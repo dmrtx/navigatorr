@@ -29,7 +29,7 @@ This is the workhorse. It makes authenticated HTTP requests to any configured se
 
 | Param | Required | Description |
 |-------|----------|-------------|
-| `service` | Yes | Service name: `sonarr`, `radarr`, `lidarr`, `readarr`, `prowlarr`, `bazarr`, `seerr`, `overseerr` |
+| `service` | Yes | Service name: `sonarr`, `radarr`, `lidarr`, `readarr`, `prowlarr`, `profilarr`, `bazarr`, `seerr`, `overseerr` |
 | `path` | Yes | API path without version prefix (e.g. `/series`, `/movie`). The version prefix (`/api/v3`, `/api/v1`) is added automatically. |
 | `method` | No | HTTP method. Defaults to `GET`. |
 | `query` | No | Query parameters as a JSON object: `{"term": "some show name"}` |
@@ -273,7 +273,7 @@ services:
   radarr:
     url: "http://your-server:7878"
     api_key: "your-api-key-here"
-  # Add any: lidarr, readarr, prowlarr, bazarr, seerr, overseerr, jellyseerr
+  # Add any: lidarr, readarr, prowlarr, profilarr, bazarr, seerr, overseerr, jellyseerr
 
 # Response size guard threshold (default: 50KB)
 # Increase if you have a large context window, decrease for smaller models
@@ -305,6 +305,7 @@ Navigatorr auto-configures these for known services — you only need `api_key`:
 | Lidarr | `8686` | `/api/v1` | `X-Api-Key` header | Auto-fetched from GitHub |
 | Readarr | `8787` | `/api/v1` | `X-Api-Key` header | Auto-fetched from GitHub |
 | Prowlarr | `9696` | `/api/v1` | `X-Api-Key` header | Auto-fetched from GitHub |
+| Profilarr 2.x | `6868` | `/api/v1` | `X-Api-Key` header | Auto-fetched from GitHub |
 | Bazarr | `6767` | `/api` | `X-Api-Key` header | Auto-fetched from GitHub |
 | Overseerr | `5055` | `/api/v1` | `X-Api-Key` header | Auto-fetched from GitHub |
 | Jellyseerr | `5055` | `/api/v1` | `X-Api-Key` header | Auto-fetched from GitHub |

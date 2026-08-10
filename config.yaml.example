@@ -21,6 +21,9 @@ services:
   prowlarr:
     url: "http://localhost:9696"
     api_key: "your-prowlarr-api-key"
+  profilarr:
+    url: "http://localhost:6868"
+    api_key: "your-profilarr-api-key"
   bazarr:
     url: "http://localhost:6767"
     api_key: "your-bazarr-api-key"
