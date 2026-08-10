@@ -18,6 +18,9 @@ services:
   readarr:
     url: "http://localhost:8787"
     api_key: "your-readarr-api-key"
+  chaptarr:
+    url: "http://localhost:8789"
+    api_key: "your-chaptarr-api-key"
   prowlarr:
     url: "http://localhost:9696"
     api_key: "your-prowlarr-api-key"

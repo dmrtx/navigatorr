@@ -2,6 +2,26 @@ package config
 
 import "testing"
 
+func TestKnownServicesHaveCompleteDefaults(t *testing.T) {
+	for name := range DefaultPorts {
+		if DefaultAPIVersions[name] == "" {
+			t.Errorf("service %q has no default API version", name)
+		}
+		if DefaultAuthMethods[name] == "" {
+			t.Errorf("service %q has no default auth method", name)
+		}
+		if DefaultStatusPaths[name] == "" {
+			t.Errorf("service %q has no default status path", name)
+		}
+		// A service needs a spec from somewhere, but not necessarily from
+		// GitHub: Bazarr publishes none and serves its own, so it is covered by
+		// DefaultSelfHostedSpecPaths instead.
+		if DefaultOpenAPIURLs[name] == "" && DefaultSelfHostedSpecPaths[name] == "" {
+			t.Errorf("service %q has no spec source: no GitHub URL and no self-hosted path", name)
+		}
+	}
+}
+
 func TestResolveURL(t *testing.T) {
 	tests := []struct {
 		name    string
