@@ -12,6 +12,7 @@ Navigatorr acts as a bridge between AI coding assistants and your self-hosted me
 - **Lidarr** — Music management
 - **Readarr** — Book management
 - **Prowlarr** — Indexer management
+- **Profilarr** — Quality profile and custom format management
 - **Bazarr** — Subtitle management
 - **Seerr** — Request management (formerly Jellyseerr)
 - **Overseerr/Jellyseerr** — Request management (legacy names, still supported)
