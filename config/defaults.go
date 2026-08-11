@@ -7,6 +7,7 @@ var DefaultPorts = map[string]int{
 	"lidarr":         8686,
 	"readarr":        8787,
 	"prowlarr":       9696,
+	"profilarr":      6868,
 	"bazarr":         6767,
 	"overseerr":      5055,
 	"jellyseerr":     5055,
@@ -21,6 +22,7 @@ var DefaultAPIVersions = map[string]string{
 	"lidarr":         "/api/v1",
 	"readarr":        "/api/v1",
 	"prowlarr":       "/api/v1",
+	"profilarr":      "/api/v1",
 	"bazarr":         "/api",
 	"overseerr":      "/api/v1",
 	"jellyseerr":     "/api/v1",
@@ -35,6 +37,7 @@ var DefaultOpenAPIURLs = map[string]string{
 	"lidarr":         "https://raw.githubusercontent.com/Lidarr/Lidarr/develop/src/Lidarr.Api.V1/openapi.json",
 	"readarr":        "https://raw.githubusercontent.com/Readarr/Readarr/develop/src/Readarr.Api.V1/openapi.json",
 	"prowlarr":       "https://raw.githubusercontent.com/Prowlarr/Prowlarr/develop/src/Prowlarr.Api.V1/openapi.json",
+	"profilarr":      "https://raw.githubusercontent.com/Dictionarry-Hub/profilarr/develop/src/lib/api/v1.openapi.json",
 	"overseerr":      "https://raw.githubusercontent.com/sct/overseerr/develop/overseerr-api.yml",
 	"jellyseerr":     "https://raw.githubusercontent.com/seerr-team/seerr/refs/heads/develop/seerr-api.yml",
 	"seerr":          "https://raw.githubusercontent.com/seerr-team/seerr/refs/heads/develop/seerr-api.yml",
@@ -48,6 +51,7 @@ var DefaultAuthMethods = map[string]string{
 	"lidarr":         "header", // X-Api-Key header
 	"readarr":        "header", // X-Api-Key header
 	"prowlarr":       "header", // X-Api-Key header
+	"profilarr":      "header", // X-Api-Key header
 	"bazarr":         "header", // X-Api-Key header
 	"overseerr":      "header", // X-Api-Key header
 	"jellyseerr":     "header", // X-Api-Key header
@@ -68,6 +72,7 @@ var DefaultStatusPaths = map[string]string{
 	"lidarr":         "/system/status",
 	"readarr":        "/system/status",
 	"prowlarr":       "/system/status",
+	"profilarr":      "/status",
 	"bazarr":         "/system/status",
 	"overseerr":      "/status",
 	"jellyseerr":     "/status",
