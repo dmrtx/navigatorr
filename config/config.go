@@ -97,16 +97,21 @@ func Load(path string) (*Config, error) {
 				svc.APIVersion = v
 			}
 		}
-		if svc.OpenAPIURL == "" {
-			if u, ok := DefaultOpenAPIURLs[name]; ok {
-				svc.OpenAPIURL = u
-			}
-		}
 		resolved, err := resolveURL(name, svc.URL)
 		if err != nil {
 			return nil, err
 		}
 		svc.URL = resolved
+		if svc.OpenAPIURL == "" {
+			if u, ok := DefaultOpenAPIURLs[name]; ok {
+				svc.OpenAPIURL = u
+			} else if p, ok := DefaultSelfHostedSpecPaths[name]; ok {
+				// Runs after resolveURL so the spec URL inherits the scheme and
+				// port that were filled in, rather than whatever partial host
+				// the config happened to carry.
+				svc.OpenAPIURL = strings.TrimSuffix(svc.URL, "/") + p
+			}
+		}
 		cfg.Services[name] = svc
 	}
 
