@@ -84,6 +84,13 @@ var DefaultStatusPaths = map[string]string{
 	"audiobookshelf": "/me",
 }
 
+// DefaultSelfHostedSpecPaths maps service type to the instance-relative path
+// for services that publish no spec to GitHub but serve one themselves. These
+// resolve against the configured instance URL instead of a fixed URL.
+var DefaultSelfHostedSpecPaths = map[string]string{
+	"bazarr": "/api/swagger.json",
+}
+
 // DefaultAuthPrefixes maps service type to auth value prefix.
 var DefaultAuthPrefixes = map[string]string{
 	"audiobookshelf": "Bearer",
