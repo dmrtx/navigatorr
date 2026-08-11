@@ -67,17 +67,21 @@ var DefaultAuthHeaders = map[string]string{
 // DefaultStatusPaths maps service type to a cheap authenticated endpoint used
 // to report connection status. Relative to the service's API version prefix.
 var DefaultStatusPaths = map[string]string{
-	"sonarr":         "/system/status",
-	"radarr":         "/system/status",
-	"lidarr":         "/system/status",
-	"readarr":        "/system/status",
-	"prowlarr":       "/system/status",
-	"profilarr":      "/status",
-	"bazarr":         "/system/status",
-	"overseerr":      "/status",
-	"jellyseerr":     "/status",
-	"seerr":          "/status",
-	"audiobookshelf": "/ping",
+	"sonarr":     "/system/status",
+	"radarr":     "/system/status",
+	"lidarr":     "/system/status",
+	"readarr":    "/system/status",
+	"prowlarr":   "/system/status",
+	"profilarr":  "/status",
+	"bazarr":     "/system/status",
+	"overseerr":  "/status",
+	"jellyseerr": "/status",
+	"seerr":      "/status",
+	// Audiobookshelf serves /ping at the root rather than under /api, so
+	// pinging it through the API prefix is always a 404. /me is under /api and
+	// is authenticated, so it also proves the token works rather than only
+	// that the host is up.
+	"audiobookshelf": "/me",
 }
 
 // DefaultAuthPrefixes maps service type to auth value prefix.
