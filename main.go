@@ -4,13 +4,17 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
+	"time"
 
 	"github.com/jakenesler/navigatorr/arrservice"
 	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/internal"
 	"github.com/jakenesler/navigatorr/openapi"
 	"github.com/jakenesler/navigatorr/qbit"
+	"github.com/jakenesler/navigatorr/queue"
 	"github.com/jakenesler/navigatorr/sabnzbd"
 	"github.com/jakenesler/navigatorr/tools"
 	"github.com/jakenesler/navigatorr/transmission"
@@ -71,6 +75,53 @@ func main() {
 		internal.Logf("sabnzbd client configured: %s", cfg.SABnzbd.URL)
 	}
 
+	// Open the request queue. This is always available to the MCP tools so an
+	// agent can drain a backlog even when the HTTP endpoint is disabled.
+	queuePath := cfg.Queue.Path
+	if queuePath == "" {
+		queuePath = config.DefaultQueuePath()
+	}
+	qStore, err := queue.Open(queuePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	defer qStore.Close()
+	internal.Logf("request queue at %s", queuePath)
+
+	// Serve the HTTP ingest endpoint alongside stdio when configured.
+	if cfg.Queue.Listen != "" {
+		// Refuse to listen without a token rather than serving openly. Anything
+		// posted here is later read and acted on by an agent holding write
+		// credentials to every configured service.
+		qSrv, err := queue.NewServer(qStore, cfg.Queue.Token)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		srv := &http.Server{
+			Addr:              cfg.Queue.Listen,
+			Handler:           qSrv.Handler(),
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       15 * time.Second,
+			WriteTimeout:      15 * time.Second,
+			IdleTimeout:       60 * time.Second,
+		}
+		// Bind failures have to be loud. Logging and carrying on leaves a
+		// process that looks healthy while silently accepting nothing.
+		ln, err := net.Listen("tcp", cfg.Queue.Listen)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: queue endpoint cannot bind %s: %v\n", cfg.Queue.Listen, err)
+			os.Exit(1)
+		}
+		internal.Logf("queue HTTP endpoint listening on %s", ln.Addr())
+		go func() {
+			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+				internal.Errorf("queue HTTP server stopped: %v", err)
+			}
+		}()
+	}
+
 	// Create MCP server
 	s := server.NewMCPServer(
 		"navigatorr",
@@ -80,7 +131,7 @@ func main() {
 	)
 
 	// Register all tools
-	tools.RegisterAll(s, cfg, registry, specStore, txClient, qbClient, sabClient)
+	tools.RegisterAll(s, cfg, registry, specStore, txClient, qbClient, sabClient, qStore)
 
 	internal.Logf("starting navigatorr MCP server (stdio)")
 

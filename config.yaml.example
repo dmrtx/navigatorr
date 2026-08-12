@@ -44,3 +44,17 @@ sabnzbd:
   api_key: "your-sabnzbd-api-key"
   # SABnzbd's own url_base setting. Ships as /sabnzbd, often cleared.
   url_base: "/sabnzbd"
+
+# Request queue. Requests posted here are held until an agent works them via the
+# queue_list / queue_claim / queue_resolve tools. The MCP tools work regardless,
+# so omit `listen` to keep the queue agent-only with no HTTP endpoint at all.
+#
+# Text posted here is later read and acted on by an agent holding write access to
+# every service above, so `token` is required whenever `listen` is set —
+# navigatorr refuses to start rather than serve this openly. Prefer binding
+# loopback and reaching it over a tunnel or reverse proxy that terminates TLS;
+# ":8099" binds every interface, and the token crosses the network in clear text.
+queue:
+  listen: "127.0.0.1:8099"  # bind address; empty disables the HTTP endpoint
+  token: "generate-a-long-random-string"
+  path: ""                  # queue file; defaults to ~/.config/navigatorr/queue.json
