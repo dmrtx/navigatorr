@@ -129,6 +129,31 @@ SABnzbd has no OpenAPI spec and dispatches everything from a `mode` query parame
 
 Deleting is covered by `allow_destructive`. SABnzbd deletes are GET requests carrying `name=delete`, so the `call_api` DELETE guard does not apply to them and these tools check the setting themselves.
 
+### Request Queue
+
+A holding area for media requests that arrive while no agent is running. Something outside navigatorr — a phone shortcut, a webhook, the iMessage bridge in `scripts/` — posts free-form text over HTTP, and the next agent session drains it.
+
+The queue stores the text verbatim rather than parsing it. Working out which show "boston legal" means, which quality profile fits, and whether it duplicates something already in the library is judgment work for the agent, not for a parser.
+
+| Tool | Description |
+|------|-------------|
+| `queue_list` | List requests, defaulting to pending. Reports counts for the other statuses so a backlog parked in `claimed` is visible. |
+| `queue_claim` | Claim a pending request before working it, so two agents do not double-add it |
+| `queue_resolve` | Close a request as `done` or `failed` with a note describing what happened |
+| `queue_release` | Return a claimed request to pending when an agent gives up without resolving |
+
+Requests move `pending → claimed → done`/`failed`, and the transitions are enforced: an item cannot be claimed twice, resolved twice, or released unless it is currently claimed. Releasing a finished request would otherwise put completed work back in the queue for an agent to action a second time.
+
+```
+POST /request   {"text": "boston legal", "source": "imessage"}   -> 201
+GET  /queue?status=pending                                       -> 200
+GET  /healthz                                                    -> 200 (no auth)
+```
+
+**The HTTP endpoint is optional and requires a token.** The MCP tools work with `listen` unset, which keeps the queue agent-only with nothing listening. When `listen` is set, `token` is required and navigatorr refuses to start without one — text in this queue is later read and acted on by an agent holding write credentials to every configured service, so an unauthenticated endpoint is a way to drive that agent, not just a way to add spam. Prefer binding loopback and reaching it through a tunnel or a reverse proxy that terminates TLS; the bearer token crosses the network in clear text.
+
+The queue file is held under an advisory lock for the life of the process. MCP servers are spawned per client, so without one, navigatorr running under two clients at once would give two processes independent copies of the same file and each would overwrite the other's requests.
+
 ## Setup
 
 ### Prerequisites

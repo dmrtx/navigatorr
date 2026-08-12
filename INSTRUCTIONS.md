@@ -6,7 +6,7 @@ This guide explains how an AI assistant uses Navigatorr to manage your media sta
 
 ## How It Works
 
-Navigatorr gives the LLM 16 tools over MCP. The LLM doesn't need to know API docs beforehand — it discovers endpoints at runtime, figures out the right parameters, and chains calls together to complete complex tasks from a single sentence.
+Navigatorr gives the LLM 23 tools over MCP. The LLM doesn't need to know API docs beforehand — it discovers endpoints at runtime, figures out the right parameters, and chains calls together to complete complex tasks from a single sentence.
 
 ---
 
@@ -259,6 +259,46 @@ LLM approach (parallel where possible):
   get_endpoint_details for /command.
 ```
 
+### Pattern 8: Draining the Request Queue
+
+Requests arrive over HTTP while no agent is running — a text message, a phone
+shortcut — and wait as free-form text. Nothing has interpreted them yet; that is
+the job.
+
+```
+User: "Anything in the queue?"
+
+LLM approach:
+  1. queue_list
+     → [{"id":"r1","text":"boston legal","source":"imessage"},
+        {"id":"r2","text":"that show with the submarine","source":"imessage"}]
+
+  2. queue_claim → id: "r1"
+     Claim BEFORE working it. Another session draining the same queue
+     will then skip it rather than adding the show twice.
+
+  3. call_api → sonarr /series/lookup?term=boston legal
+     Resolve the text to a real series, check it is not already in the
+     library, pick a quality profile and root folder, then POST /series.
+
+  4. queue_resolve → id: "r1", status: "done",
+     note: "added Boston Legal (tvdb 74058), 5 seasons monitored"
+
+     The note is the only record of what happened, and resolving is
+     one-way — a request cannot be resolved twice, so get it right.
+
+  5. r2 is ambiguous. Do not guess: resolve it as "failed" with a note
+     saying what was unclear, or leave it pending and ask the user.
+     queue_release returns a claimed item to pending if you claimed it
+     and then could not finish.
+```
+
+Requests move `pending → claimed → done`/`failed`. An item cannot be claimed
+twice, resolved twice, or released unless it is currently claimed. If
+`queue_list` reports "No matching requests" it also gives the counts for the
+other statuses, so a backlog sitting in `claimed` from a crashed session is
+visible rather than looking like an empty queue — `queue_release` recovers those.
+
 ---
 
 ## Configuration Reference
@@ -274,6 +314,14 @@ services:
     url: "http://your-server:7878"
     api_key: "your-api-key-here"
   # Add any: lidarr, readarr, chaptarr, prowlarr, profilarr, bazarr, seerr, overseerr, jellyseerr
+
+# Request queue. Optional. Omit `queue` entirely to keep the queue agent-only.
+# When `listen` is set, `token` is required — navigatorr refuses to start
+# otherwise, because queued text is later acted on by an agent with write
+# access to every service above.
+queue:
+  listen: "127.0.0.1:8099"
+  token: "generate-a-long-random-string"
 
 # Response size guard threshold (default: 50KB)
 # Increase if you have a large context window, decrease for smaller models

@@ -8,6 +8,8 @@ navigatorr
 # Local config
 .mcp.json
 .claude/
+.codex/
+.playwright-mcp/
 
 # CartoGopher
 bakes/

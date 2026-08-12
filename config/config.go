@@ -17,6 +17,7 @@ type Config struct {
 	Transmission      TransmissionConfig       `yaml:"transmission"`
 	QBittorrent       QBittorrentConfig        `yaml:"qbittorrent"`
 	SABnzbd           SABnzbdConfig            `yaml:"sabnzbd"`
+	Queue             QueueConfig              `yaml:"queue"`
 	MaxResponseSizeKB int                      `yaml:"max_response_size_kb"`
 	AllowDestructive  bool                     `yaml:"allow_destructive"`
 }
@@ -52,6 +53,20 @@ type SABnzbdConfig struct {
 func DefaultConfigPath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".config", "navigatorr", "config.yaml")
+}
+
+// QueueConfig controls the HTTP request queue. Listen is required to serve the
+// HTTP endpoint; the MCP queue tools work regardless so an agent can always
+// drain whatever has accumulated.
+type QueueConfig struct {
+	Listen string `yaml:"listen"` // e.g. ":8099"; empty disables the HTTP endpoint
+	Token  string `yaml:"token"`  // bearer token; empty disables auth
+	Path   string `yaml:"path"`   // queue file; defaults to ~/.config/navigatorr/queue.json
+}
+
+func DefaultQueuePath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".config", "navigatorr", "queue.json")
 }
 
 func Load(path string) (*Config, error) {
