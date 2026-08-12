@@ -15,6 +15,9 @@ navigatorr
 bakes/
 fast.yaml
 
+# Local agent skills / homelab notes (orpheus, music-downloads)
+skills/
+
 # Local docker compose
 docker-compose-transmission-swap.yml
 
