@@ -4,7 +4,9 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/jakenesler/navigatorr/config"
 )
@@ -100,5 +102,41 @@ func TestDoRequestStillFollowsRedirects(t *testing.T) {
 	}
 	if code != http.StatusOK {
 		t.Errorf("code = %d, want 200", code)
+	}
+}
+
+// Setting CheckRedirect opts out of the 10-redirect cap net/http applies by
+// default, so a server that alternates /x and /x/ — which sameResource treats
+// as one resource on every hop — is followed as fast as the network allows
+// until the status timeout fires. That turns a status check into thousands of
+// requests against an already-misconfigured service.
+func TestPingStopsFollowingRedirectLoop(t *testing.T) {
+	var hits int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&hits, 1)
+		if r.URL.Path == "/api/v1/status" {
+			http.Redirect(w, r, "/api/v1/status/", http.StatusFound)
+			return
+		}
+		http.Redirect(w, r, "/api/v1/status", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	svc := NewService("prowlarr", config.ServiceConfig{
+		URL:        srv.URL,
+		APIVersion: "/api/v1",
+		APIKey:     "k",
+	})
+	svc.StatusPath = "/status"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	got := svc.Ping(ctx)
+
+	if n := atomic.LoadInt64(&hits); n > maxPingRedirects+1 {
+		t.Errorf("Ping made %d requests, want at most %d", n, maxPingRedirects+1)
+	}
+	if got != "http 302" {
+		t.Errorf("Ping() = %q, want %q", got, "http 302")
 	}
 }

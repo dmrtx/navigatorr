@@ -16,6 +16,10 @@ var httpClient = &http.Client{
 	Timeout: 30 * time.Second,
 }
 
+// maxPingRedirects mirrors the cap Go's http.Client applies when CheckRedirect
+// is nil.
+const maxPingRedirects = 10
+
 // pingClient follows a redirect only when it points back at the same resource,
 // which is the trailing-slash bounce SABnzbd does on /sabnzbd. A redirect that
 // goes somewhere else is a service sending an unauthenticated or misrouted
@@ -24,6 +28,13 @@ var httpClient = &http.Client{
 var pingClient = &http.Client{
 	Timeout: 30 * time.Second,
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		// Setting CheckRedirect replaces Go's default cap of 10, so it has to
+		// be reimposed here. A server that alternates /x and /x/ looks like the
+		// same resource on every hop, and without a cap Ping follows it as fast
+		// as the network allows until the status timeout fires.
+		if len(via) >= maxPingRedirects {
+			return http.ErrUseLastResponse
+		}
 		if len(via) == 0 || !sameResource(via[0].URL, req.URL) {
 			return http.ErrUseLastResponse
 		}
