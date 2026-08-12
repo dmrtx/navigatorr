@@ -6,6 +6,7 @@ var DefaultPorts = map[string]int{
 	"radarr":         7878,
 	"lidarr":         8686,
 	"readarr":        8787,
+	"chaptarr":       8789,
 	"prowlarr":       9696,
 	"profilarr":      6868,
 	"bazarr":         6767,
@@ -21,6 +22,7 @@ var DefaultAPIVersions = map[string]string{
 	"radarr":         "/api/v3",
 	"lidarr":         "/api/v1",
 	"readarr":        "/api/v1",
+	"chaptarr":       "/api/v1",
 	"prowlarr":       "/api/v1",
 	"profilarr":      "/api/v1",
 	"bazarr":         "/api",
@@ -36,6 +38,7 @@ var DefaultOpenAPIURLs = map[string]string{
 	"radarr":         "https://raw.githubusercontent.com/Radarr/Radarr/develop/src/Radarr.Api.V3/openapi.json",
 	"lidarr":         "https://raw.githubusercontent.com/Lidarr/Lidarr/develop/src/Lidarr.Api.V1/openapi.json",
 	"readarr":        "https://raw.githubusercontent.com/Readarr/Readarr/develop/src/Readarr.Api.V1/openapi.json",
+	"chaptarr":       "https://raw.githubusercontent.com/Chaptarr/chaptarr/develop/src/Chaptarr.Api.V1/openapi.json",
 	"prowlarr":       "https://raw.githubusercontent.com/Prowlarr/Prowlarr/develop/src/Prowlarr.Api.V1/openapi.json",
 	"profilarr":      "https://raw.githubusercontent.com/Dictionarry-Hub/profilarr/develop/src/lib/api/v1.openapi.json",
 	"overseerr":      "https://raw.githubusercontent.com/sct/overseerr/develop/overseerr-api.yml",
@@ -50,6 +53,7 @@ var DefaultAuthMethods = map[string]string{
 	"radarr":         "header", // X-Api-Key header
 	"lidarr":         "header", // X-Api-Key header
 	"readarr":        "header", // X-Api-Key header
+	"chaptarr":       "header", // X-Api-Key header
 	"prowlarr":       "header", // X-Api-Key header
 	"profilarr":      "header", // X-Api-Key header
 	"bazarr":         "header", // X-Api-Key header
@@ -71,6 +75,7 @@ var DefaultStatusPaths = map[string]string{
 	"radarr":     "/system/status",
 	"lidarr":     "/system/status",
 	"readarr":    "/system/status",
+	"chaptarr":   "/system/status",
 	"prowlarr":   "/system/status",
 	"profilarr":  "/status",
 	"bazarr":     "/system/status",
