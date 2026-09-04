@@ -39,6 +39,11 @@ transmission:
   username: ""
   password: ""
 
+qbittorrent:
+  url: "http://localhost:8080"
+  username: "your-qbittorrent-username"
+  password: "your-qbittorrent-password"
+
 sabnzbd:
   url: "http://localhost:8080"
   api_key: "your-sabnzbd-api-key"
