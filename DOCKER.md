@@ -35,6 +35,43 @@ qbittorrent:
 
 When `--network host` is used on Linux, `localhost` inside Navigatorr refers to the Docker host, which is convenient when Sonarr, Radarr, Prowlarr, Bazarr, qBittorrent, and the other services publish their ports on that host.
 
+## Docker Compose
+
+A ready-to-use `compose.yaml` is included in the repository. It uses the published GHCR image, host networking, a read-only config mount, and a persistent cache volume.
+
+Pull the latest image:
+
+```bash
+docker compose pull
+```
+
+Because Navigatorr is an MCP stdio server, start it attached to stdin/stdout with:
+
+```bash
+docker compose run --rm -T navigatorr
+```
+
+`-T` is important because MCP JSON-RPC should not run through a pseudo-TTY. Do not use `docker compose up -d` for normal MCP use; a detached container has no MCP client attached to its stdio transport.
+
+The included Compose service is equivalent to:
+
+```yaml
+services:
+  navigatorr:
+    image: ghcr.io/dmrtx/navigatorr:latest
+    pull_policy: always
+    network_mode: host
+    stdin_open: true
+    tty: false
+    volumes:
+      - /home/david/.config/navigatorr/config.yaml:/root/.config/navigatorr/config.yaml:ro
+      - navigatorr-cache:/root/.cache/navigatorr
+    restart: "no"
+
+volumes:
+  navigatorr-cache:
+```
+
 ## Test the image directly
 
 ```bash
@@ -57,8 +94,18 @@ docker run --rm -i --pull always --network host \
   ghcr.io/dmrtx/navigatorr:latest
 ```
 
+You can also point a wrapper command at the Compose invocation:
+
+```bash
+docker compose -f /path/to/navigatorr/compose.yaml run --rm -T navigatorr
+```
+
+For `tunnel-client`, the direct `docker run` form is still the simplest because it does not depend on the repository being checked out on the server.
+
 If the GHCR package is private, authenticate Docker/Portainer to `ghcr.io` before using the image. If you make the package public after its first successful publish, no registry credentials are needed to pull it.
 
 ## Updating
 
-Because the MCP command uses `--pull always`, a newly published `latest` image is picked up the next time `tunnel-client` starts Navigatorr. For a reproducible deployment, replace `latest` with a `sha-*` tag instead.
+The Compose file uses `pull_policy: always`, so it checks for a newer `latest` image whenever the service is run. The direct Docker command likewise uses `--pull always`.
+
+For a reproducible deployment, replace `latest` with a `sha-*` tag instead.
