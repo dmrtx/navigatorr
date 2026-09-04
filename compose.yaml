@@ -1,0 +1,14 @@
+services:
+  navigatorr:
+    image: ghcr.io/dmrtx/navigatorr:latest
+    pull_policy: always
+    network_mode: host
+    stdin_open: true
+    tty: false
+    volumes:
+      - /home/david/.config/navigatorr/config.yaml:/root/.config/navigatorr/config.yaml:ro
+      - navigatorr-cache:/root/.cache/navigatorr
+    restart: "no"
+
+volumes:
+  navigatorr-cache:
