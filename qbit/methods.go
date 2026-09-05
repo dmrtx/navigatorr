@@ -63,6 +63,24 @@ func (c *Client) DeleteTorrents(ctx context.Context, hashes []string, deleteFile
 	return err
 }
 
+// ListFiles returns the files contained in a torrent by hash. Inspecting
+// this list before trusting a download is the torrent-content safety gate.
+func (c *Client) ListFiles(ctx context.Context, hash string) ([]TorrentFile, error) {
+	if hash == "" {
+		return nil, fmt.Errorf("hash is required")
+	}
+	data, err := c.do(ctx, "GET", "/api/v2/torrents/files?hash="+url.QueryEscape(hash), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var files []TorrentFile
+	if err := json.Unmarshal(data, &files); err != nil {
+		return nil, fmt.Errorf("decoding torrent files: %w", err)
+	}
+	return files, nil
+}
+
 // GetTransferInfo returns global transfer statistics.
 func (c *Client) GetTransferInfo(ctx context.Context) (*TransferInfo, error) {
 	data, err := c.do(ctx, "GET", "/api/v2/transfer/info", nil)

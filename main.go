@@ -16,6 +16,7 @@ import (
 	"github.com/jakenesler/navigatorr/qbit"
 	"github.com/jakenesler/navigatorr/queue"
 	"github.com/jakenesler/navigatorr/sabnzbd"
+	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/tools"
 	"github.com/jakenesler/navigatorr/transmission"
 	"github.com/mark3labs/mcp-go/server"
@@ -89,6 +90,21 @@ func main() {
 	defer qStore.Close()
 	internal.Logf("request queue at %s", queuePath)
 
+	// Open the persistent maintenance-agent database. It lives in the cache
+	// directory deployments already mount as a volume, so jobs, preferences
+	// and decisions survive container restarts.
+	dbPath := cfg.Database.Path
+	if dbPath == "" {
+		dbPath = config.DefaultDatabasePath()
+	}
+	mStore, err := store.Open(dbPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	defer mStore.Close()
+	internal.Logf("maintenance database at %s", dbPath)
+
 	// Serve the HTTP ingest endpoint alongside stdio when configured.
 	if cfg.Queue.Listen != "" {
 		// Refuse to listen without a token rather than serving openly. Anything
@@ -132,6 +148,7 @@ func main() {
 
 	// Register all tools
 	tools.RegisterAll(s, cfg, registry, specStore, txClient, qbClient, sabClient, qStore)
+	tools.RegisterMaintenance(s, cfg, registry, qbClient, mStore)
 
 	internal.Logf("starting navigatorr MCP server (stdio)")
 
