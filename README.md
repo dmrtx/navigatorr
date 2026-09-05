@@ -60,6 +60,10 @@ Claude Code / MCP Client
 | `tools` | MCP tool registration and handlers |
 | `transmission` | Transmission RPC client |
 | `qbit` | qBittorrent Web API client |
+| `store` | SQLite persistence: preferences, maintenance jobs, decisions, checks, audit log, blocklist |
+| `maint` | Deterministic ranking, filename safety, language and oversize heuristics |
+| `mediainspect` | Real-file inspection via ffprobe (no shell, fixed argv) plus sidecar detection |
+| `fsop` | Root-confined filesystem ops (stat, list, hash, move, delete) |
 | `internal` | Shared logging utilities |
 
 ### How It Works
@@ -153,6 +157,46 @@ GET  /healthz                                                    -> 200 (no auth
 **The HTTP endpoint is optional and requires a token.** The MCP tools work with `listen` unset, which keeps the queue agent-only with nothing listening. When `listen` is set, `token` is required and navigatorr refuses to start without one — text in this queue is later read and acted on by an agent holding write credentials to every configured service, so an unauthenticated endpoint is a way to drive that agent, not just a way to add spam. Prefer binding loopback and reaching it through a tunnel or a reverse proxy that terminates TLS; the bearer token crosses the network in clear text.
 
 The queue file is held under an advisory lock for the life of the process. MCP servers are spawned per client, so without one, navigatorr running under two clients at once would give two processes independent copies of the same file and each would overwrite the other's requests.
+
+### Maintenance Agent (persistent)
+
+Beyond the request queue, Navigatorr keeps a **separate SQLite-backed maintenance state**: user preferences, a structured maintenance job queue, release-decision history, real-file inspections, an audit log and a release blocklist. It defaults to `~/.cache/navigatorr/navigatorr.db` (configurable via `database.path`) with schema versioning, WAL mode and indexes — no Redis, Postgres or vector DB required.
+
+| Tool group | Tools |
+|------------|-------|
+| Preferences | `memory_set`, `memory_get`, `memory_list`, `memory_search`, `memory_delete` (scoped: `global`, `anime`, `movies`, `project:<name>`, `media:<service>:<id>`; `ttl_seconds` for expiring facts) |
+| Maintenance jobs | `maintenance_add` (idempotent), `maintenance_list`, `maintenance_next`, `maintenance_get`, `maintenance_update`, `maintenance_claim`, `maintenance_release`, `maintenance_resolve` |
+| Decisions | `decision_record`, `decision_list` (why-did-we-pick-this history) |
+| Inspection | `inspect_media` (ffprobe + sidecar subs + `*arr` fallback), `qbit_list_files` (torrent-content safety gate), `scan_dangerous_files` |
+| Ranking | `rank_releases` (deterministic scoring: codec, group, subs, seeders, size reduction) |
+| Workflow | `safe_replace` (step machine), `cleanup_imported_downloads` (evidence-gated), `scan_library_issues` (dry-run by default), `get_context` (compact LLM briefing) |
+| Blocklist | `block_release`, `block_list` |
+| Scoped filesystem | `fs_stat`, `fs_list`, `fs_hash`, `fs_safe_move`, `fs_safe_delete` (all confined to `allowed_read_roots` / `allowed_write_roots`, symlinks resolved) |
+
+Jobs move `pending → researching → candidate_found → downloading → downloaded → verifying → importing → replacing → done` (plus `blocked`/`failed`); illegal jumps are rejected, and `done` is only reachable from `replacing` — i.e. after verification **and** a confirmed Sonarr/Radarr import. The original file is never deleted on 100% download alone.
+
+**Safe-replacement example (Fate/strange Fake, 21 GB → Judas 6 GB):**
+
+```
+maintenance_add  media_type=series service=sonarr media_id=100
+                 title="Fate/strange Fake" issue_type=oversized
+safe_replace     id=1 step=plan
+rank_releases    media_type=anime current_size=21000000000 candidates=[...]
+safe_replace     id=1 step=select release_guid=<judas> title="..." size=6000000000 seeders=100 reasons=[multi_subs,hevc_10bit]
+safe_replace     id=1 step=add_torrent url="magnet:?xt=urn:btih:..."
+qbit_list_files  hash=<hash>                          # safety gate: rejects *.mkv.exe
+safe_replace     id=1 step=torrent_check               # blocked+blocklisted if dangerous
+inspect_media    path=/downloads/...                   # real audio/subs check
+safe_replace     id=1 step=verify complete=true audio_langs=Japanese sub_langs=eng,spa
+# ... trigger + confirm the Sonarr import ...
+safe_replace     id=1 step=import_confirm new_file_id=99
+safe_replace     id=1 step=delete_original via=arr confirm=true   # only now
+safe_replace     id=1 step=finish notes="Judas 1080p HEVC live"
+```
+
+**After a restart:** the jobs, preferences and decisions are still in the database. Call `maintenance_list` (or `maintenance_next`) and `get_context scope=anime` to resume — every `safe_replace` step is idempotent, so re-issuing the current step continues instead of duplicating work.
+
+**Inspecting preferences:** `memory_get scope=anime` shows the anime rules; stored values override the `maintenance:` config defaults. Temporary facts (e.g. seeder counts) use `memory_set ... ttl_seconds=3600` and are never returned once expired.
 
 ## Setup
 
@@ -335,6 +379,7 @@ All from one sentence.
 | [mcp-go](https://github.com/mark3labs/mcp-go) | MCP server framework |
 | [kin-openapi](https://github.com/getkin/kin-openapi) | OpenAPI 3.x spec parsing |
 | [yaml.v3](https://gopkg.in/yaml.v3) | YAML config parsing |
+| [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite) | Pure-Go SQLite driver (keeps the `CGO_ENABLED=0` Docker build) |
 
 ## Built With
 

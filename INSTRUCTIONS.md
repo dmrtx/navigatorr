@@ -301,6 +301,38 @@ visible rather than looking like an empty queue — `queue_release` recovers tho
 
 ---
 
+## Maintenance Agent Tools
+
+Separate from the request queue, Navigatorr persists maintenance state in SQLite and exposes a second family of tools. The queue holds *"please add X"* texts; the maintenance jobs hold structured replacement/repair work with a state machine. Never mix them.
+
+**Start of session:** call `get_context` (e.g. `scope: "anime"`) for preferences, active jobs, recent decisions and latest actions — bounded output, no need to reconstruct history manually.
+
+**Preferences (`memory_*`):** scoped rules (`global`, `anime`, `movies`, `project:<name>`, `media:<service>:<id>`). Stored values override config defaults. Use `ttl_seconds` for transient facts like seeder counts — expired facts are never returned, so they cannot harden into permanent rules.
+
+**Jobs (`maintenance_*`):** `maintenance_add` is idempotent (same media+issue returns the existing job). `maintenance_next` picks highest priority / oldest update, skipping leased and terminal jobs. `maintenance_claim`/`maintenance_release` are leases for parallel agents. `maintenance_resolve ... status: done` is refused unless the job is in `replacing` — the safe workflow's proof of verify+import.
+
+**Decisions:** `decision_record` every pick AND every notable rejection with reasons (e.g. rejected SubsPlease for size); `decision_list` answers "why did we pick this?".
+
+**Inspection before trust:** `inspect_media` reads the real file (ffprobe + sidecar `.srt/.ass` detection), falling back to labelled `*arr` mediaInfo when the file is unreachable. `qbit_list_files` must be called before trusting any replacement torrent — `Episode.mkv.exe` means reject + blocklist, original untouched.
+
+**Ranking:** `rank_releases` scores deterministically (HEVC/x265, 10-bit, group preference in config order, multi/eng/spa subs, dual audio, healthy seeders, size reduction vs current size; penalties for no seeders, missing required subs, bloated size, bad resolution). Present its reasons; do not invent your own points.
+
+**Safe replacement (`safe_replace` steps):** `plan → select → add_torrent → torrent_check → verify → import_confirm → delete_original → finish`. Rules:
+
+1. Never delete the original before `import_confirm` proves Sonarr/Radarr associated the new files.
+2. `verify` with `requires_subtitles` fails the job to `blocked` (original intact) when the replacement lacks eng/spa audio/subs.
+3. `delete_original` needs `confirm=true` AND `allow_destructive: true`; via `arr` it deletes through Sonarr/Radarr, via `filesystem` only inside `allowed_write_roots`.
+4. Every step is idempotent — after a restart, re-issue the current step.
+5. `torrent_check`/`add_torrent` blocklist malicious releases automatically (`block_release`/`block_list` for manual entries).
+
+**Scanning:** `scan_library_issues` is dry-run by default; pass `dry_run=false` to open jobs. Oversized-anime uses per-episode size (`sizeOnDisk/episodeFileCount`), never total size. Language issues need real stream data, not `originalLanguage`.
+
+**Cleanup:** `cleanup_imported_downloads` defaults to `list`. Removal needs explicit `hashes` + `confirmed_imported=true` (+ `confirm=true` for data, + `allow_destructive`); 100% progress alone never deletes.
+
+**Scoped filesystem:** `fs_stat`, `fs_list`, `fs_hash`, `fs_safe_move` work inside `allowed_read_roots`/`allowed_write_roots`; `fs_safe_delete` additionally needs the authorizing job in `replacing`. There is no shell tool and no unrestricted file read — do not ask for one.
+
+---
+
 ## Configuration Reference
 
 ```yaml

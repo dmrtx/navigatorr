@@ -104,6 +104,28 @@ For `tunnel-client`, the direct `docker run` form is still the simplest because 
 
 If the GHCR package is private, authenticate Docker/Portainer to `ghcr.io` before using the image. If you make the package public after its first successful publish, no registry credentials are needed to pull it.
 
+## Persistent maintenance database
+
+The `navigatorr-cache` volume already mounted at `/root/.cache/navigatorr` now holds two things: the OpenAPI spec cache and the SQLite maintenance database (`navigatorr.db`). No extra mount is needed — but do not remove that volume, or preferences, maintenance jobs, release decisions and the audit log go with it.
+
+```bash
+# inspect the live database from the host (read-only peek)
+docker compose run --rm -T navigatorr ls -la /root/.cache/navigatorr
+```
+
+To start from a clean slate, stop the container and delete only the db file inside the volume (or `docker volume rm navigatorr_navigatorr-cache` to drop the spec cache too). To back it up, copy `navigatorr.db`, `navigatorr.db-wal` and `navigatorr.db-shm` together while the container is stopped.
+
+If Navigatorr must see your media files (for `inspect_media` / `fs_*` tools), mount them read-only alongside the config:
+
+```yaml
+volumes:
+  - /home/david/.config/navigatorr/config.yaml:/root/.config/navigatorr/config.yaml:ro
+  - navigatorr-cache:/root/.cache/navigatorr
+  - /volume1/Media:/media:ro
+```
+
+and list `/media/...` under `media.allowed_read_roots` in `config.yaml`. Writes (`fs_safe_move`, `fs_safe_delete`) additionally require `allowed_write_roots`, and deletes additionally require the authorizing maintenance job to be in `replacing` state plus `allow_destructive: true`.
+
 ## Updating
 
 The Compose file uses `pull_policy: always`, so it checks for a newer `latest` image whenever the service is run. The direct Docker command likewise uses `--pull always`.
