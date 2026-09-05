@@ -18,8 +18,32 @@ type Config struct {
 	QBittorrent       QBittorrentConfig        `yaml:"qbittorrent"`
 	SABnzbd           SABnzbdConfig            `yaml:"sabnzbd"`
 	Queue             QueueConfig              `yaml:"queue"`
+	Database          DatabaseConfig           `yaml:"database"`
+	Media             MediaConfig              `yaml:"media"`
+	Maintenance       MaintenanceConfig        `yaml:"maintenance"`
 	MaxResponseSizeKB int                      `yaml:"max_response_size_kb"`
 	AllowDestructive  bool                     `yaml:"allow_destructive"`
+}
+
+// DatabaseConfig locates the SQLite state file. It defaults into the same
+// cache directory as the OpenAPI specs, which deployments already persist.
+type DatabaseConfig struct {
+	Path string `yaml:"path"` // defaults to ~/.cache/navigatorr/navigatorr.db
+}
+
+// MediaConfig bounds filesystem access and media inspection.
+type MediaConfig struct {
+	AllowedReadRoots  []string `yaml:"allowed_read_roots"`
+	AllowedWriteRoots []string `yaml:"allowed_write_roots"`
+	FfprobePath       string   `yaml:"ffprobe_path"` // empty = look up "ffprobe" on PATH
+}
+
+// MaintenanceConfig carries the global defaults that stored preferences
+// may override per scope.
+type MaintenanceConfig struct {
+	OversizedPerEpisodeMB int64    `yaml:"oversized_per_episode_mb"`
+	PreferredGroups       []string `yaml:"preferred_groups"`
+	PreferredResolution   string   `yaml:"preferred_resolution"`
 }
 
 type ServiceConfig struct {
@@ -67,6 +91,13 @@ type QueueConfig struct {
 func DefaultQueuePath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".config", "navigatorr", "queue.json")
+}
+
+// DefaultDatabasePath is the persistent SQLite file. Under Docker it lands
+// in /root/.cache/navigatorr, which compose.yaml already mounts as a volume.
+func DefaultDatabasePath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".cache", "navigatorr", "navigatorr.db")
 }
 
 func Load(path string) (*Config, error) {
@@ -133,6 +164,16 @@ func Load(path string) (*Config, error) {
 	// Default response size guard to 50KB if not set.
 	if cfg.MaxResponseSizeKB <= 0 {
 		cfg.MaxResponseSizeKB = 50
+	}
+
+	if cfg.Maintenance.OversizedPerEpisodeMB <= 0 {
+		cfg.Maintenance.OversizedPerEpisodeMB = 900
+	}
+	if len(cfg.Maintenance.PreferredGroups) == 0 {
+		cfg.Maintenance.PreferredGroups = []string{"Judas", "EMBER", "ASW"}
+	}
+	if cfg.Maintenance.PreferredResolution == "" {
+		cfg.Maintenance.PreferredResolution = "1080p"
 	}
 
 	return cfg, nil

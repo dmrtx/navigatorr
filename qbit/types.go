@@ -26,6 +26,17 @@ type TorrentInfo struct {
 	MagnetURI    string  `json:"magnet_uri"`
 }
 
+// TorrentFile is one file inside a torrent.
+type TorrentFile struct {
+	Name         string  `json:"name"`
+	Size         int64   `json:"size"`
+	Progress     float64 `json:"progress"`
+	Priority     int     `json:"priority"`
+	IsSeed       bool    `json:"is_seed"`
+	PieceRange   []int   `json:"piece_range"`
+	Availability float64 `json:"availability"`
+}
+
 // TransferInfo represents global transfer statistics.
 type TransferInfo struct {
 	DLInfoSpeed      int64  `json:"dl_info_speed"`

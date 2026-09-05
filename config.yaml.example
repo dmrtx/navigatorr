@@ -63,3 +63,30 @@ queue:
   listen: "127.0.0.1:8099"  # bind address; empty disables the HTTP endpoint
   token: "generate-a-long-random-string"
   path: ""                  # queue file; defaults to ~/.config/navigatorr/queue.json
+
+# Persistent maintenance-agent state (SQLite). Holds user preferences,
+# maintenance jobs, release decisions, media inspections, the audit log and
+# the release blocklist. The database survives container restarts as long as
+# the cache directory is mounted as a volume (see compose.yaml).
+database:
+  path: ""                  # defaults to ~/.cache/navigatorr/navigatorr.db
+
+# Filesystem access for media inspection and safe file operations. There is
+# NO generic shell or arbitrary-file read: every path must resolve (symlinks
+# included) inside these roots. Leave a list empty to forbid that direction.
+media:
+  allowed_read_roots:
+    - "/media/Anime"
+    - "/media/Movies"
+    - "/downloads"
+  allowed_write_roots:
+    - "/media/Anime"
+    - "/media/Movies"
+  ffprobe_path: ""          # empty = use "ffprobe" from PATH (ffmpeg package in Docker)
+
+# Global maintenance defaults. Values stored via memory_set always win over
+# these per scope (anime, movies, global).
+maintenance:
+  oversized_per_episode_mb: 900
+  preferred_groups: ["Judas", "EMBER", "ASW"]
+  preferred_resolution: "1080p"
