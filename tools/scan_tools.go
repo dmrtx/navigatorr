@@ -206,7 +206,7 @@ func registerFsTools(s *server.MCPServer, d *Deps) {
 	// fs_safe_delete — only for a validated job in replacing state.
 	s.AddTool(
 		mcp.NewTool("fs_safe_delete",
-			mcp.WithDescription("Delete ONE file inside allowed_write_roots, only when it belongs to a maintenance job in replacing state (verified + imported) and confirm=true. Never deletes directories."),
+			mcp.WithDescription("Delete ONE file inside allowed_write_roots, only when it belongs to a maintenance job in replacing state (verified + imported), confirm=true AND allow_destructive is enabled. Never deletes directories."),
 			mcp.WithString("path", mcp.Required(), mcp.Description("File path")),
 			mcp.WithString("maintenance_item_id", mcp.Required(), mcp.Description("Authorizing job id")),
 			mcp.WithString("confirm", mcp.Description("Must be true")),
@@ -224,6 +224,11 @@ func registerFsTools(s *server.MCPServer, d *Deps) {
 			}
 			if it.Status != store.MaintReplacing {
 				return toolErr("job %d is %s, not replacing: the file stays (verify + import first)", itemID, it.Status), nil
+			}
+			// The global kill-switch covers this path like every other
+			// destructive one; the job state alone must not authorize deletes.
+			if !d.Config.AllowDestructive {
+				return toolErr("deletion is disabled. Set allow_destructive: true in config.yaml to enable; the file stays"), nil
 			}
 			if !argBool(args, "confirm", false) {
 				return toolErr("confirm=true is required; the file stays"), nil

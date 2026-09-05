@@ -309,7 +309,7 @@ Separate from the request queue, Navigatorr persists maintenance state in SQLite
 
 **Preferences (`memory_*`):** scoped rules (`global`, `anime`, `movies`, `project:<name>`, `media:<service>:<id>`). Stored values override config defaults. Use `ttl_seconds` for transient facts like seeder counts — expired facts are never returned, so they cannot harden into permanent rules.
 
-**Jobs (`maintenance_*`):** `maintenance_add` is idempotent (same media+issue returns the existing job). `maintenance_next` picks highest priority / oldest update, skipping leased and terminal jobs. `maintenance_claim`/`maintenance_release` are leases for parallel agents. `maintenance_resolve ... status: done` is refused unless the job is in `replacing` — the safe workflow's proof of verify+import.
+**Jobs (`maintenance_*`):** `maintenance_add` is idempotent (same media+issue returns the existing job). `maintenance_next` picks highest priority / oldest update, skipping leased and terminal jobs. `maintenance_claim`/`maintenance_release` are leases for parallel agents. `maintenance_resolve ... status: done` is refused unless the job is in `replacing` — the safe workflow's proof of verify+import. `maintenance_reopen` is the only way back from `blocked`/`failed` (needs a note saying what changed).
 
 **Decisions:** `decision_record` every pick AND every notable rejection with reasons (e.g. rejected SubsPlease for size); `decision_list` answers "why did we pick this?".
 

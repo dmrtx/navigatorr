@@ -245,6 +245,42 @@ func registerMaintenanceTools(s *server.MCPServer, d *Deps) {
 		},
 	)
 
+	// maintenance_reopen — the only way back from blocked/failed.
+	s.AddTool(
+		mcp.NewTool("maintenance_reopen",
+			mcp.WithDescription("Reopen a blocked or failed job back to an active state (researching or pending) with a note explaining what changed. Only blocked/failed jobs can be reopened, and only along legal state-machine edges; without this, blocked jobs would be unrecoverable without editing the database."),
+			mcp.WithString("id", mcp.Required(), mcp.Description("Numeric job id")),
+			mcp.WithString("to", mcp.Description("Target state: researching or pending (default researching)")),
+			mcp.WithString("note", mcp.Description("What changed since it was blocked/failed, e.g. better subs found")),
+		),
+		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			args := req.GetArguments()
+			id, errRes := parseID(args)
+			if errRes != nil {
+				return errRes, nil
+			}
+			to := argString(args, "to", store.MaintResearching)
+			it, err := d.Store.GetItem(id)
+			if err != nil {
+				return toolErr("%v", err), nil
+			}
+			if it.Status != store.MaintBlocked && it.Status != store.MaintFailed {
+				return toolErr("job %d is %s: only blocked or failed jobs can be reopened", id, it.Status), nil
+			}
+			note := argString(args, "note", "")
+			if note == "" {
+				return toolErr("note is required: record what changed since the job was %s", it.Status), nil
+			}
+			it, err = d.Store.Transition(id, to, "reopened: "+note)
+			if err != nil {
+				return toolErr("%v", err), nil
+			}
+			_ = d.Store.LogAction("maintenance_reopen", it.Service, it.Title,
+				fmt.Sprintf(`{"id":%d,"to":%q}`, id, to), note)
+			return toolJSON(it), nil
+		},
+	)
+
 	// decision_record
 	s.AddTool(
 		mcp.NewTool("decision_record",

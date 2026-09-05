@@ -166,6 +166,51 @@ func TestRankReleasesToolPrefersJudas(t *testing.T) {
 	}
 }
 
+// A blocked job can be reopened along a legal edge; active or finished
+// jobs cannot, and reopening without a note is refused.
+func TestMaintenanceReopen(t *testing.T) {
+	s, st := maintTestServer(t, false, "")
+	id := addJob(t, s, "Vanitas", "oversized", nil)
+	fid := float64(id)
+	if _, err := st.Transition(id, store.MaintBlocked, "bad candidate"); err != nil {
+		t.Fatal(err)
+	}
+	// No note, no reopen.
+	if text := resultText(t, callTool(t, s, "maintenance_reopen", map[string]any{"id": fid})); !strings.Contains(text, "note is required") {
+		t.Errorf("reopen without note was not refused: %s", text)
+	}
+	// Illegal edge blocked -> done is refused by the state machine.
+	if text := resultText(t, callTool(t, s, "maintenance_reopen", map[string]any{"id": fid, "to": "done", "note": "x"})); !strings.Contains(text, "invalid transition") {
+		t.Errorf("illegal reopen edge was not refused: %s", text)
+	}
+	callTool(t, s, "maintenance_reopen", map[string]any{"id": fid, "to": "researching", "note": "better subs found"})
+	if it, _ := st.GetItem(id); it.Status != store.MaintResearching {
+		t.Errorf("job is %s, want researching", it.Status)
+	}
+	// Active jobs cannot be reopened.
+	if text := resultText(t, callTool(t, s, "maintenance_reopen", map[string]any{"id": fid, "note": "x"})); !strings.Contains(text, "only blocked or failed") {
+		t.Errorf("reopen of active job was not refused: %s", text)
+	}
+}
+
+// fs_safe_delete obeys the global allow_destructive kill-switch even for a
+// fully validated (replacing) job.
+func TestFsSafeDeleteNeedsAllowDestructive(t *testing.T) {
+	s, st := maintTestServer(t, false, "")
+	id := addJob(t, s, "Vanitas", "oversized", nil)
+	for _, next := range []string{store.MaintResearching, store.MaintCandidate, store.MaintDownloading,
+		store.MaintDownloaded, store.MaintVerifying, store.MaintImporting, store.MaintReplacing} {
+		if _, err := st.Transition(id, next, ""); err != nil {
+			t.Fatalf("transition to %s: %v", next, err)
+		}
+	}
+	text := resultText(t, callTool(t, s, "fs_safe_delete", map[string]any{
+		"path": "old.mkv", "maintenance_item_id": float64(id), "confirm": "true"}))
+	if !strings.Contains(text, "allow_destructive") {
+		t.Errorf("delete without allow_destructive was not refused: %s", text)
+	}
+}
+
 // Full happy path with a fake Sonarr: plan to done, with space-saved notes.
 func TestSafeReplaceHappyPath(t *testing.T) {
 	var deleted []string

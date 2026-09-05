@@ -165,7 +165,7 @@ Beyond the request queue, Navigatorr keeps a **separate SQLite-backed maintenanc
 | Tool group | Tools |
 |------------|-------|
 | Preferences | `memory_set`, `memory_get`, `memory_list`, `memory_search`, `memory_delete` (scoped: `global`, `anime`, `movies`, `project:<name>`, `media:<service>:<id>`; `ttl_seconds` for expiring facts) |
-| Maintenance jobs | `maintenance_add` (idempotent), `maintenance_list`, `maintenance_next`, `maintenance_get`, `maintenance_update`, `maintenance_claim`, `maintenance_release`, `maintenance_resolve` |
+| Maintenance jobs | `maintenance_add` (idempotent), `maintenance_list`, `maintenance_next`, `maintenance_get`, `maintenance_update`, `maintenance_claim`, `maintenance_release`, `maintenance_resolve`, `maintenance_reopen` (blocked/failed → researching/pending) |
 | Decisions | `decision_record`, `decision_list` (why-did-we-pick-this history) |
 | Inspection | `inspect_media` (ffprobe + sidecar subs + `*arr` fallback), `qbit_list_files` (torrent-content safety gate), `scan_dangerous_files` |
 | Ranking | `rank_releases` (deterministic scoring: codec, group, subs, seeders, size reduction) |
