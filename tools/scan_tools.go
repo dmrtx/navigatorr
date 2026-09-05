@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/jakenesler/navigatorr/arrservice"
 	"github.com/jakenesler/navigatorr/maint"
@@ -13,6 +15,15 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
+
+// scanTimeout bounds the whole library sweep. Per-series file sampling fans
+// out below, but a wedged service must still fail the scan instead of
+// hanging the MCP call indefinitely.
+const scanTimeout = 4 * time.Minute
+
+// scanWorkers caps concurrent per-series fetches so a 30-series scan does
+// not open 30 simultaneous connections against Sonarr/Radarr.
+const scanWorkers = 4
 
 // scanFinding is one library issue found by a scan.
 type scanFinding struct {
@@ -45,6 +56,9 @@ func registerScanTools(s *server.MCPServer, d *Deps, registry *arrservice.Regist
 			}
 			thresholdMB := argInt64(args, "per_episode_mb", d.Config.Maintenance.OversizedPerEpisodeMB)
 			threshold := thresholdMB << 20
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, scanTimeout)
+			defer cancel()
 			services := []string{}
 			switch which {
 			case "sonarr", "radarr":
@@ -71,9 +85,11 @@ func registerScanTools(s *server.MCPServer, d *Deps, registry *arrservice.Regist
 			}
 			_ = d.Store.LogAction("scan_library", strings.Join(services, ","),
 				"", fmt.Sprintf(`{"dry_run":%v}`, dry), fmt.Sprintf("%d issues", len(issues)))
+			timedOut := ctx.Err() == context.DeadlineExceeded
 			return toolJSON(map[string]any{
-				"dry_run": dry, "issues": issues, "truncated": truncated,
-				"note": firstOr(nil, "set dry_run=false to open maintenance jobs for these issues"),
+				"dry_run": dry, "issues": issues, "truncated": truncated || timedOut,
+				"timed_out": timedOut,
+				"note":      firstOr(nil, "set dry_run=false to open maintenance jobs for these issues"),
 			}), nil
 		},
 	)
@@ -175,11 +191,11 @@ func registerFsTools(s *server.MCPServer, d *Deps) {
 	// fs_hash
 	s.AddTool(
 		mcp.NewTool("fs_hash",
-			mcp.WithDescription("Compute the SHA-256 of a file inside allowed_read_roots, to verify identity or change."),
+			mcp.WithDescription("Compute the SHA-256 of a file inside allowed_read_roots, to verify identity or change. Large media files take a while; the operation honours client cancellation."),
 			mcp.WithString("path", mcp.Required(), mcp.Description("File path")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			h, n, err := d.Fs.Hash(argString(req.GetArguments(), "path", ""))
+			h, n, err := d.Fs.Hash(ctx, argString(req.GetArguments(), "path", ""))
 			if err != nil {
 				return toolErr("%v", err), nil
 			}
@@ -275,24 +291,41 @@ func scanService(ctx context.Context, registry *arrservice.Registry, d *Deps, sv
 		if err != nil {
 			return nil, false, err
 		}
-		for _, m := range items {
-			title, _ := m["title"].(string)
-			idStr := numStr(m["id"])
-			stats, _ := m["statistics"].(map[string]any)
-			size := int64(numVal(stats["sizeOnDisk"]))
-			count := int(numVal(stats["episodeFileCount"]))
-			if maint.IsOversizedEpisode(size, count, threshold) {
-				issues = append(issues, scanFinding{Service: "sonarr", MediaType: "series",
-					MediaID: idStr, Title: title, Issue: maint.IssueOversized,
-					Detail: fmt.Sprintf("%.1fGB across %d files (~%.1fGB/episode)",
-						float64(size)/1e9, count, float64(size)/float64(count)/1e9)})
-			}
-			// Sample episode files for language/dangerous signals.
-			files, _, ferr := arrCollection(ctx, svc, "/episodefile?seriesId="+idStr, 5)
-			if ferr != nil {
-				continue
-			}
-			issues = append(issues, fileLevelFindings("sonarr", "series", idStr, title, files)...)
+		// File sampling fans out over a bounded worker pool: sequential
+		// sampling makes a 30-series scan take 30 slow calls back to back.
+		// Order is preserved (slot per series) so output stays stable.
+		perSeries := make([][]scanFinding, len(items))
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, scanWorkers)
+		for i, m := range items {
+			wg.Add(1)
+			go func(i int, m map[string]any) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				title, _ := m["title"].(string)
+				idStr := numStr(m["id"])
+				var f []scanFinding
+				stats, _ := m["statistics"].(map[string]any)
+				size := int64(numVal(stats["sizeOnDisk"]))
+				count := int(numVal(stats["episodeFileCount"]))
+				if maint.IsOversizedEpisode(size, count, threshold) {
+					f = append(f, scanFinding{Service: "sonarr", MediaType: "series",
+						MediaID: idStr, Title: title, Issue: maint.IssueOversized,
+						Detail: fmt.Sprintf("%.1fGB across %d files (~%.1fGB/episode)",
+							float64(size)/1e9, count, float64(size)/float64(count)/1e9)})
+				}
+				files, _, ferr := arrCollection(ctx, svc, "/episodefile?seriesId="+idStr, 5)
+				if ferr != nil {
+					perSeries[i] = f
+					return
+				}
+				perSeries[i] = append(f, fileLevelFindings("sonarr", "series", idStr, title, files)...)
+			}(i, m)
+		}
+		wg.Wait()
+		for _, f := range perSeries {
+			issues = append(issues, f...)
 		}
 		if create {
 			attachJobs(d, issues)

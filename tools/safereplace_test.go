@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,11 +11,16 @@ import (
 
 	"github.com/jakenesler/navigatorr/arrservice"
 	"github.com/jakenesler/navigatorr/config"
+	"github.com/jakenesler/navigatorr/qbit"
 	"github.com/jakenesler/navigatorr/store"
 	"github.com/mark3labs/mcp-go/server"
 )
 
 func maintTestServer(t *testing.T, allowDestructive bool, sonarrURL string) (*server.MCPServer, *store.Store) {
+	return maintTestServerFull(t, allowDestructive, sonarrURL, nil)
+}
+
+func maintTestServerFull(t *testing.T, allowDestructive bool, sonarrURL string, qb *qbit.Client) (*server.MCPServer, *store.Store) {
 	t.Helper()
 	roots := t.TempDir()
 	cfg := &config.Config{AllowDestructive: allowDestructive}
@@ -35,8 +41,27 @@ func maintTestServer(t *testing.T, allowDestructive bool, sonarrURL string) (*se
 	}
 	t.Cleanup(func() { st.Close() })
 	s := server.NewMCPServer("test", "0.0.0")
-	RegisterMaintenance(s, cfg, arrservice.NewRegistry(cfg), nil, st)
+	RegisterMaintenance(s, cfg, arrservice.NewRegistry(cfg), qb, st)
 	return s, st
+}
+
+// fakeQbit serves the login + empty torrent lists: any hash is "unknown".
+func fakeQbit(t *testing.T) *qbit.Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/auth/login"):
+			w.Write([]byte("Ok."))
+		case strings.HasSuffix(r.URL.Path, "/torrents/files"):
+			w.Write([]byte(`[{"name":"Show.S01E01.mkv","size":100,"progress":1}]`))
+		case strings.HasSuffix(r.URL.Path, "/torrents/info"):
+			w.Write([]byte(`[]`))
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return qbit.NewClient(srv.URL, "u", "p")
 }
 
 func toolJSONMap(t *testing.T, text string) map[string]any {
@@ -208,6 +233,98 @@ func TestFsSafeDeleteNeedsAllowDestructive(t *testing.T) {
 		"path": "old.mkv", "maintenance_item_id": float64(id), "confirm": "true"}))
 	if !strings.Contains(text, "allow_destructive") {
 		t.Errorf("delete without allow_destructive was not refused: %s", text)
+	}
+}
+
+// A hash the client does not know must NOT advance the job: a removed or
+// mistyped torrent is not a completed download.
+func TestTorrentCheckMissingHashStaysDownloading(t *testing.T) {
+	s, st := maintTestServerFull(t, false, "", fakeQbit(t))
+	id := addJob(t, s, "Vanitas", "oversized", nil)
+	fid := float64(id)
+	callTool(t, s, "safe_replace", map[string]any{"id": fid, "step": "plan"})
+	callTool(t, s, "safe_replace", map[string]any{"id": fid, "step": "select",
+		"release_guid": "g1", "title": "Show 1080p"})
+	callTool(t, s, "safe_replace", map[string]any{"id": fid, "step": "add_torrent",
+		"torrent_hash": "DEADDEAD"})
+	text := resultText(t, callTool(t, s, "safe_replace", map[string]any{"id": fid, "step": "torrent_check"}))
+	if !strings.Contains(text, "not found in qbittorrent") {
+		t.Fatalf("missing torrent was not refused: %s", text)
+	}
+	if it, _ := st.GetItem(id); it.Status != store.MaintDownloading {
+		t.Errorf("job advanced to %s on a phantom torrent", it.Status)
+	}
+}
+
+// A crash between import_confirm's two transitions must heal on retry:
+// importing advances to replacing instead of reporting false success.
+func TestImportConfirmCrashRecovery(t *testing.T) {
+	s, st := maintTestServer(t, false, "")
+	id := addJob(t, s, "Vanitas", "oversized", nil)
+	for _, next := range []string{store.MaintResearching, store.MaintCandidate, store.MaintDownloading,
+		store.MaintDownloaded, store.MaintVerifying, store.MaintImporting} {
+		if _, err := st.Transition(id, next, ""); err != nil {
+			t.Fatalf("transition to %s: %v", next, err)
+		}
+	}
+	text := resultText(t, callTool(t, s, "safe_replace", map[string]any{"id": float64(id),
+		"step": "import_confirm", "new_file_id": "99"}))
+	if it, _ := st.GetItem(id); it.Status != store.MaintReplacing {
+		t.Fatalf("recovery failed, job is %s: %s", it.Status, text)
+	}
+	// A second retry is a true no-op now.
+	again := resultText(t, callTool(t, s, "safe_replace", map[string]any{"id": float64(id),
+		"step": "import_confirm", "new_file_id": "99"}))
+	if !strings.Contains(again, "already confirmed") {
+		t.Errorf("expected idempotent confirmation: %s", again)
+	}
+}
+
+// The concurrent sampler finds oversized + language issues without races.
+func TestScanServiceConcurrent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v3/series":
+			w.Write([]byte(`[
+				{"id":1,"title":"Big Anime","statistics":{"sizeOnDisk":5000000000,"episodeFileCount":2}},
+				{"id":2,"title":"Oldboy Show","statistics":{"sizeOnDisk":100,"episodeFileCount":1}}]`))
+		case r.URL.Path == "/api/v3/episodefile":
+			if r.URL.Query().Get("seriesId") == "1" {
+				w.Write([]byte(`[{"relativePath":"Big Anime/Big.Anime.S01E01.mkv",
+					"mediaInfo":{"audioLanguages":["Korean"],"subtitles":[]}}]`))
+			} else {
+				w.Write([]byte(`[{"relativePath":"Oldboy Show/oldboy.show.s01e01.mkv",
+					"mediaInfo":{"audioLanguages":["English"],"subtitles":[]}}]`))
+			}
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{}
+	cfg.Services = map[string]config.ServiceConfig{
+		"sonarr": {URL: srv.URL, APIKey: "k", AuthMethod: "header", AuthHeader: "X-Api-Key", APIVersion: "/api/v3"},
+	}
+	st, err := store.Open(t.TempDir() + "/scan.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	d := &Deps{Store: st, Config: cfg}
+	found, _, err := scanService(context.Background(), arrservice.NewRegistry(cfg), d, "sonarr", 30, 900<<20, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, f := range found {
+		seen[f.Issue] = true
+	}
+	if !seen["oversized"] {
+		t.Errorf("oversized not detected: %+v", found)
+	}
+	if !seen["missing_accessible_language"] {
+		t.Errorf("language issue not detected: %+v", found)
 	}
 }
 

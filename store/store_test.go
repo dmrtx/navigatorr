@@ -207,6 +207,17 @@ func TestActionLogRedactsSecrets(t *testing.T) {
 	}
 }
 
+func TestPreferenceValueCap(t *testing.T) {
+	s := openTest(t)
+	big := strings.Repeat("x", MaxPreferenceValueLen+1)
+	if _, err := s.SetPreference("global", "blob", `"`+big+`"`, "user", 0); err == nil {
+		t.Errorf("oversized value accepted; limit is %d", MaxPreferenceValueLen)
+	}
+	if _, err := s.SetPreference("global", "ok", `"small"`, "user", 0); err != nil {
+		t.Errorf("normal value rejected: %v", err)
+	}
+}
+
 func TestBlocklist(t *testing.T) {
 	s := openTest(t)
 	if s.IsBlocked("abc123") {

@@ -22,6 +22,12 @@ import (
 // SchemaVersion is the current schema revision. Migrations run in order.
 const SchemaVersion = 1
 
+// MaxPreferenceValueLen bounds a stored preference value. Values ride into
+// memory_get/memory_list/get_context verbatim, so one huge blob would tax
+// every later read and poison the LLM's context window. Split large data
+// across keys or keep it out of memory.
+const MaxPreferenceValueLen = 16 * 1024
+
 // Maintenance statuses. The safe-replacement workflow moves items forward
 // through them; direct jumps (e.g. pending -> done) are rejected.
 const (
@@ -280,6 +286,9 @@ func (s *Store) SetPreference(scope, key, valueJSON, source string, ttl time.Dur
 	}
 	if valueJSON == "" {
 		valueJSON = "null"
+	}
+	if len(valueJSON) > MaxPreferenceValueLen {
+		return Preference{}, fmt.Errorf("value is %d bytes, limit is %d: split it across keys or keep bulk data out of memory", len(valueJSON), MaxPreferenceValueLen)
 	}
 	if source == "" {
 		source = "user"

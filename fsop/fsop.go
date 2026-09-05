@@ -5,6 +5,7 @@
 package fsop
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -201,8 +202,10 @@ func (r *Resolver) Delete(path string) error {
 	return os.Remove(real)
 }
 
-// Hash returns the SHA-256 of a file inside the read roots.
-func (r *Resolver) Hash(path string) (string, int64, error) {
+// Hash returns the SHA-256 of a file inside the read roots. The copy runs
+// in chunks against ctx so hashing a multi-GB media file can be cancelled
+// instead of wedging the caller until it finishes.
+func (r *Resolver) Hash(ctx context.Context, path string) (string, int64, error) {
 	real, err := r.ResolveRead(path)
 	if err != nil {
 		return "", 0, err
@@ -213,9 +216,23 @@ func (r *Resolver) Hash(path string) (string, int64, error) {
 	}
 	defer f.Close()
 	h := sha256.New()
-	n, err := io.Copy(h, f)
-	if err != nil {
-		return "", 0, err
+	var n int64
+	buf := make([]byte, 1<<20)
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", 0, fmt.Errorf("hash cancelled after %d bytes: %w", n, err)
+		}
+		nr, er := f.Read(buf)
+		if nr > 0 {
+			n += int64(nr)
+			h.Write(buf[:nr])
+		}
+		if er == io.EOF {
+			break
+		}
+		if er != nil {
+			return "", 0, er
+		}
 	}
 	return hex.EncodeToString(h.Sum(nil)), n, nil
 }

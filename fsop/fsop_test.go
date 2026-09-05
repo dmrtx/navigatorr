@@ -1,6 +1,7 @@
 package fsop
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -75,6 +76,24 @@ func TestMoveDeleteInsideRoots(t *testing.T) {
 	os.WriteFile(b, []byte("2"), 0o644)
 	if err := r.Move(a, b); err == nil {
 		t.Error("overwrite was allowed")
+	}
+}
+
+func TestHashAndCancel(t *testing.T) {
+	r, root, _ := testResolver(t)
+	p := filepath.Join(root, "a.mkv")
+	os.WriteFile(p, []byte("data"), 0o644)
+	h, n, err := r.Hash(context.Background(), p)
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	if n != 4 || h == "" {
+		t.Errorf("hash=%q size=%d", h, n)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := r.Hash(ctx, p); err == nil {
+		t.Error("cancelled hash was not interrupted")
 	}
 }
 

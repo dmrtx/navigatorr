@@ -399,7 +399,13 @@ func (sd *safeDeps) stepTorrentCheck(ctx context.Context, args map[string]any, i
 			progress = t.Progress
 		}
 	}
-	if progress >= 0 && progress < 1 {
+	// A hash the client does not know is neither complete nor downloading:
+	// it was removed, never added, or mistyped. Advancing would bless a
+	// phantom replacement.
+	if progress < 0 {
+		return nil, fmt.Errorf("torrent %s not found in qbittorrent (removed, never added, or wrong hash); job stays downloading", hash)
+	}
+	if progress < 1 {
 		return toolJSON(map[string]any{"item": it,
 			"progress": progress, "note": "still downloading; content names are safe so far"}), nil
 	}
@@ -493,8 +499,23 @@ func (sd *safeDeps) stepImportConfirm(ctx context.Context, args map[string]any, 
 	if err != nil {
 		return nil, err
 	}
-	if it.Status == store.MaintImporting || it.Status == store.MaintReplacing {
+	if it.Status == store.MaintReplacing {
 		return toolJSON(map[string]any{"item": it, "note": "import already confirmed (idempotent)"}), nil
+	}
+	if it.Status == store.MaintImporting {
+		// Crash recovery: the import was confirmed and the first transition
+		// ran, but the process died before authorizing deletion. Reporting
+		// success here would wedge the job in importing forever (no other
+		// tool advances it), so complete the second transition now.
+		it, err = sd.Store.Transition(id, store.MaintReplacing,
+			"replacement live; original removal authorized (recovered after restart)")
+		if err != nil {
+			return nil, err
+		}
+		_ = sd.Store.LogAction("safe_replace_imported", it.Service, it.Title,
+			fmt.Sprintf(`{"recovered":true}`), "import confirmed; delete authorized")
+		return toolJSON(map[string]any{"item": it,
+			"next": "only now may the original be removed: safe_replace step=delete_original confirm=true"}), nil
 	}
 	if it.Status != store.MaintVerifying {
 		return nil, fmt.Errorf("import_confirm needs status verifying, item is %s", it.Status)
