@@ -6,6 +6,7 @@ navigatorr
 .dist/
 
 # Local config
+.local-env/
 .mcp.json
 .claude/
 .codex/

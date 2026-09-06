@@ -398,21 +398,29 @@ func (e *Engine) execute(ctx context.Context, inst *store.ActionInstance, ec *Ex
 				errStr = res.Error
 			}
 
+			if len(res.Outputs) > 0 {
+				mergeMap(ec.State, res.Outputs)
+			}
+			ec.Outputs = ec.State
+
 			inpJSON, _ := json.Marshal(ec.Inputs)
+			outJSON, _ := json.Marshal(res.Outputs)
 			_ = e.deps.Store.LogActionStep(store.ActionStepLog{
-				InstanceID: inst.ID,
-				StepIndex:  stepIdx,
-				StepName:   step.Name,
-				Primitive:  step.Name,
-				InputsJSON: string(inpJSON),
-				Status:     string(StepFailed),
-				Error:      errStr,
-				DurationMs: durationMs,
+				InstanceID:  inst.ID,
+				StepIndex:   stepIdx,
+				StepName:    step.Name,
+				Primitive:   step.Name,
+				InputsJSON:  string(inpJSON),
+				OutputsJSON: string(outJSON),
+				Status:      string(StepFailed),
+				Error:       errStr,
+				DurationMs:  durationMs,
 			})
 
 			inst.Status = StatusFailed
 			inst.ErrorJSON = fmt.Sprintf(`{"step": %q, "error": %q}`, step.Name, errStr)
 			inst.StateJSON = toJSON(ec.State)
+			inst.OutputsJSON = toJSON(ec.State)
 			_ = e.deps.Store.UpdateActionInstance(*inst)
 
 			_ = e.deps.Store.LogActionEnriched(
