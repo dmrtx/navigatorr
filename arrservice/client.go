@@ -131,7 +131,21 @@ func (s *Service) Post(ctx context.Context, path string, body []byte) ([]byte, e
 }
 
 func (s *Service) doRequest(ctx context.Context, client *http.Client, method, path string, query map[string]string, body []byte) ([]byte, int, error) {
-	reqURL := s.BaseURL + path
+	cleanPath := path
+	if s.Config.APIVersion != "" && strings.HasPrefix(cleanPath, s.Config.APIVersion) {
+		cleanPath = strings.TrimPrefix(cleanPath, s.Config.APIVersion)
+	} else if strings.HasPrefix(cleanPath, "/api/v") && strings.Contains(s.BaseURL, "/api/v") {
+		for _, v := range []string{"/api/v3", "/api/v1", "/api/v2"} {
+			if strings.HasPrefix(cleanPath, v) && strings.HasSuffix(s.BaseURL, v) {
+				cleanPath = strings.TrimPrefix(cleanPath, v)
+				break
+			}
+		}
+	}
+	if !strings.HasPrefix(cleanPath, "/") && cleanPath != "" {
+		cleanPath = "/" + cleanPath
+	}
+	reqURL := s.BaseURL + cleanPath
 
 	var bodyReader io.Reader
 	if body != nil {
