@@ -99,7 +99,7 @@ Claude Code / MCP Client
 
 | Tool | Description |
 |------|-------------|
-| `call_api` | Make authenticated API calls to any service. Supports field selection (including nested array drilling like `records.title`), filtering (`field:op:value`), and result limiting. Includes a response size guard and optional DELETE protection. |
+| `call_api` | Make authenticated API calls to any service. Supports JSON bodies, form-urlencoded payloads (`application/x-www-form-urlencoded`), multipart forms, field selection (including nested array drilling like `records.title`), filtering (`field:op:value`), result limiting, mutation metadata envelopes, and zero-leak diagnostics. |
 
 ### Transmission
 
@@ -349,6 +349,30 @@ DELETE /api/v3/series/{id}  — Delete a series
 → Tool: call_api → service: "sonarr", path: "/series"
 ```
 Returns full JSON with all series, episodes, and quality info. Handles auth headers, API versioning, and URL construction automatically. Supports field selection, filtering, and result limiting.
+
+Supports both standard JSON bodies and form-urlencoded requests:
+
+```json
+// JSON request:
+call_api(
+  service="radarr",
+  method="POST",
+  path="/movie",
+  body="{\"title\": \"Inception\", \"qualityProfileId\": 1, ...}"
+)
+
+// Form-urlencoded request (e.g. Bazarr settings and language profiles):
+call_api(
+  service="bazarr",
+  method="POST",
+  path="/system/settings",
+  content_type="application/x-www-form-urlencoded",
+  form={
+    "languages-profiles": "[{\"profileId\": 1, \"name\": \"Accessible EN+ES\", \"cutoff\": 65535, \"items\": [{\"id\": 1, \"language\": \"en\"}, {\"id\": 2, \"language\": \"es\"}]}]",
+    "languages-enabled": ["en", "es"]
+  }
+)
+```
 
 **5. Manage torrents**
 ```

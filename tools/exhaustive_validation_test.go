@@ -105,7 +105,7 @@ func TestValidation_CallAPI_Projections_LargeCollection(t *testing.T) {
 	}
 	reg := arrservice.NewRegistry(cfg)
 	s := server.NewMCPServer("test", "0.0.0")
-	registerAPICallTool(s, reg, cfg.MaxResponseSizeKB, false)
+	registerAPICallTool(s, reg, nil, cfg.MaxResponseSizeKB, false)
 
 	// 1. Exact prompt projection case
 	fields := "id,title,hasFile,movieFile.id,movieFile.size,movieFile.mediaInfo.audioLanguages,movieFile.mediaInfo.subtitles"
@@ -222,7 +222,7 @@ func TestValidation_CallAPI_FilteringAndOrder(t *testing.T) {
 	}
 	reg := arrservice.NewRegistry(cfg)
 	s := server.NewMCPServer("test", "0.0.0")
-	registerAPICallTool(s, reg, cfg.MaxResponseSizeKB, false)
+	registerAPICallTool(s, reg, nil, cfg.MaxResponseSizeKB, false)
 
 	// Filter gt: size > 2500
 	resGt := callTool(t, s, "call_api", map[string]any{
@@ -290,7 +290,7 @@ func TestValidation_LocalPaginationAndSnapshotRequestCount(t *testing.T) {
 	}
 	reg := arrservice.NewRegistry(cfg)
 	s := server.NewMCPServer("test", "0.0.0")
-	registerAPICallTool(s, reg, cfg.MaxResponseSizeKB, false)
+	registerAPICallTool(s, reg, nil, cfg.MaxResponseSizeKB, false)
 
 	// Traverse all 500 items in pages of 100
 	var aggregatedIDs []int
@@ -681,7 +681,7 @@ func TestValidation_CentralizedSafety_NoEarlyDeleteAndNoCallAPIBypass(t *testing
 
 	s := server.NewMCPServer("test", "0.0.0")
 	RegisterMaintenance(s, cfg, reg, qbClient, st)
-	registerAPICallTool(s, reg, 100, cfg.AllowDestructive)
+	registerAPICallTool(s, reg, nil, 100, cfg.AllowDestructive)
 	registerQbitTools(s, qbClient, cfg.AllowDestructive)
 
 	// 1. safe_replace must refuse delete_original before verify + import_confirm

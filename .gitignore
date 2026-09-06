@@ -11,6 +11,9 @@ navigatorr
 .claude/
 .codex/
 .playwright-mcp/
+.env
+.env.*
+!.env*.example
 
 # CartoGopher
 bakes/

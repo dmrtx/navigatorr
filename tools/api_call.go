@@ -1,40 +1,58 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
+	"mime"
+	"mime/multipart"
+	"net/url"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/jakenesler/navigatorr/arrservice"
+	"github.com/jakenesler/navigatorr/openapi"
 	"github.com/jakenesler/navigatorr/resilience"
 	"github.com/jakenesler/navigatorr/snapshot"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
 
-func registerAPICallTool(s *server.MCPServer, registry *arrservice.Registry, maxResponseSizeKB int, allowDestructive bool) {
+// Supported Content Types
+const (
+	ContentTypeJSON           = "application/json"
+	ContentTypeFormURLEncoded = "application/x-www-form-urlencoded"
+	ContentTypeMultipartForm  = "multipart/form-data"
+)
+
+func registerAPICallTool(s *server.MCPServer, registry *arrservice.Registry, specStore *openapi.Store, maxResponseSizeKB int, allowDestructive bool) {
 	s.AddTool(
 		mcp.NewTool("call_api",
 			mcp.WithDescription("Make an authenticated API call to any configured *arr service. Returns the JSON response. Supports real field projections, snapshot caching, and cursor-based pagination for large collections."),
-			mcp.WithString("service", mcp.Description("Service name (e.g. sonarr, radarr). Required unless cursor is provided.")),
+			mcp.WithString("service", mcp.Description("Service name (e.g. sonarr, radarr, bazarr). Required unless cursor is provided.")),
 			mcp.WithString("method", mcp.Description("HTTP method (default: GET)")),
-			mcp.WithString("path", mcp.Description("API path (e.g. /series, /movie). The API version prefix is added automatically. Required unless cursor is provided.")),
+			mcp.WithString("path", mcp.Description("API path (e.g. /series, /movie, /system/settings). The API version prefix is added automatically. Required unless cursor is provided.")),
 			mcp.WithString("query", mcp.Description("Query parameters as JSON object (e.g. {\"term\": \"breaking bad\"})")),
-			mcp.WithString("body", mcp.Description("Request body as JSON string")),
+			mcp.WithString("body", mcp.Description("JSON request body encoded as a JSON string. Do not use together with form.")),
+			mcp.WithString("content_type", mcp.Description("Request content type. Defaults to application/json when body is supplied. Supported: application/json, application/x-www-form-urlencoded, multipart/form-data.")),
+			mcp.WithString("form", mcp.Description("Form fields for application/x-www-form-urlencoded (or multipart/form-data). Pass as a JSON object string or key-value map. Arrays of primitives are encoded as repeated keys. Do not use together with body.")),
+			mcp.WithBoolean("include_metadata", mcp.Description("When true, returns a structured JSON envelope with status_code, request metadata, mutating flag, and response body.")),
 			mcp.WithString("fields", mcp.Description("Comma-separated fields to project in response. Supports nested dot notation (e.g. \"id,title,movieFile.id,movieFile.size,movieFile.mediaInfo.audioLanguages,movieFile.mediaInfo.subtitles\").")),
 			mcp.WithString("filter", mcp.Description("Filter array results. Format: \"field:op:value\". Ops: contains, eq, ne, gt, lt (e.g. \"title:contains:Pirates\", \"year:gt:2000\", \"hasFile:eq:true\")")),
 			mcp.WithString("limit", mcp.Description("Max number of items to return from array responses (default: 50 for large collections)")),
 			mcp.WithString("cursor", mcp.Description("Opaque cursor token from a previous call_api response to retrieve the next page from local snapshot")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			return handleCallAPI(ctx, req, registry, maxResponseSizeKB, allowDestructive)
+			return handleCallAPI(ctx, req, registry, specStore, maxResponseSizeKB, allowDestructive)
 		},
 	)
 }
 
-func handleCallAPI(ctx context.Context, req mcp.CallToolRequest, registry *arrservice.Registry, maxResponseSizeKB int, allowDestructive bool) (*mcp.CallToolResult, error) {
+func handleCallAPI(ctx context.Context, req mcp.CallToolRequest, registry *arrservice.Registry, specStore *openapi.Store, maxResponseSizeKB int, allowDestructive bool) (*mcp.CallToolResult, error) {
 	cursorStr := strings.TrimSpace(mcp.ParseString(req, "cursor", ""))
 	limitStr := strings.TrimSpace(mcp.ParseString(req, "limit", ""))
 	fieldsStr := strings.TrimSpace(mcp.ParseString(req, "fields", ""))
@@ -80,18 +98,140 @@ func handleCallAPI(ctx context.Context, req mcp.CallToolRequest, registry *arrse
 	path := mcp.ParseString(req, "path", "")
 	queryStr := mcp.ParseString(req, "query", "")
 	bodyStr := mcp.ParseString(req, "body", "")
+	contentTypeStr := strings.TrimSpace(mcp.ParseString(req, "content_type", ""))
+	includeMetadata := false
+	if im, ok := req.GetArguments()["include_metadata"].(bool); ok {
+		includeMetadata = im
+	}
 
 	if svcName == "" || path == "" {
 		return mcp.NewToolResultError("service and path are required"), nil
 	}
 
-	if isDestr, reason := isDestructiveAPICall(method, path, bodyStr); isDestr && !allowDestructive {
-		return mcp.NewToolResultError(fmt.Sprintf("destructive operations are disabled (%s). Set allow_destructive: true in config.yaml to enable.", reason)), nil
-	}
-
 	svc, err := registry.Get(svcName)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	// Determine if body or form arguments are provided
+	hasBody := bodyStr != ""
+	if !hasBody {
+		if raw, ok := req.GetArguments()["body"]; ok && raw != nil {
+			if s, isStr := raw.(string); isStr {
+				hasBody = strings.TrimSpace(s) != ""
+			} else {
+				hasBody = true
+			}
+		}
+	}
+
+	formRaw := req.GetArguments()["form"]
+	hasForm := false
+	if formRaw != nil {
+		if s, isStr := formRaw.(string); isStr {
+			hasForm = strings.TrimSpace(s) != ""
+		} else if m, isMap := formRaw.(map[string]any); isMap {
+			hasForm = len(m) > 0
+		} else {
+			hasForm = true
+		}
+	}
+
+	// Validation 1: Simultaneous body and form
+	if hasBody && hasForm {
+		return mcp.NewToolResultError("cannot provide both body and form simultaneously; use body for JSON or form for form-urlencoded"), nil
+	}
+
+	// Validation 2: Form with GET or HEAD
+	if hasForm && (method == "GET" || method == "HEAD") {
+		return mcp.NewToolResultError(fmt.Sprintf("cannot use form with HTTP method %s; form fields are only supported for mutation methods (POST, PUT, PATCH)", method)), nil
+	}
+
+	// Validation 3: Normalize content_type if supplied
+	normalizedCT, err := normalizeContentType(contentTypeStr)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	// Validation 4: Content-Type incompatibilities
+	if normalizedCT == ContentTypeJSON && hasForm {
+		return mcp.NewToolResultError("cannot use form with content_type application/json; use body for JSON or set content_type to application/x-www-form-urlencoded"), nil
+	}
+	if (normalizedCT == ContentTypeFormURLEncoded || normalizedCT == ContentTypeMultipartForm) && hasBody {
+		return mcp.NewToolResultError(fmt.Sprintf("cannot use body with content_type %s; use form parameter", normalizedCT)), nil
+	}
+
+	// Determine effective content type
+	effectiveCT := normalizedCT
+	if effectiveCT == "" {
+		if hasForm {
+			effectiveCT = ContentTypeFormURLEncoded
+		} else if hasBody {
+			effectiveCT = ContentTypeJSON
+		} else if specStore != nil {
+			// Check OpenAPI spec for default content type
+			if idx := specStore.GetIndex(svcName); idx != nil {
+				if detail, err := idx.GetDetail(path, method); err == nil && detail != nil && detail.RequestBody != nil && detail.RequestBody.ContentType != "" {
+					if specCT, err := normalizeContentType(detail.RequestBody.ContentType); err == nil && specCT != "" {
+						effectiveCT = specCT
+					}
+				}
+			}
+		}
+	}
+
+	// Parse query params
+	var query map[string]string
+	if queryStr != "" {
+		var raw map[string]any
+		if err := json.Unmarshal([]byte(queryStr), &raw); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid query JSON: %v", err)), nil
+		}
+		query = make(map[string]string)
+		for k, v := range raw {
+			query[k] = fmt.Sprintf("%v", v)
+		}
+	} else if raw, ok := req.GetArguments()["query"].(map[string]any); ok && raw != nil {
+		query = make(map[string]string)
+		for k, v := range raw {
+			query[k] = fmt.Sprintf("%v", v)
+		}
+	}
+
+	// Encode payload
+	var reqBodyBytes []byte
+	if hasForm {
+		if effectiveCT == ContentTypeMultipartForm {
+			var headerCT string
+			reqBodyBytes, headerCT, err = encodeMultipartFormData(formRaw)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("invalid form data: %v", err)), nil
+			}
+			effectiveCT = headerCT
+		} else {
+			effectiveCT = ContentTypeFormURLEncoded
+			reqBodyBytes, err = encodeFormURLEncoded(formRaw)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("invalid form data: %v", err)), nil
+			}
+		}
+	} else if hasBody {
+		if bodyStr != "" {
+			if (effectiveCT == ContentTypeJSON || effectiveCT == "") && !json.Valid([]byte(bodyStr)) {
+				return mcp.NewToolResultError("invalid body JSON"), nil
+			}
+			reqBodyBytes = []byte(bodyStr)
+		} else if raw, ok := req.GetArguments()["body"]; ok && raw != nil {
+			b, err := json.Marshal(raw)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("invalid body: %v", err)), nil
+			}
+			reqBodyBytes = b
+		}
+	}
+
+	if isDestr, reason := isDestructiveAPICall(method, path, string(reqBodyBytes)); isDestr && !allowDestructive {
+		return mcp.NewToolResultError(fmt.Sprintf("destructive operations are disabled (%s). Set allow_destructive: true in config.yaml to enable.", reason)), nil
 	}
 
 	// Check for cached GET snapshot to avoid hammering upstream and SQLite database locks
@@ -134,49 +274,38 @@ func handleCallAPI(ctx context.Context, req mcp.CallToolRequest, registry *arrse
 		}
 	}
 
-	// Parse query params
-	var query map[string]string
-	if queryStr != "" {
-		var raw map[string]any
-		if err := json.Unmarshal([]byte(queryStr), &raw); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("invalid query JSON: %v", err)), nil
-		}
-		query = make(map[string]string)
-		for k, v := range raw {
-			query[k] = fmt.Sprintf("%v", v)
-		}
-	}
-
-	// Parse body
-	var body []byte
-	if bodyStr != "" {
-		if !json.Valid([]byte(bodyStr)) {
-			return mcp.NewToolResultError("invalid body JSON"), nil
-		}
-		body = []byte(bodyStr)
-	} else if raw, ok := req.GetArguments()["body"]; ok && raw != nil {
-		b, err := json.Marshal(raw)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("invalid body: %v", err)), nil
-		}
-		body = b
-	}
-
-	respBody, statusCode, err := svc.DoRequest(ctx, method, path, query, body)
+	respBody, statusCode, err := svc.DoRequestWithContentType(ctx, method, path, query, reqBodyBytes, effectiveCT)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("request failed: %v", err)), nil
+		cleanErrMsg := sanitizeErrorMessage(err.Error(), svc.Config.APIKey)
+		return mcp.NewToolResultError(fmt.Sprintf("request failed: %s", cleanErrMsg)), nil
 	}
 
 	if statusCode < 200 || statusCode > 299 {
 		structErr := resilience.ClassifyError(svcName, statusCode, respBody)
+		cleanResp := sanitizeErrorMessage(truncate(string(respBody), 2000), svc.Config.APIKey)
 		return mcp.NewToolResultError(fmt.Sprintf(
 			"%s %s failed: HTTP %d (category: %s, retryable: %v)\n%s",
-			method, path, statusCode, structErr.Category, structErr.Retryable, truncate(string(respBody), 2000))), nil
+			method, path, statusCode, structErr.Category, structErr.Retryable, cleanResp)), nil
 	}
 
 	// Parse response JSON
 	var jsonResp any
 	if err := json.Unmarshal(respBody, &jsonResp); err != nil {
+		if includeMetadata {
+			meta := map[string]any{
+				"status_code": statusCode,
+				"mutating":    method != "GET" && method != "HEAD",
+				"request": map[string]any{
+					"service":      svcName,
+					"method":       method,
+					"path":         path,
+					"content_type": effectiveCT,
+				},
+				"response": strings.TrimSpace(string(respBody)),
+			}
+			data, _ := json.MarshalIndent(meta, "", "  ")
+			return mcp.NewToolResultText(string(data)), nil
+		}
 		return mcp.NewToolResultText(fmt.Sprintf("status: %d\n%s", statusCode, string(respBody))), nil
 	}
 
@@ -226,6 +355,22 @@ func handleCallAPI(ctx context.Context, req mcp.CallToolRequest, registry *arrse
 		if filterStr != "" || limitStr != "" {
 			jsonResp = processResponse(jsonResp, "", filterStr, limitStr)
 		}
+	}
+
+	if includeMetadata {
+		meta := map[string]any{
+			"status_code": statusCode,
+			"mutating":    method != "GET" && method != "HEAD",
+			"request": map[string]any{
+				"service":      svcName,
+				"method":       method,
+				"path":         path,
+				"content_type": effectiveCT,
+			},
+			"response": jsonResp,
+		}
+		data, _ := json.MarshalIndent(meta, "", "  ")
+		return mcp.NewToolResultText(string(data)), nil
 	}
 
 	maxResponseBytes := maxResponseSizeKB * 1024
@@ -575,8 +720,250 @@ func isDestructiveAPICall(method, path, bodyStr string) (bool, string) {
 					return true, fmt.Sprintf("destructive command %q", name)
 				}
 			}
+		} else if vals, err := url.ParseQuery(bodyStr); err == nil {
+			name := vals.Get("name")
+			normName := strings.ToLower(strings.TrimSpace(name))
+			if normName == "cleanuprecyclebin" || strings.HasPrefix(normName, "delete") || strings.HasPrefix(normName, "purge") {
+				return true, fmt.Sprintf("destructive command %q", name)
+			}
 		}
 	}
 
 	return false, ""
+}
+
+// normalizeContentType maps aliases and handles media type parameters.
+func normalizeContentType(ct string) (string, error) {
+	ct = strings.TrimSpace(ct)
+	if ct == "" {
+		return "", nil
+	}
+	mediaType, _, err := mime.ParseMediaType(ct)
+	if err != nil {
+		mediaType = strings.ToLower(ct)
+	}
+	switch mediaType {
+	case "application/json", "json":
+		return ContentTypeJSON, nil
+	case "application/x-www-form-urlencoded", "form", "form-urlencoded", "application/x-form-urlencoded":
+		return ContentTypeFormURLEncoded, nil
+	case "multipart/form-data", "multipart":
+		return ContentTypeMultipartForm, nil
+	default:
+		return "", fmt.Errorf("unsupported content_type %q (supported: %s, %s, %s)", ct, ContentTypeJSON, ContentTypeFormURLEncoded, ContentTypeMultipartForm)
+	}
+}
+
+// encodeFormURLEncoded encodes form data into application/x-www-form-urlencoded format.
+// Supports primitives, lists/arrays as repeated keys, Unicode, special characters,
+// and complex nested structures serialized to JSON.
+func encodeFormURLEncoded(formRaw any) ([]byte, error) {
+	if formRaw == nil {
+		return nil, nil
+	}
+
+	var m map[string]any
+
+	switch v := formRaw.(type) {
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			return nil, nil
+		}
+		// Try parsing as JSON object first
+		if err := json.Unmarshal([]byte(trimmed), &m); err != nil {
+			// Fallback: check if already a query string like foo=bar&baz=1
+			parsed, parseErr := url.ParseQuery(trimmed)
+			if parseErr == nil && len(parsed) > 0 {
+				return []byte(parsed.Encode()), nil
+			}
+			return nil, fmt.Errorf("invalid form data string: %v", err)
+		}
+	default:
+		// Always JSON round-trip to normalize nested maps/slices into standard JSON types ([]any, map[string]any)
+		b, err := json.Marshal(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid form object: %v", err)
+		}
+		if err := json.Unmarshal(b, &m); err != nil {
+			return nil, fmt.Errorf("form must be an object/map: %v", err)
+		}
+	}
+
+	vals := make(url.Values)
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	for _, k := range keys {
+		val := m[k]
+		switch typed := val.(type) {
+		case nil:
+			vals.Add(k, "")
+		case []any:
+			// Check if slice contains only primitives (string, number, boolean)
+			allPrimitives := true
+			for _, item := range typed {
+				if item == nil {
+					continue
+				}
+				switch item.(type) {
+				case string, bool, int, int64, float64, json.Number:
+					// primitive
+				default:
+					allPrimitives = false
+				}
+			}
+			if allPrimitives {
+				for _, item := range typed {
+					vals.Add(k, formatFormPrimitive(item))
+				}
+			} else {
+				// Complex structures (e.g. array of objects like Bazarr's languages-profiles)
+				// serialize to a JSON string for the single form field.
+				jsonBytes, err := json.Marshal(typed)
+				if err != nil {
+					return nil, fmt.Errorf("serializing form field %q: %w", k, err)
+				}
+				vals.Add(k, string(jsonBytes))
+			}
+		case map[string]any:
+			jsonBytes, err := json.Marshal(typed)
+			if err != nil {
+				return nil, fmt.Errorf("serializing form field %q: %w", k, err)
+			}
+			vals.Add(k, string(jsonBytes))
+		default:
+			vals.Add(k, formatFormPrimitive(typed))
+		}
+	}
+
+	return []byte(vals.Encode()), nil
+}
+
+func formatFormPrimitive(v any) string {
+	switch val := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return val
+	case bool:
+		return strconv.FormatBool(val)
+	case int:
+		return strconv.Itoa(val)
+	case int64:
+		return strconv.FormatInt(val, 10)
+	case float64:
+		if val == math.Trunc(val) && !math.IsNaN(val) && !math.IsInf(val, 0) {
+			return strconv.FormatInt(int64(val), 10)
+		}
+		return strconv.FormatFloat(val, 'f', -1, 64)
+	case json.Number:
+		return val.String()
+	default:
+		return fmt.Sprintf("%v", val)
+	}
+}
+
+// encodeMultipartFormData encodes form fields into multipart/form-data.
+func encodeMultipartFormData(formRaw any) ([]byte, string, error) {
+	if formRaw == nil {
+		return nil, "", nil
+	}
+
+	var m map[string]any
+	switch v := formRaw.(type) {
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			return nil, "", nil
+		}
+		if err := json.Unmarshal([]byte(trimmed), &m); err != nil {
+			return nil, "", fmt.Errorf("invalid form data string: %v", err)
+		}
+	default:
+		b, err := json.Marshal(v)
+		if err != nil {
+			return nil, "", fmt.Errorf("invalid form object: %v", err)
+		}
+		if err := json.Unmarshal(b, &m); err != nil {
+			return nil, "", fmt.Errorf("form must be an object/map: %v", err)
+		}
+	}
+
+	var b bytes.Buffer
+	w := multipart.NewWriter(&b)
+
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	for _, k := range keys {
+		val := m[k]
+		switch typed := val.(type) {
+		case nil:
+			_ = w.WriteField(k, "")
+		case []any:
+			allPrimitives := true
+			for _, item := range typed {
+				if item == nil {
+					continue
+				}
+				switch item.(type) {
+				case string, bool, int, int64, float64, json.Number:
+				default:
+					allPrimitives = false
+				}
+			}
+			if allPrimitives {
+				for _, item := range typed {
+					_ = w.WriteField(k, formatFormPrimitive(item))
+				}
+			} else {
+				jsonBytes, err := json.Marshal(typed)
+				if err != nil {
+					return nil, "", fmt.Errorf("serializing form field %q: %w", k, err)
+				}
+				_ = w.WriteField(k, string(jsonBytes))
+			}
+		case map[string]any:
+			jsonBytes, err := json.Marshal(typed)
+			if err != nil {
+				return nil, "", fmt.Errorf("serializing form field %q: %w", k, err)
+			}
+			_ = w.WriteField(k, string(jsonBytes))
+		default:
+			_ = w.WriteField(k, formatFormPrimitive(typed))
+		}
+	}
+
+	if err := w.Close(); err != nil {
+		return nil, "", fmt.Errorf("closing multipart writer: %w", err)
+	}
+
+	return b.Bytes(), w.FormDataContentType(), nil
+}
+
+// sanitizeErrorMessage redacts sensitive credentials from error messages.
+func sanitizeErrorMessage(msg string, secrets ...string) string {
+	clean := msg
+	for _, sec := range secrets {
+		if sec != "" {
+			clean = strings.ReplaceAll(clean, sec, "***REDACTED***")
+		}
+	}
+	return redactURLSecretsInText(clean)
+}
+
+func redactURLSecretsInText(s string) string {
+	sensitiveParams := []string{"apikey", "api_key", "token", "password", "auth", "secret"}
+	for _, p := range sensitiveParams {
+		re := regexp.MustCompile(`(?i)(` + p + `=)([^&\s\n\r"']+)`)
+		s = re.ReplaceAllString(s, `${1}***REDACTED***`)
+	}
+	return s
 }
