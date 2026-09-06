@@ -31,6 +31,7 @@ type ActionInstance struct {
 	WaitingCondition   string `json:"waiting_condition,omitempty"`
 	WaitingOptionsJSON string `json:"waiting_options_json,omitempty"`
 	ErrorJSON          string `json:"error_json,omitempty"`
+	IdempotencyKey     string `json:"idempotency_key,omitempty"`
 	CreatedAt          string `json:"created_at"`
 	UpdatedAt          string `json:"updated_at"`
 }
@@ -80,11 +81,11 @@ func (s *Store) CreateActionInstance(inst ActionInstance) error {
 	_, err := s.db.Exec(`INSERT INTO action_instances (
 		id, action_name, status, current_step, inputs_json, outputs_json,
 		state_json, waiting_reason, waiting_condition, waiting_options_json,
-		error_json, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		error_json, idempotency_key, created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		inst.ID, inst.ActionName, inst.Status, inst.CurrentStep, inst.InputsJSON, inst.OutputsJSON,
 		inst.StateJSON, inst.WaitingReason, inst.WaitingCondition, inst.WaitingOptionsJSON,
-		inst.ErrorJSON, inst.CreatedAt, inst.UpdatedAt)
+		inst.ErrorJSON, inst.IdempotencyKey, inst.CreatedAt, inst.UpdatedAt)
 	return err
 }
 
@@ -96,11 +97,11 @@ func (s *Store) GetActionInstance(id string) (*ActionInstance, error) {
 	var inst ActionInstance
 	err := s.db.QueryRow(`SELECT id, action_name, status, current_step, inputs_json,
 		outputs_json, state_json, waiting_reason, waiting_condition, waiting_options_json,
-		error_json, created_at, updated_at
+		error_json, idempotency_key, created_at, updated_at
 		FROM action_instances WHERE id=?`, id).Scan(
 		&inst.ID, &inst.ActionName, &inst.Status, &inst.CurrentStep, &inst.InputsJSON,
 		&inst.OutputsJSON, &inst.StateJSON, &inst.WaitingReason, &inst.WaitingCondition,
-		&inst.WaitingOptionsJSON, &inst.ErrorJSON, &inst.CreatedAt, &inst.UpdatedAt,
+		&inst.WaitingOptionsJSON, &inst.ErrorJSON, &inst.IdempotencyKey, &inst.CreatedAt, &inst.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("action instance %q not found", id)
@@ -120,11 +121,11 @@ func (s *Store) UpdateActionInstance(inst ActionInstance) error {
 	_, err := s.db.Exec(`UPDATE action_instances SET
 		status=?, current_step=?, outputs_json=?, state_json=?,
 		waiting_reason=?, waiting_condition=?, waiting_options_json=?,
-		error_json=?, updated_at=?
+		error_json=?, idempotency_key=?, updated_at=?
 		WHERE id=?`,
 		inst.Status, inst.CurrentStep, inst.OutputsJSON, inst.StateJSON,
 		inst.WaitingReason, inst.WaitingCondition, inst.WaitingOptionsJSON,
-		inst.ErrorJSON, now, inst.ID)
+		inst.ErrorJSON, inst.IdempotencyKey, now, inst.ID)
 	return err
 }
 
@@ -138,7 +139,7 @@ func (s *Store) ListActionInstances(status string, limit int) ([]ActionInstance,
 	}
 	q := `SELECT id, action_name, status, current_step, inputs_json, outputs_json,
 		state_json, waiting_reason, waiting_condition, waiting_options_json,
-		error_json, created_at, updated_at
+		error_json, idempotency_key, created_at, updated_at
 		FROM action_instances WHERE 1=1`
 	var args []any
 	if status != "" && !strings.EqualFold(status, "all") {
@@ -160,13 +161,41 @@ func (s *Store) ListActionInstances(status string, limit int) ([]ActionInstance,
 		if err := rows.Scan(
 			&inst.ID, &inst.ActionName, &inst.Status, &inst.CurrentStep, &inst.InputsJSON,
 			&inst.OutputsJSON, &inst.StateJSON, &inst.WaitingReason, &inst.WaitingCondition,
-			&inst.WaitingOptionsJSON, &inst.ErrorJSON, &inst.CreatedAt, &inst.UpdatedAt,
+			&inst.WaitingOptionsJSON, &inst.ErrorJSON, &inst.IdempotencyKey, &inst.CreatedAt, &inst.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
 		out = append(out, inst)
 	}
 	return out, rows.Err()
+}
+
+// FindActiveActionByIdempotencyKey finds an active (non-terminal) action by name and idempotency key.
+func (s *Store) FindActiveActionByIdempotencyKey(actionName, idempotencyKey string) (*ActionInstance, error) {
+	if idempotencyKey == "" {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var inst ActionInstance
+	err := s.db.QueryRow(`SELECT id, action_name, status, current_step, inputs_json,
+		outputs_json, state_json, waiting_reason, waiting_condition, waiting_options_json,
+		error_json, idempotency_key, created_at, updated_at
+		FROM action_instances
+		WHERE action_name=? AND idempotency_key=? AND status NOT IN ('completed', 'failed', 'cancelled')
+		ORDER BY created_at DESC LIMIT 1`, actionName, idempotencyKey).Scan(
+		&inst.ID, &inst.ActionName, &inst.Status, &inst.CurrentStep, &inst.InputsJSON,
+		&inst.OutputsJSON, &inst.StateJSON, &inst.WaitingReason, &inst.WaitingCondition,
+		&inst.WaitingOptionsJSON, &inst.ErrorJSON, &inst.IdempotencyKey, &inst.CreatedAt, &inst.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &inst, nil
 }
 
 // LogActionStep appends an execution record for one step of an action.

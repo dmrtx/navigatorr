@@ -28,6 +28,7 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 			mcp.WithString("path", mcp.Description("Shortcut: local file path")),
 			mcp.WithString("objective", mcp.Description("Shortcut: accessibility_repair or size_optimization")),
 			mcp.WithBoolean("allow_cleanup", mcp.Description("Shortcut: request cleanup of old files (requires server allow_destructive=true)")),
+			mcp.WithString("idempotency_key", mcp.Description("Optional idempotency key to prevent duplicate runs (e.g. radarr:327:size_optimization)")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			args := req.GetArguments()
@@ -51,9 +52,44 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 				inputs["allow_cleanup"] = b
 			}
 
-			res, err := engine.Run(ctx, actionName, inputs)
+			idempotencyKey := strings.TrimSpace(argString(args, "idempotency_key", ""))
+
+			res, err := engine.Run(ctx, actionName, inputs, idempotencyKey)
 			if err != nil {
 				return toolErr("action_run failed: %v", err), nil
+			}
+
+			return toolJSON(res), nil
+		},
+	)
+
+	// action_catalog — discover registered action workflows
+	s.AddTool(
+		mcp.NewTool("action_catalog",
+			mcp.WithDescription("Discover all registered action workflows, their versions, inputs, steps, and safety profiles."),
+		),
+		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			catalog := engine.Catalog()
+			return toolJSON(catalog), nil
+		},
+	)
+
+	// action_retry — retry a failed action workflow from its last safe step
+	s.AddTool(
+		mcp.NewTool("action_retry",
+			mcp.WithDescription("Retry a failed action workflow instance from its last safe step without repeating confirmed side effects."),
+			mcp.WithString("id", mcp.Required(), mcp.Description("Failed action instance ID (e.g. act-safe-media-replacement-a1b2c3d4)")),
+		),
+		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			args := req.GetArguments()
+			id := strings.TrimSpace(argString(args, "id", ""))
+			if id == "" {
+				return toolErr("id is required"), nil
+			}
+
+			res, err := engine.Retry(ctx, id)
+			if err != nil {
+				return toolErr("action_retry failed: %v", err), nil
 			}
 
 			return toolJSON(res), nil
