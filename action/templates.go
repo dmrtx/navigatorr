@@ -243,6 +243,7 @@ func (e *Engine) stepSecurityScan(ctx context.Context, ec *ExecutionContext) (St
 			Error:  fmt.Sprintf("malicious or dangerous files detected: %s", strings.Join(dangerous, ", ")),
 			Outputs: map[string]any{
 				"is_safe":         false,
+				"valid":           false,
 				"dangerous_files": dangerous,
 			},
 		}, nil
@@ -1184,6 +1185,8 @@ func (e *Engine) stepValidateDownloadSafety(ctx context.Context, ec *ExecutionCo
 			Error:  fmt.Sprintf("security scan failed: dangerous files found in download (%s); library remains untouched", strings.Join(dangerous, ", ")),
 			Outputs: map[string]any{
 				"dangerous_files": dangerous,
+				"is_safe":         false,
+				"valid":           false,
 			},
 		}, nil
 	}
