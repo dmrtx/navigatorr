@@ -94,6 +94,20 @@ func TestAccessibleLanguage(t *testing.T) {
 	if NeedsAccessibleSubtitles(nil, nil) {
 		t.Error("no audio data should not raise a language issue (incomplete inspection)")
 	}
+
+	// Policy tests for undetermined/und
+	if got := EvaluateLanguageAccessibility([]string{"Japanese"}, []string{"und"}); got != IssueNeedsInspection {
+		t.Errorf("expected IssueNeedsInspection for jp audio with und subs, got %q", got)
+	}
+	if got := EvaluateLanguageAccessibility([]string{"und"}, nil); got != IssueNeedsInspection {
+		t.Errorf("expected IssueNeedsInspection for und audio, got %q", got)
+	}
+	if got := EvaluateLanguageAccessibility([]string{"und"}, []string{"eng"}); got != "accessible" {
+		t.Errorf("expected accessible for und audio with eng subs, got %q", got)
+	}
+	if got := EvaluateLanguageAccessibility([]string{"Japanese"}, []string{"jpn"}); got != IssueMissingLanguage {
+		t.Errorf("expected IssueMissingLanguage for jp audio with jp subs, got %q", got)
+	}
 }
 
 func TestOversizedPerEpisode(t *testing.T) {

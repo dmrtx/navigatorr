@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/jakenesler/navigatorr/resilience"
 )
 
 var httpClient = &http.Client{
@@ -80,7 +82,52 @@ func (s *Service) Ping(ctx context.Context) string {
 
 // DoRequest performs an authenticated HTTP request against a service.
 func (s *Service) DoRequest(ctx context.Context, method, path string, query map[string]string, body []byte) ([]byte, int, error) {
-	return s.doRequest(ctx, httpClient, method, path, query, body)
+	var respBody []byte
+	var statusCode int
+	var err error
+
+	if s.Pool != nil {
+		retryCfg := resilience.DefaultRetryConfig()
+		if method == "POST" || method == "PATCH" {
+			// Non-idempotent operations must not blind-retry raw network drops
+			// because the side effect may have already completed on upstream server.
+			retryCfg.RetryNetworkErrors = false
+		}
+		respBody, statusCode, err = s.Pool.ExecuteWithRetry(ctx, s.Name, retryCfg, func() ([]byte, int, error) {
+			return s.doRequest(ctx, httpClient, method, path, query, body)
+		})
+	} else {
+		respBody, statusCode, err = s.doRequest(ctx, httpClient, method, path, query, body)
+	}
+
+	if (method == "POST" || method == "PUT" || method == "PATCH" || method == "DELETE") && s.Snapshots != nil {
+		s.Snapshots.Invalidate(s.Name)
+	}
+	return respBody, statusCode, err
+}
+
+// Get performs an authenticated GET request.
+func (s *Service) Get(ctx context.Context, path string, query map[string]string) ([]byte, error) {
+	data, code, err := s.DoRequest(ctx, "GET", path, query, nil)
+	if err != nil {
+		return nil, err
+	}
+	if code < 200 || code >= 300 {
+		return nil, fmt.Errorf("HTTP %d: %s", code, string(data))
+	}
+	return data, nil
+}
+
+// Post performs an authenticated POST request.
+func (s *Service) Post(ctx context.Context, path string, body []byte) ([]byte, error) {
+	data, code, err := s.DoRequest(ctx, "POST", path, nil, body)
+	if err != nil {
+		return nil, err
+	}
+	if code < 200 || code >= 300 {
+		return nil, fmt.Errorf("HTTP %d: %s", code, string(data))
+	}
+	return data, nil
 }
 
 func (s *Service) doRequest(ctx context.Context, client *http.Client, method, path string, query map[string]string, body []byte) ([]byte, int, error) {

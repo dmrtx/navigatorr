@@ -1,11 +1,15 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -21,8 +25,16 @@ type Config struct {
 	Database          DatabaseConfig           `yaml:"database"`
 	Media             MediaConfig              `yaml:"media"`
 	Maintenance       MaintenanceConfig        `yaml:"maintenance"`
+	Concurrency       ConcurrencyConfig        `yaml:"concurrency"`
 	MaxResponseSizeKB int                      `yaml:"max_response_size_kb"`
 	AllowDestructive  bool                     `yaml:"allow_destructive"`
+	LoadedPath        string                   `yaml:"-"`
+}
+
+// ConcurrencyConfig controls simultaneous upstream operations.
+type ConcurrencyConfig struct {
+	MaxAPISimultaneous     int `yaml:"max_api_simultaneous"`     // default: 3
+	MaxInspectSimultaneous int `yaml:"max_inspect_simultaneous"` // default: 2
 }
 
 // DatabaseConfig locates the SQLite state file. It defaults into the same
@@ -100,6 +112,68 @@ func DefaultDatabasePath() string {
 	return filepath.Join(home, ".cache", "navigatorr", "navigatorr.db")
 }
 
+var notFoundFieldRegex = regexp.MustCompile(`field\s+([a-zA-Z0-9_-]+)\s+not\s+found\s+in\s+type\s+([a-zA-Z0-9_.]+)`)
+
+var structTypeToSection = map[string]string{
+	"config.MediaConfig":        "media",
+	"MediaConfig":               "media",
+	"config.MaintenanceConfig":  "maintenance",
+	"MaintenanceConfig":         "maintenance",
+	"config.ConcurrencyConfig":  "concurrency",
+	"ConcurrencyConfig":         "concurrency",
+	"config.DatabaseConfig":     "database",
+	"DatabaseConfig":            "database",
+	"config.QueueConfig":        "queue",
+	"QueueConfig":               "queue",
+	"config.TransmissionConfig": "transmission",
+	"TransmissionConfig":        "transmission",
+	"config.QBittorrentConfig":  "qbittorrent",
+	"QBittorrentConfig":         "qbittorrent",
+	"config.SABnzbdConfig":      "sabnzbd",
+	"SABnzbdConfig":             "sabnzbd",
+	"config.ServiceConfig":      "services",
+	"ServiceConfig":             "services",
+}
+
+var topLevelKeys = map[string]bool{
+	"services":             true,
+	"transmission":         true,
+	"qbittorrent":          true,
+	"sabnzbd":              true,
+	"queue":                true,
+	"database":             true,
+	"media":                true,
+	"maintenance":          true,
+	"concurrency":          true,
+	"max_response_size_kb": true,
+	"allow_destructive":    true,
+}
+
+func formatConfigError(path string, err error) error {
+	errMsg := err.Error()
+	matches := notFoundFieldRegex.FindStringSubmatch(errMsg)
+	if len(matches) == 3 {
+		field := matches[1]
+		typeName := matches[2]
+
+		if section, ok := structTypeToSection[typeName]; ok {
+			keyPath := fmt.Sprintf("%s.%s", section, field)
+			if topLevelKeys[field] {
+				return fmt.Errorf("parsing config %s: unknown configuration key %q; %q is a top-level option: %w", path, keyPath, field, err)
+			}
+			return fmt.Errorf("parsing config %s: unknown configuration key %q: %w", path, keyPath, err)
+		}
+
+		if typeName == "config.Config" || typeName == "Config" {
+			if field == "allow_destuctive" {
+				return fmt.Errorf("parsing config %s: unknown configuration key %q; did you mean %q?: %w", path, field, "allow_destructive", err)
+			}
+			return fmt.Errorf("parsing config %s: unknown configuration key %q: %w", path, field, err)
+		}
+	}
+	return fmt.Errorf("parsing config %s: %w", path, err)
+}
+
 func Load(path string) (*Config, error) {
 	if path == "" {
 		path = DefaultConfigPath()
@@ -113,8 +187,12 @@ func Load(path string) (*Config, error) {
 	cfg := &Config{
 		Services: make(map[string]ServiceConfig),
 	}
-	if err := yaml.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("parsing config %s: %w", path, err)
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(cfg); err != nil {
+		if !errors.Is(err, io.EOF) {
+			return nil, formatConfigError(path, err)
+		}
 	}
 
 	// Apply defaults for known service types.
@@ -176,7 +254,37 @@ func Load(path string) (*Config, error) {
 		cfg.Maintenance.PreferredResolution = "1080p"
 	}
 
+	if cfg.Concurrency.MaxAPISimultaneous <= 0 {
+		cfg.Concurrency.MaxAPISimultaneous = 3
+	}
+	if cfg.Concurrency.MaxInspectSimultaneous <= 0 {
+		cfg.Concurrency.MaxInspectSimultaneous = 2
+	}
+	cfg.LoadedPath = path
+
 	return cfg, nil
+}
+
+// ValidateRoots checks whether the configured read and write filesystem roots exist on disk.
+func (c *Config) ValidateRoots() []string {
+	var warnings []string
+	for _, r := range c.Media.AllowedReadRoots {
+		if r == "" {
+			continue
+		}
+		if _, err := os.Stat(r); os.IsNotExist(err) {
+			warnings = append(warnings, fmt.Sprintf("configured read root %q does not exist inside container (verify Docker volume mounts)", r))
+		}
+	}
+	for _, r := range c.Media.AllowedWriteRoots {
+		if r == "" {
+			continue
+		}
+		if _, err := os.Stat(r); os.IsNotExist(err) {
+			warnings = append(warnings, fmt.Sprintf("configured write root %q does not exist inside container (verify Docker volume mounts)", r))
+		}
+	}
+	return warnings
 }
 
 // resolveURL normalizes a service URL, filling in the scheme and the service's

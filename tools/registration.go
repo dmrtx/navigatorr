@@ -1,6 +1,9 @@
 package tools
 
 import (
+	"time"
+
+	"github.com/jakenesler/navigatorr/action"
 	"github.com/jakenesler/navigatorr/arrservice"
 	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/fsop"
@@ -56,4 +59,28 @@ func RegisterMaintenance(s *server.MCPServer, cfg *config.Config, registry *arrs
 	registerSafeReplaceTools(s, d, registry, qbClient, cfg.AllowDestructive)
 	registerScanTools(s, d, registry)
 	registerFsTools(s, d)
+
+	actEngine := action.NewEngine(action.EngineDeps{
+		Store:     mStore,
+		Config:    cfg,
+		Registry:  registry,
+		Qbit:      qbClient,
+		Fs:        resolver,
+		Ffprobe:   ffprobe,
+		StartTime: time.Now(),
+	})
+	registerActionTools(s, actEngine)
+}
+
+// RegisterDiagnostics registers the diagnostics and action audit log tools.
+func RegisterDiagnostics(s *server.MCPServer, cfg *config.Config, registry *arrservice.Registry, specStore *openapi.Store, txClient *transmission.Client, qbClient *qbit.Client, sabClient *sabnzbd.Client, mStore *store.Store) {
+	registerDiagnosticsTools(s, DiagnosticsDeps{
+		Config:    cfg,
+		Registry:  registry,
+		SpecStore: specStore,
+		TxClient:  txClient,
+		QbClient:  qbClient,
+		SabClient: sabClient,
+		Store:     mStore,
+	})
 }

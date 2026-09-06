@@ -35,6 +35,7 @@ type RankPrefs struct {
 	MinSeeders       int
 	CompactBias      bool // a smaller healthy release beats a heavier one
 	CurrentSizeBytes int64
+	Objective        string // "size_optimization" (default) or "accessibility_repair"
 }
 
 // ScoredRelease is the deterministic output of Score.
@@ -183,16 +184,28 @@ func Score(c ReleaseCandidate, prefs RankPrefs) ScoredRelease {
 	}
 	if prefs.CurrentSizeBytes > 0 && c.Size > 0 {
 		ratio := float64(c.Size) / float64(prefs.CurrentSizeBytes)
-		switch {
-		case ratio <= 0.35:
-			bonus(10, "large_size_reduction")
-		case ratio <= 0.6:
-			bonus(6, "size_reduction")
-		case ratio > 1.5:
-			penalty(8, "larger_than_current")
-		}
-		if prefs.CompactBias && ratio > 1.0 {
-			penalty(6, "against_compact_preference")
+		if prefs.Objective == "accessibility_repair" {
+			// For accessibility repairs, a larger release is acceptable if it brings accessible audio/subs
+			if !needsSubs {
+				bonus(8, "accessible_for_repair")
+			}
+			if ratio > 2.5 {
+				penalty(8, "excessive_size_increase")
+			}
+		} else {
+			switch {
+			case ratio <= 0.35:
+				bonus(15, "large_size_reduction")
+			case ratio <= 0.65:
+				bonus(10, "size_reduction")
+			case ratio <= 0.85:
+				bonus(5, "moderate_size_reduction")
+			case ratio > 1.0:
+				penalty(15, "larger_than_current")
+			}
+			if prefs.CompactBias && ratio > 1.0 {
+				penalty(10, "against_compact_preference")
+			}
 		}
 	}
 

@@ -139,6 +139,7 @@ func registerMediaTools(s *server.MCPServer, d *Deps, registry *arrservice.Regis
 			mcp.WithString("current_size", mcp.Description("Current media size in bytes (enables size-reduction bonuses)")),
 			mcp.WithString("candidates", mcp.Description("JSON array of candidates: [{guid,title,release_group,size,seeders,video_codec,resolution,bit_depth,audio_langs,sub_langs,dual_audio,multi_subs}]")),
 			mcp.WithString("limit", mcp.Description("Max ranked releases to return (default 10)")),
+			mcp.WithString("objective", mcp.Description("size_optimization (default) or accessibility_repair")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			args := req.GetArguments()
@@ -160,6 +161,9 @@ func registerMediaTools(s *server.MCPServer, d *Deps, registry *arrservice.Regis
 			prefs := loadRankPrefs(d.Store, d.Config, mediaType)
 			if argOk(args, "current_size") {
 				prefs.CurrentSizeBytes = argInt64(args, "current_size", 0)
+			}
+			if obj := argString(args, "objective", ""); obj != "" {
+				prefs.Objective = obj
 			}
 			ranked := maint.RankRelease(cands, prefs)
 			limit := int(argInt64(args, "limit", 10))

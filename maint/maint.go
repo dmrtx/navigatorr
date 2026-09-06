@@ -15,6 +15,7 @@ const (
 	IssueMissingLanguage  = "missing_accessible_language"
 	IssueDangerousMedia   = "dangerous_media"
 	IssuePossibleMismatch = "possible_media_mismatch"
+	IssueNeedsInspection  = "needs_inspection"
 )
 
 // BlockedExtensions are never acceptable inside a media download.
@@ -93,6 +94,13 @@ func NormalizeLang(label string) string {
 	if code, ok := langAliases[l]; ok {
 		return code
 	}
+	// Strip BCP-47 locale/subtag (e.g. "en-us" -> "en", "es-419" -> "es", "en_us" -> "en")
+	if idx := strings.IndexAny(l, "-_"); idx > 0 {
+		base := l[:idx]
+		if code, ok := langAliases[base]; ok {
+			return code
+		}
+	}
 	return l
 }
 
@@ -116,28 +124,55 @@ func NormalizeLangs(labels []string) []string {
 // AccessibleAudio reports the acceptable audio/subtitle languages.
 func AccessibleAudio() []string { return []string{"eng", "spa"} }
 
-// NeedsAccessibleSubtitles reports true when none of the audio streams is in
-// an accessible language AND none of the subtitle streams is either. Real
-// stream data is required: originalLanguage alone is not enough.
-func NeedsAccessibleSubtitles(audioLangs, subtitleLangs []string) bool {
+// HasUnknownLang reports whether any language label in the slice is unknown, und, or empty.
+// An empty slice returns false (no unknown labels present).
+func HasUnknownLang(labels []string) bool {
+	for _, l := range labels {
+		c := NormalizeLang(l)
+		if c == "" || c == "und" || c == "unknown" {
+			return true
+		}
+	}
+	return false
+}
+
+// EvaluateLanguageAccessibility returns the accessibility verdict according to policy:
+// - Audio has eng or spa => "accessible"
+// - Subs have eng or spa => "accessible"
+// - Audio is empty or contains und/unknown => IssueNeedsInspection
+// - Audio is known foreign:
+//   - Subs contain und/unknown => IssueNeedsInspection
+//   - Subs empty or known foreign only => IssueMissingLanguage
+func EvaluateLanguageAccessibility(audioLangs, subtitleLangs []string) string {
 	audio := NormalizeLangs(audioLangs)
 	subs := NormalizeLangs(subtitleLangs)
+
 	for _, a := range audio {
 		if a == "eng" || a == "spa" {
-			return false
+			return "accessible"
 		}
 	}
 	for _, s := range subs {
 		if s == "eng" || s == "spa" {
-			return false
+			return "accessible"
 		}
 	}
-	// No audio information at all: cannot claim a language problem, the
-	// inspection is simply incomplete.
-	if len(audio) == 0 {
-		return false
+
+	if len(audio) == 0 || HasUnknownLang(audioLangs) {
+		return IssueNeedsInspection
 	}
-	return true
+	if HasUnknownLang(subtitleLangs) {
+		return IssueNeedsInspection
+	}
+
+	return IssueMissingLanguage
+}
+
+// NeedsAccessibleSubtitles reports true when none of the audio streams is in
+// an accessible language AND none of the subtitle streams is either. Real
+// stream data is required: originalLanguage alone is not enough.
+func NeedsAccessibleSubtitles(audioLangs, subtitleLangs []string) bool {
+	return EvaluateLanguageAccessibility(audioLangs, subtitleLangs) == IssueMissingLanguage
 }
 
 // OversizedThresholdBytes is the default per-episode size flag for anime.

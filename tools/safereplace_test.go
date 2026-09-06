@@ -312,19 +312,19 @@ func TestScanServiceConcurrent(t *testing.T) {
 	}
 	defer st.Close()
 	d := &Deps{Store: st, Config: cfg}
-	found, _, err := scanService(context.Background(), arrservice.NewRegistry(cfg), d, "sonarr", 30, 900<<20, false)
+	stat, err := scanService(context.Background(), arrservice.NewRegistry(cfg), d, "sonarr", 30, 900<<20, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	seen := map[string]bool{}
-	for _, f := range found {
+	for _, f := range stat.Issues {
 		seen[f.Issue] = true
 	}
 	if !seen["oversized"] {
-		t.Errorf("oversized not detected: %+v", found)
+		t.Errorf("oversized not detected: %+v", stat.Issues)
 	}
 	if !seen["missing_accessible_language"] {
-		t.Errorf("language issue not detected: %+v", found)
+		t.Errorf("language issue not detected: %+v", stat.Issues)
 	}
 }
 

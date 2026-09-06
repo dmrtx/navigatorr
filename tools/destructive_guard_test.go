@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jakenesler/navigatorr/arrservice"
+	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/qbit"
 	"github.com/jakenesler/navigatorr/transmission"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -121,4 +123,102 @@ func TestDeletesGoThroughWhenAllowed(t *testing.T) {
 	if hits == 0 {
 		t.Error("delete was allowed but no request reached the server")
 	}
+}
+
+func TestAPICallDestructiveSafetyClassification(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"success"}`))
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Services: map[string]config.ServiceConfig{
+			"radarr": {URL: srv.URL, APIKey: "test-key"},
+		},
+	}
+	reg := arrservice.NewRegistry(cfg)
+
+	t.Run("destructive operations blocked when allow_destructive=false", func(t *testing.T) {
+		s := server.NewMCPServer("test", "0.0.0")
+		registerAPICallTool(s, reg, 100, false)
+
+		cases := []struct {
+			name   string
+			method string
+			path   string
+			body   string
+		}{
+			{"HTTP DELETE verb", "DELETE", "/movie/1", ""},
+			{"POST /command CleanUpRecycleBin", "POST", "/command", `{"name":"CleanUpRecycleBin"}`},
+			{"POST /command DeleteLogFiles", "POST", "/command", `{"name":"DeleteLogFiles"}`},
+			{"POST /command PurgeQueue", "POST", "/command", `{"name":"PurgeQueue"}`},
+			{"POST to /delete endpoint", "POST", "/movie/delete", `{"ids":[1,2]}`},
+			{"POST to /purge endpoint", "POST", "/cache/purge", `{}`},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				args := map[string]any{
+					"service": "radarr",
+					"method":  tc.method,
+					"path":    tc.path,
+				}
+				if tc.body != "" {
+					args["body"] = tc.body
+				}
+				res := callTool(t, s, "call_api", args)
+				txt := resultText(t, res)
+				if !res.IsError && !strings.Contains(txt, "destructive operations are disabled") {
+					t.Errorf("expected destructive operation to be refused, got: %s", txt)
+				}
+				if !strings.Contains(txt, "allow_destructive: true") {
+					t.Errorf("expected refusal to mention allow_destructive, got: %s", txt)
+				}
+			})
+		}
+	})
+
+	t.Run("non-destructive operations allowed when allow_destructive=false", func(t *testing.T) {
+		s := server.NewMCPServer("test", "0.0.0")
+		registerAPICallTool(s, reg, 100, false)
+
+		// Regular GET
+		resGet := callTool(t, s, "call_api", map[string]any{"service": "radarr", "method": "GET", "path": "/movie"})
+		if resGet.IsError {
+			t.Errorf("expected GET to succeed, got error: %s", resultText(t, resGet))
+		}
+
+		// Non-destructive POST command
+		resPost := callTool(t, s, "call_api", map[string]any{
+			"service": "radarr",
+			"method":  "POST",
+			"path":    "/command",
+			"body":    `{"name":"RescanMovie","movieId":1}`,
+		})
+		if resPost.IsError {
+			t.Errorf("expected RescanMovie POST to succeed, got error: %s", resultText(t, resPost))
+		}
+	})
+
+	t.Run("all operations allowed when allow_destructive=true", func(t *testing.T) {
+		s := server.NewMCPServer("test", "0.0.0")
+		registerAPICallTool(s, reg, 100, true)
+
+		resDel := callTool(t, s, "call_api", map[string]any{"service": "radarr", "method": "DELETE", "path": "/movie/1"})
+		if resDel.IsError && strings.Contains(resultText(t, resDel), "destructive operations are disabled") {
+			t.Errorf("expected DELETE to be permitted when allow_destructive=true")
+		}
+
+		resCmd := callTool(t, s, "call_api", map[string]any{
+			"service": "radarr",
+			"method":  "POST",
+			"path":    "/command",
+			"body":    `{"name":"CleanUpRecycleBin"}`,
+		})
+		if resCmd.IsError && strings.Contains(resultText(t, resCmd), "destructive operations are disabled") {
+			t.Errorf("expected CleanUpRecycleBin to be permitted when allow_destructive=true")
+		}
+	})
 }

@@ -3,22 +3,47 @@ package arrservice
 import (
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/jakenesler/navigatorr/config"
+	"github.com/jakenesler/navigatorr/resilience"
+	"github.com/jakenesler/navigatorr/snapshot"
 )
 
 // Registry holds all configured services.
 type Registry struct {
-	services map[string]*Service
+	services  map[string]*Service
+	Pool      *resilience.ServicePool
+	Snapshots *snapshot.Store
 }
 
 // NewRegistry creates a registry from config.
 func NewRegistry(cfg *config.Config) *Registry {
-	r := &Registry{
-		services: make(map[string]*Service),
+	maxPerSvc := 3
+	maxMedia := 2
+	if cfg != nil {
+		if cfg.Concurrency.MaxAPISimultaneous > 0 {
+			maxPerSvc = cfg.Concurrency.MaxAPISimultaneous
+		}
+		if cfg.Concurrency.MaxInspectSimultaneous > 0 {
+			maxMedia = cfg.Concurrency.MaxInspectSimultaneous
+		}
 	}
-	for name, svcCfg := range cfg.Services {
-		r.services[name] = NewService(name, svcCfg)
+	pool := resilience.NewServicePool(maxPerSvc, maxMedia)
+	snaps := snapshot.NewStore(5 * time.Minute)
+
+	r := &Registry{
+		services:  make(map[string]*Service),
+		Pool:      pool,
+		Snapshots: snaps,
+	}
+	if cfg != nil {
+		for name, svcCfg := range cfg.Services {
+			svc := NewService(name, svcCfg)
+			svc.Pool = pool
+			svc.Snapshots = snaps
+			r.services[name] = svc
+		}
 	}
 	return r
 }
