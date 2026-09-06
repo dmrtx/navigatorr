@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -69,8 +70,45 @@ func (e *Engine) ListTemplates() []map[string]string {
 	return res
 }
 
+// Catalog returns the discovery catalog for all registered action workflows.
+func (e *Engine) Catalog() []ActionCatalogEntry {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	entries := make([]ActionCatalogEntry, 0, len(e.templates))
+	for _, t := range e.templates {
+		steps := make([]string, 0, len(t.Steps))
+		for _, s := range t.Steps {
+			steps = append(steps, s.Name)
+		}
+		reqInputs := t.RequiredInputs
+		if reqInputs == nil {
+			reqInputs = []string{}
+		}
+		optInputs := t.OptionalInputs
+		if optInputs == nil {
+			optInputs = []string{}
+		}
+		entries = append(entries, ActionCatalogEntry{
+			Name:           t.Name,
+			Version:        t.Version,
+			Description:    t.Description,
+			RequiredInputs: reqInputs,
+			OptionalInputs: optInputs,
+			Steps:          steps,
+			Destructive:    t.Destructive,
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Name < entries[j].Name
+	})
+	return entries
+}
+
 // Run creates a new action instance and begins step execution.
-func (e *Engine) Run(ctx context.Context, actionName string, inputs map[string]any) (*ActionResult, error) {
+// If an idempotencyKey is provided and an active (non-terminal) instance exists with the same
+// actionName + idempotencyKey, the existing action is returned instead of creating a new one.
+func (e *Engine) Run(ctx context.Context, actionName string, inputs map[string]any, idempotencyKeys ...string) (*ActionResult, error) {
 	if e.deps.Store == nil {
 		return nil, fmt.Errorf("maintenance store is required for action engine")
 	}
@@ -84,17 +122,36 @@ func (e *Engine) Run(ctx context.Context, actionName string, inputs map[string]a
 		inputs = make(map[string]any)
 	}
 
+	var idempotencyKey string
+	if len(idempotencyKeys) > 0 {
+		idempotencyKey = strings.TrimSpace(idempotencyKeys[0])
+	}
+	if idempotencyKey == "" {
+		if k, ok := inputs["idempotency_key"].(string); ok {
+			idempotencyKey = strings.TrimSpace(k)
+		}
+	}
+
+	// Idempotency check: if non-terminal action with same name and key exists, return it
+	if idempotencyKey != "" {
+		if existing, err := e.deps.Store.FindActiveActionByIdempotencyKey(actionName, idempotencyKey); err == nil && existing != nil {
+			ec := parseExecutionContext(existing, e)
+			return buildActionResult(existing, len(tmpl.Steps), ec), nil
+		}
+	}
+
 	instID := generateActionID(actionName)
 	inputsJSON, _ := json.Marshal(inputs)
 
 	inst := store.ActionInstance{
-		ID:          instID,
-		ActionName:  actionName,
-		Status:      StatusPending,
-		CurrentStep: 0,
-		InputsJSON:  string(inputsJSON),
-		OutputsJSON: "{}",
-		StateJSON:   "{}",
+		ID:             instID,
+		ActionName:     actionName,
+		Status:         StatusPending,
+		CurrentStep:    0,
+		InputsJSON:     string(inputsJSON),
+		OutputsJSON:    "{}",
+		StateJSON:      "{}",
+		IdempotencyKey: idempotencyKey,
 	}
 
 	if err := e.deps.Store.CreateActionInstance(inst); err != nil {
@@ -111,6 +168,67 @@ func (e *Engine) Run(ctx context.Context, actionName string, inputs map[string]a
 	}
 
 	return e.execute(ctx, &inst, ec, tmpl)
+}
+
+// Retry re-runs a failed action from its last safe step without repeating confirmed side effects.
+func (e *Engine) Retry(ctx context.Context, instanceID string) (*ActionResult, error) {
+	if e.deps.Store == nil {
+		return nil, fmt.Errorf("maintenance store is required for action engine")
+	}
+
+	inst, err := e.deps.Store.GetActionInstance(instanceID)
+	if err != nil {
+		return nil, fmt.Errorf("getting action instance %s: %w", instanceID, err)
+	}
+	if inst == nil {
+		return nil, fmt.Errorf("action instance not found: %s", instanceID)
+	}
+
+	if inst.Status != StatusFailed {
+		return nil, fmt.Errorf("only failed actions can be retried (current status: %s)", inst.Status)
+	}
+
+	tmpl, ok := e.GetTemplate(inst.ActionName)
+	if !ok {
+		return nil, fmt.Errorf("unknown action template: %s", inst.ActionName)
+	}
+
+	// Find the last safe step to resume from
+	loggedSteps, _ := e.deps.Store.GetActionSteps(inst.ID)
+	completedStepIndices := make(map[int]bool)
+	for _, ls := range loggedSteps {
+		if ls.Status == string(StepCompleted) || ls.Status == string(StepSkipped) {
+			completedStepIndices[ls.StepIndex] = true
+		}
+	}
+
+	resumeStep := 0
+	for i := 0; i < len(tmpl.Steps); i++ {
+		if !completedStepIndices[i] {
+			resumeStep = i
+			break
+		}
+	}
+
+	inst.CurrentStep = resumeStep
+	inst.Status = StatusRunning
+	inst.ErrorJSON = ""
+	_ = e.deps.Store.UpdateActionInstance(*inst)
+
+	// Record retry in audit log
+	_ = e.deps.Store.LogActionEnriched(
+		"action_retry",
+		"",
+		inst.ID,
+		inst.InputsJSON,
+		fmt.Sprintf("retrying failed action %s from step %d (%s)", inst.ID, resumeStep, tmpl.Steps[resumeStep].Name),
+		"",
+		inst.ID,
+		0,
+	)
+
+	ec := parseExecutionContext(inst, e)
+	return e.execute(ctx, inst, ec, tmpl)
 }
 
 // Resume re-activates a paused or waiting action instance.
@@ -483,6 +601,7 @@ func buildActionResult(inst *store.ActionInstance, totalSteps int, ec *Execution
 		WaitingCondition: inst.WaitingCondition,
 		WaitingOptions:   waitingOptions,
 		Error:            errStr,
+		IdempotencyKey:   inst.IdempotencyKey,
 		CreatedAt:        inst.CreatedAt,
 		UpdatedAt:        inst.UpdatedAt,
 	}

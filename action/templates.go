@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -17,8 +19,12 @@ var magnetHashRegex = regexp.MustCompile(`(?i)btih:([a-f0-9]{40}|[a-z2-7]{32})`)
 
 func (e *Engine) registerBuiltinTemplates() {
 	e.RegisterTemplate(ActionTemplate{
-		Name:        "validate_torrent",
-		Description: "Inspects torrent files and media streams, checking against malicious extensions and verifying audio/subtitle language accessibility.",
+		Name:           "validate_torrent",
+		Version:        1,
+		Description:    "Inspects torrent files and media streams, checking against malicious extensions and verifying audio/subtitle language accessibility.",
+		RequiredInputs: []string{},
+		OptionalInputs: []string{"hash", "url", "files", "path", "save_path"},
+		Destructive:    false,
 		Steps: []StepDefinition{
 			{
 				Name:        "resolve_torrent_files",
@@ -44,8 +50,12 @@ func (e *Engine) registerBuiltinTemplates() {
 	})
 
 	e.RegisterTemplate(ActionTemplate{
-		Name:        "safe_media_replacement",
-		Description: "Coordinates safe media replacement end-to-end: plans replacement, tracks download, verifies safety and media streams, pauses for trade-off decisions, reconciles external state before import, verifies library, and safely handles cleanup.",
+		Name:           "safe_media_replacement",
+		Version:        1,
+		Description:    "Coordinates safe media replacement end-to-end: plans replacement, tracks download, verifies safety and media streams, pauses for trade-off decisions, reconciles external state before import, verifies library, and safely handles cleanup.",
+		RequiredInputs: []string{"service", "media_id"},
+		OptionalInputs: []string{"objective", "path", "url", "hash", "save_path", "allow_destructive"},
+		Destructive:    false,
 		Steps: []StepDefinition{
 			{
 				Name:        "plan_and_check_current",
@@ -131,21 +141,72 @@ func (e *Engine) stepResolveTorrentFiles(ctx context.Context, ec *ExecutionConte
 			}
 		}
 	}
+	if hash == "" {
+		hash = getString(ec.State, "hash")
+	}
 
-	if len(files) == 0 && hash != "" && e.deps.Qbit != nil {
-		tfList, err := e.deps.Qbit.ListFiles(ctx, hash)
-		if err == nil {
-			for _, tf := range tfList {
-				files = append(files, tf.Name)
-				totalSize += tf.Size
+	path := getString(ec.Inputs, "path")
+	if path == "" {
+		path = getString(ec.State, "path")
+	}
+
+	if e.deps.Qbit != nil && hash != "" {
+		if tor, err := e.deps.Qbit.GetTorrent(ctx, hash); err == nil && tor != nil {
+			if path == "" {
+				if tor.ContentPath != "" {
+					path = tor.ContentPath
+				} else if tor.SavePath != "" && tor.Name != "" {
+					path = filepath.Join(tor.SavePath, tor.Name)
+				} else if tor.SavePath != "" {
+					path = tor.SavePath
+				}
+			}
+			if totalSize == 0 && tor.Size > 0 {
+				totalSize = tor.Size
+			}
+		}
+
+		if len(files) == 0 {
+			tfList, err := e.deps.Qbit.ListFiles(ctx, hash)
+			if err == nil {
+				for _, tf := range tfList {
+					files = append(files, tf.Name)
+					totalSize += tf.Size
+				}
 			}
 		}
 	}
 
-	// 3. Fallback to path
-	if len(files) == 0 {
-		if path := getString(ec.Inputs, "path"); path != "" {
-			files = append(files, filepath.Base(path))
+	// 3. Fallback to path / check local filesystem
+	if path != "" {
+		if e.deps.Fs != nil {
+			if rpath, err := e.deps.Fs.ResolveRead(path); err == nil {
+				path = rpath
+			}
+		}
+
+		if len(files) == 0 {
+			if fi, err := os.Stat(path); err == nil {
+				if fi.IsDir() {
+					_ = filepath.Walk(path, func(p string, info os.FileInfo, err error) error {
+						if err == nil && !info.IsDir() {
+							rel, rerr := filepath.Rel(path, p)
+							if rerr == nil {
+								files = append(files, rel)
+							} else {
+								files = append(files, info.Name())
+							}
+							totalSize += info.Size()
+						}
+						return nil
+					})
+				} else {
+					files = append(files, filepath.Base(path))
+					totalSize = fi.Size()
+				}
+			} else {
+				files = append(files, filepath.Base(path))
+			}
 		}
 	}
 
@@ -154,6 +215,7 @@ func (e *Engine) stepResolveTorrentFiles(ctx context.Context, ec *ExecutionConte
 		Outputs: map[string]any{
 			"files":      files,
 			"hash":       hash,
+			"path":       path,
 			"total_size": totalSize,
 			"file_count": len(files),
 		},
@@ -190,56 +252,202 @@ func (e *Engine) stepInspectStreams(ctx context.Context, ec *ExecutionContext) (
 		path = getString(ec.State, "path")
 	}
 
+	// If path is still empty, attempt to resolve via qBittorrent using hash
+	if path == "" {
+		hash := getString(ec.Inputs, "hash")
+		if hash == "" {
+			hash = getString(ec.State, "hash")
+		}
+		if hash != "" && e.deps.Qbit != nil {
+			if tor, err := e.deps.Qbit.GetTorrent(ctx, hash); err == nil && tor != nil {
+				if tor.ContentPath != "" {
+					path = tor.ContentPath
+				} else if tor.SavePath != "" && tor.Name != "" {
+					path = filepath.Join(tor.SavePath, tor.Name)
+				} else if tor.SavePath != "" {
+					path = tor.SavePath
+				}
+			}
+		}
+	}
+
 	// If no local file path available, skip probe gracefully
 	if path == "" {
 		return StepResult{
 			Status: StepCompleted,
 			Outputs: map[string]any{
 				"inspected": false,
-				"note":      "Stream inspection skipped: no local file path provided",
+				"note":      "Stream inspection skipped: no local file path provided or resolved",
 			},
 		}, nil
 	}
 
-	rep, err := mediainspect.InspectFile(ctx, e.deps.Ffprobe, path)
+	if e.deps.Fs != nil {
+		if rpath, err := e.deps.Fs.ResolveRead(path); err == nil {
+			path = rpath
+		}
+	}
+
+	fi, err := os.Stat(path)
 	if err != nil {
 		return StepResult{
 			Status: StepCompleted,
 			Outputs: map[string]any{
 				"inspected": false,
-				"error":     err.Error(),
+				"error":     fmt.Sprintf("path does not exist or is inaccessible: %v", err),
 			},
 		}, nil
 	}
 
-	acc := maint.EvaluateLanguageAccessibility(rep.AudioLanguages, rep.SubtitleLanguages)
+	var mediaFiles []string
+	if fi.IsDir() {
+		_ = filepath.Walk(path, func(p string, info os.FileInfo, err error) error {
+			if err == nil && !info.IsDir() {
+				ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(info.Name())), ".")
+				if maint.VideoExtensions[ext] {
+					mediaFiles = append(mediaFiles, p)
+				}
+			}
+			return nil
+		})
+		sort.Strings(mediaFiles)
+	} else {
+		ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(fi.Name())), ".")
+		if maint.VideoExtensions[ext] || fi.Size() > 0 {
+			mediaFiles = append(mediaFiles, path)
+		}
+	}
+
+	if len(mediaFiles) == 0 {
+		return StepResult{
+			Status: StepCompleted,
+			Outputs: map[string]any{
+				"inspected": false,
+				"error":     "no video media files found at path",
+			},
+		}, nil
+	}
+
+	var sampleFiles []string
+	if len(mediaFiles) <= 5 {
+		sampleFiles = mediaFiles
+	} else {
+		sampleFiles = append(sampleFiles, mediaFiles[0])
+		if len(mediaFiles) > 2 {
+			sampleFiles = append(sampleFiles, mediaFiles[len(mediaFiles)/2])
+		}
+		sampleFiles = append(sampleFiles, mediaFiles[len(mediaFiles)-1])
+	}
+
+	var allAudio, allSubs []string
+	var dangerous []string
+	var primaryCodec, primaryRes string
+	var bitDepth int
+	probedCount := 0
+
+	for _, mf := range sampleFiles {
+		rep, err := mediainspect.InspectFile(ctx, e.deps.Ffprobe, mf)
+		if err != nil {
+			continue
+		}
+		if rep.Probed {
+			probedCount++
+			if primaryCodec == "" {
+				primaryCodec = rep.VideoCodec
+				primaryRes = rep.Resolution
+				bitDepth = rep.BitDepth
+			}
+			for _, a := range rep.AudioLanguages {
+				norm := maint.NormalizeLang(a)
+				if norm != "" && norm != "und" && !containsStr(allAudio, norm) {
+					allAudio = append(allAudio, norm)
+				}
+			}
+			for _, s := range rep.SubtitleLanguages {
+				norm := maint.NormalizeLang(s)
+				if norm != "" && norm != "und" && !containsStr(allSubs, norm) {
+					allSubs = append(allSubs, norm)
+				}
+			}
+			if len(rep.DangerousFiles) > 0 {
+				dangerous = append(dangerous, rep.DangerousFiles...)
+			}
+		}
+	}
+
+	if probedCount == 0 {
+		return StepResult{
+			Status: StepCompleted,
+			Outputs: map[string]any{
+				"inspected": false,
+				"error":     "stream inspection failed: ffprobe could not probe media files",
+			},
+		}, nil
+	}
+
+	acc := maint.EvaluateLanguageAccessibility(allAudio, allSubs)
+
+	outputs := map[string]any{
+		"inspected":          true,
+		"video_codec":        primaryCodec,
+		"resolution":         primaryRes,
+		"bit_depth":          bitDepth,
+		"audio_languages":    allAudio,
+		"subtitle_languages": allSubs,
+		"accessibility":      acc,
+		"inspected_files":    sampleFiles,
+	}
+	if len(dangerous) > 0 {
+		outputs["dangerous_files"] = dangerous
+		outputs["is_safe"] = false
+	}
 
 	return StepResult{
-		Status: StepCompleted,
-		Outputs: map[string]any{
-			"inspected":          true,
-			"video_codec":        rep.VideoCodec,
-			"resolution":         rep.Resolution,
-			"bit_depth":          rep.BitDepth,
-			"audio_languages":    rep.AudioLanguages,
-			"subtitle_languages": rep.SubtitleLanguages,
-			"accessibility":      acc,
-		},
+		Status:  StepCompleted,
+		Outputs: outputs,
 	}, nil
 }
 
 func (e *Engine) stepSummarizeValidation(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+	isSafe, safeOk := ec.State["is_safe"].(bool)
+	if !safeOk {
+		isSafe = true
+	}
+	inspected, _ := ec.State["inspected"].(bool)
+
+	valid := false
+	validationIncomplete := false
+
+	if !isSafe {
+		valid = false
+		validationIncomplete = false
+	} else if !inspected {
+		valid = false
+		validationIncomplete = true
+	} else {
+		valid = true
+		validationIncomplete = false
+	}
+
+	outputs := map[string]any{
+		"valid":                 valid,
+		"validation_incomplete": validationIncomplete,
+		"is_safe":               isSafe,
+		"file_count":            ec.State["file_count"],
+		"total_size":            ec.State["total_size"],
+		"accessibility":         ec.State["accessibility"],
+		"audio_languages":       ec.State["audio_languages"],
+		"subtitle_languages":    ec.State["subtitle_languages"],
+		"video_codec":           ec.State["video_codec"],
+		"resolution":            ec.State["resolution"],
+	}
+	if validationIncomplete {
+		outputs["note"] = "Torrent is safe by filename screening, but media streams could not be inspected (stream inspection incomplete)"
+	}
+
 	return StepResult{
-		Status: StepCompleted,
-		Outputs: map[string]any{
-			"valid":              true,
-			"is_safe":            ec.State["is_safe"],
-			"file_count":         ec.State["file_count"],
-			"total_size":         ec.State["total_size"],
-			"accessibility":      ec.State["accessibility"],
-			"audio_languages":    ec.State["audio_languages"],
-			"subtitle_languages": ec.State["subtitle_languages"],
-		},
+		Status:  StepCompleted,
+		Outputs: outputs,
 	}, nil
 }
 
@@ -272,9 +480,9 @@ func (e *Engine) stepPlanAndCheckCurrent(ctx context.Context, ec *ExecutionConte
 	}
 
 	// Fetch current media details
-	endpoint := fmt.Sprintf("/api/v3/movie/%s", mediaID)
+	endpoint := fmt.Sprintf("/movie/%s", mediaID)
 	if service == "sonarr" {
-		endpoint = fmt.Sprintf("/api/v3/series/%s", mediaID)
+		endpoint = fmt.Sprintf("/series/%s", mediaID)
 	}
 
 	data, err := svc.Get(ctx, endpoint, nil)
@@ -312,6 +520,34 @@ func (e *Engine) stepPlanAndCheckCurrent(ctx context.Context, ec *ExecutionConte
 				}
 				if sl, ok := mi["subtitles"].(string); ok && sl != "" {
 					curSubs = strings.Split(sl, "/")
+				}
+			}
+		}
+	} else if service == "sonarr" {
+		if p, ok := mediaMap["path"].(string); ok {
+			curPath = p
+		}
+		if stats, ok := mediaMap["statistics"].(map[string]any); ok {
+			curSize = int64(numVal(stats["sizeOnDisk"]))
+		}
+		// Query episode files for the series to get current episode file ID / details
+		epData, epErr := svc.Get(ctx, "/episodefile", map[string]string{"seriesId": mediaID})
+		if epErr == nil {
+			var epFiles []map[string]any
+			if json.Unmarshal(epData, &epFiles) == nil && len(epFiles) > 0 {
+				curFileID = fmt.Sprintf("%v", epFiles[0]["id"])
+				if curPath == "" {
+					if p, ok := epFiles[0]["path"].(string); ok {
+						curPath = p
+					}
+				}
+				if mi, ok := epFiles[0]["mediaInfo"].(map[string]any); ok {
+					if al, ok := mi["audioLanguages"].(string); ok && al != "" {
+						curAudio = strings.Split(al, "/")
+					}
+					if sl, ok := mi["subtitles"].(string); ok && sl != "" {
+						curSubs = strings.Split(sl, "/")
+					}
 				}
 			}
 		}
@@ -630,9 +866,9 @@ func (e *Engine) stepReconcileAndImport(ctx context.Context, ec *ExecutionContex
 	// 1. External Reconciliation:
 	// Query current state of media in Radarr/Sonarr. If file ID already changed,
 	// the file was already imported externally (e.g. by auto-importer or another process).
-	endpoint := fmt.Sprintf("/api/v3/movie/%s", mediaID)
+	endpoint := fmt.Sprintf("/movie/%s", mediaID)
 	if service == "sonarr" {
-		endpoint = fmt.Sprintf("/api/v3/series/%s", mediaID)
+		endpoint = fmt.Sprintf("/series/%s", mediaID)
 	}
 
 	data, err := svc.Get(ctx, endpoint, nil)
@@ -644,6 +880,22 @@ func (e *Engine) stepReconcileAndImport(ctx context.Context, ec *ExecutionContex
 					activeFileID := fmt.Sprintf("%v", mf["id"])
 					if activeFileID != "" && currentFileID != "" && activeFileID != currentFileID {
 						// Already imported externally! Reconcile state without error.
+						return StepResult{
+							Status: StepCompleted,
+							Outputs: map[string]any{
+								"reconciled_externally": true,
+								"new_file_id":           activeFileID,
+								"note":                  "Detected external import; adopted new file ID without duplicating import",
+							},
+						}, nil
+					}
+				}
+			} else if service == "sonarr" {
+				epData, _ := svc.Get(ctx, "/episodefile", map[string]string{"seriesId": mediaID})
+				var epFiles []map[string]any
+				if json.Unmarshal(epData, &epFiles) == nil && len(epFiles) > 0 {
+					activeFileID := fmt.Sprintf("%v", epFiles[0]["id"])
+					if activeFileID != "" && currentFileID != "" && activeFileID != currentFileID {
 						return StepResult{
 							Status: StepCompleted,
 							Outputs: map[string]any{
@@ -673,7 +925,7 @@ func (e *Engine) stepReconcileAndImport(ctx context.Context, ec *ExecutionContex
 	}
 
 	cmdBytes, _ := json.Marshal(cmdPayload)
-	_, _ = svc.Post(ctx, "/api/v3/command", cmdBytes)
+	_, _ = svc.Post(ctx, "/command", cmdBytes)
 
 	// Fetch updated file ID
 	newFileID := currentFileID
@@ -684,6 +936,12 @@ func (e *Engine) stepReconcileAndImport(ctx context.Context, ec *ExecutionContex
 			if service == "radarr" {
 				if mf, ok := rm["movieFile"].(map[string]any); ok {
 					newFileID = fmt.Sprintf("%v", mf["id"])
+				}
+			} else if service == "sonarr" {
+				epData, _ := svc.Get(ctx, "/episodefile", map[string]string{"seriesId": mediaID})
+				var epFiles []map[string]any
+				if json.Unmarshal(epData, &epFiles) == nil && len(epFiles) > 0 {
+					newFileID = fmt.Sprintf("%v", epFiles[0]["id"])
 				}
 			}
 		}
@@ -710,9 +968,9 @@ func (e *Engine) stepVerifyLibraryState(ctx context.Context, ec *ExecutionContex
 		}, nil
 	}
 
-	endpoint := fmt.Sprintf("/api/v3/movie/%s", mediaID)
+	endpoint := fmt.Sprintf("/movie/%s", mediaID)
 	if service == "sonarr" {
-		endpoint = fmt.Sprintf("/api/v3/series/%s", mediaID)
+		endpoint = fmt.Sprintf("/series/%s", mediaID)
 	}
 
 	data, err := svc.Get(ctx, endpoint, nil)
@@ -731,12 +989,35 @@ func (e *Engine) stepVerifyLibraryState(ctx context.Context, ec *ExecutionContex
 		}, nil
 	}
 
-	hasFile, _ := m["hasFile"].(bool)
-	if !hasFile && service == "radarr" {
-		return StepResult{
-			Status: StepFailed,
-			Error:  "library verification failed: media has no active file in library; keeping original",
-		}, nil
+	if service == "radarr" {
+		hasFile, _ := m["hasFile"].(bool)
+		if !hasFile {
+			return StepResult{
+				Status: StepFailed,
+				Error:  "library verification failed: media has no active file in library; keeping original",
+			}, nil
+		}
+	} else if service == "sonarr" {
+		var epCount int64
+		if stats, ok := m["statistics"].(map[string]any); ok {
+			epCount = int64(numVal(stats["episodeFileCount"]))
+		}
+		if epCount == 0 {
+			epCount = int64(numVal(m["episodeFileCount"]))
+		}
+		if epCount == 0 {
+			epData, _ := svc.Get(ctx, "/episodefile", map[string]string{"seriesId": mediaID})
+			var epFiles []map[string]any
+			if json.Unmarshal(epData, &epFiles) == nil && len(epFiles) > 0 {
+				epCount = int64(len(epFiles))
+			}
+		}
+		if epCount == 0 {
+			return StepResult{
+				Status: StepFailed,
+				Error:  "library verification failed: series has no active episode files in library; keeping original",
+			}, nil
+		}
 	}
 
 	return StepResult{
@@ -843,4 +1124,13 @@ func isCompleteState(state string) bool {
 		strings.Contains(s, "seed") ||
 		strings.Contains(s, "complete") ||
 		strings.Contains(s, "pausedup")
+}
+
+func containsStr(slice []string, s string) bool {
+	for _, item := range slice {
+		if item == s {
+			return true
+		}
+	}
+	return false
 }

@@ -72,9 +72,24 @@ type StepDefinition struct {
 
 // ActionTemplate defines a declarative workflow composed of sequential steps
 type ActionTemplate struct {
-	Name        string
-	Description string
-	Steps       []StepDefinition
+	Name           string
+	Version        int
+	Description    string
+	RequiredInputs []string
+	OptionalInputs []string
+	Destructive    bool
+	Steps          []StepDefinition
+}
+
+// ActionCatalogEntry describes an action workflow definition for discovery
+type ActionCatalogEntry struct {
+	Name           string   `json:"name"`
+	Version        int      `json:"version"`
+	Description    string   `json:"description"`
+	RequiredInputs []string `json:"required_inputs"`
+	OptionalInputs []string `json:"optional_inputs"`
+	Steps          []string `json:"steps"`
+	Destructive    bool     `json:"destructive"`
 }
 
 // ActionResult is returned when running, resuming, or querying an action
@@ -91,6 +106,7 @@ type ActionResult struct {
 	WaitingCondition string          `json:"waiting_condition,omitempty"`
 	WaitingOptions   []WaitingOption `json:"waiting_options,omitempty"`
 	Error            string          `json:"error,omitempty"`
+	IdempotencyKey   string          `json:"idempotency_key,omitempty"`
 	DurationMs       int64           `json:"duration_ms"`
 	CreatedAt        string          `json:"created_at"`
 	UpdatedAt        string          `json:"updated_at"`
