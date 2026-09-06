@@ -149,6 +149,7 @@ func main() {
 	// Register all tools
 	tools.RegisterAll(s, cfg, registry, specStore, txClient, qbClient, sabClient, qStore)
 	tools.RegisterMaintenance(s, cfg, registry, qbClient, mStore)
+	tools.RegisterDiagnostics(s, cfg, registry, specStore, txClient, qbClient, sabClient, mStore)
 
 	internal.Logf("starting navigatorr MCP server (stdio)")
 

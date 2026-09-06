@@ -20,7 +20,7 @@ import (
 )
 
 // SchemaVersion is the current schema revision. Migrations run in order.
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 // MaxPreferenceValueLen bounds a stored preference value. Values ride into
 // memory_get/memory_list/get_context verbatim, so one huge blob would tax
@@ -252,6 +252,40 @@ var migrations = []migration{
 			reason TEXT NOT NULL DEFAULT '',
 			source TEXT NOT NULL DEFAULT 'manual',
 			created_at TEXT NOT NULL)`,
+	}},
+	{version: 2, statements: []string{
+		`CREATE TABLE IF NOT EXISTS action_instances (
+			id TEXT PRIMARY KEY,
+			action_name TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'pending',
+			current_step INTEGER NOT NULL DEFAULT 0,
+			inputs_json TEXT NOT NULL DEFAULT '{}',
+			outputs_json TEXT NOT NULL DEFAULT '{}',
+			state_json TEXT NOT NULL DEFAULT '{}',
+			waiting_reason TEXT NOT NULL DEFAULT '',
+			waiting_condition TEXT NOT NULL DEFAULT '',
+			waiting_options_json TEXT NOT NULL DEFAULT '[]',
+			error_json TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL)`,
+		`CREATE INDEX IF NOT EXISTS idx_action_instances_status ON action_instances (status, updated_at)`,
+		`CREATE TABLE IF NOT EXISTS action_steps_log (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			instance_id TEXT NOT NULL REFERENCES action_instances (id) ON DELETE CASCADE,
+			step_index INTEGER NOT NULL,
+			step_name TEXT NOT NULL,
+			primitive TEXT NOT NULL,
+			inputs_json TEXT NOT NULL DEFAULT '{}',
+			outputs_json TEXT NOT NULL DEFAULT '{}',
+			status TEXT NOT NULL,
+			error TEXT NOT NULL DEFAULT '',
+			duration_ms INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL)`,
+		`CREATE INDEX IF NOT EXISTS idx_action_steps_instance ON action_steps_log (instance_id, step_index)`,
+		`ALTER TABLE action_log ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE action_log ADD COLUMN error TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE action_log ADD COLUMN identifiers TEXT NOT NULL DEFAULT ''`,
+		`CREATE INDEX IF NOT EXISTS idx_action_log_media ON action_log (media, created_at)`,
 	}},
 }
 
@@ -929,21 +963,7 @@ func RedactSecrets(argsJSON string) string {
 
 // LogAction appends an audit entry. Secrets in args are redacted.
 func (s *Store) LogAction(action, service, media, argsJSON, result string) error {
-	if action == "" {
-		return fmt.Errorf("action is required")
-	}
-	if len(argsJSON) > 4096 {
-		argsJSON = argsJSON[:4096] + "…(truncated)"
-	}
-	if len(result) > 4096 {
-		result = result[:4096] + "…(truncated)"
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, err := s.db.Exec(`INSERT INTO action_log (action, service, media, args_json, result, created_at)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		action, service, media, RedactSecrets(argsJSON), result, nowStr())
-	return err
+	return s.LogActionEnriched(action, service, media, argsJSON, result, "", "", 0)
 }
 
 // RecentActions returns the latest audit entries, newest first.

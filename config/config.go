@@ -21,8 +21,15 @@ type Config struct {
 	Database          DatabaseConfig           `yaml:"database"`
 	Media             MediaConfig              `yaml:"media"`
 	Maintenance       MaintenanceConfig        `yaml:"maintenance"`
+	Concurrency       ConcurrencyConfig        `yaml:"concurrency"`
 	MaxResponseSizeKB int                      `yaml:"max_response_size_kb"`
 	AllowDestructive  bool                     `yaml:"allow_destructive"`
+}
+
+// ConcurrencyConfig controls simultaneous upstream operations.
+type ConcurrencyConfig struct {
+	MaxAPISimultaneous     int `yaml:"max_api_simultaneous"`     // default: 3
+	MaxInspectSimultaneous int `yaml:"max_inspect_simultaneous"` // default: 2
 }
 
 // DatabaseConfig locates the SQLite state file. It defaults into the same
@@ -174,6 +181,13 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Maintenance.PreferredResolution == "" {
 		cfg.Maintenance.PreferredResolution = "1080p"
+	}
+
+	if cfg.Concurrency.MaxAPISimultaneous <= 0 {
+		cfg.Concurrency.MaxAPISimultaneous = 3
+	}
+	if cfg.Concurrency.MaxInspectSimultaneous <= 0 {
+		cfg.Concurrency.MaxInspectSimultaneous = 2
 	}
 
 	return cfg, nil
