@@ -21,7 +21,7 @@ import (
 // alongside and are only registered when a state store is available.
 func RegisterAll(s *server.MCPServer, cfg *config.Config, registry *arrservice.Registry, specStore *openapi.Store, txClient *transmission.Client, qbClient *qbit.Client, sabClient *sabnzbd.Client, qStore *queue.Store) {
 	registerDocTools(s, registry, specStore)
-	registerAPICallTool(s, registry, cfg.MaxResponseSizeKB, cfg.AllowDestructive)
+	registerAPICallTool(s, registry, specStore, cfg.MaxResponseSizeKB, cfg.AllowDestructive)
 	if txClient != nil {
 		registerTransmissionTools(s, txClient, cfg.AllowDestructive)
 	}

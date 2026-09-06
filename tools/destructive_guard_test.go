@@ -142,7 +142,7 @@ func TestAPICallDestructiveSafetyClassification(t *testing.T) {
 
 	t.Run("destructive operations blocked when allow_destructive=false", func(t *testing.T) {
 		s := server.NewMCPServer("test", "0.0.0")
-		registerAPICallTool(s, reg, 100, false)
+		registerAPICallTool(s, reg, nil, 100, false)
 
 		cases := []struct {
 			name   string
@@ -182,7 +182,7 @@ func TestAPICallDestructiveSafetyClassification(t *testing.T) {
 
 	t.Run("non-destructive operations allowed when allow_destructive=false", func(t *testing.T) {
 		s := server.NewMCPServer("test", "0.0.0")
-		registerAPICallTool(s, reg, 100, false)
+		registerAPICallTool(s, reg, nil, 100, false)
 
 		// Regular GET
 		resGet := callTool(t, s, "call_api", map[string]any{"service": "radarr", "method": "GET", "path": "/movie"})
@@ -204,7 +204,7 @@ func TestAPICallDestructiveSafetyClassification(t *testing.T) {
 
 	t.Run("all operations allowed when allow_destructive=true", func(t *testing.T) {
 		s := server.NewMCPServer("test", "0.0.0")
-		registerAPICallTool(s, reg, 100, true)
+		registerAPICallTool(s, reg, nil, 100, true)
 
 		resDel := callTool(t, s, "call_api", map[string]any{"service": "radarr", "method": "DELETE", "path": "/movie/1"})
 		if resDel.IsError && strings.Contains(resultText(t, resDel), "destructive operations are disabled") {
