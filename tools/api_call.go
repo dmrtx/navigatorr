@@ -85,8 +85,8 @@ func handleCallAPI(ctx context.Context, req mcp.CallToolRequest, registry *arrse
 		return mcp.NewToolResultError("service and path are required"), nil
 	}
 
-	if method == "DELETE" && !allowDestructive {
-		return mcp.NewToolResultError("DELETE requests are disabled. Set allow_destructive: true in config.yaml to enable."), nil
+	if isDestr, reason := isDestructiveAPICall(method, path, bodyStr); isDestr && !allowDestructive {
+		return mcp.NewToolResultError(fmt.Sprintf("destructive operations are disabled (%s). Set allow_destructive: true in config.yaml to enable.", reason)), nil
 	}
 
 	svc, err := registry.Get(svcName)
@@ -545,4 +545,38 @@ func matchFilter(fieldVal any, op, value string) bool {
 		return err1 == nil && err2 == nil && fv < cv
 	}
 	return false
+}
+
+// isDestructiveAPICall checks whether an API request is destructive regardless of the HTTP method.
+// It detects:
+// 1. Any HTTP DELETE method.
+// 2. Any path explicitly targeting deletion or purging (e.g. /delete, /purge).
+// 3. Destructive command executions in RPC endpoints (e.g. POST /command with CleanUpRecycleBin, DeleteLogFiles, or Purge...).
+func isDestructiveAPICall(method, path, bodyStr string) (bool, string) {
+	if method == "DELETE" {
+		return true, "HTTP DELETE method"
+	}
+
+	normPath := strings.ToLower(strings.TrimSpace(path))
+
+	// 1. Endpoints with delete or purge in the path
+	if strings.HasSuffix(normPath, "/delete") || strings.Contains(normPath, "/delete/") ||
+		strings.HasSuffix(normPath, "/purge") || strings.Contains(normPath, "/purge/") {
+		return true, fmt.Sprintf("destructive path %q", path)
+	}
+
+	// 2. Commands that execute destructive operations (e.g. POST /command in *arr services)
+	if (strings.HasSuffix(normPath, "/command") || strings.Contains(normPath, "/command/")) && bodyStr != "" {
+		var cmdMap map[string]any
+		if err := json.Unmarshal([]byte(bodyStr), &cmdMap); err == nil {
+			if name, ok := cmdMap["name"].(string); ok {
+				normName := strings.ToLower(strings.TrimSpace(name))
+				if normName == "cleanuprecyclebin" || strings.HasPrefix(normName, "delete") || strings.HasPrefix(normName, "purge") {
+					return true, fmt.Sprintf("destructive command %q", name)
+				}
+			}
+		}
+	}
+
+	return false, ""
 }

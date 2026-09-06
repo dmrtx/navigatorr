@@ -38,25 +38,25 @@ func generateMockMovies(n int) []map[string]any {
 		}
 
 		movies[i] = map[string]any{
-			"id":               id,
-			"title":            fmt.Sprintf("Movie Number %04d", id),
-			"originalTitle":    fmt.Sprintf("Original Title %04d", id),
-			"hasFile":          id%7 != 0,
-			"overview":         "A full, verbose overview text that takes up dozens of kilobytes across hundreds of movies...",
-			"year":             2000 + (id % 25),
-			"added":            "2026-01-01T00:00:00Z",
-			"status":           "released",
-			"monitored":        true,
-			"isAvailable":      true,
-			"cleanTitle":       fmt.Sprintf("movienumber%04d", id),
-			"folderName":       fmt.Sprintf("Movie Number %04d (2020)", id),
-			"genres":           []string{"Action", "Drama", "Sci-Fi"},
-			"tags":             []int{1, 2, 3},
-			"ratings":          map[string]any{"imdb": map[string]any{"value": 7.5, "votes": 12000}},
-			"runtime":          120,
-			"certification":    "PG-13",
-			"collection":       map[string]any{"name": "Saga Collection", "tmdbId": 12345},
-			"alternateTitles":  []map[string]any{{"title": "Alt 1"}, {"title": "Alt 2"}},
+			"id":              id,
+			"title":           fmt.Sprintf("Movie Number %04d", id),
+			"originalTitle":   fmt.Sprintf("Original Title %04d", id),
+			"hasFile":         id%7 != 0,
+			"overview":        "A full, verbose overview text that takes up dozens of kilobytes across hundreds of movies...",
+			"year":            2000 + (id % 25),
+			"added":           "2026-01-01T00:00:00Z",
+			"status":          "released",
+			"monitored":       true,
+			"isAvailable":     true,
+			"cleanTitle":      fmt.Sprintf("movienumber%04d", id),
+			"folderName":      fmt.Sprintf("Movie Number %04d (2020)", id),
+			"genres":          []string{"Action", "Drama", "Sci-Fi"},
+			"tags":            []int{1, 2, 3},
+			"ratings":         map[string]any{"imdb": map[string]any{"value": 7.5, "votes": 12000}},
+			"runtime":         120,
+			"certification":   "PG-13",
+			"collection":      map[string]any{"name": "Saga Collection", "tmdbId": 12345},
+			"alternateTitles": []map[string]any{{"title": "Alt 1"}, {"title": "Alt 2"}},
 			"movieFile": map[string]any{
 				"id":           1000 + id,
 				"movieId":      id,
@@ -737,17 +737,17 @@ func TestValidation_Ranking_AkiraScenario(t *testing.T) {
 
 	// Candidate A: Smaller but no accessible subs/audio
 	candidateSmall := maint.ReleaseCandidate{
-		GUID:         "cand-small",
-		Title:        "Akira.1988.1080p.Compact",
-		Size:         1800000000, // 1.8 GB (ratio ~0.61 of 2.95GB)
-		Seeders:      50,
-		VideoCodec:   "hevc",
-		Resolution:   "1080p",
-		BitDepth:     10,
-		AudioLangs:   []string{"jpn"},
-		SubLangs:     []string{"jpn"},
-		DualAudio:    false,
-		MultiSubs:    false,
+		GUID:       "cand-small",
+		Title:      "Akira.1988.1080p.Compact",
+		Size:       1800000000, // 1.8 GB (ratio ~0.61 of 2.95GB)
+		Seeders:    50,
+		VideoCodec: "hevc",
+		Resolution: "1080p",
+		BitDepth:   10,
+		AudioLangs: []string{"jpn"},
+		SubLangs:   []string{"jpn"},
+		DualAudio:  false,
+		MultiSubs:  false,
 	}
 
 	// Candidate B: Larger (4.05 GB) but has Dual Audio + Multi English/Spanish subs

@@ -35,74 +35,49 @@ qbittorrent:
 
 When `--network host` is used on Linux, `localhost` inside Navigatorr refers to the Docker host, which is convenient when Sonarr, Radarr, Prowlarr, Bazarr, qBittorrent, and the other services publish their ports on that host.
 
-## Docker Compose
+## Deployment & Execution Modes
 
-A ready-to-use `compose.yaml` is included in the repository. It uses the published GHCR image, host networking, a read-only config mount, and a persistent cache volume.
+Navigatorr supports two distinct operational models depending on your infrastructure topology:
 
-Pull the latest image:
+### Mode A: Updating a Persistent Background Service (Compose / Portainer)
+
+If you run Navigatorr as a continuous service (for example, to serve the HTTP request queue ingest endpoint on `:8099` or managed as a long-running container in Portainer):
 
 ```bash
+# Pull the latest image built by CI
 docker compose pull
+
+# Recreate and restart the persistent container
+docker compose up -d --force-recreate
 ```
 
-Because Navigatorr is an MCP stdio server, start it attached to stdin/stdout with:
+*In Portainer:* Navigate to **Stacks** > select your Navigatorr stack > toggle **Pull latest image** > click **Update the stack**.
 
+> **Data Persistence:** The `navigatorr-cache` volume mounted at `/root/.cache/navigatorr` holds the SQLite database (`navigatorr.db`) and spec cache. It survives restarts and container recreation without data loss.
+
+### Mode B: Executing Navigatorr via MCP stdio
+
+Navigatorr communicates with AI assistants via MCP stdio (JSON-RPC over stdin/stdout). When used as an MCP server, the MCP host (such as `tunnel-client`, Claude Desktop, or Claude Code) launches the container per session and keeps `stdin` and `stdout` attached:
+
+**Option 1: Using Docker Compose**
 ```bash
 docker compose run --rm -T navigatorr
 ```
+*Key flags:*
+* `-T`: Disables pseudo-TTY allocation so raw JSON-RPC framing is not corrupted.
+* `--rm`: Removes the ephemeral container process once the MCP session disconnects, while all state remains persisted in `navigatorr-cache`.
 
-`-T` is important because MCP JSON-RPC should not run through a pseudo-TTY. Do not use `docker compose up -d` for normal MCP use; a detached container has no MCP client attached to its stdio transport.
-
-The included Compose service is equivalent to:
-
-```yaml
-services:
-  navigatorr:
-    image: ghcr.io/dmrtx/navigatorr:latest
-    pull_policy: always
-    network_mode: host
-    stdin_open: true
-    tty: false
-    volumes:
-      - /home/david/.config/navigatorr/config.yaml:/root/.config/navigatorr/config.yaml:ro
-      - navigatorr-cache:/root/.cache/navigatorr
-    restart: "no"
-
-volumes:
-  navigatorr-cache:
-```
-
-## Test the image directly
-
-```bash
-docker run --rm -i \
-  --pull always \
-  --network host \
-  -v /home/david/.config/navigatorr/config.yaml:/root/.config/navigatorr/config.yaml:ro \
-  ghcr.io/dmrtx/navigatorr:latest
-```
-
-The `-i` flag is required because MCP uses stdin/stdout. Do not add `-t`, because a pseudo-TTY can interfere with JSON-RPC framing.
-
-## Use it from tunnel-client
-
-Use the Docker invocation itself as the MCP command so the Navigatorr binary never runs directly on the host:
-
+**Option 2: Using direct Docker command (Recommended for MCP hosts like `tunnel-client`)**
 ```bash
 docker run --rm -i --pull always --network host \
-  -v /home/david/.config/navigatorr/config.yaml:/root/.config/navigatorr/config.yaml:ro \
+  -v /path/to/config.yaml:/root/.config/navigatorr/config.yaml:ro \
+  -v navigatorr-cache:/root/.cache/navigatorr \
   ghcr.io/dmrtx/navigatorr:latest
 ```
+*Key flags:*
+* `-i`: Keeps `stdin` open for interactive JSON-RPC communication. Do NOT pass `-t`.
 
-You can also point a wrapper command at the Compose invocation:
-
-```bash
-docker compose -f /path/to/navigatorr/compose.yaml run --rm -T navigatorr
-```
-
-For `tunnel-client`, the direct `docker run` form is still the simplest because it does not depend on the repository being checked out on the server.
-
-If the GHCR package is private, authenticate Docker/Portainer to `ghcr.io` before using the image. If you make the package public after its first successful publish, no registry credentials are needed to pull it.
+If the GHCR package is private, authenticate Docker/Portainer to `ghcr.io` before deploying. Once the package is public, no registry credentials are required.
 
 ## Persistent maintenance database
 

@@ -754,4 +754,3 @@ func TestRealWorld_LLMWorkflowErgonomics(t *testing.T) {
 	}
 	t.Logf("PROMPT 4 RESULT: 1 tool call (`action_history`), payload size %d bytes. Complete observability achieved without reading log files manually!", len(txt4Audit))
 }
-

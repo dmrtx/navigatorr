@@ -168,3 +168,90 @@ func TestValidateRoots(t *testing.T) {
 	}
 }
 
+func TestStrictConfigParsing(t *testing.T) {
+	tempDir := t.TempDir()
+
+	writeConfig := func(t *testing.T, filename, content string) string {
+		p := filepath.Join(tempDir, filename)
+		if err := os.WriteFile(p, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	t.Run("allow_destructive at top-level parses successfully", func(t *testing.T) {
+		p := writeConfig(t, "valid_top.yaml", `
+allow_destructive: true
+media:
+  allowed_read_roots: ["/media/test"]
+`)
+		cfg, err := Load(p)
+		if err != nil {
+			t.Fatalf("expected valid load, got error: %v", err)
+		}
+		if !cfg.AllowDestructive {
+			t.Errorf("expected AllowDestructive=true, got false")
+		}
+	})
+
+	t.Run("allow_destructive incorrectly nested in media fails with top-level hint", func(t *testing.T) {
+		p := writeConfig(t, "nested_media.yaml", `
+media:
+  allow_destructive: true
+  allowed_read_roots: ["/media/test"]
+`)
+		_, err := Load(p)
+		if err == nil {
+			t.Fatal("expected strict parsing error for media.allow_destructive, got nil")
+		}
+		errMsg := err.Error()
+		if !strings.Contains(errMsg, `unknown configuration key "media.allow_destructive"`) {
+			t.Errorf("expected error to mention unknown key media.allow_destructive, got: %s", errMsg)
+		}
+		if !strings.Contains(errMsg, `"allow_destructive" is a top-level option`) {
+			t.Errorf("expected error to provide top-level hint, got: %s", errMsg)
+		}
+	})
+
+	t.Run("typo allow_destuctive fails with correction hint", func(t *testing.T) {
+		p := writeConfig(t, "typo.yaml", `
+allow_destuctive: true
+`)
+		_, err := Load(p)
+		if err == nil {
+			t.Fatal("expected strict parsing error for allow_destuctive typo, got nil")
+		}
+		errMsg := err.Error()
+		if !strings.Contains(errMsg, `unknown configuration key "allow_destuctive"`) {
+			t.Errorf("expected error to mention allow_destuctive, got: %s", errMsg)
+		}
+		if !strings.Contains(errMsg, `did you mean "allow_destructive"?`) {
+			t.Errorf("expected error to offer correction hint, got: %s", errMsg)
+		}
+	})
+
+	t.Run("completely unknown key fails immediately", func(t *testing.T) {
+		p := writeConfig(t, "unknown.yaml", `
+completely_unknown_key: 123
+`)
+		_, err := Load(p)
+		if err == nil {
+			t.Fatal("expected strict parsing error for completely_unknown_key, got nil")
+		}
+		errMsg := err.Error()
+		if !strings.Contains(errMsg, `unknown configuration key "completely_unknown_key"`) {
+			t.Errorf("expected error to mention completely_unknown_key, got: %s", errMsg)
+		}
+	})
+
+	t.Run("config.yaml.example continues to validate cleanly", func(t *testing.T) {
+		examplePath := filepath.Join("..", "config.yaml.example")
+		cfg, err := Load(examplePath)
+		if err != nil {
+			t.Fatalf("config.yaml.example failed strict parsing: %v", err)
+		}
+		if cfg == nil {
+			t.Fatal("expected non-nil config")
+		}
+	})
+}

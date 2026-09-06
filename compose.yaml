@@ -17,6 +17,7 @@ services:
       # - /volume1/Media/Anime:/media/Anime:ro
       # - /volume1/Media/Movies:/media/Movies:ro
       # - /volume1/Media/Downloads:/media/Downloads:rw
+    # Use "no" for on-demand MCP stdio sessions; use "unless-stopped" for persistent background service
     restart: "no"
 
 volumes:

@@ -19,4 +19,3 @@ func Errorf(format string, args ...any) {
 func Warnf(format string, args ...any) {
 	logger.Output(2, "WARN: "+fmt.Sprintf(format, args...))
 }
-

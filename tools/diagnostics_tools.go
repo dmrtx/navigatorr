@@ -34,7 +34,7 @@ func registerDiagnosticsTools(s *server.MCPServer, d DiagnosticsDeps) {
 	// diagnostics — runtime health, connectivity, and configuration inspection without leaking secrets
 	s.AddTool(
 		mcp.NewTool("diagnostics",
-			mcp.WithDescription("Check runtime health, service connectivity, effective configuration, download clients, OpenAPI spec store, and SQLite database stats. Redacts all API keys and credentials."),
+			mcp.WithDescription("diagnostics muestra configuración efectiva no sensible y redacta todos los secretos. Check runtime health, service connectivity, effective configuration, download clients, OpenAPI spec store, and SQLite database stats."),
 			mcp.WithBoolean("check_connectivity", mcp.Description("Whether to ping external services and download clients (default true)")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -79,6 +79,15 @@ func registerDiagnosticsTools(s *server.MCPServer, d DiagnosticsDeps) {
 				if d.Config.Concurrency.MaxInspectSimultaneous > 0 {
 					effConfig["concurrency_limits"].(map[string]int)["mediainspect"] = d.Config.Concurrency.MaxInspectSimultaneous
 				}
+				if d.Config.Queue.Listen != "" {
+					queueInfo := map[string]any{
+						"listen": d.Config.Queue.Listen,
+					}
+					if d.Config.Queue.Token != "" {
+						queueInfo["token"] = "***REDACTED***"
+					}
+					effConfig["queue"] = queueInfo
+				}
 			}
 
 			// 2. Upstream services health
@@ -93,6 +102,15 @@ func registerDiagnosticsTools(s *server.MCPServer, d DiagnosticsDeps) {
 					sh := map[string]any{
 						"url":    cleanURL,
 						"status": "configured",
+					}
+					if svc.Config.APIKey != "" {
+						sh["api_key"] = "***REDACTED***"
+					}
+					if svc.Config.AuthMethod != "" {
+						sh["auth_method"] = svc.Config.AuthMethod
+					}
+					if svc.Config.AuthHeader != "" {
+						sh["auth_header"] = svc.Config.AuthHeader
 					}
 					if checkConn {
 						pingStart := time.Now()
@@ -111,6 +129,15 @@ func registerDiagnosticsTools(s *server.MCPServer, d DiagnosticsDeps) {
 			dlClients := make(map[string]any)
 			// qBittorrent
 			qbInfo := map[string]any{"configured": d.QbClient != nil}
+			if d.Config != nil && d.Config.QBittorrent.URL != "" {
+				qbInfo["url"] = redactURL(d.Config.QBittorrent.URL)
+				if d.Config.QBittorrent.Username != "" {
+					qbInfo["username"] = d.Config.QBittorrent.Username
+				}
+				if d.Config.QBittorrent.Password != "" {
+					qbInfo["password"] = "***REDACTED***"
+				}
+			}
 			if d.QbClient != nil {
 				qbInfo["status"] = "ok"
 				if checkConn {
@@ -129,6 +156,15 @@ func registerDiagnosticsTools(s *server.MCPServer, d DiagnosticsDeps) {
 
 			// Transmission
 			txInfo := map[string]any{"configured": d.TxClient != nil}
+			if d.Config != nil && d.Config.Transmission.URL != "" {
+				txInfo["url"] = redactURL(d.Config.Transmission.URL)
+				if d.Config.Transmission.Username != "" {
+					txInfo["username"] = d.Config.Transmission.Username
+				}
+				if d.Config.Transmission.Password != "" {
+					txInfo["password"] = "***REDACTED***"
+				}
+			}
 			if d.TxClient != nil {
 				txInfo["status"] = "ok"
 			}
@@ -136,6 +172,12 @@ func registerDiagnosticsTools(s *server.MCPServer, d DiagnosticsDeps) {
 
 			// SABnzbd
 			sabInfo := map[string]any{"configured": d.SabClient != nil}
+			if d.Config != nil && d.Config.SABnzbd.URL != "" {
+				sabInfo["url"] = redactURL(d.Config.SABnzbd.URL)
+				if d.Config.SABnzbd.APIKey != "" {
+					sabInfo["api_key"] = "***REDACTED***"
+				}
+			}
 			if d.SabClient != nil {
 				sabInfo["status"] = "ok"
 			}
