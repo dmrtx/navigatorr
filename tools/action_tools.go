@@ -27,7 +27,6 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 			mcp.WithString("url", mcp.Description("Shortcut: magnet link or torrent URL")),
 			mcp.WithString("path", mcp.Description("Shortcut: local file path")),
 			mcp.WithString("objective", mcp.Description("Shortcut: accessibility_repair or size_optimization")),
-			mcp.WithBoolean("allow_cleanup", mcp.Description("Shortcut: request cleanup of old files (requires server allow_destructive=true)")),
 			mcp.WithString("idempotency_key", mcp.Description("Optional idempotency key to prevent duplicate runs (e.g. radarr:327:size_optimization)")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -48,11 +47,13 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 					inputs[k] = v
 				}
 			}
-			if b, ok := args["allow_cleanup"].(bool); ok {
-				inputs["allow_cleanup"] = b
-			}
 
 			idempotencyKey := strings.TrimSpace(argString(args, "idempotency_key", ""))
+			if idempotencyKey == "" {
+				if ik, ok := inputs["idempotency_key"].(string); ok {
+					idempotencyKey = strings.TrimSpace(ik)
+				}
+			}
 
 			res, err := engine.Run(ctx, actionName, inputs, idempotencyKey)
 			if err != nil {

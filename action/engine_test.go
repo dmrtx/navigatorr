@@ -3,6 +3,7 @@ package action
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -290,18 +291,23 @@ func TestSafeMediaReplacementExternalReconciliationAndSafety(t *testing.T) {
 	// Mock Radarr server
 	callCount := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/api/v3/movie/1":
-			// Return movie with active file id 100
+			callCount++
+			fileID := 100
+			filePath := origPath
+			if callCount > 2 {
+				fileID = 200
+				filePath = newPath
+			}
 			resp := map[string]any{
 				"id":      1,
 				"title":   "The Movie",
 				"hasFile": true,
 				"movieFile": map[string]any{
-					"id":   100,
-					"path": origPath,
+					"id":   fileID,
+					"path": filePath,
 					"size": 2000000000,
 					"mediaInfo": map[string]any{
 						"audioLanguages": "Japanese",
@@ -347,11 +353,10 @@ func TestSafeMediaReplacementExternalReconciliationAndSafety(t *testing.T) {
 
 	// Run safe_media_replacement with local replacement path
 	runRes, err := engine.Run(ctx, "safe_media_replacement", map[string]any{
-		"service":       "radarr",
-		"media_id":      "1",
-		"path":          newPath,
-		"objective":     "accessibility_repair",
-		"allow_cleanup": true, // Requested cleanup, but cfg.AllowDestructive is false!
+		"service":   "radarr",
+		"media_id":  "1",
+		"path":      newPath,
+		"objective": "accessibility_repair",
 	})
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
@@ -365,10 +370,485 @@ func TestSafeMediaReplacementExternalReconciliationAndSafety(t *testing.T) {
 	if runRes.Outputs["cleanup_status"] != "skipped_destructive_disabled" {
 		t.Errorf("expected cleanup_status skipped_destructive_disabled, got %v", runRes.Outputs["cleanup_status"])
 	}
+	if runRes.Outputs["cleanup_performed"] != false {
+		t.Errorf("expected cleanup_performed false, got %v", runRes.Outputs["cleanup_performed"])
+	}
 
 	// Verify original file still exists on disk
 	if _, err := os.Stat(origPath); os.IsNotExist(err) {
 		t.Errorf("original file was deleted despite AllowDestructive=false!")
+	}
+}
+
+func TestSafeMediaReplacementDestructiveCleanupWhenAllowedAndInvariantsMet(t *testing.T) {
+	st := setupTestStore(t)
+	tempDir := t.TempDir()
+
+	origPath := filepath.Join(tempDir, "Original.Movie.720p.mkv")
+	newPath := filepath.Join(tempDir, "Replacement.Movie.1080p.mkv")
+	_ = os.WriteFile(origPath, []byte("old media"), 0o644)
+	_ = os.WriteFile(newPath, []byte("new media"), 0o644)
+
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v3/movie/1":
+			callCount++
+			fileID := 1
+			filePath := origPath
+			if callCount > 1 {
+				fileID = 2
+				filePath = newPath
+			}
+			resp := map[string]any{
+				"id":      1,
+				"title":   "Test Movie",
+				"hasFile": true,
+				"movieFile": map[string]any{
+					"id":   fileID,
+					"path": filePath,
+					"size": 2000000000,
+					"mediaInfo": map[string]any{
+						"audioLanguages": "English/Japanese",
+						"subtitles":      "English/Spanish",
+					},
+				},
+			}
+			_ = json.NewEncoder(w).Encode(resp)
+		case r.URL.Path == "/api/v3/command":
+			w.WriteHeader(200)
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": 99})
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		AllowDestructive: true, // Centralized safety: destructive operations authorized
+	}
+	cfg.Services = map[string]config.ServiceConfig{
+		"radarr": {
+			URL:        srv.URL,
+			APIKey:     "fake-key",
+			AuthMethod: "header",
+			AuthHeader: "X-Api-Key",
+			APIVersion: "/api/v3",
+		},
+	}
+	reg := arrservice.NewRegistry(cfg)
+	res, err := fsop.NewResolver([]string{tempDir}, []string{tempDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine := NewEngine(EngineDeps{
+		Store:    st,
+		Config:   cfg,
+		Registry: reg,
+		Fs:       res,
+	})
+
+	ctx := context.Background()
+
+	runRes, err := engine.Run(ctx, "safe_media_replacement", map[string]any{
+		"service":   "radarr",
+		"media_id":  "1",
+		"path":      newPath,
+		"objective": "accessibility_repair",
+	})
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	if runRes.Status != StatusCompleted {
+		t.Fatalf("expected completed status, got %s (error: %s)", runRes.Status, runRes.Error)
+	}
+
+	if runRes.Outputs["cleanup_status"] != "performed" {
+		t.Errorf("expected cleanup_status performed, got %v", runRes.Outputs["cleanup_status"])
+	}
+	if runRes.Outputs["cleanup_performed"] != true {
+		t.Errorf("expected cleanup_performed true, got %v", runRes.Outputs["cleanup_performed"])
+	}
+
+	// Verify original file was deleted from disk
+	if _, err := os.Stat(origPath); !os.IsNotExist(err) {
+		t.Errorf("expected original file to be deleted, but it still exists!")
+	}
+
+	// Verify replacement file is intact
+	if _, err := os.Stat(newPath); os.IsNotExist(err) {
+		t.Errorf("replacement file was unexpectedly deleted!")
+	}
+}
+
+func TestSafeMediaReplacementDestructiveCleanupSkippedWhenInvariantsUnmet(t *testing.T) {
+	st := setupTestStore(t)
+	tempDir := t.TempDir()
+
+	origPath := filepath.Join(tempDir, "Original.Movie.720p.mkv")
+	newPath := filepath.Join(tempDir, "Replacement.Movie.1080p.mkv")
+	_ = os.WriteFile(origPath, []byte("old media"), 0o644)
+	_ = os.WriteFile(newPath, []byte("new media"), 0o644)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v3/movie/1":
+			// Library verification invariant fails (hasFile = false)
+			resp := map[string]any{
+				"id":      1,
+				"title":   "Test Movie",
+				"hasFile": false,
+			}
+			_ = json.NewEncoder(w).Encode(resp)
+		default:
+			w.WriteHeader(200)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		AllowDestructive: true, // destructive allowed, but invariants will fail!
+	}
+	cfg.Services = map[string]config.ServiceConfig{
+		"radarr": {
+			URL:        srv.URL,
+			APIKey:     "fake-key",
+			AuthMethod: "header",
+			AuthHeader: "X-Api-Key",
+			APIVersion: "/api/v3",
+		},
+	}
+	reg := arrservice.NewRegistry(cfg)
+	res, err := fsop.NewResolver([]string{tempDir}, []string{tempDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine := NewEngine(EngineDeps{
+		Store:    st,
+		Config:   cfg,
+		Registry: reg,
+		Fs:       res,
+	})
+
+	ctx := context.Background()
+
+	runRes, err := engine.Run(ctx, "safe_media_replacement", map[string]any{
+		"service":  "radarr",
+		"media_id": "1",
+		"path":     newPath,
+	})
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	if runRes.Status != StatusFailed {
+		t.Fatalf("expected action to fail due to unverified library, got status: %s", runRes.Status)
+	}
+
+	// Original file MUST remain intact
+	if _, err := os.Stat(origPath); os.IsNotExist(err) {
+		t.Errorf("original file was deleted despite unmet library invariants!")
+	}
+}
+
+func TestSafeMediaReplacementCleanupAlreadyAbsent(t *testing.T) {
+	st := setupTestStore(t)
+	tempDir := t.TempDir()
+
+	origPath := filepath.Join(tempDir, "Original.Movie.720p.mkv")
+	newPath := filepath.Join(tempDir, "Replacement.Movie.1080p.mkv")
+	// Notice: origPath does NOT exist on disk (simulating Arr service already removing it on upgrade)
+	_ = os.WriteFile(newPath, []byte("new media content"), 0o644)
+
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v3/movie/1":
+			callCount++
+			fileID := 1
+			filePath := origPath
+			if callCount > 1 {
+				fileID = 2
+				filePath = newPath
+			}
+			resp := map[string]any{
+				"id":      1,
+				"title":   "Test Movie",
+				"hasFile": true,
+				"movieFile": map[string]any{
+					"id":   fileID,
+					"path": filePath,
+					"size": 2000000000,
+					"mediaInfo": map[string]any{
+						"audioLanguages": "English",
+						"subtitles":      "English",
+					},
+				},
+			}
+			_ = json.NewEncoder(w).Encode(resp)
+		case r.URL.Path == "/api/v3/command":
+			w.WriteHeader(200)
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": 99})
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		AllowDestructive: true,
+	}
+	cfg.Services = map[string]config.ServiceConfig{
+		"radarr": {
+			URL:        srv.URL,
+			APIKey:     "fake-key",
+			AuthMethod: "header",
+			AuthHeader: "X-Api-Key",
+			APIVersion: "/api/v3",
+		},
+	}
+	reg := arrservice.NewRegistry(cfg)
+	res, err := fsop.NewResolver([]string{tempDir}, []string{tempDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine := NewEngine(EngineDeps{
+		Store:    st,
+		Config:   cfg,
+		Registry: reg,
+		Fs:       res,
+	})
+
+	ctx := context.Background()
+
+	runRes, err := engine.Run(ctx, "safe_media_replacement", map[string]any{
+		"service":  "radarr",
+		"media_id": "1",
+		"path":     newPath,
+	})
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	if runRes.Status != StatusCompleted {
+		t.Fatalf("expected completed status, got %s: %s", runRes.Status, runRes.Error)
+	}
+	if runRes.Outputs["cleanup_status"] != "already_absent" {
+		t.Errorf("expected cleanup_status already_absent, got %v", runRes.Outputs["cleanup_status"])
+	}
+	if runRes.Outputs["cleanup_performed"] != false {
+		t.Errorf("expected cleanup_performed false, got %v", runRes.Outputs["cleanup_performed"])
+	}
+	if runRes.Outputs["replacement_verified"] != true {
+		t.Errorf("expected replacement_verified true, got %v", runRes.Outputs["replacement_verified"])
+	}
+}
+
+func TestSafeMediaReplacementCleanupFailurePreservesReplacementSuccess(t *testing.T) {
+	st := setupTestStore(t)
+	tempDir := t.TempDir()
+
+	origPath := filepath.Join(tempDir, "Original.Movie.720p.mkv")
+	newPath := filepath.Join(tempDir, "Replacement.Movie.1080p.mkv")
+	_ = os.WriteFile(origPath, []byte("old media"), 0o644)
+	_ = os.WriteFile(newPath, []byte("new media"), 0o644)
+
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v3/movie/1":
+			callCount++
+			fileID := 1
+			filePath := origPath
+			if callCount > 1 {
+				fileID = 2
+				filePath = newPath
+			}
+			resp := map[string]any{
+				"id":      1,
+				"title":   "Test Movie",
+				"hasFile": true,
+				"movieFile": map[string]any{
+					"id":   fileID,
+					"path": filePath,
+					"size": 2000000000,
+					"mediaInfo": map[string]any{
+						"audioLanguages": "English",
+						"subtitles":      "English",
+					},
+				},
+			}
+			_ = json.NewEncoder(w).Encode(resp)
+		case r.URL.Path == "/api/v3/command":
+			w.WriteHeader(200)
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": 99})
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		AllowDestructive: true,
+	}
+	cfg.Services = map[string]config.ServiceConfig{
+		"radarr": {
+			URL:        srv.URL,
+			APIKey:     "fake-key",
+			AuthMethod: "header",
+			AuthHeader: "X-Api-Key",
+			APIVersion: "/api/v3",
+		},
+	}
+	reg := arrservice.NewRegistry(cfg)
+
+	// Resolver has write roots pointing elsewhere, so deleting origPath will fail with "outside write roots"
+	otherDir := t.TempDir()
+	res, err := fsop.NewResolver([]string{tempDir}, []string{otherDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine := NewEngine(EngineDeps{
+		Store:    st,
+		Config:   cfg,
+		Registry: reg,
+		Fs:       res,
+	})
+
+	ctx := context.Background()
+
+	runRes, err := engine.Run(ctx, "safe_media_replacement", map[string]any{
+		"service":  "radarr",
+		"media_id": "1",
+		"path":     newPath,
+	})
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	// Action should fail ONLY at the cleanup step
+	if runRes.Status != StatusFailed {
+		t.Fatalf("expected action to fail on cleanup error, got %s", runRes.Status)
+	}
+	if !strings.Contains(runRes.Error, "cleanup failed") {
+		t.Errorf("expected error to mention cleanup failed, got: %s", runRes.Error)
+	}
+	if !strings.Contains(runRes.Error, "media replacement and library verification succeeded") {
+		t.Errorf("expected error to preserve media replacement success, got: %s", runRes.Error)
+	}
+	if runRes.Outputs["replacement_verified"] != true {
+		t.Errorf("expected replacement_verified true in outputs, got %v", runRes.Outputs["replacement_verified"])
+	}
+	if runRes.Outputs["cleanup_status"] != "failed" {
+		t.Errorf("expected cleanup_status failed, got %v", runRes.Outputs["cleanup_status"])
+	}
+
+	// Now verify retry: action_retry should resume directly from step 9 (update_maintenance_and_cleanup)
+	// without repeating downloads or imports!
+	stepsLog, _ := st.GetActionSteps(runRes.ID)
+	var step9 *store.ActionStepLog
+	for _, s := range stepsLog {
+		if s.StepName == "update_maintenance_and_cleanup" {
+			step9 = &s
+			break
+		}
+	}
+	if step9 == nil {
+		t.Fatalf("step update_maintenance_and_cleanup not logged in store")
+	}
+	if step9.Status != string(StepFailed) {
+		t.Errorf("expected step9 status failed in store, got %s", step9.Status)
+	}
+}
+
+func TestSafeMediaReplacementLocalPathWorkflow(t *testing.T) {
+	st := setupTestStore(t)
+	tempDir := t.TempDir()
+
+	localFilePath := filepath.Join(tempDir, "Local.Rip.1080p.mkv")
+	_ = os.WriteFile(localFilePath, []byte("local media content"), 0o644)
+
+	importCommandReceived := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v3/movie/1":
+			resp := map[string]any{
+				"id":      1,
+				"title":   "Local Movie",
+				"hasFile": true,
+				"movieFile": map[string]any{
+					"id":   50,
+					"path": localFilePath,
+					"size": 1200000000,
+					"mediaInfo": map[string]any{
+						"audioLanguages": "English",
+						"subtitles":      "English",
+					},
+				},
+			}
+			_ = json.NewEncoder(w).Encode(resp)
+		case r.URL.Path == "/api/v3/command":
+			importCommandReceived = true
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body["path"] != localFilePath {
+				t.Errorf("expected command path %s, got %v", localFilePath, body["path"])
+			}
+			w.WriteHeader(200)
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": 10})
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{AllowDestructive: false}
+	cfg.Services = map[string]config.ServiceConfig{
+		"radarr": {
+			URL:        srv.URL,
+			APIKey:     "fake-key",
+			AuthMethod: "header",
+			AuthHeader: "X-Api-Key",
+			APIVersion: "/api/v3",
+		},
+	}
+	reg := arrservice.NewRegistry(cfg)
+	res, _ := fsop.NewResolver([]string{tempDir}, []string{tempDir})
+
+	// Notice: Deps.Qbit is nil! No download client configured!
+	engine := NewEngine(EngineDeps{
+		Store:    st,
+		Config:   cfg,
+		Registry: reg,
+		Fs:       res,
+	})
+
+	ctx := context.Background()
+	// Run with only path (no hash, no url)
+	runRes, err := engine.Run(ctx, "safe_media_replacement", map[string]any{
+		"service":  "radarr",
+		"media_id": "1",
+		"path":     localFilePath,
+	})
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	if runRes.Status != StatusCompleted {
+		t.Fatalf("expected completed status for local path without download client, got: %s (error: %s)", runRes.Status, runRes.Error)
+	}
+	if !importCommandReceived {
+		t.Errorf("expected import command to be issued for local path replacement")
 	}
 }
 
@@ -977,11 +1457,19 @@ func TestActionCatalogDiscovery(t *testing.T) {
 	if len(smr.RequiredInputs) < 2 || smr.RequiredInputs[0] != "service" || smr.RequiredInputs[1] != "media_id" {
 		t.Errorf("expected required inputs [service, media_id], got %v", smr.RequiredInputs)
 	}
-	if smr.Destructive != false {
-		t.Errorf("expected destructive=false, got %v", smr.Destructive)
+	if smr.Destructive != true {
+		t.Errorf("expected destructive=true, got %v", smr.Destructive)
 	}
-	if len(smr.Steps) != 9 {
-		t.Errorf("expected 9 steps for safe_media_replacement, got %d", len(smr.Steps))
+	for _, opt := range smr.OptionalInputs {
+		if opt == "allow_cleanup" || opt == "allow_destructive" {
+			t.Errorf("expected neither allow_cleanup nor allow_destructive in optional inputs, found: %s", opt)
+		}
+	}
+	if len(smr.Steps) != 10 {
+		t.Errorf("expected 10 steps for safe_media_replacement, got %d", len(smr.Steps))
+	}
+	if len(smr.Steps) > 1 && smr.Steps[1] != "find_and_rank_candidate" {
+		t.Errorf("expected step 1 to be find_and_rank_candidate, got %s", smr.Steps[1])
 	}
 
 	if vt == nil {
@@ -989,6 +1477,9 @@ func TestActionCatalogDiscovery(t *testing.T) {
 	}
 	if vt.Version != 1 {
 		t.Errorf("expected version 1, got %d", vt.Version)
+	}
+	if vt.Destructive != false {
+		t.Errorf("expected destructive=false for validate_torrent, got %v", vt.Destructive)
 	}
 	if len(vt.Steps) != 4 {
 		t.Errorf("expected 4 steps for validate_torrent, got %d", len(vt.Steps))
@@ -1065,5 +1556,704 @@ func TestActionPersistenceAfterReopeningStore(t *testing.T) {
 	}
 	if statRes.ID != actionID || statRes.Status != StatusCompleted {
 		t.Errorf("unexpected status result after reopen: %+v", statRes)
+	}
+}
+
+func TestValidateTorrentTotalSizeDoesNotDouble(t *testing.T) {
+	st := setupTestStore(t)
+	tempDir := t.TempDir()
+
+	// 1. Create mock media files
+	mediaDir := filepath.Join(tempDir, "Fate_strange_Fake")
+	_ = os.MkdirAll(mediaDir, 0755)
+	mediaFile := filepath.Join(mediaDir, "Fate_strange_Fake_EP01.mkv")
+	_ = os.WriteFile(mediaFile, []byte("media-bytes-for-inspection"), 0644)
+
+	// 2. Mock ffprobe
+	mockFfprobe := filepath.Join(tempDir, "mock_ffprobe.sh")
+	ffprobeScript := `#!/bin/sh
+cat << 'EOF'
+{
+  "streams": [
+    {
+      "codec_type": "video",
+      "codec_name": "hevc",
+      "profile": "Main 10",
+      "pix_fmt": "yuv420p10le",
+      "width": 1920,
+      "height": 1080
+    },
+    {
+      "codec_type": "audio",
+      "codec_name": "aac",
+      "tags": { "language": "jpn" }
+    },
+    {
+      "codec_type": "subtitle",
+      "codec_name": "subrip",
+      "tags": { "language": "eng" }
+    }
+  ],
+  "format": {
+    "format_name": "matroska",
+    "duration": "1420.000000"
+  }
+}
+EOF
+`
+	_ = os.WriteFile(mockFfprobe, []byte(ffprobeScript), 0755)
+
+	// 3. Mock qBittorrent server with 14 files totaling exactly 6,120,930,408 bytes
+	// (Real production case Fate/strange Fake)
+	torHash := "f47e574a9ef41e0123456789abcdef0123456789"
+	const expectedLogicalTotal int64 = 6120930408
+	fileSizes := []int64{
+		450000000, 435000000, 440000000, 432000000, 441000000,
+		439000000, 442000000, 438000000, 440000000, 436000000,
+		443000000, 437000000, 441000000, 406930408,
+	}
+	var sumCheck int64
+	for _, sz := range fileSizes {
+		sumCheck += sz
+	}
+	if sumCheck != expectedLogicalTotal {
+		t.Fatalf("test setup error: file sizes sum to %d, want %d", sumCheck, expectedLogicalTotal)
+	}
+
+	qbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v2/auth/login":
+			w.Write([]byte("Ok."))
+		case strings.HasPrefix(r.URL.Path, "/api/v2/torrents/info"):
+			_ = json.NewEncoder(w).Encode([]qbit.TorrentInfo{
+				{
+					Hash:        torHash,
+					Name:        "Fate_strange_Fake",
+					ContentPath: mediaDir,
+					SavePath:    tempDir,
+					Size:        expectedLogicalTotal,
+					Progress:    1.0,
+					State:       "uploading",
+				},
+			})
+		case strings.HasPrefix(r.URL.Path, "/api/v2/torrents/files"):
+			var qbFiles []qbit.TorrentFile
+			for i, sz := range fileSizes {
+				qbFiles = append(qbFiles, qbit.TorrentFile{
+					Name: fmt.Sprintf("Fate_strange_Fake/Fate_strange_Fake_EP%02d.mkv", i+1),
+					Size: sz,
+				})
+			}
+			_ = json.NewEncoder(w).Encode(qbFiles)
+		default:
+			w.WriteHeader(200)
+		}
+	}))
+	defer qbSrv.Close()
+
+	qbClient := qbit.NewClient(qbSrv.URL, "", "")
+	res, _ := fsop.NewResolver([]string{tempDir}, []string{tempDir})
+
+	engine := NewEngine(EngineDeps{
+		Store:   st,
+		Config:  &config.Config{},
+		Qbit:    qbClient,
+		Fs:      res,
+		Ffprobe: mockFfprobe,
+	})
+
+	ctx := context.Background()
+	runRes, err := engine.Run(ctx, "validate_torrent", map[string]any{
+		"hash": torHash,
+	})
+	if err != nil {
+		t.Fatalf("validate_torrent Run failed: %v", err)
+	}
+
+	if runRes.Status != StatusCompleted {
+		t.Fatalf("expected completed status, got %s: %s", runRes.Status, runRes.Error)
+	}
+
+	// Verify total_size: must be 6,120,930,408 bytes, NOT doubled (12,241,860,816)
+	totalSize, ok := runRes.Outputs["total_size"].(int64)
+	if !ok {
+		totalSize = int64(numVal(runRes.Outputs["total_size"]))
+	}
+
+	const doubledTotal int64 = 12241860816
+	if totalSize == doubledTotal {
+		t.Fatalf("BUG REPRODUCED: total_size was doubled to %d! Expected %d", totalSize, expectedLogicalTotal)
+	}
+	if totalSize != expectedLogicalTotal {
+		t.Errorf("expected total_size %d, got %d", expectedLogicalTotal, totalSize)
+	}
+
+	// Verify bit_depth is detected as 10 from the HEVC 10-bit stream
+	bitDepth, _ := runRes.Outputs["bit_depth"].(int)
+	if bitDepth == 0 {
+		bitDepth = int(numVal(runRes.Outputs["bit_depth"]))
+	}
+	if bitDepth != 10 {
+		t.Errorf("expected bit_depth 10 for HEVC 10-bit stream, got %d", bitDepth)
+	}
+}
+
+func TestSafeMediaReplacementWithDirectHashOrUrl(t *testing.T) {
+	st := setupTestStore(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v3/movie/327":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":    327,
+				"title": "Direct Movie",
+			})
+		case r.URL.Path == "/api/v3/release":
+			t.Errorf("unexpected call to /api/v3/release when hash/url is provided directly!")
+			w.WriteHeader(500)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Services: map[string]config.ServiceConfig{
+			"radarr": {URL: srv.URL, APIKey: "k", AuthMethod: "header", AuthHeader: "X-Api-Key", APIVersion: "/api/v3"},
+		},
+	}
+	reg := arrservice.NewRegistry(cfg)
+
+	directHash := "11223344556677889900aabbccddeeff00112233"
+	// Mock qbittorrent
+	qbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v2/auth/login":
+			w.Write([]byte("Ok."))
+		case strings.HasPrefix(r.URL.Path, "/api/v2/torrents/info"):
+			_ = json.NewEncoder(w).Encode([]qbit.TorrentInfo{
+				{
+					Hash:     directHash,
+					Progress: 0.5,
+					State:    "downloading",
+				},
+			})
+		default:
+			w.Write([]byte("Ok."))
+		}
+	}))
+	defer qbSrv.Close()
+	qbClient := qbit.NewClient(qbSrv.URL, "", "")
+
+	engine := NewEngine(EngineDeps{
+		Store:    st,
+		Config:   cfg,
+		Registry: reg,
+		Qbit:     qbClient,
+	})
+
+	ctx := context.Background()
+	runRes, err := engine.Run(ctx, "safe_media_replacement", map[string]any{
+		"service":  "radarr",
+		"media_id": "327",
+		"hash":     directHash,
+	})
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	// Should transition to wait_for_download (or waiting_external since qbit mock doesn't finish download)
+	if runRes.Status != StatusWaitingExternal && runRes.Status != StatusCompleted {
+		t.Errorf("expected running or waiting_external, got %s: %s", runRes.Status, runRes.Error)
+	}
+	if runRes.State["candidate_source"] != "user_input" {
+		t.Errorf("expected candidate_source user_input, got %v", runRes.State["candidate_source"])
+	}
+}
+
+func TestSafeMediaReplacementAutonomousSelection(t *testing.T) {
+	st := setupTestStore(t)
+
+	// Mock Radarr with /release endpoint
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v3/movie/327":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":    327,
+				"title": "Fate/strange Fake",
+				"movieFile": map[string]any{
+					"id":   100,
+					"size": 10000000000, // 10 GB current
+				},
+			})
+		case r.URL.Path == "/api/v3/release":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"guid":         "bad-release-720p",
+					"title":        "Fate.strange.Fake.720p",
+					"size":         15000000000,
+					"seeders":      1,
+					"downloadUrl":  "magnet:?xt=urn:btih:bad0000000000000000000000000000000000000",
+					"releaseGroup": "RandomGroup",
+				},
+				{
+					"guid":         "judas-1080p-hevc",
+					"title":        "[Judas] Fate/strange Fake 1080p HEVC x265 10bit Dual Audio Multi-Subs",
+					"size":         6120930408, // size reduction (ratio ~0.61 -> bonus)
+					"seeders":      25,         // healthy seeders -> bonus
+					"downloadUrl":  "magnet:?xt=urn:btih:c001000000000000000000000000000000000001",
+					"releaseGroup": "Judas", // preferred group -> bonus
+					"videoCodec":   "hevc",
+					"resolution":   "1080p",
+					"bitDepth":     10,
+					"dualAudio":    true,
+					"multiSubs":    true,
+				},
+			})
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Services: map[string]config.ServiceConfig{
+			"radarr": {URL: srv.URL, APIKey: "k", AuthMethod: "header", AuthHeader: "X-Api-Key", APIVersion: "/api/v3"},
+		},
+	}
+	cfg.Maintenance.PreferredGroups = []string{"Judas", "EMBER"}
+	reg := arrservice.NewRegistry(cfg)
+
+	// Mock qbittorrent
+	qbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte("Ok."))
+	}))
+	defer qbSrv.Close()
+	qbClient := qbit.NewClient(qbSrv.URL, "", "")
+
+	engine := NewEngine(EngineDeps{
+		Store:    st,
+		Config:   cfg,
+		Registry: reg,
+		Qbit:     qbClient,
+	})
+
+	ctx := context.Background()
+	// Run WITHOUT hash or url: should autonomously find, rank, and select Judas
+	runRes, err := engine.Run(ctx, "safe_media_replacement", map[string]any{
+		"service":   "radarr",
+		"media_id":  "327",
+		"objective": "size_optimization",
+	})
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	// Should have selected Judas candidate
+	expectedHash := "c001000000000000000000000000000000000001"
+	if runRes.State["hash"] != expectedHash {
+		t.Errorf("expected hash %s selected, got %v", expectedHash, runRes.State["hash"])
+	}
+	if runRes.State["candidate_source"] != "auto_ranked" {
+		t.Errorf("expected candidate_source auto_ranked, got %v", runRes.State["candidate_source"])
+	}
+}
+
+func TestSafeMediaReplacementBlocklistExclusion(t *testing.T) {
+	st := setupTestStore(t)
+
+	// Pre-block the malicious or undesirable release
+	blockedHash := "badb000000000000000000000000000000000000"
+	_ = st.BlockRelease(blockedHash, "Known bad release", "admin")
+
+	goodHash := "e00d000000000000000000000000000000000001"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v3/movie/10":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":    10,
+				"title": "Movie 10",
+			})
+		case r.URL.Path == "/api/v3/release":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"guid":         "blocked-guid",
+					"title":        "[EMBER] Movie 10 1080p HEVC",
+					"size":         2000000000,
+					"seeders":      100,
+					"downloadUrl":  "magnet:?xt=urn:btih:" + blockedHash,
+					"releaseGroup": "EMBER",
+					"audio_langs":  []string{"eng"},
+					"sub_langs":    []string{"eng"},
+				},
+				{
+					"guid":         "valid-guid",
+					"title":        "[Judas] Movie 10 1080p HEVC",
+					"size":         2100000000,
+					"seeders":      20,
+					"downloadUrl":  "magnet:?xt=urn:btih:" + goodHash,
+					"releaseGroup": "Judas",
+					"videoCodec":   "hevc",
+					"resolution":   "1080p",
+					"audio_langs":  []string{"eng"},
+					"sub_langs":    []string{"eng"},
+				},
+			})
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Services: map[string]config.ServiceConfig{
+			"radarr": {URL: srv.URL, APIKey: "k", AuthMethod: "header", AuthHeader: "X-Api-Key", APIVersion: "/api/v3"},
+		},
+	}
+	reg := arrservice.NewRegistry(cfg)
+
+	qbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v2/auth/login":
+			w.Write([]byte("Ok."))
+		case strings.HasPrefix(r.URL.Path, "/api/v2/torrents/info"):
+			_ = json.NewEncoder(w).Encode([]qbit.TorrentInfo{
+				{
+					Hash:     goodHash,
+					Progress: 0.5,
+					State:    "downloading",
+				},
+			})
+		default:
+			w.Write([]byte("Ok."))
+		}
+	}))
+	defer qbSrv.Close()
+	qbClient := qbit.NewClient(qbSrv.URL, "", "")
+
+	engine := NewEngine(EngineDeps{
+		Store:    st,
+		Config:   cfg,
+		Registry: reg,
+		Qbit:     qbClient,
+	})
+
+	ctx := context.Background()
+	runRes, err := engine.Run(ctx, "safe_media_replacement", map[string]any{
+		"service":  "radarr",
+		"media_id": "10",
+	})
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	// Must NOT select blocked release
+	if runRes.State["hash"] == blockedHash {
+		t.Fatalf("SECURITY VIOLATION: Blocklisted candidate was selected!")
+	}
+	if runRes.State["hash"] != goodHash {
+		t.Errorf("expected hash %s, got %v", goodHash, runRes.State["hash"])
+	}
+
+	// Also verify that if ONLY blocked releases exist, it fails semantically
+	allBlockedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v3/movie/11":
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": 11, "title": "Movie 11"})
+		case r.URL.Path == "/api/v3/release":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"guid":        "only-blocked",
+					"title":       "Movie 11",
+					"downloadUrl": "magnet:?xt=urn:btih:" + blockedHash,
+				},
+			})
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer allBlockedSrv.Close()
+
+	cfg.Services["radarr"] = config.ServiceConfig{
+		URL: allBlockedSrv.URL, APIKey: "k", AuthMethod: "header", AuthHeader: "X-Api-Key", APIVersion: "/api/v3",
+	}
+	engineAllBlocked := NewEngine(EngineDeps{
+		Store:    st,
+		Config:   cfg,
+		Registry: arrservice.NewRegistry(cfg),
+		Qbit:     qbClient,
+	})
+	allBlockedRes, err := engineAllBlocked.Run(ctx, "safe_media_replacement", map[string]any{
+		"service":  "radarr",
+		"media_id": "11",
+	})
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if allBlockedRes.Status != StatusFailed {
+		t.Errorf("expected failed status when all candidates are blocklisted, got %s", allBlockedRes.Status)
+	}
+	if !strings.Contains(allBlockedRes.Error, "no suitable replacement candidate found") {
+		t.Errorf("expected error 'no suitable replacement candidate found', got %q", allBlockedRes.Error)
+	}
+}
+
+func TestSafeMediaReplacementNoCandidatesFailsSemantically(t *testing.T) {
+	st := setupTestStore(t)
+
+	// Mock Radarr returning empty releases
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v3/movie/99":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":    99,
+				"title": "Rare Movie",
+			})
+		case r.URL.Path == "/api/v3/release":
+			_ = json.NewEncoder(w).Encode([]map[string]any{}) // No candidates!
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Services: map[string]config.ServiceConfig{
+			"radarr": {URL: srv.URL, APIKey: "k", AuthMethod: "header", AuthHeader: "X-Api-Key", APIVersion: "/api/v3"},
+		},
+	}
+	reg := arrservice.NewRegistry(cfg)
+
+	engine := NewEngine(EngineDeps{
+		Store:    st,
+		Config:   cfg,
+		Registry: reg,
+	})
+
+	ctx := context.Background()
+	runRes, err := engine.Run(ctx, "safe_media_replacement", map[string]any{
+		"service":  "radarr",
+		"media_id": "99",
+	})
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	if runRes.Status != StatusFailed {
+		t.Fatalf("expected status failed, got %s", runRes.Status)
+	}
+
+	// Must fail with semantic error, NOT technical error like "could not determine infohash from inputs (provide hash or url)"
+	if !strings.Contains(runRes.Error, "no suitable replacement candidate found") {
+		t.Errorf("expected semantic error 'no suitable replacement candidate found', got %q", runRes.Error)
+	}
+	if strings.Contains(runRes.Error, "provide hash or url") {
+		t.Errorf("technical error 'provide hash or url' leaked: %q", runRes.Error)
+	}
+}
+
+func TestSafeMediaReplacementTradeOffWaitsDecision(t *testing.T) {
+	st := setupTestStore(t)
+
+	// Candidate with 0 seeders and huge size penalty (score <= 0)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v3/movie/20":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":    20,
+				"title": "TradeOff Movie",
+				"movieFile": map[string]any{
+					"id":   1,
+					"size": 1000000000,
+				},
+			})
+		case r.URL.Path == "/api/v3/release":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"guid":        "trade-off-guid",
+					"title":       "TradeOff.Movie.480p",
+					"size":        5000000000, // 5x larger than current -> heavy penalties
+					"seeders":     0,          // 0 seeds -> heavy penalty
+					"downloadUrl": "magnet:?xt=urn:btih:trade000000000000000000000000000000000001",
+				},
+			})
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Services: map[string]config.ServiceConfig{
+			"radarr": {URL: srv.URL, APIKey: "k", AuthMethod: "header", AuthHeader: "X-Api-Key", APIVersion: "/api/v3"},
+		},
+	}
+	reg := arrservice.NewRegistry(cfg)
+
+	engine := NewEngine(EngineDeps{
+		Store:    st,
+		Config:   cfg,
+		Registry: reg,
+	})
+
+	ctx := context.Background()
+	runRes, err := engine.Run(ctx, "safe_media_replacement", map[string]any{
+		"service":  "radarr",
+		"media_id": "20",
+	})
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	// Must transition to waiting_decision because candidate has trade-offs
+	if runRes.Status != StatusWaitingDecision {
+		t.Fatalf("expected status waiting_decision, got %s (error: %s)", runRes.Status, runRes.Error)
+	}
+	if len(runRes.WaitingOptions) == 0 {
+		t.Errorf("expected waiting options for decision")
+	}
+
+	// Cancel decision
+	cancelRes, err := engine.Resume(ctx, runRes.ID, "cancel", nil)
+	if err != nil {
+		t.Fatalf("Resume cancel failed: %v", err)
+	}
+	if cancelRes.Status != StatusFailed {
+		t.Errorf("expected status failed on cancel, got %s", cancelRes.Status)
+	}
+}
+
+func TestSafeMediaReplacementRetryDoesNotRepeatSideEffects(t *testing.T) {
+	st := setupTestStore(t)
+
+	movieCalls := 0
+	releaseCalls := 0
+	chosenHash := "a1b2c3d4e5f60123456789abcdef0123456789ab"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v3/movie/30":
+			movieCalls++
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":    30,
+				"title": "Retry Safe Movie",
+				"movieFile": map[string]any{
+					"id":   1,
+					"size": 5000000000,
+				},
+			})
+		case r.URL.Path == "/api/v3/release":
+			releaseCalls++
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"guid":         "retry-guid",
+					"title":        "[Judas] Retry Safe Movie 1080p HEVC",
+					"size":         2500000000,
+					"seeders":      30,
+					"downloadUrl":  "magnet:?xt=urn:btih:" + chosenHash,
+					"releaseGroup": "Judas",
+					"videoCodec":   "hevc",
+					"resolution":   "1080p",
+					"audio_langs":  []string{"eng"},
+					"sub_langs":    []string{"eng"},
+				},
+			})
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Services: map[string]config.ServiceConfig{
+			"radarr": {URL: srv.URL, APIKey: "k", AuthMethod: "header", AuthHeader: "X-Api-Key", APIVersion: "/api/v3"},
+		},
+	}
+	reg := arrservice.NewRegistry(cfg)
+
+	// Engine without qbit initially -> step 0 (plan) and step 1 (find_and_rank) will complete,
+	// but step 2 (add_or_track_download) will fail because Qbit is nil and no path provided!
+	engine := NewEngine(EngineDeps{
+		Store:    st,
+		Config:   cfg,
+		Registry: reg,
+		Qbit:     nil, // triggers failure at step 2
+	})
+
+	ctx := context.Background()
+	runRes, err := engine.Run(ctx, "safe_media_replacement", map[string]any{
+		"service":  "radarr",
+		"media_id": "30",
+	})
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	if runRes.Status != StatusFailed {
+		t.Fatalf("expected status failed at step 2, got %s", runRes.Status)
+	}
+	if !strings.Contains(runRes.Error, "qBittorrent client is not configured") {
+		t.Errorf("expected qBittorrent failure, got %s", runRes.Error)
+	}
+
+	if movieCalls != 1 {
+		t.Fatalf("expected movieCalls=1, got %d", movieCalls)
+	}
+	if releaseCalls != 1 {
+		t.Fatalf("expected releaseCalls=1, got %d", releaseCalls)
+	}
+
+	// Now configure working qBittorrent mock
+	qbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v2/auth/login":
+			w.Write([]byte("Ok."))
+		case strings.HasPrefix(r.URL.Path, "/api/v2/torrents/info"):
+			_ = json.NewEncoder(w).Encode([]qbit.TorrentInfo{
+				{
+					Hash:     chosenHash,
+					Progress: 0.5,
+					State:    "downloading",
+				},
+			})
+		default:
+			w.Write([]byte("Ok."))
+		}
+	}))
+	defer qbSrv.Close()
+	engine.deps.Qbit = qbit.NewClient(qbSrv.URL, "", "")
+
+	// Retry the failed action!
+	retryRes, err := engine.Retry(ctx, runRes.ID)
+	if err != nil {
+		t.Fatalf("Retry failed: %v", err)
+	}
+
+	// Step 0 and step 1 must NOT have been called again!
+	if movieCalls != 1 {
+		t.Errorf("SIDE EFFECT REPEATED: expected movieCalls to remain 1, got %d", movieCalls)
+	}
+	if releaseCalls != 1 {
+		t.Errorf("SIDE EFFECT REPEATED: expected releaseCalls to remain 1, got %d", releaseCalls)
+	}
+
+	// The retried action should have successfully resumed from step 2 (add_or_track_download)
+	// and advanced to step 3 (wait_for_download -> waiting_external)
+	if retryRes.Status != StatusWaitingExternal {
+		t.Errorf("expected retried status waiting_external, got %s (error: %s)", retryRes.Status, retryRes.Error)
+	}
+	if retryRes.State["hash"] != chosenHash {
+		t.Errorf("expected preserved hash %s, got %v", chosenHash, retryRes.State["hash"])
 	}
 }

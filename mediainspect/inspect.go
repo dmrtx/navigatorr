@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -81,9 +82,11 @@ func InspectFile(ctx context.Context, ffprobePath, path string) (Report, error) 
 		Streams []struct {
 			CodecType        string            `json:"codec_type"`
 			CodecName        string            `json:"codec_name"`
+			Profile          string            `json:"profile"`
+			PixFmt           string            `json:"pix_fmt"`
 			Width            int               `json:"width"`
 			Height           int               `json:"height"`
-			BitsPerRawSample int               `json:"bits_per_raw_sample"`
+			BitsPerRawSample any               `json:"bits_per_raw_sample"`
 			Tags             map[string]string `json:"tags"`
 			Duration         string            `json:"duration"`
 		} `json:"streams"`
@@ -115,9 +118,7 @@ func InspectFile(ctx context.Context, ffprobePath, path string) (Report, error) 
 			if rep.VideoCodec == "" {
 				rep.VideoCodec = st.CodecName
 				rep.Resolution = resolutionName(st.Height)
-				if st.BitsPerRawSample > 0 {
-					rep.BitDepth = st.BitsPerRawSample
-				}
+				rep.BitDepth = ParseBitDepth(st.BitsPerRawSample, st.PixFmt, st.Profile)
 			}
 		case "audio":
 			rep.AudioLanguages = appendNorm(rep.AudioLanguages, lang)
@@ -126,6 +127,66 @@ func InspectFile(ctx context.Context, ffprobePath, path string) (Report, error) 
 		}
 	}
 	return rep, nil
+}
+
+// ParseBitDepth extracts bit depth from raw bits (number or string), pixel format, or profile.
+// It returns 0 when metadata does not specify the bit depth.
+func ParseBitDepth(rawBits any, pixFmt, profile string) int {
+	// 1. bits_per_raw_sample from ffprobe (can be string e.g. "8", "10" or number)
+	if rawBits != nil {
+		switch v := rawBits.(type) {
+		case string:
+			if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
+				return n
+			}
+		case float64:
+			if v > 0 {
+				return int(v)
+			}
+		case int:
+			if v > 0 {
+				return v
+			}
+		}
+	}
+
+	// 2. Derive from pixel format (e.g. yuv420p10le -> 10, p010le -> 10, yuv420p12le -> 12, yuv420p -> 8)
+	pf := strings.ToLower(strings.TrimSpace(pixFmt))
+	if pf != "" {
+		if strings.Contains(pf, "10le") || strings.Contains(pf, "10be") || strings.Contains(pf, "10msb") || pf == "p010" || strings.HasPrefix(pf, "p010") {
+			return 10
+		}
+		if strings.Contains(pf, "12le") || strings.Contains(pf, "12be") || strings.Contains(pf, "12msb") || pf == "p012" || strings.HasPrefix(pf, "p012") {
+			return 12
+		}
+		if strings.Contains(pf, "16le") || strings.Contains(pf, "16be") || strings.Contains(pf, "16msb") || pf == "p016" || strings.HasPrefix(pf, "p016") {
+			return 16
+		}
+		if strings.Contains(pf, "9le") || strings.Contains(pf, "9be") {
+			return 9
+		}
+		switch pf {
+		case "yuv420p", "yuvj420p", "yuv422p", "yuvj422p", "yuv444p", "yuvj444p",
+			"nv12", "nv21", "yuyv422", "uyvy422", "rgb24", "bgr24", "rgba", "bgra", "gray":
+			return 8
+		}
+	}
+
+	// 3. Fallback to codec profile metadata
+	prof := strings.ToLower(strings.TrimSpace(profile))
+	if prof != "" {
+		if strings.Contains(prof, "10") { // e.g. "main 10", "high 10", "profile 10"
+			return 10
+		}
+		if strings.Contains(prof, "12") { // e.g. "main 12"
+			return 12
+		}
+		if prof == "main" || prof == "baseline" || prof == "high" || prof == "main progressive" {
+			return 8
+		}
+	}
+
+	return 0
 }
 
 func appendNorm(list []string, lang string) []string {
