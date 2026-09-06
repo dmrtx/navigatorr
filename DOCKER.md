@@ -1,12 +1,12 @@
 # Docker deployment
 
-This fork publishes a multi-architecture Navigatorr image to GitHub Container Registry (GHCR):
+This fork publishes a `linux/amd64` Navigatorr image to GitHub Container Registry (GHCR):
 
 ```text
 ghcr.io/dmrtx/navigatorr:latest
 ```
 
-The GitHub Actions workflow publishes `linux/amd64` and `linux/arm64` images on every push to `main`, on `v*` tags, and when run manually. It also publishes a `sha-*` tag for each build.
+The GitHub Actions workflow publishes `linux/amd64` images on every push to `main`, on `v*` tags, and when run manually. It also publishes a `sha-*` tag for each build.
 
 ## Important: Navigatorr uses MCP stdio
 
