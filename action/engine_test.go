@@ -847,6 +847,12 @@ func TestEngineActionRetrySkipsCompletedSteps(t *testing.T) {
 		t.Fatalf("expected retried action to be completed, got %s: %s", retryRes.Status, retryRes.Error)
 	}
 
+	// 4. Cannot retry an already completed action (strictly failed actions only)
+	_, err = engine.Retry(ctx, runRes.ID)
+	if err == nil || !strings.Contains(err.Error(), "only failed actions can be retried") {
+		t.Errorf("expected error retrying completed action, got: %v", err)
+	}
+
 	// Step 1 must NOT have run again!
 	if step1Calls != 1 {
 		t.Errorf("SIDE EFFECT REPEATED: expected step 1 calls to stay 1, but got %d", step1Calls)
