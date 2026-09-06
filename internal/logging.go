@@ -15,3 +15,8 @@ func Logf(format string, args ...any) {
 func Errorf(format string, args ...any) {
 	logger.Output(2, "ERROR: "+fmt.Sprintf(format, args...))
 }
+
+func Warnf(format string, args ...any) {
+	logger.Output(2, "WARN: "+fmt.Sprintf(format, args...))
+}
+

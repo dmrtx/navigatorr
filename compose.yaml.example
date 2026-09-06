@@ -1,0 +1,40 @@
+# Navigatorr Docker Compose Template
+#
+# IMPORTANT RUNTIME REQUIREMENTS:
+# 1. Navigatorr is an MCP server running over stdio (JSON-RPC).
+#    Start with: docker compose run --rm -T navigatorr
+#    Do NOT use 'docker compose up -d' for MCP sessions!
+# 2. Configuration MUST be placed in config.yaml.
+#    Navigatorr does NOT read environment variables (e.g. ALLOW_DESTRUCTIVE=true will be ignored).
+# 3. Path Mapping: All paths in config.yaml (media.allowed_read_roots / allowed_write_roots)
+#    must use the CONTAINER target paths (e.g. /media/Movies), NOT the host paths.
+
+services:
+  navigatorr:
+    image: ghcr.io/dmrtx/navigatorr:latest
+    pull_policy: always
+    # 'host' networking allows reaching services on localhost (8989, 7878, 8080, etc.)
+    network_mode: host
+    stdin_open: true
+    tty: false
+    environment:
+      # Container timezone (useful for log timestamps)
+      - TZ=UTC
+    volumes:
+      # 1. Read-only configuration mount
+      - ./config.yaml:/root/.config/navigatorr/config.yaml:ro
+
+      # 2. Persistent SQLite database & OpenAPI spec cache
+      - navigatorr-cache:/root/.cache/navigatorr
+
+      # 3. Media libraries (mounted read-only for inspect_media and safe queries)
+      - /path/on/host/Media/Anime:/media/Anime:ro
+      - /path/on/host/Media/Movies:/media/Movies:ro
+
+      # 4. Downloads directory (mounted read-write for safe_replace / cleanup operations)
+      - /path/on/host/Downloads:/media/Downloads:rw
+
+    restart: "no"
+
+volumes:
+  navigatorr-cache:

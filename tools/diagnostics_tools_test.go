@@ -30,6 +30,7 @@ func TestDiagnosticsTool(t *testing.T) {
 
 	cfg := &config.Config{
 		AllowDestructive:  false,
+		LoadedPath:        "/test/path/config.yaml",
 		MaxResponseSizeKB: 150,
 		Concurrency: config.ConcurrencyConfig{
 			MaxAPISimultaneous:     4,
@@ -75,6 +76,15 @@ func TestDiagnosticsTool(t *testing.T) {
 	}
 	if effCfg["allow_destructive"] != false {
 		t.Errorf("expected allow_destructive=false, got %v", effCfg["allow_destructive"])
+	}
+	if effCfg["config_file_loaded"] != "/test/path/config.yaml" {
+		t.Errorf("expected config_file_loaded=/test/path/config.yaml, got %v", effCfg["config_file_loaded"])
+	}
+	if effCfg["state_path"] == "" {
+		t.Errorf("expected non-empty state_path in effective_config")
+	}
+	if _, hasValidation := effCfg["root_validation"]; !hasValidation {
+		t.Errorf("expected root_validation key in effective_config")
 	}
 
 	dbStats, ok := dMap["database"].(map[string]any)

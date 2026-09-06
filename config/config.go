@@ -24,6 +24,7 @@ type Config struct {
 	Concurrency       ConcurrencyConfig        `yaml:"concurrency"`
 	MaxResponseSizeKB int                      `yaml:"max_response_size_kb"`
 	AllowDestructive  bool                     `yaml:"allow_destructive"`
+	LoadedPath        string                   `yaml:"-"`
 }
 
 // ConcurrencyConfig controls simultaneous upstream operations.
@@ -189,8 +190,31 @@ func Load(path string) (*Config, error) {
 	if cfg.Concurrency.MaxInspectSimultaneous <= 0 {
 		cfg.Concurrency.MaxInspectSimultaneous = 2
 	}
+	cfg.LoadedPath = path
 
 	return cfg, nil
+}
+
+// ValidateRoots checks whether the configured read and write filesystem roots exist on disk.
+func (c *Config) ValidateRoots() []string {
+	var warnings []string
+	for _, r := range c.Media.AllowedReadRoots {
+		if r == "" {
+			continue
+		}
+		if _, err := os.Stat(r); os.IsNotExist(err) {
+			warnings = append(warnings, fmt.Sprintf("configured read root %q does not exist inside container (verify Docker volume mounts)", r))
+		}
+	}
+	for _, r := range c.Media.AllowedWriteRoots {
+		if r == "" {
+			continue
+		}
+		if _, err := os.Stat(r); os.IsNotExist(err) {
+			warnings = append(warnings, fmt.Sprintf("configured write root %q does not exist inside container (verify Docker volume mounts)", r))
+		}
+	}
+	return warnings
 }
 
 // resolveURL normalizes a service URL, filling in the scheme and the service's

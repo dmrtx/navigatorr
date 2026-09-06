@@ -47,8 +47,11 @@ func registerDiagnosticsTools(s *server.MCPServer, d DiagnosticsDeps) {
 
 			// 1. Effective configuration (redacted)
 			effConfig := map[string]any{
+				"config_file_loaded":   "",
+				"state_path":           "",
 				"allowed_read_roots":   []string{},
 				"allowed_write_roots":  []string{},
+				"root_validation":      []string{},
 				"allow_destructive":    false,
 				"max_response_size_kb": 100,
 				"concurrency_limits": map[string]int{
@@ -57,8 +60,15 @@ func registerDiagnosticsTools(s *server.MCPServer, d DiagnosticsDeps) {
 				},
 			}
 			if d.Config != nil {
+				effConfig["config_file_loaded"] = d.Config.LoadedPath
+				dbPath := d.Config.Database.Path
+				if dbPath == "" {
+					dbPath = config.DefaultDatabasePath()
+				}
+				effConfig["state_path"] = dbPath
 				effConfig["allowed_read_roots"] = d.Config.Media.AllowedReadRoots
 				effConfig["allowed_write_roots"] = d.Config.Media.AllowedWriteRoots
+				effConfig["root_validation"] = d.Config.ValidateRoots()
 				effConfig["allow_destructive"] = d.Config.AllowDestructive
 				if d.Config.MaxResponseSizeKB > 0 {
 					effConfig["max_response_size_kb"] = d.Config.MaxResponseSizeKB
