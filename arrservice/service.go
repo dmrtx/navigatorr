@@ -2,6 +2,8 @@ package arrservice
 
 import (
 	"github.com/jakenesler/navigatorr/config"
+	"github.com/jakenesler/navigatorr/resilience"
+	"github.com/jakenesler/navigatorr/snapshot"
 )
 
 // Service represents a configured *arr service.
@@ -11,6 +13,8 @@ type Service struct {
 	Auth       AuthStrategy
 	BaseURL    string // URL + APIVersion, e.g. "http://10.0.0.100:8989/api/v3"
 	StatusPath string // cheap authenticated endpoint for Ping, may be empty
+	Pool       *resilience.ServicePool
+	Snapshots  *snapshot.Store
 }
 
 // NewService creates a Service from config.

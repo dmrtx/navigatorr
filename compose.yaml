@@ -5,9 +5,19 @@ services:
     network_mode: host
     stdin_open: true
     tty: false
+    environment:
+      - TZ=UTC
     volumes:
+      # Read-only configuration mount
       - /home/david/.config/navigatorr/config.yaml:/root/.config/navigatorr/config.yaml:ro
+      # Persistent SQLite database & spec cache
       - navigatorr-cache:/root/.cache/navigatorr
+      # Media libraries & downloads:
+      # The target inside container MUST match allowed_read_roots / allowed_write_roots in config.yaml!
+      # - /volume1/Media/Anime:/media/Anime:ro
+      # - /volume1/Media/Movies:/media/Movies:ro
+      # - /volume1/Media/Downloads:/media/Downloads:rw
+    # Use "no" for on-demand MCP stdio sessions; use "unless-stopped" for persistent background service
     restart: "no"
 
 volumes:

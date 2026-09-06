@@ -74,6 +74,18 @@ func (s *Store) GetIndex(name string) *Index {
 	return s.indices[name]
 }
 
+// LoadedServices returns the names of services whose OpenAPI specs have been loaded.
+func (s *Store) LoadedServices() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	names := make([]string, 0, len(s.indices))
+	for name := range s.indices {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // Search searches across all or a specific service.
 func (s *Store) Search(query, serviceName string) []EndpointSummary {
 	s.mu.RLock()

@@ -1,92 +1,163 @@
-# Navigatorrr configuration
-# Copy to ~/.config/navigatorr/config.yaml and fill in your values
+# Navigatorr Configuration Template
+# Copy this file to ~/.config/navigatorr/config.yaml (or your custom -config path)
+# All credentials and URLs below are imaginary placeholders.
 #
-# `url` is optional for known services — it defaults to http://localhost:<default port>.
-# Give just the host ("url: 10.0.0.100") and the default port is appended.
-# Run list_services to see what each service resolved to.
+# IMPORTANT: Configuration Precedence & Environment Variables
+# Navigatorr does NOT read environment variables (e.g. ALLOW_DESTRUCTIVE=true in docker-compose.yml
+# will NOT have any effect). All configuration MUST be defined in this config.yaml file.
 
+# ==============================================================================
+# 1. CENTRAL SAFETY GATE
+# ==============================================================================
+# Central safety gate for destructive operations across the entire application.
+# MUST be placed at the ROOT (top-level) of the YAML file.
+# If indented under services, media, or maintenance, it will be silently ignored!
+#
+# When false (default):
+#   - call_api: Blocks all HTTP DELETE requests.
+#   - qbit_manage_torrent: Blocks "delete" and "delete_files" actions.
+#   - transmission_manage_torrent: Blocks "remove" and "remove_data" actions.
+#   - sabnzbd_manage_item: Blocks "delete" actions.
+#   - fs_safe_delete: Blocks physical file deletions on disk.
+#   - safe_replace: Blocks delete_original step.
+#
+# When true:
+#   - Destructive operations are permitted, subject to tool-level authorization checks.
+allow_destructive: false
+
+# ==============================================================================
+# 2. RESPONSE SIZE & CONCURRENCY GUARDS
+# ==============================================================================
+# Maximum response size guard in kilobytes before rejection/pagination kicks in.
+# Protects the AI assistant's context window from being flooded by massive payloads.
+# Default: 50 KB (set higher, e.g. 500, if you perform large batched queries).
+max_response_size_kb: 500
+
+# Concurrency limits protect upstream *arr services and NAS storage from excessive load.
+concurrency:
+  max_api_simultaneous: 3       # Max simultaneous upstream HTTP calls (default: 3)
+  max_inspect_simultaneous: 2   # Max simultaneous ffprobe media inspections (default: 2)
+
+# ==============================================================================
+# 3. UPSTREAM *ARR & MEDIA SERVICES
+# ==============================================================================
+# Known services: sonarr, radarr, lidarr, readarr, chaptarr, prowlarr, profilarr,
+# bazarr, seerr, overseerr, jellyseerr, audiobookshelf.
+#
+# `url` is optional for known services:
+#   - If omitted, defaults to http://localhost:<default_port>
+#   - If given as a bare IP or host ("192.168.1.100"), the default port and scheme are filled in.
+#
+# Advanced options per service:
+#   - auth_method: "header" (default), "query", or "basic"
+#   - auth_header: custom header name (default: "X-Api-Key")
+#   - auth_prefix: custom prefix for the key (e.g. "Bearer ")
+#   - api_version: custom API prefix (e.g. "/api/v3")
+#   - openapi_url: custom URL to fetch OpenAPI specification
 services:
   sonarr:
     url: "http://localhost:8989"
-    api_key: "your-sonarr-api-key"
+    api_key: "imaginary-sonarr-api-key"
   radarr:
     url: "http://localhost:7878"
-    api_key: "your-radarr-api-key"
+    api_key: "imaginary-radarr-api-key"
   lidarr:
     url: "http://localhost:8686"
-    api_key: "your-lidarr-api-key"
+    api_key: "imaginary-lidarr-api-key"
   readarr:
     url: "http://localhost:8787"
-    api_key: "your-readarr-api-key"
+    api_key: "imaginary-readarr-api-key"
   chaptarr:
     url: "http://localhost:8789"
-    api_key: "your-chaptarr-api-key"
+    api_key: "imaginary-chaptarr-api-key"
   prowlarr:
     url: "http://localhost:9696"
-    api_key: "your-prowlarr-api-key"
+    api_key: "imaginary-prowlarr-api-key"
   profilarr:
     url: "http://localhost:6868"
-    api_key: "your-profilarr-api-key"
+    api_key: "imaginary-profilarr-api-key"
   bazarr:
     url: "http://localhost:6767"
-    api_key: "your-bazarr-api-key"
+    api_key: "imaginary-bazarr-api-key"
   seerr:
     url: "http://localhost:5055"
-    api_key: "your-seerr-api-key"
+    api_key: "imaginary-seerr-api-key"
+  audiobookshelf:
+    url: "http://localhost:13378"
+    api_key: "imaginary-abs-token"
+    auth_header: "Authorization"
+    auth_prefix: "Bearer "
 
+# ==============================================================================
+# 4. DOWNLOAD CLIENTS
+# ==============================================================================
 transmission:
   url: "http://localhost:9091"
-  username: ""
-  password: ""
+  username: "imaginary-tx-user"
+  password: "imaginary-tx-password"
 
 qbittorrent:
   url: "http://localhost:8080"
-  username: "your-qbittorrent-username"
-  password: "your-qbittorrent-password"
+  username: "imaginary-qbit-user"
+  password: "imaginary-qbit-password"
 
 sabnzbd:
-  url: "http://localhost:8080"
-  api_key: "your-sabnzbd-api-key"
-  # SABnzbd's own url_base setting. Ships as /sabnzbd, often cleared.
-  url_base: "/sabnzbd"
+  url: "http://localhost:8085"
+  api_key: "imaginary-sabnzbd-api-key"
+  url_base: "/sabnzbd"          # SABnzbd's url_base setting (default: /sabnzbd)
 
-# Request queue. Requests posted here are held until an agent works them via the
-# queue_list / queue_claim / queue_resolve tools. The MCP tools work regardless,
-# so omit `listen` to keep the queue agent-only with no HTTP endpoint at all.
-#
-# Text posted here is later read and acted on by an agent holding write access to
-# every service above, so `token` is required whenever `listen` is set —
-# navigatorr refuses to start rather than serve this openly. Prefer binding
-# loopback and reaching it over a tunnel or reverse proxy that terminates TLS;
-# ":8099" binds every interface, and the token crosses the network in clear text.
+# ==============================================================================
+# 5. REQUEST QUEUE (HTTP INGEST)
+# ==============================================================================
+# Holding area for incoming media requests (e.g. from Siri Shortcuts, webhooks, or bridges).
+# MCP tools (queue_list, queue_claim, queue_resolve) work even if listen is empty.
+# If `listen` is provided, `token` is strictly REQUIRED for security.
 queue:
-  listen: "127.0.0.1:8099"  # bind address; empty disables the HTTP endpoint
-  token: "generate-a-long-random-string"
-  path: ""                  # queue file; defaults to ~/.config/navigatorr/queue.json
+  listen: "127.0.0.1:8099"      # Bind address; empty disables the HTTP ingest endpoint
+  token: "imaginary-secure-bearer-token"
+  path: ""                      # Defaults to ~/.config/navigatorr/queue.json
 
-# Persistent maintenance-agent state (SQLite). Holds user preferences,
-# maintenance jobs, release decisions, media inspections, the audit log and
-# the release blocklist. The database survives container restarts as long as
-# the cache directory is mounted as a volume (see compose.yaml).
+# ==============================================================================
+# 6. PERSISTENT STATE & DATABASE (SQLITE)
+# ==============================================================================
+# Holds maintenance jobs, user preferences, release decisions, inspection cache,
+# and audit logs. Survives restarts as long as the directory is mounted in Docker.
 database:
-  path: ""                  # defaults to ~/.cache/navigatorr/navigatorr.db
+  path: ""                      # Defaults to ~/.cache/navigatorr/navigatorr.db
 
-# Filesystem access for media inspection and safe file operations. There is
-# NO generic shell or arbitrary-file read: every path must resolve (symlinks
-# included) inside these roots. Leave a list empty to forbid that direction.
+# ==============================================================================
+# 7. FILESYSTEM & MEDIA INSPECTION
+# ==============================================================================
+# Scoped filesystem access for inspect_media (ffprobe) and safe fs tools (fs_list, fs_stat, etc.).
+# Arbitrary directory access is forbidden: all paths must resolve inside these roots.
+#
+# IMPORTANT CONTAINER PATH MAPPING:
+# When running in Docker, these paths must match the paths INSIDE the container,
+# NOT the host path!
+# Example: If host /volume1/Media/Movies is mounted as -v /volume1/Media/Movies:/media/Movies,
+# use "/media/Movies" below.
+#
+# NOTE: allowed_write_roots does NOT automatically grant read permission!
+# If a directory needs to be inspected and modified, include it in BOTH lists.
 media:
   allowed_read_roots:
     - "/media/Anime"
     - "/media/Movies"
-    - "/downloads"
+    - "/media/Downloads"
   allowed_write_roots:
-    - "/media/Anime"
-    - "/media/Movies"
-  ffprobe_path: ""          # empty = use "ffprobe" from PATH (ffmpeg package in Docker)
+    - "/media/Downloads"
+  ffprobe_path: ""              # Empty uses "ffprobe" on PATH (included in official Docker image)
 
-# Global maintenance defaults. Values stored via memory_set always win over
-# these per scope (anime, movies, global).
+# ==============================================================================
+# 8. MAINTENANCE & REPLACEMENT PREFERENCES
+# ==============================================================================
+# Default heuristics for scan_library_issues and rank_releases.
+# Values stored dynamically via `memory_set` override these settings per scope.
 maintenance:
   oversized_per_episode_mb: 900
-  preferred_groups: ["Judas", "EMBER", "ASW"]
+  preferred_groups:
+    - "ImaginaryGroup"
+    - "SampleFansub"
+    - "DemoEncodes"
   preferred_resolution: "1080p"
+
