@@ -94,6 +94,13 @@ func NormalizeLang(label string) string {
 	if code, ok := langAliases[l]; ok {
 		return code
 	}
+	// Strip BCP-47 locale/subtag (e.g. "en-us" -> "en", "es-419" -> "es", "en_us" -> "en")
+	if idx := strings.IndexAny(l, "-_"); idx > 0 {
+		base := l[:idx]
+		if code, ok := langAliases[base]; ok {
+			return code
+		}
+	}
 	return l
 }
 

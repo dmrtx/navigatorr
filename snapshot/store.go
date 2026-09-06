@@ -24,9 +24,9 @@ type Snapshot struct {
 
 // Store holds temporary snapshots with TTL.
 type Store struct {
-	mu        sync.RWMutex
-	snapshots map[string]*Snapshot
-	byKey     map[string]string // "service:path:query" -> snapshot ID
+	mu         sync.RWMutex
+	snapshots  map[string]*Snapshot
+	byKey      map[string]string // "service:path:query" -> snapshot ID
 	defaultTTL time.Duration
 }
 

@@ -391,4 +391,3 @@ func TestCallAPIDeepProjectionsAndSnapshotCursor(t *testing.T) {
 		t.Errorf("expected upstream to be called exactly 1 time, got %d", upstreamCalls)
 	}
 }
-

@@ -33,7 +33,7 @@ type RankPrefs struct {
 	RequireSubs      bool // subtitles required when audio is not eng/spa
 	MaxSizeBytes     int64
 	MinSeeders       int
-	CompactBias      bool   // a smaller healthy release beats a heavier one
+	CompactBias      bool // a smaller healthy release beats a heavier one
 	CurrentSizeBytes int64
 	Objective        string // "size_optimization" (default) or "accessibility_repair"
 }
@@ -195,14 +195,16 @@ func Score(c ReleaseCandidate, prefs RankPrefs) ScoredRelease {
 		} else {
 			switch {
 			case ratio <= 0.35:
-				bonus(10, "large_size_reduction")
-			case ratio <= 0.6:
-				bonus(6, "size_reduction")
-			case ratio > 1.5:
-				penalty(8, "larger_than_current")
+				bonus(15, "large_size_reduction")
+			case ratio <= 0.65:
+				bonus(10, "size_reduction")
+			case ratio <= 0.85:
+				bonus(5, "moderate_size_reduction")
+			case ratio > 1.0:
+				penalty(15, "larger_than_current")
 			}
 			if prefs.CompactBias && ratio > 1.0 {
-				penalty(6, "against_compact_preference")
+				penalty(10, "against_compact_preference")
 			}
 		}
 	}

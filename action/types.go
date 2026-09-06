@@ -51,13 +51,13 @@ type StepResult struct {
 
 // ExecutionContext carries live state, inputs, outputs, and dependencies across steps
 type ExecutionContext struct {
-	InstanceID  string                 `json:"instance_id"`
-	ActionName  string                 `json:"action_name"`
-	Inputs      map[string]any         `json:"inputs"`
-	State       map[string]any         `json:"state"`
-	Outputs     map[string]any         `json:"outputs"`
-	Decision    string                 `json:"decision,omitempty"`
-	ExtraInputs map[string]any         `json:"extra_inputs,omitempty"`
+	InstanceID  string         `json:"instance_id"`
+	ActionName  string         `json:"action_name"`
+	Inputs      map[string]any `json:"inputs"`
+	State       map[string]any `json:"state"`
+	Outputs     map[string]any `json:"outputs"`
+	Decision    string         `json:"decision,omitempty"`
+	ExtraInputs map[string]any `json:"extra_inputs,omitempty"`
 
 	// Dependencies
 	Engine *Engine `json:"-"`
