@@ -52,15 +52,20 @@ func (e *Engine) registerBuiltinTemplates() {
 	e.RegisterTemplate(ActionTemplate{
 		Name:           "safe_media_replacement",
 		Version:        1,
-		Description:    "Coordinates safe media replacement end-to-end: plans replacement, tracks download, verifies safety and media streams, pauses for trade-off decisions, reconciles external state before import, verifies library, and safely handles cleanup.",
+		Description:    "Coordinates safe media replacement end-to-end: plans replacement, discovers and ranks candidates, tracks download, verifies safety and media streams, pauses for trade-off decisions, reconciles external state before import, verifies library, and safely handles cleanup.",
 		RequiredInputs: []string{"service", "media_id"},
-		OptionalInputs: []string{"objective", "path", "url", "hash", "save_path", "allow_destructive"},
-		Destructive:    false,
+		OptionalInputs: []string{"objective", "path", "url", "hash", "save_path", "candidates", "media_type"},
+		Destructive:    true,
 		Steps: []StepDefinition{
 			{
 				Name:        "plan_and_check_current",
 				Description: "Records current media file details in library and checks maintenance items",
 				Run:         e.stepPlanAndCheckCurrent,
+			},
+			{
+				Name:        "find_and_rank_candidate",
+				Description: "Discovers and ranks replacement candidates using indexers, preferences, and blocklist",
+				Run:         e.stepFindAndRankCandidate,
 			},
 			{
 				Name:        "add_or_track_download",
@@ -161,17 +166,21 @@ func (e *Engine) stepResolveTorrentFiles(ctx context.Context, ec *ExecutionConte
 					path = tor.SavePath
 				}
 			}
-			if totalSize == 0 && tor.Size > 0 {
+			if tor.Size > 0 {
 				totalSize = tor.Size
 			}
 		}
 
 		if len(files) == 0 {
 			tfList, err := e.deps.Qbit.ListFiles(ctx, hash)
-			if err == nil {
+			if err == nil && len(tfList) > 0 {
+				var qbFilesTotal int64
 				for _, tf := range tfList {
 					files = append(files, tf.Name)
-					totalSize += tf.Size
+					qbFilesTotal += tf.Size
+				}
+				if qbFilesTotal > 0 {
+					totalSize = qbFilesTotal
 				}
 			}
 		}
@@ -188,6 +197,7 @@ func (e *Engine) stepResolveTorrentFiles(ctx context.Context, ec *ExecutionConte
 		if len(files) == 0 {
 			if fi, err := os.Stat(path); err == nil {
 				if fi.IsDir() {
+					var dirTotal int64
 					_ = filepath.Walk(path, func(p string, info os.FileInfo, err error) error {
 						if err == nil && !info.IsDir() {
 							rel, rerr := filepath.Rel(path, p)
@@ -196,10 +206,11 @@ func (e *Engine) stepResolveTorrentFiles(ctx context.Context, ec *ExecutionConte
 							} else {
 								files = append(files, info.Name())
 							}
-							totalSize += info.Size()
+							dirTotal += info.Size()
 						}
 						return nil
 					})
+					totalSize = dirTotal
 				} else {
 					files = append(files, filepath.Base(path))
 					totalSize = fi.Size()
@@ -356,6 +367,8 @@ func (e *Engine) stepInspectStreams(ctx context.Context, ec *ExecutionContext) (
 				primaryCodec = rep.VideoCodec
 				primaryRes = rep.Resolution
 				bitDepth = rep.BitDepth
+			} else if bitDepth == 0 && rep.BitDepth > 0 {
+				bitDepth = rep.BitDepth
 			}
 			for _, a := range rep.AudioLanguages {
 				norm := maint.NormalizeLang(a)
@@ -440,6 +453,7 @@ func (e *Engine) stepSummarizeValidation(ctx context.Context, ec *ExecutionConte
 		"subtitle_languages":    ec.State["subtitle_languages"],
 		"video_codec":           ec.State["video_codec"],
 		"resolution":            ec.State["resolution"],
+		"bit_depth":             ec.State["bit_depth"],
 	}
 	if validationIncomplete {
 		outputs["note"] = "Torrent is safe by filename screening, but media streams could not be inspected (stream inspection incomplete)"
@@ -571,6 +585,427 @@ func (e *Engine) stepPlanAndCheckCurrent(ctx context.Context, ec *ExecutionConte
 	}, nil
 }
 
+func (e *Engine) loadRankPrefs(mediaType string) maint.RankPrefs {
+	scope := "movies"
+	base := maint.DefaultMoviePrefs()
+	if mediaType == "anime" || mediaType == "series" {
+		scope = "anime"
+		base = maint.DefaultAnimePrefs()
+	}
+	if e.deps.Config != nil {
+		base.PreferredGroups = e.deps.Config.Maintenance.PreferredGroups
+		if e.deps.Config.Maintenance.PreferredResolution != "" {
+			base.PreferredRes = e.deps.Config.Maintenance.PreferredResolution
+		}
+	}
+	if e.deps.Store != nil {
+		get := func(key string, dst any) {
+			for _, sc := range []string{scope, "global"} {
+				if p, err := e.deps.Store.GetPreference(sc, key); err == nil {
+					if err := p.Value(dst); err == nil {
+						return
+					}
+				}
+			}
+		}
+		get("preferred_release_groups", &base.PreferredGroups)
+		get("preferred_resolution", &base.PreferredRes)
+		get("prefer_hevc", &base.PreferHEVC)
+		get("prefer_10bit", &base.Prefer10Bit)
+		get("prefer_dual_audio", &base.PreferDualAudio)
+		get("prefer_multi_subs", &base.PreferMultiSubs)
+		get("require_subtitles_when_non_english_spanish", &base.RequireSubs)
+		get("min_seeders", &base.MinSeeders)
+		get("compact_bias", &base.CompactBias)
+		var maxMB float64
+		get("max_release_size_mb", &maxMB)
+		if maxMB > 0 {
+			base.MaxSizeBytes = int64(maxMB) << 20
+		}
+	}
+	return base
+}
+
+func (e *Engine) stepFindAndRankCandidate(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+	// 1. If caller provided hash, url, or path directly in inputs, preserve current behavior
+	hash := strings.ToLower(getString(ec.Inputs, "hash"))
+	url := getString(ec.Inputs, "url")
+	path := getString(ec.Inputs, "path")
+	if hash != "" || url != "" || path != "" {
+		return StepResult{
+			Status: StepCompleted,
+			Outputs: map[string]any{
+				"candidate_source": "user_input",
+			},
+		}, nil
+	}
+
+	// 2. If resuming from a human/LLM decision
+	if ec.Decision != "" {
+		if strings.EqualFold(ec.Decision, "cancel") || strings.EqualFold(ec.Decision, "reject") {
+			return StepResult{
+				Status: StepFailed,
+				Error:  "replacement cancelled: candidate rejected",
+			}, nil
+		}
+		if rawPending, ok := ec.State["pending_candidates"]; ok {
+			var pendingList []map[string]any
+			if b, err := json.Marshal(rawPending); err == nil {
+				_ = json.Unmarshal(b, &pendingList)
+			}
+			for _, item := range pendingList {
+				guid := strVal(item["guid"])
+				title := strVal(item["title"])
+				if guid == ec.Decision || title == ec.Decision || strings.EqualFold(ec.Decision, "proceed") {
+					candHash := strVal(item["hash"])
+					candURL := strVal(item["url"])
+					if candHash == "" && candURL != "" {
+						if m := magnetHashRegex.FindStringSubmatch(candURL); len(m) > 1 {
+							candHash = strings.ToLower(m[1])
+						}
+					}
+					outputs := map[string]any{
+						"selected_candidate": item,
+						"candidate_source":   "decision_selected",
+					}
+					if candHash != "" {
+						outputs["hash"] = candHash
+					}
+					if candURL != "" {
+						outputs["url"] = candURL
+					}
+					return StepResult{
+						Status:  StepCompleted,
+						Outputs: outputs,
+					}, nil
+				}
+			}
+		}
+	}
+
+	// 3. Obtain candidates from inputs["candidates"] or service search
+	var rawCandidates []map[string]any
+
+	if rawCands, ok := ec.Inputs["candidates"]; ok && rawCands != nil {
+		switch t := rawCands.(type) {
+		case string:
+			_ = json.Unmarshal([]byte(t), &rawCandidates)
+		case []any:
+			for _, e := range t {
+				if m, ok := e.(map[string]any); ok {
+					rawCandidates = append(rawCandidates, m)
+				}
+			}
+		case []map[string]any:
+			rawCandidates = t
+		}
+	}
+
+	service := strings.ToLower(getString(ec.Inputs, "service"))
+	mediaID := getString(ec.Inputs, "media_id")
+
+	if len(rawCandidates) == 0 && e.deps.Registry != nil && service != "" && mediaID != "" {
+		svc, err := e.deps.Registry.Get(service)
+		if err == nil && svc != nil {
+			var endpoint string
+			var query map[string]string
+			if service == "radarr" {
+				endpoint = "/release"
+				query = map[string]string{"movieId": mediaID}
+			} else if service == "sonarr" {
+				endpoint = "/release"
+				query = map[string]string{"seriesId": mediaID}
+			}
+			if endpoint != "" {
+				data, gerr := svc.Get(ctx, endpoint, query)
+				if gerr == nil {
+					_ = json.Unmarshal(data, &rawCandidates)
+				}
+			}
+		}
+
+		// Fallback to Prowlarr if available and 0 candidates returned from arr service
+		if len(rawCandidates) == 0 {
+			if prowlarrSvc, perr := e.deps.Registry.Get("prowlarr"); perr == nil && prowlarrSvc != nil {
+				title := getString(ec.State, "media_title")
+				if title != "" {
+					pdata, perr2 := prowlarrSvc.Get(ctx, "/api/v1/search", map[string]string{"query": title, "type": "search"})
+					if perr2 == nil {
+						_ = json.Unmarshal(pdata, &rawCandidates)
+					}
+				}
+			}
+		}
+	}
+
+	if len(rawCandidates) == 0 {
+		return StepResult{
+			Status: StepFailed,
+			Error:  "no suitable replacement candidate found",
+		}, nil
+	}
+
+	// 4. Exclude blocklisted, dangerous, and build candidate list
+	type candidateMeta struct {
+		hash string
+		url  string
+	}
+	metaByGUID := make(map[string]candidateMeta)
+	metaByTitle := make(map[string]candidateMeta)
+	var viableCands []maint.ReleaseCandidate
+
+	for _, m := range rawCandidates {
+		guid := strVal(m["guid"])
+		title := strVal(m["title"])
+		if title == "" {
+			title = guid
+		}
+		if title == "" {
+			continue
+		}
+
+		infoHash := strVal(m["infoHash"])
+		if infoHash == "" {
+			infoHash = strVal(m["info_hash"])
+		}
+		if infoHash == "" {
+			infoHash = strVal(m["hash"])
+		}
+		downloadURL := strVal(m["downloadUrl"])
+		if downloadURL == "" {
+			downloadURL = strVal(m["download_url"])
+		}
+		if downloadURL == "" {
+			downloadURL = strVal(m["url"])
+		}
+		magnetURL := strVal(m["magnetUrl"])
+		if magnetURL == "" {
+			magnetURL = strVal(m["magnet_url"])
+		}
+
+		if infoHash == "" && downloadURL != "" {
+			if matches := magnetHashRegex.FindStringSubmatch(downloadURL); len(matches) > 1 {
+				infoHash = strings.ToLower(matches[1])
+			}
+		}
+		if infoHash == "" && magnetURL != "" {
+			if matches := magnetHashRegex.FindStringSubmatch(magnetURL); len(matches) > 1 {
+				infoHash = strings.ToLower(matches[1])
+			}
+		}
+		if infoHash == "" && strings.HasPrefix(guid, "magnet:") {
+			if matches := magnetHashRegex.FindStringSubmatch(guid); len(matches) > 1 {
+				infoHash = strings.ToLower(matches[1])
+			}
+		}
+
+		urlVal := downloadURL
+		if urlVal == "" {
+			urlVal = magnetURL
+		}
+		if urlVal == "" && strings.HasPrefix(guid, "magnet:") {
+			urlVal = guid
+		}
+		if urlVal == "" && infoHash != "" {
+			urlVal = "magnet:?xt=urn:btih:" + infoHash
+		}
+
+		// Security: exclude dangerous filenames & blocked extensions
+		if maint.IsDangerousFilename(title) {
+			continue
+		}
+		hasDangerousExt := false
+		lowerTitle := strings.ToLower(title)
+		for ext := range maint.BlockedExtensions {
+			if strings.HasSuffix(lowerTitle, "."+ext) {
+				hasDangerousExt = true
+				break
+			}
+		}
+		if hasDangerousExt {
+			continue
+		}
+
+		// Blocklist check: never select blocklisted releases
+		if e.deps.Store != nil {
+			if (guid != "" && e.deps.Store.IsBlocked(guid)) ||
+				(infoHash != "" && e.deps.Store.IsBlocked(infoHash)) ||
+				(title != "" && e.deps.Store.IsBlocked(title)) {
+				continue
+			}
+		}
+
+		relGroup := strVal(m["releaseGroup"])
+		if relGroup == "" {
+			relGroup = strVal(m["release_group"])
+		}
+		if relGroup == "" {
+			relGroup = strVal(m["group"])
+		}
+		if relGroup == "" {
+			if strings.HasPrefix(title, "[") {
+				if idx := strings.Index(title, "]"); idx > 1 {
+					relGroup = title[1:idx]
+				}
+			}
+		}
+
+		size := int64(numVal(m["size"]))
+		seeders := int(numVal(m["seeders"]))
+		bitDepth := int(numVal(m["bit_depth"]))
+		if bitDepth == 0 && (strings.Contains(lowerTitle, "10bit") || strings.Contains(lowerTitle, "10-bit")) {
+			bitDepth = 10
+		}
+		videoCodec := strVal(m["videoCodec"])
+		if videoCodec == "" {
+			videoCodec = strVal(m["video_codec"])
+		}
+		resolution := strVal(m["resolution"])
+
+		audioLangs := listVal(m["audio_langs"])
+		if len(audioLangs) == 0 {
+			audioLangs = listVal(m["audio"])
+		}
+		subLangs := listVal(m["sub_langs"])
+		if len(subLangs) == 0 {
+			subLangs = listVal(m["subs"])
+		}
+
+		dualAudio := boolVal(m["dual_audio"])
+		if !dualAudio && strings.Contains(lowerTitle, "dual audio") {
+			dualAudio = true
+		}
+		multiSubs := boolVal(m["multi_subs"])
+		if !multiSubs && strings.Contains(lowerTitle, "multi-subs") {
+			multiSubs = true
+		}
+
+		cand := maint.ReleaseCandidate{
+			GUID:         guid,
+			Title:        title,
+			ReleaseGroup: relGroup,
+			Size:         size,
+			Seeders:      seeders,
+			VideoCodec:   videoCodec,
+			Resolution:   resolution,
+			BitDepth:     bitDepth,
+			AudioLangs:   audioLangs,
+			SubLangs:     subLangs,
+			DualAudio:    dualAudio,
+			MultiSubs:    multiSubs,
+		}
+		viableCands = append(viableCands, cand)
+		if guid != "" {
+			metaByGUID[guid] = candidateMeta{hash: infoHash, url: urlVal}
+		}
+		if title != "" {
+			metaByTitle[title] = candidateMeta{hash: infoHash, url: urlVal}
+		}
+	}
+
+	if len(viableCands) == 0 {
+		return StepResult{
+			Status: StepFailed,
+			Error:  "no suitable replacement candidate found",
+		}, nil
+	}
+
+	// 5. Rank candidates using existing ranking engine and preferences
+	mediaType := "movies"
+	if service == "sonarr" {
+		mediaType = "anime"
+	}
+	if mt := getString(ec.Inputs, "media_type"); mt != "" {
+		mediaType = mt
+	}
+
+	prefs := e.loadRankPrefs(mediaType)
+	if curSize := getInt64(ec.State, "current_size"); curSize > 0 {
+		prefs.CurrentSizeBytes = curSize
+	}
+	if obj := getString(ec.Inputs, "objective"); obj != "" {
+		prefs.Objective = obj
+	} else if obj := getString(ec.State, "objective"); obj != "" {
+		prefs.Objective = obj
+	}
+
+	ranked := maint.RankRelease(viableCands, prefs)
+	if len(ranked) == 0 {
+		return StepResult{
+			Status: StepFailed,
+			Error:  "no suitable replacement candidate found",
+		}, nil
+	}
+
+	best := ranked[0]
+
+	// 6. If best candidate has negative/zero score (trade-offs), pause with waiting_decision
+	if best.Score <= 0 {
+		waitingOptions := make([]WaitingOption, 0, min(len(ranked), 5)+1)
+		pendingList := make([]map[string]any, 0, min(len(ranked), 5))
+		for _, r := range ranked[:min(len(ranked), 5)] {
+			meta := metaByGUID[r.GUID]
+			if meta.hash == "" && meta.url == "" {
+				meta = metaByTitle[r.Title]
+			}
+			waitingOptions = append(waitingOptions, WaitingOption{
+				Decision:    r.GUID,
+				Description: fmt.Sprintf("Select %s (score: %.1f, reasons: %s)", r.Title, r.Score, strings.Join(r.Reasons, ", ")),
+			})
+			pendingList = append(pendingList, map[string]any{
+				"guid":    r.GUID,
+				"title":   r.Title,
+				"score":   r.Score,
+				"reasons": r.Reasons,
+				"hash":    meta.hash,
+				"url":     meta.url,
+			})
+		}
+		waitingOptions = append(waitingOptions, WaitingOption{
+			Decision:    "cancel",
+			Description: "Cancel replacement - no candidate meets automatic criteria",
+		})
+
+		return StepResult{
+			Status:         StepWaitingDecision,
+			WaitingReason:  "Candidates found but none meet automatic criteria without trade-offs; human decision required",
+			WaitingOptions: waitingOptions,
+			Outputs: map[string]any{
+				"candidate_count":    len(ranked),
+				"pending_candidates": pendingList,
+				"top_score":          best.Score,
+			},
+		}, nil
+	}
+
+	// 7. Best candidate is clearly valid (Score > 0)
+	meta := metaByGUID[best.GUID]
+	if meta.hash == "" && meta.url == "" {
+		meta = metaByTitle[best.Title]
+	}
+
+	outputs := map[string]any{
+		"selected_candidate": map[string]any{
+			"guid":    best.GUID,
+			"title":   best.Title,
+			"score":   best.Score,
+			"reasons": best.Reasons,
+		},
+		"candidate_source": "auto_ranked",
+	}
+	if meta.hash != "" {
+		outputs["hash"] = meta.hash
+	}
+	if meta.url != "" {
+		outputs["url"] = meta.url
+	}
+
+	return StepResult{
+		Status:  StepCompleted,
+		Outputs: outputs,
+	}, nil
+}
+
 func (e *Engine) stepAddOrTrackDownload(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
 	// If local path is provided directly, no download client is needed
 	if path := getString(ec.Inputs, "path"); path != "" {
@@ -582,9 +1017,24 @@ func (e *Engine) stepAddOrTrackDownload(ctx context.Context, ec *ExecutionContex
 			},
 		}, nil
 	}
+	if path := getString(ec.State, "download_path"); path != "" {
+		return StepResult{
+			Status: StepCompleted,
+			Outputs: map[string]any{
+				"download_path": path,
+				"download_done": true,
+			},
+		}, nil
+	}
 
 	hash := strings.ToLower(getString(ec.Inputs, "hash"))
+	if hash == "" {
+		hash = strings.ToLower(getString(ec.State, "hash"))
+	}
 	url := getString(ec.Inputs, "url")
+	if url == "" {
+		url = getString(ec.State, "url")
+	}
 	if hash == "" && url != "" {
 		if m := magnetHashRegex.FindStringSubmatch(url); len(m) > 1 {
 			hash = strings.ToLower(m[1])
@@ -602,13 +1052,16 @@ func (e *Engine) stepAddOrTrackDownload(ctx context.Context, ec *ExecutionContex
 	// If url provided and not yet added, add to qbit
 	if url != "" {
 		savePath := getString(ec.Inputs, "save_path")
+		if savePath == "" {
+			savePath = getString(ec.State, "save_path")
+		}
 		_ = e.deps.Qbit.AddTorrent(ctx, url, savePath)
 	}
 
 	if hash == "" {
 		return StepResult{
 			Status: StepFailed,
-			Error:  "could not determine infohash from inputs (provide hash or url)",
+			Error:  "could not determine infohash from inputs or candidate search (provide hash or url)",
 		}, nil
 	}
 
@@ -989,6 +1442,9 @@ func (e *Engine) stepVerifyLibraryState(ctx context.Context, ec *ExecutionContex
 		}, nil
 	}
 
+	var newFileID string
+	var newPath string
+
 	if service == "radarr" {
 		hasFile, _ := m["hasFile"].(bool)
 		if !hasFile {
@@ -996,6 +1452,12 @@ func (e *Engine) stepVerifyLibraryState(ctx context.Context, ec *ExecutionContex
 				Status: StepFailed,
 				Error:  "library verification failed: media has no active file in library; keeping original",
 			}, nil
+		}
+		if mf, ok := m["movieFile"].(map[string]any); ok {
+			newFileID = fmt.Sprintf("%v", mf["id"])
+			if p, ok := mf["path"].(string); ok {
+				newPath = p
+			}
 		}
 	} else if service == "sonarr" {
 		var epCount int64
@@ -1010,6 +1472,10 @@ func (e *Engine) stepVerifyLibraryState(ctx context.Context, ec *ExecutionContex
 			var epFiles []map[string]any
 			if json.Unmarshal(epData, &epFiles) == nil && len(epFiles) > 0 {
 				epCount = int64(len(epFiles))
+				newFileID = fmt.Sprintf("%v", epFiles[0]["id"])
+				if p, ok := epFiles[0]["path"].(string); ok {
+					newPath = p
+				}
 			}
 		}
 		if epCount == 0 {
@@ -1020,11 +1486,19 @@ func (e *Engine) stepVerifyLibraryState(ctx context.Context, ec *ExecutionContex
 		}
 	}
 
+	outputs := map[string]any{
+		"library_verified": true,
+	}
+	if newFileID != "" {
+		outputs["new_file_id"] = newFileID
+	}
+	if newPath != "" {
+		outputs["new_path"] = newPath
+	}
+
 	return StepResult{
-		Status: StepCompleted,
-		Outputs: map[string]any{
-			"library_verified": true,
-		},
+		Status:  StepCompleted,
+		Outputs: outputs,
 	}, nil
 }
 
@@ -1040,19 +1514,62 @@ func (e *Engine) stepUpdateMaintenanceAndCleanup(ctx context.Context, ec *Execut
 	}
 
 	// 2. Centralized safety gate for cleanup
-	allowCleanup, _ := ec.Inputs["allow_cleanup"].(bool)
+	// Policy: safe_media_replacement cleans up the original file if replacement succeeded.
+	// Safety invariants:
+	//   - library verified (library_verified == true)
+	//   - active new file ID confirmed (newFileID != "")
+	//   - known original path recorded (current_path != "")
+	//   - original path does not match new path (if new path known)
+	//   - new file ID does not match original file ID
+	// Destructive authorization:
+	//   - e.AllowDestructive() == true
+	libVerified, _ := ec.State["library_verified"].(bool)
+	oldPath := getString(ec.State, "current_path")
+	newPath := getString(ec.State, "new_path")
+	curFileID := getString(ec.State, "current_file_id")
+
+	cleanupPerformed := false
 	cleanupStatus := "none_requested"
 
-	if allowCleanup {
-		if !e.AllowDestructive() {
-			cleanupStatus = "skipped_destructive_disabled"
-		} else {
-			// Clean up old file or torrent download
-			cleanupStatus = "performed"
-			oldPath := getString(ec.State, "current_path")
-			if oldPath != "" && e.deps.Fs != nil {
-				_ = e.deps.Fs.Delete(oldPath)
+	if oldPath == "" {
+		cleanupStatus = "skipped_no_original_path"
+	} else if !libVerified || newFileID == "" || (curFileID != "" && curFileID == newFileID) || (newPath != "" && oldPath == newPath) {
+		cleanupStatus = "skipped_safety_invariants_unmet"
+	} else if !e.AllowDestructive() {
+		cleanupStatus = "skipped_destructive_disabled"
+	} else {
+		// Verify on filesystem before attempting deletion:
+		// If the file was already unlinked/moved by the Arr service during import, it is already absent.
+		if _, err := os.Stat(oldPath); os.IsNotExist(err) {
+			cleanupStatus = "already_absent"
+			cleanupPerformed = false
+		} else if e.deps.Fs != nil {
+			if delErr := e.deps.Fs.Delete(oldPath); delErr != nil {
+				if os.IsNotExist(delErr) {
+					cleanupStatus = "already_absent"
+					cleanupPerformed = false
+				} else {
+					// Cleanup failure must NOT obscure the successful replacement and verification.
+					// Record step failure with explicit context so retry only re-attempts cleanup.
+					return StepResult{
+						Status: StepFailed,
+						Error:  fmt.Sprintf("cleanup failed: %v (media replacement and library verification succeeded)", delErr),
+						Outputs: map[string]any{
+							"maintenance_auto_resolved": autoResolved,
+							"replacement_verified":      true,
+							"library_verified":          true,
+							"cleanup_performed":         false,
+							"cleanup_status":            "failed",
+							"cleanup_error":             delErr.Error(),
+						},
+					}, nil
+				}
+			} else {
+				cleanupPerformed = true
+				cleanupStatus = "performed"
 			}
+		} else {
+			cleanupStatus = "skipped_no_fs_resolver"
 		}
 	}
 
@@ -1060,6 +1577,9 @@ func (e *Engine) stepUpdateMaintenanceAndCleanup(ctx context.Context, ec *Execut
 		Status: StepCompleted,
 		Outputs: map[string]any{
 			"maintenance_auto_resolved": autoResolved,
+			"replacement_verified":      true,
+			"library_verified":          true,
+			"cleanup_performed":         cleanupPerformed,
 			"cleanup_status":            cleanupStatus,
 			"success":                   true,
 		},
@@ -1133,4 +1653,66 @@ func containsStr(slice []string, s string) bool {
 		}
 	}
 	return false
+}
+
+func strVal(v any) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return fmt.Sprintf("%v", v)
+}
+
+func boolVal(v any) bool {
+	switch t := v.(type) {
+	case bool:
+		return t
+	case string:
+		if b, err := strconv.ParseBool(strings.TrimSpace(t)); err == nil {
+			return b
+		}
+	}
+	return false
+}
+
+func listVal(v any) []string {
+	if v == nil {
+		return nil
+	}
+	switch t := v.(type) {
+	case []string:
+		return t
+	case []any:
+		var res []string
+		for _, e := range t {
+			if s, ok := e.(string); ok {
+				res = append(res, s)
+			}
+		}
+		return res
+	case string:
+		trimmed := strings.TrimSpace(t)
+		if strings.HasPrefix(trimmed, "[") {
+			var res []string
+			if json.Unmarshal([]byte(trimmed), &res) == nil {
+				return res
+			}
+		}
+		if trimmed != "" {
+			parts := strings.Split(trimmed, "/")
+			if len(parts) == 1 {
+				parts = strings.Split(trimmed, ",")
+			}
+			var res []string
+			for _, p := range parts {
+				if tr := strings.TrimSpace(p); tr != "" {
+					res = append(res, tr)
+				}
+			}
+			return res
+		}
+	}
+	return nil
 }
