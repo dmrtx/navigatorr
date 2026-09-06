@@ -28,15 +28,43 @@ This is the workhorse. It makes authenticated HTTP requests to any configured se
 **Parameters:**
 
 | Param | Required | Description |
-|-------|----------|-------------|
+|---|---|---|
 | `service` | Yes | Service name: `sonarr`, `radarr`, `lidarr`, `readarr`, `chaptarr`, `prowlarr`, `profilarr`, `bazarr`, `seerr`, `overseerr` |
-| `path` | Yes | API path without version prefix (e.g. `/series`, `/movie`). The version prefix (`/api/v3`, `/api/v1`) is added automatically. |
+| `path` | Yes | API path without version prefix (e.g. `/series`, `/movie`, `/system/settings`). The version prefix (`/api/v3`, `/api/v1`, `/api`) is added automatically. |
 | `method` | No | HTTP method. Defaults to `GET`. |
 | `query` | No | Query parameters as a JSON object: `{"term": "some show name"}` |
-| `body` | No | Request body as a JSON string. |
+| `body` | No | JSON request body encoded as a JSON string. Do not use together with `form`. |
+| `content_type` | No | Request content type. Defaults to `application/json` when `body` is supplied. Supported: `application/json`, `application/x-www-form-urlencoded`, `multipart/form-data`. |
+| `form` | No | Form fields for `application/x-www-form-urlencoded` (or `multipart/form-data`) as JSON object or key-value map. Arrays of primitives are encoded as repeated keys (`foo=a&foo=b`). Do not use together with `body`. |
+| `include_metadata` | No | When `true`, returns a structured JSON envelope containing `status_code`, request metadata, mutating flag, and response body. |
 | `fields` | No | Comma-separated fields to include in the response. Supports dot notation for nested fields and array drilling. |
 | `filter` | No | Filter array results. Format: `field:op:value`. Ops: `contains`, `eq`, `ne`, `gt`, `lt`. |
 | `limit` | No | Max items to return from array responses. |
+| `cursor` | No | Opaque cursor token from a previous `call_api` response to retrieve the next page from local snapshot. |
+
+**Request Body Examples (JSON vs Form):**
+
+```json
+// JSON request (Radarr, Sonarr, Seerr, etc.)
+call_api(
+  service="radarr",
+  method="POST",
+  path="/movie",
+  body="{\"title\": \"Inception\", \"qualityProfileId\": 1, ...}"
+)
+
+// Form-urlencoded request (Bazarr settings, language profiles, etc.)
+call_api(
+  service="bazarr",
+  method="POST",
+  path="/system/settings",
+  content_type="application/x-www-form-urlencoded",
+  form={
+    "languages-profiles": "[{\"profileId\": 1, \"name\": \"Accessible EN+ES\", \"cutoff\": 65535, \"items\": [{\"id\": 1, \"language\": \"en\"}, {\"id\": 2, \"language\": \"es\"}]}]",
+    "languages-enabled": ["en", "es"]
+  }
+)
+```
 
 **Field Selection Examples:**
 
