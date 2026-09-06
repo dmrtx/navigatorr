@@ -22,6 +22,26 @@ func (c *Client) ListTorrents(ctx context.Context) ([]TorrentInfo, error) {
 	return torrents, nil
 }
 
+// GetTorrent retrieves a specific torrent by hash.
+func (c *Client) GetTorrent(ctx context.Context, hash string) (*TorrentInfo, error) {
+	if hash == "" {
+		return nil, fmt.Errorf("hash is required")
+	}
+	data, err := c.do(ctx, "GET", "/api/v2/torrents/info?hashes="+url.QueryEscape(hash), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var torrents []TorrentInfo
+	if err := json.Unmarshal(data, &torrents); err != nil {
+		return nil, fmt.Errorf("decoding torrent: %w", err)
+	}
+	if len(torrents) == 0 {
+		return nil, fmt.Errorf("torrent %q not found", hash)
+	}
+	return &torrents[0], nil
+}
+
 // AddTorrent adds a torrent by magnet link or URL.
 func (c *Client) AddTorrent(ctx context.Context, urls string, savePath string) error {
 	form := url.Values{

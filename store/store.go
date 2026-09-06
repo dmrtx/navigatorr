@@ -287,6 +287,13 @@ var migrations = []migration{
 		`ALTER TABLE action_log ADD COLUMN identifiers TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS idx_action_log_media ON action_log (media, created_at)`,
 	}},
+	{version: 3, statements: []string{
+		`ALTER TABLE action_instances ADD COLUMN idempotency_key TEXT NOT NULL DEFAULT ''`,
+		`CREATE INDEX IF NOT EXISTS idx_action_instances_idempotency ON action_instances (action_name, idempotency_key, status)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_action_instances_active_idempotency
+			ON action_instances (action_name, idempotency_key)
+			WHERE idempotency_key != '' AND status NOT IN ('completed', 'failed', 'cancelled')`,
+	}},
 }
 
 // Preference is one scoped key/value entry.
