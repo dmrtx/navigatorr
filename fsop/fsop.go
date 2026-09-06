@@ -36,6 +36,9 @@ func NewResolver(readRoots, writeRoots []string) (*Resolver, error) {
 			if err != nil {
 				return nil, fmt.Errorf("resolving root %q: %w", r, err)
 			}
+			if real, err := filepath.EvalSymlinks(abs); err == nil {
+				abs = real
+			}
 			out = append(out, filepath.Clean(abs))
 		}
 		return out, nil
@@ -60,20 +63,25 @@ func resolve(path string, roots []string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	real, err := filepath.EvalSymlinks(abs)
-	if err != nil {
-		// Missing file: fall back to the lexical path so callers get a
-		// clean "not inside roots" or "not found" rather than a symlink error.
-		real = filepath.Clean(abs)
-	} else {
-		real = filepath.Clean(real)
-	}
+	real := evalExistingSymlinks(abs)
 	for _, root := range roots {
 		if real == root || strings.HasPrefix(real, root+string(os.PathSeparator)) {
 			return real, nil
 		}
 	}
 	return "", fmt.Errorf("path %q is outside the allowed roots", path)
+}
+
+func evalExistingSymlinks(p string) string {
+	real, err := filepath.EvalSymlinks(p)
+	if err == nil {
+		return filepath.Clean(real)
+	}
+	dir, file := filepath.Split(filepath.Clean(p))
+	if dir == p || dir == "" || dir == "." || dir == string(filepath.Separator) {
+		return filepath.Clean(p)
+	}
+	return filepath.Join(evalExistingSymlinks(filepath.Clean(dir)), file)
 }
 
 // ResolveRead validates a read path.

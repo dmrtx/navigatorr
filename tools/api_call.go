@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/jakenesler/navigatorr/arrservice"
+	"github.com/jakenesler/navigatorr/resilience"
+	"github.com/jakenesler/navigatorr/snapshot"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -15,15 +17,16 @@ import (
 func registerAPICallTool(s *server.MCPServer, registry *arrservice.Registry, maxResponseSizeKB int, allowDestructive bool) {
 	s.AddTool(
 		mcp.NewTool("call_api",
-			mcp.WithDescription("Make an authenticated API call to any configured *arr service. Returns the JSON response. Use fields/limit/filter to reduce response size."),
-			mcp.WithString("service", mcp.Required(), mcp.Description("Service name (e.g. sonarr, radarr)")),
+			mcp.WithDescription("Make an authenticated API call to any configured *arr service. Returns the JSON response. Supports real field projections, snapshot caching, and cursor-based pagination for large collections."),
+			mcp.WithString("service", mcp.Description("Service name (e.g. sonarr, radarr). Required unless cursor is provided.")),
 			mcp.WithString("method", mcp.Description("HTTP method (default: GET)")),
-			mcp.WithString("path", mcp.Required(), mcp.Description("API path (e.g. /series, /movie). The API version prefix is added automatically.")),
+			mcp.WithString("path", mcp.Description("API path (e.g. /series, /movie). The API version prefix is added automatically. Required unless cursor is provided.")),
 			mcp.WithString("query", mcp.Description("Query parameters as JSON object (e.g. {\"term\": \"breaking bad\"})")),
 			mcp.WithString("body", mcp.Description("Request body as JSON string")),
-			mcp.WithString("fields", mcp.Description("Comma-separated fields to include in response. Supports nested fields with dot notation (e.g. \"id,title,statistics.sizeOnDisk\"). For paginated responses, drill into arrays: \"records.id,records.title,records.status\" to select fields from each item in the records array.")),
+			mcp.WithString("fields", mcp.Description("Comma-separated fields to project in response. Supports nested dot notation (e.g. \"id,title,movieFile.id,movieFile.size,movieFile.mediaInfo.audioLanguages,movieFile.mediaInfo.subtitles\").")),
 			mcp.WithString("filter", mcp.Description("Filter array results. Format: \"field:op:value\". Ops: contains, eq, ne, gt, lt (e.g. \"title:contains:Pirates\", \"year:gt:2000\", \"hasFile:eq:true\")")),
-			mcp.WithString("limit", mcp.Description("Max number of items to return from array responses")),
+			mcp.WithString("limit", mcp.Description("Max number of items to return from array responses (default: 50 for large collections)")),
+			mcp.WithString("cursor", mcp.Description("Opaque cursor token from a previous call_api response to retrieve the next page from local snapshot")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			return handleCallAPI(ctx, req, registry, maxResponseSizeKB, allowDestructive)
@@ -32,26 +35,103 @@ func registerAPICallTool(s *server.MCPServer, registry *arrservice.Registry, max
 }
 
 func handleCallAPI(ctx context.Context, req mcp.CallToolRequest, registry *arrservice.Registry, maxResponseSizeKB int, allowDestructive bool) (*mcp.CallToolResult, error) {
+	cursorStr := strings.TrimSpace(mcp.ParseString(req, "cursor", ""))
+	limitStr := strings.TrimSpace(mcp.ParseString(req, "limit", ""))
+	fieldsStr := strings.TrimSpace(mcp.ParseString(req, "fields", ""))
+	filterStr := strings.TrimSpace(mcp.ParseString(req, "filter", ""))
+
+	// If cursor is provided, retrieve from local snapshot without hitting upstream
+	if cursorStr != "" {
+		if registry == nil || registry.Snapshots == nil {
+			return mcp.NewToolResultError("snapshot store is not available"), nil
+		}
+		limit := 50
+		if limitStr != "" {
+			if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
+				limit = l
+			}
+		}
+		items, nextCursor, complete, total, offset, err := registry.Snapshots.GetPage(cursorStr, limit)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("cursor error: %v", err)), nil
+		}
+		if filterStr != "" {
+			items = applyFilter(items, filterStr)
+		}
+		if fieldsStr != "" {
+			fields := parseFields(fieldsStr)
+			items = ProjectFields(items, fields).([]any)
+		}
+		respMap := map[string]any{
+			"items":    items,
+			"complete": complete,
+			"total":    total,
+			"offset":   offset,
+		}
+		if nextCursor != "" {
+			respMap["next_cursor"] = nextCursor
+		}
+		data, _ := json.MarshalIndent(respMap, "", "  ")
+		return mcp.NewToolResultText(string(data)), nil
+	}
+
 	svcName := mcp.ParseString(req, "service", "")
 	method := strings.ToUpper(strings.TrimSpace(mcp.ParseString(req, "method", "GET")))
 	path := mcp.ParseString(req, "path", "")
 	queryStr := mcp.ParseString(req, "query", "")
 	bodyStr := mcp.ParseString(req, "body", "")
-	fieldsStr := mcp.ParseString(req, "fields", "")
-	filterStr := mcp.ParseString(req, "filter", "")
-	limitStr := mcp.ParseString(req, "limit", "")
 
 	if svcName == "" || path == "" {
 		return mcp.NewToolResultError("service and path are required"), nil
 	}
 
-	if method == "DELETE" && !allowDestructive {
-		return mcp.NewToolResultError("DELETE requests are disabled. Set allow_destructive: true in config.yaml to enable."), nil
+	if isDestr, reason := isDestructiveAPICall(method, path, bodyStr); isDestr && !allowDestructive {
+		return mcp.NewToolResultError(fmt.Sprintf("destructive operations are disabled (%s). Set allow_destructive: true in config.yaml to enable.", reason)), nil
 	}
 
 	svc, err := registry.Get(svcName)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	// Check for cached GET snapshot to avoid hammering upstream and SQLite database locks
+	if method == "GET" && registry.Snapshots != nil {
+		if snap, ok := registry.Snapshots.Find(svcName, path, queryStr); ok {
+			items := snap.Items
+			if filterStr != "" {
+				items = applyFilter(items, filterStr)
+			}
+			if fieldsStr != "" {
+				items = ProjectFields(items, parseFields(fieldsStr)).([]any)
+			}
+			limit := 50
+			if limitStr != "" {
+				if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
+					limit = l
+				}
+			}
+			if limitStr != "" || len(items) > 50 {
+				firstPage := items
+				complete := true
+				nextCursor := ""
+				if len(items) > limit {
+					firstPage = items[:limit]
+					complete = false
+					nextCursor = snapshot.EncodeCursor(snap.ID, limit)
+				}
+				respMap := map[string]any{
+					"items":    firstPage,
+					"complete": complete,
+					"total":    snap.Total,
+					"offset":   0,
+				}
+				if nextCursor != "" {
+					respMap["next_cursor"] = nextCursor
+				}
+				data, _ := json.MarshalIndent(respMap, "", "  ")
+				return mcp.NewToolResultText(string(data)), nil
+			}
+		}
 	}
 
 	// Parse query params
@@ -67,8 +147,7 @@ func handleCallAPI(ctx context.Context, req mcp.CallToolRequest, registry *arrse
 		}
 	}
 
-	// Parse body — handle both string and object forms.
-	// Some MCP clients may deserialize a JSON body string into an object.
+	// Parse body
 	var body []byte
 	if bodyStr != "" {
 		if !json.Valid([]byte(bodyStr)) {
@@ -76,7 +155,6 @@ func handleCallAPI(ctx context.Context, req mcp.CallToolRequest, registry *arrse
 		}
 		body = []byte(bodyStr)
 	} else if raw, ok := req.GetArguments()["body"]; ok && raw != nil {
-		// Body was passed as a JSON object, not a string — marshal it back.
 		b, err := json.Marshal(raw)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("invalid body: %v", err)), nil
@@ -89,35 +167,71 @@ func handleCallAPI(ctx context.Context, req mcp.CallToolRequest, registry *arrse
 		return mcp.NewToolResultError(fmt.Sprintf("request failed: %v", err)), nil
 	}
 
-	// A non-2xx status must surface as an error. *arr services return a JSON
-	// body on failure, so without this an auth or validation failure parses
-	// cleanly and reads as a successful call.
 	if statusCode < 200 || statusCode > 299 {
+		structErr := resilience.ClassifyError(svcName, statusCode, respBody)
 		return mcp.NewToolResultError(fmt.Sprintf(
-			"%s %s failed: HTTP %d\n%s",
-			method, path, statusCode, truncate(string(respBody), 2000))), nil
+			"%s %s failed: HTTP %d (category: %s, retryable: %v)\n%s",
+			method, path, statusCode, structErr.Category, structErr.Retryable, truncate(string(respBody), 2000))), nil
 	}
 
 	// Parse response JSON
 	var jsonResp any
 	if err := json.Unmarshal(respBody, &jsonResp); err != nil {
-		// Not JSON, return raw
 		return mcp.NewToolResultText(fmt.Sprintf("status: %d\n%s", statusCode, string(respBody))), nil
 	}
 
-	// Apply filter, fields, limit to responses
-	needsProcessing := fieldsStr != "" || filterStr != "" || limitStr != ""
-	if needsProcessing {
-		jsonResp = processResponse(jsonResp, fieldsStr, filterStr, limitStr)
+	// If response is an array from a GET request, create a snapshot
+	if arr, ok := jsonResp.([]any); ok && method == "GET" && registry != nil && registry.Snapshots != nil {
+		snap := registry.Snapshots.Create(svcName, path, queryStr, arr)
+		if filterStr != "" {
+			arr = applyFilter(arr, filterStr)
+		}
+		if fieldsStr != "" {
+			arr = ProjectFields(arr, parseFields(fieldsStr)).([]any)
+		}
+		limit := 50
+		if limitStr != "" {
+			if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
+				limit = l
+			}
+		}
+		// Return cursor envelope if requested or if collection is large
+		if limitStr != "" || len(arr) > 50 {
+			firstPage := arr
+			complete := true
+			nextCursor := ""
+			if len(arr) > limit {
+				firstPage = arr[:limit]
+				complete = false
+				nextCursor = snapshot.EncodeCursor(snap.ID, limit)
+			}
+			respMap := map[string]any{
+				"items":    firstPage,
+				"complete": complete,
+				"total":    snap.Total,
+				"offset":   0,
+			}
+			if nextCursor != "" {
+				respMap["next_cursor"] = nextCursor
+			}
+			data, _ := json.MarshalIndent(respMap, "", "  ")
+			return mcp.NewToolResultText(string(data)), nil
+		}
+		jsonResp = arr
+	} else {
+		// Object response or non-GET
+		if fieldsStr != "" {
+			jsonResp = ProjectFields(jsonResp, parseFields(fieldsStr))
+		}
+		if filterStr != "" || limitStr != "" {
+			jsonResp = processResponse(jsonResp, "", filterStr, limitStr)
+		}
 	}
 
-	// Response size guard — catch oversized responses before they eat the
-	// LLM's context window. Applies to both raw and processed responses.
 	maxResponseBytes := maxResponseSizeKB * 1024
 	data, _ := json.MarshalIndent(jsonResp, "", "  ")
 
 	if len(data) > maxResponseBytes {
-		// Find the largest array in the response (top-level or nested)
 		arr, fieldPath := findLargestArray(jsonResp)
 		if len(arr) > 0 {
 			var availableFields []string
@@ -142,13 +256,12 @@ func handleCallAPI(ctx context.Context, req mcp.CallToolRequest, registry *arrse
 				hint += fmt.Sprintf("Available fields: %s\n", joinWithPrefix(availableFields, prefix))
 				hint += fmt.Sprintf("\nExample: fields: \"%sid,%stitle,%sstatus\"\n", prefix, prefix, prefix)
 			}
-			hint += "\nYou can also use filter and limit params."
+			hint += "\nYou can also use filter, limit, and cursor params."
 			hint += "\nDo NOT retry this call without fields, filter, or limit."
 
 			return mcp.NewToolResultText(hint), nil
 		}
 
-		// No array found — generic size warning
 		return mcp.NewToolResultText(fmt.Sprintf(
 			"⚠️ Response too large (%dKB). Use fields param to reduce response size.",
 			len(data)/1024)), nil
@@ -432,4 +545,38 @@ func matchFilter(fieldVal any, op, value string) bool {
 		return err1 == nil && err2 == nil && fv < cv
 	}
 	return false
+}
+
+// isDestructiveAPICall checks whether an API request is destructive regardless of the HTTP method.
+// It detects:
+// 1. Any HTTP DELETE method.
+// 2. Any path explicitly targeting deletion or purging (e.g. /delete, /purge).
+// 3. Destructive command executions in RPC endpoints (e.g. POST /command with CleanUpRecycleBin, DeleteLogFiles, or Purge...).
+func isDestructiveAPICall(method, path, bodyStr string) (bool, string) {
+	if method == "DELETE" {
+		return true, "HTTP DELETE method"
+	}
+
+	normPath := strings.ToLower(strings.TrimSpace(path))
+
+	// 1. Endpoints with delete or purge in the path
+	if strings.HasSuffix(normPath, "/delete") || strings.Contains(normPath, "/delete/") ||
+		strings.HasSuffix(normPath, "/purge") || strings.Contains(normPath, "/purge/") {
+		return true, fmt.Sprintf("destructive path %q", path)
+	}
+
+	// 2. Commands that execute destructive operations (e.g. POST /command in *arr services)
+	if (strings.HasSuffix(normPath, "/command") || strings.Contains(normPath, "/command/")) && bodyStr != "" {
+		var cmdMap map[string]any
+		if err := json.Unmarshal([]byte(bodyStr), &cmdMap); err == nil {
+			if name, ok := cmdMap["name"].(string); ok {
+				normName := strings.ToLower(strings.TrimSpace(name))
+				if normName == "cleanuprecyclebin" || strings.HasPrefix(normName, "delete") || strings.HasPrefix(normName, "purge") {
+					return true, fmt.Sprintf("destructive command %q", name)
+				}
+			}
+		}
+	}
+
+	return false, ""
 }

@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -226,5 +227,167 @@ func TestCallAPISingleLevelArrayFieldsStillWork(t *testing.T) {
 	}
 	if strings.Contains(got, "2001") {
 		t.Errorf("records.title returned unrequested fields:\n%s", got)
+	}
+}
+
+func TestCallAPIDeepProjectionsAndSnapshotCursor(t *testing.T) {
+	// Build 120 movie items
+	type movieStub struct {
+		ID        int            `json:"id"`
+		Title     string         `json:"title"`
+		Extra     string         `json:"extra"`
+		MovieFile map[string]any `json:"movieFile"`
+	}
+
+	movies := make([]movieStub, 120)
+	for i := 0; i < 120; i++ {
+		movies[i] = movieStub{
+			ID:    i + 1,
+			Title: fmt.Sprintf("Movie %d", i+1),
+			Extra: "should be filtered out by projection",
+			MovieFile: map[string]any{
+				"id":   (i + 1) * 10,
+				"size": 4000000000 + int64(i),
+				"mediaInfo": map[string]any{
+					"audioLanguages": []string{"jpn", "eng"},
+					"subtitles":      []string{"eng", "spa"},
+					"videoCodec":     "hevc",
+				},
+			},
+		}
+	}
+
+	upstreamCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+		b, _ := json.Marshal(movies)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(b)
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Services: map[string]config.ServiceConfig{
+			"radarr": {URL: srv.URL, APIKey: "k", AuthMethod: "header", AuthHeader: "X-Api-Key", APIVersion: "/api/v3"},
+		},
+	}
+	registry := arrservice.NewRegistry(cfg)
+
+	// Page 1: Request limit 50 with deep fields projection
+	fields := "id,title,movieFile.id,movieFile.size,movieFile.mediaInfo.audioLanguages,movieFile.mediaInfo.subtitles"
+	req1 := mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Name: "call_api",
+		Arguments: map[string]any{
+			"service": "radarr",
+			"path":    "/movie",
+			"limit":   "50",
+			"fields":  fields,
+		},
+	}}
+
+	res1, err := handleCallAPI(context.Background(), req1, registry, 50, false)
+	if err != nil || res1.IsError {
+		t.Fatalf("call 1 failed: %v, text: %s", err, resultText(t, res1))
+	}
+
+	text1 := resultText(t, res1)
+	if strings.Contains(text1, "should be filtered out") || strings.Contains(text1, "hevc") {
+		t.Errorf("projection leaked unrequested fields: %s", text1)
+	}
+
+	var page1 struct {
+		Items      []map[string]any `json:"items"`
+		NextCursor string           `json:"next_cursor"`
+		Complete   bool             `json:"complete"`
+		Total      int              `json:"total"`
+		Offset     int              `json:"offset"`
+	}
+	if err := json.Unmarshal([]byte(text1), &page1); err != nil {
+		t.Fatalf("unmarshal page 1: %v", err)
+	}
+
+	if len(page1.Items) != 50 || page1.Complete || page1.Total != 120 || page1.NextCursor == "" {
+		t.Fatalf("unexpected page 1: len=%d complete=%v total=%d cursor=%s",
+			len(page1.Items), page1.Complete, page1.Total, page1.NextCursor)
+	}
+
+	// Verify deep projection fields on first item
+	first := page1.Items[0]
+	mf, ok := first["movieFile"].(map[string]any)
+	if !ok {
+		t.Fatalf("movieFile missing in projection: %+v", first)
+	}
+	mi, ok := mf["mediaInfo"].(map[string]any)
+	if !ok {
+		t.Fatalf("mediaInfo missing in projection: %+v", mf)
+	}
+	if _, hasAudio := mi["audioLanguages"]; !hasAudio {
+		t.Errorf("audioLanguages missing from mediaInfo: %+v", mi)
+	}
+	if _, hasSubs := mi["subtitles"]; !hasSubs {
+		t.Errorf("subtitles missing from mediaInfo: %+v", mi)
+	}
+
+	// Page 2: Request using cursor only (no upstream call should happen!)
+	req2 := mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Name: "call_api",
+		Arguments: map[string]any{
+			"cursor": page1.NextCursor,
+			"fields": fields,
+		},
+	}}
+
+	res2, err := handleCallAPI(context.Background(), req2, registry, 50, false)
+	if err != nil || res2.IsError {
+		t.Fatalf("call 2 failed: %v, text: %s", err, resultText(t, res2))
+	}
+
+	var page2 struct {
+		Items      []map[string]any `json:"items"`
+		NextCursor string           `json:"next_cursor"`
+		Complete   bool             `json:"complete"`
+		Total      int              `json:"total"`
+		Offset     int              `json:"offset"`
+	}
+	if err := json.Unmarshal([]byte(resultText(t, res2)), &page2); err != nil {
+		t.Fatalf("unmarshal page 2: %v", err)
+	}
+
+	if len(page2.Items) != 50 || page2.Complete || page2.Offset != 50 {
+		t.Fatalf("unexpected page 2: len=%d complete=%v off=%d", len(page2.Items), page2.Complete, page2.Offset)
+	}
+
+	// Page 3: Request final page
+	req3 := mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Name: "call_api",
+		Arguments: map[string]any{
+			"cursor": page2.NextCursor,
+			"fields": fields,
+		},
+	}}
+
+	res3, err := handleCallAPI(context.Background(), req3, registry, 50, false)
+	if err != nil || res3.IsError {
+		t.Fatalf("call 3 failed: %v, text: %s", err, resultText(t, res3))
+	}
+
+	var page3 struct {
+		Items      []map[string]any `json:"items"`
+		NextCursor string           `json:"next_cursor"`
+		Complete   bool             `json:"complete"`
+		Total      int              `json:"total"`
+		Offset     int              `json:"offset"`
+	}
+	if err := json.Unmarshal([]byte(resultText(t, res3)), &page3); err != nil {
+		t.Fatalf("unmarshal page 3: %v", err)
+	}
+
+	if len(page3.Items) != 20 || !page3.Complete || page3.NextCursor != "" || page3.Offset != 100 {
+		t.Fatalf("unexpected page 3: len=%d complete=%v next=%s off=%d", len(page3.Items), page3.Complete, page3.NextCursor, page3.Offset)
+	}
+
+	// Upstream must have been called EXACTLY ONCE!
+	if upstreamCalls != 1 {
+		t.Errorf("expected upstream to be called exactly 1 time, got %d", upstreamCalls)
 	}
 }

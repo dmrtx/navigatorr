@@ -33,7 +33,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	internal.Logf("loaded config with %d services", len(cfg.Services))
+	dbPath := cfg.Database.Path
+	if dbPath == "" {
+		dbPath = config.DefaultDatabasePath()
+	}
+	internal.Logf("config loaded from %s (destructive=%v, read_roots=%d, write_roots=%d, state=%s)",
+		cfg.LoadedPath, cfg.AllowDestructive, len(cfg.Media.AllowedReadRoots), len(cfg.Media.AllowedWriteRoots), dbPath)
+
+	for _, w := range cfg.ValidateRoots() {
+		internal.Warnf("%s", w)
+	}
 
 	// Build service registry
 	registry := arrservice.NewRegistry(cfg)
@@ -93,10 +102,6 @@ func main() {
 	// Open the persistent maintenance-agent database. It lives in the cache
 	// directory deployments already mount as a volume, so jobs, preferences
 	// and decisions survive container restarts.
-	dbPath := cfg.Database.Path
-	if dbPath == "" {
-		dbPath = config.DefaultDatabasePath()
-	}
 	mStore, err := store.Open(dbPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -149,6 +154,7 @@ func main() {
 	// Register all tools
 	tools.RegisterAll(s, cfg, registry, specStore, txClient, qbClient, sabClient, qStore)
 	tools.RegisterMaintenance(s, cfg, registry, qbClient, mStore)
+	tools.RegisterDiagnostics(s, cfg, registry, specStore, txClient, qbClient, sabClient, mStore)
 
 	internal.Logf("starting navigatorr MCP server (stdio)")
 

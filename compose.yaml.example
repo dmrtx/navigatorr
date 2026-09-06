@@ -1,0 +1,43 @@
+# Navigatorr Docker Compose Template
+#
+# OPERATIONAL MODES:
+# 1. Stdio MCP Sessions (spawned on demand by an MCP host like Claude Desktop or tunnel-client):
+#    docker compose run --rm -T navigatorr
+# 2. Persistent Background Service (e.g. serving HTTP request queue or running continuous stack):
+#    docker compose up -d
+#
+# IMPORTANT CONFIGURATION RULES:
+# 1. Configuration MUST be placed in config.yaml.
+#    Navigatorr does NOT read environment variables (e.g. ALLOW_DESTRUCTIVE=true will be ignored).
+# 2. Path Mapping: All paths in config.yaml (media.allowed_read_roots / allowed_write_roots)
+#    must use the CONTAINER target paths (e.g. /media/Movies), NOT the host paths.
+
+services:
+  navigatorr:
+    image: ghcr.io/dmrtx/navigatorr:latest
+    pull_policy: always
+    # 'host' networking allows reaching services on localhost (8989, 7878, 8080, etc.)
+    network_mode: host
+    stdin_open: true
+    tty: false
+    environment:
+      # Container timezone (useful for log timestamps)
+      - TZ=UTC
+    volumes:
+      # 1. Read-only configuration mount
+      - ./config.yaml:/root/.config/navigatorr/config.yaml:ro
+
+      # 2. Persistent SQLite database & OpenAPI spec cache
+      - navigatorr-cache:/root/.cache/navigatorr
+
+      # 3. Media libraries (mounted read-only for inspect_media and safe queries)
+      - /path/on/host/Media/Anime:/media/Anime:ro
+      - /path/on/host/Media/Movies:/media/Movies:ro
+
+      # 4. Downloads directory (mounted read-write for safe_replace / cleanup operations)
+      - /path/on/host/Downloads:/media/Downloads:rw
+
+    restart: "no"
+
+volumes:
+  navigatorr-cache:

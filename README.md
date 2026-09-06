@@ -230,12 +230,16 @@ cp config.yaml.example ~/.config/navigatorr/config.yaml
 
 Edit `~/.config/navigatorr/config.yaml` with your service URLs and API keys. You can find API keys in each service's Settings > General page.
 
-**Optional global settings:**
+**Core Global Settings:**
 
 | Setting | Default | Description |
 |---------|---------|-------------|
+| `allow_destructive` | `false` | Central safety gate (MUST be a top-level YAML key). When false, blocks all DELETE requests through `call_api`, prevents destructive torrent/usenet removals (`qbit_manage_torrent`, `transmission_manage_torrent`, `sabnzbd_manage_item`), blocks `fs_safe_delete`, and halts the final replacement step in `safe_replace`. Note: Navigatorr does not read environment variables; configure this exclusively in `config.yaml`. |
 | `max_response_size_kb` | `50` | Response size guard threshold in KB. API responses exceeding this are rejected with a hint to use field selection/filtering instead of consuming the LLM's context window. |
-| `allow_destructive` | `false` | When false, blocks all DELETE requests through `call_api`, and refuses the destructive actions in the torrent client tools (`qbit_manage_torrent` delete/delete_files, `transmission_manage_torrent` remove/remove_data). Set to `true` to enable deletions. |
+| `concurrency.max_api_simultaneous` | `3` | Maximum simultaneous upstream HTTP calls to protect *arr services from being overwhelmed. |
+| `concurrency.max_inspect_simultaneous` | `2` | Maximum concurrent ffprobe media inspections to protect NAS disk I/O and CPU. |
+
+> ℹ️ **Container Deployments & Path Mapping:** Paths configured under `media.allowed_read_roots` and `media.allowed_write_roots` must match paths **inside the Docker container**, not on the host. See [DOCKER.md](DOCKER.md) for full Docker Compose recipes, path mapping diagrams, and the safety permissions matrix.
 
 ### Connect to Claude Code
 
