@@ -87,7 +87,13 @@ func (s *Service) DoRequest(ctx context.Context, method, path string, query map[
 	var err error
 
 	if s.Pool != nil {
-		respBody, statusCode, err = s.Pool.ExecuteWithRetry(ctx, s.Name, resilience.DefaultRetryConfig(), func() ([]byte, int, error) {
+		retryCfg := resilience.DefaultRetryConfig()
+		if method == "POST" || method == "PATCH" {
+			// Non-idempotent operations must not blind-retry raw network drops
+			// because the side effect may have already completed on upstream server.
+			retryCfg.RetryNetworkErrors = false
+		}
+		respBody, statusCode, err = s.Pool.ExecuteWithRetry(ctx, s.Name, retryCfg, func() ([]byte, int, error) {
 			return s.doRequest(ctx, httpClient, method, path, query, body)
 		})
 	} else {

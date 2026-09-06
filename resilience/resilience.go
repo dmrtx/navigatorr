@@ -196,17 +196,19 @@ func (p *ServicePool) ReleaseMedia() {
 
 // RetryConfig holds exponential backoff parameters.
 type RetryConfig struct {
-	MaxRetries int
-	BaseDelay  time.Duration
-	MaxDelay   time.Duration
+	MaxRetries         int
+	BaseDelay          time.Duration
+	MaxDelay           time.Duration
+	RetryNetworkErrors bool
 }
 
 // DefaultRetryConfig returns standard retry settings.
 func DefaultRetryConfig() RetryConfig {
 	return RetryConfig{
-		MaxRetries: 3,
-		BaseDelay:  150 * time.Millisecond,
-		MaxDelay:   2 * time.Second,
+		MaxRetries:         3,
+		BaseDelay:          150 * time.Millisecond,
+		MaxDelay:           2 * time.Second,
+		RetryNetworkErrors: true,
 	}
 }
 
@@ -246,6 +248,9 @@ func (p *ServicePool) ExecuteWithRetry(ctx context.Context, svc string, cfg Retr
 		p.ReleaseService(svc)
 
 		if err != nil {
+			if !cfg.RetryNetworkErrors {
+				return body, statusCode, err
+			}
 			lastErr = err
 			lastBody = body
 			lastStatus = statusCode

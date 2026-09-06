@@ -88,5 +88,19 @@ media:
 # these per scope (anime, movies, global).
 maintenance:
   oversized_per_episode_mb: 900
-  preferred_groups: ["Judas", "EMBER", "ASW"]
+  preferred_groups: ["ImaginaryGroup", "ExampleFansub", "SampleEncodes"]
   preferred_resolution: "1080p"
+
+# Maximum response size guard in kilobytes before pagination/truncation kicks in.
+# Defaults to 50KB if omitted (e.g. 500 for larger batch sizes).
+max_response_size_kb: 500
+
+# Central safety gate. If false (default), all destructive operations (DELETE
+# calls via call_api, torrent deletion with files, file removals) are blocked.
+allow_destructive: false
+
+# Bounded concurrency to protect upstream *arr services and NAS storage.
+concurrency:
+  max_api_simultaneous: 3       # Max concurrent upstream HTTP calls (default: 3)
+  max_inspect_simultaneous: 2   # Max concurrent ffprobe media inspections (default: 2)
+
