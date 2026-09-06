@@ -2,6 +2,7 @@ package arrservice
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -138,5 +139,59 @@ func TestPingStopsFollowingRedirectLoop(t *testing.T) {
 	}
 	if got != "http 302" {
 		t.Errorf("Ping() = %q, want %q", got, "http 302")
+	}
+}
+
+func TestDoRequestWithContentType(t *testing.T) {
+	var gotCT, gotAuth, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotCT = r.Header.Get("Content-Type")
+		gotAuth = r.Header.Get("X-Api-Key")
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	svc := NewService("bazarr", config.ServiceConfig{
+		URL:        srv.URL,
+		APIVersion: "/api",
+		APIKey:     "test-key-123",
+		AuthMethod: "header",
+		AuthHeader: "X-Api-Key",
+	})
+
+	ctx := context.Background()
+
+	// 1. Default DoRequest sets application/json
+	_, code, err := svc.DoRequest(ctx, "POST", "/test", nil, []byte(`{"hello":"world"}`))
+	if err != nil || code != 200 {
+		t.Fatalf("DoRequest failed: code=%d, err=%v", code, err)
+	}
+	if gotCT != "application/json" {
+		t.Errorf("expected Content-Type application/json, got %q", gotCT)
+	}
+	if gotAuth != "test-key-123" {
+		t.Errorf("expected X-Api-Key test-key-123, got %q", gotAuth)
+	}
+	if gotBody != `{"hello":"world"}` {
+		t.Errorf("expected body %q, got %q", `{"hello":"world"}`, gotBody)
+	}
+
+	// 2. DoRequestWithContentType sets application/x-www-form-urlencoded
+	formBody := []byte("foo=bar&baz=1")
+	_, code, err = svc.DoRequestWithContentType(ctx, "POST", "/test", nil, formBody, "application/x-www-form-urlencoded")
+	if err != nil || code != 200 {
+		t.Fatalf("DoRequestWithContentType failed: code=%d, err=%v", code, err)
+	}
+	if gotCT != "application/x-www-form-urlencoded" {
+		t.Errorf("expected Content-Type application/x-www-form-urlencoded, got %q", gotCT)
+	}
+	if gotAuth != "test-key-123" {
+		t.Errorf("expected X-Api-Key test-key-123, got %q", gotAuth)
+	}
+	if gotBody != "foo=bar&baz=1" {
+		t.Errorf("expected form body %q, got %q", "foo=bar&baz=1", gotBody)
 	}
 }

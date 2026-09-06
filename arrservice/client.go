@@ -15,7 +15,7 @@ import (
 )
 
 var httpClient = &http.Client{
-	Timeout: 30 * time.Second,
+	Timeout: 180 * time.Second,
 }
 
 // maxPingRedirects mirrors the cap Go's http.Client applies when CheckRedirect
@@ -61,7 +61,7 @@ const maxReadBytes = 64 << 20 // 64MB
 // stringifies the full request URL — which carries the API key for services
 // configured with query auth.
 func (s *Service) Ping(ctx context.Context) string {
-	_, code, err := s.doRequest(ctx, pingClient, "GET", s.StatusPath, nil, nil)
+	_, code, err := s.doRequest(ctx, pingClient, "GET", s.StatusPath, nil, nil, "")
 	if err != nil {
 		var uerr *url.Error
 		if errors.As(err, &uerr) && uerr.Err != nil {
@@ -80,8 +80,14 @@ func (s *Service) Ping(ctx context.Context) string {
 	}
 }
 
-// DoRequest performs an authenticated HTTP request against a service.
+// DoRequest performs an authenticated HTTP request against a service with default JSON content type.
 func (s *Service) DoRequest(ctx context.Context, method, path string, query map[string]string, body []byte) ([]byte, int, error) {
+	return s.DoRequestWithContentType(ctx, method, path, query, body, "")
+}
+
+// DoRequestWithContentType performs an authenticated HTTP request against a service with an explicit content type.
+// If contentType is empty, defaults to "application/json" for mutating methods (POST, PUT, PATCH, DELETE).
+func (s *Service) DoRequestWithContentType(ctx context.Context, method, path string, query map[string]string, body []byte, contentType string) ([]byte, int, error) {
 	var respBody []byte
 	var statusCode int
 	var err error
@@ -94,10 +100,10 @@ func (s *Service) DoRequest(ctx context.Context, method, path string, query map[
 			retryCfg.RetryNetworkErrors = false
 		}
 		respBody, statusCode, err = s.Pool.ExecuteWithRetry(ctx, s.Name, retryCfg, func() ([]byte, int, error) {
-			return s.doRequest(ctx, httpClient, method, path, query, body)
+			return s.doRequest(ctx, httpClient, method, path, query, body, contentType)
 		})
 	} else {
-		respBody, statusCode, err = s.doRequest(ctx, httpClient, method, path, query, body)
+		respBody, statusCode, err = s.doRequest(ctx, httpClient, method, path, query, body, contentType)
 	}
 
 	if (method == "POST" || method == "PUT" || method == "PATCH" || method == "DELETE") && s.Snapshots != nil {
@@ -130,7 +136,7 @@ func (s *Service) Post(ctx context.Context, path string, body []byte) ([]byte, e
 	return data, nil
 }
 
-func (s *Service) doRequest(ctx context.Context, client *http.Client, method, path string, query map[string]string, body []byte) ([]byte, int, error) {
+func (s *Service) doRequest(ctx context.Context, client *http.Client, method, path string, query map[string]string, body []byte, contentType string) ([]byte, int, error) {
 	cleanPath := path
 	if s.Config.APIVersion != "" && strings.HasPrefix(cleanPath, s.Config.APIVersion) {
 		cleanPath = strings.TrimPrefix(cleanPath, s.Config.APIVersion)
@@ -157,8 +163,12 @@ func (s *Service) doRequest(ctx context.Context, client *http.Client, method, pa
 		return nil, 0, fmt.Errorf("creating request: %w", err)
 	}
 
-	if method == "POST" || method == "PUT" || method == "PATCH" || method == "DELETE" {
-		req.Header.Set("Content-Type", "application/json")
+	reqContentType := contentType
+	if reqContentType == "" && (method == "POST" || method == "PUT" || method == "PATCH" || method == "DELETE") {
+		reqContentType = "application/json"
+	}
+	if reqContentType != "" {
+		req.Header.Set("Content-Type", reqContentType)
 	}
 	req.Header.Set("Accept", "application/json")
 

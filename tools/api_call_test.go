@@ -1,13 +1,18 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jakenesler/navigatorr/arrservice"
 	"github.com/jakenesler/navigatorr/config"
@@ -33,7 +38,7 @@ func callAPI(t *testing.T, handler http.HandlerFunc, args map[string]any) *mcp.C
 	}
 	req := mcp.CallToolRequest{Params: mcp.CallToolParams{Name: "call_api", Arguments: args}}
 
-	res, err := handleCallAPI(context.Background(), req, registry, 50, false)
+	res, err := handleCallAPI(context.Background(), req, registry, nil, 50, false)
 	if err != nil {
 		t.Fatalf("handleCallAPI returned a transport error: %v", err)
 	}
@@ -285,7 +290,7 @@ func TestCallAPIDeepProjectionsAndSnapshotCursor(t *testing.T) {
 		},
 	}}
 
-	res1, err := handleCallAPI(context.Background(), req1, registry, 50, false)
+	res1, err := handleCallAPI(context.Background(), req1, registry, nil, 50, false)
 	if err != nil || res1.IsError {
 		t.Fatalf("call 1 failed: %v, text: %s", err, resultText(t, res1))
 	}
@@ -337,7 +342,7 @@ func TestCallAPIDeepProjectionsAndSnapshotCursor(t *testing.T) {
 		},
 	}}
 
-	res2, err := handleCallAPI(context.Background(), req2, registry, 50, false)
+	res2, err := handleCallAPI(context.Background(), req2, registry, nil, 50, false)
 	if err != nil || res2.IsError {
 		t.Fatalf("call 2 failed: %v, text: %s", err, resultText(t, res2))
 	}
@@ -366,7 +371,7 @@ func TestCallAPIDeepProjectionsAndSnapshotCursor(t *testing.T) {
 		},
 	}}
 
-	res3, err := handleCallAPI(context.Background(), req3, registry, 50, false)
+	res3, err := handleCallAPI(context.Background(), req3, registry, nil, 50, false)
 	if err != nil || res3.IsError {
 		t.Fatalf("call 3 failed: %v, text: %s", err, resultText(t, res3))
 	}
@@ -389,5 +394,639 @@ func TestCallAPIDeepProjectionsAndSnapshotCursor(t *testing.T) {
 	// Upstream must have been called EXACTLY ONCE!
 	if upstreamCalls != 1 {
 		t.Errorf("expected upstream to be called exactly 1 time, got %d", upstreamCalls)
+	}
+}
+
+// 1. Unit test: JSON requests (legacy and explicit content_type)
+func TestCallAPIJSONLegacyAndExplicit(t *testing.T) {
+	var gotCT, gotAuth, gotBody string
+	h := func(w http.ResponseWriter, r *http.Request) {
+		gotCT = r.Header.Get("Content-Type")
+		gotAuth = r.Header.Get("X-Api-Key")
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id": 101, "title": "Inception"}`))
+	}
+
+	// Legacy call: body supplied, no content_type specified
+	resLegacy := callAPI(t, h, map[string]any{
+		"method": "POST",
+		"path":   "/movie",
+		"body":   `{"title": "Inception"}`,
+	})
+	if resLegacy.IsError {
+		t.Fatalf("legacy call failed: %s", resultText(t, resLegacy))
+	}
+	if gotCT != "application/json" {
+		t.Errorf("expected Content-Type application/json, got %q", gotCT)
+	}
+	if gotAuth != "k" {
+		t.Errorf("expected auth header 'k', got %q", gotAuth)
+	}
+	if gotBody != `{"title": "Inception"}` {
+		t.Errorf("expected body to be preserved, got %q", gotBody)
+	}
+
+	// Explicit call: content_type="application/json"
+	resExplicit := callAPI(t, h, map[string]any{
+		"method":       "POST",
+		"path":         "/movie",
+		"content_type": "application/json",
+		"body":         `{"title": "Inception"}`,
+	})
+	if resExplicit.IsError {
+		t.Fatalf("explicit call failed: %s", resultText(t, resExplicit))
+	}
+	if gotCT != "application/json" {
+		t.Errorf("expected Content-Type application/json, got %q", gotCT)
+	}
+}
+
+// 2. Unit test: Form-urlencoded with all required data types
+func TestCallAPIFormURLEncoded(t *testing.T) {
+	var gotCT, gotRawBody string
+	var gotForm url.Values
+
+	h := func(w http.ResponseWriter, r *http.Request) {
+		gotCT = r.Header.Get("Content-Type")
+		b, _ := io.ReadAll(r.Body)
+		gotRawBody = string(b)
+		r.Body = io.NopCloser(bytes.NewReader(b))
+		_ = r.ParseForm()
+		gotForm = r.Form
+		w.WriteHeader(http.StatusNoContent)
+	}
+
+	formArgs := map[string]any{
+		"name":    "English Subtitles",
+		"active":  true,
+		"score":   85,
+		"spaces":  "hello world",
+		"unicode": "Película Español 🎬",
+		"special": "a=1&b=2+3",
+		"tags":    []any{"en", "es"},
+	}
+
+	res := callAPI(t, h, map[string]any{
+		"method":       "POST",
+		"path":         "/settings",
+		"content_type": "application/x-www-form-urlencoded",
+		"form":         formArgs,
+	})
+	if res.IsError {
+		t.Fatalf("form call failed: %s", resultText(t, res))
+	}
+
+	if gotCT != "application/x-www-form-urlencoded" {
+		t.Errorf("expected Content-Type application/x-www-form-urlencoded, got %q", gotCT)
+	}
+
+	// Validate parsed values
+	if gotForm.Get("name") != "English Subtitles" {
+		t.Errorf("name = %q, want 'English Subtitles'", gotForm.Get("name"))
+	}
+	if gotForm.Get("active") != "true" {
+		t.Errorf("active = %q, want 'true'", gotForm.Get("active"))
+	}
+	if gotForm.Get("score") != "85" {
+		t.Errorf("score = %q, want '85'", gotForm.Get("score"))
+	}
+	if gotForm.Get("spaces") != "hello world" {
+		t.Errorf("spaces = %q, want 'hello world'", gotForm.Get("spaces"))
+	}
+	if gotForm.Get("unicode") != "Película Español 🎬" {
+		t.Errorf("unicode = %q, want 'Película Español 🎬'", gotForm.Get("unicode"))
+	}
+	if gotForm.Get("special") != "a=1&b=2+3" {
+		t.Errorf("special = %q, want 'a=1&b=2+3'", gotForm.Get("special"))
+	}
+
+	// Verify repeated keys for array
+	tags := gotForm["tags"]
+	if len(tags) != 2 || tags[0] != "en" || tags[1] != "es" {
+		t.Errorf("tags = %v, want ['en', 'es']", tags)
+	}
+
+	// Ensure no raw JSON array leakage like tags=["en","es"]
+	if strings.Contains(gotRawBody, `["en"`) {
+		t.Errorf("raw body leaked json array formatting: %s", gotRawBody)
+	}
+}
+
+// 3. Unit test: Complex JSON field inside form (Bazarr languages-profiles pattern)
+func TestCallAPIFormComplexJSONField(t *testing.T) {
+	var gotForm url.Values
+	h := func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		gotForm = r.Form
+		w.WriteHeader(http.StatusNoContent)
+	}
+
+	profilesData := []map[string]any{
+		{
+			"profileId": 1,
+			"name":      "Accessible EN+ES",
+			"cutoff":    65535,
+			"items": []map[string]any{
+				{"id": 1, "language": "en"},
+				{"id": 2, "language": "es"},
+			},
+		},
+	}
+
+	res := callAPI(t, h, map[string]any{
+		"method": "POST",
+		"path":   "/system/settings",
+		"form": map[string]any{
+			"languages-profiles": profilesData,
+			"languages-enabled":  []any{"en", "es"},
+		},
+	})
+	if res.IsError {
+		t.Fatalf("complex form call failed: %s", resultText(t, res))
+	}
+
+	lp := gotForm.Get("languages-profiles")
+	if lp == "" {
+		t.Fatal("languages-profiles field is empty")
+	}
+
+	var parsedProfiles []map[string]any
+	if err := json.Unmarshal([]byte(lp), &parsedProfiles); err != nil {
+		t.Fatalf("languages-profiles is not valid json: %v", err)
+	}
+	if len(parsedProfiles) != 1 || parsedProfiles[0]["name"] != "Accessible EN+ES" {
+		t.Errorf("unexpected parsed profiles: %+v", parsedProfiles)
+	}
+
+	// Repeated keys for languages-enabled
+	enabled := gotForm["languages-enabled"]
+	if len(enabled) != 2 || enabled[0] != "en" || enabled[1] != "es" {
+		t.Errorf("languages-enabled = %v, want ['en', 'es']", enabled)
+	}
+}
+
+// 4. Unit test: Error handling and validation
+func TestCallAPIErrors(t *testing.T) {
+	h := func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}
+
+	// Simultaneous body and form
+	resBoth := callAPI(t, h, map[string]any{
+		"method": "POST",
+		"path":   "/test",
+		"body":   `{"foo":"bar"}`,
+		"form":   map[string]any{"baz": "qux"},
+	})
+	if !resBoth.IsError || !strings.Contains(resultText(t, resBoth), "cannot provide both body and form") {
+		t.Errorf("expected error for simultaneous body and form, got: %s", resultText(t, resBoth))
+	}
+
+	// Form with GET method
+	resFormGet := callAPI(t, h, map[string]any{
+		"method": "GET",
+		"path":   "/test",
+		"form":   map[string]any{"foo": "bar"},
+	})
+	if !resFormGet.IsError || !strings.Contains(resultText(t, resFormGet), "cannot use form with HTTP method GET") {
+		t.Errorf("expected error for form with GET method, got: %s", resultText(t, resFormGet))
+	}
+
+	// Unsupported content type
+	resBadCT := callAPI(t, h, map[string]any{
+		"method":       "POST",
+		"path":         "/test",
+		"content_type": "text/xml",
+		"body":         "<xml/>",
+	})
+	if !resBadCT.IsError || !strings.Contains(resultText(t, resBadCT), "unsupported content_type") {
+		t.Errorf("expected error for unsupported content type, got: %s", resultText(t, resBadCT))
+	}
+
+	// Form with content_type application/json
+	resFormJSON := callAPI(t, h, map[string]any{
+		"method":       "POST",
+		"path":         "/test",
+		"content_type": "application/json",
+		"form":         map[string]any{"foo": "bar"},
+	})
+	if !resFormJSON.IsError || !strings.Contains(resultText(t, resFormJSON), "cannot use form with content_type application/json") {
+		t.Errorf("expected error for form with application/json, got: %s", resultText(t, resFormJSON))
+	}
+
+	// Body with content_type form-urlencoded
+	resBodyForm := callAPI(t, h, map[string]any{
+		"method":       "POST",
+		"path":         "/test",
+		"content_type": "application/x-www-form-urlencoded",
+		"body":         `{"foo":"bar"}`,
+	})
+	if !resBodyForm.IsError || !strings.Contains(resultText(t, resBodyForm), "cannot use body with content_type application/x-www-form-urlencoded") {
+		t.Errorf("expected error for body with form-urlencoded, got: %s", resultText(t, resBodyForm))
+	}
+}
+
+// 5. Unit test: Zero-leak diagnostics and secret sanitization in errors
+func TestCallAPIZeroLeakDiagnosticsAndErrorSanitization(t *testing.T) {
+	secretKey := "super-secret-api-key-xyz123"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		// Server echoes back bad credentials in error body
+		w.Write([]byte(fmt.Sprintf("Invalid request with apikey=%s and auth token %s", secretKey, secretKey)))
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Services: map[string]config.ServiceConfig{
+			"bazarr": {URL: srv.URL, APIKey: secretKey, AuthMethod: "header", AuthHeader: "X-Api-Key", APIVersion: "/api"},
+		},
+	}
+	registry := arrservice.NewRegistry(cfg)
+
+	req := mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Name: "call_api",
+		Arguments: map[string]any{
+			"service": "bazarr",
+			"method":  "POST",
+			"path":    "/system/settings",
+			"form": map[string]any{
+				"password": "my-secret-password",
+			},
+		},
+	}}
+
+	res, err := handleCallAPI(context.Background(), req, registry, nil, 50, false)
+	if err != nil {
+		t.Fatalf("unexpected transport error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("expected error result for 400 status")
+	}
+
+	errText := resultText(t, res)
+	if strings.Contains(errText, secretKey) {
+		t.Errorf("SECRET LEAK: error text contains API key: %s", errText)
+	}
+	if strings.Contains(errText, "my-secret-password") {
+		t.Errorf("SECRET LEAK: error text contains form password: %s", errText)
+	}
+	if !strings.Contains(errText, "***REDACTED***") {
+		t.Errorf("expected ***REDACTED*** placeholder in error text, got: %s", errText)
+	}
+}
+
+// 6. Unit test: Response metadata and mutation verification
+func TestCallAPIIncludeMetadata(t *testing.T) {
+	// A. Status 200 OK with JSON
+	h200 := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"result":"ok"}`))
+	}
+	res200 := callAPI(t, h200, map[string]any{
+		"method":           "POST",
+		"path":             "/movie",
+		"body":             `{"name":"test"}`,
+		"include_metadata": true,
+	})
+	if res200.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, res200))
+	}
+	var meta200 map[string]any
+	if err := json.Unmarshal([]byte(resultText(t, res200)), &meta200); err != nil {
+		t.Fatalf("failed to unmarshal metadata envelope: %v", err)
+	}
+	if meta200["status_code"] != float64(200) {
+		t.Errorf("expected status_code 200, got %v", meta200["status_code"])
+	}
+	if meta200["mutating"] != true {
+		t.Errorf("expected mutating=true for POST, got %v", meta200["mutating"])
+	}
+
+	// B. Status 204 No Content
+	h204 := func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}
+	res204 := callAPI(t, h204, map[string]any{
+		"method":           "POST",
+		"path":             "/system/settings",
+		"form":             map[string]any{"foo": "bar"},
+		"include_metadata": true,
+	})
+	if res204.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, res204))
+	}
+	var meta204 map[string]any
+	if err := json.Unmarshal([]byte(resultText(t, res204)), &meta204); err != nil {
+		t.Fatalf("failed to unmarshal metadata envelope for 204: %v", err)
+	}
+	if meta204["status_code"] != float64(204) {
+		t.Errorf("expected status_code 204, got %v", meta204["status_code"])
+	}
+	if meta204["mutating"] != true {
+		t.Errorf("expected mutating=true for 204 POST, got %v", meta204["mutating"])
+	}
+
+	// C. Without include_metadata: legacy 204 behavior
+	resLegacy204 := callAPI(t, h204, map[string]any{
+		"method": "POST",
+		"path":   "/system/settings",
+		"form":   map[string]any{"foo": "bar"},
+	})
+	if resLegacy204.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, resLegacy204))
+	}
+	txtLegacy := resultText(t, resLegacy204)
+	if !strings.HasPrefix(txtLegacy, "status: 204") {
+		t.Errorf("expected legacy 204 output to start with 'status: 204', got %q", txtLegacy)
+	}
+}
+
+// 7. Simulation test: Bazarr 1.6.0 language profiles workflow
+func TestCallAPIBazarrSimulation(t *testing.T) {
+	var currentProfiles []map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/system/languages/profiles":
+			w.Header().Set("Content-Type", "application/json")
+			if currentProfiles == nil {
+				w.Write([]byte("[]"))
+			} else {
+				data, _ := json.Marshal(currentProfiles)
+				w.Write(data)
+			}
+
+		case r.Method == "POST" && r.URL.Path == "/api/system/settings":
+			ct := r.Header.Get("Content-Type")
+			if !strings.HasPrefix(ct, "application/x-www-form-urlencoded") {
+				// Bazarr bug simulation: if JSON is sent, body is ignored and 204 returned without updating
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			_ = r.ParseForm()
+			lp := r.Form.Get("languages-profiles")
+			if lp != "" {
+				var profiles []map[string]any
+				if err := json.Unmarshal([]byte(lp), &profiles); err == nil {
+					currentProfiles = profiles
+				}
+			}
+			w.WriteHeader(http.StatusNoContent)
+
+		case r.Method == "POST" && r.URL.Path == "/api/movies":
+			// Query parameter profile assignment: POST /api/movies?radarrid=...&profileid=...
+			w.WriteHeader(http.StatusNoContent)
+
+		case r.Method == "GET" && r.URL.Path == "/api/movies":
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"data": [{"title": "Test Movie", "radarrId": 100, "profileId": 1}]}`))
+
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Services: map[string]config.ServiceConfig{
+			"bazarr": {URL: srv.URL, APIKey: "test-mock-key", AuthMethod: "header", AuthHeader: "X-Api-Key", APIVersion: "/api"},
+		},
+	}
+	registry := arrservice.NewRegistry(cfg)
+
+	// Step A: Read initial profiles -> []
+	reqGet1 := mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Name: "call_api",
+		Arguments: map[string]any{
+			"service": "bazarr",
+			"method":  "GET",
+			"path":    "/system/languages/profiles",
+		},
+	}}
+	resGet1, _ := handleCallAPI(context.Background(), reqGet1, registry, nil, 50, false)
+	if resultText(t, resGet1) != "[]" {
+		t.Fatalf("expected [], got %s", resultText(t, resGet1))
+	}
+
+	// Step B: Create language profile using form-urlencoded
+	reqPost := mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Name: "call_api",
+		Arguments: map[string]any{
+			"service":      "bazarr",
+			"method":       "POST",
+			"path":         "/system/settings",
+			"content_type": "application/x-www-form-urlencoded",
+			"form": map[string]any{
+				"languages-profiles": []map[string]any{
+					{
+						"profileId": 1,
+						"name":      "Accessible EN+ES",
+						"cutoff":    65535,
+						"items": []map[string]any{
+							{"id": 1, "language": "en"},
+							{"id": 2, "language": "es"},
+						},
+					},
+				},
+			},
+		},
+	}}
+	resPost, _ := handleCallAPI(context.Background(), reqPost, registry, nil, 50, false)
+	if resPost.IsError {
+		t.Fatalf("POST /system/settings failed: %s", resultText(t, resPost))
+	}
+
+	// Step C: Verify with GET
+	reqGet2 := mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Name: "call_api",
+		Arguments: map[string]any{
+			"service": "bazarr",
+			"method":  "GET",
+			"path":    "/system/languages/profiles",
+		},
+	}}
+	resGet2, _ := handleCallAPI(context.Background(), reqGet2, registry, nil, 50, false)
+	if resGet2.IsError {
+		t.Fatalf("GET after POST failed: %s", resultText(t, resGet2))
+	}
+
+	var verifiedProfiles []map[string]any
+	if err := json.Unmarshal([]byte(resultText(t, resGet2)), &verifiedProfiles); err != nil {
+		t.Fatalf("failed to unmarshal verified profiles: %v", err)
+	}
+	if len(verifiedProfiles) != 1 || verifiedProfiles[0]["name"] != "Accessible EN+ES" {
+		t.Fatalf("profile verification failed: %+v", verifiedProfiles)
+	}
+
+	// Step D: Assign profile to movie via POST /movies with query params
+	reqAssign := mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Name: "call_api",
+		Arguments: map[string]any{
+			"service": "bazarr",
+			"method":  "POST",
+			"path":    "/movies",
+			"query": map[string]any{
+				"radarrid":  "100",
+				"profileid": "1",
+			},
+			"include_metadata": true,
+		},
+	}}
+	resAssign, err := handleCallAPI(context.Background(), reqAssign, registry, nil, 50, true)
+	if err != nil || resAssign.IsError {
+		t.Fatalf("assign movie profile failed: %v, text: %s", err, resultText(t, resAssign))
+	}
+
+	// Step E: Verify movie assignment with GET /movies
+	reqGetMovie := mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Name: "call_api",
+		Arguments: map[string]any{
+			"service": "bazarr",
+			"method":  "GET",
+			"path":    "/movies",
+			"query": map[string]any{
+				"radarrid[]": "100",
+			},
+		},
+	}}
+	resGetMovie, err := handleCallAPI(context.Background(), reqGetMovie, registry, nil, 50, true)
+	if err != nil || resGetMovie.IsError {
+		t.Fatalf("get movie failed: %v, text: %s", err, resultText(t, resGetMovie))
+	}
+	movieText := resultText(t, resGetMovie)
+	if !strings.Contains(movieText, `"profileId": 1`) && !strings.Contains(movieText, `"profileId":1`) {
+		t.Errorf("expected movie to have profileId 1, got: %s", movieText)
+	}
+}
+
+// 8. Optional integration test against real Bazarr instance configured via environment variables.
+// Skipped by default; set BAZARR_TEST_URL and BAZARR_TEST_API_KEY to run.
+func TestCallAPIRealBazarrIntegration(t *testing.T) {
+	bazarrURL := os.Getenv("BAZARR_TEST_URL")
+	bazarrKey := os.Getenv("BAZARR_TEST_API_KEY")
+	movieID := os.Getenv("BAZARR_TEST_MOVIE_ID")
+	if movieID == "" {
+		movieID = "1"
+	}
+	if bazarrURL == "" || bazarrKey == "" {
+		t.Skip("skipping real Bazarr integration test: set BAZARR_TEST_URL and BAZARR_TEST_API_KEY to enable")
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	pingReq, err := http.NewRequest("GET", strings.TrimRight(bazarrURL, "/")+"/api/system/status", nil)
+	if err != nil {
+		t.Fatalf("failed to build ping request: %v", err)
+	}
+	pingReq.Header.Set("X-API-KEY", bazarrKey)
+	pingResp, err := client.Do(pingReq)
+	if err != nil || pingResp.StatusCode != 200 {
+		t.Fatalf("Bazarr instance at %s not reachable: %v", bazarrURL, err)
+	}
+	pingResp.Body.Close()
+
+	cfg := &config.Config{
+		AllowDestructive: true,
+		Services: map[string]config.ServiceConfig{
+			"bazarr": {URL: bazarrURL, APIKey: bazarrKey, AuthMethod: "header", AuthHeader: "X-API-KEY", APIVersion: "/api"},
+		},
+	}
+	registry := arrservice.NewRegistry(cfg)
+	ctx := context.Background()
+
+	// A. Read initial profiles
+	reqGetInitial := mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Name: "call_api",
+		Arguments: map[string]any{
+			"service": "bazarr",
+			"method":  "GET",
+			"path":    "/system/languages/profiles",
+		},
+	}}
+	resGetInitial, err := handleCallAPI(ctx, reqGetInitial, registry, nil, 50, true)
+	if err != nil || resGetInitial.IsError {
+		t.Fatalf("initial GET failed: %v, text: %s", err, resultText(t, resGetInitial))
+	}
+
+	// B. Create language profile "Accessible EN+ES" with English and Spanish
+	profilesPayload := `[{"profileId": 1, "name": "Accessible EN+ES", "cutoff": 65535, "items": [{"id": 1, "language": "en", "audio_exclude": "False", "audio_only_include": "False", "hi": "False", "forced": "False"}, {"id": 2, "language": "es", "audio_exclude": "False", "audio_only_include": "False", "hi": "False", "forced": "False"}], "mustContain": [], "mustNotContain": [], "originalFormat": null}]`
+
+	reqCreate := mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Name: "call_api",
+		Arguments: map[string]any{
+			"service":          "bazarr",
+			"method":           "POST",
+			"path":             "/system/settings",
+			"content_type":     "application/x-www-form-urlencoded",
+			"include_metadata": true,
+			"form": map[string]any{
+				"languages-profiles": profilesPayload,
+			},
+		},
+	}}
+	resCreate, err := handleCallAPI(ctx, reqCreate, registry, nil, 50, true)
+	if err != nil || resCreate.IsError {
+		t.Fatalf("create profile failed: %v, text: %s", err, resultText(t, resCreate))
+	}
+
+	// C. Read again and verify profile exists with English and Spanish
+	reqGetVerify := mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Name: "call_api",
+		Arguments: map[string]any{
+			"service": "bazarr",
+			"method":  "GET",
+			"path":    "/system/languages/profiles",
+		},
+	}}
+	resGetVerify, err := handleCallAPI(ctx, reqGetVerify, registry, nil, 50, true)
+	if err != nil || resGetVerify.IsError {
+		t.Fatalf("verification GET failed: %v, text: %s", err, resultText(t, resGetVerify))
+	}
+	verifyText := resultText(t, resGetVerify)
+	if !strings.Contains(verifyText, "Accessible EN+ES") {
+		t.Fatalf("expected profile 'Accessible EN+ES' in Bazarr, got: %s", verifyText)
+	}
+
+	// D. Assign profile to a test movie via POST /movies with query params
+	reqAssign := mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Name: "call_api",
+		Arguments: map[string]any{
+			"service": "bazarr",
+			"method":  "POST",
+			"path":    "/movies",
+			"query": map[string]any{
+				"radarrid":  movieID,
+				"profileid": "1",
+			},
+			"include_metadata": true,
+		},
+	}}
+	resAssign, err := handleCallAPI(ctx, reqAssign, registry, nil, 50, true)
+	if err != nil || resAssign.IsError {
+		t.Fatalf("assign movie profile failed: %v, text: %s", err, resultText(t, resAssign))
+	}
+
+	// E. Verify movie has profileId: 1
+	reqGetMovie := mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Name: "call_api",
+		Arguments: map[string]any{
+			"service": "bazarr",
+			"method":  "GET",
+			"path":    "/movies",
+			"query": map[string]any{
+				"radarrid[]": movieID,
+			},
+		},
+	}}
+	resGetMovie, err := handleCallAPI(ctx, reqGetMovie, registry, nil, 50, true)
+	if err != nil || resGetMovie.IsError {
+		t.Fatalf("get movie failed: %v, text: %s", err, resultText(t, resGetMovie))
+	}
+	movieText := resultText(t, resGetMovie)
+	if !strings.Contains(movieText, `"profileId": 1`) && !strings.Contains(movieText, `"profileId":1`) {
+		t.Errorf("expected movie to have profileId 1, got: %s", movieText)
 	}
 }
