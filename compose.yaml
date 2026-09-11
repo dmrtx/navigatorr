@@ -9,7 +9,7 @@ services:
       - TZ=UTC
     volumes:
       # Read-only configuration mount
-      - /home/david/.config/navigatorr/config.yaml:/root/.config/navigatorr/config.yaml:ro
+      - /home/example/.config/navigatorr/config.yaml:/root/.config/navigatorr/config.yaml:ro
       # Persistent SQLite database & spec cache
       - navigatorr-cache:/root/.cache/navigatorr
       # Media libraries & downloads:

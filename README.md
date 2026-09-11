@@ -21,6 +21,7 @@ Navigatorr acts as a bridge between AI coding assistants and your self-hosted me
 - **Transmission** — Torrent client
 - **qBittorrent** — Torrent client
 - **SABnzbd** — Usenet downloader
+- **Transcoding** — Apple Silicon SSH worker executor for hardware-accelerated FFmpeg transcoding (hevc_videotoolbox)
 
 ## Architecture
 
@@ -64,6 +65,8 @@ Claude Code / MCP Client
 | `maint` | Deterministic ranking, filename safety, language and oversize heuristics |
 | `mediainspect` | Real-file inspection via ffprobe (no shell, fixed argv) plus sidecar detection |
 | `fsop` | Root-confined filesystem ops (stat, list, hash, move, delete) |
+| `action` | Multi-step persistent workflow engine with idempotency and safety gates |
+| `transcode` | SSH executor for hardware-accelerated remote transcoding, path mapping, and process lifecycle |
 | `internal` | Shared logging utilities |
 
 ### How It Works
@@ -132,6 +135,26 @@ SABnzbd has no OpenAPI spec and dispatches everything from a `mode` query parame
 | `sabnzbd_status` | Version, speed, disk space, paused state, and warning count |
 
 Deleting is covered by `allow_destructive`. SABnzbd deletes are GET requests carrying `name=delete`, so the `call_api` DELETE guard does not apply to them and these tools check the setting themselves.
+
+### Action Engine
+
+Persistent, declarative multi-step workflows tracked in SQLite. Workflows survive agent disconnects, reboot gracefully, and safely pause in `waiting_external` (e.g. awaiting long transcode jobs) or `waiting_decision` (e.g. human-in-the-loop review on ffprobe validation failure).
+
+| Tool | Description |
+|------|-------------|
+| `action_run` | Start a workflow (`transcode_media`, `safe_media_replacement`, `validate_torrent`) |
+| `action_catalog` | Discover registered workflows, required inputs, and safety profiles |
+| `action_status` | Query workflow lifecycle state, current step, and execution log |
+| `action_resume` | Resume a paused workflow from `waiting_external` or `waiting_decision` |
+| `action_retry` | Retry a failed action from its last safe checkpoint |
+| `action_list` | Filter workflows by status (`running`, `waiting_external`, `waiting_decision`, `completed`, `failed`) |
+
+**Transcoding Workflow (`transcode_media`):**
+1. **Preflight**: Confines path within `allowed_read_roots`, verifies existence, computes initial SHA-256 hash, and extracts baseline stream metadata via `ffprobe`. Destructive replacement (`replace_original: true`) is strictly rejected.
+2. **Submit to Transcode Executor**: Generates idempotent job ID, calculates candidate path (`<source-dir>/.navigatorr-candidates/<basename>.<job-id>.mkv`), translates paths between local and remote worker namespaces, and submits the job over SSH. Resumes are idempotent and will not re-submit.
+3. **Wait for Transcode**: Monitors progress over SSH and transitions into `waiting_external` state while in flight.
+4. **Detailed Validation**: Validates file size, duration, video codec, audio tracks (preserving Japanese/English/Spanish), subtitle tracks (preserving ASS/SSA), font attachments, and chapters. Any discrepancy transitions to `waiting_decision` with human-in-the-loop options (`accept_loss` / `reject`).
+5. **Acceptance (Candidate-Only)**: Transcoded media is emitted as a non-destructive candidate output. Navigatorr verifies the original file's physical SHA-256 hash before and after to guarantee absolute immutability. Destructive replacement (`replace_original: true`) is explicitly blocked in this version to guarantee zero data loss.
 
 ### Request Queue
 
@@ -239,7 +262,30 @@ Edit `~/.config/navigatorr/config.yaml` with your service URLs and API keys. You
 | `concurrency.max_api_simultaneous` | `3` | Maximum simultaneous upstream HTTP calls to protect *arr services from being overwhelmed. |
 | `concurrency.max_inspect_simultaneous` | `2` | Maximum concurrent ffprobe media inspections to protect NAS disk I/O and CPU. |
 
-> ℹ️ **Container Deployments & Path Mapping:** Paths configured under `media.allowed_read_roots` and `media.allowed_write_roots` must match paths **inside the Docker container**, not on the host. See [DOCKER.md](DOCKER.md) for full Docker Compose recipes, path mapping diagrams, and the safety permissions matrix.
+**SSH Transcode Executor Configuration:**
+
+Navigatorr acts as the coordinator while a remote Apple Silicon Mac (M1/M2/M3/M4) executes hardware-accelerated FFmpeg (`hevc_videotoolbox`). SSH is the API:
+
+```yaml
+transcode:
+  enabled: true
+  executor: ssh
+  ssh:
+    host: "192.0.2.10"
+    user: "transcoder"
+    command: "/Users/transcoder/.local/bin/navigatorr-transcode"
+    identity_file: "/run/secrets/navigatorr_transcode_ssh"
+    connect_timeout: "5s"
+    path_mappings:
+      - local: "/media"
+        remote: "/Volumes/media"
+```
+
+> 🛡️ **Candidate-Only Non-Destructive Protection:**
+> 1. **Path Translation:** Local paths (`/media/...`) are mapped to remote worker paths (`/Volumes/media/...`) using longest-prefix match and fail-closed security.
+> 2. **Candidate Isolation:** Transcoded files are written to `.navigatorr-candidates/<basename>.<job-id>.mkv`. Overwriting the source is rejected fail-closed.
+> 3. **Cryptographic Verification:** Navigatorr computes the SHA-256 hash of the original media before submit and re-verifies bit-for-bit equality after the transcode completes. Original media is never deleted, moved, or replaced.
+> 4. **Validation Decisions:** If stream discrepancies occur (e.g. dropped audio tracks or lost subtitles), Navigatorr pauses in `waiting_decision`, allowing users to resume with `accept_loss` or `reject`.
 
 ### Connect to Claude Code
 
