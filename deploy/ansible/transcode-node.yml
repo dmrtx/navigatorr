@@ -67,7 +67,7 @@
 
     - name: Check required Homebrew formulae
       ansible.builtin.command:
-        cmd: "{{ transcode_brew_path }} list --formula {{ item }}"
+        cmd: "{{ transcode_brew_path }} list --versions {{ item }}"
       loop:
         - go
         - ffmpeg
