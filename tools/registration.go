@@ -35,7 +35,9 @@ func RegisterAll(s *server.MCPServer, cfg *config.Config, registry *arrservice.R
 	if qStore != nil {
 		registerQueueTools(s, qStore)
 	}
-	registerRecipeTools(s, cfg)
+	if cfg.Transcode.Enabled {
+		registerRecipeTools(s, cfg)
+	}
 }
 
 // RegisterMaintenance wires the persistent maintenance-agent tools. It is
