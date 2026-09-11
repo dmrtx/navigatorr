@@ -1,0 +1,15 @@
+all:
+  hosts:
+    m1-transcode-node:
+      ansible_host: 192.168.68.55
+      ansible_user: morotxo
+      ansible_connection: ssh
+      # ansible_ssh_private_key_file: ~/.ssh/id_ed25519
+
+      # Optional configuration overrides:
+      # transcode_ffmpeg_path: /opt/homebrew/bin/ffmpeg
+      # transcode_ffprobe_path: /opt/homebrew/bin/ffprobe
+      # transcode_allowed_roots:
+      #   - /Volumes/media
+      # transcode_max_parallel_jobs: 1
+      # transcode_quality: 65

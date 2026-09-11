@@ -1,0 +1,14 @@
+# Configuration for navigatorr-transcode worker
+# Managed by Ansible - manual edits will be overwritten
+
+ffmpeg: {{ transcode_ffmpeg_path | default('/opt/homebrew/bin/ffmpeg') }}
+ffprobe: {{ transcode_ffprobe_path | default('/opt/homebrew/bin/ffprobe') }}
+state_dir: {{ transcode_state_dir | default(ansible_user_dir ~ '/.local/share/navigatorr-transcode/jobs') }}
+
+allowed_roots:
+{% for root in transcode_allowed_roots | default(['/Volumes/media']) %}
+  - {{ root }}
+{% endfor %}
+
+max_parallel_jobs: {{ transcode_max_parallel_jobs | default(1) }}
+quality: {{ transcode_quality | default(65) }}

@@ -1,0 +1,115 @@
+---
+- name: Setup macOS Apple Silicon Transcode Node for Navigatorr
+  hosts: all
+  gather_facts: true
+
+  vars:
+    transcode_bin_dir: "{{ ansible_user_dir }}/.local/bin"
+    transcode_config_dir: "{{ ansible_user_dir }}/.config/navigatorr-transcode"
+    transcode_state_dir: "{{ ansible_user_dir }}/.local/share/navigatorr-transcode/jobs"
+    transcode_ffmpeg_path: "/opt/homebrew/bin/ffmpeg"
+    transcode_ffprobe_path: "/opt/homebrew/bin/ffprobe"
+    transcode_allowed_roots:
+      - "/Volumes/media"
+    transcode_max_parallel_jobs: 1
+    transcode_quality: 65
+
+  pre_tasks:
+    - name: Verify target is running macOS (Darwin)
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == "Darwin"
+        fail_msg: "Target host must be macOS (Darwin), but detected {{ ansible_os_family }}."
+
+    - name: Verify target architecture is Apple Silicon (arm64)
+      ansible.builtin.assert:
+        that:
+          - ansible_architecture == "arm64"
+        fail_msg: "Target host must be Apple Silicon arm64, but detected {{ ansible_architecture }}."
+
+  tasks:
+    - name: Install FFmpeg via Homebrew
+      community.general.homebrew:
+        name: ffmpeg
+        state: present
+
+    - name: Create local directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ transcode_bin_dir }}"
+        - "{{ transcode_config_dir }}"
+        - "{{ transcode_state_dir }}"
+
+    - name: Deploy navigatorr-transcode binary
+      ansible.builtin.copy:
+        src: "{{ transcode_binary_src | default('../../navigatorr-transcode') }}"
+        dest: "{{ transcode_bin_dir }}/navigatorr-transcode"
+        mode: "0755"
+
+    - name: Install worker configuration file
+      ansible.builtin.template:
+        src: templates/navigatorr-transcode-config.yaml.j2
+        dest: "{{ transcode_config_dir }}/config.yaml"
+        mode: "0644"
+
+    - name: Verify /Volumes/media storage directory exists
+      ansible.builtin.stat:
+        path: "/Volumes/media"
+      register: media_storage_stat
+
+    - name: Warn if /Volumes/media is not currently accessible
+      ansible.builtin.debug:
+        msg: "WARNING: /Volumes/media does not exist on this node. Mount shared storage before submitting transcoding jobs."
+      when: not media_storage_stat.stat.exists
+
+    - name: Run navigatorr-transcode doctor check
+      ansible.builtin.command:
+        cmd: "{{ transcode_bin_dir }}/navigatorr-transcode doctor"
+      register: doctor_check
+      changed_when: false
+      failed_when: doctor_check.rc != 0
+
+    - name: Generate synthetic 2-second test video for smoke validation
+      ansible.builtin.command:
+        cmd: >
+          {{ transcode_ffmpeg_path }} -y
+          -f lavfi -i testsrc=duration=2:size=320x240:rate=24
+          -f lavfi -i sine=duration=2:frequency=1000
+          -c:v libx264 -c:a aac
+          /tmp/navigatorr_smoke_input.mkv
+      changed_when: false
+
+    - name: Transcode smoke test video using hevc_videotoolbox
+      ansible.builtin.command:
+        cmd: >
+          {{ transcode_ffmpeg_path }} -y
+          -i /tmp/navigatorr_smoke_input.mkv
+          -map 0:v? -map 0:a? -map 0:s? -map 0:t?
+          -map_metadata 0 -map_chapters 0
+          -c copy -c:v hevc_videotoolbox -q:v {{ transcode_quality }}
+          /tmp/navigatorr_smoke_output.mkv
+      changed_when: false
+
+    - name: Verify smoke candidate output codec is HEVC
+      ansible.builtin.command:
+        cmd: >
+          {{ transcode_ffprobe_path }} -v error
+          -select_streams v:0
+          -show_entries stream=codec_name
+          -of default=noprint_wrappers=1:nokey=1
+          /tmp/navigatorr_smoke_output.mkv
+      register: smoke_probe
+      changed_when: false
+      failed_when: smoke_probe.stdout | trim != "hevc"
+
+    - name: Clean up synthetic smoke test artifacts
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/navigatorr_smoke_input.mkv
+        - /tmp/navigatorr_smoke_output.mkv
+      changed_when: false
