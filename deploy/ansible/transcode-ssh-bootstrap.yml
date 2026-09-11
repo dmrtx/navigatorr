@@ -11,7 +11,10 @@
     navigatorr_transcode_port: 22
     navigatorr_transcode_remote_binary: "/opt/homebrew/bin/navigatorr-transcode"
     navigatorr_controller_home: "{{ ansible_facts['user_dir'] }}"
-    navigatorr_secrets_dir: "{{ navigatorr_controller_home }}/.config/navigatorr/secrets"
+    navigatorr_controller_user: "{{ ansible_facts['user_id'] }}"
+    navigatorr_config_root: "{{ navigatorr_controller_home }}/.config"
+    navigatorr_config_dir: "{{ navigatorr_config_root }}/navigatorr"
+    navigatorr_secrets_dir: "{{ navigatorr_config_dir }}/secrets"
     navigatorr_ssh_key_path: "{{ navigatorr_secrets_dir }}/navigatorr_transcode_ssh"
     navigatorr_known_hosts_path: "{{ navigatorr_secrets_dir }}/navigatorr_known_hosts"
     navigatorr_bootstrap_known_hosts_path: "{{ navigatorr_secrets_dir }}/.bootstrap_known_hosts"
@@ -23,6 +26,15 @@
           - ansible_facts["system"] == "Linux"
         fail_msg: "Run this playbook on the OzMini Linux host."
 
+    - name: Resolve OzMini primary group
+      ansible.builtin.command:
+        argv:
+          - id
+          - -gn
+          - "{{ navigatorr_controller_user }}"
+      register: navigatorr_controller_group
+      changed_when: false
+
     - name: Install SSH bootstrap dependencies
       become: true
       ansible.builtin.apt:
@@ -32,11 +44,21 @@
         state: present
         update_cache: true
 
-    - name: Create Navigatorr secrets directory
+    - name: Repair Navigatorr user config directory ownership and permissions
+      become: true
       ansible.builtin.file:
-        path: "{{ navigatorr_secrets_dir }}"
+        path: "{{ item.path }}"
         state: directory
-        mode: "0700"
+        owner: "{{ navigatorr_controller_user }}"
+        group: "{{ navigatorr_controller_group.stdout | trim }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - path: "{{ navigatorr_config_root }}"
+          mode: "0755"
+        - path: "{{ navigatorr_config_dir }}"
+          mode: "0755"
+        - path: "{{ navigatorr_secrets_dir }}"
+          mode: "0700"
 
     - name: Generate dedicated Navigatorr transcode SSH key
       ansible.builtin.command:
