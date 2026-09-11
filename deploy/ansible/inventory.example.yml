@@ -1,6 +1,11 @@
 all:
   hosts:
     m1-transcode-node:
+      # Option A: If running Ansible directly ON the M1 Max Mac:
+      # ansible_connection: local
+      # ansible_host: localhost
+
+      # Option B: If running Ansible remotely over SSH:
       ansible_host: 192.168.68.55
       ansible_user: morotxo
       ansible_connection: ssh

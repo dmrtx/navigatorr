@@ -487,3 +487,51 @@ quality: 65
 		t.Fatalf("INTEGRITY BREACH: original source file was modified! initial: %s, final: %s", initialSHA, finalSHA)
 	}
 }
+
+func TestWorker_RecycledPIDSafety(t *testing.T) {
+	tempDir := t.TempDir()
+	jobDir := filepath.Join(tempDir, "jobs", "job-recycled")
+	jobPath := filepath.Join(jobDir, "job.json")
+
+	// Assign our own PID (guaranteed alive), but with a bogus start time from 2000
+	job := &JobRecord{
+		ID:               "job-recycled",
+		Status:           "running",
+		PID:              os.Getpid(),
+		ProcessStartTime: "Sun Jan 1 00:00:00 2000",
+		CreatedAt:        time.Now().UTC(),
+		StartedAt:        time.Now().UTC(),
+	}
+	_ = SaveJobAtomic(jobPath, job)
+
+	cfg := &WorkerConfig{
+		StateDir:        filepath.Join(tempDir, "jobs"),
+		AllowedRoots:    []string{tempDir},
+		MaxParallelJobs: 1,
+	}
+	worker := NewWorker(cfg)
+	ctx := context.Background()
+
+	// 1. IsJobProcessAlive must return false due to start time mismatch
+	if IsJobProcessAlive(job) {
+		t.Fatalf("expected IsJobProcessAlive to detect recycled PID and return false")
+	}
+
+	// 2. Status must detect dead/recycled job and mark it as failed
+	st, err := worker.Status(ctx, "job-recycled")
+	if err != nil {
+		t.Fatalf("status call failed: %v", err)
+	}
+	if st.Status != "failed" {
+		t.Errorf("expected failed status for recycled PID, got %s", st.Status)
+	}
+
+	// 3. Cancel must NOT kill our own process! If it did, the test would crash right here.
+	cancelResp, err := worker.Cancel(ctx, "job-recycled")
+	if err != nil {
+		t.Fatalf("cancel call failed: %v", err)
+	}
+	if cancelResp.Status != "cancelled" {
+		t.Errorf("expected cancelled response, got %s", cancelResp.Status)
+	}
+}

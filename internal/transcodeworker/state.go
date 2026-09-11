@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -19,9 +20,10 @@ type JobRecord struct {
 	Status      string    `json:"status"` // queued, running, completed, failed, cancelled
 	Source      string    `json:"source"`
 	Candidate   string    `json:"candidate"`
-	Profile     string    `json:"profile"`
-	PID         int       `json:"pid"`
-	CreatedAt   time.Time `json:"created_at"`
+	Profile          string    `json:"profile"`
+	PID              int       `json:"pid"`
+	ProcessStartTime string    `json:"process_start_time,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
 	StartedAt   time.Time `json:"started_at,omitempty"`
 	FinishedAt  time.Time `json:"finished_at,omitempty"`
 	ExitCode    int       `json:"exit_code,omitempty"`
@@ -97,6 +99,57 @@ func IsProcessAlive(pid int) bool {
 	// Signal 0 tests if the process exists without actually sending a signal
 	err = proc.Signal(syscall.Signal(0))
 	return err == nil
+}
+
+// GetProcessIdentity returns the command line and start time (lstart) for a PID on Unix/macOS.
+func GetProcessIdentity(pid int) (command string, startTime string, err error) {
+	if pid <= 1 {
+		return "", "", fmt.Errorf("invalid pid %d", pid)
+	}
+	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "lstart=,command=").Output()
+	if err != nil {
+		return "", "", err
+	}
+	raw := strings.TrimSpace(string(out))
+	if raw == "" {
+		return "", "", fmt.Errorf("no process found for pid %d", pid)
+	}
+	parts := strings.Fields(raw)
+	if len(parts) >= 5 {
+		// "Fri Sep 11 13:48:47 2026 /path/to/cmd ..."
+		startTime = strings.Join(parts[:5], " ")
+		if len(parts) > 5 {
+			command = strings.Join(parts[5:], " ")
+		}
+	} else {
+		command = raw
+	}
+	return command, startTime, nil
+}
+
+// IsJobProcessAlive checks whether the process for a specific job is alive and matches the job's identity.
+// It protects against PID recycling by verifying:
+// 1. The OS signal check passes.
+// 2. If ProcessStartTime was recorded, the current process's start time must match.
+// 3. If the process command line contains "_internal_run", it must match the specific job ID.
+func IsJobProcessAlive(job *JobRecord) bool {
+	if job == nil || job.PID <= 1 {
+		return false
+	}
+	if !IsProcessAlive(job.PID) {
+		return false
+	}
+	cmd, startTime, err := GetProcessIdentity(job.PID)
+	if err != nil {
+		return false
+	}
+	if job.ProcessStartTime != "" && startTime != "" && job.ProcessStartTime != startTime {
+		return false
+	}
+	if strings.Contains(cmd, "_internal_run") && !strings.Contains(cmd, job.ID) {
+		return false
+	}
+	return true
 }
 
 // ProgressMetrics contains parsed progress metrics from FFmpeg's progress.txt.

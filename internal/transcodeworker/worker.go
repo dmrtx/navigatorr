@@ -413,10 +413,10 @@ func (w *Worker) countActiveJobs(excludeID string) (int, error) {
 			continue
 		}
 		if job.Status == "running" || job.Status == "queued" {
-			if IsProcessAlive(job.PID) {
+			if IsJobProcessAlive(job) {
 				count++
 			} else if job.PID > 0 {
-				// Clean stale crash
+				// Clean stale crash or recycled PID
 				job.Status = "failed"
 				job.FinishedAt = time.Now().UTC()
 				job.Error = "process terminated unexpectedly"
@@ -442,6 +442,8 @@ func (w *Worker) InternalRun(ctx context.Context, jobID string) error {
 	}
 
 	job.PID = os.Getpid()
+	_, startTime, _ := GetProcessIdentity(job.PID)
+	job.ProcessStartTime = startTime
 	job.Status = "running"
 	job.StartedAt = time.Now().UTC()
 	_ = SaveJobAtomic(jobFile, job)
@@ -500,9 +502,9 @@ func (w *Worker) Status(ctx context.Context, jobID string) (JobStatusResponse, e
 		return JobStatusResponse{ID: jobID, Status: "failed", Error: "job not found"}, err
 	}
 
-	// Detect crashed process
+	// Detect crashed process or recycled PID
 	if (job.Status == "running" || job.Status == "queued") && job.PID > 0 {
-		if !IsProcessAlive(job.PID) {
+		if !IsJobProcessAlive(job) {
 			job.Status = "failed"
 			job.FinishedAt = time.Now().UTC()
 			job.Error = "process terminated unexpectedly"
@@ -539,15 +541,18 @@ func (w *Worker) Cancel(ctx context.Context, jobID string) (JobStatusResponse, e
 	}
 
 	if job.PID > 1 && (job.Status == "running" || job.Status == "queued") {
-		// Attempt graceful SIGTERM
-		_ = syscall.Kill(-job.PID, syscall.SIGTERM)
-		_ = syscall.Kill(job.PID, syscall.SIGTERM)
+		// Only signal if the running process truly matches this job (protects against PID recycling)
+		if IsJobProcessAlive(job) {
+			// Attempt graceful SIGTERM
+			_ = syscall.Kill(-job.PID, syscall.SIGTERM)
+			_ = syscall.Kill(job.PID, syscall.SIGTERM)
 
-		// Wait briefly, then force SIGKILL if still alive
-		time.Sleep(100 * time.Millisecond)
-		if IsProcessAlive(job.PID) {
-			_ = syscall.Kill(-job.PID, syscall.SIGKILL)
-			_ = syscall.Kill(job.PID, syscall.SIGKILL)
+			// Wait briefly, then force SIGKILL if still alive
+			time.Sleep(100 * time.Millisecond)
+			if IsJobProcessAlive(job) {
+				_ = syscall.Kill(-job.PID, syscall.SIGKILL)
+				_ = syscall.Kill(job.PID, syscall.SIGKILL)
+			}
 		}
 	}
 

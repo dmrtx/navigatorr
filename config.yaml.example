@@ -115,16 +115,27 @@ sabnzbd:
 # Disabled by default.
 transcode:
   enabled: false
-  executor: ssh
+  executor: "ssh"
+  default_action: "manual_approval"
+  min_savings_percent: 15.0
+  max_parallel_jobs: 1
   ssh:
     host: "192.168.68.55"
+    port: 22
     user: "morotxo"
-    command: "/Users/morotxo/.local/bin/navigatorr-transcode"
-    identity_file: "/run/secrets/navigatorr_transcode_ssh"
-    connect_timeout: "5s"
+
+    # Dedicated read-only key mounted into Navigatorr container
+    ssh_key_path: "/run/secrets/navigatorr_transcode_ssh"
+    known_hosts_path: "/run/secrets/navigatorr_known_hosts"
+
+    remote_binary: "/usr/local/bin/navigatorr-transcode"
+
+    connect_timeout_sec: 5
+    command_timeout_sec: 60
+
     path_mappings:
-      - local: "/media"
-        remote: "/Volumes/media"
+      - local_prefix: "/media"
+        remote_prefix: "/Volumes/media"
 
 # ==============================================================================
 # 5. REQUEST QUEUE (HTTP INGEST)

@@ -313,6 +313,68 @@ transcode:
 		}
 	})
 
+	t.Run("parses transcode configuration with user aliases and secrets", func(t *testing.T) {
+		p := writeCfg("transcode_user_aliases.yaml", `
+transcode:
+  enabled: true
+  executor: "ssh"
+  default_action: "manual_approval"
+  min_savings_percent: 15.0
+  max_parallel_jobs: 1
+  ssh:
+    host: "192.168.68.55"
+    port: 22
+    user: "morotxo"
+    ssh_key_path: "/run/secrets/navigatorr_transcode_ssh"
+    known_hosts_path: "/run/secrets/navigatorr_known_hosts"
+    remote_binary: "/usr/local/bin/navigatorr-transcode"
+    connect_timeout_sec: 5
+    command_timeout_sec: 60
+    path_mappings:
+      - local_prefix: "/media"
+        remote_prefix: "/Volumes/media"
+`)
+		cfg, err := Load(p)
+		if err != nil {
+			t.Fatalf("unexpected error loading transcode config with aliases: %v", err)
+		}
+		if cfg.Transcode.DefaultAction != "manual_approval" {
+			t.Errorf("expected default_action=manual_approval, got %s", cfg.Transcode.DefaultAction)
+		}
+		if cfg.Transcode.MinSavingsPercent != 15.0 {
+			t.Errorf("expected min_savings_percent=15.0, got %f", cfg.Transcode.MinSavingsPercent)
+		}
+		if cfg.Transcode.MaxParallelJobs != 1 {
+			t.Errorf("expected max_parallel_jobs=1, got %d", cfg.Transcode.MaxParallelJobs)
+		}
+		ssh := cfg.Transcode.SSH
+		if ssh.Port != 22 {
+			t.Errorf("expected port=22, got %d", ssh.Port)
+		}
+		if ssh.KeyFile() != "/run/secrets/navigatorr_transcode_ssh" {
+			t.Errorf("expected key file /run/secrets/navigatorr_transcode_ssh, got %s", ssh.KeyFile())
+		}
+		if ssh.KnownHostsPath != "/run/secrets/navigatorr_known_hosts" {
+			t.Errorf("expected known hosts /run/secrets/navigatorr_known_hosts, got %s", ssh.KnownHostsPath)
+		}
+		if ssh.RemoteCommand() != "/usr/local/bin/navigatorr-transcode" {
+			t.Errorf("expected remote command /usr/local/bin/navigatorr-transcode, got %s", ssh.RemoteCommand())
+		}
+		if ssh.TimeoutDuration() != 5*time.Second {
+			t.Errorf("expected timeout 5s, got %v", ssh.TimeoutDuration())
+		}
+		if ssh.CommandTimeoutDuration() != 60*time.Second {
+			t.Errorf("expected command timeout 60s, got %v", ssh.CommandTimeoutDuration())
+		}
+		if len(ssh.PathMappings) != 1 {
+			t.Fatalf("expected 1 path mapping, got %d", len(ssh.PathMappings))
+		}
+		m := ssh.PathMappings[0]
+		if m.GetLocal() != "/media" || m.GetRemote() != "/Volumes/media" {
+			t.Errorf("unexpected mapping: local=%s, remote=%s", m.GetLocal(), m.GetRemote())
+		}
+	})
+
 	t.Run("default timeout when empty", func(t *testing.T) {
 		tc := SSHExecutorConfig{}
 		if tc.TimeoutDuration() != 5*time.Second {

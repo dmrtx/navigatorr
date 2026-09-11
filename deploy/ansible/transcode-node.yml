@@ -28,10 +28,15 @@
         fail_msg: "Target host must be Apple Silicon arm64, but detected {{ ansible_architecture }}."
 
   tasks:
-    - name: Install FFmpeg via Homebrew
-      community.general.homebrew:
-        name: ffmpeg
-        state: present
+    - name: Check if FFmpeg is installed
+      ansible.builtin.stat:
+        path: "{{ transcode_ffmpeg_path }}"
+      register: ffmpeg_stat
+
+    - name: Install FFmpeg via Homebrew if missing
+      ansible.builtin.command:
+        cmd: /opt/homebrew/bin/brew install ffmpeg
+      when: not ffmpeg_stat.stat.exists
 
     - name: Create local directories
       ansible.builtin.file:
@@ -48,6 +53,20 @@
         src: "{{ transcode_binary_src | default('../../navigatorr-transcode') }}"
         dest: "{{ transcode_bin_dir }}/navigatorr-transcode"
         mode: "0755"
+
+    - name: Symlink navigatorr-transcode to /opt/homebrew/bin
+      ansible.builtin.file:
+        src: "{{ transcode_bin_dir }}/navigatorr-transcode"
+        dest: "/opt/homebrew/bin/navigatorr-transcode"
+        state: link
+      ignore_errors: true
+
+    - name: Symlink navigatorr-transcode to /usr/local/bin if permitted
+      ansible.builtin.file:
+        src: "{{ transcode_bin_dir }}/navigatorr-transcode"
+        dest: "/usr/local/bin/navigatorr-transcode"
+        state: link
+      ignore_errors: true
 
     - name: Install worker configuration file
       ansible.builtin.template:

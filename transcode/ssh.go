@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -138,6 +139,12 @@ func (e *SSHExecutor) buildSSHArgs() []string {
 		"-o", "BatchMode=yes",
 		"-o", "StrictHostKeyChecking=yes",
 		"-o", fmt.Sprintf("ConnectTimeout=%d", timeoutSec),
+	}
+	if e.cfg.Port > 0 {
+		args = append(args, "-p", strconv.Itoa(e.cfg.Port))
+	}
+	if e.cfg.KnownHostsFile != "" {
+		args = append(args, "-o", fmt.Sprintf("UserKnownHostsFile=%s", e.cfg.KnownHostsFile))
 	}
 	if e.cfg.IdentityFile != "" {
 		args = append(args, "-i", e.cfg.IdentityFile)

@@ -92,14 +92,17 @@ func main() {
 		sshCfg := cfg.Transcode.SSH
 		mappings := make([]transcode.PathMapping, len(sshCfg.PathMappings))
 		for i, m := range sshCfg.PathMappings {
-			mappings[i] = transcode.PathMapping{Local: m.Local, Remote: m.Remote}
+			mappings[i] = transcode.PathMapping{Local: m.GetLocal(), Remote: m.GetRemote()}
 		}
 		sshExec, err := transcode.NewSSHExecutor(transcode.SSHConfig{
 			Host:           sshCfg.Host,
+			Port:           sshCfg.Port,
 			User:           sshCfg.User,
-			Command:        sshCfg.Command,
-			IdentityFile:   sshCfg.IdentityFile,
+			Command:        sshCfg.RemoteCommand(),
+			IdentityFile:   sshCfg.KeyFile(),
+			KnownHostsFile: sshCfg.KnownHostsPath,
 			ConnectTimeout: sshCfg.TimeoutDuration(),
+			CommandTimeout: sshCfg.CommandTimeoutDuration(),
 			PathMappings:   mappings,
 		})
 		if err != nil {
@@ -107,7 +110,7 @@ func main() {
 		} else {
 			transcodeExecutor = sshExec
 			internal.Logf("ssh transcode executor configured: host=%s, cmd=%s, timeout=%v",
-				sshCfg.Host, sshCfg.Command, sshCfg.TimeoutDuration())
+				sshCfg.Host, sshCfg.RemoteCommand(), sshCfg.TimeoutDuration())
 		}
 	}
 

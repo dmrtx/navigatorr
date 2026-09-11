@@ -89,33 +89,82 @@ type SABnzbdConfig struct {
 }
 
 type TranscodeConfig struct {
-	Enabled  bool              `yaml:"enabled"`
-	Executor string            `yaml:"executor"` // "ssh"
-	SSH      SSHExecutorConfig `yaml:"ssh"`
+	Enabled           bool              `yaml:"enabled"`
+	Executor          string            `yaml:"executor"` // "ssh"
+	DefaultAction     string            `yaml:"default_action"`
+	MinSavingsPercent float64           `yaml:"min_savings_percent"`
+	MaxParallelJobs   int               `yaml:"max_parallel_jobs"`
+	SSH               SSHExecutorConfig `yaml:"ssh"`
 }
 
 type SSHExecutorConfig struct {
-	Host           string                 `yaml:"host"`
-	User           string                 `yaml:"user"`
-	Command        string                 `yaml:"command"`
-	IdentityFile   string                 `yaml:"identity_file"`
-	ConnectTimeout string                 `yaml:"connect_timeout"`
-	PathMappings   []TranscodePathMapping `yaml:"path_mappings"`
+	Host              string                 `yaml:"host"`
+	Port              int                    `yaml:"port"`
+	User              string                 `yaml:"user"`
+	Command           string                 `yaml:"command"`
+	RemoteBinary      string                 `yaml:"remote_binary"`
+	IdentityFile      string                 `yaml:"identity_file"`
+	SSHKeyPath        string                 `yaml:"ssh_key_path"`
+	KnownHostsPath    string                 `yaml:"known_hosts_path"`
+	ConnectTimeout    string                 `yaml:"connect_timeout"`
+	ConnectTimeoutSec int                    `yaml:"connect_timeout_sec"`
+	CommandTimeoutSec int                    `yaml:"command_timeout_sec"`
+	PathMappings      []TranscodePathMapping `yaml:"path_mappings"`
 }
 
-type TranscodePathMapping struct {
-	Local  string `yaml:"local"`
-	Remote string `yaml:"remote"`
+func (s SSHExecutorConfig) RemoteCommand() string {
+	if s.RemoteBinary != "" {
+		return s.RemoteBinary
+	}
+	return s.Command
+}
+
+func (s SSHExecutorConfig) KeyFile() string {
+	if s.SSHKeyPath != "" {
+		return s.SSHKeyPath
+	}
+	return s.IdentityFile
 }
 
 // TimeoutDuration returns the parsed connect_timeout duration or defaults to 5s.
 func (s SSHExecutorConfig) TimeoutDuration() time.Duration {
+	if s.ConnectTimeoutSec > 0 {
+		return time.Duration(s.ConnectTimeoutSec) * time.Second
+	}
 	if s.ConnectTimeout != "" {
 		if d, err := time.ParseDuration(s.ConnectTimeout); err == nil && d > 0 {
 			return d
 		}
 	}
 	return 5 * time.Second
+}
+
+func (s SSHExecutorConfig) CommandTimeoutDuration() time.Duration {
+	if s.CommandTimeoutSec > 0 {
+		return time.Duration(s.CommandTimeoutSec) * time.Second
+	}
+	return 60 * time.Second
+}
+
+type TranscodePathMapping struct {
+	Local        string `yaml:"local"`
+	Remote       string `yaml:"remote"`
+	LocalPrefix  string `yaml:"local_prefix"`
+	RemotePrefix string `yaml:"remote_prefix"`
+}
+
+func (m TranscodePathMapping) GetLocal() string {
+	if m.LocalPrefix != "" {
+		return m.LocalPrefix
+	}
+	return m.Local
+}
+
+func (m TranscodePathMapping) GetRemote() string {
+	if m.RemotePrefix != "" {
+		return m.RemotePrefix
+	}
+	return m.Remote
 }
 
 func DefaultConfigPath() string {

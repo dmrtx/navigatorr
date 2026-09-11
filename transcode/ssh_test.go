@@ -137,9 +137,11 @@ func TestSSHExecutor_PathMapping(t *testing.T) {
 func TestSSHExecutor_BuildSSHArgs(t *testing.T) {
 	cfg := SSHConfig{
 		Host:           "m1.local",
+		Port:           2222,
 		User:           "morotxo",
 		Command:        "/opt/bin/navigatorr-transcode",
 		IdentityFile:   "/home/user/.ssh/id_ed25519",
+		KnownHostsFile: "/run/secrets/navigatorr_known_hosts",
 		ConnectTimeout: 10 * time.Second,
 	}
 	exec, err := NewSSHExecutor(cfg)
@@ -158,6 +160,12 @@ func TestSSHExecutor_BuildSSHArgs(t *testing.T) {
 	}
 	if !strings.Contains(argsStr, "ConnectTimeout=10") {
 		t.Errorf("missing ConnectTimeout=10 in %s", argsStr)
+	}
+	if !strings.Contains(argsStr, "-p 2222") {
+		t.Errorf("missing port flag in %s", argsStr)
+	}
+	if !strings.Contains(argsStr, "UserKnownHostsFile=/run/secrets/navigatorr_known_hosts") {
+		t.Errorf("missing UserKnownHostsFile flag in %s", argsStr)
 	}
 	if !strings.Contains(argsStr, "-i /home/user/.ssh/id_ed25519") {
 		t.Errorf("missing identity file flag in %s", argsStr)
