@@ -4,11 +4,17 @@
   gather_facts: true
 
   vars:
-    transcode_bin_dir: "{{ ansible_user_dir }}/.local/bin"
-    transcode_config_dir: "{{ ansible_user_dir }}/.config/navigatorr-transcode"
-    transcode_state_dir: "{{ ansible_user_dir }}/.local/share/navigatorr-transcode/jobs"
+    transcode_home_dir: "{{ ansible_facts['user_dir'] }}"
+    transcode_bin_dir: "{{ transcode_home_dir }}/.local/bin"
+    transcode_config_dir: "{{ transcode_home_dir }}/.config/navigatorr-transcode"
+    transcode_state_dir: "{{ transcode_home_dir }}/.local/share/navigatorr-transcode/jobs"
+    transcode_source_dir: "{{ playbook_dir }}/../.."
+    transcode_build_path: "/tmp/navigatorr-transcode.build"
+    transcode_brew_path: "/opt/homebrew/bin/brew"
+    transcode_go_path: "/opt/homebrew/bin/go"
     transcode_ffmpeg_path: "/opt/homebrew/bin/ffmpeg"
     transcode_ffprobe_path: "/opt/homebrew/bin/ffprobe"
+    transcode_remote_binary: "/opt/homebrew/bin/navigatorr-transcode"
     transcode_allowed_roots:
       - "/Volumes/media"
     transcode_max_parallel_jobs: 1
@@ -18,27 +24,60 @@
     - name: Verify target is running macOS (Darwin)
       ansible.builtin.assert:
         that:
-          - ansible_os_family == "Darwin"
-        fail_msg: "Target host must be macOS (Darwin), but detected {{ ansible_os_family }}."
+          - ansible_facts["os_family"] == "Darwin"
+        fail_msg: "Target host must be macOS (Darwin), but detected {{ ansible_facts['os_family'] }}."
 
     - name: Verify target architecture is Apple Silicon (arm64)
       ansible.builtin.assert:
         that:
-          - ansible_architecture == "arm64"
-        fail_msg: "Target host must be Apple Silicon arm64, but detected {{ ansible_architecture }}."
+          - ansible_facts["architecture"] == "arm64"
+        fail_msg: "Target host must be Apple Silicon arm64, but detected {{ ansible_facts['architecture'] }}."
 
   tasks:
-    - name: Check if FFmpeg is installed
+    - name: Check whether Homebrew is installed
       ansible.builtin.stat:
-        path: "{{ transcode_ffmpeg_path }}"
-      register: ffmpeg_stat
+        path: "{{ transcode_brew_path }}"
+      register: homebrew_stat
 
-    - name: Install FFmpeg via Homebrew if missing
+    - name: Install Homebrew when missing
+      ansible.builtin.shell: |
+        set -euo pipefail
+        /bin/bash -c "$(/usr/bin/curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+      args:
+        executable: /bin/bash
+        creates: "{{ transcode_brew_path }}"
+      environment:
+        NONINTERACTIVE: "1"
+      when: not homebrew_stat.stat.exists
+
+    - name: Verify Homebrew is available
+      ansible.builtin.stat:
+        path: "{{ transcode_brew_path }}"
+      register: homebrew_ready
+
+    - name: Require Homebrew after bootstrap
+      ansible.builtin.assert:
+        that:
+          - homebrew_ready.stat.exists
+        fail_msg: "Homebrew bootstrap failed; expected {{ transcode_brew_path }} to exist."
+
+    - name: Check required Homebrew formulae
       ansible.builtin.command:
-        cmd: /opt/homebrew/bin/brew install ffmpeg
-      when: not ffmpeg_stat.stat.exists
+        cmd: "{{ transcode_brew_path }} list --formula {{ item }}"
+      loop:
+        - go
+        - ffmpeg
+      register: brew_formula_checks
+      changed_when: false
+      failed_when: false
 
-    - name: Create local directories
+    - name: Install missing Homebrew formulae
+      ansible.builtin.command:
+        cmd: "{{ transcode_brew_path }} install {{ item.item }}"
+      loop: "{{ brew_formula_checks.results }}"
+      when: item.rc != 0
+
+    - name: Create transcode worker directories
       ansible.builtin.file:
         path: "{{ item }}"
         state: directory
@@ -48,25 +87,30 @@
         - "{{ transcode_config_dir }}"
         - "{{ transcode_state_dir }}"
 
+    - name: Build navigatorr-transcode from the checked-out Navigatorr source
+      ansible.builtin.command:
+        cmd: "{{ transcode_go_path }} build -trimpath -o {{ transcode_build_path }} ./cmd/navigatorr-transcode"
+        chdir: "{{ transcode_source_dir }}"
+      changed_when: false
+
     - name: Deploy navigatorr-transcode binary
       ansible.builtin.copy:
-        src: "{{ transcode_binary_src | default('../../navigatorr-transcode') }}"
+        src: "{{ transcode_build_path }}"
         dest: "{{ transcode_bin_dir }}/navigatorr-transcode"
+        remote_src: true
         mode: "0755"
 
-    - name: Symlink navigatorr-transcode to /opt/homebrew/bin
+    - name: Symlink navigatorr-transcode into Homebrew bin
       ansible.builtin.file:
         src: "{{ transcode_bin_dir }}/navigatorr-transcode"
-        dest: "/opt/homebrew/bin/navigatorr-transcode"
+        dest: "{{ transcode_remote_binary }}"
         state: link
-      ignore_errors: true
 
-    - name: Symlink navigatorr-transcode to /usr/local/bin if permitted
+    - name: Remove temporary transcode build artifact
       ansible.builtin.file:
-        src: "{{ transcode_bin_dir }}/navigatorr-transcode"
-        dest: "/usr/local/bin/navigatorr-transcode"
-        state: link
-      ignore_errors: true
+        path: "{{ transcode_build_path }}"
+        state: absent
+      changed_when: false
 
     - name: Install worker configuration file
       ansible.builtin.template:
@@ -86,7 +130,7 @@
 
     - name: Run navigatorr-transcode doctor check
       ansible.builtin.command:
-        cmd: "{{ transcode_bin_dir }}/navigatorr-transcode doctor"
+        cmd: "{{ transcode_remote_binary }} doctor"
       register: doctor_check
       changed_when: false
       failed_when: doctor_check.rc != 0
