@@ -1,0 +1,169 @@
+---
+- name: Prepare OzMini for Navigatorr SSH transcode access
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  become: true
+
+  vars:
+    navigatorr_transcode_host: "192.168.68.55"
+    navigatorr_transcode_user: "morotxo"
+    navigatorr_transcode_port: 22
+    navigatorr_transcode_remote_binary: "/opt/homebrew/bin/navigatorr-transcode"
+    navigatorr_secrets_dir: "{{ ansible_facts['user_dir'] }}/.config/navigatorr/secrets"
+    navigatorr_ssh_key_path: "{{ navigatorr_secrets_dir }}/navigatorr_transcode_ssh"
+    navigatorr_known_hosts_path: "{{ navigatorr_secrets_dir }}/navigatorr_known_hosts"
+    navigatorr_bootstrap_known_hosts_path: "{{ navigatorr_secrets_dir }}/.bootstrap_known_hosts"
+
+  tasks:
+    - name: Require Linux controller
+      ansible.builtin.assert:
+        that:
+          - ansible_facts["system"] == "Linux"
+        fail_msg: "Run this playbook on the OzMini Linux host."
+
+    - name: Install SSH bootstrap dependencies
+      ansible.builtin.apt:
+        name:
+          - openssh-client
+          - sshpass
+        state: present
+        update_cache: true
+
+    - name: Create Navigatorr secrets directory
+      become: false
+      ansible.builtin.file:
+        path: "{{ navigatorr_secrets_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Generate dedicated Navigatorr transcode SSH key
+      become: false
+      ansible.builtin.command:
+        cmd: >-
+          ssh-keygen -q -t ed25519 -N ''
+          -C navigatorr-transcode@ozmini
+          -f {{ navigatorr_ssh_key_path }}
+      args:
+        creates: "{{ navigatorr_ssh_key_path }}"
+
+    - name: Lock down dedicated private key
+      become: false
+      ansible.builtin.file:
+        path: "{{ navigatorr_ssh_key_path }}"
+        mode: "0600"
+
+    - name: Initialize bootstrap known_hosts file
+      become: false
+      ansible.builtin.file:
+        path: "{{ navigatorr_bootstrap_known_hosts_path }}"
+        state: touch
+        mode: "0600"
+        modification_time: preserve
+        access_time: preserve
+
+    - name: Add M1 worker to in-memory inventory
+      become: false
+      ansible.builtin.add_host:
+        name: m1-transcode-node
+        groups: navigatorr_transcode_workers
+        ansible_host: "{{ navigatorr_transcode_host }}"
+        ansible_port: "{{ navigatorr_transcode_port }}"
+        ansible_user: "{{ navigatorr_transcode_user }}"
+        ansible_connection: ssh
+        ansible_ssh_private_key_file: "{{ navigatorr_ssh_key_path }}"
+        ansible_ssh_common_args: >-
+          -o StrictHostKeyChecking=accept-new
+          -o UserKnownHostsFile={{ navigatorr_bootstrap_known_hosts_path }}
+
+- name: Authorize OzMini dedicated key on M1 worker
+  hosts: navigatorr_transcode_workers
+  gather_facts: true
+
+  vars:
+    navigatorr_controller_home: "{{ hostvars['localhost'].ansible_facts['user_dir'] }}"
+    navigatorr_secrets_dir: "{{ navigatorr_controller_home }}/.config/navigatorr/secrets"
+    navigatorr_ssh_key_path: "{{ navigatorr_secrets_dir }}/navigatorr_transcode_ssh"
+    navigatorr_known_hosts_path: "{{ navigatorr_secrets_dir }}/navigatorr_known_hosts"
+    navigatorr_bootstrap_known_hosts_path: "{{ navigatorr_secrets_dir }}/.bootstrap_known_hosts"
+    navigatorr_transcode_host: "{{ hostvars['localhost'].navigatorr_transcode_host | default('192.168.68.55') }}"
+    navigatorr_transcode_port: "{{ hostvars['localhost'].navigatorr_transcode_port | default(22) }}"
+    navigatorr_transcode_user: "{{ hostvars['localhost'].navigatorr_transcode_user | default('morotxo') }}"
+    navigatorr_transcode_remote_binary: "{{ hostvars['localhost'].navigatorr_transcode_remote_binary | default('/opt/homebrew/bin/navigatorr-transcode') }}"
+
+  tasks:
+    - name: Require macOS Apple Silicon worker
+      ansible.builtin.assert:
+        that:
+          - ansible_facts["system"] == "Darwin"
+          - ansible_facts["architecture"] == "arm64"
+        fail_msg: "SSH target must be the Apple Silicon M1 transcode worker."
+
+    - name: Ensure remote SSH directory exists
+      ansible.builtin.file:
+        path: "{{ ansible_facts['user_dir'] }}/.ssh"
+        state: directory
+        mode: "0700"
+
+    - name: Read dedicated public key from OzMini
+      ansible.builtin.set_fact:
+        navigatorr_transcode_public_key: "{{ lookup('ansible.builtin.file', navigatorr_ssh_key_path + '.pub') | trim }}"
+
+    - name: Authorize dedicated Navigatorr transcode key
+      ansible.builtin.lineinfile:
+        path: "{{ ansible_facts['user_dir'] }}/.ssh/authorized_keys"
+        line: "{{ navigatorr_transcode_public_key }}"
+        create: true
+        mode: "0600"
+        state: present
+
+    - name: Read M1 ED25519 SSH host public key
+      ansible.builtin.slurp:
+        src: /etc/ssh/ssh_host_ed25519_key.pub
+      register: m1_ssh_host_key
+
+    - name: Install strict known_hosts entry on OzMini
+      delegate_to: localhost
+      become: false
+      ansible.builtin.copy:
+        dest: "{{ navigatorr_known_hosts_path }}"
+        mode: "0600"
+        content: >-
+          {{ navigatorr_transcode_host }} {{ (m1_ssh_host_key.content | b64decode | trim) }}
+
+    - name: Remove temporary bootstrap known_hosts file
+      delegate_to: localhost
+      become: false
+      ansible.builtin.file:
+        path: "{{ navigatorr_bootstrap_known_hosts_path }}"
+        state: absent
+
+    - name: Verify strict key-only SSH from OzMini to worker doctor
+      delegate_to: localhost
+      become: false
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - -i
+          - "{{ navigatorr_ssh_key_path }}"
+          - -p
+          - "{{ navigatorr_transcode_port | string }}"
+          - -o
+          - BatchMode=yes
+          - -o
+          - StrictHostKeyChecking=yes
+          - -o
+          - "UserKnownHostsFile={{ navigatorr_known_hosts_path }}"
+          - "{{ navigatorr_transcode_user }}@{{ navigatorr_transcode_host }}"
+          - "{{ navigatorr_transcode_remote_binary }}"
+          - doctor
+      register: navigatorr_remote_doctor
+      changed_when: false
+
+    - name: Require remote worker doctor to report healthy
+      delegate_to: localhost
+      become: false
+      ansible.builtin.assert:
+        that:
+          - (navigatorr_remote_doctor.stdout | from_json).ok | bool
+        fail_msg: "OzMini reached the M1 worker, but navigatorr-transcode doctor did not report ok=true."
