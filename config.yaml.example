@@ -117,8 +117,62 @@ transcode:
   enabled: false
   executor: "ssh"
   default_action: "manual_approval"
+  default_profile: "hevc-vt-balanced"
   min_savings_percent: 15.0
   max_parallel_jobs: 1
+
+  # Transcode profiles are declarative and strictly validated.
+  # Arbitrary FFmpeg arguments or shell strings are prohibited (fail-closed model).
+  # If 'profiles' is omitted, built-in profiles ('hevc-vt', 'hevc-vt-balanced',
+  # 'hevc-vt-quality', 'hevc-vt-space') remain available by default.
+  # Subtitle policy: Matroska preserves ASS/SSA and bitmap subtitles, while incompatible
+  # text codecs like mov_text are safely converted to subrip (SRT).
+  profiles:
+    hevc-vt-balanced:
+      container: mkv
+      video:
+        codec: hevc_videotoolbox
+        quality: 65
+      audio:
+        mode: copy
+      subtitles:
+        mode: preserve
+        convert_incompatible: true
+      preserve:
+        metadata: true
+        chapters: true
+        attachments: true
+
+    hevc-vt-quality:
+      container: mkv
+      video:
+        codec: hevc_videotoolbox
+        quality: 55
+      audio:
+        mode: copy
+      subtitles:
+        mode: preserve
+        convert_incompatible: true
+      preserve:
+        metadata: true
+        chapters: true
+        attachments: true
+
+    hevc-vt-space:
+      container: mkv
+      video:
+        codec: hevc_videotoolbox
+        quality: 75
+      audio:
+        mode: copy
+      subtitles:
+        mode: preserve
+        convert_incompatible: true
+      preserve:
+        metadata: true
+        chapters: true
+        attachments: true
+
   ssh:
     host: "192.0.2.10"
     port: 22

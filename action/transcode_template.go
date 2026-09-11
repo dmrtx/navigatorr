@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
 )
@@ -169,10 +170,50 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	ec.State["original"] = origMap
 
 	profile := strings.TrimSpace(getString(ec.Inputs, "profile"))
+	if profile == "" && e.deps.Config != nil {
+		profile = e.deps.Config.Transcode.DefaultProfile
+	}
 	if profile == "" {
 		profile = "hevc-vt"
 	}
+
+	var plan *transcode.Plan
+	if e.deps.Config != nil {
+		resolvedPlan, err := e.deps.Config.Transcode.ResolvePlan(profile)
+		if err != nil {
+			return StepResult{
+				Status: StepFailed,
+				Error:  fmt.Sprintf("unknown transcode profile %q: %v", profile, err),
+			}, nil
+		}
+		plan = resolvedPlan
+	} else {
+		builtins := config.BuiltinTranscodeProfiles()
+		prof, ok := builtins[profile]
+		if !ok {
+			return StepResult{
+				Status: StepFailed,
+				Error:  fmt.Sprintf("unknown transcode profile %q", profile),
+			}, nil
+		}
+		plan = &transcode.Plan{
+			Container:                    prof.Container,
+			VideoCodec:                   prof.Video.Codec,
+			Quality:                      prof.Video.Quality,
+			AudioMode:                    prof.Audio.Mode,
+			SubtitleMode:                 prof.Subtitles.Mode,
+			ConvertIncompatibleSubtitles: prof.Subtitles.ConvertIncompatible,
+			PreserveMetadata:             prof.Preserve.Metadata,
+			PreserveChapters:             prof.Preserve.Chapters,
+			PreserveAttachments:          prof.Preserve.Attachments,
+		}
+	}
+
+	candExt := transcode.ContainerExtension(plan.Container)
+
 	ec.State["profile"] = profile
+	ec.State["plan"] = plan
+	ec.State["candidate_extension"] = candExt
 
 	return StepResult{
 		Status: StepCompleted,
@@ -180,6 +221,8 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 			"original":        origMap,
 			"original_sha256": origSHA,
 			"resolved_path":   cleanPath,
+			"profile":         profile,
+			"plan":            plan,
 		},
 	}, nil
 }
@@ -223,12 +266,16 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 		jobID = fmt.Sprintf("job-%s", ec.InstanceID)
 	}
 
-	// Calculate candidate path: <source-dir>/.navigatorr-candidates/<basename>.<job-id>.mkv
+	// Calculate candidate path: <source-dir>/.navigatorr-candidates/<stem>.<job-id>.<ext>
+	candExt := getString(ec.State, "candidate_extension")
+	if candExt == "" {
+		candExt = ".mkv"
+	}
 	srcDir := filepath.Dir(cleanPath)
 	base := filepath.Base(cleanPath)
 	stem := strings.TrimSuffix(base, filepath.Ext(base))
 	candidateDir := filepath.Join(srcDir, ".navigatorr-candidates")
-	candidatePath := filepath.Join(candidateDir, fmt.Sprintf("%s.%s.mkv", stem, jobID))
+	candidatePath := filepath.Join(candidateDir, fmt.Sprintf("%s.%s%s", stem, jobID, candExt))
 
 	profile := strings.TrimSpace(getString(ec.Inputs, "profile"))
 	if profile == "" {
@@ -238,11 +285,17 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 		profile = "hevc-vt"
 	}
 
+	var plan *transcode.Plan
+	if p, ok := ec.State["plan"].(*transcode.Plan); ok {
+		plan = p
+	}
+
 	req := transcode.Request{
 		ID:            jobID,
 		SourcePath:    cleanPath,
 		CandidatePath: candidatePath,
 		Profile:       profile,
+		Plan:          plan,
 	}
 
 	job, err := e.deps.Transcode.Submit(ctx, req)
@@ -345,16 +398,24 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 
 		ec.State["candidate_path"] = candPath
 		ec.State["output_path"] = candPath
+		if len(st.Conversions) > 0 {
+			ec.State["conversions"] = st.Conversions
+		}
+
+		outputs := map[string]any{
+			"transcode_done":     true,
+			"candidate_path":     candPath,
+			"output_path":        candPath,
+			"job_id":             jobID,
+			"external_reference": jobID,
+		}
+		if len(st.Conversions) > 0 {
+			outputs["conversions"] = st.Conversions
+		}
 
 		return StepResult{
-			Status: StepCompleted,
-			Outputs: map[string]any{
-				"transcode_done":     true,
-				"candidate_path":     candPath,
-				"output_path":        candPath,
-				"job_id":             jobID,
-				"external_reference": jobID,
-			},
+			Status:  StepCompleted,
+			Outputs: outputs,
 		}, nil
 
 	default:
@@ -478,9 +539,23 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 
 	// 4. Subtitle streams check
 	origSubs := getStreamsList(origMap, "subtitles")
+	outSubs := outRep.Subtitles
+
+	// 4a. Check subtitle count
+	if len(origSubs) > 0 && len(outSubs) < len(origSubs) {
+		return StepResult{
+			Status:        StepWaitingDecision,
+			WaitingReason: fmt.Sprintf("Subtitle stream lost: original had %d subtitle streams, output has %d", len(origSubs), len(outSubs)),
+			WaitingOptions: []WaitingOption{
+				{Decision: "reject", Description: "Reject transcode candidate to prevent subtitle loss (keep original)"},
+				{Decision: "accept_loss", Description: "Accept transcode candidate with missing subtitle tracks"},
+			},
+		}, nil
+	}
+
 	outSubLangs := make(map[string]bool)
 	outHasASS := false
-	for _, s := range outRep.Subtitles {
+	for _, s := range outSubs {
 		if s.Language != "" {
 			outSubLangs[strings.ToLower(s.Language)] = true
 		}
@@ -514,6 +589,52 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 			WaitingOptions: []WaitingOption{
 				{Decision: "reject", Description: "Reject transcode candidate to preserve stylized ASS/SSA subtitles (keep original)"},
 				{Decision: "accept_loss", Description: "Accept transcode candidate without ASS/SSA subtitles"},
+			},
+		}, nil
+	}
+
+	// 4b. Verify default/forced dispositions if present in original
+	origForcedSubs := 0
+	outForcedSubs := 0
+	origDefaultSubs := 0
+	outDefaultSubs := 0
+	for _, s := range origSubs {
+		if s.Disposition != nil {
+			if s.Disposition["forced"] > 0 {
+				origForcedSubs++
+			}
+			if s.Disposition["default"] > 0 {
+				origDefaultSubs++
+			}
+		}
+	}
+	for _, s := range outSubs {
+		if s.Disposition != nil {
+			if s.Disposition["forced"] > 0 {
+				outForcedSubs++
+			}
+			if s.Disposition["default"] > 0 {
+				outDefaultSubs++
+			}
+		}
+	}
+	if origForcedSubs > 0 && outForcedSubs == 0 {
+		return StepResult{
+			Status:        StepWaitingDecision,
+			WaitingReason: "Forced subtitle disposition lost: original had forced subtitles",
+			WaitingOptions: []WaitingOption{
+				{Decision: "reject", Description: "Reject transcode candidate to preserve forced subtitle disposition (keep original)"},
+				{Decision: "accept_loss", Description: "Accept transcode candidate without forced disposition"},
+			},
+		}, nil
+	}
+	if origDefaultSubs > 0 && outDefaultSubs == 0 {
+		return StepResult{
+			Status:        StepWaitingDecision,
+			WaitingReason: "Default subtitle disposition lost: original had default subtitles",
+			WaitingOptions: []WaitingOption{
+				{Decision: "reject", Description: "Reject transcode candidate to preserve default subtitle disposition (keep original)"},
+				{Decision: "accept_loss", Description: "Accept transcode candidate without default disposition"},
 			},
 		}, nil
 	}
@@ -577,22 +698,36 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 		"video_codec":    videoCodec,
 		"resolution":     resolution,
 	}
+	if convs, ok := ec.State["conversions"]; ok && convs != nil {
+		resultMap["conversions"] = convs
+	}
+	if prof, ok := ec.State["profile"]; ok && prof != "" {
+		resultMap["profile"] = prof
+	}
 
 	ec.State["validation"] = valSummary
 	ec.State["result"] = resultMap
 	ec.State["size_saved_bytes"] = savedBytes
 	ec.State["size_saved_percent"] = savedPercent
 
+	stepOutputs := map[string]any{
+		"result":             resultMap,
+		"validation":         valSummary,
+		"candidate_path":     outputPath,
+		"output_path":        outputPath,
+		"size_saved_bytes":   savedBytes,
+		"size_saved_percent": savedPercent,
+	}
+	if convs, ok := ec.State["conversions"]; ok && convs != nil {
+		stepOutputs["conversions"] = convs
+	}
+	if prof, ok := ec.State["profile"]; ok && prof != "" {
+		stepOutputs["profile"] = prof
+	}
+
 	return StepResult{
-		Status: StepCompleted,
-		Outputs: map[string]any{
-			"result":             resultMap,
-			"validation":         valSummary,
-			"candidate_path":     outputPath,
-			"output_path":        outputPath,
-			"size_saved_bytes":   savedBytes,
-			"size_saved_percent": savedPercent,
-		},
+		Status:  StepCompleted,
+		Outputs: stepOutputs,
 	}, nil
 }
 
@@ -639,16 +774,23 @@ func (e *Engine) stepTranscodeAccept(ctx context.Context, ec *ExecutionContext) 
 		}
 	}
 
+	acceptOutputs := map[string]any{
+		"candidate_path":   candidatePath,
+		"output_path":      candidatePath,
+		"original_path":    origPath,
+		"original_intact":  true,
+		"replace_original": false,
+		"message":          "Transcode completed and verified. Candidate output ready. Original file physically preserved and intact.",
+	}
+	if convs, ok := ec.State["conversions"]; ok && convs != nil {
+		acceptOutputs["conversions"] = convs
+	}
+	if prof, ok := ec.State["profile"]; ok && prof != "" {
+		acceptOutputs["profile"] = prof
+	}
 	return StepResult{
-		Status: StepCompleted,
-		Outputs: map[string]any{
-			"candidate_path":   candidatePath,
-			"output_path":      candidatePath,
-			"original_path":    origPath,
-			"original_intact":  true,
-			"replace_original": false,
-			"message":          "Transcode completed and verified. Candidate output ready. Original file physically preserved and intact.",
-		},
+		Status:  StepCompleted,
+		Outputs: acceptOutputs,
 	}, nil
 }
 
@@ -696,6 +838,16 @@ func getStreamsList(m map[string]any, key string) []mediainspect.DetailedStream 
 					Codec:    getString(itemMap, "codec"),
 					Language: getString(itemMap, "language"),
 					Title:    getString(itemMap, "title"),
+				}
+				if disp, ok := itemMap["disposition"].(map[string]int); ok {
+					ds.Disposition = disp
+				} else if dispAny, ok := itemMap["disposition"].(map[string]any); ok {
+					ds.Disposition = make(map[string]int)
+					for k := range dispAny {
+						if iv := getInt(dispAny, k); iv > 0 {
+							ds.Disposition[k] = iv
+						}
+					}
 				}
 				res = append(res, ds)
 			}

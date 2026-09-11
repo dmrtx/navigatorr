@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jakenesler/navigatorr/transcode"
 	"gopkg.in/yaml.v3"
 )
 
@@ -89,12 +90,210 @@ type SABnzbdConfig struct {
 }
 
 type TranscodeConfig struct {
-	Enabled           bool              `yaml:"enabled"`
-	Executor          string            `yaml:"executor"` // "ssh"
-	DefaultAction     string            `yaml:"default_action"`
-	MinSavingsPercent float64           `yaml:"min_savings_percent"`
-	MaxParallelJobs   int               `yaml:"max_parallel_jobs"`
-	SSH               SSHExecutorConfig `yaml:"ssh"`
+	Enabled           bool                              `yaml:"enabled"`
+	Executor          string                            `yaml:"executor"` // "ssh"
+	DefaultAction     string                            `yaml:"default_action"`
+	DefaultProfile    string                            `yaml:"default_profile"`
+	MinSavingsPercent float64                           `yaml:"min_savings_percent"`
+	MaxParallelJobs   int                               `yaml:"max_parallel_jobs"`
+	SSH               SSHExecutorConfig                 `yaml:"ssh"`
+	Profiles          map[string]TranscodeProfileConfig `yaml:"profiles"`
+}
+
+type TranscodeProfileConfig struct {
+	Container string                `yaml:"container"`
+	Video     VideoProfileConfig    `yaml:"video"`
+	Audio     AudioProfileConfig    `yaml:"audio"`
+	Subtitles SubtitleProfileConfig `yaml:"subtitles"`
+	Preserve  PreserveProfileConfig `yaml:"preserve"`
+}
+
+type VideoProfileConfig struct {
+	Codec   string `yaml:"codec"`
+	Quality int    `yaml:"quality"`
+}
+
+type AudioProfileConfig struct {
+	Mode string `yaml:"mode"`
+}
+
+type SubtitleProfileConfig struct {
+	Mode                string `yaml:"mode"`
+	ConvertIncompatible bool   `yaml:"convert_incompatible"`
+}
+
+type PreserveProfileConfig struct {
+	Metadata    bool `yaml:"metadata"`
+	Chapters    bool `yaml:"chapters"`
+	Attachments bool `yaml:"attachments"`
+}
+
+var validProfileNameRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// BuiltinTranscodeProfiles returns the default, out-of-the-box transcode profiles.
+func BuiltinTranscodeProfiles() map[string]TranscodeProfileConfig {
+	return map[string]TranscodeProfileConfig{
+		"hevc-vt": {
+			Container: "mkv",
+			Video: VideoProfileConfig{
+				Codec:   "hevc_videotoolbox",
+				Quality: 65,
+			},
+			Audio: AudioProfileConfig{
+				Mode: "copy",
+			},
+			Subtitles: SubtitleProfileConfig{
+				Mode:                "preserve",
+				ConvertIncompatible: true,
+			},
+			Preserve: PreserveProfileConfig{
+				Metadata:    true,
+				Chapters:    true,
+				Attachments: true,
+			},
+		},
+		"hevc-vt-balanced": {
+			Container: "mkv",
+			Video: VideoProfileConfig{
+				Codec:   "hevc_videotoolbox",
+				Quality: 65,
+			},
+			Audio: AudioProfileConfig{
+				Mode: "copy",
+			},
+			Subtitles: SubtitleProfileConfig{
+				Mode:                "preserve",
+				ConvertIncompatible: true,
+			},
+			Preserve: PreserveProfileConfig{
+				Metadata:    true,
+				Chapters:    true,
+				Attachments: true,
+			},
+		},
+		"hevc-vt-quality": {
+			Container: "mkv",
+			Video: VideoProfileConfig{
+				Codec:   "hevc_videotoolbox",
+				Quality: 55,
+			},
+			Audio: AudioProfileConfig{
+				Mode: "copy",
+			},
+			Subtitles: SubtitleProfileConfig{
+				Mode:                "preserve",
+				ConvertIncompatible: true,
+			},
+			Preserve: PreserveProfileConfig{
+				Metadata:    true,
+				Chapters:    true,
+				Attachments: true,
+			},
+		},
+		"hevc-vt-space": {
+			Container: "mkv",
+			Video: VideoProfileConfig{
+				Codec:   "hevc_videotoolbox",
+				Quality: 75,
+			},
+			Audio: AudioProfileConfig{
+				Mode: "copy",
+			},
+			Subtitles: SubtitleProfileConfig{
+				Mode:                "preserve",
+				ConvertIncompatible: true,
+			},
+			Preserve: PreserveProfileConfig{
+				Metadata:    true,
+				Chapters:    true,
+				Attachments: true,
+			},
+		},
+	}
+}
+
+// ResolvePlan resolves a profile name into a validated, structured execution plan.
+// If profileName is empty, it falls back to DefaultProfile, then to "hevc-vt".
+func (t *TranscodeConfig) ResolvePlan(profileName string) (*transcode.Plan, error) {
+	name := strings.TrimSpace(profileName)
+	if name == "" {
+		if t.DefaultProfile != "" {
+			name = t.DefaultProfile
+		} else {
+			name = "hevc-vt"
+		}
+	}
+
+	var prof TranscodeProfileConfig
+	var found bool
+	if t.Profiles != nil {
+		prof, found = t.Profiles[name]
+	}
+	if !found {
+		builtins := BuiltinTranscodeProfiles()
+		prof, found = builtins[name]
+	}
+	if !found {
+		return nil, fmt.Errorf("unknown transcode profile %q", name)
+	}
+
+	return &transcode.Plan{
+		Container:                    prof.Container,
+		VideoCodec:                   prof.Video.Codec,
+		Quality:                      prof.Video.Quality,
+		AudioMode:                    prof.Audio.Mode,
+		SubtitleMode:                 prof.Subtitles.Mode,
+		ConvertIncompatibleSubtitles: prof.Subtitles.ConvertIncompatible,
+		PreserveMetadata:             prof.Preserve.Metadata,
+		PreserveChapters:             prof.Preserve.Chapters,
+		PreserveAttachments:          prof.Preserve.Attachments,
+	}, nil
+}
+
+// Validate verifies transcode profile definitions fail-closed at load time.
+func (t *TranscodeConfig) Validate() error {
+	if t.DefaultProfile != "" {
+		if _, err := t.ResolvePlan(t.DefaultProfile); err != nil {
+			return fmt.Errorf("transcode: default_profile %q is not defined or invalid: %w", t.DefaultProfile, err)
+		}
+	}
+
+	for name, p := range t.Profiles {
+		if !validProfileNameRegex.MatchString(name) {
+			return fmt.Errorf("transcode: invalid profile name %q (allowed characters: letters, numbers, dash, underscore)", name)
+		}
+
+		// Container validation
+		cont := strings.ToLower(strings.TrimSpace(p.Container))
+		if cont != "mkv" && cont != "matroska" {
+			return fmt.Errorf("transcode profile %q: unsupported container %q (supported: mkv)", name, p.Container)
+		}
+
+		// Video codec validation
+		vCodec := strings.ToLower(strings.TrimSpace(p.Video.Codec))
+		if vCodec != "hevc_videotoolbox" {
+			return fmt.Errorf("transcode profile %q: unsupported video codec %q (supported: hevc_videotoolbox)", name, p.Video.Codec)
+		}
+
+		// Quality validation
+		if p.Video.Quality < 1 || p.Video.Quality > 100 {
+			return fmt.Errorf("transcode profile %q: video quality %d out of range (allowed: 1-100)", name, p.Video.Quality)
+		}
+
+		// Audio mode validation
+		aMode := strings.ToLower(strings.TrimSpace(p.Audio.Mode))
+		if aMode != "copy" {
+			return fmt.Errorf("transcode profile %q: unsupported audio mode %q (supported: copy)", name, p.Audio.Mode)
+		}
+
+		// Subtitle mode validation
+		sMode := strings.ToLower(strings.TrimSpace(p.Subtitles.Mode))
+		if sMode != "preserve" {
+			return fmt.Errorf("transcode profile %q: unsupported subtitles mode %q (supported: preserve)", name, p.Subtitles.Mode)
+		}
+	}
+
+	return nil
 }
 
 type SSHExecutorConfig struct {
@@ -196,30 +395,40 @@ func DefaultDatabasePath() string {
 var notFoundFieldRegex = regexp.MustCompile(`field\s+([a-zA-Z0-9_-]+)\s+not\s+found\s+in\s+type\s+([a-zA-Z0-9_.]+)`)
 
 var structTypeToSection = map[string]string{
-	"config.MediaConfig":          "media",
-	"MediaConfig":                 "media",
-	"config.MaintenanceConfig":    "maintenance",
-	"MaintenanceConfig":           "maintenance",
-	"config.ConcurrencyConfig":    "concurrency",
-	"ConcurrencyConfig":           "concurrency",
-	"config.DatabaseConfig":       "database",
-	"DatabaseConfig":              "database",
-	"config.QueueConfig":          "queue",
-	"QueueConfig":                 "queue",
-	"config.TransmissionConfig":   "transmission",
-	"TransmissionConfig":          "transmission",
-	"config.QBittorrentConfig":    "qbittorrent",
-	"QBittorrentConfig":           "qbittorrent",
-	"config.SABnzbdConfig":        "sabnzbd",
-	"SABnzbdConfig":               "sabnzbd",
-	"config.TranscodeConfig":      "transcode",
-	"TranscodeConfig":             "transcode",
-	"config.SSHExecutorConfig":    "transcode",
-	"SSHExecutorConfig":           "transcode",
-	"config.TranscodePathMapping": "transcode",
-	"TranscodePathMapping":        "transcode",
-	"config.ServiceConfig":        "services",
-	"ServiceConfig":               "services",
+	"config.MediaConfig":            "media",
+	"MediaConfig":                   "media",
+	"config.MaintenanceConfig":      "maintenance",
+	"MaintenanceConfig":             "maintenance",
+	"config.ConcurrencyConfig":      "concurrency",
+	"ConcurrencyConfig":             "concurrency",
+	"config.DatabaseConfig":         "database",
+	"DatabaseConfig":                "database",
+	"config.QueueConfig":            "queue",
+	"QueueConfig":                   "queue",
+	"config.TransmissionConfig":     "transmission",
+	"TransmissionConfig":            "transmission",
+	"config.QBittorrentConfig":      "qbittorrent",
+	"QBittorrentConfig":             "qbittorrent",
+	"config.SABnzbdConfig":          "sabnzbd",
+	"SABnzbdConfig":                 "sabnzbd",
+	"config.TranscodeConfig":        "transcode",
+	"TranscodeConfig":               "transcode",
+	"config.SSHExecutorConfig":      "transcode",
+	"SSHExecutorConfig":             "transcode",
+	"config.TranscodePathMapping":   "transcode",
+	"TranscodePathMapping":          "transcode",
+	"config.TranscodeProfileConfig": "transcode.profiles",
+	"TranscodeProfileConfig":        "transcode.profiles",
+	"config.VideoProfileConfig":     "transcode.profiles.video",
+	"VideoProfileConfig":            "transcode.profiles.video",
+	"config.AudioProfileConfig":     "transcode.profiles.audio",
+	"AudioProfileConfig":            "transcode.profiles.audio",
+	"config.SubtitleProfileConfig":  "transcode.profiles.subtitles",
+	"SubtitleProfileConfig":         "transcode.profiles.subtitles",
+	"config.PreserveProfileConfig":  "transcode.profiles.preserve",
+	"PreserveProfileConfig":         "transcode.profiles.preserve",
+	"config.ServiceConfig":          "services",
+	"ServiceConfig":                 "services",
 }
 
 var topLevelKeys = map[string]bool{
@@ -348,6 +557,11 @@ func Load(path string) (*Config, error) {
 	if cfg.Concurrency.MaxInspectSimultaneous <= 0 {
 		cfg.Concurrency.MaxInspectSimultaneous = 2
 	}
+
+	if err := cfg.Transcode.Validate(); err != nil {
+		return nil, fmt.Errorf("parsing config %s: %w", path, err)
+	}
+
 	cfg.LoadedPath = path
 
 	return cfg, nil
