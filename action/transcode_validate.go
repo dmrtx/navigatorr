@@ -63,7 +63,24 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 	}
 	origAudio := getStreamsList(origMap, "audio")
 	if len(outRep.Audio) != len(origAudio) {
-		return waitDecision(fmt.Sprintf("Audio stream count mismatch: original=%d output=%d", len(origAudio), len(outRep.Audio))), nil
+		missing := make([]string, 0)
+		for _, a := range origAudio {
+			found := false
+			for _, b := range outRep.Audio {
+				if a.Language != "" && normCodec(a.Language) == normCodec(b.Language) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				label := a.Language
+				if label == "" {
+					label = a.Codec
+				}
+				missing = append(missing, label)
+			}
+		}
+		return waitDecision(fmt.Sprintf("Audio stream lost: original=%d output=%d missing=%s", len(origAudio), len(outRep.Audio), strings.Join(missing, ","))), nil
 	}
 	for i, a := range origAudio {
 		b := outRep.Audio[i]
@@ -79,7 +96,7 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 	}
 	origSubs := getStreamsList(origMap, "subtitles")
 	if len(outRep.Subtitles) != len(origSubs) {
-		return waitDecision(fmt.Sprintf("Subtitle stream count mismatch: original=%d output=%d", len(origSubs), len(outRep.Subtitles))), nil
+		return waitDecision(fmt.Sprintf("Subtitle stream lost: original=%d output=%d", len(origSubs), len(outRep.Subtitles))), nil
 	}
 	actions := map[int]transcode.SubtitleAction{}
 	for _, a := range plan.SubtitleActions {
@@ -102,7 +119,11 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 		}
 		for _, d := range []string{"forced", "default"} {
 			if a.Disposition[d] > 0 && b.Disposition[d] == 0 {
-				return waitDecision(fmt.Sprintf("Subtitle %s disposition lost at stream %d", d, i)), nil
+				label := "Default"
+				if d == "forced" {
+					label = "Forced"
+				}
+				return waitDecision(fmt.Sprintf("%s subtitle disposition lost at stream %d", label, i)), nil
 			}
 		}
 	}
