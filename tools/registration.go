@@ -12,6 +12,7 @@ import (
 	"github.com/jakenesler/navigatorr/queue"
 	"github.com/jakenesler/navigatorr/sabnzbd"
 	"github.com/jakenesler/navigatorr/store"
+	"github.com/jakenesler/navigatorr/tdarr"
 	"github.com/jakenesler/navigatorr/transmission"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -36,10 +37,17 @@ func RegisterAll(s *server.MCPServer, cfg *config.Config, registry *arrservice.R
 	}
 }
 
+// RegisterTdarr registers Tdarr read-only operations and job management tools.
+func RegisterTdarr(s *server.MCPServer, client tdarr.Client) {
+	if client != nil {
+		registerTdarrTools(s, client)
+	}
+}
+
 // RegisterMaintenance wires the persistent maintenance-agent tools. It is
 // separate from RegisterAll so the classic tools never depend on SQLite:
 // with a nil mStore this is a no-op and the server behaves exactly as before.
-func RegisterMaintenance(s *server.MCPServer, cfg *config.Config, registry *arrservice.Registry, qbClient *qbit.Client, mStore *store.Store) {
+func RegisterMaintenance(s *server.MCPServer, cfg *config.Config, registry *arrservice.Registry, qbClient *qbit.Client, mStore *store.Store, tdarrClients ...tdarr.Client) {
 	if mStore == nil {
 		return
 	}
@@ -60,6 +68,12 @@ func RegisterMaintenance(s *server.MCPServer, cfg *config.Config, registry *arrs
 	registerScanTools(s, d, registry)
 	registerFsTools(s, d)
 
+	var tdClient tdarr.Client
+	if len(tdarrClients) > 0 && tdarrClients[0] != nil {
+		tdClient = tdarrClients[0]
+		registerTdarrTools(s, tdClient)
+	}
+
 	actEngine := action.NewEngine(action.EngineDeps{
 		Store:     mStore,
 		Config:    cfg,
@@ -67,6 +81,7 @@ func RegisterMaintenance(s *server.MCPServer, cfg *config.Config, registry *arrs
 		Qbit:      qbClient,
 		Fs:        resolver,
 		Ffprobe:   ffprobe,
+		Tdarr:     tdClient,
 		StartTime: time.Now(),
 	})
 	registerActionTools(s, actEngine)

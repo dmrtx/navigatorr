@@ -121,6 +121,22 @@ This prevents a single API call from consuming the LLM's entire context window.
 - `qbit_manage_torrent` — Actions: `pause`, `resume`, `delete`, `delete_files`
 - `qbit_transfer_info` — Global transfer speeds and stats
 
+### Tdarr Tools
+
+- `tdarr_status` — Check server status, version, platform, uptime, and engine
+- `tdarr_nodes` — List active nodes, worker counts, queued files, and current fps/ETA
+- `tdarr_job_status` — Query worker progress by jobId or active file path
+- `tdarr_cancel` — Cancel a running transcode job on a specific node worker
+
+### Action Engine Tools
+
+- `action_run` — Run a declarative multi-step workflow (`transcode_media`, `safe_media_replacement`, `validate_torrent`)
+- `action_catalog` — Discover all registered action workflows, parameters, and safety requirements
+- `action_status` — Check current lifecycle state, waiting condition, and step logs
+- `action_resume` — Resume a paused action from `waiting_external` or `waiting_decision` (with decision: approve/reject)
+- `action_retry` — Retry a failed action from its last safe step
+- `action_list` — List action workflows filtered by status (`running`, `waiting_external`, `waiting_decision`, `completed`, `failed`)
+
 ---
 
 ## Real-World Patterns
@@ -327,6 +343,46 @@ twice, resolved twice, or released unless it is currently claimed. If
 other statuses, so a backlog sitting in `claimed` from a crashed session is
 visible rather than looking like an empty queue — `queue_release` recovers those.
 
+### Pattern 9: Transcoding Media via Tdarr Orchestration
+
+Navigatorr acts as the orchestrator; Tdarr handles distributed transcoding. Navigatorr strictly manages inspection, submission, waiting, `ffprobe` verification, and safe replacement without ever running `ffmpeg` directly.
+
+```
+User: "Transcode this oversized anime episode to HEVC using our Apple Silicon node"
+
+LLM approach:
+  1. action_run → action: "transcode_media", inputs: {
+       "path": "/Volumes/media/anime/Frieren/S01E01.mkv",
+       "profile": "anime_hevc",
+       "require_japanese_audio": true,
+       "require_subs": ["eng", "spa"]
+     }
+     → Returns action ID act-transcode-media-..., status: waiting_external,
+       step: wait_tdarr, waiting_condition: "tdarr_transcode_complete"
+
+  2. Periodically or upon session resume, monitor progress:
+     tdarr_job_status → jobId: "..."
+     action_status → id: "act-transcode-media-..."
+     → Reports live progress, ETA, and node worker status
+
+  3. When Tdarr finishes, resume the workflow:
+     action_resume → id: "act-transcode-media-..."
+     → Runs validate_result using ffprobe:
+       - Confirms output file exists and size > 0
+       - Validates duration match within tolerance
+       - Verifies video codec is hevc
+       - Validates audio streams (Japanese audio retained)
+       - Validates subtitle streams (ASS/SSA tracks and styling preserved)
+       - Confirms font attachments and chapters preserved
+     → If validation passes and replace_original is false, finishes successfully.
+     → If validation detects any discrepancy, pauses in waiting_decision
+       with options ["approve", "reject"] for user decision.
+
+  4. If user approves discrepancy:
+     action_resume → id: "act-transcode-media-...", decision: "approve"
+     → Completes workflow
+```
+
 ---
 
 ## Maintenance Agent Tools
@@ -400,6 +456,19 @@ qbittorrent:
   url: "http://your-server:8080"
   username: "admin"
   password: "your-password"
+
+# Tdarr transcoding orchestrator (optional)
+tdarr:
+  enabled: true
+  url: "http://192.168.70.71:8265"
+  api_key: ""
+  timeout: "15s"
+  flows:
+    anime_hevc: "flow-apple-silicon-hevc"
+    standard_hevc: "flow-standard-hevc"
+  path_mappings:
+    - local: "/Volumes/media"
+      server: "/media"
 ```
 
 ### Service Defaults

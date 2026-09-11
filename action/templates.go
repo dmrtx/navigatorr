@@ -18,6 +18,7 @@ import (
 var magnetHashRegex = regexp.MustCompile(`(?i)btih:([a-f0-9]{40}|[a-z2-7]{32})`)
 
 func (e *Engine) registerBuiltinTemplates() {
+	e.registerTranscodeTemplate()
 	e.RegisterTemplate(ActionTemplate{
 		Name:           "validate_torrent",
 		Version:        1,

@@ -21,6 +21,7 @@ Navigatorr acts as a bridge between AI coding assistants and your self-hosted me
 - **Transmission** — Torrent client
 - **qBittorrent** — Torrent client
 - **SABnzbd** — Usenet downloader
+- **Tdarr** — Transcoding orchestration and node monitoring
 
 ## Architecture
 
@@ -64,6 +65,8 @@ Claude Code / MCP Client
 | `maint` | Deterministic ranking, filename safety, language and oversize heuristics |
 | `mediainspect` | Real-file inspection via ffprobe (no shell, fixed argv) plus sidecar detection |
 | `fsop` | Root-confined filesystem ops (stat, list, hash, move, delete) |
+| `action` | Multi-step persistent workflow engine with idempotency and safety gates |
+| `tdarr` | Native Tdarr 2.x API client, multi-tier job tracking and cancellation |
 | `internal` | Shared logging utilities |
 
 ### How It Works
@@ -132,6 +135,37 @@ SABnzbd has no OpenAPI spec and dispatches everything from a `mode` query parame
 | `sabnzbd_status` | Version, speed, disk space, paused state, and warning count |
 
 Deleting is covered by `allow_destructive`. SABnzbd deletes are GET requests carrying `name=delete`, so the `call_api` DELETE guard does not apply to them and these tools check the setting themselves.
+
+### Tdarr
+
+Navigatorr acts as the orchestrator and Tdarr acts as the execution engine for media transcoding.
+
+| Tool | Description |
+|------|-------------|
+| `tdarr_status` | Server status, version, platform, uptime, and engine |
+| `tdarr_nodes` | Node statuses, worker allocations, active jobs, ETA, and progress |
+| `tdarr_job_status` | Inspect live transcode progress, node worker metrics, and completed job reports |
+| `tdarr_cancel` | Cancel an active worker transcode job on a specific node |
+
+### Action Engine
+
+Persistent, declarative multi-step workflows tracked in SQLite. Workflows survive agent disconnects, reboot gracefully, and safely pause in `waiting_external` (e.g. awaiting long Tdarr transcode jobs) or `waiting_decision` (e.g. human-in-the-loop review on ffprobe validation failure).
+
+| Tool | Description |
+|------|-------------|
+| `action_run` | Start a workflow (`transcode_media`, `safe_media_replacement`, `validate_torrent`) |
+| `action_catalog` | Discover registered workflows, required inputs, and safety profiles |
+| `action_status` | Query workflow lifecycle state, current step, and execution log |
+| `action_resume` | Resume a paused workflow from `waiting_external` or `waiting_decision` |
+| `action_retry` | Retry a failed action from its last safe checkpoint |
+| `action_list` | Filter workflows by status (`running`, `waiting_external`, `waiting_decision`, `completed`, `failed`) |
+
+**Transcoding Workflow (`transcode_media`):**
+1. **Preflight**: Confines path within `allowed_read_roots`, verifies existence, and extracts initial stream metadata via `ffprobe`.
+2. **Submit to Tdarr**: Translates paths to Tdarr server schema, selects flow/profile, and queues file via `scan-files`. Idempotent — resumes will not re-submit.
+3. **Wait for Transcode**: Monitors progress and transitions into `waiting_external` state while in flight.
+4. **Detailed Validation**: Validates file size, duration, video codec, audio tracks (preserving Japanese/English/Spanish), subtitle tracks (preserving ASS/SSA), font attachments, and chapters. Any discrepancy transitions to `waiting_decision`.
+5. **Acceptance**: Keeps original intact by default (`replace_original: false`). If `replace_original: true`, verifies `allow_destructive: true` and executes atomic swap with backup rollback.
 
 ### Request Queue
 
@@ -238,6 +272,22 @@ Edit `~/.config/navigatorr/config.yaml` with your service URLs and API keys. You
 | `max_response_size_kb` | `50` | Response size guard threshold in KB. API responses exceeding this are rejected with a hint to use field selection/filtering instead of consuming the LLM's context window. |
 | `concurrency.max_api_simultaneous` | `3` | Maximum simultaneous upstream HTTP calls to protect *arr services from being overwhelmed. |
 | `concurrency.max_inspect_simultaneous` | `2` | Maximum concurrent ffprobe media inspections to protect NAS disk I/O and CPU. |
+
+**Tdarr Transcoding Configuration:**
+
+```yaml
+tdarr:
+  enabled: true
+  url: "http://192.168.70.71:8265"
+  api_key: ""
+  timeout: "15s"
+  flows:
+    anime_hevc: "flow-apple-silicon-hevc"
+    standard_hevc: "flow-standard-hevc"
+  path_mappings:
+    - local: "/Volumes/media"
+      server: "/media"
+```
 
 > ℹ️ **Container Deployments & Path Mapping:** Paths configured under `media.allowed_read_roots` and `media.allowed_write_roots` must match paths **inside the Docker container**, not on the host. See [DOCKER.md](DOCKER.md) for full Docker Compose recipes, path mapping diagrams, and the safety permissions matrix.
 

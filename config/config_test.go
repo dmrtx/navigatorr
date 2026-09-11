@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestKnownServicesHaveCompleteDefaults(t *testing.T) {
@@ -252,6 +253,113 @@ completely_unknown_key: 123
 		}
 		if cfg == nil {
 			t.Fatal("expected non-nil config")
+		}
+	})
+}
+
+func TestTdarrConfig(t *testing.T) {
+	tempDir := t.TempDir()
+	writeCfg := func(filename, content string) string {
+		p := filepath.Join(tempDir, filename)
+		if err := os.WriteFile(p, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	t.Run("parses valid tdarr configuration", func(t *testing.T) {
+		p := writeCfg("tdarr_valid.yaml", `
+tdarr:
+  enabled: true
+  url: "http://192.168.70.71:8265"
+  api_key: "test-tdarr-key"
+  timeout: "30s"
+  flows:
+    hevc_safe: "flow_12345"
+  path_mappings:
+    - local: "/Volumes/media"
+      server: "/media"
+`)
+		cfg, err := Load(p)
+		if err != nil {
+			t.Fatalf("unexpected error loading tdarr config: %v", err)
+		}
+		if !cfg.Tdarr.Enabled {
+			t.Error("expected Tdarr.Enabled=true")
+		}
+		if cfg.Tdarr.URL != "http://192.168.70.71:8265" {
+			t.Errorf("unexpected URL: %s", cfg.Tdarr.URL)
+		}
+		if cfg.Tdarr.APIKey != "test-tdarr-key" {
+			t.Errorf("unexpected APIKey: %s", cfg.Tdarr.APIKey)
+		}
+		if cfg.Tdarr.TimeoutDuration() != 30*time.Second {
+			t.Errorf("expected 30s timeout, got %v", cfg.Tdarr.TimeoutDuration())
+		}
+		if cfg.Tdarr.Flows["hevc_safe"] != "flow_12345" {
+			t.Errorf("unexpected flow: %v", cfg.Tdarr.Flows)
+		}
+		if len(cfg.Tdarr.PathMappings) != 1 {
+			t.Fatalf("expected 1 path mapping, got %d", len(cfg.Tdarr.PathMappings))
+		}
+	})
+
+	t.Run("default timeout when empty", func(t *testing.T) {
+		tc := TdarrConfig{}
+		if tc.TimeoutDuration() != 15*time.Second {
+			t.Errorf("expected default 15s timeout, got %v", tc.TimeoutDuration())
+		}
+	})
+
+	t.Run("path translation between local and server", func(t *testing.T) {
+		tc := TdarrConfig{
+			PathMappings: []PathMapping{
+				{Local: "/Volumes/media", Server: "/media"},
+				{Local: "/Volumes/cache", Server: "/temp"},
+			},
+		}
+
+		// Local to Server
+		srv := tc.TranslateLocalToServer("/Volumes/media/Anime/Monster/ep01.mkv")
+		if srv != "/media/Anime/Monster/ep01.mkv" {
+			t.Errorf("expected /media/Anime/Monster/ep01.mkv, got %s", srv)
+		}
+
+		// Exact match
+		if tc.TranslateLocalToServer("/Volumes/media") != "/media" {
+			t.Errorf("expected /media, got %s", tc.TranslateLocalToServer("/Volumes/media"))
+		}
+
+		// Unmapped path passes through
+		if tc.TranslateLocalToServer("/other/path/file.mkv") != "/other/path/file.mkv" {
+			t.Errorf("expected unchanged path, got %s", tc.TranslateLocalToServer("/other/path/file.mkv"))
+		}
+
+		// Server to Local
+		loc := tc.TranslateServerToLocal("/media/Anime/Monster/ep01.mkv")
+		if loc != "/Volumes/media/Anime/Monster/ep01.mkv" {
+			t.Errorf("expected /Volumes/media/Anime/Monster/ep01.mkv, got %s", loc)
+		}
+
+		// Cache server to local
+		locCache := tc.TranslateServerToLocal("/temp/transcode-123.mkv")
+		if locCache != "/Volumes/cache/transcode-123.mkv" {
+			t.Errorf("expected /Volumes/cache/transcode-123.mkv, got %s", locCache)
+		}
+	})
+
+	t.Run("misnested tdarr key fails strict parsing", func(t *testing.T) {
+		p := writeCfg("tdarr_nested.yaml", `
+media:
+  tdarr:
+    enabled: true
+`)
+		_, err := Load(p)
+		if err == nil {
+			t.Fatal("expected strict parsing error for nested tdarr, got nil")
+		}
+		if !strings.Contains(err.Error(), "tdarr") {
+			t.Errorf("expected error mentioning tdarr, got %v", err)
 		}
 	})
 }

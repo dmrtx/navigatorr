@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -21,6 +22,7 @@ type Config struct {
 	Transmission      TransmissionConfig       `yaml:"transmission"`
 	QBittorrent       QBittorrentConfig        `yaml:"qbittorrent"`
 	SABnzbd           SABnzbdConfig            `yaml:"sabnzbd"`
+	Tdarr             TdarrConfig              `yaml:"tdarr"`
 	Queue             QueueConfig              `yaml:"queue"`
 	Database          DatabaseConfig           `yaml:"database"`
 	Media             MediaConfig              `yaml:"media"`
@@ -86,6 +88,68 @@ type SABnzbdConfig struct {
 	URLBase string `yaml:"url_base"` // SABnzbd's own url_base, "/sabnzbd" by default
 }
 
+type TdarrConfig struct {
+	Enabled      bool              `yaml:"enabled"`
+	URL          string            `yaml:"url"`
+	APIKey       string            `yaml:"api_key"`
+	Timeout      string            `yaml:"timeout"`
+	Flows        map[string]string `yaml:"flows"`
+	PathMappings []PathMapping     `yaml:"path_mappings"`
+}
+
+type PathMapping struct {
+	Local  string `yaml:"local"`
+	Server string `yaml:"server"`
+}
+
+// TimeoutDuration parses the timeout duration or defaults to 15s.
+func (c TdarrConfig) TimeoutDuration() time.Duration {
+	if c.Timeout != "" {
+		if d, err := time.ParseDuration(c.Timeout); err == nil && d > 0 {
+			return d
+		}
+	}
+	return 15 * time.Second
+}
+
+// TranslateLocalToServer converts a local filesystem path to a Tdarr Server path.
+func (c TdarrConfig) TranslateLocalToServer(localPath string) string {
+	cleanLocal := filepath.Clean(localPath)
+	for _, m := range c.PathMappings {
+		mappedLocal := filepath.Clean(m.Local)
+		if mappedLocal == "" || m.Server == "" {
+			continue
+		}
+		if cleanLocal == mappedLocal {
+			return filepath.Clean(m.Server)
+		}
+		if strings.HasPrefix(cleanLocal, mappedLocal+string(filepath.Separator)) {
+			rel := strings.TrimPrefix(cleanLocal, mappedLocal)
+			return filepath.ToSlash(filepath.Join(m.Server, rel))
+		}
+	}
+	return cleanLocal
+}
+
+// TranslateServerToLocal converts a Tdarr Server path back to a local filesystem path.
+func (c TdarrConfig) TranslateServerToLocal(serverPath string) string {
+	cleanServer := filepath.ToSlash(serverPath)
+	for _, m := range c.PathMappings {
+		mappedServer := filepath.ToSlash(m.Server)
+		if mappedServer == "" || m.Local == "" {
+			continue
+		}
+		if cleanServer == mappedServer {
+			return filepath.Clean(m.Local)
+		}
+		if strings.HasPrefix(cleanServer, mappedServer+"/") {
+			rel := strings.TrimPrefix(cleanServer, mappedServer)
+			return filepath.Clean(filepath.Join(m.Local, rel))
+		}
+	}
+	return cleanServer
+}
+
 func DefaultConfigPath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".config", "navigatorr", "config.yaml")
@@ -131,6 +195,10 @@ var structTypeToSection = map[string]string{
 	"QBittorrentConfig":         "qbittorrent",
 	"config.SABnzbdConfig":      "sabnzbd",
 	"SABnzbdConfig":             "sabnzbd",
+	"config.TdarrConfig":        "tdarr",
+	"TdarrConfig":               "tdarr",
+	"config.PathMapping":        "tdarr",
+	"PathMapping":               "tdarr",
 	"config.ServiceConfig":      "services",
 	"ServiceConfig":             "services",
 }
@@ -140,6 +208,7 @@ var topLevelKeys = map[string]bool{
 	"transmission":         true,
 	"qbittorrent":          true,
 	"sabnzbd":              true,
+	"tdarr":                true,
 	"queue":                true,
 	"database":             true,
 	"media":                true,
