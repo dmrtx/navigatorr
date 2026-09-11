@@ -37,11 +37,11 @@ func (f *fakeTdarrClient) Nodes(ctx context.Context) (map[string]tdarr.Node, err
 
 func (f *fakeTdarrClient) GetLibrary(ctx context.Context, libraryID string) (*tdarr.LibrarySettings, error) {
 	return &tdarr.LibrarySettings{
-		ID:                                  libraryID,
-		Name:                                "Test Library",
-		FolderToFolderConversion:            true,
+		ID:                                   libraryID,
+		Name:                                 "Test Library",
+		FolderToFolderConversion:             true,
 		FolderToFolderConversionDeleteSource: false,
-		OutputFolder:                        "/media/transcodes",
+		OutputFolder:                         "/media/transcodes",
 	}, nil
 }
 
