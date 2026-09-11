@@ -125,7 +125,7 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 	}
 	switch st.Status {
 	case transcode.StatusRunning, transcode.StatusQueued:
-		return StepResult{Status: StepWaitingExternal, WaitingCondition: "transcode_complete", WaitingReason: fmt.Sprintf("Transcoding media (%s, progress: %.1f%%, speed: %.1fx, fps: %.1f)", st.Status, st.Progress, st.Speed, st.FPS), Outputs: map[string]any{"transcode_status": st.Status, "progress": st.Progress, "speed": st.Speed, "fps": st.FPS, "job_id": jobID, "external_reference": jobID}}
+		return StepResult{Status: StepWaitingExternal, WaitingCondition: "transcode_complete", WaitingReason: fmt.Sprintf("Transcoding media (%s, progress: %.1f%%, speed: %.1fx, fps: %.1f)", st.Status, st.Progress, st.Speed, st.FPS), Outputs: map[string]any{"transcode_status": st.Status, "progress": st.Progress, "speed": st.Speed, "fps": st.FPS, "job_id": jobID, "external_reference": jobID}}, nil
 	case transcode.StatusFailed:
 		msg := st.Error
 		if msg == "" {

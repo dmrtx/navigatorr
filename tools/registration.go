@@ -17,6 +17,9 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
+// RegisterAll registers all tools with the MCP server. The original tools
+// keep their names and behavior; the maintenance agent tools are added
+// alongside and are only registered when a state store is available.
 func RegisterAll(s *server.MCPServer, cfg *config.Config, registry *arrservice.Registry, specStore *openapi.Store, txClient *transmission.Client, qbClient *qbit.Client, sabClient *sabnzbd.Client, qStore *queue.Store) {
 	registerDocTools(s, registry, specStore)
 	registerAPICallTool(s, registry, specStore, cfg.MaxResponseSizeKB, cfg.AllowDestructive)
@@ -34,6 +37,10 @@ func RegisterAll(s *server.MCPServer, cfg *config.Config, registry *arrservice.R
 	}
 	registerRecipeTools(s, cfg)
 }
+
+// RegisterMaintenance wires the persistent maintenance-agent tools. It is
+// separate from RegisterAll so the classic tools never depend on SQLite:
+// with a nil mStore this is a no-op and the server behaves exactly as before.
 func RegisterMaintenance(s *server.MCPServer, cfg *config.Config, registry *arrservice.Registry, qbClient *qbit.Client, mStore *store.Store, transcodeExec ...transcode.Executor) {
 	if mStore == nil {
 		return
@@ -54,17 +61,40 @@ func RegisterMaintenance(s *server.MCPServer, cfg *config.Config, registry *arrs
 	registerSafeReplaceTools(s, d, registry, qbClient, cfg.AllowDestructive)
 	registerScanTools(s, d, registry)
 	registerFsTools(s, d)
+
 	var tc transcode.Executor
 	if len(transcodeExec) > 0 && transcodeExec[0] != nil {
 		tc = transcodeExec[0]
 	}
-	actEngine := action.NewEngine(action.EngineDeps{Store: mStore, Config: cfg, Registry: registry, Qbit: qbClient, Fs: resolver, Ffprobe: ffprobe, Transcode: tc, StartTime: time.Now()})
+
+	actEngine := action.NewEngine(action.EngineDeps{
+		Store:     mStore,
+		Config:    cfg,
+		Registry:  registry,
+		Qbit:      qbClient,
+		Fs:        resolver,
+		Ffprobe:   ffprobe,
+		Transcode: tc,
+		StartTime: time.Now(),
+	})
 	registerActionTools(s, actEngine)
 }
+
+// RegisterDiagnostics registers the diagnostics and action audit log tools.
 func RegisterDiagnostics(s *server.MCPServer, cfg *config.Config, registry *arrservice.Registry, specStore *openapi.Store, txClient *transmission.Client, qbClient *qbit.Client, sabClient *sabnzbd.Client, mStore *store.Store, transcodeExec ...transcode.Executor) {
 	var tc transcode.Executor
 	if len(transcodeExec) > 0 && transcodeExec[0] != nil {
 		tc = transcodeExec[0]
 	}
-	registerDiagnosticsTools(s, DiagnosticsDeps{Config: cfg, Registry: registry, SpecStore: specStore, TxClient: txClient, QbClient: qbClient, SabClient: sabClient, Store: mStore, Transcode: tc})
+
+	registerDiagnosticsTools(s, DiagnosticsDeps{
+		Config:    cfg,
+		Registry:  registry,
+		SpecStore: specStore,
+		TxClient:  txClient,
+		QbClient:  qbClient,
+		SabClient: sabClient,
+		Store:     mStore,
+		Transcode: tc,
+	})
 }
