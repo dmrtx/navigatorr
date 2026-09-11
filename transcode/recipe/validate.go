@@ -131,7 +131,7 @@ func ValidateProfile(name string, p Profile) error {
 		return fmt.Errorf("profile %q: unsupported audio mode %q", name, p.Audio.Mode)
 	}
 	if strings.ToLower(strings.TrimSpace(p.Subtitles.Mode)) != "preserve" {
-		return fmt.Errorf("profile %q: unsupported subtitle mode %q", name, p.Subtitles.Mode)
+		return fmt.Errorf("profile %q: unsupported subtitles mode %q", name, p.Subtitles.Mode)
 	}
 	if !p.Preserve.Metadata || !p.Preserve.Chapters || !p.Preserve.Attachments {
 		return fmt.Errorf("profile %q: metadata, chapters, and attachments must all be preserved by the current engine capability boundary", name)
