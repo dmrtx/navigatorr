@@ -1,10 +1,14 @@
 package transcode
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"strings"
 	"time"
 )
 
-// Status constants for transcode jobs.
 const (
 	StatusQueued    = "queued"
 	StatusRunning   = "running"
@@ -13,21 +17,55 @@ const (
 	StatusCancelled = "cancelled"
 )
 
-// Plan specifies structured, safe parameters for media transcoding.
-// Values are strictly enumerated and validated; arbitrary FFmpeg arguments are never permitted.
-type Plan struct {
-	Container                    string `json:"container" yaml:"container"`
-	VideoCodec                   string `json:"video_codec" yaml:"video_codec"`
-	Quality                      int    `json:"quality" yaml:"quality"`
-	AudioMode                    string `json:"audio_mode" yaml:"audio_mode"`
-	SubtitleMode                 string `json:"subtitle_mode" yaml:"subtitle_mode"`
-	ConvertIncompatibleSubtitles bool   `json:"convert_incompatible_subtitles" yaml:"convert_incompatible_subtitles"`
-	PreserveMetadata             bool   `json:"preserve_metadata" yaml:"preserve_metadata"`
-	PreserveChapters             bool   `json:"preserve_chapters" yaml:"preserve_chapters"`
-	PreserveAttachments          bool   `json:"preserve_attachments" yaml:"preserve_attachments"`
+type SubtitleAction struct {
+	SourceStreamIndex int    `json:"source_stream_index" yaml:"source_stream_index"`
+	TypeIndex         int    `json:"type_index" yaml:"type_index"`
+	SourceCodec       string `json:"source_codec" yaml:"source_codec"`
+	Operation         string `json:"operation" yaml:"operation"`
+	Codec             string `json:"codec" yaml:"codec"`
+	Reason            string `json:"reason,omitempty" yaml:"reason,omitempty"`
 }
 
-// ConversionRecord captures an explicit format conversion performed on a stream for container compatibility.
+type ResiliencePlan struct {
+	MaxAttempts         int      `json:"max_attempts" yaml:"max_attempts"`
+	TransientRetries    int      `json:"transient_retries" yaml:"transient_retries"`
+	RetryBackoffSeconds []int    `json:"retry_backoff_seconds,omitempty" yaml:"retry_backoff_seconds,omitempty"`
+	MaxFallbacks        int      `json:"max_fallbacks" yaml:"max_fallbacks"`
+	RetryOn             []string `json:"retry_on,omitempty" yaml:"retry_on,omitempty"`
+}
+
+type Plan struct {
+	Container                    string           `json:"container" yaml:"container"`
+	VideoCodec                   string           `json:"video_codec" yaml:"video_codec"`
+	Quality                      int              `json:"quality" yaml:"quality"`
+	AudioMode                    string           `json:"audio_mode" yaml:"audio_mode"`
+	SubtitleMode                 string           `json:"subtitle_mode" yaml:"subtitle_mode"`
+	ConvertIncompatibleSubtitles bool             `json:"convert_incompatible_subtitles" yaml:"convert_incompatible_subtitles"`
+	PreserveMetadata             bool             `json:"preserve_metadata" yaml:"preserve_metadata"`
+	PreserveChapters             bool             `json:"preserve_chapters" yaml:"preserve_chapters"`
+	PreserveAttachments          bool             `json:"preserve_attachments" yaml:"preserve_attachments"`
+	SubtitleActions              []SubtitleAction `json:"subtitle_actions,omitempty" yaml:"subtitle_actions,omitempty"`
+	RecipeVersion                string           `json:"recipe_version,omitempty" yaml:"recipe_version,omitempty"`
+	RecipeDigest                 string           `json:"recipe_digest,omitempty" yaml:"recipe_digest,omitempty"`
+	PlanDigest                   string           `json:"plan_digest,omitempty" yaml:"plan_digest,omitempty"`
+	Resilience                   ResiliencePlan   `json:"resilience,omitempty" yaml:"resilience,omitempty"`
+	AppliedFallbacks             []string         `json:"applied_fallbacks,omitempty" yaml:"applied_fallbacks,omitempty"`
+}
+
+func DigestPlan(p *Plan) (string, error) {
+	if p == nil {
+		return "", fmt.Errorf("plan is nil")
+	}
+	cp := *p
+	cp.PlanDigest = ""
+	b, err := json.Marshal(cp)
+	if err != nil {
+		return "", fmt.Errorf("serializing plan digest: %w", err)
+	}
+	sum := sha256.Sum256(b)
+	return "sha256:" + hex.EncodeToString(sum[:]), nil
+}
+
 type ConversionRecord struct {
 	StreamType  string `json:"stream_type"`
 	StreamIndex int    `json:"stream_index"`
@@ -36,19 +74,15 @@ type ConversionRecord struct {
 	Reason      string `json:"reason"`
 }
 
-// ContainerExtension returns the canonical filesystem extension (including dot) for a container format.
-func ContainerExtension(container string) string {
-	switch container {
+func ContainerExtension(container string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(container)) {
 	case "mkv", "matroska":
-		return ".mkv"
-	case "mp4":
-		return ".mp4"
+		return ".mkv", nil
 	default:
-		return ".mkv"
+		return "", fmt.Errorf("unsupported container %q (fail closed)", container)
 	}
 }
 
-// Request defines the input for submitting a transcode job.
 type Request struct {
 	ID            string `json:"id"`
 	SourcePath    string `json:"source_path"`
@@ -56,35 +90,35 @@ type Request struct {
 	Profile       string `json:"profile"`
 	Plan          *Plan  `json:"plan,omitempty"`
 }
-
-// Job represents a submitted transcode job.
 type Job struct {
 	ID string `json:"id"`
 }
-
-// JobStatus describes the current status and metrics of a transcode job.
 type JobStatus struct {
-	ID            string             `json:"id"`
-	Status        string             `json:"status"`
-	Progress      float64            `json:"progress"`
-	FPS           float64            `json:"fps"`
-	Speed         float64            `json:"speed"`
-	CandidatePath string             `json:"candidate_path"`
-	Error         string             `json:"error,omitempty"`
-	Profile       string             `json:"profile,omitempty"`
-	Container     string             `json:"container,omitempty"`
-	VideoCodec    string             `json:"video_codec,omitempty"`
-	Quality       int                `json:"quality,omitempty"`
-	Conversions   []ConversionRecord `json:"conversions,omitempty"`
+	ID                    string             `json:"id"`
+	Status                string             `json:"status"`
+	Progress              float64            `json:"progress"`
+	FPS                   float64            `json:"fps"`
+	Speed                 float64            `json:"speed"`
+	CandidatePath         string             `json:"candidate_path"`
+	Error                 string             `json:"error,omitempty"`
+	Profile               string             `json:"profile,omitempty"`
+	RecipeVersion         string             `json:"recipe_version,omitempty"`
+	RecipeDigest          string             `json:"recipe_digest,omitempty"`
+	Container             string             `json:"container,omitempty"`
+	VideoCodec            string             `json:"video_codec,omitempty"`
+	Quality               int                `json:"quality,omitempty"`
+	Attempt               int                `json:"attempt,omitempty"`
+	RetryCount            int                `json:"retry_count,omitempty"`
+	FallbackCount         int                `json:"fallback_count,omitempty"`
+	AppliedFallbacks      []string           `json:"applied_fallbacks,omitempty"`
+	FailureClassification string             `json:"failure_classification,omitempty"`
+	Conversions           []ConversionRecord `json:"conversions,omitempty"`
 }
 
-// PathMapping specifies a pair of local and remote directory paths.
 type PathMapping struct {
 	Local  string `json:"local" yaml:"local"`
 	Remote string `json:"remote" yaml:"remote"`
 }
-
-// SSHConfig holds configuration for the SSH transcode executor.
 type SSHConfig struct {
 	Host           string        `json:"host" yaml:"host"`
 	Port           int           `json:"port,omitempty" yaml:"port,omitempty"`

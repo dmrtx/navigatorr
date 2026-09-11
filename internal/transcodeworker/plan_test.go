@@ -1,240 +1,172 @@
 package transcodeworker
 
 import (
-	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/jakenesler/navigatorr/transcode"
 )
 
-func TestPlan_SubtitleStreamPlanner(t *testing.T) {
-	// Exact test scenario from specifications:
-	// input subtitle streams:
-	//   0: mov_text
-	//   1: ass
-	//   2: subrip
-	// output subtitle codec decisions:
-	//   0: subrip
-	//   1: copy
-	//   2: copy
-	plan := &transcode.Plan{
-		Container:                    "mkv",
-		VideoCodec:                   "hevc_videotoolbox",
-		Quality:                      65,
-		AudioMode:                    "copy",
-		SubtitleMode:                 "preserve",
-		ConvertIncompatibleSubtitles: true,
-		PreserveMetadata:             true,
-		PreserveChapters:             true,
-		PreserveAttachments:          true,
+func signedPlan(t *testing.T, actions []transcode.SubtitleAction) *transcode.Plan {
+	t.Helper()
+	p := &transcode.Plan{
+		Container: "mkv", VideoCodec: "hevc_videotoolbox", Quality: 65,
+		AudioMode: "copy", SubtitleMode: "preserve", ConvertIncompatibleSubtitles: true,
+		PreserveMetadata: true, PreserveChapters: true, PreserveAttachments: true,
+		SubtitleActions: actions, RecipeVersion: "test-1.0.0",
+		RecipeDigest: "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+		Resilience:   transcode.ResiliencePlan{MaxAttempts: 3, TransientRetries: 2, RetryBackoffSeconds: []int{1, 2}, MaxFallbacks: 1, RetryOn: []string{"worker_busy", "ssh_transient"}},
 	}
-
-	inputStreams := []SourceStream{
-		{Index: 0, TypeIndex: 0, Kind: "video", Codec: "h264"},
-		{Index: 1, TypeIndex: 0, Kind: "audio", Codec: "ac3", Language: "eng"},
-		{Index: 2, TypeIndex: 0, Kind: "subtitle", Codec: "mov_text", Language: "eng"},
-		{Index: 3, TypeIndex: 1, Kind: "subtitle", Codec: "ass", Language: "jpn"},
-		{Index: 4, TypeIndex: 2, Kind: "subtitle", Codec: "subrip", Language: "spa"},
-	}
-
-	execPlan, err := BuildExecutionPlan(plan, inputStreams, 120.0)
-	if err != nil {
-		t.Fatalf("BuildExecutionPlan failed: %v", err)
-	}
-
-	// Verify subtitle stream decisions
-	subDecisions := make(map[int]string)
-	for _, s := range execPlan.Streams {
-		if s.Kind == "subtitle" {
-			subDecisions[s.TypeIndex] = s.TargetCodec
+	for _, a := range actions {
+		if a.Operation == "transcode" {
+			p.AppliedFallbacks = []string{"container_subtitle_incompatible:apply_container_conversion"}
+			break
 		}
 	}
-
-	if subDecisions[0] != "subrip" {
-		t.Errorf("expected subtitle 0 targetCodec 'subrip', got %q", subDecisions[0])
-	}
-	if subDecisions[1] != "copy" {
-		t.Errorf("expected subtitle 1 targetCodec 'copy', got %q", subDecisions[1])
-	}
-	if subDecisions[2] != "copy" {
-		t.Errorf("expected subtitle 2 targetCodec 'copy', got %q", subDecisions[2])
-	}
-
-	// Verify conversion recording
-	if len(execPlan.Conversions) != 1 {
-		t.Fatalf("expected 1 conversion, got %d", len(execPlan.Conversions))
-	}
-	conv := execPlan.Conversions[0]
-	if conv.StreamType != "subtitle" || conv.StreamIndex != 0 || conv.FromCodec != "mov_text" || conv.ToCodec != "subrip" {
-		t.Errorf("unexpected conversion: %+v", conv)
-	}
-	if conv.Reason != "matroska_compatibility" {
-		t.Errorf("expected reason 'matroska_compatibility', got %q", conv.Reason)
-	}
-
-	// Verify FFmpeg argument generation
-	args, err := BuildFFmpegArgs(execPlan, "/path/to/source.mp4", "/path/to/candidate.mkv", "/path/to/progress.txt")
+	d, err := transcode.DigestPlan(p)
 	if err != nil {
-		t.Fatalf("BuildFFmpegArgs failed: %v", err)
+		t.Fatal(err)
 	}
+	p.PlanDigest = d
+	return p
+}
 
-	argsStr := strings.Join(args, " ")
-	if !strings.Contains(argsStr, "-c:s:0 subrip") {
-		t.Errorf("expected '-c:s:0 subrip' in args, got: %s", argsStr)
+func TestPlan_RecipeResolvedMP4MovTextToMKV(t *testing.T) {
+	p := signedPlan(t, []transcode.SubtitleAction{
+		{SourceStreamIndex: 2, TypeIndex: 0, SourceCodec: "mov_text", Operation: "transcode", Codec: "subrip", Reason: "matroska_compatibility"},
+		{SourceStreamIndex: 3, TypeIndex: 1, SourceCodec: "ass", Operation: "copy", Codec: "copy"},
+		{SourceStreamIndex: 4, TypeIndex: 2, SourceCodec: "ssa", Operation: "copy", Codec: "copy"},
+	})
+	streams := []SourceStream{{Index: 0, TypeIndex: 0, Kind: "video", Codec: "h264"}, {Index: 1, TypeIndex: 0, Kind: "audio", Codec: "ac3", Language: "eng", Channels: 6}, {Index: 2, TypeIndex: 0, Kind: "subtitle", Codec: "mov_text", Language: "eng"}, {Index: 3, TypeIndex: 1, Kind: "subtitle", Codec: "ass", Language: "jpn"}, {Index: 4, TypeIndex: 2, Kind: "subtitle", Codec: "ssa", Language: "spa"}}
+	ep, err := BuildExecutionPlan(p, streams, 3600)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(argsStr, "-c:s:1 copy") {
-		t.Errorf("expected '-c:s:1 copy' in args, got: %s", argsStr)
+	if len(ep.Conversions) != 1 || ep.Conversions[0].FromCodec != "mov_text" || ep.Conversions[0].ToCodec != "subrip" {
+		t.Fatalf("conversions=%+v", ep.Conversions)
 	}
-	if !strings.Contains(argsStr, "-c:s:2 copy") {
-		t.Errorf("expected '-c:s:2 copy' in args, got: %s", argsStr)
+	args, err := BuildFFmpegArgs(ep, "in.mp4", "out.mkv", "progress.txt")
+	if err != nil {
+		t.Fatal(err)
 	}
-	// Verify global -c copy or global -c:s srt is NOT present
+	s := strings.Join(args, " ")
+	for _, want := range []string{"-c:v hevc_videotoolbox", "-c:a copy", "-c:s:0 subrip", "-c:s:1 copy", "-c:s:2 copy"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("missing %q in %s", want, s)
+		}
+	}
 	for i, a := range args {
 		if a == "-c" && i+1 < len(args) && args[i+1] == "copy" {
-			t.Errorf("dangerous global '-c copy' found in args: %s", argsStr)
-		}
-		if a == "-c:s" && i+1 < len(args) && (args[i+1] == "srt" || args[i+1] == "subrip") {
-			t.Errorf("destructive global '-c:s srt/subrip' found in args: %s", argsStr)
+			t.Fatalf("global -c copy forbidden: %s", s)
 		}
 	}
 }
 
-func TestPlan_MultipleProfilesDifferentArgv(t *testing.T) {
-	planQuality := &transcode.Plan{
-		Container:  "mkv",
-		VideoCodec: "hevc_videotoolbox",
-		Quality:    55,
-		AudioMode:  "copy",
+func TestPlan_WorkerRevalidatesCapabilityBoundary(t *testing.T) {
+	base := signedPlan(t, nil)
+	cases := []struct {
+		name   string
+		mutate func(*transcode.Plan)
+	}{
+		{"unknown container", func(p *transcode.Plan) { p.Container = "mp4" }},
+		{"arbitrary codec", func(p *transcode.Plan) { p.VideoCodec = "; rm -rf /" }},
+		{"arbitrary retry class", func(p *transcode.Plan) { p.Resilience.RetryOn = []string{"exec_shell"} }},
+		{"missing recipe identity", func(p *transcode.Plan) { p.RecipeDigest = "" }},
 	}
-	planSpace := &transcode.Plan{
-		Container:  "mkv",
-		VideoCodec: "hevc_videotoolbox",
-		Quality:    75,
-		AudioMode:  "copy",
-	}
-
-	streams := []SourceStream{
-		{Index: 0, TypeIndex: 0, Kind: "video", Codec: "h264"},
-	}
-
-	execQuality, _ := BuildExecutionPlan(planQuality, streams, 60.0)
-	execSpace, _ := BuildExecutionPlan(planSpace, streams, 60.0)
-
-	argsQ, _ := BuildFFmpegArgs(execQuality, "in.mp4", "out.mkv", "prog.txt")
-	argsS, _ := BuildFFmpegArgs(execSpace, "in.mp4", "out.mkv", "prog.txt")
-
-	strQ := strings.Join(argsQ, " ")
-	strS := strings.Join(argsS, " ")
-
-	if !strings.Contains(strQ, "-q:v 55") {
-		t.Errorf("expected -q:v 55 in args, got: %s", strQ)
-	}
-	if !strings.Contains(strS, "-q:v 75") {
-		t.Errorf("expected -q:v 75 in args, got: %s", strS)
-	}
-	if strQ == strS {
-		t.Errorf("expected different arguments for different profile qualities")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cp := *base
+			tc.mutate(&cp)
+			d, _ := transcode.DigestPlan(&cp)
+			cp.PlanDigest = d
+			if tc.name == "missing recipe identity" {
+				cp.RecipeDigest = ""
+				d, _ = transcode.DigestPlan(&cp)
+				cp.PlanDigest = d
+			}
+			if err := ValidatePlan(&cp); err == nil {
+				t.Fatal("expected fail closed")
+			}
+		})
 	}
 }
 
-func TestPlan_IncompatibleSubtitleFailClosed(t *testing.T) {
-	plan := &transcode.Plan{
-		Container:                    "mkv",
-		VideoCodec:                   "hevc_videotoolbox",
-		Quality:                      65,
-		AudioMode:                    "copy",
-		SubtitleMode:                 "preserve",
-		ConvertIncompatibleSubtitles: true,
-	}
-
-	// Subtitle codec that is neither supported in Matroska nor convertible
-	streams := []SourceStream{
-		{Index: 0, TypeIndex: 0, Kind: "video", Codec: "h264"},
-		{Index: 1, TypeIndex: 0, Kind: "subtitle", Codec: "unknown_incompatible_format"},
-	}
-
-	_, err := BuildExecutionPlan(plan, streams, 100.0)
-	if err == nil {
-		t.Fatal("expected error on unknown incompatible subtitle codec, got nil")
-	}
-	if !strings.Contains(err.Error(), "unsupported subtitle codec") || !strings.Contains(err.Error(), "fail closed") {
-		t.Errorf("expected fail closed error message, got: %v", err)
+func TestPlan_DigestDetectsMutation(t *testing.T) {
+	p := signedPlan(t, nil)
+	p.Quality = 90
+	if err := ValidatePlan(p); err == nil || !strings.Contains(err.Error(), "plan digest") {
+		t.Fatalf("expected digest rejection, got %v", err)
 	}
 }
 
-func TestPlan_DisabledConvertIncompatibleFailClosed(t *testing.T) {
-	plan := &transcode.Plan{
-		Container:                    "mkv",
-		VideoCodec:                   "hevc_videotoolbox",
-		Quality:                      65,
-		AudioMode:                    "copy",
-		SubtitleMode:                 "preserve",
-		ConvertIncompatibleSubtitles: false, // Disabled conversion
+func TestPlan_RecipeCannotExpandSubtitleCapabilities(t *testing.T) {
+	cases := [][]transcode.SubtitleAction{
+		{{SourceStreamIndex: 1, TypeIndex: 0, SourceCodec: "made_up", Operation: "copy", Codec: "copy"}},
+		{{SourceStreamIndex: 1, TypeIndex: 0, SourceCodec: "ass", Operation: "transcode", Codec: "subrip"}},
+		{{SourceStreamIndex: 1, TypeIndex: 0, SourceCodec: "mov_text", Operation: "transcode", Codec: "libx264"}},
+		{{SourceStreamIndex: 1, TypeIndex: 0, SourceCodec: "mov_text", Operation: "exec", Codec: "subrip"}},
 	}
-
-	streams := []SourceStream{
-		{Index: 0, TypeIndex: 0, Kind: "video", Codec: "h264"},
-		{Index: 1, TypeIndex: 0, Kind: "subtitle", Codec: "mov_text"},
-	}
-
-	_, err := BuildExecutionPlan(plan, streams, 100.0)
-	if err == nil {
-		t.Fatal("expected error when convert_incompatible_subtitles is false, got nil")
-	}
-	if !strings.Contains(err.Error(), "incompatible subtitle codec") {
-		t.Errorf("expected incompatible error, got: %v", err)
+	for i, actions := range cases {
+		p := signedPlan(t, actions)
+		if err := ValidatePlan(p); err == nil {
+			t.Fatalf("case %d should fail", i)
+		}
 	}
 }
 
-func TestPlan_SummarizeFFmpegError(t *testing.T) {
-	tempDir := t.TempDir()
-	logPath := filepath.Join(tempDir, "ffmpeg.log")
-
-	content := `ffmpeg version 7.0 Copyright (c) 2000-2024 the FFmpeg developers
-[matroska @ 0x123456] Subtitle codec mov_text (94213) is not supported to that coin: matroska
-[matroska @ 0x123456] Could not write header for output file #0 (incorrect codec parameters ?): Function not implemented
-Error initializing output stream 0:1 --
-Conversion failed!
-`
-	if err := os.WriteFile(logPath, []byte(content), 0644); err != nil {
-		t.Fatalf("writing log: %v", err)
-	}
-
-	summary := SummarizeFFmpegError(logPath, errors.New("exit status 178"))
-	if !strings.Contains(summary, "mov_text") || !strings.Contains(summary, "not supported") {
-		t.Errorf("expected log summary to capture mov_text error, got: %s", summary)
-	}
-	if !strings.Contains(summary, "exit status 178") {
-		t.Errorf("expected log summary to mention exit status, got: %s", summary)
+func TestPlan_SourceChangeFailsClosed(t *testing.T) {
+	p := signedPlan(t, []transcode.SubtitleAction{{SourceStreamIndex: 2, TypeIndex: 0, SourceCodec: "mov_text", Operation: "transcode", Codec: "subrip", Reason: "matroska_compatibility"}})
+	_, err := BuildExecutionPlan(p, []SourceStream{{Index: 0, TypeIndex: 0, Kind: "video", Codec: "h264"}, {Index: 2, TypeIndex: 0, Kind: "subtitle", Codec: "ass"}}, 60)
+	if err == nil || !strings.Contains(err.Error(), "source codec changed") {
+		t.Fatalf("unexpected err %v", err)
 	}
 }
 
-func TestPlan_WorkerValidationFailClosed(t *testing.T) {
-	// Plan with invalid values directly sent to worker
-	badPlan := &transcode.Plan{
-		Container:    "mp4", // not yet enabled on worker
-		VideoCodec:   "hevc_videotoolbox",
-		Quality:      65,
-		AudioMode:    "copy",
-		SubtitleMode: "preserve",
-	}
-	err := ValidatePlan(badPlan)
+func TestPlan_MissingOrExtraSubtitleActionFailsClosed(t *testing.T) {
+	p := signedPlan(t, nil)
+	_, err := BuildExecutionPlan(p, []SourceStream{{Index: 0, TypeIndex: 0, Kind: "video", Codec: "h264"}, {Index: 1, TypeIndex: 0, Kind: "subtitle", Codec: "ass"}}, 60)
 	if err == nil {
-		t.Fatal("expected error on unsupported container, got nil")
+		t.Fatal("missing subtitle action accepted")
 	}
+	p = signedPlan(t, []transcode.SubtitleAction{{SourceStreamIndex: 1, TypeIndex: 0, SourceCodec: "ass", Operation: "copy", Codec: "copy"}})
+	_, err = BuildExecutionPlan(p, []SourceStream{{Index: 0, TypeIndex: 0, Kind: "video", Codec: "h264"}}, 60)
+	if err == nil || !strings.Contains(err.Error(), "missing subtitle") {
+		t.Fatalf("extra action not rejected: %v", err)
+	}
+}
 
-	badCodecPlan := &transcode.Plan{
-		Container:    "mkv",
-		VideoCodec:   "hevc_nvenc",
-		Quality:      65,
-		AudioMode:    "copy",
-		SubtitleMode: "preserve",
+func TestPlan_LegacyHevcVTShimIsBounded(t *testing.T) {
+	p, err := ResolveWorkerPlan("hevc-vt", nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	err = ValidatePlan(badCodecPlan)
-	if err == nil {
-		t.Fatal("expected error on unsupported video codec, got nil")
+	streams := []SourceStream{{Index: 0, TypeIndex: 0, Kind: "video", Codec: "h264"}, {Index: 1, TypeIndex: 0, Kind: "subtitle", Codec: "mov_text"}, {Index: 2, TypeIndex: 1, Kind: "subtitle", Codec: "ass"}}
+	ep, err := BuildExecutionPlan(p, streams, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ep.Conversions) != 1 || ep.Conversions[0].ToCodec != "subrip" {
+		t.Fatalf("legacy shim conversion=%+v", ep.Conversions)
+	}
+	if _, err := ResolveWorkerPlan("hevc-vt-quality", nil); err == nil {
+		t.Fatal("only hevc-vt legacy shim should remain")
+	}
+}
+
+func TestPlan_ConversionsPreserveIndividualStreams(t *testing.T) {
+	p := signedPlan(t, []transcode.SubtitleAction{{SourceStreamIndex: 2, TypeIndex: 0, SourceCodec: "ass", Operation: "copy", Codec: "copy"}, {SourceStreamIndex: 3, TypeIndex: 1, SourceCodec: "mov_text", Operation: "transcode", Codec: "subrip", Reason: "matroska_compatibility"}, {SourceStreamIndex: 4, TypeIndex: 2, SourceCodec: "subrip", Operation: "copy", Codec: "copy"}})
+	streams := []SourceStream{{Index: 0, TypeIndex: 0, Kind: "video", Codec: "h264"}, {Index: 2, TypeIndex: 0, Kind: "subtitle", Codec: "ass"}, {Index: 3, TypeIndex: 1, Kind: "subtitle", Codec: "mov_text"}, {Index: 4, TypeIndex: 2, Kind: "subtitle", Codec: "subrip"}}
+	ep, err := BuildExecutionPlan(p, streams, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[int]string{}
+	for _, s := range ep.Streams {
+		if s.Kind == "subtitle" {
+			got[s.TypeIndex] = s.TargetCodec
+		}
+	}
+	if got[0] != "copy" || got[1] != "subrip" || got[2] != "copy" {
+		t.Fatalf("got %+v", got)
 	}
 }
