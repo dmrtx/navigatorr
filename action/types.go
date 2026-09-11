@@ -9,6 +9,7 @@ import (
 	"github.com/jakenesler/navigatorr/fsop"
 	"github.com/jakenesler/navigatorr/qbit"
 	"github.com/jakenesler/navigatorr/store"
+	"github.com/jakenesler/navigatorr/transcode"
 )
 
 // Action statuses mirroring store constants
@@ -120,5 +121,6 @@ type EngineDeps struct {
 	Qbit      *qbit.Client
 	Fs        *fsop.Resolver
 	Ffprobe   string
+	Transcode transcode.Executor
 	StartTime time.Time
 }

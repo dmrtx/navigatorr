@@ -129,6 +129,137 @@ func InspectFile(ctx context.Context, ffprobePath, path string) (Report, error) 
 	return rep, nil
 }
 
+// DetailedStream captures stream metadata needed for high-fidelity transcode verification.
+type DetailedStream struct {
+	Index    int               `json:"index"`
+	Kind     string            `json:"kind"` // video, audio, subtitle, attachment
+	Codec    string            `json:"codec"`
+	Language string            `json:"language,omitempty"`
+	Title    string            `json:"title,omitempty"`
+	Channels int               `json:"channels,omitempty"`
+	Width    int               `json:"width,omitempty"`
+	Height   int               `json:"height,omitempty"`
+	BitDepth int               `json:"bit_depth,omitempty"`
+	Tags     map[string]string `json:"tags,omitempty"`
+}
+
+// DetailedReport provides full-fidelity inspection including video, audio, subtitles, attachments, and chapters.
+type DetailedReport struct {
+	Path        string           `json:"path"`
+	Container   string           `json:"container"`
+	DurationSec float64          `json:"duration_sec"`
+	SizeBytes   int64            `json:"size_bytes"`
+	Video       []DetailedStream `json:"video"`
+	Audio       []DetailedStream `json:"audio"`
+	Subtitles   []DetailedStream `json:"subtitles"`
+	Attachments []DetailedStream `json:"attachments"`
+	Chapters    int              `json:"chapters"`
+	Probed      bool             `json:"probed"`
+}
+
+// InspectDetailed runs ffprobe with streams and chapters for rigorous transcode validation.
+func InspectDetailed(ctx context.Context, ffprobePath, path string) (DetailedReport, error) {
+	rep := DetailedReport{Path: path}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return rep, fmt.Errorf("stat %s: %w", path, err)
+	}
+	if fi.IsDir() {
+		return rep, fmt.Errorf("%s is a directory", path)
+	}
+	rep.SizeBytes = fi.Size()
+	rep.Container = strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
+
+	if ffprobePath == "" {
+		ffprobePath, _ = exec.LookPath("ffprobe")
+	}
+	if ffprobePath == "" {
+		return rep, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, ffprobePath,
+		"-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", "-show_chapters", path)
+	out, err := cmd.Output()
+	if err != nil {
+		return rep, nil
+	}
+
+	var probe struct {
+		Streams []struct {
+			Index            int               `json:"index"`
+			CodecType        string            `json:"codec_type"`
+			CodecName        string            `json:"codec_name"`
+			Profile          string            `json:"profile"`
+			PixFmt           string            `json:"pix_fmt"`
+			Width            int               `json:"width"`
+			Height           int               `json:"height"`
+			Channels         int               `json:"channels"`
+			BitsPerRawSample any               `json:"bits_per_raw_sample"`
+			Tags             map[string]string `json:"tags"`
+		} `json:"streams"`
+		Format struct {
+			FormatName string `json:"format_name"`
+			Duration   string `json:"duration"`
+			Size       string `json:"size"`
+		} `json:"format"`
+		Chapters []any `json:"chapters"`
+	}
+
+	if err := json.Unmarshal(out, &probe); err != nil {
+		return rep, nil
+	}
+
+	rep.Probed = true
+	if probe.Format.FormatName != "" {
+		rep.Container = strings.Split(probe.Format.FormatName, ",")[0]
+	}
+	var fmtDur float64
+	fmt.Sscanf(probe.Format.Duration, "%f", &fmtDur)
+	rep.DurationSec = fmtDur
+	rep.Chapters = len(probe.Chapters)
+
+	for _, st := range probe.Streams {
+		lang := ""
+		title := ""
+		for k, v := range st.Tags {
+			if strings.EqualFold(k, "language") {
+				lang = maint.NormalizeLang(v)
+			}
+			if strings.EqualFold(k, "title") {
+				title = strings.TrimSpace(v)
+			}
+		}
+
+		ds := DetailedStream{
+			Index:    st.Index,
+			Kind:     st.CodecType,
+			Codec:    strings.ToLower(st.CodecName),
+			Language: lang,
+			Title:    title,
+			Channels: st.Channels,
+			Width:    st.Width,
+			Height:   st.Height,
+			Tags:     st.Tags,
+		}
+
+		switch st.CodecType {
+		case "video":
+			ds.BitDepth = ParseBitDepth(st.BitsPerRawSample, st.PixFmt, st.Profile)
+			rep.Video = append(rep.Video, ds)
+		case "audio":
+			rep.Audio = append(rep.Audio, ds)
+		case "subtitle":
+			rep.Subtitles = append(rep.Subtitles, ds)
+		case "attachment":
+			rep.Attachments = append(rep.Attachments, ds)
+		}
+	}
+
+	return rep, nil
+}
+
 // ParseBitDepth extracts bit depth from raw bits (number or string), pixel format, or profile.
 // It returns 0 when metadata does not specify the bit depth.
 func ParseBitDepth(rawBits any, pixFmt, profile string) int {

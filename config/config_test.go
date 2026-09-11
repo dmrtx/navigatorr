@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestKnownServicesHaveCompleteDefaults(t *testing.T) {
@@ -252,6 +253,147 @@ completely_unknown_key: 123
 		}
 		if cfg == nil {
 			t.Fatal("expected non-nil config")
+		}
+	})
+}
+
+func TestTranscodeConfig(t *testing.T) {
+	tempDir := t.TempDir()
+	writeCfg := func(filename, content string) string {
+		p := filepath.Join(tempDir, filename)
+		if err := os.WriteFile(p, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	t.Run("parses valid transcode configuration", func(t *testing.T) {
+		p := writeCfg("transcode_valid.yaml", `
+transcode:
+  enabled: true
+  executor: "ssh"
+  ssh:
+    host: "192.0.2.10"
+    user: "transcoder"
+    command: "/Users/transcoder/.local/bin/navigatorr-transcode"
+    identity_file: "/run/secrets/navigatorr_transcode_ssh"
+    connect_timeout: "10s"
+    path_mappings:
+      - local: "/media"
+        remote: "/Volumes/media"
+`)
+		cfg, err := Load(p)
+		if err != nil {
+			t.Fatalf("unexpected error loading transcode config: %v", err)
+		}
+		if !cfg.Transcode.Enabled {
+			t.Error("expected Transcode.Enabled=true")
+		}
+		if cfg.Transcode.Executor != "ssh" {
+			t.Errorf("unexpected Executor: %s", cfg.Transcode.Executor)
+		}
+		if cfg.Transcode.SSH.Host != "192.0.2.10" {
+			t.Errorf("unexpected Host: %s", cfg.Transcode.SSH.Host)
+		}
+		if cfg.Transcode.SSH.User != "transcoder" {
+			t.Errorf("unexpected User: %s", cfg.Transcode.SSH.User)
+		}
+		if cfg.Transcode.SSH.Command != "/Users/transcoder/.local/bin/navigatorr-transcode" {
+			t.Errorf("unexpected Command: %s", cfg.Transcode.SSH.Command)
+		}
+		if cfg.Transcode.SSH.TimeoutDuration() != 10*time.Second {
+			t.Errorf("expected 10s timeout, got %v", cfg.Transcode.SSH.TimeoutDuration())
+		}
+		if len(cfg.Transcode.SSH.PathMappings) != 1 {
+			t.Fatalf("expected 1 path mapping, got %d", len(cfg.Transcode.SSH.PathMappings))
+		}
+		mapping := cfg.Transcode.SSH.PathMappings[0]
+		if mapping.Local != "/media" || mapping.Remote != "/Volumes/media" {
+			t.Errorf("unexpected mapping: %+v", mapping)
+		}
+	})
+
+	t.Run("parses transcode configuration with user aliases and secrets", func(t *testing.T) {
+		p := writeCfg("transcode_user_aliases.yaml", `
+transcode:
+  enabled: true
+  executor: "ssh"
+  default_action: "manual_approval"
+  min_savings_percent: 15.0
+  max_parallel_jobs: 1
+  ssh:
+    host: "192.0.2.10"
+    port: 22
+    user: "transcoder"
+    ssh_key_path: "/run/secrets/navigatorr_transcode_ssh"
+    known_hosts_path: "/run/secrets/navigatorr_known_hosts"
+    remote_binary: "/usr/local/bin/navigatorr-transcode"
+    connect_timeout_sec: 5
+    command_timeout_sec: 60
+    path_mappings:
+      - local_prefix: "/media"
+        remote_prefix: "/Volumes/media"
+`)
+		cfg, err := Load(p)
+		if err != nil {
+			t.Fatalf("unexpected error loading transcode config with aliases: %v", err)
+		}
+		if cfg.Transcode.DefaultAction != "manual_approval" {
+			t.Errorf("expected default_action=manual_approval, got %s", cfg.Transcode.DefaultAction)
+		}
+		if cfg.Transcode.MinSavingsPercent != 15.0 {
+			t.Errorf("expected min_savings_percent=15.0, got %f", cfg.Transcode.MinSavingsPercent)
+		}
+		if cfg.Transcode.MaxParallelJobs != 1 {
+			t.Errorf("expected max_parallel_jobs=1, got %d", cfg.Transcode.MaxParallelJobs)
+		}
+		ssh := cfg.Transcode.SSH
+		if ssh.Port != 22 {
+			t.Errorf("expected port=22, got %d", ssh.Port)
+		}
+		if ssh.KeyFile() != "/run/secrets/navigatorr_transcode_ssh" {
+			t.Errorf("expected key file /run/secrets/navigatorr_transcode_ssh, got %s", ssh.KeyFile())
+		}
+		if ssh.KnownHostsPath != "/run/secrets/navigatorr_known_hosts" {
+			t.Errorf("expected known hosts /run/secrets/navigatorr_known_hosts, got %s", ssh.KnownHostsPath)
+		}
+		if ssh.RemoteCommand() != "/usr/local/bin/navigatorr-transcode" {
+			t.Errorf("expected remote command /usr/local/bin/navigatorr-transcode, got %s", ssh.RemoteCommand())
+		}
+		if ssh.TimeoutDuration() != 5*time.Second {
+			t.Errorf("expected timeout 5s, got %v", ssh.TimeoutDuration())
+		}
+		if ssh.CommandTimeoutDuration() != 60*time.Second {
+			t.Errorf("expected command timeout 60s, got %v", ssh.CommandTimeoutDuration())
+		}
+		if len(ssh.PathMappings) != 1 {
+			t.Fatalf("expected 1 path mapping, got %d", len(ssh.PathMappings))
+		}
+		m := ssh.PathMappings[0]
+		if m.GetLocal() != "/media" || m.GetRemote() != "/Volumes/media" {
+			t.Errorf("unexpected mapping: local=%s, remote=%s", m.GetLocal(), m.GetRemote())
+		}
+	})
+
+	t.Run("default timeout when empty", func(t *testing.T) {
+		tc := SSHExecutorConfig{}
+		if tc.TimeoutDuration() != 5*time.Second {
+			t.Errorf("expected default 5s timeout, got %v", tc.TimeoutDuration())
+		}
+	})
+
+	t.Run("misnested transcode key fails strict parsing", func(t *testing.T) {
+		p := writeCfg("transcode_nested.yaml", `
+media:
+  transcode:
+    enabled: true
+`)
+		_, err := Load(p)
+		if err == nil {
+			t.Fatal("expected strict parsing error for nested transcode, got nil")
+		}
+		if !strings.Contains(err.Error(), "transcode") {
+			t.Errorf("expected error mentioning transcode, got %v", err)
 		}
 	})
 }

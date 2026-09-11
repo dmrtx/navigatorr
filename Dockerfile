@@ -11,6 +11,6 @@ FROM alpine:latest
 # (container, codec, audio/subtitle languages). Inspection degrades to
 # extension/size heuristics when ffprobe is absent, so this stays optional
 # but strongly recommended.
-RUN apk add --no-cache ca-certificates ffmpeg
+RUN apk add --no-cache ca-certificates ffmpeg openssh-client
 COPY --from=builder /app/navigatorr /usr/local/bin/navigatorr
 ENTRYPOINT ["navigatorr"]

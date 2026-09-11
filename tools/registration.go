@@ -12,6 +12,7 @@ import (
 	"github.com/jakenesler/navigatorr/queue"
 	"github.com/jakenesler/navigatorr/sabnzbd"
 	"github.com/jakenesler/navigatorr/store"
+	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transmission"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -39,7 +40,7 @@ func RegisterAll(s *server.MCPServer, cfg *config.Config, registry *arrservice.R
 // RegisterMaintenance wires the persistent maintenance-agent tools. It is
 // separate from RegisterAll so the classic tools never depend on SQLite:
 // with a nil mStore this is a no-op and the server behaves exactly as before.
-func RegisterMaintenance(s *server.MCPServer, cfg *config.Config, registry *arrservice.Registry, qbClient *qbit.Client, mStore *store.Store) {
+func RegisterMaintenance(s *server.MCPServer, cfg *config.Config, registry *arrservice.Registry, qbClient *qbit.Client, mStore *store.Store, transcodeExec ...transcode.Executor) {
 	if mStore == nil {
 		return
 	}
@@ -60,6 +61,11 @@ func RegisterMaintenance(s *server.MCPServer, cfg *config.Config, registry *arrs
 	registerScanTools(s, d, registry)
 	registerFsTools(s, d)
 
+	var tc transcode.Executor
+	if len(transcodeExec) > 0 && transcodeExec[0] != nil {
+		tc = transcodeExec[0]
+	}
+
 	actEngine := action.NewEngine(action.EngineDeps{
 		Store:     mStore,
 		Config:    cfg,
@@ -67,13 +73,19 @@ func RegisterMaintenance(s *server.MCPServer, cfg *config.Config, registry *arrs
 		Qbit:      qbClient,
 		Fs:        resolver,
 		Ffprobe:   ffprobe,
+		Transcode: tc,
 		StartTime: time.Now(),
 	})
 	registerActionTools(s, actEngine)
 }
 
 // RegisterDiagnostics registers the diagnostics and action audit log tools.
-func RegisterDiagnostics(s *server.MCPServer, cfg *config.Config, registry *arrservice.Registry, specStore *openapi.Store, txClient *transmission.Client, qbClient *qbit.Client, sabClient *sabnzbd.Client, mStore *store.Store) {
+func RegisterDiagnostics(s *server.MCPServer, cfg *config.Config, registry *arrservice.Registry, specStore *openapi.Store, txClient *transmission.Client, qbClient *qbit.Client, sabClient *sabnzbd.Client, mStore *store.Store, transcodeExec ...transcode.Executor) {
+	var tc transcode.Executor
+	if len(transcodeExec) > 0 && transcodeExec[0] != nil {
+		tc = transcodeExec[0]
+	}
+
 	registerDiagnosticsTools(s, DiagnosticsDeps{
 		Config:    cfg,
 		Registry:  registry,
@@ -82,5 +94,6 @@ func RegisterDiagnostics(s *server.MCPServer, cfg *config.Config, registry *arrs
 		QbClient:  qbClient,
 		SabClient: sabClient,
 		Store:     mStore,
+		Transcode: tc,
 	})
 }

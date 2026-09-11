@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -21,6 +22,7 @@ type Config struct {
 	Transmission      TransmissionConfig       `yaml:"transmission"`
 	QBittorrent       QBittorrentConfig        `yaml:"qbittorrent"`
 	SABnzbd           SABnzbdConfig            `yaml:"sabnzbd"`
+	Transcode         TranscodeConfig          `yaml:"transcode"`
 	Queue             QueueConfig              `yaml:"queue"`
 	Database          DatabaseConfig           `yaml:"database"`
 	Media             MediaConfig              `yaml:"media"`
@@ -86,6 +88,85 @@ type SABnzbdConfig struct {
 	URLBase string `yaml:"url_base"` // SABnzbd's own url_base, "/sabnzbd" by default
 }
 
+type TranscodeConfig struct {
+	Enabled           bool              `yaml:"enabled"`
+	Executor          string            `yaml:"executor"` // "ssh"
+	DefaultAction     string            `yaml:"default_action"`
+	MinSavingsPercent float64           `yaml:"min_savings_percent"`
+	MaxParallelJobs   int               `yaml:"max_parallel_jobs"`
+	SSH               SSHExecutorConfig `yaml:"ssh"`
+}
+
+type SSHExecutorConfig struct {
+	Host              string                 `yaml:"host"`
+	Port              int                    `yaml:"port"`
+	User              string                 `yaml:"user"`
+	Command           string                 `yaml:"command"`
+	RemoteBinary      string                 `yaml:"remote_binary"`
+	IdentityFile      string                 `yaml:"identity_file"`
+	SSHKeyPath        string                 `yaml:"ssh_key_path"`
+	KnownHostsPath    string                 `yaml:"known_hosts_path"`
+	ConnectTimeout    string                 `yaml:"connect_timeout"`
+	ConnectTimeoutSec int                    `yaml:"connect_timeout_sec"`
+	CommandTimeoutSec int                    `yaml:"command_timeout_sec"`
+	PathMappings      []TranscodePathMapping `yaml:"path_mappings"`
+}
+
+func (s SSHExecutorConfig) RemoteCommand() string {
+	if s.RemoteBinary != "" {
+		return s.RemoteBinary
+	}
+	return s.Command
+}
+
+func (s SSHExecutorConfig) KeyFile() string {
+	if s.SSHKeyPath != "" {
+		return s.SSHKeyPath
+	}
+	return s.IdentityFile
+}
+
+// TimeoutDuration returns the parsed connect_timeout duration or defaults to 5s.
+func (s SSHExecutorConfig) TimeoutDuration() time.Duration {
+	if s.ConnectTimeoutSec > 0 {
+		return time.Duration(s.ConnectTimeoutSec) * time.Second
+	}
+	if s.ConnectTimeout != "" {
+		if d, err := time.ParseDuration(s.ConnectTimeout); err == nil && d > 0 {
+			return d
+		}
+	}
+	return 5 * time.Second
+}
+
+func (s SSHExecutorConfig) CommandTimeoutDuration() time.Duration {
+	if s.CommandTimeoutSec > 0 {
+		return time.Duration(s.CommandTimeoutSec) * time.Second
+	}
+	return 60 * time.Second
+}
+
+type TranscodePathMapping struct {
+	Local        string `yaml:"local"`
+	Remote       string `yaml:"remote"`
+	LocalPrefix  string `yaml:"local_prefix"`
+	RemotePrefix string `yaml:"remote_prefix"`
+}
+
+func (m TranscodePathMapping) GetLocal() string {
+	if m.LocalPrefix != "" {
+		return m.LocalPrefix
+	}
+	return m.Local
+}
+
+func (m TranscodePathMapping) GetRemote() string {
+	if m.RemotePrefix != "" {
+		return m.RemotePrefix
+	}
+	return m.Remote
+}
+
 func DefaultConfigPath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".config", "navigatorr", "config.yaml")
@@ -115,24 +196,30 @@ func DefaultDatabasePath() string {
 var notFoundFieldRegex = regexp.MustCompile(`field\s+([a-zA-Z0-9_-]+)\s+not\s+found\s+in\s+type\s+([a-zA-Z0-9_.]+)`)
 
 var structTypeToSection = map[string]string{
-	"config.MediaConfig":        "media",
-	"MediaConfig":               "media",
-	"config.MaintenanceConfig":  "maintenance",
-	"MaintenanceConfig":         "maintenance",
-	"config.ConcurrencyConfig":  "concurrency",
-	"ConcurrencyConfig":         "concurrency",
-	"config.DatabaseConfig":     "database",
-	"DatabaseConfig":            "database",
-	"config.QueueConfig":        "queue",
-	"QueueConfig":               "queue",
-	"config.TransmissionConfig": "transmission",
-	"TransmissionConfig":        "transmission",
-	"config.QBittorrentConfig":  "qbittorrent",
-	"QBittorrentConfig":         "qbittorrent",
-	"config.SABnzbdConfig":      "sabnzbd",
-	"SABnzbdConfig":             "sabnzbd",
-	"config.ServiceConfig":      "services",
-	"ServiceConfig":             "services",
+	"config.MediaConfig":          "media",
+	"MediaConfig":                 "media",
+	"config.MaintenanceConfig":    "maintenance",
+	"MaintenanceConfig":           "maintenance",
+	"config.ConcurrencyConfig":    "concurrency",
+	"ConcurrencyConfig":           "concurrency",
+	"config.DatabaseConfig":       "database",
+	"DatabaseConfig":              "database",
+	"config.QueueConfig":          "queue",
+	"QueueConfig":                 "queue",
+	"config.TransmissionConfig":   "transmission",
+	"TransmissionConfig":          "transmission",
+	"config.QBittorrentConfig":    "qbittorrent",
+	"QBittorrentConfig":           "qbittorrent",
+	"config.SABnzbdConfig":        "sabnzbd",
+	"SABnzbdConfig":               "sabnzbd",
+	"config.TranscodeConfig":      "transcode",
+	"TranscodeConfig":             "transcode",
+	"config.SSHExecutorConfig":    "transcode",
+	"SSHExecutorConfig":           "transcode",
+	"config.TranscodePathMapping": "transcode",
+	"TranscodePathMapping":        "transcode",
+	"config.ServiceConfig":        "services",
+	"ServiceConfig":               "services",
 }
 
 var topLevelKeys = map[string]bool{
@@ -140,6 +227,7 @@ var topLevelKeys = map[string]bool{
 	"transmission":         true,
 	"qbittorrent":          true,
 	"sabnzbd":              true,
+	"transcode":            true,
 	"queue":                true,
 	"database":             true,
 	"media":                true,
