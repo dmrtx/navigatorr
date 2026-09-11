@@ -104,7 +104,7 @@ qbittorrent:
 sabnzbd:
   url: "http://localhost:8085"
   api_key: "imaginary-sabnzbd-api-key"
-  url_base: "/sabnzbd"          # SABnzbd's url_base setting (default: /sabnzbd)
+  url_base: "/sabnzbd"          # SABnzbd's own url_base setting (default: /sabnzbd)
 
 # ==============================================================================
 # 5. TRANSCODING (SSH EXECUTOR)
@@ -128,7 +128,7 @@ transcode:
     ssh_key_path: "/run/secrets/navigatorr_transcode_ssh"
     known_hosts_path: "/run/secrets/navigatorr_known_hosts"
 
-    remote_binary: "/usr/local/bin/navigatorr-transcode"
+    remote_binary: "/opt/homebrew/bin/navigatorr-transcode"
 
     connect_timeout_sec: 5
     command_timeout_sec: 60
@@ -138,7 +138,7 @@ transcode:
         remote_prefix: "/Volumes/media"
 
 # ==============================================================================
-# 5. REQUEST QUEUE (HTTP INGEST)
+# 6. REQUEST QUEUE (HTTP INGEST)
 # ==============================================================================
 # Holding area for incoming media requests (e.g. from Siri Shortcuts, webhooks, or bridges).
 # MCP tools (queue_list, queue_claim, queue_resolve) work even if listen is empty.
@@ -149,7 +149,7 @@ queue:
   path: ""                      # Defaults to ~/.config/navigatorr/queue.json
 
 # ==============================================================================
-# 6. PERSISTENT STATE & DATABASE (SQLITE)
+# 7. PERSISTENT STATE & DATABASE (SQLITE)
 # ==============================================================================
 # Holds maintenance jobs, user preferences, release decisions, inspection cache,
 # and audit logs. Survives restarts as long as the directory is mounted in Docker.
@@ -157,7 +157,7 @@ database:
   path: ""                      # Defaults to ~/.cache/navigatorr/navigatorr.db
 
 # ==============================================================================
-# 7. FILESYSTEM & MEDIA INSPECTION
+# 8. FILESYSTEM & MEDIA INSPECTION
 # ==============================================================================
 # Scoped filesystem access for inspect_media (ffprobe) and safe fs tools (fs_list, fs_stat, etc.).
 # Arbitrary directory access is forbidden: all paths must resolve inside these roots.
@@ -180,7 +180,7 @@ media:
   ffprobe_path: ""              # Empty uses "ffprobe" on PATH (included in official Docker image)
 
 # ==============================================================================
-# 8. MAINTENANCE & REPLACEMENT PREFERENCES
+# 9. MAINTENANCE & REPLACEMENT PREFERENCES
 # ==============================================================================
 # Default heuristics for scan_library_issues and rank_releases.
 # Values stored dynamically via `memory_set` override these settings per scope.
@@ -191,4 +191,3 @@ maintenance:
     - "SampleFansub"
     - "DemoEncodes"
   preferred_resolution: "1080p"
-
