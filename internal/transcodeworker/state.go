@@ -1,0 +1,176 @@
+package transcodeworker
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"math"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+)
+
+// JobRecord represents the persistent state stored in job.json on the worker.
+type JobRecord struct {
+	ID          string    `json:"id"`
+	Status      string    `json:"status"` // queued, running, completed, failed, cancelled
+	Source      string    `json:"source"`
+	Candidate   string    `json:"candidate"`
+	Profile     string    `json:"profile"`
+	PID         int       `json:"pid"`
+	CreatedAt   time.Time `json:"created_at"`
+	StartedAt   time.Time `json:"started_at,omitempty"`
+	FinishedAt  time.Time `json:"finished_at,omitempty"`
+	ExitCode    int       `json:"exit_code,omitempty"`
+	Error       string    `json:"error,omitempty"`
+	DurationSec float64   `json:"duration_sec,omitempty"`
+}
+
+// LoadJob loads a JobRecord from job.json.
+func LoadJob(path string) (*JobRecord, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading job file %s: %w", path, err)
+	}
+	var job JobRecord
+	if err := json.Unmarshal(data, &job); err != nil {
+		return nil, fmt.Errorf("unmarshaling job file %s: %w", path, err)
+	}
+	return &job, nil
+}
+
+// SaveJobAtomic saves a JobRecord to job.json atomically using a temp file and rename.
+func SaveJobAtomic(path string, job *JobRecord) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("creating job directory %s: %w", dir, err)
+	}
+
+	data, err := json.MarshalIndent(job, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling job %s: %w", job.ID, err)
+	}
+
+	tmpFile, err := os.CreateTemp(dir, "job-*.tmp")
+	if err != nil {
+		return fmt.Errorf("creating temp job file in %s: %w", dir, err)
+	}
+	tmpName := tmpFile.Name()
+
+	if _, err := tmpFile.Write(data); err != nil {
+		tmpFile.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("writing temp job file %s: %w", tmpName, err)
+	}
+
+	if err := tmpFile.Sync(); err != nil {
+		tmpFile.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("syncing temp job file %s: %w", tmpName, err)
+	}
+
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("closing temp job file %s: %w", tmpName, err)
+	}
+
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("renaming temp file %s to %s: %w", tmpName, path, err)
+	}
+
+	return nil
+}
+
+// IsProcessAlive checks whether a process with the given PID is running.
+func IsProcessAlive(pid int) bool {
+	if pid <= 1 {
+		return false
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	// Signal 0 tests if the process exists without actually sending a signal
+	err = proc.Signal(syscall.Signal(0))
+	return err == nil
+}
+
+// ProgressMetrics contains parsed progress metrics from FFmpeg's progress.txt.
+type ProgressMetrics struct {
+	Progress float64
+	FPS      float64
+	Speed    float64
+}
+
+// ParseProgress parses FFmpeg's key=value progress output.
+func ParseProgress(progressPath string, durationSec float64) ProgressMetrics {
+	f, err := os.Open(progressPath)
+	if err != nil {
+		return ProgressMetrics{}
+	}
+	defer f.Close()
+
+	var (
+		fps         float64
+		speed       float64
+		outTimeSec  float64
+		progressEnd bool
+	)
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		val := strings.TrimSpace(parts[1])
+
+		switch key {
+		case "fps":
+			if v, err := strconv.ParseFloat(val, 64); err == nil {
+				fps = v
+			}
+		case "speed":
+			// E.g. "  5.4x" or "5.4x" or "N/A"
+			valClean := strings.TrimSpace(strings.TrimSuffix(val, "x"))
+			if v, err := strconv.ParseFloat(valClean, 64); err == nil {
+				speed = v
+			}
+		case "out_time_us":
+			// out_time_us is microseconds
+			if v, err := strconv.ParseInt(val, 10, 64); err == nil && v > 0 {
+				outTimeSec = float64(v) / 1000000.0
+			}
+		case "out_time_ms":
+			// In FFmpeg, out_time_ms is historically microseconds as well
+			if outTimeSec == 0 {
+				if v, err := strconv.ParseInt(val, 10, 64); err == nil && v > 0 {
+					outTimeSec = float64(v) / 1000000.0
+				}
+			}
+		case "progress":
+			if val == "end" {
+				progressEnd = true
+			}
+		}
+	}
+
+	var pct float64
+	if progressEnd {
+		pct = 100.0
+	} else if durationSec > 0 && outTimeSec > 0 {
+		pct = math.Min(99.9, (outTimeSec/durationSec)*100.0)
+	}
+
+	return ProgressMetrics{
+		Progress: math.Round(pct*10) / 10,
+		FPS:      fps,
+		Speed:    speed,
+	}
+}
