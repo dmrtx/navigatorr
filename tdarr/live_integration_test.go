@@ -41,19 +41,23 @@ func TestLiveTdarrConnection(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	// 1. Check Server Status
 	status, err := client.Status(ctx)
 	if err != nil {
 		t.Fatalf("failed to connect to live Tdarr at %s: %v", baseURL, err)
 	}
+
 	if status.Status != "good" {
 		t.Errorf("expected status 'good', got %q", status.Status)
 	}
 	t.Logf("server connected: version=%s, os=%s, uptime=%ds", status.Version, status.OS, status.Uptime)
 
+	// 2. Check Connected Nodes
 	nodes, err := client.Nodes(ctx)
 	if err != nil {
 		t.Fatalf("failed to query live nodes: %v", err)
 	}
+
 	if len(nodes) == 0 {
 		t.Fatalf("no nodes connected to live Tdarr server at %s", baseURL)
 	}
@@ -93,14 +97,17 @@ func TestLiveTdarrFullTranscodeCycle(t *testing.T) {
 	if baseURL == "" {
 		baseURL = "http://192.168.70.71:8265"
 	}
+
 	libraryID := os.Getenv("TDARR_LIVE_LIBRARY_ID")
 	if libraryID == "" {
 		t.Skip("TDARR_LIVE_LIBRARY_ID is required for full transcode cycle test to avoid using productive libraries. Configure a dedicated test library in Tdarr and pass TDARR_LIVE_LIBRARY_ID=<id>.")
 	}
+
 	testDir := os.Getenv("TDARR_LIVE_TEST_DIR")
 	if testDir == "" {
 		t.Skip("TDARR_LIVE_TEST_DIR is required for full transcode cycle test (must be a local directory mapped to the test library).")
 	}
+
 	localRoot := os.Getenv("TDARR_LIVE_LOCAL_ROOT")
 	if localRoot == "" {
 		localRoot = "/Volumes/media"
@@ -110,15 +117,21 @@ func TestLiveTdarrFullTranscodeCycle(t *testing.T) {
 		serverRoot = "/media"
 	}
 
-	client := tdarr.NewClient(tdarr.ClientOptions{BaseURL: baseURL, Timeout: 10 * time.Second})
+	client := tdarr.NewClient(tdarr.ClientOptions{
+		BaseURL: baseURL,
+		Timeout: 10 * time.Second,
+	})
+
 	ctx := context.Background()
 
+	// 1. Verify server connected
 	status, err := client.Status(ctx)
 	if err != nil {
 		t.Fatalf("failed to connect to Tdarr server at %s: %v", baseURL, err)
 	}
 	t.Logf("server connected: version=%s, os=%s, uptime=%ds", status.Version, status.OS, status.Uptime)
 
+	// 2. Verify M1 Max node is connected
 	nodes, err := client.Nodes(ctx)
 	if err != nil {
 		t.Fatalf("failed to query nodes: %v", err)
@@ -135,6 +148,7 @@ func TestLiveTdarrFullTranscodeCycle(t *testing.T) {
 		t.Logf("Warning: M1 Max node not detected among active nodes; transcode may run on other nodes")
 	}
 
+	// 3. Validate library configuration via Tdarr API
 	libSettings, err := client.GetLibrary(ctx, libraryID)
 	if err != nil {
 		t.Fatalf("failed to validate library %q in Tdarr: %v", libraryID, err)
@@ -150,6 +164,7 @@ func TestLiveTdarrFullTranscodeCycle(t *testing.T) {
 	}
 	t.Logf("library validated: id=%s, name=%s, outputFolder=%s, candidate_mode=true", libSettings.ID, libSettings.Name, libSettings.OutputFolder)
 
+	// 4. Generate synthetic test file via ffmpeg (2s SMPTE color bars + 1000Hz sine tone)
 	ffmpegBin, err := exec.LookPath("ffmpeg")
 	if err != nil {
 		ffmpegBin = "/opt/homebrew/bin/ffmpeg"
@@ -172,6 +187,7 @@ func TestLiveTdarrFullTranscodeCycle(t *testing.T) {
 	}
 	t.Logf("synthetic file generated: %s", syntheticFile)
 
+	// Compute original checksum BEFORE transcode
 	fOrig, err := os.Open(syntheticFile)
 	if err != nil {
 		t.Fatalf("failed reading synthetic file: %v", err)
@@ -182,6 +198,7 @@ func TestLiveTdarrFullTranscodeCycle(t *testing.T) {
 	origSHA := hex.EncodeToString(hOrig.Sum(nil))
 	t.Logf("original SHA256 before: %s", origSHA)
 
+	// 5. Setup Action Engine
 	dbPath := filepath.Join(t.TempDir(), "live_action.db")
 	st, err := store.Open(dbPath)
 	if err != nil {
@@ -189,29 +206,48 @@ func TestLiveTdarrFullTranscodeCycle(t *testing.T) {
 	}
 	defer st.Close()
 
+	// Compute expected local output folder from Tdarr library settings
 	expectedLocalOutputFolder := libSettings.OutputFolder
 	if strings.HasPrefix(filepath.ToSlash(libSettings.OutputFolder), filepath.ToSlash(serverRoot)) {
 		rel := strings.TrimPrefix(filepath.ToSlash(libSettings.OutputFolder), filepath.ToSlash(serverRoot))
 		expectedLocalOutputFolder = filepath.Join(localRoot, rel)
 	}
+
 	allowedReadRoots := []string{testDir, localRoot, expectedLocalOutputFolder}
 	allowedWriteRoots := []string{testDir, localRoot, expectedLocalOutputFolder}
+
 	resResolver, err := fsop.NewResolver(allowedReadRoots, allowedWriteRoots)
 	if err != nil {
 		t.Fatalf("resolver error: %v", err)
 	}
 
 	cfg := &config.Config{
-		Media: config.MediaConfig{AllowedReadRoots: allowedReadRoots, AllowedWriteRoots: allowedWriteRoots},
+		Media: config.MediaConfig{
+			AllowedReadRoots:  allowedReadRoots,
+			AllowedWriteRoots: allowedWriteRoots,
+		},
 		Tdarr: config.TdarrConfig{
 			Enabled: true,
-			PathMappings: []config.PathMapping{{Local: localRoot, Server: serverRoot}},
+			PathMappings: []config.PathMapping{
+				{
+					Local:  localRoot,
+					Server: serverRoot,
+				},
+			},
 			Libraries: map[string]config.TdarrLibraryConfig{
-				"default": {ID: libraryID, Name: libSettings.Name, OutputFolder: libSettings.OutputFolder},
+				"default": {
+					ID:           libraryID,
+					Name:         libSettings.Name,
+					OutputFolder: libSettings.OutputFolder,
+				},
 			},
 		},
 	}
 
+	// Verify path translation before submit:
+	// 1) TranslateLocalToServer(syntheticFile) != syntheticFile
+	// 2) Translated server path must start with server root
+	// 3) Translated server path must NOT start with or contain /Volumes/
 	serverPath := cfg.Tdarr.TranslateLocalToServer(syntheticFile)
 	if serverPath == syntheticFile {
 		t.Fatalf("local path %q was not translated to server path! Ensure TDARR_LIVE_TEST_DIR (%s) is within TDARR_LIVE_LOCAL_ROOT (%s)", syntheticFile, testDir, localRoot)
@@ -231,6 +267,7 @@ func TestLiveTdarrFullTranscodeCycle(t *testing.T) {
 	defer func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+
 		cancelledActive := false
 		if submitted && !terminal {
 			if cleanupNodes, err := client.Nodes(cleanupCtx); err == nil {
@@ -240,8 +277,9 @@ func TestLiveTdarrFullTranscodeCycle(t *testing.T) {
 							continue
 						}
 						if err := client.Cancel(cleanupCtx, tdarr.CancelRequest{
-							NodeID: nodeID, WorkerID: workerID,
-							Cause: "Navigatorr isolated live-test cleanup",
+							NodeID:   nodeID,
+							WorkerID: workerID,
+							Cause:    "Navigatorr isolated live-test cleanup",
 						}); err != nil {
 							t.Logf("live-test cleanup warning: failed cancelling active Tdarr worker %s/%s: %v", nodeID, workerID, err)
 						} else {
@@ -264,8 +302,18 @@ func TestLiveTdarrFullTranscodeCycle(t *testing.T) {
 		}
 	}()
 
-	engine := action.NewEngine(action.EngineDeps{Store: st, Config: cfg, Fs: resResolver, Ffprobe: ffprobeBin, Tdarr: client})
-	runRes, err := engine.Run(ctx, "transcode_media", map[string]any{"path": syntheticFile})
+	engine := action.NewEngine(action.EngineDeps{
+		Store:   st,
+		Config:  cfg,
+		Fs:      resResolver,
+		Ffprobe: ffprobeBin,
+		Tdarr:   client,
+	})
+
+	// 6. Submit via Action Engine Run()
+	runRes, err := engine.Run(ctx, "transcode_media", map[string]any{
+		"path": syntheticFile,
+	})
 	if err != nil {
 		t.Fatalf("engine.Run failed: %v", err)
 	}
@@ -276,6 +324,7 @@ func TestLiveTdarrFullTranscodeCycle(t *testing.T) {
 	ref := runRes.Outputs["external_reference"].(string)
 	t.Logf("synthetic file submitted: id=%s, status=%s, ref=%s", runRes.ID, runRes.Status, ref)
 
+	// 7. Wait/Poll for Tdarr execution (max 90s, check every 3s)
 	timeout := 90 * time.Second
 	deadline := time.Now().Add(timeout)
 	var observedQueuedRunning bool
@@ -308,10 +357,12 @@ func TestLiveTdarrFullTranscodeCycle(t *testing.T) {
 		}
 		time.Sleep(3 * time.Second)
 	}
+
 	if completedStatus == nil {
 		t.Fatalf("timed out waiting for transcode to complete in Tdarr after %v", timeout)
 	}
 
+	// 8. Resume Action to run validation and acceptance
 	resumeRes, err := engine.Resume(ctx, runRes.ID, "", nil)
 	if err != nil {
 		t.Fatalf("engine.Resume failed: %v", err)
@@ -321,6 +372,7 @@ func TestLiveTdarrFullTranscodeCycle(t *testing.T) {
 	}
 	t.Logf("Action completed: id=%s", resumeRes.ID)
 
+	// 9. Verify candidate path exists and is distinct
 	candidatePath, _ := resumeRes.Outputs["candidate_path"].(string)
 	if candidatePath == "" {
 		candidatePath, _ = resumeRes.Outputs["output_path"].(string)
@@ -330,6 +382,7 @@ func TestLiveTdarrFullTranscodeCycle(t *testing.T) {
 	}
 	t.Logf("candidate path found: %s", candidatePath)
 
+	// Verify candidate server path translation matches candidatePath
 	serverOut, _ := resumeRes.Outputs["server_output_path"].(string)
 	if serverOut == "" && completedStatus != nil {
 		serverOut = completedStatus.OutputPath
@@ -341,9 +394,11 @@ func TestLiveTdarrFullTranscodeCycle(t *testing.T) {
 		}
 		t.Logf("Candidate server path translated successfully: server %s -> local %s", serverOut, expectedLocal)
 	}
+
 	if filepath.Clean(candidatePath) == filepath.Clean(syntheticFile) {
 		t.Fatalf("CRITICAL: candidate path is identical to original source file!")
 	}
+
 	candFi, err := os.Stat(candidatePath)
 	if err != nil {
 		t.Fatalf("candidate file not found on disk at %s: %v", candidatePath, err)
@@ -353,6 +408,7 @@ func TestLiveTdarrFullTranscodeCycle(t *testing.T) {
 	}
 	defer os.Remove(candidatePath)
 
+	// 10. Probe candidate with ffprobe
 	probeCmd := exec.Command(ffprobeBin, "-v", "error", "-show_entries", "stream=codec_type,codec_name", "-of", "json", candidatePath)
 	probeOut, err := probeCmd.CombinedOutput()
 	if err != nil {
@@ -360,6 +416,7 @@ func TestLiveTdarrFullTranscodeCycle(t *testing.T) {
 	}
 	t.Logf("candidate ffprobe PASS: valid video/audio streams verified")
 
+	// 11. Verify original file SHA256 after completion
 	fAfter, err := os.Open(syntheticFile)
 	if err != nil {
 		t.Fatalf("original file missing after transcode completion: %v", err)
@@ -368,11 +425,13 @@ func TestLiveTdarrFullTranscodeCycle(t *testing.T) {
 	_, _ = io.Copy(hAfter, fAfter)
 	fAfter.Close()
 	afterSHA := hex.EncodeToString(hAfter.Sum(nil))
+
 	if afterSHA != origSHA {
 		t.Fatalf("CRITICAL: Original file was modified during transcode! before=%s, after=%s", origSHA, afterSHA)
 	}
 	t.Logf("original SHA before == SHA after completion: %s == %s", origSHA, afterSHA)
 
+	// 12. Verify no duplicate submit
 	secondResume, err := engine.Resume(ctx, runRes.ID, "", nil)
 	if err != nil {
 		t.Fatalf("second resume failed: %v", err)
