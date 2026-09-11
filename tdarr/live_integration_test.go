@@ -164,7 +164,10 @@ func TestLiveTdarrFullTranscodeCycle(t *testing.T) {
 	}
 	t.Logf("library validated: id=%s, name=%s, outputFolder=%s, candidate_mode=true", libSettings.ID, libSettings.Name, libSettings.OutputFolder)
 
-	// 4. Generate synthetic test file via ffmpeg (2s SMPTE color bars + 1000Hz sine tone)
+	// 4. Generate synthetic test file via ffmpeg (2s SMPTE color bars + 1000Hz sine tone).
+	// Use MP4 input because Tdarr's current scanner reliably exposes stream duration
+	// metadata for MP4; the classic VideoToolbox plugin requires that duration when
+	// calculating its target bitrate. The candidate output remains MKV.
 	ffmpegBin, err := exec.LookPath("ffmpeg")
 	if err != nil {
 		ffmpegBin = "/opt/homebrew/bin/ffmpeg"
@@ -174,7 +177,7 @@ func TestLiveTdarrFullTranscodeCycle(t *testing.T) {
 		ffprobeBin = "/opt/homebrew/bin/ffprobe"
 	}
 
-	syntheticFile := filepath.Join(testDir, fmt.Sprintf("nav_live_synth_%d.mkv", time.Now().Unix()))
+	syntheticFile := filepath.Join(testDir, fmt.Sprintf("nav_live_synth_%d.mp4", time.Now().Unix()))
 	cmd := exec.Command(ffmpegBin,
 		"-f", "lavfi", "-i", "testsrc=duration=2:size=320x240:rate=24",
 		"-f", "lavfi", "-i", "sine=frequency=1000:duration=2",
