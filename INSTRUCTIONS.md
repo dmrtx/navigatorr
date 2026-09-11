@@ -374,13 +374,15 @@ LLM approach:
        - Validates audio streams (Japanese audio retained)
        - Validates subtitle streams (ASS/SSA tracks and styling preserved)
        - Confirms font attachments and chapters preserved
-     → If validation passes and replace_original is false, finishes successfully.
-     → If validation detects any discrepancy, pauses in waiting_decision
-       with options ["approve", "reject"] for user decision.
+      → If validation passes, finishes successfully in candidate mode (original file preserved and verified via SHA-256).
+      → If validation detects any discrepancy, pauses in waiting_decision
+        with options ["accept_loss", "reject"] for user decision.
 
-  4. If user approves discrepancy:
-     action_resume → id: "act-transcode-media-...", decision: "approve"
-     → Completes workflow
+   4. If user accepts discrepancy or rejects:
+      action_resume → id: "act-transcode-media-...", decision: "accept_loss"
+      → Accepts discrepancy, records loss_accepted: true, and completes workflow.
+      action_resume → id: "act-transcode-media-...", decision: "reject"
+      → Marks workflow failed; original media file remains completely untouched.
 ```
 
 ---
@@ -463,9 +465,14 @@ tdarr:
   url: "http://192.168.70.71:8265"
   api_key: ""
   timeout: "15s"
-  flows:
-    anime_hevc: "flow-apple-silicon-hevc"
-    standard_hevc: "flow-standard-hevc"
+  libraries:
+    anime_hevc:
+      id: "2jLSMhxug"             # Exact Tdarr library dbID (configured in Tdarr with your desired Flow)
+      name: "Anime HEVC"
+      output_folder: "/Volumes/media/transcodes"
+    standard_hevc:
+      id: "9kLMjxY7a"
+      name: "TV Standard HEVC"
   path_mappings:
     - local: "/Volumes/media"
       server: "/media"

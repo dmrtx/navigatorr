@@ -2,9 +2,13 @@ package action
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/jakenesler/navigatorr/mediainspect"
@@ -15,19 +19,19 @@ func (e *Engine) registerTranscodeTemplate() {
 	e.RegisterTemplate(ActionTemplate{
 		Name:           "transcode_media",
 		Version:        1,
-		Description:    "Coordinates safe media transcoding with Tdarr: inspects media streams, submits job to Tdarr, waits asynchronously via waiting_external, validates output with ffprobe (preserving audio, subtitles, fonts, chapters), and protects original media.",
+		Description:    "Coordinates safe media transcoding with Tdarr: inspects media streams, submits job to designated Tdarr library, waits asynchronously via waiting_external, validates candidate output with ffprobe (preserving audio, subtitles, fonts, chapters), and guarantees the original media remains physically untouched.",
 		RequiredInputs: []string{"path"},
-		OptionalInputs: []string{"profile", "replace_original", "expected_video_codec", "max_size_increase_percent", "library_id"},
+		OptionalInputs: []string{"profile", "replace_original", "expected_video_codec", "max_size_increase_percent"},
 		Destructive:    false,
 		Steps: []StepDefinition{
 			{
 				Name:        "preflight",
-				Description: "Verifies file safety within allowed roots and captures baseline media streams and duration snapshot with ffprobe",
+				Description: "Verifies file safety within allowed roots, captures baseline media streams with ffprobe, and computes original SHA-256 checksum for physical immutability verification",
 				Run:         e.stepTranscodePreflight,
 			},
 			{
 				Name:        "submit_tdarr",
-				Description: "Translates path to Tdarr server path and idempotently submits transcode job to Tdarr",
+				Description: "Resolves configured Tdarr library for the profile, translates path to Tdarr server schema, and idempotently submits transcode job to Tdarr",
 				Run:         e.stepTranscodeSubmit,
 			},
 			{
@@ -37,20 +41,28 @@ func (e *Engine) registerTranscodeTemplate() {
 			},
 			{
 				Name:        "validate_result",
-				Description: "Runs ffprobe on the transcoded output, validating container, duration, video, audio tracks, subtitles, attachments, and chapters",
+				Description: "Runs ffprobe on the candidate output, validating container, duration, video, audio tracks, subtitles, attachments, and chapters; handles waiting_decision without looping",
 				Run:         e.stepTranscodeValidate,
 			},
 			{
 				Name:        "accept_result",
-				Description: "Finalizes transcode report and safely replaces original only if explicitly requested and approved",
+				Description: "Finalizes candidate output report and verifies original file has remained physically and cryptographically intact",
 				Run:         e.stepTranscodeAccept,
 			},
 		},
 	})
 }
 
-// stepTranscodePreflight checks path security and collects baseline ffprobe metadata.
+// stepTranscodePreflight checks path security, ensures non-destructive mode, and captures baseline ffprobe metadata and SHA-256.
 func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+	// Destructive replacement is not supported in this version to guarantee zero data loss
+	if getBool(ec.Inputs, "replace_original") {
+		return StepResult{
+			Status: StepFailed,
+			Error:  "destructive replacement (replace_original: true) is not supported in this version to guarantee that original files are never destroyed; transcoding runs in non-destructive candidate mode",
+		}, nil
+	}
+
 	rawPath := strings.TrimSpace(getString(ec.Inputs, "path"))
 	if rawPath == "" {
 		return StepResult{Status: StepFailed, Error: "input 'path' is required"}, nil
@@ -82,6 +94,25 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		}, nil
 	}
 
+	// Compute original file SHA-256 hash for strict immutability verification
+	f, err := os.Open(cleanPath)
+	if err != nil {
+		return StepResult{
+			Status: StepFailed,
+			Error:  fmt.Sprintf("failed to open original file %s: %v", cleanPath, err),
+		}, nil
+	}
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, f); err != nil {
+		f.Close()
+		return StepResult{
+			Status: StepFailed,
+			Error:  fmt.Sprintf("failed to compute hash of original file %s: %v", cleanPath, err),
+		}, nil
+	}
+	f.Close()
+	origSHA := hex.EncodeToString(hasher.Sum(nil))
+
 	detailedRep, err := mediainspect.InspectDetailed(ctx, e.deps.Ffprobe, cleanPath)
 	if err != nil {
 		return StepResult{
@@ -93,6 +124,7 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	origMap := map[string]any{
 		"path":         cleanPath,
 		"size_bytes":   fi.Size(),
+		"sha256":       origSHA,
 		"duration_sec": detailedRep.DurationSec,
 		"container":    detailedRep.Container,
 		"video":        detailedRep.Video,
@@ -125,32 +157,36 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	origMap["subtitle_languages"] = subLangs
 
 	ec.State["resolved_path"] = cleanPath
+	ec.State["original_sha256"] = origSHA
+	ec.State["original_size"] = fi.Size()
 	ec.State["original"] = origMap
 
 	return StepResult{
 		Status: StepCompleted,
 		Outputs: map[string]any{
-			"original":      origMap,
-			"resolved_path": cleanPath,
+			"original":        origMap,
+			"original_sha256": origSHA,
+			"resolved_path":   cleanPath,
 		},
 	}, nil
 }
 
-// stepTranscodeSubmit translates the path and idempotently submits the job to Tdarr.
+// stepTranscodeSubmit resolves the Tdarr library for the requested profile, translates the path, and idempotently submits to Tdarr.
 func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
 	// Idempotency: if already submitted, skip duplicate submission
-	if getBool(ec.State, "tdarr_submitted") || getString(ec.State, "tdarr_job_id") != "" {
+	if getBool(ec.State, "tdarr_submitted") {
 		return StepResult{
 			Status: StepCompleted,
 			Outputs: map[string]any{
-				"tdarr_job_id":      getString(ec.State, "tdarr_job_id"),
-				"tdarr_server_path": getString(ec.State, "tdarr_server_path"),
-				"reused":            true,
+				"external_reference": getString(ec.State, "external_reference"),
+				"tdarr_server_path":  getString(ec.State, "tdarr_server_path"),
+				"tdarr_library_id":   getString(ec.State, "tdarr_library_id"),
+				"reused":             true,
 			},
 		}, nil
 	}
 
-	if e.deps.Tdarr == nil {
+	if e.deps.Tdarr == nil || e.deps.Config == nil || !e.deps.Config.Tdarr.Enabled {
 		return StepResult{
 			Status: StepFailed,
 			Error:  "Tdarr integration is disabled or not configured in navigatorr",
@@ -162,26 +198,21 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 		cleanPath = getString(ec.Inputs, "path")
 	}
 
-	serverPath := cleanPath
-	if e.deps.Config != nil {
-		serverPath = e.deps.Config.Tdarr.TranslateLocalToServer(cleanPath)
-	}
-
+	// Resolve configured library mapping for the profile
 	profile := strings.TrimSpace(getString(ec.Inputs, "profile"))
-	if profile == "" {
-		profile = "hevc_safe"
-	}
-	if e.deps.Config != nil && e.deps.Config.Tdarr.Flows != nil {
-		if flowID, ok := e.deps.Config.Tdarr.Flows[profile]; ok && flowID != "" {
-			profile = flowID
-		}
+	libConfig, err := e.deps.Config.Tdarr.ResolveLibrary(profile)
+	if err != nil {
+		return StepResult{
+			Status: StepFailed,
+			Error:  fmt.Sprintf("failed to resolve Tdarr library for profile %q: %v", profile, err),
+		}, nil
 	}
 
-	libraryID := strings.TrimSpace(getString(ec.Inputs, "library_id"))
+	serverPath := e.deps.Config.Tdarr.TranslateLocalToServer(cleanPath)
 
 	resp, err := e.deps.Tdarr.Submit(ctx, tdarr.SubmitRequest{
 		FilePath:  serverPath,
-		LibraryID: libraryID,
+		LibraryID: libConfig.ID,
 		Profile:   profile,
 	})
 	if err != nil {
@@ -193,34 +224,42 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 
 	ref := resp.Reference
 	if ref == "" {
-		ref = serverPath
+		ref = resp.ExternalRef.String()
 	}
 
 	ec.State["tdarr_submitted"] = true
-	ec.State["tdarr_job_id"] = ref
+	ec.State["external_reference"] = ref
+	ec.State["tdarr_library_id"] = libConfig.ID
+	ec.State["tdarr_library_name"] = libConfig.Name
+	ec.State["tdarr_library_flow"] = libConfig.Flow
+	ec.State["tdarr_output_folder"] = libConfig.OutputFolder
 	ec.State["tdarr_server_path"] = serverPath
 	ec.State["tdarr_profile"] = profile
 
 	return StepResult{
 		Status: StepCompleted,
 		Outputs: map[string]any{
-			"tdarr_job_id":      ref,
-			"tdarr_server_path": serverPath,
-			"tdarr_profile":     profile,
+			"external_reference": ref,
+			"tdarr_server_path":  serverPath,
+			"tdarr_library_id":   libConfig.ID,
+			"tdarr_profile":      profile,
 		},
 	}, nil
 }
 
 // stepTranscodeWait monitors Tdarr progress and enters waiting_external while running.
 func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
-	ref := getString(ec.State, "tdarr_job_id")
+	ref := getString(ec.State, "external_reference")
+	if ref == "" {
+		ref = getString(ec.State, "tdarr_job_id")
+	}
 	if ref == "" {
 		ref = getString(ec.State, "tdarr_server_path")
 	}
 	if ref == "" {
 		return StepResult{
 			Status: StepFailed,
-			Error:  "no active Tdarr job ID or file path to monitor",
+			Error:  "no active Tdarr external reference or server path to monitor",
 		}, nil
 	}
 
@@ -243,6 +282,9 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 
 	switch st.Status {
 	case "running", "queued":
+		if st.JobId != "" {
+			ec.State["tdarr_job_id"] = st.JobId
+		}
 		return StepResult{
 			Status:           StepWaitingExternal,
 			WaitingCondition: "tdarr_transcode_complete",
@@ -253,6 +295,7 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 				"eta":            st.ETA,
 				"fps":            st.FPS,
 				"worker_details": st.Details,
+				"job_id":         st.JobId,
 			},
 		}, nil
 
@@ -270,9 +313,18 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 		}, nil
 
 	case "completed":
+		if st.JobId != "" {
+			ec.State["tdarr_job_id"] = st.JobId
+		}
+
 		serverOutput := st.OutputPath
 		if serverOutput == "" {
-			serverOutput = getString(ec.State, "tdarr_server_path")
+			// If library has dedicated output folder, candidate lands there
+			if outFolder := getString(ec.State, "tdarr_output_folder"); outFolder != "" {
+				serverOutput = filepath.ToSlash(filepath.Join(outFolder, filepath.Base(getString(ec.State, "tdarr_server_path"))))
+			} else {
+				serverOutput = getString(ec.State, "tdarr_server_path")
+			}
 		}
 
 		localOutput := serverOutput
@@ -280,6 +332,8 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 			localOutput = e.deps.Config.Tdarr.TranslateServerToLocal(serverOutput)
 		}
 
+		ec.State["candidate_path"] = localOutput
+		ec.State["output_path"] = localOutput
 		ec.State["tdarr_output_path"] = localOutput
 		ec.State["tdarr_server_output_path"] = serverOutput
 
@@ -287,6 +341,7 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 			Status: StepCompleted,
 			Outputs: map[string]any{
 				"tdarr_done":         true,
+				"candidate_path":     localOutput,
 				"output_path":        localOutput,
 				"server_output_path": serverOutput,
 			},
@@ -302,11 +357,34 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 	}
 }
 
-// stepTranscodeValidate checks output file integrity and compares streams against original baseline.
+// stepTranscodeValidate checks candidate output file integrity and compares streams against original baseline.
 func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
-	outputPath := getString(ec.State, "tdarr_output_path")
+	// First check if the action was resumed with a user decision to avoid infinite loops
+	if ec.Decision != "" {
+		if strings.EqualFold(ec.Decision, "reject") || strings.EqualFold(ec.Decision, "cancel") {
+			return StepResult{
+				Status: StepFailed,
+				Error:  "transcode candidate rejected by user decision; original file remains untouched",
+			}, nil
+		}
+		if strings.EqualFold(ec.Decision, "accept_loss") || strings.EqualFold(ec.Decision, "approve") {
+			ec.State["validation_decision_applied"] = ec.Decision
+			return StepResult{
+				Status: StepCompleted,
+				Outputs: map[string]any{
+					"decision_applied": ec.Decision,
+					"note":             "validation discrepancy accepted by user decision",
+				},
+			}, nil
+		}
+	}
+
+	outputPath := getString(ec.State, "candidate_path")
 	if outputPath == "" {
-		outputPath = getString(ec.Outputs, "output_path")
+		outputPath = getString(ec.State, "output_path")
+	}
+	if outputPath == "" {
+		outputPath = getString(ec.State, "tdarr_output_path")
 	}
 	if outputPath == "" {
 		outputPath = getString(ec.State, "resolved_path")
@@ -316,7 +394,7 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 	if err != nil || fi.Size() == 0 {
 		return StepResult{
 			Status: StepFailed,
-			Error:  fmt.Sprintf("transcoded output file %q not accessible or has 0 bytes: %v", outputPath, err),
+			Error:  fmt.Sprintf("transcoded candidate file %q not accessible or has 0 bytes: %v", outputPath, err),
 		}, nil
 	}
 
@@ -324,7 +402,7 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 	if err != nil {
 		return StepResult{
 			Status: StepFailed,
-			Error:  fmt.Sprintf("ffprobe failed to inspect transcoded file %q: %v", outputPath, err),
+			Error:  fmt.Sprintf("ffprobe failed to inspect candidate file %q: %v", outputPath, err),
 		}, nil
 	}
 
@@ -339,8 +417,8 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 				Status:        StepWaitingDecision,
 				WaitingReason: fmt.Sprintf("Duration discrepancy: original was %.1fs, output is %.1fs (difference: %.1fs)", origDur, outRep.DurationSec, durDiff),
 				WaitingOptions: []WaitingOption{
-					{Decision: "reject", Description: "Reject transcode due to duration difference (keep original)"},
-					{Decision: "accept_loss", Description: "Accept transcode despite duration difference"},
+					{Decision: "reject", Description: "Reject transcode candidate due to duration difference (keep original)"},
+					{Decision: "accept_loss", Description: "Accept transcode candidate despite duration difference"},
 				},
 			}, nil
 		}
@@ -350,7 +428,7 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 	if len(outRep.Video) == 0 {
 		return StepResult{
 			Status: StepFailed,
-			Error:  "transcoded output contains no video streams",
+			Error:  "transcoded candidate contains no video streams",
 		}, nil
 	}
 	expectedCodec := strings.ToLower(strings.TrimSpace(getString(ec.Inputs, "expected_video_codec")))
@@ -361,8 +439,8 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 				Status:        StepWaitingDecision,
 				WaitingReason: fmt.Sprintf("Video codec mismatch: expected %s, transcoded output is %s", expectedCodec, outCodec),
 				WaitingOptions: []WaitingOption{
-					{Decision: "reject", Description: "Reject transcode due to unexpected video codec (keep original)"},
-					{Decision: "accept_loss", Description: "Accept transcode with current codec"},
+					{Decision: "reject", Description: "Reject transcode candidate due to unexpected video codec (keep original)"},
+					{Decision: "accept_loss", Description: "Accept transcode candidate with current codec"},
 				},
 			}, nil
 		}
@@ -384,8 +462,8 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 					Status:        StepWaitingDecision,
 					WaitingReason: fmt.Sprintf("Audio stream lost: original had audio language %q which is missing in transcoded output", origA.Language),
 					WaitingOptions: []WaitingOption{
-						{Decision: "reject", Description: "Reject transcode to prevent audio track loss (keep original)"},
-						{Decision: "accept_loss", Description: "Accept transcode without the missing audio track"},
+						{Decision: "reject", Description: "Reject transcode candidate to prevent audio track loss (keep original)"},
+						{Decision: "accept_loss", Description: "Accept transcode candidate without the missing audio track"},
 					},
 				}, nil
 			}
@@ -416,8 +494,8 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 					Status:        StepWaitingDecision,
 					WaitingReason: fmt.Sprintf("Subtitle stream lost: original had subtitle language %q which is missing in transcoded output", origS.Language),
 					WaitingOptions: []WaitingOption{
-						{Decision: "reject", Description: "Reject transcode to prevent subtitle loss (keep original)"},
-						{Decision: "accept_loss", Description: "Accept transcode without the missing subtitle track"},
+						{Decision: "reject", Description: "Reject transcode candidate to prevent subtitle loss (keep original)"},
+						{Decision: "accept_loss", Description: "Accept transcode candidate without the missing subtitle track"},
 					},
 				}, nil
 			}
@@ -428,8 +506,8 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 			Status:        StepWaitingDecision,
 			WaitingReason: "ASS/SSA stylized subtitles lost in transcode: original had ASS/SSA subtitle streams",
 			WaitingOptions: []WaitingOption{
-				{Decision: "reject", Description: "Reject transcode to preserve stylized ASS/SSA subtitles (keep original)"},
-				{Decision: "accept_loss", Description: "Accept transcode without ASS/SSA subtitles"},
+				{Decision: "reject", Description: "Reject transcode candidate to preserve stylized ASS/SSA subtitles (keep original)"},
+				{Decision: "accept_loss", Description: "Accept transcode candidate without ASS/SSA subtitles"},
 			},
 		}, nil
 	}
@@ -441,8 +519,8 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 			Status:        StepWaitingDecision,
 			WaitingReason: fmt.Sprintf("Font attachments lost: original file contained %d attachments (e.g. anime fonts)", len(origAttachments)),
 			WaitingOptions: []WaitingOption{
-				{Decision: "reject", Description: "Reject transcode to preserve font attachments (keep original)"},
-				{Decision: "accept_loss", Description: "Accept transcode without font attachments"},
+				{Decision: "reject", Description: "Reject transcode candidate to preserve font attachments (keep original)"},
+				{Decision: "accept_loss", Description: "Accept transcode candidate without font attachments"},
 			},
 		}, nil
 	}
@@ -454,8 +532,8 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 			Status:        StepWaitingDecision,
 			WaitingReason: fmt.Sprintf("Chapters lost: original file had %d chapters, transcoded output has 0", origChapters),
 			WaitingOptions: []WaitingOption{
-				{Decision: "reject", Description: "Reject transcode to preserve chapters (keep original)"},
-				{Decision: "accept_loss", Description: "Accept transcode without chapters"},
+				{Decision: "reject", Description: "Reject transcode candidate to preserve chapters (keep original)"},
+				{Decision: "accept_loss", Description: "Accept transcode candidate without chapters"},
 			},
 		}, nil
 	}
@@ -486,11 +564,12 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 	}
 
 	resultMap := map[string]any{
-		"path":         outputPath,
-		"size_bytes":   outputSize,
-		"duration_sec": outRep.DurationSec,
-		"video_codec":  videoCodec,
-		"resolution":   resolution,
+		"candidate_path": outputPath,
+		"output_path":    outputPath,
+		"size_bytes":     outputSize,
+		"duration_sec":   outRep.DurationSec,
+		"video_codec":    videoCodec,
+		"resolution":     resolution,
 	}
 
 	ec.State["validation"] = valSummary
@@ -503,83 +582,66 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 		Outputs: map[string]any{
 			"result":             resultMap,
 			"validation":         valSummary,
+			"candidate_path":     outputPath,
+			"output_path":        outputPath,
 			"size_saved_bytes":   savedBytes,
 			"size_saved_percent": savedPercent,
 		},
 	}, nil
 }
 
-// stepTranscodeAccept completes the transcode and conditionally handles destructive replacement safely.
+// stepTranscodeAccept completes the transcode and verifies the original file's physical immutability.
 func (e *Engine) stepTranscodeAccept(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
-	if ec.Decision == "reject" {
+	if strings.EqualFold(ec.Decision, "reject") {
 		return StepResult{
 			Status: StepFailed,
-			Error:  "transcode rejected during validation decision; original file remains untouched",
-		}, nil
-	}
-
-	replaceOriginal := getBool(ec.Inputs, "replace_original")
-	if !replaceOriginal {
-		return StepResult{
-			Status: StepCompleted,
-			Outputs: map[string]any{
-				"replace_original": false,
-				"message":          "Transcode completed and validated. Original file preserved untouched.",
-			},
-		}, nil
-	}
-
-	// replace_original is true: check central safety gate
-	if !e.AllowDestructive() {
-		return StepResult{
-			Status:        StepWaitingDecision,
-			WaitingReason: "Destructive replacement was requested (replace_original: true), but allow_destructive is disabled. Original file is intact.",
-			WaitingOptions: []WaitingOption{
-				{Decision: "keep_both", Description: "Keep both original and transcoded files without replacing original"},
-			},
+			Error:  "transcode candidate rejected by user decision; original file remains untouched",
 		}, nil
 	}
 
 	origPath := getString(ec.State, "resolved_path")
-	outputPath := getString(ec.State, "output_path")
-	if origPath == "" || outputPath == "" || origPath == outputPath {
-		return StepResult{
-			Status: StepCompleted,
-			Outputs: map[string]any{
-				"replace_original": true,
-				"message":          "Output already in destination path.",
-			},
-		}, nil
+	candidatePath := getString(ec.State, "candidate_path")
+	if candidatePath == "" {
+		candidatePath = getString(ec.State, "output_path")
 	}
 
-	// Safe atomic replacement:
-	// 1. Rename origPath to backupPath
-	// 2. Rename outputPath to origPath
-	// 3. If rename fails: rollback immediately
-	// 4. Remove backupPath
-	backupPath := origPath + ".tdarr.orig.bak"
-	if err := os.Rename(origPath, backupPath); err != nil {
-		return StepResult{
-			Status: StepFailed,
-			Error:  fmt.Sprintf("safe replace failed creating backup: %v", err),
-		}, nil
+	// Verify original file physical and cryptographic integrity: must still exist and match initial sha256
+	origSHA := getString(ec.State, "original_sha256")
+	if origPath != "" && origSHA != "" {
+		f, err := os.Open(origPath)
+		if err != nil {
+			return StepResult{
+				Status: StepFailed,
+				Error:  fmt.Sprintf("integrity violation: original media %s is no longer accessible: %v", origPath, err),
+			}, nil
+		}
+		hasher := sha256.New()
+		_, err = io.Copy(hasher, f)
+		f.Close()
+		if err != nil {
+			return StepResult{
+				Status: StepFailed,
+				Error:  fmt.Sprintf("integrity violation: unable to hash original media %s: %v", origPath, err),
+			}, nil
+		}
+		currentSHA := hex.EncodeToString(hasher.Sum(nil))
+		if currentSHA != origSHA {
+			return StepResult{
+				Status: StepFailed,
+				Error:  fmt.Sprintf("integrity violation: original file %s was modified (expected sha256 %s, got %s)", origPath, origSHA, currentSHA),
+			}, nil
+		}
 	}
-
-	if err := os.Rename(outputPath, origPath); err != nil {
-		_ = os.Rename(backupPath, origPath) // Rollback
-		return StepResult{
-			Status: StepFailed,
-			Error:  fmt.Sprintf("safe replace failed moving output into place (original restored): %v", err),
-		}, nil
-	}
-
-	_ = os.Remove(backupPath)
 
 	return StepResult{
 		Status: StepCompleted,
 		Outputs: map[string]any{
-			"replace_original": true,
-			"message":          "Transcode completed, validated, and original file replaced safely.",
+			"candidate_path":   candidatePath,
+			"output_path":      candidatePath,
+			"original_path":    origPath,
+			"original_intact":  true,
+			"replace_original": false,
+			"message":          "Transcode completed and verified. Candidate output ready. Original file physically preserved and intact.",
 		},
 	}, nil
 }

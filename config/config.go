@@ -89,12 +89,47 @@ type SABnzbdConfig struct {
 }
 
 type TdarrConfig struct {
-	Enabled      bool              `yaml:"enabled"`
-	URL          string            `yaml:"url"`
-	APIKey       string            `yaml:"api_key"`
-	Timeout      string            `yaml:"timeout"`
-	Flows        map[string]string `yaml:"flows"`
-	PathMappings []PathMapping     `yaml:"path_mappings"`
+	Enabled      bool                          `yaml:"enabled"`
+	URL          string                        `yaml:"url"`
+	APIKey       string                        `yaml:"api_key"`
+	Timeout      string                        `yaml:"timeout"`
+	Libraries    map[string]TdarrLibraryConfig `yaml:"libraries"`
+	PathMappings []PathMapping                 `yaml:"path_mappings"`
+}
+
+type TdarrLibraryConfig struct {
+	ID           string `yaml:"id"`            // Real Tdarr library dbID (e.g. "2yO9ABC123")
+	Name         string `yaml:"name"`          // Human-readable library name
+	Flow         string `yaml:"flow"`          // Expected Flow name or ID (informational)
+	OutputFolder string `yaml:"output_folder"` // Optional dedicated output folder for non-destructive candidate output
+}
+
+// ResolveLibrary resolves a configured Tdarr library for the given profile name.
+// If profile is empty and exactly one library is configured, that library is returned.
+// Returns an error if the profile does not exist or if the resolved library has an empty ID.
+func (c TdarrConfig) ResolveLibrary(profile string) (*TdarrLibraryConfig, error) {
+	if len(c.Libraries) == 0 {
+		return nil, fmt.Errorf("no tdarr libraries configured in settings")
+	}
+	if profile != "" {
+		lib, ok := c.Libraries[profile]
+		if !ok {
+			return nil, fmt.Errorf("tdarr library profile %q not found in config", profile)
+		}
+		if strings.TrimSpace(lib.ID) == "" {
+			return nil, fmt.Errorf("tdarr library profile %q has empty library id", profile)
+		}
+		return &lib, nil
+	}
+	if len(c.Libraries) == 1 {
+		for _, lib := range c.Libraries {
+			if strings.TrimSpace(lib.ID) == "" {
+				return nil, fmt.Errorf("configured default tdarr library has empty id")
+			}
+			return &lib, nil
+		}
+	}
+	return nil, fmt.Errorf("multiple tdarr libraries configured; profile name is required to select one")
 }
 
 type PathMapping struct {
@@ -197,6 +232,8 @@ var structTypeToSection = map[string]string{
 	"SABnzbdConfig":             "sabnzbd",
 	"config.TdarrConfig":        "tdarr",
 	"TdarrConfig":               "tdarr",
+	"config.TdarrLibraryConfig": "tdarr",
+	"TdarrLibraryConfig":        "tdarr",
 	"config.PathMapping":        "tdarr",
 	"PathMapping":               "tdarr",
 	"config.ServiceConfig":      "services",

@@ -159,13 +159,27 @@ func TestSubmit_Success(t *testing.T) {
 	c := NewClient(ClientOptions{BaseURL: ts.URL})
 	resp, err := c.Submit(context.Background(), SubmitRequest{
 		FilePath:  "/media/Anime/Sousou no Frieren/s01e01.mkv",
-		LibraryID: "Anime",
+		LibraryID: "lib-anime-123",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !resp.Success || resp.Reference != "/media/Anime/Sousou no Frieren/s01e01.mkv" {
+	if !resp.Success || resp.ExternalRef.LibraryID != "lib-anime-123" || resp.ExternalRef.ServerPath != "/media/Anime/Sousou no Frieren/s01e01.mkv" {
 		t.Errorf("unexpected submit response: %+v", resp)
+	}
+}
+
+func TestSubmit_EmptyLibraryFails(t *testing.T) {
+	c := NewClient(ClientOptions{BaseURL: "http://localhost"})
+	_, err := c.Submit(context.Background(), SubmitRequest{
+		FilePath:  "/media/Anime/ep01.mkv",
+		LibraryID: "",
+	})
+	if err == nil {
+		t.Fatal("expected error when library_id is empty, got nil")
+	}
+	if !strings.Contains(err.Error(), "library_id is required") {
+		t.Errorf("unexpected error message: %v", err)
 	}
 }
 

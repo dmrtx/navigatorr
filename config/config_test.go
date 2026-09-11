@@ -274,8 +274,12 @@ tdarr:
   url: "http://192.168.70.71:8265"
   api_key: "test-tdarr-key"
   timeout: "30s"
-  flows:
-    hevc_safe: "flow_12345"
+  libraries:
+    anime_hevc:
+      id: "lib-anime-123"
+      name: "Anime HEVC"
+      flow: "apple_silicon_hevc"
+      output_folder: "/media/transcodes/anime"
   path_mappings:
     - local: "/Volumes/media"
       server: "/media"
@@ -296,11 +300,33 @@ tdarr:
 		if cfg.Tdarr.TimeoutDuration() != 30*time.Second {
 			t.Errorf("expected 30s timeout, got %v", cfg.Tdarr.TimeoutDuration())
 		}
-		if cfg.Tdarr.Flows["hevc_safe"] != "flow_12345" {
-			t.Errorf("unexpected flow: %v", cfg.Tdarr.Flows)
+		lib, err := cfg.Tdarr.ResolveLibrary("anime_hevc")
+		if err != nil {
+			t.Fatalf("unexpected error resolving library: %v", err)
+		}
+		if lib.ID != "lib-anime-123" || lib.Name != "Anime HEVC" || lib.OutputFolder != "/media/transcodes/anime" {
+			t.Errorf("unexpected library values: %+v", lib)
 		}
 		if len(cfg.Tdarr.PathMappings) != 1 {
 			t.Fatalf("expected 1 path mapping, got %d", len(cfg.Tdarr.PathMappings))
+		}
+	})
+
+	t.Run("resolve library errors when profile missing or empty", func(t *testing.T) {
+		tc := TdarrConfig{
+			Libraries: map[string]TdarrLibraryConfig{
+				"empty_id": {ID: ""},
+			},
+		}
+		if _, err := tc.ResolveLibrary("missing"); err == nil {
+			t.Error("expected error for missing profile, got nil")
+		}
+		if _, err := tc.ResolveLibrary("empty_id"); err == nil {
+			t.Error("expected error for profile with empty id, got nil")
+		}
+		noLibs := TdarrConfig{}
+		if _, err := noLibs.ResolveLibrary("any"); err == nil {
+			t.Error("expected error when no libraries configured, got nil")
 		}
 	})
 

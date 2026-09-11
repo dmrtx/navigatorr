@@ -1,7 +1,9 @@
 package action
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -115,6 +117,14 @@ func setupTranscodeEngine(t *testing.T, tc tdarr.Client, ffprobePath string, rea
 		Tdarr: config.TdarrConfig{
 			Enabled: true,
 			URL:     "http://127.0.0.1:8265",
+			Libraries: map[string]config.TdarrLibraryConfig{
+				"hevc_safe": {
+					ID:           "lib-test-123",
+					Name:         "Test Library",
+					Flow:         "flow-test",
+					OutputFolder: "/media/transcodes",
+				},
+			},
 			PathMappings: []config.PathMapping{
 				{Local: readRoots[0], Server: "/media"},
 			},
@@ -222,8 +232,8 @@ func TestTranscode_FirstExecutionSubmitsExactlyOnce(t *testing.T) {
 	if atomic.LoadInt32(&mockClient.submitCalls) != 1 {
 		t.Fatalf("expected exactly 1 submit call, got %d", atomic.LoadInt32(&mockClient.submitCalls))
 	}
-	if res.Outputs["tdarr_job_id"] != "tdarr-job-test-1" {
-		t.Errorf("unexpected job ID: %v", res.Outputs["tdarr_job_id"])
+	if res.WaitingCondition != "tdarr_transcode_complete" {
+		t.Errorf("unexpected waiting condition: %v", res.WaitingCondition)
 	}
 }
 
@@ -593,6 +603,15 @@ func TestTranscode_RestartPersistResume(t *testing.T) {
 	resResolver, _ := fsop.NewResolver([]string{mediaDir}, []string{mediaDir})
 	cfg := &config.Config{
 		Media: config.MediaConfig{AllowedReadRoots: []string{mediaDir}, AllowedWriteRoots: []string{mediaDir}},
+		Tdarr: config.TdarrConfig{
+			Enabled: true,
+			Libraries: map[string]config.TdarrLibraryConfig{
+				"default": {
+					ID:   "anime_lib_123",
+					Name: "Anime",
+				},
+			},
+		},
 	}
 	engine1 := NewEngine(EngineDeps{
 		Store:   st1,
@@ -768,10 +787,73 @@ func TestTranscode_ReplaceOriginal_DestructiveGate(t *testing.T) {
 	origFile := filepath.Join(mediaDir, "OriginalGate.mkv")
 	_ = os.WriteFile(origFile, []byte("original"), 0644)
 
-	outputFile := filepath.Join(mediaDir, "TranscodedGate.mkv")
-	_ = os.WriteFile(outputFile, []byte("transcoded"), 0644)
-
 	probePath := createFakeFFprobeScript(t, defaultValidFFprobeJSON)
+	mockClient := &mockTdarrClient{}
+
+	// replace_original: true must fail explicitly and immediately with rejection
+	engine, _ := setupTranscodeEngine(t, mockClient, probePath, []string{mediaDir}, []string{mediaDir}, false)
+	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
+		"path":             origFile,
+		"replace_original": true,
+	})
+	if err != nil {
+		t.Fatalf("run error: %v", err)
+	}
+	if res.Status != StatusFailed {
+		t.Fatalf("expected failed status when replace_original is true, got %s", res.Status)
+	}
+	if !strings.Contains(res.Error, "destructive replacement (replace_original: true) is not supported") {
+		t.Errorf("expected destructive replacement error, got: %s", res.Error)
+	}
+
+	// Original still intact!
+	c, _ := os.ReadFile(origFile)
+	if string(c) != "original" {
+		t.Error("original was modified despite safety gate")
+	}
+	if atomic.LoadInt32(&mockClient.submitCalls) != 0 {
+		t.Errorf("expected 0 submit calls when replace_original rejected, got %d", atomic.LoadInt32(&mockClient.submitCalls))
+	}
+}
+
+func TestTranscode_ValidationDiscrepancy_ResumeAcceptLoss(t *testing.T) {
+	mediaDir := t.TempDir()
+	origFile := filepath.Join(mediaDir, "AnimeLoss.mkv")
+	origBytes := []byte("anime original bytes for checksum verification")
+	_ = os.WriteFile(origFile, origBytes, 0644)
+
+	outputFile := filepath.Join(mediaDir, "AnimeLossOut.mkv")
+	_ = os.WriteFile(outputFile, []byte("transcoded anime candidate bytes"), 0644)
+
+	// Original has jpn & eng audio; output has only eng audio
+	dir := t.TempDir()
+	probeScript := filepath.Join(dir, "ffprobe")
+	script := `#!/bin/sh
+if echo "$*" | grep -q "AnimeLoss.mkv"; then
+cat << 'JSON'
+{
+  "streams": [
+    {"index": 0, "codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080},
+    {"index": 1, "codec_type": "audio", "codec_name": "flac", "tags": {"language": "jpn"}},
+    {"index": 2, "codec_type": "audio", "codec_name": "aac", "tags": {"language": "eng"}}
+  ],
+  "format": {"format_name": "matroska", "duration": "1420.0", "size": "800000000"}
+}
+JSON
+else
+cat << 'JSON'
+{
+  "streams": [
+    {"index": 0, "codec_type": "video", "codec_name": "hevc", "width": 1920, "height": 1080},
+    {"index": 1, "codec_type": "audio", "codec_name": "aac", "tags": {"language": "eng"}}
+  ],
+  "format": {"format_name": "matroska", "duration": "1420.0", "size": "300000000"}
+}
+JSON
+fi
+`
+	_ = os.WriteFile(probeScript, []byte(script), 0755)
+
 	mockClient := &mockTdarrClient{
 		jobStatusFunc: func(ctx context.Context, ref string) (*tdarr.JobStatusResponse, error) {
 			return &tdarr.JobStatusResponse{
@@ -782,25 +864,188 @@ func TestTranscode_ReplaceOriginal_DestructiveGate(t *testing.T) {
 		},
 	}
 
-	// allowDestructive is FALSE, but replace_original is requested TRUE
-	engine, _ := setupTranscodeEngine(t, mockClient, probePath, []string{mediaDir}, []string{mediaDir}, false)
+	engine, _ := setupTranscodeEngine(t, mockClient, probeScript, []string{mediaDir}, []string{mediaDir}, false)
 	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
-		"path":             origFile,
-		"replace_original": true,
+		"path": origFile,
 	})
 	if err != nil {
 		t.Fatalf("run error: %v", err)
 	}
 	if res.Status != StatusWaitingDecision {
-		t.Fatalf("expected waiting_decision when allow_destructive is false, got %s", res.Status)
-	}
-	if !strings.Contains(res.WaitingReason, "allow_destructive is disabled") {
-		t.Errorf("expected allow_destructive warning, got: %s", res.WaitingReason)
+		t.Fatalf("expected waiting_decision when audio track is lost, got %s", res.Status)
 	}
 
-	// Original still intact!
-	c, _ := os.ReadFile(origFile)
-	if string(c) != "original" {
-		t.Error("original was modified despite safety gate")
+	// Resume action with decision="accept_loss"
+	resumed, err := engine.Resume(context.Background(), res.ID, "accept_loss", nil)
+	if err != nil {
+		t.Fatalf("resume error: %v", err)
+	}
+	if resumed.Status != StatusCompleted {
+		t.Fatalf("expected completed status after accepting loss, got %s (error: %s)", resumed.Status, resumed.Error)
+	}
+
+	// Check original file is still 100% intact
+	curBytes, err := os.ReadFile(origFile)
+	if err != nil {
+		t.Fatalf("failed reading original file: %v", err)
+	}
+	if !bytes.Equal(curBytes, origBytes) {
+		t.Error("original file bytes modified after resume accept_loss!")
+	}
+
+	// Outputs verify candidate_path and original_intact
+	if resumed.Outputs["candidate_path"] != outputFile {
+		t.Errorf("expected candidate_path %s, got %v", outputFile, resumed.Outputs["candidate_path"])
+	}
+	if resumed.Outputs["original_intact"] != true {
+		t.Errorf("expected original_intact true, got %v", resumed.Outputs["original_intact"])
+	}
+}
+
+func TestTranscode_ValidationDiscrepancy_ResumeReject(t *testing.T) {
+	mediaDir := t.TempDir()
+	origFile := filepath.Join(mediaDir, "AnimeReject.mkv")
+	origBytes := []byte("anime original bytes must be preserved on reject")
+	_ = os.WriteFile(origFile, origBytes, 0644)
+
+	outputFile := filepath.Join(mediaDir, "AnimeRejectOut.mkv")
+	_ = os.WriteFile(outputFile, []byte("bad output bytes"), 0644)
+
+	dir := t.TempDir()
+	probeScript := filepath.Join(dir, "ffprobe")
+	script := `#!/bin/sh
+if echo "$*" | grep -q "AnimeReject.mkv"; then
+cat << 'JSON'
+{
+  "streams": [
+    {"index": 0, "codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080},
+    {"index": 1, "codec_type": "audio", "codec_name": "flac", "tags": {"language": "jpn"}}
+  ],
+  "format": {"format_name": "matroska", "duration": "1420.0", "size": "800000000"}
+}
+JSON
+else
+cat << 'JSON'
+{
+  "streams": [
+    {"index": 0, "codec_type": "video", "codec_name": "hevc", "width": 1920, "height": 1080}
+  ],
+  "format": {"format_name": "matroska", "duration": "1420.0", "size": "300000000"}
+}
+JSON
+fi
+`
+	_ = os.WriteFile(probeScript, []byte(script), 0755)
+
+	mockClient := &mockTdarrClient{
+		jobStatusFunc: func(ctx context.Context, ref string) (*tdarr.JobStatusResponse, error) {
+			return &tdarr.JobStatusResponse{
+				Found:      true,
+				Status:     "completed",
+				OutputPath: outputFile,
+			}, nil
+		},
+	}
+
+	engine, _ := setupTranscodeEngine(t, mockClient, probeScript, []string{mediaDir}, []string{mediaDir}, false)
+	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
+		"path": origFile,
+	})
+	if err != nil {
+		t.Fatalf("run error: %v", err)
+	}
+	if res.Status != StatusWaitingDecision {
+		t.Fatalf("expected waiting_decision, got %s", res.Status)
+	}
+
+	// Resume action with decision="reject"
+	resumed, err := engine.Resume(context.Background(), res.ID, "reject", nil)
+	if err != nil {
+		t.Fatalf("resume error: %v", err)
+	}
+	if resumed.Status != StatusFailed {
+		t.Fatalf("expected failed status after reject decision, got %s", resumed.Status)
+	}
+	if !strings.Contains(resumed.Error, "rejected by user decision") {
+		t.Errorf("expected reject error message, got: %s", resumed.Error)
+	}
+
+	// Check original file is untouched
+	curBytes, err := os.ReadFile(origFile)
+	if err != nil {
+		t.Fatalf("failed reading original file: %v", err)
+	}
+	if !bytes.Equal(curBytes, origBytes) {
+		t.Error("original file bytes modified after reject!")
+	}
+}
+
+func TestTranscode_CandidateOutputReported(t *testing.T) {
+	mediaDir := t.TempDir()
+	origFile := filepath.Join(mediaDir, "CandidateSource.mkv")
+	origBytes := []byte("original pristine source bytes for candidate test")
+	_ = os.WriteFile(origFile, origBytes, 0644)
+
+	outputDir := t.TempDir()
+	candidateFile := filepath.Join(outputDir, "CandidateSource.mkv")
+	_ = os.WriteFile(candidateFile, []byte("candidate transcoded bytes in output folder"), 0644)
+
+	probePath := createFakeFFprobeScript(t, defaultValidFFprobeJSON)
+	mockClient := &mockTdarrClient{
+		jobStatusFunc: func(ctx context.Context, ref string) (*tdarr.JobStatusResponse, error) {
+			return &tdarr.JobStatusResponse{
+				Found:      true,
+				Status:     "completed",
+				OutputPath: candidateFile,
+			}, nil
+		},
+	}
+
+	engine, _ := setupTranscodeEngine(t, mockClient, probePath, []string{mediaDir, outputDir}, []string{mediaDir, outputDir}, false)
+	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
+		"path": origFile,
+	})
+	if err != nil {
+		t.Fatalf("run error: %v", err)
+	}
+	if res.Status != StatusCompleted {
+		t.Fatalf("expected completed status, got %s (error: %s)", res.Status, res.Error)
+	}
+
+	// Verify outputs contain candidate_path and output_path matching candidateFile
+	if res.Outputs["candidate_path"] != candidateFile {
+		t.Errorf("expected candidate_path == %s, got %v", candidateFile, res.Outputs["candidate_path"])
+	}
+	if res.Outputs["output_path"] != candidateFile {
+		t.Errorf("expected output_path == %s, got %v", candidateFile, res.Outputs["output_path"])
+	}
+	resolvedOrig, err := filepath.EvalSymlinks(origFile)
+	if err != nil {
+		resolvedOrig = origFile
+	}
+	if res.Outputs["original_path"] != resolvedOrig {
+		t.Errorf("expected original_path == %s, got %v", resolvedOrig, res.Outputs["original_path"])
+	}
+	if res.Outputs["original_intact"] != true {
+		t.Errorf("expected original_intact == true, got %v", res.Outputs["original_intact"])
+	}
+	if res.Outputs["replace_original"] != false {
+		t.Errorf("expected replace_original == false, got %v", res.Outputs["replace_original"])
+	}
+
+	// Verify original file checksum
+	h := sha256.Sum256(origBytes)
+	expectedSHA := fmt.Sprintf("%x", h[:])
+	if res.Outputs["original_sha256"] != expectedSHA {
+		t.Errorf("expected original_sha256 %s, got %v", expectedSHA, res.Outputs["original_sha256"])
+	}
+
+	// Verify original file on disk is bit-for-bit identical
+	curBytes, err := os.ReadFile(origFile)
+	if err != nil {
+		t.Fatalf("failed reading original: %v", err)
+	}
+	if !bytes.Equal(curBytes, origBytes) {
+		t.Errorf("original file was modified on disk!")
 	}
 }

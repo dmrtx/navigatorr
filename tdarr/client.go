@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -135,7 +137,7 @@ func (c *client) Submit(ctx context.Context, req SubmitRequest) (*SubmitResponse
 
 	libID := strings.TrimSpace(req.LibraryID)
 	if libID == "" {
-		libID = deriveLibraryID(filePath)
+		return nil, errors.New("library_id is required (must match a valid Tdarr library dbID)")
 	}
 
 	payload := map[string]any{
@@ -152,10 +154,17 @@ func (c *client) Submit(ctx context.Context, req SubmitRequest) (*SubmitResponse
 		return nil, fmt.Errorf("submitting file to tdarr: %w", err)
 	}
 
+	extRef := ExternalReference{
+		LibraryID:   libID,
+		ServerPath:  filePath,
+		SubmittedAt: time.Now().Unix(),
+	}
+
 	return &SubmitResponse{
-		Success:   true,
-		Reference: filePath,
-		Message:   "Queued in Tdarr via scanFolderWatcher",
+		Success:     true,
+		Reference:   extRef.String(),
+		ExternalRef: extRef,
+		Message:     "Queued in Tdarr via scanFolderWatcher",
 	}, nil
 }
 
@@ -163,10 +172,12 @@ func (c *client) Submit(ctx context.Context, req SubmitRequest) (*SubmitResponse
 func (c *client) JobStatus(ctx context.Context, ref string) (*JobStatusResponse, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
-		return nil, errors.New("reference (job ID or file path) is required")
+		return nil, errors.New("reference is required")
 	}
 
-	// 1. Check live workers on connected nodes
+	ext := ParseExternalReference(ref)
+
+	// 1. Check live workers on connected nodes (exact path or job ID match)
 	nodes, err := c.Nodes(ctx)
 	if err == nil {
 		for nodeID, node := range nodes {
@@ -174,7 +185,14 @@ func (c *client) JobStatus(ctx context.Context, ref string) (*JobStatusResponse,
 				if w.Idle {
 					continue
 				}
-				if matchRef(w, ref) {
+				matched := false
+				if ext.JobID != "" && w.JobId == ext.JobID {
+					matched = true
+				} else if ext.ServerPath != "" && w.File != "" && filepath.Clean(w.File) == filepath.Clean(ext.ServerPath) {
+					matched = true
+				}
+				if matched {
+					outPath := w.File
 					return &JobStatusResponse{
 						Found:      true,
 						Status:     "running",
@@ -184,7 +202,7 @@ func (c *client) JobStatus(ctx context.Context, ref string) (*JobStatusResponse,
 						NodeID:     nodeID,
 						WorkerID:   workerID,
 						JobId:      w.JobId,
-						OutputPath: w.File,
+						OutputPath: outPath,
 						Details:    w.Status,
 					}, nil
 				}
@@ -192,80 +210,104 @@ func (c *client) JobStatus(ctx context.Context, ref string) (*JobStatusResponse,
 		}
 	}
 
-	// 2. Check job report by ID if ref looks like a jobId (or try querying)
-	var report struct {
-		JobId           string         `json:"jobId"`
-		Filename        string         `json:"filename"`
-		DownloadPath    string         `json:"downloadPath"`
-		IsJobRunning    bool           `json:"isJobRunning"`
-		JobReportExists bool           `json:"jobReportExists"`
-		Job             map[string]any `json:"job"`
-		JobRecord       map[string]any `json:"jobRecord"`
-	}
-	if err := c.doJSON(ctx, http.MethodGet, "/api/v2/job-reports/"+ref, nil, &report); err == nil && report.JobReportExists {
-		if report.IsJobRunning {
-			return &JobStatusResponse{
-				Found:      true,
-				Status:     "running",
-				JobId:      report.JobId,
-				OutputPath: report.DownloadPath,
-				Details:    "Job report shows job is currently running",
-			}, nil
+	// 2. Check job report by ID ONLY if ext.JobID is a real job ID (never a file path)
+	if ext.JobID != "" && !strings.Contains(ext.JobID, "/") {
+		var report struct {
+			JobId           string         `json:"jobId"`
+			Filename        string         `json:"filename"`
+			DownloadPath    string         `json:"downloadPath"`
+			IsJobRunning    bool           `json:"isJobRunning"`
+			JobReportExists bool           `json:"jobReportExists"`
+			Job             map[string]any `json:"job"`
+			JobRecord       map[string]any `json:"jobRecord"`
 		}
-		// Check if failed
-		if isJobRecordFailed(report.JobRecord) {
-			return &JobStatusResponse{
-				Found:   true,
-				Status:  "failed",
-				JobId:   report.JobId,
-				Error:   "Transcode job marked as error in job report",
-				Details: fmt.Sprintf("%v", report.JobRecord["error"]),
-			}, nil
-		}
-		return &JobStatusResponse{
-			Found:      true,
-			Status:     "completed",
-			Progress:   100,
-			JobId:      report.JobId,
-			OutputPath: report.DownloadPath,
-			Details:    "Job completed according to job report",
-		}, nil
-	}
-
-	// 3. Check FileJSONDB via cruddb
-	var fileDoc map[string]any
-	crudPayload := map[string]any{
-		"data": map[string]any{
-			"collection": "FileJSONDB",
-			"mode":       "getById",
-			"docID":      ref,
-		},
-	}
-	if err := c.doJSON(ctx, http.MethodPost, "/api/v2/cruddb", crudPayload, &fileDoc); err == nil && fileDoc != nil && len(fileDoc) > 0 {
-		statusStr, _ := fileDoc["status"].(string)
-		lowerStatus := strings.ToLower(statusStr)
-		switch {
-		case lowerStatus == "queued" || lowerStatus == "queue":
-			return &JobStatusResponse{
-				Found:   true,
-				Status:  "queued",
-				Details: "File is queued in Tdarr database",
-			}, nil
-		case strings.Contains(lowerStatus, "error") || strings.Contains(lowerStatus, "fail"):
-			return &JobStatusResponse{
-				Found:   true,
-				Status:  "failed",
-				Error:   statusStr,
-				Details: "File marked failed in Tdarr database",
-			}, nil
-		case strings.Contains(lowerStatus, "transcod") || strings.Contains(lowerStatus, "success") || strings.Contains(lowerStatus, "complete"):
+		if err := c.doJSON(ctx, http.MethodGet, "/api/v2/job-reports/"+ext.JobID, nil, &report); err == nil && report.JobReportExists {
+			if report.IsJobRunning {
+				return &JobStatusResponse{
+					Found:      true,
+					Status:     "running",
+					JobId:      report.JobId,
+					OutputPath: report.DownloadPath,
+					Details:    "Job report shows job is currently running",
+				}, nil
+			}
+			// Check if failed
+			if isJobRecordFailed(report.JobRecord) {
+				return &JobStatusResponse{
+					Found:   true,
+					Status:  "failed",
+					JobId:   report.JobId,
+					Error:   "Transcode job marked as error in job report",
+					Details: fmt.Sprintf("%v", report.JobRecord["error"]),
+				}, nil
+			}
 			return &JobStatusResponse{
 				Found:      true,
 				Status:     "completed",
 				Progress:   100,
-				OutputPath: ref,
-				Details:    "File processed according to Tdarr database",
+				JobId:      report.JobId,
+				OutputPath: report.DownloadPath,
+				Details:    "Job completed according to job report",
 			}, nil
+		}
+	}
+
+	// 3. Check FileJSONDB via cruddb if server path is known
+	serverPath := ext.ServerPath
+	if serverPath == "" && strings.HasPrefix(ref, "/") {
+		serverPath = ref
+	}
+	if serverPath != "" {
+		var fileDoc map[string]any
+		crudPayload := map[string]any{
+			"data": map[string]any{
+				"collection": "FileJSONDB",
+				"mode":       "getById",
+				"docID":      serverPath,
+			},
+		}
+		if err := c.doJSON(ctx, http.MethodPost, "/api/v2/cruddb", crudPayload, &fileDoc); err == nil && fileDoc != nil && len(fileDoc) > 0 {
+			decision, _ := fileDoc["TranscodeDecisionMaker"].(string)
+			if decision == "" {
+				decision, _ = fileDoc["status"].(string)
+			}
+			lower := strings.ToLower(decision)
+			switch {
+			case lower == "queued" || lower == "queue":
+				return &JobStatusResponse{
+					Found:   true,
+					Status:  "queued",
+					Details: "File is queued in Tdarr database",
+				}, nil
+			case strings.Contains(lower, "error") || strings.Contains(lower, "fail"):
+				return &JobStatusResponse{
+					Found:   true,
+					Status:  "failed",
+					Error:   decision,
+					Details: "File marked failed in Tdarr database",
+				}, nil
+			case strings.Contains(lower, "success") || strings.Contains(lower, "complete"):
+				outPath, _ := fileDoc["outputFile"].(string)
+				if outPath == "" {
+					outPath, _ = fileDoc["outputFilePath"].(string)
+				}
+				jobId, _ := fileDoc["lastJobReport"].(string)
+				return &JobStatusResponse{
+					Found:      true,
+					Status:     "completed",
+					Progress:   100,
+					JobId:      jobId,
+					OutputPath: outPath,
+					Details:    "File processed successfully according to Tdarr database",
+				}, nil
+			case strings.Contains(lower, "not required"):
+				return &JobStatusResponse{
+					Found:   true,
+					Status:  "failed",
+					Error:   "transcode not required by Tdarr library rules",
+					Details: "File skipped as transcode not required",
+				}, nil
+			}
 		}
 	}
 
@@ -285,7 +327,7 @@ func (c *client) JobStatus(ctx context.Context, ref string) (*JobStatusResponse,
 	if err := c.doJSON(ctx, http.MethodPost, "/api/v2/client/staged", stagedPayload, &stagedResp); err == nil {
 		for _, item := range stagedResp.Array {
 			file, _ := item["file"].(string)
-			if file == ref || strings.HasSuffix(file, ref) || strings.HasSuffix(ref, file) {
+			if serverPath != "" && filepath.Clean(file) == filepath.Clean(serverPath) {
 				cacheFile, _ := item["cacheFile"].(string)
 				outputPath := cacheFile
 				if outputPath == "" {
@@ -367,27 +409,43 @@ func (c *client) Cancel(ctx context.Context, req CancelRequest) error {
 	return nil
 }
 
-// Helpers
-
-func deriveLibraryID(filePath string) string {
-	parts := strings.Split(strings.TrimPrefix(filePath, "/"), "/")
-	if len(parts) >= 2 && parts[0] == "media" {
-		return parts[1] // e.g. "Anime", "Movies", "TvSeries"
+// ParseExternalReference parses a reference string into an ExternalReference.
+func ParseExternalReference(ref string) ExternalReference {
+	var ext ExternalReference
+	if err := json.Unmarshal([]byte(ref), &ext); err == nil && (ext.ServerPath != "" || ext.JobID != "") {
+		return ext
 	}
-	if len(parts) >= 1 {
-		return parts[0]
+	if strings.Contains(ref, ":") {
+		parts := strings.Split(ref, ":")
+		if len(parts) >= 3 {
+			ext.LibraryID = parts[0]
+			second := parts[1]
+			ext.ServerPath = strings.Join(parts[2:], ":")
+			if ts, err := strconv.ParseInt(second, 10, 64); err == nil && ts > 0 {
+				ext.SubmittedAt = ts
+			} else {
+				ext.JobID = second
+			}
+			return ext
+		}
 	}
-	return "default"
+	if strings.HasPrefix(ref, "/") {
+		ext.ServerPath = ref
+	} else {
+		ext.JobID = ref
+	}
+	return ext
 }
 
-func matchRef(w WorkerItem, ref string) bool {
-	if w.JobId != "" && w.JobId == ref {
+func matchRef(w WorkerItem, target string) bool {
+	if target == "" {
+		return false
+	}
+	if w.JobId != "" && w.JobId == target {
 		return true
 	}
-	if w.File != "" {
-		if w.File == ref || strings.HasSuffix(w.File, ref) || strings.HasSuffix(ref, w.File) {
-			return true
-		}
+	if w.File != "" && filepath.Clean(w.File) == filepath.Clean(target) {
+		return true
 	}
 	return false
 }

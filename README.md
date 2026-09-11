@@ -275,19 +275,28 @@ Edit `~/.config/navigatorr/config.yaml` with your service URLs and API keys. You
 
 **Tdarr Transcoding Configuration:**
 
+In Tdarr 2.x, Transcode Flows are attached directly to Library configurations in Tdarr rather than individual API submissions. Navigatorr routes transcoding via explicit library mappings:
+
 ```yaml
 tdarr:
   enabled: true
   url: "http://192.168.70.71:8265"
   api_key: ""
   timeout: "15s"
-  flows:
-    anime_hevc: "flow-apple-silicon-hevc"
-    standard_hevc: "flow-standard-hevc"
+  libraries:
+    anime_hevc:
+      id: "2jLSMhxug"             # Exact Tdarr library dbID configured in Tdarr with your desired Flow
+      name: "Anime HEVC"
+      output_folder: "/Volumes/media/transcodes"
+    standard_hevc:
+      id: "9kLMjxY7a"
+      name: "TV Standard HEVC"
   path_mappings:
     - local: "/Volumes/media"
       server: "/media"
 ```
+
+> 🛡️ **Zero-Loss Candidate Mode:** All transcode jobs run in non-destructive candidate mode. Original files are physically and cryptographically verified (SHA-256) to remain intact. `replace_original` defaults to `false`; setting it to `true` is rejected. If stream discrepancies occur (e.g. lost audio/subtitles), Navigatorr enters `waiting_decision`, allowing users to resume with `accept_loss` or `reject`.
 
 > ℹ️ **Container Deployments & Path Mapping:** Paths configured under `media.allowed_read_roots` and `media.allowed_write_roots` must match paths **inside the Docker container**, not on the host. See [DOCKER.md](DOCKER.md) for full Docker Compose recipes, path mapping diagrams, and the safety permissions matrix.
 

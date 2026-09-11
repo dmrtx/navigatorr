@@ -2,6 +2,7 @@ package tdarr
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -59,18 +60,34 @@ type Node struct {
 	NodePaused    bool                  `json:"nodePaused"`
 }
 
+// ExternalReference represents a structured, realistic reference for a submitted transcode job.
+type ExternalReference struct {
+	LibraryID   string `json:"library_id"`
+	ServerPath  string `json:"server_path"`
+	SubmittedAt int64  `json:"submitted_at"`
+	JobID       string `json:"job_id,omitempty"`
+}
+
+func (r ExternalReference) String() string {
+	if r.JobID != "" {
+		return fmt.Sprintf("%s:%s:%s", r.LibraryID, r.JobID, r.ServerPath)
+	}
+	return fmt.Sprintf("%s:%d:%s", r.LibraryID, r.SubmittedAt, r.ServerPath)
+}
+
 // SubmitRequest defines the parameters to send a file to Tdarr for transcode.
 type SubmitRequest struct {
 	FilePath  string `json:"file_path"`
-	LibraryID string `json:"library_id,omitempty"`
+	LibraryID string `json:"library_id"`
 	Profile   string `json:"profile,omitempty"`
 }
 
 // SubmitResponse holds the result of submitting a job to Tdarr.
 type SubmitResponse struct {
-	Success   bool   `json:"success"`
-	Reference string `json:"reference"`
-	Message   string `json:"message,omitempty"`
+	Success     bool              `json:"success"`
+	Reference   string            `json:"reference"`
+	ExternalRef ExternalReference `json:"external_ref"`
+	Message     string            `json:"message,omitempty"`
 }
 
 // JobStatusResponse represents the unified state of a transcode job in Tdarr.

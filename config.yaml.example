@@ -117,8 +117,12 @@ tdarr:
   url: "http://localhost:8265"
   api_key: ""                   # Optional API key / token if authentication is enabled
   timeout: "15s"
-  flows:
-    hevc_safe: "hevc_safe"      # Named profile to Tdarr flow ID mapping
+  libraries:
+    anime_hevc:
+      id: "2yO9ABC123"            # Real Tdarr library dbID
+      name: "Anime HEVC Staging"  # Human-readable library name
+      flow: "apple_silicon_hevc"  # Expected Flow configured on this library in Tdarr
+      output_folder: "/media/transcodes/anime" # Dedicated output folder for non-destructive candidates
   path_mappings:                # Local path to Tdarr Server path translation
     - local: "/Volumes/media"
       server: "/media"
