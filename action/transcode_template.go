@@ -223,26 +223,47 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 		}, nil
 	}
 
-	// Validate library settings directly in Tdarr API if accessible
-	if libSettings, err := e.deps.Tdarr.GetLibrary(ctx, libConfig.ID); err == nil && libSettings != nil {
-		if !libSettings.FolderToFolderConversion {
-			return StepResult{
-				Status: StepFailed,
-				Error:  fmt.Sprintf("tdarr library %q (id: %s) has folderToFolderConversion disabled in Tdarr settings; Navigatorr requires folderToFolderConversion: true with dedicated output folder to ensure original files are not modified in-place", libConfig.Name, libConfig.ID),
-			}, nil
-		}
-		if libSettings.FolderToFolderConversionDeleteSource {
-			return StepResult{
-				Status: StepFailed,
-				Error:  fmt.Sprintf("tdarr library %q (id: %s) has deleteSource enabled in Tdarr settings; Navigatorr requires deleteSource: false to ensure original files are never deleted", libConfig.Name, libConfig.ID),
-			}, nil
-		}
-		if strings.TrimSpace(libSettings.OutputFolder) == "" {
-			return StepResult{
-				Status: StepFailed,
-				Error:  fmt.Sprintf("tdarr library %q (id: %s) has no outputFolder configured in Tdarr; Navigatorr requires a dedicated outputFolder", libConfig.Name, libConfig.ID),
-			}, nil
-		}
+	// Validate library settings directly in Tdarr API (MANDATORY FAIL-CLOSED)
+	libSettings, err := e.deps.Tdarr.GetLibrary(ctx, libConfig.ID)
+	if err != nil {
+		return StepResult{
+			Status: StepFailed,
+			Error:  fmt.Sprintf("unable to verify Tdarr candidate-safe library settings for library %q (id: %s): %v; refusing submit to prevent data loss (fail closed)", libConfig.Name, libConfig.ID, err),
+		}, nil
+	}
+	if libSettings == nil {
+		return StepResult{
+			Status: StepFailed,
+			Error:  fmt.Sprintf("tdarr library %q (id: %s) returned nil settings from Tdarr API; refusing submit (fail closed)", libConfig.Name, libConfig.ID),
+		}, nil
+	}
+	if !libSettings.FolderToFolderConversion {
+		return StepResult{
+			Status: StepFailed,
+			Error:  fmt.Sprintf("tdarr library %q (id: %s) has folderToFolderConversion disabled in Tdarr settings; Navigatorr requires folderToFolderConversion: true with dedicated output folder to ensure original files are not modified in-place (fail closed)", libConfig.Name, libConfig.ID),
+		}, nil
+	}
+	if libSettings.FolderToFolderConversionDeleteSource {
+		return StepResult{
+			Status: StepFailed,
+			Error:  fmt.Sprintf("tdarr library %q (id: %s) has deleteSource enabled in Tdarr settings; Navigatorr requires deleteSource: false to ensure original files are never deleted (fail closed)", libConfig.Name, libConfig.ID),
+		}, nil
+	}
+	if strings.TrimSpace(libSettings.OutputFolder) == "" {
+		return StepResult{
+			Status: StepFailed,
+			Error:  fmt.Sprintf("tdarr library %q (id: %s) has no outputFolder configured in Tdarr; Navigatorr requires a dedicated outputFolder (fail closed)", libConfig.Name, libConfig.ID),
+		}, nil
+	}
+
+	// Verify that real Tdarr outputFolder matches configured TdarrLibraryConfig.output_folder (normalized paths)
+	normTdarrOut := filepath.Clean(filepath.ToSlash(libSettings.OutputFolder))
+	normCfgOut := filepath.Clean(filepath.ToSlash(libConfig.OutputFolder))
+	if normTdarrOut != normCfgOut {
+		return StepResult{
+			Status: StepFailed,
+			Error:  fmt.Sprintf("tdarr library %q (id: %s) outputFolder mismatch: Tdarr has %q, Navigatorr config expects %q; refusing submit (fail closed)", libConfig.Name, libConfig.ID, normTdarrOut, normCfgOut),
+		}, nil
 	}
 
 	serverPath := e.deps.Config.Tdarr.TranslateLocalToServer(cleanPath)
@@ -685,15 +706,18 @@ func (e *Engine) stepTranscodeAccept(ctx context.Context, ec *ExecutionContext) 
 		}
 	}
 
+	serverOutputPath := getString(ec.State, "tdarr_server_output_path")
+
 	return StepResult{
 		Status: StepCompleted,
 		Outputs: map[string]any{
-			"candidate_path":   candidatePath,
-			"output_path":      candidatePath,
-			"original_path":    origPath,
-			"original_intact":  true,
-			"replace_original": false,
-			"message":          "Transcode completed and verified. Candidate output ready. Original file physically preserved and intact.",
+			"candidate_path":     candidatePath,
+			"output_path":        candidatePath,
+			"server_output_path": serverOutputPath,
+			"original_path":      origPath,
+			"original_intact":    true,
+			"replace_original":   false,
+			"message":            "Transcode completed and verified. Candidate output ready. Original file physically preserved and intact.",
 		},
 	}, nil
 }

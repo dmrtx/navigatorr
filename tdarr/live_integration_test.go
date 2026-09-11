@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -107,6 +108,15 @@ func TestLiveTdarrFullTranscodeCycle(t *testing.T) {
 		t.Skip("TDARR_LIVE_TEST_DIR is required for full transcode cycle test (must be a local directory mapped to the test library).")
 	}
 
+	localRoot := os.Getenv("TDARR_LIVE_LOCAL_ROOT")
+	if localRoot == "" {
+		localRoot = "/Volumes/media"
+	}
+	serverRoot := os.Getenv("TDARR_LIVE_SERVER_ROOT")
+	if serverRoot == "" {
+		serverRoot = "/media"
+	}
+
 	client := tdarr.NewClient(tdarr.ClientOptions{
 		BaseURL: baseURL,
 		Timeout: 10 * time.Second,
@@ -197,18 +207,34 @@ func TestLiveTdarrFullTranscodeCycle(t *testing.T) {
 	}
 	defer st.Close()
 
-	resResolver, err := fsop.NewResolver([]string{testDir}, []string{testDir})
+	// Compute expected local output folder from Tdarr library settings
+	expectedLocalOutputFolder := libSettings.OutputFolder
+	if strings.HasPrefix(filepath.ToSlash(libSettings.OutputFolder), filepath.ToSlash(serverRoot)) {
+		rel := strings.TrimPrefix(filepath.ToSlash(libSettings.OutputFolder), filepath.ToSlash(serverRoot))
+		expectedLocalOutputFolder = filepath.Join(localRoot, rel)
+	}
+
+	allowedReadRoots := []string{testDir, localRoot, expectedLocalOutputFolder}
+	allowedWriteRoots := []string{testDir, localRoot, expectedLocalOutputFolder}
+
+	resResolver, err := fsop.NewResolver(allowedReadRoots, allowedWriteRoots)
 	if err != nil {
 		t.Fatalf("resolver error: %v", err)
 	}
 
 	cfg := &config.Config{
 		Media: config.MediaConfig{
-			AllowedReadRoots:  []string{testDir},
-			AllowedWriteRoots: []string{testDir},
+			AllowedReadRoots:  allowedReadRoots,
+			AllowedWriteRoots: allowedWriteRoots,
 		},
 		Tdarr: config.TdarrConfig{
 			Enabled: true,
+			PathMappings: []config.PathMapping{
+				{
+					Local:  localRoot,
+					Server: serverRoot,
+				},
+			},
 			Libraries: map[string]config.TdarrLibraryConfig{
 				"default": {
 					ID:           libraryID,
@@ -218,6 +244,24 @@ func TestLiveTdarrFullTranscodeCycle(t *testing.T) {
 			},
 		},
 	}
+
+	// Verify path translation before submit:
+	// 1) TranslateLocalToServer(syntheticFile) != syntheticFile
+	// 2) Translated server path must start with server root
+	// 3) Translated server path must NOT start with or contain /Volumes/
+	serverPath := cfg.Tdarr.TranslateLocalToServer(syntheticFile)
+	if serverPath == syntheticFile {
+		t.Fatalf("local path %q was not translated to server path! Ensure TDARR_LIVE_TEST_DIR (%s) is within TDARR_LIVE_LOCAL_ROOT (%s)", syntheticFile, testDir, localRoot)
+	}
+	if strings.Contains(serverPath, "/Volumes/") || strings.HasPrefix(serverPath, "/Volumes") {
+		t.Fatalf("CRITICAL: translated server path %q contains /Volumes/; refusing to send unmapped macOS path to Tdarr server", serverPath)
+	}
+	normServerRoot := filepath.Clean(filepath.ToSlash(serverRoot))
+	normServerPath := filepath.Clean(filepath.ToSlash(serverPath))
+	if !strings.HasPrefix(normServerPath, normServerRoot) {
+		t.Fatalf("translated server path %q does not start with expected server root %q", serverPath, normServerRoot)
+	}
+	t.Logf("Path translation verified before submit: local %s -> server %s", syntheticFile, serverPath)
 
 	engine := action.NewEngine(action.EngineDeps{
 		Store:   st,
@@ -296,6 +340,19 @@ func TestLiveTdarrFullTranscodeCycle(t *testing.T) {
 	}
 	t.Logf("candidate path found: %s", candidatePath)
 
+	// Verify candidate server path translation matches candidatePath
+	serverOut, _ := resumeRes.Outputs["server_output_path"].(string)
+	if serverOut == "" && completedStatus != nil {
+		serverOut = completedStatus.OutputPath
+	}
+	if serverOut != "" {
+		expectedLocal := cfg.Tdarr.TranslateServerToLocal(serverOut)
+		if filepath.Clean(candidatePath) != filepath.Clean(expectedLocal) {
+			t.Fatalf("candidate_path %q does not match translated server_output_path %q (server path: %s)", candidatePath, expectedLocal, serverOut)
+		}
+		t.Logf("Candidate server path translated successfully: server %s -> local %s", serverOut, expectedLocal)
+	}
+
 	if filepath.Clean(candidatePath) == filepath.Clean(syntheticFile) {
 		t.Fatalf("CRITICAL: candidate path is identical to original source file!")
 	}
@@ -307,6 +364,7 @@ func TestLiveTdarrFullTranscodeCycle(t *testing.T) {
 	if candFi.Size() == 0 {
 		t.Fatalf("candidate file is 0 bytes")
 	}
+	defer os.Remove(candidatePath)
 
 	// 10. Probe candidate with ffprobe
 	probeCmd := exec.Command(ffprobeBin, "-v", "error", "-show_entries", "stream=codec_type,codec_name", "-of", "json", candidatePath)

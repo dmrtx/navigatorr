@@ -161,11 +161,11 @@ Persistent, declarative multi-step workflows tracked in SQLite. Workflows surviv
 | `action_list` | Filter workflows by status (`running`, `waiting_external`, `waiting_decision`, `completed`, `failed`) |
 
 **Transcoding Workflow (`transcode_media`):**
-1. **Preflight**: Confines path within `allowed_read_roots`, verifies existence, and extracts initial stream metadata via `ffprobe`.
-2. **Submit to Tdarr**: Translates paths to Tdarr server schema, selects flow/profile, and queues file via `scan-files`. Idempotent — resumes will not re-submit.
+1. **Preflight**: Confines path within `allowed_read_roots`, verifies existence, computes initial SHA-256 hash, and extracts baseline stream metadata via `ffprobe`. Destructive replacement (`replace_original: true`) is strictly rejected.
+2. **Submit to Tdarr**: Validates candidate-safe library settings fail-closed directly against the Tdarr API (`folderToFolderConversion: true`, `deleteSource: false`, matching `output_folder`), translates paths between local filesystem and Tdarr server, and queues file via `scan-files`. Resumes are idempotent and will not re-submit.
 3. **Wait for Transcode**: Monitors progress and transitions into `waiting_external` state while in flight.
-4. **Detailed Validation**: Validates file size, duration, video codec, audio tracks (preserving Japanese/English/Spanish), subtitle tracks (preserving ASS/SSA), font attachments, and chapters. Any discrepancy transitions to `waiting_decision`.
-5. **Acceptance**: Keeps original intact by default (`replace_original: false`). If `replace_original: true`, verifies `allow_destructive: true` and executes atomic swap with backup rollback.
+4. **Detailed Validation**: Validates file size, duration, video codec, audio tracks (preserving Japanese/English/Spanish), subtitle tracks (preserving ASS/SSA), font attachments, and chapters. Any discrepancy transitions to `waiting_decision` with human-in-the-loop options (`accept_loss` / `reject`).
+5. **Acceptance (Candidate-Only)**: Transcoded media is emitted as a non-destructive candidate output. Navigatorr verifies the original file's physical SHA-256 hash before and after to guarantee absolute immutability. Destructive replacement (`replace_original: true`) is explicitly blocked in this version to guarantee zero data loss.
 
 ### Request Queue
 

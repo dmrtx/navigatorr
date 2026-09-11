@@ -19,12 +19,13 @@ import (
 )
 
 type mockTdarrClient struct {
-	submitCalls   int32
-	statusCalls   int32
-	cancelCalls   int32
-	submitFunc    func(ctx context.Context, req tdarr.SubmitRequest) (*tdarr.SubmitResponse, error)
-	jobStatusFunc func(ctx context.Context, ref string) (*tdarr.JobStatusResponse, error)
-	cancelFunc    func(ctx context.Context, req tdarr.CancelRequest) error
+	submitCalls    int32
+	statusCalls    int32
+	cancelCalls    int32
+	submitFunc     func(ctx context.Context, req tdarr.SubmitRequest) (*tdarr.SubmitResponse, error)
+	jobStatusFunc  func(ctx context.Context, ref string) (*tdarr.JobStatusResponse, error)
+	cancelFunc     func(ctx context.Context, req tdarr.CancelRequest) error
+	getLibraryFunc func(ctx context.Context, libraryID string) (*tdarr.LibrarySettings, error)
 }
 
 func (m *mockTdarrClient) Status(ctx context.Context) (*tdarr.ServerStatus, error) {
@@ -59,6 +60,9 @@ func (m *mockTdarrClient) JobStatus(ctx context.Context, ref string) (*tdarr.Job
 }
 
 func (m *mockTdarrClient) GetLibrary(ctx context.Context, libraryID string) (*tdarr.LibrarySettings, error) {
+	if m.getLibraryFunc != nil {
+		return m.getLibraryFunc(ctx, libraryID)
+	}
 	return &tdarr.LibrarySettings{
 		ID:                                   libraryID,
 		Name:                                 "Test Library",
@@ -1153,5 +1157,105 @@ func TestTranscode_StaleCompletedIgnoredUntilNewJobCompletes(t *testing.T) {
 	currentBytes, _ := os.ReadFile(origFile)
 	if !bytes.Equal(currentBytes, origBytes) {
 		t.Errorf("original file bytes modified during transcode!")
+	}
+}
+
+func TestTranscode_GetLibraryFailsClosedOnError(t *testing.T) {
+	mediaDir := t.TempDir()
+	origFile := filepath.Join(mediaDir, "FailClosed.mkv")
+	_ = os.WriteFile(origFile, []byte("content"), 0644)
+
+	probePath := createFakeFFprobeScript(t, defaultValidFFprobeJSON)
+	mockClient := &mockTdarrClient{
+		getLibraryFunc: func(ctx context.Context, libraryID string) (*tdarr.LibrarySettings, error) {
+			return nil, fmt.Errorf("network connection refused")
+		},
+	}
+
+	engine, _ := setupTranscodeEngine(t, mockClient, probePath, []string{mediaDir}, []string{mediaDir}, false)
+	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
+		"path": origFile,
+	})
+	if err != nil {
+		t.Fatalf("run error: %v", err)
+	}
+	if res.Status != StatusFailed {
+		t.Fatalf("expected failed status when GetLibrary fails, got %s", res.Status)
+	}
+	if !strings.Contains(res.Error, "unable to verify Tdarr candidate-safe library settings") || !strings.Contains(res.Error, "refusing submit") {
+		t.Errorf("expected fail-closed error message, got: %s", res.Error)
+	}
+	if atomic.LoadInt32(&mockClient.submitCalls) != 0 {
+		t.Errorf("expected 0 submit calls when GetLibrary fails, got %d", atomic.LoadInt32(&mockClient.submitCalls))
+	}
+}
+
+func TestTranscode_GetLibraryFailsClosedOnFolderToFolderFalse(t *testing.T) {
+	mediaDir := t.TempDir()
+	origFile := filepath.Join(mediaDir, "DestructiveLib.mkv")
+	_ = os.WriteFile(origFile, []byte("content"), 0644)
+
+	probePath := createFakeFFprobeScript(t, defaultValidFFprobeJSON)
+	mockClient := &mockTdarrClient{
+		getLibraryFunc: func(ctx context.Context, libraryID string) (*tdarr.LibrarySettings, error) {
+			return &tdarr.LibrarySettings{
+				ID:                       libraryID,
+				Name:                     "Destructive In-Place Library",
+				FolderToFolderConversion: false, // In-place replacement!
+				OutputFolder:             "/media/transcodes",
+			}, nil
+		},
+	}
+
+	engine, _ := setupTranscodeEngine(t, mockClient, probePath, []string{mediaDir}, []string{mediaDir}, false)
+	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
+		"path": origFile,
+	})
+	if err != nil {
+		t.Fatalf("run error: %v", err)
+	}
+	if res.Status != StatusFailed {
+		t.Fatalf("expected failed status, got %s", res.Status)
+	}
+	if !strings.Contains(res.Error, "folderToFolderConversion disabled") {
+		t.Errorf("expected folderToFolderConversion error, got: %s", res.Error)
+	}
+	if atomic.LoadInt32(&mockClient.submitCalls) != 0 {
+		t.Errorf("expected 0 submit calls on unsafe library, got %d", atomic.LoadInt32(&mockClient.submitCalls))
+	}
+}
+
+func TestTranscode_GetLibraryFailsClosedOnOutputFolderMismatch(t *testing.T) {
+	mediaDir := t.TempDir()
+	origFile := filepath.Join(mediaDir, "MismatchLib.mkv")
+	_ = os.WriteFile(origFile, []byte("content"), 0644)
+
+	probePath := createFakeFFprobeScript(t, defaultValidFFprobeJSON)
+	mockClient := &mockTdarrClient{
+		getLibraryFunc: func(ctx context.Context, libraryID string) (*tdarr.LibrarySettings, error) {
+			return &tdarr.LibrarySettings{
+				ID:                       libraryID,
+				Name:                     "Mismatch Library",
+				FolderToFolderConversion: true,
+				OutputFolder:             "/media/unexpected_output_dir",
+			}, nil
+		},
+	}
+
+	engine, _ := setupTranscodeEngine(t, mockClient, probePath, []string{mediaDir}, []string{mediaDir}, false)
+	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
+		"path": origFile,
+	})
+	if err != nil {
+		t.Fatalf("run error: %v", err)
+	}
+	if res.Status != StatusFailed {
+		t.Fatalf("expected failed status on outputFolder mismatch, got %s", res.Status)
+	}
+	if !strings.Contains(res.Error, "outputFolder mismatch") {
+		t.Errorf("expected mismatch error, got: %s", res.Error)
+	}
+	if atomic.LoadInt32(&mockClient.submitCalls) != 0 {
+		t.Errorf("expected 0 submit calls on outputFolder mismatch, got %d", atomic.LoadInt32(&mockClient.submitCalls))
 	}
 }
