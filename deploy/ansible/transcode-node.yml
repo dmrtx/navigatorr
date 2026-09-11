@@ -19,6 +19,10 @@
       - "/Volumes/media"
     transcode_max_parallel_jobs: 1
     transcode_quality: 65
+    transcode_worker_smoke_job_id: "ansible-worker-smoke"
+    transcode_worker_smoke_dir: "/Volumes/media/.navigatorr-smoke"
+    transcode_worker_smoke_source: "/Volumes/media/.navigatorr-smoke/input.mkv"
+    transcode_worker_smoke_candidate: "/Volumes/media/.navigatorr-smoke/candidate.mkv"
 
   pre_tasks:
     - name: Verify target is running macOS (Darwin)
@@ -176,3 +180,98 @@
         - /tmp/navigatorr_smoke_input.mkv
         - /tmp/navigatorr_smoke_output.mkv
       changed_when: false
+
+    - name: Exercise navigatorr-transcode submit/status lifecycle
+      when: media_storage_stat.stat.exists
+      block:
+        - name: Reset prior Ansible worker smoke artifacts
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - "{{ transcode_worker_smoke_dir }}"
+            - "{{ transcode_state_dir }}/{{ transcode_worker_smoke_job_id }}"
+          changed_when: false
+
+        - name: Create worker smoke directory inside allowed media root
+          ansible.builtin.file:
+            path: "{{ transcode_worker_smoke_dir }}"
+            state: directory
+            mode: "0755"
+          changed_when: false
+
+        - name: Generate worker lifecycle synthetic source
+          ansible.builtin.command:
+            cmd: >
+              {{ transcode_ffmpeg_path }} -y
+              -f lavfi -i testsrc=duration=2:size=320x240:rate=24
+              -f lavfi -i sine=duration=2:frequency=1000
+              -c:v libx264 -c:a aac
+              {{ transcode_worker_smoke_source }}
+          changed_when: false
+
+        - name: Capture worker smoke source SHA-256 before submit
+          ansible.builtin.stat:
+            path: "{{ transcode_worker_smoke_source }}"
+            checksum_algorithm: sha256
+          register: worker_smoke_source_before
+
+        - name: Submit synthetic job through navigatorr-transcode CLI
+          ansible.builtin.command:
+            cmd: "{{ transcode_remote_binary }} submit"
+            stdin: >-
+              {{ {
+                'id': transcode_worker_smoke_job_id,
+                'source_path': transcode_worker_smoke_source,
+                'candidate_path': transcode_worker_smoke_candidate,
+                'profile': 'hevc-vt'
+              } | to_json }}
+          register: worker_smoke_submit
+          changed_when: false
+          failed_when: worker_smoke_submit.rc != 0
+
+        - name: Wait for synthetic worker job to complete
+          ansible.builtin.command:
+            cmd: "{{ transcode_remote_binary }} status {{ transcode_worker_smoke_job_id }}"
+          register: worker_smoke_status
+          changed_when: false
+          retries: 30
+          delay: 1
+          until: (worker_smoke_status.stdout | from_json).status == "completed"
+          failed_when: >-
+            worker_smoke_status.rc != 0 or
+            ((worker_smoke_status.stdout | from_json).status in ["failed", "cancelled"])
+
+        - name: Verify worker candidate output codec is HEVC
+          ansible.builtin.command:
+            cmd: >
+              {{ transcode_ffprobe_path }} -v error
+              -select_streams v:0
+              -show_entries stream=codec_name
+              -of default=noprint_wrappers=1:nokey=1
+              {{ transcode_worker_smoke_candidate }}
+          register: worker_smoke_probe
+          changed_when: false
+          failed_when: worker_smoke_probe.stdout | trim != "hevc"
+
+        - name: Capture worker smoke source SHA-256 after completion
+          ansible.builtin.stat:
+            path: "{{ transcode_worker_smoke_source }}"
+            checksum_algorithm: sha256
+          register: worker_smoke_source_after
+
+        - name: Require synthetic source to remain byte-identical
+          ansible.builtin.assert:
+            that:
+              - worker_smoke_source_before.stat.checksum == worker_smoke_source_after.stat.checksum
+            fail_msg: "navigatorr-transcode modified the synthetic source file; refusing deployment."
+
+      always:
+        - name: Clean up worker lifecycle smoke artifacts
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - "{{ transcode_worker_smoke_dir }}"
+            - "{{ transcode_state_dir }}/{{ transcode_worker_smoke_job_id }}"
+          changed_when: false
