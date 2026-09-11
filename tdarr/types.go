@@ -114,10 +114,22 @@ type CancelRequest struct {
 	Cause    string `json:"cause,omitempty"`
 }
 
+// LibrarySettings represents a Tdarr library configuration from LibrarySettingsJSONDB.
+type LibrarySettings struct {
+	ID                                   string   `json:"_id"`
+	Name                                 string   `json:"name"`
+	Folders                              []string `json:"folders"`
+	FolderToFolderConversion             bool     `json:"folderToFolderConversion"`
+	FolderToFolderConversionDeleteSource bool     `json:"folderToFolderConversionDeleteSource"`
+	OutputFolder                         string   `json:"outputFolder"`
+	Flow                                 string   `json:"flow,omitempty"`
+}
+
 // Client defines the interface for interacting with Tdarr.
 type Client interface {
 	Status(ctx context.Context) (*ServerStatus, error)
 	Nodes(ctx context.Context) (map[string]Node, error)
+	GetLibrary(ctx context.Context, libraryID string) (*LibrarySettings, error)
 	Submit(ctx context.Context, req SubmitRequest) (*SubmitResponse, error)
 	JobStatus(ctx context.Context, ref string) (*JobStatusResponse, error)
 	Cancel(ctx context.Context, req CancelRequest) error

@@ -58,6 +58,16 @@ func (m *mockTdarrClient) JobStatus(ctx context.Context, ref string) (*tdarr.Job
 	}, nil
 }
 
+func (m *mockTdarrClient) GetLibrary(ctx context.Context, libraryID string) (*tdarr.LibrarySettings, error) {
+	return &tdarr.LibrarySettings{
+		ID:                                   libraryID,
+		Name:                                 "Test Library",
+		FolderToFolderConversion:             true,
+		FolderToFolderConversionDeleteSource: false,
+		OutputFolder:                         "/media/transcodes",
+	}, nil
+}
+
 func (m *mockTdarrClient) Cancel(ctx context.Context, req tdarr.CancelRequest) error {
 	atomic.AddInt32(&m.cancelCalls, 1)
 	if m.cancelFunc != nil {
@@ -607,8 +617,9 @@ func TestTranscode_RestartPersistResume(t *testing.T) {
 			Enabled: true,
 			Libraries: map[string]config.TdarrLibraryConfig{
 				"default": {
-					ID:   "anime_lib_123",
-					Name: "Anime",
+					ID:           "anime_lib_123",
+					Name:         "Anime",
+					OutputFolder: "/media/transcodes",
 				},
 			},
 		},
@@ -1047,5 +1058,100 @@ func TestTranscode_CandidateOutputReported(t *testing.T) {
 	}
 	if !bytes.Equal(curBytes, origBytes) {
 		t.Errorf("original file was modified on disk!")
+	}
+}
+
+func TestTranscode_StaleCompletedIgnoredUntilNewJobCompletes(t *testing.T) {
+	mediaDir := t.TempDir()
+	origFile := filepath.Join(mediaDir, "StaleTest.mkv")
+	origBytes := []byte("stale test original file bytes")
+	_ = os.WriteFile(origFile, origBytes, 0644)
+
+	outputDir := t.TempDir()
+	candidateFile := filepath.Join(outputDir, "StaleTest.mkv")
+	_ = os.WriteFile(candidateFile, []byte("candidate bytes from new job"), 0644)
+
+	probePath := createFakeFFprobeScript(t, defaultValidFFprobeJSON)
+
+	phase := 1
+	mockClient := &mockTdarrClient{
+		jobStatusFunc: func(ctx context.Context, ref string) (*tdarr.JobStatusResponse, error) {
+			switch phase {
+			case 1:
+				// First query: scanner hasn't run yet, Tdarr has stale record
+				return &tdarr.JobStatusResponse{
+					Found:   true,
+					Status:  "queued",
+					Details: "stale record detected; queued",
+				}, nil
+			case 2:
+				// Second query: new worker running with real JobID
+				return &tdarr.JobStatusResponse{
+					Found:      true,
+					Status:     "running",
+					Progress:   50.0,
+					JobId:      "job-new-session-1",
+					OutputPath: candidateFile,
+				}, nil
+			default:
+				// Third query: completed with real JobID
+				return &tdarr.JobStatusResponse{
+					Found:      true,
+					Status:     "completed",
+					Progress:   100.0,
+					JobId:      "job-new-session-1",
+					OutputPath: candidateFile,
+				}, nil
+			}
+		},
+	}
+
+	engine, _ := setupTranscodeEngine(t, mockClient, probePath, []string{mediaDir, outputDir}, []string{mediaDir, outputDir}, false)
+
+	// Step 1: Run action -> Tdarr returns queued (not completed!)
+	phase = 1
+	res1, err := engine.Run(context.Background(), "transcode_media", map[string]any{
+		"path": origFile,
+	})
+	if err != nil {
+		t.Fatalf("run error: %v", err)
+	}
+	if res1.Status != StatusWaitingExternal {
+		t.Fatalf("expected waiting_external, got %s", res1.Status)
+	}
+
+	// Step 2: Resume while worker is running with JobId -> Action captures JobId and stays waiting_external
+	phase = 2
+	res2, err := engine.Resume(context.Background(), res1.ID, "", nil)
+	if err != nil {
+		t.Fatalf("resume error: %v", err)
+	}
+	if res2.Status != StatusWaitingExternal {
+		t.Fatalf("expected waiting_external while worker runs, got %s", res2.Status)
+	}
+	if res2.State["job_id"] != "job-new-session-1" {
+		t.Errorf("expected discovered job_id job-new-session-1 in state, got %v", res2.State["job_id"])
+	}
+
+	// Step 3: Resume after worker completes -> Action completes and verifies candidate
+	phase = 3
+	res3, err := engine.Resume(context.Background(), res1.ID, "", nil)
+	if err != nil {
+		t.Fatalf("resume error: %v", err)
+	}
+	if res3.Status != StatusCompleted {
+		t.Fatalf("expected completed status, got %s (error: %s)", res3.Status, res3.Error)
+	}
+	if res3.Outputs["candidate_path"] != candidateFile {
+		t.Errorf("expected candidate_path %s, got %v", candidateFile, res3.Outputs["candidate_path"])
+	}
+	if res3.Outputs["original_intact"] != true {
+		t.Errorf("expected original_intact true, got %v", res3.Outputs["original_intact"])
+	}
+
+	// Verify original file remained intact
+	currentBytes, _ := os.ReadFile(origFile)
+	if !bytes.Equal(currentBytes, origBytes) {
+		t.Errorf("original file bytes modified during transcode!")
 	}
 }

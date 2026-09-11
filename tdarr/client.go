@@ -128,6 +128,33 @@ func (c *client) Nodes(ctx context.Context) (map[string]Node, error) {
 	return nodes, nil
 }
 
+// GetLibrary retrieves library configuration from LibrarySettingsJSONDB by library ID.
+func (c *client) GetLibrary(ctx context.Context, libraryID string) (*LibrarySettings, error) {
+	libraryID = strings.TrimSpace(libraryID)
+	if libraryID == "" {
+		return nil, errors.New("library_id is required")
+	}
+
+	crudPayload := map[string]any{
+		"data": map[string]any{
+			"collection": "LibrarySettingsJSONDB",
+			"mode":       "getById",
+			"docID":      libraryID,
+		},
+	}
+
+	var lib LibrarySettings
+	if err := c.doJSON(ctx, http.MethodPost, "/api/v2/cruddb", crudPayload, &lib); err != nil {
+		return nil, fmt.Errorf("fetching library settings from tdarr: %w", err)
+	}
+
+	if lib.ID == "" {
+		return nil, fmt.Errorf("tdarr library %q not found in LibrarySettingsJSONDB", libraryID)
+	}
+
+	return &lib, nil
+}
+
 // Submit sends a file to Tdarr to be scanned and queued for transcode.
 func (c *client) Submit(ctx context.Context, req SubmitRequest) (*SubmitResponse, error) {
 	filePath := strings.TrimSpace(req.FilePath)
@@ -220,6 +247,7 @@ func (c *client) JobStatus(ctx context.Context, ref string) (*JobStatusResponse,
 			JobReportExists bool           `json:"jobReportExists"`
 			Job             map[string]any `json:"job"`
 			JobRecord       map[string]any `json:"jobRecord"`
+			CreatedAt       any            `json:"createdAt"`
 		}
 		if err := c.doJSON(ctx, http.MethodGet, "/api/v2/job-reports/"+ext.JobID, nil, &report); err == nil && report.JobReportExists {
 			if report.IsJobRunning {
@@ -241,6 +269,23 @@ func (c *client) JobStatus(ctx context.Context, ref string) (*JobStatusResponse,
 					Details: fmt.Sprintf("%v", report.JobRecord["error"]),
 				}, nil
 			}
+
+			// If report has timestamp predating current submission, do not consider completed
+			repTime := extractTimestamp(report.CreatedAt)
+			if repTime == 0 && report.JobRecord != nil {
+				repTime = extractTimestamp(report.JobRecord["createdAt"])
+			}
+			if repTime == 0 && report.Job != nil {
+				repTime = extractTimestamp(report.Job["createdAt"])
+			}
+			if ext.SubmittedAt > 0 && repTime > 0 && repTime < ext.SubmittedAt-5 {
+				return &JobStatusResponse{
+					Found:   true,
+					Status:  "queued",
+					Details: "Prior job report predates current submission; waiting for new transcode",
+				}, nil
+			}
+
 			return &JobStatusResponse{
 				Found:      true,
 				Status:     "completed",
@@ -292,6 +337,68 @@ func (c *client) JobStatus(ctx context.Context, ref string) (*JobStatusResponse,
 					outPath, _ = fileDoc["outputFilePath"].(string)
 				}
 				jobId, _ := fileDoc["lastJobReport"].(string)
+
+				// Determine whether this completion is from before ext.SubmittedAt
+				if ext.SubmittedAt > 0 {
+					var recordTime int64
+					for _, key := range []string{"statTime", "scanTime", "mtime", "updatedAt", "createdAt"} {
+						if ts := extractTimestamp(fileDoc[key]); ts > 0 {
+							recordTime = ts
+							break
+						}
+					}
+
+					// If lastJobReport is present, check its createdAt timestamp
+					if jobId != "" && !strings.Contains(jobId, "/") {
+						var rep struct {
+							CreatedAt any            `json:"createdAt"`
+							JobRecord map[string]any `json:"jobRecord"`
+							Job       map[string]any `json:"job"`
+						}
+						if err := c.doJSON(ctx, http.MethodGet, "/api/v2/job-reports/"+jobId, nil, &rep); err == nil {
+							if rts := extractTimestamp(rep.CreatedAt); rts > 0 {
+								recordTime = rts
+							} else if rep.JobRecord != nil {
+								if rts := extractTimestamp(rep.JobRecord["createdAt"]); rts > 0 {
+									recordTime = rts
+								}
+							} else if rep.Job != nil {
+								if rts := extractTimestamp(rep.Job["createdAt"]); rts > 0 {
+									recordTime = rts
+								}
+							}
+						}
+					}
+
+					// If evidence proves this record is older than our submission (with 5s grace):
+					if recordTime > 0 && recordTime < ext.SubmittedAt-5 {
+						return &JobStatusResponse{
+							Found:   true,
+							Status:  "queued",
+							Details: "Prior transcode record predates current submission; file is queued for new transcode",
+						}, nil
+					}
+
+					// If we have not yet observed a worker for this submission (ext.JobID == ""),
+					// and have no record timestamp proving completion after SubmittedAt, do not assume completed!
+					if ext.JobID == "" && (recordTime == 0 || recordTime < ext.SubmittedAt-5) {
+						return &JobStatusResponse{
+							Found:   true,
+							Status:  "queued",
+							Details: "Newly submitted file awaiting worker transcode; prior record is not from this submission",
+						}, nil
+					}
+
+					// If ext.JobID was captured from a worker of this submission, but fileDoc still points to an older lastJobReport:
+					if ext.JobID != "" && jobId != "" && ext.JobID != jobId {
+						return &JobStatusResponse{
+							Found:   true,
+							Status:  "queued",
+							Details: "File in database has not updated to current job yet",
+						}, nil
+					}
+				}
+
 				return &JobStatusResponse{
 					Found:      true,
 					Status:     "completed",
@@ -464,4 +571,37 @@ func isJobRecordFailed(record map[string]any) bool {
 		return true
 	}
 	return false
+}
+
+func extractTimestamp(val any) int64 {
+	if val == nil {
+		return 0
+	}
+	switch v := val.(type) {
+	case float64:
+		ts := int64(v)
+		if ts > 1e11 {
+			return ts / 1000
+		}
+		return ts
+	case int64:
+		if v > 1e11 {
+			return v / 1000
+		}
+		return v
+	case int:
+		return int64(v)
+	case string:
+		v = strings.TrimSpace(v)
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			if n > 1e11 {
+				return n / 1000
+			}
+			return n
+		}
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			return t.Unix()
+		}
+	}
+	return 0
 }

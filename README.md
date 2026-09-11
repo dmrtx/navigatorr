@@ -287,18 +287,23 @@ tdarr:
     anime_hevc:
       id: "2jLSMhxug"             # Exact Tdarr library dbID configured in Tdarr with your desired Flow
       name: "Anime HEVC"
-      output_folder: "/Volumes/media/transcodes"
+      output_folder: "/media/transcodes/anime" # Tdarr Server namespace (translated via path_mappings)
+      candidate_only: true        # Non-destructive candidate mode (REQUIRED; fail closed if false)
     standard_hevc:
       id: "9kLMjxY7a"
       name: "TV Standard HEVC"
+      output_folder: "/media/transcodes/tv"
+      candidate_only: true
   path_mappings:
     - local: "/Volumes/media"
       server: "/media"
 ```
 
-> 🛡️ **Zero-Loss Candidate Mode:** All transcode jobs run in non-destructive candidate mode. Original files are physically and cryptographically verified (SHA-256) to remain intact. `replace_original` defaults to `false`; setting it to `true` is rejected. If stream discrepancies occur (e.g. lost audio/subtitles), Navigatorr enters `waiting_decision`, allowing users to resume with `accept_loss` or `reject`.
-
-> ℹ️ **Container Deployments & Path Mapping:** Paths configured under `media.allowed_read_roots` and `media.allowed_write_roots` must match paths **inside the Docker container**, not on the host. See [DOCKER.md](DOCKER.md) for full Docker Compose recipes, path mapping diagrams, and the safety permissions matrix.
+> 🛡️ **Candidate-Only Non-Destructive Protection:**
+> 1. **Path Namespaces:** `output_folder` is configured strictly in the **Tdarr Server namespace** (e.g. `/media/transcodes`). Navigatorr translates it to the local workspace via `path_mappings`.
+> 2. **Safety Gates (Fail Closed):** `output_folder` is required and `candidate_only` must be true. Navigatorr queries Tdarr's `LibrarySettingsJSONDB` before submit to verify that `folderToFolderConversion: true`, `deleteSource: false`, and `outputFolder` is present on the library.
+> 3. **Cryptographic Verification:** Navigatorr computes the SHA-256 hash of the original media before submit and re-verifies bit-for-bit equality after the transcode completes.
+> 4. **Validation Decisions:** If stream discrepancies occur (e.g. dropped audio tracks or lost subtitles), Navigatorr pauses in `waiting_decision`, allowing users to resume with `accept_loss` or `reject`.
 
 ### Connect to Claude Code
 

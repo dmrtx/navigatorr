@@ -469,10 +469,13 @@ tdarr:
     anime_hevc:
       id: "2jLSMhxug"             # Exact Tdarr library dbID (configured in Tdarr with your desired Flow)
       name: "Anime HEVC"
-      output_folder: "/Volumes/media/transcodes"
+      output_folder: "/media/transcodes/anime" # Tdarr Server namespace (translated via path_mappings)
+      candidate_only: true        # Non-destructive candidate mode (REQUIRED; fail closed if false)
     standard_hevc:
       id: "9kLMjxY7a"
       name: "TV Standard HEVC"
+      output_folder: "/media/transcodes/tv"
+      candidate_only: true
   path_mappings:
     - local: "/Volumes/media"
       server: "/media"

@@ -119,10 +119,11 @@ tdarr:
   timeout: "15s"
   libraries:
     anime_hevc:
-      id: "2yO9ABC123"            # Real Tdarr library dbID
+      id: "2yO9ABC123"            # Real Tdarr library dbID (configured in Tdarr with your desired Flow)
       name: "Anime HEVC Staging"  # Human-readable library name
-      flow: "apple_silicon_hevc"  # Expected Flow configured on this library in Tdarr
-      output_folder: "/media/transcodes/anime" # Dedicated output folder for non-destructive candidates
+      flow: "apple_silicon_hevc"  # Informational: expected Flow configured on this library in Tdarr
+      output_folder: "/media/transcodes/anime" # Dedicated output folder in Tdarr Server namespace (REQUIRED)
+      candidate_only: true        # Non-destructive candidate mode (defaults to true; must not be false)
   path_mappings:                # Local path to Tdarr Server path translation
     - local: "/Volumes/media"
       server: "/media"

@@ -3,6 +3,7 @@ package tdarr
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -322,5 +323,164 @@ func TestCancel_Success(t *testing.T) {
 	data, ok := cancelledData["data"].(map[string]any)
 	if !ok || data["nodeID"] != "node1" || data["workerID"] != "w1" {
 		t.Errorf("unexpected cancel payload: %+v", cancelledData)
+	}
+}
+
+func TestJobStatus_StaleCompletedIgnoredForNewSubmit(t *testing.T) {
+	submitTime := time.Now().Unix()
+	serverPath := "/media/Anime/Monster/ep01.mkv"
+	libID := "anime_lib_123"
+
+	// 1. Initial State: Stale completed record in FileJSONDB and old job report
+	phase := 1
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v2/get-nodes":
+			if phase == 2 {
+				// Phase 2: New worker is actively running
+				w.Write([]byte(`{
+					"node1": {
+						"_id": "node1",
+						"nodeName": "Davids-M1-Max",
+						"workers": {
+							"w1": {
+								"_id": "w1",
+								"file": "/media/Anime/Monster/ep01.mkv",
+								"status": "Transcoding",
+								"percentage": 30.0,
+								"jobId": "new-job-today-789",
+								"idle": false
+							}
+						}
+					}
+				}`))
+				return
+			}
+			// Phase 1 and 3: No active workers
+			w.Write([]byte(`{}`))
+
+		case "/api/v2/cruddb":
+			var req map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			data := req["data"].(map[string]any)
+			if data["collection"] == "FileJSONDB" {
+				if phase == 1 {
+					// Stale success from yesterday (1 hour before submit)
+					w.Write([]byte(fmt.Sprintf(`{
+						"TranscodeDecisionMaker": "Success",
+						"lastJobReport": "old-job-yesterday-123",
+						"outputFile": "/media/transcodes/ep01.mkv",
+						"statTime": %d
+					}`, submitTime-3600)))
+					return
+				}
+			}
+			w.Write([]byte(`{}`))
+
+		case "/api/v2/job-reports/old-job-yesterday-123":
+			w.Write([]byte(fmt.Sprintf(`{
+				"jobId": "old-job-yesterday-123",
+				"jobReportExists": true,
+				"isJobRunning": false,
+				"createdAt": %d,
+				"downloadPath": "/media/transcodes/ep01.mkv",
+				"jobRecord": {"status": "success"}
+			}`, (submitTime-3600)*1000)))
+
+		case "/api/v2/job-reports/new-job-today-789":
+			if phase == 3 {
+				// Phase 3: New worker completed!
+				w.Write([]byte(fmt.Sprintf(`{
+					"jobId": "new-job-today-789",
+					"jobReportExists": true,
+					"isJobRunning": false,
+					"createdAt": %d,
+					"downloadPath": "/media/transcodes/ep01.mkv",
+					"jobRecord": {"status": "success"}
+				}`, (submitTime+20)*1000)))
+				return
+			}
+			http.NotFound(w, r)
+
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	c := NewClient(ClientOptions{BaseURL: ts.URL})
+
+	// Submission reference contains SubmittedAt timestamp
+	ref := fmt.Sprintf("%s:%d:%s", libID, submitTime, serverPath)
+
+	// Step 1: Query JobStatus before worker starts -> MUST NOT return completed! Must return queued!
+	phase = 1
+	st1, err := c.JobStatus(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if st1.Status == "completed" {
+		t.Fatalf("FAILED: JobStatus returned completed on a stale record predating submitTime!")
+	}
+	if st1.Status != "queued" {
+		t.Errorf("expected status queued for stale record, got %s", st1.Status)
+	}
+
+	// Step 2: New worker appears on node with real JobID
+	phase = 2
+	st2, err := c.JobStatus(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if st2.Status != "running" {
+		t.Errorf("expected status running, got %s", st2.Status)
+	}
+	if st2.JobId != "new-job-today-789" {
+		t.Errorf("expected JobId new-job-today-789, got %s", st2.JobId)
+	}
+
+	// Step 3: Worker finishes and new report exists -> returns completed with discovered JobID!
+	phase = 3
+	refWithJob := fmt.Sprintf("%s:%s:%s", libID, "new-job-today-789", serverPath)
+	st3, err := c.JobStatus(context.Background(), refWithJob)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if st3.Status != "completed" {
+		t.Errorf("expected status completed after new worker finishes, got %s", st3.Status)
+	}
+	if st3.JobId != "new-job-today-789" {
+		t.Errorf("expected JobId new-job-today-789, got %s", st3.JobId)
+	}
+	if st3.OutputPath != "/media/transcodes/ep01.mkv" {
+		t.Errorf("unexpected output path: %s", st3.OutputPath)
+	}
+}
+
+func TestGetLibrary_Success(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v2/cruddb" {
+			w.Write([]byte(`{
+				"_id": "lib-anime-test",
+				"name": "Anime",
+				"folderToFolderConversion": true,
+				"folderToFolderConversionDeleteSource": false,
+				"outputFolder": "/media/transcodes"
+			}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer ts.Close()
+
+	c := NewClient(ClientOptions{BaseURL: ts.URL})
+	lib, err := c.GetLibrary(context.Background(), "lib-anime-test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if lib.ID != "lib-anime-test" || !lib.FolderToFolderConversion || lib.FolderToFolderConversionDeleteSource || lib.OutputFolder != "/media/transcodes" {
+		t.Errorf("unexpected library settings: %+v", lib)
 	}
 }

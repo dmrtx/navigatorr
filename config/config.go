@@ -98,38 +98,67 @@ type TdarrConfig struct {
 }
 
 type TdarrLibraryConfig struct {
-	ID           string `yaml:"id"`            // Real Tdarr library dbID (e.g. "2yO9ABC123")
-	Name         string `yaml:"name"`          // Human-readable library name
-	Flow         string `yaml:"flow"`          // Expected Flow name or ID (informational)
-	OutputFolder string `yaml:"output_folder"` // Optional dedicated output folder for non-destructive candidate output
+	ID            string `yaml:"id"`             // Real Tdarr library dbID (e.g. "2yO9ABC123")
+	Name          string `yaml:"name"`           // Human-readable library name
+	Flow          string `yaml:"flow"`           // Expected Flow name or ID (informational)
+	OutputFolder  string `yaml:"output_folder"`  // Dedicated output folder in Tdarr Server path namespace (REQUIRED)
+	CandidateOnly *bool  `yaml:"candidate_only"` // Must be true (defaults to true) to ensure non-destructive candidate transcode
+}
+
+// IsCandidateOnly returns whether candidate_only is active (defaults to true if omitted).
+func (l TdarrLibraryConfig) IsCandidateOnly() bool {
+	if l.CandidateOnly == nil {
+		return true
+	}
+	return *l.CandidateOnly
 }
 
 // ResolveLibrary resolves a configured Tdarr library for the given profile name.
 // If profile is empty and exactly one library is configured, that library is returned.
-// Returns an error if the profile does not exist or if the resolved library has an empty ID.
+// Returns an error if the profile does not exist, if the library ID is empty,
+// if candidate_only is false, or if output_folder is missing.
 func (c TdarrConfig) ResolveLibrary(profile string) (*TdarrLibraryConfig, error) {
 	if len(c.Libraries) == 0 {
 		return nil, fmt.Errorf("no tdarr libraries configured in settings")
 	}
+	var lib TdarrLibraryConfig
+	var found bool
 	if profile != "" {
-		lib, ok := c.Libraries[profile]
+		l, ok := c.Libraries[profile]
 		if !ok {
 			return nil, fmt.Errorf("tdarr library profile %q not found in config", profile)
 		}
-		if strings.TrimSpace(lib.ID) == "" {
-			return nil, fmt.Errorf("tdarr library profile %q has empty library id", profile)
+		lib = l
+		found = true
+	} else if len(c.Libraries) == 1 {
+		for _, l := range c.Libraries {
+			lib = l
+			found = true
+			break
 		}
-		return &lib, nil
+	} else {
+		return nil, fmt.Errorf("multiple tdarr libraries configured; profile name is required to select one")
 	}
-	if len(c.Libraries) == 1 {
-		for _, lib := range c.Libraries {
-			if strings.TrimSpace(lib.ID) == "" {
-				return nil, fmt.Errorf("configured default tdarr library has empty id")
-			}
-			return &lib, nil
-		}
+
+	if !found {
+		return nil, fmt.Errorf("unable to resolve tdarr library")
 	}
-	return nil, fmt.Errorf("multiple tdarr libraries configured; profile name is required to select one")
+
+	if strings.TrimSpace(lib.ID) == "" {
+		return nil, fmt.Errorf("tdarr library %q has empty library id", lib.Name)
+	}
+
+	// Fail closed if candidate_only is explicitly disabled
+	if !lib.IsCandidateOnly() {
+		return nil, fmt.Errorf("tdarr library %q (id: %s): candidate_only must not be false; destructive in-place transcode is disabled in this version", lib.Name, lib.ID)
+	}
+
+	// Fail closed if output_folder is missing or empty
+	if strings.TrimSpace(lib.OutputFolder) == "" {
+		return nil, fmt.Errorf("tdarr library %q (id: %s): output_folder is required (in Tdarr Server path namespace) to guarantee non-destructive candidate transcode; fail closed", lib.Name, lib.ID)
+	}
+
+	return &lib, nil
 }
 
 type PathMapping struct {

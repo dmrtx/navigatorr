@@ -312,10 +312,13 @@ tdarr:
 		}
 	})
 
-	t.Run("resolve library errors when profile missing or empty", func(t *testing.T) {
+	t.Run("resolve library errors when profile missing, empty, or missing output_folder", func(t *testing.T) {
+		candFalse := false
 		tc := TdarrConfig{
 			Libraries: map[string]TdarrLibraryConfig{
-				"empty_id": {ID: ""},
+				"empty_id":        {ID: "", OutputFolder: "/media/transcodes"},
+				"missing_out":     {ID: "lib-1", OutputFolder: ""},
+				"candidate_false": {ID: "lib-2", OutputFolder: "/media/transcodes", CandidateOnly: &candFalse},
 			},
 		}
 		if _, err := tc.ResolveLibrary("missing"); err == nil {
@@ -323,6 +326,12 @@ tdarr:
 		}
 		if _, err := tc.ResolveLibrary("empty_id"); err == nil {
 			t.Error("expected error for profile with empty id, got nil")
+		}
+		if _, err := tc.ResolveLibrary("missing_out"); err == nil {
+			t.Error("expected error for missing output_folder, got nil")
+		}
+		if _, err := tc.ResolveLibrary("candidate_false"); err == nil {
+			t.Error("expected error for candidate_only=false, got nil")
 		}
 		noLibs := TdarrConfig{}
 		if _, err := noLibs.ResolveLibrary("any"); err == nil {

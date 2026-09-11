@@ -35,6 +35,16 @@ func (f *fakeTdarrClient) Nodes(ctx context.Context) (map[string]tdarr.Node, err
 	}, nil
 }
 
+func (f *fakeTdarrClient) GetLibrary(ctx context.Context, libraryID string) (*tdarr.LibrarySettings, error) {
+	return &tdarr.LibrarySettings{
+		ID:                                  libraryID,
+		Name:                                "Test Library",
+		FolderToFolderConversion:            true,
+		FolderToFolderConversionDeleteSource: false,
+		OutputFolder:                        "/media/transcodes",
+	}, nil
+}
+
 func (f *fakeTdarrClient) Submit(ctx context.Context, req tdarr.SubmitRequest) (*tdarr.SubmitResponse, error) {
 	if f.submitFunc != nil {
 		return f.submitFunc(ctx, req)

@@ -161,6 +161,21 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	ec.State["original_size"] = fi.Size()
 	ec.State["original"] = origMap
 
+	// Validate library configuration in preflight to fail closed early
+	profile := strings.TrimSpace(getString(ec.Inputs, "profile"))
+	if e.deps.Config != nil && e.deps.Config.Tdarr.Enabled {
+		libConfig, err := e.deps.Config.Tdarr.ResolveLibrary(profile)
+		if err != nil {
+			return StepResult{
+				Status: StepFailed,
+				Error:  fmt.Sprintf("preflight tdarr library resolution failed: %v", err),
+			}, nil
+		}
+		ec.State["tdarr_library_id"] = libConfig.ID
+		ec.State["tdarr_library_name"] = libConfig.Name
+		ec.State["tdarr_output_folder"] = libConfig.OutputFolder
+	}
+
 	return StepResult{
 		Status: StepCompleted,
 		Outputs: map[string]any{
@@ -206,6 +221,28 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 			Status: StepFailed,
 			Error:  fmt.Sprintf("failed to resolve Tdarr library for profile %q: %v", profile, err),
 		}, nil
+	}
+
+	// Validate library settings directly in Tdarr API if accessible
+	if libSettings, err := e.deps.Tdarr.GetLibrary(ctx, libConfig.ID); err == nil && libSettings != nil {
+		if !libSettings.FolderToFolderConversion {
+			return StepResult{
+				Status: StepFailed,
+				Error:  fmt.Sprintf("tdarr library %q (id: %s) has folderToFolderConversion disabled in Tdarr settings; Navigatorr requires folderToFolderConversion: true with dedicated output folder to ensure original files are not modified in-place", libConfig.Name, libConfig.ID),
+			}, nil
+		}
+		if libSettings.FolderToFolderConversionDeleteSource {
+			return StepResult{
+				Status: StepFailed,
+				Error:  fmt.Sprintf("tdarr library %q (id: %s) has deleteSource enabled in Tdarr settings; Navigatorr requires deleteSource: false to ensure original files are never deleted", libConfig.Name, libConfig.ID),
+			}, nil
+		}
+		if strings.TrimSpace(libSettings.OutputFolder) == "" {
+			return StepResult{
+				Status: StepFailed,
+				Error:  fmt.Sprintf("tdarr library %q (id: %s) has no outputFolder configured in Tdarr; Navigatorr requires a dedicated outputFolder", libConfig.Name, libConfig.ID),
+			}, nil
+		}
 	}
 
 	serverPath := e.deps.Config.Tdarr.TranslateLocalToServer(cleanPath)
@@ -284,18 +321,25 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 	case "running", "queued":
 		if st.JobId != "" {
 			ec.State["tdarr_job_id"] = st.JobId
+			currRef := getString(ec.State, "external_reference")
+			parsedRef := tdarr.ParseExternalReference(currRef)
+			if parsedRef.JobID != st.JobId {
+				parsedRef.JobID = st.JobId
+				ec.State["external_reference"] = parsedRef.String()
+			}
 		}
 		return StepResult{
 			Status:           StepWaitingExternal,
 			WaitingCondition: "tdarr_transcode_complete",
 			WaitingReason:    fmt.Sprintf("Tdarr is transcoding media (%s, progress: %.1f%%, eta: %s, fps: %.1f)", st.Status, st.Progress, st.ETA, st.FPS),
 			Outputs: map[string]any{
-				"tdarr_status":   st.Status,
-				"progress":       st.Progress,
-				"eta":            st.ETA,
-				"fps":            st.FPS,
-				"worker_details": st.Details,
-				"job_id":         st.JobId,
+				"tdarr_status":       st.Status,
+				"progress":           st.Progress,
+				"eta":                st.ETA,
+				"fps":                st.FPS,
+				"worker_details":     st.Details,
+				"job_id":             st.JobId,
+				"external_reference": getString(ec.State, "external_reference"),
 			},
 		}, nil
 
@@ -315,6 +359,12 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 	case "completed":
 		if st.JobId != "" {
 			ec.State["tdarr_job_id"] = st.JobId
+			currRef := getString(ec.State, "external_reference")
+			parsedRef := tdarr.ParseExternalReference(currRef)
+			if parsedRef.JobID != st.JobId {
+				parsedRef.JobID = st.JobId
+				ec.State["external_reference"] = parsedRef.String()
+			}
 		}
 
 		serverOutput := st.OutputPath
@@ -344,6 +394,8 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 				"candidate_path":     localOutput,
 				"output_path":        localOutput,
 				"server_output_path": serverOutput,
+				"job_id":             st.JobId,
+				"external_reference": getString(ec.State, "external_reference"),
 			},
 		}, nil
 
