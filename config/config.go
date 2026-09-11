@@ -22,7 +22,7 @@ type Config struct {
 	Transmission      TransmissionConfig       `yaml:"transmission"`
 	QBittorrent       QBittorrentConfig        `yaml:"qbittorrent"`
 	SABnzbd           SABnzbdConfig            `yaml:"sabnzbd"`
-	Tdarr             TdarrConfig              `yaml:"tdarr"`
+	Transcode         TranscodeConfig          `yaml:"transcode"`
 	Queue             QueueConfig              `yaml:"queue"`
 	Database          DatabaseConfig           `yaml:"database"`
 	Media             MediaConfig              `yaml:"media"`
@@ -88,130 +88,34 @@ type SABnzbdConfig struct {
 	URLBase string `yaml:"url_base"` // SABnzbd's own url_base, "/sabnzbd" by default
 }
 
-type TdarrConfig struct {
-	Enabled      bool                          `yaml:"enabled"`
-	URL          string                        `yaml:"url"`
-	APIKey       string                        `yaml:"api_key"`
-	Timeout      string                        `yaml:"timeout"`
-	Libraries    map[string]TdarrLibraryConfig `yaml:"libraries"`
-	PathMappings []PathMapping                 `yaml:"path_mappings"`
+type TranscodeConfig struct {
+	Enabled  bool              `yaml:"enabled"`
+	Executor string            `yaml:"executor"` // "ssh"
+	SSH      SSHExecutorConfig `yaml:"ssh"`
 }
 
-type TdarrLibraryConfig struct {
-	ID            string `yaml:"id"`             // Real Tdarr library dbID (e.g. "2yO9ABC123")
-	Name          string `yaml:"name"`           // Human-readable library name
-	Flow          string `yaml:"flow"`           // Expected Flow name or ID (informational)
-	OutputFolder  string `yaml:"output_folder"`  // Dedicated output folder in Tdarr Server path namespace (REQUIRED)
-	CandidateOnly *bool  `yaml:"candidate_only"` // Must be true (defaults to true) to ensure non-destructive candidate transcode
+type SSHExecutorConfig struct {
+	Host           string                 `yaml:"host"`
+	User           string                 `yaml:"user"`
+	Command        string                 `yaml:"command"`
+	IdentityFile   string                 `yaml:"identity_file"`
+	ConnectTimeout string                 `yaml:"connect_timeout"`
+	PathMappings   []TranscodePathMapping `yaml:"path_mappings"`
 }
 
-// IsCandidateOnly returns whether candidate_only is active (defaults to true if omitted).
-func (l TdarrLibraryConfig) IsCandidateOnly() bool {
-	if l.CandidateOnly == nil {
-		return true
-	}
-	return *l.CandidateOnly
-}
-
-// ResolveLibrary resolves a configured Tdarr library for the given profile name.
-// If profile is empty and exactly one library is configured, that library is returned.
-// Returns an error if the profile does not exist, if the library ID is empty,
-// if candidate_only is false, or if output_folder is missing.
-func (c TdarrConfig) ResolveLibrary(profile string) (*TdarrLibraryConfig, error) {
-	if len(c.Libraries) == 0 {
-		return nil, fmt.Errorf("no tdarr libraries configured in settings")
-	}
-	var lib TdarrLibraryConfig
-	var found bool
-	if profile != "" {
-		l, ok := c.Libraries[profile]
-		if !ok {
-			return nil, fmt.Errorf("tdarr library profile %q not found in config", profile)
-		}
-		lib = l
-		found = true
-	} else if len(c.Libraries) == 1 {
-		for _, l := range c.Libraries {
-			lib = l
-			found = true
-			break
-		}
-	} else {
-		return nil, fmt.Errorf("multiple tdarr libraries configured; profile name is required to select one")
-	}
-
-	if !found {
-		return nil, fmt.Errorf("unable to resolve tdarr library")
-	}
-
-	if strings.TrimSpace(lib.ID) == "" {
-		return nil, fmt.Errorf("tdarr library %q has empty library id", lib.Name)
-	}
-
-	// Fail closed if candidate_only is explicitly disabled
-	if !lib.IsCandidateOnly() {
-		return nil, fmt.Errorf("tdarr library %q (id: %s): candidate_only must not be false; destructive in-place transcode is disabled in this version", lib.Name, lib.ID)
-	}
-
-	// Fail closed if output_folder is missing or empty
-	if strings.TrimSpace(lib.OutputFolder) == "" {
-		return nil, fmt.Errorf("tdarr library %q (id: %s): output_folder is required (in Tdarr Server path namespace) to guarantee non-destructive candidate transcode; fail closed", lib.Name, lib.ID)
-	}
-
-	return &lib, nil
-}
-
-type PathMapping struct {
+type TranscodePathMapping struct {
 	Local  string `yaml:"local"`
-	Server string `yaml:"server"`
+	Remote string `yaml:"remote"`
 }
 
-// TimeoutDuration parses the timeout duration or defaults to 15s.
-func (c TdarrConfig) TimeoutDuration() time.Duration {
-	if c.Timeout != "" {
-		if d, err := time.ParseDuration(c.Timeout); err == nil && d > 0 {
+// TimeoutDuration returns the parsed connect_timeout duration or defaults to 5s.
+func (s SSHExecutorConfig) TimeoutDuration() time.Duration {
+	if s.ConnectTimeout != "" {
+		if d, err := time.ParseDuration(s.ConnectTimeout); err == nil && d > 0 {
 			return d
 		}
 	}
-	return 15 * time.Second
-}
-
-// TranslateLocalToServer converts a local filesystem path to a Tdarr Server path.
-func (c TdarrConfig) TranslateLocalToServer(localPath string) string {
-	cleanLocal := filepath.Clean(localPath)
-	for _, m := range c.PathMappings {
-		mappedLocal := filepath.Clean(m.Local)
-		if mappedLocal == "" || m.Server == "" {
-			continue
-		}
-		if cleanLocal == mappedLocal {
-			return filepath.Clean(m.Server)
-		}
-		if strings.HasPrefix(cleanLocal, mappedLocal+string(filepath.Separator)) {
-			rel := strings.TrimPrefix(cleanLocal, mappedLocal)
-			return filepath.ToSlash(filepath.Join(m.Server, rel))
-		}
-	}
-	return cleanLocal
-}
-
-// TranslateServerToLocal converts a Tdarr Server path back to a local filesystem path.
-func (c TdarrConfig) TranslateServerToLocal(serverPath string) string {
-	cleanServer := filepath.ToSlash(serverPath)
-	for _, m := range c.PathMappings {
-		mappedServer := filepath.ToSlash(m.Server)
-		if mappedServer == "" || m.Local == "" {
-			continue
-		}
-		if cleanServer == mappedServer {
-			return filepath.Clean(m.Local)
-		}
-		if strings.HasPrefix(cleanServer, mappedServer+"/") {
-			rel := strings.TrimPrefix(cleanServer, mappedServer)
-			return filepath.Clean(filepath.Join(m.Local, rel))
-		}
-	}
-	return cleanServer
+	return 5 * time.Second
 }
 
 func DefaultConfigPath() string {
@@ -259,14 +163,14 @@ var structTypeToSection = map[string]string{
 	"QBittorrentConfig":         "qbittorrent",
 	"config.SABnzbdConfig":      "sabnzbd",
 	"SABnzbdConfig":             "sabnzbd",
-	"config.TdarrConfig":        "tdarr",
-	"TdarrConfig":               "tdarr",
-	"config.TdarrLibraryConfig": "tdarr",
-	"TdarrLibraryConfig":        "tdarr",
-	"config.PathMapping":        "tdarr",
-	"PathMapping":               "tdarr",
-	"config.ServiceConfig":      "services",
-	"ServiceConfig":             "services",
+	"config.TranscodeConfig":      "transcode",
+	"TranscodeConfig":             "transcode",
+	"config.SSHExecutorConfig":    "transcode",
+	"SSHExecutorConfig":           "transcode",
+	"config.TranscodePathMapping": "transcode",
+	"TranscodePathMapping":        "transcode",
+	"config.ServiceConfig":        "services",
+	"ServiceConfig":               "services",
 }
 
 var topLevelKeys = map[string]bool{
@@ -274,7 +178,7 @@ var topLevelKeys = map[string]bool{
 	"transmission":         true,
 	"qbittorrent":          true,
 	"sabnzbd":              true,
-	"tdarr":                true,
+	"transcode":            true,
 	"queue":                true,
 	"database":             true,
 	"media":                true,

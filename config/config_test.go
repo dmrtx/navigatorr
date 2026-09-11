@@ -257,7 +257,7 @@ completely_unknown_key: 123
 	})
 }
 
-func TestTdarrConfig(t *testing.T) {
+func TestTranscodeConfig(t *testing.T) {
 	tempDir := t.TempDir()
 	writeCfg := func(filename, content string) string {
 		p := filepath.Join(tempDir, filename)
@@ -267,134 +267,71 @@ func TestTdarrConfig(t *testing.T) {
 		return p
 	}
 
-	t.Run("parses valid tdarr configuration", func(t *testing.T) {
-		p := writeCfg("tdarr_valid.yaml", `
-tdarr:
+	t.Run("parses valid transcode configuration", func(t *testing.T) {
+		p := writeCfg("transcode_valid.yaml", `
+transcode:
   enabled: true
-  url: "http://192.168.70.71:8265"
-  api_key: "test-tdarr-key"
-  timeout: "30s"
-  libraries:
-    anime_hevc:
-      id: "lib-anime-123"
-      name: "Anime HEVC"
-      flow: "apple_silicon_hevc"
-      output_folder: "/media/transcodes/anime"
-  path_mappings:
-    - local: "/Volumes/media"
-      server: "/media"
+  executor: "ssh"
+  ssh:
+    host: "192.168.68.55"
+    user: "morotxo"
+    command: "/Users/morotxo/.local/bin/navigatorr-transcode"
+    identity_file: "/run/secrets/navigatorr_transcode_ssh"
+    connect_timeout: "10s"
+    path_mappings:
+      - local: "/media"
+        remote: "/Volumes/media"
 `)
 		cfg, err := Load(p)
 		if err != nil {
-			t.Fatalf("unexpected error loading tdarr config: %v", err)
+			t.Fatalf("unexpected error loading transcode config: %v", err)
 		}
-		if !cfg.Tdarr.Enabled {
-			t.Error("expected Tdarr.Enabled=true")
+		if !cfg.Transcode.Enabled {
+			t.Error("expected Transcode.Enabled=true")
 		}
-		if cfg.Tdarr.URL != "http://192.168.70.71:8265" {
-			t.Errorf("unexpected URL: %s", cfg.Tdarr.URL)
+		if cfg.Transcode.Executor != "ssh" {
+			t.Errorf("unexpected Executor: %s", cfg.Transcode.Executor)
 		}
-		if cfg.Tdarr.APIKey != "test-tdarr-key" {
-			t.Errorf("unexpected APIKey: %s", cfg.Tdarr.APIKey)
+		if cfg.Transcode.SSH.Host != "192.168.68.55" {
+			t.Errorf("unexpected Host: %s", cfg.Transcode.SSH.Host)
 		}
-		if cfg.Tdarr.TimeoutDuration() != 30*time.Second {
-			t.Errorf("expected 30s timeout, got %v", cfg.Tdarr.TimeoutDuration())
+		if cfg.Transcode.SSH.User != "morotxo" {
+			t.Errorf("unexpected User: %s", cfg.Transcode.SSH.User)
 		}
-		lib, err := cfg.Tdarr.ResolveLibrary("anime_hevc")
-		if err != nil {
-			t.Fatalf("unexpected error resolving library: %v", err)
+		if cfg.Transcode.SSH.Command != "/Users/morotxo/.local/bin/navigatorr-transcode" {
+			t.Errorf("unexpected Command: %s", cfg.Transcode.SSH.Command)
 		}
-		if lib.ID != "lib-anime-123" || lib.Name != "Anime HEVC" || lib.OutputFolder != "/media/transcodes/anime" {
-			t.Errorf("unexpected library values: %+v", lib)
+		if cfg.Transcode.SSH.TimeoutDuration() != 10*time.Second {
+			t.Errorf("expected 10s timeout, got %v", cfg.Transcode.SSH.TimeoutDuration())
 		}
-		if len(cfg.Tdarr.PathMappings) != 1 {
-			t.Fatalf("expected 1 path mapping, got %d", len(cfg.Tdarr.PathMappings))
+		if len(cfg.Transcode.SSH.PathMappings) != 1 {
+			t.Fatalf("expected 1 path mapping, got %d", len(cfg.Transcode.SSH.PathMappings))
 		}
-	})
-
-	t.Run("resolve library errors when profile missing, empty, or missing output_folder", func(t *testing.T) {
-		candFalse := false
-		tc := TdarrConfig{
-			Libraries: map[string]TdarrLibraryConfig{
-				"empty_id":        {ID: "", OutputFolder: "/media/transcodes"},
-				"missing_out":     {ID: "lib-1", OutputFolder: ""},
-				"candidate_false": {ID: "lib-2", OutputFolder: "/media/transcodes", CandidateOnly: &candFalse},
-			},
-		}
-		if _, err := tc.ResolveLibrary("missing"); err == nil {
-			t.Error("expected error for missing profile, got nil")
-		}
-		if _, err := tc.ResolveLibrary("empty_id"); err == nil {
-			t.Error("expected error for profile with empty id, got nil")
-		}
-		if _, err := tc.ResolveLibrary("missing_out"); err == nil {
-			t.Error("expected error for missing output_folder, got nil")
-		}
-		if _, err := tc.ResolveLibrary("candidate_false"); err == nil {
-			t.Error("expected error for candidate_only=false, got nil")
-		}
-		noLibs := TdarrConfig{}
-		if _, err := noLibs.ResolveLibrary("any"); err == nil {
-			t.Error("expected error when no libraries configured, got nil")
+		mapping := cfg.Transcode.SSH.PathMappings[0]
+		if mapping.Local != "/media" || mapping.Remote != "/Volumes/media" {
+			t.Errorf("unexpected mapping: %+v", mapping)
 		}
 	})
 
 	t.Run("default timeout when empty", func(t *testing.T) {
-		tc := TdarrConfig{}
-		if tc.TimeoutDuration() != 15*time.Second {
-			t.Errorf("expected default 15s timeout, got %v", tc.TimeoutDuration())
+		tc := SSHExecutorConfig{}
+		if tc.TimeoutDuration() != 5*time.Second {
+			t.Errorf("expected default 5s timeout, got %v", tc.TimeoutDuration())
 		}
 	})
 
-	t.Run("path translation between local and server", func(t *testing.T) {
-		tc := TdarrConfig{
-			PathMappings: []PathMapping{
-				{Local: "/Volumes/media", Server: "/media"},
-				{Local: "/Volumes/cache", Server: "/temp"},
-			},
-		}
-
-		// Local to Server
-		srv := tc.TranslateLocalToServer("/Volumes/media/Anime/Monster/ep01.mkv")
-		if srv != "/media/Anime/Monster/ep01.mkv" {
-			t.Errorf("expected /media/Anime/Monster/ep01.mkv, got %s", srv)
-		}
-
-		// Exact match
-		if tc.TranslateLocalToServer("/Volumes/media") != "/media" {
-			t.Errorf("expected /media, got %s", tc.TranslateLocalToServer("/Volumes/media"))
-		}
-
-		// Unmapped path passes through
-		if tc.TranslateLocalToServer("/other/path/file.mkv") != "/other/path/file.mkv" {
-			t.Errorf("expected unchanged path, got %s", tc.TranslateLocalToServer("/other/path/file.mkv"))
-		}
-
-		// Server to Local
-		loc := tc.TranslateServerToLocal("/media/Anime/Monster/ep01.mkv")
-		if loc != "/Volumes/media/Anime/Monster/ep01.mkv" {
-			t.Errorf("expected /Volumes/media/Anime/Monster/ep01.mkv, got %s", loc)
-		}
-
-		// Cache server to local
-		locCache := tc.TranslateServerToLocal("/temp/transcode-123.mkv")
-		if locCache != "/Volumes/cache/transcode-123.mkv" {
-			t.Errorf("expected /Volumes/cache/transcode-123.mkv, got %s", locCache)
-		}
-	})
-
-	t.Run("misnested tdarr key fails strict parsing", func(t *testing.T) {
-		p := writeCfg("tdarr_nested.yaml", `
+	t.Run("misnested transcode key fails strict parsing", func(t *testing.T) {
+		p := writeCfg("transcode_nested.yaml", `
 media:
-  tdarr:
+  transcode:
     enabled: true
 `)
 		_, err := Load(p)
 		if err == nil {
-			t.Fatal("expected strict parsing error for nested tdarr, got nil")
+			t.Fatal("expected strict parsing error for nested transcode, got nil")
 		}
-		if !strings.Contains(err.Error(), "tdarr") {
-			t.Errorf("expected error mentioning tdarr, got %v", err)
+		if !strings.Contains(err.Error(), "transcode") {
+			t.Errorf("expected error mentioning transcode, got %v", err)
 		}
 	})
 }

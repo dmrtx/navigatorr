@@ -21,7 +21,7 @@ Navigatorr acts as a bridge between AI coding assistants and your self-hosted me
 - **Transmission** — Torrent client
 - **qBittorrent** — Torrent client
 - **SABnzbd** — Usenet downloader
-- **Tdarr** — Transcoding orchestration and node monitoring
+- **Transcoding** — Apple Silicon SSH worker executor for hardware-accelerated FFmpeg transcoding (hevc_videotoolbox)
 
 ## Architecture
 
@@ -66,7 +66,7 @@ Claude Code / MCP Client
 | `mediainspect` | Real-file inspection via ffprobe (no shell, fixed argv) plus sidecar detection |
 | `fsop` | Root-confined filesystem ops (stat, list, hash, move, delete) |
 | `action` | Multi-step persistent workflow engine with idempotency and safety gates |
-| `tdarr` | Native Tdarr 2.x API client, multi-tier job tracking and cancellation |
+| `transcode` | SSH executor for hardware-accelerated remote transcoding, path mapping, and process lifecycle |
 | `internal` | Shared logging utilities |
 
 ### How It Works
@@ -136,20 +136,9 @@ SABnzbd has no OpenAPI spec and dispatches everything from a `mode` query parame
 
 Deleting is covered by `allow_destructive`. SABnzbd deletes are GET requests carrying `name=delete`, so the `call_api` DELETE guard does not apply to them and these tools check the setting themselves.
 
-### Tdarr
-
-Navigatorr acts as the orchestrator and Tdarr acts as the execution engine for media transcoding.
-
-| Tool | Description |
-|------|-------------|
-| `tdarr_status` | Server status, version, platform, uptime, and engine |
-| `tdarr_nodes` | Node statuses, worker allocations, active jobs, ETA, and progress |
-| `tdarr_job_status` | Inspect live transcode progress, node worker metrics, and completed job reports |
-| `tdarr_cancel` | Cancel an active worker transcode job on a specific node |
-
 ### Action Engine
 
-Persistent, declarative multi-step workflows tracked in SQLite. Workflows survive agent disconnects, reboot gracefully, and safely pause in `waiting_external` (e.g. awaiting long Tdarr transcode jobs) or `waiting_decision` (e.g. human-in-the-loop review on ffprobe validation failure).
+Persistent, declarative multi-step workflows tracked in SQLite. Workflows survive agent disconnects, reboot gracefully, and safely pause in `waiting_external` (e.g. awaiting long transcode jobs) or `waiting_decision` (e.g. human-in-the-loop review on ffprobe validation failure).
 
 | Tool | Description |
 |------|-------------|
@@ -162,8 +151,8 @@ Persistent, declarative multi-step workflows tracked in SQLite. Workflows surviv
 
 **Transcoding Workflow (`transcode_media`):**
 1. **Preflight**: Confines path within `allowed_read_roots`, verifies existence, computes initial SHA-256 hash, and extracts baseline stream metadata via `ffprobe`. Destructive replacement (`replace_original: true`) is strictly rejected.
-2. **Submit to Tdarr**: Validates candidate-safe library settings fail-closed directly against the Tdarr API (`folderToFolderConversion: true`, `deleteSource: false`, matching `output_folder`), translates paths between local filesystem and Tdarr server, and queues file via `scan-files`. Resumes are idempotent and will not re-submit.
-3. **Wait for Transcode**: Monitors progress and transitions into `waiting_external` state while in flight.
+2. **Submit to Transcode Executor**: Generates idempotent job ID, calculates candidate path (`<source-dir>/.navigatorr-candidates/<basename>.<job-id>.mkv`), translates paths between local and remote worker namespaces, and submits the job over SSH. Resumes are idempotent and will not re-submit.
+3. **Wait for Transcode**: Monitors progress over SSH and transitions into `waiting_external` state while in flight.
 4. **Detailed Validation**: Validates file size, duration, video codec, audio tracks (preserving Japanese/English/Spanish), subtitle tracks (preserving ASS/SSA), font attachments, and chapters. Any discrepancy transitions to `waiting_decision` with human-in-the-loop options (`accept_loss` / `reject`).
 5. **Acceptance (Candidate-Only)**: Transcoded media is emitted as a non-destructive candidate output. Navigatorr verifies the original file's physical SHA-256 hash before and after to guarantee absolute immutability. Destructive replacement (`replace_original: true`) is explicitly blocked in this version to guarantee zero data loss.
 
@@ -273,36 +262,29 @@ Edit `~/.config/navigatorr/config.yaml` with your service URLs and API keys. You
 | `concurrency.max_api_simultaneous` | `3` | Maximum simultaneous upstream HTTP calls to protect *arr services from being overwhelmed. |
 | `concurrency.max_inspect_simultaneous` | `2` | Maximum concurrent ffprobe media inspections to protect NAS disk I/O and CPU. |
 
-**Tdarr Transcoding Configuration:**
+**SSH Transcode Executor Configuration:**
 
-In Tdarr 2.x, Transcode Flows are attached directly to Library configurations in Tdarr rather than individual API submissions. Navigatorr routes transcoding via explicit library mappings:
+Navigatorr acts as the coordinator while a remote Apple Silicon Mac (M1/M2/M3/M4) executes hardware-accelerated FFmpeg (`hevc_videotoolbox`). SSH is the API:
 
 ```yaml
-tdarr:
+transcode:
   enabled: true
-  url: "http://192.168.70.71:8265"
-  api_key: ""
-  timeout: "15s"
-  libraries:
-    anime_hevc:
-      id: "2jLSMhxug"             # Exact Tdarr library dbID configured in Tdarr with your desired Flow
-      name: "Anime HEVC"
-      output_folder: "/media/transcodes/anime" # Tdarr Server namespace (translated via path_mappings)
-      candidate_only: true        # Non-destructive candidate mode (REQUIRED; fail closed if false)
-    standard_hevc:
-      id: "9kLMjxY7a"
-      name: "TV Standard HEVC"
-      output_folder: "/media/transcodes/tv"
-      candidate_only: true
-  path_mappings:
-    - local: "/Volumes/media"
-      server: "/media"
+  executor: ssh
+  ssh:
+    host: "192.168.68.55"
+    user: "morotxo"
+    command: "/Users/morotxo/.local/bin/navigatorr-transcode"
+    identity_file: "/run/secrets/navigatorr_transcode_ssh"
+    connect_timeout: "5s"
+    path_mappings:
+      - local: "/media"
+        remote: "/Volumes/media"
 ```
 
 > 🛡️ **Candidate-Only Non-Destructive Protection:**
-> 1. **Path Namespaces:** `output_folder` is configured strictly in the **Tdarr Server namespace** (e.g. `/media/transcodes`). Navigatorr translates it to the local workspace via `path_mappings`.
-> 2. **Safety Gates (Fail Closed):** `output_folder` is required and `candidate_only` must be true. Navigatorr queries Tdarr's `LibrarySettingsJSONDB` before submit to verify that `folderToFolderConversion: true`, `deleteSource: false`, and `outputFolder` is present on the library.
-> 3. **Cryptographic Verification:** Navigatorr computes the SHA-256 hash of the original media before submit and re-verifies bit-for-bit equality after the transcode completes.
+> 1. **Path Translation:** Local paths (`/media/...`) are mapped to remote worker paths (`/Volumes/media/...`) using longest-prefix match and fail-closed security.
+> 2. **Candidate Isolation:** Transcoded files are written to `.navigatorr-candidates/<basename>.<job-id>.mkv`. Overwriting the source is rejected fail-closed.
+> 3. **Cryptographic Verification:** Navigatorr computes the SHA-256 hash of the original media before submit and re-verifies bit-for-bit equality after the transcode completes. Original media is never deleted, moved, or replaced.
 > 4. **Validation Decisions:** If stream discrepancies occur (e.g. dropped audio tracks or lost subtitles), Navigatorr pauses in `waiting_decision`, allowing users to resume with `accept_loss` or `reject`.
 
 ### Connect to Claude Code

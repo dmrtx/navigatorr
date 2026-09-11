@@ -107,26 +107,24 @@ sabnzbd:
   url_base: "/sabnzbd"          # SABnzbd's url_base setting (default: /sabnzbd)
 
 # ==============================================================================
-# 5. TRANSCODING (TDARR)
+# 5. TRANSCODING (SSH EXECUTOR)
 # ==============================================================================
-# Tdarr integration for media transcoding orchestration.
-# Navigatorr acts as the orchestrator; Tdarr executes the transcodes.
-# Disabled by default: when false, zero background requests are made to Tdarr.
-tdarr:
+# Remote Apple Silicon (M1/M2/M3/M4) SSH worker executor for hardware-accelerated
+# FFmpeg transcoding using hevc_videotoolbox.
+# Navigatorr acts as the coordinator; the remote node only runs FFmpeg.
+# Disabled by default.
+transcode:
   enabled: false
-  url: "http://localhost:8265"
-  api_key: ""                   # Optional API key / token if authentication is enabled
-  timeout: "15s"
-  libraries:
-    anime_hevc:
-      id: "2yO9ABC123"            # Real Tdarr library dbID (configured in Tdarr with your desired Flow)
-      name: "Anime HEVC Staging"  # Human-readable library name
-      flow: "apple_silicon_hevc"  # Informational: expected Flow configured on this library in Tdarr
-      output_folder: "/media/transcodes/anime" # Dedicated output folder in Tdarr Server namespace (REQUIRED)
-      candidate_only: true        # Non-destructive candidate mode (defaults to true; must not be false)
-  path_mappings:                # Local path to Tdarr Server path translation
-    - local: "/Volumes/media"
-      server: "/media"
+  executor: ssh
+  ssh:
+    host: "192.168.68.55"
+    user: "morotxo"
+    command: "/Users/morotxo/.local/bin/navigatorr-transcode"
+    identity_file: "/run/secrets/navigatorr_transcode_ssh"
+    connect_timeout: "5s"
+    path_mappings:
+      - local: "/media"
+        remote: "/Volumes/media"
 
 # ==============================================================================
 # 5. REQUEST QUEUE (HTTP INGEST)

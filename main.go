@@ -17,8 +17,8 @@ import (
 	"github.com/jakenesler/navigatorr/queue"
 	"github.com/jakenesler/navigatorr/sabnzbd"
 	"github.com/jakenesler/navigatorr/store"
-	"github.com/jakenesler/navigatorr/tdarr"
 	"github.com/jakenesler/navigatorr/tools"
+	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transmission"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -86,15 +86,29 @@ func main() {
 		internal.Logf("sabnzbd client configured: %s", cfg.SABnzbd.URL)
 	}
 
-	// Build Tdarr client if enabled and configured
-	var tdClient tdarr.Client
-	if cfg.Tdarr.Enabled && cfg.Tdarr.URL != "" {
-		tdClient = tdarr.NewClient(tdarr.ClientOptions{
-			BaseURL: cfg.Tdarr.URL,
-			APIKey:  cfg.Tdarr.APIKey,
-			Timeout: cfg.Tdarr.TimeoutDuration(),
+	// Build Transcode executor if enabled and configured
+	var transcodeExecutor transcode.Executor
+	if cfg.Transcode.Enabled && cfg.Transcode.Executor == "ssh" {
+		sshCfg := cfg.Transcode.SSH
+		mappings := make([]transcode.PathMapping, len(sshCfg.PathMappings))
+		for i, m := range sshCfg.PathMappings {
+			mappings[i] = transcode.PathMapping{Local: m.Local, Remote: m.Remote}
+		}
+		sshExec, err := transcode.NewSSHExecutor(transcode.SSHConfig{
+			Host:           sshCfg.Host,
+			User:           sshCfg.User,
+			Command:        sshCfg.Command,
+			IdentityFile:   sshCfg.IdentityFile,
+			ConnectTimeout: sshCfg.TimeoutDuration(),
+			PathMappings:   mappings,
 		})
-		internal.Logf("tdarr client configured: %s (timeout=%v)", cfg.Tdarr.URL, cfg.Tdarr.TimeoutDuration())
+		if err != nil {
+			internal.Warnf("failed to configure ssh transcode executor: %v", err)
+		} else {
+			transcodeExecutor = sshExec
+			internal.Logf("ssh transcode executor configured: host=%s, cmd=%s, timeout=%v",
+				sshCfg.Host, sshCfg.Command, sshCfg.TimeoutDuration())
+		}
 	}
 
 	// Open the request queue. This is always available to the MCP tools so an
@@ -165,8 +179,8 @@ func main() {
 
 	// Register all tools
 	tools.RegisterAll(s, cfg, registry, specStore, txClient, qbClient, sabClient, qStore)
-	tools.RegisterMaintenance(s, cfg, registry, qbClient, mStore, tdClient)
-	tools.RegisterDiagnostics(s, cfg, registry, specStore, txClient, qbClient, sabClient, mStore)
+	tools.RegisterMaintenance(s, cfg, registry, qbClient, mStore, transcodeExecutor)
+	tools.RegisterDiagnostics(s, cfg, registry, specStore, txClient, qbClient, sabClient, mStore, transcodeExecutor)
 
 	internal.Logf("starting navigatorr MCP server (stdio)")
 

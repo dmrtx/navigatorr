@@ -121,13 +121,6 @@ This prevents a single API call from consuming the LLM's entire context window.
 - `qbit_manage_torrent` — Actions: `pause`, `resume`, `delete`, `delete_files`
 - `qbit_transfer_info` — Global transfer speeds and stats
 
-### Tdarr Tools
-
-- `tdarr_status` — Check server status, version, platform, uptime, and engine
-- `tdarr_nodes` — List active nodes, worker counts, queued files, and current fps/ETA
-- `tdarr_job_status` — Query worker progress by jobId or active file path
-- `tdarr_cancel` — Cancel a running transcode job on a specific node worker
-
 ### Action Engine Tools
 
 - `action_run` — Run a declarative multi-step workflow (`transcode_media`, `safe_media_replacement`, `validate_torrent`)
@@ -343,32 +336,29 @@ twice, resolved twice, or released unless it is currently claimed. If
 other statuses, so a backlog sitting in `claimed` from a crashed session is
 visible rather than looking like an empty queue — `queue_release` recovers those.
 
-### Pattern 9: Transcoding Media via Tdarr Orchestration
+### Pattern 9: Transcoding Media via Apple Silicon SSH Worker
 
-Navigatorr acts as the orchestrator; Tdarr handles distributed transcoding. Navigatorr strictly manages inspection, submission, waiting, `ffprobe` verification, and safe replacement without ever running `ffmpeg` directly.
+Navigatorr acts as the coordinator; the remote Apple Silicon node executes hardware-accelerated FFmpeg via SSH. Navigatorr manages inspection, submission, waiting, `ffprobe` verification, and candidate reporting without ever modifying the original media.
 
 ```
 User: "Transcode this oversized anime episode to HEVC using our Apple Silicon node"
 
 LLM approach:
   1. action_run → action: "transcode_media", inputs: {
-       "path": "/Volumes/media/anime/Frieren/S01E01.mkv",
-       "profile": "anime_hevc",
-       "require_japanese_audio": true,
-       "require_subs": ["eng", "spa"]
+       "path": "/media/Anime/Frieren/S01E01.mkv",
+       "profile": "hevc-vt"
      }
      → Returns action ID act-transcode-media-..., status: waiting_external,
-       step: wait_tdarr, waiting_condition: "tdarr_transcode_complete"
+       step: wait_transcode, waiting_condition: "transcode_complete"
 
   2. Periodically or upon session resume, monitor progress:
-     tdarr_job_status → jobId: "..."
      action_status → id: "act-transcode-media-..."
-     → Reports live progress, ETA, and node worker status
+     → Reports live progress, ETA, fps, and worker metrics
 
-  3. When Tdarr finishes, resume the workflow:
+  3. When transcode finishes, resume the workflow:
      action_resume → id: "act-transcode-media-..."
      → Runs validate_result using ffprobe:
-       - Confirms output file exists and size > 0
+       - Confirms candidate output file exists and size > 0
        - Validates duration match within tolerance
        - Verifies video codec is hevc
        - Validates audio streams (Japanese audio retained)
@@ -459,26 +449,19 @@ qbittorrent:
   username: "admin"
   password: "your-password"
 
-# Tdarr transcoding orchestrator (optional)
-tdarr:
+# Remote Apple Silicon SSH worker transcode executor (optional)
+transcode:
   enabled: true
-  url: "http://192.168.70.71:8265"
-  api_key: ""
-  timeout: "15s"
-  libraries:
-    anime_hevc:
-      id: "2jLSMhxug"             # Exact Tdarr library dbID (configured in Tdarr with your desired Flow)
-      name: "Anime HEVC"
-      output_folder: "/media/transcodes/anime" # Tdarr Server namespace (translated via path_mappings)
-      candidate_only: true        # Non-destructive candidate mode (REQUIRED; fail closed if false)
-    standard_hevc:
-      id: "9kLMjxY7a"
-      name: "TV Standard HEVC"
-      output_folder: "/media/transcodes/tv"
-      candidate_only: true
-  path_mappings:
-    - local: "/Volumes/media"
-      server: "/media"
+  executor: "ssh"
+  ssh:
+    host: "192.168.68.55"
+    user: "morotxo"
+    command: "/Users/morotxo/.local/bin/navigatorr-transcode"
+    identity_file: "/run/secrets/navigatorr_transcode_ssh"
+    connect_timeout: "5s"
+    path_mappings:
+      - local: "/media"
+        remote: "/Volumes/media"
 ```
 
 ### Service Defaults
