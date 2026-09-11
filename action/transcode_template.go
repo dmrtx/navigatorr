@@ -12,14 +12,14 @@ import (
 	"strings"
 
 	"github.com/jakenesler/navigatorr/mediainspect"
-	"github.com/jakenesler/navigatorr/tdarr"
+	"github.com/jakenesler/navigatorr/transcode"
 )
 
 func (e *Engine) registerTranscodeTemplate() {
 	e.RegisterTemplate(ActionTemplate{
 		Name:           "transcode_media",
 		Version:        1,
-		Description:    "Coordinates safe media transcoding with Tdarr: inspects media streams, submits job to designated Tdarr library, waits asynchronously via waiting_external, validates candidate output with ffprobe (preserving audio, subtitles, fonts, chapters), and guarantees the original media remains physically untouched.",
+		Description:    "Coordinates safe media transcoding: inspects media streams, submits job to transcode executor, waits asynchronously via waiting_external, validates candidate output with ffprobe (preserving audio, subtitles, fonts, chapters), and guarantees the original media remains physically untouched.",
 		RequiredInputs: []string{"path"},
 		OptionalInputs: []string{"profile", "replace_original", "expected_video_codec", "max_size_increase_percent"},
 		Destructive:    false,
@@ -30,13 +30,13 @@ func (e *Engine) registerTranscodeTemplate() {
 				Run:         e.stepTranscodePreflight,
 			},
 			{
-				Name:        "submit_tdarr",
-				Description: "Resolves configured Tdarr library for the profile, translates path to Tdarr server schema, and idempotently submits transcode job to Tdarr",
+				Name:        "submit_transcode",
+				Description: "Calculates candidate path, generates idempotent job ID, and submits transcode job to transcode executor",
 				Run:         e.stepTranscodeSubmit,
 			},
 			{
-				Name:        "wait_tdarr",
-				Description: "Monitors Tdarr transcode progress, entering waiting_external while processing is in flight",
+				Name:        "wait_transcode",
+				Description: "Monitors transcode progress, entering waiting_external while processing is in flight",
 				Run:         e.stepTranscodeWait,
 			},
 			{
@@ -91,6 +91,13 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		return StepResult{
 			Status: StepFailed,
 			Error:  fmt.Sprintf("path %q is a directory, not a media file", cleanPath),
+		}, nil
+	}
+
+	if e.deps.Transcode == nil {
+		return StepResult{
+			Status: StepFailed,
+			Error:  "transcode executor is disabled or not configured in navigatorr",
 		}, nil
 	}
 
@@ -161,20 +168,11 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	ec.State["original_size"] = fi.Size()
 	ec.State["original"] = origMap
 
-	// Validate library configuration in preflight to fail closed early
 	profile := strings.TrimSpace(getString(ec.Inputs, "profile"))
-	if e.deps.Config != nil && e.deps.Config.Tdarr.Enabled {
-		libConfig, err := e.deps.Config.Tdarr.ResolveLibrary(profile)
-		if err != nil {
-			return StepResult{
-				Status: StepFailed,
-				Error:  fmt.Sprintf("preflight tdarr library resolution failed: %v", err),
-			}, nil
-		}
-		ec.State["tdarr_library_id"] = libConfig.ID
-		ec.State["tdarr_library_name"] = libConfig.Name
-		ec.State["tdarr_output_folder"] = libConfig.OutputFolder
+	if profile == "" {
+		profile = "hevc-vt"
 	}
+	ec.State["profile"] = profile
 
 	return StepResult{
 		Status: StepCompleted,
@@ -186,25 +184,31 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	}, nil
 }
 
-// stepTranscodeSubmit resolves the Tdarr library for the requested profile, translates the path, and idempotently submits to Tdarr.
+// stepTranscodeSubmit calculates candidate path, generates an idempotent job ID, and submits to the transcode executor.
 func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
 	// Idempotency: if already submitted, skip duplicate submission
-	if getBool(ec.State, "tdarr_submitted") {
+	if getBool(ec.State, "transcode_submitted") || getString(ec.State, "job_id") != "" {
+		jobID := getString(ec.State, "job_id")
+		if jobID == "" {
+			jobID = getString(ec.State, "external_reference")
+		}
+		candPath := getString(ec.State, "candidate_path")
 		return StepResult{
 			Status: StepCompleted,
 			Outputs: map[string]any{
-				"external_reference": getString(ec.State, "external_reference"),
-				"tdarr_server_path":  getString(ec.State, "tdarr_server_path"),
-				"tdarr_library_id":   getString(ec.State, "tdarr_library_id"),
+				"job_id":             jobID,
+				"external_reference": jobID,
+				"candidate_path":     candPath,
+				"output_path":        candPath,
 				"reused":             true,
 			},
 		}, nil
 	}
 
-	if e.deps.Tdarr == nil || e.deps.Config == nil || !e.deps.Config.Tdarr.Enabled {
+	if e.deps.Transcode == nil {
 		return StepResult{
 			Status: StepFailed,
-			Error:  "Tdarr integration is disabled or not configured in navigatorr",
+			Error:  "transcode executor is disabled or not configured in navigatorr",
 		}, nil
 	}
 
@@ -213,219 +217,151 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 		cleanPath = getString(ec.Inputs, "path")
 	}
 
-	// Resolve configured library mapping for the profile
+	// Generate idempotent job ID derived from action instance ID
+	jobID := getString(ec.State, "job_id")
+	if jobID == "" {
+		jobID = fmt.Sprintf("job-%s", ec.InstanceID)
+	}
+
+	// Calculate candidate path: <source-dir>/.navigatorr-candidates/<basename>.<job-id>.mkv
+	srcDir := filepath.Dir(cleanPath)
+	base := filepath.Base(cleanPath)
+	stem := strings.TrimSuffix(base, filepath.Ext(base))
+	candidateDir := filepath.Join(srcDir, ".navigatorr-candidates")
+	candidatePath := filepath.Join(candidateDir, fmt.Sprintf("%s.%s.mkv", stem, jobID))
+
 	profile := strings.TrimSpace(getString(ec.Inputs, "profile"))
-	libConfig, err := e.deps.Config.Tdarr.ResolveLibrary(profile)
+	if profile == "" {
+		profile = getString(ec.State, "profile")
+	}
+	if profile == "" {
+		profile = "hevc-vt"
+	}
+
+	req := transcode.Request{
+		ID:            jobID,
+		SourcePath:    cleanPath,
+		CandidatePath: candidatePath,
+		Profile:       profile,
+	}
+
+	job, err := e.deps.Transcode.Submit(ctx, req)
 	if err != nil {
 		return StepResult{
 			Status: StepFailed,
-			Error:  fmt.Sprintf("failed to resolve Tdarr library for profile %q: %v", profile, err),
+			Error:  fmt.Sprintf("failed to submit transcode job to executor: %v", err),
 		}, nil
 	}
 
-	// Validate library settings directly in Tdarr API (MANDATORY FAIL-CLOSED)
-	libSettings, err := e.deps.Tdarr.GetLibrary(ctx, libConfig.ID)
-	if err != nil {
-		return StepResult{
-			Status: StepFailed,
-			Error:  fmt.Sprintf("unable to verify Tdarr candidate-safe library settings for library %q (id: %s): %v; refusing submit to prevent data loss (fail closed)", libConfig.Name, libConfig.ID, err),
-		}, nil
-	}
-	if libSettings == nil {
-		return StepResult{
-			Status: StepFailed,
-			Error:  fmt.Sprintf("tdarr library %q (id: %s) returned nil settings from Tdarr API; refusing submit (fail closed)", libConfig.Name, libConfig.ID),
-		}, nil
-	}
-	if !libSettings.FolderToFolderConversion {
-		return StepResult{
-			Status: StepFailed,
-			Error:  fmt.Sprintf("tdarr library %q (id: %s) has folderToFolderConversion disabled in Tdarr settings; Navigatorr requires folderToFolderConversion: true with dedicated output folder to ensure original files are not modified in-place (fail closed)", libConfig.Name, libConfig.ID),
-		}, nil
-	}
-	if libSettings.FolderToFolderConversionDeleteSource {
-		return StepResult{
-			Status: StepFailed,
-			Error:  fmt.Sprintf("tdarr library %q (id: %s) has deleteSource enabled in Tdarr settings; Navigatorr requires deleteSource: false to ensure original files are never deleted (fail closed)", libConfig.Name, libConfig.ID),
-		}, nil
-	}
-	if strings.TrimSpace(libSettings.OutputFolder) == "" {
-		return StepResult{
-			Status: StepFailed,
-			Error:  fmt.Sprintf("tdarr library %q (id: %s) has no outputFolder configured in Tdarr; Navigatorr requires a dedicated outputFolder (fail closed)", libConfig.Name, libConfig.ID),
-		}, nil
-	}
-
-	// Verify that real Tdarr outputFolder matches configured TdarrLibraryConfig.output_folder (normalized paths)
-	normTdarrOut := filepath.Clean(filepath.ToSlash(libSettings.OutputFolder))
-	normCfgOut := filepath.Clean(filepath.ToSlash(libConfig.OutputFolder))
-	if normTdarrOut != normCfgOut {
-		return StepResult{
-			Status: StepFailed,
-			Error:  fmt.Sprintf("tdarr library %q (id: %s) outputFolder mismatch: Tdarr has %q, Navigatorr config expects %q; refusing submit (fail closed)", libConfig.Name, libConfig.ID, normTdarrOut, normCfgOut),
-		}, nil
-	}
-
-	serverPath := e.deps.Config.Tdarr.TranslateLocalToServer(cleanPath)
-
-	resp, err := e.deps.Tdarr.Submit(ctx, tdarr.SubmitRequest{
-		FilePath:  serverPath,
-		LibraryID: libConfig.ID,
-		Profile:   profile,
-	})
-	if err != nil {
-		return StepResult{
-			Status: StepFailed,
-			Error:  fmt.Sprintf("failed to submit transcode job to Tdarr: %v", err),
-		}, nil
-	}
-
-	ref := resp.Reference
-	if ref == "" {
-		ref = resp.ExternalRef.String()
-	}
-
-	ec.State["tdarr_submitted"] = true
-	ec.State["external_reference"] = ref
-	ec.State["tdarr_library_id"] = libConfig.ID
-	ec.State["tdarr_library_name"] = libConfig.Name
-	ec.State["tdarr_library_flow"] = libConfig.Flow
-	ec.State["tdarr_output_folder"] = libConfig.OutputFolder
-	ec.State["tdarr_server_path"] = serverPath
-	ec.State["tdarr_profile"] = profile
+	ec.State["transcode_submitted"] = true
+	ec.State["job_id"] = job.ID
+	ec.State["external_reference"] = job.ID
+	ec.State["candidate_path"] = candidatePath
+	ec.State["output_path"] = candidatePath
+	ec.State["profile"] = profile
 
 	return StepResult{
 		Status: StepCompleted,
 		Outputs: map[string]any{
-			"external_reference": ref,
-			"tdarr_server_path":  serverPath,
-			"tdarr_library_id":   libConfig.ID,
-			"tdarr_profile":      profile,
+			"job_id":             job.ID,
+			"external_reference": job.ID,
+			"candidate_path":     candidatePath,
+			"output_path":        candidatePath,
+			"profile":            profile,
 		},
 	}, nil
 }
 
-// stepTranscodeWait monitors Tdarr progress and enters waiting_external while running.
+// stepTranscodeWait monitors transcode progress and enters waiting_external while running.
 func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
-	ref := getString(ec.State, "external_reference")
-	if ref == "" {
-		ref = getString(ec.State, "tdarr_job_id")
+	jobID := getString(ec.State, "job_id")
+	if jobID == "" {
+		jobID = getString(ec.State, "external_reference")
 	}
-	if ref == "" {
-		ref = getString(ec.State, "tdarr_server_path")
-	}
-	if ref == "" {
+	if jobID == "" {
 		return StepResult{
 			Status: StepFailed,
-			Error:  "no active Tdarr external reference or server path to monitor",
+			Error:  "no active transcode job ID to monitor",
 		}, nil
 	}
 
-	if e.deps.Tdarr == nil {
+	if e.deps.Transcode == nil {
 		return StepResult{
 			Status: StepFailed,
-			Error:  "Tdarr client is not available to monitor job",
+			Error:  "transcode executor is not available to monitor job",
 		}, nil
 	}
 
-	st, err := e.deps.Tdarr.JobStatus(ctx, ref)
+	st, err := e.deps.Transcode.Status(ctx, jobID)
 	if err != nil {
 		// Temporary error during query: stay in waiting_external
 		return StepResult{
 			Status:           StepWaitingExternal,
-			WaitingCondition: "tdarr_transcode_complete",
-			WaitingReason:    fmt.Sprintf("Checking Tdarr job status: %v", err),
+			WaitingCondition: "transcode_complete",
+			WaitingReason:    fmt.Sprintf("Checking transcode job status: %v", err),
 		}, nil
 	}
 
 	switch st.Status {
-	case "running", "queued":
-		if st.JobId != "" {
-			ec.State["tdarr_job_id"] = st.JobId
-			currRef := getString(ec.State, "external_reference")
-			parsedRef := tdarr.ParseExternalReference(currRef)
-			if parsedRef.JobID != st.JobId {
-				parsedRef.JobID = st.JobId
-				ec.State["external_reference"] = parsedRef.String()
-			}
-		}
+	case transcode.StatusRunning, transcode.StatusQueued:
 		return StepResult{
 			Status:           StepWaitingExternal,
-			WaitingCondition: "tdarr_transcode_complete",
-			WaitingReason:    fmt.Sprintf("Tdarr is transcoding media (%s, progress: %.1f%%, eta: %s, fps: %.1f)", st.Status, st.Progress, st.ETA, st.FPS),
+			WaitingCondition: "transcode_complete",
+			WaitingReason:    fmt.Sprintf("Transcoding media (%s, progress: %.1f%%, speed: %.1fx, fps: %.1f)", st.Status, st.Progress, st.Speed, st.FPS),
 			Outputs: map[string]any{
-				"tdarr_status":       st.Status,
+				"transcode_status":   st.Status,
 				"progress":           st.Progress,
-				"eta":                st.ETA,
+				"speed":              st.Speed,
 				"fps":                st.FPS,
-				"worker_details":     st.Details,
-				"job_id":             st.JobId,
-				"external_reference": getString(ec.State, "external_reference"),
+				"job_id":             jobID,
+				"external_reference": jobID,
 			},
 		}, nil
 
-	case "failed":
+	case transcode.StatusFailed:
 		errMsg := st.Error
 		if errMsg == "" {
-			errMsg = st.Details
-		}
-		if errMsg == "" {
-			errMsg = "Tdarr reported job failure"
+			errMsg = "transcode executor reported job failure"
 		}
 		return StepResult{
 			Status: StepFailed,
-			Error:  fmt.Sprintf("Tdarr transcode failed: %s", errMsg),
+			Error:  fmt.Sprintf("Transcode failed: %s", errMsg),
 		}, nil
 
-	case "completed":
-		if st.JobId != "" {
-			ec.State["tdarr_job_id"] = st.JobId
-			currRef := getString(ec.State, "external_reference")
-			parsedRef := tdarr.ParseExternalReference(currRef)
-			if parsedRef.JobID != st.JobId {
-				parsedRef.JobID = st.JobId
-				ec.State["external_reference"] = parsedRef.String()
-			}
+	case transcode.StatusCancelled:
+		return StepResult{
+			Status: StepFailed,
+			Error:  "transcode job was cancelled",
+		}, nil
+
+	case transcode.StatusCompleted:
+		candPath := st.CandidatePath
+		if candPath == "" {
+			candPath = getString(ec.State, "candidate_path")
+		}
+		if candPath == "" {
+			candPath = getString(ec.State, "output_path")
 		}
 
-		serverOutput := st.OutputPath
-		if serverOutput == "" {
-			// If library has dedicated output folder, candidate lands there
-			if outFolder := getString(ec.State, "tdarr_output_folder"); outFolder != "" {
-				serverOutput = filepath.ToSlash(filepath.Join(outFolder, filepath.Base(getString(ec.State, "tdarr_server_path"))))
-			} else {
-				serverOutput = getString(ec.State, "tdarr_server_path")
-			}
-		}
-
-		localOutput := serverOutput
-		if e.deps.Config != nil {
-			localOutput = e.deps.Config.Tdarr.TranslateServerToLocal(serverOutput)
-		}
-
-		ec.State["candidate_path"] = localOutput
-		ec.State["output_path"] = localOutput
-		ec.State["tdarr_output_path"] = localOutput
-		ec.State["tdarr_server_output_path"] = serverOutput
+		ec.State["candidate_path"] = candPath
+		ec.State["output_path"] = candPath
 
 		return StepResult{
 			Status: StepCompleted,
 			Outputs: map[string]any{
-				"tdarr_done":         true,
-				"candidate_path":     localOutput,
-				"output_path":        localOutput,
-				"server_output_path": serverOutput,
-				"job_id":             st.JobId,
-				"external_reference": getString(ec.State, "external_reference"),
+				"transcode_done":     true,
+				"candidate_path":     candPath,
+				"output_path":        candPath,
+				"job_id":             jobID,
+				"external_reference": jobID,
 			},
 		}, nil
 
 	default:
-		// Unknown status yet: keep waiting
 		return StepResult{
 			Status:           StepWaitingExternal,
-			WaitingCondition: "tdarr_transcode_complete",
-			WaitingReason:    fmt.Sprintf("Tdarr is processing transcode (%s)", st.Details),
+			WaitingCondition: "transcode_complete",
+			WaitingReason:    fmt.Sprintf("Transcode in progress (%s)", st.Status),
 		}, nil
 	}
 }
@@ -455,9 +391,6 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 	outputPath := getString(ec.State, "candidate_path")
 	if outputPath == "" {
 		outputPath = getString(ec.State, "output_path")
-	}
-	if outputPath == "" {
-		outputPath = getString(ec.State, "tdarr_output_path")
 	}
 	if outputPath == "" {
 		outputPath = getString(ec.State, "resolved_path")
@@ -706,18 +639,15 @@ func (e *Engine) stepTranscodeAccept(ctx context.Context, ec *ExecutionContext) 
 		}
 	}
 
-	serverOutputPath := getString(ec.State, "tdarr_server_output_path")
-
 	return StepResult{
 		Status: StepCompleted,
 		Outputs: map[string]any{
-			"candidate_path":     candidatePath,
-			"output_path":        candidatePath,
-			"server_output_path": serverOutputPath,
-			"original_path":      origPath,
-			"original_intact":    true,
-			"replace_original":   false,
-			"message":            "Transcode completed and verified. Candidate output ready. Original file physically preserved and intact.",
+			"candidate_path":   candidatePath,
+			"output_path":      candidatePath,
+			"original_path":    origPath,
+			"original_intact":  true,
+			"replace_original": false,
+			"message":          "Transcode completed and verified. Candidate output ready. Original file physically preserved and intact.",
 		},
 	}, nil
 }

@@ -15,67 +15,53 @@ import (
 	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/fsop"
 	"github.com/jakenesler/navigatorr/store"
-	"github.com/jakenesler/navigatorr/tdarr"
+	"github.com/jakenesler/navigatorr/transcode"
 )
 
-type mockTdarrClient struct {
-	submitCalls    int32
-	statusCalls    int32
-	cancelCalls    int32
-	submitFunc     func(ctx context.Context, req tdarr.SubmitRequest) (*tdarr.SubmitResponse, error)
-	jobStatusFunc  func(ctx context.Context, ref string) (*tdarr.JobStatusResponse, error)
-	cancelFunc     func(ctx context.Context, req tdarr.CancelRequest) error
-	getLibraryFunc func(ctx context.Context, libraryID string) (*tdarr.LibrarySettings, error)
+type mockTranscodeExecutor struct {
+	submitCalls int32
+	statusCalls int32
+	cancelCalls int32
+	doctorCalls int32
+
+	doctorFunc func(ctx context.Context) error
+	submitFunc func(ctx context.Context, req transcode.Request) (transcode.Job, error)
+	statusFunc func(ctx context.Context, jobID string) (transcode.JobStatus, error)
+	cancelFunc func(ctx context.Context, jobID string) error
 }
 
-func (m *mockTdarrClient) Status(ctx context.Context) (*tdarr.ServerStatus, error) {
-	atomic.AddInt32(&m.statusCalls, 1)
-	return &tdarr.ServerStatus{Status: "good", Version: "2.87.01"}, nil
+func (m *mockTranscodeExecutor) Doctor(ctx context.Context) error {
+	atomic.AddInt32(&m.doctorCalls, 1)
+	if m.doctorFunc != nil {
+		return m.doctorFunc(ctx)
+	}
+	return nil
 }
 
-func (m *mockTdarrClient) Nodes(ctx context.Context) (map[string]tdarr.Node, error) {
-	return map[string]tdarr.Node{}, nil
-}
-
-func (m *mockTdarrClient) Submit(ctx context.Context, req tdarr.SubmitRequest) (*tdarr.SubmitResponse, error) {
+func (m *mockTranscodeExecutor) Submit(ctx context.Context, req transcode.Request) (transcode.Job, error) {
 	atomic.AddInt32(&m.submitCalls, 1)
 	if m.submitFunc != nil {
 		return m.submitFunc(ctx, req)
 	}
-	return &tdarr.SubmitResponse{
-		Success:   true,
-		Reference: "tdarr-job-test-1",
-	}, nil
+	return transcode.Job{ID: req.ID}, nil
 }
 
-func (m *mockTdarrClient) JobStatus(ctx context.Context, ref string) (*tdarr.JobStatusResponse, error) {
-	if m.jobStatusFunc != nil {
-		return m.jobStatusFunc(ctx, ref)
+func (m *mockTranscodeExecutor) Status(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+	atomic.AddInt32(&m.statusCalls, 1)
+	if m.statusFunc != nil {
+		return m.statusFunc(ctx, jobID)
 	}
-	return &tdarr.JobStatusResponse{
-		Found:    true,
-		Status:   "completed",
+	return transcode.JobStatus{
+		ID:       jobID,
+		Status:   transcode.StatusCompleted,
 		Progress: 100,
 	}, nil
 }
 
-func (m *mockTdarrClient) GetLibrary(ctx context.Context, libraryID string) (*tdarr.LibrarySettings, error) {
-	if m.getLibraryFunc != nil {
-		return m.getLibraryFunc(ctx, libraryID)
-	}
-	return &tdarr.LibrarySettings{
-		ID:                                   libraryID,
-		Name:                                 "Test Library",
-		FolderToFolderConversion:             true,
-		FolderToFolderConversionDeleteSource: false,
-		OutputFolder:                         "/media/transcodes",
-	}, nil
-}
-
-func (m *mockTdarrClient) Cancel(ctx context.Context, req tdarr.CancelRequest) error {
+func (m *mockTranscodeExecutor) Cancel(ctx context.Context, jobID string) error {
 	atomic.AddInt32(&m.cancelCalls, 1)
 	if m.cancelFunc != nil {
-		return m.cancelFunc(ctx, req)
+		return m.cancelFunc(ctx, jobID)
 	}
 	return nil
 }
@@ -109,7 +95,7 @@ const defaultValidFFprobeJSON = `{
   "chapters": [{"id": 0}]
 }`
 
-func setupTranscodeEngine(t *testing.T, tc tdarr.Client, ffprobePath string, readRoots, writeRoots []string, allowDestructive bool) (*Engine, *store.Store) {
+func setupTranscodeEngine(t *testing.T, tc transcode.Executor, ffprobePath string, readRoots, writeRoots []string, allowDestructive bool) (*Engine, *store.Store) {
 	dbPath := filepath.Join(t.TempDir(), "test_action.db")
 	st, err := store.Open(dbPath)
 	if err != nil {
@@ -128,19 +114,13 @@ func setupTranscodeEngine(t *testing.T, tc tdarr.Client, ffprobePath string, rea
 			AllowedWriteRoots: writeRoots,
 			FfprobePath:       ffprobePath,
 		},
-		Tdarr: config.TdarrConfig{
-			Enabled: true,
-			URL:     "http://127.0.0.1:8265",
-			Libraries: map[string]config.TdarrLibraryConfig{
-				"hevc_safe": {
-					ID:           "lib-test-123",
-					Name:         "Test Library",
-					Flow:         "flow-test",
-					OutputFolder: "/media/transcodes",
-				},
-			},
-			PathMappings: []config.PathMapping{
-				{Local: readRoots[0], Server: "/media"},
+		Transcode: config.TranscodeConfig{
+			Enabled:  true,
+			Executor: "ssh",
+			SSH: config.SSHExecutorConfig{
+				Host:    "192.168.68.55",
+				User:    "morotxo",
+				Command: "/Users/morotxo/.local/bin/navigatorr-transcode",
 			},
 		},
 	}
@@ -150,7 +130,7 @@ func setupTranscodeEngine(t *testing.T, tc tdarr.Client, ffprobePath string, rea
 		Config:    cfg,
 		Fs:        res,
 		Ffprobe:   ffprobePath,
-		Tdarr:     tc,
+		Transcode: tc,
 		StartTime: time.Now(),
 	})
 
@@ -163,17 +143,17 @@ func TestTranscode_PreflightValid(t *testing.T) {
 	_ = os.WriteFile(origFile, []byte("dummy-media-content-for-original-12345"), 0644)
 
 	probePath := createFakeFFprobeScript(t, defaultValidFFprobeJSON)
-	mockClient := &mockTdarrClient{
-		jobStatusFunc: func(ctx context.Context, ref string) (*tdarr.JobStatusResponse, error) {
-			return &tdarr.JobStatusResponse{
-				Found:      true,
-				Status:     "completed",
-				OutputPath: origFile,
+	mockExecutor := &mockTranscodeExecutor{
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{
+				ID:            jobID,
+				Status:        transcode.StatusCompleted,
+				CandidatePath: origFile,
 			}, nil
 		},
 	}
 
-	engine, _ := setupTranscodeEngine(t, mockClient, probePath, []string{mediaDir}, []string{mediaDir}, false)
+	engine, _ := setupTranscodeEngine(t, mockExecutor, probePath, []string{mediaDir}, []string{mediaDir}, false)
 	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
 		"path": origFile,
 	})
@@ -195,9 +175,9 @@ func TestTranscode_PathOutsideAllowlistRejected(t *testing.T) {
 	_ = os.WriteFile(outsideFile, []byte("outside content"), 0644)
 
 	probePath := createFakeFFprobeScript(t, defaultValidFFprobeJSON)
-	mockClient := &mockTdarrClient{}
+	mockExecutor := &mockTranscodeExecutor{}
 
-	engine, _ := setupTranscodeEngine(t, mockClient, probePath, []string{mediaDir}, []string{mediaDir}, false)
+	engine, _ := setupTranscodeEngine(t, mockExecutor, probePath, []string{mediaDir}, []string{mediaDir}, false)
 	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
 		"path": outsideFile,
 	})
@@ -210,8 +190,8 @@ func TestTranscode_PathOutsideAllowlistRejected(t *testing.T) {
 	if !strings.Contains(res.Error, "outside allowed read roots") {
 		t.Errorf("expected allowlist error message, got: %s", res.Error)
 	}
-	if atomic.LoadInt32(&mockClient.submitCalls) != 0 {
-		t.Error("should not have called Tdarr submit when path was rejected")
+	if atomic.LoadInt32(&mockExecutor.submitCalls) != 0 {
+		t.Error("should not have called executor submit when path was rejected")
 	}
 }
 
@@ -221,19 +201,19 @@ func TestTranscode_FirstExecutionSubmitsExactlyOnce(t *testing.T) {
 	_ = os.WriteFile(origFile, []byte("original movie bytes"), 0644)
 
 	probePath := createFakeFFprobeScript(t, defaultValidFFprobeJSON)
-	mockClient := &mockTdarrClient{
-		jobStatusFunc: func(ctx context.Context, ref string) (*tdarr.JobStatusResponse, error) {
-			return &tdarr.JobStatusResponse{
-				Found:    true,
-				Status:   "running",
+	mockExecutor := &mockTranscodeExecutor{
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{
+				ID:       jobID,
+				Status:   transcode.StatusRunning,
 				Progress: 35.0,
-				ETA:      "00:10:00",
 				FPS:      45.0,
+				Speed:    2.5,
 			}, nil
 		},
 	}
 
-	engine, _ := setupTranscodeEngine(t, mockClient, probePath, []string{mediaDir}, []string{mediaDir}, false)
+	engine, _ := setupTranscodeEngine(t, mockExecutor, probePath, []string{mediaDir}, []string{mediaDir}, false)
 	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
 		"path": origFile,
 	})
@@ -243,33 +223,33 @@ func TestTranscode_FirstExecutionSubmitsExactlyOnce(t *testing.T) {
 	if res.Status != StatusWaitingExternal {
 		t.Fatalf("expected waiting_external status, got %s", res.Status)
 	}
-	if atomic.LoadInt32(&mockClient.submitCalls) != 1 {
-		t.Fatalf("expected exactly 1 submit call, got %d", atomic.LoadInt32(&mockClient.submitCalls))
+	if atomic.LoadInt32(&mockExecutor.submitCalls) != 1 {
+		t.Fatalf("expected exactly 1 submit call, got %d", atomic.LoadInt32(&mockExecutor.submitCalls))
 	}
-	if res.WaitingCondition != "tdarr_transcode_complete" {
+	if res.WaitingCondition != "transcode_complete" {
 		t.Errorf("unexpected waiting condition: %v", res.WaitingCondition)
 	}
 }
 
-func TestTranscode_WaitingExternalWhileTdarrRuns(t *testing.T) {
+func TestTranscode_WaitingExternalWhileTranscodeRuns(t *testing.T) {
 	mediaDir := t.TempDir()
 	origFile := filepath.Join(mediaDir, "Ep2.mkv")
 	_ = os.WriteFile(origFile, []byte("original ep2 bytes"), 0644)
 
 	probePath := createFakeFFprobeScript(t, defaultValidFFprobeJSON)
-	mockClient := &mockTdarrClient{
-		jobStatusFunc: func(ctx context.Context, ref string) (*tdarr.JobStatusResponse, error) {
-			return &tdarr.JobStatusResponse{
-				Found:    true,
-				Status:   "running",
+	mockExecutor := &mockTranscodeExecutor{
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{
+				ID:       jobID,
+				Status:   transcode.StatusRunning,
 				Progress: 52.3,
-				ETA:      "00:04:12",
 				FPS:      72.0,
+				Speed:    4.1,
 			}, nil
 		},
 	}
 
-	engine, _ := setupTranscodeEngine(t, mockClient, probePath, []string{mediaDir}, []string{mediaDir}, false)
+	engine, _ := setupTranscodeEngine(t, mockExecutor, probePath, []string{mediaDir}, []string{mediaDir}, false)
 	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
 		"path": origFile,
 	})
@@ -291,25 +271,25 @@ func TestTranscode_ResumeNoDuplicateSubmit(t *testing.T) {
 
 	probePath := createFakeFFprobeScript(t, defaultValidFFprobeJSON)
 	statusCalls := 0
-	mockClient := &mockTdarrClient{
-		jobStatusFunc: func(ctx context.Context, ref string) (*tdarr.JobStatusResponse, error) {
+	mockExecutor := &mockTranscodeExecutor{
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
 			statusCalls++
 			if statusCalls == 1 {
-				return &tdarr.JobStatusResponse{
-					Found:    true,
-					Status:   "running",
+				return transcode.JobStatus{
+					ID:       jobID,
+					Status:   transcode.StatusRunning,
 					Progress: 50.0,
 				}, nil
 			}
-			return &tdarr.JobStatusResponse{
-				Found:      true,
-				Status:     "completed",
-				OutputPath: origFile,
+			return transcode.JobStatus{
+				ID:            jobID,
+				Status:        transcode.StatusCompleted,
+				CandidatePath: origFile,
 			}, nil
 		},
 	}
 
-	engine, _ := setupTranscodeEngine(t, mockClient, probePath, []string{mediaDir}, []string{mediaDir}, false)
+	engine, _ := setupTranscodeEngine(t, mockExecutor, probePath, []string{mediaDir}, []string{mediaDir}, false)
 	// Initial Run
 	res1, err := engine.Run(context.Background(), "transcode_media", map[string]any{
 		"path": origFile,
@@ -320,8 +300,8 @@ func TestTranscode_ResumeNoDuplicateSubmit(t *testing.T) {
 	if res1.Status != StatusWaitingExternal {
 		t.Fatalf("expected waiting_external, got %s", res1.Status)
 	}
-	if atomic.LoadInt32(&mockClient.submitCalls) != 1 {
-		t.Fatalf("expected 1 submit call, got %d", atomic.LoadInt32(&mockClient.submitCalls))
+	if atomic.LoadInt32(&mockExecutor.submitCalls) != 1 {
+		t.Fatalf("expected 1 submit call, got %d", atomic.LoadInt32(&mockExecutor.submitCalls))
 	}
 
 	// Resume Action
@@ -333,30 +313,29 @@ func TestTranscode_ResumeNoDuplicateSubmit(t *testing.T) {
 		t.Fatalf("expected completed status after resume, got %s (error: %s)", res2.Status, res2.Error)
 	}
 	// CONFIRMATION: Resume did NOT submit a second job!
-	if atomic.LoadInt32(&mockClient.submitCalls) != 1 {
-		t.Fatalf("expected submitCalls to remain 1 after resume, got %d", atomic.LoadInt32(&mockClient.submitCalls))
+	if atomic.LoadInt32(&mockExecutor.submitCalls) != 1 {
+		t.Fatalf("expected submitCalls to remain 1 after resume, got %d", atomic.LoadInt32(&mockExecutor.submitCalls))
 	}
 }
 
-func TestTranscode_TdarrFailureLeavesOriginalUntouched(t *testing.T) {
+func TestTranscode_TranscodeFailureLeavesOriginalUntouched(t *testing.T) {
 	mediaDir := t.TempDir()
 	origFile := filepath.Join(mediaDir, "FailedMovie.mkv")
 	originalContent := "pristine original content that must never be deleted or modified"
 	_ = os.WriteFile(origFile, []byte(originalContent), 0644)
 
 	probePath := createFakeFFprobeScript(t, defaultValidFFprobeJSON)
-	mockClient := &mockTdarrClient{
-		jobStatusFunc: func(ctx context.Context, ref string) (*tdarr.JobStatusResponse, error) {
-			return &tdarr.JobStatusResponse{
-				Found:   true,
-				Status:  "failed",
-				Error:   "Tdarr transcode node crashed (out of memory)",
-				Details: "worker failed with code 137",
+	mockExecutor := &mockTranscodeExecutor{
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{
+				ID:     jobID,
+				Status: transcode.StatusFailed,
+				Error:  "ffmpeg crashed with exit status 137 (out of memory)",
 			}, nil
 		},
 	}
 
-	engine, _ := setupTranscodeEngine(t, mockClient, probePath, []string{mediaDir}, []string{mediaDir}, false)
+	engine, _ := setupTranscodeEngine(t, mockExecutor, probePath, []string{mediaDir}, []string{mediaDir}, false)
 	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
 		"path": origFile,
 	})
@@ -366,7 +345,7 @@ func TestTranscode_TdarrFailureLeavesOriginalUntouched(t *testing.T) {
 	if res.Status != StatusFailed {
 		t.Fatalf("expected status failed, got %s", res.Status)
 	}
-	if !strings.Contains(res.Error, "Tdarr transcode failed") {
+	if !strings.Contains(res.Error, "Transcode failed") {
 		t.Errorf("unexpected error: %s", res.Error)
 	}
 
@@ -391,17 +370,17 @@ func TestTranscode_InvalidOutputLeavesOriginalUntouched(t *testing.T) {
 	_ = os.WriteFile(emptyOutput, []byte(""), 0644)
 
 	probePath := createFakeFFprobeScript(t, defaultValidFFprobeJSON)
-	mockClient := &mockTdarrClient{
-		jobStatusFunc: func(ctx context.Context, ref string) (*tdarr.JobStatusResponse, error) {
-			return &tdarr.JobStatusResponse{
-				Found:      true,
-				Status:     "completed",
-				OutputPath: emptyOutput,
+	mockExecutor := &mockTranscodeExecutor{
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{
+				ID:            jobID,
+				Status:        transcode.StatusCompleted,
+				CandidatePath: emptyOutput,
 			}, nil
 		},
 	}
 
-	engine, _ := setupTranscodeEngine(t, mockClient, probePath, []string{mediaDir}, []string{mediaDir}, false)
+	engine, _ := setupTranscodeEngine(t, mockExecutor, probePath, []string{mediaDir}, []string{mediaDir}, false)
 	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
 		"path": origFile,
 	})
@@ -455,17 +434,17 @@ fi
 `)
 	_ = os.WriteFile(probeScript, []byte(script), 0755)
 
-	mockClient := &mockTdarrClient{
-		jobStatusFunc: func(ctx context.Context, ref string) (*tdarr.JobStatusResponse, error) {
-			return &tdarr.JobStatusResponse{
-				Found:      true,
-				Status:     "completed",
-				OutputPath: outputFile,
+	mockExecutor := &mockTranscodeExecutor{
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{
+				ID:            jobID,
+				Status:        transcode.StatusCompleted,
+				CandidatePath: outputFile,
 			}, nil
 		},
 	}
 
-	engine, _ := setupTranscodeEngine(t, mockClient, probeScript, []string{mediaDir}, []string{mediaDir}, false)
+	engine, _ := setupTranscodeEngine(t, mockExecutor, probeScript, []string{mediaDir}, []string{mediaDir}, false)
 	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
 		"path": origFile,
 	})
@@ -488,7 +467,6 @@ func TestTranscode_MissingSubtitleDetected(t *testing.T) {
 	outputFile := filepath.Join(mediaDir, "AnimeSubOut.mkv")
 	_ = os.WriteFile(outputFile, []byte("transcoded anime content"), 0644)
 
-	// Original has ASS subtitles; output lost them
 	dir := t.TempDir()
 	probeScript := filepath.Join(dir, "ffprobe")
 	script := fmt.Sprintf(`#!/bin/sh
@@ -515,17 +493,17 @@ fi
 `)
 	_ = os.WriteFile(probeScript, []byte(script), 0755)
 
-	mockClient := &mockTdarrClient{
-		jobStatusFunc: func(ctx context.Context, ref string) (*tdarr.JobStatusResponse, error) {
-			return &tdarr.JobStatusResponse{
-				Found:      true,
-				Status:     "completed",
-				OutputPath: outputFile,
+	mockExecutor := &mockTranscodeExecutor{
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{
+				ID:            jobID,
+				Status:        transcode.StatusCompleted,
+				CandidatePath: outputFile,
 			}, nil
 		},
 	}
 
-	engine, _ := setupTranscodeEngine(t, mockClient, probeScript, []string{mediaDir}, []string{mediaDir}, false)
+	engine, _ := setupTranscodeEngine(t, mockExecutor, probeScript, []string{mediaDir}, []string{mediaDir}, false)
 	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
 		"path": origFile,
 	})
@@ -548,7 +526,6 @@ func TestTranscode_DurationMismatchDetected(t *testing.T) {
 	outputFile := filepath.Join(mediaDir, "TruncatedOutput.mkv")
 	_ = os.WriteFile(outputFile, []byte("truncated output content"), 0644)
 
-	// Original duration 1420.0s, output only 200.0s
 	dir := t.TempDir()
 	probeScript := filepath.Join(dir, "ffprobe")
 	script := fmt.Sprintf(`#!/bin/sh
@@ -570,17 +547,17 @@ fi
 `)
 	_ = os.WriteFile(probeScript, []byte(script), 0755)
 
-	mockClient := &mockTdarrClient{
-		jobStatusFunc: func(ctx context.Context, ref string) (*tdarr.JobStatusResponse, error) {
-			return &tdarr.JobStatusResponse{
-				Found:      true,
-				Status:     "completed",
-				OutputPath: outputFile,
+	mockExecutor := &mockTranscodeExecutor{
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{
+				ID:            jobID,
+				Status:        transcode.StatusCompleted,
+				CandidatePath: outputFile,
 			}, nil
 		},
 	}
 
-	engine, _ := setupTranscodeEngine(t, mockClient, probeScript, []string{mediaDir}, []string{mediaDir}, false)
+	engine, _ := setupTranscodeEngine(t, mockExecutor, probeScript, []string{mediaDir}, []string{mediaDir}, false)
 	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
 		"path": origFile,
 	})
@@ -604,11 +581,11 @@ func TestTranscode_RestartPersistResume(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "persist.db")
 	st1, _ := store.Open(dbPath)
 
-	mockClient := &mockTdarrClient{
-		jobStatusFunc: func(ctx context.Context, ref string) (*tdarr.JobStatusResponse, error) {
-			return &tdarr.JobStatusResponse{
-				Found:    true,
-				Status:   "running",
+	mockExecutor := &mockTranscodeExecutor{
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{
+				ID:       jobID,
+				Status:   transcode.StatusRunning,
 				Progress: 40.0,
 			}, nil
 		},
@@ -617,23 +594,17 @@ func TestTranscode_RestartPersistResume(t *testing.T) {
 	resResolver, _ := fsop.NewResolver([]string{mediaDir}, []string{mediaDir})
 	cfg := &config.Config{
 		Media: config.MediaConfig{AllowedReadRoots: []string{mediaDir}, AllowedWriteRoots: []string{mediaDir}},
-		Tdarr: config.TdarrConfig{
-			Enabled: true,
-			Libraries: map[string]config.TdarrLibraryConfig{
-				"default": {
-					ID:           "anime_lib_123",
-					Name:         "Anime",
-					OutputFolder: "/media/transcodes",
-				},
-			},
+		Transcode: config.TranscodeConfig{
+			Enabled:  true,
+			Executor: "ssh",
 		},
 	}
 	engine1 := NewEngine(EngineDeps{
-		Store:   st1,
-		Config:  cfg,
-		Fs:      resResolver,
-		Ffprobe: probePath,
-		Tdarr:   mockClient,
+		Store:     st1,
+		Config:    cfg,
+		Fs:        resResolver,
+		Ffprobe:   probePath,
+		Transcode: mockExecutor,
 	})
 
 	// Run action to waiting_external
@@ -656,20 +627,20 @@ func TestTranscode_RestartPersistResume(t *testing.T) {
 	defer st2.Close()
 
 	// Update mock to return completed now
-	mockClient.jobStatusFunc = func(ctx context.Context, ref string) (*tdarr.JobStatusResponse, error) {
-		return &tdarr.JobStatusResponse{
-			Found:      true,
-			Status:     "completed",
-			OutputPath: origFile,
+	mockExecutor.statusFunc = func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+		return transcode.JobStatus{
+			ID:            jobID,
+			Status:        transcode.StatusCompleted,
+			CandidatePath: origFile,
 		}, nil
 	}
 
 	engine2 := NewEngine(EngineDeps{
-		Store:   st2,
-		Config:  cfg,
-		Fs:      resResolver,
-		Ffprobe: probePath,
-		Tdarr:   mockClient,
+		Store:     st2,
+		Config:    cfg,
+		Fs:        resResolver,
+		Ffprobe:   probePath,
+		Transcode: mockExecutor,
 	})
 
 	// Resume action on new engine instance
@@ -681,8 +652,8 @@ func TestTranscode_RestartPersistResume(t *testing.T) {
 		t.Fatalf("expected completed status on resumed action after restart, got %s (error: %s)", resumed.Status, resumed.Error)
 	}
 	// Verify submit was NOT called again after restart
-	if atomic.LoadInt32(&mockClient.submitCalls) != 1 {
-		t.Errorf("expected exactly 1 submit call across restart, got %d", atomic.LoadInt32(&mockClient.submitCalls))
+	if atomic.LoadInt32(&mockExecutor.submitCalls) != 1 {
+		t.Errorf("expected exactly 1 submit call across restart, got %d", atomic.LoadInt32(&mockExecutor.submitCalls))
 	}
 }
 
@@ -692,17 +663,17 @@ func TestTranscode_IdempotencyKeyBehavior(t *testing.T) {
 	_ = os.WriteFile(origFile, []byte("content"), 0644)
 
 	probePath := createFakeFFprobeScript(t, defaultValidFFprobeJSON)
-	mockClient := &mockTdarrClient{
-		jobStatusFunc: func(ctx context.Context, ref string) (*tdarr.JobStatusResponse, error) {
-			return &tdarr.JobStatusResponse{
-				Found:    true,
-				Status:   "running",
+	mockExecutor := &mockTranscodeExecutor{
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{
+				ID:       jobID,
+				Status:   transcode.StatusRunning,
 				Progress: 10.0,
 			}, nil
 		},
 	}
 
-	engine, _ := setupTranscodeEngine(t, mockClient, probePath, []string{mediaDir}, []string{mediaDir}, false)
+	engine, _ := setupTranscodeEngine(t, mockExecutor, probePath, []string{mediaDir}, []string{mediaDir}, false)
 
 	// Run with idempotency key
 	res1, err := engine.Run(context.Background(), "transcode_media", map[string]any{
@@ -724,19 +695,19 @@ func TestTranscode_IdempotencyKeyBehavior(t *testing.T) {
 	if res1.ID != res2.ID {
 		t.Errorf("expected same action ID %s, got %s", res1.ID, res2.ID)
 	}
-	if atomic.LoadInt32(&mockClient.submitCalls) != 1 {
-		t.Errorf("expected 1 submit call, got %d", atomic.LoadInt32(&mockClient.submitCalls))
+	if atomic.LoadInt32(&mockExecutor.submitCalls) != 1 {
+		t.Errorf("expected 1 submit call, got %d", atomic.LoadInt32(&mockExecutor.submitCalls))
 	}
 }
 
-func TestTranscode_TdarrDisabled(t *testing.T) {
+func TestTranscode_Disabled(t *testing.T) {
 	mediaDir := t.TempDir()
-	origFile := filepath.Join(mediaDir, "NoTdarr.mkv")
+	origFile := filepath.Join(mediaDir, "NoTranscode.mkv")
 	_ = os.WriteFile(origFile, []byte("content"), 0644)
 
 	probePath := createFakeFFprobeScript(t, defaultValidFFprobeJSON)
 
-	// nil Tdarr client
+	// nil executor
 	engine, _ := setupTranscodeEngine(t, nil, probePath, []string{mediaDir}, []string{mediaDir}, false)
 	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
 		"path": origFile,
@@ -745,7 +716,7 @@ func TestTranscode_TdarrDisabled(t *testing.T) {
 		t.Fatalf("run error: %v", err)
 	}
 	if res.Status != StatusFailed {
-		t.Fatalf("expected failed status when Tdarr is disabled, got %s", res.Status)
+		t.Fatalf("expected failed status when transcode is disabled, got %s", res.Status)
 	}
 	if !strings.Contains(res.Error, "disabled or not configured") {
 		t.Errorf("expected disabled error message, got: %s", res.Error)
@@ -763,18 +734,18 @@ func TestTranscode_ReplaceOriginal_DefaultFalse(t *testing.T) {
 	_ = os.WriteFile(outputFile, []byte(transcodedContent), 0644)
 
 	probePath := createFakeFFprobeScript(t, defaultValidFFprobeJSON)
-	mockClient := &mockTdarrClient{
-		jobStatusFunc: func(ctx context.Context, ref string) (*tdarr.JobStatusResponse, error) {
-			return &tdarr.JobStatusResponse{
-				Found:      true,
-				Status:     "completed",
-				OutputPath: outputFile,
+	mockExecutor := &mockTranscodeExecutor{
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{
+				ID:            jobID,
+				Status:        transcode.StatusCompleted,
+				CandidatePath: outputFile,
 			}, nil
 		},
 	}
 
 	// replace_original is omitted (defaults to false)
-	engine, _ := setupTranscodeEngine(t, mockClient, probePath, []string{mediaDir}, []string{mediaDir}, false)
+	engine, _ := setupTranscodeEngine(t, mockExecutor, probePath, []string{mediaDir}, []string{mediaDir}, false)
 	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
 		"path": origFile,
 	})
@@ -803,10 +774,10 @@ func TestTranscode_ReplaceOriginal_DestructiveGate(t *testing.T) {
 	_ = os.WriteFile(origFile, []byte("original"), 0644)
 
 	probePath := createFakeFFprobeScript(t, defaultValidFFprobeJSON)
-	mockClient := &mockTdarrClient{}
+	mockExecutor := &mockTranscodeExecutor{}
 
 	// replace_original: true must fail explicitly and immediately with rejection
-	engine, _ := setupTranscodeEngine(t, mockClient, probePath, []string{mediaDir}, []string{mediaDir}, false)
+	engine, _ := setupTranscodeEngine(t, mockExecutor, probePath, []string{mediaDir}, []string{mediaDir}, false)
 	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
 		"path":             origFile,
 		"replace_original": true,
@@ -826,8 +797,8 @@ func TestTranscode_ReplaceOriginal_DestructiveGate(t *testing.T) {
 	if string(c) != "original" {
 		t.Error("original was modified despite safety gate")
 	}
-	if atomic.LoadInt32(&mockClient.submitCalls) != 0 {
-		t.Errorf("expected 0 submit calls when replace_original rejected, got %d", atomic.LoadInt32(&mockClient.submitCalls))
+	if atomic.LoadInt32(&mockExecutor.submitCalls) != 0 {
+		t.Errorf("expected 0 submit calls when replace_original rejected, got %d", atomic.LoadInt32(&mockExecutor.submitCalls))
 	}
 }
 
@@ -869,17 +840,17 @@ fi
 `
 	_ = os.WriteFile(probeScript, []byte(script), 0755)
 
-	mockClient := &mockTdarrClient{
-		jobStatusFunc: func(ctx context.Context, ref string) (*tdarr.JobStatusResponse, error) {
-			return &tdarr.JobStatusResponse{
-				Found:      true,
-				Status:     "completed",
-				OutputPath: outputFile,
+	mockExecutor := &mockTranscodeExecutor{
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{
+				ID:            jobID,
+				Status:        transcode.StatusCompleted,
+				CandidatePath: outputFile,
 			}, nil
 		},
 	}
 
-	engine, _ := setupTranscodeEngine(t, mockClient, probeScript, []string{mediaDir}, []string{mediaDir}, false)
+	engine, _ := setupTranscodeEngine(t, mockExecutor, probeScript, []string{mediaDir}, []string{mediaDir}, false)
 	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
 		"path": origFile,
 	})
@@ -952,17 +923,17 @@ fi
 `
 	_ = os.WriteFile(probeScript, []byte(script), 0755)
 
-	mockClient := &mockTdarrClient{
-		jobStatusFunc: func(ctx context.Context, ref string) (*tdarr.JobStatusResponse, error) {
-			return &tdarr.JobStatusResponse{
-				Found:      true,
-				Status:     "completed",
-				OutputPath: outputFile,
+	mockExecutor := &mockTranscodeExecutor{
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{
+				ID:            jobID,
+				Status:        transcode.StatusCompleted,
+				CandidatePath: outputFile,
 			}, nil
 		},
 	}
 
-	engine, _ := setupTranscodeEngine(t, mockClient, probeScript, []string{mediaDir}, []string{mediaDir}, false)
+	engine, _ := setupTranscodeEngine(t, mockExecutor, probeScript, []string{mediaDir}, []string{mediaDir}, false)
 	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
 		"path": origFile,
 	})
@@ -1006,17 +977,17 @@ func TestTranscode_CandidateOutputReported(t *testing.T) {
 	_ = os.WriteFile(candidateFile, []byte("candidate transcoded bytes in output folder"), 0644)
 
 	probePath := createFakeFFprobeScript(t, defaultValidFFprobeJSON)
-	mockClient := &mockTdarrClient{
-		jobStatusFunc: func(ctx context.Context, ref string) (*tdarr.JobStatusResponse, error) {
-			return &tdarr.JobStatusResponse{
-				Found:      true,
-				Status:     "completed",
-				OutputPath: candidateFile,
+	mockExecutor := &mockTranscodeExecutor{
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{
+				ID:            jobID,
+				Status:        transcode.StatusCompleted,
+				CandidatePath: candidateFile,
 			}, nil
 		},
 	}
 
-	engine, _ := setupTranscodeEngine(t, mockClient, probePath, []string{mediaDir, outputDir}, []string{mediaDir, outputDir}, false)
+	engine, _ := setupTranscodeEngine(t, mockExecutor, probePath, []string{mediaDir, outputDir}, []string{mediaDir, outputDir}, false)
 	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
 		"path": origFile,
 	})
@@ -1062,200 +1033,5 @@ func TestTranscode_CandidateOutputReported(t *testing.T) {
 	}
 	if !bytes.Equal(curBytes, origBytes) {
 		t.Errorf("original file was modified on disk!")
-	}
-}
-
-func TestTranscode_StaleCompletedIgnoredUntilNewJobCompletes(t *testing.T) {
-	mediaDir := t.TempDir()
-	origFile := filepath.Join(mediaDir, "StaleTest.mkv")
-	origBytes := []byte("stale test original file bytes")
-	_ = os.WriteFile(origFile, origBytes, 0644)
-
-	outputDir := t.TempDir()
-	candidateFile := filepath.Join(outputDir, "StaleTest.mkv")
-	_ = os.WriteFile(candidateFile, []byte("candidate bytes from new job"), 0644)
-
-	probePath := createFakeFFprobeScript(t, defaultValidFFprobeJSON)
-
-	phase := 1
-	mockClient := &mockTdarrClient{
-		jobStatusFunc: func(ctx context.Context, ref string) (*tdarr.JobStatusResponse, error) {
-			switch phase {
-			case 1:
-				// First query: scanner hasn't run yet, Tdarr has stale record
-				return &tdarr.JobStatusResponse{
-					Found:   true,
-					Status:  "queued",
-					Details: "stale record detected; queued",
-				}, nil
-			case 2:
-				// Second query: new worker running with real JobID
-				return &tdarr.JobStatusResponse{
-					Found:      true,
-					Status:     "running",
-					Progress:   50.0,
-					JobId:      "job-new-session-1",
-					OutputPath: candidateFile,
-				}, nil
-			default:
-				// Third query: completed with real JobID
-				return &tdarr.JobStatusResponse{
-					Found:      true,
-					Status:     "completed",
-					Progress:   100.0,
-					JobId:      "job-new-session-1",
-					OutputPath: candidateFile,
-				}, nil
-			}
-		},
-	}
-
-	engine, _ := setupTranscodeEngine(t, mockClient, probePath, []string{mediaDir, outputDir}, []string{mediaDir, outputDir}, false)
-
-	// Step 1: Run action -> Tdarr returns queued (not completed!)
-	phase = 1
-	res1, err := engine.Run(context.Background(), "transcode_media", map[string]any{
-		"path": origFile,
-	})
-	if err != nil {
-		t.Fatalf("run error: %v", err)
-	}
-	if res1.Status != StatusWaitingExternal {
-		t.Fatalf("expected waiting_external, got %s", res1.Status)
-	}
-
-	// Step 2: Resume while worker is running with JobId -> Action captures JobId and stays waiting_external
-	phase = 2
-	res2, err := engine.Resume(context.Background(), res1.ID, "", nil)
-	if err != nil {
-		t.Fatalf("resume error: %v", err)
-	}
-	if res2.Status != StatusWaitingExternal {
-		t.Fatalf("expected waiting_external while worker runs, got %s", res2.Status)
-	}
-	if res2.State["job_id"] != "job-new-session-1" {
-		t.Errorf("expected discovered job_id job-new-session-1 in state, got %v", res2.State["job_id"])
-	}
-
-	// Step 3: Resume after worker completes -> Action completes and verifies candidate
-	phase = 3
-	res3, err := engine.Resume(context.Background(), res1.ID, "", nil)
-	if err != nil {
-		t.Fatalf("resume error: %v", err)
-	}
-	if res3.Status != StatusCompleted {
-		t.Fatalf("expected completed status, got %s (error: %s)", res3.Status, res3.Error)
-	}
-	if res3.Outputs["candidate_path"] != candidateFile {
-		t.Errorf("expected candidate_path %s, got %v", candidateFile, res3.Outputs["candidate_path"])
-	}
-	if res3.Outputs["original_intact"] != true {
-		t.Errorf("expected original_intact true, got %v", res3.Outputs["original_intact"])
-	}
-
-	// Verify original file remained intact
-	currentBytes, _ := os.ReadFile(origFile)
-	if !bytes.Equal(currentBytes, origBytes) {
-		t.Errorf("original file bytes modified during transcode!")
-	}
-}
-
-func TestTranscode_GetLibraryFailsClosedOnError(t *testing.T) {
-	mediaDir := t.TempDir()
-	origFile := filepath.Join(mediaDir, "FailClosed.mkv")
-	_ = os.WriteFile(origFile, []byte("content"), 0644)
-
-	probePath := createFakeFFprobeScript(t, defaultValidFFprobeJSON)
-	mockClient := &mockTdarrClient{
-		getLibraryFunc: func(ctx context.Context, libraryID string) (*tdarr.LibrarySettings, error) {
-			return nil, fmt.Errorf("network connection refused")
-		},
-	}
-
-	engine, _ := setupTranscodeEngine(t, mockClient, probePath, []string{mediaDir}, []string{mediaDir}, false)
-	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
-		"path": origFile,
-	})
-	if err != nil {
-		t.Fatalf("run error: %v", err)
-	}
-	if res.Status != StatusFailed {
-		t.Fatalf("expected failed status when GetLibrary fails, got %s", res.Status)
-	}
-	if !strings.Contains(res.Error, "unable to verify Tdarr candidate-safe library settings") || !strings.Contains(res.Error, "refusing submit") {
-		t.Errorf("expected fail-closed error message, got: %s", res.Error)
-	}
-	if atomic.LoadInt32(&mockClient.submitCalls) != 0 {
-		t.Errorf("expected 0 submit calls when GetLibrary fails, got %d", atomic.LoadInt32(&mockClient.submitCalls))
-	}
-}
-
-func TestTranscode_GetLibraryFailsClosedOnFolderToFolderFalse(t *testing.T) {
-	mediaDir := t.TempDir()
-	origFile := filepath.Join(mediaDir, "DestructiveLib.mkv")
-	_ = os.WriteFile(origFile, []byte("content"), 0644)
-
-	probePath := createFakeFFprobeScript(t, defaultValidFFprobeJSON)
-	mockClient := &mockTdarrClient{
-		getLibraryFunc: func(ctx context.Context, libraryID string) (*tdarr.LibrarySettings, error) {
-			return &tdarr.LibrarySettings{
-				ID:                       libraryID,
-				Name:                     "Destructive In-Place Library",
-				FolderToFolderConversion: false, // In-place replacement!
-				OutputFolder:             "/media/transcodes",
-			}, nil
-		},
-	}
-
-	engine, _ := setupTranscodeEngine(t, mockClient, probePath, []string{mediaDir}, []string{mediaDir}, false)
-	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
-		"path": origFile,
-	})
-	if err != nil {
-		t.Fatalf("run error: %v", err)
-	}
-	if res.Status != StatusFailed {
-		t.Fatalf("expected failed status, got %s", res.Status)
-	}
-	if !strings.Contains(res.Error, "folderToFolderConversion disabled") {
-		t.Errorf("expected folderToFolderConversion error, got: %s", res.Error)
-	}
-	if atomic.LoadInt32(&mockClient.submitCalls) != 0 {
-		t.Errorf("expected 0 submit calls on unsafe library, got %d", atomic.LoadInt32(&mockClient.submitCalls))
-	}
-}
-
-func TestTranscode_GetLibraryFailsClosedOnOutputFolderMismatch(t *testing.T) {
-	mediaDir := t.TempDir()
-	origFile := filepath.Join(mediaDir, "MismatchLib.mkv")
-	_ = os.WriteFile(origFile, []byte("content"), 0644)
-
-	probePath := createFakeFFprobeScript(t, defaultValidFFprobeJSON)
-	mockClient := &mockTdarrClient{
-		getLibraryFunc: func(ctx context.Context, libraryID string) (*tdarr.LibrarySettings, error) {
-			return &tdarr.LibrarySettings{
-				ID:                       libraryID,
-				Name:                     "Mismatch Library",
-				FolderToFolderConversion: true,
-				OutputFolder:             "/media/unexpected_output_dir",
-			}, nil
-		},
-	}
-
-	engine, _ := setupTranscodeEngine(t, mockClient, probePath, []string{mediaDir}, []string{mediaDir}, false)
-	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
-		"path": origFile,
-	})
-	if err != nil {
-		t.Fatalf("run error: %v", err)
-	}
-	if res.Status != StatusFailed {
-		t.Fatalf("expected failed status on outputFolder mismatch, got %s", res.Status)
-	}
-	if !strings.Contains(res.Error, "outputFolder mismatch") {
-		t.Errorf("expected mismatch error, got: %s", res.Error)
-	}
-	if atomic.LoadInt32(&mockClient.submitCalls) != 0 {
-		t.Errorf("expected 0 submit calls on outputFolder mismatch, got %d", atomic.LoadInt32(&mockClient.submitCalls))
 	}
 }
