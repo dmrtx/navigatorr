@@ -121,6 +121,15 @@ This prevents a single API call from consuming the LLM's entire context window.
 - `qbit_manage_torrent` — Actions: `pause`, `resume`, `delete`, `delete_files`
 - `qbit_transfer_info` — Global transfer speeds and stats
 
+### Action Engine Tools
+
+- `action_run` — Run a declarative multi-step workflow (`transcode_media`, `safe_media_replacement`, `validate_torrent`)
+- `action_catalog` — Discover all registered action workflows, parameters, and safety requirements
+- `action_status` — Check current lifecycle state, waiting condition, and step logs
+- `action_resume` — Resume a paused action from `waiting_external` or `waiting_decision` (with decision: approve/reject)
+- `action_retry` — Retry a failed action from its last safe step
+- `action_list` — List action workflows filtered by status (`running`, `waiting_external`, `waiting_decision`, `completed`, `failed`)
+
 ---
 
 ## Real-World Patterns
@@ -327,6 +336,45 @@ twice, resolved twice, or released unless it is currently claimed. If
 other statuses, so a backlog sitting in `claimed` from a crashed session is
 visible rather than looking like an empty queue — `queue_release` recovers those.
 
+### Pattern 9: Transcoding Media via Apple Silicon SSH Worker
+
+Navigatorr acts as the coordinator; the remote Apple Silicon node executes hardware-accelerated FFmpeg via SSH. Navigatorr manages inspection, submission, waiting, `ffprobe` verification, and candidate reporting without ever modifying the original media.
+
+```
+User: "Transcode this oversized anime episode to HEVC using our Apple Silicon node"
+
+LLM approach:
+  1. action_run → action: "transcode_media", inputs: {
+       "path": "/media/Anime/Frieren/S01E01.mkv",
+       "profile": "hevc-vt"
+     }
+     → Returns action ID act-transcode-media-..., status: waiting_external,
+       step: wait_transcode, waiting_condition: "transcode_complete"
+
+  2. Periodically or upon session resume, monitor progress:
+     action_status → id: "act-transcode-media-..."
+     → Reports live progress, ETA, fps, and worker metrics
+
+  3. When transcode finishes, resume the workflow:
+     action_resume → id: "act-transcode-media-..."
+     → Runs validate_result using ffprobe:
+       - Confirms candidate output file exists and size > 0
+       - Validates duration match within tolerance
+       - Verifies video codec is hevc
+       - Validates audio streams (Japanese audio retained)
+       - Validates subtitle streams (ASS/SSA tracks and styling preserved)
+       - Confirms font attachments and chapters preserved
+      → If validation passes, finishes successfully in candidate mode (original file preserved and verified via SHA-256).
+      → If validation detects any discrepancy, pauses in waiting_decision
+        with options ["accept_loss", "reject"] for user decision.
+
+   4. If user accepts discrepancy or rejects:
+      action_resume → id: "act-transcode-media-...", decision: "accept_loss"
+      → Accepts discrepancy, records loss_accepted: true, and completes workflow.
+      action_resume → id: "act-transcode-media-...", decision: "reject"
+      → Marks workflow failed; original media file remains completely untouched.
+```
+
 ---
 
 ## Maintenance Agent Tools
@@ -400,6 +448,20 @@ qbittorrent:
   url: "http://your-server:8080"
   username: "admin"
   password: "your-password"
+
+# Remote Apple Silicon SSH worker transcode executor (optional)
+transcode:
+  enabled: true
+  executor: "ssh"
+  ssh:
+    host: "192.0.2.10"
+    user: "transcoder"
+    command: "/Users/transcoder/.local/bin/navigatorr-transcode"
+    identity_file: "/run/secrets/navigatorr_transcode_ssh"
+    connect_timeout: "5s"
+    path_mappings:
+      - local: "/media"
+        remote: "/Volumes/media"
 ```
 
 ### Service Defaults

@@ -37,6 +37,10 @@ services:
       # 4. Downloads directory (mounted read-write for safe_replace / cleanup operations)
       - /path/on/host/Downloads:/media/Downloads:rw
 
+      # 5. Dedicated read-only SSH key for remote Apple Silicon transcode worker (optional)
+      # - ./secrets/navigatorr_transcode_ssh:/run/secrets/navigatorr_transcode_ssh:ro
+      # - ./secrets/known_hosts:/run/secrets/navigatorr_known_hosts:ro
+
     restart: "no"
 
 volumes:

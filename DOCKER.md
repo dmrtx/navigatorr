@@ -19,9 +19,9 @@ Do not run it as a normal detached Portainer service unless you are intentionall
 Create the config on the Docker host:
 
 ```bash
-mkdir -p /home/navigatorr/.config/navigatorr
-cp config.yaml.example /home/navigatorr/.config/navigatorr/config.yaml
-chmod 600 /home/navigatorr/.config/navigatorr/config.yaml
+mkdir -p /home/example/.config/navigatorr
+cp config.yaml.example /home/example/.config/navigatorr/config.yaml
+chmod 600 /home/example/.config/navigatorr/config.yaml
 ```
 
 For qBittorrent, include:
@@ -94,7 +94,7 @@ If Navigatorr must see your media files (for `inspect_media` / `fs_*` tools), mo
 
 ```yaml
 volumes:
-  - /home/navigatorr/.config/navigatorr/config.yaml:/root/.config/navigatorr/config.yaml:ro
+  - /home/example/.config/navigatorr/config.yaml:/root/.config/navigatorr/config.yaml:ro
   - navigatorr-cache:/root/.cache/navigatorr
   - /srv/media/Movies:/media/Movies:ro
   - /srv/media/Anime:/media/Anime:ro
@@ -114,7 +114,7 @@ Host System (e.g. Synology NAS)                Navigatorr Container
 ┌───────────────────────────────┐              ┌───────────────────────────┐
 │ /srv/media/Movies         │ ── mount ──> │ /media/Movies             │
 │ /srv/media/Downloads      │ ── mount ──> │ /media/Downloads          │
-│ /home/navigatorr/.config/...       │ ── mount ──> │ /root/.config/...         │
+│ /home/example/.config/...       │ ── mount ──> │ /root/.config/...         │
 └───────────────────────────────┘              └───────────────────────────┘
 ```
 

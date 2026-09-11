@@ -12,6 +12,7 @@ import (
 	"github.com/jakenesler/navigatorr/qbit"
 	"github.com/jakenesler/navigatorr/sabnzbd"
 	"github.com/jakenesler/navigatorr/store"
+	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transmission"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -28,6 +29,7 @@ type DiagnosticsDeps struct {
 	QbClient  *qbit.Client
 	SabClient *sabnzbd.Client
 	Store     *store.Store
+	Transcode transcode.Executor
 }
 
 func registerDiagnosticsTools(s *server.MCPServer, d DiagnosticsDeps) {
@@ -210,6 +212,23 @@ func registerDiagnosticsTools(s *server.MCPServer, d DiagnosticsDeps) {
 				dbStats["active_maintenance_jobs"] = len(maintItems)
 			}
 
+			// 6. Transcode executor
+			var tcInfo map[string]any
+			if d.Transcode != nil {
+				tcInfo = map[string]any{
+					"configured": true,
+					"executor":   "ssh",
+					"status":     "ok",
+				}
+				if checkConn {
+					if err := d.Transcode.Doctor(ctx); err != nil {
+						tcInfo["status"] = "degraded"
+						tcInfo["error"] = err.Error()
+						overallStatus = "degraded"
+					}
+				}
+			}
+
 			res := map[string]any{
 				"status":           overallStatus,
 				"uptime_seconds":   int64(time.Since(serverStartTime).Seconds()),
@@ -218,6 +237,9 @@ func registerDiagnosticsTools(s *server.MCPServer, d DiagnosticsDeps) {
 				"download_clients": dlClients,
 				"openapi_store":    specInfo,
 				"database":         dbStats,
+			}
+			if tcInfo != nil {
+				res["transcode"] = tcInfo
 			}
 
 			return toolJSON(res), nil
