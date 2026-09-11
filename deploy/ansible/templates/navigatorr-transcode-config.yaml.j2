@@ -3,7 +3,7 @@
 
 ffmpeg: {{ transcode_ffmpeg_path | default('/opt/homebrew/bin/ffmpeg') }}
 ffprobe: {{ transcode_ffprobe_path | default('/opt/homebrew/bin/ffprobe') }}
-state_dir: {{ transcode_state_dir | default(ansible_user_dir ~ '/.local/share/navigatorr-transcode/jobs') }}
+state_dir: {{ transcode_state_dir | default(ansible_facts['user_dir'] ~ '/.local/share/navigatorr-transcode/jobs') }}
 
 allowed_roots:
 {% for root in transcode_allowed_roots | default(['/Volumes/media']) %}
