@@ -305,7 +305,7 @@ func (t *TranscodeConfig) InitializeRecipes(ctx context.Context) error {
 			mgr.StartAutoRefresh(context.Background(), d)
 		}
 	}
-	if t.DefaultProfile != "" {
+	if t.DefaultProfile != "" && t.DefaultProfile != "auto" {
 		if _, err := t.ResolvePlan(t.DefaultProfile); err != nil {
 			return fmt.Errorf("transcode: default_profile %q is not defined in the active recipe/local overrides: %w", t.DefaultProfile, err)
 		}

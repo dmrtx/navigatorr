@@ -12,6 +12,12 @@ import (
 )
 
 func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+	if getBool(ec.State, "skip_transcode") {
+		return StepResult{
+			Status:  StepSkipped,
+			Outputs: map[string]any{"skipped": true},
+		}, nil
+	}
 	if ec.Decision != "" {
 		if strings.EqualFold(ec.Decision, "reject") || strings.EqualFold(ec.Decision, "cancel") {
 			return StepResult{Status: StepFailed, Error: "transcode candidate rejected by user decision; original file remains untouched"}, nil
@@ -140,6 +146,13 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 	pct := float64(0)
 	if origSize > 0 {
 		pct = float64(saved) / float64(origSize) * 100
+	}
+	if _, ok := ec.Inputs["max_size_increase_percent"]; ok && origSize > 0 && fi.Size() > origSize {
+		maxInc := getFloat(ec.Inputs, "max_size_increase_percent")
+		increasePct := float64(fi.Size()-origSize) / float64(origSize) * 100
+		if increasePct > maxInc {
+			return waitDecision(fmt.Sprintf("Candidate file size (%d bytes) exceeds original (%d bytes) by %.1f%%, which is greater than max_size_increase_percent (%.1f%%)", fi.Size(), origSize, increasePct, maxInc)), nil
+		}
 	}
 	result := map[string]any{"candidate_path": outputPath, "output_path": outputPath, "size_bytes": fi.Size(), "duration_sec": outRep.DurationSec, "video_codec": outRep.Video[0].Codec, "resolution": fmt.Sprintf("%dx%d", outRep.Video[0].Width, outRep.Video[0].Height), "profile": getString(ec.State, "profile"), "recipe_version": plan.RecipeVersion, "recipe_digest": plan.RecipeDigest, "plan_digest": plan.PlanDigest, "attempt": getInt(ec.State, "attempt"), "retry_count": getInt(ec.State, "retry_count"), "fallback_count": getInt(ec.State, "fallback_count"), "applied_fallbacks": plan.AppliedFallbacks}
 	if c := ec.State["conversions"]; c != nil {

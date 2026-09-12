@@ -183,16 +183,16 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 	// action_run — start a declarative multi-step action workflow
 	s.AddTool(
 		mcp.NewTool("action_run",
-			mcp.WithDescription("Run a declarative multi-step action workflow (e.g. validate_torrent, safe_media_replacement). State is persistently tracked in SQLite and tolerates disconnects and reboots. Returns a compact operational summary."),
-			mcp.WithString("action", mcp.Required(), mcp.Description("Workflow name: validate_torrent, safe_media_replacement")),
-			mcp.WithString("inputs", mcp.Description("JSON object string with action parameters (e.g. {\"service\":\"radarr\",\"media_id\":\"123\",\"hash\":\"...\"})")),
-			mcp.WithString("service", mcp.Description("Shortcut: *arr service name (radarr, sonarr)")),
+			mcp.WithDescription("Run a declarative multi-step action workflow (e.g. transcode_batch, transcode_media, validate_torrent, safe_media_replacement). State is persistently tracked in SQLite and tolerates disconnects and reboots. Note: 'inputs' must be provided as a JSON object string, and 'idempotency_key' is a top-level string argument. Returns a compact operational summary."),
+			mcp.WithString("action", mcp.Required(), mcp.Description("Workflow name: transcode_batch, transcode_media, validate_torrent, safe_media_replacement")),
+			mcp.WithString("inputs", mcp.Description("JSON object string with action parameters (e.g. \"{\\\"service\\\":\\\"sonarr\\\",\\\"series_id\\\":\\\"10\\\"}\" or \"{\\\"path\\\":\\\"/media/...\\\"}\"). Must be a JSON-encoded string, not a raw object.")),
+			mcp.WithString("service", mcp.Description("Shortcut: *arr service name (sonarr, radarr)")),
 			mcp.WithString("media_id", mcp.Description("Shortcut: media ID in *arr service")),
 			mcp.WithString("hash", mcp.Description("Shortcut: torrent infohash")),
 			mcp.WithString("url", mcp.Description("Shortcut: magnet link or torrent URL")),
 			mcp.WithString("path", mcp.Description("Shortcut: local file path")),
 			mcp.WithString("objective", mcp.Description("Shortcut: accessibility_repair or size_optimization")),
-			mcp.WithString("idempotency_key", mcp.Description("Optional idempotency key to prevent duplicate runs (e.g. radarr:327:size_optimization)")),
+			mcp.WithString("idempotency_key", mcp.Description("Optional top-level idempotency key to prevent duplicate runs (e.g. batch-sonarr-10 or radarr:327:size_optimization)")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			args := req.GetArguments()
@@ -265,9 +265,9 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 	// action_resume — resume an action from waiting_external or waiting_decision
 	s.AddTool(
 		mcp.NewTool("action_resume",
-			mcp.WithDescription("Resume a paused action workflow (in waiting_external or waiting_decision state) using its action ID, optionally providing an LLM decision (e.g. approve, reject) and additional inputs. Returns a compact operational summary."),
-			mcp.WithString("id", mcp.Required(), mcp.Description("Action instance ID (e.g. act-safe-media-replacement-a1b2c3d4)")),
-			mcp.WithString("decision", mcp.Description("Decision choice when resuming from waiting_decision: approve, reject")),
+			mcp.WithDescription("Resume an active or paused action workflow using its action ID. For actions in waiting_external (e.g. transcode running in background or waiting for worker slot), call with id only to poll/advance progress. For actions in waiting_decision, provide 'decision' matching one of waiting_options (e.g. approve, reject, accept_loss, resume, pause, cancel). Note: cancelling a batch cancels queued and waiting items; active remote jobs already running on workers are not stopped. Returns a compact operational summary."),
+			mcp.WithString("id", mcp.Required(), mcp.Description("Action instance ID (e.g. act-transcode_batch-a1b2c3d4)")),
+			mcp.WithString("decision", mcp.Description("Decision choice when resuming from waiting_decision (matches one of the action's waiting_options, e.g. resume, pause, cancel, approve, reject, accept_loss). Omit when resuming waiting_external.")),
 			mcp.WithString("inputs", mcp.Description("Optional JSON object string with additional parameters")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

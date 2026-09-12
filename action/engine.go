@@ -448,6 +448,7 @@ func (e *Engine) execute(ctx context.Context, inst *store.ActionInstance, ec *Ex
 		// Handle external waiting (e.g. torrent downloading)
 		if res.Status == StepWaitingExternal {
 			mergeMap(ec.State, res.Outputs)
+			mergeMap(ec.Outputs, res.Outputs)
 			inpJSON, _ := json.Marshal(ec.Inputs)
 			outJSON, _ := json.Marshal(res.Outputs)
 
@@ -476,6 +477,7 @@ func (e *Engine) execute(ctx context.Context, inst *store.ActionInstance, ec *Ex
 		// Handle decision waiting (e.g. LLM confirmation on trade-offs)
 		if res.Status == StepWaitingDecision {
 			mergeMap(ec.State, res.Outputs)
+			mergeMap(ec.Outputs, res.Outputs)
 			inpJSON, _ := json.Marshal(ec.Inputs)
 			outJSON, _ := json.Marshal(res.Outputs)
 

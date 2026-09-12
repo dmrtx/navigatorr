@@ -20,7 +20,7 @@ import (
 )
 
 // SchemaVersion is the current schema revision. Migrations run in order.
-const SchemaVersion = 2
+const SchemaVersion = 5
 
 // MaxPreferenceValueLen bounds a stored preference value. Values ride into
 // memory_get/memory_list/get_context verbatim, so one huge blob would tax
@@ -293,6 +293,30 @@ var migrations = []migration{
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_action_instances_active_idempotency
 			ON action_instances (action_name, idempotency_key)
 			WHERE idempotency_key != '' AND status NOT IN ('completed', 'failed', 'cancelled')`,
+	}},
+	{version: 4, statements: []string{
+		`CREATE TABLE IF NOT EXISTS transcode_batch_items (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			batch_id TEXT NOT NULL,
+			item_key TEXT NOT NULL,
+			file_path TEXT NOT NULL,
+			display_label TEXT NOT NULL,
+			episode_info TEXT NOT NULL DEFAULT '',
+			decision TEXT NOT NULL DEFAULT '',
+			profile TEXT NOT NULL DEFAULT '',
+			reasons_json TEXT NOT NULL DEFAULT '[]',
+			status TEXT NOT NULL DEFAULT 'queued',
+			child_action_id TEXT NOT NULL DEFAULT '',
+			candidate_path TEXT NOT NULL DEFAULT '',
+			error TEXT NOT NULL DEFAULT '',
+			attempts INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			UNIQUE (batch_id, item_key))`,
+		`CREATE INDEX IF NOT EXISTS idx_transcode_batch_items_batch ON transcode_batch_items (batch_id, status)`,
+	}},
+	{version: 5, statements: []string{
+		`ALTER TABLE transcode_batch_items ADD COLUMN job_id TEXT NOT NULL DEFAULT ''`,
 	}},
 }
 
