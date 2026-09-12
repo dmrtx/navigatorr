@@ -212,25 +212,91 @@ The `transcode_batch` action coordinates persistent batch transcoding across lib
 | `min_savings_percent` | float | No | `config` | Minimum projected file size savings threshold (default from `config.Transcode.MinSavingsPercent`). |
 | `idempotency_key` | string | No | `""` | Optional idempotency key to re-attach to existing batch executions. |
 
-### Dry-run usage
+### Action invocation via `action_run`
 
-A dry run probes all episode files for the specified series or season, evaluates them against deterministic selector rules, records per-item decisions (`transcode`, `skip`, or `review`), and produces aggregate counts without submitting any jobs to the remote transcode executor:
+`transcode_batch` is executed via the `action_run` MCP tool. Two primary patterns are supported:
+
+#### 1. Season dry-run example
+
+Probes all episode files in Season 1, evaluates each stream against deterministic auto-profile rules, and returns aggregate counts and bounded summaries without running transcodes or mutating files:
 
 ```json
 {
-  "service": "sonarr",
-  "series_id": 42,
-  "season": 1,
-  "dry_run": true
+  "action": "transcode_batch",
+  "inputs": "{\"service\":\"sonarr\",\"series_id\":10,\"season\":1,\"profile\":\"auto\",\"dry_run\":true}"
 }
 ```
+
+#### 2. Real candidate-only batch example
+
+Processes Season 2 files, skipping items that are already HEVC or do not meet savings thresholds, and generates standalone `.candidate.<ext>` files for qualifying items with serial concurrency and worker slot management:
+
+```json
+{
+  "action": "transcode_batch",
+  "inputs": "{\"service\":\"sonarr\",\"series_id\":10,\"season\":2,\"profile\":\"auto\",\"dry_run\":false,\"replace_original\":false}"
+}
+```
+
+> [!NOTE]
+> `replace_original` defaults to `false` and must remain `false`. Any request specifying `replace_original: true` is rejected fail-closed to guarantee original library files are never touched or overwritten.
+
+### Bounded summaries and truncation metadata
+
+To prevent unbounded JSON responses when batching entire series or large seasons, action outputs provide aggregate counts plus a bounded list of per-item summaries:
+
+```json
+{
+  "batch_id": "act-transcode_batch-123456",
+  "series_title": "Kaguya-sama: Love Is War",
+  "is_anime": true,
+  "dry_run": true,
+  "counts": {
+    "total": 24,
+    "queued": 0,
+    "transcode": 18,
+    "skip": 6,
+    "review": 0,
+    "waiting_for_slot": 0,
+    "running": 0,
+    "completed": 0,
+    "failed": 0
+  },
+  "total_items": 24,
+  "returned_items": 24,
+  "truncated": false,
+  "items_limit": 25,
+  "items": [
+    {
+      "item_key": "epfile-101",
+      "file_path": "/media/tv/Kaguya S01E01.mkv",
+      "display_label": "Kaguya-sama: Love Is War - S01E01",
+      "episode_info": "S01E01",
+      "decision": "transcode",
+      "profile": "anime-hevc",
+      "reasons": ["video: h264 1080p, anime content, high bitrate (8.5 Mbps)"],
+      "status": "queued",
+      "attempts": 0,
+      "child_action_id": "",
+      "job_id": ""
+    }
+  ]
+}
+```
+
+- **Deterministic bounding**: Returns up to `items_limit` (default: 25, configurable via `max_items`).
+- **Truncation metadata**: `total_items`, `returned_items`, `truncated` (`true` when more items exist), and `items_limit`.
+- **Full persistence**: All items are persistently recorded in the SQLite `transcode_batch_items` table regardless of output truncation.
+- **Traceability**: Active items record both the `child_action_id` and the worker `job_id` returned by the transcode executor.
+- **Per-item diagnostics**: Explanatory `reasons`, runtime `error`, and retry `attempts` remain available on each item summary.
 
 ### Persistence and resume behavior
 
 `transcode_batch` tracks every unique media file in the SQLite `transcode_batch_items` table:
 - **Crash and daemon restart resilience**: If the Navigatorr daemon stops or restarts mid-batch, calling `Resume(ctx, instanceID, "", nil)` re-attaches to the batch. Items already completed or skipped are preserved and never re-transcoded.
 - **Child action idempotency**: Each batch item invokes a child `transcode_media` action with a stable idempotency key (`batch-<batch_id>-<item_key>`), ensuring safe re-attachment across worker and engine boundaries.
-- **Per-item status tracking**: Each item tracks `status` (`queued`, `skip`, `review`, `waiting_for_slot`, `running`, `completed`, `failed`), `decision`, `profile`, `reasons`, `candidate_path`, `error`, and `attempts`.
+- **Worker Job ID tracking**: Persists both `child_action_id` and remote worker `job_id` per batch item in SQLite schema version 5.
+- **Per-item status tracking**: Each item tracks `status` (`queued`, `skip`, `review`, `waiting_for_slot`, `running`, `completed`, `failed`), `decision`, `profile`, `reasons`, `child_action_id`, `job_id`, `candidate_path`, `error`, and `attempts`.
 - **Pause/resume semantics**: Passing `paused: true` or resuming with `decision: "pause"` transitions the batch to `waiting_decision`. Resuming with `decision: "resume"` cleanly continues remaining items.
 
 ### Concurrency and `worker_busy` behavior
@@ -238,17 +304,4 @@ A dry run probes all episode files for the specified series or season, evaluates
 - **Parallelism**: Respects `config.Transcode.MaxParallelJobs` (default: 1). When `max_parallel_jobs: 1`, media files are transcoded serially one after another.
 - **Worker busy handling**: If the remote transcode worker returns `worker_busy` (or reaches max parallel slots), the current item transitions to `waiting_for_slot`.
 - **Retry budget safety**: Encountering `worker_busy` does **not** increment item `attempts` or consume the transient retry budget. The batch transitions to `waiting_external` with `waiting_condition: "worker_busy"` and resumes cleanly once worker capacity becomes available.
-
-### Example batch payload
-
-```json
-{
-  "service": "sonarr",
-  "series_id": 10,
-  "season": 2,
-  "profile": "auto",
-  "dry_run": false,
-  "replace_original": false
-}
-```
 

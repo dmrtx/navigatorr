@@ -110,7 +110,7 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 		isAnime := getBool(ec.State, "is_anime")
 		return StepResult{
 			Status:  StepCompleted,
-			Outputs: buildBatchOutputs(ec.InstanceID, existingItems, seriesTitle, isAnime, dryRun),
+			Outputs: buildBatchOutputs(ec.InstanceID, existingItems, seriesTitle, isAnime, dryRun, getMaxOutputItems(ec.Inputs)),
 		}, nil
 	}
 
@@ -371,7 +371,7 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 		batchItems = append(batchItems, item)
 	}
 
-	outputs := buildBatchOutputs(ec.InstanceID, batchItems, seriesTitle, isAnime, dryRun)
+	outputs := buildBatchOutputs(ec.InstanceID, batchItems, seriesTitle, isAnime, dryRun, getMaxOutputItems(ec.Inputs))
 	return StepResult{
 		Status:  StepCompleted,
 		Outputs: outputs,
@@ -392,7 +392,7 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 	if dryRun {
 		return StepResult{
 			Status:  StepCompleted,
-			Outputs: buildBatchOutputs(ec.InstanceID, items, seriesTitle, isAnime, dryRun),
+			Outputs: buildBatchOutputs(ec.InstanceID, items, seriesTitle, isAnime, dryRun, getMaxOutputItems(ec.Inputs)),
 		}, nil
 	}
 
@@ -413,7 +413,7 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 				{Decision: "resume", Description: "Resume transcode batch"},
 				{Decision: "cancel", Description: "Cancel remaining queued items"},
 			},
-			Outputs: buildBatchOutputs(ec.InstanceID, items, seriesTitle, isAnime, dryRun),
+			Outputs: buildBatchOutputs(ec.InstanceID, items, seriesTitle, isAnime, dryRun, getMaxOutputItems(ec.Inputs)),
 		}, nil
 	}
 
@@ -429,7 +429,7 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 		items, _ = e.deps.Store.ListTranscodeBatchItems(ec.InstanceID)
 		return StepResult{
 			Status:  StepCompleted,
-			Outputs: buildBatchOutputs(ec.InstanceID, items, seriesTitle, isAnime, dryRun),
+			Outputs: buildBatchOutputs(ec.InstanceID, items, seriesTitle, isAnime, dryRun, getMaxOutputItems(ec.Inputs)),
 		}, nil
 	}
 
@@ -454,7 +454,7 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 					Status:           StepWaitingExternal,
 					WaitingCondition: "worker_busy",
 					WaitingReason:    fmt.Sprintf("Worker busy on item %s; waiting for transcode slot", it.ItemKey),
-					Outputs:          buildBatchOutputs(ec.InstanceID, latest, seriesTitle, isAnime, dryRun),
+					Outputs:          buildBatchOutputs(ec.InstanceID, latest, seriesTitle, isAnime, dryRun, getMaxOutputItems(ec.Inputs)),
 				}, nil
 			}
 		}
@@ -519,7 +519,7 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 					Status:           StepWaitingExternal,
 					WaitingCondition: "worker_busy",
 					WaitingReason:    fmt.Sprintf("Worker busy on item %s; waiting for transcode slot", firstBusyItem.ItemKey),
-					Outputs:          buildBatchOutputs(ec.InstanceID, latest, seriesTitle, isAnime, dryRun),
+					Outputs:          buildBatchOutputs(ec.InstanceID, latest, seriesTitle, isAnime, dryRun, getMaxOutputItems(ec.Inputs)),
 				}, nil
 			}
 		}
@@ -528,7 +528,7 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 	latest, _ := e.deps.Store.ListTranscodeBatchItems(ec.InstanceID)
 	return StepResult{
 		Status:  StepCompleted,
-		Outputs: buildBatchOutputs(ec.InstanceID, latest, seriesTitle, isAnime, dryRun),
+		Outputs: buildBatchOutputs(ec.InstanceID, latest, seriesTitle, isAnime, dryRun, getMaxOutputItems(ec.Inputs)),
 	}, nil
 }
 
@@ -599,6 +599,36 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 		item.ChildActionID = childRes.ID
 	}
 
+	var jobID string
+	if childRes != nil {
+		if j := getString(childRes.Outputs, "job_id"); j != "" {
+			jobID = j
+		} else if j := getString(childRes.Outputs, "external_reference"); j != "" {
+			jobID = j
+		}
+	}
+	if jobID == "" && item.ChildActionID != "" {
+		if inst, _ := e.deps.Store.GetActionInstance(item.ChildActionID); inst != nil {
+			var state map[string]any
+			_ = json.Unmarshal([]byte(inst.StateJSON), &state)
+			if j := getString(state, "job_id"); j != "" {
+				jobID = j
+			}
+			if jobID == "" {
+				var out map[string]any
+				_ = json.Unmarshal([]byte(inst.OutputsJSON), &out)
+				if j := getString(out, "job_id"); j != "" {
+					jobID = j
+				} else if j := getString(out, "external_reference"); j != "" {
+					jobID = j
+				}
+			}
+		}
+	}
+	if jobID != "" {
+		item.JobID = jobID
+	}
+
 	isWorkerBusy := false
 	if childRes != nil {
 		if childRes.Status == StatusWaitingExternal && childRes.WaitingCondition == "worker_busy" {
@@ -662,7 +692,45 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 	}
 }
 
-func buildBatchOutputs(batchID string, items []store.TranscodeBatchItem, seriesTitle string, isAnime, dryRun bool) map[string]any {
+// DefaultMaxBatchOutputItems defines the deterministic bound on per-item summaries returned in batch action outputs.
+const DefaultMaxBatchOutputItems = 25
+
+func getMaxOutputItems(inputs map[string]any) int {
+	if m := getInt(inputs, "max_output_items"); m > 0 {
+		return m
+	}
+	if m := getInt(inputs, "max_items"); m > 0 {
+		return m
+	}
+	if m := getInt(inputs, "limit"); m > 0 {
+		return m
+	}
+	return DefaultMaxBatchOutputItems
+}
+
+// TranscodeBatchItemSummary provides a bounded, serializable summary of a batch item including diagnostics and job traceability.
+type TranscodeBatchItemSummary struct {
+	ItemKey       string   `json:"item_key"`
+	FilePath      string   `json:"file_path"`
+	DisplayLabel  string   `json:"display_label"`
+	EpisodeInfo   string   `json:"episode_info,omitempty"`
+	Decision      string   `json:"decision"`
+	Profile       string   `json:"profile,omitempty"`
+	Reasons       []string `json:"reasons,omitempty"`
+	Status        string   `json:"status"`
+	Attempts      int      `json:"attempts"`
+	ChildActionID string   `json:"child_action_id,omitempty"`
+	JobID         string   `json:"job_id,omitempty"`
+	CandidatePath string   `json:"candidate_path,omitempty"`
+	Error         string   `json:"error,omitempty"`
+}
+
+func buildBatchOutputs(batchID string, items []store.TranscodeBatchItem, seriesTitle string, isAnime, dryRun bool, maxLimit ...int) map[string]any {
+	limit := DefaultMaxBatchOutputItems
+	if len(maxLimit) > 0 && maxLimit[0] > 0 {
+		limit = maxLimit[0]
+	}
+
 	counts := map[string]int{
 		"total":            len(items),
 		"queued":           0,
@@ -697,6 +765,32 @@ func buildBatchOutputs(batchID string, items []store.TranscodeBatchItem, seriesT
 		}
 	}
 
+	totalItems := len(items)
+	boundedLimit := limit
+	if boundedLimit > totalItems {
+		boundedLimit = totalItems
+	}
+	bounded := make([]TranscodeBatchItemSummary, 0, boundedLimit)
+	for i := 0; i < boundedLimit; i++ {
+		it := items[i]
+		bounded = append(bounded, TranscodeBatchItemSummary{
+			ItemKey:       it.ItemKey,
+			FilePath:      it.FilePath,
+			DisplayLabel:  it.DisplayLabel,
+			EpisodeInfo:   it.EpisodeInfo,
+			Decision:      it.Decision,
+			Profile:       it.Profile,
+			Reasons:       it.Reasons,
+			Status:        it.Status,
+			Attempts:      it.Attempts,
+			ChildActionID: it.ChildActionID,
+			JobID:         it.JobID,
+			CandidatePath: it.CandidatePath,
+			Error:         it.Error,
+		})
+	}
+	truncated := totalItems > len(bounded)
+
 	return map[string]any{
 		"batch_id":         batchID,
 		"series_title":     seriesTitle,
@@ -712,6 +806,10 @@ func buildBatchOutputs(batchID string, items []store.TranscodeBatchItem, seriesT
 		"running":          counts["running"],
 		"completed":        counts["completed"],
 		"failed":           counts["failed"],
-		"items":            items,
+		"total_items":      totalItems,
+		"returned_items":   len(bounded),
+		"truncated":        truncated,
+		"items_limit":      limit,
+		"items":            bounded,
 	}
 }

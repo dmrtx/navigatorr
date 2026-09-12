@@ -690,3 +690,270 @@ func TestTranscodeBatch_PauseAndResume(t *testing.T) {
 		t.Errorf("expected 2 submits after resume, got %d", mockExecutor.submitCalls)
 	}
 }
+
+// 8. Bounded summaries and truncation metadata
+func TestTranscodeBatch_BoundedSummariesAndTruncation(t *testing.T) {
+	tempDir := t.TempDir()
+	mediaDir := filepath.Join(tempDir, "media")
+	if err := os.MkdirAll(mediaDir, 0755); err != nil {
+		t.Fatalf("creating media dir: %v", err)
+	}
+
+	probePath := filepath.Join(tempDir, "ffprobe")
+	if err := os.WriteFile(probePath, []byte(fakeMultiProbeJSON), 0755); err != nil {
+		t.Fatalf("writing probe script: %v", err)
+	}
+
+	const totalEpisodes = 30
+	var epFiles []map[string]any
+	var eps []map[string]any
+
+	for i := 1; i <= totalEpisodes; i++ {
+		filePath := filepath.Join(mediaDir, fmt.Sprintf("BigShow S01E%02d.mkv", i))
+		f, err := os.Create(filePath)
+		if err != nil {
+			t.Fatalf("creating file %d: %v", i, err)
+		}
+		_ = f.Truncate(1400000000)
+		_, _ = f.WriteAt([]byte(fmt.Sprintf("ep-%d-content", i)), 0)
+		_ = f.Close()
+
+		fID := int64(2000 + i)
+		epFiles = append(epFiles, map[string]any{
+			"id":           fID,
+			"seriesId":     20,
+			"seasonNumber": 1,
+			"path":         filePath,
+			"size":         1400000000,
+		})
+		eps = append(eps, map[string]any{
+			"id":            int64(i),
+			"seriesId":      20,
+			"seasonNumber":  1,
+			"episodeNumber": i,
+			"title":         fmt.Sprintf("Episode %d", i),
+			"episodeFileId": fID,
+			"hasFile":       true,
+		})
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		path := r.URL.Path
+		switch {
+		case strings.HasPrefix(path, "/api/v3/series/20"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":         20,
+				"title":      "Big Show",
+				"seriesType": "standard",
+			})
+		case strings.HasPrefix(path, "/api/v3/episodefile"):
+			_ = json.NewEncoder(w).Encode(epFiles)
+		case strings.HasPrefix(path, "/api/v3/episode"):
+			_ = json.NewEncoder(w).Encode(eps)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	dbPath := filepath.Join(tempDir, "action_batch_bounded.db")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("opening test store: %v", err)
+	}
+	defer st.Close()
+
+	resolver, err := fsop.NewResolver([]string{mediaDir, tempDir}, []string{mediaDir, tempDir})
+	if err != nil {
+		t.Fatalf("creating resolver: %v", err)
+	}
+
+	cfg := &config.Config{
+		Media: config.MediaConfig{
+			AllowedReadRoots:  []string{mediaDir, tempDir},
+			AllowedWriteRoots: []string{mediaDir, tempDir},
+			FfprobePath:       probePath,
+		},
+		Transcode: config.TranscodeConfig{
+			Enabled:           true,
+			Executor:          "ssh",
+			MaxParallelJobs:   1,
+			DefaultProfile:    "general-hevc",
+			MinSavingsPercent: 0,
+		},
+		Services: map[string]config.ServiceConfig{
+			"sonarr": {
+				URL:        srv.URL,
+				APIKey:     "mock-sonarr-key",
+				AuthMethod: "header",
+				AuthHeader: "X-Api-Key",
+				APIVersion: "/api/v3",
+			},
+		},
+	}
+
+	engine := NewEngine(EngineDeps{
+		Store:     st,
+		Config:    cfg,
+		Registry:  arrservice.NewRegistry(cfg),
+		Fs:        resolver,
+		Ffprobe:   probePath,
+		Transcode: &mockTranscodeExecutor{},
+		StartTime: time.Now(),
+	})
+
+	ctx := context.Background()
+
+	// 1. Run with default limit (DefaultMaxBatchOutputItems = 25)
+	res, err := engine.Run(ctx, "transcode_batch", map[string]any{
+		"service":   "sonarr",
+		"series_id": 20,
+		"dry_run":   true,
+	})
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	if res.Status != "completed" {
+		t.Fatalf("expected completed status, got %s (%s)", res.Status, res.Error)
+	}
+
+	totalItems, ok := res.Outputs["total_items"].(int)
+	if !ok || totalItems != 30 {
+		t.Errorf("expected total_items == 30, got %v", res.Outputs["total_items"])
+	}
+	returnedItems, ok := res.Outputs["returned_items"].(int)
+	if !ok || returnedItems != 25 {
+		t.Errorf("expected returned_items == 25, got %v", res.Outputs["returned_items"])
+	}
+	itemsLimit, ok := res.Outputs["items_limit"].(int)
+	if !ok || itemsLimit != 25 {
+		t.Errorf("expected items_limit == 25, got %v", res.Outputs["items_limit"])
+	}
+	truncated, ok := res.Outputs["truncated"].(bool)
+	if !ok || !truncated {
+		t.Errorf("expected truncated == true, got %v", res.Outputs["truncated"])
+	}
+	itemsList, ok := res.Outputs["items"].([]TranscodeBatchItemSummary)
+	if !ok || len(itemsList) != 25 {
+		t.Fatalf("expected 25 bounded summaries in items, got %d", len(itemsList))
+	}
+
+	// Verify counts reflect the full 30 items
+	counts, ok := res.Outputs["counts"].(map[string]int)
+	if !ok || counts["total"] != 30 {
+		t.Errorf("expected counts.total == 30, got %v", counts)
+	}
+
+	// Verify that ALL 30 items are persistent in SQLite
+	dbItems, err := st.ListTranscodeBatchItems(res.ID)
+	if err != nil {
+		t.Fatalf("ListTranscodeBatchItems failed: %v", err)
+	}
+	if len(dbItems) != 30 {
+		t.Errorf("expected all 30 items persistent in SQLite, got %d", len(dbItems))
+	}
+
+	// 2. Run with caller-specified limit (max_items: 10)
+	res2, err := engine.Run(ctx, "transcode_batch", map[string]any{
+		"service":   "sonarr",
+		"series_id": 20,
+		"dry_run":   true,
+		"max_items": 10,
+	})
+	if err != nil {
+		t.Fatalf("run with max_items failed: %v", err)
+	}
+	if res2.Outputs["returned_items"] != 10 {
+		t.Errorf("expected returned_items == 10, got %v", res2.Outputs["returned_items"])
+	}
+	if res2.Outputs["items_limit"] != 10 {
+		t.Errorf("expected items_limit == 10, got %v", res2.Outputs["items_limit"])
+	}
+	if res2.Outputs["truncated"] != true {
+		t.Errorf("expected truncated == true, got %v", res2.Outputs["truncated"])
+	}
+	itemsList2 := res2.Outputs["items"].([]TranscodeBatchItemSummary)
+	if len(itemsList2) != 10 {
+		t.Errorf("expected 10 items in output with max_items=10, got %d", len(itemsList2))
+	}
+}
+
+// 9. Job ID and Action ID traceability
+func TestTranscodeBatch_JobIDAndActionIDTraceability(t *testing.T) {
+	const syntheticJobID = "worker-job-custom-uuid-12345"
+	mockExecutor := &mockTranscodeExecutor{
+		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
+			writeCandidateOutput(req.CandidatePath)
+			return transcode.Job{ID: syntheticJobID}, nil
+		},
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{
+				ID:     jobID,
+				Status: transcode.StatusCompleted,
+			}, nil
+		},
+	}
+
+	engine, st, _, srv, _ := setupBatchTestEnv(t, mockExecutor, 1)
+	defer srv.Close()
+	defer st.Close()
+
+	ctx := context.Background()
+	res, err := engine.Run(ctx, "transcode_batch", map[string]any{
+		"service":   "sonarr",
+		"series_id": 10,
+		"season":    1,
+		"dry_run":   false,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Status != "completed" {
+		t.Fatalf("expected completed status, got %s (%s)", res.Status, res.Error)
+	}
+
+	// 1. Verify bounded summary in res.Outputs
+	items, ok := res.Outputs["items"].([]TranscodeBatchItemSummary)
+	if !ok {
+		t.Fatalf("expected []TranscodeBatchItemSummary in outputs, got %T", res.Outputs["items"])
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item summary, got %d", len(items))
+	}
+	summary := items[0]
+	if summary.ChildActionID == "" {
+		t.Error("expected non-empty ChildActionID in item summary")
+	}
+	if summary.JobID != syntheticJobID {
+		t.Errorf("expected JobID %q in summary, got %q", syntheticJobID, summary.JobID)
+	}
+	if summary.CandidatePath == "" {
+		t.Error("expected non-empty CandidatePath in summary")
+	}
+	if summary.Error != "" {
+		t.Errorf("expected empty error in summary, got %q", summary.Error)
+	}
+	if summary.Decision != "transcode" {
+		t.Errorf("expected decision transcode, got %q", summary.Decision)
+	}
+	if summary.Status != "completed" {
+		t.Errorf("expected status completed, got %q", summary.Status)
+	}
+
+	// 2. Verify persistence in SQLite
+	dbItems, err := st.ListTranscodeBatchItems(res.ID)
+	if err != nil {
+		t.Fatalf("ListTranscodeBatchItems error: %v", err)
+	}
+	if len(dbItems) != 1 {
+		t.Fatalf("expected 1 item in db, got %d", len(dbItems))
+	}
+	dbItem := dbItems[0]
+	if dbItem.ChildActionID != summary.ChildActionID {
+		t.Errorf("expected db ChildActionID %q, got %q", summary.ChildActionID, dbItem.ChildActionID)
+	}
+	if dbItem.JobID != syntheticJobID {
+		t.Errorf("expected db JobID %q, got %q", syntheticJobID, dbItem.JobID)
+	}
+}
