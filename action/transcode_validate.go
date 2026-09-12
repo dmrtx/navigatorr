@@ -12,6 +12,12 @@ import (
 )
 
 func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+	if getBool(ec.State, "skip_transcode") {
+		return StepResult{
+			Status:  StepSkipped,
+			Outputs: map[string]any{"skipped": true},
+		}, nil
+	}
 	if ec.Decision != "" {
 		if strings.EqualFold(ec.Decision, "reject") || strings.EqualFold(ec.Decision, "cancel") {
 			return StepResult{Status: StepFailed, Error: "transcode candidate rejected by user decision; original file remains untouched"}, nil

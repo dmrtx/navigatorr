@@ -12,6 +12,16 @@ import (
 )
 
 func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+	if getBool(ec.State, "skip_transcode") {
+		return StepResult{
+			Status: StepSkipped,
+			Outputs: map[string]any{
+				"skipped":       true,
+				"auto_decision": getString(ec.State, "auto_decision"),
+				"auto_reasons":  ec.State["auto_reasons"],
+			},
+		}, nil
+	}
 	if getBool(ec.State, "transcode_submitted") || getString(ec.State, "job_id") != "" {
 		jobID := getString(ec.State, "job_id")
 		if jobID == "" {
@@ -105,6 +115,12 @@ func appendFailureHistory(ec *ExecutionContext, phase, class, msg string) {
 }
 
 func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+	if getBool(ec.State, "skip_transcode") {
+		return StepResult{
+			Status:  StepSkipped,
+			Outputs: map[string]any{"skipped": true},
+		}, nil
+	}
 	jobID := getString(ec.State, "job_id")
 	if jobID == "" {
 		jobID = getString(ec.State, "external_reference")
