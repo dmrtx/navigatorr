@@ -1469,3 +1469,52 @@ JSON
 		t.Fatalf("explicit profile should not populate auto_decision")
 	}
 }
+
+func TestTranscodeMedia_MaxSizeIncreasePercent(t *testing.T) {
+	mediaDir := t.TempDir()
+	origFile := filepath.Join(mediaDir, "Sample.mkv")
+	candFile := filepath.Join(mediaDir, ".navigatorr-candidates", "Sample.job-size-test.mkv")
+	_ = os.MkdirAll(filepath.Dir(candFile), 0755)
+
+	origContent := bytes.Repeat([]byte("small source content"), 100)                   // 2000 bytes
+	candContent := bytes.Repeat([]byte("much larger inflated candidate content"), 200) // 7600 bytes (~280% increase)
+	_ = os.WriteFile(origFile, origContent, 0644)
+	_ = os.WriteFile(candFile, candContent, 0644)
+
+	probeDir := t.TempDir()
+	probePath := filepath.Join(probeDir, "ffprobe")
+	probeJSON := defaultValidFFprobeJSON
+	script := fmt.Sprintf(`#!/bin/sh
+cat << 'JSON'
+%s
+JSON
+`, probeJSON)
+	_ = os.WriteFile(probePath, []byte(script), 0755)
+
+	mockExecutor := &mockTranscodeExecutor{
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{
+				ID:            jobID,
+				Status:        transcode.StatusCompleted,
+				CandidatePath: candFile,
+			}, nil
+		},
+	}
+
+	engine, _ := setupTranscodeEngine(t, mockExecutor, probePath, []string{mediaDir}, []string{mediaDir}, false)
+
+	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
+		"path":                      origFile,
+		"profile":                   "general-hevc",
+		"max_size_increase_percent": 10.0,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Status != StatusWaitingDecision {
+		t.Fatalf("expected status %s when size increase exceeds threshold, got %s (reason: %s)", StatusWaitingDecision, res.Status, res.WaitingReason)
+	}
+	if !strings.Contains(res.WaitingReason, "max_size_increase_percent") {
+		t.Fatalf("expected waiting reason to mention max_size_increase_percent, got %q", res.WaitingReason)
+	}
+}

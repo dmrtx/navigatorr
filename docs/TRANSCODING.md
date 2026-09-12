@@ -81,6 +81,9 @@ When running in Docker, mount the recipe file into the container:
 /home/david/Docker/navigatorr/transcode-recipes.yaml:/root/.config/navigatorr/transcode-recipes.yaml:ro
 ```
 
+> [!NOTE]
+> When using `source: file`, ensure your custom bundle includes the profile specified by `transcode.default_profile` (which defaults to `hevc-vt-balanced`), or configure `default_profile` to match one of the profiles in your file (such as `general-hevc` or `auto`).
+
 > [!WARNING]
 > When configuring `source: builtin`, you must not specify `path`, `manifest_url`, or `repository`. Specifying any of these fields with `builtin` will fail configuration validation.
 
@@ -189,3 +192,63 @@ A safe rollout is:
 3. Move policy to `source: file` or a versioned GitHub/HTTPS source.
 4. For future policy/compatibility changes, publish a new recipe bundle version and call `recipe_update`/`recipe_reload` instead of rebuilding the image.
 5. If a recipe causes trouble, use `recipe_rollback`; fetch/validation failures automatically keep LKG active.
+
+## Batch transcoding (`transcode_batch`)
+
+The `transcode_batch` action coordinates persistent batch transcoding across library series (supporting Sonarr). It resolves media files, inspects media streams, applies deterministic auto-profile selection, limits concurrency to `config.Transcode.MaxParallelJobs`, and tracks execution per item in a dedicated SQLite table (`transcode_batch_items`).
+
+### Action inputs & defaults
+
+| Input | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `service` | string | Yes | — | Media service name (must be `sonarr`). |
+| `series_id` | string/int | Yes | — | Sonarr series ID to transcode. |
+| `season` | int | No | `nil` (all) | Optional season number filter. Omit to transcode the entire series. |
+| `profile` | string | No | `auto` | Recipe profile name or `auto` for deterministic stream-based selection. |
+| `replace_original` | bool | No | `false` | Must remain `false`. Setting `true` is rejected fail-closed; original files are never overwritten. |
+| `dry_run` | bool | No | `false` | If `true`, inspects and selects profiles without queuing or running transcode jobs. |
+| `media_type` | string | No | derived | Media type override (e.g. `anime`, `tv`). Defaults to Sonarr metadata classification. |
+| `is_anime` | bool | No | derived | Explicit anime flag. If omitted, detected automatically from Sonarr series metadata (`seriesType` or genres). |
+| `min_savings_percent` | float | No | `config` | Minimum projected file size savings threshold (default from `config.Transcode.MinSavingsPercent`). |
+| `idempotency_key` | string | No | `""` | Optional idempotency key to re-attach to existing batch executions. |
+
+### Dry-run usage
+
+A dry run probes all episode files for the specified series or season, evaluates them against deterministic selector rules, records per-item decisions (`transcode`, `skip`, or `review`), and produces aggregate counts without submitting any jobs to the remote transcode executor:
+
+```json
+{
+  "service": "sonarr",
+  "series_id": 42,
+  "season": 1,
+  "dry_run": true
+}
+```
+
+### Persistence and resume behavior
+
+`transcode_batch` tracks every unique media file in the SQLite `transcode_batch_items` table:
+- **Crash and daemon restart resilience**: If the Navigatorr daemon stops or restarts mid-batch, calling `Resume(ctx, instanceID, "", nil)` re-attaches to the batch. Items already completed or skipped are preserved and never re-transcoded.
+- **Child action idempotency**: Each batch item invokes a child `transcode_media` action with a stable idempotency key (`batch-<batch_id>-<item_key>`), ensuring safe re-attachment across worker and engine boundaries.
+- **Per-item status tracking**: Each item tracks `status` (`queued`, `skip`, `review`, `waiting_for_slot`, `running`, `completed`, `failed`), `decision`, `profile`, `reasons`, `candidate_path`, `error`, and `attempts`.
+- **Pause/resume semantics**: Passing `paused: true` or resuming with `decision: "pause"` transitions the batch to `waiting_decision`. Resuming with `decision: "resume"` cleanly continues remaining items.
+
+### Concurrency and `worker_busy` behavior
+
+- **Parallelism**: Respects `config.Transcode.MaxParallelJobs` (default: 1). When `max_parallel_jobs: 1`, media files are transcoded serially one after another.
+- **Worker busy handling**: If the remote transcode worker returns `worker_busy` (or reaches max parallel slots), the current item transitions to `waiting_for_slot`.
+- **Retry budget safety**: Encountering `worker_busy` does **not** increment item `attempts` or consume the transient retry budget. The batch transitions to `waiting_external` with `waiting_condition: "worker_busy"` and resumes cleanly once worker capacity becomes available.
+
+### Example batch payload
+
+```json
+{
+  "service": "sonarr",
+  "series_id": 10,
+  "season": 2,
+  "profile": "auto",
+  "dry_run": false,
+  "replace_original": false
+}
+```
+

@@ -80,6 +80,19 @@ func (e *Engine) handleTransientFailure(ec *ExecutionContext, plan *transcode.Pl
 	class := resilience.Classify(err.Error())
 	ec.State["failure_classification"] = string(class)
 	appendFailureHistory(ec, phase, string(class), err.Error())
+	if class == resilience.WorkerBusy && getBool(ec.Inputs, "surface_worker_busy") {
+		return StepResult{
+			Status:           StepWaitingExternal,
+			WaitingCondition: "worker_busy",
+			WaitingReason:    "Worker is busy; waiting for transcode slot",
+			Outputs: map[string]any{
+				"attempt":                getInt(ec.State, "attempt"),
+				"retry_count":            getInt(ec.State, "retry_count"),
+				"failure_classification": string(class),
+				"worker_busy":            true,
+			},
+		}, nil
+	}
 	retries := getInt(ec.State, "retry_count")
 	attempt := getInt(ec.State, "attempt")
 	if attempt <= 0 {
@@ -150,6 +163,17 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 		class := resilience.Classify(msg)
 		ec.State["failure_classification"] = string(class)
 		appendFailureHistory(ec, "worker", string(class), msg)
+		if class == resilience.WorkerBusy && getBool(ec.Inputs, "surface_worker_busy") {
+			return StepResult{
+				Status:           StepWaitingExternal,
+				WaitingCondition: "worker_busy",
+				WaitingReason:    "Worker is busy; waiting for transcode slot",
+				Outputs: map[string]any{
+					"failure_classification": string(class),
+					"worker_busy":            true,
+				},
+			}, nil
+		}
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("Transcode failed (%s): %s", class, msg), Outputs: map[string]any{"failure_classification": string(class)}}, nil
 	case transcode.StatusCancelled:
 		return StepResult{Status: StepFailed, Error: "transcode job was cancelled"}, nil

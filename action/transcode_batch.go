@@ -1,0 +1,717 @@
+package action
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+
+	"github.com/jakenesler/navigatorr/mediainspect"
+	"github.com/jakenesler/navigatorr/store"
+	"github.com/jakenesler/navigatorr/transcode/resilience"
+	"github.com/jakenesler/navigatorr/transcode/selector"
+)
+
+func (e *Engine) registerTranscodeBatchTemplate() {
+	e.RegisterTemplate(ActionTemplate{
+		Name:    "transcode_batch",
+		Version: 1,
+		Description: "Coordinates persistent batch transcoding for media libraries (Sonarr), resolving episodes, " +
+			"applying deterministic auto-profile selection, respecting concurrency limits, and tracking per-item status in SQLite.",
+		RequiredInputs: []string{"service", "series_id"},
+		OptionalInputs: []string{
+			"season",
+			"profile",
+			"replace_original",
+			"dry_run",
+			"media_type",
+			"is_anime",
+			"min_savings_percent",
+			"idempotency_key",
+			"paused",
+		},
+		Destructive: false,
+		Steps: []StepDefinition{
+			{
+				Name:        "resolve_and_inspect",
+				Description: "Resolve series and episode files from Sonarr, deduplicate, inspect media streams, and select transcode profiles",
+				Run:         e.stepTranscodeBatchResolve,
+			},
+			{
+				Name:        "schedule_batch",
+				Description: "Schedule and execute transcode jobs respecting max_parallel_jobs, handle worker_busy, and track per-item status",
+				Run:         e.stepTranscodeBatchSchedule,
+			},
+		},
+	})
+}
+
+func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+	if getBool(ec.Inputs, "replace_original") {
+		return StepResult{
+			Status: StepFailed,
+			Error:  "destructive replacement (replace_original: true) is not supported; transcoding is candidate-only and never modifies the original",
+		}, nil
+	}
+
+	service := strings.ToLower(strings.TrimSpace(getString(ec.Inputs, "service")))
+	if service == "" {
+		return StepResult{Status: StepFailed, Error: "input 'service' is required"}, nil
+	}
+	if service != "sonarr" {
+		return StepResult{Status: StepFailed, Error: fmt.Sprintf("service %q is not supported; only 'sonarr' is supported for transcode_batch", service)}, nil
+	}
+
+	var seriesID string
+	if sVal, ok := ec.Inputs["series_id"]; ok && sVal != nil {
+		seriesID = strings.TrimSpace(fmt.Sprintf("%v", sVal))
+	}
+	if seriesID == "" || seriesID == "<nil>" {
+		return StepResult{Status: StepFailed, Error: "input 'series_id' is required"}, nil
+	}
+
+	var targetSeason *int
+	if sVal, ok := ec.Inputs["season"]; ok && sVal != nil {
+		sStr := strings.TrimSpace(fmt.Sprintf("%v", sVal))
+		if sStr != "" && sStr != "<nil>" {
+			sInt, err := strconv.Atoi(sStr)
+			if err != nil {
+				return StepResult{Status: StepFailed, Error: fmt.Sprintf("invalid season %q: %v", sStr, err)}, nil
+			}
+			targetSeason = &sInt
+		}
+	}
+
+	if e.deps.Registry == nil {
+		return StepResult{Status: StepFailed, Error: "arr service registry is required for transcode_batch"}, nil
+	}
+	svc, err := e.deps.Registry.Get(service)
+	if err != nil {
+		return StepResult{Status: StepFailed, Error: fmt.Sprintf("arr service %q not configured: %v", service, err)}, nil
+	}
+	if e.deps.Fs == nil {
+		return StepResult{Status: StepFailed, Error: "filesystem resolver is required for transcode_batch"}, nil
+	}
+	if e.deps.Store == nil {
+		return StepResult{Status: StepFailed, Error: "store is required for transcode_batch"}, nil
+	}
+
+	dryRun := getBool(ec.Inputs, "dry_run")
+
+	// If items already exist in the database for this batch (e.g. on resume / restart), load them
+	existingItems, err := e.deps.Store.ListTranscodeBatchItems(ec.InstanceID)
+	if err == nil && len(existingItems) > 0 {
+		seriesTitle := getString(ec.State, "series_title")
+		isAnime := getBool(ec.State, "is_anime")
+		return StepResult{
+			Status:  StepCompleted,
+			Outputs: buildBatchOutputs(ec.InstanceID, existingItems, seriesTitle, isAnime, dryRun),
+		}, nil
+	}
+
+	// 1. Fetch Series info
+	seriesData, err := svc.Get(ctx, "/series/"+seriesID, nil)
+	if err != nil {
+		return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to query Sonarr series %s: %v", seriesID, err)}, nil
+	}
+	var seriesObj map[string]any
+	if err := json.Unmarshal(seriesData, &seriesObj); err != nil {
+		return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to parse Sonarr series %s response: %v", seriesID, err)}, nil
+	}
+	seriesTitle, _ := seriesObj["title"].(string)
+	seriesType, _ := seriesObj["seriesType"].(string)
+	isAnime := strings.EqualFold(seriesType, "anime")
+	if !isAnime {
+		if genres, ok := seriesObj["genres"].([]any); ok {
+			for _, g := range genres {
+				if strings.EqualFold(fmt.Sprintf("%v", g), "anime") {
+					isAnime = true
+					break
+				}
+			}
+		}
+	}
+	if getBool(ec.Inputs, "is_anime") || strings.EqualFold(getString(ec.Inputs, "media_type"), "anime") {
+		isAnime = true
+	}
+
+	ec.State["series_title"] = seriesTitle
+	ec.State["series_type"] = seriesType
+	ec.State["is_anime"] = isAnime
+	ec.State["service"] = service
+	ec.State["series_id"] = seriesID
+
+	// 2. Fetch Episodes
+	epData, err := svc.Get(ctx, "/episode", map[string]string{"seriesId": seriesID})
+	if err != nil {
+		return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to query Sonarr episodes for series %s: %v", seriesID, err)}, nil
+	}
+	var epList []map[string]any
+	if err := json.Unmarshal(epData, &epList); err != nil {
+		return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to parse Sonarr episodes for series %s: %v", seriesID, err)}, nil
+	}
+
+	// 3. Fetch Episode Files
+	epFileData, err := svc.Get(ctx, "/episodefile", map[string]string{"seriesId": seriesID})
+	if err != nil {
+		return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to query Sonarr episode files for series %s: %v", seriesID, err)}, nil
+	}
+	var epFileList []map[string]any
+	if err := json.Unmarshal(epFileData, &epFileList); err != nil {
+		return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to parse Sonarr episode files for series %s: %v", seriesID, err)}, nil
+	}
+
+	fileMap := make(map[int64]map[string]any)
+	for _, ef := range epFileList {
+		id := int64(numVal(ef["id"]))
+		if id > 0 {
+			fileMap[id] = ef
+		}
+	}
+
+	type episodeMeta struct {
+		seasonNumber  int
+		episodeNumber int
+		title         string
+	}
+	episodesByFile := make(map[int64][]episodeMeta)
+	var fileIDs []int64
+	seenFile := make(map[int64]bool)
+
+	for _, ep := range epList {
+		hasFile, _ := ep["hasFile"].(bool)
+		if !hasFile {
+			continue
+		}
+		fID := int64(numVal(ep["episodeFileId"]))
+		if fID <= 0 {
+			continue
+		}
+		seasonNum := int(numVal(ep["seasonNumber"]))
+		if targetSeason != nil && seasonNum != *targetSeason {
+			continue
+		}
+		if !seenFile[fID] {
+			seenFile[fID] = true
+			fileIDs = append(fileIDs, fID)
+		}
+		epNum := int(numVal(ep["episodeNumber"]))
+		epTitle, _ := ep["title"].(string)
+		episodesByFile[fID] = append(episodesByFile[fID], episodeMeta{
+			seasonNumber:  seasonNum,
+			episodeNumber: epNum,
+			title:         epTitle,
+		})
+	}
+	sort.Slice(fileIDs, func(i, j int) bool {
+		return fileIDs[i] < fileIDs[j]
+	})
+
+	requestedProfile := strings.TrimSpace(getString(ec.Inputs, "profile"))
+	if requestedProfile == "" {
+		requestedProfile = "auto"
+	}
+	mediaType := "tv"
+	if isAnime {
+		mediaType = "anime"
+	}
+	if mt := getString(ec.Inputs, "media_type"); mt != "" {
+		mediaType = mt
+	}
+	minSavings := 0.0
+	if e.deps.Config != nil {
+		minSavings = e.deps.Config.Transcode.MinSavingsPercent
+	}
+	if s := getFloat(ec.Inputs, "min_savings_percent"); s > 0 {
+		minSavings = s
+	}
+
+	var batchItems []store.TranscodeBatchItem
+	for _, fID := range fileIDs {
+		itemKey := fmt.Sprintf("epfile-%d", fID)
+		existing, _ := e.deps.Store.GetTranscodeBatchItem(ec.InstanceID, itemKey)
+		if existing != nil {
+			batchItems = append(batchItems, *existing)
+			continue
+		}
+
+		ef, ok := fileMap[fID]
+		if !ok {
+			continue
+		}
+		rawPath, _ := ef["path"].(string)
+		if rawPath == "" {
+			continue
+		}
+		cleanPath, err := e.deps.Fs.ResolveRead(rawPath)
+		if err != nil {
+			item := store.TranscodeBatchItem{
+				BatchID:      ec.InstanceID,
+				ItemKey:      itemKey,
+				FilePath:     rawPath,
+				DisplayLabel: filepath.Base(rawPath),
+				Decision:     "review",
+				Status:       "review",
+				Reasons:      []string{fmt.Sprintf("path outside allowed read roots: %v", err)},
+			}
+			_ = e.deps.Store.CreateTranscodeBatchItem(item)
+			batchItems = append(batchItems, item)
+			continue
+		}
+
+		episodes := episodesByFile[fID]
+		sort.Slice(episodes, func(i, j int) bool {
+			if episodes[i].seasonNumber != episodes[j].seasonNumber {
+				return episodes[i].seasonNumber < episodes[j].seasonNumber
+			}
+			return episodes[i].episodeNumber < episodes[j].episodeNumber
+		})
+
+		episodeInfo := ""
+		displayLabel := filepath.Base(cleanPath)
+		if len(episodes) > 0 {
+			if len(episodes) == 1 {
+				episodeInfo = fmt.Sprintf("S%02dE%02d", episodes[0].seasonNumber, episodes[0].episodeNumber)
+			} else if episodes[0].seasonNumber == episodes[len(episodes)-1].seasonNumber {
+				episodeInfo = fmt.Sprintf("S%02dE%02d-E%02d", episodes[0].seasonNumber, episodes[0].episodeNumber, episodes[len(episodes)-1].episodeNumber)
+			} else {
+				episodeInfo = fmt.Sprintf("S%02dE%02d-S%02dE%02d", episodes[0].seasonNumber, episodes[0].episodeNumber, episodes[len(episodes)-1].seasonNumber, episodes[len(episodes)-1].episodeNumber)
+			}
+			if seriesTitle != "" {
+				displayLabel = fmt.Sprintf("%s - %s", seriesTitle, episodeInfo)
+			}
+		}
+
+		if _, err := os.Stat(cleanPath); err != nil {
+			item := store.TranscodeBatchItem{
+				BatchID:      ec.InstanceID,
+				ItemKey:      itemKey,
+				FilePath:     cleanPath,
+				DisplayLabel: displayLabel,
+				EpisodeInfo:  episodeInfo,
+				Decision:     "review",
+				Status:       "review",
+				Reasons:      []string{fmt.Sprintf("media file inaccessible: %v", err)},
+			}
+			_ = e.deps.Store.CreateTranscodeBatchItem(item)
+			batchItems = append(batchItems, item)
+			continue
+		}
+
+		rep, err := mediainspect.InspectDetailed(ctx, e.deps.Ffprobe, cleanPath)
+		if err != nil || !rep.Probed {
+			reason := "ffprobe did not produce a trustworthy inspection"
+			if err != nil {
+				reason = fmt.Sprintf("mediainspect failed: %v", err)
+			}
+			item := store.TranscodeBatchItem{
+				BatchID:      ec.InstanceID,
+				ItemKey:      itemKey,
+				FilePath:     cleanPath,
+				DisplayLabel: displayLabel,
+				EpisodeInfo:  episodeInfo,
+				Decision:     "review",
+				Status:       "review",
+				Reasons:      []string{reason},
+			}
+			_ = e.deps.Store.CreateTranscodeBatchItem(item)
+			batchItems = append(batchItems, item)
+			continue
+		}
+
+		var itemDecision, itemProfile, itemStatus string
+		var itemReasons []string
+
+		if strings.EqualFold(requestedProfile, "auto") {
+			selInput := selector.Input{
+				Report:            rep,
+				MediaType:         mediaType,
+				IsAnime:           isAnime,
+				MinSavingsPercent: minSavings,
+			}
+			res := selector.Select(selInput)
+			itemDecision = string(res.Decision)
+			itemProfile = res.Profile
+			itemReasons = res.Reasons
+			switch res.Decision {
+			case selector.DecisionSkip:
+				itemStatus = "skip"
+			case selector.DecisionReview:
+				itemStatus = "review"
+			case selector.DecisionTranscode:
+				itemStatus = "queued"
+			default:
+				itemStatus = "queued"
+			}
+		} else {
+			itemDecision = "transcode"
+			itemProfile = requestedProfile
+			itemReasons = []string{"explicit profile requested"}
+			itemStatus = "queued"
+		}
+
+		item := store.TranscodeBatchItem{
+			BatchID:      ec.InstanceID,
+			ItemKey:      itemKey,
+			FilePath:     cleanPath,
+			DisplayLabel: displayLabel,
+			EpisodeInfo:  episodeInfo,
+			Decision:     itemDecision,
+			Profile:      itemProfile,
+			Reasons:      itemReasons,
+			Status:       itemStatus,
+			Attempts:     0,
+		}
+		_ = e.deps.Store.CreateTranscodeBatchItem(item)
+		batchItems = append(batchItems, item)
+	}
+
+	outputs := buildBatchOutputs(ec.InstanceID, batchItems, seriesTitle, isAnime, dryRun)
+	return StepResult{
+		Status:  StepCompleted,
+		Outputs: outputs,
+	}, nil
+}
+
+func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+	dryRun := getBool(ec.Inputs, "dry_run")
+	seriesTitle := getString(ec.State, "series_title")
+	isAnime := getBool(ec.State, "is_anime")
+
+	items, err := e.deps.Store.ListTranscodeBatchItems(ec.InstanceID)
+	if err != nil {
+		return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to list batch items: %v", err)}, nil
+	}
+
+	// In dry run, resolution and auto-selection are complete; no jobs are scheduled.
+	if dryRun {
+		return StepResult{
+			Status:  StepCompleted,
+			Outputs: buildBatchOutputs(ec.InstanceID, items, seriesTitle, isAnime, dryRun),
+		}, nil
+	}
+
+	if strings.EqualFold(ec.Decision, "resume") {
+		ec.Decision = ""
+		delete(ec.Inputs, "paused")
+		ec.Inputs["paused"] = false
+		ec.State["paused"] = false
+	}
+
+	// Handle pause / cancellation semantics
+	if strings.EqualFold(ec.Decision, "pause") || getBool(ec.Inputs, "paused") {
+		ec.Decision = ""
+		return StepResult{
+			Status:        StepWaitingDecision,
+			WaitingReason: "Transcode batch paused by request",
+			WaitingOptions: []WaitingOption{
+				{Decision: "resume", Description: "Resume transcode batch"},
+				{Decision: "cancel", Description: "Cancel remaining queued items"},
+			},
+			Outputs: buildBatchOutputs(ec.InstanceID, items, seriesTitle, isAnime, dryRun),
+		}, nil
+	}
+
+	if strings.EqualFold(ec.Decision, "cancel") {
+		ec.Decision = ""
+		for i := range items {
+			if items[i].Status == "queued" || items[i].Status == "waiting_for_slot" {
+				items[i].Status = "failed"
+				items[i].Error = "cancelled by user decision"
+				_ = e.deps.Store.UpdateTranscodeBatchItem(items[i])
+			}
+		}
+		items, _ = e.deps.Store.ListTranscodeBatchItems(ec.InstanceID)
+		return StepResult{
+			Status:  StepCompleted,
+			Outputs: buildBatchOutputs(ec.InstanceID, items, seriesTitle, isAnime, dryRun),
+		}, nil
+	}
+
+	maxParallel := 1
+	if e.deps.Config != nil && e.deps.Config.Transcode.MaxParallelJobs > 0 {
+		maxParallel = e.deps.Config.Transcode.MaxParallelJobs
+	}
+
+	if maxParallel <= 1 {
+		for i := range items {
+			it := &items[i]
+			if it.Status != "queued" && it.Status != "waiting_for_slot" {
+				continue
+			}
+			workerBusy, err := e.processBatchItem(ctx, it, ec, seriesTitle, isAnime)
+			if err != nil && ctx.Err() != nil {
+				return StepResult{Status: StepFailed, Error: ctx.Err().Error()}, nil
+			}
+			if workerBusy {
+				latest, _ := e.deps.Store.ListTranscodeBatchItems(ec.InstanceID)
+				return StepResult{
+					Status:           StepWaitingExternal,
+					WaitingCondition: "worker_busy",
+					WaitingReason:    fmt.Sprintf("Worker busy on item %s; waiting for transcode slot", it.ItemKey),
+					Outputs:          buildBatchOutputs(ec.InstanceID, latest, seriesTitle, isAnime, dryRun),
+				}, nil
+			}
+		}
+	} else {
+		var pendingIndices []int
+		for i := range items {
+			if items[i].Status == "queued" || items[i].Status == "waiting_for_slot" {
+				pendingIndices = append(pendingIndices, i)
+			}
+		}
+
+		if len(pendingIndices) > 0 {
+			sem := make(chan struct{}, maxParallel)
+			var wg sync.WaitGroup
+			var busyMu sync.Mutex
+			var firstBusyItem *store.TranscodeBatchItem
+
+			cancelled := false
+			for _, idx := range pendingIndices {
+				it := &items[idx]
+				busyMu.Lock()
+				alreadyBusy := firstBusyItem != nil
+				busyMu.Unlock()
+				if alreadyBusy {
+					break
+				}
+
+				select {
+				case <-ctx.Done():
+					cancelled = true
+					break
+				case sem <- struct{}{}:
+				}
+				if cancelled {
+					break
+				}
+
+				wg.Add(1)
+				go func(item *store.TranscodeBatchItem) {
+					defer wg.Done()
+					defer func() { <-sem }()
+
+					busy, _ := e.processBatchItem(ctx, item, ec, seriesTitle, isAnime)
+					if busy {
+						busyMu.Lock()
+						if firstBusyItem == nil {
+							firstBusyItem = item
+						}
+						busyMu.Unlock()
+					}
+				}(it)
+			}
+			wg.Wait()
+
+			if cancelled && ctx.Err() != nil {
+				return StepResult{Status: StepFailed, Error: ctx.Err().Error()}, nil
+			}
+
+			if firstBusyItem != nil {
+				latest, _ := e.deps.Store.ListTranscodeBatchItems(ec.InstanceID)
+				return StepResult{
+					Status:           StepWaitingExternal,
+					WaitingCondition: "worker_busy",
+					WaitingReason:    fmt.Sprintf("Worker busy on item %s; waiting for transcode slot", firstBusyItem.ItemKey),
+					Outputs:          buildBatchOutputs(ec.InstanceID, latest, seriesTitle, isAnime, dryRun),
+				}, nil
+			}
+		}
+	}
+
+	latest, _ := e.deps.Store.ListTranscodeBatchItems(ec.InstanceID)
+	return StepResult{
+		Status:  StepCompleted,
+		Outputs: buildBatchOutputs(ec.InstanceID, latest, seriesTitle, isAnime, dryRun),
+	}, nil
+}
+
+func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatchItem, ec *ExecutionContext, seriesTitle string, isAnime bool) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+
+	mediaType := "tv"
+	if isAnime {
+		mediaType = "anime"
+	}
+	if mt := getString(ec.Inputs, "media_type"); mt != "" {
+		mediaType = mt
+	}
+	minSavings := 0.0
+	if e.deps.Config != nil {
+		minSavings = e.deps.Config.Transcode.MinSavingsPercent
+	}
+	if s := getFloat(ec.Inputs, "min_savings_percent"); s > 0 {
+		minSavings = s
+	}
+
+	childInputs := map[string]any{
+		"path":                item.FilePath,
+		"profile":             item.Profile,
+		"replace_original":    false,
+		"media_type":          mediaType,
+		"is_anime":            isAnime,
+		"min_savings_percent": minSavings,
+		"surface_worker_busy": true,
+	}
+	childIdempotencyKey := fmt.Sprintf("batch-%s-%s", ec.InstanceID, item.ItemKey)
+
+	item.Status = "running"
+	_ = e.deps.Store.UpdateTranscodeBatchItem(*item)
+
+	var childRes *ActionResult
+	var childErr error
+
+	if item.ChildActionID != "" {
+		existingChild, _ := e.deps.Store.GetActionInstance(item.ChildActionID)
+		if existingChild != nil && existingChild.Status == StatusWaitingExternal {
+			childRes, childErr = e.Resume(ctx, existingChild.ID, "", map[string]any{"surface_worker_busy": true})
+		} else if existingChild != nil && (existingChild.Status == StatusCompleted || existingChild.Status == StatusFailed) {
+			tmpl, _ := e.GetTemplate("transcode_media")
+			childEC := parseExecutionContext(existingChild, e)
+			childRes = buildActionResult(existingChild, len(tmpl.Steps), childEC)
+		} else {
+			childRes, childErr = e.Run(ctx, "transcode_media", childInputs, childIdempotencyKey)
+		}
+	} else {
+		childRes, childErr = e.Run(ctx, "transcode_media", childInputs, childIdempotencyKey)
+	}
+
+	// If child action was already in StatusWaitingExternal when Run found it via idempotency key, resume it now
+	if childRes != nil && childRes.Status == StatusWaitingExternal && childRes.ID != "" && item.ChildActionID == "" {
+		item.ChildActionID = childRes.ID
+		resumedRes, resumedErr := e.Resume(ctx, childRes.ID, "", map[string]any{"surface_worker_busy": true})
+		if resumedErr == nil && resumedRes != nil {
+			childRes = resumedRes
+		} else if resumedErr != nil {
+			childErr = resumedErr
+		}
+	}
+
+	if childRes != nil && item.ChildActionID == "" {
+		item.ChildActionID = childRes.ID
+	}
+
+	isWorkerBusy := false
+	if childRes != nil {
+		if childRes.Status == StatusWaitingExternal && childRes.WaitingCondition == "worker_busy" {
+			isWorkerBusy = true
+		} else if childRes.Status == StatusFailed && (getString(childRes.Outputs, "failure_classification") == string(resilience.WorkerBusy) || strings.Contains(strings.ToLower(childRes.Error), "worker busy")) {
+			isWorkerBusy = true
+		}
+	}
+
+	if isWorkerBusy {
+		item.Status = "waiting_for_slot"
+		// Worker busy does NOT increment attempts or consume retry budget
+		_ = e.deps.Store.UpdateTranscodeBatchItem(*item)
+		return true, nil
+	}
+
+	if childErr != nil {
+		item.Status = "failed"
+		item.Error = childErr.Error()
+		item.Attempts++
+		_ = e.deps.Store.UpdateTranscodeBatchItem(*item)
+		return false, nil
+	}
+
+	if childRes == nil {
+		item.Status = "failed"
+		item.Error = "child action returned nil result"
+		item.Attempts++
+		_ = e.deps.Store.UpdateTranscodeBatchItem(*item)
+		return false, nil
+	}
+
+	switch childRes.Status {
+	case StatusCompleted:
+		item.Status = "completed"
+		cand := getString(childRes.Outputs, "candidate_path")
+		if cand == "" {
+			cand = getString(childRes.Outputs, "output_path")
+		}
+		item.CandidatePath = cand
+		item.Error = ""
+		item.Attempts++
+		_ = e.deps.Store.UpdateTranscodeBatchItem(*item)
+		return false, nil
+
+	case StatusFailed:
+		item.Status = "failed"
+		errStr := childRes.Error
+		if errStr == "" && childRes.Outputs != nil {
+			errStr = fmt.Sprintf("%v", childRes.Outputs["error"])
+		}
+		item.Error = errStr
+		item.Attempts++
+		_ = e.deps.Store.UpdateTranscodeBatchItem(*item)
+		return false, nil
+
+	default:
+		item.Status = "waiting_for_slot"
+		_ = e.deps.Store.UpdateTranscodeBatchItem(*item)
+		return false, nil
+	}
+}
+
+func buildBatchOutputs(batchID string, items []store.TranscodeBatchItem, seriesTitle string, isAnime, dryRun bool) map[string]any {
+	counts := map[string]int{
+		"total":            len(items),
+		"queued":           0,
+		"transcode":        0,
+		"skip":             0,
+		"review":           0,
+		"waiting_for_slot": 0,
+		"running":          0,
+		"completed":        0,
+		"failed":           0,
+	}
+
+	for _, it := range items {
+		if it.Decision == "transcode" {
+			counts["transcode"]++
+		}
+		switch it.Status {
+		case "queued":
+			counts["queued"]++
+		case "skip":
+			counts["skip"]++
+		case "review":
+			counts["review"]++
+		case "waiting_for_slot":
+			counts["waiting_for_slot"]++
+		case "running":
+			counts["running"]++
+		case "completed":
+			counts["completed"]++
+		case "failed":
+			counts["failed"]++
+		}
+	}
+
+	return map[string]any{
+		"batch_id":         batchID,
+		"series_title":     seriesTitle,
+		"is_anime":         isAnime,
+		"dry_run":          dryRun,
+		"counts":           counts,
+		"total":            counts["total"],
+		"queued":           counts["queued"],
+		"transcode":        counts["transcode"],
+		"skip":             counts["skip"],
+		"review":           counts["review"],
+		"waiting_for_slot": counts["waiting_for_slot"],
+		"running":          counts["running"],
+		"completed":        counts["completed"],
+		"failed":           counts["failed"],
+		"items":            items,
+	}
+}
