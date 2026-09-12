@@ -1320,3 +1320,36 @@ func TestTranscodeBatch_OutputCap100AndWaitingDecision(t *testing.T) {
 		t.Errorf("expected top-level waiting_decision == 1, got %v", outputs["waiting_decision"])
 	}
 }
+
+func TestTranscodeBatchUnadvertisedInputs(t *testing.T) {
+	engine := NewEngine(EngineDeps{})
+	tmpl, ok := engine.GetTemplate("transcode_batch")
+	if !ok {
+		t.Fatalf("transcode_batch template not found")
+	}
+
+	disallowed := []string{"idempotency_key", "surface_worker_busy", "limit"}
+	for _, input := range disallowed {
+		for _, opt := range tmpl.OptionalInputs {
+			if opt == input {
+				t.Errorf("expected %q not to be advertised in transcode_batch OptionalInputs", input)
+			}
+		}
+		for _, req := range tmpl.RequiredInputs {
+			if req == input {
+				t.Errorf("expected %q not to be advertised in transcode_batch RequiredInputs", input)
+			}
+		}
+	}
+
+	// Verify that getMaxOutputItems ignores the removed "limit" alias but respects max_output_items and max_items
+	if got := getMaxOutputItems(map[string]any{"limit": 10}); got != DefaultMaxBatchOutputItems {
+		t.Errorf("expected limit alias to be ignored by getMaxOutputItems, got %d", got)
+	}
+	if got := getMaxOutputItems(map[string]any{"max_output_items": 12}); got != 12 {
+		t.Errorf("expected max_output_items to return 12, got %d", got)
+	}
+	if got := getMaxOutputItems(map[string]any{"max_items": 15}); got != 15 {
+		t.Errorf("expected max_items to return 15, got %d", got)
+	}
+}

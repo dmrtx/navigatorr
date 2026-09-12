@@ -32,13 +32,10 @@ func (e *Engine) registerTranscodeBatchTemplate() {
 			"media_type",
 			"is_anime",
 			"min_savings_percent",
-			"idempotency_key",
 			"paused",
 			"max_size_increase_percent",
-			"surface_worker_busy",
 			"max_output_items",
 			"max_items",
-			"limit",
 		},
 		Destructive: false,
 		Steps: []StepDefinition{
@@ -1019,8 +1016,6 @@ func getMaxOutputItems(inputs map[string]any) int {
 	if m := getInt(inputs, "max_output_items"); m > 0 {
 		limit = m
 	} else if m := getInt(inputs, "max_items"); m > 0 {
-		limit = m
-	} else if m := getInt(inputs, "limit"); m > 0 {
 		limit = m
 	}
 	if limit > MaxBatchOutputItems {
