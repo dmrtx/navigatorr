@@ -63,6 +63,27 @@ transcode:
 
 A pinned `revision` may be used instead of `channel`. `main` and `master` are deliberately rejected as pinned revisions so a supposedly immutable deployment cannot silently change underneath a running installation.
 
+## Custom file recipes
+
+To load custom recipes from a local file, configure `source: file`:
+
+```yaml
+transcode:
+  recipes:
+    source: file
+    path: /root/.config/navigatorr/transcode-recipes.yaml
+    cache_dir: /root/.cache/navigatorr/transcode-recipes
+```
+
+When running in Docker, mount the recipe file into the container:
+
+```text
+/home/david/Docker/navigatorr/transcode-recipes.yaml:/root/.config/navigatorr/transcode-recipes.yaml:ro
+```
+
+> [!WARNING]
+> When configuring `source: builtin`, you must not specify `path`, `manifest_url`, or `repository`. Specifying any of these fields with `builtin` will fail configuration validation.
+
 ## Bundle schema
 
 A bundle is strictly decoded. Unknown fields fail validation.
