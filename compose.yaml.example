@@ -1,10 +1,19 @@
 # Navigatorr Docker Compose Template
 #
 # OPERATIONAL MODES:
-# 1. Stdio MCP Sessions (spawned on demand by an MCP host like Claude Desktop or tunnel-client):
-#    docker compose run --rm -T navigatorr
-# 2. Persistent Background Service (e.g. serving HTTP request queue or running continuous stack):
-#    docker compose up -d
+#
+# 1. On-Demand Stdio MCP Sessions (Default, spawned per-session by an MCP host):
+#    Command: docker compose run --rm -T navigatorr
+#    Settings: restart: "no", stdin_open: true
+#
+# 2. Persistent Streamable HTTP Background Service (Recommended for Portainer):
+#    Command: docker compose up -d
+#    Settings: restart: "unless-stopped"
+#    Service command: ["-transport=streamable-http", "-listen=127.0.0.1:8098"]
+#    SECURITY NOTE: When network_mode: host is active on Linux, binding 0.0.0.0:8098 exposes
+#    unauthenticated MCP tools across your network. Use 127.0.0.1:8098 for local/tunnel setups,
+#    or place behind an authenticating reverse proxy.
+#    Endpoint: http://127.0.0.1:8098/mcp
 #
 # IMPORTANT CONFIGURATION RULES:
 # 1. Configuration MUST be placed in config.yaml.
@@ -41,7 +50,13 @@ services:
       # - ./secrets/navigatorr_transcode_ssh:/run/secrets/navigatorr_transcode_ssh:ro
       # - ./secrets/known_hosts:/run/secrets/navigatorr_known_hosts:ro
 
+    # Mode 1 (On-demand stdio): restart: "no"
+    # Mode 2 (Persistent HTTP in Portainer): restart: "unless-stopped"
     restart: "no"
+
+    # Enable Mode 2 (Persistent Streamable HTTP) by setting:
+    # command: ["-transport=streamable-http", "-listen=127.0.0.1:8098"]
+    # (Or configure mcp.transport: streamable-http and mcp.listen: 127.0.0.1:8098 in config.yaml)
 
 volumes:
   navigatorr-cache:

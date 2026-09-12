@@ -1,3 +1,19 @@
+# Navigatorr Docker Compose Configuration
+#
+# Choose between Mode 1 (On-Demand Stdio) or Mode 2 (Persistent Streamable HTTP):
+#
+# MODE 1: On-Demand MCP Stdio Session (Default)
+#   - Keep restart: "no"
+#   - Spawn on-demand from client: docker compose run --rm -T navigatorr
+#
+# MODE 2: Persistent Streamable HTTP Service (Recommended for Portainer / 24/7 background stacks)
+#   - Change restart: "unless-stopped"
+#   - Add command: ["-transport=streamable-http", "-listen=127.0.0.1:8098"]
+#   - SECURITY NOTICE: When network_mode: host is active on Linux, binding 0.0.0.0:8098 exposes
+#     unauthenticated MCP control across your entire LAN. Use 127.0.0.1:8098 for local/tunnel setups,
+#     or place behind a reverse proxy / firewall if remote access is required.
+#   - Endpoint is available at: http://127.0.0.1:8098/mcp (or http://<host>:8098/mcp if bound to 0.0.0.0)
+#
 services:
   navigatorr:
     image: ghcr.io/dmrtx/navigatorr:latest
@@ -17,8 +33,13 @@ services:
       # - /srv/media/Anime:/media/Anime:ro
       # - /srv/media/Movies:/media/Movies:ro
       # - /srv/media/Downloads:/media/Downloads:rw
-    # Use "no" for on-demand MCP stdio sessions; use "unless-stopped" for persistent background service
+
+    # Mode 1 (On-Demand Stdio): restart: "no"
+    # Mode 2 (Persistent Streamable HTTP): restart: "unless-stopped"
     restart: "no"
+
+    # To run Mode 2 (Persistent Streamable HTTP), uncomment:
+    # command: ["-transport=streamable-http", "-listen=127.0.0.1:8098"]
 
 volumes:
   navigatorr-cache:
