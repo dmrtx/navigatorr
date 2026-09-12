@@ -131,11 +131,21 @@ func (s *Store) UpdateActionInstance(inst ActionInstance) error {
 
 // ListActionInstances returns action instances optionally filtered by status.
 func (s *Store) ListActionInstances(status string, limit int) ([]ActionInstance, error) {
+	return s.ListActionInstancesPaged(status, limit, 0)
+}
+
+// ListActionInstancesPaged returns action instances optionally filtered by status with offset pagination.
+func (s *Store) ListActionInstancesPaged(status string, limit, offset int) ([]ActionInstance, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if limit <= 0 || limit > 100 {
-		limit = 50
+	if limit <= 0 {
+		limit = 20
+	} else if limit > 100 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
 	}
 	q := `SELECT id, action_name, status, current_step, inputs_json, outputs_json,
 		state_json, waiting_reason, waiting_condition, waiting_options_json,
@@ -146,8 +156,8 @@ func (s *Store) ListActionInstances(status string, limit int) ([]ActionInstance,
 		q += ` AND status=?`
 		args = append(args, status)
 	}
-	q += ` ORDER BY updated_at DESC LIMIT ?`
-	args = append(args, limit)
+	q += ` ORDER BY updated_at DESC LIMIT ? OFFSET ?`
+	args = append(args, limit, offset)
 
 	rows, err := s.db.Query(q, args...)
 	if err != nil {

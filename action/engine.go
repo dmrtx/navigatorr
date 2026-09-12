@@ -300,6 +300,11 @@ func (e *Engine) Status(ctx context.Context, instanceID string) (*ActionResult, 
 
 // List returns action instances matching the optional status filter.
 func (e *Engine) List(ctx context.Context, status string, limit int) ([]ActionResult, error) {
+	return e.ListPaged(ctx, status, limit, 0)
+}
+
+// ListPaged returns action instances matching the optional status filter with offset pagination.
+func (e *Engine) ListPaged(ctx context.Context, status string, limit, offset int) ([]ActionResult, error) {
 	if e.deps.Store == nil {
 		return nil, fmt.Errorf("maintenance store is required")
 	}
@@ -309,11 +314,14 @@ func (e *Engine) List(ctx context.Context, status string, limit int) ([]ActionRe
 	if limit > 100 {
 		limit = 100
 	}
+	if offset < 0 {
+		offset = 0
+	}
 	if strings.EqualFold(status, "all") {
 		status = ""
 	}
 
-	instances, err := e.deps.Store.ListActionInstances(status, limit)
+	instances, err := e.deps.Store.ListActionInstancesPaged(status, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("listing action instances: %w", err)
 	}
@@ -596,6 +604,18 @@ func buildActionResult(inst *store.ActionInstance, totalSteps int, ec *Execution
 		}
 	}
 
+	var durationMs int64
+	if inst.CreatedAt != "" && inst.UpdatedAt != "" {
+		if tStart, err1 := time.Parse(time.RFC3339, inst.CreatedAt); err1 == nil {
+			if tEnd, err2 := time.Parse(time.RFC3339, inst.UpdatedAt); err2 == nil {
+				durationMs = tEnd.Sub(tStart).Milliseconds()
+				if durationMs < 0 {
+					durationMs = 0
+				}
+			}
+		}
+	}
+
 	return &ActionResult{
 		ID:               inst.ID,
 		ActionName:       inst.ActionName,
@@ -610,6 +630,7 @@ func buildActionResult(inst *store.ActionInstance, totalSteps int, ec *Execution
 		WaitingOptions:   waitingOptions,
 		Error:            errStr,
 		IdempotencyKey:   inst.IdempotencyKey,
+		DurationMs:       durationMs,
 		CreatedAt:        inst.CreatedAt,
 		UpdatedAt:        inst.UpdatedAt,
 	}
