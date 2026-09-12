@@ -40,6 +40,27 @@ func (e *Engine) stepTranscodeAccept(ctx context.Context, ec *ExecutionContext) 
 		ec.State["failure_classification"] = string(resilience.SourceChanged)
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("integrity violation: original file %s was modified (expected sha256 %s, got %s)", origPath, origSHA, current)}, nil
 	}
+	if getBool(ec.State, "skip_transcode") {
+		decision := getString(ec.State, "auto_decision")
+		reasons := ec.State["auto_reasons"]
+		msg := fmt.Sprintf("Transcode not performed: auto decision is %s. Original file preserved and untouched.", decision)
+		out := map[string]any{
+			"skipped":         true,
+			"auto_decision":   decision,
+			"auto_reasons":    reasons,
+			"original_path":   origPath,
+			"original_sha256": origSHA,
+			"original_intact": true,
+			"message":         msg,
+		}
+		if p := getString(ec.State, "auto_profile"); p != "" {
+			out["profile"] = p
+		}
+		if s, ok := ec.State["expected_savings_percent"]; ok {
+			out["expected_savings_percent"] = s
+		}
+		return StepResult{Status: StepCompleted, Outputs: out}, nil
+	}
 	out := map[string]any{"candidate_path": candidate, "output_path": candidate, "original_path": origPath, "original_intact": true, "original_sha256": origSHA, "replace_original": false, "profile": getString(ec.State, "profile"), "recipe_version": getString(ec.State, "recipe_version"), "recipe_digest": getString(ec.State, "recipe_digest"), "plan_digest": getString(ec.State, "plan_digest"), "attempt": getInt(ec.State, "attempt"), "retry_count": getInt(ec.State, "retry_count"), "fallback_count": getInt(ec.State, "fallback_count"), "applied_fallbacks": ec.State["applied_fallbacks"], "message": "Transcode completed and verified. Candidate output ready. Original file physically preserved and SHA-256 unchanged."}
 	if c := ec.State["conversions"]; c != nil {
 		out["conversions"] = c
