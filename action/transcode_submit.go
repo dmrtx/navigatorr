@@ -80,7 +80,7 @@ func (e *Engine) handleTransientFailure(ec *ExecutionContext, plan *transcode.Pl
 	class := resilience.Classify(err.Error())
 	ec.State["failure_classification"] = string(class)
 	appendFailureHistory(ec, phase, string(class), err.Error())
-	if class == resilience.WorkerBusy && getBool(ec.Inputs, "surface_worker_busy") {
+	if class == resilience.WorkerBusy && (getBool(ec.Inputs, "surface_worker_busy") || getBool(ec.State, "surface_worker_busy")) {
 		return StepResult{
 			Status:           StepWaitingExternal,
 			WaitingCondition: "worker_busy",
@@ -163,7 +163,7 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 		class := resilience.Classify(msg)
 		ec.State["failure_classification"] = string(class)
 		appendFailureHistory(ec, "worker", string(class), msg)
-		if class == resilience.WorkerBusy && getBool(ec.Inputs, "surface_worker_busy") {
+		if class == resilience.WorkerBusy && (getBool(ec.Inputs, "surface_worker_busy") || getBool(ec.State, "surface_worker_busy")) {
 			return StepResult{
 				Status:           StepWaitingExternal,
 				WaitingCondition: "worker_busy",

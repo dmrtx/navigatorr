@@ -34,6 +34,11 @@ func (e *Engine) registerTranscodeBatchTemplate() {
 			"min_savings_percent",
 			"idempotency_key",
 			"paused",
+			"max_size_increase_percent",
+			"surface_worker_busy",
+			"max_output_items",
+			"max_items",
+			"limit",
 		},
 		Destructive: false,
 		Steps: []StepDefinition{
@@ -411,7 +416,7 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 			WaitingReason: "Transcode batch paused by request",
 			WaitingOptions: []WaitingOption{
 				{Decision: "resume", Description: "Resume transcode batch"},
-				{Decision: "cancel", Description: "Cancel remaining queued items"},
+				{Decision: "cancel", Description: "Cancel remaining queued and waiting items (active remote jobs are not stopped)"},
 			},
 			Outputs: buildBatchOutputs(ec.InstanceID, items, seriesTitle, isAnime, dryRun, getMaxOutputItems(ec.Inputs)),
 		}, nil
@@ -427,10 +432,156 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 			}
 		}
 		items, _ = e.deps.Store.ListTranscodeBatchItems(ec.InstanceID)
+		outputs := buildBatchOutputs(ec.InstanceID, items, seriesTitle, isAnime, dryRun, getMaxOutputItems(ec.Inputs))
+		outputs["note"] = "Queued and waiting items were cancelled. Active remote transcode jobs are not stopped and remain running on workers."
+
+		hasRunning := false
+		for _, it := range items {
+			if it.Status == "running" {
+				hasRunning = true
+				break
+			}
+		}
+		if hasRunning {
+			return StepResult{
+				Status:           StepWaitingExternal,
+				WaitingCondition: "transcode_running",
+				WaitingReason:    "Remaining queued items cancelled; waiting for active remote transcode job(s) to finish (active jobs not stopped)",
+				Outputs:          outputs,
+			}, nil
+		}
 		return StepResult{
 			Status:  StepCompleted,
-			Outputs: buildBatchOutputs(ec.InstanceID, items, seriesTitle, isAnime, dryRun, getMaxOutputItems(ec.Inputs)),
+			Outputs: outputs,
 		}, nil
+	}
+
+	// Forward user decision to child action if an item is in waiting_decision
+	if ec.Decision != "" {
+		decisionToForward := ec.Decision
+		ec.Decision = ""
+		for i := range items {
+			if items[i].Status == "waiting_decision" && items[i].ChildActionID != "" {
+				resumedRes, resumedErr := e.Resume(ctx, items[i].ChildActionID, decisionToForward, map[string]any{"surface_worker_busy": true})
+				if resumedErr == nil && resumedRes != nil {
+					switch resumedRes.Status {
+					case StatusCompleted:
+						items[i].Status = "completed"
+						cand := getString(resumedRes.Outputs, "candidate_path")
+						if cand == "" {
+							cand = getString(resumedRes.Outputs, "output_path")
+						}
+						items[i].CandidatePath = cand
+						items[i].Error = ""
+						if items[i].Attempts == 0 {
+							items[i].Attempts = 1
+						}
+					case StatusFailed:
+						items[i].Status = "failed"
+						items[i].Error = resumedRes.Error
+						if items[i].Attempts == 0 {
+							items[i].Attempts = 1
+						}
+					case StatusWaitingDecision:
+						items[i].Status = "waiting_decision"
+					case StatusWaitingExternal:
+						if resumedRes.WaitingCondition == "worker_busy" {
+							items[i].Status = "waiting_for_slot"
+						} else {
+							items[i].Status = "running"
+						}
+					default:
+						items[i].Status = "running"
+					}
+					_ = e.deps.Store.UpdateTranscodeBatchItem(items[i])
+				}
+				break
+			}
+		}
+	}
+
+	// Recover existing child actions across all statuses to ensure no duplicate submits
+	for i := range items {
+		it := &items[i]
+		childIdempotencyKey := fmt.Sprintf("batch-%s-%s", ec.InstanceID, it.ItemKey)
+
+		if it.ChildActionID == "" {
+			if existingChild, err := e.deps.Store.FindActionByIdempotencyKey("transcode_media", childIdempotencyKey); err == nil && existingChild != nil {
+				it.ChildActionID = existingChild.ID
+			}
+		}
+
+		if it.ChildActionID != "" {
+			existingChild, err := e.deps.Store.GetActionInstance(it.ChildActionID)
+			if err == nil && existingChild != nil {
+				if it.JobID == "" {
+					var state map[string]any
+					_ = json.Unmarshal([]byte(existingChild.StateJSON), &state)
+					if j := getString(state, "job_id"); j != "" {
+						it.JobID = j
+					}
+				}
+
+				switch existingChild.Status {
+				case StatusCompleted:
+					if it.Status != "completed" {
+						it.Status = "completed"
+						var out map[string]any
+						_ = json.Unmarshal([]byte(existingChild.OutputsJSON), &out)
+						cand := getString(out, "candidate_path")
+						if cand == "" {
+							cand = getString(out, "output_path")
+						}
+						it.CandidatePath = cand
+						it.Error = ""
+						if it.Attempts == 0 {
+							it.Attempts = 1
+						}
+						_ = e.deps.Store.UpdateTranscodeBatchItem(*it)
+					}
+				case StatusFailed:
+					var out map[string]any
+					_ = json.Unmarshal([]byte(existingChild.OutputsJSON), &out)
+					isBusy := getString(out, "failure_classification") == string(resilience.WorkerBusy) ||
+						strings.Contains(strings.ToLower(existingChild.ErrorJSON), "worker busy")
+					if isBusy {
+						if it.Status != "waiting_for_slot" {
+							it.Status = "waiting_for_slot"
+							_ = e.deps.Store.UpdateTranscodeBatchItem(*it)
+						}
+					} else if it.Status != "failed" {
+						it.Status = "failed"
+						it.Error = existingChild.ErrorJSON
+						if it.Attempts == 0 {
+							it.Attempts = 1
+						}
+						_ = e.deps.Store.UpdateTranscodeBatchItem(*it)
+					}
+				case StatusWaitingDecision:
+					if it.Status != "waiting_decision" {
+						it.Status = "waiting_decision"
+						_ = e.deps.Store.UpdateTranscodeBatchItem(*it)
+					}
+				case StatusWaitingExternal:
+					if existingChild.WaitingCondition == "worker_busy" {
+						if it.Status != "waiting_for_slot" {
+							it.Status = "waiting_for_slot"
+							_ = e.deps.Store.UpdateTranscodeBatchItem(*it)
+						}
+					} else {
+						if it.Status != "running" {
+							it.Status = "running"
+							_ = e.deps.Store.UpdateTranscodeBatchItem(*it)
+						}
+					}
+				case StatusRunning, StatusPending:
+					if it.Status != "running" {
+						it.Status = "running"
+						_ = e.deps.Store.UpdateTranscodeBatchItem(*it)
+					}
+				}
+			}
+		}
 	}
 
 	maxParallel := 1
@@ -438,27 +589,53 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 		maxParallel = e.deps.Config.Transcode.MaxParallelJobs
 	}
 
-	if maxParallel <= 1 {
-		for i := range items {
-			it := &items[i]
-			if it.Status != "queued" && it.Status != "waiting_for_slot" {
-				continue
-			}
-			workerBusy, err := e.processBatchItem(ctx, it, ec, seriesTitle, isAnime)
+	// First, check/advance any items that are already running
+	for i := range items {
+		it := &items[i]
+		if it.Status == "running" {
+			_, err := e.processBatchItem(ctx, it, ec, seriesTitle, isAnime)
 			if err != nil && ctx.Err() != nil {
 				return StepResult{Status: StepFailed, Error: ctx.Err().Error()}, nil
 			}
-			if workerBusy {
-				latest, _ := e.deps.Store.ListTranscodeBatchItems(ec.InstanceID)
-				return StepResult{
-					Status:           StepWaitingExternal,
-					WaitingCondition: "worker_busy",
-					WaitingReason:    fmt.Sprintf("Worker busy on item %s; waiting for transcode slot", it.ItemKey),
-					Outputs:          buildBatchOutputs(ec.InstanceID, latest, seriesTitle, isAnime, dryRun, getMaxOutputItems(ec.Inputs)),
-				}, nil
+		}
+	}
+
+	var workerBusyEncountered bool
+
+	// Loop to dispatch items while slots are available and pending items exist
+	for {
+		if ctx.Err() != nil {
+			return StepResult{Status: StepFailed, Error: ctx.Err().Error()}, nil
+		}
+		if workerBusyEncountered {
+			break
+		}
+
+		items, err = e.deps.Store.ListTranscodeBatchItems(ec.InstanceID)
+		if err != nil {
+			return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to list batch items: %v", err)}, nil
+		}
+
+		activeCount := 0
+		hasWaitingDecision := false
+		for _, it := range items {
+			if it.Status == "running" {
+				activeCount++
+			} else if it.Status == "waiting_decision" {
+				hasWaitingDecision = true
 			}
 		}
-	} else {
+
+		if hasWaitingDecision {
+			break
+		}
+
+		availableSlots := maxParallel - activeCount
+		if availableSlots <= 0 {
+			break
+		}
+
+		// Find next batch of items (both queued and waiting_for_slot are candidates)
 		var pendingIndices []int
 		for i := range items {
 			if items[i].Status == "queued" || items[i].Status == "waiting_for_slot" {
@@ -466,17 +643,35 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 			}
 		}
 
-		if len(pendingIndices) > 0 {
-			sem := make(chan struct{}, maxParallel)
+		if len(pendingIndices) == 0 {
+			break
+		}
+
+		toSchedule := pendingIndices
+		if len(toSchedule) > availableSlots {
+			toSchedule = toSchedule[:availableSlots]
+		}
+
+		if len(toSchedule) == 1 {
+			it := &items[toSchedule[0]]
+			busy, err := e.processBatchItem(ctx, it, ec, seriesTitle, isAnime)
+			if err != nil && ctx.Err() != nil {
+				return StepResult{Status: StepFailed, Error: ctx.Err().Error()}, nil
+			}
+			if busy {
+				workerBusyEncountered = true
+				break
+			}
+		} else {
+			sem := make(chan struct{}, availableSlots)
 			var wg sync.WaitGroup
 			var busyMu sync.Mutex
-			var firstBusyItem *store.TranscodeBatchItem
 
 			cancelled := false
-			for _, idx := range pendingIndices {
+			for _, idx := range toSchedule {
 				it := &items[idx]
 				busyMu.Lock()
-				alreadyBusy := firstBusyItem != nil
+				alreadyBusy := workerBusyEncountered
 				busyMu.Unlock()
 				if alreadyBusy {
 					break
@@ -500,9 +695,7 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 					busy, _ := e.processBatchItem(ctx, item, ec, seriesTitle, isAnime)
 					if busy {
 						busyMu.Lock()
-						if firstBusyItem == nil {
-							firstBusyItem = item
-						}
+						workerBusyEncountered = true
 						busyMu.Unlock()
 					}
 				}(it)
@@ -512,23 +705,96 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 			if cancelled && ctx.Err() != nil {
 				return StepResult{Status: StepFailed, Error: ctx.Err().Error()}, nil
 			}
-
-			if firstBusyItem != nil {
-				latest, _ := e.deps.Store.ListTranscodeBatchItems(ec.InstanceID)
-				return StepResult{
-					Status:           StepWaitingExternal,
-					WaitingCondition: "worker_busy",
-					WaitingReason:    fmt.Sprintf("Worker busy on item %s; waiting for transcode slot", firstBusyItem.ItemKey),
-					Outputs:          buildBatchOutputs(ec.InstanceID, latest, seriesTitle, isAnime, dryRun, getMaxOutputItems(ec.Inputs)),
-				}, nil
+			if workerBusyEncountered {
+				break
 			}
 		}
 	}
 
 	latest, _ := e.deps.Store.ListTranscodeBatchItems(ec.InstanceID)
+	outLimit := getMaxOutputItems(ec.Inputs)
+	batchOutputs := buildBatchOutputs(ec.InstanceID, latest, seriesTitle, isAnime, dryRun, outLimit)
+
+	// Check if any item is waiting for decision
+	for _, it := range latest {
+		if it.Status == "waiting_decision" {
+			reason := fmt.Sprintf("Item %s waiting for decision", it.ItemKey)
+			options := []WaitingOption{
+				{Decision: "approve", Description: "Approve transcode result"},
+				{Decision: "reject", Description: "Reject transcode result"},
+			}
+			if it.ChildActionID != "" {
+				if childInst, _ := e.deps.Store.GetActionInstance(it.ChildActionID); childInst != nil {
+					if childInst.WaitingReason != "" {
+						reason = childInst.WaitingReason
+					}
+					var childOpts []WaitingOption
+					_ = json.Unmarshal([]byte(childInst.WaitingOptionsJSON), &childOpts)
+					if len(childOpts) > 0 {
+						options = childOpts
+					}
+				}
+			}
+			return StepResult{
+				Status:         StepWaitingDecision,
+				WaitingReason:  reason,
+				WaitingOptions: options,
+				Outputs:        batchOutputs,
+			}, nil
+		}
+	}
+
+	// Check if worker busy occurred or any item is waiting for slot
+	waitingForSlotCount := 0
+	for _, it := range latest {
+		if it.Status == "waiting_for_slot" {
+			waitingForSlotCount++
+		}
+	}
+	if workerBusyEncountered || waitingForSlotCount > 0 {
+		return StepResult{
+			Status:           StepWaitingExternal,
+			WaitingCondition: "worker_busy",
+			WaitingReason:    fmt.Sprintf("Worker busy; %d item(s) waiting for transcode slot", waitingForSlotCount),
+			Outputs:          batchOutputs,
+		}, nil
+	}
+
+	// Check if any item is running
+	runningCount := 0
+	for _, it := range latest {
+		if it.Status == "running" {
+			runningCount++
+		}
+	}
+	if runningCount > 0 {
+		return StepResult{
+			Status:           StepWaitingExternal,
+			WaitingCondition: "transcode_running",
+			WaitingReason:    fmt.Sprintf("%d transcode job(s) in progress", runningCount),
+			Outputs:          batchOutputs,
+		}, nil
+	}
+
+	// Check if any item is still queued
+	queuedCount := 0
+	for _, it := range latest {
+		if it.Status == "queued" {
+			queuedCount++
+		}
+	}
+	if queuedCount > 0 {
+		return StepResult{
+			Status:           StepWaitingExternal,
+			WaitingCondition: "queued",
+			WaitingReason:    fmt.Sprintf("%d item(s) queued for transcode", queuedCount),
+			Outputs:          batchOutputs,
+		}, nil
+	}
+
 	return StepResult{
 		Status:  StepCompleted,
-		Outputs: buildBatchOutputs(ec.InstanceID, latest, seriesTitle, isAnime, dryRun, getMaxOutputItems(ec.Inputs)),
+		Outputs: batchOutputs,
 	}, nil
 }
 
@@ -552,16 +818,29 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 		minSavings = s
 	}
 
+	maxSizeIncrease := 0.0
+	if val, ok := ec.Inputs["max_size_increase_percent"]; ok && val != nil {
+		maxSizeIncrease = getFloat(ec.Inputs, "max_size_increase_percent")
+	}
+
 	childInputs := map[string]any{
-		"path":                item.FilePath,
-		"profile":             item.Profile,
-		"replace_original":    false,
-		"media_type":          mediaType,
-		"is_anime":            isAnime,
-		"min_savings_percent": minSavings,
-		"surface_worker_busy": true,
+		"path":                      item.FilePath,
+		"profile":                   item.Profile,
+		"replace_original":          false,
+		"media_type":                mediaType,
+		"is_anime":                  isAnime,
+		"min_savings_percent":       minSavings,
+		"surface_worker_busy":       true,
+		"max_size_increase_percent": maxSizeIncrease,
 	}
 	childIdempotencyKey := fmt.Sprintf("batch-%s-%s", ec.InstanceID, item.ItemKey)
+
+	// Stable child action lookup across all statuses to prevent duplicate submits across restarts
+	if item.ChildActionID == "" {
+		if existing, err := e.deps.Store.FindActionByIdempotencyKey("transcode_media", childIdempotencyKey); err == nil && existing != nil {
+			item.ChildActionID = existing.ID
+		}
+	}
 
 	item.Status = "running"
 	_ = e.deps.Store.UpdateTranscodeBatchItem(*item)
@@ -571,12 +850,21 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 
 	if item.ChildActionID != "" {
 		existingChild, _ := e.deps.Store.GetActionInstance(item.ChildActionID)
-		if existingChild != nil && existingChild.Status == StatusWaitingExternal {
-			childRes, childErr = e.Resume(ctx, existingChild.ID, "", map[string]any{"surface_worker_busy": true})
-		} else if existingChild != nil && (existingChild.Status == StatusCompleted || existingChild.Status == StatusFailed) {
-			tmpl, _ := e.GetTemplate("transcode_media")
-			childEC := parseExecutionContext(existingChild, e)
-			childRes = buildActionResult(existingChild, len(tmpl.Steps), childEC)
+		if existingChild != nil {
+			switch existingChild.Status {
+			case StatusWaitingExternal:
+				childRes, childErr = e.Resume(ctx, existingChild.ID, "", map[string]any{"surface_worker_busy": true})
+			case StatusWaitingDecision:
+				tmpl, _ := e.GetTemplate("transcode_media")
+				childEC := parseExecutionContext(existingChild, e)
+				childRes = buildActionResult(existingChild, len(tmpl.Steps), childEC)
+			case StatusCompleted, StatusFailed:
+				tmpl, _ := e.GetTemplate("transcode_media")
+				childEC := parseExecutionContext(existingChild, e)
+				childRes = buildActionResult(existingChild, len(tmpl.Steps), childEC)
+			default:
+				childRes, childErr = e.Resume(ctx, existingChild.ID, "", map[string]any{"surface_worker_busy": true})
+			}
 		} else {
 			childRes, childErr = e.Run(ctx, "transcode_media", childInputs, childIdempotencyKey)
 		}
@@ -648,7 +936,9 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 	if childErr != nil {
 		item.Status = "failed"
 		item.Error = childErr.Error()
-		item.Attempts++
+		if item.Attempts == 0 {
+			item.Attempts = 1
+		}
 		_ = e.deps.Store.UpdateTranscodeBatchItem(*item)
 		return false, nil
 	}
@@ -656,7 +946,9 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 	if childRes == nil {
 		item.Status = "failed"
 		item.Error = "child action returned nil result"
-		item.Attempts++
+		if item.Attempts == 0 {
+			item.Attempts = 1
+		}
 		_ = e.deps.Store.UpdateTranscodeBatchItem(*item)
 		return false, nil
 	}
@@ -670,7 +962,9 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 		}
 		item.CandidatePath = cand
 		item.Error = ""
-		item.Attempts++
+		if item.Attempts == 0 {
+			item.Attempts = 1
+		}
 		_ = e.deps.Store.UpdateTranscodeBatchItem(*item)
 		return false, nil
 
@@ -681,31 +975,61 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 			errStr = fmt.Sprintf("%v", childRes.Outputs["error"])
 		}
 		item.Error = errStr
-		item.Attempts++
+		if item.Attempts == 0 {
+			item.Attempts = 1
+		}
+		_ = e.deps.Store.UpdateTranscodeBatchItem(*item)
+		return false, nil
+
+	case StatusWaitingDecision:
+		item.Status = "waiting_decision"
+		_ = e.deps.Store.UpdateTranscodeBatchItem(*item)
+		return false, nil
+
+	case StatusWaitingExternal:
+		if isWorkerBusy {
+			item.Status = "waiting_for_slot"
+		} else {
+			// Normal child waiting_external => running!
+			item.Status = "running"
+		}
+		_ = e.deps.Store.UpdateTranscodeBatchItem(*item)
+		return false, nil
+
+	case StatusRunning, StatusPending:
+		item.Status = "running"
 		_ = e.deps.Store.UpdateTranscodeBatchItem(*item)
 		return false, nil
 
 	default:
-		item.Status = "waiting_for_slot"
+		item.Status = "running"
 		_ = e.deps.Store.UpdateTranscodeBatchItem(*item)
 		return false, nil
 	}
 }
 
 // DefaultMaxBatchOutputItems defines the deterministic bound on per-item summaries returned in batch action outputs.
-const DefaultMaxBatchOutputItems = 25
+const (
+	DefaultMaxBatchOutputItems = 25
+	MaxBatchOutputItems        = 100
+)
 
 func getMaxOutputItems(inputs map[string]any) int {
+	limit := DefaultMaxBatchOutputItems
 	if m := getInt(inputs, "max_output_items"); m > 0 {
-		return m
+		limit = m
+	} else if m := getInt(inputs, "max_items"); m > 0 {
+		limit = m
+	} else if m := getInt(inputs, "limit"); m > 0 {
+		limit = m
 	}
-	if m := getInt(inputs, "max_items"); m > 0 {
-		return m
+	if limit > MaxBatchOutputItems {
+		limit = MaxBatchOutputItems
 	}
-	if m := getInt(inputs, "limit"); m > 0 {
-		return m
+	if limit < 1 {
+		limit = DefaultMaxBatchOutputItems
 	}
-	return DefaultMaxBatchOutputItems
+	return limit
 }
 
 // TranscodeBatchItemSummary provides a bounded, serializable summary of a batch item including diagnostics and job traceability.
@@ -730,6 +1054,12 @@ func buildBatchOutputs(batchID string, items []store.TranscodeBatchItem, seriesT
 	if len(maxLimit) > 0 && maxLimit[0] > 0 {
 		limit = maxLimit[0]
 	}
+	if limit > MaxBatchOutputItems {
+		limit = MaxBatchOutputItems
+	}
+	if limit < 1 {
+		limit = DefaultMaxBatchOutputItems
+	}
 
 	counts := map[string]int{
 		"total":            len(items),
@@ -738,6 +1068,7 @@ func buildBatchOutputs(batchID string, items []store.TranscodeBatchItem, seriesT
 		"skip":             0,
 		"review":           0,
 		"waiting_for_slot": 0,
+		"waiting_decision": 0,
 		"running":          0,
 		"completed":        0,
 		"failed":           0,
@@ -756,6 +1087,8 @@ func buildBatchOutputs(batchID string, items []store.TranscodeBatchItem, seriesT
 			counts["review"]++
 		case "waiting_for_slot":
 			counts["waiting_for_slot"]++
+		case "waiting_decision":
+			counts["waiting_decision"]++
 		case "running":
 			counts["running"]++
 		case "completed":
@@ -803,6 +1136,7 @@ func buildBatchOutputs(batchID string, items []store.TranscodeBatchItem, seriesT
 		"skip":             counts["skip"],
 		"review":           counts["review"],
 		"waiting_for_slot": counts["waiting_for_slot"],
+		"waiting_decision": counts["waiting_decision"],
 		"running":          counts["running"],
 		"completed":        counts["completed"],
 		"failed":           counts["failed"],

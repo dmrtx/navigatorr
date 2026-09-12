@@ -19,7 +19,7 @@ func (e *Engine) registerTranscodeTemplate() {
 	e.RegisterTemplate(ActionTemplate{
 		Name: "transcode_media", Version: 2,
 		Description:    "Coordinates safe candidate-only media transcoding using an immutable recipe-resolved plan, bounded transient retries, worker revalidation, post-transcode stream validation, and original SHA-256 verification.",
-		RequiredInputs: []string{"path"}, OptionalInputs: []string{"profile", "replace_original", "expected_video_codec", "max_size_increase_percent", "media_type", "is_anime", "min_savings_percent"}, Destructive: false,
+		RequiredInputs: []string{"path"}, OptionalInputs: []string{"profile", "replace_original", "expected_video_codec", "max_size_increase_percent", "media_type", "is_anime", "min_savings_percent", "surface_worker_busy"}, Destructive: false,
 		Steps: []StepDefinition{
 			{Name: "preflight", Description: "Inspect source, hash original, resolve profile/recipe and per-stream compatibility plan", Run: e.stepTranscodePreflight},
 			{Name: "submit_transcode", Description: "Submit the immutable structured plan to the remote worker with bounded transient retries", Run: e.stepTranscodeSubmit},
@@ -98,11 +98,15 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	origMap["subtitle_languages"] = subLangs
 
 	profile := strings.TrimSpace(getString(ec.Inputs, "profile"))
-	if profile == "" && e.deps.Config != nil {
-		profile = e.deps.Config.Transcode.DefaultProfile
+	if profile == "" && e.deps.Config != nil && strings.TrimSpace(e.deps.Config.Transcode.DefaultProfile) != "" {
+		profile = strings.TrimSpace(e.deps.Config.Transcode.DefaultProfile)
 	}
 	if profile == "" {
 		profile = "hevc-vt"
+	}
+
+	if getBool(ec.Inputs, "surface_worker_busy") {
+		ec.State["surface_worker_busy"] = true
 	}
 
 	var autoResult *selector.Result

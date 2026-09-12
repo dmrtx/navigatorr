@@ -1518,3 +1518,94 @@ JSON
 		t.Fatalf("expected waiting reason to mention max_size_increase_percent, got %q", res.WaitingReason)
 	}
 }
+
+func TestTranscode_OmittedProfileHonorsConfiguredDefaultProfile(t *testing.T) {
+	mediaDir := t.TempDir()
+	origFile := filepath.Join(mediaDir, "test.mkv")
+	f, err := os.Create(origFile)
+	if err != nil {
+		t.Fatalf("creating test file: %v", err)
+	}
+	_ = f.Truncate(1500000000)
+	_, _ = f.WriteAt([]byte("dummy media bytes"), 0)
+	_ = f.Close()
+
+	h264ProbeJSON := `{
+  "streams": [
+    {"index": 0, "codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080},
+    {"index": 1, "codec_type": "audio", "codec_name": "aac", "tags": {"language": "jpn"}},
+    {"index": 2, "codec_type": "subtitle", "codec_name": "ass", "tags": {"language": "eng"}}
+  ],
+  "format": {
+    "format_name": "matroska",
+    "duration": "1420.0",
+    "size": "1500000000"
+  },
+  "chapters": []
+}`
+	probePath := createFakeFFprobeScript(t, h264ProbeJSON)
+
+	// Case 1: DefaultProfile is "auto", profile input is omitted -> honors "auto" and resolves to "anime-hevc"
+	{
+		var capturedReq transcode.Request
+		mockExecutor := &mockTranscodeExecutor{
+			submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
+				capturedReq = req
+				candPath := req.CandidatePath
+				if candPath == "" {
+					candPath = origFile
+				}
+				_ = os.WriteFile(candPath, []byte("cand"), 0644)
+				return transcode.Job{ID: req.ID}, nil
+			},
+			statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+				return transcode.JobStatus{
+					ID:            jobID,
+					Status:        transcode.StatusCompleted,
+					CandidatePath: origFile,
+				}, nil
+			},
+		}
+
+		engine, _ := setupTranscodeEngine(t, mockExecutor, probePath, []string{mediaDir}, []string{mediaDir}, false)
+		engine.deps.Config.Transcode.DefaultProfile = "auto"
+
+		res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
+			"path":     origFile,
+			"is_anime": true,
+		})
+		if err != nil {
+			t.Fatalf("run failed: %v", err)
+		}
+		if res.Outputs["profile"] != "anime-hevc" {
+			t.Fatalf("expected auto profile resolution to select anime-hevc, got %v (skipped: %v, auto_decision: %v, reasons: %v)", res.Outputs["profile"], res.Outputs["skipped"], res.Outputs["auto_decision"], res.Outputs["auto_reasons"])
+		}
+		_ = capturedReq
+	}
+
+	// Case 2: DefaultProfile is unset (""), profile input omitted -> fallback to legacy "hevc-vt"
+	{
+		mockExecutor := &mockTranscodeExecutor{
+			statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+				return transcode.JobStatus{
+					ID:            jobID,
+					Status:        transcode.StatusCompleted,
+					CandidatePath: origFile,
+				}, nil
+			},
+		}
+
+		engine, _ := setupTranscodeEngine(t, mockExecutor, probePath, []string{mediaDir}, []string{mediaDir}, false)
+		engine.deps.Config.Transcode.DefaultProfile = ""
+
+		res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
+			"path": origFile,
+		})
+		if err != nil {
+			t.Fatalf("run failed: %v", err)
+		}
+		if res.Outputs["profile"] != "hevc-vt" {
+			t.Errorf("expected fallback profile hevc-vt, got %v", res.Outputs["profile"])
+		}
+	}
+}

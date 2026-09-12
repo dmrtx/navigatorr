@@ -17,7 +17,7 @@ type TranscodeBatchItem struct {
 	Decision      string   `json:"decision"`
 	Profile       string   `json:"profile"`
 	Reasons       []string `json:"reasons"`
-	Status        string   `json:"status"` // queued, skip, review, waiting_for_slot, running, completed, failed
+	Status        string   `json:"status"` // queued, skip, review, waiting_for_slot, waiting_decision, running, completed, failed
 	ChildActionID string   `json:"child_action_id"`
 	JobID         string   `json:"job_id"`
 	CandidatePath string   `json:"candidate_path"`

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -955,5 +956,367 @@ func TestTranscodeBatch_JobIDAndActionIDTraceability(t *testing.T) {
 	}
 	if dbItem.JobID != syntheticJobID {
 		t.Errorf("expected db JobID %q, got %q", syntheticJobID, dbItem.JobID)
+	}
+}
+
+// 10. Async state transition: normal child waiting_external transitions item to "running", NOT "waiting_for_slot"
+func TestTranscodeBatch_AsyncStateTransition(t *testing.T) {
+	var jobStatus atomic.Value
+	jobStatus.Store(transcode.StatusRunning)
+
+	mockExecutor := &mockTranscodeExecutor{
+		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
+			writeCandidateOutput(req.CandidatePath)
+			return transcode.Job{ID: req.ID}, nil
+		},
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			st := jobStatus.Load().(string)
+			return transcode.JobStatus{
+				ID:     jobID,
+				Status: st,
+			}, nil
+		},
+	}
+
+	engine, st, _, srv, _ := setupBatchTestEnv(t, mockExecutor, 1)
+	defer srv.Close()
+	defer st.Close()
+
+	ctx := context.Background()
+
+	// Initial run: job starts and is running asynchronously
+	res, err := engine.Run(ctx, "transcode_batch", map[string]any{
+		"service":   "sonarr",
+		"series_id": 10,
+		"season":    1,
+		"dry_run":   false,
+	})
+	if err != nil {
+		t.Fatalf("unexpected run error: %v", err)
+	}
+	if res.Status != StatusWaitingExternal {
+		t.Fatalf("expected batch status %s when job running, got %s", StatusWaitingExternal, res.Status)
+	}
+	if res.WaitingCondition != "transcode_running" {
+		t.Errorf("expected waiting condition transcode_running, got %q", res.WaitingCondition)
+	}
+
+	items, err := st.ListTranscodeBatchItems(res.ID)
+	if err != nil {
+		t.Fatalf("list items: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(items))
+	}
+	if items[0].Status != "running" {
+		t.Errorf("expected item status running for async job, got %q (must NOT be waiting_for_slot)", items[0].Status)
+	}
+	if items[0].Attempts != 0 {
+		t.Errorf("expected attempts 0 while still in flight, got %d", items[0].Attempts)
+	}
+
+	// Remote job finishes
+	jobStatus.Store(transcode.StatusCompleted)
+
+	// Resume batch
+	resumed, err := engine.Resume(ctx, res.ID, "", nil)
+	if err != nil {
+		t.Fatalf("unexpected resume error: %v", err)
+	}
+	if resumed.Status != StatusCompleted {
+		t.Fatalf("expected batch status completed after job finish, got %s (%s)", resumed.Status, resumed.Error)
+	}
+
+	itemsAfter, _ := st.ListTranscodeBatchItems(res.ID)
+	if itemsAfter[0].Status != "completed" {
+		t.Errorf("expected item status completed, got %q", itemsAfter[0].Status)
+	}
+	if itemsAfter[0].Attempts != 1 {
+		t.Errorf("expected item attempts 1 after completion, got %d", itemsAfter[0].Attempts)
+	}
+}
+
+// 11. Concurrency with max_parallel_jobs=2: active running children occupy slots across resumes
+func TestTranscodeBatch_MaxParallel2_SlotOccupancy(t *testing.T) {
+	var job1Status atomic.Value
+	job1Status.Store(transcode.StatusRunning)
+	var job2Status atomic.Value
+	job2Status.Store(transcode.StatusRunning)
+
+	var submits int32
+	var jobMap sync.Map
+	mockExecutor := &mockTranscodeExecutor{
+		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
+			atomic.AddInt32(&submits, 1)
+			jobMap.Store(req.ID, req.SourcePath)
+			writeCandidateOutput(req.CandidatePath)
+			return transcode.Job{ID: req.ID}, nil
+		},
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			val, _ := jobMap.Load(jobID)
+			src, _ := val.(string)
+			if strings.Contains(src, "S01E01") {
+				return transcode.JobStatus{ID: jobID, Status: job1Status.Load().(string)}, nil
+			}
+			return transcode.JobStatus{ID: jobID, Status: job2Status.Load().(string)}, nil
+		},
+	}
+
+	// Setup with maxParallelJobs = 2
+	engine, st, _, srv, _ := setupBatchTestEnv(t, mockExecutor, 2)
+	defer srv.Close()
+	defer st.Close()
+
+	ctx := context.Background()
+
+	// Run series (items 101 [h264], 102 [hevc skip], 103 [h264])
+	// Both items 101 and 103 need transcode. maxParallel=2 allows both to run simultaneously.
+	res, err := engine.Run(ctx, "transcode_batch", map[string]any{
+		"service":   "sonarr",
+		"series_id": 10,
+		"dry_run":   false,
+	})
+	if err != nil {
+		t.Fatalf("unexpected run error: %v", err)
+	}
+	if res.Status != StatusWaitingExternal {
+		t.Fatalf("expected batch status waiting_external with 2 jobs in flight, got %s", res.Status)
+	}
+	if atomic.LoadInt32(&submits) != 2 {
+		t.Fatalf("expected exactly 2 submits to fill the 2 parallel slots, got %d", submits)
+	}
+
+	items, _ := st.ListTranscodeBatchItems(res.ID)
+	runningCount := 0
+	for _, it := range items {
+		if it.Status == "running" {
+			runningCount++
+		}
+	}
+	if runningCount != 2 {
+		t.Errorf("expected exactly 2 items running, got %d", runningCount)
+	}
+
+	// Job 1 completes, Job 2 remains running
+	job1Status.Store(transcode.StatusCompleted)
+
+	resumed1, err := engine.Resume(ctx, res.ID, "", nil)
+	if err != nil {
+		t.Fatalf("unexpected resume1 error: %v", err)
+	}
+	// Batch should still be waiting_external because Job 2 is still running
+	if resumed1.Status != StatusWaitingExternal {
+		t.Fatalf("expected batch to wait while job 2 is running, got %s", resumed1.Status)
+	}
+
+	items1, _ := st.ListTranscodeBatchItems(res.ID)
+	for _, it := range items1 {
+		if it.ItemKey == "epfile-101" && it.Status != "completed" {
+			t.Errorf("expected epfile-101 completed, got %s", it.Status)
+		}
+		if it.ItemKey == "epfile-103" && it.Status != "running" {
+			t.Errorf("expected epfile-103 running, got %s", it.Status)
+		}
+	}
+
+	// Job 2 completes
+	job2Status.Store(transcode.StatusCompleted)
+
+	resumed2, err := engine.Resume(ctx, res.ID, "", nil)
+	if err != nil {
+		t.Fatalf("unexpected resume2 error: %v", err)
+	}
+	if resumed2.Status != StatusCompleted {
+		t.Fatalf("expected batch completed when all jobs done, got %s", resumed2.Status)
+	}
+}
+
+// 12. Waiting decision propagation and decision forwarding via resume
+func TestTranscodeBatch_WaitingDecisionPropagationAndForwarding(t *testing.T) {
+	var candPathCreated string
+	mockExecutor := &mockTranscodeExecutor{
+		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
+			candPathCreated = req.CandidatePath
+			// Write candidate file that is significantly larger than source (source is 1.4 GB = 1400000000 bytes)
+			// Make candidate 2.0 GB so it exceeds max_size_increase_percent (default 0.0)
+			if candPathCreated != "" {
+				_ = os.MkdirAll(filepath.Dir(candPathCreated), 0755)
+				f, _ := os.Create(candPathCreated)
+				_ = f.Truncate(2000000000)
+				_, _ = f.WriteAt([]byte("large-candidate-media-content"), 0)
+				_ = f.Close()
+			}
+			return transcode.Job{ID: req.ID}, nil
+		},
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{
+				ID:            jobID,
+				Status:        transcode.StatusCompleted,
+				CandidatePath: candPathCreated,
+			}, nil
+		},
+	}
+
+	engine, st, _, srv, _ := setupBatchTestEnv(t, mockExecutor, 1)
+	defer srv.Close()
+	defer st.Close()
+
+	ctx := context.Background()
+
+	// Initial run: candidate is larger, max_size_increase_percent is forwarded (default 0.0)
+	// Should enter waiting_decision!
+	res, err := engine.Run(ctx, "transcode_batch", map[string]any{
+		"service":   "sonarr",
+		"series_id": 10,
+		"season":    1,
+		"dry_run":   false,
+	})
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	if res.Status != StatusWaitingDecision {
+		t.Fatalf("expected status %s on size increase, got %s (reason: %s)", StatusWaitingDecision, res.Status, res.WaitingReason)
+	}
+
+	// Verify counts reflect waiting_decision
+	counts, ok := res.Outputs["counts"].(map[string]int)
+	if !ok || counts["waiting_decision"] != 1 {
+		t.Errorf("expected counts.waiting_decision == 1, got %v", counts)
+	}
+
+	items, _ := st.ListTranscodeBatchItems(res.ID)
+	if len(items) != 1 || items[0].Status != "waiting_decision" {
+		t.Fatalf("expected item status waiting_decision, got %s", items[0].Status)
+	}
+
+	// Resume batch with "accept_loss" decision: should forward to child action and complete!
+	resumed, err := engine.Resume(ctx, res.ID, "accept_loss", nil)
+	if err != nil {
+		t.Fatalf("resume failed: %v", err)
+	}
+	if resumed.Status != StatusCompleted {
+		t.Fatalf("expected completed status after forwarding accept_loss, got %s (%s)", resumed.Status, resumed.Error)
+	}
+
+	itemsAfter, _ := st.ListTranscodeBatchItems(res.ID)
+	if itemsAfter[0].Status != "completed" {
+		t.Errorf("expected item status completed after accepting loss, got %s", itemsAfter[0].Status)
+	}
+}
+
+// 13. Safe cancel: does not falsely claim active remote jobs stopped
+func TestTranscodeBatch_SafeCancelDoesNotFalselyClaimRemoteJobsStopped(t *testing.T) {
+	var jobStatus atomic.Value
+	jobStatus.Store(transcode.StatusRunning)
+
+	mockExecutor := &mockTranscodeExecutor{
+		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
+			writeCandidateOutput(req.CandidatePath)
+			return transcode.Job{ID: req.ID}, nil
+		},
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{
+				ID:     jobID,
+				Status: jobStatus.Load().(string),
+			}, nil
+		},
+	}
+
+	// maxParallel = 1 so item 101 runs and item 103 stays queued
+	engine, st, _, srv, _ := setupBatchTestEnv(t, mockExecutor, 1)
+	defer srv.Close()
+	defer st.Close()
+
+	ctx := context.Background()
+
+	res, err := engine.Run(ctx, "transcode_batch", map[string]any{
+		"service":   "sonarr",
+		"series_id": 10,
+		"dry_run":   false,
+	})
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	if res.Status != StatusWaitingExternal {
+		t.Fatalf("expected waiting_external, got %s", res.Status)
+	}
+
+	// Now user requests cancellation
+	cancelledRes, err := engine.Resume(ctx, res.ID, "cancel", nil)
+	if err != nil {
+		t.Fatalf("cancel resume failed: %v", err)
+	}
+
+	// Because item 101 is still running remotely on the worker, the batch must NOT claim completed!
+	// It must wait for active jobs to finish and note that remote jobs are not stopped.
+	if cancelledRes.Status != StatusWaitingExternal {
+		t.Fatalf("expected safe cancel to remain waiting_external while remote job active, got %s", cancelledRes.Status)
+	}
+
+	note, _ := cancelledRes.Outputs["note"].(string)
+	if !strings.Contains(note, "Active remote transcode jobs are not stopped") {
+		t.Errorf("expected note to mention active remote transcode jobs are not stopped, got %q", note)
+	}
+
+	// Verify queued item 103 is cancelled
+	items, _ := st.ListTranscodeBatchItems(res.ID)
+	for _, it := range items {
+		if it.ItemKey == "epfile-103" {
+			if it.Status != "failed" || !strings.Contains(it.Error, "cancelled") {
+				t.Errorf("expected epfile-103 failed due to cancellation, got status=%s err=%s", it.Status, it.Error)
+			}
+		}
+		if it.ItemKey == "epfile-101" {
+			if it.Status != "running" {
+				t.Errorf("expected epfile-101 to remain running on remote worker, got %s", it.Status)
+			}
+		}
+	}
+}
+
+// 14. Output bounding strictly caps at MaxBatchOutputItems (100) and outputs include waiting_decision
+func TestTranscodeBatch_OutputCap100AndWaitingDecision(t *testing.T) {
+	// Build a synthetic list of 120 batch items
+	var items []store.TranscodeBatchItem
+	for i := 0; i < 120; i++ {
+		st := "queued"
+		if i == 0 {
+			st = "waiting_decision"
+		}
+		items = append(items, store.TranscodeBatchItem{
+			BatchID:  "batch-cap-test",
+			ItemKey:  fmt.Sprintf("ep-%03d", i),
+			FilePath: fmt.Sprintf("/media/ep-%03d.mkv", i),
+			Status:   st,
+		})
+	}
+
+	// Requesting max_items = 200 should be capped at MaxBatchOutputItems (100)
+	outputs := buildBatchOutputs("batch-cap-test", items, "Cap Test", false, false, 200)
+
+	totalItems := outputs["total_items"].(int)
+	if totalItems != 120 {
+		t.Errorf("expected total_items == 120, got %d", totalItems)
+	}
+	returnedItems := outputs["returned_items"].(int)
+	if returnedItems != 100 {
+		t.Errorf("expected returned_items strictly capped at 100, got %d", returnedItems)
+	}
+	itemsLimit := outputs["items_limit"].(int)
+	if itemsLimit != 100 {
+		t.Errorf("expected items_limit capped at 100, got %d", itemsLimit)
+	}
+	truncated := outputs["truncated"].(bool)
+	if !truncated {
+		t.Errorf("expected truncated == true")
+	}
+
+	// Verify waiting_decision count in counts map and top-level outputs
+	counts := outputs["counts"].(map[string]int)
+	if counts["waiting_decision"] != 1 {
+		t.Errorf("expected counts.waiting_decision == 1, got %d", counts["waiting_decision"])
+	}
+	if outputs["waiting_decision"] != 1 {
+		t.Errorf("expected top-level waiting_decision == 1, got %v", outputs["waiting_decision"])
 	}
 }
