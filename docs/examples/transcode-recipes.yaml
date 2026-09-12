@@ -20,9 +20,9 @@ containers:
         target_codec: subrip
         reason: matroska_compatibility
 profiles:
-  hevc-vt:
+  general-hevc:
     container: mkv
-    video: {codec: hevc_videotoolbox, quality: 65}
+    video: {codec: hevc_videotoolbox, quality: 70}
     audio: {mode: copy}
     subtitles: {mode: preserve, convert_incompatible: true}
     preserve: {metadata: true, chapters: true, attachments: true}
@@ -35,34 +35,6 @@ profiles:
         - {when: container_subtitle_incompatible, action: apply_container_conversion}
         - {when: worker_busy, action: retry}
         - {when: ssh_transient, action: retry}
-  hevc-vt-balanced:
-    container: mkv
-    video: {codec: hevc_videotoolbox, quality: 65}
-    audio: {mode: copy}
-    subtitles: {mode: preserve, convert_incompatible: true}
-    preserve: {metadata: true, chapters: true, attachments: true}
-    resilience: *default_resilience
-  hevc-vt-quality:
-    container: mkv
-    video: {codec: hevc_videotoolbox, quality: 75}
-    audio: {mode: copy}
-    subtitles: {mode: preserve, convert_incompatible: true}
-    preserve: {metadata: true, chapters: true, attachments: true}
-    resilience: *default_resilience
-  hevc-vt-space:
-    container: mkv
-    video: {codec: hevc_videotoolbox, quality: 55}
-    audio: {mode: copy}
-    subtitles: {mode: preserve, convert_incompatible: true}
-    preserve: {metadata: true, chapters: true, attachments: true}
-    resilience: *default_resilience
-  general-hevc:
-    container: mkv
-    video: {codec: hevc_videotoolbox, quality: 70}
-    audio: {mode: copy}
-    subtitles: {mode: preserve, convert_incompatible: true}
-    preserve: {metadata: true, chapters: true, attachments: true}
-    resilience: *default_resilience
   anime-hevc:
     container: mkv
     video: {codec: hevc_videotoolbox, quality: 80}
@@ -70,4 +42,3 @@ profiles:
     subtitles: {mode: preserve, convert_incompatible: true}
     preserve: {metadata: true, chapters: true, attachments: true}
     resilience: *default_resilience
-

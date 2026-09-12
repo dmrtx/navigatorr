@@ -63,6 +63,30 @@ transcode:
 
 A pinned `revision` may be used instead of `channel`. `main` and `master` are deliberately rejected as pinned revisions so a supposedly immutable deployment cannot silently change underneath a running installation.
 
+## Custom file recipes
+
+To load custom recipes from a local file, configure `source: file`:
+
+```yaml
+transcode:
+  recipes:
+    source: file
+    path: /root/.config/navigatorr/transcode-recipes.yaml
+    cache_dir: /root/.cache/navigatorr/transcode-recipes
+```
+
+When running in Docker, mount the recipe file into the container:
+
+```text
+/home/david/Docker/navigatorr/transcode-recipes.yaml:/root/.config/navigatorr/transcode-recipes.yaml:ro
+```
+
+> [!NOTE]
+> When using `source: file`, ensure your custom bundle includes the profile specified by `transcode.default_profile` (which defaults to `hevc-vt-balanced`), or configure `default_profile` to match one of the profiles in your file (such as `general-hevc` or `auto`).
+
+> [!WARNING]
+> When configuring `source: builtin`, you must not specify `path`, `manifest_url`, or `repository`. Specifying any of these fields with `builtin` will fail configuration validation.
+
 ## Bundle schema
 
 A bundle is strictly decoded. Unknown fields fail validation.
@@ -168,3 +192,137 @@ A safe rollout is:
 3. Move policy to `source: file` or a versioned GitHub/HTTPS source.
 4. For future policy/compatibility changes, publish a new recipe bundle version and call `recipe_update`/`recipe_reload` instead of rebuilding the image.
 5. If a recipe causes trouble, use `recipe_rollback`; fetch/validation failures automatically keep LKG active.
+
+## Batch transcoding (`transcode_batch`)
+
+The `transcode_batch` action coordinates persistent batch transcoding across library series (supporting Sonarr). It resolves media files, inspects media streams, applies deterministic auto-profile selection, limits concurrency to `config.Transcode.MaxParallelJobs`, and tracks execution per item in a dedicated SQLite table (`transcode_batch_items`).
+
+### Action inputs & defaults
+
+| Input | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `service` | string | Yes | — | Media service name (must be `sonarr`). |
+| `series_id` | string/int | Yes | — | Sonarr series ID to transcode. |
+| `season` | int | No | `nil` (all) | Optional season number filter. Omit to transcode the entire series. |
+| `profile` | string | No | `auto` | Recipe profile name or `auto` for deterministic stream-based selection. If omitted in `transcode_media`, honors configured `DefaultProfile` (including `auto`), else falls back to legacy `hevc-vt`. |
+| `replace_original` | bool | No | `false` | Must remain `false`. Setting `true` is rejected fail-closed; original files are never overwritten. |
+| `dry_run` | bool | No | `false` | If `true`, inspects and selects profiles without queuing or running transcode jobs. |
+| `media_type` | string | No | derived | Media type override (e.g. `anime`, `tv`). Defaults to Sonarr metadata classification. |
+| `is_anime` | bool | No | derived | Explicit anime flag. If omitted, detected automatically from Sonarr series metadata (`seriesType` or genres). |
+| `min_savings_percent` | float | No | `config` | Minimum projected file size savings threshold (default from `config.Transcode.MinSavingsPercent`). |
+| `max_size_increase_percent` | float | No | `0.0` | Allowed candidate size increase percentage (default `0.0`). Any candidate exceeding this triggers `waiting_decision`. |
+| `surface_worker_busy` | bool | No | `true` | When `true`, worker capacity saturation surfaces `waiting_for_slot` without failing or burning retry budgets. |
+| `max_items` / `max_output_items` | int | No | `25` | Deterministic bound on returned item summaries in outputs (default 25, capped at max 100). |
+
+> [!IMPORTANT]
+> `idempotency_key` is a **top-level** MCP argument to `action_run`, NOT nested within the `inputs` JSON object.
+> Furthermore, `inputs` must always be supplied as a serialized JSON object string (e.g. `"{\"service\":\"sonarr\",...}"`).
+
+### Action invocation via `action_run`
+
+`transcode_batch` is executed via the `action_run` MCP tool:
+
+#### 1. Season dry-run example
+
+Probes all episode files in Season 1, evaluates each stream against deterministic auto-profile rules, and returns aggregate counts and bounded summaries without running transcodes or mutating files:
+
+```json
+{
+  "action": "transcode_batch",
+  "inputs": "{\"service\":\"sonarr\",\"series_id\":10,\"season\":1,\"profile\":\"auto\",\"dry_run\":true}",
+  "idempotency_key": "batch-sonarr-10-s1"
+}
+```
+
+#### 2. Real candidate-only batch example
+
+Processes Season 2 files, skipping items that are already HEVC or do not meet savings thresholds, and generates standalone `.candidate.<ext>` files for qualifying items with serial concurrency and worker slot management:
+
+```json
+{
+  "action": "transcode_batch",
+  "inputs": "{\"service\":\"sonarr\",\"series_id\":10,\"season\":2,\"profile\":\"auto\",\"dry_run\":false,\"replace_original\":false,\"max_size_increase_percent\":0.0}",
+  "idempotency_key": "batch-sonarr-10-s2"
+}
+```
+
+#### 3. Single-item transcode example (`transcode_media`)
+
+```json
+{
+  "action": "transcode_media",
+  "inputs": "{\"path\":\"/media/tv/Series/S01E01.mkv\",\"profile\":\"auto\"}",
+  "idempotency_key": "transcode-s01e01"
+}
+```
+If `profile` is omitted, the engine honors `config.Transcode.DefaultProfile` (which can be set to `auto` or a specific profile), falling back to `hevc-vt` if unset.
+
+> [!NOTE]
+> `replace_original` defaults to `false` and must remain `false`. Any request specifying `replace_original: true` is rejected fail-closed to guarantee original library files are never touched or overwritten.
+
+### Bounded summaries and truncation metadata
+
+To prevent unbounded JSON responses when batching entire series or large seasons, action outputs provide aggregate counts plus a bounded list of per-item summaries (default 25, capped at max 100):
+
+```json
+{
+  "batch_id": "act-transcode_batch-123456",
+  "series_title": "Kaguya-sama: Love Is War",
+  "is_anime": true,
+  "dry_run": true,
+  "counts": {
+    "total": 24,
+    "queued": 0,
+    "transcode": 18,
+    "skip": 6,
+    "review": 0,
+    "waiting_for_slot": 0,
+    "waiting_decision": 0,
+    "running": 0,
+    "completed": 0,
+    "failed": 0
+  },
+  "total_items": 24,
+  "returned_items": 24,
+  "truncated": false,
+  "items_limit": 25,
+  "items": [
+    {
+      "item_key": "epfile-101",
+      "file_path": "/media/tv/Kaguya S01E01.mkv",
+      "display_label": "Kaguya-sama: Love Is War - S01E01",
+      "episode_info": "S01E01",
+      "decision": "transcode",
+      "profile": "anime-hevc",
+      "reasons": ["video: h264 1080p, anime content, high bitrate (8.5 Mbps)"],
+      "status": "queued",
+      "attempts": 0,
+      "child_action_id": "",
+      "job_id": ""
+    }
+  ]
+}
+```
+
+- **Deterministic bounding**: Returns up to `items_limit` (default: 25, configurable via `max_items` or `max_output_items`, strictly capped at 100).
+- **Truncation metadata**: `total_items`, `returned_items`, `truncated` (`true` when more items exist), and `items_limit`.
+- **Full persistence**: All items are persistently recorded in the SQLite `transcode_batch_items` table regardless of output truncation.
+- **Traceability**: Active items record both the `child_action_id` and the worker `job_id` returned by the transcode executor.
+- **Per-item diagnostics**: Explanatory `reasons`, runtime `error`, and retry `attempts` remain available on each item summary.
+
+### Persistence, recovery, and resume behavior
+
+`transcode_batch` tracks every unique media file in the SQLite `transcode_batch_items` table:
+- **Crash and daemon restart resilience**: If the Navigatorr daemon stops or restarts mid-batch, calling `Resume(ctx, instanceID, "", nil)` re-attaches to the batch. Items are recovered via stable child idempotency lookup (`batch-<batch_id>-<item_key>`) across all statuses, preventing duplicate job submissions.
+- **Concurrency & slot occupancy**: Active in-flight items occupy slots up to `config.Transcode.MaxParallelJobs` across resumes.
+- **Decision forwarding**: When a child item requires user decision (e.g. `max_size_increase_percent` exceeded), the batch surfaces `waiting_decision`. Calling `action_resume` with `decision: "accept_loss"` or `"reject"` automatically forwards the decision to the child action.
+- **Safe cancellation semantics**: Calling `action_resume` with `decision: "cancel"` marks queued and waiting items as cancelled. Active remote transcode jobs already in flight on workers are **not** stopped and remain running on workers. The batch surfaces this explicitly rather than falsely claiming remote jobs were terminated.
+- **Pause/resume semantics**: Passing `paused: true` or resuming with `decision: "pause"` transitions the batch to `waiting_decision`. Resuming with `decision: "resume"` cleanly continues remaining items.
+
+### Concurrency and `worker_busy` behavior
+
+- **Parallelism**: Respects `config.Transcode.MaxParallelJobs` (default: 1). When `max_parallel_jobs: 1`, media files are transcoded serially one after another.
+- **Worker busy handling**: If the remote transcode worker returns `worker_busy` (or reaches max parallel slots), the current item transitions to `waiting_for_slot`. Normal background transcodes remain in `running`.
+- **Retry budget safety**: Encountering `worker_busy` does **not** increment item `attempts` or consume the transient retry budget. The batch transitions to `waiting_external` with `waiting_condition: "worker_busy"` and resumes cleanly once worker capacity becomes available.
+
+

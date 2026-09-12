@@ -1265,3 +1265,347 @@ esac
 		t.Errorf("expected warning about forced subtitle disposition, got: %s", res.WaitingReason)
 	}
 }
+
+func TestTranscode_AutoProfile_OversizedAnime_SelectsAnimeHEVC(t *testing.T) {
+	mediaDir := t.TempDir()
+	origFile := filepath.Join(mediaDir, "Anime.S01E01.mkv")
+	candFile := filepath.Join(mediaDir, ".navigatorr-candidates", "Anime.S01E01.job-test-1.mkv")
+	_ = os.MkdirAll(filepath.Dir(candFile), 0755)
+
+	origContent := bytes.Repeat([]byte("h264 anime media bytes!"), 1_000_000) // ~23 MB
+	candContent := bytes.Repeat([]byte("hevc anime media bytes!"), 500_000)   // ~11.5 MB
+	_ = os.WriteFile(origFile, origContent, 0644)
+	_ = os.WriteFile(candFile, candContent, 0644)
+
+	probeDir := t.TempDir()
+	probePath := filepath.Join(probeDir, "ffprobe")
+
+	probeOriginal := `{
+  "streams": [
+    {"index": 0, "codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080},
+    {"index": 1, "codec_type": "audio", "codec_name": "aac", "tags": {"language": "jpn"}},
+    {"index": 2, "codec_type": "subtitle", "codec_name": "ass", "tags": {"language": "eng"}}
+  ],
+  "format": {
+    "format_name": "matroska",
+    "duration": "10.0",
+    "size": "23000000"
+  },
+  "chapters": []
+}`
+	probeCandidate := `{
+  "streams": [
+    {"index": 0, "codec_type": "video", "codec_name": "hevc", "width": 1920, "height": 1080},
+    {"index": 1, "codec_type": "audio", "codec_name": "aac", "tags": {"language": "jpn"}},
+    {"index": 2, "codec_type": "subtitle", "codec_name": "ass", "tags": {"language": "eng"}}
+  ],
+  "format": {
+    "format_name": "matroska",
+    "duration": "10.0",
+    "size": "11500000"
+  },
+  "chapters": []
+}`
+
+	script := fmt.Sprintf(`#!/bin/sh
+case "$*" in
+  *Anime.S01E01.mkv*) cat << 'JSON'
+%s
+JSON
+  ;;
+  *) cat << 'JSON'
+%s
+JSON
+  ;;
+esac
+`, probeOriginal, probeCandidate)
+	_ = os.WriteFile(probePath, []byte(script), 0755)
+
+	var submittedProfile string
+	mockExecutor := &mockTranscodeExecutor{
+		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
+			submittedProfile = req.Profile
+			return transcode.Job{ID: req.ID}, nil
+		},
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{
+				ID:            jobID,
+				Status:        transcode.StatusCompleted,
+				CandidatePath: candFile,
+			}, nil
+		},
+	}
+
+	engine, _ := setupTranscodeEngine(t, mockExecutor, probePath, []string{mediaDir}, []string{mediaDir}, false)
+
+	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
+		"path":       origFile,
+		"profile":    "auto",
+		"is_anime":   true,
+		"media_type": "episode",
+	})
+	if err != nil {
+		t.Fatalf("unexpected engine error: %v", err)
+	}
+
+	if res.Status != StatusCompleted {
+		t.Fatalf("expected completed status, got %s: %v", res.Status, res.Error)
+	}
+	if submittedProfile != "anime-hevc" {
+		t.Fatalf("expected auto profile to select anime-hevc, got %q", submittedProfile)
+	}
+	if res.Outputs["auto_decision"] != "transcode" {
+		t.Fatalf("expected auto_decision=transcode, got %v", res.Outputs["auto_decision"])
+	}
+}
+
+func TestTranscode_AutoProfile_HEVC_SkipsWithoutSubmitting(t *testing.T) {
+	mediaDir := t.TempDir()
+	origFile := filepath.Join(mediaDir, "AlreadyHEVC.mkv")
+	origContent := bytes.Repeat([]byte("already hevc media"), 1000)
+	_ = os.WriteFile(origFile, origContent, 0644)
+
+	probeDir := t.TempDir()
+	probePath := filepath.Join(probeDir, "ffprobe")
+
+	probeScript := `#!/bin/sh
+cat << 'JSON'
+{
+  "streams": [
+    {"index": 0, "codec_type": "video", "codec_name": "hevc", "width": 1920, "height": 1080, "bits_per_raw_sample": "10"},
+    {"index": 1, "codec_type": "audio", "codec_name": "aac", "tags": {"language": "jpn"}}
+  ],
+  "format": {
+    "format_name": "matroska",
+    "duration": "1440.0",
+    "size": "450000000"
+  },
+  "chapters": []
+}
+JSON
+`
+	_ = os.WriteFile(probePath, []byte(probeScript), 0755)
+
+	mockExecutor := &mockTranscodeExecutor{}
+	engine, _ := setupTranscodeEngine(t, mockExecutor, probePath, []string{mediaDir}, []string{mediaDir}, false)
+
+	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
+		"path":    origFile,
+		"profile": "auto",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if res.Status != StatusCompleted {
+		t.Fatalf("expected completed status, got %s: %v", res.Status, res.Error)
+	}
+	if mockExecutor.submitCalls != 0 {
+		t.Fatalf("expected 0 submit calls on auto skip, got %d", mockExecutor.submitCalls)
+	}
+	if res.Outputs["auto_decision"] != "skip" {
+		t.Fatalf("expected auto_decision=skip, got %v", res.Outputs["auto_decision"])
+	}
+	if res.Outputs["skipped"] != true {
+		t.Fatalf("expected skipped=true, got %v", res.Outputs["skipped"])
+	}
+	if res.Outputs["original_intact"] != true {
+		t.Fatalf("expected original_intact=true, got %v", res.Outputs["original_intact"])
+	}
+}
+
+func TestTranscode_AutoProfile_ExplicitProfileCompatible(t *testing.T) {
+	mediaDir := t.TempDir()
+	origFile := filepath.Join(mediaDir, "Sample.mkv")
+	candFile := filepath.Join(mediaDir, ".navigatorr-candidates", "Sample.job-test-2.mkv")
+	_ = os.MkdirAll(filepath.Dir(candFile), 0755)
+
+	origContent := bytes.Repeat([]byte("test original"), 100)
+	candContent := bytes.Repeat([]byte("test candidate"), 100)
+	_ = os.WriteFile(origFile, origContent, 0644)
+	_ = os.WriteFile(candFile, candContent, 0644)
+
+	probeDir := t.TempDir()
+	probePath := filepath.Join(probeDir, "ffprobe")
+	probeJSON := defaultValidFFprobeJSON
+	script := fmt.Sprintf(`#!/bin/sh
+cat << 'JSON'
+%s
+JSON
+`, probeJSON)
+	_ = os.WriteFile(probePath, []byte(script), 0755)
+
+	var submittedProfile string
+	mockExecutor := &mockTranscodeExecutor{
+		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
+			submittedProfile = req.Profile
+			return transcode.Job{ID: req.ID}, nil
+		},
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{
+				ID:            jobID,
+				Status:        transcode.StatusCompleted,
+				CandidatePath: candFile,
+			}, nil
+		},
+	}
+
+	engine, _ := setupTranscodeEngine(t, mockExecutor, probePath, []string{mediaDir}, []string{mediaDir}, false)
+
+	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
+		"path":    origFile,
+		"profile": "general-hevc",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Status != StatusCompleted {
+		t.Fatalf("expected completed status, got %s: %v", res.Status, res.Error)
+	}
+	if submittedProfile != "general-hevc" {
+		t.Fatalf("expected submitted profile general-hevc, got %s", submittedProfile)
+	}
+	if _, hasAuto := res.Outputs["auto_decision"]; hasAuto {
+		t.Fatalf("explicit profile should not populate auto_decision")
+	}
+}
+
+func TestTranscodeMedia_MaxSizeIncreasePercent(t *testing.T) {
+	mediaDir := t.TempDir()
+	origFile := filepath.Join(mediaDir, "Sample.mkv")
+	candFile := filepath.Join(mediaDir, ".navigatorr-candidates", "Sample.job-size-test.mkv")
+	_ = os.MkdirAll(filepath.Dir(candFile), 0755)
+
+	origContent := bytes.Repeat([]byte("small source content"), 100)                   // 2000 bytes
+	candContent := bytes.Repeat([]byte("much larger inflated candidate content"), 200) // 7600 bytes (~280% increase)
+	_ = os.WriteFile(origFile, origContent, 0644)
+	_ = os.WriteFile(candFile, candContent, 0644)
+
+	probeDir := t.TempDir()
+	probePath := filepath.Join(probeDir, "ffprobe")
+	probeJSON := defaultValidFFprobeJSON
+	script := fmt.Sprintf(`#!/bin/sh
+cat << 'JSON'
+%s
+JSON
+`, probeJSON)
+	_ = os.WriteFile(probePath, []byte(script), 0755)
+
+	mockExecutor := &mockTranscodeExecutor{
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{
+				ID:            jobID,
+				Status:        transcode.StatusCompleted,
+				CandidatePath: candFile,
+			}, nil
+		},
+	}
+
+	engine, _ := setupTranscodeEngine(t, mockExecutor, probePath, []string{mediaDir}, []string{mediaDir}, false)
+
+	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
+		"path":                      origFile,
+		"profile":                   "general-hevc",
+		"max_size_increase_percent": 10.0,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Status != StatusWaitingDecision {
+		t.Fatalf("expected status %s when size increase exceeds threshold, got %s (reason: %s)", StatusWaitingDecision, res.Status, res.WaitingReason)
+	}
+	if !strings.Contains(res.WaitingReason, "max_size_increase_percent") {
+		t.Fatalf("expected waiting reason to mention max_size_increase_percent, got %q", res.WaitingReason)
+	}
+}
+
+func TestTranscode_OmittedProfileHonorsConfiguredDefaultProfile(t *testing.T) {
+	mediaDir := t.TempDir()
+	origFile := filepath.Join(mediaDir, "test.mkv")
+	f, err := os.Create(origFile)
+	if err != nil {
+		t.Fatalf("creating test file: %v", err)
+	}
+	_ = f.Truncate(1500000000)
+	_, _ = f.WriteAt([]byte("dummy media bytes"), 0)
+	_ = f.Close()
+
+	h264ProbeJSON := `{
+  "streams": [
+    {"index": 0, "codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080},
+    {"index": 1, "codec_type": "audio", "codec_name": "aac", "tags": {"language": "jpn"}},
+    {"index": 2, "codec_type": "subtitle", "codec_name": "ass", "tags": {"language": "eng"}}
+  ],
+  "format": {
+    "format_name": "matroska",
+    "duration": "1420.0",
+    "size": "1500000000"
+  },
+  "chapters": []
+}`
+	probePath := createFakeFFprobeScript(t, h264ProbeJSON)
+
+	// Case 1: DefaultProfile is "auto", profile input is omitted -> honors "auto" and resolves to "anime-hevc"
+	{
+		var capturedReq transcode.Request
+		mockExecutor := &mockTranscodeExecutor{
+			submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
+				capturedReq = req
+				candPath := req.CandidatePath
+				if candPath == "" {
+					candPath = origFile
+				}
+				_ = os.WriteFile(candPath, []byte("cand"), 0644)
+				return transcode.Job{ID: req.ID}, nil
+			},
+			statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+				return transcode.JobStatus{
+					ID:            jobID,
+					Status:        transcode.StatusCompleted,
+					CandidatePath: origFile,
+				}, nil
+			},
+		}
+
+		engine, _ := setupTranscodeEngine(t, mockExecutor, probePath, []string{mediaDir}, []string{mediaDir}, false)
+		engine.deps.Config.Transcode.DefaultProfile = "auto"
+
+		res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
+			"path":     origFile,
+			"is_anime": true,
+		})
+		if err != nil {
+			t.Fatalf("run failed: %v", err)
+		}
+		if res.Outputs["profile"] != "anime-hevc" {
+			t.Fatalf("expected auto profile resolution to select anime-hevc, got %v (skipped: %v, auto_decision: %v, reasons: %v)", res.Outputs["profile"], res.Outputs["skipped"], res.Outputs["auto_decision"], res.Outputs["auto_reasons"])
+		}
+		_ = capturedReq
+	}
+
+	// Case 2: DefaultProfile is unset (""), profile input omitted -> fallback to legacy "hevc-vt"
+	{
+		mockExecutor := &mockTranscodeExecutor{
+			statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+				return transcode.JobStatus{
+					ID:            jobID,
+					Status:        transcode.StatusCompleted,
+					CandidatePath: origFile,
+				}, nil
+			},
+		}
+
+		engine, _ := setupTranscodeEngine(t, mockExecutor, probePath, []string{mediaDir}, []string{mediaDir}, false)
+		engine.deps.Config.Transcode.DefaultProfile = ""
+
+		res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
+			"path": origFile,
+		})
+		if err != nil {
+			t.Fatalf("run failed: %v", err)
+		}
+		if res.Outputs["profile"] != "hevc-vt" {
+			t.Errorf("expected fallback profile hevc-vt, got %v", res.Outputs["profile"])
+		}
+	}
+}
