@@ -1,0 +1,58 @@
+schema_version: 1
+bundle_version: "2026.09.1"
+containers:
+  mkv:
+    subtitle_copy:
+      - subrip
+      - srt
+      - ass
+      - ssa
+      - hdmv_pgs_subtitle
+      - pgs
+      - dvd_subtitle
+      - vobsub
+      - dvb_subtitle
+      - dvb_teletext
+      - webvtt
+      - text
+    subtitle_conversions:
+      mov_text:
+        target_codec: subrip
+        reason: matroska_compatibility
+profiles:
+  hevc-vt:
+    container: mkv
+    video: {codec: hevc_videotoolbox, quality: 65}
+    audio: {mode: copy}
+    subtitles: {mode: preserve, convert_incompatible: true}
+    preserve: {metadata: true, chapters: true, attachments: true}
+    resilience: &default_resilience
+      max_attempts: 3
+      transient_retries: 2
+      retry_backoff_seconds: [5, 20]
+      max_fallbacks: 1
+      fallbacks:
+        - {when: container_subtitle_incompatible, action: apply_container_conversion}
+        - {when: worker_busy, action: retry}
+        - {when: ssh_transient, action: retry}
+  hevc-vt-balanced:
+    container: mkv
+    video: {codec: hevc_videotoolbox, quality: 65}
+    audio: {mode: copy}
+    subtitles: {mode: preserve, convert_incompatible: true}
+    preserve: {metadata: true, chapters: true, attachments: true}
+    resilience: *default_resilience
+  hevc-vt-quality:
+    container: mkv
+    video: {codec: hevc_videotoolbox, quality: 75}
+    audio: {mode: copy}
+    subtitles: {mode: preserve, convert_incompatible: true}
+    preserve: {metadata: true, chapters: true, attachments: true}
+    resilience: *default_resilience
+  hevc-vt-space:
+    container: mkv
+    video: {codec: hevc_videotoolbox, quality: 55}
+    audio: {mode: copy}
+    subtitles: {mode: preserve, convert_incompatible: true}
+    preserve: {metadata: true, chapters: true, attachments: true}
+    resilience: *default_resilience

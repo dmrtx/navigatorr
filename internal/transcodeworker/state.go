@@ -12,23 +12,27 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/jakenesler/navigatorr/transcode"
 )
 
 // JobRecord represents the persistent state stored in job.json on the worker.
 type JobRecord struct {
-	ID               string    `json:"id"`
-	Status           string    `json:"status"` // queued, running, completed, failed, cancelled
-	Source           string    `json:"source"`
-	Candidate        string    `json:"candidate"`
-	Profile          string    `json:"profile"`
-	PID              int       `json:"pid"`
-	ProcessStartTime string    `json:"process_start_time,omitempty"`
-	CreatedAt        time.Time `json:"created_at"`
-	StartedAt        time.Time `json:"started_at,omitempty"`
-	FinishedAt       time.Time `json:"finished_at,omitempty"`
-	ExitCode         int       `json:"exit_code,omitempty"`
-	Error            string    `json:"error,omitempty"`
-	DurationSec      float64   `json:"duration_sec,omitempty"`
+	ID               string                       `json:"id"`
+	Status           string                       `json:"status"` // queued, running, completed, failed, cancelled
+	Source           string                       `json:"source"`
+	Candidate        string                       `json:"candidate"`
+	Profile          string                       `json:"profile"`
+	Plan             *transcode.Plan              `json:"plan,omitempty"`
+	Conversions      []transcode.ConversionRecord `json:"conversions,omitempty"`
+	PID              int                          `json:"pid"`
+	ProcessStartTime string                       `json:"process_start_time,omitempty"`
+	CreatedAt        time.Time                    `json:"created_at"`
+	StartedAt        time.Time                    `json:"started_at,omitempty"`
+	FinishedAt       time.Time                    `json:"finished_at,omitempty"`
+	ExitCode         int                          `json:"exit_code,omitempty"`
+	Error            string                       `json:"error,omitempty"`
+	DurationSec      float64                      `json:"duration_sec,omitempty"`
 }
 
 // LoadJob loads a JobRecord from job.json.

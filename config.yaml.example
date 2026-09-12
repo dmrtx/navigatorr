@@ -107,18 +107,53 @@ sabnzbd:
   url_base: "/sabnzbd"          # SABnzbd's own url_base setting (default: /sabnzbd)
 
 # ==============================================================================
-# 5. TRANSCODING (SSH EXECUTOR)
+# 5. TRANSCODING (SSH EXECUTOR + VERSIONED RECIPES)
 # ==============================================================================
 # Remote Apple Silicon (M1/M2/M3/M4) SSH worker executor for hardware-accelerated
 # FFmpeg transcoding using hevc_videotoolbox.
-# Navigatorr acts as the coordinator; the remote node only runs FFmpeg.
-# Disabled by default.
+#
+# IMPORTANT ARCHITECTURE:
+#   - The Navigatorr/worker image contains only the safe execution capabilities.
+#   - Profile/container/subtitle policy lives in a versioned recipe bundle.
+#   - A policy/compatibility fix should update/reload the recipe, NOT rebuild the image.
+#   - Recipes cannot inject raw FFmpeg arguments, shell commands, or arbitrary binaries.
+#
+# Built-in safe recipes are used by default. To externalize policy, change source to
+# "file", "https", or "github". See docs/TRANSCODING.md for the recipe schema.
 transcode:
   enabled: false
   executor: "ssh"
   default_action: "manual_approval"
+  default_profile: "hevc-vt-balanced"
   min_savings_percent: 15.0
   max_parallel_jobs: 1
+
+  recipes:
+    # Zero-config safe default. The embedded bundle currently provides:
+    #   hevc-vt / hevc-vt-balanced = q:v 65
+    #   hevc-vt-quality            = q:v 75
+    #   hevc-vt-space              = q:v 55
+    # For hevc_videotoolbox, a HIGHER q:v value means HIGHER quality.
+    source: "builtin"
+    cache_dir: ""                # Empty => ~/.cache/navigatorr/transcode-recipes
+
+    # Local versioned bundle example (uncomment and set source: "file"):
+    # path: "/config/transcode-recipes.yaml"
+
+    # Generic HTTPS manifest example (uncomment and set source: "https"):
+    # manifest_url: "https://recipes.example.invalid/stable/manifest.json"
+
+    # GitHub example (uncomment and set source: "github"):
+    # repository: "example/transcode-recipes"
+    # channel: "stable"          # stable | beta
+    # revision: ""               # use instead of channel for a pinned tag/SHA-like ref
+    # refresh_interval: "15m"    # optional atomic hot refresh; minimum 1m
+
+  # Optional backwards-compatible local profile overrides may still be declared under
+  # transcode.profiles. They replace a recipe profile as a whole and are validated by
+  # the same capability boundary; they cannot add worker capabilities. Prefer changing
+  # the external versioned recipe for normal policy maintenance.
+
   ssh:
     host: "192.0.2.10"
     port: 22

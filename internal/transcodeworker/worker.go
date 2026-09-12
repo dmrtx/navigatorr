@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jakenesler/navigatorr/transcode"
 	"gopkg.in/yaml.v3"
 )
 
@@ -222,18 +223,20 @@ func (w *Worker) Doctor(ctx context.Context) DoctorResult {
 
 // SubmitRequest defines the JSON input for the submit command.
 type SubmitRequest struct {
-	ID            string `json:"id"`
-	SourcePath    string `json:"source_path"`
-	CandidatePath string `json:"candidate_path"`
-	Profile       string `json:"profile"`
+	ID            string          `json:"id"`
+	SourcePath    string          `json:"source_path"`
+	CandidatePath string          `json:"candidate_path"`
+	Profile       string          `json:"profile"`
+	Plan          *transcode.Plan `json:"plan,omitempty"`
 }
 
 // SubmitResponse defines the JSON output for the submit command.
 type SubmitResponse struct {
-	ID            string `json:"id"`
-	Status        string `json:"status"`
-	CandidatePath string `json:"candidate_path,omitempty"`
-	Error         string `json:"error,omitempty"`
+	ID            string          `json:"id"`
+	Status        string          `json:"status"`
+	CandidatePath string          `json:"candidate_path,omitempty"`
+	Plan          *transcode.Plan `json:"plan,omitempty"`
+	Error         string          `json:"error,omitempty"`
 }
 
 // IsPathWithinAllowedRoots verifies that the given path is strictly inside one of the allowed roots.
@@ -350,12 +353,18 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 		profile = "hevc-vt"
 	}
 
+	plan, err := ResolveWorkerPlan(profile, req.Plan)
+	if err != nil {
+		return SubmitResponse{ID: req.ID, Error: fmt.Sprintf("invalid transcode profile or plan: %v", err)}, err
+	}
+
 	job := &JobRecord{
 		ID:        req.ID,
 		Status:    "queued",
 		Source:    cleanSource,
 		Candidate: cleanCandidate,
 		Profile:   profile,
+		Plan:      plan,
 		CreatedAt: time.Now().UTC(),
 	}
 
@@ -390,6 +399,7 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 		ID:            req.ID,
 		Status:        "queued",
 		CandidatePath: cleanCandidate,
+		Plan:          plan,
 	}, nil
 }
 
@@ -448,17 +458,52 @@ func (w *Worker) InternalRun(ctx context.Context, jobID string) error {
 	job.StartedAt = time.Now().UTC()
 	_ = SaveJobAtomic(jobFile, job)
 
-	// Determine duration with ffprobe
-	dur, _ := ProbeDuration(ctx, w.ffprobePath, job.Source)
+	// Ensure plan is resolved
+	if job.Plan == nil {
+		plan, err := ResolveWorkerPlan(job.Profile, nil)
+		if err != nil {
+			job.Status = "failed"
+			job.FinishedAt = time.Now().UTC()
+			job.ExitCode = 1
+			job.Error = fmt.Sprintf("resolving plan: %v", err)
+			_ = SaveJobAtomic(jobFile, job)
+			return err
+		}
+		job.Plan = plan
+	}
+
+	// Probe source streams and duration with ffprobe
+	streams, dur, probeErr := ProbeSourceStreams(ctx, w.ffprobePath, job.Source)
 	if dur > 0 {
 		job.DurationSec = dur
-		_ = SaveJobAtomic(jobFile, job)
 	}
+	if probeErr != nil {
+		job.Status = "failed"
+		job.FinishedAt = time.Now().UTC()
+		job.ExitCode = 1
+		job.Error = fmt.Sprintf("probing source streams: %v", probeErr)
+		_ = SaveJobAtomic(jobFile, job)
+		return probeErr
+	}
+
+	// Build stream-by-stream execution plan
+	execPlan, planErr := BuildExecutionPlan(job.Plan, streams, job.DurationSec)
+	if planErr != nil {
+		job.Status = "failed"
+		job.FinishedAt = time.Now().UTC()
+		job.ExitCode = 1
+		job.Error = fmt.Sprintf("building execution plan: %v", planErr)
+		_ = SaveJobAtomic(jobFile, job)
+		return planErr
+	}
+
+	job.Conversions = execPlan.Conversions
+	_ = SaveJobAtomic(jobFile, job)
 
 	progressPath := filepath.Join(jobDir, "progress.txt")
 	logPath := filepath.Join(jobDir, "ffmpeg.log")
 
-	ffmpegErr := RunFFmpeg(ctx, w.ffmpegPath, w.cfg.Quality, job, progressPath, logPath)
+	ffmpegErr := RunFFmpeg(ctx, w.ffmpegPath, execPlan, job, progressPath, logPath)
 
 	// Reload in case cancel was called
 	latestJob, loadErr := LoadJob(jobFile)
@@ -483,13 +528,18 @@ func (w *Worker) InternalRun(ctx context.Context, jobID string) error {
 
 // JobStatusResponse is returned by the status subcommand.
 type JobStatusResponse struct {
-	ID            string  `json:"id"`
-	Status        string  `json:"status"`
-	Progress      float64 `json:"progress"`
-	FPS           float64 `json:"fps"`
-	Speed         float64 `json:"speed"`
-	CandidatePath string  `json:"candidate_path"`
-	Error         string  `json:"error,omitempty"`
+	ID            string                       `json:"id"`
+	Status        string                       `json:"status"`
+	Progress      float64                      `json:"progress"`
+	FPS           float64                      `json:"fps"`
+	Speed         float64                      `json:"speed"`
+	CandidatePath string                       `json:"candidate_path"`
+	Error         string                       `json:"error,omitempty"`
+	Profile       string                       `json:"profile,omitempty"`
+	Container     string                       `json:"container,omitempty"`
+	VideoCodec    string                       `json:"video_codec,omitempty"`
+	Quality       int                          `json:"quality,omitempty"`
+	Conversions   []transcode.ConversionRecord `json:"conversions,omitempty"`
 }
 
 // Status reads the current status of a job.
@@ -519,6 +569,14 @@ func (w *Worker) Status(ctx context.Context, jobID string) (JobStatusResponse, e
 		metrics.Progress = 100.0
 	}
 
+	var container, videoCodec string
+	var quality int
+	if job.Plan != nil {
+		container = job.Plan.Container
+		videoCodec = job.Plan.VideoCodec
+		quality = job.Plan.Quality
+	}
+
 	return JobStatusResponse{
 		ID:            job.ID,
 		Status:        job.Status,
@@ -527,6 +585,11 @@ func (w *Worker) Status(ctx context.Context, jobID string) (JobStatusResponse, e
 		Speed:         metrics.Speed,
 		CandidatePath: job.Candidate,
 		Error:         job.Error,
+		Profile:       job.Profile,
+		Container:     container,
+		VideoCodec:    videoCodec,
+		Quality:       quality,
+		Conversions:   job.Conversions,
 	}, nil
 }
 

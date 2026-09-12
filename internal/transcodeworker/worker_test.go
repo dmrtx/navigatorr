@@ -535,3 +535,296 @@ func TestWorker_RecycledPIDSafety(t *testing.T) {
 		t.Errorf("expected cancelled response, got %s", cancelResp.Status)
 	}
 }
+
+// TestWorker_MP4_MovText_To_MKV_E2E tests real transcode of MP4 (H264 + AC3 + mov_text) -> MKV (HEVC + AC3 copy + subrip).
+func TestWorker_MP4_MovText_To_MKV_E2E(t *testing.T) {
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+		t.Skip("skipping local synthetic transcode test: requires darwin arm64")
+	}
+
+	ffmpegPath := "/opt/homebrew/bin/ffmpeg"
+	ffprobePath := "/opt/homebrew/bin/ffprobe"
+	if _, err := os.Stat(ffmpegPath); err != nil {
+		t.Skip("ffmpeg not found at /opt/homebrew/bin/ffmpeg")
+	}
+
+	tempDir := t.TempDir()
+	sourceFile := filepath.Join(tempDir, "sample_movtext.mp4")
+	srtFile := filepath.Join(tempDir, "sub.srt")
+	_ = os.WriteFile(srtFile, []byte("1\n00:00:00,000 --> 00:00:02,000\nHello English subtitle\n"), 0644)
+
+	// Generate MP4 with H264, AC3, and mov_text subtitle
+	genCmd := exec.Command(ffmpegPath, "-y",
+		"-f", "lavfi", "-i", "testsrc=duration=2:size=320x240:rate=24",
+		"-f", "lavfi", "-i", "sine=duration=2:frequency=1000",
+		"-i", srtFile,
+		"-c:v", "libx264",
+		"-c:a", "ac3",
+		"-c:s", "mov_text",
+		"-metadata:s:s:0", "language=eng",
+		sourceFile,
+	)
+	if out, err := genCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to generate synthetic MP4: %v (%s)", err, out)
+	}
+
+	initialSHA, err := fileSHA256(sourceFile)
+	if err != nil {
+		t.Fatalf("failed to hash source: %v", err)
+	}
+
+	candFile := filepath.Join(tempDir, ".navigatorr-candidates", "sample_movtext.job_movtext.mkv")
+	stateDir := filepath.Join(tempDir, "jobs")
+	cfg := &WorkerConfig{
+		FFmpeg:          ffmpegPath,
+		FFprobe:         ffprobePath,
+		StateDir:        stateDir,
+		AllowedRoots:    []string{tempDir},
+		MaxParallelJobs: 1,
+		Quality:         65,
+	}
+
+	cfgFile := filepath.Join(tempDir, "config.yaml")
+	cfgData := fmt.Sprintf("ffmpeg: %s\nffprobe: %s\nstate_dir: %s\nallowed_roots:\n  - %s\nmax_parallel_jobs: 1\nquality: 65\n",
+		ffmpegPath, ffprobePath, stateDir, tempDir)
+	_ = os.WriteFile(cfgFile, []byte(cfgData), 0644)
+
+	binPath := filepath.Join(tempDir, "navigatorr-transcode")
+	buildCmd := exec.Command("go", "build", "-o", binPath, "github.com/jakenesler/navigatorr/cmd/navigatorr-transcode")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build navigatorr-transcode: %v (%s)", err, out)
+	}
+
+	worker := NewWorker(cfg)
+	ctx := context.Background()
+
+	subResp, err := worker.Submit(ctx, SubmitRequest{
+		ID:            "job-movtext-1",
+		SourcePath:    sourceFile,
+		CandidatePath: candFile,
+		Profile:       "hevc-vt",
+	}, binPath, cfgFile)
+	if err != nil {
+		t.Fatalf("submit failed: %v", err)
+	}
+	if subResp.Status != "queued" {
+		t.Errorf("expected queued status, got %s", subResp.Status)
+	}
+
+	// Poll status until complete
+	deadline := time.Now().Add(30 * time.Second)
+	var finalStatus JobStatusResponse
+	for time.Now().Before(deadline) {
+		st, err := worker.Status(ctx, "job-movtext-1")
+		if err == nil {
+			finalStatus = st
+			if st.Status == "completed" || st.Status == "failed" {
+				break
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	if finalStatus.Status != "completed" {
+		t.Fatalf("transcode failed or timed out: %+v", finalStatus)
+	}
+
+	// 1. Verify candidate file exists
+	candFi, err := os.Stat(candFile)
+	if err != nil || candFi.Size() == 0 {
+		t.Fatalf("candidate file missing or empty: %v", err)
+	}
+
+	// 2. Verify conversion recorded in status
+	if len(finalStatus.Conversions) != 1 {
+		t.Fatalf("expected 1 conversion in status, got %d: %+v", len(finalStatus.Conversions), finalStatus.Conversions)
+	}
+	conv := finalStatus.Conversions[0]
+	if conv.FromCodec != "mov_text" || conv.ToCodec != "subrip" {
+		t.Errorf("expected mov_text -> subrip conversion, got %+v", conv)
+	}
+
+	// 3. Verify video codec == hevc
+	vProbe, err := exec.Command(ffprobePath, "-v", "error",
+		"-select_streams", "v:0",
+		"-show_entries", "stream=codec_name",
+		"-of", "default=noprint_wrappers=1:nokey=1",
+		candFile,
+	).Output()
+	if err != nil {
+		t.Fatalf("probing video: %v", err)
+	}
+	if strings.TrimSpace(string(vProbe)) != "hevc" {
+		t.Errorf("expected hevc video, got %q", string(vProbe))
+	}
+
+	// 4. Verify audio codec == ac3 (copied)
+	aProbe, err := exec.Command(ffprobePath, "-v", "error",
+		"-select_streams", "a:0",
+		"-show_entries", "stream=codec_name",
+		"-of", "default=noprint_wrappers=1:nokey=1",
+		candFile,
+	).Output()
+	if err != nil {
+		t.Fatalf("probing audio: %v", err)
+	}
+	if strings.TrimSpace(string(aProbe)) != "ac3" {
+		t.Errorf("expected ac3 audio, got %q", string(aProbe))
+	}
+
+	// 5. Verify subtitle codec == subrip (converted from mov_text for Matroska compatibility)
+	sProbe, err := exec.Command(ffprobePath, "-v", "error",
+		"-select_streams", "s:0",
+		"-show_entries", "stream=codec_name",
+		"-of", "default=noprint_wrappers=1:nokey=1",
+		candFile,
+	).Output()
+	if err != nil {
+		t.Fatalf("probing subtitle: %v", err)
+	}
+	if strings.TrimSpace(string(sProbe)) != "subrip" {
+		t.Errorf("expected subrip subtitle in candidate, got %q", string(sProbe))
+	}
+
+	// 6. Verify original file SHA-256 untouched
+	finalSHA, err := fileSHA256(sourceFile)
+	if err != nil {
+		t.Fatalf("hashing source: %v", err)
+	}
+	if finalSHA != initialSHA {
+		t.Fatalf("INTEGRITY BREACH: original source modified! initial: %s, final: %s", initialSHA, finalSHA)
+	}
+}
+
+// TestWorker_MKV_ASS_Preserved_E2E verifies that MKV with ASS subtitles preserves ASS without converting to SRT.
+func TestWorker_MKV_ASS_Preserved_E2E(t *testing.T) {
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+		t.Skip("skipping local synthetic transcode test: requires darwin arm64")
+	}
+
+	ffmpegPath := "/opt/homebrew/bin/ffmpeg"
+	ffprobePath := "/opt/homebrew/bin/ffprobe"
+	if _, err := os.Stat(ffmpegPath); err != nil {
+		t.Skip("ffmpeg not found at /opt/homebrew/bin/ffmpeg")
+	}
+
+	tempDir := t.TempDir()
+	sourceFile := filepath.Join(tempDir, "sample_ass.mkv")
+	assFile := filepath.Join(tempDir, "sub.ass")
+
+	assContent := `[Script Info]
+ScriptType: v4.00+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,2,2,10,10,10,1
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,Stylized Subtitle Test
+`
+	_ = os.WriteFile(assFile, []byte(assContent), 0644)
+
+	// Generate MKV with H264, AAC, and ASS subtitle
+	genCmd := exec.Command(ffmpegPath, "-y",
+		"-f", "lavfi", "-i", "testsrc=duration=2:size=320x240:rate=24",
+		"-f", "lavfi", "-i", "sine=duration=2:frequency=1000",
+		"-i", assFile,
+		"-c:v", "libx264",
+		"-c:a", "aac",
+		"-c:s", "ass",
+		"-metadata:s:s:0", "language=jpn",
+		sourceFile,
+	)
+	if out, err := genCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to generate synthetic MKV: %v (%s)", err, out)
+	}
+
+	initialSHA, err := fileSHA256(sourceFile)
+	if err != nil {
+		t.Fatalf("failed to hash source: %v", err)
+	}
+
+	candFile := filepath.Join(tempDir, ".navigatorr-candidates", "sample_ass.job_ass.mkv")
+	stateDir := filepath.Join(tempDir, "jobs")
+	cfg := &WorkerConfig{
+		FFmpeg:          ffmpegPath,
+		FFprobe:         ffprobePath,
+		StateDir:        stateDir,
+		AllowedRoots:    []string{tempDir},
+		MaxParallelJobs: 1,
+		Quality:         65,
+	}
+
+	cfgFile := filepath.Join(tempDir, "config.yaml")
+	cfgData := fmt.Sprintf("ffmpeg: %s\nffprobe: %s\nstate_dir: %s\nallowed_roots:\n  - %s\nmax_parallel_jobs: 1\nquality: 65\n",
+		ffmpegPath, ffprobePath, stateDir, tempDir)
+	_ = os.WriteFile(cfgFile, []byte(cfgData), 0644)
+
+	binPath := filepath.Join(tempDir, "navigatorr-transcode")
+	buildCmd := exec.Command("go", "build", "-o", binPath, "github.com/jakenesler/navigatorr/cmd/navigatorr-transcode")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build navigatorr-transcode: %v (%s)", err, out)
+	}
+
+	worker := NewWorker(cfg)
+	ctx := context.Background()
+
+	subResp, err := worker.Submit(ctx, SubmitRequest{
+		ID:            "job-ass-1",
+		SourcePath:    sourceFile,
+		CandidatePath: candFile,
+		Profile:       "hevc-vt",
+	}, binPath, cfgFile)
+	if err != nil {
+		t.Fatalf("submit failed: %v", err)
+	}
+	if subResp.Status != "queued" {
+		t.Errorf("expected queued status, got %s", subResp.Status)
+	}
+
+	// Poll status until complete
+	deadline := time.Now().Add(30 * time.Second)
+	var finalStatus JobStatusResponse
+	for time.Now().Before(deadline) {
+		st, err := worker.Status(ctx, "job-ass-1")
+		if err == nil {
+			finalStatus = st
+			if st.Status == "completed" || st.Status == "failed" {
+				break
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	if finalStatus.Status != "completed" {
+		t.Fatalf("transcode failed or timed out: %+v", finalStatus)
+	}
+
+	// Verify subtitle codec remains ASS (NOT converted to srt/subrip)
+	sProbe, err := exec.Command(ffprobePath, "-v", "error",
+		"-select_streams", "s:0",
+		"-show_entries", "stream=codec_name",
+		"-of", "default=noprint_wrappers=1:nokey=1",
+		candFile,
+	).Output()
+	if err != nil {
+		t.Fatalf("probing subtitle: %v", err)
+	}
+	codec := strings.TrimSpace(string(sProbe))
+	if codec != "ass" {
+		t.Errorf("CRITICAL VIOLATION: ASS subtitle was converted to %q (expected ass preservation!)", codec)
+	}
+
+	// No conversions should have occurred
+	if len(finalStatus.Conversions) != 0 {
+		t.Errorf("expected 0 conversions for ASS subtitle, got: %+v", finalStatus.Conversions)
+	}
+
+	// Verify original file SHA-256 untouched
+	finalSHA, err := fileSHA256(sourceFile)
+	if err != nil {
+		t.Fatalf("hashing source: %v", err)
+	}
+	if finalSHA != initialSHA {
+		t.Fatalf("INTEGRITY BREACH: original source modified! initial: %s, final: %s", initialSHA, finalSHA)
+	}
+}

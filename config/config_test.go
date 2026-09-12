@@ -397,3 +397,263 @@ media:
 		}
 	})
 }
+
+func TestTranscode_Profiles(t *testing.T) {
+	tempDir := t.TempDir()
+
+	writeCfg := func(name, content string) string {
+		p := filepath.Join(tempDir, name)
+		if err := os.WriteFile(p, []byte(content), 0644); err != nil {
+			t.Fatalf("writing %s: %v", name, err)
+		}
+		return p
+	}
+
+	t.Run("legacy hevc-vt profile resolves without profiles configured", func(t *testing.T) {
+		p := writeCfg("transcode_builtin.yaml", `
+transcode:
+  enabled: true
+  executor: "ssh"
+  ssh:
+    host: "192.0.2.10"
+    user: "transcoder"
+    command: "/opt/homebrew/bin/navigatorr-transcode"
+`)
+		cfg, err := Load(p)
+		if err != nil {
+			t.Fatalf("failed to load config: %v", err)
+		}
+
+		plan, err := cfg.Transcode.ResolvePlan("hevc-vt")
+		if err != nil {
+			t.Fatalf("failed to resolve legacy profile hevc-vt: %v", err)
+		}
+		if plan.Container != "mkv" {
+			t.Errorf("expected container mkv, got %s", plan.Container)
+		}
+		if plan.VideoCodec != "hevc_videotoolbox" {
+			t.Errorf("expected video codec hevc_videotoolbox, got %s", plan.VideoCodec)
+		}
+		if plan.Quality != 65 {
+			t.Errorf("expected default quality 65, got %d", plan.Quality)
+		}
+		if plan.AudioMode != "copy" {
+			t.Errorf("expected audio mode copy, got %s", plan.AudioMode)
+		}
+		if plan.SubtitleMode != "preserve" {
+			t.Errorf("expected subtitle mode preserve, got %s", plan.SubtitleMode)
+		}
+		if !plan.ConvertIncompatibleSubtitles {
+			t.Errorf("expected ConvertIncompatibleSubtitles=true")
+		}
+		if !plan.PreserveMetadata || !plan.PreserveChapters || !plan.PreserveAttachments {
+			t.Errorf("expected metadata, chapters, attachments to be preserved")
+		}
+	})
+
+	t.Run("two profiles with different quality generate different plans", func(t *testing.T) {
+		p := writeCfg("transcode_diff_quality.yaml", `
+transcode:
+  enabled: true
+  executor: "ssh"
+  default_profile: "hevc-vt-quality"
+  profiles:
+    hevc-vt-quality:
+      container: mkv
+      video:
+        codec: hevc_videotoolbox
+        quality: 55
+      audio:
+        mode: copy
+      subtitles:
+        mode: preserve
+        convert_incompatible: true
+      preserve:
+        metadata: true
+        chapters: true
+        attachments: true
+    hevc-vt-space:
+      container: mkv
+      video:
+        codec: hevc_videotoolbox
+        quality: 75
+      audio:
+        mode: copy
+      subtitles:
+        mode: preserve
+        convert_incompatible: true
+      preserve:
+        metadata: true
+        chapters: true
+        attachments: true
+  ssh:
+    host: "192.0.2.10"
+    user: "transcoder"
+    command: "/opt/homebrew/bin/navigatorr-transcode"
+`)
+		cfg, err := Load(p)
+		if err != nil {
+			t.Fatalf("failed to load config: %v", err)
+		}
+
+		planQual, err := cfg.Transcode.ResolvePlan("hevc-vt-quality")
+		if err != nil {
+			t.Fatalf("resolving hevc-vt-quality: %v", err)
+		}
+		planSpace, err := cfg.Transcode.ResolvePlan("hevc-vt-space")
+		if err != nil {
+			t.Fatalf("resolving hevc-vt-space: %v", err)
+		}
+
+		if planQual.Quality != 55 {
+			t.Errorf("expected quality 55, got %d", planQual.Quality)
+		}
+		if planSpace.Quality != 75 {
+			t.Errorf("expected quality 75, got %d", planSpace.Quality)
+		}
+		if planQual.Quality == planSpace.Quality {
+			t.Errorf("expected different qualities for different profiles")
+		}
+
+		// Empty string resolves to default_profile (hevc-vt-quality)
+		planDef, err := cfg.Transcode.ResolvePlan("")
+		if err != nil {
+			t.Fatalf("resolving default profile: %v", err)
+		}
+		if planDef.Quality != 55 {
+			t.Errorf("expected default profile quality 55, got %d", planDef.Quality)
+		}
+	})
+
+	t.Run("unknown profile returns error", func(t *testing.T) {
+		tc := TranscodeConfig{}
+		_, err := tc.ResolvePlan("nonexistent-profile")
+		if err == nil {
+			t.Fatal("expected error resolving nonexistent profile, got nil")
+		}
+		if !strings.Contains(err.Error(), "unknown transcode profile") {
+			t.Errorf("expected unknown profile error, got %v", err)
+		}
+	})
+
+	t.Run("invalid profile config rejected at load time", func(t *testing.T) {
+		cases := []struct {
+			name        string
+			yamlSnippet string
+			errSubstr   string
+		}{
+			{
+				name: "disallowed container",
+				yamlSnippet: `
+transcode:
+  profiles:
+    bad-container:
+      container: avi
+      video: {codec: hevc_videotoolbox, quality: 65}
+      audio: {mode: copy}
+      subtitles: {mode: preserve}
+`,
+				errSubstr: "unsupported container",
+			},
+			{
+				name: "disallowed video codec",
+				yamlSnippet: `
+transcode:
+  profiles:
+    bad-codec:
+      container: mkv
+      video: {codec: libx264, quality: 65}
+      audio: {mode: copy}
+      subtitles: {mode: preserve}
+`,
+				errSubstr: "unsupported video codec",
+			},
+			{
+				name: "quality out of range low",
+				yamlSnippet: `
+transcode:
+  profiles:
+    low-qual:
+      container: mkv
+      video: {codec: hevc_videotoolbox, quality: 0}
+      audio: {mode: copy}
+      subtitles: {mode: preserve}
+`,
+				errSubstr: "quality",
+			},
+			{
+				name: "quality out of range high",
+				yamlSnippet: `
+transcode:
+  profiles:
+    high-qual:
+      container: mkv
+      video: {codec: hevc_videotoolbox, quality: 101}
+      audio: {mode: copy}
+      subtitles: {mode: preserve}
+`,
+				errSubstr: "quality",
+			},
+			{
+				name: "disallowed audio mode",
+				yamlSnippet: `
+transcode:
+  profiles:
+    bad-audio:
+      container: mkv
+      video: {codec: hevc_videotoolbox, quality: 65}
+      audio: {mode: transcode}
+      subtitles: {mode: preserve}
+`,
+				errSubstr: "unsupported audio mode",
+			},
+			{
+				name: "disallowed subtitle mode",
+				yamlSnippet: `
+transcode:
+  profiles:
+    bad-subs:
+      container: mkv
+      video: {codec: hevc_videotoolbox, quality: 65}
+      audio: {mode: copy}
+      subtitles: {mode: strip}
+`,
+				errSubstr: "unsupported subtitles mode",
+			},
+			{
+				name: "command injection in profile name",
+				yamlSnippet: `
+transcode:
+  profiles:
+    "hevc; rm -rf /":
+      container: mkv
+      video: {codec: hevc_videotoolbox, quality: 65}
+      audio: {mode: copy}
+      subtitles: {mode: preserve}
+`,
+				errSubstr: "invalid profile name",
+			},
+			{
+				name: "unknown default_profile",
+				yamlSnippet: `
+transcode:
+  default_profile: "unregistered_profile"
+`,
+				errSubstr: "default_profile",
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				p := writeCfg("test_"+tc.name+".yaml", tc.yamlSnippet)
+				_, err := Load(p)
+				if err == nil {
+					t.Fatalf("expected error loading invalid config, got nil")
+				}
+				if !strings.Contains(err.Error(), tc.errSubstr) {
+					t.Errorf("expected error containing %q, got: %v", tc.errSubstr, err)
+				}
+			})
+		}
+	})
+}

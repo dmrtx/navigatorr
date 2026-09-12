@@ -131,16 +131,17 @@ func InspectFile(ctx context.Context, ffprobePath, path string) (Report, error) 
 
 // DetailedStream captures stream metadata needed for high-fidelity transcode verification.
 type DetailedStream struct {
-	Index    int               `json:"index"`
-	Kind     string            `json:"kind"` // video, audio, subtitle, attachment
-	Codec    string            `json:"codec"`
-	Language string            `json:"language,omitempty"`
-	Title    string            `json:"title,omitempty"`
-	Channels int               `json:"channels,omitempty"`
-	Width    int               `json:"width,omitempty"`
-	Height   int               `json:"height,omitempty"`
-	BitDepth int               `json:"bit_depth,omitempty"`
-	Tags     map[string]string `json:"tags,omitempty"`
+	Index       int               `json:"index"`
+	Kind        string            `json:"kind"` // video, audio, subtitle, attachment
+	Codec       string            `json:"codec"`
+	Language    string            `json:"language,omitempty"`
+	Title       string            `json:"title,omitempty"`
+	Channels    int               `json:"channels,omitempty"`
+	Width       int               `json:"width,omitempty"`
+	Height      int               `json:"height,omitempty"`
+	BitDepth    int               `json:"bit_depth,omitempty"`
+	Tags        map[string]string `json:"tags,omitempty"`
+	Disposition map[string]int    `json:"disposition,omitempty"`
 }
 
 // DetailedReport provides full-fidelity inspection including video, audio, subtitles, attachments, and chapters.
@@ -198,6 +199,7 @@ func InspectDetailed(ctx context.Context, ffprobePath, path string) (DetailedRep
 			Channels         int               `json:"channels"`
 			BitsPerRawSample any               `json:"bits_per_raw_sample"`
 			Tags             map[string]string `json:"tags"`
+			Disposition      map[string]int    `json:"disposition"`
 		} `json:"streams"`
 		Format struct {
 			FormatName string `json:"format_name"`
@@ -233,15 +235,16 @@ func InspectDetailed(ctx context.Context, ffprobePath, path string) (DetailedRep
 		}
 
 		ds := DetailedStream{
-			Index:    st.Index,
-			Kind:     st.CodecType,
-			Codec:    strings.ToLower(st.CodecName),
-			Language: lang,
-			Title:    title,
-			Channels: st.Channels,
-			Width:    st.Width,
-			Height:   st.Height,
-			Tags:     st.Tags,
+			Index:       st.Index,
+			Kind:        st.CodecType,
+			Codec:       strings.ToLower(st.CodecName),
+			Language:    lang,
+			Title:       title,
+			Channels:    st.Channels,
+			Width:       st.Width,
+			Height:      st.Height,
+			Tags:        st.Tags,
+			Disposition: st.Disposition,
 		}
 
 		switch st.CodecType {

@@ -1035,3 +1035,233 @@ func TestTranscode_CandidateOutputReported(t *testing.T) {
 		t.Errorf("original file was modified on disk!")
 	}
 }
+
+func TestTranscode_UnknownProfileRejectedBeforeSubmit(t *testing.T) {
+	mediaDir := t.TempDir()
+	origFile := filepath.Join(mediaDir, "test.mp4")
+	_ = os.WriteFile(origFile, []byte("fake mp4 media"), 0644)
+
+	probeScript := createFakeFFprobeScript(t, defaultValidFFprobeJSON)
+
+	mockExecutor := &mockTranscodeExecutor{
+		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
+			t.Fatal("Submit was called for an unknown profile, but it should have been rejected during preflight!")
+			return transcode.Job{}, nil
+		},
+	}
+
+	engine, _ := setupTranscodeEngine(t, mockExecutor, probeScript, []string{mediaDir}, []string{mediaDir}, false)
+
+	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
+		"path":    origFile,
+		"profile": "totally-unknown-profile",
+	})
+	if err != nil {
+		t.Fatalf("unexpected engine error: %v", err)
+	}
+
+	if res.Status != StatusFailed {
+		t.Fatalf("expected action to fail with unknown profile, got status %s", res.Status)
+	}
+	if !strings.Contains(res.Error, "unknown transcode profile") {
+		t.Errorf("expected error about unknown transcode profile, got: %s", res.Error)
+	}
+	if mockExecutor.submitCalls != 0 {
+		t.Errorf("expected 0 submit calls, got %d", mockExecutor.submitCalls)
+	}
+}
+
+func TestTranscode_CandidateExtensionDerivedFromContainer(t *testing.T) {
+	mediaDir := t.TempDir()
+	origFile := filepath.Join(mediaDir, "movie.mp4")
+	_ = os.WriteFile(origFile, []byte("fake movie"), 0644)
+
+	probeScript := createFakeFFprobeScript(t, defaultValidFFprobeJSON)
+
+	var submittedCandidatePath string
+	mockExecutor := &mockTranscodeExecutor{
+		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
+			submittedCandidatePath = req.CandidatePath
+			return transcode.Job{ID: req.ID}, nil
+		},
+	}
+
+	engine, _ := setupTranscodeEngine(t, mockExecutor, probeScript, []string{mediaDir}, []string{mediaDir}, false)
+
+	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
+		"path":    origFile,
+		"profile": "hevc-vt",
+	})
+	if err != nil {
+		t.Fatalf("unexpected engine error: %v", err)
+	}
+
+	// For MKV container, extension must be .mkv
+	if !strings.HasSuffix(submittedCandidatePath, ".mkv") {
+		t.Errorf("expected candidate path to end in .mkv, got: %s", submittedCandidatePath)
+	}
+	_ = res
+}
+
+func TestTranscode_MovTextToSubripConversionAccepted(t *testing.T) {
+	mediaDir := t.TempDir()
+	origFile := filepath.Join(mediaDir, "source_movtext.mp4")
+	_ = os.WriteFile(origFile, []byte("fake mp4 with mov_text"), 0644)
+
+	candFile := filepath.Join(mediaDir, "candidate_subrip.mkv")
+	_ = os.WriteFile(candFile, []byte("fake mkv with subrip"), 0644)
+
+	// Probe for original has mov_text
+	probeOriginal := `{
+  "streams": [
+    {"index": 0, "codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080},
+    {"index": 1, "codec_type": "audio", "codec_name": "ac3", "tags": {"language": "eng"}},
+    {"index": 2, "codec_type": "subtitle", "codec_name": "mov_text", "tags": {"language": "eng"}}
+  ],
+  "format": {"format_name": "mov,mp4", "duration": "3600.0", "size": "1000000"},
+  "chapters": []
+}`
+
+	// Probe for candidate has subrip
+	probeCandidate := `{
+  "streams": [
+    {"index": 0, "codec_type": "video", "codec_name": "hevc", "width": 1920, "height": 1080},
+    {"index": 1, "codec_type": "audio", "codec_name": "ac3", "tags": {"language": "eng"}},
+    {"index": 2, "codec_type": "subtitle", "codec_name": "subrip", "tags": {"language": "eng"}}
+  ],
+  "format": {"format_name": "matroska", "duration": "3600.0", "size": "600000"},
+  "chapters": []
+}`
+
+	probeDir := t.TempDir()
+	probePath := filepath.Join(probeDir, "ffprobe")
+	script := fmt.Sprintf(`#!/bin/sh
+case "$*" in
+  *source_movtext*) cat << 'JSON'
+%s
+JSON
+  ;;
+  *) cat << 'JSON'
+%s
+JSON
+  ;;
+esac
+`, probeOriginal, probeCandidate)
+	if err := os.WriteFile(probePath, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write probe: %v", err)
+	}
+
+	mockExecutor := &mockTranscodeExecutor{
+		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
+			return transcode.Job{ID: req.ID}, nil
+		},
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{
+				ID:            jobID,
+				Status:        transcode.StatusCompleted,
+				CandidatePath: candFile,
+				Conversions: []transcode.ConversionRecord{
+					{
+						StreamType:  "subtitle",
+						StreamIndex: 0,
+						FromCodec:   "mov_text",
+						ToCodec:     "subrip",
+						Reason:      "matroska_compatibility",
+					},
+				},
+			}, nil
+		},
+	}
+
+	engine, _ := setupTranscodeEngine(t, mockExecutor, probePath, []string{mediaDir}, []string{mediaDir}, false)
+
+	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
+		"path":    origFile,
+		"profile": "hevc-vt",
+	})
+	if err != nil {
+		t.Fatalf("unexpected engine error: %v", err)
+	}
+
+	// Must complete successfully without entering waiting_decision for subtitle loss!
+	if res.Status != StatusCompleted {
+		t.Fatalf("expected transcode to complete successfully, got status %s (reason: %s, error: %s)", res.Status, res.WaitingReason, res.Error)
+	}
+
+	// Verify conversions are included in outputs
+	if res.Outputs["conversions"] == nil {
+		t.Errorf("expected conversions in outputs, got nil")
+	}
+}
+
+func TestTranscode_ForcedDispositionPreservation(t *testing.T) {
+	mediaDir := t.TempDir()
+	origFile := filepath.Join(mediaDir, "source_forced.mkv")
+	_ = os.WriteFile(origFile, []byte("fake mkv with forced sub"), 0644)
+
+	candFile := filepath.Join(mediaDir, "candidate_unforced.mkv")
+	_ = os.WriteFile(candFile, []byte("fake mkv without forced sub"), 0644)
+
+	// Original has forced: 1
+	probeOriginal := `{
+  "streams": [
+    {"index": 0, "codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080},
+    {"index": 1, "codec_type": "subtitle", "codec_name": "subrip", "tags": {"language": "eng"}, "disposition": {"forced": 1, "default": 0}}
+  ],
+  "format": {"format_name": "matroska", "duration": "100.0", "size": "1000"},
+  "chapters": []
+}`
+
+	// Candidate lost forced disposition: forced: 0
+	probeCandidate := `{
+  "streams": [
+    {"index": 0, "codec_type": "video", "codec_name": "hevc", "width": 1920, "height": 1080},
+    {"index": 1, "codec_type": "subtitle", "codec_name": "subrip", "tags": {"language": "eng"}, "disposition": {"forced": 0, "default": 0}}
+  ],
+  "format": {"format_name": "matroska", "duration": "100.0", "size": "600"},
+  "chapters": []
+}`
+
+	probeDir := t.TempDir()
+	probePath := filepath.Join(probeDir, "ffprobe")
+	script := fmt.Sprintf(`#!/bin/sh
+case "$*" in
+  *source_forced*) cat << 'JSON'
+%s
+JSON
+  ;;
+  *) cat << 'JSON'
+%s
+JSON
+  ;;
+esac
+`, probeOriginal, probeCandidate)
+	_ = os.WriteFile(probePath, []byte(script), 0755)
+
+	mockExecutor := &mockTranscodeExecutor{
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{
+				ID:            jobID,
+				Status:        transcode.StatusCompleted,
+				CandidatePath: candFile,
+			}, nil
+		},
+	}
+
+	engine, _ := setupTranscodeEngine(t, mockExecutor, probePath, []string{mediaDir}, []string{mediaDir}, false)
+
+	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
+		"path": origFile,
+	})
+	if err != nil {
+		t.Fatalf("unexpected engine error: %v", err)
+	}
+
+	// Must detect lost forced disposition and enter waiting_decision
+	if res.Status != StatusWaitingDecision {
+		t.Fatalf("expected waiting_decision when forced subtitle disposition is lost, got %s", res.Status)
+	}
+	if !strings.Contains(res.WaitingReason, "Forced subtitle disposition lost") {
+		t.Errorf("expected warning about forced subtitle disposition, got: %s", res.WaitingReason)
+	}
+}
