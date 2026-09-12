@@ -216,6 +216,9 @@ func (e *SSHExecutor) Submit(ctx context.Context, req Request) (Job, error) {
 		"candidate_path": remoteCandidate,
 		"profile":        profile,
 	}
+	if req.Plan != nil {
+		payload["plan"] = req.Plan
+	}
 	inputData, err := json.Marshal(payload)
 	if err != nil {
 		return Job{}, fmt.Errorf("serializing submit payload: %w", err)
