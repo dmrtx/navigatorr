@@ -31,9 +31,15 @@ type Config struct {
 	Media             MediaConfig              `yaml:"media"`
 	Maintenance       MaintenanceConfig        `yaml:"maintenance"`
 	Concurrency       ConcurrencyConfig        `yaml:"concurrency"`
+	MCP               MCPConfig                `yaml:"mcp"`
 	MaxResponseSizeKB int                      `yaml:"max_response_size_kb"`
 	AllowDestructive  bool                     `yaml:"allow_destructive"`
 	LoadedPath        string                   `yaml:"-"`
+}
+
+type MCPConfig struct {
+	Transport string `yaml:"transport"`
+	Listen    string `yaml:"listen"`
 }
 
 type ConcurrencyConfig struct {
@@ -408,9 +414,53 @@ func DefaultDatabasePath() string {
 
 var notFoundFieldRegex = regexp.MustCompile(`field\s+([a-zA-Z0-9_-]+)\s+not\s+found\s+in\s+type\s+([a-zA-Z0-9_.]+)`)
 var structTypeToSection = map[string]string{
-	"config.MediaConfig": "media", "MediaConfig": "media", "config.MaintenanceConfig": "maintenance", "MaintenanceConfig": "maintenance", "config.ConcurrencyConfig": "concurrency", "ConcurrencyConfig": "concurrency", "config.DatabaseConfig": "database", "DatabaseConfig": "database", "config.QueueConfig": "queue", "QueueConfig": "queue", "config.TransmissionConfig": "transmission", "TransmissionConfig": "transmission", "config.QBittorrentConfig": "qbittorrent", "QBittorrentConfig": "qbittorrent", "config.SABnzbdConfig": "sabnzbd", "SABnzbdConfig": "sabnzbd", "config.TranscodeConfig": "transcode", "TranscodeConfig": "transcode", "config.TranscodeRecipeConfig": "transcode.recipes", "TranscodeRecipeConfig": "transcode.recipes", "config.SSHExecutorConfig": "transcode", "SSHExecutorConfig": "transcode", "config.TranscodePathMapping": "transcode", "TranscodePathMapping": "transcode", "config.TranscodeProfileConfig": "transcode.profiles", "TranscodeProfileConfig": "transcode.profiles", "config.VideoProfileConfig": "transcode.profiles.video", "VideoProfileConfig": "transcode.profiles.video", "config.AudioProfileConfig": "transcode.profiles.audio", "AudioProfileConfig": "transcode.profiles.audio", "config.SubtitleProfileConfig": "transcode.profiles.subtitles", "SubtitleProfileConfig": "transcode.profiles.subtitles", "config.PreserveProfileConfig": "transcode.profiles.preserve", "PreserveProfileConfig": "transcode.profiles.preserve", "config.ResilienceProfileConfig": "transcode.profiles.resilience", "ResilienceProfileConfig": "transcode.profiles.resilience", "config.ServiceConfig": "services", "ServiceConfig": "services",
+	"config.MediaConfig": "media", "MediaConfig": "media", "config.MaintenanceConfig": "maintenance", "MaintenanceConfig": "maintenance", "config.ConcurrencyConfig": "concurrency", "ConcurrencyConfig": "concurrency", "config.MCPConfig": "mcp", "MCPConfig": "mcp", "config.DatabaseConfig": "database", "DatabaseConfig": "database", "config.QueueConfig": "queue", "QueueConfig": "queue", "config.TransmissionConfig": "transmission", "TransmissionConfig": "transmission", "config.QBittorrentConfig": "qbittorrent", "QBittorrentConfig": "qbittorrent", "config.SABnzbdConfig": "sabnzbd", "SABnzbdConfig": "sabnzbd", "config.TranscodeConfig": "transcode", "TranscodeConfig": "transcode", "config.TranscodeRecipeConfig": "transcode.recipes", "TranscodeRecipeConfig": "transcode.recipes", "config.SSHExecutorConfig": "transcode", "SSHExecutorConfig": "transcode", "config.TranscodePathMapping": "transcode", "TranscodePathMapping": "transcode", "config.TranscodeProfileConfig": "transcode.profiles", "TranscodeProfileConfig": "transcode.profiles", "config.VideoProfileConfig": "transcode.profiles.video", "VideoProfileConfig": "transcode.profiles.video", "config.AudioProfileConfig": "transcode.profiles.audio", "AudioProfileConfig": "transcode.profiles.audio", "config.SubtitleProfileConfig": "transcode.profiles.subtitles", "SubtitleProfileConfig": "transcode.profiles.subtitles", "config.PreserveProfileConfig": "transcode.profiles.preserve", "PreserveProfileConfig": "transcode.profiles.preserve", "config.ResilienceProfileConfig": "transcode.profiles.resilience", "ResilienceProfileConfig": "transcode.profiles.resilience", "config.ServiceConfig": "services", "ServiceConfig": "services",
 }
-var topLevelKeys = map[string]bool{"services": true, "transmission": true, "qbittorrent": true, "sabnzbd": true, "transcode": true, "queue": true, "database": true, "media": true, "maintenance": true, "concurrency": true, "max_response_size_kb": true, "allow_destructive": true}
+var topLevelKeys = map[string]bool{"services": true, "transmission": true, "qbittorrent": true, "sabnzbd": true, "transcode": true, "queue": true, "database": true, "media": true, "maintenance": true, "concurrency": true, "mcp": true, "max_response_size_kb": true, "allow_destructive": true}
+
+type TransportOptions struct {
+	Transport string // "stdio" or "streamable-http"
+	Listen    string // e.g. "127.0.0.1:8098"
+}
+
+// ResolveTransport resolves MCP transport options from CLI flags and configuration.
+// Precedence: CLI flag > Config value > Defaults.
+// Defaults: Transport="stdio", Listen="127.0.0.1:8098".
+func ResolveTransport(cfg *Config, flagTransport, flagListen string) (TransportOptions, error) {
+	opts := TransportOptions{
+		Transport: "stdio",
+		Listen:    "127.0.0.1:8098",
+	}
+	if cfg != nil {
+		if t := strings.TrimSpace(cfg.MCP.Transport); t != "" {
+			opts.Transport = strings.ToLower(t)
+		}
+		if l := strings.TrimSpace(cfg.MCP.Listen); l != "" {
+			opts.Listen = l
+		}
+	}
+	if t := strings.TrimSpace(flagTransport); t != "" {
+		opts.Transport = strings.ToLower(t)
+	}
+	if l := strings.TrimSpace(flagListen); l != "" {
+		opts.Listen = l
+	}
+
+	switch opts.Transport {
+	case "stdio", "streamable-http":
+		// valid
+	default:
+		return opts, fmt.Errorf("invalid transport %q: must be \"stdio\" or \"streamable-http\"", opts.Transport)
+	}
+
+	if opts.Transport == "streamable-http" {
+		if opts.Listen == "" {
+			opts.Listen = "127.0.0.1:8098"
+		}
+	}
+
+	return opts, nil
+}
 
 func formatConfigError(path string, err error) error {
 	errMsg := err.Error()

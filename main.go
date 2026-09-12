@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/jakenesler/navigatorr/arrservice"
@@ -25,10 +27,18 @@ import (
 
 func main() {
 	configPath := flag.String("config", "", "path to config.yaml (default: ~/.config/navigatorr/config.yaml)")
+	transportFlag := flag.String("transport", "", "MCP transport mode: stdio or streamable-http (default: from config, or stdio)")
+	listenFlag := flag.String("listen", "", "MCP listen address for streamable-http (default: from config, or 127.0.0.1:8098)")
 	flag.Parse()
 
 	// Load config
 	cfg, err := config.Load(*configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	transportOpts, err := config.ResolveTransport(cfg, *transportFlag, *listenFlag)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -140,6 +150,7 @@ func main() {
 	internal.Logf("maintenance database at %s", dbPath)
 
 	// Serve the HTTP ingest endpoint alongside stdio when configured.
+	var qHttpSrv *http.Server
 	if cfg.Queue.Listen != "" {
 		// Refuse to listen without a token rather than serving openly. Anything
 		// posted here is later read and acted on by an agent holding write
@@ -149,7 +160,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
-		srv := &http.Server{
+		qHttpSrv = &http.Server{
 			Addr:              cfg.Queue.Listen,
 			Handler:           qSrv.Handler(),
 			ReadHeaderTimeout: 5 * time.Second,
@@ -166,7 +177,7 @@ func main() {
 		}
 		internal.Logf("queue HTTP endpoint listening on %s", ln.Addr())
 		go func() {
-			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			if err := qHttpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
 				internal.Errorf("queue HTTP server stopped: %v", err)
 			}
 		}()
@@ -185,11 +196,58 @@ func main() {
 	tools.RegisterMaintenance(s, cfg, registry, qbClient, mStore, transcodeExecutor)
 	tools.RegisterDiagnostics(s, cfg, registry, specStore, txClient, qbClient, sabClient, mStore, transcodeExecutor)
 
-	internal.Logf("starting navigatorr MCP server (stdio)")
+	if transportOpts.Transport == "streamable-http" {
+		endpointPath := "/mcp"
+		srv := &http.Server{
+			Addr:              transportOpts.Listen,
+			ReadHeaderTimeout: 10 * time.Second,
+			IdleTimeout:       60 * time.Second,
+		}
+		mcpHTTP := server.NewStreamableHTTPServer(s,
+			server.WithEndpointPath(endpointPath),
+			server.WithStreamableHTTPServer(srv),
+		)
+		mux := http.NewServeMux()
+		mux.Handle(endpointPath, mcpHTTP)
+		mux.Handle(endpointPath+"/", mcpHTTP)
+		srv.Handler = mux
 
-	// Serve over stdio
-	if err := server.ServeStdio(s); err != nil {
-		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
-		os.Exit(1)
+		ln, err := net.Listen("tcp", transportOpts.Listen)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: streamable-http endpoint cannot bind %s: %v\n", transportOpts.Listen, err)
+			os.Exit(1)
+		}
+		internal.Logf("starting navigatorr MCP server (streamable-http) listening on %s (endpoint: %s)", ln.Addr(), endpointPath)
+
+		host, _, splitErr := net.SplitHostPort(transportOpts.Listen)
+		if splitErr == nil && (host == "0.0.0.0" || host == "") {
+			internal.Warnf("MCP streamable-http listening on %s (all interfaces); ensure host firewall or reverse proxy restricts access when network_mode: host is used", ln.Addr())
+		}
+
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+		go func() {
+			sig := <-sigCh
+			internal.Logf("received signal %v, gracefully shutting down MCP HTTP server...", sig)
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if qHttpSrv != nil {
+				_ = qHttpSrv.Shutdown(shutdownCtx)
+			}
+			_ = mcpHTTP.Shutdown(shutdownCtx)
+			_ = srv.Shutdown(shutdownCtx)
+		}()
+
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			fmt.Fprintf(os.Stderr, "server error: %v\n", err)
+			os.Exit(1)
+		}
+		internal.Logf("streamable-http MCP server stopped cleanly")
+	} else {
+		internal.Logf("starting navigatorr MCP server (stdio)")
+		if err := server.ServeStdio(s); err != nil {
+			fmt.Fprintf(os.Stderr, "server error: %v\n", err)
+			os.Exit(1)
+		}
 	}
 }

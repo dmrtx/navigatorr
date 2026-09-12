@@ -8,11 +8,20 @@ ghcr.io/dmrtx/navigatorr:latest
 
 The GitHub Actions workflow publishes `linux/amd64` images on every push to `main`, on `v*` tags, and when run manually. It also publishes a `sha-*` tag for each build.
 
-## Important: Navigatorr uses MCP stdio
+## MCP Transports: Streamable HTTP vs Stdio
 
-Navigatorr is an MCP stdio server, not a long-running HTTP MCP server. The intended deployment is for the MCP host (for example `tunnel-client`) to start the Docker container as its MCP command and keep stdin/stdout attached.
+Navigatorr supports two distinct MCP transports:
 
-Do not run it as a normal detached Portainer service unless you are intentionally using only the optional request queue endpoint. Without an MCP client attached to stdio, the main MCP transport is not usable.
+1. **Persistent Streamable HTTP (`streamable-http`, recommended for Portainer):**
+   Navigatorr runs as a persistent, long-running daemon listening on HTTP (default port `8098`, endpoint `/mcp`). MCP clients (such as remote agents or local MCP hosts configured with HTTP/SSE endpoints) connect over HTTP.
+   
+   **Why Persistent HTTP is recommended for Portainer:**
+   - **Survives restarts and updates seamlessly:** In stdio mode, long-lived sessions depend on an uninterrupted stdin/stdout pipe. If Portainer updates the container or restarts the service, the pipe breaks and wedges or crashes the client session. With Streamable HTTP, the container restarts cleanly under `restart: unless-stopped` and MCP clients automatically reconnect using standard HTTP/SSE reconnection without session corruption.
+   - **Independent lifecycle:** The MCP daemon lifecycle is decoupled from individual client sessions. Multiple agents can connect to the same persistent instance without conflicting on SQLite database locks.
+   - **Clean container monitoring:** Portainer's health checks, log aggregation, and stack management operate normally on a persistent container without pseudo-TTY or stdin detachment problems.
+
+2. **On-Demand Stdio (`stdio`, default for backward compatibility):**
+   Navigatorr communicates via standard input/output (JSON-RPC over stdin/stdout). The MCP host spawns the container per session and keeps `stdin` and `stdout` attached. Best for local development or one-off CLI tools.
 
 ## Configuration
 
@@ -23,6 +32,25 @@ mkdir -p /home/example/.config/navigatorr
 cp config.yaml.example /home/example/.config/navigatorr/config.yaml
 chmod 600 /home/example/.config/navigatorr/config.yaml
 ```
+
+To configure Streamable HTTP in `config.yaml`:
+
+```yaml
+mcp:
+  transport: "streamable-http"   # or "stdio"
+  listen: "127.0.0.1:8098"       # endpoint will be /mcp (default 127.0.0.1:8098)
+```
+
+Or pass CLI flags to the container:
+```bash
+-transport=streamable-http -listen=127.0.0.1:8098
+```
+
+> [!WARNING]
+> **Network Security with `network_mode: host`:**
+> When using `network_mode: host` on Linux, binding `-listen=0.0.0.0:8098` opens Navigatorr's unauthenticated MCP endpoints to all host network interfaces (and the public internet if port 8098 is open on your firewall).
+> - **Recommended:** Bind `127.0.0.1:8098` if your MCP host or tunnel client (e.g. Cloudflare Tunnel, Tailscale, SSH tunnel) resides on the same machine.
+> - If accessing across your local LAN, put Navigatorr behind an authenticating reverse proxy (Nginx, Caddy, Traefik) with TLS, or enforce firewall rules restricting port 8098 access to trusted IP ranges.
 
 For qBittorrent, include:
 
@@ -37,27 +65,40 @@ When `--network host` is used on Linux, `localhost` inside Navigatorr refers to 
 
 ## Deployment & Execution Modes
 
-Navigatorr supports two distinct operational models depending on your infrastructure topology:
+### Mode A: Persistent Background Service via Streamable HTTP (Portainer / Docker Compose)
 
-### Mode A: Updating a Persistent Background Service (Compose / Portainer)
+This is the recommended mode for 24/7 server deployments.
 
-If you run Navigatorr as a continuous service (for example, to serve the HTTP request queue ingest endpoint on `:8099` or managed as a long-running container in Portainer):
+1. **In `compose.yaml`:**
+   ```yaml
+   services:
+     navigatorr:
+       image: ghcr.io/dmrtx/navigatorr:latest
+       pull_policy: always
+       network_mode: host
+       restart: unless-stopped
+       command: ["-transport=streamable-http", "-listen=127.0.0.1:8098"]
+       volumes:
+         - /home/example/.config/navigatorr/config.yaml:/root/.config/navigatorr/config.yaml:ro
+         - navigatorr-cache:/root/.cache/navigatorr
+   ```
+2. **Start the service:**
+   ```bash
+   docker compose up -d
+   ```
+3. **Connect your MCP client:** Point your MCP client to:
+   ```text
+   http://127.0.0.1:8098/mcp
+   ```
+   *(Or `http://<host-ip>:8098/mcp` if bound to `0.0.0.0:8098` behind an authenticating firewall/proxy).*
 
-```bash
-# Pull the latest image built by CI
-docker compose pull
-
-# Recreate and restart the persistent container
-docker compose up -d --force-recreate
-```
-
-*In Portainer:* Navigate to **Stacks** > select your Navigatorr stack > toggle **Pull latest image** > click **Update the stack**.
+*In Portainer:* Navigate to **Stacks** > select your Navigatorr stack > set `restart: unless-stopped` and the `command:` above > click **Update the stack**.
 
 > **Data Persistence:** The `navigatorr-cache` volume mounted at `/root/.cache/navigatorr` holds the SQLite database (`navigatorr.db`) and spec cache. It survives restarts and container recreation without data loss.
 
-### Mode B: Executing Navigatorr via MCP stdio
+### Mode B: Executing Navigatorr via On-Demand MCP stdio
 
-Navigatorr communicates with AI assistants via MCP stdio (JSON-RPC over stdin/stdout). When used as an MCP server, the MCP host (such as `tunnel-client`, Claude Desktop, or Claude Code) launches the container per session and keeps `stdin` and `stdout` attached:
+When used as an on-demand stdio MCP server, the MCP host launches the container per session with `stdin` and `stdout` attached:
 
 **Option 1: Using Docker Compose**
 ```bash
@@ -65,9 +106,9 @@ docker compose run --rm -T navigatorr
 ```
 *Key flags:*
 * `-T`: Disables pseudo-TTY allocation so raw JSON-RPC framing is not corrupted.
-* `--rm`: Removes the ephemeral container process once the MCP session disconnects, while all state remains persisted in `navigatorr-cache`.
+* `--rm`: Removes the ephemeral container process once the MCP session disconnects.
 
-**Option 2: Using direct Docker command (Recommended for MCP hosts like `tunnel-client`)**
+**Option 2: Using direct Docker command**
 ```bash
 docker run --rm -i --pull always --network host \
   -v /path/to/config.yaml:/root/.config/navigatorr/config.yaml:ro \
