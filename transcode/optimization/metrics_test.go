@@ -1,6 +1,7 @@
 package optimization
 
 import (
+	"math"
 	"testing"
 )
 
@@ -49,15 +50,11 @@ func TestAggregateSampleScores(t *testing.T) {
 		if agg.MaxScore != 96.0 {
 			t.Errorf("MaxScore = %f, want 96.0", agg.MaxScore)
 		}
-		// Harmonic mean of 94, 96, 95: 3 / (1/94 + 1/96 + 1/95) = 94.9930
-		if agg.HarmonicMean <= 0 || agg.HarmonicMean > agg.MeanScore {
-			t.Errorf("unexpected harmonic mean %f (should be <= mean %f)", agg.HarmonicMean, agg.MeanScore)
-		}
 	})
 }
 
 func TestVMAFPolicy(t *testing.T) {
-	policy := DefaultVMAFPolicy() // target 95.0, min 91.0, marginal 0.5
+	policy := DefaultVMAFPolicy() // approved defaults: target 96.0, min 95.0, marginal 0.5
 	sdrColor := ColorInfo{ColorPrimaries: "bt709", ColorTransfer: "bt709"}
 
 	t.Run("reaches target", func(t *testing.T) {
@@ -75,7 +72,7 @@ func TestVMAFPolicy(t *testing.T) {
 
 	t.Run("meets minimum but below target", func(t *testing.T) {
 		agg := AggregateSampleScores(MetricTypeVMAF, []SampleScore{
-			{SampleIndex: 0, Score: 93.0, Valid: true},
+			{SampleIndex: 0, Score: 95.2, Valid: true},
 		})
 		eval := policy.Evaluate(agg, sdrColor)
 		if !eval.Eligible || eval.TargetReached || !eval.MinimumMet {
@@ -88,25 +85,53 @@ func TestVMAFPolicy(t *testing.T) {
 
 	t.Run("below minimum", func(t *testing.T) {
 		agg := AggregateSampleScores(MetricTypeVMAF, []SampleScore{
-			{SampleIndex: 0, Score: 89.5, Valid: true},
+			{SampleIndex: 0, Score: 94.5, Valid: true},
 		})
 		eval := policy.Evaluate(agg, sdrColor)
 		if eval.Eligible || eval.TargetReached || eval.MinimumMet {
 			t.Errorf("expected ineligible, target NOT reached, min NOT met: %+v", eval)
 		}
-		if eval.IneligibleReason != ReasonBelowMinimumQuality {
-			t.Errorf("expected reason %q, got %q", ReasonBelowMinimumQuality, eval.IneligibleReason)
+		if eval.IneligibleReason != ReasonSampleBelowMinimum && eval.IneligibleReason != ReasonBelowMinimumQuality {
+			t.Errorf("expected reason %q or %q, got %q", ReasonSampleBelowMinimum, ReasonBelowMinimumQuality, eval.IneligibleReason)
+		}
+	})
+
+	// Regression test for required fix 1:
+	// Mean score meets target, but one sample is below policy minimum (e.g. 94.0 < 95.0).
+	// Must fail closed: candidate is marked ineligible with ReasonSampleBelowMinimum.
+	t.Run("mean passes target but one sample below minimum fails closed", func(t *testing.T) {
+		agg := AggregateSampleScores(MetricTypeVMAF, []SampleScore{
+			{SampleIndex: 0, Score: 97.0, Valid: true},
+			{SampleIndex: 1, Score: 94.0, Valid: true}, // Below min 95.0!
+			{SampleIndex: 2, Score: 97.0, Valid: true},
+		})
+		if agg.MeanScore != 96.0 {
+			t.Fatalf("MeanScore = %f, want 96.0", agg.MeanScore)
+		}
+
+		eval := policy.Evaluate(agg, sdrColor)
+		if eval.Eligible {
+			t.Errorf("expected Eligible = false when one sample is below minimum")
+		}
+		if eval.MinimumMet {
+			t.Errorf("expected MinimumMet = false when one sample is below minimum")
+		}
+		if eval.TargetReached {
+			t.Errorf("expected TargetReached = false when one sample is below minimum")
+		}
+		if eval.IneligibleReason != ReasonSampleBelowMinimum {
+			t.Errorf("expected reason %q, got %q", ReasonSampleBelowMinimum, eval.IneligibleReason)
 		}
 	})
 }
 
 func TestSSIMPolicy(t *testing.T) {
-	policy := DefaultSSIMPolicy() // target 0.98, min 0.95, marginal 0.005
+	policy := DefaultSSIMPolicy() // approved defaults: target 0.99, min 0.98, marginal 0.005
 	sdrColor := ColorInfo{ColorPrimaries: "bt709", ColorTransfer: "bt709"}
 
 	t.Run("reaches target", func(t *testing.T) {
 		agg := AggregateSampleScores(MetricTypeSSIM, []SampleScore{
-			{SampleIndex: 0, Score: 0.985, Valid: true},
+			{SampleIndex: 0, Score: 0.992, Valid: true},
 		})
 		eval := policy.Evaluate(agg, sdrColor)
 		if !eval.Eligible || !eval.TargetReached || !eval.MinimumMet {
@@ -119,7 +144,7 @@ func TestSSIMPolicy(t *testing.T) {
 
 	t.Run("meets minimum but below target", func(t *testing.T) {
 		agg := AggregateSampleScores(MetricTypeSSIM, []SampleScore{
-			{SampleIndex: 0, Score: 0.965, Valid: true},
+			{SampleIndex: 0, Score: 0.985, Valid: true},
 		})
 		eval := policy.Evaluate(agg, sdrColor)
 		if !eval.Eligible || eval.TargetReached || !eval.MinimumMet {
@@ -132,14 +157,30 @@ func TestSSIMPolicy(t *testing.T) {
 
 	t.Run("below minimum", func(t *testing.T) {
 		agg := AggregateSampleScores(MetricTypeSSIM, []SampleScore{
-			{SampleIndex: 0, Score: 0.930, Valid: true},
+			{SampleIndex: 0, Score: 0.970, Valid: true},
 		})
 		eval := policy.Evaluate(agg, sdrColor)
 		if eval.Eligible || eval.TargetReached || eval.MinimumMet {
 			t.Errorf("expected ineligible, target NOT reached, min NOT met: %+v", eval)
 		}
-		if eval.IneligibleReason != ReasonBelowMinimumQuality {
-			t.Errorf("expected reason %q, got %q", ReasonBelowMinimumQuality, eval.IneligibleReason)
+		if eval.IneligibleReason != ReasonSampleBelowMinimum && eval.IneligibleReason != ReasonBelowMinimumQuality {
+			t.Errorf("expected reason %q or %q, got %q", ReasonSampleBelowMinimum, ReasonBelowMinimumQuality, eval.IneligibleReason)
+		}
+	})
+
+	// Regression test for SSIM per-sample quality gate
+	t.Run("ssim mean passes but one sample below minimum fails closed", func(t *testing.T) {
+		agg := AggregateSampleScores(MetricTypeSSIM, []SampleScore{
+			{SampleIndex: 0, Score: 0.995, Valid: true},
+			{SampleIndex: 1, Score: 0.975, Valid: true}, // Below min 0.98!
+			{SampleIndex: 2, Score: 0.995, Valid: true},
+		})
+		eval := policy.Evaluate(agg, sdrColor)
+		if eval.Eligible || eval.MinimumMet || eval.TargetReached {
+			t.Errorf("expected candidate to be ineligible due to failing sample: %+v", eval)
+		}
+		if eval.IneligibleReason != ReasonSampleBelowMinimum {
+			t.Errorf("expected reason %q, got %q", ReasonSampleBelowMinimum, eval.IneligibleReason)
 		}
 	})
 }
@@ -148,7 +189,7 @@ func TestNoThresholdConversion(t *testing.T) {
 	// SSIM metric evaluated with VMAF policy must be rejected cleanly without conversion
 	vmafPolicy := DefaultVMAFPolicy()
 	ssimAgg := AggregateSampleScores(MetricTypeSSIM, []SampleScore{
-		{SampleIndex: 0, Score: 0.99, Valid: true},
+		{SampleIndex: 0, Score: 0.995, Valid: true},
 	})
 	eval := vmafPolicy.Evaluate(ssimAgg, ColorInfo{})
 	if eval.Eligible {
@@ -210,18 +251,53 @@ func TestValidatePolicy(t *testing.T) {
 		t.Errorf("expected error for nil policy")
 	}
 
+	// Min > Target
 	badThresholds := NewVMAFPolicy(90.0, 95.0, 0.5)
 	if err := ValidatePolicy(badThresholds); err == nil {
 		t.Errorf("expected error when Min > Target")
 	}
 
-	badTolerance := NewVMAFPolicy(95.0, 91.0, -0.1)
+	// Negative tolerance
+	badTolerance := NewVMAFPolicy(96.0, 95.0, -0.1)
 	if err := ValidatePolicy(badTolerance); err == nil {
 		t.Errorf("expected error when MarginalTolerance < 0")
 	}
 
-	goodPolicy := DefaultVMAFPolicy()
-	if err := ValidatePolicy(goodPolicy); err != nil {
-		t.Errorf("unexpected error for valid policy: %v", err)
+	// Non-finite values
+	nanPolicy := NewVMAFPolicy(math.NaN(), 95.0, 0.5)
+	if err := ValidatePolicy(nanPolicy); err == nil {
+		t.Errorf("expected error for NaN target")
+	}
+	infPolicy := NewVMAFPolicy(96.0, math.Inf(1), 0.5)
+	if err := ValidatePolicy(infPolicy); err == nil {
+		t.Errorf("expected error for Inf min")
+	}
+
+	// VMAF out of bounds (< 0 or > 100)
+	vmafNegative := NewVMAFPolicy(96.0, -1.0, 0.5)
+	if err := ValidatePolicy(vmafNegative); err == nil {
+		t.Errorf("expected error for VMAF min < 0")
+	}
+	vmafOver100 := NewVMAFPolicy(105.0, 95.0, 0.5)
+	if err := ValidatePolicy(vmafOver100); err == nil {
+		t.Errorf("expected error for VMAF target > 100")
+	}
+
+	// SSIM out of bounds (< 0 or > 1)
+	ssimNegative := NewSSIMPolicy(0.99, -0.05, 0.005)
+	if err := ValidatePolicy(ssimNegative); err == nil {
+		t.Errorf("expected error for SSIM min < 0")
+	}
+	ssimOver1 := NewSSIMPolicy(1.05, 0.98, 0.005)
+	if err := ValidatePolicy(ssimOver1); err == nil {
+		t.Errorf("expected error for SSIM target > 1.0")
+	}
+
+	// Valid policies
+	if err := ValidatePolicy(DefaultVMAFPolicy()); err != nil {
+		t.Errorf("unexpected error for default VMAF policy: %v", err)
+	}
+	if err := ValidatePolicy(DefaultSSIMPolicy()); err != nil {
+		t.Errorf("unexpected error for default SSIM policy: %v", err)
 	}
 }

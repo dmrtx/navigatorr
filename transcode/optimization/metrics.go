@@ -21,7 +21,6 @@ type MetricAggregate struct {
 	MeanScore        float64       `json:"mean_score"`
 	MinScore         float64       `json:"min_score"`
 	MaxScore         float64       `json:"max_score"`
-	HarmonicMean     float64       `json:"harmonic_mean"`
 	IneligibleReason string        `json:"ineligible_reason,omitempty"`
 }
 
@@ -40,11 +39,9 @@ func AggregateSampleScores(metric MetricType, scores []SampleScore) MetricAggreg
 	}
 
 	var sum float64
-	var reciprocalSum float64
 	minScore := math.MaxFloat64
 	maxScore := -math.MaxFloat64
 	allValid := true
-	hasZeroOrNegative := false
 
 	for _, s := range scores {
 		if !s.Valid {
@@ -57,11 +54,6 @@ func AggregateSampleScores(metric MetricType, scores []SampleScore) MetricAggreg
 		}
 		if s.Score > maxScore {
 			maxScore = s.Score
-		}
-		if s.Score <= 0 {
-			hasZeroOrNegative = true
-		} else {
-			reciprocalSum += 1.0 / s.Score
 		}
 	}
 
@@ -76,12 +68,6 @@ func AggregateSampleScores(metric MetricType, scores []SampleScore) MetricAggreg
 	agg.MeanScore = round4(sum / n)
 	agg.MinScore = round4(minScore)
 	agg.MaxScore = round4(maxScore)
-
-	if hasZeroOrNegative || reciprocalSum <= 0 {
-		agg.HarmonicMean = round4(minScore)
-	} else {
-		agg.HarmonicMean = round4(n / reciprocalSum)
-	}
 
 	return agg
 }
@@ -124,9 +110,9 @@ func NewVMAFPolicy(target, min, marginalTolerance float64) *VMAFPolicy {
 	}
 }
 
-// DefaultVMAFPolicy returns a standard SDR VMAF policy (target 95.0, min 91.0, marginal tolerance 0.5).
+// DefaultVMAFPolicy returns the approved standard SDR VMAF policy (target 96.0, min 95.0, marginal tolerance 0.5).
 func DefaultVMAFPolicy() *VMAFPolicy {
-	return NewVMAFPolicy(95.0, 91.0, 0.5)
+	return NewVMAFPolicy(96.0, 95.0, 0.5)
 }
 
 func (p *VMAFPolicy) Metric() MetricType {
@@ -152,6 +138,11 @@ func (p *VMAFPolicy) Evaluate(agg MetricAggregate, color ColorInfo) PolicyEvalua
 		MinScore:    p.Min,
 	}
 
+	if err := ValidatePolicy(p); err != nil {
+		eval.IneligibleReason = ReasonInvalidMetric
+		return eval
+	}
+
 	if agg.MetricType != p.Metric() {
 		eval.IneligibleReason = ReasonInvalidMetric
 		return eval
@@ -173,6 +164,17 @@ func (p *VMAFPolicy) Evaluate(agg MetricAggregate, color ColorInfo) PolicyEvalua
 	}
 
 	eval.CandidateScore = agg.MeanScore
+
+	// Per-sample quality gate: ANY valid sample below the policy minimum makes the candidate ineligible.
+	for _, s := range agg.SampleScores {
+		if s.Valid && s.Score < p.Min {
+			eval.IneligibleReason = ReasonSampleBelowMinimum
+			eval.Eligible = false
+			eval.MinimumMet = false
+			eval.TargetReached = false
+			return eval
+		}
+	}
 
 	if eval.CandidateScore < p.Min {
 		eval.IneligibleReason = ReasonBelowMinimumQuality
@@ -208,9 +210,9 @@ func NewSSIMPolicy(target, min, marginalTolerance float64) *SSIMPolicy {
 	}
 }
 
-// DefaultSSIMPolicy returns a standard SSIM policy (target 0.98, min 0.95, marginal tolerance 0.005).
+// DefaultSSIMPolicy returns the approved standard SSIM policy (target 0.99, min 0.98, marginal tolerance 0.005).
 func DefaultSSIMPolicy() *SSIMPolicy {
-	return NewSSIMPolicy(0.98, 0.95, 0.005)
+	return NewSSIMPolicy(0.99, 0.98, 0.005)
 }
 
 func (p *SSIMPolicy) Metric() MetricType {
@@ -236,6 +238,11 @@ func (p *SSIMPolicy) Evaluate(agg MetricAggregate, color ColorInfo) PolicyEvalua
 		MinScore:    p.Min,
 	}
 
+	if err := ValidatePolicy(p); err != nil {
+		eval.IneligibleReason = ReasonInvalidMetric
+		return eval
+	}
+
 	if agg.MetricType != p.Metric() {
 		eval.IneligibleReason = ReasonInvalidMetric
 		return eval
@@ -258,6 +265,17 @@ func (p *SSIMPolicy) Evaluate(agg MetricAggregate, color ColorInfo) PolicyEvalua
 
 	eval.CandidateScore = agg.MeanScore
 
+	// Per-sample quality gate: ANY valid sample below the policy minimum makes the candidate ineligible.
+	for _, s := range agg.SampleScores {
+		if s.Valid && s.Score < p.Min {
+			eval.IneligibleReason = ReasonSampleBelowMinimum
+			eval.Eligible = false
+			eval.MinimumMet = false
+			eval.TargetReached = false
+			return eval
+		}
+	}
+
 	if eval.CandidateScore < p.Min {
 		eval.IneligibleReason = ReasonBelowMinimumQuality
 		return eval
@@ -276,16 +294,40 @@ func (p *SSIMPolicy) Evaluate(agg MetricAggregate, color ColorInfo) PolicyEvalua
 	return eval
 }
 
-// ValidatePolicy ensures that a quality policy is non-nil and properly configured.
+// ValidatePolicy ensures that a quality policy is non-nil, finite, and within valid metric bounds.
 func ValidatePolicy(p QualityPolicy) error {
 	if p == nil {
 		return fmt.Errorf("%s: quality policy is required", ReasonMetricMissing)
 	}
-	if p.MinScore() > p.TargetScore() {
-		return fmt.Errorf("invalid policy: minimum score %f cannot exceed target score %f", p.MinScore(), p.TargetScore())
+
+	target := p.TargetScore()
+	min := p.MinScore()
+	tol := p.Tolerance()
+
+	if !isFinite(target) || !isFinite(min) || !isFinite(tol) {
+		return fmt.Errorf("invalid policy: thresholds and tolerance must be finite numbers")
 	}
-	if p.Tolerance() < 0 {
-		return fmt.Errorf("invalid policy: marginal tolerance %f cannot be negative", p.Tolerance())
+
+	if tol < 0 {
+		return fmt.Errorf("invalid policy: marginal tolerance %f cannot be negative", tol)
 	}
+
+	if min > target {
+		return fmt.Errorf("invalid policy: minimum score %f cannot exceed target score %f", min, target)
+	}
+
+	switch p.Metric() {
+	case MetricTypeVMAF:
+		if min < 0.0 || target > 100.0 {
+			return fmt.Errorf("invalid VMAF policy: thresholds must be within [0, 100], got min %f, target %f", min, target)
+		}
+	case MetricTypeSSIM:
+		if min < 0.0 || target > 1.0 {
+			return fmt.Errorf("invalid SSIM policy: thresholds must be within [0, 1], got min %f, target %f", min, target)
+		}
+	default:
+		return fmt.Errorf("%s: unknown metric type %s", ReasonInvalidMetric, p.Metric())
+	}
+
 	return nil
 }

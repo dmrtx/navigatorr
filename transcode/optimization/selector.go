@@ -101,6 +101,21 @@ func SelectCandidate(in SelectorInput) SelectionResult {
 			continue
 		}
 
+		// Estimate usability gate: candidates with invalid/missing video or nonpositive bytes must never win.
+		if !c.EstimatedOutput.SuitableForSelection || c.EstimatedOutput.EstimatedVideoBytes <= 0 || c.EstimatedOutput.EstimatedTotalBytes <= 0 {
+			ec.Eligible = false
+			ec.TargetReached = false
+			ec.MinimumMet = false
+			if c.EstimatedOutput.UnusableReason != "" {
+				ec.EvaluationReason = c.EstimatedOutput.UnusableReason
+			} else {
+				ec.EvaluationReason = ReasonUnusableEstimate
+			}
+			allBelowMin = false
+			res.AllEvaluated = append(res.AllEvaluated, ec)
+			continue
+		}
+
 		eval := in.Policy.Evaluate(c.AggregateResult, c.ColorInfo)
 		ec.Score = eval.CandidateScore
 		ec.Eligible = eval.Eligible
@@ -108,7 +123,7 @@ func SelectCandidate(in SelectorInput) SelectionResult {
 		ec.MinimumMet = eval.MinimumMet
 		ec.EvaluationReason = eval.IneligibleReason
 
-		if eval.IneligibleReason != ReasonBelowMinimumQuality {
+		if eval.IneligibleReason != ReasonBelowMinimumQuality && eval.IneligibleReason != ReasonSampleBelowMinimum {
 			allBelowMin = false
 		}
 
