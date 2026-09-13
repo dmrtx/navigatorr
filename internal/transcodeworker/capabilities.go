@@ -12,12 +12,117 @@ import (
 
 const videoToolboxEncoder = "hevc_videotoolbox"
 
-type VideoToolboxCapabilities struct {
-	Encoder      string   `json:"encoder"`
-	Available    bool     `json:"available"`
-	Profiles     []string `json:"profiles,omitempty"`
-	PixelFormats []string `json:"pixel_formats,omitempty"`
-	Options      []string `json:"options,omitempty"`
+type VideoToolboxCapabilities = transcode.VideoToolboxCapabilities
+
+// ProbeWorkerCapabilities probes full versioned capabilities of the worker node.
+func ProbeWorkerCapabilities(ctx context.Context, ffmpegPath string) (transcode.WorkerCapabilities, error) {
+	caps := transcode.WorkerCapabilities{
+		ProtocolVersion: transcode.WorkerProtocolVersion,
+		WorkerVersion:   "2026.09.2",
+		BuildGitCommit:  "f8d5c3a",
+		FFmpegPath:      ffmpegPath,
+		Encoders:        make(map[string]bool),
+		Filters:         make(map[string]bool),
+	}
+
+	// 1. Probe FFmpeg version
+	verCmd := exec.CommandContext(ctx, ffmpegPath, "-version")
+	verOut, err := verCmd.Output()
+	if err != nil {
+		return caps, fmt.Errorf("probing ffmpeg version at %s failed: %w", ffmpegPath, err)
+	}
+	caps.FFmpegVersion = ParseFFmpegVersion(string(verOut))
+
+	// 2. Probe VideoToolbox details (partial absence does not fail the whole report)
+	vtCaps, vtErr := ProbeVideoToolboxCapabilities(ctx, ffmpegPath)
+	if vtErr != nil {
+		vtCaps = transcode.VideoToolboxCapabilities{
+			Encoder:   videoToolboxEncoder,
+			Available: false,
+		}
+	}
+	caps.VideoToolbox = vtCaps
+
+	// 3. Probe encoders availability
+	encCmd := exec.CommandContext(ctx, ffmpegPath, "-hide_banner", "-encoders")
+	encOut, _ := encCmd.Output()
+	caps.Encoders = ParseAvailableEncoders(string(encOut))
+	if vtCaps.Available {
+		caps.Encoders[videoToolboxEncoder] = true
+	}
+
+	// 4. Probe filters availability (e.g. libvmaf, ssim, scale, format)
+	filtCmd := exec.CommandContext(ctx, ffmpegPath, "-hide_banner", "-filters")
+	filtOut, _ := filtCmd.Output()
+	caps.Filters = ParseAvailableFilters(string(filtOut))
+
+	// 5. Generate deterministic signature
+	sig, err := transcode.ComputeCapabilitySignature(caps)
+	if err != nil {
+		return caps, fmt.Errorf("generating capability signature: %w", err)
+	}
+	caps.Signature = sig
+
+	return caps, nil
+}
+
+// ParseFFmpegVersion extracts the FFmpeg version string from ffmpeg -version output.
+func ParseFFmpegVersion(raw string) string {
+	for _, line := range strings.Split(raw, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(strings.ToLower(trimmed), "ffmpeg version ") {
+			fields := strings.Fields(trimmed)
+			if len(fields) >= 3 {
+				return fields[2]
+			}
+			return trimmed
+		}
+	}
+	return "unknown"
+}
+
+// ParseAvailableEncoders extracts presence of key encoders from ffmpeg -encoders output.
+func ParseAvailableEncoders(raw string) map[string]bool {
+	encoders := map[string]bool{
+		"hevc_videotoolbox":   false,
+		"h264_videotoolbox":   false,
+		"prores_videotoolbox": false,
+		"libx264":             false,
+		"libx265":             false,
+		"aac":                 false,
+	}
+	for _, line := range strings.Split(raw, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 {
+			name := strings.ToLower(fields[1])
+			if len(fields[0]) >= 6 && (strings.HasPrefix(fields[0], "V") || strings.HasPrefix(fields[0], "A") || strings.HasPrefix(fields[0], "S")) {
+				encoders[name] = true
+			}
+		}
+	}
+	return encoders
+}
+
+// ParseAvailableFilters extracts presence of key filters from ffmpeg -filters output.
+func ParseAvailableFilters(raw string) map[string]bool {
+	filters := map[string]bool{
+		"libvmaf": false,
+		"ssim":    false,
+		"scale":   false,
+		"format":  false,
+		"null":    false,
+		"fps":     false,
+	}
+	for _, line := range strings.Split(raw, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 {
+			name := strings.ToLower(fields[1])
+			if len(fields[0]) == 3 {
+				filters[name] = true
+			}
+		}
+	}
+	return filters
 }
 
 func ProbeVideoToolboxCapabilities(ctx context.Context, ffmpegPath string) (VideoToolboxCapabilities, error) {

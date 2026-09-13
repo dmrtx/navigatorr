@@ -24,10 +24,11 @@ type mockTranscodeExecutor struct {
 	cancelCalls int32
 	doctorCalls int32
 
-	doctorFunc func(ctx context.Context) error
-	submitFunc func(ctx context.Context, req transcode.Request) (transcode.Job, error)
-	statusFunc func(ctx context.Context, jobID string) (transcode.JobStatus, error)
-	cancelFunc func(ctx context.Context, jobID string) error
+	doctorFunc       func(ctx context.Context) error
+	capabilitiesFunc func(ctx context.Context) (transcode.WorkerCapabilities, error)
+	submitFunc       func(ctx context.Context, req transcode.Request) (transcode.Job, error)
+	statusFunc       func(ctx context.Context, jobID string) (transcode.JobStatus, error)
+	cancelFunc       func(ctx context.Context, jobID string) error
 }
 
 func (m *mockTranscodeExecutor) Doctor(ctx context.Context) error {
@@ -36,6 +37,30 @@ func (m *mockTranscodeExecutor) Doctor(ctx context.Context) error {
 		return m.doctorFunc(ctx)
 	}
 	return nil
+}
+
+func (m *mockTranscodeExecutor) Capabilities(ctx context.Context) (transcode.WorkerCapabilities, error) {
+	if m.capabilitiesFunc != nil {
+		return m.capabilitiesFunc(ctx)
+	}
+	caps := transcode.WorkerCapabilities{
+		ProtocolVersion: transcode.WorkerProtocolVersion,
+		WorkerVersion:   "2026.09.2",
+		BuildGitCommit:  "f8d5c3a",
+		FFmpegVersion:   "7.1",
+		Encoders:        map[string]bool{"hevc_videotoolbox": true},
+		Filters:         map[string]bool{"scale": true},
+		VideoToolbox: transcode.VideoToolboxCapabilities{
+			Encoder:      "hevc_videotoolbox",
+			Available:    true,
+			Profiles:     []string{"main", "main10"},
+			PixelFormats: []string{"nv12", "p010le", "yuv420p"},
+			Options:      []string{"prio_speed", "profile", "realtime", "spatial_aq"},
+		},
+	}
+	sig, _ := transcode.ComputeCapabilitySignature(caps)
+	caps.Signature = sig
+	return caps, nil
 }
 
 func (m *mockTranscodeExecutor) Submit(ctx context.Context, req transcode.Request) (transcode.Job, error) {
