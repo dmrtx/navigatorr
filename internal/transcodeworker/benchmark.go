@@ -676,7 +676,14 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) 
 	}
 
 	// If job was cancelled while runner was executing, preserve cancelled status!
+	// Copy partial evidence if available without resurrecting or modifying cancelled state.
 	if latest.Status == "cancelled" {
+		if record.Evidence != nil {
+			latest.Evidence = record.Evidence
+			if err := SaveBenchmarkAtomic(benchFile, latest); err != nil {
+				return fmt.Errorf("persisting partial evidence on cancelled benchmark %s: %w", jobID, err)
+			}
+		}
 		return nil
 	}
 
