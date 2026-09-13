@@ -38,6 +38,12 @@ type Plan struct {
 	Container                    string           `json:"container" yaml:"container"`
 	VideoCodec                   string           `json:"video_codec" yaml:"video_codec"`
 	Quality                      int              `json:"quality" yaml:"quality"`
+	VideoProfile                 string           `json:"video_profile,omitempty" yaml:"video_profile,omitempty"`
+	PixelFormat                  string           `json:"pixel_format,omitempty" yaml:"pixel_format,omitempty"`
+	PrioritizeSpeed              *bool            `json:"prioritize_speed,omitempty" yaml:"prioritize_speed,omitempty"`
+	SpatialAQ                    *bool            `json:"spatial_aq,omitempty" yaml:"spatial_aq,omitempty"`
+	Realtime                     *bool            `json:"realtime,omitempty" yaml:"realtime,omitempty"`
+	ExpectedBitDepth             int              `json:"expected_bit_depth,omitempty" yaml:"expected_bit_depth,omitempty"`
 	AudioMode                    string           `json:"audio_mode" yaml:"audio_mode"`
 	SubtitleMode                 string           `json:"subtitle_mode" yaml:"subtitle_mode"`
 	ConvertIncompatibleSubtitles bool             `json:"convert_incompatible_subtitles" yaml:"convert_incompatible_subtitles"`
@@ -107,6 +113,12 @@ type JobStatus struct {
 	Container             string             `json:"container,omitempty"`
 	VideoCodec            string             `json:"video_codec,omitempty"`
 	Quality               int                `json:"quality,omitempty"`
+	VideoProfile          string             `json:"video_profile,omitempty"`
+	PixelFormat           string             `json:"pixel_format,omitempty"`
+	PrioritizeSpeed       *bool              `json:"prioritize_speed,omitempty"`
+	SpatialAQ             *bool              `json:"spatial_aq,omitempty"`
+	Realtime              *bool              `json:"realtime,omitempty"`
+	ExpectedBitDepth      int                `json:"expected_bit_depth,omitempty"`
 	Attempt               int                `json:"attempt,omitempty"`
 	RetryCount            int                `json:"retry_count,omitempty"`
 	FallbackCount         int                `json:"fallback_count,omitempty"`
