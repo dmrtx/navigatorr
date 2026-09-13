@@ -411,12 +411,37 @@ Demostrado mediante tests que:
   - [x] Aislamiento estricto de namespace y tipos: transcode `Submit` rechaza prefijo `bench-`; colisiones cruzadas (`job.json` vs `benchmark.json`) rechazadas; escaneo de active slots ignora dot-files y directorios no reconocidos.
   - [x] Workspace temporal `samples/` con cleanup seguro y acotado que jamás toca el source media ni el directorio raíz del job.
   - [x] Frontera inyectable `BenchmarkRunner` con fail-closed en producción (`"benchmark runner not implemented"`).
-- [x] **Fase 4B — Extracción y encode FFmpeg de samples**:
+- [x] **Fase 4B — Extracción y encode FFmpeg de samples (auditoría adversarial y endurecimiento)**:
   - [x] Implementar extracción/encode de samples con argv seguro de FFmpeg en worker (`ProductionBenchmarkRunner`).
   - [x] Extracción de referencia sin pérdidas (`ffv1`, `-accurate_seek`, `-avoid_negative_ts make_zero`, video-only, `-an -sn -dn`).
   - [x] Encode secuencial y determinista de candidatos `hevc_videotoolbox` desde samples de referencia con validación previa de bit depth (8-bit vs 10-bit) y rechazo de HDR/DV.
   - [x] Estructuras de evidencia física (`BenchmarkExecutionEvidence`, `BenchmarkSampleRef`, `BenchmarkCandidateSampleResult`) persistidas en `benchmark.json`.
   - [x] Contrato de workspace seguro: verificación estricta de rutas hijas (`verifyChildPath`), sanitización de IDs y cleanup idempotente que nunca toca el medio original ni archivos fuera de `samples/`.
+  - [x] **Seguridad de proceso y cancelación de process tree**:
+    - Contexto de señal (`signal.NotifyContext` con `SIGTERM`/`SIGINT`) en `_internal_benchmark` y `_internal_run` (`main.go`).
+    - Comandos FFmpeg aislados en su propio process group (`cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}`) con `cmd.Cancel = func() { syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }` y `WaitDelay = 2 * time.Second`.
+    - `BenchmarkCancel` señaliza tanto el process group (`-record.PID`) como el PID directo con SIGTERM, verificando liveness tras 150ms antes de escalar a SIGKILL.
+  - [x] **Endurecimiento TOCTOU y symlinks**:
+    - Rechazo inmediato si `samplesDir` pre-existe como symlink (`os.Lstat`).
+    - `prepareOutputFile` comprueba que `refPath` y `candPath` no pre-existan como symlinks (`os.Lstat`), y elimina archivos regulares pre-existentes antes de invocar FFmpeg para prevenir que `-y` siga symlinks.
+    - `CleanBenchmarkSamples` rechaza si `jobDir` es un symlink, remueve únicamente la entrada symlink con `os.Remove` si `samplesDir` es symlink, y verifica mediante `filepath.EvalSymlinks` que el target resuelto permanezca estrictamente dentro de `jobDir` antes de ejecutar `os.RemoveAll`.
+  - [x] **Nombres de archivo de candidatos libres de colisión**:
+    - Clave inyectiva `candidateFileKey(candIdx, rawID, quality)` (`cand_<idx>_<sanitized>_<shortHash>_q<quality>_sample_<sampleIdx>.mkv`) combinando índice, etiqueta saneada, hash SHA-256 corto del ID original y calidad.
+  - [x] **Preservación de evidencia parcial ante fallos**:
+    - `record.Evidence` se inicializa y enlaza inmediatamente al inicio de `RunBenchmark`.
+    - Samples de referencia completados y resultados de encode de candidatos (incluyendo mensajes de error de candidatos fallidos) se preservan en `record.Evidence` y se persisten en `benchmark.json` al fallar el job.
+  - [x] **Captura de stderr acotada en memoria**:
+    - Buffer acotado `boundedBuffer` con tope configurable (16 KB) y marcador `... [stderr truncated]` para prevenir fugas de RAM por logs verbosos de FFmpeg.
+  - [x] **Detección exhaustiva de Dolby Vision, estabilidad de fuente y gating de chroma**:
+    - Rechazo explícito de Dolby Vision en codecs (`dvh1`, `dvhe`, `dva1`, `dav1`, `dovi`), perfiles (`Dolby Vision`), tags de stream y side data (`DOVI configuration record`).
+    - Snapshot de tamaño y modtime de la fuente (`os.Stat`), con verificación `verifySourceUnchanged` antes y después de cada extracción/encode, fallando cerrado si se modifica concurrentemente.
+    - Gating de chroma subsampling: solo se permiten fuentes 4:2:0 (`yuv420p`, `yuvj420p`, `nv12`, `yuv420p10le`, `p010le`); 4:4:4 y 4:2:2 son rechazados para evitar conversiones silenciosas y distorsiones métricas en downstream VMAF/SSIM.
+  - [x] **Contrato documentado de alineación de frames y ventanas**:
+    - Búsqueda exacta y rápida: `-accurate_seek -ss <startSec>` antes de `-i` localiza el keyframe previo y decodifica con precisión frame a frame hasta el timestamp.
+    - Ventana exacta: `-t <durationSec>`.
+    - Normalización PTS: `-avoid_negative_ts make_zero` resetea la línea temporal a PTS 0.
+    - Máster sin pérdidas: `-c:v ffv1` con `-an -sn -dn`.
+    - Correspondencia frame a frame 1:1: El encode de candidatos consume el sample FFV1 de principio a fin (frame 0 al final sin seeking ni recortes), garantizando emparejamiento idéntico de frames para scoring VMAF/SSIM en Fase 5.
 
 ### Fase 5 — Métricas y estimación
 - [x] Modelos puros de evaluación VMAF con per-sample quality gate y agregación determinista en `transcode/optimization`.
@@ -461,7 +486,7 @@ Demostrado mediante tests que:
 | 1. Inspección completa | Completo | `DetailedReport`/`DetailedStream` extendido (color space/primaries/transfer/range, HDR/mastering metadata, frame rate racional y calculado, bitrates numéricamente acotados, channel layout de audio, side data), fixtures H264 8-bit/10-bit, HEVC Main10, HDR BT.2020, chapters y subtítulos | `eaadfe1`, `94a5a01`, `5eb1d30`, `9e90d7b` |
 | 2. Capacidades y protocolo | Completo | `WorkerCapabilities` versionado (`ProtocolVersion == WorkerProtocolVersion`), probe errors estructurados, clean absence encoder-specific, eliminación de campo redundante `VideoToolbox`, fingerprint determinista de capacidades, handshake SSH | `eaadfe1`, `94a5a01`, `5eb1d30`, `9e90d7b` |
 | 3. Recipes v2 | Completo | Loader v1/v2 compatible (`MinSchemaVersion`..`LatestSchemaVersion`), `OptimizationPolicy` validado con defaults aprobados (VMAF 96/95/0.5, SSIM 0.99/0.98/0.005, sampling bounds 1..32, `MaxBitrateKbps = 1_000_000`), omission safety en bloques métricos parciales | `eaadfe1`, `94a5a01`, `5eb1d30`, `9e90d7b`, `c92725b` |
-| 4. Sampling y temporales | Completo | Fase 4A (protocolo, SSH, models, locking `.capacity.lock` y `jobDir/.lock`, argv exacto `MatchesExactBenchmarkArgs`, idempotencia total) y Fase 4B (`ProductionBenchmarkRunner`, extracción `ffv1`, encode `hevc_videotoolbox`, `verifyChildPath`, bit depth gating, evidencia `BenchmarkExecutionEvidence`, cleanup acotado y seguro) completas y verificadas | `e23f204`, `8fe5828`, `badad4a`, `7fb5108`, `a35bcd6`, `f57a8af`, `35d9682` |
+| 4. Sampling y temporales | Completo | Fase 4A (protocolo, SSH, models, locking `.capacity.lock` y `jobDir/.lock`, argv exacto `MatchesExactBenchmarkArgs`, idempotencia total) y Fase 4B (`ProductionBenchmarkRunner`, extracción `ffv1`, encode `hevc_videotoolbox`, `verifyChildPath`, bit depth gating, evidencia `BenchmarkExecutionEvidence`, cleanup acotado y seguro, process group cancellation, symlink TOCTOU hardening, collision-free candidate names, partial evidence preservation, bounded stderr, DV y chroma 4:2:0 gating) completas y verificadas | `e23f204`, `8fe5828`, `badad4a`, `7fb5108`, `a35bcd6`, `f57a8af`, `35d9682`, `5c69e0d` |
 | 5. Métricas y estimación | Parcial (solo modelos puros de métricas y estimación) | `transcode/optimization/metrics.go` y `estimator.go` con per-sample quality gate, políticas independientes VMAF/SSIM, ineligibilidad explícita de HDR para SDR, estimación de video aislada por streams, preservación de audio copiado, fallbacks visibles y guards contra overflow. Ejecución de filtros y FFmpeg en worker pendientes. | `e23f204` (src: `83479df`), `8fe5828` (src: `a26d5f4`), `badad4a` (src: `b036209`) |
 | 6. Selección VideoToolbox | Pendiente | Modelo puro `CandidateSelector` disponible en `transcode/optimization/selector.go`; ejecución y benchmarking real en worker pendientes. | — |
 | 7. Actions e integración | Pendiente | Action `benchmark_transcode` e integración del ganador en `transcode_media` pendientes de implementación. | — |
@@ -489,4 +514,5 @@ Demostrado mediante tests que:
   - `20cd037`: `docs(transcode): record Phase 4A blocker corrections and capacity locking contracts`
 - **Extracción y encode FFmpeg de samples (Fase 4B)**:
   - `35d9682`: `feat(transcode): implement phase 4B sample extraction and candidate encoding runner`
-
+  - `0534336`: `docs(transcode): record completion of Phase 4B sample extraction and candidate encoding runner`
+  - `5c69e0d`: `fix(transcode): harden phase 4B cancellation, symlink toctou, filename collision, and evidence tracking`
