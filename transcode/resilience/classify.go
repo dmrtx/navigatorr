@@ -9,6 +9,7 @@ const (
 	SSHTransient                    FailureClass = "ssh_transient"
 	WorkerUnreachable               FailureClass = "worker_unreachable"
 	EncoderTemporarilyUnavailable   FailureClass = "encoder_temporarily_unavailable"
+	EncoderCapabilityUnsupported    FailureClass = "encoder_capability_unsupported"
 	ContainerSubtitleIncompatible   FailureClass = "container_subtitle_incompatible"
 	ContainerAudioIncompatible      FailureClass = "container_audio_incompatible"
 	ContainerAttachmentIncompatible FailureClass = "container_attachment_incompatible"
@@ -29,6 +30,8 @@ func Classify(message string) FailureClass {
 		return SSHTransient
 	case strings.Contains(s, "no route to host") || strings.Contains(s, "connection refused") || strings.Contains(s, "could not resolve hostname"):
 		return WorkerUnreachable
+	case strings.Contains(s, "encoder_capability_unsupported") || strings.Contains(s, "encoder capability unsupported"):
+		return EncoderCapabilityUnsupported
 	case strings.Contains(s, "videotoolbox") && strings.Contains(s, "temporar"):
 		return EncoderTemporarilyUnavailable
 	case strings.Contains(s, "subtitle") && (strings.Contains(s, "not supported") || strings.Contains(s, "incompatible")):
