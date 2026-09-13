@@ -48,11 +48,31 @@ type SamplePlan struct {
 // PlanSamples generates deterministic sample windows adhering to duration clamping,
 // overlap avoidance, short video full-duration fallback, and sample count reduction.
 func PlanSamples(cfg SamplePlanConfig) (SamplePlan, error) {
-	if cfg.Duration <= 0 {
-		return SamplePlan{}, fmt.Errorf("%s: duration must be positive (%f)", ReasonInvalidDuration, cfg.Duration)
+	if !isFinite(cfg.Duration) || cfg.Duration <= 0 {
+		return SamplePlan{}, fmt.Errorf("%s: duration must be positive and finite (%f)", ReasonInvalidDuration, cfg.Duration)
 	}
-	if cfg.SampleSeconds <= 0 {
-		return SamplePlan{}, fmt.Errorf("%s: sample seconds must be positive (%f)", ReasonInvalidSampleConfig, cfg.SampleSeconds)
+	if !isFinite(cfg.SampleSeconds) || cfg.SampleSeconds <= 0 {
+		return SamplePlan{}, fmt.Errorf("%s: sample seconds must be positive and finite (%f)", ReasonInvalidSampleConfig, cfg.SampleSeconds)
+	}
+
+	if len(cfg.Positions) > 0 {
+		if cfg.SampleCount > 0 && cfg.SampleCount != len(cfg.Positions) {
+			return SamplePlan{}, fmt.Errorf("%s: contradictory sample_count (%d) versus positions count (%d)", ReasonContradictorySampleCount, cfg.SampleCount, len(cfg.Positions))
+		}
+		for i, p := range cfg.Positions {
+			if !isFinite(p) {
+				return SamplePlan{}, fmt.Errorf("%s: position at index %d must be a finite number", ReasonInvalidPosition, i)
+			}
+			if cfg.RelativePositions {
+				if p < 0.0 || p > 1.0 {
+					return SamplePlan{}, fmt.Errorf("%s: relative position %f at index %d must be in [0, 1]", ReasonInvalidPosition, p, i)
+				}
+			} else {
+				if p < 0.0 || p > cfg.Duration {
+					return SamplePlan{}, fmt.Errorf("%s: absolute position %f at index %d must be in [0, duration %f]", ReasonInvalidPosition, p, i, cfg.Duration)
+				}
+			}
+		}
 	}
 
 	requestedCount := cfg.SampleCount

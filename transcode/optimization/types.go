@@ -1,6 +1,7 @@
 package optimization
 
 import (
+	"math"
 	"strings"
 )
 
@@ -27,6 +28,7 @@ const (
 	ReasonTargetReached              = "target_reached"
 	ReasonMinimumMet                 = "minimum_met"
 	ReasonBelowMinimumQuality        = "below_minimum_quality"
+	ReasonSampleBelowMinimum         = "sample_below_minimum_quality"
 	ReasonHDRIneligibleForSDRScoring = "hdr_ineligible_for_sdr_scoring"
 	ReasonInvalidMetric              = "invalid_metric"
 	ReasonNoValidMetric              = "no_valid_metric"
@@ -36,19 +38,25 @@ const (
 	ReasonNoValidSampleScores        = "no_valid_sample_scores"
 
 	// Sample planning reasons
-	ReasonInvalidDuration     = "invalid_duration"
-	ReasonInvalidSampleConfig = "invalid_sample_config"
-	ReasonReducedSampleCount  = "reduced_sample_count_to_avoid_overlap"
-	ReasonFullDurationSample  = "full_duration_used_for_short_video"
+	ReasonInvalidDuration          = "invalid_duration"
+	ReasonInvalidSampleConfig      = "invalid_sample_config"
+	ReasonInvalidPosition          = "invalid_sample_position"
+	ReasonContradictorySampleCount = "contradictory_sample_count"
+	ReasonReducedSampleCount       = "reduced_sample_count_to_avoid_overlap"
+	ReasonFullDurationSample       = "full_duration_used_for_short_video"
 
 	// Output estimation uncertainty / fallback reasons
-	ReasonVideoBitrateFallback   = "video_bitrate_fallback_used"
-	ReasonAudioBitrateFallback   = "audio_bitrate_fallback_used"
-	ReasonAudioHeuristicFallback = "audio_heuristic_fallback_used"
-	ReasonSubtitleSizeEstimated  = "subtitle_size_estimated"
-	ReasonMissingSourceSize      = "missing_source_size"
-	ReasonZeroDuration           = "zero_duration"
-	ReasonVideoPayloadUncertain  = "video_payload_uncertain"
+	ReasonVideoBitrateFallback  = "video_bitrate_fallback_used"
+	ReasonAudioBitrateFallback  = "audio_bitrate_fallback_used"
+	ReasonSubtitleSizeEstimated = "subtitle_size_estimated"
+	ReasonMissingSourceSize     = "missing_source_size"
+	ReasonZeroDuration          = "zero_duration"
+	ReasonVideoPayloadUncertain = "video_payload_uncertain"
+	ReasonMissingStreamBitrate  = "missing_stream_bitrate"
+	ReasonMissingSubtitleSize   = "missing_subtitle_size"
+	ReasonUnusableEstimate      = "unusable_estimate"
+	ReasonInvalidVideoEstimate  = "invalid_video_estimate"
+	ReasonInvalidEstimatorInput = "invalid_estimator_input"
 )
 
 // ColorInfo captures the color space, transfer characteristics, and HDR metadata of a stream.
@@ -87,4 +95,9 @@ func IsHDR(c ColorInfo) bool {
 	}
 
 	return false
+}
+
+// isFinite reports whether f is neither NaN nor an infinity.
+func isFinite(f float64) bool {
+	return !math.IsNaN(f) && !math.IsInf(f, 0)
 }
