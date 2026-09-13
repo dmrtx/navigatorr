@@ -60,13 +60,13 @@ func TestBuildVideoEncoderArgsLegacyIsUnchanged(t *testing.T) {
 
 func TestBuildVideoEncoderArgsBalancedMapping(t *testing.T) {
 	plan := &transcode.Plan{
-		VideoCodec:      "hevc_videotoolbox",
-		Quality:         65,
-		VideoProfile:    "main",
-		PixelFormat:     "yuv420p",
-		PrioritizeSpeed: boolPtr(false),
-		SpatialAQ:       boolPtr(true),
-		Realtime:        boolPtr(false),
+		VideoCodec:       "hevc_videotoolbox",
+		Quality:          65,
+		VideoProfile:     "main",
+		PixelFormat:      "yuv420p",
+		PrioritizeSpeed:  boolPtr(false),
+		SpatialAQ:        boolPtr(true),
+		Realtime:         boolPtr(false),
 		ExpectedBitDepth: 8,
 	}
 	got, err := BuildVideoEncoderArgs(plan)
