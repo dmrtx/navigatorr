@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"runtime/debug"
 	"sort"
 	"strings"
 
@@ -14,12 +15,71 @@ const videoToolboxEncoder = "hevc_videotoolbox"
 
 type VideoToolboxCapabilities = transcode.VideoToolboxCapabilities
 
+var (
+	buildVersion   = ""
+	buildGitCommit = ""
+)
+
+// SetBuildMetadata allows setting worker build version and git commit dynamically.
+func SetBuildMetadata(version, gitCommit string) {
+	buildVersion = strings.TrimSpace(version)
+	buildGitCommit = strings.TrimSpace(gitCommit)
+}
+
+// GetBuildMetadata retrieves injected build metadata, falls back to runtime debug build info,
+// or returns explicit "unknown".
+func GetBuildMetadata() (version string, commit string) {
+	version = buildVersion
+	commit = buildGitCommit
+
+	if version == "" || commit == "" {
+		if bi, ok := debug.ReadBuildInfo(); ok {
+			if version == "" && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+				version = bi.Main.Version
+			}
+			if commit == "" {
+				for _, setting := range bi.Settings {
+					if setting.Key == "vcs.revision" {
+						commit = setting.Value
+						break
+					}
+				}
+			}
+		}
+	}
+
+	if version == "" {
+		version = "unknown"
+	}
+	if commit == "" {
+		commit = "unknown"
+	}
+	return version, commit
+}
+
+func boundedErrorMessage(err error, output []byte, maxLen int) string {
+	var parts []string
+	if err != nil {
+		parts = append(parts, err.Error())
+	}
+	outStr := strings.TrimSpace(string(output))
+	if outStr != "" {
+		parts = append(parts, outStr)
+	}
+	msg := strings.Join(parts, ": ")
+	if maxLen > 0 && len(msg) > maxLen {
+		return msg[:maxLen] + "..."
+	}
+	return msg
+}
+
 // ProbeWorkerCapabilities probes full versioned capabilities of the worker node.
 func ProbeWorkerCapabilities(ctx context.Context, ffmpegPath string) (transcode.WorkerCapabilities, error) {
+	ver, commit := GetBuildMetadata()
 	caps := transcode.WorkerCapabilities{
 		ProtocolVersion: transcode.WorkerProtocolVersion,
-		WorkerVersion:   "2026.09.2",
-		BuildGitCommit:  "f8d5c3a",
+		WorkerVersion:   ver,
+		BuildGitCommit:  commit,
 		FFmpegPath:      ffmpegPath,
 		Encoders:        make(map[string]bool),
 		Filters:         make(map[string]bool),
@@ -27,41 +87,60 @@ func ProbeWorkerCapabilities(ctx context.Context, ffmpegPath string) (transcode.
 
 	// 1. Probe FFmpeg version
 	verCmd := exec.CommandContext(ctx, ffmpegPath, "-version")
-	verOut, err := verCmd.Output()
+	verOut, err := verCmd.CombinedOutput()
 	if err != nil {
-		return caps, fmt.Errorf("probing ffmpeg version at %s failed: %w", ffmpegPath, err)
+		errMsg := boundedErrorMessage(err, verOut, 256)
+		caps.ProbeErrors = append(caps.ProbeErrors, transcode.ProbeError{
+			Component: "ffmpeg_version",
+			Message:   errMsg,
+		})
+		return caps, fmt.Errorf("probing ffmpeg version at %s failed: %w (%s)", ffmpegPath, err, errMsg)
 	}
 	caps.FFmpegVersion = ParseFFmpegVersion(string(verOut))
 
-	// 2. Probe VideoToolbox details (partial absence does not fail the whole report)
+	// 2. Probe VideoToolbox details (partial absence does not fail the whole report, but records structured warning/error)
 	vtCaps, vtErr := ProbeVideoToolboxCapabilities(ctx, ffmpegPath)
 	if vtErr != nil {
-		vtCaps = transcode.VideoToolboxCapabilities{
-			Encoder:   videoToolboxEncoder,
-			Available: false,
-		}
+		caps.ProbeErrors = append(caps.ProbeErrors, transcode.ProbeError{
+			Component: "videotoolbox",
+			Message:   boundedErrorMessage(vtErr, nil, 256),
+		})
 	}
 	caps.VideoToolbox = vtCaps
 
-	// 3. Probe encoders availability
+	// 3. Probe encoders availability (preserve partial parsed lines if command failed, but record structured warning/error)
 	encCmd := exec.CommandContext(ctx, ffmpegPath, "-hide_banner", "-encoders")
-	encOut, _ := encCmd.Output()
+	encOut, encErr := encCmd.CombinedOutput()
+	if encErr != nil {
+		caps.ProbeErrors = append(caps.ProbeErrors, transcode.ProbeError{
+			Component: "encoders",
+			Message:   boundedErrorMessage(encErr, encOut, 256),
+		})
+	}
 	caps.Encoders = ParseAvailableEncoders(string(encOut))
 	if vtCaps.Available {
 		caps.Encoders[videoToolboxEncoder] = true
 	}
 
-	// 4. Probe filters availability (e.g. libvmaf, ssim, scale, format)
+	// 4. Probe filters availability (preserve partial parsed lines if command failed, but record structured warning/error)
 	filtCmd := exec.CommandContext(ctx, ffmpegPath, "-hide_banner", "-filters")
-	filtOut, _ := filtCmd.Output()
+	filtOut, filtErr := filtCmd.CombinedOutput()
+	if filtErr != nil {
+		caps.ProbeErrors = append(caps.ProbeErrors, transcode.ProbeError{
+			Component: "filters",
+			Message:   boundedErrorMessage(filtErr, filtOut, 256),
+		})
+	}
 	caps.Filters = ParseAvailableFilters(string(filtOut))
 
-	// 5. Generate deterministic signature
-	sig, err := transcode.ComputeCapabilitySignature(caps)
+	// 5. Generate deterministic capability fingerprint (and signature alias)
+	fp, err := transcode.ComputeCapabilityFingerprint(caps)
 	if err != nil {
-		return caps, fmt.Errorf("generating capability signature: %w", err)
+		return caps, fmt.Errorf("generating capability fingerprint: %w", err)
 	}
-	caps.Signature = sig
+	caps.CapabilityFingerprint = fp
+	caps.CapabilitySignature = fp
+	caps.Signature = fp
 
 	return caps, nil
 }

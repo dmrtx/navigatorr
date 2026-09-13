@@ -207,11 +207,11 @@ func (e *SSHExecutor) Capabilities(ctx context.Context) (WorkerCapabilities, err
 		return WorkerCapabilities{}, fmt.Errorf("failed to parse capabilities response: %w (output: %s)", err, stdout.String())
 	}
 
-	if caps.ProtocolVersion <= 0 {
-		return WorkerCapabilities{}, fmt.Errorf("invalid or missing protocol version %d in worker capabilities (fail closed)", caps.ProtocolVersion)
+	if caps.ProtocolVersion != WorkerProtocolVersion {
+		return WorkerCapabilities{}, fmt.Errorf("worker returned unsupported protocol version %d (expected %d) (fail closed)", caps.ProtocolVersion, WorkerProtocolVersion)
 	}
 
-	if err := VerifyCapabilitySignature(caps); err != nil {
+	if err := VerifyCapabilityFingerprint(caps); err != nil {
 		return WorkerCapabilities{}, err
 	}
 

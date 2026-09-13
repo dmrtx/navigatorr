@@ -45,8 +45,8 @@ func (m *mockTranscodeExecutor) Capabilities(ctx context.Context) (transcode.Wor
 	}
 	caps := transcode.WorkerCapabilities{
 		ProtocolVersion: transcode.WorkerProtocolVersion,
-		WorkerVersion:   "2026.09.2",
-		BuildGitCommit:  "f8d5c3a",
+		WorkerVersion:   "1.0.0",
+		BuildGitCommit:  "abcdef0",
 		FFmpegVersion:   "7.1",
 		Encoders:        map[string]bool{"hevc_videotoolbox": true},
 		Filters:         map[string]bool{"scale": true},
@@ -58,8 +58,10 @@ func (m *mockTranscodeExecutor) Capabilities(ctx context.Context) (transcode.Wor
 			Options:      []string{"prio_speed", "profile", "realtime", "spatial_aq"},
 		},
 	}
-	sig, _ := transcode.ComputeCapabilitySignature(caps)
-	caps.Signature = sig
+	fp, _ := transcode.ComputeCapabilityFingerprint(caps)
+	caps.CapabilityFingerprint = fp
+	caps.CapabilitySignature = fp
+	caps.Signature = fp
 	return caps, nil
 }
 
@@ -1633,4 +1635,99 @@ func TestTranscode_OmittedProfileHonorsConfiguredDefaultProfile(t *testing.T) {
 			t.Errorf("expected fallback profile hevc-vt, got %v", res.Outputs["profile"])
 		}
 	}
+}
+
+func TestTranscodePreflight_DetailedMetadataRetention(t *testing.T) {
+	mediaDir := t.TempDir()
+	origFile := filepath.Join(mediaDir, "HDR10Test.mkv")
+	_ = os.WriteFile(origFile, []byte("fake-hdr10-video-content"), 0o644)
+
+	probeOutput := `{
+		"streams": [
+			{
+				"index": 0,
+				"codec_type": "video",
+				"codec_name": "hevc",
+				"profile": "Main 10",
+				"pix_fmt": "yuv420p10le",
+				"width": 3840,
+				"height": 2160,
+				"r_frame_rate": "24000/1001",
+				"avg_frame_rate": "24000/1001",
+				"bit_rate": "5500000",
+				"color_range": "tv",
+				"color_space": "bt2020nc",
+				"color_primaries": "bt2020",
+				"color_transfer": "smpte2084"
+			}
+		],
+		"format": {
+			"format_name": "matroska,webm",
+			"duration": "120.0",
+			"bit_rate": "6000000"
+		},
+		"chapters": []
+	}`
+
+	probePath := createFakeFFprobeScript(t, probeOutput)
+
+	var capturedReq transcode.Request
+	mockExecutor := &mockTranscodeExecutor{
+		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
+			capturedReq = req
+			return transcode.Job{ID: req.ID}, nil
+		},
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{
+				ID:            jobID,
+				Status:        transcode.StatusCompleted,
+				CandidatePath: origFile,
+			}, nil
+		},
+	}
+
+	engine, _ := setupTranscodeEngine(t, mockExecutor, probePath, []string{mediaDir}, []string{mediaDir}, false)
+	engine.deps.Config.Transcode.DefaultProfile = "anime-hevc-quality"
+
+	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
+		"path": origFile,
+	})
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+
+	origMap, ok := res.Outputs["original"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected original metadata map in outputs, got %T", res.Outputs["original"])
+	}
+
+	if origMap["bit_rate"] != int64(6000000) {
+		t.Errorf("expected container bit_rate=6000000, got %v", origMap["bit_rate"])
+	}
+	if origMap["stream_bit_rate"] != int64(5500000) {
+		t.Errorf("expected stream bit_rate=5500000, got %v", origMap["stream_bit_rate"])
+	}
+	if origMap["r_frame_rate"] != "24000/1001" {
+		t.Errorf("expected r_frame_rate=24000/1001, got %v", origMap["r_frame_rate"])
+	}
+	if origMap["avg_frame_rate"] != "24000/1001" {
+		t.Errorf("expected avg_frame_rate=24000/1001, got %v", origMap["avg_frame_rate"])
+	}
+	fps, ok := origMap["fps"].(float64)
+	if !ok || fps < 23.97 || fps > 23.98 {
+		t.Errorf("expected fps around 23.976, got %v", origMap["fps"])
+	}
+	if origMap["color_range"] != "tv" {
+		t.Errorf("expected color_range=tv, got %v", origMap["color_range"])
+	}
+	if origMap["color_space"] != "bt2020nc" {
+		t.Errorf("expected color_space=bt2020nc, got %v", origMap["color_space"])
+	}
+	if origMap["color_primaries"] != "bt2020" {
+		t.Errorf("expected color_primaries=bt2020, got %v", origMap["color_primaries"])
+	}
+	if origMap["color_transfer"] != "smpte2084" {
+		t.Errorf("expected color_transfer=smpte2084, got %v", origMap["color_transfer"])
+	}
+	_ = capturedReq
 }

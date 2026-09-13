@@ -75,24 +75,46 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("ffprobe did not produce a trustworthy detailed inspection for %s (fail closed)", cleanPath)}, nil
 	}
 	origMap := map[string]any{"path": cleanPath, "size_bytes": fi.Size(), "sha256": origSHA, "duration_sec": rep.DurationSec, "container": rep.Container, "video": rep.Video, "audio": rep.Audio, "subtitles": rep.Subtitles, "attachments": rep.Attachments, "chapters": rep.Chapters, "probed": rep.Probed}
+	if rep.BitRate > 0 {
+		origMap["bit_rate"] = rep.BitRate
+	}
 	if len(rep.Video) > 0 {
-		origMap["video_codec"] = rep.Video[0].Codec
-		origMap["resolution"] = fmt.Sprintf("%dx%d", rep.Video[0].Width, rep.Video[0].Height)
-		origMap["bit_depth"] = rep.Video[0].BitDepth
-		if rep.Video[0].Profile != "" {
-			origMap["video_profile"] = rep.Video[0].Profile
+		v0 := rep.Video[0]
+		origMap["video_codec"] = v0.Codec
+		origMap["resolution"] = fmt.Sprintf("%dx%d", v0.Width, v0.Height)
+		origMap["bit_depth"] = v0.BitDepth
+		if v0.Profile != "" {
+			origMap["video_profile"] = v0.Profile
 		}
-		if rep.Video[0].PixelFormat != "" {
-			origMap["pixel_format"] = rep.Video[0].PixelFormat
+		if v0.PixelFormat != "" {
+			origMap["pixel_format"] = v0.PixelFormat
 		}
-		if rep.Video[0].FrameRate != "" {
-			origMap["frame_rate"] = rep.Video[0].FrameRate
+		if v0.RFrameRate != "" {
+			origMap["r_frame_rate"] = v0.RFrameRate
 		}
-		if rep.Video[0].FPS > 0 {
-			origMap["fps"] = rep.Video[0].FPS
+		if v0.AvgFrameRate != "" {
+			origMap["avg_frame_rate"] = v0.AvgFrameRate
 		}
-		if rep.Video[0].ColorSpace != "" {
-			origMap["color_space"] = rep.Video[0].ColorSpace
+		if v0.FrameRate != "" {
+			origMap["frame_rate"] = v0.FrameRate
+		}
+		if v0.FPS > 0 {
+			origMap["fps"] = v0.FPS
+		}
+		if v0.BitRate > 0 {
+			origMap["stream_bit_rate"] = v0.BitRate
+		}
+		if v0.ColorRange != "" {
+			origMap["color_range"] = v0.ColorRange
+		}
+		if v0.ColorSpace != "" {
+			origMap["color_space"] = v0.ColorSpace
+		}
+		if v0.ColorPrimaries != "" {
+			origMap["color_primaries"] = v0.ColorPrimaries
+		}
+		if v0.ColorTransfer != "" {
+			origMap["color_transfer"] = v0.ColorTransfer
 		}
 	}
 	if rep.HDR != nil {

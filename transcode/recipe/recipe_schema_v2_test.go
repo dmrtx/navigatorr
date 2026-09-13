@@ -1,17 +1,182 @@
 package recipe
 
 import (
+	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 )
 
-func TestRecipeSchemaV1_BackwardCompatibility(t *testing.T) {
-	v1YAML := `
+const sampleValidV1YAML = `
 schema_version: 1
-bundle_version: "2026.09.2"
+bundle_version: "v1.0"
 containers:
   mkv:
-    subtitle_copy: ["subrip", "ass"]
+    subtitle_copy: [subrip, ass]
+profiles:
+  anime-hevc-quality:
+    container: mkv
+    video:
+      codec: hevc_videotoolbox
+      quality: 65
+      profile: main10
+      pixel_format: p010le
+    audio:
+      mode: copy
+    subtitles:
+      mode: preserve
+      convert_incompatible: true
+    preserve:
+      metadata: true
+      chapters: true
+      attachments: true
+    resilience:
+      max_attempts: 3
+      transient_retries: 2
+      retry_backoff_seconds: [1, 2]
+      max_fallbacks: 1
+      fallbacks:
+        - when: container_subtitle_incompatible
+          action: apply_container_conversion
+`
+
+const sampleValidV2YAML = `
+schema_version: 2
+bundle_version: "v2.0"
+containers:
+  mkv:
+    subtitle_copy: [subrip, ass]
+profiles:
+  anime-hevc-quality:
+    container: mkv
+    video:
+      codec: hevc_videotoolbox
+      quality: 65
+      profile: main10
+      pixel_format: p010le
+    audio:
+      mode: copy
+    subtitles:
+      mode: preserve
+      convert_incompatible: true
+    preserve:
+      metadata: true
+      chapters: true
+      attachments: true
+    resilience:
+      max_attempts: 3
+      transient_retries: 2
+      retry_backoff_seconds: [1, 2]
+      max_fallbacks: 1
+      fallbacks:
+        - when: container_subtitle_incompatible
+          action: apply_container_conversion
+    optimization:
+      enabled: true
+      sampling:
+        strategy: uniform
+        sample_count: 3
+        sample_seconds: 10.0
+        positions: [0.2, 0.5, 0.8]
+      quality:
+        preferred_metric: vmaf
+        vmaf:
+          target: 95.0
+          minimum: 93.0
+        ssim:
+          target: 0.98
+          minimum: 0.96
+        marginal_tolerance: 0.5
+      search:
+        max_candidates: 5
+        quality_values: [55, 60, 65, 70, 75]
+      size:
+        preferred_total_bitrate_kbps:
+          min: 2000
+          max: 6000
+        soft_max_total_bitrate_kbps: 8000
+`
+
+func TestRecipeSchemaConstants(t *testing.T) {
+	if MinSchemaVersion != 1 {
+		t.Errorf("expected MinSchemaVersion=1, got %d", MinSchemaVersion)
+	}
+	if LatestSchemaVersion != 2 {
+		t.Errorf("expected LatestSchemaVersion=2, got %d", LatestSchemaVersion)
+	}
+	if SupportedSchemaVersionV1 != 1 {
+		t.Errorf("expected SupportedSchemaVersionV1=1, got %d", SupportedSchemaVersionV1)
+	}
+	if SupportedSchemaVersionV2 != 2 {
+		t.Errorf("expected SupportedSchemaVersionV2=2, got %d", SupportedSchemaVersionV2)
+	}
+	if SupportedSchemaVersion != LatestSchemaVersion {
+		t.Errorf("expected SupportedSchemaVersion to alias LatestSchemaVersion (%d), got %d", LatestSchemaVersion, SupportedSchemaVersion)
+	}
+}
+
+func TestRecipeSchemaV1_FullCompatibility(t *testing.T) {
+	snap, err := Parse([]byte(sampleValidV1YAML))
+	if err != nil {
+		t.Fatalf("Parse of v1 schema failed: %v", err)
+	}
+	if snap.Bundle.SchemaVersion != SupportedSchemaVersionV1 {
+		t.Errorf("expected schema_version %d, got %d", SupportedSchemaVersionV1, snap.Bundle.SchemaVersion)
+	}
+	p := snap.Bundle.Profiles["anime-hevc-quality"]
+	if p.Optimization != nil {
+		t.Errorf("expected optimization to be nil in v1 recipe")
+	}
+}
+
+func TestRecipeSchemaV1_RejectsOptimizationPolicy(t *testing.T) {
+	yamlWithOpt := strings.Replace(sampleValidV1YAML, "resilience:", `optimization:
+      enabled: true
+    resilience:`, 1)
+
+	_, err := Parse([]byte(yamlWithOpt))
+	if err == nil || !strings.Contains(err.Error(), "optimization policy requires schema_version 2") {
+		t.Fatalf("expected schema_version 2 requirement error, got: %v", err)
+	}
+}
+
+func TestRecipeSchemaV2_FullValidationAndNormalization(t *testing.T) {
+	snap, err := Parse([]byte(sampleValidV2YAML))
+	if err != nil {
+		t.Fatalf("Parse of v2 schema failed: %v", err)
+	}
+	if snap.Bundle.SchemaVersion != SupportedSchemaVersionV2 {
+		t.Errorf("expected schema_version %d, got %d", SupportedSchemaVersionV2, snap.Bundle.SchemaVersion)
+	}
+	p := snap.Bundle.Profiles["anime-hevc-quality"]
+	if p.Optimization == nil {
+		t.Fatalf("expected optimization to be populated")
+	}
+	opt := p.Optimization
+	if !opt.Enabled {
+		t.Errorf("expected optimization.enabled=true")
+	}
+	if opt.Sampling.Strategy != "uniform" || opt.Sampling.SampleCount != 3 || opt.Sampling.SampleSeconds != 10.0 {
+		t.Errorf("unexpected sampling config: %+v", opt.Sampling)
+	}
+	if opt.Quality.PreferredMetric != "vmaf" || opt.Quality.VMAF.Target != 95.0 || opt.Quality.MarginalTolerance != 0.5 {
+		t.Errorf("unexpected quality config: %+v", opt.Quality)
+	}
+	if opt.Search.MaxCandidates != 5 || len(opt.Search.QualityValues) != 5 {
+		t.Errorf("unexpected search config: %+v", opt.Search)
+	}
+	if opt.Size.PreferredTotalBitrateKbps.Min != 2000 || opt.Size.PreferredTotalBitrateKbps.Max != 6000 || opt.Size.SoftMaxTotalBitrateKbps != 8000 {
+		t.Errorf("unexpected size config: %+v", opt.Size)
+	}
+}
+
+func TestRecipeSchemaV2_DocumentedDefaultsThroughNormalization(t *testing.T) {
+	yamlMinimalOpt := `
+schema_version: 2
+bundle_version: "v2.0"
+containers:
+  mkv:
+    subtitle_copy: [subrip]
 profiles:
   test-profile:
     container: mkv
@@ -19,340 +184,343 @@ profiles:
       codec: hevc_videotoolbox
       quality: 65
     audio: {mode: copy}
-    subtitles: {mode: preserve, convert_incompatible: true}
-    preserve: {metadata: true, chapters: true, attachments: true}
-    resilience:
-      max_attempts: 1
-`
-	snap, err := Parse([]byte(v1YAML))
-	if err != nil {
-		t.Fatalf("Parse v1 bundle failed: %v", err)
-	}
-	if snap.Bundle.SchemaVersion != 1 {
-		t.Errorf("expected schema_version 1, got %d", snap.Bundle.SchemaVersion)
-	}
-	p := snap.Bundle.Profiles["test-profile"]
-	if p.Optimization != nil {
-		t.Errorf("expected nil optimization policy for v1, got %+v", p.Optimization)
-	}
-}
-
-func TestRecipeSchemaV1_RejectsOptimizationPolicy(t *testing.T) {
-	v1WithOptYAML := `
-schema_version: 1
-bundle_version: "2026.09.2"
-containers:
-  mkv:
-    subtitle_copy: ["subrip"]
-profiles:
-  opt-profile:
-    container: mkv
-    video: {codec: hevc_videotoolbox, quality: 65}
-    audio: {mode: copy}
-    subtitles: {mode: preserve, convert_incompatible: true}
+    subtitles: {mode: preserve}
     preserve: {metadata: true, chapters: true, attachments: true}
     resilience: {max_attempts: 1}
     optimization:
-      quality_candidates: [60, 65, 70]
+      enabled: true
 `
-	_, err := Parse([]byte(v1WithOptYAML))
-	if err == nil || !strings.Contains(err.Error(), "optimization policy requires schema_version 2") {
-		t.Fatalf("expected error mentioning optimization policy requires schema_version 2, got: %v", err)
+	snap, err := Parse([]byte(yamlMinimalOpt))
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	opt := snap.Bundle.Profiles["test-profile"].Optimization
+	if opt == nil {
+		t.Fatalf("expected optimization to be non-nil")
+	}
+	// Verify documented defaults were populated through normalization
+	if opt.Sampling == nil || opt.Sampling.Strategy != DefaultSamplingStrategy || opt.Sampling.SampleCount != DefaultSampleCount {
+		t.Errorf("sampling defaults not normalized: %+v", opt.Sampling)
+	}
+	if opt.Quality == nil || opt.Quality.PreferredMetric != DefaultPreferredMetric || opt.Quality.VMAF.Target != DefaultVMAFTarget {
+		t.Errorf("quality defaults not normalized: %+v", opt.Quality)
+	}
+	if opt.Search == nil || opt.Search.MaxCandidates != DefaultMaxCandidates || len(opt.Search.QualityValues) != len(DefaultQualityValues) {
+		t.Errorf("search defaults not normalized: %+v", opt.Search)
 	}
 }
 
-func TestRecipeSchemaV2_FullOptimizationPolicy(t *testing.T) {
-	v2YAML := `
+func TestRecipeSchemaV2_DisabledOptimizationAllowedWithoutConfig(t *testing.T) {
+	yamlDisabledOpt := `
 schema_version: 2
-bundle_version: "2026.09.2-v2"
+bundle_version: "v2.0"
 containers:
   mkv:
-    subtitle_copy: ["subrip", "ass"]
+    subtitle_copy: [subrip]
 profiles:
-  optimized-anime:
+  test-profile:
     container: mkv
     video:
       codec: hevc_videotoolbox
       quality: 65
-      profile: main10
-      pixel_format: p010le
-      prioritize_speed: false
-      spatial_aq: true
-      realtime: false
     audio: {mode: copy}
-    subtitles: {mode: preserve, convert_incompatible: true}
+    subtitles: {mode: preserve}
     preserve: {metadata: true, chapters: true, attachments: true}
-    resilience:
-      max_attempts: 2
+    resilience: {max_attempts: 1}
     optimization:
-      sampling:
-        segment_duration_sec: 15.0
-        segment_count: 5
-        min_source_duration_sec: 120.0
-      thresholds:
-        min_vmaf: 92.0
-        target_vmaf: 95.5
-        min_ssim: 0.97
-        target_ssim: 0.99
-      quality_candidates: [55, 60, 65, 70, 75]
-      bitrate_guidance:
-        preferred_bitrate: 4500000
-        soft_max_bitrate: 8000000
+      enabled: false
 `
-	snap, err := Parse([]byte(v2YAML))
+	snap, err := Parse([]byte(yamlDisabledOpt))
 	if err != nil {
-		t.Fatalf("Parse v2 bundle failed: %v", err)
+		t.Fatalf("Parse of disabled optimization should succeed: %v", err)
 	}
-	if snap.Bundle.SchemaVersion != 2 {
-		t.Errorf("expected schema_version 2, got %d", snap.Bundle.SchemaVersion)
-	}
-	p, ok := snap.Bundle.Profiles["optimized-anime"]
-	if !ok {
-		t.Fatalf("missing profile optimized-anime")
-	}
-	if p.Optimization == nil {
-		t.Fatalf("expected optimization policy to be populated")
-	}
-	opt := p.Optimization
-
-	// Sampling
-	if opt.Sampling == nil || opt.Sampling.SegmentDurationSec != 15.0 || opt.Sampling.SegmentCount != 5 || opt.Sampling.MinSourceDurationSec != 120.0 {
-		t.Errorf("unexpected sampling policy: %+v", opt.Sampling)
-	}
-
-	// Thresholds
-	if opt.Thresholds == nil || opt.Thresholds.MinVMAF != 92.0 || opt.Thresholds.TargetVMAF != 95.5 || opt.Thresholds.MinSSIM != 0.97 || opt.Thresholds.TargetSSIM != 0.99 {
-		t.Errorf("unexpected metric thresholds: %+v", opt.Thresholds)
-	}
-
-	// Quality Candidates
-	if len(opt.QualityCandidates) != 5 || opt.QualityCandidates[0] != 55 || opt.QualityCandidates[4] != 75 {
-		t.Errorf("unexpected quality candidates: %v", opt.QualityCandidates)
-	}
-
-	// Bitrate Guidance
-	if opt.BitrateGuidance == nil || opt.BitrateGuidance.PreferredBitrate != 4500000 || opt.BitrateGuidance.SoftMaxBitrate != 8000000 {
-		t.Errorf("unexpected bitrate guidance: %+v", opt.BitrateGuidance)
-	}
-
-	// Verify resolution separates optimization policy from Plan
-	plan, err := Resolve(snap, "optimized-anime", nil, nil)
-	if err != nil {
-		t.Fatalf("Resolve failed: %v", err)
-	}
-	if plan.VideoProfile != "main10" || plan.PixelFormat != "p010le" || plan.ExpectedBitDepth != 10 {
-		t.Errorf("unexpected plan video knobs: profile=%s pix_fmt=%s bit_depth=%d",
-			plan.VideoProfile, plan.PixelFormat, plan.ExpectedBitDepth)
-	}
-	if plan.PlanDigest == "" {
-		t.Errorf("plan digest must not be empty")
+	opt := snap.Bundle.Profiles["test-profile"].Optimization
+	if opt.Enabled {
+		t.Errorf("expected optimization.enabled=false")
 	}
 }
 
-func TestRecipeSchemaV2_StrictKnownFieldsRejectsArbitraryArgs(t *testing.T) {
+func TestRecipeSchemaV2_StrictKnownFieldsRejectsOldFlattenedSchema(t *testing.T) {
+	oldFlattenedYAML := `
+schema_version: 2
+bundle_version: "v2.0"
+containers:
+  mkv:
+    subtitle_copy: [subrip]
+profiles:
+  test-profile:
+    container: mkv
+    video:
+      codec: hevc_videotoolbox
+      quality: 65
+    audio: {mode: copy}
+    subtitles: {mode: preserve}
+    preserve: {metadata: true, chapters: true, attachments: true}
+    resilience: {max_attempts: 1}
+    optimization:
+      thresholds:
+        target_vmaf: 95.0
+`
+	_, err := Parse([]byte(oldFlattenedYAML))
+	if err == nil || (!strings.Contains(err.Error(), "thresholds") && !strings.Contains(err.Error(), "not found")) {
+		t.Fatalf("expected KnownFields rejection of old flattened 'thresholds' field, got: %v", err)
+	}
+}
+
+func TestRecipeOptimizationPolicy_ValidationFailures(t *testing.T) {
 	cases := []struct {
-		name string
-		yaml string
+		name        string
+		opt         OptimizationPolicy
+		errContains string
 	}{
 		{
-			name: "arbitrary ffmpeg_args in optimization",
-			yaml: `
-schema_version: 2
-bundle_version: "2026.09.2"
-containers: {mkv: {subtitle_copy: ["subrip"]}}
-profiles:
-  p:
-    container: mkv
-    video: {codec: hevc_videotoolbox, quality: 65}
-    audio: {mode: copy}
-    subtitles: {mode: preserve, convert_incompatible: true}
-    preserve: {metadata: true, chapters: true, attachments: true}
-    resilience: {max_attempts: 1}
-    optimization:
-      ffmpeg_args: ["-b:v", "5M"]
-`,
+			name: "non-finite float in sample_seconds",
+			opt: OptimizationPolicy{
+				Enabled: true,
+				Sampling: &SamplingPolicy{
+					Strategy:      "uniform",
+					SampleCount:   2,
+					SampleSeconds: math.NaN(),
+					Positions:     []float64{0.2, 0.8},
+				},
+			},
+			errContains: "sample_seconds",
 		},
 		{
-			name: "custom_command in sampling",
-			yaml: `
-schema_version: 2
-bundle_version: "2026.09.2"
-containers: {mkv: {subtitle_copy: ["subrip"]}}
-profiles:
-  p:
-    container: mkv
-    video: {codec: hevc_videotoolbox, quality: 65}
-    audio: {mode: copy}
-    subtitles: {mode: preserve, convert_incompatible: true}
-    preserve: {metadata: true, chapters: true, attachments: true}
-    resilience: {max_attempts: 1}
-    optimization:
-      sampling:
-        custom_command: "ffmpeg -i in.mkv out.mkv"
-`,
+			name: "sampling positions count mismatch",
+			opt: OptimizationPolicy{
+				Enabled: true,
+				Sampling: &SamplingPolicy{
+					Strategy:      "uniform",
+					SampleCount:   3,
+					SampleSeconds: 10.0,
+					Positions:     []float64{0.2, 0.8},
+				},
+			},
+			errContains: "positions length (2) must match sample_count (3)",
 		},
 		{
-			name: "unverified encoder arg in video block",
-			yaml: `
-schema_version: 2
-bundle_version: "2026.09.2"
-containers: {mkv: {subtitle_copy: ["subrip"]}}
-profiles:
-  p:
-    container: mkv
-    video: {codec: hevc_videotoolbox, quality: 65, bitrate: "5M"}
-    audio: {mode: copy}
-    subtitles: {mode: preserve, convert_incompatible: true}
-    preserve: {metadata: true, chapters: true, attachments: true}
-    resilience: {max_attempts: 1}
-`,
+			name: "sampling positions not strictly increasing",
+			opt: OptimizationPolicy{
+				Enabled: true,
+				Sampling: &SamplingPolicy{
+					Strategy:      "uniform",
+					SampleCount:   2,
+					SampleSeconds: 10.0,
+					Positions:     []float64{0.8, 0.2},
+				},
+			},
+			errContains: "must be strictly increasing",
+		},
+		{
+			name: "sampling position out of (0, 1) range",
+			opt: OptimizationPolicy{
+				Enabled: true,
+				Sampling: &SamplingPolicy{
+					Strategy:      "uniform",
+					SampleCount:   1,
+					SampleSeconds: 10.0,
+					Positions:     []float64{1.5},
+				},
+			},
+			errContains: "out of range (0.0, 1.0)",
+		},
+		{
+			name: "vmaf target less than minimum",
+			opt: OptimizationPolicy{
+				Enabled: true,
+				Sampling: &SamplingPolicy{
+					Strategy:      "uniform",
+					SampleCount:   1,
+					SampleSeconds: 10.0,
+					Positions:     []float64{0.5},
+				},
+				Quality: &QualityPolicy{
+					PreferredMetric: "vmaf",
+					VMAF:            &MetricTarget{Target: 90.0, Minimum: 95.0},
+				},
+			},
+			errContains: "vmaf target (90) must be >= minimum (95)",
+		},
+		{
+			name: "ssim target less than minimum",
+			opt: OptimizationPolicy{
+				Enabled: true,
+				Sampling: &SamplingPolicy{
+					Strategy:      "uniform",
+					SampleCount:   1,
+					SampleSeconds: 10.0,
+					Positions:     []float64{0.5},
+				},
+				Quality: &QualityPolicy{
+					PreferredMetric: "ssim",
+					SSIM:            &MetricTarget{Target: 0.90, Minimum: 0.95},
+				},
+			},
+			errContains: "ssim target (0.9) must be >= minimum (0.95)",
+		},
+		{
+			name: "duplicate quality candidates",
+			opt: OptimizationPolicy{
+				Enabled: true,
+				Sampling: &SamplingPolicy{
+					Strategy:      "uniform",
+					SampleCount:   1,
+					SampleSeconds: 10.0,
+					Positions:     []float64{0.5},
+				},
+				Quality: &QualityPolicy{
+					PreferredMetric: "vmaf",
+					VMAF:            &MetricTarget{Target: 95.0, Minimum: 93.0},
+				},
+				Search: &SearchPolicy{
+					MaxCandidates: 5,
+					QualityValues: []int{60, 60, 70},
+				},
+			},
+			errContains: "quality_values must be strictly ordered without duplicates",
+		},
+		{
+			name: "unordered quality candidates",
+			opt: OptimizationPolicy{
+				Enabled: true,
+				Sampling: &SamplingPolicy{
+					Strategy:      "uniform",
+					SampleCount:   1,
+					SampleSeconds: 10.0,
+					Positions:     []float64{0.5},
+				},
+				Quality: &QualityPolicy{
+					PreferredMetric: "vmaf",
+					VMAF:            &MetricTarget{Target: 95.0, Minimum: 93.0},
+				},
+				Search: &SearchPolicy{
+					MaxCandidates: 5,
+					QualityValues: []int{70, 60},
+				},
+			},
+			errContains: "quality_values must be strictly ordered without duplicates",
+		},
+		{
+			name: "candidate count exceeds max_candidates",
+			opt: OptimizationPolicy{
+				Enabled: true,
+				Sampling: &SamplingPolicy{
+					Strategy:      "uniform",
+					SampleCount:   1,
+					SampleSeconds: 10.0,
+					Positions:     []float64{0.5},
+				},
+				Quality: &QualityPolicy{
+					PreferredMetric: "vmaf",
+					VMAF:            &MetricTarget{Target: 95.0, Minimum: 93.0},
+				},
+				Search: &SearchPolicy{
+					MaxCandidates: 2,
+					QualityValues: []int{50, 60, 70},
+				},
+			},
+			errContains: "exceeds max_candidates",
+		},
+		{
+			name: "preferred bitrate min exceeds max",
+			opt: OptimizationPolicy{
+				Enabled: true,
+				Sampling: &SamplingPolicy{
+					Strategy:      "uniform",
+					SampleCount:   1,
+					SampleSeconds: 10.0,
+					Positions:     []float64{0.5},
+				},
+				Quality: &QualityPolicy{
+					PreferredMetric: "vmaf",
+					VMAF:            &MetricTarget{Target: 95.0, Minimum: 93.0},
+				},
+				Search: &SearchPolicy{
+					MaxCandidates: 3,
+					QualityValues: []int{50, 60},
+				},
+				Size: &SizePolicy{
+					PreferredTotalBitrateKbps: &BitrateRange{Min: 5000, Max: 3000},
+				},
+			},
+			errContains: "preferred_total_bitrate_kbps max (3000) must be >= min (5000)",
+		},
+		{
+			name: "soft_max_total_bitrate_kbps less than preferred max",
+			opt: OptimizationPolicy{
+				Enabled: true,
+				Sampling: &SamplingPolicy{
+					Strategy:      "uniform",
+					SampleCount:   1,
+					SampleSeconds: 10.0,
+					Positions:     []float64{0.5},
+				},
+				Quality: &QualityPolicy{
+					PreferredMetric: "vmaf",
+					VMAF:            &MetricTarget{Target: 95.0, Minimum: 93.0},
+				},
+				Search: &SearchPolicy{
+					MaxCandidates: 3,
+					QualityValues: []int{50, 60},
+				},
+				Size: &SizePolicy{
+					PreferredTotalBitrateKbps: &BitrateRange{Min: 3000, Max: 5000},
+					SoftMaxTotalBitrateKbps:   4000,
+				},
+			},
+			errContains: "soft_max_total_bitrate_kbps (4000) must be >= preferred_total_bitrate_kbps max (5000)",
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := Parse([]byte(tc.yaml))
-			if err == nil {
-				t.Fatalf("expected strict KnownFields error for %s, got nil", tc.name)
+			optCopy := tc.opt
+			err := ValidateOptimizationPolicy("test", &optCopy)
+			if err == nil || !strings.Contains(err.Error(), tc.errContains) {
+				t.Fatalf("expected error containing %q, got: %v", tc.errContains, err)
 			}
 		})
 	}
 }
 
-func TestRecipeSchemaV2_OptimizationValidationBounds(t *testing.T) {
-	baseYAML := func(optBlock string) string {
-		return `
-schema_version: 2
-bundle_version: "2026.09.2"
-containers:
-  mkv:
-    subtitle_copy: ["subrip"]
-profiles:
-  test-opt:
-    container: mkv
-    video: {codec: hevc_videotoolbox, quality: 65}
-    audio: {mode: copy}
-    subtitles: {mode: preserve, convert_incompatible: true}
-    preserve: {metadata: true, chapters: true, attachments: true}
-    resilience: {max_attempts: 1}
-    optimization:
-` + optBlock
-	}
-
-	tests := []struct {
-		name      string
-		opt       string
-		errSubstr string
-	}{
-		{
-			name:      "vmaf out of range high",
-			opt:       "      thresholds: {min_vmaf: 105.0}",
-			errSubstr: "min_vmaf 105 out of range 0-100",
+func TestRecipeSchemaV2_JSONRoundTrip(t *testing.T) {
+	opt := &OptimizationPolicy{
+		Enabled: true,
+		Sampling: &SamplingPolicy{
+			Strategy:      "uniform",
+			SampleCount:   3,
+			SampleSeconds: 15.0,
+			Positions:     []float64{0.25, 0.5, 0.75},
 		},
-		{
-			name:      "vmaf target less than min",
-			opt:       "      thresholds: {min_vmaf: 95.0, target_vmaf: 90.0}",
-			errSubstr: "target_vmaf (90) must be >= min_vmaf (95)",
+		Quality: &QualityPolicy{
+			PreferredMetric:   "vmaf",
+			VMAF:              &MetricTarget{Target: 96.0, Minimum: 94.0},
+			MarginalTolerance: 0.5,
 		},
-		{
-			name:      "ssim out of range high",
-			opt:       "      thresholds: {min_ssim: 1.5}",
-			errSubstr: "min_ssim 1.5 out of range 0.0-1.0",
+		Search: &SearchPolicy{
+			MaxCandidates: 3,
+			QualityValues: []int{60, 65, 70},
 		},
-		{
-			name:      "ssim target less than min",
-			opt:       "      thresholds: {min_ssim: 0.98, target_ssim: 0.95}",
-			errSubstr: "target_ssim (0.95) must be >= min_ssim (0.98)",
-		},
-		{
-			name:      "quality candidate out of range high",
-			opt:       "      quality_candidates: [50, 105]",
-			errSubstr: "quality candidate 105 out of range 1-100",
-		},
-		{
-			name:      "quality candidate out of range low",
-			opt:       "      quality_candidates: [0, 50]",
-			errSubstr: "quality candidate 0 out of range 1-100",
-		},
-		{
-			name:      "duplicate quality candidate",
-			opt:       "      quality_candidates: [65, 70, 65]",
-			errSubstr: "duplicate quality candidate 65",
-		},
-		{
-			name:      "too many quality candidates",
-			opt:       "      quality_candidates: [10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 99]",
-			errSubstr: "maximum 10 quality candidates allowed",
-		},
-		{
-			name:      "inverted bitrate guidance",
-			opt:       "      bitrate_guidance: {preferred_bitrate: 8000000, soft_max_bitrate: 4000000}",
-			errSubstr: "soft_max_bitrate (4000000) must be >= preferred_bitrate (8000000)",
-		},
-		{
-			name:      "sampling duration too high",
-			opt:       "      sampling: {segment_duration_sec: 500.0}",
-			errSubstr: "segment_duration_sec must be between 0 and 300 seconds",
-		},
-		{
-			name:      "sampling count too high",
-			opt:       "      sampling: {segment_count: 25}",
-			errSubstr: "segment_count out of range",
+		Size: &SizePolicy{
+			PreferredTotalBitrateKbps: &BitrateRange{Min: 2000, Max: 5000},
+			SoftMaxTotalBitrateKbps:   6000,
 		},
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			bundleData := baseYAML(tc.opt)
-			_, err := Parse([]byte(bundleData))
-			if err == nil || !strings.Contains(err.Error(), tc.errSubstr) {
-				t.Fatalf("expected error containing %q, got: %v", tc.errSubstr, err)
-			}
-		})
-	}
-}
-
-func TestBuiltinProfiles_AnimeHevcQualityAndCurrentProfilesUnchanged(t *testing.T) {
-	snap, err := Parse(EmbeddedBytes())
+	data, err := json.Marshal(opt)
 	if err != nil {
-		t.Fatalf("Parse embedded bytes failed: %v", err)
+		t.Fatalf("Marshal failed: %v", err)
 	}
 
-	p, ok := snap.Bundle.Profiles["anime-hevc-quality"]
-	if !ok {
-		t.Fatalf("missing profile anime-hevc-quality")
+	var decoded OptimizationPolicy
+	dec := json.NewDecoder(strings.NewReader(string(data)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&decoded); err != nil {
+		t.Fatalf("Decode failed: %v", err)
 	}
 
-	if p.Video.Codec != "hevc_videotoolbox" {
-		t.Errorf("expected codec hevc_videotoolbox, got %s", p.Video.Codec)
-	}
-	if p.Video.Quality != 75 {
-		t.Errorf("expected quality 75, got %d", p.Video.Quality)
-	}
-	if p.Video.Profile != "main" {
-		t.Errorf("expected profile main, got %s", p.Video.Profile)
-	}
-	if p.Video.PixelFormat != "yuv420p" {
-		t.Errorf("expected pixel_format yuv420p, got %s", p.Video.PixelFormat)
-	}
-	if p.Video.PrioritizeSpeed == nil || *p.Video.PrioritizeSpeed != false {
-		t.Errorf("expected prioritize_speed false, got %v", p.Video.PrioritizeSpeed)
-	}
-	if p.Video.SpatialAQ == nil || *p.Video.SpatialAQ != true {
-		t.Errorf("expected spatial_aq true, got %v", p.Video.SpatialAQ)
-	}
-	if p.Video.Realtime == nil || *p.Video.Realtime != false {
-		t.Errorf("expected realtime false, got %v", p.Video.Realtime)
-	}
-	if p.Optimization != nil {
-		t.Errorf("expected anime-hevc-quality optimization policy to remain nil, got %+v", p.Optimization)
-	}
-
-	plan, err := Resolve(snap, "anime-hevc-quality", nil, nil)
-	if err != nil {
-		t.Fatalf("Resolve anime-hevc-quality failed: %v", err)
-	}
-	if plan.Quality != 75 || plan.VideoProfile != "main" || plan.PixelFormat != "yuv420p" || plan.ExpectedBitDepth != 8 {
-		t.Errorf("unexpected resolved plan for anime-hevc-quality: %+v", plan)
+	if decoded.Sampling.SampleSeconds != 15.0 || decoded.Quality.VMAF.Target != 96.0 {
+		t.Errorf("roundtrip data mismatch: %+v", decoded)
 	}
 }

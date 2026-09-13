@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -560,5 +561,133 @@ func TestDetailedReport_JSONRoundTripPreservation(t *testing.T) {
 
 	if !reflect.DeepEqual(orig, restored) {
 		t.Errorf("Round trip mismatch:\norig:     %+v\nrestored: %+v", orig, restored)
+	}
+}
+
+func TestDetailedInspection_FormatBitRateAndFrameRates(t *testing.T) {
+	dir := t.TempDir()
+	mediaFile := filepath.Join(dir, "rates.mkv")
+	_ = os.WriteFile(mediaFile, []byte("fake-video"), 0o644)
+
+	probeJSON := `{
+		"streams": [
+			{
+				"index": 0,
+				"codec_type": "video",
+				"codec_name": "hevc",
+				"r_frame_rate": "24/1",
+				"avg_frame_rate": "24000/1001",
+				"bit_rate": "8000000"
+			}
+		],
+		"format": {
+			"format_name": "matroska",
+			"duration": "100.0",
+			"bit_rate": "8500000"
+		}
+	}`
+
+	mockFFprobe := createMockFFprobe(t, dir, probeJSON)
+	rep, err := InspectDetailed(context.Background(), mockFFprobe, mediaFile)
+	if err != nil {
+		t.Fatalf("InspectDetailed failed: %v", err)
+	}
+
+	if rep.BitRate != 8500000 {
+		t.Errorf("expected format bit_rate=8500000, got %d", rep.BitRate)
+	}
+
+	if len(rep.Video) != 1 {
+		t.Fatalf("expected 1 video stream, got %d", len(rep.Video))
+	}
+	v := rep.Video[0]
+	if v.RFrameRate != "24/1" {
+		t.Errorf("expected r_frame_rate='24/1', got %q", v.RFrameRate)
+	}
+	if v.AvgFrameRate != "24000/1001" {
+		t.Errorf("expected avg_frame_rate='24000/1001', got %q", v.AvgFrameRate)
+	}
+	// FPS should be computed from avg_frame_rate first (23.976), not r_frame_rate (24.0)
+	if v.FPS < 23.97 || v.FPS > 23.98 {
+		t.Errorf("expected FPS computed from avg_frame_rate (~23.976), got %v", v.FPS)
+	}
+}
+
+func TestDetailedInspection_MasteringDisplayNoNilStringsAndBoundedSideData(t *testing.T) {
+	dir := t.TempDir()
+	mediaFile := filepath.Join(dir, "hdr_partial.mkv")
+	_ = os.WriteFile(mediaFile, []byte("fake-video"), 0o644)
+
+	// Create side data with partial mastering display (omitted fields) and more than 10 side-data entries
+	probeJSON := `{
+		"streams": [
+			{
+				"index": 0,
+				"codec_type": "video",
+				"codec_name": "hevc",
+				"side_data_list": [
+					{
+						"side_data_type": "Mastering display metadata",
+						"red_x": "34000/50000",
+						"max_luminance": "10000000/10000"
+					},
+					{"side_data_type": "entry2"},
+					{"side_data_type": "entry3"},
+					{"side_data_type": "entry4"},
+					{"side_data_type": "entry5"},
+					{"side_data_type": "entry6"},
+					{"side_data_type": "entry7"},
+					{"side_data_type": "entry8"},
+					{"side_data_type": "entry9"},
+					{"side_data_type": "entry10"},
+					{"side_data_type": "entry11"},
+					{"side_data_type": "entry12"}
+				]
+			}
+		],
+		"format": {
+			"format_name": "matroska",
+			"duration": "50.0"
+		}
+	}`
+
+	mockFFprobe := createMockFFprobe(t, dir, probeJSON)
+	rep, err := InspectDetailed(context.Background(), mockFFprobe, mediaFile)
+	if err != nil {
+		t.Fatalf("InspectDetailed failed: %v", err)
+	}
+
+	if len(rep.Video) != 1 {
+		t.Fatalf("expected 1 video stream, got %d", len(rep.Video))
+	}
+	v := rep.Video[0]
+
+	// 1. Verify side data list is bounded to maxSideDataEntries (10)
+	if len(v.SideData) > 10 {
+		t.Errorf("expected side data entries to be bounded to 10, got %d", len(v.SideData))
+	}
+
+	// 2. Verify partial mastering display does not contain "<nil>" strings
+	if v.MasteringDisplay == nil {
+		t.Fatalf("expected mastering display to be non-nil")
+	}
+	if v.MasteringDisplay.RedX != "34000/50000" {
+		t.Errorf("expected red_x='34000/50000', got %q", v.MasteringDisplay.RedX)
+	}
+	if v.MasteringDisplay.MinLuminance != "" {
+		t.Errorf("expected unpopulated min_luminance to be empty string, got %q", v.MasteringDisplay.MinLuminance)
+	}
+
+	// 3. Verify JSON serialization never includes "<nil>"
+	data, err := json.Marshal(v.MasteringDisplay)
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+	jsonStr := string(data)
+	if strings.Contains(jsonStr, "<nil>") {
+		t.Errorf("JSON output contains '<nil>': %s", jsonStr)
+	}
+	if strings.Contains(jsonStr, "min_luminance") {
+		t.Errorf("JSON output should omit empty min_luminance: %s", jsonStr)
 	}
 }
