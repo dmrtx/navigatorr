@@ -141,36 +141,5 @@ func getOptimizationPolicy(v any) *recipe.OptimizationPolicy {
 }
 
 func isSourceHDRorDV(rep *mediainspect.DetailedReport) bool {
-	if rep == nil {
-		return false
-	}
-	if rep.HDR != nil && rep.HDR.Present {
-		return true
-	}
-	for _, vs := range rep.Video {
-		codec := strings.ToLower(strings.TrimSpace(vs.Codec))
-		prof := strings.ToLower(strings.TrimSpace(vs.Profile))
-		if strings.Contains(codec, "dovi") || strings.Contains(codec, "dvh1") ||
-			strings.Contains(codec, "dvhe") || strings.Contains(codec, "dva1") ||
-			strings.Contains(codec, "dav1") || strings.Contains(prof, "dolby vision") ||
-			strings.Contains(prof, "dovi") || strings.HasPrefix(prof, "dv") {
-			return true
-		}
-		ct := strings.ToLower(strings.TrimSpace(vs.ColorTransfer))
-		cp := strings.ToLower(strings.TrimSpace(vs.ColorPrimaries))
-		cs := strings.ToLower(strings.TrimSpace(vs.ColorSpace))
-		if ct == "smpte2084" || ct == "arib-std-b67" || strings.Contains(ct, "2084") || strings.Contains(ct, "hlg") || strings.Contains(ct, "pq") {
-			return true
-		}
-		if cp == "bt2020" || strings.Contains(cp, "2020") || cp == "dci-p3" {
-			return true
-		}
-		if cs == "bt2020nc" || cs == "bt2020c" || strings.Contains(cs, "2020") {
-			return true
-		}
-		if vs.MasteringDisplay != nil || vs.ContentLightLevel != nil {
-			return true
-		}
-	}
-	return false
+	return mediainspect.IsHDRorDolbyVisionReport(rep)
 }

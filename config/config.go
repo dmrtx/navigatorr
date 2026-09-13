@@ -269,7 +269,8 @@ func (t *TranscodeConfig) ResolvePlanForSource(profileName string, subtitles []r
 }
 
 // ResolveProfile resolves and validates a recipe Profile for the given profileName,
-// incorporating local profile overrides and normalizing optimization policies if present.
+// incorporating local profile overrides (whose optimization policies are already normalized
+// during snapshot parsing and override conversion).
 func (t *TranscodeConfig) ResolveProfile(profileName string) (recipe.Profile, error) {
 	name := strings.TrimSpace(profileName)
 	if name == "" {
