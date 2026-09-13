@@ -84,9 +84,10 @@ func LoadWorkerConfig(configPath string) (*WorkerConfig, error) {
 
 // Worker manages the local transcode execution on the node.
 type Worker struct {
-	cfg         *WorkerConfig
-	ffmpegPath  string
-	ffprobePath string
+	cfg             *WorkerConfig
+	ffmpegPath      string
+	ffprobePath     string
+	benchmarkRunner BenchmarkRunner
 }
 
 // NewWorker initializes a new transcode worker.
@@ -302,6 +303,12 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 	}
 
 	jobDir := filepath.Join(w.cfg.StateDir, req.ID)
+	benchFile := filepath.Join(jobDir, "benchmark.json")
+	if _, err := os.Stat(benchFile); err == nil {
+		return SubmitResponse{ID: req.ID, Error: fmt.Sprintf("job ID collision: %q already exists as a benchmark job (fail closed)", req.ID)},
+			fmt.Errorf("job ID collision with benchmark job")
+	}
+
 	jobFile := filepath.Join(jobDir, "job.json")
 
 	// Idempotency: if job already exists
@@ -417,20 +424,38 @@ func (w *Worker) countActiveJobs(excludeID string) (int, error) {
 		if !entry.IsDir() || entry.Name() == excludeID {
 			continue
 		}
-		jobPath := filepath.Join(w.cfg.StateDir, entry.Name(), "job.json")
+		entryDir := filepath.Join(w.cfg.StateDir, entry.Name())
+		jobPath := filepath.Join(entryDir, "job.json")
 		job, err := LoadJob(jobPath)
-		if err != nil {
-			continue
+		if err == nil {
+			if job.Status == "running" || job.Status == "queued" {
+				if IsJobProcessAlive(job) {
+					count++
+					continue
+				} else if job.PID > 0 {
+					// Clean stale crash or recycled PID
+					job.Status = "failed"
+					job.FinishedAt = time.Now().UTC()
+					job.Error = "process terminated unexpectedly"
+					_ = SaveJobAtomic(jobPath, job)
+				}
+			}
 		}
-		if job.Status == "running" || job.Status == "queued" {
-			if IsJobProcessAlive(job) {
-				count++
-			} else if job.PID > 0 {
-				// Clean stale crash or recycled PID
-				job.Status = "failed"
-				job.FinishedAt = time.Now().UTC()
-				job.Error = "process terminated unexpectedly"
-				_ = SaveJobAtomic(jobPath, job)
+
+		// Also check for active benchmark jobs sharing the worker capacity
+		benchPath := filepath.Join(entryDir, "benchmark.json")
+		bench, err := LoadBenchmark(benchPath)
+		if err == nil {
+			if bench.Status == "running" || bench.Status == "queued" {
+				if IsBenchmarkProcessAlive(bench) {
+					count++
+				} else if bench.PID > 0 {
+					bench.Status = "failed"
+					bench.FinishedAt = time.Now().UTC()
+					bench.Error = "process terminated unexpectedly"
+					_ = SaveBenchmarkAtomic(benchPath, bench)
+					_ = w.CleanBenchmarkSamples(entry.Name())
+				}
 			}
 		}
 	}
