@@ -127,6 +127,23 @@ func ValidateProfile(name string, p Profile) error {
 	if p.Video.Quality < 1 || p.Video.Quality > 100 {
 		return fmt.Errorf("profile %q: video quality %d out of range 1-100", name, p.Video.Quality)
 	}
+	videoProfile := normalizeCodec(p.Video.Profile)
+	pixelFormat := normalizeCodec(p.Video.PixelFormat)
+	if videoProfile != "" && videoProfile != "main" && videoProfile != "main10" {
+		return fmt.Errorf("profile %q: unsupported HEVC profile %q (allowed: main, main10)", name, p.Video.Profile)
+	}
+	if pixelFormat != "" && pixelFormat != "yuv420p" && pixelFormat != "p010le" {
+		return fmt.Errorf("profile %q: unsupported pixel_format %q (allowed: yuv420p, p010le)", name, p.Video.PixelFormat)
+	}
+	if videoProfile == "main10" && pixelFormat != "p010le" {
+		return fmt.Errorf("profile %q: HEVC main10 requires pixel_format p010le to guarantee 10-bit output", name)
+	}
+	if pixelFormat == "p010le" && videoProfile != "main10" {
+		return fmt.Errorf("profile %q: pixel_format p010le requires HEVC profile main10", name)
+	}
+	if videoProfile == "main" && pixelFormat == "p010le" {
+		return fmt.Errorf("profile %q: HEVC main is incompatible with pixel_format p010le", name)
+	}
 	if strings.ToLower(strings.TrimSpace(p.Audio.Mode)) != "copy" {
 		return fmt.Errorf("profile %q: unsupported audio mode %q", name, p.Audio.Mode)
 	}

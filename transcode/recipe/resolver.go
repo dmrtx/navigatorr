@@ -72,8 +72,17 @@ func Resolve(s *Snapshot, profileName string, overrides map[string]Profile, subt
 			retryOn = append(retryOn, f.When)
 		}
 	}
+	videoProfile := normalizeCodec(p.Video.Profile)
+	pixelFormat := normalizeCodec(p.Video.PixelFormat)
+	expectedBitDepth := 0
+	if videoProfile == "main10" {
+		expectedBitDepth = 10
+	} else if videoProfile == "main" || pixelFormat == "yuv420p" {
+		expectedBitDepth = 8
+	}
 	plan := &transcode.Plan{
 		Container: container, VideoCodec: normalizeCodec(p.Video.Codec), Quality: p.Video.Quality,
+		VideoProfile: videoProfile, PixelFormat: pixelFormat, PrioritizeSpeed: cloneBool(p.Video.PrioritizeSpeed), SpatialAQ: cloneBool(p.Video.SpatialAQ), Realtime: cloneBool(p.Video.Realtime), ExpectedBitDepth: expectedBitDepth,
 		AudioMode: strings.ToLower(strings.TrimSpace(p.Audio.Mode)), SubtitleMode: strings.ToLower(strings.TrimSpace(p.Subtitles.Mode)),
 		ConvertIncompatibleSubtitles: p.Subtitles.ConvertIncompatible, PreserveMetadata: p.Preserve.Metadata, PreserveChapters: p.Preserve.Chapters, PreserveAttachments: p.Preserve.Attachments,
 		SubtitleActions: actions, RecipeVersion: s.Identity.Version, RecipeDigest: s.Identity.Digest,
@@ -86,4 +95,12 @@ func Resolve(s *Snapshot, profileName string, overrides map[string]Profile, subt
 	}
 	plan.PlanDigest = digest
 	return plan, nil
+}
+
+func cloneBool(v *bool) *bool {
+	if v == nil {
+		return nil
+	}
+	out := *v
+	return &out
 }
