@@ -477,13 +477,13 @@ Demostrado mediante tests que:
 - [x] Verificar determinismo estricto, tolerancia a fallos por candidato, preservación de evidencia en cancelación/fallo, e invariancia ante permutaciones del orden de candidatos con suite exhaustiva de tests unitarios e integrales en `benchmark_runner_selection_test.go`.
 
 ### Fase 7 — Actions e integración
-- [ ] Registrar `benchmark_transcode`.
-- [ ] Añadir lifecycle persistente de submit/wait/result/cancel.
-- [ ] Integrar la ruta optimizada en `transcode_media` sin alterar la ruta legacy.
-- [ ] Crear el plan ganador inmutable y su digest.
-- [ ] Mantener validación completa y aceptación candidate-only.
-- [ ] Verificar resume/idempotencia y `worker_busy`.
-- [ ] Confirmar compatibilidad básica con `transcode_batch`.
+- [x] Registrar `benchmark_transcode`.
+- [x] Añadir lifecycle persistente de submit/wait/result/cancel.
+- [x] Integrar la ruta optimizada en `transcode_media` sin alterar la ruta legacy.
+- [x] Crear el plan ganador inmutable y su digest.
+- [x] Mantener validación completa y aceptación candidate-only.
+- [x] Verificar resume/idempotencia y `worker_busy`.
+- [x] Confirmar compatibilidad básica con `transcode_batch`.
 
 ### Fase 8 — Documentación y validación real
 - [ ] Actualizar `docs/TRANSCODING.md`.
@@ -507,8 +507,8 @@ Demostrado mediante tests que:
 | 3. Recipes v2 | Completo | Loader v1/v2 compatible (`MinSchemaVersion`..`LatestSchemaVersion`), `OptimizationPolicy` validado con defaults aprobados (VMAF 96/95/0.5, SSIM 0.99/0.98/0.005, sampling bounds 1..32, `MaxBitrateKbps = 1_000_000`), omission safety en bloques métricos parciales | `eaadfe1`, `94a5a01`, `5eb1d30`, `9e90d7b`, `c92725b` |
 | 4. Sampling y temporales | Completo | Fase 4A (protocolo, SSH, models, locking `.capacity.lock` y `jobDir/.lock`, argv exacto `MatchesExactBenchmarkArgs`, idempotencia total) y Fase 4B (`ProductionBenchmarkRunner`, extracción `ffv1`, encode `hevc_videotoolbox`, `verifyChildPath`, bit depth gating, evidencia `BenchmarkExecutionEvidence`, cleanup acotado y seguro, process group cancellation, symlink TOCTOU hardening, collision-free candidate names, partial evidence preservation on error and cancel, bounded stderr, DV y chroma 4:2:0 gating, deferral de full-range `yuvj420p`) completas y verificadas | `e23f204`, `8fe5828`, `badad4a`, `7fb5108`, `a35bcd6`, `f57a8af`, `35d9682`, `5c69e0d`, `76dba67` |
 | 5. Métricas y estimación | Completo | Modelos puros (`transcode/optimization/metrics.go`, `estimator.go`) y runner remoto FFmpeg (`internal/transcodeworker/benchmark_runner.go`) con libvmaf/ssim filter capability gating (soporte 2 y 3 caracteres), filtergraph path escaping en dos niveles, parsing robusto con bounding 5MB vía LimitReader y O_NOFOLLOW, candidate-level failure isolation, 10-bit VMAF fail-closed gating, frame contiguity verification, SSIM last-match tail parsing, metric='both' dual aggregates, inmutabilidad de medios y agregación tipada pura antes de limpieza de scratch | `e23f204`, `8fe5828`, `badad4a`, `3eade67`, `7651b64` |
-| 6. Selección VideoToolbox | Completo | Pipeline de selección y estimación integrado en `ProductionBenchmarkRunner` conectando `transcode/optimization` con evidencia de Fase 4B/5; modelos tipados `BenchmarkDecision`/`BenchmarkWinner`/`BenchmarkCandidateEvaluation` persistidos en evidencia y status; soporte para métricas `vmaf`, `ssim` y `both` con fallback determinista; validación fail-closed de policies y fallbacks; suite completa de 10 tests de selección en `benchmark_runner_selection_test.go` | `e23f204`, `8fe5828`, `badad4a`, `e0250ce` |
-| 7. Actions e integración | Pendiente | Action `benchmark_transcode` e integración del ganador en `transcode_media` pendientes de implementación. | — |
+| 6. Selección VideoToolbox | Completo | Pipeline de selección y estimación integrado en `ProductionBenchmarkRunner` conectando `transcode/optimization` con evidencia de Fase 4B/5; modelos tipados `BenchmarkDecision`/`BenchmarkWinner`/`BenchmarkCandidateEvaluation` persistidos en evidencia y status; soporte para métricas `vmaf`, `ssim` y `both` con fallback determinista; validación fail-closed de policies y fallbacks; suite completa de 10 tests de selección en `benchmark_runner_selection_test.go` | `e23f204`, `8fe5828`, `badad4a`, `e0250ce`, `f96907b` |
+| 7. Actions e integración | Completo | Action `benchmark_transcode` y pasos `submit_benchmark`/`wait_benchmark` en `transcode_media`; resolución de recipes v2 con `ResolveProfile`; plan ganador inmutable con `PlanDigest`; gating fail-closed (SDR, bit depth, HDR/DV, capabilities); propagación de cancelación y `WorkerBusy`; 13 tests unitarios e integrales en `transcode_benchmark_test.go` | `118d2b4` |
 | 8. Validación y PR | Pendiente | Validación en M1 Max, benchmarks reales y apertura del PR único hacia `main` pendientes. | — |
 
 ### Detalle de commits aceptados en el worktree
@@ -542,3 +542,6 @@ Demostrado mediante tests que:
   - `7651b64`: `fix(transcode): address Phase 5 adversarial review corrections`
 - **Evaluación de candidatos y selección determinista (Fase 6)**:
   - `e0250ce`: `feat(transcode): implement Phase 6 candidate evaluation and deterministic selection`
+  - `f96907b`: `fix(transcode): fail closed on invalid preferred_metric in benchmark quality config`
+- **Actions e integración (Fase 7)**:
+  - `118d2b4`: `feat(action): implement phase 7 transcode benchmark and optimization integration`
