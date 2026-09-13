@@ -2,10 +2,13 @@ package transcodeworker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1028,5 +1031,941 @@ func TestProductionBenchmarkRunner_EndToEndWithInternalBenchmarkCleanup(t *testi
 	postHash, _ := fileSHA256(sourceFile)
 	if initialHash != postHash {
 		t.Errorf("source media was mutated! %s != %s", initialHash, postHash)
+	}
+}
+
+func TestCandidateFileKey_CollisionFree(t *testing.T) {
+	cases := []struct {
+		idx1, q1 int
+		id1      string
+		idx2, q2 int
+		id2      string
+	}{
+		{0, 60, "cand.1", 0, 60, "cand_1"},
+		{0, 60, "a_very_long_candidate_id_that_exceeds_thirty_two_characters_prefix_a", 0, 60, "a_very_long_candidate_id_that_exceeds_thirty_two_characters_prefix_b"},
+		{0, 60, "cand", 1, 60, "cand"},
+		{0, 60, "cand", 0, 70, "cand"},
+	}
+
+	for _, tc := range cases {
+		k1 := candidateFileKey(tc.idx1, tc.id1, tc.q1)
+		k2 := candidateFileKey(tc.idx2, tc.id2, tc.q2)
+		if k1 == k2 {
+			t.Errorf("candidateFileKey collision between (%d,%s,%d) and (%d,%s,%d): %s",
+				tc.idx1, tc.id1, tc.q1, tc.idx2, tc.id2, tc.q2, k1)
+		}
+	}
+}
+
+func TestBoundedBuffer_CapAndTruncation(t *testing.T) {
+	b := newBoundedBuffer(512)
+	payload := strings.Repeat("x", 2000)
+	n, err := b.Write([]byte(payload))
+	if err != nil {
+		t.Fatalf("unexpected write error: %v", err)
+	}
+	if n != len(payload) {
+		t.Errorf("expected Write to report %d bytes written, got %d", len(payload), n)
+	}
+	if b.buf.Len() > 512 {
+		t.Errorf("buffer exceeded max capacity: %d > 512", b.buf.Len())
+	}
+	if !b.truncated {
+		t.Errorf("expected truncated to be true")
+	}
+	out := b.String()
+	if !strings.Contains(out, "... [stderr truncated]") {
+		t.Errorf("expected truncation marker in String(), got: %s", out)
+	}
+}
+
+func TestProductionBenchmarkRunner_SamplesDirSymlinkRejected(t *testing.T) {
+	dir := t.TempDir()
+	sourceFile := filepath.Join(dir, "original_source.mkv")
+	_ = os.WriteFile(sourceFile, []byte("fake video data"), 0644)
+
+	mockFFmpeg, mockProbe, _ := setupMockTools(t, dir, sdr8BitProbeJSON, "")
+
+	cfg := &WorkerConfig{
+		StateDir:        filepath.Join(dir, "state"),
+		AllowedRoots:    []string{dir},
+		MaxParallelJobs: 1,
+		FFmpeg:          mockFFmpeg,
+		FFprobe:         mockProbe,
+	}
+	worker := NewWorker(cfg)
+
+	jobID := "bench-symlink-dir"
+	jobDir := filepath.Join(cfg.StateDir, jobID)
+	_ = os.MkdirAll(jobDir, 0755)
+
+	outsideDir := filepath.Join(dir, "outside_target")
+	_ = os.MkdirAll(outsideDir, 0755)
+
+	samplesDir := filepath.Join(jobDir, "samples")
+	if err := os.Symlink(outsideDir, samplesDir); err != nil {
+		t.Fatalf("creating symlink: %v", err)
+	}
+
+	record := &BenchmarkRecord{
+		ProtocolVersion: transcode.WorkerProtocolVersion,
+		ID:              jobID,
+		Status:          "running",
+		Source:          sourceFile,
+		Metric:          "vmaf",
+		Samples: []transcode.BenchmarkSampleWindow{
+			{Index: 0, StartSeconds: 5.0, DurationSeconds: 10.0},
+		},
+		Candidates: []transcode.BenchmarkCandidate{
+			{ID: "c1", Quality: 65},
+		},
+		Attempt: 1,
+	}
+
+	runner := &ProductionBenchmarkRunner{}
+	err := runner.RunBenchmark(context.Background(), worker, record)
+	if err == nil {
+		t.Fatalf("expected error when samplesDir is a symlink, got nil")
+	}
+	if !strings.Contains(err.Error(), "is a symlink (fail closed)") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+
+	// Verify outside target directory remains completely empty
+	entries, _ := os.ReadDir(outsideDir)
+	if len(entries) > 0 {
+		t.Errorf("outside directory was modified despite symlink rejection: %v", entries)
+	}
+}
+
+func TestProductionBenchmarkRunner_RefPathSymlinkRejected(t *testing.T) {
+	dir := t.TempDir()
+	sourceFile := filepath.Join(dir, "original_source.mkv")
+	_ = os.WriteFile(sourceFile, []byte("fake video data"), 0644)
+
+	mockFFmpeg, mockProbe, _ := setupMockTools(t, dir, sdr8BitProbeJSON, "")
+
+	cfg := &WorkerConfig{
+		StateDir:        filepath.Join(dir, "state"),
+		AllowedRoots:    []string{dir},
+		MaxParallelJobs: 1,
+		FFmpeg:          mockFFmpeg,
+		FFprobe:         mockProbe,
+	}
+	worker := NewWorker(cfg)
+
+	jobID := "bench-symlink-ref"
+	jobDir := filepath.Join(cfg.StateDir, jobID)
+	samplesDir := filepath.Join(jobDir, "samples")
+	_ = os.MkdirAll(samplesDir, 0755)
+
+	outsideFile := filepath.Join(dir, "outside_ref_target.txt")
+	outsideContent := []byte("critical outside file do not overwrite")
+	_ = os.WriteFile(outsideFile, outsideContent, 0644)
+
+	refPath := filepath.Join(samplesDir, "ref_sample_0.mkv")
+	if err := os.Symlink(outsideFile, refPath); err != nil {
+		t.Fatalf("creating ref symlink: %v", err)
+	}
+
+	record := &BenchmarkRecord{
+		ProtocolVersion: transcode.WorkerProtocolVersion,
+		ID:              jobID,
+		Status:          "running",
+		Source:          sourceFile,
+		Metric:          "vmaf",
+		Samples: []transcode.BenchmarkSampleWindow{
+			{Index: 0, StartSeconds: 5.0, DurationSeconds: 10.0},
+		},
+		Candidates: []transcode.BenchmarkCandidate{
+			{ID: "c1", Quality: 65},
+		},
+		Attempt: 1,
+	}
+
+	runner := &ProductionBenchmarkRunner{}
+	err := runner.RunBenchmark(context.Background(), worker, record)
+	if err == nil {
+		t.Fatalf("expected error when refPath is a symlink, got nil")
+	}
+	if !strings.Contains(err.Error(), "is a symlink (fail closed)") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+
+	// Verify outside file was NOT overwritten
+	data, _ := os.ReadFile(outsideFile)
+	if string(data) != string(outsideContent) {
+		t.Errorf("outside file was overwritten through symlink! got: %s", string(data))
+	}
+}
+
+func TestProductionBenchmarkRunner_CandPathSymlinkRejected(t *testing.T) {
+	dir := t.TempDir()
+	sourceFile := filepath.Join(dir, "original_source.mkv")
+	_ = os.WriteFile(sourceFile, []byte("fake video data"), 0644)
+
+	mockFFmpeg, mockProbe, _ := setupMockTools(t, dir, sdr8BitProbeJSON, "")
+
+	cfg := &WorkerConfig{
+		StateDir:        filepath.Join(dir, "state"),
+		AllowedRoots:    []string{dir},
+		MaxParallelJobs: 1,
+		FFmpeg:          mockFFmpeg,
+		FFprobe:         mockProbe,
+	}
+	worker := NewWorker(cfg)
+
+	jobID := "bench-symlink-cand"
+	jobDir := filepath.Join(cfg.StateDir, jobID)
+	samplesDir := filepath.Join(jobDir, "samples")
+	_ = os.MkdirAll(samplesDir, 0755)
+
+	outsideFile := filepath.Join(dir, "outside_cand_target.txt")
+	outsideContent := []byte("critical outside cand file")
+	_ = os.WriteFile(outsideFile, outsideContent, 0644)
+
+	candKey := candidateFileKey(0, "c1", 65)
+	candPath := filepath.Join(samplesDir, fmt.Sprintf("%s_sample_0.mkv", candKey))
+	if err := os.Symlink(outsideFile, candPath); err != nil {
+		t.Fatalf("creating cand symlink: %v", err)
+	}
+
+	record := &BenchmarkRecord{
+		ProtocolVersion: transcode.WorkerProtocolVersion,
+		ID:              jobID,
+		Status:          "running",
+		Source:          sourceFile,
+		Metric:          "vmaf",
+		Samples: []transcode.BenchmarkSampleWindow{
+			{Index: 0, StartSeconds: 5.0, DurationSeconds: 10.0},
+		},
+		Candidates: []transcode.BenchmarkCandidate{
+			{ID: "c1", Quality: 65},
+		},
+		Attempt: 1,
+	}
+
+	runner := &ProductionBenchmarkRunner{}
+	err := runner.RunBenchmark(context.Background(), worker, record)
+	if err == nil {
+		t.Fatalf("expected error when candPath is a symlink, got nil")
+	}
+	if !strings.Contains(err.Error(), "is a symlink (fail closed)") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+
+	data, _ := os.ReadFile(outsideFile)
+	if string(data) != string(outsideContent) {
+		t.Errorf("outside cand file was overwritten through symlink! got: %s", string(data))
+	}
+}
+
+func TestProductionBenchmarkRunner_PreExistingRegularFileReplacedCleanly(t *testing.T) {
+	dir := t.TempDir()
+	sourceFile := filepath.Join(dir, "original_source.mkv")
+	_ = os.WriteFile(sourceFile, []byte("fake video data"), 0644)
+
+	mockFFmpeg, mockProbe, _ := setupMockTools(t, dir, sdr8BitProbeJSON, "")
+
+	cfg := &WorkerConfig{
+		StateDir:        filepath.Join(dir, "state"),
+		AllowedRoots:    []string{dir},
+		MaxParallelJobs: 1,
+		FFmpeg:          mockFFmpeg,
+		FFprobe:         mockProbe,
+	}
+	worker := NewWorker(cfg)
+
+	jobID := "bench-regular-replace"
+	jobDir := filepath.Join(cfg.StateDir, jobID)
+	samplesDir := filepath.Join(jobDir, "samples")
+	_ = os.MkdirAll(samplesDir, 0755)
+
+	refPath := filepath.Join(samplesDir, "ref_sample_0.mkv")
+	_ = os.WriteFile(refPath, []byte("stale leftover data from previous aborted attempt"), 0644)
+
+	record := &BenchmarkRecord{
+		ProtocolVersion: transcode.WorkerProtocolVersion,
+		ID:              jobID,
+		Status:          "running",
+		Source:          sourceFile,
+		Metric:          "vmaf",
+		Samples: []transcode.BenchmarkSampleWindow{
+			{Index: 0, StartSeconds: 5.0, DurationSeconds: 10.0},
+		},
+		Candidates: []transcode.BenchmarkCandidate{
+			{ID: "c1", Quality: 65},
+		},
+		Attempt: 1,
+	}
+
+	runner := &ProductionBenchmarkRunner{}
+	if err := runner.RunBenchmark(context.Background(), worker, record); err != nil {
+		t.Fatalf("RunBenchmark failed: %v", err)
+	}
+
+	refData, err := os.ReadFile(refPath)
+	if err != nil {
+		t.Fatalf("reading ref file: %v", err)
+	}
+	if string(refData) == "stale leftover data from previous aborted attempt" {
+		t.Errorf("stale file was not replaced!")
+	}
+}
+
+func TestCleanBenchmarkSamples_SymlinkGuards(t *testing.T) {
+	dir := t.TempDir()
+	outsideDir := filepath.Join(dir, "outside_precious_data")
+	_ = os.MkdirAll(outsideDir, 0755)
+	preciousFile := filepath.Join(outsideDir, "keep_me.txt")
+	_ = os.WriteFile(preciousFile, []byte("do not delete"), 0644)
+
+	cfg := &WorkerConfig{
+		StateDir:        filepath.Join(dir, "state"),
+		AllowedRoots:    []string{dir},
+		MaxParallelJobs: 1,
+	}
+	worker := NewWorker(cfg)
+
+	t.Run("samplesDir is symlink to outside", func(t *testing.T) {
+		jobID := "bench-clean-symlink"
+		jobDir := filepath.Join(cfg.StateDir, jobID)
+		_ = os.MkdirAll(jobDir, 0755)
+		samplesDir := filepath.Join(jobDir, "samples")
+		if err := os.Symlink(outsideDir, samplesDir); err != nil {
+			t.Fatalf("symlink: %v", err)
+		}
+
+		err := worker.CleanBenchmarkSamples(jobID)
+		if err != nil {
+			t.Fatalf("CleanBenchmarkSamples failed: %v", err)
+		}
+
+		// The symlink entry itself should be unlinked
+		if _, err := os.Lstat(samplesDir); !os.IsNotExist(err) {
+			t.Errorf("expected symlink to be removed, but stat succeeded")
+		}
+
+		// Outside directory and its files must be completely intact!
+		if _, err := os.Stat(preciousFile); err != nil {
+			t.Errorf("outside file was deleted! %v", err)
+		}
+	})
+
+	t.Run("jobDir is symlink", func(t *testing.T) {
+		jobID := "bench-clean-jobsymlink"
+		outsideJob := filepath.Join(dir, "outside_job")
+		_ = os.MkdirAll(outsideJob, 0755)
+		jobDir := filepath.Join(cfg.StateDir, jobID)
+		_ = os.Symlink(outsideJob, jobDir)
+
+		err := worker.CleanBenchmarkSamples(jobID)
+		if err == nil {
+			t.Errorf("expected error when jobDir is a symlink, got nil")
+		}
+	})
+}
+
+func TestProductionBenchmarkRunner_PartialEvidencePreservedOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	sourceFile := filepath.Join(dir, "original_source.mkv")
+	_ = os.WriteFile(sourceFile, []byte("fake video data"), 0644)
+
+	// Simulate failure specifically when encoding sample 1 (ref_sample_1 as input to candidate encode)
+	mockFFmpeg, mockProbe, _ := setupMockTools(t, dir, sdr8BitProbeJSON, "ref_sample_1.mkv*hevc_videotoolbox")
+
+	cfg := &WorkerConfig{
+		StateDir:        filepath.Join(dir, "state"),
+		AllowedRoots:    []string{dir},
+		MaxParallelJobs: 1,
+		FFmpeg:          mockFFmpeg,
+		FFprobe:         mockProbe,
+	}
+	worker := NewWorker(cfg)
+
+	jobID := "bench-partial-evidence"
+	jobDir := filepath.Join(cfg.StateDir, jobID)
+	_ = os.MkdirAll(jobDir, 0755)
+	benchFile := filepath.Join(jobDir, "benchmark.json")
+
+	token := "run-token-partial"
+	record := &BenchmarkRecord{
+		ProtocolVersion: transcode.WorkerProtocolVersion,
+		ID:              jobID,
+		Status:          "queued",
+		Source:          sourceFile,
+		Metric:          "vmaf",
+		Samples: []transcode.BenchmarkSampleWindow{
+			{Index: 0, StartSeconds: 5.0, DurationSeconds: 10.0},
+			{Index: 1, StartSeconds: 25.0, DurationSeconds: 10.0},
+		},
+		Candidates: []transcode.BenchmarkCandidate{
+			{ID: "c1", Quality: 65},
+		},
+		Attempt:   1,
+		RunToken:  token,
+		CreatedAt: time.Now().UTC(),
+	}
+	_ = SaveBenchmarkAtomic(benchFile, record)
+
+	ctx := context.Background()
+	err := worker.InternalBenchmark(ctx, jobID, token)
+	if err == nil {
+		t.Fatalf("expected InternalBenchmark to return error on simulated failure, got nil")
+	}
+
+	saved, err := LoadBenchmark(benchFile)
+	if err != nil {
+		t.Fatalf("loading saved benchmark: %v", err)
+	}
+
+	if saved.Status != "failed" {
+		t.Errorf("expected status 'failed', got %q", saved.Status)
+	}
+	if saved.Evidence == nil {
+		t.Fatalf("expected non-nil Evidence on failed benchmark to preserve partial work")
+	}
+
+	// Both reference samples were extracted successfully
+	if len(saved.Evidence.ReferenceSamples) != 2 {
+		t.Errorf("expected 2 reference samples in partial evidence, got %d", len(saved.Evidence.ReferenceSamples))
+	}
+
+	// Candidate sample 0 succeeded, Candidate sample 1 failed and was recorded with Error
+	if len(saved.Evidence.CandidateSamples) != 2 {
+		t.Fatalf("expected 2 candidate samples in evidence (1 success, 1 failure), got %d", len(saved.Evidence.CandidateSamples))
+	}
+	if saved.Evidence.CandidateSamples[0].Error != "" {
+		t.Errorf("candidate sample 0 should have no error, got: %s", saved.Evidence.CandidateSamples[0].Error)
+	}
+	if saved.Evidence.CandidateSamples[1].Error == "" {
+		t.Errorf("candidate sample 1 should record failure error, got empty")
+	}
+}
+
+func TestProductionBenchmarkRunner_DolbyVisionDetection(t *testing.T) {
+	cases := []struct {
+		name      string
+		probeJSON string
+	}{
+		{
+			name: "codec dvh1",
+			probeJSON: `{
+  "streams": [{
+    "index": 0, "codec_type": "video", "codec_name": "dvh1", "pix_fmt": "p010le", "bits_per_raw_sample": "10", "width": 1920, "height": 1080
+  }], "format": {"duration": "100.0"}
+}`,
+		},
+		{
+			name: "codec dvhe",
+			probeJSON: `{
+  "streams": [{
+    "index": 0, "codec_type": "video", "codec_name": "dvhe", "pix_fmt": "p010le", "bits_per_raw_sample": "10", "width": 1920, "height": 1080
+  }], "format": {"duration": "100.0"}
+}`,
+		},
+		{
+			name: "profile Dolby Vision",
+			probeJSON: `{
+  "streams": [{
+    "index": 0, "codec_type": "video", "codec_name": "hevc", "profile": "Dolby Vision Profile 5", "pix_fmt": "p010le", "bits_per_raw_sample": "10", "width": 1920, "height": 1080
+  }], "format": {"duration": "100.0"}
+}`,
+		},
+		{
+			name: "DOVI side data",
+			probeJSON: `{
+  "streams": [{
+    "index": 0, "codec_type": "video", "codec_name": "hevc", "profile": "Main 10", "pix_fmt": "p010le", "bits_per_raw_sample": "10", "width": 1920, "height": 1080,
+    "side_data_list": [{"side_data_type": "DOVI configuration record"}]
+  }], "format": {"duration": "100.0"}
+}`,
+		},
+		{
+			name: "stream tags dovi",
+			probeJSON: `{
+  "streams": [{
+    "index": 0, "codec_type": "video", "codec_name": "hevc", "profile": "Main 10", "pix_fmt": "p010le", "bits_per_raw_sample": "10", "width": 1920, "height": 1080,
+    "tags": {"dovi_profile": "5"}
+  }], "format": {"duration": "100.0"}
+}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			sourceFile := filepath.Join(dir, "source_dv.mkv")
+			_ = os.WriteFile(sourceFile, []byte("dv media content"), 0644)
+
+			mockFFmpeg, mockProbe, _ := setupMockTools(t, dir, tc.probeJSON, "")
+
+			cfg := &WorkerConfig{
+				StateDir:        filepath.Join(dir, "state"),
+				AllowedRoots:    []string{dir},
+				MaxParallelJobs: 1,
+				FFmpeg:          mockFFmpeg,
+				FFprobe:         mockProbe,
+			}
+			worker := NewWorker(cfg)
+
+			record := &BenchmarkRecord{
+				ProtocolVersion: transcode.WorkerProtocolVersion,
+				ID:              "bench-dv",
+				Status:          "running",
+				Source:          sourceFile,
+				Metric:          "vmaf",
+				Samples:         []transcode.BenchmarkSampleWindow{{Index: 0, StartSeconds: 1.0, DurationSeconds: 10.0}},
+				Candidates:      []transcode.BenchmarkCandidate{{ID: "c1", Quality: 70}},
+				Attempt:         1,
+			}
+
+			runner := &ProductionBenchmarkRunner{}
+			err := runner.RunBenchmark(context.Background(), worker, record)
+			if err == nil {
+				t.Fatalf("expected Dolby Vision source to be rejected, got nil")
+			}
+			if !strings.Contains(err.Error(), "HDR/Dolby Vision source not eligible") {
+				t.Errorf("unexpected error message: %v", err)
+			}
+		})
+	}
+}
+
+func TestProductionBenchmarkRunner_ChromaSubsamplingGating(t *testing.T) {
+	cases := []struct {
+		name      string
+		probeJSON string
+	}{
+		{
+			name: "yuv444p 8-bit rejected",
+			probeJSON: `{
+  "streams": [{
+    "index": 0, "codec_type": "video", "codec_name": "h264", "pix_fmt": "yuv444p", "bits_per_raw_sample": "8", "width": 1920, "height": 1080
+  }], "format": {"duration": "100.0"}
+}`,
+		},
+		{
+			name: "yuv422p 8-bit rejected",
+			probeJSON: `{
+  "streams": [{
+    "index": 0, "codec_type": "video", "codec_name": "h264", "pix_fmt": "yuv422p", "bits_per_raw_sample": "8", "width": 1920, "height": 1080
+  }], "format": {"duration": "100.0"}
+}`,
+		},
+		{
+			name: "yuv444p10le 10-bit rejected",
+			probeJSON: `{
+  "streams": [{
+    "index": 0, "codec_type": "video", "codec_name": "hevc", "profile": "Main 4:4:4 10", "pix_fmt": "yuv444p10le", "bits_per_raw_sample": "10", "width": 1920, "height": 1080
+  }], "format": {"duration": "100.0"}
+}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			sourceFile := filepath.Join(dir, "source_chroma.mkv")
+			_ = os.WriteFile(sourceFile, []byte("chroma test media"), 0644)
+
+			mockFFmpeg, mockProbe, _ := setupMockTools(t, dir, tc.probeJSON, "")
+
+			cfg := &WorkerConfig{
+				StateDir:        filepath.Join(dir, "state"),
+				AllowedRoots:    []string{dir},
+				MaxParallelJobs: 1,
+				FFmpeg:          mockFFmpeg,
+				FFprobe:         mockProbe,
+			}
+			worker := NewWorker(cfg)
+
+			record := &BenchmarkRecord{
+				ProtocolVersion: transcode.WorkerProtocolVersion,
+				ID:              "bench-chroma",
+				Status:          "running",
+				Source:          sourceFile,
+				Metric:          "vmaf",
+				Samples:         []transcode.BenchmarkSampleWindow{{Index: 0, StartSeconds: 1.0, DurationSeconds: 10.0}},
+				Candidates:      []transcode.BenchmarkCandidate{{ID: "c1", Quality: 70}},
+				Attempt:         1,
+			}
+
+			runner := &ProductionBenchmarkRunner{}
+			err := runner.RunBenchmark(context.Background(), worker, record)
+			if err == nil {
+				t.Fatalf("expected unsupported chroma to be rejected, got nil")
+			}
+			if !strings.Contains(err.Error(), "requires 4:2:0 chroma subsampling") {
+				t.Errorf("unexpected error message: %v", err)
+			}
+		})
+	}
+}
+
+func TestProductionBenchmarkRunner_SourceStabilityConcurrentlyModified(t *testing.T) {
+	dir := t.TempDir()
+	sourceFile := filepath.Join(dir, "source_concur.mkv")
+	_ = os.WriteFile(sourceFile, []byte("initial source bytes"), 0644)
+
+	mockFFmpeg, mockProbe, _ := setupMockTools(t, dir, sdr8BitProbeJSON, "")
+
+	cfg := &WorkerConfig{
+		StateDir:        filepath.Join(dir, "state"),
+		AllowedRoots:    []string{dir},
+		MaxParallelJobs: 1,
+		FFmpeg:          mockFFmpeg,
+		FFprobe:         mockProbe,
+	}
+	worker := NewWorker(cfg)
+
+	record := &BenchmarkRecord{
+		ProtocolVersion: transcode.WorkerProtocolVersion,
+		ID:              "bench-concur",
+		Status:          "running",
+		Source:          sourceFile,
+		Metric:          "vmaf",
+		Samples:         []transcode.BenchmarkSampleWindow{{Index: 0, StartSeconds: 1.0, DurationSeconds: 10.0}},
+		Candidates:      []transcode.BenchmarkCandidate{{ID: "c1", Quality: 65}},
+		Attempt:         1,
+	}
+
+	runner := &ProductionBenchmarkRunner{}
+	runner.SetMetricsHook(func(ctx context.Context, w *Worker, record *BenchmarkRecord, evidence *BenchmarkExecutionEvidence) error {
+		// Mutate source file size concurrently right before final check
+		return os.WriteFile(sourceFile, []byte("tampered content modifying length"), 0644)
+	})
+
+	err := runner.RunBenchmark(context.Background(), worker, record)
+	if err == nil {
+		t.Fatalf("expected error on concurrently modified source file, got nil")
+	}
+	if !strings.Contains(err.Error(), "concurrently modified") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestProductionBenchmarkRunner_ProcessGroupCancellation_NoOrphans(t *testing.T) {
+	dir := t.TempDir()
+	sourceFile := filepath.Join(dir, "source_cancel_tree.mkv")
+	_ = os.WriteFile(sourceFile, []byte("fake video content for tree cancel"), 0644)
+
+	pidFile := filepath.Join(dir, "child.pid")
+	grandchildPidFile := filepath.Join(dir, "grandchild.pid")
+
+	mockProbe := filepath.Join(dir, "mock_probe.sh")
+	_ = os.WriteFile(mockProbe, []byte(fmt.Sprintf("#!/bin/sh\ncat << 'EOF'\n%s\nEOF\n", sdr8BitProbeJSON)), 0755)
+
+	mockFFmpeg := filepath.Join(dir, "mock_ffmpeg_tree.sh")
+	script := fmt.Sprintf(`#!/bin/sh
+case "$*" in
+  *"-version"*)
+    echo "ffmpeg version 7.1"
+    exit 0
+    ;;
+  *"-h encoder=hevc_videotoolbox"*)
+    cat << 'EOF'
+Encoder hevc_videotoolbox [VideoToolbox H.265 Encoder]:
+    Supported pixel formats: nv12 p010le yuv420p
+hevc_videotoolbox AVOptions:
+  -profile           <int>        E..V....... Profile (from 0 to 2) (default 0)
+     main            1            E..V....... Main Profile
+     main10          2            E..V....... Main10 Profile
+  -prio_speed        <boolean>    E..V....... Prioritize encoding speed (default false)
+  -spatial_aq        <boolean>    E..V....... Spatial AQ (default false)
+  -realtime          <boolean>    E..V....... Realtime (default false)
+EOF
+    exit 0
+    ;;
+  *"-encoders"*)
+    cat << 'EOF'
+Encoders:
+ V..... hevc_videotoolbox    VideoToolbox H.265
+ V..... ffv1                 FFmpeg video codec #1
+EOF
+    exit 0
+    ;;
+esac
+
+# Record direct child PID
+echo $$ > %q
+
+# Spawn grandchild in the background
+sleep 300 &
+echo $! > %q
+
+# Wait indefinitely for grandchild or until killed
+wait
+`, pidFile, grandchildPidFile)
+	if err := os.WriteFile(mockFFmpeg, []byte(script), 0755); err != nil {
+		t.Fatalf("writing script: %v", err)
+	}
+
+	cfg := &WorkerConfig{
+		StateDir:        filepath.Join(dir, "state"),
+		AllowedRoots:    []string{dir},
+		MaxParallelJobs: 1,
+		FFmpeg:          mockFFmpeg,
+		FFprobe:         mockProbe,
+	}
+	worker := NewWorker(cfg)
+
+	record := &BenchmarkRecord{
+		ProtocolVersion: transcode.WorkerProtocolVersion,
+		ID:              "bench-tree-cancel",
+		Status:          "running",
+		Source:          sourceFile,
+		Metric:          "vmaf",
+		Samples:         []transcode.BenchmarkSampleWindow{{Index: 0, StartSeconds: 1.0, DurationSeconds: 10.0}},
+		Candidates:      []transcode.BenchmarkCandidate{{ID: "c1", Quality: 65}},
+		Attempt:         1,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runner := &ProductionBenchmarkRunner{}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runner.RunBenchmark(ctx, worker, record)
+	}()
+
+	// Wait until both child PID and grandchild PID are recorded and running
+	var childPID, gcPID int
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		pBytes, err1 := os.ReadFile(pidFile)
+		gcBytes, err2 := os.ReadFile(grandchildPidFile)
+		if err1 == nil && err2 == nil {
+			pStr := strings.TrimSpace(string(pBytes))
+			gcStr := strings.TrimSpace(string(gcBytes))
+			if pStr != "" && gcStr != "" {
+				childPID, _ = strconv.Atoi(pStr)
+				gcPID, _ = strconv.Atoi(gcStr)
+				if childPID > 0 && gcPID > 0 {
+					if syscall.Kill(childPID, 0) == nil && syscall.Kill(gcPID, 0) == nil {
+						break
+					}
+				}
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if childPID == 0 || gcPID == 0 {
+		cancel()
+		t.Fatalf("timed out waiting for child (%d) and grandchild (%d) to start", childPID, gcPID)
+	}
+
+	// Verify they are alive
+	if err := syscall.Kill(childPID, 0); err != nil {
+		t.Fatalf("child process %d is not alive: %v", childPID, err)
+	}
+	if err := syscall.Kill(gcPID, 0); err != nil {
+		t.Fatalf("grandchild process %d is not alive: %v", gcPID, err)
+	}
+
+	// Now cancel the context
+	cancel()
+
+	// Wait for RunBenchmark to return
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatalf("expected error from cancelled RunBenchmark, got nil")
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("expected context.Canceled, got: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for RunBenchmark to exit after cancel")
+	}
+
+	// Wait up to 3 seconds for the process group to be reaped/terminated
+	killDeadline := time.Now().Add(3 * time.Second)
+	childDead := false
+	gcDead := false
+	for time.Now().Before(killDeadline) {
+		if !childDead && syscall.Kill(childPID, 0) != nil {
+			childDead = true
+		}
+		if !gcDead && syscall.Kill(gcPID, 0) != nil {
+			gcDead = true
+		}
+		if childDead && gcDead {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	_ = syscall.Kill(childPID, syscall.SIGKILL)
+	_ = syscall.Kill(gcPID, syscall.SIGKILL)
+
+	if !childDead {
+		t.Errorf("child process %d is still alive after cancellation! Orphan detected", childPID)
+	}
+	if !gcDead {
+		t.Errorf("grandchild process %d is still alive after cancellation! Process group orphan detected", gcPID)
+	}
+}
+
+func TestBenchmarkCancel_TerminatesProcessGroupAndMarksCancelled(t *testing.T) {
+	dir := t.TempDir()
+	sourceFile := filepath.Join(dir, "source_bench_cancel.mkv")
+	_ = os.WriteFile(sourceFile, []byte("fake video data"), 0644)
+
+	pidFile := filepath.Join(dir, "ffmpeg_bench.pid")
+	gcPidFile := filepath.Join(dir, "ffmpeg_bench_gc.pid")
+
+	mockProbe := filepath.Join(dir, "mock_probe.sh")
+	_ = os.WriteFile(mockProbe, []byte(fmt.Sprintf("#!/bin/sh\ncat << 'EOF'\n%s\nEOF\n", sdr8BitProbeJSON)), 0755)
+
+	mockFFmpeg := filepath.Join(dir, "mock_ffmpeg_cancel.sh")
+	script := fmt.Sprintf(`#!/bin/sh
+case "$*" in
+  *"-version"*)
+    echo "ffmpeg version 7.1"
+    exit 0
+    ;;
+  *"-h encoder=hevc_videotoolbox"*)
+    cat << 'EOF'
+Encoder hevc_videotoolbox [VideoToolbox H.265 Encoder]:
+    Supported pixel formats: nv12 p010le yuv420p
+hevc_videotoolbox AVOptions:
+  -profile           <int>        E..V....... Profile (from 0 to 2) (default 0)
+     main            1            E..V....... Main Profile
+     main10          2            E..V....... Main10 Profile
+  -prio_speed        <boolean>    E..V....... Prioritize encoding speed (default false)
+  -spatial_aq        <boolean>    E..V....... Spatial AQ (default false)
+  -realtime          <boolean>    E..V....... Realtime (default false)
+EOF
+    exit 0
+    ;;
+  *"-encoders"*)
+    cat << 'EOF'
+Encoders:
+ V..... hevc_videotoolbox    VideoToolbox H.265
+ V..... ffv1                 FFmpeg video codec #1
+EOF
+    exit 0
+    ;;
+esac
+
+echo $$ > %q
+sleep 300 &
+echo $! > %q
+wait
+`, pidFile, gcPidFile)
+	_ = os.WriteFile(mockFFmpeg, []byte(script), 0755)
+
+	cfg := &WorkerConfig{
+		StateDir:        filepath.Join(dir, "state"),
+		AllowedRoots:    []string{dir},
+		MaxParallelJobs: 1,
+		FFmpeg:          mockFFmpeg,
+		FFprobe:         mockProbe,
+	}
+	worker := NewWorker(cfg)
+
+	jobID := "bench-cancel-e2e"
+	jobDir := filepath.Join(cfg.StateDir, jobID)
+	_ = os.MkdirAll(jobDir, 0755)
+	benchFile := filepath.Join(jobDir, "benchmark.json")
+
+	token := "run-token-cancel-e2e"
+	record := &BenchmarkRecord{
+		ProtocolVersion: transcode.WorkerProtocolVersion,
+		ID:              jobID,
+		Status:          "queued",
+		Source:          sourceFile,
+		Metric:          "vmaf",
+		Samples:         []transcode.BenchmarkSampleWindow{{Index: 0, StartSeconds: 5.0, DurationSeconds: 10.0}},
+		Candidates:      []transcode.BenchmarkCandidate{{ID: "c1", Quality: 65}},
+		Attempt:         1,
+		RunToken:        token,
+		CreatedAt:       time.Now().UTC(),
+	}
+	_ = SaveBenchmarkAtomic(benchFile, record)
+
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+	defer bgCancel()
+
+	runErrCh := make(chan error, 1)
+	go func() {
+		runErrCh <- worker.InternalBenchmark(bgCtx, jobID, token)
+	}()
+
+	var childPID, gcPID int
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		pBytes, err1 := os.ReadFile(pidFile)
+		gcBytes, err2 := os.ReadFile(gcPidFile)
+		if err1 == nil && err2 == nil {
+			pStr := strings.TrimSpace(string(pBytes))
+			gcStr := strings.TrimSpace(string(gcBytes))
+			if pStr != "" && gcStr != "" {
+				childPID, _ = strconv.Atoi(pStr)
+				gcPID, _ = strconv.Atoi(gcStr)
+				if childPID > 0 && gcPID > 0 {
+					if syscall.Kill(childPID, 0) == nil && syscall.Kill(gcPID, 0) == nil {
+						break
+					}
+				}
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if childPID == 0 || gcPID == 0 {
+		t.Fatalf("mock ffmpeg child/grandchild did not start in time")
+	}
+
+	statusResp, err := worker.BenchmarkCancel(context.Background(), jobID)
+	if err != nil {
+		t.Fatalf("BenchmarkCancel failed: %v", err)
+	}
+	if statusResp.Status != "cancelled" {
+		t.Errorf("expected BenchmarkCancel status 'cancelled', got %q", statusResp.Status)
+	}
+
+	bgCancel()
+
+	select {
+	case <-runErrCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("InternalBenchmark did not exit after cancel")
+	}
+
+	killDeadline := time.Now().Add(3 * time.Second)
+	childDead := false
+	gcDead := false
+	for time.Now().Before(killDeadline) {
+		if !childDead && syscall.Kill(childPID, 0) != nil {
+			childDead = true
+		}
+		if !gcDead && syscall.Kill(gcPID, 0) != nil {
+			gcDead = true
+		}
+		if childDead && gcDead {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	_ = syscall.Kill(childPID, syscall.SIGKILL)
+	_ = syscall.Kill(gcPID, syscall.SIGKILL)
+
+	if !childDead {
+		t.Errorf("child process %d still alive after BenchmarkCancel", childPID)
+	}
+	if !gcDead {
+		t.Errorf("grandchild process %d still alive after BenchmarkCancel", gcPID)
+	}
+
+	saved, err := LoadBenchmark(benchFile)
+	if err != nil {
+		t.Fatalf("loading benchmark record: %v", err)
+	}
+	if saved.Status != "cancelled" {
+		t.Errorf("expected saved record status 'cancelled', got %q", saved.Status)
 	}
 }
