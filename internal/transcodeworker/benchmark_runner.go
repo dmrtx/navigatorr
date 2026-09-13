@@ -148,9 +148,12 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		return fmt.Errorf("unsupported source bit depth %d: only 8-bit and 10-bit sources are supported for benchmark", sourceBitDepth)
 	}
 
-	// Chroma subsampling gating: VideoToolbox candidates support 4:2:0 (yuv420p / nv12 / p010le / yuv420p10le).
-	// Reject 4:4:4 or 4:2:2 source formats to prevent silent downsampling and invalid VMAF comparisons.
+	// Chroma subsampling gating: VideoToolbox candidates support standard limited-range 4:2:0 (yuv420p / nv12 / p010le / yuv420p10le).
+	// Reject 4:4:4, 4:2:2, and full-range formats (e.g. yuvj420p) to prevent silent downsampling or range-conversion discrepancies.
 	if !isSupportedSourceChroma(sourceVideo.PixelFormat, sourceBitDepth) {
+		if strings.ToLower(strings.TrimSpace(sourceVideo.PixelFormat)) == "yuvj420p" {
+			return fmt.Errorf("unsupported source pixel format %q (%d-bit): full-range yuvj420p is deferred until range-normalized metric pipeline support (fail closed)", sourceVideo.PixelFormat, sourceBitDepth)
+		}
 		return fmt.Errorf("unsupported source pixel format %q (%d-bit): automatic benchmark requires 4:2:0 chroma subsampling (e.g. yuv420p, nv12, yuv420p10le, p010le)", sourceVideo.PixelFormat, sourceBitDepth)
 	}
 
@@ -386,22 +389,25 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 }
 
 // BuildReferenceExtractionArgs constructs the exact, safe FFmpeg argument slice
-// for extracting a frame-accurate, timestamp-normalized, lossless reference sample.
+// for extracting a frame-aligned, timestamp-normalized, lossless reference sample.
 //
 // Frame alignment & windowing rationale:
 // 1. Fast & frame-accurate seeking: Placing `-accurate_seek -ss <startSec>` before `-i`
 //    enables demuxer keyframe seeking immediately before the target timestamp, followed
 //    by accurate frame-by-frame decoding and discarding up to the requested point. This avoids
-//    decoding the entire media file from time 0 while guaranteeing bit-identical frame boundaries.
-// 2. Exact sample window: `-t <durationSec>` extracts precisely the requested duration window.
+//    decoding the entire media file from time 0 while guaranteeing deterministic frame boundaries.
+// 2. Deterministic window duration: `-t <durationSec>` extracts the requested window,
+//    which is deterministically frame-aligned and frame-quantized for VFR/timebase sources
+//    rather than a mathematically continuous floating-point cut.
 // 3. PTS normalization: `-avoid_negative_ts make_zero` resets stream and container timestamps
 //    so that the extracted sample starts cleanly at PTS 0.
 // 4. Lossless master: `-c:v ffv1` encodes losslessly, preserving raw decoded pixel format,
 //    bit depth, and frame cadence with zero generational loss.
 // 5. Clean elementary stream: `-an -sn -dn` strips audio, subtitles, and data streams.
 // 6. Deterministic candidate alignment: Candidate samples are subsequently encoded from this
-//    FFV1 reference from frame 0 to end without seeking or trimming, ensuring exact 1:1
-//    frame correspondence for downstream VMAF/SSIM metric evaluation.
+//    FFV1 reference master from frame 0 to end without seeking or trimming. While the source
+//    window itself is frame-quantized, the candidate-to-reference frame correspondence is
+//    strictly 1:1 and exact for downstream VMAF/SSIM metric evaluation.
 func BuildReferenceExtractionArgs(sourcePath, refPath string, videoIndex int, startSec, durationSec float64) []string {
 	return []string{
 		"-y",
@@ -479,12 +485,14 @@ func verifySourceUnchanged(sourcePath string, expectedSize int64, expectedModTim
 	return nil
 }
 
-// isSupportedSourceChroma returns true if the source pixel format has 4:2:0 chroma subsampling.
+// isSupportedSourceChroma returns true if the source pixel format has safe 4:2:0 chroma subsampling.
+// Full-range yuvj420p is deferred until Phase 5 range-normalized metric pipeline support to avoid
+// implicit full-to-limited range conversion discrepancies during VideoToolbox candidate comparison.
 func isSupportedSourceChroma(pixFmt string, bitDepth int) bool {
 	p := strings.ToLower(strings.TrimSpace(pixFmt))
 	if bitDepth == 8 {
 		switch p {
-		case "yuv420p", "yuvj420p", "nv12":
+		case "yuv420p", "nv12":
 			return true
 		}
 		return false

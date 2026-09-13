@@ -1534,8 +1534,9 @@ func TestProductionBenchmarkRunner_DolbyVisionDetection(t *testing.T) {
 
 func TestProductionBenchmarkRunner_ChromaSubsamplingGating(t *testing.T) {
 	cases := []struct {
-		name      string
-		probeJSON string
+		name            string
+		probeJSON       string
+		expectedErrPart string
 	}{
 		{
 			name: "yuv444p 8-bit rejected",
@@ -1544,6 +1545,7 @@ func TestProductionBenchmarkRunner_ChromaSubsamplingGating(t *testing.T) {
     "index": 0, "codec_type": "video", "codec_name": "h264", "pix_fmt": "yuv444p", "bits_per_raw_sample": "8", "width": 1920, "height": 1080
   }], "format": {"duration": "100.0"}
 }`,
+			expectedErrPart: "requires 4:2:0 chroma subsampling",
 		},
 		{
 			name: "yuv422p 8-bit rejected",
@@ -1552,6 +1554,7 @@ func TestProductionBenchmarkRunner_ChromaSubsamplingGating(t *testing.T) {
     "index": 0, "codec_type": "video", "codec_name": "h264", "pix_fmt": "yuv422p", "bits_per_raw_sample": "8", "width": 1920, "height": 1080
   }], "format": {"duration": "100.0"}
 }`,
+			expectedErrPart: "requires 4:2:0 chroma subsampling",
 		},
 		{
 			name: "yuv444p10le 10-bit rejected",
@@ -1560,6 +1563,16 @@ func TestProductionBenchmarkRunner_ChromaSubsamplingGating(t *testing.T) {
     "index": 0, "codec_type": "video", "codec_name": "hevc", "profile": "Main 4:4:4 10", "pix_fmt": "yuv444p10le", "bits_per_raw_sample": "10", "width": 1920, "height": 1080
   }], "format": {"duration": "100.0"}
 }`,
+			expectedErrPart: "requires 4:2:0 chroma subsampling",
+		},
+		{
+			name: "yuvj420p full-range 8-bit rejected",
+			probeJSON: `{
+  "streams": [{
+    "index": 0, "codec_type": "video", "codec_name": "h264", "pix_fmt": "yuvj420p", "bits_per_raw_sample": "8", "width": 1920, "height": 1080
+  }], "format": {"duration": "100.0"}
+}`,
+			expectedErrPart: "full-range yuvj420p is deferred until range-normalized metric pipeline support",
 		},
 	}
 
@@ -1596,8 +1609,12 @@ func TestProductionBenchmarkRunner_ChromaSubsamplingGating(t *testing.T) {
 			if err == nil {
 				t.Fatalf("expected unsupported chroma to be rejected, got nil")
 			}
-			if !strings.Contains(err.Error(), "requires 4:2:0 chroma subsampling") {
-				t.Errorf("unexpected error message: %v", err)
+			expected := tc.expectedErrPart
+			if expected == "" {
+				expected = "requires 4:2:0 chroma subsampling"
+			}
+			if !strings.Contains(err.Error(), expected) {
+				t.Errorf("unexpected error message: %v (expected part: %q)", err, expected)
 			}
 		})
 	}
@@ -1967,5 +1984,176 @@ wait
 	}
 	if saved.Status != "cancelled" {
 		t.Errorf("expected saved record status 'cancelled', got %q", saved.Status)
+	}
+}
+
+func TestInternalBenchmark_CoordinatorCancellation_PreservesPartialEvidence(t *testing.T) {
+	dir := t.TempDir()
+	sourceFile := filepath.Join(dir, "source_cancel_evidence.mkv")
+	_ = os.WriteFile(sourceFile, []byte("fake video data for cancel evidence"), 0644)
+
+	pidFile := filepath.Join(dir, "sample1_ref.pid")
+
+	mockProbe := filepath.Join(dir, "mock_probe.sh")
+	_ = os.WriteFile(mockProbe, []byte(fmt.Sprintf("#!/bin/sh\ncat << 'EOF'\n%s\nEOF\n", sdr8BitProbeJSON)), 0755)
+
+	mockFFmpeg := filepath.Join(dir, "mock_ffmpeg_cancel_evidence.sh")
+	script := fmt.Sprintf(`#!/bin/sh
+case "$*" in
+  *"-version"*)
+    echo "ffmpeg version 7.1"
+    exit 0
+    ;;
+  *"-h encoder=hevc_videotoolbox"*)
+    cat << 'EOF'
+Encoder hevc_videotoolbox [VideoToolbox H.265 Encoder]:
+    Supported pixel formats: nv12 p010le yuv420p
+hevc_videotoolbox AVOptions:
+  -profile           <int>        E..V....... Profile (from 0 to 2) (default 0)
+     main            1            E..V....... Main Profile
+     main10          2            E..V....... Main10 Profile
+  -prio_speed        <boolean>    E..V....... Prioritize encoding speed (default false)
+  -spatial_aq        <boolean>    E..V....... Spatial AQ (default false)
+  -realtime          <boolean>    E..V....... Realtime (default false)
+EOF
+    exit 0
+    ;;
+  *"-encoders"*)
+    cat << 'EOF'
+Encoders:
+ V..... hevc_videotoolbox    VideoToolbox H.265
+ V..... ffv1                 FFmpeg video codec #1
+EOF
+    exit 0
+    ;;
+  *"ref_sample_1.mkv"*)
+    # When extracting ref sample 1, record PID and sleep indefinitely so cancellation occurs mid-run
+    echo $$ > %q
+    sleep 300
+    exit 0
+    ;;
+esac
+
+# Find output file (last argument) and create it so os.Stat succeeds
+out=""
+for last; do out="$last"; done
+if [ -n "$out" ]; then
+  mkdir -p "$(dirname "$out")"
+  echo "fake media data for $out" > "$out"
+fi
+exit 0
+`, pidFile)
+	_ = os.WriteFile(mockFFmpeg, []byte(script), 0755)
+
+	cfg := &WorkerConfig{
+		StateDir:        filepath.Join(dir, "state"),
+		AllowedRoots:    []string{dir},
+		MaxParallelJobs: 1,
+		FFmpeg:          mockFFmpeg,
+		FFprobe:         mockProbe,
+	}
+	worker := NewWorker(cfg)
+
+	jobID := "bench-cancel-partial"
+	jobDir := filepath.Join(cfg.StateDir, jobID)
+	_ = os.MkdirAll(jobDir, 0755)
+	benchFile := filepath.Join(jobDir, "benchmark.json")
+
+	token := "run-token-cancel-partial"
+	record := &BenchmarkRecord{
+		ProtocolVersion: transcode.WorkerProtocolVersion,
+		ID:              jobID,
+		Status:          "queued",
+		Source:          sourceFile,
+		Metric:          "vmaf",
+		Samples: []transcode.BenchmarkSampleWindow{
+			{Index: 0, StartSeconds: 5.0, DurationSeconds: 10.0},
+			{Index: 1, StartSeconds: 25.0, DurationSeconds: 10.0},
+		},
+		Candidates: []transcode.BenchmarkCandidate{
+			{ID: "c1", Quality: 65},
+		},
+		Attempt:   1,
+		RunToken:  token,
+		CreatedAt: time.Now().UTC(),
+	}
+	_ = SaveBenchmarkAtomic(benchFile, record)
+
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+	defer bgCancel()
+
+	runErrCh := make(chan error, 1)
+	go func() {
+		runErrCh <- worker.InternalBenchmark(bgCtx, jobID, token)
+	}()
+
+	// Wait for sample 1 reference extraction to start and record its PID
+	var childPID int
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		pBytes, err := os.ReadFile(pidFile)
+		if err == nil {
+			pStr := strings.TrimSpace(string(pBytes))
+			if pStr != "" {
+				childPID, _ = strconv.Atoi(pStr)
+				if childPID > 0 && syscall.Kill(childPID, 0) == nil {
+					break
+				}
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if childPID == 0 {
+		t.Fatalf("timed out waiting for sample 1 reference extraction to start")
+	}
+
+	// Cancel via coordinator BenchmarkCancel
+	statusResp, err := worker.BenchmarkCancel(context.Background(), jobID)
+	if err != nil {
+		t.Fatalf("BenchmarkCancel failed: %v", err)
+	}
+	if statusResp.Status != "cancelled" {
+		t.Errorf("expected BenchmarkCancel status 'cancelled', got %q", statusResp.Status)
+	}
+
+	bgCancel()
+
+	select {
+	case err := <-runErrCh:
+		if err != nil {
+			t.Errorf("expected InternalBenchmark to return nil on cancelled state, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("InternalBenchmark did not exit after cancel")
+	}
+
+	_ = syscall.Kill(childPID, syscall.SIGKILL)
+
+	// Verify benchmark record on disk:
+	// 1. Status MUST remain "cancelled" (NO resurrection to completed or failed!)
+	// 2. Evidence MUST be non-nil and preserve sample 0 outcomes
+	// 3. Samples workspace must be cleaned
+	saved, err := LoadBenchmark(benchFile)
+	if err != nil {
+		t.Fatalf("loading benchmark record: %v", err)
+	}
+	if saved.Status != "cancelled" {
+		t.Fatalf("state resurrection! Expected status 'cancelled', got %q", saved.Status)
+	}
+	if saved.Evidence == nil {
+		t.Fatalf("expected Evidence to be non-nil on cancelled record with pre-cancellation work")
+	}
+	if len(saved.Evidence.ReferenceSamples) < 1 {
+		t.Errorf("expected at least 1 reference sample in partial evidence, got %d", len(saved.Evidence.ReferenceSamples))
+	}
+	if saved.Evidence.ReferenceSamples[0].Index != 0 {
+		t.Errorf("expected sample 0 reference preserved, got index %d", saved.Evidence.ReferenceSamples[0].Index)
+	}
+
+	// Verify samples directory on disk was cleaned up
+	samplesDir := filepath.Join(jobDir, "samples")
+	if _, err := os.Stat(samplesDir); !os.IsNotExist(err) {
+		t.Errorf("expected samples directory to be cleaned, but it exists: %s", samplesDir)
 	}
 }
