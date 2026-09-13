@@ -268,3 +268,96 @@ func TestDigestBenchmarkRequest_Determinism(t *testing.T) {
 		t.Fatalf("expected different digest when candidate quality changes")
 	}
 }
+
+func TestValidateBenchmarkRequest_PreferredMetric(t *testing.T) {
+	// 1. Omitted / default behavior: Quality is nil -> passes
+	reqNilQuality := validTestBenchmarkRequest()
+	reqNilQuality.Quality = nil
+	if err := ValidateBenchmarkRequest(&reqNilQuality); err != nil {
+		t.Fatalf("expected nil Quality to pass validation, got: %v", err)
+	}
+
+	// 2. Omitted / default behavior: Quality non-nil, PreferredMetric is empty string -> passes
+	reqEmptyPref := validTestBenchmarkRequest()
+	reqEmptyPref.Quality = &BenchmarkQualityConfig{
+		PreferredMetric: "",
+	}
+	if err := ValidateBenchmarkRequest(&reqEmptyPref); err != nil {
+		t.Fatalf("expected empty PreferredMetric to pass validation, got: %v", err)
+	}
+	if reqEmptyPref.Quality.PreferredMetric != "" {
+		t.Errorf("expected empty PreferredMetric to remain empty, got %q", reqEmptyPref.Quality.PreferredMetric)
+	}
+
+	// 3. Valid vmaf: exact, mixed case, and untrimmed
+	vmafCases := []struct {
+		input string
+		want  string
+	}{
+		{"vmaf", "vmaf"},
+		{"VMAF", "vmaf"},
+		{"  vmaf  ", "vmaf"},
+		{"\tVmaf\n", "vmaf"},
+	}
+	for _, tc := range vmafCases {
+		req := validTestBenchmarkRequest()
+		req.Quality = &BenchmarkQualityConfig{
+			PreferredMetric: tc.input,
+		}
+		if err := ValidateBenchmarkRequest(&req); err != nil {
+			t.Errorf("expected valid preferred_metric %q to pass, got: %v", tc.input, err)
+		}
+		if req.Quality.PreferredMetric != tc.want {
+			t.Errorf("preferred_metric %q: got %q, want %q", tc.input, req.Quality.PreferredMetric, tc.want)
+		}
+	}
+
+	// 4. Valid ssim: exact, mixed case, and untrimmed
+	ssimCases := []struct {
+		input string
+		want  string
+	}{
+		{"ssim", "ssim"},
+		{"SSIM", "ssim"},
+		{"  ssim  ", "ssim"},
+		{"\tSsim\n", "ssim"},
+	}
+	for _, tc := range ssimCases {
+		req := validTestBenchmarkRequest()
+		req.Quality = &BenchmarkQualityConfig{
+			PreferredMetric: tc.input,
+		}
+		if err := ValidateBenchmarkRequest(&req); err != nil {
+			t.Errorf("expected valid preferred_metric %q to pass, got: %v", tc.input, err)
+		}
+		if req.Quality.PreferredMetric != tc.want {
+			t.Errorf("preferred_metric %q: got %q, want %q", tc.input, req.Quality.PreferredMetric, tc.want)
+		}
+	}
+
+	// 5. Invalid value rejection (fail-closed, no silent coercion)
+	invalidValues := []string{
+		"arbitrary",
+		"psnr",
+		"both",
+		"vmaf+ssim",
+		"vmaf_hd",
+		"ssim_plus",
+		"   ",
+		"\t\n",
+		"null",
+		"none",
+	}
+	for _, inv := range invalidValues {
+		req := validTestBenchmarkRequest()
+		req.Quality = &BenchmarkQualityConfig{
+			PreferredMetric: inv,
+		}
+		err := ValidateBenchmarkRequest(&req)
+		if err == nil {
+			t.Errorf("expected error for invalid preferred_metric %q, got nil", inv)
+		} else if !strings.Contains(err.Error(), "invalid preferred_metric") {
+			t.Errorf("expected error message to contain 'invalid preferred_metric' for %q, got: %v", inv, err)
+		}
+	}
+}
