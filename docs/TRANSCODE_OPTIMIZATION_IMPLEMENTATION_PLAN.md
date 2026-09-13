@@ -427,21 +427,22 @@ Demostrado mediante tests que:
     - `CleanBenchmarkSamples` rechaza si `jobDir` es un symlink, remueve únicamente la entrada symlink con `os.Remove` si `samplesDir` es symlink, y verifica mediante `filepath.EvalSymlinks` que el target resuelto permanezca estrictamente dentro de `jobDir` antes de ejecutar `os.RemoveAll`.
   - [x] **Nombres de archivo de candidatos libres de colisión**:
     - Clave inyectiva `candidateFileKey(candIdx, rawID, quality)` (`cand_<idx>_<sanitized>_<shortHash>_q<quality>_sample_<sampleIdx>.mkv`) combinando índice, etiqueta saneada, hash SHA-256 corto del ID original y calidad.
-  - [x] **Preservación de evidencia parcial ante fallos**:
+  - [x] **Preservación de evidencia parcial ante fallos o cancelación**:
     - `record.Evidence` se inicializa y enlaza inmediatamente al inicio de `RunBenchmark`.
     - Samples de referencia completados y resultados de encode de candidatos (incluyendo mensajes de error de candidatos fallidos) se preservan en `record.Evidence` y se persisten en `benchmark.json` al fallar el job.
+    - En caso de cancelación por el coordinador mid-run (`latest.Status == "cancelled"`), la evidencia parcial en memoria se copia a `latest.Evidence` y se persiste atómicamente en `benchmark.json` sin alterar el estado `cancelled`, su timestamp de finalización ni su error, garantizando que la cancelación jamás resucite o mute el estado a `failed` ni deje muestras huérfanas en disco.
   - [x] **Captura de stderr acotada en memoria**:
     - Buffer acotado `boundedBuffer` con tope configurable (16 KB) y marcador `... [stderr truncated]` para prevenir fugas de RAM por logs verbosos de FFmpeg.
   - [x] **Detección exhaustiva de Dolby Vision, estabilidad de fuente y gating de chroma**:
     - Rechazo explícito de Dolby Vision en codecs (`dvh1`, `dvhe`, `dva1`, `dav1`, `dovi`), perfiles (`Dolby Vision`), tags de stream y side data (`DOVI configuration record`).
     - Snapshot de tamaño y modtime de la fuente (`os.Stat`), con verificación `verifySourceUnchanged` antes y después de cada extracción/encode, fallando cerrado si se modifica concurrentemente.
-    - Gating de chroma subsampling: solo se permiten fuentes 4:2:0 (`yuv420p`, `yuvj420p`, `nv12`, `yuv420p10le`, `p010le`); 4:4:4 y 4:2:2 son rechazados para evitar conversiones silenciosas y distorsiones métricas en downstream VMAF/SSIM.
+    - Gating de chroma subsampling: solo se permiten fuentes 4:2:0 de rango limitado (`yuv420p`, `nv12`, `yuv420p10le`, `p010le`); 4:4:4, 4:2:2 y fuentes de rango completo (`yuvj420p`) se rechazan fail-closed (el soporte de `yuvj420p` se difiere a la normalización de rango en la Fase 5 para prevenir inconsistencias de compresión de luma contra la referencia FFV1 en el scoring VMAF/SSIM).
   - [x] **Contrato documentado de alineación de frames y ventanas**:
-    - Búsqueda exacta y rápida: `-accurate_seek -ss <startSec>` antes de `-i` localiza el keyframe previo y decodifica con precisión frame a frame hasta el timestamp.
+    - Búsqueda exacta y rápida: `-accurate_seek -ss <startSec>` antes de `-i` localiza el keyframe previo y decodifica con precisión frame a frame hasta el timestamp. En fuentes VFR o con timebases irregulares, los límites de ventana solicitados están cuantizados/alineados al frame más cercano (frame-quantized/frame-aligned).
     - Ventana exacta: `-t <durationSec>`.
     - Normalización PTS: `-avoid_negative_ts make_zero` resetea la línea temporal a PTS 0.
     - Máster sin pérdidas: `-c:v ffv1` con `-an -sn -dn`.
-    - Correspondencia frame a frame 1:1: El encode de candidatos consume el sample FFV1 de principio a fin (frame 0 al final sin seeking ni recortes), garantizando emparejamiento idéntico de frames para scoring VMAF/SSIM en Fase 5.
+    - Correspondencia frame a frame 1:1: El encode de candidatos consume el sample FFV1 extraído de principio a fin (frame 0 al final sin seeking ni recortes), garantizando emparejamiento idéntico de frames contra la referencia para scoring VMAF/SSIM en Fase 5.
 
 ### Fase 5 — Métricas y estimación
 - [x] Modelos puros de evaluación VMAF con per-sample quality gate y agregación determinista en `transcode/optimization`.
@@ -486,7 +487,7 @@ Demostrado mediante tests que:
 | 1. Inspección completa | Completo | `DetailedReport`/`DetailedStream` extendido (color space/primaries/transfer/range, HDR/mastering metadata, frame rate racional y calculado, bitrates numéricamente acotados, channel layout de audio, side data), fixtures H264 8-bit/10-bit, HEVC Main10, HDR BT.2020, chapters y subtítulos | `eaadfe1`, `94a5a01`, `5eb1d30`, `9e90d7b` |
 | 2. Capacidades y protocolo | Completo | `WorkerCapabilities` versionado (`ProtocolVersion == WorkerProtocolVersion`), probe errors estructurados, clean absence encoder-specific, eliminación de campo redundante `VideoToolbox`, fingerprint determinista de capacidades, handshake SSH | `eaadfe1`, `94a5a01`, `5eb1d30`, `9e90d7b` |
 | 3. Recipes v2 | Completo | Loader v1/v2 compatible (`MinSchemaVersion`..`LatestSchemaVersion`), `OptimizationPolicy` validado con defaults aprobados (VMAF 96/95/0.5, SSIM 0.99/0.98/0.005, sampling bounds 1..32, `MaxBitrateKbps = 1_000_000`), omission safety en bloques métricos parciales | `eaadfe1`, `94a5a01`, `5eb1d30`, `9e90d7b`, `c92725b` |
-| 4. Sampling y temporales | Completo | Fase 4A (protocolo, SSH, models, locking `.capacity.lock` y `jobDir/.lock`, argv exacto `MatchesExactBenchmarkArgs`, idempotencia total) y Fase 4B (`ProductionBenchmarkRunner`, extracción `ffv1`, encode `hevc_videotoolbox`, `verifyChildPath`, bit depth gating, evidencia `BenchmarkExecutionEvidence`, cleanup acotado y seguro, process group cancellation, symlink TOCTOU hardening, collision-free candidate names, partial evidence preservation, bounded stderr, DV y chroma 4:2:0 gating) completas y verificadas | `e23f204`, `8fe5828`, `badad4a`, `7fb5108`, `a35bcd6`, `f57a8af`, `35d9682`, `5c69e0d` |
+| 4. Sampling y temporales | Completo | Fase 4A (protocolo, SSH, models, locking `.capacity.lock` y `jobDir/.lock`, argv exacto `MatchesExactBenchmarkArgs`, idempotencia total) y Fase 4B (`ProductionBenchmarkRunner`, extracción `ffv1`, encode `hevc_videotoolbox`, `verifyChildPath`, bit depth gating, evidencia `BenchmarkExecutionEvidence`, cleanup acotado y seguro, process group cancellation, symlink TOCTOU hardening, collision-free candidate names, partial evidence preservation on error and cancel, bounded stderr, DV y chroma 4:2:0 gating, deferral de full-range `yuvj420p`) completas y verificadas | `e23f204`, `8fe5828`, `badad4a`, `7fb5108`, `a35bcd6`, `f57a8af`, `35d9682`, `5c69e0d`, `76dba67` |
 | 5. Métricas y estimación | Parcial (solo modelos puros de métricas y estimación) | `transcode/optimization/metrics.go` y `estimator.go` con per-sample quality gate, políticas independientes VMAF/SSIM, ineligibilidad explícita de HDR para SDR, estimación de video aislada por streams, preservación de audio copiado, fallbacks visibles y guards contra overflow. Ejecución de filtros y FFmpeg en worker pendientes. | `e23f204` (src: `83479df`), `8fe5828` (src: `a26d5f4`), `badad4a` (src: `b036209`) |
 | 6. Selección VideoToolbox | Pendiente | Modelo puro `CandidateSelector` disponible en `transcode/optimization/selector.go`; ejecución y benchmarking real en worker pendientes. | — |
 | 7. Actions e integración | Pendiente | Action `benchmark_transcode` e integración del ganador en `transcode_media` pendientes de implementación. | — |
@@ -516,3 +517,5 @@ Demostrado mediante tests que:
   - `35d9682`: `feat(transcode): implement phase 4B sample extraction and candidate encoding runner`
   - `0534336`: `docs(transcode): record completion of Phase 4B sample extraction and candidate encoding runner`
   - `5c69e0d`: `fix(transcode): harden phase 4B cancellation, symlink toctou, filename collision, and evidence tracking`
+  - `532d9dd`: `docs(transcode): record Phase 4B adversarial corrections and process group safety`
+  - `76dba67`: `fix(transcode): persist partial evidence on cancel and reject full-range yuvj420p`
