@@ -197,7 +197,11 @@ func main() {
 			os.Exit(1)
 		}
 		jobID := subcmdArgs[0]
-		if err := worker.InternalBenchmark(ctx, jobID); err != nil {
+		runToken := ""
+		if len(subcmdArgs) >= 2 {
+			runToken = subcmdArgs[1]
+		}
+		if err := worker.InternalBenchmark(ctx, jobID, runToken); err != nil {
 			fmt.Fprintf(os.Stderr, "internal_benchmark failed for job %s: %v\n", jobID, err)
 			os.Exit(1)
 		}
