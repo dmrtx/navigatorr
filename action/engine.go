@@ -360,7 +360,7 @@ func (e *Engine) Cancel(ctx context.Context, instanceID, reason string) (*Action
 	ec := parseExecutionContext(inst, e)
 
 	if e.deps.Transcode != nil {
-		if benchID := getString(ec.State, "benchmark_job_id"); benchID != "" {
+		if benchID := getString(ec.State, "benchmark_job_id"); benchID != "" && !getBool(ec.State, "benchmark_done") {
 			_ = e.deps.Transcode.BenchmarkCancel(ctx, benchID)
 		}
 		if jobID := getString(ec.State, "job_id"); jobID != "" {

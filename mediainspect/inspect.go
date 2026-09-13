@@ -688,20 +688,102 @@ func ParseBitRate(raw any, tags map[string]string) int64 {
 }
 
 func isHDRStream(st DetailedStream) bool {
-	ct := strings.ToLower(strings.TrimSpace(st.ColorTransfer))
-	cp := strings.ToLower(strings.TrimSpace(st.ColorPrimaries))
-	cs := strings.ToLower(strings.TrimSpace(st.ColorSpace))
-	if ct == "smpte2084" || ct == "arib-std-b67" || strings.Contains(ct, "2084") || strings.Contains(ct, "hlg") {
-		return true
-	}
-	if cp == "bt2020" || strings.Contains(cp, "2020") {
-		return true
-	}
-	if cs == "bt2020nc" || cs == "bt2020c" || strings.Contains(cs, "2020") {
-		return true
-	}
+	return IsHDRorDolbyVisionStream(st)
+}
+
+// IsHDRorDolbyVisionStream reports whether a video stream contains HDR or Dolby Vision signaling.
+// It checks mastering display and content light metadata, codecs (dovi, dvh1, dvhe, dva1, dav1),
+// profiles (Dolby Vision, dovi, dv), color transfer characteristics (smpte2084, arib-std-b67, hlg, pq),
+// color primaries (bt2020, dci-p3), color matrix space (bt2020nc/c), side data (DV RPU, mastering display, etc.),
+// and stream tags.
+func IsHDRorDolbyVisionStream(st DetailedStream) bool {
+	// 1. Mastering display metadata or content light level
 	if st.MasteringDisplay != nil || st.ContentLightLevel != nil {
 		return true
+	}
+
+	// 2. Codec and profile check for Dolby Vision / HDR
+	codec := strings.ToLower(strings.TrimSpace(st.Codec))
+	profile := strings.ToLower(strings.TrimSpace(st.Profile))
+	if strings.Contains(codec, "dovi") || strings.Contains(codec, "dvh1") ||
+		strings.Contains(codec, "dvhe") || strings.Contains(codec, "dva1") ||
+		strings.Contains(codec, "dav1") {
+		return true
+	}
+	if strings.Contains(profile, "dolby vision") || strings.Contains(profile, "dovi") ||
+		strings.HasPrefix(profile, "dv") {
+		return true
+	}
+
+	// 3. Color transfer characteristics
+	transfer := strings.ToLower(strings.TrimSpace(st.ColorTransfer))
+	switch transfer {
+	case "smpte2084", "arib-std-b67", "arib_std_b67", "hlg", "pq", "smpte428", "bt2020-10", "bt2020-12":
+		return true
+	}
+	if strings.Contains(transfer, "2084") || strings.Contains(transfer, "hlg") || strings.Contains(transfer, "pq") {
+		return true
+	}
+
+	// 4. Color primaries
+	primaries := strings.ToLower(strings.TrimSpace(st.ColorPrimaries))
+	switch primaries {
+	case "bt2020", "bt2020nc", "bt2020c", "dci-p3":
+		return true
+	}
+	if strings.Contains(primaries, "2020") || primaries == "dci-p3" {
+		return true
+	}
+
+	// 5. Color space / matrix coefficients
+	cs := strings.ToLower(strings.TrimSpace(st.ColorSpace))
+	switch cs {
+	case "bt2020nc", "bt2020c":
+		return true
+	}
+	if strings.Contains(cs, "2020") {
+		return true
+	}
+
+	// 6. Side data (DV RPU, mastering display, content light, etc.)
+	for _, sd := range st.SideData {
+		sdt := strings.ToLower(strings.TrimSpace(sd.SideDataType))
+		if strings.Contains(sdt, "mastering display") ||
+			strings.Contains(sdt, "content light") ||
+			strings.Contains(sdt, "dovi") ||
+			strings.Contains(sdt, "dolby vision") ||
+			strings.Contains(sdt, "hdr") {
+			return true
+		}
+	}
+
+	// 7. Stream tags
+	for k, v := range st.Tags {
+		kl := strings.ToLower(k)
+		vl := strings.ToLower(v)
+		if strings.Contains(kl, "dovi") || strings.Contains(kl, "dolby") ||
+			strings.Contains(vl, "dovi") || strings.Contains(vl, "dolby vision") ||
+			strings.Contains(vl, "dvh1") || strings.Contains(vl, "dvhe") ||
+			strings.Contains(vl, "dva1") || strings.Contains(vl, "dav1") {
+			return true
+		}
+	}
+
+	return false
+}
+
+// IsHDRorDolbyVisionReport reports whether a DetailedReport represents HDR or Dolby Vision media.
+func IsHDRorDolbyVisionReport(rep *DetailedReport) bool {
+	if rep == nil {
+		return false
+	}
+	if rep.HDR != nil && rep.HDR.Present {
+		return true
+	}
+	for _, vs := range rep.Video {
+		if IsHDRorDolbyVisionStream(vs) {
+			return true
+		}
 	}
 	return false
 }

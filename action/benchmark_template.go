@@ -132,6 +132,17 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 		return StepResult{Status: StepFailed, Error: "transcode executor is not available to monitor benchmark"}, nil
 	}
 
+	if wait := getString(ec.State, "benchmark_retry_not_before"); wait != "" {
+		if at, err := time.Parse(time.RFC3339Nano, wait); err == nil && time.Now().Before(at) {
+			return StepResult{
+				Status:           StepWaitingExternal,
+				WaitingCondition: "benchmark_retry",
+				WaitingReason:    fmt.Sprintf("Benchmark retry is backed off until %s", at.UTC().Format(time.RFC3339)),
+			}, nil
+		}
+		delete(ec.State, "benchmark_retry_not_before")
+	}
+
 	if ctx.Err() != nil {
 		_ = e.deps.Transcode.BenchmarkCancel(context.Background(), benchJobID)
 		return StepResult{Status: StepFailed, Error: ctx.Err().Error()}, nil
@@ -288,23 +299,25 @@ func (e *Engine) handleBenchmarkTransientFailure(ec *ExecutionContext, plan *tra
 	class := resilience.Classify(err.Error())
 	ec.State["failure_classification"] = string(class)
 	appendFailureHistory(ec, phase, string(class), err.Error())
+
+	retries := getInt(ec.State, "benchmark_retry_count")
+	attempt := getInt(ec.State, "benchmark_attempt")
+	if attempt <= 0 {
+		attempt = 1
+	}
+
 	if class == resilience.WorkerBusy && (getBool(ec.Inputs, "surface_worker_busy") || getBool(ec.State, "surface_worker_busy")) {
 		return StepResult{
 			Status:           StepWaitingExternal,
 			WaitingCondition: "worker_busy",
 			WaitingReason:    "Worker is busy; waiting for benchmark slot",
 			Outputs: map[string]any{
-				"attempt":                getInt(ec.State, "attempt"),
-				"retry_count":            getInt(ec.State, "retry_count"),
+				"benchmark_attempt":      attempt,
+				"benchmark_retry_count":  retries,
 				"failure_classification": string(class),
 				"worker_busy":            true,
 			},
 		}, nil
-	}
-	retries := getInt(ec.State, "benchmark_retry_count")
-	attempt := getInt(ec.State, "benchmark_attempt")
-	if attempt <= 0 {
-		attempt = 1
 	}
 	var res transcode.ResiliencePlan
 	if plan != nil {
@@ -327,8 +340,8 @@ func (e *Engine) handleBenchmarkTransientFailure(ec *ExecutionContext, plan *tra
 			WaitingCondition: "benchmark_retry",
 			WaitingReason:    fmt.Sprintf("%s classified as %s; bounded retry %d/%d after %ds", phase, class, retries, res.TransientRetries, backoff),
 			Outputs: map[string]any{
-				"attempt":                attempt,
-				"retry_count":            retries,
+				"benchmark_attempt":      attempt,
+				"benchmark_retry_count":  retries,
 				"failure_classification": string(class),
 			},
 		}, nil
@@ -337,8 +350,8 @@ func (e *Engine) handleBenchmarkTransientFailure(ec *ExecutionContext, plan *tra
 		Status: StepFailed,
 		Error:  fmt.Sprintf("%s failed (%s): %v", phase, class, err),
 		Outputs: map[string]any{
-			"attempt":                attempt,
-			"retry_count":            retries,
+			"benchmark_attempt":      attempt,
+			"benchmark_retry_count":  retries,
 			"failure_classification": string(class),
 		},
 	}, nil
@@ -437,7 +450,7 @@ func resolveBenchmarkMetric(ec *ExecutionContext, optQuality *recipe.QualityPoli
 	return "vmaf", nil
 }
 
-func buildBenchmarkQualityConfig(optQuality *recipe.QualityPolicy, resolvedMetric string) *transcode.BenchmarkQualityConfig {
+func buildBenchmarkQualityConfig(optQuality *recipe.QualityPolicy) *transcode.BenchmarkQualityConfig {
 	if optQuality == nil {
 		return nil
 	}
@@ -517,7 +530,7 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 		return nil, err
 	}
 
-	qualityCfg := buildBenchmarkQualityConfig(opt.Quality, metric)
+	qualityCfg := buildBenchmarkQualityConfig(opt.Quality)
 
 	declaredVideoBitrate := int64(0)
 	if v0.BitRate > 0 {

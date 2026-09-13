@@ -2,12 +2,14 @@ package action
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/fsop"
@@ -120,6 +122,91 @@ const hdr10ProbeJSON = `{
     {"index": 0, "codec_type": "video", "codec_name": "hevc", "profile": "Main 10", "pix_fmt": "yuv420p10le", "width": 3840, "height": 2160, "color_transfer": "smpte2084", "color_primaries": "bt2020", "color_space": "bt2020nc"}
   ],
   "format": {"format_name": "matroska", "duration": "1200.0", "size": "1500000000"},
+  "chapters": []
+}`
+
+const dvSideDataOnlyProbeJSON = `{
+  "streams": [
+    {
+      "index": 0,
+      "codec_type": "video",
+      "codec_name": "hevc",
+      "profile": "Main 10",
+      "pix_fmt": "yuv420p10le",
+      "width": 1920,
+      "height": 1080,
+      "color_transfer": "bt709",
+      "color_primaries": "bt709",
+      "color_space": "bt709",
+      "side_data_list": [
+        {"side_data_type": "DOVI configuration record", "dv_version_major": 1, "dv_profile": 8}
+      ]
+    }
+  ],
+  "format": {"format_name": "matroska", "duration": "1200.0", "size": "900000000"},
+  "chapters": []
+}`
+
+const doviTagOnlyProbeJSON = `{
+  "streams": [
+    {
+      "index": 0,
+      "codec_type": "video",
+      "codec_name": "hevc",
+      "profile": "Main 10",
+      "pix_fmt": "yuv420p10le",
+      "width": 1920,
+      "height": 1080,
+      "color_transfer": "bt709",
+      "color_primaries": "bt709",
+      "color_space": "bt709",
+      "tags": {"dovi_profile": "5"}
+    }
+  ],
+  "format": {"format_name": "matroska", "duration": "1200.0", "size": "900000000"},
+  "chapters": []
+}`
+
+const hdrMasteringSideDataOnlyProbeJSON = `{
+  "streams": [
+    {
+      "index": 0,
+      "codec_type": "video",
+      "codec_name": "hevc",
+      "profile": "Main 10",
+      "pix_fmt": "yuv420p10le",
+      "width": 1920,
+      "height": 1080,
+      "color_transfer": "bt709",
+      "color_primaries": "bt709",
+      "color_space": "bt709",
+      "side_data_list": [
+        {"side_data_type": "Mastering display metadata", "red_x": "34000/50000"}
+      ]
+    }
+  ],
+  "format": {"format_name": "matroska", "duration": "1200.0", "size": "900000000"},
+  "chapters": []
+}`
+
+const standard10BitSDRProbeJSON = `{
+  "streams": [
+    {
+      "index": 0,
+      "codec_type": "video",
+      "codec_name": "hevc",
+      "profile": "Main 10",
+      "pix_fmt": "yuv420p10le",
+      "width": 1920,
+      "height": 1080,
+      "color_transfer": "bt709",
+      "color_primaries": "bt709",
+      "color_space": "bt709"
+    },
+    {"index": 1, "codec_type": "audio", "codec_name": "aac", "channels": 2, "tags": {"language": "jpn"}},
+    {"index": 2, "codec_type": "subtitle", "codec_name": "subrip", "tags": {"language": "eng"}}
+  ],
+  "format": {"format_name": "matroska", "duration": "1200.0", "size": "900000000"},
   "chapters": []
 }`
 
@@ -770,6 +857,88 @@ func TestTranscode_BitDepthAndHDRSafety(t *testing.T) {
 			t.Errorf("benchmark must not be submitted for HDR source")
 		}
 	})
+
+	t.Run("DV side data only fails closed", func(t *testing.T) {
+		mock := &mockTranscodeExecutor{}
+		engine, _, mediaFile, _ := setupBenchmarkTestEnv(t, mock, dvSideDataOnlyProbeJSON, &recipe.OptimizationPolicy{Enabled: true})
+		res, err := engine.Run(context.Background(), "benchmark_transcode", map[string]any{
+			"path":    mediaFile,
+			"profile": "opt-vt",
+		})
+		if err != nil {
+			t.Fatalf("unexpected engine error: %v", err)
+		}
+		if res.Status != StatusFailed {
+			t.Fatalf("expected DV side-data-only to fail closed, got %s", res.Status)
+		}
+		if mock.benchmarkSubmitCalls != 0 {
+			t.Errorf("benchmark must not be submitted for DV side data")
+		}
+	})
+
+	t.Run("DOVI tag only fails closed", func(t *testing.T) {
+		mock := &mockTranscodeExecutor{}
+		engine, _, mediaFile, _ := setupBenchmarkTestEnv(t, mock, doviTagOnlyProbeJSON, &recipe.OptimizationPolicy{Enabled: true})
+		res, err := engine.Run(context.Background(), "benchmark_transcode", map[string]any{
+			"path":    mediaFile,
+			"profile": "opt-vt",
+		})
+		if err != nil {
+			t.Fatalf("unexpected engine error: %v", err)
+		}
+		if res.Status != StatusFailed {
+			t.Fatalf("expected DOVI tag-only to fail closed, got %s", res.Status)
+		}
+		if mock.benchmarkSubmitCalls != 0 {
+			t.Errorf("benchmark must not be submitted for DOVI tags")
+		}
+	})
+
+	t.Run("HDR mastering side data only fails closed", func(t *testing.T) {
+		mock := &mockTranscodeExecutor{}
+		engine, _, mediaFile, _ := setupBenchmarkTestEnv(t, mock, hdrMasteringSideDataOnlyProbeJSON, &recipe.OptimizationPolicy{Enabled: true})
+		res, err := engine.Run(context.Background(), "benchmark_transcode", map[string]any{
+			"path":    mediaFile,
+			"profile": "opt-vt",
+		})
+		if err != nil {
+			t.Fatalf("unexpected engine error: %v", err)
+		}
+		if res.Status != StatusFailed {
+			t.Fatalf("expected HDR mastering side-data to fail closed, got %s", res.Status)
+		}
+		if mock.benchmarkSubmitCalls != 0 {
+			t.Errorf("benchmark must not be submitted for HDR mastering metadata")
+		}
+	})
+
+	t.Run("ordinary SDR false positive regression passes", func(t *testing.T) {
+		mock := &mockTranscodeExecutor{
+			benchmarkStatusFunc: func(ctx context.Context, jobID string) (transcode.BenchmarkStatus, error) {
+				return transcode.BenchmarkStatus{
+					ProtocolVersion: transcode.WorkerProtocolVersion,
+					ID:              jobID,
+					Status:          transcode.StatusCompleted,
+					Decision:        &transcode.BenchmarkDecision{Winner: &transcode.BenchmarkWinner{CandidateID: "c1", Quality: 65, ExpectedBitDepth: 10}},
+				}, nil
+			},
+		}
+		engine, _, mediaFile, _ := setupBenchmarkTestEnv(t, mock, standard10BitSDRProbeJSON, &recipe.OptimizationPolicy{Enabled: true})
+		res, err := engine.Run(context.Background(), "benchmark_transcode", map[string]any{
+			"path":    mediaFile,
+			"profile": "opt-vt",
+			"metric":  "ssim",
+		})
+		if err != nil {
+			t.Fatalf("unexpected engine error: %v", err)
+		}
+		if res.Status != StatusCompleted {
+			t.Fatalf("expected ordinary 10-bit SDR to succeed, got %s (error: %s)", res.Status, res.Error)
+		}
+		if mock.benchmarkSubmitCalls != 1 {
+			t.Errorf("expected exactly 1 benchmark submit call for ordinary SDR, got %d", mock.benchmarkSubmitCalls)
+		}
+	})
 }
 
 // 12. persisted outputs survive action reload
@@ -917,6 +1086,18 @@ func TestTranscode_IdempotentResumeAndWorkerBusy(t *testing.T) {
 		if res.WaitingCondition != "worker_busy" {
 			t.Errorf("expected WaitingCondition=worker_busy, got %s", res.WaitingCondition)
 		}
+		if res.Outputs["benchmark_attempt"] == nil {
+			t.Errorf("expected benchmark_attempt in outputs, got nil")
+		}
+		if res.Outputs["benchmark_retry_count"] == nil {
+			t.Errorf("expected benchmark_retry_count in outputs, got nil")
+		}
+		if res.Outputs["attempt"] != nil {
+			t.Errorf("did not expect transcode 'attempt' in benchmark worker_busy outputs, got %v", res.Outputs["attempt"])
+		}
+		if res.Outputs["retry_count"] != nil {
+			t.Errorf("did not expect transcode 'retry_count' in benchmark worker_busy outputs, got %v", res.Outputs["retry_count"])
+		}
 	})
 
 	t.Run("idempotent submission reuse", func(t *testing.T) {
@@ -961,4 +1142,278 @@ func TestTranscode_IdempotentResumeAndWorkerBusy(t *testing.T) {
 			t.Errorf("expected exactly 1 submit call, got %d", atomic.LoadInt32(&submitCount))
 		}
 	})
+}
+
+// 14. cancellation of transcode_media after benchmark completed while full transcode is active
+func TestTranscodeMedia_Optimized_CancellationAfterBenchmarkDone_OnlyCancelsFullTranscode(t *testing.T) {
+	var benchCancelCalls int32
+	var fullCancelCalls int32
+	mock := &mockTranscodeExecutor{
+		benchmarkStatusFunc: func(ctx context.Context, jobID string) (transcode.BenchmarkStatus, error) {
+			return transcode.BenchmarkStatus{
+				ProtocolVersion: transcode.WorkerProtocolVersion,
+				ID:              jobID,
+				Status:          transcode.StatusCompleted,
+				Progress:        100,
+				Decision: &transcode.BenchmarkDecision{
+					Winner: &transcode.BenchmarkWinner{
+						CandidateID:      "cand_q75",
+						CandidateIndex:   3,
+						Quality:          75,
+						VideoProfile:     "main",
+						PixelFormat:      "yuv420p",
+						ExpectedBitDepth: 8,
+						MetricType:       "vmaf",
+						Score:            97.0,
+						TargetReached:    true,
+						MinimumMet:       true,
+					},
+					DecisionReason: "optimal",
+				},
+			}, nil
+		},
+		benchmarkCancelFunc: func(ctx context.Context, jobID string) error {
+			atomic.AddInt32(&benchCancelCalls, 1)
+			return nil
+		},
+		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
+			return transcode.Job{ID: req.ID}, nil
+		},
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			// In-progress full transcode keeps action in waiting_external
+			return transcode.JobStatus{
+				ID:       jobID,
+				Status:   transcode.StatusRunning,
+				Progress: 40.0,
+			}, nil
+		},
+		cancelFunc: func(ctx context.Context, jobID string) error {
+			atomic.AddInt32(&fullCancelCalls, 1)
+			return nil
+		},
+	}
+
+	engine, _, mediaFile, _ := setupBenchmarkTestEnv(t, mock, standard8BitProbeJSON, &recipe.OptimizationPolicy{Enabled: true})
+
+	// Run initially -> completes benchmark, submits full transcode, enters waiting_external on wait_transcode
+	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
+		"path":    mediaFile,
+		"profile": "opt-vt",
+	})
+	if err != nil {
+		t.Fatalf("unexpected run error: %v", err)
+	}
+	if res.Status != StatusWaitingExternal {
+		t.Fatalf("expected StatusWaitingExternal, got %s", res.Status)
+	}
+
+	// Verify benchmark is done and full transcode was submitted
+	if mock.benchmarkSubmitCalls != 1 {
+		t.Errorf("expected 1 benchmark submit call, got %d", mock.benchmarkSubmitCalls)
+	}
+	if mock.submitCalls != 1 {
+		t.Errorf("expected 1 full transcode submit call, got %d", mock.submitCalls)
+	}
+
+	// Cancel the action while full transcode is active
+	resCancel, err := engine.Cancel(context.Background(), res.ID, "user cancelled active transcode")
+	if err != nil {
+		t.Fatalf("Cancel error: %v", err)
+	}
+	if resCancel.Status != StatusCancelled {
+		t.Errorf("expected StatusCancelled, got %s", resCancel.Status)
+	}
+
+	// BenchmarkCancel must NOT be called since benchmark_done was true
+	if atomic.LoadInt32(&benchCancelCalls) != 0 {
+		t.Errorf("BenchmarkCancel should NOT be called after benchmark is done, got %d calls", atomic.LoadInt32(&benchCancelCalls))
+	}
+	// Normal transcode Cancel MUST be called
+	if atomic.LoadInt32(&fullCancelCalls) != 1 {
+		t.Errorf("expected Cancel to be called exactly once for full transcode, got %d calls", atomic.LoadInt32(&fullCancelCalls))
+	}
+}
+
+// 15. stepBenchmarkWait honors persisted benchmark_retry_not_before backoff
+func TestBenchmarkWait_HonorsRetryNotBeforeBackoff(t *testing.T) {
+	mock := &mockTranscodeExecutor{
+		benchmarkStatusFunc: func(ctx context.Context, jobID string) (transcode.BenchmarkStatus, error) {
+			return transcode.BenchmarkStatus{
+				ProtocolVersion: transcode.WorkerProtocolVersion,
+				ID:              jobID,
+				Status:          transcode.StatusRunning,
+				Progress:        10.0,
+			}, nil
+		},
+	}
+
+	engine, _, mediaFile, _ := setupBenchmarkTestEnv(t, mock, standard8BitProbeJSON, &recipe.OptimizationPolicy{Enabled: true})
+
+	// Initial run: starts benchmark, enters waiting_external
+	res, err := engine.Run(context.Background(), "benchmark_transcode", map[string]any{
+		"path":    mediaFile,
+		"profile": "opt-vt",
+	})
+	if err != nil || res.Status != StatusWaitingExternal {
+		t.Fatalf("initial run error: %v, status: %s", err, res.Status)
+	}
+
+	// Persist benchmark_retry_not_before in action state 30 seconds into the future
+	inst, err := engine.deps.Store.GetActionInstance(res.ID)
+	if err != nil {
+		t.Fatalf("getting action instance: %v", err)
+	}
+	ec := parseExecutionContext(inst, engine)
+	ec.State["benchmark_retry_not_before"] = time.Now().Add(30 * time.Second).UTC().Format(time.RFC3339Nano)
+	stateBytes, _ := json.Marshal(ec.State)
+	inst.StateJSON = string(stateBytes)
+	if err := engine.deps.Store.UpdateActionInstance(*inst); err != nil {
+		t.Fatalf("updating action instance: %v", err)
+	}
+
+	// Reset status calls counter
+	atomic.StoreInt32(&mock.benchmarkStatusCalls, 0)
+
+	// Resume action: backoff is active, must NOT call BenchmarkStatus
+	resumeRes, err := engine.Resume(context.Background(), res.ID, "", nil)
+	if err != nil {
+		t.Fatalf("resume error: %v", err)
+	}
+	if resumeRes.Status != StatusWaitingExternal {
+		t.Errorf("expected StatusWaitingExternal during backoff, got %s", resumeRes.Status)
+	}
+	if resumeRes.WaitingCondition != "benchmark_retry" {
+		t.Errorf("expected waiting_condition=benchmark_retry, got %s", resumeRes.WaitingCondition)
+	}
+	if atomic.LoadInt32(&mock.benchmarkStatusCalls) != 0 {
+		t.Errorf("BenchmarkStatus should NOT be called while backoff is active, got %d calls", atomic.LoadInt32(&mock.benchmarkStatusCalls))
+	}
+
+	// Now update backoff to the past (expired)
+	inst, _ = engine.deps.Store.GetActionInstance(res.ID)
+	ec = parseExecutionContext(inst, engine)
+	ec.State["benchmark_retry_not_before"] = time.Now().Add(-10 * time.Second).UTC().Format(time.RFC3339Nano)
+	stateBytes, _ = json.Marshal(ec.State)
+	inst.StateJSON = string(stateBytes)
+	_ = engine.deps.Store.UpdateActionInstance(*inst)
+
+	// Resume again: backoff expired, should call BenchmarkStatus
+	resumeRes2, err := engine.Resume(context.Background(), res.ID, "", nil)
+	if err != nil {
+		t.Fatalf("resume2 error: %v", err)
+	}
+	if atomic.LoadInt32(&mock.benchmarkStatusCalls) != 1 {
+		t.Errorf("BenchmarkStatus should be called after backoff expired, got %d calls", atomic.LoadInt32(&mock.benchmarkStatusCalls))
+	}
+	_ = resumeRes2
+}
+
+// 16. reload/resume coverage for optimized transcode_media across benchmark-completed boundary
+func TestTranscodeMedia_Optimized_ReloadResumeAcrossBenchmarkCompletedBoundary(t *testing.T) {
+	var fullTranscodeReq transcode.Request
+	mock := &mockTranscodeExecutor{
+		benchmarkStatusFunc: func(ctx context.Context, jobID string) (transcode.BenchmarkStatus, error) {
+			return transcode.BenchmarkStatus{
+				ProtocolVersion: transcode.WorkerProtocolVersion,
+				ID:              jobID,
+				Status:          transcode.StatusCompleted,
+				Progress:        100,
+				Decision: &transcode.BenchmarkDecision{
+					Winner: &transcode.BenchmarkWinner{
+						CandidateID:         "cand_q72",
+						CandidateIndex:      2,
+						Quality:             72,
+						VideoProfile:        "main",
+						PixelFormat:         "yuv420p",
+						ExpectedBitDepth:    8,
+						MetricType:          "vmaf",
+						Score:               96.5,
+						TargetReached:       true,
+						MinimumMet:          true,
+						EstimatedVideoBytes: 250000000,
+						EstimatedTotalBytes: 300000000,
+						EstimatedTotalMB:    300.0,
+						SavingsPercent:      45.0,
+					},
+					DecisionReason: "winner cand_q72 reached target",
+				},
+			}, nil
+		},
+		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
+			fullTranscodeReq = req
+			_ = os.MkdirAll(filepath.Dir(req.CandidatePath), 0755)
+			_ = os.WriteFile(req.CandidatePath, []byte("transcoded-output"), 0644)
+			return transcode.Job{ID: req.ID}, nil
+		},
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{
+				ID:       jobID,
+				Status:   transcode.StatusCompleted,
+				Progress: 100,
+			}, nil
+		},
+	}
+
+	engine1, st, mediaFile, _ := setupBenchmarkTestEnv(t, mock, standard8BitProbeJSON, &recipe.OptimizationPolicy{Enabled: true})
+
+	// Run initial execution -> completes benchmark, submits full transcode
+	res1, err := engine1.Run(context.Background(), "transcode_media", map[string]any{
+		"path":    mediaFile,
+		"profile": "opt-vt",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res1.Status != StatusCompleted {
+		t.Fatalf("expected StatusCompleted, got %s (error: %s)", res1.Status, res1.Error)
+	}
+
+	// Capture outputs from first run
+	winnerCandID := getString(res1.Outputs, "winner_candidate_id")
+	planDigest := getString(res1.Outputs, "plan_digest")
+	if winnerCandID != "cand_q72" {
+		t.Errorf("expected winner cand_q72, got %s", winnerCandID)
+	}
+	if planDigest == "" {
+		t.Errorf("expected non-empty plan_digest")
+	}
+
+	// Now simulate reloaded engine with the same store
+	engine2 := NewEngine(EngineDeps{
+		Store:     st,
+		Config:    engine1.deps.Config,
+		Fs:        engine1.deps.Fs,
+		Ffprobe:   engine1.deps.Ffprobe,
+		Transcode: mock,
+	})
+
+	// Resuming completed action
+	resumeRes, err := engine2.Resume(context.Background(), res1.ID, "", nil)
+	if err != nil {
+		t.Fatalf("resume error: %v", err)
+	}
+	if resumeRes.Status != StatusCompleted {
+		t.Errorf("expected StatusCompleted on reload, got %s", resumeRes.Status)
+	}
+
+	// Assertions:
+	// 1. No second benchmark submit
+	if mock.benchmarkSubmitCalls != 1 {
+		t.Errorf("expected exactly 1 benchmark submit call, got %d", mock.benchmarkSubmitCalls)
+	}
+	// 2. Same persisted winner and concrete PlanDigest
+	if getString(resumeRes.Outputs, "winner_candidate_id") != winnerCandID {
+		t.Errorf("winner candidate changed on reload: %s vs %s", getString(resumeRes.Outputs, "winner_candidate_id"), winnerCandID)
+	}
+	if getString(resumeRes.Outputs, "plan_digest") != planDigest {
+		t.Errorf("plan digest changed on reload: %s vs %s", getString(resumeRes.Outputs, "plan_digest"), planDigest)
+	}
+	// 3. Exactly one full submit
+	if mock.submitCalls != 1 {
+		t.Errorf("expected exactly 1 full transcode submit call, got %d", mock.submitCalls)
+	}
+	// 4. Concrete Plan properties match winner
+	if fullTranscodeReq.Plan == nil || fullTranscodeReq.Plan.Quality != 72 {
+		t.Errorf("submitted transcode request does not have winner's quality 72")
+	}
 }
