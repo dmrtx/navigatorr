@@ -110,6 +110,7 @@ type JobStatus struct {
 	Profile               string             `json:"profile,omitempty"`
 	RecipeVersion         string             `json:"recipe_version,omitempty"`
 	RecipeDigest          string             `json:"recipe_digest,omitempty"`
+	PlanDigest            string             `json:"plan_digest,omitempty"`
 	Container             string             `json:"container,omitempty"`
 	VideoCodec            string             `json:"video_codec,omitempty"`
 	Quality               int                `json:"quality,omitempty"`
