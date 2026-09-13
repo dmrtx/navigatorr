@@ -81,6 +81,7 @@ type BenchmarkExecutionEvidence struct {
 	CandidateSamples  []BenchmarkCandidateSampleResult     `json:"candidate_samples"`
 	MetricSamples     []BenchmarkMetricSampleResult        `json:"metric_samples,omitempty"`
 	CandidateMetrics  []BenchmarkCandidateMetricAggregate  `json:"candidate_metrics,omitempty"`
+	Decision          *transcode.BenchmarkDecision         `json:"decision,omitempty"`
 }
 
 type validatedCandidate struct {
@@ -93,16 +94,22 @@ type validatedCandidate struct {
 	fileKey     string
 }
 
-// ProductionBenchmarkRunner implements BenchmarkRunner for Phase 4B and Phase 5.
+// ProductionBenchmarkRunner implements BenchmarkRunner for Phase 4B, Phase 5, and Phase 6.
 // It extracts lossless reference samples, encodes candidate samples using hevc_videotoolbox,
-// and computes perceptual quality metrics (VMAF/SSIM).
+// computes perceptual quality metrics (VMAF/SSIM), and deterministically selects the winning candidate.
 type ProductionBenchmarkRunner struct {
-	metricsHook func(ctx context.Context, w *Worker, record *BenchmarkRecord, evidence *BenchmarkExecutionEvidence) error
+	metricsHook   func(ctx context.Context, w *Worker, record *BenchmarkRecord, evidence *BenchmarkExecutionEvidence) error
+	selectionHook func(ctx context.Context, w *Worker, record *BenchmarkRecord, evidence *BenchmarkExecutionEvidence) error
 }
 
 // SetMetricsHook sets an optional metrics callback for Phase 5 integration before scratch cleanup.
 func (r *ProductionBenchmarkRunner) SetMetricsHook(hook func(ctx context.Context, w *Worker, record *BenchmarkRecord, evidence *BenchmarkExecutionEvidence) error) {
 	r.metricsHook = hook
+}
+
+// SetSelectionHook sets an optional selection callback for Phase 6 integration before scratch cleanup.
+func (r *ProductionBenchmarkRunner) SetSelectionHook(hook func(ctx context.Context, w *Worker, record *BenchmarkRecord, evidence *BenchmarkExecutionEvidence) error) {
+	r.selectionHook = hook
 }
 
 // RunBenchmark executes the Phase 4B sample extraction and candidate encoding pipeline:
@@ -415,6 +422,17 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 	} else {
 		if err := r.runMetrics(ctx, w, record, evidence, samplesDir, validatedCandidates, sourceInitialSize, sourceInitialModTime); err != nil {
 			return fmt.Errorf("metrics calculation failed: %w", err)
+		}
+	}
+
+	// 7. Phase 6 candidate evaluation and selection before scratch cleanup
+	if r.selectionHook != nil {
+		if err := r.selectionHook(ctx, w, record, evidence); err != nil {
+			return fmt.Errorf("candidate selection failed: %w", err)
+		}
+	} else {
+		if err := r.runSelection(ctx, record, evidence, validatedCandidates, rep, sourceInitialSize); err != nil {
+			return fmt.Errorf("candidate selection failed: %w", err)
 		}
 	}
 
@@ -1412,5 +1430,327 @@ func (r *ProductionBenchmarkRunner) runMetrics(
 		}
 	}
 
+	return nil
+}
+
+func (r *ProductionBenchmarkRunner) runSelection(
+	ctx context.Context,
+	record *BenchmarkRecord,
+	evidence *BenchmarkExecutionEvidence,
+	validatedCandidates []validatedCandidate,
+	rep mediainspect.DetailedReport,
+	sourceInitialSize int64,
+) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	normMetric := strings.ToLower(strings.TrimSpace(record.Metric))
+	if normMetric == "" {
+		normMetric = "vmaf"
+	}
+
+	// Resolve quality policies (VMAF and SSIM)
+	vmafPolicy := optimization.DefaultVMAFPolicy()
+	if record.Quality != nil && record.Quality.VMAF != nil {
+		tol := vmafPolicy.Tolerance()
+		if record.Quality.VMAF.MarginalTolerance != nil {
+			tol = *record.Quality.VMAF.MarginalTolerance
+		}
+		vmafPolicy = optimization.NewVMAFPolicy(record.Quality.VMAF.Target, record.Quality.VMAF.Minimum, tol)
+	}
+
+	ssimPolicy := optimization.DefaultSSIMPolicy()
+	if record.Quality != nil && record.Quality.SSIM != nil {
+		tol := ssimPolicy.Tolerance()
+		if record.Quality.SSIM.MarginalTolerance != nil {
+			tol = *record.Quality.SSIM.MarginalTolerance
+		}
+		ssimPolicy = optimization.NewSSIMPolicy(record.Quality.SSIM.Target, record.Quality.SSIM.Minimum, tol)
+	}
+
+	// Validate policies fail closed
+	if err := optimization.ValidatePolicy(vmafPolicy); err != nil {
+		return fmt.Errorf("validating vmaf policy: %w (fail closed)", err)
+	}
+	if err := optimization.ValidatePolicy(ssimPolicy); err != nil {
+		return fmt.Errorf("validating ssim policy: %w (fail closed)", err)
+	}
+
+	// Determine primary selector policy based on requested metric and availability
+	var selectorPolicy optimization.QualityPolicy
+	switch normMetric {
+	case "vmaf":
+		selectorPolicy = vmafPolicy
+	case "ssim":
+		selectorPolicy = ssimPolicy
+	case "both", "vmaf+ssim":
+		preferred := "vmaf"
+		if record.Quality != nil && strings.ToLower(strings.TrimSpace(record.Quality.PreferredMetric)) != "" {
+			preferred = strings.ToLower(strings.TrimSpace(record.Quality.PreferredMetric))
+		}
+		hasValidVMAF := false
+		hasValidSSIM := false
+		for _, cm := range evidence.CandidateMetrics {
+			if cm.MetricType == optimization.MetricTypeVMAF && cm.Aggregate.Valid {
+				hasValidVMAF = true
+			}
+			if cm.MetricType == optimization.MetricTypeSSIM && cm.Aggregate.Valid {
+				hasValidSSIM = true
+			}
+		}
+		if preferred == "ssim" {
+			if hasValidSSIM || !hasValidVMAF {
+				selectorPolicy = ssimPolicy
+			} else {
+				selectorPolicy = vmafPolicy
+			}
+		} else {
+			if hasValidVMAF || !hasValidSSIM {
+				selectorPolicy = vmafPolicy
+			} else {
+				selectorPolicy = ssimPolicy
+			}
+		}
+	default:
+		selectorPolicy = vmafPolicy
+	}
+
+	// Assemble ColorInfo
+	colorInfo := optimization.ColorInfo{
+		BitDepth: evidence.SourceBitDepth,
+	}
+	if len(rep.Video) > 0 {
+		colorInfo.ColorPrimaries = rep.Video[0].ColorPrimaries
+		colorInfo.ColorTransfer = rep.Video[0].ColorTransfer
+		colorInfo.ColorSpace = rep.Video[0].ColorSpace
+		colorInfo.PixelFormat = rep.Video[0].PixelFormat
+		if colorInfo.BitDepth == 0 {
+			colorInfo.BitDepth = rep.Video[0].BitDepth
+		}
+	}
+
+	// Media size and duration
+	sourceSize := rep.SizeBytes
+	if sourceSize <= 0 {
+		sourceSize = sourceInitialSize
+	}
+	totalDuration := record.SourceDuration
+	if totalDuration <= 0 {
+		totalDuration = rep.DurationSec
+	}
+
+	// Total planned sample duration
+	var totalSampleDurationSec float64
+	for _, s := range record.Samples {
+		totalSampleDurationSec += s.DurationSeconds
+	}
+	if totalSampleDurationSec <= 0 {
+		for _, ref := range evidence.ReferenceSamples {
+			totalSampleDurationSec += ref.DurationSeconds
+		}
+	}
+
+	// Assemble stream estimates (audio, subtitle, attachments)
+	audioEstimates := make([]optimization.AudioStreamEstimate, 0, len(rep.Audio))
+	for _, a := range rep.Audio {
+		ae := optimization.AudioStreamEstimate{
+			Index:      a.Index,
+			Codec:      a.Codec,
+			Channels:   a.Channels,
+			BitrateBps: a.BitRate,
+			Copied:     true,
+		}
+		if ae.BitrateBps == 0 && a.Tags != nil {
+			if s, ok := a.Tags["BPS"]; ok {
+				if bps, err := strconv.ParseInt(s, 10, 64); err == nil && bps > 0 {
+					ae.BitrateBps = bps
+				}
+			}
+			if ae.BitrateBps == 0 {
+				if s, ok := a.Tags["NUMBER_OF_BYTES"]; ok {
+					if bytes, err := strconv.ParseInt(s, 10, 64); err == nil && bytes > 0 {
+						ae.SizeBytes = bytes
+					}
+				}
+			}
+		}
+		if ae.BitrateBps == 0 && ae.SizeBytes == 0 && record.FallbackAudioBitrateBps > 0 {
+			ae.FallbackBitrateBps = record.FallbackAudioBitrateBps
+		}
+		audioEstimates = append(audioEstimates, ae)
+	}
+
+	subEstimates := make([]optimization.SubtitleStreamEstimate, 0, len(rep.Subtitles))
+	for _, s := range rep.Subtitles {
+		se := optimization.SubtitleStreamEstimate{
+			Index: s.Index,
+			Codec: s.Codec,
+		}
+		if s.Tags != nil {
+			if sBytes, ok := s.Tags["NUMBER_OF_BYTES"]; ok {
+				if b, err := strconv.ParseInt(sBytes, 10, 64); err == nil && b > 0 {
+					se.SizeBytes = b
+				}
+			}
+		}
+		if se.SizeBytes == 0 && record.FallbackSubtitleSizeBytes > 0 {
+			se.FallbackSizeBytes = record.FallbackSubtitleSizeBytes
+		}
+		subEstimates = append(subEstimates, se)
+	}
+
+	var attachmentBytes int64
+	if record.AttachmentBytes > 0 {
+		attachmentBytes = record.AttachmentBytes
+	} else {
+		for _, att := range rep.Attachments {
+			if att.Tags != nil {
+				if sBytes, ok := att.Tags["NUMBER_OF_BYTES"]; ok {
+					if b, err := strconv.ParseInt(sBytes, 10, 64); err == nil && b > 0 {
+						attachmentBytes += b
+					}
+				}
+			}
+		}
+	}
+
+	candidateInputs := make([]optimization.CandidateInput, 0, len(validatedCandidates))
+	candidateEstimates := make([]optimization.EstimationResult, len(validatedCandidates))
+
+	for i, vc := range validatedCandidates {
+		// Determine candidate encode success and total sample bytes
+		encodeSuccess := true
+		var candSampleBytes int64
+		sampleCount := 0
+		for _, cs := range evidence.CandidateSamples {
+			if cs.CandidateID == vc.candidate.ID {
+				if cs.Error != "" || cs.SizeBytes <= 0 {
+					encodeSuccess = false
+				} else {
+					candSampleBytes += cs.SizeBytes
+					sampleCount++
+				}
+			}
+		}
+		if len(record.Samples) > 0 && sampleCount != len(record.Samples) {
+			encodeSuccess = false
+		}
+
+		// Estimate candidate output size
+		estInput := optimization.OutputEstimateInput{
+			SourceSizeBytes:         sourceSize,
+			TotalDurationSeconds:    totalDuration,
+			SampleDurationSeconds:   totalSampleDurationSec,
+			SampleVideoBytes:        candSampleBytes,
+			DeclaredVideoBitrateBps: record.DeclaredVideoBitrateBps,
+			AudioStreams:            audioEstimates,
+			SubtitleStreams:         subEstimates,
+			AttachmentBytes:         attachmentBytes,
+			ContainerOverheadRate:   optimization.DefaultContainerOverheadRate,
+		}
+		est, err := optimization.EstimateOutput(estInput)
+		if err != nil {
+			est.SuitableForSelection = false
+			if est.UnusableReason == "" {
+				est.UnusableReason = optimization.ReasonInvalidEstimatorInput
+			}
+		}
+		candidateEstimates[i] = est
+
+		// Find candidate's aggregate for the selector policy metric
+		var candAgg optimization.MetricAggregate
+		foundAgg := false
+		for _, cm := range evidence.CandidateMetrics {
+			if cm.CandidateID == vc.candidate.ID && cm.MetricType == selectorPolicy.Metric() {
+				candAgg = cm.Aggregate
+				foundAgg = true
+				break
+			}
+		}
+		if !foundAgg {
+			candAgg = optimization.MetricAggregate{
+				MetricType:       selectorPolicy.Metric(),
+				Valid:            false,
+				IneligibleReason: optimization.ReasonMetricMissing,
+			}
+		}
+
+		candidateInputs = append(candidateInputs, optimization.CandidateInput{
+			CandidateID:     vc.candidate.ID,
+			Profile:         vc.profile,
+			EncodeSuccess:   encodeSuccess,
+			AggregateResult: candAgg,
+			ColorInfo:       colorInfo,
+			EstimatedOutput: est,
+		})
+	}
+
+	// Deterministic selection
+	selIn := optimization.SelectorInput{
+		Policy:     selectorPolicy,
+		Candidates: candidateInputs,
+	}
+	selRes := optimization.SelectCandidate(selIn)
+
+	decision := &transcode.BenchmarkDecision{
+		DecisionReason: selRes.DecisionReason,
+		Evaluations:    make([]transcode.BenchmarkCandidateEvaluation, 0, len(validatedCandidates)),
+	}
+
+	for i, vc := range validatedCandidates {
+		ec := selRes.AllEvaluated[i]
+		decision.Evaluations = append(decision.Evaluations, transcode.BenchmarkCandidateEvaluation{
+			CandidateID:      vc.candidate.ID,
+			CandidateIndex:   vc.index,
+			Quality:          vc.candidate.Quality,
+			VideoProfile:     vc.profile,
+			PixelFormat:      vc.pixelFormat,
+			ExpectedBitDepth: vc.bitDepth,
+			Score:            ec.Score,
+			MetricType:       string(selectorPolicy.Metric()),
+			Eligible:         ec.Eligible,
+			TargetReached:    ec.TargetReached,
+			MinimumMet:       ec.MinimumMet,
+			EvaluationReason: ec.EvaluationReason,
+			EstimatedBytes:   ec.EstimatedBytes,
+			EstimatedMB:      ec.EstimatedMB,
+			SavingsPercent:   ec.SavingsPercent,
+			Uncertainties:    ec.Uncertainties,
+		})
+	}
+
+	if selRes.Winner != nil {
+		for i, vc := range validatedCandidates {
+			if vc.candidate.ID == selRes.Winner.CandidateID {
+				est := candidateEstimates[i]
+				decision.Winner = &transcode.BenchmarkWinner{
+					CandidateID:               vc.candidate.ID,
+					CandidateIndex:            vc.index,
+					Quality:                   vc.candidate.Quality,
+					VideoProfile:              vc.profile,
+					PixelFormat:               vc.pixelFormat,
+					ExpectedBitDepth:          vc.bitDepth,
+					MetricType:                string(selectorPolicy.Metric()),
+					Score:                     selRes.Winner.Score,
+					TargetReached:             selRes.Winner.TargetReached,
+					MinimumMet:                selRes.Winner.MinimumMet,
+					EstimatedVideoBytes:       est.EstimatedVideoBytes,
+					EstimatedAudioBytes:       est.EstimatedAudioBytes,
+					EstimatedSubtitleBytes:    est.EstimatedSubtitleBytes,
+					EstimatedAttachmentBytes:  est.EstimatedAttachmentBytes,
+					EstimatedMuxOverheadBytes: est.EstimatedMuxOverheadBytes,
+					EstimatedTotalBytes:       est.EstimatedTotalBytes,
+					EstimatedTotalMB:          est.EstimatedTotalMB,
+					SavingsBytes:              est.SavingsBytes,
+					SavingsPercent:            est.SavingsPercent,
+					Uncertainties:             est.Uncertainties,
+				}
+				break
+			}
+		}
+	}
+
+	evidence.Decision = decision
 	return nil
 }
