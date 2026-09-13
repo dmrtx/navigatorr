@@ -18,14 +18,12 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 			Outputs: map[string]any{"skipped": true},
 		}, nil
 	}
+	acceptValidationLoss := false
 	if ec.Decision != "" {
 		if strings.EqualFold(ec.Decision, "reject") || strings.EqualFold(ec.Decision, "cancel") {
 			return StepResult{Status: StepFailed, Error: "transcode candidate rejected by user decision; original file remains untouched"}, nil
 		}
-		if strings.EqualFold(ec.Decision, "accept_loss") || strings.EqualFold(ec.Decision, "approve") {
-			ec.State["validation_decision_applied"] = ec.Decision
-			return StepResult{Status: StepCompleted, Outputs: map[string]any{"decision_applied": ec.Decision, "note": "validation discrepancy accepted by user decision"}}, nil
-		}
+		acceptValidationLoss = strings.EqualFold(ec.Decision, "accept_loss") || strings.EqualFold(ec.Decision, "approve")
 	}
 	outputPath := getString(ec.State, "candidate_path")
 	if outputPath == "" {
@@ -50,15 +48,22 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 	waitDecision := func(reason string) StepResult {
 		return StepResult{Status: StepWaitingDecision, WaitingReason: reason, WaitingOptions: []WaitingOption{{Decision: "reject", Description: "Reject candidate and keep original"}, {Decision: "accept_loss", Description: "Accept candidate despite validation discrepancy"}}}
 	}
+	if len(outRep.Video) == 0 {
+		return StepResult{Status: StepFailed, Error: "transcoded candidate contains no video streams"}, nil
+	}
+	if plan.ExpectedBitDepth > 0 && outRep.Video[0].BitDepth != plan.ExpectedBitDepth {
+		return StepResult{Status: StepFailed, Error: fmt.Sprintf("Video bit depth mismatch: plan requires %d-bit output but candidate is %d-bit (fail closed)", plan.ExpectedBitDepth, outRep.Video[0].BitDepth)}, nil
+	}
+	if acceptValidationLoss {
+		ec.State["validation_decision_applied"] = ec.Decision
+		return StepResult{Status: StepCompleted, Outputs: map[string]any{"decision_applied": ec.Decision, "note": "validation discrepancy accepted by user decision after hard candidate invariants passed"}}, nil
+	}
 	origDur := getFloat(origMap, "duration_sec")
 	if origDur > 0 && outRep.DurationSec > 0 {
 		d := math.Abs(outRep.DurationSec - origDur)
 		if d > 3 && (d/origDur) > 0.02 {
 			return waitDecision(fmt.Sprintf("Duration discrepancy: original was %.1fs, output is %.1fs (difference: %.1fs)", origDur, outRep.DurationSec, d)), nil
 		}
-	}
-	if len(outRep.Video) == 0 {
-		return StepResult{Status: StepFailed, Error: "transcoded candidate contains no video streams"}, nil
 	}
 	expected := strings.ToLower(strings.TrimSpace(getString(ec.Inputs, "expected_video_codec")))
 	if expected == "" {
@@ -72,9 +77,6 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 		if outRep.Video[0].Width != origVideo[0].Width || outRep.Video[0].Height != origVideo[0].Height {
 			return waitDecision(fmt.Sprintf("Video resolution mismatch: original=%dx%d output=%dx%d", origVideo[0].Width, origVideo[0].Height, outRep.Video[0].Width, outRep.Video[0].Height)), nil
 		}
-	}
-	if plan.ExpectedBitDepth > 0 && outRep.Video[0].BitDepth != plan.ExpectedBitDepth {
-		return StepResult{Status: StepFailed, Error: fmt.Sprintf("Video bit depth mismatch: plan requires %d-bit output but candidate is %d-bit (fail closed)", plan.ExpectedBitDepth, outRep.Video[0].BitDepth)}, nil
 	}
 	origAudio := getStreamsList(origMap, "audio")
 	if len(outRep.Audio) != len(origAudio) {
