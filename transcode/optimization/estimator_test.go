@@ -89,8 +89,8 @@ func TestEstimateOutput_SampleVideoBytes(t *testing.T) {
 	}
 }
 
-func TestEstimateOutput_HonorCopiedAudioOnly(t *testing.T) {
-	// Audio stream 1 is Copied: false (should NOT be included in copied audio)
+func TestEstimateOutput_DiscardedAudioExcluded(t *testing.T) {
+	// Audio stream 1 is Discarded: true (should NOT be included in output)
 	// Audio stream 2 is Copied: true (should be included)
 	in := OutputEstimateInput{
 		SourceSizeBytes:       1000000000,
@@ -98,8 +98,8 @@ func TestEstimateOutput_HonorCopiedAudioOnly(t *testing.T) {
 		SampleDurationSeconds: 10.0,
 		SampleVideoBytes:      1000000,
 		AudioStreams: []AudioStreamEstimate{
-			{Index: 1, Codec: "dts", SizeBytes: 150000000, Copied: false}, // NOT copied
-			{Index: 2, Codec: "aac", SizeBytes: 50000000, Copied: true},   // copied
+			{Index: 1, Codec: "dts", SizeBytes: 150000000, Discarded: true}, // Discarded
+			{Index: 2, Codec: "aac", SizeBytes: 50000000, Copied: true},     // Kept
 		},
 	}
 
@@ -108,10 +108,64 @@ func TestEstimateOutput_HonorCopiedAudioOnly(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Only Stream 2 (50MB) should be counted; Stream 1 (150MB) must be ignored
 	expectedAudio := int64(50000000)
 	if res.EstimatedAudioBytes != expectedAudio {
-		t.Errorf("EstimatedAudioBytes = %d, want %d (non-copied audio must be excluded)", res.EstimatedAudioBytes, expectedAudio)
+		t.Errorf("EstimatedAudioBytes = %d, want %d (discarded audio must be excluded)", res.EstimatedAudioBytes, expectedAudio)
+	}
+}
+
+func TestEstimateOutput_NonCopiedAudioExplicitPayload(t *testing.T) {
+	// Re-encoded audio stream (Copied: false) with explicit target bitrate
+	in := OutputEstimateInput{
+		SourceSizeBytes:       1000000000,
+		TotalDurationSeconds:  100.0,
+		SampleDurationSeconds: 10.0,
+		SampleVideoBytes:      1000000,
+		AudioStreams: []AudioStreamEstimate{
+			{Index: 1, Codec: "aac", Channels: 2, BitrateBps: 192000, Copied: false}, // 192 kbps re-encode
+		},
+	}
+
+	res, err := EstimateOutput(in)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !res.SuitableForSelection {
+		t.Errorf("expected SuitableForSelection = true when non-copied audio has explicit bitrate")
+	}
+
+	// 192,000 * 100 / 8 = 2,400,000 bytes
+	expectedAudio := int64(2400000)
+	if res.EstimatedAudioBytes != expectedAudio {
+		t.Errorf("EstimatedAudioBytes = %d, want %d", res.EstimatedAudioBytes, expectedAudio)
+	}
+}
+
+func TestEstimateOutput_NonCopiedAudioLackingEstimateUnsuitable(t *testing.T) {
+	// Re-encoded audio stream (Copied: false) lacking size, bitrate, and fallback.
+	// System MUST NOT silently ignore non-copied audio (which would underestimate size);
+	// it must mark the estimate unsuitable!
+	in := OutputEstimateInput{
+		SourceSizeBytes:       1000000000,
+		TotalDurationSeconds:  100.0,
+		SampleDurationSeconds: 10.0,
+		SampleVideoBytes:      1000000,
+		AudioStreams: []AudioStreamEstimate{
+			{Index: 1, Codec: "aac", Channels: 2, Copied: false}, // No bitrate or fallback!
+		},
+	}
+
+	res, err := EstimateOutput(in)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if res.SuitableForSelection {
+		t.Errorf("expected SuitableForSelection = false when non-copied stream has unknown size")
+	}
+	if res.UnusableReason != ReasonMissingStreamBitrate {
+		t.Errorf("UnusableReason = %q, want %q", res.UnusableReason, ReasonMissingStreamBitrate)
 	}
 }
 
@@ -242,6 +296,26 @@ func TestEstimateOutput_UnusableVideoEstimate(t *testing.T) {
 	}
 	if res.UnusableReason != ReasonInvalidVideoEstimate && res.UnusableReason != ReasonUnusableEstimate {
 		t.Errorf("expected unusable reason, got %q", res.UnusableReason)
+	}
+}
+
+func TestEstimateOutput_OverflowProtection(t *testing.T) {
+	// Float multiplication scaling that would exceed int64
+	in := OutputEstimateInput{
+		TotalDurationSeconds:  1000000.0,
+		SampleDurationSeconds: 0.001,
+		SampleVideoBytes:      10000000000000000, // 1e16 bytes * 1e9 scale = 1e25 bytes
+	}
+
+	res, err := EstimateOutput(in)
+	if err == nil {
+		t.Errorf("expected error on float overflow scaling")
+	}
+	if res.SuitableForSelection {
+		t.Errorf("expected SuitableForSelection = false on overflow")
+	}
+	if res.UnusableReason != ReasonIntegerOverflow {
+		t.Errorf("UnusableReason = %q, want %q", res.UnusableReason, ReasonIntegerOverflow)
 	}
 }
 
