@@ -694,7 +694,7 @@ transcode:
           vmaf:
             target: 96.0
             minimum: 93.0
-          marginal_tolerance: 0.5
+            marginal_tolerance: 0.5
         search:
           max_candidates: 5
           quality_values: [60, 65, 70]
@@ -737,7 +737,7 @@ transcode:
 		if recProfile.Optimization.Sampling == nil || recProfile.Optimization.Sampling.SampleSeconds != 12.0 {
 			t.Errorf("unexpected sampling policy: %+v", recProfile.Optimization.Sampling)
 		}
-		if recProfile.Optimization.Quality == nil || recProfile.Optimization.Quality.VMAF.Target != 96.0 {
+		if recProfile.Optimization.Quality == nil || recProfile.Optimization.Quality.VMAF.Target != 96.0 || recProfile.Optimization.Quality.VMAF.MarginalTolerance == nil || *recProfile.Optimization.Quality.VMAF.MarginalTolerance != 0.5 {
 			t.Errorf("unexpected quality policy: %+v", recProfile.Optimization.Quality)
 		}
 		if recProfile.Optimization.Search == nil || len(recProfile.Optimization.Search.QualityValues) != 3 || recProfile.Optimization.Search.QualityValues[1] != 65 {
@@ -745,6 +745,13 @@ transcode:
 		}
 		if recProfile.Optimization.Size == nil || recProfile.Optimization.Size.PreferredTotalBitrateKbps.Max != 5000 {
 			t.Errorf("unexpected size policy: %+v", recProfile.Optimization.Size)
+		}
+
+		// Verify deep cloning at mapping boundaries: mutating recProfile.Optimization
+		// does NOT affect cfg.Transcode.Profiles["custom-main10"].Optimization
+		recProfile.Optimization.Sampling.Positions[0] = 0.999
+		if cfg.Transcode.Profiles["custom-main10"].Optimization.Sampling.Positions[0] == 0.999 {
+			t.Errorf("aliasing detected: mutating recipe override mutated config profile")
 		}
 
 		plan, err := cfg.Transcode.ResolvePlan("custom-main10")

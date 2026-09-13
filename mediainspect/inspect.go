@@ -8,9 +8,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -389,15 +391,15 @@ func ParseFrameRateRational(raw string) (float64, bool) {
 	if len(parts) == 2 {
 		num, err1 := strconv.ParseFloat(parts[0], 64)
 		den, err2 := strconv.ParseFloat(parts[1], 64)
-		if err1 == nil && err2 == nil && den > 0 {
+		if err1 == nil && err2 == nil && den > 0 && !math.IsNaN(num) && !math.IsNaN(den) && !math.IsInf(num, 0) && !math.IsInf(den, 0) {
 			fps := num / den
-			if fps > 0 {
+			if fps > 0 && !math.IsNaN(fps) && !math.IsInf(fps, 0) {
 				return fps, true
 			}
 		}
 	} else if len(parts) == 1 {
 		val, err := strconv.ParseFloat(parts[0], 64)
-		if err == nil && val > 0 {
+		if err == nil && val > 0 && !math.IsNaN(val) && !math.IsInf(val, 0) {
 			return val, true
 		}
 	}
@@ -465,20 +467,29 @@ func parseContentLightLevelMetadata(sdMap map[string]any) *ContentLightLevelMeta
 			}
 			switch val := v.(type) {
 			case float64:
-				if val > 0 {
+				if val > 0 && !math.IsNaN(val) && !math.IsInf(val, 0) && val <= float64(math.MaxInt32) {
 					return int(val)
+				}
+			case float32:
+				f := float64(val)
+				if f > 0 && !math.IsNaN(f) && !math.IsInf(f, 0) && f <= float64(math.MaxInt32) {
+					return int(f)
 				}
 			case int:
 				if val > 0 {
 					return val
 				}
 			case int64:
-				if val > 0 {
+				if val > 0 && val <= math.MaxInt32 {
 					return int(val)
 				}
 			case string:
-				if n, err := strconv.Atoi(strings.TrimSpace(val)); err == nil && n > 0 {
+				trimmed := strings.TrimSpace(val)
+				if n, err := strconv.Atoi(trimmed); err == nil && n > 0 {
 					return n
+				}
+				if f, err := strconv.ParseFloat(trimmed, 64); err == nil && f > 0 && !math.IsNaN(f) && !math.IsInf(f, 0) && f <= float64(math.MaxInt32) {
+					return int(f)
 				}
 			}
 		}
@@ -532,11 +543,18 @@ func sanitizeSideDataList(rawList []json.RawMessage) []SideDataRecord {
 
 func sanitizeSideDataMap(entry map[string]any) map[string]any {
 	out := make(map[string]any)
+	keys := make([]string, 0, len(entry))
+	for k := range entry {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
 	count := 0
-	for k, v := range entry {
+	for _, k := range keys {
 		if count >= maxSideDataKeys {
 			break
 		}
+		v := entry[k]
 		if v == nil {
 			continue
 		}
@@ -556,11 +574,18 @@ func sanitizeSideDataMap(entry map[string]any) map[string]any {
 			count++
 		case map[string]any:
 			nested := make(map[string]any)
+			nestedKeys := make([]string, 0, len(val))
+			for nk := range val {
+				nestedKeys = append(nestedKeys, nk)
+			}
+			sort.Strings(nestedKeys)
+
 			nestedCount := 0
-			for nk, nv := range val {
+			for _, nk := range nestedKeys {
 				if nestedCount >= 10 {
 					break
 				}
+				nv := val[nk]
 				if nv == nil {
 					continue
 				}
@@ -593,15 +618,21 @@ func ParseBitRate(raw any, tags map[string]string) int64 {
 	if raw != nil {
 		switch v := raw.(type) {
 		case string:
-			if n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil && n > 0 {
+			trimmed := strings.TrimSpace(v)
+			if n, err := strconv.ParseInt(trimmed, 10, 64); err == nil && n > 0 {
 				return n
 			}
-			if f, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil && f > 0 {
+			if f, err := strconv.ParseFloat(trimmed, 64); err == nil && f > 0 && !math.IsNaN(f) && !math.IsInf(f, 0) && f <= float64(math.MaxInt64) {
 				return int64(f)
 			}
 		case float64:
-			if v > 0 {
+			if v > 0 && !math.IsNaN(v) && !math.IsInf(v, 0) && v <= float64(math.MaxInt64) {
 				return int64(v)
+			}
+		case float32:
+			f := float64(v)
+			if f > 0 && !math.IsNaN(f) && !math.IsInf(f, 0) && f <= float64(math.MaxInt64) {
+				return int64(f)
 			}
 		case int64:
 			if v > 0 {
@@ -615,8 +646,12 @@ func ParseBitRate(raw any, tags map[string]string) int64 {
 	}
 	for k, v := range tags {
 		if strings.HasPrefix(strings.ToUpper(k), "BPS") {
-			if n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil && n > 0 {
+			trimmed := strings.TrimSpace(v)
+			if n, err := strconv.ParseInt(trimmed, 10, 64); err == nil && n > 0 {
 				return n
+			}
+			if f, err := strconv.ParseFloat(trimmed, 64); err == nil && f > 0 && !math.IsNaN(f) && !math.IsInf(f, 0) && f <= float64(math.MaxInt64) {
+				return int64(f)
 			}
 		}
 	}
@@ -626,10 +661,14 @@ func ParseBitRate(raw any, tags map[string]string) int64 {
 func isHDRStream(st DetailedStream) bool {
 	ct := strings.ToLower(strings.TrimSpace(st.ColorTransfer))
 	cp := strings.ToLower(strings.TrimSpace(st.ColorPrimaries))
+	cs := strings.ToLower(strings.TrimSpace(st.ColorSpace))
 	if ct == "smpte2084" || ct == "arib-std-b67" || strings.Contains(ct, "2084") || strings.Contains(ct, "hlg") {
 		return true
 	}
 	if cp == "bt2020" || strings.Contains(cp, "2020") {
+		return true
+	}
+	if cs == "bt2020nc" || cs == "bt2020c" || strings.Contains(cs, "2020") {
 		return true
 	}
 	if st.MasteringDisplay != nil || st.ContentLightLevel != nil {

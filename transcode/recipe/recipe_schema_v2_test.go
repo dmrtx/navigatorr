@@ -83,10 +83,11 @@ profiles:
         vmaf:
           target: 95.0
           minimum: 93.0
+          marginal_tolerance: 0.5
         ssim:
           target: 0.98
           minimum: 0.96
-        marginal_tolerance: 0.5
+          marginal_tolerance: 0.005
       search:
         max_candidates: 5
         quality_values: [55, 60, 65, 70, 75]
@@ -159,8 +160,11 @@ func TestRecipeSchemaV2_FullValidationAndNormalization(t *testing.T) {
 	if opt.Sampling.Strategy != "uniform" || opt.Sampling.SampleCount != 3 || opt.Sampling.SampleSeconds != 10.0 {
 		t.Errorf("unexpected sampling config: %+v", opt.Sampling)
 	}
-	if opt.Quality.PreferredMetric != "vmaf" || opt.Quality.VMAF.Target != 95.0 || opt.Quality.MarginalTolerance != 0.5 {
+	if opt.Quality.PreferredMetric != "vmaf" || opt.Quality.VMAF.Target != 95.0 || opt.Quality.VMAF.MarginalTolerance == nil || *opt.Quality.VMAF.MarginalTolerance != 0.5 {
 		t.Errorf("unexpected quality config: %+v", opt.Quality)
+	}
+	if opt.Quality.SSIM.Target != 0.98 || opt.Quality.SSIM.MarginalTolerance == nil || *opt.Quality.SSIM.MarginalTolerance != 0.005 {
+		t.Errorf("unexpected ssim config: %+v", opt.Quality.SSIM)
 	}
 	if opt.Search.MaxCandidates != 5 || len(opt.Search.QualityValues) != 5 {
 		t.Errorf("unexpected search config: %+v", opt.Search)
@@ -199,11 +203,14 @@ profiles:
 		t.Fatalf("expected optimization to be non-nil")
 	}
 	// Verify documented defaults were populated through normalization
-	if opt.Sampling == nil || opt.Sampling.Strategy != DefaultSamplingStrategy || opt.Sampling.SampleCount != DefaultSampleCount {
+	if opt.Sampling == nil || opt.Sampling.Strategy != DefaultSamplingStrategy || opt.Sampling.SampleCount != DefaultSampleCount || opt.Sampling.SampleSeconds != DefaultSampleSeconds {
 		t.Errorf("sampling defaults not normalized: %+v", opt.Sampling)
 	}
-	if opt.Quality == nil || opt.Quality.PreferredMetric != DefaultPreferredMetric || opt.Quality.VMAF.Target != DefaultVMAFTarget {
+	if opt.Quality == nil || opt.Quality.PreferredMetric != DefaultPreferredMetric || opt.Quality.VMAF.Target != DefaultVMAFTarget || opt.Quality.VMAF.Minimum != DefaultVMAFMinimum || opt.Quality.VMAF.MarginalTolerance == nil || *opt.Quality.VMAF.MarginalTolerance != DefaultVMAFMarginalTolerance {
 		t.Errorf("quality defaults not normalized: %+v", opt.Quality)
+	}
+	if opt.Quality.SSIM.Target != DefaultSSIMTarget || opt.Quality.SSIM.Minimum != DefaultSSIMMinimum || opt.Quality.SSIM.MarginalTolerance == nil || *opt.Quality.SSIM.MarginalTolerance != DefaultSSIMMarginalTolerance {
+		t.Errorf("ssim defaults not normalized: %+v", opt.Quality.SSIM)
 	}
 	if opt.Search == nil || opt.Search.MaxCandidates != DefaultMaxCandidates || len(opt.Search.QualityValues) != len(DefaultQualityValues) {
 		t.Errorf("search defaults not normalized: %+v", opt.Search)
@@ -485,6 +492,7 @@ func TestRecipeOptimizationPolicy_ValidationFailures(t *testing.T) {
 }
 
 func TestRecipeSchemaV2_JSONRoundTrip(t *testing.T) {
+	vmafTol := 0.5
 	opt := &OptimizationPolicy{
 		Enabled: true,
 		Sampling: &SamplingPolicy{
@@ -494,9 +502,8 @@ func TestRecipeSchemaV2_JSONRoundTrip(t *testing.T) {
 			Positions:     []float64{0.25, 0.5, 0.75},
 		},
 		Quality: &QualityPolicy{
-			PreferredMetric:   "vmaf",
-			VMAF:              &MetricTarget{Target: 96.0, Minimum: 94.0},
-			MarginalTolerance: 0.5,
+			PreferredMetric: "vmaf",
+			VMAF:            &MetricTarget{Target: 96.0, Minimum: 94.0, MarginalTolerance: &vmafTol},
 		},
 		Search: &SearchPolicy{
 			MaxCandidates: 3,
@@ -520,7 +527,93 @@ func TestRecipeSchemaV2_JSONRoundTrip(t *testing.T) {
 		t.Fatalf("Decode failed: %v", err)
 	}
 
-	if decoded.Sampling.SampleSeconds != 15.0 || decoded.Quality.VMAF.Target != 96.0 {
+	if decoded.Sampling.SampleSeconds != 15.0 || decoded.Quality.VMAF.Target != 96.0 || decoded.Quality.VMAF.MarginalTolerance == nil || *decoded.Quality.VMAF.MarginalTolerance != 0.5 {
 		t.Errorf("roundtrip data mismatch: %+v", decoded)
+	}
+}
+
+func TestRecipeOptimizationPolicy_StrictNormalizationAndZeroTolerance(t *testing.T) {
+	zeroTol := 0.0
+	opt := &OptimizationPolicy{
+		Enabled: true,
+		Sampling: &SamplingPolicy{
+			Strategy:      "  DISTRIBUTED  ",
+			SampleSeconds: -10.0, // Invalid negative number: normalization must NOT overwrite with default!
+		},
+		Quality: &QualityPolicy{
+			PreferredMetric: "  VMAF  ",
+			VMAF: &MetricTarget{
+				Target:            96.0,
+				Minimum:           95.0,
+				MarginalTolerance: &zeroTol, // Explicit zero tolerance must NOT be overwritten!
+			},
+		},
+	}
+	NormalizeOptimizationPolicy(opt)
+
+	// Verify trimming and lowercasing
+	if opt.Sampling.Strategy != "distributed" {
+		t.Errorf("expected sampling strategy to be lowercased 'distributed', got %q", opt.Sampling.Strategy)
+	}
+	if opt.Quality.PreferredMetric != "vmaf" {
+		t.Errorf("expected preferred metric to be lowercased 'vmaf', got %q", opt.Quality.PreferredMetric)
+	}
+
+	// Verify explicit zero tolerance was preserved
+	if opt.Quality.VMAF.MarginalTolerance == nil || *opt.Quality.VMAF.MarginalTolerance != 0.0 {
+		t.Errorf("expected zero tolerance 0.0 to be preserved, got %v", opt.Quality.VMAF.MarginalTolerance)
+	}
+
+	// Verify negative sample_seconds was NOT replaced by default 20.0
+	if opt.Sampling.SampleSeconds != -10.0 {
+		t.Errorf("expected negative sample_seconds -10.0 to be retained, got %v", opt.Sampling.SampleSeconds)
+	}
+
+	// Validation must fail closed on negative sample_seconds
+	err := ValidateOptimizationPolicy("test", opt)
+	if err == nil || !strings.Contains(err.Error(), "sample_seconds") {
+		t.Errorf("expected validation failure on negative sample_seconds, got: %v", err)
+	}
+}
+
+func TestRecipeOptimizationPolicy_CloneIndependence(t *testing.T) {
+	tol := 0.5
+	orig := &OptimizationPolicy{
+		Enabled: true,
+		Sampling: &SamplingPolicy{
+			Strategy:      "distributed",
+			SampleCount:   3,
+			SampleSeconds: 20.0,
+			Positions:     []float64{0.2, 0.5, 0.8},
+		},
+		Quality: &QualityPolicy{
+			PreferredMetric: "vmaf",
+			VMAF:            &MetricTarget{Target: 96.0, Minimum: 95.0, MarginalTolerance: &tol},
+		},
+		Search: &SearchPolicy{
+			MaxCandidates: 5,
+			QualityValues: []int{55, 60, 65, 70, 75},
+		},
+	}
+
+	cloned := orig.Clone()
+	if cloned == nil {
+		t.Fatalf("expected non-nil clone")
+	}
+
+	// Mutate clone
+	cloned.Sampling.Positions[0] = 0.99
+	*cloned.Quality.VMAF.MarginalTolerance = 1.0
+	cloned.Search.QualityValues[0] = 999
+
+	// Orig must remain untouched
+	if orig.Sampling.Positions[0] == 0.99 {
+		t.Errorf("mutation of cloned positions mutated orig")
+	}
+	if *orig.Quality.VMAF.MarginalTolerance == 1.0 {
+		t.Errorf("mutation of cloned marginal tolerance mutated orig")
+	}
+	if orig.Search.QualityValues[0] == 999 {
+		t.Errorf("mutation of cloned quality values mutated orig")
 	}
 }

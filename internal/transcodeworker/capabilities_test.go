@@ -312,3 +312,67 @@ esac
 		}
 	}
 }
+
+func TestProbeWorkerCapabilities_CleanAbsenceOnNonApple(t *testing.T) {
+	dir := t.TempDir()
+	fakeFFmpeg := filepath.Join(dir, "fake_ffmpeg_linux.sh")
+
+	// Standard non-Apple FFmpeg build output where hevc_videotoolbox is not recognized
+	script := `#!/bin/sh
+case "$*" in
+  *"-version"*)
+    echo "ffmpeg version 7.1-static (Linux)"
+    ;;
+  *"-h encoder=hevc_videotoolbox"*)
+    echo "Codec 'hevc_videotoolbox' is not recognized by FFmpeg." >&2
+    exit 1
+    ;;
+  *"-encoders"*)
+    cat << 'EOF'
+Encoders:
+ V..... libx264              libx264 H.264
+ V..... libx265              libx265 H.265
+ A..... aac                  AAC
+EOF
+    ;;
+  *"-filters"*)
+    cat << 'EOF'
+Filters:
+ ... scale             V->V       Scale
+ ... ssim              VV->V      SSIM
+EOF
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(fakeFFmpeg, []byte(script), 0o755); err != nil {
+		t.Fatalf("failed writing fake ffmpeg: %v", err)
+	}
+
+	caps, err := ProbeWorkerCapabilities(context.Background(), fakeFFmpeg)
+	if err != nil {
+		t.Fatalf("ProbeWorkerCapabilities failed on clean absence: %v", err)
+	}
+
+	// Clean absence must NOT be treated as a ProbeError
+	if caps.HasProbeErrors() {
+		t.Errorf("expected no probe errors for clean absence, got: %+v", caps.ProbeErrors)
+	}
+	if caps.VideoToolbox.Available {
+		t.Errorf("expected VideoToolbox.Available=false")
+	}
+	if caps.EncoderDetails["hevc_videotoolbox"].Available {
+		t.Errorf("expected EncoderDetails[hevc_videotoolbox].Available=false")
+	}
+	if caps.Encoders["hevc_videotoolbox"] {
+		t.Errorf("expected Encoders[hevc_videotoolbox]=false")
+	}
+	if !caps.Encoders["libx264"] || !caps.Encoders["libx265"] {
+		t.Errorf("expected standard software encoders to be available")
+	}
+	if !strings.HasPrefix(caps.CapabilityFingerprint, "sha256:") {
+		t.Errorf("expected valid fingerprint digest, got %q", caps.CapabilityFingerprint)
+	}
+}

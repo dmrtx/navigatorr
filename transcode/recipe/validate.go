@@ -210,7 +210,8 @@ func isFinite(f float64) bool {
 }
 
 // NormalizeOptimizationPolicy populates documented defaults for enabled optimization policies
-// where fields were omitted, replacing ambiguous zero values with concrete defaults.
+// where fields were omitted, replacing truly omitted/zero values with concrete defaults without
+// overwriting invalid negative numbers.
 func NormalizeOptimizationPolicy(opt *OptimizationPolicy) {
 	if opt == nil || !opt.Enabled {
 		return
@@ -225,13 +226,15 @@ func NormalizeOptimizationPolicy(opt *OptimizationPolicy) {
 			Positions:     append([]float64(nil), DefaultSamplingPositions...),
 		}
 	} else {
+		opt.Sampling.Strategy = strings.ToLower(strings.TrimSpace(opt.Sampling.Strategy))
 		if opt.Sampling.Strategy == "" {
 			opt.Sampling.Strategy = DefaultSamplingStrategy
 		}
-		if opt.Sampling.SampleSeconds <= 0 {
+		// Only default if EXACTLY zero. Do not overwrite negative numbers!
+		if opt.Sampling.SampleSeconds == 0 {
 			opt.Sampling.SampleSeconds = DefaultSampleSeconds
 		}
-		if opt.Sampling.SampleCount <= 0 {
+		if opt.Sampling.SampleCount == 0 {
 			if len(opt.Sampling.Positions) > 0 {
 				opt.Sampling.SampleCount = len(opt.Sampling.Positions)
 			} else {
@@ -251,25 +254,37 @@ func NormalizeOptimizationPolicy(opt *OptimizationPolicy) {
 	}
 
 	// 2. Quality normalization
+	defaultVMAFTol := DefaultVMAFMarginalTolerance
+	defaultSSIMTol := DefaultSSIMMarginalTolerance
 	if opt.Quality == nil {
 		opt.Quality = &QualityPolicy{
-			PreferredMetric:   DefaultPreferredMetric,
-			VMAF:              &MetricTarget{Target: DefaultVMAFTarget, Minimum: DefaultVMAFMinimum},
-			SSIM:              &MetricTarget{Target: DefaultSSIMTarget, Minimum: DefaultSSIMMinimum},
-			MarginalTolerance: DefaultMarginalTolerance,
+			PreferredMetric: DefaultPreferredMetric,
+			VMAF:            &MetricTarget{Target: DefaultVMAFTarget, Minimum: DefaultVMAFMinimum, MarginalTolerance: &defaultVMAFTol},
+			SSIM:            &MetricTarget{Target: DefaultSSIMTarget, Minimum: DefaultSSIMMinimum, MarginalTolerance: &defaultSSIMTol},
 		}
 	} else {
+		opt.Quality.PreferredMetric = strings.ToLower(strings.TrimSpace(opt.Quality.PreferredMetric))
 		if opt.Quality.PreferredMetric == "" {
 			opt.Quality.PreferredMetric = DefaultPreferredMetric
 		}
-		if opt.Quality.PreferredMetric == "vmaf" && opt.Quality.VMAF == nil {
-			opt.Quality.VMAF = &MetricTarget{Target: DefaultVMAFTarget, Minimum: DefaultVMAFMinimum}
+		if opt.Quality.VMAF != nil {
+			if opt.Quality.VMAF.MarginalTolerance == nil {
+				v := DefaultVMAFMarginalTolerance
+				opt.Quality.VMAF.MarginalTolerance = &v
+			}
+		} else if opt.Quality.PreferredMetric == "vmaf" {
+			v := DefaultVMAFMarginalTolerance
+			opt.Quality.VMAF = &MetricTarget{Target: DefaultVMAFTarget, Minimum: DefaultVMAFMinimum, MarginalTolerance: &v}
 		}
-		if opt.Quality.PreferredMetric == "ssim" && opt.Quality.SSIM == nil {
-			opt.Quality.SSIM = &MetricTarget{Target: DefaultSSIMTarget, Minimum: DefaultSSIMMinimum}
-		}
-		if opt.Quality.MarginalTolerance <= 0 {
-			opt.Quality.MarginalTolerance = DefaultMarginalTolerance
+
+		if opt.Quality.SSIM != nil {
+			if opt.Quality.SSIM.MarginalTolerance == nil {
+				v := DefaultSSIMMarginalTolerance
+				opt.Quality.SSIM.MarginalTolerance = &v
+			}
+		} else if opt.Quality.PreferredMetric == "ssim" {
+			v := DefaultSSIMMarginalTolerance
+			opt.Quality.SSIM = &MetricTarget{Target: DefaultSSIMTarget, Minimum: DefaultSSIMMinimum, MarginalTolerance: &v}
 		}
 	}
 
@@ -280,7 +295,8 @@ func NormalizeOptimizationPolicy(opt *OptimizationPolicy) {
 			QualityValues: append([]int(nil), DefaultQualityValues...),
 		}
 	} else {
-		if opt.Search.MaxCandidates <= 0 {
+		// Only default if EXACTLY zero. Do not overwrite negative numbers!
+		if opt.Search.MaxCandidates == 0 {
 			if len(opt.Search.QualityValues) > 0 {
 				opt.Search.MaxCandidates = len(opt.Search.QualityValues)
 			} else {
@@ -305,8 +321,8 @@ func ValidateOptimizationPolicy(name string, opt *OptimizationPolicy) error {
 	}
 	s := opt.Sampling
 	strat := strings.ToLower(strings.TrimSpace(s.Strategy))
-	if strat != "uniform" && strat != "relative_positions" {
-		return fmt.Errorf("profile %q: unsupported sampling strategy %q (allowed: uniform, relative_positions)", name, s.Strategy)
+	if strat != "distributed" && strat != "uniform" && strat != "relative_positions" {
+		return fmt.Errorf("profile %q: unsupported sampling strategy %q (allowed: distributed, uniform, relative_positions)", name, s.Strategy)
 	}
 	if s.SampleCount < 1 || s.SampleCount > 20 {
 		return fmt.Errorf("profile %q: sample_count %d out of range 1-20", name, s.SampleCount)
@@ -335,36 +351,40 @@ func ValidateOptimizationPolicy(name string, opt *OptimizationPolicy) error {
 	if metric != "vmaf" && metric != "ssim" {
 		return fmt.Errorf("profile %q: unsupported preferred_metric %q (allowed: vmaf, ssim)", name, q.PreferredMetric)
 	}
-	if !isFinite(q.MarginalTolerance) || q.MarginalTolerance < 0 || q.MarginalTolerance > 10.0 {
-		return fmt.Errorf("profile %q: marginal_tolerance %v out of range [0.0, 10.0]", name, q.MarginalTolerance)
-	}
 	if metric == "vmaf" && q.VMAF == nil {
 		return fmt.Errorf("profile %q: vmaf metric targets are required when preferred_metric is vmaf", name)
 	}
 	if metric == "ssim" && q.SSIM == nil {
 		return fmt.Errorf("profile %q: ssim metric targets are required when preferred_metric is ssim", name)
 	}
-	if q.VMAF != nil {
-		if !isFinite(q.VMAF.Target) || q.VMAF.Target < 0 || q.VMAF.Target > 100 {
-			return fmt.Errorf("profile %q: vmaf target %v out of range 0-100", name, q.VMAF.Target)
+
+	validateMetricTarget := func(metricName string, m *MetricTarget, maxVal float64) error {
+		if m == nil {
+			return nil
 		}
-		if !isFinite(q.VMAF.Minimum) || q.VMAF.Minimum < 0 || q.VMAF.Minimum > 100 {
-			return fmt.Errorf("profile %q: vmaf minimum %v out of range 0-100", name, q.VMAF.Minimum)
+		if !isFinite(m.Target) || m.Target < 0 || m.Target > maxVal {
+			return fmt.Errorf("profile %q: %s target %v out of range 0-%v", name, metricName, m.Target, maxVal)
 		}
-		if q.VMAF.Target < q.VMAF.Minimum {
-			return fmt.Errorf("profile %q: vmaf target (%v) must be >= minimum (%v)", name, q.VMAF.Target, q.VMAF.Minimum)
+		if !isFinite(m.Minimum) || m.Minimum < 0 || m.Minimum > maxVal {
+			return fmt.Errorf("profile %q: %s minimum %v out of range 0-%v", name, metricName, m.Minimum, maxVal)
 		}
+		if m.Target < m.Minimum {
+			return fmt.Errorf("profile %q: %s target (%v) must be >= minimum (%v)", name, metricName, m.Target, m.Minimum)
+		}
+		if m.MarginalTolerance != nil {
+			tol := *m.MarginalTolerance
+			if !isFinite(tol) || tol < 0 || tol > maxVal {
+				return fmt.Errorf("profile %q: %s marginal_tolerance %v out of range [0.0, %v]", name, metricName, tol, maxVal)
+			}
+		}
+		return nil
 	}
-	if q.SSIM != nil {
-		if !isFinite(q.SSIM.Target) || q.SSIM.Target < 0 || q.SSIM.Target > 1.0 {
-			return fmt.Errorf("profile %q: ssim target %v out of range 0.0-1.0", name, q.SSIM.Target)
-		}
-		if !isFinite(q.SSIM.Minimum) || q.SSIM.Minimum < 0 || q.SSIM.Minimum > 1.0 {
-			return fmt.Errorf("profile %q: ssim minimum %v out of range 0.0-1.0", name, q.SSIM.Minimum)
-		}
-		if q.SSIM.Target < q.SSIM.Minimum {
-			return fmt.Errorf("profile %q: ssim target (%v) must be >= minimum (%v)", name, q.SSIM.Target, q.SSIM.Minimum)
-		}
+
+	if err := validateMetricTarget("vmaf", q.VMAF, 100.0); err != nil {
+		return err
+	}
+	if err := validateMetricTarget("ssim", q.SSIM, 1.0); err != nil {
+		return err
 	}
 
 	// 3. Search validation

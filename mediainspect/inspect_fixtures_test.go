@@ -691,3 +691,145 @@ func TestDetailedInspection_MasteringDisplayNoNilStringsAndBoundedSideData(t *te
 		t.Errorf("JSON output should omit empty min_luminance: %s", jsonStr)
 	}
 }
+
+func TestDetailedInspection_HDRColorSpaceBT2020NC_and_BT2020C(t *testing.T) {
+	cases := []struct {
+		name       string
+		colorSpace string
+	}{
+		{"bt2020nc", "bt2020nc"},
+		{"bt2020c", "bt2020c"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := DetailedStream{
+				Kind:       "video",
+				Codec:      "hevc",
+				ColorSpace: tc.colorSpace,
+			}
+			if !isHDRStream(st) {
+				t.Errorf("expected isHDRStream=true for ColorSpace=%q", tc.colorSpace)
+			}
+		})
+	}
+}
+
+func TestDetailedInspection_ParseFrameRateRational_RejectsNaNAndInf(t *testing.T) {
+	invalidRates := []string{
+		"NaN",
+		"NaN/1",
+		"1/NaN",
+		"Inf",
+		"-Inf",
+		"Inf/1",
+		"1/Inf",
+		"+Inf",
+		"0/0",
+		"-24/1",
+		"0/1",
+		"",
+	}
+
+	for _, raw := range invalidRates {
+		fps, ok := ParseFrameRateRational(raw)
+		if ok || fps != 0 {
+			t.Errorf("ParseFrameRateRational(%q) expected false, 0; got %v, %v", raw, ok, fps)
+		}
+	}
+
+	// Valid rational rates
+	fps, ok := ParseFrameRateRational("24000/1001")
+	if !ok || math.Abs(fps-23.976023976) > 0.001 {
+		t.Errorf("ParseFrameRateRational(24000/1001) expected ~23.976, got %v", fps)
+	}
+}
+
+func TestDetailedInspection_ParseBitRateAndCLL_RejectsNonFiniteAndOverflow(t *testing.T) {
+	// ParseBitRate tests
+	invalidBitrates := []any{
+		"NaN",
+		"Inf",
+		"-Inf",
+		math.NaN(),
+		math.Inf(1),
+		math.Inf(-1),
+		1e25, // overflows int64
+		-500,
+	}
+	for _, raw := range invalidBitrates {
+		br := ParseBitRate(raw, nil)
+		if br != 0 {
+			t.Errorf("ParseBitRate(%v) expected 0, got %d", raw, br)
+		}
+	}
+
+	// Valid bitrate
+	if br := ParseBitRate("8000000", nil); br != 8000000 {
+		t.Errorf("expected 8000000, got %d", br)
+	}
+	if br := ParseBitRate(float64(8000000), nil); br != 8000000 {
+		t.Errorf("expected 8000000, got %d", br)
+	}
+
+	// CLL conversions
+	invalidCLLMap := map[string]any{
+		"max_content": math.NaN(),
+		"max_average": math.Inf(1),
+	}
+	if cll := parseContentLightLevelMetadata(invalidCLLMap); cll != nil {
+		t.Errorf("expected nil CLL for NaN/Inf, got %+v", cll)
+	}
+
+	overflowCLLMap := map[string]any{
+		"max_content": 1e20, // exceeds MaxInt32
+	}
+	if cll := parseContentLightLevelMetadata(overflowCLLMap); cll != nil {
+		t.Errorf("expected nil CLL for overflow > MaxInt32, got %+v", cll)
+	}
+
+	validCLLMap := map[string]any{
+		"max_content": 1000,
+		"max_average": 400,
+	}
+	cll := parseContentLightLevelMetadata(validCLLMap)
+	if cll == nil || cll.MaxCLL != 1000 || cll.MaxFALL != 400 {
+		t.Errorf("unexpected valid CLL: %+v", cll)
+	}
+}
+
+func TestDetailedInspection_SanitizeSideDataMap_DeterministicKeyOrder(t *testing.T) {
+	// Map with more keys than maxSideDataKeys (15)
+	raw := map[string]any{
+		"z_key": "last",
+		"a_key": "first",
+		"m_key": "middle",
+		"k01":   1,
+		"k02":   2,
+		"k03":   3,
+		"k04":   4,
+		"k05":   5,
+		"k06":   6,
+		"k07":   7,
+		"k08":   8,
+		"k09":   9,
+		"k10":   10,
+		"k11":   11,
+		"k12":   12,
+		"k13":   13,
+		"k14":   14,
+		"k15":   15,
+	}
+
+	// Repeated runs must produce identical keys in identical order
+	sanitized1 := sanitizeSideDataMap(raw)
+	data1, _ := json.Marshal(sanitized1)
+
+	for i := 0; i < 20; i++ {
+		sanitized2 := sanitizeSideDataMap(raw)
+		data2, _ := json.Marshal(sanitized2)
+		if string(data1) != string(data2) {
+			t.Fatalf("non-deterministic output in sanitizeSideDataMap:\nrun1: %s\nrun2: %s", string(data1), string(data2))
+		}
+	}
+}
