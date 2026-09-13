@@ -397,13 +397,18 @@ Demostrado mediante tests que:
 ### Fase 4 — Sampling y workspace temporal
 - [x] Implementar `SamplePlanner` puro y determinista en `transcode/optimization`.
 - [x] Cubrir videos cortos, clamps, overlaps y límite `MaxSampleCount=32`.
-- [x] **Fase 4A — Protocolo de benchmark, ciclo de vida persistente y workspace**:
+- [x] **Fase 4A — Protocolo de benchmark, ciclo de vida persistente y workspace (auditoría corregida)**:
   - [x] Modelos de benchmark públicos versionados con validación estricta (`BenchmarkRequest`, `BenchmarkCandidate`, `BenchmarkSampleWindow`, `BenchmarkStatus`).
   - [x] Extensión de `Executor`/`SSHExecutor` (`BenchmarkSubmit`, `BenchmarkStatus`, `BenchmarkCancel`).
-  - [x] Ciclo de vida persistente en worker bajo `StateDir/<benchmark-id>/` (`benchmark.json`, namespace `bench-`, digest idempotency, slot accounting, process validation).
-  - [x] Creación de workspace temporal `samples/` y cleanup acotado que protege source y job record.
+  - [x] Validación centralizada y endurecida de job ID (`ValidateBenchmarkJobID`: longitud 7..128, prefijo `bench-`, regex estricto, rechazo de path traversal `..`, separadores y nombres reservados de filesystem).
+  - [x] Identidad de proceso estricta y protección contra PID reuse: `RunToken` de alta entropía por intento de ejecución, validado exactamente en `_internal_benchmark`, verificado en `IsBenchmarkExecutionAlive`.
+  - [x] Cancelación fail-closed: solo señaliza si la identidad viva coincide inequívocamente; reconciliación segura a `cancelled` si ya murió o el PID es ajeno.
+  - [x] Exclusión mutua de escritor único mediante file lock (`syscall.Flock` en `jobDir/.lock`) eliminando ventanas TOCTOU.
+  - [x] Manejo preciso de idempotencia y retries: transport retry in-flight devuelve estado activo sin spawns extra; retry de jobs fallidos/cancelados crea un nuevo intento (`Attempt+1`, nuevo `RunToken`); colisión con mismo ID y diferente digest se rechaza deterministamente en cualquier estado.
+  - [x] Transiciones de estado monótonas por run (preservación de cancelación si llega durante la ejecución del runner).
+  - [x] Aislamiento estricto de namespace y tipos: transcode `Submit` rechaza prefijo `bench-`; colisiones cruzadas (`job.json` vs `benchmark.json`) rechazadas; escaneo de active slots ignora dot-files y directorios no reconocidos.
+  - [x] Workspace temporal `samples/` con cleanup seguro y acotado que jamás toca el source media ni el directorio raíz del job.
   - [x] Frontera inyectable `BenchmarkRunner` con fail-closed en producción (`"benchmark runner not implemented"`).
-  - [x] Comandos CLI explícitos `benchmark_submit`, `benchmark_status`, `benchmark_cancel`, `_internal_benchmark`.
 - [ ] **Fase 4B — Extracción y encode FFmpeg de samples**:
   - [ ] Implementar extracción/encode de samples con argv seguro de FFmpeg en worker.
   - [ ] Implementar cleanup acotado e idempotente tras ejecución de samples.
@@ -452,7 +457,7 @@ Demostrado mediante tests que:
 | 1. Inspección completa | Completo | `DetailedReport`/`DetailedStream` extendido (color space/primaries/transfer/range, HDR/mastering metadata, frame rate racional y calculado, bitrates numéricamente acotados, channel layout de audio, side data), fixtures H264 8-bit/10-bit, HEVC Main10, HDR BT.2020, chapters y subtítulos | `eaadfe1`, `94a5a01`, `5eb1d30`, `9e90d7b` |
 | 2. Capacidades y protocolo | Completo | `WorkerCapabilities` versionado (`ProtocolVersion == WorkerProtocolVersion`), probe errors estructurados, clean absence encoder-specific, eliminación de campo redundante `VideoToolbox`, fingerprint determinista de capacidades, handshake SSH | `eaadfe1`, `94a5a01`, `5eb1d30`, `9e90d7b` |
 | 3. Recipes v2 | Completo | Loader v1/v2 compatible (`MinSchemaVersion`..`LatestSchemaVersion`), `OptimizationPolicy` validado con defaults aprobados (VMAF 96/95/0.5, SSIM 0.99/0.98/0.005, sampling bounds 1..32, `MaxBitrateKbps = 1_000_000`), omission safety en bloques métricos parciales | `eaadfe1`, `94a5a01`, `5eb1d30`, `9e90d7b`, `c92725b` |
-| 4. Sampling y temporales | Parcial (Fase 4A protocolo/ciclo de vida/workspace completo; Fase 4B extracción FFmpeg pendiente) | Modelos públicos versionados, extensión SSH (`BenchmarkSubmit`/`Status`/`Cancel`), persistencia atómica `benchmark.json`, workspace `samples/`, slot accounting, fail-closed runner y tests exhaustivos | `e23f204`, `8fe5828`, `badad4a`, `7fb5108` |
+| 4. Sampling y temporales | Parcial (Fase 4A protocolo/ciclo de vida/workspace completo y auditado; Fase 4B extracción FFmpeg pendiente) | Modelos públicos versionados, extensión SSH (`BenchmarkSubmit`/`Status`/`Cancel`), persistencia atómica `benchmark.json`, locking `jobDir/.lock` contra TOCTOU, `RunToken` de alta entropía y liveness estricto, workspace `samples/`, slot accounting, fail-closed runner y tests exhaustivos | `e23f204`, `8fe5828`, `badad4a`, `7fb5108`, `a35bcd6` |
 | 5. Métricas y estimación | Parcial (solo modelos puros de métricas y estimación) | `transcode/optimization/metrics.go` y `estimator.go` con per-sample quality gate, políticas independientes VMAF/SSIM, ineligibilidad explícita de HDR para SDR, estimación de video aislada por streams, preservación de audio copiado, fallbacks visibles y guards contra overflow. Ejecución de filtros y FFmpeg en worker pendientes. | `e23f204` (src: `83479df`), `8fe5828` (src: `a26d5f4`), `badad4a` (src: `b036209`) |
 | 6. Selección VideoToolbox | Pendiente | Modelo puro `CandidateSelector` disponible en `transcode/optimization/selector.go`; ejecución y benchmarking real en worker pendientes. | — |
 | 7. Actions e integración | Pendiente | Action `benchmark_transcode` e integración del ganador en `transcode_media` pendientes de implementación. | — |
@@ -473,4 +478,6 @@ Demostrado mediante tests que:
   - `c92725b`: `test(transcode): verify recipe schema v2 alignment with pure optimization-core contracts`
 - **Protocolo y ciclo de vida de benchmark (Fase 4A)**:
   - `7fb5108`: `feat(transcode): implement phase 4A benchmark protocol and persistent worker lifecycle`
+  - `68297aa`: `docs(transcode): record completion of phase 4A benchmark protocol and worker lifecycle`
+  - `a35bcd6`: `fix(transcode): harden phase 4A execution identity, idempotency locking, and namespace isolation`
 
