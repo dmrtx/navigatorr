@@ -411,10 +411,12 @@ Demostrado mediante tests que:
   - [x] Aislamiento estricto de namespace y tipos: transcode `Submit` rechaza prefijo `bench-`; colisiones cruzadas (`job.json` vs `benchmark.json`) rechazadas; escaneo de active slots ignora dot-files y directorios no reconocidos.
   - [x] Workspace temporal `samples/` con cleanup seguro y acotado que jamás toca el source media ni el directorio raíz del job.
   - [x] Frontera inyectable `BenchmarkRunner` con fail-closed en producción (`"benchmark runner not implemented"`).
-- [ ] **Fase 4B — Extracción y encode FFmpeg de samples**:
-  - [ ] Implementar extracción/encode de samples con argv seguro de FFmpeg en worker.
-  - [ ] Implementar cleanup acotado e idelpotente tras ejecución de samples.
-  - [ ] Verificar que no se crean archivos permanentes junto al original.
+- [x] **Fase 4B — Extracción y encode FFmpeg de samples**:
+  - [x] Implementar extracción/encode de samples con argv seguro de FFmpeg en worker (`ProductionBenchmarkRunner`).
+  - [x] Extracción de referencia sin pérdidas (`ffv1`, `-accurate_seek`, `-avoid_negative_ts make_zero`, video-only, `-an -sn -dn`).
+  - [x] Encode secuencial y determinista de candidatos `hevc_videotoolbox` desde samples de referencia con validación previa de bit depth (8-bit vs 10-bit) y rechazo de HDR/DV.
+  - [x] Estructuras de evidencia física (`BenchmarkExecutionEvidence`, `BenchmarkSampleRef`, `BenchmarkCandidateSampleResult`) persistidas en `benchmark.json`.
+  - [x] Contrato de workspace seguro: verificación estricta de rutas hijas (`verifyChildPath`), sanitización de IDs y cleanup idempotente que nunca toca el medio original ni archivos fuera de `samples/`.
 
 ### Fase 5 — Métricas y estimación
 - [x] Modelos puros de evaluación VMAF con per-sample quality gate y agregación determinista en `transcode/optimization`.
@@ -459,7 +461,7 @@ Demostrado mediante tests que:
 | 1. Inspección completa | Completo | `DetailedReport`/`DetailedStream` extendido (color space/primaries/transfer/range, HDR/mastering metadata, frame rate racional y calculado, bitrates numéricamente acotados, channel layout de audio, side data), fixtures H264 8-bit/10-bit, HEVC Main10, HDR BT.2020, chapters y subtítulos | `eaadfe1`, `94a5a01`, `5eb1d30`, `9e90d7b` |
 | 2. Capacidades y protocolo | Completo | `WorkerCapabilities` versionado (`ProtocolVersion == WorkerProtocolVersion`), probe errors estructurados, clean absence encoder-specific, eliminación de campo redundante `VideoToolbox`, fingerprint determinista de capacidades, handshake SSH | `eaadfe1`, `94a5a01`, `5eb1d30`, `9e90d7b` |
 | 3. Recipes v2 | Completo | Loader v1/v2 compatible (`MinSchemaVersion`..`LatestSchemaVersion`), `OptimizationPolicy` validado con defaults aprobados (VMAF 96/95/0.5, SSIM 0.99/0.98/0.005, sampling bounds 1..32, `MaxBitrateKbps = 1_000_000`), omission safety en bloques métricos parciales | `eaadfe1`, `94a5a01`, `5eb1d30`, `9e90d7b`, `c92725b` |
-| 4. Sampling y temporales | Parcial (Fase 4A protocolo/ciclo de vida/workspace completo y auditado; Fase 4B extracción FFmpeg pendiente) | Modelos públicos versionados, extensión SSH (`BenchmarkSubmit`/`Status`/`Cancel`), persistencia atómica `benchmark.json`, locking `jobDir/.lock` contra TOCTOU, global capacity lock `.capacity.lock`, secuencia exacta de argv `MatchesExactBenchmarkArgs`, `RunToken` de alta entropía interno, idempotencia estricta en todos los estados, workspace `samples/`, slot accounting, fail-closed runner y tests exhaustivos | `e23f204`, `8fe5828`, `badad4a`, `7fb5108`, `a35bcd6`, `f57a8af` |
+| 4. Sampling y temporales | Completo | Fase 4A (protocolo, SSH, models, locking `.capacity.lock` y `jobDir/.lock`, argv exacto `MatchesExactBenchmarkArgs`, idempotencia total) y Fase 4B (`ProductionBenchmarkRunner`, extracción `ffv1`, encode `hevc_videotoolbox`, `verifyChildPath`, bit depth gating, evidencia `BenchmarkExecutionEvidence`, cleanup acotado y seguro) completas y verificadas | `e23f204`, `8fe5828`, `badad4a`, `7fb5108`, `a35bcd6`, `f57a8af`, `35d9682` |
 | 5. Métricas y estimación | Parcial (solo modelos puros de métricas y estimación) | `transcode/optimization/metrics.go` y `estimator.go` con per-sample quality gate, políticas independientes VMAF/SSIM, ineligibilidad explícita de HDR para SDR, estimación de video aislada por streams, preservación de audio copiado, fallbacks visibles y guards contra overflow. Ejecución de filtros y FFmpeg en worker pendientes. | `e23f204` (src: `83479df`), `8fe5828` (src: `a26d5f4`), `badad4a` (src: `b036209`) |
 | 6. Selección VideoToolbox | Pendiente | Modelo puro `CandidateSelector` disponible en `transcode/optimization/selector.go`; ejecución y benchmarking real en worker pendientes. | — |
 | 7. Actions e integración | Pendiente | Action `benchmark_transcode` e integración del ganador en `transcode_media` pendientes de implementación. | — |
@@ -484,4 +486,7 @@ Demostrado mediante tests que:
   - `a35bcd6`: `fix(transcode): harden phase 4A execution identity, idempotency locking, and namespace isolation`
   - `7249e93`: `docs(transcode): record Phase 4A audit corrections and contracts`
   - `f57a8af`: `fix(transcode): enforce exact benchmark argv sequence, global capacity lock, and strict submit idempotency`
+  - `20cd037`: `docs(transcode): record Phase 4A blocker corrections and capacity locking contracts`
+- **Extracción y encode FFmpeg de samples (Fase 4B)**:
+  - `35d9682`: `feat(transcode): implement phase 4B sample extraction and candidate encoding runner`
 
