@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/jakenesler/navigatorr/transcode/optimization"
 )
 
 var (
@@ -73,6 +75,71 @@ func ValidateBenchmarkJobID(id string) error {
 	return nil
 }
 
+// BenchmarkQualityThresholds specifies target, minimum acceptable score, and optional marginal tolerance.
+type BenchmarkQualityThresholds struct {
+	Target            float64  `json:"target,omitempty"`
+	Minimum           float64  `json:"minimum,omitempty"`
+	MarginalTolerance *float64 `json:"marginal_tolerance,omitempty"`
+}
+
+// BenchmarkQualityConfig configures quality evaluation policies for a benchmark run.
+type BenchmarkQualityConfig struct {
+	PreferredMetric string                      `json:"preferred_metric,omitempty"`
+	VMAF            *BenchmarkQualityThresholds `json:"vmaf,omitempty"`
+	SSIM            *BenchmarkQualityThresholds `json:"ssim,omitempty"`
+}
+
+// BenchmarkWinner records the selected winning candidate and its concrete parameters.
+type BenchmarkWinner struct {
+	CandidateID               string   `json:"candidate_id"`
+	CandidateIndex            int      `json:"candidate_index"`
+	Quality                   int      `json:"quality"`
+	VideoProfile              string   `json:"video_profile,omitempty"`
+	PixelFormat               string   `json:"pixel_format,omitempty"`
+	ExpectedBitDepth          int      `json:"expected_bit_depth"`
+	MetricType                string   `json:"metric_type"`
+	Score                     float64  `json:"score"`
+	TargetReached             bool     `json:"target_reached"`
+	MinimumMet                bool     `json:"minimum_met"`
+	EstimatedVideoBytes       int64    `json:"estimated_video_bytes"`
+	EstimatedAudioBytes       int64    `json:"estimated_audio_bytes"`
+	EstimatedSubtitleBytes    int64    `json:"estimated_subtitle_bytes"`
+	EstimatedAttachmentBytes  int64    `json:"estimated_attachment_bytes"`
+	EstimatedMuxOverheadBytes int64    `json:"estimated_mux_overhead_bytes"`
+	EstimatedTotalBytes       int64    `json:"estimated_total_bytes"`
+	EstimatedTotalMB          float64  `json:"estimated_total_mb"`
+	SavingsBytes              int64    `json:"savings_bytes"`
+	SavingsPercent            float64  `json:"savings_percent"`
+	Uncertainties             []string `json:"uncertainties,omitempty"`
+}
+
+// BenchmarkCandidateEvaluation records the evaluation summary for one candidate.
+type BenchmarkCandidateEvaluation struct {
+	CandidateID      string   `json:"candidate_id"`
+	CandidateIndex   int      `json:"candidate_index"`
+	Quality          int      `json:"quality"`
+	VideoProfile     string   `json:"video_profile,omitempty"`
+	PixelFormat      string   `json:"pixel_format,omitempty"`
+	ExpectedBitDepth int      `json:"expected_bit_depth"`
+	Score            float64  `json:"score"`
+	MetricType       string   `json:"metric_type"`
+	Eligible         bool     `json:"eligible"`
+	TargetReached    bool     `json:"target_reached"`
+	MinimumMet       bool     `json:"minimum_met"`
+	EvaluationReason string   `json:"evaluation_reason"`
+	EstimatedBytes   int64    `json:"estimated_bytes"`
+	EstimatedMB      float64  `json:"estimated_mb"`
+	SavingsPercent   float64  `json:"savings_percent"`
+	Uncertainties    []string `json:"uncertainties,omitempty"`
+}
+
+// BenchmarkDecision records the explainable Phase 6 candidate selection outcome.
+type BenchmarkDecision struct {
+	Winner         *BenchmarkWinner               `json:"winner,omitempty"`
+	DecisionReason string                         `json:"decision_reason"`
+	Evaluations    []BenchmarkCandidateEvaluation `json:"evaluations"`
+}
+
 // BenchmarkCandidate specifies one encoder candidate to evaluate during a benchmark.
 // Arbitrary ffmpeg arguments are strictly forbidden.
 type BenchmarkCandidate struct {
@@ -94,13 +161,18 @@ type BenchmarkSampleWindow struct {
 // It is strictly versioned and does NOT accept candidate output paths or replace_original parameters,
 // making original media mutation completely impossible.
 type BenchmarkRequest struct {
-	ProtocolVersion int                     `json:"protocol_version"`
-	ID              string                  `json:"id"`
-	SourcePath      string                  `json:"source_path"`
-	SourceDuration  float64                 `json:"source_duration,omitempty"`
-	Metric          string                  `json:"metric"` // "vmaf" or "ssim"
-	Samples         []BenchmarkSampleWindow `json:"samples"`
-	Candidates      []BenchmarkCandidate    `json:"candidates"`
+	ProtocolVersion           int                     `json:"protocol_version"`
+	ID                        string                  `json:"id"`
+	SourcePath                string                  `json:"source_path"`
+	SourceDuration            float64                 `json:"source_duration,omitempty"`
+	Metric                    string                  `json:"metric"` // "vmaf", "ssim", "both"
+	Samples                   []BenchmarkSampleWindow `json:"samples"`
+	Candidates                []BenchmarkCandidate    `json:"candidates"`
+	Quality                   *BenchmarkQualityConfig `json:"quality,omitempty"`
+	FallbackAudioBitrateBps   int64                   `json:"fallback_audio_bitrate_bps,omitempty"`
+	FallbackSubtitleSizeBytes int64                   `json:"fallback_subtitle_size_bytes,omitempty"`
+	DeclaredVideoBitrateBps   int64                   `json:"declared_video_bitrate_bps,omitempty"`
+	AttachmentBytes           int64                   `json:"attachment_bytes,omitempty"`
 }
 
 // BenchmarkJob is the receipt returned upon successful submission of a benchmark request.
@@ -126,19 +198,20 @@ type BenchmarkCancelResponse struct {
 
 // BenchmarkStatus captures the current execution status and metadata of a benchmark job.
 type BenchmarkStatus struct {
-	ProtocolVersion int       `json:"protocol_version"`
-	ID              string    `json:"id"`
-	Status          string    `json:"status"` // queued, running, completed, failed, cancelled
-	SourcePath      string    `json:"source_path"`
-	Metric          string    `json:"metric,omitempty"`
-	Progress        float64   `json:"progress"`
-	Error           string    `json:"error,omitempty"`
-	SamplesPlanned  int       `json:"samples_planned"`
-	CandidatesCount int       `json:"candidates_count"`
-	Attempt         int       `json:"attempt,omitempty"`
-	CreatedAt       time.Time `json:"created_at"`
-	StartedAt       time.Time `json:"started_at,omitempty"`
-	FinishedAt      time.Time `json:"finished_at,omitempty"`
+	ProtocolVersion int                `json:"protocol_version"`
+	ID              string             `json:"id"`
+	Status          string             `json:"status"` // queued, running, completed, failed, cancelled
+	SourcePath      string             `json:"source_path"`
+	Metric          string             `json:"metric,omitempty"`
+	Progress        float64            `json:"progress"`
+	Error           string             `json:"error,omitempty"`
+	SamplesPlanned  int                `json:"samples_planned"`
+	CandidatesCount int                `json:"candidates_count"`
+	Attempt         int                `json:"attempt,omitempty"`
+	CreatedAt       time.Time          `json:"created_at"`
+	StartedAt       time.Time          `json:"started_at,omitempty"`
+	FinishedAt      time.Time          `json:"finished_at,omitempty"`
+	Decision        *BenchmarkDecision `json:"decision,omitempty"`
 }
 
 // DigestBenchmarkRequest computes a deterministic sha256 digest of the benchmark request payload.
@@ -183,8 +256,44 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 	}
 
 	normMetric := strings.ToLower(strings.TrimSpace(req.Metric))
-	if normMetric != "vmaf" && normMetric != "ssim" {
-		return fmt.Errorf("invalid metric %q: must be explicit enum 'vmaf' or 'ssim'", req.Metric)
+	if normMetric != "vmaf" && normMetric != "ssim" && normMetric != "both" && normMetric != "vmaf+ssim" {
+		return fmt.Errorf("invalid metric %q: must be explicit enum 'vmaf', 'ssim', or 'both'", req.Metric)
+	}
+
+	if req.FallbackAudioBitrateBps < 0 {
+		return fmt.Errorf("invalid fallback_audio_bitrate_bps %d: cannot be negative", req.FallbackAudioBitrateBps)
+	}
+	if req.FallbackSubtitleSizeBytes < 0 {
+		return fmt.Errorf("invalid fallback_subtitle_size_bytes %d: cannot be negative", req.FallbackSubtitleSizeBytes)
+	}
+	if req.DeclaredVideoBitrateBps < 0 {
+		return fmt.Errorf("invalid declared_video_bitrate_bps %d: cannot be negative", req.DeclaredVideoBitrateBps)
+	}
+	if req.AttachmentBytes < 0 {
+		return fmt.Errorf("invalid attachment_bytes %d: cannot be negative", req.AttachmentBytes)
+	}
+
+	if req.Quality != nil {
+		if req.Quality.VMAF != nil {
+			tol := optimization.DefaultVMAFPolicy().Tolerance()
+			if req.Quality.VMAF.MarginalTolerance != nil {
+				tol = *req.Quality.VMAF.MarginalTolerance
+			}
+			p := optimization.NewVMAFPolicy(req.Quality.VMAF.Target, req.Quality.VMAF.Minimum, tol)
+			if err := optimization.ValidatePolicy(p); err != nil {
+				return fmt.Errorf("invalid vmaf quality policy: %w", err)
+			}
+		}
+		if req.Quality.SSIM != nil {
+			tol := optimization.DefaultSSIMPolicy().Tolerance()
+			if req.Quality.SSIM.MarginalTolerance != nil {
+				tol = *req.Quality.SSIM.MarginalTolerance
+			}
+			p := optimization.NewSSIMPolicy(req.Quality.SSIM.Target, req.Quality.SSIM.Minimum, tol)
+			if err := optimization.ValidatePolicy(p); err != nil {
+				return fmt.Errorf("invalid ssim quality policy: %w", err)
+			}
+		}
 	}
 
 	if len(req.Samples) == 0 {
