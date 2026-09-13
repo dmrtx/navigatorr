@@ -88,6 +88,7 @@ type Worker struct {
 	ffmpegPath      string
 	ffprobePath     string
 	benchmarkRunner BenchmarkRunner
+	afterSpawnHook  func(jobDir string, pid int)
 }
 
 // NewWorker initializes a new transcode worker.
@@ -315,6 +316,29 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 			fmt.Errorf("invalid transcode job id: path traversal")
 	}
 
+	profile := req.Profile
+	if strings.TrimSpace(profile) == "" {
+		profile = "hevc-vt"
+	}
+
+	plan, err := ResolveWorkerPlan(profile, req.Plan)
+	if err != nil {
+		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("invalid transcode profile or plan: %v", err)}, err
+	}
+
+	// Shared capacity lock serializes slot accounting across all benchmark and transcode jobs
+	capLock, err := acquireCapacityLock(cleanStateDir)
+	if err != nil {
+		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("acquiring capacity lock: %v", err)}, err
+	}
+	defer capLock.Unlock()
+
+	jobLock, err := acquireJobLock(jobDir)
+	if err != nil {
+		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("acquiring job lock: %v", err)}, err
+	}
+	defer jobLock.Unlock()
+
 	benchFile := filepath.Join(jobDir, "benchmark.json")
 	if _, err := os.Stat(benchFile); err == nil {
 		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("job ID collision: %q already exists as a benchmark job (fail closed)", trimmedID)},
@@ -348,37 +372,27 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 	}
 
 	// Check concurrency / busy status
-	activeJobs, err := w.countActiveJobs(req.ID)
+	activeJobs, err := w.countActiveJobs(trimmedID)
 	if err != nil {
-		return SubmitResponse{ID: req.ID, Error: fmt.Sprintf("checking active jobs: %v", err)}, err
+		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("checking active jobs: %v", err)}, err
 	}
 	if activeJobs >= w.cfg.MaxParallelJobs {
 		return SubmitResponse{
-			ID:    req.ID,
+			ID:    trimmedID,
 			Error: fmt.Sprintf("worker busy: maximum parallel jobs (%d) reached", w.cfg.MaxParallelJobs),
 		}, fmt.Errorf("worker busy: max parallel jobs reached")
 	}
 
-	profile := req.Profile
-	if strings.TrimSpace(profile) == "" {
-		profile = "hevc-vt"
-	}
-
-	plan, err := ResolveWorkerPlan(profile, req.Plan)
-	if err != nil {
-		return SubmitResponse{ID: req.ID, Error: fmt.Sprintf("invalid transcode profile or plan: %v", err)}, err
-	}
-
 	// Ensure job directory and candidate directory exist
 	if err := os.MkdirAll(jobDir, 0755); err != nil {
-		return SubmitResponse{ID: req.ID, Error: fmt.Sprintf("creating job directory: %v", err)}, err
+		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("creating job directory: %v", err)}, err
 	}
 	if err := os.MkdirAll(filepath.Dir(cleanCandidate), 0755); err != nil {
-		return SubmitResponse{ID: req.ID, Error: fmt.Sprintf("creating candidate directory: %v", err)}, err
+		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("creating candidate directory: %v", err)}, err
 	}
 
 	job := &JobRecord{
-		ID:        req.ID,
+		ID:        trimmedID,
 		Status:    "queued",
 		Source:    cleanSource,
 		Candidate: cleanCandidate,
@@ -388,7 +402,7 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 	}
 
 	if err := SaveJobAtomic(jobFile, job); err != nil {
-		return SubmitResponse{ID: req.ID, Error: fmt.Sprintf("saving initial job state: %v", err)}, err
+		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("saving initial job state: %v", err)}, err
 	}
 
 	// Launch decoupled runner process
@@ -396,7 +410,7 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 	if configPath != "" {
 		args = append(args, "--config", configPath)
 	}
-	args = append(args, "_internal_run", req.ID)
+	args = append(args, "_internal_run", trimmedID)
 
 	cmd := exec.Command(selfExe, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -411,11 +425,28 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 		job.Error = fmt.Sprintf("spawning worker process: %v", err)
 		job.FinishedAt = time.Now().UTC()
 		_ = SaveJobAtomic(jobFile, job)
-		return SubmitResponse{ID: req.ID, Error: job.Error}, err
+		return SubmitResponse{ID: trimmedID, Error: job.Error}, err
+	}
+
+	if w.afterSpawnHook != nil {
+		w.afterSpawnHook(jobDir, cmd.Process.Pid)
+	}
+
+	job.PID = cmd.Process.Pid
+	_, lstart, _ := GetProcessIdentity(job.PID)
+	job.ProcessStartTime = lstart
+	if err := SaveJobAtomic(jobFile, job); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		job.Status = "failed"
+		job.Error = fmt.Sprintf("persisting transcode process identity: %v", err)
+		job.FinishedAt = time.Now().UTC()
+		_ = SaveJobAtomic(jobFile, job)
+		return SubmitResponse{ID: trimmedID, Error: job.Error}, err
 	}
 
 	return SubmitResponse{
-		ID:            req.ID,
+		ID:            trimmedID,
 		Status:        "queued",
 		CandidatePath: cleanCandidate,
 		Plan:          plan,

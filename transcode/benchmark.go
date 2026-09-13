@@ -136,7 +136,6 @@ type BenchmarkStatus struct {
 	SamplesPlanned  int       `json:"samples_planned"`
 	CandidatesCount int       `json:"candidates_count"`
 	Attempt         int       `json:"attempt,omitempty"`
-	RunToken        string    `json:"run_token,omitempty"`
 	CreatedAt       time.Time `json:"created_at"`
 	StartedAt       time.Time `json:"started_at,omitempty"`
 	FinishedAt      time.Time `json:"finished_at,omitempty"`

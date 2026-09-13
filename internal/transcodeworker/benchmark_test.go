@@ -54,6 +54,68 @@ func validWorkerBenchmarkRequest(sourcePath string) transcode.BenchmarkRequest {
 	}
 }
 
+func TestMatchesExactBenchmarkArgs_ExactVsSubstring(t *testing.T) {
+	jobID := "bench-job-123"
+	runToken := "run-token-abc"
+
+	// 1. Exact match in full argv
+	exactArgv := []string{"/usr/local/bin/navigatorr-transcode", "--config", "/etc/config.yaml", "_internal_benchmark", jobID, runToken}
+	if !MatchesExactBenchmarkArgs(exactArgv, jobID, runToken) {
+		t.Fatalf("expected exact argv sequence to match")
+	}
+
+	// 2. Substring false positives that MUST be rejected
+	substringCases := []struct {
+		name string
+		argv []string
+	}{
+		{
+			name: "run token has extra suffix",
+			argv: []string{"bin", "_internal_benchmark", jobID, runToken + "-extra"},
+		},
+		{
+			name: "run token has extra prefix",
+			argv: []string{"bin", "_internal_benchmark", jobID, "prefix-" + runToken},
+		},
+		{
+			name: "job ID has extra suffix",
+			argv: []string{"bin", "_internal_benchmark", jobID + "-extra", runToken},
+		},
+		{
+			name: "job ID has extra prefix",
+			argv: []string{"bin", "_internal_benchmark", "prefix-" + jobID, runToken},
+		},
+		{
+			name: "command has extra suffix",
+			argv: []string{"bin", "_internal_benchmark_run", jobID, runToken},
+		},
+		{
+			name: "tokens not contiguous",
+			argv: []string{"bin", "_internal_benchmark", "--flag", jobID, runToken},
+		},
+		{
+			name: "tokens out of order",
+			argv: []string{"bin", "_internal_benchmark", runToken, jobID},
+		},
+		{
+			name: "too short",
+			argv: []string{"_internal_benchmark", jobID},
+		},
+		{
+			name: "empty argv",
+			argv: []string{},
+		},
+	}
+
+	for _, tc := range substringCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if MatchesExactBenchmarkArgs(tc.argv, jobID, runToken) {
+				t.Fatalf("expected MatchesExactBenchmarkArgs to reject %s, but it passed", tc.name)
+			}
+		})
+	}
+}
+
 func TestBenchmarkSubmit_ValidationAndNamespaceIsolation(t *testing.T) {
 	tempDir := t.TempDir()
 	mediaDir := filepath.Join(tempDir, "media")
@@ -187,7 +249,7 @@ func TestBenchmarkSubmit_SingleWriterConcurrency(t *testing.T) {
 		t.Fatalf("expected all %d goroutines to succeed, got %d", numGoroutines, countQueued)
 	}
 
-	// Verify only a single run was created (Attempt == 1)
+	// Verify only a single run was created
 	benchFile := filepath.Join(stateDir, req.ID, "benchmark.json")
 	record, err := LoadBenchmark(benchFile)
 	if err != nil {
@@ -304,14 +366,14 @@ func TestBenchmarkSubmit_DeterministicCollision(t *testing.T) {
 	}
 }
 
-func TestBenchmarkSubmit_TransportRetryVsTerminalRetry(t *testing.T) {
+func TestBenchmarkSubmit_IdempotencyAcrossAllStates_NoSpawn(t *testing.T) {
 	tempDir := t.TempDir()
 	mediaDir := filepath.Join(tempDir, "media")
 	stateDir := filepath.Join(tempDir, "state")
 	_ = os.MkdirAll(mediaDir, 0o755)
 	_ = os.MkdirAll(stateDir, 0o755)
 
-	sourceFile, _ := createTestMediaSource(t, mediaDir, "source.mkv", "retry-test-data")
+	sourceFile, _ := createTestMediaSource(t, mediaDir, "source.mkv", "idempotency-test-data")
 	mockExe := createMockWorkerScript(t, tempDir)
 
 	cfg := &WorkerConfig{
@@ -323,82 +385,215 @@ func TestBenchmarkSubmit_TransportRetryVsTerminalRetry(t *testing.T) {
 	ctx := context.Background()
 
 	req := validWorkerBenchmarkRequest(sourceFile)
-	req.ID = "bench-retry-flow"
+	req.ID = "bench-idempotency-all-states"
 
-	// 1. Initial submit spawns run attempt 1
+	// 1. Initial submit spawns execution
 	resp1, err := worker.BenchmarkSubmit(ctx, req, mockExe, "")
 	if err != nil {
-		t.Fatalf("initial BenchmarkSubmit failed: %v", err)
+		t.Fatalf("initial submit failed: %v", err)
 	}
 	if resp1.Status != "queued" {
-		t.Fatalf("expected initial status 'queued', got %q", resp1.Status)
+		t.Fatalf("expected queued status, got %q", resp1.Status)
 	}
 
 	benchFile := filepath.Join(stateDir, req.ID, "benchmark.json")
 	rec1, err := LoadBenchmark(benchFile)
 	if err != nil {
-		t.Fatalf("failed loading benchmark record: %v", err)
+		t.Fatalf("loading benchmark failed: %v", err)
 	}
-	if rec1.Attempt != 1 {
-		t.Fatalf("expected Attempt 1, got %d", rec1.Attempt)
-	}
-	token1 := rec1.RunToken
-	pid1 := rec1.PID
-	if token1 == "" || pid1 <= 0 {
-		t.Fatalf("invalid initial token %q or pid %d", token1, pid1)
+	initialPID := rec1.PID
+	initialToken := rec1.RunToken
+	if initialPID <= 0 || initialToken == "" {
+		t.Fatalf("invalid initial PID %d or token %q", initialPID, initialToken)
 	}
 
-	// 2. Transport retry: submitting identical request while process is alive
+	// 2. In-flight submit (queued/running): returns active status, no new spawn, token unchanged
 	resp2, err := worker.BenchmarkSubmit(ctx, req, mockExe, "")
 	if err != nil {
-		t.Fatalf("transport retry failed: %v", err)
+		t.Fatalf("in-flight submit failed: %v", err)
 	}
 	if resp2.Status != "queued" && resp2.Status != "running" {
-		t.Fatalf("transport retry got status %q, want 'queued' or 'running'", resp2.Status)
+		t.Fatalf("expected active status, got %q", resp2.Status)
 	}
-
 	rec2, _ := LoadBenchmark(benchFile)
-	if rec2.Attempt != 1 || rec2.RunToken != token1 || rec2.PID != pid1 {
-		t.Fatalf("transport retry modified execution run! rec2: %+v", rec2)
+	if rec2.PID != initialPID || rec2.RunToken != initialToken {
+		t.Fatalf("in-flight submit modified PID or token!")
 	}
 
-	// 3. Kill the mock process to simulate terminal failure
-	if pid1 > 0 {
-		_ = syscall.Kill(pid1, syscall.SIGKILL)
+	// Kill initial process before moving to terminal state tests
+	if initialPID > 0 {
+		_ = syscall.Kill(initialPID, syscall.SIGKILL)
 	}
-	time.Sleep(100 * time.Millisecond)
 
-	rec2.Status = "failed"
-	rec2.Error = "simulated worker failure"
+	// 3. Late submit after completed: returns completed, no spawn, token unchanged
+	rec2.Status = "completed"
 	rec2.FinishedAt = time.Now().UTC()
 	_ = SaveBenchmarkAtomic(benchFile, rec2)
 
-	// 4. Terminal retry: submitting identical request when job is in failed state
-	respRetry, err := worker.BenchmarkSubmit(ctx, req, mockExe, "")
+	respComp, err := worker.BenchmarkSubmit(ctx, req, mockExe, "")
 	if err != nil {
-		t.Fatalf("terminal retry failed: %v", err)
+		t.Fatalf("submit on completed failed: %v", err)
 	}
-	if respRetry.Status != "queued" {
-		t.Fatalf("expected queued status on retry, got %q", respRetry.Status)
+	if respComp.Status != "completed" {
+		t.Fatalf("expected completed status, got %q", respComp.Status)
 	}
-
-	rec3, _ := LoadBenchmark(benchFile)
-	if rec3.Attempt != 2 {
-		t.Errorf("expected Attempt == 2 on terminal retry, got %d", rec3.Attempt)
-	}
-	if rec3.RunToken == token1 || rec3.RunToken == "" {
-		t.Errorf("expected fresh RunToken on retry, got %q (old %q)", rec3.RunToken, token1)
-	}
-	if rec3.PID == pid1 || rec3.PID <= 0 {
-		t.Errorf("expected new PID on retry, got %d (old %d)", rec3.PID, pid1)
-	}
-	if rec3.Error != "" {
-		t.Errorf("expected reset error on retry, got %q", rec3.Error)
+	recComp, _ := LoadBenchmark(benchFile)
+	if recComp.PID != initialPID || recComp.RunToken != initialToken {
+		t.Fatalf("submit on completed modified PID or token!")
 	}
 
-	// Clean up second process
-	if rec3.PID > 0 {
-		_ = syscall.Kill(rec3.PID, syscall.SIGKILL)
+	// 4. Late submit after failed: returns failed, no spawn, token unchanged
+	recComp.Status = "failed"
+	recComp.Error = "simulated failure"
+	_ = SaveBenchmarkAtomic(benchFile, recComp)
+
+	respFailed, err := worker.BenchmarkSubmit(ctx, req, mockExe, "")
+	if err != nil {
+		t.Fatalf("submit on failed returned error: %v", err)
+	}
+	if respFailed.Status != "failed" {
+		t.Fatalf("expected failed status on late retry, got %q", respFailed.Status)
+	}
+	recFailed, _ := LoadBenchmark(benchFile)
+	if recFailed.PID != initialPID || recFailed.RunToken != initialToken {
+		t.Fatalf("submit on failed modified PID or token! (must not respawn)")
+	}
+
+	// 5. Late submit after cancelled: returns cancelled, no spawn, token unchanged
+	recFailed.Status = "cancelled"
+	recFailed.Error = "cancelled by coordinator"
+	_ = SaveBenchmarkAtomic(benchFile, recFailed)
+
+	respCancelled, err := worker.BenchmarkSubmit(ctx, req, mockExe, "")
+	if err != nil {
+		t.Fatalf("submit on cancelled returned error: %v", err)
+	}
+	if respCancelled.Status != "cancelled" {
+		t.Fatalf("expected cancelled status on late retry, got %q", respCancelled.Status)
+	}
+	recCancelled, _ := LoadBenchmark(benchFile)
+	if recCancelled.PID != initialPID || recCancelled.RunToken != initialToken {
+		t.Fatalf("submit on cancelled modified PID or token! (must not respawn)")
+	}
+
+	// 6. Caller explicitly uses a NEW job ID to retry the same workload -> succeeds and spawns new execution
+	newReq := req
+	newReq.ID = "bench-explicit-retry-new-id"
+	respNew, err := worker.BenchmarkSubmit(ctx, newReq, mockExe, "")
+	if err != nil {
+		t.Fatalf("submit with new job ID failed: %v", err)
+	}
+	if respNew.Status != "queued" {
+		t.Fatalf("expected queued status for new job ID, got %q", respNew.Status)
+	}
+
+	recNew, _ := LoadBenchmark(filepath.Join(stateDir, newReq.ID, "benchmark.json"))
+	if recNew.RunToken == initialToken || recNew.PID == initialPID {
+		t.Fatalf("expected new job ID to have new token and PID")
+	}
+
+	if recNew.PID > 0 {
+		_ = syscall.Kill(recNew.PID, syscall.SIGKILL)
+	}
+}
+
+func TestBenchmarkSubmit_MaxParallelJobs_CrossIDConcurrency(t *testing.T) {
+	tempDir := t.TempDir()
+	mediaDir := filepath.Join(tempDir, "media")
+	stateDir := filepath.Join(tempDir, "state")
+	_ = os.MkdirAll(mediaDir, 0o755)
+	_ = os.MkdirAll(stateDir, 0o755)
+
+	sourceFile, _ := createTestMediaSource(t, mediaDir, "source.mkv", "capacity-race-data")
+	mockExe := createMockWorkerScript(t, tempDir)
+
+	// MaxParallelJobs is strictly 1: exactly one job may be queued/running across ALL types
+	cfg := &WorkerConfig{
+		StateDir:        stateDir,
+		AllowedRoots:    []string{mediaDir},
+		MaxParallelJobs: 1,
+	}
+	worker := NewWorker(cfg)
+	ctx := context.Background()
+
+	// Prepare 2 different benchmark requests and 1 transcode request
+	req1 := validWorkerBenchmarkRequest(sourceFile)
+	req1.ID = "bench-job-alpha"
+
+	req2 := validWorkerBenchmarkRequest(sourceFile)
+	req2.ID = "bench-job-beta"
+
+	tcReq := SubmitRequest{
+		ID:            "job-transcode-gamma",
+		SourcePath:    sourceFile,
+		CandidatePath: filepath.Join(mediaDir, "out_gamma.mkv"),
+	}
+
+	type submitResult struct {
+		name   string
+		status string
+		err    error
+	}
+
+	resultsCh := make(chan submitResult, 3)
+	startBarrier := make(chan struct{})
+	var wg sync.WaitGroup
+
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		<-startBarrier
+		resp, err := worker.BenchmarkSubmit(ctx, req1, mockExe, "")
+		resultsCh <- submitResult{name: req1.ID, status: resp.Status, err: err}
+	}()
+
+	go func() {
+		defer wg.Done()
+		<-startBarrier
+		resp, err := worker.BenchmarkSubmit(ctx, req2, mockExe, "")
+		resultsCh <- submitResult{name: req2.ID, status: resp.Status, err: err}
+	}()
+
+	go func() {
+		defer wg.Done()
+		<-startBarrier
+		resp, err := worker.Submit(ctx, tcReq, mockExe, "")
+		resultsCh <- submitResult{name: tcReq.ID, status: resp.Status, err: err}
+	}()
+
+	// Release all three requests concurrently
+	close(startBarrier)
+	wg.Wait()
+	close(resultsCh)
+
+	var successCount int
+	var busyCount int
+
+	for res := range resultsCh {
+		if res.err == nil && res.status == "queued" {
+			successCount++
+		} else if res.err != nil && strings.Contains(res.err.Error(), "worker busy") {
+			busyCount++
+		} else {
+			t.Errorf("unexpected outcome for %s: status=%q err=%v", res.name, res.status, res.err)
+		}
+	}
+
+	if successCount != 1 {
+		t.Fatalf("expected EXACTLY 1 job to succeed under MaxParallelJobs=1, got %d", successCount)
+	}
+	if busyCount != 2 {
+		t.Fatalf("expected EXACTLY 2 jobs to be rejected with worker busy, got %d", busyCount)
+	}
+
+	// Clean up any spawned process
+	for _, id := range []string{req1.ID, req2.ID} {
+		if b, err := LoadBenchmark(filepath.Join(stateDir, id, "benchmark.json")); err == nil && b.PID > 0 {
+			_ = syscall.Kill(b.PID, syscall.SIGKILL)
+		}
+	}
+	if j, err := LoadJob(filepath.Join(stateDir, tcReq.ID, "job.json")); err == nil && j.PID > 0 {
+		_ = syscall.Kill(j.PID, syscall.SIGKILL)
 	}
 }
 
@@ -639,6 +834,7 @@ func TestBenchmark_CountActiveJobs_Isolation(t *testing.T) {
 
 	// 1. Create dot-files and directories that must be ignored
 	_ = os.MkdirAll(filepath.Join(stateDir, ".hidden-dir"), 0o755)
+	_ = os.WriteFile(filepath.Join(stateDir, ".capacity.lock"), []byte("lock"), 0o600)
 	_ = os.WriteFile(filepath.Join(stateDir, ".lock"), []byte("lock"), 0o600)
 	_ = os.WriteFile(filepath.Join(stateDir, ".DS_Store"), []byte("junk"), 0o644)
 
@@ -651,5 +847,56 @@ func TestBenchmark_CountActiveJobs_Isolation(t *testing.T) {
 	}
 	if count != 0 {
 		t.Errorf("expected 0 active jobs for hidden/invalid entries, got %d", count)
+	}
+}
+
+func TestBenchmarkSubmit_PostSpawnPersistenceFailureKillsProcess(t *testing.T) {
+	tempDir := t.TempDir()
+	mediaDir := filepath.Join(tempDir, "media")
+	stateDir := filepath.Join(tempDir, "state")
+	_ = os.MkdirAll(mediaDir, 0o755)
+	_ = os.MkdirAll(stateDir, 0o755)
+
+	sourceFile, _ := createTestMediaSource(t, mediaDir, "source.mkv", "post-spawn-test")
+	mockExe := createMockWorkerScript(t, tempDir)
+
+	cfg := &WorkerConfig{
+		StateDir:        stateDir,
+		AllowedRoots:    []string{mediaDir},
+		MaxParallelJobs: 2,
+	}
+	worker := NewWorker(cfg)
+	ctx := context.Background()
+
+	req := validWorkerBenchmarkRequest(sourceFile)
+	req.ID = "bench-post-spawn-fail"
+	jobDir := filepath.Join(stateDir, req.ID)
+
+	var capturedPID int
+	worker.afterSpawnHook = func(dir string, pid int) {
+		capturedPID = pid
+		// Make directory read-only so that SaveBenchmarkAtomic fails when writing temp file
+		_ = os.Chmod(dir, 0o555)
+	}
+	defer func() {
+		_ = os.Chmod(jobDir, 0o755)
+	}()
+
+	resp, err := worker.BenchmarkSubmit(ctx, req, mockExe, "")
+	if err == nil {
+		t.Fatalf("expected error from failed persistence after spawn, got nil (resp: %+v)", resp)
+	}
+
+	// Restore permissions
+	_ = os.Chmod(jobDir, 0o755)
+
+	if capturedPID <= 0 {
+		t.Fatalf("expected capturedPID to be positive")
+	}
+
+	// Verify that the spawned process was immediately terminated and not left orphaned
+	if IsProcessAlive(capturedPID) {
+		_ = syscall.Kill(capturedPID, syscall.SIGKILL)
+		t.Fatalf("spawned process %d was not killed after post-spawn persistence failure!", capturedPID)
 	}
 }
