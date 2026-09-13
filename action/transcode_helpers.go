@@ -6,6 +6,7 @@ import (
 
 	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/recipe"
 )
 
 func getPlan(v any) *transcode.Plan {
@@ -99,6 +100,77 @@ func getBool(m map[string]any, key string) bool {
 	if s, ok := m[key].(string); ok {
 		s = strings.ToLower(strings.TrimSpace(s))
 		return s == "true" || s == "1" || s == "yes"
+	}
+	return false
+}
+
+func getSourceReport(v any) *mediainspect.DetailedReport {
+	if r, ok := v.(*mediainspect.DetailedReport); ok {
+		return r
+	}
+	if v == nil {
+		return nil
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil
+	}
+	var r mediainspect.DetailedReport
+	if json.Unmarshal(b, &r) != nil {
+		return nil
+	}
+	return &r
+}
+
+func getOptimizationPolicy(v any) *recipe.OptimizationPolicy {
+	if p, ok := v.(*recipe.OptimizationPolicy); ok {
+		return p
+	}
+	if v == nil {
+		return nil
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil
+	}
+	var p recipe.OptimizationPolicy
+	if json.Unmarshal(b, &p) != nil {
+		return nil
+	}
+	return &p
+}
+
+func isSourceHDRorDV(rep *mediainspect.DetailedReport) bool {
+	if rep == nil {
+		return false
+	}
+	if rep.HDR != nil && rep.HDR.Present {
+		return true
+	}
+	for _, vs := range rep.Video {
+		codec := strings.ToLower(strings.TrimSpace(vs.Codec))
+		prof := strings.ToLower(strings.TrimSpace(vs.Profile))
+		if strings.Contains(codec, "dovi") || strings.Contains(codec, "dvh1") ||
+			strings.Contains(codec, "dvhe") || strings.Contains(codec, "dva1") ||
+			strings.Contains(codec, "dav1") || strings.Contains(prof, "dolby vision") ||
+			strings.Contains(prof, "dovi") || strings.HasPrefix(prof, "dv") {
+			return true
+		}
+		ct := strings.ToLower(strings.TrimSpace(vs.ColorTransfer))
+		cp := strings.ToLower(strings.TrimSpace(vs.ColorPrimaries))
+		cs := strings.ToLower(strings.TrimSpace(vs.ColorSpace))
+		if ct == "smpte2084" || ct == "arib-std-b67" || strings.Contains(ct, "2084") || strings.Contains(ct, "hlg") || strings.Contains(ct, "pq") {
+			return true
+		}
+		if cp == "bt2020" || strings.Contains(cp, "2020") || cp == "dci-p3" {
+			return true
+		}
+		if cs == "bt2020nc" || cs == "bt2020c" || strings.Contains(cs, "2020") {
+			return true
+		}
+		if vs.MasteringDisplay != nil || vs.ContentLightLevel != nil {
+			return true
+		}
 	}
 	return false
 }

@@ -268,6 +268,34 @@ func (t *TranscodeConfig) ResolvePlanForSource(profileName string, subtitles []r
 	return recipe.Resolve(snap, name, t.recipeOverrides(), subtitles)
 }
 
+// ResolveProfile resolves and validates a recipe Profile for the given profileName,
+// incorporating local profile overrides and normalizing optimization policies if present.
+func (t *TranscodeConfig) ResolveProfile(profileName string) (recipe.Profile, error) {
+	name := strings.TrimSpace(profileName)
+	if name == "" {
+		name = strings.TrimSpace(t.DefaultProfile)
+	}
+	if name == "" {
+		name = "hevc-vt"
+	}
+	snap, err := t.activeSnapshot()
+	if err != nil {
+		return recipe.Profile{}, err
+	}
+	p, ok := snap.Bundle.Profiles[name]
+	if op, exists := t.recipeOverrides()[name]; exists {
+		p = op
+		ok = true
+	}
+	if !ok {
+		return recipe.Profile{}, fmt.Errorf("unknown transcode profile %q", name)
+	}
+	if err := recipe.ValidateProfile(name, p); err != nil {
+		return recipe.Profile{}, err
+	}
+	return p, nil
+}
+
 func (t *TranscodeConfig) validateRecipeSource() error {
 	src := strings.ToLower(strings.TrimSpace(t.Recipes.Source))
 	if src == "" {
