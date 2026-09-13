@@ -340,14 +340,6 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 		}, fmt.Errorf("worker busy: max parallel jobs reached")
 	}
 
-	// Ensure job directory and candidate directory exist
-	if err := os.MkdirAll(jobDir, 0755); err != nil {
-		return SubmitResponse{ID: req.ID, Error: fmt.Sprintf("creating job directory: %v", err)}, err
-	}
-	if err := os.MkdirAll(filepath.Dir(cleanCandidate), 0755); err != nil {
-		return SubmitResponse{ID: req.ID, Error: fmt.Sprintf("creating candidate directory: %v", err)}, err
-	}
-
 	profile := req.Profile
 	if strings.TrimSpace(profile) == "" {
 		profile = "hevc-vt"
@@ -356,6 +348,14 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 	plan, err := ResolveWorkerPlan(profile, req.Plan)
 	if err != nil {
 		return SubmitResponse{ID: req.ID, Error: fmt.Sprintf("invalid transcode profile or plan: %v", err)}, err
+	}
+
+	// Ensure job directory and candidate directory exist
+	if err := os.MkdirAll(jobDir, 0755); err != nil {
+		return SubmitResponse{ID: req.ID, Error: fmt.Sprintf("creating job directory: %v", err)}, err
+	}
+	if err := os.MkdirAll(filepath.Dir(cleanCandidate), 0755); err != nil {
+		return SubmitResponse{ID: req.ID, Error: fmt.Sprintf("creating candidate directory: %v", err)}, err
 	}
 
 	job := &JobRecord{
@@ -528,18 +528,27 @@ func (w *Worker) InternalRun(ctx context.Context, jobID string) error {
 
 // JobStatusResponse is returned by the status subcommand.
 type JobStatusResponse struct {
-	ID            string                       `json:"id"`
-	Status        string                       `json:"status"`
-	Progress      float64                      `json:"progress"`
-	FPS           float64                      `json:"fps"`
-	Speed         float64                      `json:"speed"`
-	CandidatePath string                       `json:"candidate_path"`
-	Error         string                       `json:"error,omitempty"`
-	Profile       string                       `json:"profile,omitempty"`
-	Container     string                       `json:"container,omitempty"`
-	VideoCodec    string                       `json:"video_codec,omitempty"`
-	Quality       int                          `json:"quality,omitempty"`
-	Conversions   []transcode.ConversionRecord `json:"conversions,omitempty"`
+	ID               string                       `json:"id"`
+	Status           string                       `json:"status"`
+	Progress         float64                      `json:"progress"`
+	FPS              float64                      `json:"fps"`
+	Speed            float64                      `json:"speed"`
+	CandidatePath    string                       `json:"candidate_path"`
+	Error            string                       `json:"error,omitempty"`
+	Profile          string                       `json:"profile,omitempty"`
+	RecipeVersion    string                       `json:"recipe_version,omitempty"`
+	RecipeDigest     string                       `json:"recipe_digest,omitempty"`
+	PlanDigest       string                       `json:"plan_digest,omitempty"`
+	Container        string                       `json:"container,omitempty"`
+	VideoCodec       string                       `json:"video_codec,omitempty"`
+	Quality          int                          `json:"quality,omitempty"`
+	VideoProfile     string                       `json:"video_profile,omitempty"`
+	PixelFormat      string                       `json:"pixel_format,omitempty"`
+	PrioritizeSpeed  *bool                        `json:"prioritize_speed,omitempty"`
+	SpatialAQ        *bool                        `json:"spatial_aq,omitempty"`
+	Realtime         *bool                        `json:"realtime,omitempty"`
+	ExpectedBitDepth int                          `json:"expected_bit_depth,omitempty"`
+	Conversions      []transcode.ConversionRecord `json:"conversions,omitempty"`
 }
 
 // Status reads the current status of a job.
@@ -569,27 +578,51 @@ func (w *Worker) Status(ctx context.Context, jobID string) (JobStatusResponse, e
 		metrics.Progress = 100.0
 	}
 
-	var container, videoCodec string
-	var quality int
+	var (
+		container, videoCodec                   string
+		quality                                 int
+		recipeVersion, recipeDigest, planDigest string
+		videoProfile, pixelFormat               string
+		prioritizeSpeed, spatialAQ, realtime    *bool
+		expectedBitDepth                        int
+	)
 	if job.Plan != nil {
 		container = job.Plan.Container
 		videoCodec = job.Plan.VideoCodec
 		quality = job.Plan.Quality
+		recipeVersion = job.Plan.RecipeVersion
+		recipeDigest = job.Plan.RecipeDigest
+		planDigest = job.Plan.PlanDigest
+		videoProfile = job.Plan.VideoProfile
+		pixelFormat = job.Plan.PixelFormat
+		prioritizeSpeed = job.Plan.PrioritizeSpeed
+		spatialAQ = job.Plan.SpatialAQ
+		realtime = job.Plan.Realtime
+		expectedBitDepth = job.Plan.ExpectedBitDepth
 	}
 
 	return JobStatusResponse{
-		ID:            job.ID,
-		Status:        job.Status,
-		Progress:      metrics.Progress,
-		FPS:           metrics.FPS,
-		Speed:         metrics.Speed,
-		CandidatePath: job.Candidate,
-		Error:         job.Error,
-		Profile:       job.Profile,
-		Container:     container,
-		VideoCodec:    videoCodec,
-		Quality:       quality,
-		Conversions:   job.Conversions,
+		ID:               job.ID,
+		Status:           job.Status,
+		Progress:         metrics.Progress,
+		FPS:              metrics.FPS,
+		Speed:            metrics.Speed,
+		CandidatePath:    job.Candidate,
+		Error:            job.Error,
+		Profile:          job.Profile,
+		RecipeVersion:    recipeVersion,
+		RecipeDigest:     recipeDigest,
+		PlanDigest:       planDigest,
+		Container:        container,
+		VideoCodec:       videoCodec,
+		Quality:          quality,
+		VideoProfile:     videoProfile,
+		PixelFormat:      pixelFormat,
+		PrioritizeSpeed:  prioritizeSpeed,
+		SpatialAQ:        spatialAQ,
+		Realtime:         realtime,
+		ExpectedBitDepth: expectedBitDepth,
+		Conversions:      job.Conversions,
 	}, nil
 }
 
