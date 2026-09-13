@@ -274,6 +274,14 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 	}
 
 	if req.Quality != nil {
+		if req.Quality.PreferredMetric != "" {
+			normPref := strings.ToLower(strings.TrimSpace(req.Quality.PreferredMetric))
+			if normPref != "vmaf" && normPref != "ssim" {
+				return fmt.Errorf("invalid preferred_metric %q: must be 'vmaf' or 'ssim'", req.Quality.PreferredMetric)
+			}
+			req.Quality.PreferredMetric = normPref
+		}
+
 		if req.Quality.VMAF != nil {
 			tol := optimization.DefaultVMAFPolicy().Tolerance()
 			if req.Quality.VMAF.MarginalTolerance != nil {
