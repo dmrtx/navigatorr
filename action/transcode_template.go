@@ -79,6 +79,24 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		origMap["video_codec"] = rep.Video[0].Codec
 		origMap["resolution"] = fmt.Sprintf("%dx%d", rep.Video[0].Width, rep.Video[0].Height)
 		origMap["bit_depth"] = rep.Video[0].BitDepth
+		if rep.Video[0].Profile != "" {
+			origMap["video_profile"] = rep.Video[0].Profile
+		}
+		if rep.Video[0].PixelFormat != "" {
+			origMap["pixel_format"] = rep.Video[0].PixelFormat
+		}
+		if rep.Video[0].FrameRate != "" {
+			origMap["frame_rate"] = rep.Video[0].FrameRate
+		}
+		if rep.Video[0].FPS > 0 {
+			origMap["fps"] = rep.Video[0].FPS
+		}
+		if rep.Video[0].ColorSpace != "" {
+			origMap["color_space"] = rep.Video[0].ColorSpace
+		}
+	}
+	if rep.HDR != nil {
+		origMap["hdr"] = rep.HDR
 	}
 	audioLangs := make([]string, 0, len(rep.Audio))
 	for _, a := range rep.Audio {

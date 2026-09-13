@@ -65,7 +65,7 @@ func main() {
 		}
 
 	case "capabilities":
-		caps, err := worker.VideoToolboxCapabilities(ctx)
+		caps, err := worker.Capabilities(ctx)
 		if err != nil {
 			printJSON(map[string]any{"error": err.Error(), "capabilities": caps})
 			os.Exit(1)

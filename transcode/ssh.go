@@ -186,6 +186,38 @@ func (e *SSHExecutor) Doctor(ctx context.Context) error {
 	return nil
 }
 
+// Capabilities fetches and verifies the versioned capability report from the remote worker node.
+func (e *SSHExecutor) Capabilities(ctx context.Context) (WorkerCapabilities, error) {
+	args := e.buildSSHArgs()
+	args = append(args, e.cfg.Command, "capabilities")
+
+	cmd := exec.CommandContext(ctx, e.sshBinary, args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		outStr := strings.TrimSpace(stdout.String())
+		errStr := strings.TrimSpace(stderr.String())
+		return WorkerCapabilities{}, fmt.Errorf("ssh capabilities failed: %w (stderr: %s, stdout: %s)", err, errStr, outStr)
+	}
+
+	var caps WorkerCapabilities
+	if err := json.Unmarshal(stdout.Bytes(), &caps); err != nil {
+		return WorkerCapabilities{}, fmt.Errorf("failed to parse capabilities response: %w (output: %s)", err, stdout.String())
+	}
+
+	if caps.ProtocolVersion <= 0 {
+		return WorkerCapabilities{}, fmt.Errorf("invalid or missing protocol version %d in worker capabilities (fail closed)", caps.ProtocolVersion)
+	}
+
+	if err := VerifyCapabilitySignature(caps); err != nil {
+		return WorkerCapabilities{}, err
+	}
+
+	return caps, nil
+}
+
 // Submit sends a transcode request to the remote worker.
 func (e *SSHExecutor) Submit(ctx context.Context, req Request) (Job, error) {
 	if strings.TrimSpace(req.ID) == "" {

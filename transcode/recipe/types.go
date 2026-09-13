@@ -2,7 +2,11 @@ package recipe
 
 import "time"
 
-const SupportedSchemaVersion = 1
+const (
+	SupportedSchemaVersionV1 = 1
+	SupportedSchemaVersionV2 = 2
+	SupportedSchemaVersion   = 1
+)
 
 type Bundle struct {
 	SchemaVersion int                      `json:"schema_version" yaml:"schema_version"`
@@ -21,13 +25,43 @@ type ConversionRule struct {
 	Reason      string `json:"reason" yaml:"reason"`
 }
 
+// SamplingPolicy defines declarative bounded parameters for quality sampling.
+type SamplingPolicy struct {
+	SegmentDurationSec   float64 `json:"segment_duration_sec,omitempty" yaml:"segment_duration_sec,omitempty"`
+	SegmentCount         int     `json:"segment_count,omitempty" yaml:"segment_count,omitempty"`
+	MinSourceDurationSec float64 `json:"min_source_duration_sec,omitempty" yaml:"min_source_duration_sec,omitempty"`
+}
+
+// MetricThresholds defines VMAF and SSIM thresholds for candidate quality evaluation.
+type MetricThresholds struct {
+	MinVMAF    float64 `json:"min_vmaf,omitempty" yaml:"min_vmaf,omitempty"`
+	TargetVMAF float64 `json:"target_vmaf,omitempty" yaml:"target_vmaf,omitempty"`
+	MinSSIM    float64 `json:"min_ssim,omitempty" yaml:"min_ssim,omitempty"`
+	TargetSSIM float64 `json:"target_ssim,omitempty" yaml:"target_ssim,omitempty"`
+}
+
+// BitrateGuidance defines preferred and soft-max total bitrate guidance in bits per second.
+type BitrateGuidance struct {
+	PreferredBitrate int64 `json:"preferred_bitrate,omitempty" yaml:"preferred_bitrate,omitempty"`
+	SoftMaxBitrate   int64 `json:"soft_max_bitrate,omitempty" yaml:"soft_max_bitrate,omitempty"`
+}
+
+// OptimizationPolicy defines typed optimization policy for candidate quality selection.
+type OptimizationPolicy struct {
+	Sampling          *SamplingPolicy   `json:"sampling,omitempty" yaml:"sampling,omitempty"`
+	Thresholds        *MetricThresholds `json:"thresholds,omitempty" yaml:"thresholds,omitempty"`
+	QualityCandidates []int             `json:"quality_candidates,omitempty" yaml:"quality_candidates,omitempty"`
+	BitrateGuidance   *BitrateGuidance  `json:"bitrate_guidance,omitempty" yaml:"bitrate_guidance,omitempty"`
+}
+
 type Profile struct {
-	Container  string            `json:"container" yaml:"container"`
-	Video      VideoProfile      `json:"video" yaml:"video"`
-	Audio      AudioProfile      `json:"audio" yaml:"audio"`
-	Subtitles  SubtitleProfile   `json:"subtitles" yaml:"subtitles"`
-	Preserve   PreserveProfile   `json:"preserve" yaml:"preserve"`
-	Resilience ResilienceProfile `json:"resilience" yaml:"resilience"`
+	Container    string              `json:"container" yaml:"container"`
+	Video        VideoProfile        `json:"video" yaml:"video"`
+	Audio        AudioProfile        `json:"audio" yaml:"audio"`
+	Subtitles    SubtitleProfile     `json:"subtitles" yaml:"subtitles"`
+	Preserve     PreserveProfile     `json:"preserve" yaml:"preserve"`
+	Resilience   ResilienceProfile   `json:"resilience" yaml:"resilience"`
+	Optimization *OptimizationPolicy `json:"optimization,omitempty" yaml:"optimization,omitempty"`
 }
 
 type VideoProfile struct {
