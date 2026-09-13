@@ -51,32 +51,27 @@ func getStreamsList(m map[string]any, key string) []mediainspect.DetailedStream 
 	if !ok || raw == nil {
 		return nil
 	}
-	switch v := raw.(type) {
-	case []mediainspect.DetailedStream:
-		return v
-	case []any:
-		res := make([]mediainspect.DetailedStream, 0, len(v))
-		for _, item := range v {
-			if ds, ok := item.(mediainspect.DetailedStream); ok {
-				res = append(res, ds)
-				continue
-			}
-			if im, ok := item.(map[string]any); ok {
-				ds := mediainspect.DetailedStream{Index: getInt(im, "index"), Kind: getString(im, "kind"), Codec: getString(im, "codec"), Language: getString(im, "language"), Title: getString(im, "title"), Channels: getInt(im, "channels")}
-				if d, ok := im["disposition"].(map[string]int); ok {
-					ds.Disposition = d
-				} else if da, ok := im["disposition"].(map[string]any); ok {
-					ds.Disposition = map[string]int{}
-					for k := range da {
-						ds.Disposition[k] = getInt(da, k)
-					}
-				}
-				res = append(res, ds)
-			}
-		}
-		return res
+	if streams, ok := raw.([]mediainspect.DetailedStream); ok {
+		return streams
 	}
-	return nil
+	var b []byte
+	switch v := raw.(type) {
+	case []byte:
+		b = v
+	case string:
+		b = []byte(v)
+	default:
+		var err error
+		b, err = json.Marshal(v)
+		if err != nil {
+			return nil
+		}
+	}
+	var streams []mediainspect.DetailedStream
+	if json.Unmarshal(b, &streams) != nil {
+		return nil
+	}
+	return streams
 }
 
 func getInt(m map[string]any, key string) int {
