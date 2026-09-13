@@ -25,6 +25,9 @@ func ProbeVideoToolboxCapabilities(ctx context.Context, ffmpegPath string) (Vide
 	out, err := cmd.CombinedOutput()
 	caps := ParseVideoToolboxCapabilities(string(out))
 	if err != nil {
+		if ctx.Err() != nil {
+			return caps, ctx.Err()
+		}
 		msg := strings.TrimSpace(string(out))
 		if len(msg) > 512 {
 			msg = msg[:512] + "..."
