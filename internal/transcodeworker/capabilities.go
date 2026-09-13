@@ -107,6 +107,10 @@ func ProbeWorkerCapabilities(ctx context.Context, ffmpegPath string) (transcode.
 		})
 	}
 	caps.VideoToolbox = vtCaps
+	if caps.EncoderDetails == nil {
+		caps.EncoderDetails = make(map[string]transcode.EncoderCapabilities)
+	}
+	caps.EncoderDetails[videoToolboxEncoder] = vtCaps
 
 	// 3. Probe encoders availability (preserve partial parsed lines if command failed, but record structured warning/error)
 	encCmd := exec.CommandContext(ctx, ffmpegPath, "-hide_banner", "-encoders")
@@ -133,14 +137,12 @@ func ProbeWorkerCapabilities(ctx context.Context, ffmpegPath string) (transcode.
 	}
 	caps.Filters = ParseAvailableFilters(string(filtOut))
 
-	// 5. Generate deterministic capability fingerprint (and signature alias)
+	// 5. Generate deterministic capability fingerprint
 	fp, err := transcode.ComputeCapabilityFingerprint(caps)
 	if err != nil {
 		return caps, fmt.Errorf("generating capability fingerprint: %w", err)
 	}
 	caps.CapabilityFingerprint = fp
-	caps.CapabilitySignature = fp
-	caps.Signature = fp
 
 	return caps, nil
 }
@@ -204,6 +206,16 @@ func ParseAvailableFilters(raw string) map[string]bool {
 	return filters
 }
 
+func isCleanAbsence(output string) bool {
+	lower := strings.ToLower(output)
+	return strings.Contains(lower, "is not recognized by ffmpeg") ||
+		strings.Contains(lower, "not recognized") ||
+		strings.Contains(lower, "not found") ||
+		strings.Contains(lower, "unknown encoder") ||
+		strings.Contains(lower, "cannot find encoder") ||
+		strings.Contains(lower, "unrecognized option")
+}
+
 func ProbeVideoToolboxCapabilities(ctx context.Context, ffmpegPath string) (VideoToolboxCapabilities, error) {
 	cmd := exec.CommandContext(ctx, ffmpegPath, "-hide_banner", "-h", "encoder="+videoToolboxEncoder)
 	out, err := cmd.CombinedOutput()
@@ -212,6 +224,10 @@ func ProbeVideoToolboxCapabilities(ctx context.Context, ffmpegPath string) (Vide
 		if ctx.Err() != nil {
 			return caps, ctx.Err()
 		}
+		if isCleanAbsence(string(out)) {
+			caps.Available = false
+			return caps, nil
+		}
 		msg := strings.TrimSpace(string(out))
 		if len(msg) > 512 {
 			msg = msg[:512] + "..."
@@ -219,7 +235,8 @@ func ProbeVideoToolboxCapabilities(ctx context.Context, ffmpegPath string) (Vide
 		return caps, fmt.Errorf("encoder_capability_unsupported: probing %s capabilities failed: %w (%s)", videoToolboxEncoder, err, msg)
 	}
 	if !caps.Available {
-		return caps, fmt.Errorf("encoder_capability_unsupported: FFmpeg help did not report encoder %s", videoToolboxEncoder)
+		// Clean absence when help returns exit code 0 but does not report the encoder
+		return caps, nil
 	}
 	return caps, nil
 }

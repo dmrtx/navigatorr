@@ -12,14 +12,17 @@ import (
 // WorkerProtocolVersion is the current version of the worker capability protocol.
 const WorkerProtocolVersion = 1
 
-// VideoToolboxCapabilities captures hardware encoder details for Apple Silicon VideoToolbox.
-type VideoToolboxCapabilities struct {
+// EncoderCapabilities describes detailed supported profiles, pixel formats, and options for a specific encoder.
+type EncoderCapabilities struct {
 	Encoder      string   `json:"encoder"`
 	Available    bool     `json:"available"`
 	Profiles     []string `json:"profiles,omitempty"`
 	PixelFormats []string `json:"pixel_formats,omitempty"`
 	Options      []string `json:"options,omitempty"`
 }
+
+// VideoToolboxCapabilities is an alias to EncoderCapabilities for convenience and compatibility.
+type VideoToolboxCapabilities = EncoderCapabilities
 
 // ProbeError records non-fatal probe warnings or errors encountered during capability discovery,
 // allowing callers to differentiate between confirmed absence and probe failure.
@@ -30,20 +33,22 @@ type ProbeError struct {
 
 // WorkerCapabilities represents the versioned capability report of a transcode worker node.
 type WorkerCapabilities struct {
-	ProtocolVersion       int                      `json:"protocol_version"`
-	WorkerVersion         string                   `json:"worker_version,omitempty"`
-	BuildGitCommit        string                   `json:"build_git_commit,omitempty"`
-	FFmpegVersion         string                   `json:"ffmpeg_version"`
-	FFmpegPath            string                   `json:"ffmpeg_path,omitempty"`
-	Encoders              map[string]bool          `json:"encoders"`
-	Filters               map[string]bool          `json:"filters"`
-	VideoToolbox          VideoToolboxCapabilities `json:"video_toolbox"`
-	ProbeErrors           []ProbeError             `json:"probe_errors,omitempty"`
-	CapabilityFingerprint string                   `json:"capability_fingerprint,omitempty"`
-	// CapabilitySignature is retained as an alias for backwards compatibility
-	CapabilitySignature   string                   `json:"capability_signature,omitempty"`
-	// Signature is retained as a JSON alias for backwards compatibility
-	Signature             string                   `json:"signature,omitempty"`
+	ProtocolVersion       int                            `json:"protocol_version"`
+	WorkerVersion         string                         `json:"worker_version,omitempty"`
+	BuildGitCommit        string                         `json:"build_git_commit,omitempty"`
+	FFmpegVersion         string                         `json:"ffmpeg_version"`
+	FFmpegPath            string                         `json:"ffmpeg_path,omitempty"`
+	Encoders              map[string]bool                `json:"encoders"`
+	EncoderDetails        map[string]EncoderCapabilities `json:"encoder_details,omitempty"`
+	VideoToolbox          EncoderCapabilities            `json:"video_toolbox,omitempty"`
+	Filters               map[string]bool                `json:"filters"`
+	ProbeErrors           []ProbeError                   `json:"probe_errors,omitempty"`
+	CapabilityFingerprint string                         `json:"capability_fingerprint,omitempty"`
+}
+
+// Fingerprint returns the canonical capability fingerprint.
+func (c WorkerCapabilities) Fingerprint() string {
+	return c.CapabilityFingerprint
 }
 
 // HasProbeErrors returns true if any non-fatal probe errors were reported during capability discovery.
@@ -61,59 +66,55 @@ func (c WorkerCapabilities) HasComponentError(component string) bool {
 	return false
 }
 
-// Fingerprint returns the capability fingerprint or signature alias.
-func (c WorkerCapabilities) Fingerprint() string {
-	if c.CapabilityFingerprint != "" {
-		return c.CapabilityFingerprint
-	}
-	if c.CapabilitySignature != "" {
-		return c.CapabilitySignature
-	}
-	return c.Signature
-}
-
 // fingerprintPayload defines the stable subset of capabilities used to compute
 // the cache identity / capability fingerprint.
 // Machine-specific paths like FFmpegPath are excluded to ensure capability equivalence
 // across different worker nodes with identical capability sets.
 type fingerprintPayload struct {
-	ProtocolVersion int                      `json:"protocol_version"`
-	WorkerVersion   string                   `json:"worker_version,omitempty"`
-	BuildGitCommit  string                   `json:"build_git_commit,omitempty"`
-	FFmpegVersion   string                   `json:"ffmpeg_version"`
-	Encoders        map[string]bool          `json:"encoders"`
-	Filters         map[string]bool          `json:"filters"`
-	VideoToolbox    VideoToolboxCapabilities `json:"video_toolbox"`
-	ProbeErrors     []ProbeError             `json:"probe_errors,omitempty"`
+	ProtocolVersion int                            `json:"protocol_version"`
+	WorkerVersion   string                         `json:"worker_version,omitempty"`
+	BuildGitCommit  string                         `json:"build_git_commit,omitempty"`
+	FFmpegVersion   string                         `json:"ffmpeg_version"`
+	Encoders        map[string]bool                `json:"encoders"`
+	EncoderDetails  map[string]EncoderCapabilities `json:"encoder_details,omitempty"`
+	Filters         map[string]bool                `json:"filters"`
+	ProbeErrors     []ProbeError                   `json:"probe_errors,omitempty"`
 }
 
 // ComputeCapabilityFingerprint returns a deterministic sha256 digest of WorkerCapabilities
 // representing its capability equivalence for caching and validation.
 // Note: This is a cache identity fingerprint, NOT a cryptographic authentication proof.
 func ComputeCapabilityFingerprint(caps WorkerCapabilities) (string, error) {
+	// Deep-clone and sort encoder details
+	detCopy := make(map[string]EncoderCapabilities, len(caps.EncoderDetails))
+	for k, v := range caps.EncoderDetails {
+		ec := v
+		if len(ec.Profiles) > 1 {
+			ec.Profiles = append([]string(nil), ec.Profiles...)
+			sort.Strings(ec.Profiles)
+		}
+		if len(ec.PixelFormats) > 1 {
+			ec.PixelFormats = append([]string(nil), ec.PixelFormats...)
+			sort.Strings(ec.PixelFormats)
+		}
+		if len(ec.Options) > 1 {
+			ec.Options = append([]string(nil), ec.Options...)
+			sort.Strings(ec.Options)
+		}
+		detCopy[k] = ec
+	}
+
 	payload := fingerprintPayload{
 		ProtocolVersion: caps.ProtocolVersion,
 		WorkerVersion:   caps.WorkerVersion,
 		BuildGitCommit:  caps.BuildGitCommit,
 		FFmpegVersion:   caps.FFmpegVersion,
 		Encoders:        caps.Encoders,
+		EncoderDetails:  detCopy,
 		Filters:         caps.Filters,
-		VideoToolbox:    caps.VideoToolbox,
 		ProbeErrors:     caps.ProbeErrors,
 	}
 
-	if len(payload.VideoToolbox.Profiles) > 1 {
-		payload.VideoToolbox.Profiles = append([]string(nil), payload.VideoToolbox.Profiles...)
-		sort.Strings(payload.VideoToolbox.Profiles)
-	}
-	if len(payload.VideoToolbox.PixelFormats) > 1 {
-		payload.VideoToolbox.PixelFormats = append([]string(nil), payload.VideoToolbox.PixelFormats...)
-		sort.Strings(payload.VideoToolbox.PixelFormats)
-	}
-	if len(payload.VideoToolbox.Options) > 1 {
-		payload.VideoToolbox.Options = append([]string(nil), payload.VideoToolbox.Options...)
-		sort.Strings(payload.VideoToolbox.Options)
-	}
 	if len(payload.ProbeErrors) > 1 {
 		payload.ProbeErrors = append([]ProbeError(nil), payload.ProbeErrors...)
 		sort.Slice(payload.ProbeErrors, func(i, j int) bool {
@@ -132,28 +133,17 @@ func ComputeCapabilityFingerprint(caps WorkerCapabilities) (string, error) {
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
-// ComputeCapabilitySignature is an alias for ComputeCapabilityFingerprint for backwards compatibility.
-func ComputeCapabilitySignature(caps WorkerCapabilities) (string, error) {
-	return ComputeCapabilityFingerprint(caps)
-}
-
 // VerifyCapabilityFingerprint checks that the fingerprint on WorkerCapabilities matches the computed digest.
 func VerifyCapabilityFingerprint(caps WorkerCapabilities) error {
-	fp := caps.Fingerprint()
-	if fp == "" {
+	if caps.CapabilityFingerprint == "" {
 		return fmt.Errorf("worker capabilities missing capability fingerprint (fail closed)")
 	}
 	expected, err := ComputeCapabilityFingerprint(caps)
 	if err != nil {
 		return fmt.Errorf("failed computing capability fingerprint: %w", err)
 	}
-	if fp != expected {
-		return fmt.Errorf("worker capability fingerprint mismatch: got %s, want %s (fail closed)", fp, expected)
+	if caps.CapabilityFingerprint != expected {
+		return fmt.Errorf("worker capability fingerprint mismatch: got %s, want %s (fail closed)", caps.CapabilityFingerprint, expected)
 	}
 	return nil
-}
-
-// VerifyCapabilitySignature is an alias for VerifyCapabilityFingerprint for backwards compatibility.
-func VerifyCapabilitySignature(caps WorkerCapabilities) error {
-	return VerifyCapabilityFingerprint(caps)
 }

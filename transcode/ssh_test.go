@@ -294,8 +294,6 @@ func TestSSHExecutor_Capabilities(t *testing.T) {
 		t.Fatalf("ComputeCapabilityFingerprint failed: %v", err)
 	}
 	validCaps.CapabilityFingerprint = validFP
-	validCaps.CapabilitySignature = validFP
-	validCaps.Signature = validFP
 
 	validJSON, err := json.Marshal(validCaps)
 	if err != nil {
@@ -304,8 +302,6 @@ func TestSSHExecutor_Capabilities(t *testing.T) {
 
 	tamperedCaps := validCaps
 	tamperedCaps.CapabilityFingerprint = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-	tamperedCaps.CapabilitySignature = tamperedCaps.CapabilityFingerprint
-	tamperedCaps.Signature = tamperedCaps.CapabilityFingerprint
 	tamperedJSON, _ := json.Marshal(tamperedCaps)
 
 	t.Run("valid capabilities fingerprint verified", func(t *testing.T) {

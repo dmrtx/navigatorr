@@ -12,16 +12,17 @@ const (
 )
 
 const (
-	DefaultSamplingStrategy  = "uniform"
-	DefaultSampleCount       = 3
-	DefaultSampleSeconds     = 10.0
-	DefaultPreferredMetric   = "vmaf"
-	DefaultVMAFTarget        = 95.0
-	DefaultVMAFMinimum       = 93.0
-	DefaultSSIMTarget        = 0.98
-	DefaultSSIMMinimum       = 0.96
-	DefaultMarginalTolerance = 0.5
-	DefaultMaxCandidates     = 5
+	DefaultSamplingStrategy      = "distributed"
+	DefaultSampleCount           = 3
+	DefaultSampleSeconds         = 20.0
+	DefaultPreferredMetric       = "vmaf"
+	DefaultVMAFTarget            = 96.0
+	DefaultVMAFMinimum           = 95.0
+	DefaultVMAFMarginalTolerance = 0.5
+	DefaultSSIMTarget            = 0.99
+	DefaultSSIMMinimum           = 0.98
+	DefaultSSIMMarginalTolerance = 0.005
+	DefaultMaxCandidates         = 5
 )
 
 var (
@@ -55,6 +56,20 @@ type OptimizationPolicy struct {
 	Size     *SizePolicy     `json:"size,omitempty" yaml:"size,omitempty"`
 }
 
+// Clone creates a deep copy of OptimizationPolicy without aliasing pointers or slices.
+func (opt *OptimizationPolicy) Clone() *OptimizationPolicy {
+	if opt == nil {
+		return nil
+	}
+	return &OptimizationPolicy{
+		Enabled:  opt.Enabled,
+		Sampling: opt.Sampling.Clone(),
+		Quality:  opt.Quality.Clone(),
+		Search:   opt.Search.Clone(),
+		Size:     opt.Size.Clone(),
+	}
+}
+
 // SamplingPolicy controls where and how probe samples are extracted from the source video.
 type SamplingPolicy struct {
 	Strategy      string    `json:"strategy,omitempty" yaml:"strategy,omitempty"`
@@ -63,18 +78,64 @@ type SamplingPolicy struct {
 	Positions     []float64 `json:"positions,omitempty" yaml:"positions,omitempty"`
 }
 
-// QualityPolicy configures target objective quality metrics and acceptability thresholds.
-type QualityPolicy struct {
-	PreferredMetric   string        `json:"preferred_metric,omitempty" yaml:"preferred_metric,omitempty"`
-	VMAF              *MetricTarget `json:"vmaf,omitempty" yaml:"vmaf,omitempty"`
-	SSIM              *MetricTarget `json:"ssim,omitempty" yaml:"ssim,omitempty"`
-	MarginalTolerance float64       `json:"marginal_tolerance,omitempty" yaml:"marginal_tolerance,omitempty"`
+// Clone creates a deep copy of SamplingPolicy.
+func (s *SamplingPolicy) Clone() *SamplingPolicy {
+	if s == nil {
+		return nil
+	}
+	var pos []float64
+	if s.Positions != nil {
+		pos = append([]float64(nil), s.Positions...)
+	}
+	return &SamplingPolicy{
+		Strategy:      s.Strategy,
+		SampleCount:   s.SampleCount,
+		SampleSeconds: s.SampleSeconds,
+		Positions:     pos,
+	}
 }
 
-// MetricTarget specifies target and minimum acceptable scores for an objective quality metric.
+// QualityPolicy configures target objective quality metrics and acceptability thresholds.
+type QualityPolicy struct {
+	PreferredMetric string        `json:"preferred_metric,omitempty" yaml:"preferred_metric,omitempty"`
+	VMAF            *MetricTarget `json:"vmaf,omitempty" yaml:"vmaf,omitempty"`
+	SSIM            *MetricTarget `json:"ssim,omitempty" yaml:"ssim,omitempty"`
+}
+
+// Clone creates a deep copy of QualityPolicy.
+func (q *QualityPolicy) Clone() *QualityPolicy {
+	if q == nil {
+		return nil
+	}
+	return &QualityPolicy{
+		PreferredMetric: q.PreferredMetric,
+		VMAF:            q.VMAF.Clone(),
+		SSIM:            q.SSIM.Clone(),
+	}
+}
+
+// MetricTarget specifies target, minimum acceptable scores, and metric-specific marginal tolerance.
 type MetricTarget struct {
-	Target  float64 `json:"target" yaml:"target"`
-	Minimum float64 `json:"minimum" yaml:"minimum"`
+	Target            float64  `json:"target" yaml:"target"`
+	Minimum           float64  `json:"minimum" yaml:"minimum"`
+	MarginalTolerance *float64 `json:"marginal_tolerance,omitempty" yaml:"marginal_tolerance,omitempty"`
+}
+
+// Clone creates a deep copy of MetricTarget.
+func (m *MetricTarget) Clone() *MetricTarget {
+	if m == nil {
+		return nil
+	}
+	var tol *float64
+	if m.MarginalTolerance != nil {
+		v := *m.MarginalTolerance
+		tol = &v
+	}
+	return &MetricTarget{
+		Target:            m.Target,
+		Minimum:           m.Minimum,
+		MarginalTolerance: tol,
+	}
 }
 
 // SearchPolicy defines parameter space and candidate selection bounds.
@@ -83,16 +144,53 @@ type SearchPolicy struct {
 	QualityValues []int `json:"quality_values,omitempty" yaml:"quality_values,omitempty"`
 }
 
+// Clone creates a deep copy of SearchPolicy.
+func (srch *SearchPolicy) Clone() *SearchPolicy {
+	if srch == nil {
+		return nil
+	}
+	var qv []int
+	if srch.QualityValues != nil {
+		qv = append([]int(nil), srch.QualityValues...)
+	}
+	return &SearchPolicy{
+		MaxCandidates: srch.MaxCandidates,
+		QualityValues: qv,
+	}
+}
+
 // SizePolicy specifies bitrate ranges and constraints in kilobits per second.
 type SizePolicy struct {
 	PreferredTotalBitrateKbps *BitrateRange `json:"preferred_total_bitrate_kbps,omitempty" yaml:"preferred_total_bitrate_kbps,omitempty"`
 	SoftMaxTotalBitrateKbps   int           `json:"soft_max_total_bitrate_kbps,omitempty" yaml:"soft_max_total_bitrate_kbps,omitempty"`
 }
 
+// Clone creates a deep copy of SizePolicy.
+func (sz *SizePolicy) Clone() *SizePolicy {
+	if sz == nil {
+		return nil
+	}
+	return &SizePolicy{
+		PreferredTotalBitrateKbps: sz.PreferredTotalBitrateKbps.Clone(),
+		SoftMaxTotalBitrateKbps:   sz.SoftMaxTotalBitrateKbps,
+	}
+}
+
 // BitrateRange defines minimum and maximum acceptable total bitrate in kbps.
 type BitrateRange struct {
 	Min int `json:"min" yaml:"min"`
 	Max int `json:"max" yaml:"max"`
+}
+
+// Clone creates a deep copy of BitrateRange.
+func (b *BitrateRange) Clone() *BitrateRange {
+	if b == nil {
+		return nil
+	}
+	return &BitrateRange{
+		Min: b.Min,
+		Max: b.Max,
+	}
 }
 
 type Profile struct {
