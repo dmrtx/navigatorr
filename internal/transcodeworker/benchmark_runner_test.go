@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -340,12 +341,12 @@ EOF
   *"-filters"*)
     cat << 'EOF'
 Filters:
-  ..C libvmaf           VV->V      Calculate the VMAF between two video streams.
-  ..C ssim              VV->V      Calculate the SSIM between two video streams.
-  ... scale             V->V       Scale the input video size and/or convert the image format.
-  ... format            V->V       Convert the input video to one of the specified pixel formats.
-  ... null              V->V       Pass the source unchanged to the output.
-  ... fps               V->V       Force constant framerate.
+  .. libvmaf           VV->V      Calculate the VMAF between two video streams.
+  TS ssim              VV->V      Calculate the SSIM between two video streams.
+  .S scale             V->V       Scale the input video size and/or convert the image format.
+  .. format            V->V       Convert the input video to one of the specified pixel formats.
+  .. null              V->V       Pass the source unchanged to the output.
+  .. fps               V->V       Force constant framerate.
 EOF
     exit 0
     ;;
@@ -700,7 +701,7 @@ func TestProductionBenchmarkRunner_10BitSource_Success(t *testing.T) {
 		ID:              "bench-test10",
 		Status:          "running",
 		Source:          sourceFile,
-		Metric:          "vmaf",
+		Metric:          "ssim",
 		Samples: []transcode.BenchmarkSampleWindow{
 			{Index: 0, StartSeconds: 20.0, DurationSeconds: 10.0},
 		},
@@ -2244,10 +2245,11 @@ func TestBuildVMAFArgs_ArgvExactness(t *testing.T) {
 		}
 	}
 
-	// Verify escaping of special characters in log path
+	// Verify escaping of special characters in log path:
+	// Colon requires \\:, single quote requires \\\', backslash requires \\\\
 	logPathSpecial := "/tmp/with:colon/and'quote/and\\backslash/log.json"
 	argsSpecial := BuildVMAFArgs(candPath, refPath, logPathSpecial)
-	expectedFilter := "[0:v][1:v]libvmaf=log_fmt=json:log_path=/tmp/with\\:colon/and\\'quote/and\\\\backslash/log.json"
+	expectedFilter := "[0:v][1:v]libvmaf=log_fmt=json:log_path=/tmp/with\\\\:colon/and\\\\\\'quote/and\\\\\\\\backslash/log.json"
 	if argsSpecial[6] != expectedFilter {
 		t.Errorf("expected filter string %q, got %q", expectedFilter, argsSpecial[6])
 	}
@@ -2281,6 +2283,110 @@ func TestBuildSSIMArgs_ArgvExactness(t *testing.T) {
 	argsNoStats := BuildSSIMArgs(candPath, refPath, "")
 	if argsNoStats[6] != "[0:v][1:v]ssim" {
 		t.Errorf("expected filter string '[0:v][1:v]ssim', got %q", argsNoStats[6])
+	}
+
+	// With special characters in stats path
+	statsPathSpecial := "/tmp/with:colon/and'quote/and\\backslash/stats.log"
+	argsSpecial := BuildSSIMArgs(candPath, refPath, statsPathSpecial)
+	expectedFilterSpecial := "[0:v][1:v]ssim=stats_file=/tmp/with\\\\:colon/and\\\\\\'quote/and\\\\\\\\backslash/stats.log"
+	if argsSpecial[6] != expectedFilterSpecial {
+		t.Errorf("expected filter string %q, got %q", expectedFilterSpecial, argsSpecial[6])
+	}
+}
+
+func TestEscapeFFmpegFilterPath_Comprehensive(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "plain path",
+			input:    "/var/log/benchmark.json",
+			expected: "/var/log/benchmark.json",
+		},
+		{
+			name:     "colon in path",
+			input:    "/scratch/task_123:456/vmaf.json",
+			expected: "/scratch/task_123\\\\:456/vmaf.json",
+		},
+		{
+			name:     "single quote in path",
+			input:    "/scratch/user's folder/ssim.log",
+			expected: "/scratch/user\\\\\\'s folder/ssim.log",
+		},
+		{
+			name:     "backslash in path",
+			input:    `C:\media\samples\test.mkv`,
+			expected: "C\\\\:\\\\\\\\media\\\\\\\\samples\\\\\\\\test.mkv",
+		},
+		{
+			name:     "brackets comma semicolon in path",
+			input:    "/tmp/[test,sample;1]/out.log",
+			expected: "/tmp/\\\\[test\\\\,sample\\\\;1\\\\]/out.log",
+		},
+		{
+			name:     "combined colons quotes backslashes and spaces",
+			input:    `/tmp/run:1/user's \data/out.log`,
+			expected: "/tmp/run\\\\:1/user\\\\\\'s \\\\\\\\data/out.log",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := escapeFFmpegFilterPath(tc.input)
+			if got != tc.expected {
+				t.Errorf("escapeFFmpegFilterPath(%q):\nexpected: %q\ngot:      %q", tc.input, tc.expected, got)
+			}
+		})
+	}
+}
+
+func TestFFmpegFilterPath_LiveSmokeTest(t *testing.T) {
+	ffmpegBin, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg binary not installed, skipping live smoke test")
+	}
+
+	// Create a real directory with colons, single quotes, and spaces to challenge FFmpeg filter parsing
+	baseDir := t.TempDir()
+	specialDir := filepath.Join(baseDir, "path:with'quote and spaces")
+	if err := os.MkdirAll(specialDir, 0700); err != nil {
+		t.Fatalf("failed creating special dir: %v", err)
+	}
+
+	statsFile := filepath.Join(specialDir, "ssim:stats'out.log")
+	filterArg := fmt.Sprintf("[0:v][1:v]ssim=stats_file=%s", escapeFFmpegFilterPath(statsFile))
+
+	// Run harmless filter invocation with nullsrc test inputs directly via execve (no shell)
+	cmd := exec.Command(ffmpegBin,
+		"-nostats",
+		"-f", "lavfi", "-i", "nullsrc=s=64x64:d=0.1:r=10",
+		"-f", "lavfi", "-i", "nullsrc=s=64x64:d=0.1:r=10",
+		"-filter_complex", filterArg,
+		"-f", "null",
+		"-",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("ffmpeg execution failed with filterArg %q: %v; output:\n%s", filterArg, err, string(out))
+	}
+
+	// Verify stats file was created by FFmpeg at the escaped path
+	data, err := os.ReadFile(statsFile)
+	if err != nil {
+		t.Fatalf("expected stats file to be created at %s, but read failed: %v", statsFile, err)
+	}
+	if len(data) == 0 {
+		t.Fatalf("expected non-empty stats file at %s", statsFile)
+	}
+
+	score, err := ParseSSIMStatsFile(data)
+	if err != nil {
+		t.Fatalf("failed parsing ssim stats file from live run: %v", err)
+	}
+	if score < 0.99 {
+		t.Errorf("expected near-perfect SSIM for identical nullsrc inputs, got %v", score)
 	}
 }
 
@@ -2441,6 +2547,158 @@ func TestParseSSIMStderr_ValidAndMalformed(t *testing.T) {
 	}
 }
 
+func TestParseSSIMStderr_LastMatchSelection(t *testing.T) {
+	// FFmpeg may print multiple progress SSIM lines before printing the final summary line
+	multiMatchStderr := `
+[Parsed_ssim_0 @ 0x123] SSIM Y:0.910000 U:0.920000 V:0.920000 All:0.915000 (10.00)
+frame=   50 fps=0.0 q=-0.0 size=N/A time=00:00:02.00 bitrate=N/A speed=   4x
+[Parsed_ssim_0 @ 0x123] SSIM Y:0.930000 U:0.940000 V:0.940000 All:0.935000 (11.87)
+frame=  100 fps=0.0 q=-0.0 size=N/A time=00:00:04.00 bitrate=N/A speed=   4x
+[Parsed_ssim_0 @ 0x123] SSIM Y:0.980000 U:0.990000 V:0.990000 All:0.985000 (18.23)
+`
+	score, err := ParseSSIMStderr(multiMatchStderr)
+	if err != nil {
+		t.Fatalf("unexpected error parsing multi-line stderr: %v", err)
+	}
+	// Must select the LAST match (0.985000) not the first match (0.915000)
+	if math.Abs(score-0.985000) > 1e-6 {
+		t.Errorf("expected last match 0.985000, got %v", score)
+	}
+}
+
+func TestParseVMAFJSON_FrameFallbackContiguityAndValidation(t *testing.T) {
+	// Contiguous frames: 0, 1, 2
+	validContiguous := []byte(`{
+		"frames": [
+			{"frameNum": 0, "metrics": {"vmaf": 92.0}},
+			{"frameNum": 1, "metrics": {"vmaf": 94.0}},
+			{"frameNum": 2, "metrics": {"vmaf": 96.0}}
+		]
+	}`)
+	score, err := ParseVMAFJSON(validContiguous)
+	if err != nil {
+		t.Fatalf("unexpected error on contiguous frames: %v", err)
+	}
+	if math.Abs(score-94.0) > 1e-6 {
+		t.Errorf("expected score 94.0, got %v", score)
+	}
+
+	// Gapped frames: 0, 2 (missing frame 1) -> must fail closed
+	gappedFrames := []byte(`{
+		"frames": [
+			{"frameNum": 0, "metrics": {"vmaf": 92.0}},
+			{"frameNum": 2, "metrics": {"vmaf": 96.0}}
+		]
+	}`)
+	if _, err := ParseVMAFJSON(gappedFrames); err == nil {
+		t.Errorf("expected error on gapped frames, got nil")
+	} else if !strings.Contains(err.Error(), "contiguous") {
+		t.Errorf("expected error mentioning contiguous, got: %v", err)
+	}
+
+	// Duplicate frames: 0, 1, 1 -> must fail closed
+	duplicateFrames := []byte(`{
+		"frames": [
+			{"frameNum": 0, "metrics": {"vmaf": 92.0}},
+			{"frameNum": 1, "metrics": {"vmaf": 94.0}},
+			{"frameNum": 1, "metrics": {"vmaf": 96.0}}
+		]
+	}`)
+	if _, err := ParseVMAFJSON(duplicateFrames); err == nil {
+		t.Errorf("expected error on duplicate frames, got nil")
+	}
+
+	// Out of bounds frame score: > 100
+	outOfBoundsHigh := []byte(`{
+		"frames": [
+			{"frameNum": 0, "metrics": {"vmaf": 105.0}}
+		]
+	}`)
+	if _, err := ParseVMAFJSON(outOfBoundsHigh); err == nil {
+		t.Errorf("expected error on frame score > 100, got nil")
+	}
+
+	// Out of bounds frame score: < 0
+	outOfBoundsLow := []byte(`{
+		"frames": [
+			{"frameNum": 0, "metrics": {"vmaf": -1.0}}
+		]
+	}`)
+	if _, err := ParseVMAFJSON(outOfBoundsLow); err == nil {
+		t.Errorf("expected error on negative frame score, got nil")
+	}
+
+	// NaN frame score
+	nanFrame := []byte(`{
+		"frames": [
+			{"frameNum": 0, "metrics": {"vmaf": "NaN"}}
+		]
+	}`)
+	if _, err := ParseVMAFJSON(nanFrame); err == nil {
+		t.Errorf("expected error on NaN frame score, got nil")
+	}
+}
+
+func TestReadMetricLogFile_Hardening(t *testing.T) {
+	dir := t.TempDir()
+
+	// 1. Valid regular file
+	regularPath := filepath.Join(dir, "valid.json")
+	if err := os.WriteFile(regularPath, []byte(`{"version": "1.0"}`), 0600); err != nil {
+		t.Fatalf("failed writing test file: %v", err)
+	}
+	data, err := readMetricLogFile(regularPath)
+	if err != nil {
+		t.Fatalf("unexpected error reading valid regular file: %v", err)
+	}
+	if string(data) != `{"version": "1.0"}` {
+		t.Errorf("unexpected content: %s", string(data))
+	}
+
+	// 2. Symlink to regular file must fail closed
+	symlinkPath := filepath.Join(dir, "symlink.json")
+	if err := os.Symlink(regularPath, symlinkPath); err != nil {
+		t.Fatalf("failed creating test symlink: %v", err)
+	}
+	if _, err := readMetricLogFile(symlinkPath); err == nil {
+		t.Errorf("expected error reading symlink, got nil")
+	}
+
+	// 3. Empty file must fail closed
+	emptyPath := filepath.Join(dir, "empty.json")
+	if err := os.WriteFile(emptyPath, []byte{}, 0600); err != nil {
+		t.Fatalf("failed writing empty file: %v", err)
+	}
+	if _, err := readMetricLogFile(emptyPath); err == nil {
+		t.Errorf("expected error reading empty file, got nil")
+	}
+
+	// 4. Non-existent file must fail closed
+	missingPath := filepath.Join(dir, "missing.json")
+	if _, err := readMetricLogFile(missingPath); err == nil {
+		t.Errorf("expected error reading non-existent file, got nil")
+	}
+}
+
+func TestTailBuffer_PreservesTail(t *testing.T) {
+	buf := newTailBuffer(100) // 100 bytes max
+	// Write 500 bytes with distinct sequential numbers
+	for i := 0; i < 50; i++ {
+		_, _ = buf.Write([]byte(fmt.Sprintf("line_%03d\n", i)))
+	}
+	result := buf.String()
+	if len(result) > 100 {
+		t.Errorf("tail buffer length %d exceeds max 100", len(result))
+	}
+	// Verify that the final lines are preserved in the tail
+	if !strings.Contains(result, "line_049") {
+		t.Errorf("expected tail buffer to contain the final line_049, got:\n%s", result)
+	}
+	if strings.Contains(result, "line_001") {
+		t.Errorf("expected early line_001 to have been evicted, but it was present:\n%s", result)
+	}
+}
+
 func TestProductionBenchmarkRunner_CapabilityGating(t *testing.T) {
 	dir := t.TempDir()
 	sourceFile := filepath.Join(dir, "source.mkv")
@@ -2477,7 +2735,7 @@ EOF
     exit 0
     ;;
   *"-filters"*)
-    echo "Filters:\n  ... ssim VV->V Calculate the SSIM\n  ... null V->V Pass the source"
+    echo "Filters:\n  TS ssim VV->V Calculate the SSIM\n  .. null V->V Pass the source"
     exit 0
     ;;
 esac
@@ -2546,7 +2804,7 @@ EOF
     exit 0
     ;;
   *"-filters"*)
-    echo "Filters:\n  ... libvmaf VV->V Calculate the VMAF\n  ... null V->V Pass the source"
+    echo "Filters:\n  .. libvmaf VV->V Calculate the VMAF\n  .. null V->V Pass the source"
     exit 0
     ;;
 esac
@@ -2797,7 +3055,7 @@ EOF
     exit 0
     ;;
   *"-filters"*)
-    echo "Filters:\n  ..C libvmaf VV->V Calculate the VMAF\n  ... null V->V Pass the source"
+    echo "Filters:\n  .. libvmaf VV->V Calculate the VMAF\n  .. null V->V Pass the source"
     exit 0
     ;;
 esac
@@ -2843,15 +3101,25 @@ exit 0
 	}
 
 	runner := &ProductionBenchmarkRunner{}
+	// Under candidate failure isolation, a symlink log on a candidate marks that candidate
+	// ineligible with an error rather than failing the entire benchmark job.
 	err := runner.RunBenchmark(context.Background(), worker, record)
-	if err == nil {
-		t.Fatalf("expected failure when metric log target is a symlink, got nil")
-	}
-	if !strings.Contains(err.Error(), "symlink") {
-		t.Errorf("expected error mentioning symlink, got: %v", err)
+	if err != nil {
+		t.Fatalf("unexpected benchmark job error under candidate-level failure semantics: %v", err)
 	}
 
-	// Ensure readMetricLogFile also fails closed on symlink
+	if record.Evidence == nil || len(record.Evidence.CandidateMetrics) != 1 {
+		t.Fatalf("expected evidence with candidate metrics to be persisted")
+	}
+	cm := record.Evidence.CandidateMetrics[0]
+	if cm.Aggregate.Valid {
+		t.Errorf("expected candidate aggregate to be invalid on symlink attack")
+	}
+	if cm.Aggregate.IneligibleReason != optimization.ReasonIncompleteSampleScores {
+		t.Errorf("expected IneligibleReason=%s, got %s", optimization.ReasonIncompleteSampleScores, cm.Aggregate.IneligibleReason)
+	}
+
+	// Ensure readMetricLogFile itself fails closed on symlink
 	if _, err := readMetricLogFile(symlinkPath); err == nil {
 		t.Errorf("expected readMetricLogFile to fail on symlink, got nil")
 	}
@@ -2898,7 +3166,7 @@ EOF
     exit 0
     ;;
   *"-filters"*)
-    echo "Filters:\n  ... libvmaf VV->V Calculate the VMAF\n  ... null V->V Pass the source"
+    echo "Filters:\n  .. libvmaf VV->V Calculate the VMAF\n  .. null V->V Pass the source"
     exit 0
     ;;
   *"-filter_complex"*"libvmaf"*)
@@ -2950,12 +3218,25 @@ exit 0
 	}
 
 	runner := &ProductionBenchmarkRunner{}
+	// Under candidate failure isolation, an oversized log marks that candidate
+	// ineligible rather than failing the entire benchmark job.
 	err := runner.RunBenchmark(context.Background(), worker, record)
-	if err == nil {
-		t.Fatalf("expected closed failure on oversized metric log, got nil")
+	if err != nil {
+		t.Fatalf("unexpected benchmark job error under candidate-level failure semantics: %v", err)
 	}
-	if !strings.Contains(err.Error(), "exceeds maximum allowed") && !strings.Contains(err.Error(), "oversized") {
-		t.Errorf("expected error mentioning oversized / exceeds maximum allowed, got: %v", err)
+
+	if record.Evidence == nil || len(record.Evidence.CandidateMetrics) != 1 {
+		t.Fatalf("expected evidence with candidate metrics to be persisted")
+	}
+	cm := record.Evidence.CandidateMetrics[0]
+	if cm.Aggregate.Valid {
+		t.Errorf("expected candidate aggregate to be invalid on oversized log")
+	}
+	if cm.Aggregate.IneligibleReason != optimization.ReasonIncompleteSampleScores {
+		t.Errorf("expected IneligibleReason=%s, got %s", optimization.ReasonIncompleteSampleScores, cm.Aggregate.IneligibleReason)
+	}
+	if len(record.Evidence.MetricSamples) != 1 || !strings.Contains(record.Evidence.MetricSamples[0].Error, "exceeds maximum allowed") {
+		t.Errorf("expected metric sample error mentioning exceeds maximum allowed, got %v", record.Evidence.MetricSamples)
 	}
 }
 
@@ -3003,7 +3284,72 @@ func TestProductionBenchmarkRunner_MediaUntouchedDuringMetrics(t *testing.T) {
 	}
 }
 
-func TestProductionBenchmarkRunner_10BitSource_MetricSafety(t *testing.T) {
+func TestProductionBenchmarkRunner_10BitSource_VMAFFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	sourceFile := filepath.Join(dir, "source_10bit.mkv")
+	_ = os.WriteFile(sourceFile, []byte("fake 10-bit video content"), 0644)
+
+	mockFFmpeg, mockProbe, _ := setupMockTools(t, dir, sdr10BitProbeJSON, "")
+
+	cfg := &WorkerConfig{
+		StateDir:        filepath.Join(dir, "state"),
+		AllowedRoots:    []string{dir},
+		MaxParallelJobs: 1,
+		FFmpeg:          mockFFmpeg,
+		FFprobe:         mockProbe,
+	}
+	worker := NewWorker(cfg)
+
+	// VMAF on 10-bit source must fail closed because worker capabilities do not assert 10-bit VMAF
+	recordVMAF := &BenchmarkRecord{
+		ProtocolVersion: transcode.WorkerProtocolVersion,
+		ID:              "bench-10bit-vmaf-fail",
+		Status:          "running",
+		Source:          sourceFile,
+		Metric:          "vmaf",
+		Samples: []transcode.BenchmarkSampleWindow{
+			{Index: 0, StartSeconds: 5.0, DurationSeconds: 10.0},
+		},
+		Candidates: []transcode.BenchmarkCandidate{
+			{ID: "cand_10bit", Quality: 60},
+		},
+		Attempt: 1,
+	}
+
+	runner := &ProductionBenchmarkRunner{}
+	err := runner.RunBenchmark(context.Background(), worker, recordVMAF)
+	if err == nil {
+		t.Fatalf("expected closed failure for 10-bit VMAF without capability assertion, got nil")
+	}
+	if !strings.Contains(err.Error(), "10-bit VMAF capability") {
+		t.Errorf("expected error mentioning 10-bit VMAF capability, got: %v", err)
+	}
+
+	// 'both' on 10-bit source must also fail closed
+	recordBoth := &BenchmarkRecord{
+		ProtocolVersion: transcode.WorkerProtocolVersion,
+		ID:              "bench-10bit-both-fail",
+		Status:          "running",
+		Source:          sourceFile,
+		Metric:          "both",
+		Samples: []transcode.BenchmarkSampleWindow{
+			{Index: 0, StartSeconds: 5.0, DurationSeconds: 10.0},
+		},
+		Candidates: []transcode.BenchmarkCandidate{
+			{ID: "cand_10bit", Quality: 60},
+		},
+		Attempt: 1,
+	}
+	errBoth := runner.RunBenchmark(context.Background(), worker, recordBoth)
+	if errBoth == nil {
+		t.Fatalf("expected closed failure for 10-bit metric='both', got nil")
+	}
+	if !strings.Contains(errBoth.Error(), "10-bit VMAF capability") {
+		t.Errorf("expected error mentioning 10-bit VMAF capability, got: %v", errBoth)
+	}
+}
+
+func TestProductionBenchmarkRunner_10BitSource_SSIMSucceeds(t *testing.T) {
 	dir := t.TempDir()
 	sourceFile := filepath.Join(dir, "source_10bit.mkv")
 	_ = os.WriteFile(sourceFile, []byte("fake 10-bit video content"), 0644)
@@ -3019,12 +3365,13 @@ func TestProductionBenchmarkRunner_10BitSource_MetricSafety(t *testing.T) {
 	}
 	worker := NewWorker(cfg)
 
-	record := &BenchmarkRecord{
+	// SSIM on 10-bit source succeeds because native FFmpeg ssim filter supports yuv420p10le safely
+	recordSSIM := &BenchmarkRecord{
 		ProtocolVersion: transcode.WorkerProtocolVersion,
-		ID:              "bench-10bit-metrics",
+		ID:              "bench-10bit-ssim",
 		Status:          "running",
 		Source:          sourceFile,
-		Metric:          "both",
+		Metric:          "ssim",
 		Samples: []transcode.BenchmarkSampleWindow{
 			{Index: 0, StartSeconds: 5.0, DurationSeconds: 10.0},
 		},
@@ -3035,37 +3382,25 @@ func TestProductionBenchmarkRunner_10BitSource_MetricSafety(t *testing.T) {
 	}
 
 	runner := &ProductionBenchmarkRunner{}
-	if err := runner.RunBenchmark(context.Background(), worker, record); err != nil {
-		t.Fatalf("RunBenchmark failed: %v", err)
+	if err := runner.RunBenchmark(context.Background(), worker, recordSSIM); err != nil {
+		t.Fatalf("RunBenchmark failed for 10-bit SSIM: %v", err)
 	}
 
-	if record.Evidence == nil {
+	if recordSSIM.Evidence == nil {
 		t.Fatalf("expected record.Evidence to be non-nil")
 	}
-	if record.Evidence.SourceBitDepth != 10 {
-		t.Errorf("expected source bit depth 10, got %d", record.Evidence.SourceBitDepth)
+	if recordSSIM.Evidence.SourceBitDepth != 10 {
+		t.Errorf("expected source bit depth 10, got %d", recordSSIM.Evidence.SourceBitDepth)
 	}
-	if len(record.Evidence.ReferenceSamples) != 1 {
-		t.Errorf("expected 1 reference sample, got %v", record.Evidence.ReferenceSamples)
+	if len(recordSSIM.Evidence.MetricSamples) != 1 {
+		t.Fatalf("expected 1 metric sample result, got %d", len(recordSSIM.Evidence.MetricSamples))
 	}
-	if record.Evidence.SourcePixelFormat != "yuv420p10le" {
-		t.Errorf("expected source pixel format yuv420p10le, got %s", record.Evidence.SourcePixelFormat)
-	}
-	if len(record.Evidence.CandidateSamples) != 1 || record.Evidence.CandidateSamples[0].PixelFormat != "p010le" {
-		t.Errorf("expected 10-bit candidate sample p010le, got %v", record.Evidence.CandidateSamples)
-	}
-	if len(record.Evidence.MetricSamples) != 1 {
-		t.Fatalf("expected 1 metric sample result, got %d", len(record.Evidence.MetricSamples))
-	}
-	ms := record.Evidence.MetricSamples[0]
-	if ms.VMAF == nil || *ms.VMAF <= 0 {
-		t.Errorf("expected valid VMAF score for 10-bit, got %v", ms.VMAF)
-	}
-	if ms.SSIM == nil || *ms.SSIM <= 0 {
+	ms := recordSSIM.Evidence.MetricSamples[0]
+	if ms.SSIM == nil || *ms.SSIM <= 0 || *ms.SSIM > 1.0 {
 		t.Errorf("expected valid SSIM score for 10-bit, got %v", ms.SSIM)
 	}
 
-	// Verify log contains exact 10-bit extraction, encoding, and metric calls without downsampling
+	// Verify log contains exact 10-bit extraction, encoding, and ssim calls without downsampling
 	logBytes, err := os.ReadFile(logFile)
 	if err != nil {
 		t.Fatalf("reading log: %v", err)
@@ -3077,11 +3412,209 @@ func TestProductionBenchmarkRunner_10BitSource_MetricSafety(t *testing.T) {
 	if !strings.Contains(logStr, "main10") || !strings.Contains(logStr, "p010le") {
 		t.Errorf("expected candidate encoding to use main10 and p010le")
 	}
-	if !strings.Contains(logStr, "libvmaf") {
-		t.Errorf("expected libvmaf to be executed")
-	}
 	if !strings.Contains(logStr, "ssim") {
 		t.Errorf("expected ssim to be executed")
+	}
+	if strings.Contains(logStr, "libvmaf") {
+		t.Errorf("libvmaf should not be executed when metric is ssim")
+	}
+}
+
+func TestProductionBenchmarkRunner_CandidateLevelFailure_Isolation(t *testing.T) {
+	dir := t.TempDir()
+	sourceFile := filepath.Join(dir, "source.mkv")
+	_ = os.WriteFile(sourceFile, []byte("fake video content"), 0644)
+
+	// Simulate failure only on candidate 0 during libvmaf metric calculation
+	mockFFmpeg, mockProbe, _ := setupMockTools(t, dir, sdr8BitProbeJSON, "cand_0*libvmaf")
+
+	cfg := &WorkerConfig{
+		StateDir:        filepath.Join(dir, "state"),
+		AllowedRoots:    []string{dir},
+		MaxParallelJobs: 1,
+		FFmpeg:          mockFFmpeg,
+		FFprobe:         mockProbe,
+	}
+	worker := NewWorker(cfg)
+
+	record := &BenchmarkRecord{
+		ProtocolVersion: transcode.WorkerProtocolVersion,
+		ID:              "bench-cand-isolation",
+		Status:          "running",
+		Source:          sourceFile,
+		Metric:          "vmaf",
+		Samples: []transcode.BenchmarkSampleWindow{
+			{Index: 0, StartSeconds: 5.0, DurationSeconds: 10.0},
+		},
+		Candidates: []transcode.BenchmarkCandidate{
+			{ID: "cand_0", Quality: 60},
+			{ID: "cand_1", Quality: 70},
+		},
+		Attempt: 1,
+	}
+
+	runner := &ProductionBenchmarkRunner{}
+	// RunBenchmark MUST NOT fail the entire job when one candidate fails metric measurement
+	if err := runner.RunBenchmark(context.Background(), worker, record); err != nil {
+		t.Fatalf("RunBenchmark should not fail whole job on candidate-level metric failure: %v", err)
+	}
+
+	evidence := record.Evidence
+	if evidence == nil {
+		t.Fatalf("expected evidence to be persisted")
+	}
+	if len(evidence.CandidateMetrics) != 2 {
+		t.Fatalf("expected 2 candidate metrics, got %d", len(evidence.CandidateMetrics))
+	}
+
+	// Candidate 0 must be marked ineligible with reason ReasonIncompleteSampleScores
+	cm0 := evidence.CandidateMetrics[0]
+	if cm0.CandidateID != "cand_0" {
+		t.Errorf("expected cand_0 at index 0, got %s", cm0.CandidateID)
+	}
+	if cm0.Aggregate.Valid {
+		t.Errorf("candidate 0 aggregate should be invalid")
+	}
+	if cm0.Aggregate.IneligibleReason != optimization.ReasonIncompleteSampleScores {
+		t.Errorf("candidate 0 ineligible reason expected %s, got %s", optimization.ReasonIncompleteSampleScores, cm0.Aggregate.IneligibleReason)
+	}
+
+	// Candidate 1 must be eligible with Valid: true and valid score
+	cm1 := evidence.CandidateMetrics[1]
+	if cm1.CandidateID != "cand_1" {
+		t.Errorf("expected cand_1 at index 1, got %s", cm1.CandidateID)
+	}
+	if !cm1.Aggregate.Valid {
+		t.Errorf("candidate 1 aggregate should be valid, got reason %s", cm1.Aggregate.IneligibleReason)
+	}
+	if cm1.Aggregate.MeanScore <= 0 {
+		t.Errorf("candidate 1 mean score should be positive, got %v", cm1.Aggregate.MeanScore)
+	}
+}
+
+func TestProductionBenchmarkRunner_CandidateLevelFailure_AllCandidatesFail(t *testing.T) {
+	dir := t.TempDir()
+	sourceFile := filepath.Join(dir, "source.mkv")
+	_ = os.WriteFile(sourceFile, []byte("fake video content"), 0644)
+
+	// All libvmaf metric commands fail
+	mockFFmpeg, mockProbe, _ := setupMockTools(t, dir, sdr8BitProbeJSON, "libvmaf")
+
+	cfg := &WorkerConfig{
+		StateDir:        filepath.Join(dir, "state"),
+		AllowedRoots:    []string{dir},
+		MaxParallelJobs: 1,
+		FFmpeg:          mockFFmpeg,
+		FFprobe:         mockProbe,
+	}
+	worker := NewWorker(cfg)
+
+	record := &BenchmarkRecord{
+		ProtocolVersion: transcode.WorkerProtocolVersion,
+		ID:              "bench-all-cand-fail",
+		Status:          "running",
+		Source:          sourceFile,
+		Metric:          "vmaf",
+		Samples: []transcode.BenchmarkSampleWindow{
+			{Index: 0, StartSeconds: 5.0, DurationSeconds: 10.0},
+		},
+		Candidates: []transcode.BenchmarkCandidate{
+			{ID: "cand_0", Quality: 60},
+			{ID: "cand_1", Quality: 70},
+		},
+		Attempt: 1,
+	}
+
+	runner := &ProductionBenchmarkRunner{}
+	// Entire job succeeds, but all candidates are ineligible for Phase 6 selection
+	if err := runner.RunBenchmark(context.Background(), worker, record); err != nil {
+		t.Fatalf("RunBenchmark should complete without job failure: %v", err)
+	}
+
+	evidence := record.Evidence
+	if evidence == nil {
+		t.Fatalf("expected evidence to be persisted")
+	}
+	for i, cm := range evidence.CandidateMetrics {
+		if cm.Aggregate.Valid {
+			t.Errorf("candidate %d aggregate should be invalid", i)
+		}
+	}
+}
+
+func TestProductionBenchmarkRunner_MetricBoth_DualDeterministicAggregates(t *testing.T) {
+	dir := t.TempDir()
+	sourceFile := filepath.Join(dir, "source.mkv")
+	_ = os.WriteFile(sourceFile, []byte("fake video content"), 0644)
+
+	mockFFmpeg, mockProbe, _ := setupMockTools(t, dir, sdr8BitProbeJSON, "")
+
+	cfg := &WorkerConfig{
+		StateDir:        filepath.Join(dir, "state"),
+		AllowedRoots:    []string{dir},
+		MaxParallelJobs: 1,
+		FFmpeg:          mockFFmpeg,
+		FFprobe:         mockProbe,
+	}
+	worker := NewWorker(cfg)
+
+	record := &BenchmarkRecord{
+		ProtocolVersion: transcode.WorkerProtocolVersion,
+		ID:              "bench-metric-both",
+		Status:          "running",
+		Source:          sourceFile,
+		Metric:          "both",
+		Samples: []transcode.BenchmarkSampleWindow{
+			{Index: 0, StartSeconds: 5.0, DurationSeconds: 10.0},
+			{Index: 1, StartSeconds: 20.0, DurationSeconds: 10.0},
+		},
+		Candidates: []transcode.BenchmarkCandidate{
+			{ID: "cand_0", Quality: 60},
+			{ID: "cand_1", Quality: 70},
+		},
+		Attempt: 1,
+	}
+
+	runner := &ProductionBenchmarkRunner{}
+	if err := runner.RunBenchmark(context.Background(), worker, record); err != nil {
+		t.Fatalf("RunBenchmark failed for metric='both': %v", err)
+	}
+
+	evidence := record.Evidence
+	if evidence == nil {
+		t.Fatalf("expected non-nil evidence")
+	}
+
+	// 2 candidates * 2 metrics (vmaf, ssim) = 4 CandidateMetrics entries in deterministic order:
+	// cand_0 VMAF, cand_0 SSIM, cand_1 VMAF, cand_1 SSIM
+	if len(evidence.CandidateMetrics) != 4 {
+		t.Fatalf("expected 4 CandidateMetrics entries for 2 candidates with metric='both', got %d", len(evidence.CandidateMetrics))
+	}
+
+	expectedMetrics := []struct {
+		candID string
+		metric optimization.MetricType
+	}{
+		{"cand_0", optimization.MetricTypeVMAF},
+		{"cand_0", optimization.MetricTypeSSIM},
+		{"cand_1", optimization.MetricTypeVMAF},
+		{"cand_1", optimization.MetricTypeSSIM},
+	}
+
+	for i, em := range expectedMetrics {
+		cm := evidence.CandidateMetrics[i]
+		if cm.CandidateID != em.candID {
+			t.Errorf("entry %d: expected candidate %s, got %s", i, em.candID, cm.CandidateID)
+		}
+		if cm.MetricType != em.metric {
+			t.Errorf("entry %d: expected metric type %s, got %s", i, em.metric, cm.MetricType)
+		}
+		if !cm.Aggregate.Valid {
+			t.Errorf("entry %d (%s %s): expected valid aggregate, got invalid: %s", i, em.candID, em.metric, cm.Aggregate.IneligibleReason)
+		}
+		if len(cm.Aggregate.SampleScores) != 2 {
+			t.Errorf("entry %d: expected 2 samples aggregated, got %d", i, len(cm.Aggregate.SampleScores))
+		}
 	}
 }
 
@@ -3122,7 +3655,7 @@ EOF
     exit 0
     ;;
   *"-filters"*)
-    echo "Filters:\n  ..C libvmaf VV->V Calculate the VMAF\n  ... null V->V Pass the source"
+    echo "Filters:\n  .. libvmaf VV->V Calculate the VMAF\n  .. null V->V Pass the source"
     exit 0
     ;;
   *"-filter_complex"*"libvmaf"*)

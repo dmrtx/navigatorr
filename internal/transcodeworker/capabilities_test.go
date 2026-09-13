@@ -124,8 +124,42 @@ func TestParseAvailableEncoders_PartialAbsence(t *testing.T) {
 	}
 }
 
-func TestParseAvailableFilters_PartialAbsence(t *testing.T) {
-	rawFilters := `Filters:
+func TestParseAvailableFilters_ModernTwoCharAndLegacyThreeChar(t *testing.T) {
+	// 1. Realistic modern FFmpeg 9.0+ / Apple clang fixture with 2-character flag columns
+	modernRaw := `Filters:
+  T.. = Timeline support
+  .S. = Slice threading
+  ..C = Command support
+  ---
+ .. libvmaf           VV->V      Calculate the VMAF between two video streams.
+ TS ssim              VV->V      Calculate the SSIM between two video streams.
+ .S scale             V->V       Scale the input video size and/or convert the image format.
+ .. format            V->V       Convert the input video to one of the specified pixel formats.
+ .. null              N->N       Pass the source unchanged to the output.
+ .. fps               V->V       Force constant framerate.
+`
+	modernFilters := ParseAvailableFilters(modernRaw)
+	if !modernFilters["libvmaf"] {
+		t.Errorf("modern fixture: expected libvmaf=true for 2-char '..' flag")
+	}
+	if !modernFilters["ssim"] {
+		t.Errorf("modern fixture: expected ssim=true for 2-char 'TS' flag")
+	}
+	if !modernFilters["scale"] {
+		t.Errorf("modern fixture: expected scale=true for 2-char '.S' flag")
+	}
+	if !modernFilters["format"] {
+		t.Errorf("modern fixture: expected format=true for 2-char '..' flag")
+	}
+	if !modernFilters["null"] {
+		t.Errorf("modern fixture: expected null=true for 2-char '..' flag")
+	}
+	if !modernFilters["fps"] {
+		t.Errorf("modern fixture: expected fps=true for 2-char '..' flag")
+	}
+
+	// 2. Legacy FFmpeg fixture with 3-character flag columns
+	legacyRaw := `Filters:
   ... = Source flag
   .T. = Timeline support
   .S. = Slice threading
@@ -133,21 +167,33 @@ func TestParseAvailableFilters_PartialAbsence(t *testing.T) {
   ---
  ... scale             V->V       Scale the input video size and/or convert the image format.
  ... format            V->V       Convert the input video to one of the specified pixel formats.
- ... ssim              VV->V      Calculate the SSIM between two video streams.
+ TSC ssim              VV->V      Calculate the SSIM between two video streams.
+ ..C libvmaf           VV->V      Calculate the VMAF between two video streams.
  ... null              N->N       Pass the source unchanged to the output.
 `
-	f := ParseAvailableFilters(rawFilters)
-	if !f["scale"] {
-		t.Errorf("expected scale=true")
+	legacyFilters := ParseAvailableFilters(legacyRaw)
+	if !legacyFilters["scale"] {
+		t.Errorf("legacy fixture: expected scale=true for 3-char '...' flag")
 	}
-	if !f["format"] {
-		t.Errorf("expected format=true")
+	if !legacyFilters["ssim"] {
+		t.Errorf("legacy fixture: expected ssim=true for 3-char 'TSC' flag")
 	}
-	if !f["ssim"] {
-		t.Errorf("expected ssim=true")
+	if !legacyFilters["libvmaf"] {
+		t.Errorf("legacy fixture: expected libvmaf=true for 3-char '..C' flag")
 	}
-	if f["libvmaf"] {
-		t.Errorf("expected libvmaf=false when missing from build (partial absence represented)")
+
+	// 3. Partial absence representation: missing libvmaf
+	missingRaw := `Filters:
+  ---
+ TS ssim              VV->V      Calculate the SSIM between two video streams.
+ .S scale             V->V       Scale the input video size.
+`
+	missingFilters := ParseAvailableFilters(missingRaw)
+	if !missingFilters["ssim"] {
+		t.Errorf("missing fixture: expected ssim=true")
+	}
+	if missingFilters["libvmaf"] {
+		t.Errorf("missing fixture: expected libvmaf=false when missing from build")
 	}
 }
 
