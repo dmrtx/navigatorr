@@ -3,12 +3,15 @@ package transcodeworker
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/jakenesler/navigatorr/mediainspect"
@@ -59,12 +62,13 @@ func (r *ProductionBenchmarkRunner) SetMetricsHook(hook func(ctx context.Context
 }
 
 // RunBenchmark executes the Phase 4B sample extraction and candidate encoding pipeline:
-// 1. Inspects source media with ffprobe model, enforcing single video stream, SDR-only, and 8/10-bit support.
-// 2. Gating check of worker capabilities and candidate compatibility before encoding.
-// 3. Sequential extraction of lossless reference samples for each sample window.
-// 4. Sequential encoding of VideoToolbox candidate samples from reference samples.
-// 5. Invokes optional metrics hook (Phase 5) before scratch cleanup.
-// 6. Persists complete physical evidence into the record.
+// 1. Validates source stability (size and modtime snapshot).
+// 2. Inspects source media with ffprobe model, enforcing single video stream, SDR-only, 4:2:0 chroma, and 8/10-bit support.
+// 3. Probes worker capabilities and validates all candidate configurations upfront.
+// 4. Sequentially extracts lossless reference samples for each sample window.
+// 5. Sequentially encodes VideoToolbox candidate samples from reference samples.
+// 6. Invokes optional metrics hook (Phase 5) before scratch cleanup.
+// 7. Persists physical evidence and preserves partial work on failure.
 func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker, record *BenchmarkRecord) error {
 	if record == nil {
 		return errors.New("benchmark record cannot be nil (fail closed)")
@@ -73,6 +77,17 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		return errors.New("worker instance cannot be nil (fail closed)")
 	}
 
+	// 1. Source stability snapshot before inspection
+	sourceStat, err := os.Stat(record.Source)
+	if err != nil {
+		return fmt.Errorf("stat source media %s: %w", record.Source, err)
+	}
+	if !sourceStat.Mode().IsRegular() {
+		return fmt.Errorf("source media %s is not a regular file (fail closed)", record.Source)
+	}
+	sourceInitialSize := sourceStat.Size()
+	sourceInitialModTime := sourceStat.ModTime()
+
 	cleanStateDir := filepath.Clean(w.cfg.StateDir)
 	jobDir := filepath.Join(cleanStateDir, record.ID)
 	samplesDir := filepath.Join(jobDir, "samples")
@@ -80,11 +95,33 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 	if err := verifyChildPath(jobDir, samplesDir); err != nil {
 		return fmt.Errorf("invalid samples directory: %w", err)
 	}
+
+	// Reject immediately if samplesDir itself is pre-existing as a symlink
+	if fi, err := os.Lstat(samplesDir); err == nil {
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("samples directory %s is a symlink (fail closed)", samplesDir)
+		}
+		if !fi.IsDir() {
+			return fmt.Errorf("samples path %s is not a directory (fail closed)", samplesDir)
+		}
+	}
+
 	if err := os.MkdirAll(samplesDir, 0755); err != nil {
 		return fmt.Errorf("creating samples directory: %w", err)
 	}
 
-	// 1. Source inspection using ffprobe model
+	// Post-mkdir check on samplesDir
+	if fi, err := os.Lstat(samplesDir); err != nil {
+		return fmt.Errorf("stat samples directory: %w", err)
+	} else if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("samples directory %s is a symlink (fail closed)", samplesDir)
+	}
+
+	// 2. Source inspection using ffprobe model
+	if err := verifySourceUnchanged(record.Source, sourceInitialSize, sourceInitialModTime); err != nil {
+		return err
+	}
+
 	rep, err := mediainspect.InspectDetailed(ctx, w.ffprobePath, record.Source)
 	if err != nil {
 		return fmt.Errorf("inspecting source media %s: %w", record.Source, err)
@@ -100,7 +137,7 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 	}
 	sourceVideo := rep.Video[0]
 
-	// HDR / Dolby Vision rejection: automatic benchmark optimization is SDR-only
+	// HDR / Dolby Vision rejection: automatic benchmark optimization is strictly SDR-only
 	if (rep.HDR != nil && rep.HDR.Present) || isHDRStreamDetailed(sourceVideo) {
 		return errors.New("HDR/Dolby Vision source not eligible for automatic benchmark optimization (fail closed)")
 	}
@@ -111,7 +148,13 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		return fmt.Errorf("unsupported source bit depth %d: only 8-bit and 10-bit sources are supported for benchmark", sourceBitDepth)
 	}
 
-	// 2. Capability probing and candidate validation upfront
+	// Chroma subsampling gating: VideoToolbox candidates support 4:2:0 (yuv420p / nv12 / p010le / yuv420p10le).
+	// Reject 4:4:4 or 4:2:2 source formats to prevent silent downsampling and invalid VMAF comparisons.
+	if !isSupportedSourceChroma(sourceVideo.PixelFormat, sourceBitDepth) {
+		return fmt.Errorf("unsupported source pixel format %q (%d-bit): automatic benchmark requires 4:2:0 chroma subsampling (e.g. yuv420p, nv12, yuv420p10le, p010le)", sourceVideo.PixelFormat, sourceBitDepth)
+	}
+
+	// 3. Capability probing and candidate validation upfront
 	caps, err := ProbeVideoToolboxCapabilities(ctx, w.ffmpegPath)
 	if err != nil {
 		return fmt.Errorf("probing worker video capabilities: %w", err)
@@ -121,15 +164,17 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 	}
 
 	type validatedCandidate struct {
+		index       int
 		candidate   transcode.BenchmarkCandidate
 		plan        *transcode.Plan
 		profile     string
 		pixelFormat string
 		bitDepth    int
+		fileKey     string
 	}
 
 	validatedCandidates := make([]validatedCandidate, 0, len(record.Candidates))
-	for _, c := range record.Candidates {
+	for candIdx, c := range record.Candidates {
 		prof, pix, bd, err := resolveCandidateBitDepth(&c, sourceBitDepth)
 		if err != nil {
 			return err
@@ -147,16 +192,19 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		if _, err := BuildVideoEncoderArgs(plan); err != nil {
 			return fmt.Errorf("candidate %q encoder args validation failed: %w", c.ID, err)
 		}
+		fileKey := candidateFileKey(candIdx, c.ID, c.Quality)
 		validatedCandidates = append(validatedCandidates, validatedCandidate{
+			index:       candIdx,
 			candidate:   c,
 			plan:        plan,
 			profile:     prof,
 			pixelFormat: pix,
 			bitDepth:    bd,
+			fileKey:     fileKey,
 		})
 	}
 
-	// Initialize evidence
+	// Initialize evidence and attach immediately so partial progress is preserved on failure
 	resStr := fmt.Sprintf("%dx%d", sourceVideo.Width, sourceVideo.Height)
 	evidence := &BenchmarkExecutionEvidence{
 		SourceVideoIndex:  sourceVideo.Index,
@@ -166,11 +214,16 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		ReferenceSamples:  make([]BenchmarkSampleRef, 0, len(record.Samples)),
 		CandidateSamples:  make([]BenchmarkCandidateSampleResult, 0, len(record.Candidates)*len(record.Samples)),
 	}
+	record.Evidence = evidence
 
-	// 3. Extract reference samples sequentially
+	// 4. Extract reference samples sequentially
 	for _, window := range record.Samples {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+
+		if err := verifySourceUnchanged(record.Source, sourceInitialSize, sourceInitialModTime); err != nil {
+			return err
 		}
 
 		refFileName := fmt.Sprintf("ref_sample_%d.mkv", window.Index)
@@ -178,12 +231,24 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		if err := verifyChildPath(samplesDir, refPath); err != nil {
 			return fmt.Errorf("invalid reference sample path: %w", err)
 		}
+		if err := prepareOutputFile(refPath); err != nil {
+			return err
+		}
 
 		refArgs := BuildReferenceExtractionArgs(record.Source, refPath, sourceVideo.Index, window.StartSeconds, window.DurationSeconds)
 
 		cmd := exec.CommandContext(ctx, w.ffmpegPath, refArgs...)
-		var stderrBuf bytes.Buffer
-		cmd.Stderr = &stderrBuf
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error {
+			if cmd.Process != nil && cmd.Process.Pid > 0 {
+				return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			}
+			return nil
+		}
+		cmd.WaitDelay = 2 * time.Second
+
+		stderrBuf := newBoundedBuffer(16 * 1024)
+		cmd.Stderr = stderrBuf
 		cmd.Stdout = nil
 
 		if err := cmd.Run(); err != nil {
@@ -191,7 +256,11 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 				return ctx.Err()
 			}
 			return fmt.Errorf("extracting reference sample %d failed: %w: %s",
-				window.Index, err, boundedStderr(&stderrBuf, 1024))
+				window.Index, err, boundedStderr(stderrBuf, 1024))
+		}
+
+		if err := verifySourceUnchanged(record.Source, sourceInitialSize, sourceInitialModTime); err != nil {
+			return err
 		}
 
 		fi, err := os.Stat(refPath)
@@ -208,11 +277,15 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		})
 	}
 
-	// 4. Encode candidate samples sequentially
+	// 5. Encode candidate samples sequentially
 	for _, vc := range validatedCandidates {
 		for _, window := range record.Samples {
 			if ctx.Err() != nil {
 				return ctx.Err()
+			}
+
+			if err := verifySourceUnchanged(record.Source, sourceInitialSize, sourceInitialModTime); err != nil {
+				return err
 			}
 
 			refFileName := fmt.Sprintf("ref_sample_%d.mkv", window.Index)
@@ -221,10 +294,13 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 				return fmt.Errorf("reference sample %d not found at %s: %w", window.Index, refPath, err)
 			}
 
-			candFileName := fmt.Sprintf("cand_%s_sample_%d.mkv", sanitizeCandidateID(vc.candidate.ID), window.Index)
+			candFileName := fmt.Sprintf("%s_sample_%d.mkv", vc.fileKey, window.Index)
 			candPath := filepath.Join(samplesDir, candFileName)
 			if err := verifyChildPath(samplesDir, candPath); err != nil {
 				return fmt.Errorf("invalid candidate sample path: %w", err)
+			}
+			if err := prepareOutputFile(candPath); err != nil {
+				return err
 			}
 
 			candArgs, err := BuildCandidateEncodeArgs(refPath, candPath, vc.plan)
@@ -234,22 +310,51 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 
 			start := time.Now()
 			cmd := exec.CommandContext(ctx, w.ffmpegPath, candArgs...)
-			var stderrBuf bytes.Buffer
-			cmd.Stderr = &stderrBuf
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			cmd.Cancel = func() error {
+				if cmd.Process != nil && cmd.Process.Pid > 0 {
+					return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				}
+				return nil
+			}
+			cmd.WaitDelay = 2 * time.Second
+
+			stderrBuf := newBoundedBuffer(16 * 1024)
+			cmd.Stderr = stderrBuf
 			cmd.Stdout = nil
 
 			if err := cmd.Run(); err != nil {
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
-				return fmt.Errorf("encoding candidate %q for sample %d failed: %w: %s",
-					vc.candidate.ID, window.Index, err, boundedStderr(&stderrBuf, 1024))
+				errStr := fmt.Sprintf("encoding candidate %q for sample %d failed: %v: %s",
+					vc.candidate.ID, window.Index, err, boundedStderr(stderrBuf, 1024))
+				evidence.CandidateSamples = append(evidence.CandidateSamples, BenchmarkCandidateSampleResult{
+					CandidateID:  vc.candidate.ID,
+					SampleIndex:  window.Index,
+					File:         filepath.Base(candPath),
+					Quality:      vc.candidate.Quality,
+					VideoProfile: vc.profile,
+					PixelFormat:  vc.pixelFormat,
+					Error:        errStr,
+				})
+				return errors.New(errStr)
 			}
 			elapsed := time.Since(start).Seconds()
 
 			fi, err := os.Stat(candPath)
 			if err != nil || fi.Size() == 0 {
-				return fmt.Errorf("candidate %q for sample %d produced empty or missing file at %s", vc.candidate.ID, window.Index, candPath)
+				errStr := fmt.Sprintf("candidate %q for sample %d produced empty or missing file at %s", vc.candidate.ID, window.Index, candPath)
+				evidence.CandidateSamples = append(evidence.CandidateSamples, BenchmarkCandidateSampleResult{
+					CandidateID:  vc.candidate.ID,
+					SampleIndex:  window.Index,
+					File:         filepath.Base(candPath),
+					Quality:      vc.candidate.Quality,
+					VideoProfile: vc.profile,
+					PixelFormat:  vc.pixelFormat,
+					Error:        errStr,
+				})
+				return errors.New(errStr)
 			}
 
 			evidence.CandidateSamples = append(evidence.CandidateSamples, BenchmarkCandidateSampleResult{
@@ -265,25 +370,38 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		}
 	}
 
-	// 5. Optional Phase 5 metrics hook before cleanup
+	// 6. Optional Phase 5 metrics hook before scratch cleanup
 	if r.metricsHook != nil {
 		if err := r.metricsHook(ctx, w, record, evidence); err != nil {
 			return fmt.Errorf("metrics calculation failed: %w", err)
 		}
 	}
 
-	record.Evidence = evidence
+	// Final verification that source was never mutated during the run
+	if err := verifySourceUnchanged(record.Source, sourceInitialSize, sourceInitialModTime); err != nil {
+		return err
+	}
+
 	return nil
 }
 
 // BuildReferenceExtractionArgs constructs the exact, safe FFmpeg argument slice
 // for extracting a frame-accurate, timestamp-normalized, lossless reference sample.
-// - `-accurate_seek` with `-ss` before `-i` ensures exact seeking up to requested timestamp.
-// - `-t` limits reading to the exact sample duration.
-// - `-avoid_negative_ts make_zero` resets timestamps so the sample starts cleanly at zero.
-// - `-map 0:<videoIndex>` explicitly maps only the primary video stream.
-// - `-c:v ffv1` encodes losslessly, preserving exact pixel format, bit depth, and frames.
-// - `-an -sn -dn` explicitly strips audio, subtitles, and data streams.
+//
+// Frame alignment & windowing rationale:
+// 1. Fast & frame-accurate seeking: Placing `-accurate_seek -ss <startSec>` before `-i`
+//    enables demuxer keyframe seeking immediately before the target timestamp, followed
+//    by accurate frame-by-frame decoding and discarding up to the requested point. This avoids
+//    decoding the entire media file from time 0 while guaranteeing bit-identical frame boundaries.
+// 2. Exact sample window: `-t <durationSec>` extracts precisely the requested duration window.
+// 3. PTS normalization: `-avoid_negative_ts make_zero` resets stream and container timestamps
+//    so that the extracted sample starts cleanly at PTS 0.
+// 4. Lossless master: `-c:v ffv1` encodes losslessly, preserving raw decoded pixel format,
+//    bit depth, and frame cadence with zero generational loss.
+// 5. Clean elementary stream: `-an -sn -dn` strips audio, subtitles, and data streams.
+// 6. Deterministic candidate alignment: Candidate samples are subsequently encoded from this
+//    FFV1 reference from frame 0 to end without seeking or trimming, ensuring exact 1:1
+//    frame correspondence for downstream VMAF/SSIM metric evaluation.
 func BuildReferenceExtractionArgs(sourcePath, refPath string, videoIndex int, startSec, durationSec float64) []string {
 	return []string{
 		"-y",
@@ -304,6 +422,8 @@ func BuildReferenceExtractionArgs(sourcePath, refPath string, videoIndex int, st
 
 // BuildCandidateEncodeArgs constructs the exact, safe FFmpeg argument slice
 // for encoding a candidate sample from the extracted reference sample using hevc_videotoolbox.
+// Because the reference sample is already frame-accurate and timestamp-normalized,
+// candidate encoding starts from frame 0 to end, guaranteeing exact 1:1 frame alignment.
 func BuildCandidateEncodeArgs(refPath, candPath string, plan *transcode.Plan) ([]string, error) {
 	if plan == nil {
 		return nil, errors.New("transcode plan cannot be nil (fail closed)")
@@ -321,6 +441,74 @@ func BuildCandidateEncodeArgs(refPath, candPath string, plan *transcode.Plan) ([
 	args = append(args, videoArgs...)
 	args = append(args, "-an", "-sn", "-dn", candPath)
 	return args, nil
+}
+
+// prepareOutputFile verifies that the target path does not pre-exist as a symlink.
+// If a regular file pre-exists at the target path, it is removed explicitly before FFmpeg runs
+// to prevent FFmpeg's -y flag from following pre-existing symlinks or writing into existing inodes.
+func prepareOutputFile(targetPath string) error {
+	fi, err := os.Lstat(targetPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("checking target output %s: %w", targetPath, err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("target output %s is a symlink (fail closed)", targetPath)
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("target output %s is not a regular file (fail closed)", targetPath)
+	}
+	if err := os.Remove(targetPath); err != nil {
+		return fmt.Errorf("removing existing target file %s: %w", targetPath, err)
+	}
+	return nil
+}
+
+// verifySourceUnchanged checks that the source file size and modification time have not changed.
+func verifySourceUnchanged(sourcePath string, expectedSize int64, expectedModTime time.Time) error {
+	fi, err := os.Stat(sourcePath)
+	if err != nil {
+		return fmt.Errorf("re-stating source file %s failed: %w (fail closed)", sourcePath, err)
+	}
+	if fi.Size() != expectedSize || !fi.ModTime().Equal(expectedModTime) {
+		return fmt.Errorf("source file %s was concurrently modified (size %d->%d, mtime %v->%v): failing closed",
+			sourcePath, expectedSize, fi.Size(), expectedModTime, fi.ModTime())
+	}
+	return nil
+}
+
+// isSupportedSourceChroma returns true if the source pixel format has 4:2:0 chroma subsampling.
+func isSupportedSourceChroma(pixFmt string, bitDepth int) bool {
+	p := strings.ToLower(strings.TrimSpace(pixFmt))
+	if bitDepth == 8 {
+		switch p {
+		case "yuv420p", "yuvj420p", "nv12":
+			return true
+		}
+		return false
+	}
+	if bitDepth == 10 {
+		switch p {
+		case "yuv420p10le", "p010le":
+			return true
+		}
+		return false
+	}
+	return false
+}
+
+// candidateFileKey constructs an injective, collision-free filename prefix for a candidate sample.
+// Includes the candidate index, sanitized label, deterministic short raw ID hash, and quality level.
+func candidateFileKey(index int, rawID string, quality int) string {
+	h := sha256.Sum256([]byte(rawID))
+	shortHash := hex.EncodeToString(h[:4]) // 8 hex characters
+	sanitized := sanitizeCandidateID(rawID)
+	if len(sanitized) > 16 {
+		sanitized = sanitized[:16]
+	}
+	return fmt.Sprintf("cand_%d_%s_%s_q%d", index, sanitized, shortHash, quality)
 }
 
 func resolveCandidateBitDepth(c *transcode.BenchmarkCandidate, sourceBitDepth int) (profile, pixFmt string, bitDepth int, err error) {
@@ -369,30 +557,69 @@ func resolveCandidateBitDepth(c *transcode.BenchmarkCandidate, sourceBitDepth in
 }
 
 func isHDRStreamDetailed(ds mediainspect.DetailedStream) bool {
+	// 1. Mastering display metadata or content light level
 	if ds.MasteringDisplay != nil || ds.ContentLightLevel != nil {
 		return true
 	}
+
+	// 2. Codec and profile check for Dolby Vision / HDR
+	codec := strings.ToLower(strings.TrimSpace(ds.Codec))
+	profile := strings.ToLower(strings.TrimSpace(ds.Profile))
+	if strings.Contains(codec, "dovi") || strings.Contains(codec, "dvh1") ||
+		strings.Contains(codec, "dvhe") || strings.Contains(codec, "dva1") ||
+		strings.Contains(codec, "dav1") {
+		return true
+	}
+	if strings.Contains(profile, "dolby vision") || strings.Contains(profile, "dovi") ||
+		strings.HasPrefix(profile, "dv") {
+		return true
+	}
+
+	// 3. Color transfer characteristics
 	transfer := strings.ToLower(strings.TrimSpace(ds.ColorTransfer))
 	switch transfer {
 	case "smpte2084", "arib-std-b67", "arib_std_b67", "hlg", "pq", "smpte428", "bt2020-10", "bt2020-12":
 		return true
 	}
+
+	// 4. Color primaries
 	primaries := strings.ToLower(strings.TrimSpace(ds.ColorPrimaries))
 	switch primaries {
 	case "bt2020", "bt2020nc", "bt2020c", "dci-p3":
 		return true
 	}
+
+	// 5. Color space / matrix coefficients
 	cs := strings.ToLower(strings.TrimSpace(ds.ColorSpace))
 	switch cs {
 	case "bt2020nc", "bt2020c":
 		return true
 	}
+
+	// 6. Side data (DV RPU, mastering display, etc.)
 	for _, sd := range ds.SideData {
 		sdt := strings.ToLower(strings.TrimSpace(sd.SideDataType))
-		if strings.Contains(sdt, "mastering display") || strings.Contains(sdt, "content light") || strings.Contains(sdt, "dovi") || strings.Contains(sdt, "hdr") {
+		if strings.Contains(sdt, "mastering display") ||
+			strings.Contains(sdt, "content light") ||
+			strings.Contains(sdt, "dovi") ||
+			strings.Contains(sdt, "dolby vision") ||
+			strings.Contains(sdt, "hdr") {
 			return true
 		}
 	}
+
+	// 7. Stream tags
+	for k, v := range ds.Tags {
+		kl := strings.ToLower(k)
+		vl := strings.ToLower(v)
+		if strings.Contains(kl, "dovi") || strings.Contains(kl, "dolby") ||
+			strings.Contains(vl, "dovi") || strings.Contains(vl, "dolby vision") ||
+			strings.Contains(vl, "dvh1") || strings.Contains(vl, "dvhe") ||
+			strings.Contains(vl, "dva1") || strings.Contains(vl, "dav1") {
+			return true
+		}
+	}
+
 	return false
 }
 
@@ -437,11 +664,50 @@ func verifyChildPath(parentDir, targetPath string) error {
 	return nil
 }
 
-func boundedStderr(buf *bytes.Buffer, maxLen int) string {
+// boundedBuffer is an io.Writer that keeps at most maxBytes in memory.
+// If writes exceed maxBytes, the buffer is capped and marked as truncated.
+type boundedBuffer struct {
+	maxBytes  int
+	buf       bytes.Buffer
+	truncated bool
+}
+
+func newBoundedBuffer(maxBytes int) *boundedBuffer {
+	if maxBytes <= 0 {
+		maxBytes = 16 * 1024
+	}
+	return &boundedBuffer{maxBytes: maxBytes}
+}
+
+func (b *boundedBuffer) Write(p []byte) (n int, err error) {
+	n = len(p)
+	if b.buf.Len() >= b.maxBytes {
+		b.truncated = true
+		return n, nil
+	}
+	remaining := b.maxBytes - b.buf.Len()
+	if len(p) > remaining {
+		b.buf.Write(p[:remaining])
+		b.truncated = true
+	} else {
+		b.buf.Write(p)
+	}
+	return n, nil
+}
+
+func (b *boundedBuffer) String() string {
+	str := strings.TrimSpace(b.buf.String())
+	if b.truncated {
+		return str + "\n... [stderr truncated]"
+	}
+	return str
+}
+
+func boundedStderr(buf *boundedBuffer, maxLen int) string {
 	if buf == nil {
 		return ""
 	}
-	str := strings.TrimSpace(buf.String())
+	str := buf.String()
 	if maxLen > 0 && len(str) > maxLen {
 		return str[:maxLen] + "..."
 	}
