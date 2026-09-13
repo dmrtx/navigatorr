@@ -119,6 +119,13 @@ func TestVideoProfileRejectsInvalidTypedControls(t *testing.T) {
       ffmpeg_args: ["-foo", "bar"]`,
 			want: "field ffmpeg_args",
 		},
+		{
+			name: "unverified bitrate rejected",
+			video: `      codec: hevc_videotoolbox
+      quality: 65
+      bitrate: 2500k`,
+			want: "field bitrate",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
