@@ -191,10 +191,10 @@ func profileToRecipe(name string, p TranscodeProfileConfig) recipe.Profile {
 			SpatialAQ:       p.Video.SpatialAQ,
 			Realtime:        p.Video.Realtime,
 		},
-		Audio:        recipe.AudioProfile{Mode: p.Audio.Mode},
-		Subtitles:    recipe.SubtitleProfile{Mode: p.Subtitles.Mode, ConvertIncompatible: p.Subtitles.ConvertIncompatible},
-		Preserve:     recipe.PreserveProfile{Metadata: p.Preserve.Metadata, Chapters: p.Preserve.Chapters, Attachments: p.Preserve.Attachments},
-		Resilience:   r,
+		Audio:      recipe.AudioProfile{Mode: p.Audio.Mode},
+		Subtitles:  recipe.SubtitleProfile{Mode: p.Subtitles.Mode, ConvertIncompatible: p.Subtitles.ConvertIncompatible},
+		Preserve:   recipe.PreserveProfile{Metadata: p.Preserve.Metadata, Chapters: p.Preserve.Chapters, Attachments: p.Preserve.Attachments},
+		Resilience: r,
 		Optimization: func() *recipe.OptimizationPolicy {
 			if p.Optimization == nil {
 				return nil

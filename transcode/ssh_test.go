@@ -281,12 +281,14 @@ func TestSSHExecutor_Capabilities(t *testing.T) {
 		FFmpegVersion:   "7.1",
 		Encoders:        map[string]bool{"hevc_videotoolbox": true, "h264_videotoolbox": true, "libx265": false},
 		Filters:         map[string]bool{"scale": true, "ssim": true, "libvmaf": false},
-		VideoToolbox: VideoToolboxCapabilities{
-			Encoder:      "hevc_videotoolbox",
-			Available:    true,
-			Profiles:     []string{"main", "main10"},
-			PixelFormats: []string{"nv12", "p010le", "yuv420p"},
-			Options:      []string{"prio_speed", "profile", "realtime", "spatial_aq"},
+		EncoderDetails: map[string]EncoderCapabilities{
+			"hevc_videotoolbox": {
+				Encoder:      "hevc_videotoolbox",
+				Available:    true,
+				Profiles:     []string{"main", "main10"},
+				PixelFormats: []string{"nv12", "p010le", "yuv420p"},
+				Options:      []string{"prio_speed", "profile", "realtime", "spatial_aq"},
+			},
 		},
 	}
 	validFP, err := ComputeCapabilityFingerprint(validCaps)

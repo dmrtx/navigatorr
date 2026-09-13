@@ -106,7 +106,6 @@ func ProbeWorkerCapabilities(ctx context.Context, ffmpegPath string) (transcode.
 			Message:   boundedErrorMessage(vtErr, nil, 256),
 		})
 	}
-	caps.VideoToolbox = vtCaps
 	if caps.EncoderDetails == nil {
 		caps.EncoderDetails = make(map[string]transcode.EncoderCapabilities)
 	}
@@ -206,14 +205,26 @@ func ParseAvailableFilters(raw string) map[string]bool {
 	return filters
 }
 
-func isCleanAbsence(output string) bool {
+func isCleanAbsence(encoderName, output string) bool {
 	lower := strings.ToLower(output)
-	return strings.Contains(lower, "is not recognized by ffmpeg") ||
-		strings.Contains(lower, "not recognized") ||
-		strings.Contains(lower, "not found") ||
-		strings.Contains(lower, "unknown encoder") ||
-		strings.Contains(lower, "cannot find encoder") ||
-		strings.Contains(lower, "unrecognized option")
+	enc := strings.ToLower(strings.TrimSpace(encoderName))
+	if enc == "" {
+		enc = videoToolboxEncoder
+	}
+
+	// Must specifically mention the queried encoder
+	if !strings.Contains(lower, enc) {
+		return false
+	}
+
+	// Known clean absence messages output by FFmpeg when an encoder is not built into the binary.
+	// Generic errors like "unrecognized option" or "not found" (e.g. missing libraries/binaries)
+	// must NOT match so they remain ProbeErrors.
+	return strings.Contains(lower, fmt.Sprintf("codec '%s' is not recognized by ffmpeg", enc)) ||
+		strings.Contains(lower, fmt.Sprintf("encoder '%s' not found", enc)) ||
+		strings.Contains(lower, fmt.Sprintf("unknown encoder '%s'", enc)) ||
+		strings.Contains(lower, fmt.Sprintf("cannot find encoder '%s'", enc)) ||
+		(strings.Contains(lower, "is not recognized by ffmpeg") && strings.Contains(lower, enc))
 }
 
 func ProbeVideoToolboxCapabilities(ctx context.Context, ffmpegPath string) (VideoToolboxCapabilities, error) {
@@ -224,7 +235,7 @@ func ProbeVideoToolboxCapabilities(ctx context.Context, ffmpegPath string) (Vide
 		if ctx.Err() != nil {
 			return caps, ctx.Err()
 		}
-		if isCleanAbsence(string(out)) {
+		if isCleanAbsence(videoToolboxEncoder, string(out)) {
 			caps.Available = false
 			return caps, nil
 		}

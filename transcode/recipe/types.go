@@ -8,7 +8,7 @@ const (
 	SupportedSchemaVersionV1 = 1
 	SupportedSchemaVersionV2 = 2
 	// Deprecated: use MinSchemaVersion or LatestSchemaVersion instead.
-	SupportedSchemaVersion   = LatestSchemaVersion
+	SupportedSchemaVersion = LatestSchemaVersion
 )
 
 const (
@@ -23,6 +23,9 @@ const (
 	DefaultSSIMMinimum           = 0.98
 	DefaultSSIMMarginalTolerance = 0.005
 	DefaultMaxCandidates         = 5
+	// MaxBitrateKbps is the conservative upper limit (1,000,000 kbps = 1 Gbps) for recipe bitrate guidance
+	// to prevent overflow and absurd values during future arithmetic and optimization.
+	MaxBitrateKbps = 1_000_000
 )
 
 var (
