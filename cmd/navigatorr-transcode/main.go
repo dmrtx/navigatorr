@@ -38,7 +38,7 @@ func main() {
 	}
 
 	if subcmd == "" {
-		fmt.Fprintf(os.Stderr, "Usage: %s [--config <path>] <doctor|submit|status|cancel|_internal_run> [args...]\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Usage: %s [--config <path>] <doctor|capabilities|submit|status|cancel|_internal_run> [args...]\n", os.Args[0])
 		os.Exit(1)
 	}
 
@@ -63,6 +63,14 @@ func main() {
 		if !res.OK {
 			os.Exit(1)
 		}
+
+	case "capabilities":
+		caps, err := worker.VideoToolboxCapabilities(ctx)
+		if err != nil {
+			printJSON(map[string]any{"error": err.Error(), "capabilities": caps})
+			os.Exit(1)
+		}
+		printJSON(caps)
 
 	case "submit":
 		inputData, err := io.ReadAll(os.Stdin)

@@ -31,8 +31,13 @@ type Profile struct {
 }
 
 type VideoProfile struct {
-	Codec   string `json:"codec" yaml:"codec"`
-	Quality int    `json:"quality" yaml:"quality"`
+	Codec           string `json:"codec" yaml:"codec"`
+	Quality         int    `json:"quality" yaml:"quality"`
+	Profile         string `json:"profile,omitempty" yaml:"profile,omitempty"`
+	PixelFormat     string `json:"pixel_format,omitempty" yaml:"pixel_format,omitempty"`
+	PrioritizeSpeed *bool  `json:"prioritize_speed,omitempty" yaml:"prioritize_speed,omitempty"`
+	SpatialAQ       *bool  `json:"spatial_aq,omitempty" yaml:"spatial_aq,omitempty"`
+	Realtime        *bool  `json:"realtime,omitempty" yaml:"realtime,omitempty"`
 }
 
 type AudioProfile struct {
