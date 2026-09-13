@@ -9,6 +9,7 @@ import (
 	"os"
 
 	"github.com/jakenesler/navigatorr/internal/transcodeworker"
+	"github.com/jakenesler/navigatorr/transcode"
 )
 
 var (
@@ -49,7 +50,7 @@ func main() {
 	}
 
 	if subcmd == "" {
-		fmt.Fprintf(os.Stderr, "Usage: %s [--config <path>] <doctor|capabilities|submit|status|cancel|_internal_run> [args...]\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Usage: %s [--config <path>] <doctor|capabilities|submit|status|cancel|_internal_run|benchmark_submit|benchmark_status|benchmark_cancel|_internal_benchmark> [args...]\n", os.Args[0])
 		os.Exit(1)
 	}
 
@@ -133,6 +134,71 @@ func main() {
 		res, err := worker.Cancel(ctx, jobID)
 		printJSON(res)
 		if err != nil {
+			os.Exit(1)
+		}
+
+	case "benchmark_submit":
+		inputData, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			printJSON(transcode.BenchmarkSubmitResponse{
+				ProtocolVersion: transcode.WorkerProtocolVersion,
+				Error:           fmt.Sprintf("reading stdin: %v", err),
+			})
+			os.Exit(1)
+		}
+		var req transcode.BenchmarkRequest
+		if err := json.Unmarshal(inputData, &req); err != nil {
+			printJSON(transcode.BenchmarkSubmitResponse{
+				ProtocolVersion: transcode.WorkerProtocolVersion,
+				Error:           fmt.Sprintf("parsing benchmark submit JSON: %v", err),
+			})
+			os.Exit(1)
+		}
+
+		resp, err := worker.BenchmarkSubmit(ctx, req, selfExe, configPath)
+		printJSON(resp)
+		if err != nil {
+			os.Exit(1)
+		}
+
+	case "benchmark_status":
+		if len(subcmdArgs) < 1 {
+			printJSON(transcode.BenchmarkStatus{
+				ProtocolVersion: transcode.WorkerProtocolVersion,
+				Error:           "missing job id",
+			})
+			os.Exit(1)
+		}
+		jobID := subcmdArgs[0]
+		st, err := worker.BenchmarkStatus(ctx, jobID)
+		printJSON(st)
+		if err != nil {
+			os.Exit(1)
+		}
+
+	case "benchmark_cancel":
+		if len(subcmdArgs) < 1 {
+			printJSON(transcode.BenchmarkCancelResponse{
+				ProtocolVersion: transcode.WorkerProtocolVersion,
+				Error:           "missing job id",
+			})
+			os.Exit(1)
+		}
+		jobID := subcmdArgs[0]
+		res, err := worker.BenchmarkCancel(ctx, jobID)
+		printJSON(res)
+		if err != nil {
+			os.Exit(1)
+		}
+
+	case "_internal_benchmark":
+		if len(subcmdArgs) < 1 {
+			fmt.Fprintf(os.Stderr, "missing job id for _internal_benchmark\n")
+			os.Exit(1)
+		}
+		jobID := subcmdArgs[0]
+		if err := worker.InternalBenchmark(ctx, jobID); err != nil {
+			fmt.Fprintf(os.Stderr, "internal_benchmark failed for job %s: %v\n", jobID, err)
 			os.Exit(1)
 		}
 
