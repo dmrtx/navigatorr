@@ -387,4 +387,28 @@ func TestSamplePlanner_InvalidInputs(t *testing.T) {
 	if err == nil {
 		t.Errorf("expected error for NaN position")
 	}
+
+	// Excessive sample_count exceeding MaxSampleCount (32)
+	_, err = PlanSamples(SamplePlanConfig{
+		Duration:      3600.0,
+		SampleSeconds: 10.0,
+		SampleCount:   MaxSampleCount + 1,
+	})
+	if err == nil {
+		t.Errorf("expected error for sample_count > MaxSampleCount")
+	}
+
+	// Excessive positions exceeding MaxSampleCount (32)
+	excessivePositions := make([]float64, MaxSampleCount+1)
+	for i := range excessivePositions {
+		excessivePositions[i] = float64(i * 10)
+	}
+	_, err = PlanSamples(SamplePlanConfig{
+		Duration:      3600.0,
+		SampleSeconds: 10.0,
+		Positions:     excessivePositions,
+	})
+	if err == nil {
+		t.Errorf("expected error for len(positions) > MaxSampleCount")
+	}
 }
