@@ -11,6 +11,17 @@ import (
 	"github.com/jakenesler/navigatorr/internal/transcodeworker"
 )
 
+var (
+	Version   string
+	GitCommit string
+)
+
+func init() {
+	if Version != "" || GitCommit != "" {
+		transcodeworker.SetBuildMetadata(Version, GitCommit)
+	}
+}
+
 func main() {
 	var configPath string
 

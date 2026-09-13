@@ -3,9 +3,30 @@ package recipe
 import "time"
 
 const (
+	MinSchemaVersion         = 1
+	LatestSchemaVersion      = 2
 	SupportedSchemaVersionV1 = 1
 	SupportedSchemaVersionV2 = 2
-	SupportedSchemaVersion   = 1
+	// Deprecated: use MinSchemaVersion or LatestSchemaVersion instead.
+	SupportedSchemaVersion   = LatestSchemaVersion
+)
+
+const (
+	DefaultSamplingStrategy  = "uniform"
+	DefaultSampleCount       = 3
+	DefaultSampleSeconds     = 10.0
+	DefaultPreferredMetric   = "vmaf"
+	DefaultVMAFTarget        = 95.0
+	DefaultVMAFMinimum       = 93.0
+	DefaultSSIMTarget        = 0.98
+	DefaultSSIMMinimum       = 0.96
+	DefaultMarginalTolerance = 0.5
+	DefaultMaxCandidates     = 5
+)
+
+var (
+	DefaultSamplingPositions = []float64{0.2, 0.5, 0.8}
+	DefaultQualityValues     = []int{55, 60, 65, 70, 75}
 )
 
 type Bundle struct {
@@ -25,33 +46,53 @@ type ConversionRule struct {
 	Reason      string `json:"reason" yaml:"reason"`
 }
 
-// SamplingPolicy defines declarative bounded parameters for quality sampling.
-type SamplingPolicy struct {
-	SegmentDurationSec   float64 `json:"segment_duration_sec,omitempty" yaml:"segment_duration_sec,omitempty"`
-	SegmentCount         int     `json:"segment_count,omitempty" yaml:"segment_count,omitempty"`
-	MinSourceDurationSec float64 `json:"min_source_duration_sec,omitempty" yaml:"min_source_duration_sec,omitempty"`
-}
-
-// MetricThresholds defines VMAF and SSIM thresholds for candidate quality evaluation.
-type MetricThresholds struct {
-	MinVMAF    float64 `json:"min_vmaf,omitempty" yaml:"min_vmaf,omitempty"`
-	TargetVMAF float64 `json:"target_vmaf,omitempty" yaml:"target_vmaf,omitempty"`
-	MinSSIM    float64 `json:"min_ssim,omitempty" yaml:"min_ssim,omitempty"`
-	TargetSSIM float64 `json:"target_ssim,omitempty" yaml:"target_ssim,omitempty"`
-}
-
-// BitrateGuidance defines preferred and soft-max total bitrate guidance in bits per second.
-type BitrateGuidance struct {
-	PreferredBitrate int64 `json:"preferred_bitrate,omitempty" yaml:"preferred_bitrate,omitempty"`
-	SoftMaxBitrate   int64 `json:"soft_max_bitrate,omitempty" yaml:"soft_max_bitrate,omitempty"`
-}
-
-// OptimizationPolicy defines typed optimization policy for candidate quality selection.
+// OptimizationPolicy defines the tuning policy for automated quality and bitrate optimization.
 type OptimizationPolicy struct {
-	Sampling          *SamplingPolicy   `json:"sampling,omitempty" yaml:"sampling,omitempty"`
-	Thresholds        *MetricThresholds `json:"thresholds,omitempty" yaml:"thresholds,omitempty"`
-	QualityCandidates []int             `json:"quality_candidates,omitempty" yaml:"quality_candidates,omitempty"`
-	BitrateGuidance   *BitrateGuidance  `json:"bitrate_guidance,omitempty" yaml:"bitrate_guidance,omitempty"`
+	Enabled  bool            `json:"enabled" yaml:"enabled"`
+	Sampling *SamplingPolicy `json:"sampling,omitempty" yaml:"sampling,omitempty"`
+	Quality  *QualityPolicy  `json:"quality,omitempty" yaml:"quality,omitempty"`
+	Search   *SearchPolicy   `json:"search,omitempty" yaml:"search,omitempty"`
+	Size     *SizePolicy     `json:"size,omitempty" yaml:"size,omitempty"`
+}
+
+// SamplingPolicy controls where and how probe samples are extracted from the source video.
+type SamplingPolicy struct {
+	Strategy      string    `json:"strategy,omitempty" yaml:"strategy,omitempty"`
+	SampleCount   int       `json:"sample_count,omitempty" yaml:"sample_count,omitempty"`
+	SampleSeconds float64   `json:"sample_seconds,omitempty" yaml:"sample_seconds,omitempty"`
+	Positions     []float64 `json:"positions,omitempty" yaml:"positions,omitempty"`
+}
+
+// QualityPolicy configures target objective quality metrics and acceptability thresholds.
+type QualityPolicy struct {
+	PreferredMetric   string        `json:"preferred_metric,omitempty" yaml:"preferred_metric,omitempty"`
+	VMAF              *MetricTarget `json:"vmaf,omitempty" yaml:"vmaf,omitempty"`
+	SSIM              *MetricTarget `json:"ssim,omitempty" yaml:"ssim,omitempty"`
+	MarginalTolerance float64       `json:"marginal_tolerance,omitempty" yaml:"marginal_tolerance,omitempty"`
+}
+
+// MetricTarget specifies target and minimum acceptable scores for an objective quality metric.
+type MetricTarget struct {
+	Target  float64 `json:"target" yaml:"target"`
+	Minimum float64 `json:"minimum" yaml:"minimum"`
+}
+
+// SearchPolicy defines parameter space and candidate selection bounds.
+type SearchPolicy struct {
+	MaxCandidates int   `json:"max_candidates,omitempty" yaml:"max_candidates,omitempty"`
+	QualityValues []int `json:"quality_values,omitempty" yaml:"quality_values,omitempty"`
+}
+
+// SizePolicy specifies bitrate ranges and constraints in kilobits per second.
+type SizePolicy struct {
+	PreferredTotalBitrateKbps *BitrateRange `json:"preferred_total_bitrate_kbps,omitempty" yaml:"preferred_total_bitrate_kbps,omitempty"`
+	SoftMaxTotalBitrateKbps   int           `json:"soft_max_total_bitrate_kbps,omitempty" yaml:"soft_max_total_bitrate_kbps,omitempty"`
+}
+
+// BitrateRange defines minimum and maximum acceptable total bitrate in kbps.
+type BitrateRange struct {
+	Min int `json:"min" yaml:"min"`
+	Max int `json:"max" yaml:"max"`
 }
 
 type Profile struct {

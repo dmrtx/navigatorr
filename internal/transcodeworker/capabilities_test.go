@@ -10,6 +10,74 @@ import (
 	"github.com/jakenesler/navigatorr/transcode"
 )
 
+func TestBuildMetadata_DynamicAndDefault(t *testing.T) {
+	// 1. Explicitly test setting dynamic build metadata
+	SetBuildMetadata("2026.10.1", "deadbeef")
+	ver, commit := GetBuildMetadata()
+	if ver != "2026.10.1" {
+		t.Errorf("expected version 2026.10.1, got %q", ver)
+	}
+	if commit != "deadbeef" {
+		t.Errorf("expected commit deadbeef, got %q", commit)
+	}
+
+	// 2. Clear metadata; should fall back to debug info or "unknown"
+	SetBuildMetadata("", "")
+	ver2, commit2 := GetBuildMetadata()
+	if ver2 == "" {
+		t.Errorf("version should not be empty")
+	}
+	if commit2 == "" {
+		t.Errorf("commit should not be empty")
+	}
+}
+
+func TestCapabilityFingerprint_PathExcludedAndEquivalence(t *testing.T) {
+	caps1 := transcode.WorkerCapabilities{
+		ProtocolVersion: transcode.WorkerProtocolVersion,
+		WorkerVersion:   "1.0.0",
+		BuildGitCommit:  "abcdef0",
+		FFmpegVersion:   "7.1",
+		FFmpegPath:      "/usr/bin/ffmpeg",
+		Encoders:        map[string]bool{"hevc_videotoolbox": true, "libx264": true},
+		Filters:         map[string]bool{"scale": true, "ssim": true},
+		VideoToolbox: transcode.VideoToolboxCapabilities{
+			Encoder:      "hevc_videotoolbox",
+			Available:    true,
+			Profiles:     []string{"main", "main10"},
+			PixelFormats: []string{"nv12", "p010le"},
+			Options:      []string{"profile", "spatial_aq"},
+		},
+	}
+
+	caps2 := caps1
+	caps2.FFmpegPath = "/opt/homebrew/bin/ffmpeg" // Different machine path
+
+	fp1, err := transcode.ComputeCapabilityFingerprint(caps1)
+	if err != nil {
+		t.Fatalf("failed computing fp1: %v", err)
+	}
+	fp2, err := transcode.ComputeCapabilityFingerprint(caps2)
+	if err != nil {
+		t.Fatalf("failed computing fp2: %v", err)
+	}
+
+	if fp1 != fp2 {
+		t.Errorf("capability fingerprint must exclude machine-specific FFmpegPath: %s != %s", fp1, fp2)
+	}
+
+	// Modifying actual capabilities must change fingerprint
+	caps3 := caps1
+	caps3.Encoders["libx265"] = true
+	fp3, err := transcode.ComputeCapabilityFingerprint(caps3)
+	if err != nil {
+		t.Fatalf("failed computing fp3: %v", err)
+	}
+	if fp3 == fp1 {
+		t.Errorf("expected different fingerprint when capabilities change")
+	}
+}
+
 func TestParseFFmpegVersion(t *testing.T) {
 	raw := `ffmpeg version 7.1 Copyright (c) 2000-2024 the FFmpeg developers
 built with Apple clang version 16.0.0 (clang-1600.0.26.4)
@@ -81,7 +149,7 @@ func TestParseAvailableFilters_PartialAbsence(t *testing.T) {
 	}
 }
 
-func TestProbeWorkerCapabilities_DeterministicSignatureAndPartialAbsence(t *testing.T) {
+func TestProbeWorkerCapabilities_DeterministicFingerprintAndPartialAbsence(t *testing.T) {
 	dir := t.TempDir()
 	fakeFFmpeg := filepath.Join(dir, "fake_ffmpeg.sh")
 
@@ -129,6 +197,9 @@ esac
 		t.Fatalf("failed writing fake ffmpeg: %v", err)
 	}
 
+	SetBuildMetadata("1.0.0", "abcdef0")
+	defer SetBuildMetadata("", "")
+
 	caps, err := ProbeWorkerCapabilities(context.Background(), fakeFFmpeg)
 	if err != nil {
 		t.Fatalf("ProbeWorkerCapabilities failed: %v", err)
@@ -136,6 +207,12 @@ esac
 
 	if caps.ProtocolVersion != transcode.WorkerProtocolVersion {
 		t.Errorf("expected ProtocolVersion=%d, got %d", transcode.WorkerProtocolVersion, caps.ProtocolVersion)
+	}
+	if caps.WorkerVersion != "1.0.0" {
+		t.Errorf("expected WorkerVersion=1.0.0, got %s", caps.WorkerVersion)
+	}
+	if caps.BuildGitCommit != "abcdef0" {
+		t.Errorf("expected BuildGitCommit=abcdef0, got %s", caps.BuildGitCommit)
 	}
 	if caps.FFmpegVersion != "7.1" {
 		t.Errorf("expected FFmpegVersion=7.1, got %s", caps.FFmpegVersion)
@@ -155,43 +232,54 @@ esac
 	if caps.Filters["libvmaf"] {
 		t.Errorf("expected libvmaf=false (partial absence represented)")
 	}
-	if !strings.HasPrefix(caps.Signature, "sha256:") {
-		t.Errorf("expected sha256 signature, got %s", caps.Signature)
+	if !strings.HasPrefix(caps.CapabilityFingerprint, "sha256:") {
+		t.Errorf("expected sha256 fingerprint, got %s", caps.CapabilityFingerprint)
+	}
+	if caps.HasProbeErrors() {
+		t.Errorf("unexpected probe errors: %+v", caps.ProbeErrors)
 	}
 
-	// Verify deterministic signature verification passes
-	if err := transcode.VerifyCapabilitySignature(caps); err != nil {
-		t.Errorf("VerifyCapabilitySignature failed: %v", err)
+	// Verify deterministic fingerprint verification passes
+	if err := transcode.VerifyCapabilityFingerprint(caps); err != nil {
+		t.Errorf("VerifyCapabilityFingerprint failed: %v", err)
 	}
 
-	// Second probe produces identical deterministic signature
+	// Second probe produces identical deterministic fingerprint
 	caps2, err := ProbeWorkerCapabilities(context.Background(), fakeFFmpeg)
 	if err != nil {
 		t.Fatalf("second probe failed: %v", err)
 	}
-	if caps.Signature != caps2.Signature {
-		t.Errorf("signatures did not match: %s vs %s", caps.Signature, caps2.Signature)
+	if caps.CapabilityFingerprint != caps2.CapabilityFingerprint {
+		t.Errorf("fingerprints did not match: %s vs %s", caps.CapabilityFingerprint, caps2.CapabilityFingerprint)
 	}
 }
 
-func TestProbeWorkerCapabilities_VideoToolboxMissingDoesNotFailEntireReport(t *testing.T) {
+func TestProbeWorkerCapabilities_ProbeErrorsRecordedOnFailure(t *testing.T) {
 	dir := t.TempDir()
-	fakeFFmpeg := filepath.Join(dir, "fake_ffmpeg_no_vt.sh")
+	fakeFFmpeg := filepath.Join(dir, "fake_ffmpeg_err.sh")
 
+	// Mock script where -encoders and -filters fail with non-zero exit and error text
 	script := `#!/bin/sh
 case "$*" in
   *"-version"*)
-    echo "ffmpeg version 6.1"
+    echo "ffmpeg version 7.1"
     ;;
   *"-h encoder=hevc_videotoolbox"*)
-    echo "Codec 'hevc_videotoolbox' is not recognized by FFmpeg." >&2
-    exit 1
+    cat << 'EOF'
+Encoder hevc_videotoolbox [VideoToolbox H.265 Encoder]:
+    Supported pixel formats: p010le
+hevc_videotoolbox AVOptions:
+  -profile <int>
+     main10 2
+EOF
     ;;
   *"-encoders"*)
-    echo " V..... libx264    libx264"
+    echo "probe encoders failed: internal driver fault" >&2
+    exit 1
     ;;
   *"-filters"*)
-    echo " ... scale        V->V    Scale video"
+    echo "probe filters failed: cannot load filter graph" >&2
+    exit 2
     ;;
   *)
     exit 0
@@ -204,18 +292,23 @@ esac
 
 	caps, err := ProbeWorkerCapabilities(context.Background(), fakeFFmpeg)
 	if err != nil {
-		t.Fatalf("expected ProbeWorkerCapabilities to succeed despite missing VideoToolbox, got: %v", err)
+		t.Fatalf("ProbeWorkerCapabilities should preserve partial results and not fail completely, got: %v", err)
 	}
-	if caps.VideoToolbox.Available {
-		t.Errorf("expected VideoToolbox.Available=false")
+
+	if !caps.HasProbeErrors() {
+		t.Errorf("expected probe errors to be recorded")
 	}
-	if caps.Encoders["hevc_videotoolbox"] {
-		t.Errorf("expected Encoders[hevc_videotoolbox]=false")
+	if !caps.HasComponentError("encoders") {
+		t.Errorf("expected component error for encoders")
 	}
-	if !caps.Encoders["libx264"] {
-		t.Errorf("expected Encoders[libx264]=true")
+	if !caps.HasComponentError("filters") {
+		t.Errorf("expected component error for filters")
 	}
-	if err := transcode.VerifyCapabilitySignature(caps); err != nil {
-		t.Errorf("signature verification failed: %v", err)
+
+	// Check that error messages are bounded
+	for _, pe := range caps.ProbeErrors {
+		if len(pe.Message) > 300 {
+			t.Errorf("probe error message exceeded bounded length: %d chars", len(pe.Message))
+		}
 	}
 }
