@@ -449,8 +449,19 @@ Demostrado mediante tests que:
 - [x] Modelos puros de fallback SSIM con thresholds y tolerancias independientes.
 - [x] Ineligibilidad explícita de HDR para scoring automático SDR.
 - [x] Estimador de tamaño con cálculo de video por streams, preservación de audio copiado y reporte de incertidumbres.
-- [ ] Implementar cálculo remoto de filtros VMAF y SSIM con FFmpeg en worker.
-- [ ] Cubrir ausencia de filtros, fallos y outputs incompletos en el worker.
+- [x] Implementar cálculo remoto de filtros VMAF y SSIM con FFmpeg en worker (`internal/transcodeworker/benchmark_runner.go`):
+  - Gating de capacidades: verificación estricta de filtros `libvmaf` y `ssim` en `WorkerCapabilities` con fallo cerrado si no están disponibles.
+  - Generación de comandos segura y exacta: `BuildVMAFArgs` y `BuildSSIMArgs` con escape de caracteres de filtro (`:`, `\`, `'`) y redirección a null sink (`-f null -`).
+  - Aislamiento en scratch: logs de métricas estructurados generados exclusivamente en `samples/` con nombres derivados libres de colisiones (`sample_<sampleIdx>_vmaf.json`, `sample_<sampleIdx>_ssim.stats`).
+  - Hardening contra TOCTOU y symlinks: verificación `os.Lstat`, rechazo de enlaces simbólicos o archivos no regulares.
+  - Bounding de archivos: límite estricto de lectura a 5 MB (`MaxMetricLogSizeBytes`).
+  - Parsing determinista y fail-closed: extracción de `pooled_metrics.vmaf.mean` con fallback a promedio de frames; parsing de SSIM All medio; rechazo inmediato de NaN, Inf y valores fuera de rango ([0, 100] VMAF, [0, 1] SSIM).
+  - Preservación de medios e inmutabilidad: el source original, las referencias FFV1 y los candidatos HEVC nunca se modifican; verificación de inmutabilidad por hash SHA-256.
+  - Orden determinista: ejecución secuencial estricta por candidato y por sample ($C \times S$).
+  - Aislamiento de procesos y cancelación: ejecución en process group dedicado con propagación de SIGKILL y preservación de evidencia parcial.
+  - Integración pura: reuso directo de `optimization.AggregateSampleScores` para cálculo de agregados de métricas tipados.
+- [x] Cubrir ausencia de filtros, fallos y outputs incompletos en el worker con suite completa de pruebas unitarias e integrales en `benchmark_runner_test.go`.
+
 
 ### Fase 6 — Búsqueda y selección VideoToolbox
 - [x] Implementar `CandidateSelector` puro en `transcode/optimization/selector.go` con reglas multi-tier y códigos de razón estables.
@@ -488,7 +499,7 @@ Demostrado mediante tests que:
 | 2. Capacidades y protocolo | Completo | `WorkerCapabilities` versionado (`ProtocolVersion == WorkerProtocolVersion`), probe errors estructurados, clean absence encoder-specific, eliminación de campo redundante `VideoToolbox`, fingerprint determinista de capacidades, handshake SSH | `eaadfe1`, `94a5a01`, `5eb1d30`, `9e90d7b` |
 | 3. Recipes v2 | Completo | Loader v1/v2 compatible (`MinSchemaVersion`..`LatestSchemaVersion`), `OptimizationPolicy` validado con defaults aprobados (VMAF 96/95/0.5, SSIM 0.99/0.98/0.005, sampling bounds 1..32, `MaxBitrateKbps = 1_000_000`), omission safety en bloques métricos parciales | `eaadfe1`, `94a5a01`, `5eb1d30`, `9e90d7b`, `c92725b` |
 | 4. Sampling y temporales | Completo | Fase 4A (protocolo, SSH, models, locking `.capacity.lock` y `jobDir/.lock`, argv exacto `MatchesExactBenchmarkArgs`, idempotencia total) y Fase 4B (`ProductionBenchmarkRunner`, extracción `ffv1`, encode `hevc_videotoolbox`, `verifyChildPath`, bit depth gating, evidencia `BenchmarkExecutionEvidence`, cleanup acotado y seguro, process group cancellation, symlink TOCTOU hardening, collision-free candidate names, partial evidence preservation on error and cancel, bounded stderr, DV y chroma 4:2:0 gating, deferral de full-range `yuvj420p`) completas y verificadas | `e23f204`, `8fe5828`, `badad4a`, `7fb5108`, `a35bcd6`, `f57a8af`, `35d9682`, `5c69e0d`, `76dba67` |
-| 5. Métricas y estimación | Parcial (solo modelos puros de métricas y estimación) | `transcode/optimization/metrics.go` y `estimator.go` con per-sample quality gate, políticas independientes VMAF/SSIM, ineligibilidad explícita de HDR para SDR, estimación de video aislada por streams, preservación de audio copiado, fallbacks visibles y guards contra overflow. Ejecución de filtros y FFmpeg en worker pendientes. | `e23f204` (src: `83479df`), `8fe5828` (src: `a26d5f4`), `badad4a` (src: `b036209`) |
+| 5. Métricas y estimación | Completo | Modelos puros (`transcode/optimization/metrics.go`, `estimator.go`) y runner remoto FFmpeg (`internal/transcodeworker/benchmark_runner.go`) con libvmaf/ssim filter capability gating, parsing robusto con bounding 5MB, rechazo de symlinks y NaN/Inf/out-of-range, ejecución secuencial determinista C x S, inmutabilidad de medios, aislamiento de process group, preservación de evidencia parcial y agregación tipada pura antes de limpieza de scratch | `e23f204`, `8fe5828`, `badad4a`, `3eade67` |
 | 6. Selección VideoToolbox | Pendiente | Modelo puro `CandidateSelector` disponible en `transcode/optimization/selector.go`; ejecución y benchmarking real en worker pendientes. | — |
 | 7. Actions e integración | Pendiente | Action `benchmark_transcode` e integración del ganador en `transcode_media` pendientes de implementación. | — |
 | 8. Validación y PR | Pendiente | Validación en M1 Max, benchmarks reales y apertura del PR único hacia `main` pendientes. | — |
@@ -519,3 +530,5 @@ Demostrado mediante tests que:
   - `5c69e0d`: `fix(transcode): harden phase 4B cancellation, symlink toctou, filename collision, and evidence tracking`
   - `532d9dd`: `docs(transcode): record Phase 4B adversarial corrections and process group safety`
   - `76dba67`: `fix(transcode): persist partial evidence on cancel and reject full-range yuvj420p`
+- **Medición remota VMAF y SSIM (Fase 5)**:
+  - `3eade67`: `feat(transcode): implement Phase 5 remote VMAF and SSIM measurement`
