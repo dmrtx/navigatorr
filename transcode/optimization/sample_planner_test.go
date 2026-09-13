@@ -1,6 +1,7 @@
 package optimization
 
 import (
+	"math"
 	"testing"
 )
 
@@ -333,5 +334,57 @@ func TestSamplePlanner_InvalidInputs(t *testing.T) {
 	})
 	if err == nil {
 		t.Errorf("expected error for negative sample seconds")
+	}
+
+	// Contradictory sample_count vs positions count
+	_, err = PlanSamples(SamplePlanConfig{
+		Duration:      100.0,
+		SampleSeconds: 10.0,
+		SampleCount:   3,
+		Positions:     []float64{20.0, 50.0}, // only 2 positions!
+	})
+	if err == nil {
+		t.Errorf("expected error for contradictory sample_count vs positions")
+	}
+
+	// Out of bounds relative positions
+	_, err = PlanSamples(SamplePlanConfig{
+		Duration:          100.0,
+		SampleSeconds:     10.0,
+		RelativePositions: true,
+		Positions:         []float64{0.2, 1.2}, // 1.2 > 1.0
+	})
+	if err == nil {
+		t.Errorf("expected error for relative position > 1.0")
+	}
+
+	_, err = PlanSamples(SamplePlanConfig{
+		Duration:          100.0,
+		SampleSeconds:     10.0,
+		RelativePositions: true,
+		Positions:         []float64{-0.1, 0.5},
+	})
+	if err == nil {
+		t.Errorf("expected error for relative position < 0.0")
+	}
+
+	// Out of bounds absolute positions
+	_, err = PlanSamples(SamplePlanConfig{
+		Duration:      100.0,
+		SampleSeconds: 10.0,
+		Positions:     []float64{20.0, 150.0}, // 150 > 100
+	})
+	if err == nil {
+		t.Errorf("expected error for absolute position > duration")
+	}
+
+	// Non-finite position
+	_, err = PlanSamples(SamplePlanConfig{
+		Duration:      100.0,
+		SampleSeconds: 10.0,
+		Positions:     []float64{20.0, math.NaN()},
+	})
+	if err == nil {
+		t.Errorf("expected error for NaN position")
 	}
 }
