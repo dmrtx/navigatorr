@@ -126,6 +126,20 @@ func TestVideoProfileRejectsInvalidTypedControls(t *testing.T) {
       bitrate: 2500k`,
 			want: "field bitrate",
 		},
+		{
+			name: "unverified max_bitrate rejected",
+			video: `      codec: hevc_videotoolbox
+      quality: 65
+      max_bitrate: 5000k`,
+			want: "field max_bitrate",
+		},
+		{
+			name: "unverified bufsize rejected",
+			video: `      codec: hevc_videotoolbox
+      quality: 65
+      bufsize: 5000k`,
+			want: "field bufsize",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
