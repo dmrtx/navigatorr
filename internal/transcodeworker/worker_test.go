@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -14,6 +15,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/jakenesler/navigatorr/transcode"
 )
 
 func TestWorker_PathValidation(t *testing.T) {
@@ -827,4 +830,249 @@ Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,Stylized Subtitle Test
 	if finalSHA != initialSHA {
 		t.Fatalf("INTEGRITY BREACH: original source modified! initial: %s, final: %s", initialSHA, finalSHA)
 	}
+}
+
+func TestWorker_SubmitRejectsInvalidPlanBeforeSpawning(t *testing.T) {
+	tempDir := t.TempDir()
+	sourceFile := filepath.Join(tempDir, "source.mkv")
+	_ = os.WriteFile(sourceFile, []byte("media"), 0644)
+	candidateFile := filepath.Join(tempDir, "candidate.mkv")
+
+	cfg := &WorkerConfig{
+		StateDir:        filepath.Join(tempDir, "jobs"),
+		AllowedRoots:    []string{tempDir},
+		MaxParallelJobs: 1,
+	}
+	worker := NewWorker(cfg)
+	ctx := context.Background()
+
+	// Create an invalid plan (main10 + yuv420p)
+	p := &transcode.Plan{
+		Container:           "mkv",
+		VideoCodec:          "hevc_videotoolbox",
+		Quality:             65,
+		VideoProfile:        "main10",
+		PixelFormat:         "yuv420p",
+		ExpectedBitDepth:    10,
+		AudioMode:           "copy",
+		SubtitleMode:        "preserve",
+		PreserveMetadata:    true,
+		PreserveChapters:    true,
+		PreserveAttachments: true,
+		RecipeVersion:       "test-1.0.0",
+		RecipeDigest:        "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+		Resilience:          transcode.ResiliencePlan{MaxAttempts: 1},
+	}
+	d, _ := transcode.DigestPlan(p)
+	p.PlanDigest = d
+
+	jobID := "invalid-plan-job"
+	res, err := worker.Submit(ctx, SubmitRequest{
+		ID:            jobID,
+		SourcePath:    sourceFile,
+		CandidatePath: candidateFile,
+		Plan:          p,
+	}, os.Args[0], "")
+
+	if err == nil {
+		t.Fatal("expected Submit to reject invalid plan, but it succeeded")
+	}
+	if !strings.Contains(res.Error, "main10 requires pixel format p010le") {
+		t.Fatalf("expected error message about main10 and pixel format, got: %s", res.Error)
+	}
+
+	// Verify no job directory was created on disk
+	jobDir := filepath.Join(cfg.StateDir, jobID)
+	if _, err := os.Stat(jobDir); !os.IsNotExist(err) {
+		t.Fatalf("expected job directory %s not to exist, but it was created", jobDir)
+	}
+}
+
+func TestWorker_JobStatusResponseCompleteness(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := &WorkerConfig{
+		StateDir:        filepath.Join(tempDir, "jobs"),
+		AllowedRoots:    []string{tempDir},
+		MaxParallelJobs: 1,
+	}
+	worker := NewWorker(cfg)
+	ctx := context.Background()
+
+	t.Run("population and serialization with explicit false booleans", func(t *testing.T) {
+		fVal := false
+		tVal := true
+		jobDir := filepath.Join(cfg.StateDir, "job-explicit-false")
+		_ = os.MkdirAll(jobDir, 0755)
+
+		plan := &transcode.Plan{
+			Container:        "mkv",
+			VideoCodec:       "hevc_videotoolbox",
+			Quality:          65,
+			VideoProfile:     "main",
+			PixelFormat:      "yuv420p",
+			PrioritizeSpeed:  &fVal,
+			SpatialAQ:        &tVal,
+			Realtime:         &fVal,
+			ExpectedBitDepth: 8,
+			RecipeVersion:    "recipe-v2.0",
+			RecipeDigest:     "sha256:aaaa",
+			PlanDigest:       "sha256:bbbb",
+		}
+
+		job := &JobRecord{
+			ID:        "job-explicit-false",
+			Status:    "running",
+			Source:    filepath.Join(tempDir, "src.mkv"),
+			Candidate: filepath.Join(tempDir, "cand.mkv"),
+			Profile:   "anime-hevc-balanced",
+			Plan:      plan,
+			CreatedAt: time.Now().UTC(),
+		}
+		if err := SaveJobAtomic(filepath.Join(jobDir, "job.json"), job); err != nil {
+			t.Fatal(err)
+		}
+
+		resp, err := worker.Status(ctx, "job-explicit-false")
+		if err != nil {
+			t.Fatalf("Status error: %v", err)
+		}
+
+		// Verify populated fields
+		if resp.RecipeVersion != "recipe-v2.0" {
+			t.Errorf("got recipe_version %q, want recipe-v2.0", resp.RecipeVersion)
+		}
+		if resp.RecipeDigest != "sha256:aaaa" {
+			t.Errorf("got recipe_digest %q, want sha256:aaaa", resp.RecipeDigest)
+		}
+		if resp.PlanDigest != "sha256:bbbb" {
+			t.Errorf("got plan_digest %q, want sha256:bbbb", resp.PlanDigest)
+		}
+		if resp.VideoProfile != "main" {
+			t.Errorf("got video_profile %q, want main", resp.VideoProfile)
+		}
+		if resp.PixelFormat != "yuv420p" {
+			t.Errorf("got pixel_format %q, want yuv420p", resp.PixelFormat)
+		}
+		if resp.ExpectedBitDepth != 8 {
+			t.Errorf("got expected_bit_depth %d, want 8", resp.ExpectedBitDepth)
+		}
+		if resp.PrioritizeSpeed == nil || *resp.PrioritizeSpeed != false {
+			t.Errorf("got prioritize_speed %v, want explicit pointer to false", resp.PrioritizeSpeed)
+		}
+		if resp.SpatialAQ == nil || *resp.SpatialAQ != true {
+			t.Errorf("got spatial_aq %v, want explicit pointer to true", resp.SpatialAQ)
+		}
+		if resp.Realtime == nil || *resp.Realtime != false {
+			t.Errorf("got realtime %v, want explicit pointer to false", resp.Realtime)
+		}
+
+		// Verify JSON serialization preserves explicit false
+		data, err := json.Marshal(resp)
+		if err != nil {
+			t.Fatalf("json.Marshal failed: %v", err)
+		}
+		jsonStr := string(data)
+		if !strings.Contains(jsonStr, `"prioritize_speed":false`) {
+			t.Errorf("JSON should contain \"prioritize_speed\":false, got: %s", jsonStr)
+		}
+		if !strings.Contains(jsonStr, `"spatial_aq":true`) {
+			t.Errorf("JSON should contain \"spatial_aq\":true, got: %s", jsonStr)
+		}
+		if !strings.Contains(jsonStr, `"realtime":false`) {
+			t.Errorf("JSON should contain \"realtime\":false, got: %s", jsonStr)
+		}
+		if !strings.Contains(jsonStr, `"recipe_version":"recipe-v2.0"`) {
+			t.Errorf("JSON should contain recipe_version, got: %s", jsonStr)
+		}
+		if !strings.Contains(jsonStr, `"plan_digest":"sha256:bbbb"`) {
+			t.Errorf("JSON should contain plan_digest, got: %s", jsonStr)
+		}
+
+		// Unmarshal back and verify pointers
+		var roundtrip JobStatusResponse
+		if err := json.Unmarshal(data, &roundtrip); err != nil {
+			t.Fatalf("json.Unmarshal failed: %v", err)
+		}
+		if roundtrip.PrioritizeSpeed == nil || *roundtrip.PrioritizeSpeed != false {
+			t.Errorf("unmarshaled prioritize_speed should be false, got: %v", roundtrip.PrioritizeSpeed)
+		}
+		if roundtrip.Realtime == nil || *roundtrip.Realtime != false {
+			t.Errorf("unmarshaled realtime should be false, got: %v", roundtrip.Realtime)
+		}
+	})
+
+	t.Run("population and serialization with nil booleans and omitted fields", func(t *testing.T) {
+		jobDir := filepath.Join(cfg.StateDir, "job-nil-fields")
+		_ = os.MkdirAll(jobDir, 0755)
+
+		plan := &transcode.Plan{
+			Container:  "mkv",
+			VideoCodec: "hevc_videotoolbox",
+			Quality:    65,
+		}
+
+		job := &JobRecord{
+			ID:        "job-nil-fields",
+			Status:    "running",
+			Source:    filepath.Join(tempDir, "src.mkv"),
+			Candidate: filepath.Join(tempDir, "cand.mkv"),
+			Profile:   "hevc-vt",
+			Plan:      plan,
+			CreatedAt: time.Now().UTC(),
+		}
+		if err := SaveJobAtomic(filepath.Join(jobDir, "job.json"), job); err != nil {
+			t.Fatal(err)
+		}
+
+		resp, err := worker.Status(ctx, "job-nil-fields")
+		if err != nil {
+			t.Fatalf("Status error: %v", err)
+		}
+
+		if resp.PrioritizeSpeed != nil {
+			t.Errorf("expected nil prioritize_speed, got %v", resp.PrioritizeSpeed)
+		}
+		if resp.SpatialAQ != nil {
+			t.Errorf("expected nil spatial_aq, got %v", resp.SpatialAQ)
+		}
+		if resp.Realtime != nil {
+			t.Errorf("expected nil realtime, got %v", resp.Realtime)
+		}
+		if resp.VideoProfile != "" {
+			t.Errorf("expected empty video_profile, got %q", resp.VideoProfile)
+		}
+		if resp.PixelFormat != "" {
+			t.Errorf("expected empty pixel_format, got %q", resp.PixelFormat)
+		}
+		if resp.ExpectedBitDepth != 0 {
+			t.Errorf("expected 0 expected_bit_depth, got %d", resp.ExpectedBitDepth)
+		}
+
+		// Verify JSON serialization omits nil and zero fields
+		data, err := json.Marshal(resp)
+		if err != nil {
+			t.Fatalf("json.Marshal failed: %v", err)
+		}
+		jsonStr := string(data)
+		for _, omitted := range []string{"prioritize_speed", "spatial_aq", "realtime", "video_profile", "pixel_format", "expected_bit_depth", "recipe_version", "recipe_digest", "plan_digest"} {
+			if strings.Contains(jsonStr, `"`+omitted+`"`) {
+				t.Errorf("JSON should omit %q, got: %s", omitted, jsonStr)
+			}
+		}
+
+		// Unmarshal back and verify nil remains nil
+		var roundtrip JobStatusResponse
+		if err := json.Unmarshal(data, &roundtrip); err != nil {
+			t.Fatalf("json.Unmarshal failed: %v", err)
+		}
+		if roundtrip.PrioritizeSpeed != nil {
+			t.Errorf("unmarshaled prioritize_speed should be nil, got: %v", roundtrip.PrioritizeSpeed)
+		}
+		if roundtrip.SpatialAQ != nil {
+			t.Errorf("unmarshaled spatial_aq should be nil, got: %v", roundtrip.SpatialAQ)
+		}
+		if roundtrip.Realtime != nil {
+			t.Errorf("unmarshaled realtime should be nil, got: %v", roundtrip.Realtime)
+		}
+	})
 }
