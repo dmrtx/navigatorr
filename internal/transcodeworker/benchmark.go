@@ -430,10 +430,41 @@ func (w *Worker) CleanBenchmarkSamples(jobID string) error {
 		return fmt.Errorf("invalid jobID for cleanup: path traversal")
 	}
 
+	// Reject if jobDir itself is a symlink
+	if jfi, err := os.Lstat(jobDir); err == nil && jfi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("job directory is a symlink: %s (fail closed)", jobDir)
+	}
+
 	samplesDir := filepath.Join(jobDir, "samples")
 	// Double check that samplesDir is strictly child of jobDir and basename is "samples"
 	if filepath.Dir(samplesDir) != jobDir || filepath.Base(samplesDir) != "samples" {
 		return fmt.Errorf("refusing to clean non-sample directory: %s", samplesDir)
+	}
+
+	// Lstat check before remove: if samplesDir is a symlink, remove ONLY the symlink itself, never follow!
+	fi, err := os.Lstat(samplesDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return os.Remove(samplesDir)
+	}
+
+	// Path target evaluation before RemoveAll: verify real target is inside real jobDir
+	realJobDir, err := filepath.EvalSymlinks(jobDir)
+	if err != nil {
+		return fmt.Errorf("resolving job directory: %w", err)
+	}
+	realSamplesDir, err := filepath.EvalSymlinks(samplesDir)
+	if err != nil {
+		return fmt.Errorf("resolving samples directory: %w", err)
+	}
+	relReal, err := filepath.Rel(realJobDir, realSamplesDir)
+	if err != nil || relReal == "." || relReal != "samples" || strings.HasPrefix(relReal, "..") {
+		return fmt.Errorf("samples directory target %s escapes job directory %s", realSamplesDir, realJobDir)
 	}
 
 	return os.RemoveAll(samplesDir)
@@ -549,9 +580,11 @@ func (w *Worker) BenchmarkCancel(ctx context.Context, jobID string) (transcode.B
 		if IsBenchmarkExecutionAlive(record) {
 			proc, err := os.FindProcess(record.PID)
 			if err == nil {
+				_ = syscall.Kill(-record.PID, syscall.SIGTERM)
 				_ = proc.Signal(syscall.SIGTERM)
-				time.Sleep(50 * time.Millisecond)
+				time.Sleep(150 * time.Millisecond)
 				if IsBenchmarkExecutionAlive(record) {
+					_ = syscall.Kill(-record.PID, syscall.SIGKILL)
 					_ = proc.Signal(syscall.SIGKILL)
 				}
 			}

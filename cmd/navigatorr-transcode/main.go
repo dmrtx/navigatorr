@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/jakenesler/navigatorr/internal/transcodeworker"
 	"github.com/jakenesler/navigatorr/transcode"
@@ -108,7 +110,9 @@ func main() {
 			os.Exit(1)
 		}
 		jobID := subcmdArgs[0]
-		if err := worker.InternalRun(ctx, jobID); err != nil {
+		sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+		defer stop()
+		if err := worker.InternalRun(sigCtx, jobID); err != nil {
 			fmt.Fprintf(os.Stderr, "internal_run failed for job %s: %v\n", jobID, err)
 			os.Exit(1)
 		}
@@ -201,7 +205,9 @@ func main() {
 		if len(subcmdArgs) >= 2 {
 			runToken = subcmdArgs[1]
 		}
-		if err := worker.InternalBenchmark(ctx, jobID, runToken); err != nil {
+		sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+		defer stop()
+		if err := worker.InternalBenchmark(sigCtx, jobID, runToken); err != nil {
 			fmt.Fprintf(os.Stderr, "internal_benchmark failed for job %s: %v\n", jobID, err)
 			os.Exit(1)
 		}
