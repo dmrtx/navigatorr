@@ -2,6 +2,8 @@ package transcodeworker
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,6 +28,8 @@ type BenchmarkRecord struct {
 	Samples          []transcode.BenchmarkSampleWindow `json:"samples"`
 	Candidates       []transcode.BenchmarkCandidate    `json:"candidates"`
 	RequestDigest    string                            `json:"request_digest"`
+	Attempt          int                               `json:"attempt"`
+	RunToken         string                            `json:"run_token"`
 	PID              int                               `json:"pid"`
 	ProcessStartTime string                            `json:"process_start_time,omitempty"`
 	CreatedAt        time.Time                         `json:"created_at"`
@@ -103,9 +107,50 @@ func SaveBenchmarkAtomic(path string, record *BenchmarkRecord) error {
 	return nil
 }
 
-// IsBenchmarkProcessAlive checks whether the background process for a benchmark job is alive and matches its identity.
-func IsBenchmarkProcessAlive(b *BenchmarkRecord) bool {
-	if b == nil || b.PID <= 1 {
+type jobFileLock struct {
+	file *os.File
+}
+
+func acquireJobLock(jobDir string) (*jobFileLock, error) {
+	if err := os.MkdirAll(jobDir, 0755); err != nil {
+		return nil, fmt.Errorf("creating job dir for lock: %w", err)
+	}
+	lockFile := filepath.Join(jobDir, ".lock")
+	f, err := os.OpenFile(lockFile, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, fmt.Errorf("opening lock file %s: %w", lockFile, err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("locking %s: %w", lockFile, err)
+	}
+	return &jobFileLock{file: f}, nil
+}
+
+func (l *jobFileLock) Unlock() {
+	if l != nil && l.file != nil {
+		_ = syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN)
+		_ = l.file.Close()
+	}
+}
+
+func generateRunToken() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generating run token entropy: %w", err)
+	}
+	return fmt.Sprintf("run-%d-%s", time.Now().UnixNano(), hex.EncodeToString(b)), nil
+}
+
+// IsBenchmarkExecutionAlive rigorously verifies whether the background process for a benchmark
+// run is alive and matches its exact execution identity.
+// It guards against PID recycling and foreign processes by verifying:
+// 1. PID > 1 and process responds to signal 0.
+// 2. The record has a non-empty RunToken.
+// 3. The process's lstart matches ProcessStartTime (if recorded).
+// 4. The process's command line contains "_internal_benchmark", the exact RunToken, and the exact job ID.
+func IsBenchmarkExecutionAlive(b *BenchmarkRecord) bool {
+	if b == nil || b.PID <= 1 || b.RunToken == "" {
 		return false
 	}
 	if !IsProcessAlive(b.PID) {
@@ -118,7 +163,13 @@ func IsBenchmarkProcessAlive(b *BenchmarkRecord) bool {
 	if b.ProcessStartTime != "" && startTime != "" && b.ProcessStartTime != startTime {
 		return false
 	}
-	if strings.Contains(cmd, "_internal_benchmark") && !strings.Contains(cmd, b.ID) {
+	if !strings.Contains(cmd, "_internal_benchmark") {
+		return false
+	}
+	if !strings.Contains(cmd, b.RunToken) {
+		return false
+	}
+	if !strings.Contains(cmd, b.ID) {
 		return false
 	}
 	return true
@@ -134,6 +185,27 @@ func (w *Worker) getBenchmarkRunner() BenchmarkRunner {
 // SetBenchmarkRunner injects a custom runner for lifecycle testing or future phases.
 func (w *Worker) SetBenchmarkRunner(runner BenchmarkRunner) {
 	w.benchmarkRunner = runner
+}
+
+func (w *Worker) spawnInternalBenchmark(selfExe, configPath, jobID, runToken string) (*exec.Cmd, error) {
+	args := []string{}
+	if configPath != "" {
+		args = append(args, "--config", configPath)
+	}
+	args = append(args, "_internal_benchmark", jobID, runToken)
+
+	cmd := exec.Command(selfExe, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setsid: true, // Independent session so it survives SSH disconnect
+	}
+	cmd.Stdin = nil
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	return cmd, nil
 }
 
 // BenchmarkSubmit initiates a detached benchmark job with strict validation, idempotency, and workspace management.
@@ -171,15 +243,23 @@ func (w *Worker) BenchmarkSubmit(ctx context.Context, req transcode.BenchmarkReq
 	cleanStateDir := filepath.Clean(w.cfg.StateDir)
 	jobDir := filepath.Join(cleanStateDir, req.ID)
 	rel, err := filepath.Rel(cleanStateDir, jobDir)
-	if err != nil || rel == "." || strings.HasPrefix(rel, "..") || strings.Contains(rel, "/") || strings.Contains(rel, "\\") {
+	if err != nil || rel == "." || rel != req.ID || strings.HasPrefix(rel, "..") || strings.Contains(rel, "/") || strings.Contains(rel, "\\") {
 		resp.Error = fmt.Sprintf("invalid benchmark job id %q (path traversal attempt)", req.ID)
 		return resp, fmt.Errorf("invalid benchmark job id: path traversal")
 	}
 
+	// Single-writer mutual exclusion via advisory file lock
+	lock, err := acquireJobLock(jobDir)
+	if err != nil {
+		resp.Error = fmt.Sprintf("acquiring job lock for %s: %v", req.ID, err)
+		return resp, err
+	}
+	defer lock.Unlock()
+
 	// Collision check: reject if a transcode job already exists with this ID
 	transcodeJobFile := filepath.Join(jobDir, "job.json")
 	if _, err := os.Stat(transcodeJobFile); err == nil {
-		resp.Error = fmt.Sprintf("job ID collision: %q already exists as a transcode job", req.ID)
+		resp.Error = fmt.Sprintf("job ID collision: %q already exists as a transcode job (fail closed)", req.ID)
 		return resp, fmt.Errorf("job ID collision with transcode job")
 	}
 
@@ -190,31 +270,97 @@ func (w *Worker) BenchmarkSubmit(ctx context.Context, req transcode.BenchmarkReq
 		return resp, err
 	}
 
-	// Idempotency check: if benchmark record already exists
+	// Idempotency and retry check
 	if existing, err := LoadBenchmark(benchFile); err == nil && existing != nil {
+		// Collision: same ID with different request digest must fail closed
 		if existing.RequestDigest != reqDigest {
 			resp.Error = fmt.Sprintf("job ID collision: existing benchmark job %q has different request digest (fail closed)", req.ID)
 			return resp, fmt.Errorf("job ID collision with mismatched digest")
 		}
 
-		if existing.Status == "running" || existing.Status == "queued" {
-			if IsBenchmarkProcessAlive(existing) {
+		switch existing.Status {
+		case "queued", "running":
+			if IsBenchmarkExecutionAlive(existing) {
+				// In-flight idempotent transport retry: return active status without spawning a second worker
 				resp.Status = existing.Status
 				return resp, nil
 			}
-			// Process died without updating status
+			// Process died prematurely without updating status; reconcile to failed
 			existing.Status = "failed"
 			existing.FinishedAt = time.Now().UTC()
 			existing.Error = "process terminated unexpectedly"
 			_ = SaveBenchmarkAtomic(benchFile, existing)
 			_ = w.CleanBenchmarkSamples(req.ID)
-		} else {
-			resp.Status = existing.Status
+			// Reconciled to terminal failed; proceed to retry flow below
+
+		case "completed":
+			// Benchmark already finished successfully
+			resp.Status = "completed"
 			return resp, nil
 		}
+
+		// Existing status is failed or cancelled: explicit retry with new attempt and run token
+		activeJobs, err := w.countActiveJobs(req.ID)
+		if err != nil {
+			resp.Error = fmt.Sprintf("checking active jobs: %v", err)
+			return resp, err
+		}
+		if activeJobs >= w.cfg.MaxParallelJobs {
+			resp.Error = fmt.Sprintf("worker busy: maximum parallel jobs (%d) reached", w.cfg.MaxParallelJobs)
+			return resp, fmt.Errorf("worker busy: max parallel jobs reached")
+		}
+
+		newRunToken, err := generateRunToken()
+		if err != nil {
+			resp.Error = fmt.Sprintf("generating run token: %v", err)
+			return resp, err
+		}
+
+		// Clean scratch workspace and recreate empty samples directory
+		_ = w.CleanBenchmarkSamples(req.ID)
+		samplesDir := filepath.Join(jobDir, "samples")
+		if err := os.MkdirAll(samplesDir, 0755); err != nil {
+			resp.Error = fmt.Sprintf("recreating samples workspace: %v", err)
+			return resp, err
+		}
+
+		existing.Attempt++
+		existing.RunToken = newRunToken
+		existing.Status = "queued"
+		existing.Error = ""
+		existing.PID = 0
+		existing.ProcessStartTime = ""
+		existing.StartedAt = time.Time{}
+		existing.FinishedAt = time.Time{}
+		existing.ExitCode = 0
+
+		if err := SaveBenchmarkAtomic(benchFile, existing); err != nil {
+			resp.Error = fmt.Sprintf("saving retry benchmark state: %v", err)
+			_ = w.CleanBenchmarkSamples(req.ID)
+			return resp, err
+		}
+
+		cmd, err := w.spawnInternalBenchmark(selfExe, configPath, req.ID, newRunToken)
+		if err != nil {
+			existing.Status = "failed"
+			existing.Error = fmt.Sprintf("spawning benchmark process retry: %v", err)
+			existing.FinishedAt = time.Now().UTC()
+			_ = SaveBenchmarkAtomic(benchFile, existing)
+			_ = w.CleanBenchmarkSamples(req.ID)
+			resp.Error = existing.Error
+			return resp, err
+		}
+
+		existing.PID = cmd.Process.Pid
+		_, lstart, _ := GetProcessIdentity(existing.PID)
+		existing.ProcessStartTime = lstart
+		_ = SaveBenchmarkAtomic(benchFile, existing)
+
+		resp.Status = "queued"
+		return resp, nil
 	}
 
-	// Check concurrency / busy status against shared worker slot capacity
+	// New benchmark job: verify slot capacity
 	activeJobs, err := w.countActiveJobs(req.ID)
 	if err != nil {
 		resp.Error = fmt.Sprintf("checking active jobs: %v", err)
@@ -225,10 +371,17 @@ func (w *Worker) BenchmarkSubmit(ctx context.Context, req transcode.BenchmarkReq
 		return resp, fmt.Errorf("worker busy: max parallel jobs reached")
 	}
 
-	// Create workspace: only StateDir/<benchmark-id>/ and a child samples/ workspace
+	// Create workspace: only StateDir/<benchmark-id>/samples
 	samplesDir := filepath.Join(jobDir, "samples")
 	if err := os.MkdirAll(samplesDir, 0755); err != nil {
 		resp.Error = fmt.Sprintf("creating samples workspace: %v", err)
+		return resp, err
+	}
+
+	runToken, err := generateRunToken()
+	if err != nil {
+		resp.Error = fmt.Sprintf("generating run token: %v", err)
+		_ = w.CleanBenchmarkSamples(req.ID)
 		return resp, err
 	}
 
@@ -242,6 +395,8 @@ func (w *Worker) BenchmarkSubmit(ctx context.Context, req transcode.BenchmarkReq
 		Samples:         req.Samples,
 		Candidates:      req.Candidates,
 		RequestDigest:   reqDigest,
+		Attempt:         1,
+		RunToken:        runToken,
 		CreatedAt:       time.Now().UTC(),
 	}
 
@@ -251,22 +406,8 @@ func (w *Worker) BenchmarkSubmit(ctx context.Context, req transcode.BenchmarkReq
 		return resp, err
 	}
 
-	// Launch decoupled runner process
-	args := []string{}
-	if configPath != "" {
-		args = append(args, "--config", configPath)
-	}
-	args = append(args, "_internal_benchmark", req.ID)
-
-	cmd := exec.Command(selfExe, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setsid: true, // Independent session so it survives SSH disconnect
-	}
-	cmd.Stdin = nil
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-
-	if err := cmd.Start(); err != nil {
+	cmd, err := w.spawnInternalBenchmark(selfExe, configPath, req.ID, runToken)
+	if err != nil {
 		record.Status = "failed"
 		record.Error = fmt.Sprintf("spawning benchmark process: %v", err)
 		record.FinishedAt = time.Now().UTC()
@@ -276,6 +417,11 @@ func (w *Worker) BenchmarkSubmit(ctx context.Context, req transcode.BenchmarkReq
 		return resp, err
 	}
 
+	record.PID = cmd.Process.Pid
+	_, lstart, _ := GetProcessIdentity(record.PID)
+	record.ProcessStartTime = lstart
+	_ = SaveBenchmarkAtomic(benchFile, record)
+
 	resp.Status = "queued"
 	return resp, nil
 }
@@ -284,15 +430,15 @@ func (w *Worker) BenchmarkSubmit(ctx context.Context, req transcode.BenchmarkReq
 // Never deletes the job record or the source file.
 func (w *Worker) CleanBenchmarkSamples(jobID string) error {
 	cleanID := strings.TrimSpace(jobID)
-	if cleanID == "" {
-		return errors.New("jobID is required")
+	if err := transcode.ValidateBenchmarkJobID(cleanID); err != nil {
+		return fmt.Errorf("invalid jobID for cleanup: %w", err)
 	}
 
 	cleanStateDir := filepath.Clean(w.cfg.StateDir)
 	jobDir := filepath.Join(cleanStateDir, cleanID)
 
 	rel, err := filepath.Rel(cleanStateDir, jobDir)
-	if err != nil || rel == "." || strings.HasPrefix(rel, "..") || strings.Contains(rel, "/") || strings.Contains(rel, "\\") {
+	if err != nil || rel == "." || rel != cleanID || strings.HasPrefix(rel, "..") || strings.Contains(rel, "/") || strings.Contains(rel, "\\") {
 		return fmt.Errorf("invalid jobID for cleanup: path traversal")
 	}
 
@@ -313,15 +459,15 @@ func (w *Worker) BenchmarkStatus(ctx context.Context, jobID string) (transcode.B
 		ID:              cleanID,
 	}
 
-	if cleanID == "" {
-		st.Error = "jobID is required"
-		return st, errors.New("jobID is required")
+	if err := transcode.ValidateBenchmarkJobID(cleanID); err != nil {
+		st.Error = err.Error()
+		return st, err
 	}
 
 	cleanStateDir := filepath.Clean(w.cfg.StateDir)
 	jobDir := filepath.Join(cleanStateDir, cleanID)
 	rel, err := filepath.Rel(cleanStateDir, jobDir)
-	if err != nil || rel == "." || strings.HasPrefix(rel, "..") || strings.Contains(rel, "/") || strings.Contains(rel, "\\") {
+	if err != nil || rel == "." || rel != cleanID || strings.HasPrefix(rel, "..") || strings.Contains(rel, "/") || strings.Contains(rel, "\\") {
 		st.Error = "invalid jobID"
 		return st, fmt.Errorf("invalid jobID: path traversal")
 	}
@@ -337,6 +483,8 @@ func (w *Worker) BenchmarkStatus(ctx context.Context, jobID string) (transcode.B
 	st.Metric = record.Metric
 	st.SamplesPlanned = len(record.Samples)
 	st.CandidatesCount = len(record.Candidates)
+	st.Attempt = record.Attempt
+	st.RunToken = record.RunToken
 	st.CreatedAt = record.CreatedAt
 	st.StartedAt = record.StartedAt
 	st.FinishedAt = record.FinishedAt
@@ -344,15 +492,29 @@ func (w *Worker) BenchmarkStatus(ctx context.Context, jobID string) (transcode.B
 	st.Status = record.Status
 
 	if record.Status == "running" || record.Status == "queued" {
-		if !IsBenchmarkProcessAlive(record) && record.PID > 0 {
-			record.Status = "failed"
-			record.FinishedAt = time.Now().UTC()
-			record.Error = "process terminated unexpectedly"
-			_ = SaveBenchmarkAtomic(benchFile, record)
-			_ = w.CleanBenchmarkSamples(cleanID)
-			st.Status = record.Status
-			st.Error = record.Error
-			st.FinishedAt = record.FinishedAt
+		if !IsBenchmarkExecutionAlive(record) {
+			lock, err := acquireJobLock(jobDir)
+			if err == nil {
+				defer lock.Unlock()
+				latest, lErr := LoadBenchmark(benchFile)
+				if lErr == nil && latest != nil && (latest.Status == "running" || latest.Status == "queued") {
+					if !IsBenchmarkExecutionAlive(latest) {
+						latest.Status = "failed"
+						latest.FinishedAt = time.Now().UTC()
+						latest.Error = "process terminated unexpectedly"
+						_ = SaveBenchmarkAtomic(benchFile, latest)
+						_ = w.CleanBenchmarkSamples(cleanID)
+						st.Status = latest.Status
+						st.Error = latest.Error
+						st.FinishedAt = latest.FinishedAt
+					} else {
+						st.Status = latest.Status
+						st.Error = latest.Error
+						st.StartedAt = latest.StartedAt
+						st.FinishedAt = latest.FinishedAt
+					}
+				}
+			}
 		}
 	}
 
@@ -367,15 +529,27 @@ func (w *Worker) BenchmarkCancel(ctx context.Context, jobID string) (transcode.B
 		ID:              cleanID,
 	}
 
-	if cleanID == "" {
-		resp.Error = "jobID is required"
-		return resp, errors.New("jobID is required")
+	if err := transcode.ValidateBenchmarkJobID(cleanID); err != nil {
+		resp.Error = err.Error()
+		return resp, err
 	}
 
 	cleanStateDir := filepath.Clean(w.cfg.StateDir)
 	jobDir := filepath.Join(cleanStateDir, cleanID)
-	benchFile := filepath.Join(jobDir, "benchmark.json")
+	rel, err := filepath.Rel(cleanStateDir, jobDir)
+	if err != nil || rel == "." || rel != cleanID || strings.HasPrefix(rel, "..") || strings.Contains(rel, "/") || strings.Contains(rel, "\\") {
+		resp.Error = "invalid jobID: path traversal attempt"
+		return resp, fmt.Errorf("invalid jobID: path traversal")
+	}
 
+	lock, err := acquireJobLock(jobDir)
+	if err != nil {
+		resp.Error = fmt.Sprintf("acquiring job lock: %v", err)
+		return resp, err
+	}
+	defer lock.Unlock()
+
+	benchFile := filepath.Join(jobDir, "benchmark.json")
 	record, err := LoadBenchmark(benchFile)
 	if err != nil {
 		resp.Error = fmt.Sprintf("benchmark job not found: %v", err)
@@ -383,17 +557,18 @@ func (w *Worker) BenchmarkCancel(ctx context.Context, jobID string) (transcode.B
 	}
 
 	if record.Status == "queued" || record.Status == "running" {
-		if record.PID > 1 && IsProcessAlive(record.PID) {
+		// Fail-closed: only signal if the process is alive and strictly matches the job's RunToken identity
+		if IsBenchmarkExecutionAlive(record) {
 			proc, err := os.FindProcess(record.PID)
 			if err == nil {
 				_ = proc.Signal(syscall.SIGTERM)
-				// Small grace check
 				time.Sleep(50 * time.Millisecond)
-				if IsProcessAlive(record.PID) {
+				if IsBenchmarkExecutionAlive(record) {
 					_ = proc.Signal(syscall.SIGKILL)
 				}
 			}
 		}
+		// Safely reconcile status to cancelled
 		record.Status = "cancelled"
 		record.FinishedAt = time.Now().UTC()
 		record.Error = "cancelled by coordinator"
@@ -407,17 +582,38 @@ func (w *Worker) BenchmarkCancel(ctx context.Context, jobID string) (transcode.B
 }
 
 // InternalBenchmark is invoked by the background decoupled process to execute the benchmark.
-func (w *Worker) InternalBenchmark(ctx context.Context, jobID string) error {
-	jobDir := filepath.Join(w.cfg.StateDir, jobID)
+func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) error {
+	if err := transcode.ValidateBenchmarkJobID(jobID); err != nil {
+		return fmt.Errorf("invalid jobID: %w", err)
+	}
+
+	cleanStateDir := filepath.Clean(w.cfg.StateDir)
+	jobDir := filepath.Join(cleanStateDir, jobID)
 	benchFile := filepath.Join(jobDir, "benchmark.json")
+
+	// Phase 1: Verify token, transition from queued -> running under lock
+	lock, err := acquireJobLock(jobDir)
+	if err != nil {
+		return fmt.Errorf("acquiring lock for %s: %w", jobID, err)
+	}
 
 	record, err := LoadBenchmark(benchFile)
 	if err != nil {
+		lock.Unlock()
 		return fmt.Errorf("loading benchmark %s: %w", jobID, err)
 	}
 
+	// Exact run token verification (FAIL CLOSED)
+	if record.RunToken == "" || record.RunToken != runToken {
+		lock.Unlock()
+		return fmt.Errorf("run token mismatch for benchmark %s (expected %q, got %q): failing closed",
+			jobID, record.RunToken, runToken)
+	}
+
+	// Check if already cancelled or terminal before we even started
 	if record.Status != "queued" && record.Status != "running" {
-		return fmt.Errorf("benchmark %s is not in runnable state (status=%s)", jobID, record.Status)
+		lock.Unlock()
+		return fmt.Errorf("benchmark %s is in non-runnable state (status=%s)", jobID, record.Status)
 	}
 
 	record.PID = os.Getpid()
@@ -425,28 +621,57 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID string) error {
 		record.ProcessStartTime = lstart
 	}
 	record.Status = "running"
-	record.StartedAt = time.Now().UTC()
+	if record.StartedAt.IsZero() {
+		record.StartedAt = time.Now().UTC()
+	}
 	if err := SaveBenchmarkAtomic(benchFile, record); err != nil {
+		lock.Unlock()
 		return fmt.Errorf("updating benchmark to running: %w", err)
 	}
+	lock.Unlock()
 
+	// Phase 2: Execute benchmark runner outside lock so cancellation/status can acquire lock
 	runner := w.getBenchmarkRunner()
 	runErr := runner.RunBenchmark(ctx, w, record)
 
-	// Clean samples workspace regardless of outcome; record persists
+	// Clean samples workspace regardless of outcome
 	_ = w.CleanBenchmarkSamples(jobID)
 
+	// Phase 3: Transition to terminal state under lock
+	lock, err = acquireJobLock(jobDir)
+	if err != nil {
+		return fmt.Errorf("re-acquiring lock for completion: %w", err)
+	}
+	defer lock.Unlock()
+
+	latest, err := LoadBenchmark(benchFile)
+	if err != nil {
+		return fmt.Errorf("loading benchmark for completion %s: %w", jobID, err)
+	}
+
+	// If run token changed (e.g. new attempt was started), do not touch state
+	if latest.RunToken != runToken {
+		return nil
+	}
+
+	// If job was cancelled while runner was executing, preserve cancelled status!
+	if latest.Status == "cancelled" {
+		return nil
+	}
+
+	// Monotonic transition to completed or failed
 	if runErr != nil {
-		record.Status = "failed"
-		record.Error = runErr.Error()
-		record.FinishedAt = time.Now().UTC()
-		_ = SaveBenchmarkAtomic(benchFile, record)
+		latest.Status = "failed"
+		latest.Error = runErr.Error()
+		latest.FinishedAt = time.Now().UTC()
+		_ = SaveBenchmarkAtomic(benchFile, latest)
 		return runErr
 	}
 
-	record.Status = "completed"
-	record.FinishedAt = time.Now().UTC()
-	if err := SaveBenchmarkAtomic(benchFile, record); err != nil {
+	latest.Status = "completed"
+	latest.FinishedAt = time.Now().UTC()
+	latest.Error = ""
+	if err := SaveBenchmarkAtomic(benchFile, latest); err != nil {
 		return fmt.Errorf("updating benchmark to completed: %w", err)
 	}
 

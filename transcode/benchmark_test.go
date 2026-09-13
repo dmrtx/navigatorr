@@ -53,19 +53,65 @@ func TestValidateBenchmarkRequest_ProtocolMismatch(t *testing.T) {
 	}
 }
 
-func TestValidateBenchmarkRequest_InvalidJobIDs(t *testing.T) {
+func TestValidateBenchmarkJobID(t *testing.T) {
+	validIDs := []string{
+		"bench-1",
+		"bench-job123",
+		"bench-my_benchmark-v1.0",
+		"bench-ABCDEF123456",
+		"bench-" + strings.Repeat("a", MaxBenchmarkIDLength-6),
+	}
+	for _, id := range validIDs {
+		if err := ValidateBenchmarkJobID(id); err != nil {
+			t.Errorf("expected %q to be valid job ID, got: %v", id, err)
+		}
+	}
+
 	invalidIDs := []string{
 		"",
 		"   ",
-		"regular-job-123", // missing bench- prefix
-		"job-bench-123",   // bench- not at start
-		"bench-",          // empty suffix
-		"bench-../etc",    // path traversal
-		"bench-foo/bar",   // path separator
-		"bench-foo\\bar",  // path separator
-		"bench-job@123",   // invalid character
-		"bench-job$123",   // shell special character
-		"bench-" + strings.Repeat("a", MaxBenchmarkIDLength), // exceeds length
+		"regular-job-123",   // missing bench- prefix
+		"job-bench-123",     // bench- not at start
+		"bench-",            // length 6 < 7
+		"bench-..",          // path traversal
+		"bench-../etc",      // path traversal
+		"bench-foo/bar",     // path separator
+		"bench-foo\\bar",    // path separator
+		"bench-job:123",     // illegal colon
+		"bench-job\x00123",  // null byte
+		"bench-foo%2fbar",   // url encoded slash
+		"bench-foo%5cbar",   // url encoded backslash
+		"bench-.hidden",     // dot immediately following bench-
+		"bench-_underscore", // underscore immediately following bench-
+		"bench--dash",       // dash immediately following bench-
+		"bench-samples",     // reserved name
+		"bench-scratch",     // reserved name
+		"bench-lock",        // reserved name
+		"bench-con",         // reserved DOS name
+		"bench-prn",         // reserved DOS name
+		"bench-aux",         // reserved DOS name
+		"bench-nul",         // reserved DOS name
+		"bench-com1",        // reserved DOS name
+		"bench-job@123",     // invalid character
+		"bench-job$123",     // shell special character
+		"bench-" + strings.Repeat("a", MaxBenchmarkIDLength-5), // 129 chars exceeds MaxBenchmarkIDLength
+	}
+
+	for _, id := range invalidIDs {
+		if err := ValidateBenchmarkJobID(id); err == nil {
+			t.Errorf("expected error for invalid ID %q, got nil", id)
+		}
+	}
+}
+
+func TestValidateBenchmarkRequest_InvalidJobIDs(t *testing.T) {
+	invalidIDs := []string{
+		"",
+		"regular-job-123",
+		"bench-",
+		"bench-../etc",
+		"bench-samples",
+		"bench-foo%2fbar",
 	}
 
 	for _, id := range invalidIDs {

@@ -14,8 +14,8 @@ import (
 
 var (
 	// validBenchmarkJobIDRegex enforces the distinct benchmark namespace and safe filesystem identifier:
-	// must start with "bench-" followed by alphanumeric characters, underscores, hyphens, or dots.
-	validBenchmarkJobIDRegex = regexp.MustCompile(`^bench-[a-zA-Z0-9_.-]+$`)
+	// must start with "bench-" followed by an alphanumeric character, and then alphanumeric, underscores, hyphens, or dots.
+	validBenchmarkJobIDRegex = regexp.MustCompile(`^bench-[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 	validCandidateIDRegex    = regexp.MustCompile(`^[a-zA-Z0-9_.-]+$`)
 )
 
@@ -27,6 +27,51 @@ const (
 	// MaxBenchmarkIDLength bounds the length of benchmark job and candidate IDs.
 	MaxBenchmarkIDLength = 128
 )
+
+// ValidateBenchmarkJobID validates that a job ID belongs to the benchmark namespace,
+// has bounded length (7..128), and contains only safe filesystem characters without traversal.
+func ValidateBenchmarkJobID(id string) error {
+	trimmedID := strings.TrimSpace(id)
+	if trimmedID == "" {
+		return errors.New("benchmark job id is required")
+	}
+	if len(trimmedID) < 7 || len(trimmedID) > MaxBenchmarkIDLength {
+		return fmt.Errorf("benchmark job id %q must be between 7 and %d characters", trimmedID, MaxBenchmarkIDLength)
+	}
+	if !strings.HasPrefix(trimmedID, "bench-") {
+		return fmt.Errorf("invalid benchmark job id %q: must begin with required prefix 'bench-'", trimmedID)
+	}
+	if strings.ContainsAny(trimmedID, "/\\:\x00") {
+		return fmt.Errorf("invalid benchmark job id %q: contains illegal characters or path separators", trimmedID)
+	}
+	if strings.Contains(trimmedID, "..") {
+		return fmt.Errorf("invalid benchmark job id %q: path traversal attempt detected", trimmedID)
+	}
+	lowerID := strings.ToLower(trimmedID)
+	if strings.Contains(lowerID, "%2f") || strings.Contains(lowerID, "%5c") {
+		return fmt.Errorf("invalid benchmark job id %q: encoded path traversal detected", trimmedID)
+	}
+	if !validBenchmarkJobIDRegex.MatchString(trimmedID) {
+		return fmt.Errorf("invalid benchmark job id %q: must match regex format ^bench-[a-zA-Z0-9][a-zA-Z0-9_.-]*$", trimmedID)
+	}
+
+	reservedNames := map[string]bool{
+		"bench-samples": true,
+		"bench-scratch": true,
+		"bench-lock":    true,
+		"bench-con":     true,
+		"bench-prn":     true,
+		"bench-aux":     true,
+		"bench-nul":     true,
+		"bench-com1":    true,
+		"bench-com2":    true,
+		"bench-lpt1":    true,
+	}
+	if reservedNames[lowerID] {
+		return fmt.Errorf("invalid benchmark job id %q: reserved filesystem identifier", trimmedID)
+	}
+	return nil
+}
 
 // BenchmarkCandidate specifies one encoder candidate to evaluate during a benchmark.
 // Arbitrary ffmpeg arguments are strictly forbidden.
@@ -90,6 +135,8 @@ type BenchmarkStatus struct {
 	Error           string    `json:"error,omitempty"`
 	SamplesPlanned  int       `json:"samples_planned"`
 	CandidatesCount int       `json:"candidates_count"`
+	Attempt         int       `json:"attempt,omitempty"`
+	RunToken        string    `json:"run_token,omitempty"`
 	CreatedAt       time.Time `json:"created_at"`
 	StartedAt       time.Time `json:"started_at,omitempty"`
 	FinishedAt      time.Time `json:"finished_at,omitempty"`
@@ -120,15 +167,8 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 			req.ProtocolVersion, WorkerProtocolVersion)
 	}
 
-	trimmedID := strings.TrimSpace(req.ID)
-	if trimmedID == "" {
-		return errors.New("benchmark request id is required")
-	}
-	if len(trimmedID) > MaxBenchmarkIDLength {
-		return fmt.Errorf("benchmark request id exceeds maximum length (%d characters)", MaxBenchmarkIDLength)
-	}
-	if !validBenchmarkJobIDRegex.MatchString(trimmedID) {
-		return fmt.Errorf("invalid benchmark request id %q: must start with 'bench-' and contain only alphanumeric, dash, dot, or underscore", trimmedID)
+	if err := ValidateBenchmarkJobID(req.ID); err != nil {
+		return err
 	}
 
 	trimmedSource := strings.TrimSpace(req.SourcePath)

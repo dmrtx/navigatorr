@@ -260,14 +260,19 @@ func IsPathWithinAllowedRoots(path string, allowedRoots []string) bool {
 
 // Submit initiates a detached transcode job.
 func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configPath string) (SubmitResponse, error) {
-	if strings.TrimSpace(req.ID) == "" {
+	trimmedID := strings.TrimSpace(req.ID)
+	if trimmedID == "" {
 		return SubmitResponse{Error: "missing request id"}, errors.New("missing request id")
 	}
+	if strings.HasPrefix(strings.ToLower(trimmedID), "bench-") {
+		return SubmitResponse{ID: trimmedID, Error: "transcode job ID cannot use reserved benchmark prefix 'bench-' (fail closed)"},
+			errors.New("transcode job ID cannot use reserved benchmark prefix 'bench-'")
+	}
 	if strings.TrimSpace(req.SourcePath) == "" {
-		return SubmitResponse{ID: req.ID, Error: "missing source_path"}, errors.New("missing source_path")
+		return SubmitResponse{ID: trimmedID, Error: "missing source_path"}, errors.New("missing source_path")
 	}
 	if strings.TrimSpace(req.CandidatePath) == "" {
-		return SubmitResponse{ID: req.ID, Error: "missing candidate_path"}, errors.New("missing candidate_path")
+		return SubmitResponse{ID: trimmedID, Error: "missing candidate_path"}, errors.New("missing candidate_path")
 	}
 
 	cleanSource := filepath.Clean(req.SourcePath)
@@ -275,37 +280,44 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 
 	// Reject candidate == source (FAIL CLOSED)
 	if cleanSource == cleanCandidate {
-		return SubmitResponse{ID: req.ID, Error: "candidate_path cannot equal source_path (fail closed)"},
+		return SubmitResponse{ID: trimmedID, Error: "candidate_path cannot equal source_path (fail closed)"},
 			errors.New("candidate_path cannot equal source_path")
 	}
 
 	// Reject source outside allowed roots (FAIL CLOSED)
 	if !IsPathWithinAllowedRoots(cleanSource, w.cfg.AllowedRoots) {
-		return SubmitResponse{ID: req.ID, Error: fmt.Sprintf("source_path %q is outside allowed roots %v (fail closed)", cleanSource, w.cfg.AllowedRoots)},
+		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("source_path %q is outside allowed roots %v (fail closed)", cleanSource, w.cfg.AllowedRoots)},
 			fmt.Errorf("source_path outside allowed roots: %s", cleanSource)
 	}
 
 	// Reject candidate outside allowed roots (FAIL CLOSED)
 	if !IsPathWithinAllowedRoots(cleanCandidate, w.cfg.AllowedRoots) {
-		return SubmitResponse{ID: req.ID, Error: fmt.Sprintf("candidate_path %q is outside allowed roots %v (fail closed)", cleanCandidate, w.cfg.AllowedRoots)},
+		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("candidate_path %q is outside allowed roots %v (fail closed)", cleanCandidate, w.cfg.AllowedRoots)},
 			fmt.Errorf("candidate_path outside allowed roots: %s", cleanCandidate)
 	}
 
 	// Verify source exists and is not directory
 	fi, err := os.Stat(cleanSource)
 	if err != nil {
-		return SubmitResponse{ID: req.ID, Error: fmt.Sprintf("source_path %q not accessible: %v", cleanSource, err)},
+		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("source_path %q not accessible: %v", cleanSource, err)},
 			fmt.Errorf("source_path not accessible: %w", err)
 	}
 	if fi.IsDir() {
-		return SubmitResponse{ID: req.ID, Error: fmt.Sprintf("source_path %q is a directory", cleanSource)},
+		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("source_path %q is a directory", cleanSource)},
 			fmt.Errorf("source_path %q is a directory", cleanSource)
 	}
 
-	jobDir := filepath.Join(w.cfg.StateDir, req.ID)
+	cleanStateDir := filepath.Clean(w.cfg.StateDir)
+	jobDir := filepath.Join(cleanStateDir, trimmedID)
+	rel, err := filepath.Rel(cleanStateDir, jobDir)
+	if err != nil || rel == "." || rel != trimmedID || strings.HasPrefix(rel, "..") || strings.Contains(rel, "/") || strings.Contains(rel, "\\") {
+		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("invalid transcode job id %q (path traversal attempt)", trimmedID)},
+			fmt.Errorf("invalid transcode job id: path traversal")
+	}
+
 	benchFile := filepath.Join(jobDir, "benchmark.json")
 	if _, err := os.Stat(benchFile); err == nil {
-		return SubmitResponse{ID: req.ID, Error: fmt.Sprintf("job ID collision: %q already exists as a benchmark job (fail closed)", req.ID)},
+		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("job ID collision: %q already exists as a benchmark job (fail closed)", trimmedID)},
 			fmt.Errorf("job ID collision with benchmark job")
 	}
 
@@ -421,40 +433,47 @@ func (w *Worker) countActiveJobs(excludeID string) (int, error) {
 
 	count := 0
 	for _, entry := range entries {
-		if !entry.IsDir() || entry.Name() == excludeID {
+		name := entry.Name()
+		if !entry.IsDir() || name == excludeID || strings.HasPrefix(name, ".") {
 			continue
 		}
-		entryDir := filepath.Join(w.cfg.StateDir, entry.Name())
+		entryDir := filepath.Join(w.cfg.StateDir, name)
+
+		// 1. Check for active transcode job
 		jobPath := filepath.Join(entryDir, "job.json")
-		job, err := LoadJob(jobPath)
-		if err == nil {
-			if job.Status == "running" || job.Status == "queued" {
-				if IsJobProcessAlive(job) {
-					count++
-					continue
-				} else if job.PID > 0 {
-					// Clean stale crash or recycled PID
-					job.Status = "failed"
-					job.FinishedAt = time.Now().UTC()
-					job.Error = "process terminated unexpectedly"
-					_ = SaveJobAtomic(jobPath, job)
+		if fi, err := os.Stat(jobPath); err == nil && !fi.IsDir() {
+			job, err := LoadJob(jobPath)
+			if err == nil && job != nil && job.ID == name {
+				if job.Status == "running" || job.Status == "queued" {
+					if IsJobProcessAlive(job) {
+						count++
+						continue
+					} else if job.PID > 0 {
+						// Clean stale crash or recycled PID
+						job.Status = "failed"
+						job.FinishedAt = time.Now().UTC()
+						job.Error = "process terminated unexpectedly"
+						_ = SaveJobAtomic(jobPath, job)
+					}
 				}
 			}
 		}
 
-		// Also check for active benchmark jobs sharing the worker capacity
+		// 2. Check for active benchmark job sharing worker capacity
 		benchPath := filepath.Join(entryDir, "benchmark.json")
-		bench, err := LoadBenchmark(benchPath)
-		if err == nil {
-			if bench.Status == "running" || bench.Status == "queued" {
-				if IsBenchmarkProcessAlive(bench) {
-					count++
-				} else if bench.PID > 0 {
-					bench.Status = "failed"
-					bench.FinishedAt = time.Now().UTC()
-					bench.Error = "process terminated unexpectedly"
-					_ = SaveBenchmarkAtomic(benchPath, bench)
-					_ = w.CleanBenchmarkSamples(entry.Name())
+		if fi, err := os.Stat(benchPath); err == nil && !fi.IsDir() {
+			bench, err := LoadBenchmark(benchPath)
+			if err == nil && bench != nil && bench.ID == name {
+				if bench.Status == "running" || bench.Status == "queued" {
+					if IsBenchmarkExecutionAlive(bench) {
+						count++
+					} else if bench.PID > 0 {
+						bench.Status = "failed"
+						bench.FinishedAt = time.Now().UTC()
+						bench.Error = "process terminated unexpectedly"
+						_ = SaveBenchmarkAtomic(benchPath, bench)
+						_ = w.CleanBenchmarkSamples(name)
+					}
 				}
 			}
 		}
