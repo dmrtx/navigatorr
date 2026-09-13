@@ -93,6 +93,23 @@ func (m *mockTranscodeExecutor) Cancel(ctx context.Context, jobID string) error 
 	return nil
 }
 
+func (m *mockTranscodeExecutor) BenchmarkSubmit(ctx context.Context, req transcode.BenchmarkRequest) (transcode.BenchmarkJob, error) {
+	return transcode.BenchmarkJob{ID: req.ID}, nil
+}
+
+func (m *mockTranscodeExecutor) BenchmarkStatus(ctx context.Context, jobID string) (transcode.BenchmarkStatus, error) {
+	return transcode.BenchmarkStatus{
+		ProtocolVersion: transcode.WorkerProtocolVersion,
+		ID:              jobID,
+		Status:          transcode.StatusCompleted,
+		Progress:        100,
+	}, nil
+}
+
+func (m *mockTranscodeExecutor) BenchmarkCancel(ctx context.Context, jobID string) error {
+	return nil
+}
+
 func createFakeFFprobeScript(t *testing.T, streamsJSON string) string {
 	dir := t.TempDir()
 	probePath := filepath.Join(dir, "ffprobe")
