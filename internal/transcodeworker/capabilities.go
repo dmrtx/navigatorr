@@ -184,6 +184,8 @@ func ParseAvailableEncoders(raw string) map[string]bool {
 }
 
 // ParseAvailableFilters extracts presence of key filters from ffmpeg -filters output.
+// Modern FFmpeg outputs 2-character flag columns (e.g. ".. libvmaf", "TS ssim"),
+// while older FFmpeg versions output 3-character flag columns (e.g. "..C libvmaf", "... scale").
 func ParseAvailableFilters(raw string) map[string]bool {
 	filters := map[string]bool{
 		"libvmaf": false,
@@ -196,8 +198,9 @@ func ParseAvailableFilters(raw string) map[string]bool {
 	for _, line := range strings.Split(raw, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) >= 2 {
-			name := strings.ToLower(fields[1])
-			if len(fields[0]) == 3 {
+			flagLen := len(fields[0])
+			if (flagLen == 2 || flagLen == 3) && fields[1] != "=" {
+				name := strings.ToLower(fields[1])
 				filters[name] = true
 			}
 		}
