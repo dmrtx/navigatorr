@@ -656,4 +656,94 @@ transcode:
 			})
 		}
 	})
+
+	t.Run("local profile overrides preserve all VideoToolbox and optimization fields", func(t *testing.T) {
+		p := writeCfg("override_fields.yaml", `
+transcode:
+  enabled: true
+  executor: "ssh"
+  ssh:
+    host: "192.0.2.10"
+    user: "transcoder"
+    command: "/opt/homebrew/bin/navigatorr-transcode"
+  profiles:
+    custom-main10:
+      container: mkv
+      video:
+        codec: hevc_videotoolbox
+        quality: 68
+        profile: main10
+        pixel_format: p010le
+        prioritize_speed: false
+        spatial_aq: true
+        realtime: false
+      audio: {mode: copy}
+      subtitles: {mode: preserve, convert_incompatible: true}
+      preserve: {metadata: true, chapters: true, attachments: true}
+      resilience:
+        max_attempts: 2
+      optimization:
+        sampling:
+          segment_duration_sec: 12.0
+          segment_count: 4
+        thresholds:
+          min_vmaf: 93.0
+          target_vmaf: 96.0
+          min_ssim: 0.98
+        quality_candidates: [60, 65, 70]
+        bitrate_guidance:
+          preferred_bitrate: 5000000
+          soft_max_bitrate: 9000000
+`)
+		cfg, err := Load(p)
+		if err != nil {
+			t.Fatalf("failed loading config with local profile overrides: %v", err)
+		}
+
+		overrides := cfg.Transcode.recipeOverrides()
+		recProfile, ok := overrides["custom-main10"]
+		if !ok {
+			t.Fatalf("missing custom-main10 in recipe overrides")
+		}
+
+		if recProfile.Video.Profile != "main10" {
+			t.Errorf("expected Video.Profile=main10, got %s", recProfile.Video.Profile)
+		}
+		if recProfile.Video.PixelFormat != "p010le" {
+			t.Errorf("expected Video.PixelFormat=p010le, got %s", recProfile.Video.PixelFormat)
+		}
+		if recProfile.Video.PrioritizeSpeed == nil || *recProfile.Video.PrioritizeSpeed != false {
+			t.Errorf("expected PrioritizeSpeed=false, got %v", recProfile.Video.PrioritizeSpeed)
+		}
+		if recProfile.Video.SpatialAQ == nil || *recProfile.Video.SpatialAQ != true {
+			t.Errorf("expected SpatialAQ=true, got %v", recProfile.Video.SpatialAQ)
+		}
+		if recProfile.Video.Realtime == nil || *recProfile.Video.Realtime != false {
+			t.Errorf("expected Realtime=false, got %v", recProfile.Video.Realtime)
+		}
+
+		if recProfile.Optimization == nil {
+			t.Fatalf("expected Optimization to be preserved, got nil")
+		}
+		if recProfile.Optimization.Sampling == nil || recProfile.Optimization.Sampling.SegmentDurationSec != 12.0 {
+			t.Errorf("unexpected sampling policy: %+v", recProfile.Optimization.Sampling)
+		}
+		if recProfile.Optimization.Thresholds == nil || recProfile.Optimization.Thresholds.MinVMAF != 93.0 {
+			t.Errorf("unexpected thresholds: %+v", recProfile.Optimization.Thresholds)
+		}
+		if len(recProfile.Optimization.QualityCandidates) != 3 || recProfile.Optimization.QualityCandidates[1] != 65 {
+			t.Errorf("unexpected quality candidates: %v", recProfile.Optimization.QualityCandidates)
+		}
+		if recProfile.Optimization.BitrateGuidance == nil || recProfile.Optimization.BitrateGuidance.PreferredBitrate != 5000000 {
+			t.Errorf("unexpected bitrate guidance: %+v", recProfile.Optimization.BitrateGuidance)
+		}
+
+		plan, err := cfg.Transcode.ResolvePlan("custom-main10")
+		if err != nil {
+			t.Fatalf("failed to resolve custom-main10 plan: %v", err)
+		}
+		if plan.VideoProfile != "main10" || plan.PixelFormat != "p010le" || plan.ExpectedBitDepth != 10 {
+			t.Errorf("plan missing resolved knobs: %+v", plan)
+		}
+	})
 }

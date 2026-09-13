@@ -50,8 +50,8 @@ func Validate(b *Bundle) error {
 	if b == nil {
 		return fmt.Errorf("recipe bundle is nil")
 	}
-	if b.SchemaVersion != SupportedSchemaVersion {
-		return fmt.Errorf("unsupported recipe schema_version %d (supported: %d)", b.SchemaVersion, SupportedSchemaVersion)
+	if b.SchemaVersion != SupportedSchemaVersionV1 && b.SchemaVersion != SupportedSchemaVersionV2 {
+		return fmt.Errorf("unsupported recipe schema_version %d (supported: %d, %d)", b.SchemaVersion, SupportedSchemaVersionV1, SupportedSchemaVersionV2)
 	}
 	if strings.TrimSpace(b.BundleVersion) == "" || !safeToken.MatchString(b.BundleVersion) {
 		return fmt.Errorf("invalid bundle_version %q", b.BundleVersion)
@@ -100,6 +100,9 @@ func Validate(b *Bundle) error {
 	for name, p := range b.Profiles {
 		if !safeToken.MatchString(name) {
 			return fmt.Errorf("invalid profile name %q", name)
+		}
+		if p.Optimization != nil && b.SchemaVersion < SupportedSchemaVersionV2 {
+			return fmt.Errorf("profile %q: optimization policy requires schema_version 2", name)
 		}
 		if err := ValidateProfile(name, p); err != nil {
 			return err
@@ -186,6 +189,79 @@ func ValidateProfile(name string, p Profile) error {
 		seen[key] = true
 		if f.Action == "apply_container_conversion" && f.When != "container_subtitle_incompatible" {
 			return fmt.Errorf("profile %q: container conversion fallback only valid for container_subtitle_incompatible", name)
+		}
+	}
+	if p.Optimization != nil {
+		if err := ValidateOptimizationPolicy(name, p.Optimization); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ValidateOptimizationPolicy verifies that typed optimization models contain safe, bounded values.
+func ValidateOptimizationPolicy(name string, opt *OptimizationPolicy) error {
+	if opt == nil {
+		return nil
+	}
+	if opt.Sampling != nil {
+		s := opt.Sampling
+		if s.SegmentDurationSec < 0 || s.SegmentDurationSec > 300 {
+			return fmt.Errorf("profile %q: sampling segment_duration_sec must be between 0 and 300 seconds", name)
+		}
+		if s.SegmentCount < 0 || s.SegmentCount > 20 {
+			return fmt.Errorf("profile %q: sampling segment_count out of range (allowed: 1-20)", name)
+		}
+		if s.MinSourceDurationSec < 0 {
+			return fmt.Errorf("profile %q: sampling min_source_duration_sec must be non-negative", name)
+		}
+	}
+	if opt.Thresholds != nil {
+		t := opt.Thresholds
+		if t.MinVMAF < 0 || t.MinVMAF > 100 {
+			return fmt.Errorf("profile %q: min_vmaf %v out of range 0-100", name, t.MinVMAF)
+		}
+		if t.TargetVMAF < 0 || t.TargetVMAF > 100 {
+			return fmt.Errorf("profile %q: target_vmaf %v out of range 0-100", name, t.TargetVMAF)
+		}
+		if t.MinVMAF > 0 && t.TargetVMAF > 0 && t.TargetVMAF < t.MinVMAF {
+			return fmt.Errorf("profile %q: target_vmaf (%v) must be >= min_vmaf (%v)", name, t.TargetVMAF, t.MinVMAF)
+		}
+		if t.MinSSIM < 0 || t.MinSSIM > 1.0 {
+			return fmt.Errorf("profile %q: min_ssim %v out of range 0.0-1.0", name, t.MinSSIM)
+		}
+		if t.TargetSSIM < 0 || t.TargetSSIM > 1.0 {
+			return fmt.Errorf("profile %q: target_ssim %v out of range 0.0-1.0", name, t.TargetSSIM)
+		}
+		if t.MinSSIM > 0 && t.TargetSSIM > 0 && t.TargetSSIM < t.MinSSIM {
+			return fmt.Errorf("profile %q: target_ssim (%v) must be >= min_ssim (%v)", name, t.TargetSSIM, t.MinSSIM)
+		}
+	}
+	if len(opt.QualityCandidates) > 0 {
+		if len(opt.QualityCandidates) > 10 {
+			return fmt.Errorf("profile %q: maximum 10 quality candidates allowed", name)
+		}
+		seen := map[int]bool{}
+		for _, q := range opt.QualityCandidates {
+			if q < 1 || q > 100 {
+				return fmt.Errorf("profile %q: quality candidate %d out of range 1-100", name, q)
+			}
+			if seen[q] {
+				return fmt.Errorf("profile %q: duplicate quality candidate %d", name, q)
+			}
+			seen[q] = true
+		}
+	}
+	if opt.BitrateGuidance != nil {
+		bg := opt.BitrateGuidance
+		if bg.PreferredBitrate < 0 {
+			return fmt.Errorf("profile %q: preferred_bitrate must be >= 0", name)
+		}
+		if bg.SoftMaxBitrate < 0 {
+			return fmt.Errorf("profile %q: soft_max_bitrate must be >= 0", name)
+		}
+		if bg.PreferredBitrate > 0 && bg.SoftMaxBitrate > 0 && bg.SoftMaxBitrate < bg.PreferredBitrate {
+			return fmt.Errorf("profile %q: soft_max_bitrate (%d) must be >= preferred_bitrate (%d)", name, bg.SoftMaxBitrate, bg.PreferredBitrate)
 		}
 	}
 	return nil
