@@ -621,70 +621,7 @@ func resolveCandidateBitDepth(c *transcode.BenchmarkCandidate, sourceBitDepth in
 }
 
 func isHDRStreamDetailed(ds mediainspect.DetailedStream) bool {
-	// 1. Mastering display metadata or content light level
-	if ds.MasteringDisplay != nil || ds.ContentLightLevel != nil {
-		return true
-	}
-
-	// 2. Codec and profile check for Dolby Vision / HDR
-	codec := strings.ToLower(strings.TrimSpace(ds.Codec))
-	profile := strings.ToLower(strings.TrimSpace(ds.Profile))
-	if strings.Contains(codec, "dovi") || strings.Contains(codec, "dvh1") ||
-		strings.Contains(codec, "dvhe") || strings.Contains(codec, "dva1") ||
-		strings.Contains(codec, "dav1") {
-		return true
-	}
-	if strings.Contains(profile, "dolby vision") || strings.Contains(profile, "dovi") ||
-		strings.HasPrefix(profile, "dv") {
-		return true
-	}
-
-	// 3. Color transfer characteristics
-	transfer := strings.ToLower(strings.TrimSpace(ds.ColorTransfer))
-	switch transfer {
-	case "smpte2084", "arib-std-b67", "arib_std_b67", "hlg", "pq", "smpte428", "bt2020-10", "bt2020-12":
-		return true
-	}
-
-	// 4. Color primaries
-	primaries := strings.ToLower(strings.TrimSpace(ds.ColorPrimaries))
-	switch primaries {
-	case "bt2020", "bt2020nc", "bt2020c", "dci-p3":
-		return true
-	}
-
-	// 5. Color space / matrix coefficients
-	cs := strings.ToLower(strings.TrimSpace(ds.ColorSpace))
-	switch cs {
-	case "bt2020nc", "bt2020c":
-		return true
-	}
-
-	// 6. Side data (DV RPU, mastering display, etc.)
-	for _, sd := range ds.SideData {
-		sdt := strings.ToLower(strings.TrimSpace(sd.SideDataType))
-		if strings.Contains(sdt, "mastering display") ||
-			strings.Contains(sdt, "content light") ||
-			strings.Contains(sdt, "dovi") ||
-			strings.Contains(sdt, "dolby vision") ||
-			strings.Contains(sdt, "hdr") {
-			return true
-		}
-	}
-
-	// 7. Stream tags
-	for k, v := range ds.Tags {
-		kl := strings.ToLower(k)
-		vl := strings.ToLower(v)
-		if strings.Contains(kl, "dovi") || strings.Contains(kl, "dolby") ||
-			strings.Contains(vl, "dovi") || strings.Contains(vl, "dolby vision") ||
-			strings.Contains(vl, "dvh1") || strings.Contains(vl, "dvhe") ||
-			strings.Contains(vl, "dva1") || strings.Contains(vl, "dav1") {
-			return true
-		}
-	}
-
-	return false
+	return mediainspect.IsHDRorDolbyVisionStream(ds)
 }
 
 func sanitizeCandidateID(id string) string {

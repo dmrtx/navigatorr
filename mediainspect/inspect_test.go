@@ -243,3 +243,93 @@ func TestInspectFileRealWorldBitDepth(t *testing.T) {
 		t.Errorf("expected bit_depth 0 for unknown metadata, got %d", repUnk.BitDepth)
 	}
 }
+
+func TestIsHDRorDolbyVision(t *testing.T) {
+	// 1. DV side data only
+	dvSideDataStream := DetailedStream{
+		Codec:       "hevc",
+		Profile:     "Main 10",
+		PixelFormat: "yuv420p10le",
+		SideData: []SideDataRecord{
+			{SideDataType: "DOVI configuration record"},
+		},
+	}
+	if !IsHDRorDolbyVisionStream(dvSideDataStream) {
+		t.Errorf("expected IsHDRorDolbyVisionStream=true for DOVI side data")
+	}
+
+	// 2. DOVI tag only
+	doviTagStream := DetailedStream{
+		Codec:       "hevc",
+		Profile:     "Main 10",
+		PixelFormat: "yuv420p10le",
+		Tags: map[string]string{
+			"dovi_profile": "5",
+		},
+	}
+	if !IsHDRorDolbyVisionStream(doviTagStream) {
+		t.Errorf("expected IsHDRorDolbyVisionStream=true for DOVI tag")
+	}
+
+	// 3. HDR mastering metadata
+	hdrMasteringStream := DetailedStream{
+		Codec:            "hevc",
+		Profile:          "Main 10",
+		PixelFormat:      "yuv420p10le",
+		MasteringDisplay: &MasteringDisplayMetadata{RedX: "34000/50000"},
+	}
+	if !IsHDRorDolbyVisionStream(hdrMasteringStream) {
+		t.Errorf("expected IsHDRorDolbyVisionStream=true for mastering display metadata")
+	}
+
+	// 4. Content light level metadata
+	hdrCLLStream := DetailedStream{
+		Codec:             "hevc",
+		Profile:           "Main 10",
+		PixelFormat:       "yuv420p10le",
+		ContentLightLevel: &ContentLightLevelMetadata{MaxCLL: 1000},
+	}
+	if !IsHDRorDolbyVisionStream(hdrCLLStream) {
+		t.Errorf("expected IsHDRorDolbyVisionStream=true for content light level metadata")
+	}
+
+	// 5. Ordinary SDR stream (8-bit and 10-bit)
+	sdr8BitStream := DetailedStream{
+		Codec:          "h264",
+		Profile:        "High",
+		PixelFormat:    "yuv420p",
+		ColorTransfer:  "bt709",
+		ColorPrimaries: "bt709",
+		ColorSpace:     "bt709",
+	}
+	if IsHDRorDolbyVisionStream(sdr8BitStream) {
+		t.Errorf("expected IsHDRorDolbyVisionStream=false for standard 8-bit SDR BT.709")
+	}
+
+	sdr10BitStream := DetailedStream{
+		Codec:          "hevc",
+		Profile:        "Main 10",
+		PixelFormat:    "yuv420p10le",
+		ColorTransfer:  "bt709",
+		ColorPrimaries: "bt709",
+		ColorSpace:     "bt709",
+	}
+	if IsHDRorDolbyVisionStream(sdr10BitStream) {
+		t.Errorf("expected IsHDRorDolbyVisionStream=false for standard 10-bit SDR BT.709")
+	}
+
+	// 6. Report-level checks
+	sdrRep := &DetailedReport{
+		Video: []DetailedStream{sdr8BitStream},
+	}
+	if IsHDRorDolbyVisionReport(sdrRep) {
+		t.Errorf("expected IsHDRorDolbyVisionReport=false for SDR report")
+	}
+
+	dvRep := &DetailedReport{
+		Video: []DetailedStream{dvSideDataStream},
+	}
+	if !IsHDRorDolbyVisionReport(dvRep) {
+		t.Errorf("expected IsHDRorDolbyVisionReport=true for DV report")
+	}
+}
