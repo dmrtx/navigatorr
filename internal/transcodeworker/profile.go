@@ -45,6 +45,9 @@ func ValidatePlan(p *transcode.Plan) error {
 	if p.Quality < 1 || p.Quality > 100 {
 		return fmt.Errorf("invalid quality level %d (must be 1-100; fail closed)", p.Quality)
 	}
+	if _, err := BuildVideoEncoderArgs(p); err != nil {
+		return err
+	}
 	if norm(p.AudioMode) != "copy" {
 		return fmt.Errorf("unsupported audio mode %q (fail closed)", p.AudioMode)
 	}

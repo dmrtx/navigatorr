@@ -16,13 +16,22 @@ For `codec: hevc_videotoolbox` the schema supports:
 | `spatial_aq` | boolean | `true`, `false` | not forced | `-spatial_aq 1/0` |
 | `realtime` | boolean | `true`, `false` | not forced | `-realtime 1/0` |
 
-Omitted fields stay absent from the immutable plan. This is intentional: a legacy profile containing only `codec` and `quality` generates the same video encoder arguments it generated before these controls existed.
+Omitted fields stay absent from the immutable plan. This is intentional: legacy is `FFmpeg-argv compatible; no new encoder defaults are injected`. However, note that runtime capability probing still runs on the worker before encode execution.
+
+### Pointer-boolean semantics
+
+The optional boolean switches (`prioritize_speed`, `spatial_aq`, `realtime`) use pointer-boolean semantics:
+- **Omitted / `nil`**: nil/omitted injects nothing into the FFmpeg command line and does not require that option to be supported by the worker's FFmpeg binary.
+- **Explicit `false`**: Explicit false pointer-bools are configured and require the corresponding FFmpeg option, emitting `0` in FFmpeg arguments (e.g. `-prio_speed 0`, `-spatial_aq 0`, `-realtime 0`).
+- **Explicit `true`**: Configured typed value emitting `1` in FFmpeg arguments (e.g. `-prio_speed 1`, `-spatial_aq 1`, `-realtime 1`), and likewise requires that corresponding FFmpeg option to exist in the worker's FFmpeg encoder capabilities.
 
 `ffmpeg_args`, `extra_args`, shell snippets, and similar escape hatches are not part of the schema and are rejected by the strict YAML decoder.
 
 ## Validation rules
 
 The recipe loader rejects unknown values and invalid types before a job is submitted. `main10` requires `pixel_format: p010le`; conversely, `p010le` requires `profile: main10`. `main` with `p010le` is invalid. Main10 resolves to `expected_bit_depth: 10` in the immutable plan.
+
+The worker's `ValidatePlan` performs early structural validation before persisting state or spawning a job process, ensuring that typed VideoToolbox settings (profile, pixel format, and expected bit depth consistency) are validated before external FFmpeg execution.
 
 The remote worker adds a second, runtime capability boundary. Before starting FFmpeg it executes the equivalent of:
 
@@ -128,4 +137,9 @@ The profile is still propagated by name through `transcode_batch`; no batch sele
 
 ## Required real-hardware verification
 
-Schema acceptance and unit tests are not proof that a particular Mac/FFmpeg build actually supports AQ or 10-bit VideoToolbox. Before promoting these profiles, run `navigatorr-transcode capabilities` on the configured Apple Silicon worker and perform candidate-only encodes with `replace_original=false`. Main10 is considered verified only when post-validation reports 10-bit output from `main10 + p010le`. AQ is considered verified only after the installed FFmpeg reports `spatial_aq` and a real candidate encode completes successfully.
+Schema acceptance and unit tests are not proof that a particular Mac/FFmpeg build actually supports AQ or 10-bit VideoToolbox. Before promoting these profiles, run `navigatorr-transcode capabilities` on the configured Apple Silicon worker and perform candidate-only encodes with `replace_original=false`.
+
+- **Main10**: Main10 is considered verified only when post-validation reports 10-bit output from `main10 + p010le`.
+- **Spatial AQ**: Spatial AQ is physically validated only when no VideoToolbox unsupported/ignored AQ warning appears; the worker now fails such warnings as `encoder_capability_unsupported`.
+
+The M1 physical matrix has not been run yet; real-hardware matrix verification across Apple Silicon generations remains pending.
