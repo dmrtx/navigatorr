@@ -1,5 +1,5 @@
 schema_version: 1
-bundle_version: "2026.09.1"
+bundle_version: "2026.09.2"
 containers:
   mkv:
     subtitle_copy:
@@ -70,4 +70,87 @@ profiles:
     subtitles: {mode: preserve, convert_incompatible: true}
     preserve: {metadata: true, chapters: true, attachments: true}
     resilience: *default_resilience
-
+  anime-hevc-balanced:
+    container: mkv
+    video:
+      codec: hevc_videotoolbox
+      quality: 65
+      profile: main
+      pixel_format: yuv420p
+      prioritize_speed: false
+      spatial_aq: false
+      realtime: false
+    audio: {mode: copy}
+    subtitles: {mode: preserve, convert_incompatible: true}
+    preserve: {metadata: true, chapters: true, attachments: true}
+    resilience: *default_resilience
+  anime-hevc-balanced-aq:
+    container: mkv
+    video:
+      codec: hevc_videotoolbox
+      quality: 65
+      profile: main
+      pixel_format: yuv420p
+      prioritize_speed: false
+      spatial_aq: true
+      realtime: false
+    audio: {mode: copy}
+    subtitles: {mode: preserve, convert_incompatible: true}
+    preserve: {metadata: true, chapters: true, attachments: true}
+    resilience: *default_resilience
+  anime-hevc-quality:
+    container: mkv
+    video:
+      codec: hevc_videotoolbox
+      quality: 75
+      profile: main
+      pixel_format: yuv420p
+      prioritize_speed: false
+      spatial_aq: true
+      realtime: false
+    audio: {mode: copy}
+    subtitles: {mode: preserve, convert_incompatible: true}
+    preserve: {metadata: true, chapters: true, attachments: true}
+    resilience: *default_resilience
+  anime-hevc-space:
+    container: mkv
+    video:
+      codec: hevc_videotoolbox
+      quality: 55
+      profile: main
+      pixel_format: yuv420p
+      prioritize_speed: false
+      spatial_aq: false
+      realtime: false
+    audio: {mode: copy}
+    subtitles: {mode: preserve, convert_incompatible: true}
+    preserve: {metadata: true, chapters: true, attachments: true}
+    resilience: *default_resilience
+  anime-hevc-main10:
+    container: mkv
+    video:
+      codec: hevc_videotoolbox
+      quality: 65
+      profile: main10
+      pixel_format: p010le
+      prioritize_speed: false
+      spatial_aq: false
+      realtime: false
+    audio: {mode: copy}
+    subtitles: {mode: preserve, convert_incompatible: true}
+    preserve: {metadata: true, chapters: true, attachments: true}
+    resilience: *default_resilience
+  anime-hevc-main10-aq:
+    container: mkv
+    video:
+      codec: hevc_videotoolbox
+      quality: 65
+      profile: main10
+      pixel_format: p010le
+      prioritize_speed: false
+      spatial_aq: true
+      realtime: false
+    audio: {mode: copy}
+    subtitles: {mode: preserve, convert_incompatible: true}
+    preserve: {metadata: true, chapters: true, attachments: true}
+    resilience: *default_resilience

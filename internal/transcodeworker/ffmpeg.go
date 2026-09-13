@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -66,7 +68,6 @@ func SummarizeFFmpegError(logPath string, runErr error) string {
 		return fmt.Sprintf("ffmpeg execution failed: %v", runErr)
 	}
 
-	// Focus on the tail (last 8KB max)
 	if len(data) > 8192 {
 		data = data[len(data)-8192:]
 	}
@@ -80,11 +81,9 @@ func SummarizeFFmpegError(logPath string, runErr error) string {
 			continue
 		}
 		lower := strings.ToLower(line)
-		// Skip progress-like lines
 		if strings.HasPrefix(lower, "frame=") || strings.HasPrefix(lower, "size=") || strings.HasPrefix(lower, "video:") {
 			continue
 		}
-		// Skip generic FFmpeg trailers to prioritize specific root causes
 		if strings.EqualFold(lower, "conversion failed!") || strings.HasPrefix(lower, "error initializing output stream") {
 			continue
 		}
@@ -94,7 +93,6 @@ func SummarizeFFmpegError(logPath string, runErr error) string {
 			strings.Contains(lower, "failed") ||
 			strings.Contains(lower, "function not implemented") ||
 			strings.Contains(lower, "invalid") {
-			// Strip leading prefix like [matroska @ 0x12345] if present
 			cleaned := line
 			if idx := strings.Index(cleaned, "] "); idx != -1 {
 				cleaned = cleaned[idx+2:]
@@ -114,7 +112,6 @@ func SummarizeFFmpegError(logPath string, runErr error) string {
 		return fmt.Sprintf("ffmpeg failed (%v): %s", runErr, summary)
 	}
 
-	// Fallback to last non-empty line
 	for i := len(lines) - 1; i >= 0; i-- {
 		line := strings.TrimSpace(lines[i])
 		if line != "" && !strings.HasPrefix(line, "frame=") {
@@ -128,10 +125,53 @@ func SummarizeFFmpegError(logPath string, runErr error) string {
 	return fmt.Sprintf("ffmpeg execution failed: %v", runErr)
 }
 
+var (
+	spatialAQRegex            = regexp.MustCompile(`(?i)\bspatial[\s_.-]*aq\b`)
+	spatialAQUnsupportedRegex = regexp.MustCompile(`(?i)(not\s+support|n't\s+support|no\s+support|unsupport|non-support|nonsupport|ignor|not\s+available|unavailable|not\s+accept)`)
+)
+
+// DetectSpatialAQWarning inspects stderr/log output line-by-line for VideoToolbox warnings
+// specifically indicating that spatial AQ is unsupported or its value was ignored.
+// It returns true and the cleaned warning message if detected, or false and empty string otherwise.
+func DetectSpatialAQWarning(stderr string) (bool, string) {
+	for _, rawLine := range strings.Split(stderr, "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" {
+			continue
+		}
+		if spatialAQRegex.MatchString(line) && spatialAQUnsupportedRegex.MatchString(line) {
+			cleaned := line
+			if idx := strings.LastIndex(cleaned, "] "); idx != -1 {
+				cleaned = strings.TrimSpace(cleaned[idx+2:])
+			}
+			return true, cleaned
+		}
+	}
+	return false, ""
+}
+
+// HasSpatialAQUnsupportedWarning returns true if stderr contains a VideoToolbox warning
+// specifically indicating that spatial AQ is unsupported or its value was ignored.
+func HasSpatialAQUnsupportedWarning(stderr string) bool {
+	matched, _ := DetectSpatialAQWarning(stderr)
+	return matched
+}
+
 // RunFFmpeg executes the transcode process using an ExecutionPlan and stream-by-stream codec mapping.
 func RunFFmpeg(ctx context.Context, ffmpegPath string, execPlan *ExecutionPlan, job *JobRecord, progressPath, logPath string) error {
-	if execPlan == nil {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if execPlan == nil || execPlan.Plan == nil {
 		return fmt.Errorf("execution plan cannot be nil")
+	}
+
+	caps, err := ProbeVideoToolboxCapabilities(ctx, ffmpegPath)
+	if err != nil {
+		return err
+	}
+	if err := ValidateVideoToolboxCapabilities(execPlan.Plan, caps); err != nil {
+		return err
 	}
 
 	args, err := BuildFFmpegArgs(execPlan, job.Source, job.Candidate, progressPath)
@@ -145,12 +185,35 @@ func RunFFmpeg(ctx context.Context, ffmpegPath string, execPlan *ExecutionPlan, 
 	}
 	defer logFile.Close()
 
+	var stderrBuf bytes.Buffer
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
 	cmd.Stdout = logFile
-	cmd.Stderr = logFile
+	if execPlan.Plan.SpatialAQ != nil {
+		cmd.Stderr = io.MultiWriter(logFile, &stderrBuf)
+	} else {
+		cmd.Stderr = logFile
+	}
 
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return errors.New(SummarizeFFmpegError(logPath, err))
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	if execPlan.Plan.SpatialAQ != nil {
+		stderrOutput := stderrBuf.String()
+		if stderrOutput == "" {
+			if data, err := os.ReadFile(logPath); err == nil {
+				stderrOutput = string(data)
+			}
+		}
+		if matched, warning := DetectSpatialAQWarning(stderrOutput); matched {
+			return fmt.Errorf("encoder_capability_unsupported: VideoToolbox spatial_aq unsupported by device: %s", warning)
+		}
 	}
 	return nil
 }

@@ -170,3 +170,120 @@ func TestPlan_ConversionsPreserveIndividualStreams(t *testing.T) {
 		t.Fatalf("got %+v", got)
 	}
 }
+
+func TestPlan_EarlyStructuralValidation(t *testing.T) {
+	t.Run("legacy plan still validates", func(t *testing.T) {
+		p := signedPlan(t, nil)
+		// All typed VideoToolbox fields omitted
+		if err := ValidatePlan(p); err != nil {
+			t.Fatalf("expected legacy plan to validate, got: %v", err)
+		}
+	})
+
+	t.Run("main10 + wrong pixel format fails", func(t *testing.T) {
+		p := signedPlan(t, nil)
+		p.VideoProfile = "main10"
+		p.PixelFormat = "yuv420p"
+		p.ExpectedBitDepth = 10
+		d, err := transcode.DigestPlan(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.PlanDigest = d
+		err = ValidatePlan(p)
+		if err == nil || !strings.Contains(err.Error(), "main10 requires pixel format p010le") {
+			t.Fatalf("expected main10 + wrong pixel format to fail, got: %v", err)
+		}
+	})
+
+	t.Run("p010le + main fails", func(t *testing.T) {
+		p := signedPlan(t, nil)
+		p.VideoProfile = "main"
+		p.PixelFormat = "p010le"
+		p.ExpectedBitDepth = 8
+		d, err := transcode.DigestPlan(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.PlanDigest = d
+		err = ValidatePlan(p)
+		if err == nil || !strings.Contains(err.Error(), "pixel format p010le requires HEVC main10") {
+			t.Fatalf("expected p010le + main to fail, got: %v", err)
+		}
+	})
+
+	t.Run("expected bit depth inconsistency fails", func(t *testing.T) {
+		// ExpectedBitDepth 10 but profile is main
+		p := signedPlan(t, nil)
+		p.VideoProfile = "main"
+		p.PixelFormat = "yuv420p"
+		p.ExpectedBitDepth = 10
+		d, err := transcode.DigestPlan(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.PlanDigest = d
+		err = ValidatePlan(p)
+		if err == nil || !strings.Contains(err.Error(), "expected 10-bit output requires main10 + p010le") {
+			t.Fatalf("expected 10-bit with main/yuv420p to fail, got: %v", err)
+		}
+
+		// main10 but ExpectedBitDepth is 8
+		p2 := signedPlan(t, nil)
+		p2.VideoProfile = "main10"
+		p2.PixelFormat = "p010le"
+		p2.ExpectedBitDepth = 8
+		d2, err := transcode.DigestPlan(p2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p2.PlanDigest = d2
+		err = ValidatePlan(p2)
+		if err == nil || !strings.Contains(err.Error(), "main10 plan must require expected bit depth 10") {
+			t.Fatalf("expected main10 with bit depth 8 to fail, got: %v", err)
+		}
+
+		// main10 but ExpectedBitDepth is 0
+		p3 := signedPlan(t, nil)
+		p3.VideoProfile = "main10"
+		p3.PixelFormat = "p010le"
+		p3.ExpectedBitDepth = 0
+		d3, err := transcode.DigestPlan(p3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p3.PlanDigest = d3
+		err = ValidatePlan(p3)
+		if err == nil || !strings.Contains(err.Error(), "main10 plan must require expected bit depth 10") {
+			t.Fatalf("expected main10 with bit depth 0 to fail, got: %v", err)
+		}
+
+		// Unsupported expected bit depth 12
+		p4 := signedPlan(t, nil)
+		p4.ExpectedBitDepth = 12
+		d4, err := transcode.DigestPlan(p4)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p4.PlanDigest = d4
+		err = ValidatePlan(p4)
+		if err == nil || !strings.Contains(err.Error(), "unsupported expected bit depth 12") {
+			t.Fatalf("expected unsupported expected bit depth to fail, got: %v", err)
+		}
+	})
+
+	t.Run("valid main10 passes", func(t *testing.T) {
+		p := signedPlan(t, nil)
+		p.VideoProfile = "main10"
+		p.PixelFormat = "p010le"
+		p.ExpectedBitDepth = 10
+		d, err := transcode.DigestPlan(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.PlanDigest = d
+		if err := ValidatePlan(p); err != nil {
+			t.Fatalf("expected valid main10 plan to pass, got: %v", err)
+		}
+	})
+}
