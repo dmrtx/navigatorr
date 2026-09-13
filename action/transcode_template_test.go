@@ -24,11 +24,18 @@ type mockTranscodeExecutor struct {
 	cancelCalls int32
 	doctorCalls int32
 
-	doctorFunc       func(ctx context.Context) error
-	capabilitiesFunc func(ctx context.Context) (transcode.WorkerCapabilities, error)
-	submitFunc       func(ctx context.Context, req transcode.Request) (transcode.Job, error)
-	statusFunc       func(ctx context.Context, jobID string) (transcode.JobStatus, error)
-	cancelFunc       func(ctx context.Context, jobID string) error
+	benchmarkSubmitCalls int32
+	benchmarkStatusCalls int32
+	benchmarkCancelCalls int32
+
+	doctorFunc           func(ctx context.Context) error
+	capabilitiesFunc     func(ctx context.Context) (transcode.WorkerCapabilities, error)
+	submitFunc           func(ctx context.Context, req transcode.Request) (transcode.Job, error)
+	statusFunc           func(ctx context.Context, jobID string) (transcode.JobStatus, error)
+	cancelFunc           func(ctx context.Context, jobID string) error
+	benchmarkSubmitFunc  func(ctx context.Context, req transcode.BenchmarkRequest) (transcode.BenchmarkJob, error)
+	benchmarkStatusFunc  func(ctx context.Context, jobID string) (transcode.BenchmarkStatus, error)
+	benchmarkCancelFunc  func(ctx context.Context, jobID string) error
 }
 
 func (m *mockTranscodeExecutor) Doctor(ctx context.Context) error {
@@ -49,7 +56,7 @@ func (m *mockTranscodeExecutor) Capabilities(ctx context.Context) (transcode.Wor
 		BuildGitCommit:  "abcdef0",
 		FFmpegVersion:   "7.1",
 		Encoders:        map[string]bool{"hevc_videotoolbox": true},
-		Filters:         map[string]bool{"scale": true},
+		Filters:         map[string]bool{"scale": true, "libvmaf": true, "ssim": true},
 		EncoderDetails: map[string]transcode.EncoderCapabilities{
 			"hevc_videotoolbox": {
 				Encoder:      "hevc_videotoolbox",
@@ -94,10 +101,18 @@ func (m *mockTranscodeExecutor) Cancel(ctx context.Context, jobID string) error 
 }
 
 func (m *mockTranscodeExecutor) BenchmarkSubmit(ctx context.Context, req transcode.BenchmarkRequest) (transcode.BenchmarkJob, error) {
+	atomic.AddInt32(&m.benchmarkSubmitCalls, 1)
+	if m.benchmarkSubmitFunc != nil {
+		return m.benchmarkSubmitFunc(ctx, req)
+	}
 	return transcode.BenchmarkJob{ID: req.ID}, nil
 }
 
 func (m *mockTranscodeExecutor) BenchmarkStatus(ctx context.Context, jobID string) (transcode.BenchmarkStatus, error) {
+	atomic.AddInt32(&m.benchmarkStatusCalls, 1)
+	if m.benchmarkStatusFunc != nil {
+		return m.benchmarkStatusFunc(ctx, jobID)
+	}
 	return transcode.BenchmarkStatus{
 		ProtocolVersion: transcode.WorkerProtocolVersion,
 		ID:              jobID,
@@ -107,6 +122,10 @@ func (m *mockTranscodeExecutor) BenchmarkStatus(ctx context.Context, jobID strin
 }
 
 func (m *mockTranscodeExecutor) BenchmarkCancel(ctx context.Context, jobID string) error {
+	atomic.AddInt32(&m.benchmarkCancelCalls, 1)
+	if m.benchmarkCancelFunc != nil {
+		return m.benchmarkCancelFunc(ctx, jobID)
+	}
 	return nil
 }
 

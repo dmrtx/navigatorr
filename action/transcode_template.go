@@ -19,9 +19,11 @@ func (e *Engine) registerTranscodeTemplate() {
 	e.RegisterTemplate(ActionTemplate{
 		Name: "transcode_media", Version: 2,
 		Description:    "Coordinates safe candidate-only media transcoding using an immutable recipe-resolved plan, bounded transient retries, worker revalidation, post-transcode stream validation, and original SHA-256 verification.",
-		RequiredInputs: []string{"path"}, OptionalInputs: []string{"profile", "replace_original", "expected_video_codec", "max_size_increase_percent", "media_type", "is_anime", "min_savings_percent", "surface_worker_busy"}, Destructive: false,
+		RequiredInputs: []string{"path"}, OptionalInputs: []string{"profile", "replace_original", "expected_video_codec", "max_size_increase_percent", "media_type", "is_anime", "min_savings_percent", "surface_worker_busy", "metric"}, Destructive: false,
 		Steps: []StepDefinition{
 			{Name: "preflight", Description: "Inspect source, hash original, resolve profile/recipe and per-stream compatibility plan", Run: e.stepTranscodePreflight},
+			{Name: "submit_benchmark", Description: "Submit benchmark request if profile optimization is enabled", Run: e.stepBenchmarkSubmit},
+			{Name: "wait_benchmark", Description: "Wait for benchmark completion and materialize winning plan if optimization is enabled", Run: e.stepBenchmarkWait},
 			{Name: "submit_transcode", Description: "Submit the immutable structured plan to the remote worker with bounded transient retries", Run: e.stepTranscodeSubmit},
 			{Name: "wait_transcode", Description: "Monitor transcode progress and classify transient transport failures", Run: e.stepTranscodeWait},
 			{Name: "validate_result", Description: "Validate duration, codecs, streams, dispositions, attachments, chapters and candidate integrity", Run: e.stepTranscodeValidate},
@@ -215,10 +217,49 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		return StepResult{Status: StepFailed, Error: err.Error()}, nil
 	}
 
+	recipeProfile, err := e.deps.Config.Transcode.ResolveProfile(profile)
+	if err != nil {
+		return StepResult{Status: StepFailed, Error: fmt.Sprintf("resolving recipe profile %q: %v", profile, err)}, nil
+	}
+
+	optEnabled := recipeProfile.Optimization != nil && recipeProfile.Optimization.Enabled
+	var optPolicy *recipe.OptimizationPolicy
+	if ec.ActionName == "benchmark_transcode" {
+		if recipeProfile.Optimization != nil && !recipeProfile.Optimization.Enabled {
+			return StepResult{Status: StepFailed, Error: fmt.Sprintf("profile %q has optimization disabled (fail closed)", profile)}, nil
+		}
+		if recipeProfile.Optimization != nil && recipeProfile.Optimization.Enabled {
+			optPolicy = recipeProfile.Optimization
+		} else {
+			optPolicy = &recipe.OptimizationPolicy{Enabled: true}
+			recipe.NormalizeOptimizationPolicy(optPolicy)
+		}
+		optEnabled = true
+	} else if optEnabled {
+		optPolicy = recipeProfile.Optimization
+	}
+
+	if optEnabled && optPolicy != nil {
+		if isSourceHDRorDV(&rep) {
+			return StepResult{Status: StepFailed, Error: "source media contains HDR/Dolby Vision: automatic optimization is only supported for SDR content (fail closed)"}, nil
+		}
+		if len(rep.Video) > 0 {
+			bd := rep.Video[0].BitDepth
+			if bd != 8 && bd != 10 {
+				return StepResult{Status: StepFailed, Error: fmt.Sprintf("unsupported source bit depth %d: automatic optimization only supports 8-bit and 10-bit SDR content (fail closed)", bd)}, nil
+			}
+		}
+		ec.State["optimization_enabled"] = true
+		ec.State["optimization_policy"] = optPolicy
+	} else {
+		ec.State["optimization_enabled"] = false
+	}
+
 	ec.State["resolved_path"] = cleanPath
 	ec.State["original_sha256"] = origSHA
 	ec.State["original_size"] = fi.Size()
 	ec.State["original"] = origMap
+	ec.State["source_report"] = rep
 	ec.State["profile"] = profile
 	ec.State["plan"] = plan
 	ec.State["candidate_extension"] = ext
@@ -239,6 +280,9 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		"recipe_digest":     plan.RecipeDigest,
 		"plan_digest":       plan.PlanDigest,
 		"applied_fallbacks": plan.AppliedFallbacks,
+	}
+	if optEnabled {
+		outputs["optimization_enabled"] = true
 	}
 	if autoResult != nil {
 		outputs["auto_decision"] = autoResult.Decision
