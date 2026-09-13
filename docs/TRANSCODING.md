@@ -150,7 +150,7 @@ Before SSH submission, Navigatorr probes the source and resolves every subtitle 
 
 The resulting immutable plan contains the recipe version, recipe SHA-256 digest, plan SHA-256 digest, exact per-stream actions, bounded retry policy, and applied fallbacks. The worker probes the source again and verifies stream index/codec plus the plan digest before constructing FFmpeg argv. A recipe therefore cannot smuggle in unsupported operations.
 
-The worker still has one narrowly scoped legacy `hevc-vt` profile-only compatibility shim for rolling upgrades. New Navigatorr submissions always send a fully resolved plan; the shim is not the normal policy path and should be removed after old clients are retired.
+The worker still has one narrowly scoped legacy `hevc-vt` profile-only compatibility shim for rolling upgrades. Legacy profile submissions are `FFmpeg-argv compatible; no new encoder defaults are injected`, but are not fully behavior-compatible because runtime capability probing occurs on the worker before encode execution. New Navigatorr submissions always send a fully resolved plan; the shim is not the normal policy path and should be removed after old clients are retired.
 
 ## Hot reload, LKG, and rollback
 
