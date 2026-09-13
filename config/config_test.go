@@ -683,17 +683,26 @@ transcode:
       resilience:
         max_attempts: 2
       optimization:
+        enabled: true
         sampling:
-          segment_duration_sec: 12.0
-          segment_count: 4
-        thresholds:
-          min_vmaf: 93.0
-          target_vmaf: 96.0
-          min_ssim: 0.98
-        quality_candidates: [60, 65, 70]
-        bitrate_guidance:
-          preferred_bitrate: 5000000
-          soft_max_bitrate: 9000000
+          strategy: uniform
+          sample_count: 4
+          sample_seconds: 12.0
+          positions: [0.1, 0.4, 0.7, 0.9]
+        quality:
+          preferred_metric: vmaf
+          vmaf:
+            target: 96.0
+            minimum: 93.0
+          marginal_tolerance: 0.5
+        search:
+          max_candidates: 5
+          quality_values: [60, 65, 70]
+        size:
+          preferred_total_bitrate_kbps:
+            min: 2000
+            max: 5000
+          soft_max_total_bitrate_kbps: 6000
 `)
 		cfg, err := Load(p)
 		if err != nil {
@@ -725,17 +734,17 @@ transcode:
 		if recProfile.Optimization == nil {
 			t.Fatalf("expected Optimization to be preserved, got nil")
 		}
-		if recProfile.Optimization.Sampling == nil || recProfile.Optimization.Sampling.SegmentDurationSec != 12.0 {
+		if recProfile.Optimization.Sampling == nil || recProfile.Optimization.Sampling.SampleSeconds != 12.0 {
 			t.Errorf("unexpected sampling policy: %+v", recProfile.Optimization.Sampling)
 		}
-		if recProfile.Optimization.Thresholds == nil || recProfile.Optimization.Thresholds.MinVMAF != 93.0 {
-			t.Errorf("unexpected thresholds: %+v", recProfile.Optimization.Thresholds)
+		if recProfile.Optimization.Quality == nil || recProfile.Optimization.Quality.VMAF.Target != 96.0 {
+			t.Errorf("unexpected quality policy: %+v", recProfile.Optimization.Quality)
 		}
-		if len(recProfile.Optimization.QualityCandidates) != 3 || recProfile.Optimization.QualityCandidates[1] != 65 {
-			t.Errorf("unexpected quality candidates: %v", recProfile.Optimization.QualityCandidates)
+		if recProfile.Optimization.Search == nil || len(recProfile.Optimization.Search.QualityValues) != 3 || recProfile.Optimization.Search.QualityValues[1] != 65 {
+			t.Errorf("unexpected search policy: %+v", recProfile.Optimization.Search)
 		}
-		if recProfile.Optimization.BitrateGuidance == nil || recProfile.Optimization.BitrateGuidance.PreferredBitrate != 5000000 {
-			t.Errorf("unexpected bitrate guidance: %+v", recProfile.Optimization.BitrateGuidance)
+		if recProfile.Optimization.Size == nil || recProfile.Optimization.Size.PreferredTotalBitrateKbps.Max != 5000 {
+			t.Errorf("unexpected size policy: %+v", recProfile.Optimization.Size)
 		}
 
 		plan, err := cfg.Transcode.ResolvePlan("custom-main10")

@@ -179,7 +179,9 @@ type DetailedStream struct {
 	Width             int                        `json:"width,omitempty"`
 	Height            int                        `json:"height,omitempty"`
 	BitDepth          int                        `json:"bit_depth,omitempty"`
-	FrameRate         string                     `json:"frame_rate,omitempty"`
+	RFrameRate        string                     `json:"r_frame_rate,omitempty"`
+	AvgFrameRate      string                     `json:"avg_frame_rate,omitempty"`
+	FrameRate         string                     `json:"frame_rate,omitempty"` // aliases avg_frame_rate or r_frame_rate for backwards compatibility
 	FPS               float64                    `json:"fps,omitempty"`
 	BitRate           int64                      `json:"bit_rate,omitempty"`
 	ColorRange        string                     `json:"color_range,omitempty"`
@@ -199,6 +201,7 @@ type DetailedReport struct {
 	Container   string           `json:"container"`
 	DurationSec float64          `json:"duration_sec"`
 	SizeBytes   int64            `json:"size_bytes"`
+	BitRate     int64            `json:"bit_rate,omitempty"` // format/overall container bitrate in bps
 	Video       []DetailedStream `json:"video"`
 	Audio       []DetailedStream `json:"audio"`
 	Subtitles   []DetailedStream `json:"subtitles"`
@@ -261,9 +264,11 @@ func InspectDetailed(ctx context.Context, ffprobePath, path string) (DetailedRep
 			Disposition      map[string]int    `json:"disposition"`
 		} `json:"streams"`
 		Format struct {
-			FormatName string `json:"format_name"`
-			Duration   string `json:"duration"`
-			Size       string `json:"size"`
+			FormatName string            `json:"format_name"`
+			Duration   string            `json:"duration"`
+			Size       string            `json:"size"`
+			BitRate    any               `json:"bit_rate"`
+			Tags       map[string]string `json:"tags"`
 		} `json:"format"`
 		Chapters []any `json:"chapters"`
 	}
@@ -279,6 +284,7 @@ func InspectDetailed(ctx context.Context, ffprobePath, path string) (DetailedRep
 	var fmtDur float64
 	fmt.Sscanf(probe.Format.Duration, "%f", &fmtDur)
 	rep.DurationSec = fmtDur
+	rep.BitRate = ParseBitRate(probe.Format.BitRate, probe.Format.Tags)
 	rep.Chapters = len(probe.Chapters)
 
 	for _, st := range probe.Streams {
@@ -293,7 +299,14 @@ func InspectDetailed(ctx context.Context, ffprobePath, path string) (DetailedRep
 			}
 		}
 
-		frameRate, fps := ParseFrameRate(st.RFrameRate, st.AvgFrameRate)
+		fps, ok := ParseFrameRateRational(st.AvgFrameRate)
+		if !ok {
+			fps, _ = ParseFrameRateRational(st.RFrameRate)
+		}
+		frameRate := st.AvgFrameRate
+		if frameRate == "" || frameRate == "0/0" {
+			frameRate = st.RFrameRate
+		}
 		bitRate := ParseBitRate(st.BitRate, st.Tags)
 
 		ds := DetailedStream{
@@ -308,6 +321,8 @@ func InspectDetailed(ctx context.Context, ffprobePath, path string) (DetailedRep
 			ChannelLayout:  st.ChannelLayout,
 			Width:          st.Width,
 			Height:         st.Height,
+			RFrameRate:     st.RFrameRate,
+			AvgFrameRate:   st.AvgFrameRate,
 			FrameRate:      frameRate,
 			FPS:            fps,
 			BitRate:        bitRate,
@@ -320,46 +335,18 @@ func InspectDetailed(ctx context.Context, ffprobePath, path string) (DetailedRep
 		}
 
 		if len(st.SideDataList) > 0 {
+			ds.SideData = sanitizeSideDataList(st.SideDataList)
 			for _, rawSD := range st.SideDataList {
 				var sdMap map[string]any
 				if err := json.Unmarshal(rawSD, &sdMap); err != nil {
 					continue
 				}
 				sdType, _ := sdMap["side_data_type"].(string)
-				ds.SideData = append(ds.SideData, SideDataRecord{
-					SideDataType: sdType,
-					Data:         sdMap,
-				})
-
 				if strings.EqualFold(sdType, "Mastering display metadata") {
-					md := &MasteringDisplayMetadata{
-						RedX:         fmt.Sprint(sdMap["red_x"]),
-						RedY:         fmt.Sprint(sdMap["red_y"]),
-						GreenX:       fmt.Sprint(sdMap["green_x"]),
-						GreenY:       fmt.Sprint(sdMap["green_y"]),
-						BlueX:        fmt.Sprint(sdMap["blue_x"]),
-						BlueY:        fmt.Sprint(sdMap["blue_y"]),
-						WhitePointX:  fmt.Sprint(sdMap["white_point_x"]),
-						WhitePointY:  fmt.Sprint(sdMap["white_point_y"]),
-						MinLuminance: fmt.Sprint(sdMap["min_luminance"]),
-						MaxLuminance: fmt.Sprint(sdMap["max_luminance"]),
-					}
-					ds.MasteringDisplay = md
+					ds.MasteringDisplay = parseMasteringDisplayMetadata(sdMap)
 				}
-
 				if strings.EqualFold(sdType, "Content light level metadata") {
-					cll := &ContentLightLevelMetadata{}
-					if v, ok := sdMap["max_content"].(float64); ok {
-						cll.MaxCLL = int(v)
-					} else if v, ok := sdMap["max_content_light_level"].(float64); ok {
-						cll.MaxCLL = int(v)
-					}
-					if v, ok := sdMap["max_average"].(float64); ok {
-						cll.MaxFALL = int(v)
-					} else if v, ok := sdMap["max_frame_average_light_level"].(float64); ok {
-						cll.MaxFALL = int(v)
-					}
-					ds.ContentLightLevel = cll
+					ds.ContentLightLevel = parseContentLightLevelMetadata(sdMap)
 				}
 			}
 		}
@@ -392,31 +379,213 @@ func InspectDetailed(ctx context.Context, ffprobePath, path string) (DetailedRep
 	return rep, nil
 }
 
-// ParseFrameRate extracts rational frame rate string and calculated float64 FPS.
-func ParseFrameRate(rFrameRate, avgFrameRate string) (string, float64) {
-	for _, raw := range []string{rFrameRate, avgFrameRate} {
-		raw = strings.TrimSpace(raw)
-		if raw == "" || raw == "0/0" {
-			continue
+// ParseFrameRateRational parses a rational frame rate string like "24000/1001" or "24" to float64.
+func ParseFrameRateRational(raw string) (float64, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "0/0" {
+		return 0, false
+	}
+	parts := strings.Split(raw, "/")
+	if len(parts) == 2 {
+		num, err1 := strconv.ParseFloat(parts[0], 64)
+		den, err2 := strconv.ParseFloat(parts[1], 64)
+		if err1 == nil && err2 == nil && den > 0 {
+			fps := num / den
+			if fps > 0 {
+				return fps, true
+			}
 		}
-		parts := strings.Split(raw, "/")
-		if len(parts) == 2 {
-			num, err1 := strconv.ParseFloat(parts[0], 64)
-			den, err2 := strconv.ParseFloat(parts[1], 64)
-			if err1 == nil && err2 == nil && den > 0 {
-				fps := num / den
-				if fps > 0 {
-					return raw, fps
+	} else if len(parts) == 1 {
+		val, err := strconv.ParseFloat(parts[0], 64)
+		if err == nil && val > 0 {
+			return val, true
+		}
+	}
+	return 0, false
+}
+
+// ParseFrameRate extracts frame rate prioritizing avg_frame_rate first, falling back to r_frame_rate.
+// It returns the chosen frame rate string and the calculated float64 FPS.
+func ParseFrameRate(rFrameRate, avgFrameRate string) (string, float64) {
+	if fps, ok := ParseFrameRateRational(avgFrameRate); ok {
+		return avgFrameRate, fps
+	}
+	if fps, ok := ParseFrameRateRational(rFrameRate); ok {
+		return rFrameRate, fps
+	}
+	return "", 0
+}
+
+func parseMasteringDisplayMetadata(sdMap map[string]any) *MasteringDisplayMetadata {
+	if sdMap == nil {
+		return nil
+	}
+	getString := func(key string) string {
+		v, ok := sdMap[key]
+		if !ok || v == nil {
+			return ""
+		}
+		s := strings.TrimSpace(fmt.Sprintf("%v", v))
+		if s == "" || s == "<nil>" || s == "nil" {
+			return ""
+		}
+		return s
+	}
+
+	md := &MasteringDisplayMetadata{
+		RedX:         getString("red_x"),
+		RedY:         getString("red_y"),
+		GreenX:       getString("green_x"),
+		GreenY:       getString("green_y"),
+		BlueX:        getString("blue_x"),
+		BlueY:        getString("blue_y"),
+		WhitePointX:  getString("white_point_x"),
+		WhitePointY:  getString("white_point_y"),
+		MinLuminance: getString("min_luminance"),
+		MaxLuminance: getString("max_luminance"),
+	}
+
+	if md.RedX == "" && md.RedY == "" && md.GreenX == "" && md.GreenY == "" &&
+		md.BlueX == "" && md.BlueY == "" && md.WhitePointX == "" && md.WhitePointY == "" &&
+		md.MinLuminance == "" && md.MaxLuminance == "" {
+		return nil
+	}
+	return md
+}
+
+func parseContentLightLevelMetadata(sdMap map[string]any) *ContentLightLevelMetadata {
+	if sdMap == nil {
+		return nil
+	}
+	getInt := func(keys ...string) int {
+		for _, k := range keys {
+			v, ok := sdMap[k]
+			if !ok || v == nil {
+				continue
+			}
+			switch val := v.(type) {
+			case float64:
+				if val > 0 {
+					return int(val)
+				}
+			case int:
+				if val > 0 {
+					return val
+				}
+			case int64:
+				if val > 0 {
+					return int(val)
+				}
+			case string:
+				if n, err := strconv.Atoi(strings.TrimSpace(val)); err == nil && n > 0 {
+					return n
 				}
 			}
-		} else if len(parts) == 1 {
-			val, err := strconv.ParseFloat(parts[0], 64)
-			if err == nil && val > 0 {
-				return raw, val
+		}
+		return 0
+	}
+
+	cll := &ContentLightLevelMetadata{
+		MaxCLL:  getInt("max_content", "max_content_light_level"),
+		MaxFALL: getInt("max_average", "max_frame_average_light_level"),
+	}
+	if cll.MaxCLL == 0 && cll.MaxFALL == 0 {
+		return nil
+	}
+	return cll
+}
+
+const (
+	maxSideDataEntries = 10
+	maxSideDataKeys    = 15
+	maxSideDataValLen  = 256
+)
+
+func sanitizeSideDataList(rawList []json.RawMessage) []SideDataRecord {
+	if len(rawList) == 0 {
+		return nil
+	}
+	limit := len(rawList)
+	if limit > maxSideDataEntries {
+		limit = maxSideDataEntries
+	}
+	result := make([]SideDataRecord, 0, limit)
+	for i := 0; i < limit; i++ {
+		var sdMap map[string]any
+		if err := json.Unmarshal(rawList[i], &sdMap); err != nil || len(sdMap) == 0 {
+			continue
+		}
+		sdType, _ := sdMap["side_data_type"].(string)
+		sanitized := sanitizeSideDataMap(sdMap)
+		if len(sanitized) > 0 {
+			result = append(result, SideDataRecord{
+				SideDataType: sdType,
+				Data:         sanitized,
+			})
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+func sanitizeSideDataMap(entry map[string]any) map[string]any {
+	out := make(map[string]any)
+	count := 0
+	for k, v := range entry {
+		if count >= maxSideDataKeys {
+			break
+		}
+		if v == nil {
+			continue
+		}
+		switch val := v.(type) {
+		case string:
+			str := strings.TrimSpace(val)
+			if str == "" || str == "<nil>" || str == "nil" {
+				continue
+			}
+			if len(str) > maxSideDataValLen {
+				str = str[:maxSideDataValLen]
+			}
+			out[k] = str
+			count++
+		case float64, float32, int, int64, int32, uint, uint64, uint32, bool:
+			out[k] = val
+			count++
+		case map[string]any:
+			nested := make(map[string]any)
+			nestedCount := 0
+			for nk, nv := range val {
+				if nestedCount >= 10 {
+					break
+				}
+				if nv == nil {
+					continue
+				}
+				switch nval := nv.(type) {
+				case string:
+					str := strings.TrimSpace(nval)
+					if str != "" && str != "<nil>" && str != "nil" {
+						if len(str) > maxSideDataValLen {
+							str = str[:maxSideDataValLen]
+						}
+						nested[nk] = str
+						nestedCount++
+					}
+				case float64, float32, int, int64, int32, uint, uint64, uint32, bool:
+					nested[nk] = nval
+					nestedCount++
+				}
+			}
+			if len(nested) > 0 {
+				out[k] = nested
+				count++
 			}
 		}
 	}
-	return "", 0
+	return out
 }
 
 // ParseBitRate extracts bitrate in bits per second from raw ffprobe bit_rate or tags.
