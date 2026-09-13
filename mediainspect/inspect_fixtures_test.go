@@ -491,21 +491,21 @@ func TestDetailedReport_JSONRoundTripPreservation(t *testing.T) {
 		},
 		Video: []DetailedStream{
 			{
-				Index:         0,
-				Kind:          "video",
-				Codec:         "hevc",
-				Profile:       "Main 10",
-				PixelFormat:   "p010le",
-				Width:         3840,
-				Height:        2160,
-				BitDepth:      10,
-				FrameRate:     "24000/1001",
-				FPS:           23.976023976023978,
-				BitRate:       18500000,
-				ColorRange:    "tv",
-				ColorSpace:    "bt2020nc",
+				Index:          0,
+				Kind:           "video",
+				Codec:          "hevc",
+				Profile:        "Main 10",
+				PixelFormat:    "p010le",
+				Width:          3840,
+				Height:         2160,
+				BitDepth:       10,
+				FrameRate:      "24000/1001",
+				FPS:            23.976023976023978,
+				BitRate:        18500000,
+				ColorRange:     "tv",
+				ColorSpace:     "bt2020nc",
 				ColorPrimaries: "bt2020",
-				ColorTransfer: "smpte2084",
+				ColorTransfer:  "smpte2084",
 				MasteringDisplay: &MasteringDisplayMetadata{
 					RedX: "34000/50000",
 				},
@@ -831,5 +831,122 @@ func TestDetailedInspection_SanitizeSideDataMap_DeterministicKeyOrder(t *testing
 		if string(data1) != string(data2) {
 			t.Fatalf("non-deterministic output in sanitizeSideDataMap:\nrun1: %s\nrun2: %s", string(data1), string(data2))
 		}
+	}
+}
+
+func TestDetailedInspection_NumericBoundaries(t *testing.T) {
+	// 1. ParseBitRate with float64(math.MaxInt64) and string 2^63
+	maxInt64Float := float64(math.MaxInt64)
+	if br := ParseBitRate(maxInt64Float, nil); br != 0 {
+		t.Errorf("expected 0 for float64(math.MaxInt64), got %d", br)
+	}
+	if br := ParseBitRate("9223372036854775808", nil); br != 0 {
+		t.Errorf("expected 0 for 2^63 string, got %d", br)
+	}
+
+	// 2. ParseBitRate tag ordering: exact BPS preferred over BPS-*
+	tagsPreferred := map[string]string{
+		"BPS-eng": "1000000",
+		"BPS":     "5000000",
+		"BPS-fra": "2000000",
+	}
+	if br := ParseBitRate(nil, tagsPreferred); br != 5000000 {
+		t.Errorf("expected exact BPS tag (5000000), got %d", br)
+	}
+
+	// Deterministic sorting when multiple BPS-* tags exist and no exact BPS
+	tagsSorted := map[string]string{
+		"BPS-rus": "3000000",
+		"BPS-eng": "1000000",
+		"BPS-fra": "2000000",
+	}
+	for i := 0; i < 20; i++ {
+		if br := ParseBitRate(nil, tagsSorted); br != 1000000 {
+			t.Fatalf("expected deterministic first BPS tag BPS-eng (1000000), got %d", br)
+		}
+	}
+
+	// 3. ParseDuration
+	durations := []struct {
+		raw      string
+		expected float64
+	}{
+		{"NaN", 0},
+		{"+Inf", 0},
+		{"-Inf", 0},
+		{"-12.5", 0},
+		{"0", 0},
+		{"0.0", 0},
+		{"", 0},
+		{"   ", 0},
+		{"120.5", 120.5},
+	}
+	for _, tc := range durations {
+		if got := ParseDuration(tc.raw); got != tc.expected {
+			t.Errorf("ParseDuration(%q) = %v, expected %v", tc.raw, got, tc.expected)
+		}
+	}
+
+	// 4. Content light level int exceeding MaxInt32
+	cllOverflowInt := map[string]any{
+		"max_content": int(math.MaxInt32 + 1000),
+	}
+	if cll := parseContentLightLevelMetadata(cllOverflowInt); cll != nil {
+		t.Errorf("expected nil CLL for int > MaxInt32, got %+v", cll)
+	}
+
+	cllOverflowString := map[string]any{
+		"max_content": "3000000000", // > MaxInt32 (2147483647)
+	}
+	if cll := parseContentLightLevelMetadata(cllOverflowString); cll != nil {
+		t.Errorf("expected nil CLL for string > MaxInt32, got %+v", cll)
+	}
+
+	cllMixed := map[string]any{
+		"max_content": int(math.MaxInt32 + 1000),
+		"max_average": 400,
+	}
+	if cll := parseContentLightLevelMetadata(cllMixed); cll == nil || cll.MaxCLL != 0 || cll.MaxFALL != 400 {
+		t.Errorf("expected MaxCLL=0, MaxFALL=400 for overflow max_content, got %+v", cll)
+	}
+}
+
+func TestDetailedInspection_FrameRateFallbackAssignsValidRational(t *testing.T) {
+	dir := t.TempDir()
+	mediaFile := filepath.Join(dir, "Test.FrameRateFallback.mkv")
+	_ = os.WriteFile(mediaFile, []byte("fake-payload"), 0o644)
+
+	probeJSON := `{
+		"streams": [
+			{
+				"index": 0,
+				"codec_type": "video",
+				"codec_name": "h264",
+				"r_frame_rate": "24/1",
+				"avg_frame_rate": "0/0",
+				"width": 1920,
+				"height": 1080
+			}
+		],
+		"format": {
+			"format_name": "matroska",
+			"duration": "60.0"
+		}
+	}`
+
+	mockFFprobe := createMockFFprobe(t, dir, probeJSON)
+	rep, err := InspectDetailed(context.Background(), mockFFprobe, mediaFile)
+	if err != nil {
+		t.Fatalf("InspectDetailed failed: %v", err)
+	}
+	if len(rep.Video) != 1 {
+		t.Fatalf("expected 1 video stream, got %d", len(rep.Video))
+	}
+	v := rep.Video[0]
+	if v.FrameRate != "24/1" {
+		t.Errorf("expected FrameRate '24/1', got %q", v.FrameRate)
+	}
+	if v.FPS != 24.0 {
+		t.Errorf("expected FPS 24.0, got %f", v.FPS)
 	}
 }

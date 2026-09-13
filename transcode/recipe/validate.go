@@ -268,6 +268,12 @@ func NormalizeOptimizationPolicy(opt *OptimizationPolicy) {
 			opt.Quality.PreferredMetric = DefaultPreferredMetric
 		}
 		if opt.Quality.VMAF != nil {
+			if opt.Quality.VMAF.Target == 0 {
+				opt.Quality.VMAF.Target = DefaultVMAFTarget
+			}
+			if opt.Quality.VMAF.Minimum == 0 {
+				opt.Quality.VMAF.Minimum = DefaultVMAFMinimum
+			}
 			if opt.Quality.VMAF.MarginalTolerance == nil {
 				v := DefaultVMAFMarginalTolerance
 				opt.Quality.VMAF.MarginalTolerance = &v
@@ -278,6 +284,12 @@ func NormalizeOptimizationPolicy(opt *OptimizationPolicy) {
 		}
 
 		if opt.Quality.SSIM != nil {
+			if opt.Quality.SSIM.Target == 0 {
+				opt.Quality.SSIM.Target = DefaultSSIMTarget
+			}
+			if opt.Quality.SSIM.Minimum == 0 {
+				opt.Quality.SSIM.Minimum = DefaultSSIMMinimum
+			}
 			if opt.Quality.SSIM.MarginalTolerance == nil {
 				v := DefaultSSIMMarginalTolerance
 				opt.Quality.SSIM.MarginalTolerance = &v
@@ -362,11 +374,11 @@ func ValidateOptimizationPolicy(name string, opt *OptimizationPolicy) error {
 		if m == nil {
 			return nil
 		}
-		if !isFinite(m.Target) || m.Target < 0 || m.Target > maxVal {
-			return fmt.Errorf("profile %q: %s target %v out of range 0-%v", name, metricName, m.Target, maxVal)
+		if !isFinite(m.Target) || m.Target <= 0 || m.Target > maxVal {
+			return fmt.Errorf("profile %q: %s target %v out of range (0.0-%v]", name, metricName, m.Target, maxVal)
 		}
-		if !isFinite(m.Minimum) || m.Minimum < 0 || m.Minimum > maxVal {
-			return fmt.Errorf("profile %q: %s minimum %v out of range 0-%v", name, metricName, m.Minimum, maxVal)
+		if !isFinite(m.Minimum) || m.Minimum <= 0 || m.Minimum > maxVal {
+			return fmt.Errorf("profile %q: %s minimum %v out of range (0.0-%v]", name, metricName, m.Minimum, maxVal)
 		}
 		if m.Target < m.Minimum {
 			return fmt.Errorf("profile %q: %s target (%v) must be >= minimum (%v)", name, metricName, m.Target, m.Minimum)
@@ -415,8 +427,11 @@ func ValidateOptimizationPolicy(name string, opt *OptimizationPolicy) error {
 		sz := opt.Size
 		if sz.PreferredTotalBitrateKbps != nil {
 			pb := sz.PreferredTotalBitrateKbps
-			if pb.Min <= 0 {
-				return fmt.Errorf("profile %q: preferred_total_bitrate_kbps min must be > 0", name)
+			if pb.Min <= 0 || pb.Max <= 0 {
+				return fmt.Errorf("profile %q: preferred_total_bitrate_kbps values must be positive", name)
+			}
+			if pb.Min > MaxBitrateKbps || pb.Max > MaxBitrateKbps {
+				return fmt.Errorf("profile %q: preferred_total_bitrate_kbps values exceed upper limit (%d kbps)", name, MaxBitrateKbps)
 			}
 			if pb.Max < pb.Min {
 				return fmt.Errorf("profile %q: preferred_total_bitrate_kbps max (%d) must be >= min (%d)", name, pb.Max, pb.Min)
@@ -424,6 +439,9 @@ func ValidateOptimizationPolicy(name string, opt *OptimizationPolicy) error {
 		}
 		if sz.SoftMaxTotalBitrateKbps < 0 {
 			return fmt.Errorf("profile %q: soft_max_total_bitrate_kbps must be >= 0", name)
+		}
+		if sz.SoftMaxTotalBitrateKbps > MaxBitrateKbps {
+			return fmt.Errorf("profile %q: soft_max_total_bitrate_kbps (%d) exceeds upper limit (%d kbps)", name, sz.SoftMaxTotalBitrateKbps, MaxBitrateKbps)
 		}
 		if sz.SoftMaxTotalBitrateKbps > 0 && sz.PreferredTotalBitrateKbps != nil {
 			if sz.SoftMaxTotalBitrateKbps < sz.PreferredTotalBitrateKbps.Max {

@@ -105,9 +105,7 @@ func InspectFile(ctx context.Context, ffprobePath, path string) (Report, error) 
 	if probe.Format.FormatName != "" {
 		rep.Container = strings.Split(probe.Format.FormatName, ",")[0]
 	}
-	var fmtDur float64
-	fmt.Sscanf(probe.Format.Duration, "%f", &fmtDur)
-	rep.DurationSec = fmtDur
+	rep.DurationSec = ParseDuration(probe.Format.Duration)
 	for _, st := range probe.Streams {
 		lang := ""
 		for k, v := range st.Tags {
@@ -283,9 +281,7 @@ func InspectDetailed(ctx context.Context, ffprobePath, path string) (DetailedRep
 	if probe.Format.FormatName != "" {
 		rep.Container = strings.Split(probe.Format.FormatName, ",")[0]
 	}
-	var fmtDur float64
-	fmt.Sscanf(probe.Format.Duration, "%f", &fmtDur)
-	rep.DurationSec = fmtDur
+	rep.DurationSec = ParseDuration(probe.Format.Duration)
 	rep.BitRate = ParseBitRate(probe.Format.BitRate, probe.Format.Tags)
 	rep.Chapters = len(probe.Chapters)
 
@@ -301,14 +297,7 @@ func InspectDetailed(ctx context.Context, ffprobePath, path string) (DetailedRep
 			}
 		}
 
-		fps, ok := ParseFrameRateRational(st.AvgFrameRate)
-		if !ok {
-			fps, _ = ParseFrameRateRational(st.RFrameRate)
-		}
-		frameRate := st.AvgFrameRate
-		if frameRate == "" || frameRate == "0/0" {
-			frameRate = st.RFrameRate
-		}
+		frameRate, fps := ParseFrameRate(st.RFrameRate, st.AvgFrameRate)
 		bitRate := ParseBitRate(st.BitRate, st.Tags)
 
 		ds := DetailedStream{
@@ -379,6 +368,20 @@ func InspectDetailed(ctx context.Context, ffprobePath, path string) (DetailedRep
 	}
 
 	return rep, nil
+}
+
+// ParseDuration parses a duration string in seconds and returns a non-negative finite float64.
+// Rejects NaN, Inf, and negative values.
+func ParseDuration(raw string) float64 {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return 0
+	}
+	f, err := strconv.ParseFloat(trimmed, 64)
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f <= 0 {
+		return 0
+	}
+	return f
 }
 
 // ParseFrameRateRational parses a rational frame rate string like "24000/1001" or "24" to float64.
@@ -476,7 +479,7 @@ func parseContentLightLevelMetadata(sdMap map[string]any) *ContentLightLevelMeta
 					return int(f)
 				}
 			case int:
-				if val > 0 {
+				if val > 0 && val <= math.MaxInt32 {
 					return val
 				}
 			case int64:
@@ -485,8 +488,8 @@ func parseContentLightLevelMetadata(sdMap map[string]any) *ContentLightLevelMeta
 				}
 			case string:
 				trimmed := strings.TrimSpace(val)
-				if n, err := strconv.Atoi(trimmed); err == nil && n > 0 {
-					return n
+				if n, err := strconv.ParseInt(trimmed, 10, 64); err == nil && n > 0 && n <= math.MaxInt32 {
+					return int(n)
 				}
 				if f, err := strconv.ParseFloat(trimmed, 64); err == nil && f > 0 && !math.IsNaN(f) && !math.IsInf(f, 0) && f <= float64(math.MaxInt32) {
 					return int(f)
@@ -615,6 +618,10 @@ func sanitizeSideDataMap(entry map[string]any) map[string]any {
 
 // ParseBitRate extracts bitrate in bits per second from raw ffprobe bit_rate or tags.
 func ParseBitRate(raw any, tags map[string]string) int64 {
+	// 1<<63 is 9223372036854775808.0 (the float64 value of math.MaxInt64 rounded to 2^63).
+	// Any float64 >= 1<<63 overflows signed int64 conversion and produces math.MinInt64.
+	// Therefore, float values must be strictly < 9223372036854775808.0 (float64(uint64(1)<<63)).
+	const maxInt64Float = float64(uint64(1) << 63)
 	if raw != nil {
 		switch v := raw.(type) {
 		case string:
@@ -622,17 +629,23 @@ func ParseBitRate(raw any, tags map[string]string) int64 {
 			if n, err := strconv.ParseInt(trimmed, 10, 64); err == nil && n > 0 {
 				return n
 			}
-			if f, err := strconv.ParseFloat(trimmed, 64); err == nil && f > 0 && !math.IsNaN(f) && !math.IsInf(f, 0) && f <= float64(math.MaxInt64) {
-				return int64(f)
+			if f, err := strconv.ParseFloat(trimmed, 64); err == nil && f > 0 && !math.IsNaN(f) && !math.IsInf(f, 0) && f < maxInt64Float {
+				if n := int64(f); n > 0 {
+					return n
+				}
 			}
 		case float64:
-			if v > 0 && !math.IsNaN(v) && !math.IsInf(v, 0) && v <= float64(math.MaxInt64) {
-				return int64(v)
+			if v > 0 && !math.IsNaN(v) && !math.IsInf(v, 0) && v < maxInt64Float {
+				if n := int64(v); n > 0 {
+					return n
+				}
 			}
 		case float32:
 			f := float64(v)
-			if f > 0 && !math.IsNaN(f) && !math.IsInf(f, 0) && f <= float64(math.MaxInt64) {
-				return int64(f)
+			if f > 0 && !math.IsNaN(f) && !math.IsInf(f, 0) && f < maxInt64Float {
+				if n := int64(f); n > 0 {
+					return n
+				}
 			}
 		case int64:
 			if v > 0 {
@@ -644,14 +657,30 @@ func ParseBitRate(raw any, tags map[string]string) int64 {
 			}
 		}
 	}
-	for k, v := range tags {
-		if strings.HasPrefix(strings.ToUpper(k), "BPS") {
-			trimmed := strings.TrimSpace(v)
+	if len(tags) > 0 {
+		var bpsKeys []string
+		for k := range tags {
+			if strings.HasPrefix(strings.ToUpper(k), "BPS") {
+				bpsKeys = append(bpsKeys, k)
+			}
+		}
+		sort.Slice(bpsKeys, func(i, j int) bool {
+			iExact := strings.EqualFold(bpsKeys[i], "BPS")
+			jExact := strings.EqualFold(bpsKeys[j], "BPS")
+			if iExact != jExact {
+				return iExact
+			}
+			return bpsKeys[i] < bpsKeys[j]
+		})
+		for _, k := range bpsKeys {
+			trimmed := strings.TrimSpace(tags[k])
 			if n, err := strconv.ParseInt(trimmed, 10, 64); err == nil && n > 0 {
 				return n
 			}
-			if f, err := strconv.ParseFloat(trimmed, 64); err == nil && f > 0 && !math.IsNaN(f) && !math.IsInf(f, 0) && f <= float64(math.MaxInt64) {
-				return int64(f)
+			if f, err := strconv.ParseFloat(trimmed, 64); err == nil && f > 0 && !math.IsNaN(f) && !math.IsInf(f, 0) && f < maxInt64Float {
+				if n := int64(f); n > 0 {
+					return n
+				}
 			}
 		}
 	}
