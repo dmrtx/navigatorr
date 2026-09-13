@@ -60,8 +60,6 @@ func (m *mockTranscodeExecutor) Capabilities(ctx context.Context) (transcode.Wor
 	}
 	fp, _ := transcode.ComputeCapabilityFingerprint(caps)
 	caps.CapabilityFingerprint = fp
-	caps.CapabilitySignature = fp
-	caps.Signature = fp
 	return caps, nil
 }
 

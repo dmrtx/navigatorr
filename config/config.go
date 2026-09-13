@@ -195,7 +195,16 @@ func profileToRecipe(name string, p TranscodeProfileConfig) recipe.Profile {
 		Subtitles:    recipe.SubtitleProfile{Mode: p.Subtitles.Mode, ConvertIncompatible: p.Subtitles.ConvertIncompatible},
 		Preserve:     recipe.PreserveProfile{Metadata: p.Preserve.Metadata, Chapters: p.Preserve.Chapters, Attachments: p.Preserve.Attachments},
 		Resilience:   r,
-		Optimization: p.Optimization,
+		Optimization: func() *recipe.OptimizationPolicy {
+			if p.Optimization == nil {
+				return nil
+			}
+			opt := p.Optimization.Clone()
+			if opt.Enabled {
+				recipe.NormalizeOptimizationPolicy(opt)
+			}
+			return opt
+		}(),
 	}
 }
 
@@ -215,7 +224,7 @@ func recipeToProfile(p recipe.Profile) TranscodeProfileConfig {
 		Subtitles:    SubtitleProfileConfig{Mode: p.Subtitles.Mode, ConvertIncompatible: p.Subtitles.ConvertIncompatible},
 		Preserve:     PreserveProfileConfig{Metadata: p.Preserve.Metadata, Chapters: p.Preserve.Chapters, Attachments: p.Preserve.Attachments},
 		Resilience:   ResilienceProfileConfig{MaxAttempts: p.Resilience.MaxAttempts, TransientRetries: p.Resilience.TransientRetries, RetryBackoffSeconds: append([]int(nil), p.Resilience.RetryBackoffSeconds...), MaxFallbacks: p.Resilience.MaxFallbacks, Fallbacks: append([]recipe.FallbackRule(nil), p.Resilience.Fallbacks...)},
-		Optimization: p.Optimization,
+		Optimization: p.Optimization.Clone(),
 	}
 }
 
