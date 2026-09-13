@@ -5,17 +5,22 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/optimization"
 )
 
 // BenchmarkSampleRef describes an extracted reference sample window.
@@ -29,29 +34,66 @@ type BenchmarkSampleRef struct {
 
 // BenchmarkCandidateSampleResult describes one candidate encode for one sample window.
 type BenchmarkCandidateSampleResult struct {
-	CandidateID       string  `json:"candidate_id"`
-	SampleIndex       int     `json:"sample_index"`
-	File              string  `json:"file"`
-	SizeBytes         int64   `json:"size_bytes"`
-	EncodeDurationSec float64 `json:"encode_duration_sec"`
-	Quality           int     `json:"quality"`
-	VideoProfile      string  `json:"video_profile,omitempty"`
-	PixelFormat       string  `json:"pixel_format,omitempty"`
-	Error             string  `json:"error,omitempty"`
+	CandidateID       string   `json:"candidate_id"`
+	SampleIndex       int      `json:"sample_index"`
+	File              string   `json:"file"`
+	SizeBytes         int64    `json:"size_bytes"`
+	EncodeDurationSec float64  `json:"encode_duration_sec"`
+	Quality           int      `json:"quality"`
+	VideoProfile      string   `json:"video_profile,omitempty"`
+	PixelFormat       string   `json:"pixel_format,omitempty"`
+	VMAF              *float64 `json:"vmaf,omitempty"`
+	SSIM              *float64 `json:"ssim,omitempty"`
+	MetricDurationSec float64  `json:"metric_duration_sec,omitempty"`
+	Error             string   `json:"error,omitempty"`
 }
 
-// BenchmarkExecutionEvidence records all physical sample outcomes produced in Phase 4B.
+// BenchmarkMetricSampleResult records perceptual quality metric measurements for one candidate sample.
+type BenchmarkMetricSampleResult struct {
+	CandidateID       string   `json:"candidate_id"`
+	CandidateIndex    int      `json:"candidate_index"`
+	SampleIndex       int      `json:"sample_index"`
+	VMAF              *float64 `json:"vmaf,omitempty"`
+	SSIM              *float64 `json:"ssim,omitempty"`
+	VMAFDurationSec   float64  `json:"vmaf_duration_sec,omitempty"`
+	SSIMDurationSec   float64  `json:"ssim_duration_sec,omitempty"`
+	MetricDurationSec float64  `json:"metric_duration_sec"`
+	Error             string   `json:"error,omitempty"`
+}
+
+// BenchmarkCandidateMetricAggregate records the aggregated metric result for one candidate.
+type BenchmarkCandidateMetricAggregate struct {
+	CandidateID    string                       `json:"candidate_id"`
+	CandidateIndex int                          `json:"candidate_index"`
+	MetricType     optimization.MetricType      `json:"metric_type"`
+	Aggregate      optimization.MetricAggregate `json:"aggregate"`
+}
+
+// BenchmarkExecutionEvidence records all physical sample outcomes and metric measurements.
 type BenchmarkExecutionEvidence struct {
-	SourceVideoIndex  int                              `json:"source_video_index"`
-	SourceBitDepth    int                              `json:"source_bit_depth"`
-	SourcePixelFormat string                           `json:"source_pixel_format"`
-	SourceResolution  string                           `json:"source_resolution"`
-	ReferenceSamples  []BenchmarkSampleRef             `json:"reference_samples"`
-	CandidateSamples  []BenchmarkCandidateSampleResult `json:"candidate_samples"`
+	SourceVideoIndex  int                                  `json:"source_video_index"`
+	SourceBitDepth    int                                  `json:"source_bit_depth"`
+	SourcePixelFormat string                               `json:"source_pixel_format"`
+	SourceResolution  string                               `json:"source_resolution"`
+	ReferenceSamples  []BenchmarkSampleRef                 `json:"reference_samples"`
+	CandidateSamples  []BenchmarkCandidateSampleResult     `json:"candidate_samples"`
+	MetricSamples     []BenchmarkMetricSampleResult        `json:"metric_samples,omitempty"`
+	CandidateMetrics  []BenchmarkCandidateMetricAggregate  `json:"candidate_metrics,omitempty"`
 }
 
-// ProductionBenchmarkRunner implements BenchmarkRunner for Phase 4B.
-// It extracts lossless reference samples and encodes candidate samples using hevc_videotoolbox.
+type validatedCandidate struct {
+	index       int
+	candidate   transcode.BenchmarkCandidate
+	plan        *transcode.Plan
+	profile     string
+	pixelFormat string
+	bitDepth    int
+	fileKey     string
+}
+
+// ProductionBenchmarkRunner implements BenchmarkRunner for Phase 4B and Phase 5.
+// It extracts lossless reference samples, encodes candidate samples using hevc_videotoolbox,
+// and computes perceptual quality metrics (VMAF/SSIM).
 type ProductionBenchmarkRunner struct {
 	metricsHook func(ctx context.Context, w *Worker, record *BenchmarkRecord, evidence *BenchmarkExecutionEvidence) error
 }
@@ -164,16 +206,6 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 	}
 	if !caps.Available {
 		return errors.New("hevc_videotoolbox encoder is not available on worker (fail closed)")
-	}
-
-	type validatedCandidate struct {
-		index       int
-		candidate   transcode.BenchmarkCandidate
-		plan        *transcode.Plan
-		profile     string
-		pixelFormat string
-		bitDepth    int
-		fileKey     string
 	}
 
 	validatedCandidates := make([]validatedCandidate, 0, len(record.Candidates))
@@ -373,9 +405,13 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		}
 	}
 
-	// 6. Optional Phase 5 metrics hook before scratch cleanup
+	// 6. Phase 5 metrics calculation before scratch cleanup
 	if r.metricsHook != nil {
 		if err := r.metricsHook(ctx, w, record, evidence); err != nil {
+			return fmt.Errorf("metrics calculation failed: %w", err)
+		}
+	} else {
+		if err := r.runMetrics(ctx, w, record, evidence, samplesDir, validatedCandidates, sourceInitialSize, sourceInitialModTime); err != nil {
 			return fmt.Errorf("metrics calculation failed: %w", err)
 		}
 	}
@@ -720,4 +756,533 @@ func boundedStderr(buf *boundedBuffer, maxLen int) string {
 		return str[:maxLen] + "..."
 	}
 	return str
+}
+
+// MaxMetricLogSizeBytes defines the maximum allowed size of a metric log or stats file (5 MB)
+// to prevent denial-of-service / memory exhaustion attacks.
+const MaxMetricLogSizeBytes = 5 * 1024 * 1024
+
+// escapeFilterArg escapes special characters in FFmpeg filter option arguments.
+// Specifically colons (:), backslashes (\), and single quotes (').
+func escapeFilterArg(s string) string {
+	var sb strings.Builder
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		switch b {
+		case ':', '\\', '\'':
+			sb.WriteByte('\\')
+			sb.WriteByte(b)
+		default:
+			sb.WriteByte(b)
+		}
+	}
+	return sb.String()
+}
+
+// BuildVMAFArgs constructs the exact, safe FFmpeg argument slice
+// for calculating VMAF between a candidate sample (distorted, 0:v)
+// and an FFV1 reference sample (reference, 1:v).
+func BuildVMAFArgs(candPath, refPath, logPath string) []string {
+	return []string{
+		"-nostats",
+		"-i", candPath,
+		"-i", refPath,
+		"-filter_complex", fmt.Sprintf("[0:v][1:v]libvmaf=log_fmt=json:log_path=%s", escapeFilterArg(logPath)),
+		"-f", "null",
+		"-",
+	}
+}
+
+// BuildSSIMArgs constructs the exact, safe FFmpeg argument slice
+// for calculating SSIM between a candidate sample (distorted, 0:v)
+// and an FFV1 reference sample (reference, 1:v).
+func BuildSSIMArgs(candPath, refPath, statsPath string) []string {
+	filter := "[0:v][1:v]ssim"
+	if statsPath != "" {
+		filter = fmt.Sprintf("[0:v][1:v]ssim=stats_file=%s", escapeFilterArg(statsPath))
+	}
+	return []string{
+		"-nostats",
+		"-i", candPath,
+		"-i", refPath,
+		"-filter_complex", filter,
+		"-f", "null",
+		"-",
+	}
+}
+
+// derivedMetricLogPath constructs a collision-free, verified scratch path for metric logs
+// derived from candidate index, sample index, safe hash, and metric type.
+func derivedMetricLogPath(samplesDir string, metric string, candIdx int, candidateID string, sampleIdx int) (string, error) {
+	h := sha256.Sum256([]byte(candidateID))
+	shortHash := hex.EncodeToString(h[:4]) // 8 hex chars
+	var ext string
+	if metric == "vmaf" {
+		ext = "json"
+	} else {
+		ext = "log"
+	}
+	filename := fmt.Sprintf("metric_%s_cand_%d_%s_sample_%d.%s", metric, candIdx, shortHash, sampleIdx, ext)
+	logPath := filepath.Join(samplesDir, filename)
+	if err := verifyChildPath(samplesDir, logPath); err != nil {
+		return "", fmt.Errorf("resolving metric log path %s: %w", filename, err)
+	}
+	return logPath, nil
+}
+
+type vmafJSONLog struct {
+	Version       string                      `json:"version"`
+	PooledMetrics map[string]vmafPooledMetric `json:"pooled_metrics"`
+	Frames        []vmafFrame                 `json:"frames"`
+}
+
+type vmafPooledMetric struct {
+	Min          *float64 `json:"min"`
+	Max          *float64 `json:"max"`
+	Mean         *float64 `json:"mean"`
+	HarmonicMean *float64 `json:"harmonic_mean"`
+}
+
+type vmafFrame struct {
+	FrameNum int                `json:"frameNum"`
+	Metrics  map[string]float64 `json:"metrics"`
+}
+
+// ParseVMAFJSON parses libvmaf JSON log data, validating bounds and finite float.
+func ParseVMAFJSON(data []byte) (float64, error) {
+	if len(data) == 0 {
+		return 0, errors.New("empty vmaf log data (fail closed)")
+	}
+	if len(data) > MaxMetricLogSizeBytes {
+		return 0, fmt.Errorf("oversized vmaf log data (%d bytes exceeds %d max) (fail closed)", len(data), MaxMetricLogSizeBytes)
+	}
+
+	var log vmafJSONLog
+	if err := json.Unmarshal(data, &log); err != nil {
+		return 0, fmt.Errorf("malformed vmaf json log: %w (fail closed)", err)
+	}
+
+	var score float64
+	found := false
+
+	if log.PooledMetrics != nil {
+		if pm, ok := log.PooledMetrics["vmaf"]; ok && pm.Mean != nil {
+			score = *pm.Mean
+			found = true
+		}
+	}
+
+	if !found && len(log.Frames) > 0 {
+		var sum float64
+		frameCount := 0
+		for _, f := range log.Frames {
+			if s, ok := f.Metrics["vmaf"]; ok {
+				if math.IsNaN(s) || math.IsInf(s, 0) {
+					return 0, errors.New("vmaf frame score is NaN or Inf (fail closed)")
+				}
+				sum += s
+				frameCount++
+			}
+		}
+		if frameCount == len(log.Frames) && frameCount > 0 {
+			score = sum / float64(frameCount)
+			found = true
+		}
+	}
+
+	if !found {
+		return 0, errors.New("vmaf score not found in pooled_metrics or frames (fail closed)")
+	}
+
+	if math.IsNaN(score) || math.IsInf(score, 0) {
+		return 0, errors.New("vmaf score is NaN or Inf (fail closed)")
+	}
+	if score < 0.0 || score > 100.0 {
+		return 0, fmt.Errorf("vmaf score %v out of range [0, 100] (fail closed)", score)
+	}
+
+	return score, nil
+}
+
+// ParseSSIMStatsFile parses an FFmpeg ssim stats_file output, averaging the per-frame All scores.
+func ParseSSIMStatsFile(data []byte) (float64, error) {
+	if len(data) == 0 {
+		return 0, errors.New("empty ssim stats data (fail closed)")
+	}
+	if len(data) > MaxMetricLogSizeBytes {
+		return 0, fmt.Errorf("oversized ssim stats data (%d bytes exceeds %d max) (fail closed)", len(data), MaxMetricLogSizeBytes)
+	}
+
+	lines := strings.Split(string(data), "\n")
+	var sum float64
+	var count int
+
+	re := regexp.MustCompile(`\bAll:([0-9.]+|nan|inf|-inf)\b`)
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		matches := re.FindStringSubmatch(line)
+		if len(matches) < 2 {
+			continue
+		}
+		valStr := matches[1]
+		if strings.EqualFold(valStr, "nan") || strings.EqualFold(valStr, "inf") || strings.EqualFold(valStr, "-inf") {
+			return 0, errors.New("ssim frame score is NaN or Inf (fail closed)")
+		}
+		val, err := strconv.ParseFloat(valStr, 64)
+		if err != nil {
+			return 0, fmt.Errorf("parsing ssim frame score %q: %w (fail closed)", valStr, err)
+		}
+		if math.IsNaN(val) || math.IsInf(val, 0) {
+			return 0, errors.New("ssim frame score is NaN or Inf (fail closed)")
+		}
+		if val < 0.0 || val > 1.0 {
+			return 0, fmt.Errorf("ssim frame score %v out of range [0, 1] (fail closed)", val)
+		}
+		sum += val
+		count++
+	}
+
+	if count == 0 {
+		return 0, errors.New("no valid ssim frames found in stats file (fail closed)")
+	}
+
+	avg := sum / float64(count)
+	if math.IsNaN(avg) || math.IsInf(avg, 0) {
+		return 0, errors.New("ssim average score is NaN or Inf (fail closed)")
+	}
+	if avg < 0.0 || avg > 1.0 {
+		return 0, fmt.Errorf("ssim average score %v out of range [0, 1] (fail closed)", avg)
+	}
+
+	return avg, nil
+}
+
+// ParseSSIMStderr extracts aggregate SSIM score from FFmpeg stderr output.
+func ParseSSIMStderr(stderr string) (float64, error) {
+	if strings.TrimSpace(stderr) == "" {
+		return 0, errors.New("empty stderr output (fail closed)")
+	}
+	re := regexp.MustCompile(`SSIM\s+.*?\bAll:([0-9.]+|nan|inf|-inf)\b`)
+	matches := re.FindStringSubmatch(stderr)
+	if len(matches) < 2 {
+		return 0, errors.New("ssim aggregate score not found in stderr (fail closed)")
+	}
+	valStr := matches[1]
+	if strings.EqualFold(valStr, "nan") || strings.EqualFold(valStr, "inf") || strings.EqualFold(valStr, "-inf") {
+		return 0, errors.New("ssim aggregate score is NaN or Inf (fail closed)")
+	}
+	val, err := strconv.ParseFloat(valStr, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parsing ssim score %q: %w (fail closed)", valStr, err)
+	}
+	if math.IsNaN(val) || math.IsInf(val, 0) {
+		return 0, errors.New("ssim aggregate score is NaN or Inf (fail closed)")
+	}
+	if val < 0.0 || val > 1.0 {
+		return 0, fmt.Errorf("ssim aggregate score %v out of range [0, 1] (fail closed)", val)
+	}
+	return val, nil
+}
+
+func readMetricLogFile(logPath string) ([]byte, error) {
+	fi, err := os.Lstat(logPath)
+	if err != nil {
+		return nil, fmt.Errorf("stat metric log %s: %w (fail closed)", logPath, err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("metric log %s is a symlink (fail closed)", logPath)
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("metric log %s is not a regular file (fail closed)", logPath)
+	}
+	if fi.Size() == 0 {
+		return nil, fmt.Errorf("metric log %s is empty (fail closed)", logPath)
+	}
+	if fi.Size() > MaxMetricLogSizeBytes {
+		return nil, fmt.Errorf("metric log %s size %d exceeds maximum allowed %d (fail closed)", logPath, fi.Size(), MaxMetricLogSizeBytes)
+	}
+	return os.ReadFile(logPath)
+}
+
+func (r *ProductionBenchmarkRunner) runMetrics(
+	ctx context.Context,
+	w *Worker,
+	record *BenchmarkRecord,
+	evidence *BenchmarkExecutionEvidence,
+	samplesDir string,
+	validatedCandidates []validatedCandidate,
+	sourceInitialSize int64,
+	sourceInitialModTime time.Time,
+) error {
+	normMetric := strings.ToLower(strings.TrimSpace(record.Metric))
+	if normMetric == "" {
+		normMetric = "vmaf"
+	}
+
+	caps, err := w.Capabilities(ctx)
+	if err != nil {
+		return fmt.Errorf("probing worker capabilities: %w (fail closed)", err)
+	}
+
+	switch normMetric {
+	case "vmaf":
+		if !caps.Filters["libvmaf"] {
+			return errors.New("required filter 'libvmaf' is not available on worker (fail closed)")
+		}
+	case "ssim":
+		if !caps.Filters["ssim"] {
+			return errors.New("required filter 'ssim' is not available on worker (fail closed)")
+		}
+	case "both", "vmaf+ssim":
+		if !caps.Filters["libvmaf"] {
+			return errors.New("required filter 'libvmaf' is not available on worker (fail closed)")
+		}
+		if !caps.Filters["ssim"] {
+			return errors.New("required filter 'ssim' is not available on worker (fail closed)")
+		}
+	default:
+		return fmt.Errorf("unsupported benchmark metric %q (fail closed)", record.Metric)
+	}
+
+	runVMAF := normMetric == "vmaf" || normMetric == "both" || normMetric == "vmaf+ssim"
+	runSSIM := normMetric == "ssim" || normMetric == "both" || normMetric == "vmaf+ssim"
+
+	primaryMetricType := optimization.MetricTypeVMAF
+	if normMetric == "ssim" {
+		primaryMetricType = optimization.MetricTypeSSIM
+	}
+
+	for candIdx, vc := range validatedCandidates {
+		var candidateScores []optimization.SampleScore
+
+		for _, window := range record.Samples {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+
+			if err := verifySourceUnchanged(record.Source, sourceInitialSize, sourceInitialModTime); err != nil {
+				return err
+			}
+
+			candPath := filepath.Join(samplesDir, fmt.Sprintf("%s_sample_%d.mkv", vc.fileKey, window.Index))
+			refPath := filepath.Join(samplesDir, fmt.Sprintf("ref_sample_%d.mkv", window.Index))
+
+			candStat, err := os.Stat(candPath)
+			if err != nil || !candStat.Mode().IsRegular() || candStat.Size() == 0 {
+				errStr := fmt.Sprintf("candidate sample missing or invalid at %s", candPath)
+				evidence.MetricSamples = append(evidence.MetricSamples, BenchmarkMetricSampleResult{
+					CandidateID:    vc.candidate.ID,
+					CandidateIndex: candIdx,
+					SampleIndex:    window.Index,
+					Error:          errStr,
+				})
+				return errors.New(errStr)
+			}
+			refStat, err := os.Stat(refPath)
+			if err != nil || !refStat.Mode().IsRegular() || refStat.Size() == 0 {
+				errStr := fmt.Sprintf("reference sample missing or invalid at %s", refPath)
+				evidence.MetricSamples = append(evidence.MetricSamples, BenchmarkMetricSampleResult{
+					CandidateID:    vc.candidate.ID,
+					CandidateIndex: candIdx,
+					SampleIndex:    window.Index,
+					Error:          errStr,
+				})
+				return errors.New(errStr)
+			}
+
+			var vmafScore *float64
+			var ssimScore *float64
+			var vmafDurationSec float64
+			var ssimDurationSec float64
+
+			if runVMAF {
+				logPath, err := derivedMetricLogPath(samplesDir, "vmaf", candIdx, vc.candidate.ID, window.Index)
+				if err != nil {
+					return err
+				}
+				if err := prepareOutputFile(logPath); err != nil {
+					return fmt.Errorf("preparing vmaf log path %s: %w", logPath, err)
+				}
+
+				args := BuildVMAFArgs(candPath, refPath, logPath)
+				cmd := exec.CommandContext(ctx, w.ffmpegPath, args...)
+				cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+				cmd.Cancel = func() error {
+					if cmd.Process != nil && cmd.Process.Pid > 0 {
+						return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+					}
+					return nil
+				}
+				cmd.WaitDelay = 2 * time.Second
+				stderrBuf := newBoundedBuffer(16 * 1024)
+				cmd.Stderr = stderrBuf
+				cmd.Stdout = nil
+
+				start := time.Now()
+				runErr := cmd.Run()
+				vmafDurationSec = time.Since(start).Seconds()
+
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				if runErr != nil {
+					errStr := fmt.Sprintf("ffmpeg vmaf failed for cand %q sample %d: %v; stderr: %s",
+						vc.candidate.ID, window.Index, runErr, stderrBuf.String())
+					evidence.MetricSamples = append(evidence.MetricSamples, BenchmarkMetricSampleResult{
+						CandidateID:       vc.candidate.ID,
+						CandidateIndex:    candIdx,
+						SampleIndex:       window.Index,
+						VMAFDurationSec:   vmafDurationSec,
+						MetricDurationSec: vmafDurationSec,
+						Error:             errStr,
+					})
+					return errors.New(errStr)
+				}
+
+				logData, err := readMetricLogFile(logPath)
+				if err != nil {
+					evidence.MetricSamples = append(evidence.MetricSamples, BenchmarkMetricSampleResult{
+						CandidateID:       vc.candidate.ID,
+						CandidateIndex:    candIdx,
+						SampleIndex:       window.Index,
+						VMAFDurationSec:   vmafDurationSec,
+						MetricDurationSec: vmafDurationSec,
+						Error:             err.Error(),
+					})
+					return err
+				}
+
+				score, err := ParseVMAFJSON(logData)
+				if err != nil {
+					evidence.MetricSamples = append(evidence.MetricSamples, BenchmarkMetricSampleResult{
+						CandidateID:       vc.candidate.ID,
+						CandidateIndex:    candIdx,
+						SampleIndex:       window.Index,
+						VMAFDurationSec:   vmafDurationSec,
+						MetricDurationSec: vmafDurationSec,
+						Error:             err.Error(),
+					})
+					return err
+				}
+				vmafScore = &score
+			}
+
+			if runSSIM {
+				statsPath, err := derivedMetricLogPath(samplesDir, "ssim", candIdx, vc.candidate.ID, window.Index)
+				if err != nil {
+					return err
+				}
+				if err := prepareOutputFile(statsPath); err != nil {
+					return fmt.Errorf("preparing ssim stats path %s: %w", statsPath, err)
+				}
+
+				args := BuildSSIMArgs(candPath, refPath, statsPath)
+				cmd := exec.CommandContext(ctx, w.ffmpegPath, args...)
+				cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+				cmd.Cancel = func() error {
+					if cmd.Process != nil && cmd.Process.Pid > 0 {
+						return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+					}
+					return nil
+				}
+				cmd.WaitDelay = 2 * time.Second
+				stderrBuf := newBoundedBuffer(16 * 1024)
+				cmd.Stderr = stderrBuf
+				cmd.Stdout = nil
+
+				start := time.Now()
+				runErr := cmd.Run()
+				ssimDurationSec = time.Since(start).Seconds()
+
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				if runErr != nil {
+					errStr := fmt.Sprintf("ffmpeg ssim failed for cand %q sample %d: %v; stderr: %s",
+						vc.candidate.ID, window.Index, runErr, stderrBuf.String())
+					evidence.MetricSamples = append(evidence.MetricSamples, BenchmarkMetricSampleResult{
+						CandidateID:       vc.candidate.ID,
+						CandidateIndex:    candIdx,
+						SampleIndex:       window.Index,
+						SSIMDurationSec:   ssimDurationSec,
+						MetricDurationSec: ssimDurationSec,
+						Error:             errStr,
+					})
+					return errors.New(errStr)
+				}
+
+				var score float64
+				statsData, err := readMetricLogFile(statsPath)
+				if err == nil {
+					score, err = ParseSSIMStatsFile(statsData)
+				}
+				if err != nil {
+					score, err = ParseSSIMStderr(stderrBuf.String())
+				}
+				if err != nil {
+					evidence.MetricSamples = append(evidence.MetricSamples, BenchmarkMetricSampleResult{
+						CandidateID:       vc.candidate.ID,
+						CandidateIndex:    candIdx,
+						SampleIndex:       window.Index,
+						SSIMDurationSec:   ssimDurationSec,
+						MetricDurationSec: ssimDurationSec,
+						Error:             err.Error(),
+					})
+					return err
+				}
+				ssimScore = &score
+			}
+
+			metricRes := BenchmarkMetricSampleResult{
+				CandidateID:       vc.candidate.ID,
+				CandidateIndex:    candIdx,
+				SampleIndex:       window.Index,
+				VMAF:              vmafScore,
+				SSIM:              ssimScore,
+				VMAFDurationSec:   vmafDurationSec,
+				SSIMDurationSec:   ssimDurationSec,
+				MetricDurationSec: vmafDurationSec + ssimDurationSec,
+			}
+			evidence.MetricSamples = append(evidence.MetricSamples, metricRes)
+
+			for i := range evidence.CandidateSamples {
+				if evidence.CandidateSamples[i].CandidateID == vc.candidate.ID && evidence.CandidateSamples[i].SampleIndex == window.Index {
+					evidence.CandidateSamples[i].VMAF = vmafScore
+					evidence.CandidateSamples[i].SSIM = ssimScore
+					evidence.CandidateSamples[i].MetricDurationSec = metricRes.MetricDurationSec
+					break
+				}
+			}
+
+			var sampleVal float64
+			if primaryMetricType == optimization.MetricTypeVMAF && vmafScore != nil {
+				sampleVal = *vmafScore
+			} else if primaryMetricType == optimization.MetricTypeSSIM && ssimScore != nil {
+				sampleVal = *ssimScore
+			}
+			candidateScores = append(candidateScores, optimization.SampleScore{
+				SampleIndex: window.Index,
+				Score:       sampleVal,
+				Valid:       true,
+			})
+		}
+
+		agg := optimization.AggregateSampleScores(primaryMetricType, candidateScores)
+		evidence.CandidateMetrics = append(evidence.CandidateMetrics, BenchmarkCandidateMetricAggregate{
+			CandidateID:    vc.candidate.ID,
+			CandidateIndex: candIdx,
+			MetricType:     primaryMetricType,
+			Aggregate:      agg,
+		})
+
+		if !agg.Valid {
+			return fmt.Errorf("candidate %q metric aggregation invalid: reason %s (fail closed)", vc.candidate.ID, agg.IneligibleReason)
+		}
+	}
+
+	return nil
 }
