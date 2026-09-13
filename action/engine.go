@@ -358,6 +358,16 @@ func (e *Engine) Cancel(ctx context.Context, instanceID, reason string) (*Action
 
 	tmpl, _ := e.GetTemplate(inst.ActionName)
 	ec := parseExecutionContext(inst, e)
+
+	if e.deps.Transcode != nil {
+		if benchID := getString(ec.State, "benchmark_job_id"); benchID != "" {
+			_ = e.deps.Transcode.BenchmarkCancel(ctx, benchID)
+		}
+		if jobID := getString(ec.State, "job_id"); jobID != "" {
+			_ = e.deps.Transcode.Cancel(ctx, jobID)
+		}
+	}
+
 	return buildActionResult(inst, len(tmpl.Steps), ec), nil
 }
 
