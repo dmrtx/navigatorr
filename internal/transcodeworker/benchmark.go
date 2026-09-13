@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -37,18 +36,12 @@ type BenchmarkRecord struct {
 	FinishedAt       time.Time                         `json:"finished_at,omitempty"`
 	ExitCode         int                               `json:"exit_code,omitempty"`
 	Error            string                            `json:"error,omitempty"`
+	Evidence         *BenchmarkExecutionEvidence       `json:"evidence,omitempty"`
 }
 
 // BenchmarkRunner defines the pluggable executor interface for running benchmarks.
 type BenchmarkRunner interface {
 	RunBenchmark(ctx context.Context, w *Worker, record *BenchmarkRecord) error
-}
-
-// defaultBenchmarkRunner is the production runner for Phase 4A which fails closed.
-type defaultBenchmarkRunner struct{}
-
-func (r *defaultBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker, record *BenchmarkRecord) error {
-	return errors.New("benchmark runner not implemented (fail closed; awaiting Phase 4B)")
 }
 
 // LoadBenchmark loads a BenchmarkRecord from benchmark.json.
@@ -201,7 +194,7 @@ func (w *Worker) getBenchmarkRunner() BenchmarkRunner {
 	if w.benchmarkRunner != nil {
 		return w.benchmarkRunner
 	}
-	return &defaultBenchmarkRunner{}
+	return &ProductionBenchmarkRunner{}
 }
 
 // SetBenchmarkRunner injects a custom runner for lifecycle testing or future phases.
@@ -659,6 +652,9 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) 
 		latest.Status = "failed"
 		latest.Error = runErr.Error()
 		latest.FinishedAt = time.Now().UTC()
+		if record.Evidence != nil {
+			latest.Evidence = record.Evidence
+		}
 		_ = SaveBenchmarkAtomic(benchFile, latest)
 		return runErr
 	}
@@ -666,6 +662,7 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) 
 	latest.Status = "completed"
 	latest.FinishedAt = time.Now().UTC()
 	latest.Error = ""
+	latest.Evidence = record.Evidence
 	if err := SaveBenchmarkAtomic(benchFile, latest); err != nil {
 		return fmt.Errorf("updating benchmark to completed: %w", err)
 	}
