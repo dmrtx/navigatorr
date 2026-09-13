@@ -40,7 +40,6 @@ type WorkerCapabilities struct {
 	FFmpegPath            string                         `json:"ffmpeg_path,omitempty"`
 	Encoders              map[string]bool                `json:"encoders"`
 	EncoderDetails        map[string]EncoderCapabilities `json:"encoder_details,omitempty"`
-	VideoToolbox          EncoderCapabilities            `json:"video_toolbox,omitempty"`
 	Filters               map[string]bool                `json:"filters"`
 	ProbeErrors           []ProbeError                   `json:"probe_errors,omitempty"`
 	CapabilityFingerprint string                         `json:"capability_fingerprint,omitempty"`

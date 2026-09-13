@@ -617,3 +617,213 @@ func TestRecipeOptimizationPolicy_CloneIndependence(t *testing.T) {
 		t.Errorf("mutation of cloned quality values mutated orig")
 	}
 }
+
+func TestRecipeOptimizationPolicy_MetricTargetOmissionSafety(t *testing.T) {
+	// 1. Empty vmaf block: vmaf: {}
+	optEmptyVMAF := &OptimizationPolicy{
+		Enabled: true,
+		Sampling: &SamplingPolicy{
+			Strategy:      "distributed",
+			SampleCount:   3,
+			SampleSeconds: 20.0,
+			Positions:     []float64{0.2, 0.5, 0.8},
+		},
+		Quality: &QualityPolicy{
+			PreferredMetric: "vmaf",
+			VMAF:            &MetricTarget{}, // empty block
+		},
+		Search: &SearchPolicy{
+			MaxCandidates: 3,
+			QualityValues: []int{60, 65, 70},
+		},
+	}
+	NormalizeOptimizationPolicy(optEmptyVMAF)
+	if optEmptyVMAF.Quality.VMAF.Target != DefaultVMAFTarget {
+		t.Errorf("expected target normalized to %v, got %v", DefaultVMAFTarget, optEmptyVMAF.Quality.VMAF.Target)
+	}
+	if optEmptyVMAF.Quality.VMAF.Minimum != DefaultVMAFMinimum {
+		t.Errorf("expected minimum normalized to %v, got %v", DefaultVMAFMinimum, optEmptyVMAF.Quality.VMAF.Minimum)
+	}
+	if optEmptyVMAF.Quality.VMAF.MarginalTolerance == nil || *optEmptyVMAF.Quality.VMAF.MarginalTolerance != DefaultVMAFMarginalTolerance {
+		t.Errorf("expected marginal tolerance normalized to %v", DefaultVMAFMarginalTolerance)
+	}
+	if err := ValidateOptimizationPolicy("test", optEmptyVMAF); err != nil {
+		t.Fatalf("expected valid normalized policy, got: %v", err)
+	}
+
+	// 2. Partial vmaf block: vmaf: {target: 97}
+	optPartialVMAF := &OptimizationPolicy{
+		Enabled: true,
+		Quality: &QualityPolicy{
+			PreferredMetric: "vmaf",
+			VMAF:            &MetricTarget{Target: 97.0},
+		},
+	}
+	NormalizeOptimizationPolicy(optPartialVMAF)
+	if optPartialVMAF.Quality.VMAF.Target != 97.0 {
+		t.Errorf("expected target=97.0, got %v", optPartialVMAF.Quality.VMAF.Target)
+	}
+	if optPartialVMAF.Quality.VMAF.Minimum != DefaultVMAFMinimum {
+		t.Errorf("expected minimum normalized to default %v, got %v", DefaultVMAFMinimum, optPartialVMAF.Quality.VMAF.Minimum)
+	}
+
+	// 3. Partial ssim block: ssim: {minimum: 0.985}
+	optPartialSSIM := &OptimizationPolicy{
+		Enabled: true,
+		Quality: &QualityPolicy{
+			PreferredMetric: "ssim",
+			SSIM:            &MetricTarget{Minimum: 0.985},
+		},
+	}
+	NormalizeOptimizationPolicy(optPartialSSIM)
+	if optPartialSSIM.Quality.SSIM.Target != DefaultSSIMTarget {
+		t.Errorf("expected target normalized to default %v, got %v", DefaultSSIMTarget, optPartialSSIM.Quality.SSIM.Target)
+	}
+	if optPartialSSIM.Quality.SSIM.Minimum != 0.985 {
+		t.Errorf("expected minimum=0.985, got %v", optPartialSSIM.Quality.SSIM.Minimum)
+	}
+	if optPartialSSIM.Quality.SSIM.MarginalTolerance == nil || *optPartialSSIM.Quality.SSIM.MarginalTolerance != DefaultSSIMMarginalTolerance {
+		t.Errorf("expected ssim marginal tolerance normalized to %v", DefaultSSIMMarginalTolerance)
+	}
+
+	// 4. Target zero without normalization must fail validation (cannot silently accept every candidate)
+	optRawZero := &OptimizationPolicy{
+		Enabled: true,
+		Sampling: &SamplingPolicy{
+			Strategy:      "distributed",
+			SampleCount:   1,
+			SampleSeconds: 20.0,
+			Positions:     []float64{0.5},
+		},
+		Quality: &QualityPolicy{
+			PreferredMetric: "vmaf",
+			VMAF:            &MetricTarget{Target: 0.0, Minimum: 0.0},
+		},
+		Search: &SearchPolicy{
+			MaxCandidates: 1,
+			QualityValues: []int{65},
+		},
+	}
+	if err := ValidateOptimizationPolicy("test", optRawZero); err == nil || !strings.Contains(err.Error(), "target 0") {
+		t.Errorf("expected validation failure for unnormalized zero target, got: %v", err)
+	}
+
+	// 5. Negative and non-finite targets/minimums are rejected
+	for _, tc := range []struct {
+		name    string
+		vmaf    *MetricTarget
+		wantErr string
+	}{
+		{"negative target", &MetricTarget{Target: -10, Minimum: 90}, "target -10 out of range"},
+		{"negative minimum", &MetricTarget{Target: 95, Minimum: -5}, "minimum -5 out of range"},
+		{"NaN target", &MetricTarget{Target: math.NaN(), Minimum: 90}, "target NaN out of range"},
+		{"Inf minimum", &MetricTarget{Target: 95, Minimum: math.Inf(1)}, "minimum +Inf out of range"},
+	} {
+		optBad := &OptimizationPolicy{
+			Enabled: true,
+			Sampling: &SamplingPolicy{
+				Strategy:      "distributed",
+				SampleCount:   1,
+				SampleSeconds: 20.0,
+				Positions:     []float64{0.5},
+			},
+			Quality: &QualityPolicy{
+				PreferredMetric: "vmaf",
+				VMAF:            tc.vmaf,
+			},
+			Search: &SearchPolicy{
+				MaxCandidates: 1,
+				QualityValues: []int{65},
+			},
+		}
+		NormalizeOptimizationPolicy(optBad)
+		if err := ValidateOptimizationPolicy("test", optBad); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Errorf("[%s] expected error containing %q, got: %v", tc.name, tc.wantErr, err)
+		}
+	}
+}
+
+func TestRecipeOptimizationPolicy_BitrateUpperBounds(t *testing.T) {
+	cases := []struct {
+		name        string
+		size        *SizePolicy
+		errContains string
+	}{
+		{
+			name: "preferred max exceeds MaxBitrateKbps",
+			size: &SizePolicy{
+				PreferredTotalBitrateKbps: &BitrateRange{Min: 5000, Max: 2_000_000},
+			},
+			errContains: "upper limit",
+		},
+		{
+			name: "preferred min exceeds MaxBitrateKbps",
+			size: &SizePolicy{
+				PreferredTotalBitrateKbps: &BitrateRange{Min: 2_000_000, Max: 3_000_000},
+			},
+			errContains: "upper limit",
+		},
+		{
+			name: "preferred math.MaxInt",
+			size: &SizePolicy{
+				PreferredTotalBitrateKbps: &BitrateRange{Min: 5000, Max: math.MaxInt},
+			},
+			errContains: "upper limit",
+		},
+		{
+			name: "preferred negative min",
+			size: &SizePolicy{
+				PreferredTotalBitrateKbps: &BitrateRange{Min: -10, Max: 5000},
+			},
+			errContains: "must be positive",
+		},
+		{
+			name: "softmax exceeds MaxBitrateKbps",
+			size: &SizePolicy{
+				SoftMaxTotalBitrateKbps: 2_000_000,
+			},
+			errContains: "upper limit",
+		},
+		{
+			name: "softmax math.MaxInt",
+			size: &SizePolicy{
+				SoftMaxTotalBitrateKbps: math.MaxInt,
+			},
+			errContains: "upper limit",
+		},
+		{
+			name: "softmax negative",
+			size: &SizePolicy{
+				SoftMaxTotalBitrateKbps: -50,
+			},
+			errContains: "must be >= 0",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opt := &OptimizationPolicy{
+				Enabled: true,
+				Sampling: &SamplingPolicy{
+					Strategy:      "distributed",
+					SampleCount:   1,
+					SampleSeconds: 20.0,
+					Positions:     []float64{0.5},
+				},
+				Quality: &QualityPolicy{
+					PreferredMetric: "vmaf",
+					VMAF:            &MetricTarget{Target: 96.0, Minimum: 95.0},
+				},
+				Search: &SearchPolicy{
+					MaxCandidates: 1,
+					QualityValues: []int{65},
+				},
+				Size: tc.size,
+			}
+			err := ValidateOptimizationPolicy("test", opt)
+			if err == nil || !strings.Contains(err.Error(), tc.errContains) {
+				t.Fatalf("expected error containing %q, got: %v", tc.errContains, err)
+			}
+		})
+	}
+}

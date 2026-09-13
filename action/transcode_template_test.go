@@ -50,12 +50,14 @@ func (m *mockTranscodeExecutor) Capabilities(ctx context.Context) (transcode.Wor
 		FFmpegVersion:   "7.1",
 		Encoders:        map[string]bool{"hevc_videotoolbox": true},
 		Filters:         map[string]bool{"scale": true},
-		VideoToolbox: transcode.VideoToolboxCapabilities{
-			Encoder:      "hevc_videotoolbox",
-			Available:    true,
-			Profiles:     []string{"main", "main10"},
-			PixelFormats: []string{"nv12", "p010le", "yuv420p"},
-			Options:      []string{"prio_speed", "profile", "realtime", "spatial_aq"},
+		EncoderDetails: map[string]transcode.EncoderCapabilities{
+			"hevc_videotoolbox": {
+				Encoder:      "hevc_videotoolbox",
+				Available:    true,
+				Profiles:     []string{"main", "main10"},
+				PixelFormats: []string{"nv12", "p010le", "yuv420p"},
+				Options:      []string{"prio_speed", "profile", "realtime", "spatial_aq"},
+			},
 		},
 	}
 	fp, _ := transcode.ComputeCapabilityFingerprint(caps)

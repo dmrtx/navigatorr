@@ -41,12 +41,14 @@ func TestCapabilityFingerprint_PathExcludedAndEquivalence(t *testing.T) {
 		FFmpegPath:      "/usr/bin/ffmpeg",
 		Encoders:        map[string]bool{"hevc_videotoolbox": true, "libx264": true},
 		Filters:         map[string]bool{"scale": true, "ssim": true},
-		VideoToolbox: transcode.VideoToolboxCapabilities{
-			Encoder:      "hevc_videotoolbox",
-			Available:    true,
-			Profiles:     []string{"main", "main10"},
-			PixelFormats: []string{"nv12", "p010le"},
-			Options:      []string{"profile", "spatial_aq"},
+		EncoderDetails: map[string]transcode.EncoderCapabilities{
+			"hevc_videotoolbox": {
+				Encoder:      "hevc_videotoolbox",
+				Available:    true,
+				Profiles:     []string{"main", "main10"},
+				PixelFormats: []string{"nv12", "p010le"},
+				Options:      []string{"profile", "spatial_aq"},
+			},
 		},
 	}
 
@@ -217,8 +219,8 @@ esac
 	if caps.FFmpegVersion != "7.1" {
 		t.Errorf("expected FFmpegVersion=7.1, got %s", caps.FFmpegVersion)
 	}
-	if !caps.VideoToolbox.Available {
-		t.Errorf("expected VideoToolbox.Available=true")
+	if !caps.EncoderDetails["hevc_videotoolbox"].Available {
+		t.Errorf("expected EncoderDetails[hevc_videotoolbox].Available=true")
 	}
 	if !caps.Encoders["hevc_videotoolbox"] {
 		t.Errorf("expected Encoders[hevc_videotoolbox]=true")
@@ -360,9 +362,6 @@ esac
 	if caps.HasProbeErrors() {
 		t.Errorf("expected no probe errors for clean absence, got: %+v", caps.ProbeErrors)
 	}
-	if caps.VideoToolbox.Available {
-		t.Errorf("expected VideoToolbox.Available=false")
-	}
 	if caps.EncoderDetails["hevc_videotoolbox"].Available {
 		t.Errorf("expected EncoderDetails[hevc_videotoolbox].Available=false")
 	}
@@ -374,5 +373,70 @@ esac
 	}
 	if !strings.HasPrefix(caps.CapabilityFingerprint, "sha256:") {
 		t.Errorf("expected valid fingerprint digest, got %q", caps.CapabilityFingerprint)
+	}
+}
+
+func TestIsCleanAbsence_NegativeAndPositiveCases(t *testing.T) {
+	positives := []string{
+		"Codec 'hevc_videotoolbox' is not recognized by FFmpeg.",
+		"Encoder 'hevc_videotoolbox' not found.",
+		"Unknown encoder 'hevc_videotoolbox'",
+		"Cannot find encoder 'hevc_videotoolbox'",
+	}
+	for _, msg := range positives {
+		if !isCleanAbsence("hevc_videotoolbox", msg) {
+			t.Errorf("expected isCleanAbsence=true for %q", msg)
+		}
+	}
+
+	negatives := []string{
+		"Unrecognized option 'h'.",
+		"Unrecognized option 'hide_banner'.",
+		"/usr/bin/ffmpeg: libavcodec.so.58: cannot open shared object file: No such file or directory",
+		"ffmpeg: command not found",
+		"Segmentation fault (core dumped)",
+		"hevc_videotoolbox: unrecognized option",
+		"Error initializing filtergraph",
+	}
+	for _, msg := range negatives {
+		if isCleanAbsence("hevc_videotoolbox", msg) {
+			t.Errorf("expected isCleanAbsence=false for generic/system error %q", msg)
+		}
+	}
+}
+
+func TestProbeWorkerCapabilities_GenericOptionFailureRecordsProbeError(t *testing.T) {
+	dir := t.TempDir()
+	fakeFFmpeg := filepath.Join(dir, "fake_ffmpeg_broken_probe.sh")
+
+	script := `#!/bin/sh
+case "$*" in
+  *"-version"*)
+    echo "ffmpeg version 7.1"
+    ;;
+  *"-h encoder=hevc_videotoolbox"*)
+    echo "Unrecognized option 'h'." >&2
+    exit 1
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(fakeFFmpeg, []byte(script), 0o755); err != nil {
+		t.Fatalf("failed writing fake ffmpeg: %v", err)
+	}
+
+	caps, err := ProbeWorkerCapabilities(context.Background(), fakeFFmpeg)
+	if err != nil {
+		t.Fatalf("ProbeWorkerCapabilities failed: %v", err)
+	}
+
+	// Generic option failure must be recorded as a probe error
+	if !caps.HasProbeErrors() {
+		t.Errorf("expected probe error recorded for generic unrecognized option error")
+	}
+	if !caps.HasComponentError("videotoolbox") {
+		t.Errorf("expected component error for videotoolbox")
 	}
 }
