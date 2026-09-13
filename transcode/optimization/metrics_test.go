@@ -16,6 +16,67 @@ func TestAggregateSampleScores(t *testing.T) {
 		}
 	})
 
+	t.Run("unknown metric type", func(t *testing.T) {
+		scores := []SampleScore{
+			{SampleIndex: 0, Score: 95.0, Valid: true},
+		}
+		agg := AggregateSampleScores(MetricType("psnr"), scores)
+		if agg.Valid {
+			t.Errorf("expected Valid = false for unknown metric type")
+		}
+		if agg.IneligibleReason != ReasonInvalidMetric {
+			t.Errorf("expected reason %q, got %q", ReasonInvalidMetric, agg.IneligibleReason)
+		}
+	})
+
+	t.Run("non-finite score NaN", func(t *testing.T) {
+		scores := []SampleScore{
+			{SampleIndex: 0, Score: math.NaN(), Valid: true},
+		}
+		agg := AggregateSampleScores(MetricTypeVMAF, scores)
+		if agg.Valid {
+			t.Errorf("expected Valid = false for NaN score")
+		}
+		if agg.IneligibleReason != ReasonScoreOutOfBounds {
+			t.Errorf("expected reason %q, got %q", ReasonScoreOutOfBounds, agg.IneligibleReason)
+		}
+	})
+
+	t.Run("non-finite score Inf", func(t *testing.T) {
+		scores := []SampleScore{
+			{SampleIndex: 0, Score: math.Inf(1), Valid: true},
+		}
+		agg := AggregateSampleScores(MetricTypeSSIM, scores)
+		if agg.Valid {
+			t.Errorf("expected Valid = false for Inf score")
+		}
+		if agg.IneligibleReason != ReasonScoreOutOfBounds {
+			t.Errorf("expected reason %q, got %q", ReasonScoreOutOfBounds, agg.IneligibleReason)
+		}
+	})
+
+	t.Run("vmaf score out of bounds", func(t *testing.T) {
+		aggLow := AggregateSampleScores(MetricTypeVMAF, []SampleScore{{Score: -0.5, Valid: true}})
+		if aggLow.Valid || aggLow.IneligibleReason != ReasonScoreOutOfBounds {
+			t.Errorf("expected invalid for negative VMAF, got: %+v", aggLow)
+		}
+		aggHigh := AggregateSampleScores(MetricTypeVMAF, []SampleScore{{Score: 100.5, Valid: true}})
+		if aggHigh.Valid || aggHigh.IneligibleReason != ReasonScoreOutOfBounds {
+			t.Errorf("expected invalid for VMAF > 100, got: %+v", aggHigh)
+		}
+	})
+
+	t.Run("ssim score out of bounds", func(t *testing.T) {
+		aggLow := AggregateSampleScores(MetricTypeSSIM, []SampleScore{{Score: -0.01, Valid: true}})
+		if aggLow.Valid || aggLow.IneligibleReason != ReasonScoreOutOfBounds {
+			t.Errorf("expected invalid for negative SSIM, got: %+v", aggLow)
+		}
+		aggHigh := AggregateSampleScores(MetricTypeSSIM, []SampleScore{{Score: 1.05, Valid: true}})
+		if aggHigh.Valid || aggHigh.IneligibleReason != ReasonScoreOutOfBounds {
+			t.Errorf("expected invalid for SSIM > 1.0, got: %+v", aggHigh)
+		}
+	})
+
 	t.Run("incomplete sample scores with failure", func(t *testing.T) {
 		scores := []SampleScore{
 			{SampleIndex: 0, Score: 95.0, Valid: true},
@@ -247,8 +308,29 @@ func TestHDRExplicitIneligibility(t *testing.T) {
 }
 
 func TestValidatePolicy(t *testing.T) {
+	// Untyped nil
 	if err := ValidatePolicy(nil); err == nil {
-		t.Errorf("expected error for nil policy")
+		t.Errorf("expected error for untyped nil policy")
+	}
+
+	// Typed nil *VMAFPolicy must fail safely without panic
+	var typedNilVMAF *VMAFPolicy = nil
+	if err := ValidatePolicy(typedNilVMAF); err == nil {
+		t.Errorf("expected error for typed-nil VMAF policy")
+	}
+	evalNilVMAF := typedNilVMAF.Evaluate(MetricAggregate{}, ColorInfo{})
+	if evalNilVMAF.Eligible {
+		t.Errorf("expected ineligible for typed-nil VMAF evaluate")
+	}
+
+	// Typed nil *SSIMPolicy must fail safely without panic
+	var typedNilSSIM *SSIMPolicy = nil
+	if err := ValidatePolicy(typedNilSSIM); err == nil {
+		t.Errorf("expected error for typed-nil SSIM policy")
+	}
+	evalNilSSIM := typedNilSSIM.Evaluate(MetricAggregate{}, ColorInfo{})
+	if evalNilSSIM.Eligible {
+		t.Errorf("expected ineligible for typed-nil SSIM evaluate")
 	}
 
 	// Min > Target
@@ -261,6 +343,18 @@ func TestValidatePolicy(t *testing.T) {
 	badTolerance := NewVMAFPolicy(96.0, 95.0, -0.1)
 	if err := ValidatePolicy(badTolerance); err == nil {
 		t.Errorf("expected error when MarginalTolerance < 0")
+	}
+
+	// Tolerance out of bounds for VMAF (> 100)
+	tolOver100VMAF := NewVMAFPolicy(96.0, 95.0, 105.0)
+	if err := ValidatePolicy(tolOver100VMAF); err == nil {
+		t.Errorf("expected error when VMAF tolerance > 100")
+	}
+
+	// Tolerance out of bounds for SSIM (> 1.0)
+	tolOver1SSIM := NewSSIMPolicy(0.99, 0.98, 1.2)
+	if err := ValidatePolicy(tolOver1SSIM); err == nil {
+		t.Errorf("expected error when SSIM tolerance > 1.0")
 	}
 
 	// Non-finite values

@@ -55,6 +55,13 @@ func PlanSamples(cfg SamplePlanConfig) (SamplePlan, error) {
 		return SamplePlan{}, fmt.Errorf("%s: sample seconds must be positive and finite (%f)", ReasonInvalidSampleConfig, cfg.SampleSeconds)
 	}
 
+	if cfg.SampleCount > MaxSampleCount {
+		return SamplePlan{}, fmt.Errorf("%s: requested sample_count (%d) exceeds maximum allowed limit of %d", ReasonExcessiveSampleCount, cfg.SampleCount, MaxSampleCount)
+	}
+	if len(cfg.Positions) > MaxSampleCount {
+		return SamplePlan{}, fmt.Errorf("%s: positions count (%d) exceeds maximum allowed limit of %d", ReasonExcessiveSampleCount, len(cfg.Positions), MaxSampleCount)
+	}
+
 	if len(cfg.Positions) > 0 {
 		if cfg.SampleCount > 0 && cfg.SampleCount != len(cfg.Positions) {
 			return SamplePlan{}, fmt.Errorf("%s: contradictory sample_count (%d) versus positions count (%d)", ReasonContradictorySampleCount, cfg.SampleCount, len(cfg.Positions))

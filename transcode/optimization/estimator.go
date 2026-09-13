@@ -8,15 +8,16 @@ import (
 // DefaultContainerOverheadRate represents a typical 0.5% muxing overhead for MKV/MP4 containers.
 const DefaultContainerOverheadRate = 0.005
 
-// AudioStreamEstimate holds stream metadata needed to estimate copied audio.
+// AudioStreamEstimate holds stream metadata needed to estimate audio payload.
 type AudioStreamEstimate struct {
 	Index              int    `json:"index"`
 	Codec              string `json:"codec,omitempty"`
 	Channels           int    `json:"channels,omitempty"`
 	BitrateBps         int64  `json:"bitrate_bps,omitempty"`          // Declared / probed bitrate in bits per second
-	SizeBytes          int64  `json:"size_bytes,omitempty"`           // Known copied stream size in bytes if already probed
+	SizeBytes          int64  `json:"size_bytes,omitempty"`           // Known stream size in bytes if already probed
 	FallbackBitrateBps int64  `json:"fallback_bitrate_bps,omitempty"` // Caller-supplied explicit fallback bitrate in bits per second
-	Copied             bool   `json:"copied"`                         // Must be true to include in copied audio estimate
+	Copied             bool   `json:"copied"`                         // True if copied; false if re-encoded
+	Discarded          bool   `json:"discarded,omitempty"`            // True if this stream is discarded/omitted from output
 }
 
 // SubtitleStreamEstimate holds metadata needed to estimate subtitle stream overhead.
@@ -50,7 +51,7 @@ type OutputEstimateInput struct {
 	ContainerOverheadRate float64 `json:"container_overhead_rate,omitempty"`
 }
 
-// EstimationResult provides a transparent breakdown of video, copied audio, subtitles,
+// EstimationResult provides a transparent breakdown of video, audio, subtitles,
 // container overhead, total bytes/MB, estimated savings, and visible uncertainty/unusable reasons.
 type EstimationResult struct {
 	SuitableForSelection      bool     `json:"suitable_for_selection"`
@@ -68,7 +69,8 @@ type EstimationResult struct {
 }
 
 // EstimateOutput calculates the expected output size by isolating the video stream
-// from copied audio, subtitles, and attachments. It validates inputs, rejects magic heuristics,
+// alongside audio, subtitles, and attachments. It validates inputs, guards against
+// overflow and non-finite numbers, requires explicit fallback estimates without guessing,
 // and marks estimates lacking video or stream estimates unsuitable for automatic selection.
 func EstimateOutput(in OutputEstimateInput) (EstimationResult, error) {
 	res := EstimationResult{
@@ -117,12 +119,26 @@ func EstimateOutput(in OutputEstimateInput) (EstimationResult, error) {
 		}
 	}
 
-	// 2. Video estimation
+	// 2. Video estimation guarded against overflow
 	if in.SampleVideoBytes > 0 && in.SampleDurationSeconds > 0 {
 		scale := in.TotalDurationSeconds / in.SampleDurationSeconds
-		res.EstimatedVideoBytes = int64(math.Round(float64(in.SampleVideoBytes) * scale))
+		videoFloat := float64(in.SampleVideoBytes) * scale
+		vb, err := safeFloatToInt64(videoFloat)
+		if err != nil {
+			res.SuitableForSelection = false
+			res.UnusableReason = ReasonIntegerOverflow
+			return res, err
+		}
+		res.EstimatedVideoBytes = vb
 	} else if in.DeclaredVideoBitrateBps > 0 {
-		res.EstimatedVideoBytes = int64(math.Round(float64(in.DeclaredVideoBitrateBps) * in.TotalDurationSeconds / 8.0))
+		videoFloat := float64(in.DeclaredVideoBitrateBps) * in.TotalDurationSeconds / 8.0
+		vb, err := safeFloatToInt64(videoFloat)
+		if err != nil {
+			res.SuitableForSelection = false
+			res.UnusableReason = ReasonIntegerOverflow
+			return res, err
+		}
+		res.EstimatedVideoBytes = vb
 		res.Uncertainties = append(res.Uncertainties, ReasonVideoBitrateFallback)
 	} else {
 		res.EstimatedVideoBytes = 0
@@ -131,38 +147,64 @@ func EstimateOutput(in OutputEstimateInput) (EstimationResult, error) {
 		res.Uncertainties = append(res.Uncertainties, ReasonVideoPayloadUncertain)
 	}
 
-	// 3. Audio estimation (copied streams only)
+	// 3. Audio estimation (copied or re-encoded streams in output)
 	for _, a := range in.AudioStreams {
-		if !a.Copied {
-			// Correctly honor Copied: non-copied audio streams are excluded from copied audio output
+		if a.Discarded {
+			// Stream is explicitly discarded from output container.
 			continue
 		}
 
+		var streamBytes int64
 		if a.SizeBytes > 0 {
-			res.EstimatedAudioBytes += a.SizeBytes
+			streamBytes = a.SizeBytes
 		} else if a.BitrateBps > 0 {
-			streamBytes := int64(math.Round(float64(a.BitrateBps) * in.TotalDurationSeconds / 8.0))
-			res.EstimatedAudioBytes += streamBytes
+			raw := float64(a.BitrateBps) * in.TotalDurationSeconds / 8.0
+			sb, err := safeFloatToInt64(raw)
+			if err != nil {
+				res.SuitableForSelection = false
+				res.UnusableReason = ReasonIntegerOverflow
+				return res, err
+			}
+			streamBytes = sb
+			if !a.Copied {
+				res.Uncertainties = append(res.Uncertainties, fmt.Sprintf("%s:stream_%d", ReasonAudioBitrateFallback, a.Index))
+			}
 		} else if a.FallbackBitrateBps > 0 {
-			streamBytes := int64(math.Round(float64(a.FallbackBitrateBps) * in.TotalDurationSeconds / 8.0))
-			res.EstimatedAudioBytes += streamBytes
+			raw := float64(a.FallbackBitrateBps) * in.TotalDurationSeconds / 8.0
+			sb, err := safeFloatToInt64(raw)
+			if err != nil {
+				res.SuitableForSelection = false
+				res.UnusableReason = ReasonIntegerOverflow
+				return res, err
+			}
+			streamBytes = sb
 			res.Uncertainties = append(res.Uncertainties, fmt.Sprintf("%s:stream_%d", ReasonAudioBitrateFallback, a.Index))
 		} else {
-			// No measured size, declared bitrate, or explicit caller fallback exists! Do not invent size.
+			// Output audio stream lacks an explicit measured size, declared bitrate, or fallback.
+			// We may NOT silently ignore non-copied or copied audio, which would underestimate size.
 			res.SuitableForSelection = false
 			if res.UnusableReason == "" {
 				res.UnusableReason = ReasonMissingStreamBitrate
 			}
 			res.Uncertainties = append(res.Uncertainties, fmt.Sprintf("%s:stream_%d", ReasonMissingStreamBitrate, a.Index))
 		}
+
+		var err error
+		res.EstimatedAudioBytes, err = safeAddInt64(res.EstimatedAudioBytes, streamBytes)
+		if err != nil {
+			res.SuitableForSelection = false
+			res.UnusableReason = ReasonIntegerOverflow
+			return res, err
+		}
 	}
 
 	// 4. Subtitle estimation
 	for _, s := range in.SubtitleStreams {
+		var streamBytes int64
 		if s.SizeBytes > 0 {
-			res.EstimatedSubtitleBytes += s.SizeBytes
+			streamBytes = s.SizeBytes
 		} else if s.FallbackSizeBytes > 0 {
-			res.EstimatedSubtitleBytes += s.FallbackSizeBytes
+			streamBytes = s.FallbackSizeBytes
 			res.Uncertainties = append(res.Uncertainties, fmt.Sprintf("%s:stream_%d", ReasonSubtitleSizeEstimated, s.Index))
 		} else {
 			// No measured size or caller-supplied explicit fallback exists! Do not invent size.
@@ -172,21 +214,61 @@ func EstimateOutput(in OutputEstimateInput) (EstimationResult, error) {
 			}
 			res.Uncertainties = append(res.Uncertainties, fmt.Sprintf("%s:stream_%d", ReasonMissingSubtitleSize, s.Index))
 		}
+
+		var err error
+		res.EstimatedSubtitleBytes, err = safeAddInt64(res.EstimatedSubtitleBytes, streamBytes)
+		if err != nil {
+			res.SuitableForSelection = false
+			res.UnusableReason = ReasonIntegerOverflow
+			return res, err
+		}
 	}
 
 	// 5. Attachments
 	res.EstimatedAttachmentBytes = in.AttachmentBytes
 
-	// 6. Mux overhead
+	// 6. Mux overhead guarded against overflow
 	overheadRate := in.ContainerOverheadRate
 	if overheadRate <= 0 {
 		overheadRate = DefaultContainerOverheadRate
 	}
-	payloadBytes := res.EstimatedVideoBytes + res.EstimatedAudioBytes + res.EstimatedSubtitleBytes + res.EstimatedAttachmentBytes
-	res.EstimatedMuxOverheadBytes = int64(math.Round(float64(payloadBytes) * overheadRate))
+
+	payloadBytes, err := safeAddInt64(res.EstimatedVideoBytes, res.EstimatedAudioBytes)
+	if err != nil {
+		res.SuitableForSelection = false
+		res.UnusableReason = ReasonIntegerOverflow
+		return res, err
+	}
+	payloadBytes, err = safeAddInt64(payloadBytes, res.EstimatedSubtitleBytes)
+	if err != nil {
+		res.SuitableForSelection = false
+		res.UnusableReason = ReasonIntegerOverflow
+		return res, err
+	}
+	payloadBytes, err = safeAddInt64(payloadBytes, res.EstimatedAttachmentBytes)
+	if err != nil {
+		res.SuitableForSelection = false
+		res.UnusableReason = ReasonIntegerOverflow
+		return res, err
+	}
+
+	overheadFloat := float64(payloadBytes) * overheadRate
+	muxBytes, err := safeFloatToInt64(overheadFloat)
+	if err != nil {
+		res.SuitableForSelection = false
+		res.UnusableReason = ReasonIntegerOverflow
+		return res, err
+	}
+	res.EstimatedMuxOverheadBytes = muxBytes
 
 	// 7. Total bytes and decimal MB (1,000,000 bytes)
-	res.EstimatedTotalBytes = payloadBytes + res.EstimatedMuxOverheadBytes
+	totalBytes, err := safeAddInt64(payloadBytes, muxBytes)
+	if err != nil {
+		res.SuitableForSelection = false
+		res.UnusableReason = ReasonIntegerOverflow
+		return res, err
+	}
+	res.EstimatedTotalBytes = totalBytes
 	res.EstimatedTotalMB = round2(float64(res.EstimatedTotalBytes) / 1000000.0)
 
 	// 8. Savings calculation

@@ -62,7 +62,7 @@ func SelectCandidate(in SelectorInput) SelectionResult {
 		return res
 	}
 
-	if in.Policy == nil {
+	if err := ValidatePolicy(in.Policy); err != nil {
 		for _, c := range in.Candidates {
 			res.AllEvaluated = append(res.AllEvaluated, EvaluatedCandidate{
 				CandidateID:      c.CandidateID,

@@ -25,11 +25,18 @@ type MetricAggregate struct {
 }
 
 // AggregateSampleScores computes deterministic aggregate metrics over sample scores.
-// If any sample score is invalid or the score list is empty, Valid is marked false.
+// It rejects unknown metric types, non-finite scores (NaN/Inf), and scores outside the metric's
+// native scale (VMAF [0, 100], SSIM [0, 1]).
 func AggregateSampleScores(metric MetricType, scores []SampleScore) MetricAggregate {
 	agg := MetricAggregate{
 		MetricType:   metric,
 		SampleScores: scores,
+	}
+
+	if metric != MetricTypeVMAF && metric != MetricTypeSSIM {
+		agg.Valid = false
+		agg.IneligibleReason = ReasonInvalidMetric
+		return agg
 	}
 
 	if len(scores) == 0 {
@@ -48,6 +55,28 @@ func AggregateSampleScores(metric MetricType, scores []SampleScore) MetricAggreg
 			allValid = false
 			continue
 		}
+
+		if !isFinite(s.Score) {
+			agg.Valid = false
+			agg.IneligibleReason = ReasonScoreOutOfBounds
+			return agg
+		}
+
+		switch metric {
+		case MetricTypeVMAF:
+			if s.Score < 0.0 || s.Score > 100.0 {
+				agg.Valid = false
+				agg.IneligibleReason = ReasonScoreOutOfBounds
+				return agg
+			}
+		case MetricTypeSSIM:
+			if s.Score < 0.0 || s.Score > 1.0 {
+				agg.Valid = false
+				agg.IneligibleReason = ReasonScoreOutOfBounds
+				return agg
+			}
+		}
+
 		sum += s.Score
 		if s.Score < minScore {
 			minScore = s.Score
@@ -120,18 +149,35 @@ func (p *VMAFPolicy) Metric() MetricType {
 }
 
 func (p *VMAFPolicy) TargetScore() float64 {
+	if p == nil {
+		return math.NaN()
+	}
 	return p.Target
 }
 
 func (p *VMAFPolicy) MinScore() float64 {
+	if p == nil {
+		return math.NaN()
+	}
 	return p.Min
 }
 
 func (p *VMAFPolicy) Tolerance() float64 {
+	if p == nil {
+		return math.NaN()
+	}
 	return p.MarginalTolerance
 }
 
 func (p *VMAFPolicy) Evaluate(agg MetricAggregate, color ColorInfo) PolicyEvaluation {
+	if p == nil {
+		return PolicyEvaluation{
+			MetricType:       MetricTypeVMAF,
+			Eligible:         false,
+			IneligibleReason: ReasonMetricMissing,
+		}
+	}
+
 	eval := PolicyEvaluation{
 		MetricType:  p.Metric(),
 		TargetScore: p.Target,
@@ -220,18 +266,35 @@ func (p *SSIMPolicy) Metric() MetricType {
 }
 
 func (p *SSIMPolicy) TargetScore() float64 {
+	if p == nil {
+		return math.NaN()
+	}
 	return p.Target
 }
 
 func (p *SSIMPolicy) MinScore() float64 {
+	if p == nil {
+		return math.NaN()
+	}
 	return p.Min
 }
 
 func (p *SSIMPolicy) Tolerance() float64 {
+	if p == nil {
+		return math.NaN()
+	}
 	return p.MarginalTolerance
 }
 
 func (p *SSIMPolicy) Evaluate(agg MetricAggregate, color ColorInfo) PolicyEvaluation {
+	if p == nil {
+		return PolicyEvaluation{
+			MetricType:       MetricTypeSSIM,
+			Eligible:         false,
+			IneligibleReason: ReasonMetricMissing,
+		}
+	}
+
 	eval := PolicyEvaluation{
 		MetricType:  p.Metric(),
 		TargetScore: p.Target,
@@ -295,9 +358,21 @@ func (p *SSIMPolicy) Evaluate(agg MetricAggregate, color ColorInfo) PolicyEvalua
 }
 
 // ValidatePolicy ensures that a quality policy is non-nil, finite, and within valid metric bounds.
+// It safely checks for untyped nil and typed-nil policies without panicking.
 func ValidatePolicy(p QualityPolicy) error {
 	if p == nil {
 		return fmt.Errorf("%s: quality policy is required", ReasonMetricMissing)
+	}
+
+	switch v := p.(type) {
+	case *VMAFPolicy:
+		if v == nil {
+			return fmt.Errorf("%s: quality policy is nil", ReasonMetricMissing)
+		}
+	case *SSIMPolicy:
+		if v == nil {
+			return fmt.Errorf("%s: quality policy is nil", ReasonMetricMissing)
+		}
 	}
 
 	target := p.TargetScore()
@@ -306,10 +381,6 @@ func ValidatePolicy(p QualityPolicy) error {
 
 	if !isFinite(target) || !isFinite(min) || !isFinite(tol) {
 		return fmt.Errorf("invalid policy: thresholds and tolerance must be finite numbers")
-	}
-
-	if tol < 0 {
-		return fmt.Errorf("invalid policy: marginal tolerance %f cannot be negative", tol)
 	}
 
 	if min > target {
@@ -321,9 +392,15 @@ func ValidatePolicy(p QualityPolicy) error {
 		if min < 0.0 || target > 100.0 {
 			return fmt.Errorf("invalid VMAF policy: thresholds must be within [0, 100], got min %f, target %f", min, target)
 		}
+		if tol < 0.0 || tol > 100.0 {
+			return fmt.Errorf("invalid VMAF policy: marginal tolerance must be within [0, 100], got %f", tol)
+		}
 	case MetricTypeSSIM:
 		if min < 0.0 || target > 1.0 {
 			return fmt.Errorf("invalid SSIM policy: thresholds must be within [0, 1], got min %f, target %f", min, target)
+		}
+		if tol < 0.0 || tol > 1.0 {
+			return fmt.Errorf("invalid SSIM policy: marginal tolerance must be within [0, 1], got %f", tol)
 		}
 	default:
 		return fmt.Errorf("%s: unknown metric type %s", ReasonInvalidMetric, p.Metric())

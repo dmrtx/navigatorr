@@ -529,3 +529,139 @@ func TestCandidateSelector_SSIMPolicy(t *testing.T) {
 		t.Errorf("DecisionReason = %q, want %q", res.DecisionReason, ReasonTargetReachedSmallestSize)
 	}
 }
+
+func TestCandidateSelector_TypedNilPolicy(t *testing.T) {
+	var typedNil *VMAFPolicy = nil
+	in := SelectorInput{
+		Policy: typedNil,
+		Candidates: []CandidateInput{
+			{CandidateID: "c1", EncodeSuccess: true},
+		},
+	}
+
+	res := SelectCandidate(in)
+	if res.Winner != nil {
+		t.Errorf("expected no winner for typed-nil policy")
+	}
+	if res.DecisionReason != ReasonNoValidMetric {
+		t.Errorf("DecisionReason = %q, want %q", res.DecisionReason, ReasonNoValidMetric)
+	}
+}
+
+// Regression test for requirement 1:
+// Candidate with invalid aggregate (e.g. score out of bounds) is rejected and never wins.
+func TestCandidateSelector_InvalidAggregateRejected(t *testing.T) {
+	policy := DefaultVMAFPolicy()
+	sdrColor := ColorInfo{ColorPrimaries: "bt709", ColorTransfer: "bt709"}
+
+	// Aggregate with score > 100 is invalid
+	invalidAgg := AggregateSampleScores(MetricTypeVMAF, []SampleScore{
+		{SampleIndex: 0, Score: 105.0, Valid: true},
+	})
+	if invalidAgg.Valid {
+		t.Fatalf("expected aggregate with score 105.0 to be invalid")
+	}
+
+	validAgg := AggregateSampleScores(MetricTypeVMAF, []SampleScore{
+		{SampleIndex: 0, Score: 96.5, Valid: true},
+	})
+
+	in := SelectorInput{
+		Policy: policy,
+		Candidates: []CandidateInput{
+			{
+				CandidateID:     "cand_invalid_agg",
+				EncodeSuccess:   true,
+				ColorInfo:       sdrColor,
+				AggregateResult: invalidAgg,
+				EstimatedOutput: EstimationResult{
+					SuitableForSelection: true,
+					EstimatedVideoBytes:  500000000,
+					EstimatedTotalBytes:  600000000,
+				},
+			},
+			{
+				CandidateID:     "cand_valid",
+				EncodeSuccess:   true,
+				ColorInfo:       sdrColor,
+				AggregateResult: validAgg,
+				EstimatedOutput: EstimationResult{
+					SuitableForSelection: true,
+					EstimatedVideoBytes:  600000000,
+					EstimatedTotalBytes:  800000000,
+				},
+			},
+		},
+	}
+
+	res := SelectCandidate(in)
+	if res.Winner == nil {
+		t.Fatalf("expected cand_valid to win, got nil")
+	}
+	if res.Winner.CandidateID != "cand_valid" {
+		t.Errorf("Winner ID = %q, want %q", res.Winner.CandidateID, "cand_valid")
+	}
+}
+
+// Regression test for requirement 4:
+// Candidate with non-copied audio lacking explicit estimate cannot win by underestimation.
+func TestCandidateSelector_NonCopiedAudioCannotWinByUnderestimation(t *testing.T) {
+	policy := DefaultVMAFPolicy()
+	sdrColor := ColorInfo{ColorPrimaries: "bt709", ColorTransfer: "bt709"}
+
+	// Estimate for candidate with unestimated non-copied audio
+	estMissingAudio, _ := EstimateOutput(OutputEstimateInput{
+		SourceSizeBytes:       1000000000,
+		TotalDurationSeconds:  100.0,
+		SampleDurationSeconds: 10.0,
+		SampleVideoBytes:      1000000,
+		AudioStreams: []AudioStreamEstimate{
+			{Index: 1, Codec: "aac", Channels: 2, Copied: false}, // Lacks bitrate/fallback!
+		},
+	})
+	if estMissingAudio.SuitableForSelection {
+		t.Fatalf("expected unestimated non-copied audio to make estimate unsuitable")
+	}
+
+	estValid, _ := EstimateOutput(OutputEstimateInput{
+		SourceSizeBytes:       1000000000,
+		TotalDurationSeconds:  100.0,
+		SampleDurationSeconds: 10.0,
+		SampleVideoBytes:      1000000,
+		AudioStreams: []AudioStreamEstimate{
+			{Index: 1, Codec: "aac", Channels: 2, BitrateBps: 192000, Copied: false}, // Explicit bitrate
+		},
+	})
+	if !estValid.SuitableForSelection {
+		t.Fatalf("expected valid candidate estimate to be suitable")
+	}
+
+	in := SelectorInput{
+		Policy: policy,
+		Candidates: []CandidateInput{
+			{
+				// This candidate would appear smaller if non-copied audio was ignored (0 bytes vs ~2.4MB)
+				CandidateID:     "cand_underestimated",
+				EncodeSuccess:   true,
+				ColorInfo:       sdrColor,
+				AggregateResult: AggregateSampleScores(MetricTypeVMAF, []SampleScore{{Score: 97.0, Valid: true}}),
+				EstimatedOutput: estMissingAudio,
+			},
+			{
+				CandidateID:     "cand_properly_estimated",
+				EncodeSuccess:   true,
+				ColorInfo:       sdrColor,
+				AggregateResult: AggregateSampleScores(MetricTypeVMAF, []SampleScore{{Score: 96.5, Valid: true}}),
+				EstimatedOutput: estValid,
+			},
+		},
+	}
+
+	res := SelectCandidate(in)
+	if res.Winner == nil {
+		t.Fatalf("expected cand_properly_estimated to win, got nil")
+	}
+	if res.Winner.CandidateID != "cand_properly_estimated" {
+		t.Errorf("Winner ID = %q, want %q", res.Winner.CandidateID, "cand_properly_estimated")
+	}
+}
