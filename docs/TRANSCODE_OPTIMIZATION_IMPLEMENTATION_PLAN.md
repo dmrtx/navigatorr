@@ -450,17 +450,20 @@ Demostrado mediante tests que:
 - [x] Ineligibilidad explícita de HDR para scoring automático SDR.
 - [x] Estimador de tamaño con cálculo de video por streams, preservación de audio copiado y reporte de incertidumbres.
 - [x] Implementar cálculo remoto de filtros VMAF y SSIM con FFmpeg en worker (`internal/transcodeworker/benchmark_runner.go`):
-  - Gating de capacidades: verificación estricta de filtros `libvmaf` y `ssim` en `WorkerCapabilities` con fallo cerrado si no están disponibles.
-  - Generación de comandos segura y exacta: `BuildVMAFArgs` y `BuildSSIMArgs` con escape de caracteres de filtro (`:`, `\`, `'`) y redirección a null sink (`-f null -`).
-  - Aislamiento en scratch: logs de métricas estructurados generados exclusivamente en `samples/` con nombres derivados libres de colisiones (`sample_<sampleIdx>_vmaf.json`, `sample_<sampleIdx>_ssim.stats`).
-  - Hardening contra TOCTOU y symlinks: verificación `os.Lstat`, rechazo de enlaces simbólicos o archivos no regulares.
-  - Bounding de archivos: límite estricto de lectura a 5 MB (`MaxMetricLogSizeBytes`).
-  - Parsing determinista y fail-closed: extracción de `pooled_metrics.vmaf.mean` con fallback a promedio de frames; parsing de SSIM All medio; rechazo inmediato de NaN, Inf y valores fuera de rango ([0, 100] VMAF, [0, 1] SSIM).
+  - Gating de capacidades y parser robusto: `ParseAvailableFilters` analiza de forma compatible tanto flags modernos de 2 caracteres (`.. libvmaf`, `TS ssim`) como legados de 3 caracteres (`..C`, `TSC`).
+  - Gating estricto de 10-bit VMAF: fuentes de 10-bit con métrica VMAF o `both` fallan cerrado de inmediato con mensaje claro si el worker no tiene capacidad verificada de 10-bit VMAF, prohibiendo terminantemente la conversión silenciosa a 8-bit. El filtro SSIM nativo de FFmpeg procesa 10-bit (`yuv420p10le`) de forma nativa y segura sin pérdida de profundidad.
+  - Generación de comandos segura y escape de filtergraph en dos niveles: `BuildVMAFArgs` y `BuildSSIMArgs` con escape exacto para `avfilter_graph_parse2` y `av_set_options_string` (`\\:` para `:`, `\\\'` para `'`, `\\\\` para `\`, `\\` para `[] ;,`) sin intermediación de shell, redirigiendo a null sink (`-f null -`).
+  - Aislamiento en scratch: logs de métricas estructurados generados exclusivamente en `samples/` con esquema derivado libre de colisiones: `metric_<metric>_cand_<candIdx>_<hash>_sample_<sampleIdx>.<ext>`.
+  - Hardening contra TOCTOU y symlinks: apertura a nivel de descriptor con `syscall.O_NOFOLLOW` (en Unix/macOS) y verificación de descriptor regular con `f.Stat().Mode().IsRegular()`.
+  - Bounding de archivos y streaming: límite estricto de lectura a 5 MB (`MaxMetricLogSizeBytes`) implementado mediante `io.LimitReader(f, MaxMetricLogSizeBytes+1)`, fallando cerrado ante archivos vacíos o sobredimensionados.
+  - Semántica de fallos a nivel de candidato: errores en la ejecución de métricas o parsing de logs de un candidato no abortan el benchmark completo; el candidato afectado se marca como inelegible (`Valid = false`, `IneligibleReason = ReasonIncompleteSampleScores`) y el benchmark continúa evaluando los candidatos restantes. Errores fatales a nivel de trabajo (cancelación, mutación de origen, corrupción de referencia) abortan de inmediato.
+  - Parsing determinista y fail-closed: extracción de `pooled_metrics.vmaf.mean` con fallback a promedio de frames validando contigüidad estricta y sin huecos ni duplicados en `frameNum`; parsing de SSIM seleccionando el último resumen en stderr mediante un tail buffer acotado; rechazo de NaN, Inf y valores fuera de rango ([0, 100] VMAF, [0, 1] SSIM).
+  - Soporte completo de `metric="both"`: persistencia y agregación determinista para ambas métricas (VMAF seguido de SSIM) por candidato en `CandidateMetrics`.
   - Preservación de medios e inmutabilidad: el source original, las referencias FFV1 y los candidatos HEVC nunca se modifican; verificación de inmutabilidad por hash SHA-256.
   - Orden determinista: ejecución secuencial estricta por candidato y por sample ($C \times S$).
   - Aislamiento de procesos y cancelación: ejecución en process group dedicado con propagación de SIGKILL y preservación de evidencia parcial.
   - Integración pura: reuso directo de `optimization.AggregateSampleScores` para cálculo de agregados de métricas tipados.
-- [x] Cubrir ausencia de filtros, fallos y outputs incompletos en el worker con suite completa de pruebas unitarias e integrales en `benchmark_runner_test.go`.
+- [x] Cubrir ausencia de filtros, fallos y outputs incompletos en el worker con suite completa de pruebas unitarias e integrales en `benchmark_runner_test.go` y `capabilities_test.go`.
 
 
 ### Fase 6 — Búsqueda y selección VideoToolbox
@@ -499,7 +502,7 @@ Demostrado mediante tests que:
 | 2. Capacidades y protocolo | Completo | `WorkerCapabilities` versionado (`ProtocolVersion == WorkerProtocolVersion`), probe errors estructurados, clean absence encoder-specific, eliminación de campo redundante `VideoToolbox`, fingerprint determinista de capacidades, handshake SSH | `eaadfe1`, `94a5a01`, `5eb1d30`, `9e90d7b` |
 | 3. Recipes v2 | Completo | Loader v1/v2 compatible (`MinSchemaVersion`..`LatestSchemaVersion`), `OptimizationPolicy` validado con defaults aprobados (VMAF 96/95/0.5, SSIM 0.99/0.98/0.005, sampling bounds 1..32, `MaxBitrateKbps = 1_000_000`), omission safety en bloques métricos parciales | `eaadfe1`, `94a5a01`, `5eb1d30`, `9e90d7b`, `c92725b` |
 | 4. Sampling y temporales | Completo | Fase 4A (protocolo, SSH, models, locking `.capacity.lock` y `jobDir/.lock`, argv exacto `MatchesExactBenchmarkArgs`, idempotencia total) y Fase 4B (`ProductionBenchmarkRunner`, extracción `ffv1`, encode `hevc_videotoolbox`, `verifyChildPath`, bit depth gating, evidencia `BenchmarkExecutionEvidence`, cleanup acotado y seguro, process group cancellation, symlink TOCTOU hardening, collision-free candidate names, partial evidence preservation on error and cancel, bounded stderr, DV y chroma 4:2:0 gating, deferral de full-range `yuvj420p`) completas y verificadas | `e23f204`, `8fe5828`, `badad4a`, `7fb5108`, `a35bcd6`, `f57a8af`, `35d9682`, `5c69e0d`, `76dba67` |
-| 5. Métricas y estimación | Completo | Modelos puros (`transcode/optimization/metrics.go`, `estimator.go`) y runner remoto FFmpeg (`internal/transcodeworker/benchmark_runner.go`) con libvmaf/ssim filter capability gating, parsing robusto con bounding 5MB, rechazo de symlinks y NaN/Inf/out-of-range, ejecución secuencial determinista C x S, inmutabilidad de medios, aislamiento de process group, preservación de evidencia parcial y agregación tipada pura antes de limpieza de scratch | `e23f204`, `8fe5828`, `badad4a`, `3eade67` |
+| 5. Métricas y estimación | Completo | Modelos puros (`transcode/optimization/metrics.go`, `estimator.go`) y runner remoto FFmpeg (`internal/transcodeworker/benchmark_runner.go`) con libvmaf/ssim filter capability gating (soporte 2 y 3 caracteres), filtergraph path escaping en dos niveles, parsing robusto con bounding 5MB vía LimitReader y O_NOFOLLOW, candidate-level failure isolation, 10-bit VMAF fail-closed gating, frame contiguity verification, SSIM last-match tail parsing, metric='both' dual aggregates, inmutabilidad de medios y agregación tipada pura antes de limpieza de scratch | `e23f204`, `8fe5828`, `badad4a`, `3eade67`, `7651b64` |
 | 6. Selección VideoToolbox | Pendiente | Modelo puro `CandidateSelector` disponible en `transcode/optimization/selector.go`; ejecución y benchmarking real en worker pendientes. | — |
 | 7. Actions e integración | Pendiente | Action `benchmark_transcode` e integración del ganador en `transcode_media` pendientes de implementación. | — |
 | 8. Validación y PR | Pendiente | Validación en M1 Max, benchmarks reales y apertura del PR único hacia `main` pendientes. | — |
@@ -532,3 +535,4 @@ Demostrado mediante tests que:
   - `76dba67`: `fix(transcode): persist partial evidence on cancel and reject full-range yuvj420p`
 - **Medición remota VMAF y SSIM (Fase 5)**:
   - `3eade67`: `feat(transcode): implement Phase 5 remote VMAF and SSIM measurement`
+  - `7651b64`: `fix(transcode): address Phase 5 adversarial review corrections`
