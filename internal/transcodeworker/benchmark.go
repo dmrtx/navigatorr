@@ -127,6 +127,22 @@ func acquireJobLock(jobDir string) (*jobFileLock, error) {
 	return &jobFileLock{file: f}, nil
 }
 
+func acquireCapacityLock(stateDir string) (*jobFileLock, error) {
+	if err := os.MkdirAll(stateDir, 0755); err != nil {
+		return nil, fmt.Errorf("creating state dir for capacity lock: %w", err)
+	}
+	lockFile := filepath.Join(stateDir, ".capacity.lock")
+	f, err := os.OpenFile(lockFile, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, fmt.Errorf("opening capacity lock file %s: %w", lockFile, err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("locking %s: %w", lockFile, err)
+	}
+	return &jobFileLock{file: f}, nil
+}
+
 func (l *jobFileLock) Unlock() {
 	if l != nil && l.file != nil {
 		_ = syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN)
@@ -142,37 +158,43 @@ func generateRunToken() (string, error) {
 	return fmt.Sprintf("run-%d-%s", time.Now().UnixNano(), hex.EncodeToString(b)), nil
 }
 
+// MatchesExactBenchmarkArgs checks whether tokens contain the exact contiguous sequence:
+// ["_internal_benchmark", exactJobID, exactRunToken].
+// Substrings, prefixes, or suffixes do not match.
+func MatchesExactBenchmarkArgs(tokens []string, jobID, runToken string) bool {
+	if jobID == "" || runToken == "" || len(tokens) < 3 {
+		return false
+	}
+	for i := 0; i <= len(tokens)-3; i++ {
+		if tokens[i] == "_internal_benchmark" && tokens[i+1] == jobID && tokens[i+2] == runToken {
+			return true
+		}
+	}
+	return false
+}
+
 // IsBenchmarkExecutionAlive rigorously verifies whether the background process for a benchmark
 // run is alive and matches its exact execution identity.
 // It guards against PID recycling and foreign processes by verifying:
 // 1. PID > 1 and process responds to signal 0.
-// 2. The record has a non-empty RunToken.
+// 2. The record has non-empty ID and RunToken.
 // 3. The process's lstart matches ProcessStartTime (if recorded).
-// 4. The process's command line contains "_internal_benchmark", the exact RunToken, and the exact job ID.
+// 4. The process's tokenized argv contains the exact contiguous sequence ["_internal_benchmark", b.ID, b.RunToken].
 func IsBenchmarkExecutionAlive(b *BenchmarkRecord) bool {
-	if b == nil || b.PID <= 1 || b.RunToken == "" {
+	if b == nil || b.PID <= 1 || b.ID == "" || b.RunToken == "" {
 		return false
 	}
 	if !IsProcessAlive(b.PID) {
 		return false
 	}
-	cmd, startTime, err := GetProcessIdentity(b.PID)
+	tokens, startTime, err := GetProcessTokens(b.PID)
 	if err != nil {
 		return false
 	}
 	if b.ProcessStartTime != "" && startTime != "" && b.ProcessStartTime != startTime {
 		return false
 	}
-	if !strings.Contains(cmd, "_internal_benchmark") {
-		return false
-	}
-	if !strings.Contains(cmd, b.RunToken) {
-		return false
-	}
-	if !strings.Contains(cmd, b.ID) {
-		return false
-	}
-	return true
+	return MatchesExactBenchmarkArgs(tokens, b.ID, b.RunToken)
 }
 
 func (w *Worker) getBenchmarkRunner() BenchmarkRunner {
@@ -209,6 +231,8 @@ func (w *Worker) spawnInternalBenchmark(selfExe, configPath, jobID, runToken str
 }
 
 // BenchmarkSubmit initiates a detached benchmark job with strict validation, idempotency, and workspace management.
+// It is strictly idempotent across ALL states: identical ID + identical digest returns the existing status
+// without spawning a new execution run. Retrying failed/cancelled benchmarks requires a new benchmark job ID.
 func (w *Worker) BenchmarkSubmit(ctx context.Context, req transcode.BenchmarkRequest, selfExe, configPath string) (transcode.BenchmarkSubmitResponse, error) {
 	resp := transcode.BenchmarkSubmitResponse{
 		ProtocolVersion: transcode.WorkerProtocolVersion,
@@ -248,13 +272,21 @@ func (w *Worker) BenchmarkSubmit(ctx context.Context, req transcode.BenchmarkReq
 		return resp, fmt.Errorf("invalid benchmark job id: path traversal")
 	}
 
-	// Single-writer mutual exclusion via advisory file lock
-	lock, err := acquireJobLock(jobDir)
+	// Capacity lock serializes slot accounting across all benchmark and transcode jobs
+	capLock, err := acquireCapacityLock(cleanStateDir)
+	if err != nil {
+		resp.Error = fmt.Sprintf("acquiring capacity lock: %v", err)
+		return resp, err
+	}
+	defer capLock.Unlock()
+
+	// Per-job mutual exclusion via advisory file lock (lock order: capLock -> jobLock)
+	jobLock, err := acquireJobLock(jobDir)
 	if err != nil {
 		resp.Error = fmt.Sprintf("acquiring job lock for %s: %v", req.ID, err)
 		return resp, err
 	}
-	defer lock.Unlock()
+	defer jobLock.Unlock()
 
 	// Collision check: reject if a transcode job already exists with this ID
 	transcodeJobFile := filepath.Join(jobDir, "job.json")
@@ -270,7 +302,7 @@ func (w *Worker) BenchmarkSubmit(ctx context.Context, req transcode.BenchmarkReq
 		return resp, err
 	}
 
-	// Idempotency and retry check
+	// Idempotency check across all states
 	if existing, err := LoadBenchmark(benchFile); err == nil && existing != nil {
 		// Collision: same ID with different request digest must fail closed
 		if existing.RequestDigest != reqDigest {
@@ -281,7 +313,7 @@ func (w *Worker) BenchmarkSubmit(ctx context.Context, req transcode.BenchmarkReq
 		switch existing.Status {
 		case "queued", "running":
 			if IsBenchmarkExecutionAlive(existing) {
-				// In-flight idempotent transport retry: return active status without spawning a second worker
+				// In-flight transport retry: return active status without spawning a second worker
 				resp.Status = existing.Status
 				return resp, nil
 			}
@@ -291,76 +323,24 @@ func (w *Worker) BenchmarkSubmit(ctx context.Context, req transcode.BenchmarkReq
 			existing.Error = "process terminated unexpectedly"
 			_ = SaveBenchmarkAtomic(benchFile, existing)
 			_ = w.CleanBenchmarkSamples(req.ID)
-			// Reconciled to terminal failed; proceed to retry flow below
+			resp.Status = "failed"
+			resp.Error = existing.Error
+			return resp, nil
 
-		case "completed":
-			// Benchmark already finished successfully
-			resp.Status = "completed"
+		case "completed", "failed", "cancelled":
+			// Terminal states are strictly idempotent: return existing terminal status without re-execution
+			resp.Status = existing.Status
+			resp.Error = existing.Error
+			return resp, nil
+
+		default:
+			resp.Status = existing.Status
+			resp.Error = existing.Error
 			return resp, nil
 		}
-
-		// Existing status is failed or cancelled: explicit retry with new attempt and run token
-		activeJobs, err := w.countActiveJobs(req.ID)
-		if err != nil {
-			resp.Error = fmt.Sprintf("checking active jobs: %v", err)
-			return resp, err
-		}
-		if activeJobs >= w.cfg.MaxParallelJobs {
-			resp.Error = fmt.Sprintf("worker busy: maximum parallel jobs (%d) reached", w.cfg.MaxParallelJobs)
-			return resp, fmt.Errorf("worker busy: max parallel jobs reached")
-		}
-
-		newRunToken, err := generateRunToken()
-		if err != nil {
-			resp.Error = fmt.Sprintf("generating run token: %v", err)
-			return resp, err
-		}
-
-		// Clean scratch workspace and recreate empty samples directory
-		_ = w.CleanBenchmarkSamples(req.ID)
-		samplesDir := filepath.Join(jobDir, "samples")
-		if err := os.MkdirAll(samplesDir, 0755); err != nil {
-			resp.Error = fmt.Sprintf("recreating samples workspace: %v", err)
-			return resp, err
-		}
-
-		existing.Attempt++
-		existing.RunToken = newRunToken
-		existing.Status = "queued"
-		existing.Error = ""
-		existing.PID = 0
-		existing.ProcessStartTime = ""
-		existing.StartedAt = time.Time{}
-		existing.FinishedAt = time.Time{}
-		existing.ExitCode = 0
-
-		if err := SaveBenchmarkAtomic(benchFile, existing); err != nil {
-			resp.Error = fmt.Sprintf("saving retry benchmark state: %v", err)
-			_ = w.CleanBenchmarkSamples(req.ID)
-			return resp, err
-		}
-
-		cmd, err := w.spawnInternalBenchmark(selfExe, configPath, req.ID, newRunToken)
-		if err != nil {
-			existing.Status = "failed"
-			existing.Error = fmt.Sprintf("spawning benchmark process retry: %v", err)
-			existing.FinishedAt = time.Now().UTC()
-			_ = SaveBenchmarkAtomic(benchFile, existing)
-			_ = w.CleanBenchmarkSamples(req.ID)
-			resp.Error = existing.Error
-			return resp, err
-		}
-
-		existing.PID = cmd.Process.Pid
-		_, lstart, _ := GetProcessIdentity(existing.PID)
-		existing.ProcessStartTime = lstart
-		_ = SaveBenchmarkAtomic(benchFile, existing)
-
-		resp.Status = "queued"
-		return resp, nil
 	}
 
-	// New benchmark job: verify slot capacity
+	// New benchmark job: verify slot capacity under capacity lock
 	activeJobs, err := w.countActiveJobs(req.ID)
 	if err != nil {
 		resp.Error = fmt.Sprintf("checking active jobs: %v", err)
@@ -417,10 +397,25 @@ func (w *Worker) BenchmarkSubmit(ctx context.Context, req transcode.BenchmarkReq
 		return resp, err
 	}
 
+	if w.afterSpawnHook != nil {
+		w.afterSpawnHook(jobDir, cmd.Process.Pid)
+	}
+
 	record.PID = cmd.Process.Pid
-	_, lstart, _ := GetProcessIdentity(record.PID)
+	_, lstart, _ := GetProcessTokens(record.PID)
 	record.ProcessStartTime = lstart
-	_ = SaveBenchmarkAtomic(benchFile, record)
+	if err := SaveBenchmarkAtomic(benchFile, record); err != nil {
+		// Fail-closed: kill newly spawned process immediately so it is never orphaned without identity
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		record.Status = "failed"
+		record.Error = fmt.Sprintf("persisting benchmark process identity: %v", err)
+		record.FinishedAt = time.Now().UTC()
+		_ = SaveBenchmarkAtomic(benchFile, record)
+		_ = w.CleanBenchmarkSamples(req.ID)
+		resp.Error = record.Error
+		return resp, fmt.Errorf("persisting benchmark process identity: %w", err)
+	}
 
 	resp.Status = "queued"
 	return resp, nil
@@ -484,7 +479,6 @@ func (w *Worker) BenchmarkStatus(ctx context.Context, jobID string) (transcode.B
 	st.SamplesPlanned = len(record.Samples)
 	st.CandidatesCount = len(record.Candidates)
 	st.Attempt = record.Attempt
-	st.RunToken = record.RunToken
 	st.CreatedAt = record.CreatedAt
 	st.StartedAt = record.StartedAt
 	st.FinishedAt = record.FinishedAt
@@ -493,9 +487,10 @@ func (w *Worker) BenchmarkStatus(ctx context.Context, jobID string) (transcode.B
 
 	if record.Status == "running" || record.Status == "queued" {
 		if !IsBenchmarkExecutionAlive(record) {
-			lock, err := acquireJobLock(jobDir)
+			// Acquire job lock to ensure we do not race with in-flight spawn or transition
+			jobLock, err := acquireJobLock(jobDir)
 			if err == nil {
-				defer lock.Unlock()
+				defer jobLock.Unlock()
 				latest, lErr := LoadBenchmark(benchFile)
 				if lErr == nil && latest != nil && (latest.Status == "running" || latest.Status == "queued") {
 					if !IsBenchmarkExecutionAlive(latest) {
@@ -542,12 +537,12 @@ func (w *Worker) BenchmarkCancel(ctx context.Context, jobID string) (transcode.B
 		return resp, fmt.Errorf("invalid jobID: path traversal")
 	}
 
-	lock, err := acquireJobLock(jobDir)
+	jobLock, err := acquireJobLock(jobDir)
 	if err != nil {
 		resp.Error = fmt.Sprintf("acquiring job lock: %v", err)
 		return resp, err
 	}
-	defer lock.Unlock()
+	defer jobLock.Unlock()
 
 	benchFile := filepath.Join(jobDir, "benchmark.json")
 	record, err := LoadBenchmark(benchFile)
@@ -592,32 +587,32 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) 
 	benchFile := filepath.Join(jobDir, "benchmark.json")
 
 	// Phase 1: Verify token, transition from queued -> running under lock
-	lock, err := acquireJobLock(jobDir)
+	jobLock, err := acquireJobLock(jobDir)
 	if err != nil {
 		return fmt.Errorf("acquiring lock for %s: %w", jobID, err)
 	}
 
 	record, err := LoadBenchmark(benchFile)
 	if err != nil {
-		lock.Unlock()
+		jobLock.Unlock()
 		return fmt.Errorf("loading benchmark %s: %w", jobID, err)
 	}
 
 	// Exact run token verification (FAIL CLOSED)
 	if record.RunToken == "" || record.RunToken != runToken {
-		lock.Unlock()
+		jobLock.Unlock()
 		return fmt.Errorf("run token mismatch for benchmark %s (expected %q, got %q): failing closed",
 			jobID, record.RunToken, runToken)
 	}
 
 	// Check if already cancelled or terminal before we even started
 	if record.Status != "queued" && record.Status != "running" {
-		lock.Unlock()
+		jobLock.Unlock()
 		return fmt.Errorf("benchmark %s is in non-runnable state (status=%s)", jobID, record.Status)
 	}
 
 	record.PID = os.Getpid()
-	if _, lstart, err := GetProcessIdentity(record.PID); err == nil {
+	if _, lstart, err := GetProcessTokens(record.PID); err == nil {
 		record.ProcessStartTime = lstart
 	}
 	record.Status = "running"
@@ -625,10 +620,10 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) 
 		record.StartedAt = time.Now().UTC()
 	}
 	if err := SaveBenchmarkAtomic(benchFile, record); err != nil {
-		lock.Unlock()
+		jobLock.Unlock()
 		return fmt.Errorf("updating benchmark to running: %w", err)
 	}
-	lock.Unlock()
+	jobLock.Unlock()
 
 	// Phase 2: Execute benchmark runner outside lock so cancellation/status can acquire lock
 	runner := w.getBenchmarkRunner()
@@ -638,18 +633,18 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) 
 	_ = w.CleanBenchmarkSamples(jobID)
 
 	// Phase 3: Transition to terminal state under lock
-	lock, err = acquireJobLock(jobDir)
+	jobLock, err = acquireJobLock(jobDir)
 	if err != nil {
 		return fmt.Errorf("re-acquiring lock for completion: %w", err)
 	}
-	defer lock.Unlock()
+	defer jobLock.Unlock()
 
 	latest, err := LoadBenchmark(benchFile)
 	if err != nil {
 		return fmt.Errorf("loading benchmark for completion %s: %w", jobID, err)
 	}
 
-	// If run token changed (e.g. new attempt was started), do not touch state
+	// If run token changed, do not touch state
 	if latest.RunToken != runToken {
 		return nil
 	}
