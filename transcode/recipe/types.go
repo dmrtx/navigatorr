@@ -145,6 +145,10 @@ func (m *MetricTarget) Clone() *MetricTarget {
 type SearchPolicy struct {
 	MaxCandidates int   `json:"max_candidates,omitempty" yaml:"max_candidates,omitempty"`
 	QualityValues []int `json:"quality_values,omitempty" yaml:"quality_values,omitempty"`
+	// AdaptiveMode selects exhaustive (default) or adaptive candidate evaluation.
+	AdaptiveMode string `json:"adaptive_mode,omitempty" yaml:"adaptive_mode,omitempty"`
+	// AdaptiveInitialQuality overrides the adaptive starting quality (default 65).
+	AdaptiveInitialQuality int `json:"adaptive_initial_quality,omitempty" yaml:"adaptive_initial_quality,omitempty"`
 }
 
 // Clone creates a deep copy of SearchPolicy.
@@ -157,8 +161,10 @@ func (srch *SearchPolicy) Clone() *SearchPolicy {
 		qv = append([]int(nil), srch.QualityValues...)
 	}
 	return &SearchPolicy{
-		MaxCandidates: srch.MaxCandidates,
-		QualityValues: qv,
+		MaxCandidates:          srch.MaxCandidates,
+		QualityValues:          qv,
+		AdaptiveMode:           srch.AdaptiveMode,
+		AdaptiveInitialQuality: srch.AdaptiveInitialQuality,
 	}
 }
 

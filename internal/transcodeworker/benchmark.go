@@ -24,33 +24,34 @@ var (
 
 // BenchmarkRecord represents the persistent state stored in benchmark.json on the worker.
 type BenchmarkRecord struct {
-	ProtocolVersion           int                               `json:"protocol_version"`
-	ID                        string                            `json:"id"`
-	Status                    string                            `json:"status"` // queued, running, completed, failed, cancelled
-	Source                    string                            `json:"source"`
-	SourceDuration            float64                           `json:"source_duration,omitempty"`
-	Metric                    string                            `json:"metric"`
-	Progress                  float64                           `json:"progress"`
-	Phase                     string                            `json:"phase,omitempty"`
-	HeartbeatAt               time.Time                         `json:"heartbeat_at,omitempty"`
-	Samples                   []transcode.BenchmarkSampleWindow `json:"samples"`
-	Candidates                []transcode.BenchmarkCandidate    `json:"candidates"`
-	Quality                   *transcode.BenchmarkQualityConfig `json:"quality,omitempty"`
-	FallbackAudioBitrateBps   int64                             `json:"fallback_audio_bitrate_bps,omitempty"`
-	FallbackSubtitleSizeBytes int64                             `json:"fallback_subtitle_size_bytes,omitempty"`
-	DeclaredVideoBitrateBps   int64                             `json:"declared_video_bitrate_bps,omitempty"`
-	AttachmentBytes           int64                             `json:"attachment_bytes,omitempty"`
-	RequestDigest             string                            `json:"request_digest"`
-	Attempt                   int                               `json:"attempt"`
-	RunToken                  string                            `json:"run_token"`
-	PID                       int                               `json:"pid"`
-	ProcessStartTime          string                            `json:"process_start_time,omitempty"`
-	CreatedAt                 time.Time                         `json:"created_at"`
-	StartedAt                 time.Time                         `json:"started_at,omitempty"`
-	FinishedAt                time.Time                         `json:"finished_at,omitempty"`
-	ExitCode                  int                               `json:"exit_code,omitempty"`
-	Error                     string                            `json:"error,omitempty"`
-	Evidence                  *BenchmarkExecutionEvidence       `json:"evidence,omitempty"`
+	ProtocolVersion           int                                `json:"protocol_version"`
+	ID                        string                             `json:"id"`
+	Status                    string                             `json:"status"` // queued, running, completed, failed, cancelled
+	Source                    string                             `json:"source"`
+	SourceDuration            float64                            `json:"source_duration,omitempty"`
+	Metric                    string                             `json:"metric"`
+	Progress                  float64                            `json:"progress"`
+	Phase                     string                             `json:"phase,omitempty"`
+	HeartbeatAt               time.Time                          `json:"heartbeat_at,omitempty"`
+	Samples                   []transcode.BenchmarkSampleWindow  `json:"samples"`
+	Candidates                []transcode.BenchmarkCandidate     `json:"candidates"`
+	Quality                   *transcode.BenchmarkQualityConfig  `json:"quality,omitempty"`
+	Adaptive                  *transcode.BenchmarkAdaptiveConfig `json:"adaptive,omitempty"`
+	FallbackAudioBitrateBps   int64                              `json:"fallback_audio_bitrate_bps,omitempty"`
+	FallbackSubtitleSizeBytes int64                              `json:"fallback_subtitle_size_bytes,omitempty"`
+	DeclaredVideoBitrateBps   int64                              `json:"declared_video_bitrate_bps,omitempty"`
+	AttachmentBytes           int64                              `json:"attachment_bytes,omitempty"`
+	RequestDigest             string                             `json:"request_digest"`
+	Attempt                   int                                `json:"attempt"`
+	RunToken                  string                             `json:"run_token"`
+	PID                       int                                `json:"pid"`
+	ProcessStartTime          string                             `json:"process_start_time,omitempty"`
+	CreatedAt                 time.Time                          `json:"created_at"`
+	StartedAt                 time.Time                          `json:"started_at,omitempty"`
+	FinishedAt                time.Time                          `json:"finished_at,omitempty"`
+	ExitCode                  int                                `json:"exit_code,omitempty"`
+	Error                     string                             `json:"error,omitempty"`
+	Evidence                  *BenchmarkExecutionEvidence        `json:"evidence,omitempty"`
 }
 
 // BenchmarkRunner defines the pluggable executor interface for running benchmarks.
@@ -382,6 +383,7 @@ func (w *Worker) BenchmarkSubmit(ctx context.Context, req transcode.BenchmarkReq
 		Samples:                   req.Samples,
 		Candidates:                req.Candidates,
 		Quality:                   req.Quality,
+		Adaptive:                  req.Adaptive,
 		FallbackAudioBitrateBps:   req.FallbackAudioBitrateBps,
 		FallbackSubtitleSizeBytes: req.FallbackSubtitleSizeBytes,
 		DeclaredVideoBitrateBps:   req.DeclaredVideoBitrateBps,
