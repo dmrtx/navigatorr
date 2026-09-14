@@ -516,6 +516,37 @@ En vivo en Apple Silicon (este host arm64, FFmpeg 9.0.1 homebrew con `hevc_video
 - Ejemplo v2 validado con `recipe.Parse` real: `version=2026.09.3-example.1 digest=sha256:ae0f0f30…bef27e profiles=1 (general-hevc-optimized, optimization enabled=true)`.
 - Decisión de alcance: la recipe embebida (`default.yaml`, schema 1) queda byte-idéntica para no rotar su digest ni alterar ningún plan existente; la adopción de optimización es opt-in vía el ejemplo v2. Revisable en la revisión del PR.
 
+#### Corrección de Defecto de Cableado en Preflight y Validación en Vivo (2026-09-14)
+
+**Defecto reproducido en vivo desde commit desplegado `5b1be607`:**
+- En Apple Silicon M1 real, `benchmark_transcode` con archivo fixture en `/volume1/Media/Downloads/.navigatorr-candidates/navigatorr-e2e-source.job-act-transcode-media-6238643161393432.mkv`, perfil `anime-hevc-quality`, métrica `ssim` y `replace_original=false` completó exitosamente: detectó `optimization_enabled=true`, evaluó q55/q60/q65/q70/q75, seleccionó q55 con SSIM 0.9961 (yuv420p, 8-bit Main) y PlanDigest concreto `sha256:bc5d40e661f50e1398d41674c96afee7e3f42027cf867dba21f35c7398803adf`.
+- Sin embargo, al invocar `transcode_media` inmediatamente después con los mismos parámetros exactos (ruta, perfil `anime-hevc-quality`, métrica `ssim`), el flujo completó 7/7 pasos omitiendo silenciosamente `submit_benchmark` y `wait_benchmark`. Los outputs de preflight omitieron `optimization_enabled`, y el submit final usó la calidad estática 75 con el digest estático `sha256:5f3790702c4416380cb31fe56b128aa646aa5bd3fd577ca4b3435165e1a34bf6`.
+
+**Causa raíz identificada:**
+- En `stepTranscodePreflight` (`action/transcode_template.go`), la rama que instanciaba la política por defecto normalizada (`&recipe.OptimizationPolicy{Enabled: true}`) cuando `recipeProfile.Optimization == nil` estaba condicionada exclusivamente a `if ec.ActionName == "benchmark_transcode"`.
+- Al ejecutar `transcode_media` (`ec.ActionName != "benchmark_transcode"`), `optEnabled` evaluaba estrictamente a `recipeProfile.Optimization != nil && recipeProfile.Optimization.Enabled`.
+- Como los perfiles builtin (como `anime-hevc-quality` en `default.yaml`) no definen bloque `optimization:`, `recipeProfile.Optimization` era `nil`. En consecuencia, preflight asumía `optEnabled = false`, no persistía `optimization_enabled` en los outputs y los pasos condicionales de benchmark se saltaban, cayendo en el fallback estático.
+
+**Resolución aplicada:**
+- En `stepTranscodePreflight`:
+  1. Si `recipeProfile.Optimization != nil && !recipeProfile.Optimization.Enabled`: se desactiva explícitamente (`optEnabled = false`; si es `benchmark_transcode`, falla closed inmediatamente).
+  2. Si `recipeProfile.Optimization != nil && recipeProfile.Optimization.Enabled`: se adopta la política del perfil y `optEnabled = true`.
+  3. Si `ec.ActionName == "benchmark_transcode" || metricInput != ""`: cuando `Optimization == nil`, se crea y normaliza una política por defecto y se fija `optEnabled = true`. Si `metricInput == ""` en un perfil sin bloque de optimización, permanece en transcode estático legacy (`optEnabled = false`).
+  4. Los outputs de preflight garantizan `outputs["optimization_enabled"] = true` consultando `getBool(ec.State, "optimization_enabled")`.
+
+**Inspección de ruta anidada `.navigatorr-candidates/.navigatorr-candidates/...`:**
+- En `action/transcode_submit.go`, `candidatePath` se calcula como `filepath.Join(srcDir, ".navigatorr-candidates", ...)`.
+- Cuando el archivo de entrada utilizado para la prueba en vivo fue `/volume1/Media/Downloads/.navigatorr-candidates/navigatorr-e2e-source...mkv`, `srcDir` ya era `.navigatorr-candidates`, lo que provocó que el candidato resultante fuera `.navigatorr-candidates/.navigatorr-candidates/...`.
+- Se verificó que este comportamiento es completamente seguro (aislamiento de candidatos garantizado, verificación estricta de SHA, sin escape de directorios ni mutación de la fuente), siendo un artefacto puro de usar un candidato previo como archivo de prueba de validación. En producción normal, los medios de biblioteca nunca residen dentro de directorios `.navigatorr-candidates`.
+
+**Evidencia de pruebas automatizadas:**
+- Se añadieron 3 tests de regresión en `action/transcode_phase8_closure_test.go`:
+  1. `TestPhase8_LiveValidationReproduction_AnimeHevcQualitySSIMWinner`: Reproduce exactamente el caso en vivo de M1 (`anime-hevc-quality` + `ssim`), verificando que preflight genera `optimization_enabled=true`, `BenchmarkSubmit` se invoca exactamente 1 vez, el submit final recibe los knobs del ganador (q55, Main, yuv420p, 8-bit) con digest concreto `sha256:bc5d40e6...` (diferente del base estático `sha256:5f379070...`) y el archivo original permanece inmutable.
+  2. `TestPhase8_OptimizationDisabled_ExplicitPolicy_SkipsBenchmark`: Verifica que con `optimization.enabled: false`, `transcode_media` omite benchmark (0 llamadas a `BenchmarkSubmit`), ejecuta el submit estático y omite `optimization_enabled` en outputs.
+  3. `TestPhase8_OptimizationDisabled_BuiltinWithoutMetric_SkipsBenchmark`: Verifica que el perfil builtin sin parámetro `metric` continúa ejecutando transcode estático sin benchmark.
+- Suite completa en verde: `go test -count=1 ./...` pasó 100% OK; tests de race en `./action` en verde.
+- Se formatearon con `gofmt -w` los ficheros señalados del hito: `action/benchmark_template.go`, `action/transcode_template_test.go`, `internal/transcodeworker/benchmark.go`, `internal/transcodeworker/benchmark_runner.go`.
+
 ## 9. Estado de avance
 
 | Fase | Estado | Evidencia | Commits aceptados |
@@ -528,7 +559,7 @@ En vivo en Apple Silicon (este host arm64, FFmpeg 9.0.1 homebrew con `hevc_video
 | 5. Métricas y estimación | Completo | Modelos puros (`transcode/optimization/metrics.go`, `estimator.go`) y runner remoto FFmpeg (`internal/transcodeworker/benchmark_runner.go`) con libvmaf/ssim filter capability gating (soporte 2 y 3 caracteres), filtergraph path escaping en dos niveles, parsing robusto con bounding 5MB vía LimitReader y O_NOFOLLOW, candidate-level failure isolation, 10-bit VMAF fail-closed gating, frame contiguity verification, SSIM last-match tail parsing, metric='both' dual aggregates, inmutabilidad de medios y agregación tipada pura antes de limpieza de scratch | `e23f204`, `8fe5828`, `badad4a`, `3eade67`, `7651b64` |
 | 6. Selección VideoToolbox | Completo | Pipeline de selección y estimación integrado en `ProductionBenchmarkRunner` conectando `transcode/optimization` con evidencia de Fase 4B/5; modelos tipados `BenchmarkDecision`/`BenchmarkWinner`/`BenchmarkCandidateEvaluation` persistidos en evidencia y status; soporte para métricas `vmaf`, `ssim` y `both` con fallback determinista; validación fail-closed de policies y fallbacks; suite completa de 10 tests de selección en `benchmark_runner_selection_test.go` | `e23f204`, `8fe5828`, `badad4a`, `e0250ce`, `f96907b` |
 | 7. Actions e integración | Completo | Action `benchmark_transcode` y pasos `submit_benchmark`/`wait_benchmark` en `transcode_media`; resolución de recipes v2 con `ResolveProfile`; plan ganador inmutable con `PlanDigest`; gating fail-closed (SDR, bit depth, HDR/DV, capabilities); correcciones de auditoría para HDR/DV, cancelación, worker busy y wait backoff; suite de tests en `transcode_benchmark_test.go` | `118d2b4`, `c953d63` |
-| 8. Validación y PR | Completo con alcance documentado | Docs (`TRANSCODING.md`, ejemplo v2 validado), tests de cierre Fase 8 (`ba572d8`), validación en vivo parcial en Apple Silicon (capabilities, inspección, VMAF/SSIM, SHAs) con matriz VT bloqueada por sandbox (`-12903`) y PR pendiente de instrucción explícita. | `ba572d8` + commit docs Fase 8 (este) |
+| 8. Validación y PR | Completo con alcance documentado | Docs (`TRANSCODING.md`, ejemplo v2 validado), tests de cierre Fase 8 (`ba572d8`), corrección de cableado de preflight validado en vivo con 3 nuevos tests de regresión (`TestPhase8_LiveValidationReproduction_AnimeHevcQualitySSIMWinner`, etc.), formateo gofmt de hitos (`130402a`), suite completa `go test ./...` 100% verde y PR pendiente de instrucción explícita. | `ba572d8`, `130402a` + commit fix/docs cableado |
 
 ### Detalle de commits aceptados en el worktree
 
