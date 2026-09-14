@@ -24,10 +24,18 @@ type mockTranscodeExecutor struct {
 	cancelCalls int32
 	doctorCalls int32
 
-	doctorFunc func(ctx context.Context) error
-	submitFunc func(ctx context.Context, req transcode.Request) (transcode.Job, error)
-	statusFunc func(ctx context.Context, jobID string) (transcode.JobStatus, error)
-	cancelFunc func(ctx context.Context, jobID string) error
+	benchmarkSubmitCalls int32
+	benchmarkStatusCalls int32
+	benchmarkCancelCalls int32
+
+	doctorFunc          func(ctx context.Context) error
+	capabilitiesFunc    func(ctx context.Context) (transcode.WorkerCapabilities, error)
+	submitFunc          func(ctx context.Context, req transcode.Request) (transcode.Job, error)
+	statusFunc          func(ctx context.Context, jobID string) (transcode.JobStatus, error)
+	cancelFunc          func(ctx context.Context, jobID string) error
+	benchmarkSubmitFunc func(ctx context.Context, req transcode.BenchmarkRequest) (transcode.BenchmarkJob, error)
+	benchmarkStatusFunc func(ctx context.Context, jobID string) (transcode.BenchmarkStatus, error)
+	benchmarkCancelFunc func(ctx context.Context, jobID string) error
 }
 
 func (m *mockTranscodeExecutor) Doctor(ctx context.Context) error {
@@ -36,6 +44,32 @@ func (m *mockTranscodeExecutor) Doctor(ctx context.Context) error {
 		return m.doctorFunc(ctx)
 	}
 	return nil
+}
+
+func (m *mockTranscodeExecutor) Capabilities(ctx context.Context) (transcode.WorkerCapabilities, error) {
+	if m.capabilitiesFunc != nil {
+		return m.capabilitiesFunc(ctx)
+	}
+	caps := transcode.WorkerCapabilities{
+		ProtocolVersion: transcode.WorkerProtocolVersion,
+		WorkerVersion:   "1.0.0",
+		BuildGitCommit:  "abcdef0",
+		FFmpegVersion:   "7.1",
+		Encoders:        map[string]bool{"hevc_videotoolbox": true},
+		Filters:         map[string]bool{"scale": true, "libvmaf": true, "ssim": true},
+		EncoderDetails: map[string]transcode.EncoderCapabilities{
+			"hevc_videotoolbox": {
+				Encoder:      "hevc_videotoolbox",
+				Available:    true,
+				Profiles:     []string{"main", "main10"},
+				PixelFormats: []string{"nv12", "p010le", "yuv420p"},
+				Options:      []string{"prio_speed", "profile", "realtime", "spatial_aq"},
+			},
+		},
+	}
+	fp, _ := transcode.ComputeCapabilityFingerprint(caps)
+	caps.CapabilityFingerprint = fp
+	return caps, nil
 }
 
 func (m *mockTranscodeExecutor) Submit(ctx context.Context, req transcode.Request) (transcode.Job, error) {
@@ -62,6 +96,35 @@ func (m *mockTranscodeExecutor) Cancel(ctx context.Context, jobID string) error 
 	atomic.AddInt32(&m.cancelCalls, 1)
 	if m.cancelFunc != nil {
 		return m.cancelFunc(ctx, jobID)
+	}
+	return nil
+}
+
+func (m *mockTranscodeExecutor) BenchmarkSubmit(ctx context.Context, req transcode.BenchmarkRequest) (transcode.BenchmarkJob, error) {
+	atomic.AddInt32(&m.benchmarkSubmitCalls, 1)
+	if m.benchmarkSubmitFunc != nil {
+		return m.benchmarkSubmitFunc(ctx, req)
+	}
+	return transcode.BenchmarkJob{ID: req.ID}, nil
+}
+
+func (m *mockTranscodeExecutor) BenchmarkStatus(ctx context.Context, jobID string) (transcode.BenchmarkStatus, error) {
+	atomic.AddInt32(&m.benchmarkStatusCalls, 1)
+	if m.benchmarkStatusFunc != nil {
+		return m.benchmarkStatusFunc(ctx, jobID)
+	}
+	return transcode.BenchmarkStatus{
+		ProtocolVersion: transcode.WorkerProtocolVersion,
+		ID:              jobID,
+		Status:          transcode.StatusCompleted,
+		Progress:        100,
+	}, nil
+}
+
+func (m *mockTranscodeExecutor) BenchmarkCancel(ctx context.Context, jobID string) error {
+	atomic.AddInt32(&m.benchmarkCancelCalls, 1)
+	if m.benchmarkCancelFunc != nil {
+		return m.benchmarkCancelFunc(ctx, jobID)
 	}
 	return nil
 }
@@ -1608,4 +1671,99 @@ func TestTranscode_OmittedProfileHonorsConfiguredDefaultProfile(t *testing.T) {
 			t.Errorf("expected fallback profile hevc-vt, got %v", res.Outputs["profile"])
 		}
 	}
+}
+
+func TestTranscodePreflight_DetailedMetadataRetention(t *testing.T) {
+	mediaDir := t.TempDir()
+	origFile := filepath.Join(mediaDir, "HDR10Test.mkv")
+	_ = os.WriteFile(origFile, []byte("fake-hdr10-video-content"), 0o644)
+
+	probeOutput := `{
+		"streams": [
+			{
+				"index": 0,
+				"codec_type": "video",
+				"codec_name": "hevc",
+				"profile": "Main 10",
+				"pix_fmt": "yuv420p10le",
+				"width": 3840,
+				"height": 2160,
+				"r_frame_rate": "24000/1001",
+				"avg_frame_rate": "24000/1001",
+				"bit_rate": "5500000",
+				"color_range": "tv",
+				"color_space": "bt2020nc",
+				"color_primaries": "bt2020",
+				"color_transfer": "smpte2084"
+			}
+		],
+		"format": {
+			"format_name": "matroska,webm",
+			"duration": "120.0",
+			"bit_rate": "6000000"
+		},
+		"chapters": []
+	}`
+
+	probePath := createFakeFFprobeScript(t, probeOutput)
+
+	var capturedReq transcode.Request
+	mockExecutor := &mockTranscodeExecutor{
+		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
+			capturedReq = req
+			return transcode.Job{ID: req.ID}, nil
+		},
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{
+				ID:            jobID,
+				Status:        transcode.StatusCompleted,
+				CandidatePath: origFile,
+			}, nil
+		},
+	}
+
+	engine, _ := setupTranscodeEngine(t, mockExecutor, probePath, []string{mediaDir}, []string{mediaDir}, false)
+	engine.deps.Config.Transcode.DefaultProfile = "anime-hevc-quality"
+
+	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
+		"path": origFile,
+	})
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+
+	origMap, ok := res.Outputs["original"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected original metadata map in outputs, got %T", res.Outputs["original"])
+	}
+
+	if origMap["bit_rate"] != int64(6000000) {
+		t.Errorf("expected container bit_rate=6000000, got %v", origMap["bit_rate"])
+	}
+	if origMap["stream_bit_rate"] != int64(5500000) {
+		t.Errorf("expected stream bit_rate=5500000, got %v", origMap["stream_bit_rate"])
+	}
+	if origMap["r_frame_rate"] != "24000/1001" {
+		t.Errorf("expected r_frame_rate=24000/1001, got %v", origMap["r_frame_rate"])
+	}
+	if origMap["avg_frame_rate"] != "24000/1001" {
+		t.Errorf("expected avg_frame_rate=24000/1001, got %v", origMap["avg_frame_rate"])
+	}
+	fps, ok := origMap["fps"].(float64)
+	if !ok || fps < 23.97 || fps > 23.98 {
+		t.Errorf("expected fps around 23.976, got %v", origMap["fps"])
+	}
+	if origMap["color_range"] != "tv" {
+		t.Errorf("expected color_range=tv, got %v", origMap["color_range"])
+	}
+	if origMap["color_space"] != "bt2020nc" {
+		t.Errorf("expected color_space=bt2020nc, got %v", origMap["color_space"])
+	}
+	if origMap["color_primaries"] != "bt2020" {
+		t.Errorf("expected color_primaries=bt2020, got %v", origMap["color_primaries"])
+	}
+	if origMap["color_transfer"] != "smpte2084" {
+		t.Errorf("expected color_transfer=smpte2084, got %v", origMap["color_transfer"])
+	}
+	_ = capturedReq
 }

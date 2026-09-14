@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"math"
 	"regexp"
 	"strings"
 
@@ -39,6 +40,11 @@ func Parse(data []byte) (*Snapshot, error) {
 	if err := dec.Decode(&trailing); err != io.EOF {
 		return nil, fmt.Errorf("recipe bundle must contain exactly one YAML/JSON document")
 	}
+	for _, p := range b.Profiles {
+		if p.Optimization != nil {
+			NormalizeOptimizationPolicy(p.Optimization)
+		}
+	}
 	if err := Validate(&b); err != nil {
 		return nil, err
 	}
@@ -50,8 +56,8 @@ func Validate(b *Bundle) error {
 	if b == nil {
 		return fmt.Errorf("recipe bundle is nil")
 	}
-	if b.SchemaVersion != SupportedSchemaVersion {
-		return fmt.Errorf("unsupported recipe schema_version %d (supported: %d)", b.SchemaVersion, SupportedSchemaVersion)
+	if b.SchemaVersion < MinSchemaVersion || b.SchemaVersion > LatestSchemaVersion {
+		return fmt.Errorf("unsupported recipe schema_version %d (supported: %d-%d)", b.SchemaVersion, MinSchemaVersion, LatestSchemaVersion)
 	}
 	if strings.TrimSpace(b.BundleVersion) == "" || !safeToken.MatchString(b.BundleVersion) {
 		return fmt.Errorf("invalid bundle_version %q", b.BundleVersion)
@@ -100,6 +106,9 @@ func Validate(b *Bundle) error {
 	for name, p := range b.Profiles {
 		if !safeToken.MatchString(name) {
 			return fmt.Errorf("invalid profile name %q", name)
+		}
+		if p.Optimization != nil && b.SchemaVersion < SupportedSchemaVersionV2 {
+			return fmt.Errorf("profile %q: optimization policy requires schema_version %d", name, SupportedSchemaVersionV2)
 		}
 		if err := ValidateProfile(name, p); err != nil {
 			return err
@@ -188,6 +197,259 @@ func ValidateProfile(name string, p Profile) error {
 			return fmt.Errorf("profile %q: container conversion fallback only valid for container_subtitle_incompatible", name)
 		}
 	}
+	if p.Optimization != nil {
+		if err := ValidateOptimizationPolicy(name, p.Optimization); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func isFinite(f float64) bool {
+	return !math.IsNaN(f) && !math.IsInf(f, 0)
+}
+
+// NormalizeOptimizationPolicy populates documented defaults for enabled optimization policies
+// where fields were omitted, replacing truly omitted/zero values with concrete defaults without
+// overwriting invalid negative numbers.
+func NormalizeOptimizationPolicy(opt *OptimizationPolicy) {
+	if opt == nil || !opt.Enabled {
+		return
+	}
+
+	// 1. Sampling normalization
+	if opt.Sampling == nil {
+		opt.Sampling = &SamplingPolicy{
+			Strategy:      DefaultSamplingStrategy,
+			SampleCount:   DefaultSampleCount,
+			SampleSeconds: DefaultSampleSeconds,
+			Positions:     append([]float64(nil), DefaultSamplingPositions...),
+		}
+	} else {
+		opt.Sampling.Strategy = strings.ToLower(strings.TrimSpace(opt.Sampling.Strategy))
+		if opt.Sampling.Strategy == "" {
+			opt.Sampling.Strategy = DefaultSamplingStrategy
+		}
+		// Only default if EXACTLY zero. Do not overwrite negative numbers!
+		if opt.Sampling.SampleSeconds == 0 {
+			opt.Sampling.SampleSeconds = DefaultSampleSeconds
+		}
+		if opt.Sampling.SampleCount == 0 {
+			if len(opt.Sampling.Positions) > 0 {
+				opt.Sampling.SampleCount = len(opt.Sampling.Positions)
+			} else {
+				opt.Sampling.SampleCount = DefaultSampleCount
+			}
+		}
+		if len(opt.Sampling.Positions) == 0 && opt.Sampling.SampleCount > 0 {
+			if opt.Sampling.SampleCount == 3 {
+				opt.Sampling.Positions = append([]float64(nil), DefaultSamplingPositions...)
+			} else {
+				opt.Sampling.Positions = make([]float64, opt.Sampling.SampleCount)
+				for i := 0; i < opt.Sampling.SampleCount; i++ {
+					opt.Sampling.Positions[i] = float64(i+1) / float64(opt.Sampling.SampleCount+1)
+				}
+			}
+		}
+	}
+
+	// 2. Quality normalization
+	defaultVMAFTol := DefaultVMAFMarginalTolerance
+	defaultSSIMTol := DefaultSSIMMarginalTolerance
+	if opt.Quality == nil {
+		opt.Quality = &QualityPolicy{
+			PreferredMetric: DefaultPreferredMetric,
+			VMAF:            &MetricTarget{Target: DefaultVMAFTarget, Minimum: DefaultVMAFMinimum, MarginalTolerance: &defaultVMAFTol},
+			SSIM:            &MetricTarget{Target: DefaultSSIMTarget, Minimum: DefaultSSIMMinimum, MarginalTolerance: &defaultSSIMTol},
+		}
+	} else {
+		opt.Quality.PreferredMetric = strings.ToLower(strings.TrimSpace(opt.Quality.PreferredMetric))
+		if opt.Quality.PreferredMetric == "" {
+			opt.Quality.PreferredMetric = DefaultPreferredMetric
+		}
+		if opt.Quality.VMAF != nil {
+			if opt.Quality.VMAF.Target == 0 {
+				opt.Quality.VMAF.Target = DefaultVMAFTarget
+			}
+			if opt.Quality.VMAF.Minimum == 0 {
+				opt.Quality.VMAF.Minimum = DefaultVMAFMinimum
+			}
+			if opt.Quality.VMAF.MarginalTolerance == nil {
+				v := DefaultVMAFMarginalTolerance
+				opt.Quality.VMAF.MarginalTolerance = &v
+			}
+		} else if opt.Quality.PreferredMetric == "vmaf" {
+			v := DefaultVMAFMarginalTolerance
+			opt.Quality.VMAF = &MetricTarget{Target: DefaultVMAFTarget, Minimum: DefaultVMAFMinimum, MarginalTolerance: &v}
+		}
+
+		if opt.Quality.SSIM != nil {
+			if opt.Quality.SSIM.Target == 0 {
+				opt.Quality.SSIM.Target = DefaultSSIMTarget
+			}
+			if opt.Quality.SSIM.Minimum == 0 {
+				opt.Quality.SSIM.Minimum = DefaultSSIMMinimum
+			}
+			if opt.Quality.SSIM.MarginalTolerance == nil {
+				v := DefaultSSIMMarginalTolerance
+				opt.Quality.SSIM.MarginalTolerance = &v
+			}
+		} else if opt.Quality.PreferredMetric == "ssim" {
+			v := DefaultSSIMMarginalTolerance
+			opt.Quality.SSIM = &MetricTarget{Target: DefaultSSIMTarget, Minimum: DefaultSSIMMinimum, MarginalTolerance: &v}
+		}
+	}
+
+	// 3. Search normalization
+	if opt.Search == nil {
+		opt.Search = &SearchPolicy{
+			MaxCandidates: DefaultMaxCandidates,
+			QualityValues: append([]int(nil), DefaultQualityValues...),
+		}
+	} else {
+		// Only default if EXACTLY zero. Do not overwrite negative numbers!
+		if opt.Search.MaxCandidates == 0 {
+			if len(opt.Search.QualityValues) > 0 {
+				opt.Search.MaxCandidates = len(opt.Search.QualityValues)
+			} else {
+				opt.Search.MaxCandidates = DefaultMaxCandidates
+			}
+		}
+		if len(opt.Search.QualityValues) == 0 {
+			opt.Search.QualityValues = append([]int(nil), DefaultQualityValues...)
+		}
+	}
+}
+
+// ValidateOptimizationPolicy verifies that typed optimization models contain safe, bounded values.
+func ValidateOptimizationPolicy(name string, opt *OptimizationPolicy) error {
+	if opt == nil || !opt.Enabled {
+		return nil
+	}
+
+	// 1. Sampling validation
+	if opt.Sampling == nil {
+		return fmt.Errorf("profile %q: sampling policy is required when optimization is enabled", name)
+	}
+	s := opt.Sampling
+	strat := strings.ToLower(strings.TrimSpace(s.Strategy))
+	if strat != "distributed" && strat != "uniform" && strat != "relative_positions" {
+		return fmt.Errorf("profile %q: unsupported sampling strategy %q (allowed: distributed, uniform, relative_positions)", name, s.Strategy)
+	}
+	if s.SampleCount < 1 || s.SampleCount > 20 {
+		return fmt.Errorf("profile %q: sample_count %d out of range 1-20", name, s.SampleCount)
+	}
+	if !isFinite(s.SampleSeconds) || s.SampleSeconds <= 0 || s.SampleSeconds > 120.0 {
+		return fmt.Errorf("profile %q: sample_seconds %v out of range (0.0, 120.0]", name, s.SampleSeconds)
+	}
+	if len(s.Positions) != s.SampleCount {
+		return fmt.Errorf("profile %q: sampling positions length (%d) must match sample_count (%d)", name, len(s.Positions), s.SampleCount)
+	}
+	for i, pos := range s.Positions {
+		if !isFinite(pos) || pos <= 0.0 || pos >= 1.0 {
+			return fmt.Errorf("profile %q: sampling position %v at index %d out of range (0.0, 1.0)", name, pos, i)
+		}
+		if i > 0 && pos <= s.Positions[i-1] {
+			return fmt.Errorf("profile %q: sampling positions must be strictly increasing (%v <= %v)", name, pos, s.Positions[i-1])
+		}
+	}
+
+	// 2. Quality validation
+	if opt.Quality == nil {
+		return fmt.Errorf("profile %q: quality policy is required when optimization is enabled", name)
+	}
+	q := opt.Quality
+	metric := strings.ToLower(strings.TrimSpace(q.PreferredMetric))
+	if metric != "vmaf" && metric != "ssim" {
+		return fmt.Errorf("profile %q: unsupported preferred_metric %q (allowed: vmaf, ssim)", name, q.PreferredMetric)
+	}
+	if metric == "vmaf" && q.VMAF == nil {
+		return fmt.Errorf("profile %q: vmaf metric targets are required when preferred_metric is vmaf", name)
+	}
+	if metric == "ssim" && q.SSIM == nil {
+		return fmt.Errorf("profile %q: ssim metric targets are required when preferred_metric is ssim", name)
+	}
+
+	validateMetricTarget := func(metricName string, m *MetricTarget, maxVal float64) error {
+		if m == nil {
+			return nil
+		}
+		if !isFinite(m.Target) || m.Target <= 0 || m.Target > maxVal {
+			return fmt.Errorf("profile %q: %s target %v out of range (0.0-%v]", name, metricName, m.Target, maxVal)
+		}
+		if !isFinite(m.Minimum) || m.Minimum <= 0 || m.Minimum > maxVal {
+			return fmt.Errorf("profile %q: %s minimum %v out of range (0.0-%v]", name, metricName, m.Minimum, maxVal)
+		}
+		if m.Target < m.Minimum {
+			return fmt.Errorf("profile %q: %s target (%v) must be >= minimum (%v)", name, metricName, m.Target, m.Minimum)
+		}
+		if m.MarginalTolerance != nil {
+			tol := *m.MarginalTolerance
+			if !isFinite(tol) || tol < 0 || tol > maxVal {
+				return fmt.Errorf("profile %q: %s marginal_tolerance %v out of range [0.0, %v]", name, metricName, tol, maxVal)
+			}
+		}
+		return nil
+	}
+
+	if err := validateMetricTarget("vmaf", q.VMAF, 100.0); err != nil {
+		return err
+	}
+	if err := validateMetricTarget("ssim", q.SSIM, 1.0); err != nil {
+		return err
+	}
+
+	// 3. Search validation
+	if opt.Search == nil {
+		return fmt.Errorf("profile %q: search policy is required when optimization is enabled", name)
+	}
+	srch := opt.Search
+	if srch.MaxCandidates < 1 || srch.MaxCandidates > 20 {
+		return fmt.Errorf("profile %q: max_candidates %d out of range 1-20", name, srch.MaxCandidates)
+	}
+	if len(srch.QualityValues) == 0 {
+		return fmt.Errorf("profile %q: search quality_values cannot be empty", name)
+	}
+	if len(srch.QualityValues) > srch.MaxCandidates {
+		return fmt.Errorf("profile %q: number of quality_values (%d) exceeds max_candidates (%d)", name, len(srch.QualityValues), srch.MaxCandidates)
+	}
+	for i, val := range srch.QualityValues {
+		if val < 1 || val > 100 {
+			return fmt.Errorf("profile %q: quality value %d out of range 1-100", name, val)
+		}
+		if i > 0 && val <= srch.QualityValues[i-1] {
+			return fmt.Errorf("profile %q: quality_values must be strictly ordered without duplicates (found %d after %d)", name, val, srch.QualityValues[i-1])
+		}
+	}
+
+	// 4. Size validation
+	if opt.Size != nil {
+		sz := opt.Size
+		if sz.PreferredTotalBitrateKbps != nil {
+			pb := sz.PreferredTotalBitrateKbps
+			if pb.Min <= 0 || pb.Max <= 0 {
+				return fmt.Errorf("profile %q: preferred_total_bitrate_kbps values must be positive", name)
+			}
+			if pb.Min > MaxBitrateKbps || pb.Max > MaxBitrateKbps {
+				return fmt.Errorf("profile %q: preferred_total_bitrate_kbps values exceed upper limit (%d kbps)", name, MaxBitrateKbps)
+			}
+			if pb.Max < pb.Min {
+				return fmt.Errorf("profile %q: preferred_total_bitrate_kbps max (%d) must be >= min (%d)", name, pb.Max, pb.Min)
+			}
+		}
+		if sz.SoftMaxTotalBitrateKbps < 0 {
+			return fmt.Errorf("profile %q: soft_max_total_bitrate_kbps must be >= 0", name)
+		}
+		if sz.SoftMaxTotalBitrateKbps > MaxBitrateKbps {
+			return fmt.Errorf("profile %q: soft_max_total_bitrate_kbps (%d) exceeds upper limit (%d kbps)", name, sz.SoftMaxTotalBitrateKbps, MaxBitrateKbps)
+		}
+		if sz.SoftMaxTotalBitrateKbps > 0 && sz.PreferredTotalBitrateKbps != nil {
+			if sz.SoftMaxTotalBitrateKbps < sz.PreferredTotalBitrateKbps.Max {
+				return fmt.Errorf("profile %q: soft_max_total_bitrate_kbps (%d) must be >= preferred_total_bitrate_kbps max (%d)", name, sz.SoftMaxTotalBitrateKbps, sz.PreferredTotalBitrateKbps.Max)
+			}
+		}
+	}
+
 	return nil
 }
 

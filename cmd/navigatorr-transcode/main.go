@@ -3,13 +3,26 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/jakenesler/navigatorr/internal/transcodeworker"
+	"github.com/jakenesler/navigatorr/transcode"
 )
+
+var (
+	Version   string
+	GitCommit string
+)
+
+func init() {
+	if Version != "" || GitCommit != "" {
+		transcodeworker.SetBuildMetadata(Version, GitCommit)
+	}
+}
 
 func main() {
 	var configPath string
@@ -38,7 +51,7 @@ func main() {
 	}
 
 	if subcmd == "" {
-		fmt.Fprintf(os.Stderr, "Usage: %s [--config <path>] <doctor|capabilities|submit|status|cancel|_internal_run> [args...]\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Usage: %s [--config <path>] <doctor|capabilities|submit|status|cancel|_internal_run|benchmark_submit|benchmark_status|benchmark_cancel|_internal_benchmark> [args...]\n", os.Args[0])
 		os.Exit(1)
 	}
 
@@ -65,7 +78,7 @@ func main() {
 		}
 
 	case "capabilities":
-		caps, err := worker.VideoToolboxCapabilities(ctx)
+		caps, err := worker.Capabilities(ctx)
 		if err != nil {
 			printJSON(map[string]any{"error": err.Error(), "capabilities": caps})
 			os.Exit(1)
@@ -96,7 +109,9 @@ func main() {
 			os.Exit(1)
 		}
 		jobID := subcmdArgs[0]
-		if err := worker.InternalRun(ctx, jobID); err != nil {
+		sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+		defer stop()
+		if err := worker.InternalRun(sigCtx, jobID); err != nil {
 			fmt.Fprintf(os.Stderr, "internal_run failed for job %s: %v\n", jobID, err)
 			os.Exit(1)
 		}
@@ -125,6 +140,77 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "benchmark_submit":
+		inputData, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			printJSON(transcode.BenchmarkSubmitResponse{
+				ProtocolVersion: transcode.WorkerProtocolVersion,
+				Error:           fmt.Sprintf("reading stdin: %v", err),
+			})
+			os.Exit(1)
+		}
+		var req transcode.BenchmarkRequest
+		if err := json.Unmarshal(inputData, &req); err != nil {
+			printJSON(transcode.BenchmarkSubmitResponse{
+				ProtocolVersion: transcode.WorkerProtocolVersion,
+				Error:           fmt.Sprintf("parsing benchmark submit JSON: %v", err),
+			})
+			os.Exit(1)
+		}
+
+		resp, err := worker.BenchmarkSubmit(ctx, req, selfExe, configPath)
+		printJSON(resp)
+		if err != nil {
+			os.Exit(1)
+		}
+
+	case "benchmark_status":
+		if len(subcmdArgs) < 1 {
+			printJSON(transcode.BenchmarkStatus{
+				ProtocolVersion: transcode.WorkerProtocolVersion,
+				Error:           "missing job id",
+			})
+			os.Exit(1)
+		}
+		jobID := subcmdArgs[0]
+		st, err := worker.BenchmarkStatus(ctx, jobID)
+		printJSON(st)
+		if err != nil {
+			os.Exit(1)
+		}
+
+	case "benchmark_cancel":
+		if len(subcmdArgs) < 1 {
+			printJSON(transcode.BenchmarkCancelResponse{
+				ProtocolVersion: transcode.WorkerProtocolVersion,
+				Error:           "missing job id",
+			})
+			os.Exit(1)
+		}
+		jobID := subcmdArgs[0]
+		res, err := worker.BenchmarkCancel(ctx, jobID)
+		printJSON(res)
+		if err != nil {
+			os.Exit(1)
+		}
+
+	case "_internal_benchmark":
+		if len(subcmdArgs) < 1 {
+			fmt.Fprintf(os.Stderr, "missing job id for _internal_benchmark\n")
+			os.Exit(1)
+		}
+		jobID := subcmdArgs[0]
+		runToken := ""
+		if len(subcmdArgs) >= 2 {
+			runToken = subcmdArgs[1]
+		}
+		sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+		defer stop()
+		if err := worker.InternalBenchmark(sigCtx, jobID, runToken); err != nil {
+			fmt.Fprintf(os.Stderr, "internal_benchmark failed for job %s: %v\n", jobID, err)
+			os.Exit(1)
+		}
+
 	default:
 		printJSON(map[string]any{"error": fmt.Sprintf("unknown command %q", subcmd)})
 		os.Exit(1)
@@ -139,6 +225,3 @@ func printJSON(v any) {
 func stringsHasPrefix(s, prefix string) bool {
 	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
 }
-
-// Keep flag package imported if needed
-var _ = flag.String

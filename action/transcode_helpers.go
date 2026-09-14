@@ -6,6 +6,7 @@ import (
 
 	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/recipe"
 )
 
 func getPlan(v any) *transcode.Plan {
@@ -101,4 +102,44 @@ func getBool(m map[string]any, key string) bool {
 		return s == "true" || s == "1" || s == "yes"
 	}
 	return false
+}
+
+func getSourceReport(v any) *mediainspect.DetailedReport {
+	if r, ok := v.(*mediainspect.DetailedReport); ok {
+		return r
+	}
+	if v == nil {
+		return nil
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil
+	}
+	var r mediainspect.DetailedReport
+	if json.Unmarshal(b, &r) != nil {
+		return nil
+	}
+	return &r
+}
+
+func getOptimizationPolicy(v any) *recipe.OptimizationPolicy {
+	if p, ok := v.(*recipe.OptimizationPolicy); ok {
+		return p
+	}
+	if v == nil {
+		return nil
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil
+	}
+	var p recipe.OptimizationPolicy
+	if json.Unmarshal(b, &p) != nil {
+		return nil
+	}
+	return &p
+}
+
+func isSourceHDRorDV(rep *mediainspect.DetailedReport) bool {
+	return mediainspect.IsHDRorDolbyVisionReport(rep)
 }
