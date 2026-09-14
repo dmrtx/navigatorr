@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/jakenesler/navigatorr/transcode"
 	"gopkg.in/yaml.v3"
 )
 
@@ -434,6 +435,12 @@ func ValidateOptimizationPolicy(name string, opt *OptimizationPolicy) error {
 	}
 	if srch.AdaptiveInitialQuality != 0 && (srch.AdaptiveInitialQuality < 1 || srch.AdaptiveInitialQuality > 100) {
 		return fmt.Errorf("profile %q: adaptive_initial_quality %d out of range 1-100", name, srch.AdaptiveInitialQuality)
+	}
+	if srch.EncodeConcurrency < 0 || srch.EncodeConcurrency > transcode.MaxBenchmarkConcurrency {
+		return fmt.Errorf("profile %q: encode_concurrency %d out of range 0-%d (0 selects default)", name, srch.EncodeConcurrency, transcode.MaxBenchmarkConcurrency)
+	}
+	if srch.MetricConcurrency < 0 || srch.MetricConcurrency > transcode.MaxBenchmarkConcurrency {
+		return fmt.Errorf("profile %q: metric_concurrency %d out of range 0-%d (0 selects default)", name, srch.MetricConcurrency, transcode.MaxBenchmarkConcurrency)
 	}
 
 	// 4. Size validation

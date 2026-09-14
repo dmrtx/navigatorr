@@ -4,12 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/jakenesler/navigatorr/mediainspect"
@@ -85,105 +81,6 @@ func resolveAdaptivePlanningPolicy(record *BenchmarkRecord) (target, tolerance f
 		return 0, 0, "", fmt.Errorf("validating adaptive planning policy: %w (fail closed)", err)
 	}
 	return policy.TargetScore(), policy.Tolerance(), policy.Metric(), nil
-}
-
-// encodeCandidateSamples encodes all sample windows for a single validated candidate.
-// It shares exact ffmpeg construction, path verification, and evidence semantics with
-// the exhaustive encode loop; job-fatal errors return immediately.
-func encodeCandidateSamples(
-	ctx context.Context,
-	w *Worker,
-	record *BenchmarkRecord,
-	evidence *BenchmarkExecutionEvidence,
-	samplesDir string,
-	vc validatedCandidate,
-	sourceInitialSize int64,
-	sourceInitialModTime time.Time,
-	progressReporter *benchmarkProgressReporter,
-) error {
-	for _, window := range record.Samples {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		progressReporter.StartUnit("encoding_candidates")
-		if err := verifySourceUnchanged(record.Source, sourceInitialSize, sourceInitialModTime); err != nil {
-			return err
-		}
-		refFileName := fmt.Sprintf("ref_sample_%d.mkv", window.Index)
-		refPath := filepath.Join(samplesDir, refFileName)
-		if _, err := os.Stat(refPath); err != nil {
-			return fmt.Errorf("reference sample %d not found at %s: %w", window.Index, refPath, err)
-		}
-		candFileName := fmt.Sprintf("%s_sample_%d.mkv", vc.fileKey, window.Index)
-		candPath := filepath.Join(samplesDir, candFileName)
-		if err := verifyChildPath(samplesDir, candPath); err != nil {
-			return fmt.Errorf("invalid candidate sample path: %w", err)
-		}
-		if err := prepareOutputFile(candPath); err != nil {
-			return err
-		}
-		candArgs, err := BuildCandidateEncodeArgs(refPath, candPath, vc.plan)
-		if err != nil {
-			return fmt.Errorf("building candidate %q args: %w", vc.candidate.ID, err)
-		}
-		start := time.Now()
-		cmd := exec.CommandContext(ctx, w.ffmpegPath, candArgs...)
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		cmd.Cancel = func() error {
-			if cmd.Process != nil && cmd.Process.Pid > 0 {
-				return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			}
-			return nil
-		}
-		cmd.WaitDelay = 2 * time.Second
-		stderrBuf := newBoundedBuffer(16 * 1024)
-		cmd.Stderr = stderrBuf
-		cmd.Stdout = nil
-		if err := cmd.Run(); err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			errStr := fmt.Sprintf("encoding candidate %q for sample %d failed: %v: %s",
-				vc.candidate.ID, window.Index, err, boundedStderr(stderrBuf, 1024))
-			evidence.CandidateSamples = append(evidence.CandidateSamples, BenchmarkCandidateSampleResult{
-				CandidateID:  vc.candidate.ID,
-				SampleIndex:  window.Index,
-				File:         filepath.Base(candPath),
-				Quality:      vc.candidate.Quality,
-				VideoProfile: vc.profile,
-				PixelFormat:  vc.pixelFormat,
-				Error:        errStr,
-			})
-			return errors.New(errStr)
-		}
-		elapsed := time.Since(start).Seconds()
-		fi, err := os.Stat(candPath)
-		if err != nil || fi.Size() == 0 {
-			errStr := fmt.Sprintf("candidate %q for sample %d produced empty or missing file at %s", vc.candidate.ID, window.Index, candPath)
-			evidence.CandidateSamples = append(evidence.CandidateSamples, BenchmarkCandidateSampleResult{
-				CandidateID:  vc.candidate.ID,
-				SampleIndex:  window.Index,
-				File:         filepath.Base(candPath),
-				Quality:      vc.candidate.Quality,
-				VideoProfile: vc.profile,
-				PixelFormat:  vc.pixelFormat,
-				Error:        errStr,
-			})
-			return errors.New(errStr)
-		}
-		evidence.CandidateSamples = append(evidence.CandidateSamples, BenchmarkCandidateSampleResult{
-			CandidateID:       vc.candidate.ID,
-			SampleIndex:       window.Index,
-			File:              filepath.Base(candPath),
-			SizeBytes:         fi.Size(),
-			EncodeDurationSec: elapsed,
-			Quality:           vc.candidate.Quality,
-			VideoProfile:      vc.profile,
-			PixelFormat:       vc.pixelFormat,
-		})
-		progressReporter.CompleteUnit()
-	}
-	return nil
 }
 
 // adaptiveObservationForCandidate builds the planner observation for one evaluated
@@ -323,11 +220,11 @@ func (r *ProductionBenchmarkRunner) runAdaptiveCandidates(
 		}
 		vcPos := order[sortedPos].pos
 		vc := validatedCandidates[vcPos]
-		if err := encodeCandidateSamples(ctx, w, record, evidence, samplesDir, vc, sourceInitialSize, sourceInitialModTime, progressReporter); err != nil {
+		// One probe candidate at a time: samples pipeline within the probe while
+		// planner decisions stay strictly sequential, so adaptive search still
+		// avoids unnecessary candidates.
+		if err := r.runPipelinedEncodeMetrics(ctx, w, record, evidence, samplesDir, []validatedCandidate{vc}, sourceInitialSize, sourceInitialModTime, progressReporter); err != nil {
 			return err
-		}
-		if err := r.runMetrics(ctx, w, record, evidence, samplesDir, []validatedCandidate{vc}, sourceInitialSize, sourceInitialModTime, progressReporter); err != nil {
-			return fmt.Errorf("metrics calculation failed: %w", err)
 		}
 		evaluatedCount++
 		obs := adaptiveObservationForCandidate(sortedPos, vc, planningPolicy, evidence, colorInfo)
