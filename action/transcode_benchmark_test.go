@@ -1178,6 +1178,7 @@ func TestTranscodeMedia_Optimized_CancellationAfterBenchmarkDone_OnlyCancelsFull
 						Score:            97.0,
 						TargetReached:    true,
 						MinimumMet:       true,
+						SavingsPercent:   40.0,
 					},
 					DecisionReason: "optimal",
 				},
