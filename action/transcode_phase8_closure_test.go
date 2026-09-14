@@ -162,6 +162,7 @@ func TestPhase8_PersistedOutputsLeakNoWorkerInternals(t *testing.T) {
 					Score:            96.8,
 					TargetReached:    true,
 					MinimumMet:       true,
+					SavingsPercent:   40.0,
 				},
 				DecisionReason: "candidate cand_q70 reached target",
 			},
