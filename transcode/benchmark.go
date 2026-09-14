@@ -28,6 +28,12 @@ const (
 	MaxBenchmarkSamples = 32
 	// MaxBenchmarkIDLength bounds the length of benchmark job and candidate IDs.
 	MaxBenchmarkIDLength = 128
+	// DefaultEncodeConcurrency bounds simultaneous candidate sample encodes.
+	DefaultEncodeConcurrency = 2
+	// DefaultMetricConcurrency bounds simultaneous metric (VMAF/SSIM) evaluations.
+	DefaultMetricConcurrency = 2
+	// MaxBenchmarkConcurrency caps explicit encode/metric concurrency settings.
+	MaxBenchmarkConcurrency = 4
 )
 
 // ValidateBenchmarkJobID validates that a job ID belongs to the benchmark namespace,
@@ -96,6 +102,15 @@ type BenchmarkQualityConfig struct {
 type BenchmarkAdaptiveConfig struct {
 	Mode           string `json:"mode,omitempty"`
 	InitialQuality int    `json:"initial_quality,omitempty"`
+}
+
+// BenchmarkConcurrencyConfig bounds concurrent benchmark execution.
+// A nil Concurrency field selects conservative defaults (2 encoders, 2 metrics).
+// Zero values inside select the corresponding default; explicit values are
+// bounded to MaxBenchmarkConcurrency to avoid VideoToolbox/CPU contention.
+type BenchmarkConcurrencyConfig struct {
+	EncodeConcurrency int `json:"encode_concurrency,omitempty"`
+	MetricConcurrency int `json:"metric_concurrency,omitempty"`
 }
 
 // BenchmarkWinner records the selected winning candidate and its concrete parameters.
@@ -170,19 +185,20 @@ type BenchmarkSampleWindow struct {
 // It is strictly versioned and does NOT accept candidate output paths or replace_original parameters,
 // making original media mutation completely impossible.
 type BenchmarkRequest struct {
-	ProtocolVersion           int                      `json:"protocol_version"`
-	ID                        string                   `json:"id"`
-	SourcePath                string                   `json:"source_path"`
-	SourceDuration            float64                  `json:"source_duration,omitempty"`
-	Metric                    string                   `json:"metric"` // "vmaf", "ssim", "both"
-	Samples                   []BenchmarkSampleWindow  `json:"samples"`
-	Candidates                []BenchmarkCandidate     `json:"candidates"`
-	Quality                   *BenchmarkQualityConfig  `json:"quality,omitempty"`
-	Adaptive                  *BenchmarkAdaptiveConfig `json:"adaptive,omitempty"`
-	FallbackAudioBitrateBps   int64                    `json:"fallback_audio_bitrate_bps,omitempty"`
-	FallbackSubtitleSizeBytes int64                    `json:"fallback_subtitle_size_bytes,omitempty"`
-	DeclaredVideoBitrateBps   int64                    `json:"declared_video_bitrate_bps,omitempty"`
-	AttachmentBytes           int64                    `json:"attachment_bytes,omitempty"`
+	ProtocolVersion           int                         `json:"protocol_version"`
+	ID                        string                      `json:"id"`
+	SourcePath                string                      `json:"source_path"`
+	SourceDuration            float64                     `json:"source_duration,omitempty"`
+	Metric                    string                      `json:"metric"` // "vmaf", "ssim", "both"
+	Samples                   []BenchmarkSampleWindow     `json:"samples"`
+	Candidates                []BenchmarkCandidate        `json:"candidates"`
+	Quality                   *BenchmarkQualityConfig     `json:"quality,omitempty"`
+	Adaptive                  *BenchmarkAdaptiveConfig    `json:"adaptive,omitempty"`
+	Concurrency               *BenchmarkConcurrencyConfig `json:"concurrency,omitempty"`
+	FallbackAudioBitrateBps   int64                       `json:"fallback_audio_bitrate_bps,omitempty"`
+	FallbackSubtitleSizeBytes int64                       `json:"fallback_subtitle_size_bytes,omitempty"`
+	DeclaredVideoBitrateBps   int64                       `json:"declared_video_bitrate_bps,omitempty"`
+	AttachmentBytes           int64                       `json:"attachment_bytes,omitempty"`
 }
 
 // BenchmarkJob is the receipt returned upon successful submission of a benchmark request.
@@ -331,6 +347,23 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 		}
 		if req.Adaptive.InitialQuality == 0 {
 			req.Adaptive.InitialQuality = optimization.DefaultAdaptiveInitialQuality
+		}
+	}
+
+	if req.Concurrency != nil {
+		if req.Concurrency.EncodeConcurrency < 0 || req.Concurrency.EncodeConcurrency > MaxBenchmarkConcurrency {
+			return fmt.Errorf("invalid concurrency encode_concurrency %d: must be in 0..%d (0 selects default %d)",
+				req.Concurrency.EncodeConcurrency, MaxBenchmarkConcurrency, DefaultEncodeConcurrency)
+		}
+		if req.Concurrency.MetricConcurrency < 0 || req.Concurrency.MetricConcurrency > MaxBenchmarkConcurrency {
+			return fmt.Errorf("invalid concurrency metric_concurrency %d: must be in 0..%d (0 selects default %d)",
+				req.Concurrency.MetricConcurrency, MaxBenchmarkConcurrency, DefaultMetricConcurrency)
+		}
+		if req.Concurrency.EncodeConcurrency == 0 {
+			req.Concurrency.EncodeConcurrency = DefaultEncodeConcurrency
+		}
+		if req.Concurrency.MetricConcurrency == 0 {
+			req.Concurrency.MetricConcurrency = DefaultMetricConcurrency
 		}
 	}
 
