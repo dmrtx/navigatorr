@@ -183,6 +183,102 @@ The built-in profiles use:
 
 Post-transcode validation checks duration, video codec, audio stream count/codecs/languages/channels, subtitle count and expected copy/conversion codecs, subtitle languages and `forced`/`default` dispositions, attachments, and chapters. A discrepancy requires rejection or an explicit user decision; the original is not deleted or overwritten.
 
+## Benchmark-driven optimization (recipes v2)
+
+Profiles without `optimization` follow the legacy flow with no observable change. A profile with `optimization.enabled: true` (schema_version 2) instead probes a small set of encoder configurations over deterministic source samples, scores them objectively, and transcodes the full file only with the concrete winning parameters.
+
+```text
+preflight + InspectDetailed
+→ capability handshake
+→ resolve optimization policy
+→ SamplePlanner (deterministic windows)
+→ remote sequential benchmark
+→ QualityEvaluator (VMAF and/or SSIM)
+→ OutputEstimator
+→ CandidateSelector (explainable decision)
+→ benchmark-only: finish with report
+→ optimization enabled: materialize immutable winning plan + PlanDigest
+→ normal full transcode → existing validation → candidate-only acceptance
+```
+
+### Actions
+
+- `benchmark_transcode` is candidate-only: it shares preflight and models with `transcode_media`, runs the benchmark, persists the report, and never executes the full file nor creates a permanent candidate.
+- `transcode_media` with an optimized profile adds `submit_benchmark` / `wait_benchmark` steps before the existing `submit_transcode` / `wait_transcode` / `validate_result` / `accept_result` steps. It uses the winner's concrete knobs (quality, profile, pixel format, bit depth) for the full transcode and refuses to continue when there is no valid winner.
+
+### Optimization policy reference
+
+```yaml
+optimization:
+  enabled: true
+  sampling:
+    strategy: distributed        # distributed | uniform | relative_positions
+    sample_count: 3              # 1-20, must match len(positions)
+    sample_seconds: 20           # (0, 120]
+    positions: [0.2, 0.5, 0.8]   # strictly increasing, in (0, 1)
+  quality:
+    preferred_metric: vmaf       # vmaf | ssim
+    vmaf: {target: 96.0, minimum: 95.0, marginal_tolerance: 0.5}
+    ssim: {target: 0.99, minimum: 0.98, marginal_tolerance: 0.005}
+  search:
+    max_candidates: 5            # 1-20, >= len(quality_values)
+    quality_values: [55, 60, 65, 70, 75]  # strictly increasing -q:v list
+  size:
+    preferred_total_bitrate_kbps: {min: 2100, max: 3650}
+    soft_max_total_bitrate_kbps: 4250      # soft guidance, not a hard target
+```
+
+Omitted blocks fall back to the defaults above; an explicitly requested metric block must carry its own thresholds. Quality always wins over hitting a size number: size guidance is soft.
+
+A complete, loader-validated example lives in `docs/examples/transcode-recipes-optimization.yaml`. The embedded builtin bundle stays schema_version 1; optimization is adopted via `file`/`https`/`github` sources, never by editing worker code.
+
+### Sampling
+
+Positions mark the desired center of each sample (`start = position * duration - sample_seconds / 2`), clamped to the valid range with overlap avoided when duration allows. Short videos use fewer samples or the whole segment without exceeding duration. Reference and candidate stay frame-aligned (lossless FFV1 reference, PTS normalized) so VMAF/SSIM compare identical frames. Temporary outputs live only under `state_dir/<job-id>/samples/` and only known job files are ever cleaned. For quick debugging, `sample_count: 1` with `sample_seconds: 60` covers the simple single-sample case.
+
+### Metrics
+
+Every candidate is scored against the same original sample. The aggregate must clear the configured minimum and no single sample may fall below the per-sample gate. VMAF (0-100) and SSIM (0-1) have independent thresholds and marginal tolerances; scores are never invented and thresholds are never converted between metrics. If the preferred metric is unavailable but the other has configured thresholds, the other may decide; with no valid metric the benchmark reports without an automatic winner.
+
+### Selection
+
+Invalid, incomplete, or below-minimum candidates are rejected. Among valid candidates the smallest that reaches target wins; if none reaches target but some clear minimum, the highest quality wins with size as tie-break; tiny gains above target do not justify large bitrate increases (metric-specific marginal tolerance). Otherwise there is no automatic winner, and `transcode_media` stops before any full submit. Every outcome carries stable reason codes plus a human-readable explanation, and the full candidate list with exact parameters is persisted in order.
+
+### Bit depth
+
+- 8-bit source: only 8-bit candidates (`main` + `yuv420p`).
+- 10-bit source: only 10-bit candidates (`main10` + `p010le`).
+- There is no "convert 8-bit to 10-bit" optimization; existing Main10 is never marketed as an optimization.
+- If the worker cannot preserve the required depth, the job returns review or an explicit failure, never a silent downgrade; the final candidate is re-validated for bit depth.
+- VMAF on 10-bit sources fails closed unless the worker reports verified 10-bit VMAF capability; SSIM handles 10-bit natively. Prefer `ssim` for 10-bit SDR policies.
+
+### HDR and Dolby Vision
+
+Automatic selection supports SDR only. HDR/Dolby Vision sources (transfer, primaries, color space, tags, or DOVI side data) are preserved in the report but fail closed: review or an explicitly informational benchmark with no automatic winner. No silent SDR thresholds, no implicit tone mapping.
+
+### Speed priority
+
+There is no separate "fast" benchmark mode. Speed is expressed per profile through the typed VideoToolbox switches documented in `docs/VIDEOTOOLBOX_PROFILES.md` (`prioritize_speed`, `spatial_aq`, `realtime` with pointer-boolean semantics: omitted means "emit nothing", explicit values are required capabilities and fail closed when unsupported).
+
+### Capabilities
+
+Before any benchmark the coordinator fetches versioned `WorkerCapabilities` (protocol version, Navigatorr/worker build, FFmpeg version, encoders, `libvmaf`/`ssim` filters, per-encoder profiles/pixel formats/options, structured probe errors, deterministic `CapabilityFingerprint`). Missing capabilities fail the job with a classifiable error before any encode starts; an old worker safely rejects the explicit benchmark protocol command.
+
+### Troubleshooting
+
+| Symptom | Meaning | Action |
+|---|---|---|
+| `worker_busy` / `waiting_for_slot` | All worker slots occupied | Wait; retries use bounded backoff and do not burn the transient budget |
+| No winner, reason `no_candidate_met_minimum_quality` | Nothing cleared the quality floor | Loosen thresholds deliberately, or keep the original; the engine will not guess |
+| HDR/DV review | Fail-closed on HDR metadata | Expected; do not force SDR thresholds onto HDR |
+| `encoder_capability_unsupported` | Recipe asks for an option the worker FFmpeg lacks | Change the recipe (typed fields only), bump `bundle_version`, `recipe_reload` |
+| `replace_original: true` rejected | Candidate-only invariant | Keep `false`; originals are hashed before/after and never overwritten |
+| Benchmark retry backed off | `benchmark_retry_not_before` set | Automatic; resume after the reported time |
+
+### Validation status
+
+Automated suites cover the full orchestration matrix with stubbed executors and fixture probes (8-bit/10-bit SDR, HDR/DV fail-closed, vmaf/ssim/both, no-winner, busy/retry/backoff, cancellation on both sides of the benchmark boundary, reload/resume, deterministic digests, candidate-only acceptance, source immutability, no secret/path leakage). Live Apple Silicon evidence (real capability handshake, real inspection, real VMAF/SSIM scoring, real recipe loading) versus blocked items (hardware VideoToolbox encodes unavailable in the validation sandbox) is recorded per item in `docs/TRANSCODE_OPTIMIZATION_IMPLEMENTATION_PLAN.md` phase 8.
+
 ## Rollout
 
 A safe rollout is:
