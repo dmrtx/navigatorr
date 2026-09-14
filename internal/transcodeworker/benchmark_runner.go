@@ -84,6 +84,83 @@ type BenchmarkExecutionEvidence struct {
 	Decision          *transcode.BenchmarkDecision        `json:"decision,omitempty"`
 }
 
+type benchmarkProgressReporter struct {
+	w              *Worker
+	record         *BenchmarkRecord
+	totalUnits     int
+	completedUnits int
+	currentPhase   string
+	lastProgress   float64
+}
+
+func newBenchmarkProgressReporter(w *Worker, record *BenchmarkRecord, totalUnits int) *benchmarkProgressReporter {
+	return &benchmarkProgressReporter{
+		w:          w,
+		record:     record,
+		totalUnits: totalUnits,
+	}
+}
+
+func (p *benchmarkProgressReporter) StartUnit(phase string) {
+	if p == nil {
+		return
+	}
+	p.currentPhase = phase
+	now := time.Now().UTC()
+	if p.record != nil {
+		p.record.Phase = phase
+		p.record.HeartbeatAt = now
+	}
+	if p.w != nil && p.record != nil && p.record.ID != "" && p.record.RunToken != "" {
+		_ = p.w.UpdateBenchmarkProgress(p.record.ID, p.record.RunToken, p.lastProgress, phase)
+	}
+}
+
+func (p *benchmarkProgressReporter) CompleteUnit() {
+	if p == nil {
+		return
+	}
+	p.completedUnits++
+	pct := 0.0
+	if p.totalUnits > 0 {
+		pct = (float64(p.completedUnits) / float64(p.totalUnits)) * 100.0
+	}
+	if pct >= 100.0 {
+		pct = 99.0
+	}
+	pct = math.Round(pct*10) / 10
+	if pct >= 100.0 {
+		pct = 99.0
+	}
+	if pct < p.lastProgress {
+		pct = p.lastProgress
+	}
+	p.lastProgress = pct
+	now := time.Now().UTC()
+	if p.record != nil {
+		p.record.Progress = pct
+		p.record.HeartbeatAt = now
+	}
+	if p.w != nil && p.record != nil && p.record.ID != "" && p.record.RunToken != "" {
+		_ = p.w.UpdateBenchmarkProgress(p.record.ID, p.record.RunToken, pct, p.currentPhase)
+	}
+}
+
+func (p *benchmarkProgressReporter) SetPhase(phase string) {
+	if p == nil {
+		return
+	}
+	p.currentPhase = phase
+	now := time.Now().UTC()
+	if p.record != nil {
+		p.record.Phase = phase
+		p.record.HeartbeatAt = now
+	}
+	if p.w != nil && p.record != nil && p.record.ID != "" && p.record.RunToken != "" {
+		_ = p.w.UpdateBenchmarkProgress(p.record.ID, p.record.RunToken, p.lastProgress, phase)
+	}
+}
+
 type validatedCandidate struct {
 	index       int
 	candidate   transcode.BenchmarkCandidate
@@ -260,11 +337,36 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 	}
 	record.Evidence = evidence
 
+	// Resolve total work units for deterministic progress
+	normMetric := strings.ToLower(strings.TrimSpace(record.Metric))
+	if normMetric == "" {
+		normMetric = "vmaf"
+	}
+	passesPerSample := 0
+	if normMetric == "vmaf" || normMetric == "both" || normMetric == "vmaf+ssim" {
+		passesPerSample++
+	}
+	if normMetric == "ssim" || normMetric == "both" || normMetric == "vmaf+ssim" {
+		passesPerSample++
+	}
+
+	metricUnits := 0
+	if r.metricsHook != nil {
+		metricUnits = 1
+	} else {
+		metricUnits = len(validatedCandidates) * len(record.Samples) * passesPerSample
+	}
+
+	totalUnits := len(record.Samples) + (len(validatedCandidates) * len(record.Samples)) + metricUnits
+	progressReporter := newBenchmarkProgressReporter(w, record, totalUnits)
+
 	// 4. Extract reference samples sequentially
 	for _, window := range record.Samples {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+
+		progressReporter.StartUnit("extracting_samples")
 
 		if err := verifySourceUnchanged(record.Source, sourceInitialSize, sourceInitialModTime); err != nil {
 			return err
@@ -319,6 +421,8 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 			File:            filepath.Base(refPath),
 			SizeBytes:       fi.Size(),
 		})
+
+		progressReporter.CompleteUnit()
 	}
 
 	// 5. Encode candidate samples sequentially
@@ -327,6 +431,8 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+
+			progressReporter.StartUnit("encoding_candidates")
 
 			if err := verifySourceUnchanged(record.Source, sourceInitialSize, sourceInitialModTime); err != nil {
 				return err
@@ -411,21 +517,26 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 				VideoProfile:      vc.profile,
 				PixelFormat:       vc.pixelFormat,
 			})
+
+			progressReporter.CompleteUnit()
 		}
 	}
 
 	// 6. Phase 5 metrics calculation before scratch cleanup
 	if r.metricsHook != nil {
+		progressReporter.StartUnit("evaluating_metrics")
 		if err := r.metricsHook(ctx, w, record, evidence); err != nil {
 			return fmt.Errorf("metrics calculation failed: %w", err)
 		}
+		progressReporter.CompleteUnit()
 	} else {
-		if err := r.runMetrics(ctx, w, record, evidence, samplesDir, validatedCandidates, sourceInitialSize, sourceInitialModTime); err != nil {
+		if err := r.runMetrics(ctx, w, record, evidence, samplesDir, validatedCandidates, sourceInitialSize, sourceInitialModTime, progressReporter); err != nil {
 			return fmt.Errorf("metrics calculation failed: %w", err)
 		}
 	}
 
 	// 7. Phase 6 candidate evaluation and selection before scratch cleanup
+	progressReporter.SetPhase("selecting_candidate")
 	if r.selectionHook != nil {
 		if err := r.selectionHook(ctx, w, record, evidence); err != nil {
 			return fmt.Errorf("candidate selection failed: %w", err)
@@ -1064,6 +1175,7 @@ func (r *ProductionBenchmarkRunner) runMetrics(
 	validatedCandidates []validatedCandidate,
 	sourceInitialSize int64,
 	sourceInitialModTime time.Time,
+	progressReporter *benchmarkProgressReporter,
 ) error {
 	normMetric := strings.ToLower(strings.TrimSpace(record.Metric))
 	if normMetric == "" {
@@ -1172,6 +1284,10 @@ func (r *ProductionBenchmarkRunner) runMetrics(
 					return fmt.Errorf("preparing vmaf log path %s: %w", logPath, err)
 				}
 
+				if progressReporter != nil {
+					progressReporter.StartUnit("evaluating_metrics")
+				}
+
 				args := BuildVMAFArgs(candPath, refPath, logPath)
 				cmd := exec.CommandContext(ctx, w.ffmpegPath, args...)
 				cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -1214,6 +1330,9 @@ func (r *ProductionBenchmarkRunner) runMetrics(
 								Score:       score,
 								Valid:       true,
 							})
+							if progressReporter != nil {
+								progressReporter.CompleteUnit()
+							}
 						}
 					}
 				}
@@ -1250,6 +1369,10 @@ func (r *ProductionBenchmarkRunner) runMetrics(
 				}
 				if err := prepareOutputFile(statsPath); err != nil {
 					return fmt.Errorf("preparing ssim stats path %s: %w", statsPath, err)
+				}
+
+				if progressReporter != nil {
+					progressReporter.StartUnit("evaluating_metrics")
 				}
 
 				args := BuildSSIMArgs(candPath, refPath, statsPath)
@@ -1297,6 +1420,9 @@ func (r *ProductionBenchmarkRunner) runMetrics(
 							Score:       score,
 							Valid:       true,
 						})
+						if progressReporter != nil {
+							progressReporter.CompleteUnit()
+						}
 					}
 				}
 
