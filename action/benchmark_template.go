@@ -160,15 +160,27 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 
 	switch st.Status {
 	case transcode.StatusRunning, transcode.StatusQueued:
+		reason := fmt.Sprintf("Benchmarking encoder configurations (%s, progress: %.1f%%)", st.Status, st.Progress)
+		if st.Phase != "" {
+			reason = fmt.Sprintf("Benchmarking encoder configurations (%s, phase: %s, progress: %.1f%%)", st.Status, st.Phase, st.Progress)
+		}
+		outputs := map[string]any{
+			"benchmark_job_id": benchJobID,
+			"benchmark_status": st.Status,
+			"progress":         st.Progress,
+		}
+		if st.Phase != "" {
+			outputs["phase"] = st.Phase
+		}
+		if !st.HeartbeatAt.IsZero() {
+			outputs["heartbeat"] = st.HeartbeatAt
+			outputs["heartbeat_at"] = st.HeartbeatAt
+		}
 		return StepResult{
 			Status:           StepWaitingExternal,
 			WaitingCondition: "benchmark_complete",
-			WaitingReason:    fmt.Sprintf("Benchmarking encoder configurations (%s, progress: %.1f%%)", st.Status, st.Progress),
-			Outputs: map[string]any{
-				"benchmark_job_id": benchJobID,
-				"benchmark_status": st.Status,
-				"progress":         st.Progress,
-			},
+			WaitingReason:    reason,
+			Outputs:          outputs,
 		}, nil
 	case transcode.StatusFailed:
 		msg := st.Error
@@ -305,10 +317,27 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 			Outputs: outputs,
 		}, nil
 	default:
+		reason := fmt.Sprintf("Benchmark in progress (%s)", st.Status)
+		if st.Phase != "" {
+			reason = fmt.Sprintf("Benchmark in progress (%s, phase: %s)", st.Status, st.Phase)
+		}
+		outputs := map[string]any{
+			"benchmark_job_id": benchJobID,
+			"benchmark_status": st.Status,
+			"progress":         st.Progress,
+		}
+		if st.Phase != "" {
+			outputs["phase"] = st.Phase
+		}
+		if !st.HeartbeatAt.IsZero() {
+			outputs["heartbeat"] = st.HeartbeatAt
+			outputs["heartbeat_at"] = st.HeartbeatAt
+		}
 		return StepResult{
 			Status:           StepWaitingExternal,
 			WaitingCondition: "benchmark_complete",
-			WaitingReason:    fmt.Sprintf("Benchmark in progress (%s)", st.Status),
+			WaitingReason:    reason,
+			Outputs:          outputs,
 		}, nil
 	}
 }
