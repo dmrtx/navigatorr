@@ -222,21 +222,21 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("resolving recipe profile %q: %v", profile, err)}, nil
 	}
 
+	metricInput := strings.TrimSpace(getString(ec.Inputs, "metric"))
 	optEnabled := recipeProfile.Optimization != nil && recipeProfile.Optimization.Enabled
 	var optPolicy *recipe.OptimizationPolicy
-	if ec.ActionName == "benchmark_transcode" {
-		if recipeProfile.Optimization != nil && !recipeProfile.Optimization.Enabled {
+	if recipeProfile.Optimization != nil && !recipeProfile.Optimization.Enabled {
+		if ec.ActionName == "benchmark_transcode" {
 			return StepResult{Status: StepFailed, Error: fmt.Sprintf("profile %q has optimization disabled (fail closed)", profile)}, nil
 		}
-		if recipeProfile.Optimization != nil && recipeProfile.Optimization.Enabled {
-			optPolicy = recipeProfile.Optimization
-		} else {
-			optPolicy = &recipe.OptimizationPolicy{Enabled: true}
-			recipe.NormalizeOptimizationPolicy(optPolicy)
-		}
-		optEnabled = true
-	} else if optEnabled {
+		optEnabled = false
+	} else if recipeProfile.Optimization != nil && recipeProfile.Optimization.Enabled {
 		optPolicy = recipeProfile.Optimization
+		optEnabled = true
+	} else if ec.ActionName == "benchmark_transcode" || metricInput != "" {
+		optPolicy = &recipe.OptimizationPolicy{Enabled: true}
+		recipe.NormalizeOptimizationPolicy(optPolicy)
+		optEnabled = true
 	}
 
 	if optEnabled && optPolicy != nil {
@@ -281,7 +281,7 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		"plan_digest":       plan.PlanDigest,
 		"applied_fallbacks": plan.AppliedFallbacks,
 	}
-	if optEnabled {
+	if getBool(ec.State, "optimization_enabled") {
 		outputs["optimization_enabled"] = true
 	}
 	if autoResult != nil {

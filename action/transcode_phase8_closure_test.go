@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/recipe"
 )
@@ -261,5 +262,257 @@ func TestPhase8_BenchmarkAPITypesExposeNoSecrets(t *testing.T) {
 					rt.Name(), f.Name, f.Tag.Get("json"))
 			}
 		}
+	}
+}
+
+const liveValidation8BitProbeJSON = `{
+  "streams": [
+    {"index": 0, "codec_type": "video", "codec_name": "h264", "profile": "High", "pix_fmt": "yuv420p", "width": 1920, "height": 1080, "bit_rate": "5000000"},
+    {"index": 1, "codec_type": "audio", "codec_name": "aac", "channels": 2, "tags": {"language": "jpn"}}
+  ],
+  "format": {"format_name": "matroska", "duration": "1200.0", "size": "750000000", "bit_rate": "5000000"},
+  "chapters": []
+}`
+
+// TestPhase8_LiveValidationReproduction_AnimeHevcQualitySSIMWinner tests the exact
+// live reproduction from deployed 5b1be607: running transcode_media with profile
+// anime-hevc-quality and metric ssim. Preflight must wire optimization_enabled=true,
+// BenchmarkSubmit must be called exactly once, the benchmark steps must not be skipped,
+// the winner must rewrite quality (55), profile (main), pixfmt (yuv420p), and bit depth (8),
+// the winning PlanDigest must differ from the static base digest, and full transcode Submit
+// must receive the winning plan with the new PlanDigest.
+func TestPhase8_LiveValidationReproduction_AnimeHevcQualitySSIMWinner(t *testing.T) {
+	var fullTranscodeReq transcode.Request
+	mock := &mockTranscodeExecutor{
+		benchmarkStatusFunc: func(ctx context.Context, jobID string) (transcode.BenchmarkStatus, error) {
+			return transcode.BenchmarkStatus{
+				ProtocolVersion: transcode.WorkerProtocolVersion,
+				ID:              jobID,
+				Status:          transcode.StatusCompleted,
+				Progress:        100,
+				Decision: &transcode.BenchmarkDecision{
+					Winner: &transcode.BenchmarkWinner{
+						CandidateID:         "cand_q55",
+						CandidateIndex:      0,
+						Quality:             55,
+						VideoProfile:        "main",
+						PixelFormat:         "yuv420p",
+						ExpectedBitDepth:    8,
+						MetricType:          "ssim",
+						Score:               0.9961,
+						TargetReached:       true,
+						MinimumMet:          true,
+						EstimatedVideoBytes: 280000000,
+						EstimatedTotalBytes: 320000000,
+						EstimatedTotalMB:    320.0,
+						SavingsPercent:      42.0,
+					},
+					DecisionReason: "winner cand_q55 optimal ssim 0.9961",
+				},
+			}, nil
+		},
+		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
+			fullTranscodeReq = req
+			_ = os.MkdirAll(filepath.Dir(req.CandidatePath), 0755)
+			_ = os.WriteFile(req.CandidatePath, []byte("transcoded-output-anime-hevc-quality"), 0644)
+			return transcode.Job{ID: req.ID}, nil
+		},
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{
+				ID:       jobID,
+				Status:   transcode.StatusCompleted,
+				Progress: 100,
+			}, nil
+		},
+	}
+
+	// Setup with 8-bit probe without subtitles matching the live M1 fixture, so
+	// anime-hevc-quality yields the exact live base digest sha256:5f379070...
+	engine, _, mediaFile, _ := setupBenchmarkTestEnv(t, mock, liveValidation8BitProbeJSON, nil)
+
+	// Verify the static base plan digest for anime-hevc-quality before running.
+	basePlan, err := engine.deps.Config.Transcode.ResolvePlan("anime-hevc-quality")
+	if err != nil {
+		t.Fatalf("resolving base plan for anime-hevc-quality: %v", err)
+	}
+	const expectedStaticBaseDigest = "sha256:5f3790702c4416380cb31fe56b128aa646aa5bd3fd577ca4b3435165e1a34bf6"
+	if basePlan.PlanDigest != expectedStaticBaseDigest {
+		t.Fatalf("static base plan digest = %q, want %q", basePlan.PlanDigest, expectedStaticBaseDigest)
+	}
+
+	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
+		"path":             mediaFile,
+		"profile":          "anime-hevc-quality",
+		"metric":           "ssim",
+		"replace_original": false,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Status != StatusCompleted {
+		t.Fatalf("expected StatusCompleted, got %s (error: %s)", res.Status, res.Error)
+	}
+
+	// 1. Preflight outputs must include optimization_enabled=true
+	if !getBool(res.Outputs, "optimization_enabled") {
+		t.Errorf("expected outputs to include optimization_enabled=true")
+	}
+
+	// 2. Assert transcode_media does not skip benchmark; BenchmarkSubmit called exactly once
+	if atomic.LoadInt32(&mock.benchmarkSubmitCalls) != 1 {
+		t.Errorf("expected 1 benchmark submit call, got %d", atomic.LoadInt32(&mock.benchmarkSubmitCalls))
+	}
+	if atomic.LoadInt32(&mock.submitCalls) != 1 {
+		t.Errorf("expected 1 full transcode submit call, got %d", atomic.LoadInt32(&mock.submitCalls))
+	}
+
+	// 3. Winner rewrites quality, profile, pixfmt, and bit depth
+	if fullTranscodeReq.Plan == nil {
+		t.Fatalf("submitted transcode request has nil Plan")
+	}
+	if fullTranscodeReq.Plan.Quality != 55 {
+		t.Errorf("submitted plan quality = %d, want winner's quality 55 (was base 75)", fullTranscodeReq.Plan.Quality)
+	}
+	if fullTranscodeReq.Plan.VideoProfile != "main" {
+		t.Errorf("submitted plan video profile = %q, want %q", fullTranscodeReq.Plan.VideoProfile, "main")
+	}
+	if fullTranscodeReq.Plan.PixelFormat != "yuv420p" {
+		t.Errorf("submitted plan pixel format = %q, want %q", fullTranscodeReq.Plan.PixelFormat, "yuv420p")
+	}
+	if fullTranscodeReq.Plan.ExpectedBitDepth != 8 {
+		t.Errorf("submitted plan expected bit depth = %d, want 8", fullTranscodeReq.Plan.ExpectedBitDepth)
+	}
+
+	// 4. Concrete PlanDigest differs from static base and full Submit receives winner plan
+	const expectedWinnerDigest = "sha256:bc5d40e661f50e1398d41674c96afee7e3f42027cf867dba21f35c7398803adf"
+	if fullTranscodeReq.Plan.PlanDigest == expectedStaticBaseDigest {
+		t.Errorf("submitted PlanDigest unexpectedly matches static base digest %s; static fallback occurred!", expectedStaticBaseDigest)
+	}
+	if fullTranscodeReq.Plan.PlanDigest != expectedWinnerDigest {
+		t.Errorf("submitted PlanDigest = %s, want winner digest %s", fullTranscodeReq.Plan.PlanDigest, expectedWinnerDigest)
+	}
+	if getString(res.Outputs, "plan_digest") != expectedWinnerDigest {
+		t.Errorf("action output plan_digest %q does not match concrete winning plan digest %q",
+			getString(res.Outputs, "plan_digest"), expectedWinnerDigest)
+	}
+
+	// 5. Source media untouched and candidate isolation verified
+	sourceBytes, _ := os.ReadFile(mediaFile)
+	if string(sourceBytes) != "fake-source-media-bytes-for-benchmark-testing" {
+		t.Errorf("source media was unexpectedly mutated")
+	}
+}
+
+// TestPhase8_OptimizationDisabled_ExplicitPolicy_SkipsBenchmark tests that when
+// a profile has optimization explicitly disabled (enabled: false), transcode_media
+// remains unchanged, skips benchmark (BenchmarkSubmit called 0 times), and full
+// Submit receives the base static plan, even if metric is specified.
+func TestPhase8_OptimizationDisabled_ExplicitPolicy_SkipsBenchmark(t *testing.T) {
+	var fullTranscodeReq transcode.Request
+	mock := &mockTranscodeExecutor{
+		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
+			fullTranscodeReq = req
+			_ = os.MkdirAll(filepath.Dir(req.CandidatePath), 0755)
+			_ = os.WriteFile(req.CandidatePath, []byte("transcoded-output-disabled"), 0644)
+			return transcode.Job{ID: req.ID}, nil
+		},
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{
+				ID:       jobID,
+				Status:   transcode.StatusCompleted,
+				Progress: 100,
+			}, nil
+		},
+	}
+
+	engine, _, mediaFile, _ := setupBenchmarkTestEnv(t, mock, standard8BitProbeJSON, nil)
+	engine.deps.Config.Transcode.Profiles = map[string]config.TranscodeProfileConfig{
+		"opt-disabled": {
+			Container: "mkv",
+			Video: config.VideoProfileConfig{
+				Codec:   "hevc_videotoolbox",
+				Quality: 70,
+			},
+			Audio:        config.AudioProfileConfig{Mode: "copy"},
+			Subtitles:    config.SubtitleProfileConfig{Mode: "preserve", ConvertIncompatible: true},
+			Preserve:     config.PreserveProfileConfig{Metadata: true, Chapters: true, Attachments: true},
+			Optimization: &recipe.OptimizationPolicy{Enabled: false},
+		},
+	}
+
+	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
+		"path":             mediaFile,
+		"profile":          "opt-disabled",
+		"metric":           "ssim",
+		"replace_original": false,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Status != StatusCompleted {
+		t.Fatalf("expected StatusCompleted, got %s (error: %s)", res.Status, res.Error)
+	}
+
+	if getBool(res.Outputs, "optimization_enabled") {
+		t.Errorf("outputs unexpectedly reported optimization_enabled=true for disabled profile")
+	}
+	if atomic.LoadInt32(&mock.benchmarkSubmitCalls) != 0 {
+		t.Errorf("expected 0 benchmark submit calls for optimization-disabled profile, got %d",
+			atomic.LoadInt32(&mock.benchmarkSubmitCalls))
+	}
+	if atomic.LoadInt32(&mock.submitCalls) != 1 {
+		t.Errorf("expected 1 full transcode submit call, got %d", atomic.LoadInt32(&mock.submitCalls))
+	}
+	if fullTranscodeReq.Plan == nil || fullTranscodeReq.Plan.Quality != 70 {
+		t.Errorf("expected full submit to use static base quality 70, got %v", fullTranscodeReq.Plan)
+	}
+}
+
+// TestPhase8_OptimizationDisabled_BuiltinWithoutMetric_SkipsBenchmark tests that a
+// builtin profile without an optimization block and without metric input skips benchmark
+// and proceeds with legacy static transcode unchanged.
+func TestPhase8_OptimizationDisabled_BuiltinWithoutMetric_SkipsBenchmark(t *testing.T) {
+	var fullTranscodeReq transcode.Request
+	mock := &mockTranscodeExecutor{
+		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
+			fullTranscodeReq = req
+			_ = os.MkdirAll(filepath.Dir(req.CandidatePath), 0755)
+			_ = os.WriteFile(req.CandidatePath, []byte("transcoded-output-static"), 0644)
+			return transcode.Job{ID: req.ID}, nil
+		},
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{
+				ID:       jobID,
+				Status:   transcode.StatusCompleted,
+				Progress: 100,
+			}, nil
+		},
+	}
+
+	engine, _, mediaFile, _ := setupBenchmarkTestEnv(t, mock, liveValidation8BitProbeJSON, nil)
+
+	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
+		"path":    mediaFile,
+		"profile": "anime-hevc-quality",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Status != StatusCompleted {
+		t.Fatalf("expected StatusCompleted, got %s (error: %s)", res.Status, res.Error)
+	}
+
+	if getBool(res.Outputs, "optimization_enabled") {
+		t.Errorf("outputs unexpectedly reported optimization_enabled=true when no metric requested")
+	}
+	if atomic.LoadInt32(&mock.benchmarkSubmitCalls) != 0 {
+		t.Errorf("expected 0 benchmark submit calls, got %d", atomic.LoadInt32(&mock.benchmarkSubmitCalls))
+	}
+	if atomic.LoadInt32(&mock.submitCalls) != 1 {
+		t.Errorf("expected 1 full transcode submit call, got %d", atomic.LoadInt32(&mock.submitCalls))
+	}
+	const expectedStaticBaseDigest = "sha256:5f3790702c4416380cb31fe56b128aa646aa5bd3fd577ca4b3435165e1a34bf6"
+	if fullTranscodeReq.Plan == nil || fullTranscodeReq.Plan.PlanDigest != expectedStaticBaseDigest {
+		t.Errorf("expected full submit to use static base digest %s, got %v", expectedStaticBaseDigest, fullTranscodeReq.Plan)
 	}
 }
