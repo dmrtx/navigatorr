@@ -158,8 +158,12 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 	if origSize > 0 {
 		pct = float64(saved) / float64(origSize) * 100
 	}
-	if _, ok := ec.Inputs["max_size_increase_percent"]; ok && origSize > 0 && fi.Size() > origSize {
-		maxInc := getFloat(ec.Inputs, "max_size_increase_percent")
+	// Enforce the effective size guardrail, not just an explicit input: a
+	// direct transcode_media call omitting max_size_increase_percent still
+	// gets the production default (0% allowed growth) as second-line defense
+	// behind the pre-transcode benchmark guard.
+	_, maxInc := e.effectiveSizeGuardrails(ec)
+	if origSize > 0 && fi.Size() > origSize {
 		increasePct := float64(fi.Size()-origSize) / float64(origSize) * 100
 		if increasePct > maxInc {
 			return waitDecision(fmt.Sprintf("Candidate file size (%d bytes) exceeds original (%d bytes) by %.1f%%, which is greater than max_size_increase_percent (%.1f%%)", fi.Size(), origSize, increasePct, maxInc)), nil

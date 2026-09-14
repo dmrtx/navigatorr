@@ -110,7 +110,7 @@ func TestTranscodeMedia_BenchmarkGuard_ExplicitOverrideAllowsSubmit(t *testing.T
 	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
 		"path":                      mediaFile,
 		"profile":                   "opt-vt",
-		"min_savings_percent":       -30.0,
+		"min_savings_percent":       0.0,
 		"max_size_increase_percent": 25.0,
 	})
 	if err != nil {
@@ -177,6 +177,50 @@ func TestBenchmarkTranscode_NegativeSavingsStillReportsWinner(t *testing.T) {
 	}
 }
 
+// Second line of defense. The benchmark predicts +40% savings so the
+// pre-transcode guard passes, but the real encode ends up larger than the
+// original. With max_size_increase_percent omitted, validate_result must
+// still stop in waiting_decision using the effective default (0%).
+func TestTranscodeMedia_PostTranscodeGuardrailAppliesDefaultMaxIncrease(t *testing.T) {
+	mock := &mockTranscodeExecutor{
+		benchmarkStatusFunc: benchmarkWinnerWithSavings(40.0),
+		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
+			_ = os.MkdirAll(filepath.Dir(req.CandidatePath), 0755)
+			// Source fixture is tens of bytes; write a much larger candidate
+			// so the real result exceeds the original.
+			if err := os.WriteFile(req.CandidatePath, make([]byte, 64*1024), 0644); err != nil {
+				t.Errorf("writing oversized candidate: %v", err)
+			}
+			return transcode.Job{ID: req.ID}, nil
+		},
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{
+				ID:       jobID,
+				Status:   transcode.StatusCompleted,
+				Progress: 100,
+			}, nil
+		},
+	}
+	engine, _, mediaFile, _ := setupBenchmarkTestEnv(t, mock, standard8BitProbeJSON, &recipe.OptimizationPolicy{Enabled: true})
+
+	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
+		"path":    mediaFile,
+		"profile": "opt-vt",
+	})
+	if err != nil {
+		t.Fatalf("unexpected engine error: %v", err)
+	}
+	if atomic.LoadInt32(&mock.submitCalls) != 1 {
+		t.Fatalf("benchmark predicted +40%% savings, expected 1 full transcode submit call, got %d", atomic.LoadInt32(&mock.submitCalls))
+	}
+	if res.Status != StatusWaitingDecision {
+		t.Fatalf("expected StatusWaitingDecision for oversized candidate under default 0%% guardrail, got %s (error: %s)", res.Status, res.Error)
+	}
+	if !strings.Contains(res.WaitingReason, "max_size_increase_percent") {
+		t.Errorf("expected waiting reason to mention max_size_increase_percent, got %q", res.WaitingReason)
+	}
+}
+
 // E (unit). Effective guardrail resolution: omitted inputs fall back to the
 // established production behavior (15% minimum savings, 0% allowed growth);
 // explicit caller values override; configured policy wins over the fallback.
@@ -192,7 +236,7 @@ func TestResolveTranscodeSizeGuardrails_DefaultsAndOverrides(t *testing.T) {
 		{"nil inputs default to 15/0", nil, 0, 15, 0},
 		{"configured minimum wins over fallback", map[string]any{}, 20, 20, 0},
 		{"explicit minimum overrides config", map[string]any{"min_savings_percent": 5.0}, 20, 5, 0},
-		{"explicit zeros disable both guardrails", map[string]any{"min_savings_percent": 0.0, "max_size_increase_percent": 0.0}, 15, 0, 0},
+		{"explicit zeros mean disabled minimum and zero allowed growth", map[string]any{"min_savings_percent": 0.0, "max_size_increase_percent": 0.0}, 15, 0, 0},
 		{"explicit growth allowance respected", map[string]any{"max_size_increase_percent": 10.0}, 0, 15, 10},
 		{"explicit negative minimum respected", map[string]any{"min_savings_percent": -30.0}, 0, -30, 0},
 	}
@@ -227,12 +271,17 @@ func TestCheckBenchmarkSavingsGuardrail_ProductionBoundaries(t *testing.T) {
 		}
 	}
 
-	// Explicit override that allows the prediction must pass.
-	if err := checkBenchmarkSavingsGuardrail(-20, -30, 25); err != nil {
-		t.Errorf("explicit override should allow predicted -20%% savings, got %v", err)
+	// min=0 disables the minimum-savings requirement (selector semantics),
+	// so max_size_increase_percent alone decides: 20% growth within 25% passes.
+	if err := checkBenchmarkSavingsGuardrail(-20, 0, 25); err != nil {
+		t.Errorf("min=0 with 25%% allowed growth should permit predicted -20%% savings, got %v", err)
+	}
+	// min=0 with max=0 allows exactly zero growth: any growth blocks.
+	if err := checkBenchmarkSavingsGuardrail(-1, 0, 0); err == nil {
+		t.Errorf("min=0 with 0%% allowed growth must block predicted -1%% savings")
 	}
 	// Explicit growth allowance that is exceeded must still block.
-	if err := checkBenchmarkSavingsGuardrail(-20, -30, 10); err == nil {
+	if err := checkBenchmarkSavingsGuardrail(-20, 0, 10); err == nil {
 		t.Errorf("predicted 20%% growth exceeding allowed 10%% must block")
 	}
 }
