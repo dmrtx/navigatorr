@@ -2,7 +2,36 @@ package recipe
 
 import "time"
 
-const SupportedSchemaVersion = 1
+const (
+	MinSchemaVersion         = 1
+	LatestSchemaVersion      = 2
+	SupportedSchemaVersionV1 = 1
+	SupportedSchemaVersionV2 = 2
+	// Deprecated: use MinSchemaVersion or LatestSchemaVersion instead.
+	SupportedSchemaVersion = LatestSchemaVersion
+)
+
+const (
+	DefaultSamplingStrategy      = "distributed"
+	DefaultSampleCount           = 3
+	DefaultSampleSeconds         = 20.0
+	DefaultPreferredMetric       = "vmaf"
+	DefaultVMAFTarget            = 96.0
+	DefaultVMAFMinimum           = 95.0
+	DefaultVMAFMarginalTolerance = 0.5
+	DefaultSSIMTarget            = 0.99
+	DefaultSSIMMinimum           = 0.98
+	DefaultSSIMMarginalTolerance = 0.005
+	DefaultMaxCandidates         = 5
+	// MaxBitrateKbps is the conservative upper limit (1,000,000 kbps = 1 Gbps) for recipe bitrate guidance
+	// to prevent overflow and absurd values during future arithmetic and optimization.
+	MaxBitrateKbps = 1_000_000
+)
+
+var (
+	DefaultSamplingPositions = []float64{0.2, 0.5, 0.8}
+	DefaultQualityValues     = []int{55, 60, 65, 70, 75}
+)
 
 type Bundle struct {
 	SchemaVersion int                      `json:"schema_version" yaml:"schema_version"`
@@ -21,13 +50,160 @@ type ConversionRule struct {
 	Reason      string `json:"reason" yaml:"reason"`
 }
 
+// OptimizationPolicy defines the tuning policy for automated quality and bitrate optimization.
+type OptimizationPolicy struct {
+	Enabled  bool            `json:"enabled" yaml:"enabled"`
+	Sampling *SamplingPolicy `json:"sampling,omitempty" yaml:"sampling,omitempty"`
+	Quality  *QualityPolicy  `json:"quality,omitempty" yaml:"quality,omitempty"`
+	Search   *SearchPolicy   `json:"search,omitempty" yaml:"search,omitempty"`
+	Size     *SizePolicy     `json:"size,omitempty" yaml:"size,omitempty"`
+}
+
+// Clone creates a deep copy of OptimizationPolicy without aliasing pointers or slices.
+func (opt *OptimizationPolicy) Clone() *OptimizationPolicy {
+	if opt == nil {
+		return nil
+	}
+	return &OptimizationPolicy{
+		Enabled:  opt.Enabled,
+		Sampling: opt.Sampling.Clone(),
+		Quality:  opt.Quality.Clone(),
+		Search:   opt.Search.Clone(),
+		Size:     opt.Size.Clone(),
+	}
+}
+
+// SamplingPolicy controls where and how probe samples are extracted from the source video.
+type SamplingPolicy struct {
+	Strategy      string    `json:"strategy,omitempty" yaml:"strategy,omitempty"`
+	SampleCount   int       `json:"sample_count,omitempty" yaml:"sample_count,omitempty"`
+	SampleSeconds float64   `json:"sample_seconds,omitempty" yaml:"sample_seconds,omitempty"`
+	Positions     []float64 `json:"positions,omitempty" yaml:"positions,omitempty"`
+}
+
+// Clone creates a deep copy of SamplingPolicy.
+func (s *SamplingPolicy) Clone() *SamplingPolicy {
+	if s == nil {
+		return nil
+	}
+	var pos []float64
+	if s.Positions != nil {
+		pos = append([]float64(nil), s.Positions...)
+	}
+	return &SamplingPolicy{
+		Strategy:      s.Strategy,
+		SampleCount:   s.SampleCount,
+		SampleSeconds: s.SampleSeconds,
+		Positions:     pos,
+	}
+}
+
+// QualityPolicy configures target objective quality metrics and acceptability thresholds.
+type QualityPolicy struct {
+	PreferredMetric string        `json:"preferred_metric,omitempty" yaml:"preferred_metric,omitempty"`
+	VMAF            *MetricTarget `json:"vmaf,omitempty" yaml:"vmaf,omitempty"`
+	SSIM            *MetricTarget `json:"ssim,omitempty" yaml:"ssim,omitempty"`
+}
+
+// Clone creates a deep copy of QualityPolicy.
+func (q *QualityPolicy) Clone() *QualityPolicy {
+	if q == nil {
+		return nil
+	}
+	return &QualityPolicy{
+		PreferredMetric: q.PreferredMetric,
+		VMAF:            q.VMAF.Clone(),
+		SSIM:            q.SSIM.Clone(),
+	}
+}
+
+// MetricTarget specifies target, minimum acceptable scores, and metric-specific marginal tolerance.
+type MetricTarget struct {
+	Target            float64  `json:"target" yaml:"target"`
+	Minimum           float64  `json:"minimum" yaml:"minimum"`
+	MarginalTolerance *float64 `json:"marginal_tolerance,omitempty" yaml:"marginal_tolerance,omitempty"`
+}
+
+// Clone creates a deep copy of MetricTarget.
+func (m *MetricTarget) Clone() *MetricTarget {
+	if m == nil {
+		return nil
+	}
+	var tol *float64
+	if m.MarginalTolerance != nil {
+		v := *m.MarginalTolerance
+		tol = &v
+	}
+	return &MetricTarget{
+		Target:            m.Target,
+		Minimum:           m.Minimum,
+		MarginalTolerance: tol,
+	}
+}
+
+// SearchPolicy defines parameter space and candidate selection bounds.
+type SearchPolicy struct {
+	MaxCandidates int   `json:"max_candidates,omitempty" yaml:"max_candidates,omitempty"`
+	QualityValues []int `json:"quality_values,omitempty" yaml:"quality_values,omitempty"`
+}
+
+// Clone creates a deep copy of SearchPolicy.
+func (srch *SearchPolicy) Clone() *SearchPolicy {
+	if srch == nil {
+		return nil
+	}
+	var qv []int
+	if srch.QualityValues != nil {
+		qv = append([]int(nil), srch.QualityValues...)
+	}
+	return &SearchPolicy{
+		MaxCandidates: srch.MaxCandidates,
+		QualityValues: qv,
+	}
+}
+
+// SizePolicy specifies bitrate ranges and constraints in kilobits per second.
+type SizePolicy struct {
+	PreferredTotalBitrateKbps *BitrateRange `json:"preferred_total_bitrate_kbps,omitempty" yaml:"preferred_total_bitrate_kbps,omitempty"`
+	SoftMaxTotalBitrateKbps   int           `json:"soft_max_total_bitrate_kbps,omitempty" yaml:"soft_max_total_bitrate_kbps,omitempty"`
+}
+
+// Clone creates a deep copy of SizePolicy.
+func (sz *SizePolicy) Clone() *SizePolicy {
+	if sz == nil {
+		return nil
+	}
+	return &SizePolicy{
+		PreferredTotalBitrateKbps: sz.PreferredTotalBitrateKbps.Clone(),
+		SoftMaxTotalBitrateKbps:   sz.SoftMaxTotalBitrateKbps,
+	}
+}
+
+// BitrateRange defines minimum and maximum acceptable total bitrate in kbps.
+type BitrateRange struct {
+	Min int `json:"min" yaml:"min"`
+	Max int `json:"max" yaml:"max"`
+}
+
+// Clone creates a deep copy of BitrateRange.
+func (b *BitrateRange) Clone() *BitrateRange {
+	if b == nil {
+		return nil
+	}
+	return &BitrateRange{
+		Min: b.Min,
+		Max: b.Max,
+	}
+}
+
 type Profile struct {
-	Container  string            `json:"container" yaml:"container"`
-	Video      VideoProfile      `json:"video" yaml:"video"`
-	Audio      AudioProfile      `json:"audio" yaml:"audio"`
-	Subtitles  SubtitleProfile   `json:"subtitles" yaml:"subtitles"`
-	Preserve   PreserveProfile   `json:"preserve" yaml:"preserve"`
-	Resilience ResilienceProfile `json:"resilience" yaml:"resilience"`
+	Container    string              `json:"container" yaml:"container"`
+	Video        VideoProfile        `json:"video" yaml:"video"`
+	Audio        AudioProfile        `json:"audio" yaml:"audio"`
+	Subtitles    SubtitleProfile     `json:"subtitles" yaml:"subtitles"`
+	Preserve     PreserveProfile     `json:"preserve" yaml:"preserve"`
+	Resilience   ResilienceProfile   `json:"resilience" yaml:"resilience"`
+	Optimization *OptimizationPolicy `json:"optimization,omitempty" yaml:"optimization,omitempty"`
 }
 
 type VideoProfile struct {

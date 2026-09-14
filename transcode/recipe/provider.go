@@ -83,8 +83,8 @@ func (p *HTTPManifestProvider) Fetch(ctx context.Context) (Candidate, error) {
 	if err := dec.Decode(&trailing); err != io.EOF {
 		return Candidate{}, fmt.Errorf("recipe manifest must contain exactly one JSON document")
 	}
-	if m.SchemaVersion != SupportedSchemaVersion {
-		return Candidate{}, fmt.Errorf("unsupported manifest schema_version %d", m.SchemaVersion)
+	if m.SchemaVersion < MinSchemaVersion || m.SchemaVersion > LatestSchemaVersion {
+		return Candidate{}, fmt.Errorf("unsupported manifest schema_version %d (supported: %d-%d)", m.SchemaVersion, MinSchemaVersion, LatestSchemaVersion)
 	}
 	if !safeToken.MatchString(m.BundleVersion) {
 		return Candidate{}, fmt.Errorf("invalid manifest bundle_version %q", m.BundleVersion)

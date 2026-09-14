@@ -2,6 +2,7 @@ package transcode
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -270,4 +271,132 @@ exit 1
 	if err := exec.Cancel(ctx, "job-test-123"); err != nil {
 		t.Fatalf("cancel failed: %v", err)
 	}
+}
+
+func TestSSHExecutor_Capabilities(t *testing.T) {
+	validCaps := WorkerCapabilities{
+		ProtocolVersion: WorkerProtocolVersion,
+		WorkerVersion:   "1.0.0",
+		BuildGitCommit:  "abcdef0",
+		FFmpegVersion:   "7.1",
+		Encoders:        map[string]bool{"hevc_videotoolbox": true, "h264_videotoolbox": true, "libx265": false},
+		Filters:         map[string]bool{"scale": true, "ssim": true, "libvmaf": false},
+		EncoderDetails: map[string]EncoderCapabilities{
+			"hevc_videotoolbox": {
+				Encoder:      "hevc_videotoolbox",
+				Available:    true,
+				Profiles:     []string{"main", "main10"},
+				PixelFormats: []string{"nv12", "p010le", "yuv420p"},
+				Options:      []string{"prio_speed", "profile", "realtime", "spatial_aq"},
+			},
+		},
+	}
+	validFP, err := ComputeCapabilityFingerprint(validCaps)
+	if err != nil {
+		t.Fatalf("ComputeCapabilityFingerprint failed: %v", err)
+	}
+	validCaps.CapabilityFingerprint = validFP
+
+	validJSON, err := json.Marshal(validCaps)
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+
+	tamperedCaps := validCaps
+	tamperedCaps.CapabilityFingerprint = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+	tamperedJSON, _ := json.Marshal(tamperedCaps)
+
+	t.Run("valid capabilities fingerprint verified", func(t *testing.T) {
+		script := fmt.Sprintf(`
+for arg in "$@"; do
+    if [ "$arg" = "capabilities" ]; then
+        echo '%s'
+        exit 0
+    fi
+done
+exit 1
+`, string(validJSON))
+		fakeSSH := createFakeSSHBinary(t, script)
+		cfg := SSHConfig{Host: "test.host", Command: "/bin/navigatorr-transcode"}
+		exec, err := NewSSHExecutor(cfg, WithSSHBinary(fakeSSH))
+		if err != nil {
+			t.Fatal(err)
+		}
+		caps, err := exec.Capabilities(context.Background())
+		if err != nil {
+			t.Fatalf("Capabilities failed: %v", err)
+		}
+		if caps.ProtocolVersion != WorkerProtocolVersion {
+			t.Errorf("expected protocol %d, got %d", WorkerProtocolVersion, caps.ProtocolVersion)
+		}
+		if caps.Fingerprint() != validFP {
+			t.Errorf("fingerprint mismatch: got %s, want %s", caps.Fingerprint(), validFP)
+		}
+	})
+
+	t.Run("tampered fingerprint fails closed", func(t *testing.T) {
+		script := fmt.Sprintf(`
+for arg in "$@"; do
+    if [ "$arg" = "capabilities" ]; then
+        echo '%s'
+        exit 0
+    fi
+done
+exit 1
+`, string(tamperedJSON))
+		fakeSSH := createFakeSSHBinary(t, script)
+		cfg := SSHConfig{Host: "test.host", Command: "/bin/navigatorr-transcode"}
+		exec, err := NewSSHExecutor(cfg, WithSSHBinary(fakeSSH))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = exec.Capabilities(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "fingerprint mismatch") {
+			t.Fatalf("expected fingerprint mismatch error, got: %v", err)
+		}
+	})
+
+	t.Run("missing protocol version (0) fails closed", func(t *testing.T) {
+		script := `
+for arg in "$@"; do
+    if [ "$arg" = "capabilities" ]; then
+        echo '{"protocol_version": 0, "capability_fingerprint": "abc"}'
+        exit 0
+    fi
+done
+exit 1
+`
+		fakeSSH := createFakeSSHBinary(t, script)
+		cfg := SSHConfig{Host: "test.host", Command: "/bin/navigatorr-transcode"}
+		exec, err := NewSSHExecutor(cfg, WithSSHBinary(fakeSSH))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = exec.Capabilities(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "unsupported protocol version 0 (expected 1)") {
+			t.Fatalf("expected unsupported protocol version error, got: %v", err)
+		}
+	})
+
+	t.Run("future/unsupported protocol version (2) fails closed", func(t *testing.T) {
+		script := `
+for arg in "$@"; do
+    if [ "$arg" = "capabilities" ]; then
+        echo '{"protocol_version": 2, "capability_fingerprint": "abc"}'
+        exit 0
+    fi
+done
+exit 1
+`
+		fakeSSH := createFakeSSHBinary(t, script)
+		cfg := SSHConfig{Host: "test.host", Command: "/bin/navigatorr-transcode"}
+		exec, err := NewSSHExecutor(cfg, WithSSHBinary(fakeSSH))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = exec.Capabilities(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "unsupported protocol version 2 (expected 1)") {
+			t.Fatalf("expected unsupported protocol version 2 error, got: %v", err)
+		}
+	})
 }

@@ -186,6 +186,38 @@ func (e *SSHExecutor) Doctor(ctx context.Context) error {
 	return nil
 }
 
+// Capabilities fetches and verifies the versioned capability report from the remote worker node.
+func (e *SSHExecutor) Capabilities(ctx context.Context) (WorkerCapabilities, error) {
+	args := e.buildSSHArgs()
+	args = append(args, e.cfg.Command, "capabilities")
+
+	cmd := exec.CommandContext(ctx, e.sshBinary, args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		outStr := strings.TrimSpace(stdout.String())
+		errStr := strings.TrimSpace(stderr.String())
+		return WorkerCapabilities{}, fmt.Errorf("ssh capabilities failed: %w (stderr: %s, stdout: %s)", err, errStr, outStr)
+	}
+
+	var caps WorkerCapabilities
+	if err := json.Unmarshal(stdout.Bytes(), &caps); err != nil {
+		return WorkerCapabilities{}, fmt.Errorf("failed to parse capabilities response: %w (output: %s)", err, stdout.String())
+	}
+
+	if caps.ProtocolVersion != WorkerProtocolVersion {
+		return WorkerCapabilities{}, fmt.Errorf("worker returned unsupported protocol version %d (expected %d) (fail closed)", caps.ProtocolVersion, WorkerProtocolVersion)
+	}
+
+	if err := VerifyCapabilityFingerprint(caps); err != nil {
+		return WorkerCapabilities{}, err
+	}
+
+	return caps, nil
+}
+
 // Submit sends a transcode request to the remote worker.
 func (e *SSHExecutor) Submit(ctx context.Context, req Request) (Job, error) {
 	if strings.TrimSpace(req.ID) == "" {
@@ -321,6 +353,138 @@ func (e *SSHExecutor) Cancel(ctx context.Context, jobID string) error {
 	}
 	if resp.Error != "" {
 		return fmt.Errorf("remote cancel error: %s", resp.Error)
+	}
+	return nil
+}
+
+// BenchmarkSubmit sends a benchmark request to the remote worker.
+func (e *SSHExecutor) BenchmarkSubmit(ctx context.Context, req BenchmarkRequest) (BenchmarkJob, error) {
+	if err := ValidateBenchmarkRequest(&req); err != nil {
+		return BenchmarkJob{}, fmt.Errorf("validating benchmark request: %w", err)
+	}
+
+	remoteSource, err := e.TranslateLocalToRemote(req.SourcePath)
+	if err != nil {
+		return BenchmarkJob{}, fmt.Errorf("translating source path: %w", err)
+	}
+
+	cp := req
+	cp.SourcePath = remoteSource
+
+	inputData, err := json.Marshal(cp)
+	if err != nil {
+		return BenchmarkJob{}, fmt.Errorf("serializing benchmark submit payload: %w", err)
+	}
+
+	args := e.buildSSHArgs()
+	args = append(args, e.cfg.Command, "benchmark_submit")
+
+	cmd := exec.CommandContext(ctx, e.sshBinary, args...)
+	cmd.Stdin = bytes.NewReader(inputData)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		outStr := strings.TrimSpace(stdout.String())
+		errStr := strings.TrimSpace(stderr.String())
+		return BenchmarkJob{}, fmt.Errorf("ssh benchmark_submit failed: %w (stderr: %s, stdout: %s)", err, errStr, outStr)
+	}
+
+	var resp BenchmarkSubmitResponse
+	if err := json.Unmarshal(stdout.Bytes(), &resp); err != nil {
+		return BenchmarkJob{}, fmt.Errorf("failed to parse benchmark submit response: %w (output: %s)", err, stdout.String())
+	}
+	if resp.ProtocolVersion != WorkerProtocolVersion {
+		return BenchmarkJob{}, fmt.Errorf("worker returned unsupported protocol version %d (expected %d) (fail closed)",
+			resp.ProtocolVersion, WorkerProtocolVersion)
+	}
+	if resp.Error != "" {
+		return BenchmarkJob{}, fmt.Errorf("worker rejected benchmark submit: %s", resp.Error)
+	}
+	if resp.ID == "" {
+		resp.ID = req.ID
+	}
+
+	return BenchmarkJob{ID: resp.ID}, nil
+}
+
+// BenchmarkStatus queries the status of a benchmark job on the remote worker.
+func (e *SSHExecutor) BenchmarkStatus(ctx context.Context, jobID string) (BenchmarkStatus, error) {
+	trimmedID := strings.TrimSpace(jobID)
+	if trimmedID == "" {
+		return BenchmarkStatus{}, errors.New("jobID is required")
+	}
+	if !validBenchmarkJobIDRegex.MatchString(trimmedID) {
+		return BenchmarkStatus{}, fmt.Errorf("invalid benchmark jobID %q", jobID)
+	}
+
+	args := e.buildSSHArgs()
+	args = append(args, e.cfg.Command, "benchmark_status", trimmedID)
+
+	cmd := exec.CommandContext(ctx, e.sshBinary, args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		outStr := strings.TrimSpace(stdout.String())
+		errStr := strings.TrimSpace(stderr.String())
+		return BenchmarkStatus{}, fmt.Errorf("ssh benchmark_status failed: %w (stderr: %s, stdout: %s)", err, errStr, outStr)
+	}
+
+	var st BenchmarkStatus
+	if err := json.Unmarshal(stdout.Bytes(), &st); err != nil {
+		return BenchmarkStatus{}, fmt.Errorf("failed to parse benchmark status response: %w (output: %s)", err, stdout.String())
+	}
+	if st.ProtocolVersion != WorkerProtocolVersion {
+		return BenchmarkStatus{}, fmt.Errorf("worker returned unsupported protocol version %d (expected %d) (fail closed)",
+			st.ProtocolVersion, WorkerProtocolVersion)
+	}
+
+	if st.SourcePath != "" {
+		if localSource, err := e.TranslateRemoteToLocal(st.SourcePath); err == nil {
+			st.SourcePath = localSource
+		}
+	}
+
+	return st, nil
+}
+
+// BenchmarkCancel cancels an active benchmark job on the remote worker.
+func (e *SSHExecutor) BenchmarkCancel(ctx context.Context, jobID string) error {
+	trimmedID := strings.TrimSpace(jobID)
+	if trimmedID == "" {
+		return errors.New("jobID is required")
+	}
+	if !validBenchmarkJobIDRegex.MatchString(trimmedID) {
+		return fmt.Errorf("invalid benchmark jobID %q", jobID)
+	}
+
+	args := e.buildSSHArgs()
+	args = append(args, e.cfg.Command, "benchmark_cancel", trimmedID)
+
+	cmd := exec.CommandContext(ctx, e.sshBinary, args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		outStr := strings.TrimSpace(stdout.String())
+		errStr := strings.TrimSpace(stderr.String())
+		return fmt.Errorf("ssh benchmark_cancel failed: %w (stderr: %s, stdout: %s)", err, errStr, outStr)
+	}
+
+	var resp BenchmarkCancelResponse
+	if err := json.Unmarshal(stdout.Bytes(), &resp); err != nil {
+		return fmt.Errorf("failed to parse benchmark cancel response: %w (output: %s)", err, stdout.String())
+	}
+	if resp.ProtocolVersion != WorkerProtocolVersion {
+		return fmt.Errorf("worker returned unsupported protocol version %d (expected %d) (fail closed)",
+			resp.ProtocolVersion, WorkerProtocolVersion)
+	}
+	if resp.Error != "" {
+		return fmt.Errorf("remote benchmark cancel error: %s", resp.Error)
 	}
 	return nil
 }

@@ -109,16 +109,22 @@ type TranscodeRecipeConfig struct {
 }
 
 type TranscodeProfileConfig struct {
-	Container  string                  `yaml:"container"`
-	Video      VideoProfileConfig      `yaml:"video"`
-	Audio      AudioProfileConfig      `yaml:"audio"`
-	Subtitles  SubtitleProfileConfig   `yaml:"subtitles"`
-	Preserve   PreserveProfileConfig   `yaml:"preserve"`
-	Resilience ResilienceProfileConfig `yaml:"resilience,omitempty"`
+	Container    string                     `yaml:"container"`
+	Video        VideoProfileConfig         `yaml:"video"`
+	Audio        AudioProfileConfig         `yaml:"audio"`
+	Subtitles    SubtitleProfileConfig      `yaml:"subtitles"`
+	Preserve     PreserveProfileConfig      `yaml:"preserve"`
+	Resilience   ResilienceProfileConfig    `yaml:"resilience,omitempty"`
+	Optimization *recipe.OptimizationPolicy `yaml:"optimization,omitempty"`
 }
 type VideoProfileConfig struct {
-	Codec   string `yaml:"codec"`
-	Quality int    `yaml:"quality"`
+	Codec           string `yaml:"codec"`
+	Quality         int    `yaml:"quality"`
+	Profile         string `yaml:"profile,omitempty"`
+	PixelFormat     string `yaml:"pixel_format,omitempty"`
+	PrioritizeSpeed *bool  `yaml:"prioritize_speed,omitempty"`
+	SpatialAQ       *bool  `yaml:"spatial_aq,omitempty"`
+	Realtime        *bool  `yaml:"realtime,omitempty"`
 }
 type AudioProfileConfig struct {
 	Mode string `yaml:"mode"`
@@ -174,11 +180,52 @@ func profileToRecipe(name string, p TranscodeProfileConfig) recipe.Profile {
 		r.MaxFallbacks = 1
 		r.Fallbacks = []recipe.FallbackRule{{When: "container_subtitle_incompatible", Action: "apply_container_conversion"}}
 	}
-	return recipe.Profile{Container: p.Container, Video: recipe.VideoProfile{Codec: p.Video.Codec, Quality: p.Video.Quality}, Audio: recipe.AudioProfile{Mode: p.Audio.Mode}, Subtitles: recipe.SubtitleProfile{Mode: p.Subtitles.Mode, ConvertIncompatible: p.Subtitles.ConvertIncompatible}, Preserve: recipe.PreserveProfile{Metadata: p.Preserve.Metadata, Chapters: p.Preserve.Chapters, Attachments: p.Preserve.Attachments}, Resilience: r}
+	return recipe.Profile{
+		Container: p.Container,
+		Video: recipe.VideoProfile{
+			Codec:           p.Video.Codec,
+			Quality:         p.Video.Quality,
+			Profile:         p.Video.Profile,
+			PixelFormat:     p.Video.PixelFormat,
+			PrioritizeSpeed: p.Video.PrioritizeSpeed,
+			SpatialAQ:       p.Video.SpatialAQ,
+			Realtime:        p.Video.Realtime,
+		},
+		Audio:      recipe.AudioProfile{Mode: p.Audio.Mode},
+		Subtitles:  recipe.SubtitleProfile{Mode: p.Subtitles.Mode, ConvertIncompatible: p.Subtitles.ConvertIncompatible},
+		Preserve:   recipe.PreserveProfile{Metadata: p.Preserve.Metadata, Chapters: p.Preserve.Chapters, Attachments: p.Preserve.Attachments},
+		Resilience: r,
+		Optimization: func() *recipe.OptimizationPolicy {
+			if p.Optimization == nil {
+				return nil
+			}
+			opt := p.Optimization.Clone()
+			if opt.Enabled {
+				recipe.NormalizeOptimizationPolicy(opt)
+			}
+			return opt
+		}(),
+	}
 }
 
 func recipeToProfile(p recipe.Profile) TranscodeProfileConfig {
-	return TranscodeProfileConfig{Container: p.Container, Video: VideoProfileConfig{Codec: p.Video.Codec, Quality: p.Video.Quality}, Audio: AudioProfileConfig{Mode: p.Audio.Mode}, Subtitles: SubtitleProfileConfig{Mode: p.Subtitles.Mode, ConvertIncompatible: p.Subtitles.ConvertIncompatible}, Preserve: PreserveProfileConfig{Metadata: p.Preserve.Metadata, Chapters: p.Preserve.Chapters, Attachments: p.Preserve.Attachments}, Resilience: ResilienceProfileConfig{MaxAttempts: p.Resilience.MaxAttempts, TransientRetries: p.Resilience.TransientRetries, RetryBackoffSeconds: append([]int(nil), p.Resilience.RetryBackoffSeconds...), MaxFallbacks: p.Resilience.MaxFallbacks, Fallbacks: append([]recipe.FallbackRule(nil), p.Resilience.Fallbacks...)}}
+	return TranscodeProfileConfig{
+		Container: p.Container,
+		Video: VideoProfileConfig{
+			Codec:           p.Video.Codec,
+			Quality:         p.Video.Quality,
+			Profile:         p.Video.Profile,
+			PixelFormat:     p.Video.PixelFormat,
+			PrioritizeSpeed: p.Video.PrioritizeSpeed,
+			SpatialAQ:       p.Video.SpatialAQ,
+			Realtime:        p.Video.Realtime,
+		},
+		Audio:        AudioProfileConfig{Mode: p.Audio.Mode},
+		Subtitles:    SubtitleProfileConfig{Mode: p.Subtitles.Mode, ConvertIncompatible: p.Subtitles.ConvertIncompatible},
+		Preserve:     PreserveProfileConfig{Metadata: p.Preserve.Metadata, Chapters: p.Preserve.Chapters, Attachments: p.Preserve.Attachments},
+		Resilience:   ResilienceProfileConfig{MaxAttempts: p.Resilience.MaxAttempts, TransientRetries: p.Resilience.TransientRetries, RetryBackoffSeconds: append([]int(nil), p.Resilience.RetryBackoffSeconds...), MaxFallbacks: p.Resilience.MaxFallbacks, Fallbacks: append([]recipe.FallbackRule(nil), p.Resilience.Fallbacks...)},
+		Optimization: p.Optimization.Clone(),
+	}
 }
 
 // BuiltinTranscodeProfiles is retained for API compatibility, but its single source of truth is the embedded recipe bundle.
@@ -219,6 +266,35 @@ func (t *TranscodeConfig) ResolvePlanForSource(profileName string, subtitles []r
 		return nil, err
 	}
 	return recipe.Resolve(snap, name, t.recipeOverrides(), subtitles)
+}
+
+// ResolveProfile resolves and validates a recipe Profile for the given profileName,
+// incorporating local profile overrides (whose optimization policies are already normalized
+// during snapshot parsing and override conversion).
+func (t *TranscodeConfig) ResolveProfile(profileName string) (recipe.Profile, error) {
+	name := strings.TrimSpace(profileName)
+	if name == "" {
+		name = strings.TrimSpace(t.DefaultProfile)
+	}
+	if name == "" {
+		name = "hevc-vt"
+	}
+	snap, err := t.activeSnapshot()
+	if err != nil {
+		return recipe.Profile{}, err
+	}
+	p, ok := snap.Bundle.Profiles[name]
+	if op, exists := t.recipeOverrides()[name]; exists {
+		p = op
+		ok = true
+	}
+	if !ok {
+		return recipe.Profile{}, fmt.Errorf("unknown transcode profile %q", name)
+	}
+	if err := recipe.ValidateProfile(name, p); err != nil {
+		return recipe.Profile{}, err
+	}
+	return p, nil
 }
 
 func (t *TranscodeConfig) validateRecipeSource() error {

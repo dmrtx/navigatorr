@@ -656,4 +656,110 @@ transcode:
 			})
 		}
 	})
+
+	t.Run("local profile overrides preserve all VideoToolbox and optimization fields", func(t *testing.T) {
+		p := writeCfg("override_fields.yaml", `
+transcode:
+  enabled: true
+  executor: "ssh"
+  ssh:
+    host: "192.0.2.10"
+    user: "transcoder"
+    command: "/opt/homebrew/bin/navigatorr-transcode"
+  profiles:
+    custom-main10:
+      container: mkv
+      video:
+        codec: hevc_videotoolbox
+        quality: 68
+        profile: main10
+        pixel_format: p010le
+        prioritize_speed: false
+        spatial_aq: true
+        realtime: false
+      audio: {mode: copy}
+      subtitles: {mode: preserve, convert_incompatible: true}
+      preserve: {metadata: true, chapters: true, attachments: true}
+      resilience:
+        max_attempts: 2
+      optimization:
+        enabled: true
+        sampling:
+          strategy: uniform
+          sample_count: 4
+          sample_seconds: 12.0
+          positions: [0.1, 0.4, 0.7, 0.9]
+        quality:
+          preferred_metric: vmaf
+          vmaf:
+            target: 96.0
+            minimum: 93.0
+            marginal_tolerance: 0.5
+        search:
+          max_candidates: 5
+          quality_values: [60, 65, 70]
+        size:
+          preferred_total_bitrate_kbps:
+            min: 2000
+            max: 5000
+          soft_max_total_bitrate_kbps: 6000
+`)
+		cfg, err := Load(p)
+		if err != nil {
+			t.Fatalf("failed loading config with local profile overrides: %v", err)
+		}
+
+		overrides := cfg.Transcode.recipeOverrides()
+		recProfile, ok := overrides["custom-main10"]
+		if !ok {
+			t.Fatalf("missing custom-main10 in recipe overrides")
+		}
+
+		if recProfile.Video.Profile != "main10" {
+			t.Errorf("expected Video.Profile=main10, got %s", recProfile.Video.Profile)
+		}
+		if recProfile.Video.PixelFormat != "p010le" {
+			t.Errorf("expected Video.PixelFormat=p010le, got %s", recProfile.Video.PixelFormat)
+		}
+		if recProfile.Video.PrioritizeSpeed == nil || *recProfile.Video.PrioritizeSpeed != false {
+			t.Errorf("expected PrioritizeSpeed=false, got %v", recProfile.Video.PrioritizeSpeed)
+		}
+		if recProfile.Video.SpatialAQ == nil || *recProfile.Video.SpatialAQ != true {
+			t.Errorf("expected SpatialAQ=true, got %v", recProfile.Video.SpatialAQ)
+		}
+		if recProfile.Video.Realtime == nil || *recProfile.Video.Realtime != false {
+			t.Errorf("expected Realtime=false, got %v", recProfile.Video.Realtime)
+		}
+
+		if recProfile.Optimization == nil {
+			t.Fatalf("expected Optimization to be preserved, got nil")
+		}
+		if recProfile.Optimization.Sampling == nil || recProfile.Optimization.Sampling.SampleSeconds != 12.0 {
+			t.Errorf("unexpected sampling policy: %+v", recProfile.Optimization.Sampling)
+		}
+		if recProfile.Optimization.Quality == nil || recProfile.Optimization.Quality.VMAF.Target != 96.0 || recProfile.Optimization.Quality.VMAF.MarginalTolerance == nil || *recProfile.Optimization.Quality.VMAF.MarginalTolerance != 0.5 {
+			t.Errorf("unexpected quality policy: %+v", recProfile.Optimization.Quality)
+		}
+		if recProfile.Optimization.Search == nil || len(recProfile.Optimization.Search.QualityValues) != 3 || recProfile.Optimization.Search.QualityValues[1] != 65 {
+			t.Errorf("unexpected search policy: %+v", recProfile.Optimization.Search)
+		}
+		if recProfile.Optimization.Size == nil || recProfile.Optimization.Size.PreferredTotalBitrateKbps.Max != 5000 {
+			t.Errorf("unexpected size policy: %+v", recProfile.Optimization.Size)
+		}
+
+		// Verify deep cloning at mapping boundaries: mutating recProfile.Optimization
+		// does NOT affect cfg.Transcode.Profiles["custom-main10"].Optimization
+		recProfile.Optimization.Sampling.Positions[0] = 0.999
+		if cfg.Transcode.Profiles["custom-main10"].Optimization.Sampling.Positions[0] == 0.999 {
+			t.Errorf("aliasing detected: mutating recipe override mutated config profile")
+		}
+
+		plan, err := cfg.Transcode.ResolvePlan("custom-main10")
+		if err != nil {
+			t.Fatalf("failed to resolve custom-main10 plan: %v", err)
+		}
+		if plan.VideoProfile != "main10" || plan.PixelFormat != "p010le" || plan.ExpectedBitDepth != 10 {
+			t.Errorf("plan missing resolved knobs: %+v", plan)
+		}
+	})
 }

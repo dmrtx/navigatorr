@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"runtime/debug"
 	"sort"
 	"strings"
 
@@ -12,12 +13,221 @@ import (
 
 const videoToolboxEncoder = "hevc_videotoolbox"
 
-type VideoToolboxCapabilities struct {
-	Encoder      string   `json:"encoder"`
-	Available    bool     `json:"available"`
-	Profiles     []string `json:"profiles,omitempty"`
-	PixelFormats []string `json:"pixel_formats,omitempty"`
-	Options      []string `json:"options,omitempty"`
+type VideoToolboxCapabilities = transcode.VideoToolboxCapabilities
+
+var (
+	buildVersion   = ""
+	buildGitCommit = ""
+)
+
+// SetBuildMetadata allows setting worker build version and git commit dynamically.
+func SetBuildMetadata(version, gitCommit string) {
+	buildVersion = strings.TrimSpace(version)
+	buildGitCommit = strings.TrimSpace(gitCommit)
+}
+
+// GetBuildMetadata retrieves injected build metadata, falls back to runtime debug build info,
+// or returns explicit "unknown".
+func GetBuildMetadata() (version string, commit string) {
+	version = buildVersion
+	commit = buildGitCommit
+
+	if version == "" || commit == "" {
+		if bi, ok := debug.ReadBuildInfo(); ok {
+			if version == "" && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+				version = bi.Main.Version
+			}
+			if commit == "" {
+				for _, setting := range bi.Settings {
+					if setting.Key == "vcs.revision" {
+						commit = setting.Value
+						break
+					}
+				}
+			}
+		}
+	}
+
+	if version == "" {
+		version = "unknown"
+	}
+	if commit == "" {
+		commit = "unknown"
+	}
+	return version, commit
+}
+
+func boundedErrorMessage(err error, output []byte, maxLen int) string {
+	var parts []string
+	if err != nil {
+		parts = append(parts, err.Error())
+	}
+	outStr := strings.TrimSpace(string(output))
+	if outStr != "" {
+		parts = append(parts, outStr)
+	}
+	msg := strings.Join(parts, ": ")
+	if maxLen > 0 && len(msg) > maxLen {
+		return msg[:maxLen] + "..."
+	}
+	return msg
+}
+
+// ProbeWorkerCapabilities probes full versioned capabilities of the worker node.
+func ProbeWorkerCapabilities(ctx context.Context, ffmpegPath string) (transcode.WorkerCapabilities, error) {
+	ver, commit := GetBuildMetadata()
+	caps := transcode.WorkerCapabilities{
+		ProtocolVersion: transcode.WorkerProtocolVersion,
+		WorkerVersion:   ver,
+		BuildGitCommit:  commit,
+		FFmpegPath:      ffmpegPath,
+		Encoders:        make(map[string]bool),
+		Filters:         make(map[string]bool),
+	}
+
+	// 1. Probe FFmpeg version
+	verCmd := exec.CommandContext(ctx, ffmpegPath, "-version")
+	verOut, err := verCmd.CombinedOutput()
+	if err != nil {
+		errMsg := boundedErrorMessage(err, verOut, 256)
+		caps.ProbeErrors = append(caps.ProbeErrors, transcode.ProbeError{
+			Component: "ffmpeg_version",
+			Message:   errMsg,
+		})
+		return caps, fmt.Errorf("probing ffmpeg version at %s failed: %w (%s)", ffmpegPath, err, errMsg)
+	}
+	caps.FFmpegVersion = ParseFFmpegVersion(string(verOut))
+
+	// 2. Probe VideoToolbox details (partial absence does not fail the whole report, but records structured warning/error)
+	vtCaps, vtErr := ProbeVideoToolboxCapabilities(ctx, ffmpegPath)
+	if vtErr != nil {
+		caps.ProbeErrors = append(caps.ProbeErrors, transcode.ProbeError{
+			Component: "videotoolbox",
+			Message:   boundedErrorMessage(vtErr, nil, 256),
+		})
+	}
+	if caps.EncoderDetails == nil {
+		caps.EncoderDetails = make(map[string]transcode.EncoderCapabilities)
+	}
+	caps.EncoderDetails[videoToolboxEncoder] = vtCaps
+
+	// 3. Probe encoders availability (preserve partial parsed lines if command failed, but record structured warning/error)
+	encCmd := exec.CommandContext(ctx, ffmpegPath, "-hide_banner", "-encoders")
+	encOut, encErr := encCmd.CombinedOutput()
+	if encErr != nil {
+		caps.ProbeErrors = append(caps.ProbeErrors, transcode.ProbeError{
+			Component: "encoders",
+			Message:   boundedErrorMessage(encErr, encOut, 256),
+		})
+	}
+	caps.Encoders = ParseAvailableEncoders(string(encOut))
+	if vtCaps.Available {
+		caps.Encoders[videoToolboxEncoder] = true
+	}
+
+	// 4. Probe filters availability (preserve partial parsed lines if command failed, but record structured warning/error)
+	filtCmd := exec.CommandContext(ctx, ffmpegPath, "-hide_banner", "-filters")
+	filtOut, filtErr := filtCmd.CombinedOutput()
+	if filtErr != nil {
+		caps.ProbeErrors = append(caps.ProbeErrors, transcode.ProbeError{
+			Component: "filters",
+			Message:   boundedErrorMessage(filtErr, filtOut, 256),
+		})
+	}
+	caps.Filters = ParseAvailableFilters(string(filtOut))
+
+	// 5. Generate deterministic capability fingerprint
+	fp, err := transcode.ComputeCapabilityFingerprint(caps)
+	if err != nil {
+		return caps, fmt.Errorf("generating capability fingerprint: %w", err)
+	}
+	caps.CapabilityFingerprint = fp
+
+	return caps, nil
+}
+
+// ParseFFmpegVersion extracts the FFmpeg version string from ffmpeg -version output.
+func ParseFFmpegVersion(raw string) string {
+	for _, line := range strings.Split(raw, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(strings.ToLower(trimmed), "ffmpeg version ") {
+			fields := strings.Fields(trimmed)
+			if len(fields) >= 3 {
+				return fields[2]
+			}
+			return trimmed
+		}
+	}
+	return "unknown"
+}
+
+// ParseAvailableEncoders extracts presence of key encoders from ffmpeg -encoders output.
+func ParseAvailableEncoders(raw string) map[string]bool {
+	encoders := map[string]bool{
+		"hevc_videotoolbox":   false,
+		"h264_videotoolbox":   false,
+		"prores_videotoolbox": false,
+		"libx264":             false,
+		"libx265":             false,
+		"aac":                 false,
+	}
+	for _, line := range strings.Split(raw, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 {
+			name := strings.ToLower(fields[1])
+			if len(fields[0]) >= 6 && (strings.HasPrefix(fields[0], "V") || strings.HasPrefix(fields[0], "A") || strings.HasPrefix(fields[0], "S")) {
+				encoders[name] = true
+			}
+		}
+	}
+	return encoders
+}
+
+// ParseAvailableFilters extracts presence of key filters from ffmpeg -filters output.
+// Modern FFmpeg outputs 2-character flag columns (e.g. ".. libvmaf", "TS ssim"),
+// while older FFmpeg versions output 3-character flag columns (e.g. "..C libvmaf", "... scale").
+func ParseAvailableFilters(raw string) map[string]bool {
+	filters := map[string]bool{
+		"libvmaf": false,
+		"ssim":    false,
+		"scale":   false,
+		"format":  false,
+		"null":    false,
+		"fps":     false,
+	}
+	for _, line := range strings.Split(raw, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 {
+			flagLen := len(fields[0])
+			if (flagLen == 2 || flagLen == 3) && fields[1] != "=" {
+				name := strings.ToLower(fields[1])
+				filters[name] = true
+			}
+		}
+	}
+	return filters
+}
+
+func isCleanAbsence(encoderName, output string) bool {
+	lower := strings.ToLower(output)
+	enc := strings.ToLower(strings.TrimSpace(encoderName))
+	if enc == "" {
+		enc = videoToolboxEncoder
+	}
+
+	// Must specifically mention the queried encoder
+	if !strings.Contains(lower, enc) {
+		return false
+	}
+
+	// Known clean absence messages output by FFmpeg when an encoder is not built into the binary.
+	// Generic errors like "unrecognized option" or "not found" (e.g. missing libraries/binaries)
+	// must NOT match so they remain ProbeErrors.
+	return strings.Contains(lower, fmt.Sprintf("codec '%s' is not recognized by ffmpeg", enc)) ||
+		strings.Contains(lower, fmt.Sprintf("encoder '%s' not found", enc)) ||
+		strings.Contains(lower, fmt.Sprintf("unknown encoder '%s'", enc)) ||
+		strings.Contains(lower, fmt.Sprintf("cannot find encoder '%s'", enc)) ||
+		(strings.Contains(lower, "is not recognized by ffmpeg") && strings.Contains(lower, enc))
 }
 
 func ProbeVideoToolboxCapabilities(ctx context.Context, ffmpegPath string) (VideoToolboxCapabilities, error) {
@@ -28,6 +238,10 @@ func ProbeVideoToolboxCapabilities(ctx context.Context, ffmpegPath string) (Vide
 		if ctx.Err() != nil {
 			return caps, ctx.Err()
 		}
+		if isCleanAbsence(videoToolboxEncoder, string(out)) {
+			caps.Available = false
+			return caps, nil
+		}
 		msg := strings.TrimSpace(string(out))
 		if len(msg) > 512 {
 			msg = msg[:512] + "..."
@@ -35,7 +249,8 @@ func ProbeVideoToolboxCapabilities(ctx context.Context, ffmpegPath string) (Vide
 		return caps, fmt.Errorf("encoder_capability_unsupported: probing %s capabilities failed: %w (%s)", videoToolboxEncoder, err, msg)
 	}
 	if !caps.Available {
-		return caps, fmt.Errorf("encoder_capability_unsupported: FFmpeg help did not report encoder %s", videoToolboxEncoder)
+		// Clean absence when help returns exit code 0 but does not report the encoder
+		return caps, nil
 	}
 	return caps, nil
 }

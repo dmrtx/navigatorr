@@ -131,6 +131,31 @@ func GetProcessIdentity(pid int) (command string, startTime string, err error) {
 	return command, startTime, nil
 }
 
+// GetProcessTokens returns the whitespace-tokenized argument fields and start time (lstart) for a PID on Unix/macOS.
+func GetProcessTokens(pid int) (tokens []string, startTime string, err error) {
+	if pid <= 1 {
+		return nil, "", fmt.Errorf("invalid pid %d", pid)
+	}
+	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "lstart=,command=").Output()
+	if err != nil {
+		return nil, "", err
+	}
+	raw := strings.TrimSpace(string(out))
+	if raw == "" {
+		return nil, "", fmt.Errorf("no process found for pid %d", pid)
+	}
+	parts := strings.Fields(raw)
+	if len(parts) >= 5 {
+		startTime = strings.Join(parts[:5], " ")
+		if len(parts) > 5 {
+			tokens = parts[5:]
+		}
+	} else {
+		tokens = parts
+	}
+	return tokens, startTime, nil
+}
+
 // IsJobProcessAlive checks whether the process for a specific job is alive and matches the job's identity.
 // It protects against PID recycling by verifying:
 // 1. The OS signal check passes.
