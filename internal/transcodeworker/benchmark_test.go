@@ -900,3 +900,251 @@ func TestBenchmarkSubmit_PostSpawnPersistenceFailureKillsProcess(t *testing.T) {
 		t.Fatalf("spawned process %d was not killed after post-spawn persistence failure!", capturedPID)
 	}
 }
+
+func TestBenchmarkStatus_MapsProgressPhaseHeartbeat(t *testing.T) {
+	tempDir := t.TempDir()
+	stateDir := filepath.Join(tempDir, "state")
+	jobID := "bench-map-test"
+	jobDir := filepath.Join(stateDir, jobID)
+	if err := os.MkdirAll(jobDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	fixedTime := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	record := &BenchmarkRecord{
+		ProtocolVersion:  transcode.WorkerProtocolVersion,
+		ID:               jobID,
+		Status:           "running",
+		Source:           "/media/source.mkv",
+		Metric:           "vmaf",
+		Progress:         45.5,
+		Phase:            "encoding_candidates",
+		HeartbeatAt:      fixedTime,
+		RunToken:         "token-map-123",
+		PID:              os.Getpid(),
+		ProcessStartTime: "test-lstart",
+		CreatedAt:        fixedTime.Add(-time.Hour),
+		StartedAt:        fixedTime.Add(-30 * time.Minute),
+	}
+	benchFile := filepath.Join(jobDir, "benchmark.json")
+	if err := SaveBenchmarkAtomic(benchFile, record); err != nil {
+		t.Fatalf("saving benchmark: %v", err)
+	}
+
+	worker := NewWorker(&WorkerConfig{StateDir: stateDir})
+	st, err := worker.BenchmarkStatus(context.Background(), jobID)
+	if err != nil {
+		t.Fatalf("BenchmarkStatus failed: %v", err)
+	}
+
+	if st.Progress != 45.5 {
+		t.Errorf("expected Progress=45.5, got %v", st.Progress)
+	}
+	if st.Phase != "encoding_candidates" {
+		t.Errorf("expected Phase='encoding_candidates', got %q", st.Phase)
+	}
+	if !st.HeartbeatAt.Equal(fixedTime) {
+		t.Errorf("expected HeartbeatAt=%v, got %v", fixedTime, st.HeartbeatAt)
+	}
+}
+
+func TestWorker_UpdateBenchmarkProgress_MonotonicAndPreservesFields(t *testing.T) {
+	tempDir := t.TempDir()
+	stateDir := filepath.Join(tempDir, "state")
+	jobID := "bench-mono-test"
+	jobDir := filepath.Join(stateDir, jobID)
+	if err := os.MkdirAll(jobDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	fixedCreated := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
+	fixedStarted := time.Date(2026, 9, 14, 10, 5, 0, 0, time.UTC)
+	initialEvidence := &BenchmarkExecutionEvidence{
+		SourceResolution: "1920x1080",
+	}
+
+	record := &BenchmarkRecord{
+		ProtocolVersion:  transcode.WorkerProtocolVersion,
+		ID:               jobID,
+		Status:           "running",
+		Source:           "/media/source.mkv",
+		Metric:           "vmaf",
+		Progress:         20.0,
+		Phase:            "extracting_samples",
+		RunToken:         "token-mono-456",
+		PID:              12345,
+		ProcessStartTime: "test-lstart-time",
+		CreatedAt:        fixedCreated,
+		StartedAt:        fixedStarted,
+		Evidence:         initialEvidence,
+	}
+	benchFile := filepath.Join(jobDir, "benchmark.json")
+	if err := SaveBenchmarkAtomic(benchFile, record); err != nil {
+		t.Fatalf("saving benchmark: %v", err)
+	}
+
+	worker := NewWorker(&WorkerConfig{StateDir: stateDir})
+
+	// 1. Monotonic advance to 50.0
+	err := worker.UpdateBenchmarkProgress(jobID, "token-mono-456", 50.0, "encoding_candidates")
+	if err != nil {
+		t.Fatalf("UpdateBenchmarkProgress to 50.0 failed: %v", err)
+	}
+
+	loaded, err := LoadBenchmark(benchFile)
+	if err != nil {
+		t.Fatalf("loading benchmark: %v", err)
+	}
+	if loaded.Progress != 50.0 {
+		t.Errorf("expected Progress=50.0, got %v", loaded.Progress)
+	}
+	if loaded.Phase != "encoding_candidates" {
+		t.Errorf("expected Phase='encoding_candidates', got %q", loaded.Phase)
+	}
+	if loaded.HeartbeatAt.IsZero() {
+		t.Errorf("expected HeartbeatAt to be populated")
+	}
+	// Verify preservation of other fields
+	if loaded.PID != 12345 || loaded.ProcessStartTime != "test-lstart-time" {
+		t.Errorf("PID/ProcessStartTime clobbered: %d / %q", loaded.PID, loaded.ProcessStartTime)
+	}
+	if loaded.Source != "/media/source.mkv" || loaded.Metric != "vmaf" {
+		t.Errorf("Source/Metric clobbered: %q / %q", loaded.Source, loaded.Metric)
+	}
+	if loaded.Evidence == nil || loaded.Evidence.SourceResolution != "1920x1080" {
+		t.Errorf("Evidence clobbered: %+v", loaded.Evidence)
+	}
+
+	// 2. Attempt regression to 30.0 - progress must remain 50.0
+	firstHeartbeat := loaded.HeartbeatAt
+	err = worker.UpdateBenchmarkProgress(jobID, "token-mono-456", 30.0, "evaluating_metrics")
+	if err != nil {
+		t.Fatalf("UpdateBenchmarkProgress with lower progress failed: %v", err)
+	}
+
+	loaded2, err := LoadBenchmark(benchFile)
+	if err != nil {
+		t.Fatalf("loading benchmark: %v", err)
+	}
+	if loaded2.Progress != 50.0 {
+		t.Errorf("expected Progress to stay 50.0 (monotonic), got %v", loaded2.Progress)
+	}
+	if loaded2.Phase != "evaluating_metrics" {
+		t.Errorf("expected Phase to update to 'evaluating_metrics', got %q", loaded2.Phase)
+	}
+	if loaded2.HeartbeatAt.Before(firstHeartbeat) {
+		t.Errorf("expected HeartbeatAt to be updated")
+	}
+}
+
+func TestWorker_UpdateBenchmarkProgress_StaleTokenAndCancelled(t *testing.T) {
+	tempDir := t.TempDir()
+	stateDir := filepath.Join(tempDir, "state")
+	worker := NewWorker(&WorkerConfig{StateDir: stateDir})
+
+	// Case A: Stale RunToken cannot overwrite
+	jobIDA := "bench-stale-token"
+	jobDirA := filepath.Join(stateDir, jobIDA)
+	_ = os.MkdirAll(jobDirA, 0o755)
+	recA := &BenchmarkRecord{
+		ProtocolVersion: transcode.WorkerProtocolVersion,
+		ID:              jobIDA,
+		Status:          "running",
+		Progress:        15.0,
+		RunToken:        "valid-token-111",
+	}
+	benchFileA := filepath.Join(jobDirA, "benchmark.json")
+	_ = SaveBenchmarkAtomic(benchFileA, recA)
+
+	err := worker.UpdateBenchmarkProgress(jobIDA, "stale-foreign-token", 80.0, "fake_phase")
+	if err == nil {
+		t.Fatalf("expected error on stale RunToken, got nil")
+	}
+	if !errors.Is(err, ErrBenchmarkRunTokenMismatch) {
+		t.Errorf("expected ErrBenchmarkRunTokenMismatch, got %v", err)
+	}
+	checkA, _ := LoadBenchmark(benchFileA)
+	if checkA.Progress != 15.0 {
+		t.Errorf("expected record Progress to remain 15.0, got %v", checkA.Progress)
+	}
+
+	// Case B: Cancelled record cannot be updated or resurrected
+	jobIDB := "bench-cancelled"
+	jobDirB := filepath.Join(stateDir, jobIDB)
+	_ = os.MkdirAll(jobDirB, 0o755)
+	recB := &BenchmarkRecord{
+		ProtocolVersion: transcode.WorkerProtocolVersion,
+		ID:              jobIDB,
+		Status:          "cancelled",
+		Progress:        22.0,
+		RunToken:        "token-cancel-222",
+	}
+	benchFileB := filepath.Join(jobDirB, "benchmark.json")
+	_ = SaveBenchmarkAtomic(benchFileB, recB)
+
+	err = worker.UpdateBenchmarkProgress(jobIDB, "token-cancel-222", 90.0, "running_phase")
+	if err == nil {
+		t.Fatalf("expected error on cancelled benchmark, got nil")
+	}
+	if !errors.Is(err, ErrBenchmarkNotActive) {
+		t.Errorf("expected ErrBenchmarkNotActive, got %v", err)
+	}
+	checkB, _ := LoadBenchmark(benchFileB)
+	if checkB.Status != "cancelled" {
+		t.Errorf("expected Status to remain cancelled, got %q", checkB.Status)
+	}
+	if checkB.Progress != 22.0 {
+		t.Errorf("expected Progress to remain 22.0, got %v", checkB.Progress)
+	}
+}
+
+func TestBenchmark_InternalBenchmark_ReportsProgress100OnCompletion(t *testing.T) {
+	tempDir := t.TempDir()
+	stateDir := filepath.Join(tempDir, "state")
+	jobID := "bench-terminal-100"
+	jobDir := filepath.Join(stateDir, jobID)
+	_ = os.MkdirAll(jobDir, 0o755)
+
+	record := &BenchmarkRecord{
+		ProtocolVersion: transcode.WorkerProtocolVersion,
+		ID:              jobID,
+		Status:          "queued",
+		RunToken:        "token-comp-333",
+		Metric:          "vmaf",
+		Source:          "/media/test.mkv",
+		Progress:        0,
+	}
+	benchFile := filepath.Join(jobDir, "benchmark.json")
+	_ = SaveBenchmarkAtomic(benchFile, record)
+
+	worker := NewWorker(&WorkerConfig{StateDir: stateDir})
+
+	// Inject runner that updates progress to 60.0 during execution and returns success
+	worker.SetBenchmarkRunner(&mockLifecycleRunner{
+		onRun: func() {
+			_ = worker.UpdateBenchmarkProgress(jobID, "token-comp-333", 60.0, "encoding_candidates")
+		},
+	})
+
+	err := worker.InternalBenchmark(context.Background(), jobID, "token-comp-333")
+	if err != nil {
+		t.Fatalf("InternalBenchmark failed: %v", err)
+	}
+
+	st, err := worker.BenchmarkStatus(context.Background(), jobID)
+	if err != nil {
+		t.Fatalf("BenchmarkStatus failed: %v", err)
+	}
+	if st.Status != "completed" {
+		t.Errorf("expected Status='completed', got %q", st.Status)
+	}
+	if st.Progress != 100 {
+		t.Errorf("expected Progress=100 on completed, got %v", st.Progress)
+	}
+	if st.Phase != "completed" {
+		t.Errorf("expected Phase='completed' on completed, got %q", st.Phase)
+	}
+	if st.HeartbeatAt.IsZero() {
+		t.Errorf("expected HeartbeatAt to be set")
+	}
+}
