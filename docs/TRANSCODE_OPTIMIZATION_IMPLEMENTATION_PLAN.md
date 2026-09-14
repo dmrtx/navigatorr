@@ -4,7 +4,7 @@ Estado: en progreso por fases (un solo PR hacia main, sin merge automático)
 Proyecto: Navigatorr  
 Rama objetivo: `main`  
 Fecha del plan: 2026-09-13  
-Última actualización: 2026-09-14 (fase 8 cerrada con alcance documentado; PR pendiente de instrucción explícita)
+Última actualización: 2026-09-14 (cierre final de revisión de fases 1-8 y preparación de PR)
 
 ## 1. Objetivo
 
@@ -596,3 +596,10 @@ En vivo en Apple Silicon (este host arm64, FFmpeg 9.0.1 homebrew con `hevc_video
 - **Actions e integración (Fase 7)**:
   - `118d2b4`: `feat(action): implement phase 7 transcode benchmark and optimization integration`
   - `c953d63`: `fix(action): address Phase 7 adversarial audit corrections for HDR/DV, cancellation, worker busy, and wait backoff`
+  - `33c18df`: `docs(transcode): record completion of Phase 7 action integration`
+  - `d2e7d25`: `docs(transcode): record Phase 7 audit correction commit`
+- **Validación, cierre y hardening de preflight (Fase 8)**:
+  - `ba572d8`: `test(action): add Phase 8 closure integration tests for optimized transcode`
+  - `5b1be60`: `docs(transcode): complete Phase 8 validation closure and optimization docs`
+  - `130402a`: `style(transcode): resolve gofmt formatting on milestone files`
+  - `557dd2f`: `fix(transcode): wire optimization preflight for requested metric and add regression tests`
