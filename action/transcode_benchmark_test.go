@@ -28,6 +28,15 @@ const standard8BitCandidateJSON = `{
   "chapters": []
 }`
 
+const standard8BitNoSubCandidateJSON = `{
+  "streams": [
+    {"index": 0, "codec_type": "video", "codec_name": "hevc", "profile": "Main", "pix_fmt": "yuv420p", "width": 1920, "height": 1080, "bit_rate": "3000000"},
+    {"index": 1, "codec_type": "audio", "codec_name": "aac", "channels": 2, "tags": {"language": "jpn"}}
+  ],
+  "format": {"format_name": "matroska", "duration": "1200.0", "size": "350000000", "bit_rate": "3000000"},
+  "chapters": []
+}`
+
 const standard10BitCandidateJSON = `{
   "streams": [
     {"index": 0, "codec_type": "video", "codec_name": "hevc", "profile": "Main 10", "pix_fmt": "yuv420p10le", "width": 1920, "height": 1080, "bit_rate": "3000000"},
@@ -45,6 +54,8 @@ func createSmartFakeFFprobeScript(t *testing.T, sourceJSON string) string {
 	candJSON := standard8BitCandidateJSON
 	if strings.Contains(sourceJSON, "yuv420p10le") || strings.Contains(sourceJSON, "Main 10") {
 		candJSON = standard10BitCandidateJSON
+	} else if !strings.Contains(sourceJSON, `"codec_type": "subtitle"`) {
+		candJSON = standard8BitNoSubCandidateJSON
 	}
 	script := fmt.Sprintf(`#!/bin/sh
 case "$*" in
