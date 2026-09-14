@@ -28,14 +28,14 @@ type mockTranscodeExecutor struct {
 	benchmarkStatusCalls int32
 	benchmarkCancelCalls int32
 
-	doctorFunc           func(ctx context.Context) error
-	capabilitiesFunc     func(ctx context.Context) (transcode.WorkerCapabilities, error)
-	submitFunc           func(ctx context.Context, req transcode.Request) (transcode.Job, error)
-	statusFunc           func(ctx context.Context, jobID string) (transcode.JobStatus, error)
-	cancelFunc           func(ctx context.Context, jobID string) error
-	benchmarkSubmitFunc  func(ctx context.Context, req transcode.BenchmarkRequest) (transcode.BenchmarkJob, error)
-	benchmarkStatusFunc  func(ctx context.Context, jobID string) (transcode.BenchmarkStatus, error)
-	benchmarkCancelFunc  func(ctx context.Context, jobID string) error
+	doctorFunc          func(ctx context.Context) error
+	capabilitiesFunc    func(ctx context.Context) (transcode.WorkerCapabilities, error)
+	submitFunc          func(ctx context.Context, req transcode.Request) (transcode.Job, error)
+	statusFunc          func(ctx context.Context, jobID string) (transcode.JobStatus, error)
+	cancelFunc          func(ctx context.Context, jobID string) error
+	benchmarkSubmitFunc func(ctx context.Context, req transcode.BenchmarkRequest) (transcode.BenchmarkJob, error)
+	benchmarkStatusFunc func(ctx context.Context, jobID string) (transcode.BenchmarkStatus, error)
+	benchmarkCancelFunc func(ctx context.Context, jobID string) error
 }
 
 func (m *mockTranscodeExecutor) Doctor(ctx context.Context) error {

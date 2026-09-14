@@ -73,15 +73,15 @@ type BenchmarkCandidateMetricAggregate struct {
 
 // BenchmarkExecutionEvidence records all physical sample outcomes and metric measurements.
 type BenchmarkExecutionEvidence struct {
-	SourceVideoIndex  int                                  `json:"source_video_index"`
-	SourceBitDepth    int                                  `json:"source_bit_depth"`
-	SourcePixelFormat string                               `json:"source_pixel_format"`
-	SourceResolution  string                               `json:"source_resolution"`
-	ReferenceSamples  []BenchmarkSampleRef                 `json:"reference_samples"`
-	CandidateSamples  []BenchmarkCandidateSampleResult     `json:"candidate_samples"`
-	MetricSamples     []BenchmarkMetricSampleResult        `json:"metric_samples,omitempty"`
-	CandidateMetrics  []BenchmarkCandidateMetricAggregate  `json:"candidate_metrics,omitempty"`
-	Decision          *transcode.BenchmarkDecision         `json:"decision,omitempty"`
+	SourceVideoIndex  int                                 `json:"source_video_index"`
+	SourceBitDepth    int                                 `json:"source_bit_depth"`
+	SourcePixelFormat string                              `json:"source_pixel_format"`
+	SourceResolution  string                              `json:"source_resolution"`
+	ReferenceSamples  []BenchmarkSampleRef                `json:"reference_samples"`
+	CandidateSamples  []BenchmarkCandidateSampleResult    `json:"candidate_samples"`
+	MetricSamples     []BenchmarkMetricSampleResult       `json:"metric_samples,omitempty"`
+	CandidateMetrics  []BenchmarkCandidateMetricAggregate `json:"candidate_metrics,omitempty"`
+	Decision          *transcode.BenchmarkDecision        `json:"decision,omitempty"`
 }
 
 type validatedCandidate struct {
@@ -448,22 +448,22 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 // for extracting a frame-aligned, timestamp-normalized, lossless reference sample.
 //
 // Frame alignment & windowing rationale:
-// 1. Fast & frame-accurate seeking: Placing `-accurate_seek -ss <startSec>` before `-i`
-//    enables demuxer keyframe seeking immediately before the target timestamp, followed
-//    by accurate frame-by-frame decoding and discarding up to the requested point. This avoids
-//    decoding the entire media file from time 0 while guaranteeing deterministic frame boundaries.
-// 2. Deterministic window duration: `-t <durationSec>` extracts the requested window,
-//    which is deterministically frame-aligned and frame-quantized for VFR/timebase sources
-//    rather than a mathematically continuous floating-point cut.
-// 3. PTS normalization: `-avoid_negative_ts make_zero` resets stream and container timestamps
-//    so that the extracted sample starts cleanly at PTS 0.
-// 4. Lossless master: `-c:v ffv1` encodes losslessly, preserving raw decoded pixel format,
-//    bit depth, and frame cadence with zero generational loss.
-// 5. Clean elementary stream: `-an -sn -dn` strips audio, subtitles, and data streams.
-// 6. Deterministic candidate alignment: Candidate samples are subsequently encoded from this
-//    FFV1 reference master from frame 0 to end without seeking or trimming. While the source
-//    window itself is frame-quantized, the candidate-to-reference frame correspondence is
-//    strictly 1:1 and exact for downstream VMAF/SSIM metric evaluation.
+//  1. Fast & frame-accurate seeking: Placing `-accurate_seek -ss <startSec>` before `-i`
+//     enables demuxer keyframe seeking immediately before the target timestamp, followed
+//     by accurate frame-by-frame decoding and discarding up to the requested point. This avoids
+//     decoding the entire media file from time 0 while guaranteeing deterministic frame boundaries.
+//  2. Deterministic window duration: `-t <durationSec>` extracts the requested window,
+//     which is deterministically frame-aligned and frame-quantized for VFR/timebase sources
+//     rather than a mathematically continuous floating-point cut.
+//  3. PTS normalization: `-avoid_negative_ts make_zero` resets stream and container timestamps
+//     so that the extracted sample starts cleanly at PTS 0.
+//  4. Lossless master: `-c:v ffv1` encodes losslessly, preserving raw decoded pixel format,
+//     bit depth, and frame cadence with zero generational loss.
+//  5. Clean elementary stream: `-an -sn -dn` strips audio, subtitles, and data streams.
+//  6. Deterministic candidate alignment: Candidate samples are subsequently encoded from this
+//     FFV1 reference master from frame 0 to end without seeking or trimming. While the source
+//     window itself is frame-quantized, the candidate-to-reference frame correspondence is
+//     strictly 1:1 and exact for downstream VMAF/SSIM metric evaluation.
 func BuildReferenceExtractionArgs(sourcePath, refPath string, videoIndex int, startSec, durationSec float64) []string {
 	return []string{
 		"-y",
@@ -766,13 +766,13 @@ const MaxMetricLogSizeBytes = 5 * 1024 * 1024
 // escapeFFmpegFilterPath escapes an absolute filesystem path for safe use as a filter option
 // value in an FFmpeg -filter_complex argument.
 // FFmpeg filtergraph evaluation involves two distinct unescaping stages:
-// 1. Filtergraph syntax parsing (avfilter_graph_parse2), which unescapes backslashes preceding
-//    special syntax characters such as ':', '\'', '\\', '[', ']', ';', ','.
-// 2. Filter option key=value parsing (av_opt_set / av_set_options_string).
+//  1. Filtergraph syntax parsing (avfilter_graph_parse2), which unescapes backslashes preceding
+//     special syntax characters such as ':', '\”, '\\', '[', ']', ';', ','.
+//  2. Filter option key=value parsing (av_opt_set / av_set_options_string).
 //
 // To safely survive both stages without unintended option splitting or quote stripping:
 // - Backslash '\' becomes 4 backslashes "\\\\" (resolves to "\\" after stage 1, then "\" after stage 2)
-// - Single quote '\'' becomes 3 backslashes + quote "\\\'" (resolves to "\'" after stage 1, then "'" after stage 2)
+// - Single quote '\” becomes 3 backslashes + quote "\\\'" (resolves to "\'" after stage 1, then "'" after stage 2)
 // - Colon ':' becomes 2 backslashes + colon "\\:" (resolves to "\:" after stage 1, preventing option splitting, then ":" after stage 2)
 // - Brackets '[', ']', commas ',', and semicolons ';' are prefixed with "\\".
 func escapeFFmpegFilterPath(s string) string {
