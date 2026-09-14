@@ -3760,3 +3760,94 @@ exit 0
 		t.Errorf("expected VMAF 95.5 in partial evidence, got %v", evidence.MetricSamples[0].VMAF)
 	}
 }
+
+func TestBenchmarkRunner_ProgressAdvancesDeterministicallyAndCapsBelow100(t *testing.T) {
+	dir := t.TempDir()
+	sourceFile := filepath.Join(dir, "source.mkv")
+	sourceContent := make([]byte, 1024*1024)
+	if err := os.WriteFile(sourceFile, sourceContent, 0644); err != nil {
+		t.Fatalf("writing source file: %v", err)
+	}
+
+	mockFFmpeg, mockProbe, _ := setupMockTools(t, dir, sdr8BitProbeJSON, "")
+
+	stateDir := filepath.Join(dir, "state")
+	jobID := "bench-progress-units"
+	jobDir := filepath.Join(stateDir, jobID)
+	if err := os.MkdirAll(jobDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	cfg := &WorkerConfig{
+		StateDir:        stateDir,
+		AllowedRoots:    []string{dir},
+		MaxParallelJobs: 1,
+		FFmpeg:          mockFFmpeg,
+		FFprobe:         mockProbe,
+	}
+	worker := NewWorker(cfg)
+
+	token := "token-prog-runner"
+	record := &BenchmarkRecord{
+		ProtocolVersion: transcode.WorkerProtocolVersion,
+		ID:              jobID,
+		Status:          "running",
+		Source:          sourceFile,
+		Metric:          "vmaf",
+		RunToken:        token,
+		Samples: []transcode.BenchmarkSampleWindow{
+			{Index: 0, StartSeconds: 10.0, DurationSeconds: 15.0},
+			{Index: 1, StartSeconds: 50.0, DurationSeconds: 15.0},
+		},
+		Candidates: []transcode.BenchmarkCandidate{
+			{ID: "cand_q60", Quality: 60},
+			{ID: "cand_q70", Quality: 70},
+		},
+		Attempt: 1,
+	}
+	benchFile := filepath.Join(jobDir, "benchmark.json")
+	if err := SaveBenchmarkAtomic(benchFile, record); err != nil {
+		t.Fatalf("saving initial benchmark: %v", err)
+	}
+
+	runner := &ProductionBenchmarkRunner{}
+	ctx := context.Background()
+
+	if err := runner.RunBenchmark(ctx, worker, record); err != nil {
+		t.Fatalf("RunBenchmark failed: %v", err)
+	}
+
+	// Work units calculation:
+	// 2 samples reference extraction = 2 units
+	// 2 candidates * 2 samples encodes = 4 units
+	// 2 candidates * 2 samples VMAF passes = 4 units
+	// Total = 10 units.
+	// When all 10 complete, 10/10 = 100%, but must be capped below 100 (99.0%).
+	if record.Progress < 90.0 {
+		t.Errorf("expected progress to advance across all work units, got %v", record.Progress)
+	}
+	if record.Progress >= 100.0 {
+		t.Errorf("running benchmark progress must remain <100 until terminal completed state, got %v", record.Progress)
+	}
+	if record.Progress != 99.0 {
+		t.Errorf("expected capped progress 99.0 after all work units complete, got %v", record.Progress)
+	}
+	if record.Phase != "selecting_candidate" {
+		t.Errorf("expected final runner phase 'selecting_candidate', got %q", record.Phase)
+	}
+
+	// Verify benchmark.json on disk was also updated with monotonic progress < 100
+	onDisk, err := LoadBenchmark(benchFile)
+	if err != nil {
+		t.Fatalf("loading benchmark from disk: %v", err)
+	}
+	if onDisk.Progress != 99.0 {
+		t.Errorf("expected on-disk progress to be 99.0, got %v", onDisk.Progress)
+	}
+	if onDisk.Phase != "selecting_candidate" {
+		t.Errorf("expected on-disk phase 'selecting_candidate', got %q", onDisk.Phase)
+	}
+	if onDisk.HeartbeatAt.IsZero() {
+		t.Errorf("expected on-disk HeartbeatAt to be set")
+	}
+}

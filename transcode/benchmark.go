@@ -204,6 +204,8 @@ type BenchmarkStatus struct {
 	SourcePath      string             `json:"source_path"`
 	Metric          string             `json:"metric,omitempty"`
 	Progress        float64            `json:"progress"`
+	Phase           string             `json:"phase,omitempty"`
+	HeartbeatAt     time.Time          `json:"heartbeat_at,omitempty"`
 	Error           string             `json:"error,omitempty"`
 	SamplesPlanned  int                `json:"samples_planned"`
 	CandidatesCount int                `json:"candidates_count"`
