@@ -8,9 +8,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -103,9 +105,7 @@ func InspectFile(ctx context.Context, ffprobePath, path string) (Report, error) 
 	if probe.Format.FormatName != "" {
 		rep.Container = strings.Split(probe.Format.FormatName, ",")[0]
 	}
-	var fmtDur float64
-	fmt.Sscanf(probe.Format.Duration, "%f", &fmtDur)
-	rep.DurationSec = fmtDur
+	rep.DurationSec = ParseDuration(probe.Format.Duration)
 	for _, st := range probe.Streams {
 		lang := ""
 		for k, v := range st.Tags {
@@ -129,19 +129,70 @@ func InspectFile(ctx context.Context, ffprobePath, path string) (Report, error) 
 	return rep, nil
 }
 
+// MasteringDisplayMetadata captures HDR mastering display color volume (SMPTE 2086).
+type MasteringDisplayMetadata struct {
+	RedX         string `json:"red_x,omitempty"`
+	RedY         string `json:"red_y,omitempty"`
+	GreenX       string `json:"green_x,omitempty"`
+	GreenY       string `json:"green_y,omitempty"`
+	BlueX        string `json:"blue_x,omitempty"`
+	BlueY        string `json:"blue_y,omitempty"`
+	WhitePointX  string `json:"white_point_x,omitempty"`
+	WhitePointY  string `json:"white_point_y,omitempty"`
+	MinLuminance string `json:"min_luminance,omitempty"`
+	MaxLuminance string `json:"max_luminance,omitempty"`
+}
+
+// ContentLightLevelMetadata captures HDR content light levels (CTA-861.3).
+type ContentLightLevelMetadata struct {
+	MaxCLL  int `json:"max_content,omitempty"`
+	MaxFALL int `json:"max_average,omitempty"`
+}
+
+// SideDataRecord captures arbitrary stream side data records from ffprobe.
+type SideDataRecord struct {
+	SideDataType string         `json:"side_data_type"`
+	Data         map[string]any `json:"data,omitempty"`
+}
+
+// HDRReport summarizes high-dynamic-range metadata present on media streams.
+type HDRReport struct {
+	Present           bool                       `json:"present"`
+	ColorPrimaries    string                     `json:"color_primaries,omitempty"`
+	ColorTransfer     string                     `json:"color_transfer,omitempty"`
+	ColorSpace        string                     `json:"color_space,omitempty"`
+	MasteringDisplay  *MasteringDisplayMetadata  `json:"mastering_display,omitempty"`
+	ContentLightLevel *ContentLightLevelMetadata `json:"content_light_level,omitempty"`
+}
+
 // DetailedStream captures stream metadata needed for high-fidelity transcode verification.
 type DetailedStream struct {
-	Index       int               `json:"index"`
-	Kind        string            `json:"kind"` // video, audio, subtitle, attachment
-	Codec       string            `json:"codec"`
-	Language    string            `json:"language,omitempty"`
-	Title       string            `json:"title,omitempty"`
-	Channels    int               `json:"channels,omitempty"`
-	Width       int               `json:"width,omitempty"`
-	Height      int               `json:"height,omitempty"`
-	BitDepth    int               `json:"bit_depth,omitempty"`
-	Tags        map[string]string `json:"tags,omitempty"`
-	Disposition map[string]int    `json:"disposition,omitempty"`
+	Index             int                        `json:"index"`
+	Kind              string                     `json:"kind"` // video, audio, subtitle, attachment
+	Codec             string                     `json:"codec"`
+	Profile           string                     `json:"profile,omitempty"`
+	PixelFormat       string                     `json:"pixel_format,omitempty"`
+	Language          string                     `json:"language,omitempty"`
+	Title             string                     `json:"title,omitempty"`
+	Channels          int                        `json:"channels,omitempty"`
+	ChannelLayout     string                     `json:"channel_layout,omitempty"`
+	Width             int                        `json:"width,omitempty"`
+	Height            int                        `json:"height,omitempty"`
+	BitDepth          int                        `json:"bit_depth,omitempty"`
+	RFrameRate        string                     `json:"r_frame_rate,omitempty"`
+	AvgFrameRate      string                     `json:"avg_frame_rate,omitempty"`
+	FrameRate         string                     `json:"frame_rate,omitempty"` // aliases avg_frame_rate or r_frame_rate for backwards compatibility
+	FPS               float64                    `json:"fps,omitempty"`
+	BitRate           int64                      `json:"bit_rate,omitempty"`
+	ColorRange        string                     `json:"color_range,omitempty"`
+	ColorSpace        string                     `json:"color_space,omitempty"`
+	ColorPrimaries    string                     `json:"color_primaries,omitempty"`
+	ColorTransfer     string                     `json:"color_transfer,omitempty"`
+	MasteringDisplay  *MasteringDisplayMetadata  `json:"mastering_display,omitempty"`
+	ContentLightLevel *ContentLightLevelMetadata `json:"content_light_level,omitempty"`
+	SideData          []SideDataRecord           `json:"side_data,omitempty"`
+	Tags              map[string]string          `json:"tags,omitempty"`
+	Disposition       map[string]int             `json:"disposition,omitempty"`
 }
 
 // DetailedReport provides full-fidelity inspection including video, audio, subtitles, attachments, and chapters.
@@ -150,12 +201,14 @@ type DetailedReport struct {
 	Container   string           `json:"container"`
 	DurationSec float64          `json:"duration_sec"`
 	SizeBytes   int64            `json:"size_bytes"`
+	BitRate     int64            `json:"bit_rate,omitempty"` // format/overall container bitrate in bps
 	Video       []DetailedStream `json:"video"`
 	Audio       []DetailedStream `json:"audio"`
 	Subtitles   []DetailedStream `json:"subtitles"`
 	Attachments []DetailedStream `json:"attachments"`
 	Chapters    int              `json:"chapters"`
 	Probed      bool             `json:"probed"`
+	HDR         *HDRReport       `json:"hdr,omitempty"`
 }
 
 // InspectDetailed runs ffprobe with streams and chapters for rigorous transcode validation.
@@ -194,17 +247,28 @@ func InspectDetailed(ctx context.Context, ffprobePath, path string) (DetailedRep
 			CodecName        string            `json:"codec_name"`
 			Profile          string            `json:"profile"`
 			PixFmt           string            `json:"pix_fmt"`
+			RFrameRate       string            `json:"r_frame_rate"`
+			AvgFrameRate     string            `json:"avg_frame_rate"`
 			Width            int               `json:"width"`
 			Height           int               `json:"height"`
 			Channels         int               `json:"channels"`
+			ChannelLayout    string            `json:"channel_layout"`
 			BitsPerRawSample any               `json:"bits_per_raw_sample"`
+			BitRate          any               `json:"bit_rate"`
+			ColorRange       string            `json:"color_range"`
+			ColorSpace       string            `json:"color_space"`
+			ColorPrimaries   string            `json:"color_primaries"`
+			ColorTransfer    string            `json:"color_transfer"`
+			SideDataList     []json.RawMessage `json:"side_data_list"`
 			Tags             map[string]string `json:"tags"`
 			Disposition      map[string]int    `json:"disposition"`
 		} `json:"streams"`
 		Format struct {
-			FormatName string `json:"format_name"`
-			Duration   string `json:"duration"`
-			Size       string `json:"size"`
+			FormatName string            `json:"format_name"`
+			Duration   string            `json:"duration"`
+			Size       string            `json:"size"`
+			BitRate    any               `json:"bit_rate"`
+			Tags       map[string]string `json:"tags"`
 		} `json:"format"`
 		Chapters []any `json:"chapters"`
 	}
@@ -217,9 +281,8 @@ func InspectDetailed(ctx context.Context, ffprobePath, path string) (DetailedRep
 	if probe.Format.FormatName != "" {
 		rep.Container = strings.Split(probe.Format.FormatName, ",")[0]
 	}
-	var fmtDur float64
-	fmt.Sscanf(probe.Format.Duration, "%f", &fmtDur)
-	rep.DurationSec = fmtDur
+	rep.DurationSec = ParseDuration(probe.Format.Duration)
+	rep.BitRate = ParseBitRate(probe.Format.BitRate, probe.Format.Tags)
 	rep.Chapters = len(probe.Chapters)
 
 	for _, st := range probe.Streams {
@@ -234,22 +297,66 @@ func InspectDetailed(ctx context.Context, ffprobePath, path string) (DetailedRep
 			}
 		}
 
+		frameRate, fps := ParseFrameRate(st.RFrameRate, st.AvgFrameRate)
+		bitRate := ParseBitRate(st.BitRate, st.Tags)
+
 		ds := DetailedStream{
-			Index:       st.Index,
-			Kind:        st.CodecType,
-			Codec:       strings.ToLower(st.CodecName),
-			Language:    lang,
-			Title:       title,
-			Channels:    st.Channels,
-			Width:       st.Width,
-			Height:      st.Height,
-			Tags:        st.Tags,
-			Disposition: st.Disposition,
+			Index:          st.Index,
+			Kind:           st.CodecType,
+			Codec:          strings.ToLower(st.CodecName),
+			Profile:        st.Profile,
+			PixelFormat:    st.PixFmt,
+			Language:       lang,
+			Title:          title,
+			Channels:       st.Channels,
+			ChannelLayout:  st.ChannelLayout,
+			Width:          st.Width,
+			Height:         st.Height,
+			RFrameRate:     st.RFrameRate,
+			AvgFrameRate:   st.AvgFrameRate,
+			FrameRate:      frameRate,
+			FPS:            fps,
+			BitRate:        bitRate,
+			ColorRange:     st.ColorRange,
+			ColorSpace:     st.ColorSpace,
+			ColorPrimaries: st.ColorPrimaries,
+			ColorTransfer:  st.ColorTransfer,
+			Tags:           st.Tags,
+			Disposition:    st.Disposition,
+		}
+
+		if len(st.SideDataList) > 0 {
+			ds.SideData = sanitizeSideDataList(st.SideDataList)
+			for _, rawSD := range st.SideDataList {
+				var sdMap map[string]any
+				if err := json.Unmarshal(rawSD, &sdMap); err != nil {
+					continue
+				}
+				sdType, _ := sdMap["side_data_type"].(string)
+				if strings.EqualFold(sdType, "Mastering display metadata") {
+					ds.MasteringDisplay = parseMasteringDisplayMetadata(sdMap)
+				}
+				if strings.EqualFold(sdType, "Content light level metadata") {
+					ds.ContentLightLevel = parseContentLightLevelMetadata(sdMap)
+				}
+			}
 		}
 
 		switch st.CodecType {
 		case "video":
 			ds.BitDepth = ParseBitDepth(st.BitsPerRawSample, st.PixFmt, st.Profile)
+			if isHDRStream(ds) {
+				if rep.HDR == nil {
+					rep.HDR = &HDRReport{
+						Present:           true,
+						ColorPrimaries:    ds.ColorPrimaries,
+						ColorTransfer:     ds.ColorTransfer,
+						ColorSpace:        ds.ColorSpace,
+						MasteringDisplay:  ds.MasteringDisplay,
+						ContentLightLevel: ds.ContentLightLevel,
+					}
+				}
+			}
 			rep.Video = append(rep.Video, ds)
 		case "audio":
 			rep.Audio = append(rep.Audio, ds)
@@ -261,6 +368,424 @@ func InspectDetailed(ctx context.Context, ffprobePath, path string) (DetailedRep
 	}
 
 	return rep, nil
+}
+
+// ParseDuration parses a duration string in seconds and returns a non-negative finite float64.
+// Rejects NaN, Inf, and negative values.
+func ParseDuration(raw string) float64 {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return 0
+	}
+	f, err := strconv.ParseFloat(trimmed, 64)
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f <= 0 {
+		return 0
+	}
+	return f
+}
+
+// ParseFrameRateRational parses a rational frame rate string like "24000/1001" or "24" to float64.
+func ParseFrameRateRational(raw string) (float64, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "0/0" {
+		return 0, false
+	}
+	parts := strings.Split(raw, "/")
+	if len(parts) == 2 {
+		num, err1 := strconv.ParseFloat(parts[0], 64)
+		den, err2 := strconv.ParseFloat(parts[1], 64)
+		if err1 == nil && err2 == nil && den > 0 && !math.IsNaN(num) && !math.IsNaN(den) && !math.IsInf(num, 0) && !math.IsInf(den, 0) {
+			fps := num / den
+			if fps > 0 && !math.IsNaN(fps) && !math.IsInf(fps, 0) {
+				return fps, true
+			}
+		}
+	} else if len(parts) == 1 {
+		val, err := strconv.ParseFloat(parts[0], 64)
+		if err == nil && val > 0 && !math.IsNaN(val) && !math.IsInf(val, 0) {
+			return val, true
+		}
+	}
+	return 0, false
+}
+
+// ParseFrameRate extracts frame rate prioritizing avg_frame_rate first, falling back to r_frame_rate.
+// It returns the chosen frame rate string and the calculated float64 FPS.
+func ParseFrameRate(rFrameRate, avgFrameRate string) (string, float64) {
+	if fps, ok := ParseFrameRateRational(avgFrameRate); ok {
+		return avgFrameRate, fps
+	}
+	if fps, ok := ParseFrameRateRational(rFrameRate); ok {
+		return rFrameRate, fps
+	}
+	return "", 0
+}
+
+func parseMasteringDisplayMetadata(sdMap map[string]any) *MasteringDisplayMetadata {
+	if sdMap == nil {
+		return nil
+	}
+	getString := func(key string) string {
+		v, ok := sdMap[key]
+		if !ok || v == nil {
+			return ""
+		}
+		s := strings.TrimSpace(fmt.Sprintf("%v", v))
+		if s == "" || s == "<nil>" || s == "nil" {
+			return ""
+		}
+		return s
+	}
+
+	md := &MasteringDisplayMetadata{
+		RedX:         getString("red_x"),
+		RedY:         getString("red_y"),
+		GreenX:       getString("green_x"),
+		GreenY:       getString("green_y"),
+		BlueX:        getString("blue_x"),
+		BlueY:        getString("blue_y"),
+		WhitePointX:  getString("white_point_x"),
+		WhitePointY:  getString("white_point_y"),
+		MinLuminance: getString("min_luminance"),
+		MaxLuminance: getString("max_luminance"),
+	}
+
+	if md.RedX == "" && md.RedY == "" && md.GreenX == "" && md.GreenY == "" &&
+		md.BlueX == "" && md.BlueY == "" && md.WhitePointX == "" && md.WhitePointY == "" &&
+		md.MinLuminance == "" && md.MaxLuminance == "" {
+		return nil
+	}
+	return md
+}
+
+func parseContentLightLevelMetadata(sdMap map[string]any) *ContentLightLevelMetadata {
+	if sdMap == nil {
+		return nil
+	}
+	getInt := func(keys ...string) int {
+		for _, k := range keys {
+			v, ok := sdMap[k]
+			if !ok || v == nil {
+				continue
+			}
+			switch val := v.(type) {
+			case float64:
+				if val > 0 && !math.IsNaN(val) && !math.IsInf(val, 0) && val <= float64(math.MaxInt32) {
+					return int(val)
+				}
+			case float32:
+				f := float64(val)
+				if f > 0 && !math.IsNaN(f) && !math.IsInf(f, 0) && f <= float64(math.MaxInt32) {
+					return int(f)
+				}
+			case int:
+				if val > 0 && val <= math.MaxInt32 {
+					return val
+				}
+			case int64:
+				if val > 0 && val <= math.MaxInt32 {
+					return int(val)
+				}
+			case string:
+				trimmed := strings.TrimSpace(val)
+				if n, err := strconv.ParseInt(trimmed, 10, 64); err == nil && n > 0 && n <= math.MaxInt32 {
+					return int(n)
+				}
+				if f, err := strconv.ParseFloat(trimmed, 64); err == nil && f > 0 && !math.IsNaN(f) && !math.IsInf(f, 0) && f <= float64(math.MaxInt32) {
+					return int(f)
+				}
+			}
+		}
+		return 0
+	}
+
+	cll := &ContentLightLevelMetadata{
+		MaxCLL:  getInt("max_content", "max_content_light_level"),
+		MaxFALL: getInt("max_average", "max_frame_average_light_level"),
+	}
+	if cll.MaxCLL == 0 && cll.MaxFALL == 0 {
+		return nil
+	}
+	return cll
+}
+
+const (
+	maxSideDataEntries = 10
+	maxSideDataKeys    = 15
+	maxSideDataValLen  = 256
+)
+
+func sanitizeSideDataList(rawList []json.RawMessage) []SideDataRecord {
+	if len(rawList) == 0 {
+		return nil
+	}
+	limit := len(rawList)
+	if limit > maxSideDataEntries {
+		limit = maxSideDataEntries
+	}
+	result := make([]SideDataRecord, 0, limit)
+	for i := 0; i < limit; i++ {
+		var sdMap map[string]any
+		if err := json.Unmarshal(rawList[i], &sdMap); err != nil || len(sdMap) == 0 {
+			continue
+		}
+		sdType, _ := sdMap["side_data_type"].(string)
+		sanitized := sanitizeSideDataMap(sdMap)
+		if len(sanitized) > 0 {
+			result = append(result, SideDataRecord{
+				SideDataType: sdType,
+				Data:         sanitized,
+			})
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+func sanitizeSideDataMap(entry map[string]any) map[string]any {
+	out := make(map[string]any)
+	keys := make([]string, 0, len(entry))
+	for k := range entry {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	count := 0
+	for _, k := range keys {
+		if count >= maxSideDataKeys {
+			break
+		}
+		v := entry[k]
+		if v == nil {
+			continue
+		}
+		switch val := v.(type) {
+		case string:
+			str := strings.TrimSpace(val)
+			if str == "" || str == "<nil>" || str == "nil" {
+				continue
+			}
+			if len(str) > maxSideDataValLen {
+				str = str[:maxSideDataValLen]
+			}
+			out[k] = str
+			count++
+		case float64, float32, int, int64, int32, uint, uint64, uint32, bool:
+			out[k] = val
+			count++
+		case map[string]any:
+			nested := make(map[string]any)
+			nestedKeys := make([]string, 0, len(val))
+			for nk := range val {
+				nestedKeys = append(nestedKeys, nk)
+			}
+			sort.Strings(nestedKeys)
+
+			nestedCount := 0
+			for _, nk := range nestedKeys {
+				if nestedCount >= 10 {
+					break
+				}
+				nv := val[nk]
+				if nv == nil {
+					continue
+				}
+				switch nval := nv.(type) {
+				case string:
+					str := strings.TrimSpace(nval)
+					if str != "" && str != "<nil>" && str != "nil" {
+						if len(str) > maxSideDataValLen {
+							str = str[:maxSideDataValLen]
+						}
+						nested[nk] = str
+						nestedCount++
+					}
+				case float64, float32, int, int64, int32, uint, uint64, uint32, bool:
+					nested[nk] = nval
+					nestedCount++
+				}
+			}
+			if len(nested) > 0 {
+				out[k] = nested
+				count++
+			}
+		}
+	}
+	return out
+}
+
+// ParseBitRate extracts bitrate in bits per second from raw ffprobe bit_rate or tags.
+func ParseBitRate(raw any, tags map[string]string) int64 {
+	// 1<<63 is 9223372036854775808.0 (the float64 value of math.MaxInt64 rounded to 2^63).
+	// Any float64 >= 1<<63 overflows signed int64 conversion and produces math.MinInt64.
+	// Therefore, float values must be strictly < 9223372036854775808.0 (float64(uint64(1)<<63)).
+	const maxInt64Float = float64(uint64(1) << 63)
+	if raw != nil {
+		switch v := raw.(type) {
+		case string:
+			trimmed := strings.TrimSpace(v)
+			if n, err := strconv.ParseInt(trimmed, 10, 64); err == nil && n > 0 {
+				return n
+			}
+			if f, err := strconv.ParseFloat(trimmed, 64); err == nil && f > 0 && !math.IsNaN(f) && !math.IsInf(f, 0) && f < maxInt64Float {
+				if n := int64(f); n > 0 {
+					return n
+				}
+			}
+		case float64:
+			if v > 0 && !math.IsNaN(v) && !math.IsInf(v, 0) && v < maxInt64Float {
+				if n := int64(v); n > 0 {
+					return n
+				}
+			}
+		case float32:
+			f := float64(v)
+			if f > 0 && !math.IsNaN(f) && !math.IsInf(f, 0) && f < maxInt64Float {
+				if n := int64(f); n > 0 {
+					return n
+				}
+			}
+		case int64:
+			if v > 0 {
+				return v
+			}
+		case int:
+			if v > 0 {
+				return int64(v)
+			}
+		}
+	}
+	if len(tags) > 0 {
+		var bpsKeys []string
+		for k := range tags {
+			if strings.HasPrefix(strings.ToUpper(k), "BPS") {
+				bpsKeys = append(bpsKeys, k)
+			}
+		}
+		sort.Slice(bpsKeys, func(i, j int) bool {
+			iExact := strings.EqualFold(bpsKeys[i], "BPS")
+			jExact := strings.EqualFold(bpsKeys[j], "BPS")
+			if iExact != jExact {
+				return iExact
+			}
+			return bpsKeys[i] < bpsKeys[j]
+		})
+		for _, k := range bpsKeys {
+			trimmed := strings.TrimSpace(tags[k])
+			if n, err := strconv.ParseInt(trimmed, 10, 64); err == nil && n > 0 {
+				return n
+			}
+			if f, err := strconv.ParseFloat(trimmed, 64); err == nil && f > 0 && !math.IsNaN(f) && !math.IsInf(f, 0) && f < maxInt64Float {
+				if n := int64(f); n > 0 {
+					return n
+				}
+			}
+		}
+	}
+	return 0
+}
+
+func isHDRStream(st DetailedStream) bool {
+	return IsHDRorDolbyVisionStream(st)
+}
+
+// IsHDRorDolbyVisionStream reports whether a video stream contains HDR or Dolby Vision signaling.
+// It checks mastering display and content light metadata, codecs (dovi, dvh1, dvhe, dva1, dav1),
+// profiles (Dolby Vision, dovi, dv), color transfer characteristics (smpte2084, arib-std-b67, hlg, pq),
+// color primaries (bt2020, dci-p3), color matrix space (bt2020nc/c), side data (DV RPU, mastering display, etc.),
+// and stream tags.
+func IsHDRorDolbyVisionStream(st DetailedStream) bool {
+	// 1. Mastering display metadata or content light level
+	if st.MasteringDisplay != nil || st.ContentLightLevel != nil {
+		return true
+	}
+
+	// 2. Codec and profile check for Dolby Vision / HDR
+	codec := strings.ToLower(strings.TrimSpace(st.Codec))
+	profile := strings.ToLower(strings.TrimSpace(st.Profile))
+	if strings.Contains(codec, "dovi") || strings.Contains(codec, "dvh1") ||
+		strings.Contains(codec, "dvhe") || strings.Contains(codec, "dva1") ||
+		strings.Contains(codec, "dav1") {
+		return true
+	}
+	if strings.Contains(profile, "dolby vision") || strings.Contains(profile, "dovi") ||
+		strings.HasPrefix(profile, "dv") {
+		return true
+	}
+
+	// 3. Color transfer characteristics
+	transfer := strings.ToLower(strings.TrimSpace(st.ColorTransfer))
+	switch transfer {
+	case "smpte2084", "arib-std-b67", "arib_std_b67", "hlg", "pq", "smpte428", "bt2020-10", "bt2020-12":
+		return true
+	}
+	if strings.Contains(transfer, "2084") || strings.Contains(transfer, "hlg") || strings.Contains(transfer, "pq") {
+		return true
+	}
+
+	// 4. Color primaries
+	primaries := strings.ToLower(strings.TrimSpace(st.ColorPrimaries))
+	switch primaries {
+	case "bt2020", "bt2020nc", "bt2020c", "dci-p3":
+		return true
+	}
+	if strings.Contains(primaries, "2020") || primaries == "dci-p3" {
+		return true
+	}
+
+	// 5. Color space / matrix coefficients
+	cs := strings.ToLower(strings.TrimSpace(st.ColorSpace))
+	switch cs {
+	case "bt2020nc", "bt2020c":
+		return true
+	}
+	if strings.Contains(cs, "2020") {
+		return true
+	}
+
+	// 6. Side data (DV RPU, mastering display, content light, etc.)
+	for _, sd := range st.SideData {
+		sdt := strings.ToLower(strings.TrimSpace(sd.SideDataType))
+		if strings.Contains(sdt, "mastering display") ||
+			strings.Contains(sdt, "content light") ||
+			strings.Contains(sdt, "dovi") ||
+			strings.Contains(sdt, "dolby vision") ||
+			strings.Contains(sdt, "hdr") {
+			return true
+		}
+	}
+
+	// 7. Stream tags
+	for k, v := range st.Tags {
+		kl := strings.ToLower(k)
+		vl := strings.ToLower(v)
+		if strings.Contains(kl, "dovi") || strings.Contains(kl, "dolby") ||
+			strings.Contains(vl, "dovi") || strings.Contains(vl, "dolby vision") ||
+			strings.Contains(vl, "dvh1") || strings.Contains(vl, "dvhe") ||
+			strings.Contains(vl, "dva1") || strings.Contains(vl, "dav1") {
+			return true
+		}
+	}
+
+	return false
+}
+
+// IsHDRorDolbyVisionReport reports whether a DetailedReport represents HDR or Dolby Vision media.
+func IsHDRorDolbyVisionReport(rep *DetailedReport) bool {
+	if rep == nil {
+		return false
+	}
+	if rep.HDR != nil && rep.HDR.Present {
+		return true
+	}
+	for _, vs := range rep.Video {
+		if IsHDRorDolbyVisionStream(vs) {
+			return true
+		}
+	}
+	return false
 }
 
 // ParseBitDepth extracts bit depth from raw bits (number or string), pixel format, or profile.

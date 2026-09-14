@@ -1,0 +1,91 @@
+# Example recipe bundle (schema_version 2) with benchmark-driven optimization.
+#
+# This file is an opt-in example only. It is NOT the embedded builtin bundle
+# (transcode/recipe/default.yaml, schema_version 1), whose profiles are
+# intentionally left unchanged: profiles without `optimization` keep the exact
+# legacy transcode_media flow with no observable behavior change.
+#
+# To use it, point Navigatorr at this file:
+#
+#   transcode:
+#     recipes:
+#       source: file
+#       path: /config/transcode-recipes-optimization.yaml
+#       cache_dir: /config/cache/transcode-recipes
+#
+# Then run `recipe_reload`, confirm `recipe_status`, and invoke:
+#   benchmark_transcode (benchmark-only, never creates a permanent candidate), or
+#   transcode_media with profile general-hevc-optimized (full candidate only
+#   when the benchmark selects a valid winner; candidate-only, never replaces
+#   the original).
+#
+# Rollout note: update Navigatorr AND the worker first, verify the capability
+# handshake (`navigatorr-transcode capabilities`), and only then activate a
+# v2 bundle. A v2 bundle never activates on an old binary.
+
+schema_version: 2
+bundle_version: "2026.09.3-example.1"
+
+containers:
+  mkv:
+    subtitle_copy:
+      - subrip
+      - srt
+      - ass
+      - ssa
+      - hdmv_pgs_subtitle
+      - pgs
+      - dvd_subtitle
+      - vobsub
+      - dvb_subtitle
+      - dvb_teletext
+      - webvtt
+      - text
+    subtitle_conversions:
+      mov_text:
+        target_codec: subrip
+        reason: matroska_compatibility
+
+profiles:
+  # 8-bit SDR optimization example. All policy values below restate the
+  # documented engine defaults explicitly so the file reads standalone.
+  general-hevc-optimized:
+    container: mkv
+    video: {codec: hevc_videotoolbox, quality: 65}
+    audio: {mode: copy}
+    subtitles: {mode: preserve, convert_incompatible: true}
+    preserve: {metadata: true, chapters: true, attachments: true}
+    resilience: &default_resilience
+      max_attempts: 3
+      transient_retries: 2
+      retry_backoff_seconds: [5, 20]
+      max_fallbacks: 1
+      fallbacks:
+        - {when: container_subtitle_incompatible, action: apply_container_conversion}
+        - {when: worker_busy, action: retry}
+        - {when: ssh_transient, action: retry}
+    optimization:
+      enabled: true
+      sampling:
+        strategy: distributed
+        sample_count: 3
+        sample_seconds: 20
+        positions: [0.2, 0.5, 0.8]
+      quality:
+        preferred_metric: vmaf
+        vmaf: {target: 96.0, minimum: 95.0, marginal_tolerance: 0.5}
+        ssim: {target: 0.99, minimum: 0.98, marginal_tolerance: 0.005}
+      search:
+        max_candidates: 5
+        quality_values: [55, 60, 65, 70, 75]
+      size:
+        preferred_total_bitrate_kbps: {min: 2100, max: 3650}
+        soft_max_total_bitrate_kbps: 4250
+
+  # 10-bit SDR note: a 10-bit source only ever yields 10-bit candidates
+  # (main10 + p010le). There is deliberately NO "convert 8-bit to 10-bit"
+  # optimization: 8-bit sources only yield 8-bit candidates. Sources that
+  # need 10-bit scoring must prefer ssim, because VMAF on 10-bit sources
+  # fails closed unless the worker reports verified 10-bit VMAF capability.
+  # HDR and Dolby Vision sources fail closed (review, no automatic winner,
+  # no tone mapping) and are never scored against SDR thresholds.
