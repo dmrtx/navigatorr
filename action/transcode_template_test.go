@@ -1484,7 +1484,9 @@ func TestTranscode_AutoProfile_ExplicitProfileCompatible(t *testing.T) {
 	_ = os.MkdirAll(filepath.Dir(candFile), 0755)
 
 	origContent := bytes.Repeat([]byte("test original"), 100)
-	candContent := bytes.Repeat([]byte("test candidate"), 100)
+	// Candidate must not exceed the original: with no explicit
+	// max_size_increase_percent the effective default (0%) applies.
+	candContent := bytes.Repeat([]byte("test candidate"), 90)
 	_ = os.WriteFile(origFile, origContent, 0644)
 	_ = os.WriteFile(candFile, candContent, 0644)
 
