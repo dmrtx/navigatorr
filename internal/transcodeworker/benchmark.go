@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -16,6 +17,11 @@ import (
 	"github.com/jakenesler/navigatorr/transcode"
 )
 
+var (
+	ErrBenchmarkNotActive        = errors.New("benchmark is not active")
+	ErrBenchmarkRunTokenMismatch = errors.New("benchmark run token mismatch")
+)
+
 // BenchmarkRecord represents the persistent state stored in benchmark.json on the worker.
 type BenchmarkRecord struct {
 	ProtocolVersion           int                               `json:"protocol_version"`
@@ -24,6 +30,9 @@ type BenchmarkRecord struct {
 	Source                    string                            `json:"source"`
 	SourceDuration            float64                           `json:"source_duration,omitempty"`
 	Metric                    string                            `json:"metric"`
+	Progress                  float64                           `json:"progress"`
+	Phase                     string                            `json:"phase,omitempty"`
+	HeartbeatAt               time.Time                         `json:"heartbeat_at,omitempty"`
 	Samples                   []transcode.BenchmarkSampleWindow `json:"samples"`
 	Candidates                []transcode.BenchmarkCandidate    `json:"candidates"`
 	Quality                   *transcode.BenchmarkQualityConfig `json:"quality,omitempty"`
@@ -480,6 +489,61 @@ func (w *Worker) CleanBenchmarkSamples(jobID string) error {
 	return os.RemoveAll(samplesDir)
 }
 
+// UpdateBenchmarkProgress safely updates progress, phase, and heartbeat of a benchmark job.
+// It acquires the job lock, loads latest benchmark.json, verifies the RunToken, ensures status
+// is still queued or running, applies monotonic progress update, and saves atomically.
+// It preserves cancellation, PID, evidence, and other concurrent state.
+func (w *Worker) UpdateBenchmarkProgress(jobID, runToken string, progress float64, phase string) error {
+	cleanID := strings.TrimSpace(jobID)
+	if err := transcode.ValidateBenchmarkJobID(cleanID); err != nil {
+		return fmt.Errorf("invalid jobID for progress update: %w", err)
+	}
+
+	cleanStateDir := filepath.Clean(w.cfg.StateDir)
+	jobDir := filepath.Join(cleanStateDir, cleanID)
+	rel, err := filepath.Rel(cleanStateDir, jobDir)
+	if err != nil || rel == "." || rel != cleanID || strings.HasPrefix(rel, "..") || strings.Contains(rel, "/") || strings.Contains(rel, "\\") {
+		return fmt.Errorf("invalid jobID: path traversal")
+	}
+
+	jobLock, err := acquireJobLock(jobDir)
+	if err != nil {
+		return fmt.Errorf("acquiring job lock for progress update %s: %w", cleanID, err)
+	}
+	defer jobLock.Unlock()
+
+	benchFile := filepath.Join(jobDir, "benchmark.json")
+	latest, err := LoadBenchmark(benchFile)
+	if err != nil {
+		return fmt.Errorf("loading benchmark %s: %w", cleanID, err)
+	}
+
+	// Verify the same RunToken (FAIL CLOSED)
+	if latest.RunToken == "" || latest.RunToken != runToken {
+		return fmt.Errorf("%w for benchmark %s (expected %q, got %q)", ErrBenchmarkRunTokenMismatch, cleanID, latest.RunToken, runToken)
+	}
+
+	// Verify status is still queued or running (do not overwrite cancelled, failed, or completed)
+	if latest.Status != "queued" && latest.Status != "running" {
+		return fmt.Errorf("%w for benchmark %s (status=%s)", ErrBenchmarkNotActive, cleanID, latest.Status)
+	}
+
+	// Apply monotonic progress (never regress)
+	if progress > latest.Progress {
+		latest.Progress = progress
+	}
+	if phase != "" {
+		latest.Phase = phase
+	}
+	latest.HeartbeatAt = time.Now().UTC()
+
+	if err := SaveBenchmarkAtomic(benchFile, latest); err != nil {
+		return fmt.Errorf("saving benchmark progress for %s: %w", cleanID, err)
+	}
+
+	return nil
+}
+
 // BenchmarkStatus returns the current status and metadata of a benchmark job.
 func (w *Worker) BenchmarkStatus(ctx context.Context, jobID string) (transcode.BenchmarkStatus, error) {
 	cleanID := strings.TrimSpace(jobID)
@@ -518,6 +582,9 @@ func (w *Worker) BenchmarkStatus(ctx context.Context, jobID string) (transcode.B
 	st.FinishedAt = record.FinishedAt
 	st.Error = record.Error
 	st.Status = record.Status
+	st.Progress = record.Progress
+	st.Phase = record.Phase
+	st.HeartbeatAt = record.HeartbeatAt
 	if record.Evidence != nil && record.Evidence.Decision != nil {
 		st.Decision = record.Evidence.Decision
 	}
@@ -542,11 +609,17 @@ func (w *Worker) BenchmarkStatus(ctx context.Context, jobID string) (transcode.B
 						st.Status = latest.Status
 						st.Error = latest.Error
 						st.FinishedAt = latest.FinishedAt
+						st.Progress = latest.Progress
+						st.Phase = latest.Phase
+						st.HeartbeatAt = latest.HeartbeatAt
 					} else {
 						st.Status = latest.Status
 						st.Error = latest.Error
 						st.StartedAt = latest.StartedAt
 						st.FinishedAt = latest.FinishedAt
+						st.Progress = latest.Progress
+						st.Phase = latest.Phase
+						st.HeartbeatAt = latest.HeartbeatAt
 					}
 				}
 			}
@@ -661,6 +734,8 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) 
 	if record.StartedAt.IsZero() {
 		record.StartedAt = time.Now().UTC()
 	}
+	record.Phase = "starting"
+	record.HeartbeatAt = time.Now().UTC()
 	if err := SaveBenchmarkAtomic(benchFile, record); err != nil {
 		jobLock.Unlock()
 		return fmt.Errorf("updating benchmark to running: %w", err)
@@ -708,6 +783,10 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) 
 		latest.Status = "failed"
 		latest.Error = runErr.Error()
 		latest.FinishedAt = time.Now().UTC()
+		latest.HeartbeatAt = time.Now().UTC()
+		if record.Progress > latest.Progress {
+			latest.Progress = record.Progress
+		}
 		if record.Evidence != nil {
 			latest.Evidence = record.Evidence
 		}
@@ -717,6 +796,9 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) 
 
 	latest.Status = "completed"
 	latest.FinishedAt = time.Now().UTC()
+	latest.HeartbeatAt = time.Now().UTC()
+	latest.Progress = 100
+	latest.Phase = "completed"
 	latest.Error = ""
 	latest.Evidence = record.Evidence
 	if err := SaveBenchmarkAtomic(benchFile, latest); err != nil {

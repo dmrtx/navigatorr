@@ -1429,3 +1429,105 @@ func TestTranscodeMedia_Optimized_ReloadResumeAcrossBenchmarkCompletedBoundary(t
 		t.Errorf("submitted transcode request does not have winner's quality 72")
 	}
 }
+
+func TestBenchmarkWait_PhaseAndHeartbeatOutputs(t *testing.T) {
+	t.Run("running wait output includes phase and heartbeat when supplied", func(t *testing.T) {
+		fixedHeartbeat := time.Date(2026, 9, 14, 15, 30, 0, 0, time.UTC)
+		mock := &mockTranscodeExecutor{
+			benchmarkSubmitFunc: func(ctx context.Context, req transcode.BenchmarkRequest) (transcode.BenchmarkJob, error) {
+				return transcode.BenchmarkJob{ID: req.ID}, nil
+			},
+			benchmarkStatusFunc: func(ctx context.Context, jobID string) (transcode.BenchmarkStatus, error) {
+				return transcode.BenchmarkStatus{
+					ProtocolVersion: transcode.WorkerProtocolVersion,
+					ID:              jobID,
+					Status:          transcode.StatusRunning,
+					Progress:        35.5,
+					Phase:           "encoding_candidates",
+					HeartbeatAt:     fixedHeartbeat,
+				}, nil
+			},
+		}
+
+		engine, _, mediaFile, _ := setupBenchmarkTestEnv(t, mock, standard8BitProbeJSON, &recipe.OptimizationPolicy{Enabled: true})
+		res, err := engine.Run(context.Background(), "benchmark_transcode", map[string]any{
+			"path":    mediaFile,
+			"profile": "opt-vt",
+		})
+		if err != nil {
+			t.Fatalf("unexpected engine error: %v", err)
+		}
+
+		if res.Status != StatusWaitingExternal {
+			t.Fatalf("expected StatusWaitingExternal, got %s", res.Status)
+		}
+		if !strings.Contains(res.WaitingReason, "phase: encoding_candidates") {
+			t.Errorf("expected WaitingReason to include 'phase: encoding_candidates', got %q", res.WaitingReason)
+		}
+		if !strings.Contains(res.WaitingReason, "35.5%") {
+			t.Errorf("expected WaitingReason to include progress '35.5%%', got %q", res.WaitingReason)
+		}
+		if res.Outputs["phase"] != "encoding_candidates" {
+			t.Errorf("expected Outputs[phase]='encoding_candidates', got %v", res.Outputs["phase"])
+		}
+		if res.Outputs["progress"] != 35.5 {
+			t.Errorf("expected Outputs[progress]=35.5, got %v", res.Outputs["progress"])
+		}
+		hb, ok := res.Outputs["heartbeat"].(time.Time)
+		if !ok || !hb.Equal(fixedHeartbeat) {
+			t.Errorf("expected Outputs[heartbeat]=%v, got %v", fixedHeartbeat, res.Outputs["heartbeat"])
+		}
+		hbAt, okAt := res.Outputs["heartbeat_at"].(time.Time)
+		if !okAt || !hbAt.Equal(fixedHeartbeat) {
+			t.Errorf("expected Outputs[heartbeat_at]=%v, got %v", fixedHeartbeat, res.Outputs["heartbeat_at"])
+		}
+	})
+
+	t.Run("running wait output remains compatible when phase and heartbeat absent", func(t *testing.T) {
+		mock := &mockTranscodeExecutor{
+			benchmarkSubmitFunc: func(ctx context.Context, req transcode.BenchmarkRequest) (transcode.BenchmarkJob, error) {
+				return transcode.BenchmarkJob{ID: req.ID}, nil
+			},
+			benchmarkStatusFunc: func(ctx context.Context, jobID string) (transcode.BenchmarkStatus, error) {
+				return transcode.BenchmarkStatus{
+					ProtocolVersion: transcode.WorkerProtocolVersion,
+					ID:              jobID,
+					Status:          transcode.StatusRunning,
+					Progress:        0.0,
+				}, nil
+			},
+		}
+
+		engine, _, mediaFile, _ := setupBenchmarkTestEnv(t, mock, standard8BitProbeJSON, &recipe.OptimizationPolicy{Enabled: true})
+		res, err := engine.Run(context.Background(), "benchmark_transcode", map[string]any{
+			"path":    mediaFile,
+			"profile": "opt-vt",
+		})
+		if err != nil {
+			t.Fatalf("unexpected engine error: %v", err)
+		}
+
+		if res.Status != StatusWaitingExternal {
+			t.Fatalf("expected StatusWaitingExternal, got %s", res.Status)
+		}
+		expectedReason := "Benchmarking encoder configurations (running, progress: 0.0%)"
+		if res.WaitingReason != expectedReason {
+			t.Errorf("expected WaitingReason=%q, got %q", expectedReason, res.WaitingReason)
+		}
+		if strings.Contains(res.WaitingReason, "phase:") {
+			t.Errorf("did not expect phase in WaitingReason, got %q", res.WaitingReason)
+		}
+		if res.Outputs["phase"] != nil {
+			t.Errorf("expected nil phase output for legacy worker, got %v", res.Outputs["phase"])
+		}
+		if res.Outputs["heartbeat"] != nil {
+			t.Errorf("expected nil heartbeat output for legacy worker, got %v", res.Outputs["heartbeat"])
+		}
+		if res.Outputs["heartbeat_at"] != nil {
+			t.Errorf("expected nil heartbeat_at output for legacy worker, got %v", res.Outputs["heartbeat_at"])
+		}
+		if res.Outputs["progress"] != 0.0 {
+			t.Errorf("expected Outputs[progress]=0.0, got %v", res.Outputs["progress"])
+		}
+	})
+}

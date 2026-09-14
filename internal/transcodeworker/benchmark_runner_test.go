@@ -3760,3 +3760,526 @@ exit 0
 		t.Errorf("expected VMAF 95.5 in partial evidence, got %v", evidence.MetricSamples[0].VMAF)
 	}
 }
+
+func TestBenchmarkRunner_ProgressAdvancesDeterministicallyAndCapsBelow100(t *testing.T) {
+	dir := t.TempDir()
+	sourceFile := filepath.Join(dir, "source.mkv")
+	sourceContent := make([]byte, 1024*1024)
+	if err := os.WriteFile(sourceFile, sourceContent, 0644); err != nil {
+		t.Fatalf("writing source file: %v", err)
+	}
+
+	mockFFmpeg, mockProbe, _ := setupMockTools(t, dir, sdr8BitProbeJSON, "")
+
+	stateDir := filepath.Join(dir, "state")
+	jobID := "bench-progress-units"
+	jobDir := filepath.Join(stateDir, jobID)
+	if err := os.MkdirAll(jobDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	cfg := &WorkerConfig{
+		StateDir:        stateDir,
+		AllowedRoots:    []string{dir},
+		MaxParallelJobs: 1,
+		FFmpeg:          mockFFmpeg,
+		FFprobe:         mockProbe,
+	}
+	worker := NewWorker(cfg)
+
+	token := "token-prog-runner"
+	record := &BenchmarkRecord{
+		ProtocolVersion: transcode.WorkerProtocolVersion,
+		ID:              jobID,
+		Status:          "running",
+		Source:          sourceFile,
+		Metric:          "vmaf",
+		RunToken:        token,
+		Samples: []transcode.BenchmarkSampleWindow{
+			{Index: 0, StartSeconds: 10.0, DurationSeconds: 15.0},
+			{Index: 1, StartSeconds: 50.0, DurationSeconds: 15.0},
+		},
+		Candidates: []transcode.BenchmarkCandidate{
+			{ID: "cand_q60", Quality: 60},
+			{ID: "cand_q70", Quality: 70},
+		},
+		Attempt: 1,
+	}
+	benchFile := filepath.Join(jobDir, "benchmark.json")
+	if err := SaveBenchmarkAtomic(benchFile, record); err != nil {
+		t.Fatalf("saving initial benchmark: %v", err)
+	}
+
+	runner := &ProductionBenchmarkRunner{}
+	ctx := context.Background()
+
+	if err := runner.RunBenchmark(ctx, worker, record); err != nil {
+		t.Fatalf("RunBenchmark failed: %v", err)
+	}
+
+	// Work units calculation:
+	// 2 samples reference extraction = 2 units
+	// 2 candidates * 2 samples encodes = 4 units
+	// 2 candidates * 2 samples VMAF passes = 4 units
+	// Total = 10 units.
+	// When all 10 complete, 10/10 = 100%, but must be capped below 100 (99.0%).
+	if record.Progress < 90.0 {
+		t.Errorf("expected progress to advance across all work units, got %v", record.Progress)
+	}
+	if record.Progress >= 100.0 {
+		t.Errorf("running benchmark progress must remain <100 until terminal completed state, got %v", record.Progress)
+	}
+	if record.Progress != 99.0 {
+		t.Errorf("expected capped progress 99.0 after all work units complete, got %v", record.Progress)
+	}
+	if record.Phase != "selecting_candidate" {
+		t.Errorf("expected final runner phase 'selecting_candidate', got %q", record.Phase)
+	}
+
+	// Verify benchmark.json on disk was also updated with monotonic progress < 100
+	onDisk, err := LoadBenchmark(benchFile)
+	if err != nil {
+		t.Fatalf("loading benchmark from disk: %v", err)
+	}
+	if onDisk.Progress != 99.0 {
+		t.Errorf("expected on-disk progress to be 99.0, got %v", onDisk.Progress)
+	}
+	if onDisk.Phase != "selecting_candidate" {
+		t.Errorf("expected on-disk phase 'selecting_candidate', got %q", onDisk.Phase)
+	}
+	if onDisk.HeartbeatAt.IsZero() {
+		t.Errorf("expected on-disk HeartbeatAt to be set")
+	}
+}
+
+func setupMockToolsWithCustomVMAF(t *testing.T, dir string, probeJSON string, vmafPayload string, ffmpegFailPattern string) (string, string, string) {
+	t.Helper()
+
+	mockProbe := filepath.Join(dir, "mock_ffprobe.sh")
+	probeScript := fmt.Sprintf(`#!/bin/sh
+cat << 'EOF'
+%s
+EOF
+`, probeJSON)
+	if err := os.WriteFile(mockProbe, []byte(probeScript), 0755); err != nil {
+		t.Fatalf("writing mock ffprobe: %v", err)
+	}
+
+	logFile := filepath.Join(dir, "ffmpeg_calls.log")
+	mockFFmpeg := filepath.Join(dir, "mock_ffmpeg.sh")
+	ffmpegScript := fmt.Sprintf(`#!/bin/sh
+echo "$*" >> %q
+
+case "$*" in
+  *"-version"*)
+    echo "ffmpeg version 7.1 Copyright (c) 2000-2024 the FFmpeg developers"
+    exit 0
+    ;;
+  *"-h encoder=hevc_videotoolbox"*)
+    cat << 'EOF'
+Encoder hevc_videotoolbox [VideoToolbox H.265 Encoder]:
+    Supported pixel formats: nv12 p010le yuv420p
+hevc_videotoolbox AVOptions:
+  -profile           <int>        E..V....... Profile (from 0 to 2) (default 0)
+     main            1            E..V....... Main Profile
+     main10          2            E..V....... Main10 Profile
+  -prio_speed        <boolean>    E..V....... Prioritize encoding speed (default false)
+  -spatial_aq        <boolean>    E..V....... Spatial AQ (default false)
+  -realtime          <boolean>    E..V....... Realtime (default false)
+EOF
+    exit 0
+    ;;
+  *"-encoders"*)
+    cat << 'EOF'
+Encoders:
+ V..... hevc_videotoolbox    VideoToolbox H.265
+ V..... ffv1                 FFmpeg video codec #1
+EOF
+    exit 0
+    ;;
+  *"-filters"*)
+    cat << 'EOF'
+Filters:
+  .. libvmaf           VV->V      Calculate the VMAF between two video streams.
+  TS ssim              VV->V      Calculate the SSIM between two video streams.
+  .S scale             V->V       Scale the input video size and/or convert the image format.
+  .. format            V->V       Convert the input video to one of the specified pixel formats.
+  .. null              V->V       Pass the source unchanged to the output.
+  .. fps               V->V       Force constant framerate.
+EOF
+    exit 0
+    ;;
+esac
+
+# Check for simulated failure pattern
+if [ -n %q ]; then
+  case "$*" in
+    *%s*)
+      echo "simulated ffmpeg failure for: $*" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+case "$*" in
+  *"-filter_complex"*"libvmaf"*)
+    for arg in "$@"; do
+      case "$arg" in
+        *"log_path="*)
+          lpath="${arg#*log_path=}"
+          lpath="${lpath%%%%:*}"
+          mkdir -p "$(dirname "$lpath")"
+          cat << 'VMAF_EOF' > "$lpath"
+%s
+VMAF_EOF
+          ;;
+      esac
+    done
+    exit 0
+    ;;
+  *"-filter_complex"*"ssim"*)
+    for arg in "$@"; do
+      case "$arg" in
+        *"stats_file="*)
+          spath="${arg#*stats_file=}"
+          spath="${spath%%%%:*}"
+          mkdir -p "$(dirname "$spath")"
+          cat << 'SSIM_EOF' > "$spath"
+n:1 Y:0.980000 U:0.985000 V:0.985000 All:0.980000 (16.99)
+SSIM_EOF
+          ;;
+      esac
+    done
+    echo "[Parsed_ssim_0] SSIM Y:0.980000 U:0.985000 V:0.985000 All:0.980000 (16.99)" >&2
+    exit 0
+    ;;
+esac
+
+# Find output file (last argument)
+out=""
+for last; do out="$last"; done
+
+case "$out" in
+  -*|"")
+    # Not an output file (flag or empty)
+    ;;
+  *)
+    # Write fake dummy media data so os.Stat sees non-zero size
+    mkdir -p "$(dirname "$out")"
+    echo "fake media data payload for $out" > "$out"
+    ;;
+esac
+exit 0
+`, logFile, ffmpegFailPattern, ffmpegFailPattern, vmafPayload)
+
+	if err := os.WriteFile(mockFFmpeg, []byte(ffmpegScript), 0755); err != nil {
+		t.Fatalf("writing mock ffmpeg: %v", err)
+	}
+
+	return mockFFmpeg, mockProbe, logFile
+}
+
+func TestBenchmarkProgressReporter_ResolveAndSkipUnits(t *testing.T) {
+	record := &BenchmarkRecord{
+		ID:       "bench-test-rep",
+		RunToken: "token-rep",
+	}
+	reporter := newBenchmarkProgressReporter(nil, record, 5)
+
+	if reporter.TotalUnits() != 5 {
+		t.Errorf("expected total units 5, got %d", reporter.TotalUnits())
+	}
+	if reporter.CompletedUnits() != 0 {
+		t.Errorf("expected completed units 0, got %d", reporter.CompletedUnits())
+	}
+
+	// Start a unit
+	reporter.StartUnit("extracting_samples")
+	if record.Phase != "extracting_samples" {
+		t.Errorf("expected phase extracting_samples, got %s", record.Phase)
+	}
+
+	// Resolve 1 unit
+	reporter.ResolveUnit()
+	if reporter.CompletedUnits() != 1 {
+		t.Errorf("expected completed units 1, got %d", reporter.CompletedUnits())
+	}
+	// 1/5 = 20.0%
+	if record.Progress != 20.0 {
+		t.Errorf("expected progress 20.0, got %v", record.Progress)
+	}
+
+	// CompleteUnit is alias for ResolveUnits(1)
+	reporter.CompleteUnit()
+	if reporter.CompletedUnits() != 2 {
+		t.Errorf("expected completed units 2, got %d", reporter.CompletedUnits())
+	}
+	// 2/5 = 40.0%
+	if record.Progress != 40.0 {
+		t.Errorf("expected progress 40.0, got %v", record.Progress)
+	}
+
+	// Skip 2 units
+	reporter.SkipUnits(2)
+	if reporter.CompletedUnits() != 4 {
+		t.Errorf("expected completed units 4, got %d", reporter.CompletedUnits())
+	}
+	// 4/5 = 80.0%
+	if record.Progress != 80.0 {
+		t.Errorf("expected progress 80.0, got %v", record.Progress)
+	}
+
+	// SkipUnits with 0 or negative does nothing
+	reporter.SkipUnits(0)
+	reporter.SkipUnits(-1)
+	if reporter.CompletedUnits() != 4 {
+		t.Errorf("expected completed units unchanged at 4, got %d", reporter.CompletedUnits())
+	}
+
+	// Resolve remaining unit (5/5 = 100%, capped at 99.0%)
+	reporter.ResolveUnit()
+	if reporter.CompletedUnits() != 5 {
+		t.Errorf("expected completed units 5, got %d", reporter.CompletedUnits())
+	}
+	if record.Progress != 99.0 {
+		t.Errorf("expected progress capped at 99.0, got %v", record.Progress)
+	}
+
+	// Further resolutions stay capped at 99.0 and progress does not decrease
+	reporter.ResolveUnits(2)
+	if record.Progress != 99.0 {
+		t.Errorf("expected progress to remain capped at 99.0, got %v", record.Progress)
+	}
+}
+
+func TestBenchmarkRunner_ProgressResolvesUnitWhenVMAFParseFails(t *testing.T) {
+	dir := t.TempDir()
+	sourceFile := filepath.Join(dir, "source.mkv")
+	if err := os.WriteFile(sourceFile, make([]byte, 1024*1024), 0644); err != nil {
+		t.Fatalf("writing source file: %v", err)
+	}
+
+	// Corrupt JSON payload: FFmpeg succeeds (exit 0) but ParseVMAFJSON fails
+	corruptedVMAF := `{"broken_json": [ unclosed`
+	mockFFmpeg, mockProbe, _ := setupMockToolsWithCustomVMAF(t, dir, sdr8BitProbeJSON, corruptedVMAF, "")
+
+	stateDir := filepath.Join(dir, "state")
+	jobID := "bench-vmaf-parse-fail"
+	jobDir := filepath.Join(stateDir, jobID)
+	if err := os.MkdirAll(jobDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	cfg := &WorkerConfig{
+		StateDir:        stateDir,
+		AllowedRoots:    []string{dir},
+		MaxParallelJobs: 1,
+		FFmpeg:          mockFFmpeg,
+		FFprobe:         mockProbe,
+	}
+	worker := NewWorker(cfg)
+
+	token := "token-vmaf-parse-fail"
+	record := &BenchmarkRecord{
+		ProtocolVersion: transcode.WorkerProtocolVersion,
+		ID:              jobID,
+		Status:          "running",
+		Source:          sourceFile,
+		Metric:          "vmaf",
+		RunToken:        token,
+		Samples: []transcode.BenchmarkSampleWindow{
+			{Index: 0, StartSeconds: 10.0, DurationSeconds: 15.0},
+		},
+		Candidates: []transcode.BenchmarkCandidate{
+			{ID: "cand_q60", Quality: 60},
+		},
+		Attempt: 1,
+	}
+	benchFile := filepath.Join(jobDir, "benchmark.json")
+	if err := SaveBenchmarkAtomic(benchFile, record); err != nil {
+		t.Fatalf("saving initial benchmark: %v", err)
+	}
+
+	runner := &ProductionBenchmarkRunner{}
+	ctx := context.Background()
+
+	// RunBenchmark must not fail the job on candidate-level metric failure
+	if err := runner.RunBenchmark(ctx, worker, record); err != nil {
+		t.Fatalf("RunBenchmark failed: %v", err)
+	}
+
+	// Total planned work units:
+	// 1 sample ref extraction = 1 unit
+	// 1 candidate sample encode = 1 unit
+	// 1 candidate sample VMAF pass = 1 unit
+	// Total = 3 units.
+	// Even though VMAF log parse failed, the FFmpeg invocation was completed and its planned unit resolved.
+	// 3/3 resolved -> running progress advances to 99.0% (capped below 100).
+	if record.Progress != 99.0 {
+		t.Errorf("expected running progress 99.0 when failed VMAF parse unit is resolved, got %v", record.Progress)
+	}
+	if record.Phase != "selecting_candidate" {
+		t.Errorf("expected phase 'selecting_candidate', got %q", record.Phase)
+	}
+
+	// Verify on-disk benchmark.json
+	onDisk, err := LoadBenchmark(benchFile)
+	if err != nil {
+		t.Fatalf("loading benchmark from disk: %v", err)
+	}
+	if onDisk.Progress != 99.0 {
+		t.Errorf("expected on-disk progress 99.0, got %v", onDisk.Progress)
+	}
+
+	// Verify failure/evidence semantics remain unchanged
+	evidence := record.Evidence
+	if evidence == nil {
+		t.Fatalf("expected evidence to be recorded")
+	}
+	if len(evidence.CandidateMetrics) != 1 {
+		t.Fatalf("expected 1 candidate metric aggregate, got %d", len(evidence.CandidateMetrics))
+	}
+	cm := evidence.CandidateMetrics[0]
+	if cm.CandidateID != "cand_q60" {
+		t.Errorf("expected candidate cand_q60, got %s", cm.CandidateID)
+	}
+	if cm.Aggregate.Valid {
+		t.Errorf("expected candidate aggregate to be invalid due to parse failure")
+	}
+	if cm.Aggregate.IneligibleReason != optimization.ReasonIncompleteSampleScores {
+		t.Errorf("expected ineligible reason %s, got %s", optimization.ReasonIncompleteSampleScores, cm.Aggregate.IneligibleReason)
+	}
+	if len(evidence.MetricSamples) != 1 {
+		t.Fatalf("expected 1 metric sample, got %d", len(evidence.MetricSamples))
+	}
+	if !strings.Contains(evidence.MetricSamples[0].Error, "parse vmaf log") {
+		t.Errorf("expected metric sample error to mention 'parse vmaf log', got %q", evidence.MetricSamples[0].Error)
+	}
+}
+
+func TestBenchmarkRunner_ProgressResolvesBothUnitsWhenVMAFFailsInBothMetric(t *testing.T) {
+	dir := t.TempDir()
+	sourceFile := filepath.Join(dir, "source.mkv")
+	if err := os.WriteFile(sourceFile, make([]byte, 1024*1024), 0644); err != nil {
+		t.Fatalf("writing source file: %v", err)
+	}
+
+	// Simulate libvmaf subprocess failure (exit 1)
+	mockFFmpeg, mockProbe, _ := setupMockTools(t, dir, sdr8BitProbeJSON, "libvmaf")
+
+	stateDir := filepath.Join(dir, "state")
+	jobID := "bench-both-metric-skip"
+	jobDir := filepath.Join(stateDir, jobID)
+	if err := os.MkdirAll(jobDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	cfg := &WorkerConfig{
+		StateDir:        stateDir,
+		AllowedRoots:    []string{dir},
+		MaxParallelJobs: 1,
+		FFmpeg:          mockFFmpeg,
+		FFprobe:         mockProbe,
+	}
+	worker := NewWorker(cfg)
+
+	token := "token-both-metric-skip"
+	record := &BenchmarkRecord{
+		ProtocolVersion: transcode.WorkerProtocolVersion,
+		ID:              jobID,
+		Status:          "running",
+		Source:          sourceFile,
+		Metric:          "both",
+		RunToken:        token,
+		Samples: []transcode.BenchmarkSampleWindow{
+			{Index: 0, StartSeconds: 10.0, DurationSeconds: 15.0},
+			{Index: 1, StartSeconds: 40.0, DurationSeconds: 15.0},
+		},
+		Candidates: []transcode.BenchmarkCandidate{
+			{ID: "cand_q60", Quality: 60},
+		},
+		Attempt: 1,
+	}
+	benchFile := filepath.Join(jobDir, "benchmark.json")
+	if err := SaveBenchmarkAtomic(benchFile, record); err != nil {
+		t.Fatalf("saving initial benchmark: %v", err)
+	}
+
+	runner := &ProductionBenchmarkRunner{}
+	ctx := context.Background()
+
+	// RunBenchmark must not fail the job on candidate-level metric failure
+	if err := runner.RunBenchmark(ctx, worker, record); err != nil {
+		t.Fatalf("RunBenchmark failed: %v", err)
+	}
+
+	// Planned work units calculation:
+	// 2 samples reference extraction = 2 units
+	// 1 candidate * 2 samples encodes = 2 units
+	// 1 candidate * 2 samples * 2 passes (VMAF + SSIM) = 4 metric units
+	// Total = 8 units.
+	// For sample 0:
+	// - VMAF FFmpeg fails -> resolved as 1 unit.
+	// - SSIM is skipped due to VMAF failure -> resolved as 1 unit.
+	// For sample 1:
+	// - Candidate is already failed -> both planned passes (VMAF + SSIM) are skipped -> resolved as 2 units.
+	// All 8 units are resolved. Denominator does NOT stall.
+	// Progress reaches 99.0% (capped below 100).
+	if record.Progress != 99.0 {
+		t.Errorf("expected running progress 99.0 with all units resolved in metric='both', got %v", record.Progress)
+	}
+	if record.Phase != "selecting_candidate" {
+		t.Errorf("expected final phase 'selecting_candidate', got %q", record.Phase)
+	}
+
+	// Verify on-disk benchmark.json
+	onDisk, err := LoadBenchmark(benchFile)
+	if err != nil {
+		t.Fatalf("loading benchmark from disk: %v", err)
+	}
+	if onDisk.Progress != 99.0 {
+		t.Errorf("expected on-disk progress 99.0, got %v", onDisk.Progress)
+	}
+
+	// Verify failure/evidence semantics remain unchanged
+	evidence := record.Evidence
+	if evidence == nil {
+		t.Fatalf("expected evidence to be recorded")
+	}
+	// Both VMAF and SSIM aggregates exist in deterministic order
+	if len(evidence.CandidateMetrics) != 2 {
+		t.Fatalf("expected 2 candidate metric aggregates (VMAF + SSIM), got %d", len(evidence.CandidateMetrics))
+	}
+	vmafAgg := evidence.CandidateMetrics[0]
+	if vmafAgg.MetricType != optimization.MetricTypeVMAF {
+		t.Errorf("expected first aggregate to be VMAF, got %v", vmafAgg.MetricType)
+	}
+	if vmafAgg.Aggregate.Valid {
+		t.Errorf("expected VMAF aggregate to be invalid")
+	}
+	if vmafAgg.Aggregate.IneligibleReason != optimization.ReasonIncompleteSampleScores {
+		t.Errorf("expected VMAF IneligibleReason %s, got %s", optimization.ReasonIncompleteSampleScores, vmafAgg.Aggregate.IneligibleReason)
+	}
+
+	ssimAgg := evidence.CandidateMetrics[1]
+	if ssimAgg.MetricType != optimization.MetricTypeSSIM {
+		t.Errorf("expected second aggregate to be SSIM, got %v", ssimAgg.MetricType)
+	}
+	if ssimAgg.Aggregate.Valid {
+		t.Errorf("expected SSIM aggregate to be invalid")
+	}
+	if ssimAgg.Aggregate.IneligibleReason != optimization.ReasonIncompleteSampleScores {
+		t.Errorf("expected SSIM IneligibleReason %s, got %s", optimization.ReasonIncompleteSampleScores, ssimAgg.Aggregate.IneligibleReason)
+	}
+
+	// Both samples recorded in evidence.MetricSamples
+	if len(evidence.MetricSamples) != 2 {
+		t.Fatalf("expected 2 metric sample records, got %d", len(evidence.MetricSamples))
+	}
+	if !strings.Contains(evidence.MetricSamples[0].Error, "ffmpeg vmaf failed") {
+		t.Errorf("expected sample 0 error to mention ffmpeg vmaf failed, got %q", evidence.MetricSamples[0].Error)
+	}
+	if !strings.Contains(evidence.MetricSamples[1].Error, "ffmpeg vmaf failed") {
+		t.Errorf("expected sample 1 error to carry candidate failure reason, got %q", evidence.MetricSamples[1].Error)
+	}
+}
