@@ -318,6 +318,11 @@ func NormalizeOptimizationPolicy(opt *OptimizationPolicy) {
 		if len(opt.Search.QualityValues) == 0 {
 			opt.Search.QualityValues = append([]int(nil), DefaultQualityValues...)
 		}
+		// Adaptive defaults: empty mode stays empty (treated as exhaustive downstream).
+		// Normalize explicit mode spelling; leave AdaptiveInitialQuality 0 as default 65.
+		if opt.Search.AdaptiveMode != "" {
+			opt.Search.AdaptiveMode = strings.ToLower(strings.TrimSpace(opt.Search.AdaptiveMode))
+		}
 	}
 }
 
@@ -420,6 +425,15 @@ func ValidateOptimizationPolicy(name string, opt *OptimizationPolicy) error {
 		if i > 0 && val <= srch.QualityValues[i-1] {
 			return fmt.Errorf("profile %q: quality_values must be strictly ordered without duplicates (found %d after %d)", name, val, srch.QualityValues[i-1])
 		}
+	}
+	if srch.AdaptiveMode != "" {
+		mode := strings.ToLower(strings.TrimSpace(srch.AdaptiveMode))
+		if mode != "exhaustive" && mode != "adaptive" {
+			return fmt.Errorf("profile %q: adaptive_mode %q must be 'exhaustive' or 'adaptive'", name, srch.AdaptiveMode)
+		}
+	}
+	if srch.AdaptiveInitialQuality != 0 && (srch.AdaptiveInitialQuality < 1 || srch.AdaptiveInitialQuality > 100) {
+		return fmt.Errorf("profile %q: adaptive_initial_quality %d out of range 1-100", name, srch.AdaptiveInitialQuality)
 	}
 
 	// 4. Size validation

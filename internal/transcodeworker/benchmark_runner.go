@@ -451,115 +451,123 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		progressReporter.CompleteUnit()
 	}
 
-	// 5. Encode candidate samples sequentially
-	for _, vc := range validatedCandidates {
-		for _, window := range record.Samples {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-
-			progressReporter.StartUnit("encoding_candidates")
-
-			if err := verifySourceUnchanged(record.Source, sourceInitialSize, sourceInitialModTime); err != nil {
-				return err
-			}
-
-			refFileName := fmt.Sprintf("ref_sample_%d.mkv", window.Index)
-			refPath := filepath.Join(samplesDir, refFileName)
-			if _, err := os.Stat(refPath); err != nil {
-				return fmt.Errorf("reference sample %d not found at %s: %w", window.Index, refPath, err)
-			}
-
-			candFileName := fmt.Sprintf("%s_sample_%d.mkv", vc.fileKey, window.Index)
-			candPath := filepath.Join(samplesDir, candFileName)
-			if err := verifyChildPath(samplesDir, candPath); err != nil {
-				return fmt.Errorf("invalid candidate sample path: %w", err)
-			}
-			if err := prepareOutputFile(candPath); err != nil {
-				return err
-			}
-
-			candArgs, err := BuildCandidateEncodeArgs(refPath, candPath, vc.plan)
-			if err != nil {
-				return fmt.Errorf("building candidate %q args: %w", vc.candidate.ID, err)
-			}
-
-			start := time.Now()
-			cmd := exec.CommandContext(ctx, w.ffmpegPath, candArgs...)
-			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-			cmd.Cancel = func() error {
-				if cmd.Process != nil && cmd.Process.Pid > 0 {
-					return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-				}
-				return nil
-			}
-			cmd.WaitDelay = 2 * time.Second
-
-			stderrBuf := newBoundedBuffer(16 * 1024)
-			cmd.Stderr = stderrBuf
-			cmd.Stdout = nil
-
-			if err := cmd.Run(); err != nil {
+	// 5+6. Candidate encode and metric evaluation: adaptive probing with
+	// exhaustive fallback, or the preserved exhaustive path unchanged.
+	if isAdaptiveEnabled(record, r) {
+		if err := r.runAdaptiveCandidates(ctx, w, record, evidence, samplesDir, validatedCandidates, rep, sourceInitialSize, sourceInitialModTime, progressReporter, passesPerSample); err != nil {
+			return err
+		}
+	} else {
+		// 5. Encode candidate samples sequentially
+		for _, vc := range validatedCandidates {
+			for _, window := range record.Samples {
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
-				errStr := fmt.Sprintf("encoding candidate %q for sample %d failed: %v: %s",
-					vc.candidate.ID, window.Index, err, boundedStderr(stderrBuf, 1024))
+
+				progressReporter.StartUnit("encoding_candidates")
+
+				if err := verifySourceUnchanged(record.Source, sourceInitialSize, sourceInitialModTime); err != nil {
+					return err
+				}
+
+				refFileName := fmt.Sprintf("ref_sample_%d.mkv", window.Index)
+				refPath := filepath.Join(samplesDir, refFileName)
+				if _, err := os.Stat(refPath); err != nil {
+					return fmt.Errorf("reference sample %d not found at %s: %w", window.Index, refPath, err)
+				}
+
+				candFileName := fmt.Sprintf("%s_sample_%d.mkv", vc.fileKey, window.Index)
+				candPath := filepath.Join(samplesDir, candFileName)
+				if err := verifyChildPath(samplesDir, candPath); err != nil {
+					return fmt.Errorf("invalid candidate sample path: %w", err)
+				}
+				if err := prepareOutputFile(candPath); err != nil {
+					return err
+				}
+
+				candArgs, err := BuildCandidateEncodeArgs(refPath, candPath, vc.plan)
+				if err != nil {
+					return fmt.Errorf("building candidate %q args: %w", vc.candidate.ID, err)
+				}
+
+				start := time.Now()
+				cmd := exec.CommandContext(ctx, w.ffmpegPath, candArgs...)
+				cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+				cmd.Cancel = func() error {
+					if cmd.Process != nil && cmd.Process.Pid > 0 {
+						return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+					}
+					return nil
+				}
+				cmd.WaitDelay = 2 * time.Second
+
+				stderrBuf := newBoundedBuffer(16 * 1024)
+				cmd.Stderr = stderrBuf
+				cmd.Stdout = nil
+
+				if err := cmd.Run(); err != nil {
+					if ctx.Err() != nil {
+						return ctx.Err()
+					}
+					errStr := fmt.Sprintf("encoding candidate %q for sample %d failed: %v: %s",
+						vc.candidate.ID, window.Index, err, boundedStderr(stderrBuf, 1024))
+					evidence.CandidateSamples = append(evidence.CandidateSamples, BenchmarkCandidateSampleResult{
+						CandidateID:  vc.candidate.ID,
+						SampleIndex:  window.Index,
+						File:         filepath.Base(candPath),
+						Quality:      vc.candidate.Quality,
+						VideoProfile: vc.profile,
+						PixelFormat:  vc.pixelFormat,
+						Error:        errStr,
+					})
+					return errors.New(errStr)
+				}
+				elapsed := time.Since(start).Seconds()
+
+				fi, err := os.Stat(candPath)
+				if err != nil || fi.Size() == 0 {
+					errStr := fmt.Sprintf("candidate %q for sample %d produced empty or missing file at %s", vc.candidate.ID, window.Index, candPath)
+					evidence.CandidateSamples = append(evidence.CandidateSamples, BenchmarkCandidateSampleResult{
+						CandidateID:  vc.candidate.ID,
+						SampleIndex:  window.Index,
+						File:         filepath.Base(candPath),
+						Quality:      vc.candidate.Quality,
+						VideoProfile: vc.profile,
+						PixelFormat:  vc.pixelFormat,
+						Error:        errStr,
+					})
+					return errors.New(errStr)
+				}
+
 				evidence.CandidateSamples = append(evidence.CandidateSamples, BenchmarkCandidateSampleResult{
-					CandidateID:  vc.candidate.ID,
-					SampleIndex:  window.Index,
-					File:         filepath.Base(candPath),
-					Quality:      vc.candidate.Quality,
-					VideoProfile: vc.profile,
-					PixelFormat:  vc.pixelFormat,
-					Error:        errStr,
+					CandidateID:       vc.candidate.ID,
+					SampleIndex:       window.Index,
+					File:              filepath.Base(candPath),
+					SizeBytes:         fi.Size(),
+					EncodeDurationSec: elapsed,
+					Quality:           vc.candidate.Quality,
+					VideoProfile:      vc.profile,
+					PixelFormat:       vc.pixelFormat,
 				})
-				return errors.New(errStr)
+
+				progressReporter.CompleteUnit()
 			}
-			elapsed := time.Since(start).Seconds()
+		}
 
-			fi, err := os.Stat(candPath)
-			if err != nil || fi.Size() == 0 {
-				errStr := fmt.Sprintf("candidate %q for sample %d produced empty or missing file at %s", vc.candidate.ID, window.Index, candPath)
-				evidence.CandidateSamples = append(evidence.CandidateSamples, BenchmarkCandidateSampleResult{
-					CandidateID:  vc.candidate.ID,
-					SampleIndex:  window.Index,
-					File:         filepath.Base(candPath),
-					Quality:      vc.candidate.Quality,
-					VideoProfile: vc.profile,
-					PixelFormat:  vc.pixelFormat,
-					Error:        errStr,
-				})
-				return errors.New(errStr)
+		// 6. Phase 5 metrics calculation before scratch cleanup
+		if r.metricsHook != nil {
+			progressReporter.StartUnit("evaluating_metrics")
+			if err := r.metricsHook(ctx, w, record, evidence); err != nil {
+				return fmt.Errorf("metrics calculation failed: %w", err)
 			}
-
-			evidence.CandidateSamples = append(evidence.CandidateSamples, BenchmarkCandidateSampleResult{
-				CandidateID:       vc.candidate.ID,
-				SampleIndex:       window.Index,
-				File:              filepath.Base(candPath),
-				SizeBytes:         fi.Size(),
-				EncodeDurationSec: elapsed,
-				Quality:           vc.candidate.Quality,
-				VideoProfile:      vc.profile,
-				PixelFormat:       vc.pixelFormat,
-			})
-
 			progressReporter.CompleteUnit()
+		} else {
+			if err := r.runMetrics(ctx, w, record, evidence, samplesDir, validatedCandidates, sourceInitialSize, sourceInitialModTime, progressReporter); err != nil {
+				return fmt.Errorf("metrics calculation failed: %w", err)
+			}
 		}
-	}
-
-	// 6. Phase 5 metrics calculation before scratch cleanup
-	if r.metricsHook != nil {
-		progressReporter.StartUnit("evaluating_metrics")
-		if err := r.metricsHook(ctx, w, record, evidence); err != nil {
-			return fmt.Errorf("metrics calculation failed: %w", err)
-		}
-		progressReporter.CompleteUnit()
-	} else {
-		if err := r.runMetrics(ctx, w, record, evidence, samplesDir, validatedCandidates, sourceInitialSize, sourceInitialModTime, progressReporter); err != nil {
-			return fmt.Errorf("metrics calculation failed: %w", err)
-		}
-	}
+	} // end exhaustive encode+metrics; adaptive path returns above with same progress denominator
 
 	// 7. Phase 6 candidate evaluation and selection before scratch cleanup
 	progressReporter.SetPhase("selecting_candidate")
@@ -1251,7 +1259,8 @@ func (r *ProductionBenchmarkRunner) runMetrics(
 		return fmt.Errorf("worker capability unsupported: source media has bit depth %d (> 8-bit) but worker does not have verified 10-bit VMAF capability; silent 8-bit downconversion is prohibited (fail closed)", evidence.SourceBitDepth)
 	}
 
-	for candIdx, vc := range validatedCandidates {
+	for _, vc := range validatedCandidates {
+		candIdx := vc.index
 		var vmafSampleScores []optimization.SampleScore
 		var ssimSampleScores []optimization.SampleScore
 		candidateFailed := false
