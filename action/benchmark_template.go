@@ -282,6 +282,24 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 			}, nil
 		}
 
+		// For transcode_media only, enforce the effective size guardrails
+		// against the winner's predicted savings BEFORE any full encode is
+		// launched. Standalone benchmark_transcode stays report-only and
+		// must not block on a growing estimate.
+		if ec.ActionName == "transcode_media" && hasWinner {
+			minSavings, maxIncrease := e.effectiveSizeGuardrails(ec)
+			outputs["effective_min_savings_percent"] = minSavings
+			outputs["effective_max_size_increase_percent"] = maxIncrease
+			outputs["predicted_savings_percent"] = st.Decision.Winner.SavingsPercent
+			if err := checkBenchmarkSavingsGuardrail(st.Decision.Winner.SavingsPercent, minSavings, maxIncrease); err != nil {
+				return StepResult{
+					Status:  StepFailed,
+					Error:   fmt.Sprintf("%v: full transcode not started; manual review required (fail closed)", err),
+					Outputs: outputs,
+				}, nil
+			}
+		}
+
 		return StepResult{
 			Status:  StepCompleted,
 			Outputs: outputs,
