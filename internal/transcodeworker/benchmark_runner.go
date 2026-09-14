@@ -117,10 +117,22 @@ func (p *benchmarkProgressReporter) StartUnit(phase string) {
 }
 
 func (p *benchmarkProgressReporter) CompleteUnit() {
-	if p == nil {
+	p.ResolveUnits(1)
+}
+
+func (p *benchmarkProgressReporter) ResolveUnit() {
+	p.ResolveUnits(1)
+}
+
+func (p *benchmarkProgressReporter) SkipUnits(n int) {
+	p.ResolveUnits(n)
+}
+
+func (p *benchmarkProgressReporter) ResolveUnits(n int) {
+	if p == nil || n <= 0 {
 		return
 	}
-	p.completedUnits++
+	p.completedUnits += n
 	pct := 0.0
 	if p.totalUnits > 0 {
 		pct = (float64(p.completedUnits) / float64(p.totalUnits)) * 100.0
@@ -144,6 +156,20 @@ func (p *benchmarkProgressReporter) CompleteUnit() {
 	if p.w != nil && p.record != nil && p.record.ID != "" && p.record.RunToken != "" {
 		_ = p.w.UpdateBenchmarkProgress(p.record.ID, p.record.RunToken, pct, p.currentPhase)
 	}
+}
+
+func (p *benchmarkProgressReporter) TotalUnits() int {
+	if p == nil {
+		return 0
+	}
+	return p.totalUnits
+}
+
+func (p *benchmarkProgressReporter) CompletedUnits() int {
+	if p == nil {
+		return 0
+	}
+	return p.completedUnits
 }
 
 func (p *benchmarkProgressReporter) SetPhase(phase string) {
@@ -1209,6 +1235,13 @@ func (r *ProductionBenchmarkRunner) runMetrics(
 
 	runVMAF := normMetric == "vmaf" || normMetric == "both" || normMetric == "vmaf+ssim"
 	runSSIM := normMetric == "ssim" || normMetric == "both" || normMetric == "vmaf+ssim"
+	passesPerSample := 0
+	if runVMAF {
+		passesPerSample++
+	}
+	if runSSIM {
+		passesPerSample++
+	}
 
 	// 10-bit media validation: libvmaf requires explicit capability probe verification.
 	// If worker capabilities do not explicitly assert 10-bit VMAF capability, fail closed
@@ -1267,6 +1300,9 @@ func (r *ProductionBenchmarkRunner) runMetrics(
 					SampleIndex:    window.Index,
 					Error:          candidateFailReason,
 				})
+				if progressReporter != nil {
+					progressReporter.SkipUnits(passesPerSample)
+				}
 				continue
 			}
 
@@ -1330,11 +1366,12 @@ func (r *ProductionBenchmarkRunner) runMetrics(
 								Score:       score,
 								Valid:       true,
 							})
-							if progressReporter != nil {
-								progressReporter.CompleteUnit()
-							}
 						}
 					}
+				}
+
+				if progressReporter != nil {
+					progressReporter.ResolveUnit()
 				}
 
 				if candidateFailed {
@@ -1349,6 +1386,9 @@ func (r *ProductionBenchmarkRunner) runMetrics(
 							Valid:       false,
 							Error:       candidateFailReason,
 						})
+						if progressReporter != nil {
+							progressReporter.SkipUnits(1)
+						}
 					}
 					evidence.MetricSamples = append(evidence.MetricSamples, BenchmarkMetricSampleResult{
 						CandidateID:       vc.candidate.ID,
@@ -1420,10 +1460,11 @@ func (r *ProductionBenchmarkRunner) runMetrics(
 							Score:       score,
 							Valid:       true,
 						})
-						if progressReporter != nil {
-							progressReporter.CompleteUnit()
-						}
 					}
+				}
+
+				if progressReporter != nil {
+					progressReporter.ResolveUnit()
 				}
 
 				if candidateFailed {
