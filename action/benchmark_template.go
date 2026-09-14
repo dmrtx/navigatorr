@@ -17,9 +17,9 @@ import (
 
 func (e *Engine) registerBenchmarkTemplate() {
 	e.RegisterTemplate(ActionTemplate{
-		Name:        "benchmark_transcode",
-		Version:     1,
-		Description: "Coordinates safe candidate-only benchmark evaluation of encoder parameters over deterministic source samples, returning quality metrics, size estimates, and an explainable decision without modifying media or creating permanent candidates.",
+		Name:           "benchmark_transcode",
+		Version:        1,
+		Description:    "Coordinates safe candidate-only benchmark evaluation of encoder parameters over deterministic source samples, returning quality metrics, size estimates, and an explainable decision without modifying media or creating permanent candidates.",
 		RequiredInputs: []string{"path"},
 		OptionalInputs: []string{"profile", "metric", "replace_original", "surface_worker_busy"},
 		Destructive:    false,
@@ -551,17 +551,17 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 	}
 
 	req := &transcode.BenchmarkRequest{
-		ProtocolVersion:           transcode.WorkerProtocolVersion,
-		ID:                        benchJobID,
-		SourcePath:                cleanPath,
-		SourceDuration:            rep.DurationSec,
-		Metric:                    metric,
-		Samples:                   samples,
-		Candidates:                candidates,
-		Quality:                   qualityCfg,
-		FallbackAudioBitrateBps:   384000,
-		DeclaredVideoBitrateBps:   declaredVideoBitrate,
-		AttachmentBytes:           attachmentBytes,
+		ProtocolVersion:         transcode.WorkerProtocolVersion,
+		ID:                      benchJobID,
+		SourcePath:              cleanPath,
+		SourceDuration:          rep.DurationSec,
+		Metric:                  metric,
+		Samples:                 samples,
+		Candidates:              candidates,
+		Quality:                 qualityCfg,
+		FallbackAudioBitrateBps: 384000,
+		DeclaredVideoBitrateBps: declaredVideoBitrate,
+		AttachmentBytes:         attachmentBytes,
 	}
 
 	if err := transcode.ValidateBenchmarkRequest(req); err != nil {
