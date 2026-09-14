@@ -149,6 +149,10 @@ type SearchPolicy struct {
 	AdaptiveMode string `json:"adaptive_mode,omitempty" yaml:"adaptive_mode,omitempty"`
 	// AdaptiveInitialQuality overrides the adaptive starting quality (default 65).
 	AdaptiveInitialQuality int `json:"adaptive_initial_quality,omitempty" yaml:"adaptive_initial_quality,omitempty"`
+	// EncodeConcurrency bounds simultaneous candidate sample encodes (0 selects default 2).
+	EncodeConcurrency int `json:"encode_concurrency,omitempty" yaml:"encode_concurrency,omitempty"`
+	// MetricConcurrency bounds simultaneous metric evaluations (0 selects default 2).
+	MetricConcurrency int `json:"metric_concurrency,omitempty" yaml:"metric_concurrency,omitempty"`
 }
 
 // Clone creates a deep copy of SearchPolicy.
@@ -165,6 +169,8 @@ func (srch *SearchPolicy) Clone() *SearchPolicy {
 		QualityValues:          qv,
 		AdaptiveMode:           srch.AdaptiveMode,
 		AdaptiveInitialQuality: srch.AdaptiveInitialQuality,
+		EncodeConcurrency:      srch.EncodeConcurrency,
+		MetricConcurrency:      srch.MetricConcurrency,
 	}
 }
 

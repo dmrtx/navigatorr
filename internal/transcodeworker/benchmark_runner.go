@@ -85,6 +85,7 @@ type BenchmarkExecutionEvidence struct {
 }
 
 type benchmarkProgressReporter struct {
+	mu             sync.Mutex
 	w              *Worker
 	record         *BenchmarkRecord
 	totalUnits     int
@@ -105,6 +106,8 @@ func (p *benchmarkProgressReporter) StartUnit(phase string) {
 	if p == nil {
 		return
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.currentPhase = phase
 	now := time.Now().UTC()
 	if p.record != nil {
@@ -132,6 +135,8 @@ func (p *benchmarkProgressReporter) ResolveUnits(n int) {
 	if p == nil || n <= 0 {
 		return
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.completedUnits += n
 	pct := 0.0
 	if p.totalUnits > 0 {
@@ -169,6 +174,8 @@ func (p *benchmarkProgressReporter) CompletedUnits() int {
 	if p == nil {
 		return 0
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	return p.completedUnits
 }
 
@@ -176,6 +183,8 @@ func (p *benchmarkProgressReporter) SetPhase(phase string) {
 	if p == nil {
 		return
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.currentPhase = phase
 	now := time.Now().UTC()
 	if p.record != nil {
@@ -452,13 +461,21 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 	}
 
 	// 5+6. Candidate encode and metric evaluation: adaptive probing with
-	// exhaustive fallback, or the preserved exhaustive path unchanged.
+	// exhaustive fallback, bounded pipelined execution for real runs, or the
+	// legacy sequential path for test-hook injection.
 	if isAdaptiveEnabled(record, r) {
 		if err := r.runAdaptiveCandidates(ctx, w, record, evidence, samplesDir, validatedCandidates, rep, sourceInitialSize, sourceInitialModTime, progressReporter, passesPerSample); err != nil {
 			return err
 		}
+	} else if r.metricsHook == nil {
+		// Exhaustive real path: bounded concurrent encode->metric pipeline across
+		// all candidates. Evidence is assembled deterministically in
+		// (candidate, sample) order, so completion order never affects results.
+		if err := r.runPipelinedEncodeMetrics(ctx, w, record, evidence, samplesDir, validatedCandidates, sourceInitialSize, sourceInitialModTime, progressReporter); err != nil {
+			return err
+		}
 	} else {
-		// 5. Encode candidate samples sequentially
+		// 5. Encode candidate samples sequentially (legacy path for test-hook injection)
 		for _, vc := range validatedCandidates {
 			for _, window := range record.Samples {
 				if ctx.Err() != nil {
@@ -555,19 +572,14 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 			}
 		}
 
-		// 6. Phase 5 metrics calculation before scratch cleanup
-		if r.metricsHook != nil {
-			progressReporter.StartUnit("evaluating_metrics")
-			if err := r.metricsHook(ctx, w, record, evidence); err != nil {
-				return fmt.Errorf("metrics calculation failed: %w", err)
-			}
-			progressReporter.CompleteUnit()
-		} else {
-			if err := r.runMetrics(ctx, w, record, evidence, samplesDir, validatedCandidates, sourceInitialSize, sourceInitialModTime, progressReporter); err != nil {
-				return fmt.Errorf("metrics calculation failed: %w", err)
-			}
+		// 6. Phase 5 metrics calculation via injected hook (legacy test path;
+		// this branch is only reached when r.metricsHook != nil).
+		progressReporter.StartUnit("evaluating_metrics")
+		if err := r.metricsHook(ctx, w, record, evidence); err != nil {
+			return fmt.Errorf("metrics calculation failed: %w", err)
 		}
-	} // end exhaustive encode+metrics; adaptive path returns above with same progress denominator
+		progressReporter.CompleteUnit()
+	} // end legacy sequential encode+hook path
 
 	// 7. Phase 6 candidate evaluation and selection before scratch cleanup
 	progressReporter.SetPhase("selecting_candidate")
@@ -1198,352 +1210,6 @@ func readMetricLogFile(logPath string) ([]byte, error) {
 		return nil, fmt.Errorf("metric log %s contained 0 bytes after read (fail closed)", logPath)
 	}
 	return data, nil
-}
-
-func (r *ProductionBenchmarkRunner) runMetrics(
-	ctx context.Context,
-	w *Worker,
-	record *BenchmarkRecord,
-	evidence *BenchmarkExecutionEvidence,
-	samplesDir string,
-	validatedCandidates []validatedCandidate,
-	sourceInitialSize int64,
-	sourceInitialModTime time.Time,
-	progressReporter *benchmarkProgressReporter,
-) error {
-	normMetric := strings.ToLower(strings.TrimSpace(record.Metric))
-	if normMetric == "" {
-		normMetric = "vmaf"
-	}
-
-	caps, err := w.Capabilities(ctx)
-	if err != nil {
-		return fmt.Errorf("probing worker capabilities: %w (fail closed)", err)
-	}
-
-	switch normMetric {
-	case "vmaf":
-		if !caps.Filters["libvmaf"] {
-			return errors.New("required filter 'libvmaf' is not available on worker (fail closed)")
-		}
-	case "ssim":
-		if !caps.Filters["ssim"] {
-			return errors.New("required filter 'ssim' is not available on worker (fail closed)")
-		}
-	case "both", "vmaf+ssim":
-		if !caps.Filters["libvmaf"] {
-			return errors.New("required filter 'libvmaf' is not available on worker (fail closed)")
-		}
-		if !caps.Filters["ssim"] {
-			return errors.New("required filter 'ssim' is not available on worker (fail closed)")
-		}
-	default:
-		return fmt.Errorf("unsupported benchmark metric %q (fail closed)", record.Metric)
-	}
-
-	runVMAF := normMetric == "vmaf" || normMetric == "both" || normMetric == "vmaf+ssim"
-	runSSIM := normMetric == "ssim" || normMetric == "both" || normMetric == "vmaf+ssim"
-	passesPerSample := 0
-	if runVMAF {
-		passesPerSample++
-	}
-	if runSSIM {
-		passesPerSample++
-	}
-
-	// 10-bit media validation: libvmaf requires explicit capability probe verification.
-	// If worker capabilities do not explicitly assert 10-bit VMAF capability, fail closed
-	// rather than silently downconverting 10-bit source/candidate media to 8-bit.
-	// Native FFmpeg ssim filter supports 10-bit pixel formats (yuv420p10le) natively.
-	if evidence.SourceBitDepth > 8 && runVMAF {
-		return fmt.Errorf("worker capability unsupported: source media has bit depth %d (> 8-bit) but worker does not have verified 10-bit VMAF capability; silent 8-bit downconversion is prohibited (fail closed)", evidence.SourceBitDepth)
-	}
-
-	for _, vc := range validatedCandidates {
-		candIdx := vc.index
-		var vmafSampleScores []optimization.SampleScore
-		var ssimSampleScores []optimization.SampleScore
-		candidateFailed := false
-		var candidateFailReason string
-
-		for _, window := range record.Samples {
-			// Job-fatal checks: context cancellation or external tampering abort the job immediately.
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			if err := verifySourceUnchanged(record.Source, sourceInitialSize, sourceInitialModTime); err != nil {
-				return fmt.Errorf("source media modified during benchmark (integrity violation, fail closed): %w", err)
-			}
-
-			refPath := filepath.Join(samplesDir, fmt.Sprintf("ref_sample_%d.mkv", window.Index))
-			refStat, err := os.Stat(refPath)
-			if err != nil || !refStat.Mode().IsRegular() || refStat.Size() == 0 {
-				return fmt.Errorf("lossless reference sample %s missing or invalid (job-fatal integrity violation, fail closed)", refPath)
-			}
-
-			candPath := filepath.Join(samplesDir, fmt.Sprintf("%s_sample_%d.mkv", vc.fileKey, window.Index))
-			candStat, err := os.Stat(candPath)
-			if err != nil || !candStat.Mode().IsRegular() || candStat.Size() == 0 {
-				candidateFailed = true
-				candidateFailReason = fmt.Sprintf("candidate sample %s missing or invalid", candPath)
-			}
-
-			if candidateFailed {
-				if runVMAF {
-					vmafSampleScores = append(vmafSampleScores, optimization.SampleScore{
-						SampleIndex: window.Index,
-						Valid:       false,
-						Error:       candidateFailReason,
-					})
-				}
-				if runSSIM {
-					ssimSampleScores = append(ssimSampleScores, optimization.SampleScore{
-						SampleIndex: window.Index,
-						Valid:       false,
-						Error:       candidateFailReason,
-					})
-				}
-				evidence.MetricSamples = append(evidence.MetricSamples, BenchmarkMetricSampleResult{
-					CandidateID:    vc.candidate.ID,
-					CandidateIndex: candIdx,
-					SampleIndex:    window.Index,
-					Error:          candidateFailReason,
-				})
-				if progressReporter != nil {
-					progressReporter.SkipUnits(passesPerSample)
-				}
-				continue
-			}
-
-			var vmafScore *float64
-			var ssimScore *float64
-			var vmafDurationSec float64
-			var ssimDurationSec float64
-
-			if runVMAF {
-				logPath, err := derivedMetricLogPath(samplesDir, "vmaf", candIdx, vc.candidate.ID, window.Index)
-				if err != nil {
-					return err
-				}
-				if err := prepareOutputFile(logPath); err != nil {
-					return fmt.Errorf("preparing vmaf log path %s: %w", logPath, err)
-				}
-
-				if progressReporter != nil {
-					progressReporter.StartUnit("evaluating_metrics")
-				}
-
-				args := BuildVMAFArgs(candPath, refPath, logPath)
-				cmd := exec.CommandContext(ctx, w.ffmpegPath, args...)
-				cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-				cmd.Cancel = func() error {
-					if cmd.Process != nil && cmd.Process.Pid > 0 {
-						return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-					}
-					return nil
-				}
-				cmd.WaitDelay = 2 * time.Second
-				stderrBuf := newTailBuffer(64 * 1024)
-				cmd.Stderr = stderrBuf
-				cmd.Stdout = nil
-
-				start := time.Now()
-				runErr := cmd.Run()
-				vmafDurationSec = time.Since(start).Seconds()
-
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
-				if runErr != nil {
-					candidateFailed = true
-					candidateFailReason = fmt.Sprintf("ffmpeg vmaf failed for cand %q sample %d: %v; stderr: %s",
-						vc.candidate.ID, window.Index, runErr, stderrBuf.String())
-				} else {
-					logData, err := readMetricLogFile(logPath)
-					if err != nil {
-						candidateFailed = true
-						candidateFailReason = fmt.Sprintf("read vmaf log for cand %q sample %d: %v", vc.candidate.ID, window.Index, err)
-					} else {
-						score, err := ParseVMAFJSON(logData)
-						if err != nil {
-							candidateFailed = true
-							candidateFailReason = fmt.Sprintf("parse vmaf log for cand %q sample %d: %v", vc.candidate.ID, window.Index, err)
-						} else {
-							vmafScore = &score
-							vmafSampleScores = append(vmafSampleScores, optimization.SampleScore{
-								SampleIndex: window.Index,
-								Score:       score,
-								Valid:       true,
-							})
-						}
-					}
-				}
-
-				if progressReporter != nil {
-					progressReporter.ResolveUnit()
-				}
-
-				if candidateFailed {
-					vmafSampleScores = append(vmafSampleScores, optimization.SampleScore{
-						SampleIndex: window.Index,
-						Valid:       false,
-						Error:       candidateFailReason,
-					})
-					if runSSIM {
-						ssimSampleScores = append(ssimSampleScores, optimization.SampleScore{
-							SampleIndex: window.Index,
-							Valid:       false,
-							Error:       candidateFailReason,
-						})
-						if progressReporter != nil {
-							progressReporter.SkipUnits(1)
-						}
-					}
-					evidence.MetricSamples = append(evidence.MetricSamples, BenchmarkMetricSampleResult{
-						CandidateID:       vc.candidate.ID,
-						CandidateIndex:    candIdx,
-						SampleIndex:       window.Index,
-						VMAFDurationSec:   vmafDurationSec,
-						MetricDurationSec: vmafDurationSec,
-						Error:             candidateFailReason,
-					})
-					continue
-				}
-			}
-
-			if runSSIM {
-				statsPath, err := derivedMetricLogPath(samplesDir, "ssim", candIdx, vc.candidate.ID, window.Index)
-				if err != nil {
-					return err
-				}
-				if err := prepareOutputFile(statsPath); err != nil {
-					return fmt.Errorf("preparing ssim stats path %s: %w", statsPath, err)
-				}
-
-				if progressReporter != nil {
-					progressReporter.StartUnit("evaluating_metrics")
-				}
-
-				args := BuildSSIMArgs(candPath, refPath, statsPath)
-				cmd := exec.CommandContext(ctx, w.ffmpegPath, args...)
-				cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-				cmd.Cancel = func() error {
-					if cmd.Process != nil && cmd.Process.Pid > 0 {
-						return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-					}
-					return nil
-				}
-				cmd.WaitDelay = 2 * time.Second
-				stderrBuf := newTailBuffer(64 * 1024)
-				cmd.Stderr = stderrBuf
-				cmd.Stdout = nil
-
-				start := time.Now()
-				runErr := cmd.Run()
-				ssimDurationSec = time.Since(start).Seconds()
-
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
-				if runErr != nil {
-					candidateFailed = true
-					candidateFailReason = fmt.Sprintf("ffmpeg ssim failed for cand %q sample %d: %v; stderr: %s",
-						vc.candidate.ID, window.Index, runErr, stderrBuf.String())
-				} else {
-					var score float64
-					statsData, err := readMetricLogFile(statsPath)
-					if err == nil {
-						score, err = ParseSSIMStatsFile(statsData)
-					}
-					if err != nil {
-						// Stats file read/parse failed, fall back to parsing summary from stderr tail
-						score, err = ParseSSIMStderr(stderrBuf.String())
-					}
-					if err != nil {
-						candidateFailed = true
-						candidateFailReason = fmt.Sprintf("read/parse ssim stats for cand %q sample %d: %v", vc.candidate.ID, window.Index, err)
-					} else {
-						ssimScore = &score
-						ssimSampleScores = append(ssimSampleScores, optimization.SampleScore{
-							SampleIndex: window.Index,
-							Score:       score,
-							Valid:       true,
-						})
-					}
-				}
-
-				if progressReporter != nil {
-					progressReporter.ResolveUnit()
-				}
-
-				if candidateFailed {
-					ssimSampleScores = append(ssimSampleScores, optimization.SampleScore{
-						SampleIndex: window.Index,
-						Valid:       false,
-						Error:       candidateFailReason,
-					})
-					evidence.MetricSamples = append(evidence.MetricSamples, BenchmarkMetricSampleResult{
-						CandidateID:       vc.candidate.ID,
-						CandidateIndex:    candIdx,
-						SampleIndex:       window.Index,
-						VMAF:              vmafScore,
-						VMAFDurationSec:   vmafDurationSec,
-						SSIMDurationSec:   ssimDurationSec,
-						MetricDurationSec: vmafDurationSec + ssimDurationSec,
-						Error:             candidateFailReason,
-					})
-					continue
-				}
-			}
-
-			metricRes := BenchmarkMetricSampleResult{
-				CandidateID:       vc.candidate.ID,
-				CandidateIndex:    candIdx,
-				SampleIndex:       window.Index,
-				VMAF:              vmafScore,
-				SSIM:              ssimScore,
-				VMAFDurationSec:   vmafDurationSec,
-				SSIMDurationSec:   ssimDurationSec,
-				MetricDurationSec: vmafDurationSec + ssimDurationSec,
-			}
-			evidence.MetricSamples = append(evidence.MetricSamples, metricRes)
-
-			for i := range evidence.CandidateSamples {
-				if evidence.CandidateSamples[i].CandidateID == vc.candidate.ID && evidence.CandidateSamples[i].SampleIndex == window.Index {
-					evidence.CandidateSamples[i].VMAF = vmafScore
-					evidence.CandidateSamples[i].SSIM = ssimScore
-					evidence.CandidateSamples[i].MetricDurationSec = metricRes.MetricDurationSec
-					break
-				}
-			}
-		}
-
-		// Persist deterministic candidate aggregates.
-		// For metric='both', persist aggregates for BOTH VMAF and SSIM in deterministic order.
-		// If a candidate suffered sample failures, the aggregate will record Valid: false and
-		// IneligibleReason: ReasonIncompleteSampleScores, cleanly marking that candidate ineligible
-		// without aborting remaining candidates or fabricating scores.
-		if runVMAF {
-			vmafAgg := optimization.AggregateSampleScores(optimization.MetricTypeVMAF, vmafSampleScores)
-			evidence.CandidateMetrics = append(evidence.CandidateMetrics, BenchmarkCandidateMetricAggregate{
-				CandidateID:    vc.candidate.ID,
-				CandidateIndex: candIdx,
-				MetricType:     optimization.MetricTypeVMAF,
-				Aggregate:      vmafAgg,
-			})
-		}
-		if runSSIM {
-			ssimAgg := optimization.AggregateSampleScores(optimization.MetricTypeSSIM, ssimSampleScores)
-			evidence.CandidateMetrics = append(evidence.CandidateMetrics, BenchmarkCandidateMetricAggregate{
-				CandidateID:    vc.candidate.ID,
-				CandidateIndex: candIdx,
-				MetricType:     optimization.MetricTypeSSIM,
-				Aggregate:      ssimAgg,
-			})
-		}
-	}
-
-	return nil
 }
 
 func (r *ProductionBenchmarkRunner) runSelection(
