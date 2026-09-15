@@ -176,6 +176,51 @@ type Worker struct {
 	// judged by the test binary's argv. Production identity checks are never
 	// weakened: the default path is unchanged.
 	isAlive func(*JobRecord) bool
+
+	// Phase 6B2 operational execution seams. Nil selects the production
+	// implementations (RunFFmpegPaths / ProbeSourceStreams / FinalizeOutputAtomic).
+	// Tests inject stubs so the state machine is deterministic without real
+	// ffmpeg/ffprobe. They never change the semantic Source/Candidate or the
+	// execution-spec digest.
+	runFFmpeg             func(ctx context.Context, execPlan *ExecutionPlan, job *JobRecord, inputPath, outputPath, progressPath, logPath string) error
+	probeSource           func(ctx context.Context, path string) ([]SourceStream, float64, error)
+	finalizeOutput        func(ctx context.Context, localCandidate, destination, jobID string) error
+	afterEncodeCheckpoint func(jobDir string, job *JobRecord)
+	// leaseManager is optional: when set, external staging sources and external
+	// finalization destinations are driven healthy through the existing lease
+	// primitive before mutation. Nil is a no-op ("where applicable").
+	leaseManager *LeaseManager
+}
+
+// SetRunFFmpeg injects a custom encoder runner (tests). Nil restores the
+// production RunFFmpegPaths path.
+func (w *Worker) SetRunFFmpeg(fn func(ctx context.Context, execPlan *ExecutionPlan, job *JobRecord, inputPath, outputPath, progressPath, logPath string) error) {
+	w.runFFmpeg = fn
+}
+
+// SetProbeSource injects a custom stream probe (tests). Nil restores
+// ProbeSourceStreams.
+func (w *Worker) SetProbeSource(fn func(ctx context.Context, path string) ([]SourceStream, float64, error)) {
+	w.probeSource = fn
+}
+
+// SetFinalizeOutput injects a custom output finalizer (tests). Nil restores
+// FinalizeOutputAtomic.
+func (w *Worker) SetFinalizeOutput(fn func(ctx context.Context, localCandidate, destination, jobID string) error) {
+	w.finalizeOutput = fn
+}
+
+// SetAfterEncodeCheckpoint injects a hook invoked after the EncodeComplete
+// checkpoint is durably persisted and before finalization (tests). Nil disables
+// the hook.
+func (w *Worker) SetAfterEncodeCheckpoint(fn func(jobDir string, job *JobRecord)) {
+	w.afterEncodeCheckpoint = fn
+}
+
+// SetLeaseManager injects the operational storage lease manager (tests). Nil
+// disables external health/repair driving.
+func (w *Worker) SetLeaseManager(m *LeaseManager) {
+	w.leaseManager = m
 }
 
 // SetTranscodeSpawner injects a custom detached-spawn function (tests).
@@ -1246,6 +1291,12 @@ func (w *Worker) countActiveJobs(excludeID string) (int, error) {
 }
 
 // InternalRun is invoked by the background decoupled process.
+//
+// Phase 6B2: it resolves the stored operational metadata up front and fails
+// closed (before any mutation) on malformed/unknown state. If encoding already
+// completed (EncodeComplete), it resumes finalization only and never reruns
+// ffmpeg or probes the source. Otherwise it drives staging -> encode ->
+// checkpoint -> finalization -> completion.
 func (w *Worker) InternalRun(ctx context.Context, jobID string) error {
 	jobDir := filepath.Join(w.cfg.StateDir, jobID)
 	jobFile := filepath.Join(jobDir, "job.json")
@@ -1259,85 +1310,67 @@ func (w *Worker) InternalRun(ctx context.Context, jobID string) error {
 		return nil
 	}
 
-	job.PID = os.Getpid()
-	_, startTime, _ := GetProcessIdentity(job.PID)
-	job.ProcessStartTime = startTime
-	job.Status = "running"
-	job.StartedAt = time.Now().UTC()
-	_ = SaveJobAtomic(jobFile, job)
-
-	// Ensure plan is resolved
-	if job.Plan == nil {
-		plan, err := ResolveWorkerPlan(job.Profile, nil)
-		if err != nil {
-			job.Status = "failed"
-			job.FinishedAt = time.Now().UTC()
-			job.ExitCode = 1
-			job.Error = fmt.Sprintf("resolving plan: %v", err)
-			if perr := w.persistTerminalJob(jobDir, jobFile, job); perr != nil {
-				return perr
-			}
-			return err
-		}
-		job.Plan = plan
+	// Stored operational metadata is authoritative. Unknown nonblank states
+	// and missing required operational paths fail closed here, before any
+	// runner identity, staging, probe, or finalization mutation.
+	resolved, err := resolveOperationalForExecution(job)
+	if err != nil {
+		return fmt.Errorf("job %s: %w", jobID, err)
 	}
 
-	// Probe source streams and duration with ffprobe
-	streams, dur, probeErr := ProbeSourceStreams(ctx, w.ffprobePath, job.Source)
-	if dur > 0 {
-		job.DurationSec = dur
-	}
-	if probeErr != nil {
-		job.Status = "failed"
-		job.FinishedAt = time.Now().UTC()
-		job.ExitCode = 1
-		job.Error = fmt.Sprintf("probing source streams: %v", probeErr)
-		if perr := w.persistTerminalJob(jobDir, jobFile, job); perr != nil {
-			return perr
-		}
-		return probeErr
-	}
+	// Post-encode restart resume: encoding already finished, so claiming the
+	// runner and finalizing is safe and must never re-probe or re-encode.
+	postEncodeResume := isPostEncodeResume(job)
 
-	// Build stream-by-stream execution plan
-	execPlan, planErr := BuildExecutionPlan(job.Plan, streams, job.DurationSec)
-	if planErr != nil {
-		job.Status = "failed"
-		job.FinishedAt = time.Now().UTC()
-		job.ExitCode = 1
-		job.Error = fmt.Sprintf("building execution plan: %v", planErr)
-		if perr := w.persistTerminalJob(jobDir, jobFile, job); perr != nil {
-			return perr
-		}
-		return planErr
+	// Claim the runner under the per-job lock. This serializes with the parent
+	// spawner's post-spawn identity stamp in ResumePostEncode so a child can
+	// never overwrite (nor be overwritten by) a stale parent snapshot.
+	claimed, err := w.claimRunner(jobDir, jobFile, job)
+	if err != nil {
+		return err
+	}
+	if !claimed {
+		// Cancellation wins over a concurrently claimed runner.
+		return nil
 	}
 
-	job.Conversions = execPlan.Conversions
-	_ = SaveJobAtomic(jobFile, job)
-
-	progressPath := filepath.Join(jobDir, "progress.txt")
-	logPath := filepath.Join(jobDir, "ffmpeg.log")
-
-	ffmpegErr := RunFFmpeg(ctx, w.ffmpegPath, execPlan, job, progressPath, logPath)
-
-	// Resolve the terminal transition under the per-job lock inside
-	// persistTerminalJob: a concurrent Cancel always wins and the cancelled
-	// record is never overwritten. There is no unlocked cancellation check.
-	if ffmpegErr == nil {
-		job.Status = "completed"
-		job.FinishedAt = time.Now().UTC()
-		job.ExitCode = 0
-		job.Error = ""
-	} else {
-		job.Status = "failed"
-		job.FinishedAt = time.Now().UTC()
-		job.ExitCode = 1
-		job.Error = ffmpegErr.Error()
+	if postEncodeResume || job.EncodeComplete {
+		return w.finalizeOperational(ctx, jobDir, jobFile, job, resolved)
 	}
+	return w.executeOperational(ctx, jobDir, jobFile, job, resolved)
+}
 
-	if perr := w.persistTerminalJob(jobDir, jobFile, job); perr != nil {
-		return perr
+// claimRunner durably records this process as the job's runner under the
+// per-job lock. Cancellation wins: a concurrently cancelled record is never
+// overwritten and claimed=false is returned. On success the latest durable
+// record is copied back into job.
+func (w *Worker) claimRunner(jobDir, jobFile string, job *JobRecord) (bool, error) {
+	jobLock, err := acquireJobLock(jobDir)
+	if err != nil {
+		return false, fmt.Errorf("acquiring job lock for runner claim: %w", err)
 	}
-	return ffmpegErr
+	defer jobLock.Unlock()
+
+	latest, err := LoadJob(jobFile)
+	if err != nil {
+		return false, fmt.Errorf("reloading job for runner claim: %w", err)
+	}
+	if latest == nil {
+		return false, fmt.Errorf("reloading job for runner claim: nil record")
+	}
+	if latest.Status == "cancelled" {
+		return false, nil
+	}
+	latest.PID = os.Getpid()
+	_, startTime, _ := GetProcessIdentity(latest.PID)
+	latest.ProcessStartTime = startTime
+	latest.Status = "running"
+	latest.StartedAt = time.Now().UTC()
+	if serr := SaveJobAtomic(jobFile, latest); serr != nil {
+		return false, fmt.Errorf("persisting runner claim for job %q: %w", latest.ID, serr)
+	}
+	*job = *latest
+	return true, nil
 }
 
 // terminalMarkerFromJob builds a TerminalMarker mirroring a terminal job.
