@@ -35,6 +35,12 @@ type JobRecord struct {
 	ExitCode            int                          `json:"exit_code,omitempty"`
 	Error               string                       `json:"error,omitempty"`
 	DurationSec         float64                      `json:"duration_sec,omitempty"`
+	// Minimal transport metadata (no retry engine): mirrors transcode.JobStatus.
+	Attempt               int      `json:"attempt,omitempty"`
+	RetryCount            int      `json:"retry_count,omitempty"`
+	FallbackCount         int      `json:"fallback_count,omitempty"`
+	AppliedFallbacks      []string `json:"applied_fallbacks,omitempty"`
+	FailureClassification string   `json:"failure_classification,omitempty"`
 }
 
 // LoadJob loads a JobRecord from job.json.
