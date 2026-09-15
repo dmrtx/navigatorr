@@ -212,12 +212,13 @@ func registerDiagnosticsTools(s *server.MCPServer, d DiagnosticsDeps) {
 				dbStats["active_maintenance_jobs"] = len(maintItems)
 			}
 
-			// 6. Transcode executor
+			// 6. Transcode executor. Automatic execution is HTTP-only; SSH is
+			// retired/admin-only and is never wired here.
 			var tcInfo map[string]any
 			if d.Transcode != nil {
 				tcInfo = map[string]any{
 					"configured": true,
-					"executor":   "ssh",
+					"executor":   "http",
 					"status":     "ok",
 				}
 				if checkConn {

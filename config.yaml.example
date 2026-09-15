@@ -107,10 +107,17 @@ sabnzbd:
   url_base: "/sabnzbd"          # SABnzbd's own url_base setting (default: /sabnzbd)
 
 # ==============================================================================
-# 5. TRANSCODING (SSH EXECUTOR + VERSIONED RECIPES)
+# 5. TRANSCODING (HTTP DAEMON EXECUTOR + VERSIONED RECIPES)
 # ==============================================================================
-# Remote Apple Silicon (M1/M2/M3/M4) SSH worker executor for hardware-accelerated
-# FFmpeg transcoding using hevc_videotoolbox.
+# Automatic transcoding runs over the persistent HTTP daemon transport served
+# by a remote Apple Silicon (M1/M2/M3/M4) worker for hardware-accelerated FFmpeg
+# transcoding using hevc_videotoolbox.
+#
+# Automatic SSH execution is RETIRED. There is NO automatic SSH fallback: if the
+# HTTP daemon is unreachable or a submit transport timeout/disconnect occurs,
+# the outcome is UNKNOWN (not a failed encode). Reconcile via Status before any
+# retry. `executor` defaults to "http" when omitted; the `ssh` block below is
+# admin/bootstrap/manual-recovery only and is never used for automatic app wiring.
 #
 # IMPORTANT ARCHITECTURE:
 #   - The Navigatorr/worker image contains only the safe execution capabilities.
@@ -122,7 +129,8 @@ sabnzbd:
 # "file", "https", or "github". See docs/TRANSCODING.md for the recipe schema.
 transcode:
   enabled: false
-  executor: "ssh"
+  # Automatic execution is HTTP-only. May be omitted (defaults to "http").
+  executor: "http"
   default_action: "manual_approval"
   default_profile: "hevc-vt-balanced"
   min_savings_percent: 15.0
@@ -154,6 +162,9 @@ transcode:
   # the same capability boundary; they cannot add worker capabilities. Prefer changing
   # the external versioned recipe for normal policy maintenance.
 
+  # ADMIN / BOOTSTRAP / MANUAL RECOVERY ONLY.
+  # Automatic execution never uses SSH; this block is retained for out-of-band
+  # recovery and backward-compatible parsing, NOT for app wiring.
   ssh:
     host: "192.0.2.10"
     port: 22
@@ -172,18 +183,14 @@ transcode:
       - local_prefix: "/media"
         remote_prefix: "/Volumes/media"
 
-  # DARK / NON-DEFAULT persistent-daemon HTTP transport (PR2).
-  # Default executor above stays "ssh"; set transcode.executor to "http"
-  # ONLY for explicit opt-in testing. No automatic fallback between
-  # transports. A submit transport timeout/disconnect is UNKNOWN (not an
-  # encode failure): reconcile via Status before any retry (phase 4).
-  # Idempotency remains weak by job ID in PR2 (strong
-  # idempotency_key + execution_spec_digest is PR3).
+  # Persistent-daemon HTTP transport used for ALL automatic execution.
+  # No automatic SSH fallback. A submit transport timeout/disconnect is
+  # UNKNOWN (not an encode failure): reconcile via Status before any retry.
   http:
-    base_url: "http://192.0.2.10:8097"
+    base_url: "http://192.168.68.55:8097"
     # Bearer credential for the daemon (required on non-loopback binds).
     # Prefer token_file with 0600 permissions in production.
-    token: ""
+    token: ""                    # placeholder; prefer token_file below
     token_file: "/run/secrets/navigatorr_transcode_http_token"
     request_timeout_sec: 15
     submit_timeout_sec: 60

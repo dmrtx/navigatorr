@@ -1,5 +1,10 @@
 package config
 
+// DefaultTranscodeExecutor is the executor selected when an enabled transcode
+// section omits `executor`. Automatic execution is HTTP-only; SSH is retained
+// for admin/backward-compatible parsing but is never chosen implicitly.
+const DefaultTranscodeExecutor = "http"
+
 // DefaultPorts maps service type to default port.
 var DefaultPorts = map[string]int{
 	"sonarr":         8989,

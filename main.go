@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -96,48 +97,13 @@ func main() {
 		internal.Logf("sabnzbd client configured: %s", cfg.SABnzbd.URL)
 	}
 
-	// Build Transcode executor if enabled and configured.
-	// SSH remains the default production transport. The HTTP executor is
-	// dark/non-default: it is constructed ONLY when
-	// cfg.Transcode.Executor == "http" (explicit opt-in, no cutover, no
-	// automatic fallback between transports).
-	var transcodeExecutor transcode.Executor
-	if cfg.Transcode.Enabled && cfg.Transcode.Executor == "http" {
-		httpCfg, err := cfg.Transcode.BuildHTTPExecutorConfig()
-		if err != nil {
-			internal.Warnf("failed to configure http transcode executor: %v", err)
-		} else if httpExec, err := transcode.NewHTTPExecutor(httpCfg); err != nil {
-			internal.Warnf("failed to configure http transcode executor: %v", err)
-		} else {
-			transcodeExecutor = httpExec
-			internal.Logf("http transcode executor configured (dark): base=%s, request_timeout=%v, submit_timeout=%v",
-				httpExec.BaseURL(), httpCfg.RequestTimeout, httpCfg.SubmitTimeout)
-		}
-	}
-	if cfg.Transcode.Enabled && cfg.Transcode.Executor == "ssh" {
-		sshCfg := cfg.Transcode.SSH
-		mappings := make([]transcode.PathMapping, len(sshCfg.PathMappings))
-		for i, m := range sshCfg.PathMappings {
-			mappings[i] = transcode.PathMapping{Local: m.GetLocal(), Remote: m.GetRemote()}
-		}
-		sshExec, err := transcode.NewSSHExecutor(transcode.SSHConfig{
-			Host:           sshCfg.Host,
-			Port:           sshCfg.Port,
-			User:           sshCfg.User,
-			Command:        sshCfg.RemoteCommand(),
-			IdentityFile:   sshCfg.KeyFile(),
-			KnownHostsFile: sshCfg.KnownHostsPath,
-			ConnectTimeout: sshCfg.TimeoutDuration(),
-			CommandTimeout: sshCfg.CommandTimeoutDuration(),
-			PathMappings:   mappings,
-		})
-		if err != nil {
-			internal.Warnf("failed to configure ssh transcode executor: %v", err)
-		} else {
-			transcodeExecutor = sshExec
-			internal.Logf("ssh transcode executor configured: host=%s, cmd=%s, timeout=%v",
-				sshCfg.Host, sshCfg.RemoteCommand(), sshCfg.TimeoutDuration())
-		}
+	// Build the automatic transcode executor. Only the HTTP daemon transport
+	// is valid for automatic execution; SSH automatic execution is retired.
+	// Construction failures are fatal rather than logged-and-ignored.
+	transcodeExecutor, err := buildAutomaticTranscodeExecutor(cfg.Transcode)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
 	}
 
 	// Open the request queue. This is always available to the MCP tools so an
@@ -265,5 +231,35 @@ func main() {
 			fmt.Fprintf(os.Stderr, "server error: %v\n", err)
 			os.Exit(1)
 		}
+	}
+}
+
+// buildAutomaticTranscodeExecutor constructs the executor used for automatic
+// (agent-initiated) transcode execution. Only the HTTP daemon transport is
+// valid; SSH automatic execution is retired and admin-only. It fails closed on
+// blank or unknown executor values and never falls back between transports.
+func buildAutomaticTranscodeExecutor(tc config.TranscodeConfig) (transcode.Executor, error) {
+	if !tc.Enabled {
+		return nil, nil
+	}
+
+	switch strings.ToLower(strings.TrimSpace(tc.Executor)) {
+	case "http":
+		httpCfg, err := tc.BuildHTTPExecutorConfig()
+		if err != nil {
+			return nil, fmt.Errorf("automatic transcode executor: http configuration: %w", err)
+		}
+		exec, err := transcode.NewHTTPExecutor(httpCfg)
+		if err != nil {
+			return nil, fmt.Errorf("automatic transcode executor: http executor: %w", err)
+		}
+		internal.Logf("automatic transcode executor configured: http base=%s", exec.BaseURL())
+		return exec, nil
+	case "ssh":
+		return nil, fmt.Errorf("automatic transcode execution over ssh is retired and admin-only; configure executor=http")
+	case "":
+		return nil, fmt.Errorf("automatic transcode executor is not configured; configure executor=http")
+	default:
+		return nil, fmt.Errorf("automatic transcode executor %q is not valid; only \"http\" is supported for automatic execution", tc.Executor)
 	}
 }
