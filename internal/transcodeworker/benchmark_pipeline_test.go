@@ -680,6 +680,160 @@ func TestPipeline_ExhaustiveWinnerMatchesGolden(t *testing.T) {
 	}
 }
 
+func TestPipeline_PartialEvidenceCompleteWhenUnitFails(t *testing.T) {
+	// Regression test: one pipelined encode unit fails fast while its sibling
+	// encode is still in flight (slow success). Both the successful and the
+	// failed CandidateSamples entries must be preserved deterministically in
+	// (candidate, sample) order. Pre-fix, the first job-fatal error cancelled
+	// the shared pipeline context, SIGKILLing the in-flight sibling encode,
+	// whose outcome was then discarded (expected 2 candidate samples, got 1).
+	dir := t.TempDir()
+	sourceFile := filepath.Join(dir, "source.mkv")
+	if err := os.WriteFile(sourceFile, []byte("fake source media"), 0644); err != nil {
+		t.Fatalf("writing source: %v", err)
+	}
+
+	mockProbe := filepath.Join(dir, "mock_ffprobe.sh")
+	probeScript := "#!/bin/sh\ncat << 'EOF'\n" + sdr8BitProbeJSON + "\nEOF\n"
+	if err := os.WriteFile(mockProbe, []byte(probeScript), 0755); err != nil {
+		t.Fatalf("writing mock ffprobe: %v", err)
+	}
+	mockFFmpeg := filepath.Join(dir, "mock_ffmpeg.sh")
+	ffmpegScript := `#!/bin/sh
+case "$*" in
+  *"-version"*)
+    echo "ffmpeg version 7.1 Copyright (c) 2000-2024 the FFmpeg developers"
+    exit 0
+    ;;
+  *"-h encoder=hevc_videotoolbox"*)
+    cat << 'EOF'
+Encoder hevc_videotoolbox [VideoToolbox H.265 Encoder]:
+    Supported pixel formats: nv12 p010le yuv420p
+hevc_videotoolbox AVOptions:
+  -profile           <int>        E..V....... Profile (from 0 to 2) (default 0)
+     main            1            E..V....... Main Profile
+     main10          2            E..V....... Main10 Profile
+  -prio_speed        <boolean>    E..V....... Prioritize encoding speed (default false)
+  -spatial_aq        <boolean>    E..V....... Spatial AQ (default false)
+  -realtime          <boolean>    E..V....... Realtime (default false)
+EOF
+    exit 0
+    ;;
+  *"-encoders"*)
+    cat << 'EOF'
+Encoders:
+ V..... hevc_videotoolbox    VideoToolbox H.265
+ V..... ffv1                 FFmpeg video codec #1
+EOF
+    exit 0
+    ;;
+  *"-filters"*)
+    cat << 'EOF'
+Filters:
+  .. libvmaf           VV->V      Calculate the VMAF between two video streams.
+  TS ssim              VV->V      Calculate the SSIM between two video streams.
+EOF
+    exit 0
+    ;;
+esac
+
+case "$*" in
+  *"-filter_complex"*"libvmaf"*)
+    for arg in "$@"; do
+      case "$arg" in
+        *"log_path="*)
+          lpath="${arg#*log_path=}"
+          lpath="${lpath%%:*}"
+          mkdir -p "$(dirname "$lpath")"
+          cat << 'VMAF_EOF' > "$lpath"
+{
+  "version": "2.3.1",
+  "pooled_metrics": {
+    "vmaf": {
+      "mean": 95.500000
+    }
+  }
+}
+VMAF_EOF
+          ;;
+      esac
+    done
+    exit 0
+    ;;
+esac
+
+# Candidate encode for sample 1 fails fast; sibling sample 0 encode is slow
+# so it is guaranteed to still be in flight when the failure lands.
+case "$*" in
+  *"ref_sample_1"*hevc_videotoolbox*|*hevc_videotoolbox*"ref_sample_1"*)
+    echo "simulated encode failure for sample 1" >&2
+    exit 1
+    ;;
+esac
+
+out=""
+for last; do out="$last"; done
+case "$*" in
+  *hevc_videotoolbox*)
+    sleep 1
+    ;;
+esac
+case "$out" in
+  -*|"")
+    ;;
+  *)
+    mkdir -p "$(dirname "$out")"
+    echo "fake media data payload for $out" > "$out"
+    ;;
+esac
+exit 0
+`
+	if err := os.WriteFile(mockFFmpeg, []byte(ffmpegScript), 0755); err != nil {
+		t.Fatalf("writing mock ffmpeg: %v", err)
+	}
+
+	cfg := &WorkerConfig{
+		StateDir:        filepath.Join(dir, "state"),
+		AllowedRoots:    []string{dir},
+		MaxParallelJobs: 1,
+		FFmpeg:          mockFFmpeg,
+		FFprobe:         mockProbe,
+	}
+	worker := NewWorker(cfg)
+	record := &BenchmarkRecord{
+		ProtocolVersion: transcode.WorkerProtocolVersion,
+		ID:              "bench-pipe-partial",
+		Status:          "running",
+		Source:          sourceFile,
+		Metric:          "vmaf",
+		Samples: []transcode.BenchmarkSampleWindow{
+			{Index: 0, StartSeconds: 5.0, DurationSeconds: 5.0},
+			{Index: 1, StartSeconds: 20.0, DurationSeconds: 5.0},
+		},
+		Candidates: []transcode.BenchmarkCandidate{{ID: "cand_q65", Quality: 65}},
+		Attempt:    1,
+	}
+	runner := &ProductionBenchmarkRunner{}
+	err := runner.RunBenchmark(context.Background(), worker, record)
+	if err == nil {
+		t.Fatalf("expected job-fatal encode error, got nil")
+	}
+
+	ev := record.Evidence
+	if ev == nil {
+		t.Fatalf("expected partial evidence on failure (run err: %v)", err)
+	}
+	if len(ev.CandidateSamples) != 2 {
+		t.Fatalf("expected 2 candidate samples in evidence (1 success, 1 failure), got %d", len(ev.CandidateSamples))
+	}
+	if got := ev.CandidateSamples[0]; got.SampleIndex != 0 || got.Error != "" {
+		t.Errorf("CandidateSamples[0] = sample %d err %q, want sample 0 with no error", got.SampleIndex, got.Error)
+	}
+	if got := ev.CandidateSamples[1]; got.SampleIndex != 1 || got.Error == "" {
+		t.Errorf("CandidateSamples[1] = sample %d err %q, want sample 1 with failure error", got.SampleIndex, got.Error)
+	}
+}
+
 func TestResolvePipelineConcurrency(t *testing.T) {
 	cases := []struct {
 		name         string
