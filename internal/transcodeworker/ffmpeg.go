@@ -61,15 +61,43 @@ func ProbeDuration(ctx context.Context, ffprobePath, filePath string) (float64, 
 	return dur, nil
 }
 
-// SummarizeFFmpegError extracts a bounded, sanitized error summary from the tail of ffmpeg.log.
-func SummarizeFFmpegError(logPath string, runErr error) string {
-	data, err := os.ReadFile(logPath)
-	if err != nil || len(data) == 0 {
-		return fmt.Sprintf("ffmpeg execution failed: %v", runErr)
+// readFileTail returns at most the final maxBytes of the file at path. It
+// opens/stats/ReadAt so a durable append log is never read in full.
+func readFileTail(path string, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		return nil, fmt.Errorf("maxBytes must be positive")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	offset := int64(0)
+	if size := fi.Size(); size > maxBytes {
+		offset = size - maxBytes
 	}
 
-	if len(data) > 8192 {
-		data = data[len(data)-8192:]
+	buf := make([]byte, maxBytes)
+	n, err := f.ReadAt(buf, offset)
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	return buf[:n], nil
+}
+
+// SummarizeFFmpegError extracts a bounded, sanitized error summary from the
+// tail of ffmpeg.log. Only the final bounded bytes are read: with append-only
+// durable logs the file may be arbitrarily large and historical failures must
+// not influence the current run's summary.
+func SummarizeFFmpegError(logPath string, runErr error) string {
+	data, err := readFileTail(logPath, 8192)
+	if err != nil || len(data) == 0 {
+		return fmt.Sprintf("ffmpeg execution failed: %v", runErr)
 	}
 
 	lines := strings.Split(string(data), "\n")
@@ -179,7 +207,9 @@ func RunFFmpeg(ctx context.Context, ffmpegPath string, execPlan *ExecutionPlan, 
 		return fmt.Errorf("building ffmpeg arguments: %w", err)
 	}
 
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	// Append (not truncate): the ffmpeg log is durable and must survive runner
+	// restarts without discarding prior evidence.
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return fmt.Errorf("creating ffmpeg log file %s: %w", logPath, err)
 	}
@@ -205,13 +235,10 @@ func RunFFmpeg(ctx context.Context, ffmpegPath string, execPlan *ExecutionPlan, 
 	}
 
 	if execPlan.Plan.SpatialAQ != nil {
-		stderrOutput := stderrBuf.String()
-		if stderrOutput == "" {
-			if data, err := os.ReadFile(logPath); err == nil {
-				stderrOutput = string(data)
-			}
-		}
-		if matched, warning := DetectSpatialAQWarning(stderrOutput); matched {
+		// stderrBuf captures THIS run's stderr. With an append-only durable
+		// ffmpeg.log, historical warnings must never classify the current run:
+		// an empty current-run stderr simply means no current SpatialAQ warning.
+		if matched, warning := DetectSpatialAQWarning(stderrBuf.String()); matched {
 			return fmt.Errorf("encoder_capability_unsupported: VideoToolbox spatial_aq unsupported by device: %s", warning)
 		}
 	}
