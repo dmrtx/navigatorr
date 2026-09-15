@@ -12,8 +12,10 @@ package transcode
 // encode failure: callers must reconcile via idempotent Status before
 // deciding anything. That reconciliation protocol is phase 4 (not PR2).
 //
-// Worker idempotency in PR2 remains weak by job ID only; strong
-// idempotency_key + execution_spec_digest is PR3 (not implemented here).
+// Worker idempotency in PR3 is strong: idempotency_key +
+// execution_spec_digest (canonical digest over source, candidate, normalized
+// profile, and resolved plan/plan digest via DigestTranscodeExecutionSpec).
+// A complete 409 idempotency conflict is definitive (never UncertainError).
 
 import (
 	"bytes"
@@ -565,19 +567,23 @@ func (e *HTTPExecutor) Capabilities(ctx context.Context) (WorkerCapabilities, er
 }
 
 type httpSubmitPayload struct {
-	ID            string `json:"id"`
-	SourcePath    string `json:"source_path"`
-	CandidatePath string `json:"candidate_path"`
-	Profile       string `json:"profile"`
-	Plan          *Plan  `json:"plan,omitempty"`
+	ID                  string `json:"id"`
+	SourcePath          string `json:"source_path"`
+	CandidatePath       string `json:"candidate_path"`
+	Profile             string `json:"profile"`
+	Plan                *Plan  `json:"plan,omitempty"`
+	IdempotencyKey      string `json:"idempotency_key,omitempty"`
+	ExecutionSpecDigest string `json:"execution_spec_digest,omitempty"`
 }
 
 type httpSubmitResult struct {
-	ID            string `json:"id"`
-	Status        string `json:"status"`
-	CandidatePath string `json:"candidate_path,omitempty"`
-	Plan          *Plan  `json:"plan,omitempty"`
-	Error         string `json:"error,omitempty"`
+	ID                  string `json:"id"`
+	Status              string `json:"status"`
+	CandidatePath       string `json:"candidate_path,omitempty"`
+	Plan                *Plan  `json:"plan,omitempty"`
+	IdempotencyKey      string `json:"idempotency_key,omitempty"`
+	ExecutionSpecDigest string `json:"execution_spec_digest,omitempty"`
+	Error               string `json:"error,omitempty"`
 }
 
 // Submit translates local paths to remote, POSTs exactly once, and maps the
@@ -586,7 +592,8 @@ type httpSubmitResult struct {
 // truncated body, malformed JSON, or an id/status mismatch) yields
 // *UncertainError (UNKNOWN, not encode failure); no resubmit, no SSH
 // fallback, no retry budget consumed here. A complete non-2xx rejection
-// stays a definitive typed *HTTPError.
+// stays a definitive typed *HTTPError — including 409 idempotency conflicts
+// (same key + different digest), which are definitive and never uncertain.
 func (e *HTTPExecutor) Submit(ctx context.Context, req Request) (Job, error) {
 	if strings.TrimSpace(req.ID) == "" {
 		return Job{}, errors.New("request id is required")
@@ -606,7 +613,20 @@ func (e *HTTPExecutor) Submit(ctx context.Context, req Request) (Job, error) {
 	if strings.TrimSpace(profile) == "" {
 		profile = "hevc-vt"
 	}
-	payload := httpSubmitPayload{ID: req.ID, SourcePath: remoteSource, CandidatePath: remoteCandidate, Profile: profile, Plan: req.Plan}
+	// Canonical idempotency data (PR3): explicit key wins, otherwise the job
+	// ID; digest over the immutable execution request when a resolved plan is
+	// present (profile-only callers omit the digest and let the worker compute
+	// it over the resolved plan).
+	effKey := DefaultTranscodeIdempotencyKey(req.ID, req.IdempotencyKey)
+	var specDigest string
+	if req.ExecutionSpecDigest != "" {
+		specDigest = strings.TrimSpace(req.ExecutionSpecDigest)
+	} else if req.Plan != nil {
+		if d, derr := DigestTranscodeExecutionSpec(remoteSource, remoteCandidate, profile, req.Plan); derr == nil {
+			specDigest = d
+		}
+	}
+	payload := httpSubmitPayload{ID: req.ID, SourcePath: remoteSource, CandidatePath: remoteCandidate, Profile: profile, Plan: req.Plan, IdempotencyKey: effKey, ExecutionSpecDigest: specDigest}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return Job{}, fmt.Errorf("serializing submit payload: %w", err)
