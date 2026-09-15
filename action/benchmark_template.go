@@ -521,6 +521,48 @@ func buildBenchmarkQualityConfig(optQuality *recipe.QualityPolicy) *transcode.Be
 	return qc
 }
 
+func buildBenchmarkAdaptiveConfig(srch *recipe.SearchPolicy) *transcode.BenchmarkAdaptiveConfig {
+	if srch == nil {
+		return nil
+	}
+	mode := strings.ToLower(strings.TrimSpace(srch.AdaptiveMode))
+	if mode == "" || mode == optimization.AdaptiveModeExhaustive {
+		return nil
+	}
+	if mode != optimization.AdaptiveModeAdaptive {
+		return nil
+	}
+	initial := srch.AdaptiveInitialQuality
+	if initial == 0 {
+		initial = optimization.DefaultAdaptiveInitialQuality
+	}
+	return &transcode.BenchmarkAdaptiveConfig{
+		Mode:           optimization.AdaptiveModeAdaptive,
+		InitialQuality: initial,
+	}
+}
+
+func buildBenchmarkConcurrencyConfig(srch *recipe.SearchPolicy) *transcode.BenchmarkConcurrencyConfig {
+	if srch == nil {
+		return nil
+	}
+	if srch.EncodeConcurrency == 0 && srch.MetricConcurrency == 0 {
+		return nil
+	}
+	enc := srch.EncodeConcurrency
+	if enc == 0 {
+		enc = transcode.DefaultEncodeConcurrency
+	}
+	met := srch.MetricConcurrency
+	if met == 0 {
+		met = transcode.DefaultMetricConcurrency
+	}
+	return &transcode.BenchmarkConcurrencyConfig{
+		EncodeConcurrency: enc,
+		MetricConcurrency: met,
+	}
+}
+
 func validateWorkerCapabilitiesForBenchmark(caps transcode.WorkerCapabilities, metric string, sourceBitDepth int) error {
 	if caps.ProtocolVersion != transcode.WorkerProtocolVersion {
 		return fmt.Errorf("worker protocol version %d does not match expected %d (fail closed)",
@@ -578,6 +620,8 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 	}
 
 	qualityCfg := buildBenchmarkQualityConfig(opt.Quality)
+	adaptiveCfg := buildBenchmarkAdaptiveConfig(opt.Search)
+	concurrencyCfg := buildBenchmarkConcurrencyConfig(opt.Search)
 
 	declaredVideoBitrate := int64(0)
 	if v0.BitRate > 0 {
@@ -606,6 +650,8 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 		Samples:                 samples,
 		Candidates:              candidates,
 		Quality:                 qualityCfg,
+		Adaptive:                adaptiveCfg,
+		Concurrency:             concurrencyCfg,
 		FallbackAudioBitrateBps: 384000,
 		DeclaredVideoBitrateBps: declaredVideoBitrate,
 		AttachmentBytes:         attachmentBytes,
