@@ -85,16 +85,21 @@ type SABnzbdConfig struct {
 }
 
 type TranscodeConfig struct {
-	Enabled           bool                              `yaml:"enabled"`
-	Executor          string                            `yaml:"executor"`
-	DefaultAction     string                            `yaml:"default_action"`
-	DefaultProfile    string                            `yaml:"default_profile"`
-	MinSavingsPercent float64                           `yaml:"min_savings_percent"`
-	MaxParallelJobs   int                               `yaml:"max_parallel_jobs"`
-	SSH               SSHExecutorConfig                 `yaml:"ssh"`
-	Recipes           TranscodeRecipeConfig             `yaml:"recipes"`
-	Profiles          map[string]TranscodeProfileConfig `yaml:"profiles"`
-	recipeManager     *recipe.Manager                   `yaml:"-"`
+	Enabled           bool              `yaml:"enabled"`
+	Executor          string            `yaml:"executor"`
+	DefaultAction     string            `yaml:"default_action"`
+	DefaultProfile    string            `yaml:"default_profile"`
+	MinSavingsPercent float64           `yaml:"min_savings_percent"`
+	MaxParallelJobs   int               `yaml:"max_parallel_jobs"`
+	SSH               SSHExecutorConfig `yaml:"ssh"`
+	// HTTP configures the dark/non-default persistent-daemon transport.
+	// Canonical key is `http` (consistent with `ssh`); `worker_http` is
+	// accepted as an alias and merged (explicit `http` wins).
+	HTTP          HTTPExecutorConfig                `yaml:"http"`
+	WorkerHTTP    HTTPExecutorConfig                `yaml:"worker_http"`
+	Recipes       TranscodeRecipeConfig             `yaml:"recipes"`
+	Profiles      map[string]TranscodeProfileConfig `yaml:"profiles"`
+	recipeManager *recipe.Manager                   `yaml:"-"`
 }
 
 type TranscodeRecipeConfig struct {
@@ -393,6 +398,17 @@ func (t *TranscodeConfig) Validate() error {
 	if err := t.validateRecipeSource(); err != nil {
 		return err
 	}
+	if strings.EqualFold(strings.TrimSpace(t.Executor), "http") {
+		if err := t.EffectiveHTTPConfig().ValidateHTTPConfig(); err != nil {
+			return err
+		}
+	} else if hc := t.EffectiveHTTPConfig(); strings.TrimSpace(hc.BaseURL) != "" {
+		// A configured-but-dormant http block must still be well-formed so
+		// enabling it later cannot surprise production.
+		if err := hc.ValidateHTTPConfig(); err != nil {
+			return err
+		}
+	}
 	for name, p := range t.Profiles {
 		if !validProfileNameRegex.MatchString(name) {
 			return fmt.Errorf("transcode: invalid profile name %q (allowed characters: letters, numbers, dash, underscore)", name)
@@ -449,6 +465,87 @@ func (s SSHExecutorConfig) CommandTimeoutDuration() time.Duration {
 	return 60 * time.Second
 }
 
+type HTTPExecutorConfig struct {
+	// BaseURL is the daemon origin, e.g. "http://192.0.2.10:8097".
+	// The "/v1" prefix is appended by the executor; do not include it.
+	BaseURL string `yaml:"base_url"`
+	// Token is the bearer credential. Empty means no Authorization header
+	// (only appropriate for loopback daemons).
+	Token string `yaml:"token"`
+	// TokenFile is read once at executor construction when Token is empty.
+	TokenFile string `yaml:"token_file"`
+	// RequestTimeoutSec bounds Doctor/Capabilities/Status/Cancel (default 15s).
+	RequestTimeoutSec int `yaml:"request_timeout_sec"`
+	// SubmitTimeoutSec bounds Submit/benchmark-submit POSTs (default 60s).
+	// It bounds transport only, never the encode itself.
+	SubmitTimeoutSec int                    `yaml:"submit_timeout_sec"`
+	PathMappings     []TranscodePathMapping `yaml:"path_mappings"`
+}
+
+// EffectiveHTTPConfig merges the `http` (canonical) and `worker_http`
+// (alias) blocks. Explicit `http.base_url` wins; otherwise the alias is
+// used verbatim.
+func (t *TranscodeConfig) EffectiveHTTPConfig() HTTPExecutorConfig {
+	if strings.TrimSpace(t.HTTP.BaseURL) != "" {
+		return t.HTTP
+	}
+	return t.WorkerHTTP
+}
+
+func (h HTTPExecutorConfig) RequestTimeoutDuration() time.Duration {
+	if h.RequestTimeoutSec > 0 {
+		return time.Duration(h.RequestTimeoutSec) * time.Second
+	}
+	return 15 * time.Second
+}
+
+func (h HTTPExecutorConfig) SubmitTimeoutDuration() time.Duration {
+	if h.SubmitTimeoutSec > 0 {
+		return time.Duration(h.SubmitTimeoutSec) * time.Second
+	}
+	return 60 * time.Second
+}
+
+// BuildHTTPExecutorConfig maps the effective http/worker_http block onto
+// the transcode.HTTPConfig used by NewHTTPExecutor. It is the single
+// construction site shared by production wiring (main.go) and tests.
+func (t *TranscodeConfig) BuildHTTPExecutorConfig() (transcode.HTTPConfig, error) {
+	hc := t.EffectiveHTTPConfig()
+	if err := hc.ValidateHTTPConfig(); err != nil {
+		return transcode.HTTPConfig{}, err
+	}
+	mappings := make([]transcode.PathMapping, len(hc.PathMappings))
+	for i, m := range hc.PathMappings {
+		mappings[i] = transcode.PathMapping{Local: m.GetLocal(), Remote: m.GetRemote()}
+	}
+	return transcode.HTTPConfig{
+		BaseURL:        strings.TrimSpace(hc.BaseURL),
+		Token:          strings.TrimSpace(hc.Token),
+		TokenFile:      strings.TrimSpace(hc.TokenFile),
+		RequestTimeout: hc.RequestTimeoutDuration(),
+		SubmitTimeout:  hc.SubmitTimeoutDuration(),
+		PathMappings:   mappings,
+	}, nil
+}
+
+// ValidateHTTPConfig fail-closes on malformed daemon configuration. It is
+// enforced at load time only when the http executor is selected, so
+// existing ssh-only configs are unaffected.
+func (h HTTPExecutorConfig) ValidateHTTPConfig() error {
+	base := strings.TrimSpace(h.BaseURL)
+	if base == "" {
+		return fmt.Errorf("transcode http: base_url is required when executor is http")
+	}
+	u, err := url.Parse(base)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("transcode http: base_url %q must be an absolute http(s) URL", h.BaseURL)
+	}
+	if h.RequestTimeoutSec < 0 || h.SubmitTimeoutSec < 0 {
+		return fmt.Errorf("transcode http: timeouts must not be negative")
+	}
+	return nil
+}
+
 type TranscodePathMapping struct {
 	Local        string `yaml:"local"`
 	Remote       string `yaml:"remote"`
@@ -490,7 +587,7 @@ func DefaultDatabasePath() string {
 
 var notFoundFieldRegex = regexp.MustCompile(`field\s+([a-zA-Z0-9_-]+)\s+not\s+found\s+in\s+type\s+([a-zA-Z0-9_.]+)`)
 var structTypeToSection = map[string]string{
-	"config.MediaConfig": "media", "MediaConfig": "media", "config.MaintenanceConfig": "maintenance", "MaintenanceConfig": "maintenance", "config.ConcurrencyConfig": "concurrency", "ConcurrencyConfig": "concurrency", "config.MCPConfig": "mcp", "MCPConfig": "mcp", "config.DatabaseConfig": "database", "DatabaseConfig": "database", "config.QueueConfig": "queue", "QueueConfig": "queue", "config.TransmissionConfig": "transmission", "TransmissionConfig": "transmission", "config.QBittorrentConfig": "qbittorrent", "QBittorrentConfig": "qbittorrent", "config.SABnzbdConfig": "sabnzbd", "SABnzbdConfig": "sabnzbd", "config.TranscodeConfig": "transcode", "TranscodeConfig": "transcode", "config.TranscodeRecipeConfig": "transcode.recipes", "TranscodeRecipeConfig": "transcode.recipes", "config.SSHExecutorConfig": "transcode", "SSHExecutorConfig": "transcode", "config.TranscodePathMapping": "transcode", "TranscodePathMapping": "transcode", "config.TranscodeProfileConfig": "transcode.profiles", "TranscodeProfileConfig": "transcode.profiles", "config.VideoProfileConfig": "transcode.profiles.video", "VideoProfileConfig": "transcode.profiles.video", "config.AudioProfileConfig": "transcode.profiles.audio", "AudioProfileConfig": "transcode.profiles.audio", "config.SubtitleProfileConfig": "transcode.profiles.subtitles", "SubtitleProfileConfig": "transcode.profiles.subtitles", "config.PreserveProfileConfig": "transcode.profiles.preserve", "PreserveProfileConfig": "transcode.profiles.preserve", "config.ResilienceProfileConfig": "transcode.profiles.resilience", "ResilienceProfileConfig": "transcode.profiles.resilience", "config.ServiceConfig": "services", "ServiceConfig": "services",
+	"config.MediaConfig": "media", "MediaConfig": "media", "config.MaintenanceConfig": "maintenance", "MaintenanceConfig": "maintenance", "config.ConcurrencyConfig": "concurrency", "ConcurrencyConfig": "concurrency", "config.MCPConfig": "mcp", "MCPConfig": "mcp", "config.DatabaseConfig": "database", "DatabaseConfig": "database", "config.QueueConfig": "queue", "QueueConfig": "queue", "config.TransmissionConfig": "transmission", "TransmissionConfig": "transmission", "config.QBittorrentConfig": "qbittorrent", "QBittorrentConfig": "qbittorrent", "config.SABnzbdConfig": "sabnzbd", "SABnzbdConfig": "sabnzbd", "config.TranscodeConfig": "transcode", "TranscodeConfig": "transcode", "config.TranscodeRecipeConfig": "transcode.recipes", "TranscodeRecipeConfig": "transcode.recipes", "config.SSHExecutorConfig": "transcode", "SSHExecutorConfig": "transcode", "config.HTTPExecutorConfig": "transcode", "HTTPExecutorConfig": "transcode", "config.TranscodePathMapping": "transcode", "TranscodePathMapping": "transcode", "config.TranscodeProfileConfig": "transcode.profiles", "TranscodeProfileConfig": "transcode.profiles", "config.VideoProfileConfig": "transcode.profiles.video", "VideoProfileConfig": "transcode.profiles.video", "config.AudioProfileConfig": "transcode.profiles.audio", "AudioProfileConfig": "transcode.profiles.audio", "config.SubtitleProfileConfig": "transcode.profiles.subtitles", "SubtitleProfileConfig": "transcode.profiles.subtitles", "config.PreserveProfileConfig": "transcode.profiles.preserve", "PreserveProfileConfig": "transcode.profiles.preserve", "config.ResilienceProfileConfig": "transcode.profiles.resilience", "ResilienceProfileConfig": "transcode.profiles.resilience", "config.ServiceConfig": "services", "ServiceConfig": "services",
 }
 var topLevelKeys = map[string]bool{"services": true, "transmission": true, "qbittorrent": true, "sabnzbd": true, "transcode": true, "queue": true, "database": true, "media": true, "maintenance": true, "concurrency": true, "mcp": true, "max_response_size_kb": true, "allow_destructive": true}
 
