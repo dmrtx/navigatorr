@@ -11,6 +11,8 @@ import (
 	"os"
 	"regexp"
 	"strings"
+
+	"github.com/jakenesler/navigatorr/transcode"
 )
 
 // maxHTTPBodyBytes caps versioned API request bodies. Submit payloads are small
@@ -142,8 +144,12 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/health", s.handleHealth)
 	mux.HandleFunc("/v1/ready", s.handleReady)
+	mux.HandleFunc("/v1/doctor", s.handleDoctor)
+	mux.HandleFunc("/v1/capabilities", s.handleCapabilities)
 	mux.HandleFunc("/v1/jobs", s.handleJobs)
 	mux.HandleFunc("/v1/jobs/", s.handleJobByID)
+	mux.HandleFunc("/v1/benchmarks", s.handleBenchmarks)
+	mux.HandleFunc("/v1/benchmarks/", s.handleBenchmarkByID)
 	// Auth applies first so the documented invariant holds: when a token is
 	// configured it protects ALL /v1/* including malformed/traversal paths
 	// (unauthenticated traversal -> 401). rejectTraversal still runs before
@@ -154,25 +160,28 @@ func (s *Server) Handler() http.Handler {
 }
 
 // rejectTraversal fails closed on raw "." / ".." / empty segments and on
-// encoded separators/dots anywhere under /v1/jobs/ before ServeMux path
-// cleaning can redirect. Legitimate IDs match ^[a-zA-Z0-9_.-]+$ and never
+// encoded separators/dots anywhere under /v1/jobs/ or /v1/benchmarks/
+// before ServeMux path cleaning can redirect. Legitimate IDs match
+// ^[a-zA-Z0-9_.-]+$ (transcode) or ^bench-... (benchmark) and never
 // contain "/" or "%", so rejecting "%2f/%5c/%2e" here is safe; IDs that
-// merely contain dots (e.g. "a.b") pass through to ValidateTranscodeJobID.
+// merely contain dots (e.g. "a.b") pass through to job-ID validation.
 func rejectTraversal(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		escaped := r.URL.EscapedPath()
-		if strings.HasPrefix(escaped, "/v1/jobs/") {
-			rest := strings.TrimPrefix(escaped, "/v1/jobs/")
-			lower := strings.ToLower(rest)
-			if strings.Contains(lower, "%2f") || strings.Contains(lower, "%5c") || strings.Contains(lower, "%2e") {
-				writeHTTPError(w, http.StatusBadRequest, "invalid job id: encoded path traversal detected")
-				return
-			}
-			if trimmed := strings.Trim(rest, "/"); trimmed != "" {
-				for _, seg := range strings.Split(trimmed, "/") {
-					if seg == "." || seg == ".." || seg == "" {
-						writeHTTPError(w, http.StatusBadRequest, fmt.Sprintf("invalid job id %q", seg))
-						return
+		for _, prefix := range []string{"/v1/jobs/", "/v1/benchmarks/"} {
+			if strings.HasPrefix(escaped, prefix) {
+				rest := strings.TrimPrefix(escaped, prefix)
+				lower := strings.ToLower(rest)
+				if strings.Contains(lower, "%2f") || strings.Contains(lower, "%5c") || strings.Contains(lower, "%2e") {
+					writeHTTPError(w, http.StatusBadRequest, "invalid job id: encoded path traversal detected")
+					return
+				}
+				if trimmed := strings.Trim(rest, "/"); trimmed != "" {
+					for _, seg := range strings.Split(trimmed, "/") {
+						if seg == "." || seg == ".." || seg == "" {
+							writeHTTPError(w, http.StatusBadRequest, fmt.Sprintf("invalid job id %q", seg))
+							return
+						}
 					}
 				}
 			}
@@ -412,6 +421,166 @@ func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleDoctor serves GET /v1/doctor. It reuses Worker.Doctor verbatim so
+// HTTPExecutor.Doctor has the same fail-closed semantics as the SSH
+// `doctor` subcommand (ffmpeg/VideoToolbox/allowed-roots checks). It is
+// deliberately separate from /v1/health (liveness) and /v1/ready
+// (state-dir writability): capabilities/doctor must never be faked from
+// health.
+func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeHTTPError(w, http.StatusMethodNotAllowed, "use GET")
+		return
+	}
+	if s.worker == nil {
+		writeHTTPError(w, http.StatusInternalServerError, "worker is not configured")
+		return
+	}
+	res := s.worker.Doctor(r.Context())
+	if !res.OK {
+		writeHTTPJSON(w, http.StatusServiceUnavailable, res)
+		return
+	}
+	writeHTTPJSON(w, http.StatusOK, res)
+}
+
+// handleCapabilities serves GET /v1/capabilities. It reuses
+// Worker.Capabilities (ProbeWorkerCapabilities) verbatim, including the
+// versioned protocol_version and capability_fingerprint fields that the
+// Navigatorr side must verify (same checks as SSHExecutor.Capabilities).
+// A probe failure is a 500 with an error envelope so callers fail closed
+// instead of caching a fake/partial capability set.
+func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeHTTPError(w, http.StatusMethodNotAllowed, "use GET")
+		return
+	}
+	if s.worker == nil {
+		writeHTTPError(w, http.StatusInternalServerError, "worker is not configured")
+		return
+	}
+	caps, err := s.worker.Capabilities(r.Context())
+	if err != nil {
+		writeHTTPError(w, http.StatusInternalServerError, fmt.Sprintf("probing worker capabilities: %v", err))
+		return
+	}
+	writeHTTPJSON(w, http.StatusOK, caps)
+}
+
+// handleBenchmarks serves POST /v1/benchmarks. Structured JSON only; the
+// body is transcode.BenchmarkRequest with DisallowUnknownFields and a 1 MiB
+// cap, mirroring POST /v1/jobs. Delegates to Worker.BenchmarkSubmit so
+// validation, digest idempotency, capacity accounting, and detached spawn
+// semantics are reused verbatim.
+func (s *Server) handleBenchmarks(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/v1/benchmarks" {
+		writeHTTPError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeHTTPError(w, http.StatusMethodNotAllowed, "use POST")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxHTTPBodyBytes)
+	var req transcode.BenchmarkRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeHTTPError(w, http.StatusBadRequest, fmt.Sprintf("invalid json: %v", err))
+		return
+	}
+	if s.worker == nil {
+		writeHTTPError(w, http.StatusInternalServerError, "worker is not configured")
+		return
+	}
+	resp, err := s.worker.BenchmarkSubmit(r.Context(), req, s.selfExe, s.configPath)
+	if err != nil {
+		writeHTTPJSON(w, classifyBenchmarkSubmitError(err), resp)
+		return
+	}
+	code := http.StatusCreated
+	if resp.Status == "running" || resp.Status == "completed" || resp.Status == "failed" || resp.Status == "cancelled" {
+		// Idempotent re-submit of an existing benchmark (all terminal and
+		// live states are strictly idempotent by id+digest in the worker).
+		code = http.StatusOK
+	}
+	writeHTTPJSON(w, code, resp)
+}
+
+// handleBenchmarkByID serves GET /v1/benchmarks/{id} and
+// POST /v1/benchmarks/{id}/cancel.
+func (s *Server) handleBenchmarkByID(w http.ResponseWriter, r *http.Request) {
+	escaped := r.URL.EscapedPath()
+	rest := strings.TrimPrefix(escaped, "/v1/benchmarks/")
+	lowerRest := strings.ToLower(rest)
+	if strings.Contains(lowerRest, "%2f") || strings.Contains(lowerRest, "%5c") || strings.Contains(lowerRest, "%2e") {
+		writeHTTPError(w, http.StatusBadRequest, "invalid job id: encoded path traversal detected")
+		return
+	}
+	trimmed := strings.Trim(rest, "/")
+	parts := strings.Split(trimmed, "/")
+	var id string
+	var isCancel bool
+	switch {
+	case len(parts) == 1:
+		id = parts[0]
+	case len(parts) == 2 && parts[1] == "cancel":
+		id = parts[0]
+		isCancel = true
+	default:
+		writeHTTPError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if decoded, err := url.PathUnescape(id); err != nil {
+		writeHTTPError(w, http.StatusBadRequest, fmt.Sprintf("invalid job id %q", id))
+		return
+	} else {
+		id = decoded
+	}
+	if strings.TrimSpace(id) == "" || strings.Contains(id, "/") || strings.Contains(id, "\\") {
+		writeHTTPError(w, http.StatusBadRequest, fmt.Sprintf("invalid job id %q", id))
+		return
+	}
+	if err := validateBenchmarkJobIDHTTP(id); err != nil {
+		writeHTTPError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if s.worker == nil {
+		writeHTTPError(w, http.StatusInternalServerError, "worker is not configured")
+		return
+	}
+	switch {
+	case r.Method == http.MethodGet && !isCancel:
+		st, err := s.worker.BenchmarkStatus(r.Context(), id)
+		if err != nil {
+			if isBenchmarkNotFoundError(err) {
+				writeHTTPJSON(w, http.StatusNotFound, st)
+				return
+			}
+			writeHTTPJSON(w, http.StatusBadRequest, st)
+			return
+		}
+		writeHTTPJSON(w, http.StatusOK, st)
+	case r.Method == http.MethodPost && isCancel:
+		res, err := s.worker.BenchmarkCancel(r.Context(), id)
+		if err != nil {
+			if isBenchmarkNotFoundError(err) {
+				writeHTTPJSON(w, http.StatusNotFound, res)
+				return
+			}
+			writeHTTPJSON(w, http.StatusBadRequest, res)
+			return
+		}
+		writeHTTPJSON(w, http.StatusOK, res)
+	default:
+		if isCancel {
+			writeHTTPError(w, http.StatusMethodNotAllowed, "use POST")
+			return
+		}
+		writeHTTPJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "use GET"})
+	}
+}
+
 // classifySubmitError maps Worker.Submit failures to HTTP codes while reusing
 // Submit/Status/Cancel semantics. PR1 keeps "worker busy" as a temporary
 // 409 (retryable) and does NOT implement the authoritative persistent queue.
@@ -437,6 +606,41 @@ func isNotFoundError(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "job not found") ||
 		strings.Contains(msg, "reading job file") ||
+		strings.Contains(msg, "no such file")
+}
+
+// validateBenchmarkJobIDHTTP reuses the canonical benchmark namespace
+// validation so HTTP and SSH transports share one fail-closed definition.
+func validateBenchmarkJobIDHTTP(id string) error {
+	return transcode.ValidateBenchmarkJobID(id)
+}
+
+// classifyBenchmarkSubmitError mirrors classifySubmitError for benchmarks:
+// busy stays a temporary 409 (retryable); spawn/persist/lock failures are
+// 500; validation/plan/path/digest collisions are 400.
+func classifyBenchmarkSubmitError(err error) int {
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "worker busy") || strings.Contains(msg, "max parallel jobs"):
+		return http.StatusConflict
+	case strings.Contains(msg, "acquiring capacity lock"),
+		strings.Contains(msg, "acquiring job lock"),
+		strings.Contains(msg, "spawning benchmark process"),
+		strings.Contains(msg, "persisting benchmark process identity"),
+		strings.Contains(msg, "saving initial benchmark state"),
+		strings.Contains(msg, "creating samples workspace"),
+		strings.Contains(msg, "generating run token"),
+		strings.Contains(msg, "checking active jobs"):
+		return http.StatusInternalServerError
+	default:
+		return http.StatusBadRequest
+	}
+}
+
+func isBenchmarkNotFoundError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "benchmark job not found") ||
+		strings.Contains(msg, "reading benchmark file") ||
 		strings.Contains(msg, "no such file")
 }
 
