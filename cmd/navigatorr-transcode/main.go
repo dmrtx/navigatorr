@@ -303,7 +303,7 @@ func runServe(cfg *transcodeworker.WorkerConfig, configPath, selfExe string, arg
 	// reconciliation completed; a reconciliation error closes the listener and
 	// fails startup without ever serving as healthy.
 	stopScheduler := func() {}
-	if err := startServeAfterReconcile(sigCtx, worker, func() {
+	if err := startServeAfterReconcileAndResume(sigCtx, worker, worker, serveCfg.SelfExe, serveCfg.ConfigPath, func() {
 		stopScheduler = startServeQueueDrain(sigCtx, srv)
 	}); err != nil {
 		_ = ln.Close()
@@ -344,6 +344,39 @@ func startServeAfterReconcile(ctx context.Context, rec startupReconciler, startD
 	}
 	if err := rec.ReconcileStartup(ctx); err != nil {
 		return fmt.Errorf("serve startup reconciliation failed (refusing to start scheduler): %w", err)
+	}
+	if startDrain != nil {
+		startDrain()
+	}
+	return nil
+}
+
+// startupResumer is the fail-closed startup dependency for the Phase 6B2
+// post-encode finalization resume. *transcodeworker.Worker implements it; tests
+// inject a stub so the ordering and failure behavior are deterministic.
+type startupResumer interface {
+	ResumePostEncode(ctx context.Context, selfExe, configPath string) (int, error)
+}
+
+// startServeAfterReconcileAndResume enforces the full safe serve startup order
+// after the listener is bound: ReconcileStartup must succeed, then the
+// post-encode finalization resume must succeed synchronously, and only then is
+// the queued scheduler started. Any failure returns a contextual error and
+// never starts the queued scheduler, so the daemon fails startup closed instead
+// of appearing healthy with stranded post-encode jobs. It is a small seam so
+// the ordering is deterministically testable.
+func startServeAfterReconcileAndResume(ctx context.Context, rec startupReconciler, res startupResumer, selfExe, configPath string, startDrain func()) error {
+	if rec == nil {
+		return errors.New("serve startup: worker is not configured for reconciliation")
+	}
+	if err := rec.ReconcileStartup(ctx); err != nil {
+		return fmt.Errorf("serve startup reconciliation failed (refusing to start scheduler): %w", err)
+	}
+	if res == nil {
+		return errors.New("serve startup: worker is not configured for post-encode resume")
+	}
+	if _, err := res.ResumePostEncode(ctx, selfExe, configPath); err != nil {
+		return fmt.Errorf("serve startup post-encode resume failed (refusing to start scheduler): %w", err)
 	}
 	if startDrain != nil {
 		startDrain()
