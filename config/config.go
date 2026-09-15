@@ -728,6 +728,14 @@ func Load(path string) (*Config, error) {
 	if cfg.Concurrency.MaxInspectSimultaneous <= 0 {
 		cfg.Concurrency.MaxInspectSimultaneous = 2
 	}
+	// Automatic transcode execution is HTTP-only. When transcode is enabled but
+	// no executor is given, fail over to the HTTP daemon rather than the retired
+	// SSH transport. SSH remains parseable for admin/backward compatibility but
+	// is never selected implicitly. Validation below then enforces the HTTP
+	// block, so a missing/unusable base_url still fails closed at load time.
+	if cfg.Transcode.Enabled && strings.TrimSpace(cfg.Transcode.Executor) == "" {
+		cfg.Transcode.Executor = DefaultTranscodeExecutor
+	}
 	if err := cfg.Transcode.Validate(); err != nil {
 		return nil, fmt.Errorf("parsing config %s: %w", path, err)
 	}

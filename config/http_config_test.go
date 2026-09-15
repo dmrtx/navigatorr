@@ -8,8 +8,9 @@ import (
 	"time"
 )
 
-// PR2: dark HTTP worker transport configuration. Default executor stays
-// "ssh"; "http" is explicit opt-in only.
+// HTTP daemon transport configuration. Automatic execution is HTTP-only: an
+// enabled transcode section that omits `executor` defaults to "http". Explicit
+// SSH still parses for admin/backward compatibility but is never automatic.
 
 func writeHTTPConfig(t *testing.T, name, content string) string {
 	t.Helper()
@@ -106,7 +107,7 @@ func TestTranscodeHTTP_Validation(t *testing.T) {
 		})
 	}
 
-	t.Run("ssh default unaffected without http block", func(t *testing.T) {
+	t.Run("explicit ssh still parses for admin compatibility", func(t *testing.T) {
 		p := writeHTTPConfig(t, "ssh.yaml", "transcode:\n  executor: \"ssh\"\n")
 		cfg, err := Load(p)
 		if err != nil {
@@ -126,13 +127,13 @@ func TestTranscodeHTTP_Validation(t *testing.T) {
 	})
 }
 
-func TestTranscodeHTTP_ExampleStaysSSHDefault(t *testing.T) {
+func TestTranscodeHTTP_ExampleUsesHTTPDefault(t *testing.T) {
 	cfg, err := Load(filepath.Join("..", "config.yaml.example"))
 	if err != nil {
 		t.Fatalf("example: %v", err)
 	}
-	if cfg.Transcode.Executor != "ssh" {
-		t.Errorf("example default executor must stay ssh, got %q", cfg.Transcode.Executor)
+	if cfg.Transcode.Executor != "http" {
+		t.Errorf("example default executor must be http, got %q", cfg.Transcode.Executor)
 	}
 	hc := cfg.Transcode.EffectiveHTTPConfig()
 	if hc.BaseURL == "" {
@@ -140,5 +141,35 @@ func TestTranscodeHTTP_ExampleStaysSSHDefault(t *testing.T) {
 	}
 	if err := hc.ValidateHTTPConfig(); err != nil {
 		t.Errorf("example http block must be well-formed: %v", err)
+	}
+}
+
+func TestTranscodeHTTP_EnabledOmittingExecutorDefaultsHTTP(t *testing.T) {
+	p := writeHTTPConfig(t, "default.yaml", `
+transcode:
+  enabled: true
+  http:
+    base_url: "http://192.0.2.10:8097"
+`)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Transcode.Executor != "http" {
+		t.Fatalf("omitted executor must default to http, got %q", cfg.Transcode.Executor)
+	}
+	if _, err := cfg.Transcode.BuildHTTPExecutorConfig(); err != nil {
+		t.Fatalf("defaulted http executor must build: %v", err)
+	}
+}
+
+func TestTranscodeHTTP_DisabledOmittingExecutorNotForcedHTTP(t *testing.T) {
+	p := writeHTTPConfig(t, "disabled.yaml", "transcode:\n  enabled: false\n")
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Transcode.Executor == "http" {
+		t.Errorf("disabled transcode must not imply the http executor, got %q", cfg.Transcode.Executor)
 	}
 }
