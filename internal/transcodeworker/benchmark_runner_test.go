@@ -629,7 +629,10 @@ func TestProductionBenchmarkRunner_8BitSource_ExactArgvAndOrder(t *testing.T) {
 		}
 	}
 
-	// Order must be: Ref 0, Ref 1, Cand 0 Sample 0, Cand 0 Sample 1, Cand 1 Sample 0, Cand 1 Sample 1
+	// Reference extraction stays sequential and first: Ref 0, Ref 1.
+	// Candidate encodes run on the bounded concurrent pipeline, so their
+	// invocation order is intentionally not asserted; per-invocation argv
+	// exactness and deterministic evidence ordering are asserted instead.
 	if len(executionLines) != 6 {
 		t.Fatalf("expected 6 ffmpeg execution lines, got %d:\n%s", len(executionLines), strings.Join(executionLines, "\n"))
 	}
@@ -652,31 +655,63 @@ func TestProductionBenchmarkRunner_8BitSource_ExactArgvAndOrder(t *testing.T) {
 		t.Errorf("unexpected ref 1 command: %s", l1)
 	}
 
-	// Line 2: Cand q60 Sample 0
-	l2 := executionLines[2]
-	if !strings.Contains(l2, "-i") || !strings.Contains(l2, "ref_sample_0.mkv") || !strings.Contains(l2, "-q:v 60") || !strings.Contains(l2, "-profile:v main") || !strings.Contains(l2, "-pix_fmt yuv420p") {
-		t.Errorf("unexpected cand q60 sample 0 command: %s", l2)
+	// Lines 2-5: the four candidate encodes as an unordered set.
+	candLines := executionLines[2:]
+	wantCand := map[string]bool{
+		"q60|ref_sample_0.mkv": false,
+		"q60|ref_sample_1.mkv": false,
+		"q70|ref_sample_0.mkv": false,
+		"q70|ref_sample_1.mkv": false,
 	}
-	if !strings.Contains(l2, "-an") || !strings.Contains(l2, "-sn") || !strings.Contains(l2, "-dn") {
-		t.Errorf("cand command missing -an/-sn/-dn: %s", l2)
+	for _, l := range candLines {
+		if !strings.Contains(l, "-c:v hevc_videotoolbox") {
+			t.Errorf("expected candidate encode command, got: %s", l)
+			continue
+		}
+		if !strings.Contains(l, "-an") || !strings.Contains(l, "-sn") || !strings.Contains(l, "-dn") {
+			t.Errorf("cand command missing -an/-sn/-dn: %s", l)
+		}
+		matched := false
+		for key := range wantCand {
+			parts := strings.Split(key, "|")
+			if strings.Contains(l, "-q:v "+parts[0][1:]) && strings.Contains(l, parts[1]) {
+				if wantCand[key] {
+					t.Errorf("duplicate candidate encode for %s: %s", key, l)
+				}
+				wantCand[key] = true
+				matched = true
+				if parts[0] == "q60" && strings.Contains(l, "ref_sample_0.mkv") {
+					if !strings.Contains(l, "-i") || !strings.Contains(l, "-profile:v main") || !strings.Contains(l, "-pix_fmt yuv420p") {
+						t.Errorf("cand q60 sample 0 command missing exact flags: %s", l)
+					}
+				}
+			}
+		}
+		if !matched {
+			t.Errorf("unexpected candidate encode command: %s", l)
+		}
+	}
+	for key, seen := range wantCand {
+		if !seen {
+			t.Errorf("missing candidate encode for %s among:\n%s", key, strings.Join(candLines, "\n"))
+		}
 	}
 
-	// Line 3: Cand q60 Sample 1
-	l3 := executionLines[3]
-	if !strings.Contains(l3, "ref_sample_1.mkv") || !strings.Contains(l3, "-q:v 60") {
-		t.Errorf("unexpected cand q60 sample 1 command: %s", l3)
-	}
-
-	// Line 4: Cand q70 Sample 0
-	l4 := executionLines[4]
-	if !strings.Contains(l4, "ref_sample_0.mkv") || !strings.Contains(l4, "-q:v 70") {
-		t.Errorf("unexpected cand q70 sample 0 command: %s", l4)
-	}
-
-	// Line 5: Cand q70 Sample 1
-	l5 := executionLines[5]
-	if !strings.Contains(l5, "ref_sample_1.mkv") || !strings.Contains(l5, "-q:v 70") {
-		t.Errorf("unexpected cand q70 sample 1 command: %s", l5)
+	// Deterministic evidence ordering is preserved despite concurrent execution.
+	if record.Evidence == nil {
+		t.Fatalf("expected non-nil evidence")
+	} else {
+		wantOrder := []string{"cand_q60", "cand_q60", "cand_q70", "cand_q70"}
+		wantSamples := []int{0, 1, 0, 1}
+		if len(record.Evidence.CandidateSamples) != 4 {
+			t.Fatalf("expected 4 candidate samples in evidence, got %d", len(record.Evidence.CandidateSamples))
+		}
+		for i, cs := range record.Evidence.CandidateSamples {
+			if cs.CandidateID != wantOrder[i] || cs.SampleIndex != wantSamples[i] {
+				t.Errorf("evidence candidate sample %d = (%s, sample %d), want (%s, sample %d)",
+					i, cs.CandidateID, cs.SampleIndex, wantOrder[i], wantSamples[i])
+			}
+		}
 	}
 }
 
@@ -2925,7 +2960,9 @@ func TestProductionBenchmarkRunner_DeterministicOrder_CandidateXSample(t *testin
 		t.Errorf("expected valid aggregate for cand_q75, got %v", evidence.CandidateMetrics[1])
 	}
 
-	// Verify argv execution order in ffmpeg_calls.log
+	// Verify argv invocations in ffmpeg_calls.log as an unordered set: the bounded
+	// pipeline intentionally removes cross-unit invocation ordering while evidence
+	// ordering above stays deterministic.
 	logBytes, err := os.ReadFile(logFile)
 	if err != nil {
 		t.Fatalf("reading log: %v", err)
@@ -2939,17 +2976,32 @@ func TestProductionBenchmarkRunner_DeterministicOrder_CandidateXSample(t *testin
 	if len(vmafCalls) != 4 {
 		t.Fatalf("expected 4 libvmaf execution lines, got %d", len(vmafCalls))
 	}
-	if !strings.Contains(vmafCalls[0], "cand_0") || !strings.Contains(vmafCalls[0], "sample_0") {
-		t.Errorf("vmafCall[0] unexpected: %s", vmafCalls[0])
+	wantVMAF := map[string]bool{
+		"cand_0|sample_0": false,
+		"cand_0|sample_1": false,
+		"cand_1|sample_0": false,
+		"cand_1|sample_1": false,
 	}
-	if !strings.Contains(vmafCalls[1], "cand_0") || !strings.Contains(vmafCalls[1], "sample_1") {
-		t.Errorf("vmafCall[1] unexpected: %s", vmafCalls[1])
+	for _, line := range vmafCalls {
+		matched := false
+		for key := range wantVMAF {
+			parts := strings.Split(key, "|")
+			if strings.Contains(line, parts[0]) && strings.Contains(line, parts[1]) {
+				if wantVMAF[key] {
+					t.Errorf("duplicate libvmaf invocation for %s: %s", key, line)
+				}
+				wantVMAF[key] = true
+				matched = true
+			}
+		}
+		if !matched {
+			t.Errorf("unexpected libvmaf invocation: %s", line)
+		}
 	}
-	if !strings.Contains(vmafCalls[2], "cand_1") || !strings.Contains(vmafCalls[2], "sample_0") {
-		t.Errorf("vmafCall[2] unexpected: %s", vmafCalls[2])
-	}
-	if !strings.Contains(vmafCalls[3], "cand_1") || !strings.Contains(vmafCalls[3], "sample_1") {
-		t.Errorf("vmafCall[3] unexpected: %s", vmafCalls[3])
+	for key, seen := range wantVMAF {
+		if !seen {
+			t.Errorf("missing libvmaf invocation for %s", key)
+		}
 	}
 }
 
