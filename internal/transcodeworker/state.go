@@ -99,6 +99,116 @@ func SaveJobAtomic(path string, job *JobRecord) error {
 	return nil
 }
 
+// TerminalMarker is a durable completion/failure attestation written after a
+// job reaches a terminal state. It is used at startup reconciliation to tell a
+// genuine terminal transition apart from an interrupted runner.
+type TerminalMarker struct {
+	JobID                 string    `json:"job_id"`
+	ExecutionSpecDigest   string    `json:"execution_spec_digest"`
+	Status                string    `json:"status"`
+	FinishedAt            time.Time `json:"finished_at"`
+	ExitCode              int       `json:"exit_code,omitempty"`
+	Error                 string    `json:"error,omitempty"`
+	FailureClassification string    `json:"failure_classification,omitempty"`
+}
+
+// isTerminalStatus reports whether status is a terminal job status.
+func isTerminalStatus(status string) bool {
+	switch status {
+	case "completed", "failed", "cancelled":
+		return true
+	default:
+		return false
+	}
+}
+
+// SaveTerminalMarkerAtomic validates and atomically persists a TerminalMarker
+// using a temp file + rename. Rejects nil markers, blank job ID/digest,
+// nonterminal status, and zero FinishedAt.
+func SaveTerminalMarkerAtomic(path string, marker *TerminalMarker) error {
+	if marker == nil {
+		return fmt.Errorf("saving terminal marker: nil marker")
+	}
+	if strings.TrimSpace(marker.JobID) == "" {
+		return fmt.Errorf("saving terminal marker: blank job_id")
+	}
+	if strings.TrimSpace(marker.ExecutionSpecDigest) == "" {
+		return fmt.Errorf("saving terminal marker %s: blank execution_spec_digest", marker.JobID)
+	}
+	if !isTerminalStatus(marker.Status) {
+		return fmt.Errorf("saving terminal marker %s: nonterminal status %q", marker.JobID, marker.Status)
+	}
+	if marker.FinishedAt.IsZero() {
+		return fmt.Errorf("saving terminal marker %s: zero finished_at", marker.JobID)
+	}
+
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("creating terminal marker directory %s: %w", dir, err)
+	}
+
+	data, err := json.MarshalIndent(marker, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling terminal marker %s: %w", marker.JobID, err)
+	}
+
+	tmpFile, err := os.CreateTemp(dir, "terminal-*.tmp")
+	if err != nil {
+		return fmt.Errorf("creating temp terminal marker in %s: %w", dir, err)
+	}
+	tmpName := tmpFile.Name()
+
+	if _, err := tmpFile.Write(data); err != nil {
+		tmpFile.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("writing temp terminal marker %s: %w", tmpName, err)
+	}
+
+	if err := tmpFile.Sync(); err != nil {
+		tmpFile.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("syncing temp terminal marker %s: %w", tmpName, err)
+	}
+
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("closing temp terminal marker %s: %w", tmpName, err)
+	}
+
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("renaming temp terminal marker %s to %s: %w", tmpName, path, err)
+	}
+
+	return nil
+}
+
+// LoadTerminalMarker reads and validates a TerminalMarker, rejecting blank job
+// ID/digest, nonterminal status, and zero or missing FinishedAt.
+func LoadTerminalMarker(path string) (*TerminalMarker, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading terminal marker %s: %w", path, err)
+	}
+	var marker TerminalMarker
+	if err := json.Unmarshal(data, &marker); err != nil {
+		return nil, fmt.Errorf("unmarshaling terminal marker %s: %w", path, err)
+	}
+	if strings.TrimSpace(marker.JobID) == "" {
+		return nil, fmt.Errorf("terminal marker %s: blank job_id", path)
+	}
+	if strings.TrimSpace(marker.ExecutionSpecDigest) == "" {
+		return nil, fmt.Errorf("terminal marker %s: blank execution_spec_digest", path)
+	}
+	if !isTerminalStatus(marker.Status) {
+		return nil, fmt.Errorf("terminal marker %s: nonterminal status %q", path, marker.Status)
+	}
+	if marker.FinishedAt.IsZero() {
+		return nil, fmt.Errorf("terminal marker %s: zero finished_at", path)
+	}
+	return &marker, nil
+}
+
 // IsProcessAlive checks whether a process with the given PID is running.
 func IsProcessAlive(pid int) bool {
 	if pid <= 1 {
