@@ -15,7 +15,9 @@ const DefaultSchedulerInterval = 2 * time.Second
 // sweep (so jobs persisted before a restart become schedulable immediately),
 // then a bounded ticker sweep until ctx is done or the returned stop func is
 // called. It only ever starts persisted queued jobs as global slots open; it
-// deliberately performs no running-job reconciliation (phase 5).
+// deliberately performs no running-job reconciliation itself, because the
+// serve startup path guarantees ReconcileStartup has completed successfully
+// before this scheduler is started.
 //
 // Ownership: the persistent daemon calls this once with its serve lifetime
 // context, so queued jobs start while Navigatorr is disconnected. Callers
