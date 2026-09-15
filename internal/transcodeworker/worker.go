@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -101,6 +102,38 @@ type Worker struct {
 	ffprobePath     string
 	benchmarkRunner BenchmarkRunner
 	afterSpawnHook  func(jobDir string, pid int)
+	// spawnTranscode spawns the detached runner for a queued job. Nil selects
+	// the production exec.Command path. Tests inject a stub that records the
+	// spawn without forking so queue/idempotency behavior is deterministic
+	// without real ffmpeg.
+	spawnTranscode func(selfExe, configPath, jobID string) (pid int, startTime string, err error)
+	// isAlive overrides process-liveness checks. Nil selects the production
+	// IsJobProcessAlive identity check (argv + start-time anti-recycling).
+	// Tests inject a stub-consistent function so stub-spawned jobs are not
+	// judged by the test binary's argv. Production identity checks are never
+	// weakened: the default path is unchanged.
+	isAlive func(*JobRecord) bool
+}
+
+// SetTranscodeSpawner injects a custom detached-spawn function (tests).
+func (w *Worker) SetTranscodeSpawner(fn func(selfExe, configPath, jobID string) (int, string, error)) {
+	w.spawnTranscode = fn
+}
+
+// SetAliveFunc injects a custom job-liveness function (tests). Nil restores
+// the production IsJobProcessAlive check.
+func (w *Worker) SetAliveFunc(fn func(*JobRecord) bool) {
+	w.isAlive = fn
+}
+
+// jobAlive reports whether a job's runner process is alive. Production uses
+// IsJobProcessAlive (signal + argv/start-time identity); tests may inject a
+// stub-consistent equivalent.
+func (w *Worker) jobAlive(job *JobRecord) bool {
+	if w.isAlive != nil {
+		return w.isAlive(job)
+	}
+	return IsJobProcessAlive(job)
 }
 
 // NewWorker initializes a new transcode worker.
@@ -237,20 +270,47 @@ func (w *Worker) Doctor(ctx context.Context) DoctorResult {
 
 // SubmitRequest defines the JSON input for the submit command.
 type SubmitRequest struct {
-	ID            string          `json:"id"`
-	SourcePath    string          `json:"source_path"`
-	CandidatePath string          `json:"candidate_path"`
-	Profile       string          `json:"profile"`
-	Plan          *transcode.Plan `json:"plan,omitempty"`
+	ID                  string          `json:"id"`
+	SourcePath          string          `json:"source_path"`
+	CandidatePath       string          `json:"candidate_path"`
+	Profile             string          `json:"profile"`
+	Plan                *transcode.Plan `json:"plan,omitempty"`
+	IdempotencyKey      string          `json:"idempotency_key,omitempty"`
+	ExecutionSpecDigest string          `json:"execution_spec_digest,omitempty"`
 }
 
 // SubmitResponse defines the JSON output for the submit command.
 type SubmitResponse struct {
-	ID            string          `json:"id"`
-	Status        string          `json:"status"`
-	CandidatePath string          `json:"candidate_path,omitempty"`
-	Plan          *transcode.Plan `json:"plan,omitempty"`
-	Error         string          `json:"error,omitempty"`
+	ID                  string          `json:"id"`
+	Status              string          `json:"status"`
+	CandidatePath       string          `json:"candidate_path,omitempty"`
+	Plan                *transcode.Plan `json:"plan,omitempty"`
+	IdempotencyKey      string          `json:"idempotency_key,omitempty"`
+	ExecutionSpecDigest string          `json:"execution_spec_digest,omitempty"`
+	Reused              bool            `json:"-"`
+	Error               string          `json:"error,omitempty"`
+}
+
+// IdempotencyConflictError is a deterministic strong-idempotency conflict:
+// the same idempotency key was already persisted with a different canonical
+// execution-spec digest. It maps to HTTP 409 and is definitive (never
+// UncertainError).
+type IdempotencyConflictError struct {
+	Key             string
+	ExistingJobID   string
+	ExistingDigest  string
+	RequestedDigest string
+}
+
+func (e *IdempotencyConflictError) Error() string {
+	return fmt.Sprintf("idempotency_conflict: key %q already persists job %q with different execution_spec_digest (existing=%s requested=%s)",
+		e.Key, e.ExistingJobID, e.ExistingDigest, e.RequestedDigest)
+}
+
+// IsIdempotencyConflict reports whether err is an *IdempotencyConflictError.
+func IsIdempotencyConflict(err error) bool {
+	var ce *IdempotencyConflictError
+	return errors.As(err, &ce)
 }
 
 // IsPathWithinAllowedRoots verifies that the given path is strictly inside one of the allowed roots.
@@ -338,18 +398,160 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("invalid transcode profile or plan: %v", err)}, err
 	}
 
-	// Shared capacity lock serializes slot accounting across all benchmark and transcode jobs
+	// Canonical execution-spec digest over the immutable resolved request.
+	// Never trust caller-supplied digest text: recompute and verify.
+	canonicalDigest, err := transcode.DigestTranscodeExecutionSpec(cleanSource, cleanCandidate, profile, plan)
+	if err != nil {
+		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("computing execution spec digest: %v", err)}, err
+	}
+	if strings.TrimSpace(req.ExecutionSpecDigest) != "" && strings.TrimSpace(req.ExecutionSpecDigest) != canonicalDigest {
+		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("execution_spec_digest mismatch (fail closed): caller=%q canonical=%q", strings.TrimSpace(req.ExecutionSpecDigest), canonicalDigest)},
+			fmt.Errorf("execution_spec_digest mismatch (fail closed)")
+	}
+	effKey := transcode.DefaultTranscodeIdempotencyKey(trimmedID, req.IdempotencyKey)
+	if err := transcode.ValidateTranscodeIdempotencyKey(effKey); err != nil {
+		return SubmitResponse{ID: trimmedID, Error: err.Error()}, err
+	}
+
+	// Shared capacity lock serializes slot accounting, strong-idempotency
+	// scans, and scheduler passes across all benchmark and transcode jobs.
+	// Lock order everywhere is capLock -> jobLock.
 	capLock, err := acquireCapacityLock(cleanStateDir)
 	if err != nil {
 		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("acquiring capacity lock: %v", err)}, err
 	}
 	defer capLock.Unlock()
 
+	// Strong idempotency: same key + same digest => existing job (200, reused,
+	// never requeue/respawn); same key + different digest => deterministic
+	// 409 conflict. The scan is durable (job.json source of truth). Any scan
+	// failure is definitive (fail closed): never create a duplicate.
+	match, merr := w.findJobByIdempotencyKeyLocked(effKey)
+	if merr != nil {
+		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("scanning durable idempotency index: %v", merr)}, merr
+	}
+	if match != nil {
+		// Serialize with Cancel (which holds only the per-job lock) using
+		// lock order capLock -> jobLock. The scan above may be stale, so
+		// reload under the matched job's lock before any decision/mutation.
+		matchDir := filepath.Join(cleanStateDir, match.ID)
+		matchLock, err := acquireJobLock(matchDir)
+		if err != nil {
+			return SubmitResponse{ID: match.ID, Error: fmt.Sprintf("acquiring job lock for idempotent job %q: %v", match.ID, err)}, err
+		}
+		matchUnlocked := false
+		unlockMatch := func() {
+			if !matchUnlocked {
+				matchUnlocked = true
+				matchLock.Unlock()
+			}
+		}
+		defer unlockMatch()
+
+		matchFile := filepath.Join(cleanStateDir, match.ID, "job.json")
+		fresh, ferr := LoadJob(matchFile)
+		if ferr != nil {
+			return SubmitResponse{ID: match.ID, Error: fmt.Sprintf("reloading durable job %q under lock (fail closed): %v", match.ID, ferr)}, ferr
+		}
+		if fresh == nil || fresh.ID != match.ID {
+			ierr := fmt.Errorf("inconsistent durable job record %s (fail closed): id mismatch", matchFile)
+			return SubmitResponse{ID: match.ID, Error: ierr.Error()}, ierr
+		}
+		storedKey := strings.TrimSpace(fresh.IdempotencyKey)
+		if storedKey == "" {
+			if fresh.ID != effKey {
+				ierr := fmt.Errorf("idempotency index inconsistent for job %q (fail closed): legacy key mismatch", fresh.ID)
+				return SubmitResponse{ID: fresh.ID, Error: ierr.Error()}, ierr
+			}
+		} else if storedKey != effKey {
+			ierr := fmt.Errorf("idempotency index inconsistent for job %q (fail closed): key mismatch", fresh.ID)
+			return SubmitResponse{ID: fresh.ID, Error: ierr.Error()}, ierr
+		}
+		match = fresh
+		persistedDigest := match.ExecutionSpecDigest
+		var persistedPlan *transcode.Plan
+		if persistedDigest == "" {
+			// Legacy record: recompute from the PERSISTED spec, never adopt
+			// the new request's digest blindly. Compute effective resolved
+			// plan + digest without mutation; compare first, backfill only
+			// after equality is proven.
+			pd, pp, perr := w.persistedExecutionDigest(match)
+			if perr != nil {
+				return SubmitResponse{ID: match.ID, Status: match.Status, CandidatePath: match.Candidate,
+					Error: fmt.Sprintf("recomputing persisted execution spec digest for job %q: %v", match.ID, perr)}, perr
+			}
+			persistedDigest = pd
+			persistedPlan = pp
+		}
+		if persistedDigest != canonicalDigest {
+			ce := &IdempotencyConflictError{Key: effKey, ExistingJobID: match.ID, ExistingDigest: persistedDigest, RequestedDigest: canonicalDigest}
+			return SubmitResponse{ID: match.ID, Status: match.Status, CandidatePath: match.Candidate, Error: ce.Error()}, ce
+		}
+		if match.ExecutionSpecDigest == "" || match.IdempotencyKey == "" {
+			match.ExecutionSpecDigest = persistedDigest
+			if match.IdempotencyKey == "" {
+				match.IdempotencyKey = effKey
+			}
+			if persistedPlan != nil {
+				match.Plan = persistedPlan
+			}
+			if serr := SaveJobAtomic(matchFile, match); serr != nil {
+				berr := fmt.Errorf("persisting idempotency backfill failed for job %q: %w", match.ID, serr)
+				return SubmitResponse{ID: match.ID, Status: match.Status, CandidatePath: match.Candidate, Error: berr.Error()}, berr
+			}
+		}
+		// Reconcile liveness without respawning: running with a dead process
+		// becomes failed; queued with a stale PID is reset to schedulable
+		// queued (PID 0) so a restart can schedule it.
+		if match.Status == "running" || match.Status == "queued" {
+			if match.PID > 0 && !w.jobAlive(match) {
+				if match.Status == "running" {
+					match.Status = "failed"
+					match.FinishedAt = time.Now().UTC()
+					match.Error = "process terminated unexpectedly"
+					_ = SaveJobAtomic(matchFile, match)
+				} else {
+					match.PID = 0
+					match.ProcessStartTime = ""
+					_ = SaveJobAtomic(matchFile, match)
+				}
+			}
+		}
+		// Opportunistically schedule a still-queued match (single spawn at
+		// most; the scheduler holds capLock+jobLock so concurrent same-key
+		// submits yield one durable job and one spawn). Release the matched
+		// job lock first: the scheduler re-acquires per-job locks and flock
+		// is non-reentrant. capLock stays held.
+		if match.Status == "queued" {
+			unlockMatch()
+			_ = w.scheduleQueuedLocked(ctx, selfExe, configPath)
+			if refreshed, rerr := LoadJob(matchFile); rerr == nil && refreshed != nil {
+				match = refreshed
+			}
+		}
+		return SubmitResponse{
+			ID: match.ID, Status: match.Status, CandidatePath: match.Candidate,
+			Plan: match.Plan, IdempotencyKey: match.IdempotencyKey,
+			ExecutionSpecDigest: match.ExecutionSpecDigest, Reused: true,
+		}, nil
+	}
+
 	jobLock, err := acquireJobLock(jobDir)
 	if err != nil {
 		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("acquiring job lock: %v", err)}, err
 	}
-	defer jobLock.Unlock()
+	// flock is non-reentrant across separate open() file descriptions: the
+	// scheduler below re-acquires this same job lock, so it must be released
+	// first. capLock stays held throughout, preserving capLock -> jobLock
+	// ordering and serializing concurrent idempotency scans.
+	unlocked := false
+	unlockJob := func() {
+		if !unlocked {
+			unlocked = true
+			jobLock.Unlock()
+		}
+	}
+	defer unlockJob()
 
 	benchFile := filepath.Join(jobDir, "benchmark.json")
 	if _, err := os.Stat(benchFile); err == nil {
@@ -359,42 +561,100 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 
 	jobFile := filepath.Join(jobDir, "job.json")
 
-	// Idempotency: if job already exists
+	// Legacy same-ID handling (distinct from strong idempotency when callers
+	// use explicit keys): a live queued/running record is reused; a dead
+	// running record becomes failed; completed/failed/cancelled records are
+	// returned as-is when the digest matches, otherwise the key scan above
+	// already produced a conflict for same-key callers. A same-ID record
+	// carrying a different key/digest fails closed as a conflict.
 	if existing, err := LoadJob(jobFile); err == nil && existing != nil {
+		if existing.IdempotencyKey != "" && existing.IdempotencyKey != effKey {
+			ce := &IdempotencyConflictError{Key: effKey, ExistingJobID: existing.ID, ExistingDigest: existing.ExecutionSpecDigest, RequestedDigest: canonicalDigest}
+			return SubmitResponse{ID: existing.ID, Status: existing.Status, CandidatePath: existing.Candidate, Error: ce.Error()}, ce
+		}
+		// Fail closed on legacy records: recompute the digest from the
+		// PERSISTED spec before comparing; never adopt the new digest
+		// blindly. Uncomputable persisted specs are definitive errors.
+		// Compute effective resolved plan + digest without mutation; compare
+		// first, backfill only after equality is proven.
+		persistedDigest := existing.ExecutionSpecDigest
+		var persistedPlan *transcode.Plan
+		if persistedDigest == "" {
+			pd, pp, perr := w.persistedExecutionDigest(existing)
+			if perr != nil {
+				return SubmitResponse{ID: existing.ID, Status: existing.Status, CandidatePath: existing.Candidate,
+					Error: fmt.Sprintf("recomputing persisted execution spec digest for job %q: %v", existing.ID, perr)}, perr
+			}
+			persistedDigest = pd
+			persistedPlan = pp
+		}
+		if persistedDigest != canonicalDigest {
+			ce := &IdempotencyConflictError{Key: effKey, ExistingJobID: existing.ID, ExistingDigest: persistedDigest, RequestedDigest: canonicalDigest}
+			return SubmitResponse{ID: existing.ID, Status: existing.Status, CandidatePath: existing.Candidate, Error: ce.Error()}, ce
+		}
+		if existing.ExecutionSpecDigest == "" || existing.IdempotencyKey == "" {
+			existing.ExecutionSpecDigest = persistedDigest
+			if existing.IdempotencyKey == "" {
+				existing.IdempotencyKey = effKey
+			}
+			if persistedPlan != nil {
+				existing.Plan = persistedPlan
+			}
+			if serr := SaveJobAtomic(jobFile, existing); serr != nil {
+				berr := fmt.Errorf("persisting idempotency backfill failed for job %q: %w", existing.ID, serr)
+				return SubmitResponse{ID: existing.ID, Status: existing.Status, CandidatePath: existing.Candidate, Error: berr.Error()}, berr
+			}
+		}
 		if existing.Status == "running" || existing.Status == "queued" {
-			if IsProcessAlive(existing.PID) {
+			if existing.PID > 0 && w.jobAlive(existing) {
 				return SubmitResponse{
-					ID:            existing.ID,
-					Status:        existing.Status,
-					CandidatePath: existing.Candidate,
+					ID: existing.ID, Status: existing.Status, CandidatePath: existing.Candidate,
+					Plan: existing.Plan, IdempotencyKey: existing.IdempotencyKey,
+					ExecutionSpecDigest: existing.ExecutionSpecDigest, Reused: true,
 				}, nil
 			}
-			// Process died without updating job.json
-			existing.Status = "failed"
-			existing.FinishedAt = time.Now().UTC()
-			existing.Error = "process terminated unexpectedly"
-			_ = SaveJobAtomic(jobFile, existing)
-		} else if existing.Status == "completed" {
+			if existing.PID > 0 && !w.jobAlive(existing) {
+				if existing.Status == "running" {
+					existing.Status = "failed"
+					existing.FinishedAt = time.Now().UTC()
+					existing.Error = "process terminated unexpectedly"
+					_ = SaveJobAtomic(jobFile, existing)
+					return SubmitResponse{
+						ID: existing.ID, Status: existing.Status, CandidatePath: existing.Candidate,
+						Plan: existing.Plan, IdempotencyKey: existing.IdempotencyKey,
+						ExecutionSpecDigest: existing.ExecutionSpecDigest, Reused: true,
+					}, nil
+				}
+				// Queued with a stale PID: fall through and re-persist below
+				// (same job ID, same spec) rather than failing.
+			} else if existing.PID == 0 && existing.Status == "queued" {
+				// Durable queued job resubmitted (e.g. after restart): reuse
+				// and let the scheduler start it; never double-persist.
+				// Release the job lock first: the scheduler re-acquires it
+				// (flock is non-reentrant; holding it would self-deadlock).
+				unlockJob()
+				_ = w.scheduleQueuedLocked(ctx, selfExe, configPath)
+				if refreshed, rerr := LoadJob(jobFile); rerr == nil && refreshed != nil {
+					existing = refreshed
+				}
+				return SubmitResponse{
+					ID: existing.ID, Status: existing.Status, CandidatePath: existing.Candidate,
+					Plan: existing.Plan, IdempotencyKey: existing.IdempotencyKey,
+					ExecutionSpecDigest: existing.ExecutionSpecDigest, Reused: true,
+				}, nil
+			}
+		} else if existing.Status == "completed" || existing.Status == "failed" || existing.Status == "cancelled" {
+			// Key/digest already backfilled above on spec match; reuse as-is.
 			return SubmitResponse{
-				ID:            existing.ID,
-				Status:        "completed",
-				CandidatePath: existing.Candidate,
+				ID: existing.ID, Status: existing.Status, CandidatePath: existing.Candidate,
+				Plan: existing.Plan, IdempotencyKey: existing.IdempotencyKey,
+				ExecutionSpecDigest: existing.ExecutionSpecDigest, Reused: true,
 			}, nil
 		}
 	}
 
-	// Check concurrency / busy status
-	activeJobs, err := w.countActiveJobs(trimmedID)
-	if err != nil {
-		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("checking active jobs: %v", err)}, err
-	}
-	if activeJobs >= w.cfg.MaxParallelJobs {
-		return SubmitResponse{
-			ID:    trimmedID,
-			Error: fmt.Sprintf("worker busy: maximum parallel jobs (%d) reached", w.cfg.MaxParallelJobs),
-		}, fmt.Errorf("worker busy: max parallel jobs reached")
-	}
-
+	// Authoritative durable queue: persist as queued even when all slots are
+	// occupied. Capacity exhaustion is NOT "worker busy" for transcode submit.
 	// Ensure job directory and candidate directory exist
 	if err := os.MkdirAll(jobDir, 0755); err != nil {
 		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("creating job directory: %v", err)}, err
@@ -404,25 +664,49 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 	}
 
 	job := &JobRecord{
-		ID:        trimmedID,
-		Status:    "queued",
-		Source:    cleanSource,
-		Candidate: cleanCandidate,
-		Profile:   profile,
-		Plan:      plan,
-		CreatedAt: time.Now().UTC(),
+		ID:                  trimmedID,
+		Status:              "queued",
+		Source:              cleanSource,
+		Candidate:           cleanCandidate,
+		Profile:             profile,
+		Plan:                plan,
+		IdempotencyKey:      effKey,
+		ExecutionSpecDigest: canonicalDigest,
+		CreatedAt:           time.Now().UTC(),
 	}
 
 	if err := SaveJobAtomic(jobFile, job); err != nil {
 		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("saving initial job state: %v", err)}, err
 	}
 
-	// Launch decoupled runner process
+	// Scheduler: start persisted queued jobs (including this one) while slots
+	// are free, never exceeding max_parallel_jobs and never double-spawning.
+	// Release the job lock first: the scheduler re-acquires per-job locks
+	// (flock is non-reentrant; holding it would self-deadlock). capLock stays
+	// held, so no concurrent submit can interleave.
+	unlockJob()
+	_ = w.scheduleQueuedLocked(ctx, selfExe, configPath)
+	if refreshed, rerr := LoadJob(jobFile); rerr == nil && refreshed != nil {
+		job = refreshed
+	}
+
+	return SubmitResponse{
+		ID: trimmedID, Status: job.Status, CandidatePath: cleanCandidate, Plan: plan,
+		IdempotencyKey: effKey, ExecutionSpecDigest: canonicalDigest,
+	}, nil
+}
+
+// spawnTranscodeProcess spawns the detached runner, using the injected test
+// stub when present.
+func (w *Worker) spawnTranscodeProcess(selfExe, configPath, jobID string) (int, string, error) {
+	if w.spawnTranscode != nil {
+		return w.spawnTranscode(selfExe, configPath, jobID)
+	}
 	args := []string{}
 	if configPath != "" {
 		args = append(args, "--config", configPath)
 	}
-	args = append(args, "_internal_run", trimmedID)
+	args = append(args, "_internal_run", jobID)
 
 	cmd := exec.Command(selfExe, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -433,36 +717,241 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 	cmd.Stderr = nil
 
 	if err := cmd.Start(); err != nil {
-		job.Status = "failed"
-		job.Error = fmt.Sprintf("spawning worker process: %v", err)
-		job.FinishedAt = time.Now().UTC()
-		_ = SaveJobAtomic(jobFile, job)
-		return SubmitResponse{ID: trimmedID, Error: job.Error}, err
+		return 0, "", err
 	}
+	pid := cmd.Process.Pid
+	_, lstart, _ := GetProcessIdentity(pid)
+	return pid, lstart, nil
+}
 
-	if w.afterSpawnHook != nil {
-		w.afterSpawnHook(jobDir, cmd.Process.Pid)
+// killTranscodeProcess best-efforts termination of a spawned runner whose
+// identity persistence failed (fail closed: never orphan without identity).
+func killTranscodeProcess(pid int) {
+	if pid <= 1 {
+		return
 	}
-
-	job.PID = cmd.Process.Pid
-	_, lstart, _ := GetProcessIdentity(job.PID)
-	job.ProcessStartTime = lstart
-	if err := SaveJobAtomic(jobFile, job); err != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		job.Status = "failed"
-		job.Error = fmt.Sprintf("persisting transcode process identity: %v", err)
-		job.FinishedAt = time.Now().UTC()
-		_ = SaveJobAtomic(jobFile, job)
-		return SubmitResponse{ID: trimmedID, Error: job.Error}, err
+	if proc, err := os.FindProcess(pid); err == nil {
+		_ = proc.Kill()
+		_, _ = proc.Wait()
 	}
+}
 
-	return SubmitResponse{
-		ID:            trimmedID,
-		Status:        "queued",
-		CandidatePath: cleanCandidate,
-		Plan:          plan,
-	}, nil
+// persistedExecutionDigest recomputes the canonical digest for a persisted
+// record's OWN spec through the SAME worker resolution path Submit uses
+// (ResolveWorkerPlan over the record's Profile/Plan). Legacy profile-only
+// records (nil Plan) resolve to the same default plan a fresh identical
+// submit resolves to, so unchanged resubmits backfill/reuse instead of
+// falsely conflicting. Changed candidate/profile/resolved-plan still
+// conflicts. Unresolvable persisted specs are definitive errors (fail
+// closed); the new request's digest is never adopted blindly.
+//
+// It returns both the canonical digest and the resolved effective plan
+// (carrying its canonical PlanDigest) without mutating the record, so
+// callers can backfill job.json consistently after equality is proven.
+func (w *Worker) persistedExecutionDigest(rec *JobRecord) (string, *transcode.Plan, error) {
+	if rec == nil {
+		return "", nil, fmt.Errorf("nil job record for execution spec digest (fail closed)")
+	}
+	resolved, err := ResolveWorkerPlan(rec.Profile, rec.Plan)
+	if err != nil {
+		return "", nil, fmt.Errorf("resolving persisted execution spec for job %q: %w", rec.ID, err)
+	}
+	d, err := transcode.DigestTranscodeExecutionSpec(rec.Source, rec.Candidate, rec.Profile, resolved)
+	if err != nil {
+		return "", nil, err
+	}
+	return d, resolved, nil
+}
+
+// findJobByIdempotencyKeyLocked scans durable job.json records for a matching
+// idempotency key. Callers must hold the capacity lock. Directories without
+// job.json (benchmark-only or empty dirs) are skipped; a present but
+// unloadable or inconsistent job.json is a definitive error (fail closed) so
+// strong idempotency can never duplicate under corrupted state.
+func (w *Worker) findJobByIdempotencyKeyLocked(key string) (*JobRecord, error) {
+	entries, err := os.ReadDir(w.cfg.StateDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() || strings.HasPrefix(name, ".") {
+			continue
+		}
+		jobPath := filepath.Join(w.cfg.StateDir, name, "job.json")
+		if _, statErr := os.Stat(jobPath); statErr != nil {
+			if os.IsNotExist(statErr) {
+				continue
+			}
+			return nil, fmt.Errorf("statting durable job record %s (fail closed): %w", jobPath, statErr)
+		}
+		job, err := LoadJob(jobPath)
+		if err != nil {
+			return nil, fmt.Errorf("loading durable job record %s (fail closed): %w", jobPath, err)
+		}
+		if job == nil || job.ID != name {
+			return nil, fmt.Errorf("inconsistent durable job record %s (fail closed): id mismatch", jobPath)
+		}
+		stored := strings.TrimSpace(job.IdempotencyKey)
+		if stored == "" {
+			// Backfill compatibility: legacy records without a key match
+			// their own job ID.
+			if name != key {
+				continue
+			}
+		} else if stored != key {
+			continue
+		}
+		cp := *job
+		return &cp, nil
+	}
+	return nil, nil
+}
+
+// listQueuedJobsLocked returns persisted queued jobs in durable FIFO order
+// (CreatedAt, then ID). Callers must hold the capacity lock.
+func (w *Worker) listQueuedJobsLocked() []*JobRecord {
+	entries, err := os.ReadDir(w.cfg.StateDir)
+	if err != nil {
+		return nil
+	}
+	var out []*JobRecord
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() || strings.HasPrefix(name, ".") {
+			continue
+		}
+		jobPath := filepath.Join(w.cfg.StateDir, name, "job.json")
+		job, err := LoadJob(jobPath)
+		if err != nil || job == nil || job.ID != name || job.Status != "queued" {
+			continue
+		}
+		cp := *job
+		out = append(out, &cp)
+	}
+	sortQueuedJobs(out)
+	return out
+}
+
+func sortQueuedJobs(jobs []*JobRecord) {
+	sort.Slice(jobs, func(i, j int) bool {
+		if !jobs[i].CreatedAt.Equal(jobs[j].CreatedAt) {
+			return jobs[i].CreatedAt.Before(jobs[j].CreatedAt)
+		}
+		return jobs[i].ID < jobs[j].ID
+	})
+}
+
+// runningCountLocked counts live transcode running slots plus live benchmark
+// slots (one global ceiling). Queued-but-unspawned jobs (PID 0) do not
+// consume slots. Callers must hold the capacity lock.
+func (w *Worker) runningCountLocked(excludeID string) (int, error) {
+	return w.countActiveJobs(excludeID)
+}
+
+// scheduleQueuedLocked starts persisted queued jobs FIFO while global slots
+// are free. It never exceeds max_parallel_jobs (transcodes + benchmarks in
+// aggregate) and never double-spawns: each spawn happens under capLock +
+// per-job lock after re-verifying status==queued and slot availability.
+// Cancelled jobs are skipped and never spawn. Returns the number started.
+func (w *Worker) scheduleQueuedLocked(ctx context.Context, selfExe, configPath string) int {
+	_ = ctx
+	maxJobs := w.cfg.MaxParallelJobs
+	if maxJobs <= 0 {
+		maxJobs = 1
+	}
+	started := 0
+	for {
+		active, err := w.runningCountLocked("")
+		if err != nil || active >= maxJobs {
+			return started
+		}
+		queued := w.listQueuedJobsLocked()
+		if len(queued) == 0 {
+			return started
+		}
+		progressed := false
+		for _, q := range queued {
+			if active >= maxJobs {
+				return started
+			}
+			jobDir := filepath.Join(w.cfg.StateDir, q.ID)
+			jobLock, err := acquireJobLock(jobDir)
+			if err != nil {
+				continue
+			}
+			func() {
+				defer jobLock.Unlock()
+				jobFile := filepath.Join(jobDir, "job.json")
+				latest, err := LoadJob(jobFile)
+				if err != nil || latest == nil || latest.Status != "queued" {
+					return // cancelled/terminal/running: never spawn
+				}
+				if latest.PID > 0 && w.jobAlive(latest) {
+					return // already spawned: never double-spawn
+				}
+				if latest.PID > 0 && !w.jobAlive(latest) {
+					// Stale PID from a crashed spawner: reset to schedulable.
+					latest.PID = 0
+					latest.ProcessStartTime = ""
+					_ = SaveJobAtomic(jobFile, latest)
+				}
+				// Re-check capacity under both locks before spawning.
+				cur, err := w.runningCountLocked("")
+				if err != nil || cur >= maxJobs {
+					active = cur
+					return
+				}
+				pid, lstart, err := w.spawnTranscodeProcess(selfExe, configPath, latest.ID)
+				if err != nil {
+					latest.Status = "failed"
+					latest.Error = fmt.Sprintf("spawning worker process: %v", err)
+					latest.FinishedAt = time.Now().UTC()
+					_ = SaveJobAtomic(jobFile, latest)
+					return
+				}
+				if w.afterSpawnHook != nil {
+					w.afterSpawnHook(jobDir, pid)
+				}
+				latest.PID = pid
+				latest.ProcessStartTime = lstart
+				if err := SaveJobAtomic(jobFile, latest); err != nil {
+					killTranscodeProcess(pid)
+					latest.Status = "failed"
+					latest.Error = fmt.Sprintf("persisting transcode process identity: %v", err)
+					latest.FinishedAt = time.Now().UTC()
+					latest.PID = 0
+					latest.ProcessStartTime = ""
+					_ = SaveJobAtomic(jobFile, latest)
+					return
+				}
+				active = cur + 1
+				started++
+				progressed = true
+			}()
+		}
+		if !progressed {
+			return started
+		}
+	}
+}
+
+// ScheduleQueued is the public scheduler entry: discover persisted queued
+// jobs and start them as global slots open. Safe for daemon/worker startup:
+// queued jobs (including PID-0 jobs persisted before a restart) become
+// schedulable; running jobs are left untouched (phase 5 reconciliation is
+// deliberately out of scope).
+func (w *Worker) ScheduleQueued(ctx context.Context, selfExe, configPath string) (int, error) {
+	cleanStateDir := filepath.Clean(w.cfg.StateDir)
+	capLock, err := acquireCapacityLock(cleanStateDir)
+	if err != nil {
+		return 0, err
+	}
+	defer capLock.Unlock()
+	return w.scheduleQueuedLocked(ctx, selfExe, configPath), nil
 }
 
 func (w *Worker) countActiveJobs(excludeID string) (int, error) {
@@ -488,15 +977,28 @@ func (w *Worker) countActiveJobs(excludeID string) (int, error) {
 			job, err := LoadJob(jobPath)
 			if err == nil && job != nil && job.ID == name {
 				if job.Status == "running" || job.Status == "queued" {
-					if IsJobProcessAlive(job) {
+					if job.PID == 0 {
+						// Durable queued but never spawned: schedulable, not
+						// occupying a slot.
+						continue
+					}
+					if w.jobAlive(job) {
 						count++
 						continue
-					} else if job.PID > 0 {
+					}
+					if job.Status == "running" {
 						// Clean stale crash or recycled PID
 						job.Status = "failed"
 						job.FinishedAt = time.Now().UTC()
 						job.Error = "process terminated unexpectedly"
 						_ = SaveJobAtomic(jobPath, job)
+					} else {
+						// Queued with a stale PID: treat as non-active without
+						// persisting here. Ownership: scheduler and locked
+						// Submit own queued stale PID normalization under
+						// capLock + per-job lock. Persisting here (capLock
+						// only) could resurrect a concurrently cancelled job.
+						continue
 					}
 				}
 			}
@@ -648,14 +1150,22 @@ func (w *Worker) Status(ctx context.Context, jobID string) (JobStatusResponse, e
 		return JobStatusResponse{ID: jobID, Status: "failed", Error: "job not found"}, err
 	}
 
-	// Detect crashed process or recycled PID
-	if (job.Status == "running" || job.Status == "queued") && job.PID > 0 {
-		if !IsJobProcessAlive(job) {
+	// Detect crashed process or recycled PID. Running with a dead process
+	// becomes failed. Queued with a stale PID is reported as queued without
+	// persisting here; ownership: scheduler and locked Submit own queued
+	// stale PID normalization under capLock + per-job lock. Persisting here
+	// (no jobLock) could resurrect a concurrently cancelled job. PID-0
+	// queued jobs report queued correctly without liveness checks.
+	if job.Status == "running" && job.PID > 0 {
+		if !w.jobAlive(job) {
 			job.Status = "failed"
 			job.FinishedAt = time.Now().UTC()
 			job.Error = "process terminated unexpectedly"
 			_ = SaveJobAtomic(jobFile, job)
 		}
+	} else if job.Status == "queued" && job.PID > 0 {
+		// Intentionally no durable rewrite: treat stale PID as schedulable
+		// queued for reporting/counting; scheduler normalizes under lock.
 	}
 
 	progressPath := filepath.Join(jobDir, "progress.txt")
@@ -713,26 +1223,51 @@ func (w *Worker) Status(ctx context.Context, jobID string) (JobStatusResponse, e
 	}, nil
 }
 
-// Cancel terminates a running job.
+// Cancel terminates a running job. Cancel on a durable queued (unspawned)
+// job marks it cancelled under the per-job lock and guarantees the scheduler
+// never spawns it (the scheduler only spawns status==queued under capLock +
+// jobLock). Running cancel keeps existing signal semantics.
 func (w *Worker) Cancel(ctx context.Context, jobID string) (JobStatusResponse, error) {
 	jobDir := filepath.Join(w.cfg.StateDir, jobID)
 	jobFile := filepath.Join(jobDir, "job.json")
+
+	jobLock, err := acquireJobLock(jobDir)
+	if err != nil {
+		return JobStatusResponse{ID: jobID, Status: "failed", Error: "job not found"}, err
+	}
+	defer jobLock.Unlock()
 
 	job, err := LoadJob(jobFile)
 	if err != nil {
 		return JobStatusResponse{ID: jobID, Status: "failed", Error: "job not found"}, err
 	}
 
+	// Queued and never spawned: no process exists; mark cancelled so any
+	// concurrent scheduler pass skips it.
+	if job.Status == "queued" && job.PID <= 1 {
+		job.Status = "cancelled"
+		job.FinishedAt = time.Now().UTC()
+		_ = SaveJobAtomic(jobFile, job)
+		if job.Candidate != "" && job.Candidate != job.Source {
+			_ = os.Remove(job.Candidate)
+		}
+		return JobStatusResponse{
+			ID:            job.ID,
+			Status:        "cancelled",
+			CandidatePath: job.Candidate,
+		}, nil
+	}
+
 	if job.PID > 1 && (job.Status == "running" || job.Status == "queued") {
 		// Only signal if the running process truly matches this job (protects against PID recycling)
-		if IsJobProcessAlive(job) {
+		if w.jobAlive(job) {
 			// Attempt graceful SIGTERM
 			_ = syscall.Kill(-job.PID, syscall.SIGTERM)
 			_ = syscall.Kill(job.PID, syscall.SIGTERM)
 
 			// Wait briefly, then force SIGKILL if still alive
 			time.Sleep(100 * time.Millisecond)
-			if IsJobProcessAlive(job) {
+			if w.jobAlive(job) {
 				_ = syscall.Kill(-job.PID, syscall.SIGKILL)
 				_ = syscall.Kill(job.PID, syscall.SIGKILL)
 			}

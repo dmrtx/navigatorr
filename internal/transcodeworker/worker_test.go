@@ -203,18 +203,26 @@ func TestWorker_BusyWorker(t *testing.T) {
 	}
 	worker := NewWorker(cfg)
 
-	// Submit a new job while another is running
-	_, err := worker.Submit(context.Background(), SubmitRequest{
+	// PR3 authoritative durable queue: submit under full capacity persists as
+	// queued instead of returning "worker busy".
+	resp, err := worker.Submit(context.Background(), SubmitRequest{
 		ID:            "job-new",
 		SourcePath:    sourceFile,
 		CandidatePath: filepath.Join(tempDir, "out2.mkv"),
 	}, os.Args[0], "")
 
-	if err == nil {
-		t.Fatalf("expected error when worker is busy, got nil")
+	if err != nil {
+		t.Fatalf("PR3 durable queue: expected queued success under full capacity, got err %v", err)
 	}
-	if !strings.Contains(err.Error(), "busy") {
-		t.Errorf("expected busy error, got %v", err)
+	if resp.Status != "queued" {
+		t.Errorf("expected queued status under full capacity, got %+v", resp)
+	}
+	loaded, lerr := LoadJob(filepath.Join(tempDir, "jobs", "job-new", "job.json"))
+	if lerr != nil || loaded == nil || loaded.Status != "queued" {
+		t.Fatalf("expected persisted queued job, got %+v err %v", loaded, lerr)
+	}
+	if loaded.PID != 0 {
+		t.Errorf("queued-behind-capacity job must not spawn yet (PID=0), got %d", loaded.PID)
 	}
 }
 

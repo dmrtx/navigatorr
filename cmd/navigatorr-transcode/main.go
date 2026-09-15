@@ -274,6 +274,19 @@ func runServe(cfg *transcodeworker.WorkerConfig, configPath, selfExe string, arg
 	worker := transcodeworker.NewWorker(cfg)
 	srv := transcodeworker.NewServer(worker, serveCfg.SelfExe, serveCfg.ConfigPath, serveCfg.Token)
 
+	// Serve lifetime: SIGTERM/SIGINT drives both HTTP graceful shutdown and
+	// the autonomous queue drain below.
+	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
+	// Autonomous durable-queue drain for the serve lifetime only: startup
+	// sweep (previously persisted queued jobs) plus a bounded ticker sweep so
+	// queued jobs start when capacity frees without another submit, including
+	// while Navigatorr is disconnected. No scheduler runs for short-lived CLI
+	// submit/status commands. Stops on SIGTERM/SIGINT/shutdown via sigCtx.
+	stopScheduler := startServeQueueDrain(sigCtx, srv)
+	defer stopScheduler()
+
 	httpSrv := &http.Server{
 		Addr:              serveCfg.Listen,
 		Handler:           srv.Handler(),
@@ -288,8 +301,6 @@ func runServe(cfg *transcodeworker.WorkerConfig, configPath, selfExe string, arg
 	}
 	fmt.Fprintf(os.Stderr, "navigatorr-transcode serve listening on %s\n", ln.Addr())
 
-	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
 	go func() {
 		<-sigCtx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -300,6 +311,16 @@ func runServe(cfg *transcodeworker.WorkerConfig, configPath, selfExe string, arg
 		return fmt.Errorf("serve http server stopped: %w", err)
 	}
 	return nil
+}
+
+// startServeQueueDrain starts the daemon-owned autonomous queue drain bound to
+// ctx (the serve lifetime) with the default tick. Split out so the serve
+// wiring itself is unit-testable without binding a port.
+func startServeQueueDrain(ctx context.Context, srv *transcodeworker.Server) func() {
+	if srv == nil {
+		return func() {}
+	}
+	return srv.StartScheduler(ctx, 0)
 }
 
 func stringsHasPrefix(s, prefix string) bool {
