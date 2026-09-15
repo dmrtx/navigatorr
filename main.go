@@ -96,8 +96,24 @@ func main() {
 		internal.Logf("sabnzbd client configured: %s", cfg.SABnzbd.URL)
 	}
 
-	// Build Transcode executor if enabled and configured
+	// Build Transcode executor if enabled and configured.
+	// SSH remains the default production transport. The HTTP executor is
+	// dark/non-default: it is constructed ONLY when
+	// cfg.Transcode.Executor == "http" (explicit opt-in, no cutover, no
+	// automatic fallback between transports).
 	var transcodeExecutor transcode.Executor
+	if cfg.Transcode.Enabled && cfg.Transcode.Executor == "http" {
+		httpCfg, err := cfg.Transcode.BuildHTTPExecutorConfig()
+		if err != nil {
+			internal.Warnf("failed to configure http transcode executor: %v", err)
+		} else if httpExec, err := transcode.NewHTTPExecutor(httpCfg); err != nil {
+			internal.Warnf("failed to configure http transcode executor: %v", err)
+		} else {
+			transcodeExecutor = httpExec
+			internal.Logf("http transcode executor configured (dark): base=%s, request_timeout=%v, submit_timeout=%v",
+				httpExec.BaseURL(), httpCfg.RequestTimeout, httpCfg.SubmitTimeout)
+		}
+	}
 	if cfg.Transcode.Enabled && cfg.Transcode.Executor == "ssh" {
 		sshCfg := cfg.Transcode.SSH
 		mappings := make([]transcode.PathMapping, len(sshCfg.PathMappings))
