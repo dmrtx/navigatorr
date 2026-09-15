@@ -159,6 +159,14 @@ func HasSpatialAQUnsupportedWarning(stderr string) bool {
 
 // RunFFmpeg executes the transcode process using an ExecutionPlan and stream-by-stream codec mapping.
 func RunFFmpeg(ctx context.Context, ffmpegPath string, execPlan *ExecutionPlan, job *JobRecord, progressPath, logPath string) error {
+	return RunFFmpegPaths(ctx, ffmpegPath, execPlan, job.Source, job.Candidate, progressPath, logPath)
+}
+
+// RunFFmpegPaths is RunFFmpeg with explicit operational input/output paths. It
+// lets the Phase 6B2 state machine read the effective (possibly staged) input
+// and write the local candidate while the semantic Source/Candidate remain
+// immutable. Stream behavior is identical to RunFFmpeg.
+func RunFFmpegPaths(ctx context.Context, ffmpegPath string, execPlan *ExecutionPlan, inputPath, outputPath, progressPath, logPath string) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -174,7 +182,7 @@ func RunFFmpeg(ctx context.Context, ffmpegPath string, execPlan *ExecutionPlan, 
 		return err
 	}
 
-	args, err := BuildFFmpegArgs(execPlan, job.Source, job.Candidate, progressPath)
+	args, err := BuildFFmpegArgs(execPlan, inputPath, outputPath, progressPath)
 	if err != nil {
 		return fmt.Errorf("building ffmpeg arguments: %w", err)
 	}
