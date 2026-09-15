@@ -41,6 +41,22 @@ type JobRecord struct {
 	FallbackCount         int      `json:"fallback_count,omitempty"`
 	AppliedFallbacks      []string `json:"applied_fallbacks,omitempty"`
 	FailureClassification string   `json:"failure_classification,omitempty"`
+
+	// Operational storage metadata (Phase 6B1). These fields are purely
+	// operational: they never participate in the transcode Plan or the
+	// execution-spec digest, are omitempty/backward compatible, and are
+	// initialized only when a NEW job is persisted. Blanks on legacy records
+	// mean unspecified; helper methods infer safe defaults without mutating
+	// the semantic Source/Candidate.
+	StagingPolicy       string `json:"staging_policy,omitempty"`
+	StagingState        string `json:"staging_state,omitempty"`
+	EffectiveInputPath  string `json:"effective_input_path,omitempty"`
+	StagedInputPath     string `json:"staged_input_path,omitempty"`
+	LocalCandidatePath  string `json:"local_candidate_path,omitempty"`
+	IntendedDestination string `json:"intended_destination,omitempty"`
+	EncodeComplete      bool   `json:"encode_complete,omitempty"`
+	FinalizationState   string `json:"finalization_state,omitempty"`
+	PartialPath         string `json:"partial_path,omitempty"`
 }
 
 // LoadJob loads a JobRecord from job.json.

@@ -30,6 +30,15 @@ type WorkerConfig struct {
 	HTTPListen    string `json:"http_listen" yaml:"http_listen"`
 	HTTPToken     string `json:"http_token" yaml:"http_token"`
 	HTTPTokenFile string `json:"http_token_file" yaml:"http_token_file"`
+
+	// Operational storage settings (Phase 6B1). StagingPolicy is validated
+	// fail-closed on config load; ExternalRoots defaults to a copy of
+	// AllowedRoots when absent/empty; LocalWorkDir defaults to a deterministic
+	// path beneath StateDir. None of these affect transcode.Plan or the
+	// execution-spec digest.
+	StagingPolicy StagingPolicy `json:"staging_policy" yaml:"staging_policy"`
+	ExternalRoots []string      `json:"external_roots" yaml:"external_roots"`
+	LocalWorkDir  string        `json:"local_work_dir" yaml:"local_work_dir"`
 }
 
 // DefaultWorkerConfig returns sane defaults for an Apple Silicon Mac.
@@ -43,6 +52,7 @@ func DefaultWorkerConfig() *WorkerConfig {
 		MaxParallelJobs: 1,
 		Quality:         65,
 		HTTPListen:      "127.0.0.1:8097",
+		StagingPolicy:   DefaultStagingPolicy(),
 	}
 }
 
@@ -54,32 +64,16 @@ func LoadWorkerConfig(configPath string) (*WorkerConfig, error) {
 		configPath = filepath.Join(home, ".config", "navigatorr-transcode", "config.yaml")
 	}
 
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return cfg, nil
+	if data, err := os.ReadFile(configPath); err != nil {
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("reading worker config %s: %w", configPath, err)
 		}
-		return nil, fmt.Errorf("reading worker config %s: %w", configPath, err)
-	}
-
-	if err := yaml.Unmarshal(data, cfg); err != nil {
+	} else if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parsing worker config %s: %w", configPath, err)
 	}
 
-	// Expand ~ in state_dir and roots if needed
-	home, _ := os.UserHomeDir()
-	if home != "" {
-		if strings.HasPrefix(cfg.StateDir, "~/") {
-			cfg.StateDir = filepath.Join(home, cfg.StateDir[2:])
-		}
-		for i, r := range cfg.AllowedRoots {
-			if strings.HasPrefix(r, "~/") {
-				cfg.AllowedRoots[i] = filepath.Join(home, r[2:])
-			}
-		}
-		if strings.HasPrefix(cfg.HTTPTokenFile, "~/") {
-			cfg.HTTPTokenFile = filepath.Join(home, cfg.HTTPTokenFile[2:])
-		}
+	if err := cfg.normalizeOperational(); err != nil {
+		return nil, fmt.Errorf("parsing worker config %s: %w", configPath, err)
 	}
 
 	if cfg.MaxParallelJobs <= 0 {
@@ -93,6 +87,75 @@ func LoadWorkerConfig(configPath string) (*WorkerConfig, error) {
 	}
 
 	return cfg, nil
+}
+
+// normalizeOperational expands ~-prefixed paths, cleans roots, validates the
+// staging policy (fail closed), and fills the operational defaults: ExternalRoots
+// becomes a COPY of AllowedRoots when absent/empty, and LocalWorkDir becomes a
+// deterministic path beneath StateDir when blank. The ExternalRoots copy is
+// deliberately a distinct slice so later mutation of one never aliases the
+// other.
+func (cfg *WorkerConfig) normalizeOperational() error {
+	home, _ := os.UserHomeDir()
+	expand := func(p string) string {
+		if home != "" && strings.HasPrefix(p, "~/") {
+			return filepath.Join(home, p[2:])
+		}
+		return p
+	}
+
+	cfg.StateDir = expand(cfg.StateDir)
+	cfg.HTTPTokenFile = expand(cfg.HTTPTokenFile)
+	cfg.LocalWorkDir = expand(cfg.LocalWorkDir)
+	for i, r := range cfg.AllowedRoots {
+		cfg.AllowedRoots[i] = expand(r)
+	}
+	for i, r := range cfg.ExternalRoots {
+		cfg.ExternalRoots[i] = expand(r)
+	}
+
+	policy := strings.TrimSpace(string(cfg.StagingPolicy))
+	if policy == "" {
+		cfg.StagingPolicy = DefaultStagingPolicy()
+	} else {
+		parsed, err := ParseStagingPolicy(policy)
+		if err != nil {
+			return err
+		}
+		cfg.StagingPolicy = parsed
+	}
+
+	cfg.AllowedRoots = cleanRootPaths(cfg.AllowedRoots)
+	cfg.ExternalRoots = cleanRootPaths(cfg.ExternalRoots)
+
+	if len(cfg.ExternalRoots) == 0 && len(cfg.AllowedRoots) > 0 {
+		cfg.ExternalRoots = append([]string(nil), cfg.AllowedRoots...)
+	}
+
+	if strings.TrimSpace(cfg.LocalWorkDir) == "" && strings.TrimSpace(cfg.StateDir) != "" {
+		cfg.LocalWorkDir = filepath.Join(filepath.Clean(cfg.StateDir), "_work")
+	} else {
+		cfg.LocalWorkDir = filepath.Clean(cfg.LocalWorkDir)
+	}
+
+	return nil
+}
+
+// cleanRootPaths trims surrounding whitespace, drops blank entries, and
+// filesystem-cleans each remaining root while preserving order.
+func cleanRootPaths(roots []string) []string {
+	if len(roots) == 0 {
+		return roots
+	}
+	out := make([]string, 0, len(roots))
+	for _, r := range roots {
+		r = strings.TrimSpace(r)
+		if r == "" {
+			continue
+		}
+		out = append(out, filepath.Clean(r))
+	}
+	return out
 }
 
 // Worker manages the local transcode execution on the node.
@@ -331,6 +394,84 @@ func IsPathWithinAllowedRoots(path string, allowedRoots []string) bool {
 	return false
 }
 
+// operationalMetadata is the operational storage metadata resolved for a NEW
+// job. It is never fed into transcode.Plan or the execution-spec digest.
+type operationalMetadata struct {
+	StagingPolicy       StagingPolicy
+	StagingState        StagingState
+	EffectiveInputPath  string
+	StagedInputPath     string
+	LocalCandidatePath  string
+	IntendedDestination string
+	FinalizationState   FinalizationState
+	PartialPath         string
+}
+
+// localWorkDir resolves the operational local work directory: the configured
+// LocalWorkDir, or a deterministic "<StateDir>/_work" when blank. It never
+// mutates the config.
+func (w *Worker) localWorkDir() string {
+	dir := strings.TrimSpace(w.cfg.LocalWorkDir)
+	if dir == "" {
+		dir = filepath.Join(filepath.Clean(w.cfg.StateDir), "_work")
+	}
+	return filepath.Clean(dir)
+}
+
+// operationalMetadataFor resolves the operational storage metadata for a job
+// from the worker config. The semantic source and candidate are treated as
+// immutable originals: the returned IntendedDestination always equals the
+// candidate and staging/finalization only add operational paths. A blank
+// StagingPolicy falls back to the operational default ("auto") so records
+// persisted before Phase 6B1 and directly-constructed configs keep working.
+func (w *Worker) operationalMetadataFor(source, candidate, jobID string) (*operationalMetadata, error) {
+	policy := w.cfg.StagingPolicy
+	if strings.TrimSpace(string(policy)) == "" {
+		policy = DefaultStagingPolicy()
+	}
+	parsed, err := ParseStagingPolicy(string(policy))
+	if err != nil {
+		return nil, err
+	}
+
+	meta := &operationalMetadata{
+		StagingPolicy:       parsed,
+		IntendedDestination: candidate,
+	}
+
+	stage, err := ShouldStageInput(parsed, source, w.cfg.ExternalRoots)
+	if err != nil {
+		return nil, err
+	}
+	if stage {
+		staged, err := StagedInputPath(w.localWorkDir(), jobID, source)
+		if err != nil {
+			return nil, err
+		}
+		meta.StagingState = StagingStatePending
+		meta.StagedInputPath = staged
+		meta.EffectiveInputPath = staged
+	} else {
+		meta.StagingState = StagingStateNotRequired
+		meta.EffectiveInputPath = source
+	}
+
+	if IsExternalPath(candidate, w.cfg.ExternalRoots) {
+		localCandidate, err := LocalCandidatePath(w.localWorkDir(), jobID, candidate)
+		if err != nil {
+			return nil, err
+		}
+		meta.LocalCandidatePath = localCandidate
+		meta.FinalizationState = FinalizationStatePending
+		meta.PartialPath = PartialPathFor(candidate, jobID)
+	} else {
+		meta.LocalCandidatePath = candidate
+		meta.FinalizationState = FinalizationStateNotRequired
+	}
+
+	return meta, nil
+}
+
 // Submit initiates a detached transcode job.
 func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configPath string) (SubmitResponse, error) {
 	trimmedID := strings.TrimSpace(req.ID)
@@ -506,11 +647,25 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 		if match.Status == "running" || match.Status == "queued" {
 			if match.PID > 0 && !w.jobAlive(match) {
 				if match.Status == "running" {
-					match.Status = "failed"
-					match.FinishedAt = time.Now().UTC()
-					match.Error = "process terminated unexpectedly"
-					match.FailureClassification = "runner_killed"
-					_ = SaveJobAtomic(matchFile, match)
+					if IsPostEncodeFinalizationPending(match) {
+						// Phase 6B1: encoding finished but finalization is
+						// still pending and the runner is gone. This must
+						// never become runner_killed (nor be respawned): keep
+						// it nonterminal running with the runner identity
+						// cleared, exactly like reconcileJob.
+						match.PID = 0
+						match.ProcessStartTime = ""
+						if serr := SaveJobAtomic(matchFile, match); serr != nil {
+							perr := fmt.Errorf("persisting post-encode normalization for job %q: %w", match.ID, serr)
+							return SubmitResponse{ID: match.ID, Status: match.Status, CandidatePath: match.Candidate, Error: perr.Error()}, perr
+						}
+					} else {
+						match.Status = "failed"
+						match.FinishedAt = time.Now().UTC()
+						match.Error = "process terminated unexpectedly"
+						match.FailureClassification = "runner_killed"
+						_ = SaveJobAtomic(matchFile, match)
+					}
 				} else {
 					match.PID = 0
 					match.ProcessStartTime = ""
@@ -616,6 +771,23 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 			}
 			if existing.PID > 0 && !w.jobAlive(existing) {
 				if existing.Status == "running" {
+					if IsPostEncodeFinalizationPending(existing) {
+						// Phase 6B1: same post-encode protection as the
+						// strong-idempotency path and reconcileJob. Never
+						// runner_killed, never respawned; keep nonterminal
+						// running with the runner identity cleared.
+						existing.PID = 0
+						existing.ProcessStartTime = ""
+						if serr := SaveJobAtomic(jobFile, existing); serr != nil {
+							perr := fmt.Errorf("persisting post-encode normalization for job %q: %w", existing.ID, serr)
+							return SubmitResponse{ID: existing.ID, Status: existing.Status, CandidatePath: existing.Candidate, Error: perr.Error()}, perr
+						}
+						return SubmitResponse{
+							ID: existing.ID, Status: existing.Status, CandidatePath: existing.Candidate,
+							Plan: existing.Plan, IdempotencyKey: existing.IdempotencyKey,
+							ExecutionSpecDigest: existing.ExecutionSpecDigest, Reused: true,
+						}, nil
+					}
 					existing.Status = "failed"
 					existing.FinishedAt = time.Now().UTC()
 					existing.Error = "process terminated unexpectedly"
@@ -657,12 +829,27 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 
 	// Authoritative durable queue: persist as queued even when all slots are
 	// occupied. Capacity exhaustion is NOT "worker busy" for transcode submit.
-	// Ensure job directory and candidate directory exist
+	// Ensure job directory exists. The semantic Source and Candidate are never
+	// rewritten here.
 	if err := os.MkdirAll(jobDir, 0755); err != nil {
 		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("creating job directory: %v", err)}, err
 	}
-	if err := os.MkdirAll(filepath.Dir(cleanCandidate), 0755); err != nil {
-		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("creating candidate directory: %v", err)}, err
+
+	// Resolve operational storage metadata after the semantic digest and
+	// idempotency decisions above, so it can never influence them. No file is
+	// copied and no ffmpeg state changes: this is metadata only.
+	meta, metaErr := w.operationalMetadataFor(cleanSource, cleanCandidate, trimmedID)
+	if metaErr != nil {
+		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("resolving operational storage metadata: %v", metaErr)}, metaErr
+	}
+
+	// Phase 6 is local-output-first: an external destination must not require
+	// (or create) its remote directory at Submit time. Only local destinations
+	// keep the historical pre-create of the candidate directory.
+	if meta.FinalizationState == FinalizationStateNotRequired {
+		if err := os.MkdirAll(filepath.Dir(cleanCandidate), 0755); err != nil {
+			return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("creating candidate directory: %v", err)}, err
+		}
 	}
 
 	job := &JobRecord{
@@ -677,6 +864,15 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 		CreatedAt:           time.Now().UTC(),
 		Attempt:             1,
 		RetryCount:          0,
+
+		StagingPolicy:       string(meta.StagingPolicy),
+		StagingState:        string(meta.StagingState),
+		EffectiveInputPath:  meta.EffectiveInputPath,
+		StagedInputPath:     meta.StagedInputPath,
+		LocalCandidatePath:  meta.LocalCandidatePath,
+		IntendedDestination: meta.IntendedDestination,
+		FinalizationState:   string(meta.FinalizationState),
+		PartialPath:         meta.PartialPath,
 	}
 	if plan != nil && len(plan.AppliedFallbacks) > 0 {
 		job.AppliedFallbacks = append([]string(nil), plan.AppliedFallbacks...)
@@ -995,6 +1191,20 @@ func (w *Worker) countActiveJobs(excludeID string) (int, error) {
 						continue
 					}
 					if job.Status == "running" {
+						if IsPostEncodeFinalizationPending(job) {
+							// Phase 6B1: encoding finished, finalization still
+							// pending, runner gone. Never runner_killed and not
+							// an active encode slot: clear the runner identity
+							// and persist nonterminal running. This path is
+							// reachable outside startup reconcile (e.g. via
+							// capacity counting during scheduling).
+							job.PID = 0
+							job.ProcessStartTime = ""
+							if serr := SaveJobAtomic(jobPath, job); serr != nil {
+								return 0, fmt.Errorf("persisting post-encode normalization for job %q: %w", job.ID, serr)
+							}
+							continue
+						}
 						// Clean stale crash or recycled PID
 						job.Status = "failed"
 						job.FinishedAt = time.Now().UTC()
@@ -1285,12 +1495,28 @@ func (w *Worker) reconcileJob(jobDir, jobFile string) error {
 	}
 
 	switch job.Status {
-	case "completed", "failed", "cancelled", "queued":
+	case "completed", "failed", "cancelled":
+		// Terminal states are immutable: unknown operational fields must not
+		// make reconciliation fail or mutate them.
 		return nil
-	case "running":
-		// reconciled below
+	case "queued", "running":
+		// Nonterminal: strict operational-state validation below.
 	default:
 		return fmt.Errorf("reconciling job %s: unknown status %q (fail closed)", job.ID, job.Status)
+	}
+
+	// Malformed operational state on a nonterminal job fails closed rather
+	// than being silently downgraded to runner_killed. Blank/zero is
+	// preserved as legacy.
+	if err := ValidateStagingState(job.StagingState); err != nil {
+		return fmt.Errorf("reconciling job %s: %w", job.ID, err)
+	}
+	if err := ValidateFinalizationState(job.FinalizationState); err != nil {
+		return fmt.Errorf("reconciling job %s: %w", job.ID, err)
+	}
+
+	if job.Status == "queued" {
+		return nil
 	}
 
 	markerPath := filepath.Join(jobDir, "terminal.json")
@@ -1305,6 +1531,22 @@ func (w *Worker) reconcileJob(jobDir, jobFile string) error {
 	// Missing/corrupt/invalid/mismatched markers are never completion
 	// evidence: fall through to runner liveness.
 	if w.jobAlive(job) {
+		return nil
+	}
+
+	// Post-encode restart-safe normalization (Phase 6B1): encoding already
+	// completed and the output still needs staging finalization, but no runner
+	// is alive. Re-running encode would be wrong, so this is never
+	// runner_killed and gets no terminal marker. We deliberately keep the
+	// existing public status "running" (no new client-visible Status) with the
+	// runner identity cleared to PID 0. InternalRun is not wired to resume
+	// finalization in this PR; 6B2 will use LocalCandidatePath/PartialPath.
+	if IsPostEncodeFinalizationPending(job) {
+		job.PID = 0
+		job.ProcessStartTime = ""
+		if err := SaveJobAtomic(jobFile, job); err != nil {
+			return fmt.Errorf("normalizing post-encode job %s for restart: %w", job.ID, err)
+		}
 		return nil
 	}
 
@@ -1350,6 +1592,18 @@ type JobStatusResponse struct {
 	AppliedFallbacks      []string                     `json:"applied_fallbacks,omitempty"`
 	FailureClassification string                       `json:"failure_classification,omitempty"`
 	Conversions           []transcode.ConversionRecord `json:"conversions,omitempty"`
+
+	// Operational storage observability (Phase 6B1). Additive: never changes
+	// the meaning of existing fields/statuses.
+	StagingPolicy       string `json:"staging_policy,omitempty"`
+	StagingState        string `json:"staging_state,omitempty"`
+	EffectiveInputPath  string `json:"effective_input_path,omitempty"`
+	StagedInputPath     string `json:"staged_input_path,omitempty"`
+	LocalCandidatePath  string `json:"local_candidate_path,omitempty"`
+	IntendedDestination string `json:"intended_destination,omitempty"`
+	EncodeComplete      bool   `json:"encode_complete,omitempty"`
+	FinalizationState   string `json:"finalization_state,omitempty"`
+	PartialPath         string `json:"partial_path,omitempty"`
 }
 
 // Status reads the current status of a job.
@@ -1438,6 +1692,16 @@ func (w *Worker) Status(ctx context.Context, jobID string) (JobStatusResponse, e
 		AppliedFallbacks:      job.AppliedFallbacks,
 		FailureClassification: job.FailureClassification,
 		Conversions:           job.Conversions,
+
+		StagingPolicy:       job.StagingPolicy,
+		StagingState:        job.StagingState,
+		EffectiveInputPath:  job.EffectiveInput(),
+		StagedInputPath:     job.StagedInputPath,
+		LocalCandidatePath:  job.LocalCandidate(),
+		IntendedDestination: job.Destination(),
+		EncodeComplete:      job.EncodeComplete,
+		FinalizationState:   job.FinalizationState,
+		PartialPath:         job.PartialPath,
 	}, nil
 }
 
