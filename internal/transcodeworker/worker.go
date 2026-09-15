@@ -24,6 +24,11 @@ type WorkerConfig struct {
 	AllowedRoots    []string `json:"allowed_roots" yaml:"allowed_roots"`
 	MaxParallelJobs int      `json:"max_parallel_jobs" yaml:"max_parallel_jobs"`
 	Quality         int      `json:"quality" yaml:"quality"`
+	// HTTP daemon (PR1 `serve` mode) settings. Empty tokens mean "no auth",
+	// which is only permitted on loopback binds (enforced in http.go).
+	HTTPListen    string `json:"http_listen" yaml:"http_listen"`
+	HTTPToken     string `json:"http_token" yaml:"http_token"`
+	HTTPTokenFile string `json:"http_token_file" yaml:"http_token_file"`
 }
 
 // DefaultWorkerConfig returns sane defaults for an Apple Silicon Mac.
@@ -36,6 +41,7 @@ func DefaultWorkerConfig() *WorkerConfig {
 		AllowedRoots:    []string{"/Volumes/media"},
 		MaxParallelJobs: 1,
 		Quality:         65,
+		HTTPListen:      "127.0.0.1:8097",
 	}
 }
 
@@ -70,6 +76,9 @@ func LoadWorkerConfig(configPath string) (*WorkerConfig, error) {
 				cfg.AllowedRoots[i] = filepath.Join(home, r[2:])
 			}
 		}
+		if strings.HasPrefix(cfg.HTTPTokenFile, "~/") {
+			cfg.HTTPTokenFile = filepath.Join(home, cfg.HTTPTokenFile[2:])
+		}
 	}
 
 	if cfg.MaxParallelJobs <= 0 {
@@ -77,6 +86,9 @@ func LoadWorkerConfig(configPath string) (*WorkerConfig, error) {
 	}
 	if cfg.Quality <= 0 {
 		cfg.Quality = 65
+	}
+	if strings.TrimSpace(cfg.HTTPListen) == "" {
+		cfg.HTTPListen = "127.0.0.1:8097"
 	}
 
 	return cfg, nil
