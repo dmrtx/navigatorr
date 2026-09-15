@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/jakenesler/navigatorr/internal/transcodeworker"
 	"github.com/jakenesler/navigatorr/transcode"
@@ -51,7 +54,7 @@ func main() {
 	}
 
 	if subcmd == "" {
-		fmt.Fprintf(os.Stderr, "Usage: %s [--config <path>] <doctor|capabilities|submit|status|cancel|_internal_run|benchmark_submit|benchmark_status|benchmark_cancel|_internal_benchmark> [args...]\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Usage: %s [--config <path>] <doctor|capabilities|submit|status|cancel|serve|_internal_run|benchmark_submit|benchmark_status|benchmark_cancel|_internal_benchmark> [args...]\n", os.Args[0])
 		os.Exit(1)
 	}
 
@@ -194,6 +197,12 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "serve":
+		if err := runServe(cfg, configPath, selfExe, subcmdArgs); err != nil {
+			fmt.Fprintf(os.Stderr, "serve failed: %v\n", err)
+			os.Exit(1)
+		}
+
 	case "_internal_benchmark":
 		if len(subcmdArgs) < 1 {
 			fmt.Fprintf(os.Stderr, "missing job id for _internal_benchmark\n")
@@ -220,6 +229,77 @@ func main() {
 func printJSON(v any) {
 	data, _ := json.MarshalIndent(v, "", "  ")
 	fmt.Println(string(data))
+}
+
+// runServe starts the persistent PR1 HTTP daemon. It reuses the existing
+// Worker for Submit/Status/Cancel and never shells out to ffmpeg directly:
+// execution still flows through Worker.InternalRun via the detached runner.
+func runServe(cfg *transcodeworker.WorkerConfig, configPath, selfExe string, args []string) error {
+	var listenFlag, tokenFlag, tokenFileFlag string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--listen":
+			if i+1 < len(args) {
+				listenFlag = args[i+1]
+				i++
+			}
+		case "--token":
+			if i+1 < len(args) {
+				tokenFlag = args[i+1]
+				i++
+			}
+		case "--token-file":
+			if i+1 < len(args) {
+				tokenFileFlag = args[i+1]
+				i++
+			}
+		default:
+			if stringsHasPrefix(args[i], "--listen=") {
+				listenFlag = args[i][len("--listen="):]
+			} else if stringsHasPrefix(args[i], "--token=") {
+				tokenFlag = args[i][len("--token="):]
+			} else if stringsHasPrefix(args[i], "--token-file=") {
+				tokenFileFlag = args[i][len("--token-file="):]
+			} else {
+				return fmt.Errorf("unknown serve flag %q (expected --listen, --token, --token-file)", args[i])
+			}
+		}
+	}
+
+	serveCfg, err := transcodeworker.ResolveServeConfig(cfg, listenFlag, tokenFlag, tokenFileFlag, selfExe, configPath)
+	if err != nil {
+		return err
+	}
+
+	worker := transcodeworker.NewWorker(cfg)
+	srv := transcodeworker.NewServer(worker, serveCfg.SelfExe, serveCfg.ConfigPath, serveCfg.Token)
+
+	httpSrv := &http.Server{
+		Addr:              serveCfg.Listen,
+		Handler:           srv.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	ln, err := net.Listen("tcp", serveCfg.Listen)
+	if err != nil {
+		return fmt.Errorf("serve cannot bind %s: %w", serveCfg.Listen, err)
+	}
+	fmt.Fprintf(os.Stderr, "navigatorr-transcode serve listening on %s\n", ln.Addr())
+
+	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	go func() {
+		<-sigCtx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = httpSrv.Shutdown(shutdownCtx)
+	}()
+	if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
+		return fmt.Errorf("serve http server stopped: %w", err)
+	}
+	return nil
 }
 
 func stringsHasPrefix(s, prefix string) bool {
