@@ -156,6 +156,22 @@ func (s *Server) StartScheduler(ctx context.Context, interval time.Duration) fun
 	return s.worker.RunScheduler(ctx, s.selfExe, s.configPath, interval)
 }
 
+// StartSchedulerAfterReconcile is the serve startup sequence: it runs
+// ReconcileStartup synchronously first and only starts the autonomous queue
+// drain (whose initial sweep schedules queued jobs) if reconciliation
+// succeeds. On reconciliation error it returns a nil stop func and the error
+// without scheduling anything (fail closed), so a restored worker never
+// schedules on unreconciled state. It adds no network contract.
+func (s *Server) StartSchedulerAfterReconcile(ctx context.Context, interval time.Duration) (func(), error) {
+	if s.worker == nil {
+		return func() {}, nil
+	}
+	if err := s.worker.ReconcileStartup(ctx); err != nil {
+		return nil, fmt.Errorf("startup reconciliation failed: %w", err)
+	}
+	return s.worker.RunScheduler(ctx, s.selfExe, s.configPath, interval), nil
+}
+
 // Handler builds the /v1 routes with auth enforcement.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
