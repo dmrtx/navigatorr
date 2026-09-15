@@ -1064,7 +1064,9 @@ func (w *Worker) InternalRun(ctx context.Context, jobID string) error {
 			job.FinishedAt = time.Now().UTC()
 			job.ExitCode = 1
 			job.Error = fmt.Sprintf("resolving plan: %v", err)
-			_ = SaveJobAtomic(jobFile, job)
+			if perr := w.persistTerminalJob(jobDir, jobFile, job); perr != nil {
+				return perr
+			}
 			return err
 		}
 		job.Plan = plan
@@ -1080,7 +1082,9 @@ func (w *Worker) InternalRun(ctx context.Context, jobID string) error {
 		job.FinishedAt = time.Now().UTC()
 		job.ExitCode = 1
 		job.Error = fmt.Sprintf("probing source streams: %v", probeErr)
-		_ = SaveJobAtomic(jobFile, job)
+		if perr := w.persistTerminalJob(jobDir, jobFile, job); perr != nil {
+			return perr
+		}
 		return probeErr
 	}
 
@@ -1091,7 +1095,9 @@ func (w *Worker) InternalRun(ctx context.Context, jobID string) error {
 		job.FinishedAt = time.Now().UTC()
 		job.ExitCode = 1
 		job.Error = fmt.Sprintf("building execution plan: %v", planErr)
-		_ = SaveJobAtomic(jobFile, job)
+		if perr := w.persistTerminalJob(jobDir, jobFile, job); perr != nil {
+			return perr
+		}
 		return planErr
 	}
 
@@ -1103,12 +1109,9 @@ func (w *Worker) InternalRun(ctx context.Context, jobID string) error {
 
 	ffmpegErr := RunFFmpeg(ctx, w.ffmpegPath, execPlan, job, progressPath, logPath)
 
-	// Reload in case cancel was called
-	latestJob, loadErr := LoadJob(jobFile)
-	if loadErr == nil && latestJob != nil && latestJob.Status == "cancelled" {
-		return nil
-	}
-
+	// Resolve the terminal transition under the per-job lock inside
+	// persistTerminalJob: a concurrent Cancel always wins and the cancelled
+	// record is never overwritten. There is no unlocked cancellation check.
 	if ffmpegErr == nil {
 		job.Status = "completed"
 		job.FinishedAt = time.Now().UTC()
@@ -1121,7 +1124,202 @@ func (w *Worker) InternalRun(ctx context.Context, jobID string) error {
 		job.Error = ffmpegErr.Error()
 	}
 
-	return SaveJobAtomic(jobFile, job)
+	if perr := w.persistTerminalJob(jobDir, jobFile, job); perr != nil {
+		return perr
+	}
+	return ffmpegErr
+}
+
+// terminalMarkerFromJob builds a TerminalMarker mirroring a terminal job.
+func terminalMarkerFromJob(job *JobRecord) *TerminalMarker {
+	if job == nil {
+		return nil
+	}
+	return &TerminalMarker{
+		JobID:                 job.ID,
+		ExecutionSpecDigest:   job.ExecutionSpecDigest,
+		Status:                job.Status,
+		FinishedAt:            job.FinishedAt,
+		ExitCode:              job.ExitCode,
+		Error:                 job.Error,
+		FailureClassification: job.FailureClassification,
+	}
+}
+
+// terminalMarkerMatchesJob reports whether marker is valid terminal evidence
+// for job: the job must carry a nonblank digest and the marker must agree on
+// job ID and digest and itself be terminal.
+func terminalMarkerMatchesJob(job *JobRecord, marker *TerminalMarker) bool {
+	if job == nil || marker == nil {
+		return false
+	}
+	if strings.TrimSpace(job.ExecutionSpecDigest) == "" {
+		return false
+	}
+	if marker.JobID != job.ID {
+		return false
+	}
+	if marker.ExecutionSpecDigest != job.ExecutionSpecDigest {
+		return false
+	}
+	return isTerminalStatus(marker.Status)
+}
+
+// applyTerminalMarker copies marker terminal fields onto job.
+func applyTerminalMarker(job *JobRecord, marker *TerminalMarker) {
+	job.Status = marker.Status
+	job.FinishedAt = marker.FinishedAt
+	job.ExitCode = marker.ExitCode
+	job.Error = marker.Error
+	job.FailureClassification = marker.FailureClassification
+}
+
+// persistTerminalJob durably persists a terminal job transition under the
+// per-job lock. Cancellation always wins: a concurrently cancelled latest
+// record is never overwritten. For a normal terminal transition job.json is
+// saved first and only then a matching terminal marker; a marker failure is
+// returned and markers are never written before the job record.
+func (w *Worker) persistTerminalJob(jobDir, jobFile string, job *JobRecord) error {
+	jobLock, err := acquireJobLock(jobDir)
+	if err != nil {
+		return fmt.Errorf("acquiring job lock for terminal persistence: %w", err)
+	}
+	defer jobLock.Unlock()
+
+	latest, err := LoadJob(jobFile)
+	if err != nil {
+		return fmt.Errorf("reloading job for terminal persistence: %w", err)
+	}
+	if latest == nil {
+		return fmt.Errorf("reloading job for terminal persistence: nil record")
+	}
+
+	if latest.Status == "cancelled" {
+		// Cancellation wins: job.json is never overwritten. Refresh a matching
+		// cancelled marker only for records carrying a normal digest and
+		// timestamp; legacy cancelled records stay untouched with no marker.
+		if strings.TrimSpace(latest.ExecutionSpecDigest) != "" && !latest.FinishedAt.IsZero() {
+			marker := terminalMarkerFromJob(latest)
+			if err := SaveTerminalMarkerAtomic(filepath.Join(jobDir, "terminal.json"), marker); err != nil {
+				return fmt.Errorf("saving cancelled terminal marker for job %q: %w", latest.ID, err)
+			}
+		}
+		return nil
+	}
+
+	if err := SaveJobAtomic(jobFile, job); err != nil {
+		return fmt.Errorf("saving terminal job %q: %w", job.ID, err)
+	}
+	marker := terminalMarkerFromJob(job)
+	if err := SaveTerminalMarkerAtomic(filepath.Join(jobDir, "terminal.json"), marker); err != nil {
+		return fmt.Errorf("saving terminal marker for job %q: %w", job.ID, err)
+	}
+	return nil
+}
+
+// ReconcileStartup reconciles persisted jobs after a worker restart. Running
+// jobs are resolved from a valid matching terminal marker, else by runner
+// liveness: a live runner stays running, a dead runner becomes failed
+// (runner_killed) with a matching failed marker. Completed/failed/cancelled
+// and queued jobs are left unchanged; unknown statuses fail closed.
+func (w *Worker) ReconcileStartup(ctx context.Context) error {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+
+	stateDir := filepath.Clean(w.cfg.StateDir)
+	entries, err := os.ReadDir(stateDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("reading state dir %s for reconciliation: %w", stateDir, err)
+	}
+
+	for _, entry := range entries {
+		if ctx != nil {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		jobDir := filepath.Join(stateDir, entry.Name())
+		jobFile := filepath.Join(jobDir, "job.json")
+		if _, err := os.Stat(jobFile); err != nil {
+			if os.IsNotExist(err) {
+				continue // benchmark-only or empty dir
+			}
+			return fmt.Errorf("stat job file %s: %w", jobFile, err)
+		}
+		if err := w.reconcileJob(jobDir, jobFile); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// reconcileJob reconciles a single persisted job under its per-job lock.
+func (w *Worker) reconcileJob(jobDir, jobFile string) error {
+	jobLock, err := acquireJobLock(jobDir)
+	if err != nil {
+		return fmt.Errorf("acquiring job lock for reconciliation: %w", err)
+	}
+	defer jobLock.Unlock()
+
+	job, err := LoadJob(jobFile)
+	if err != nil {
+		return fmt.Errorf("loading job for reconciliation: %w", err)
+	}
+	if job == nil {
+		return fmt.Errorf("reconciling job in %s: nil record (fail closed)", jobDir)
+	}
+	if strings.TrimSpace(job.ID) == "" {
+		return fmt.Errorf("reconciling job in %s: blank job id (fail closed)", jobDir)
+	}
+	if job.ID != filepath.Base(jobDir) {
+		return fmt.Errorf("reconciling job %s: id %q does not match directory (fail closed)", jobDir, job.ID)
+	}
+
+	switch job.Status {
+	case "completed", "failed", "cancelled", "queued":
+		return nil
+	case "running":
+		// reconciled below
+	default:
+		return fmt.Errorf("reconciling job %s: unknown status %q (fail closed)", job.ID, job.Status)
+	}
+
+	markerPath := filepath.Join(jobDir, "terminal.json")
+	if marker, merr := LoadTerminalMarker(markerPath); merr == nil && terminalMarkerMatchesJob(job, marker) {
+		applyTerminalMarker(job, marker)
+		if err := SaveJobAtomic(jobFile, job); err != nil {
+			return fmt.Errorf("persisting reconciled job %s: %w", job.ID, err)
+		}
+		return nil
+	}
+
+	// Missing/corrupt/invalid/mismatched markers are never completion
+	// evidence: fall through to runner liveness.
+	if w.jobAlive(job) {
+		return nil
+	}
+
+	job.Status = "failed"
+	job.FinishedAt = time.Now().UTC()
+	job.Error = "process terminated unexpectedly"
+	job.FailureClassification = "runner_killed"
+	if err := SaveJobAtomic(jobFile, job); err != nil {
+		return fmt.Errorf("persisting failed reconciliation for job %s: %w", job.ID, err)
+	}
+	marker := terminalMarkerFromJob(job)
+	if err := SaveTerminalMarkerAtomic(markerPath, marker); err != nil {
+		return fmt.Errorf("saving failed terminal marker for job %s: %w", job.ID, err)
+	}
+	return nil
 }
 
 // JobStatusResponse is returned by the status subcommand.
