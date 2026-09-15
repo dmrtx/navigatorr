@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -279,14 +280,6 @@ func runServe(cfg *transcodeworker.WorkerConfig, configPath, selfExe string, arg
 	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	// Autonomous durable-queue drain for the serve lifetime only: startup
-	// sweep (previously persisted queued jobs) plus a bounded ticker sweep so
-	// queued jobs start when capacity frees without another submit, including
-	// while Navigatorr is disconnected. No scheduler runs for short-lived CLI
-	// submit/status commands. Stops on SIGTERM/SIGINT/shutdown via sigCtx.
-	stopScheduler := startServeQueueDrain(sigCtx, srv)
-	defer stopScheduler()
-
 	httpSrv := &http.Server{
 		Addr:              serveCfg.Listen,
 		Handler:           srv.Handler(),
@@ -299,6 +292,25 @@ func runServe(cfg *transcodeworker.WorkerConfig, configPath, selfExe string, arg
 	if err != nil {
 		return fmt.Errorf("serve cannot bind %s: %w", serveCfg.Listen, err)
 	}
+
+	// Autonomous durable-queue drain for the serve lifetime only (startup
+	// sweep plus a bounded ticker sweep so queued jobs start when capacity
+	// frees without another submit, including while Navigatorr is
+	// disconnected). Safe startup ordering (fail closed): bind first so a bind
+	// failure can never spawn queued work, then reconcile persisted state
+	// synchronously BEFORE any scheduling, and only start the drain once
+	// reconciliation succeeds. No queued job is scheduled/spawned unless
+	// reconciliation completed; a reconciliation error closes the listener and
+	// fails startup without ever serving as healthy.
+	stopScheduler := func() {}
+	if err := startServeAfterReconcile(sigCtx, worker, func() {
+		stopScheduler = startServeQueueDrain(sigCtx, srv)
+	}); err != nil {
+		_ = ln.Close()
+		return err
+	}
+	defer stopScheduler()
+
 	fmt.Fprintf(os.Stderr, "navigatorr-transcode serve listening on %s\n", ln.Addr())
 
 	go func() {
@@ -309,6 +321,32 @@ func runServe(cfg *transcodeworker.WorkerConfig, configPath, selfExe string, arg
 	}()
 	if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("serve http server stopped: %w", err)
+	}
+	return nil
+}
+
+// startupReconciler is the fail-closed startup dependency for the serve
+// lifecycle. *transcodeworker.Worker implements it; tests inject a stub so the
+// ordering can be proven without real processes or network.
+type startupReconciler interface {
+	ReconcileStartup(ctx context.Context) error
+}
+
+// startServeAfterReconcile enforces the safe serve startup order: persisted
+// state is reconciled synchronously and startDrain (the autonomous queue drain,
+// which is what can schedule/spawn queued jobs) is only invoked when
+// reconciliation succeeds. On failure it returns a contextual error and never
+// calls startDrain, so startup fails closed. It is a small seam so the
+// ordering is deterministically testable.
+func startServeAfterReconcile(ctx context.Context, rec startupReconciler, startDrain func()) error {
+	if rec == nil {
+		return errors.New("serve startup: worker is not configured for reconciliation")
+	}
+	if err := rec.ReconcileStartup(ctx); err != nil {
+		return fmt.Errorf("serve startup reconciliation failed (refusing to start scheduler): %w", err)
+	}
+	if startDrain != nil {
+		startDrain()
 	}
 	return nil
 }

@@ -1,6 +1,6 @@
 # Binary
-navigatorr
-navigatorr-transcode
+/navigatorr
+/navigatorr-transcode
 *.exe
 
 # Build
