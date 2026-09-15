@@ -4,18 +4,18 @@ import "testing"
 
 func TestClassifyPR4Taxonomy(t *testing.T) {
 	cases := map[string]FailureClass{
-		"idempotency_conflict: key already persists": IdempotencyConflict,
+		"idempotency_conflict: key already persists":   IdempotencyConflict,
 		"execution_spec_digest mismatch (fail closed)": IdempotencyConflict,
-		"transcode job was cancelled":                   Cancelled,
-		"job canceled by user":                          Cancelled,
-		"no space left on device":                       StorageFull,
-		"ENOSPC during write":                           StorageFull,
-		"process killed with SIGKILL":                   RunnerKilled,
-		"process terminated unexpectedly":               RunnerKilled,
-		"invalid data found when processing input":      FFmpegInputCorrupt,
-		"moov atom not found":                           FFmpegInputCorrupt,
-		"read failed: input/output error":               StorageIOTransient,
-		"i/o error on storage":                          StorageIOTransient,
+		"transcode job was cancelled":                  Cancelled,
+		"job canceled by user":                         Cancelled,
+		"no space left on device":                      StorageFull,
+		"ENOSPC during write":                          StorageFull,
+		"process killed with SIGKILL":                  RunnerKilled,
+		"process terminated unexpectedly":              RunnerKilled,
+		"invalid data found when processing input":     FFmpegInputCorrupt,
+		"moov atom not found":                          FFmpegInputCorrupt,
+		"read failed: input/output error":              StorageIOTransient,
+		"i/o error on storage":                         StorageIOTransient,
 	}
 	for msg, want := range cases {
 		if got := Classify(msg); got != want {
