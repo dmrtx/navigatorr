@@ -242,11 +242,27 @@ func (e *SSHExecutor) Submit(ctx context.Context, req Request) (Job, error) {
 		profile = "hevc-vt"
 	}
 
+	// PR3 strong idempotency: generate deterministic key/digest when the
+	// caller did not explicitly provide them so existing callers keep working.
+	effKey := DefaultTranscodeIdempotencyKey(req.ID, req.IdempotencyKey)
+	var specDigest string
+	if strings.TrimSpace(req.ExecutionSpecDigest) != "" {
+		specDigest = strings.TrimSpace(req.ExecutionSpecDigest)
+	} else if req.Plan != nil {
+		if d, derr := DigestTranscodeExecutionSpec(remoteSource, remoteCandidate, profile, req.Plan); derr == nil {
+			specDigest = d
+		}
+	}
+
 	payload := map[string]any{
-		"id":             req.ID,
-		"source_path":    remoteSource,
-		"candidate_path": remoteCandidate,
-		"profile":        profile,
+		"id":              req.ID,
+		"source_path":     remoteSource,
+		"candidate_path":  remoteCandidate,
+		"profile":         profile,
+		"idempotency_key": effKey,
+	}
+	if specDigest != "" {
+		payload["execution_spec_digest"] = specDigest
 	}
 	if req.Plan != nil {
 		payload["plan"] = req.Plan

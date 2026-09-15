@@ -586,6 +586,16 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 		maxParallel = e.deps.Config.Transcode.MaxParallelJobs
 	}
 
+	// PR3 note: the worker now owns an authoritative durable queue
+	// (transcode submits persist as queued instead of returning "worker busy"),
+	// so this loop's maxParallel gating is LOCAL action fan-out throttling
+	// only (bounding concurrent child-action execution engine-side) and must
+	// not be confused with remote-capacity admission. No remote-capacity probe
+	// is performed here; "worker busy" handling below is retained solely for
+	// backward compatibility (legacy workers) and benchmarks, which keep
+	// busy-409 submission semantics under the same global ceiling. Phase-4
+	// retry semantics are untouched.
+
 	// First, check/advance any items that are already running
 	for i := range items {
 		it := &items[i]

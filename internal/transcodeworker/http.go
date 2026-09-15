@@ -1,6 +1,7 @@
 package transcodeworker
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/jakenesler/navigatorr/transcode"
 )
@@ -123,8 +125,11 @@ func ValidateServeAddr(addr, token string) error {
 }
 
 // Server exposes the existing Worker over a versioned JSON HTTP API.
-// It reuses Worker.Submit/Status/Cancel semantics verbatim; PR1 keeps the
-// existing "worker busy" behavior and does NOT implement a persistent queue.
+// It reuses Worker.Submit/Status/Cancel semantics verbatim. PR3 implements
+// the authoritative persistent queue: transcode submits persist as queued
+// (201) even at capacity; same key + same digest reuses the existing job
+// (200); same key + different digest is a definitive 409 idempotency
+// conflict (never UncertainError client-side).
 type Server struct {
 	worker     *Worker
 	token      string
@@ -137,6 +142,18 @@ type Server struct {
 // at startup; Handler itself simply skips auth when token is empty).
 func NewServer(worker *Worker, selfExe, configPath, token string) *Server {
 	return &Server{worker: worker, selfExe: selfExe, configPath: configPath, token: token}
+}
+
+// StartScheduler starts the daemon-owned autonomous queue drain bound to ctx
+// (the serve lifetime): an initial sweep plus a bounded ticker sweep, so
+// persisted queued jobs start when capacity frees without another submit or
+// status request, including while Navigatorr is disconnected. It performs no
+// running-job reconciliation (phase 5). The returned func stops the ticker.
+func (s *Server) StartScheduler(ctx context.Context, interval time.Duration) func() {
+	if s.worker == nil {
+		return func() {}
+	}
+	return s.worker.RunScheduler(ctx, s.selfExe, s.configPath, interval)
 }
 
 // Handler builds the /v1 routes with auth enforcement.
@@ -335,8 +352,8 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	code := http.StatusCreated
-	if resp.Status == "running" || resp.Status == "completed" {
-		// Idempotent re-submit of an existing job.
+	if resp.Reused {
+		// Idempotent re-submit of the same execution spec (any status).
 		code = http.StatusOK
 	}
 	writeHTTPJSON(w, code, resp)
@@ -582,11 +599,17 @@ func (s *Server) handleBenchmarkByID(w http.ResponseWriter, r *http.Request) {
 }
 
 // classifySubmitError maps Worker.Submit failures to HTTP codes while reusing
-// Submit/Status/Cancel semantics. PR1 keeps "worker busy" as a temporary
-// 409 (retryable) and does NOT implement the authoritative persistent queue.
+// Submit/Status/Cancel semantics. PR3: durable queue acceptance never returns
+// "worker busy" for transcodes (busy mapping retained only for benchmark
+// compat/legacy workers); strong idempotency conflicts are a definitive 409.
 func classifySubmitError(err error) int {
+	if IsIdempotencyConflict(err) {
+		return http.StatusConflict
+	}
 	msg := strings.ToLower(err.Error())
 	switch {
+	case strings.Contains(msg, "idempotency_conflict"):
+		return http.StatusConflict
 	case strings.Contains(msg, "worker busy") || strings.Contains(msg, "max parallel jobs"):
 		return http.StatusConflict
 	case strings.Contains(msg, "acquiring capacity lock"),

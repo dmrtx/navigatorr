@@ -453,16 +453,23 @@ func TestHTTP_SubmitStatusCancelWiring(t *testing.T) {
 		t.Errorf("invalid plan must not create a job directory")
 	}
 
-	// Worker busy wiring: MaxParallelJobs=1 already occupied by job-wired-1,
-	// so a fresh valid submit must map to 409 (temporary PR1 behavior).
+	// PR3 durable queue wiring: MaxParallelJobs=1 already occupied by
+	// job-wired-1, so a fresh valid submit persists as queued (201), not 409.
 	busyPayload, _ := json.Marshal(SubmitRequest{
 		ID:            "job-wired-2",
 		SourcePath:    sourceFile,
 		CandidatePath: filepath.Join(tempDir, "wired-cand-2.mkv"),
 	})
 	rec = doRequest(t, srv, http.MethodPost, "/v1/jobs", string(busyPayload), "")
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("busy submit: expected 409, got %d (%s)", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("durable queue submit: expected 201, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var queued SubmitResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &queued); err != nil {
+		t.Fatalf("queued json: %v", err)
+	}
+	if queued.Status != "queued" {
+		t.Fatalf("expected queued status, got %+v", queued)
 	}
 
 	// Cancel wiring -> 200 cancelled. Use a non-alive PID so Cancel does not

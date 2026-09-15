@@ -90,11 +90,13 @@ func ContainerExtension(container string) (string, error) {
 }
 
 type Request struct {
-	ID            string `json:"id"`
-	SourcePath    string `json:"source_path"`
-	CandidatePath string `json:"candidate_path"`
-	Profile       string `json:"profile"`
-	Plan          *Plan  `json:"plan,omitempty"`
+	ID                  string `json:"id"`
+	SourcePath          string `json:"source_path"`
+	CandidatePath       string `json:"candidate_path"`
+	Profile             string `json:"profile"`
+	Plan                *Plan  `json:"plan,omitempty"`
+	IdempotencyKey      string `json:"idempotency_key,omitempty"`
+	ExecutionSpecDigest string `json:"execution_spec_digest,omitempty"`
 }
 type Job struct {
 	ID string `json:"id"`
