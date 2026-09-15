@@ -509,6 +509,7 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 					match.Status = "failed"
 					match.FinishedAt = time.Now().UTC()
 					match.Error = "process terminated unexpectedly"
+					match.FailureClassification = "runner_killed"
 					_ = SaveJobAtomic(matchFile, match)
 				} else {
 					match.PID = 0
@@ -618,6 +619,7 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 					existing.Status = "failed"
 					existing.FinishedAt = time.Now().UTC()
 					existing.Error = "process terminated unexpectedly"
+					existing.FailureClassification = "runner_killed"
 					_ = SaveJobAtomic(jobFile, existing)
 					return SubmitResponse{
 						ID: existing.ID, Status: existing.Status, CandidatePath: existing.Candidate,
@@ -673,6 +675,12 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 		IdempotencyKey:      effKey,
 		ExecutionSpecDigest: canonicalDigest,
 		CreatedAt:           time.Now().UTC(),
+		Attempt:             1,
+		RetryCount:          0,
+	}
+	if plan != nil && len(plan.AppliedFallbacks) > 0 {
+		job.AppliedFallbacks = append([]string(nil), plan.AppliedFallbacks...)
+		job.FallbackCount = len(plan.AppliedFallbacks)
 	}
 
 	if err := SaveJobAtomic(jobFile, job); err != nil {
@@ -991,6 +999,7 @@ func (w *Worker) countActiveJobs(excludeID string) (int, error) {
 						job.Status = "failed"
 						job.FinishedAt = time.Now().UTC()
 						job.Error = "process terminated unexpectedly"
+						job.FailureClassification = "runner_killed"
 						_ = SaveJobAtomic(jobPath, job)
 					} else {
 						// Queued with a stale PID: treat as non-active without
@@ -1117,27 +1126,32 @@ func (w *Worker) InternalRun(ctx context.Context, jobID string) error {
 
 // JobStatusResponse is returned by the status subcommand.
 type JobStatusResponse struct {
-	ID               string                       `json:"id"`
-	Status           string                       `json:"status"`
-	Progress         float64                      `json:"progress"`
-	FPS              float64                      `json:"fps"`
-	Speed            float64                      `json:"speed"`
-	CandidatePath    string                       `json:"candidate_path"`
-	Error            string                       `json:"error,omitempty"`
-	Profile          string                       `json:"profile,omitempty"`
-	RecipeVersion    string                       `json:"recipe_version,omitempty"`
-	RecipeDigest     string                       `json:"recipe_digest,omitempty"`
-	PlanDigest       string                       `json:"plan_digest,omitempty"`
-	Container        string                       `json:"container,omitempty"`
-	VideoCodec       string                       `json:"video_codec,omitempty"`
-	Quality          int                          `json:"quality,omitempty"`
-	VideoProfile     string                       `json:"video_profile,omitempty"`
-	PixelFormat      string                       `json:"pixel_format,omitempty"`
-	PrioritizeSpeed  *bool                        `json:"prioritize_speed,omitempty"`
-	SpatialAQ        *bool                        `json:"spatial_aq,omitempty"`
-	Realtime         *bool                        `json:"realtime,omitempty"`
-	ExpectedBitDepth int                          `json:"expected_bit_depth,omitempty"`
-	Conversions      []transcode.ConversionRecord `json:"conversions,omitempty"`
+	ID                    string                       `json:"id"`
+	Status                string                       `json:"status"`
+	Progress              float64                      `json:"progress"`
+	FPS                   float64                      `json:"fps"`
+	Speed                 float64                      `json:"speed"`
+	CandidatePath         string                       `json:"candidate_path"`
+	Error                 string                       `json:"error,omitempty"`
+	Profile               string                       `json:"profile,omitempty"`
+	RecipeVersion         string                       `json:"recipe_version,omitempty"`
+	RecipeDigest          string                       `json:"recipe_digest,omitempty"`
+	PlanDigest            string                       `json:"plan_digest,omitempty"`
+	Container             string                       `json:"container,omitempty"`
+	VideoCodec            string                       `json:"video_codec,omitempty"`
+	Quality               int                          `json:"quality,omitempty"`
+	VideoProfile          string                       `json:"video_profile,omitempty"`
+	PixelFormat           string                       `json:"pixel_format,omitempty"`
+	PrioritizeSpeed       *bool                        `json:"prioritize_speed,omitempty"`
+	SpatialAQ             *bool                        `json:"spatial_aq,omitempty"`
+	Realtime              *bool                        `json:"realtime,omitempty"`
+	ExpectedBitDepth      int                          `json:"expected_bit_depth,omitempty"`
+	Attempt               int                          `json:"attempt,omitempty"`
+	RetryCount            int                          `json:"retry_count,omitempty"`
+	FallbackCount         int                          `json:"fallback_count,omitempty"`
+	AppliedFallbacks      []string                     `json:"applied_fallbacks,omitempty"`
+	FailureClassification string                       `json:"failure_classification,omitempty"`
+	Conversions           []transcode.ConversionRecord `json:"conversions,omitempty"`
 }
 
 // Status reads the current status of a job.
@@ -1161,6 +1175,7 @@ func (w *Worker) Status(ctx context.Context, jobID string) (JobStatusResponse, e
 			job.Status = "failed"
 			job.FinishedAt = time.Now().UTC()
 			job.Error = "process terminated unexpectedly"
+			job.FailureClassification = "runner_killed"
 			_ = SaveJobAtomic(jobFile, job)
 		}
 	} else if job.Status == "queued" && job.PID > 0 {
@@ -1199,27 +1214,32 @@ func (w *Worker) Status(ctx context.Context, jobID string) (JobStatusResponse, e
 	}
 
 	return JobStatusResponse{
-		ID:               job.ID,
-		Status:           job.Status,
-		Progress:         metrics.Progress,
-		FPS:              metrics.FPS,
-		Speed:            metrics.Speed,
-		CandidatePath:    job.Candidate,
-		Error:            job.Error,
-		Profile:          job.Profile,
-		RecipeVersion:    recipeVersion,
-		RecipeDigest:     recipeDigest,
-		PlanDigest:       planDigest,
-		Container:        container,
-		VideoCodec:       videoCodec,
-		Quality:          quality,
-		VideoProfile:     videoProfile,
-		PixelFormat:      pixelFormat,
-		PrioritizeSpeed:  prioritizeSpeed,
-		SpatialAQ:        spatialAQ,
-		Realtime:         realtime,
-		ExpectedBitDepth: expectedBitDepth,
-		Conversions:      job.Conversions,
+		ID:                    job.ID,
+		Status:                job.Status,
+		Progress:              metrics.Progress,
+		FPS:                   metrics.FPS,
+		Speed:                 metrics.Speed,
+		CandidatePath:         job.Candidate,
+		Error:                 job.Error,
+		Profile:               job.Profile,
+		RecipeVersion:         recipeVersion,
+		RecipeDigest:          recipeDigest,
+		PlanDigest:            planDigest,
+		Container:             container,
+		VideoCodec:            videoCodec,
+		Quality:               quality,
+		VideoProfile:          videoProfile,
+		PixelFormat:           pixelFormat,
+		PrioritizeSpeed:       prioritizeSpeed,
+		SpatialAQ:             spatialAQ,
+		Realtime:              realtime,
+		ExpectedBitDepth:      expectedBitDepth,
+		Attempt:               job.Attempt,
+		RetryCount:            job.RetryCount,
+		FallbackCount:         job.FallbackCount,
+		AppliedFallbacks:      job.AppliedFallbacks,
+		FailureClassification: job.FailureClassification,
+		Conversions:           job.Conversions,
 	}, nil
 }
 
