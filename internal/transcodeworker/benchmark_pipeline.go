@@ -94,14 +94,21 @@ func (c *candidatePoison) setFailed(reason string) {
 	}
 }
 
-// pipelineFatal records the first job-fatal error and cancels remaining work.
+// pipelineFatal records the first job-fatal error and stops remaining work
+// from starting. It deliberately does NOT cancel the pipeline context: every
+// unit runs its ffmpeg invocation via exec.CommandContext on that context, so
+// cancelling it would SIGKILL in-flight sibling encodes/metrics whose outcomes
+// would then be discarded, leaving nondeterministic partial evidence behind.
+// In-flight units always run to completion and record their outcomes; the
+// feeder and encode workers consult failed() to avoid starting new units after
+// a fatal error. Caller cancellation still flows through the parent context
+// and aborts promptly via the ctx.Done/ctx.Err() checks in the worker loops.
 // A mutex (not sync.Once) guards the fields because readers use get() rather
 // than Once.Do, so Once alone cannot order the handoff to the joining goroutine.
 type pipelineFatal struct {
 	mu     sync.Mutex
 	err    error
 	metric bool // true when the fatal error came from the metric stage
-	cancel context.CancelFunc
 }
 
 func (f *pipelineFatal) set(err error, metric bool) {
@@ -115,15 +122,18 @@ func (f *pipelineFatal) set(err error, metric bool) {
 	}
 	f.err = err
 	f.metric = metric
-	if f.cancel != nil {
-		f.cancel()
-	}
 }
 
 func (f *pipelineFatal) get() (error, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.err, f.metric
+}
+
+func (f *pipelineFatal) failed() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.err != nil
 }
 
 // pipelineShared carries read-mostly execution context plus shared pipeline state.
@@ -229,9 +239,12 @@ func (r *ProductionBenchmarkRunner) runPipelinedEncodeMetrics(
 		}
 	}
 
+	// Derived context only ties worker commands to caller cancellation; a
+	// job-fatal unit error never cancels it so in-flight sibling units always
+	// finish and record their outcomes (deterministic partial evidence).
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	fatal := &pipelineFatal{cancel: cancel}
+	fatal := &pipelineFatal{}
 	poisons := make([]*candidatePoison, len(vcs))
 	for i := range poisons {
 		poisons[i] = &candidatePoison{}
@@ -257,11 +270,15 @@ func (r *ProductionBenchmarkRunner) runPipelinedEncodeMetrics(
 	encQ := make(chan int, nUnits)
 	metQ := make(chan int, nUnits)
 
-	// Feeder enqueues units in deterministic order; stops early on cancellation
-	// so queued/new work never starts after a fatal error or caller cancel.
+	// Feeder enqueues units in deterministic order; stops early on caller
+	// cancellation or the first job-fatal error so no new work starts after
+	// the job is already doomed. In-flight units are never interrupted.
 	go func() {
 		defer close(encQ)
 		for i := range units {
+			if fatal.failed() {
+				return
+			}
 			select {
 			case <-ctx.Done():
 				return
@@ -284,6 +301,9 @@ func (r *ProductionBenchmarkRunner) runPipelinedEncodeMetrics(
 						return
 					}
 					if ctx.Err() != nil {
+						return
+					}
+					if fatal.failed() {
 						return
 					}
 					sh.runEncodeUnit(ctx, units[idx], idx)
@@ -740,8 +760,10 @@ func (sh *pipelineShared) assembleEvidence(units []pipelineUnit) {
 			continue
 		}
 		enc := sh.encodeOut[idx]
-		// Zero-value entries (unit never executed after cancellation) are skipped;
-		// the job fails in that case and partial evidence only aids debugging.
+		// Zero-value entries (unit never started because a fatal error or
+		// caller cancellation stopped new work) are skipped; every started
+		// unit records its outcome, so completed partial evidence is never
+		// lost to a sibling unit's failure.
 		if enc.entry.CandidateID == "" {
 			continue
 		}
