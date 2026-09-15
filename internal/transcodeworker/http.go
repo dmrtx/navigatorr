@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -374,13 +375,16 @@ func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 	trimmed := strings.Trim(rest, "/")
 	parts := strings.Split(trimmed, "/")
 	var id string
-	var isCancel bool
+	var isCancel, isLogs bool
 	switch {
 	case len(parts) == 1:
 		id = parts[0]
 	case len(parts) == 2 && parts[1] == "cancel":
 		id = parts[0]
 		isCancel = true
+	case len(parts) == 2 && parts[1] == "logs":
+		id = parts[0]
+		isLogs = true
 	default:
 		writeHTTPError(w, http.StatusNotFound, "not found")
 		return
@@ -407,6 +411,8 @@ func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
+	case r.Method == http.MethodGet && isLogs:
+		s.handleJobLogs(w, r, id)
 	case r.Method == http.MethodGet && !isCancel:
 		st, err := s.worker.Status(r.Context(), id)
 		if err != nil {
@@ -436,6 +442,37 @@ func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 		}
 		writeHTTPError(w, http.StatusMethodNotAllowed, "use GET")
 	}
+}
+
+// handleJobLogs serves GET /v1/jobs/{id}/logs. It exposes the existing
+// per-job runner log (<StateDir>/<id>/ffmpeg.log) as a bounded JSON tail:
+// content plus truncated/size_bytes so a dropped prefix is unambiguous. The
+// body is hard-capped by Worker.ReadJobLog regardless of the optional
+// tail_bytes query parameter; malformed or non-positive tail_bytes is a 400.
+func (s *Server) handleJobLogs(w http.ResponseWriter, r *http.Request, jobID string) {
+	if s.worker == nil {
+		writeHTTPError(w, http.StatusInternalServerError, "worker is not configured")
+		return
+	}
+	var tailBytes int64
+	if raw := strings.TrimSpace(r.URL.Query().Get("tail_bytes")); raw != "" {
+		n, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || n <= 0 {
+			writeHTTPError(w, http.StatusBadRequest, "tail_bytes must be a positive integer")
+			return
+		}
+		tailBytes = n
+	}
+	log, err := s.worker.ReadJobLog(jobID, tailBytes)
+	if err != nil {
+		if IsJobLogNotFound(err) {
+			writeHTTPError(w, http.StatusNotFound, "job log not found")
+			return
+		}
+		writeHTTPError(w, http.StatusInternalServerError, fmt.Sprintf("reading job log: %v", err))
+		return
+	}
+	writeHTTPJSON(w, http.StatusOK, log)
 }
 
 // handleDoctor serves GET /v1/doctor. It reuses Worker.Doctor verbatim so
