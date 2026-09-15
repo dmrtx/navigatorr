@@ -172,6 +172,25 @@ transcode:
       - local_prefix: "/media"
         remote_prefix: "/Volumes/media"
 
+  # DARK / NON-DEFAULT persistent-daemon HTTP transport (PR2).
+  # Default executor above stays "ssh"; set transcode.executor to "http"
+  # ONLY for explicit opt-in testing. No automatic fallback between
+  # transports. A submit transport timeout/disconnect is UNKNOWN (not an
+  # encode failure): reconcile via Status before any retry (phase 4).
+  # Idempotency remains weak by job ID in PR2 (strong
+  # idempotency_key + execution_spec_digest is PR3).
+  http:
+    base_url: "http://192.0.2.10:8097"
+    # Bearer credential for the daemon (required on non-loopback binds).
+    # Prefer token_file with 0600 permissions in production.
+    token: ""
+    token_file: "/run/secrets/navigatorr_transcode_http_token"
+    request_timeout_sec: 15
+    submit_timeout_sec: 60
+    path_mappings:
+      - local_prefix: "/media"
+        remote_prefix: "/Volumes/media"
+
 # ==============================================================================
 # 6. REQUEST QUEUE (HTTP INGEST)
 # ==============================================================================
