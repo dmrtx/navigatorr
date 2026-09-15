@@ -498,6 +498,11 @@ func TestBenchmarkSubmit_IdempotencyAcrossAllStates_NoSpawn(t *testing.T) {
 }
 
 func TestBenchmarkSubmit_MaxParallelJobs_CrossIDConcurrency(t *testing.T) {
+	// PR3 semantics: benchmarks keep non-durable-queued / busy admission
+	// (exactly one of two racing benchmarks succeeds, the other gets worker
+	// busy). Transcode submits are covered separately in
+	// TestPR3_TranscodeQueuedBehindBenchmarkOccupancy and must never return
+	// worker busy.
 	tempDir := t.TempDir()
 	mediaDir := filepath.Join(tempDir, "media")
 	stateDir := filepath.Join(tempDir, "state")
@@ -507,7 +512,7 @@ func TestBenchmarkSubmit_MaxParallelJobs_CrossIDConcurrency(t *testing.T) {
 	sourceFile, _ := createTestMediaSource(t, mediaDir, "source.mkv", "capacity-race-data")
 	mockExe := createMockWorkerScript(t, tempDir)
 
-	// MaxParallelJobs is strictly 1: exactly one job may be queued/running across ALL types
+	// MaxParallelJobs is strictly 1 for running work across ALL types.
 	cfg := &WorkerConfig{
 		StateDir:        stateDir,
 		AllowedRoots:    []string{mediaDir},
@@ -516,18 +521,12 @@ func TestBenchmarkSubmit_MaxParallelJobs_CrossIDConcurrency(t *testing.T) {
 	worker := NewWorker(cfg)
 	ctx := context.Background()
 
-	// Prepare 2 different benchmark requests and 1 transcode request
+	// Two different benchmark requests race under one capacity lock.
 	req1 := validWorkerBenchmarkRequest(sourceFile)
 	req1.ID = "bench-job-alpha"
 
 	req2 := validWorkerBenchmarkRequest(sourceFile)
 	req2.ID = "bench-job-beta"
-
-	tcReq := SubmitRequest{
-		ID:            "job-transcode-gamma",
-		SourcePath:    sourceFile,
-		CandidatePath: filepath.Join(mediaDir, "out_gamma.mkv"),
-	}
 
 	type submitResult struct {
 		name   string
@@ -535,11 +534,11 @@ func TestBenchmarkSubmit_MaxParallelJobs_CrossIDConcurrency(t *testing.T) {
 		err    error
 	}
 
-	resultsCh := make(chan submitResult, 3)
+	resultsCh := make(chan submitResult, 2)
 	startBarrier := make(chan struct{})
 	var wg sync.WaitGroup
 
-	wg.Add(3)
+	wg.Add(2)
 	go func() {
 		defer wg.Done()
 		<-startBarrier
@@ -554,14 +553,7 @@ func TestBenchmarkSubmit_MaxParallelJobs_CrossIDConcurrency(t *testing.T) {
 		resultsCh <- submitResult{name: req2.ID, status: resp.Status, err: err}
 	}()
 
-	go func() {
-		defer wg.Done()
-		<-startBarrier
-		resp, err := worker.Submit(ctx, tcReq, mockExe, "")
-		resultsCh <- submitResult{name: tcReq.ID, status: resp.Status, err: err}
-	}()
-
-	// Release all three requests concurrently
+	// Release both benchmark requests concurrently.
 	close(startBarrier)
 	wg.Wait()
 	close(resultsCh)
@@ -580,14 +572,111 @@ func TestBenchmarkSubmit_MaxParallelJobs_CrossIDConcurrency(t *testing.T) {
 	}
 
 	if successCount != 1 {
-		t.Fatalf("expected EXACTLY 1 job to succeed under MaxParallelJobs=1, got %d", successCount)
+		t.Fatalf("expected EXACTLY 1 benchmark to succeed under MaxParallelJobs=1, got %d", successCount)
 	}
-	if busyCount != 2 {
-		t.Fatalf("expected EXACTLY 2 jobs to be rejected with worker busy, got %d", busyCount)
+	if busyCount != 1 {
+		t.Fatalf("expected EXACTLY 1 benchmark to be rejected with worker busy, got %d", busyCount)
 	}
 
-	// Clean up any spawned process
+	active, err := worker.countActiveJobs("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active > 1 {
+		t.Fatalf("aggregate running work exceeds MaxParallelJobs=1: %d", active)
+	}
+
+	// Clean up any spawned process.
 	for _, id := range []string{req1.ID, req2.ID} {
+		if b, err := LoadBenchmark(filepath.Join(stateDir, id, "benchmark.json")); err == nil && b.PID > 0 {
+			_ = syscall.Kill(b.PID, syscall.SIGKILL)
+		}
+	}
+}
+
+func TestPR3_TranscodeQueuedBehindBenchmarkOccupancy(t *testing.T) {
+	// PR3 requires transcode submits to be durably accepted as queued even
+	// when capacity is full. Deterministic: first occupy the single slot with
+	// a benchmark, then submit the transcode. The transcode must succeed as
+	// durable queued (PID 0, not consuming running capacity) and never return
+	// worker busy, while global running work never exceeds MaxParallelJobs=1.
+	tempDir := t.TempDir()
+	mediaDir := filepath.Join(tempDir, "media")
+	stateDir := filepath.Join(tempDir, "state")
+	_ = os.MkdirAll(mediaDir, 0o755)
+	_ = os.MkdirAll(stateDir, 0o755)
+
+	sourceFile, _ := createTestMediaSource(t, mediaDir, "source.mkv", "pr3-occupancy-data")
+	mockExe := createMockWorkerScript(t, tempDir)
+
+	cfg := &WorkerConfig{
+		StateDir:        stateDir,
+		AllowedRoots:    []string{mediaDir},
+		MaxParallelJobs: 1,
+	}
+	worker := NewWorker(cfg)
+	ctx := context.Background()
+
+	// Occupy the slot with a live benchmark.
+	occReq := validWorkerBenchmarkRequest(sourceFile)
+	occReq.ID = "bench-occupant-pr3"
+	occResp, err := worker.BenchmarkSubmit(ctx, occReq, mockExe, "")
+	if err != nil {
+		t.Fatalf("occupant benchmark submit failed: %v", err)
+	}
+	if occResp.Status != "queued" && occResp.Status != "running" {
+		t.Fatalf("unexpected occupant benchmark status %+v", occResp)
+	}
+
+	// A second benchmark must still get worker busy (non-durable-queued).
+	otherReq := validWorkerBenchmarkRequest(sourceFile)
+	otherReq.ID = "bench-other-busy"
+	_, otherErr := worker.BenchmarkSubmit(ctx, otherReq, mockExe, "")
+	if otherErr == nil || !strings.Contains(otherErr.Error(), "worker busy") {
+		t.Fatalf("second benchmark under full capacity must return worker busy, got %v", otherErr)
+	}
+
+	// Transcode submit must succeed as durable queued, never worker busy.
+	tcReq := SubmitRequest{
+		ID:            "job-transcode-pr3-queued",
+		SourcePath:    sourceFile,
+		CandidatePath: filepath.Join(mediaDir, "out_pr3.mkv"),
+	}
+	tcResp, err := worker.Submit(ctx, tcReq, mockExe, "")
+	if err != nil {
+		t.Fatalf("transcode submit under full capacity must succeed queued, got err %v", err)
+	}
+	if strings.Contains(tcResp.Status, "busy") {
+		t.Fatalf("transcode submit must never return worker busy, got %+v", tcResp)
+	}
+	if tcResp.Status != "queued" {
+		t.Fatalf("expected transcode queued behind benchmark occupancy, got %+v", tcResp)
+	}
+	if tcResp.Reused {
+		t.Fatalf("new transcode submit must not be marked reused")
+	}
+
+	loaded, err := LoadJob(filepath.Join(stateDir, tcReq.ID, "job.json"))
+	if err != nil {
+		t.Fatalf("transcode queued job must be durably persisted: %v", err)
+	}
+	if loaded.Status != "queued" {
+		t.Fatalf("persisted transcode must be queued, got %+v", loaded)
+	}
+	if loaded.PID != 0 {
+		t.Fatalf("queued-behind-benchmark must have PID=0 and not consume running capacity, got PID=%d", loaded.PID)
+	}
+
+	active, err := worker.countActiveJobs("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active > 1 {
+		t.Fatalf("global running work exceeds MaxParallelJobs=1: %d", active)
+	}
+
+	// Clean up any spawned processes.
+	for _, id := range []string{occReq.ID, otherReq.ID} {
 		if b, err := LoadBenchmark(filepath.Join(stateDir, id, "benchmark.json")); err == nil && b.PID > 0 {
 			_ = syscall.Kill(b.PID, syscall.SIGKILL)
 		}
