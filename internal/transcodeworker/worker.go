@@ -1742,6 +1742,18 @@ func (w *Worker) Status(ctx context.Context, jobID string) (JobStatusResponse, e
 // job marks it cancelled under the per-job lock and guarantees the scheduler
 // never spawns it (the scheduler only spawns status==queued under capLock +
 // jobLock). Running cancel keeps existing signal semantics.
+//
+// Terminal immutability: completed/failed records are returned unchanged. An
+// already-cancelled record is returned unchanged, but its cancelled terminal
+// marker is (re)written for modern records carrying durable evidence (nonblank
+// digest + finished_at); legacy blank-digest records stay untouched with no
+// marker.
+//
+// For queued/running cancellation job.json is saved first and a persistence
+// failure fails closed (no marker, no artifact cleanup); the cancelled terminal
+// marker is written only after job.json is durable. Only worker-owned
+// incomplete artifacts are removed: never the semantic source and never a
+// finalized Phase 6 destination.
 func (w *Worker) Cancel(ctx context.Context, jobID string) (JobStatusResponse, error) {
 	jobDir := filepath.Join(w.cfg.StateDir, jobID)
 	jobFile := filepath.Join(jobDir, "job.json")
@@ -1757,14 +1769,20 @@ func (w *Worker) Cancel(ctx context.Context, jobID string) (JobStatusResponse, e
 		return JobStatusResponse{ID: jobID, Status: "failed", Error: "job not found"}, err
 	}
 
-	// Queued and never spawned: no process exists; mark cancelled so any
-	// concurrent scheduler pass skips it.
-	if job.Status == "queued" && job.PID <= 1 {
-		job.Status = "cancelled"
-		job.FinishedAt = time.Now().UTC()
-		_ = SaveJobAtomic(jobFile, job)
-		if job.Candidate != "" && job.Candidate != job.Source {
-			_ = os.Remove(job.Candidate)
+	switch job.Status {
+	case "completed", "failed":
+		// Terminal states are immutable: never rewrite, revive, or clean them.
+		return JobStatusResponse{
+			ID:            job.ID,
+			Status:        job.Status,
+			CandidatePath: job.Candidate,
+			Error:         job.Error,
+		}, nil
+	case "cancelled":
+		// Idempotent: the durable record is never rewritten. A cancelled marker
+		// is ensured only when the record carries durable evidence.
+		if err := w.ensureCancelledTerminalMarker(jobDir, job); err != nil {
+			return JobStatusResponse{ID: job.ID, Status: job.Status, CandidatePath: job.Candidate, Error: err.Error()}, err
 		}
 		return JobStatusResponse{
 			ID:            job.ID,
@@ -1791,16 +1809,73 @@ func (w *Worker) Cancel(ctx context.Context, jobID string) (JobStatusResponse, e
 
 	job.Status = "cancelled"
 	job.FinishedAt = time.Now().UTC()
-	_ = SaveJobAtomic(jobFile, job)
 
-	// Clean up incomplete candidate if it exists, never touching source!
-	if job.Candidate != "" && job.Candidate != job.Source {
-		_ = os.Remove(job.Candidate)
+	// job.json is the durable source of truth and must be persisted (fail
+	// closed) before any terminal marker is written.
+	if err := SaveJobAtomic(jobFile, job); err != nil {
+		return JobStatusResponse{ID: job.ID, Status: "failed", CandidatePath: job.Candidate, Error: err.Error()}, err
 	}
+	if err := w.ensureCancelledTerminalMarker(jobDir, job); err != nil {
+		return JobStatusResponse{ID: job.ID, Status: "cancelled", CandidatePath: job.Candidate, Error: err.Error()}, err
+	}
+
+	w.cleanupCancelledArtifacts(job)
 
 	return JobStatusResponse{
 		ID:            job.ID,
 		Status:        "cancelled",
 		CandidatePath: job.Candidate,
 	}, nil
+}
+
+// ensureCancelledTerminalMarker writes (or refreshes) the cancelled terminal
+// marker for an already-durable cancelled record. Legacy records with a blank
+// execution-spec digest or a missing finished_at cannot yield a valid marker
+// and are deliberately left with no marker, preserving backward compatibility.
+func (w *Worker) ensureCancelledTerminalMarker(jobDir string, job *JobRecord) error {
+	if job == nil {
+		return nil
+	}
+	if strings.TrimSpace(job.ExecutionSpecDigest) == "" || job.FinishedAt.IsZero() {
+		return nil
+	}
+	if err := SaveTerminalMarkerAtomic(filepath.Join(jobDir, "terminal.json"), terminalMarkerFromJob(job)); err != nil {
+		return fmt.Errorf("ensuring cancelled terminal marker for job %s: %w", job.ID, err)
+	}
+	return nil
+}
+
+// cleanupCancelledArtifacts removes only worker-owned incomplete artifacts of a
+// newly-cancelled job. It never removes the semantic source. For Phase 6
+// external destinations the encoder output is the operational local candidate
+// and finalization stages through the job's exact own partial path; both are
+// removed, while the atomically published destination is left untouched. For
+// local-only and legacy jobs (finalization not_required or blank) the candidate
+// IS the encoder output, so an incomplete candidate is removed as before.
+func (w *Worker) cleanupCancelledArtifacts(job *JobRecord) {
+	if job == nil {
+		return
+	}
+	source := strings.TrimSpace(job.Source)
+	candidate := strings.TrimSpace(job.Candidate)
+	destination := strings.TrimSpace(job.Destination())
+
+	if fs := FinalizationState(strings.TrimSpace(job.FinalizationState)); fs != "" && fs != FinalizationStateNotRequired {
+		local := strings.TrimSpace(job.LocalCandidatePath)
+		if local != "" && local != source && local != destination {
+			_ = os.Remove(local)
+		}
+		partial := strings.TrimSpace(job.PartialPath)
+		if partial == "" && destination != "" {
+			partial = PartialPathFor(destination, job.ID)
+		}
+		if partial != "" && partial != source && partial != destination {
+			_ = os.Remove(partial)
+		}
+		return
+	}
+
+	if candidate != "" && candidate != source {
+		_ = os.Remove(candidate)
+	}
 }
