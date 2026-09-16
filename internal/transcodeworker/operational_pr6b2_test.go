@@ -7,6 +7,7 @@ package transcodeworker
 // execution-spec digest are never rewritten by operational execution.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -1046,5 +1047,692 @@ func TestPR6B2_ExclusiveCopyFinalizationFailureResumesToCompleted(t *testing.T) 
 	}
 	if rec.encodeCalls != 0 {
 		t.Fatalf("finalization resume must never encode, got %d", rec.encodeCalls)
+	}
+}
+
+// TestPR6B2_AmbiguousPublicationRealStoragePathThenResumesCompleted drives the
+// REAL failing storage path (the exclusive-copy fallback whose post-close
+// visibility cannot be established), proves the durable ambiguous
+// classification is produced, then resumes and completes by byte-for-byte
+// content equality without ever re-encoding.
+func TestPR6B2_AmbiguousPublicationRealStoragePathThenResumesCompleted(t *testing.T) {
+	tempDir := t.TempDir()
+	extRoot := filepath.Join(tempDir, "external")
+	cfg := pr6b2Config(tempDir, func(c *WorkerConfig) {
+		c.ExternalRoots = []string{extRoot}
+	})
+	w := NewWorker(cfg)
+	newStubSpawn().install(w)
+	rec := &pr6b2Recorder{createOut: true}
+	rec.install(w)
+
+	const id = "job-6b2-ambiguous-real"
+	destination := filepath.Join(extRoot, "out.mkv")
+	localCandidate := filepath.Join(cfg.StateDir, "_work", id, "candidate.mkv")
+	pr6b2SeedPostEncode(t, cfg, id, localCandidate, destination)
+
+	// Force the real exclusive-copy fallback, then make its post-close
+	// destination stat persistently unobservable (the smbfs race).
+	w.SetFinalizeOutput(func(ctx context.Context, local, dest, jobID string) error {
+		return finalizeOutputAtomicWith(ctx, local, dest, jobID, nil, smbCommitFallback())
+	})
+
+	origStat, origSleep := statPath, sleepPath
+	defer func() { statPath, sleepPath = origStat, origSleep }()
+	var seam verifySeam
+	statPath = func(p string) (os.FileInfo, error) {
+		seam.calls++
+		if p == destination {
+			return nil, transientENOENT(p)
+		}
+		return os.Stat(p)
+	}
+	sleepPath = func(time.Duration) { seam.sleeps++ }
+
+	err := pr6b2Run(t, w, id)
+	if err == nil {
+		t.Fatal("ambiguous publication must surface an error")
+	}
+	if !errors.Is(err, ErrAmbiguousPublication) {
+		t.Fatalf("error = %v, want ErrAmbiguousPublication", err)
+	}
+	failed := pr6b1LoadJob(t, cfg.StateDir, id)
+	if failed.Status != "running" || failed.PID != 0 || !failed.EncodeComplete {
+		t.Fatalf("ambiguous failure must stay resumable: %+v", failed)
+	}
+	if failed.FinalizationState != string(FinalizationStateFinalizing) {
+		t.Fatalf("FinalizationState = %q, want finalizing", failed.FinalizationState)
+	}
+	if failed.FailureClassification != FailureStoragePublicationAmbiguous {
+		t.Fatalf("classification = %q, want %q", failed.FailureClassification, FailureStoragePublicationAmbiguous)
+	}
+	// The real copy wrote the bytes; only observation failed, so the
+	// destination is preserved for content-equality recovery.
+	content, rerr := os.ReadFile(localCandidate)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if b, rerr := os.ReadFile(destination); rerr != nil || !bytes.Equal(b, content) {
+		t.Fatalf("destination = %q (%v), want preserved encoded output", b, rerr)
+	}
+	if _, err := os.Stat(localCandidate); err != nil {
+		t.Fatalf("local candidate must be preserved: %v", err)
+	}
+	if rec.encodeCalls != 0 {
+		t.Fatalf("ambiguous publication must never re-encode, got %d", rec.encodeCalls)
+	}
+
+	// Resume with a healthy stat: the ambiguous destination is byte-identical
+	// to the candidate, so the job completes without re-encoding.
+	statPath, sleepPath = origStat, origSleep
+	if err := pr6b2Run(t, w, id); err != nil {
+		t.Fatalf("recovery InternalRun: %v", err)
+	}
+	got := pr6b1LoadJob(t, cfg.StateDir, id)
+	if got.Status != "completed" || got.FinalizationState != string(FinalizationStateCompleted) {
+		t.Fatalf("recovered job = %+v, want completed", got)
+	}
+	if got.FailureClassification != "" {
+		t.Fatalf("classification = %q, want cleared on completion", got.FailureClassification)
+	}
+	if b, rerr := os.ReadFile(destination); rerr != nil || !bytes.Equal(b, content) {
+		t.Fatalf("destination = %q (%v), want unchanged encoded output", b, rerr)
+	}
+	if rec.encodeCalls != 0 {
+		t.Fatalf("recovery must never re-encode, got %d", rec.encodeCalls)
+	}
+	if _, err := os.Stat(localCandidate); !os.IsNotExist(err) {
+		t.Fatalf("local candidate must be cleaned after completion: %v", err)
+	}
+}
+
+// legacyOldAmbiguousError reconstructs, independently of the production
+// recognizer, the exact error an old worker persisted for this job's own
+// partial and destination when the exclusive-copy post-close stat saw ENOENT.
+func legacyOldAmbiguousError(partial, destination string) string {
+	return fmt.Sprintf(
+		"finalization failed: transcode storage i/o failure: publishing %s to %s: transcode storage i/o failure: statting %s: stat %s: no such file or directory",
+		partial, destination, destination, destination,
+	)
+}
+
+// seedLegacyDifferingDestination seeds a finalizing/storage_finalization_failed
+// job with a same-size destination whose tail is zero-filled (models a partial
+// write), an intact own partial identical to the candidate, and the supplied
+// persisted error. It returns the candidate content.
+func seedLegacyDifferingDestination(t *testing.T, cfg *WorkerConfig, id, destination, localCandidate, partial, persistedError string) []byte {
+	t.Helper()
+	pr6b2SeedPostEncode(t, cfg, id, localCandidate, destination)
+	content, err := os.ReadFile(localCandidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	diff := append([]byte(nil), content...)
+	for i := len(diff) / 2; i < len(diff); i++ {
+		diff[i] = 0
+	}
+	if len(diff) > 0 && bytes.Equal(diff, content) {
+		t.Fatal("test setup requires a differing destination")
+	}
+	mustWriteFile(t, destination, diff, 0o644)
+	mustWriteFile(t, partial, content, 0o644)
+	seed := pr6b1LoadJob(t, cfg.StateDir, id)
+	seed.FinalizationState = string(FinalizationStateFinalizing)
+	seed.FailureClassification = FailureStorageFinalization
+	seed.Error = persistedError
+	pr6b2Seed(t, cfg.StateDir, seed)
+	return content
+}
+
+// TestPR6B2_LegacyAmbiguousPublicationModelsE04 models the live E04 job: an old
+// generic storage_finalization_failed job whose exact old ambiguous-publication
+// error names its own partial and destination, whose own partial is intact and
+// identical to the candidate, and whose destination is the same size but
+// differs after a partial write. Recovery must remove only the proven own
+// destination, republish from the candidate, and complete without re-encoding.
+func TestPR6B2_LegacyAmbiguousPublicationModelsE04(t *testing.T) {
+	tempDir := t.TempDir()
+	extRoot := filepath.Join(tempDir, "external")
+	cfg := pr6b2Config(tempDir, func(c *WorkerConfig) {
+		c.ExternalRoots = []string{extRoot}
+	})
+	w := NewWorker(cfg)
+	newStubSpawn().install(w)
+	rec := &pr6b2Recorder{createOut: true}
+	rec.install(w)
+
+	const id = "job-act-transcode-media-3138633435326235"
+	destination := filepath.Join(extRoot, "out.mkv")
+	localCandidate := filepath.Join(cfg.StateDir, "_work", id, "candidate.mkv")
+	partial := PartialPathFor(destination, id)
+	content := seedLegacyDifferingDestination(t, cfg, id, destination, localCandidate, partial, legacyOldAmbiguousError(partial, destination))
+
+	if err := pr6b2Run(t, w, id); err != nil {
+		t.Fatalf("E04 recovery: %v", err)
+	}
+	got := pr6b1LoadJob(t, cfg.StateDir, id)
+	if got.Status != "completed" || got.FinalizationState != string(FinalizationStateCompleted) {
+		t.Fatalf("recovered E04 job = %+v, want completed", got)
+	}
+	if got.FailureClassification != "" {
+		t.Fatalf("classification = %q, want cleared", got.FailureClassification)
+	}
+	if b, rerr := os.ReadFile(destination); rerr != nil || !bytes.Equal(b, content) {
+		t.Fatalf("destination = %q (%v), want republished candidate", b, rerr)
+	}
+	if rec.encodeCalls != 0 {
+		t.Fatalf("E04 recovery must never re-encode, got %d", rec.encodeCalls)
+	}
+}
+
+// TestPR6B2_TypedAmbiguousDifferentDestinationRepublished proves the typed
+// marker alone authorises destructive recovery: a differing destination known
+// to come from this job's O_EXCL publication is removed and republished.
+func TestPR6B2_TypedAmbiguousDifferentDestinationRepublished(t *testing.T) {
+	tempDir := t.TempDir()
+	extRoot := filepath.Join(tempDir, "external")
+	cfg := pr6b2Config(tempDir, func(c *WorkerConfig) {
+		c.ExternalRoots = []string{extRoot}
+	})
+	w := NewWorker(cfg)
+	newStubSpawn().install(w)
+	rec := &pr6b2Recorder{createOut: true}
+	rec.install(w)
+
+	const id = "job-6b2-typed-different"
+	destination := filepath.Join(extRoot, "out.mkv")
+	localCandidate := filepath.Join(cfg.StateDir, "_work", id, "candidate.mkv")
+	pr6b2SeedPostEncode(t, cfg, id, localCandidate, destination)
+
+	seed := pr6b1LoadJob(t, cfg.StateDir, id)
+	seed.FinalizationState = string(FinalizationStateFinalizing)
+	seed.FailureClassification = FailureStoragePublicationAmbiguous
+	pr6b2Seed(t, cfg.StateDir, seed)
+
+	content, err := os.ReadFile(localCandidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unrelated := bytes.ToUpper(content)
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, destination, unrelated, 0o644)
+	mustWriteFile(t, PartialPathFor(destination, id), content, 0o644)
+
+	if err := pr6b2Run(t, w, id); err != nil {
+		t.Fatalf("typed republish: %v", err)
+	}
+	got := pr6b1LoadJob(t, cfg.StateDir, id)
+	if got.Status != "completed" {
+		t.Fatalf("job = %+v, want completed", got)
+	}
+	if b, rerr := os.ReadFile(destination); rerr != nil || !bytes.Equal(b, content) {
+		t.Fatalf("destination = %q (%v), want republished candidate", b, rerr)
+	}
+	if rec.encodeCalls != 0 {
+		t.Fatalf("republish must never re-encode, got %d", rec.encodeCalls)
+	}
+}
+
+// TestPR6B2_LegacyWrongPartialInErrorNoDeletion proves the recognizer is not a
+// substring/partial heuristic: if the persisted error names a different partial
+// path, no destructive recovery happens and the destination is left untouched.
+func TestPR6B2_LegacyWrongPartialInErrorNoDeletion(t *testing.T) {
+	tempDir := t.TempDir()
+	extRoot := filepath.Join(tempDir, "external")
+	cfg := pr6b2Config(tempDir, func(c *WorkerConfig) {
+		c.ExternalRoots = []string{extRoot}
+	})
+	w := NewWorker(cfg)
+	newStubSpawn().install(w)
+	rec := &pr6b2Recorder{createOut: true}
+	rec.install(w)
+
+	const id = "job-6b2-legacy-wrong-partial"
+	destination := filepath.Join(extRoot, "out.mkv")
+	localCandidate := filepath.Join(cfg.StateDir, "_work", id, "candidate.mkv")
+	partial := PartialPathFor(destination, id)
+	wrongPartial := PartialPathFor(destination, "someone-else")
+	seedLegacyDifferingDestination(t, cfg, id, destination, localCandidate, partial, legacyOldAmbiguousError(wrongPartial, destination))
+
+	diff, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runErr := pr6b2Run(t, w, id)
+	if runErr == nil || !IsDestinationExists(runErr) {
+		t.Fatalf("error = %v, want ErrDestinationExists", runErr)
+	}
+	if b, rerr := os.ReadFile(destination); rerr != nil || !bytes.Equal(b, diff) {
+		t.Fatalf("destination = %q (%v), must not be deleted", b, rerr)
+	}
+	if rec.encodeCalls != 0 {
+		t.Fatalf("no deletion path must never re-encode, got %d", rec.encodeCalls)
+	}
+}
+
+// TestPR6B2_LegacyWrongDestinationInErrorNoDeletion proves a persisted error
+// naming a different destination never authorises deletion of this destination.
+func TestPR6B2_LegacyWrongDestinationInErrorNoDeletion(t *testing.T) {
+	tempDir := t.TempDir()
+	extRoot := filepath.Join(tempDir, "external")
+	cfg := pr6b2Config(tempDir, func(c *WorkerConfig) {
+		c.ExternalRoots = []string{extRoot}
+	})
+	w := NewWorker(cfg)
+	newStubSpawn().install(w)
+	rec := &pr6b2Recorder{createOut: true}
+	rec.install(w)
+
+	const id = "job-6b2-legacy-wrong-dest"
+	destination := filepath.Join(extRoot, "out.mkv")
+	localCandidate := filepath.Join(cfg.StateDir, "_work", id, "candidate.mkv")
+	partial := PartialPathFor(destination, id)
+	wrongDestination := filepath.Join(extRoot, "other.mkv")
+	seedLegacyDifferingDestination(t, cfg, id, destination, localCandidate, partial, legacyOldAmbiguousError(partial, wrongDestination))
+
+	diff, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runErr := pr6b2Run(t, w, id)
+	if runErr == nil || !IsDestinationExists(runErr) {
+		t.Fatalf("error = %v, want ErrDestinationExists", runErr)
+	}
+	if b, rerr := os.ReadFile(destination); rerr != nil || !bytes.Equal(b, diff) {
+		t.Fatalf("destination = %q (%v), must not be deleted", b, rerr)
+	}
+}
+
+// TestPR6B2_LegacyNoExactSignatureNoDeletion proves a generic
+// storage_finalization_failed job whose error is not the exact legacy
+// ambiguous-publication shape never authorises deletion.
+func TestPR6B2_LegacyNoExactSignatureNoDeletion(t *testing.T) {
+	tempDir := t.TempDir()
+	extRoot := filepath.Join(tempDir, "external")
+	cfg := pr6b2Config(tempDir, func(c *WorkerConfig) {
+		c.ExternalRoots = []string{extRoot}
+	})
+	w := NewWorker(cfg)
+	newStubSpawn().install(w)
+	rec := &pr6b2Recorder{createOut: true}
+	rec.install(w)
+
+	const id = "job-6b2-legacy-no-signature"
+	destination := filepath.Join(extRoot, "out.mkv")
+	localCandidate := filepath.Join(cfg.StateDir, "_work", id, "candidate.mkv")
+	partial := PartialPathFor(destination, id)
+	seedLegacyDifferingDestination(t, cfg, id, destination, localCandidate, partial, "finalization failed: transcode storage i/o failure: some unrelated failure")
+
+	diff, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runErr := pr6b2Run(t, w, id)
+	if runErr == nil || !IsDestinationExists(runErr) {
+		t.Fatalf("error = %v, want ErrDestinationExists", runErr)
+	}
+	if b, rerr := os.ReadFile(destination); rerr != nil || !bytes.Equal(b, diff) {
+		t.Fatalf("destination = %q (%v), must not be deleted", b, rerr)
+	}
+}
+
+// TestPR6B2_LegacyCandidatePartialMismatchNoDeletion proves the exact legacy
+// signature is not sufficient on its own: the own partial must still be
+// byte-for-byte identical to the local candidate or no deletion occurs.
+func TestPR6B2_LegacyCandidatePartialMismatchNoDeletion(t *testing.T) {
+	tempDir := t.TempDir()
+	extRoot := filepath.Join(tempDir, "external")
+	cfg := pr6b2Config(tempDir, func(c *WorkerConfig) {
+		c.ExternalRoots = []string{extRoot}
+	})
+	w := NewWorker(cfg)
+	newStubSpawn().install(w)
+	rec := &pr6b2Recorder{createOut: true}
+	rec.install(w)
+
+	const id = "job-6b2-legacy-partial-mismatch"
+	destination := filepath.Join(extRoot, "out.mkv")
+	localCandidate := filepath.Join(cfg.StateDir, "_work", id, "candidate.mkv")
+	partial := PartialPathFor(destination, id)
+	content := seedLegacyDifferingDestination(t, cfg, id, destination, localCandidate, partial, legacyOldAmbiguousError(partial, destination))
+	// Replace the intact partial with different content of the same size.
+	mustWriteFile(t, partial, bytes.ToUpper(content), 0o644)
+
+	diff, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runErr := pr6b2Run(t, w, id)
+	if runErr == nil || !IsDestinationExists(runErr) {
+		t.Fatalf("error = %v, want ErrDestinationExists", runErr)
+	}
+	if b, rerr := os.ReadFile(destination); rerr != nil || !bytes.Equal(b, diff) {
+		t.Fatalf("destination = %q (%v), must not be deleted", b, rerr)
+	}
+}
+
+// TestRemoveAmbiguousDestinationIfSafeGuards proves destination removal refuses
+// source/local-candidate/partial collisions and non-regular paths, while still
+// removing a genuine proven destination (whose semantic Candidate normally
+// equals the destination).
+func TestRemoveAmbiguousDestinationIfSafeGuards(t *testing.T) {
+	base := t.TempDir()
+	w := NewWorker(pr6b2Config(base, nil))
+	dest := filepath.Join(base, "dest.mkv")
+	src := filepath.Join(base, "src.mkv")
+	cand := filepath.Join(base, "cand.mkv")
+	partial := filepath.Join(base, "dest.mkv.partial.job-1")
+	for _, p := range []string{dest, src, cand, partial} {
+		mustWriteFile(t, p, []byte("keep"), 0o644)
+	}
+	job := &JobRecord{Source: src, Candidate: dest}
+
+	collisions := []struct {
+		name    string
+		dest    string
+		partial string
+		local   string
+	}{
+		{"source", src, partial, cand},
+		{"local candidate", cand, partial, cand},
+		{"own partial", partial, partial, cand},
+	}
+	for _, tc := range collisions {
+		removed, err := w.removeAmbiguousDestinationIfSafe(job, &resolvedOperational{destination: tc.dest, localCandidate: tc.local, partial: tc.partial})
+		if err == nil || removed {
+			t.Fatalf("%s collision: removed=%v err=%v, want refusal", tc.name, removed, err)
+		}
+	}
+	if _, err := os.Stat(src); err != nil {
+		t.Fatalf("source must survive: %v", err)
+	}
+	if _, err := os.Stat(cand); err != nil {
+		t.Fatalf("local candidate must survive: %v", err)
+	}
+	if _, err := os.Stat(partial); err != nil {
+		t.Fatalf("partial must survive: %v", err)
+	}
+
+	if removed, err := w.removeAmbiguousDestinationIfSafe(job, &resolvedOperational{destination: dest, localCandidate: cand, partial: partial}); err != nil || !removed {
+		t.Fatalf("genuine destination: removed=%v err=%v, want true,nil", removed, err)
+	}
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Fatalf("genuine destination must be removed: %v", err)
+	}
+}
+
+// TestPR6B2_FinalizingWithoutFailureMarkerDoesNotReconcile proves the trust
+// boundary: a durable finalizing state that was persisted before the publish
+// call is NOT proof a publication was attempted. Even with a byte-identical
+// destination and own partial present, recovery must not fire without a
+// durable failure marker; strict no-clobber is preserved.
+func TestPR6B2_FinalizingWithoutFailureMarkerDoesNotReconcile(t *testing.T) {
+	tempDir := t.TempDir()
+	extRoot := filepath.Join(tempDir, "external")
+	cfg := pr6b2Config(tempDir, func(c *WorkerConfig) {
+		c.ExternalRoots = []string{extRoot}
+	})
+	w := NewWorker(cfg)
+	newStubSpawn().install(w)
+	rec := &pr6b2Recorder{createOut: true}
+	rec.install(w)
+
+	const id = "job-6b2-finalizing-no-marker"
+	destination := filepath.Join(extRoot, "out.mkv")
+	localCandidate := filepath.Join(cfg.StateDir, "_work", id, "candidate.mkv")
+	pr6b2SeedPostEncode(t, cfg, id, localCandidate, destination)
+
+	seed := pr6b1LoadJob(t, cfg.StateDir, id)
+	seed.FinalizationState = string(FinalizationStateFinalizing)
+	seed.FailureClassification = ""
+	pr6b2Seed(t, cfg.StateDir, seed)
+
+	content, err := os.ReadFile(localCandidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	destinationContent := append([]byte(nil), content...)
+	mustWriteFile(t, destination, destinationContent, 0o644)
+	mustWriteFile(t, PartialPathFor(destination, id), content, 0o644)
+
+	err = pr6b2Run(t, w, id)
+	if err == nil {
+		t.Fatal("finalizing without the failure marker must not reconcile")
+	}
+	if !IsDestinationExists(err) {
+		t.Fatalf("error = %v, want ErrDestinationExists", err)
+	}
+	if b, rerr := os.ReadFile(destination); rerr != nil || !bytes.Equal(b, destinationContent) {
+		t.Fatalf("destination = %q (%v), must not be overwritten", b, rerr)
+	}
+	got := pr6b1LoadJob(t, cfg.StateDir, id)
+	if got.Status != "running" || !got.EncodeComplete {
+		t.Fatalf("job = %+v, want resumable running/encode-complete", got)
+	}
+	if _, err := os.Stat(localCandidate); err != nil {
+		t.Fatalf("local candidate must be preserved on refusal: %v", err)
+	}
+	if rec.encodeCalls != 0 {
+		t.Fatalf("refusal must never re-encode, got %d", rec.encodeCalls)
+	}
+}
+
+// TestPR6B2_FreshConflictWithStalePartialNeverReconciles proves a normal fresh
+// ErrDestinationExists conflict (same-size unrelated destination) is recorded
+// as the generic failure and, on resume, still refuses because content differs.
+// A stale own partial is cleaned when the conflict is recorded and never turns
+// the conflict into success.
+func TestPR6B2_FreshConflictWithStalePartialNeverReconciles(t *testing.T) {
+	tempDir := t.TempDir()
+	extRoot := filepath.Join(tempDir, "external")
+	cfg := pr6b2Config(tempDir, func(c *WorkerConfig) {
+		c.ExternalRoots = []string{extRoot}
+	})
+	w := NewWorker(cfg)
+	newStubSpawn().install(w)
+	rec := &pr6b2Recorder{createOut: true}
+	rec.install(w)
+
+	const id = "job-6b2-fresh-conflict"
+	destination := filepath.Join(extRoot, "out.mkv")
+	localCandidate := filepath.Join(cfg.StateDir, "_work", id, "candidate.mkv")
+	pr6b2SeedPostEncode(t, cfg, id, localCandidate, destination)
+
+	content, err := os.ReadFile(localCandidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sameSizeUnrelated := bytes.ToUpper(content)
+	if len(sameSizeUnrelated) != len(content) || bytes.Equal(sameSizeUnrelated, content) {
+		t.Fatalf("test setup requires an unrelated same-size destination")
+	}
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, destination, sameSizeUnrelated, 0o644)
+	// Stale own partial left by an earlier crash; the destination-exists
+	// precheck returns before the finalizer would have cleaned it.
+	mustWriteFile(t, PartialPathFor(destination, id), content, 0o644)
+
+	err = pr6b2Run(t, w, id)
+	if err == nil {
+		t.Fatal("fresh conflict must fail")
+	}
+	if !IsDestinationExists(err) {
+		t.Fatalf("first run error = %v, want ErrDestinationExists", err)
+	}
+	failed := pr6b1LoadJob(t, cfg.StateDir, id)
+	if failed.FinalizationState != string(FinalizationStateFinalizing) ||
+		failed.FailureClassification != FailureStorageFinalization {
+		t.Fatalf("recorded failure state = %+v, want finalizing/storage_finalization_failed", failed)
+	}
+	if exists, _ := pathExists(PartialPathFor(destination, id)); exists {
+		t.Fatal("a recorded conflict must clean this job's stale own partial")
+	}
+
+	err = pr6b2Run(t, w, id)
+	if err == nil {
+		t.Fatal("resume must not reconcile an unrelated same-size destination")
+	}
+	if !IsDestinationExists(err) {
+		t.Fatalf("resume error = %v, want ErrDestinationExists", err)
+	}
+	if b, rerr := os.ReadFile(destination); rerr != nil || !bytes.Equal(b, sameSizeUnrelated) {
+		t.Fatalf("unrelated destination = %q (%v), must not be overwritten", b, rerr)
+	}
+	if rec.encodeCalls != 0 {
+		t.Fatalf("conflict handling must never re-encode, got %d", rec.encodeCalls)
+	}
+}
+
+// TestPR6B2_UnrelatedPartialIgnoredAndPreserved proves only this job's exact
+// partial is ever targeted. A byte-identical destination completes by content
+// equality regardless of an unrelated partial, and the unrelated partial is
+// left untouched.
+func TestPR6B2_UnrelatedPartialIgnoredAndPreserved(t *testing.T) {
+	tempDir := t.TempDir()
+	extRoot := filepath.Join(tempDir, "external")
+	cfg := pr6b2Config(tempDir, func(c *WorkerConfig) {
+		c.ExternalRoots = []string{extRoot}
+	})
+	w := NewWorker(cfg)
+	newStubSpawn().install(w)
+	rec := &pr6b2Recorder{createOut: true}
+	rec.install(w)
+
+	const id = "job-6b2-unrelated-partial"
+	destination := filepath.Join(extRoot, "out.mkv")
+	localCandidate := filepath.Join(cfg.StateDir, "_work", id, "candidate.mkv")
+	pr6b2SeedPostEncode(t, cfg, id, localCandidate, destination)
+
+	seed := pr6b1LoadJob(t, cfg.StateDir, id)
+	seed.FinalizationState = string(FinalizationStateFinalizing)
+	seed.FailureClassification = FailureStoragePublicationAmbiguous
+	pr6b2Seed(t, cfg.StateDir, seed)
+
+	content, err := os.ReadFile(localCandidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, destination, content, 0o644)
+	unrelated := PartialPathFor(destination, "somebody-else")
+	mustWriteFile(t, unrelated, []byte("keep me"), 0o644)
+
+	if err := pr6b2Run(t, w, id); err != nil {
+		t.Fatalf("content-equal recovery: %v", err)
+	}
+	got := pr6b1LoadJob(t, cfg.StateDir, id)
+	if got.Status != "completed" {
+		t.Fatalf("job = %+v, want completed", got)
+	}
+	if b, rerr := os.ReadFile(unrelated); rerr != nil || string(b) != "keep me" {
+		t.Fatalf("unrelated partial = %q (%v), must be preserved", b, rerr)
+	}
+	if rec.encodeCalls != 0 {
+		t.Fatalf("recovery must never re-encode, got %d", rec.encodeCalls)
+	}
+}
+
+// TestPR6B2_SymlinkedOwnPartialCleanedWithoutFollowing proves partial cleanup
+// never follows a symlink: in an unproven conflict (generic failure with no
+// legacy signature), the symlink at this job's exact partial path is removed as
+// a link and the target it pointed at (the local candidate) is preserved.
+func TestPR6B2_SymlinkedOwnPartialCleanedWithoutFollowing(t *testing.T) {
+	tempDir := t.TempDir()
+	extRoot := filepath.Join(tempDir, "external")
+	cfg := pr6b2Config(tempDir, func(c *WorkerConfig) {
+		c.ExternalRoots = []string{extRoot}
+	})
+	w := NewWorker(cfg)
+	newStubSpawn().install(w)
+	rec := &pr6b2Recorder{createOut: true}
+	rec.install(w)
+
+	const id = "job-6b2-symlink-partial"
+	destination := filepath.Join(extRoot, "out.mkv")
+	localCandidate := filepath.Join(cfg.StateDir, "_work", id, "candidate.mkv")
+	pr6b2SeedPostEncode(t, cfg, id, localCandidate, destination)
+
+	seed := pr6b1LoadJob(t, cfg.StateDir, id)
+	seed.FinalizationState = string(FinalizationStateFinalizing)
+	seed.FailureClassification = FailureStorageFinalization
+	seed.Error = "finalization failed: transcode storage i/o failure: unrelated"
+	pr6b2Seed(t, cfg.StateDir, seed)
+
+	content, err := os.ReadFile(localCandidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, destination, bytes.ToUpper(content), 0o644)
+	partial := PartialPathFor(destination, id)
+	if err := os.Symlink(localCandidate, partial); err != nil {
+		t.Fatal(err)
+	}
+
+	err = pr6b2Run(t, w, id)
+	if err == nil {
+		t.Fatal("an unproven differing destination must remain a conflict")
+	}
+	if !IsDestinationExists(err) {
+		t.Fatalf("error = %v, want ErrDestinationExists", err)
+	}
+	if li, lerr := os.Lstat(partial); lerr == nil && li.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("symlinked own partial must be removed")
+	}
+	if b, rerr := os.ReadFile(localCandidate); rerr != nil || !bytes.Equal(b, content) {
+		t.Fatalf("symlink target (candidate) must be preserved: %q (%v)", b, rerr)
+	}
+	if rec.encodeCalls != 0 {
+		t.Fatalf("refusal must never re-encode, got %d", rec.encodeCalls)
+	}
+}
+
+// TestRemoveOwnPartialIfSafeGuards proves partial cleanup refuses to touch a
+// path that collides with the semantic source, semantic candidate, or intended
+// destination, while still removing a genuine own partial.
+func TestRemoveOwnPartialIfSafeGuards(t *testing.T) {
+	base := t.TempDir()
+	w := NewWorker(pr6b2Config(base, nil))
+	dest := filepath.Join(base, "dest.mkv")
+	src := filepath.Join(base, "src.mkv")
+	cand := filepath.Join(base, "cand.mkv")
+	for _, p := range []string{dest, src, cand} {
+		mustWriteFile(t, p, []byte("keep"), 0o644)
+	}
+	job := &JobRecord{Source: src, Candidate: cand}
+
+	for _, tc := range []struct {
+		name    string
+		partial string
+	}{
+		{"destination", dest},
+		{"source", src},
+		{"candidate", cand},
+	} {
+		w.removeOwnPartialIfSafe(job, &resolvedOperational{destination: dest, partial: tc.partial})
+		if _, err := os.Stat(tc.partial); err != nil {
+			t.Fatalf("protected %s path must not be removed: %v", tc.name, err)
+		}
+	}
+
+	ownPartial := PartialPathFor(dest, "job-1")
+	mustWriteFile(t, ownPartial, []byte("temp"), 0o644)
+	w.removeOwnPartialIfSafe(job, &resolvedOperational{destination: dest, partial: ownPartial})
+	if _, err := os.Stat(ownPartial); !os.IsNotExist(err) {
+		t.Fatalf("genuine own partial must be removed: %v", err)
 	}
 }

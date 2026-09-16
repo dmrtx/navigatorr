@@ -1,6 +1,7 @@
 package transcodeworker
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // This file implements operational staging and finalization primitives. They
@@ -75,7 +77,20 @@ var (
 	ErrStorageIO = errors.New("transcode storage i/o failure")
 	// ErrSizeMismatch indicates the copied byte count did not match the source.
 	ErrSizeMismatch = errors.New("copied byte count mismatch")
+	// ErrAmbiguousPublication indicates an exclusive-copy publication wrote and
+	// closed the destination but could not verify its post-close visibility
+	// (for example transient ENOENT on a macOS smbfs mount). The destination may
+	// or may not be a complete, valid copy, so it is deliberately NOT removed.
+	// Callers surface a distinct durable classification and reconcile the
+	// destination later by full content equality, never by trust or size alone.
+	ErrAmbiguousPublication = errors.New("transcode publication written but not verified")
 )
+
+// errPostCloseUnverified is an internal marker wrapped by copyRegularFileTo
+// when a written-and-closed file cannot be observed by a post-close stat. It is
+// interpreted only by the exclusive-copy publication path, which converts it
+// into ErrAmbiguousPublication.
+var errPostCloseUnverified = errors.New("post-close destination verification unavailable")
 
 // IsSourceMissing reports whether err is (or wraps) ErrSourceMissing.
 func IsSourceMissing(err error) bool { return errors.Is(err, ErrSourceMissing) }
@@ -296,6 +311,38 @@ func copyWithContext(ctx context.Context, source string, dst *os.File) (int64, e
 	}
 }
 
+// Post-close destination verification retry bounds. A file that was just
+// written and closed can briefly be invisible to a fresh stat on network
+// filesystems (notably a macOS smbfs mount) while the share propagates the new
+// directory entry. The retry below masks only that transient os.IsNotExist
+// window; it is small and bounded so a genuinely missing or failed destination
+// still fails closed.
+const (
+	destVerifyAttempts = 5
+	destVerifyBackoff  = 100 * time.Millisecond
+)
+
+// statPath and sleepPath are the post-close verification seams. They default to
+// the production os.Stat/time.Sleep and exist only so tests can drive the
+// bounded transient-ENOENT retry deterministically without sleeping. Tests
+// replace them serially and restore them.
+var (
+	statPath  = os.Stat
+	sleepPath = time.Sleep
+)
+
+// statWithRetry stats path, retrying only a transient os.IsNotExist result a
+// bounded number of times with a small backoff. Any non-NotExist error is
+// returned immediately, as is a persistent absence after the final attempt.
+func statWithRetry(path string) (os.FileInfo, error) {
+	fi, err := statPath(path)
+	for attempt := 1; err != nil && os.IsNotExist(err) && attempt < destVerifyAttempts; attempt++ {
+		sleepPath(destVerifyBackoff)
+		fi, err = statPath(path)
+	}
+	return fi, err
+}
+
 // copyRegularFileTo copies source into an already-open dst, applies perm
 // (defaulting to 0644 when zero), Syncs and Closes dst, then verifies that the
 // on-disk temp size matches the expected source size.
@@ -319,14 +366,86 @@ func copyRegularFileTo(ctx context.Context, source string, dst *os.File, wantSiz
 	if err := dst.Close(); err != nil {
 		return fmt.Errorf("%w: closing %s: %v", ErrStorageIO, dst.Name(), err)
 	}
-	fi, err := os.Stat(dst.Name())
+	fi, err := statWithRetry(dst.Name())
 	if err != nil {
-		return fmt.Errorf("%w: statting %s: %v", ErrStorageIO, dst.Name(), err)
+		// The bytes were written and the handle closed, but the fresh entry is
+		// not observable. Mark this so the exclusive-copy publication can treat
+		// it as ambiguous rather than deleting possibly-good output.
+		return fmt.Errorf("%w: %w: statting %s: %v", ErrStorageIO, errPostCloseUnverified, dst.Name(), err)
 	}
 	if fi.Size() != wantSize {
 		return fmt.Errorf("%w: %s size %d != source size %d", ErrSizeMismatch, dst.Name(), fi.Size(), wantSize)
 	}
 	return nil
+}
+
+// filesHaveEqualContent reports whether a and b are regular files with
+// byte-for-byte identical content. It first compares sizes as a cheap
+// precheck, then streams both files in chunks so large candidates never need to
+// be held in memory. A missing, non-regular, or size-mismatched file returns
+// (false, nil); other I/O failures are ErrStorageIO. It never mutates either
+// path.
+//
+// This is the acceptance gate for recovering an ambiguous publication: size
+// alone is not evidence, because a different file of the same length must never
+// be mistaken for this job's output.
+func filesHaveEqualContent(ctx context.Context, a, b string) (bool, error) {
+	aInfo, err := os.Lstat(a)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("%w: statting %s: %v", ErrStorageIO, a, err)
+	}
+	bInfo, err := os.Lstat(b)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("%w: statting %s: %v", ErrStorageIO, b, err)
+	}
+	if !aInfo.Mode().IsRegular() || !bInfo.Mode().IsRegular() || aInfo.Size() != bInfo.Size() {
+		return false, nil
+	}
+	if aInfo.Size() == 0 {
+		return true, nil
+	}
+
+	af, err := os.Open(a)
+	if err != nil {
+		return false, fmt.Errorf("%w: opening %s: %v", ErrStorageIO, a, err)
+	}
+	defer af.Close()
+	bf, err := os.Open(b)
+	if err != nil {
+		return false, fmt.Errorf("%w: opening %s: %v", ErrStorageIO, b, err)
+	}
+	defer bf.Close()
+
+	const chunk = 128 * 1024
+	bufA := make([]byte, chunk)
+	bufB := make([]byte, chunk)
+	for {
+		if cerr := ctx.Err(); cerr != nil {
+			return false, cerr
+		}
+		na, ea := io.ReadFull(af, bufA)
+		nb, eb := io.ReadFull(bf, bufB)
+		if na != nb || !bytes.Equal(bufA[:na], bufB[:nb]) {
+			return false, nil
+		}
+		aDone := ea == io.EOF || ea == io.ErrUnexpectedEOF
+		bDone := eb == io.EOF || eb == io.ErrUnexpectedEOF
+		if !aDone && ea != nil {
+			return false, fmt.Errorf("%w: reading %s: %v", ErrStorageIO, a, ea)
+		}
+		if !bDone && eb != nil {
+			return false, fmt.Errorf("%w: reading %s: %v", ErrStorageIO, b, eb)
+		}
+		if aDone || bDone {
+			return aDone && bDone, nil
+		}
+	}
 }
 
 // syncDir best-effort flushes a directory entry after a commit so the new name
@@ -401,6 +520,13 @@ func commitNoReplaceWith(ctx context.Context, src, dst string, rename, link func
 				if errors.Is(cerr, fs.ErrExist) {
 					return fmt.Errorf("%w: %s", ErrDestinationExists, dst)
 				}
+				// An ambiguous publication wrote and closed the destination but
+				// could not verify it. Propagate the typed signal so the state
+				// machine preserves the destination and records a distinct
+				// durable classification instead of treating it as generic I/O.
+				if errors.Is(cerr, ErrAmbiguousPublication) {
+					return cerr
+				}
 				return fmt.Errorf("%w: publishing %s to %s: %v", ErrStorageIO, src, dst, cerr)
 			}
 			return nil
@@ -417,10 +543,13 @@ func commitNoReplaceWith(ctx context.Context, src, dst string, rename, link func
 // macOS SMB/smbfs mount).
 //
 // No-clobber is still guaranteed by O_CREATE|O_EXCL: a concurrently created
-// destination is never overwritten and is reported as ErrDestinationExists.
-// On any failure the partially written destination is removed so the
-// destination is left absent and the source is preserved for a safe retry. On
-// success the source is consumed, mirroring the hard-link publication.
+// destination is never overwritten and is reported as ErrDestinationExists. On
+// an ordinary failure the partially written destination is removed so the
+// destination is left absent and the source is preserved for a safe retry. If
+// the bytes were written and the handle closed but post-close verification
+// could not observe the entry (ErrAmbiguousPublication), the destination is
+// deliberately preserved for later content-equality reconciliation. On success
+// the source is consumed, mirroring the hard-link publication.
 func copyNoReplace(ctx context.Context, src, dst string) error {
 	return copyNoReplaceWith(ctx, src, dst, nil)
 }
@@ -442,8 +571,12 @@ func copyNoReplaceWith(ctx context.Context, src, dst string, hook func(dstPath s
 		return fmt.Errorf("%w: creating %s: %v", ErrStorageIO, dst, err)
 	}
 	published := false
+	// preserve keeps a written-and-closed destination when its post-close
+	// visibility could not be established; the bytes may be a complete, valid
+	// copy and must not be destroyed before content-equality reconciliation.
+	preserve := false
 	defer func() {
-		if !published {
+		if !published && !preserve {
 			_ = out.Close()
 			_ = os.Remove(dst)
 		}
@@ -456,6 +589,10 @@ func copyNoReplaceWith(ctx context.Context, src, dst string, hook func(dstPath s
 	}
 
 	if err := copyRegularFileTo(ctx, src, out, info.Size(), info.Mode().Perm()); err != nil {
+		if errors.Is(err, errPostCloseUnverified) {
+			preserve = true
+			return fmt.Errorf("%w: %v", ErrAmbiguousPublication, err)
+		}
 		return err
 	}
 	published = true
@@ -568,8 +705,14 @@ func stageInputAtomic(ctx context.Context, source, stagedFinal string, hook func
 // filesystems without an atomic no-replace rename or hard links the commit
 // falls back to an exclusive-create copy, during which the destination may be
 // briefly visible; the job is not reported completed until that copy is fully
-// verified. On any error or cancellation only the exact own partial (and any
-// partially written exclusive-copy destination) is removed.
+// verified. Post-close verification tolerates a transient os.IsNotExist result
+// from network-filesystem metadata propagation (for example a macOS smbfs
+// mount) with a small bounded retry (see statWithRetry). If the retry is
+// exhausted the publication is reported as ErrAmbiguousPublication and the
+// written destination is deliberately preserved for later byte-for-byte
+// content-equality recovery rather than deleted. On any other error or
+// cancellation only the exact own partial (and any partially written
+// exclusive-copy destination) is removed.
 func FinalizeOutputAtomic(ctx context.Context, localCandidate, destination, jobID string) error {
 	return finalizeOutputAtomic(ctx, localCandidate, destination, jobID, nil)
 }
