@@ -1,19 +1,173 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/jakenesler/navigatorr/arrservice"
 	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/openapi"
 	"github.com/jakenesler/navigatorr/store"
+	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
+
+// diagDoctorStub satisfies transcode.Executor through the embedded interface so
+// the diagnostics tests only need to model Doctor. Any other method panics,
+// which is what we want: diagnostics must never call them.
+type diagDoctorStub struct {
+	transcode.Executor
+	doctorCalls int32
+	doctorFunc  func(ctx context.Context) error
+}
+
+func (m *diagDoctorStub) Doctor(ctx context.Context) error {
+	atomic.AddInt32(&m.doctorCalls, 1)
+	if m.doctorFunc != nil {
+		return m.doctorFunc(ctx)
+	}
+	return nil
+}
+
+func callDiagnosticsWithContext(t *testing.T, s *server.MCPServer, ctx context.Context, args map[string]any) string {
+	t.Helper()
+	tool := s.GetTool("diagnostics")
+	if tool == nil {
+		t.Fatal("diagnostics tool was not registered")
+	}
+	req := mcp.CallToolRequest{Params: mcp.CallToolParams{Name: "diagnostics", Arguments: args}}
+	res, err := tool.Handler(ctx, req)
+	if err != nil {
+		t.Fatalf("diagnostics returned a transport error: %v", err)
+	}
+	return resultText(t, res)
+}
+
+// A slow upstream probe must not starve the transcode Doctor check. Before the
+// fix, Doctor only ran after the sequential probes, so under a bounded parent
+// deadline it started against an already-expired context and reported degraded.
+func TestDiagnosticsSlowProbeDoesNotStarveDoctor(t *testing.T) {
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(3 * time.Second):
+		case <-r.Context().Done():
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer slow.Close()
+
+	cfg := &config.Config{
+		Services: map[string]config.ServiceConfig{
+			"radarr": {URL: slow.URL},
+		},
+	}
+	reg := arrservice.NewRegistry(cfg)
+
+	stub := &diagDoctorStub{
+		doctorFunc: func(ctx context.Context) error {
+			select {
+			case <-time.After(50 * time.Millisecond):
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
+	}
+
+	s := server.NewMCPServer("test", "0.0.0")
+	RegisterDiagnostics(s, cfg, reg, nil, nil, nil, nil, nil, stub)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+	defer cancel()
+
+	txt := callDiagnosticsWithContext(t, s, ctx, map[string]any{"check_connectivity": true})
+
+	var dMap map[string]any
+	if err := json.Unmarshal([]byte(txt), &dMap); err != nil {
+		t.Fatalf("decoding diagnostics output: %v", err)
+	}
+	tcInfo, ok := dMap["transcode"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing transcode section: %v", dMap)
+	}
+	if tcInfo["status"] != "ok" {
+		t.Errorf("expected transcode status ok despite slow probe, got %v (error=%v)", tcInfo["status"], tcInfo["error"])
+	}
+	if _, hasErr := tcInfo["error"]; hasErr {
+		t.Errorf("expected no transcode error, got %v", tcInfo["error"])
+	}
+	if got := atomic.LoadInt32(&stub.doctorCalls); got != 1 {
+		t.Errorf("expected Doctor called once, got %d", got)
+	}
+}
+
+// Doctor failures must still surface as degraded on both the transcode section
+// and the overall status, exactly as before the concurrency change.
+func TestDiagnosticsDoctorErrorMarksDegraded(t *testing.T) {
+	stub := &diagDoctorStub{
+		doctorFunc: func(ctx context.Context) error {
+			return errors.New("doctor boom")
+		},
+	}
+
+	s := server.NewMCPServer("test", "0.0.0")
+	RegisterDiagnostics(s, &config.Config{}, nil, nil, nil, nil, nil, nil, stub)
+
+	txt := callDiagnosticsWithContext(t, s, context.Background(), map[string]any{"check_connectivity": true})
+
+	var dMap map[string]any
+	if err := json.Unmarshal([]byte(txt), &dMap); err != nil {
+		t.Fatalf("decoding diagnostics output: %v", err)
+	}
+	if dMap["status"] != "degraded" {
+		t.Errorf("expected overall status degraded, got %v", dMap["status"])
+	}
+	tcInfo, ok := dMap["transcode"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing transcode section: %v", dMap)
+	}
+	if tcInfo["status"] != "degraded" {
+		t.Errorf("expected transcode status degraded, got %v", tcInfo["status"])
+	}
+	if got, _ := tcInfo["error"].(string); !strings.Contains(got, "doctor boom") {
+		t.Errorf("expected doctor error surfaced, got %q", got)
+	}
+}
+
+// With connectivity checks disabled, Doctor must not be invoked at all.
+func TestDiagnosticsSkipsDoctorWhenConnectivityDisabled(t *testing.T) {
+	stub := &diagDoctorStub{}
+
+	s := server.NewMCPServer("test", "0.0.0")
+	RegisterDiagnostics(s, &config.Config{}, nil, nil, nil, nil, nil, nil, stub)
+
+	txt := callDiagnosticsWithContext(t, s, context.Background(), map[string]any{"check_connectivity": false})
+
+	var dMap map[string]any
+	if err := json.Unmarshal([]byte(txt), &dMap); err != nil {
+		t.Fatalf("decoding diagnostics output: %v", err)
+	}
+	if got := atomic.LoadInt32(&stub.doctorCalls); got != 0 {
+		t.Errorf("expected Doctor not called when check_connectivity=false, got %d calls", got)
+	}
+	tcInfo, ok := dMap["transcode"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing transcode section: %v", dMap)
+	}
+	if tcInfo["status"] != "ok" {
+		t.Errorf("expected transcode status ok when connectivity skipped, got %v", tcInfo["status"])
+	}
+}
 
 func TestDiagnosticsTool(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
