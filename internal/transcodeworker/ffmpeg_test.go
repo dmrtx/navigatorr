@@ -2,6 +2,7 @@ package transcodeworker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -407,4 +408,160 @@ exit 0
 			t.Fatalf("should not classify in-flight cancellation as encoder_capability_unsupported: %v", err)
 		}
 	})
+}
+
+// TestSummarizeFFmpegError_BoundedTailOnly proves the summary only ever
+// considers the bounded tail: an error far outside the tail bound is never
+// reported even though it is present earlier in the file.
+func TestSummarizeFFmpegError_BoundedTailOnly(t *testing.T) {
+	tempDir := t.TempDir()
+	logPath := filepath.Join(tempDir, "ffmpeg.log")
+
+	head := strings.Repeat("noise line without keywords\n", 2000)
+	head += "[hevc_videotoolbox @ 0x1] Error: HEAD_SENTINEL_MUST_NOT_APPEAR\n"
+	// More than ffmpegErrorSummaryTailBytes of filler pushes the head sentinel
+	// well outside the bounded tail window.
+	filler := strings.Repeat("filler line\n", int(ffmpegErrorSummaryTailBytes)/12+200)
+	tail := "[hevc_videotoolbox @ 0x2] Error: TAIL_SENTINEL_MUST_APPEAR"
+	content := head + filler + tail
+	if err := os.WriteFile(logPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	summary := SummarizeFFmpegError(logPath, errors.New("exit status 1"))
+	if !strings.Contains(summary, "TAIL_SENTINEL_MUST_APPEAR") {
+		t.Fatalf("summary must include the tail error, got %q", summary)
+	}
+	if strings.Contains(summary, "HEAD_SENTINEL_MUST_NOT_APPEAR") {
+		t.Fatalf("summary must not read beyond the bounded tail, got %q", summary)
+	}
+}
+
+// TestSummarizeFFmpegError_LargeLogStaysBounded exercises a log much larger
+// than the summary tail and asserts the summary remains small and tail-derived.
+func TestSummarizeFFmpegError_LargeLogStaysBounded(t *testing.T) {
+	tempDir := t.TempDir()
+	logPath := filepath.Join(tempDir, "ffmpeg.log")
+
+	total := int(ffmpegErrorSummaryTailBytes) * 64
+	buf := make([]byte, total)
+	for i := range buf {
+		buf[i] = 'x'
+	}
+	tail := "\n[hevc_videotoolbox @ 0x9] Error: LARGE_LOG_TAIL_ERROR"
+	copy(buf[total-len(tail):], tail)
+	if err := os.WriteFile(logPath, buf, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	summary := SummarizeFFmpegError(logPath, errors.New("exit status 1"))
+	if !strings.Contains(summary, "LARGE_LOG_TAIL_ERROR") {
+		t.Fatalf("summary must include the tail error, got %q", summary)
+	}
+	if len(summary) > 600 {
+		t.Fatalf("summary must stay bounded, len=%d: %q", len(summary), summary)
+	}
+}
+
+func TestSummarizeFFmpegError_MissingLogFallsBack(t *testing.T) {
+	summary := SummarizeFFmpegError(filepath.Join(t.TempDir(), "absent.log"), errors.New("exit status 1"))
+	if !strings.Contains(summary, "ffmpeg execution failed") {
+		t.Fatalf("missing log must fall back to generic summary, got %q", summary)
+	}
+}
+
+// TestRunFFmpeg_AQDetectionUsesCurrentRunStderrOnly ensures spatial AQ
+// detection never scrapes the log file. The warning here is written to stdout
+// (which lands in ffmpeg.log) and never to stderr, so a log-reading detector
+// would false-positive; stderr-only detection must succeed.
+func TestRunFFmpeg_AQDetectionUsesCurrentRunStderrOnly(t *testing.T) {
+	tempDir := t.TempDir()
+	sourcePath := filepath.Join(tempDir, "source.mkv")
+	candPath := filepath.Join(tempDir, "cand.mkv")
+	progressPath := filepath.Join(tempDir, "progress.txt")
+	logPath := filepath.Join(tempDir, "ffmpeg.log")
+
+	_ = os.WriteFile(sourcePath, []byte("fake source media"), 0644)
+
+	mockScript := createMockFFmpegScript(t, tempDir, "ffmpeg_aq_stdout.sh", `
+echo "[hevc_videotoolbox @ 0x7fa281008000] This device does not support the spatialaq option. Value ignored."
+exit 0
+`)
+
+	plan := &transcode.Plan{
+		VideoCodec:   "hevc_videotoolbox",
+		Quality:      65,
+		VideoProfile: "main",
+		PixelFormat:  "yuv420p",
+		SpatialAQ:    boolPtr(true),
+	}
+	execPlan := &ExecutionPlan{Plan: plan}
+	job := &JobRecord{
+		ID:        "job-aq-stdout",
+		Source:    sourcePath,
+		Candidate: candPath,
+		Plan:      plan,
+	}
+
+	if err := RunFFmpeg(context.Background(), mockScript, execPlan, job, progressPath, logPath); err != nil {
+		t.Fatalf("AQ detection must use current-run stderr only, got: %v", err)
+	}
+
+	data, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatalf("reading log: %v", readErr)
+	}
+	if !strings.Contains(string(data), "spatialaq") {
+		t.Fatalf("test setup: warning should be present in the log via stdout, got %q", string(data))
+	}
+}
+
+// TestRunFFmpeg_LogTruncatedPerRun locks in per-run truncate semantics: a
+// previous run's bytes never persist into the current run's log.
+func TestRunFFmpeg_LogTruncatedPerRun(t *testing.T) {
+	tempDir := t.TempDir()
+	sourcePath := filepath.Join(tempDir, "source.mkv")
+	candPath := filepath.Join(tempDir, "cand.mkv")
+	progressPath := filepath.Join(tempDir, "progress.txt")
+	logPath := filepath.Join(tempDir, "ffmpeg.log")
+
+	_ = os.WriteFile(sourcePath, []byte("fake source media"), 0644)
+	if err := os.WriteFile(logPath, []byte("HISTORICAL_STALE_ERROR from a previous run\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mockScript := createMockFFmpegScript(t, tempDir, "ffmpeg_current_run.sh", `
+echo "CURRENT_RUN_OUTPUT" >&2
+exit 0
+`)
+
+	plan := &transcode.Plan{
+		VideoCodec:   "hevc_videotoolbox",
+		Quality:      65,
+		VideoProfile: "main",
+		PixelFormat:  "yuv420p",
+		SpatialAQ:    boolPtr(true),
+	}
+	execPlan := &ExecutionPlan{Plan: plan}
+	job := &JobRecord{
+		ID:        "job-truncate",
+		Source:    sourcePath,
+		Candidate: candPath,
+		Plan:      plan,
+	}
+
+	if err := RunFFmpeg(context.Background(), mockScript, execPlan, job, progressPath, logPath); err != nil {
+		t.Fatalf("RunFFmpeg: %v", err)
+	}
+
+	data, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatalf("reading log: %v", readErr)
+	}
+	if !strings.Contains(string(data), "CURRENT_RUN_OUTPUT") {
+		t.Fatalf("current run output missing from log: %q", string(data))
+	}
+	if strings.Contains(string(data), "HISTORICAL_STALE_ERROR") {
+		t.Fatalf("per-run truncate must drop prior content, got: %q", string(data))
+	}
 }
