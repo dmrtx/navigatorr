@@ -537,13 +537,16 @@ func TestWorker_RecycledPIDSafety(t *testing.T) {
 		t.Errorf("expected failed status for recycled PID, got %s", st.Status)
 	}
 
-	// 3. Cancel must NOT kill our own process! If it did, the test would crash right here.
+	// 3. Cancel must NOT kill our own process! If it did, the test would crash
+	// right here. Status already marked the recycled-PID job failed, and
+	// terminal completed/failed states are immutable: Cancel must return the
+	// existing failed state unchanged rather than converting it to cancelled.
 	cancelResp, err := worker.Cancel(ctx, "job-recycled")
 	if err != nil {
 		t.Fatalf("cancel call failed: %v", err)
 	}
-	if cancelResp.Status != "cancelled" {
-		t.Errorf("expected cancelled response, got %s", cancelResp.Status)
+	if cancelResp.Status != "failed" {
+		t.Errorf("expected failed response (immutable terminal state), got %s", cancelResp.Status)
 	}
 }
 
