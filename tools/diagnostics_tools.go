@@ -47,6 +47,23 @@ func registerDiagnosticsTools(s *server.MCPServer, d DiagnosticsDeps) {
 
 			overallStatus := "ok"
 
+			// Start the transcode Doctor probe before the sequential upstream
+			// service and download-client checks. Those checks can consume the
+			// whole wall-clock budget under a caller-imposed deadline, leaving
+			// Doctor to start against an already-expired context. Running it
+			// concurrently, but with the same caller context, keeps it bounded
+			// by (and cancellable with) the caller while granting it the full
+			// budget. The buffered channel decouples completion timing from the
+			// transcode section, so the sender never blocks or leaks if the
+			// result is never read.
+			var doctorDone chan error
+			if checkConn && d.Transcode != nil {
+				doctorDone = make(chan error, 1)
+				go func() {
+					doctorDone <- d.Transcode.Doctor(ctx)
+				}()
+			}
+
 			// 1. Effective configuration (redacted)
 			effConfig := map[string]any{
 				"config_file_loaded":   "",
@@ -221,8 +238,8 @@ func registerDiagnosticsTools(s *server.MCPServer, d DiagnosticsDeps) {
 					"executor":   "http",
 					"status":     "ok",
 				}
-				if checkConn {
-					if err := d.Transcode.Doctor(ctx); err != nil {
+				if checkConn && doctorDone != nil {
+					if err := <-doctorDone; err != nil {
 						tcInfo["status"] = "degraded"
 						tcInfo["error"] = err.Error()
 						overallStatus = "degraded"
