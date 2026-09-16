@@ -949,3 +949,102 @@ func TestPR6B2_LegacyBlankOperationalFieldsLocalCompatible(t *testing.T) {
 		t.Fatalf("legacy operational helpers must fall back to semantic paths: %+v", got)
 	}
 }
+
+// TestPR6B2_FinalizeFallsBackToExclusiveCopyWhenHardLinksUnsupported drives the
+// full post-encode finalization on a simulated macOS SMB/smbfs destination
+// where neither an exclusive rename nor hard links work, and proves the job
+// still reaches a completed/finalization-completed terminal state.
+func TestPR6B2_FinalizeFallsBackToExclusiveCopyWhenHardLinksUnsupported(t *testing.T) {
+	tempDir := t.TempDir()
+	extRoot := filepath.Join(tempDir, "external")
+	cfg := pr6b2Config(tempDir, func(c *WorkerConfig) {
+		c.ExternalRoots = []string{extRoot}
+	})
+	w := NewWorker(cfg)
+	newStubSpawn().install(w)
+	rec := &pr6b2Recorder{createOut: true}
+	rec.install(w)
+
+	const id = "job-6b2-smb-fallback"
+	destination := filepath.Join(extRoot, "out.mkv")
+	localCandidate := filepath.Join(cfg.StateDir, "_work", id, "candidate.mkv")
+	pr6b2SeedPostEncode(t, cfg, id, localCandidate, destination)
+
+	w.SetFinalizeOutput(func(ctx context.Context, local, dest, jobID string) error {
+		return finalizeOutputAtomicWith(ctx, local, dest, jobID, nil, smbCommitFallback())
+	})
+
+	if err := pr6b2Run(t, w, id); err != nil {
+		t.Fatalf("InternalRun: %v", err)
+	}
+	if rec.encodeCalls != 0 {
+		t.Fatalf("resume must not encode, got %d", rec.encodeCalls)
+	}
+	if b, err := os.ReadFile(destination); err != nil || string(b) != "encoded-media" {
+		t.Fatalf("destination = %q err=%v, want finalized output", b, err)
+	}
+	if exists, _ := pathExists(PartialPathFor(destination, id)); exists {
+		t.Fatal("partial must be consumed by the exclusive-copy finalization")
+	}
+	got := pr6b1LoadJob(t, cfg.StateDir, id)
+	if got.Status != "completed" || got.FinalizationState != string(FinalizationStateCompleted) {
+		t.Fatalf("job = %+v, want completed/finalization completed", got)
+	}
+}
+
+// TestPR6B2_ExclusiveCopyFinalizationFailureResumesToCompleted proves that a
+// failed exclusive-copy publish leaves the job resumable with the storage
+// classification, exposes no destination, and succeeds on retry.
+func TestPR6B2_ExclusiveCopyFinalizationFailureResumesToCompleted(t *testing.T) {
+	tempDir := t.TempDir()
+	extRoot := filepath.Join(tempDir, "external")
+	cfg := pr6b2Config(tempDir, func(c *WorkerConfig) {
+		c.ExternalRoots = []string{extRoot}
+	})
+	w := NewWorker(cfg)
+	newStubSpawn().install(w)
+	rec := &pr6b2Recorder{createOut: true}
+	rec.install(w)
+
+	const id = "job-6b2-smb-retry"
+	destination := filepath.Join(extRoot, "out.mkv")
+	localCandidate := filepath.Join(cfg.StateDir, "_work", id, "candidate.mkv")
+	pr6b2SeedPostEncode(t, cfg, id, localCandidate, destination)
+
+	attempts := 0
+	w.SetFinalizeOutput(func(ctx context.Context, local, dest, jobID string) error {
+		attempts++
+		if attempts == 1 {
+			return fmt.Errorf("%w: simulated smb publish failure", ErrStorageIO)
+		}
+		return finalizeOutputAtomicWith(ctx, local, dest, jobID, nil, smbCommitFallback())
+	})
+
+	if err := pr6b2Run(t, w, id); err == nil {
+		t.Fatal("first finalization failure must surface an error")
+	}
+	failed := pr6b1LoadJob(t, cfg.StateDir, id)
+	if failed.Status != "running" || failed.PID != 0 || !failed.EncodeComplete {
+		t.Fatalf("failed finalization must stay nonterminal/resumable: %+v", failed)
+	}
+	if failed.FailureClassification != FailureStorageFinalization {
+		t.Fatalf("classification = %q, want %q", failed.FailureClassification, FailureStorageFinalization)
+	}
+	if _, err := os.Stat(destination); !os.IsNotExist(err) {
+		t.Fatal("destination must not exist after a failed exclusive-copy publish")
+	}
+
+	if err := pr6b2Run(t, w, id); err != nil {
+		t.Fatalf("second resume must succeed: %v", err)
+	}
+	if b, err := os.ReadFile(destination); err != nil || string(b) != "encoded-media" {
+		t.Fatalf("destination = %q err=%v, want finalized output", b, err)
+	}
+	got := pr6b1LoadJob(t, cfg.StateDir, id)
+	if got.Status != "completed" || got.FinalizationState != string(FinalizationStateCompleted) {
+		t.Fatalf("second resume job = %+v, want completed", got)
+	}
+	if rec.encodeCalls != 0 {
+		t.Fatalf("finalization resume must never encode, got %d", rec.encodeCalls)
+	}
+}
