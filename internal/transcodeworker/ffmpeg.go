@@ -61,15 +61,18 @@ func ProbeDuration(ctx context.Context, ffprobePath, filePath string) (float64, 
 	return dur, nil
 }
 
-// SummarizeFFmpegError extracts a bounded, sanitized error summary from the tail of ffmpeg.log.
+// ffmpegErrorSummaryTailBytes bounds how much of ffmpeg.log SummarizeFFmpegError
+// will ever hold in memory. Only the tail is ever needed, so an arbitrarily
+// large log can never be slurped whole.
+const ffmpegErrorSummaryTailBytes int64 = 8192
+
+// SummarizeFFmpegError extracts a bounded, sanitized error summary from the tail
+// of ffmpeg.log. The read is a bounded, no-follow tail (readBoundedTail), so a
+// huge log is never loaded into memory and a symlinked log is never followed.
 func SummarizeFFmpegError(logPath string, runErr error) string {
-	data, err := os.ReadFile(logPath)
+	data, _, _, err := readBoundedTail(logPath, ffmpegErrorSummaryTailBytes)
 	if err != nil || len(data) == 0 {
 		return fmt.Sprintf("ffmpeg execution failed: %v", runErr)
-	}
-
-	if len(data) > 8192 {
-		data = data[len(data)-8192:]
 	}
 
 	lines := strings.Split(string(data), "\n")
@@ -187,6 +190,13 @@ func RunFFmpegPaths(ctx context.Context, ffmpegPath string, execPlan *ExecutionP
 		return fmt.Errorf("building ffmpeg arguments: %w", err)
 	}
 
+	// Per-run truncate, deliberately not O_APPEND. Phase 6B2 invokes ffmpeg at
+	// most once per job: InternalRun routes any EncodeComplete or post-encode
+	// resume record straight to finalization, and no retry/requeue path resets
+	// EncodeComplete or returns a terminal job to queued/running. Append would
+	// therefore add no cross-run continuity; it would only let stale bytes leak
+	// into the bounded error summary and AQ detection. Truncating keeps
+	// ffmpeg.log strictly current-run.
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		return fmt.Errorf("creating ffmpeg log file %s: %w", logPath, err)
@@ -213,13 +223,10 @@ func RunFFmpegPaths(ctx context.Context, ffmpegPath string, execPlan *ExecutionP
 	}
 
 	if execPlan.Plan.SpatialAQ != nil {
-		stderrOutput := stderrBuf.String()
-		if stderrOutput == "" {
-			if data, err := os.ReadFile(logPath); err == nil {
-				stderrOutput = string(data)
-			}
-		}
-		if matched, warning := DetectSpatialAQWarning(stderrOutput); matched {
+		// Current-run stderr only. The log file also carries stdout and, if the
+		// path were ever reused, could carry non-current bytes, so detection
+		// never scrapes it: VideoToolbox only emits this warning on stderr.
+		if matched, warning := DetectSpatialAQWarning(stderrBuf.String()); matched {
 			return fmt.Errorf("encoder_capability_unsupported: VideoToolbox spatial_aq unsupported by device: %s", warning)
 		}
 	}
