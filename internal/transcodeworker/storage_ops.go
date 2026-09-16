@@ -346,8 +346,12 @@ func syncDir(dir string) {
 // the target filesystem (for example some SMB/NAS mounts) rejected it.
 var errNoReplaceUnsupported = errors.New("atomic no-replace rename unsupported")
 
-// commitNoReplace atomically publishes src at dst without ever replacing an
-// existing dst.
+// commitFunc is a no-clobber publication primitive. It publishes the fully
+// written and verified src at dst, or fails without replacing an existing dst.
+// The source name is consumed on success.
+type commitFunc func(ctx context.Context, src, dst string) error
+
+// commitNoReplace publishes src at dst without ever replacing an existing dst.
 //
 // On Darwin it uses renamex_np(RENAME_EXCL), which performs the publication as
 // a single rename and fails with EEXIST when dst exists; this works through
@@ -357,30 +361,108 @@ var errNoReplaceUnsupported = errors.New("atomic no-replace rename unsupported")
 // unsupported by some SMB/FAT shares. Other platforms use the hard-link
 // fallback directly.
 //
-// src must be a fully written, synced, size-verified file on the same
-// filesystem as dst so the destination name appears with complete contents in
-// a single operation. Unlike os.Rename, this can never clobber a concurrently
-// created dst: an existing destination is reported as ErrDestinationExists and
-// its bytes are preserved. If neither primitive is supported the commit fails
-// closed with ErrStorageIO, and it never falls back to a clobbering rename.
-func commitNoReplace(src, dst string) error {
-	err := renameNoReplace(src, dst)
+// If hard links are also unavailable (for example a macOS SMB/smbfs mount),
+// the commit falls back to an exclusive-create copy (copyNoReplace). That
+// fallback is still no-clobber because the destination is created with
+// O_CREATE|O_EXCL, but unlike a rename or hard link it is not atomic, so the
+// destination may be briefly visible while it is being written. Callers must
+// therefore treat the publish as complete only when this returns nil; on any
+// failure the partially written destination is removed and the source is
+// preserved.
+//
+// src must be a fully written, synced, size-verified regular file. Unlike
+// os.Rename, this never clobbers a concurrently created dst: an existing
+// destination is reported as ErrDestinationExists and its bytes are preserved.
+// It never falls back to a clobbering rename.
+func commitNoReplace(ctx context.Context, src, dst string) error {
+	return commitNoReplaceWith(ctx, src, dst, renameNoReplace, linkNoReplace)
+}
+
+// commitNoReplaceWith is commitNoReplace with injectable rename/link primitives
+// so tests can exercise each publication path, including filesystems without
+// hard-link support, without depending on the host filesystem.
+func commitNoReplaceWith(ctx context.Context, src, dst string, rename, link func(src, dst string) error) error {
+	err := rename(src, dst)
 	switch {
 	case err == nil:
 		return nil
 	case errors.Is(err, fs.ErrExist):
 		return fmt.Errorf("%w: %s", ErrDestinationExists, dst)
 	case errors.Is(err, errNoReplaceUnsupported):
-		if lerr := linkNoReplace(src, dst); lerr != nil {
+		if lerr := link(src, dst); lerr != nil {
 			if errors.Is(lerr, fs.ErrExist) {
 				return fmt.Errorf("%w: %s", ErrDestinationExists, dst)
 			}
-			return fmt.Errorf("%w: publishing %s to %s: %v", ErrStorageIO, src, dst, lerr)
+			// Neither an exclusive rename nor hard links are usable on this
+			// filesystem. Fall back to an exclusive-create copy, which still
+			// cannot clobber a concurrent destination; its own failure is
+			// surfaced rather than degrading to a clobbering rename.
+			if cerr := copyNoReplace(ctx, src, dst); cerr != nil {
+				if errors.Is(cerr, fs.ErrExist) {
+					return fmt.Errorf("%w: %s", ErrDestinationExists, dst)
+				}
+				return fmt.Errorf("%w: publishing %s to %s: %v", ErrStorageIO, src, dst, cerr)
+			}
+			return nil
 		}
 		return nil
 	default:
 		return fmt.Errorf("%w: publishing %s to %s: %v", ErrStorageIO, src, dst, err)
 	}
+}
+
+// copyNoReplace publishes src at dst with an exclusive create followed by a
+// full byte copy. It is the last-resort publication path for filesystems that
+// support neither an atomic no-replace rename nor hard links (for example a
+// macOS SMB/smbfs mount).
+//
+// No-clobber is still guaranteed by O_CREATE|O_EXCL: a concurrently created
+// destination is never overwritten and is reported as ErrDestinationExists.
+// On any failure the partially written destination is removed so the
+// destination is left absent and the source is preserved for a safe retry. On
+// success the source is consumed, mirroring the hard-link publication.
+func copyNoReplace(ctx context.Context, src, dst string) error {
+	return copyNoReplaceWith(ctx, src, dst, nil)
+}
+
+// copyNoReplaceWith is copyNoReplace with an optional test-only hook invoked
+// after the exclusive destination is created but before any bytes are copied.
+// It lets tests inject a mid-copy failure and observe cleanup.
+func copyNoReplaceWith(ctx context.Context, src, dst string, hook func(dstPath string) error) (err error) {
+	info, err := regularFileInfo(src)
+	if err != nil {
+		return err
+	}
+
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
+	if err != nil {
+		if os.IsExist(err) {
+			return fs.ErrExist
+		}
+		return fmt.Errorf("%w: creating %s: %v", ErrStorageIO, dst, err)
+	}
+	published := false
+	defer func() {
+		if !published {
+			_ = out.Close()
+			_ = os.Remove(dst)
+		}
+	}()
+
+	if hook != nil {
+		if herr := hook(dst); herr != nil {
+			return herr
+		}
+	}
+
+	if err := copyRegularFileTo(ctx, src, out, info.Size(), info.Mode().Perm()); err != nil {
+		return err
+	}
+	published = true
+	// dst is fully written and verified; dropping src is cleanup. A failure
+	// here leaves a redundant source name but never corrupts dst.
+	_ = os.Remove(src)
+	return nil
 }
 
 // linkNoReplace creates dst as a hard link to src (link(2) on Unix,
@@ -406,9 +488,9 @@ func linkNoReplace(src, dst string) error {
 // It requires a regular source, requires stagedFinal not to pre-exist, copies
 // through a unique temp file in stagedFinal's directory, preserves the source
 // permission bits, verifies the copied byte count, then commits the temp into
-// place with a no-clobber link. On any error or cancellation only its own temp
-// file is removed and stagedFinal is left absent. No content hashes are
-// computed.
+// place with a no-clobber publication (see commitNoReplace). On any error or
+// cancellation only its own temp file is removed and stagedFinal is left
+// absent. No content hashes are computed.
 func StageInputAtomic(ctx context.Context, source, stagedFinal string) error {
 	return stageInputAtomic(ctx, source, stagedFinal, nil)
 }
@@ -468,7 +550,7 @@ func stageInputAtomic(ctx context.Context, source, stagedFinal string, hook func
 	if cerr := ctx.Err(); cerr != nil {
 		return cerr
 	}
-	if err := commitNoReplace(tmpPath, stagedFinal); err != nil {
+	if err := commitNoReplace(ctx, tmpPath, stagedFinal); err != nil {
 		return err
 	}
 	committed = true
@@ -481,10 +563,13 @@ func stageInputAtomic(ctx context.Context, source, stagedFinal string, hook func
 // The destination must not pre-exist (fail closed). The copy always goes
 // through the exact partial path "<destination>.partial.<jobID>"; a stale
 // partial for this job is replaced, but unrelated partials are never touched.
-// The no-clobber commit happens only after the byte count is verified, so
-// destination is absent until commit, and a concurrently created destination
-// is never overwritten. On any error or cancellation only the exact own
-// partial is removed.
+// The no-clobber commit (see commitNoReplace) happens only after the byte count
+// is verified, so a concurrently created destination is never overwritten. On
+// filesystems without an atomic no-replace rename or hard links the commit
+// falls back to an exclusive-create copy, during which the destination may be
+// briefly visible; the job is not reported completed until that copy is fully
+// verified. On any error or cancellation only the exact own partial (and any
+// partially written exclusive-copy destination) is removed.
 func FinalizeOutputAtomic(ctx context.Context, localCandidate, destination, jobID string) error {
 	return finalizeOutputAtomic(ctx, localCandidate, destination, jobID, nil)
 }
@@ -493,6 +578,13 @@ func FinalizeOutputAtomic(ctx context.Context, localCandidate, destination, jobI
 // invoked after the partial is written/synced/verified but before the commit.
 // It lets tests observe that destination is still absent and inject a race.
 func finalizeOutputAtomic(ctx context.Context, localCandidate, destination, jobID string, hook func(partialPath string) error) (err error) {
+	return finalizeOutputAtomicWith(ctx, localCandidate, destination, jobID, hook, commitNoReplace)
+}
+
+// finalizeOutputAtomicWith is finalizeOutputAtomic with an injectable
+// publication primitive, so tests can exercise filesystems where the default
+// no-clobber commit has to fall back to the exclusive-copy path.
+func finalizeOutputAtomicWith(ctx context.Context, localCandidate, destination, jobID string, hook func(partialPath string) error, commit commitFunc) (err error) {
 	if strings.TrimSpace(localCandidate) == "" {
 		return fmt.Errorf("%w: empty local candidate path", ErrSourceInvalid)
 	}
@@ -560,7 +652,7 @@ func finalizeOutputAtomic(ctx context.Context, localCandidate, destination, jobI
 
 	// No-clobber commit: fails with ErrDestinationExists if a destination
 	// appeared after the pre-check, preserving its bytes.
-	if err := commitNoReplace(partial, destination); err != nil {
+	if err := commit(ctx, partial, destination); err != nil {
 		return err
 	}
 	committed = true
