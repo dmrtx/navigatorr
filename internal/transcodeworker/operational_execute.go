@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -29,6 +30,16 @@ import (
 // "source_corrupt" and "runner_killed" so a resumable finalization problem is
 // never mistaken for a corrupt source or a killed encoder.
 const FailureStorageFinalization = "storage_finalization_failed"
+
+// FailureStoragePublicationAmbiguous classifies a finalization failure where an
+// exclusive-copy publication wrote and closed the destination but could not
+// verify its post-close visibility (for example transient ENOENT on a macOS
+// smbfs mount). The destination is preserved and the job may complete on a
+// later resume only after full byte-for-byte content equality with the local
+// candidate is established. It is distinct from FailureStorageFinalization so an
+// ordinary (including destination-exists) failure is never silently upgraded to
+// a successful publication.
+const FailureStoragePublicationAmbiguous = "storage_publication_ambiguous"
 
 // resolvedOperational is the executable interpretation of a job's durable
 // operational metadata. It is derived only from the persisted record.
@@ -258,6 +269,78 @@ func (w *Worker) finalizeOperational(ctx context.Context, jobDir, jobFile string
 		return w.recordFinalizationFailure(jobDir, jobFile, job, err)
 	}
 
+	// Idempotent recovery of a prior ambiguous publication. It requires
+	// FinalizationState == finalizing and EncodeComplete, plus durable proof that
+	// the destination was created by THIS job's own O_EXCL publication:
+	//
+	//   - FailureStoragePublicationAmbiguous (new worker): the exclusive-copy
+	//     path recorded the typed marker, so the destination is known to
+	//     originate from this job's O_EXCL create; or
+	//   - FailureStorageFinalization (old worker) whose job.Error is byte-for-byte
+	//     the exact old ambiguous-publication error naming THIS job's partial and
+	//     THIS destination, and whose exact own partial is still present and
+	//     byte-for-byte identical to the local candidate (see
+	//     proveLegacyAmbiguousPublication). The live E04 job has this shape.
+	//
+	// Without such proof the destination may be an unrelated file: completion is
+	// still allowed only on full byte-for-byte equality, and a differing
+	// destination is left untouched for the strict no-clobber finalizer to
+	// report as ErrDestinationExists. Destructive recovery (removing a proven
+	// own incomplete destination and republishing from the intact candidate) is
+	// permitted only with proof.
+	if r.finalization == FinalizationStateFinalizing && job.EncodeComplete {
+		eligible := job.FailureClassification == FailureStoragePublicationAmbiguous ||
+			job.FailureClassification == FailureStorageFinalization
+		if eligible {
+			proven := job.FailureClassification == FailureStoragePublicationAmbiguous
+			if !proven {
+				p, perr := w.proveLegacyAmbiguousPublication(ctx, job, r)
+				if perr != nil {
+					return w.recordFinalizationFailure(jobDir, jobFile, job, perr)
+				}
+				proven = p
+			}
+
+			present, perr := pathExists(r.destination)
+			if perr != nil {
+				return w.recordFinalizationFailure(jobDir, jobFile, job, perr)
+			}
+			if present {
+				equal, cerr := filesHaveEqualContent(ctx, r.localCandidate, r.destination)
+				if cerr != nil {
+					return w.recordFinalizationFailure(jobDir, jobFile, job, cerr)
+				}
+				if equal {
+					w.removeOwnPartialIfSafe(job, r)
+					cancelled, serr := w.persistOperationalProgress(jobDir, jobFile, job, func(l *JobRecord) {
+						l.EncodeComplete = true
+						l.FinalizationState = string(FinalizationStateCompleted)
+					})
+					if serr != nil {
+						return serr
+					}
+					if cancelled {
+						return nil
+					}
+					return w.completeOperationalJob(jobDir, jobFile, job, r)
+				}
+				if proven {
+					// The destination is proven to be this job's own incomplete
+					// publication: remove only it (collision-guarded) and fall
+					// through to republish from the intact candidate.
+					if _, rerr := w.removeAmbiguousDestinationIfSafe(job, r); rerr != nil {
+						return w.recordFinalizationFailure(jobDir, jobFile, job, rerr)
+					}
+				}
+			}
+			// Destination absent (retry publication), removed (proven), or
+			// differing without proof (conflict): drop any stale own partial and
+			// fall through. The strict finalizer republishes or reports
+			// ErrDestinationExists. Unrelated partials are never touched.
+			w.removeOwnPartialIfSafe(job, r)
+		}
+	}
+
 	cancelled, err := w.persistOperationalProgress(jobDir, jobFile, job, func(l *JobRecord) {
 		l.EncodeComplete = true
 		l.FinalizationState = string(FinalizationStateFinalizing)
@@ -285,6 +368,12 @@ func (w *Worker) finalizeOperational(ctx context.Context, jobDir, jobFile string
 			// without recording a spurious finalization failure.
 			return ctx.Err()
 		}
+		// The finalizer removes its own partial on ordinary failures, but an
+		// early destination-exists precheck returns before its cleanup is set
+		// up, so a stale own partial could otherwise survive and later be
+		// mistaken for evidence of a publication attempt. Drop only this job's
+		// exact partial (guarded); unrelated partials are never touched.
+		w.removeOwnPartialIfSafe(job, r)
 		return w.recordFinalizationFailure(jobDir, jobFile, job, ferr)
 	}
 
@@ -317,8 +406,14 @@ func (w *Worker) completeOperationalJob(jobDir, jobFile string, job *JobRecord, 
 // recordFinalizationFailure leaves the job nonterminal and resumable after a
 // finalization/storage failure, preserving the local candidate and staged
 // artifacts. The runner identity is cleared so a startup resume can spawn
-// finalization again.
+// finalization again. An ambiguous exclusive-copy publication is recorded with
+// its own classification so recovery can later require content equality; every
+// other cause keeps the generic classification.
 func (w *Worker) recordFinalizationFailure(jobDir, jobFile string, job *JobRecord, cause error) error {
+	classification := FailureStorageFinalization
+	if errors.Is(cause, ErrAmbiguousPublication) {
+		classification = FailureStoragePublicationAmbiguous
+	}
 	cancelled, err := w.persistOperationalProgress(jobDir, jobFile, job, func(l *JobRecord) {
 		l.Status = "running"
 		l.PID = 0
@@ -327,7 +422,7 @@ func (w *Worker) recordFinalizationFailure(jobDir, jobFile string, job *JobRecor
 		if !IsPostEncodeFinalizationPending(l) {
 			l.FinalizationState = string(FinalizationStatePending)
 		}
-		l.FailureClassification = FailureStorageFinalization
+		l.FailureClassification = classification
 		l.Error = fmt.Sprintf("finalization failed: %v", cause)
 		l.FinishedAt = time.Time{}
 		l.ExitCode = 0
@@ -411,6 +506,133 @@ func (w *Worker) cleanupOperationalArtifacts(job *JobRecord, r *resolvedOperatio
 	if c := strings.TrimSpace(r.localCandidate); c != "" && c != job.Source && c != job.Candidate && c != r.destination {
 		_ = os.Remove(c)
 	}
+}
+
+// proveLegacyAmbiguousPublication reports whether job.Error is byte-for-byte the
+// exact error an old worker persisted for THIS job's own partial and THIS
+// destination, and whether this job's exact own partial is still present as a
+// regular file byte-for-byte identical to the local candidate. Only that
+// combination proves the existing destination was created by this job's prior
+// O_EXCL publication and may therefore be removed for a safe republish.
+//
+// The match is exact (no substring heuristics): a generic storage error, a
+// different partial, or a different destination never qualifies.
+func (w *Worker) proveLegacyAmbiguousPublication(ctx context.Context, job *JobRecord, r *resolvedOperational) (bool, error) {
+	if job == nil || r == nil {
+		return false, nil
+	}
+	if job.FailureClassification != FailureStorageFinalization || !job.EncodeComplete {
+		return false, nil
+	}
+	partial := strings.TrimSpace(r.partial)
+	destination := strings.TrimSpace(r.destination)
+	if partial == "" || destination == "" {
+		return false, nil
+	}
+	if job.Error != legacyAmbiguousPublicationError(partial, destination) {
+		return false, nil
+	}
+
+	info, err := os.Lstat(partial)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("%w: statting %s: %v", ErrStorageIO, partial, err)
+	}
+	if !info.Mode().IsRegular() {
+		return false, nil
+	}
+	equal, err := filesHaveEqualContent(ctx, r.localCandidate, partial)
+	if err != nil {
+		return false, err
+	}
+	return equal, nil
+}
+
+// legacyAmbiguousPublicationError reconstructs the exact error an old worker
+// persisted when its exclusive-copy publication wrote and closed the
+// destination but the post-close stat could not observe it. The old worker
+// wrapped the failure as:
+//
+//	finalization failed: <storage io>: publishing <partial> to <destination>:
+//	    <storage io>: statting <destination>: stat <destination>: <enoent>
+//
+// Matching this exact string (rather than a substring or a generic marker) is
+// what proves the destination came from this job's own O_EXCL create.
+func legacyAmbiguousPublicationError(partial, destination string) string {
+	return fmt.Sprintf(
+		"finalization failed: %s: publishing %s to %s: %s: statting %s: stat %s: %s",
+		ErrStorageIO.Error(), partial, destination,
+		ErrStorageIO.Error(), destination, destination,
+		syscall.ENOENT.Error(),
+	)
+}
+
+// removeAmbiguousDestinationIfSafe removes this job's proven own ambiguous
+// destination so it can be republished. It refuses to touch a path that
+// collides with the semantic source, the local candidate, or this job's exact
+// partial, and refuses any non-regular destination. It never removes unrelated
+// files.
+//
+// Note: for a finalized job the semantic Candidate normally equals the intended
+// destination, so Candidate is only treated as a collision when it names a
+// genuinely different path; otherwise no destination could ever be removed.
+func (w *Worker) removeAmbiguousDestinationIfSafe(job *JobRecord, r *resolvedOperational) (bool, error) {
+	if job == nil || r == nil {
+		return false, nil
+	}
+	dest := strings.TrimSpace(r.destination)
+	if dest == "" {
+		return false, nil
+	}
+	clean := filepath.Clean(dest)
+	protected := []string{job.Source, r.localCandidate, r.partial}
+	if c := strings.TrimSpace(job.Candidate); c != "" && filepath.Clean(c) != clean {
+		protected = append(protected, c)
+	}
+	for _, p := range protected {
+		if pp := strings.TrimSpace(p); pp != "" && filepath.Clean(pp) == clean {
+			return false, fmt.Errorf("%w: refusing to remove destination %s: collides with %s", ErrStorageIO, dest, pp)
+		}
+	}
+	info, err := os.Lstat(dest)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("%w: statting %s: %v", ErrStorageIO, dest, err)
+	}
+	if !info.Mode().IsRegular() {
+		return false, fmt.Errorf("%w: refusing to remove non-regular destination %s", ErrStorageIO, dest)
+	}
+	if err := os.Remove(dest); err != nil {
+		return false, fmt.Errorf("%w: removing ambiguous destination %s: %v", ErrStorageIO, dest, err)
+	}
+	return true, nil
+}
+
+// removeOwnPartialIfSafe removes this job's exact finalization partial, if any,
+// with the same path guards as cleanupOperationalArtifacts: it refuses to touch
+// a path that collides with the semantic source, the semantic candidate, or the
+// intended destination, so a partial can never delete original media or a
+// finalized output. Unrelated partials are never targeted (the path is always
+// PartialPathFor(destination, job.ID)). Removal is best effort.
+func (w *Worker) removeOwnPartialIfSafe(job *JobRecord, r *resolvedOperational) {
+	if job == nil || r == nil {
+		return
+	}
+	p := strings.TrimSpace(r.partial)
+	if p == "" {
+		return
+	}
+	clean := filepath.Clean(p)
+	for _, protected := range []string{job.Source, job.Candidate, r.destination} {
+		if pp := strings.TrimSpace(protected); pp != "" && filepath.Clean(pp) == clean {
+			return
+		}
+	}
+	_ = os.Remove(p)
 }
 
 // ensureExternalHealthy drives the external storage root containing path to

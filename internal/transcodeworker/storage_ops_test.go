@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
+	"time"
 )
 
 func readDirNames(t *testing.T, dir string) []string {
@@ -902,5 +903,243 @@ func TestFinalizeOutputAtomicExclusiveCopyFallbackNoClobberRace(t *testing.T) {
 	}
 	if exists, _ := pathExists(partial); exists {
 		t.Fatal("own partial must be cleaned after failed exclusive-copy commit")
+	}
+}
+
+// verifySeam records how often the injected post-close stat/sleep seams ran.
+type verifySeam struct {
+	calls  int
+	sleeps int
+}
+
+// installVerifySeam replaces statPath/sleepPath with deterministic stubs and
+// restores the production functions on test cleanup.
+func installVerifySeam(t *testing.T, seam *verifySeam, stat func(string) (os.FileInfo, error)) {
+	t.Helper()
+	origStat, origSleep := statPath, sleepPath
+	statPath = func(p string) (os.FileInfo, error) {
+		seam.calls++
+		return stat(p)
+	}
+	sleepPath = func(time.Duration) { seam.sleeps++ }
+	t.Cleanup(func() {
+		statPath, sleepPath = origStat, origSleep
+	})
+}
+
+func transientENOENT(p string) error {
+	return &os.PathError{Op: "stat", Path: p, Err: fs.ErrNotExist}
+}
+
+// TestStatWithRetryTransientENOENTSucceeds proves a briefly-invisible freshly
+// written path (macOS smbfs metadata propagation) is observed after a bounded
+// retry instead of failing the copy.
+func TestStatWithRetryTransientENOENTSucceeds(t *testing.T) {
+	real := filepath.Join(t.TempDir(), "f")
+	mustWriteFile(t, real, []byte("x"), 0o644)
+
+	var seam verifySeam
+	installVerifySeam(t, &seam, func(p string) (os.FileInfo, error) {
+		if seam.calls <= 2 {
+			return nil, transientENOENT(p)
+		}
+		return os.Stat(p)
+	})
+
+	fi, err := statWithRetry(real)
+	if err != nil {
+		t.Fatalf("statWithRetry: %v", err)
+	}
+	if fi.Size() != 1 {
+		t.Fatalf("size = %d, want 1", fi.Size())
+	}
+	if seam.calls != 3 {
+		t.Fatalf("stat calls = %d, want 3", seam.calls)
+	}
+	if seam.sleeps != 2 {
+		t.Fatalf("retry sleeps = %d, want 2", seam.sleeps)
+	}
+}
+
+// TestStatWithRetryBoundedOnPersistentENOENT proves the retry is bounded: a
+// genuinely missing path is not retried forever.
+func TestStatWithRetryBoundedOnPersistentENOENT(t *testing.T) {
+	var seam verifySeam
+	installVerifySeam(t, &seam, func(p string) (os.FileInfo, error) {
+		return nil, transientENOENT(p)
+	})
+
+	_, err := statWithRetry("missing")
+	if !os.IsNotExist(err) {
+		t.Fatalf("error = %v, want IsNotExist", err)
+	}
+	if seam.calls != destVerifyAttempts {
+		t.Fatalf("stat calls = %d, want %d", seam.calls, destVerifyAttempts)
+	}
+	if seam.sleeps != destVerifyAttempts-1 {
+		t.Fatalf("retry sleeps = %d, want %d", seam.sleeps, destVerifyAttempts-1)
+	}
+}
+
+// TestStatWithRetryDoesNotRetryNonNotExist proves non-transient stat errors fail
+// immediately rather than being masked by the retry.
+func TestStatWithRetryDoesNotRetryNonNotExist(t *testing.T) {
+	sentinel := errors.New("permission denied")
+	var seam verifySeam
+	installVerifySeam(t, &seam, func(string) (os.FileInfo, error) {
+		return nil, sentinel
+	})
+
+	_, err := statWithRetry("whatever")
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("error = %v, want sentinel", err)
+	}
+	if seam.calls != 1 || seam.sleeps != 0 {
+		t.Fatalf("calls=%d sleeps=%d, want 1/0 (no retry)", seam.calls, seam.sleeps)
+	}
+}
+
+// TestExecCopyTransientENOENTAfterCloseSucceeds is the end-to-end regression
+// for the reported macOS smbfs race: the exclusive-copy publication copies to
+// the destination, closes it, and the immediate verification stat transiently
+// reports ENOENT. The bounded retry must observe the file and complete.
+func TestExecCopyTransientENOENTAfterCloseSucceeds(t *testing.T) {
+	base := t.TempDir()
+	candidate := filepath.Join(base, "candidate.mkv")
+	content := []byte("encoded output bytes")
+	mustWriteFile(t, candidate, content, 0o640)
+	destination := filepath.Join(base, "dest", "final.mkv")
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var seam verifySeam
+	failedOnce := false
+	installVerifySeam(t, &seam, func(p string) (os.FileInfo, error) {
+		if p == destination && !failedOnce {
+			failedOnce = true
+			return nil, transientENOENT(p)
+		}
+		return os.Stat(p)
+	})
+
+	if err := finalizeOutputAtomicWith(context.Background(), candidate, destination, "job-1", nil, smbCommitFallback()); err != nil {
+		t.Fatalf("finalizeOutputAtomicWith: %v", err)
+	}
+	got, err := os.ReadFile(destination)
+	if err != nil || !bytes.Equal(got, content) {
+		t.Fatalf("destination = %q (%v), want %q", got, err, content)
+	}
+	if seam.sleeps != 1 {
+		t.Fatalf("retry sleeps = %d, want 1", seam.sleeps)
+	}
+	if exists, _ := pathExists(PartialPathFor(destination, "job-1")); exists {
+		t.Fatal("own partial must be consumed by the exclusive-copy commit")
+	}
+}
+
+// TestExecCopyPersistentENOENTAfterCloseIsAmbiguousAndPreserved proves that when
+// the destination never becomes visible the copy does not delete the bytes it
+// wrote: it reports the typed ErrAmbiguousPublication and preserves the
+// destination for later content-equality recovery, while preserving the
+// candidate too. The retry remains bounded.
+func TestExecCopyPersistentENOENTAfterCloseIsAmbiguousAndPreserved(t *testing.T) {
+	base := t.TempDir()
+	candidate := filepath.Join(base, "candidate.mkv")
+	content := []byte("encoded output bytes")
+	mustWriteFile(t, candidate, content, 0o640)
+	destination := filepath.Join(base, "dest", "final.mkv")
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var seam verifySeam
+	installVerifySeam(t, &seam, func(p string) (os.FileInfo, error) {
+		if p == destination {
+			return nil, transientENOENT(p)
+		}
+		return os.Stat(p)
+	})
+
+	err := finalizeOutputAtomicWith(context.Background(), candidate, destination, "job-1", nil, smbCommitFallback())
+	if !errors.Is(err, ErrAmbiguousPublication) {
+		t.Fatalf("error = %v, want ErrAmbiguousPublication", err)
+	}
+	if seam.calls < destVerifyAttempts {
+		t.Fatalf("stat calls = %d, want at least %d (bounded retry ran)", seam.calls, destVerifyAttempts)
+	}
+	// The bytes were really written; the stat only lied about visibility.
+	got, rerr := os.ReadFile(destination)
+	if rerr != nil || !bytes.Equal(got, content) {
+		t.Fatalf("destination = %q (%v), want preserved %q", got, rerr, content)
+	}
+	if exists, _ := pathExists(PartialPathFor(destination, "job-1")); exists {
+		t.Fatal("own partial must be cleaned up")
+	}
+	if _, err := os.Stat(candidate); err != nil {
+		t.Fatalf("local candidate must be preserved: %v", err)
+	}
+}
+
+// TestFilesHaveEqualContent proves the recovery gate compares actual bytes, not
+// just size: same-size different content is refused.
+func TestFilesHaveEqualContent(t *testing.T) {
+	base := t.TempDir()
+	a := filepath.Join(base, "a")
+	candidate := filepath.Join(base, "candidate")
+	mustWriteFile(t, candidate, []byte("0123456789"), 0o644)
+
+	if ok, err := filesHaveEqualContent(context.Background(), candidate, a); err != nil || ok {
+		t.Fatalf("missing b: ok=%v err=%v, want false,nil", ok, err)
+	}
+
+	mustWriteFile(t, a, []byte("0123456789"), 0o644)
+	if ok, err := filesHaveEqualContent(context.Background(), candidate, a); err != nil || !ok {
+		t.Fatalf("equal content: ok=%v err=%v, want true,nil", ok, err)
+	}
+
+	// Same size, different bytes: must be refused.
+	mustWriteFile(t, a, []byte("ABCDEFGHIJ"), 0o644)
+	if ok, err := filesHaveEqualContent(context.Background(), candidate, a); err != nil || ok {
+		t.Fatalf("same-size different content: ok=%v err=%v, want false,nil", ok, err)
+	}
+
+	// Different size: refused.
+	mustWriteFile(t, a, []byte("short"), 0o644)
+	if ok, err := filesHaveEqualContent(context.Background(), candidate, a); err != nil || ok {
+		t.Fatalf("different size: ok=%v err=%v, want false,nil", ok, err)
+	}
+
+	// Non-regular: refused.
+	if err := os.Remove(a); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(a, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := filesHaveEqualContent(context.Background(), candidate, a); err != nil || ok {
+		t.Fatalf("non-regular b: ok=%v err=%v, want false,nil", ok, err)
+	}
+}
+
+// TestFilesHaveEqualContentLargeEqualAcrossChunks exercises the chunked compare
+// across a buffer boundary so equality is proven on multi-chunk files.
+func TestFilesHaveEqualContentLargeEqualAcrossChunks(t *testing.T) {
+	base := t.TempDir()
+	a := filepath.Join(base, "a")
+	b := filepath.Join(base, "b")
+	payload := make([]byte, 300*1024+7)
+	for i := range payload {
+		payload[i] = byte(i % 251)
+	}
+	mustWriteFile(t, a, payload, 0o644)
+	mustWriteFile(t, b, payload, 0o644)
+	if ok, err := filesHaveEqualContent(context.Background(), a, b); err != nil || !ok {
+		t.Fatalf("equal multi-chunk files: ok=%v err=%v, want true,nil", ok, err)
+	}
+	payload[len(payload)-1] ^= 0xFF
+	mustWriteFile(t, b, payload, 0o644)
+	if ok, err := filesHaveEqualContent(context.Background(), a, b); err != nil || ok {
+		t.Fatalf("differing final byte: ok=%v err=%v, want false,nil", ok, err)
 	}
 }
