@@ -745,3 +745,162 @@ func TestLinkNoReplaceFallback(t *testing.T) {
 		t.Fatal("source must survive a failed no-clobber publication")
 	}
 }
+
+// unsupportedRename and unsupportedLink simulate a filesystem (for example a
+// macOS SMB/smbfs mount) where neither an exclusive rename nor hard links are
+// supported, forcing the exclusive-copy publication path.
+func unsupportedRename(_, _ string) error { return errNoReplaceUnsupported }
+func unsupportedLink(_, _ string) error   { return errors.New("operation not supported") }
+
+func smbCommitFallback() commitFunc {
+	return func(ctx context.Context, src, dst string) error {
+		return commitNoReplaceWith(ctx, src, dst, unsupportedRename, unsupportedLink)
+	}
+}
+
+func TestCommitNoReplaceWithHardLinkSupported(t *testing.T) {
+	base := t.TempDir()
+	src := filepath.Join(base, "src")
+	dst := filepath.Join(base, "dst")
+	content := []byte("link published bytes")
+	mustWriteFile(t, src, content, 0o640)
+
+	if err := commitNoReplaceWith(context.Background(), src, dst, unsupportedRename, linkNoReplace); err != nil {
+		t.Fatalf("commitNoReplaceWith: %v", err)
+	}
+	if exists, _ := pathExists(src); exists {
+		t.Fatal("source must be consumed by the link publication")
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil || !bytes.Equal(got, content) {
+		t.Fatalf("published = %q (%v), want %q", got, err, content)
+	}
+}
+
+func TestCommitNoReplaceFallsBackToExclusiveCopyWhenHardLinksUnsupported(t *testing.T) {
+	base := t.TempDir()
+	src := filepath.Join(base, "src")
+	dst := filepath.Join(base, "dst")
+	content := []byte("smb published bytes")
+	mustWriteFile(t, src, content, 0o640)
+
+	if err := commitNoReplaceWith(context.Background(), src, dst, unsupportedRename, unsupportedLink); err != nil {
+		t.Fatalf("commitNoReplaceWith: %v", err)
+	}
+	if exists, _ := pathExists(src); exists {
+		t.Fatal("source must be consumed by the exclusive-copy publication")
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil || !bytes.Equal(got, content) {
+		t.Fatalf("published = %q (%v), want %q", got, err, content)
+	}
+	fi, err := os.Stat(dst)
+	if err != nil || fi.Mode().Perm() != 0o640 {
+		t.Fatalf("destination mode = %v (%v), want 640", fi.Mode().Perm(), err)
+	}
+	if names := readDirNames(t, base); len(names) != 1 || names[0] != "dst" {
+		t.Fatalf("unexpected leftovers after exclusive-copy publish: %v", names)
+	}
+}
+
+func TestCommitNoReplaceExclusiveCopyNeverClobbersExistingDestination(t *testing.T) {
+	base := t.TempDir()
+	src := filepath.Join(base, "src")
+	dst := filepath.Join(base, "dst")
+	mustWriteFile(t, src, []byte("new bytes"), 0o600)
+	sentinel := []byte("sentinel winner")
+	mustWriteFile(t, dst, sentinel, 0o600)
+
+	err := commitNoReplaceWith(context.Background(), src, dst, unsupportedRename, unsupportedLink)
+	if !IsDestinationExists(err) {
+		t.Fatalf("error = %v, want ErrDestinationExists", err)
+	}
+	got, rerr := os.ReadFile(dst)
+	if rerr != nil || !bytes.Equal(got, sentinel) {
+		t.Fatalf("existing destination clobbered: %q (%v)", got, rerr)
+	}
+	if exists, _ := pathExists(src); !exists {
+		t.Fatal("source must survive a failed no-clobber publication")
+	}
+}
+
+// TestCopyNoReplaceCleansUpFailedCopyAndAllowsRetry proves that a mid-copy
+// failure leaves no partial destination (so incomplete output is never exposed
+// as a completed file), preserves the source, and allows a clean retry.
+func TestCopyNoReplaceCleansUpFailedCopyAndAllowsRetry(t *testing.T) {
+	base := t.TempDir()
+	src := filepath.Join(base, "src")
+	dst := filepath.Join(base, "dst")
+	content := []byte("retry bytes")
+	mustWriteFile(t, src, content, 0o640)
+	sentinel := errors.New("mid-copy boom")
+
+	err := copyNoReplaceWith(context.Background(), src, dst, func(string) error { return sentinel })
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("error = %v, want sentinel", err)
+	}
+	if exists, _ := pathExists(dst); exists {
+		t.Fatal("a failed exclusive copy must not leave a partial destination")
+	}
+	if exists, _ := pathExists(src); !exists {
+		t.Fatal("source must be preserved after a failed copy")
+	}
+
+	if err := copyNoReplace(context.Background(), src, dst); err != nil {
+		t.Fatalf("retry copyNoReplace: %v", err)
+	}
+	got, rerr := os.ReadFile(dst)
+	if rerr != nil || !bytes.Equal(got, content) {
+		t.Fatalf("retried published = %q (%v), want %q", got, rerr, content)
+	}
+	if exists, _ := pathExists(src); exists {
+		t.Fatal("source must be consumed after a successful retry")
+	}
+}
+
+func TestFinalizeOutputAtomicExclusiveCopyFallbackPublishes(t *testing.T) {
+	base := t.TempDir()
+	candidate := filepath.Join(base, "candidate.mkv")
+	content := []byte("encoded output bytes")
+	mustWriteFile(t, candidate, content, 0o640)
+	destination := filepath.Join(base, "dest", "final.mkv")
+
+	if err := finalizeOutputAtomicWith(context.Background(), candidate, destination, "job-1", nil, smbCommitFallback()); err != nil {
+		t.Fatalf("finalizeOutputAtomicWith: %v", err)
+	}
+	got, err := os.ReadFile(destination)
+	if err != nil || !bytes.Equal(got, content) {
+		t.Fatalf("destination = %q (%v), want %q", got, err, content)
+	}
+	if exists, _ := pathExists(PartialPathFor(destination, "job-1")); exists {
+		t.Fatal("own partial must be consumed by the exclusive-copy commit")
+	}
+}
+
+func TestFinalizeOutputAtomicExclusiveCopyFallbackNoClobberRace(t *testing.T) {
+	base := t.TempDir()
+	candidate := filepath.Join(base, "candidate.mkv")
+	mustWriteFile(t, candidate, []byte("new bytes"), 0o644)
+	destination := filepath.Join(base, "dest", "final.mkv")
+	partial := PartialPathFor(destination, "job-1")
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := []byte("sentinel winner")
+
+	err := finalizeOutputAtomicWith(context.Background(), candidate, destination, "job-1", func(p string) error {
+		// A concurrent publisher wins the destination after our pre-check; the
+		// exclusive create in the fallback must refuse to overwrite it.
+		return os.WriteFile(destination, sentinel, 0o600)
+	}, smbCommitFallback())
+	if !IsDestinationExists(err) {
+		t.Fatalf("error = %v, want ErrDestinationExists", err)
+	}
+	got, rerr := os.ReadFile(destination)
+	if rerr != nil || !bytes.Equal(got, sentinel) {
+		t.Fatalf("existing destination clobbered: %q (%v)", got, rerr)
+	}
+	if exists, _ := pathExists(partial); exists {
+		t.Fatal("own partial must be cleaned after failed exclusive-copy commit")
+	}
+}
