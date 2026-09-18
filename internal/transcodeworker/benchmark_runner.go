@@ -91,6 +91,7 @@ type benchmarkProgressReporter struct {
 	totalUnits     int
 	completedUnits int
 	currentPhase   string
+	currentDetails transcode.BenchmarkProgressDetails
 	lastProgress   float64
 }
 
@@ -103,19 +104,39 @@ func newBenchmarkProgressReporter(w *Worker, record *BenchmarkRecord, totalUnits
 }
 
 func (p *benchmarkProgressReporter) StartUnit(phase string) {
+	p.StartSampleUnit(phase, 0, 0, "", "")
+}
+
+func (p *benchmarkProgressReporter) StartSampleUnit(phase string, sampleNumber, candidateNumber int, candidateID, metric string) {
 	if p == nil {
 		return
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.currentPhase = phase
+	p.currentDetails = transcode.BenchmarkProgressDetails{
+		SampleNumber:    sampleNumber,
+		CandidateNumber: candidateNumber,
+		CandidateID:     candidateID,
+		Metric:          metric,
+	}
+	p.persistLocked()
+}
+
+func (p *benchmarkProgressReporter) persistLocked() {
 	now := time.Now().UTC()
+	details := p.currentDetails
+	details.CompletedUnits = p.completedUnits
+	details.TotalUnits = p.totalUnits
 	if p.record != nil {
-		p.record.Phase = phase
+		p.record.Progress = p.lastProgress
+		p.record.Phase = p.currentPhase
 		p.record.HeartbeatAt = now
+		p.record.LastProgressAt = now
+		p.record.ProgressDetails = &details
 	}
 	if p.w != nil && p.record != nil && p.record.ID != "" && p.record.RunToken != "" {
-		_ = p.w.UpdateBenchmarkProgress(p.record.ID, p.record.RunToken, p.lastProgress, phase)
+		_ = p.w.updateBenchmarkProgress(p.record.ID, p.record.RunToken, p.lastProgress, p.currentPhase, &details, false)
 	}
 }
 
@@ -153,14 +174,7 @@ func (p *benchmarkProgressReporter) ResolveUnits(n int) {
 		pct = p.lastProgress
 	}
 	p.lastProgress = pct
-	now := time.Now().UTC()
-	if p.record != nil {
-		p.record.Progress = pct
-		p.record.HeartbeatAt = now
-	}
-	if p.w != nil && p.record != nil && p.record.ID != "" && p.record.RunToken != "" {
-		_ = p.w.UpdateBenchmarkProgress(p.record.ID, p.record.RunToken, pct, p.currentPhase)
-	}
+	p.persistLocked()
 }
 
 func (p *benchmarkProgressReporter) TotalUnits() int {
@@ -180,20 +194,7 @@ func (p *benchmarkProgressReporter) CompletedUnits() int {
 }
 
 func (p *benchmarkProgressReporter) SetPhase(phase string) {
-	if p == nil {
-		return
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.currentPhase = phase
-	now := time.Now().UTC()
-	if p.record != nil {
-		p.record.Phase = phase
-		p.record.HeartbeatAt = now
-	}
-	if p.w != nil && p.record != nil && p.record.ID != "" && p.record.RunToken != "" {
-		_ = p.w.UpdateBenchmarkProgress(p.record.ID, p.record.RunToken, p.lastProgress, phase)
-	}
+	p.StartUnit(phase)
 }
 
 type validatedCandidate struct {
@@ -396,12 +397,12 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 	progressReporter := newBenchmarkProgressReporter(w, record, totalUnits)
 
 	// 4. Extract reference samples sequentially
-	for _, window := range record.Samples {
+	for sampleNumber, window := range record.Samples {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 
-		progressReporter.StartUnit("extracting_samples")
+		progressReporter.StartSampleUnit("extracting_samples", sampleNumber+1, 0, "", "")
 
 		if err := verifySourceUnchanged(record.Source, sourceInitialSize, sourceInitialModTime); err != nil {
 			return err
@@ -477,12 +478,12 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 	} else {
 		// 5. Encode candidate samples sequentially (legacy path for test-hook injection)
 		for _, vc := range validatedCandidates {
-			for _, window := range record.Samples {
+			for sampleNumber, window := range record.Samples {
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
 
-				progressReporter.StartUnit("encoding_candidates")
+				progressReporter.StartSampleUnit("encoding_candidates", sampleNumber+1, vc.index+1, vc.candidate.ID, "")
 
 				if err := verifySourceUnchanged(record.Source, sourceInitialSize, sourceInitialModTime); err != nil {
 					return err
@@ -582,7 +583,7 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 	} // end legacy sequential encode+hook path
 
 	// 7. Phase 6 candidate evaluation and selection before scratch cleanup
-	progressReporter.SetPhase("selecting_candidate")
+	progressReporter.SetPhase("estimating_final_size")
 	if r.selectionHook != nil {
 		if err := r.selectionHook(ctx, w, record, evidence); err != nil {
 			return fmt.Errorf("candidate selection failed: %w", err)
@@ -592,6 +593,7 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 			return fmt.Errorf("candidate selection failed: %w", err)
 		}
 	}
+	progressReporter.SetPhase("selecting_candidate")
 
 	// Final verification that source was never mutated during the run
 	if err := verifySourceUnchanged(record.Source, sourceInitialSize, sourceInitialModTime); err != nil {
@@ -1368,7 +1370,12 @@ func (r *ProductionBenchmarkRunner) runSelection(
 		}
 		if s.Tags != nil {
 			if sBytes, ok := s.Tags["NUMBER_OF_BYTES"]; ok {
-				if b, err := strconv.ParseInt(sBytes, 10, 64); err == nil && b > 0 {
+				sBytes = strings.TrimSpace(sBytes)
+				if sBytes != "" && !strings.EqualFold(sBytes, "N/A") {
+					b, err := strconv.ParseInt(sBytes, 10, 64)
+					if err != nil || b < 0 {
+						return fmt.Errorf("%s: invalid subtitle byte count for stream_%d", optimization.ReasonInvalidEstimatorInput, s.Index)
+					}
 					se.SizeBytes = b
 				}
 			}

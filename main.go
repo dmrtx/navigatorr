@@ -175,7 +175,17 @@ func main() {
 
 	// Register all tools
 	tools.RegisterAll(s, cfg, registry, specStore, txClient, qbClient, sabClient, qStore)
-	tools.RegisterMaintenance(s, cfg, registry, qbClient, mStore, transcodeExecutor)
+	actEngine := tools.RegisterMaintenance(s, cfg, registry, qbClient, mStore, transcodeExecutor)
+	if actEngine != nil {
+		reconcileCtx, stopReconciler := context.WithCancel(context.Background())
+		reconcilerDone := actEngine.StartReconciler(reconcileCtx)
+		// Join before the deferred database close. Polling belongs to the
+		// process and continues when MCP clients disconnect.
+		defer func() {
+			stopReconciler()
+			<-reconcilerDone
+		}()
+	}
 	tools.RegisterDiagnostics(s, cfg, registry, specStore, txClient, qbClient, sabClient, mStore, transcodeExecutor)
 
 	if transportOpts.Transport == "streamable-http" {

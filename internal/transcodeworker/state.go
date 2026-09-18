@@ -18,6 +18,7 @@ import (
 
 // JobRecord represents the persistent state stored in job.json on the worker.
 type JobRecord struct {
+	transcode.JobTelemetry
 	ID                  string                       `json:"id"`
 	Status              string                       `json:"status"` // queued, running, completed, failed, cancelled
 	Source              string                       `json:"source"`
@@ -57,6 +58,10 @@ type JobRecord struct {
 	EncodeComplete      bool   `json:"encode_complete,omitempty"`
 	FinalizationState   string `json:"finalization_state,omitempty"`
 	PartialPath         string `json:"partial_path,omitempty"`
+	// Post-encode recovery has its own durable budget; it never consumes an
+	// encode retry or invalidates the already completed encode checkpoint.
+	FinalizationRetryCount int       `json:"finalization_retry_count,omitempty"`
+	NextFinalizationAt     time.Time `json:"next_finalization_at,omitzero"`
 }
 
 // LoadJob loads a JobRecord from job.json.
@@ -317,27 +322,46 @@ func IsJobProcessAlive(job *JobRecord) bool {
 
 // ProgressMetrics contains parsed progress metrics from FFmpeg's progress.txt.
 type ProgressMetrics struct {
-	Progress float64
-	FPS      float64
-	Speed    float64
+	Progress  float64
+	FPS       float64
+	Speed     float64
+	Valid     bool
+	UpdatedAt time.Time
 }
 
 // ParseProgress parses FFmpeg's key=value progress output.
 func ParseProgress(progressPath string, durationSec float64) ProgressMetrics {
-	f, err := os.Open(progressPath)
+	data, _, _, err := readBoundedTail(progressPath, 64*1024)
+	if err != nil || len(data) == 0 {
+		return ProgressMetrics{}
+	}
+	info, err := os.Stat(progressPath)
 	if err != nil {
 		return ProgressMetrics{}
 	}
-	defer f.Close()
+	// Only complete FFmpeg records are measurements; a partially appended
+	// stanza must not replace the previous snapshot with zeros.
+	end := strings.LastIndex(string(data), "progress=")
+	if end < 0 {
+		return ProgressMetrics{}
+	}
+	newline := strings.IndexByte(string(data[end:]), '\n')
+	if newline < 0 {
+		data = data[:end]
+	} else {
+		data = data[:end+newline+1]
+	}
 
 	var (
-		fps         float64
-		speed       float64
-		outTimeSec  float64
-		progressEnd bool
+		fps                                float64
+		speed                              float64
+		outTimeSec                         float64
+		progressEnd                        bool
+		valid                              bool
+		lastFPS, lastSpeed, lastOutTimeSec float64
 	)
 
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(strings.NewReader(string(data)))
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		parts := strings.SplitN(line, "=", 2)
@@ -371,8 +395,10 @@ func ParseProgress(progressPath string, durationSec float64) ProgressMetrics {
 				}
 			}
 		case "progress":
-			if val == "end" {
-				progressEnd = true
+			if val == "end" || val == "continue" {
+				valid = true
+				progressEnd = val == "end"
+				lastFPS, lastSpeed, lastOutTimeSec = fps, speed, outTimeSec
 			}
 		}
 	}
@@ -380,13 +406,15 @@ func ParseProgress(progressPath string, durationSec float64) ProgressMetrics {
 	var pct float64
 	if progressEnd {
 		pct = 100.0
-	} else if durationSec > 0 && outTimeSec > 0 {
-		pct = math.Min(99.9, (outTimeSec/durationSec)*100.0)
+	} else if durationSec > 0 && lastOutTimeSec > 0 {
+		pct = math.Min(99.9, (lastOutTimeSec/durationSec)*100.0)
 	}
 
 	return ProgressMetrics{
-		Progress: math.Round(pct*10) / 10,
-		FPS:      fps,
-		Speed:    speed,
+		Progress:  math.Round(pct*10) / 10,
+		FPS:       lastFPS,
+		Speed:     lastSpeed,
+		Valid:     valid,
+		UpdatedAt: info.ModTime().UTC(),
 	}
 }

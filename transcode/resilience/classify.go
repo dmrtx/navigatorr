@@ -1,6 +1,9 @@
 package resilience
 
-import "strings"
+import (
+	"errors"
+	"strings"
+)
 
 type FailureClass string
 
@@ -24,10 +27,61 @@ const (
 	StorageFull                     FailureClass = "storage_full"
 	Cancelled                       FailureClass = "cancelled"
 	IdempotencyConflict             FailureClass = "idempotency_conflict"
+	SMBSigningRequired              FailureClass = "smb_signing_required"
+	SMBSessionInvalid               FailureClass = "smb_session_invalid"
+	SMBAuthFailed                   FailureClass = "smb_auth_failed"
+	SMBTransportError               FailureClass = "smb_transport_error"
+	StoragePermissionDenied         FailureClass = "storage_permission_denied"
+	StorageIOError                  FailureClass = "storage_io_error"
+	SourceUnreachable               FailureClass = "source_unreachable"
 )
+
+// ClassifyError preserves a typed boundary failure before considering messages.
+// Use Classify for errors restored from older persisted jobs or HTTP strings.
+func ClassifyError(err error) FailureClass {
+	if err == nil {
+		return ""
+	}
+	var classified interface{ FailureClass() string }
+	if errors.As(err, &classified) && classified.FailureClass() != "" {
+		return FailureClass(classified.FailureClass())
+	}
+	return Classify(err.Error())
+}
 
 func Classify(message string) FailureClass {
 	s := strings.ToLower(message)
+	// Explicit serialized classes take precedence over generic phrases such
+	// as "connection reset", which formerly labeled SMB failures as SSH.
+	for _, class := range []FailureClass{SMBSigningRequired, SMBSessionInvalid, SMBAuthFailed, SMBTransportError, StoragePermissionDenied, StorageIOError, SourceUnreachable, Cancelled, StorageFull} {
+		if s == string(class) || strings.Contains(s, string(class)+":") {
+			return class
+		}
+	}
+	if legacySMBBoundary(s) {
+		switch {
+		case strings.Contains(s, "canceled") || strings.Contains(s, "cancelled"):
+			return Cancelled
+		case strings.Contains(s, "no space left") || strings.Contains(s, "disk full") || strings.Contains(s, "enospc"):
+			return StorageFull
+		case strings.Contains(s, "signing required"):
+			return SMBSigningRequired
+		case strings.Contains(s, "session expired") || strings.Contains(s, "session has expired") || strings.Contains(s, "session deleted") || strings.Contains(s, "invalid session"):
+			return SMBSessionInvalid
+		case strings.Contains(s, "logon failure") || strings.Contains(s, "logon is invalid") || strings.Contains(s, "authentication failed"):
+			return SMBAuthFailed
+		case strings.Contains(s, "permission denied") || strings.Contains(s, "access denied") || strings.Contains(s, "operation not permitted"):
+			return StoragePermissionDenied
+		case strings.Contains(s, "no such file") || strings.Contains(s, "does not exist"):
+			return SourceUnreachable
+		case strings.Contains(s, "source") && strings.Contains(s, "changed"):
+			return SourceChanged
+		case strings.Contains(s, "connection reset") || strings.Contains(s, "broken pipe") || strings.Contains(s, "connection refused") || strings.Contains(s, "timed out") || strings.Contains(s, "deadline exceeded") || strings.Contains(s, "no route to host"):
+			return SMBTransportError
+		default:
+			return StorageIOError
+		}
+	}
 	switch {
 	case strings.Contains(s, "idempotency_conflict") || strings.Contains(s, "idempotency conflict") || (strings.Contains(s, "execution_spec_digest") && strings.Contains(s, "mismatch")):
 		return IdempotencyConflict
@@ -35,6 +89,8 @@ func Classify(message string) FailureClass {
 		return Cancelled
 	case strings.Contains(s, "no space left") || strings.Contains(s, "no-space") || strings.Contains(s, "no space") || strings.Contains(s, "enospc") || strings.Contains(s, "disk full"):
 		return StorageFull
+	case strings.Contains(s, "permission denied") || strings.Contains(s, "operation not permitted"):
+		return StoragePermissionDenied
 	case strings.Contains(s, "sigkill") || strings.Contains(s, "killed") || strings.Contains(s, "process terminated unexpectedly"):
 		return RunnerKilled
 	case strings.Contains(s, "worker busy") || strings.Contains(s, "maximum parallel jobs"):
@@ -69,10 +125,27 @@ func Classify(message string) FailureClass {
 		return FFmpegUnknown
 	}
 }
+
+func legacySMBBoundary(message string) bool {
+	if strings.HasPrefix(message, "smb:") || strings.HasPrefix(message, "smb ") || strings.Contains(message, ": smb:") || strings.Contains(message, ": smb ") {
+		return true
+	}
+	for _, operation := range []string{"opening smb ", "statting smb ", "reading smb ", "closing smb ", "authenticating smb ", "connecting to smb ", "mounting smb ", "uploading smb ", "verifying smb ", "ensuring smb ", "creating exclusive smb ", "renaming smb ", "reading back smb "} {
+		if strings.Contains(message, operation) {
+			return true
+		}
+	}
+	return false
+}
+
 func Retryable(c FailureClass, allowed []string) bool {
 	switch c {
 	case RunnerKilled, FFmpegInputCorrupt, StorageFull, Cancelled, IdempotencyConflict,
-		ValidationDurationMismatch, ValidationStreamLoss, ValidationCodecMismatch, SourceChanged:
+		ValidationDurationMismatch, ValidationStreamLoss, ValidationCodecMismatch, SourceChanged,
+		SMBSigningRequired, SMBSessionInvalid, SMBAuthFailed, SMBTransportError,
+		StoragePermissionDenied, StorageIOError, SourceUnreachable:
+		// SMB operations already recover on a fresh signed session. Replaying
+		// the full encode after exhausted recovery is unsafe and wasteful.
 		return false
 	}
 	for _, v := range allowed {

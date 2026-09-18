@@ -79,7 +79,10 @@ type ActionTemplate struct {
 	RequiredInputs []string
 	OptionalInputs []string
 	Destructive    bool
-	Steps          []StepDefinition
+	// AutoReconcile opts this workflow into autonomous continuation of external waits.
+	// Decision waits are always excluded.
+	AutoReconcile bool
+	Steps         []StepDefinition
 }
 
 // ActionCatalogEntry describes an action workflow definition for discovery
@@ -95,22 +98,27 @@ type ActionCatalogEntry struct {
 
 // ActionResult is returned when running, resuming, or querying an action
 type ActionResult struct {
-	ID               string          `json:"id"`
-	ActionName       string          `json:"action_name"`
-	Status           string          `json:"status"`
-	CurrentStep      int             `json:"current_step"`
-	TotalSteps       int             `json:"total_steps"`
-	Inputs           map[string]any  `json:"inputs"`
-	Outputs          map[string]any  `json:"outputs"`
-	State            map[string]any  `json:"state"`
-	WaitingReason    string          `json:"waiting_reason,omitempty"`
-	WaitingCondition string          `json:"waiting_condition,omitempty"`
-	WaitingOptions   []WaitingOption `json:"waiting_options,omitempty"`
-	Error            string          `json:"error,omitempty"`
-	IdempotencyKey   string          `json:"idempotency_key,omitempty"`
-	DurationMs       int64           `json:"duration_ms"`
-	CreatedAt        string          `json:"created_at"`
-	UpdatedAt        string          `json:"updated_at"`
+	ID                   string          `json:"id"`
+	ActionName           string          `json:"action_name"`
+	Status               string          `json:"status"`
+	CurrentStep          int             `json:"current_step"`
+	TotalSteps           int             `json:"total_steps"`
+	Inputs               map[string]any  `json:"inputs"`
+	Outputs              map[string]any  `json:"outputs"`
+	State                map[string]any  `json:"state"`
+	WaitingReason        string          `json:"waiting_reason,omitempty"`
+	WaitingCondition     string          `json:"waiting_condition,omitempty"`
+	WaitingOptions       []WaitingOption `json:"waiting_options,omitempty"`
+	Error                string          `json:"error,omitempty"`
+	IdempotencyKey       string          `json:"idempotency_key,omitempty"`
+	DurationMs           int64           `json:"duration_ms"` // Deprecated alias of wall_duration_ms.
+	WallDurationMs       int64           `json:"wall_duration_ms"`
+	QueueDurationMs      *int64          `json:"queue_duration_ms,omitempty"`
+	EncodeDurationMs     *int64          `json:"encode_duration_ms,omitempty"`
+	ValidationDurationMs *int64          `json:"validation_duration_ms,omitempty"`
+	ReconcileLagMs       *int64          `json:"reconcile_lag_ms,omitempty"`
+	CreatedAt            string          `json:"created_at"`
+	UpdatedAt            string          `json:"updated_at"`
 }
 
 // EngineDeps bundles dependencies needed by the Action Engine
@@ -123,4 +131,7 @@ type EngineDeps struct {
 	Ffprobe   string
 	Transcode transcode.Executor
 	StartTime time.Time
+	// Now and ReconcileInterval are optional clock/scheduling overrides.
+	Now               func() time.Time
+	ReconcileInterval time.Duration
 }

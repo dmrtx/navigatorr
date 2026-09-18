@@ -16,16 +16,19 @@ import (
 
 // Engine manages declarative, persistent, multi-step actions.
 type Engine struct {
-	mu        sync.RWMutex
-	deps      EngineDeps
-	templates map[string]ActionTemplate
+	mu             sync.RWMutex
+	deps           EngineDeps
+	templates      map[string]ActionTemplate
+	reconcilerOnce sync.Once
+	reconcilerDone chan struct{}
 }
 
 // NewEngine creates a new Action Engine.
 func NewEngine(deps EngineDeps) *Engine {
 	e := &Engine{
-		deps:      deps,
-		templates: make(map[string]ActionTemplate),
+		deps:           deps,
+		templates:      make(map[string]ActionTemplate),
+		reconcilerDone: make(chan struct{}),
 	}
 	e.registerBuiltinTemplates()
 	return e
@@ -118,9 +121,11 @@ func (e *Engine) Run(ctx context.Context, actionName string, inputs map[string]a
 		return nil, fmt.Errorf("unknown action template: %s", actionName)
 	}
 
-	if inputs == nil {
-		inputs = make(map[string]any)
+	inputCopy := make(map[string]any, len(inputs))
+	for key, value := range inputs {
+		inputCopy[key] = value
 	}
+	inputs = inputCopy
 
 	var idempotencyKey string
 	if len(idempotencyKeys) > 0 {
@@ -132,6 +137,18 @@ func (e *Engine) Run(ctx context.Context, actionName string, inputs map[string]a
 		}
 	}
 
+	if actionName == "promote_transcode_candidate" {
+		var err error
+		idempotencyKey, err = promotionIdempotency(inputs)
+		if err != nil {
+			return nil, err
+		}
+		if existing, err := e.deps.Store.FindActionByIdempotencyKey(actionName, idempotencyKey); err != nil {
+			return nil, err
+		} else if existing != nil {
+			return e.existingPromotion(existing, tmpl, inputs)
+		}
+	}
 	// Idempotency check: if non-terminal action with same name and key exists, return it
 	if idempotencyKey != "" {
 		if existing, err := e.deps.Store.FindActiveActionByIdempotencyKey(actionName, idempotencyKey); err == nil && existing != nil {
@@ -155,6 +172,13 @@ func (e *Engine) Run(ctx context.Context, actionName string, inputs map[string]a
 	}
 
 	if err := e.deps.Store.CreateActionInstance(inst); err != nil {
+		// A concurrent caller can win the unique idempotency key between the
+		// lookup and INSERT. Return that same workflow, never another promotion.
+		if actionName == "promote_transcode_candidate" {
+			if existing, lookupErr := e.deps.Store.FindActionByIdempotencyKey(actionName, idempotencyKey); lookupErr == nil && existing != nil {
+				return e.existingPromotion(existing, tmpl, inputs)
+			}
+		}
 		return nil, fmt.Errorf("creating action instance: %w", err)
 	}
 
@@ -167,7 +191,16 @@ func (e *Engine) Run(ctx context.Context, actionName string, inputs map[string]a
 		Engine:     e,
 	}
 
-	return e.execute(ctx, &inst, ec, tmpl)
+	claimCtx, release, err := e.claimExecution(ctx, inst.ID, true)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	stored, err := e.deps.Store.GetActionInstance(inst.ID)
+	if err != nil {
+		return nil, err
+	}
+	return e.execute(claimCtx, stored, ec, tmpl)
 }
 
 // Retry re-runs a failed action from its last safe step without repeating confirmed side effects.
@@ -176,6 +209,11 @@ func (e *Engine) Retry(ctx context.Context, instanceID string) (*ActionResult, e
 		return nil, fmt.Errorf("maintenance store is required for action engine")
 	}
 
+	ctx, release, err := e.claimExecution(ctx, instanceID, true)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	inst, err := e.deps.Store.GetActionInstance(instanceID)
 	if err != nil {
 		return nil, fmt.Errorf("getting action instance %s: %w", instanceID, err)
@@ -193,27 +231,25 @@ func (e *Engine) Retry(ctx context.Context, instanceID string) (*ActionResult, e
 		return nil, fmt.Errorf("unknown action template: %s", inst.ActionName)
 	}
 
-	// Find the last safe step to resume from
-	loggedSteps, _ := e.deps.Store.GetActionSteps(inst.ID)
-	completedStepIndices := make(map[int]bool)
-	for _, ls := range loggedSteps {
-		if ls.Status == string(StepCompleted) || ls.Status == string(StepSkipped) {
-			completedStepIndices[ls.StepIndex] = true
-		}
+	// The durable checkpoint is authoritative. Audit logs can be missing after
+	// a crash and must never advance execution past state that was not saved.
+	resumeStep := inst.CurrentStep
+	if resumeStep < 0 || resumeStep >= len(tmpl.Steps) {
+		return nil, fmt.Errorf("invalid retry checkpoint %d", resumeStep)
 	}
-
-	resumeStep := 0
-	for i := 0; i < len(tmpl.Steps); i++ {
-		if !completedStepIndices[i] {
-			resumeStep = i
-			break
-		}
+	ec := parseExecutionContext(inst, e)
+	resumeStep, err = e.prepareRemoteRetry(ctx, inst, ec, tmpl, resumeStep)
+	if err != nil {
+		return nil, err
 	}
+	inst.StateJSON, inst.OutputsJSON = toJSON(ec.State), toJSON(ec.Outputs)
 
 	inst.CurrentStep = resumeStep
 	inst.Status = StatusRunning
 	inst.ErrorJSON = ""
-	_ = e.deps.Store.UpdateActionInstance(*inst)
+	if saveErr := e.updateInstance(ctx, inst); saveErr != nil {
+		return nil, saveErr
+	}
 
 	// Record retry in audit log
 	_ = e.deps.Store.LogActionEnriched(
@@ -227,16 +263,24 @@ func (e *Engine) Retry(ctx context.Context, instanceID string) (*ActionResult, e
 		0,
 	)
 
-	ec := parseExecutionContext(inst, e)
 	return e.execute(ctx, inst, ec, tmpl)
 }
 
 // Resume re-activates a paused or waiting action instance.
 func (e *Engine) Resume(ctx context.Context, instanceID string, decision string, extraInputs map[string]any) (*ActionResult, error) {
+	return e.resume(ctx, instanceID, decision, extraInputs, false)
+}
+
+func (e *Engine) resume(ctx context.Context, instanceID string, decision string, extraInputs map[string]any, automatic bool) (*ActionResult, error) {
 	if e.deps.Store == nil {
 		return nil, fmt.Errorf("maintenance store is required for action engine")
 	}
 
+	ctx, release, err := e.claimExecution(ctx, instanceID, !automatic)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	inst, err := e.deps.Store.GetActionInstance(instanceID)
 	if err != nil {
 		return nil, fmt.Errorf("getting action instance %s: %w", instanceID, err)
@@ -256,7 +300,14 @@ func (e *Engine) Resume(ctx context.Context, instanceID string, decision string,
 		return buildActionResult(inst, len(tmpl.Steps), ec), nil
 	}
 
+	if inst.ActionName == "promote_transcode_candidate" && len(extraInputs) != 0 {
+		return nil, fmt.Errorf("promotion inputs and integrity baseline are immutable; resume accepts only a decision")
+	}
+
 	ec := parseExecutionContext(inst, e)
+	if (automatic && !e.shouldReconcile(inst, tmpl, ec)) || (inst.Status == StatusWaitingDecision && decision == "") {
+		return buildActionResult(inst, len(tmpl.Steps), ec), nil
+	}
 	if decision != "" {
 		ec.Decision = decision
 	}
@@ -267,12 +318,15 @@ func (e *Engine) Resume(ctx context.Context, instanceID string, decision string,
 		}
 	}
 
+	inst.InputsJSON = toJSON(ec.Inputs)
 	// Reset waiting state before re-entering
 	inst.Status = StatusRunning
 	inst.WaitingReason = ""
 	inst.WaitingCondition = ""
 	inst.WaitingOptionsJSON = "[]"
-	_ = e.deps.Store.UpdateActionInstance(*inst)
+	if saveErr := e.updateInstance(ctx, inst); saveErr != nil {
+		return nil, saveErr
+	}
 
 	return e.execute(ctx, inst, ec, tmpl)
 }
@@ -342,6 +396,11 @@ func (e *Engine) Cancel(ctx context.Context, instanceID, reason string) (*Action
 		return nil, fmt.Errorf("maintenance store is required")
 	}
 
+	ctx, release, err := e.claimExecution(ctx, instanceID, true)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	inst, err := e.deps.Store.GetActionInstance(instanceID)
 	if err != nil {
 		return nil, fmt.Errorf("getting action instance: %w", err)
@@ -352,7 +411,7 @@ func (e *Engine) Cancel(ctx context.Context, instanceID, reason string) (*Action
 
 	inst.Status = StatusCancelled
 	inst.WaitingReason = reason
-	if err := e.deps.Store.UpdateActionInstance(*inst); err != nil {
+	if err := e.updateInstance(ctx, inst); err != nil {
 		return nil, fmt.Errorf("updating action instance: %w", err)
 	}
 
@@ -368,6 +427,11 @@ func (e *Engine) Cancel(ctx context.Context, instanceID, reason string) (*Action
 		}
 	}
 
+	// A batch cascade is intentionally not performed here: pending children are
+	// stopped by their own admission guard (which re-reads this parent under the
+	// parent lease), and accepted jobs keep their identity and remain tracked.
+	// Directly mutating child rows without their lease could clobber a live run
+	// or erase a user wait.
 	return buildActionResult(inst, len(tmpl.Steps), ec), nil
 }
 
@@ -375,37 +439,60 @@ func (e *Engine) Cancel(ctx context.Context, instanceID, reason string) (*Action
 func (e *Engine) execute(ctx context.Context, inst *store.ActionInstance, ec *ExecutionContext, tmpl ActionTemplate) (*ActionResult, error) {
 	totalSteps := len(tmpl.Steps)
 
-	// Fetch previously completed steps for idempotency
-	loggedSteps, _ := e.deps.Store.GetActionSteps(inst.ID)
-	completedStepIndices := make(map[int]bool)
-	for _, ls := range loggedSteps {
-		if ls.Status == string(StepCompleted) || ls.Status == string(StepSkipped) {
-			completedStepIndices[ls.StepIndex] = true
-		}
-	}
+	// current_step and state are one durable checkpoint; step logs are audit
+	// records, never recovery authority.
 
 	for stepIdx := inst.CurrentStep; stepIdx < totalSteps; stepIdx++ {
 		// Respect context cancellation
 		if err := ctx.Err(); err != nil {
-			inst.Status = StatusFailed
-			inst.ErrorJSON = fmt.Sprintf(`{"error": %q}`, err.Error())
-			_ = e.deps.Store.UpdateActionInstance(*inst)
+			if tmpl.AutoReconcile && len(ec.State) > 0 {
+				inst.Status = StatusWaitingExternal
+				inst.CurrentStep = stepIdx
+				inst.WaitingCondition = "worker_reconciling"
+				inst.WaitingReason = "Coordinator interrupted; workflow will reconcile automatically"
+				e.scheduleReconcile(ec, inst.WaitingCondition)
+				inst.StateJSON, inst.OutputsJSON = toJSON(ec.State), toJSON(ec.State)
+			} else {
+				inst.Status = StatusFailed
+				inst.ErrorJSON = fmt.Sprintf(`{"error": %q}`, err.Error())
+			}
+			if saveErr := e.updateInstance(ctx, inst); saveErr != nil {
+				return nil, saveErr
+			}
 			return buildActionResult(inst, totalSteps, ec), err
-		}
-
-		// Idempotency: if step already finished in previous run, skip re-execution
-		if completedStepIndices[stepIdx] {
-			continue
 		}
 
 		step := tmpl.Steps[stepIdx]
 		inst.Status = StatusRunning
 		inst.CurrentStep = stepIdx
-		_ = e.deps.Store.UpdateActionInstance(*inst)
+		inst.StateJSON = toJSON(ec.State)
+		inst.OutputsJSON = toJSON(ec.Outputs)
+		if err := e.updateInstance(ctx, inst); err != nil {
+			return nil, err
+		}
 
 		start := time.Now()
 		res, err := step.Run(ctx, ec)
+		inst.InputsJSON = toJSON(ec.Inputs)
 		durationMs := time.Since(start).Milliseconds()
+
+		if step.Name == "validate_result" || step.Name == "accept_result" {
+			ec.State["coordinator_validation_duration_ms"] = getInt64(ec.State, "coordinator_validation_duration_ms") + durationMs
+			ec.State["validation_duration_ms"] = getInt64(ec.State, "coordinator_validation_duration_ms") + getInt64(ec.State, "worker_validation_duration_ms")
+			if res.Outputs == nil {
+				res.Outputs = make(map[string]any)
+			}
+			res.Outputs["validation_duration_ms"] = ec.State["validation_duration_ms"]
+			res.Outputs["coordinator_validation_duration_ms"] = ec.State["coordinator_validation_duration_ms"]
+		}
+		if ctx.Err() != nil && tmpl.AutoReconcile {
+			// A caller timeout or service shutdown suspends the coordinator; only
+			// action_cancel is allowed to cancel a remote job.
+			err = nil
+			res.Status = StepWaitingExternal
+			res.WaitingCondition = "worker_reconciling"
+			res.WaitingReason = "Coordinator request interrupted; workflow will reconcile automatically"
+		}
 
 		// Handle step failure
 		if err != nil || res.Status == StepFailed {
@@ -423,6 +510,14 @@ func (e *Engine) execute(ctx context.Context, inst *store.ActionInstance, ec *Ex
 
 			inpJSON, _ := json.Marshal(ec.Inputs)
 			outJSON, _ := json.Marshal(res.Outputs)
+
+			inst.Status = StatusFailed
+			inst.ErrorJSON = fmt.Sprintf(`{"step": %q, "error": %q}`, step.Name, errStr)
+			inst.StateJSON = toJSON(ec.State)
+			inst.OutputsJSON = toJSON(ec.State)
+			if saveErr := e.updateInstance(ctx, inst); saveErr != nil {
+				return nil, saveErr
+			}
 			_ = e.deps.Store.LogActionStep(store.ActionStepLog{
 				InstanceID:  inst.ID,
 				StepIndex:   stepIdx,
@@ -434,12 +529,6 @@ func (e *Engine) execute(ctx context.Context, inst *store.ActionInstance, ec *Ex
 				Error:       errStr,
 				DurationMs:  durationMs,
 			})
-
-			inst.Status = StatusFailed
-			inst.ErrorJSON = fmt.Sprintf(`{"step": %q, "error": %q}`, step.Name, errStr)
-			inst.StateJSON = toJSON(ec.State)
-			inst.OutputsJSON = toJSON(ec.State)
-			_ = e.deps.Store.UpdateActionInstance(*inst)
 
 			_ = e.deps.Store.LogActionEnriched(
 				"action_failed",
@@ -462,6 +551,16 @@ func (e *Engine) execute(ctx context.Context, inst *store.ActionInstance, ec *Ex
 			inpJSON, _ := json.Marshal(ec.Inputs)
 			outJSON, _ := json.Marshal(res.Outputs)
 
+			e.scheduleReconcile(ec, res.WaitingCondition)
+			inst.Status = StatusWaitingExternal
+			inst.CurrentStep = stepIdx
+			inst.WaitingReason = res.WaitingReason
+			inst.WaitingCondition = res.WaitingCondition
+			inst.StateJSON = toJSON(ec.State)
+			inst.OutputsJSON = toJSON(ec.Outputs)
+			if saveErr := e.updateInstance(ctx, inst); saveErr != nil {
+				return nil, saveErr
+			}
 			_ = e.deps.Store.LogActionStep(store.ActionStepLog{
 				InstanceID:  inst.ID,
 				StepIndex:   stepIdx,
@@ -473,14 +572,6 @@ func (e *Engine) execute(ctx context.Context, inst *store.ActionInstance, ec *Ex
 				DurationMs:  durationMs,
 			})
 
-			inst.Status = StatusWaitingExternal
-			inst.CurrentStep = stepIdx
-			inst.WaitingReason = res.WaitingReason
-			inst.WaitingCondition = res.WaitingCondition
-			inst.StateJSON = toJSON(ec.State)
-			inst.OutputsJSON = toJSON(ec.Outputs)
-			_ = e.deps.Store.UpdateActionInstance(*inst)
-
 			return buildActionResult(inst, totalSteps, ec), nil
 		}
 
@@ -491,6 +582,17 @@ func (e *Engine) execute(ctx context.Context, inst *store.ActionInstance, ec *Ex
 			inpJSON, _ := json.Marshal(ec.Inputs)
 			outJSON, _ := json.Marshal(res.Outputs)
 
+			delete(ec.State, "next_poll_at")
+			delete(ec.Outputs, "next_poll_at")
+			inst.Status = StatusWaitingDecision
+			inst.CurrentStep = stepIdx
+			inst.WaitingReason = res.WaitingReason
+			inst.WaitingOptionsJSON = toJSON(res.WaitingOptions)
+			inst.StateJSON = toJSON(ec.State)
+			inst.OutputsJSON = toJSON(ec.Outputs)
+			if saveErr := e.updateInstance(ctx, inst); saveErr != nil {
+				return nil, saveErr
+			}
 			_ = e.deps.Store.LogActionStep(store.ActionStepLog{
 				InstanceID:  inst.ID,
 				StepIndex:   stepIdx,
@@ -501,14 +603,6 @@ func (e *Engine) execute(ctx context.Context, inst *store.ActionInstance, ec *Ex
 				Status:      string(StepWaitingDecision),
 				DurationMs:  durationMs,
 			})
-
-			inst.Status = StatusWaitingDecision
-			inst.CurrentStep = stepIdx
-			inst.WaitingReason = res.WaitingReason
-			inst.WaitingOptionsJSON = toJSON(res.WaitingOptions)
-			inst.StateJSON = toJSON(ec.State)
-			inst.OutputsJSON = toJSON(ec.Outputs)
-			_ = e.deps.Store.UpdateActionInstance(*inst)
 
 			return buildActionResult(inst, totalSteps, ec), nil
 		}
@@ -524,6 +618,12 @@ func (e *Engine) execute(ctx context.Context, inst *store.ActionInstance, ec *Ex
 			stepStatus = StepSkipped
 		}
 
+		inst.CurrentStep = stepIdx + 1
+		inst.StateJSON = toJSON(ec.State)
+		inst.OutputsJSON = toJSON(ec.Outputs)
+		if saveErr := e.updateInstance(ctx, inst); saveErr != nil {
+			return nil, saveErr
+		}
 		_ = e.deps.Store.LogActionStep(store.ActionStepLog{
 			InstanceID:  inst.ID,
 			StepIndex:   stepIdx,
@@ -534,19 +634,23 @@ func (e *Engine) execute(ctx context.Context, inst *store.ActionInstance, ec *Ex
 			Status:      string(stepStatus),
 			DurationMs:  durationMs,
 		})
-
-		inst.CurrentStep = stepIdx + 1
-		inst.StateJSON = toJSON(ec.State)
-		inst.OutputsJSON = toJSON(ec.Outputs)
-		_ = e.deps.Store.UpdateActionInstance(*inst)
 	}
 
 	// All steps finished
+	delete(ec.State, "next_poll_at")
+	delete(ec.Outputs, "next_poll_at")
+	if getBool(ec.State, "transcode_done") {
+		ec.State["transcode_status"] = "completed"
+		ec.Outputs["transcode_status"] = "completed"
+	}
+	inst.WaitingReason, inst.WaitingCondition, inst.WaitingOptionsJSON = "", "", "[]"
 	inst.Status = StatusCompleted
 	inst.CurrentStep = totalSteps
 	inst.StateJSON = toJSON(ec.State)
 	inst.OutputsJSON = toJSON(ec.Outputs)
-	_ = e.deps.Store.UpdateActionInstance(*inst)
+	if saveErr := e.updateInstance(ctx, inst); saveErr != nil {
+		return nil, saveErr
+	}
 
 	_ = e.deps.Store.LogActionEnriched(
 		"action_completed",
@@ -620,6 +724,9 @@ func buildActionResult(inst *store.ActionInstance, totalSteps int, ec *Execution
 	if inst.CreatedAt != "" && inst.UpdatedAt != "" {
 		if tStart, err1 := time.Parse(time.RFC3339, inst.CreatedAt); err1 == nil {
 			if tEnd, err2 := time.Parse(time.RFC3339, inst.UpdatedAt); err2 == nil {
+				if inst.Status != StatusCompleted && inst.Status != StatusFailed && inst.Status != StatusCancelled {
+					tEnd = time.Now()
+				}
 				durationMs = tEnd.Sub(tStart).Milliseconds()
 				if durationMs < 0 {
 					durationMs = 0
@@ -629,22 +736,27 @@ func buildActionResult(inst *store.ActionInstance, totalSteps int, ec *Execution
 	}
 
 	return &ActionResult{
-		ID:               inst.ID,
-		ActionName:       inst.ActionName,
-		Status:           inst.Status,
-		CurrentStep:      inst.CurrentStep,
-		TotalSteps:       totalSteps,
-		Inputs:           ec.Inputs,
-		Outputs:          ec.Outputs,
-		State:            ec.State,
-		WaitingReason:    inst.WaitingReason,
-		WaitingCondition: inst.WaitingCondition,
-		WaitingOptions:   waitingOptions,
-		Error:            errStr,
-		IdempotencyKey:   inst.IdempotencyKey,
-		DurationMs:       durationMs,
-		CreatedAt:        inst.CreatedAt,
-		UpdatedAt:        inst.UpdatedAt,
+		ID:                   inst.ID,
+		ActionName:           inst.ActionName,
+		Status:               inst.Status,
+		CurrentStep:          inst.CurrentStep,
+		TotalSteps:           totalSteps,
+		Inputs:               ec.Inputs,
+		Outputs:              ec.Outputs,
+		State:                ec.State,
+		WaitingReason:        inst.WaitingReason,
+		WaitingCondition:     inst.WaitingCondition,
+		WaitingOptions:       waitingOptions,
+		Error:                errStr,
+		IdempotencyKey:       inst.IdempotencyKey,
+		DurationMs:           durationMs,
+		WallDurationMs:       durationMs,
+		QueueDurationMs:      optionalDuration(ec.State, "queue_duration_ms"),
+		EncodeDurationMs:     optionalDuration(ec.State, "encode_duration_ms"),
+		ValidationDurationMs: optionalDuration(ec.State, "validation_duration_ms"),
+		ReconcileLagMs:       optionalDuration(ec.State, "reconcile_lag_ms"),
+		CreatedAt:            inst.CreatedAt,
+		UpdatedAt:            inst.UpdatedAt,
 	}
 }
 
