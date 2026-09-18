@@ -11,7 +11,19 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/jakenesler/navigatorr/transcode/resilience"
 )
+
+// Only errors from an invoked FFmpeg process may use ffmpeg_unknown. Setup,
+// staging and authentication failures preserve their own classifications.
+type ffmpegExecutionError struct{ cause error }
+
+func (e *ffmpegExecutionError) Error() string { return e.cause.Error() }
+func (e *ffmpegExecutionError) Unwrap() error { return e.cause }
+func (e *ffmpegExecutionError) FailureClass() string {
+	return string(resilience.Classify(e.cause.Error()))
+}
 
 // ResolveToolPath finds the tool at specified path or falls back to PATH.
 func ResolveToolPath(configured, fallbackName string) string {
@@ -216,7 +228,11 @@ func RunFFmpegPaths(ctx context.Context, ffmpegPath string, execPlan *ExecutionP
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return errors.New(SummarizeFFmpegError(logPath, err))
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			return fmt.Errorf("starting encoder process: %w", err)
+		}
+		return &ffmpegExecutionError{cause: errors.New(SummarizeFFmpegError(logPath, err))}
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()

@@ -21,6 +21,7 @@ func (e *Engine) registerBuiltinTemplates() {
 	e.registerTranscodeTemplate()
 	e.registerBenchmarkTemplate()
 	e.registerTranscodeBatchTemplate()
+	e.registerPromoteTranscodeTemplate()
 	e.RegisterTemplate(ActionTemplate{
 		Name:           "validate_torrent",
 		Version:        1,

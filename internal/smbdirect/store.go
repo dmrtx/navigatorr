@@ -4,6 +4,7 @@
 package smbdirect
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -162,13 +163,13 @@ func (s *Store) RemotePath(localPath string) (string, bool) {
 	return remote, true
 }
 
-func (s *Store) Stat(ctx context.Context, localPath string) (os.FileInfo, error) {
+func (s *Store) Stat(ctx context.Context, localPath string) (info os.FileInfo, retErr error) {
+	defer func() { retErr = wrapError("stat", retErr) }()
 	remote, ok := s.RemotePath(localPath)
 	if !ok {
 		return nil, fmt.Errorf("path %q is outside smb_direct.local_root", localPath)
 	}
-	var info os.FileInfo
-	err := s.connect(ctx, func(fs share) error {
+	err := s.withSessionRetry(ctx, "stat", func(fs share) error {
 		var err error
 		info, err = fs.Stat(remote)
 		return err
@@ -179,6 +180,7 @@ func (s *Store) Stat(ctx context.Context, localPath string) (os.FileInfo, error)
 // DownloadAtomic copies a remote source to a local SSD path and publishes the
 // local file only after a complete sync and size check.
 func (s *Store) DownloadAtomic(ctx context.Context, remoteLocalPath, localPath string) (retErr error) {
+	defer func() { retErr = wrapError("download", retErr) }()
 	remote, ok := s.RemotePath(remoteLocalPath)
 	if !ok {
 		return fmt.Errorf("path %q is outside smb_direct.local_root", remoteLocalPath)
@@ -197,7 +199,15 @@ func (s *Store) DownloadAtomic(ctx context.Context, remoteLocalPath, localPath s
 			_ = os.Remove(tmpName)
 		}
 	}()
-	err = s.connect(ctx, func(fs share) error {
+	err = s.withSessionRetry(ctx, "download", func(fs share) error {
+		// A recovered session starts a fresh read. Never append to a partial
+		// download or leave bytes from a longer previous attempt behind.
+		if err := tmp.Truncate(0); err != nil {
+			return fmt.Errorf("resetting local staging file: %w", err)
+		}
+		if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+			return fmt.Errorf("rewinding local staging file: %w", err)
+		}
 		info, err := fs.Stat(remote)
 		if err != nil {
 			return fmt.Errorf("statting SMB source: %w", err)
@@ -209,13 +219,21 @@ func (s *Store) DownloadAtomic(ctx context.Context, remoteLocalPath, localPath s
 		if err != nil {
 			return fmt.Errorf("opening SMB source: %w", err)
 		}
-		n, copyErr := copyContext(ctx, tmp, src)
+		// Exercise an authenticated source read before committing the staged
+		// download. Small inputs may reach EOF within this preflight.
+		preflight := make([]byte, 64*1024)
+		read, readErr := io.ReadFull(src, preflight)
+		if readErr != nil && readErr != io.EOF && readErr != io.ErrUnexpectedEOF {
+			_ = src.Close()
+			return fmt.Errorf("reading SMB source preflight: %w", readErr)
+		}
+		n, copyErr := copyContext(ctx, tmp, io.MultiReader(bytes.NewReader(preflight[:read]), src))
 		closeErr := src.Close()
 		if copyErr != nil {
-			return copyErr
+			return fmt.Errorf("reading SMB source: %w", copyErr)
 		}
 		if closeErr != nil {
-			return closeErr
+			return fmt.Errorf("closing SMB source: %w", closeErr)
 		}
 		if n != info.Size() {
 			return fmt.Errorf("SMB source changed while downloading: copied=%d stat=%d", n, info.Size())
@@ -240,7 +258,8 @@ func (s *Store) DownloadAtomic(ctx context.Context, remoteLocalPath, localPath s
 // Publish uploads a local candidate to an exclusive job-owned partial, reads
 // the entire partial back for SHA-256 verification, and renames without
 // replacement. A retry succeeds only if an existing final is byte-identical.
-func (s *Store) Publish(ctx context.Context, localCandidate, destination, jobID string) error {
+func (s *Store) Publish(ctx context.Context, localCandidate, destination, jobID string) (retErr error) {
+	defer func() { retErr = wrapError("publish", retErr) }()
 	remote, ok := s.RemotePath(destination)
 	if !ok {
 		return fmt.Errorf("path %q is outside smb_direct.local_root", destination)
@@ -254,7 +273,7 @@ func (s *Store) Publish(ctx context.Context, localCandidate, destination, jobID 
 		return fmt.Errorf("hashing local candidate: %w", err)
 	}
 	partial := remote + ".partial." + jobID
-	return s.connect(ctx, func(fs share) (retErr error) {
+	return s.withSessionRetry(ctx, "publish", func(fs share) (retErr error) {
 		if err := ensureRemoteDir(fs, path.Dir(remote)); err != nil {
 			return fmt.Errorf("ensuring SMB destination directory: %w", err)
 		}
@@ -310,13 +329,19 @@ func (s *Store) Publish(ctx context.Context, localCandidate, destination, jobID 
 			return fmt.Errorf("uploading SMB partial: %w", err)
 		}
 		hash, size, err := hashRemote(ctx, fs, partial)
-		if err != nil || size != localSize || hash != localHash {
-			return fmt.Errorf("SMB partial readback mismatch: bytes=%d/%d sha256=%s/%s err=%v", size, localSize, hash, localHash, err)
+		if err != nil {
+			return fmt.Errorf("reading back SMB partial: %w", err)
+		}
+		if size != localSize || hash != localHash {
+			return fmt.Errorf("SMB partial readback mismatch: bytes=%d/%d sha256=%s/%s", size, localSize, hash, localHash)
 		}
 		if err := fs.RenameNoReplace(partial, remote); err != nil {
 			if os.IsExist(err) {
 				hash, size, verifyErr := hashRemote(ctx, fs, remote)
-				if verifyErr == nil && size == localSize && hash == localHash {
+				if verifyErr != nil {
+					return fmt.Errorf("verifying destination after rename conflict: %w", verifyErr)
+				}
+				if size == localSize && hash == localHash {
 					_ = fs.Remove(partial)
 					created = false
 					return nil
@@ -327,8 +352,11 @@ func (s *Store) Publish(ctx context.Context, localCandidate, destination, jobID 
 		}
 		created = false
 		hash, size, err = hashRemote(ctx, fs, remote)
-		if err != nil || size != localSize || hash != localHash {
-			return fmt.Errorf("SMB final verification mismatch: bytes=%d/%d sha256=%s/%s err=%v", size, localSize, hash, localHash, err)
+		if err != nil {
+			return fmt.Errorf("verifying SMB final: %w", err)
+		}
+		if size != localSize || hash != localHash {
+			return fmt.Errorf("SMB final verification mismatch: bytes=%d/%d sha256=%s/%s", size, localSize, hash, localHash)
 		}
 		return nil
 	})
@@ -365,7 +393,8 @@ func ensureRemoteDir(fs share, dir string) error {
 // CheckRoot verifies authenticated read/write access without relying on a
 // mounted filesystem. It creates and removes one random empty file at the
 // share root and never inspects unrelated media.
-func (s *Store) CheckRoot(ctx context.Context) error {
+func (s *Store) CheckRoot(ctx context.Context) (retErr error) {
+	defer func() { retErr = wrapError("check_root", retErr) }()
 	var token [12]byte
 	if _, err := rand.Read(token[:]); err != nil {
 		return err
@@ -390,7 +419,7 @@ func (s *Store) CheckRoot(ctx context.Context) error {
 	})
 }
 
-func (s *Store) connectSMB(ctx context.Context, operation func(share) error) error {
+func (s *Store) connectSMB(ctx context.Context, operation func(share) error) (retErr error) {
 	password, err := readPasswordFile(s.cfg.PasswordFile)
 	if err != nil {
 		return err
@@ -402,21 +431,45 @@ func (s *Store) connectSMB(ctx context.Context, operation func(share) error) err
 		return fmt.Errorf("connecting to SMB server %s: %w", s.cfg.Server, err)
 	}
 	defer conn.Close()
-	d := &smb2.Dialer{
-		Negotiator: smb2.Negotiator{RequireMessageSigning: true},
-		Initiator:  &smb2.NTLMInitiator{User: s.cfg.Username, Password: password, Domain: s.cfg.Domain},
-	}
+	d := s.signedDialer(password)
 	session, err := d.DialContext(opCtx, conn)
 	if err != nil {
+		if Classify(err) == StorageIOError {
+			err = &Error{Class: SMBAuthFailed, Op: "authenticate", Err: err}
+		}
 		return fmt.Errorf("authenticating SMB session: %w", err)
 	}
-	defer session.Logoff()
-	mounted, err := session.WithContext(opCtx).Mount(s.cfg.Share)
+	var mounted *smb2.Share
+	defer func() {
+		if retErr != nil {
+			// Invalidate the failed connection immediately. In particular,
+			// do not wait for a damaged session to acknowledge Logoff.
+			_ = conn.Close()
+			return
+		}
+		// go-smb2's Session and Share default to context.Background even
+		// after DialContext/Mount. Explicitly bound cleanup as well as I/O.
+		cleanupCtx, cleanupCancel := context.WithTimeout(opCtx, 2*time.Second)
+		defer cleanupCancel()
+		if mounted != nil {
+			_ = mounted.WithContext(cleanupCtx).Umount()
+		}
+		_ = session.WithContext(cleanupCtx).Logoff()
+	}()
+	mounted, err = session.WithContext(opCtx).Mount(s.cfg.Share)
 	if err != nil {
 		return fmt.Errorf("mounting SMB share %q in userspace: %w", s.cfg.Share, err)
 	}
-	defer mounted.Umount()
 	return operation(smbShare{inner: mounted.WithContext(opCtx)})
+}
+
+// Every attempt, including recovery, uses the same signing requirement. There
+// is deliberately no unsigned fallback for a server/session signing failure.
+func (s *Store) signedDialer(password string) *smb2.Dialer {
+	return &smb2.Dialer{
+		Negotiator: smb2.Negotiator{RequireMessageSigning: true},
+		Initiator:  &smb2.NTLMInitiator{User: s.cfg.Username, Password: password, Domain: s.cfg.Domain},
+	}
 }
 
 func readPasswordFile(name string) (string, error) {

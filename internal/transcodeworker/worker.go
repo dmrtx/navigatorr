@@ -410,6 +410,9 @@ func (w *Worker) Doctor(ctx context.Context) DoctorResult {
 }
 
 func (w *Worker) statMedia(ctx context.Context, name string) (os.FileInfo, error) {
+	if err := w.requireMediaBackend(name); err != nil {
+		return nil, err
+	}
 	if w.mediaStore != nil && w.mediaStore.Maps(name) {
 		return w.mediaStore.Stat(ctx, name)
 	}
@@ -528,6 +531,11 @@ func (w *Worker) operationalMetadataFor(source, candidate, jobID string) (*opera
 	if err != nil {
 		return nil, err
 	}
+	// Direct SMB addresses are logical names, never mounted input paths. They
+	// always require SSD staging irrespective of the legacy mount policy.
+	if w.mediaStore != nil && w.mediaStore.Maps(source) {
+		stage = true
+	}
 	if stage {
 		staged, err := StagedInputPath(w.localWorkDir(), jobID, source)
 		if err != nil {
@@ -541,7 +549,7 @@ func (w *Worker) operationalMetadataFor(source, candidate, jobID string) (*opera
 		meta.EffectiveInputPath = source
 	}
 
-	if IsExternalPath(candidate, w.cfg.ExternalRoots) {
+	if IsExternalPath(candidate, w.cfg.ExternalRoots) || (w.mediaStore != nil && w.mediaStore.Maps(candidate)) {
 		localCandidate, err := LocalCandidatePath(w.localWorkDir(), jobID, candidate)
 		if err != nil {
 			return nil, err
@@ -576,6 +584,11 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 
 	cleanSource := filepath.Clean(req.SourcePath)
 	cleanCandidate := filepath.Clean(req.CandidatePath)
+	for _, name := range []string{cleanSource, cleanCandidate} {
+		if err := w.requireMediaBackend(name); err != nil {
+			return SubmitResponse{ID: trimmedID, Error: err.Error()}, err
+		}
+	}
 
 	// Reject candidate == source (FAIL CLOSED)
 	if cleanSource == cleanCandidate {
@@ -959,6 +972,8 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 		FinalizationState:   string(meta.FinalizationState),
 		PartialPath:         meta.PartialPath,
 	}
+	job.Phase = "queued"
+	w.initializeStorageTelemetry(job)
 	if plan != nil && len(plan.AppliedFallbacks) > 0 {
 		job.AppliedFallbacks = append([]string(nil), plan.AppliedFallbacks...)
 		job.FallbackCount = len(plan.AppliedFallbacks)
@@ -1276,26 +1291,13 @@ func (w *Worker) countActiveJobs(excludeID string) (int, error) {
 						continue
 					}
 					if job.Status == "running" {
-						if IsPostEncodeFinalizationPending(job) {
-							// Phase 6B1: encoding finished, finalization still
-							// pending, runner gone. Never runner_killed and not
-							// an active encode slot: clear the runner identity
-							// and persist nonterminal running. This path is
-							// reachable outside startup reconcile (e.g. via
-							// capacity counting during scheduling).
-							job.PID = 0
-							job.ProcessStartTime = ""
-							if serr := SaveJobAtomic(jobPath, job); serr != nil {
-								return 0, fmt.Errorf("persisting post-encode normalization for job %q: %w", job.ID, serr)
-							}
-							continue
+						latest, err := w.reconcileStoppedRunner(entryDir, jobPath)
+						if err != nil {
+							return 0, err
 						}
-						// Clean stale crash or recycled PID
-						job.Status = "failed"
-						job.FinishedAt = time.Now().UTC()
-						job.Error = "process terminated unexpectedly"
-						job.FailureClassification = "runner_killed"
-						_ = SaveJobAtomic(jobPath, job)
+						if latest.Status == "running" && latest.PID > 0 {
+							count++ // a runner claimed the job after the initial read
+						}
 					} else {
 						// Queued with a stale PID: treat as non-active without
 						// persisting here. Ownership: scheduler and locked
@@ -1317,11 +1319,13 @@ func (w *Worker) countActiveJobs(excludeID string) (int, error) {
 					if IsBenchmarkExecutionAlive(bench) {
 						count++
 					} else if bench.PID > 0 {
-						bench.Status = "failed"
-						bench.FinishedAt = time.Now().UTC()
-						bench.Error = "process terminated unexpectedly"
-						_ = SaveBenchmarkAtomic(benchPath, bench)
-						_ = w.CleanBenchmarkSamples(name)
+						latest, err := w.reconcileStoppedBenchmark(entryDir, bench)
+						if err != nil {
+							return 0, err
+						}
+						if (latest.Status == "running" || latest.Status == "queued") && latest.PID > 0 {
+							count++ // execution changed after the initial read; retain its slot
+						}
 					}
 				}
 			}
@@ -1357,6 +1361,9 @@ func (w *Worker) InternalRun(ctx context.Context, jobID string) error {
 	if err != nil {
 		return fmt.Errorf("job %s: %w", jobID, err)
 	}
+	if err := w.validateJobStorageBackend(job, resolved); err != nil {
+		return w.failJobTerminal(jobDir, jobFile, job, err)
+	}
 
 	// Post-encode restart resume: encoding already finished, so claiming the
 	// runner and finalizing is safe and must never re-probe or re-encode.
@@ -1373,6 +1380,8 @@ func (w *Worker) InternalRun(ctx context.Context, jobID string) error {
 		// Cancellation wins over a concurrently claimed runner.
 		return nil
 	}
+	stopHeartbeat := w.startJobHeartbeat(ctx, jobDir, jobFile, jobHeartbeatInterval)
+	defer stopHeartbeat()
 
 	if postEncodeResume || job.EncodeComplete {
 		return w.finalizeOperational(ctx, jobDir, jobFile, job, resolved)
@@ -1405,7 +1414,14 @@ func (w *Worker) claimRunner(jobDir, jobFile string, job *JobRecord) (bool, erro
 	_, startTime, _ := GetProcessIdentity(latest.PID)
 	latest.ProcessStartTime = startTime
 	latest.Status = "running"
-	latest.StartedAt = time.Now().UTC()
+	if latest.StartedAt.IsZero() {
+		latest.StartedAt = time.Now().UTC()
+	}
+	latest.Phase = "preparing"
+	if latest.EncodeComplete {
+		latest.Phase = "publishing"
+	}
+	latest.WorkerHeartbeatAt = time.Now().UTC()
 	if serr := SaveJobAtomic(jobFile, latest); serr != nil {
 		return false, fmt.Errorf("persisting runner claim for job %q: %w", latest.ID, serr)
 	}
@@ -1490,6 +1506,17 @@ func (w *Worker) persistTerminalJob(jobDir, jobFile string, job *JobRecord) erro
 		return nil
 	}
 
+	// A heartbeat may have advanced since the runner's last phase transition.
+	// Preserve its measurements without replacing the terminal decision.
+	if latest.LastProgressAt.After(job.LastProgressAt) {
+		job.LastProgressAt = latest.LastProgressAt
+		job.LastKnownProgress = latest.LastKnownProgress
+	}
+	job.WorkerHeartbeatAt = job.FinishedAt
+	job.Phase = job.Status
+	job.ProgressIsStale = false
+	job.NextFinalizationAt = time.Time{}
+	job.JobTelemetry = telemetryFor(job, time.Now().UTC())
 	if err := SaveJobAtomic(jobFile, job); err != nil {
 		return fmt.Errorf("saving terminal job %q: %w", job.ID, err)
 	}
@@ -1639,6 +1666,7 @@ func (w *Worker) reconcileJob(jobDir, jobFile string) error {
 
 // JobStatusResponse is returned by the status subcommand.
 type JobStatusResponse struct {
+	transcode.JobTelemetry
 	ID                    string                       `json:"id"`
 	Status                string                       `json:"status"`
 	Progress              float64                      `json:"progress"`
@@ -1689,31 +1717,17 @@ func (w *Worker) Status(ctx context.Context, jobID string) (JobStatusResponse, e
 		return JobStatusResponse{ID: jobID, Status: "failed", Error: "job not found"}, err
 	}
 
-	// Detect crashed process or recycled PID. Running with a dead process
-	// becomes failed. Queued with a stale PID is reported as queued without
-	// persisting here; ownership: scheduler and locked Submit own queued
-	// stale PID normalization under capLock + per-job lock. Persisting here
-	// (no jobLock) could resurrect a concurrently cancelled job. PID-0
-	// queued jobs report queued correctly without liveness checks.
-	if job.Status == "running" && job.PID > 0 {
-		if !w.jobAlive(job) {
-			job.Status = "failed"
-			job.FinishedAt = time.Now().UTC()
-			job.Error = "process terminated unexpectedly"
-			job.FailureClassification = "runner_killed"
-			_ = SaveJobAtomic(jobFile, job)
+	// Re-read under lock before persisting liveness failures: the initial
+	// snapshot may race the runner's completion or a user's cancellation.
+	if job.Status == "running" && job.PID > 0 && !w.jobAlive(job) {
+		job, err = w.reconcileStoppedRunner(jobDir, jobFile)
+		if err != nil {
+			return JobStatusResponse{}, err
 		}
-	} else if job.Status == "queued" && job.PID > 0 {
-		// Intentionally no durable rewrite: treat stale PID as schedulable
-		// queued for reporting/counting; scheduler normalizes under lock.
 	}
-
-	progressPath := filepath.Join(jobDir, "progress.txt")
-	metrics := ParseProgress(progressPath, job.DurationSec)
-
-	if job.Status == "completed" {
-		metrics.Progress = 100.0
-	}
+	metrics := observeJobProgress(jobDir, job, time.Now().UTC())
+	telemetry := telemetryFor(job, time.Now().UTC())
+	telemetry.WorkerSlotsTotal, telemetry.WorkerSlotsUsed, telemetry.QueuePosition = w.slotSnapshot(jobID)
 
 	var (
 		container, videoCodec                   string
@@ -1739,6 +1753,7 @@ func (w *Worker) Status(ctx context.Context, jobID string) (JobStatusResponse, e
 	}
 
 	return JobStatusResponse{
+		JobTelemetry:          telemetry,
 		ID:                    job.ID,
 		Status:                job.Status,
 		Progress:              metrics.Progress,
@@ -1849,6 +1864,9 @@ func (w *Worker) Cancel(ctx context.Context, jobID string) (JobStatusResponse, e
 
 	job.Status = "cancelled"
 	job.FinishedAt = time.Now().UTC()
+	job.Phase = "cancelled"
+	job.ProgressIsStale = false
+	job.NextFinalizationAt = time.Time{}
 
 	// job.json is the durable source of truth and must be persisted (fail
 	// closed) before any terminal marker is written.

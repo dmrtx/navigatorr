@@ -21,13 +21,22 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
-// diagDoctorStub satisfies transcode.Executor through the embedded interface so
-// the diagnostics tests only need to model Doctor. Any other method panics,
-// which is what we want: diagnostics must never call them.
+// Only availability probes may run during diagnostics; invoking an encode
+// operation through the embedded interface would panic.
 type diagDoctorStub struct {
 	transcode.Executor
 	doctorCalls int32
 	doctorFunc  func(ctx context.Context) error
+	readyFunc   func(ctx context.Context) error
+}
+
+func (m *diagDoctorStub) Health(context.Context) error { return nil }
+
+func (m *diagDoctorStub) Ready(ctx context.Context) error {
+	if m.readyFunc != nil {
+		return m.readyFunc(ctx)
+	}
+	return nil
 }
 
 func (m *diagDoctorStub) Doctor(ctx context.Context) error {
@@ -90,7 +99,7 @@ func TestDiagnosticsSlowProbeDoesNotStarveDoctor(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
 	defer cancel()
 
-	txt := callDiagnosticsWithContext(t, s, ctx, map[string]any{"check_connectivity": true})
+	txt := callDiagnosticsWithContext(t, s, ctx, map[string]any{"check_connectivity": true, "check_deep": true})
 
 	var dMap map[string]any
 	if err := json.Unmarshal([]byte(txt), &dMap); err != nil {
@@ -111,9 +120,9 @@ func TestDiagnosticsSlowProbeDoesNotStarveDoctor(t *testing.T) {
 	}
 }
 
-// Doctor failures must still surface as degraded on both the transcode section
-// and the overall status, exactly as before the concurrency change.
-func TestDiagnosticsDoctorErrorMarksDegraded(t *testing.T) {
+// A deep diagnostic failure must remain visible without declaring a ready
+// worker unavailable.
+func TestDiagnosticsDoctorErrorDoesNotMaskReadiness(t *testing.T) {
 	stub := &diagDoctorStub{
 		doctorFunc: func(ctx context.Context) error {
 			return errors.New("doctor boom")
@@ -123,24 +132,69 @@ func TestDiagnosticsDoctorErrorMarksDegraded(t *testing.T) {
 	s := server.NewMCPServer("test", "0.0.0")
 	RegisterDiagnostics(s, &config.Config{}, nil, nil, nil, nil, nil, nil, stub)
 
-	txt := callDiagnosticsWithContext(t, s, context.Background(), map[string]any{"check_connectivity": true})
+	txt := callDiagnosticsWithContext(t, s, context.Background(), map[string]any{"check_connectivity": true, "check_deep": true})
 
 	var dMap map[string]any
 	if err := json.Unmarshal([]byte(txt), &dMap); err != nil {
 		t.Fatalf("decoding diagnostics output: %v", err)
 	}
-	if dMap["status"] != "degraded" {
-		t.Errorf("expected overall status degraded, got %v", dMap["status"])
+	if dMap["status"] != "ok" {
+		t.Errorf("expected overall status ok, got %v", dMap["status"])
 	}
 	tcInfo, ok := dMap["transcode"].(map[string]any)
 	if !ok {
 		t.Fatalf("missing transcode section: %v", dMap)
 	}
-	if tcInfo["status"] != "degraded" {
-		t.Errorf("expected transcode status degraded, got %v", tcInfo["status"])
+	if tcInfo["status"] != "ok" || tcInfo["can_accept_jobs"] != true {
+		t.Errorf("expected ready transcode worker, got %v", tcInfo)
 	}
-	if got, _ := tcInfo["error"].(string); !strings.Contains(got, "doctor boom") {
+	doctor := tcInfo["doctor"].(map[string]any)
+	if got, _ := doctor["error"].(string); !strings.Contains(got, "doctor boom") {
 		t.Errorf("expected doctor error surfaced, got %q", got)
+	}
+}
+
+func TestDiagnosticsReadinessFailureIsUnavailable(t *testing.T) {
+	stub := &diagDoctorStub{readyFunc: func(context.Context) error {
+		return errors.New("worker draining")
+	}}
+	result := inspectTranscodeAvailability(context.Background(), stub, false)
+	if result["status"] != "degraded" || result["can_accept_jobs"] != false {
+		t.Fatalf("readiness failure hidden: %v", result)
+	}
+	if atomic.LoadInt32(&stub.doctorCalls) != 0 {
+		t.Fatal("ordinary diagnostics invoked deep Doctor")
+	}
+}
+
+func TestDiagnosticsDeepTimeoutPreservesHealthyReadyResult(t *testing.T) {
+	stub := &diagDoctorStub{doctorFunc: func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	result := inspectTranscodeAvailability(ctx, stub, true)
+	if result["status"] != "ok" || result["can_accept_jobs"] != true {
+		t.Fatalf("deep timeout changed readiness: %v", result)
+	}
+	doctor := result["doctor"].(map[string]any)
+	if doctor["error_class"] != "diagnostic_timeout" {
+		t.Fatalf("missing specific diagnostic timeout: %v", doctor)
+	}
+}
+
+func TestDiagnosticsCancelledQueryDoesNotDeclareWorkerDown(t *testing.T) {
+	stub := &diagDoctorStub{readyFunc: func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	result := inspectTranscodeAvailability(ctx, stub, false)
+	ready := result["ready"].(map[string]any)
+	if ready["error_class"] != "worker_reachability_unknown" || result["status"] != "unknown" || result["can_accept_jobs"] != nil {
+		t.Fatalf("query cancellation was mistaken for worker outage: %v", result)
 	}
 }
 
@@ -164,8 +218,8 @@ func TestDiagnosticsSkipsDoctorWhenConnectivityDisabled(t *testing.T) {
 	if !ok {
 		t.Fatalf("missing transcode section: %v", dMap)
 	}
-	if tcInfo["status"] != "ok" {
-		t.Errorf("expected transcode status ok when connectivity skipped, got %v", tcInfo["status"])
+	if tcInfo["status"] != "not_checked" {
+		t.Errorf("expected transcode status not_checked when connectivity skipped, got %v", tcInfo["status"])
 	}
 }
 

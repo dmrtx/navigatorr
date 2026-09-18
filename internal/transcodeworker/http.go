@@ -314,10 +314,13 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 		writeHTTPJSON(w, http.StatusServiceUnavailable, map[string]any{"ready": false, "error": fmt.Sprintf("state_dir not writable: %v", detail)})
 		return
 	}
+	total, used, _ := s.worker.slotSnapshot("")
 	writeHTTPJSON(w, http.StatusOK, map[string]any{
-		"ready":             true,
-		"state_dir":         stateDir,
-		"max_parallel_jobs": maxParallel,
+		"ready":              true,
+		"state_dir":          stateDir,
+		"max_parallel_jobs":  maxParallel,
+		"worker_slots_total": total,
+		"worker_slots_used":  used,
 	})
 }
 
