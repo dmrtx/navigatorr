@@ -17,7 +17,8 @@ import (
 
 func (e *Engine) registerTranscodeTemplate() {
 	e.RegisterTemplate(ActionTemplate{
-		Name: "transcode_media", Version: 2,
+		AutoReconcile: true,
+		Name:          "transcode_media", Version: 2,
 		Description:    "Coordinates safe candidate-only media transcoding using an immutable recipe-resolved plan, bounded transient retries, worker revalidation, post-transcode stream validation, and original SHA-256 verification.",
 		RequiredInputs: []string{"path"}, OptionalInputs: []string{"profile", "replace_original", "expected_video_codec", "max_size_increase_percent", "media_type", "is_anime", "min_savings_percent", "surface_worker_busy", "metric"}, Destructive: false,
 		Steps: []StepDefinition{
@@ -63,7 +64,7 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to open original file %s: %v", cleanPath, err)}, nil
 	}
 	h := sha256.New()
-	_, hashErr := io.Copy(h, f)
+	_, hashErr := io.Copy(h, contextReader{ctx: ctx, reader: f})
 	_ = f.Close()
 	if hashErr != nil {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to compute hash of original file %s: %v", cleanPath, hashErr)}, nil

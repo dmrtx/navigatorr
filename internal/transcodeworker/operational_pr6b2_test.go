@@ -493,8 +493,8 @@ func TestPR6B2_FinalizationFailureResumesWithoutReencode(t *testing.T) {
 	if failed.Status != "running" || failed.PID != 0 || !failed.EncodeComplete {
 		t.Fatalf("failed finalization must stay nonterminal/resumable: %+v", failed)
 	}
-	if failed.FailureClassification != FailureStorageFinalization {
-		t.Fatalf("classification = %q, want %q", failed.FailureClassification, FailureStorageFinalization)
+	if failed.FailureClassification != "storage_io_error" {
+		t.Fatalf("classification = %q, want storage_io_error", failed.FailureClassification)
 	}
 	if _, err := os.Stat(localCandidate); err != nil {
 		t.Fatalf("local candidate must be preserved on finalization failure: %v", err)
@@ -1028,8 +1028,8 @@ func TestPR6B2_ExclusiveCopyFinalizationFailureResumesToCompleted(t *testing.T) 
 	if failed.Status != "running" || failed.PID != 0 || !failed.EncodeComplete {
 		t.Fatalf("failed finalization must stay nonterminal/resumable: %+v", failed)
 	}
-	if failed.FailureClassification != FailureStorageFinalization {
-		t.Fatalf("classification = %q, want %q", failed.FailureClassification, FailureStorageFinalization)
+	if failed.FailureClassification != "storage_io_error" {
+		t.Fatalf("classification = %q, want storage_io_error", failed.FailureClassification)
 	}
 	if _, err := os.Stat(destination); !os.IsNotExist(err) {
 		t.Fatal("destination must not exist after a failed exclusive-copy publish")
@@ -1571,8 +1571,8 @@ func TestPR6B2_FreshConflictWithStalePartialNeverReconciles(t *testing.T) {
 	}
 	failed := pr6b1LoadJob(t, cfg.StateDir, id)
 	if failed.FinalizationState != string(FinalizationStateFinalizing) ||
-		failed.FailureClassification != FailureStorageFinalization {
-		t.Fatalf("recorded failure state = %+v, want finalizing/storage_finalization_failed", failed)
+		failed.FailureClassification != "idempotency_conflict" || !failed.NextFinalizationAt.IsZero() {
+		t.Fatalf("recorded failure state = %+v, want finalizing/idempotency_conflict without scheduled retry", failed)
 	}
 	if exists, _ := pathExists(PartialPathFor(destination, id)); exists {
 		t.Fatal("a recorded conflict must clean this job's stale own partial")

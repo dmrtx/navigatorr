@@ -254,14 +254,14 @@ func TestEstimateOutput_MissingFallbacksUnsuitable(t *testing.T) {
 		t.Errorf("UnusableReason = %q, want %q", res.UnusableReason, ReasonMissingStreamBitrate)
 	}
 
-	// Subtitle without size or fallback
+	// Bitmap subtitle without size or fallback still fails closed.
 	inSub := OutputEstimateInput{
 		SourceSizeBytes:       500000000,
 		TotalDurationSeconds:  100.0,
 		SampleDurationSeconds: 10.0,
 		SampleVideoBytes:      1000000,
 		SubtitleStreams: []SubtitleStreamEstimate{
-			{Index: 2, Codec: "subrip"}, // No size or fallback!
+			{Index: 2, Codec: "hdmv_pgs_subtitle"}, // No size or fallback!
 		},
 	}
 
@@ -296,6 +296,42 @@ func TestEstimateOutput_UnusableVideoEstimate(t *testing.T) {
 	}
 	if res.UnusableReason != ReasonInvalidVideoEstimate && res.UnusableReason != ReasonUnusableEstimate {
 		t.Errorf("expected unusable reason, got %q", res.UnusableReason)
+	}
+}
+
+func TestEstimateOutput_TextSubtitleAllowance(t *testing.T) {
+	for _, codec := range []string{"srt", "subrip", "mov_text", "ass", "ssa", "webvtt", " ASS "} {
+		t.Run(codec, func(t *testing.T) {
+			res, err := EstimateOutput(OutputEstimateInput{
+				SourceSizeBytes: 1786755584, TotalDurationSeconds: 3600,
+				SampleDurationSeconds: 60, SampleVideoBytes: 7304172,
+				AudioStreams:    []AudioStreamEstimate{{Index: 1, Codec: "aac", BitrateBps: 192000, Copied: true}},
+				SubtitleStreams: []SubtitleStreamEstimate{{Index: 2, Codec: codec}},
+			})
+			if err != nil || !res.SuitableForSelection || res.UnusableReason != "" {
+				t.Fatalf("unknown text subtitle size should remain selectable: %+v, %v", res, err)
+			}
+			if res.EstimatedSubtitleBytes != DefaultTextSubtitleSizeBytes {
+				t.Errorf("subtitle estimate = %d, want conservative %d", res.EstimatedSubtitleBytes, DefaultTextSubtitleSizeBytes)
+			}
+			if len(res.Uncertainties) != 1 || res.Uncertainties[0] != "subtitle_size_estimated:stream_2" {
+				t.Errorf("missing visible subtitle uncertainty: %v", res.Uncertainties)
+			}
+			if math.Abs(res.SavingsPercent-70.36) > 0.15 {
+				t.Errorf("small text allowance materially changed ~70%% savings: %.2f", res.SavingsPercent)
+			}
+		})
+	}
+	for _, codec := range []string{"hdmv_pgs_subtitle", "dvd_subtitle", "unknown", ""} {
+		t.Run("no_default_"+codec, func(t *testing.T) {
+			res, err := EstimateOutput(OutputEstimateInput{
+				TotalDurationSeconds: 100, SampleDurationSeconds: 10, SampleVideoBytes: 1000000,
+				SubtitleStreams: []SubtitleStreamEstimate{{Index: 2, Codec: codec}},
+			})
+			if err != nil || res.SuitableForSelection || res.UnusableReason != ReasonMissingSubtitleSize {
+				t.Fatalf("unknown/bitmap subtitle must still require size: %+v, %v", res, err)
+			}
+		})
 	}
 }
 

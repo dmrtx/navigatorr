@@ -222,24 +222,39 @@ type BenchmarkCancelResponse struct {
 	Error           string `json:"error,omitempty"`
 }
 
+// BenchmarkProgressDetails describes the latest started unit and resolved work
+// count. Encodes and metrics can overlap; this is not an exclusive active slot.
+// SampleNumber and CandidateNumber are one-based positions in the original plan.
+type BenchmarkProgressDetails struct {
+	SampleNumber    int    `json:"sample_number,omitempty"`
+	CandidateNumber int    `json:"candidate_number,omitempty"`
+	CandidateID     string `json:"candidate_id,omitempty"`
+	Metric          string `json:"metric,omitempty"`
+	CompletedUnits  int    `json:"completed_units"`
+	TotalUnits      int    `json:"total_units"`
+}
+
 // BenchmarkStatus captures the current execution status and metadata of a benchmark job.
 type BenchmarkStatus struct {
-	ProtocolVersion int                `json:"protocol_version"`
-	ID              string             `json:"id"`
-	Status          string             `json:"status"` // queued, running, completed, failed, cancelled
-	SourcePath      string             `json:"source_path"`
-	Metric          string             `json:"metric,omitempty"`
-	Progress        float64            `json:"progress"`
-	Phase           string             `json:"phase,omitempty"`
-	HeartbeatAt     time.Time          `json:"heartbeat_at,omitempty"`
-	Error           string             `json:"error,omitempty"`
-	SamplesPlanned  int                `json:"samples_planned"`
-	CandidatesCount int                `json:"candidates_count"`
-	Attempt         int                `json:"attempt,omitempty"`
-	CreatedAt       time.Time          `json:"created_at"`
-	StartedAt       time.Time          `json:"started_at,omitempty"`
-	FinishedAt      time.Time          `json:"finished_at,omitempty"`
-	Decision        *BenchmarkDecision `json:"decision,omitempty"`
+	ProtocolVersion int                       `json:"protocol_version"`
+	ID              string                    `json:"id"`
+	Status          string                    `json:"status"` // queued, running, completed, failed, cancelled
+	SourcePath      string                    `json:"source_path"`
+	Metric          string                    `json:"metric,omitempty"`
+	Progress        float64                   `json:"progress"`
+	Phase           string                    `json:"phase,omitempty"`
+	HeartbeatAt     time.Time                 `json:"heartbeat_at,omitempty"`
+	LastProgressAt  time.Time                 `json:"last_progress_at,omitempty"`
+	ProgressIsStale bool                      `json:"progress_is_stale"`
+	ProgressDetails *BenchmarkProgressDetails `json:"progress_details,omitempty"`
+	Error           string                    `json:"error,omitempty"`
+	SamplesPlanned  int                       `json:"samples_planned"`
+	CandidatesCount int                       `json:"candidates_count"`
+	Attempt         int                       `json:"attempt,omitempty"`
+	CreatedAt       time.Time                 `json:"created_at"`
+	StartedAt       time.Time                 `json:"started_at,omitempty"`
+	FinishedAt      time.Time                 `json:"finished_at,omitempty"`
+	Decision        *BenchmarkDecision        `json:"decision,omitempty"`
 }
 
 // DigestBenchmarkRequest computes a deterministic sha256 digest of the benchmark request payload.

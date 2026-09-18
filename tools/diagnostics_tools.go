@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"strings"
 	"time"
@@ -38,6 +39,7 @@ func registerDiagnosticsTools(s *server.MCPServer, d DiagnosticsDeps) {
 		mcp.NewTool("diagnostics",
 			mcp.WithDescription("diagnostics muestra configuración efectiva no sensible y redacta todos los secretos. Check runtime health, service connectivity, effective configuration, download clients, OpenAPI spec store, and SQLite database stats."),
 			mcp.WithBoolean("check_connectivity", mcp.Description("Whether to ping external services and download clients (default true)")),
+			mcp.WithBoolean("check_deep", mcp.Description("Also run the transcode worker's deep Doctor checks (default false). Doctor results are separate from readiness.")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			checkConn := true
@@ -46,21 +48,16 @@ func registerDiagnosticsTools(s *server.MCPServer, d DiagnosticsDeps) {
 			}
 
 			overallStatus := "ok"
+			checkDeep, _ := req.GetArguments()["check_deep"].(bool)
 
-			// Start the transcode Doctor probe before the sequential upstream
-			// service and download-client checks. Those checks can consume the
-			// whole wall-clock budget under a caller-imposed deadline, leaving
-			// Doctor to start against an already-expired context. Running it
-			// concurrently, but with the same caller context, keeps it bounded
-			// by (and cancellable with) the caller while granting it the full
-			// budget. The buffered channel decouples completion timing from the
-			// transcode section, so the sender never blocks or leaks if the
-			// result is never read.
-			var doctorDone chan error
+			// Start worker probes before upstream checks so a slow *arr service
+			// cannot starve readiness. Deep diagnostics are explicitly requested
+			// and never decide whether the executor is available.
+			var workerDone chan map[string]any
 			if checkConn && d.Transcode != nil {
-				doctorDone = make(chan error, 1)
+				workerDone = make(chan map[string]any, 1)
 				go func() {
-					doctorDone <- d.Transcode.Doctor(ctx)
+					workerDone <- inspectTranscodeAvailability(ctx, d.Transcode, checkDeep)
 				}()
 			}
 
@@ -236,12 +233,13 @@ func registerDiagnosticsTools(s *server.MCPServer, d DiagnosticsDeps) {
 				tcInfo = map[string]any{
 					"configured": true,
 					"executor":   "http",
-					"status":     "ok",
+					"status":     "not_checked",
 				}
-				if checkConn && doctorDone != nil {
-					if err := <-doctorDone; err != nil {
-						tcInfo["status"] = "degraded"
-						tcInfo["error"] = err.Error()
+				if workerDone != nil {
+					for key, value := range <-workerDone {
+						tcInfo[key] = value
+					}
+					if tcInfo["status"] != "ok" {
 						overallStatus = "degraded"
 					}
 				}
@@ -295,6 +293,92 @@ func registerDiagnosticsTools(s *server.MCPServer, d DiagnosticsDeps) {
 			}), nil
 		},
 	)
+}
+
+// inspectTranscodeAvailability keeps process health, submit readiness and deep
+// diagnostics independent. Each probe runs concurrently within the caller's
+// deadline. Executors without an availability API are reported as unknown;
+// Doctor is never silently used as their readiness gate.
+func inspectTranscodeAvailability(ctx context.Context, executor transcode.Executor, deep bool) map[string]any {
+	result := map[string]any{"status": "unknown", "doctor": map[string]any{"status": "not_checked"}}
+	availability, supported := executor.(interface {
+		Health(context.Context) error
+		Ready(context.Context) error
+	})
+	type probe struct {
+		name string
+		err  error
+	}
+	done := make(chan probe, 3)
+	pending := make(map[string]bool)
+	start := func(name string, run func(context.Context) error) {
+		pending[name] = true
+		go func() { done <- probe{name, run(ctx)} }()
+	}
+	if supported {
+		start("health", availability.Health)
+		start("ready", availability.Ready)
+	} else {
+		result["health"] = map[string]any{"status": "unsupported"}
+		result["ready"] = map[string]any{"status": "unsupported"}
+	}
+	if deep {
+		start("doctor", executor.Doctor)
+	}
+	setResult := func(name string, err error) {
+		status := map[string]any{"status": "ok"}
+		if err != nil {
+			status["status"] = "degraded"
+			status["error"] = err.Error()
+			class := "worker_unavailable"
+			if name == "doctor" {
+				class = "diagnostic_failed"
+				if errors.Is(err, context.DeadlineExceeded) {
+					class = "diagnostic_timeout"
+				} else if errors.Is(err, context.Canceled) {
+					class = "diagnostic_cancelled"
+				}
+			} else if transcode.IsTransportUncertain(err) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				class = "worker_reachability_unknown"
+				status["status"] = "unknown"
+			}
+			status["error_class"] = class
+		}
+		result[name] = status
+		if name == "ready" {
+			result["status"] = status["status"]
+			result["can_accept_jobs"] = err == nil
+			if status["status"] == "unknown" {
+				result["can_accept_jobs"] = nil
+			}
+			if err != nil {
+				result["error"] = err.Error()
+			}
+		}
+	}
+	for len(pending) > 0 {
+		select {
+		case p := <-done:
+			delete(pending, p.name)
+			setResult(p.name, p.err)
+		case <-ctx.Done():
+			// Drain already finished probes before labelling the rest timed out.
+			// A slow deep check must not erase a readiness result already received.
+			for {
+				select {
+				case p := <-done:
+					delete(pending, p.name)
+					setResult(p.name, p.err)
+				default:
+					for name := range pending {
+						setResult(name, ctx.Err())
+					}
+					return result
+				}
+			}
+		}
+	}
+	return result
 }
 
 func redactURL(raw string) string {
