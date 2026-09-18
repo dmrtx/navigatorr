@@ -3676,6 +3676,7 @@ func TestProductionBenchmarkRunner_MetricCancellation_PreservesPartialEvidence(t
 	_ = os.WriteFile(sourceFile, []byte("fake video content"), 0644)
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	mockProbe := filepath.Join(dir, "mock_probe.sh")
 	_ = os.WriteFile(mockProbe, []byte(fmt.Sprintf("#!/bin/sh\ncat << 'EOF'\n%s\nEOF\n", sdr8BitProbeJSON)), 0755)
@@ -3773,16 +3774,29 @@ exit 0
 			{ID: "cand_0", Quality: 60},
 			{ID: "cand_1", Quality: 70},
 		},
-		Attempt: 1,
+		// Serialize encode/metric stages so cand_0's completed metric evidence is
+		// recorded before cand_1's mid-flight cancellation, independent of load.
+		Concurrency: &transcode.BenchmarkConcurrencyConfig{EncodeConcurrency: 1, MetricConcurrency: 1},
+		Attempt:     1,
 	}
 
-	// Goroutine that monitors for cancel trigger
+	// Monitor for the cancel trigger until the run returns. No fixed retry
+	// budget: the mock blocks in cand_1's metric after touching the file, so
+	// cancellation is observed deterministically instead of racing a timeout.
+	cancelObserved := make(chan struct{})
+	defer close(cancelObserved)
 	go func() {
-		for i := 0; i < 50; i++ {
-			time.Sleep(50 * time.Millisecond)
-			if _, err := os.Stat(cancelTriggerFile); err == nil {
-				cancel()
+		ticker := time.NewTicker(5 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-cancelObserved:
 				return
+			case <-ticker.C:
+				if _, err := os.Stat(cancelTriggerFile); err == nil {
+					cancel()
+					return
+				}
 			}
 		}
 	}()

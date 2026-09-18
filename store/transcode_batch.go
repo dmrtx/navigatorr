@@ -122,7 +122,63 @@ func (s *Store) ListTranscodeBatchItems(batchID string) ([]TranscodeBatchItem, e
 		return nil, err
 	}
 	defer rows.Close()
+	return scanTranscodeBatchItems(rows)
+}
 
+// FindTranscodeBatchItemByChildActionID returns the single batch item whose
+// child_action_id references the given child action. A non-unique association
+// is rejected so a manipulated link cannot mask the real parent.
+func (s *Store) FindTranscodeBatchItemByChildActionID(childActionID string) (*TranscodeBatchItem, error) {
+	if childActionID == "" {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.findTranscodeBatchItemLocked(
+		`SELECT id, batch_id, item_key, file_path, display_label,
+			episode_info, decision, profile, reasons_json, status, child_action_id, job_id,
+			candidate_path, error, attempts, created_at, updated_at
+			FROM transcode_batch_items WHERE child_action_id = ? LIMIT 2`, childActionID)
+}
+
+// FindTranscodeBatchItemByChildKey returns the single batch item whose exact
+// constructed child idempotency key ('batch-' || batch_id || '-' || item_key)
+// matches the supplied key. The key is compared as a whole; it is never split
+// on separators, so ids containing '-' are handled unambiguously.
+func (s *Store) FindTranscodeBatchItemByChildKey(childKey string) (*TranscodeBatchItem, error) {
+	if childKey == "" {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.findTranscodeBatchItemLocked(
+		`SELECT id, batch_id, item_key, file_path, display_label,
+			episode_info, decision, profile, reasons_json, status, child_action_id, job_id,
+			candidate_path, error, attempts, created_at, updated_at
+			FROM transcode_batch_items
+			WHERE ? = 'batch-' || batch_id || '-' || item_key LIMIT 2`, childKey)
+}
+
+func (s *Store) findTranscodeBatchItemLocked(query string, args ...any) (*TranscodeBatchItem, error) {
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items, err := scanTranscodeBatchItems(rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(items) > 1 {
+		return nil, fmt.Errorf("ambiguous transcode_batch item association: %d matches", len(items))
+	}
+	if len(items) == 0 {
+		return nil, nil
+	}
+	return &items[0], nil
+}
+
+func scanTranscodeBatchItems(rows *sql.Rows) ([]TranscodeBatchItem, error) {
 	var items []TranscodeBatchItem
 	for rows.Next() {
 		var item TranscodeBatchItem

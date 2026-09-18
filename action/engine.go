@@ -427,6 +427,11 @@ func (e *Engine) Cancel(ctx context.Context, instanceID, reason string) (*Action
 		}
 	}
 
+	// A batch cascade is intentionally not performed here: pending children are
+	// stopped by their own admission guard (which re-reads this parent under the
+	// parent lease), and accepted jobs keep their identity and remain tracked.
+	// Directly mutating child rows without their lease could clobber a live run
+	// or erase a user wait.
 	return buildActionResult(inst, len(tmpl.Steps), ec), nil
 }
 

@@ -69,19 +69,6 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 		cleanPath = getString(ec.Inputs, "path")
 	}
 
-	rep := getSourceReport(ec.State["source_report"])
-	if rep == nil {
-		rep = getSourceReport(ec.State["original"])
-	}
-	if rep == nil {
-		return StepResult{Status: StepFailed, Error: "media inspection report is missing from state (fail closed)"}, nil
-	}
-
-	opt := getOptimizationPolicy(ec.State["optimization_policy"])
-	if opt == nil || !opt.Enabled {
-		return StepResult{Status: StepFailed, Error: "optimization policy is missing or disabled (fail closed)"}, nil
-	}
-
 	var req *transcode.BenchmarkRequest
 	var caps transcode.WorkerCapabilities
 	if getBool(ec.State, "benchmark_reconcile") {
@@ -103,16 +90,45 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 			switch st.Status {
 			case transcode.StatusQueued, transcode.StatusRunning, transcode.StatusCompleted, transcode.StatusFailed, transcode.StatusCancelled:
 				ec.State["benchmark_submitted"] = true
+				ec.State["benchmark_job_id"] = id
 				delete(ec.State, "benchmark_reconcile")
+				if perr := e.persistExecutionState(ctx, ec); perr != nil {
+					return StepResult{}, perr
+				}
 				return StepResult{Status: StepCompleted, Outputs: map[string]any{"benchmark_job_id": id, "benchmark_status": st.Status, "reconciled": true}}, nil
 			default:
 				return StepResult{Status: StepFailed, Error: fmt.Sprintf("unexpected benchmark status %q", st.Status)}, nil
 			}
 		}
 	}
+
+	// Admission critical section: when this child belongs to a batch, hold the
+	// parent lease across the policy re-read and the persisted submit outcome so
+	// a confirmed batch cancel cannot interleave a new benchmark admission. A
+	// benchmark that was already accepted/uncertain is reconciled above and is
+	// never blocked from being tracked. Admission is evaluated before any worker
+	// capability probe or request build.
+	lease, blockedRes, handled := e.beginAdmission(ctx, ec, "benchmark")
+	if handled {
+		return blockedRes, nil
+	}
+	defer lease.Close()
+	actx := lease.Context(ctx)
+
 	if req == nil {
+		rep := getSourceReport(ec.State["source_report"])
+		if rep == nil {
+			rep = getSourceReport(ec.State["original"])
+		}
+		if rep == nil {
+			return StepResult{Status: StepFailed, Error: "media inspection report is missing from state (fail closed)"}, nil
+		}
+		opt := getOptimizationPolicy(ec.State["optimization_policy"])
+		if opt == nil || !opt.Enabled {
+			return StepResult{Status: StepFailed, Error: "optimization policy is missing or disabled (fail closed)"}, nil
+		}
 		var err error
-		caps, err = e.deps.Transcode.Capabilities(ctx)
+		caps, err = e.deps.Transcode.Capabilities(actx)
 		if err != nil {
 			if isRetryableWorkerPollError(err) {
 				return StepResult{Status: StepWaitingExternal, WaitingCondition: "worker_unreachable", WaitingReason: fmt.Sprintf("Worker capabilities temporarily unavailable: %v", err)}, nil
@@ -128,6 +144,7 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 	if err != nil {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("computing benchmark request digest: %v", err)}, nil
 	}
+
 	ec.State["benchmark_job_id"] = req.ID
 	ec.State["benchmark_request"] = req
 	ec.State["benchmark_request_digest"] = digest
@@ -135,18 +152,37 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 	if caps.CapabilityFingerprint != "" {
 		ec.State["capability_fingerprint"] = caps.CapabilityFingerprint
 	}
-	if err := e.persistExecutionState(ctx, ec); err != nil {
+	if err := e.persistExecutionState(actx, ec); err != nil {
 		return StepResult{}, err
 	}
+	// Ownership check after the identity checkpoint: a lost parent lease must
+	// not create a new benchmark job; the persisted uncertainty stays for a
+	// later safe reconciliation.
+	if !e.parentLeaseHeld(lease) {
+		return StepResult{Status: StepWaitingExternal, WaitingCondition: "parent_busy", WaitingReason: fmt.Sprintf("Parent admission lease lost before benchmark submit for %s; deferring without resubmit", req.ID), Outputs: map[string]any{"benchmark_job_id": req.ID}}, nil
+	}
 
-	job, err := e.deps.Transcode.BenchmarkSubmit(ctx, *req)
+	job, err := e.deps.Transcode.BenchmarkSubmit(actx, *req)
 	if err != nil {
 		if isRetryableWorkerPollError(err) {
-			return StepResult{Status: StepWaitingExternal, WaitingCondition: "worker_reconciling", WaitingReason: "Benchmark submit uncertain; reconciling the existing remote identity", Outputs: map[string]any{"benchmark_job_id": req.ID}}, nil
+			res := StepResult{Status: StepWaitingExternal, WaitingCondition: "worker_reconciling", WaitingReason: "Benchmark submit uncertain; reconciling the existing remote identity", Outputs: map[string]any{"benchmark_job_id": req.ID}}
+			if perr := e.persistExecutionState(actx, ec); perr != nil {
+				return StepResult{}, perr
+			}
+			return res, nil
 		}
 		delete(ec.State, "benchmark_reconcile")
 		plan := getPlan(ec.State["plan"])
-		return e.handleBenchmarkTransientFailure(ec, plan, err, "benchmark_submit")
+		res, herr := e.handleBenchmarkTransientFailure(ec, plan, err, "benchmark_submit")
+		if herr != nil {
+			return StepResult{}, herr
+		}
+		// Persist the definitive outcome under the child owner before releasing
+		// the parent admission lease.
+		if perr := e.persistExecutionState(actx, ec); perr != nil {
+			return StepResult{}, perr
+		}
+		return res, nil
 	}
 
 	delete(ec.State, "benchmark_reconcile")
@@ -155,6 +191,10 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 	ec.State["benchmark_request_digest"] = digest
 	if caps.CapabilityFingerprint != "" {
 		ec.State["capability_fingerprint"] = caps.CapabilityFingerprint
+	}
+	// Persist acceptance before releasing the parent admission lease.
+	if perr := e.persistExecutionState(actx, ec); perr != nil {
+		return StepResult{}, perr
 	}
 
 	return StepResult{

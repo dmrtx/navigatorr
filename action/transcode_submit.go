@@ -68,14 +68,10 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 	if plan == nil {
 		return StepResult{Status: StepFailed, Error: "resolved transcode plan is missing (fail closed)"}, nil
 	}
-	// Persist stable identity before first Submit so uncertainty can reconcile.
-	ec.State["job_id"] = jobID
-	ec.State["external_reference"] = jobID
-	ec.State["candidate_path"] = candidatePath
-	ec.State["output_path"] = candidatePath
-	ec.State["idempotency_key"] = jobID
 	req := transcode.Request{ID: jobID, SourcePath: cleanPath, CandidatePath: candidatePath, Profile: profile, Plan: plan, IdempotencyKey: jobID}
-	// Transport-uncertainty reconciliation before reuse.
+
+	// Transport-uncertainty reconciliation before reuse. This is a read-only
+	// status query and deliberately does not take the parent admission lease.
 	if getBool(ec.State, "transcode_reconcile") {
 		e.recordWorkerPoll(ec)
 		st, serr := e.deps.Transcode.Status(ctx, jobID)
@@ -84,6 +80,9 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 				return StepResult{Status: StepWaitingExternal, WaitingCondition: "worker_unreachable", WaitingReason: fmt.Sprintf("Transcode reconcile status uncertain for job %s; awaiting worker", jobID), Outputs: map[string]any{"job_id": jobID, "external_reference": jobID, "attempt": getInt(ec.State, "attempt"), "retry_count": getInt(ec.State, "retry_count")}}, nil
 			}
 			if httpErr, ok := transcodeHTTPError(serr); ok && httpErr.StatusCode == 404 {
+				// The worker has no such job. Any resubmit below re-reads the
+				// parent policy under its lease; a decision cached before this
+				// read must never authorize the resubmit.
 				clearTranscodeReconcileFlags(ec)
 			} else {
 				return StepResult{Status: StepFailed, Error: fmt.Sprintf("transcode reconcile status failed (fail closed): %v", serr)}, nil
@@ -91,6 +90,10 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 		} else {
 			switch st.Status {
 			case transcode.StatusQueued, transcode.StatusRunning, transcode.StatusCompleted, transcode.StatusFailed, transcode.StatusCancelled:
+				ec.State["job_id"] = jobID
+				ec.State["external_reference"] = jobID
+				ec.State["candidate_path"] = candidatePath
+				ec.State["output_path"] = candidatePath
 				ec.State["transcode_submitted"] = true
 				clearTranscodeReconcileFlags(ec)
 				e.observeTranscodeStatus(ec, st)
@@ -98,30 +101,73 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 					ec.State["candidate_path"] = st.CandidatePath
 					ec.State["output_path"] = st.CandidatePath
 				}
+				// Persist acceptance/tracking before any admission lease release.
+				if perr := e.persistExecutionState(ctx, ec); perr != nil {
+					return StepResult{}, perr
+				}
 				return StepResult{Status: StepCompleted, Outputs: map[string]any{"job_id": jobID, "external_reference": jobID, "candidate_path": getString(ec.State, "candidate_path"), "output_path": getString(ec.State, "output_path"), "transcode_status": st.Status, "reconciled": true, "attempt": getInt(ec.State, "attempt"), "retry_count": getInt(ec.State, "retry_count")}}, nil
 			default:
 				return StepResult{Status: StepFailed, Error: fmt.Sprintf("transcode reconcile unexpected status %q (fail closed)", st.Status)}, nil
 			}
 		}
 	}
+
+	// Admission critical section: when the child belongs to a batch, hold the
+	// parent's durable lease across the policy re-read, identity persistence and
+	// the submit outcome so Engine.Cancel cannot interleave a confirmed cancel.
+	lease, blockedRes, handled := e.beginAdmission(ctx, ec, "transcode")
+	if handled {
+		return blockedRes, nil
+	}
+	defer lease.Close()
+	actx := lease.Context(ctx)
+
+	// Stable identity persisted before Submit so uncertainty can reconcile.
+	ec.State["job_id"] = jobID
+	ec.State["external_reference"] = jobID
+	ec.State["candidate_path"] = candidatePath
+	ec.State["output_path"] = candidatePath
+	ec.State["idempotency_key"] = jobID
 	ec.State["transcode_reconcile"] = true
-	if err := e.persistExecutionState(ctx, ec); err != nil {
+	if err := e.persistExecutionState(actx, ec); err != nil {
 		return StepResult{}, err
 	}
-	job, err := e.deps.Transcode.Submit(ctx, req)
+	// Ownership check after the identity checkpoint: if the parent lease was
+	// lost (or is no longer renewed), do not create a new remote job. The
+	// persisted uncertainty is preserved for a later safe reconciliation.
+	if !e.parentLeaseHeld(lease) {
+		return StepResult{Status: StepWaitingExternal, WaitingCondition: "parent_busy", WaitingReason: fmt.Sprintf("Parent admission lease lost before submit for job %s; deferring without resubmit", jobID), Outputs: map[string]any{"job_id": jobID, "external_reference": jobID, "candidate_path": candidatePath, "output_path": candidatePath}}, nil
+	}
+	job, err := e.deps.Transcode.Submit(actx, req)
 	if err != nil {
 		if isRetryableWorkerPollError(err) {
 			ec.State["transcode_reconcile"] = true
-			return StepResult{Status: StepWaitingExternal, WaitingCondition: "worker_reconciling", WaitingReason: fmt.Sprintf("Transcode submit uncertain for job %s; reconciling with worker", jobID), Outputs: map[string]any{"job_id": jobID, "external_reference": jobID, "candidate_path": candidatePath, "output_path": candidatePath, "attempt": getInt(ec.State, "attempt"), "retry_count": getInt(ec.State, "retry_count"), "failure_classification": string(resilience.WorkerUnreachable)}}, nil
+			res := StepResult{Status: StepWaitingExternal, WaitingCondition: "worker_reconciling", WaitingReason: fmt.Sprintf("Transcode submit uncertain for job %s; reconciling with worker", jobID), Outputs: map[string]any{"job_id": jobID, "external_reference": jobID, "candidate_path": candidatePath, "output_path": candidatePath, "attempt": getInt(ec.State, "attempt"), "retry_count": getInt(ec.State, "retry_count"), "failure_classification": string(resilience.WorkerUnreachable)}}
+			if perr := e.persistExecutionState(actx, ec); perr != nil {
+				return StepResult{}, perr
+			}
+			return res, nil
 		}
 		clearTranscodeReconcileFlags(ec) // A definitive rejection did not accept the job.
+		var res StepResult
 		if isTranscodeIdempotencyConflict(err) {
 			class := resilience.IdempotencyConflict
 			ec.State["failure_classification"] = string(class)
 			appendFailureHistory(ec, "submit", string(class), err.Error())
-			return StepResult{Status: StepFailed, Error: fmt.Sprintf("submit failed (%s): %v", class, err), Outputs: map[string]any{"attempt": getInt(ec.State, "attempt"), "retry_count": getInt(ec.State, "retry_count"), "failure_classification": string(class)}}, nil
+			res = StepResult{Status: StepFailed, Error: fmt.Sprintf("submit failed (%s): %v", class, err), Outputs: map[string]any{"attempt": getInt(ec.State, "attempt"), "retry_count": getInt(ec.State, "retry_count"), "failure_classification": string(class)}}
+		} else {
+			var herr error
+			res, herr = e.handleTransientFailure(ec, plan, err, "submit")
+			if herr != nil {
+				return StepResult{}, herr
+			}
 		}
-		return e.handleTransientFailure(ec, plan, err, "submit")
+		// Persist the definitive outcome under the child owner before the parent
+		// admission lease is released.
+		if perr := e.persistExecutionState(actx, ec); perr != nil {
+			return StepResult{}, perr
+		}
+		return res, nil
 	}
 	ec.State["transcode_submitted"] = true
 	ec.State["job_id"] = job.ID
@@ -129,6 +175,10 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 	ec.State["candidate_path"] = candidatePath
 	ec.State["output_path"] = candidatePath
 	clearTranscodeReconcileFlags(ec)
+	// Persist acceptance before releasing the parent admission lease.
+	if perr := e.persistExecutionState(actx, ec); perr != nil {
+		return StepResult{}, perr
+	}
 	return StepResult{Status: StepCompleted, Outputs: map[string]any{"job_id": job.ID, "external_reference": job.ID, "candidate_path": candidatePath, "output_path": candidatePath, "profile": profile, "recipe_version": plan.RecipeVersion, "recipe_digest": plan.RecipeDigest, "plan_digest": plan.PlanDigest, "attempt": getInt(ec.State, "attempt"), "retry_count": getInt(ec.State, "retry_count"), "fallback_count": getInt(ec.State, "fallback_count")}}, nil
 }
 

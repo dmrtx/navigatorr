@@ -404,24 +404,25 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 		delete(ec.Inputs, "paused")
 		ec.Inputs["paused"] = false
 		ec.State["paused"] = false
+		// Persist the cleared pause before fan-out: children read the parent's
+		// durable state and must not observe the stale paused=true.
+		if err := e.persistExecutionState(ctx, ec); err != nil {
+			return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to persist resume: %v", err)}, nil
+		}
 	}
 
-	// Handle pause / cancellation semantics
-	if strings.EqualFold(ec.Decision, "pause") || getBool(ec.Inputs, "paused") {
-		ec.Decision = ""
-		return StepResult{
-			Status:        StepWaitingDecision,
-			WaitingReason: "Transcode batch paused by request",
-			WaitingOptions: []WaitingOption{
-				{Decision: "resume", Description: "Resume transcode batch"},
-				{Decision: "cancel", Description: "Cancel remaining queued and waiting items (active remote jobs are not stopped)"},
-			},
-			Outputs: buildBatchOutputs(ec.InstanceID, items, seriesTitle, isAnime, dryRun, getMaxOutputItems(ec.Inputs)),
-		}, nil
-	}
-
+	// Cancellation is evaluated before pause so it also works from paused:true.
 	if strings.EqualFold(ec.Decision, "cancel") {
 		ec.Decision = ""
+		ec.Inputs["paused"] = false
+		ec.State["paused"] = false
+		// Durable batch-cancel control: children re-read it under the parent
+		// admission lease, so no new submit can start after the cancel is
+		// confirmed. Persist it before any further coordination.
+		ec.State["cancel_requested"] = true
+		if err := e.persistExecutionState(ctx, ec); err != nil {
+			return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to persist cancel: %v", err)}, nil
+		}
 		for i := range items {
 			if items[i].Status == "queued" || items[i].Status == "waiting_for_slot" {
 				items[i].Status = "failed"
@@ -431,7 +432,10 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 		}
 		items, _ = e.deps.Store.ListTranscodeBatchItems(ec.InstanceID)
 		outputs := buildBatchOutputs(ec.InstanceID, items, seriesTitle, isAnime, dryRun, getMaxOutputItems(ec.Inputs))
-		outputs["note"] = "Queued and waiting items were cancelled. Active remote transcode jobs are not stopped and remain running on workers."
+		// Batch cancel does not kill accepted jobs: they remain tracked. Pending
+		// children terminate on their next safe reconciliation; an accepted
+		// child may still be cancelled individually through its own action.
+		outputs["note"] = "Queued and waiting items were cancelled. Pending children stop on their next safe reconciliation. Active remote transcode jobs are not stopped and remain running on workers."
 
 		hasRunning := false
 		for _, it := range items {
@@ -448,9 +452,31 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 				Outputs:          outputs,
 			}, nil
 		}
+		// Preserve and surface a user wait instead of reporting completion: its
+		// decision, identity and candidate are retained.
+		if res, ok := e.batchWaitingDecisionResult(items, outputs); ok {
+			return res, nil
+		}
 		return StepResult{
 			Status:  StepCompleted,
 			Outputs: outputs,
+		}, nil
+	}
+
+	// Handle pause semantics. The paused flag is persisted so the autonomous
+	// reconciler and every child observe the pause across restarts.
+	if strings.EqualFold(ec.Decision, "pause") || getBool(ec.Inputs, "paused") {
+		ec.Decision = ""
+		ec.Inputs["paused"] = true
+		ec.State["paused"] = true
+		return StepResult{
+			Status:        StepWaitingDecision,
+			WaitingReason: "Transcode batch paused by request",
+			WaitingOptions: []WaitingOption{
+				{Decision: "resume", Description: "Resume transcode batch"},
+				{Decision: "cancel", Description: "Cancel remaining queued and waiting items (active remote jobs are not stopped)"},
+			},
+			Outputs: buildBatchOutputs(ec.InstanceID, items, seriesTitle, isAnime, dryRun, getMaxOutputItems(ec.Inputs)),
 		}, nil
 	}
 
@@ -477,6 +503,16 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 					case StatusFailed:
 						items[i].Status = "failed"
 						items[i].Error = resumedRes.Error
+						if items[i].Attempts == 0 {
+							items[i].Attempts = 1
+						}
+					case StatusCancelled:
+						items[i].Status = "failed"
+						if resumedRes.Error != "" {
+							items[i].Error = resumedRes.Error
+						} else {
+							items[i].Error = "child action was cancelled"
+						}
 						if items[i].Attempts == 0 {
 							items[i].Attempts = 1
 						}
@@ -558,6 +594,18 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 				case StatusWaitingDecision:
 					if it.Status != "waiting_decision" {
 						it.Status = "waiting_decision"
+						_ = e.deps.Store.UpdateTranscodeBatchItem(*it)
+					}
+				case StatusCancelled:
+					// A durably cancelled child is projected as failed so a later
+					// projection never reverts it to running. Batch cancel leaves
+					// accepted jobs alone; a child may still be cancelled directly
+					// through its own action, and that is reflected here.
+					if it.Status != "failed" {
+						it.Status = "failed"
+						if it.Error == "" {
+							it.Error = "cancelled"
+						}
 						_ = e.deps.Store.UpdateTranscodeBatchItem(*it)
 					}
 				case StatusWaitingExternal:
@@ -724,32 +772,8 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 	batchOutputs := buildBatchOutputs(ec.InstanceID, latest, seriesTitle, isAnime, dryRun, outLimit)
 
 	// Check if any item is waiting for decision
-	for _, it := range latest {
-		if it.Status == "waiting_decision" {
-			reason := fmt.Sprintf("Item %s waiting for decision", it.ItemKey)
-			options := []WaitingOption{
-				{Decision: "approve", Description: "Approve transcode result"},
-				{Decision: "reject", Description: "Reject transcode result"},
-			}
-			if it.ChildActionID != "" {
-				if childInst, _ := e.deps.Store.GetActionInstance(it.ChildActionID); childInst != nil {
-					if childInst.WaitingReason != "" {
-						reason = childInst.WaitingReason
-					}
-					var childOpts []WaitingOption
-					_ = json.Unmarshal([]byte(childInst.WaitingOptionsJSON), &childOpts)
-					if len(childOpts) > 0 {
-						options = childOpts
-					}
-				}
-			}
-			return StepResult{
-				Status:         StepWaitingDecision,
-				WaitingReason:  reason,
-				WaitingOptions: options,
-				Outputs:        batchOutputs,
-			}, nil
-		}
+	if res, ok := e.batchWaitingDecisionResult(latest, batchOutputs); ok {
+		return res, nil
 	}
 
 	// Check if worker busy occurred or any item is waiting for slot
@@ -840,6 +864,9 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 		"min_savings_percent":       minSavings,
 		"surface_worker_busy":       true,
 		"max_size_increase_percent": maxSizeIncrease,
+		// Durable parent link so the child can refuse new submissions after the
+		// batch is cancelled or paused, including across restarts.
+		"parent_action_id": ec.InstanceID,
 	}
 	childIdempotencyKey := fmt.Sprintf("batch-%s-%s", ec.InstanceID, item.ItemKey)
 
@@ -866,7 +893,7 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 				tmpl, _ := e.GetTemplate("transcode_media")
 				childEC := parseExecutionContext(existingChild, e)
 				childRes = buildActionResult(existingChild, len(tmpl.Steps), childEC)
-			case StatusCompleted, StatusFailed:
+			case StatusCompleted, StatusFailed, StatusCancelled:
 				tmpl, _ := e.GetTemplate("transcode_media")
 				childEC := parseExecutionContext(existingChild, e)
 				childRes = buildActionResult(existingChild, len(tmpl.Steps), childEC)
@@ -994,6 +1021,15 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 		_ = e.deps.Store.UpdateTranscodeBatchItem(*item)
 		return false, nil
 
+	case StatusCancelled:
+		// A durably cancelled child stays terminal; never project it as running.
+		item.Status = "failed"
+		if item.Error == "" {
+			item.Error = "cancelled"
+		}
+		_ = e.deps.Store.UpdateTranscodeBatchItem(*item)
+		return false, nil
+
 	case StatusWaitingExternal:
 		if isWorkerBusy {
 			item.Status = "waiting_for_slot"
@@ -1014,6 +1050,40 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 		_ = e.deps.Store.UpdateTranscodeBatchItem(*item)
 		return false, nil
 	}
+}
+
+// batchWaitingDecisionResult surfaces the first waiting_decision item with its
+// child action's reason, options, persisted identity and candidate intact.
+func (e *Engine) batchWaitingDecisionResult(items []store.TranscodeBatchItem, outputs map[string]any) (StepResult, bool) {
+	for _, it := range items {
+		if it.Status != "waiting_decision" {
+			continue
+		}
+		reason := fmt.Sprintf("Item %s waiting for decision", it.ItemKey)
+		options := []WaitingOption{
+			{Decision: "approve", Description: "Approve transcode result"},
+			{Decision: "reject", Description: "Reject transcode result"},
+		}
+		if it.ChildActionID != "" {
+			if childInst, _ := e.deps.Store.GetActionInstance(it.ChildActionID); childInst != nil {
+				if childInst.WaitingReason != "" {
+					reason = childInst.WaitingReason
+				}
+				var childOpts []WaitingOption
+				_ = json.Unmarshal([]byte(childInst.WaitingOptionsJSON), &childOpts)
+				if len(childOpts) > 0 {
+					options = childOpts
+				}
+			}
+		}
+		return StepResult{
+			Status:         StepWaitingDecision,
+			WaitingReason:  reason,
+			WaitingOptions: options,
+			Outputs:        outputs,
+		}, true
+	}
+	return StepResult{}, false
 }
 
 // DefaultMaxBatchOutputItems defines the deterministic bound on per-item summaries returned in batch action outputs.

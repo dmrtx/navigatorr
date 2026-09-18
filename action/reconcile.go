@@ -16,7 +16,10 @@ const actionLeaseTTL = 2 * time.Minute
 
 var errActionBusy = errors.New("action is already executing")
 
-type actionLeaseOwnerKey struct{}
+// actionLeaseOwnerKey identifies the lease owner token for a specific action.
+// Keying by action id lets a child execution inherit and reuse an already-held
+// parent lease (see beginAdmission) instead of re-acquiring or releasing it.
+type actionLeaseOwnerKey struct{ actionID string }
 
 func (e *Engine) now() time.Time {
 	if e.deps.Now != nil {
@@ -118,6 +121,9 @@ func (e *Engine) shouldReconcile(inst *store.ActionInstance, tmpl ActionTemplate
 	if getBool(ec.Inputs, "paused") || getBool(ec.State, "paused") {
 		return false
 	}
+	// Parent cancel/pause control is enforced at each admission point under the
+	// parent's durable lease. Pending children are still reconciled so they can
+	// be driven to a terminal state safely; accepted jobs keep being tracked.
 	if at, err := time.Parse(time.RFC3339Nano, getString(ec.State, "next_poll_at")); err == nil && e.now().Before(at) {
 		return false
 	}
@@ -183,7 +189,7 @@ func (e *Engine) claimExecution(ctx context.Context, id string, wait bool) (cont
 		case <-timer.C:
 		}
 	}
-	leaseCtx, cancel := context.WithCancel(context.WithValue(ctx, actionLeaseOwnerKey{}, owner))
+	leaseCtx, cancel := context.WithCancel(context.WithValue(ctx, actionLeaseOwnerKey{actionID: id}, owner))
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -210,7 +216,7 @@ func (e *Engine) claimExecution(ctx context.Context, id string, wait bool) (cont
 }
 
 func (e *Engine) updateInstance(ctx context.Context, inst *store.ActionInstance) error {
-	owner, _ := ctx.Value(actionLeaseOwnerKey{}).(string)
+	owner, _ := ctx.Value(actionLeaseOwnerKey{actionID: inst.ID}).(string)
 	inst.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	return e.deps.Store.UpdateClaimedActionInstance(*inst, owner)
 }
