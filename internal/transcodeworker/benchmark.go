@@ -28,6 +28,7 @@ type BenchmarkRecord struct {
 	ID                        string                                `json:"id"`
 	Status                    string                                `json:"status"` // queued, running, completed, failed, cancelled
 	Source                    string                                `json:"source"`
+	EffectiveSource           string                                `json:"effective_source,omitempty"`
 	SourceDuration            float64                               `json:"source_duration,omitempty"`
 	Metric                    string                                `json:"metric"`
 	Progress                  float64                               `json:"progress"`
@@ -262,7 +263,7 @@ func (w *Worker) BenchmarkSubmit(ctx context.Context, req transcode.BenchmarkReq
 	}
 
 	// Verify source exists and is not directory
-	fi, err := os.Stat(cleanSource)
+	fi, err := w.statMedia(ctx, cleanSource)
 	if err != nil {
 		resp.Error = fmt.Sprintf("source_path %q not accessible: %v", cleanSource, err)
 		return resp, fmt.Errorf("source_path not accessible: %w", err)
@@ -379,6 +380,7 @@ func (w *Worker) BenchmarkSubmit(ctx context.Context, req transcode.BenchmarkReq
 		ID:                        req.ID,
 		Status:                    "queued",
 		Source:                    cleanSource,
+		EffectiveSource:           cleanSource,
 		SourceDuration:            req.SourceDuration,
 		Metric:                    strings.ToLower(strings.TrimSpace(req.Metric)),
 		Samples:                   req.Samples,
@@ -394,6 +396,9 @@ func (w *Worker) BenchmarkSubmit(ctx context.Context, req transcode.BenchmarkReq
 		Attempt:                   1,
 		RunToken:                  runToken,
 		CreatedAt:                 time.Now().UTC(),
+	}
+	if w.mediaStore != nil && w.mediaStore.Maps(cleanSource) {
+		record.EffectiveSource = filepath.Join(jobDir, "source"+safeFileExtension(cleanSource))
 	}
 
 	if err := SaveBenchmarkAtomic(benchFile, record); err != nil {
@@ -746,9 +751,27 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) 
 	}
 	jobLock.Unlock()
 
-	// Phase 2: Execute benchmark runner outside lock so cancellation/status can acquire lock
-	runner := w.getBenchmarkRunner()
-	runErr := runner.RunBenchmark(ctx, w, record)
+	// Phase 2: Execute benchmark runner outside lock so cancellation/status can acquire lock.
+	// Direct-SMB sources are first materialized on local SSD; the durable Source
+	// remains the semantic NAS path used by status and idempotency.
+	var runErr error
+	effectiveSource := strings.TrimSpace(record.EffectiveSource)
+	if effectiveSource == "" {
+		effectiveSource = record.Source
+	}
+	if effectiveSource != record.Source {
+		if w.mediaStore == nil || !w.mediaStore.Maps(record.Source) {
+			runErr = fmt.Errorf("benchmark requires configured SMB direct media store for %s", record.Source)
+		} else {
+			runErr = w.mediaStore.DownloadAtomic(ctx, record.Source, effectiveSource)
+			defer os.Remove(effectiveSource)
+		}
+	}
+	if runErr == nil {
+		record.Source = effectiveSource
+		runner := w.getBenchmarkRunner()
+		runErr = runner.RunBenchmark(ctx, w, record)
+	}
 
 	// Clean samples workspace regardless of outcome
 	_ = w.CleanBenchmarkSamples(jobID)

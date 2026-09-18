@@ -239,7 +239,13 @@ func (w *Worker) ensureStaged(ctx context.Context, jobDir, jobFile string, job *
 		} else if cancelled {
 			return true, nil
 		}
-		if err := StageInputAtomic(ctx, job.Source, r.stagedInput); err != nil {
+		var err error
+		if w.mediaStore != nil && w.mediaStore.Maps(job.Source) {
+			err = w.mediaStore.DownloadAtomic(ctx, job.Source, r.stagedInput)
+		} else {
+			err = StageInputAtomic(ctx, job.Source, r.stagedInput)
+		}
+		if err != nil {
 			return false, err
 		}
 	}
@@ -288,7 +294,8 @@ func (w *Worker) finalizeOperational(ctx context.Context, jobDir, jobFile string
 	// report as ErrDestinationExists. Destructive recovery (removing a proven
 	// own incomplete destination and republishing from the intact candidate) is
 	// permitted only with proof.
-	if r.finalization == FinalizationStateFinalizing && job.EncodeComplete {
+	directSMB := w.mediaStore != nil && w.mediaStore.Maps(r.destination)
+	if !directSMB && r.finalization == FinalizationStateFinalizing && job.EncodeComplete {
 		eligible := job.FailureClassification == FailureStoragePublicationAmbiguous ||
 			job.FailureClassification == FailureStorageFinalization
 		if eligible {
@@ -358,11 +365,17 @@ func (w *Worker) finalizeOperational(ctx context.Context, jobDir, jobFile string
 		return nil
 	}
 
-	finalize := w.finalizeOutput
-	if finalize == nil {
-		finalize = FinalizeOutputAtomic
+	var ferr error
+	if directSMB {
+		ferr = w.mediaStore.Publish(ctx, r.localCandidate, r.destination, job.ID)
+	} else {
+		finalize := w.finalizeOutput
+		if finalize == nil {
+			finalize = FinalizeOutputAtomic
+		}
+		ferr = finalize(ctx, r.localCandidate, r.destination, job.ID)
 	}
-	if ferr := finalize(ctx, r.localCandidate, r.destination, job.ID); ferr != nil {
+	if ferr != nil {
 		if ctx.Err() != nil {
 			// Runner is shutting down mid-finalize: leave the job resumable
 			// without recording a spurious finalization failure.
@@ -373,7 +386,9 @@ func (w *Worker) finalizeOperational(ctx context.Context, jobDir, jobFile string
 		// up, so a stale own partial could otherwise survive and later be
 		// mistaken for evidence of a publication attempt. Drop only this job's
 		// exact partial (guarded); unrelated partials are never touched.
-		w.removeOwnPartialIfSafe(job, r)
+		if !directSMB {
+			w.removeOwnPartialIfSafe(job, r)
+		}
 		return w.recordFinalizationFailure(jobDir, jobFile, job, ferr)
 	}
 
@@ -639,6 +654,9 @@ func (w *Worker) removeOwnPartialIfSafe(job *JobRecord, r *resolvedOperational) 
 // healthy through the existing lease primitive when one is configured. It is a
 // no-op for local paths or when no lease manager is set ("where applicable").
 func (w *Worker) ensureExternalHealthy(ctx context.Context, path string) error {
+	if w.mediaStore != nil && w.mediaStore.Maps(path) {
+		return nil
+	}
 	if w.leaseManager == nil || strings.TrimSpace(path) == "" {
 		return nil
 	}

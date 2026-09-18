@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jakenesler/navigatorr/internal/smbdirect"
 	"github.com/jakenesler/navigatorr/transcode"
 	"gopkg.in/yaml.v3"
 )
@@ -36,9 +37,10 @@ type WorkerConfig struct {
 	// AllowedRoots when absent/empty; LocalWorkDir defaults to a deterministic
 	// path beneath StateDir. None of these affect transcode.Plan or the
 	// execution-spec digest.
-	StagingPolicy StagingPolicy `json:"staging_policy" yaml:"staging_policy"`
-	ExternalRoots []string      `json:"external_roots" yaml:"external_roots"`
-	LocalWorkDir  string        `json:"local_work_dir" yaml:"local_work_dir"`
+	StagingPolicy StagingPolicy    `json:"staging_policy" yaml:"staging_policy"`
+	ExternalRoots []string         `json:"external_roots" yaml:"external_roots"`
+	LocalWorkDir  string           `json:"local_work_dir" yaml:"local_work_dir"`
+	SMBDirect     smbdirect.Config `json:"smb_direct" yaml:"smb_direct"`
 }
 
 // DefaultWorkerConfig returns sane defaults for an Apple Silicon Mac.
@@ -107,6 +109,8 @@ func (cfg *WorkerConfig) normalizeOperational() error {
 	cfg.StateDir = expand(cfg.StateDir)
 	cfg.HTTPTokenFile = expand(cfg.HTTPTokenFile)
 	cfg.LocalWorkDir = expand(cfg.LocalWorkDir)
+	cfg.SMBDirect.LocalRoot = expand(cfg.SMBDirect.LocalRoot)
+	cfg.SMBDirect.PasswordFile = expand(cfg.SMBDirect.PasswordFile)
 	for i, r := range cfg.AllowedRoots {
 		cfg.AllowedRoots[i] = expand(r)
 	}
@@ -136,6 +140,9 @@ func (cfg *WorkerConfig) normalizeOperational() error {
 		cfg.LocalWorkDir = filepath.Join(filepath.Clean(cfg.StateDir), "_work")
 	} else {
 		cfg.LocalWorkDir = filepath.Clean(cfg.LocalWorkDir)
+	}
+	if err := cfg.SMBDirect.Normalize(cfg.AllowedRoots); err != nil {
+		return err
 	}
 
 	return nil
@@ -190,6 +197,15 @@ type Worker struct {
 	// finalization destinations are driven healthy through the existing lease
 	// primitive before mutation. Nil is a no-op ("where applicable").
 	leaseManager *LeaseManager
+	mediaStore   directMediaStore
+}
+
+type directMediaStore interface {
+	Maps(string) bool
+	Stat(context.Context, string) (os.FileInfo, error)
+	DownloadAtomic(context.Context, string, string) error
+	Publish(context.Context, string, string, string) error
+	CheckRoot(context.Context) error
 }
 
 // SetRunFFmpeg injects a custom encoder runner (tests). Nil restores the
@@ -249,11 +265,15 @@ func NewWorker(cfg *WorkerConfig) *Worker {
 	if cfg == nil {
 		cfg = DefaultWorkerConfig()
 	}
-	return &Worker{
+	w := &Worker{
 		cfg:         cfg,
 		ffmpegPath:  ResolveToolPath(cfg.FFmpeg, "ffmpeg"),
 		ffprobePath: ResolveToolPath(cfg.FFprobe, "ffprobe"),
 	}
+	if cfg.SMBDirect.Enabled {
+		w.mediaStore = smbdirect.New(cfg.SMBDirect)
+	}
+	return w
 }
 
 // RootStatus records the accessibility of an allowed root directory.
@@ -328,6 +348,19 @@ func (w *Worker) Doctor(ctx context.Context) DoctorResult {
 
 	for _, root := range w.cfg.AllowedRoots {
 		rs := RootStatus{Path: root}
+		if w.mediaStore != nil && w.mediaStore.Maps(filepath.Join(root, ".navigatorr-root-check")) {
+			if err := w.mediaStore.CheckRoot(ctx); err != nil {
+				rs.Error = err.Error()
+				res.OK = false
+				errs = append(errs, fmt.Sprintf("allowed SMB root %s not accessible: %v", root, err))
+			} else {
+				rs.Exists = true
+				rs.Readable = true
+				rs.Writable = true
+			}
+			res.AllowedRoots = append(res.AllowedRoots, rs)
+			continue
+		}
 		fi, err := os.Stat(root)
 		if err != nil {
 			rs.Error = err.Error()
@@ -374,6 +407,13 @@ func (w *Worker) Doctor(ctx context.Context) DoctorResult {
 	}
 
 	return res
+}
+
+func (w *Worker) statMedia(ctx context.Context, name string) (os.FileInfo, error) {
+	if w.mediaStore != nil && w.mediaStore.Maps(name) {
+		return w.mediaStore.Stat(ctx, name)
+	}
+	return os.Stat(name)
 }
 
 // SubmitRequest defines the JSON input for the submit command.
@@ -556,7 +596,7 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 	}
 
 	// Verify source exists and is not directory
-	fi, err := os.Stat(cleanSource)
+	fi, err := w.statMedia(ctx, cleanSource)
 	if err != nil {
 		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("source_path %q not accessible: %v", cleanSource, err)},
 			fmt.Errorf("source_path not accessible: %w", err)
