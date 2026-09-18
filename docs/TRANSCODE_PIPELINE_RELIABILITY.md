@@ -22,6 +22,32 @@ The workflow's terminal output carries the final worker status. Original
 integrity is marked verified only after comparing the SHA-256 with the original
 baseline; the resolved `original_sha256_pending` field is removed.
 
+### Batch parent/child coordination
+
+A `transcode_batch` parent fans out one `transcode_media` child per item and
+links them durably through the batch item (`child_action_id`) and the child's
+exact idempotency key (`batch-<batch_id>-<item_key>`). Every remote admission
+(the child's transcode submit and its benchmark submit) re-reads the parent's
+cancel/pause policy under the parent's execution lease before contacting the
+worker, so a confirmed batch cancel cannot interleave a new submit. Ordinary
+status polls and hashes never take that lease, so sibling work is not
+serialized; a busy parent defers the admission instead of waiting on it.
+
+Cancelling or pausing the batch stops *new* submissions and retries of pending
+children, including after a restart and under the autonomous reconciler. It does
+not kill already accepted remote jobs: their identity stays durable and they
+continue to be tracked to completion. An uncertain submit is always resolved by
+querying the same job identity, and it is never resubmitted after the cancel. A
+paused parent defers admissions reversibly; resuming the batch persists the
+unpause before fan-out resumes.
+
+A child whose parent link is known but whose parent row cannot be read is failed
+closed. A parent that is itself waiting for a user decision blocks new child
+admissions reversibly (`parent_waiting_decision`) while accepted jobs keep being
+tracked. User decision waits (`waiting_decision`) are never approved, rejected or
+cancelled by the reconciler, and an explicit batch cancel preserves that pending
+decision together with its identity and candidate.
+
 ## Availability and diagnostics
 
 Normal `diagnostics` calls use `/v1/health` for process health and `/v1/ready`

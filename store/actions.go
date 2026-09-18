@@ -113,6 +113,30 @@ func (s *Store) GetActionInstance(id string) (*ActionInstance, error) {
 	return &inst, nil
 }
 
+// GetActionInstanceIfExists is like GetActionInstance but returns (nil, nil)
+// when the row is absent, so callers can tell not-found apart from real errors.
+func (s *Store) GetActionInstanceIfExists(id string) (*ActionInstance, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var inst ActionInstance
+	err := s.db.QueryRow(`SELECT id, action_name, status, current_step, inputs_json,
+		outputs_json, state_json, waiting_reason, waiting_condition, waiting_options_json,
+		error_json, idempotency_key, created_at, updated_at
+		FROM action_instances WHERE id=?`, id).Scan(
+		&inst.ID, &inst.ActionName, &inst.Status, &inst.CurrentStep, &inst.InputsJSON,
+		&inst.OutputsJSON, &inst.StateJSON, &inst.WaitingReason, &inst.WaitingCondition,
+		&inst.WaitingOptionsJSON, &inst.ErrorJSON, &inst.IdempotencyKey, &inst.CreatedAt, &inst.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &inst, nil
+}
+
 // UpdateActionInstance updates status, state, outputs and progress of an action instance.
 func (s *Store) UpdateActionInstance(inst ActionInstance) error {
 	return s.updateActionInstance(inst, "")

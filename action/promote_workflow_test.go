@@ -47,7 +47,13 @@ type promotionHarness struct {
 
 func newPromotionHarness(t *testing.T) *promotionHarness {
 	t.Helper()
-	h := &promotionHarness{t: t, st: setupTestStore(t), root: t.TempDir(), files: map[int]promotionFile{}, commands: map[int]promotionCommandResponse{}, nextCommand: 1, acceptDroppedImport: true}
+	// t.TempDir returns the /var/folders alias on darwin; canonicalize only the
+	// fixture root so the production symlink guard still sees real paths.
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &promotionHarness{t: t, st: setupTestStore(t), root: root, files: map[int]promotionFile{}, commands: map[int]promotionCommandResponse{}, nextCommand: 1, acceptDroppedImport: true}
 	season := filepath.Join(h.root, "Series", "Season 1")
 	h.original = filepath.Join(season, "Series S01E01-E02.mp4")
 	h.candidate = filepath.Join(season, ".navigatorr-candidates", "candidate.mkv")
