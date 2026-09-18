@@ -374,7 +374,7 @@ func (sh *pipelineShared) runEncodeUnit(ctx context.Context, u pipelineUnit, idx
 		fail(ctx.Err())
 		return
 	}
-	sh.progressReporter.StartUnit("encoding_candidates")
+	sh.progressReporter.StartSampleUnit("encoding_candidates", u.sampOrd+1, vc.index+1, vc.candidate.ID, "")
 	if err := verifySourceUnchanged(sh.record.Source, sh.sourceInitialSize, sh.sourceInitialModTime); err != nil {
 		fail(err)
 		return
@@ -529,7 +529,7 @@ func (sh *pipelineShared) runMetricUnit(ctx context.Context, u pipelineUnit, idx
 			fail(fmt.Errorf("preparing vmaf log path %s: %w", logPath, err))
 			return
 		}
-		sh.progressReporter.StartUnit("evaluating_metrics")
+		sh.progressReporter.StartSampleUnit("evaluating_metrics", u.sampOrd+1, vc.index+1, vc.candidate.ID, "vmaf")
 		args := BuildVMAFArgs(candPath, refPath, logPath)
 		cmd := exec.CommandContext(ctx, sh.w.ffmpegPath, args...)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -617,7 +617,7 @@ func (sh *pipelineShared) runMetricUnit(ctx context.Context, u pipelineUnit, idx
 			fail(fmt.Errorf("preparing ssim stats path %s: %w", statsPath, err))
 			return
 		}
-		sh.progressReporter.StartUnit("evaluating_metrics")
+		sh.progressReporter.StartSampleUnit("evaluating_metrics", u.sampOrd+1, vc.index+1, vc.candidate.ID, "ssim")
 		args := BuildSSIMArgs(candPath, refPath, statsPath)
 		cmd := exec.CommandContext(ctx, sh.w.ffmpegPath, args...)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

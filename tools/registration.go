@@ -43,9 +43,11 @@ func RegisterAll(s *server.MCPServer, cfg *config.Config, registry *arrservice.R
 // RegisterMaintenance wires the persistent maintenance-agent tools. It is
 // separate from RegisterAll so the classic tools never depend on SQLite:
 // with a nil mStore this is a no-op and the server behaves exactly as before.
-func RegisterMaintenance(s *server.MCPServer, cfg *config.Config, registry *arrservice.Registry, qbClient *qbit.Client, mStore *store.Store, transcodeExec ...transcode.Executor) {
+// The returned engine lets the process own its reconciler lifecycle independently
+// of MCP clients. Callers that only register tools may ignore the return value.
+func RegisterMaintenance(s *server.MCPServer, cfg *config.Config, registry *arrservice.Registry, qbClient *qbit.Client, mStore *store.Store, transcodeExec ...transcode.Executor) *action.Engine {
 	if mStore == nil {
-		return
+		return nil
 	}
 	resolver, err := fsop.NewResolver(cfg.Media.AllowedReadRoots, cfg.Media.AllowedWriteRoots)
 	if err != nil {
@@ -80,6 +82,7 @@ func RegisterMaintenance(s *server.MCPServer, cfg *config.Config, registry *arrs
 		StartTime: time.Now(),
 	})
 	registerActionTools(s, actEngine)
+	return actEngine
 }
 
 // RegisterDiagnostics registers the diagnostics and action audit log tools.

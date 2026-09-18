@@ -47,6 +47,10 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 	jobID := getString(ec.State, "job_id")
 	if jobID == "" {
 		jobID = fmt.Sprintf("job-%s", ec.InstanceID)
+		for _, key := range []string{"phase", "progress", "speed", "fps", "last_progress_at", "last_known_progress", "worker_heartbeat_at", "progress_is_stale"} {
+			delete(ec.State, key)
+			delete(ec.Outputs, key)
+		}
 	}
 	ext := getString(ec.State, "candidate_extension")
 	if ext == "" {
@@ -73,9 +77,10 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 	req := transcode.Request{ID: jobID, SourcePath: cleanPath, CandidatePath: candidatePath, Profile: profile, Plan: plan, IdempotencyKey: jobID}
 	// Transport-uncertainty reconciliation before reuse.
 	if getBool(ec.State, "transcode_reconcile") {
+		e.recordWorkerPoll(ec)
 		st, serr := e.deps.Transcode.Status(ctx, jobID)
 		if serr != nil {
-			if transcode.IsTransportUncertain(serr) {
+			if isRetryableWorkerPollError(serr) {
 				return StepResult{Status: StepWaitingExternal, WaitingCondition: "worker_unreachable", WaitingReason: fmt.Sprintf("Transcode reconcile status uncertain for job %s; awaiting worker", jobID), Outputs: map[string]any{"job_id": jobID, "external_reference": jobID, "attempt": getInt(ec.State, "attempt"), "retry_count": getInt(ec.State, "retry_count")}}, nil
 			}
 			if httpErr, ok := transcodeHTTPError(serr); ok && httpErr.StatusCode == 404 {
@@ -88,7 +93,7 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 			case transcode.StatusQueued, transcode.StatusRunning, transcode.StatusCompleted, transcode.StatusFailed, transcode.StatusCancelled:
 				ec.State["transcode_submitted"] = true
 				clearTranscodeReconcileFlags(ec)
-				mirrorTranscodeWorkerMetadata(ec, st)
+				e.observeTranscodeStatus(ec, st)
 				if st.CandidatePath != "" {
 					ec.State["candidate_path"] = st.CandidatePath
 					ec.State["output_path"] = st.CandidatePath
@@ -99,12 +104,17 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 			}
 		}
 	}
+	ec.State["transcode_reconcile"] = true
+	if err := e.persistExecutionState(ctx, ec); err != nil {
+		return StepResult{}, err
+	}
 	job, err := e.deps.Transcode.Submit(ctx, req)
 	if err != nil {
-		if transcode.IsTransportUncertain(err) {
+		if isRetryableWorkerPollError(err) {
 			ec.State["transcode_reconcile"] = true
 			return StepResult{Status: StepWaitingExternal, WaitingCondition: "worker_reconciling", WaitingReason: fmt.Sprintf("Transcode submit uncertain for job %s; reconciling with worker", jobID), Outputs: map[string]any{"job_id": jobID, "external_reference": jobID, "candidate_path": candidatePath, "output_path": candidatePath, "attempt": getInt(ec.State, "attempt"), "retry_count": getInt(ec.State, "retry_count"), "failure_classification": string(resilience.WorkerUnreachable)}}, nil
 		}
+		clearTranscodeReconcileFlags(ec) // A definitive rejection did not accept the job.
 		if isTranscodeIdempotencyConflict(err) {
 			class := resilience.IdempotencyConflict
 			ec.State["failure_classification"] = string(class)
@@ -134,6 +144,22 @@ func transcodeHTTPError(err error) (*transcode.HTTPError, bool) {
 	return nil, false
 }
 
+// An unavailable status endpoint is not evidence that the encode failed. Keep
+// the same identity and poll with backoff; only a remote terminal status can
+// authorize creating a fresh attempt.
+func isRetryableWorkerPollError(err error) bool {
+	if transcode.IsTransportUncertain(err) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	if he, ok := transcodeHTTPError(err); ok {
+		switch he.StatusCode {
+		case 408, 425, 429, 500, 502, 503, 504:
+			return true
+		}
+	}
+	return false
+}
+
 func isTranscodeIdempotencyConflict(err error) bool {
 	msg := strings.ToLower(err.Error())
 	if strings.Contains(msg, "idempotency_conflict") || strings.Contains(msg, "idempotency conflict") {
@@ -160,11 +186,12 @@ func mirrorTranscodeWorkerMetadata(ec *ExecutionContext, st transcode.JobStatus)
 }
 
 func transcodeWorkerMetadataOutputs(ec *ExecutionContext, st transcode.JobStatus) map[string]any {
-	out := map[string]any{
+	out := transcodeTelemetryOutputs(ec)
+	mergeMap(out, map[string]any{
 		"attempt":        getInt(ec.State, "attempt"),
 		"retry_count":    getInt(ec.State, "retry_count"),
 		"fallback_count": getInt(ec.State, "fallback_count"),
-	}
+	})
 	if v, ok := ec.State["applied_fallbacks"]; ok {
 		out["applied_fallbacks"] = v
 	} else if st.AppliedFallbacks != nil {
@@ -174,6 +201,9 @@ func transcodeWorkerMetadataOutputs(ec *ExecutionContext, st transcode.JobStatus
 		out["failure_classification"] = fc
 	} else if st.FailureClassification != "" {
 		out["failure_classification"] = st.FailureClassification
+	}
+	if class, ok := out["failure_classification"]; ok {
+		out["error_class"] = class
 	}
 	return out
 }
@@ -246,9 +276,11 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 	if e.deps.Transcode == nil {
 		return StepResult{Status: StepFailed, Error: "transcode executor is not available to monitor job"}, nil
 	}
+	e.recordWorkerPoll(ec)
 	st, err := e.deps.Transcode.Status(ctx, jobID)
 	if err != nil {
-		if transcode.IsTransportUncertain(err) {
+		if isRetryableWorkerPollError(err) {
+			ec.State["progress_is_stale"] = true
 			return StepResult{Status: StepWaitingExternal, WaitingCondition: "worker_unreachable", WaitingReason: fmt.Sprintf("Transcode status uncertain for job %s; awaiting worker", jobID), Outputs: map[string]any{"job_id": jobID, "external_reference": jobID, "attempt": getInt(ec.State, "attempt"), "retry_count": getInt(ec.State, "retry_count"), "failure_classification": string(resilience.WorkerUnreachable)}}, nil
 		}
 		if he, ok := transcodeHTTPError(err); ok && he.StatusCode == 404 {
@@ -258,17 +290,31 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 		// status errors. Fail closed with budgets unchanged.
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("transcode status failed (fail closed): %v", err), Outputs: map[string]any{"job_id": jobID, "external_reference": jobID, "attempt": getInt(ec.State, "attempt"), "retry_count": getInt(ec.State, "retry_count")}}, nil
 	}
+	e.observeTranscodeStatus(ec, st)
+	if st.RecoveryRequired {
+		out := transcodeWorkerMetadataOutputs(ec, st)
+		out["job_id"], out["external_reference"] = jobID, jobID
+		out["worker_error"] = st.Error
+		return StepResult{Status: StepWaitingDecision, WaitingReason: fmt.Sprintf("Encoding finished for job %s; the encoded candidate is preserved but publication requires intervention (%s): %s", jobID, st.FailureClassification, st.Error), WaitingOptions: []WaitingOption{{Decision: "recheck", Description: "Check the same worker job after publication recovery; do not encode again"}}, Outputs: out}, nil
+	}
 	switch st.Status {
 	case transcode.StatusRunning, transcode.StatusQueued:
 		mirrorTranscodeWorkerMetadata(ec, st)
 		meta := transcodeWorkerMetadataOutputs(ec, st)
-		meta["transcode_status"] = st.Status
-		meta["progress"] = st.Progress
-		meta["speed"] = st.Speed
-		meta["fps"] = st.FPS
+		mergeMap(meta, transcodeTelemetryOutputs(ec))
 		meta["job_id"] = jobID
 		meta["external_reference"] = jobID
-		return StepResult{Status: StepWaitingExternal, WaitingCondition: "transcode_complete", WaitingReason: fmt.Sprintf("Transcoding media (%s, progress: %.1f%%, speed: %.1fx, fps: %.1f)", st.Status, st.Progress, st.Speed, st.FPS), Outputs: meta}, nil
+		reason := fmt.Sprintf("Transcoding media (%s, progress: %.1f%%, speed: %.1fx, fps: %.1f)", st.Status, st.Progress, st.Speed, st.FPS)
+		if getBool(ec.State, "progress_is_stale") {
+			reason = fmt.Sprintf("Transcoding media (%s; progress temporarily stale)", st.Status)
+			if p := getFloat(ec.State, "progress"); p > 0 {
+				reason += fmt.Sprintf("; last known: %.1f%%", p)
+			}
+		}
+		if st.Phase != "" {
+			reason += "; phase: " + st.Phase
+		}
+		return StepResult{Status: StepWaitingExternal, WaitingCondition: "transcode_complete", WaitingReason: reason, Outputs: meta}, nil
 	case transcode.StatusFailed:
 		mirrorTranscodeWorkerMetadata(ec, st)
 		msg := st.Error

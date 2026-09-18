@@ -169,7 +169,7 @@ func TestReconcile404ControlledSameRequestResubmit(t *testing.T) {
 func TestReconcileDefinitiveOtherErrorFailsClosed(t *testing.T) {
 	mock := &mockTranscodeExecutor{
 		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
-			return transcode.JobStatus{}, &transcode.HTTPError{Method: "GET", URL: "/v1/jobs/" + jobID, StatusCode: 500, Message: "boom"}
+			return transcode.JobStatus{}, &transcode.HTTPError{Method: "GET", URL: "/v1/jobs/" + jobID, StatusCode: 403, Message: "forbidden"}
 		},
 	}
 	e := NewEngine(EngineDeps{Transcode: mock})
@@ -355,7 +355,7 @@ func TestWaitFailedWorkerBusyIsTerminal(t *testing.T) {
 	}
 }
 
-func TestWaitDefinitive500FailsClosedBudgetUnchanged(t *testing.T) {
+func TestWaitUnavailable500ReconcilesBudgetUnchanged(t *testing.T) {
 	mock := &mockTranscodeExecutor{
 		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
 			return transcode.JobStatus{}, &transcode.HTTPError{Method: "GET", URL: "/v1/jobs/" + jobID, StatusCode: 500, Message: "connection reset by peer"}
@@ -367,8 +367,8 @@ func TestWaitDefinitive500FailsClosedBudgetUnchanged(t *testing.T) {
 	ec.State["attempt"] = 2
 	ec.State["retry_count"] = 1
 	res, _ := e.stepTranscodeWait(context.Background(), ec)
-	if res.Status != StepFailed {
-		t.Fatalf("got %s want failed closed", res.Status)
+	if res.Status != StepWaitingExternal || res.WaitingCondition != "worker_unreachable" {
+		t.Fatalf("got %s/%s want waiting_external/worker_unreachable", res.Status, res.WaitingCondition)
 	}
 	if getInt(ec.State, "attempt") != 2 || getInt(ec.State, "retry_count") != 1 {
 		t.Fatalf("definitive status error must not burn budget, got attempt=%v retry=%v", ec.State["attempt"], ec.State["retry_count"])

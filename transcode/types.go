@@ -101,7 +101,52 @@ type Request struct {
 type Job struct {
 	ID string `json:"id"`
 }
+
+// ProgressSnapshot is the last observed encoder update. A nil snapshot means
+// no measurement has arrived; zero-valued rates are not evidence of a stall.
+type ProgressSnapshot struct {
+	Progress  float64   `json:"progress"`
+	FPS       float64   `json:"fps"`
+	Speed     float64   `json:"speed"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// JobTelemetry is additive to the stable queued/running/terminal status model.
+// Phase describes actual work; runner slots include preparation and publication
+// as well as encoding. Durations are omitted when older workers lack evidence.
+type JobTelemetry struct {
+	Phase                  string            `json:"phase,omitempty"`
+	CreatedAt              time.Time         `json:"created_at,omitzero"`
+	StartedAt              time.Time         `json:"started_at,omitzero"`
+	FinishedAt             time.Time         `json:"finished_at,omitzero"`
+	EncodeStartedAt        time.Time         `json:"encode_started_at,omitzero"`
+	EncodeFinishedAt       time.Time         `json:"encode_finished_at,omitzero"`
+	ValidationStartedAt    time.Time         `json:"validation_started_at,omitzero"`
+	ValidationFinishedAt   time.Time         `json:"validation_finished_at,omitzero"`
+	QueueDurationMs        *int64            `json:"queue_duration_ms,omitempty"`
+	EncodeDurationMs       *int64            `json:"encode_duration_ms,omitempty"`
+	ValidationDurationMs   *int64            `json:"validation_duration_ms,omitempty"`
+	WallDurationMs         *int64            `json:"wall_duration_ms,omitempty"`
+	LastProgressAt         time.Time         `json:"last_progress_at,omitzero"`
+	WorkerHeartbeatAt      time.Time         `json:"worker_heartbeat_at,omitzero"`
+	ProgressIsStale        bool              `json:"progress_is_stale"`
+	LastKnownProgress      *ProgressSnapshot `json:"last_known_progress,omitempty"`
+	WorkerSlotsTotal       int               `json:"worker_slots_total,omitempty"`
+	WorkerSlotsUsed        int               `json:"worker_slots_used"`
+	QueuePosition          int               `json:"queue_position,omitempty"`
+	FinalizationRetryCount int               `json:"finalization_retry_count,omitempty"`
+	NextFinalizationAt     time.Time         `json:"next_finalization_at,omitzero"`
+	RecoveryRequired       bool              `json:"recovery_required,omitempty"`
+	ErrorClass             string            `json:"error_class,omitempty"`
+	StorageBackend         string            `json:"storage_backend,omitempty"`
+	NavigatorrPath         string            `json:"navigatorr_path,omitempty"`
+	WorkerResolvedPath     string            `json:"worker_resolved_path,omitempty"`
+	SMBShare               string            `json:"smb_share,omitempty"`
+	SMBRelativePath        string            `json:"smb_relative_path,omitempty"`
+}
+
 type JobStatus struct {
+	JobTelemetry
 	ID                    string             `json:"id"`
 	Status                string             `json:"status"`
 	Progress              float64            `json:"progress"`

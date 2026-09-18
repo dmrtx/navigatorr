@@ -136,8 +136,8 @@ func TestMigrationV4ToV5(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_version`).Scan(&ver); err != nil {
 		t.Fatalf("reading version: %v", err)
 	}
-	if ver != 5 {
-		t.Fatalf("expected schema version 5, got %d", ver)
+	if ver != SchemaVersion {
+		t.Fatalf("expected schema version %d, got %d", SchemaVersion, ver)
 	}
 
 	// Verify old item can be read and defaults job_id to empty string

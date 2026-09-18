@@ -13,6 +13,62 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
+func TestCompactTranscodeStatusPreservesWorkerEvidence(t *testing.T) {
+	encodeMs, lagMs := int64(240000), int64(25000000)
+	res := &action.ActionResult{
+		ID: "transcode-observed", ActionName: "transcode_media", Status: action.StatusWaitingExternal,
+		CurrentStep: 2, TotalSteps: 5, DurationMs: 25240000, WallDurationMs: 25240000,
+		EncodeDurationMs: &encodeMs, ReconcileLagMs: &lagMs,
+		Outputs: map[string]any{
+			"transcode_status": "running", "transcode_phase": "encoding", "progress": 26.2,
+			"progress_is_stale": true, "worker_heartbeat_at": "2026-01-01T00:00:00Z",
+			"last_known_progress": map[string]any{"progress": 26.2, "speed": 15.5, "fps": 366.1},
+			"source_report":       strings.Repeat("private-metadata", 10000),
+		},
+		State: map[string]any{"next_poll_at": "2026-01-01T00:00:15Z"},
+	}
+	compact := toCompactSummary(res)
+	data, err := json.Marshal(compact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compact.Worker["progress_is_stale"] != true || compact.Worker["last_known_progress"] == nil {
+		t.Fatalf("compact status lost stale progress evidence: %s", data)
+	}
+	if compact.WallDurationMs == *compact.EncodeDurationMs || *compact.ReconcileLagMs != lagMs {
+		t.Fatalf("compact status confused wall time and encoding: %s", data)
+	}
+	if compact.Reconciliation["next_poll_at"] == nil || len(data) > 4096 || strings.Contains(string(data), "private-metadata") {
+		t.Fatalf("compact status must expose polling without raw media payload: %s", data)
+	}
+}
+
+func TestCompactPromotionApprovalIncludesConcreteReplacement(t *testing.T) {
+	res := &action.ActionResult{
+		ID: "promotion-approval", ActionName: "promote_transcode_candidate", Status: action.StatusWaitingDecision,
+		Outputs: map[string]any{"promotion": map[string]any{
+			"transcode_action_id": "source-action", "series_id": 42, "service": "sonarr",
+			"original_path": "/media/series/original.mp4", "candidate_path": "/media/series/.navigatorr-candidates/candidate.mkv",
+			"episode_ids": []int{101, 102}, "original_bytes": 1800000000, "candidate_bytes": 530000000,
+			"candidate_sha256": strings.Repeat("a", 64), "approved": false,
+			"commands": map[string]any{"large_history": strings.Repeat("unrelated-command", 10000)},
+		}},
+	}
+	summary := toCompactSummary(res)
+	encoded, err := json.Marshal(summary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"transcode_action_id", "series_id", "original_path", "candidate_path", "episode_ids", "candidate_sha256", "original_bytes", "candidate_bytes"} {
+		if summary.Promotion[key] == nil {
+			t.Errorf("approval omitted %s: %s", key, encoded)
+		}
+	}
+	if summary.Promotion["approved"] != false || len(encoded) > 4096 || strings.Contains(string(encoded), "unrelated-command") {
+		t.Fatalf("approval must show its bounded, unapproved plan: %s", encoded)
+	}
+}
+
 func TestActionResponses_ContextBounded(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "action_bounded.db")
 	st, err := store.Open(dbPath)
@@ -502,4 +558,76 @@ func TestActionResponses_ContextBounded(t *testing.T) {
 			t.Errorf("expected at most 100 items with limit clamped")
 		}
 	})
+}
+
+func TestActionList_OneHundredTranscodesRemainBounded(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "transcode_list.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	engine := action.NewEngine(action.EngineDeps{Store: st})
+	s := server.NewMCPServer("navigatorr-test", "1.0.0", server.WithToolCapabilities(true))
+	registerActionTools(s, engine)
+
+	now := time.Now().UTC()
+	stamp := now.Format(time.RFC3339)
+	telemetry := map[string]any{
+		"transcode_status": "running", "transcode_phase": "encoding",
+		"progress": 26.2, "speed": 15.5, "fps": 366.1,
+		"last_progress_at": stamp, "worker_heartbeat_at": stamp,
+		"progress_is_stale":   false,
+		"last_known_progress": map[string]any{"progress": 26.2, "speed": 15.5, "fps": 366.1, "updated_at": stamp},
+		"worker_slots_total":  3, "worker_slots_used": 3, "queue_position": 0,
+		"storage_backend": "smb_direct",
+		"next_poll_at":    now.Add(5 * time.Second).Format(time.RFC3339), "last_worker_poll_at": stamp,
+		"queue_duration_ms": 5, "encode_duration_ms": 180000,
+		"validation_duration_ms": 4000, "reconcile_lag_ms": 5000,
+	}
+	encoded, err := json.Marshal(telemetry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 100; i++ {
+		if err := st.CreateActionInstance(store.ActionInstance{
+			ID: fmt.Sprintf("act-transcode-media-%08d", i), ActionName: "transcode_media",
+			Status: action.StatusWaitingExternal, CurrentStep: 2,
+			WaitingReason:    "Transcoding media (running, progress: 26.2%, speed: 15.5x, fps: 366.1)",
+			WaitingCondition: "transcode_complete",
+			InputsJSON:       `{}`, OutputsJSON: string(encoded), StateJSON: string(encoded),
+			IdempotencyKey: fmt.Sprintf("series-10-episode-%03d-q65", i),
+			CreatedAt:      now.Add(-4 * time.Minute).Format(time.RFC3339), UpdatedAt: stamp,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	response := resultText(t, callTool(t, s, "action_list", map[string]any{"limit": "100", "offset": "0"}))
+	if len(response) >= MaxActionResponseBytes {
+		t.Fatalf("normal 100-action page exceeds response budget: %d bytes", len(response))
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(response), &rows); err != nil {
+		t.Fatalf("expected an array of actions, not an overflow error: %v; response: %s", err, response)
+	}
+	if len(rows) != 100 {
+		t.Fatalf("normal page was truncated: got %d actions, want 100", len(rows))
+	}
+	seen := make(map[string]bool, 100)
+	for _, row := range rows {
+		id, _ := row["id"].(string)
+		if id == "" || seen[id] {
+			t.Fatalf("missing or duplicate action ID: %q", id)
+		}
+		seen[id] = true
+		if row["status"] != action.StatusWaitingExternal || row["current_step"] != float64(2) || row["wall_duration_ms"] == nil {
+			t.Fatalf("list lost operational fields: %+v", row)
+		}
+		for _, field := range []string{"worker", "reconciliation", "queue_duration_ms", "encode_duration_ms", "validation_duration_ms", "reconcile_lag_ms"} {
+			if _, exists := row[field]; exists {
+				t.Fatalf("per-action detail %q should remain in action_status: %+v", field, row)
+			}
+		}
+	}
+	t.Logf("100 transcode actions fit in %d bytes", len(response))
 }

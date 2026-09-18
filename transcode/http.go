@@ -3,14 +3,12 @@ package transcode
 // HTTPExecutor implements Executor over the versioned worker daemon HTTP API
 // (`navigatorr-transcode serve`, /v1 routes).
 //
-// DARK / NON-DEFAULT integration (PR2): wire it via
-// cfg.Transcode.Executor == "http" only for explicit opt-in. Production
-// default remains SSH. There is deliberately NO automatic SSH fallback after
+// The production pipeline uses HTTP. There is deliberately NO SSH fallback after
 // HTTP uncertainty, NO automatic resubmit, and NO consumption of encode
 // retry budget at the transport layer. A submit/cancel transport
 // timeout/disconnect is UNKNOWN (possibly accepted by the worker), not an
 // encode failure: callers must reconcile via idempotent Status before
-// deciding anything. That reconciliation protocol is phase 4 (not PR2).
+// deciding anything. Navigatorr's background reconciler owns subsequent polls.
 //
 // Worker idempotency in PR3 is strong: idempotency_key +
 // execution_spec_digest (canonical digest over source, candidate, normalized
@@ -108,6 +106,10 @@ func (e *UncertainError) Error() string {
 	where := e.Op
 	if e.JobID != "" {
 		where += " job " + e.JobID
+	}
+	switch e.Op {
+	case "health", "ready", "doctor", "capabilities", "status", "benchmark_status":
+		return fmt.Sprintf("transcode http %s: transport uncertain (read unavailable; no mutation requested; retry this read): %v", where, e.Err)
 	}
 	return fmt.Sprintf("transcode http %s: transport uncertain (may or may not have been accepted; reconcile via Status before retry; do not burn encode retry budget): %v", where, e.Err)
 }
@@ -483,6 +485,46 @@ func (e *HTTPExecutor) mutatingDoErr(op, jobID string, err error) error {
 	return &UncertainError{Op: op, JobID: jobID, Err: err}
 }
 
+// Health checks process liveness without inspecting storage or encoders.
+func (e *HTTPExecutor) Health(ctx context.Context) error {
+	return e.availability(ctx, "health", "ok")
+}
+
+// Ready checks whether the worker can accept a durable job. Deep diagnostics
+// are intentionally independent and must not gate a healthy submit.
+func (e *HTTPExecutor) Ready(ctx context.Context) error {
+	return e.availability(ctx, "ready", "ready")
+}
+
+func (e *HTTPExecutor) availability(ctx context.Context, op, field string) error {
+	ctx, cancel := context.WithTimeout(ctx, e.reqTO)
+	defer cancel()
+	path := "/v1/" + op
+	req, err := e.newRequest(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return fmt.Errorf("building %s request: %w", op, err)
+	}
+	data, code, _, err := e.do(req, op, "", false)
+	if err != nil {
+		if isTransportFailure(err) {
+			return e.failUncertain(op, "", err)
+		}
+		return fmt.Errorf("transcode http %s: %w", op, err)
+	}
+	if code != http.StatusOK {
+		return &HTTPError{Method: http.MethodGet, URL: redactURL(e.base + path), StatusCode: code, Message: parseErrorMessage(data)}
+	}
+	var result map[string]json.RawMessage
+	if err := json.Unmarshal(data, &result); err != nil {
+		return fmt.Errorf("parsing %s response: %w", op, err)
+	}
+	var available bool
+	if err := json.Unmarshal(result[field], &available); err != nil || !available {
+		return fmt.Errorf("transcode http %s: response did not confirm %s=true", op, field)
+	}
+	return nil
+}
+
 // Doctor reuses the daemon's environmental checks verbatim. It GETs
 // /v1/doctor (NOT /health or /ready) so capability-relevant diagnostics are
 // never faked from liveness.
@@ -723,6 +765,9 @@ func (e *HTTPExecutor) Status(ctx context.Context, jobID string) (JobStatus, err
 		if localCandidate, terr := e.TranslateRemoteToLocal(st.CandidatePath); terr == nil {
 			st.CandidatePath = localCandidate
 		}
+	}
+	if st.NavigatorrPath == "" && st.WorkerResolvedPath != "" {
+		st.NavigatorrPath, _ = e.TranslateRemoteToLocal(st.WorkerResolvedPath)
 	}
 	return st, nil
 }

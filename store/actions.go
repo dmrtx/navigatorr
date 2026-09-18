@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Action execution statuses
@@ -114,19 +115,41 @@ func (s *Store) GetActionInstance(id string) (*ActionInstance, error) {
 
 // UpdateActionInstance updates status, state, outputs and progress of an action instance.
 func (s *Store) UpdateActionInstance(inst ActionInstance) error {
+	return s.updateActionInstance(inst, "")
+}
+
+// UpdateClaimedActionInstance fences a stale executor after its lease expires.
+func (s *Store) UpdateClaimedActionInstance(inst ActionInstance, owner string) error {
+	return s.updateActionInstance(inst, owner)
+}
+
+func (s *Store) updateActionInstance(inst ActionInstance, owner string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	now := nowStr()
-	_, err := s.db.Exec(`UPDATE action_instances SET
-		status=?, current_step=?, outputs_json=?, state_json=?,
+	res, err := s.db.Exec(`UPDATE action_instances SET
+		status=?, current_step=?, inputs_json=?, outputs_json=?, state_json=?,
 		waiting_reason=?, waiting_condition=?, waiting_options_json=?,
 		error_json=?, idempotency_key=?, updated_at=?
-		WHERE id=?`,
-		inst.Status, inst.CurrentStep, inst.OutputsJSON, inst.StateJSON,
+		WHERE id=? AND (? = '' OR EXISTS (SELECT 1 FROM action_execution_leases
+		 WHERE action_id=? AND owner=? AND expires_at_ms>?))`,
+		inst.Status, inst.CurrentStep, inst.InputsJSON, inst.OutputsJSON, inst.StateJSON,
 		inst.WaitingReason, inst.WaitingCondition, inst.WaitingOptionsJSON,
-		inst.ErrorJSON, inst.IdempotencyKey, now, inst.ID)
-	return err
+		inst.ErrorJSON, inst.IdempotencyKey, now, inst.ID, owner, inst.ID, owner, time.Now().UnixMilli())
+	if err != nil {
+		return err
+	}
+	if owner != "" {
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n != 1 {
+			return fmt.Errorf("action execution lease lost for %s", inst.ID)
+		}
+	}
+	return nil
 }
 
 // ListActionInstances returns action instances optionally filtered by status.

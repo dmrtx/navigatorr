@@ -2,6 +2,13 @@ package transcode
 
 import "context"
 
+// AvailabilityExecutor separates cheap availability checks from optional deep
+// diagnostics. Existing executors remain compatible with Executor.
+type AvailabilityExecutor interface {
+	Health(context.Context) error
+	Ready(context.Context) error
+}
+
 // Executor defines the generic interface for media transcoding execution.
 // Navigatorr acts as the coordinator while Executor dispatches, inspects, and cancels work.
 type Executor interface {

@@ -62,20 +62,28 @@ func chunkPayload(id, actionName, section, key string, rawBytes []byte, chunkIdx
 // ActionCompactSummary contains operational fields needed to monitor or continue workflows,
 // omitting full inputs/outputs/state to protect the model's context window.
 type ActionCompactSummary struct {
-	ID               string                 `json:"id"`
-	ActionName       string                 `json:"action_name"`
-	Status           string                 `json:"status"`
-	CurrentStep      int                    `json:"current_step"`
-	TotalSteps       int                    `json:"total_steps"`
-	Progress         string                 `json:"progress"`
-	WaitingReason    string                 `json:"waiting_reason,omitempty"`
-	WaitingCondition string                 `json:"waiting_condition,omitempty"`
-	WaitingOptions   []action.WaitingOption `json:"waiting_options,omitempty"`
-	Error            string                 `json:"error,omitempty"`
-	IdempotencyKey   string                 `json:"idempotency_key,omitempty"`
-	DurationMs       int64                  `json:"duration_ms"`
-	CreatedAt        string                 `json:"created_at,omitempty"`
-	UpdatedAt        string                 `json:"updated_at,omitempty"`
+	ID                   string                 `json:"id"`
+	ActionName           string                 `json:"action_name"`
+	Status               string                 `json:"status"`
+	CurrentStep          int                    `json:"current_step"`
+	TotalSteps           int                    `json:"total_steps"`
+	Progress             string                 `json:"progress"`
+	WaitingReason        string                 `json:"waiting_reason,omitempty"`
+	WaitingCondition     string                 `json:"waiting_condition,omitempty"`
+	WaitingOptions       []action.WaitingOption `json:"waiting_options,omitempty"`
+	Error                string                 `json:"error,omitempty"`
+	IdempotencyKey       string                 `json:"idempotency_key,omitempty"`
+	DurationMs           int64                  `json:"duration_ms"`
+	WallDurationMs       int64                  `json:"wall_duration_ms"`
+	QueueDurationMs      *int64                 `json:"queue_duration_ms,omitempty"`
+	EncodeDurationMs     *int64                 `json:"encode_duration_ms,omitempty"`
+	ValidationDurationMs *int64                 `json:"validation_duration_ms,omitempty"`
+	ReconcileLagMs       *int64                 `json:"reconcile_lag_ms,omitempty"`
+	Worker               map[string]any         `json:"worker,omitempty"`
+	Reconciliation       map[string]any         `json:"reconciliation,omitempty"`
+	Promotion            map[string]any         `json:"promotion,omitempty"`
+	CreatedAt            string                 `json:"created_at,omitempty"`
+	UpdatedAt            string                 `json:"updated_at,omitempty"`
 }
 
 // StepSummary represents a compact execution step record omitting raw JSON payloads.
@@ -107,21 +115,88 @@ func toCompactSummary(res *action.ActionResult) ActionCompactSummary {
 		return ActionCompactSummary{}
 	}
 	return ActionCompactSummary{
-		ID:               res.ID,
-		ActionName:       res.ActionName,
-		Status:           res.Status,
-		CurrentStep:      res.CurrentStep,
-		TotalSteps:       res.TotalSteps,
-		Progress:         formatProgress(res.CurrentStep, res.TotalSteps, res.Status),
-		WaitingReason:    res.WaitingReason,
-		WaitingCondition: res.WaitingCondition,
-		WaitingOptions:   res.WaitingOptions,
-		Error:            res.Error,
-		IdempotencyKey:   res.IdempotencyKey,
-		DurationMs:       res.DurationMs,
-		CreatedAt:        res.CreatedAt,
-		UpdatedAt:        res.UpdatedAt,
+		ID:                   res.ID,
+		ActionName:           res.ActionName,
+		Status:               res.Status,
+		CurrentStep:          res.CurrentStep,
+		TotalSteps:           res.TotalSteps,
+		Progress:             formatProgress(res.CurrentStep, res.TotalSteps, res.Status),
+		WaitingReason:        res.WaitingReason,
+		WaitingCondition:     res.WaitingCondition,
+		WaitingOptions:       res.WaitingOptions,
+		Error:                res.Error,
+		IdempotencyKey:       res.IdempotencyKey,
+		DurationMs:           res.DurationMs,
+		WallDurationMs:       res.WallDurationMs,
+		QueueDurationMs:      res.QueueDurationMs,
+		EncodeDurationMs:     res.EncodeDurationMs,
+		ValidationDurationMs: res.ValidationDurationMs,
+		ReconcileLagMs:       res.ReconcileLagMs,
+		Worker: compactOperationalFields(res, []string{
+			"transcode_status", "transcode_phase", "benchmark_status", "benchmark_phase", "phase",
+			"progress", "speed", "fps", "last_progress_at", "worker_heartbeat_at",
+			"progress_is_stale", "last_known_progress", "progress_details", "benchmark_progress_details",
+			"worker_slots_total", "worker_slots_used", "queue_position", "storage_backend",
+			"recovery_required", "error_class", "finalization_retry_count", "next_finalization_at",
+		}),
+		Reconciliation: compactOperationalFields(res, []string{
+			"next_poll_at", "last_worker_poll_at", "worker_completed_at", "reconciled_at",
+		}),
+		Promotion: compactPromotion(res),
+		CreatedAt: res.CreatedAt,
+		UpdatedAt: res.UpdatedAt,
 	}
+}
+
+// Approval must show the concrete files and episodes it will replace, even in
+// the default compact response. Do not require a second detail request merely
+// to discover what an approve option refers to.
+func compactPromotion(res *action.ActionResult) map[string]any {
+	if res.ActionName != "promote_transcode_candidate" {
+		return nil
+	}
+	value := res.State["promotion"]
+	if value == nil {
+		value = res.Outputs["promotion"]
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	var plan map[string]any
+	if json.Unmarshal(encoded, &plan) != nil {
+		return nil
+	}
+	return compactOperationalFields(&action.ActionResult{Outputs: plan}, []string{
+		"transcode_action_id", "service", "series_id", "original_path", "candidate_path",
+		"original_episode_file_id", "episode_ids", "original_bytes", "candidate_bytes",
+		"original_sha256", "candidate_sha256", "approved", "new_episode_file_id", "new_path",
+		"recovery_path", "recovery_verified",
+	})
+}
+
+// Only bounded operational data belongs in compact responses. Media reports,
+// paths, manifests and arbitrary workflow payloads remain in action_detail.
+func compactOperationalFields(res *action.ActionResult, keys []string) map[string]any {
+	var fields map[string]any
+	for _, key := range keys {
+		value, exists := res.Outputs[key]
+		if !exists {
+			value, exists = res.State[key]
+		}
+		if !exists || value == nil {
+			continue
+		}
+		encoded, err := json.Marshal(value)
+		if err != nil || len(encoded) > 1024 {
+			continue
+		}
+		if fields == nil {
+			fields = make(map[string]any)
+		}
+		fields[key] = value
+	}
+	return fields
 }
 
 func toStepSummaries(steps []store.ActionStepLog) []StepSummary {
@@ -183,8 +258,8 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 	// action_run — start a declarative multi-step action workflow
 	s.AddTool(
 		mcp.NewTool("action_run",
-			mcp.WithDescription("Run a declarative multi-step action workflow (e.g. transcode_batch, transcode_media, validate_torrent, safe_media_replacement). State is persistently tracked in SQLite and tolerates disconnects and reboots. Note: 'inputs' must be provided as a JSON object string, and 'idempotency_key' is a top-level string argument. Returns a compact operational summary."),
-			mcp.WithString("action", mcp.Required(), mcp.Description("Workflow name: transcode_batch, transcode_media, validate_torrent, safe_media_replacement")),
+			mcp.WithDescription("Run a declarative multi-step action workflow (e.g. transcode_batch, transcode_media, promote_transcode_candidate, validate_torrent, safe_media_replacement). State is persistently tracked in SQLite and tolerates disconnects and reboots. Transcode and benchmark external waits reconcile automatically; candidate promotion requires explicit approval. Note: 'inputs' must be provided as a JSON object string, and 'idempotency_key' is a top-level string argument. Returns a compact operational summary."),
+			mcp.WithString("action", mcp.Required(), mcp.Description("Workflow name: transcode_batch, transcode_media, benchmark_transcode, promote_transcode_candidate, validate_torrent, safe_media_replacement")),
 			mcp.WithString("inputs", mcp.Description("JSON object string with action parameters (e.g. \"{\\\"service\\\":\\\"sonarr\\\",\\\"series_id\\\":\\\"10\\\"}\" or \"{\\\"path\\\":\\\"/media/...\\\"}\"). Must be a JSON-encoded string, not a raw object.")),
 			mcp.WithString("service", mcp.Description("Shortcut: *arr service name (sonarr, radarr)")),
 			mcp.WithString("media_id", mcp.Description("Shortcut: media ID in *arr service")),
@@ -567,7 +642,7 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 	// action_list — list recent actions with optional status filtering
 	s.AddTool(
 		mcp.NewTool("action_list",
-			mcp.WithDescription("List action workflow instances with optional status filtering (running, waiting_external, waiting_decision, completed, failed, or all). Returns compact operational summaries only."),
+			mcp.WithDescription("List action workflow instances with optional status filtering (running, waiting_external, waiting_decision, completed, failed, or all). Returns compact summaries; use action_status for each job's worker telemetry and timing breakdown."),
 			mcp.WithString("status", mcp.Description("Filter status: running, waiting_external, waiting_decision, completed, failed, all (default all)")),
 			mcp.WithString("limit", mcp.Description("Max items to return (1-100, default 20)")),
 			mcp.WithString("offset", mcp.Description("Pagination offset (default 0)")),
@@ -594,6 +669,16 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 			summaries := make([]ActionCompactSummary, len(res))
 			for i := range res {
 				summaries[i] = toCompactSummary(&res[i])
+				// Full per-worker telemetry can make a normal 100-action page
+				// exceed the response limit. Keep it in action_status; preserve
+				// the listing's existing compact shape and page size.
+				summaries[i].Worker = nil
+				summaries[i].Reconciliation = nil
+				summaries[i].Promotion = nil
+				summaries[i].QueueDurationMs = nil
+				summaries[i].EncodeDurationMs = nil
+				summaries[i].ValidationDurationMs = nil
+				summaries[i].ReconcileLagMs = nil
 			}
 
 			return toolBoundedJSON(summaries, MaxActionResponseBytes, nil), nil

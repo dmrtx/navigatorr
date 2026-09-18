@@ -9,6 +9,9 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/jakenesler/navigatorr/internal/smbdirect"
+	"github.com/jakenesler/navigatorr/transcode/resilience"
 )
 
 // This file implements the Phase 6B2 operational execution state machine:
@@ -171,6 +174,8 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 	if cancelled, err := w.persistOperationalProgress(jobDir, jobFile, job, func(l *JobRecord) {
 		l.DurationSec = job.DurationSec
 		l.Conversions = job.Conversions
+		l.Phase = "encoding"
+		l.EncodeStartedAt = time.Now().UTC()
 	}); err != nil {
 		return err
 	} else if cancelled {
@@ -183,8 +188,23 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 	// Encode operational input -> local candidate. Semantic Source/Candidate
 	// remain unchanged in the persisted record.
 	ffmpegErr := w.runOperationalFFmpeg(ctx, execPlan, job, r.effectiveInput, r.localCandidate, progressPath, logPath)
+	job.EncodeFinishedAt = time.Now().UTC()
 	if ffmpegErr != nil {
+		job.FailureClassification = string(resilience.ClassifyError(ffmpegErr))
+		var classified interface{ FailureClass() string }
+		if job.FailureClassification == string(resilience.FFmpegUnknown) && !errors.As(ffmpegErr, &classified) {
+			job.FailureClassification = "worker_setup_failed"
+		}
 		return w.failJobTerminal(jobDir, jobFile, job, ffmpegErr)
+	}
+	if cancelled, err := w.persistOperationalProgress(jobDir, jobFile, job, func(l *JobRecord) {
+		l.EncodeFinishedAt = job.EncodeFinishedAt
+		l.Phase = "validating"
+		l.ValidationStartedAt = time.Now().UTC()
+	}); err != nil {
+		return err
+	} else if cancelled {
+		return nil
 	}
 
 	if err := validateEncodedCandidate(r.localCandidate); err != nil {
@@ -196,6 +216,7 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 	// nonterminal.
 	if cancelled, err := w.persistOperationalProgress(jobDir, jobFile, job, func(l *JobRecord) {
 		l.EncodeComplete = true
+		l.ValidationFinishedAt = time.Now().UTC()
 		l.LocalCandidatePath = r.localCandidate
 		if strings.TrimSpace(r.destination) != "" {
 			l.IntendedDestination = r.destination
@@ -234,12 +255,16 @@ func (w *Worker) ensureStaged(ctx context.Context, jobDir, jobFile string, job *
 	} else if !ready {
 		if cancelled, err := w.persistOperationalProgress(jobDir, jobFile, job, func(l *JobRecord) {
 			l.StagingState = string(StagingStateStaging)
+			l.Phase = "reading_source"
 		}); err != nil {
 			return false, err
 		} else if cancelled {
 			return true, nil
 		}
 		var err error
+		if err := w.requireMediaBackend(job.Source); err != nil {
+			return false, err
+		}
 		if w.mediaStore != nil && w.mediaStore.Maps(job.Source) {
 			err = w.mediaStore.DownloadAtomic(ctx, job.Source, r.stagedInput)
 		} else {
@@ -254,6 +279,7 @@ func (w *Worker) ensureStaged(ctx context.Context, jobDir, jobFile string, job *
 		l.StagingState = string(StagingStateReady)
 		l.StagedInputPath = r.stagedInput
 		l.EffectiveInputPath = r.effectiveInput
+		l.Phase = "preparing"
 	})
 	if err != nil {
 		return false, err
@@ -297,7 +323,8 @@ func (w *Worker) finalizeOperational(ctx context.Context, jobDir, jobFile string
 	directSMB := w.mediaStore != nil && w.mediaStore.Maps(r.destination)
 	if !directSMB && r.finalization == FinalizationStateFinalizing && job.EncodeComplete {
 		eligible := job.FailureClassification == FailureStoragePublicationAmbiguous ||
-			job.FailureClassification == FailureStorageFinalization
+			job.FailureClassification == FailureStorageFinalization ||
+			finalizationClassRetryable(job.FailureClassification)
 		if eligible {
 			proven := job.FailureClassification == FailureStoragePublicationAmbiguous
 			if !proven {
@@ -351,6 +378,7 @@ func (w *Worker) finalizeOperational(ctx context.Context, jobDir, jobFile string
 	cancelled, err := w.persistOperationalProgress(jobDir, jobFile, job, func(l *JobRecord) {
 		l.EncodeComplete = true
 		l.FinalizationState = string(FinalizationStateFinalizing)
+		l.Phase = "publishing"
 	})
 	if err != nil {
 		return err
@@ -407,6 +435,7 @@ func (w *Worker) finalizeOperational(ctx context.Context, jobDir, jobFile string
 // cleans up only worker-owned local artifacts.
 func (w *Worker) completeOperationalJob(jobDir, jobFile string, job *JobRecord, r *resolvedOperational) error {
 	job.Status = "completed"
+	job.NextFinalizationAt = time.Time{}
 	job.FinishedAt = time.Now().UTC()
 	job.ExitCode = 0
 	job.Error = ""
@@ -421,13 +450,20 @@ func (w *Worker) completeOperationalJob(jobDir, jobFile string, job *JobRecord, 
 // recordFinalizationFailure leaves the job nonterminal and resumable after a
 // finalization/storage failure, preserving the local candidate and staged
 // artifacts. The runner identity is cleared so a startup resume can spawn
-// finalization again. An ambiguous exclusive-copy publication is recorded with
-// its own classification so recovery can later require content equality; every
-// other cause keeps the generic classification.
+// finalization again. Only transient failures receive a bounded scheduled
+// recovery. Permanent failures remain resumable without automatic respawns.
 func (w *Worker) recordFinalizationFailure(jobDir, jobFile string, job *JobRecord, cause error) error {
 	classification := FailureStorageFinalization
-	if errors.Is(cause, ErrAmbiguousPublication) {
+	if class := resilience.ClassifyError(cause); class != resilience.FFmpegUnknown && class != "" {
+		classification = string(class)
+	}
+	switch {
+	case errors.Is(cause, ErrDestinationExists), errors.Is(cause, smbdirect.ErrDestinationExists):
+		classification = string(resilience.IdempotencyConflict)
+	case errors.Is(cause, ErrAmbiguousPublication):
 		classification = FailureStoragePublicationAmbiguous
+	case classification == FailureStorageFinalization && errors.Is(cause, ErrStorageIO):
+		classification = string(resilience.StorageIOError)
 	}
 	cancelled, err := w.persistOperationalProgress(jobDir, jobFile, job, func(l *JobRecord) {
 		l.Status = "running"
@@ -439,6 +475,11 @@ func (w *Worker) recordFinalizationFailure(jobDir, jobFile string, job *JobRecor
 		}
 		l.FailureClassification = classification
 		l.Error = fmt.Sprintf("finalization failed: %v", cause)
+		l.Phase = "publication_pending"
+		l.NextFinalizationAt = time.Time{}
+		if automaticFinalizationAllowed(l) {
+			l.NextFinalizationAt = time.Now().UTC().Add(finalizationRetryDelay(l.FinalizationRetryCount))
+		}
 		l.FinishedAt = time.Time{}
 		l.ExitCode = 0
 	})
@@ -454,6 +495,14 @@ func (w *Worker) recordFinalizationFailure(jobDir, jobFile string, job *JobRecor
 // failJobTerminal persists a terminal failed transition (cancellation still
 // wins inside persistTerminalJob) and returns the cause.
 func (w *Worker) failJobTerminal(jobDir, jobFile string, job *JobRecord, cause error) error {
+	if job.FailureClassification == "" {
+		job.FailureClassification = string(resilience.ClassifyError(cause))
+		if job.FailureClassification == string(resilience.FFmpegUnknown) {
+			// The encoder path sets its own classification; an unrecognized
+			// staging/probe/setup failure is never an FFmpeg execution failure.
+			job.FailureClassification = "worker_setup_failed"
+		}
+	}
 	job.Status = "failed"
 	job.FinishedAt = time.Now().UTC()
 	job.ExitCode = 1
@@ -654,6 +703,9 @@ func (w *Worker) removeOwnPartialIfSafe(job *JobRecord, r *resolvedOperational) 
 // healthy through the existing lease primitive when one is configured. It is a
 // no-op for local paths or when no lease manager is set ("where applicable").
 func (w *Worker) ensureExternalHealthy(ctx context.Context, path string) error {
+	if err := w.requireMediaBackend(path); err != nil {
+		return err
+	}
 	if w.mediaStore != nil && w.mediaStore.Maps(path) {
 		return nil
 	}
@@ -701,10 +753,10 @@ func isPostEncodeResume(job *JobRecord) bool {
 	return IsPostEncodeFinalizationPending(job)
 }
 
-// ResumePostEncode is the explicit Phase 6B2 restart resume mechanism. It scans
+// ResumePostEncode is the startup and periodic publication recovery sweep. It scans
 // durable jobs for running PID-0 records whose encoding already completed and
 // whose destination still awaits finalization, and spawns one detached runner
-// per such job. It NEVER schedules queued jobs (the queued scheduler is
+// per due transient job within its persisted retry budget. It NEVER schedules queued jobs (the queued scheduler is
 // unaffected) and never runs ffmpeg: the spawned runner resumes finalization
 // only. Returns the number of runners started.
 //
@@ -720,7 +772,9 @@ func isPostEncodeResume(job *JobRecord) bool {
 // stale pre-spawn snapshot. A runner whose identity cannot be persisted is
 // killed and the persistence failure is surfaced.
 func (w *Worker) ResumePostEncode(ctx context.Context, selfExe, configPath string) (int, error) {
-	_ = ctx
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	cleanStateDir := filepath.Clean(w.cfg.StateDir)
 	capLock, err := acquireCapacityLock(cleanStateDir)
 	if err != nil {
@@ -738,7 +792,18 @@ func (w *Worker) ResumePostEncode(ctx context.Context, selfExe, configPath strin
 
 	started := 0
 	var errs []error
+	active, err := w.countActiveJobs("")
+	if err != nil {
+		return 0, fmt.Errorf("counting capacity for post-encode resume: %w", err)
+	}
+	maxParallel := w.cfg.MaxParallelJobs
+	if maxParallel <= 0 {
+		maxParallel = 1
+	}
 	for _, entry := range entries {
+		if ctx.Err() != nil {
+			return started, errors.Join(append(errs, ctx.Err())...)
+		}
 		name := entry.Name()
 		if !entry.IsDir() || strings.HasPrefix(name, ".") {
 			continue
@@ -775,8 +840,30 @@ func (w *Worker) ResumePostEncode(ctx context.Context, selfExe, configPath strin
 			if !isPostEncodeResume(job) {
 				return // not a post-encode candidate: safely skipped
 			}
+			if active >= maxParallel || !automaticFinalizationAllowed(job) || time.Now().UTC().Before(job.NextFinalizationAt) {
+				return
+			}
+			// Reserve an attempt before spawning so daemon crashes and fast
+			// child failures cannot reset the budget or race an immediate retry.
+			job.FinalizationRetryCount++
+			job.NextFinalizationAt = time.Time{}
+			if job.FinalizationRetryCount < MaxFinalizationRetries {
+				job.NextFinalizationAt = time.Now().UTC().Add(finalizationRetryDelay(job.FinalizationRetryCount))
+			}
+			if serr := SaveJobAtomic(jobFile, job); serr != nil {
+				errs = append(errs, fmt.Errorf("reserving post-encode retry for job %s: %w", job.ID, serr))
+				return
+			}
 			pid, lstart, perr := w.spawnTranscodeProcess(selfExe, configPath, job.ID)
 			if perr != nil {
+				job.FailureClassification = failurePostEncodeRunnerUnavailable
+				job.Error = fmt.Sprintf("post-encode resume runner unavailable: %v", perr)
+				if job.FinalizationRetryCount >= MaxFinalizationRetries {
+					job.NextFinalizationAt = time.Time{}
+				}
+				if serr := SaveJobAtomic(jobFile, job); serr != nil {
+					errs = append(errs, fmt.Errorf("persisting failed post-encode spawn for job %s: %w", job.ID, serr))
+				}
 				errs = append(errs, fmt.Errorf("spawning post-encode resume runner for job %s: %w", job.ID, perr))
 				return
 			}
@@ -797,6 +884,7 @@ func (w *Worker) ResumePostEncode(ctx context.Context, selfExe, configPath strin
 			if latest.PID != 0 || !isPostEncodeResume(latest) {
 				// The child already owns/advanced the record; leave it alone.
 				started++
+				active++
 				return
 			}
 			latest.PID = pid
@@ -810,6 +898,7 @@ func (w *Worker) ResumePostEncode(ctx context.Context, selfExe, configPath strin
 				return
 			}
 			started++
+			active++
 		}()
 	}
 	return started, errors.Join(errs...)

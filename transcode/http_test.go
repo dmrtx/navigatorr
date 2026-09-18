@@ -15,6 +15,76 @@ import (
 	"time"
 )
 
+func TestHTTPAvailabilityAndSubmitDoNotDependOnDoctor(t *testing.T) {
+	var doctorCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/health":
+			fmt.Fprintln(w, `{"ok":true}`)
+		case "/v1/ready":
+			fmt.Fprintln(w, `{"ready":true}`)
+		case "/v1/doctor":
+			doctorCalls.Add(1)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprintln(w, `{"ok":false,"error":"deep storage probe timed out"}`)
+		case "/v1/jobs":
+			// Deployed workers reject unknown request fields; telemetry must
+			// remain response-only so rolling upgrades can still submit.
+			var request Request
+			decoder := json.NewDecoder(r.Body)
+			decoder.DisallowUnknownFields()
+			if err := decoder.Decode(&request); err != nil {
+				t.Error(err)
+			}
+			if request.SourcePath != "/Volumes/media/source.mkv" {
+				t.Errorf("submit mixed path layers: %+v", request)
+			}
+			fmt.Fprintln(w, `{"id":"availability","status":"queued"}`)
+		case "/v1/jobs/availability":
+			fmt.Fprintln(w, `{"id":"availability","status":"running","worker_resolved_path":"/Volumes/media/source.mkv","candidate_path":"/Volumes/media/candidate.mkv","storage_backend":"smb_direct","smb_share":"media","smb_relative_path":"source.mkv"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	e := newTestHTTPExecutor(t, srv)
+	if err := e.Health(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Ready(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if doctorCalls.Load() != 0 {
+		t.Fatal("availability invoked deep diagnosis")
+	}
+	if err := e.Doctor(context.Background()); err == nil {
+		t.Fatal("explicit doctor did not report its failure")
+	}
+	if _, err := e.Submit(context.Background(), Request{ID: "availability", SourcePath: "/local/media/source.mkv", CandidatePath: "/local/media/candidate.mkv"}); err != nil {
+		t.Fatalf("deep diagnostic failure blocked a ready worker: %v", err)
+	}
+	if doctorCalls.Load() != 1 {
+		t.Fatal("submit consulted doctor again")
+	}
+	st, err := e.Status(context.Background(), "availability")
+	if err != nil || st.NavigatorrPath != "/local/media/source.mkv" || st.WorkerResolvedPath != "/Volumes/media/source.mkv" || st.SMBRelativePath != "source.mkv" || st.CandidatePath != "/local/media/candidate.mkv" {
+		t.Fatalf("status did not preserve separate path layers: %+v %v", st, err)
+	}
+}
+
+func TestHTTPAvailabilityTimeoutIsReadUncertainty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
+	defer srv.Close()
+	e, err := NewHTTPExecutor(HTTPConfig{BaseURL: srv.URL, RequestTimeout: 20 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = e.Ready(context.Background())
+	if !IsTransportUncertain(err) || strings.Contains(err.Error(), "may or may not have been accepted") || !strings.Contains(err.Error(), "retry this read") {
+		t.Fatalf("read timeout was confused with an uncertain submit: %v", err)
+	}
+}
+
 // newClosedListener binds an ephemeral loopback port and closes it, so the
 // returned address is guaranteed (barring a race) to refuse connections.
 func newClosedListener(t *testing.T) (string, error) {

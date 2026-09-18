@@ -3,10 +3,27 @@ package optimization
 import (
 	"fmt"
 	"math"
+	"strings"
 )
 
 // DefaultContainerOverheadRate represents a typical 0.5% muxing overhead for MKV/MP4 containers.
 const DefaultContainerOverheadRate = 0.005
+
+// DefaultTextSubtitleSizeBytes is a conservative 2 MiB allowance per text
+// subtitle stream when ffprobe has no byte count. This is an estimate, not a
+// bound: unusually large scripts remain visible as estimation uncertainty.
+// Bitmap subtitles and unknown codecs require measured size or an explicit
+// caller fallback because their payload can be significant.
+const DefaultTextSubtitleSizeBytes int64 = 2 * 1024 * 1024
+
+func isTextSubtitleCodec(codec string) bool {
+	switch strings.ToLower(strings.TrimSpace(codec)) {
+	case "srt", "subrip", "mov_text", "ass", "ssa", "webvtt":
+		return true
+	default:
+		return false
+	}
+}
 
 // AudioStreamEstimate holds stream metadata needed to estimate audio payload.
 type AudioStreamEstimate struct {
@@ -70,8 +87,9 @@ type EstimationResult struct {
 
 // EstimateOutput calculates the expected output size by isolating the video stream
 // alongside audio, subtitles, and attachments. It validates inputs, guards against
-// overflow and non-finite numbers, requires explicit fallback estimates without guessing,
-// and marks estimates lacking video or stream estimates unsuitable for automatic selection.
+// overflow and non-finite numbers, and marks estimates lacking video or material
+// stream estimates unsuitable for selection. Known text subtitle codecs may use
+// a conservative default with visible uncertainty when their size is unknown.
 func EstimateOutput(in OutputEstimateInput) (EstimationResult, error) {
 	res := EstimationResult{
 		SuitableForSelection: true,
@@ -206,8 +224,11 @@ func EstimateOutput(in OutputEstimateInput) (EstimationResult, error) {
 		} else if s.FallbackSizeBytes > 0 {
 			streamBytes = s.FallbackSizeBytes
 			res.Uncertainties = append(res.Uncertainties, fmt.Sprintf("%s:stream_%d", ReasonSubtitleSizeEstimated, s.Index))
+		} else if isTextSubtitleCodec(s.Codec) {
+			streamBytes = DefaultTextSubtitleSizeBytes
+			res.Uncertainties = append(res.Uncertainties, fmt.Sprintf("%s:stream_%d", ReasonSubtitleSizeEstimated, s.Index))
 		} else {
-			// No measured size or caller-supplied explicit fallback exists! Do not invent size.
+			// Bitmap and unknown subtitles cannot use the small text allowance.
 			res.SuitableForSelection = false
 			if res.UnusableReason == "" {
 				res.UnusableReason = ReasonMissingSubtitleSize

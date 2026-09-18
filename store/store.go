@@ -20,7 +20,7 @@ import (
 )
 
 // SchemaVersion is the current schema revision. Migrations run in order.
-const SchemaVersion = 5
+const SchemaVersion = 6
 
 // MaxPreferenceValueLen bounds a stored preference value. Values ride into
 // memory_get/memory_list/get_context verbatim, so one huge blob would tax
@@ -317,6 +317,19 @@ var migrations = []migration{
 	}},
 	{version: 5, statements: []string{
 		`ALTER TABLE transcode_batch_items ADD COLUMN job_id TEXT NOT NULL DEFAULT ''`,
+	}},
+	{version: 6, statements: []string{
+		`CREATE TABLE IF NOT EXISTS promotion_original_claims (
+			service TEXT NOT NULL,
+			episode_file_id INTEGER NOT NULL,
+			action_id TEXT NOT NULL REFERENCES action_instances(id),
+			PRIMARY KEY(service, episode_file_id))`,
+		`CREATE TABLE IF NOT EXISTS action_execution_leases (
+			action_id TEXT PRIMARY KEY REFERENCES action_instances(id) ON DELETE CASCADE,
+			owner TEXT NOT NULL,
+			expires_at_ms INTEGER NOT NULL)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_action_promotion_idempotency ON action_instances(action_name, idempotency_key)
+		 WHERE action_name='promote_transcode_candidate' AND idempotency_key != ''`,
 	}},
 }
 

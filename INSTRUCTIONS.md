@@ -123,12 +123,21 @@ This prevents a single API call from consuming the LLM's entire context window.
 
 ### Action Engine Tools
 
-- `action_run` — Run a declarative multi-step workflow (`transcode_media`, `safe_media_replacement`, `validate_torrent`)
+- `action_run` — Run a declarative multi-step workflow (`transcode_media`, `promote_transcode_candidate`, `safe_media_replacement`, `validate_torrent`)
 - `action_catalog` — Discover all registered action workflows, parameters, and safety requirements
 - `action_status` — Check current lifecycle state, waiting condition, and step logs
 - `action_resume` — Resume a paused action from `waiting_external` or `waiting_decision` (with decision: approve/reject)
 - `action_retry` — Retry a failed action from its last safe step
 - `action_list` — List action workflows filtered by status (`running`, `waiting_external`, `waiting_decision`, `completed`, `failed`)
+
+Transcode and benchmark external waits are reconciled by the running server;
+clients do not need to keep calling `action_resume` to finish accepted jobs.
+`promote_transcode_candidate` takes `transcode_action_id` and `series_id`, with
+an optional Sonarr `service` name. It verifies a concrete replacement and waits
+for `action_resume` with `decision="approve"` before importing or deleting.
+Ordinary transcoding still creates a candidate only. See
+[transcode operational status](docs/TRANSCODE_PIPELINE_RELIABILITY.md) for
+progress, timing, diagnostics and recovery behavior.
 
 ---
 
