@@ -847,18 +847,42 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) 
 	// Phase 2: Execute benchmark runner outside lock so cancellation/status can acquire lock.
 	// Direct-SMB sources are first materialized on local SSD; the durable Source
 	// remains the semantic NAS path used by status and idempotency.
+	// Transcode I/O optimization: external/SMB sources are served from the
+	// shared source cache when enabled, so a benchmark and the subsequent full
+	// transcode for the same immutable source share a single NAS read. The
+	// cache entry is shared and is never removed by per-job cleanup; only the
+	// per-job samples workspace and any legacy per-job download are cleaned.
 	var runErr error
+	semanticSource := record.Source
 	effectiveSource := strings.TrimSpace(record.EffectiveSource)
 	if effectiveSource == "" {
-		effectiveSource = record.Source
+		effectiveSource = semanticSource
 	}
-	if effectiveSource != record.Source {
+	usingSharedCache := false
+	if w.sourceCacheEnabled() && w.shouldCacheSourceForBenchmark(semanticSource) {
 		_ = w.UpdateBenchmarkProgress(jobID, runToken, 0, "reading_source")
-		if w.mediaStore == nil || !w.mediaStore.Maps(record.Source) {
-			runErr = fmt.Errorf("benchmark requires configured SMB direct media store for %s", record.Source)
+		cached, cerr := w.ensureSourceCached(ctx, filepath.Clean(semanticSource))
+		if cerr != nil {
+			runErr = cerr
 		} else {
-			runErr = w.mediaStore.DownloadAtomic(ctx, record.Source, effectiveSource)
-			defer os.Remove(effectiveSource)
+			effectiveSource = cached
+			usingSharedCache = true
+			// Drop any legacy per-job download path that Submit may have
+			// reserved; it is never used when the shared cache serves the
+			// source. Removal is best-effort and never touches the cache.
+			if legacy := strings.TrimSpace(record.EffectiveSource); legacy != "" && legacy != semanticSource && legacy != cached && !w.isCachePath(legacy) {
+				_ = os.Remove(legacy)
+			}
+		}
+	} else if effectiveSource != semanticSource {
+		_ = w.UpdateBenchmarkProgress(jobID, runToken, 0, "reading_source")
+		if w.mediaStore == nil || !w.mediaStore.Maps(semanticSource) {
+			runErr = fmt.Errorf("benchmark requires configured SMB direct media store for %s", semanticSource)
+		} else {
+			runErr = w.mediaStore.DownloadAtomic(ctx, semanticSource, effectiveSource)
+			if !w.isCachePath(effectiveSource) {
+				defer os.Remove(effectiveSource)
+			}
 		}
 	}
 	if runErr == nil {
@@ -866,6 +890,7 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) 
 		record.Source = effectiveSource
 		runner := w.getBenchmarkRunner()
 		runErr = runner.RunBenchmark(ctx, w, record)
+		_ = usingSharedCache
 	}
 
 	// Clean samples workspace regardless of outcome

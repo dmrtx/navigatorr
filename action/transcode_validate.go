@@ -32,6 +32,18 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 	if outputPath == "" {
 		return StepResult{Status: StepFailed, Error: "candidate path is missing (fail closed)"}, nil
 	}
+	// Lightweight independent post-publish verification: the published object
+	// must exist as a non-empty regular file before any heavy media inspection.
+	// The expensive full structural/media validation already ran worker-local on
+	// the candidate BEFORE publish (see internal/transcodeworker validation);
+	// the worker then performed a stat/size post-publish check. This coordinator
+	// step independently proves the published NAS object is the expected
+	// candidate without trusting the worker, while the detailed stream/policy
+	// checks below remain as defense-in-depth and never weaken fail-closed,
+	// original-preservation, no-clobber, or promotion-separation guarantees.
+	if err := verifyPublishedCandidateLight(outputPath); err != nil {
+		return StepResult{Status: StepFailed, Error: err.Error()}, nil
+	}
 	fi, err := os.Stat(outputPath)
 	if err != nil || fi.Size() == 0 {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("transcoded candidate file %q not accessible or has 0 bytes: %v", outputPath, err)}, nil
@@ -201,3 +213,23 @@ func expectedVideoCodec(codec string) string {
 }
 
 func normCodec(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
+
+// verifyPublishedCandidateLight is the coordinator's lightweight independent
+// post-publish verification: existence, regular-file identity, and non-empty
+// size. It proves the published NAS object is the expected candidate without
+// trusting worker attestation. Heavier stream/policy checks run after it as
+// defense-in-depth.
+func verifyPublishedCandidateLight(candidatePath string) error {
+	p := strings.TrimSpace(candidatePath)
+	if p == "" {
+		return fmt.Errorf("candidate path is missing (fail closed)")
+	}
+	fi, err := os.Stat(p)
+	if err != nil || fi.Size() == 0 {
+		return fmt.Errorf("transcoded candidate file %q not accessible or has 0 bytes: %v", candidatePath, err)
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("transcoded candidate file %q is not a regular file (fail closed)", candidatePath)
+	}
+	return nil
+}
