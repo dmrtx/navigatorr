@@ -97,6 +97,11 @@ type Request struct {
 	Plan                *Plan  `json:"plan,omitempty"`
 	IdempotencyKey      string `json:"idempotency_key,omitempty"`
 	ExecutionSpecDigest string `json:"execution_spec_digest,omitempty"`
+	// SourceSHA256 is the coordinator preflight's SHA-256 of the original source
+	// bytes. Optional for legacy callers; when present it is carried into the
+	// shared source cache identity and the worker verifies local bytes against
+	// it before publishing a cache entry.
+	SourceSHA256 string `json:"source_sha256,omitempty"`
 }
 type Job struct {
 	ID string `json:"id"`
@@ -173,6 +178,13 @@ type JobStatus struct {
 	AppliedFallbacks      []string           `json:"applied_fallbacks,omitempty"`
 	FailureClassification string             `json:"failure_classification,omitempty"`
 	Conversions           []ConversionRecord `json:"conversions,omitempty"`
+	// CandidateSizeBytes and CandidateSHA256 are the accepted worker-local
+	// candidate's size and content digest, attested by the worker during
+	// pre-publish validation. They are the cheap identity metadata the
+	// coordinator uses for its lightweight post-publish verification without a
+	// full NAS read or media inspection.
+	CandidateSizeBytes int64  `json:"candidate_size_bytes,omitempty"`
+	CandidateSHA256    string `json:"candidate_sha256,omitempty"`
 }
 
 type PathMapping struct {

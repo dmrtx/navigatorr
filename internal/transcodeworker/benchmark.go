@@ -35,6 +35,7 @@ type BenchmarkRecord struct {
 	ID                        string                                `json:"id"`
 	Status                    string                                `json:"status"` // queued, running, completed, failed, cancelled
 	Source                    string                                `json:"source"`
+	SourceSHA256              string                                `json:"source_sha256,omitempty"`
 	EffectiveSource           string                                `json:"effective_source,omitempty"`
 	SourceDuration            float64                               `json:"source_duration,omitempty"`
 	Metric                    string                                `json:"metric"`
@@ -421,6 +422,7 @@ func (w *Worker) BenchmarkSubmit(ctx context.Context, req transcode.BenchmarkReq
 		ID:                        req.ID,
 		Status:                    "queued",
 		Source:                    cleanSource,
+		SourceSHA256:              req.SourceSHA256,
 		EffectiveSource:           cleanSource,
 		SourceDuration:            req.SourceDuration,
 		Metric:                    strings.ToLower(strings.TrimSpace(req.Metric)),
@@ -858,19 +860,32 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) 
 	if effectiveSource == "" {
 		effectiveSource = semanticSource
 	}
-	usingSharedCache := false
+	// The benchmark never reads the evictable shared cache filename directly:
+	// it acquires a JOB-LOCAL immutable hard link (safe local-copy fallback) and
+	// runs against that, so a concurrent cache sweep can unlink the shared name
+	// without breaking an in-flight benchmark. The lease is job-owned and
+	// removed on completion (or reused idempotently on resume).
+	leasePath := filepath.Join(jobDir, "source"+safeFileExtension(semanticSource))
+	leaseOwned := false
+	defer func() {
+		if leaseOwned {
+			_ = os.Remove(leasePath)
+		}
+	}()
 	if w.sourceCacheEnabled() && w.shouldCacheSourceForBenchmark(semanticSource) {
 		_ = w.UpdateBenchmarkProgress(jobID, runToken, 0, "reading_source")
-		cached, cerr := w.ensureSourceCached(ctx, filepath.Clean(semanticSource))
+		cached, cerr := w.ensureSourceCached(ctx, filepath.Clean(semanticSource), record.SourceSHA256)
 		if cerr != nil {
 			runErr = cerr
+		} else if lease, lerr := w.acquireCachedSourceLease(ctx, cached, leasePath); lerr != nil {
+			runErr = lerr
 		} else {
-			effectiveSource = cached
-			usingSharedCache = true
+			effectiveSource = lease
+			leaseOwned = true
 			// Drop any legacy per-job download path that Submit may have
 			// reserved; it is never used when the shared cache serves the
 			// source. Removal is best-effort and never touches the cache.
-			if legacy := strings.TrimSpace(record.EffectiveSource); legacy != "" && legacy != semanticSource && legacy != cached && !w.isCachePath(legacy) {
+			if legacy := strings.TrimSpace(record.EffectiveSource); legacy != "" && legacy != semanticSource && legacy != lease && !w.isCachePath(legacy) {
 				_ = os.Remove(legacy)
 			}
 		}
@@ -890,7 +905,6 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) 
 		record.Source = effectiveSource
 		runner := w.getBenchmarkRunner()
 		runErr = runner.RunBenchmark(ctx, w, record)
-		_ = usingSharedCache
 	}
 
 	// Clean samples workspace regardless of outcome
