@@ -262,6 +262,16 @@ and compute the same hash-aware digest the worker recomputes from the persisted
 record, so a changed source at the same path with the same candidate/profile/
 plan is a deterministic idempotency conflict rather than a silent reuse.
 
+> **Protocol v2 — server and worker must be upgraded together.** Adding
+> `source_sha256` to the normal transcode submit and benchmark payloads is an
+> incompatible wire-schema change: worker HTTP decoders use
+> `DisallowUnknownFields`, so a v1 worker rejects the new payloads. The worker
+> protocol version is therefore bumped to **2**, and a new coordinator rejects a
+> stale v1 worker during the capability handshake (before any submit) instead of
+> deferring the failure. There is no compatibility fallback and `source_sha256`
+> is never silently omitted. Upgrade the Navigatorr server and every transcode
+> worker in the same rollout.
+
 Worker config (`~/.config/navigatorr-transcode/config.yaml`):
 
 ```yaml
@@ -274,8 +284,10 @@ source_cache_max_bytes: 21474836480
 source_cache_ttl_hours: 72
 ```
 
-Ansible: no configuration changes are required. Existing worker configs keep
-working; the new keys are optional with safe defaults. To opt out, set
+Ansible: the worker binary does not require config changes (the new keys are
+optional with safe defaults), but the cache settings are explicitly managed by
+[dmrtx/mrtx-ansible PR #28](https://github.com/dmrtx/mrtx-ansible/pull/28)
+rather than left to defaults. To opt out there, set
 `disable_source_cache: true`.
 
 ## Benchmark-driven optimization (recipes v2)

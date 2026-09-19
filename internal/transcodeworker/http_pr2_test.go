@@ -104,7 +104,7 @@ func TestHTTP_BenchmarkSubmitStatusCancelWiring(t *testing.T) {
 	srv := NewServer(worker, filepath.Join(tempDir, "nonexistent-transcode-binary"), "", "")
 
 	// Unknown fields rejected (no raw-arg smuggling surface).
-	badUnknown := `{"protocol_version": 1, "id": "bench-unknown-fields", "source_path": "` + sourceFile + `", "metric": "vmaf", "samples": [{"index": 0, "start_seconds": 1, "duration_seconds": 5}], "candidates": [{"id": "c1", "quality": 65}], "ffmpeg_args": ["-crf", "20"]}`
+	badUnknown := `{"protocol_version": 2, "id": "bench-unknown-fields", "source_path": "` + sourceFile + `", "metric": "vmaf", "samples": [{"index": 0, "start_seconds": 1, "duration_seconds": 5}], "candidates": [{"id": "c1", "quality": 65}], "ffmpeg_args": ["-crf", "20"]}`
 	rec := doRequest(t, srv, http.MethodPost, "/v1/benchmarks", badUnknown, "")
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("unknown fields: want 400, got %d (%s)", rec.Code, rec.Body.String())
