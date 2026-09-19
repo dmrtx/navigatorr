@@ -499,10 +499,14 @@ fi
 
 	mockExecutor := &mockTranscodeExecutor{
 		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			// The worker validates the LOCAL candidate before publish and fails
+			// closed; the coordinator never inspects the published candidate.
 			return transcode.JobStatus{
-				ID:            jobID,
-				Status:        transcode.StatusCompleted,
-				CandidatePath: outputFile,
+				ID:                    jobID,
+				Status:                transcode.StatusFailed,
+				CandidatePath:         outputFile,
+				FailureClassification: "source_invalid",
+				Error:                 "local candidate audio count 1 != source 2 (fail closed, never publish); missing jpn audio",
 			}, nil
 		},
 	}
@@ -514,11 +518,11 @@ fi
 	if err != nil {
 		t.Fatalf("run error: %v", err)
 	}
-	if res.Status != StatusWaitingDecision {
-		t.Fatalf("expected waiting_decision when audio track is lost, got %s", res.Status)
+	if res.Status != StatusFailed {
+		t.Fatalf("expected worker pre-publish validation failure on lost audio, got %s", res.Status)
 	}
-	if !strings.Contains(res.WaitingReason, "Audio stream lost") || !strings.Contains(res.WaitingReason, "jpn") {
-		t.Errorf("expected warning about lost Japanese audio, got: %s", res.WaitingReason)
+	if !strings.Contains(res.Error, "audio") || !strings.Contains(res.Error, "jpn") {
+		t.Errorf("expected warning about lost Japanese audio, got: %s", res.Error)
 	}
 }
 
@@ -559,9 +563,11 @@ fi
 	mockExecutor := &mockTranscodeExecutor{
 		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
 			return transcode.JobStatus{
-				ID:            jobID,
-				Status:        transcode.StatusCompleted,
-				CandidatePath: outputFile,
+				ID:                    jobID,
+				Status:                transcode.StatusFailed,
+				CandidatePath:         outputFile,
+				FailureClassification: "source_invalid",
+				Error:                 "local candidate subtitle count 0 != source 1 (fail closed, never publish); ASS/SSA subtitle lost",
 			}, nil
 		},
 	}
@@ -573,11 +579,11 @@ fi
 	if err != nil {
 		t.Fatalf("run error: %v", err)
 	}
-	if res.Status != StatusWaitingDecision {
-		t.Fatalf("expected waiting_decision when subtitle track is lost, got %s", res.Status)
+	if res.Status != StatusFailed {
+		t.Fatalf("expected worker pre-publish validation failure on lost subtitle, got %s", res.Status)
 	}
-	if !strings.Contains(res.WaitingReason, "Subtitle stream lost") && !strings.Contains(res.WaitingReason, "ASS/SSA") {
-		t.Errorf("expected subtitle warning, got: %s", res.WaitingReason)
+	if !strings.Contains(res.Error, "subtitle") && !strings.Contains(res.Error, "ASS/SSA") {
+		t.Errorf("expected subtitle warning, got: %s", res.Error)
 	}
 }
 
@@ -613,9 +619,11 @@ fi
 	mockExecutor := &mockTranscodeExecutor{
 		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
 			return transcode.JobStatus{
-				ID:            jobID,
-				Status:        transcode.StatusCompleted,
-				CandidatePath: outputFile,
+				ID:                    jobID,
+				Status:                transcode.StatusFailed,
+				CandidatePath:         outputFile,
+				FailureClassification: "source_invalid",
+				Error:                 "local candidate duration 200.0s diverges from source 1420.0s (fail closed, never publish)",
 			}, nil
 		},
 	}
@@ -627,11 +635,11 @@ fi
 	if err != nil {
 		t.Fatalf("run error: %v", err)
 	}
-	if res.Status != StatusWaitingDecision {
-		t.Fatalf("expected waiting_decision on duration mismatch, got %s", res.Status)
+	if res.Status != StatusFailed {
+		t.Fatalf("expected worker pre-publish validation duration failure, got %s", res.Status)
 	}
-	if !strings.Contains(res.WaitingReason, "Duration discrepancy") {
-		t.Errorf("expected duration discrepancy reason, got: %s", res.WaitingReason)
+	if !strings.Contains(strings.ToLower(res.Error), "duration") {
+		t.Errorf("expected duration discrepancy reason, got: %s", res.Error)
 	}
 }
 
@@ -872,7 +880,10 @@ func TestTranscode_ValidationDiscrepancy_ResumeAcceptLoss(t *testing.T) {
 	_ = os.WriteFile(origFile, origBytes, 0644)
 
 	outputFile := filepath.Join(mediaDir, "AnimeLossOut.mkv")
-	_ = os.WriteFile(outputFile, []byte("transcoded anime candidate bytes"), 0644)
+	// Candidate is intentionally larger than the original so the cheap,
+	// coordinator-side size guardrail (the retained accept/reject decision
+	// path) produces a waiting_decision.
+	_ = os.WriteFile(outputFile, []byte(strings.Repeat("candidate-bytes-", 20)), 0644)
 
 	// Original has jpn & eng audio; output has only eng audio
 	dir := t.TempDir()
@@ -958,7 +969,7 @@ func TestTranscode_ValidationDiscrepancy_ResumeReject(t *testing.T) {
 	_ = os.WriteFile(origFile, origBytes, 0644)
 
 	outputFile := filepath.Join(mediaDir, "AnimeRejectOut.mkv")
-	_ = os.WriteFile(outputFile, []byte("bad output bytes"), 0644)
+	_ = os.WriteFile(outputFile, []byte(strings.Repeat("bad-output-bytes-", 20)), 0644)
 
 	dir := t.TempDir()
 	probeScript := filepath.Join(dir, "ffprobe")
@@ -1304,9 +1315,11 @@ esac
 	mockExecutor := &mockTranscodeExecutor{
 		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
 			return transcode.JobStatus{
-				ID:            jobID,
-				Status:        transcode.StatusCompleted,
-				CandidatePath: candFile,
+				ID:                    jobID,
+				Status:                transcode.StatusFailed,
+				CandidatePath:         candFile,
+				FailureClassification: "source_invalid",
+				Error:                 "forced subtitle disposition lost at stream 0 (fail closed, never publish)",
 			}, nil
 		},
 	}
@@ -1320,12 +1333,13 @@ esac
 		t.Fatalf("unexpected engine error: %v", err)
 	}
 
-	// Must detect lost forced disposition and enter waiting_decision
-	if res.Status != StatusWaitingDecision {
-		t.Fatalf("expected waiting_decision when forced subtitle disposition is lost, got %s", res.Status)
+	// Lost forced disposition is caught worker-local before publish and is
+	// terminal (never published).
+	if res.Status != StatusFailed {
+		t.Fatalf("expected failure when forced subtitle disposition is lost, got %s", res.Status)
 	}
-	if !strings.Contains(res.WaitingReason, "Forced subtitle disposition lost") {
-		t.Errorf("expected warning about forced subtitle disposition, got: %s", res.WaitingReason)
+	if !strings.Contains(res.Error, "forced subtitle disposition lost") {
+		t.Errorf("expected warning about forced subtitle disposition, got: %s", res.Error)
 	}
 }
 

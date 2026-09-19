@@ -68,7 +68,7 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 	if plan == nil {
 		return StepResult{Status: StepFailed, Error: "resolved transcode plan is missing (fail closed)"}, nil
 	}
-	req := transcode.Request{ID: jobID, SourcePath: cleanPath, CandidatePath: candidatePath, Profile: profile, Plan: plan, IdempotencyKey: jobID}
+	req := transcode.Request{ID: jobID, SourcePath: cleanPath, CandidatePath: candidatePath, Profile: profile, Plan: plan, IdempotencyKey: jobID, SourceSHA256: getString(ec.State, "original_sha256")}
 
 	// Transport-uncertainty reconciliation before reuse. This is a read-only
 	// status query and deliberately does not take the parent admission lease.

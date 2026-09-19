@@ -267,6 +267,24 @@ func TestDigestBenchmarkRequest_Determinism(t *testing.T) {
 	if d1 == d3 {
 		t.Fatalf("expected different digest when candidate quality changes")
 	}
+
+	// Changing source content identity changes the benchmark request digest,
+	// so a benchmark and its idempotency identity are bound to source bytes.
+	req3 := validTestBenchmarkRequest()
+	req3.SourceSHA256 = strings.Repeat("a", 64)
+	d4, err := DigestBenchmarkRequest(&req3)
+	if err != nil {
+		t.Fatalf("DigestBenchmarkRequest failed: %v", err)
+	}
+	req4 := validTestBenchmarkRequest()
+	req4.SourceSHA256 = strings.Repeat("b", 64)
+	d5, err := DigestBenchmarkRequest(&req4)
+	if err != nil {
+		t.Fatalf("DigestBenchmarkRequest failed: %v", err)
+	}
+	if d1 == d4 || d4 == d5 {
+		t.Fatalf("source SHA-256 must alter the benchmark request digest (%s / %s / %s)", d1, d4, d5)
+	}
 }
 
 func TestValidateBenchmarkRequest_PreferredMetric(t *testing.T) {

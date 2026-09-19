@@ -156,16 +156,18 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 	}
 
 	// Probe the operational input (staged when staging applies), never the
-	// semantic source when a staged copy exists.
-	streams, dur, probeErr := w.probeSourceForJob(ctx, r.effectiveInput)
-	if dur > 0 {
-		job.DurationSec = dur
+	// semantic source when a staged copy exists. The detailed probe supplies
+	// the chapter count and video attributes needed for local pre-publish
+	// policy validation.
+	srcProbe, probeErr := w.probeSourceDetailsForJob(ctx, r.effectiveInput)
+	if srcProbe.DurationSec > 0 {
+		job.DurationSec = srcProbe.DurationSec
 	}
 	if probeErr != nil {
 		return w.failJobTerminal(jobDir, jobFile, job, fmt.Errorf("probing source streams: %w", probeErr))
 	}
 
-	execPlan, planErr := BuildExecutionPlan(job.Plan, streams, job.DurationSec)
+	execPlan, planErr := BuildExecutionPlan(job.Plan, srcProbe.Streams, job.DurationSec)
 	if planErr != nil {
 		return w.failJobTerminal(jobDir, jobFile, job, fmt.Errorf("building execution plan: %w", planErr))
 	}
@@ -207,17 +209,31 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 		return nil
 	}
 
-	if err := validateEncodedCandidate(r.localCandidate); err != nil {
-		return w.failJobTerminal(jobDir, jobFile, job, err)
+	attest, verr := w.validateEncodedCandidateFull(ctx, r.localCandidate, execPlan, srcProbe, 0)
+	if verr != nil {
+		// A bad local candidate must never be published. Remove only the
+		// worker-owned local candidate; the semantic source and the shared
+		// source cache are never touched. For local-only jobs the local
+		// candidate IS the candidate path, and the bad file is still removed
+		// because the job never completed (it is incomplete output, not a
+		// finalized destination).
+		if c := strings.TrimSpace(r.localCandidate); c != "" && !w.isCachePath(c) && c != job.Source {
+			_ = os.Remove(c)
+		}
+		return w.failJobTerminal(jobDir, jobFile, job, verr)
 	}
 
 	// Checkpoint: durably record that encoding finished BEFORE any
 	// finalization. A crash after this point never reruns ffmpeg. Status stays
-	// nonterminal.
+	// nonterminal. The accepted candidate's size and content digest are
+	// persisted so the coordinator can perform a cheap, independent
+	// post-publish identity check without a NAS read or media inspection.
 	if cancelled, err := w.persistOperationalProgress(jobDir, jobFile, job, func(l *JobRecord) {
 		l.EncodeComplete = true
 		l.ValidationFinishedAt = time.Now().UTC()
 		l.LocalCandidatePath = r.localCandidate
+		l.CandidateSizeBytes = attest.SizeBytes
+		l.CandidateSHA256 = attest.SHA256
 		if strings.TrimSpace(r.destination) != "" {
 			l.IntendedDestination = r.destination
 		}
@@ -238,6 +254,15 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 // and reuses a ready staged artifact without recopying. It persists each state
 // transition and honors cancellation. A staged file already present at a
 // pending/staging state is treated as already staged (idempotent recovery).
+//
+// Transcode I/O optimization: when the shared source cache is enabled and holds
+// a verified entry for the same immutable source identity, the per-job staged
+// input is fulfilled with a purely local cache->staged copy (no NAS read).
+// Otherwise the source is staged once from the NAS and the shared cache is
+// populated best-effort from the staged copy, so a benchmark that ran first (or
+// a later transcode of the same source) reuses it without a second full
+// transfer. Cache misses, disabled caches, and local sources fall back to the
+// legacy direct staging path exactly.
 func (w *Worker) ensureStaged(ctx context.Context, jobDir, jobFile string, job *JobRecord, r *resolvedOperational) (bool, error) {
 	switch r.staging {
 	case StagingStateNotRequired:
@@ -265,13 +290,38 @@ func (w *Worker) ensureStaged(ctx context.Context, jobDir, jobFile string, job *
 		if err := w.requireMediaBackend(job.Source); err != nil {
 			return false, err
 		}
-		if w.mediaStore != nil && w.mediaStore.Maps(job.Source) {
-			err = w.mediaStore.DownloadAtomic(ctx, job.Source, r.stagedInput)
-		} else {
-			err = StageInputAtomic(ctx, job.Source, r.stagedInput)
+		stagedFromCache := false
+		if w.sourceCacheEnabled() {
+			if fi, serr := w.statSourceForCache(ctx, job.Source); serr == nil {
+				if hit, ok := lookupSourceCache(w.sourceCacheDir(), filepath.Clean(job.Source), fi, job.SourceSHA256); ok {
+					// Job-local immutable hard link (fallback: safe local copy).
+					// The job never reads the evictable shared filename, so a
+					// concurrent sweep can unlink it without breaking this job.
+					if lease, lerr := w.acquireCachedSourceLease(ctx, hit, r.stagedInput); lerr == nil {
+						_ = lease
+						stagedFromCache = true
+					}
+				}
+			}
 		}
-		if err != nil {
-			return false, err
+		if !stagedFromCache {
+			if w.mediaStore != nil && w.mediaStore.Maps(job.Source) {
+				err = w.mediaStore.DownloadAtomic(ctx, job.Source, r.stagedInput)
+			} else {
+				err = StageInputAtomic(ctx, job.Source, r.stagedInput)
+			}
+			if err != nil {
+				return false, err
+			}
+			// Best-effort: share this fresh NAS read with future jobs for the
+			// same immutable source. Local bytes are hashed against the
+			// coordinator digest before the entry is published; failures never
+			// fail the current job.
+			if w.sourceCacheEnabled() {
+				if fi, serr := w.statSourceForCache(ctx, job.Source); serr == nil {
+					_, _ = populateSourceCacheFromLocal(ctx, w.sourceCacheDir(), filepath.Clean(job.Source), fi, r.stagedInput, job.SourceSHA256)
+				}
+			}
 		}
 	}
 
@@ -420,6 +470,22 @@ func (w *Worker) finalizeOperational(ctx context.Context, jobDir, jobFile string
 		return w.recordFinalizationFailure(jobDir, jobFile, job, ferr)
 	}
 
+	// Lightweight independent post-publish verification: the published object
+	// must be the expected candidate (regular file, size-identical to the
+	// accepted local candidate). This is stat-only and deliberately cheap after
+	// the network copy; the expensive full structural/media validation already
+	// ran locally before publish. Any mismatch fails closed and stays resumable
+	// without marking the job complete.
+	// Direct-SMB publication already performs its own verified publish
+	// (hash-verified exclusive upload inside mediaStore.Publish), so no
+	// additional filesystem stat applies to logical SMB destinations.
+	if !directSMB {
+		if verr := verifyPublishedCandidate(ctx, r.localCandidate, r.destination); verr != nil {
+			w.removeOwnPartialIfSafe(job, r)
+			return w.recordFinalizationFailure(jobDir, jobFile, job, verr)
+		}
+	}
+
 	cancelled, err = w.persistOperationalProgress(jobDir, jobFile, job, func(l *JobRecord) {
 		l.FinalizationState = string(FinalizationStateCompleted)
 	})
@@ -559,15 +625,16 @@ func (w *Worker) jobCancelled(jobDir, jobFile string) (bool, error) {
 // cleanupOperationalArtifacts removes only worker-owned local artifacts after a
 // fully successful completion: the staged input and a local candidate distinct
 // from both the semantic candidate and the intended destination. It never
-// touches the semantic source or the final destination.
+// touches the semantic source, the final destination, or shared source-cache
+// entries (which are owned by the cache, not by any single job).
 func (w *Worker) cleanupOperationalArtifacts(job *JobRecord, r *resolvedOperational) {
 	if r == nil || job == nil {
 		return
 	}
-	if s := strings.TrimSpace(r.stagedInput); s != "" && s != job.Source && s != job.Candidate && s != r.destination {
+	if s := strings.TrimSpace(r.stagedInput); s != "" && s != job.Source && s != job.Candidate && s != r.destination && !w.isCachePath(s) {
 		_ = os.Remove(s)
 	}
-	if c := strings.TrimSpace(r.localCandidate); c != "" && c != job.Source && c != job.Candidate && c != r.destination {
+	if c := strings.TrimSpace(r.localCandidate); c != "" && c != job.Source && c != job.Candidate && c != r.destination && !w.isCachePath(c) {
 		_ = os.Remove(c)
 	}
 }
@@ -910,6 +977,22 @@ func (w *Worker) probeSourceForJob(ctx context.Context, path string) ([]SourceSt
 		return w.probeSource(ctx, path)
 	}
 	return ProbeSourceStreams(ctx, w.ffprobePath, path)
+}
+
+// probeSourceDetailsForJob returns the detailed probe (streams + duration +
+// chapters) for local pre-publish validation. An explicit detailed seam wins;
+// otherwise a plain stream seam is adapted (chapter count unknown, so chapter
+// preservation is skipped for injected tests); otherwise the production
+// ffprobe path is used.
+func (w *Worker) probeSourceDetailsForJob(ctx context.Context, path string) (SourceProbe, error) {
+	if w.probeDetails != nil {
+		return w.probeDetails(ctx, path)
+	}
+	if w.probeSource != nil {
+		streams, dur, err := w.probeSource(ctx, path)
+		return SourceProbe{Streams: streams, DurationSec: dur}, err
+	}
+	return ProbeSourceDetails(ctx, w.ffprobePath, path)
 }
 
 // runOperationalFFmpeg uses the injected encoder when present, else the

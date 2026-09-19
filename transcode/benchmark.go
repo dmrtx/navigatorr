@@ -251,6 +251,11 @@ type BenchmarkRequest struct {
 	FallbackSubtitleSizeBytes int64                       `json:"fallback_subtitle_size_bytes,omitempty"`
 	DeclaredVideoBitrateBps   int64                       `json:"declared_video_bitrate_bps,omitempty"`
 	AttachmentBytes           int64                       `json:"attachment_bytes,omitempty"`
+	// SourceSHA256 is the coordinator preflight's SHA-256 of the original source
+	// bytes. Optional for legacy callers; it binds the shared source cache entry
+	// to content identity so a same path/size/mtime source with changed content
+	// can never be reused.
+	SourceSHA256 string `json:"source_sha256,omitempty"`
 }
 
 // BenchmarkJob is the receipt returned upon successful submission of a benchmark request.
@@ -366,6 +371,13 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 	}
 	if req.AttachmentBytes < 0 {
 		return fmt.Errorf("invalid attachment_bytes %d: cannot be negative", req.AttachmentBytes)
+	}
+
+	if err := ValidateSourceSHA256(req.SourceSHA256); err != nil {
+		return err
+	}
+	if norm, err := NormalizeSourceSHA256(req.SourceSHA256); err == nil {
+		req.SourceSHA256 = norm
 	}
 
 	if req.Quality != nil {

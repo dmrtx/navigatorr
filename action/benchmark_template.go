@@ -947,6 +947,7 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 		FallbackAudioBitrateBps: 384000,
 		DeclaredVideoBitrateBps: declaredVideoBitrate,
 		AttachmentBytes:         attachmentBytes,
+		SourceSHA256:            getString(ec.State, "original_sha256"),
 	}
 
 	if err := transcode.ValidateBenchmarkRequest(req); err != nil {

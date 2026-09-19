@@ -206,6 +206,64 @@ func TestHTTPExecutor_Capabilities(t *testing.T) {
 	}
 }
 
+func TestHTTPExecutor_CapabilitiesRejectsStaleProtocolBeforeSubmit(t *testing.T) {
+	// The wire schema changed incompatibly (source_sha256). A new coordinator
+	// must reject an old (v1) worker during the capability handshake, before
+	// any submit, instead of deferring the failure until the worker's
+	// DisallowUnknownFields decoder rejects the payload.
+	newCapsServer := func(version int, submits *atomic.Int32) *httptest.Server {
+		caps := validTestCaps(t)
+		caps.ProtocolVersion = version
+		fp, err := ComputeCapabilityFingerprint(caps)
+		if err != nil {
+			t.Fatal(err)
+		}
+		caps.CapabilityFingerprint = fp
+		body, err := json.Marshal(caps)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/v1/capabilities":
+				_, _ = w.Write(body)
+			case "/v1/jobs":
+				submits.Add(1)
+				w.WriteHeader(http.StatusCreated)
+				fmt.Fprintln(w, `{"id": "job-stale", "status": "queued"}`)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+	}
+
+	var staleSubmits atomic.Int32
+	staleSrv := newCapsServer(1, &staleSubmits)
+	defer staleSrv.Close()
+	staleExec := newTestHTTPExecutor(t, staleSrv)
+	wantErr := fmt.Sprintf("unsupported protocol version 1 (expected %d)", WorkerProtocolVersion)
+	if _, err := staleExec.Capabilities(context.Background()); err == nil || !strings.Contains(err.Error(), wantErr) {
+		t.Fatalf("expected stale v1 capability rejection %q, got: %v", wantErr, err)
+	}
+	if got := staleSubmits.Load(); got != 0 {
+		t.Fatalf("no submit may occur when the capability handshake rejects the worker; saw %d", got)
+	}
+
+	// Matching v2 succeeds and reports the current protocol version.
+	var matchSubmits atomic.Int32
+	matchSrv := newCapsServer(WorkerProtocolVersion, &matchSubmits)
+	defer matchSrv.Close()
+	matchExec := newTestHTTPExecutor(t, matchSrv)
+	caps, err := matchExec.Capabilities(context.Background())
+	if err != nil {
+		t.Fatalf("matching protocol version must succeed: %v", err)
+	}
+	if caps.ProtocolVersion != WorkerProtocolVersion {
+		t.Fatalf("protocol version = %d, want %d", caps.ProtocolVersion, WorkerProtocolVersion)
+	}
+}
+
 func TestHTTPExecutor_SubmitStatusCancel(t *testing.T) {
 	var gotSubmit map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -519,11 +577,11 @@ func TestHTTPExecutor_BenchmarkRoundTrip(t *testing.T) {
 				return
 			}
 			w.WriteHeader(http.StatusCreated)
-			fmt.Fprintln(w, `{"protocol_version": 1, "id": "bench-test-123", "status": "queued"}`)
+			fmt.Fprintln(w, `{"protocol_version": 2, "id": "bench-test-123", "status": "queued"}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/benchmarks/bench-test-123":
-			fmt.Fprintln(w, `{"protocol_version": 1, "id": "bench-test-123", "status": "running", "source_path": "/Volumes/media/source.mkv", "progress": 50.0}`)
+			fmt.Fprintln(w, `{"protocol_version": 2, "id": "bench-test-123", "status": "running", "source_path": "/Volumes/media/source.mkv", "progress": 50.0}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/benchmarks/bench-test-123/cancel":
-			fmt.Fprintln(w, `{"protocol_version": 1, "id": "bench-test-123", "status": "cancelled"}`)
+			fmt.Fprintln(w, `{"protocol_version": 2, "id": "bench-test-123", "status": "cancelled"}`)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 			fmt.Fprintln(w, `{"error": "not found"}`)
@@ -689,11 +747,11 @@ func TestHTTPExecutor_BenchmarkSubmitAmbiguous2xxIsUncertain(t *testing.T) {
 		name string
 		body string
 	}{
-		{"truncated json", `{"protocol_version": 1, "id": "bench-test-123", "status": "que`},
-		{"mismatched id", `{"protocol_version": 1, "id": "bench-other", "status": "queued"}`},
-		{"empty status", `{"protocol_version": 1, "id": "bench-test-123", "status": ""}`},
+		{"truncated json", `{"protocol_version": 2, "id": "bench-test-123", "status": "que`},
+		{"mismatched id", `{"protocol_version": 2, "id": "bench-other", "status": "queued"}`},
+		{"empty status", `{"protocol_version": 2, "id": "bench-test-123", "status": ""}`},
 		{"protocol mismatch on 2xx", `{"protocol_version": 99, "id": "bench-test-123", "status": "queued"}`},
-		{"error field on 2xx", `{"protocol_version": 1, "id": "bench-test-123", "status": "queued", "error": "worker busy: maximum parallel jobs (1) reached"}`},
+		{"error field on 2xx", `{"protocol_version": 2, "id": "bench-test-123", "status": "queued", "error": "worker busy: maximum parallel jobs (1) reached"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var attempts atomic.Int32
@@ -716,11 +774,11 @@ func TestHTTPExecutor_BenchmarkCancelAmbiguous2xxIsUncertain(t *testing.T) {
 		name string
 		body string
 	}{
-		{"truncated json", `{"protocol_version": 1, "id": "bench-test-123", "status": "cancell`},
-		{"mismatched id", `{"protocol_version": 1, "id": "bench-other", "status": "cancelled"}`},
-		{"wrong status", `{"protocol_version": 1, "id": "bench-test-123", "status": "running"}`},
+		{"truncated json", `{"protocol_version": 2, "id": "bench-test-123", "status": "cancell`},
+		{"mismatched id", `{"protocol_version": 2, "id": "bench-other", "status": "cancelled"}`},
+		{"wrong status", `{"protocol_version": 2, "id": "bench-test-123", "status": "running"}`},
 		{"protocol mismatch on 2xx", `{"protocol_version": 99, "id": "bench-test-123", "status": "cancelled"}`},
-		{"error field on 2xx", `{"protocol_version": 1, "id": "bench-test-123", "status": "cancelled", "error": "boom"}`},
+		{"error field on 2xx", `{"protocol_version": 2, "id": "bench-test-123", "status": "cancelled", "error": "boom"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var attempts atomic.Int32

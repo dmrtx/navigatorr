@@ -19,23 +19,32 @@ import (
 // JobRecord represents the persistent state stored in job.json on the worker.
 type JobRecord struct {
 	transcode.JobTelemetry
-	ID                  string                       `json:"id"`
-	Status              string                       `json:"status"` // queued, running, completed, failed, cancelled
-	Source              string                       `json:"source"`
-	Candidate           string                       `json:"candidate"`
-	Profile             string                       `json:"profile"`
-	Plan                *transcode.Plan              `json:"plan,omitempty"`
-	IdempotencyKey      string                       `json:"idempotency_key,omitempty"`
-	ExecutionSpecDigest string                       `json:"execution_spec_digest,omitempty"`
-	Conversions         []transcode.ConversionRecord `json:"conversions,omitempty"`
-	PID                 int                          `json:"pid"`
-	ProcessStartTime    string                       `json:"process_start_time,omitempty"`
-	CreatedAt           time.Time                    `json:"created_at"`
-	StartedAt           time.Time                    `json:"started_at,omitempty"`
-	FinishedAt          time.Time                    `json:"finished_at,omitempty"`
-	ExitCode            int                          `json:"exit_code,omitempty"`
-	Error               string                       `json:"error,omitempty"`
-	DurationSec         float64                      `json:"duration_sec,omitempty"`
+	ID                  string          `json:"id"`
+	Status              string          `json:"status"` // queued, running, completed, failed, cancelled
+	Source              string          `json:"source"`
+	Candidate           string          `json:"candidate"`
+	Profile             string          `json:"profile"`
+	Plan                *transcode.Plan `json:"plan,omitempty"`
+	IdempotencyKey      string          `json:"idempotency_key,omitempty"`
+	ExecutionSpecDigest string          `json:"execution_spec_digest,omitempty"`
+	// SourceSHA256 is the coordinator preflight digest of the original source
+	// bytes, used as the content-identity component of the shared source cache
+	// key. Optional; empty on legacy records.
+	SourceSHA256     string                       `json:"source_sha256,omitempty"`
+	Conversions      []transcode.ConversionRecord `json:"conversions,omitempty"`
+	PID              int                          `json:"pid"`
+	ProcessStartTime string                       `json:"process_start_time,omitempty"`
+	CreatedAt        time.Time                    `json:"created_at"`
+	StartedAt        time.Time                    `json:"started_at,omitempty"`
+	FinishedAt       time.Time                    `json:"finished_at,omitempty"`
+	ExitCode         int                          `json:"exit_code,omitempty"`
+	Error            string                       `json:"error,omitempty"`
+	DurationSec      float64                      `json:"duration_sec,omitempty"`
+	// CandidateSizeBytes/CandidateSHA256 attest the accepted worker-local
+	// candidate computed during pre-publish validation. They are the cheap
+	// identity metadata exposed to the coordinator for post-publish checks.
+	CandidateSizeBytes int64  `json:"candidate_size_bytes,omitempty"`
+	CandidateSHA256    string `json:"candidate_sha256,omitempty"`
 	// Minimal transport metadata (no retry engine): mirrors transcode.JobStatus.
 	Attempt               int      `json:"attempt,omitempty"`
 	RetryCount            int      `json:"retry_count,omitempty"`

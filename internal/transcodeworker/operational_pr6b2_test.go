@@ -38,7 +38,7 @@ func (r *pr6b2Recorder) streams() []SourceStream {
 	if r.probeStreams != nil {
 		return r.probeStreams
 	}
-	return []SourceStream{{Index: 0, TypeIndex: 0, Kind: "video", Codec: "h264"}}
+	return []SourceStream{{Index: 0, TypeIndex: 0, Kind: "video", Codec: "hevc"}}
 }
 
 func (r *pr6b2Recorder) install(w *Worker) {
@@ -173,8 +173,11 @@ func TestPR6B2_ExternalSourceStagesAndReusesStagedInput(t *testing.T) {
 	if rec.encodeCalls != 1 {
 		t.Fatalf("encode calls = %d, want 1", rec.encodeCalls)
 	}
-	if len(rec.probePaths) != 1 || rec.probePaths[0] != wantStaged {
-		t.Fatalf("probe paths = %v, want staged input %q", rec.probePaths, wantStaged)
+	// Full candidate validation probes the worker-local candidate before
+	// publish, so two probes are expected: the staged source and the local
+	// candidate. The first must be the staged input.
+	if len(rec.probePaths) != 2 || rec.probePaths[0] != wantStaged {
+		t.Fatalf("probe paths = %v, want [staged input %q, local candidate]", rec.probePaths, wantStaged)
 	}
 	if rec.encodeIns[0] != wantStaged {
 		t.Fatalf("encode input = %q, want staged input %q", rec.encodeIns[0], wantStaged)
