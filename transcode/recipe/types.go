@@ -219,8 +219,12 @@ type Profile struct {
 }
 
 type VideoProfile struct {
-	Codec           string `json:"codec" yaml:"codec"`
-	Quality         int    `json:"quality" yaml:"quality"`
+	Codec string `json:"codec" yaml:"codec"`
+	// Quality is -q:v for hevc_videotoolbox (higher = higher quality) and CRF
+	// for libx265 (LOWER = higher quality, 1..51).
+	Quality int `json:"quality" yaml:"quality"`
+	// Preset is the libx265 preset (empty for hevc_videotoolbox).
+	Preset          string `json:"preset,omitempty" yaml:"preset,omitempty"`
 	Profile         string `json:"profile,omitempty" yaml:"profile,omitempty"`
 	PixelFormat     string `json:"pixel_format,omitempty" yaml:"pixel_format,omitempty"`
 	PrioritizeSpeed *bool  `json:"prioritize_speed,omitempty" yaml:"prioritize_speed,omitempty"`

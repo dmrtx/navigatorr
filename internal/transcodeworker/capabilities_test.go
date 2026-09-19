@@ -486,3 +486,60 @@ esac
 		t.Errorf("expected component error for videotoolbox")
 	}
 }
+
+func TestValidateEncoderCapabilitiesLibX265FailClosedWhenMissing(t *testing.T) {
+	dir := t.TempDir()
+	fakeFFmpeg := filepath.Join(dir, "fake_ffmpeg_no_x265.sh")
+	script := `#!/bin/sh
+case "$*" in
+  *"-encoders"*)
+    cat << 'EOF'
+Encoders:
+ V..... hevc_videotoolbox    VideoToolbox H.265
+ A..... aac                  AAC
+EOF
+    ;;
+  *) exit 0 ;;
+esac
+`
+	if err := os.WriteFile(fakeFFmpeg, []byte(script), 0o755); err != nil {
+		t.Fatalf("failed writing fake ffmpeg: %v", err)
+	}
+
+	plan := &transcode.Plan{VideoCodec: "libx265", Quality: 24, Preset: "slow"}
+	err := ValidateEncoderCapabilities(context.Background(), fakeFFmpeg, plan)
+	if err == nil || !strings.Contains(err.Error(), "encoder_capability_unsupported") || !strings.Contains(err.Error(), "libx265") {
+		t.Fatalf("missing libx265 did not fail closed clearly: %v", err)
+	}
+}
+
+func TestValidateEncoderCapabilitiesLibX265Present(t *testing.T) {
+	dir := t.TempDir()
+	fakeFFmpeg := filepath.Join(dir, "fake_ffmpeg_with_x265.sh")
+	script := `#!/bin/sh
+case "$*" in
+  *"-encoders"*)
+    cat << 'EOF'
+Encoders:
+ V..... libx265              libx265 H.265 / HEVC
+ V..... hevc_videotoolbox    VideoToolbox H.265
+ A..... aac                  AAC
+EOF
+    ;;
+  *) exit 0 ;;
+esac
+`
+	if err := os.WriteFile(fakeFFmpeg, []byte(script), 0o755); err != nil {
+		t.Fatalf("failed writing fake ffmpeg: %v", err)
+	}
+
+	plan := &transcode.Plan{VideoCodec: "libx265", Quality: 24, Preset: "slow"}
+	if err := ValidateEncoderCapabilities(context.Background(), fakeFFmpeg, plan); err != nil {
+		t.Fatalf("libx265 should be accepted when present: %v", err)
+	}
+
+	badPreset := &transcode.Plan{VideoCodec: "libx265", Quality: 24, Preset: "turbo"}
+	if err := ValidateEncoderCapabilities(context.Background(), fakeFFmpeg, badPreset); err == nil || !strings.Contains(err.Error(), "preset") {
+		t.Fatalf("invalid preset did not fail closed: %v", err)
+	}
+}

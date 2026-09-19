@@ -38,9 +38,9 @@ func TestRecipeParserRejectsUnsafeOrUnknownContent(t *testing.T) {
 	base := string(EmbeddedBytes())
 	cases := []struct{ name, data, want string }{
 		{"unknown field", base + "\nextra_args: ['-c', 'copy']\n", "field extra_args"},
-		{"unsupported schema", strings.Replace(base, "schema_version: 1", "schema_version: 99", 1), "unsupported recipe schema_version"},
+		{"unsupported schema", strings.Replace(base, "schema_version: 2", "schema_version: 99", 1), "unsupported recipe schema_version"},
 		{"malformed yaml", "schema_version: [", "parsing recipe bundle"},
-		{"unsafe bundle version", strings.Replace(base, `bundle_version: "2026.09.2"`, `bundle_version: ".."`, 1), "invalid bundle_version"},
+		{"unsafe bundle version", strings.Replace(base, `bundle_version: "2026.09.3"`, `bundle_version: ".."`, 1), "invalid bundle_version"},
 		{"unsafe video codec", strings.Replace(base, "hevc_videotoolbox", ";rm-rf", 1), "unsupported video codec"},
 		{"unsafe conversion target", strings.Replace(base, "target_codec: subrip", "target_codec: libx264", 1), "unsupported subtitle conversion target"},
 		{"unsafe fallback action", strings.Replace(base, "action: retry", "action: exec", 1), "unknown fallback action"},
@@ -169,7 +169,7 @@ func (p *mutableProvider) set(data []byte, err error) {
 
 func versionedBundle(version string, quality int) []byte {
 	s := string(EmbeddedBytes())
-	s = strings.Replace(s, `bundle_version: "2026.09.2"`, fmt.Sprintf(`bundle_version: %q`, version), 1)
+	s = strings.Replace(s, `bundle_version: "2026.09.3"`, fmt.Sprintf(`bundle_version: %q`, version), 1)
 	s = strings.Replace(s, "quality: 65}", fmt.Sprintf("quality: %d}", quality), 1)
 	return []byte(s)
 }
@@ -243,7 +243,7 @@ func TestManagerDoesNotRestoreCacheFromDifferentSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m2.Snapshot().Identity.Version != "2026.09.2" {
+	if m2.Snapshot().Identity.Version != "2026.09.3" {
 		t.Fatalf("cross-source cache restored: %s", m2.Snapshot().Identity.Version)
 	}
 }
