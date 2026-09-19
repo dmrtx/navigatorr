@@ -321,33 +321,29 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		return fmt.Errorf("unsupported source pixel format %q (%d-bit): automatic benchmark requires 4:2:0 chroma subsampling (e.g. yuv420p, nv12, yuv420p10le, p010le)", sourceVideo.PixelFormat, sourceBitDepth)
 	}
 
-	// 3. Capability probing and candidate validation upfront
-	caps, err := ProbeVideoToolboxCapabilities(ctx, w.ffmpegPath)
-	if err != nil {
-		return fmt.Errorf("probing worker video capabilities: %w", err)
-	}
-	if !caps.Available {
-		return errors.New("hevc_videotoolbox encoder is not available on worker (fail closed)")
-	}
-
+	// 3. Capability probing and candidate validation upfront. Capabilities are
+	// validated per candidate against the actual FFmpeg binary (fail closed);
+	// libx265 candidates fail clearly when the worker FFmpeg lacks libx265.
 	validatedCandidates := make([]validatedCandidate, 0, len(record.Candidates))
 	for candIdx, c := range record.Candidates {
 		prof, pix, bd, err := resolveCandidateBitDepth(&c, sourceBitDepth)
 		if err != nil {
 			return err
 		}
+		codec := transcode.BenchmarkCandidateVideoCodec(c)
 		plan := &transcode.Plan{
-			VideoCodec:       videoToolboxEncoder,
+			VideoCodec:       codec,
 			Quality:          c.Quality,
+			Preset:           norm(c.Preset),
 			VideoProfile:     prof,
 			PixelFormat:      pix,
 			ExpectedBitDepth: bd,
 		}
-		if err := ValidateVideoToolboxCapabilities(plan, caps); err != nil {
-			return fmt.Errorf("candidate %q capability validation failed: %w", c.ID, err)
-		}
 		if _, err := BuildVideoEncoderArgs(plan); err != nil {
 			return fmt.Errorf("candidate %q encoder args validation failed: %w", c.ID, err)
+		}
+		if err := ValidateEncoderCapabilities(ctx, w.ffmpegPath, plan); err != nil {
+			return fmt.Errorf("candidate %q capability validation failed: %w", c.ID, err)
 		}
 		fileKey := candidateFileKey(candIdx, c.ID, c.Quality)
 		validatedCandidates = append(validatedCandidates, validatedCandidate{
@@ -1489,7 +1485,9 @@ func (r *ProductionBenchmarkRunner) runSelection(
 		decision.Evaluations = append(decision.Evaluations, transcode.BenchmarkCandidateEvaluation{
 			CandidateID:      vc.candidate.ID,
 			CandidateIndex:   vc.index,
+			VideoCodec:       transcode.BenchmarkCandidateVideoCodec(vc.candidate),
 			Quality:          vc.candidate.Quality,
+			Preset:           norm(vc.candidate.Preset),
 			VideoProfile:     vc.profile,
 			PixelFormat:      vc.pixelFormat,
 			ExpectedBitDepth: vc.bitDepth,
@@ -1513,7 +1511,9 @@ func (r *ProductionBenchmarkRunner) runSelection(
 				decision.Winner = &transcode.BenchmarkWinner{
 					CandidateID:               vc.candidate.ID,
 					CandidateIndex:            vc.index,
+					VideoCodec:                transcode.BenchmarkCandidateVideoCodec(vc.candidate),
 					Quality:                   vc.candidate.Quality,
+					Preset:                    norm(vc.candidate.Preset),
 					VideoProfile:              vc.profile,
 					PixelFormat:               vc.pixelFormat,
 					ExpectedBitDepth:          vc.bitDepth,

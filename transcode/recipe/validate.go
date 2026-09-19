@@ -131,11 +131,24 @@ func ValidateProfile(name string, p Profile) error {
 	if normalizeContainer(p.Container) != "mkv" {
 		return fmt.Errorf("profile %q: unsupported container %q", name, p.Container)
 	}
-	if normalizeCodec(p.Video.Codec) != "hevc_videotoolbox" {
+	if normalizeCodec(p.Video.Codec) != transcode.VideoCodecHEVCVideoToolbox && normalizeCodec(p.Video.Codec) != transcode.VideoCodecLibX265 {
 		return fmt.Errorf("profile %q: unsupported video codec %q", name, p.Video.Codec)
 	}
-	if p.Video.Quality < 1 || p.Video.Quality > 100 {
-		return fmt.Errorf("profile %q: video quality %d out of range 1-100", name, p.Video.Quality)
+	codec := normalizeCodec(p.Video.Codec)
+	if codec == transcode.VideoCodecLibX265 {
+		if p.Video.Quality < transcode.LibX265CRFMin || p.Video.Quality > transcode.LibX265CRFMax {
+			return fmt.Errorf("profile %q: libx265 crf (quality) %d out of range %d-%d", name, p.Video.Quality, transcode.LibX265CRFMin, transcode.LibX265CRFMax)
+		}
+		if preset := normalizeCodec(p.Video.Preset); preset != "" && !transcode.IsValidLibX265Preset(preset) {
+			return fmt.Errorf("profile %q: unsupported libx265 preset %q (allowed: %v)", name, p.Video.Preset, transcode.ValidLibX265Presets())
+		}
+	} else {
+		if p.Video.Quality < 1 || p.Video.Quality > 100 {
+			return fmt.Errorf("profile %q: video quality %d out of range 1-100", name, p.Video.Quality)
+		}
+		if strings.TrimSpace(p.Video.Preset) != "" {
+			return fmt.Errorf("profile %q: preset is only supported for libx265, got %q for %s", name, p.Video.Preset, p.Video.Codec)
+		}
 	}
 	videoProfile := normalizeCodec(p.Video.Profile)
 	pixelFormat := normalizeCodec(p.Video.PixelFormat)
@@ -201,6 +214,15 @@ func ValidateProfile(name string, p Profile) error {
 	if p.Optimization != nil {
 		if err := ValidateOptimizationPolicy(name, p.Optimization); err != nil {
 			return err
+		}
+		// For libx265, search quality values are CRF values and must respect the
+		// narrower x265 range even though the generic policy allows 1..100.
+		if codec == transcode.VideoCodecLibX265 && p.Optimization.Search != nil {
+			for _, q := range p.Optimization.Search.QualityValues {
+				if q < transcode.LibX265CRFMin || q > transcode.LibX265CRFMax {
+					return fmt.Errorf("profile %q: libx265 search crf %d out of range %d-%d", name, q, transcode.LibX265CRFMin, transcode.LibX265CRFMax)
+				}
+			}
 		}
 	}
 	return nil

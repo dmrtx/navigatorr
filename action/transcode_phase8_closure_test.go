@@ -336,7 +336,7 @@ func TestPhase8_LiveValidationReproduction_AnimeHevcQualitySSIMWinner(t *testing
 	if err != nil {
 		t.Fatalf("resolving base plan for anime-hevc-quality: %v", err)
 	}
-	const expectedStaticBaseDigest = "sha256:5f3790702c4416380cb31fe56b128aa646aa5bd3fd577ca4b3435165e1a34bf6"
+	const expectedStaticBaseDigest = "sha256:a7e6a9336a4eb2d6eb4af49429e1274beb75b78401c5219e99e51d4f22e4da94"
 	if basePlan.PlanDigest != expectedStaticBaseDigest {
 		t.Fatalf("static base plan digest = %q, want %q", basePlan.PlanDigest, expectedStaticBaseDigest)
 	}
@@ -385,7 +385,7 @@ func TestPhase8_LiveValidationReproduction_AnimeHevcQualitySSIMWinner(t *testing
 	}
 
 	// 4. Concrete PlanDigest differs from static base and full Submit receives winner plan
-	const expectedWinnerDigest = "sha256:bc5d40e661f50e1398d41674c96afee7e3f42027cf867dba21f35c7398803adf"
+	const expectedWinnerDigest = "sha256:38473ab1be3fa52c1cecf21f1d1363bac97105b1bb39d43a06618d01d894a616"
 	if fullTranscodeReq.Plan.PlanDigest == expectedStaticBaseDigest {
 		t.Errorf("submitted PlanDigest unexpectedly matches static base digest %s; static fallback occurred!", expectedStaticBaseDigest)
 	}
@@ -512,7 +512,7 @@ func TestPhase8_OptimizationDisabled_BuiltinWithoutMetric_SkipsBenchmark(t *test
 	if atomic.LoadInt32(&mock.submitCalls) != 1 {
 		t.Errorf("expected 1 full transcode submit call, got %d", atomic.LoadInt32(&mock.submitCalls))
 	}
-	const expectedStaticBaseDigest = "sha256:5f3790702c4416380cb31fe56b128aa646aa5bd3fd577ca4b3435165e1a34bf6"
+	const expectedStaticBaseDigest = "sha256:a7e6a9336a4eb2d6eb4af49429e1274beb75b78401c5219e99e51d4f22e4da94"
 	if fullTranscodeReq.Plan == nil || fullTranscodeReq.Plan.PlanDigest != expectedStaticBaseDigest {
 		t.Errorf("expected full submit to use static base digest %s, got %v", expectedStaticBaseDigest, fullTranscodeReq.Plan)
 	}

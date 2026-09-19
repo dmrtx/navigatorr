@@ -35,11 +35,17 @@ type ResiliencePlan struct {
 }
 
 type Plan struct {
-	Container                    string           `json:"container" yaml:"container"`
-	VideoCodec                   string           `json:"video_codec" yaml:"video_codec"`
-	Quality                      int              `json:"quality" yaml:"quality"`
-	VideoProfile                 string           `json:"video_profile,omitempty" yaml:"video_profile,omitempty"`
-	PixelFormat                  string           `json:"pixel_format,omitempty" yaml:"pixel_format,omitempty"`
+	Container  string `json:"container" yaml:"container"`
+	VideoCodec string `json:"video_codec" yaml:"video_codec"`
+	// Quality is the rate-control knob. For hevc_videotoolbox it maps to -q:v
+	// (higher = higher quality). For libx265 it maps to -crf (LOWER = higher
+	// quality, valid range 1..51). See VideoProfile.Preset for x265 preset.
+	Quality      int    `json:"quality" yaml:"quality"`
+	VideoProfile string `json:"video_profile,omitempty" yaml:"video_profile,omitempty"`
+	PixelFormat  string `json:"pixel_format,omitempty" yaml:"pixel_format,omitempty"`
+	// Preset is the libx265 speed/efficiency preset. It must be empty for
+	// hevc_videotoolbox and is validated against a fixed safe enum for libx265.
+	Preset                       string           `json:"preset,omitempty" yaml:"preset,omitempty"`
 	PrioritizeSpeed              *bool            `json:"prioritize_speed,omitempty" yaml:"prioritize_speed,omitempty"`
 	SpatialAQ                    *bool            `json:"spatial_aq,omitempty" yaml:"spatial_aq,omitempty"`
 	Realtime                     *bool            `json:"realtime,omitempty" yaml:"realtime,omitempty"`
@@ -56,6 +62,42 @@ type Plan struct {
 	PlanDigest                   string           `json:"plan_digest,omitempty" yaml:"plan_digest,omitempty"`
 	Resilience                   ResiliencePlan   `json:"resilience,omitempty" yaml:"resilience,omitempty"`
 	AppliedFallbacks             []string         `json:"applied_fallbacks,omitempty" yaml:"applied_fallbacks,omitempty"`
+}
+
+// Video encoder identifiers accepted by the worker and recipe engine.
+const (
+	VideoCodecHEVCVideoToolbox = "hevc_videotoolbox"
+	VideoCodecLibX265          = "libx265"
+)
+
+// libx265 rate-control bounds. For libx265, Quality is interpreted as CRF,
+// where a LOWER value yields HIGHER quality (inverse of VideoToolbox -q:v).
+const (
+	LibX265CRFMin = 1
+	LibX265CRFMax = 51
+)
+
+// libX265Presets is the fixed, safe libx265 -preset enum. Arbitrary values are
+// rejected everywhere to preserve the fail-closed, no-raw-args boundary.
+var libX265Presets = map[string]bool{
+	"ultrafast": true, "superfast": true, "veryfast": true, "faster": true,
+	"fast": true, "medium": true, "slow": true, "slower": true,
+	"veryslow": true, "placebo": true,
+}
+
+// NormalizeVideoCodec lowercases and trims a codec identifier.
+func NormalizeVideoCodec(codec string) string {
+	return strings.ToLower(strings.TrimSpace(codec))
+}
+
+// IsValidLibX265Preset reports whether preset belongs to the libx265 enum.
+func IsValidLibX265Preset(preset string) bool {
+	return libX265Presets[strings.ToLower(strings.TrimSpace(preset))]
+}
+
+// ValidLibX265Presets returns the allowed libx265 presets in a stable order.
+func ValidLibX265Presets() []string {
+	return []string{"ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow", "placebo"}
 }
 
 func DigestPlan(p *Plan) (string, error) {

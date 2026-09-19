@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -117,7 +118,9 @@ type BenchmarkConcurrencyConfig struct {
 type BenchmarkWinner struct {
 	CandidateID               string   `json:"candidate_id"`
 	CandidateIndex            int      `json:"candidate_index"`
+	VideoCodec                string   `json:"video_codec,omitempty"`
 	Quality                   int      `json:"quality"`
+	Preset                    string   `json:"preset,omitempty"`
 	VideoProfile              string   `json:"video_profile,omitempty"`
 	PixelFormat               string   `json:"pixel_format,omitempty"`
 	ExpectedBitDepth          int      `json:"expected_bit_depth"`
@@ -141,7 +144,9 @@ type BenchmarkWinner struct {
 type BenchmarkCandidateEvaluation struct {
 	CandidateID      string   `json:"candidate_id"`
 	CandidateIndex   int      `json:"candidate_index"`
+	VideoCodec       string   `json:"video_codec,omitempty"`
 	Quality          int      `json:"quality"`
+	Preset           string   `json:"preset,omitempty"`
 	VideoProfile     string   `json:"video_profile,omitempty"`
 	PixelFormat      string   `json:"pixel_format,omitempty"`
 	ExpectedBitDepth int      `json:"expected_bit_depth"`
@@ -167,10 +172,26 @@ type BenchmarkDecision struct {
 // BenchmarkCandidate specifies one encoder candidate to evaluate during a benchmark.
 // Arbitrary ffmpeg arguments are strictly forbidden.
 type BenchmarkCandidate struct {
-	ID           string `json:"id"`
-	Quality      int    `json:"quality"`
+	ID string `json:"id"`
+	// VideoCodec selects the encoder. Empty means hevc_videotoolbox for
+	// backwards compatibility. libx265 is also accepted.
+	VideoCodec string `json:"video_codec,omitempty"`
+	// Quality is -q:v for VideoToolbox (1..100, higher = better) and CRF for
+	// libx265 (1..51, lower = better).
+	Quality int `json:"quality"`
+	// Preset is the libx265 preset; it must be empty for hevc_videotoolbox.
+	Preset       string `json:"preset,omitempty"`
 	VideoProfile string `json:"video_profile,omitempty"`
 	PixelFormat  string `json:"pixel_format,omitempty"`
+}
+
+// BenchmarkCandidateVideoCodec resolves the effective encoder for a candidate.
+func BenchmarkCandidateVideoCodec(c BenchmarkCandidate) string {
+	codec := NormalizeVideoCodec(c.VideoCodec)
+	if codec == "" {
+		return VideoCodecHEVCVideoToolbox
+	}
+	return codec
 }
 
 // BenchmarkSampleWindow specifies one temporal window to sample from the source.
@@ -427,7 +448,7 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 	}
 
 	seenCandidateIDs := make(map[string]bool)
-	seenQualities := make(map[int]bool)
+	seenQualities := make(map[string]bool)
 	for i, c := range req.Candidates {
 		cID := strings.TrimSpace(c.ID)
 		if cID == "" {
@@ -444,13 +465,31 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 		}
 		seenCandidateIDs[cID] = true
 
-		if c.Quality < 1 || c.Quality > 100 {
-			return fmt.Errorf("candidate %q quality %d out of valid range 1..100", cID, c.Quality)
+		codec := BenchmarkCandidateVideoCodec(c)
+		preset := strings.ToLower(strings.TrimSpace(c.Preset))
+		switch codec {
+		case VideoCodecHEVCVideoToolbox:
+			if preset != "" {
+				return fmt.Errorf("candidate %q: preset is only supported for libx265, got %q for %s", cID, c.Preset, VideoCodecHEVCVideoToolbox)
+			}
+			if c.Quality < 1 || c.Quality > 100 {
+				return fmt.Errorf("candidate %q quality %d out of valid range 1..100", cID, c.Quality)
+			}
+		case VideoCodecLibX265:
+			if preset != "" && !IsValidLibX265Preset(preset) {
+				return fmt.Errorf("candidate %q has unsupported libx265 preset %q", cID, c.Preset)
+			}
+			if c.Quality < LibX265CRFMin || c.Quality > LibX265CRFMax {
+				return fmt.Errorf("candidate %q crf %d out of valid range %d..%d for libx265", cID, c.Quality, LibX265CRFMin, LibX265CRFMax)
+			}
+		default:
+			return fmt.Errorf("candidate %q has unsupported video codec %q", cID, c.VideoCodec)
 		}
-		if seenQualities[c.Quality] {
-			return fmt.Errorf("duplicate candidate quality %d for candidate %q", c.Quality, cID)
+		qualityKey := codec + ":" + strconv.Itoa(c.Quality)
+		if seenQualities[qualityKey] {
+			return fmt.Errorf("duplicate candidate quality %d for codec %s (candidate %q)", c.Quality, codec, cID)
 		}
-		seenQualities[c.Quality] = true
+		seenQualities[qualityKey] = true
 	}
 
 	return nil
