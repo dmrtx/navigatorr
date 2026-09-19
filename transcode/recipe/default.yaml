@@ -1,5 +1,5 @@
 schema_version: 2
-bundle_version: "2026.09.3"
+bundle_version: "2026.09.4"
 containers:
   mkv:
     subtitle_copy:
@@ -186,3 +186,40 @@ profiles:
       search:
         max_candidates: 4
         quality_values: [20, 22, 24, 26]
+  # Fast hardware alternative to live-action-hevc for 1080p live-action
+  # sources. Uses VideoToolbox average-bitrate rate control (-b:v sweep)
+  # instead of x265 CRF: much faster encodes at the cost of bitrate
+  # efficiency. The 3200/3500/3800 kbps sweep brackets the 3500k default;
+  # quality acceptance (VMAF 92/88) intentionally matches live-action-hevc so
+  # both families are judged by the same bar. Auto-selection policy is
+  # unchanged: profiles are chosen explicitly by name, never silently
+  # substituted across encoder families.
+  live-action-hevc-vt:
+    container: mkv
+    video:
+      codec: hevc_videotoolbox
+      average_bitrate_kbps: 3500
+      profile: main
+      pixel_format: yuv420p
+      prioritize_speed: false
+      spatial_aq: true
+      realtime: false
+    audio: {mode: copy}
+    subtitles: {mode: preserve, convert_incompatible: true}
+    preserve: {metadata: true, chapters: true, attachments: true}
+    resilience: *default_resilience
+    optimization:
+      enabled: true
+      sampling:
+        strategy: distributed
+        sample_count: 3
+        sample_seconds: 20
+        positions: [0.2, 0.5, 0.8]
+      quality:
+        preferred_metric: vmaf
+        vmaf:
+          target: 92
+          minimum: 88
+      search:
+        max_candidates: 3
+        bitrate_values: [3200, 3500, 3800]

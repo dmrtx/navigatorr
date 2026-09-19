@@ -204,7 +204,7 @@ preflight + InspectDetailed
 ### Actions
 
 - `benchmark_transcode` is candidate-only: it shares preflight and models with `transcode_media`, runs the benchmark, persists the report, and never executes the full file nor creates a permanent candidate.
-- `transcode_media` with an optimized profile adds `submit_benchmark` / `wait_benchmark` steps before the existing `submit_transcode` / `wait_transcode` / `validate_result` / `accept_result` steps. It uses the winner's concrete knobs (quality, profile, pixel format, bit depth) for the full transcode and refuses to continue when there is no valid winner.
+- `transcode_media` with an optimized profile adds `submit_benchmark` / `wait_benchmark` steps before the existing `submit_transcode` / `wait_transcode` / `validate_result` / `accept_result` steps. It uses the winner's concrete knobs (encoder, quality or average bitrate, preset, profile, pixel format, bit depth, plus any typed VideoToolbox switches) for the full transcode and refuses to continue when there is no valid winner.
 
 ### Optimization policy reference
 
@@ -221,14 +221,17 @@ optimization:
     vmaf: {target: 96.0, minimum: 95.0, marginal_tolerance: 0.5}
     ssim: {target: 0.99, minimum: 0.98, marginal_tolerance: 0.005}
   search:
-    max_candidates: 5            # 1-20, >= len(quality_values)
-    quality_values: [55, 60, 65, 70, 75]  # strictly increasing -q:v list
+    max_candidates: 5            # 1-20, >= len(quality_values|bitrate_values)
+    quality_values: [55, 60, 65, 70, 75]  # strictly increasing -q:v list (or CRF list for libx265)
+    # bitrate_values: [3200, 3500, 3800]  # alternative: strictly increasing -b:v kbps sweep, hevc_videotoolbox only; mutually exclusive with quality_values
   size:
     preferred_total_bitrate_kbps: {min: 2100, max: 3650}
     soft_max_total_bitrate_kbps: 4250      # soft guidance, not a hard target
 ```
 
 Omitted blocks fall back to the defaults above; an explicitly requested metric block must carry its own thresholds. Quality always wins over hitting a size number: size guidance is soft.
+
+Recipes select exactly one encoder family (`hevc_videotoolbox` or `libx265`) plus only typed knobs valid for that family — cross-family knobs (VideoToolbox rate/offline switches on `libx265`, `preset`/CRF semantics on VideoToolbox) fail recipe validation. The profile's rate-control mode must match its search dimension (`quality` with `quality_values`, `average_bitrate_kbps` with `bitrate_values`). All non-swept typed knobs are inherited verbatim into every benchmark candidate, so benchmark encodes exercise the exact configuration the full transcode would run; the winner carries the full knob set back into the materialized plan. Adaptive probing applies to quality-ordered VideoToolbox sweeps only — libx265 CRF sweeps and VideoToolbox bitrate sweeps always run exhaustive, with identical VMAF/SSIM selection and size guardrails.
 
 A complete, loader-validated example lives in `docs/examples/transcode-recipes-optimization.yaml`. The embedded builtin bundle stays schema_version 1; optimization is adopted via `file`/`https`/`github` sources, never by editing worker code.
 

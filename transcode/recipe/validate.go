@@ -142,12 +142,18 @@ func ValidateProfile(name string, p Profile) error {
 		if preset := normalizeCodec(p.Video.Preset); preset != "" && !transcode.IsValidLibX265Preset(preset) {
 			return fmt.Errorf("profile %q: unsupported libx265 preset %q (allowed: %v)", name, p.Video.Preset, transcode.ValidLibX265Presets())
 		}
-	} else {
-		if p.Video.Quality < 1 || p.Video.Quality > 100 {
-			return fmt.Errorf("profile %q: video quality %d out of range 1-100", name, p.Video.Quality)
+		if err := rejectLibX265VideoToolboxVideoKnobs(name, p.Video); err != nil {
+			return err
 		}
+	} else {
 		if strings.TrimSpace(p.Video.Preset) != "" {
 			return fmt.Errorf("profile %q: preset is only supported for libx265, got %q for %s", name, p.Video.Preset, p.Video.Codec)
+		}
+		if err := ValidateVideoRateControl(name, p.Video); err != nil {
+			return err
+		}
+		if err := ValidateVideoOfflineKnobs(name, p.Video); err != nil {
+			return err
 		}
 	}
 	videoProfile := normalizeCodec(p.Video.Profile)
@@ -215,9 +221,23 @@ func ValidateProfile(name string, p Profile) error {
 		if err := ValidateOptimizationPolicy(name, p.Optimization); err != nil {
 			return err
 		}
+		// The profile's own rate-control mode must match the benchmark search
+		// dimension: a quality base with a bitrate sweep (or vice versa) is
+		// ambiguous about which configuration the full transcode would run.
+		if codec == transcode.VideoCodecHEVCVideoToolbox && p.Optimization.Search != nil {
+			baseBitrate := p.Video.AverageBitrateKbps != 0
+			searchBitrate := len(p.Optimization.Search.BitrateValues) > 0
+			if baseBitrate != searchBitrate {
+				return fmt.Errorf("profile %q: video rate-control mode must match the search dimension: use average_bitrate_kbps with bitrate_values, or quality with quality_values (fail closed)", name)
+			}
+		}
 		// For libx265, search quality values are CRF values and must respect the
 		// narrower x265 range even though the generic policy allows 1..100.
+		// Bitrate sweeps are hevc_videotoolbox-only; libx265 is CRF-only.
 		if codec == transcode.VideoCodecLibX265 && p.Optimization.Search != nil {
+			if len(p.Optimization.Search.BitrateValues) > 0 {
+				return fmt.Errorf("profile %q: search bitrate_values are only supported for hevc_videotoolbox, not libx265 (fail closed)", name)
+			}
 			for _, q := range p.Optimization.Search.QualityValues {
 				if q < transcode.LibX265CRFMin || q > transcode.LibX265CRFMax {
 					return fmt.Errorf("profile %q: libx265 search crf %d out of range %d-%d", name, q, transcode.LibX265CRFMin, transcode.LibX265CRFMax)
@@ -230,6 +250,122 @@ func ValidateProfile(name string, p Profile) error {
 
 func isFinite(f float64) bool {
 	return !math.IsNaN(f) && !math.IsInf(f, 0)
+}
+
+// rejectLibX265VideoToolboxVideoKnobs fail-closes when a libx265 recipe
+// carries any hevc_videotoolbox-only control. Encoder families never share
+// knobs: VT rate-control/offline/boolean switches are meaningless for x265.
+func rejectLibX265VideoToolboxVideoKnobs(name string, v VideoProfile) error {
+	if v.AverageBitrateKbps != 0 {
+		return fmt.Errorf("profile %q: average_bitrate_kbps is only supported for hevc_videotoolbox, not libx265 (fail closed)", name)
+	}
+	if v.MaxBitrateKbps != 0 {
+		return fmt.Errorf("profile %q: max_bitrate_kbps is only supported for hevc_videotoolbox, not libx265 (fail closed)", name)
+	}
+	if v.ConstantBitrate != nil {
+		return fmt.Errorf("profile %q: constant_bitrate is only supported for hevc_videotoolbox, not libx265 (fail closed)", name)
+	}
+	if v.QMin != nil || v.QMax != nil {
+		return fmt.Errorf("profile %q: qmin/qmax are only supported for hevc_videotoolbox, not libx265 (fail closed)", name)
+	}
+	if v.GOPSize != nil {
+		return fmt.Errorf("profile %q: gop_size is only supported for hevc_videotoolbox, not libx265 (fail closed)", name)
+	}
+	if v.BFrames != nil {
+		return fmt.Errorf("profile %q: b_frames is only supported for hevc_videotoolbox, not libx265 (fail closed)", name)
+	}
+	if v.ClosedGOP != nil {
+		return fmt.Errorf("profile %q: closed_gop is only supported for hevc_videotoolbox, not libx265 (fail closed)", name)
+	}
+	if v.PowerEfficient != nil {
+		return fmt.Errorf("profile %q: power_efficient is only supported for hevc_videotoolbox, not libx265 (fail closed)", name)
+	}
+	if v.MaxRefFrames != nil {
+		return fmt.Errorf("profile %q: max_ref_frames is only supported for hevc_videotoolbox, not libx265 (fail closed)", name)
+	}
+	if v.PrioritizeSpeed != nil || v.SpatialAQ != nil || v.Realtime != nil {
+		return fmt.Errorf("profile %q: VideoToolbox-only options (prioritize_speed/spatial_aq/realtime) are not supported for libx265 (fail closed)", name)
+	}
+	return nil
+}
+
+// ValidateVideoRateControl enforces the bounded typed rate-control model for
+// hevc_videotoolbox: exactly one of quality mode (-q:v) or average-bitrate
+// mode (-b:v). CBR (-constant_bit_rate) and maxrate (-maxrate) require an
+// average bitrate; maxrate must cap at or above the average. There is no
+// bufsize knob: the current FFmpeg VideoToolbox encoder does not consume it
+// meaningfully, so it stays rejected by strict decoding.
+func ValidateVideoRateControl(name string, v VideoProfile) error {
+	hasQuality := v.Quality != 0
+	hasBitrate := v.AverageBitrateKbps != 0
+	if hasQuality && hasBitrate {
+		return fmt.Errorf("profile %q: video quality (%d) and average_bitrate_kbps (%d) are mutually exclusive: use exactly one rate-control mode", name, v.Quality, v.AverageBitrateKbps)
+	}
+	if !hasQuality && !hasBitrate {
+		return fmt.Errorf("profile %q: video must specify either quality (1-100) or average_bitrate_kbps (>0)", name)
+	}
+	if hasQuality && (v.Quality < 1 || v.Quality > 100) {
+		return fmt.Errorf("profile %q: video quality %d out of range 1-100", name, v.Quality)
+	}
+	if hasBitrate && (v.AverageBitrateKbps < 1 || v.AverageBitrateKbps > MaxBitrateKbps) {
+		return fmt.Errorf("profile %q: average_bitrate_kbps %d out of range 1-%d", name, v.AverageBitrateKbps, MaxBitrateKbps)
+	}
+	if v.MaxBitrateKbps != 0 {
+		if !hasBitrate {
+			return fmt.Errorf("profile %q: max_bitrate_kbps requires average_bitrate_kbps (fail closed)", name)
+		}
+		if v.MaxBitrateKbps < 1 || v.MaxBitrateKbps > MaxBitrateKbps {
+			return fmt.Errorf("profile %q: max_bitrate_kbps %d out of range 1-%d", name, v.MaxBitrateKbps, MaxBitrateKbps)
+		}
+		if v.MaxBitrateKbps < v.AverageBitrateKbps {
+			return fmt.Errorf("profile %q: max_bitrate_kbps (%d) must be >= average_bitrate_kbps (%d)", name, v.MaxBitrateKbps, v.AverageBitrateKbps)
+		}
+	}
+	if v.ConstantBitrate != nil && *v.ConstantBitrate && !hasBitrate {
+		return fmt.Errorf("profile %q: constant_bitrate requires average_bitrate_kbps (fail closed)", name)
+	}
+	return nil
+}
+
+// validateIntKnob fail-closes on out-of-range explicit integer knobs.
+// A nil pointer means "emit nothing" and is always valid, preserving
+// explicit false/zero semantics for set values (e.g. b_frames: 0).
+func validateIntKnob(name, knob string, v *int, min, max int) error {
+	if v == nil {
+		return nil
+	}
+	if *v < min || *v > max {
+		return fmt.Errorf("profile %q: %s %d out of range %d-%d", name, knob, *v, min, max)
+	}
+	return nil
+}
+
+// ValidateVideoOfflineKnobs enforces bounds on the typed offline-quality
+// knobs actually consumed by FFmpeg VideoToolbox for file transcoding.
+// Irrelevant or dangerous controls (require_sw/allow_sw software fallback,
+// alpha_quality, frames_before/frames_after, low_delay) are deliberately NOT
+// part of the schema and stay rejected by strict decoding; hardware
+// acceleration remains required for hevc_videotoolbox.
+func ValidateVideoOfflineKnobs(name string, v VideoProfile) error {
+	if err := validateIntKnob(name, "qmin", v.QMin, 0, MaxQMinQMax); err != nil {
+		return err
+	}
+	if err := validateIntKnob(name, "qmax", v.QMax, 0, MaxQMinQMax); err != nil {
+		return err
+	}
+	if v.QMin != nil && v.QMax != nil && *v.QMin > *v.QMax {
+		return fmt.Errorf("profile %q: qmin (%d) must be <= qmax (%d)", name, *v.QMin, *v.QMax)
+	}
+	if err := validateIntKnob(name, "gop_size", v.GOPSize, 1, MaxGOPSize); err != nil {
+		return err
+	}
+	if err := validateIntKnob(name, "b_frames", v.BFrames, 0, MaxBFrames); err != nil {
+		return err
+	}
+	if err := validateIntKnob(name, "max_ref_frames", v.MaxRefFrames, 1, MaxRefFrames); err != nil {
+		return err
+	}
+	return nil
 }
 
 // NormalizeOptimizationPolicy populates documented defaults for enabled optimization policies
@@ -332,13 +468,17 @@ func NormalizeOptimizationPolicy(opt *OptimizationPolicy) {
 	} else {
 		// Only default if EXACTLY zero. Do not overwrite negative numbers!
 		if opt.Search.MaxCandidates == 0 {
-			if len(opt.Search.QualityValues) > 0 {
-				opt.Search.MaxCandidates = len(opt.Search.QualityValues)
+			if n := len(opt.Search.QualityValues) + len(opt.Search.BitrateValues); n > 0 {
+				opt.Search.MaxCandidates = n
 			} else {
 				opt.Search.MaxCandidates = DefaultMaxCandidates
 			}
 		}
-		if len(opt.Search.QualityValues) == 0 {
+		// QualityValues is the legacy default dimension, but it must NOT be
+		// backfilled when the profile explicitly sweeps bitrates: an empty
+		// quality list alongside bitrate_values selects bitrate mode.
+		// A mixed configuration (both set) is left for validation to reject.
+		if len(opt.Search.QualityValues) == 0 && len(opt.Search.BitrateValues) == 0 {
 			opt.Search.QualityValues = append([]int(nil), DefaultQualityValues...)
 		}
 		// Adaptive defaults: empty mode stays empty (treated as exhaustive downstream).
@@ -435,18 +575,38 @@ func ValidateOptimizationPolicy(name string, opt *OptimizationPolicy) error {
 	if srch.MaxCandidates < 1 || srch.MaxCandidates > 20 {
 		return fmt.Errorf("profile %q: max_candidates %d out of range 1-20", name, srch.MaxCandidates)
 	}
-	if len(srch.QualityValues) == 0 {
-		return fmt.Errorf("profile %q: search quality_values cannot be empty", name)
+	hasQuality := len(srch.QualityValues) > 0
+	hasBitrate := len(srch.BitrateValues) > 0
+	if hasQuality && hasBitrate {
+		return fmt.Errorf("profile %q: search quality_values and bitrate_values are mutually exclusive: sweep exactly one rate-control dimension", name)
 	}
-	if len(srch.QualityValues) > srch.MaxCandidates {
-		return fmt.Errorf("profile %q: number of quality_values (%d) exceeds max_candidates (%d)", name, len(srch.QualityValues), srch.MaxCandidates)
+	if !hasQuality && !hasBitrate {
+		return fmt.Errorf("profile %q: search must specify quality_values or bitrate_values", name)
 	}
-	for i, val := range srch.QualityValues {
-		if val < 1 || val > 100 {
-			return fmt.Errorf("profile %q: quality value %d out of range 1-100", name, val)
+	if hasQuality {
+		if len(srch.QualityValues) > srch.MaxCandidates {
+			return fmt.Errorf("profile %q: number of quality_values (%d) exceeds max_candidates (%d)", name, len(srch.QualityValues), srch.MaxCandidates)
 		}
-		if i > 0 && val <= srch.QualityValues[i-1] {
-			return fmt.Errorf("profile %q: quality_values must be strictly ordered without duplicates (found %d after %d)", name, val, srch.QualityValues[i-1])
+		for i, val := range srch.QualityValues {
+			if val < 1 || val > 100 {
+				return fmt.Errorf("profile %q: quality value %d out of range 1-100", name, val)
+			}
+			if i > 0 && val <= srch.QualityValues[i-1] {
+				return fmt.Errorf("profile %q: quality_values must be strictly ordered without duplicates (found %d after %d)", name, val, srch.QualityValues[i-1])
+			}
+		}
+	}
+	if hasBitrate {
+		if len(srch.BitrateValues) > srch.MaxCandidates {
+			return fmt.Errorf("profile %q: number of bitrate_values (%d) exceeds max_candidates (%d)", name, len(srch.BitrateValues), srch.MaxCandidates)
+		}
+		for i, val := range srch.BitrateValues {
+			if val < 1 || val > MaxBitrateKbps {
+				return fmt.Errorf("profile %q: bitrate value %d out of range 1-%d kbps", name, val, MaxBitrateKbps)
+			}
+			if i > 0 && val <= srch.BitrateValues[i-1] {
+				return fmt.Errorf("profile %q: bitrate_values must be strictly ordered without duplicates (found %d after %d)", name, val, srch.BitrateValues[i-1])
+			}
 		}
 	}
 	if srch.AdaptiveMode != "" {

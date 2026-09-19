@@ -82,6 +82,42 @@ profiles:
         preferred_total_bitrate_kbps: {min: 2100, max: 3650}
         soft_max_total_bitrate_kbps: 4250
 
+  # Average-bitrate optimization example (VideoToolbox only): the profile's
+  # rate mode (average_bitrate_kbps, quality unset) must match the search
+  # dimension (bitrate_values, no quality_values). Bitrate sweeps always run
+  # exhaustive with the same VMAF selection and size guardrails as quality
+  # sweeps; adaptive probing is quality-ordered only. libx265 profiles must
+  # use quality_values (CRF) instead — bitrate_values there fail validation.
+  general-hevc-bitrate-optimized:
+    container: mkv
+    video:
+      codec: hevc_videotoolbox
+      average_bitrate_kbps: 3500
+      max_bitrate_kbps: 5000
+      profile: main
+      pixel_format: yuv420p
+      prioritize_speed: false
+      spatial_aq: true
+      realtime: false
+    audio: {mode: copy}
+    subtitles: {mode: preserve, convert_incompatible: true}
+    preserve: {metadata: true, chapters: true, attachments: true}
+    resilience: *default_resilience
+    optimization:
+      enabled: true
+      sampling:
+        strategy: distributed
+        sample_count: 3
+        sample_seconds: 20
+        positions: [0.2, 0.5, 0.8]
+      quality:
+        preferred_metric: vmaf
+        vmaf: {target: 92.0, minimum: 88.0, marginal_tolerance: 0.5}
+        ssim: {target: 0.99, minimum: 0.98, marginal_tolerance: 0.005}
+      search:
+        max_candidates: 3
+        bitrate_values: [3200, 3500, 3800]
+
   # 10-bit SDR note: a 10-bit source only ever yields 10-bit candidates
   # (main10 + p010le). There is deliberately NO "convert 8-bit to 10-bit"
   # optimization: 8-bit sources only yield 8-bit candidates. Sources that

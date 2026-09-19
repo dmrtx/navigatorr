@@ -10,11 +10,39 @@ For `codec: hevc_videotoolbox` the schema supports:
 | --- | --- | --- | --- | --- |
 | `codec` | string | `hevc_videotoolbox` | required | `-c:v hevc_videotoolbox` |
 | `quality` | integer | `1..100` | existing profile value | `-q:v N` |
+| `average_bitrate_kbps` | integer | `1..1000000` | not forced | `-b:v Nk` (AverageBitRate) |
+| `max_bitrate_kbps` | integer | `>= average`, `<= 1000000` | not forced | `-maxrate Nk` (DataRateLimits) |
+| `constant_bitrate` | boolean | `true`, `false` | not forced (off) | `-constant_bit_rate 1/0` |
 | `profile` | string | `main`, `main10` | not forced | `-profile:v VALUE` |
 | `pixel_format` | string | `yuv420p`, `p010le` | not forced | `-pix_fmt VALUE` |
 | `prioritize_speed` | boolean | `true`, `false` | not forced | `-prio_speed 1/0` |
 | `spatial_aq` | boolean | `true`, `false` | not forced | `-spatial_aq 1/0` |
 | `realtime` | boolean | `true`, `false` | not forced | `-realtime 1/0` |
+| `qmin` / `qmax` | integer | `0..69`, `qmin <= qmax` | not forced | `-qmin N` / `-qmax N` (allowed frame QP) |
+| `gop_size` | integer | `1..100000` | not forced | `-g N` (max keyframe interval) |
+| `b_frames` | integer | `0..16` | not forced | `-bf N` (frame reordering depth) |
+| `closed_gop` | boolean | `true`, `false` | not forced | `-flags +cgop` / `-flags -cgop` |
+| `power_efficient` | boolean | `true`, `false` | not forced | `-power_efficient 1/0` |
+| `max_ref_frames` | integer | `1..16` | not forced | `-max_ref_frames N` |
+
+## Rate-control modes
+
+Exactly one mode per recipe; `quality` and `average_bitrate_kbps` together
+fail recipe validation, as does a profile whose rate mode disagrees with its
+benchmark search dimension (`quality_values` vs `bitrate_values`):
+
+- **Quality mode** (`quality: 65`): constant-quality `-q:v`. This is the
+  default and the only mode the legacy profiles use.
+- **Average-bitrate mode** (`average_bitrate_kbps: 3500` with `quality`
+  unset): `-b:v 3500k` (AverageBitRate). Optional `constant_bitrate: true`
+  adds `-constant_bit_rate 1` (never the default), and optional
+  `max_bitrate_kbps` adds generic `-maxrate` capping at or above the average.
+  Benchmark sweeps use `bitrate_values: [3200, 3500, 3800]` (see
+  `live-action-hevc-vt`).
+
+Integer knobs use pointer semantics like the booleans below: omitted means
+"emit nothing", while an explicit value — including `b_frames: 0` — is
+emitted verbatim and validated against the ranges above.
 
 Omitted fields stay absent from the immutable plan. This is intentional: legacy is `FFmpeg-argv compatible; no new encoder defaults are injected`, not fully behavior-compatible because capability probing occurs.
 
@@ -119,13 +147,46 @@ anime-hevc-main10
 
 anime-hevc-main10-aq
 -c:v hevc_videotoolbox -q:v 65 -profile:v main10 -pix_fmt p010le -prio_speed 0 -spatial_aq 1 -realtime 0
+
+live-action-hevc-vt (average-bitrate mode)
+-c:v hevc_videotoolbox -b:v 3500k -profile:v main -pix_fmt yuv420p -prio_speed 0 -spatial_aq 1 -realtime 0
 ```
+
+New options always append after the legacy `-realtime` slot in fixed order
+(`-qmin`, `-qmax`, `-g`, `-bf`, `-flags`, `-power_efficient`,
+`-max_ref_frames`, `-constant_bit_rate`, `-maxrate`), so legacy argv stays
+byte-identical.
 
 The rest of the generated command continues to use Navigatorr's explicit stream maps, copied audio/attachments, recipe-resolved subtitle codecs, metadata/chapter preservation, progress output, and candidate path.
 
 ## Bitrate controls
 
-`bitrate`, `max_bitrate`, and `bufsize` are intentionally **not** accepted yet. FFmpeg exposes generic rate-control switches, but their exact interaction with the installed Apple VideoToolbox implementation must be verified before Navigatorr promises stable semantics. Until that verification exists, the strict recipe loader rejects these fields instead of silently translating them into an untested mode or accidentally forcing CBR.
+Rate control is typed, never passthrough: `average_bitrate_kbps` (`-b:v`),
+`max_bitrate_kbps` (`-maxrate`), and `constant_bitrate`
+(`-constant_bit_rate`) are the only accepted spellings. The bare legacy
+names `bitrate`, `max_bitrate`, and especially `bufsize` stay rejected by the
+strict recipe loader: the current FFmpeg VideoToolbox encoder does not
+consume `bufsize` meaningfully, so Navigatorr refuses to promise semantics
+for it. CBR is opt-in per recipe and never the default.
+
+## Encoder-family boundaries
+
+Recipes select exactly one encoder family, and each family accepts only its
+own typed knobs — validated fail-closed at recipe parse, plan build, and
+worker capability negotiation:
+
+- `hevc_videotoolbox` accepts everything in the table above and rejects
+  `preset` (libx265-only).
+- `libx265` accepts `quality` (CRF 1..51, lower = better) plus `preset` from
+  the fixed safe enum, and rejects every VideoToolbox-only knob
+  (`average_bitrate_kbps`, `max_bitrate_kbps`, `constant_bitrate`,
+  `qmin`/`qmax`, `gop_size`, `b_frames`, `closed_gop`, `power_efficient`,
+  `max_ref_frames`, `prioritize_speed`, `spatial_aq`, `realtime`).
+
+Deliberately absent from both families (rejected by strict decoding):
+`require_sw` / `allow_sw` software fallback, `alpha_quality`,
+`frames_before` / `frames_after`, and `low_delay`. Hardware acceleration
+remains required for `hevc_videotoolbox`.
 
 ## VideoToolbox versus x265
 
@@ -141,5 +202,6 @@ Schema acceptance and unit tests are not proof that a particular Mac/FFmpeg buil
 
 - **Main10**: Main10 is considered verified only when post-validation reports 10-bit output from `main10 + p010le`.
 - **Spatial AQ**: Spatial AQ is physically validated only when encode completes without VideoToolbox unsupported/ignored AQ warning; the worker fails such warnings as `encoder_capability_unsupported`.
+- **New typed options** (`constant_bit_rate`, `power_efficient`, `max_ref_frames`): requested options must appear in the worker's `ffmpeg -h encoder=hevc_videotoolbox` probe or the job fails closed before any encode starts. Generic controls (`-b:v`, `-maxrate`, `-qmin`/`-qmax`, `-g`, `-bf`, `-flags`) are core FFmpeg options validated structurally instead.
 
 The M1 physical matrix has not been run yet; real-hardware matrix verification across Apple Silicon generations remains pending.

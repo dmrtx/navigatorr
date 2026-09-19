@@ -11,7 +11,9 @@ import (
 )
 
 func TestBuildBenchmarkCandidatesLibX265(t *testing.T) {
-	candidates, err := buildBenchmarkCandidates(8, transcode.VideoCodecLibX265, "slow", []int{20, 22, 24, 26}, 4)
+	base := &transcode.Plan{VideoCodec: transcode.VideoCodecLibX265, Quality: 24, Preset: "slow"}
+	srch := &recipe.SearchPolicy{MaxCandidates: 4, QualityValues: []int{20, 22, 24, 26}}
+	candidates, err := buildBenchmarkCandidates(base, 8, srch)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -39,7 +41,9 @@ func TestBuildBenchmarkCandidatesLibX265(t *testing.T) {
 }
 
 func TestBuildBenchmarkCandidatesVideoToolboxUnchanged(t *testing.T) {
-	candidates, err := buildBenchmarkCandidates(8, "", "", []int{60, 65, 70}, 5)
+	base := &transcode.Plan{VideoCodec: transcode.VideoCodecHEVCVideoToolbox, Quality: 65}
+	srch := &recipe.SearchPolicy{MaxCandidates: 5, QualityValues: []int{60, 65, 70}}
+	candidates, err := buildBenchmarkCandidates(base, 8, srch)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -60,7 +64,9 @@ func TestBuildBenchmarkCandidatesVideoToolboxUnchanged(t *testing.T) {
 }
 
 func TestBuildBenchmarkCandidatesLibX265DefaultsPreset(t *testing.T) {
-	candidates, err := buildBenchmarkCandidates(8, transcode.VideoCodecLibX265, "", []int{24}, 4)
+	base := &transcode.Plan{VideoCodec: transcode.VideoCodecLibX265, Quality: 24}
+	srch := &recipe.SearchPolicy{MaxCandidates: 4, QualityValues: []int{24}}
+	candidates, err := buildBenchmarkCandidates(base, 8, srch)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -70,17 +76,29 @@ func TestBuildBenchmarkCandidatesLibX265DefaultsPreset(t *testing.T) {
 }
 
 func TestBuildBenchmarkCandidatesRejectsInvalidInputs(t *testing.T) {
-	if _, err := buildBenchmarkCandidates(8, transcode.VideoCodecLibX265, "slow", []int{52}, 4); err == nil || !strings.Contains(err.Error(), "invalid libx265 crf") {
-		t.Fatalf("out-of-range CRF did not fail closed: %v", err)
+	cases := []struct {
+		name    string
+		codec   string
+		preset  string
+		qVals   []int
+		brVals  []int
+		wantErr string
+	}{
+		{name: "out-of-range CRF", codec: transcode.VideoCodecLibX265, preset: "slow", qVals: []int{52}, wantErr: "invalid libx265 crf"},
+		{name: "invalid preset", codec: transcode.VideoCodecLibX265, preset: "turbo", qVals: []int{24}, wantErr: "unsupported libx265 preset"},
+		{name: "unsupported codec", codec: "libx264", qVals: []int{24}, wantErr: "unsupported video codec"},
+		{name: "preset for VideoToolbox", codec: transcode.VideoCodecHEVCVideoToolbox, preset: "slow", qVals: []int{65}, wantErr: "only supported for libx265"},
+		{name: "bitrate sweep for libx265", codec: transcode.VideoCodecLibX265, preset: "slow", brVals: []int{3500}, wantErr: "only supported for hevc_videotoolbox"},
+		{name: "mixed sweep", codec: transcode.VideoCodecHEVCVideoToolbox, qVals: []int{65}, brVals: []int{3500}, wantErr: "mutually exclusive"},
 	}
-	if _, err := buildBenchmarkCandidates(8, transcode.VideoCodecLibX265, "turbo", []int{24}, 4); err == nil || !strings.Contains(err.Error(), "unsupported libx265 preset") {
-		t.Fatalf("invalid preset did not fail closed: %v", err)
-	}
-	if _, err := buildBenchmarkCandidates(8, "libx264", "", []int{24}, 4); err == nil || !strings.Contains(err.Error(), "unsupported video codec") {
-		t.Fatalf("unsupported codec did not fail closed: %v", err)
-	}
-	if _, err := buildBenchmarkCandidates(8, transcode.VideoCodecHEVCVideoToolbox, "slow", []int{65}, 4); err == nil || !strings.Contains(err.Error(), "only supported for libx265") {
-		t.Fatalf("preset for VideoToolbox did not fail closed: %v", err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			base := &transcode.Plan{VideoCodec: tc.codec, Preset: tc.preset, Quality: 24}
+			srch := &recipe.SearchPolicy{MaxCandidates: 4, QualityValues: tc.qVals, BitrateValues: tc.brVals}
+			if _, err := buildBenchmarkCandidates(base, 8, srch); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
+			}
+		})
 	}
 }
 
