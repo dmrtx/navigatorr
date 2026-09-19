@@ -399,6 +399,7 @@ func (e *Engine) Cancel(ctx context.Context, instanceID, reason string) (*Action
 		return nil, fmt.Errorf("maintenance store is required")
 	}
 
+	requestCtx := ctx
 	ctx, release, err := e.claimExecution(ctx, instanceID, true)
 	if err != nil {
 		return nil, err
@@ -489,7 +490,7 @@ func (e *Engine) Cancel(ctx context.Context, instanceID, reason string) (*Action
 		if strings.TrimSpace(reason) != "" {
 			childReason += ": " + reason
 		}
-		if _, cerr := e.Cancel(ctx, childID, childReason); cerr != nil {
+		if _, cerr := e.Cancel(requestCtx, childID, childReason); cerr != nil {
 			cancelErrors = append(cancelErrors, fmt.Sprintf("cancelling child %s: %v", childID, cerr))
 		}
 	}
