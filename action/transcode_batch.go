@@ -460,8 +460,8 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 		if len(cancelErrors) > 0 {
 			outputs["cancel_errors"] = cancelErrors
 			return StepResult{
-				Status: StepFailed,
-				Error:  "batch cancellation was only partially confirmed: " + strings.Join(cancelErrors, "; "),
+				Status:  StepFailed,
+				Error:   "batch cancellation was only partially confirmed: " + strings.Join(cancelErrors, "; "),
 				Outputs: outputs,
 			}, nil
 		}
