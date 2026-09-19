@@ -59,6 +59,8 @@ type promotionState struct {
 	Approved               bool                         `json:"approved"`
 	BackupPath             string                       `json:"recovery_path,omitempty"`
 	BackupVerified         bool                         `json:"recovery_verified"`
+	RecoveryCopyOwner      string                       `json:"recovery_copy_owner,omitempty"`
+	RecoveryCopyComplete   bool                         `json:"recovery_copy_complete,omitempty"`
 	NewFileID              int                          `json:"new_episode_file_id,omitempty"`
 	NewPath                string                       `json:"new_path,omitempty"`
 	Commands               map[string]*promotionCommand `json:"commands,omitempty"`
