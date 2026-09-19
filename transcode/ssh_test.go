@@ -373,16 +373,17 @@ exit 1
 			t.Fatal(err)
 		}
 		_, err = exec.Capabilities(context.Background())
-		if err == nil || !strings.Contains(err.Error(), "unsupported protocol version 0 (expected 1)") {
-			t.Fatalf("expected unsupported protocol version error, got: %v", err)
+		want := fmt.Sprintf("unsupported protocol version 0 (expected %d)", WorkerProtocolVersion)
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("expected %q, got: %v", want, err)
 		}
 	})
 
-	t.Run("future/unsupported protocol version (2) fails closed", func(t *testing.T) {
+	t.Run("stale v1 worker rejected before submit", func(t *testing.T) {
 		script := `
 for arg in "$@"; do
     if [ "$arg" = "capabilities" ]; then
-        echo '{"protocol_version": 2, "capability_fingerprint": "abc"}'
+        echo '{"protocol_version": 1, "capability_fingerprint": "abc"}'
         exit 0
     fi
 done
@@ -395,8 +396,9 @@ exit 1
 			t.Fatal(err)
 		}
 		_, err = exec.Capabilities(context.Background())
-		if err == nil || !strings.Contains(err.Error(), "unsupported protocol version 2 (expected 1)") {
-			t.Fatalf("expected unsupported protocol version 2 error, got: %v", err)
+		want := fmt.Sprintf("unsupported protocol version 1 (expected %d)", WorkerProtocolVersion)
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("expected %q, got: %v", want, err)
 		}
 	})
 }

@@ -9,8 +9,16 @@ import (
 	"strings"
 )
 
-// WorkerProtocolVersion is the current version of the worker capability protocol.
-const WorkerProtocolVersion = 1
+// WorkerProtocolVersion is the current version of the worker capability
+// protocol.
+//
+// Version 2 is a breaking wire-schema change: normal transcode submit and
+// BenchmarkRequest payloads now carry `source_sha256`. Worker HTTP decoders use
+// DisallowUnknownFields, so an older (v1) worker rejects those payloads. New
+// coordinators therefore reject a stale v1 worker during the capability
+// handshake (before any submit) instead of deferring the failure. Server and
+// worker must be upgraded together.
+const WorkerProtocolVersion = 2
 
 // EncoderCapabilities describes detailed supported profiles, pixel formats, and options for a specific encoder.
 type EncoderCapabilities struct {

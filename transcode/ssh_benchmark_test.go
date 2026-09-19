@@ -14,15 +14,15 @@ for arg in "$@"; do
         # Ensure remote translated path was supplied
         echo "$input" | grep -q "/Volumes/media/source.mkv" || exit 2
         echo "$input" | grep -q "bench-test-123" || exit 3
-        echo '{"protocol_version": 1, "id": "bench-test-123", "status": "queued"}'
+        echo '{"protocol_version": 2, "id": "bench-test-123", "status": "queued"}'
         exit 0
     fi
     if [ "$arg" = "benchmark_status" ]; then
-        echo '{"protocol_version": 1, "id": "bench-test-123", "status": "running", "source_path": "/Volumes/media/source.mkv", "progress": 50.0}'
+        echo '{"protocol_version": 2, "id": "bench-test-123", "status": "running", "source_path": "/Volumes/media/source.mkv", "progress": 50.0}'
         exit 0
     fi
     if [ "$arg" = "benchmark_cancel" ]; then
-        echo '{"protocol_version": 1, "id": "bench-test-123", "status": "cancelled"}'
+        echo '{"protocol_version": 2, "id": "bench-test-123", "status": "cancelled"}'
         exit 0
     fi
 done
