@@ -183,6 +183,81 @@ The built-in profiles use:
 
 Post-transcode validation checks duration, video codec, audio stream count/codecs/languages/channels, subtitle count and expected copy/conversion codecs, subtitle languages and `forced`/`default` dispositions, attachments, and chapters. A discrepancy requires rejection or an explicit user decision; the original is not deleted or overwritten.
 
+### Transcode I/O optimization (worker-local validation + shared source cache)
+
+Old data flow (per optimized `transcode_media`):
+
+```text
+NAS source --(benchmark seeks)--> benchmark samples/metrics
+NAS source --(full staging copy)--> full encode --> publish candidate to NAS
+NAS candidate --(full coordinator ffprobe validation)--> accept
+```
+
+New data flow:
+
+```text
+NAS source --(one local cache copy)--> shared source cache (<local_work_dir>/_source-cache)
+shared cache --(local reads)--> benchmark samples/metrics
+shared cache --(local copy to per-job staged input)--> full encode locally
+local candidate --(full structural/media validation locally, fail closed)--> publish once to NAS
+published NAS object --(lightweight stat/size/identity verification worker + coordinator)--> accept
+coordinator full stream/policy checks remain as defense-in-depth
+```
+
+Safety invariants (unchanged):
+
+- Full candidate validation runs worker-local BEFORE publish; a bad local
+  candidate fails the job and its local file is removed without ever publishing.
+- Post-publish verification is lightweight and independent (regular-file
+  existence + exact size match for filesystem destinations; hash-verified
+  exclusive publish for SMB-direct). Mismatches fail closed and stay resumable.
+- Original-preservation, no-clobber (`O_EXCL` / exclusive rename / hard-link,
+  never overwriting an existing destination), cancellation-wins,
+  crash/resume (EncodeComplete checkpoint never re-encodes), idempotency
+  (execution-spec digest + idempotency key), and promotion separation are
+  preserved.
+- `benchmark_transcode` stays non-destructive and never creates a permanent
+  `.navigatorr-candidates` entry. It may populate/read the shared cache but
+  only cleans its own `samples/` workspace and legacy per-job downloads, never
+  shared cache entries.
+
+Source cache identity and cleanup:
+
+- Key: `sha256(clean_source_path | size | mtime_nanos | mode)` with a JSON
+  sidecar (`source`, `size`, `mod_time_unix_nano`). Any size/mtime change is a
+  miss; stale content is never reused.
+- Location: `<local_work_dir>/_source-cache/<key><ext>` plus `<key>.meta.json`,
+  always on worker-local storage, never on NAS roots.
+- Concurrency: atomic temp + no-clobber publish; concurrent populators race
+  safely (one wins, losers revalidate the winner). Per-job staged inputs are
+  fulfilled by local cache-to-staged copies, never by sharing mutable files.
+- Bounds/cleanup: `source_cache_max_bytes` (default 20 GiB) and
+  `source_cache_ttl_hours` (default 72h). Sweeps are best-effort, never fail a
+  job, never delete temp/sidecar-less files, and skip recently-written entries
+  that may belong to active jobs. Per-job completion/cancel cleanup never
+  deletes cache paths.
+- `staging_policy` (`auto`/`never`/`always`) and SMB-direct/path-mapping
+  semantics are preserved. The cache is consulted only when the source would
+  otherwise require a NAS read (external path per policy, or SMB-direct
+  mapping). `disable_source_cache: true` restores legacy per-job staging
+  exactly.
+
+Worker config (`~/.config/navigatorr-transcode/config.yaml`):
+
+```yaml
+staging_policy: auto
+external_roots: ["/Volumes/media"]
+local_work_dir: "/tmp/navigatorr-work"
+# All three below are optional; shown with conservative defaults.
+disable_source_cache: false
+source_cache_max_bytes: 21474836480
+source_cache_ttl_hours: 72
+```
+
+Ansible: no configuration changes are required. Existing worker configs keep
+working; the new keys are optional with safe defaults. To opt out, set
+`disable_source_cache: true`.
+
 ## Benchmark-driven optimization (recipes v2)
 
 Profiles without `optimization` follow the legacy flow with no observable change. A profile with `optimization.enabled: true` (schema_version 2) instead probes a small set of encoder configurations over deterministic source samples, scores them objectively, and transcodes the full file only with the concrete winning parameters.

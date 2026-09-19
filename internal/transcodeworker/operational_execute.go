@@ -207,7 +207,16 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 		return nil
 	}
 
-	if err := validateEncodedCandidate(r.localCandidate); err != nil {
+	if err := w.validateEncodedCandidateFull(ctx, r.localCandidate, execPlan, streams, job.DurationSec, 0); err != nil {
+		// A bad local candidate must never be published. Remove only the
+		// worker-owned local candidate; the semantic source and the shared
+		// source cache are never touched. For local-only jobs the local
+		// candidate IS the candidate path, and the bad file is still removed
+		// because the job never completed (it is incomplete output, not a
+		// finalized destination).
+		if c := strings.TrimSpace(r.localCandidate); c != "" && !w.isCachePath(c) && c != job.Source {
+			_ = os.Remove(c)
+		}
 		return w.failJobTerminal(jobDir, jobFile, job, err)
 	}
 
@@ -238,6 +247,15 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 // and reuses a ready staged artifact without recopying. It persists each state
 // transition and honors cancellation. A staged file already present at a
 // pending/staging state is treated as already staged (idempotent recovery).
+//
+// Transcode I/O optimization: when the shared source cache is enabled and holds
+// a verified entry for the same immutable source identity, the per-job staged
+// input is fulfilled with a purely local cache->staged copy (no NAS read).
+// Otherwise the source is staged once from the NAS and the shared cache is
+// populated best-effort from the staged copy, so a benchmark that ran first (or
+// a later transcode of the same source) reuses it without a second full
+// transfer. Cache misses, disabled caches, and local sources fall back to the
+// legacy direct staging path exactly.
 func (w *Worker) ensureStaged(ctx context.Context, jobDir, jobFile string, job *JobRecord, r *resolvedOperational) (bool, error) {
 	switch r.staging {
 	case StagingStateNotRequired:
@@ -265,13 +283,39 @@ func (w *Worker) ensureStaged(ctx context.Context, jobDir, jobFile string, job *
 		if err := w.requireMediaBackend(job.Source); err != nil {
 			return false, err
 		}
-		if w.mediaStore != nil && w.mediaStore.Maps(job.Source) {
-			err = w.mediaStore.DownloadAtomic(ctx, job.Source, r.stagedInput)
-		} else {
-			err = StageInputAtomic(ctx, job.Source, r.stagedInput)
+		stagedFromCache := false
+		if w.sourceCacheEnabled() {
+			if fi, serr := w.statSourceForCache(ctx, job.Source); serr == nil {
+				if hit, ok := lookupSourceCache(w.sourceCacheDir(), filepath.Clean(job.Source), fi); ok {
+					if cerr := copyCacheToStaged(ctx, hit, r.stagedInput); cerr == nil {
+						stagedFromCache = true
+					} else if !IsDestinationExists(cerr) {
+						// Fall through to direct staging on any non-trivial
+						// cache-copy failure; a stale/corrupt cache entry is
+						// never trusted over a fresh NAS read.
+						stagedFromCache = false
+					} else {
+						stagedFromCache = true
+					}
+				}
+			}
 		}
-		if err != nil {
-			return false, err
+		if !stagedFromCache {
+			if w.mediaStore != nil && w.mediaStore.Maps(job.Source) {
+				err = w.mediaStore.DownloadAtomic(ctx, job.Source, r.stagedInput)
+			} else {
+				err = StageInputAtomic(ctx, job.Source, r.stagedInput)
+			}
+			if err != nil {
+				return false, err
+			}
+			// Best-effort: share this fresh NAS read with future jobs for the
+			// same immutable source. Failures never fail the current job.
+			if w.sourceCacheEnabled() {
+				if fi, serr := w.statSourceForCache(ctx, job.Source); serr == nil {
+					_, _ = populateSourceCacheFromLocal(ctx, w.sourceCacheDir(), filepath.Clean(job.Source), fi, r.stagedInput)
+				}
+			}
 		}
 	}
 
@@ -420,6 +464,22 @@ func (w *Worker) finalizeOperational(ctx context.Context, jobDir, jobFile string
 		return w.recordFinalizationFailure(jobDir, jobFile, job, ferr)
 	}
 
+	// Lightweight independent post-publish verification: the published object
+	// must be the expected candidate (regular file, size-identical to the
+	// accepted local candidate). This is stat-only and deliberately cheap after
+	// the network copy; the expensive full structural/media validation already
+	// ran locally before publish. Any mismatch fails closed and stays resumable
+	// without marking the job complete.
+	// Direct-SMB publication already performs its own verified publish
+	// (hash-verified exclusive upload inside mediaStore.Publish), so no
+	// additional filesystem stat applies to logical SMB destinations.
+	if !directSMB {
+		if verr := verifyPublishedCandidate(ctx, r.localCandidate, r.destination); verr != nil {
+			w.removeOwnPartialIfSafe(job, r)
+			return w.recordFinalizationFailure(jobDir, jobFile, job, verr)
+		}
+	}
+
 	cancelled, err = w.persistOperationalProgress(jobDir, jobFile, job, func(l *JobRecord) {
 		l.FinalizationState = string(FinalizationStateCompleted)
 	})
@@ -559,15 +619,16 @@ func (w *Worker) jobCancelled(jobDir, jobFile string) (bool, error) {
 // cleanupOperationalArtifacts removes only worker-owned local artifacts after a
 // fully successful completion: the staged input and a local candidate distinct
 // from both the semantic candidate and the intended destination. It never
-// touches the semantic source or the final destination.
+// touches the semantic source, the final destination, or shared source-cache
+// entries (which are owned by the cache, not by any single job).
 func (w *Worker) cleanupOperationalArtifacts(job *JobRecord, r *resolvedOperational) {
 	if r == nil || job == nil {
 		return
 	}
-	if s := strings.TrimSpace(r.stagedInput); s != "" && s != job.Source && s != job.Candidate && s != r.destination {
+	if s := strings.TrimSpace(r.stagedInput); s != "" && s != job.Source && s != job.Candidate && s != r.destination && !w.isCachePath(s) {
 		_ = os.Remove(s)
 	}
-	if c := strings.TrimSpace(r.localCandidate); c != "" && c != job.Source && c != job.Candidate && c != r.destination {
+	if c := strings.TrimSpace(r.localCandidate); c != "" && c != job.Source && c != job.Candidate && c != r.destination && !w.isCachePath(c) {
 		_ = os.Remove(c)
 	}
 }

@@ -41,6 +41,16 @@ type WorkerConfig struct {
 	ExternalRoots []string         `json:"external_roots" yaml:"external_roots"`
 	LocalWorkDir  string           `json:"local_work_dir" yaml:"local_work_dir"`
 	SMBDirect     smbdirect.Config `json:"smb_direct" yaml:"smb_direct"`
+
+	// Shared source-cache settings (transcode I/O optimization). The cache lets
+	// a benchmark and the subsequent full transcode for the SAME immutable
+	// source share one NAS read. Conservative defaults preserve existing
+	// behavior when unset: enabled, 20 GiB bound, 72h TTL. Setting
+	// DisableSourceCache restores legacy per-job staging/downloads exactly.
+	// None of these affect transcode.Plan or the execution-spec digest.
+	DisableSourceCache  bool  `json:"disable_source_cache" yaml:"disable_source_cache"`
+	SourceCacheMaxBytes int64 `json:"source_cache_max_bytes" yaml:"source_cache_max_bytes"`
+	SourceCacheTTLHours int   `json:"source_cache_ttl_hours" yaml:"source_cache_ttl_hours"`
 }
 
 // DefaultWorkerConfig returns sane defaults for an Apple Silicon Mac.
@@ -140,6 +150,12 @@ func (cfg *WorkerConfig) normalizeOperational() error {
 		cfg.LocalWorkDir = filepath.Join(filepath.Clean(cfg.StateDir), "_work")
 	} else {
 		cfg.LocalWorkDir = filepath.Clean(cfg.LocalWorkDir)
+	}
+	if cfg.SourceCacheMaxBytes < 0 {
+		return fmt.Errorf("source_cache_max_bytes must not be negative (fail closed)")
+	}
+	if cfg.SourceCacheTTLHours < 0 {
+		return fmt.Errorf("source_cache_ttl_hours must not be negative (fail closed)")
 	}
 	if err := cfg.SMBDirect.Normalize(cfg.AllowedRoots); err != nil {
 		return err
@@ -1920,7 +1936,7 @@ func (w *Worker) cleanupCancelledArtifacts(job *JobRecord) {
 
 	if fs := FinalizationState(strings.TrimSpace(job.FinalizationState)); fs != "" && fs != FinalizationStateNotRequired {
 		local := strings.TrimSpace(job.LocalCandidatePath)
-		if local != "" && local != source && local != destination {
+		if local != "" && local != source && local != destination && !w.isCachePath(local) {
 			_ = os.Remove(local)
 		}
 		partial := strings.TrimSpace(job.PartialPath)
