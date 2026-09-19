@@ -1204,8 +1204,9 @@ func TestTranscodeBatch_WaitingDecisionPropagationAndForwarding(t *testing.T) {
 	}
 }
 
-// 13. Safe cancel: does not falsely claim active remote jobs stopped
-func TestTranscodeBatch_SafeCancelDoesNotFalselyClaimRemoteJobsStopped(t *testing.T) {
+// 13. Batch cancel stops already-admitted remote jobs instead of merely
+// cancelling pending items and waiting for active encodes to finish.
+func TestTranscodeBatch_CancelStopsActiveRemoteJobs(t *testing.T) {
 	var jobStatus atomic.Value
 	jobStatus.Store(transcode.StatusRunning)
 
@@ -1220,9 +1221,13 @@ func TestTranscodeBatch_SafeCancelDoesNotFalselyClaimRemoteJobsStopped(t *testin
 				Status: jobStatus.Load().(string),
 			}, nil
 		},
+		cancelFunc: func(ctx context.Context, jobID string) error {
+			jobStatus.Store(transcode.StatusCancelled)
+			return nil
+		},
 	}
 
-	// maxParallel = 1 so item 101 runs and item 103 stays queued
+	// maxParallel = 1 so item 101 is admitted and item 103 stays queued.
 	engine, st, _, srv, _ := setupBatchTestEnv(t, mockExecutor, 1)
 	defer srv.Close()
 	defer st.Close()
@@ -1241,24 +1246,22 @@ func TestTranscodeBatch_SafeCancelDoesNotFalselyClaimRemoteJobsStopped(t *testin
 		t.Fatalf("expected waiting_external, got %s", res.Status)
 	}
 
-	// Now user requests cancellation
 	cancelledRes, err := engine.Resume(ctx, res.ID, "cancel", nil)
 	if err != nil {
 		t.Fatalf("cancel resume failed: %v", err)
 	}
-
-	// Because item 101 is still running remotely on the worker, the batch must NOT claim completed!
-	// It must wait for active jobs to finish and note that remote jobs are not stopped.
-	if cancelledRes.Status != StatusWaitingExternal {
-		t.Fatalf("expected safe cancel to remain waiting_external while remote job active, got %s", cancelledRes.Status)
+	if cancelledRes.Status != StatusCompleted {
+		t.Fatalf("expected batch cancellation to complete after stopping active remote job, got %s", cancelledRes.Status)
+	}
+	if atomic.LoadInt32(&mockExecutor.cancelCalls) != 1 {
+		t.Fatalf("expected exactly one remote cancel for admitted job, got %d", mockExecutor.cancelCalls)
 	}
 
 	note, _ := cancelledRes.Outputs["note"].(string)
-	if !strings.Contains(note, "Active remote transcode jobs are not stopped") {
-		t.Errorf("expected note to mention active remote transcode jobs are not stopped, got %q", note)
+	if !strings.Contains(note, "already-admitted remote transcode jobs") {
+		t.Errorf("expected note to confirm active remote jobs are stopped, got %q", note)
 	}
 
-	// Verify queued item 103 is cancelled
 	items, _ := st.ListTranscodeBatchItems(res.ID)
 	for _, it := range items {
 		if it.ItemKey == "epfile-103" {
@@ -1267,8 +1270,8 @@ func TestTranscodeBatch_SafeCancelDoesNotFalselyClaimRemoteJobsStopped(t *testin
 			}
 		}
 		if it.ItemKey == "epfile-101" {
-			if it.Status != "running" {
-				t.Errorf("expected epfile-101 to remain running on remote worker, got %s", it.Status)
+			if it.Status != "failed" || !strings.Contains(it.Error, "cancelled") {
+				t.Errorf("expected epfile-101 cancelled after remote worker stop, got status=%s err=%s", it.Status, it.Error)
 			}
 		}
 	}
