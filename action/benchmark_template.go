@@ -339,6 +339,16 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 				wp.VideoProfile = winner.VideoProfile
 				wp.PixelFormat = winner.PixelFormat
 				wp.ExpectedBitDepth = winner.ExpectedBitDepth
+				// The winner is authoritative for the encoder and preset it was
+				// benchmarked with; carry them into the full-encode plan so a
+				// libx265 winner is not silently re-encoded with the base plan's
+				// VideoToolbox encoder (and vice versa).
+				if codec := strings.TrimSpace(winner.VideoCodec); codec != "" {
+					wp.VideoCodec = codec
+				}
+				if preset := strings.TrimSpace(winner.Preset); preset != "" {
+					wp.Preset = preset
+				}
 				digest, err := transcode.DigestPlan(&wp)
 				if err != nil {
 					return StepResult{Status: StepFailed, Error: fmt.Sprintf("computing winning plan digest: %v", err)}, nil
@@ -359,6 +369,8 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 
 			outputs["winner"] = winner
 			outputs["winner_candidate_id"] = winner.CandidateID
+			outputs["winner_video_codec"] = winner.VideoCodec
+			outputs["winner_preset"] = winner.Preset
 			outputs["winner_quality"] = winner.Quality
 			outputs["winner_video_profile"] = winner.VideoProfile
 			outputs["winner_pixel_format"] = winner.PixelFormat
@@ -741,11 +753,15 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 
 	// The encoder and preset come from the resolved plan so profile=live-action-hevc
 	// benchmarks produce libx265 candidates rather than VideoToolbox candidates.
-	var planCodec, planPreset string
-	if plan := getPlan(ec.State["plan"]); plan != nil {
-		planCodec = plan.VideoCodec
-		planPreset = plan.Preset
+	// A missing or unreadable plan must fail closed: falling back to an empty
+	// codec would silently benchmark VideoToolbox candidates instead of the
+	// encoder the profile actually selected.
+	plan := getPlan(ec.State["plan"])
+	if plan == nil {
+		return nil, errors.New("resolved plan is missing or unreadable from state; refusing to default benchmark encoder to VideoToolbox (fail closed)")
 	}
+	planCodec := plan.VideoCodec
+	planPreset := plan.Preset
 
 	candidates, err := buildBenchmarkCandidates(bitDepth, planCodec, planPreset, opt.Search.QualityValues, opt.Search.MaxCandidates)
 	if err != nil {

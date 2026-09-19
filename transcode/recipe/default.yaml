@@ -186,6 +186,3 @@ profiles:
       search:
         max_candidates: 4
         quality_values: [20, 22, 24, 26]
-      size:
-        preferred_total_bitrate_kbps: {min: 3200, max: 4500}
-        soft_max_total_bitrate_kbps: 5500
