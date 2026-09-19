@@ -48,6 +48,17 @@ and `recovery_path` identifies it. Savings are final only after successful
 cleanup. Recovery paths are confined to write roots and symlink traversal is
 rejected.
 
+Recovery publication is itself restart-safe. Navigatorr persists the execution
+owner before writing `original.bak.partial` and persists a separate
+`recovery_copy_complete` checkpoint only after the copy has finished, synced,
+and closed. A partial still owned by the current execution is never hashed,
+unlinked, or restarted. If a later execution inherits the action after the old
+lease is gone, it first detaches the abandoned partial pathname before rebuilding
+it, so a lingering writer cannot modify the new partial being verified. Only a
+complete partial with the expected size and SHA-256 is renamed to
+`original.bak`; `recovery_verified=true` is persisted before ManualImport is
+allowed.
+
 ## Why import alone is insufficient
 
 Sonarr's
