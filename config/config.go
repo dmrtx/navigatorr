@@ -125,6 +125,7 @@ type TranscodeProfileConfig struct {
 type VideoProfileConfig struct {
 	Codec           string `yaml:"codec"`
 	Quality         int    `yaml:"quality"`
+	Preset          string `yaml:"preset,omitempty"`
 	Profile         string `yaml:"profile,omitempty"`
 	PixelFormat     string `yaml:"pixel_format,omitempty"`
 	PrioritizeSpeed *bool  `yaml:"prioritize_speed,omitempty"`
@@ -190,6 +191,7 @@ func profileToRecipe(name string, p TranscodeProfileConfig) recipe.Profile {
 		Video: recipe.VideoProfile{
 			Codec:           p.Video.Codec,
 			Quality:         p.Video.Quality,
+			Preset:          p.Video.Preset,
 			Profile:         p.Video.Profile,
 			PixelFormat:     p.Video.PixelFormat,
 			PrioritizeSpeed: p.Video.PrioritizeSpeed,
@@ -219,6 +221,7 @@ func recipeToProfile(p recipe.Profile) TranscodeProfileConfig {
 		Video: VideoProfileConfig{
 			Codec:           p.Video.Codec,
 			Quality:         p.Video.Quality,
+			Preset:          p.Video.Preset,
 			Profile:         p.Video.Profile,
 			PixelFormat:     p.Video.PixelFormat,
 			PrioritizeSpeed: p.Video.PrioritizeSpeed,

@@ -1,5 +1,5 @@
-schema_version: 1
-bundle_version: "2026.09.2"
+schema_version: 2
+bundle_version: "2026.09.3"
 containers:
   mkv:
     subtitle_copy:
@@ -154,3 +154,35 @@ profiles:
     subtitles: {mode: preserve, convert_incompatible: true}
     preserve: {metadata: true, chapters: true, attachments: true}
     resilience: *default_resilience
+  # Software (CPU) HEVC for live-action 1080p sources. Uses libx265 rate control:
+  # for libx265 `quality` is CRF (LOWER = HIGHER quality), unlike VideoToolbox
+  # -q:v. Preset `slow` favors bitrate efficiency for live-action without the
+  # pathological encode times of slower/veryslow. 8-bit main/yuv420p is kept for
+  # 8-bit H264 sources (no silent 8->10 conversion).
+  live-action-hevc:
+    container: mkv
+    video:
+      codec: libx265
+      quality: 24
+      preset: slow
+      profile: main
+      pixel_format: yuv420p
+    audio: {mode: copy}
+    subtitles: {mode: preserve, convert_incompatible: true}
+    preserve: {metadata: true, chapters: true, attachments: true}
+    resilience: *default_resilience
+    optimization:
+      enabled: true
+      sampling:
+        strategy: distributed
+        sample_count: 3
+        sample_seconds: 20
+        positions: [0.2, 0.5, 0.8]
+      quality:
+        preferred_metric: vmaf
+        vmaf:
+          target: 92
+          minimum: 88
+      search:
+        max_candidates: 4
+        quality_values: [20, 22, 24, 26]

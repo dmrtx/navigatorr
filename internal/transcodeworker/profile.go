@@ -22,7 +22,7 @@ type WorkerCapabilities struct {
 func Capabilities() WorkerCapabilities {
 	return WorkerCapabilities{
 		Containers:           []string{"mkv"},
-		VideoCodecs:          []string{"hevc_videotoolbox"},
+		VideoCodecs:          []string{"hevc_videotoolbox", "libx265"},
 		AudioOperations:      []string{"copy"},
 		SubtitleOperations:   []string{"copy", "transcode"},
 		SubtitleEncodeCodecs: []string{"subrip"},
@@ -39,10 +39,10 @@ func ValidatePlan(p *transcode.Plan) error {
 	if normalizeContainer(p.Container) != "mkv" {
 		return fmt.Errorf("unsupported container %q (only mkv is allowed; fail closed)", p.Container)
 	}
-	if norm(p.VideoCodec) != "hevc_videotoolbox" {
+	if norm(p.VideoCodec) != "hevc_videotoolbox" && norm(p.VideoCodec) != "libx265" {
 		return fmt.Errorf("unsupported video codec %q (fail closed)", p.VideoCodec)
 	}
-	if p.Quality < 1 || p.Quality > 100 {
+	if norm(p.VideoCodec) == "hevc_videotoolbox" && (p.Quality < 1 || p.Quality > 100) {
 		return fmt.Errorf("invalid quality level %d (must be 1-100; fail closed)", p.Quality)
 	}
 	if _, err := BuildVideoEncoderArgs(p); err != nil {

@@ -11,7 +11,54 @@ import (
 	"github.com/jakenesler/navigatorr/transcode"
 )
 
-const videoToolboxEncoder = "hevc_videotoolbox"
+const (
+	videoToolboxEncoder = "hevc_videotoolbox"
+	libX265Encoder      = "libx265"
+)
+
+// ProbeAvailableEncoders runs ffmpeg -encoders and parses encoder availability.
+func ProbeAvailableEncoders(ctx context.Context, ffmpegPath string) (map[string]bool, error) {
+	cmd := exec.CommandContext(ctx, ffmpegPath, "-hide_banner", "-encoders")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("probing available encoders failed: %w (%s)", err, boundedErrorMessage(err, out, 256))
+	}
+	return ParseAvailableEncoders(string(out)), nil
+}
+
+// ValidateEncoderCapabilities validates a resolved plan against the actual
+// FFmpeg binary the worker will execute. It fails closed for any codec that is
+// not proven available, dispatching on the plan's video codec.
+func ValidateEncoderCapabilities(ctx context.Context, ffmpegPath string, plan *transcode.Plan) error {
+	if plan == nil {
+		return fmt.Errorf("encoder_capability_unsupported: transcode plan is nil")
+	}
+	switch norm(plan.VideoCodec) {
+	case videoToolboxEncoder:
+		caps, err := ProbeVideoToolboxCapabilities(ctx, ffmpegPath)
+		if err != nil {
+			return err
+		}
+		return ValidateVideoToolboxCapabilities(plan, caps)
+	case libX265Encoder:
+		available, err := ProbeAvailableEncoders(ctx, ffmpegPath)
+		if err != nil {
+			return fmt.Errorf("encoder_capability_unsupported: %w", err)
+		}
+		if !available[libX265Encoder] {
+			return fmt.Errorf("encoder_capability_unsupported: encoder %s is unavailable in the configured FFmpeg (install an FFmpeg build with libx265)", libX265Encoder)
+		}
+		if preset := norm(plan.Preset); preset != "" && !transcode.IsValidLibX265Preset(preset) {
+			return fmt.Errorf("encoder_capability_unsupported: unsupported libx265 preset %q", plan.Preset)
+		}
+		return nil
+	default:
+		return fmt.Errorf("encoder_capability_unsupported: unsupported video codec %q", plan.VideoCodec)
+	}
+}
 
 type VideoToolboxCapabilities = transcode.VideoToolboxCapabilities
 
