@@ -209,7 +209,7 @@ func TestOperationalEncodePersistsPhaseAndCompletionTimestamps(t *testing.T) {
 	job := &JobRecord{ID: "phase-times", Status: "queued", Source: src, Candidate: filepath.Join(dir, "candidate.mkv"), Plan: pr6b2Plan(t), ExecutionSpecDigest: pr5Digest, CreatedAt: time.Now().Add(-time.Minute)}
 	pr6b2Seed(t, w.cfg.StateDir, job)
 	w.SetProbeSource(func(context.Context, string) ([]SourceStream, float64, error) {
-		return []SourceStream{{Index: 0, TypeIndex: 0, Kind: "video", Codec: "h264"}}, 120, nil
+		return []SourceStream{{Index: 0, TypeIndex: 0, Kind: "video", Codec: "hevc"}}, 120, nil
 	})
 	w.SetRunFFmpeg(func(_ context.Context, _ *ExecutionPlan, j *JobRecord, _, out, _, _ string) error {
 		got := pr6b1LoadJob(t, w.cfg.StateDir, j.ID)

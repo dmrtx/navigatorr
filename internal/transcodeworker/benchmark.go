@@ -35,6 +35,7 @@ type BenchmarkRecord struct {
 	ID                        string                                `json:"id"`
 	Status                    string                                `json:"status"` // queued, running, completed, failed, cancelled
 	Source                    string                                `json:"source"`
+	SourceSHA256              string                                `json:"source_sha256,omitempty"`
 	EffectiveSource           string                                `json:"effective_source,omitempty"`
 	SourceDuration            float64                               `json:"source_duration,omitempty"`
 	Metric                    string                                `json:"metric"`
@@ -421,6 +422,7 @@ func (w *Worker) BenchmarkSubmit(ctx context.Context, req transcode.BenchmarkReq
 		ID:                        req.ID,
 		Status:                    "queued",
 		Source:                    cleanSource,
+		SourceSHA256:              req.SourceSHA256,
 		EffectiveSource:           cleanSource,
 		SourceDuration:            req.SourceDuration,
 		Metric:                    strings.ToLower(strings.TrimSpace(req.Metric)),
@@ -847,18 +849,55 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) 
 	// Phase 2: Execute benchmark runner outside lock so cancellation/status can acquire lock.
 	// Direct-SMB sources are first materialized on local SSD; the durable Source
 	// remains the semantic NAS path used by status and idempotency.
+	// Transcode I/O optimization: external/SMB sources are served from the
+	// shared source cache when enabled, so a benchmark and the subsequent full
+	// transcode for the same immutable source share a single NAS read. The
+	// cache entry is shared and is never removed by per-job cleanup; only the
+	// per-job samples workspace and any legacy per-job download are cleaned.
 	var runErr error
+	semanticSource := record.Source
 	effectiveSource := strings.TrimSpace(record.EffectiveSource)
 	if effectiveSource == "" {
-		effectiveSource = record.Source
+		effectiveSource = semanticSource
 	}
-	if effectiveSource != record.Source {
+	// The benchmark never reads the evictable shared cache filename directly:
+	// it acquires a JOB-LOCAL immutable hard link (safe local-copy fallback) and
+	// runs against that, so a concurrent cache sweep can unlink the shared name
+	// without breaking an in-flight benchmark. The lease is job-owned and
+	// removed on completion (or reused idempotently on resume).
+	leasePath := filepath.Join(jobDir, "source"+safeFileExtension(semanticSource))
+	leaseOwned := false
+	defer func() {
+		if leaseOwned {
+			_ = os.Remove(leasePath)
+		}
+	}()
+	if w.sourceCacheEnabled() && w.shouldCacheSourceForBenchmark(semanticSource) {
 		_ = w.UpdateBenchmarkProgress(jobID, runToken, 0, "reading_source")
-		if w.mediaStore == nil || !w.mediaStore.Maps(record.Source) {
-			runErr = fmt.Errorf("benchmark requires configured SMB direct media store for %s", record.Source)
+		cached, cerr := w.ensureSourceCached(ctx, filepath.Clean(semanticSource), record.SourceSHA256)
+		if cerr != nil {
+			runErr = cerr
+		} else if lease, lerr := w.acquireCachedSourceLease(ctx, cached, leasePath); lerr != nil {
+			runErr = lerr
 		} else {
-			runErr = w.mediaStore.DownloadAtomic(ctx, record.Source, effectiveSource)
-			defer os.Remove(effectiveSource)
+			effectiveSource = lease
+			leaseOwned = true
+			// Drop any legacy per-job download path that Submit may have
+			// reserved; it is never used when the shared cache serves the
+			// source. Removal is best-effort and never touches the cache.
+			if legacy := strings.TrimSpace(record.EffectiveSource); legacy != "" && legacy != semanticSource && legacy != lease && !w.isCachePath(legacy) {
+				_ = os.Remove(legacy)
+			}
+		}
+	} else if effectiveSource != semanticSource {
+		_ = w.UpdateBenchmarkProgress(jobID, runToken, 0, "reading_source")
+		if w.mediaStore == nil || !w.mediaStore.Maps(semanticSource) {
+			runErr = fmt.Errorf("benchmark requires configured SMB direct media store for %s", semanticSource)
+		} else {
+			runErr = w.mediaStore.DownloadAtomic(ctx, semanticSource, effectiveSource)
+			if !w.isCachePath(effectiveSource) {
+				defer os.Remove(effectiveSource)
+			}
 		}
 	}
 	if runErr == nil {

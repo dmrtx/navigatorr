@@ -44,7 +44,7 @@ func schedulerPublicationFailure(t *testing.T, failure error, failures int32) (*
 	w.mediaStore = store
 	w.SetAliveFunc(func(job *JobRecord) bool { return job.PID != 0 })
 	w.SetProbeSource(func(context.Context, string) ([]SourceStream, float64, error) {
-		return []SourceStream{{Index: 0, TypeIndex: 0, Kind: "video", Codec: "h264"}}, 60, nil
+		return []SourceStream{{Index: 0, TypeIndex: 0, Kind: "video", Codec: "hevc"}}, 60, nil
 	})
 	encodes := &atomic.Int32{}
 	w.SetRunFFmpeg(func(_ context.Context, _ *ExecutionPlan, _ *JobRecord, _, output, _, _ string) error {

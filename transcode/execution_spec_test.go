@@ -109,3 +109,67 @@ func TestDigestTranscodeExecutionSpec_PlanDigestInvariant(t *testing.T) {
 		t.Errorf("digest must carry sha256: prefix, got %q", dValid)
 	}
 }
+
+// TestDigestTranscodeExecutionSpec_SourceSHA256Identity proves that source
+// content identity is part of the canonical full-transcode execution-spec
+// digest when available, so a changed source at the same path cannot reuse an
+// existing job, while empty (legacy) SHA-256 values are byte-for-byte
+// unchanged.
+func TestDigestTranscodeExecutionSpec_SourceSHA256Identity(t *testing.T) {
+	base := canonicalTestPlan(t)
+	const src = "/Volumes/media/a.mkv"
+	const cand = "/Volumes/media/b.mkv"
+	shaA := strings.Repeat("a", 64)
+	shaB := strings.Repeat("b", 64)
+
+	dA, err := DigestTranscodeExecutionSpecWithSourceSHA(src, cand, "hevc-vt", shaA, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dA2, err := DigestTranscodeExecutionSpecWithSourceSHA(src, cand, "hevc-vt", shaA, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dA != dA2 {
+		t.Fatalf("same source SHA-256 must produce the same digest: %s != %s", dA, dA2)
+	}
+
+	dB, err := DigestTranscodeExecutionSpecWithSourceSHA(src, cand, "hevc-vt", shaB, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dA == dB {
+		t.Fatal("different source SHA-256 must alter the execution-spec digest")
+	}
+
+	// Legacy equivalence: an absent SHA-256 hashes exactly like the legacy
+	// no-identity function, preserving historical persisted digests.
+	legacy, err := DigestTranscodeExecutionSpec(src, cand, "hevc-vt", base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyEmpty, err := DigestTranscodeExecutionSpecWithSourceSHA(src, cand, "hevc-vt", "", base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy != legacyEmpty {
+		t.Fatalf("empty source SHA-256 must be byte-for-byte legacy-equivalent: %s != %s", legacy, legacyEmpty)
+	}
+	if dA == legacy {
+		t.Fatal("a present source SHA-256 must differ from the legacy digest")
+	}
+
+	// Prefix/case normalization.
+	dPrefixed, err := DigestTranscodeExecutionSpecWithSourceSHA(src, cand, "hevc-vt", "SHA256:"+strings.ToUpper(shaA), base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dPrefixed != dA {
+		t.Fatalf("sha256: prefix / uppercase must normalize to the same digest: %s != %s", dPrefixed, dA)
+	}
+
+	// Malformed digests fail closed rather than being silently ignored.
+	if _, err := DigestTranscodeExecutionSpecWithSourceSHA(src, cand, "hevc-vt", "not-a-digest", base); err == nil {
+		t.Fatal("malformed source SHA-256 must fail closed")
+	}
+}

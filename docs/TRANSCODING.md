@@ -181,7 +181,114 @@ The built-in profiles use:
 
 `transcode_media` is candidate-only. `replace_original: true` is rejected. The original is SHA-256 hashed before work begins and re-hashed at acceptance.
 
-Post-transcode validation checks duration, video codec, audio stream count/codecs/languages/channels, subtitle count and expected copy/conversion codecs, subtitle languages and `forced`/`default` dispositions, attachments, and chapters. A discrepancy requires rejection or an explicit user decision; the original is not deleted or overwritten.
+All structural/media/policy validation (duration, video codec, expected bit depth and pixel format, audio stream count/codecs/languages/channels, subtitle count and expected copy/conversion codecs, subtitle languages and `forced`/`default` dispositions, attachments, and chapters) runs worker-local on the candidate BEFORE it is published. A bad candidate fails the job closed and is never published; the original is never deleted or overwritten. Promotion of an already-published candidate intentionally performs a full re-inspection.
+
+### Transcode I/O optimization (worker-local validation + shared source cache)
+
+Old data flow (per optimized `transcode_media`):
+
+```text
+NAS source --(benchmark seeks)--> benchmark samples/metrics
+NAS source --(full staging copy)--> full encode --> publish candidate to NAS
+NAS candidate --(full coordinator ffprobe validation)--> accept
+```
+
+New data flow:
+
+```text
+NAS source --(one local cache copy, local bytes hashed vs expected SHA-256)--> shared source cache
+shared cache --(job-local hard link / lease)--> benchmark samples/metrics
+shared cache --(job-local hard link / lease)--> full encode locally
+local candidate --(full structural/media/policy validation locally, fail closed)--> publish once to NAS
+published object --(lightweight identity: regular/non-empty + exact size; SMB uses its verified publish)--> accept
+```
+
+Coordinator post-publish validation is deliberately lightweight and performs **no** ffprobe/mediainspect and **no** NAS candidate read. The worker computes the accepted candidate's size and SHA-256 during local validation and attests them in `job.json`/status; the coordinator compares the published object's size against that attestation (stat only), enforces the cheap size guardrail, and relies on the worker's hash-verified exclusive publish for SMB-direct logical paths (which are never `stat`ed). Full promotion-time inspection of a published candidate still uses the detailed validator.
+
+Safety invariants (unchanged):
+
+- Full candidate validation runs worker-local BEFORE publish; a bad local
+  candidate fails the job and its local file is removed without ever publishing.
+- Post-publish verification is lightweight and independent: regular/non-empty
+  existence and exact size match for filesystem destinations, plus the
+  worker's own stat/size check; SMB-direct uses its existing hash-verified
+  exclusive publish. Mismatches fail closed and stay resumable.
+- Original-preservation, no-clobber (`O_EXCL` / exclusive rename / hard-link,
+  never overwriting an existing destination), cancellation-wins,
+  crash/resume (EncodeComplete checkpoint never re-encodes), idempotency
+  (execution-spec digest + idempotency key), and promotion separation are
+  preserved.
+- `benchmark_transcode` stays non-destructive and never creates a permanent
+  `.navigatorr-candidates` entry. It may populate/read the shared cache but
+  only cleans its own `samples/` workspace, its job-local lease, and legacy
+  per-job downloads, never shared cache entries.
+
+Source cache identity and cleanup:
+
+- Key: `sha256(clean_source_path | size | mtime_nanos | mode | expected_sha256)`
+  with a JSON sidecar (`source`, `size`, `mod_time_unix_nano`, `sha256`). The
+  coordinator preflight SHA-256 of the source is forwarded to both the
+  benchmark and the full transcode. A size, mtime, or **content** change is a
+  miss, so a same path/size/mtime source with changed content can never be
+  reused. Before an entry is published the worker hashes only the LOCAL
+  copied/downloaded bytes and compares them to the expected digest; a mismatch
+  is never published. No additional NAS read/hash is ever performed.
+- Location: `<local_work_dir>/_source-cache/<key><ext>` plus `<key>.meta.json`,
+  always on worker-local storage, never on NAS roots. Sweeps remove the correct
+  `<key>.meta.json` sidecar (not `<key><ext>.meta.json`).
+- Concurrency: atomic temp + no-clobber publish; concurrent populators race
+  safely (one wins, losers revalidate the winner).
+- Active-job safety: an in-flight benchmark or full transcode never reads the
+  evictable shared filename directly. It acquires a JOB-LOCAL immutable hard
+  link (safe atomic local-copy fallback if linking is unsupported) and runs
+  against that. Eviction may unlink the shared name without breaking an active
+  job; per-job cleanup removes only its own link/copy. This yields zero second
+  NAS transfer for a benchmark followed by a full transcode of the same source.
+- Bounds/cleanup: `source_cache_max_bytes` (default 20 GiB) and
+  `source_cache_ttl_hours` (default 72h). Sweeps are best-effort, never fail a
+  job, and skip recently-written entries. Per-job completion/cancel cleanup
+  never deletes shared cache paths.
+- `staging_policy` (`auto`/`never`/`always`) and SMB-direct/path-mapping
+  semantics are preserved. The cache is consulted only when the source would
+  otherwise require a NAS read (external path per policy, or SMB-direct
+  mapping). Local sources are read in place and never cached.
+  `disable_source_cache: true` restores legacy per-job staging exactly.
+
+Source content identity is also part of **strong full-transcode idempotency**:
+the canonical execution-spec digest includes the normalized preflight SHA-256
+when available (the field is omitted when absent, so historical digests are
+byte-for-byte unchanged). The HTTP and SSH executors forward `source_sha256`
+and compute the same hash-aware digest the worker recomputes from the persisted
+record, so a changed source at the same path with the same candidate/profile/
+plan is a deterministic idempotency conflict rather than a silent reuse.
+
+> **Protocol v2 — server and worker must be upgraded together.** Adding
+> `source_sha256` to the normal transcode submit and benchmark payloads is an
+> incompatible wire-schema change: worker HTTP decoders use
+> `DisallowUnknownFields`, so a v1 worker rejects the new payloads. The worker
+> protocol version is therefore bumped to **2**, and a new coordinator rejects a
+> stale v1 worker during the capability handshake (before any submit) instead of
+> deferring the failure. There is no compatibility fallback and `source_sha256`
+> is never silently omitted. Upgrade the Navigatorr server and every transcode
+> worker in the same rollout.
+
+Worker config (`~/.config/navigatorr-transcode/config.yaml`):
+
+```yaml
+staging_policy: auto
+external_roots: ["/Volumes/media"]
+local_work_dir: "/tmp/navigatorr-work"
+# All three below are optional; shown with conservative defaults.
+disable_source_cache: false
+source_cache_max_bytes: 21474836480
+source_cache_ttl_hours: 72
+```
+
+Ansible: the worker binary does not require config changes (the new keys are
+optional with safe defaults), but the cache settings are explicitly managed by
+[dmrtx/mrtx-ansible PR #28](https://github.com/dmrtx/mrtx-ansible/pull/28)
+rather than left to defaults. To opt out there, set
+`disable_source_cache: true`.
 
 ## Benchmark-driven optimization (recipes v2)
 

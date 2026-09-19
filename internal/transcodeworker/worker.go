@@ -41,6 +41,16 @@ type WorkerConfig struct {
 	ExternalRoots []string         `json:"external_roots" yaml:"external_roots"`
 	LocalWorkDir  string           `json:"local_work_dir" yaml:"local_work_dir"`
 	SMBDirect     smbdirect.Config `json:"smb_direct" yaml:"smb_direct"`
+
+	// Shared source-cache settings (transcode I/O optimization). The cache lets
+	// a benchmark and the subsequent full transcode for the SAME immutable
+	// source share one NAS read. Conservative defaults preserve existing
+	// behavior when unset: enabled, 20 GiB bound, 72h TTL. Setting
+	// DisableSourceCache restores legacy per-job staging/downloads exactly.
+	// None of these affect transcode.Plan or the execution-spec digest.
+	DisableSourceCache  bool  `json:"disable_source_cache" yaml:"disable_source_cache"`
+	SourceCacheMaxBytes int64 `json:"source_cache_max_bytes" yaml:"source_cache_max_bytes"`
+	SourceCacheTTLHours int   `json:"source_cache_ttl_hours" yaml:"source_cache_ttl_hours"`
 }
 
 // DefaultWorkerConfig returns sane defaults for an Apple Silicon Mac.
@@ -141,6 +151,12 @@ func (cfg *WorkerConfig) normalizeOperational() error {
 	} else {
 		cfg.LocalWorkDir = filepath.Clean(cfg.LocalWorkDir)
 	}
+	if cfg.SourceCacheMaxBytes < 0 {
+		return fmt.Errorf("source_cache_max_bytes must not be negative (fail closed)")
+	}
+	if cfg.SourceCacheTTLHours < 0 {
+		return fmt.Errorf("source_cache_ttl_hours must not be negative (fail closed)")
+	}
 	if err := cfg.SMBDirect.Normalize(cfg.AllowedRoots); err != nil {
 		return err
 	}
@@ -191,6 +207,7 @@ type Worker struct {
 	// execution-spec digest.
 	runFFmpeg             func(ctx context.Context, execPlan *ExecutionPlan, job *JobRecord, inputPath, outputPath, progressPath, logPath string) error
 	probeSource           func(ctx context.Context, path string) ([]SourceStream, float64, error)
+	probeDetails          func(ctx context.Context, path string) (SourceProbe, error)
 	finalizeOutput        func(ctx context.Context, localCandidate, destination, jobID string) error
 	afterEncodeCheckpoint func(jobDir string, job *JobRecord)
 	// leaseManager is optional: when set, external staging sources and external
@@ -218,6 +235,13 @@ func (w *Worker) SetRunFFmpeg(fn func(ctx context.Context, execPlan *ExecutionPl
 // ProbeSourceStreams.
 func (w *Worker) SetProbeSource(fn func(ctx context.Context, path string) ([]SourceStream, float64, error)) {
 	w.probeSource = fn
+}
+
+// SetProbeDetails injects a custom detailed probe (tests). Nil falls back to
+// the injected stream probe (with unknown chapter count) or the production
+// ProbeSourceDetails.
+func (w *Worker) SetProbeDetails(fn func(ctx context.Context, path string) (SourceProbe, error)) {
+	w.probeDetails = fn
 }
 
 // SetFinalizeOutput injects a custom output finalizer (tests). Nil restores
@@ -428,6 +452,10 @@ type SubmitRequest struct {
 	Plan                *transcode.Plan `json:"plan,omitempty"`
 	IdempotencyKey      string          `json:"idempotency_key,omitempty"`
 	ExecutionSpecDigest string          `json:"execution_spec_digest,omitempty"`
+	// SourceSHA256 is the coordinator preflight digest of the original source
+	// bytes. Optional for legacy callers; carried into the shared source cache
+	// identity so unchanged-content reuse is provable.
+	SourceSHA256 string `json:"source_sha256,omitempty"`
 }
 
 // SubmitResponse defines the JSON output for the submit command.
@@ -581,6 +609,14 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 	if strings.TrimSpace(req.CandidatePath) == "" {
 		return SubmitResponse{ID: trimmedID, Error: "missing candidate_path"}, errors.New("missing candidate_path")
 	}
+	// Optional content identity. A malformed digest fails closed rather than
+	// being silently ignored, so callers cannot accidentally disable the
+	// content check by sending garbage.
+	sourceSHA, err := transcode.NormalizeSourceSHA256(req.SourceSHA256)
+	if err != nil {
+		return SubmitResponse{ID: trimmedID, Error: err.Error()}, err
+	}
+	req.SourceSHA256 = sourceSHA
 
 	cleanSource := filepath.Clean(req.SourcePath)
 	cleanCandidate := filepath.Clean(req.CandidatePath)
@@ -637,9 +673,10 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("invalid transcode profile or plan: %v", err)}, err
 	}
 
-	// Canonical execution-spec digest over the immutable resolved request.
+	// Canonical execution-spec digest over the immutable resolved request,
+	// including the source content identity when the coordinator supplied it.
 	// Never trust caller-supplied digest text: recompute and verify.
-	canonicalDigest, err := transcode.DigestTranscodeExecutionSpec(cleanSource, cleanCandidate, profile, plan)
+	canonicalDigest, err := transcode.DigestTranscodeExecutionSpecWithSourceSHA(cleanSource, cleanCandidate, profile, sourceSHA, plan)
 	if err != nil {
 		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("computing execution spec digest: %v", err)}, err
 	}
@@ -959,6 +996,7 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 		Plan:                plan,
 		IdempotencyKey:      effKey,
 		ExecutionSpecDigest: canonicalDigest,
+		SourceSHA256:        sourceSHA,
 		CreatedAt:           time.Now().UTC(),
 		Attempt:             1,
 		RetryCount:          0,
@@ -1042,12 +1080,13 @@ func killTranscodeProcess(pid int) {
 
 // persistedExecutionDigest recomputes the canonical digest for a persisted
 // record's OWN spec through the SAME worker resolution path Submit uses
-// (ResolveWorkerPlan over the record's Profile/Plan). Legacy profile-only
-// records (nil Plan) resolve to the same default plan a fresh identical
-// submit resolves to, so unchanged resubmits backfill/reuse instead of
-// falsely conflicting. Changed candidate/profile/resolved-plan still
-// conflicts. Unresolvable persisted specs are definitive errors (fail
-// closed); the new request's digest is never adopted blindly.
+// (ResolveWorkerPlan over the record's Profile/Plan), including the record's
+// persisted source SHA-256 so durable idempotency comparisons stay symmetric.
+// Legacy profile-only records (nil Plan) resolve to the same default plan a
+// fresh identical submit resolves to, so unchanged resubmits backfill/reuse
+// instead of falsely conflicting. Changed candidate/profile/resolved-plan/
+// source-content still conflicts. Unresolvable persisted specs are definitive
+// errors (fail closed); the new request's digest is never adopted blindly.
 //
 // It returns both the canonical digest and the resolved effective plan
 // (carrying its canonical PlanDigest) without mutating the record, so
@@ -1060,7 +1099,7 @@ func (w *Worker) persistedExecutionDigest(rec *JobRecord) (string, *transcode.Pl
 	if err != nil {
 		return "", nil, fmt.Errorf("resolving persisted execution spec for job %q: %w", rec.ID, err)
 	}
-	d, err := transcode.DigestTranscodeExecutionSpec(rec.Source, rec.Candidate, rec.Profile, resolved)
+	d, err := transcode.DigestTranscodeExecutionSpecWithSourceSHA(rec.Source, rec.Candidate, rec.Profile, rec.SourceSHA256, resolved)
 	if err != nil {
 		return "", nil, err
 	}
@@ -1693,6 +1732,9 @@ type JobStatusResponse struct {
 	AppliedFallbacks      []string                     `json:"applied_fallbacks,omitempty"`
 	FailureClassification string                       `json:"failure_classification,omitempty"`
 	Conversions           []transcode.ConversionRecord `json:"conversions,omitempty"`
+	// Accepted candidate identity (cheap post-publish verification metadata).
+	CandidateSizeBytes int64  `json:"candidate_size_bytes,omitempty"`
+	CandidateSHA256    string `json:"candidate_sha256,omitempty"`
 
 	// Operational storage observability (Phase 6B1). Additive: never changes
 	// the meaning of existing fields/statuses.
@@ -1780,6 +1822,8 @@ func (w *Worker) Status(ctx context.Context, jobID string) (JobStatusResponse, e
 		AppliedFallbacks:      job.AppliedFallbacks,
 		FailureClassification: job.FailureClassification,
 		Conversions:           job.Conversions,
+		CandidateSizeBytes:    job.CandidateSizeBytes,
+		CandidateSHA256:       job.CandidateSHA256,
 
 		StagingPolicy:       job.StagingPolicy,
 		StagingState:        job.StagingState,
@@ -1920,7 +1964,7 @@ func (w *Worker) cleanupCancelledArtifacts(job *JobRecord) {
 
 	if fs := FinalizationState(strings.TrimSpace(job.FinalizationState)); fs != "" && fs != FinalizationStateNotRequired {
 		local := strings.TrimSpace(job.LocalCandidatePath)
-		if local != "" && local != source && local != destination {
+		if local != "" && local != source && local != destination && !w.isCachePath(local) {
 			_ = os.Remove(local)
 		}
 		partial := strings.TrimSpace(job.PartialPath)

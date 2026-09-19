@@ -9,6 +9,18 @@ import (
 
 func (e *Engine) observeTranscodeStatus(ec *ExecutionContext, st transcode.JobStatus) {
 	mirrorTranscodeWorkerMetadata(ec, st)
+	// Cheap independent identity metadata for lightweight post-publish
+	// verification: the accepted local candidate's size and content digest,
+	// attested by the worker before publish.
+	if st.CandidateSizeBytes > 0 {
+		ec.State["candidate_size_bytes"] = st.CandidateSizeBytes
+	}
+	if st.CandidateSHA256 != "" {
+		ec.State["candidate_sha256"] = st.CandidateSHA256
+	}
+	if st.StorageBackend != "" {
+		ec.State["storage_backend"] = st.StorageBackend
+	}
 	if st.FailureClassification == "" {
 		delete(ec.State, "failure_classification")
 		delete(ec.Outputs, "failure_classification")

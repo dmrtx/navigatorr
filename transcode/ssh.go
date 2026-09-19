@@ -249,7 +249,7 @@ func (e *SSHExecutor) Submit(ctx context.Context, req Request) (Job, error) {
 	if strings.TrimSpace(req.ExecutionSpecDigest) != "" {
 		specDigest = strings.TrimSpace(req.ExecutionSpecDigest)
 	} else if req.Plan != nil {
-		if d, derr := DigestTranscodeExecutionSpec(remoteSource, remoteCandidate, profile, req.Plan); derr == nil {
+		if d, derr := DigestTranscodeExecutionSpecWithSourceSHA(remoteSource, remoteCandidate, profile, req.SourceSHA256, req.Plan); derr == nil {
 			specDigest = d
 		}
 	}
@@ -263,6 +263,9 @@ func (e *SSHExecutor) Submit(ctx context.Context, req Request) (Job, error) {
 	}
 	if specDigest != "" {
 		payload["execution_spec_digest"] = specDigest
+	}
+	if strings.TrimSpace(req.SourceSHA256) != "" {
+		payload["source_sha256"] = req.SourceSHA256
 	}
 	if req.Plan != nil {
 		payload["plan"] = req.Plan
