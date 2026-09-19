@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/recipe"
 )
@@ -93,5 +94,41 @@ func TestBuildBenchmarkAdaptiveDisabledForLibX265(t *testing.T) {
 	// VideoToolbox keeps adaptive behavior unchanged.
 	if cfg := buildBenchmarkAdaptiveConfig(srch, transcode.VideoCodecHEVCVideoToolbox); cfg == nil || cfg.Mode != "adaptive" {
 		t.Fatalf("expected adaptive config preserved for videotoolbox, got %+v", cfg)
+	}
+}
+
+// TestBuildBenchmarkRequestFailsClosedWithoutResolvedPlan proves that a missing
+// or unreadable resolved plan cannot silently degrade the benchmark to
+// VideoToolbox candidates. The encoder must come from the plan (fail closed).
+func TestBuildBenchmarkRequestFailsClosedWithoutResolvedPlan(t *testing.T) {
+	rep := &mediainspect.DetailedReport{
+		DurationSec: 100,
+		Video:       []mediainspect.DetailedStream{{BitDepth: 8, BitRate: 5000000}},
+	}
+	opt := &recipe.OptimizationPolicy{
+		Enabled:  true,
+		Sampling: &recipe.SamplingPolicy{SampleSeconds: 5, SampleCount: 1, Positions: []float64{0.5}},
+		Search:   &recipe.SearchPolicy{MaxCandidates: 4, QualityValues: []int{24}},
+		Quality:  &recipe.QualityPolicy{PreferredMetric: "vmaf"},
+	}
+
+	cases := []struct {
+		name  string
+		state map[string]any
+	}{
+		{name: "missing plan", state: map[string]any{}},
+		{name: "unreadable plan", state: map[string]any{"plan": make(chan int)}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ec := &ExecutionContext{InstanceID: "bench-test", State: tc.state}
+			req, err := buildBenchmarkRequest(ec, "/media/source.mkv", rep, opt, transcode.WorkerCapabilities{})
+			if err == nil {
+				t.Fatalf("expected fail-closed error, got request %+v", req)
+			}
+			if !strings.Contains(err.Error(), "resolved plan is missing or unreadable") {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
 	}
 }

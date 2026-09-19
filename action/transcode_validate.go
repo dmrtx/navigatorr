@@ -193,7 +193,7 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 
 func expectedVideoCodec(codec string) string {
 	switch normCodec(codec) {
-	case "hevc_videotoolbox":
+	case "hevc_videotoolbox", "libx265":
 		return "hevc"
 	default:
 		return normCodec(codec)

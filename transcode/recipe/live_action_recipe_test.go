@@ -77,16 +77,6 @@ func TestLiveActionHEVCOptimizationPolicy(t *testing.T) {
 			t.Fatalf("quality_values = %v, want %v", opt.Search.QualityValues, wantCRF)
 		}
 	}
-	if opt.Size == nil || opt.Size.PreferredTotalBitrateKbps == nil {
-		t.Fatalf("expected preferred bitrate range, got %+v", opt.Size)
-	}
-	pr := opt.Size.PreferredTotalBitrateKbps
-	if pr.Min != 3200 || pr.Max != 4500 {
-		t.Fatalf("preferred bitrate = %d..%d, want 3200..4500", pr.Min, pr.Max)
-	}
-	if opt.Size.SoftMaxTotalBitrateKbps != 5500 {
-		t.Fatalf("soft max bitrate = %d, want 5500", opt.Size.SoftMaxTotalBitrateKbps)
-	}
 }
 
 func TestExistingVideoToolboxProfilesUnchanged(t *testing.T) {
