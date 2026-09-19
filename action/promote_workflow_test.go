@@ -615,7 +615,6 @@ func TestPromotionDifferentCandidatesCannotClaimSameOriginal(t *testing.T) {
 	}
 }
 
-
 func TestPromotionPreserveDoesNotTouchPartialOwnedByCurrentExecution(t *testing.T) {
 	h := newPromotionHarness(t)
 	r := h.run()
