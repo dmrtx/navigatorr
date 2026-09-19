@@ -102,8 +102,12 @@ const MaxQPBound = 69
 // MaxBenchmarkGOPSize bounds explicit gop_size keyframe intervals.
 const MaxBenchmarkGOPSize = 100000
 
-// MaxBenchmarkBFrames bounds explicit b_frames frame-reordering depth.
-const MaxBenchmarkBFrames = 16
+// MaxBenchmarkBFrames bounds explicit b_frames to the only truthful values:
+// 0 disables frame reordering/B-frames (-bf 0) and 1 enables it (-bf 1).
+// Upstream FFmpeg derives a boolean (avctx->max_b_frames > 0, reported as
+// depth 2 for HEVC) and never uses the requested value as a tunable depth,
+// so anything above 1 fails closed instead of implying fake granularity.
+const MaxBenchmarkBFrames = 1
 
 // MaxBenchmarkRefFrames bounds explicit max_ref_frames.
 const MaxBenchmarkRefFrames = 16

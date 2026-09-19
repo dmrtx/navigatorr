@@ -146,7 +146,7 @@ profiles:
       qmin: 0
       qmax: 51
       gop_size: 300
-      b_frames: 2
+      b_frames: 1
       closed_gop: true
       power_efficient: false
       max_ref_frames: 4
