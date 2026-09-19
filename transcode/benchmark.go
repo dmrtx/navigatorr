@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -117,7 +118,22 @@ type BenchmarkConcurrencyConfig struct {
 type BenchmarkWinner struct {
 	CandidateID               string   `json:"candidate_id"`
 	CandidateIndex            int      `json:"candidate_index"`
+	VideoCodec                string   `json:"video_codec,omitempty"`
 	Quality                   int      `json:"quality"`
+	Preset                    string   `json:"preset,omitempty"`
+	AverageBitrateKbps        int      `json:"average_bitrate_kbps,omitempty"`
+	MaxBitrateKbps            int      `json:"max_bitrate_kbps,omitempty"`
+	ConstantBitrate           *bool    `json:"constant_bitrate,omitempty"`
+	QMin                      *int     `json:"qmin,omitempty"`
+	QMax                      *int     `json:"qmax,omitempty"`
+	GOPSize                   *int     `json:"gop_size,omitempty"`
+	BFrames                   *int     `json:"b_frames,omitempty"`
+	ClosedGOP                 *bool    `json:"closed_gop,omitempty"`
+	PowerEfficient            *bool    `json:"power_efficient,omitempty"`
+	MaxRefFrames              *int     `json:"max_ref_frames,omitempty"`
+	PrioritizeSpeed           *bool    `json:"prioritize_speed,omitempty"`
+	SpatialAQ                 *bool    `json:"spatial_aq,omitempty"`
+	Realtime                  *bool    `json:"realtime,omitempty"`
 	VideoProfile              string   `json:"video_profile,omitempty"`
 	PixelFormat               string   `json:"pixel_format,omitempty"`
 	ExpectedBitDepth          int      `json:"expected_bit_depth"`
@@ -139,22 +155,25 @@ type BenchmarkWinner struct {
 
 // BenchmarkCandidateEvaluation records the evaluation summary for one candidate.
 type BenchmarkCandidateEvaluation struct {
-	CandidateID      string   `json:"candidate_id"`
-	CandidateIndex   int      `json:"candidate_index"`
-	Quality          int      `json:"quality"`
-	VideoProfile     string   `json:"video_profile,omitempty"`
-	PixelFormat      string   `json:"pixel_format,omitempty"`
-	ExpectedBitDepth int      `json:"expected_bit_depth"`
-	Score            float64  `json:"score"`
-	MetricType       string   `json:"metric_type"`
-	Eligible         bool     `json:"eligible"`
-	TargetReached    bool     `json:"target_reached"`
-	MinimumMet       bool     `json:"minimum_met"`
-	EvaluationReason string   `json:"evaluation_reason"`
-	EstimatedBytes   int64    `json:"estimated_bytes"`
-	EstimatedMB      float64  `json:"estimated_mb"`
-	SavingsPercent   float64  `json:"savings_percent"`
-	Uncertainties    []string `json:"uncertainties,omitempty"`
+	CandidateID        string   `json:"candidate_id"`
+	CandidateIndex     int      `json:"candidate_index"`
+	VideoCodec         string   `json:"video_codec,omitempty"`
+	Quality            int      `json:"quality"`
+	Preset             string   `json:"preset,omitempty"`
+	AverageBitrateKbps int      `json:"average_bitrate_kbps,omitempty"`
+	VideoProfile       string   `json:"video_profile,omitempty"`
+	PixelFormat        string   `json:"pixel_format,omitempty"`
+	ExpectedBitDepth   int      `json:"expected_bit_depth"`
+	Score              float64  `json:"score"`
+	MetricType         string   `json:"metric_type"`
+	Eligible           bool     `json:"eligible"`
+	TargetReached      bool     `json:"target_reached"`
+	MinimumMet         bool     `json:"minimum_met"`
+	EvaluationReason   string   `json:"evaluation_reason"`
+	EstimatedBytes     int64    `json:"estimated_bytes"`
+	EstimatedMB        float64  `json:"estimated_mb"`
+	SavingsPercent     float64  `json:"savings_percent"`
+	Uncertainties      []string `json:"uncertainties,omitempty"`
 }
 
 // BenchmarkDecision records the explainable Phase 6 candidate selection outcome.
@@ -167,10 +186,43 @@ type BenchmarkDecision struct {
 // BenchmarkCandidate specifies one encoder candidate to evaluate during a benchmark.
 // Arbitrary ffmpeg arguments are strictly forbidden.
 type BenchmarkCandidate struct {
-	ID           string `json:"id"`
-	Quality      int    `json:"quality"`
-	VideoProfile string `json:"video_profile,omitempty"`
-	PixelFormat  string `json:"pixel_format,omitempty"`
+	ID string `json:"id"`
+	// VideoCodec selects the encoder. Empty means hevc_videotoolbox for
+	// backwards compatibility. libx265 is also accepted.
+	VideoCodec string `json:"video_codec,omitempty"`
+	// Quality is -q:v for VideoToolbox (1..100, higher = better) and CRF for
+	// libx265 (1..51, lower = better). For VideoToolbox average-bitrate mode,
+	// Quality must be 0 and AverageBitrateKbps carries the -b:v target.
+	Quality int `json:"quality"`
+	// Preset is the libx265 preset; it must be empty for hevc_videotoolbox.
+	Preset string `json:"preset,omitempty"`
+	// Bounded typed hevc_videotoolbox rate-control/offline knobs. All must be
+	// unset for libx265. All other knobs besides the swept rate dimension are
+	// inherited from the profile's resolved base plan and held fixed.
+	AverageBitrateKbps int    `json:"average_bitrate_kbps,omitempty"`
+	MaxBitrateKbps     int    `json:"max_bitrate_kbps,omitempty"`
+	ConstantBitrate    *bool  `json:"constant_bitrate,omitempty"`
+	QMin               *int   `json:"qmin,omitempty"`
+	QMax               *int   `json:"qmax,omitempty"`
+	GOPSize            *int   `json:"gop_size,omitempty"`
+	BFrames            *int   `json:"b_frames,omitempty"`
+	ClosedGOP          *bool  `json:"closed_gop,omitempty"`
+	PowerEfficient     *bool  `json:"power_efficient,omitempty"`
+	MaxRefFrames       *int   `json:"max_ref_frames,omitempty"`
+	PrioritizeSpeed    *bool  `json:"prioritize_speed,omitempty"`
+	SpatialAQ          *bool  `json:"spatial_aq,omitempty"`
+	Realtime           *bool  `json:"realtime,omitempty"`
+	VideoProfile       string `json:"video_profile,omitempty"`
+	PixelFormat        string `json:"pixel_format,omitempty"`
+}
+
+// BenchmarkCandidateVideoCodec resolves the effective encoder for a candidate.
+func BenchmarkCandidateVideoCodec(c BenchmarkCandidate) string {
+	codec := NormalizeVideoCodec(c.VideoCodec)
+	if codec == "" {
+		return VideoCodecHEVCVideoToolbox
+	}
+	return codec
 }
 
 // BenchmarkSampleWindow specifies one temporal window to sample from the source.
@@ -439,7 +491,8 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 	}
 
 	seenCandidateIDs := make(map[string]bool)
-	seenQualities := make(map[int]bool)
+	seenQualities := make(map[string]bool)
+	vtRateMode := ""
 	for i, c := range req.Candidates {
 		cID := strings.TrimSpace(c.ID)
 		if cID == "" {
@@ -456,15 +509,139 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 		}
 		seenCandidateIDs[cID] = true
 
-		if c.Quality < 1 || c.Quality > 100 {
-			return fmt.Errorf("candidate %q quality %d out of valid range 1..100", cID, c.Quality)
+		codec := BenchmarkCandidateVideoCodec(c)
+		preset := strings.ToLower(strings.TrimSpace(c.Preset))
+		switch codec {
+		case VideoCodecHEVCVideoToolbox:
+			if preset != "" {
+				return fmt.Errorf("candidate %q: preset is only supported for libx265, got %q for %s", cID, c.Preset, VideoCodecHEVCVideoToolbox)
+			}
+			hasQuality := c.Quality != 0
+			hasBitrate := c.AverageBitrateKbps != 0
+			if hasQuality && hasBitrate {
+				return fmt.Errorf("candidate %q specifies both quality (%d) and average_bitrate_kbps (%d): rate-control modes are mutually exclusive (fail closed)", cID, c.Quality, c.AverageBitrateKbps)
+			}
+			if !hasQuality && !hasBitrate {
+				return fmt.Errorf("candidate %q must specify either quality (1..100) or average_bitrate_kbps (>0) (fail closed)", cID)
+			}
+			mode := "quality"
+			if hasBitrate {
+				mode = "bitrate"
+			}
+			if vtRateMode == "" {
+				vtRateMode = mode
+			} else if vtRateMode != mode {
+				return fmt.Errorf("candidate %q uses %s mode but the benchmark already uses %s mode for hevc_videotoolbox: mixed rate-control configurations are forbidden (fail closed)", cID, mode, vtRateMode)
+			}
+			if hasQuality {
+				if c.Quality < 1 || c.Quality > 100 {
+					return fmt.Errorf("candidate %q quality %d out of valid range 1..100", cID, c.Quality)
+				}
+			} else {
+				if c.AverageBitrateKbps < 1 || c.AverageBitrateKbps > MaxVideoBitrateKbps {
+					return fmt.Errorf("candidate %q average_bitrate_kbps %d out of valid range 1..%d", cID, c.AverageBitrateKbps, MaxVideoBitrateKbps)
+				}
+			}
+			if c.MaxBitrateKbps != 0 {
+				if !hasBitrate {
+					return fmt.Errorf("candidate %q specifies max_bitrate_kbps without average_bitrate_kbps (fail closed)", cID)
+				}
+				if c.MaxBitrateKbps < 1 || c.MaxBitrateKbps > MaxVideoBitrateKbps {
+					return fmt.Errorf("candidate %q max_bitrate_kbps %d out of valid range 1..%d", cID, c.MaxBitrateKbps, MaxVideoBitrateKbps)
+				}
+				if c.MaxBitrateKbps < c.AverageBitrateKbps {
+					return fmt.Errorf("candidate %q max_bitrate_kbps (%d) must be >= average_bitrate_kbps (%d) (fail closed)", cID, c.MaxBitrateKbps, c.AverageBitrateKbps)
+				}
+			}
+			if c.ConstantBitrate != nil && *c.ConstantBitrate && !hasBitrate {
+				return fmt.Errorf("candidate %q enables constant_bitrate without average_bitrate_kbps (fail closed)", cID)
+			}
+			if err := validateBenchmarkIntKnob(cID, "qmin", c.QMin, 0, MaxQPBound); err != nil {
+				return err
+			}
+			if err := validateBenchmarkIntKnob(cID, "qmax", c.QMax, 0, MaxQPBound); err != nil {
+				return err
+			}
+			if c.QMin != nil && c.QMax != nil && *c.QMin > *c.QMax {
+				return fmt.Errorf("candidate %q qmin (%d) must be <= qmax (%d) (fail closed)", cID, *c.QMin, *c.QMax)
+			}
+			if err := validateBenchmarkIntKnob(cID, "gop_size", c.GOPSize, 1, MaxBenchmarkGOPSize); err != nil {
+				return err
+			}
+			if err := validateBenchmarkIntKnob(cID, "b_frames", c.BFrames, 0, MaxBenchmarkBFrames); err != nil {
+				return err
+			}
+			if err := validateBenchmarkIntKnob(cID, "max_ref_frames", c.MaxRefFrames, 1, MaxBenchmarkRefFrames); err != nil {
+				return err
+			}
+		case VideoCodecLibX265:
+			if preset != "" && !IsValidLibX265Preset(preset) {
+				return fmt.Errorf("candidate %q has unsupported libx265 preset %q", cID, c.Preset)
+			}
+			if c.Quality < LibX265CRFMin || c.Quality > LibX265CRFMax {
+				return fmt.Errorf("candidate %q crf %d out of valid range %d..%d for libx265", cID, c.Quality, LibX265CRFMin, LibX265CRFMax)
+			}
+			if err := rejectLibX265VideoToolboxKnobs(cID, c); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("candidate %q has unsupported video codec %q", cID, c.VideoCodec)
 		}
-		if seenQualities[c.Quality] {
-			return fmt.Errorf("duplicate candidate quality %d for candidate %q", c.Quality, cID)
+		qualityKey := codec + ":" + strconv.Itoa(c.Quality) + ":br" + strconv.Itoa(c.AverageBitrateKbps)
+		if seenQualities[qualityKey] {
+			return fmt.Errorf("duplicate candidate quality %d (bitrate %d) for codec %s (candidate %q)", c.Quality, c.AverageBitrateKbps, codec, cID)
 		}
-		seenQualities[c.Quality] = true
+		seenQualities[qualityKey] = true
 	}
 
+	return nil
+}
+
+// rejectLibX265VideoToolboxKnobs fail-closes when a libx265 candidate carries
+// any hevc_videotoolbox-only control. The families never share knobs.
+func rejectLibX265VideoToolboxKnobs(candidateID string, c BenchmarkCandidate) error {
+	if c.AverageBitrateKbps != 0 {
+		return fmt.Errorf("candidate %q: average_bitrate_kbps is only supported for hevc_videotoolbox, not libx265 (fail closed)", candidateID)
+	}
+	if c.MaxBitrateKbps != 0 {
+		return fmt.Errorf("candidate %q: max_bitrate_kbps is only supported for hevc_videotoolbox, not libx265 (fail closed)", candidateID)
+	}
+	if c.ConstantBitrate != nil {
+		return fmt.Errorf("candidate %q: constant_bitrate is only supported for hevc_videotoolbox, not libx265 (fail closed)", candidateID)
+	}
+	if c.QMin != nil || c.QMax != nil {
+		return fmt.Errorf("candidate %q: qmin/qmax are only supported for hevc_videotoolbox, not libx265 (fail closed)", candidateID)
+	}
+	if c.GOPSize != nil {
+		return fmt.Errorf("candidate %q: gop_size is only supported for hevc_videotoolbox, not libx265 (fail closed)", candidateID)
+	}
+	if c.BFrames != nil {
+		return fmt.Errorf("candidate %q: b_frames is only supported for hevc_videotoolbox, not libx265 (fail closed)", candidateID)
+	}
+	if c.ClosedGOP != nil {
+		return fmt.Errorf("candidate %q: closed_gop is only supported for hevc_videotoolbox, not libx265 (fail closed)", candidateID)
+	}
+	if c.PowerEfficient != nil {
+		return fmt.Errorf("candidate %q: power_efficient is only supported for hevc_videotoolbox, not libx265 (fail closed)", candidateID)
+	}
+	if c.MaxRefFrames != nil {
+		return fmt.Errorf("candidate %q: max_ref_frames is only supported for hevc_videotoolbox, not libx265 (fail closed)", candidateID)
+	}
+	if c.PrioritizeSpeed != nil || c.SpatialAQ != nil || c.Realtime != nil {
+		return fmt.Errorf("candidate %q: VideoToolbox-only options (prio_speed/spatial_aq/realtime) are not supported for libx265 (fail closed)", candidateID)
+	}
+	return nil
+}
+
+// validateBenchmarkIntKnob fail-closes on out-of-range explicit integer knobs.
+// A nil pointer means "emit nothing" and is always valid.
+func validateBenchmarkIntKnob(candidateID, knob string, v *int, min, max int) error {
+	if v == nil {
+		return nil
+	}
+	if *v < min || *v > max {
+		return fmt.Errorf("candidate %q %s %d out of valid range %d..%d (fail closed)", candidateID, knob, *v, min, max)
+	}
 	return nil
 }
 

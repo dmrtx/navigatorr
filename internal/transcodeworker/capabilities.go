@@ -11,7 +11,54 @@ import (
 	"github.com/jakenesler/navigatorr/transcode"
 )
 
-const videoToolboxEncoder = "hevc_videotoolbox"
+const (
+	videoToolboxEncoder = "hevc_videotoolbox"
+	libX265Encoder      = "libx265"
+)
+
+// ProbeAvailableEncoders runs ffmpeg -encoders and parses encoder availability.
+func ProbeAvailableEncoders(ctx context.Context, ffmpegPath string) (map[string]bool, error) {
+	cmd := exec.CommandContext(ctx, ffmpegPath, "-hide_banner", "-encoders")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("probing available encoders failed: %w (%s)", err, boundedErrorMessage(err, out, 256))
+	}
+	return ParseAvailableEncoders(string(out)), nil
+}
+
+// ValidateEncoderCapabilities validates a resolved plan against the actual
+// FFmpeg binary the worker will execute. It fails closed for any codec that is
+// not proven available, dispatching on the plan's video codec.
+func ValidateEncoderCapabilities(ctx context.Context, ffmpegPath string, plan *transcode.Plan) error {
+	if plan == nil {
+		return fmt.Errorf("encoder_capability_unsupported: transcode plan is nil")
+	}
+	switch norm(plan.VideoCodec) {
+	case videoToolboxEncoder:
+		caps, err := ProbeVideoToolboxCapabilities(ctx, ffmpegPath)
+		if err != nil {
+			return err
+		}
+		return ValidateVideoToolboxCapabilities(plan, caps)
+	case libX265Encoder:
+		available, err := ProbeAvailableEncoders(ctx, ffmpegPath)
+		if err != nil {
+			return fmt.Errorf("encoder_capability_unsupported: %w", err)
+		}
+		if !available[libX265Encoder] {
+			return fmt.Errorf("encoder_capability_unsupported: encoder %s is unavailable in the configured FFmpeg (install an FFmpeg build with libx265)", libX265Encoder)
+		}
+		if preset := norm(plan.Preset); preset != "" && !transcode.IsValidLibX265Preset(preset) {
+			return fmt.Errorf("encoder_capability_unsupported: unsupported libx265 preset %q", plan.Preset)
+		}
+		return nil
+	default:
+		return fmt.Errorf("encoder_capability_unsupported: unsupported video codec %q", plan.VideoCodec)
+	}
+}
 
 type VideoToolboxCapabilities = transcode.VideoToolboxCapabilities
 
@@ -282,7 +329,8 @@ func ParseVideoToolboxCapabilities(raw string) VideoToolboxCapabilities {
 			if len(fields) > 0 {
 				name := strings.TrimPrefix(strings.ToLower(fields[0]), "-")
 				switch name {
-				case "profile", "prio_speed", "spatial_aq", "realtime":
+				case "profile", "prio_speed", "spatial_aq", "realtime",
+					"constant_bit_rate", "power_efficient", "max_ref_frames":
 					optionSet[name] = true
 				}
 				inProfileValues = name == "profile"
@@ -324,6 +372,11 @@ func ValidateVideoToolboxCapabilities(plan *transcode.Plan, caps VideoToolboxCap
 	if plan.PixelFormat != "" && !contains(caps.PixelFormats, norm(plan.PixelFormat)) {
 		return fmt.Errorf("encoder_capability_unsupported: pixel format %q is not reported by installed FFmpeg for %s (reported: %v)", plan.PixelFormat, videoToolboxEncoder, caps.PixelFormats)
 	}
+	// VideoToolbox-specific options must be reported by the installed FFmpeg;
+	// anything requested but absent fails closed instead of being silently
+	// dropped. Generic codec controls (-b:v, -maxrate, -qmin/-qmax, -g, -bf,
+	// -flags cgop) are core FFmpeg options and are validated structurally by
+	// BuildVideoEncoderArgs, so they need no encoder-option probe gate.
 	for _, knob := range []struct {
 		name string
 		set  bool
@@ -331,6 +384,9 @@ func ValidateVideoToolboxCapabilities(plan *transcode.Plan, caps VideoToolboxCap
 		{name: "prio_speed", set: plan.PrioritizeSpeed != nil},
 		{name: "spatial_aq", set: plan.SpatialAQ != nil},
 		{name: "realtime", set: plan.Realtime != nil},
+		{name: "constant_bit_rate", set: plan.ConstantBitrate != nil},
+		{name: "power_efficient", set: plan.PowerEfficient != nil},
+		{name: "max_ref_frames", set: plan.MaxRefFrames != nil},
 	} {
 		if knob.set && !contains(caps.Options, knob.name) {
 			return fmt.Errorf("encoder_capability_unsupported: FFmpeg does not expose %s for %s", knob.name, videoToolboxEncoder)

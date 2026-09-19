@@ -92,7 +92,10 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 		"candidate_path": outputPath, "output_path": outputPath, "size_bytes": candidateSize, "duration_sec": duration,
 		"video_codec": videoCodec, "resolution": resolution, "bit_depth": bitDepth,
 		"profile": getString(ec.State, "profile"), "recipe_version": plan.RecipeVersion, "recipe_digest": plan.RecipeDigest, "plan_digest": plan.PlanDigest,
-		"video_profile": plan.VideoProfile, "pixel_format": plan.PixelFormat, "prioritize_speed": plan.PrioritizeSpeed, "spatial_aq": plan.SpatialAQ, "realtime": plan.Realtime, "expected_bit_depth": plan.ExpectedBitDepth,
+		"video_profile": plan.VideoProfile, "pixel_format": plan.PixelFormat, "prioritize_speed": plan.PrioritizeSpeed, "spatial_aq": plan.SpatialAQ, "realtime": plan.Realtime,
+		"average_bitrate_kbps": plan.AverageBitrateKbps, "max_bitrate_kbps": plan.MaxBitrateKbps, "constant_bitrate": plan.ConstantBitrate,
+		"qmin": plan.QMin, "qmax": plan.QMax, "gop_size": plan.GOPSize, "b_frames": plan.BFrames, "closed_gop": plan.ClosedGOP,
+		"power_efficient": plan.PowerEfficient, "max_ref_frames": plan.MaxRefFrames, "expected_bit_depth": plan.ExpectedBitDepth,
 		"attempt": getInt(ec.State, "attempt"), "retry_count": getInt(ec.State, "retry_count"), "fallback_count": getInt(ec.State, "fallback_count"), "applied_fallbacks": plan.AppliedFallbacks,
 	}
 	if c := ec.State["conversions"]; c != nil {

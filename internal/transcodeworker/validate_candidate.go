@@ -161,7 +161,7 @@ func countStreams(streams []SourceStream, kind string) int {
 // the container is expected to report.
 func expectedWorkerVideoCodec(codec string) string {
 	switch norm(codec) {
-	case "hevc_videotoolbox", "hevc", "h265", "x265":
+	case "hevc_videotoolbox", "libx265", "hevc", "h265", "x265":
 		return "hevc"
 	case "h264_videotoolbox", "h264", "avc", "avc1":
 		return "h264"

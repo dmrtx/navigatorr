@@ -416,46 +416,54 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 		ec.Decision = ""
 		ec.Inputs["paused"] = false
 		ec.State["paused"] = false
-		// Durable batch-cancel control: children re-read it under the parent
-		// admission lease, so no new submit can start after the cancel is
-		// confirmed. Persist it before any further coordination.
+		// Durable batch-cancel control: persist the intent first so no new child
+		// admission can race with the cancellation fan-out.
 		ec.State["cancel_requested"] = true
 		if err := e.persistExecutionState(ctx, ec); err != nil {
 			return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to persist cancel: %v", err)}, nil
 		}
+
+		var cancelErrors []string
 		for i := range items {
-			if items[i].Status == "queued" || items[i].Status == "waiting_for_slot" {
-				items[i].Status = "failed"
-				items[i].Error = "cancelled by user decision"
-				_ = e.deps.Store.UpdateTranscodeBatchItem(items[i])
+			it := &items[i]
+			if it.Status == "completed" || it.Status == "failed" || it.Status == "skip" {
+				continue
 			}
+			if it.ChildActionID != "" {
+				child, cerr := e.deps.Store.GetActionInstanceIfExists(it.ChildActionID)
+				if cerr != nil {
+					cancelErrors = append(cancelErrors, fmt.Sprintf("%s: read child action: %v", it.ItemKey, cerr))
+					continue
+				}
+				if child != nil && child.Status != StatusCompleted && child.Status != StatusFailed && child.Status != StatusCancelled {
+					if _, cerr := e.Cancel(ctx, it.ChildActionID, "cancelled by parent transcode batch "+ec.InstanceID); cerr != nil {
+						cancelErrors = append(cancelErrors, fmt.Sprintf("%s: %v", it.ItemKey, cerr))
+						continue
+					}
+				}
+			} else if it.JobID != "" && e.deps.Transcode != nil {
+				// Partial-persistence fallback: stop a known worker job even when
+				// the child action relation was not saved.
+				if cerr := e.cancelTranscodeJobConfirmed(ctx, it.JobID); cerr != nil {
+					cancelErrors = append(cancelErrors, fmt.Sprintf("%s job %s: %v", it.ItemKey, it.JobID, cerr))
+					continue
+				}
+			}
+			it.Status = "failed"
+			it.Error = "cancelled by user decision"
+			_ = e.deps.Store.UpdateTranscodeBatchItem(*it)
 		}
+
 		items, _ = e.deps.Store.ListTranscodeBatchItems(ec.InstanceID)
 		outputs := buildBatchOutputs(ec.InstanceID, items, seriesTitle, isAnime, dryRun, getMaxOutputItems(ec.Inputs))
-		// Batch cancel does not kill accepted jobs: they remain tracked. Pending
-		// children terminate on their next safe reconciliation; an accepted
-		// child may still be cancelled individually through its own action.
-		outputs["note"] = "Queued and waiting items were cancelled. Pending children stop on their next safe reconciliation. Active remote transcode jobs are not stopped and remain running on workers."
-
-		hasRunning := false
-		for _, it := range items {
-			if it.Status == "running" {
-				hasRunning = true
-				break
-			}
-		}
-		if hasRunning {
+		outputs["note"] = "Batch cancellation stops queued, waiting, and already-admitted remote transcode jobs. Completed items are left unchanged."
+		if len(cancelErrors) > 0 {
+			outputs["cancel_errors"] = cancelErrors
 			return StepResult{
-				Status:           StepWaitingExternal,
-				WaitingCondition: "transcode_running",
-				WaitingReason:    "Remaining queued items cancelled; waiting for active remote transcode job(s) to finish (active jobs not stopped)",
-				Outputs:          outputs,
+				Status:  StepFailed,
+				Error:   "batch cancellation was only partially confirmed: " + strings.Join(cancelErrors, "; "),
+				Outputs: outputs,
 			}, nil
-		}
-		// Preserve and surface a user wait instead of reporting completion: its
-		// decision, identity and candidate are retained.
-		if res, ok := e.batchWaitingDecisionResult(items, outputs); ok {
-			return res, nil
 		}
 		return StepResult{
 			Status:  StepCompleted,
@@ -474,7 +482,7 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 			WaitingReason: "Transcode batch paused by request",
 			WaitingOptions: []WaitingOption{
 				{Decision: "resume", Description: "Resume transcode batch"},
-				{Decision: "cancel", Description: "Cancel remaining queued and waiting items (active remote jobs are not stopped)"},
+				{Decision: "cancel", Description: "Cancel the batch and stop active remote transcode jobs"},
 			},
 			Outputs: buildBatchOutputs(ec.InstanceID, items, seriesTitle, isAnime, dryRun, getMaxOutputItems(ec.Inputs)),
 		}, nil
@@ -598,9 +606,9 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 					}
 				case StatusCancelled:
 					// A durably cancelled child is projected as failed so a later
-					// projection never reverts it to running. Batch cancel leaves
-					// accepted jobs alone; a child may still be cancelled directly
-					// through its own action, and that is reflected here.
+					// projection never reverts it to running. Batch cancellation now
+					// cascades through child actions, so accepted worker jobs are
+					// stopped instead of being left to consume worker slots.
 					if it.Status != "failed" {
 						it.Status = "failed"
 						if it.Error == "" {

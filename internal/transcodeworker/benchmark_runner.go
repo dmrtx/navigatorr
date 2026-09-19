@@ -36,18 +36,19 @@ type BenchmarkSampleRef struct {
 
 // BenchmarkCandidateSampleResult describes one candidate encode for one sample window.
 type BenchmarkCandidateSampleResult struct {
-	CandidateID       string   `json:"candidate_id"`
-	SampleIndex       int      `json:"sample_index"`
-	File              string   `json:"file"`
-	SizeBytes         int64    `json:"size_bytes"`
-	EncodeDurationSec float64  `json:"encode_duration_sec"`
-	Quality           int      `json:"quality"`
-	VideoProfile      string   `json:"video_profile,omitempty"`
-	PixelFormat       string   `json:"pixel_format,omitempty"`
-	VMAF              *float64 `json:"vmaf,omitempty"`
-	SSIM              *float64 `json:"ssim,omitempty"`
-	MetricDurationSec float64  `json:"metric_duration_sec,omitempty"`
-	Error             string   `json:"error,omitempty"`
+	CandidateID        string   `json:"candidate_id"`
+	SampleIndex        int      `json:"sample_index"`
+	File               string   `json:"file"`
+	SizeBytes          int64    `json:"size_bytes"`
+	EncodeDurationSec  float64  `json:"encode_duration_sec"`
+	Quality            int      `json:"quality"`
+	AverageBitrateKbps int      `json:"average_bitrate_kbps,omitempty"`
+	VideoProfile       string   `json:"video_profile,omitempty"`
+	PixelFormat        string   `json:"pixel_format,omitempty"`
+	VMAF               *float64 `json:"vmaf,omitempty"`
+	SSIM               *float64 `json:"ssim,omitempty"`
+	MetricDurationSec  float64  `json:"metric_duration_sec,omitempty"`
+	Error              string   `json:"error,omitempty"`
 }
 
 // BenchmarkMetricSampleResult records perceptual quality metric measurements for one candidate sample.
@@ -321,33 +322,42 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		return fmt.Errorf("unsupported source pixel format %q (%d-bit): automatic benchmark requires 4:2:0 chroma subsampling (e.g. yuv420p, nv12, yuv420p10le, p010le)", sourceVideo.PixelFormat, sourceBitDepth)
 	}
 
-	// 3. Capability probing and candidate validation upfront
-	caps, err := ProbeVideoToolboxCapabilities(ctx, w.ffmpegPath)
-	if err != nil {
-		return fmt.Errorf("probing worker video capabilities: %w", err)
-	}
-	if !caps.Available {
-		return errors.New("hevc_videotoolbox encoder is not available on worker (fail closed)")
-	}
-
+	// 3. Capability probing and candidate validation upfront. Capabilities are
+	// validated per candidate against the actual FFmpeg binary (fail closed);
+	// libx265 candidates fail clearly when the worker FFmpeg lacks libx265.
 	validatedCandidates := make([]validatedCandidate, 0, len(record.Candidates))
 	for candIdx, c := range record.Candidates {
 		prof, pix, bd, err := resolveCandidateBitDepth(&c, sourceBitDepth)
 		if err != nil {
 			return err
 		}
+		codec := transcode.BenchmarkCandidateVideoCodec(c)
 		plan := &transcode.Plan{
-			VideoCodec:       videoToolboxEncoder,
-			Quality:          c.Quality,
-			VideoProfile:     prof,
-			PixelFormat:      pix,
-			ExpectedBitDepth: bd,
-		}
-		if err := ValidateVideoToolboxCapabilities(plan, caps); err != nil {
-			return fmt.Errorf("candidate %q capability validation failed: %w", c.ID, err)
+			VideoCodec:         codec,
+			Quality:            c.Quality,
+			Preset:             norm(c.Preset),
+			AverageBitrateKbps: c.AverageBitrateKbps,
+			MaxBitrateKbps:     c.MaxBitrateKbps,
+			ConstantBitrate:    c.ConstantBitrate,
+			QMin:               c.QMin,
+			QMax:               c.QMax,
+			GOPSize:            c.GOPSize,
+			BFrames:            c.BFrames,
+			ClosedGOP:          c.ClosedGOP,
+			PowerEfficient:     c.PowerEfficient,
+			MaxRefFrames:       c.MaxRefFrames,
+			PrioritizeSpeed:    c.PrioritizeSpeed,
+			SpatialAQ:          c.SpatialAQ,
+			Realtime:           c.Realtime,
+			VideoProfile:       prof,
+			PixelFormat:        pix,
+			ExpectedBitDepth:   bd,
 		}
 		if _, err := BuildVideoEncoderArgs(plan); err != nil {
 			return fmt.Errorf("candidate %q encoder args validation failed: %w", c.ID, err)
+		}
+		if err := ValidateEncoderCapabilities(ctx, w.ffmpegPath, plan); err != nil {
+			return fmt.Errorf("candidate %q capability validation failed: %w", c.ID, err)
 		}
 		fileKey := candidateFileKey(candIdx, c.ID, c.Quality)
 		validatedCandidates = append(validatedCandidates, validatedCandidate{
@@ -531,13 +541,14 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 					errStr := fmt.Sprintf("encoding candidate %q for sample %d failed: %v: %s",
 						vc.candidate.ID, window.Index, err, boundedStderr(stderrBuf, 1024))
 					evidence.CandidateSamples = append(evidence.CandidateSamples, BenchmarkCandidateSampleResult{
-						CandidateID:  vc.candidate.ID,
-						SampleIndex:  window.Index,
-						File:         filepath.Base(candPath),
-						Quality:      vc.candidate.Quality,
-						VideoProfile: vc.profile,
-						PixelFormat:  vc.pixelFormat,
-						Error:        errStr,
+						CandidateID:        vc.candidate.ID,
+						SampleIndex:        window.Index,
+						File:               filepath.Base(candPath),
+						Quality:            vc.candidate.Quality,
+						AverageBitrateKbps: vc.candidate.AverageBitrateKbps,
+						VideoProfile:       vc.profile,
+						PixelFormat:        vc.pixelFormat,
+						Error:              errStr,
 					})
 					return errors.New(errStr)
 				}
@@ -547,26 +558,28 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 				if err != nil || fi.Size() == 0 {
 					errStr := fmt.Sprintf("candidate %q for sample %d produced empty or missing file at %s", vc.candidate.ID, window.Index, candPath)
 					evidence.CandidateSamples = append(evidence.CandidateSamples, BenchmarkCandidateSampleResult{
-						CandidateID:  vc.candidate.ID,
-						SampleIndex:  window.Index,
-						File:         filepath.Base(candPath),
-						Quality:      vc.candidate.Quality,
-						VideoProfile: vc.profile,
-						PixelFormat:  vc.pixelFormat,
-						Error:        errStr,
+						CandidateID:        vc.candidate.ID,
+						SampleIndex:        window.Index,
+						File:               filepath.Base(candPath),
+						Quality:            vc.candidate.Quality,
+						AverageBitrateKbps: vc.candidate.AverageBitrateKbps,
+						VideoProfile:       vc.profile,
+						PixelFormat:        vc.pixelFormat,
+						Error:              errStr,
 					})
 					return errors.New(errStr)
 				}
 
 				evidence.CandidateSamples = append(evidence.CandidateSamples, BenchmarkCandidateSampleResult{
-					CandidateID:       vc.candidate.ID,
-					SampleIndex:       window.Index,
-					File:              filepath.Base(candPath),
-					SizeBytes:         fi.Size(),
-					EncodeDurationSec: elapsed,
-					Quality:           vc.candidate.Quality,
-					VideoProfile:      vc.profile,
-					PixelFormat:       vc.pixelFormat,
+					CandidateID:        vc.candidate.ID,
+					SampleIndex:        window.Index,
+					File:               filepath.Base(candPath),
+					SizeBytes:          fi.Size(),
+					EncodeDurationSec:  elapsed,
+					Quality:            vc.candidate.Quality,
+					AverageBitrateKbps: vc.candidate.AverageBitrateKbps,
+					VideoProfile:       vc.profile,
+					PixelFormat:        vc.pixelFormat,
 				})
 
 				progressReporter.CompleteUnit()
@@ -1487,22 +1500,25 @@ func (r *ProductionBenchmarkRunner) runSelection(
 	for i, vc := range validatedCandidates {
 		ec := selRes.AllEvaluated[i]
 		decision.Evaluations = append(decision.Evaluations, transcode.BenchmarkCandidateEvaluation{
-			CandidateID:      vc.candidate.ID,
-			CandidateIndex:   vc.index,
-			Quality:          vc.candidate.Quality,
-			VideoProfile:     vc.profile,
-			PixelFormat:      vc.pixelFormat,
-			ExpectedBitDepth: vc.bitDepth,
-			Score:            ec.Score,
-			MetricType:       string(selectorPolicy.Metric()),
-			Eligible:         ec.Eligible,
-			TargetReached:    ec.TargetReached,
-			MinimumMet:       ec.MinimumMet,
-			EvaluationReason: ec.EvaluationReason,
-			EstimatedBytes:   ec.EstimatedBytes,
-			EstimatedMB:      ec.EstimatedMB,
-			SavingsPercent:   ec.SavingsPercent,
-			Uncertainties:    ec.Uncertainties,
+			CandidateID:        vc.candidate.ID,
+			CandidateIndex:     vc.index,
+			VideoCodec:         transcode.BenchmarkCandidateVideoCodec(vc.candidate),
+			Quality:            vc.candidate.Quality,
+			Preset:             norm(vc.candidate.Preset),
+			AverageBitrateKbps: vc.candidate.AverageBitrateKbps,
+			VideoProfile:       vc.profile,
+			PixelFormat:        vc.pixelFormat,
+			ExpectedBitDepth:   vc.bitDepth,
+			Score:              ec.Score,
+			MetricType:         string(selectorPolicy.Metric()),
+			Eligible:           ec.Eligible,
+			TargetReached:      ec.TargetReached,
+			MinimumMet:         ec.MinimumMet,
+			EvaluationReason:   ec.EvaluationReason,
+			EstimatedBytes:     ec.EstimatedBytes,
+			EstimatedMB:        ec.EstimatedMB,
+			SavingsPercent:     ec.SavingsPercent,
+			Uncertainties:      ec.Uncertainties,
 		})
 	}
 
@@ -1513,7 +1529,22 @@ func (r *ProductionBenchmarkRunner) runSelection(
 				decision.Winner = &transcode.BenchmarkWinner{
 					CandidateID:               vc.candidate.ID,
 					CandidateIndex:            vc.index,
+					VideoCodec:                transcode.BenchmarkCandidateVideoCodec(vc.candidate),
 					Quality:                   vc.candidate.Quality,
+					Preset:                    norm(vc.candidate.Preset),
+					AverageBitrateKbps:        vc.candidate.AverageBitrateKbps,
+					MaxBitrateKbps:            vc.candidate.MaxBitrateKbps,
+					ConstantBitrate:           vc.candidate.ConstantBitrate,
+					QMin:                      vc.candidate.QMin,
+					QMax:                      vc.candidate.QMax,
+					GOPSize:                   vc.candidate.GOPSize,
+					BFrames:                   vc.candidate.BFrames,
+					ClosedGOP:                 vc.candidate.ClosedGOP,
+					PowerEfficient:            vc.candidate.PowerEfficient,
+					MaxRefFrames:              vc.candidate.MaxRefFrames,
+					PrioritizeSpeed:           vc.candidate.PrioritizeSpeed,
+					SpatialAQ:                 vc.candidate.SpatialAQ,
+					Realtime:                  vc.candidate.Realtime,
 					VideoProfile:              vc.profile,
 					PixelFormat:               vc.pixelFormat,
 					ExpectedBitDepth:          vc.bitDepth,
