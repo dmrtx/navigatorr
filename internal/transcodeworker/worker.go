@@ -673,9 +673,10 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("invalid transcode profile or plan: %v", err)}, err
 	}
 
-	// Canonical execution-spec digest over the immutable resolved request.
+	// Canonical execution-spec digest over the immutable resolved request,
+	// including the source content identity when the coordinator supplied it.
 	// Never trust caller-supplied digest text: recompute and verify.
-	canonicalDigest, err := transcode.DigestTranscodeExecutionSpec(cleanSource, cleanCandidate, profile, plan)
+	canonicalDigest, err := transcode.DigestTranscodeExecutionSpecWithSourceSHA(cleanSource, cleanCandidate, profile, sourceSHA, plan)
 	if err != nil {
 		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("computing execution spec digest: %v", err)}, err
 	}
@@ -1079,12 +1080,13 @@ func killTranscodeProcess(pid int) {
 
 // persistedExecutionDigest recomputes the canonical digest for a persisted
 // record's OWN spec through the SAME worker resolution path Submit uses
-// (ResolveWorkerPlan over the record's Profile/Plan). Legacy profile-only
-// records (nil Plan) resolve to the same default plan a fresh identical
-// submit resolves to, so unchanged resubmits backfill/reuse instead of
-// falsely conflicting. Changed candidate/profile/resolved-plan still
-// conflicts. Unresolvable persisted specs are definitive errors (fail
-// closed); the new request's digest is never adopted blindly.
+// (ResolveWorkerPlan over the record's Profile/Plan), including the record's
+// persisted source SHA-256 so durable idempotency comparisons stay symmetric.
+// Legacy profile-only records (nil Plan) resolve to the same default plan a
+// fresh identical submit resolves to, so unchanged resubmits backfill/reuse
+// instead of falsely conflicting. Changed candidate/profile/resolved-plan/
+// source-content still conflicts. Unresolvable persisted specs are definitive
+// errors (fail closed); the new request's digest is never adopted blindly.
 //
 // It returns both the canonical digest and the resolved effective plan
 // (carrying its canonical PlanDigest) without mutating the record, so
@@ -1097,7 +1099,7 @@ func (w *Worker) persistedExecutionDigest(rec *JobRecord) (string, *transcode.Pl
 	if err != nil {
 		return "", nil, fmt.Errorf("resolving persisted execution spec for job %q: %w", rec.ID, err)
 	}
-	d, err := transcode.DigestTranscodeExecutionSpec(rec.Source, rec.Candidate, rec.Profile, resolved)
+	d, err := transcode.DigestTranscodeExecutionSpecWithSourceSHA(rec.Source, rec.Candidate, rec.Profile, rec.SourceSHA256, resolved)
 	if err != nil {
 		return "", nil, err
 	}

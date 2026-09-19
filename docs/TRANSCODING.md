@@ -254,6 +254,14 @@ Source cache identity and cleanup:
   mapping). Local sources are read in place and never cached.
   `disable_source_cache: true` restores legacy per-job staging exactly.
 
+Source content identity is also part of **strong full-transcode idempotency**:
+the canonical execution-spec digest includes the normalized preflight SHA-256
+when available (the field is omitted when absent, so historical digests are
+byte-for-byte unchanged). The HTTP and SSH executors forward `source_sha256`
+and compute the same hash-aware digest the worker recomputes from the persisted
+record, so a changed source at the same path with the same candidate/profile/
+plan is a deterministic idempotency conflict rather than a silent reuse.
+
 Worker config (`~/.config/navigatorr-transcode/config.yaml`):
 
 ```yaml

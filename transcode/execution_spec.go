@@ -8,12 +8,20 @@ package transcode
 //   - cleaned source path (filepath.Clean)
 //   - cleaned candidate path (filepath.Clean)
 //   - normalized profile (lowercase/trimmed, empty -> "hevc-vt")
+//   - normalized source SHA-256 when the coordinator preflight supplied one
+//     (omitted entirely when empty, so legacy digests are byte-for-byte
+//     unchanged)
 //   - resolved plan digest (DigestPlan over the normalized plan) plus the
 //     canonical plan JSON itself (so recipe/pixel-format/subtitle-action
 //     changes alter the digest even if a stale plan_digest were echoed)
 //
 // Callers must NOT trust arbitrary caller-supplied digest text: the worker
 // recomputes this value from the resolved plan and rejects mismatches.
+//
+// Source content identity: when a SHA-256 is available, a changed source file
+// at the same path (even with the same candidate/profile/plan) produces a
+// different digest, so strong idempotency can never reuse a job that encoded
+// different bytes.
 
 import (
 	"crypto/sha256"
@@ -63,23 +71,34 @@ func DefaultTranscodeIdempotencyKey(jobID, key string) string {
 }
 
 type canonicalExecutionSpec struct {
-	Source     string `json:"source"`
-	Candidate  string `json:"candidate"`
-	Profile    string `json:"profile"`
-	PlanDigest string `json:"plan_digest"`
-	Plan       *Plan  `json:"plan,omitempty"`
+	Source       string `json:"source"`
+	Candidate    string `json:"candidate"`
+	Profile      string `json:"profile"`
+	SourceSHA256 string `json:"source_sha256,omitempty"`
+	PlanDigest   string `json:"plan_digest"`
+	Plan         *Plan  `json:"plan,omitempty"`
 }
 
-// DigestTranscodeExecutionSpec computes the canonical digest. plan may be
-// nil for legacy profile-only callers; the digest then covers the normalized
-// profile with an empty plan digest (executors with a nil plan should
-// preferably omit the digest and let the worker compute it over the resolved
-// plan instead of sending a profile-only value).
+// DigestTranscodeExecutionSpec computes the canonical digest for legacy callers
+// that have no source content identity. It is exactly equivalent to
+// DigestTranscodeExecutionSpecWithSourceSHA with an empty source SHA-256, so
+// historical digests are byte-for-byte unchanged.
 //
-// Canonicalization guarantee: only plan CONTENT influences the digest. A plan
-// with an empty, valid, or stale/tampered PlanDigest hashes identically;
-// only an actual content change alters the result.
+// plan may be nil for legacy profile-only callers; the digest then covers the
+// normalized profile with an empty plan digest (executors with a nil plan
+// should preferably omit the digest and let the worker compute it over the
+// resolved plan instead of sending a profile-only value).
 func DigestTranscodeExecutionSpec(sourcePath, candidatePath, profile string, plan *Plan) (string, error) {
+	return DigestTranscodeExecutionSpecWithSourceSHA(sourcePath, candidatePath, profile, "", plan)
+}
+
+// DigestTranscodeExecutionSpecWithSourceSHA computes the canonical digest
+// including the normalized source content identity when available. See
+// DigestTranscodeExecutionSpec for the canonicalization guarantee: only plan
+// CONTENT, profile, cleaned paths, and (when non-empty) the normalized source
+// SHA-256 influence the digest. Empty, valid, or stale/tampered PlanDigest
+// values hash identically; only an actual content change alters the result.
+func DigestTranscodeExecutionSpecWithSourceSHA(sourcePath, candidatePath, profile, sourceSHA256 string, plan *Plan) (string, error) {
 	cleanSource := filepath.Clean(strings.TrimSpace(sourcePath))
 	cleanCandidate := filepath.Clean(strings.TrimSpace(candidatePath))
 	if cleanSource == "" || cleanSource == "." {
@@ -87,6 +106,10 @@ func DigestTranscodeExecutionSpec(sourcePath, candidatePath, profile string, pla
 	}
 	if cleanCandidate == "" || cleanCandidate == "." {
 		return "", fmt.Errorf("candidate path is required for execution spec digest")
+	}
+	normSourceSHA, err := NormalizeSourceSHA256(sourceSHA256)
+	if err != nil {
+		return "", fmt.Errorf("normalizing source sha256 for execution spec digest: %w", err)
 	}
 	normProfile := NormalizeTranscodeProfile(profile)
 	var planDigest string
@@ -107,11 +130,12 @@ func DigestTranscodeExecutionSpec(sourcePath, candidatePath, profile string, pla
 		planCopy = &cp
 	}
 	canon := canonicalExecutionSpec{
-		Source:     cleanSource,
-		Candidate:  cleanCandidate,
-		Profile:    normProfile,
-		PlanDigest: planDigest,
-		Plan:       planCopy,
+		Source:       cleanSource,
+		Candidate:    cleanCandidate,
+		Profile:      normProfile,
+		SourceSHA256: normSourceSHA,
+		PlanDigest:   planDigest,
+		Plan:         planCopy,
 	}
 	b, err := json.Marshal(canon)
 	if err != nil {
