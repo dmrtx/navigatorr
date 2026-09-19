@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jakenesler/navigatorr/store"
+	"github.com/jakenesler/navigatorr/transcode"
 )
 
 // Engine manages declarative, persistent, multi-step actions.
@@ -390,7 +391,9 @@ func (e *Engine) ListPaged(ctx context.Context, status string, limit, offset int
 	return res, nil
 }
 
-// Cancel marks an active action as cancelled.
+// Cancel marks an active action as cancelled and propagates cancellation to
+// remote transcode work. A transcode_batch cancellation cascades to every
+// non-terminal child action so already-admitted worker jobs are stopped too.
 func (e *Engine) Cancel(ctx context.Context, instanceID, reason string) (*ActionResult, error) {
 	if e.deps.Store == nil {
 		return nil, fmt.Errorf("maintenance store is required")
@@ -400,7 +403,15 @@ func (e *Engine) Cancel(ctx context.Context, instanceID, reason string) (*Action
 	if err != nil {
 		return nil, err
 	}
-	defer release()
+	released := false
+	releaseLease := func() {
+		if !released {
+			released = true
+			release()
+		}
+	}
+	defer releaseLease()
+
 	inst, err := e.deps.Store.GetActionInstance(instanceID)
 	if err != nil {
 		return nil, fmt.Errorf("getting action instance: %w", err)
@@ -411,28 +422,187 @@ func (e *Engine) Cancel(ctx context.Context, instanceID, reason string) (*Action
 
 	inst.Status = StatusCancelled
 	inst.WaitingReason = reason
+	inst.WaitingCondition = ""
+	inst.WaitingOptionsJSON = "[]"
 	if err := e.updateInstance(ctx, inst); err != nil {
 		return nil, fmt.Errorf("updating action instance: %w", err)
 	}
 
 	tmpl, _ := e.GetTemplate(inst.ActionName)
 	ec := parseExecutionContext(inst, e)
+	result := buildActionResult(inst, len(tmpl.Steps), ec)
 
-	if e.deps.Transcode != nil {
-		if benchID := getString(ec.State, "benchmark_job_id"); benchID != "" && !getBool(ec.State, "benchmark_done") {
-			_ = e.deps.Transcode.BenchmarkCancel(ctx, benchID)
-		}
-		if jobID := getString(ec.State, "job_id"); jobID != "" {
-			_ = e.deps.Transcode.Cancel(ctx, jobID)
+	// Persist the parent/local cancellation before contacting the worker. This
+	// closes admission immediately: no new child submit may start after cancel
+	// is confirmed locally, even if the remote cancellation later needs
+	// reconciliation.
+	var cancelErrors []string
+	if err := e.cancelRemoteActionWork(ctx, ec); err != nil {
+		cancelErrors = append(cancelErrors, err.Error())
+	}
+
+	// A batch used to deliberately leave accepted children running. That makes
+	// "cancel the batch" operationally misleading and can leave the worker slots
+	// occupied by work the caller explicitly abandoned. Collect the children
+	// while the parent lease is held, then release it before recursively
+	// cancelling children so child execution/admission cannot deadlock on the
+	// parent lease.
+	var childIDs []string
+	if inst.ActionName == "transcode_batch" {
+		items, lerr := e.deps.Store.ListTranscodeBatchItems(instanceID)
+		if lerr != nil {
+			cancelErrors = append(cancelErrors, fmt.Sprintf("listing batch children: %v", lerr))
+		} else {
+			seen := make(map[string]struct{})
+			for _, item := range items {
+				if item.ChildActionID != "" {
+					if _, ok := seen[item.ChildActionID]; !ok {
+						seen[item.ChildActionID] = struct{}{}
+						childIDs = append(childIDs, item.ChildActionID)
+					}
+					continue
+				}
+				// Fail-safe for a partially persisted batch relation: if a worker
+				// job identity was saved but its child action ID was not, still stop
+				// the remote job rather than orphaning active work.
+				if item.JobID != "" && e.deps.Transcode != nil {
+					if cerr := e.cancelTranscodeJobConfirmed(ctx, item.JobID); cerr != nil {
+						cancelErrors = append(cancelErrors, fmt.Sprintf("cancelling orphan batch job %s: %v", item.JobID, cerr))
+					}
+				}
+			}
 		}
 	}
 
-	// A batch cascade is intentionally not performed here: pending children are
-	// stopped by their own admission guard (which re-reads this parent under the
-	// parent lease), and accepted jobs keep their identity and remain tracked.
-	// Directly mutating child rows without their lease could clobber a live run
-	// or erase a user wait.
-	return buildActionResult(inst, len(tmpl.Steps), ec), nil
+	releaseLease()
+
+	for _, childID := range childIDs {
+		child, gerr := e.deps.Store.GetActionInstanceIfExists(childID)
+		if gerr != nil {
+			cancelErrors = append(cancelErrors, fmt.Sprintf("reading child action %s: %v", childID, gerr))
+			continue
+		}
+		if child == nil || child.Status == StatusCompleted || child.Status == StatusFailed || child.Status == StatusCancelled {
+			continue
+		}
+		childReason := "parent transcode batch " + instanceID + " cancelled"
+		if strings.TrimSpace(reason) != "" {
+			childReason += ": " + reason
+		}
+		if _, cerr := e.Cancel(ctx, childID, childReason); cerr != nil {
+			cancelErrors = append(cancelErrors, fmt.Sprintf("cancelling child %s: %v", childID, cerr))
+		}
+	}
+
+	if len(cancelErrors) > 0 {
+		return result, fmt.Errorf("action %s was cancelled locally, but remote cancellation was not fully confirmed: %s", instanceID, strings.Join(cancelErrors, "; "))
+	}
+	return result, nil
+}
+
+// cancelRemoteActionWork cancels every remote identity owned by one action.
+// It recovers a transcode job ID from the batch-item relation when an older or
+// partially-persisted child row does not carry job_id in its state.
+func (e *Engine) cancelRemoteActionWork(ctx context.Context, ec *ExecutionContext) error {
+	if e.deps.Transcode == nil || ec == nil {
+		return nil
+	}
+	var errs []string
+
+	benchID := getString(ec.State, "benchmark_job_id")
+	if benchID == "" {
+		benchID = getString(ec.Outputs, "benchmark_job_id")
+	}
+	if benchID != "" && !getBool(ec.State, "benchmark_done") {
+		if err := e.cancelBenchmarkJobConfirmed(ctx, benchID); err != nil {
+			errs = append(errs, fmt.Sprintf("benchmark %s: %v", benchID, err))
+		}
+	}
+
+	jobID := getString(ec.State, "job_id")
+	if jobID == "" {
+		jobID = getString(ec.Outputs, "job_id")
+	}
+	if jobID == "" {
+		jobID = getString(ec.State, "external_reference")
+	}
+	if jobID == "" {
+		jobID = getString(ec.Outputs, "external_reference")
+	}
+	if jobID == "" && e.deps.Store != nil && ec.InstanceID != "" {
+		item, err := e.deps.Store.FindTranscodeBatchItemByChildActionID(ec.InstanceID)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("recovering worker job identity: %v", err))
+		} else if item != nil {
+			jobID = item.JobID
+		}
+	}
+	if jobID != "" {
+		if err := e.cancelTranscodeJobConfirmed(ctx, jobID); err != nil {
+			errs = append(errs, fmt.Sprintf("transcode %s: %v", jobID, err))
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("%s", strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+// cancelTranscodeJobConfirmed sends cancel once. Only when the HTTP result is
+// transport-uncertain do we reconcile with Status before deciding whether a
+// second idempotent cancel is needed. This preserves the existing no-blind-
+// retry rule while making cancellation operationally reliable.
+func (e *Engine) cancelTranscodeJobConfirmed(ctx context.Context, jobID string) error {
+	err := e.deps.Transcode.Cancel(ctx, jobID)
+	if err == nil {
+		return nil
+	}
+	if !transcode.IsTransportUncertain(err) {
+		return err
+	}
+
+	st, serr := e.deps.Transcode.Status(ctx, jobID)
+	if serr != nil {
+		return fmt.Errorf("cancel result uncertain (%v); status reconciliation failed: %w", err, serr)
+	}
+	switch st.Status {
+	case transcode.StatusCancelled, transcode.StatusCompleted, transcode.StatusFailed:
+		return nil
+	case transcode.StatusQueued, transcode.StatusRunning:
+		if rerr := e.deps.Transcode.Cancel(ctx, jobID); rerr != nil {
+			return fmt.Errorf("cancel result uncertain; worker still reports %s and confirmed retry failed: %w", st.Status, rerr)
+		}
+		return nil
+	default:
+		return fmt.Errorf("cancel result uncertain; worker returned unexpected status %q", st.Status)
+	}
+}
+
+func (e *Engine) cancelBenchmarkJobConfirmed(ctx context.Context, jobID string) error {
+	err := e.deps.Transcode.BenchmarkCancel(ctx, jobID)
+	if err == nil {
+		return nil
+	}
+	if !transcode.IsTransportUncertain(err) {
+		return err
+	}
+
+	st, serr := e.deps.Transcode.BenchmarkStatus(ctx, jobID)
+	if serr != nil {
+		return fmt.Errorf("benchmark cancel result uncertain (%v); status reconciliation failed: %w", err, serr)
+	}
+	switch st.Status {
+	case transcode.StatusCancelled, transcode.StatusCompleted, transcode.StatusFailed:
+		return nil
+	case transcode.StatusQueued, transcode.StatusRunning:
+		if rerr := e.deps.Transcode.BenchmarkCancel(ctx, jobID); rerr != nil {
+			return fmt.Errorf("benchmark cancel result uncertain; worker still reports %s and confirmed retry failed: %w", st.Status, rerr)
+		}
+		return nil
+	default:
+		return fmt.Errorf("benchmark cancel result uncertain; worker returned unexpected status %q", st.Status)
+	}
 }
 
 // execute runs steps sequentially with persistence, idempotency, and wait handling.
