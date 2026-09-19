@@ -123,14 +123,24 @@ type TranscodeProfileConfig struct {
 	Optimization *recipe.OptimizationPolicy `yaml:"optimization,omitempty"`
 }
 type VideoProfileConfig struct {
-	Codec           string `yaml:"codec"`
-	Quality         int    `yaml:"quality"`
-	Preset          string `yaml:"preset,omitempty"`
-	Profile         string `yaml:"profile,omitempty"`
-	PixelFormat     string `yaml:"pixel_format,omitempty"`
-	PrioritizeSpeed *bool  `yaml:"prioritize_speed,omitempty"`
-	SpatialAQ       *bool  `yaml:"spatial_aq,omitempty"`
-	Realtime        *bool  `yaml:"realtime,omitempty"`
+	Codec              string `yaml:"codec"`
+	Quality            int    `yaml:"quality"`
+	Preset             string `yaml:"preset,omitempty"`
+	Profile            string `yaml:"profile,omitempty"`
+	PixelFormat        string `yaml:"pixel_format,omitempty"`
+	PrioritizeSpeed    *bool  `yaml:"prioritize_speed,omitempty"`
+	SpatialAQ          *bool  `yaml:"spatial_aq,omitempty"`
+	Realtime           *bool  `yaml:"realtime,omitempty"`
+	AverageBitrateKbps int    `yaml:"average_bitrate_kbps,omitempty"`
+	MaxBitrateKbps     int    `yaml:"max_bitrate_kbps,omitempty"`
+	ConstantBitrate    *bool  `yaml:"constant_bitrate,omitempty"`
+	QMin               *int   `yaml:"qmin,omitempty"`
+	QMax               *int   `yaml:"qmax,omitempty"`
+	GOPSize            *int   `yaml:"gop_size,omitempty"`
+	BFrames            *int   `yaml:"b_frames,omitempty"`
+	ClosedGOP          *bool  `yaml:"closed_gop,omitempty"`
+	PowerEfficient     *bool  `yaml:"power_efficient,omitempty"`
+	MaxRefFrames       *int   `yaml:"max_ref_frames,omitempty"`
 }
 type AudioProfileConfig struct {
 	Mode string `yaml:"mode"`
@@ -189,14 +199,24 @@ func profileToRecipe(name string, p TranscodeProfileConfig) recipe.Profile {
 	return recipe.Profile{
 		Container: p.Container,
 		Video: recipe.VideoProfile{
-			Codec:           p.Video.Codec,
-			Quality:         p.Video.Quality,
-			Preset:          p.Video.Preset,
-			Profile:         p.Video.Profile,
-			PixelFormat:     p.Video.PixelFormat,
-			PrioritizeSpeed: p.Video.PrioritizeSpeed,
-			SpatialAQ:       p.Video.SpatialAQ,
-			Realtime:        p.Video.Realtime,
+			Codec:              p.Video.Codec,
+			Quality:            p.Video.Quality,
+			Preset:             p.Video.Preset,
+			Profile:            p.Video.Profile,
+			PixelFormat:        p.Video.PixelFormat,
+			PrioritizeSpeed:    p.Video.PrioritizeSpeed,
+			SpatialAQ:          p.Video.SpatialAQ,
+			Realtime:           p.Video.Realtime,
+			AverageBitrateKbps: p.Video.AverageBitrateKbps,
+			MaxBitrateKbps:     p.Video.MaxBitrateKbps,
+			ConstantBitrate:    p.Video.ConstantBitrate,
+			QMin:               p.Video.QMin,
+			QMax:               p.Video.QMax,
+			GOPSize:            p.Video.GOPSize,
+			BFrames:            p.Video.BFrames,
+			ClosedGOP:          p.Video.ClosedGOP,
+			PowerEfficient:     p.Video.PowerEfficient,
+			MaxRefFrames:       p.Video.MaxRefFrames,
 		},
 		Audio:      recipe.AudioProfile{Mode: p.Audio.Mode},
 		Subtitles:  recipe.SubtitleProfile{Mode: p.Subtitles.Mode, ConvertIncompatible: p.Subtitles.ConvertIncompatible},
@@ -219,14 +239,24 @@ func recipeToProfile(p recipe.Profile) TranscodeProfileConfig {
 	return TranscodeProfileConfig{
 		Container: p.Container,
 		Video: VideoProfileConfig{
-			Codec:           p.Video.Codec,
-			Quality:         p.Video.Quality,
-			Preset:          p.Video.Preset,
-			Profile:         p.Video.Profile,
-			PixelFormat:     p.Video.PixelFormat,
-			PrioritizeSpeed: p.Video.PrioritizeSpeed,
-			SpatialAQ:       p.Video.SpatialAQ,
-			Realtime:        p.Video.Realtime,
+			Codec:              p.Video.Codec,
+			Quality:            p.Video.Quality,
+			Preset:             p.Video.Preset,
+			Profile:            p.Video.Profile,
+			PixelFormat:        p.Video.PixelFormat,
+			PrioritizeSpeed:    p.Video.PrioritizeSpeed,
+			SpatialAQ:          p.Video.SpatialAQ,
+			Realtime:           p.Video.Realtime,
+			AverageBitrateKbps: p.Video.AverageBitrateKbps,
+			MaxBitrateKbps:     p.Video.MaxBitrateKbps,
+			ConstantBitrate:    p.Video.ConstantBitrate,
+			QMin:               p.Video.QMin,
+			QMax:               p.Video.QMax,
+			GOPSize:            p.Video.GOPSize,
+			BFrames:            p.Video.BFrames,
+			ClosedGOP:          p.Video.ClosedGOP,
+			PowerEfficient:     p.Video.PowerEfficient,
+			MaxRefFrames:       p.Video.MaxRefFrames,
 		},
 		Audio:        AudioProfileConfig{Mode: p.Audio.Mode},
 		Subtitles:    SubtitleProfileConfig{Mode: p.Subtitles.Mode, ConvertIncompatible: p.Subtitles.ConvertIncompatible},

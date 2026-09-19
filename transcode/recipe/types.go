@@ -26,6 +26,19 @@ const (
 	// MaxBitrateKbps is the conservative upper limit (1,000,000 kbps = 1 Gbps) for recipe bitrate guidance
 	// to prevent overflow and absurd values during future arithmetic and optimization.
 	MaxBitrateKbps = 1_000_000
+	// Bounds for typed offline hevc_videotoolbox controls. QMin/QMax follow
+	// the FFmpeg quantizer-scale range (nil means "emit nothing"; explicit
+	// values must be real QP bounds, never the FFmpeg "auto" sentinel).
+	MaxQMinQMax = 69
+	// MaxGOPSize bounds the -g keyframe interval sanity range for offline files.
+	MaxGOPSize = 100000
+	// MaxBFrames bounds -bf to 0 (disable reordering) or 1 (enable it).
+	// VideoToolbox chooses the actual reorder/B-frame depth internally
+	// (upstream: avctx->max_b_frames > 0, reported as 2 for HEVC), so the
+	// field is an on/off switch, never a tunable depth.
+	MaxBFrames = 1
+	// MaxRefFrames bounds -max_ref_frames for offline files.
+	MaxRefFrames = 16
 )
 
 var (
@@ -142,9 +155,13 @@ func (m *MetricTarget) Clone() *MetricTarget {
 }
 
 // SearchPolicy defines parameter space and candidate selection bounds.
+// QualityValues (-q:v sweep for VideoToolbox, CRF sweep for libx265) and
+// BitrateValues (-b:v sweep in kbps, hevc_videotoolbox only) are mutually
+// exclusive: exactly one dimension may drive a benchmark.
 type SearchPolicy struct {
 	MaxCandidates int   `json:"max_candidates,omitempty" yaml:"max_candidates,omitempty"`
 	QualityValues []int `json:"quality_values,omitempty" yaml:"quality_values,omitempty"`
+	BitrateValues []int `json:"bitrate_values,omitempty" yaml:"bitrate_values,omitempty"`
 	// AdaptiveMode selects exhaustive (default) or adaptive candidate evaluation.
 	AdaptiveMode string `json:"adaptive_mode,omitempty" yaml:"adaptive_mode,omitempty"`
 	// AdaptiveInitialQuality overrides the adaptive starting quality (default 65).
@@ -164,9 +181,14 @@ func (srch *SearchPolicy) Clone() *SearchPolicy {
 	if srch.QualityValues != nil {
 		qv = append([]int(nil), srch.QualityValues...)
 	}
+	var bv []int
+	if srch.BitrateValues != nil {
+		bv = append([]int(nil), srch.BitrateValues...)
+	}
 	return &SearchPolicy{
 		MaxCandidates:          srch.MaxCandidates,
 		QualityValues:          qv,
+		BitrateValues:          bv,
 		AdaptiveMode:           srch.AdaptiveMode,
 		AdaptiveInitialQuality: srch.AdaptiveInitialQuality,
 		EncodeConcurrency:      srch.EncodeConcurrency,
@@ -230,6 +252,23 @@ type VideoProfile struct {
 	PrioritizeSpeed *bool  `json:"prioritize_speed,omitempty" yaml:"prioritize_speed,omitempty"`
 	SpatialAQ       *bool  `json:"spatial_aq,omitempty" yaml:"spatial_aq,omitempty"`
 	Realtime        *bool  `json:"realtime,omitempty" yaml:"realtime,omitempty"`
+	// Bounded typed rate-control model for hevc_videotoolbox only (never valid
+	// for libx265). Quality (-q:v) and AverageBitrateKbps (-b:v) are mutually
+	// exclusive. There is no bufsize knob: the current FFmpeg VideoToolbox
+	// encoder does not consume it meaningfully, so it stays rejected by
+	// strict decoding.
+	AverageBitrateKbps int   `json:"average_bitrate_kbps,omitempty" yaml:"average_bitrate_kbps,omitempty"`
+	MaxBitrateKbps     int   `json:"max_bitrate_kbps,omitempty" yaml:"max_bitrate_kbps,omitempty"`
+	ConstantBitrate    *bool `json:"constant_bitrate,omitempty" yaml:"constant_bitrate,omitempty"`
+	// Bounded typed offline-quality knobs actually consumed by FFmpeg
+	// VideoToolbox for file transcoding (never valid for libx265).
+	QMin           *int  `json:"qmin,omitempty" yaml:"qmin,omitempty"`
+	QMax           *int  `json:"qmax,omitempty" yaml:"qmax,omitempty"`
+	GOPSize        *int  `json:"gop_size,omitempty" yaml:"gop_size,omitempty"`
+	BFrames        *int  `json:"b_frames,omitempty" yaml:"b_frames,omitempty"`
+	ClosedGOP      *bool `json:"closed_gop,omitempty" yaml:"closed_gop,omitempty"`
+	PowerEfficient *bool `json:"power_efficient,omitempty" yaml:"power_efficient,omitempty"`
+	MaxRefFrames   *int  `json:"max_ref_frames,omitempty" yaml:"max_ref_frames,omitempty"`
 }
 
 type AudioProfile struct {
