@@ -190,6 +190,12 @@ func (h *promotionHarness) serve(w http.ResponseWriter, r *http.Request) {
 				if p.Commands["import"] == nil || p.Commands["import"].SentAt == "" {
 					h.t.Error("import sent before durable intent")
 				}
+				if !p.BackupVerified {
+					h.t.Error("import sent before recovery_verified was persisted")
+				}
+				if p.RecoveryCopyOwner != "" || p.RecoveryCopyComplete {
+					h.t.Error("import sent while recovery copy was still marked in-flight")
+				}
 				if err := h.engine.verifyPromotionHash(context.Background(), p.BackupPath, p.OriginalSHA); err != nil {
 					h.t.Errorf("import before recovery verification: %v", err)
 				} else {
@@ -606,5 +612,116 @@ func TestPromotionDifferentCandidatesCannotClaimSameOriginal(t *testing.T) {
 	second = h.resume(second.ID, "approve")
 	if second.Status != StatusFailed || !strings.Contains(second.Error, "reserved") || h.imports != 1 {
 		t.Fatalf("original reservation bypassed: %s %s imports=%d", second.Status, second.Error, h.imports)
+	}
+}
+
+
+func TestPromotionPreserveDoesNotTouchPartialOwnedByCurrentExecution(t *testing.T) {
+	h := newPromotionHarness(t)
+	r := h.run()
+	p, err := loadPromotion(&ExecutionContext{State: r.State})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Approved = true
+	key := sha256.Sum256([]byte(p.Service + "\x00" + p.SourceActionID))
+	p.BackupPath = filepath.Join(filepath.Dir(p.CandidatePath), ".promotion-recovery", hex.EncodeToString(key[:]), "original.bak")
+	if err := os.MkdirAll(filepath.Dir(p.BackupPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	partial := p.BackupPath + ".partial"
+	const partialBytes = "copy-is-still-being-written"
+	if err := os.WriteFile(partial, []byte(partialBytes), 0600); err != nil {
+		t.Fatal(err)
+	}
+	const owner = "executor-live-copy"
+	p.RecoveryCopyOwner = owner
+	p.RecoveryCopyComplete = false
+	ec := &ExecutionContext{
+		InstanceID: r.ID,
+		ActionName: "promote_transcode_candidate",
+		State:      map[string]any{"promotion": p},
+		Outputs:    map[string]any{},
+		Engine:     h.engine,
+	}
+	ctx := context.WithValue(context.Background(), actionLeaseOwnerKey{actionID: r.ID}, owner)
+
+	res, err := h.engine.stepPromotePreserve(ctx, ec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != StepWaitingExternal {
+		t.Fatalf("active partial was not deferred: %+v", res)
+	}
+	got, err := os.ReadFile(partial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != partialBytes {
+		t.Fatalf("active partial was modified/restarted: %q", string(got))
+	}
+	if _, err := os.Stat(p.BackupPath); !os.IsNotExist(err) {
+		t.Fatalf("backup was published while copy was active: %v", err)
+	}
+	if h.imports != 0 || h.deletes != 0 {
+		t.Fatalf("Sonarr mutated while recovery copy was active: imports=%d deletes=%d", h.imports, h.deletes)
+	}
+}
+
+func TestPromotionRecoversAbandonedPartialBeforeReplacement(t *testing.T) {
+	h := newPromotionHarness(t)
+	r := h.run()
+	inst, err := h.st.GetActionInstance(r.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ec := parseExecutionContext(inst, h.engine)
+	p, err := loadPromotion(ec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := sha256.Sum256([]byte(p.Service + "\x00" + p.SourceActionID))
+	p.BackupPath = filepath.Join(filepath.Dir(p.CandidatePath), ".promotion-recovery", hex.EncodeToString(key[:]), "original.bak")
+	p.RecoveryCopyOwner = "executor-that-lost-the-lease"
+	p.RecoveryCopyComplete = false
+	if err := os.MkdirAll(filepath.Dir(p.BackupPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p.BackupPath+".partial", []byte("abandoned-incomplete-copy"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ec.State["promotion"] = p
+	inst.StateJSON = toJSON(ec.State)
+	if err := h.st.UpdateActionInstance(*inst); err != nil {
+		t.Fatal(err)
+	}
+
+	r = h.resume(r.ID, "approve")
+	if r.Status != StatusWaitingExternal {
+		t.Fatalf("replacement did not reach the deletion checkpoint: status=%s error=%s waiting=%s", r.Status, r.Error, r.WaitingReason)
+	}
+	p, err = loadPromotion(&ExecutionContext{State: r.State})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p.BackupVerified || p.RecoveryCopyOwner != "" || p.RecoveryCopyComplete {
+		t.Fatalf("recovery publication was not durably finalized before replacement: %+v", p)
+	}
+	if err := h.engine.verifyPromotionHash(context.Background(), p.BackupPath, p.OriginalSHA); err != nil {
+		t.Fatalf("published recovery is invalid: %v", err)
+	}
+	if _, err := os.Stat(p.BackupPath + ".partial"); !os.IsNotExist(err) {
+		t.Fatalf("canonical partial survived verified publication: %v", err)
+	}
+	if h.imports != 1 || h.deletes != 1 || strings.Join(h.mutationOrder, ",") != "import,delete" {
+		t.Fatalf("replacement ordering before reconcile is wrong: imports=%d deletes=%d order=%v", h.imports, h.deletes, h.mutationOrder)
+	}
+
+	r = h.finish(r)
+	if r.Status != StatusCompleted {
+		t.Fatalf("replacement did not finish: status=%s error=%s waiting=%s", r.Status, r.Error, r.WaitingReason)
+	}
+	if strings.Join(h.mutationOrder, ",") != "import,delete,rename,rescan" {
+		t.Fatalf("final replacement order %v", h.mutationOrder)
 	}
 }
