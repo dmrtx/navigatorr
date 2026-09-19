@@ -83,8 +83,12 @@ func Resolve(s *Snapshot, profileName string, overrides map[string]Profile, subt
 	plan := &transcode.Plan{
 		Container: container, VideoCodec: normalizeCodec(p.Video.Codec), Quality: p.Video.Quality,
 		Preset:       normalizeCodec(p.Video.Preset),
-		VideoProfile: videoProfile, PixelFormat: pixelFormat, PrioritizeSpeed: cloneBool(p.Video.PrioritizeSpeed), SpatialAQ: cloneBool(p.Video.SpatialAQ), Realtime: cloneBool(p.Video.Realtime), ExpectedBitDepth: expectedBitDepth,
-		AudioMode: strings.ToLower(strings.TrimSpace(p.Audio.Mode)), SubtitleMode: strings.ToLower(strings.TrimSpace(p.Subtitles.Mode)),
+		VideoProfile: videoProfile, PixelFormat: pixelFormat, PrioritizeSpeed: cloneBool(p.Video.PrioritizeSpeed), SpatialAQ: cloneBool(p.Video.SpatialAQ), Realtime: cloneBool(p.Video.Realtime),
+		AverageBitrateKbps: p.Video.AverageBitrateKbps, MaxBitrateKbps: p.Video.MaxBitrateKbps, ConstantBitrate: cloneBool(p.Video.ConstantBitrate),
+		QMin: cloneInt(p.Video.QMin), QMax: cloneInt(p.Video.QMax), GOPSize: cloneInt(p.Video.GOPSize), BFrames: cloneInt(p.Video.BFrames),
+		ClosedGOP: cloneBool(p.Video.ClosedGOP), PowerEfficient: cloneBool(p.Video.PowerEfficient), MaxRefFrames: cloneInt(p.Video.MaxRefFrames),
+		ExpectedBitDepth: expectedBitDepth,
+		AudioMode:        strings.ToLower(strings.TrimSpace(p.Audio.Mode)), SubtitleMode: strings.ToLower(strings.TrimSpace(p.Subtitles.Mode)),
 		ConvertIncompatibleSubtitles: p.Subtitles.ConvertIncompatible, PreserveMetadata: p.Preserve.Metadata, PreserveChapters: p.Preserve.Chapters, PreserveAttachments: p.Preserve.Attachments,
 		SubtitleActions: actions, RecipeVersion: s.Identity.Version, RecipeDigest: s.Identity.Digest,
 		Resilience:       transcode.ResiliencePlan{MaxAttempts: p.Resilience.MaxAttempts, TransientRetries: p.Resilience.TransientRetries, RetryBackoffSeconds: append([]int(nil), p.Resilience.RetryBackoffSeconds...), MaxFallbacks: p.Resilience.MaxFallbacks, RetryOn: retryOn},
@@ -99,6 +103,14 @@ func Resolve(s *Snapshot, profileName string, overrides map[string]Profile, subt
 }
 
 func cloneBool(v *bool) *bool {
+	if v == nil {
+		return nil
+	}
+	out := *v
+	return &out
+}
+
+func cloneInt(v *int) *int {
 	if v == nil {
 		return nil
 	}

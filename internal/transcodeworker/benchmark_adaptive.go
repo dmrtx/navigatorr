@@ -31,9 +31,14 @@ func isAdaptiveEnabled(record *BenchmarkRecord, r *ProductionBenchmarkRunner) bo
 	// Adaptive ordering assumes ascending rate-control value => non-decreasing
 	// quality. That holds for VideoToolbox -q:v but is inverted for libx265 CRF
 	// (lower CRF = higher quality), so non-VideoToolbox codecs always use the
-	// exhaustive path to preserve selection semantics.
+	// exhaustive path to preserve selection semantics. VideoToolbox bitrate
+	// sweeps are likewise excluded: the planner probes quality-ordered
+	// candidates only.
 	for _, c := range record.Candidates {
 		if transcode.BenchmarkCandidateVideoCodec(c) != "hevc_videotoolbox" {
+			return false
+		}
+		if c.AverageBitrateKbps != 0 {
 			return false
 		}
 	}
