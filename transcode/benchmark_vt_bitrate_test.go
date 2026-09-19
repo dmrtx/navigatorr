@@ -77,6 +77,11 @@ func TestValidateBenchmarkRequest_VTRateModeFailClosed(t *testing.T) {
 			want:  "qmin (40) must be <= qmax (30)",
 		},
 		{
+			name:  "bframes above boolean range",
+			cands: []BenchmarkCandidate{{ID: "c1", Quality: 65, BFrames: intPtr(2)}},
+			want:  "b_frames 2 out of valid range 0..1",
+		},
+		{
 			name:  "preset for videotoolbox",
 			cands: []BenchmarkCandidate{{ID: "c1", Quality: 65, Preset: "slow"}},
 			want:  "only supported for libx265",

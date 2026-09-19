@@ -81,6 +81,27 @@ func TestBuildVideoEncoderArgsOfflineKnobs(t *testing.T) {
 	}
 }
 
+func TestBuildVideoEncoderArgsBFramesBooleanSemantics(t *testing.T) {
+	// Upstream FFmpeg uses -bf only as an on/off switch (avctx->max_b_frames
+	// > 0, reported as depth 2 for HEVC): 0 disables reordering, 1 enables
+	// it, and anything above 1 fails closed instead of implying tunable depth.
+	on := &transcode.Plan{VideoCodec: "hevc_videotoolbox", Quality: 65, BFrames: intPtr(1)}
+	got, err := BuildVideoEncoderArgs(on)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"-c:v", "hevc_videotoolbox", "-q:v", "65", "-bf", "1"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected args\nwant=%v\n got=%v", want, got)
+	}
+	for _, depth := range []int{2, 3, 16} {
+		bad := &transcode.Plan{VideoCodec: "hevc_videotoolbox", Quality: 65, BFrames: intPtr(depth)}
+		if _, err := BuildVideoEncoderArgs(bad); err == nil || !strings.Contains(err.Error(), "invalid b_frames") {
+			t.Fatalf("b_frames %d did not fail closed: %v", depth, err)
+		}
+	}
+}
+
 func TestBuildVideoEncoderArgsClosedGOPExplicitFalse(t *testing.T) {
 	plan := &transcode.Plan{VideoCodec: "hevc_videotoolbox", Quality: 65, ClosedGOP: boolPtr(false)}
 	got, err := BuildVideoEncoderArgs(plan)

@@ -32,8 +32,11 @@ const (
 	MaxQMinQMax = 69
 	// MaxGOPSize bounds the -g keyframe interval sanity range for offline files.
 	MaxGOPSize = 100000
-	// MaxBFrames bounds -bf frame-reordering depth for offline files.
-	MaxBFrames = 16
+	// MaxBFrames bounds -bf to 0 (disable reordering) or 1 (enable it).
+	// VideoToolbox chooses the actual reorder/B-frame depth internally
+	// (upstream: avctx->max_b_frames > 0, reported as 2 for HEVC), so the
+	// field is an on/off switch, never a tunable depth.
+	MaxBFrames = 1
 	// MaxRefFrames bounds -max_ref_frames for offline files.
 	MaxRefFrames = 16
 )

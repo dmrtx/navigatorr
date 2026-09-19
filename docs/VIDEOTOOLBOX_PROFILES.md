@@ -20,7 +20,7 @@ For `codec: hevc_videotoolbox` the schema supports:
 | `realtime` | boolean | `true`, `false` | not forced | `-realtime 1/0` |
 | `qmin` / `qmax` | integer | `0..69`, `qmin <= qmax` | not forced | `-qmin N` / `-qmax N` (allowed frame QP) |
 | `gop_size` | integer | `1..100000` | not forced | `-g N` (max keyframe interval) |
-| `b_frames` | integer | `0..16` | not forced | `-bf N` (frame reordering depth) |
+| `b_frames` | integer | `0` or `1` | not forced | `-bf 0` disables frame reordering/B-frames, `-bf 1` enables it (VideoToolbox chooses the actual reorder/B-frame depth internally — upstream reports 2 for HEVC — so this is an on/off switch, never a tunable depth) |
 | `closed_gop` | boolean | `true`, `false` | not forced | `-flags +cgop` / `-flags -cgop` |
 | `power_efficient` | boolean | `true`, `false` | not forced | `-power_efficient 1/0` |
 | `max_ref_frames` | integer | `1..16` | not forced | `-max_ref_frames N` |
@@ -42,7 +42,13 @@ benchmark search dimension (`quality_values` vs `bitrate_values`):
 
 Integer knobs use pointer semantics like the booleans below: omitted means
 "emit nothing", while an explicit value — including `b_frames: 0` — is
-emitted verbatim and validated against the ranges above.
+emitted verbatim and validated against the ranges above. Values above a
+knob's documented maximum (e.g. `b_frames: 2`) fail recipe validation
+instead of implying encoder granularity FFmpeg does not implement.
+
+`max_ref_frames` only has an effect below the maximum allowed by the
+profile/level (upstream encoder semantics); larger values are accepted by
+the range check but do not force references past that ceiling.
 
 Omitted fields stay absent from the immutable plan. This is intentional: legacy is `FFmpeg-argv compatible; no new encoder defaults are injected`, not fully behavior-compatible because capability probing occurs.
 

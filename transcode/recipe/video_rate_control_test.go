@@ -125,6 +125,13 @@ func TestVideoRateControlFailClosed(t *testing.T) {
 			want: "qmin (40) must be <= qmax (30)",
 		},
 		{
+			name: "bframes above boolean range",
+			video: `      codec: hevc_videotoolbox
+      quality: 65
+      b_frames: 2`,
+			want: "b_frames 2 out of range 0-1",
+		},
+		{
 			name: "preset for videotoolbox",
 			video: `      codec: hevc_videotoolbox
       quality: 65
