@@ -616,6 +616,7 @@ type httpSubmitPayload struct {
 	Plan                *Plan  `json:"plan,omitempty"`
 	IdempotencyKey      string `json:"idempotency_key,omitempty"`
 	ExecutionSpecDigest string `json:"execution_spec_digest,omitempty"`
+	SourceSHA256        string `json:"source_sha256,omitempty"`
 }
 
 type httpSubmitResult struct {
@@ -664,11 +665,11 @@ func (e *HTTPExecutor) Submit(ctx context.Context, req Request) (Job, error) {
 	if req.ExecutionSpecDigest != "" {
 		specDigest = strings.TrimSpace(req.ExecutionSpecDigest)
 	} else if req.Plan != nil {
-		if d, derr := DigestTranscodeExecutionSpec(remoteSource, remoteCandidate, profile, req.Plan); derr == nil {
+		if d, derr := DigestTranscodeExecutionSpecWithSourceSHA(remoteSource, remoteCandidate, profile, req.SourceSHA256, req.Plan); derr == nil {
 			specDigest = d
 		}
 	}
-	payload := httpSubmitPayload{ID: req.ID, SourcePath: remoteSource, CandidatePath: remoteCandidate, Profile: profile, Plan: req.Plan, IdempotencyKey: effKey, ExecutionSpecDigest: specDigest}
+	payload := httpSubmitPayload{ID: req.ID, SourcePath: remoteSource, CandidatePath: remoteCandidate, Profile: profile, Plan: req.Plan, IdempotencyKey: effKey, ExecutionSpecDigest: specDigest, SourceSHA256: req.SourceSHA256}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return Job{}, fmt.Errorf("serializing submit payload: %w", err)
