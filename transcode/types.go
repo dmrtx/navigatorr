@@ -35,14 +35,33 @@ type ResiliencePlan struct {
 }
 
 type Plan struct {
-	Container                    string           `json:"container" yaml:"container"`
-	VideoCodec                   string           `json:"video_codec" yaml:"video_codec"`
-	Quality                      int              `json:"quality" yaml:"quality"`
-	VideoProfile                 string           `json:"video_profile,omitempty" yaml:"video_profile,omitempty"`
-	PixelFormat                  string           `json:"pixel_format,omitempty" yaml:"pixel_format,omitempty"`
-	PrioritizeSpeed              *bool            `json:"prioritize_speed,omitempty" yaml:"prioritize_speed,omitempty"`
-	SpatialAQ                    *bool            `json:"spatial_aq,omitempty" yaml:"spatial_aq,omitempty"`
-	Realtime                     *bool            `json:"realtime,omitempty" yaml:"realtime,omitempty"`
+	Container  string `json:"container" yaml:"container"`
+	VideoCodec string `json:"video_codec" yaml:"video_codec"`
+	// Quality is the rate-control knob. For hevc_videotoolbox it maps to -q:v
+	// (higher = higher quality). For libx265 it maps to -crf (LOWER = higher
+	// quality, valid range 1..51). See VideoProfile.Preset for x265 preset.
+	Quality      int    `json:"quality" yaml:"quality"`
+	VideoProfile string `json:"video_profile,omitempty" yaml:"video_profile,omitempty"`
+	PixelFormat  string `json:"pixel_format,omitempty" yaml:"pixel_format,omitempty"`
+	// Preset is the libx265 speed/efficiency preset. It must be empty for
+	// hevc_videotoolbox and is validated against a fixed safe enum for libx265.
+	Preset          string `json:"preset,omitempty" yaml:"preset,omitempty"`
+	PrioritizeSpeed *bool  `json:"prioritize_speed,omitempty" yaml:"prioritize_speed,omitempty"`
+	SpatialAQ       *bool  `json:"spatial_aq,omitempty" yaml:"spatial_aq,omitempty"`
+	Realtime        *bool  `json:"realtime,omitempty" yaml:"realtime,omitempty"`
+	// Bounded typed hevc_videotoolbox rate-control/offline knobs. All must be
+	// unset for libx265; quality-vs-bitrate exclusivity is enforced at every
+	// validation layer. See VideoProfile for field semantics.
+	AverageBitrateKbps           int              `json:"average_bitrate_kbps,omitempty" yaml:"average_bitrate_kbps,omitempty"`
+	MaxBitrateKbps               int              `json:"max_bitrate_kbps,omitempty" yaml:"max_bitrate_kbps,omitempty"`
+	ConstantBitrate              *bool            `json:"constant_bitrate,omitempty" yaml:"constant_bitrate,omitempty"`
+	QMin                         *int             `json:"qmin,omitempty" yaml:"qmin,omitempty"`
+	QMax                         *int             `json:"qmax,omitempty" yaml:"qmax,omitempty"`
+	GOPSize                      *int             `json:"gop_size,omitempty" yaml:"gop_size,omitempty"`
+	BFrames                      *int             `json:"b_frames,omitempty" yaml:"b_frames,omitempty"`
+	ClosedGOP                    *bool            `json:"closed_gop,omitempty" yaml:"closed_gop,omitempty"`
+	PowerEfficient               *bool            `json:"power_efficient,omitempty" yaml:"power_efficient,omitempty"`
+	MaxRefFrames                 *int             `json:"max_ref_frames,omitempty" yaml:"max_ref_frames,omitempty"`
 	ExpectedBitDepth             int              `json:"expected_bit_depth,omitempty" yaml:"expected_bit_depth,omitempty"`
 	AudioMode                    string           `json:"audio_mode" yaml:"audio_mode"`
 	SubtitleMode                 string           `json:"subtitle_mode" yaml:"subtitle_mode"`
@@ -56,6 +75,64 @@ type Plan struct {
 	PlanDigest                   string           `json:"plan_digest,omitempty" yaml:"plan_digest,omitempty"`
 	Resilience                   ResiliencePlan   `json:"resilience,omitempty" yaml:"resilience,omitempty"`
 	AppliedFallbacks             []string         `json:"applied_fallbacks,omitempty" yaml:"applied_fallbacks,omitempty"`
+}
+
+// Video encoder identifiers accepted by the worker and recipe engine.
+const (
+	VideoCodecHEVCVideoToolbox = "hevc_videotoolbox"
+	VideoCodecLibX265          = "libx265"
+)
+
+// libx265 rate-control bounds. For libx265, Quality is interpreted as CRF,
+// where a LOWER value yields HIGHER quality (inverse of VideoToolbox -q:v).
+const (
+	LibX265CRFMin = 1
+	LibX265CRFMax = 51
+)
+
+// Bounds for typed hevc_videotoolbox rate-control/offline knobs shared by the
+// coordinator and worker without a transcode->recipe import cycle.
+// MaxVideoBitrateKbps mirrors the recipe MaxBitrateKbps limit (1 Gbps).
+const MaxVideoBitrateKbps = 1_000_000
+
+// MaxQPBound bounds explicit qmin/qmax quantizer values (FFmpeg scale;
+// nil means "emit nothing", never the FFmpeg "auto" sentinel).
+const MaxQPBound = 69
+
+// MaxBenchmarkGOPSize bounds explicit gop_size keyframe intervals.
+const MaxBenchmarkGOPSize = 100000
+
+// MaxBenchmarkBFrames bounds explicit b_frames to the only truthful values:
+// 0 disables frame reordering/B-frames (-bf 0) and 1 enables it (-bf 1).
+// Upstream FFmpeg derives a boolean (avctx->max_b_frames > 0, reported as
+// depth 2 for HEVC) and never uses the requested value as a tunable depth,
+// so anything above 1 fails closed instead of implying fake granularity.
+const MaxBenchmarkBFrames = 1
+
+// MaxBenchmarkRefFrames bounds explicit max_ref_frames.
+const MaxBenchmarkRefFrames = 16
+
+// libX265Presets is the fixed, safe libx265 -preset enum. Arbitrary values are
+// rejected everywhere to preserve the fail-closed, no-raw-args boundary.
+var libX265Presets = map[string]bool{
+	"ultrafast": true, "superfast": true, "veryfast": true, "faster": true,
+	"fast": true, "medium": true, "slow": true, "slower": true,
+	"veryslow": true, "placebo": true,
+}
+
+// NormalizeVideoCodec lowercases and trims a codec identifier.
+func NormalizeVideoCodec(codec string) string {
+	return strings.ToLower(strings.TrimSpace(codec))
+}
+
+// IsValidLibX265Preset reports whether preset belongs to the libx265 enum.
+func IsValidLibX265Preset(preset string) bool {
+	return libX265Presets[strings.ToLower(strings.TrimSpace(preset))]
+}
+
+// ValidLibX265Presets returns the allowed libx265 presets in a stable order.
+func ValidLibX265Presets() []string {
+	return []string{"ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow", "placebo"}
 }
 
 func DigestPlan(p *Plan) (string, error) {
@@ -171,6 +248,16 @@ type JobStatus struct {
 	PrioritizeSpeed       *bool              `json:"prioritize_speed,omitempty"`
 	SpatialAQ             *bool              `json:"spatial_aq,omitempty"`
 	Realtime              *bool              `json:"realtime,omitempty"`
+	AverageBitrateKbps    int                `json:"average_bitrate_kbps,omitempty"`
+	MaxBitrateKbps        int                `json:"max_bitrate_kbps,omitempty"`
+	ConstantBitrate       *bool              `json:"constant_bitrate,omitempty"`
+	QMin                  *int               `json:"qmin,omitempty"`
+	QMax                  *int               `json:"qmax,omitempty"`
+	GOPSize               *int               `json:"gop_size,omitempty"`
+	BFrames               *int               `json:"b_frames,omitempty"`
+	ClosedGOP             *bool              `json:"closed_gop,omitempty"`
+	PowerEfficient        *bool              `json:"power_efficient,omitempty"`
+	MaxRefFrames          *int               `json:"max_ref_frames,omitempty"`
 	ExpectedBitDepth      int                `json:"expected_bit_depth,omitempty"`
 	Attempt               int                `json:"attempt,omitempty"`
 	RetryCount            int                `json:"retry_count,omitempty"`

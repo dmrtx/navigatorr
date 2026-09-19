@@ -22,7 +22,7 @@ type WorkerCapabilities struct {
 func Capabilities() WorkerCapabilities {
 	return WorkerCapabilities{
 		Containers:           []string{"mkv"},
-		VideoCodecs:          []string{"hevc_videotoolbox"},
+		VideoCodecs:          []string{"hevc_videotoolbox", "libx265"},
 		AudioOperations:      []string{"copy"},
 		SubtitleOperations:   []string{"copy", "transcode"},
 		SubtitleEncodeCodecs: []string{"subrip"},
@@ -39,11 +39,21 @@ func ValidatePlan(p *transcode.Plan) error {
 	if normalizeContainer(p.Container) != "mkv" {
 		return fmt.Errorf("unsupported container %q (only mkv is allowed; fail closed)", p.Container)
 	}
-	if norm(p.VideoCodec) != "hevc_videotoolbox" {
+	if norm(p.VideoCodec) != "hevc_videotoolbox" && norm(p.VideoCodec) != "libx265" {
 		return fmt.Errorf("unsupported video codec %q (fail closed)", p.VideoCodec)
 	}
-	if p.Quality < 1 || p.Quality > 100 {
-		return fmt.Errorf("invalid quality level %d (must be 1-100; fail closed)", p.Quality)
+	// VideoToolbox rate control is exactly one dimension: quality mode
+	// (-q:v 1..100) or average-bitrate mode (-b:v with Quality unset). Full
+	// cross-field rules live in BuildVideoEncoderArgs; this gate only admits
+	// the two shapes. libx265 CRF bounds are enforced by BuildVideoEncoderArgs.
+	if norm(p.VideoCodec) == "hevc_videotoolbox" {
+		if p.AverageBitrateKbps > 0 {
+			if p.Quality != 0 {
+				return fmt.Errorf("quality (%d) and average_bitrate_kbps (%d) are mutually exclusive (fail closed)", p.Quality, p.AverageBitrateKbps)
+			}
+		} else if p.Quality < 1 || p.Quality > 100 {
+			return fmt.Errorf("invalid quality level %d (must be 1-100; fail closed)", p.Quality)
+		}
 	}
 	if _, err := BuildVideoEncoderArgs(p); err != nil {
 		return err

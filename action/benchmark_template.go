@@ -335,10 +335,65 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 			basePlan := getPlan(ec.State["plan"])
 			if basePlan != nil {
 				wp := *basePlan
+				// The swept rate dimension is authoritative verbatim: quality
+				// winners carry Quality with zero bitrate, bitrate winners
+				// carry AverageBitrateKbps with zero quality.
 				wp.Quality = winner.Quality
+				wp.AverageBitrateKbps = winner.AverageBitrateKbps
+				// All other typed knobs are carried when the winner states
+				// them (coordinator-built candidates always echo the full
+				// inherited set); a winner that omits them (foreign or
+				// pre-upgrade in-flight job) retains the base plan intent
+				// instead of silently clearing encoder configuration.
+				if winner.MaxBitrateKbps != 0 {
+					wp.MaxBitrateKbps = winner.MaxBitrateKbps
+				}
+				if winner.ConstantBitrate != nil {
+					wp.ConstantBitrate = winner.ConstantBitrate
+				}
+				if winner.QMin != nil {
+					wp.QMin = winner.QMin
+				}
+				if winner.QMax != nil {
+					wp.QMax = winner.QMax
+				}
+				if winner.GOPSize != nil {
+					wp.GOPSize = winner.GOPSize
+				}
+				if winner.BFrames != nil {
+					wp.BFrames = winner.BFrames
+				}
+				if winner.ClosedGOP != nil {
+					wp.ClosedGOP = winner.ClosedGOP
+				}
+				if winner.PowerEfficient != nil {
+					wp.PowerEfficient = winner.PowerEfficient
+				}
+				if winner.MaxRefFrames != nil {
+					wp.MaxRefFrames = winner.MaxRefFrames
+				}
+				if winner.PrioritizeSpeed != nil {
+					wp.PrioritizeSpeed = winner.PrioritizeSpeed
+				}
+				if winner.SpatialAQ != nil {
+					wp.SpatialAQ = winner.SpatialAQ
+				}
+				if winner.Realtime != nil {
+					wp.Realtime = winner.Realtime
+				}
 				wp.VideoProfile = winner.VideoProfile
 				wp.PixelFormat = winner.PixelFormat
 				wp.ExpectedBitDepth = winner.ExpectedBitDepth
+				// The winner is authoritative for the encoder and preset it was
+				// benchmarked with; carry them into the full-encode plan so a
+				// libx265 winner is not silently re-encoded with the base plan's
+				// VideoToolbox encoder (and vice versa).
+				if codec := strings.TrimSpace(winner.VideoCodec); codec != "" {
+					wp.VideoCodec = codec
+				}
+				if preset := strings.TrimSpace(winner.Preset); preset != "" {
+					wp.Preset = preset
+				}
 				digest, err := transcode.DigestPlan(&wp)
 				if err != nil {
 					return StepResult{Status: StepFailed, Error: fmt.Sprintf("computing winning plan digest: %v", err)}, nil
@@ -359,7 +414,10 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 
 			outputs["winner"] = winner
 			outputs["winner_candidate_id"] = winner.CandidateID
+			outputs["winner_video_codec"] = winner.VideoCodec
+			outputs["winner_preset"] = winner.Preset
 			outputs["winner_quality"] = winner.Quality
+			outputs["winner_average_bitrate_kbps"] = winner.AverageBitrateKbps
 			outputs["winner_video_profile"] = winner.VideoProfile
 			outputs["winner_pixel_format"] = winner.PixelFormat
 			outputs["winner_bit_depth"] = winner.ExpectedBitDepth
@@ -506,9 +564,15 @@ func getOrCreateBenchmarkJobID(ec *ExecutionContext) (string, error) {
 	return id, nil
 }
 
-func buildBenchmarkCandidates(bitDepth int, qVals []int, maxCandidates int) ([]transcode.BenchmarkCandidate, error) {
+func buildBenchmarkCandidates(basePlan *transcode.Plan, bitDepth int, srch *recipe.SearchPolicy) ([]transcode.BenchmarkCandidate, error) {
+	if basePlan == nil {
+		return nil, fmt.Errorf("base transcode plan is required to derive benchmark encoder and video knobs (fail closed)")
+	}
 	if bitDepth != 8 && bitDepth != 10 {
 		return nil, fmt.Errorf("unsupported source bit depth %d: only 8-bit and 10-bit SDR content supported (fail closed)", bitDepth)
+	}
+	if srch == nil {
+		return nil, fmt.Errorf("search policy is required to build benchmark candidates (fail closed)")
 	}
 	targetProf := "main"
 	targetPix := "yuv420p"
@@ -517,24 +581,135 @@ func buildBenchmarkCandidates(bitDepth int, qVals []int, maxCandidates int) ([]t
 		targetPix = "p010le"
 	}
 
-	if maxCandidates > 0 && len(qVals) > maxCandidates {
-		qVals = qVals[:maxCandidates]
+	normCodec := transcode.NormalizeVideoCodec(basePlan.VideoCodec)
+	if normCodec == "" {
+		normCodec = transcode.VideoCodecHEVCVideoToolbox
+	}
+	normPreset := strings.ToLower(strings.TrimSpace(basePlan.Preset))
+	maxCandidates := srch.MaxCandidates
+	hasQuality := len(srch.QualityValues) > 0
+	hasBitrate := len(srch.BitrateValues) > 0
+	if hasQuality && hasBitrate {
+		return nil, fmt.Errorf("search quality_values and bitrate_values are mutually exclusive: sweep exactly one rate-control dimension (fail closed)")
+	}
+	if !hasQuality && !hasBitrate {
+		return nil, fmt.Errorf("search must specify quality_values or bitrate_values (fail closed)")
 	}
 
-	candidates := make([]transcode.BenchmarkCandidate, 0, len(qVals))
-	for _, q := range qVals {
-		if q < 1 || q > 100 {
-			return nil, fmt.Errorf("invalid quality %d: must be in 1..100", q)
-		}
-		cID := fmt.Sprintf("cand_q%d", q)
-		candidates = append(candidates, transcode.BenchmarkCandidate{
-			ID:           cID,
-			Quality:      q,
-			VideoProfile: targetProf,
-			PixelFormat:  targetPix,
-		})
+	// All typed VideoToolbox knobs except the swept rate dimension are
+	// inherited verbatim from the profile's resolved base plan, so benchmark
+	// encodes exercise the exact configuration the full transcode would run.
+	inheritVideoToolboxKnobs := func(c *transcode.BenchmarkCandidate) {
+		c.VideoProfile = targetProf
+		c.PixelFormat = targetPix
+		c.MaxBitrateKbps = basePlan.MaxBitrateKbps
+		c.ConstantBitrate = cloneBenchmarkBool(basePlan.ConstantBitrate)
+		c.QMin = cloneBenchmarkInt(basePlan.QMin)
+		c.QMax = cloneBenchmarkInt(basePlan.QMax)
+		c.GOPSize = cloneBenchmarkInt(basePlan.GOPSize)
+		c.BFrames = cloneBenchmarkInt(basePlan.BFrames)
+		c.ClosedGOP = cloneBenchmarkBool(basePlan.ClosedGOP)
+		c.PowerEfficient = cloneBenchmarkBool(basePlan.PowerEfficient)
+		c.MaxRefFrames = cloneBenchmarkInt(basePlan.MaxRefFrames)
+		c.PrioritizeSpeed = cloneBenchmarkBool(basePlan.PrioritizeSpeed)
+		c.SpatialAQ = cloneBenchmarkBool(basePlan.SpatialAQ)
+		c.Realtime = cloneBenchmarkBool(basePlan.Realtime)
 	}
-	return candidates, nil
+
+	switch normCodec {
+	case transcode.VideoCodecHEVCVideoToolbox:
+		if normPreset != "" {
+			return nil, fmt.Errorf("preset %q is only supported for libx265 (fail closed)", basePlan.Preset)
+		}
+		if hasBitrate {
+			brVals := srch.BitrateValues
+			if maxCandidates > 0 && len(brVals) > maxCandidates {
+				brVals = brVals[:maxCandidates]
+			}
+			candidates := make([]transcode.BenchmarkCandidate, 0, len(brVals))
+			for _, br := range brVals {
+				if br < 1 || br > transcode.MaxVideoBitrateKbps {
+					return nil, fmt.Errorf("invalid bitrate value %d: must be in 1..%d kbps", br, transcode.MaxVideoBitrateKbps)
+				}
+				c := transcode.BenchmarkCandidate{
+					ID:                 fmt.Sprintf("cand_br%dk", br),
+					VideoCodec:         normCodec,
+					AverageBitrateKbps: br,
+				}
+				inheritVideoToolboxKnobs(&c)
+				if c.MaxBitrateKbps != 0 && c.MaxBitrateKbps < c.AverageBitrateKbps {
+					return nil, fmt.Errorf("bitrate candidate %q (%d kbps) exceeds inherited max_bitrate_kbps (%d) (fail closed)", c.ID, c.AverageBitrateKbps, c.MaxBitrateKbps)
+				}
+				candidates = append(candidates, c)
+			}
+			return candidates, nil
+		}
+		qVals := srch.QualityValues
+		if maxCandidates > 0 && len(qVals) > maxCandidates {
+			qVals = qVals[:maxCandidates]
+		}
+		candidates := make([]transcode.BenchmarkCandidate, 0, len(qVals))
+		for _, q := range qVals {
+			if q < 1 || q > 100 {
+				return nil, fmt.Errorf("invalid quality %d: must be in 1..100", q)
+			}
+			c := transcode.BenchmarkCandidate{
+				ID:         fmt.Sprintf("cand_q%d", q),
+				VideoCodec: normCodec,
+				Quality:    q,
+			}
+			inheritVideoToolboxKnobs(&c)
+			candidates = append(candidates, c)
+		}
+		return candidates, nil
+	case transcode.VideoCodecLibX265:
+		if hasBitrate {
+			return nil, fmt.Errorf("search bitrate_values are only supported for hevc_videotoolbox, not libx265: libx265 is CRF-only (fail closed)")
+		}
+		if normPreset == "" {
+			normPreset = "medium"
+		}
+		if !transcode.IsValidLibX265Preset(normPreset) {
+			return nil, fmt.Errorf("unsupported libx265 preset %q", basePlan.Preset)
+		}
+		qVals := srch.QualityValues
+		if maxCandidates > 0 && len(qVals) > maxCandidates {
+			qVals = qVals[:maxCandidates]
+		}
+		candidates := make([]transcode.BenchmarkCandidate, 0, len(qVals))
+		for _, q := range qVals {
+			if q < transcode.LibX265CRFMin || q > transcode.LibX265CRFMax {
+				return nil, fmt.Errorf("invalid libx265 crf %d: must be in %d..%d", q, transcode.LibX265CRFMin, transcode.LibX265CRFMax)
+			}
+			candidates = append(candidates, transcode.BenchmarkCandidate{
+				ID:           fmt.Sprintf("cand_crf%d", q),
+				VideoCodec:   normCodec,
+				Quality:      q,
+				Preset:       normPreset,
+				VideoProfile: targetProf,
+				PixelFormat:  targetPix,
+			})
+		}
+		return candidates, nil
+	default:
+		return nil, fmt.Errorf("unsupported video codec %q for benchmark (fail closed)", basePlan.VideoCodec)
+	}
+}
+
+func cloneBenchmarkBool(v *bool) *bool {
+	if v == nil {
+		return nil
+	}
+	out := *v
+	return &out
+}
+
+func cloneBenchmarkInt(v *int) *int {
+	if v == nil {
+		return nil
+	}
+	out := *v
+	return &out
 }
 
 func buildBenchmarkSamples(rep *mediainspect.DetailedReport, optSampling *recipe.SamplingPolicy) ([]transcode.BenchmarkSampleWindow, error) {
@@ -609,8 +784,19 @@ func buildBenchmarkQualityConfig(optQuality *recipe.QualityPolicy) *transcode.Be
 	return qc
 }
 
-func buildBenchmarkAdaptiveConfig(srch *recipe.SearchPolicy) *transcode.BenchmarkAdaptiveConfig {
+func buildBenchmarkAdaptiveConfig(srch *recipe.SearchPolicy, codec string) *transcode.BenchmarkAdaptiveConfig {
 	if srch == nil {
+		return nil
+	}
+	// Adaptive ordering assumes ascending rate-control value => non-decreasing
+	// quality, which does not hold for libx265 CRF (lower = higher quality).
+	// libx265 always uses exhaustive candidate evaluation. The same applies
+	// to VideoToolbox bitrate sweeps: the adaptive planner probes
+	// quality-ordered candidates only.
+	if transcode.NormalizeVideoCodec(codec) == transcode.VideoCodecLibX265 {
+		return nil
+	}
+	if len(srch.BitrateValues) > 0 {
 		return nil
 	}
 	mode := strings.ToLower(strings.TrimSpace(srch.AdaptiveMode))
@@ -651,13 +837,20 @@ func buildBenchmarkConcurrencyConfig(srch *recipe.SearchPolicy) *transcode.Bench
 	}
 }
 
-func validateWorkerCapabilitiesForBenchmark(caps transcode.WorkerCapabilities, metric string, sourceBitDepth int) error {
+func validateWorkerCapabilitiesForBenchmark(caps transcode.WorkerCapabilities, metric string, sourceBitDepth int, codec string) error {
 	if caps.ProtocolVersion != transcode.WorkerProtocolVersion {
 		return fmt.Errorf("worker protocol version %d does not match expected %d (fail closed)",
 			caps.ProtocolVersion, transcode.WorkerProtocolVersion)
 	}
-	if !caps.Encoders["hevc_videotoolbox"] {
-		return errors.New("required encoder 'hevc_videotoolbox' is not available on worker (fail closed)")
+	normCodec := transcode.NormalizeVideoCodec(codec)
+	if normCodec == "" {
+		normCodec = transcode.VideoCodecHEVCVideoToolbox
+	}
+	if !caps.Encoders[normCodec] {
+		return fmt.Errorf("required encoder %q is not available on worker (fail closed)", normCodec)
+	}
+	if normCodec == transcode.VideoCodecLibX265 && sourceBitDepth > 8 {
+		return fmt.Errorf("worker capability unsupported: libx265 benchmark is 8-bit only, got source bit depth %d (fail closed)", sourceBitDepth)
 	}
 	needVMAF := metric == "vmaf" || metric == "both"
 	needSSIM := metric == "ssim" || metric == "both"
@@ -693,7 +886,18 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 		return nil, err
 	}
 
-	candidates, err := buildBenchmarkCandidates(bitDepth, opt.Search.QualityValues, opt.Search.MaxCandidates)
+	// The encoder and preset come from the resolved plan so profile=live-action-hevc
+	// benchmarks produce libx265 candidates rather than VideoToolbox candidates.
+	// A missing or unreadable plan must fail closed: falling back to an empty
+	// codec would silently benchmark VideoToolbox candidates instead of the
+	// encoder the profile actually selected.
+	plan := getPlan(ec.State["plan"])
+	if plan == nil {
+		return nil, errors.New("resolved plan is missing or unreadable from state; refusing to default benchmark encoder to VideoToolbox (fail closed)")
+	}
+	planCodec := plan.VideoCodec
+
+	candidates, err := buildBenchmarkCandidates(plan, bitDepth, opt.Search)
 	if err != nil {
 		return nil, err
 	}
@@ -703,12 +907,12 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 		return nil, err
 	}
 
-	if err := validateWorkerCapabilitiesForBenchmark(caps, metric, bitDepth); err != nil {
+	if err := validateWorkerCapabilitiesForBenchmark(caps, metric, bitDepth, planCodec); err != nil {
 		return nil, err
 	}
 
 	qualityCfg := buildBenchmarkQualityConfig(opt.Quality)
-	adaptiveCfg := buildBenchmarkAdaptiveConfig(opt.Search)
+	adaptiveCfg := buildBenchmarkAdaptiveConfig(opt.Search, planCodec)
 	concurrencyCfg := buildBenchmarkConcurrencyConfig(opt.Search)
 
 	declaredVideoBitrate := int64(0)
