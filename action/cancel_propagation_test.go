@@ -185,3 +185,52 @@ func TestCancelBatchCascadesToActiveChildren(t *testing.T) {
 		}
 	}
 }
+
+
+func TestBatchCancelDecisionStopsAlreadyAdmittedWorkerJob(t *testing.T) {
+	mock := &mockTranscodeExecutor{
+		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
+			return transcode.Job{ID: req.ID}, nil
+		},
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{ID: jobID, Status: transcode.StatusRunning, Progress: 50}, nil
+		},
+	}
+	engine, st, _, srv, _ := setupBatchTestEnv(t, mock, 1)
+	defer srv.Close()
+	defer st.Close()
+
+	ctx := context.Background()
+	res, err := engine.Run(ctx, "transcode_batch", map[string]any{
+		"service": "sonarr",
+		"series_id": 10,
+		"season": 1,
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Status != StatusWaitingExternal {
+		t.Fatalf("expected active batch to wait, got %s", res.Status)
+	}
+	if atomic.LoadInt32(&mock.submitCalls) != 1 {
+		t.Fatalf("submit calls=%d want 1", mock.submitCalls)
+	}
+
+	cancelled, err := engine.Resume(ctx, res.ID, "cancel", nil)
+	if err != nil {
+		t.Fatalf("cancel decision: %v", err)
+	}
+	if cancelled.Status != StatusCompleted {
+		t.Fatalf("cancel decision status=%s error=%s", cancelled.Status, cancelled.Error)
+	}
+	if atomic.LoadInt32(&mock.cancelCalls) != 1 {
+		t.Fatalf("remote cancel calls=%d want 1", mock.cancelCalls)
+	}
+	items, err := st.ListTranscodeBatchItems(res.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Status != "failed" || !strings.Contains(items[0].Error, "cancelled") {
+		t.Fatalf("unexpected cancelled batch items: %+v", items)
+	}
+}
