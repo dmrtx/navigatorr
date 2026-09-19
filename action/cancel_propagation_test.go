@@ -201,9 +201,9 @@ func TestBatchCancelDecisionStopsAlreadyAdmittedWorkerJob(t *testing.T) {
 
 	ctx := context.Background()
 	res, err := engine.Run(ctx, "transcode_batch", map[string]any{
-		"service": "sonarr",
+		"service":   "sonarr",
 		"series_id": 10,
-		"season": 1,
+		"season":    1,
 	})
 	if err != nil {
 		t.Fatalf("run: %v", err)
