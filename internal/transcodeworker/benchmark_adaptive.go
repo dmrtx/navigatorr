@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jakenesler/navigatorr/mediainspect"
+	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/optimization"
 )
 
@@ -26,6 +27,15 @@ func isAdaptiveEnabled(record *BenchmarkRecord, r *ProductionBenchmarkRunner) bo
 	}
 	if r != nil && (r.metricsHook != nil || r.selectionHook != nil) {
 		return false
+	}
+	// Adaptive ordering assumes ascending rate-control value => non-decreasing
+	// quality. That holds for VideoToolbox -q:v but is inverted for libx265 CRF
+	// (lower CRF = higher quality), so non-VideoToolbox codecs always use the
+	// exhaustive path to preserve selection semantics.
+	for _, c := range record.Candidates {
+		if transcode.BenchmarkCandidateVideoCodec(c) != "hevc_videotoolbox" {
+			return false
+		}
 	}
 	if len(record.Candidates) <= 2 {
 		return false

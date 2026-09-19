@@ -189,11 +189,7 @@ func RunFFmpegPaths(ctx context.Context, ffmpegPath string, execPlan *ExecutionP
 		return fmt.Errorf("execution plan cannot be nil")
 	}
 
-	caps, err := ProbeVideoToolboxCapabilities(ctx, ffmpegPath)
-	if err != nil {
-		return err
-	}
-	if err := ValidateVideoToolboxCapabilities(execPlan.Plan, caps); err != nil {
+	if err := ValidateEncoderCapabilities(ctx, ffmpegPath, execPlan.Plan); err != nil {
 		return err
 	}
 

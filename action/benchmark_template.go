@@ -506,7 +506,7 @@ func getOrCreateBenchmarkJobID(ec *ExecutionContext) (string, error) {
 	return id, nil
 }
 
-func buildBenchmarkCandidates(bitDepth int, qVals []int, maxCandidates int) ([]transcode.BenchmarkCandidate, error) {
+func buildBenchmarkCandidates(bitDepth int, codec, preset string, qVals []int, maxCandidates int) ([]transcode.BenchmarkCandidate, error) {
 	if bitDepth != 8 && bitDepth != 10 {
 		return nil, fmt.Errorf("unsupported source bit depth %d: only 8-bit and 10-bit SDR content supported (fail closed)", bitDepth)
 	}
@@ -517,19 +517,52 @@ func buildBenchmarkCandidates(bitDepth int, qVals []int, maxCandidates int) ([]t
 		targetPix = "p010le"
 	}
 
+	normCodec := transcode.NormalizeVideoCodec(codec)
+	if normCodec == "" {
+		normCodec = transcode.VideoCodecHEVCVideoToolbox
+	}
+	normPreset := strings.ToLower(strings.TrimSpace(preset))
+	switch normCodec {
+	case transcode.VideoCodecHEVCVideoToolbox:
+		if normPreset != "" {
+			return nil, fmt.Errorf("preset %q is only supported for libx265 (fail closed)", preset)
+		}
+	case transcode.VideoCodecLibX265:
+		if normPreset == "" {
+			normPreset = "medium"
+		}
+		if !transcode.IsValidLibX265Preset(normPreset) {
+			return nil, fmt.Errorf("unsupported libx265 preset %q", preset)
+		}
+	default:
+		return nil, fmt.Errorf("unsupported video codec %q for benchmark (fail closed)", codec)
+	}
+
 	if maxCandidates > 0 && len(qVals) > maxCandidates {
 		qVals = qVals[:maxCandidates]
 	}
 
 	candidates := make([]transcode.BenchmarkCandidate, 0, len(qVals))
 	for _, q := range qVals {
-		if q < 1 || q > 100 {
-			return nil, fmt.Errorf("invalid quality %d: must be in 1..100", q)
+		switch normCodec {
+		case transcode.VideoCodecHEVCVideoToolbox:
+			if q < 1 || q > 100 {
+				return nil, fmt.Errorf("invalid quality %d: must be in 1..100", q)
+			}
+		case transcode.VideoCodecLibX265:
+			if q < transcode.LibX265CRFMin || q > transcode.LibX265CRFMax {
+				return nil, fmt.Errorf("invalid libx265 crf %d: must be in %d..%d", q, transcode.LibX265CRFMin, transcode.LibX265CRFMax)
+			}
 		}
 		cID := fmt.Sprintf("cand_q%d", q)
+		if normCodec == transcode.VideoCodecLibX265 {
+			cID = fmt.Sprintf("cand_crf%d", q)
+		}
 		candidates = append(candidates, transcode.BenchmarkCandidate{
 			ID:           cID,
+			VideoCodec:   normCodec,
 			Quality:      q,
+			Preset:       normPreset,
 			VideoProfile: targetProf,
 			PixelFormat:  targetPix,
 		})
@@ -609,8 +642,14 @@ func buildBenchmarkQualityConfig(optQuality *recipe.QualityPolicy) *transcode.Be
 	return qc
 }
 
-func buildBenchmarkAdaptiveConfig(srch *recipe.SearchPolicy) *transcode.BenchmarkAdaptiveConfig {
+func buildBenchmarkAdaptiveConfig(srch *recipe.SearchPolicy, codec string) *transcode.BenchmarkAdaptiveConfig {
 	if srch == nil {
+		return nil
+	}
+	// Adaptive ordering assumes ascending rate-control value => non-decreasing
+	// quality, which does not hold for libx265 CRF (lower = higher quality).
+	// libx265 always uses exhaustive candidate evaluation.
+	if transcode.NormalizeVideoCodec(codec) == transcode.VideoCodecLibX265 {
 		return nil
 	}
 	mode := strings.ToLower(strings.TrimSpace(srch.AdaptiveMode))
@@ -651,13 +690,20 @@ func buildBenchmarkConcurrencyConfig(srch *recipe.SearchPolicy) *transcode.Bench
 	}
 }
 
-func validateWorkerCapabilitiesForBenchmark(caps transcode.WorkerCapabilities, metric string, sourceBitDepth int) error {
+func validateWorkerCapabilitiesForBenchmark(caps transcode.WorkerCapabilities, metric string, sourceBitDepth int, codec string) error {
 	if caps.ProtocolVersion != transcode.WorkerProtocolVersion {
 		return fmt.Errorf("worker protocol version %d does not match expected %d (fail closed)",
 			caps.ProtocolVersion, transcode.WorkerProtocolVersion)
 	}
-	if !caps.Encoders["hevc_videotoolbox"] {
-		return errors.New("required encoder 'hevc_videotoolbox' is not available on worker (fail closed)")
+	normCodec := transcode.NormalizeVideoCodec(codec)
+	if normCodec == "" {
+		normCodec = transcode.VideoCodecHEVCVideoToolbox
+	}
+	if !caps.Encoders[normCodec] {
+		return fmt.Errorf("required encoder %q is not available on worker (fail closed)", normCodec)
+	}
+	if normCodec == transcode.VideoCodecLibX265 && sourceBitDepth > 8 {
+		return fmt.Errorf("worker capability unsupported: libx265 benchmark is 8-bit only, got source bit depth %d (fail closed)", sourceBitDepth)
 	}
 	needVMAF := metric == "vmaf" || metric == "both"
 	needSSIM := metric == "ssim" || metric == "both"
@@ -693,7 +739,15 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 		return nil, err
 	}
 
-	candidates, err := buildBenchmarkCandidates(bitDepth, opt.Search.QualityValues, opt.Search.MaxCandidates)
+	// The encoder and preset come from the resolved plan so profile=live-action-hevc
+	// benchmarks produce libx265 candidates rather than VideoToolbox candidates.
+	var planCodec, planPreset string
+	if plan := getPlan(ec.State["plan"]); plan != nil {
+		planCodec = plan.VideoCodec
+		planPreset = plan.Preset
+	}
+
+	candidates, err := buildBenchmarkCandidates(bitDepth, planCodec, planPreset, opt.Search.QualityValues, opt.Search.MaxCandidates)
 	if err != nil {
 		return nil, err
 	}
@@ -703,12 +757,12 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 		return nil, err
 	}
 
-	if err := validateWorkerCapabilitiesForBenchmark(caps, metric, bitDepth); err != nil {
+	if err := validateWorkerCapabilitiesForBenchmark(caps, metric, bitDepth, planCodec); err != nil {
 		return nil, err
 	}
 
 	qualityCfg := buildBenchmarkQualityConfig(opt.Quality)
-	adaptiveCfg := buildBenchmarkAdaptiveConfig(opt.Search)
+	adaptiveCfg := buildBenchmarkAdaptiveConfig(opt.Search, planCodec)
 	concurrencyCfg := buildBenchmarkConcurrencyConfig(opt.Search)
 
 	declaredVideoBitrate := int64(0)
