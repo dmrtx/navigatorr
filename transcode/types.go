@@ -45,10 +45,23 @@ type Plan struct {
 	PixelFormat  string `json:"pixel_format,omitempty" yaml:"pixel_format,omitempty"`
 	// Preset is the libx265 speed/efficiency preset. It must be empty for
 	// hevc_videotoolbox and is validated against a fixed safe enum for libx265.
-	Preset                       string           `json:"preset,omitempty" yaml:"preset,omitempty"`
-	PrioritizeSpeed              *bool            `json:"prioritize_speed,omitempty" yaml:"prioritize_speed,omitempty"`
-	SpatialAQ                    *bool            `json:"spatial_aq,omitempty" yaml:"spatial_aq,omitempty"`
-	Realtime                     *bool            `json:"realtime,omitempty" yaml:"realtime,omitempty"`
+	Preset          string `json:"preset,omitempty" yaml:"preset,omitempty"`
+	PrioritizeSpeed *bool  `json:"prioritize_speed,omitempty" yaml:"prioritize_speed,omitempty"`
+	SpatialAQ       *bool  `json:"spatial_aq,omitempty" yaml:"spatial_aq,omitempty"`
+	Realtime        *bool  `json:"realtime,omitempty" yaml:"realtime,omitempty"`
+	// Bounded typed hevc_videotoolbox rate-control/offline knobs. All must be
+	// unset for libx265; quality-vs-bitrate exclusivity is enforced at every
+	// validation layer. See VideoProfile for field semantics.
+	AverageBitrateKbps           int              `json:"average_bitrate_kbps,omitempty" yaml:"average_bitrate_kbps,omitempty"`
+	MaxBitrateKbps               int              `json:"max_bitrate_kbps,omitempty" yaml:"max_bitrate_kbps,omitempty"`
+	ConstantBitrate              *bool            `json:"constant_bitrate,omitempty" yaml:"constant_bitrate,omitempty"`
+	QMin                         *int             `json:"qmin,omitempty" yaml:"qmin,omitempty"`
+	QMax                         *int             `json:"qmax,omitempty" yaml:"qmax,omitempty"`
+	GOPSize                      *int             `json:"gop_size,omitempty" yaml:"gop_size,omitempty"`
+	BFrames                      *int             `json:"b_frames,omitempty" yaml:"b_frames,omitempty"`
+	ClosedGOP                    *bool            `json:"closed_gop,omitempty" yaml:"closed_gop,omitempty"`
+	PowerEfficient               *bool            `json:"power_efficient,omitempty" yaml:"power_efficient,omitempty"`
+	MaxRefFrames                 *int             `json:"max_ref_frames,omitempty" yaml:"max_ref_frames,omitempty"`
 	ExpectedBitDepth             int              `json:"expected_bit_depth,omitempty" yaml:"expected_bit_depth,omitempty"`
 	AudioMode                    string           `json:"audio_mode" yaml:"audio_mode"`
 	SubtitleMode                 string           `json:"subtitle_mode" yaml:"subtitle_mode"`
@@ -76,6 +89,24 @@ const (
 	LibX265CRFMin = 1
 	LibX265CRFMax = 51
 )
+
+// Bounds for typed hevc_videotoolbox rate-control/offline knobs shared by the
+// coordinator and worker without a transcode->recipe import cycle.
+// MaxVideoBitrateKbps mirrors the recipe MaxBitrateKbps limit (1 Gbps).
+const MaxVideoBitrateKbps = 1_000_000
+
+// MaxQPBound bounds explicit qmin/qmax quantizer values (FFmpeg scale;
+// nil means "emit nothing", never the FFmpeg "auto" sentinel).
+const MaxQPBound = 69
+
+// MaxBenchmarkGOPSize bounds explicit gop_size keyframe intervals.
+const MaxBenchmarkGOPSize = 100000
+
+// MaxBenchmarkBFrames bounds explicit b_frames frame-reordering depth.
+const MaxBenchmarkBFrames = 16
+
+// MaxBenchmarkRefFrames bounds explicit max_ref_frames.
+const MaxBenchmarkRefFrames = 16
 
 // libX265Presets is the fixed, safe libx265 -preset enum. Arbitrary values are
 // rejected everywhere to preserve the fail-closed, no-raw-args boundary.
@@ -208,6 +239,16 @@ type JobStatus struct {
 	PrioritizeSpeed       *bool              `json:"prioritize_speed,omitempty"`
 	SpatialAQ             *bool              `json:"spatial_aq,omitempty"`
 	Realtime              *bool              `json:"realtime,omitempty"`
+	AverageBitrateKbps    int                `json:"average_bitrate_kbps,omitempty"`
+	MaxBitrateKbps        int                `json:"max_bitrate_kbps,omitempty"`
+	ConstantBitrate       *bool              `json:"constant_bitrate,omitempty"`
+	QMin                  *int               `json:"qmin,omitempty"`
+	QMax                  *int               `json:"qmax,omitempty"`
+	GOPSize               *int               `json:"gop_size,omitempty"`
+	BFrames               *int               `json:"b_frames,omitempty"`
+	ClosedGOP             *bool              `json:"closed_gop,omitempty"`
+	PowerEfficient        *bool              `json:"power_efficient,omitempty"`
+	MaxRefFrames          *int               `json:"max_ref_frames,omitempty"`
 	ExpectedBitDepth      int                `json:"expected_bit_depth,omitempty"`
 	Attempt               int                `json:"attempt,omitempty"`
 	RetryCount            int                `json:"retry_count,omitempty"`

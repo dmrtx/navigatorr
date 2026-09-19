@@ -421,13 +421,14 @@ func (sh *pipelineShared) runEncodeUnit(ctx context.Context, u pipelineUnit, idx
 			vc.candidate.ID, window.Index, err, boundedStderr(stderrBuf, 1024))
 		sh.encodeOut[idx] = pipelineEncodeOutcome{
 			entry: BenchmarkCandidateSampleResult{
-				CandidateID:  vc.candidate.ID,
-				SampleIndex:  window.Index,
-				File:         filepath.Base(candPath),
-				Quality:      vc.candidate.Quality,
-				VideoProfile: vc.profile,
-				PixelFormat:  vc.pixelFormat,
-				Error:        errStr,
+				CandidateID:        vc.candidate.ID,
+				SampleIndex:        window.Index,
+				File:               filepath.Base(candPath),
+				Quality:            vc.candidate.Quality,
+				AverageBitrateKbps: vc.candidate.AverageBitrateKbps,
+				VideoProfile:       vc.profile,
+				PixelFormat:        vc.pixelFormat,
+				Error:              errStr,
 			},
 			err: errors.New(errStr),
 		}
@@ -440,13 +441,14 @@ func (sh *pipelineShared) runEncodeUnit(ctx context.Context, u pipelineUnit, idx
 		errStr := fmt.Sprintf("candidate %q for sample %d produced empty or missing file at %s", vc.candidate.ID, window.Index, candPath)
 		sh.encodeOut[idx] = pipelineEncodeOutcome{
 			entry: BenchmarkCandidateSampleResult{
-				CandidateID:  vc.candidate.ID,
-				SampleIndex:  window.Index,
-				File:         filepath.Base(candPath),
-				Quality:      vc.candidate.Quality,
-				VideoProfile: vc.profile,
-				PixelFormat:  vc.pixelFormat,
-				Error:        errStr,
+				CandidateID:        vc.candidate.ID,
+				SampleIndex:        window.Index,
+				File:               filepath.Base(candPath),
+				Quality:            vc.candidate.Quality,
+				AverageBitrateKbps: vc.candidate.AverageBitrateKbps,
+				VideoProfile:       vc.profile,
+				PixelFormat:        vc.pixelFormat,
+				Error:              errStr,
 			},
 			err: errors.New(errStr),
 		}
@@ -455,14 +457,15 @@ func (sh *pipelineShared) runEncodeUnit(ctx context.Context, u pipelineUnit, idx
 	}
 	sh.encodeOut[idx] = pipelineEncodeOutcome{
 		entry: BenchmarkCandidateSampleResult{
-			CandidateID:       vc.candidate.ID,
-			SampleIndex:       window.Index,
-			File:              filepath.Base(candPath),
-			SizeBytes:         fi.Size(),
-			EncodeDurationSec: elapsed,
-			Quality:           vc.candidate.Quality,
-			VideoProfile:      vc.profile,
-			PixelFormat:       vc.pixelFormat,
+			CandidateID:        vc.candidate.ID,
+			SampleIndex:        window.Index,
+			File:               filepath.Base(candPath),
+			SizeBytes:          fi.Size(),
+			EncodeDurationSec:  elapsed,
+			Quality:            vc.candidate.Quality,
+			AverageBitrateKbps: vc.candidate.AverageBitrateKbps,
+			VideoProfile:       vc.profile,
+			PixelFormat:        vc.pixelFormat,
 		},
 	}
 	sh.progressReporter.CompleteUnit()

@@ -126,3 +126,49 @@ profiles:
     subtitles: {mode: preserve, convert_incompatible: true}
     preserve: {metadata: true, chapters: true, attachments: true}
     resilience: *default_resilience
+  # Offline-quality example: quality mode plus the bounded typed knobs FFmpeg
+  # VideoToolbox actually consumes for file transcoding. Starting-point values
+  # only — verify on real hardware via candidate-only encodes with
+  # replace_original=false (see docs/VIDEOTOOLBOX_PROFILES.md). Irrelevant or
+  # dangerous controls (require_sw/allow_sw, alpha_quality,
+  # frames_before/after, low_delay, bufsize, bare bitrate/max_bitrate
+  # spellings) are not schema fields and are rejected by strict decoding.
+  general-hevc-offline:
+    container: mkv
+    video:
+      codec: hevc_videotoolbox
+      quality: 65
+      profile: main
+      pixel_format: yuv420p
+      prioritize_speed: false
+      spatial_aq: true
+      realtime: false
+      qmin: 0
+      qmax: 51
+      gop_size: 300
+      b_frames: 2
+      closed_gop: true
+      power_efficient: false
+      max_ref_frames: 4
+    audio: {mode: copy}
+    subtitles: {mode: preserve, convert_incompatible: true}
+    preserve: {metadata: true, chapters: true, attachments: true}
+    resilience: *default_resilience
+  # Average-bitrate example: -b:v mode with an optional -maxrate cap. CBR
+  # (-constant_bit_rate) stays off unless explicitly enabled. Quality and
+  # average_bitrate_kbps together are rejected; pick exactly one mode.
+  general-hevc-bitrate:
+    container: mkv
+    video:
+      codec: hevc_videotoolbox
+      average_bitrate_kbps: 3500
+      max_bitrate_kbps: 5000
+      profile: main
+      pixel_format: yuv420p
+      prioritize_speed: false
+      spatial_aq: true
+      realtime: false
+    audio: {mode: copy}
+    subtitles: {mode: preserve, convert_incompatible: true}
+    preserve: {metadata: true, chapters: true, attachments: true}
+    resilience: *default_resilience
