@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jakenesler/navigatorr/mediainspect"
 )
@@ -87,6 +88,57 @@ func (r *promotionContextReader) Read(p []byte) (int, error) {
 		return 0, err
 	}
 	return r.r.Read(p)
+}
+
+type promotionContextWriter struct {
+	ctx context.Context
+	w   io.Writer
+}
+
+func (w *promotionContextWriter) Write(p []byte) (int, error) {
+	if err := w.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return w.w.Write(p)
+}
+
+func promotionExecutionOwner(ctx context.Context, actionID string) string {
+	if owner, _ := ctx.Value(actionLeaseOwnerKey{actionID: actionID}).(string); strings.TrimSpace(owner) != "" {
+		return owner
+	}
+	return "unfenced:" + actionID
+}
+
+func (e *Engine) promotionDetachPartial(partial string) error {
+	if _, err := e.promotionPath(partial, true); err != nil {
+		return err
+	}
+	info, err := os.Lstat(partial)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("recovery partial is not a regular file")
+	}
+	// Never unlink the pathname and immediately recreate it while a stale
+	// executor may still hold the old file open. Renaming first gives any
+	// lingering writer its own inode/path so it cannot race the new copy or
+	// the post-copy SHA verification.
+	detached := fmt.Sprintf("%s.abandoned.%d", partial, time.Now().UTC().UnixNano())
+	if _, err := e.promotionPath(detached, true); err != nil {
+		return err
+	}
+	if err := os.Rename(partial, detached); err != nil {
+		return fmt.Errorf("detach abandoned recovery partial: %w", err)
+	}
+	// Best effort: on POSIX an open writer may continue on the unlinked inode;
+	// on filesystems that refuse removal while open, the detached scratch file
+	// is harmless and cannot collide with the canonical recovery pathname.
+	_ = os.Remove(detached)
+	return nil
 }
 
 func (e *Engine) verifyPromotionHash(ctx context.Context, path, expected string) error {
@@ -265,6 +317,15 @@ func (e *Engine) stepPromotePreserve(ctx context.Context, ec *ExecutionContext) 
 	if _, err := e.promotionPath(p.BackupPath, true); err != nil {
 		return promoteFailed(err)
 	}
+
+	partial := p.BackupPath + ".partial"
+	if _, err := e.promotionPath(partial, true); err != nil {
+		return promoteFailed(err)
+	}
+
+	// A published backup wins over any scratch state. Verify the durable copy,
+	// detach/remove a leftover partial without hashing a potentially active
+	// writer, and only then mark recovery_verified.
 	if _, err := os.Lstat(p.BackupPath); err == nil {
 		if err := e.verifyPromotionHash(ctx, p.BackupPath, p.OriginalSHA); err != nil {
 			return promoteFailed(err)
@@ -272,25 +333,64 @@ func (e *Engine) stepPromotePreserve(ctx context.Context, ec *ExecutionContext) 
 		if err := e.promotionRemovePartial(ctx, ec, p); err != nil {
 			return promoteFailed(err)
 		}
+		p.BackupVerified = true
+		p.RecoveryCopyOwner = ""
+		p.RecoveryCopyComplete = false
+		if err := e.savePromotion(ctx, ec, p); err != nil {
+			return promoteFailed(err)
+		}
+		return StepResult{Status: StepCompleted, Outputs: map[string]any{"recovery_path": p.BackupPath, "recovery_retained": true}}, nil
 	} else if !os.IsNotExist(err) {
 		return promoteFailed(err)
-	} else {
-		partial := p.BackupPath + ".partial"
-		if _, err := e.promotionPath(partial, true); err != nil {
-			return promoteFailed(err)
+	}
+
+	owner := promotionExecutionOwner(ctx, ec.InstanceID)
+	partialReady := false
+	if info, err := os.Lstat(partial); err == nil {
+		if !info.Mode().IsRegular() {
+			return promoteFailed(fmt.Errorf("recovery partial is not a regular file"))
 		}
-		if info, err := os.Lstat(partial); err == nil {
-			if !info.Mode().IsRegular() {
-				return promoteFailed(fmt.Errorf("recovery partial is not a regular file"))
+		if p.RecoveryCopyComplete {
+			if info.Size() != p.OriginalBytes {
+				return promoteFailed(fmt.Errorf("completed recovery partial size changed: got %d bytes, expected %d", info.Size(), p.OriginalBytes))
 			}
-			// No Sonarr mutation has started in this step. The original was just
-			// reverified, so an interrupted private copy can be rebuilt safely.
-			if err := os.Remove(partial); err != nil {
+			partialReady = true
+		} else if p.RecoveryCopyOwner == owner {
+			// Re-entry must never hash, unlink, or restart a partial that the
+			// current executor still owns. The normal action lease prevents this;
+			// this guard makes preserve_original safe even if it is re-entered.
+			return promoteWait("Recovery copy is still in progress; waiting for the owning execution to finish")
+		} else {
+			// The current action execution owns the durable lease, so a different
+			// persisted owner is stale. Detach its pathname before rebuilding.
+			// A lingering blocked writer may finish against the detached inode, but
+			// can never mutate the new canonical .partial or its SHA verification.
+			if err := e.promotionDetachPartial(partial); err != nil {
 				return promoteFailed(err)
 			}
-		} else if !os.IsNotExist(err) {
+			p.RecoveryCopyOwner = ""
+			p.RecoveryCopyComplete = false
+			if err := e.savePromotion(ctx, ec, p); err != nil {
+				return promoteFailed(err)
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return promoteFailed(err)
+	} else if p.RecoveryCopyComplete {
+		return promoteFailed(fmt.Errorf("completed recovery partial disappeared before publication"))
+	}
+
+	if !partialReady {
+		p.BackupVerified = false
+		p.RecoveryCopyOwner = owner
+		p.RecoveryCopyComplete = false
+		// Persist ownership before creating/writing the canonical partial. A
+		// restart can therefore distinguish an in-flight copy from a completed
+		// one and will never blindly hash or unlink it.
+		if err := e.savePromotion(ctx, ec, p); err != nil {
 			return promoteFailed(err)
 		}
+
 		src, err := os.Open(p.OriginalPath)
 		if err != nil {
 			return promoteFailed(err)
@@ -300,7 +400,7 @@ func (e *Engine) stepPromotePreserve(ctx context.Context, ec *ExecutionContext) 
 			_ = src.Close()
 			return promoteFailed(err)
 		}
-		_, copyErr := io.Copy(dst, &promotionContextReader{ctx: ctx, r: src})
+		n, copyErr := io.Copy(&promotionContextWriter{ctx: ctx, w: dst}, &promotionContextReader{ctx: ctx, r: src})
 		_ = src.Close()
 		if copyErr == nil {
 			copyErr = dst.Sync()
@@ -312,21 +412,43 @@ func (e *Engine) stepPromotePreserve(ctx context.Context, ec *ExecutionContext) 
 		if copyErr != nil {
 			return promoteFailed(copyErr)
 		}
-		if err := e.verifyPromotionHash(ctx, partial, p.OriginalSHA); err != nil {
+		if n != p.OriginalBytes {
+			return promoteFailed(fmt.Errorf("recovery copy size mismatch: copied %d bytes, expected %d", n, p.OriginalBytes))
+		}
+		info, err := os.Lstat(partial)
+		if err != nil {
 			return promoteFailed(err)
 		}
-		// This is an independent copy in the promotion's private directory.
-		// Atomic rename needs no NAS hard-link support. The durable original
-		// reservation prevents another promotion from publishing here.
-		if _, err := os.Lstat(p.BackupPath); !os.IsNotExist(err) {
-			return promoteFailed(fmt.Errorf("recovery destination unexpectedly exists before publication"))
+		if !info.Mode().IsRegular() || info.Size() != p.OriginalBytes {
+			return promoteFailed(fmt.Errorf("recovery partial is not a complete regular copy"))
 		}
-		if _, err := e.promotionPath(p.BackupPath, true); err != nil {
-			return promoteFailed(err)
-		}
+
+		// This checkpoint is deliberately after Copy + Sync + Close and before
+		// hashing. A resumed executor may hash a partial only when this durable
+		// bit proves no copy operation is still writing it.
+		p.RecoveryCopyComplete = true
 		if err := e.savePromotion(ctx, ec, p); err != nil {
 			return promoteFailed(err)
 		}
+	}
+
+	if err := e.verifyPromotionHash(ctx, partial, p.OriginalSHA); err != nil {
+		return promoteFailed(err)
+	}
+
+	// Publish only verified bytes. The action execution lease serializes this
+	// rename; the persisted copy owner/checkpoint makes the filesystem side safe
+	// even across interrupted/re-entered preserve_original executions.
+	if _, err := os.Lstat(p.BackupPath); err == nil {
+		if err := e.verifyPromotionHash(ctx, p.BackupPath, p.OriginalSHA); err != nil {
+			return promoteFailed(err)
+		}
+		if err := e.promotionRemovePartial(ctx, ec, p); err != nil {
+			return promoteFailed(err)
+		}
+	} else if !os.IsNotExist(err) {
+		return promoteFailed(err)
+	} else {
 		if err := ctx.Err(); err != nil {
 			return promoteFailed(err)
 		}
@@ -338,7 +460,13 @@ func (e *Engine) stepPromotePreserve(ctx context.Context, ec *ExecutionContext) 
 			_ = d.Close()
 		}
 	}
+
+	if err := e.verifyPromotionHash(ctx, p.BackupPath, p.OriginalSHA); err != nil {
+		return promoteFailed(err)
+	}
 	p.BackupVerified = true
+	p.RecoveryCopyOwner = ""
+	p.RecoveryCopyComplete = false
 	if err := e.savePromotion(ctx, ec, p); err != nil {
 		return promoteFailed(err)
 	}
@@ -350,14 +478,21 @@ func (e *Engine) promotionRemovePartial(ctx context.Context, ec *ExecutionContex
 	if _, err := e.promotionPath(partial, true); err != nil {
 		return err
 	}
-	if _, err := os.Lstat(partial); os.IsNotExist(err) {
+	info, err := os.Lstat(partial)
+	if os.IsNotExist(err) {
 		return nil
-	} else if err != nil {
+	}
+	if err != nil {
 		return err
 	}
-	if err := e.verifyPromotionHash(ctx, partial, p.OriginalSHA); err != nil {
-		return err
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("recovery partial is not a regular file")
 	}
+	// Once a verified backup exists, the canonical partial is scratch state.
+	// Do not hash it: a legacy/stale writer could still have it open, which is
+	// exactly the race preserve_original must avoid. Removing the pathname is
+	// safe; any open writer keeps only its detached inode and cannot overwrite
+	// the verified backup.
 	if err := e.savePromotion(ctx, ec, p); err != nil {
 		return err
 	}
