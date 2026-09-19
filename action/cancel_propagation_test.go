@@ -186,7 +186,6 @@ func TestCancelBatchCascadesToActiveChildren(t *testing.T) {
 	}
 }
 
-
 func TestBatchCancelDecisionStopsAlreadyAdmittedWorkerJob(t *testing.T) {
 	mock := &mockTranscodeExecutor{
 		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
