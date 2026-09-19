@@ -38,7 +38,7 @@ func (r *pr6b2Recorder) streams() []SourceStream {
 	if r.probeStreams != nil {
 		return r.probeStreams
 	}
-	return []SourceStream{{Index: 0, TypeIndex: 0, Kind: "video", Codec: "h264"}}
+	return []SourceStream{{Index: 0, TypeIndex: 0, Kind: "video", Codec: "hevc"}}
 }
 
 func (r *pr6b2Recorder) install(w *Worker) {

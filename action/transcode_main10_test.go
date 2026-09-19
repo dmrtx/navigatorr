@@ -54,10 +54,15 @@ fi
 
 	mockExecutor := &mockTranscodeExecutor{
 		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			// The worker probes the LOCAL candidate before publish and rejects
+			// the 8-bit output for a required 10-bit plan; the coordinator no
+			// longer performs this heavy inspection over NAS.
 			return transcode.JobStatus{
-				ID:            jobID,
-				Status:        transcode.StatusCompleted,
-				CandidatePath: candidateFile,
+				ID:                    jobID,
+				Status:                transcode.StatusFailed,
+				CandidatePath:         candidateFile,
+				FailureClassification: "source_invalid",
+				Error:                 "local candidate bit depth 8 != expected 10 (fail closed, never publish)",
 			}, nil
 		},
 	}
@@ -72,9 +77,9 @@ fi
 		t.Fatalf("run error: %v", err)
 	}
 	if res.Status != StatusFailed {
-		t.Fatalf("expected Main10 validation failure for 8-bit candidate, got %s", res.Status)
+		t.Fatalf("expected Main10 pre-publish validation failure for 8-bit candidate, got %s", res.Status)
 	}
-	if !strings.Contains(strings.ToLower(res.Error), "bit depth mismatch") || !strings.Contains(res.Error, "10-bit") || !strings.Contains(res.Error, "8-bit") {
+	if !strings.Contains(strings.ToLower(res.Error), "bit depth") || !strings.Contains(res.Error, "10") || !strings.Contains(res.Error, "8") {
 		t.Fatalf("unexpected validation error: %s", res.Error)
 	}
 
@@ -142,9 +147,11 @@ fi
 						}, nil
 					}
 					return transcode.JobStatus{
-						ID:            jobID,
-						Status:        transcode.StatusCompleted,
-						CandidatePath: candidateFile,
+						ID:                    jobID,
+						Status:                transcode.StatusFailed,
+						CandidatePath:         candidateFile,
+						FailureClassification: "source_invalid",
+						Error:                 "local candidate bit depth 8 != expected 10 (fail closed, never publish)",
 					}, nil
 				},
 			}
@@ -173,9 +180,9 @@ fi
 			if res2.Status != StatusFailed {
 				t.Fatalf("expected status failed even with %s, got %s", bypassDecision, res2.Status)
 			}
-			if !strings.Contains(strings.ToLower(res2.Error), "bit depth mismatch") ||
-				!strings.Contains(res2.Error, "10-bit") ||
-				!strings.Contains(res2.Error, "8-bit") {
+			if !strings.Contains(strings.ToLower(res2.Error), "bit depth") ||
+				!strings.Contains(res2.Error, "10") ||
+				!strings.Contains(res2.Error, "8") {
 				t.Fatalf("expected bit depth mismatch error, got: %s", res2.Error)
 			}
 

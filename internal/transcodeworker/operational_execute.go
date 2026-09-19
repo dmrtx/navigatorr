@@ -156,16 +156,18 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 	}
 
 	// Probe the operational input (staged when staging applies), never the
-	// semantic source when a staged copy exists.
-	streams, dur, probeErr := w.probeSourceForJob(ctx, r.effectiveInput)
-	if dur > 0 {
-		job.DurationSec = dur
+	// semantic source when a staged copy exists. The detailed probe supplies
+	// the chapter count and video attributes needed for local pre-publish
+	// policy validation.
+	srcProbe, probeErr := w.probeSourceDetailsForJob(ctx, r.effectiveInput)
+	if srcProbe.DurationSec > 0 {
+		job.DurationSec = srcProbe.DurationSec
 	}
 	if probeErr != nil {
 		return w.failJobTerminal(jobDir, jobFile, job, fmt.Errorf("probing source streams: %w", probeErr))
 	}
 
-	execPlan, planErr := BuildExecutionPlan(job.Plan, streams, job.DurationSec)
+	execPlan, planErr := BuildExecutionPlan(job.Plan, srcProbe.Streams, job.DurationSec)
 	if planErr != nil {
 		return w.failJobTerminal(jobDir, jobFile, job, fmt.Errorf("building execution plan: %w", planErr))
 	}
@@ -207,7 +209,8 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 		return nil
 	}
 
-	if err := w.validateEncodedCandidateFull(ctx, r.localCandidate, execPlan, streams, job.DurationSec, 0); err != nil {
+	attest, verr := w.validateEncodedCandidateFull(ctx, r.localCandidate, execPlan, srcProbe, 0)
+	if verr != nil {
 		// A bad local candidate must never be published. Remove only the
 		// worker-owned local candidate; the semantic source and the shared
 		// source cache are never touched. For local-only jobs the local
@@ -217,16 +220,20 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 		if c := strings.TrimSpace(r.localCandidate); c != "" && !w.isCachePath(c) && c != job.Source {
 			_ = os.Remove(c)
 		}
-		return w.failJobTerminal(jobDir, jobFile, job, err)
+		return w.failJobTerminal(jobDir, jobFile, job, verr)
 	}
 
 	// Checkpoint: durably record that encoding finished BEFORE any
 	// finalization. A crash after this point never reruns ffmpeg. Status stays
-	// nonterminal.
+	// nonterminal. The accepted candidate's size and content digest are
+	// persisted so the coordinator can perform a cheap, independent
+	// post-publish identity check without a NAS read or media inspection.
 	if cancelled, err := w.persistOperationalProgress(jobDir, jobFile, job, func(l *JobRecord) {
 		l.EncodeComplete = true
 		l.ValidationFinishedAt = time.Now().UTC()
 		l.LocalCandidatePath = r.localCandidate
+		l.CandidateSizeBytes = attest.SizeBytes
+		l.CandidateSHA256 = attest.SHA256
 		if strings.TrimSpace(r.destination) != "" {
 			l.IntendedDestination = r.destination
 		}
@@ -286,15 +293,12 @@ func (w *Worker) ensureStaged(ctx context.Context, jobDir, jobFile string, job *
 		stagedFromCache := false
 		if w.sourceCacheEnabled() {
 			if fi, serr := w.statSourceForCache(ctx, job.Source); serr == nil {
-				if hit, ok := lookupSourceCache(w.sourceCacheDir(), filepath.Clean(job.Source), fi); ok {
-					if cerr := copyCacheToStaged(ctx, hit, r.stagedInput); cerr == nil {
-						stagedFromCache = true
-					} else if !IsDestinationExists(cerr) {
-						// Fall through to direct staging on any non-trivial
-						// cache-copy failure; a stale/corrupt cache entry is
-						// never trusted over a fresh NAS read.
-						stagedFromCache = false
-					} else {
+				if hit, ok := lookupSourceCache(w.sourceCacheDir(), filepath.Clean(job.Source), fi, job.SourceSHA256); ok {
+					// Job-local immutable hard link (fallback: safe local copy).
+					// The job never reads the evictable shared filename, so a
+					// concurrent sweep can unlink it without breaking this job.
+					if lease, lerr := w.acquireCachedSourceLease(ctx, hit, r.stagedInput); lerr == nil {
+						_ = lease
 						stagedFromCache = true
 					}
 				}
@@ -310,10 +314,12 @@ func (w *Worker) ensureStaged(ctx context.Context, jobDir, jobFile string, job *
 				return false, err
 			}
 			// Best-effort: share this fresh NAS read with future jobs for the
-			// same immutable source. Failures never fail the current job.
+			// same immutable source. Local bytes are hashed against the
+			// coordinator digest before the entry is published; failures never
+			// fail the current job.
 			if w.sourceCacheEnabled() {
 				if fi, serr := w.statSourceForCache(ctx, job.Source); serr == nil {
-					_, _ = populateSourceCacheFromLocal(ctx, w.sourceCacheDir(), filepath.Clean(job.Source), fi, r.stagedInput)
+					_, _ = populateSourceCacheFromLocal(ctx, w.sourceCacheDir(), filepath.Clean(job.Source), fi, r.stagedInput, job.SourceSHA256)
 				}
 			}
 		}
@@ -971,6 +977,22 @@ func (w *Worker) probeSourceForJob(ctx context.Context, path string) ([]SourceSt
 		return w.probeSource(ctx, path)
 	}
 	return ProbeSourceStreams(ctx, w.ffprobePath, path)
+}
+
+// probeSourceDetailsForJob returns the detailed probe (streams + duration +
+// chapters) for local pre-publish validation. An explicit detailed seam wins;
+// otherwise a plain stream seam is adapted (chapter count unknown, so chapter
+// preservation is skipped for injected tests); otherwise the production
+// ffprobe path is used.
+func (w *Worker) probeSourceDetailsForJob(ctx context.Context, path string) (SourceProbe, error) {
+	if w.probeDetails != nil {
+		return w.probeDetails(ctx, path)
+	}
+	if w.probeSource != nil {
+		streams, dur, err := w.probeSource(ctx, path)
+		return SourceProbe{Streams: streams, DurationSec: dur}, err
+	}
+	return ProbeSourceDetails(ctx, w.ffprobePath, path)
 }
 
 // runOperationalFFmpeg uses the injected encoder when present, else the

@@ -84,11 +84,14 @@ fi
 					Progress: 50.0,
 				}, nil
 			}
-			// Transcode has completed when resumed
+			// Transcode has completed when resumed; the worker rejected the
+			// candidate locally before publish because the resolution changed.
 			return transcode.JobStatus{
-				ID:            jobID,
-				Status:        transcode.StatusCompleted,
-				CandidatePath: candidateFile,
+				ID:                    jobID,
+				Status:                transcode.StatusFailed,
+				CandidatePath:         candidateFile,
+				FailureClassification: "source_invalid",
+				Error:                 "local candidate resolution 1280x720 != source 1920x1080 (fail closed, never publish)",
 			}, nil
 		},
 	}
@@ -168,39 +171,25 @@ fi
 		StartTime: time.Now(),
 	})
 
-	// 4. Resume the action: executor reports transcode completed, advancing to validate_result
+	// 4. Resume the action: the worker reports the candidate rejected it
+	//    pre-publish due to the resolution mismatch. This is terminal.
 	res2, err := reloadedEngine.Resume(ctx, res1.ID, "", nil)
 	if err != nil {
 		t.Fatalf("resume error: %v", err)
 	}
-
-	// The resumed action MUST fail validate_result due to resolution mismatch (1920x1080 vs 1280x720).
-	// If Width/Height had been lost across JSON persistence (as in older versions),
-	// resolution mismatch check would have been skipped and the action would have succeeded.
 	if res2.Status == StatusCompleted {
-		t.Fatalf("resumed action completed successfully despite resolution mismatch! Width/Height check was bypassed")
+		t.Fatalf("resumed action completed successfully despite resolution mismatch")
 	}
-	if res2.Status != StatusWaitingDecision {
-		t.Fatalf("expected status %s on resolution mismatch, got %s", StatusWaitingDecision, res2.Status)
+	if res2.Status != StatusFailed {
+		t.Fatalf("expected status %s on resolution mismatch, got %s", StatusFailed, res2.Status)
 	}
-	if !strings.Contains(res2.WaitingReason, "Video resolution mismatch") ||
-		!strings.Contains(res2.WaitingReason, "1920x1080") ||
-		!strings.Contains(res2.WaitingReason, "1280x720") {
-		t.Fatalf("expected resolution mismatch warning in waiting reason, got: %s", res2.WaitingReason)
-	}
-
-	// 5. Rejecting the candidate completes the failure path, leaving original pristine
-	res3, err := reloadedEngine.Resume(ctx, res1.ID, "reject", nil)
-	if err != nil {
-		t.Fatalf("reject resume error: %v", err)
-	}
-	if res3.Status != StatusFailed {
-		t.Fatalf("expected status failed after rejection, got %s", res3.Status)
-	}
-	if !strings.Contains(res3.Error, "rejected by user decision") {
-		t.Fatalf("expected rejection error, got: %s", res3.Error)
+	if !strings.Contains(res2.Error, "resolution") ||
+		!strings.Contains(res2.Error, "1920x1080") ||
+		!strings.Contains(res2.Error, "1280x720") {
+		t.Fatalf("expected resolution mismatch error, got: %s", res2.Error)
 	}
 
+	// 5. The original must remain pristine after the failed worker validation.
 	origBytes, err := os.ReadFile(origFile)
 	if err != nil {
 		t.Fatalf("reading original: %v", err)

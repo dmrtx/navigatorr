@@ -207,6 +207,7 @@ type Worker struct {
 	// execution-spec digest.
 	runFFmpeg             func(ctx context.Context, execPlan *ExecutionPlan, job *JobRecord, inputPath, outputPath, progressPath, logPath string) error
 	probeSource           func(ctx context.Context, path string) ([]SourceStream, float64, error)
+	probeDetails          func(ctx context.Context, path string) (SourceProbe, error)
 	finalizeOutput        func(ctx context.Context, localCandidate, destination, jobID string) error
 	afterEncodeCheckpoint func(jobDir string, job *JobRecord)
 	// leaseManager is optional: when set, external staging sources and external
@@ -234,6 +235,13 @@ func (w *Worker) SetRunFFmpeg(fn func(ctx context.Context, execPlan *ExecutionPl
 // ProbeSourceStreams.
 func (w *Worker) SetProbeSource(fn func(ctx context.Context, path string) ([]SourceStream, float64, error)) {
 	w.probeSource = fn
+}
+
+// SetProbeDetails injects a custom detailed probe (tests). Nil falls back to
+// the injected stream probe (with unknown chapter count) or the production
+// ProbeSourceDetails.
+func (w *Worker) SetProbeDetails(fn func(ctx context.Context, path string) (SourceProbe, error)) {
+	w.probeDetails = fn
 }
 
 // SetFinalizeOutput injects a custom output finalizer (tests). Nil restores
@@ -444,6 +452,10 @@ type SubmitRequest struct {
 	Plan                *transcode.Plan `json:"plan,omitempty"`
 	IdempotencyKey      string          `json:"idempotency_key,omitempty"`
 	ExecutionSpecDigest string          `json:"execution_spec_digest,omitempty"`
+	// SourceSHA256 is the coordinator preflight digest of the original source
+	// bytes. Optional for legacy callers; carried into the shared source cache
+	// identity so unchanged-content reuse is provable.
+	SourceSHA256 string `json:"source_sha256,omitempty"`
 }
 
 // SubmitResponse defines the JSON output for the submit command.
@@ -597,6 +609,14 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 	if strings.TrimSpace(req.CandidatePath) == "" {
 		return SubmitResponse{ID: trimmedID, Error: "missing candidate_path"}, errors.New("missing candidate_path")
 	}
+	// Optional content identity. A malformed digest fails closed rather than
+	// being silently ignored, so callers cannot accidentally disable the
+	// content check by sending garbage.
+	sourceSHA, err := transcode.NormalizeSourceSHA256(req.SourceSHA256)
+	if err != nil {
+		return SubmitResponse{ID: trimmedID, Error: err.Error()}, err
+	}
+	req.SourceSHA256 = sourceSHA
 
 	cleanSource := filepath.Clean(req.SourcePath)
 	cleanCandidate := filepath.Clean(req.CandidatePath)
@@ -975,6 +995,7 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 		Plan:                plan,
 		IdempotencyKey:      effKey,
 		ExecutionSpecDigest: canonicalDigest,
+		SourceSHA256:        sourceSHA,
 		CreatedAt:           time.Now().UTC(),
 		Attempt:             1,
 		RetryCount:          0,
@@ -1709,6 +1730,9 @@ type JobStatusResponse struct {
 	AppliedFallbacks      []string                     `json:"applied_fallbacks,omitempty"`
 	FailureClassification string                       `json:"failure_classification,omitempty"`
 	Conversions           []transcode.ConversionRecord `json:"conversions,omitempty"`
+	// Accepted candidate identity (cheap post-publish verification metadata).
+	CandidateSizeBytes int64  `json:"candidate_size_bytes,omitempty"`
+	CandidateSHA256    string `json:"candidate_sha256,omitempty"`
 
 	// Operational storage observability (Phase 6B1). Additive: never changes
 	// the meaning of existing fields/statuses.
@@ -1796,6 +1820,8 @@ func (w *Worker) Status(ctx context.Context, jobID string) (JobStatusResponse, e
 		AppliedFallbacks:      job.AppliedFallbacks,
 		FailureClassification: job.FailureClassification,
 		Conversions:           job.Conversions,
+		CandidateSizeBytes:    job.CandidateSizeBytes,
+		CandidateSHA256:       job.CandidateSHA256,
 
 		StagingPolicy:       job.StagingPolicy,
 		StagingState:        job.StagingState,

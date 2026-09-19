@@ -156,7 +156,10 @@ func (e *Engine) stepPromotePlan(ctx context.Context, ec *ExecutionContext) (Ste
 	}
 	// Reuse the full transcode stream validator without accepting any prior
 	// loss override. Approval is for a validated replacement, not lost streams.
-	validation, err := e.stepTranscodeValidate(ctx, source)
+	// Promotion intentionally performs a real full inspection of the published
+	// candidate; the normal transcode pipeline's post-publish step stays
+	// lightweight (the worker already validated the local candidate).
+	validation, err := e.validateCandidateDetailed(ctx, source)
 	if err != nil {
 		return promoteFailed(err)
 	}
