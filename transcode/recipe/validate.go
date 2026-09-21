@@ -128,6 +128,9 @@ func Validate(b *Bundle) error {
 }
 
 func ValidateProfile(name string, p Profile) error {
+	if strings.EqualFold(strings.TrimSpace(name), "auto") {
+		return fmt.Errorf("profile name %q is reserved for automatic profile selection", name)
+	}
 	if normalizeContainer(p.Container) != "mkv" {
 		return fmt.Errorf("profile %q: unsupported container %q", name, p.Container)
 	}
