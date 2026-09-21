@@ -30,7 +30,7 @@ func TestManagedProfilePersistenceHistoryAndDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec1, err := m.SaveManagedProfile("anime-x265", managedTestProfile(), "first", "act-1", "")
+	rec1, err := m.SaveManagedProfile("anime-x265", managedTestProfile(), "first", "act-1", 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,10 +40,13 @@ func TestManagedProfilePersistenceHistoryAndDelete(t *testing.T) {
 
 	p2 := managedTestProfile()
 	p2.Video.Quality = 22
-	if _, err := m.SaveManagedProfile("anime-x265", p2, "second", "act-2", ""); err == nil || !strings.Contains(err.Error(), "expected_digest is required") {
+	if _, err := m.SaveManagedProfile("anime-x265", p2, "second", "act-2", 0, rec1.Digest); err == nil || !strings.Contains(err.Error(), "expected_generation is required") {
+		t.Fatalf("expected update without expected_generation to fail closed, got %v", err)
+	}
+	if _, err := m.SaveManagedProfile("anime-x265", p2, "second", "act-2", rec1.Generation, ""); err == nil || !strings.Contains(err.Error(), "expected_digest is required") {
 		t.Fatalf("expected update without expected_digest to fail closed, got %v", err)
 	}
-	rec2, err := m.SaveManagedProfile("anime-x265", p2, "second", "act-2", rec1.Digest)
+	rec2, err := m.SaveManagedProfile("anime-x265", p2, "second", "act-2", rec1.Generation, rec1.Digest)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,13 +73,16 @@ func TestManagedProfilePersistenceHistoryAndDelete(t *testing.T) {
 		t.Fatalf("unexpected history: %+v", history)
 	}
 
-	if _, err := reopened.DeleteManagedProfile("anime-x265", ""); err == nil || !strings.Contains(err.Error(), "expected_digest is required") {
+	if _, err := reopened.DeleteManagedProfile("anime-x265", 0, rec2.Digest); err == nil || !strings.Contains(err.Error(), "expected_generation is required") {
+		t.Fatalf("expected delete without expected_generation to fail closed, got %v", err)
+	}
+	if _, err := reopened.DeleteManagedProfile("anime-x265", rec2.Generation, ""); err == nil || !strings.Contains(err.Error(), "expected_digest is required") {
 		t.Fatalf("expected delete without expected_digest to fail closed, got %v", err)
 	}
-	if _, err := reopened.DeleteManagedProfile("anime-x265", rec1.Digest); err == nil {
+	if _, err := reopened.DeleteManagedProfile("anime-x265", rec1.Generation, rec1.Digest); err == nil {
 		t.Fatal("expected optimistic concurrency mismatch")
 	}
-	deleted, err := reopened.DeleteManagedProfile("anime-x265", rec2.Digest)
+	deleted, err := reopened.DeleteManagedProfile("anime-x265", rec2.Generation, rec2.Digest)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +102,7 @@ func TestManagedProfilePersistenceHistoryAndDelete(t *testing.T) {
 
 	p3 := managedTestProfile()
 	p3.Video.Quality = 20
-	rec3, err := reopened.SaveManagedProfile("anime-x265", p3, "recreated", "act-3", "")
+	rec3, err := reopened.SaveManagedProfile("anime-x265", p3, "recreated", "act-3", 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,6 +118,75 @@ func TestManagedProfilePersistenceHistoryAndDelete(t *testing.T) {
 	}
 	if len(history) != 4 || history[3].Event != "saved" || history[3].Generation != 3 {
 		t.Fatalf("recreate generation/history mismatch: %+v", history)
+	}
+}
+
+
+func TestManagedProfileCASRejectsMetadataOnlyConcurrentChange(t *testing.T) {
+	m, err := NewManager(BuiltinProvider{}, t.TempDir(), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p := managedTestProfile()
+	rec1, err := m.SaveManagedProfile("anime-x265", p, "first metadata", "act-1", 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec2, err := m.SaveManagedProfile("anime-x265", p, "metadata changed", "act-2", rec1.Generation, rec1.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec2.Generation != 2 {
+		t.Fatalf("metadata-only save should advance generation: got %d", rec2.Generation)
+	}
+	if rec2.Digest != rec1.Digest {
+		t.Fatalf("metadata-only save should preserve profile digest: %s != %s", rec2.Digest, rec1.Digest)
+	}
+
+	p3 := managedTestProfile()
+	p3.Video.Quality = 22
+	if _, err := m.SaveManagedProfile("anime-x265", p3, "stale writer", "act-stale", rec1.Generation, rec1.Digest); err == nil || !strings.Contains(err.Error(), "expected generation 1, current 2") {
+		t.Fatalf("stale metadata-era update should fail on generation even with matching digest, got %v", err)
+	}
+	if _, err := m.DeleteManagedProfile("anime-x265", rec1.Generation, rec1.Digest); err == nil || !strings.Contains(err.Error(), "expected generation 1, current 2") {
+		t.Fatalf("stale metadata-era delete should fail on generation even with matching digest, got %v", err)
+	}
+}
+
+func TestManagedProfileCASRejectsABAContentCycle(t *testing.T) {
+	m, err := NewManager(BuiltinProvider{}, t.TempDir(), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a := managedTestProfile()
+	recA1, err := m.SaveManagedProfile("anime-x265", a, "A1", "act-a1", 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	b := managedTestProfile()
+	b.Video.Quality = 22
+	recB, err := m.SaveManagedProfile("anime-x265", b, "B", "act-b", recA1.Generation, recA1.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recA3, err := m.SaveManagedProfile("anime-x265", a, "A3", "act-a3", recB.Generation, recB.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recA3.Generation != 3 || recA3.Digest != recA1.Digest {
+		t.Fatalf("expected A -> B -> A to restore digest but advance generation: A1=%+v A3=%+v", recA1, recA3)
+	}
+
+	stale := managedTestProfile()
+	stale.Video.Quality = 20
+	if _, err := m.SaveManagedProfile("anime-x265", stale, "stale A1 writer", "act-stale", recA1.Generation, recA1.Digest); err == nil || !strings.Contains(err.Error(), "expected generation 1, current 3") {
+		t.Fatalf("ABA stale update should fail on generation, got %v", err)
+	}
+	if _, err := m.DeleteManagedProfile("anime-x265", recA1.Generation, recA1.Digest); err == nil || !strings.Contains(err.Error(), "expected generation 1, current 3") {
+		t.Fatalf("ABA stale delete should fail on generation, got %v", err)
 	}
 }
 
