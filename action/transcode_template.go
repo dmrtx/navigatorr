@@ -334,7 +334,6 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	return StepResult{Status: StepCompleted, Outputs: outputs}, nil
 }
 
-
 func (e *Engine) validateTranscodeInputs(ec *ExecutionContext) error {
 	tmpl, ok := e.GetTemplate(ec.ActionName)
 	if !ok {
