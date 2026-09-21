@@ -178,4 +178,3 @@ func TestRecipeSaveAcceptsStructuredObjectAndKeepsStrictDecoding(t *testing.T) {
 		t.Fatalf("update without expected_digest must fail closed: %s", updateTxt)
 	}
 }
-
