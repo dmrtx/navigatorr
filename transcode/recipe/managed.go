@@ -261,10 +261,11 @@ func (m *Manager) GetManagedProfile(name string) (ManagedProfileRecord, bool, er
 }
 
 // SaveManagedProfile creates a managed profile or replaces an existing one.
-// New names omit expectedDigest. Replacing an existing profile requires
-// expectedDigest to match the active digest so blind overwrites fail closed.
+// New names omit expectedGeneration/expectedDigest. Replacing an existing
+// profile requires both the active generation and digest so metadata-only
+// changes and ABA profile-content cycles cannot satisfy a stale CAS.
 // Generation remains monotonic per profile name across delete/recreate cycles.
-func (m *Manager) SaveManagedProfile(name string, profile Profile, description, sourceActionID, expectedDigest string) (ManagedProfileRecord, error) {
+func (m *Manager) SaveManagedProfile(name string, profile Profile, description, sourceActionID string, expectedGeneration int64, expectedDigest string) (ManagedProfileRecord, error) {
 	name = strings.TrimSpace(name)
 	norm, digest, err := NormalizeAndDigestProfile(name, profile)
 	if err != nil {
@@ -279,14 +280,20 @@ func (m *Manager) SaveManagedProfile(name string, profile Profile, description, 
 	current, exists := reg.Profiles[name]
 	expectedDigest = strings.TrimSpace(expectedDigest)
 	if exists {
+		if expectedGeneration <= 0 {
+			return ManagedProfileRecord{}, fmt.Errorf("managed profile %q already exists; expected_generation is required to update it", name)
+		}
 		if expectedDigest == "" {
 			return ManagedProfileRecord{}, fmt.Errorf("managed profile %q already exists; expected_digest is required to update it", name)
+		}
+		if current.Generation != expectedGeneration {
+			return ManagedProfileRecord{}, fmt.Errorf("managed profile %q changed: expected generation %d, current %d", name, expectedGeneration, current.Generation)
 		}
 		if current.Digest != expectedDigest {
 			return ManagedProfileRecord{}, fmt.Errorf("managed profile %q changed: expected digest %s, current %s", name, expectedDigest, current.Digest)
 		}
-	} else if expectedDigest != "" {
-		return ManagedProfileRecord{}, fmt.Errorf("managed profile %q does not exist; expected_digest cannot create it", name)
+	} else if expectedGeneration != 0 || expectedDigest != "" {
+		return ManagedProfileRecord{}, fmt.Errorf("managed profile %q does not exist; expected_generation/expected_digest cannot create it", name)
 	}
 
 	nextGeneration := int64(1)
@@ -339,10 +346,10 @@ func (m *Manager) SaveManagedProfile(name string, profile Profile, description, 
 }
 
 // DeleteManagedProfile removes the active managed override while preserving an
-// audit entry. expectedDigest is mandatory so deletes cannot race a concurrent
-// update. Running actions are unaffected because they already hold an immutable
-// resolved plan.
-func (m *Manager) DeleteManagedProfile(name, expectedDigest string) (ManagedProfileHistoryEntry, error) {
+// audit entry. expectedGeneration and expectedDigest are mandatory so deletes
+// cannot race metadata-only changes, content changes, or ABA content cycles.
+// Running actions are unaffected because they already hold an immutable plan.
+func (m *Manager) DeleteManagedProfile(name string, expectedGeneration int64, expectedDigest string) (ManagedProfileHistoryEntry, error) {
 	name = strings.TrimSpace(name)
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -355,8 +362,14 @@ func (m *Manager) DeleteManagedProfile(name, expectedDigest string) (ManagedProf
 		return ManagedProfileHistoryEntry{}, fmt.Errorf("managed profile %q not found", name)
 	}
 	expectedDigest = strings.TrimSpace(expectedDigest)
+	if expectedGeneration <= 0 {
+		return ManagedProfileHistoryEntry{}, fmt.Errorf("expected_generation is required to delete managed profile %q", name)
+	}
 	if expectedDigest == "" {
 		return ManagedProfileHistoryEntry{}, fmt.Errorf("expected_digest is required to delete managed profile %q", name)
+	}
+	if rec.Generation != expectedGeneration {
+		return ManagedProfileHistoryEntry{}, fmt.Errorf("managed profile %q changed: expected generation %d, current %d", name, expectedGeneration, rec.Generation)
 	}
 	if rec.Digest != expectedDigest {
 		return ManagedProfileHistoryEntry{}, fmt.Errorf("managed profile %q changed: expected digest %s, current %s", name, expectedDigest, rec.Digest)
