@@ -24,6 +24,19 @@ func managedTestProfile() Profile {
 	}
 }
 
+
+func TestManagedProfileRejectsReservedAutoName(t *testing.T) {
+	m, err := NewManager(BuiltinProvider{}, t.TempDir(), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"auto", "AUTO", "Auto"} {
+		if _, err := m.SaveManagedProfile(name, managedTestProfile(), "reserved", "", 0, ""); err == nil || !strings.Contains(err.Error(), "reserved for automatic profile selection") {
+			t.Fatalf("SaveManagedProfile(%q) should reject reserved auto name, got %v", name, err)
+		}
+	}
+}
+
 func TestManagedProfilePersistenceHistoryAndDelete(t *testing.T) {
 	dir := t.TempDir()
 	m, err := NewManager(BuiltinProvider{}, dir, "", "")
