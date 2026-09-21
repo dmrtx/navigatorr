@@ -23,6 +23,12 @@ type Engine struct {
 	templates      map[string]ActionTemplate
 	reconcilerOnce sync.Once
 	reconcilerDone chan struct{}
+
+	// promotionCopyBoundaryHook, when set by tests, runs after a private
+	// recovery copy has been flushed and closed and before it is verified or
+	// published. It exists to make the promote copy/verify boundary
+	// deterministic in tests; production leaves it nil.
+	promotionCopyBoundaryHook func(partial string)
 }
 
 // NewEngine creates a new Action Engine.
