@@ -150,6 +150,25 @@ func argStrings(args map[string]any, key string) []string {
 	return nil
 }
 
+// parseJSONObject parses exactly one JSON object from a string. Arrays,
+// scalars, null, malformed JSON, and trailing documents are rejected so tool
+// callers never silently lose requested inputs.
+func parseJSONObject(raw string) (map[string]any, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return map[string]any{}, nil
+	}
+	var value any
+	if err := json.Unmarshal([]byte(raw), &value); err != nil {
+		return nil, fmt.Errorf("invalid JSON object: %w", err)
+	}
+	obj, ok := value.(map[string]any)
+	if !ok || obj == nil {
+		return nil, fmt.Errorf("inputs must be a JSON object")
+	}
+	return obj, nil
+}
+
 // argJSON re-marshals any argument to its JSON encoding.
 func argJSON(args map[string]any, key string) (string, error) {
 	v, ok := args[key]

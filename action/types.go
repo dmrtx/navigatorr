@@ -73,12 +73,13 @@ type StepDefinition struct {
 
 // ActionTemplate defines a declarative workflow composed of sequential steps
 type ActionTemplate struct {
-	Name           string
-	Version        int
-	Description    string
-	RequiredInputs []string
-	OptionalInputs []string
-	Destructive    bool
+	Name            string
+	Version         int
+	Description     string
+	RequiredInputs  []string
+	OptionalInputs  []string
+	Destructive     bool
+	ImmutableInputs bool
 	// AutoReconcile opts this workflow into autonomous continuation of external waits.
 	// Decision waits are always excluded.
 	AutoReconcile bool
@@ -87,13 +88,14 @@ type ActionTemplate struct {
 
 // ActionCatalogEntry describes an action workflow definition for discovery
 type ActionCatalogEntry struct {
-	Name           string   `json:"name"`
-	Version        int      `json:"version"`
-	Description    string   `json:"description"`
-	RequiredInputs []string `json:"required_inputs"`
-	OptionalInputs []string `json:"optional_inputs"`
-	Steps          []string `json:"steps"`
-	Destructive    bool     `json:"destructive"`
+	Name            string   `json:"name"`
+	Version         int      `json:"version"`
+	Description     string   `json:"description"`
+	RequiredInputs  []string `json:"required_inputs"`
+	OptionalInputs  []string `json:"optional_inputs"`
+	Steps           []string `json:"steps"`
+	Destructive     bool     `json:"destructive"`
+	ImmutableInputs bool     `json:"immutable_inputs"`
 }
 
 // ActionResult is returned when running, resuming, or querying an action

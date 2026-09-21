@@ -118,7 +118,7 @@ func (e *Engine) shouldReconcile(inst *store.ActionInstance, tmpl ActionTemplate
 	if !tmpl.AutoReconcile || (inst.Status != StatusWaitingExternal && inst.Status != StatusRunning) {
 		return false
 	}
-	if getBool(ec.Inputs, "paused") || getBool(ec.State, "paused") {
+	if getBool(ec.State, "paused") {
 		return false
 	}
 	// Parent cancel/pause control is enforced at each admission point under the

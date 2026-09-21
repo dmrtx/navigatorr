@@ -126,6 +126,7 @@ type VideoProfileConfig struct {
 	Codec              string `yaml:"codec"`
 	Quality            int    `yaml:"quality"`
 	Preset             string `yaml:"preset,omitempty"`
+	Tune               string `yaml:"tune,omitempty"`
 	Profile            string `yaml:"profile,omitempty"`
 	PixelFormat        string `yaml:"pixel_format,omitempty"`
 	PrioritizeSpeed    *bool  `yaml:"prioritize_speed,omitempty"`
@@ -184,6 +185,31 @@ func (t *TranscodeConfig) recipeOverrides() map[string]recipe.Profile {
 	return out
 }
 
+// resolvedRecipeOverrides composes the three recipe layers used by new jobs:
+// active bundle < static config overrides < centrally managed profiles.
+// Managed profiles intentionally win so day-to-day recipe changes do not
+// require editing deployment configuration. Running jobs are unaffected
+// because they already hold an immutable resolved transcode.Plan.
+func (t *TranscodeConfig) resolvedRecipeOverrides() (map[string]recipe.Profile, map[string]recipe.ManagedProfileRecord, error) {
+	out := t.recipeOverrides()
+	if out == nil {
+		out = make(map[string]recipe.Profile)
+	}
+	managed := make(map[string]recipe.ManagedProfileRecord)
+	if t.recipeManager == nil {
+		return out, managed, nil
+	}
+	records, err := t.recipeManager.ListManagedProfiles()
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, rec := range records {
+		out[rec.Name] = rec.Profile
+		managed[rec.Name] = rec
+	}
+	return out, managed, nil
+}
+
 func profileToRecipe(name string, p TranscodeProfileConfig) recipe.Profile {
 	r := recipe.ResilienceProfile{MaxAttempts: p.Resilience.MaxAttempts, TransientRetries: p.Resilience.TransientRetries, RetryBackoffSeconds: append([]int(nil), p.Resilience.RetryBackoffSeconds...), MaxFallbacks: p.Resilience.MaxFallbacks, Fallbacks: append([]recipe.FallbackRule(nil), p.Resilience.Fallbacks...)}
 	// Backward-compatible local profiles from PR #16 did not contain a resilience block.
@@ -202,6 +228,7 @@ func profileToRecipe(name string, p TranscodeProfileConfig) recipe.Profile {
 			Codec:              p.Video.Codec,
 			Quality:            p.Video.Quality,
 			Preset:             p.Video.Preset,
+			Tune:               p.Video.Tune,
 			Profile:            p.Video.Profile,
 			PixelFormat:        p.Video.PixelFormat,
 			PrioritizeSpeed:    p.Video.PrioritizeSpeed,
@@ -242,6 +269,7 @@ func recipeToProfile(p recipe.Profile) TranscodeProfileConfig {
 			Codec:              p.Video.Codec,
 			Quality:            p.Video.Quality,
 			Preset:             p.Video.Preset,
+			Tune:               p.Video.Tune,
 			Profile:            p.Video.Profile,
 			PixelFormat:        p.Video.PixelFormat,
 			PrioritizeSpeed:    p.Video.PrioritizeSpeed,
@@ -291,25 +319,8 @@ func (t *TranscodeConfig) activeSnapshot() (*recipe.Snapshot, error) {
 func (t *TranscodeConfig) ResolvePlan(profileName string) (*transcode.Plan, error) {
 	return t.ResolvePlanForSource(profileName, nil)
 }
-func (t *TranscodeConfig) ResolvePlanForSource(profileName string, subtitles []recipe.SourceSubtitle) (*transcode.Plan, error) {
-	name := strings.TrimSpace(profileName)
-	if name == "" {
-		name = strings.TrimSpace(t.DefaultProfile)
-	}
-	if name == "" {
-		name = "hevc-vt"
-	}
-	snap, err := t.activeSnapshot()
-	if err != nil {
-		return nil, err
-	}
-	return recipe.Resolve(snap, name, t.recipeOverrides(), subtitles)
-}
 
-// ResolveProfile resolves and validates a recipe Profile for the given profileName,
-// incorporating local profile overrides (whose optimization policies are already normalized
-// during snapshot parsing and override conversion).
-func (t *TranscodeConfig) ResolveProfile(profileName string) (recipe.Profile, error) {
+func (t *TranscodeConfig) resolvedProfileContext(profileName string) (string, *recipe.Snapshot, map[string]recipe.Profile, map[string]recipe.ManagedProfileRecord, recipe.Profile, error) {
 	name := strings.TrimSpace(profileName)
 	if name == "" {
 		name = strings.TrimSpace(t.DefaultProfile)
@@ -319,20 +330,91 @@ func (t *TranscodeConfig) ResolveProfile(profileName string) (recipe.Profile, er
 	}
 	snap, err := t.activeSnapshot()
 	if err != nil {
-		return recipe.Profile{}, err
+		return "", nil, nil, nil, recipe.Profile{}, err
+	}
+	overrides, managed, err := t.resolvedRecipeOverrides()
+	if err != nil {
+		return "", nil, nil, nil, recipe.Profile{}, fmt.Errorf("reading managed transcode profiles: %w", err)
 	}
 	p, ok := snap.Bundle.Profiles[name]
-	if op, exists := t.recipeOverrides()[name]; exists {
+	if op, exists := overrides[name]; exists {
 		p = op
 		ok = true
 	}
 	if !ok {
-		return recipe.Profile{}, fmt.Errorf("unknown transcode profile %q", name)
+		return "", nil, nil, nil, recipe.Profile{}, fmt.Errorf("unknown transcode profile %q", name)
 	}
 	if err := recipe.ValidateProfile(name, p); err != nil {
-		return recipe.Profile{}, err
+		return "", nil, nil, nil, recipe.Profile{}, err
 	}
-	return p, nil
+	return name, snap, overrides, managed, p, nil
+}
+
+// ResolvePlanAndProfileForSource returns the exact validated profile and the
+// immutable plan derived from the same recipe snapshot/managed-registry read.
+// This prevents a managed profile update between plan resolution and
+// optimization-policy lookup from mixing two generations inside one action.
+func (t *TranscodeConfig) ResolvePlanAndProfileForSource(profileName string, subtitles []recipe.SourceSubtitle) (*transcode.Plan, recipe.Profile, error) {
+	name, snap, overrides, managed, p, err := t.resolvedProfileContext(profileName)
+	if err != nil {
+		return nil, recipe.Profile{}, err
+	}
+	plan, err := recipe.Resolve(snap, name, overrides, subtitles)
+	if err != nil {
+		return nil, recipe.Profile{}, err
+	}
+	if rec, ok := managed[name]; ok {
+		plan.RecipeVersion = fmt.Sprintf("managed:%s:%d", name, rec.Generation)
+		plan.RecipeDigest = rec.Digest
+		plan.PlanDigest = ""
+		digest, err := transcode.DigestPlan(plan)
+		if err != nil {
+			return nil, recipe.Profile{}, err
+		}
+		plan.PlanDigest = digest
+	}
+	return plan, p, nil
+}
+
+func (t *TranscodeConfig) ResolvePlanForSource(profileName string, subtitles []recipe.SourceSubtitle) (*transcode.Plan, error) {
+	plan, _, err := t.ResolvePlanAndProfileForSource(profileName, subtitles)
+	return plan, err
+}
+
+// ResolveEphemeralPlanForSource validates a complete one-action profile,
+// resolves it through the same container/subtitle compatibility machinery as
+// durable recipes, and stamps a content identity that can be tracked or later
+// persisted through recipe_save. It never mutates the active recipe registry.
+func (t *TranscodeConfig) ResolveEphemeralPlanForSource(profile recipe.Profile, subtitles []recipe.SourceSubtitle) (*transcode.Plan, recipe.Profile, string, error) {
+	const name = "ephemeral"
+	normalized, digest, err := recipe.NormalizeAndDigestProfile(name, profile)
+	if err != nil {
+		return nil, recipe.Profile{}, "", err
+	}
+	snap, err := t.activeSnapshot()
+	if err != nil {
+		return nil, recipe.Profile{}, "", err
+	}
+	plan, err := recipe.Resolve(snap, name, map[string]recipe.Profile{name: normalized}, subtitles)
+	if err != nil {
+		return nil, recipe.Profile{}, "", err
+	}
+	plan.RecipeVersion = "ephemeral"
+	plan.RecipeDigest = digest
+	plan.PlanDigest = ""
+	planDigest, err := transcode.DigestPlan(plan)
+	if err != nil {
+		return nil, recipe.Profile{}, "", err
+	}
+	plan.PlanDigest = planDigest
+	return plan, normalized, digest, nil
+}
+
+// ResolveProfile resolves and validates a recipe Profile for the given profileName.
+// Precedence is active bundle < static config override < centrally managed profile.
+func (t *TranscodeConfig) ResolveProfile(profileName string) (recipe.Profile, error) {
+	_, _, _, _, p, err := t.resolvedProfileContext(profileName)
+	return p, err
 }
 
 func (t *TranscodeConfig) validateRecipeSource() error {
@@ -419,8 +501,9 @@ func (t *TranscodeConfig) InitializeRecipes(ctx context.Context) error {
 			mgr.StartAutoRefresh(context.Background(), d)
 		}
 	}
-	if t.DefaultProfile != "" && t.DefaultProfile != "auto" {
-		if _, err := t.ResolvePlan(t.DefaultProfile); err != nil {
+	defaultProfile := strings.TrimSpace(t.DefaultProfile)
+	if defaultProfile != "" && !strings.EqualFold(defaultProfile, "auto") {
+		if _, err := t.ResolvePlan(defaultProfile); err != nil {
 			return fmt.Errorf("transcode: default_profile %q is not defined in the active recipe/local overrides: %w", t.DefaultProfile, err)
 		}
 	}
