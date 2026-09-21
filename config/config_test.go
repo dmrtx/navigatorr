@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -522,6 +523,15 @@ transcode:
 		}
 		if planDef.Quality != 55 {
 			t.Errorf("expected default profile quality 55, got %d", planDef.Quality)
+		}
+	})
+
+	t.Run("default auto profile is case-insensitive and trimmed", func(t *testing.T) {
+		for _, value := range []string{"auto", "AUTO", "Auto", " auto "} {
+			tc := TranscodeConfig{DefaultProfile: value}
+			if err := tc.InitializeRecipes(context.Background()); err != nil {
+				t.Fatalf("default_profile %q should be accepted as automatic selector pseudo-profile: %v", value, err)
+			}
 		}
 	})
 
