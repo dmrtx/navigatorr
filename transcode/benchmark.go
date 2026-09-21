@@ -121,6 +121,7 @@ type BenchmarkWinner struct {
 	VideoCodec                string   `json:"video_codec,omitempty"`
 	Quality                   int      `json:"quality"`
 	Preset                    string   `json:"preset,omitempty"`
+	Tune                      string   `json:"tune,omitempty"`
 	AverageBitrateKbps        int      `json:"average_bitrate_kbps,omitempty"`
 	MaxBitrateKbps            int      `json:"max_bitrate_kbps,omitempty"`
 	ConstantBitrate           *bool    `json:"constant_bitrate,omitempty"`
@@ -160,6 +161,7 @@ type BenchmarkCandidateEvaluation struct {
 	VideoCodec         string   `json:"video_codec,omitempty"`
 	Quality            int      `json:"quality"`
 	Preset             string   `json:"preset,omitempty"`
+	Tune               string   `json:"tune,omitempty"`
 	AverageBitrateKbps int      `json:"average_bitrate_kbps,omitempty"`
 	VideoProfile       string   `json:"video_profile,omitempty"`
 	PixelFormat        string   `json:"pixel_format,omitempty"`
@@ -196,6 +198,8 @@ type BenchmarkCandidate struct {
 	Quality int `json:"quality"`
 	// Preset is the libx265 preset; it must be empty for hevc_videotoolbox.
 	Preset string `json:"preset,omitempty"`
+	// Tune is a bounded libx265 tune and must be empty for VideoToolbox.
+	Tune string `json:"tune,omitempty"`
 	// Bounded typed hevc_videotoolbox rate-control/offline knobs. All must be
 	// unset for libx265. All other knobs besides the swept rate dimension are
 	// inherited from the profile's resolved base plan and held fixed.
@@ -511,10 +515,14 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 
 		codec := BenchmarkCandidateVideoCodec(c)
 		preset := strings.ToLower(strings.TrimSpace(c.Preset))
+		tune := strings.ToLower(strings.TrimSpace(c.Tune))
 		switch codec {
 		case VideoCodecHEVCVideoToolbox:
 			if preset != "" {
 				return fmt.Errorf("candidate %q: preset is only supported for libx265, got %q for %s", cID, c.Preset, VideoCodecHEVCVideoToolbox)
+			}
+			if tune != "" {
+				return fmt.Errorf("candidate %q: tune is only supported for libx265, got %q for %s", cID, c.Tune, VideoCodecHEVCVideoToolbox)
 			}
 			hasQuality := c.Quality != 0
 			hasBitrate := c.AverageBitrateKbps != 0
@@ -578,6 +586,9 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 			if preset != "" && !IsValidLibX265Preset(preset) {
 				return fmt.Errorf("candidate %q has unsupported libx265 preset %q", cID, c.Preset)
 			}
+			if tune != "" && !IsValidLibX265Tune(tune) {
+				return fmt.Errorf("candidate %q has unsupported libx265 tune %q", cID, c.Tune)
+			}
 			if c.Quality < LibX265CRFMin || c.Quality > LibX265CRFMax {
 				return fmt.Errorf("candidate %q crf %d out of valid range %d..%d for libx265", cID, c.Quality, LibX265CRFMin, LibX265CRFMax)
 			}
@@ -587,7 +598,7 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 		default:
 			return fmt.Errorf("candidate %q has unsupported video codec %q", cID, c.VideoCodec)
 		}
-		qualityKey := codec + ":" + strconv.Itoa(c.Quality) + ":br" + strconv.Itoa(c.AverageBitrateKbps)
+		qualityKey := codec + ":" + preset + ":" + tune + ":" + strconv.Itoa(c.Quality) + ":br" + strconv.Itoa(c.AverageBitrateKbps)
 		if seenQualities[qualityKey] {
 			return fmt.Errorf("duplicate candidate quality %d (bitrate %d) for codec %s (candidate %q)", c.Quality, c.AverageBitrateKbps, codec, cID)
 		}

@@ -29,6 +29,9 @@ func buildVideoToolboxArgs(plan *transcode.Plan) ([]string, error) {
 	if norm(plan.Preset) != "" {
 		return nil, fmt.Errorf("preset is only supported for libx265, got %q for hevc_videotoolbox", plan.Preset)
 	}
+	if norm(plan.Tune) != "" {
+		return nil, fmt.Errorf("tune is only supported for libx265, got %q for hevc_videotoolbox", plan.Tune)
+	}
 	profile, pixelFormat, err := validateHEVCVideoShape(plan)
 	if err != nil {
 		return nil, err
@@ -194,7 +197,14 @@ func buildLibX265Args(plan *transcode.Plan) ([]string, error) {
 	if !transcode.IsValidLibX265Preset(preset) {
 		return nil, fmt.Errorf("unsupported libx265 preset %q (allowed: %v)", plan.Preset, transcode.ValidLibX265Presets())
 	}
+	tune := norm(plan.Tune)
+	if tune != "" && !transcode.IsValidLibX265Tune(tune) {
+		return nil, fmt.Errorf("unsupported libx265 tune %q (allowed: %v)", plan.Tune, transcode.ValidLibX265Tunes())
+	}
 	args := []string{"-c:v", "libx265", "-crf", strconv.Itoa(crf), "-preset", preset}
+	if tune != "" {
+		args = append(args, "-tune", tune)
+	}
 	if profile != "" {
 		args = append(args, "-profile:v", profile)
 	}

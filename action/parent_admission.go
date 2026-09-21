@@ -155,7 +155,7 @@ func (e *Engine) parentPolicy(parentID string) (string, error) {
 	if getBool(pec.State, "cancel_requested") || getBool(pec.Inputs, "cancel_requested") {
 		return "cancelled", nil
 	}
-	if getBool(pec.Inputs, "paused") || getBool(pec.State, "paused") {
+	if getBool(pec.State, "paused") {
 		return "paused", nil
 	}
 	if parent.Status == StatusWaitingDecision {

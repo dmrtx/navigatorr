@@ -278,7 +278,11 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 
 			inputs := make(map[string]any)
 			if rawInputs := argString(args, "inputs", ""); rawInputs != "" {
-				_ = json.Unmarshal([]byte(rawInputs), &inputs)
+				var err error
+				inputs, err = parseJSONObject(rawInputs)
+				if err != nil {
+					return toolErr("invalid action_run inputs: %v", err), nil
+				}
 			}
 
 			// Merge shortcut arguments
@@ -307,7 +311,7 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 	// action_catalog — discover registered action workflows
 	s.AddTool(
 		mcp.NewTool("action_catalog",
-			mcp.WithDescription("Discover all registered action workflows, their versions, inputs, steps, and safety profiles."),
+			mcp.WithDescription("Discover all registered action workflows, their versions, inputs, immutable-input policy, steps, and safety profiles."),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			catalog := engine.Catalog()
@@ -340,10 +344,10 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 	// action_resume — resume an action from waiting_external or waiting_decision
 	s.AddTool(
 		mcp.NewTool("action_resume",
-			mcp.WithDescription("Resume an active or paused action workflow using its action ID. For actions in waiting_external (e.g. transcode running in background or waiting for worker slot), call with id only to poll/advance progress. For actions in waiting_decision, provide 'decision' matching one of waiting_options (e.g. approve, reject, accept_loss, resume, pause, cancel). Note: cancelling a batch cancels queued and waiting items; active remote jobs already running on workers are not stopped. Returns a compact operational summary."),
+			mcp.WithDescription("Resume an active or paused action workflow using its action ID. For actions in waiting_external (e.g. transcode running in background or waiting for worker slot), call with id only to poll/advance progress. For actions in waiting_decision, provide 'decision' matching one of waiting_options (e.g. approve, reject, accept_loss, resume, pause, cancel). Workflows advertised by action_catalog with immutable_inputs=true reject additional inputs after creation. Cancelling a transcode batch propagates cancellation to admitted child actions so active remote transcode jobs are stopped when supported. Returns a compact operational summary."),
 			mcp.WithString("id", mcp.Required(), mcp.Description("Action instance ID (e.g. act-transcode_batch-a1b2c3d4)")),
 			mcp.WithString("decision", mcp.Description("Decision choice when resuming from waiting_decision (matches one of the action's waiting_options, e.g. resume, pause, cancel, approve, reject, accept_loss). Omit when resuming waiting_external.")),
-			mcp.WithString("inputs", mcp.Description("Optional JSON object string with additional parameters")),
+			mcp.WithString("inputs", mcp.Description("Optional JSON object string with additional parameters. Rejected for workflows whose template declares immutable inputs.")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			args := req.GetArguments()
@@ -355,7 +359,11 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 			decision := strings.TrimSpace(argString(args, "decision", ""))
 			var extraInputs map[string]any
 			if rawInputs := argString(args, "inputs", ""); rawInputs != "" {
-				_ = json.Unmarshal([]byte(rawInputs), &extraInputs)
+				var err error
+				extraInputs, err = parseJSONObject(rawInputs)
+				if err != nil {
+					return toolErr("invalid action_resume inputs: %v", err), nil
+				}
 			}
 
 			res, err := engine.Resume(ctx, id, decision, extraInputs)

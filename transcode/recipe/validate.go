@@ -128,6 +128,9 @@ func Validate(b *Bundle) error {
 }
 
 func ValidateProfile(name string, p Profile) error {
+	if strings.EqualFold(strings.TrimSpace(name), "auto") {
+		return fmt.Errorf("profile name %q is reserved for automatic profile selection", name)
+	}
 	if normalizeContainer(p.Container) != "mkv" {
 		return fmt.Errorf("profile %q: unsupported container %q", name, p.Container)
 	}
@@ -142,12 +145,18 @@ func ValidateProfile(name string, p Profile) error {
 		if preset := normalizeCodec(p.Video.Preset); preset != "" && !transcode.IsValidLibX265Preset(preset) {
 			return fmt.Errorf("profile %q: unsupported libx265 preset %q (allowed: %v)", name, p.Video.Preset, transcode.ValidLibX265Presets())
 		}
+		if tune := normalizeCodec(p.Video.Tune); tune != "" && !transcode.IsValidLibX265Tune(tune) {
+			return fmt.Errorf("profile %q: unsupported libx265 tune %q (allowed: %v)", name, p.Video.Tune, transcode.ValidLibX265Tunes())
+		}
 		if err := rejectLibX265VideoToolboxVideoKnobs(name, p.Video); err != nil {
 			return err
 		}
 	} else {
 		if strings.TrimSpace(p.Video.Preset) != "" {
 			return fmt.Errorf("profile %q: preset is only supported for libx265, got %q for %s", name, p.Video.Preset, p.Video.Codec)
+		}
+		if strings.TrimSpace(p.Video.Tune) != "" {
+			return fmt.Errorf("profile %q: tune is only supported for libx265, got %q for %s", name, p.Video.Tune, p.Video.Codec)
 		}
 		if err := ValidateVideoRateControl(name, p.Video); err != nil {
 			return err

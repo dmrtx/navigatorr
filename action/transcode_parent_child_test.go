@@ -187,13 +187,14 @@ func TestPauseBlocksEncodeButResumeAllowsSubmit(t *testing.T) {
 		t.Fatalf("paused parent must not launch encode: %s/%s submits=%d", res.Status, res.WaitingCondition, mock.submitCalls)
 	}
 
-	// Explicit resume clears the durable pause; the encode admission proceeds.
+	// Explicit resume clears durable State only. The original immutable input may
+	// still say paused=true and must not block the next child admission.
 	parent, err := st.GetActionInstance("parent-pause")
 	if err != nil {
 		t.Fatal(err)
 	}
 	parent.StateJSON = toJSON(map[string]any{"paused": false})
-	parent.InputsJSON = toJSON(map[string]any{"service": "sonarr", "paused": false})
+	parent.InputsJSON = toJSON(map[string]any{"service": "sonarr", "paused": true})
 	if err := st.UpdateActionInstance(*parent); err != nil {
 		t.Fatal(err)
 	}
@@ -516,8 +517,8 @@ func TestBatchPauseFromExecutionPersistsPausedFlag(t *testing.T) {
 		t.Fatal(err)
 	}
 	ec := parseExecutionContext(inst, engine)
-	if !getBool(ec.State, "paused") && !getBool(ec.Inputs, "paused") {
-		t.Fatal("decision=pause must persist paused=true durably")
+	if !getBool(ec.State, "paused") {
+		t.Fatal("decision=pause must persist paused=true in durable state")
 	}
 	if mock.submitCalls != 1 {
 		t.Fatalf("pausing must not submit further items, submitCalls=%d", mock.submitCalls)

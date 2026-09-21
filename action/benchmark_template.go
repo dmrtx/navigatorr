@@ -18,13 +18,14 @@ import (
 
 func (e *Engine) registerBenchmarkTemplate() {
 	e.RegisterTemplate(ActionTemplate{
-		AutoReconcile:  true,
-		Name:           "benchmark_transcode",
-		Version:        1,
-		Description:    "Coordinates safe candidate-only benchmark evaluation of encoder parameters over deterministic source samples, returning quality metrics, size estimates, and an explainable decision without modifying media or creating permanent candidates.",
-		RequiredInputs: []string{"path"},
-		OptionalInputs: []string{"profile", "metric", "replace_original", "surface_worker_busy"},
-		Destructive:    false,
+		AutoReconcile:   true,
+		ImmutableInputs: true,
+		Name:            "benchmark_transcode",
+		Version:         1,
+		Description:     "Coordinates safe candidate-only benchmark evaluation of encoder parameters over deterministic source samples, returning quality metrics, size estimates, and an explainable decision without modifying media or creating permanent candidates.",
+		RequiredInputs:  []string{"path"},
+		OptionalInputs:  []string{"profile", "profile_config", "metric", "replace_original", "surface_worker_busy"},
+		Destructive:     false,
 		Steps: []StepDefinition{
 			{Name: "preflight", Description: "Inspect source, hash original, resolve profile and optimization policy", Run: e.stepTranscodePreflight},
 			{Name: "submit_benchmark", Description: "Submit deterministic sample benchmark request to remote worker", Run: e.stepBenchmarkSubmit},
@@ -345,6 +346,9 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 				// inherited set); a winner that omits them (foreign or
 				// pre-upgrade in-flight job) retains the base plan intent
 				// instead of silently clearing encoder configuration.
+				if winner.Tune != "" {
+					wp.Tune = winner.Tune
+				}
 				if winner.MaxBitrateKbps != 0 {
 					wp.MaxBitrateKbps = winner.MaxBitrateKbps
 				}
@@ -586,6 +590,7 @@ func buildBenchmarkCandidates(basePlan *transcode.Plan, bitDepth int, srch *reci
 		normCodec = transcode.VideoCodecHEVCVideoToolbox
 	}
 	normPreset := strings.ToLower(strings.TrimSpace(basePlan.Preset))
+	normTune := strings.ToLower(strings.TrimSpace(basePlan.Tune))
 	maxCandidates := srch.MaxCandidates
 	hasQuality := len(srch.QualityValues) > 0
 	hasBitrate := len(srch.BitrateValues) > 0
@@ -620,6 +625,9 @@ func buildBenchmarkCandidates(basePlan *transcode.Plan, bitDepth int, srch *reci
 	case transcode.VideoCodecHEVCVideoToolbox:
 		if normPreset != "" {
 			return nil, fmt.Errorf("preset %q is only supported for libx265 (fail closed)", basePlan.Preset)
+		}
+		if normTune != "" {
+			return nil, fmt.Errorf("tune %q is only supported for libx265 (fail closed)", basePlan.Tune)
 		}
 		if hasBitrate {
 			brVals := srch.BitrateValues
@@ -672,6 +680,9 @@ func buildBenchmarkCandidates(basePlan *transcode.Plan, bitDepth int, srch *reci
 		if !transcode.IsValidLibX265Preset(normPreset) {
 			return nil, fmt.Errorf("unsupported libx265 preset %q", basePlan.Preset)
 		}
+		if normTune != "" && !transcode.IsValidLibX265Tune(normTune) {
+			return nil, fmt.Errorf("unsupported libx265 tune %q", basePlan.Tune)
+		}
 		qVals := srch.QualityValues
 		if maxCandidates > 0 && len(qVals) > maxCandidates {
 			qVals = qVals[:maxCandidates]
@@ -686,6 +697,7 @@ func buildBenchmarkCandidates(basePlan *transcode.Plan, bitDepth int, srch *reci
 				VideoCodec:   normCodec,
 				Quality:      q,
 				Preset:       normPreset,
+				Tune:         normTune,
 				VideoProfile: targetProf,
 				PixelFormat:  targetPix,
 			})
@@ -742,8 +754,8 @@ func buildBenchmarkSamples(rep *mediainspect.DetailedReport, optSampling *recipe
 func resolveBenchmarkMetric(ec *ExecutionContext, optQuality *recipe.QualityPolicy) (string, error) {
 	raw := strings.ToLower(strings.TrimSpace(getString(ec.Inputs, "metric")))
 	if raw != "" {
-		if raw != "vmaf" && raw != "ssim" && raw != "both" && raw != "vmaf+ssim" {
-			return "", fmt.Errorf("invalid metric %q: must be 'vmaf', 'ssim', or 'both' (fail closed)", raw)
+		if raw != "auto" && raw != "vmaf" && raw != "ssim" && raw != "both" && raw != "vmaf+ssim" {
+			return "", fmt.Errorf("invalid metric %q: must be 'auto', 'vmaf', 'ssim', or 'both' (fail closed)", raw)
 		}
 		if raw == "vmaf+ssim" {
 			raw = "both"
@@ -758,6 +770,22 @@ func resolveBenchmarkMetric(ec *ExecutionContext, optQuality *recipe.QualityPoli
 		return norm, nil
 	}
 	return "vmaf", nil
+}
+
+func resolveAutoBenchmarkMetric(metric string, caps transcode.WorkerCapabilities, sourceBitDepth int) (string, error) {
+	if metric != "auto" {
+		return metric, nil
+	}
+	// VMAF is preferred only where this coordinator has a verified safe path.
+	// For 10-bit sources, selecting it would require the prohibited silent
+	// down-conversion, so auto deterministically chooses SSIM instead.
+	if sourceBitDepth <= 8 && caps.Filters["libvmaf"] {
+		return "vmaf", nil
+	}
+	if caps.Filters["ssim"] {
+		return "ssim", nil
+	}
+	return "", fmt.Errorf("worker capability unsupported: metric auto found no safe metric for %d-bit source (need verified libvmaf for 8-bit or ssim) (fail closed)", sourceBitDepth)
 }
 
 func buildBenchmarkQualityConfig(optQuality *recipe.QualityPolicy) *transcode.BenchmarkQualityConfig {
@@ -780,6 +808,24 @@ func buildBenchmarkQualityConfig(optQuality *recipe.QualityPolicy) *transcode.Be
 			Minimum:           optQuality.SSIM.Minimum,
 			MarginalTolerance: optQuality.SSIM.MarginalTolerance,
 		}
+	}
+	return qc
+}
+
+func ensureBenchmarkQualityMetric(qc *transcode.BenchmarkQualityConfig, metric string) *transcode.BenchmarkQualityConfig {
+	if qc == nil {
+		qc = &transcode.BenchmarkQualityConfig{}
+	}
+	if metric == "vmaf" || metric == "ssim" {
+		qc.PreferredMetric = metric
+	}
+	if (metric == "vmaf" || metric == "both") && qc.VMAF == nil {
+		tolerance := recipe.DefaultVMAFMarginalTolerance
+		qc.VMAF = &transcode.BenchmarkQualityThresholds{Target: recipe.DefaultVMAFTarget, Minimum: recipe.DefaultVMAFMinimum, MarginalTolerance: &tolerance}
+	}
+	if (metric == "ssim" || metric == "both") && qc.SSIM == nil {
+		tolerance := recipe.DefaultSSIMMarginalTolerance
+		qc.SSIM = &transcode.BenchmarkQualityThresholds{Target: recipe.DefaultSSIMTarget, Minimum: recipe.DefaultSSIMMinimum, MarginalTolerance: &tolerance}
 	}
 	return qc
 }
@@ -906,12 +952,16 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 	if err != nil {
 		return nil, err
 	}
+	metric, err = resolveAutoBenchmarkMetric(metric, caps, bitDepth)
+	if err != nil {
+		return nil, err
+	}
 
 	if err := validateWorkerCapabilitiesForBenchmark(caps, metric, bitDepth, planCodec); err != nil {
 		return nil, err
 	}
 
-	qualityCfg := buildBenchmarkQualityConfig(opt.Quality)
+	qualityCfg := ensureBenchmarkQualityMetric(buildBenchmarkQualityConfig(opt.Quality), metric)
 	adaptiveCfg := buildBenchmarkAdaptiveConfig(opt.Search, planCodec)
 	concurrencyCfg := buildBenchmarkConcurrencyConfig(opt.Search)
 

@@ -1,6 +1,7 @@
 package action
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -94,13 +95,14 @@ func (e *Engine) Catalog() []ActionCatalogEntry {
 			optInputs = []string{}
 		}
 		entries = append(entries, ActionCatalogEntry{
-			Name:           t.Name,
-			Version:        t.Version,
-			Description:    t.Description,
-			RequiredInputs: reqInputs,
-			OptionalInputs: optInputs,
-			Steps:          steps,
-			Destructive:    t.Destructive,
+			Name:            t.Name,
+			Version:         t.Version,
+			Description:     t.Description,
+			RequiredInputs:  reqInputs,
+			OptionalInputs:  optInputs,
+			Steps:           steps,
+			Destructive:     t.Destructive,
+			ImmutableInputs: t.ImmutableInputs,
 		})
 	}
 	sort.Slice(entries, func(i, j int) bool {
@@ -153,13 +155,32 @@ func (e *Engine) Run(ctx context.Context, actionName string, inputs map[string]a
 	// Idempotency check: if non-terminal action with same name and key exists, return it
 	if idempotencyKey != "" {
 		if existing, err := e.deps.Store.FindActiveActionByIdempotencyKey(actionName, idempotencyKey); err == nil && existing != nil {
+			if tmpl.ImmutableInputs {
+				matches, compareErr := immutableActionInputsMatch(existing.InputsJSON, inputs)
+				if compareErr != nil {
+					return nil, fmt.Errorf("checking immutable inputs for idempotent action %s: %w", existing.ID, compareErr)
+				}
+				if !matches {
+					return nil, fmt.Errorf("idempotency key %q already belongs to active %s action %s with different immutable inputs", idempotencyKey, actionName, existing.ID)
+				}
+			}
 			ec := parseExecutionContext(existing, e)
 			return buildActionResult(existing, len(tmpl.Steps), ec), nil
 		}
 	}
 
 	instID := generateActionID(actionName)
-	inputsJSON, _ := json.Marshal(inputs)
+	inputsJSON, err := json.Marshal(inputs)
+	if err != nil {
+		return nil, fmt.Errorf("encoding action inputs: %w", err)
+	}
+	// Execute from the same detached JSON value that is persisted. In
+	// particular, nested profile_config maps supplied by a caller must not be
+	// able to change underneath an immutable action after creation.
+	var persistedInputs map[string]any
+	if err := json.Unmarshal(inputsJSON, &persistedInputs); err != nil {
+		return nil, fmt.Errorf("copying action inputs: %w", err)
+	}
 
 	inst := store.ActionInstance{
 		ID:             instID,
@@ -174,10 +195,25 @@ func (e *Engine) Run(ctx context.Context, actionName string, inputs map[string]a
 
 	if err := e.deps.Store.CreateActionInstance(inst); err != nil {
 		// A concurrent caller can win the unique idempotency key between the
-		// lookup and INSERT. Return that same workflow, never another promotion.
+		// lookup and INSERT. Return that same workflow only when its immutable
+		// request is the same; never hide a conflicting action configuration.
 		if actionName == "promote_transcode_candidate" {
 			if existing, lookupErr := e.deps.Store.FindActionByIdempotencyKey(actionName, idempotencyKey); lookupErr == nil && existing != nil {
 				return e.existingPromotion(ctx, existing, tmpl, inputs)
+			}
+		} else if idempotencyKey != "" {
+			if existing, lookupErr := e.deps.Store.FindActiveActionByIdempotencyKey(actionName, idempotencyKey); lookupErr == nil && existing != nil {
+				if tmpl.ImmutableInputs {
+					matches, compareErr := immutableActionInputsMatch(existing.InputsJSON, inputs)
+					if compareErr != nil {
+						return nil, fmt.Errorf("checking immutable inputs for concurrent idempotent action %s: %w", existing.ID, compareErr)
+					}
+					if !matches {
+						return nil, fmt.Errorf("idempotency key %q already belongs to active %s action %s with different immutable inputs", idempotencyKey, actionName, existing.ID)
+					}
+				}
+				existingEC := parseExecutionContext(existing, e)
+				return buildActionResult(existing, len(tmpl.Steps), existingEC), nil
 			}
 		}
 		return nil, fmt.Errorf("creating action instance: %w", err)
@@ -186,7 +222,7 @@ func (e *Engine) Run(ctx context.Context, actionName string, inputs map[string]a
 	ec := &ExecutionContext{
 		InstanceID: instID,
 		ActionName: actionName,
-		Inputs:     inputs,
+		Inputs:     persistedInputs,
 		State:      make(map[string]any),
 		Outputs:    make(map[string]any),
 		Engine:     e,
@@ -202,6 +238,34 @@ func (e *Engine) Run(ctx context.Context, actionName string, inputs map[string]a
 		return nil, err
 	}
 	return e.execute(claimCtx, stored, ec, tmpl)
+}
+
+func immutableActionInputsMatch(existingJSON string, requested map[string]any) (bool, error) {
+	var existing map[string]any
+	if err := json.Unmarshal([]byte(existingJSON), &existing); err != nil {
+		return false, fmt.Errorf("decoding persisted inputs: %w", err)
+	}
+
+	// idempotency_key is action metadata and may be supplied either as the
+	// dedicated Run argument or inside inputs. It does not change workflow
+	// semantics and therefore is excluded from the immutable payload check.
+	delete(existing, "idempotency_key")
+	requestedCopy := make(map[string]any, len(requested))
+	for key, value := range requested {
+		if key != "idempotency_key" {
+			requestedCopy[key] = value
+		}
+	}
+
+	existingCanonical, err := json.Marshal(existing)
+	if err != nil {
+		return false, fmt.Errorf("encoding persisted inputs: %w", err)
+	}
+	requestedCanonical, err := json.Marshal(requestedCopy)
+	if err != nil {
+		return false, fmt.Errorf("encoding requested inputs: %w", err)
+	}
+	return bytes.Equal(existingCanonical, requestedCanonical), nil
 }
 
 // Retry re-runs a failed action from its last safe step without repeating confirmed side effects.
@@ -295,14 +359,14 @@ func (e *Engine) resume(ctx context.Context, instanceID string, decision string,
 		return nil, fmt.Errorf("unknown action template: %s", inst.ActionName)
 	}
 
+	if len(extraInputs) != 0 && tmpl.ImmutableInputs {
+		return nil, fmt.Errorf("%s inputs are immutable after action creation; resume accepts only a decision", inst.ActionName)
+	}
+
 	// If already completed or terminal, return current state
 	if inst.Status == StatusCompleted || inst.Status == StatusFailed || inst.Status == StatusCancelled {
 		ec := parseExecutionContext(inst, e)
 		return buildActionResult(inst, len(tmpl.Steps), ec), nil
-	}
-
-	if inst.ActionName == "promote_transcode_candidate" && len(extraInputs) != 0 {
-		return nil, fmt.Errorf("promotion inputs and integrity baseline are immutable; resume accepts only a decision")
 	}
 
 	ec := parseExecutionContext(inst, e)

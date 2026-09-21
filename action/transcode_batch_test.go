@@ -419,11 +419,20 @@ func TestTranscodeBatch_WorkerBusyHandling(t *testing.T) {
 	if items[0].Attempts != 0 {
 		t.Errorf("worker_busy must NOT consume item attempts / retry budget; got attempts: %d", items[0].Attempts)
 	}
+	if items[0].ChildActionID == "" {
+		t.Fatal("expected worker-busy item to retain child action id")
+	}
+	childBefore, err := st.GetActionInstance(items[0].ChildActionID)
+	if err != nil || childBefore == nil {
+		t.Fatalf("failed reading child before batch resume: child=%v err=%v", childBefore, err)
+	}
+	childInputsBefore := childBefore.InputsJSON
 
 	// Now free the worker slot
 	busy.Store(false)
 
-	// Resume the batch action
+	// Resume the batch action. The child must resume without extraInputs because
+	// surface_worker_busy was fixed at child creation time.
 	resumeRes, err := engine.Resume(ctx, res.ID, "", nil)
 	if err != nil {
 		t.Fatalf("unexpected resume error: %v", err)
@@ -441,6 +450,13 @@ func TestTranscodeBatch_WorkerBusyHandling(t *testing.T) {
 	}
 	if resumedItems[0].Attempts != 1 {
 		t.Errorf("expected item attempts=1 after successful transcode, got %d", resumedItems[0].Attempts)
+	}
+	childAfter, err := st.GetActionInstance(items[0].ChildActionID)
+	if err != nil || childAfter == nil {
+		t.Fatalf("failed reading child after batch resume: child=%v err=%v", childAfter, err)
+	}
+	if childAfter.InputsJSON != childInputsBefore {
+		t.Fatalf("batch resume must not mutate child inputs: before=%s after=%s", childInputsBefore, childAfter.InputsJSON)
 	}
 }
 
@@ -706,6 +722,18 @@ func TestTranscodeBatch_PauseAndResume(t *testing.T) {
 	if res.Status != StatusWaitingDecision {
 		t.Fatalf("expected StatusWaitingDecision when paused, got %s", res.Status)
 	}
+	beforeResume, err := st.GetActionInstance(res.ID)
+	if err != nil || beforeResume == nil {
+		t.Fatalf("reading paused batch: inst=%v err=%v", beforeResume, err)
+	}
+	originalInputsJSON := beforeResume.InputsJSON
+	var pausedState map[string]any
+	if err := json.Unmarshal([]byte(beforeResume.StateJSON), &pausedState); err != nil {
+		t.Fatal(err)
+	}
+	if pausedState["paused"] != true {
+		t.Fatalf("paused control must live in durable state, got %+v", pausedState["paused"])
+	}
 
 	// Resume the paused batch
 	resumeRes, err := engine.Resume(ctx, res.ID, "resume", nil)
@@ -721,6 +749,21 @@ func TestTranscodeBatch_PauseAndResume(t *testing.T) {
 	if mockExecutor.benchmarkSubmitCalls != 2 {
 		t.Errorf("expected 2 SSIM benchmark submits after resume, got %d", mockExecutor.benchmarkSubmitCalls)
 	}
+	afterResume, err := st.GetActionInstance(res.ID)
+	if err != nil || afterResume == nil {
+		t.Fatalf("reading resumed batch: inst=%v err=%v", afterResume, err)
+	}
+	if afterResume.InputsJSON != originalInputsJSON {
+		t.Fatalf("pause/resume mutated immutable batch inputs: before=%s after=%s", originalInputsJSON, afterResume.InputsJSON)
+	}
+	var resumedState map[string]any
+	if err := json.Unmarshal([]byte(afterResume.StateJSON), &resumedState); err != nil {
+		t.Fatal(err)
+	}
+	if resumedState["paused"] != false {
+		t.Fatalf("resume should clear durable paused state, got %+v", resumedState["paused"])
+	}
+
 	items, err := st.ListTranscodeBatchItems(res.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -973,6 +1016,77 @@ func TestTranscodeBatch_MaxItemsLimitsPreparedAndScheduledItems(t *testing.T) {
 	}
 	if res.Outputs["total_items"] != 1 {
 		t.Fatalf("expected total_items=1, got %v", res.Outputs["total_items"])
+	}
+}
+
+func TestTranscodeBatchPropagatesEphemeralProfileToImmutableChildren(t *testing.T) {
+	mockExecutor := &mockTranscodeExecutor{
+		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
+			return transcode.Job{}, fmt.Errorf("worker busy: maximum parallel jobs reached")
+		},
+	}
+
+	engine, st, _, srv, _ := setupBatchTestEnv(t, mockExecutor, 1)
+	defer srv.Close()
+	defer st.Close()
+
+	res, err := engine.Run(context.Background(), "transcode_batch", map[string]any{
+		"service":                   "sonarr",
+		"series_id":                 10,
+		"season":                    1,
+		"profile_config":            testEphemeralBatchProfileConfig(),
+		"preserve_source_bit_depth": false,
+	})
+	if err != nil {
+		t.Fatalf("run with ephemeral profile_config failed: %v", err)
+	}
+	if res.Status != StatusWaitingExternal || res.WaitingCondition != "worker_busy" {
+		t.Fatalf("expected worker_busy after creating the child, got %s/%s (%s)", res.Status, res.WaitingCondition, res.Error)
+	}
+	if getString(res.Outputs, "ephemeral_recipe_digest") == "" {
+		t.Fatalf("batch did not expose the normalized ephemeral recipe digest: %+v", res.Outputs)
+	}
+
+	items, err := st.ListTranscodeBatchItems(res.ID)
+	if err != nil || len(items) != 1 || items[0].ChildActionID == "" {
+		t.Fatalf("expected one admitted child: items=%+v err=%v", items, err)
+	}
+	child, err := st.GetActionInstance(items[0].ChildActionID)
+	if err != nil || child == nil {
+		t.Fatalf("reading ephemeral child: child=%v err=%v", child, err)
+	}
+	var inputs map[string]any
+	if err := json.Unmarshal([]byte(child.InputsJSON), &inputs); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := inputs["profile_config"].(map[string]any); !ok {
+		t.Fatalf("child did not receive profile_config: %s", child.InputsJSON)
+	}
+	if _, ok := inputs["profile"]; ok {
+		t.Fatalf("child received mutually exclusive profile and profile_config: %s", child.InputsJSON)
+	}
+	if preserve, ok := inputs["preserve_source_bit_depth"].(bool); !ok || preserve {
+		t.Fatalf("child did not receive explicit bit-depth opt-out: %s", child.InputsJSON)
+	}
+}
+
+func TestTranscodeBatchRejectsIgnoredExperimentalKnobs(t *testing.T) {
+	engine := NewEngine(EngineDeps{})
+	ec := &ExecutionContext{
+		ActionName: "transcode_batch",
+		Inputs: map[string]any{
+			"service":        "sonarr",
+			"series_id":      10,
+			"tune":           "animation",
+			"crf_candidates": []any{20, 22, 24},
+		},
+	}
+	res, err := engine.stepTranscodeBatchResolve(context.Background(), ec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != StepFailed || !strings.Contains(res.Error, "unsupported input") || !strings.Contains(res.Error, "profile_config") {
+		t.Fatalf("batch must reject ignored experimental knobs explicitly, got %+v", res)
 	}
 }
 

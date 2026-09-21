@@ -19,15 +19,18 @@ import (
 
 func (e *Engine) registerTranscodeBatchTemplate() {
 	e.RegisterTemplate(ActionTemplate{
-		AutoReconcile: true,
-		Name:          "transcode_batch",
-		Version:       1,
+		AutoReconcile:   true,
+		ImmutableInputs: true,
+		Name:            "transcode_batch",
+		Version:         1,
 		Description: "Coordinates persistent batch transcoding for media libraries (Sonarr), resolving episodes, " +
 			"applying deterministic auto-profile selection, respecting concurrency limits, and tracking per-item status in SQLite.",
 		RequiredInputs: []string{"service", "series_id"},
 		OptionalInputs: []string{
 			"season",
 			"profile",
+			"profile_config",
+			"preserve_source_bit_depth",
 			"metric",
 			"replace_original",
 			"dry_run",
@@ -56,11 +59,22 @@ func (e *Engine) registerTranscodeBatchTemplate() {
 }
 
 func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+	if err := e.validateTranscodeInputs(ec); err != nil {
+		return StepResult{Status: StepFailed, Error: err.Error()}, nil
+	}
 	if getBool(ec.Inputs, "replace_original") {
 		return StepResult{
 			Status: StepFailed,
 			Error:  "destructive replacement (replace_original: true) is not supported; transcoding is candidate-only and never modifies the original",
 		}, nil
+	}
+	ephemeralProfile, ephemeralDigest, hasProfileConfig, profileConfigErr := decodeEphemeralProfileInput(ec.Inputs)
+	if profileConfigErr != nil {
+		return StepResult{Status: StepFailed, Error: profileConfigErr.Error()}, nil
+	}
+	if hasProfileConfig {
+		ec.State["ephemeral_profile"] = ephemeralProfile
+		ec.State["ephemeral_recipe_digest"] = ephemeralDigest
 	}
 
 	service := strings.ToLower(strings.TrimSpace(getString(ec.Inputs, "service")))
@@ -112,9 +126,14 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 	if err == nil && len(existingItems) > 0 {
 		seriesTitle := getString(ec.State, "series_title")
 		isAnime := getBool(ec.State, "is_anime")
+		outputs := buildBatchOutputs(ec.InstanceID, existingItems, seriesTitle, isAnime, dryRun, getMaxOutputItems(ec.Inputs))
+		if hasProfileConfig {
+			outputs["ephemeral_profile"] = ephemeralProfile
+			outputs["ephemeral_recipe_digest"] = ephemeralDigest
+		}
 		return StepResult{
 			Status:  StepCompleted,
-			Outputs: buildBatchOutputs(ec.InstanceID, existingItems, seriesTitle, isAnime, dryRun, getMaxOutputItems(ec.Inputs)),
+			Outputs: outputs,
 		}, nil
 	}
 
@@ -220,7 +239,9 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 	}
 
 	requestedProfile := strings.TrimSpace(getString(ec.Inputs, "profile"))
-	if requestedProfile == "" {
+	if hasProfileConfig {
+		requestedProfile = "ephemeral"
+	} else if requestedProfile == "" {
 		requestedProfile = "auto"
 	}
 	mediaType := "tv"
@@ -379,6 +400,10 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 	}
 
 	outputs := buildBatchOutputs(ec.InstanceID, batchItems, seriesTitle, isAnime, dryRun, getMaxOutputItems(ec.Inputs))
+	if hasProfileConfig {
+		outputs["ephemeral_profile"] = ephemeralProfile
+		outputs["ephemeral_recipe_digest"] = ephemeralDigest
+	}
 	return StepResult{
 		Status:  StepCompleted,
 		Outputs: outputs,
@@ -386,6 +411,13 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 }
 
 func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+	// paused is an action-creation input only. Copy it into durable control
+	// state once, then mutate State exclusively so InputsJSON remains an audit
+	// record of the original request.
+	if _, initialized := ec.State["paused"]; !initialized {
+		ec.State["paused"] = getBool(ec.Inputs, "paused")
+	}
+
 	dryRun := getBool(ec.Inputs, "dry_run")
 	seriesTitle := getString(ec.State, "series_title")
 	isAnime := getBool(ec.State, "is_anime")
@@ -405,8 +437,6 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 
 	if strings.EqualFold(ec.Decision, "resume") {
 		ec.Decision = ""
-		delete(ec.Inputs, "paused")
-		ec.Inputs["paused"] = false
 		ec.State["paused"] = false
 		// Persist the cleared pause before fan-out: children read the parent's
 		// durable state and must not observe the stale paused=true.
@@ -418,7 +448,6 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 	// Cancellation is evaluated before pause so it also works from paused:true.
 	if strings.EqualFold(ec.Decision, "cancel") {
 		ec.Decision = ""
-		ec.Inputs["paused"] = false
 		ec.State["paused"] = false
 		// Durable batch-cancel control: persist the intent first so no new child
 		// admission can race with the cancellation fan-out.
@@ -475,11 +504,10 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 		}, nil
 	}
 
-	// Handle pause semantics. The paused flag is persisted so the autonomous
-	// reconciler and every child observe the pause across restarts.
-	if strings.EqualFold(ec.Decision, "pause") || getBool(ec.Inputs, "paused") {
+	// Handle pause semantics through durable State only. The original paused
+	// input remains unchanged for auditability.
+	if strings.EqualFold(ec.Decision, "pause") || getBool(ec.State, "paused") {
 		ec.Decision = ""
-		ec.Inputs["paused"] = true
 		ec.State["paused"] = true
 		return StepResult{
 			Status:        StepWaitingDecision,
@@ -498,7 +526,7 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 		ec.Decision = ""
 		for i := range items {
 			if items[i].Status == "waiting_decision" && items[i].ChildActionID != "" {
-				resumedRes, resumedErr := e.Resume(ctx, items[i].ChildActionID, decisionToForward, map[string]any{"surface_worker_busy": true})
+				resumedRes, resumedErr := e.Resume(ctx, items[i].ChildActionID, decisionToForward, nil)
 				if resumedErr == nil && resumedRes != nil {
 					switch resumedRes.Status {
 					case StatusCompleted:
@@ -869,7 +897,6 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 
 	childInputs := map[string]any{
 		"path":                      item.FilePath,
-		"profile":                   item.Profile,
 		"replace_original":          false,
 		"media_type":                mediaType,
 		"is_anime":                  isAnime,
@@ -880,8 +907,16 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 		// batch is cancelled or paused, including across restarts.
 		"parent_action_id": ec.InstanceID,
 	}
+	if ephemeralProfile, ok := ec.Inputs["profile_config"]; ok && ephemeralProfile != nil {
+		childInputs["profile_config"] = ephemeralProfile
+	} else {
+		childInputs["profile"] = item.Profile
+	}
 	if metric := strings.TrimSpace(getString(ec.Inputs, "metric")); metric != "" {
 		childInputs["metric"] = metric
+	}
+	if preserve, ok := ec.Inputs["preserve_source_bit_depth"]; ok {
+		childInputs["preserve_source_bit_depth"] = preserve
 	}
 	childIdempotencyKey := fmt.Sprintf("batch-%s-%s", ec.InstanceID, item.ItemKey)
 
@@ -903,7 +938,7 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 		if existingChild != nil {
 			switch existingChild.Status {
 			case StatusWaitingExternal:
-				childRes, childErr = e.Resume(ctx, existingChild.ID, "", map[string]any{"surface_worker_busy": true})
+				childRes, childErr = e.Resume(ctx, existingChild.ID, "", nil)
 			case StatusWaitingDecision:
 				tmpl, _ := e.GetTemplate("transcode_media")
 				childEC := parseExecutionContext(existingChild, e)
@@ -913,7 +948,7 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 				childEC := parseExecutionContext(existingChild, e)
 				childRes = buildActionResult(existingChild, len(tmpl.Steps), childEC)
 			default:
-				childRes, childErr = e.Resume(ctx, existingChild.ID, "", map[string]any{"surface_worker_busy": true})
+				childRes, childErr = e.Resume(ctx, existingChild.ID, "", nil)
 			}
 		} else {
 			childRes, childErr = e.Run(ctx, "transcode_media", childInputs, childIdempotencyKey)
@@ -925,7 +960,7 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 	// If child action was already in StatusWaitingExternal when Run found it via idempotency key, resume it now
 	if childRes != nil && childRes.Status == StatusWaitingExternal && childRes.ID != "" && item.ChildActionID == "" {
 		item.ChildActionID = childRes.ID
-		resumedRes, resumedErr := e.Resume(ctx, childRes.ID, "", map[string]any{"surface_worker_busy": true})
+		resumedRes, resumedErr := e.Resume(ctx, childRes.ID, "", nil)
 		if resumedErr == nil && resumedRes != nil {
 			childRes = resumedRes
 		} else if resumedErr != nil {
