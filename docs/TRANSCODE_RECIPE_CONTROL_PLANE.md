@@ -23,9 +23,16 @@ The work queue is deliberately not recipe storage.
 
 Managed saves are strict, atomic and versioned per profile. Each normalized
 profile has a stable SHA-256 content digest, a generation, timestamps and an
-optional `source_action_id`. Save/delete transitions are retained in bounded
-history. A managed delete only affects future resolutions; running actions keep
-the plan they already resolved.
+optional `source_action_id`. Generations are monotonic per profile name even
+across delete/recreate cycles, so a version identity is never reused.
+Save/delete transitions are retained in bounded history. A managed delete only
+affects future resolutions; running actions keep the plan they already resolved.
+
+Mutations fail closed by default: creating a previously unused/deleted profile
+name omits `expected_digest`; updating an active managed profile requires its
+current digest; deleting an active managed profile also requires its current
+digest. This prevents an LLM or concurrent client from blindly overwriting or
+deleting a recipe that changed after it was read.
 
 ## Ephemeral experiments
 
@@ -48,17 +55,22 @@ For example, passing `tune` or `crf_candidates` directly to
 `benchmark_transcode` fails and points the caller to `profile_config`.
 
 A successful experiment can be persisted with `recipe_save`, copying the
-normalized profile returned by the action and recording the action ID in
-`source_action_id`. A later dedicated promote-from-action helper can verify
-the action before saving, but it is not required for recipe distribution.
+normalized profile returned by the action. The MCP schema exposes `profile`
+as a real structured object rather than JSON embedded in a string.
+
+`source_action_id` is currently unverified reference metadata only. Navigatorr
+does not yet prove that the action exists, completed successfully, or produced
+the same digest. A later dedicated promote-from-action helper can provide that
+verified provenance before saving; it is not required for recipe distribution.
 
 ## MCP recipe tools
 
 - `recipe_list`: inspect bundle/static/managed layers.
 - `recipe_get`: inspect the effective typed profile and source layer.
-- `recipe_save`: create/update a strict managed profile, optionally using
-  `expected_digest` for optimistic concurrency.
-- `recipe_delete`: remove the managed override without affecting running jobs.
+- `recipe_save`: create a strict managed profile, or update one only when the
+  caller supplies its current `expected_digest`.
+- `recipe_delete`: remove the managed override only with its current
+  `expected_digest`, without affecting running jobs.
 - `recipe_history`: inspect save/delete generations.
 - `recipe_status`, `recipe_reload`, `recipe_update`, `recipe_rollback`:
   retain their bundle/LKG responsibilities.
