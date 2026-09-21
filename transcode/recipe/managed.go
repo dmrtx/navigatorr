@@ -26,14 +26,14 @@ var managedProfileNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 // ManagedProfileRecord is a centrally managed profile stored by Navigatorr.
 // Generation is monotonic per profile name; Digest identifies the normalized
 // profile content independently of its name or descriptive metadata.
+// SourceActionID is unverified reference metadata until a future
+// promote-from-action flow validates provenance.
 type ManagedProfileRecord struct {
 	Name           string    `json:"name"`
 	Profile        Profile   `json:"profile"`
 	Digest         string    `json:"digest"`
 	Generation     int64     `json:"generation"`
 	Description    string    `json:"description,omitempty"`
-	// SourceActionID is unverified reference metadata until a future
-	// promote-from-action flow validates provenance.
 	SourceActionID string    `json:"source_action_id,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
