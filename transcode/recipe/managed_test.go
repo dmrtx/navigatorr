@@ -10,7 +10,7 @@ func managedTestProfile() Profile {
 		Container: "mkv",
 		Video:     VideoProfile{Codec: "libx265", Quality: 24, Preset: "slow", Profile: "main", PixelFormat: "yuv420p"},
 		Audio:     AudioProfile{Mode: "copy"},
-		Subtitles: SubtitleProfile{Mode: "copy", ConvertIncompatible: true},
+		Subtitles: SubtitleProfile{Mode: "preserve", ConvertIncompatible: true},
 		Preserve:  PreserveProfile{Metadata: true, Chapters: true, Attachments: true},
 		Resilience: ResilienceProfile{
 			MaxAttempts:  1,
