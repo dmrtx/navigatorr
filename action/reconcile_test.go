@@ -465,16 +465,19 @@ func TestBenchmarkUncertainSubmitPersistsIdentityAndResumesAutomatically(t *test
 	}
 }
 
-func TestResumeInputChangesSurviveFollowingAutomaticPoll(t *testing.T) {
+func TestPausedControlStateSurvivesFollowingAutomaticPoll(t *testing.T) {
 	st := setupTestStore(t)
 	now := time.Now()
 	e := NewEngine(EngineDeps{Store: st, Now: func() time.Time { return now }})
-	e.RegisterTemplate(ActionTemplate{Name: "paused_batch", AutoReconcile: true, Steps: []StepDefinition{{Name: "schedule", Run: func(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+	e.RegisterTemplate(ActionTemplate{Name: "paused_batch", AutoReconcile: true, ImmutableInputs: true, Steps: []StepDefinition{{Name: "schedule", Run: func(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+		if _, initialized := ec.State["paused"]; !initialized {
+			ec.State["paused"] = getBool(ec.Inputs, "paused")
+		}
 		if ec.Decision == "resume" {
-			ec.Inputs["paused"], ec.State["paused"] = false, false
+			ec.State["paused"] = false
 			return StepResult{Status: StepWaitingExternal, WaitingCondition: "jobs_running"}, nil
 		}
-		if getBool(ec.Inputs, "paused") {
+		if getBool(ec.State, "paused") {
 			return StepResult{Status: StepWaitingDecision}, nil
 		}
 		return StepResult{Status: StepCompleted}, nil
@@ -492,7 +495,7 @@ func TestResumeInputChangesSurviveFollowingAutomaticPoll(t *testing.T) {
 		t.Fatal(err)
 	}
 	r, err = e.Status(context.Background(), r.ID)
-	if err != nil || r.Status != StatusCompleted || getBool(r.Inputs, "paused") {
-		t.Fatalf("unpaused batch forgot its inputs: %+v %v", r, err)
+	if err != nil || r.Status != StatusCompleted || !getBool(r.Inputs, "paused") || getBool(r.State, "paused") {
+		t.Fatalf("pause state/input separation was not preserved: %+v %v", r, err)
 	}
 }
