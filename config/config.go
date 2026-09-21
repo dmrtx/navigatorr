@@ -184,6 +184,31 @@ func (t *TranscodeConfig) recipeOverrides() map[string]recipe.Profile {
 	return out
 }
 
+// resolvedRecipeOverrides composes the three recipe layers used by new jobs:
+// active bundle < static config overrides < centrally managed profiles.
+// Managed profiles intentionally win so day-to-day recipe changes do not
+// require editing deployment configuration. Running jobs are unaffected
+// because they already hold an immutable resolved transcode.Plan.
+func (t *TranscodeConfig) resolvedRecipeOverrides() (map[string]recipe.Profile, map[string]recipe.ManagedProfileRecord, error) {
+	out := t.recipeOverrides()
+	if out == nil {
+		out = make(map[string]recipe.Profile)
+	}
+	managed := make(map[string]recipe.ManagedProfileRecord)
+	if t.recipeManager == nil {
+		return out, managed, nil
+	}
+	records, err := t.recipeManager.ListManagedProfiles()
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, rec := range records {
+		out[rec.Name] = rec.Profile
+		managed[rec.Name] = rec
+	}
+	return out, managed, nil
+}
+
 func profileToRecipe(name string, p TranscodeProfileConfig) recipe.Profile {
 	r := recipe.ResilienceProfile{MaxAttempts: p.Resilience.MaxAttempts, TransientRetries: p.Resilience.TransientRetries, RetryBackoffSeconds: append([]int(nil), p.Resilience.RetryBackoffSeconds...), MaxFallbacks: p.Resilience.MaxFallbacks, Fallbacks: append([]recipe.FallbackRule(nil), p.Resilience.Fallbacks...)}
 	// Backward-compatible local profiles from PR #16 did not contain a resilience block.
@@ -303,12 +328,58 @@ func (t *TranscodeConfig) ResolvePlanForSource(profileName string, subtitles []r
 	if err != nil {
 		return nil, err
 	}
-	return recipe.Resolve(snap, name, t.recipeOverrides(), subtitles)
+	overrides, managed, err := t.resolvedRecipeOverrides()
+	if err != nil {
+		return nil, fmt.Errorf("reading managed transcode profiles: %w", err)
+	}
+	plan, err := recipe.Resolve(snap, name, overrides, subtitles)
+	if err != nil {
+		return nil, err
+	}
+	if rec, ok := managed[name]; ok {
+		plan.RecipeVersion = fmt.Sprintf("managed:%s:%d", name, rec.Generation)
+		plan.RecipeDigest = rec.Digest
+		plan.PlanDigest = ""
+		digest, err := transcode.DigestPlan(plan)
+		if err != nil {
+			return nil, err
+		}
+		plan.PlanDigest = digest
+	}
+	return plan, nil
 }
 
-// ResolveProfile resolves and validates a recipe Profile for the given profileName,
-// incorporating local profile overrides (whose optimization policies are already normalized
-// during snapshot parsing and override conversion).
+// ResolveEphemeralPlanForSource validates a complete one-action profile,
+// resolves it through the same container/subtitle compatibility machinery as
+// durable recipes, and stamps a content identity that can be tracked or later
+// persisted through recipe_save. It never mutates the active recipe registry.
+func (t *TranscodeConfig) ResolveEphemeralPlanForSource(profile recipe.Profile, subtitles []recipe.SourceSubtitle) (*transcode.Plan, recipe.Profile, string, error) {
+	const name = "ephemeral"
+	normalized, digest, err := recipe.NormalizeAndDigestProfile(name, profile)
+	if err != nil {
+		return nil, recipe.Profile{}, "", err
+	}
+	snap, err := t.activeSnapshot()
+	if err != nil {
+		return nil, recipe.Profile{}, "", err
+	}
+	plan, err := recipe.Resolve(snap, name, map[string]recipe.Profile{name: normalized}, subtitles)
+	if err != nil {
+		return nil, recipe.Profile{}, "", err
+	}
+	plan.RecipeVersion = "ephemeral"
+	plan.RecipeDigest = digest
+	plan.PlanDigest = ""
+	planDigest, err := transcode.DigestPlan(plan)
+	if err != nil {
+		return nil, recipe.Profile{}, "", err
+	}
+	plan.PlanDigest = planDigest
+	return plan, normalized, digest, nil
+}
+
+// ResolveProfile resolves and validates a recipe Profile for the given profileName.
+// Precedence is active bundle < static config override < centrally managed profile.
 func (t *TranscodeConfig) ResolveProfile(profileName string) (recipe.Profile, error) {
 	name := strings.TrimSpace(profileName)
 	if name == "" {
@@ -322,7 +393,11 @@ func (t *TranscodeConfig) ResolveProfile(profileName string) (recipe.Profile, er
 		return recipe.Profile{}, err
 	}
 	p, ok := snap.Bundle.Profiles[name]
-	if op, exists := t.recipeOverrides()[name]; exists {
+	overrides, _, err := t.resolvedRecipeOverrides()
+	if err != nil {
+		return recipe.Profile{}, fmt.Errorf("reading managed transcode profiles: %w", err)
+	}
+	if op, exists := overrides[name]; exists {
 		p = op
 		ok = true
 	}
