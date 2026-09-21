@@ -278,7 +278,11 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 
 			inputs := make(map[string]any)
 			if rawInputs := argString(args, "inputs", ""); rawInputs != "" {
-				_ = json.Unmarshal([]byte(rawInputs), &inputs)
+				var err error
+				inputs, err = parseJSONObject(rawInputs)
+				if err != nil {
+					return toolErr("invalid action_run inputs: %v", err), nil
+				}
 			}
 
 			// Merge shortcut arguments
@@ -355,7 +359,11 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 			decision := strings.TrimSpace(argString(args, "decision", ""))
 			var extraInputs map[string]any
 			if rawInputs := argString(args, "inputs", ""); rawInputs != "" {
-				_ = json.Unmarshal([]byte(rawInputs), &extraInputs)
+				var err error
+				extraInputs, err = parseJSONObject(rawInputs)
+				if err != nil {
+					return toolErr("invalid action_resume inputs: %v", err), nil
+				}
 			}
 
 			res, err := engine.Resume(ctx, id, decision, extraInputs)
