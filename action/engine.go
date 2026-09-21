@@ -94,11 +94,11 @@ func (e *Engine) Catalog() []ActionCatalogEntry {
 			optInputs = []string{}
 		}
 		entries = append(entries, ActionCatalogEntry{
-			Name:           t.Name,
-			Version:        t.Version,
-			Description:    t.Description,
-			RequiredInputs: reqInputs,
-			OptionalInputs: optInputs,
+			Name:            t.Name,
+			Version:         t.Version,
+			Description:     t.Description,
+			RequiredInputs:  reqInputs,
+			OptionalInputs:  optInputs,
 			Steps:           steps,
 			Destructive:     t.Destructive,
 			ImmutableInputs: t.ImmutableInputs,
