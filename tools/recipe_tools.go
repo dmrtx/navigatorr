@@ -15,8 +15,15 @@ type recipeSaveInput struct {
 	Name           string         `json:"name" jsonschema:"description=Managed profile name"`
 	Profile        recipe.Profile `json:"profile" jsonschema:"description=Complete typed transcode recipe profile"`
 	Description    string         `json:"description,omitempty" jsonschema:"description=Optional human readable purpose or validation note"`
-	SourceActionID string         `json:"source_action_id,omitempty" jsonschema:"description=Optional unverified action reference metadata; recipe_save does not validate provenance"`
-	ExpectedDigest string         `json:"expected_digest,omitempty" jsonschema:"description=Required when replacing an existing managed profile; omit only when creating a new name"`
+	SourceActionID     string         `json:"source_action_id,omitempty" jsonschema:"description=Optional unverified action reference metadata; recipe_save does not validate provenance"`
+	ExpectedGeneration int64          `json:"expected_generation,omitempty" jsonschema:"description=Required when replacing an existing managed profile; omit only when creating a new name"`
+	ExpectedDigest     string         `json:"expected_digest,omitempty" jsonschema:"description=Required when replacing an existing managed profile; omit only when creating a new name"`
+}
+
+type recipeDeleteInput struct {
+	Name               string `json:"name" jsonschema:"description=Managed profile name"`
+	ExpectedGeneration int64  `json:"expected_generation" jsonschema:"description=Current managed profile generation; required for optimistic concurrency"`
+	ExpectedDigest     string `json:"expected_digest" jsonschema:"description=Current managed profile digest; required for optimistic concurrency"`
 }
 
 func registerRecipeTools(s *server.MCPServer, cfg *config.Config) {
@@ -95,7 +102,7 @@ func registerRecipeTools(s *server.MCPServer, cfg *config.Config) {
 	})
 
 	s.AddTool(mcp.NewTool("recipe_save",
-		mcp.WithDescription("Create or replace a centrally managed typed transcode profile. profile is a structured object and is strictly decoded: unknown/unsupported fields fail instead of being ignored. Creating a new name omits expected_digest; replacing an existing profile requires the current digest. source_action_id is unverified reference metadata, not validated provenance. New jobs see the saved profile immediately; running jobs keep their immutable plans."),
+		mcp.WithDescription("Create or replace a centrally managed typed transcode profile. profile is a structured object and is strictly decoded: unknown/unsupported fields fail instead of being ignored. Creating a new name omits expected_generation and expected_digest; replacing an existing profile requires both current values. generation is the primary CAS token and prevents metadata-only/ABA races; digest additionally checks profile content. source_action_id is unverified reference metadata, not validated provenance. New jobs see the saved profile immediately; running jobs keep their immutable plans."),
 		mcp.WithInputSchema[recipeSaveInput](),
 	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args := req.GetArguments()
@@ -120,6 +127,7 @@ func registerRecipeTools(s *server.MCPServer, cfg *config.Config) {
 			profile,
 			argString(args, "description", ""),
 			argString(args, "source_action_id", ""),
+			argInt64(args, "expected_generation", 0),
 			argString(args, "expected_digest", ""),
 		)
 		if err != nil {
@@ -132,9 +140,8 @@ func registerRecipeTools(s *server.MCPServer, cfg *config.Config) {
 	})
 
 	s.AddTool(mcp.NewTool("recipe_delete",
-		mcp.WithDescription("Delete a centrally managed profile override while preserving its audit history. expected_digest is required so a concurrent update cannot be deleted blindly. Running jobs are not changed."),
-		mcp.WithString("name", mcp.Required(), mcp.Description("Managed profile name")),
-		mcp.WithString("expected_digest", mcp.Required(), mcp.Description("Current managed profile digest; required for optimistic concurrency")),
+		mcp.WithDescription("Delete a centrally managed profile override while preserving its audit history. expected_generation and expected_digest are both required; stale metadata-only or ABA-era clients fail closed. Running jobs are not changed."),
+		mcp.WithInputSchema[recipeDeleteInput](),
 	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args := req.GetArguments()
 		name := strings.TrimSpace(argString(args, "name", ""))
@@ -145,7 +152,7 @@ func registerRecipeTools(s *server.MCPServer, cfg *config.Config) {
 		if mgr == nil {
 			return toolErr("transcode recipe manager is not initialized"), nil
 		}
-		entry, err := mgr.DeleteManagedProfile(name, argString(args, "expected_digest", ""))
+		entry, err := mgr.DeleteManagedProfile(name, argInt64(args, "expected_generation", 0), argString(args, "expected_digest", ""))
 		if err != nil {
 			return toolErr("deleting managed recipe: %v", err), nil
 		}
