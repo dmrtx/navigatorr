@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -20,7 +21,7 @@ func (e *Engine) registerTranscodeTemplate() {
 		AutoReconcile: true,
 		Name:          "transcode_media", Version: 2,
 		Description:    "Coordinates safe candidate-only media transcoding using an immutable recipe-resolved plan, bounded transient retries, worker revalidation, post-transcode stream validation, and original SHA-256 verification.",
-		RequiredInputs: []string{"path"}, OptionalInputs: []string{"profile", "replace_original", "expected_video_codec", "max_size_increase_percent", "media_type", "is_anime", "min_savings_percent", "surface_worker_busy", "metric"}, Destructive: false,
+		RequiredInputs: []string{"path"}, OptionalInputs: []string{"profile", "profile_config", "replace_original", "expected_video_codec", "max_size_increase_percent", "media_type", "is_anime", "min_savings_percent", "surface_worker_busy", "metric", "parent_action_id"}, Destructive: false,
 		Steps: []StepDefinition{
 			{Name: "preflight", Description: "Inspect source, hash original, resolve profile/recipe and per-stream compatibility plan", Run: e.stepTranscodePreflight},
 			{Name: "submit_benchmark", Description: "Submit benchmark request if profile optimization is enabled", Run: e.stepBenchmarkSubmit},
@@ -34,6 +35,9 @@ func (e *Engine) registerTranscodeTemplate() {
 }
 
 func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+	if err := e.validateTranscodeInputs(ec); err != nil {
+		return StepResult{Status: StepFailed, Error: err.Error()}, nil
+	}
 	if getBool(ec.Inputs, "replace_original") {
 		return StepResult{Status: StepFailed, Error: "destructive replacement (replace_original: true) is not supported; transcoding is candidate-only and never modifies the original"}, nil
 	}
@@ -141,11 +145,30 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	origMap["subtitle_languages"] = subLangs
 
 	profile := strings.TrimSpace(getString(ec.Inputs, "profile"))
-	if profile == "" && e.deps.Config != nil && strings.TrimSpace(e.deps.Config.Transcode.DefaultProfile) != "" {
-		profile = strings.TrimSpace(e.deps.Config.Transcode.DefaultProfile)
-	}
-	if profile == "" {
-		profile = "hevc-vt"
+	rawProfileConfig, hasProfileConfig := ec.Inputs["profile_config"]
+	hasProfileConfig = hasProfileConfig && rawProfileConfig != nil
+	var ephemeralProfile recipe.Profile
+	var ephemeralDigest string
+	if hasProfileConfig {
+		if profile != "" {
+			return StepResult{Status: StepFailed, Error: "profile and profile_config are mutually exclusive; profile_config is a complete ephemeral profile"}, nil
+		}
+		b, err := json.Marshal(rawProfileConfig)
+		if err != nil {
+			return StepResult{Status: StepFailed, Error: fmt.Sprintf("encoding profile_config: %v", err)}, nil
+		}
+		ephemeralProfile, ephemeralDigest, err = recipe.DecodeProfileStrict("ephemeral", b)
+		if err != nil {
+			return StepResult{Status: StepFailed, Error: fmt.Sprintf("invalid profile_config: %v", err)}, nil
+		}
+		profile = "ephemeral"
+	} else {
+		if profile == "" && e.deps.Config != nil && strings.TrimSpace(e.deps.Config.Transcode.DefaultProfile) != "" {
+			profile = strings.TrimSpace(e.deps.Config.Transcode.DefaultProfile)
+		}
+		if profile == "" {
+			profile = "hevc-vt"
+		}
 	}
 
 	if getBool(ec.Inputs, "surface_worker_busy") {
@@ -153,7 +176,7 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	}
 
 	var autoResult *selector.Result
-	if strings.EqualFold(profile, "auto") {
+	if !hasProfileConfig && strings.EqualFold(profile, "auto") {
 		mediaType := strings.ToLower(strings.TrimSpace(getString(ec.Inputs, "media_type")))
 		isAnime := getBool(ec.Inputs, "is_anime")
 		if !isAnime && mediaType == "anime" {
@@ -209,18 +232,27 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	if e.deps.Config == nil {
 		return StepResult{Status: StepFailed, Error: "navigatorr config is required to resolve transcode recipes"}, nil
 	}
-	plan, err := e.deps.Config.Transcode.ResolvePlanForSource(profile, sourceSubs)
-	if err != nil {
-		return StepResult{Status: StepFailed, Error: fmt.Sprintf("resolving transcode profile %q: %v", profile, err)}, nil
+	var plan *transcode.Plan
+	var recipeProfile recipe.Profile
+	var err error
+	if hasProfileConfig {
+		plan, recipeProfile, ephemeralDigest, err = e.deps.Config.Transcode.ResolveEphemeralPlanForSource(ephemeralProfile, sourceSubs)
+		if err != nil {
+			return StepResult{Status: StepFailed, Error: fmt.Sprintf("resolving ephemeral profile_config: %v", err)}, nil
+		}
+	} else {
+		plan, err = e.deps.Config.Transcode.ResolvePlanForSource(profile, sourceSubs)
+		if err != nil {
+			return StepResult{Status: StepFailed, Error: fmt.Sprintf("resolving transcode profile %q: %v", profile, err)}, nil
+		}
+		recipeProfile, err = e.deps.Config.Transcode.ResolveProfile(profile)
+		if err != nil {
+			return StepResult{Status: StepFailed, Error: fmt.Sprintf("resolving recipe profile %q: %v", profile, err)}, nil
+		}
 	}
 	ext, err := transcode.ContainerExtension(plan.Container)
 	if err != nil {
 		return StepResult{Status: StepFailed, Error: err.Error()}, nil
-	}
-
-	recipeProfile, err := e.deps.Config.Transcode.ResolveProfile(profile)
-	if err != nil {
-		return StepResult{Status: StepFailed, Error: fmt.Sprintf("resolving recipe profile %q: %v", profile, err)}, nil
 	}
 
 	metricInput := strings.TrimSpace(getString(ec.Inputs, "metric"))
@@ -268,6 +300,10 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	ec.State["recipe_digest"] = plan.RecipeDigest
 	ec.State["plan_digest"] = plan.PlanDigest
 	ec.State["applied_fallbacks"] = plan.AppliedFallbacks
+	if hasProfileConfig {
+		ec.State["ephemeral_profile"] = recipeProfile
+		ec.State["ephemeral_recipe_digest"] = ephemeralDigest
+	}
 	ec.State["fallback_count"] = len(plan.AppliedFallbacks)
 	ec.State["attempt"] = 1
 	ec.State["retry_count"] = 0
@@ -282,6 +318,10 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		"plan_digest":       plan.PlanDigest,
 		"applied_fallbacks": plan.AppliedFallbacks,
 	}
+	if hasProfileConfig {
+		outputs["ephemeral_profile"] = recipeProfile
+		outputs["ephemeral_recipe_digest"] = ephemeralDigest
+	}
 	if getBool(ec.State, "optimization_enabled") {
 		outputs["optimization_enabled"] = true
 	}
@@ -292,4 +332,25 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		outputs["expected_savings_percent"] = autoResult.ExpectedSavingsPercent
 	}
 	return StepResult{Status: StepCompleted, Outputs: outputs}, nil
+}
+
+
+func (e *Engine) validateTranscodeInputs(ec *ExecutionContext) error {
+	tmpl, ok := e.GetTemplate(ec.ActionName)
+	if !ok {
+		return fmt.Errorf("unknown action template %q", ec.ActionName)
+	}
+	allowed := map[string]bool{"idempotency_key": true}
+	for _, name := range tmpl.RequiredInputs {
+		allowed[name] = true
+	}
+	for _, name := range tmpl.OptionalInputs {
+		allowed[name] = true
+	}
+	for name := range ec.Inputs {
+		if !allowed[name] {
+			return fmt.Errorf("unsupported input %q for %s; experimental encoder settings must be supplied inside strict profile_config", name, ec.ActionName)
+		}
+	}
+	return nil
 }
