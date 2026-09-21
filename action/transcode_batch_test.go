@@ -419,11 +419,20 @@ func TestTranscodeBatch_WorkerBusyHandling(t *testing.T) {
 	if items[0].Attempts != 0 {
 		t.Errorf("worker_busy must NOT consume item attempts / retry budget; got attempts: %d", items[0].Attempts)
 	}
+	if items[0].ChildActionID == "" {
+		t.Fatal("expected worker-busy item to retain child action id")
+	}
+	childBefore, err := st.GetActionInstance(items[0].ChildActionID)
+	if err != nil || childBefore == nil {
+		t.Fatalf("failed reading child before batch resume: child=%v err=%v", childBefore, err)
+	}
+	childInputsBefore := childBefore.InputsJSON
 
 	// Now free the worker slot
 	busy.Store(false)
 
-	// Resume the batch action
+	// Resume the batch action. The child must resume without extraInputs because
+	// surface_worker_busy was fixed at child creation time.
 	resumeRes, err := engine.Resume(ctx, res.ID, "", nil)
 	if err != nil {
 		t.Fatalf("unexpected resume error: %v", err)
@@ -441,6 +450,13 @@ func TestTranscodeBatch_WorkerBusyHandling(t *testing.T) {
 	}
 	if resumedItems[0].Attempts != 1 {
 		t.Errorf("expected item attempts=1 after successful transcode, got %d", resumedItems[0].Attempts)
+	}
+	childAfter, err := st.GetActionInstance(items[0].ChildActionID)
+	if err != nil || childAfter == nil {
+		t.Fatalf("failed reading child after batch resume: child=%v err=%v", childAfter, err)
+	}
+	if childAfter.InputsJSON != childInputsBefore {
+		t.Fatalf("batch resume must not mutate child inputs: before=%s after=%s", childInputsBefore, childAfter.InputsJSON)
 	}
 }
 
