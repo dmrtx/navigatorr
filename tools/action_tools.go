@@ -340,10 +340,10 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 	// action_resume — resume an action from waiting_external or waiting_decision
 	s.AddTool(
 		mcp.NewTool("action_resume",
-			mcp.WithDescription("Resume an active or paused action workflow using its action ID. For actions in waiting_external (e.g. transcode running in background or waiting for worker slot), call with id only to poll/advance progress. For actions in waiting_decision, provide 'decision' matching one of waiting_options (e.g. approve, reject, accept_loss, resume, pause, cancel). Note: cancelling a batch cancels queued and waiting items; active remote jobs already running on workers are not stopped. Returns a compact operational summary."),
+			mcp.WithDescription("Resume an active or paused action workflow using its action ID. For actions in waiting_external (e.g. transcode running in background or waiting for worker slot), call with id only to poll/advance progress. For actions in waiting_decision, provide 'decision' matching one of waiting_options (e.g. approve, reject, accept_loss, resume, pause, cancel). Immutable workflows such as transcode_media, benchmark_transcode, transcode_batch, and promote_transcode_candidate reject additional inputs after creation. Cancelling a transcode batch propagates cancellation to admitted child actions so active remote transcode jobs are stopped when supported. Returns a compact operational summary."),
 			mcp.WithString("id", mcp.Required(), mcp.Description("Action instance ID (e.g. act-transcode_batch-a1b2c3d4)")),
 			mcp.WithString("decision", mcp.Description("Decision choice when resuming from waiting_decision (matches one of the action's waiting_options, e.g. resume, pause, cancel, approve, reject, accept_loss). Omit when resuming waiting_external.")),
-			mcp.WithString("inputs", mcp.Description("Optional JSON object string with additional parameters")),
+			mcp.WithString("inputs", mcp.Description("Optional JSON object string with additional parameters. Rejected for workflows whose template declares immutable inputs.")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			args := req.GetArguments()
