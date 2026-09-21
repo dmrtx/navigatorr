@@ -240,13 +240,9 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 			return StepResult{Status: StepFailed, Error: fmt.Sprintf("resolving ephemeral profile_config: %v", err)}, nil
 		}
 	} else {
-		plan, err = e.deps.Config.Transcode.ResolvePlanForSource(profile, sourceSubs)
+		plan, recipeProfile, err = e.deps.Config.Transcode.ResolvePlanAndProfileForSource(profile, sourceSubs)
 		if err != nil {
 			return StepResult{Status: StepFailed, Error: fmt.Sprintf("resolving transcode profile %q: %v", profile, err)}, nil
-		}
-		recipeProfile, err = e.deps.Config.Transcode.ResolveProfile(profile)
-		if err != nil {
-			return StepResult{Status: StepFailed, Error: fmt.Sprintf("resolving recipe profile %q: %v", profile, err)}, nil
 		}
 	}
 	ext, err := transcode.ContainerExtension(plan.Container)
