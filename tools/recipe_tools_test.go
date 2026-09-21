@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -11,9 +12,8 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
-func structuredRecipeProfileMap(t *testing.T) map[string]any {
-	t.Helper()
-	p := recipe.Profile{
+func structuredRecipeProfile() recipe.Profile {
+	return recipe.Profile{
 		Container: "mkv",
 		Video: recipe.VideoProfile{
 			Codec:       "libx265",
@@ -32,6 +32,11 @@ func structuredRecipeProfileMap(t *testing.T) map[string]any {
 			Fallbacks:    []recipe.FallbackRule{{When: "container_subtitle_incompatible", Action: "apply_container_conversion"}},
 		},
 	}
+}
+
+func structuredRecipeProfileMap(t *testing.T) map[string]any {
+	t.Helper()
+	p := structuredRecipeProfile()
 	b, err := json.Marshal(p)
 	if err != nil {
 		t.Fatal(err)
@@ -206,5 +211,106 @@ func TestRecipeSaveAcceptsStructuredObjectAndKeepsStrictDecoding(t *testing.T) {
 	updateTxt = resultText(t, updateRes)
 	if !strings.Contains(updateTxt, "expected_digest is required") {
 		t.Fatalf("update without expected_digest must fail closed: %s", updateTxt)
+	}
+}
+
+func TestRecipeListReturnsPaginatedManagedSummaries(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Transcode.Recipes.CacheDir = t.TempDir()
+	if err := cfg.Transcode.InitializeRecipes(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	mgr := cfg.Transcode.RecipeManager()
+	for _, name := range []string{"alpha-x265", "beta-x265", "gamma-x265"} {
+		if _, err := mgr.SaveManagedProfile(name, structuredRecipeProfile(), "summary-only", "", 0, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	s := server.NewMCPServer("test", "0.0.0")
+	registerRecipeTools(s, cfg)
+	res := callTool(t, s, "recipe_list", map[string]any{"limit": 1, "offset": 1})
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(resultText(t, res)), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if int(payload["managed_total"].(float64)) != 3 || int(payload["managed_returned"].(float64)) != 1 {
+		t.Fatalf("unexpected managed pagination metadata: %+v", payload)
+	}
+	items, ok := payload["managed_profiles"].([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("unexpected managed summaries: %+v", payload["managed_profiles"])
+	}
+	item, ok := items[0].(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected managed summary shape: %+v", items[0])
+	}
+	if item["name"] != "beta-x265" {
+		t.Fatalf("expected sorted offset page to return beta-x265, got %+v", item)
+	}
+	if _, ok := item["profile"]; ok {
+		t.Fatalf("recipe_list must not embed full profile bodies: %+v", item)
+	}
+	for _, key := range []string{"generation", "digest", "description", "updated_at"} {
+		if _, ok := item[key]; !ok {
+			t.Fatalf("managed summary missing %q: %+v", key, item)
+		}
+	}
+}
+
+func TestRecipeHistoryReturnsRecentCompactEntries(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Transcode.Recipes.CacheDir = t.TempDir()
+	if err := cfg.Transcode.InitializeRecipes(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	mgr := cfg.Transcode.RecipeManager()
+	profile := structuredRecipeProfile()
+	rec, err := mgr.SaveManagedProfile("history-x265", profile, "generation 1", "", 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for generation := int64(2); generation <= 12; generation++ {
+		rec, err = mgr.SaveManagedProfile(
+			"history-x265",
+			profile,
+			fmt.Sprintf("generation %d", generation),
+			"",
+			rec.Generation,
+			rec.Digest,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	s := server.NewMCPServer("test", "0.0.0")
+	registerRecipeTools(s, cfg)
+	res := callTool(t, s, "recipe_history", map[string]any{"name": "history-x265", "limit": 3})
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(resultText(t, res)), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if int(payload["total_entries"].(float64)) != 12 || int(payload["returned_entries"].(float64)) != 3 {
+		t.Fatalf("unexpected history pagination metadata: %+v", payload)
+	}
+	history, ok := payload["history"].([]any)
+	if !ok || len(history) != 3 {
+		t.Fatalf("unexpected history response: %+v", payload["history"])
+	}
+	want := []float64{10, 11, 12}
+	for i, raw := range history {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("unexpected history entry shape: %+v", raw)
+		}
+		if entry["generation"] != want[i] {
+			t.Fatalf("history should return newest entries in chronological order; got %+v", history)
+		}
+		if _, ok := entry["profile"]; ok {
+			t.Fatalf("recipe_history must not repeat full profile bodies: %+v", entry)
+		}
 	}
 }
