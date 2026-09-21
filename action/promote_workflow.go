@@ -293,33 +293,43 @@ func (e *Engine) stepPromoteFinalize(ctx context.Context, ec *ExecutionContext) 
 		needsIdentitySave = true
 	}
 
-	// Rename persists the final identity before finalize runs. Use that durable
-	// path for physical verification: Sonarr may briefly return the old
-	// .navigatorr-candidates path while its library view catches up, and that
-	// temporary path legitimately no longer exists after the rename.
+	// Resolve the promoted file from durable post-rename state. new_path is
+	// persisted by the rename step and is authoritative: after Sonarr adopts
+	// and renames the candidate, candidate_path legitimately no longer exists
+	// and must never be reopened. Sonarr's reported path may still briefly (or
+	// permanently, across a restart) be the stale pre-rename temporary path,
+	// so it is only a fallback when no durable new_path has been recorded yet.
 	finalPath := filepath.Clean(p.NewPath)
-	if p.NewPath == "" || temporaryPromotionPath(p.NewPath) {
+	if p.NewPath == "" {
 		if temporaryPromotionPath(adopted.Path) {
 			return promoteWait("Waiting for Sonarr to publish the renamed library path")
 		}
 		finalPath = filepath.Clean(adopted.Path)
 		p.NewPath = adopted.Path
 		needsIdentitySave = true
-	} else if filepath.Clean(adopted.Path) != finalPath {
-		return promoteWait("Waiting for Sonarr's library path to match the completed rename")
 	}
+	// A durable new_path that still points inside .navigatorr-candidates is
+	// corrupt or incomplete persisted state: fail closed, never fall back.
 	if temporaryPromotionPath(finalPath) {
-		return promoteFailed(fmt.Errorf("final active candidate must be outside .navigatorr-candidates"))
+		return promoteFailed(fmt.Errorf("final active candidate must be outside .navigatorr-candidates; recovery retained"))
 	}
 	if _, err := e.promotionPath(finalPath, false); err != nil {
 		return promoteFailed(err)
 	}
-	if info, err := os.Lstat(finalPath); err != nil {
+	if p.SeriesPath != "" && !withinPromotionPath(p.SeriesPath, finalPath) {
+		return promoteFailed(fmt.Errorf("final library file is outside the series library root; recovery retained"))
+	}
+	info, err := os.Lstat(finalPath)
+	if err != nil {
 		return promoteFailed(err)
-	} else if !info.Mode().IsRegular() {
+	}
+	if !info.Mode().IsRegular() {
 		return promoteFailed(fmt.Errorf("final library file is not a regular file"))
 	}
-	if err := e.verifyPromotionHash(ctx, finalPath, p.CandidateSHA); err != nil {
+	if p.CandidateBytes > 0 && info.Size() != p.CandidateBytes {
+		return promoteFailed(fmt.Errorf("final library file size %d differs from the validated candidate size %d; recovery retained", info.Size(), p.CandidateBytes))
+	}
+	if err := e.verifyPromotionHashStable(ctx, finalPath, p.CandidateSHA); err != nil {
 		return promoteFailed(err)
 	}
 	if needsIdentitySave {

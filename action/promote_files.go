@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jakenesler/navigatorr/mediainspect"
 )
@@ -91,6 +92,55 @@ func (r *promotionContextReader) Read(p []byte) (int, error) {
 
 func (e *Engine) verifyPromotionHash(ctx context.Context, path, expected string) error {
 	actual, _, err := e.promotionHash(ctx, path)
+	if err != nil {
+		return err
+	}
+	if actual != expected {
+		return fmt.Errorf("integrity violation: SHA-256 changed for %s", path)
+	}
+	return nil
+}
+
+const promotionStableHashAttempts = 5
+
+// promotionHashStable retries the strict, single-shot promotionHash when the
+// filesystem exposes transiently inconsistent metadata (a common race on
+// network mounts immediately after a writer closes). It never relaxes the
+// integrity contract: a successful result is always a full stable read, and a
+// file that never settles is reported as an error after bounded retries.
+func (e *Engine) promotionHashStable(ctx context.Context, path string) (string, int64, error) {
+	var lastErr error
+	for attempt := 0; attempt < promotionStableHashAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return "", 0, err
+		}
+		hash, n, err := e.promotionHash(ctx, path)
+		if err == nil {
+			return hash, n, nil
+		}
+		if !transientPromotionHashError(err) {
+			return "", 0, err
+		}
+		lastErr = err
+		select {
+		case <-ctx.Done():
+			return "", 0, ctx.Err()
+		case <-time.After(time.Duration(attempt+1) * 20 * time.Millisecond):
+		}
+	}
+	return "", 0, lastErr
+}
+
+func transientPromotionHashError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "file changed while opening") || strings.Contains(msg, "file changed while hashing")
+}
+
+func (e *Engine) verifyPromotionHashStable(ctx context.Context, path, expected string) error {
+	actual, _, err := e.promotionHashStable(ctx, path)
 	if err != nil {
 		return err
 	}
@@ -286,8 +336,9 @@ func (e *Engine) stepPromotePreserve(ctx context.Context, ec *ExecutionContext) 
 			// Retry/re-entry: a previous attempt may have completed the private
 			// copy but crashed before the atomic rename. Reuse a stable, exact
 			// copy instead of discarding it and copying the original again.
+			// An unstable or mismatched partial is never trusted for reuse.
 			if info.Size() == p.OriginalBytes && p.OriginalBytes > 0 {
-				hash, n, hashErr := e.promotionHash(ctx, partial)
+				hash, n, hashErr := e.promotionHashStable(ctx, partial)
 				if hashErr == nil && hash == p.OriginalSHA && n == p.OriginalBytes {
 					if err := e.promotionPublishPartial(ctx, ec, p, partial); err != nil {
 						return promoteFailed(err)
@@ -303,28 +354,13 @@ func (e *Engine) stepPromotePreserve(ctx context.Context, ec *ExecutionContext) 
 		} else if !os.IsNotExist(err) {
 			return promoteFailed(err)
 		}
-		src, err := os.Open(p.OriginalPath)
-		if err != nil {
+		if err := e.promotionCopyToPartial(ctx, p.OriginalPath, partial); err != nil {
 			return promoteFailed(err)
 		}
-		dst, err := os.OpenFile(partial, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-		if err != nil {
-			_ = src.Close()
-			return promoteFailed(err)
-		}
-		_, copyErr := io.Copy(dst, &promotionContextReader{ctx: ctx, r: src})
-		_ = src.Close()
-		if copyErr == nil {
-			copyErr = dst.Sync()
-		}
-		closeErr := dst.Close()
-		if copyErr == nil {
-			copyErr = closeErr
-		}
-		if copyErr != nil {
-			return promoteFailed(copyErr)
-		}
-		if err := e.verifyPromotionHash(ctx, partial, p.OriginalSHA); err != nil {
+		// promotionCopyToPartial returns only after the destination writer is
+		// flushed and closed, so this hashes a finished file, never an active
+		// writer. Stable hashing absorbs transient post-close metadata races.
+		if err := e.verifyPromotionHashStable(ctx, partial, p.OriginalSHA); err != nil {
 			return promoteFailed(err)
 		}
 		// This is an independent copy in the promotion's private directory.
@@ -340,6 +376,40 @@ preserved:
 		return promoteFailed(err)
 	}
 	return StepResult{Status: StepCompleted, Outputs: map[string]any{"recovery_path": p.BackupPath, "recovery_retained": true}}, nil
+}
+
+// promotionCopyToPartial copies the original into the private recovery
+// partial. It returns only after the destination has been synced and closed,
+// so callers must not hash or publish the partial before it returns.
+func (e *Engine) promotionCopyToPartial(ctx context.Context, srcPath, partial string) error {
+	if _, err := e.promotionPath(partial, true); err != nil {
+		return err
+	}
+	src, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+	dst, err := os.OpenFile(partial, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		_ = src.Close()
+		return err
+	}
+	_, copyErr := io.Copy(dst, &promotionContextReader{ctx: ctx, r: src})
+	_ = src.Close()
+	if copyErr == nil {
+		copyErr = dst.Sync()
+	}
+	closeErr := dst.Close()
+	if copyErr == nil {
+		copyErr = closeErr
+	}
+	if copyErr != nil {
+		return copyErr
+	}
+	if hook := e.promotionCopyBoundaryHook; hook != nil {
+		hook(partial)
+	}
+	return nil
 }
 
 func (e *Engine) promotionPublishPartial(ctx context.Context, ec *ExecutionContext, p *promotionState, partial string) error {

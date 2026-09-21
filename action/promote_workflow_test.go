@@ -43,6 +43,7 @@ type promotionHarness struct {
 	poisonOldPath                      bool
 	poisonCandidateOnImport            bool
 	stalePathAfterRescan               bool
+	permanentStaleFinalPath            bool
 	stalePathReads                     int
 	backupSeen                         bool
 }
@@ -121,9 +122,11 @@ func (h *promotionHarness) serve(w http.ResponseWriter, r *http.Request) {
 	case r.Method == "GET" && r.URL.Path == "/api/v3/episodefile":
 		files := []promotionFile{}
 		for _, f := range h.files {
-			if f.ID == 202 && h.stalePathReads > 0 {
+			if f.ID == 202 && (h.permanentStaleFinalPath || h.stalePathReads > 0) {
 				f.Path = h.candidate
-				h.stalePathReads--
+				if h.stalePathReads > 0 {
+					h.stalePathReads--
+				}
 			}
 			files = append(files, f)
 		}
@@ -632,5 +635,186 @@ func TestPromotionDifferentCandidatesCannotClaimSameOriginal(t *testing.T) {
 	second = h.resume(second.ID, "approve")
 	if second.Status != StatusFailed || !strings.Contains(second.Error, "reserved") || h.imports != 1 {
 		t.Fatalf("original reservation bypassed: %s %s imports=%d", second.Status, second.Error, h.imports)
+	}
+}
+
+// seedPostRenameFinalize persists a promotion that has already completed the
+// Sonarr rename: the temporary candidate is gone, the final library file and a
+// verified recovery backup exist, and new_path/new_episode_file_id are durable.
+// It reloads the engine from the store so finalize must work from persisted
+// state alone.
+func (h *promotionHarness) seedPostRenameFinalize(t *testing.T, mutate func(p *promotionState)) (string, *promotionState) {
+	t.Helper()
+	originalBytes, err := os.ReadFile(h.original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidateBytes, err := os.ReadFile(h.candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origSHA := sha256.Sum256(originalBytes)
+	candSHA := sha256.Sum256(candidateBytes)
+
+	backup := expectedPromotionBackup(h.candidate)
+	if err := os.MkdirAll(filepath.Dir(backup), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(backup, originalBytes, 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Sonarr's completed rename moved the candidate to the final library path.
+	if err := os.Rename(h.candidate, h.final); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(h.original); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	delete(h.files, 101)
+	file := promotionFile{ID: 202, SeriesID: 1, Path: h.final, Size: int64(len(candidateBytes))}
+	file.MediaInfo.VideoCodec = "HEVC"
+	h.files[202] = file
+	for i := range h.episodes {
+		h.episodes[i].EpisodeFileID = 202
+	}
+
+	p := &promotionState{
+		SourceActionID: "source-transcode",
+		Service:        "sonarr",
+		SeriesID:       1,
+		SeriesPath:     filepath.Join(h.root, "Series"),
+		OriginalPath:   h.original,
+		CandidatePath:  h.candidate,
+		OriginalSHA:    hex.EncodeToString(origSHA[:]),
+		CandidateSHA:   hex.EncodeToString(candSHA[:]),
+		OriginalBytes:  int64(len(originalBytes)),
+		CandidateBytes: int64(len(candidateBytes)),
+		OriginalFileID: 101,
+		EpisodeIDs:     []int{11, 12},
+		Quality:        json.RawMessage(`{"quality":{"id":3,"name":"WEBDL-1080p"},"revision":{"version":1,"real":0}}`),
+		Languages:      json.RawMessage(`[]`),
+		Approved:       true,
+		BackupPath:     backup,
+		BackupVerified: true,
+		NewFileID:      202,
+		NewPath:        h.final,
+		Commands:       map[string]*promotionCommand{"import": {Done: true}, "rename": {Done: true}},
+		OldRemoved:     true,
+	}
+	if mutate != nil {
+		mutate(p)
+	}
+	inst := store.ActionInstance{
+		ID:          "promote-finalize-" + fmt.Sprintf("%d", time.Now().UnixNano()),
+		ActionName:  "promote_transcode_candidate",
+		Status:      StatusRunning,
+		CurrentStep: 7,
+		StateJSON:   toJSON(map[string]any{"promotion": p}),
+	}
+	if err := h.st.CreateActionInstance(inst); err != nil {
+		t.Fatal(err)
+	}
+	h.restart()
+	return inst.ID, p
+}
+
+func TestPromotionFinalizeUsesDurableNewPathNotCandidatePath(t *testing.T) {
+	h := newPromotionHarness(t)
+	// Sonarr keeps reporting the pre-rename temporary path. finalize must not
+	// reopen it; the durable new_path is authoritative.
+	h.permanentStaleFinalPath = true
+	id, p := h.seedPostRenameFinalize(t, nil)
+	if _, err := os.Stat(h.candidate); !os.IsNotExist(err) {
+		t.Fatalf("fixture error: candidate should be gone: %v", err)
+	}
+	r := h.resume(id, "")
+	if r.Status != StatusCompleted {
+		t.Fatalf("finalize from durable new_path: %s %s waiting=%s", r.Status, r.Error, r.WaitingReason)
+	}
+	if p.NewFileID != 202 || filepath.Clean(p.NewPath) != filepath.Clean(h.final) {
+		t.Fatalf("durable identity drifted: id=%d path=%q", p.NewFileID, p.NewPath)
+	}
+	if getInt(r.Outputs, "new_episode_file_id") != 202 {
+		t.Fatalf("finalize did not report persisted new_episode_file_id: %v", r.Outputs["new_episode_file_id"])
+	}
+	if _, err := os.Stat(p.BackupPath); !os.IsNotExist(err) {
+		t.Fatalf("verified recovery was not removed after finalize: %v", err)
+	}
+	finalBytes, err := os.ReadFile(h.final)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actual := sha256.Sum256(finalBytes); hex.EncodeToString(actual[:]) != p.CandidateSHA {
+		t.Fatal("final library file does not match the persisted candidate SHA")
+	}
+}
+
+func TestPromotionFinalizeRetriesAfterReloadFromPersistedState(t *testing.T) {
+	h := newPromotionHarness(t)
+	h.permanentStaleFinalPath = true
+	id, p := h.seedPostRenameFinalize(t, nil)
+	// Simulate the durable checkpoint left by a failed finalize attempt, then a
+	// process restart. Retry must succeed from new_path/new_episode_file_id with
+	// no transient pre-rename path and no resubmitted Sonarr mutations.
+	inst, err := h.st.GetActionInstance(id)
+	if err != nil || inst == nil {
+		t.Fatalf("reload seeded instance: %v", err)
+	}
+	inst.Status = StatusFailed
+	inst.ErrorJSON = `{"step":"finalize_promotion","error":"interrupted"}`
+	if err := h.st.UpdateActionInstance(*inst); err != nil {
+		t.Fatal(err)
+	}
+	h.restart()
+	r, err := h.engine.Retry(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Status != StatusCompleted {
+		t.Fatalf("retry from persisted state: %s %s waiting=%s", r.Status, r.Error, r.WaitingReason)
+	}
+	if h.imports != 0 || h.deletes != 0 || h.renames != 0 || h.rescans != 0 {
+		t.Fatalf("retry replayed Sonarr mutations: import=%d delete=%d rename=%d rescan=%d", h.imports, h.deletes, h.renames, h.rescans)
+	}
+	if _, err := os.Stat(p.BackupPath); !os.IsNotExist(err) {
+		t.Fatalf("recovery not cleaned after retry: %v", err)
+	}
+}
+
+func TestPromotionFinalizeFailsClosedOnNewPathHashMismatch(t *testing.T) {
+	h := newPromotionHarness(t)
+	id, p := h.seedPostRenameFinalize(t, nil)
+	finalBytes, err := os.ReadFile(h.final)
+	if err != nil {
+		t.Fatal(err)
+	}
+	corrupted := append([]byte{}, finalBytes...)
+	corrupted[len(corrupted)-1] ^= 0xFF
+	if err := os.WriteFile(h.final, corrupted, 0600); err != nil {
+		t.Fatal(err)
+	}
+	r := h.resume(id, "")
+	if r.Status != StatusFailed || !strings.Contains(r.Error, "SHA-256") {
+		t.Fatalf("new_path hash mismatch was not rejected: %s %s", r.Status, r.Error)
+	}
+	if _, err := os.Stat(p.BackupPath); err != nil {
+		t.Fatalf("recovery must be preserved on hash mismatch: %v", err)
+	}
+}
+
+func TestPromotionFinalizeFailsClosedWhenNewPathIsTemporary(t *testing.T) {
+	h := newPromotionHarness(t)
+	id, p := h.seedPostRenameFinalize(t, func(p *promotionState) {
+		p.NewPath = filepath.Join(filepath.Dir(h.candidate), "renamed.mkv")
+	})
+	if !temporaryPromotionPath(p.NewPath) {
+		t.Fatalf("fixture error: %q is not a temporary path", p.NewPath)
+	}
+	r := h.resume(id, "")
+	if r.Status != StatusFailed || !strings.Contains(r.Error, ".navigatorr-candidates") {
+		t.Fatalf("temporary new_path was not rejected: %s %s", r.Status, r.Error)
+	}
+	if _, err := os.Stat(p.BackupPath); err != nil {
+		t.Fatalf("recovery must be preserved when new_path is temporary: %v", err)
 	}
 }
