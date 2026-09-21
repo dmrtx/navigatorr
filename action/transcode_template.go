@@ -18,7 +18,7 @@ import (
 
 func (e *Engine) registerTranscodeTemplate() {
 	e.RegisterTemplate(ActionTemplate{
-		AutoReconcile:  true,
+		AutoReconcile:   true,
 		ImmutableInputs: true,
 		Name:            "transcode_media", Version: 2,
 		Description:    "Coordinates safe candidate-only media transcoding using an immutable recipe-resolved plan, bounded transient retries, worker revalidation, post-transcode stream validation, and original SHA-256 verification.",
