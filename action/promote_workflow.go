@@ -284,6 +284,36 @@ func (e *Engine) stepPromoteFinalize(ctx context.Context, ec *ExecutionContext) 
 	if !ok || temporaryPromotionPath(adopted.Path) {
 		return promoteFailed(fmt.Errorf("final active candidate must be outside .navigatorr-candidates"))
 	}
+	// Use the durable renamed identity, not the stale temporary candidate path
+	// that no longer exists after rename_candidate. promotionAdopted refreshes
+	// the in-memory NewFileID/NewPath and hash-verifies the active file; persist
+	// it so a crash between rename/rescan/finalize cannot lose the final binding.
+	if p.NewPath == "" || p.NewFileID <= 0 {
+		p.NewFileID, p.NewPath = adopted.ID, adopted.Path
+		if err := e.savePromotion(ctx, ec, p); err != nil {
+			return promoteFailed(err)
+		}
+	} else if filepath.Clean(p.NewPath) != filepath.Clean(adopted.Path) || p.NewFileID != adopted.ID {
+		return promoteFailed(fmt.Errorf("final library file changed since rename; recovery retained"))
+	}
+	finalPath := p.NewPath
+	if finalPath == "" {
+		finalPath = adopted.Path
+	}
+	if temporaryPromotionPath(finalPath) {
+		return promoteFailed(fmt.Errorf("final active candidate must be outside .navigatorr-candidates"))
+	}
+	if _, err := e.promotionPath(finalPath, false); err != nil {
+		return promoteFailed(err)
+	}
+	if info, err := os.Lstat(finalPath); err != nil {
+		return promoteFailed(err)
+	} else if !info.Mode().IsRegular() {
+		return promoteFailed(fmt.Errorf("final library file is not a regular file"))
+	}
+	if err := e.verifyPromotionHash(ctx, finalPath, p.CandidateSHA); err != nil {
+		return promoteFailed(err)
+	}
 	if err := e.promotionNoOldReferences(ctx, svc, p); err != nil {
 		return promoteFailed(err)
 	}
@@ -301,7 +331,7 @@ func (e *Engine) stepPromoteFinalize(ctx context.Context, ec *ExecutionContext) 
 			return promoteFailed(fmt.Errorf("old physical file remains after library cleanup"))
 		}
 	}
-	if p.CandidatePath != adopted.Path {
+	if filepath.Clean(p.CandidatePath) != filepath.Clean(finalPath) {
 		if _, err := os.Lstat(p.CandidatePath); err == nil {
 			if _, err := e.promotionPath(p.CandidatePath, true); err != nil {
 				return promoteFailed(err)
@@ -361,5 +391,5 @@ func (e *Engine) stepPromoteFinalize(ctx context.Context, ec *ExecutionContext) 
 	if p.OriginalBytes > 0 {
 		percent = float64(saved) / float64(p.OriginalBytes) * 100
 	}
-	return StepResult{Status: StepCompleted, Outputs: map[string]any{"promoted": true, "promotion": p, "final_path": adopted.Path, "new_episode_file_id": adopted.ID, "episode_ids": p.EpisodeIDs, "original_integrity": "verified_before_replacement", "candidate_sha256": p.CandidateSHA, "one_active_file_per_episode": true, "recovery_retained": false, "size_saved_bytes": saved, "size_saved_percent": percent}}, nil
+	return StepResult{Status: StepCompleted, Outputs: map[string]any{"promoted": true, "promotion": p, "final_path": finalPath, "new_episode_file_id": p.NewFileID, "episode_ids": p.EpisodeIDs, "original_integrity": "verified_before_replacement", "candidate_sha256": p.CandidateSHA, "one_active_file_per_episode": true, "recovery_retained": false, "size_saved_bytes": saved, "size_saved_percent": percent}}, nil
 }
