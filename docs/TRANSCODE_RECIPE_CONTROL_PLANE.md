@@ -22,9 +22,10 @@ tools.
 The work queue is deliberately not recipe storage.
 
 `auto` is reserved case-insensitively as the selector pseudo-profile and cannot
-be defined as a bundle, static, or managed recipe name. This keeps control-plane
-discovery consistent with what `transcode_media(profile="auto")` actually
-executes.
+be defined as a bundle, static, or managed recipe name. `default_profile` treats
+trimmed variants such as `auto`, `AUTO`, and `Auto` identically. This keeps
+control-plane discovery and startup validation consistent with what
+`transcode_media(profile="auto")` actually executes.
 
 Managed saves are strict, atomic and versioned per profile. Each normalized
 profile has a stable SHA-256 content digest, a generation, timestamps and an
@@ -74,10 +75,11 @@ verified provenance before saving; it is not required for recipe distribution.
 `transcode_media`, `benchmark_transcode`, `transcode_batch`, and
 `promote_transcode_candidate` declare immutable inputs at the workflow
 template. Resume/reconciliation may supply a decision, but cannot inject or
-replace inputs. This keeps encoder settings, size guardrails and validation
-expectations tied to the same immutable action configuration that produced the
-resolved Plan. Batch children receive `surface_worker_busy` at creation and are
-resumed without extra inputs.
+replace inputs. Batch pause/resume/cancel control lives in durable `State`, so
+`InputsJSON` remains the exact action-creation request. This keeps encoder
+settings, size guardrails and validation expectations tied to the same immutable
+action configuration that produced the resolved Plan. Batch children receive
+`surface_worker_busy` at creation and are resumed without extra inputs.
 
 ## MCP recipe tools
 
@@ -103,3 +105,12 @@ This model naturally supports multiple transcode workers later: the coordinator
 chooses a compatible worker and sends the same resolved plan. Worker discovery,
 capability-aware routing and load balancing are separate scheduling concerns
 and do not require recipe synchronization.
+
+
+## MCP action input parsing
+
+`action_run.inputs` and `action_resume.inputs` are JSON object strings and
+fail closed. Malformed JSON, arrays, scalars, and `null` are rejected explicitly
+instead of being treated as omitted inputs. `action_catalog` exposes
+`immutable_inputs` for each workflow so callers can discover whether resume-time
+input changes are permitted.
