@@ -29,10 +29,11 @@ Save/delete transitions are retained in bounded history. A managed delete only
 affects future resolutions; running actions keep the plan they already resolved.
 
 Mutations fail closed by default: creating a previously unused/deleted profile
-name omits `expected_digest`; updating an active managed profile requires its
-current digest; deleting an active managed profile also requires its current
-digest. This prevents an LLM or concurrent client from blindly overwriting or
-deleting a recipe that changed after it was read.
+name omits `expected_generation` and `expected_digest`; updating or deleting
+an active managed profile requires both current values. The monotonic generation
+is the primary CAS token, so metadata-only changes and A → B → A content cycles
+invalidate stale clients even when the normalized profile digest matches again.
+The digest remains an additional content-integrity check.
 
 ## Ephemeral experiments
 
@@ -63,14 +64,23 @@ does not yet prove that the action exists, completed successfully, or produced
 the same digest. A later dedicated promote-from-action helper can provide that
 verified provenance before saving; it is not required for recipe distribution.
 
+## Immutable action inputs
+
+`transcode_media` and `benchmark_transcode` freeze their inputs at action
+creation. Resume/reconciliation may supply a decision, but cannot inject or
+replace inputs. This keeps encoder settings, size guardrails and validation
+expectations tied to the same immutable action configuration that produced the
+resolved Plan. Batch children receive `surface_worker_busy` at creation and are
+resumed without extra inputs.
+
 ## MCP recipe tools
 
 - `recipe_list`: inspect bundle/static/managed layers.
 - `recipe_get`: inspect the effective typed profile and source layer.
 - `recipe_save`: create a strict managed profile, or update one only when the
-  caller supplies its current `expected_digest`.
+  caller supplies its current `expected_generation` and `expected_digest`.
 - `recipe_delete`: remove the managed override only with its current
-  `expected_digest`, without affecting running jobs.
+  `expected_generation` and `expected_digest`, without affecting running jobs.
 - `recipe_history`: inspect save/delete generations.
 - `recipe_status`, `recipe_reload`, `recipe_update`, `recipe_rollback`:
   retain their bundle/LKG responsibilities.
