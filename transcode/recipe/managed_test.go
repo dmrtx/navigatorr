@@ -8,18 +8,18 @@ import (
 func managedTestProfile() Profile {
 	return Profile{
 		Container: "mkv",
-		Video: VideoProfile{Codec: "libx265", Quality: 24, Preset: "slow", Profile: "main", PixelFormat: "yuv420p"},
-		Audio: AudioProfile{Mode: "copy"},
+		Video:     VideoProfile{Codec: "libx265", Quality: 24, Preset: "slow", Profile: "main", PixelFormat: "yuv420p"},
+		Audio:     AudioProfile{Mode: "copy"},
 		Subtitles: SubtitleProfile{Mode: "copy", ConvertIncompatible: true},
-		Preserve: PreserveProfile{Metadata: true, Chapters: true, Attachments: true},
+		Preserve:  PreserveProfile{Metadata: true, Chapters: true, Attachments: true},
 		Resilience: ResilienceProfile{
-			MaxAttempts: 1,
+			MaxAttempts:  1,
 			MaxFallbacks: 1,
-			Fallbacks: []FallbackRule{{When: "container_subtitle_incompatible", Action: "apply_container_conversion"}},
+			Fallbacks:    []FallbackRule{{When: "container_subtitle_incompatible", Action: "apply_container_conversion"}},
 		},
 		Optimization: &OptimizationPolicy{
 			Enabled: true,
-			Search: &SearchPolicy{QualityValues: []int{20, 22, 24, 26}},
+			Search:  &SearchPolicy{QualityValues: []int{20, 22, 24, 26}},
 		},
 	}
 }
