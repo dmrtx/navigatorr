@@ -387,6 +387,13 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 }
 
 func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+	// paused is an action-creation input only. Copy it into durable control
+	// state once, then mutate State exclusively so InputsJSON remains an audit
+	// record of the original request.
+	if _, initialized := ec.State["paused"]; !initialized {
+		ec.State["paused"] = getBool(ec.Inputs, "paused")
+	}
+
 	dryRun := getBool(ec.Inputs, "dry_run")
 	seriesTitle := getString(ec.State, "series_title")
 	isAnime := getBool(ec.State, "is_anime")
@@ -406,8 +413,6 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 
 	if strings.EqualFold(ec.Decision, "resume") {
 		ec.Decision = ""
-		delete(ec.Inputs, "paused")
-		ec.Inputs["paused"] = false
 		ec.State["paused"] = false
 		// Persist the cleared pause before fan-out: children read the parent's
 		// durable state and must not observe the stale paused=true.
@@ -419,7 +424,6 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 	// Cancellation is evaluated before pause so it also works from paused:true.
 	if strings.EqualFold(ec.Decision, "cancel") {
 		ec.Decision = ""
-		ec.Inputs["paused"] = false
 		ec.State["paused"] = false
 		// Durable batch-cancel control: persist the intent first so no new child
 		// admission can race with the cancellation fan-out.
@@ -476,11 +480,10 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 		}, nil
 	}
 
-	// Handle pause semantics. The paused flag is persisted so the autonomous
-	// reconciler and every child observe the pause across restarts.
-	if strings.EqualFold(ec.Decision, "pause") || getBool(ec.Inputs, "paused") {
+	// Handle pause semantics through durable State only. The original paused
+	// input remains unchanged for auditability.
+	if strings.EqualFold(ec.Decision, "pause") || getBool(ec.State, "paused") {
 		ec.Decision = ""
-		ec.Inputs["paused"] = true
 		ec.State["paused"] = true
 		return StepResult{
 			Status:        StepWaitingDecision,
