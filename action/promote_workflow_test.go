@@ -42,6 +42,8 @@ type promotionHarness struct {
 	renameFailures                     int
 	poisonOldPath                      bool
 	poisonCandidateOnImport            bool
+	stalePathAfterRescan               bool
+	stalePathReads                     int
 	backupSeen                         bool
 }
 
@@ -119,6 +121,10 @@ func (h *promotionHarness) serve(w http.ResponseWriter, r *http.Request) {
 	case r.Method == "GET" && r.URL.Path == "/api/v3/episodefile":
 		files := []promotionFile{}
 		for _, f := range h.files {
+			if f.ID == 202 && h.stalePathReads > 0 {
+				f.Path = h.candidate
+				h.stalePathReads--
+			}
 			files = append(files, f)
 		}
 		write(files)
@@ -256,6 +262,9 @@ func (h *promotionHarness) serve(w http.ResponseWriter, r *http.Request) {
 		case "RescanSeries":
 			h.rescans++
 			h.mutationOrder = append(h.mutationOrder, "rescan")
+			if h.stalePathAfterRescan {
+				h.stalePathReads = 1
+			}
 		default:
 			h.t.Errorf("unexpected command %q", name)
 			w.WriteHeader(400)
