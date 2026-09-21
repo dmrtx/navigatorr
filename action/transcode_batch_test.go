@@ -671,6 +671,7 @@ func TestTranscodeBatch_PauseAndResume(t *testing.T) {
 		"service":   "sonarr",
 		"series_id": 10,
 		"paused":    true,
+		"metric":    "ssim",
 	})
 	if err != nil {
 		t.Fatalf("unexpected run error: %v", err)
@@ -689,6 +690,26 @@ func TestTranscodeBatch_PauseAndResume(t *testing.T) {
 	}
 	if mockExecutor.submitCalls != 2 {
 		t.Errorf("expected 2 submits after resume, got %d", mockExecutor.submitCalls)
+	}
+	items, err := st.ListTranscodeBatchItems(res.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range items {
+		if item.ChildActionID == "" {
+			continue
+		}
+		child, err := st.GetActionInstance(item.ChildActionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var inputs map[string]any
+		if err := json.Unmarshal([]byte(child.InputsJSON), &inputs); err != nil {
+			t.Fatal(err)
+		}
+		if inputs["metric"] != "ssim" {
+			t.Fatalf("batch child metric = %v, want ssim", inputs["metric"])
+		}
 	}
 }
 

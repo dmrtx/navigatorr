@@ -3,6 +3,7 @@ package action
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/jakenesler/navigatorr/mediainspect"
@@ -151,6 +152,16 @@ func getInt(m map[string]any, key string) int {
 		return int(v)
 	case float64:
 		return int(v)
+	case json.Number:
+		i, err := strconv.Atoi(string(v))
+		if err == nil {
+			return i
+		}
+	case string:
+		i, err := strconv.Atoi(strings.TrimSpace(v))
+		if err == nil {
+			return i
+		}
 	}
 	return 0
 }

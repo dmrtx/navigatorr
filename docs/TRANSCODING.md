@@ -411,6 +411,7 @@ The `transcode_batch` action coordinates persistent batch transcoding across lib
 | `series_id` | string/int | Yes | — | Sonarr series ID to transcode. |
 | `season` | int | No | `nil` (all) | Optional season number filter. Omit to transcode the entire series. |
 | `profile` | string | No | `auto` | Recipe profile name or `auto` for deterministic stream-based selection. If omitted in `transcode_media`, honors configured `DefaultProfile` (including `auto`), else falls back to legacy `hevc-vt`. |
+| `metric` | string | No | profile default | Optimization metric (`vmaf`, `ssim`, or `both`) propagated to every `transcode_media` child. Use `ssim` for 10-bit sources when VMAF is unavailable. |
 | `replace_original` | bool | No | `false` | Must remain `false`. Setting `true` is rejected fail-closed; original files are never overwritten. |
 | `dry_run` | bool | No | `false` | If `true`, inspects and selects profiles without queuing or running transcode jobs. |
 | `media_type` | string | No | derived | Media type override (e.g. `anime`, `tv`). Defaults to Sonarr metadata classification. |
@@ -530,5 +531,4 @@ To prevent unbounded JSON responses when batching entire series or large seasons
 - **Parallelism**: Respects `config.Transcode.MaxParallelJobs` (default: 1). When `max_parallel_jobs: 1`, media files are transcoded serially one after another.
 - **Worker busy handling**: If the remote transcode worker returns `worker_busy` (or reaches max parallel slots), the current item transitions to `waiting_for_slot`. Normal background transcodes remain in `running`.
 - **Retry budget safety**: Encountering `worker_busy` does **not** increment item `attempts` or consume the transient retry budget. The batch transitions to `waiting_external` with `waiting_condition: "worker_busy"` and resumes cleanly once worker capacity becomes available.
-
 

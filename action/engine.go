@@ -147,7 +147,7 @@ func (e *Engine) Run(ctx context.Context, actionName string, inputs map[string]a
 		if existing, err := e.deps.Store.FindActionByIdempotencyKey(actionName, idempotencyKey); err != nil {
 			return nil, err
 		} else if existing != nil {
-			return e.existingPromotion(existing, tmpl, inputs)
+			return e.existingPromotion(ctx, existing, tmpl, inputs)
 		}
 	}
 	// Idempotency check: if non-terminal action with same name and key exists, return it
@@ -177,7 +177,7 @@ func (e *Engine) Run(ctx context.Context, actionName string, inputs map[string]a
 		// lookup and INSERT. Return that same workflow, never another promotion.
 		if actionName == "promote_transcode_candidate" {
 			if existing, lookupErr := e.deps.Store.FindActionByIdempotencyKey(actionName, idempotencyKey); lookupErr == nil && existing != nil {
-				return e.existingPromotion(existing, tmpl, inputs)
+				return e.existingPromotion(ctx, existing, tmpl, inputs)
 			}
 		}
 		return nil, fmt.Errorf("creating action instance: %w", err)
