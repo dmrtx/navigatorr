@@ -498,7 +498,7 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 		ec.Decision = ""
 		for i := range items {
 			if items[i].Status == "waiting_decision" && items[i].ChildActionID != "" {
-				resumedRes, resumedErr := e.Resume(ctx, items[i].ChildActionID, decisionToForward, map[string]any{"surface_worker_busy": true})
+				resumedRes, resumedErr := e.Resume(ctx, items[i].ChildActionID, decisionToForward, nil)
 				if resumedErr == nil && resumedRes != nil {
 					switch resumedRes.Status {
 					case StatusCompleted:
@@ -903,7 +903,7 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 		if existingChild != nil {
 			switch existingChild.Status {
 			case StatusWaitingExternal:
-				childRes, childErr = e.Resume(ctx, existingChild.ID, "", map[string]any{"surface_worker_busy": true})
+				childRes, childErr = e.Resume(ctx, existingChild.ID, "", nil)
 			case StatusWaitingDecision:
 				tmpl, _ := e.GetTemplate("transcode_media")
 				childEC := parseExecutionContext(existingChild, e)
@@ -913,7 +913,7 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 				childEC := parseExecutionContext(existingChild, e)
 				childRes = buildActionResult(existingChild, len(tmpl.Steps), childEC)
 			default:
-				childRes, childErr = e.Resume(ctx, existingChild.ID, "", map[string]any{"surface_worker_busy": true})
+				childRes, childErr = e.Resume(ctx, existingChild.ID, "", nil)
 			}
 		} else {
 			childRes, childErr = e.Run(ctx, "transcode_media", childInputs, childIdempotencyKey)
@@ -925,7 +925,7 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 	// If child action was already in StatusWaitingExternal when Run found it via idempotency key, resume it now
 	if childRes != nil && childRes.Status == StatusWaitingExternal && childRes.ID != "" && item.ChildActionID == "" {
 		item.ChildActionID = childRes.ID
-		resumedRes, resumedErr := e.Resume(ctx, childRes.ID, "", map[string]any{"surface_worker_busy": true})
+		resumedRes, resumedErr := e.Resume(ctx, childRes.ID, "", nil)
 		if resumedErr == nil && resumedRes != nil {
 			childRes = resumedRes
 		} else if resumedErr != nil {
