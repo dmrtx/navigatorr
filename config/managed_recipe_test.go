@@ -18,7 +18,7 @@ func controlPlaneTestProfile(quality int) recipe.Profile {
 			PixelFormat: "yuv420p",
 		},
 		Audio:     recipe.AudioProfile{Mode: "copy"},
-		Subtitles: recipe.SubtitleProfile{Mode: "copy", ConvertIncompatible: true},
+		Subtitles: recipe.SubtitleProfile{Mode: "preserve", ConvertIncompatible: true},
 		Preserve:  recipe.PreserveProfile{Metadata: true, Chapters: true, Attachments: true},
 		Resilience: recipe.ResilienceProfile{
 			MaxAttempts:  1,
