@@ -21,9 +21,9 @@ func controlPlaneTestProfile(quality int) recipe.Profile {
 		Subtitles: recipe.SubtitleProfile{Mode: "copy", ConvertIncompatible: true},
 		Preserve:  recipe.PreserveProfile{Metadata: true, Chapters: true, Attachments: true},
 		Resilience: recipe.ResilienceProfile{
-			MaxAttempts: 1,
+			MaxAttempts:  1,
 			MaxFallbacks: 1,
-			Fallbacks: []recipe.FallbackRule{{When: "container_subtitle_incompatible", Action: "apply_container_conversion"}},
+			Fallbacks:    []recipe.FallbackRule{{When: "container_subtitle_incompatible", Action: "apply_container_conversion"}},
 		},
 		Optimization: &recipe.OptimizationPolicy{
 			Enabled: true,
