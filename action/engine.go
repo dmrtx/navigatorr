@@ -99,8 +99,9 @@ func (e *Engine) Catalog() []ActionCatalogEntry {
 			Description:    t.Description,
 			RequiredInputs: reqInputs,
 			OptionalInputs: optInputs,
-			Steps:          steps,
-			Destructive:    t.Destructive,
+			Steps:           steps,
+			Destructive:     t.Destructive,
+			ImmutableInputs: t.ImmutableInputs,
 		})
 	}
 	sort.Slice(entries, func(i, j int) bool {
