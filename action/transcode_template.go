@@ -234,7 +234,6 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	}
 	var plan *transcode.Plan
 	var recipeProfile recipe.Profile
-	var err error
 	if hasProfileConfig {
 		plan, recipeProfile, ephemeralDigest, err = e.deps.Config.Transcode.ResolveEphemeralPlanForSource(ephemeralProfile, sourceSubs)
 		if err != nil {
