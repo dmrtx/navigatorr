@@ -40,6 +40,9 @@ func TestManagedProfilePersistenceHistoryAndDelete(t *testing.T) {
 
 	p2 := managedTestProfile()
 	p2.Video.Quality = 22
+	if _, err := m.SaveManagedProfile("anime-x265", p2, "second", "act-2", ""); err == nil || !strings.Contains(err.Error(), "expected_digest is required") {
+		t.Fatalf("expected update without expected_digest to fail closed, got %v", err)
+	}
 	rec2, err := m.SaveManagedProfile("anime-x265", p2, "second", "act-2", rec1.Digest)
 	if err != nil {
 		t.Fatal(err)
@@ -67,6 +70,9 @@ func TestManagedProfilePersistenceHistoryAndDelete(t *testing.T) {
 		t.Fatalf("unexpected history: %+v", history)
 	}
 
+	if _, err := reopened.DeleteManagedProfile("anime-x265", ""); err == nil || !strings.Contains(err.Error(), "expected_digest is required") {
+		t.Fatalf("expected delete without expected_digest to fail closed, got %v", err)
+	}
 	if _, err := reopened.DeleteManagedProfile("anime-x265", rec1.Digest); err == nil {
 		t.Fatal("expected optimistic concurrency mismatch")
 	}
@@ -86,6 +92,26 @@ func TestManagedProfilePersistenceHistoryAndDelete(t *testing.T) {
 	}
 	if len(history) != 3 || history[2].Event != "deleted" {
 		t.Fatalf("delete not recorded: %+v", history)
+	}
+
+	p3 := managedTestProfile()
+	p3.Video.Quality = 20
+	rec3, err := reopened.SaveManagedProfile("anime-x265", p3, "recreated", "act-3", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec3.Generation != 3 {
+		t.Fatalf("generation must remain monotonic across delete/recreate: got %d, want 3", rec3.Generation)
+	}
+	if rec3.Digest == rec1.Digest || rec3.Digest == rec2.Digest {
+		t.Fatalf("recreated profile should have a distinct digest in this fixture: %+v", rec3)
+	}
+	history, err = reopened.ManagedProfileHistory("anime-x265")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 4 || history[3].Event != "saved" || history[3].Generation != 3 {
+		t.Fatalf("recreate generation/history mismatch: %+v", history)
 	}
 }
 
