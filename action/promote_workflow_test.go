@@ -278,6 +278,23 @@ func (h *promotionHarness) run() *ActionResult {
 	return result
 }
 
+func TestPromotionAcceptsStringSeriesIDFromMCPInputs(t *testing.T) {
+	h := newPromotionHarness(t)
+	result, err := h.engine.Run(context.Background(), "promote_transcode_candidate", map[string]any{
+		"transcode_action_id": "source-transcode",
+		"series_id":           "1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != StatusWaitingDecision {
+		t.Fatalf("expected promotion plan to reach approval, got status=%s error=%s", result.Status, result.Error)
+	}
+	if h.imports != 0 {
+		t.Fatalf("planning a promotion must not import files, imports=%d", h.imports)
+	}
+}
+
 func (h *promotionHarness) resume(id, decision string) *ActionResult {
 	h.t.Helper()
 	result, err := h.engine.Resume(context.Background(), id, decision, nil)

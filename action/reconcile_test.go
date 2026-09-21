@@ -367,6 +367,41 @@ func TestPromotionIdentitySurvivesCompletionAndCannotChangeOnResume(t *testing.T
 	}
 }
 
+func TestPromotionRunRetriesMatchingStepZeroFailure(t *testing.T) {
+	st := setupTestStore(t)
+	e := NewEngine(EngineDeps{Store: st})
+	e.RegisterTemplate(ActionTemplate{Name: "promote_transcode_candidate", Steps: []StepDefinition{{Name: "plan", Run: func(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+		if getInt(ec.Inputs, "series_id") <= 0 {
+			return StepResult{Status: StepFailed, Error: "positive series_id required"}, nil
+		}
+		return StepResult{Status: StepWaitingDecision}, nil
+	}}}})
+	if err := st.CreateActionInstance(store.ActionInstance{
+		ID:             "failed-promotion",
+		ActionName:     "promote_transcode_candidate",
+		Status:         StatusFailed,
+		CurrentStep:    0,
+		InputsJSON:     `{"service":"sonarr","transcode_action_id":"source-action","series_id":"42"}`,
+		OutputsJSON:    `{}`,
+		StateJSON:      `{}`,
+		ErrorJSON:      "positive series_id required",
+		IdempotencyKey: "promote:sonarr:source-action",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := e.Run(context.Background(), "promote_transcode_candidate", map[string]any{
+		"transcode_action_id": "source-action",
+		"series_id":           42,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ID != "failed-promotion" || result.Status != StatusWaitingDecision {
+		t.Fatalf("expected same promotion to retry into approval, got id=%s status=%s error=%s", result.ID, result.Status, result.Error)
+	}
+}
+
 func TestAuditLogCannotAdvanceBeyondPersistedCheckpoint(t *testing.T) {
 	st := setupTestStore(t)
 	e := NewEngine(EngineDeps{Store: st})

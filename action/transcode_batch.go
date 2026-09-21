@@ -28,6 +28,7 @@ func (e *Engine) registerTranscodeBatchTemplate() {
 		OptionalInputs: []string{
 			"season",
 			"profile",
+			"metric",
 			"replace_original",
 			"dry_run",
 			"media_type",
@@ -875,6 +876,9 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 		// Durable parent link so the child can refuse new submissions after the
 		// batch is cancelled or paused, including across restarts.
 		"parent_action_id": ec.InstanceID,
+	}
+	if metric := strings.TrimSpace(getString(ec.Inputs, "metric")); metric != "" {
+		childInputs["metric"] = metric
 	}
 	childIdempotencyKey := fmt.Sprintf("batch-%s-%s", ec.InstanceID, item.ItemKey)
 
