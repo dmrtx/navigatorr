@@ -46,6 +46,9 @@ type Plan struct {
 	// Preset is the libx265 speed/efficiency preset. It must be empty for
 	// hevc_videotoolbox and is validated against a fixed safe enum for libx265.
 	Preset          string `json:"preset,omitempty" yaml:"preset,omitempty"`
+	// Tune is a bounded libx265 tune enum (for example animation or grain).
+	// It must be empty for hevc_videotoolbox.
+	Tune            string `json:"tune,omitempty" yaml:"tune,omitempty"`
 	PrioritizeSpeed *bool  `json:"prioritize_speed,omitempty" yaml:"prioritize_speed,omitempty"`
 	SpatialAQ       *bool  `json:"spatial_aq,omitempty" yaml:"spatial_aq,omitempty"`
 	Realtime        *bool  `json:"realtime,omitempty" yaml:"realtime,omitempty"`
@@ -120,6 +123,11 @@ var libX265Presets = map[string]bool{
 	"veryslow": true, "placebo": true,
 }
 
+var libX265Tunes = map[string]bool{
+	"psnr": true, "ssim": true, "grain": true, "zerolatency": true,
+	"fastdecode": true, "animation": true,
+}
+
 // NormalizeVideoCodec lowercases and trims a codec identifier.
 func NormalizeVideoCodec(codec string) string {
 	return strings.ToLower(strings.TrimSpace(codec))
@@ -133,6 +141,16 @@ func IsValidLibX265Preset(preset string) bool {
 // ValidLibX265Presets returns the allowed libx265 presets in a stable order.
 func ValidLibX265Presets() []string {
 	return []string{"ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow", "placebo"}
+}
+
+// IsValidLibX265Tune reports whether tune belongs to the deliberately bounded
+// x265 tune allowlist. Arbitrary x265-params remain forbidden.
+func IsValidLibX265Tune(tune string) bool {
+	return libX265Tunes[strings.ToLower(strings.TrimSpace(tune))]
+}
+
+func ValidLibX265Tunes() []string {
+	return []string{"psnr", "ssim", "grain", "zerolatency", "fastdecode", "animation"}
 }
 
 func DigestPlan(p *Plan) (string, error) {
