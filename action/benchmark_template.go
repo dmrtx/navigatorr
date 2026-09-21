@@ -18,14 +18,14 @@ import (
 
 func (e *Engine) registerBenchmarkTemplate() {
 	e.RegisterTemplate(ActionTemplate{
-		AutoReconcile:  true,
+		AutoReconcile:   true,
 		ImmutableInputs: true,
 		Name:            "benchmark_transcode",
-		Version:        1,
-		Description:    "Coordinates safe candidate-only benchmark evaluation of encoder parameters over deterministic source samples, returning quality metrics, size estimates, and an explainable decision without modifying media or creating permanent candidates.",
-		RequiredInputs: []string{"path"},
-		OptionalInputs: []string{"profile", "profile_config", "metric", "replace_original", "surface_worker_busy"},
-		Destructive:    false,
+		Version:         1,
+		Description:     "Coordinates safe candidate-only benchmark evaluation of encoder parameters over deterministic source samples, returning quality metrics, size estimates, and an explainable decision without modifying media or creating permanent candidates.",
+		RequiredInputs:  []string{"path"},
+		OptionalInputs:  []string{"profile", "profile_config", "metric", "replace_original", "surface_worker_busy"},
+		Destructive:     false,
 		Steps: []StepDefinition{
 			{Name: "preflight", Description: "Inspect source, hash original, resolve profile and optimization policy", Run: e.stepTranscodePreflight},
 			{Name: "submit_benchmark", Description: "Submit deterministic sample benchmark request to remote worker", Run: e.stepBenchmarkSubmit},
