@@ -115,9 +115,11 @@ func (e *Engine) promotionOriginalStillActive(ctx context.Context, svc *arrservi
 	return fmt.Errorf("original episodeFile disappeared before import")
 }
 
-// An episode's active file ID, Sonarr's media metadata, and the file's actual
-// content must agree. A path or file-size comparison alone is insufficient.
-func (e *Engine) promotionAdopted(ctx context.Context, svc *arrservice.Service, p *promotionState) (*promotionFile, bool, error) {
+// promotionAdoptedFile verifies Sonarr's logical adoption without opening the
+// reported path. Keeping discovery separate from physical inspection lets the
+// finalization step use the durable post-rename path instead of accidentally
+// reopening a stale temporary path returned during Sonarr reconciliation.
+func (e *Engine) promotionAdoptedFile(ctx context.Context, svc *arrservice.Service, p *promotionState) (*promotionFile, bool, error) {
 	snap, err := e.promotionSnapshot(ctx, svc, p)
 	if err != nil {
 		return nil, false, err
@@ -155,13 +157,23 @@ func (e *Engine) promotionAdopted(ctx context.Context, svc *arrservice.Service, 
 		if !promotionHEVC(f.MediaInfo.VideoCodec) {
 			return nil, false, fmt.Errorf("Sonarr has not confirmed HEVC streams for the imported file")
 		}
-		if err := e.promotionInspectAdopted(ctx, f.Path, p.CandidateSHA); err != nil {
-			return nil, false, err
-		}
-		p.NewFileID, p.NewPath = f.ID, f.Path
 		return &f, true, nil
 	}
 	return nil, false, fmt.Errorf("Sonarr's active episodeFile is absent from the library listing")
+}
+
+// An episode's active file ID, Sonarr's media metadata, and the file's actual
+// content must agree. A path or file-size comparison alone is insufficient.
+func (e *Engine) promotionAdopted(ctx context.Context, svc *arrservice.Service, p *promotionState) (*promotionFile, bool, error) {
+	f, ok, err := e.promotionAdoptedFile(ctx, svc, p)
+	if err != nil || !ok {
+		return f, ok, err
+	}
+	if err := e.promotionInspectAdopted(ctx, f.Path, p.CandidateSHA); err != nil {
+		return nil, false, err
+	}
+	p.NewFileID, p.NewPath = f.ID, f.Path
+	return f, true, nil
 }
 
 type promotionCommandResponse struct {
