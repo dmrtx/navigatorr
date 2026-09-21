@@ -19,10 +19,10 @@ import (
 
 func (e *Engine) registerTranscodeBatchTemplate() {
 	e.RegisterTemplate(ActionTemplate{
-		AutoReconcile:  true,
+		AutoReconcile:   true,
 		ImmutableInputs: true,
 		Name:            "transcode_batch",
-		Version:       1,
+		Version:         1,
 		Description: "Coordinates persistent batch transcoding for media libraries (Sonarr), resolving episodes, " +
 			"applying deterministic auto-profile selection, respecting concurrency limits, and tracking per-item status in SQLite.",
 		RequiredInputs: []string{"service", "series_id"},
