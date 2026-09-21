@@ -616,8 +616,7 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 				case StatusFailed:
 					var out map[string]any
 					_ = json.Unmarshal([]byte(existingChild.OutputsJSON), &out)
-					isBusy := getString(out, "failure_classification") == string(resilience.WorkerBusy) ||
-						strings.Contains(strings.ToLower(existingChild.ErrorJSON), "worker busy")
+					isBusy := terminalFailureIsWorkerBusy(existingChild.ErrorJSON, out)
 					if isBusy {
 						if it.Status != "waiting_for_slot" {
 							it.Status = "waiting_for_slot"
@@ -1006,7 +1005,7 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 	if childRes != nil {
 		if childRes.Status == StatusWaitingExternal && childRes.WaitingCondition == "worker_busy" {
 			isWorkerBusy = true
-		} else if childRes.Status == StatusFailed && (getString(childRes.Outputs, "failure_classification") == string(resilience.WorkerBusy) || strings.Contains(strings.ToLower(childRes.Error), "worker busy")) {
+		} else if childRes.Status == StatusFailed && terminalFailureIsWorkerBusy(childRes.Error, childRes.Outputs) {
 			isWorkerBusy = true
 		}
 	}
@@ -1100,6 +1099,21 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 		_ = e.deps.Store.UpdateTranscodeBatchItem(*item)
 		return false, nil
 	}
+}
+
+// terminalFailureIsWorkerBusy classifies the terminal failure itself, not stale
+// telemetry accumulated by an earlier step. Action outputs are merged across
+// the workflow, so a child that once surfaced worker_busy may still carry that
+// classification after a later benchmark guardrail (or another terminal
+// failure) becomes authoritative. A non-empty terminal error therefore wins;
+// the historical output classification is only a compatibility fallback for
+// old records that have no terminal error text.
+func terminalFailureIsWorkerBusy(terminalError string, outputs map[string]any) bool {
+	normalizedError := strings.ToLower(strings.TrimSpace(terminalError))
+	if normalizedError != "" {
+		return strings.Contains(normalizedError, "worker busy")
+	}
+	return getString(outputs, "failure_classification") == string(resilience.WorkerBusy)
 }
 
 // batchWaitingDecisionResult surfaces the first waiting_decision item with its

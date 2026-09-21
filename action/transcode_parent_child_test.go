@@ -559,6 +559,62 @@ func TestBatchProjectsCancelledChildAsFailed(t *testing.T) {
 	}
 }
 
+func TestBatchTerminalGuardrailFailureOverridesStaleWorkerBusyTelemetry(t *testing.T) {
+	st := setupTestStore(t)
+	parentID := "batch-stale-busy"
+	childID := "child-guardrail-failed"
+	seedBatchParent(t, st, parentID, StatusWaitingExternal, map[string]any{})
+	if err := st.CreateActionInstance(store.ActionInstance{
+		ID:             childID,
+		ActionName:     "transcode_media",
+		Status:         StatusFailed,
+		CurrentStep:    2,
+		IdempotencyKey: "batch-" + parentID + "-epfile-101",
+		InputsJSON:     `{"path":"/Volumes/media/ep.mkv","parent_action_id":"batch-stale-busy"}`,
+		StateJSON:      `{"failure_classification":"worker_busy","worker_busy":true}`,
+		OutputsJSON:    `{"failure_classification":"worker_busy","worker_busy":true}`,
+		ErrorJSON:      "benchmark winner predicts only 11.9% savings, below required minimum 15.0%",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateTranscodeBatchItem(store.TranscodeBatchItem{
+		BatchID: parentID, ItemKey: "epfile-101", FilePath: "/Volumes/media/ep.mkv",
+		Status: "waiting_for_slot", ChildActionID: childID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	e := NewEngine(EngineDeps{Store: st})
+	ec := &ExecutionContext{
+		InstanceID: parentID,
+		ActionName: "transcode_batch",
+		Inputs:     map[string]any{"service": "sonarr", "series_id": 10},
+		State:      map[string]any{},
+		Outputs:    map[string]any{},
+	}
+	res, err := e.stepTranscodeBatchSchedule(context.Background(), ec)
+	if err != nil {
+		t.Fatalf("schedule: %v", err)
+	}
+	items, _ := st.ListTranscodeBatchItems(parentID)
+	if len(items) != 1 || items[0].Status != "failed" {
+		t.Fatalf("terminal guardrail failure must override stale worker_busy telemetry, got %+v", items)
+	}
+	if items[0].Attempts != 1 {
+		t.Fatalf("terminal failure must consume exactly one attempt, got %d", items[0].Attempts)
+	}
+	if items[0].Error == "" {
+		t.Fatal("terminal child error must be projected onto the batch item")
+	}
+	if res.Status != StepCompleted {
+		t.Fatalf("batch with only terminal items must complete, got %s/%s", res.Status, res.WaitingCondition)
+	}
+	counts := res.Outputs["counts"].(map[string]int)
+	if counts["failed"] != 1 || counts["waiting_for_slot"] != 0 {
+		t.Fatalf("unexpected terminal counts: %+v", counts)
+	}
+}
+
 // A lost parent guard blocks a new submit while the original child context
 // remains alive, and preserves the persisted identity checkpoint.
 func TestParentLeaseLossBlocksSubmitKeepsOriginalContext(t *testing.T) {
