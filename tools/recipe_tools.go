@@ -201,4 +201,3 @@ func registerRecipeTools(s *server.MCPServer, cfg *config.Config) {
 		return toolJSON(map[string]any{"status": st, "rolled_back": true}), nil
 	})
 }
-
