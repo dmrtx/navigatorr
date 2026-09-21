@@ -258,9 +258,10 @@ func (m *Manager) GetManagedProfile(name string) (ManagedProfileRecord, bool, er
 	return rec, ok, nil
 }
 
-// SaveManagedProfile creates or replaces a managed profile. expectedDigest is
-// optional optimistic concurrency: when supplied it must match the current
-// content digest (and therefore cannot create a missing profile).
+// SaveManagedProfile creates a managed profile or replaces an existing one.
+// New names omit expectedDigest. Replacing an existing profile requires
+// expectedDigest to match the active digest so blind overwrites fail closed.
+// Generation remains monotonic per profile name across delete/recreate cycles.
 func (m *Manager) SaveManagedProfile(name string, profile Profile, description, sourceActionID, expectedDigest string) (ManagedProfileRecord, error) {
 	name = strings.TrimSpace(name)
 	norm, digest, err := NormalizeAndDigestProfile(name, profile)
@@ -275,27 +276,39 @@ func (m *Manager) SaveManagedProfile(name string, profile Profile, description, 
 	}
 	current, exists := reg.Profiles[name]
 	expectedDigest = strings.TrimSpace(expectedDigest)
-	if expectedDigest != "" {
-		if !exists {
-			return ManagedProfileRecord{}, fmt.Errorf("managed profile %q does not exist; expected_digest cannot create it", name)
+	if exists {
+		if expectedDigest == "" {
+			return ManagedProfileRecord{}, fmt.Errorf("managed profile %q already exists; expected_digest is required to update it", name)
 		}
 		if current.Digest != expectedDigest {
 			return ManagedProfileRecord{}, fmt.Errorf("managed profile %q changed: expected digest %s, current %s", name, expectedDigest, current.Digest)
 		}
+	} else if expectedDigest != "" {
+		return ManagedProfileRecord{}, fmt.Errorf("managed profile %q does not exist; expected_digest cannot create it", name)
 	}
+
+	nextGeneration := int64(1)
+	for _, entry := range reg.History[name] {
+		if entry.Generation >= nextGeneration {
+			nextGeneration = entry.Generation + 1
+		}
+	}
+	if exists && current.Generation >= nextGeneration {
+		nextGeneration = current.Generation + 1
+	}
+
 	now := time.Now().UTC()
 	rec := ManagedProfileRecord{
 		Name:           name,
 		Profile:        norm,
 		Digest:         digest,
-		Generation:     1,
+		Generation:     nextGeneration,
 		Description:    strings.TrimSpace(description),
 		SourceActionID: strings.TrimSpace(sourceActionID),
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
 	if exists {
-		rec.Generation = current.Generation + 1
 		rec.CreatedAt = current.CreatedAt
 		if rec.Description == "" {
 			rec.Description = current.Description
@@ -324,8 +337,9 @@ func (m *Manager) SaveManagedProfile(name string, profile Profile, description, 
 }
 
 // DeleteManagedProfile removes the active managed override while preserving an
-// audit entry. Running actions are unaffected because they already hold an
-// immutable resolved plan.
+// audit entry. expectedDigest is mandatory so deletes cannot race a concurrent
+// update. Running actions are unaffected because they already hold an immutable
+// resolved plan.
 func (m *Manager) DeleteManagedProfile(name, expectedDigest string) (ManagedProfileHistoryEntry, error) {
 	name = strings.TrimSpace(name)
 	m.mu.Lock()
@@ -339,7 +353,10 @@ func (m *Manager) DeleteManagedProfile(name, expectedDigest string) (ManagedProf
 		return ManagedProfileHistoryEntry{}, fmt.Errorf("managed profile %q not found", name)
 	}
 	expectedDigest = strings.TrimSpace(expectedDigest)
-	if expectedDigest != "" && rec.Digest != expectedDigest {
+	if expectedDigest == "" {
+		return ManagedProfileHistoryEntry{}, fmt.Errorf("expected_digest is required to delete managed profile %q", name)
+	}
+	if rec.Digest != expectedDigest {
 		return ManagedProfileHistoryEntry{}, fmt.Errorf("managed profile %q changed: expected digest %s, current %s", name, expectedDigest, rec.Digest)
 	}
 	entry := ManagedProfileHistoryEntry{
