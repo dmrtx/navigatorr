@@ -319,7 +319,8 @@ func (t *TranscodeConfig) activeSnapshot() (*recipe.Snapshot, error) {
 func (t *TranscodeConfig) ResolvePlan(profileName string) (*transcode.Plan, error) {
 	return t.ResolvePlanForSource(profileName, nil)
 }
-func (t *TranscodeConfig) ResolvePlanForSource(profileName string, subtitles []recipe.SourceSubtitle) (*transcode.Plan, error) {
+
+func (t *TranscodeConfig) resolvedProfileContext(profileName string) (string, *recipe.Snapshot, map[string]recipe.Profile, map[string]recipe.ManagedProfileRecord, recipe.Profile, error) {
 	name := strings.TrimSpace(profileName)
 	if name == "" {
 		name = strings.TrimSpace(t.DefaultProfile)
@@ -329,15 +330,38 @@ func (t *TranscodeConfig) ResolvePlanForSource(profileName string, subtitles []r
 	}
 	snap, err := t.activeSnapshot()
 	if err != nil {
-		return nil, err
+		return "", nil, nil, nil, recipe.Profile{}, err
 	}
 	overrides, managed, err := t.resolvedRecipeOverrides()
 	if err != nil {
-		return nil, fmt.Errorf("reading managed transcode profiles: %w", err)
+		return "", nil, nil, nil, recipe.Profile{}, fmt.Errorf("reading managed transcode profiles: %w", err)
+	}
+	p, ok := snap.Bundle.Profiles[name]
+	if op, exists := overrides[name]; exists {
+		p = op
+		ok = true
+	}
+	if !ok {
+		return "", nil, nil, nil, recipe.Profile{}, fmt.Errorf("unknown transcode profile %q", name)
+	}
+	if err := recipe.ValidateProfile(name, p); err != nil {
+		return "", nil, nil, nil, recipe.Profile{}, err
+	}
+	return name, snap, overrides, managed, p, nil
+}
+
+// ResolvePlanAndProfileForSource returns the exact validated profile and the
+// immutable plan derived from the same recipe snapshot/managed-registry read.
+// This prevents a managed profile update between plan resolution and
+// optimization-policy lookup from mixing two generations inside one action.
+func (t *TranscodeConfig) ResolvePlanAndProfileForSource(profileName string, subtitles []recipe.SourceSubtitle) (*transcode.Plan, recipe.Profile, error) {
+	name, snap, overrides, managed, p, err := t.resolvedProfileContext(profileName)
+	if err != nil {
+		return nil, recipe.Profile{}, err
 	}
 	plan, err := recipe.Resolve(snap, name, overrides, subtitles)
 	if err != nil {
-		return nil, err
+		return nil, recipe.Profile{}, err
 	}
 	if rec, ok := managed[name]; ok {
 		plan.RecipeVersion = fmt.Sprintf("managed:%s:%d", name, rec.Generation)
@@ -345,11 +369,16 @@ func (t *TranscodeConfig) ResolvePlanForSource(profileName string, subtitles []r
 		plan.PlanDigest = ""
 		digest, err := transcode.DigestPlan(plan)
 		if err != nil {
-			return nil, err
+			return nil, recipe.Profile{}, err
 		}
 		plan.PlanDigest = digest
 	}
-	return plan, nil
+	return plan, p, nil
+}
+
+func (t *TranscodeConfig) ResolvePlanForSource(profileName string, subtitles []recipe.SourceSubtitle) (*transcode.Plan, error) {
+	plan, _, err := t.ResolvePlanAndProfileForSource(profileName, subtitles)
+	return plan, err
 }
 
 // ResolveEphemeralPlanForSource validates a complete one-action profile,
@@ -384,33 +413,8 @@ func (t *TranscodeConfig) ResolveEphemeralPlanForSource(profile recipe.Profile, 
 // ResolveProfile resolves and validates a recipe Profile for the given profileName.
 // Precedence is active bundle < static config override < centrally managed profile.
 func (t *TranscodeConfig) ResolveProfile(profileName string) (recipe.Profile, error) {
-	name := strings.TrimSpace(profileName)
-	if name == "" {
-		name = strings.TrimSpace(t.DefaultProfile)
-	}
-	if name == "" {
-		name = "hevc-vt"
-	}
-	snap, err := t.activeSnapshot()
-	if err != nil {
-		return recipe.Profile{}, err
-	}
-	p, ok := snap.Bundle.Profiles[name]
-	overrides, _, err := t.resolvedRecipeOverrides()
-	if err != nil {
-		return recipe.Profile{}, fmt.Errorf("reading managed transcode profiles: %w", err)
-	}
-	if op, exists := overrides[name]; exists {
-		p = op
-		ok = true
-	}
-	if !ok {
-		return recipe.Profile{}, fmt.Errorf("unknown transcode profile %q", name)
-	}
-	if err := recipe.ValidateProfile(name, p); err != nil {
-		return recipe.Profile{}, err
-	}
-	return p, nil
+	_, _, _, _, p, err := t.resolvedProfileContext(profileName)
+	return p, err
 }
 
 func (t *TranscodeConfig) validateRecipeSource() error {
