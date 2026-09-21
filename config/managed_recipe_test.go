@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/jakenesler/navigatorr/transcode/recipe"
@@ -89,5 +90,18 @@ func TestResolveEphemeralPlanDoesNotPersistAndHasOwnDigest(t *testing.T) {
 	}
 	if len(managed) != 0 {
 		t.Fatalf("ephemeral resolution persisted profile unexpectedly: %+v", managed)
+	}
+}
+
+func TestStaticProfileRejectsReservedAutoName(t *testing.T) {
+	for _, name := range []string{"auto", "AUTO"} {
+		tc := TranscodeConfig{
+			Profiles: map[string]TranscodeProfileConfig{
+				name: recipeToProfile(controlPlaneTestProfile(24)),
+			},
+		}
+		if err := tc.Validate(); err == nil || !strings.Contains(err.Error(), "reserved for automatic profile selection") {
+			t.Fatalf("static profile %q should be rejected as reserved, got %v", name, err)
+		}
 	}
 }
