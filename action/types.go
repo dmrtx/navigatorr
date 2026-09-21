@@ -77,8 +77,9 @@ type ActionTemplate struct {
 	Version        int
 	Description    string
 	RequiredInputs []string
-	OptionalInputs []string
-	Destructive    bool
+	OptionalInputs  []string
+	Destructive     bool
+	ImmutableInputs bool
 	// AutoReconcile opts this workflow into autonomous continuation of external waits.
 	// Decision waits are always excluded.
 	AutoReconcile bool
