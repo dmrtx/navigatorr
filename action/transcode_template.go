@@ -22,7 +22,7 @@ func (e *Engine) registerTranscodeTemplate() {
 		ImmutableInputs: true,
 		Name:            "transcode_media", Version: 2,
 		Description:    "Coordinates safe candidate-only media transcoding using an immutable recipe-resolved plan, bounded transient retries, worker revalidation, post-transcode stream validation, and original SHA-256 verification.",
-		RequiredInputs: []string{"path"}, OptionalInputs: []string{"profile", "profile_config", "replace_original", "expected_video_codec", "max_size_increase_percent", "media_type", "is_anime", "min_savings_percent", "surface_worker_busy", "metric", "parent_action_id"}, Destructive: false,
+		RequiredInputs: []string{"path"}, OptionalInputs: []string{"profile", "profile_config", "preserve_source_bit_depth", "replace_original", "expected_video_codec", "max_size_increase_percent", "media_type", "is_anime", "min_savings_percent", "surface_worker_busy", "metric", "parent_action_id"}, Destructive: false,
 		Steps: []StepDefinition{
 			{Name: "preflight", Description: "Inspect source, hash original, resolve profile/recipe and per-stream compatibility plan", Run: e.stepTranscodePreflight},
 			{Name: "submit_benchmark", Description: "Submit benchmark request if profile optimization is enabled", Run: e.stepBenchmarkSubmit},
@@ -146,22 +146,11 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	origMap["subtitle_languages"] = subLangs
 
 	profile := strings.TrimSpace(getString(ec.Inputs, "profile"))
-	rawProfileConfig, hasProfileConfig := ec.Inputs["profile_config"]
-	hasProfileConfig = hasProfileConfig && rawProfileConfig != nil
-	var ephemeralProfile recipe.Profile
-	var ephemeralDigest string
+	ephemeralProfile, ephemeralDigest, hasProfileConfig, profileConfigErr := decodeEphemeralProfileInput(ec.Inputs)
+	if profileConfigErr != nil {
+		return StepResult{Status: StepFailed, Error: profileConfigErr.Error()}, nil
+	}
 	if hasProfileConfig {
-		if profile != "" {
-			return StepResult{Status: StepFailed, Error: "profile and profile_config are mutually exclusive; profile_config is a complete ephemeral profile"}, nil
-		}
-		b, err := json.Marshal(rawProfileConfig)
-		if err != nil {
-			return StepResult{Status: StepFailed, Error: fmt.Sprintf("encoding profile_config: %v", err)}, nil
-		}
-		ephemeralProfile, ephemeralDigest, err = recipe.DecodeProfileStrict("ephemeral", b)
-		if err != nil {
-			return StepResult{Status: StepFailed, Error: fmt.Sprintf("invalid profile_config: %v", err)}, nil
-		}
 		profile = "ephemeral"
 	} else {
 		if profile == "" && e.deps.Config != nil && strings.TrimSpace(e.deps.Config.Transcode.DefaultProfile) != "" {
@@ -246,6 +235,15 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 			return StepResult{Status: StepFailed, Error: fmt.Sprintf("resolving transcode profile %q: %v", profile, err)}, nil
 		}
 	}
+	preserveBitDepth, err := resolvePreserveSourceBitDepth(ec.Inputs)
+	if err != nil {
+		return StepResult{Status: StepFailed, Error: err.Error()}, nil
+	}
+	if len(rep.Video) > 0 {
+		if err := preserveSourceBitDepth(plan, rep.Video[0].BitDepth, preserveBitDepth); err != nil {
+			return StepResult{Status: StepFailed, Error: fmt.Sprintf("resolving transcode profile %q: %v", profile, err)}, nil
+		}
+	}
 	ext, err := transcode.ContainerExtension(plan.Container)
 	if err != nil {
 		return StepResult{Status: StepFailed, Error: err.Error()}, nil
@@ -295,6 +293,7 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	ec.State["recipe_version"] = plan.RecipeVersion
 	ec.State["recipe_digest"] = plan.RecipeDigest
 	ec.State["plan_digest"] = plan.PlanDigest
+	ec.State["preserve_source_bit_depth"] = preserveBitDepth
 	ec.State["applied_fallbacks"] = plan.AppliedFallbacks
 	if hasProfileConfig {
 		ec.State["ephemeral_profile"] = recipeProfile
@@ -304,15 +303,16 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	ec.State["attempt"] = 1
 	ec.State["retry_count"] = 0
 	outputs := map[string]any{
-		"original":          origMap,
-		"original_sha256":   origSHA,
-		"resolved_path":     cleanPath,
-		"profile":           profile,
-		"plan":              plan,
-		"recipe_version":    plan.RecipeVersion,
-		"recipe_digest":     plan.RecipeDigest,
-		"plan_digest":       plan.PlanDigest,
-		"applied_fallbacks": plan.AppliedFallbacks,
+		"original":                  origMap,
+		"original_sha256":           origSHA,
+		"resolved_path":             cleanPath,
+		"profile":                   profile,
+		"plan":                      plan,
+		"recipe_version":            plan.RecipeVersion,
+		"recipe_digest":             plan.RecipeDigest,
+		"plan_digest":               plan.PlanDigest,
+		"preserve_source_bit_depth": preserveBitDepth,
+		"applied_fallbacks":         plan.AppliedFallbacks,
 	}
 	if hasProfileConfig {
 		outputs["ephemeral_profile"] = recipeProfile
@@ -328,6 +328,68 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		outputs["expected_savings_percent"] = autoResult.ExpectedSavingsPercent
 	}
 	return StepResult{Status: StepCompleted, Outputs: outputs}, nil
+}
+
+func resolvePreserveSourceBitDepth(inputs map[string]any) (bool, error) {
+	raw, present := inputs["preserve_source_bit_depth"]
+	if !present {
+		return true, nil
+	}
+	preserve, ok := raw.(bool)
+	if !ok {
+		return false, fmt.Errorf("input 'preserve_source_bit_depth' must be a boolean")
+	}
+	return preserve, nil
+}
+
+func preserveSourceBitDepth(plan *transcode.Plan, sourceBitDepth int, preserve bool) error {
+	if plan == nil {
+		return fmt.Errorf("resolved plan is missing")
+	}
+	if !preserve {
+		return nil
+	}
+	if sourceBitDepth != 8 && sourceBitDepth != 10 {
+		return nil
+	}
+	if plan.ExpectedBitDepth == sourceBitDepth {
+		return nil
+	}
+	if sourceBitDepth == 10 {
+		plan.VideoProfile = "main10"
+		plan.PixelFormat = "p010le"
+		plan.ExpectedBitDepth = 10
+	} else {
+		plan.VideoProfile = "main"
+		plan.PixelFormat = "yuv420p"
+		plan.ExpectedBitDepth = 8
+	}
+	plan.PlanDigest = ""
+	digest, err := transcode.DigestPlan(plan)
+	if err != nil {
+		return err
+	}
+	plan.PlanDigest = digest
+	return nil
+}
+
+func decodeEphemeralProfileInput(inputs map[string]any) (recipe.Profile, string, bool, error) {
+	raw, present := inputs["profile_config"]
+	if !present || raw == nil {
+		return recipe.Profile{}, "", false, nil
+	}
+	if strings.TrimSpace(getString(inputs, "profile")) != "" {
+		return recipe.Profile{}, "", false, fmt.Errorf("profile and profile_config are mutually exclusive; profile_config is a complete ephemeral profile")
+	}
+	b, err := json.Marshal(raw)
+	if err != nil {
+		return recipe.Profile{}, "", false, fmt.Errorf("encoding profile_config: %v", err)
+	}
+	profile, digest, err := recipe.DecodeProfileStrict("ephemeral", b)
+	if err != nil {
+		return recipe.Profile{}, "", false, fmt.Errorf("invalid profile_config: %v", err)
+	}
+	return profile, digest, true, nil
 }
 
 func (e *Engine) validateTranscodeInputs(ec *ExecutionContext) error {

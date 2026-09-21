@@ -99,3 +99,60 @@ func TestBuiltinWorkflowImmutableInputPolicy(t *testing.T) {
 		}
 	}
 }
+
+func TestImmutableActionIdempotencyRejectsDifferentInputs(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "immutable-idempotency.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	engine := NewEngine(EngineDeps{Store: st})
+	engine.RegisterTemplate(ActionTemplate{
+		Name:            "immutable_test",
+		ImmutableInputs: true,
+		Steps: []StepDefinition{{
+			Name: "wait",
+			Run: func(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+				return StepResult{Status: StepWaitingExternal, WaitingCondition: "test_wait"}, nil
+			},
+		}},
+	})
+
+	originalInputs := map[string]any{
+		"path": "/media/source.mkv",
+		"profile_config": map[string]any{
+			"video": map[string]any{"codec": "libx265", "quality": 24},
+		},
+	}
+	first, err := engine.Run(context.Background(), "immutable_test", originalInputs, "same-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	same, err := engine.Run(context.Background(), "immutable_test", originalInputs, "same-key")
+	if err != nil {
+		t.Fatalf("identical immutable inputs should return the idempotent action: %v", err)
+	}
+	if same.ID != first.ID {
+		t.Fatalf("idempotent action changed: first=%s same=%s", first.ID, same.ID)
+	}
+
+	changedInputs := map[string]any{
+		"path": "/media/source.mkv",
+		"profile_config": map[string]any{
+			"video": map[string]any{"codec": "libx265", "quality": 22},
+		},
+	}
+	if _, err := engine.Run(context.Background(), "immutable_test", changedInputs, "same-key"); err == nil || !strings.Contains(err.Error(), "different immutable inputs") {
+		t.Fatalf("changed immutable inputs must fail instead of returning the old action, got %v", err)
+	}
+
+	stored, err := st.GetActionInstance(first.ID)
+	if err != nil || stored == nil {
+		t.Fatalf("reading original action: action=%v err=%v", stored, err)
+	}
+	if !strings.Contains(stored.InputsJSON, `"quality":24`) {
+		t.Fatalf("idempotency conflict mutated original inputs: %s", stored.InputsJSON)
+	}
+}

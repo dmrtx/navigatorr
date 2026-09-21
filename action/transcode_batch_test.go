@@ -1019,6 +1019,77 @@ func TestTranscodeBatch_MaxItemsLimitsPreparedAndScheduledItems(t *testing.T) {
 	}
 }
 
+func TestTranscodeBatchPropagatesEphemeralProfileToImmutableChildren(t *testing.T) {
+	mockExecutor := &mockTranscodeExecutor{
+		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
+			return transcode.Job{}, fmt.Errorf("worker busy: maximum parallel jobs reached")
+		},
+	}
+
+	engine, st, _, srv, _ := setupBatchTestEnv(t, mockExecutor, 1)
+	defer srv.Close()
+	defer st.Close()
+
+	res, err := engine.Run(context.Background(), "transcode_batch", map[string]any{
+		"service":                   "sonarr",
+		"series_id":                 10,
+		"season":                    1,
+		"profile_config":            testEphemeralBatchProfileConfig(),
+		"preserve_source_bit_depth": false,
+	})
+	if err != nil {
+		t.Fatalf("run with ephemeral profile_config failed: %v", err)
+	}
+	if res.Status != StatusWaitingExternal || res.WaitingCondition != "worker_busy" {
+		t.Fatalf("expected worker_busy after creating the child, got %s/%s (%s)", res.Status, res.WaitingCondition, res.Error)
+	}
+	if getString(res.Outputs, "ephemeral_recipe_digest") == "" {
+		t.Fatalf("batch did not expose the normalized ephemeral recipe digest: %+v", res.Outputs)
+	}
+
+	items, err := st.ListTranscodeBatchItems(res.ID)
+	if err != nil || len(items) != 1 || items[0].ChildActionID == "" {
+		t.Fatalf("expected one admitted child: items=%+v err=%v", items, err)
+	}
+	child, err := st.GetActionInstance(items[0].ChildActionID)
+	if err != nil || child == nil {
+		t.Fatalf("reading ephemeral child: child=%v err=%v", child, err)
+	}
+	var inputs map[string]any
+	if err := json.Unmarshal([]byte(child.InputsJSON), &inputs); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := inputs["profile_config"].(map[string]any); !ok {
+		t.Fatalf("child did not receive profile_config: %s", child.InputsJSON)
+	}
+	if _, ok := inputs["profile"]; ok {
+		t.Fatalf("child received mutually exclusive profile and profile_config: %s", child.InputsJSON)
+	}
+	if preserve, ok := inputs["preserve_source_bit_depth"].(bool); !ok || preserve {
+		t.Fatalf("child did not receive explicit bit-depth opt-out: %s", child.InputsJSON)
+	}
+}
+
+func TestTranscodeBatchRejectsIgnoredExperimentalKnobs(t *testing.T) {
+	engine := NewEngine(EngineDeps{})
+	ec := &ExecutionContext{
+		ActionName: "transcode_batch",
+		Inputs: map[string]any{
+			"service":        "sonarr",
+			"series_id":      10,
+			"tune":           "animation",
+			"crf_candidates": []any{20, 22, 24},
+		},
+	}
+	res, err := engine.stepTranscodeBatchResolve(context.Background(), ec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != StepFailed || !strings.Contains(res.Error, "unsupported input") || !strings.Contains(res.Error, "profile_config") {
+		t.Fatalf("batch must reject ignored experimental knobs explicitly, got %+v", res)
+	}
+}
+
 // 9. Job ID and Action ID traceability
 func TestTranscodeBatch_JobIDAndActionIDTraceability(t *testing.T) {
 	const syntheticJobID = "worker-job-custom-uuid-12345"

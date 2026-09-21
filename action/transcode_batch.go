@@ -29,6 +29,8 @@ func (e *Engine) registerTranscodeBatchTemplate() {
 		OptionalInputs: []string{
 			"season",
 			"profile",
+			"profile_config",
+			"preserve_source_bit_depth",
 			"metric",
 			"replace_original",
 			"dry_run",
@@ -57,11 +59,22 @@ func (e *Engine) registerTranscodeBatchTemplate() {
 }
 
 func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+	if err := e.validateTranscodeInputs(ec); err != nil {
+		return StepResult{Status: StepFailed, Error: err.Error()}, nil
+	}
 	if getBool(ec.Inputs, "replace_original") {
 		return StepResult{
 			Status: StepFailed,
 			Error:  "destructive replacement (replace_original: true) is not supported; transcoding is candidate-only and never modifies the original",
 		}, nil
+	}
+	ephemeralProfile, ephemeralDigest, hasProfileConfig, profileConfigErr := decodeEphemeralProfileInput(ec.Inputs)
+	if profileConfigErr != nil {
+		return StepResult{Status: StepFailed, Error: profileConfigErr.Error()}, nil
+	}
+	if hasProfileConfig {
+		ec.State["ephemeral_profile"] = ephemeralProfile
+		ec.State["ephemeral_recipe_digest"] = ephemeralDigest
 	}
 
 	service := strings.ToLower(strings.TrimSpace(getString(ec.Inputs, "service")))
@@ -113,9 +126,14 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 	if err == nil && len(existingItems) > 0 {
 		seriesTitle := getString(ec.State, "series_title")
 		isAnime := getBool(ec.State, "is_anime")
+		outputs := buildBatchOutputs(ec.InstanceID, existingItems, seriesTitle, isAnime, dryRun, getMaxOutputItems(ec.Inputs))
+		if hasProfileConfig {
+			outputs["ephemeral_profile"] = ephemeralProfile
+			outputs["ephemeral_recipe_digest"] = ephemeralDigest
+		}
 		return StepResult{
 			Status:  StepCompleted,
-			Outputs: buildBatchOutputs(ec.InstanceID, existingItems, seriesTitle, isAnime, dryRun, getMaxOutputItems(ec.Inputs)),
+			Outputs: outputs,
 		}, nil
 	}
 
@@ -221,7 +239,9 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 	}
 
 	requestedProfile := strings.TrimSpace(getString(ec.Inputs, "profile"))
-	if requestedProfile == "" {
+	if hasProfileConfig {
+		requestedProfile = "ephemeral"
+	} else if requestedProfile == "" {
 		requestedProfile = "auto"
 	}
 	mediaType := "tv"
@@ -380,6 +400,10 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 	}
 
 	outputs := buildBatchOutputs(ec.InstanceID, batchItems, seriesTitle, isAnime, dryRun, getMaxOutputItems(ec.Inputs))
+	if hasProfileConfig {
+		outputs["ephemeral_profile"] = ephemeralProfile
+		outputs["ephemeral_recipe_digest"] = ephemeralDigest
+	}
 	return StepResult{
 		Status:  StepCompleted,
 		Outputs: outputs,
@@ -873,7 +897,6 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 
 	childInputs := map[string]any{
 		"path":                      item.FilePath,
-		"profile":                   item.Profile,
 		"replace_original":          false,
 		"media_type":                mediaType,
 		"is_anime":                  isAnime,
@@ -884,8 +907,16 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 		// batch is cancelled or paused, including across restarts.
 		"parent_action_id": ec.InstanceID,
 	}
+	if ephemeralProfile, ok := ec.Inputs["profile_config"]; ok && ephemeralProfile != nil {
+		childInputs["profile_config"] = ephemeralProfile
+	} else {
+		childInputs["profile"] = item.Profile
+	}
 	if metric := strings.TrimSpace(getString(ec.Inputs, "metric")); metric != "" {
 		childInputs["metric"] = metric
+	}
+	if preserve, ok := ec.Inputs["preserve_source_bit_depth"]; ok {
+		childInputs["preserve_source_bit_depth"] = preserve
 	}
 	childIdempotencyKey := fmt.Sprintf("batch-%s-%s", ec.InstanceID, item.ItemKey)
 

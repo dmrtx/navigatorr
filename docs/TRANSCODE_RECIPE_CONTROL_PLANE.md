@@ -43,9 +43,11 @@ The digest remains an additional content-integrity check.
 
 ## Ephemeral experiments
 
-`benchmark_transcode` and `transcode_media` accept `profile_config`, a
-complete typed `recipe.Profile` object. It is mutually exclusive with
-`profile`.
+`benchmark_transcode`, `transcode_media`, and `transcode_batch` accept
+`profile_config`, a complete typed `recipe.Profile` object. It is mutually
+exclusive with `profile`. A batch passes the same immutable ephemeral profile
+to every child, so a series-level experiment does not have to be persisted as
+a managed recipe first.
 
 The server strictly decodes `profile_config` with unknown-field rejection,
 normalizes it, validates encoder-specific constraints, assigns an
@@ -59,7 +61,17 @@ Arbitrary FFmpeg/x265 argument strings remain forbidden.
 
 Legacy top-level experimental knobs are rejected instead of silently ignored.
 For example, passing `tune` or `crf_candidates` directly to
-`benchmark_transcode` fails and points the caller to `profile_config`.
+`benchmark_transcode` or `transcode_batch` fails and points the caller to
+`profile_config`.
+
+`metric: auto` selects VMAF for supported 8-bit sources and SSIM when a 10-bit
+source cannot use VMAF without an unsafe down-conversion. If the worker has no
+safe metric for the source, the benchmark fails closed. Recipe plans that omit
+an output bit-depth shape are materialized from the inspected source. Source
+bit depth is preserved by default even when an older recipe resolves a
+different profile/pixel format. A caller must set
+`preserve_source_bit_depth: false` explicitly to opt into that conversion; the
+resolved plan and digest still record the actual profile and pixel format used.
 
 A successful experiment can be persisted with `recipe_save`, copying the
 normalized profile returned by the action. The MCP schema exposes `profile`
@@ -80,6 +92,9 @@ replace inputs. Batch pause/resume/cancel control lives in durable `State`, so
 settings, size guardrails and validation expectations tied to the same immutable
 action configuration that produced the resolved Plan. Batch children receive
 `surface_worker_busy` at creation and are resumed without extra inputs.
+Reusing an active action's idempotency key is accepted only when the complete
+immutable input payload matches; a changed profile or guardrail fails instead
+of silently returning an action created with different settings.
 
 ## MCP recipe tools
 
