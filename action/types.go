@@ -73,10 +73,10 @@ type StepDefinition struct {
 
 // ActionTemplate defines a declarative workflow composed of sequential steps
 type ActionTemplate struct {
-	Name           string
-	Version        int
-	Description    string
-	RequiredInputs []string
+	Name            string
+	Version         int
+	Description     string
+	RequiredInputs  []string
 	OptionalInputs  []string
 	Destructive     bool
 	ImmutableInputs bool
