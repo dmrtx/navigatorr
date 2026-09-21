@@ -722,6 +722,18 @@ func TestTranscodeBatch_PauseAndResume(t *testing.T) {
 	if res.Status != StatusWaitingDecision {
 		t.Fatalf("expected StatusWaitingDecision when paused, got %s", res.Status)
 	}
+	beforeResume, err := st.GetActionInstance(res.ID)
+	if err != nil || beforeResume == nil {
+		t.Fatalf("reading paused batch: inst=%v err=%v", beforeResume, err)
+	}
+	originalInputsJSON := beforeResume.InputsJSON
+	var pausedState map[string]any
+	if err := json.Unmarshal([]byte(beforeResume.StateJSON), &pausedState); err != nil {
+		t.Fatal(err)
+	}
+	if pausedState["paused"] != true {
+		t.Fatalf("paused control must live in durable state, got %+v", pausedState["paused"])
+	}
 
 	// Resume the paused batch
 	resumeRes, err := engine.Resume(ctx, res.ID, "resume", nil)
@@ -737,6 +749,21 @@ func TestTranscodeBatch_PauseAndResume(t *testing.T) {
 	if mockExecutor.benchmarkSubmitCalls != 2 {
 		t.Errorf("expected 2 SSIM benchmark submits after resume, got %d", mockExecutor.benchmarkSubmitCalls)
 	}
+	afterResume, err := st.GetActionInstance(res.ID)
+	if err != nil || afterResume == nil {
+		t.Fatalf("reading resumed batch: inst=%v err=%v", afterResume, err)
+	}
+	if afterResume.InputsJSON != originalInputsJSON {
+		t.Fatalf("pause/resume mutated immutable batch inputs: before=%s after=%s", originalInputsJSON, afterResume.InputsJSON)
+	}
+	var resumedState map[string]any
+	if err := json.Unmarshal([]byte(afterResume.StateJSON), &resumedState); err != nil {
+		t.Fatal(err)
+	}
+	if resumedState["paused"] != false {
+		t.Fatalf("resume should clear durable paused state, got %+v", resumedState["paused"])
+	}
+
 	items, err := st.ListTranscodeBatchItems(res.ID)
 	if err != nil {
 		t.Fatal(err)
