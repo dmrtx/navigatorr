@@ -51,9 +51,9 @@ type ManagedProfileHistoryEntry struct {
 }
 
 type managedRegistryFile struct {
-	SchemaVersion int                                    `json:"schema_version"`
-	Revision      int64                                  `json:"revision"`
-	Profiles      map[string]ManagedProfileRecord        `json:"profiles"`
+	SchemaVersion int                                     `json:"schema_version"`
+	Revision      int64                                   `json:"revision"`
+	Profiles      map[string]ManagedProfileRecord         `json:"profiles"`
 	History       map[string][]ManagedProfileHistoryEntry `json:"history,omitempty"`
 }
 
