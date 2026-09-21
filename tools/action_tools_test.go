@@ -89,6 +89,7 @@ func TestActionToolsLifecycle(t *testing.T) {
 		t.Errorf("expected at least 2 catalog entries, got %d", len(catalog))
 	}
 	foundSMR := false
+	foundImmutableBatch := false
 	for _, entry := range catalog {
 		if entry["name"] == "safe_media_replacement" {
 			foundSMR = true
@@ -99,9 +100,18 @@ func TestActionToolsLifecycle(t *testing.T) {
 				t.Errorf("expected destructive=true, got %v", entry["destructive"])
 			}
 		}
+		if entry["name"] == "transcode_batch" {
+			foundImmutableBatch = true
+			if entry["immutable_inputs"] != true {
+				t.Errorf("expected transcode_batch immutable_inputs=true, got %v", entry["immutable_inputs"])
+			}
+		}
 	}
 	if !foundSMR {
 		t.Errorf("safe_media_replacement not found in action_catalog")
+	}
+	if !foundImmutableBatch {
+		t.Errorf("transcode_batch not found in action_catalog")
 	}
 
 	// 6. action_retry tool on failed action
@@ -253,5 +263,131 @@ func TestIdempotencyKeyMCPToolSchemaAndProtocol(t *testing.T) {
 	id3 := m3["id"].(string)
 	if id3 != id1 {
 		t.Errorf("deduplication via inputs JSON failed: expected %s, got %s", id1, id3)
+	}
+}
+
+
+func TestParseJSONObjectStrict(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		wantErr string
+	}{
+		{name: "object", raw: `{"metric":"ssim"}`},
+		{name: "empty object", raw: `{}`},
+		{name: "malformed", raw: `{bad`, wantErr: "invalid JSON object"},
+		{name: "array", raw: `["foo"]`, wantErr: "inputs must be a JSON object"},
+		{name: "string scalar", raw: `"foo"`, wantErr: "inputs must be a JSON object"},
+		{name: "number scalar", raw: `42`, wantErr: "inputs must be a JSON object"},
+		{name: "null", raw: `null`, wantErr: "inputs must be a JSON object"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseJSONObject(tc.raw)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected parse error: %v", err)
+				}
+				if got == nil {
+					t.Fatal("expected non-nil object")
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestActionRunRejectsInvalidInputsJSON(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "action_invalid_run_inputs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	engine := action.NewEngine(action.EngineDeps{Store: st, Config: &config.Config{}})
+	s := server.NewMCPServer("test", "0.0.0")
+	registerActionTools(s, engine)
+
+	for _, raw := range []string{`{bad`, `["foo"]`, `"foo"`} {
+		res := callTool(t, s, "action_run", map[string]any{
+			"action": "validate_torrent",
+			"inputs": raw,
+		})
+		txt := resultText(t, res)
+		if !strings.Contains(txt, "invalid action_run inputs") {
+			t.Fatalf("action_run should reject %q explicitly, got %s", raw, txt)
+		}
+	}
+}
+
+func TestActionResumeRejectsInvalidInputsJSONWithoutAdvancing(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "action_invalid_resume_inputs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	engine := action.NewEngine(action.EngineDeps{Store: st, Config: &config.Config{}})
+	engine.RegisterTemplate(action.ActionTemplate{
+		Name: "resume_parse_test",
+		Steps: []action.StepDefinition{{
+			Name: "wait",
+			Run: func(ctx context.Context, ec *action.ExecutionContext) (action.StepResult, error) {
+				if ec.Decision == "continue" {
+					return action.StepResult{Status: action.StepCompleted}, nil
+				}
+				return action.StepResult{
+					Status:           action.StepWaitingDecision,
+					WaitingReason:    "waiting for continue",
+					WaitingOptions:   []action.WaitingOption{{Decision: "continue", Description: "Continue"}},
+				}, nil
+			},
+		}},
+	})
+
+	s := server.NewMCPServer("test", "0.0.0")
+	registerActionTools(s, engine)
+
+	runRes := callTool(t, s, "action_run", map[string]any{"action": "resume_parse_test"})
+	runTxt := resultText(t, runRes)
+	var run map[string]any
+	if err := json.Unmarshal([]byte(runTxt), &run); err != nil {
+		t.Fatal(err)
+	}
+	id, _ := run["id"].(string)
+	if id == "" {
+		t.Fatalf("missing action id: %s", runTxt)
+	}
+
+	for _, raw := range []string{`{bad`, `["foo"]`, `"foo"`} {
+		res := callTool(t, s, "action_resume", map[string]any{
+			"id":       id,
+			"decision": "continue",
+			"inputs":   raw,
+		})
+		txt := resultText(t, res)
+		if !strings.Contains(txt, "invalid action_resume inputs") {
+			t.Fatalf("action_resume should reject %q explicitly, got %s", raw, txt)
+		}
+		inst, err := st.GetActionInstance(id)
+		if err != nil || inst == nil {
+			t.Fatalf("reading waiting action: inst=%v err=%v", inst, err)
+		}
+		if inst.Status != action.StatusWaitingDecision {
+			t.Fatalf("invalid resume inputs advanced workflow: status=%s", inst.Status)
+		}
+	}
+
+	okRes := callTool(t, s, "action_resume", map[string]any{
+		"id":       id,
+		"decision": "continue",
+		"inputs":   `{}`,
+	})
+	okTxt := resultText(t, okRes)
+	if !strings.Contains(okTxt, `"status": "completed"`) {
+		t.Fatalf("valid empty object should resume normally, got %s", okTxt)
 	}
 }
