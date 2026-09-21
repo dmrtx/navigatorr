@@ -44,7 +44,7 @@ JSON
     cat << 'JSON'
 {
   "streams": [
-    {"index": 0, "codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080},
+    {"index": 0, "codec_type": "video", "codec_name": "h264", "pix_fmt": "yuv420p", "width": 1920, "height": 1080},
     {"index": 1, "codec_type": "audio", "codec_name": "aac", "tags": {"language": "jpn"}},
     {"index": 2, "codec_type": "subtitle", "codec_name": "ass", "tags": {"language": "eng"}}
   ],
@@ -648,6 +648,33 @@ func TestTranscodeBatch_ReplaceOriginalRejected(t *testing.T) {
 // 7. Pause and Resume semantics
 func TestTranscodeBatch_PauseAndResume(t *testing.T) {
 	mockExecutor := &mockTranscodeExecutor{
+		benchmarkStatusFunc: func(ctx context.Context, jobID string) (transcode.BenchmarkStatus, error) {
+			return transcode.BenchmarkStatus{
+				ProtocolVersion: transcode.WorkerProtocolVersion,
+				ID:              jobID,
+				Status:          transcode.StatusCompleted,
+				Progress:        100,
+				Decision: &transcode.BenchmarkDecision{
+					Winner: &transcode.BenchmarkWinner{
+						CandidateID:         "cand-ssim",
+						CandidateIndex:      0,
+						Quality:             55,
+						VideoProfile:        "main",
+						PixelFormat:         "yuv420p",
+						ExpectedBitDepth:    8,
+						MetricType:          "ssim",
+						Score:               0.996,
+						TargetReached:       true,
+						MinimumMet:          true,
+						EstimatedVideoBytes: 500000000,
+						EstimatedTotalBytes: 600000000,
+						EstimatedTotalMB:    600,
+						SavingsPercent:      50,
+					},
+					DecisionReason: "test SSIM winner",
+				},
+			}, nil
+		},
 		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
 			writeCandidateOutput(req.CandidatePath)
 			return transcode.Job{ID: req.ID}, nil
@@ -690,6 +717,9 @@ func TestTranscodeBatch_PauseAndResume(t *testing.T) {
 	}
 	if mockExecutor.submitCalls != 2 {
 		t.Errorf("expected 2 submits after resume, got %d", mockExecutor.submitCalls)
+	}
+	if mockExecutor.benchmarkSubmitCalls != 2 {
+		t.Errorf("expected 2 SSIM benchmark submits after resume, got %d", mockExecutor.benchmarkSubmitCalls)
 	}
 	items, err := st.ListTranscodeBatchItems(res.ID)
 	if err != nil {
