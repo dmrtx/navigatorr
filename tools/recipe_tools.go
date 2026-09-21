@@ -11,6 +11,14 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
+type recipeSaveInput struct {
+	Name           string         `json:"name" jsonschema:"description=Managed profile name"`
+	Profile        recipe.Profile `json:"profile" jsonschema:"description=Complete typed transcode recipe profile"`
+	Description    string         `json:"description,omitempty" jsonschema:"description=Optional human readable purpose or validation note"`
+	SourceActionID string         `json:"source_action_id,omitempty" jsonschema:"description=Optional unverified action reference metadata; recipe_save does not validate provenance"`
+	ExpectedDigest string         `json:"expected_digest,omitempty" jsonschema:"description=Required when replacing an existing managed profile; omit only when creating a new name"`
+}
+
 func registerRecipeTools(s *server.MCPServer, cfg *config.Config) {
 	s.AddTool(mcp.NewTool("recipe_status", mcp.WithDescription("Show the active transcode recipe source, version, digest, last-known-good version, last check time, and sanitized update error.")), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		mgr := cfg.Transcode.RecipeManager()
@@ -87,12 +95,8 @@ func registerRecipeTools(s *server.MCPServer, cfg *config.Config) {
 	})
 
 	s.AddTool(mcp.NewTool("recipe_save",
-		mcp.WithDescription("Create or replace a centrally managed typed transcode profile. The profile is strictly decoded: unknown/unsupported fields fail instead of being ignored. New jobs see it immediately; running jobs keep their immutable plans."),
-		mcp.WithString("name", mcp.Required(), mcp.Description("Profile name")),
-		mcp.WithString("profile", mcp.Required(), mcp.Description("Complete recipe.Profile JSON object")),
-		mcp.WithString("description", mcp.Description("Optional human-readable purpose/validation note")),
-		mcp.WithString("source_action_id", mcp.Description("Optional benchmark/transcode action ID that demonstrated this profile")),
-		mcp.WithString("expected_digest", mcp.Description("Optional optimistic-concurrency digest of the current managed profile")),
+		mcp.WithDescription("Create or replace a centrally managed typed transcode profile. profile is a structured object and is strictly decoded: unknown/unsupported fields fail instead of being ignored. Creating a new name omits expected_digest; replacing an existing profile requires the current digest. source_action_id is unverified reference metadata, not validated provenance. New jobs see the saved profile immediately; running jobs keep their immutable plans."),
+		mcp.WithInputSchema[recipeSaveInput](),
 	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args := req.GetArguments()
 		name := strings.TrimSpace(argString(args, "name", ""))
@@ -128,9 +132,9 @@ func registerRecipeTools(s *server.MCPServer, cfg *config.Config) {
 	})
 
 	s.AddTool(mcp.NewTool("recipe_delete",
-		mcp.WithDescription("Delete a centrally managed profile override while preserving its audit history. Running jobs are not changed."),
+		mcp.WithDescription("Delete a centrally managed profile override while preserving its audit history. expected_digest is required so a concurrent update cannot be deleted blindly. Running jobs are not changed."),
 		mcp.WithString("name", mcp.Required(), mcp.Description("Managed profile name")),
-		mcp.WithString("expected_digest", mcp.Description("Optional optimistic-concurrency digest")),
+		mcp.WithString("expected_digest", mcp.Required(), mcp.Description("Current managed profile digest; required for optimistic concurrency")),
 	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args := req.GetArguments()
 		name := strings.TrimSpace(argString(args, "name", ""))
