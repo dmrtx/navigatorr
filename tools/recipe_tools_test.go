@@ -96,12 +96,16 @@ func TestRecipeSaveMCPProfileIsStructuredObject(t *testing.T) {
 	if !requiredSet["name"] || !requiredSet["profile"] {
 		t.Fatalf("recipe_save name/profile must be required: %+v", required)
 	}
-	if requiredSet["expected_digest"] {
-		t.Fatalf("expected_digest is conditional: it must remain optional for create and be enforced at runtime for update")
+	if requiredSet["expected_generation"] || requiredSet["expected_digest"] {
+		t.Fatalf("expected_generation/expected_digest are conditional: they must remain optional for create and be enforced at runtime for update")
+	}
+	generationSchema, _ := props["expected_generation"].(map[string]any)
+	if generationSchema["type"] != "integer" {
+		t.Fatalf("recipe_save expected_generation should be integer when supplied, got %+v", generationSchema)
 	}
 }
 
-func TestRecipeDeleteMCPRequiresExpectedDigest(t *testing.T) {
+func TestRecipeDeleteMCPRequiresGenerationAndDigest(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Transcode.Recipes.CacheDir = t.TempDir()
 	if err := cfg.Transcode.InitializeRecipes(context.Background()); err != nil {
@@ -115,12 +119,27 @@ func TestRecipeDeleteMCPRequiresExpectedDigest(t *testing.T) {
 	if tool == nil {
 		t.Fatal("recipe_delete was not registered")
 	}
-	required := map[string]bool{}
-	for _, name := range tool.Tool.InputSchema.Required {
-		required[name] = true
+	if len(tool.Tool.RawInputSchema) == 0 {
+		t.Fatalf("recipe_delete should publish a typed raw input schema, got %+v", tool.Tool.InputSchema)
 	}
-	if !required["name"] || !required["expected_digest"] {
-		t.Fatalf("recipe_delete must require name and expected_digest in MCP schema: %+v", tool.Tool.InputSchema.Required)
+	var schema map[string]any
+	if err := json.Unmarshal(tool.Tool.RawInputSchema, &schema); err != nil {
+		t.Fatalf("decoding recipe_delete schema: %v", err)
+	}
+	requiredRaw, _ := schema["required"].([]any)
+	required := map[string]bool{}
+	for _, raw := range requiredRaw {
+		if name, ok := raw.(string); ok {
+			required[name] = true
+		}
+	}
+	if !required["name"] || !required["expected_generation"] || !required["expected_digest"] {
+		t.Fatalf("recipe_delete must require name, expected_generation and expected_digest: %+v", requiredRaw)
+	}
+	props, _ := schema["properties"].(map[string]any)
+	generation, _ := props["expected_generation"].(map[string]any)
+	if generation["type"] != "integer" {
+		t.Fatalf("expected_generation should be exposed as integer, got %+v", generation)
 	}
 }
 
@@ -170,10 +189,21 @@ func TestRecipeSaveAcceptsStructuredObjectAndKeepsStrictDecoding(t *testing.T) {
 	update := structuredRecipeProfileMap(t)
 	update["video"].(map[string]any)["quality"] = float64(22)
 	updateRes := callTool(t, s, "recipe_save", map[string]any{
-		"name":    "structured-x265",
-		"profile": update,
+		"name":            "structured-x265",
+		"profile":         update,
+		"expected_digest": rec.Digest,
 	})
 	updateTxt := resultText(t, updateRes)
+	if !strings.Contains(updateTxt, "expected_generation is required") {
+		t.Fatalf("update without expected_generation must fail closed: %s", updateTxt)
+	}
+
+	updateRes = callTool(t, s, "recipe_save", map[string]any{
+		"name":                "structured-x265",
+		"profile":             update,
+		"expected_generation": rec.Generation,
+	})
+	updateTxt = resultText(t, updateRes)
 	if !strings.Contains(updateTxt, "expected_digest is required") {
 		t.Fatalf("update without expected_digest must fail closed: %s", updateTxt)
 	}
