@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	"fmt"
 	"sort"
 	"strings"
 
@@ -203,4 +202,3 @@ func registerRecipeTools(s *server.MCPServer, cfg *config.Config) {
 	})
 }
 
-var _ = fmt.Sprintf
