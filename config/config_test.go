@@ -529,6 +529,7 @@ transcode:
 	t.Run("default auto profile is case-insensitive and trimmed", func(t *testing.T) {
 		for _, value := range []string{"auto", "AUTO", "Auto", " auto "} {
 			tc := TranscodeConfig{DefaultProfile: value}
+			tc.Recipes.CacheDir = t.TempDir()
 			if err := tc.InitializeRecipes(context.Background()); err != nil {
 				t.Fatalf("default_profile %q should be accepted as automatic selector pseudo-profile: %v", value, err)
 			}
