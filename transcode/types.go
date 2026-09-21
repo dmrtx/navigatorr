@@ -45,7 +45,7 @@ type Plan struct {
 	PixelFormat  string `json:"pixel_format,omitempty" yaml:"pixel_format,omitempty"`
 	// Preset is the libx265 speed/efficiency preset. It must be empty for
 	// hevc_videotoolbox and is validated against a fixed safe enum for libx265.
-	Preset          string `json:"preset,omitempty" yaml:"preset,omitempty"`
+	Preset string `json:"preset,omitempty" yaml:"preset,omitempty"`
 	// Tune is a bounded libx265 tune enum (for example animation or grain).
 	// It must be empty for hevc_videotoolbox.
 	Tune            string `json:"tune,omitempty" yaml:"tune,omitempty"`
