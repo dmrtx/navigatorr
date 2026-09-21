@@ -16,10 +16,10 @@ import (
 func (e *Engine) registerPromoteTranscodeTemplate() {
 	e.RegisterTemplate(ActionTemplate{
 		Name: "promote_transcode_candidate", Version: 1, Destructive: true,
-		AutoReconcile:  true,
+		AutoReconcile:   true,
 		ImmutableInputs: true,
-		Description:    "Promotes a completed, validated transcode into Sonarr after explicit approval, preserving a verified recovery copy until import, old-file cleanup, rename and rescan are verified. Persists external command intents and never blindly resubmits uncertain imports.",
-		RequiredInputs: []string{"transcode_action_id", "series_id"}, OptionalInputs: []string{"service"},
+		Description:     "Promotes a completed, validated transcode into Sonarr after explicit approval, preserving a verified recovery copy until import, old-file cleanup, rename and rescan are verified. Persists external command intents and never blindly resubmits uncertain imports.",
+		RequiredInputs:  []string{"transcode_action_id", "series_id"}, OptionalInputs: []string{"service"},
 		Steps: []StepDefinition{
 			{Name: "plan_promotion", Description: "Verify original and candidate, and resolve all episodes sharing the original file", Run: e.stepPromotePlan},
 			{Name: "approve_promotion", Description: "Present the exact replacement for an explicit approve decision", Run: e.stepPromoteApprove},
