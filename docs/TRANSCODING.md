@@ -419,7 +419,8 @@ The `transcode_batch` action coordinates persistent batch transcoding across lib
 | `min_savings_percent` | float | No | `config` | Minimum projected file size savings threshold (default from `config.Transcode.MinSavingsPercent`). |
 | `max_size_increase_percent` | float | No | `0.0` | Allowed candidate size increase percentage (default `0.0`). Any candidate exceeding this triggers `waiting_decision`. |
 | `surface_worker_busy` | bool | No | `true` | When `true`, worker capacity saturation surfaces `waiting_for_slot` without failing or burning retry budgets. |
-| `max_items` / `max_output_items` | int | No | `25` | Deterministic bound on returned item summaries in outputs (default 25, capped at max 100). |
+| `max_items` | int | No | unlimited | Deterministic bound on episode files prepared, persisted, and scheduled by the batch. |
+| `max_output_items` | int | No | `25` | Bound on returned item summaries in outputs (default 25, capped at max 100). This does not affect scheduling. |
 
 > [!IMPORTANT]
 > `idempotency_key` is a **top-level** MCP argument to `action_run`, NOT nested within the `inputs` JSON object.
@@ -511,7 +512,8 @@ To prevent unbounded JSON responses when batching entire series or large seasons
 }
 ```
 
-- **Deterministic bounding**: Returns up to `items_limit` (default: 25, configurable via `max_items` or `max_output_items`, strictly capped at 100).
+- **Deterministic batch limit**: `max_items` limits the sorted episode-file set before inspection, persistence, or scheduling.
+- **Deterministic output bounding**: Returns up to `items_limit` summaries (default: 25, configurable via `max_output_items`, strictly capped at 100).
 - **Truncation metadata**: `total_items`, `returned_items`, `truncated` (`true` when more items exist), and `items_limit`.
 - **Full persistence**: All items are persistently recorded in the SQLite `transcode_batch_items` table regardless of output truncation.
 - **Traceability**: Active items record both the `child_action_id` and the worker `job_id` returned by the transcode executor.
@@ -531,4 +533,3 @@ To prevent unbounded JSON responses when batching entire series or large seasons
 - **Parallelism**: Respects `config.Transcode.MaxParallelJobs` (default: 1). When `max_parallel_jobs: 1`, media files are transcoded serially one after another.
 - **Worker busy handling**: If the remote transcode worker returns `worker_busy` (or reaches max parallel slots), the current item transitions to `waiting_for_slot`. Normal background transcodes remain in `running`.
 - **Retry budget safety**: Encountering `worker_busy` does **not** increment item `attempts` or consume the transient retry budget. The batch transitions to `waiting_external` with `waiting_condition: "worker_busy"` and resumes cleanly once worker capacity becomes available.
-

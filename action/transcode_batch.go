@@ -215,6 +215,9 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 	sort.Slice(fileIDs, func(i, j int) bool {
 		return fileIDs[i] < fileIDs[j]
 	})
+	if maxItems := getMaxBatchItems(ec.Inputs); maxItems > 0 && len(fileIDs) > maxItems {
+		fileIDs = fileIDs[:maxItems]
+	}
 
 	requestedProfile := strings.TrimSpace(getString(ec.Inputs, "profile"))
 	if requestedProfile == "" {
@@ -1108,8 +1111,6 @@ func getMaxOutputItems(inputs map[string]any) int {
 	limit := DefaultMaxBatchOutputItems
 	if m := getInt(inputs, "max_output_items"); m > 0 {
 		limit = m
-	} else if m := getInt(inputs, "max_items"); m > 0 {
-		limit = m
 	}
 	if limit > MaxBatchOutputItems {
 		limit = MaxBatchOutputItems
@@ -1118,6 +1119,16 @@ func getMaxOutputItems(inputs map[string]any) int {
 		limit = DefaultMaxBatchOutputItems
 	}
 	return limit
+}
+
+// getMaxBatchItems returns the requested bound on media files admitted to the
+// batch. Zero means unbounded. This is intentionally separate from
+// max_output_items, which only limits the number of summaries in the response.
+func getMaxBatchItems(inputs map[string]any) int {
+	if limit := getInt(inputs, "max_items"); limit > 0 {
+		return limit
+	}
+	return 0
 }
 
 // TranscodeBatchItemSummary provides a bounded, serializable summary of a batch item including diagnostics and job traceability.

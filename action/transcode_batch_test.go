@@ -876,15 +876,15 @@ func TestTranscodeBatch_BoundedSummariesAndTruncation(t *testing.T) {
 		t.Errorf("expected all 30 items persistent in SQLite, got %d", len(dbItems))
 	}
 
-	// 2. Run with caller-specified limit (max_items: 10)
+	// 2. Run with caller-specified output limit (max_output_items: 10)
 	res2, err := engine.Run(ctx, "transcode_batch", map[string]any{
-		"service":   "sonarr",
-		"series_id": 20,
-		"dry_run":   true,
-		"max_items": 10,
+		"service":          "sonarr",
+		"series_id":        20,
+		"dry_run":          true,
+		"max_output_items": 10,
 	})
 	if err != nil {
-		t.Fatalf("run with max_items failed: %v", err)
+		t.Fatalf("run with max_output_items failed: %v", err)
 	}
 	if res2.Outputs["returned_items"] != 10 {
 		t.Errorf("expected returned_items == 10, got %v", res2.Outputs["returned_items"])
@@ -897,7 +897,52 @@ func TestTranscodeBatch_BoundedSummariesAndTruncation(t *testing.T) {
 	}
 	itemsList2 := res2.Outputs["items"].([]TranscodeBatchItemSummary)
 	if len(itemsList2) != 10 {
-		t.Errorf("expected 10 items in output with max_items=10, got %d", len(itemsList2))
+		t.Errorf("expected 10 items in output with max_output_items=10, got %d", len(itemsList2))
+	}
+}
+
+func TestTranscodeBatch_MaxItemsLimitsPreparedAndScheduledItems(t *testing.T) {
+	mockExecutor := &mockTranscodeExecutor{
+		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
+			writeCandidateOutput(req.CandidatePath)
+			return transcode.Job{ID: req.ID}, nil
+		},
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{ID: jobID, Status: transcode.StatusCompleted}, nil
+		},
+	}
+
+	engine, st, _, srv, _ := setupBatchTestEnv(t, mockExecutor, 2)
+	defer srv.Close()
+	defer st.Close()
+
+	res, err := engine.Run(context.Background(), "transcode_batch", map[string]any{
+		"service":   "sonarr",
+		"series_id": 10,
+		"max_items": 1,
+	})
+	if err != nil {
+		t.Fatalf("run with max_items failed: %v", err)
+	}
+	if res.Status != StatusCompleted {
+		t.Fatalf("expected completed status, got %s (%s)", res.Status, res.Error)
+	}
+
+	items, err := st.ListTranscodeBatchItems(res.ID)
+	if err != nil {
+		t.Fatalf("ListTranscodeBatchItems failed: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected max_items=1 to persist exactly 1 item, got %d", len(items))
+	}
+	if items[0].ItemKey != "epfile-101" {
+		t.Fatalf("expected deterministic first item epfile-101, got %s", items[0].ItemKey)
+	}
+	if mockExecutor.submitCalls != 1 {
+		t.Fatalf("expected max_items=1 to submit exactly 1 transcode, got %d", mockExecutor.submitCalls)
+	}
+	if res.Outputs["total_items"] != 1 {
+		t.Fatalf("expected total_items=1, got %v", res.Outputs["total_items"])
 	}
 }
 
@@ -1315,7 +1360,7 @@ func TestTranscodeBatch_OutputCap100AndWaitingDecision(t *testing.T) {
 		})
 	}
 
-	// Requesting max_items = 200 should be capped at MaxBatchOutputItems (100)
+	// Requesting an output limit of 200 should be capped at MaxBatchOutputItems (100)
 	outputs := buildBatchOutputs("batch-cap-test", items, "Cap Test", false, false, 200)
 
 	totalItems := outputs["total_items"].(int)
@@ -1366,14 +1411,21 @@ func TestTranscodeBatchUnadvertisedInputs(t *testing.T) {
 		}
 	}
 
-	// Verify that getMaxOutputItems ignores the removed "limit" alias but respects max_output_items and max_items
+	// Output and batch limits are independent: max_output_items bounds response
+	// summaries while max_items bounds actual preparation and scheduling.
 	if got := getMaxOutputItems(map[string]any{"limit": 10}); got != DefaultMaxBatchOutputItems {
 		t.Errorf("expected limit alias to be ignored by getMaxOutputItems, got %d", got)
 	}
 	if got := getMaxOutputItems(map[string]any{"max_output_items": 12}); got != 12 {
 		t.Errorf("expected max_output_items to return 12, got %d", got)
 	}
-	if got := getMaxOutputItems(map[string]any{"max_items": 15}); got != 15 {
-		t.Errorf("expected max_items to return 15, got %d", got)
+	if got := getMaxOutputItems(map[string]any{"max_items": 15}); got != DefaultMaxBatchOutputItems {
+		t.Errorf("expected max_items not to affect the output limit, got %d", got)
+	}
+	if got := getMaxBatchItems(map[string]any{"max_items": 15}); got != 15 {
+		t.Errorf("expected max_items to return a batch limit of 15, got %d", got)
+	}
+	if got := getMaxBatchItems(map[string]any{"max_output_items": 12}); got != 0 {
+		t.Errorf("expected max_output_items not to affect the batch limit, got %d", got)
 	}
 }
