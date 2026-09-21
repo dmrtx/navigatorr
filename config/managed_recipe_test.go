@@ -43,7 +43,7 @@ func TestManagedProfileOverridesStaticAndCarriesManagedIdentity(t *testing.T) {
 		},
 		recipeManager: mgr,
 	}
-	rec, err := mgr.SaveManagedProfile("central-test", controlPlaneTestProfile(22), "validated", "act-benchmark-1", "")
+	rec, err := mgr.SaveManagedProfile("central-test", controlPlaneTestProfile(22), "validated", "act-benchmark-1", 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}
