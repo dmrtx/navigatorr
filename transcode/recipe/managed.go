@@ -32,6 +32,8 @@ type ManagedProfileRecord struct {
 	Digest         string    `json:"digest"`
 	Generation     int64     `json:"generation"`
 	Description    string    `json:"description,omitempty"`
+	// SourceActionID is unverified reference metadata until a future
+	// promote-from-action flow validates provenance.
 	SourceActionID string    `json:"source_action_id,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
