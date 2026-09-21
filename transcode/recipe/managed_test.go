@@ -24,7 +24,6 @@ func managedTestProfile() Profile {
 	}
 }
 
-
 func TestManagedProfileRejectsReservedAutoName(t *testing.T) {
 	m, err := NewManager(BuiltinProvider{}, t.TempDir(), "", "")
 	if err != nil {
