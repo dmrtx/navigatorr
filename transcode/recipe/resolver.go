@@ -83,6 +83,7 @@ func Resolve(s *Snapshot, profileName string, overrides map[string]Profile, subt
 	plan := &transcode.Plan{
 		Container: container, VideoCodec: normalizeCodec(p.Video.Codec), Quality: p.Video.Quality,
 		Preset:       normalizeCodec(p.Video.Preset),
+		Tune:         normalizeCodec(p.Video.Tune),
 		VideoProfile: videoProfile, PixelFormat: pixelFormat, PrioritizeSpeed: cloneBool(p.Video.PrioritizeSpeed), SpatialAQ: cloneBool(p.Video.SpatialAQ), Realtime: cloneBool(p.Video.Realtime),
 		AverageBitrateKbps: p.Video.AverageBitrateKbps, MaxBitrateKbps: p.Video.MaxBitrateKbps, ConstantBitrate: cloneBool(p.Video.ConstantBitrate),
 		QMin: cloneInt(p.Video.QMin), QMax: cloneInt(p.Video.QMax), GOPSize: cloneInt(p.Video.GOPSize), BFrames: cloneInt(p.Video.BFrames),
