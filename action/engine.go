@@ -295,14 +295,19 @@ func (e *Engine) resume(ctx context.Context, instanceID string, decision string,
 		return nil, fmt.Errorf("unknown action template: %s", inst.ActionName)
 	}
 
+	if len(extraInputs) != 0 {
+		switch inst.ActionName {
+		case "promote_transcode_candidate":
+			return nil, fmt.Errorf("promotion inputs and integrity baseline are immutable; resume accepts only a decision")
+		case "transcode_media", "benchmark_transcode":
+			return nil, fmt.Errorf("%s inputs are immutable after action creation; resume accepts only a decision", inst.ActionName)
+		}
+	}
+
 	// If already completed or terminal, return current state
 	if inst.Status == StatusCompleted || inst.Status == StatusFailed || inst.Status == StatusCancelled {
 		ec := parseExecutionContext(inst, e)
 		return buildActionResult(inst, len(tmpl.Steps), ec), nil
-	}
-
-	if inst.ActionName == "promote_transcode_candidate" && len(extraInputs) != 0 {
-		return nil, fmt.Errorf("promotion inputs and integrity baseline are immutable; resume accepts only a decision")
 	}
 
 	ec := parseExecutionContext(inst, e)
