@@ -345,6 +345,9 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 				// inherited set); a winner that omits them (foreign or
 				// pre-upgrade in-flight job) retains the base plan intent
 				// instead of silently clearing encoder configuration.
+				if winner.Tune != "" {
+					wp.Tune = winner.Tune
+				}
 				if winner.MaxBitrateKbps != 0 {
 					wp.MaxBitrateKbps = winner.MaxBitrateKbps
 				}
@@ -586,6 +589,7 @@ func buildBenchmarkCandidates(basePlan *transcode.Plan, bitDepth int, srch *reci
 		normCodec = transcode.VideoCodecHEVCVideoToolbox
 	}
 	normPreset := strings.ToLower(strings.TrimSpace(basePlan.Preset))
+	normTune := strings.ToLower(strings.TrimSpace(basePlan.Tune))
 	maxCandidates := srch.MaxCandidates
 	hasQuality := len(srch.QualityValues) > 0
 	hasBitrate := len(srch.BitrateValues) > 0
@@ -620,6 +624,9 @@ func buildBenchmarkCandidates(basePlan *transcode.Plan, bitDepth int, srch *reci
 	case transcode.VideoCodecHEVCVideoToolbox:
 		if normPreset != "" {
 			return nil, fmt.Errorf("preset %q is only supported for libx265 (fail closed)", basePlan.Preset)
+		}
+		if normTune != "" {
+			return nil, fmt.Errorf("tune %q is only supported for libx265 (fail closed)", basePlan.Tune)
 		}
 		if hasBitrate {
 			brVals := srch.BitrateValues
@@ -672,6 +679,9 @@ func buildBenchmarkCandidates(basePlan *transcode.Plan, bitDepth int, srch *reci
 		if !transcode.IsValidLibX265Preset(normPreset) {
 			return nil, fmt.Errorf("unsupported libx265 preset %q", basePlan.Preset)
 		}
+		if normTune != "" && !transcode.IsValidLibX265Tune(normTune) {
+			return nil, fmt.Errorf("unsupported libx265 tune %q", basePlan.Tune)
+		}
 		qVals := srch.QualityValues
 		if maxCandidates > 0 && len(qVals) > maxCandidates {
 			qVals = qVals[:maxCandidates]
@@ -686,6 +696,7 @@ func buildBenchmarkCandidates(basePlan *transcode.Plan, bitDepth int, srch *reci
 				VideoCodec:   normCodec,
 				Quality:      q,
 				Preset:       normPreset,
+				Tune:         normTune,
 				VideoProfile: targetProf,
 				PixelFormat:  targetPix,
 			})
