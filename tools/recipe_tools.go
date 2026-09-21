@@ -12,9 +12,9 @@ import (
 )
 
 type recipeSaveInput struct {
-	Name           string         `json:"name" jsonschema:"description=Managed profile name"`
-	Profile        recipe.Profile `json:"profile" jsonschema:"description=Complete typed transcode recipe profile"`
-	Description    string         `json:"description,omitempty" jsonschema:"description=Optional human readable purpose or validation note"`
+	Name               string         `json:"name" jsonschema:"description=Managed profile name"`
+	Profile            recipe.Profile `json:"profile" jsonschema:"description=Complete typed transcode recipe profile"`
+	Description        string         `json:"description,omitempty" jsonschema:"description=Optional human readable purpose or validation note"`
 	SourceActionID     string         `json:"source_action_id,omitempty" jsonschema:"description=Optional unverified action reference metadata; recipe_save does not validate provenance"`
 	ExpectedGeneration int64          `json:"expected_generation,omitempty" jsonschema:"description=Required when replacing an existing managed profile; omit only when creating a new name"`
 	ExpectedDigest     string         `json:"expected_digest,omitempty" jsonschema:"description=Required when replacing an existing managed profile; omit only when creating a new name"`
