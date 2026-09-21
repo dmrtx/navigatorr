@@ -21,6 +21,11 @@ tools.
 
 The work queue is deliberately not recipe storage.
 
+`auto` is reserved case-insensitively as the selector pseudo-profile and cannot
+be defined as a bundle, static, or managed recipe name. This keeps control-plane
+discovery consistent with what `transcode_media(profile="auto")` actually
+executes.
+
 Managed saves are strict, atomic and versioned per profile. Each normalized
 profile has a stable SHA-256 content digest, a generation, timestamps and an
 optional `source_action_id`. Generations are monotonic per profile name even
@@ -66,8 +71,9 @@ verified provenance before saving; it is not required for recipe distribution.
 
 ## Immutable action inputs
 
-`transcode_media` and `benchmark_transcode` freeze their inputs at action
-creation. Resume/reconciliation may supply a decision, but cannot inject or
+`transcode_media`, `benchmark_transcode`, `transcode_batch`, and
+`promote_transcode_candidate` declare immutable inputs at the workflow
+template. Resume/reconciliation may supply a decision, but cannot inject or
 replace inputs. This keeps encoder settings, size guardrails and validation
 expectations tied to the same immutable action configuration that produced the
 resolved Plan. Batch children receive `surface_worker_busy` at creation and are
@@ -75,13 +81,15 @@ resumed without extra inputs.
 
 ## MCP recipe tools
 
-- `recipe_list`: inspect bundle/static/managed layers.
+- `recipe_list`: inspect bundle/static/managed layers using paginated managed
+  summaries; use `recipe_get` for a complete profile.
 - `recipe_get`: inspect the effective typed profile and source layer.
 - `recipe_save`: create a strict managed profile, or update one only when the
   caller supplies its current `expected_generation` and `expected_digest`.
 - `recipe_delete`: remove the managed override only with its current
   `expected_generation` and `expected_digest`, without affecting running jobs.
-- `recipe_history`: inspect save/delete generations.
+- `recipe_history`: inspect recent bounded save/delete metadata (default 10,
+  max 50) without repeating full profile bodies.
 - `recipe_status`, `recipe_reload`, `recipe_update`, `recipe_rollback`:
   retain their bundle/LKG responsibilities.
 
