@@ -121,7 +121,6 @@ func TestManagedProfilePersistenceHistoryAndDelete(t *testing.T) {
 	}
 }
 
-
 func TestManagedProfileCASRejectsMetadataOnlyConcurrentChange(t *testing.T) {
 	m, err := NewManager(BuiltinProvider{}, t.TempDir(), "", "")
 	if err != nil {
