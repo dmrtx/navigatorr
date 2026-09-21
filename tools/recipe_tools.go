@@ -26,6 +26,35 @@ type recipeDeleteInput struct {
 	ExpectedDigest     string `json:"expected_digest" jsonschema:"description=Current managed profile digest; required for optimistic concurrency"`
 }
 
+const (
+	defaultRecipeListLimit    = 50
+	maxRecipeListLimit        = 100
+	defaultRecipeHistoryLimit = 10
+	maxRecipeHistoryLimit     = 50
+)
+
+func managedProfileSummary(rec recipe.ManagedProfileRecord) map[string]any {
+	return map[string]any{
+		"name":             rec.Name,
+		"generation":       rec.Generation,
+		"digest":           rec.Digest,
+		"description":      rec.Description,
+		"source_action_id": rec.SourceActionID,
+		"updated_at":       rec.UpdatedAt,
+	}
+}
+
+func managedHistorySummary(entry recipe.ManagedProfileHistoryEntry) map[string]any {
+	return map[string]any{
+		"event":            entry.Event,
+		"generation":       entry.Generation,
+		"digest":           entry.Digest,
+		"description":      entry.Description,
+		"source_action_id": entry.SourceActionID,
+		"at":               entry.At,
+	}
+}
+
 func registerRecipeTools(s *server.MCPServer, cfg *config.Config) {
 	s.AddTool(mcp.NewTool("recipe_status", mcp.WithDescription("Show the active transcode recipe source, version, digest, last-known-good version, last check time, and sanitized update error.")), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		mgr := cfg.Transcode.RecipeManager()
@@ -43,7 +72,9 @@ func registerRecipeTools(s *server.MCPServer, cfg *config.Config) {
 	// for day-to-day recipes. Workers never install these objects: every action
 	// resolves a validated immutable Plan and sends that plan to the selected worker.
 	s.AddTool(mcp.NewTool("recipe_list",
-		mcp.WithDescription("List available transcode recipe profiles. Managed profiles are centrally stored by Navigatorr and override static config/bundle profiles for new jobs."),
+		mcp.WithDescription("List available transcode recipe profiles without embedding full managed profile bodies. Managed summaries are paginated; use recipe_get for one complete effective profile."),
+		mcp.WithNumber("limit", mcp.Description("Optional managed-profile page size (default 50, max 100)"), mcp.Min(1), mcp.Max(maxRecipeListLimit)),
+		mcp.WithNumber("offset", mcp.Description("Optional zero-based managed-profile offset"), mcp.Min(0)),
 	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		mgr := cfg.Transcode.RecipeManager()
 		if mgr == nil {
@@ -53,6 +84,30 @@ func registerRecipeTools(s *server.MCPServer, cfg *config.Config) {
 		if err != nil {
 			return toolErr("reading managed recipe registry: %v", err), nil
 		}
+		args := req.GetArguments()
+		limit := int(argInt64(args, "limit", defaultRecipeListLimit))
+		if limit <= 0 {
+			limit = defaultRecipeListLimit
+		}
+		if limit > maxRecipeListLimit {
+			limit = maxRecipeListLimit
+		}
+		offset := int(argInt64(args, "offset", 0))
+		if offset < 0 {
+			offset = 0
+		}
+		if offset > len(managed) {
+			offset = len(managed)
+		}
+		end := offset + limit
+		if end > len(managed) {
+			end = len(managed)
+		}
+		managedSummaries := make([]map[string]any, 0, end-offset)
+		for _, rec := range managed[offset:end] {
+			managedSummaries = append(managedSummaries, managedProfileSummary(rec))
+		}
+
 		bundleNames := []string{}
 		if snap := mgr.Snapshot(); snap != nil {
 			for name := range snap.Bundle.Profiles {
@@ -65,12 +120,17 @@ func registerRecipeTools(s *server.MCPServer, cfg *config.Config) {
 			staticNames = append(staticNames, name)
 		}
 		sort.Strings(staticNames)
-		return toolJSON(map[string]any{
+		payload := map[string]any{
 			"precedence":             []string{"managed", "static_config", "active_bundle"},
-			"managed_profiles":       managed,
+			"managed_profiles":       managedSummaries,
+			"managed_total":          len(managed),
+			"managed_returned":       len(managedSummaries),
+			"managed_offset":         offset,
+			"managed_limit":          limit,
 			"static_config_profiles": staticNames,
 			"active_bundle_profiles": bundleNames,
-		}), nil
+		}
+		return toolBoundedJSON(payload, MaxActionResponseBytes, nil), nil
 	})
 
 	s.AddTool(mcp.NewTool("recipe_get",
@@ -160,10 +220,12 @@ func registerRecipeTools(s *server.MCPServer, cfg *config.Config) {
 	})
 
 	s.AddTool(mcp.NewTool("recipe_history",
-		mcp.WithDescription("Show the bounded save/delete audit history for a centrally managed profile."),
+		mcp.WithDescription("Show recent save/delete audit metadata for a centrally managed profile without repeating full profile bodies. Returns the newest entries in chronological order; use recipe_get for the current full profile."),
 		mcp.WithString("name", mcp.Required(), mcp.Description("Managed profile name")),
+		mcp.WithNumber("limit", mcp.Description("Optional number of recent history entries (default 10, max 50)"), mcp.Min(1), mcp.Max(maxRecipeHistoryLimit)),
 	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		name := strings.TrimSpace(argString(req.GetArguments(), "name", ""))
+		args := req.GetArguments()
+		name := strings.TrimSpace(argString(args, "name", ""))
 		if name == "" {
 			return toolErr("name is required"), nil
 		}
@@ -175,7 +237,29 @@ func registerRecipeTools(s *server.MCPServer, cfg *config.Config) {
 		if err != nil {
 			return toolErr("reading managed recipe history: %v", err), nil
 		}
-		return toolJSON(map[string]any{"name": name, "history": history}), nil
+		limit := int(argInt64(args, "limit", defaultRecipeHistoryLimit))
+		if limit <= 0 {
+			limit = defaultRecipeHistoryLimit
+		}
+		if limit > maxRecipeHistoryLimit {
+			limit = maxRecipeHistoryLimit
+		}
+		start := 0
+		if len(history) > limit {
+			start = len(history) - limit
+		}
+		summaries := make([]map[string]any, 0, len(history)-start)
+		for _, entry := range history[start:] {
+			summaries = append(summaries, managedHistorySummary(entry))
+		}
+		payload := map[string]any{
+			"name":             name,
+			"history":          summaries,
+			"total_entries":    len(history),
+			"returned_entries": len(summaries),
+			"limit":            limit,
+		}
+		return toolBoundedJSON(payload, MaxActionResponseBytes, nil), nil
 	})
 
 	s.AddTool(mcp.NewTool("recipe_reload", mcp.WithDescription("Re-read the configured bundle recipe source, validate it strictly, cache it, and atomically activate it only if valid. Centrally managed profile overrides are independent. Running jobs keep their existing plan.")), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
