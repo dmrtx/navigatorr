@@ -19,7 +19,8 @@ import (
 func (e *Engine) registerBenchmarkTemplate() {
 	e.RegisterTemplate(ActionTemplate{
 		AutoReconcile:  true,
-		Name:           "benchmark_transcode",
+		ImmutableInputs: true,
+		Name:            "benchmark_transcode",
 		Version:        1,
 		Description:    "Coordinates safe candidate-only benchmark evaluation of encoder parameters over deterministic source samples, returning quality metrics, size estimates, and an explainable decision without modifying media or creating permanent candidates.",
 		RequiredInputs: []string{"path"},
