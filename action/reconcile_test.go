@@ -339,7 +339,7 @@ func TestPromotionIdentitySurvivesCompletionAndCannotChangeOnResume(t *testing.T
 	st := setupTestStore(t)
 	e := NewEngine(EngineDeps{Store: st})
 	var promotions atomic.Int32
-	e.RegisterTemplate(ActionTemplate{Name: "promote_transcode_candidate", Steps: []StepDefinition{{Name: "approve", Run: func(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+	e.RegisterTemplate(ActionTemplate{Name: "promote_transcode_candidate", ImmutableInputs: true, Steps: []StepDefinition{{Name: "approve", Run: func(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
 		if ec.Decision != "approve" {
 			return StepResult{Status: StepWaitingDecision}, nil
 		}
