@@ -93,8 +93,9 @@ type ActionCatalogEntry struct {
 	Description    string   `json:"description"`
 	RequiredInputs []string `json:"required_inputs"`
 	OptionalInputs []string `json:"optional_inputs"`
-	Steps          []string `json:"steps"`
-	Destructive    bool     `json:"destructive"`
+	Steps           []string `json:"steps"`
+	Destructive     bool     `json:"destructive"`
+	ImmutableInputs bool     `json:"immutable_inputs"`
 }
 
 // ActionResult is returned when running, resuming, or querying an action
