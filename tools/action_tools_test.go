@@ -266,7 +266,6 @@ func TestIdempotencyKeyMCPToolSchemaAndProtocol(t *testing.T) {
 	}
 }
 
-
 func TestParseJSONObjectStrict(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -340,9 +339,9 @@ func TestActionResumeRejectsInvalidInputsJSONWithoutAdvancing(t *testing.T) {
 					return action.StepResult{Status: action.StepCompleted}, nil
 				}
 				return action.StepResult{
-					Status:           action.StepWaitingDecision,
-					WaitingReason:    "waiting for continue",
-					WaitingOptions:   []action.WaitingOption{{Decision: "continue", Description: "Continue"}},
+					Status:         action.StepWaitingDecision,
+					WaitingReason:  "waiting for continue",
+					WaitingOptions: []action.WaitingOption{{Decision: "continue", Description: "Continue"}},
 				}, nil
 			},
 		}},
