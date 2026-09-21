@@ -277,12 +277,55 @@ func (e *Engine) stepPromoteFinalize(ctx context.Context, ec *ExecutionContext) 
 	if err != nil {
 		return promoteFailed(err)
 	}
-	adopted, ok, err := e.promotionAdopted(ctx, svc, p)
+	adopted, ok, err := e.promotionAdoptedFile(ctx, svc, p)
 	if err != nil {
 		return promoteFailed(err)
 	}
-	if !ok || temporaryPromotionPath(adopted.Path) {
+	if !ok {
+		return promoteFailed(fmt.Errorf("final active candidate is no longer adopted"))
+	}
+	if p.NewFileID > 0 && p.NewFileID != adopted.ID {
+		return promoteFailed(fmt.Errorf("final library file identity changed since rename; recovery retained"))
+	}
+	needsIdentitySave := false
+	if p.NewFileID <= 0 {
+		p.NewFileID = adopted.ID
+		needsIdentitySave = true
+	}
+
+	// Rename persists the final identity before finalize runs. Use that durable
+	// path for physical verification: Sonarr may briefly return the old
+	// .navigatorr-candidates path while its library view catches up, and that
+	// temporary path legitimately no longer exists after the rename.
+	finalPath := filepath.Clean(p.NewPath)
+	if p.NewPath == "" || temporaryPromotionPath(p.NewPath) {
+		if temporaryPromotionPath(adopted.Path) {
+			return promoteWait("Waiting for Sonarr to publish the renamed library path")
+		}
+		finalPath = filepath.Clean(adopted.Path)
+		p.NewPath = adopted.Path
+		needsIdentitySave = true
+	} else if filepath.Clean(adopted.Path) != finalPath {
+		return promoteWait("Waiting for Sonarr's library path to match the completed rename")
+	}
+	if temporaryPromotionPath(finalPath) {
 		return promoteFailed(fmt.Errorf("final active candidate must be outside .navigatorr-candidates"))
+	}
+	if _, err := e.promotionPath(finalPath, false); err != nil {
+		return promoteFailed(err)
+	}
+	if info, err := os.Lstat(finalPath); err != nil {
+		return promoteFailed(err)
+	} else if !info.Mode().IsRegular() {
+		return promoteFailed(fmt.Errorf("final library file is not a regular file"))
+	}
+	if err := e.verifyPromotionHash(ctx, finalPath, p.CandidateSHA); err != nil {
+		return promoteFailed(err)
+	}
+	if needsIdentitySave {
+		if err := e.savePromotion(ctx, ec, p); err != nil {
+			return promoteFailed(err)
+		}
 	}
 	if err := e.promotionNoOldReferences(ctx, svc, p); err != nil {
 		return promoteFailed(err)
@@ -296,12 +339,12 @@ func (e *Engine) stepPromoteFinalize(ctx context.Context, ec *ExecutionContext) 
 			return promoteFailed(fmt.Errorf("old episodeFile still exists after rescan"))
 		}
 	}
-	if p.OriginalPath != adopted.Path {
+	if filepath.Clean(p.OriginalPath) != finalPath {
 		if _, err := os.Lstat(p.OriginalPath); err == nil || !os.IsNotExist(err) {
 			return promoteFailed(fmt.Errorf("old physical file remains after library cleanup"))
 		}
 	}
-	if p.CandidatePath != adopted.Path {
+	if filepath.Clean(p.CandidatePath) != finalPath {
 		if _, err := os.Lstat(p.CandidatePath); err == nil {
 			if _, err := e.promotionPath(p.CandidatePath, true); err != nil {
 				return promoteFailed(err)
@@ -361,5 +404,5 @@ func (e *Engine) stepPromoteFinalize(ctx context.Context, ec *ExecutionContext) 
 	if p.OriginalBytes > 0 {
 		percent = float64(saved) / float64(p.OriginalBytes) * 100
 	}
-	return StepResult{Status: StepCompleted, Outputs: map[string]any{"promoted": true, "promotion": p, "final_path": adopted.Path, "new_episode_file_id": adopted.ID, "episode_ids": p.EpisodeIDs, "original_integrity": "verified_before_replacement", "candidate_sha256": p.CandidateSHA, "one_active_file_per_episode": true, "recovery_retained": false, "size_saved_bytes": saved, "size_saved_percent": percent}}, nil
+	return StepResult{Status: StepCompleted, Outputs: map[string]any{"promoted": true, "promotion": p, "final_path": finalPath, "new_episode_file_id": p.NewFileID, "episode_ids": p.EpisodeIDs, "original_integrity": "verified_before_replacement", "candidate_sha256": p.CandidateSHA, "one_active_file_per_episode": true, "recovery_retained": false, "size_saved_bytes": saved, "size_saved_percent": percent}}, nil
 }

@@ -283,6 +283,18 @@ func (e *Engine) stepPromotePreserve(ctx context.Context, ec *ExecutionContext) 
 			if !info.Mode().IsRegular() {
 				return promoteFailed(fmt.Errorf("recovery partial is not a regular file"))
 			}
+			// Retry/re-entry: a previous attempt may have completed the private
+			// copy but crashed before the atomic rename. Reuse a stable, exact
+			// copy instead of discarding it and copying the original again.
+			if info.Size() == p.OriginalBytes && p.OriginalBytes > 0 {
+				hash, n, hashErr := e.promotionHash(ctx, partial)
+				if hashErr == nil && hash == p.OriginalSHA && n == p.OriginalBytes {
+					if err := e.promotionPublishPartial(ctx, ec, p, partial); err != nil {
+						return promoteFailed(err)
+					}
+					goto preserved
+				}
+			}
 			// No Sonarr mutation has started in this step. The original was just
 			// reverified, so an interrupted private copy can be rebuilt safely.
 			if err := os.Remove(partial); err != nil {
@@ -318,31 +330,47 @@ func (e *Engine) stepPromotePreserve(ctx context.Context, ec *ExecutionContext) 
 		// This is an independent copy in the promotion's private directory.
 		// Atomic rename needs no NAS hard-link support. The durable original
 		// reservation prevents another promotion from publishing here.
-		if _, err := os.Lstat(p.BackupPath); !os.IsNotExist(err) {
-			return promoteFailed(fmt.Errorf("recovery destination unexpectedly exists before publication"))
-		}
-		if _, err := e.promotionPath(p.BackupPath, true); err != nil {
+		if err := e.promotionPublishPartial(ctx, ec, p, partial); err != nil {
 			return promoteFailed(err)
-		}
-		if err := e.savePromotion(ctx, ec, p); err != nil {
-			return promoteFailed(err)
-		}
-		if err := ctx.Err(); err != nil {
-			return promoteFailed(err)
-		}
-		if err := os.Rename(partial, p.BackupPath); err != nil {
-			return promoteFailed(err)
-		}
-		if d, err := os.Open(filepath.Dir(p.BackupPath)); err == nil {
-			_ = d.Sync()
-			_ = d.Close()
 		}
 	}
+preserved:
 	p.BackupVerified = true
 	if err := e.savePromotion(ctx, ec, p); err != nil {
 		return promoteFailed(err)
 	}
 	return StepResult{Status: StepCompleted, Outputs: map[string]any{"recovery_path": p.BackupPath, "recovery_retained": true}}, nil
+}
+
+func (e *Engine) promotionPublishPartial(ctx context.Context, ec *ExecutionContext, p *promotionState, partial string) error {
+	if _, err := e.promotionPath(partial, true); err != nil {
+		return err
+	}
+	if _, err := e.promotionPath(p.BackupPath, true); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(p.BackupPath); err == nil {
+		if err := e.verifyPromotionHash(ctx, p.BackupPath, p.OriginalSHA); err != nil {
+			return err
+		}
+		return e.promotionRemovePartial(ctx, ec, p)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := e.savePromotion(ctx, ec, p); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := os.Rename(partial, p.BackupPath); err != nil {
+		return err
+	}
+	if d, err := os.Open(filepath.Dir(p.BackupPath)); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
 }
 
 func (e *Engine) promotionRemovePartial(ctx context.Context, ec *ExecutionContext, p *promotionState) error {
