@@ -43,6 +43,7 @@ type promotionHarness struct {
 	poisonOldPath                      bool
 	poisonCandidateOnImport            bool
 	stalePathAfterRescan               bool
+	stalePathAfterRename               bool
 	permanentStaleFinalPath            bool
 	adoptedPathOverride                string
 	stalePathReads                     int
@@ -266,6 +267,9 @@ func (h *promotionHarness) serve(w http.ResponseWriter, r *http.Request) {
 					f := h.files[202]
 					f.Path = h.final
 					h.files[202] = f
+					if h.stalePathAfterRename {
+						h.permanentStaleFinalPath = true
+					}
 				}
 			}
 		case "RescanSeries":

@@ -156,16 +156,21 @@ func (w *Worker) statSourceForCache(ctx context.Context, cleanSource string) (os
 // hashLocalFileSHA256 hashes LOCAL bytes only (never a NAS path) and returns
 // the lowercase hex digest. It honors cancellation between chunks.
 func hashLocalFileSHA256(ctx context.Context, path string) (string, error) {
+	before, err := os.Lstat(path)
+	if err != nil || !before.Mode().IsRegular() {
+		return "", fmt.Errorf("%w: local file for hashing %s is not a regular file", ErrSourceInvalid, path)
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return "", fmt.Errorf("%w: opening local file for hashing %s: %v", ErrStorageIO, path, err)
 	}
 	defer f.Close()
 	fi, err := f.Stat()
-	if err != nil || !fi.Mode().IsRegular() {
+	if err != nil || !fi.Mode().IsRegular() || !os.SameFile(before, fi) {
 		return "", fmt.Errorf("%w: local file for hashing %s is not a regular file", ErrSourceInvalid, path)
 	}
 	h := sha256.New()
+	var total int64
 	buf := make([]byte, 128*1024)
 	for {
 		if cerr := ctx.Err(); cerr != nil {
@@ -174,6 +179,7 @@ func hashLocalFileSHA256(ctx context.Context, path string) (string, error) {
 		n, rerr := f.Read(buf)
 		if n > 0 {
 			_, _ = h.Write(buf[:n])
+			total += int64(n)
 		}
 		if rerr == io.EOF {
 			break
@@ -181,6 +187,10 @@ func hashLocalFileSHA256(ctx context.Context, path string) (string, error) {
 		if rerr != nil {
 			return "", fmt.Errorf("%w: reading local file for hashing %s: %v", ErrStorageIO, path, rerr)
 		}
+	}
+	after, err := os.Lstat(path)
+	if err != nil || !os.SameFile(before, after) || total != before.Size() || after.Size() != total || !before.ModTime().Equal(after.ModTime()) {
+		return "", fmt.Errorf("%w: local file changed while hashing %s", ErrSourceInvalid, path)
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
