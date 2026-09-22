@@ -277,6 +277,11 @@ func (e *Engine) stepPromoteFinalize(ctx context.Context, ec *ExecutionContext) 
 	if err != nil {
 		return promoteFailed(err)
 	}
+	// The durable series library root is required to confine the final path and
+	// recovery cleanup. Never proceed without it.
+	if p.SeriesPath == "" {
+		return promoteFailed(fmt.Errorf("persisted series library path is missing; recovery retained"))
+	}
 	adopted, ok, err := e.promotionAdoptedFile(ctx, svc, p)
 	if err != nil {
 		return promoteFailed(err)
@@ -322,7 +327,7 @@ func (e *Engine) stepPromoteFinalize(ctx context.Context, ec *ExecutionContext) 
 	if _, err := e.promotionPath(finalPath, false); err != nil {
 		return promoteFailed(err)
 	}
-	if p.SeriesPath != "" && !withinPromotionPath(p.SeriesPath, finalPath) {
+	if !withinPromotionPath(p.SeriesPath, finalPath) {
 		return promoteFailed(fmt.Errorf("final library file is outside the series library root; recovery retained"))
 	}
 	info, err := os.Lstat(finalPath)
@@ -369,7 +374,7 @@ func (e *Engine) stepPromoteFinalize(ctx context.Context, ec *ExecutionContext) 
 				return promoteFailed(err)
 			}
 			for _, f := range snap.Files {
-				if filepath.Clean(f.Path) == p.CandidatePath {
+				if filepath.Clean(f.Path) == filepath.Clean(p.CandidatePath) {
 					return promoteFailed(fmt.Errorf("temporary candidate path is still registered in Sonarr"))
 				}
 			}
@@ -409,8 +414,13 @@ func (e *Engine) stepPromoteFinalize(ctx context.Context, ec *ExecutionContext) 
 	} else if !os.IsNotExist(err) || !p.RecoveryCleanupStarted {
 		return promoteFailed(fmt.Errorf("recovery copy disappeared before verified cleanup"))
 	}
-	_ = os.Remove(filepath.Dir(p.BackupPath)) // only empty private directories
-	_ = os.Remove(filepath.Dir(filepath.Dir(p.BackupPath)))
+	// Cleanup is confined to the expected per-promotion key directory and its
+	// direct .promotion-recovery parent, using empty-only os.Remove semantics.
+	keyDir, parentDir := promotionRecoveryDirs(p.BackupPath)
+	_ = os.Remove(keyDir)
+	if filepath.Base(parentDir) == ".promotion-recovery" {
+		_ = os.Remove(parentDir)
+	}
 	p.BackupVerified = false
 	if err := e.savePromotion(ctx, ec, p); err != nil {
 		return promoteFailed(err)

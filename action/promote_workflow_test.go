@@ -845,6 +845,59 @@ func TestPromotionFinalizeRetainsNonEmptyRecoveryDirectory(t *testing.T) {
 	}
 }
 
+func TestPromotionFinalizeFailsClosedOnTamperedRecoveryPath(t *testing.T) {
+	h := newPromotionHarness(t)
+	originalBytes, err := os.ReadFile(h.original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tamperedDir := filepath.Join(h.root, "unrelated-recovery")
+	tamperedBackup := filepath.Join(tamperedDir, "original.bak")
+	id, _ := h.seedPostRenameFinalize(t, func(p *promotionState) {
+		// Corrupt persisted recovery identity to point at an unrelated but
+		// allowed-root file whose bytes match the original.
+		p.BackupPath = tamperedBackup
+	})
+	if err := os.MkdirAll(tamperedDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tamperedBackup, originalBytes, 0600); err != nil {
+		t.Fatal(err)
+	}
+	expected := expectedPromotionBackup(h.candidate)
+
+	r := h.resume(id, "")
+	if r.Status != StatusFailed {
+		t.Fatalf("tampered recovery path was not rejected: %s %s", r.Status, r.Error)
+	}
+	if !strings.Contains(r.Error, "does not match the deterministic promotion location") {
+		t.Fatalf("tampered-path failure reason missing: %s", r.Error)
+	}
+	if _, err := os.Stat(tamperedBackup); err != nil {
+		t.Fatalf("unrelated file at tampered recovery path was deleted: %v", err)
+	}
+	if _, err := os.Stat(tamperedDir); err != nil {
+		t.Fatalf("unrelated directory at tampered recovery path was deleted: %v", err)
+	}
+	if _, err := os.Stat(expected); err != nil {
+		t.Fatalf("genuine recovery copy was not retained: %v", err)
+	}
+}
+
+func TestPromotionFinalizeFailsClosedOnMissingSeriesPath(t *testing.T) {
+	h := newPromotionHarness(t)
+	id, p := h.seedPostRenameFinalize(t, func(p *promotionState) {
+		p.SeriesPath = ""
+	})
+	r := h.resume(id, "")
+	if r.Status != StatusFailed || !strings.Contains(r.Error, "series library path") {
+		t.Fatalf("missing series library path was not rejected: %s %s", r.Status, r.Error)
+	}
+	if _, err := os.Stat(p.BackupPath); err != nil {
+		t.Fatalf("recovery must be retained when the series path is missing: %v", err)
+	}
+}
+
 func TestPromotionFinalizeFailsClosedOnNewPathHashMismatch(t *testing.T) {
 	h := newPromotionHarness(t)
 	id, p := h.seedPostRenameFinalize(t, nil)
