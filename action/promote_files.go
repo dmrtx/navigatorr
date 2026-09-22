@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -80,16 +81,19 @@ func promotionRecoveryDirs(backupPath string) (keyDir, parentDir string) {
 	return keyDir, filepath.Dir(keyDir)
 }
 
+func (e *Engine) promotionLstat(path string) (os.FileInfo, error) {
+	if e.promotionLstatHook != nil {
+		return e.promotionLstatHook(path)
+	}
+	return os.Lstat(path)
+}
+
 func (e *Engine) promotionHash(ctx context.Context, path string) (string, int64, error) {
 	resolved, err := e.promotionPath(path, false)
 	if err != nil {
 		return "", 0, err
 	}
-	lstat := os.Lstat
-	if e.promotionLstatHook != nil {
-		lstat = e.promotionLstatHook
-	}
-	before, err := lstat(resolved)
+	before, err := e.promotionLstat(resolved)
 	if err != nil {
 		return "", 0, err
 	}
@@ -113,7 +117,7 @@ func (e *Engine) promotionHash(ctx context.Context, path string) (string, int64,
 	if err != nil {
 		return "", 0, err
 	}
-	after, err := lstat(resolved)
+	after, err := e.promotionLstat(resolved)
 	if err != nil {
 		return "", 0, err
 	}
@@ -552,18 +556,18 @@ func (e *Engine) promotionRemoveLeftoverCandidate(ctx context.Context, ec *Execu
 	if _, err := e.promotionPath(p.CandidatePath, true); err != nil {
 		return err
 	}
-	if _, err := os.Lstat(p.CandidatePath); os.IsNotExist(err) {
+	if _, err := e.promotionLstat(p.CandidatePath); os.IsNotExist(err) {
 		return nil
 	} else if err != nil {
 		return err
 	}
 	if err := e.verifyPromotionHash(ctx, p.CandidatePath, p.CandidateSHA); err != nil {
-		// Require a fresh confirmation of absence. A replacement file, an
-		// unreadable path or an integrity mismatch still retains recovery.
-		if os.IsNotExist(err) {
-			if _, statErr := os.Lstat(p.CandidatePath); os.IsNotExist(statErr) {
-				return nil
-			}
+		// ENOENT from opening/reading the optional leftover is authoritative.
+		// Rechecking Lstat here is not a fresh confirmation on NAS mounts: it
+		// can keep returning the cached, pre-rename inode after open failed.
+		// Other errors, especially digest mismatches, still retain recovery.
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
 		}
 		return err
 	}
