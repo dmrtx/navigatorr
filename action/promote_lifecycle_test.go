@@ -189,6 +189,65 @@ func TestPromotionFinalizeRetainsChangedLeftoverCandidate(t *testing.T) {
 	}
 }
 
+func TestPromotionFinalizeWithPersistentlyCachedCandidateMetadata(t *testing.T) {
+	h := newPromotionHarness(t)
+	id, p := h.seedPostRenameFinalize(t, nil)
+	stale, err := os.Lstat(h.final)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Model a NAS pathname cache that continues reporting the moved inode,
+	// even after open returns ENOENT. A second Lstat is not fresh evidence.
+	candidateStats := 0
+	h.engine.promotionLstatHook = func(path string) (os.FileInfo, error) {
+		if path == h.candidate {
+			candidateStats++
+			return stale, nil
+		}
+		return os.Lstat(path)
+	}
+	r := h.resume(id, "")
+	if r.Status != StatusCompleted {
+		t.Fatalf("stale candidate metadata blocked finalization: %s %s (stats=%d)", r.Status, r.Error, candidateStats)
+	}
+	if candidateStats < 2 {
+		t.Fatal("fixture did not exercise open after cached metadata")
+	}
+	if _, err := os.Stat(p.BackupPath); !os.IsNotExist(err) {
+		t.Fatalf("recovery retained after verified finalization: %v", err)
+	}
+	if h.imports != 0 || h.deletes != 0 || h.renames != 0 || h.rescans != 0 {
+		t.Fatal("finalization replayed Sonarr mutations")
+	}
+}
+
+func TestPromotionFinalizeStillRequiresFinalAndRecoveryFiles(t *testing.T) {
+	for _, missing := range []string{"final", "recovery"} {
+		t.Run(missing, func(t *testing.T) {
+			h := newPromotionHarness(t)
+			id, p := h.seedPostRenameFinalize(t, nil)
+			path := h.final
+			if missing == "recovery" {
+				path = p.BackupPath
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			r := h.resume(id, "")
+			if r.Status != StatusFailed {
+				t.Fatalf("missing required %s accepted: %s %s", missing, r.Status, r.Error)
+			}
+			remaining := p.BackupPath
+			if missing == "recovery" {
+				remaining = h.final
+			}
+			if _, err := os.Stat(remaining); err != nil {
+				t.Fatalf("remaining required file was removed: %v", err)
+			}
+		})
+	}
+}
+
 func TestPromotionRejectsChangedWorkerAttestedCandidate(t *testing.T) {
 	h := newPromotionHarness(t)
 	source, err := h.st.GetActionInstance("source-transcode")
