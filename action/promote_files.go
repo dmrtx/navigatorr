@@ -544,6 +544,46 @@ func (e *Engine) promotionVerifyRecovered(ctx context.Context, p *promotionState
 	return e.verifyPromotionHashStable(ctx, p.BackupPath, p.OriginalSHA)
 }
 
+// Called only after finalization verifies the final library file and adoption.
+// The old temporary path is optional: Sonarr or delayed NAS metadata may make
+// its removal visible between discovery and hashing. Never apply this tolerance
+// to the required final file or recovery copy.
+func (e *Engine) promotionRemoveLeftoverCandidate(ctx context.Context, ec *ExecutionContext, p *promotionState, snap *promotionLibrary) error {
+	if _, err := e.promotionPath(p.CandidatePath, true); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(p.CandidatePath); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if err := e.verifyPromotionHash(ctx, p.CandidatePath, p.CandidateSHA); err != nil {
+		// Require a fresh confirmation of absence. A replacement file, an
+		// unreadable path or an integrity mismatch still retains recovery.
+		if os.IsNotExist(err) {
+			if _, statErr := os.Lstat(p.CandidatePath); os.IsNotExist(statErr) {
+				return nil
+			}
+		}
+		return err
+	}
+	for _, f := range snap.Files {
+		if filepath.Clean(f.Path) == filepath.Clean(p.CandidatePath) {
+			return fmt.Errorf("temporary candidate path is still registered in Sonarr")
+		}
+	}
+	if err := e.savePromotion(ctx, ec, p); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := os.Remove(p.CandidatePath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 func (e *Engine) promotionInspectAdopted(ctx context.Context, p *promotionState, path string) error {
 	// Preserve the first physical HEVC check (including legacy checkpoints).
 	// Once bound to CandidateSHA, identical bytes prove identical streams and
