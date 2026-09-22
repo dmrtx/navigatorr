@@ -52,6 +52,7 @@ type promotionState struct {
 	CandidateSHA           string                       `json:"candidate_sha256"`
 	OriginalBytes          int64                        `json:"original_bytes"`
 	CandidateBytes         int64                        `json:"candidate_bytes"`
+	CandidateMediaVerified bool                         `json:"candidate_media_verified,omitempty"`
 	OriginalFileID         int                          `json:"original_episode_file_id"`
 	EpisodeIDs             []int                        `json:"episode_ids"`
 	Quality                json.RawMessage              `json:"quality"`
@@ -82,6 +83,9 @@ func loadPromotion(ec *ExecutionContext) (*promotionState, error) {
 	}
 	if p.Commands == nil {
 		p.Commands = make(map[string]*promotionCommand)
+	}
+	if err := promotionBackupPathMatches(p); err != nil {
+		return nil, err
 	}
 	return p, nil
 }

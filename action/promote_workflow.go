@@ -18,9 +18,6 @@ func (e *Engine) stepPromoteImport(ctx context.Context, ec *ExecutionContext) (S
 	if err != nil {
 		return promoteFailed(err)
 	}
-	if err := e.promotionVerifyRecovered(ctx, p); err != nil {
-		return promoteFailed(err)
-	}
 	cmd := p.Commands["import"]
 	if cmd != nil && cmd.SentAt != "" {
 		_, adopted, err := e.promotionAdopted(ctx, svc, p)
@@ -34,6 +31,9 @@ func (e *Engine) stepPromoteImport(ctx context.Context, ec *ExecutionContext) (S
 		// Failed reads or an unfinished import are reconciled against the
 		// persisted command. No error here can trigger another ManualImport.
 	} else {
+		if err := e.promotionVerifyRecovered(ctx, p); err != nil {
+			return promoteFailed(err)
+		}
 		if err := e.verifyPromotionHash(ctx, p.OriginalPath, p.OriginalSHA); err != nil {
 			return promoteFailed(err)
 		}
@@ -81,14 +81,11 @@ func (e *Engine) stepPromoteRemoveOld(ctx context.Context, ec *ExecutionContext)
 	if err != nil {
 		return promoteFailed(err)
 	}
-	if err := e.promotionVerifyRecovered(ctx, p); err != nil {
-		return promoteFailed(err)
-	}
-	adopted, ok, err := e.promotionAdopted(ctx, svc, p)
+	adopted, ok, err := e.promotionAdoptedFile(ctx, svc, p)
 	if err != nil {
 		return promoteFailed(err)
 	}
-	if !ok {
+	if !ok || p.NewFileID <= 0 || adopted.ID != p.NewFileID {
 		return promoteFailed(fmt.Errorf("candidate is no longer adopted; old file will not be removed"))
 	}
 	snap, err := e.promotionSnapshot(ctx, svc, p)
@@ -109,6 +106,9 @@ func (e *Engine) stepPromoteRemoveOld(ctx context.Context, ec *ExecutionContext)
 	if oldExists {
 		if p.DeleteSentAt != "" {
 			return promotionUncertain(p.DeleteSentAt, "The old episodeFile delete outcome remains uncertain")
+		}
+		if err := e.promotionVerifyRecovered(ctx, p); err != nil {
+			return promoteFailed(err)
 		}
 		// Reload the exact object immediately before DELETE. Never trust an
 		// old snapshot: the ID/path could now refer to the imported file.
@@ -146,7 +146,7 @@ func (e *Engine) stepPromoteRemoveOld(ctx context.Context, ec *ExecutionContext)
 		if err := e.promotionNoOldReferences(ctx, svc, p); err != nil {
 			return promoteFailed(err)
 		}
-		if err := e.promotionInspectAdopted(ctx, adopted.Path, p.CandidateSHA); err != nil {
+		if err := e.promotionInspectAdopted(ctx, p, adopted.Path); err != nil {
 			return promoteFailed(err)
 		}
 		p.DeleteSentAt = time.Now().UTC().Format(time.RFC3339Nano)
@@ -169,6 +169,12 @@ func (e *Engine) stepPromoteRemoveOld(ctx context.Context, ec *ExecutionContext)
 			}
 		}
 		if _, err := os.Lstat(p.OriginalPath); err == nil {
+			if err := e.promotionVerifyRecovered(ctx, p); err != nil {
+				return promoteFailed(err)
+			}
+			if err := e.promotionInspectAdopted(ctx, p, adopted.Path); err != nil {
+				return promoteFailed(err)
+			}
 			if _, err := e.promotionPath(p.OriginalPath, true); err != nil {
 				return promoteFailed(err)
 			}
@@ -227,21 +233,51 @@ func (e *Engine) stepPromoteRename(ctx context.Context, ec *ExecutionContext) (S
 	if !p.OldRemoved {
 		return promoteFailed(fmt.Errorf("old file removal has not been verified"))
 	}
-	if err := e.promotionVerifyRecovered(ctx, p); err != nil {
-		return promoteFailed(err)
-	}
-	adopted, ok, err := e.promotionAdopted(ctx, svc, p)
+	// Discovery must not open Sonarr's possibly stale pre-rename path. A
+	// completed command may have moved it before its response was checkpointed.
+	adopted, ok, err := e.promotionAdoptedFile(ctx, svc, p)
 	if err != nil {
 		return promoteFailed(err)
 	}
 	if !ok {
 		return promoteFailed(fmt.Errorf("candidate is no longer adopted"))
 	}
+	if p.NewFileID <= 0 || p.NewFileID != adopted.ID {
+		return promoteFailed(fmt.Errorf("adopted file identity changed or is missing before rename; recovery retained"))
+	}
 	if !temporaryPromotionPath(adopted.Path) {
+		if p.NewPath != "" && !temporaryPromotionPath(p.NewPath) && filepath.Clean(p.NewPath) != filepath.Clean(adopted.Path) {
+			return promoteFailed(fmt.Errorf("adopted library path changed after rename; recovery retained"))
+		}
+		if err := e.promotionInspectAdopted(ctx, p, adopted.Path); err != nil {
+			return promoteFailed(err)
+		}
+		p.NewPath = filepath.Clean(adopted.Path)
 		if err := e.savePromotion(ctx, ec, p); err != nil {
 			return promoteFailed(err)
 		}
 		return StepResult{Status: StepCompleted}, nil
+	}
+	if filepath.Clean(adopted.Path) != filepath.Clean(p.CandidatePath) {
+		return promoteFailed(fmt.Errorf("Sonarr reports an unrelated temporary candidate path; recovery retained"))
+	}
+	if p.NewPath != "" && !temporaryPromotionPath(p.NewPath) {
+		if !withinPromotionPath(p.SeriesPath, p.NewPath) {
+			return promoteFailed(fmt.Errorf("durable renamed path is outside the series root"))
+		}
+		if err := e.promotionInspectAdopted(ctx, p, p.NewPath); err != nil {
+			return promoteFailed(err)
+		}
+		return StepResult{Status: StepCompleted}, nil
+	}
+	cmd := p.Commands["rename"]
+	if cmd == nil || cmd.SentAt == "" || cmd.Failed {
+		if err := e.promotionVerifyRecovered(ctx, p); err != nil {
+			return promoteFailed(err)
+		}
+		if err := e.promotionInspectAdopted(ctx, p, adopted.Path); err != nil {
+			return promoteFailed(err)
+		}
 	}
 	if _, err := e.promotionPath(adopted.Path, true); err != nil {
 		return promoteFailed(err)
@@ -251,13 +287,23 @@ func (e *Engine) stepPromoteRename(ctx context.Context, ec *ExecutionContext) (S
 	if err != nil || res.Status != StepCompleted {
 		return res, err
 	}
-	adopted, ok, err = e.promotionAdopted(ctx, svc, p)
+	adopted, ok, err = e.promotionAdoptedFile(ctx, svc, p)
 	if err != nil {
 		return promoteFailed(err)
 	}
-	if !ok || temporaryPromotionPath(adopted.Path) {
-		return promoteFailed(fmt.Errorf("Sonarr rename finished without moving the active file out of .navigatorr-candidates; recovery retained"))
+	if !ok || adopted.ID != p.NewFileID {
+		return promoteFailed(fmt.Errorf("candidate identity changed after rename; recovery retained"))
 	}
+	if temporaryPromotionPath(adopted.Path) {
+		if filepath.Clean(adopted.Path) != filepath.Clean(p.CandidatePath) {
+			return promoteFailed(fmt.Errorf("Sonarr reports an unrelated temporary candidate path; recovery retained"))
+		}
+		return promoteWait("Rename completed; waiting for Sonarr to publish the final library path, recovery retained")
+	}
+	if err := e.promotionInspectAdopted(ctx, p, adopted.Path); err != nil {
+		return promoteFailed(err)
+	}
+	p.NewPath = filepath.Clean(adopted.Path)
 	if err := e.savePromotion(ctx, ec, p); err != nil {
 		return promoteFailed(err)
 	}
@@ -277,6 +323,11 @@ func (e *Engine) stepPromoteFinalize(ctx context.Context, ec *ExecutionContext) 
 	if err != nil {
 		return promoteFailed(err)
 	}
+	// The durable series library root is required to confine the final path and
+	// recovery cleanup. Never proceed without it.
+	if p.SeriesPath == "" {
+		return promoteFailed(fmt.Errorf("persisted series library path is missing; recovery retained"))
+	}
 	adopted, ok, err := e.promotionAdoptedFile(ctx, svc, p)
 	if err != nil {
 		return promoteFailed(err)
@@ -284,42 +335,54 @@ func (e *Engine) stepPromoteFinalize(ctx context.Context, ec *ExecutionContext) 
 	if !ok {
 		return promoteFailed(fmt.Errorf("final active candidate is no longer adopted"))
 	}
-	if p.NewFileID > 0 && p.NewFileID != adopted.ID {
+	if p.NewFileID <= 0 || p.NewFileID != adopted.ID {
 		return promoteFailed(fmt.Errorf("final library file identity changed since rename; recovery retained"))
 	}
 	needsIdentitySave := false
-	if p.NewFileID <= 0 {
-		p.NewFileID = adopted.ID
-		needsIdentitySave = true
-	}
 
-	// Rename persists the final identity before finalize runs. Use that durable
-	// path for physical verification: Sonarr may briefly return the old
-	// .navigatorr-candidates path while its library view catches up, and that
-	// temporary path legitimately no longer exists after the rename.
+	// Resolve the promoted file from durable post-rename state. new_path is
+	// persisted by the rename step and is authoritative: after Sonarr adopts
+	// and renames the candidate, candidate_path legitimately no longer exists
+	// and must never be reopened. Sonarr's reported path may still briefly (or
+	// permanently, across a restart) be the stale pre-rename temporary path,
+	// so it is only a fallback when no durable new_path has been recorded yet.
 	finalPath := filepath.Clean(p.NewPath)
-	if p.NewPath == "" || temporaryPromotionPath(p.NewPath) {
+	if p.NewPath == "" {
 		if temporaryPromotionPath(adopted.Path) {
 			return promoteWait("Waiting for Sonarr to publish the renamed library path")
 		}
 		finalPath = filepath.Clean(adopted.Path)
 		p.NewPath = adopted.Path
 		needsIdentitySave = true
-	} else if filepath.Clean(adopted.Path) != finalPath {
-		return promoteWait("Waiting for Sonarr's library path to match the completed rename")
 	}
+	// A durable new_path that still points inside .navigatorr-candidates is
+	// corrupt or incomplete persisted state: fail closed, never fall back.
 	if temporaryPromotionPath(finalPath) {
-		return promoteFailed(fmt.Errorf("final active candidate must be outside .navigatorr-candidates"))
+		return promoteFailed(fmt.Errorf("final active candidate must be outside .navigatorr-candidates; recovery retained"))
+	}
+	// Tolerate Sonarr still reporting the stale pre-rename temporary path, but
+	// never silently accept a different non-temporary library path: that is
+	// identity drift and must fail closed with recovery retained.
+	if filepath.Clean(adopted.Path) != finalPath && (!temporaryPromotionPath(adopted.Path) || filepath.Clean(adopted.Path) != filepath.Clean(p.CandidatePath)) {
+		return promoteFailed(fmt.Errorf("Sonarr reports adopted library path %q but the durable new_path is %q; recovery retained", adopted.Path, finalPath))
 	}
 	if _, err := e.promotionPath(finalPath, false); err != nil {
 		return promoteFailed(err)
 	}
-	if info, err := os.Lstat(finalPath); err != nil {
+	if !withinPromotionPath(p.SeriesPath, finalPath) {
+		return promoteFailed(fmt.Errorf("final library file is outside the series library root; recovery retained"))
+	}
+	info, err := os.Lstat(finalPath)
+	if err != nil {
 		return promoteFailed(err)
-	} else if !info.Mode().IsRegular() {
+	}
+	if !info.Mode().IsRegular() {
 		return promoteFailed(fmt.Errorf("final library file is not a regular file"))
 	}
-	if err := e.verifyPromotionHash(ctx, finalPath, p.CandidateSHA); err != nil {
+	if p.CandidateBytes > 0 && info.Size() != p.CandidateBytes {
+		return promoteFailed(fmt.Errorf("final library file size %d differs from the validated candidate size %d; recovery retained", info.Size(), p.CandidateBytes))
+	}
+	if err := e.verifyPromotionHashStable(ctx, finalPath, p.CandidateSHA); err != nil {
 		return promoteFailed(err)
 	}
 	if needsIdentitySave {
@@ -353,7 +416,7 @@ func (e *Engine) stepPromoteFinalize(ctx context.Context, ec *ExecutionContext) 
 				return promoteFailed(err)
 			}
 			for _, f := range snap.Files {
-				if filepath.Clean(f.Path) == p.CandidatePath {
+				if filepath.Clean(f.Path) == filepath.Clean(p.CandidatePath) {
 					return promoteFailed(fmt.Errorf("temporary candidate path is still registered in Sonarr"))
 				}
 			}
@@ -393,8 +456,21 @@ func (e *Engine) stepPromoteFinalize(ctx context.Context, ec *ExecutionContext) 
 	} else if !os.IsNotExist(err) || !p.RecoveryCleanupStarted {
 		return promoteFailed(fmt.Errorf("recovery copy disappeared before verified cleanup"))
 	}
-	_ = os.Remove(filepath.Dir(p.BackupPath)) // only empty private directories
-	_ = os.Remove(filepath.Dir(filepath.Dir(p.BackupPath)))
+	// Cleanup is confined to the expected per-promotion key directory and its
+	// direct .promotion-recovery parent, using empty-only os.Remove semantics.
+	keyDir, parentDir := promotionRecoveryDirs(p.BackupPath)
+	_ = os.Remove(keyDir)
+	if filepath.Base(parentDir) == ".promotion-recovery" {
+		_ = os.Remove(parentDir)
+	}
+	// Shared candidate folders can contain other jobs. Remove only the exact
+	// empty candidate parent, never siblings or ancestors of the series root.
+	candidateDir := filepath.Dir(p.CandidatePath)
+	if filepath.Base(candidateDir) == ".navigatorr-candidates" && withinPromotionPath(p.SeriesPath, candidateDir) {
+		if _, err := e.promotionPath(candidateDir, true); err == nil {
+			_ = os.Remove(candidateDir)
+		}
+	}
 	p.BackupVerified = false
 	if err := e.savePromotion(ctx, ec, p); err != nil {
 		return promoteFailed(err)

@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jakenesler/navigatorr/mediainspect"
 )
@@ -38,12 +39,57 @@ func (e *Engine) promotionPath(path string, write bool) (string, error) {
 	return resolved, nil
 }
 
+// promotionRecoveryPath derives the deterministic recovery backup path for a
+// promotion from durable promotion identity. preserve and every consumer of a
+// persisted BackupPath must use this single scheme so a tampered path can never
+// redirect recovery verification or cleanup.
+func promotionRecoveryPath(service, sourceActionID, candidatePath string) string {
+	key := sha256.Sum256([]byte(service + "\x00" + sourceActionID))
+	return filepath.Join(filepath.Dir(candidatePath), ".promotion-recovery", hex.EncodeToString(key[:]), "original.bak")
+}
+
+func promotionExpectedBackupPath(p *promotionState) (string, error) {
+	if p.CandidatePath == "" {
+		return "", fmt.Errorf("promotion candidate path is required to derive the recovery location")
+	}
+	return promotionRecoveryPath(p.Service, p.SourceActionID, p.CandidatePath), nil
+}
+
+// promotionBackupPathMatches fails closed when a persisted BackupPath does not
+// equal the path derived from durable promotion identity. It must gate any
+// trust, verification, or deletion of recovery state.
+func promotionBackupPathMatches(p *promotionState) error {
+	if p.BackupPath == "" {
+		return nil
+	}
+	expected, err := promotionExpectedBackupPath(p)
+	if err != nil {
+		return err
+	}
+	if filepath.Clean(p.BackupPath) != filepath.Clean(expected) {
+		return fmt.Errorf("persisted recovery path %q does not match the deterministic promotion location %q; refusing to trust or delete it", p.BackupPath, expected)
+	}
+	return nil
+}
+
+// promotionRecoveryDirs returns the expected per-promotion recovery key
+// directory and its direct .promotion-recovery parent. Cleanup removes only
+// these direct parents, never arbitrary ancestors of a persisted path.
+func promotionRecoveryDirs(backupPath string) (keyDir, parentDir string) {
+	keyDir = filepath.Dir(backupPath)
+	return keyDir, filepath.Dir(keyDir)
+}
+
 func (e *Engine) promotionHash(ctx context.Context, path string) (string, int64, error) {
 	resolved, err := e.promotionPath(path, false)
 	if err != nil {
 		return "", 0, err
 	}
-	before, err := os.Lstat(resolved)
+	lstat := os.Lstat
+	if e.promotionLstatHook != nil {
+		lstat = e.promotionLstatHook
+	}
+	before, err := lstat(resolved)
 	if err != nil {
 		return "", 0, err
 	}
@@ -67,11 +113,18 @@ func (e *Engine) promotionHash(ctx context.Context, path string) (string, int64,
 	if err != nil {
 		return "", 0, err
 	}
-	after, err := os.Lstat(resolved)
+	after, err := lstat(resolved)
 	if err != nil {
 		return "", 0, err
 	}
-	if !os.SameFile(before, after) || before.Size() != n || !before.ModTime().Equal(after.ModTime()) {
+	finished, err := f.Stat()
+	if err != nil {
+		return "", 0, err
+	}
+	// Use the opened descriptor for size/mtime stability. Pathname attributes
+	// may still describe the pre-close NAS copy even though the descriptor sees
+	// the complete file. Path stats prove identity, never completion metadata.
+	if !os.SameFile(opened, after) || !os.SameFile(opened, finished) || opened.Size() != n || finished.Size() != n || !opened.ModTime().Equal(finished.ModTime()) {
 		return "", 0, fmt.Errorf("file changed while hashing: %s", path)
 	}
 	return hex.EncodeToString(h.Sum(nil)), n, nil
@@ -91,6 +144,55 @@ func (r *promotionContextReader) Read(p []byte) (int, error) {
 
 func (e *Engine) verifyPromotionHash(ctx context.Context, path, expected string) error {
 	actual, _, err := e.promotionHash(ctx, path)
+	if err != nil {
+		return err
+	}
+	if actual != expected {
+		return fmt.Errorf("integrity violation: SHA-256 changed for %s", path)
+	}
+	return nil
+}
+
+const promotionStableHashAttempts = 5
+
+// promotionHashStable retries the strict, single-shot promotionHash when the
+// filesystem exposes transiently inconsistent metadata (a common race on
+// network mounts immediately after a writer closes). It never relaxes the
+// integrity contract: a successful result is always a full stable read, and a
+// file that never settles is reported as an error after bounded retries.
+func (e *Engine) promotionHashStable(ctx context.Context, path string) (string, int64, error) {
+	var lastErr error
+	for attempt := 0; attempt < promotionStableHashAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return "", 0, err
+		}
+		hash, n, err := e.promotionHash(ctx, path)
+		if err == nil {
+			return hash, n, nil
+		}
+		if !transientPromotionHashError(err) {
+			return "", 0, err
+		}
+		lastErr = err
+		select {
+		case <-ctx.Done():
+			return "", 0, ctx.Err()
+		case <-time.After(time.Duration(attempt+1) * 20 * time.Millisecond):
+		}
+	}
+	return "", 0, lastErr
+}
+
+func transientPromotionHashError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "file changed while opening") || strings.Contains(msg, "file changed while hashing")
+}
+
+func (e *Engine) verifyPromotionHashStable(ctx context.Context, path, expected string) error {
+	actual, _, err := e.promotionHashStable(ctx, path)
 	if err != nil {
 		return err
 	}
@@ -153,6 +255,14 @@ func (e *Engine) stepPromotePlan(ctx context.Context, ec *ExecutionContext) (Ste
 	p.CandidateSHA, p.CandidateBytes, err = e.promotionHash(ctx, p.CandidatePath)
 	if err != nil {
 		return promoteFailed(err)
+	}
+	// Modern workers attest the candidate before publication. Do not replace
+	// that baseline with a fresh digest of potentially changed NAS bytes.
+	if expected := getString(source.State, "candidate_sha256"); expected != "" && expected != p.CandidateSHA {
+		return promoteFailed(fmt.Errorf("candidate SHA-256 changed since worker validation; promotion blocked"))
+	}
+	if expected := getInt64(source.State, "candidate_size_bytes"); expected > 0 && expected != p.CandidateBytes {
+		return promoteFailed(fmt.Errorf("candidate size changed since worker validation; promotion blocked"))
 	}
 	// Reuse the full transcode stream validator without accepting any prior
 	// loss override. Approval is for a validated replacement, not lost streams.
@@ -250,8 +360,11 @@ func (e *Engine) stepPromotePreserve(ctx context.Context, ec *ExecutionContext) 
 		return promoteFailed(fmt.Errorf("the original Sonarr episodeFile is reserved by another promotion; resume its recorded action before trying another candidate"))
 	}
 	if p.BackupPath == "" {
-		key := sha256.Sum256([]byte(p.Service + "\x00" + p.SourceActionID))
-		p.BackupPath = filepath.Join(filepath.Dir(p.CandidatePath), ".promotion-recovery", hex.EncodeToString(key[:]), "original.bak")
+		expected, err := promotionExpectedBackupPath(p)
+		if err != nil {
+			return promoteFailed(err)
+		}
+		p.BackupPath = expected
 		if err := e.savePromotion(ctx, ec, p); err != nil {
 			return promoteFailed(err)
 		}
@@ -266,7 +379,7 @@ func (e *Engine) stepPromotePreserve(ctx context.Context, ec *ExecutionContext) 
 		return promoteFailed(err)
 	}
 	if _, err := os.Lstat(p.BackupPath); err == nil {
-		if err := e.verifyPromotionHash(ctx, p.BackupPath, p.OriginalSHA); err != nil {
+		if err := e.verifyPromotionHashStable(ctx, p.BackupPath, p.OriginalSHA); err != nil {
 			return promoteFailed(err)
 		}
 		if err := e.promotionRemovePartial(ctx, ec, p); err != nil {
@@ -286,8 +399,9 @@ func (e *Engine) stepPromotePreserve(ctx context.Context, ec *ExecutionContext) 
 			// Retry/re-entry: a previous attempt may have completed the private
 			// copy but crashed before the atomic rename. Reuse a stable, exact
 			// copy instead of discarding it and copying the original again.
+			// An unstable or mismatched partial is never trusted for reuse.
 			if info.Size() == p.OriginalBytes && p.OriginalBytes > 0 {
-				hash, n, hashErr := e.promotionHash(ctx, partial)
+				hash, n, hashErr := e.promotionHashStable(ctx, partial)
 				if hashErr == nil && hash == p.OriginalSHA && n == p.OriginalBytes {
 					if err := e.promotionPublishPartial(ctx, ec, p, partial); err != nil {
 						return promoteFailed(err)
@@ -303,28 +417,13 @@ func (e *Engine) stepPromotePreserve(ctx context.Context, ec *ExecutionContext) 
 		} else if !os.IsNotExist(err) {
 			return promoteFailed(err)
 		}
-		src, err := os.Open(p.OriginalPath)
-		if err != nil {
+		if err := e.promotionCopyToPartial(ctx, p.OriginalPath, partial); err != nil {
 			return promoteFailed(err)
 		}
-		dst, err := os.OpenFile(partial, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-		if err != nil {
-			_ = src.Close()
-			return promoteFailed(err)
-		}
-		_, copyErr := io.Copy(dst, &promotionContextReader{ctx: ctx, r: src})
-		_ = src.Close()
-		if copyErr == nil {
-			copyErr = dst.Sync()
-		}
-		closeErr := dst.Close()
-		if copyErr == nil {
-			copyErr = closeErr
-		}
-		if copyErr != nil {
-			return promoteFailed(copyErr)
-		}
-		if err := e.verifyPromotionHash(ctx, partial, p.OriginalSHA); err != nil {
+		// promotionCopyToPartial returns only after the destination writer is
+		// flushed and closed, so this hashes a finished file, never an active
+		// writer. Stable hashing absorbs transient post-close metadata races.
+		if err := e.verifyPromotionHashStable(ctx, partial, p.OriginalSHA); err != nil {
 			return promoteFailed(err)
 		}
 		// This is an independent copy in the promotion's private directory.
@@ -342,7 +441,44 @@ preserved:
 	return StepResult{Status: StepCompleted, Outputs: map[string]any{"recovery_path": p.BackupPath, "recovery_retained": true}}, nil
 }
 
+// promotionCopyToPartial copies the original into the private recovery
+// partial. It returns only after the destination has been synced and closed,
+// so callers must not hash or publish the partial before it returns.
+func (e *Engine) promotionCopyToPartial(ctx context.Context, srcPath, partial string) error {
+	if _, err := e.promotionPath(partial, true); err != nil {
+		return err
+	}
+	src, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+	dst, err := os.OpenFile(partial, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		_ = src.Close()
+		return err
+	}
+	_, copyErr := io.Copy(dst, &promotionContextReader{ctx: ctx, r: src})
+	_ = src.Close()
+	if copyErr == nil {
+		copyErr = dst.Sync()
+	}
+	closeErr := dst.Close()
+	if copyErr == nil {
+		copyErr = closeErr
+	}
+	if copyErr != nil {
+		return copyErr
+	}
+	if hook := e.promotionCopyBoundaryHook; hook != nil {
+		hook(partial)
+	}
+	return nil
+}
+
 func (e *Engine) promotionPublishPartial(ctx context.Context, ec *ExecutionContext, p *promotionState, partial string) error {
+	if err := promotionBackupPathMatches(p); err != nil {
+		return err
+	}
 	if _, err := e.promotionPath(partial, true); err != nil {
 		return err
 	}
@@ -350,7 +486,7 @@ func (e *Engine) promotionPublishPartial(ctx context.Context, ec *ExecutionConte
 		return err
 	}
 	if _, err := os.Lstat(p.BackupPath); err == nil {
-		if err := e.verifyPromotionHash(ctx, p.BackupPath, p.OriginalSHA); err != nil {
+		if err := e.verifyPromotionHashStable(ctx, p.BackupPath, p.OriginalSHA); err != nil {
 			return err
 		}
 		return e.promotionRemovePartial(ctx, ec, p)
@@ -374,6 +510,9 @@ func (e *Engine) promotionPublishPartial(ctx context.Context, ec *ExecutionConte
 }
 
 func (e *Engine) promotionRemovePartial(ctx context.Context, ec *ExecutionContext, p *promotionState) error {
+	if err := promotionBackupPathMatches(p); err != nil {
+		return err
+	}
 	partial := p.BackupPath + ".partial"
 	if _, err := e.promotionPath(partial, true); err != nil {
 		return err
@@ -383,7 +522,7 @@ func (e *Engine) promotionRemovePartial(ctx context.Context, ec *ExecutionContex
 	} else if err != nil {
 		return err
 	}
-	if err := e.verifyPromotionHash(ctx, partial, p.OriginalSHA); err != nil {
+	if err := e.verifyPromotionHashStable(ctx, partial, p.OriginalSHA); err != nil {
 		return err
 	}
 	if err := e.savePromotion(ctx, ec, p); err != nil {
@@ -399,21 +538,33 @@ func (e *Engine) promotionVerifyRecovered(ctx context.Context, p *promotionState
 	if !p.BackupVerified || p.BackupPath == "" {
 		return fmt.Errorf("verified recovery copy is required before Sonarr mutations")
 	}
-	return e.verifyPromotionHash(ctx, p.BackupPath, p.OriginalSHA)
+	if err := promotionBackupPathMatches(p); err != nil {
+		return err
+	}
+	return e.verifyPromotionHashStable(ctx, p.BackupPath, p.OriginalSHA)
 }
 
-func (e *Engine) promotionInspectAdopted(ctx context.Context, path, expectedSHA string) error {
-	if _, err := e.promotionPath(path, false); err != nil {
+func (e *Engine) promotionInspectAdopted(ctx context.Context, p *promotionState, path string) error {
+	// Preserve the first physical HEVC check (including legacy checkpoints).
+	// Once bound to CandidateSHA, identical bytes prove identical streams and
+	// later adoption/rename checks need no repeated NAS media probe.
+	if !p.CandidateMediaVerified {
+		if _, err := e.promotionPath(path, false); err != nil {
+			return err
+		}
+		rep, err := mediainspect.InspectDetailed(ctx, e.deps.Ffprobe, path)
+		if err != nil {
+			return err
+		}
+		if !rep.Probed || len(rep.Video) == 0 || !promotionHEVC(rep.Video[0].Codec) {
+			return fmt.Errorf("Sonarr's physical file is not a verified HEVC candidate")
+		}
+	}
+	if err := e.verifyPromotionHashStable(ctx, path, p.CandidateSHA); err != nil {
 		return err
 	}
-	rep, err := mediainspect.InspectDetailed(ctx, e.deps.Ffprobe, path)
-	if err != nil {
-		return err
-	}
-	if !rep.Probed || len(rep.Video) == 0 || !promotionHEVC(rep.Video[0].Codec) {
-		return fmt.Errorf("Sonarr's physical file is not a verified HEVC candidate")
-	}
-	return e.verifyPromotionHash(ctx, path, expectedSHA)
+	p.CandidateMediaVerified = true
+	return nil
 }
 
 func promotionHEVC(codec string) bool {
