@@ -313,6 +313,12 @@ func (e *Engine) stepPromoteFinalize(ctx context.Context, ec *ExecutionContext) 
 	if temporaryPromotionPath(finalPath) {
 		return promoteFailed(fmt.Errorf("final active candidate must be outside .navigatorr-candidates; recovery retained"))
 	}
+	// Tolerate Sonarr still reporting the stale pre-rename temporary path, but
+	// never silently accept a different non-temporary library path: that is
+	// identity drift and must fail closed with recovery retained.
+	if !temporaryPromotionPath(adopted.Path) && filepath.Clean(adopted.Path) != finalPath {
+		return promoteFailed(fmt.Errorf("Sonarr reports adopted library path %q but the durable new_path is %q; recovery retained", adopted.Path, finalPath))
+	}
 	if _, err := e.promotionPath(finalPath, false); err != nil {
 		return promoteFailed(err)
 	}

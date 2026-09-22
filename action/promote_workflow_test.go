@@ -44,6 +44,7 @@ type promotionHarness struct {
 	poisonCandidateOnImport            bool
 	stalePathAfterRescan               bool
 	permanentStaleFinalPath            bool
+	adoptedPathOverride                string
 	stalePathReads                     int
 	backupSeen                         bool
 }
@@ -122,10 +123,15 @@ func (h *promotionHarness) serve(w http.ResponseWriter, r *http.Request) {
 	case r.Method == "GET" && r.URL.Path == "/api/v3/episodefile":
 		files := []promotionFile{}
 		for _, f := range h.files {
-			if f.ID == 202 && (h.permanentStaleFinalPath || h.stalePathReads > 0) {
-				f.Path = h.candidate
-				if h.stalePathReads > 0 {
-					h.stalePathReads--
+			if f.ID == 202 {
+				if h.permanentStaleFinalPath || h.stalePathReads > 0 {
+					f.Path = h.candidate
+					if h.stalePathReads > 0 {
+						h.stalePathReads--
+					}
+				}
+				if h.adoptedPathOverride != "" {
+					f.Path = h.adoptedPathOverride
 				}
 			}
 			files = append(files, f)
@@ -740,6 +746,12 @@ func TestPromotionFinalizeUsesDurableNewPathNotCandidatePath(t *testing.T) {
 	if _, err := os.Stat(p.BackupPath); !os.IsNotExist(err) {
 		t.Fatalf("verified recovery was not removed after finalize: %v", err)
 	}
+	if _, err := os.Stat(filepath.Dir(p.BackupPath)); !os.IsNotExist(err) {
+		t.Fatalf("empty per-promotion recovery directory not removed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(filepath.Dir(p.BackupPath))); !os.IsNotExist(err) {
+		t.Fatalf("empty recovery parent directory not removed: %v", err)
+	}
 	finalBytes, err := os.ReadFile(h.final)
 	if err != nil {
 		t.Fatal(err)
@@ -778,6 +790,58 @@ func TestPromotionFinalizeRetriesAfterReloadFromPersistedState(t *testing.T) {
 	}
 	if _, err := os.Stat(p.BackupPath); !os.IsNotExist(err) {
 		t.Fatalf("recovery not cleaned after retry: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(p.BackupPath)); !os.IsNotExist(err) {
+		t.Fatalf("empty per-promotion recovery directory not removed after retry: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(filepath.Dir(p.BackupPath))); !os.IsNotExist(err) {
+		t.Fatalf("empty recovery parent directory not removed after retry: %v", err)
+	}
+}
+
+func TestPromotionFinalizeFailsClosedWhenSonarrReportsDifferentNonTemporaryPath(t *testing.T) {
+	h := newPromotionHarness(t)
+	// Sonarr associates the expected new_episode_file_id with a different
+	// non-temporary library path than the durable new_path. That is identity
+	// drift: finalize must fail closed instead of waiting or accepting it.
+	h.adoptedPathOverride = filepath.Join(filepath.Join(h.root, "Series", "Season 1"), "Series S01E01-E02-alt.mkv")
+	id, p := h.seedPostRenameFinalize(t, nil)
+	if temporaryPromotionPath(h.adoptedPathOverride) {
+		t.Fatal("fixture error: override must be a non-temporary path")
+	}
+	if _, err := os.ReadFile(h.final); err != nil {
+		t.Fatalf("fixture error: durable new_path must exist: %v", err)
+	}
+	r := h.resume(id, "")
+	if r.Status != StatusFailed {
+		t.Fatalf("drifted adopted path was not rejected: %s %s", r.Status, r.Error)
+	}
+	if !strings.Contains(r.Error, "durable new_path") {
+		t.Fatalf("drift failure did not name the durable new_path: %s", r.Error)
+	}
+	if _, err := os.Stat(p.BackupPath); err != nil {
+		t.Fatalf("recovery must be retained on adopted-path drift: %v", err)
+	}
+}
+
+func TestPromotionFinalizeRetainsNonEmptyRecoveryDirectory(t *testing.T) {
+	h := newPromotionHarness(t)
+	id, p := h.seedPostRenameFinalize(t, nil)
+	recoveryDir := filepath.Dir(p.BackupPath)
+	extra := filepath.Join(recoveryDir, "unrelated.txt")
+	if err := os.WriteFile(extra, []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	r := h.resume(id, "")
+	if r.Status != StatusCompleted {
+		t.Fatalf("finalize with non-empty recovery dir: %s %s", r.Status, r.Error)
+	}
+	if _, err := os.Stat(p.BackupPath); !os.IsNotExist(err) {
+		t.Fatalf("recovery backup not removed: %v", err)
+	}
+	// Cleanup only removes empty directories; unrelated content is preserved.
+	if _, err := os.Stat(extra); err != nil {
+		t.Fatalf("unrelated recovery-directory content was not preserved safely: %v", err)
 	}
 }
 
