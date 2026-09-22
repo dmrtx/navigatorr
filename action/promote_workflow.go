@@ -408,29 +408,8 @@ func (e *Engine) stepPromoteFinalize(ctx context.Context, ec *ExecutionContext) 
 		}
 	}
 	if filepath.Clean(p.CandidatePath) != finalPath {
-		if _, err := os.Lstat(p.CandidatePath); err == nil {
-			if _, err := e.promotionPath(p.CandidatePath, true); err != nil {
-				return promoteFailed(err)
-			}
-			if err := e.verifyPromotionHash(ctx, p.CandidatePath, p.CandidateSHA); err != nil {
-				return promoteFailed(err)
-			}
-			for _, f := range snap.Files {
-				if filepath.Clean(f.Path) == filepath.Clean(p.CandidatePath) {
-					return promoteFailed(fmt.Errorf("temporary candidate path is still registered in Sonarr"))
-				}
-			}
-			if err := e.savePromotion(ctx, ec, p); err != nil {
-				return promoteFailed(err)
-			}
-			if err := ctx.Err(); err != nil {
-				return promoteFailed(err)
-			}
-			if err := os.Remove(p.CandidatePath); err != nil {
-				return promoteFailed(err)
-			}
-		} else if !os.IsNotExist(err) {
-			return promoteFailed(err)
+		if err := e.promotionRemoveLeftoverCandidate(ctx, ec, p, snap); err != nil {
+			return promoteFailed(fmt.Errorf("clean up leftover candidate: %w", err))
 		}
 	}
 	if _, err := e.promotionPath(p.BackupPath, true); err != nil {
