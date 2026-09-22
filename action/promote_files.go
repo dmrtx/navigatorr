@@ -39,6 +39,47 @@ func (e *Engine) promotionPath(path string, write bool) (string, error) {
 	return resolved, nil
 }
 
+// promotionRecoveryPath derives the deterministic recovery backup path for a
+// promotion from durable promotion identity. preserve and every consumer of a
+// persisted BackupPath must use this single scheme so a tampered path can never
+// redirect recovery verification or cleanup.
+func promotionRecoveryPath(service, sourceActionID, candidatePath string) string {
+	key := sha256.Sum256([]byte(service + "\x00" + sourceActionID))
+	return filepath.Join(filepath.Dir(candidatePath), ".promotion-recovery", hex.EncodeToString(key[:]), "original.bak")
+}
+
+func promotionExpectedBackupPath(p *promotionState) (string, error) {
+	if p.CandidatePath == "" {
+		return "", fmt.Errorf("promotion candidate path is required to derive the recovery location")
+	}
+	return promotionRecoveryPath(p.Service, p.SourceActionID, p.CandidatePath), nil
+}
+
+// promotionBackupPathMatches fails closed when a persisted BackupPath does not
+// equal the path derived from durable promotion identity. It must gate any
+// trust, verification, or deletion of recovery state.
+func promotionBackupPathMatches(p *promotionState) error {
+	if p.BackupPath == "" {
+		return nil
+	}
+	expected, err := promotionExpectedBackupPath(p)
+	if err != nil {
+		return err
+	}
+	if filepath.Clean(p.BackupPath) != filepath.Clean(expected) {
+		return fmt.Errorf("persisted recovery path %q does not match the deterministic promotion location %q; refusing to trust or delete it", p.BackupPath, expected)
+	}
+	return nil
+}
+
+// promotionRecoveryDirs returns the expected per-promotion recovery key
+// directory and its direct .promotion-recovery parent. Cleanup removes only
+// these direct parents, never arbitrary ancestors of a persisted path.
+func promotionRecoveryDirs(backupPath string) (keyDir, parentDir string) {
+	keyDir = filepath.Dir(backupPath)
+	return keyDir, filepath.Dir(keyDir)
+}
+
 func (e *Engine) promotionHash(ctx context.Context, path string) (string, int64, error) {
 	resolved, err := e.promotionPath(path, false)
 	if err != nil {
@@ -300,8 +341,11 @@ func (e *Engine) stepPromotePreserve(ctx context.Context, ec *ExecutionContext) 
 		return promoteFailed(fmt.Errorf("the original Sonarr episodeFile is reserved by another promotion; resume its recorded action before trying another candidate"))
 	}
 	if p.BackupPath == "" {
-		key := sha256.Sum256([]byte(p.Service + "\x00" + p.SourceActionID))
-		p.BackupPath = filepath.Join(filepath.Dir(p.CandidatePath), ".promotion-recovery", hex.EncodeToString(key[:]), "original.bak")
+		expected, err := promotionExpectedBackupPath(p)
+		if err != nil {
+			return promoteFailed(err)
+		}
+		p.BackupPath = expected
 		if err := e.savePromotion(ctx, ec, p); err != nil {
 			return promoteFailed(err)
 		}
@@ -413,6 +457,9 @@ func (e *Engine) promotionCopyToPartial(ctx context.Context, srcPath, partial st
 }
 
 func (e *Engine) promotionPublishPartial(ctx context.Context, ec *ExecutionContext, p *promotionState, partial string) error {
+	if err := promotionBackupPathMatches(p); err != nil {
+		return err
+	}
 	if _, err := e.promotionPath(partial, true); err != nil {
 		return err
 	}
@@ -444,6 +491,9 @@ func (e *Engine) promotionPublishPartial(ctx context.Context, ec *ExecutionConte
 }
 
 func (e *Engine) promotionRemovePartial(ctx context.Context, ec *ExecutionContext, p *promotionState) error {
+	if err := promotionBackupPathMatches(p); err != nil {
+		return err
+	}
 	partial := p.BackupPath + ".partial"
 	if _, err := e.promotionPath(partial, true); err != nil {
 		return err
@@ -453,7 +503,7 @@ func (e *Engine) promotionRemovePartial(ctx context.Context, ec *ExecutionContex
 	} else if err != nil {
 		return err
 	}
-	if err := e.verifyPromotionHash(ctx, partial, p.OriginalSHA); err != nil {
+	if err := e.verifyPromotionHashStable(ctx, partial, p.OriginalSHA); err != nil {
 		return err
 	}
 	if err := e.savePromotion(ctx, ec, p); err != nil {
@@ -469,7 +519,10 @@ func (e *Engine) promotionVerifyRecovered(ctx context.Context, p *promotionState
 	if !p.BackupVerified || p.BackupPath == "" {
 		return fmt.Errorf("verified recovery copy is required before Sonarr mutations")
 	}
-	return e.verifyPromotionHash(ctx, p.BackupPath, p.OriginalSHA)
+	if err := promotionBackupPathMatches(p); err != nil {
+		return err
+	}
+	return e.verifyPromotionHashStable(ctx, p.BackupPath, p.OriginalSHA)
 }
 
 func (e *Engine) promotionInspectAdopted(ctx context.Context, path, expectedSHA string) error {
