@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -23,6 +24,15 @@ type Engine struct {
 	templates      map[string]ActionTemplate
 	reconcilerOnce sync.Once
 	reconcilerDone chan struct{}
+
+	// promotionCopyBoundaryHook, when set by tests, runs after a private
+	// recovery copy has been flushed and closed and before it is verified or
+	// published. It exists to make the promote copy/verify boundary
+	// deterministic in tests; production leaves it nil.
+	promotionCopyBoundaryHook func(partial string)
+	// Test seam for delayed pathname metadata on network mounts. Descriptor
+	// stats still use the real opened file.
+	promotionLstatHook func(string) (os.FileInfo, error)
 }
 
 // NewEngine creates a new Action Engine.

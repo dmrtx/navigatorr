@@ -1,6 +1,7 @@
 package action
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -98,6 +99,85 @@ func TestPromotionRebuildsIncompletePartial(t *testing.T) {
 	}
 }
 
+func TestPromotionNeverTrustsMismatchedPartialAtExactSize(t *testing.T) {
+	h := newPromotionHarness(t)
+	r := h.run()
+	if r.Status != StatusWaitingDecision {
+		t.Fatalf("plan: %s %s", r.Status, r.Error)
+	}
+	backupPath := expectedPromotionBackup(h.candidate)
+	partial := backupPath + ".partial"
+	if err := os.MkdirAll(filepath.Dir(backupPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	originalBytes, err := os.ReadFile(h.original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Same size as the original but different content: a size-only retry check
+	// would publish this corrupt partial as the recovery copy.
+	mismatched := append([]byte{}, originalBytes...)
+	mismatched[len(mismatched)/2] ^= 0xFF
+	if err := os.WriteFile(partial, mismatched, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	r = h.resume(r.ID, "approve")
+	if r.Status != StatusWaitingExternal {
+		t.Fatalf("mismatched partial was not rebuilt: %s %s", r.Status, r.Error)
+	}
+	p, err := loadPromotion(&ExecutionContext{State: r.State})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backupBytes, err := os.ReadFile(p.BackupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(backupBytes, originalBytes) {
+		t.Fatal("mismatched partial was trusted as the recovery copy")
+	}
+	if _, err := os.Lstat(partial); !os.IsNotExist(err) {
+		t.Fatalf("mismatched partial retained: %v", err)
+	}
+}
+
+func TestPromotionVerifiesRecoveryOnlyAfterCopyIsClosedAndSynced(t *testing.T) {
+	h := newPromotionHarness(t)
+	originalBytes, err := os.ReadFile(h.original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundaryObserved := false
+	// The hook runs after the copy destination has been synced and closed. If
+	// verification ran before that boundary, corrupting the finished copy here
+	// could not be detected; the step must fail instead of publishing it.
+	h.engine.promotionCopyBoundaryHook = func(partial string) {
+		boundaryObserved = true
+		got, err := os.ReadFile(partial)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, originalBytes) {
+			t.Fatalf("copy boundary hook saw an incomplete copy: %d of %d bytes", len(got), len(originalBytes))
+		}
+		if err := os.WriteFile(partial, bytes.Repeat([]byte("x"), len(originalBytes)), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := h.run()
+	r = h.resume(r.ID, "approve")
+	if !boundaryObserved {
+		t.Fatal("copy boundary hook was never observed")
+	}
+	if r.Status != StatusFailed || !strings.Contains(r.Error, "SHA-256") {
+		t.Fatalf("verification did not run after the finished copy boundary: %s %s", r.Status, r.Error)
+	}
+	if h.imports != 0 {
+		t.Fatalf("Sonarr was mutated despite a corrupted recovery partial: imports=%d", h.imports)
+	}
+}
+
 func TestPromotionFinalizeWaitsForStaleSonarrPathThenUsesDurableNewPath(t *testing.T) {
 	h := newPromotionHarness(t)
 	h.stalePathAfterRescan = true
@@ -132,5 +212,52 @@ func TestPromotionFinalizeWaitsForStaleSonarrPathThenUsesDurableNewPath(t *testi
 	}
 	if !strings.Contains(strings.Join(h.mutationOrder, ","), "rename,rescan") {
 		t.Fatalf("rename/rescan not observed: %v", h.mutationOrder)
+	}
+}
+
+func TestPromotionHashUsesDescriptorDespiteStaleNASPathMetadata(t *testing.T) {
+	h := newPromotionHarness(t)
+	path := filepath.Join(h.root, "closed-copy.partial")
+	if err := os.WriteFile(path, []byte("short"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	stale, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := []byte("complete synced recovery copy")
+	if err := os.WriteFile(path, contents, 0600); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	h.engine.promotionLstatHook = func(name string) (os.FileInfo, error) { calls++; return stale, nil }
+	hash, n, err := h.engine.promotionHashStable(context.Background(), path)
+	expected := sha256.Sum256(contents)
+	if err != nil || hash != hex.EncodeToString(expected[:]) || n != int64(len(contents)) {
+		t.Fatalf("closed copy rejected: hash=%s n=%d err=%v", hash, n, err)
+	}
+	if calls != 2 {
+		t.Fatalf("metadata lag caused repeated full hashing: %d stats", calls)
+	}
+}
+
+func TestPromotionHashRejectsRealChangeDuringRead(t *testing.T) {
+	h := newPromotionHarness(t)
+	path := filepath.Join(h.root, "changing.partial")
+	if err := os.WriteFile(path, []byte("original bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	h.engine.promotionLstatHook = func(name string) (os.FileInfo, error) {
+		calls++
+		if calls == 2 {
+			if err := os.WriteFile(name, []byte("different length bytes"), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return os.Lstat(name)
+	}
+	if _, _, err := h.engine.promotionHash(context.Background(), path); err == nil {
+		t.Fatal("real modification was accepted as metadata lag")
 	}
 }

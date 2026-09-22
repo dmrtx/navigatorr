@@ -219,6 +219,19 @@ func (w *Worker) initializeStorageTelemetry(job *JobRecord) {
 // Stored direct-SMB jobs cannot silently switch backend after a config change;
 // nor may a legacy local layout bypass SSD staging when direct SMB is enabled.
 func (w *Worker) validateJobStorageBackend(job *JobRecord, r *resolvedOperational) error {
+	if r.staging != StagingStateNotRequired {
+		if err := w.requireLocalScratch(r.stagedInput); err != nil {
+			return err
+		}
+		if err := w.requireLocalScratch(r.effectiveInput); err != nil {
+			return err
+		}
+	}
+	if r.finalization != FinalizationStateNotRequired {
+		if err := w.requireLocalScratch(r.localCandidate); err != nil {
+			return err
+		}
+	}
 	if job.StorageBackend == "smb_direct" && (w.mediaStore == nil || !w.mediaStore.Maps(job.Source) || !w.mediaStore.Maps(job.Candidate)) {
 		return fmt.Errorf("storage_backend_mismatch: persisted smb_direct job requires its direct SMB mapping")
 	}
