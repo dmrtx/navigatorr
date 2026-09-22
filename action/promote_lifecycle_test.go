@@ -128,6 +128,67 @@ func TestPromotionCleanupPreservesOtherCandidates(t *testing.T) {
 	}
 }
 
+func TestPromotionFinalizeToleratesCandidateDisappearingBeforeHash(t *testing.T) {
+	h := newPromotionHarness(t)
+	id, p := h.seedPostRenameFinalize(t, nil)
+	final, err := os.ReadFile(h.final)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.candidate, final, 0600); err != nil {
+		t.Fatal(err)
+	}
+	// The optional leftover existed at cleanup discovery, but an external
+	// rename/removal becomes visible before it can be opened for hashing.
+	disappeared := false
+	h.engine.promotionLstatHook = func(path string) (os.FileInfo, error) {
+		if path == h.candidate && !disappeared {
+			stale, err := os.Lstat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			disappeared = true
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			return stale, nil
+		}
+		return os.Lstat(path)
+	}
+	r := h.resume(id, "")
+	if !disappeared || r.Status != StatusCompleted {
+		t.Fatalf("optional candidate disappearance: %s %s", r.Status, r.Error)
+	}
+	if _, err := os.Stat(p.BackupPath); !os.IsNotExist(err) {
+		t.Fatalf("recovery not cleaned after verified finalization: %v", err)
+	}
+	got, err := os.ReadFile(h.final)
+	if err != nil || string(got) != string(final) {
+		t.Fatalf("final file changed: %v", err)
+	}
+}
+
+func TestPromotionFinalizeRetainsChangedLeftoverCandidate(t *testing.T) {
+	h := newPromotionHarness(t)
+	id, p := h.seedPostRenameFinalize(t, func(p *promotionState) {
+		// E01's final filename is also the former original filename.
+		p.OriginalPath = h.final
+	})
+	if err := os.WriteFile(h.candidate, []byte("unapproved replacement"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	r := h.resume(id, "")
+	if r.Status != StatusFailed || !strings.Contains(r.Error, "SHA-256 changed") {
+		t.Fatalf("changed leftover accepted: %s %s", r.Status, r.Error)
+	}
+	if _, err := os.Stat(p.BackupPath); err != nil {
+		t.Fatalf("required recovery removed: %v", err)
+	}
+	if got, err := os.ReadFile(h.candidate); err != nil || string(got) != "unapproved replacement" {
+		t.Fatalf("changed leftover was removed: %q %v", got, err)
+	}
+}
+
 func TestPromotionRejectsChangedWorkerAttestedCandidate(t *testing.T) {
 	h := newPromotionHarness(t)
 	source, err := h.st.GetActionInstance("source-transcode")
