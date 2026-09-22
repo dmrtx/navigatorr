@@ -85,7 +85,11 @@ func (e *Engine) promotionHash(ctx context.Context, path string) (string, int64,
 	if err != nil {
 		return "", 0, err
 	}
-	before, err := os.Lstat(resolved)
+	lstat := os.Lstat
+	if e.promotionLstatHook != nil {
+		lstat = e.promotionLstatHook
+	}
+	before, err := lstat(resolved)
 	if err != nil {
 		return "", 0, err
 	}
@@ -109,11 +113,18 @@ func (e *Engine) promotionHash(ctx context.Context, path string) (string, int64,
 	if err != nil {
 		return "", 0, err
 	}
-	after, err := os.Lstat(resolved)
+	after, err := lstat(resolved)
 	if err != nil {
 		return "", 0, err
 	}
-	if !os.SameFile(before, after) || before.Size() != n || !before.ModTime().Equal(after.ModTime()) {
+	finished, err := f.Stat()
+	if err != nil {
+		return "", 0, err
+	}
+	// Use the opened descriptor for size/mtime stability. Pathname attributes
+	// may still describe the pre-close NAS copy even though the descriptor sees
+	// the complete file. Path stats prove identity, never completion metadata.
+	if !os.SameFile(opened, after) || !os.SameFile(opened, finished) || opened.Size() != n || finished.Size() != n || !opened.ModTime().Equal(finished.ModTime()) {
 		return "", 0, fmt.Errorf("file changed while hashing: %s", path)
 	}
 	return hex.EncodeToString(h.Sum(nil)), n, nil
@@ -245,6 +256,14 @@ func (e *Engine) stepPromotePlan(ctx context.Context, ec *ExecutionContext) (Ste
 	if err != nil {
 		return promoteFailed(err)
 	}
+	// Modern workers attest the candidate before publication. Do not replace
+	// that baseline with a fresh digest of potentially changed NAS bytes.
+	if expected := getString(source.State, "candidate_sha256"); expected != "" && expected != p.CandidateSHA {
+		return promoteFailed(fmt.Errorf("candidate SHA-256 changed since worker validation; promotion blocked"))
+	}
+	if expected := getInt64(source.State, "candidate_size_bytes"); expected > 0 && expected != p.CandidateBytes {
+		return promoteFailed(fmt.Errorf("candidate size changed since worker validation; promotion blocked"))
+	}
 	// Reuse the full transcode stream validator without accepting any prior
 	// loss override. Approval is for a validated replacement, not lost streams.
 	// Promotion intentionally performs a real full inspection of the published
@@ -360,7 +379,7 @@ func (e *Engine) stepPromotePreserve(ctx context.Context, ec *ExecutionContext) 
 		return promoteFailed(err)
 	}
 	if _, err := os.Lstat(p.BackupPath); err == nil {
-		if err := e.verifyPromotionHash(ctx, p.BackupPath, p.OriginalSHA); err != nil {
+		if err := e.verifyPromotionHashStable(ctx, p.BackupPath, p.OriginalSHA); err != nil {
 			return promoteFailed(err)
 		}
 		if err := e.promotionRemovePartial(ctx, ec, p); err != nil {
@@ -467,7 +486,7 @@ func (e *Engine) promotionPublishPartial(ctx context.Context, ec *ExecutionConte
 		return err
 	}
 	if _, err := os.Lstat(p.BackupPath); err == nil {
-		if err := e.verifyPromotionHash(ctx, p.BackupPath, p.OriginalSHA); err != nil {
+		if err := e.verifyPromotionHashStable(ctx, p.BackupPath, p.OriginalSHA); err != nil {
 			return err
 		}
 		return e.promotionRemovePartial(ctx, ec, p)
@@ -525,18 +544,27 @@ func (e *Engine) promotionVerifyRecovered(ctx context.Context, p *promotionState
 	return e.verifyPromotionHashStable(ctx, p.BackupPath, p.OriginalSHA)
 }
 
-func (e *Engine) promotionInspectAdopted(ctx context.Context, path, expectedSHA string) error {
-	if _, err := e.promotionPath(path, false); err != nil {
+func (e *Engine) promotionInspectAdopted(ctx context.Context, p *promotionState, path string) error {
+	// Preserve the first physical HEVC check (including legacy checkpoints).
+	// Once bound to CandidateSHA, identical bytes prove identical streams and
+	// later adoption/rename checks need no repeated NAS media probe.
+	if !p.CandidateMediaVerified {
+		if _, err := e.promotionPath(path, false); err != nil {
+			return err
+		}
+		rep, err := mediainspect.InspectDetailed(ctx, e.deps.Ffprobe, path)
+		if err != nil {
+			return err
+		}
+		if !rep.Probed || len(rep.Video) == 0 || !promotionHEVC(rep.Video[0].Codec) {
+			return fmt.Errorf("Sonarr's physical file is not a verified HEVC candidate")
+		}
+	}
+	if err := e.verifyPromotionHashStable(ctx, path, p.CandidateSHA); err != nil {
 		return err
 	}
-	rep, err := mediainspect.InspectDetailed(ctx, e.deps.Ffprobe, path)
-	if err != nil {
-		return err
-	}
-	if !rep.Probed || len(rep.Video) == 0 || !promotionHEVC(rep.Video[0].Codec) {
-		return fmt.Errorf("Sonarr's physical file is not a verified HEVC candidate")
-	}
-	return e.verifyPromotionHash(ctx, path, expectedSHA)
+	p.CandidateMediaVerified = true
+	return nil
 }
 
 func promotionHEVC(codec string) bool {

@@ -145,6 +145,11 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 	} else if cancelled {
 		return nil
 	}
+	// Cache population is best effort, but the source identity is not. Check
+	// the staged local bytes even when caching is disabled or staging resumed.
+	if err := verifyLocalDigest(ctx, r.effectiveInput, job.SourceSHA256); err != nil {
+		return w.failJobTerminal(jobDir, jobFile, job, fmt.Errorf("staged source integrity: %w", err))
+	}
 
 	// Ensure plan is resolved
 	if job.Plan == nil {
@@ -346,6 +351,11 @@ func (w *Worker) finalizeOperational(ctx context.Context, jobDir, jobFile string
 	case FinalizationStateNotRequired, FinalizationStateCompleted:
 		return w.completeOperationalJob(jobDir, jobFile, job, r)
 	}
+	// Recheck LOCAL bytes against the accepted checkpoint before touching the
+	// NAS, including publication retries after a process/node restart.
+	if err := verifyCheckpointCandidate(ctx, job, r.localCandidate); err != nil {
+		return w.recordFinalizationFailure(jobDir, jobFile, job, err)
+	}
 
 	if err := w.ensureExternalHealthy(ctx, r.destination); err != nil {
 		return w.recordFinalizationFailure(jobDir, jobFile, job, err)
@@ -468,6 +478,9 @@ func (w *Worker) finalizeOperational(ctx context.Context, jobDir, jobFile string
 			w.removeOwnPartialIfSafe(job, r)
 		}
 		return w.recordFinalizationFailure(jobDir, jobFile, job, ferr)
+	}
+	if err := verifyCheckpointCandidate(ctx, job, r.localCandidate); err != nil {
+		return w.recordFinalizationFailure(jobDir, jobFile, job, err)
 	}
 
 	// Lightweight independent post-publish verification: the published object
@@ -636,6 +649,11 @@ func (w *Worker) cleanupOperationalArtifacts(job *JobRecord, r *resolvedOperatio
 	}
 	if c := strings.TrimSpace(r.localCandidate); c != "" && c != job.Source && c != job.Candidate && c != r.destination && !w.isCachePath(c) {
 		_ = os.Remove(c)
+	}
+	// Remove just this job's empty workspace. Other artifacts, shared cache,
+	// and the workspace root survive; no recursive deletion or globbing.
+	if dir, err := JobWorkDir(w.localWorkDir(), job.ID); err == nil {
+		_ = os.Remove(dir)
 	}
 }
 

@@ -214,3 +214,50 @@ func TestPromotionFinalizeWaitsForStaleSonarrPathThenUsesDurableNewPath(t *testi
 		t.Fatalf("rename/rescan not observed: %v", h.mutationOrder)
 	}
 }
+
+func TestPromotionHashUsesDescriptorDespiteStaleNASPathMetadata(t *testing.T) {
+	h := newPromotionHarness(t)
+	path := filepath.Join(h.root, "closed-copy.partial")
+	if err := os.WriteFile(path, []byte("short"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	stale, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := []byte("complete synced recovery copy")
+	if err := os.WriteFile(path, contents, 0600); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	h.engine.promotionLstatHook = func(name string) (os.FileInfo, error) { calls++; return stale, nil }
+	hash, n, err := h.engine.promotionHashStable(context.Background(), path)
+	expected := sha256.Sum256(contents)
+	if err != nil || hash != hex.EncodeToString(expected[:]) || n != int64(len(contents)) {
+		t.Fatalf("closed copy rejected: hash=%s n=%d err=%v", hash, n, err)
+	}
+	if calls != 2 {
+		t.Fatalf("metadata lag caused repeated full hashing: %d stats", calls)
+	}
+}
+
+func TestPromotionHashRejectsRealChangeDuringRead(t *testing.T) {
+	h := newPromotionHarness(t)
+	path := filepath.Join(h.root, "changing.partial")
+	if err := os.WriteFile(path, []byte("original bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	h.engine.promotionLstatHook = func(name string) (os.FileInfo, error) {
+		calls++
+		if calls == 2 {
+			if err := os.WriteFile(name, []byte("different length bytes"), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return os.Lstat(name)
+	}
+	if _, _, err := h.engine.promotionHash(context.Background(), path); err == nil {
+		t.Fatal("real modification was accepted as metadata lag")
+	}
+}

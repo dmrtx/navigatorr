@@ -169,7 +169,10 @@ func (e *Engine) promotionAdopted(ctx context.Context, svc *arrservice.Service, 
 	if err != nil || !ok {
 		return f, ok, err
 	}
-	if err := e.promotionInspectAdopted(ctx, f.Path, p.CandidateSHA); err != nil {
+	if p.NewFileID > 0 && p.NewFileID != f.ID {
+		return nil, false, fmt.Errorf("adopted episodeFile identity changed; recovery retained")
+	}
+	if err := e.promotionInspectAdopted(ctx, p, f.Path); err != nil {
 		return nil, false, err
 	}
 	p.NewFileID, p.NewPath = f.ID, f.Path

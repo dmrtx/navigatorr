@@ -564,6 +564,11 @@ func (w *Worker) operationalMetadataFor(source, candidate, jobID string) (*opera
 	if w.mediaStore != nil && w.mediaStore.Maps(source) {
 		stage = true
 	}
+	if stage || IsExternalPath(candidate, w.cfg.ExternalRoots) || (w.mediaStore != nil && w.mediaStore.Maps(candidate)) {
+		if err := w.requireLocalScratch(w.localWorkDir()); err != nil {
+			return nil, err
+		}
+	}
 	if stage {
 		staged, err := StagedInputPath(w.localWorkDir(), jobID, source)
 		if err != nil {

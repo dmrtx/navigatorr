@@ -43,6 +43,29 @@ type CandidateAttestation struct {
 	PixelFormat string
 }
 
+func verifyCheckpointCandidate(ctx context.Context, job *JobRecord, path string) error {
+	// Pre-attestation worker records remain readable. A partial or missing
+	// identity on a modern validated checkpoint is always an error.
+	if job.CandidateSHA256 == "" && job.CandidateSizeBytes == 0 && job.ValidationFinishedAt.IsZero() {
+		return nil
+	}
+	if job.CandidateSHA256 == "" || job.CandidateSizeBytes <= 0 {
+		return fmt.Errorf("%w: validated candidate checkpoint has no complete integrity baseline", ErrSourceInvalid)
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() != job.CandidateSizeBytes {
+		return fmt.Errorf("%w: local candidate no longer matches validated size/type; never publish", ErrSourceInvalid)
+	}
+	sha, err := hashLocalFileSHA256(ctx, path)
+	if err != nil {
+		return err
+	}
+	if sha != job.CandidateSHA256 {
+		return fmt.Errorf("%w: local candidate SHA-256 changed after validation; never publish", ErrSourceInvalid)
+	}
+	return nil
+}
+
 // validateEncodedCandidateFull performs full structural/media/policy validation
 // of the worker-local candidate before the EncodeComplete checkpoint. It fails
 // closed on any probe failure, missing video, codec/bit-depth/pixel-format
@@ -58,6 +81,12 @@ func (w *Worker) validateEncodedCandidateFull(ctx context.Context, localCandidat
 	info, err := os.Lstat(localCandidate)
 	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
 		return attest, fmt.Errorf("%w: local candidate %s is not a non-empty regular file", ErrSourceInvalid, localCandidate)
+	}
+	// Bind the probe to an immutable byte baseline. Hashing only after the
+	// probe could bless a replacement written while ffprobe was running.
+	sha, err := hashLocalFileSHA256(ctx, localCandidate)
+	if err != nil {
+		return attest, err
 	}
 	candProbe, err := w.probeSourceDetailsForJob(ctx, localCandidate)
 	if err != nil {
@@ -121,9 +150,12 @@ func (w *Worker) validateEncodedCandidateFull(ctx context.Context, localCandidat
 			return attest, fmt.Errorf("%w: local candidate duration %.1fs diverges from source %.1fs (diff %.1fs, fail closed, never publish)", ErrSourceInvalid, candProbe.DurationSec, srcProbe.DurationSec, d)
 		}
 	}
-	sha, err := hashLocalFileSHA256(ctx, localCandidate)
+	verifiedSHA, err := hashLocalFileSHA256(ctx, localCandidate)
 	if err != nil {
 		return attest, err
+	}
+	if verifiedSHA != sha {
+		return attest, fmt.Errorf("%w: local candidate changed during validation; never publish", ErrSourceInvalid)
 	}
 	attest = CandidateAttestation{
 		SizeBytes:   info.Size(),

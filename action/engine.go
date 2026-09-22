@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -29,6 +30,9 @@ type Engine struct {
 	// published. It exists to make the promote copy/verify boundary
 	// deterministic in tests; production leaves it nil.
 	promotionCopyBoundaryHook func(partial string)
+	// Test seam for delayed pathname metadata on network mounts. Descriptor
+	// stats still use the real opened file.
+	promotionLstatHook func(string) (os.FileInfo, error)
 }
 
 // NewEngine creates a new Action Engine.
