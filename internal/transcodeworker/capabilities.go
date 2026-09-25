@@ -3,6 +3,7 @@ package transcodeworker
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime/debug"
 	"sort"
@@ -122,6 +123,18 @@ func boundedErrorMessage(err error, output []byte, maxLen int) string {
 
 // ProbeWorkerCapabilities probes full versioned capabilities of the worker node.
 func ProbeWorkerCapabilities(ctx context.Context, ffmpegPath string) (transcode.WorkerCapabilities, error) {
+	return ProbeWorkerCapabilitiesWithScratch(ctx, ffmpegPath, os.TempDir())
+}
+
+// ProbeWorkerCapabilitiesWithScratch keeps executable quality probes inside
+// worker-owned scratch when called by a running worker.
+func ProbeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratchRoot string) (transcode.WorkerCapabilities, error) {
+	return probeWorkerCapabilitiesWithScratch(ctx, ffmpegPath, scratchRoot, true)
+}
+
+// Legacy benchmarks need the encoder/filter inventory but do not request
+// perceptual capabilities. Avoid running synthetic metric jobs in that path.
+func probeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratchRoot string, probeQuality bool) (transcode.WorkerCapabilities, error) {
 	ver, commit := GetBuildMetadata()
 	caps := transcode.WorkerCapabilities{
 		ProtocolVersion: transcode.WorkerProtocolVersion,
@@ -182,6 +195,10 @@ func ProbeWorkerCapabilities(ctx context.Context, ffmpegPath string) (transcode.
 		})
 	}
 	caps.Filters = ParseAvailableFilters(string(filtOut))
+	if probeQuality && caps.Filters["libvmaf"] {
+		qualityCaps := cachedQualityCapabilities(ctx, ffmpegPath, scratchRoot)
+		caps.Quality = &qualityCaps
+	}
 
 	// 5. Generate deterministic capability fingerprint
 	fp, err := transcode.ComputeCapabilityFingerprint(caps)

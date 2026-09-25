@@ -150,3 +150,18 @@ func TestBuildBenchmarkRequestFailsClosedWithoutResolvedPlan(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildBenchmarkRequestRejectsNativeMain10CAMBI(t *testing.T) {
+	rep := &mediainspect.DetailedReport{DurationSec: 100, Video: []mediainspect.DetailedStream{{BitDepth: 10, BitRate: 5000000, FPS: 24}}}
+	opt := &recipe.OptimizationPolicy{
+		Enabled:  true,
+		Sampling: &recipe.SamplingPolicy{SampleSeconds: 5, SampleCount: 1, Positions: []float64{0.5}},
+		Search:   &recipe.SearchPolicy{MaxCandidates: 4, QualityValues: []int{65}},
+		Quality:  &recipe.QualityPolicy{PreferredMetric: "ssim", Banding: &recipe.BandingPolicy{Enabled: true, Metric: "cambi", Mode: "full_ref", Enforcement: "observe"}},
+	}
+	ec := &ExecutionContext{InstanceID: "bench-main10-cambi", Inputs: map[string]any{}, State: map[string]any{"plan": &transcode.Plan{VideoCodec: transcode.VideoCodecHEVCVideoToolbox, Quality: 65}}}
+	_, err := buildBenchmarkRequest(ec, "/media/source.mkv", rep, opt, transcode.WorkerCapabilities{})
+	if err == nil || !strings.Contains(err.Error(), "quality_cambi_native_main10_unverified") {
+		t.Fatalf("native Main10 CAMBI was not rejected: %v", err)
+	}
+}

@@ -15,6 +15,7 @@ import (
 
 	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/optimization"
+	"github.com/jakenesler/navigatorr/transcode/quality"
 )
 
 // resolvePipelineConcurrency resolves bounded encode/metric worker counts.
@@ -59,14 +60,18 @@ type pipelineEncodeOutcome struct {
 
 // pipelineMetricOutcome is the metric result for one unit.
 type pipelineMetricOutcome struct {
-	executed   bool
-	vmaf       *float64
-	ssim       *float64
-	vmafDurSec float64
-	ssimDurSec float64
-	vmafScores []optimization.SampleScore
-	ssimScores []optimization.SampleScore
-	entry      *BenchmarkMetricSampleResult
+	executed    bool
+	vmaf        *float64
+	vmafStats   *quality.VMAFStats
+	cambi       *quality.CAMBIStats
+	cambiErr    string
+	cambiDurSec float64
+	ssim        *float64
+	vmafDurSec  float64
+	ssimDurSec  float64
+	vmafScores  []optimization.SampleScore
+	ssimScores  []optimization.SampleScore
+	entry       *BenchmarkMetricSampleResult
 }
 
 // candidatePoison tracks candidate-level metric failure across concurrent units.
@@ -148,6 +153,10 @@ type pipelineShared struct {
 	progressReporter     *benchmarkProgressReporter
 	runVMAF              bool
 	runSSIM              bool
+	runCAMBI             bool
+	vmafModel            *quality.VMAFModel
+	qualityCaps          *transcode.QualityCapabilities
+	capFingerprint       string
 	passesPerSample      int
 	poisons              []*candidatePoison
 	encodeOut            []pipelineEncodeOutcome
@@ -191,7 +200,8 @@ func (r *ProductionBenchmarkRunner) runPipelinedEncodeMetrics(
 	if normMetric == "" {
 		normMetric = "vmaf"
 	}
-	caps, err := w.Capabilities(ctx)
+	needQualityProbe := record.Quality != nil && ((record.Quality.VMAF != nil && record.Quality.VMAF.Model != "") || (record.Quality.Banding != nil && record.Quality.Banding.Enabled))
+	caps, err := probeWorkerCapabilitiesWithScratch(ctx, w.ffmpegPath, filepath.Join(w.cfg.StateDir, "quality-probe-scratch"), needQualityProbe)
 	if err != nil {
 		return fmt.Errorf("probing worker capabilities: %w (fail closed)", err)
 	}
@@ -216,6 +226,21 @@ func (r *ProductionBenchmarkRunner) runPipelinedEncodeMetrics(
 	}
 	runVMAF := normMetric == "vmaf" || normMetric == "both" || normMetric == "vmaf+ssim"
 	runSSIM := normMetric == "ssim" || normMetric == "both" || normMetric == "vmaf+ssim"
+	runCAMBI := record.Quality != nil && record.Quality.Banding != nil && record.Quality.Banding.Enabled
+	var vmafModel *quality.VMAFModel
+	if runVMAF && record.Quality != nil && record.Quality.VMAF != nil && record.Quality.VMAF.Model != "" {
+		model, err := quality.Model(record.Quality.VMAF.Model)
+		if err != nil {
+			return err
+		}
+		if caps.Quality == nil || caps.Quality.ProbeError != "" || !caps.Quality.Models[model.ID].Available {
+			return fmt.Errorf("quality_vmaf_model_unavailable: model %s is not executable on worker (fail closed)", model.ID)
+		}
+		vmafModel = &model
+	}
+	if runCAMBI && (caps.Quality == nil || caps.Quality.ProbeError != "" || !caps.Quality.CAMBIFullRef) {
+		return fmt.Errorf("quality_cambi_full_ref_unavailable: CAMBI full-reference is not executable on worker (fail closed)")
+	}
 	passesPerSample := 0
 	if runVMAF {
 		passesPerSample++
@@ -223,10 +248,16 @@ func (r *ProductionBenchmarkRunner) runPipelinedEncodeMetrics(
 	if runSSIM {
 		passesPerSample++
 	}
+	if runCAMBI {
+		passesPerSample++
+	}
 
 	// 10-bit media validation, matching sequential runMetrics fail-closed behavior.
 	if evidence.SourceBitDepth > 8 && runVMAF {
 		return fmt.Errorf("worker capability unsupported: source media has bit depth %d (> 8-bit) but worker does not have verified 10-bit VMAF capability; silent 8-bit downconversion is prohibited (fail closed)", evidence.SourceBitDepth)
+	}
+	if evidence.SourceBitDepth > 8 && runCAMBI {
+		return fmt.Errorf("quality_cambi_native_main10_unverified: native %d-bit source is not eligible for CAMBI (fail closed)", evidence.SourceBitDepth)
 	}
 
 	encodeN, metricN := resolvePipelineConcurrency(record)
@@ -260,6 +291,10 @@ func (r *ProductionBenchmarkRunner) runPipelinedEncodeMetrics(
 		progressReporter:     progressReporter,
 		runVMAF:              runVMAF,
 		runSSIM:              runSSIM,
+		runCAMBI:             runCAMBI,
+		vmafModel:            vmafModel,
+		qualityCaps:          caps.Quality,
+		capFingerprint:       caps.CapabilityFingerprint,
 		passesPerSample:      passesPerSample,
 		poisons:              poisons,
 		encodeOut:            make([]pipelineEncodeOutcome, nUnits),
@@ -516,6 +551,7 @@ func (sh *pipelineShared) runMetricUnit(ctx context.Context, u pipelineUnit, idx
 	}
 
 	var vmafScore *float64
+	var vmafStats *quality.VMAFStats
 	var ssimScore *float64
 	var vmafDurationSec float64
 	var ssimDurationSec float64
@@ -534,6 +570,13 @@ func (sh *pipelineShared) runMetricUnit(ctx context.Context, u pipelineUnit, idx
 		}
 		sh.progressReporter.StartSampleUnit("evaluating_metrics", u.sampOrd+1, vc.index+1, vc.candidate.ID, "vmaf")
 		args := BuildVMAFArgs(candPath, refPath, logPath)
+		if sh.vmafModel != nil {
+			args, err = BuildVMAFModelArgs(candPath, refPath, logPath, *sh.vmafModel)
+			if err != nil {
+				fail(err)
+				return
+			}
+		}
 		cmd := exec.CommandContext(ctx, sh.w.ffmpegPath, args...)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		cmd.Cancel = func() error {
@@ -563,7 +606,18 @@ func (sh *pipelineShared) runMetricUnit(ctx context.Context, u pipelineUnit, idx
 				candidateFailed = true
 				candidateFailReason = fmt.Sprintf("read vmaf log for cand %q sample %d: %v", vc.candidate.ID, window.Index, err)
 			} else {
-				score, err := ParseVMAFJSON(logData)
+				var score float64
+				if sh.vmafModel != nil {
+					windowSec := sh.record.Quality.VMAF.WorstWindowSeconds
+					stats, parseErr := quality.ParseVMAF(logData, MaxMetricLogSizeBytes, *sh.vmafModel, window.Index, window.StartSeconds, sh.evidence.SourceFPS, windowSec, sh.record.Quality.VMAF.FrameThreshold)
+					err = parseErr
+					if err == nil {
+						score = stats.Mean
+						vmafStats = &stats
+					}
+				} else {
+					score, err = ParseVMAFJSON(logData)
+				}
 				if err != nil {
 					candidateFailed = true
 					candidateFailReason = fmt.Sprintf("parse vmaf log for cand %q sample %d: %v", vc.candidate.ID, window.Index, err)
@@ -589,6 +643,9 @@ func (sh *pipelineShared) runMetricUnit(ctx context.Context, u pipelineUnit, idx
 				})
 				sh.progressReporter.SkipUnits(1)
 			}
+			if sh.runCAMBI {
+				sh.progressReporter.SkipUnits(1)
+			}
 			out.entry = &BenchmarkMetricSampleResult{
 				CandidateID:       vc.candidate.ID,
 				CandidateIndex:    candIdx,
@@ -607,6 +664,7 @@ func (sh *pipelineShared) runMetricUnit(ctx context.Context, u pipelineUnit, idx
 			Valid:       true,
 		})
 		sh.metricOut[idx].vmaf = vmafScore
+		sh.metricOut[idx].vmafStats = vmafStats
 		sh.metricOut[idx].vmafDurSec = vmafDurationSec
 	}
 
@@ -667,6 +725,7 @@ func (sh *pipelineShared) runMetricUnit(ctx context.Context, u pipelineUnit, idx
 			out := sh.metricOut[idx]
 			out.executed = true
 			out.vmaf = vmafScore
+			out.vmafStats = vmafStats
 			out.vmafDurSec = vmafDurationSec
 			out.ssimDurSec = ssimDurationSec
 			// Preserve any valid VMAF score recorded above.
@@ -687,12 +746,16 @@ func (sh *pipelineShared) runMetricUnit(ctx context.Context, u pipelineUnit, idx
 				CandidateIndex:    candIdx,
 				SampleIndex:       window.Index,
 				VMAF:              vmafScore,
+				VMAFStats:         vmafStats,
 				VMAFDurationSec:   vmafDurationSec,
 				SSIMDurationSec:   ssimDurationSec,
 				MetricDurationSec: vmafDurationSec + ssimDurationSec,
 				Error:             candidateFailReason,
 			}
 			sh.metricOut[idx] = out
+			if sh.runCAMBI {
+				sh.progressReporter.SkipUnits(1)
+			}
 			return
 		}
 		sh.metricOut[idx].ssimScores = append(sh.metricOut[idx].ssimScores, optimization.SampleScore{
@@ -705,8 +768,25 @@ func (sh *pipelineShared) runMetricUnit(ctx context.Context, u pipelineUnit, idx
 	}
 
 	out := sh.metricOut[idx]
+	if sh.runCAMBI {
+		sh.progressReporter.StartSampleUnit("evaluating_metrics", u.sampOrd+1, vc.index+1, vc.candidate.ID, "cambi_full_ref")
+		start := time.Now()
+		stats, err := runCAMBIMetricSample(ctx, sh.w.ffmpegPath, sh.samplesDir, candPath, refPath, candIdx, vc.candidate.ID, window.Index, window.StartSeconds, sh.evidence.SourceFPS, sh.qualityCaps.CAMBIOutput)
+		out.cambiDurSec = time.Since(start).Seconds()
+		sh.progressReporter.ResolveUnit()
+		if ctx.Err() != nil {
+			fail(ctx.Err())
+			return
+		}
+		if err != nil {
+			out.cambiErr = err.Error()
+		} else {
+			out.cambi = &stats
+		}
+	}
 	out.executed = true
 	out.vmaf = vmafScore
+	out.vmafStats = vmafStats
 	out.ssim = ssimScore
 	out.vmafDurSec = vmafDurationSec
 	out.ssimDurSec = ssimDurationSec
@@ -717,10 +797,14 @@ func (sh *pipelineShared) runMetricUnit(ctx context.Context, u pipelineUnit, idx
 		CandidateIndex:    candIdx,
 		SampleIndex:       window.Index,
 		VMAF:              vmafScore,
+		VMAFStats:         vmafStats,
+		CAMBI:             out.cambi,
+		CAMBIError:        out.cambiErr,
+		CAMBIDurationSec:  out.cambiDurSec,
 		SSIM:              ssimScore,
 		VMAFDurationSec:   vmafDurationSec,
 		SSIMDurationSec:   ssimDurationSec,
-		MetricDurationSec: vmafDurationSec + ssimDurationSec,
+		MetricDurationSec: vmafDurationSec + ssimDurationSec + out.cambiDurSec,
 	}
 	sh.metricOut[idx] = out
 }
@@ -750,6 +834,36 @@ func invalidMetricOutcome(candidateID string, candIdx, sampleIdx int, reason str
 		Error:          reason,
 	}
 	return out
+}
+
+func runCAMBIMetricSample(ctx context.Context, ffmpegPath, samplesDir, candPath, refPath string, candIdx int, candidateID string, sampleIdx int, sourceStartSec, fps float64, outputMetric string) (quality.CAMBIStats, error) {
+	logPath, err := derivedMetricLogPath(samplesDir, "cambi", candIdx, candidateID, sampleIdx)
+	if err != nil {
+		return quality.CAMBIStats{}, err
+	}
+	if err := prepareOutputFile(logPath); err != nil {
+		return quality.CAMBIStats{}, err
+	}
+	args := BuildCAMBIArgs(candPath, refPath, logPath)
+	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil && cmd.Process.Pid > 0 {
+			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		return nil
+	}
+	cmd.WaitDelay = 2 * time.Second
+	stderrBuf := newTailBuffer(64 * 1024)
+	cmd.Stderr = stderrBuf
+	if err := cmd.Run(); err != nil {
+		return quality.CAMBIStats{}, fmt.Errorf("ffmpeg CAMBI full-reference failed: %v: %s", err, stderrBuf.String())
+	}
+	data, err := readMetricLogFile(logPath)
+	if err != nil {
+		return quality.CAMBIStats{}, err
+	}
+	return quality.ParseCAMBIFullReference(data, MaxMetricLogSizeBytes, outputMetric, sampleIdx, sourceStartSec, fps)
 }
 
 // assembleEvidence persists per-unit outcomes into evidence in deterministic
@@ -815,6 +929,10 @@ func (sh *pipelineShared) assembleEvidence(units []pipelineUnit) {
 			vmafScores = append(vmafScores, met.vmafScores...)
 			ssimScores = append(ssimScores, met.ssimScores...)
 		}
+		qualityEvidence, rejectReason := sh.evaluateCandidateQuality(vcOrd, vc.candidate.ID)
+		if qualityEvidence != nil {
+			sh.evidence.Quality = append(sh.evidence.Quality, *qualityEvidence)
+		}
 		// A candidate with no executed metric units (cancelled mid-flight) gets an
 		// invalid aggregate rather than a fabricated one; the job fails regardless.
 		if sh.runVMAF {
@@ -827,6 +945,10 @@ func (sh *pipelineShared) assembleEvidence(units []pipelineUnit) {
 				}
 			} else {
 				agg = optimization.AggregateSampleScores(optimization.MetricTypeVMAF, vmafScores)
+			}
+			if rejectReason != "" {
+				agg.Valid = false
+				agg.IneligibleReason = rejectReason
 			}
 			sh.evidence.CandidateMetrics = append(sh.evidence.CandidateMetrics, BenchmarkCandidateMetricAggregate{
 				CandidateID:    vc.candidate.ID,
@@ -846,6 +968,10 @@ func (sh *pipelineShared) assembleEvidence(units []pipelineUnit) {
 			} else {
 				agg = optimization.AggregateSampleScores(optimization.MetricTypeSSIM, ssimScores)
 			}
+			if rejectReason != "" {
+				agg.Valid = false
+				agg.IneligibleReason = rejectReason
+			}
 			sh.evidence.CandidateMetrics = append(sh.evidence.CandidateMetrics, BenchmarkCandidateMetricAggregate{
 				CandidateID:    vc.candidate.ID,
 				CandidateIndex: vc.index,
@@ -854,4 +980,82 @@ func (sh *pipelineShared) assembleEvidence(units []pipelineUnit) {
 			})
 		}
 	}
+}
+
+func (sh *pipelineShared) evaluateCandidateQuality(vcOrd int, candidateID string) (*CandidateQualityEvidence, string) {
+	if sh.vmafModel == nil && !sh.runCAMBI {
+		return nil, ""
+	}
+	e := &CandidateQualityEvidence{CandidateID: candidateID, CapabilityFingerprint: sh.capFingerprint, Verdict: "pass"}
+	var vmafSamples []quality.VMAFStats
+	var cambiSamples []quality.CAMBIStats
+	for sampOrd := range sh.record.Samples {
+		idx := vcOrd*len(sh.record.Samples) + sampOrd
+		if idx >= len(sh.metricOut) {
+			continue
+		}
+		met := sh.metricOut[idx]
+		if met.vmafStats != nil {
+			vmafSamples = append(vmafSamples, *met.vmafStats)
+		}
+		if met.cambi != nil {
+			cambiSamples = append(cambiSamples, *met.cambi)
+		}
+	}
+	var reject string
+	if sh.vmafModel != nil {
+		if len(vmafSamples) != len(sh.record.Samples) {
+			e.ReasonCodes = append(e.ReasonCodes, "quality_vmaf_evidence_incomplete")
+		}
+		if len(vmafSamples) == len(sh.record.Samples) {
+			combined, err := quality.CombineVMAF(vmafSamples)
+			if err != nil {
+				e.ReasonCodes = append(e.ReasonCodes, "quality_vmaf_evidence_incomplete")
+			} else {
+				e.VMAF = &combined
+				policy := sh.record.Quality.VMAF
+				if policy.P5Minimum != nil && combined.P5 < *policy.P5Minimum {
+					e.ReasonCodes = append(e.ReasonCodes, "quality_vmaf_p5_below_minimum")
+				}
+				if policy.WorstWindowMinimum != nil && combined.WorstWindowMean < *policy.WorstWindowMinimum {
+					e.ReasonCodes = append(e.ReasonCodes, "quality_vmaf_worst_window_below_minimum")
+				}
+				if policy.MaxFramesBelowThreshold != nil && combined.FramesBelowThreshold > *policy.MaxFramesBelowThreshold {
+					e.ReasonCodes = append(e.ReasonCodes, "quality_vmaf_frames_below_limit_exceeded")
+				}
+			}
+		}
+		if sh.record.Quality.VMAF.GuardrailEnforcement == "reject" && len(e.ReasonCodes) > 0 {
+			reject = e.ReasonCodes[0]
+		}
+	}
+	if sh.runCAMBI {
+		cambiReasonStart := len(e.ReasonCodes)
+		if len(cambiSamples) != len(sh.record.Samples) {
+			e.ReasonCodes = append(e.ReasonCodes, "quality_cambi_evidence_incomplete")
+		} else {
+			combined, err := quality.CombineCAMBI(cambiSamples)
+			if err != nil {
+				e.ReasonCodes = append(e.ReasonCodes, "quality_cambi_evidence_incomplete")
+			} else {
+				e.CAMBI = &combined
+				b := sh.record.Quality.Banding
+				if b.MaxMean != nil && combined.Mean > *b.MaxMean {
+					e.ReasonCodes = append(e.ReasonCodes, "quality_cambi_mean_above_maximum")
+				}
+				if b.MaxPeak != nil && combined.Max > *b.MaxPeak {
+					e.ReasonCodes = append(e.ReasonCodes, "quality_cambi_peak_above_maximum")
+				}
+			}
+		}
+		if sh.record.Quality.Banding.Enforcement == "reject" && len(e.ReasonCodes) > cambiReasonStart && reject == "" {
+			reject = e.ReasonCodes[cambiReasonStart]
+		}
+	}
+	if reject != "" {
+		e.Verdict = "fail"
+	} else if len(e.ReasonCodes) > 0 {
+		e.Verdict = "observe"
+	}
+	return e, reject
 }

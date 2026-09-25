@@ -79,3 +79,43 @@ func TestBenchmarkWaitMaterializesWinningEncoderAndPreset(t *testing.T) {
 		t.Fatalf("winner_preset output = %v, want slow", res.Outputs["winner_preset"])
 	}
 }
+
+func TestBenchmarkWaitBindsFinalQualityToImmutableRequest(t *testing.T) {
+	req := transcode.BenchmarkRequest{
+		ID: "bench-quality", Metric: "vmaf",
+		Samples: []transcode.BenchmarkSampleWindow{{Index: 0, StartSeconds: 10, DurationSeconds: 5}},
+		Quality: &transcode.BenchmarkQualityConfig{
+			VMAF:            &transcode.BenchmarkQualityThresholds{Model: "v1_1080p_3h", Target: 96, Minimum: 95},
+			FinalValidation: &transcode.BenchmarkFinalValidationConfig{Mode: "sampled"},
+		},
+	}
+	digest, err := transcode.DigestBenchmarkRequest(&req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock := &mockTranscodeExecutor{benchmarkStatusFunc: func(ctx context.Context, jobID string) (transcode.BenchmarkStatus, error) {
+		return transcode.BenchmarkStatus{Status: transcode.StatusCompleted, Decision: &transcode.BenchmarkDecision{Winner: &transcode.BenchmarkWinner{CandidateID: "winner", VideoCodec: transcode.VideoCodecHEVCVideoToolbox, Quality: 65, VideoProfile: "main", PixelFormat: "yuv420p", ExpectedBitDepth: 8, MetricType: "vmaf", Score: 97}}}, nil
+	}}
+	e := NewEngine(EngineDeps{Transcode: mock})
+	contextFor := func(request transcode.BenchmarkRequest) *ExecutionContext {
+		return &ExecutionContext{InstanceID: "bench-quality", ActionName: "benchmark_transcode", Inputs: map[string]any{}, Outputs: map[string]any{}, State: map[string]any{
+			"optimization_enabled": true, "benchmark_job_id": req.ID, "benchmark_request": request, "benchmark_request_digest": digest,
+			"plan": &transcode.Plan{Container: "mkv", VideoCodec: transcode.VideoCodecHEVCVideoToolbox, Quality: 70},
+		}}
+	}
+	ec := contextFor(req)
+	res, err := e.stepBenchmarkWait(context.Background(), ec)
+	if err != nil || res.Status != StepCompleted {
+		t.Fatalf("valid quality handoff failed: %+v %v", res, err)
+	}
+	plan := getPlan(ec.State["plan"])
+	if plan == nil || plan.QualityValidation == nil || plan.QualityValidation.BenchmarkRequestDigest != digest || len(plan.QualityValidation.Samples) != 1 {
+		t.Fatalf("missing immutable final quality plan: %+v", plan)
+	}
+	changed := req
+	changed.Quality = &transcode.BenchmarkQualityConfig{VMAF: &transcode.BenchmarkQualityThresholds{Model: "v1_1080p_3h", Target: 96, Minimum: 50}, FinalValidation: &transcode.BenchmarkFinalValidationConfig{Mode: "sampled"}}
+	res, err = e.stepBenchmarkWait(context.Background(), contextFor(changed))
+	if err != nil || res.Status != StepFailed {
+		t.Fatalf("tampered quality request accepted: %+v %v", res, err)
+	}
+}

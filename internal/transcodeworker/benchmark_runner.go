@@ -23,6 +23,7 @@ import (
 	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/optimization"
+	"github.com/jakenesler/navigatorr/transcode/quality"
 )
 
 // BenchmarkSampleRef describes an extracted reference sample window.
@@ -53,15 +54,19 @@ type BenchmarkCandidateSampleResult struct {
 
 // BenchmarkMetricSampleResult records perceptual quality metric measurements for one candidate sample.
 type BenchmarkMetricSampleResult struct {
-	CandidateID       string   `json:"candidate_id"`
-	CandidateIndex    int      `json:"candidate_index"`
-	SampleIndex       int      `json:"sample_index"`
-	VMAF              *float64 `json:"vmaf,omitempty"`
-	SSIM              *float64 `json:"ssim,omitempty"`
-	VMAFDurationSec   float64  `json:"vmaf_duration_sec,omitempty"`
-	SSIMDurationSec   float64  `json:"ssim_duration_sec,omitempty"`
-	MetricDurationSec float64  `json:"metric_duration_sec"`
-	Error             string   `json:"error,omitempty"`
+	CandidateID       string              `json:"candidate_id"`
+	CandidateIndex    int                 `json:"candidate_index"`
+	SampleIndex       int                 `json:"sample_index"`
+	VMAF              *float64            `json:"vmaf,omitempty"`
+	VMAFStats         *quality.VMAFStats  `json:"vmaf_stats,omitempty"`
+	CAMBI             *quality.CAMBIStats `json:"cambi,omitempty"`
+	CAMBIError        string              `json:"cambi_error,omitempty"`
+	CAMBIDurationSec  float64             `json:"cambi_duration_sec,omitempty"`
+	SSIM              *float64            `json:"ssim,omitempty"`
+	VMAFDurationSec   float64             `json:"vmaf_duration_sec,omitempty"`
+	SSIMDurationSec   float64             `json:"ssim_duration_sec,omitempty"`
+	MetricDurationSec float64             `json:"metric_duration_sec"`
+	Error             string              `json:"error,omitempty"`
 }
 
 // BenchmarkCandidateMetricAggregate records the aggregated metric result for one candidate.
@@ -78,12 +83,16 @@ type BenchmarkExecutionEvidence struct {
 	SourceBitDepth    int                                 `json:"source_bit_depth"`
 	SourcePixelFormat string                              `json:"source_pixel_format"`
 	SourceResolution  string                              `json:"source_resolution"`
+	SourceFPS         float64                             `json:"source_fps,omitempty"`
+	Quality           []CandidateQualityEvidence          `json:"quality,omitempty"`
 	ReferenceSamples  []BenchmarkSampleRef                `json:"reference_samples"`
 	CandidateSamples  []BenchmarkCandidateSampleResult    `json:"candidate_samples"`
 	MetricSamples     []BenchmarkMetricSampleResult       `json:"metric_samples,omitempty"`
 	CandidateMetrics  []BenchmarkCandidateMetricAggregate `json:"candidate_metrics,omitempty"`
 	Decision          *transcode.BenchmarkDecision        `json:"decision,omitempty"`
 }
+
+type CandidateQualityEvidence = transcode.BenchmarkCandidateQualityEvidence
 
 type benchmarkProgressReporter struct {
 	mu             sync.Mutex
@@ -301,6 +310,9 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		return fmt.Errorf("source media %s has %d video streams; benchmark requires exactly 1 (fail closed)", record.Source, len(rep.Video))
 	}
 	sourceVideo := rep.Video[0]
+	if record.Quality != nil && record.Quality.VMAF != nil && record.Quality.VMAF.Model != "" && sourceVideo.FPS >= 45 {
+		return fmt.Errorf("VMAF model %q is non-HFR and source FPS %.3f requires an HFR model (fail closed)", record.Quality.VMAF.Model, sourceVideo.FPS)
+	}
 
 	// HDR / Dolby Vision rejection: automatic benchmark optimization is strictly SDR-only
 	if (rep.HDR != nil && rep.HDR.Present) || isHDRStreamDetailed(sourceVideo) {
@@ -379,6 +391,7 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		SourceBitDepth:    sourceBitDepth,
 		SourcePixelFormat: sourceVideo.PixelFormat,
 		SourceResolution:  resStr,
+		SourceFPS:         sourceVideo.FPS,
 		ReferenceSamples:  make([]BenchmarkSampleRef, 0, len(record.Samples)),
 		CandidateSamples:  make([]BenchmarkCandidateSampleResult, 0, len(record.Candidates)*len(record.Samples)),
 	}
@@ -394,6 +407,9 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		passesPerSample++
 	}
 	if normMetric == "ssim" || normMetric == "both" || normMetric == "vmaf+ssim" {
+		passesPerSample++
+	}
+	if record.Quality != nil && record.Quality.Banding != nil && record.Quality.Banding.Enabled {
 		passesPerSample++
 	}
 
@@ -983,6 +999,25 @@ func BuildVMAFArgs(candPath, refPath, logPath string) []string {
 	}
 }
 
+// BuildVMAFModelArgs makes the model and measurement precision explicit. The
+// encoded files retain their own bit depths; conversion exists only in the
+// metric graph. framesync must end at the shorter input without repeats.
+func BuildVMAFModelArgs(candPath, refPath, logPath string, model quality.VMAFModel) ([]string, error) {
+	if model.ID == "" || model.LibvmafModel == "" || model.MeasurementBitDepth != 10 {
+		return nil, fmt.Errorf("unsupported VMAF model measurement contract")
+	}
+	filter := fmt.Sprintf("[0:v]format=yuv420p10le,setpts=PTS-STARTPTS[d];[1:v]format=yuv420p10le,setpts=PTS-STARTPTS[r];[d][r]libvmaf=model=version=%s:log_fmt=json:log_path=%s:shortest=1:repeatlast=0", model.LibvmafModel, escapeFFmpegFilterPath(logPath))
+	return []string{"-nostdin", "-nostats", "-i", candPath, "-i", refPath, "-filter_complex", filter, "-f", "null", "-"}, nil
+}
+
+// BuildCAMBIArgs runs a separate, bounded full-reference pass. VMAF v1 has an
+// internal CAMBI feature, so adding another to that invocation is unsafe on
+// several libvmaf builds.
+func BuildCAMBIArgs(candPath, refPath, logPath string) []string {
+	filter := fmt.Sprintf("[0:v]format=yuv420p10le,setpts=PTS-STARTPTS[d];[1:v]format=yuv420p10le,setpts=PTS-STARTPTS[r];[d][r]libvmaf=model=version=vmaf_v0.6.1:feature=name=cambi\\\\:full_ref=true:log_fmt=json:log_path=%s:shortest=1:repeatlast=0", escapeFFmpegFilterPath(logPath))
+	return []string{"-nostdin", "-nostats", "-i", candPath, "-i", refPath, "-filter_complex", filter, "-f", "null", "-"}
+}
+
 // BuildSSIMArgs constructs the exact, safe FFmpeg argument slice
 // for calculating SSIM between a candidate sample (distorted, 0:v)
 // and an FFV1 reference sample (reference, 1:v).
@@ -1034,7 +1069,7 @@ type vmafPooledMetric struct {
 }
 
 type vmafFrame struct {
-	FrameNum int                `json:"frameNum"`
+	FrameNum *int               `json:"frameNum"`
 	Metrics  map[string]float64 `json:"metrics"`
 }
 
@@ -1062,35 +1097,46 @@ func ParseVMAFJSON(data []byte) (float64, error) {
 		}
 	}
 
-	if !found && len(log.Frames) > 0 {
+	if len(log.Frames) > 0 {
 		var sum float64
 		for i, f := range log.Frames {
+			if f.FrameNum == nil {
+				return 0, fmt.Errorf("missing vmaf frame number at index %d (fail closed)", i)
+			}
+			frameNum := *f.FrameNum
 			// Verify frame numbers are strictly increasing and contiguous
 			if i == 0 {
-				if f.FrameNum < 0 {
-					return 0, fmt.Errorf("invalid initial vmaf frame number %d (fail closed)", f.FrameNum)
+				if frameNum != 0 {
+					return 0, fmt.Errorf("invalid initial vmaf frame number %d (fail closed)", frameNum)
 				}
 			} else {
-				expectedFrame := log.Frames[i-1].FrameNum + 1
-				if f.FrameNum != expectedFrame {
-					return 0, fmt.Errorf("vmaf frame numbers not contiguous: frame at index %d has frameNum %d, expected %d (missing, duplicate, or gapped frames; fail closed)", i, f.FrameNum, expectedFrame)
+				expectedFrame := i
+				if frameNum != expectedFrame {
+					return 0, fmt.Errorf("vmaf frame numbers not contiguous: frame at index %d has frameNum %d, expected %d (missing, duplicate, or gapped frames; fail closed)", i, frameNum, expectedFrame)
 				}
 			}
 
 			s, ok := f.Metrics["vmaf"]
 			if !ok {
-				return 0, fmt.Errorf("missing vmaf metric in frame %d (fail closed)", f.FrameNum)
+				return 0, fmt.Errorf("missing vmaf metric in frame %d (fail closed)", frameNum)
 			}
 			if math.IsNaN(s) || math.IsInf(s, 0) {
-				return 0, fmt.Errorf("vmaf frame %d score is NaN or Inf (fail closed)", f.FrameNum)
+				return 0, fmt.Errorf("vmaf frame %d score is NaN or Inf (fail closed)", frameNum)
 			}
 			if s < 0.0 || s > 100.0 {
-				return 0, fmt.Errorf("vmaf frame %d score %v out of range [0, 100] (fail closed)", f.FrameNum, s)
+				return 0, fmt.Errorf("vmaf frame %d score %v out of range [0, 100] (fail closed)", frameNum, s)
 			}
 			sum += s
 		}
-		score = sum / float64(len(log.Frames))
-		found = true
+		frameMean := sum / float64(len(log.Frames))
+		if found {
+			if math.Abs(score-frameMean) > 0.01 {
+				return 0, fmt.Errorf("pooled vmaf mean %v inconsistent with frame mean %v (fail closed)", score, frameMean)
+			}
+		} else {
+			score = frameMean
+			found = true
+		}
 	}
 
 	if !found {

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/jakenesler/navigatorr/transcode/quality"
 	"strings"
 	"time"
 )
@@ -55,29 +56,55 @@ type Plan struct {
 	// Bounded typed hevc_videotoolbox rate-control/offline knobs. All must be
 	// unset for libx265; quality-vs-bitrate exclusivity is enforced at every
 	// validation layer. See VideoProfile for field semantics.
-	AverageBitrateKbps           int              `json:"average_bitrate_kbps,omitempty" yaml:"average_bitrate_kbps,omitempty"`
-	MaxBitrateKbps               int              `json:"max_bitrate_kbps,omitempty" yaml:"max_bitrate_kbps,omitempty"`
-	ConstantBitrate              *bool            `json:"constant_bitrate,omitempty" yaml:"constant_bitrate,omitempty"`
-	QMin                         *int             `json:"qmin,omitempty" yaml:"qmin,omitempty"`
-	QMax                         *int             `json:"qmax,omitempty" yaml:"qmax,omitempty"`
-	GOPSize                      *int             `json:"gop_size,omitempty" yaml:"gop_size,omitempty"`
-	BFrames                      *int             `json:"b_frames,omitempty" yaml:"b_frames,omitempty"`
-	ClosedGOP                    *bool            `json:"closed_gop,omitempty" yaml:"closed_gop,omitempty"`
-	PowerEfficient               *bool            `json:"power_efficient,omitempty" yaml:"power_efficient,omitempty"`
-	MaxRefFrames                 *int             `json:"max_ref_frames,omitempty" yaml:"max_ref_frames,omitempty"`
-	ExpectedBitDepth             int              `json:"expected_bit_depth,omitempty" yaml:"expected_bit_depth,omitempty"`
-	AudioMode                    string           `json:"audio_mode" yaml:"audio_mode"`
-	SubtitleMode                 string           `json:"subtitle_mode" yaml:"subtitle_mode"`
-	ConvertIncompatibleSubtitles bool             `json:"convert_incompatible_subtitles" yaml:"convert_incompatible_subtitles"`
-	PreserveMetadata             bool             `json:"preserve_metadata" yaml:"preserve_metadata"`
-	PreserveChapters             bool             `json:"preserve_chapters" yaml:"preserve_chapters"`
-	PreserveAttachments          bool             `json:"preserve_attachments" yaml:"preserve_attachments"`
-	SubtitleActions              []SubtitleAction `json:"subtitle_actions,omitempty" yaml:"subtitle_actions,omitempty"`
-	RecipeVersion                string           `json:"recipe_version,omitempty" yaml:"recipe_version,omitempty"`
-	RecipeDigest                 string           `json:"recipe_digest,omitempty" yaml:"recipe_digest,omitempty"`
-	PlanDigest                   string           `json:"plan_digest,omitempty" yaml:"plan_digest,omitempty"`
-	Resilience                   ResiliencePlan   `json:"resilience,omitempty" yaml:"resilience,omitempty"`
-	AppliedFallbacks             []string         `json:"applied_fallbacks,omitempty" yaml:"applied_fallbacks,omitempty"`
+	AverageBitrateKbps           int                    `json:"average_bitrate_kbps,omitempty" yaml:"average_bitrate_kbps,omitempty"`
+	MaxBitrateKbps               int                    `json:"max_bitrate_kbps,omitempty" yaml:"max_bitrate_kbps,omitempty"`
+	ConstantBitrate              *bool                  `json:"constant_bitrate,omitempty" yaml:"constant_bitrate,omitempty"`
+	QMin                         *int                   `json:"qmin,omitempty" yaml:"qmin,omitempty"`
+	QMax                         *int                   `json:"qmax,omitempty" yaml:"qmax,omitempty"`
+	GOPSize                      *int                   `json:"gop_size,omitempty" yaml:"gop_size,omitempty"`
+	BFrames                      *int                   `json:"b_frames,omitempty" yaml:"b_frames,omitempty"`
+	ClosedGOP                    *bool                  `json:"closed_gop,omitempty" yaml:"closed_gop,omitempty"`
+	PowerEfficient               *bool                  `json:"power_efficient,omitempty" yaml:"power_efficient,omitempty"`
+	MaxRefFrames                 *int                   `json:"max_ref_frames,omitempty" yaml:"max_ref_frames,omitempty"`
+	ExpectedBitDepth             int                    `json:"expected_bit_depth,omitempty" yaml:"expected_bit_depth,omitempty"`
+	AudioMode                    string                 `json:"audio_mode" yaml:"audio_mode"`
+	SubtitleMode                 string                 `json:"subtitle_mode" yaml:"subtitle_mode"`
+	ConvertIncompatibleSubtitles bool                   `json:"convert_incompatible_subtitles" yaml:"convert_incompatible_subtitles"`
+	PreserveMetadata             bool                   `json:"preserve_metadata" yaml:"preserve_metadata"`
+	PreserveChapters             bool                   `json:"preserve_chapters" yaml:"preserve_chapters"`
+	PreserveAttachments          bool                   `json:"preserve_attachments" yaml:"preserve_attachments"`
+	SubtitleActions              []SubtitleAction       `json:"subtitle_actions,omitempty" yaml:"subtitle_actions,omitempty"`
+	RecipeVersion                string                 `json:"recipe_version,omitempty" yaml:"recipe_version,omitempty"`
+	RecipeDigest                 string                 `json:"recipe_digest,omitempty" yaml:"recipe_digest,omitempty"`
+	PlanDigest                   string                 `json:"plan_digest,omitempty" yaml:"plan_digest,omitempty"`
+	Resilience                   ResiliencePlan         `json:"resilience,omitempty" yaml:"resilience,omitempty"`
+	AppliedFallbacks             []string               `json:"applied_fallbacks,omitempty" yaml:"applied_fallbacks,omitempty"`
+	QualityValidation            *QualityValidationPlan `json:"quality_validation,omitempty" yaml:"quality_validation,omitempty"`
+}
+
+// QualityValidationPlan is the immutable bridge from the benchmark's sampled
+// policy to the final candidate. It is included in the plan digest.
+type QualityValidationPlan struct {
+	Metric                 string                  `json:"metric" yaml:"metric"`
+	Samples                []BenchmarkSampleWindow `json:"samples" yaml:"samples"`
+	Quality                BenchmarkQualityConfig  `json:"quality" yaml:"quality"`
+	BenchmarkRequestDigest string                  `json:"benchmark_request_digest" yaml:"benchmark_request_digest"`
+}
+
+type FinalQualityEvidence struct {
+	Verdict                string              `json:"verdict"`
+	ReasonCodes            []string            `json:"reason_codes,omitempty"`
+	CandidateSHA256        string              `json:"candidate_sha256"`
+	CandidateSizeBytes     int64               `json:"candidate_size_bytes"`
+	PlanDigest             string              `json:"plan_digest"`
+	BenchmarkRequestDigest string              `json:"benchmark_request_digest"`
+	ModelID                string              `json:"model_id,omitempty"`
+	SourceBitDepth         int                 `json:"source_bit_depth,omitempty"`
+	CandidateBitDepth      int                 `json:"candidate_bit_depth,omitempty"`
+	CapabilityFingerprint  string              `json:"capability_fingerprint,omitempty"`
+	VMAF                   *quality.VMAFStats  `json:"vmaf,omitempty"`
+	CAMBI                  *quality.CAMBIStats `json:"cambi,omitempty"`
+	SSIMMean               *float64            `json:"ssim_mean,omitempty"`
 }
 
 // Video encoder identifiers accepted by the worker and recipe engine.
@@ -247,42 +274,43 @@ type JobTelemetry struct {
 
 type JobStatus struct {
 	JobTelemetry
-	ID                    string             `json:"id"`
-	Status                string             `json:"status"`
-	Progress              float64            `json:"progress"`
-	FPS                   float64            `json:"fps"`
-	Speed                 float64            `json:"speed"`
-	CandidatePath         string             `json:"candidate_path"`
-	Error                 string             `json:"error,omitempty"`
-	Profile               string             `json:"profile,omitempty"`
-	RecipeVersion         string             `json:"recipe_version,omitempty"`
-	RecipeDigest          string             `json:"recipe_digest,omitempty"`
-	PlanDigest            string             `json:"plan_digest,omitempty"`
-	Container             string             `json:"container,omitempty"`
-	VideoCodec            string             `json:"video_codec,omitempty"`
-	Quality               int                `json:"quality,omitempty"`
-	VideoProfile          string             `json:"video_profile,omitempty"`
-	PixelFormat           string             `json:"pixel_format,omitempty"`
-	PrioritizeSpeed       *bool              `json:"prioritize_speed,omitempty"`
-	SpatialAQ             *bool              `json:"spatial_aq,omitempty"`
-	Realtime              *bool              `json:"realtime,omitempty"`
-	AverageBitrateKbps    int                `json:"average_bitrate_kbps,omitempty"`
-	MaxBitrateKbps        int                `json:"max_bitrate_kbps,omitempty"`
-	ConstantBitrate       *bool              `json:"constant_bitrate,omitempty"`
-	QMin                  *int               `json:"qmin,omitempty"`
-	QMax                  *int               `json:"qmax,omitempty"`
-	GOPSize               *int               `json:"gop_size,omitempty"`
-	BFrames               *int               `json:"b_frames,omitempty"`
-	ClosedGOP             *bool              `json:"closed_gop,omitempty"`
-	PowerEfficient        *bool              `json:"power_efficient,omitempty"`
-	MaxRefFrames          *int               `json:"max_ref_frames,omitempty"`
-	ExpectedBitDepth      int                `json:"expected_bit_depth,omitempty"`
-	Attempt               int                `json:"attempt,omitempty"`
-	RetryCount            int                `json:"retry_count,omitempty"`
-	FallbackCount         int                `json:"fallback_count,omitempty"`
-	AppliedFallbacks      []string           `json:"applied_fallbacks,omitempty"`
-	FailureClassification string             `json:"failure_classification,omitempty"`
-	Conversions           []ConversionRecord `json:"conversions,omitempty"`
+	ID                    string                `json:"id"`
+	Status                string                `json:"status"`
+	Progress              float64               `json:"progress"`
+	FPS                   float64               `json:"fps"`
+	Speed                 float64               `json:"speed"`
+	CandidatePath         string                `json:"candidate_path"`
+	QualityEvidence       *FinalQualityEvidence `json:"quality_evidence,omitempty"`
+	Error                 string                `json:"error,omitempty"`
+	Profile               string                `json:"profile,omitempty"`
+	RecipeVersion         string                `json:"recipe_version,omitempty"`
+	RecipeDigest          string                `json:"recipe_digest,omitempty"`
+	PlanDigest            string                `json:"plan_digest,omitempty"`
+	Container             string                `json:"container,omitempty"`
+	VideoCodec            string                `json:"video_codec,omitempty"`
+	Quality               int                   `json:"quality,omitempty"`
+	VideoProfile          string                `json:"video_profile,omitempty"`
+	PixelFormat           string                `json:"pixel_format,omitempty"`
+	PrioritizeSpeed       *bool                 `json:"prioritize_speed,omitempty"`
+	SpatialAQ             *bool                 `json:"spatial_aq,omitempty"`
+	Realtime              *bool                 `json:"realtime,omitempty"`
+	AverageBitrateKbps    int                   `json:"average_bitrate_kbps,omitempty"`
+	MaxBitrateKbps        int                   `json:"max_bitrate_kbps,omitempty"`
+	ConstantBitrate       *bool                 `json:"constant_bitrate,omitempty"`
+	QMin                  *int                  `json:"qmin,omitempty"`
+	QMax                  *int                  `json:"qmax,omitempty"`
+	GOPSize               *int                  `json:"gop_size,omitempty"`
+	BFrames               *int                  `json:"b_frames,omitempty"`
+	ClosedGOP             *bool                 `json:"closed_gop,omitempty"`
+	PowerEfficient        *bool                 `json:"power_efficient,omitempty"`
+	MaxRefFrames          *int                  `json:"max_ref_frames,omitempty"`
+	ExpectedBitDepth      int                   `json:"expected_bit_depth,omitempty"`
+	Attempt               int                   `json:"attempt,omitempty"`
+	RetryCount            int                   `json:"retry_count,omitempty"`
+	FallbackCount         int                   `json:"fallback_count,omitempty"`
+	AppliedFallbacks      []string              `json:"applied_fallbacks,omitempty"`
+	FailureClassification string                `json:"failure_classification,omitempty"`
+	Conversions           []ConversionRecord    `json:"conversions,omitempty"`
 	// CandidateSizeBytes and CandidateSHA256 are the accepted worker-local
 	// candidate's size and content digest, attested by the worker during
 	// pre-publish validation. They are the cheap identity metadata the

@@ -1738,8 +1738,9 @@ type JobStatusResponse struct {
 	FailureClassification string                       `json:"failure_classification,omitempty"`
 	Conversions           []transcode.ConversionRecord `json:"conversions,omitempty"`
 	// Accepted candidate identity (cheap post-publish verification metadata).
-	CandidateSizeBytes int64  `json:"candidate_size_bytes,omitempty"`
-	CandidateSHA256    string `json:"candidate_sha256,omitempty"`
+	CandidateSizeBytes int64                           `json:"candidate_size_bytes,omitempty"`
+	CandidateSHA256    string                          `json:"candidate_sha256,omitempty"`
+	QualityEvidence    *transcode.FinalQualityEvidence `json:"quality_evidence,omitempty"`
 
 	// Operational storage observability (Phase 6B1). Additive: never changes
 	// the meaning of existing fields/statuses.
@@ -1807,6 +1808,7 @@ func (w *Worker) Status(ctx context.Context, jobID string) (JobStatusResponse, e
 		FPS:                   metrics.FPS,
 		Speed:                 metrics.Speed,
 		CandidatePath:         job.Candidate,
+		QualityEvidence:       job.QualityEvidence,
 		Error:                 job.Error,
 		Profile:               job.Profile,
 		RecipeVersion:         recipeVersion,

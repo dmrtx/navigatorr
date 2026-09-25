@@ -327,6 +327,9 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 			"decision_reason":    st.Decision.DecisionReason,
 			"has_winner":         hasWinner,
 		}
+		if len(st.Quality) > 0 {
+			outputs["benchmark_quality"] = st.Quality
+		}
 
 		var winningPlan *transcode.Plan
 		if hasWinner {
@@ -397,6 +400,28 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 				}
 				if preset := strings.TrimSpace(winner.Preset); preset != "" {
 					wp.Preset = preset
+				}
+				if raw, ok := ec.State["benchmark_request"]; ok {
+					encoded, err := json.Marshal(raw)
+					if err != nil {
+						return StepResult{Status: StepFailed, Error: fmt.Sprintf("serializing immutable benchmark request: %v", err)}, nil
+					}
+					var benchmarkRequest transcode.BenchmarkRequest
+					if err := json.Unmarshal(encoded, &benchmarkRequest); err != nil {
+						return StepResult{Status: StepFailed, Error: fmt.Sprintf("decoding immutable benchmark request: %v", err)}, nil
+					}
+					if benchmarkRequest.Quality != nil && benchmarkRequest.Quality.FinalValidation != nil {
+						if benchmarkRequest.ID != benchJobID || benchmarkRequest.Quality.FinalValidation.Mode != "sampled" {
+							return StepResult{Status: StepFailed, Error: "quality final-validation plan does not match completed benchmark"}, nil
+						}
+						requestDigest, err := transcode.DigestBenchmarkRequest(&benchmarkRequest)
+						if err != nil || requestDigest != getString(ec.State, "benchmark_request_digest") {
+							return StepResult{Status: StepFailed, Error: "immutable benchmark request digest changed before final-validation handoff"}, nil
+						}
+						wp.QualityValidation = &transcode.QualityValidationPlan{Metric: benchmarkRequest.Metric, Samples: append([]transcode.BenchmarkSampleWindow(nil), benchmarkRequest.Samples...), Quality: *benchmarkRequest.Quality, BenchmarkRequestDigest: getString(ec.State, "benchmark_request_digest")}
+					}
+				} else if ec.State["benchmark_request_digest"] != nil {
+					return StepResult{Status: StepFailed, Error: "immutable benchmark request missing at final-validation handoff"}, nil
 				}
 				digest, err := transcode.DigestPlan(&wp)
 				if err != nil {
@@ -797,10 +822,24 @@ func buildBenchmarkQualityConfig(optQuality *recipe.QualityPolicy) *transcode.Be
 	}
 	if optQuality.VMAF != nil {
 		qc.VMAF = &transcode.BenchmarkQualityThresholds{
-			Target:            optQuality.VMAF.Target,
-			Minimum:           optQuality.VMAF.Minimum,
-			MarginalTolerance: optQuality.VMAF.MarginalTolerance,
+			Target:                  optQuality.VMAF.Target,
+			Minimum:                 optQuality.VMAF.Minimum,
+			MarginalTolerance:       optQuality.VMAF.MarginalTolerance,
+			Model:                   optQuality.VMAF.Model,
+			GuardrailEnforcement:    optQuality.VMAF.GuardrailEnforcement,
+			P5Minimum:               optQuality.VMAF.P5Minimum,
+			WorstWindowMinimum:      optQuality.VMAF.WorstWindowMinimum,
+			WorstWindowSeconds:      optQuality.VMAF.WorstWindowSeconds,
+			FrameThreshold:          optQuality.VMAF.FrameThreshold,
+			MaxFramesBelowThreshold: optQuality.VMAF.MaxFramesBelowThreshold,
 		}
+	}
+	if optQuality.Banding != nil {
+		b := optQuality.Banding
+		qc.Banding = &transcode.BenchmarkBandingConfig{Enabled: b.Enabled, Metric: b.Metric, Mode: b.Mode, Enforcement: b.Enforcement, MaxMean: b.MaxMean, MaxPeak: b.MaxPeak}
+	}
+	if optQuality.FinalValidation != nil {
+		qc.FinalValidation = &transcode.BenchmarkFinalValidationConfig{Mode: optQuality.FinalValidation.Mode}
 	}
 	if optQuality.SSIM != nil {
 		qc.SSIM = &transcode.BenchmarkQualityThresholds{
@@ -955,6 +994,28 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 	metric, err = resolveAutoBenchmarkMetric(metric, caps, bitDepth)
 	if err != nil {
 		return nil, err
+	}
+	if opt.Quality != nil && opt.Quality.VMAF != nil && opt.Quality.VMAF.Model != "" {
+		modelID := opt.Quality.VMAF.Model
+		if caps.Quality != nil && caps.Quality.ProbeError != "" {
+			return nil, fmt.Errorf("quality VMAF capability probe failed: %s", caps.Quality.ProbeError)
+		}
+		modelAvailable := caps.Quality != nil && caps.Quality.Models[modelID].Available
+		if (metric == "vmaf" || metric == "both") && (!modelAvailable || v0.FPS >= 45) {
+			if strings.EqualFold(strings.TrimSpace(getString(ec.Inputs, "metric")), "auto") && caps.Filters["ssim"] {
+				metric = "ssim"
+			} else {
+				return nil, fmt.Errorf("quality_vmaf_model_unavailable: %s cannot execute for %.3f FPS source", modelID, v0.FPS)
+			}
+		}
+	}
+	if opt.Quality != nil && opt.Quality.Banding != nil && opt.Quality.Banding.Enabled {
+		if bitDepth > 8 {
+			return nil, fmt.Errorf("quality_cambi_native_main10_unverified: native %d-bit source is not eligible for CAMBI", bitDepth)
+		}
+		if caps.Quality == nil || caps.Quality.ProbeError != "" || !caps.Quality.CAMBIFullRef {
+			return nil, fmt.Errorf("quality_cambi_full_ref_unavailable: worker cannot prove requested CAMBI mode")
+		}
 	}
 
 	if err := validateWorkerCapabilitiesForBenchmark(caps, metric, bitDepth, planCodec); err != nil {

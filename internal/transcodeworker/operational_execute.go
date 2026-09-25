@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jakenesler/navigatorr/internal/smbdirect"
+	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/resilience"
 )
 
@@ -215,6 +216,34 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 	}
 
 	attest, verr := w.validateEncodedCandidateFull(ctx, r.localCandidate, execPlan, srcProbe, 0)
+	if verr == nil && job.Plan != nil && job.Plan.QualityValidation != nil {
+		if job.SourceSHA256 == "" {
+			verr = fmt.Errorf("quality_final_source_identity_missing: immutable source digest required before final validation")
+		}
+		if verr == nil {
+			verr = verifyLocalDigest(ctx, r.effectiveInput, job.SourceSHA256)
+		}
+		if verr == nil {
+			if cancelled, progressErr := w.persistOperationalProgress(jobDir, jobFile, job, func(l *JobRecord) { l.Phase = "validating_quality" }); progressErr != nil {
+				return progressErr
+			} else if cancelled {
+				return nil
+			}
+			var qualityEvidence *transcode.FinalQualityEvidence
+			qualityEvidence, verr = w.validateFinalPerceptual(ctx, jobDir, r.effectiveInput, r.localCandidate, job.Plan, attest.SHA256, attest.SizeBytes)
+			job.QualityEvidence = qualityEvidence
+			if verr == nil {
+				verr = verifyLocalDigest(ctx, r.effectiveInput, job.SourceSHA256)
+			}
+			if verr == nil {
+				var currentSHA string
+				currentSHA, verr = hashLocalFileSHA256(ctx, r.localCandidate)
+				if verr == nil && currentSHA != attest.SHA256 {
+					verr = fmt.Errorf("quality_candidate_identity_changed: candidate changed during final validation")
+				}
+			}
+		}
+	}
 	if verr != nil {
 		// A bad local candidate must never be published. Remove only the
 		// worker-owned local candidate; the semantic source and the shared
@@ -239,6 +268,7 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 		l.LocalCandidatePath = r.localCandidate
 		l.CandidateSizeBytes = attest.SizeBytes
 		l.CandidateSHA256 = attest.SHA256
+		l.QualityEvidence = job.QualityEvidence
 		if strings.TrimSpace(r.destination) != "" {
 			l.IntendedDestination = r.destination
 		}
@@ -348,7 +378,15 @@ func (w *Worker) ensureStaged(ctx context.Context, jobDir, jobFile string, job *
 // distinct classification and never reruns encode.
 func (w *Worker) finalizeOperational(ctx context.Context, jobDir, jobFile string, job *JobRecord, r *resolvedOperational) error {
 	switch r.finalization {
-	case FinalizationStateNotRequired, FinalizationStateCompleted:
+	case FinalizationStateNotRequired:
+		if err := verifyCheckpointCandidate(ctx, job, r.localCandidate); err != nil {
+			return w.failJobTerminal(jobDir, jobFile, job, err)
+		}
+		return w.completeOperationalJob(jobDir, jobFile, job, r)
+	case FinalizationStateCompleted:
+		if err := verifyCheckpointCandidate(ctx, job, r.localCandidate); err != nil {
+			return w.recordFinalizationFailure(jobDir, jobFile, job, err)
+		}
 		return w.completeOperationalJob(jobDir, jobFile, job, r)
 	}
 	// Recheck LOCAL bytes against the accepted checkpoint before touching the
