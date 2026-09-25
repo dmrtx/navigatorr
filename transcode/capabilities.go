@@ -39,6 +39,24 @@ type ProbeError struct {
 	Message   string `json:"message"`   // bounded error description
 }
 
+// QualityModelCapability is the result of executing an actual model and JSON
+// measurement path, not merely finding the libvmaf filter in -filters output.
+type QualityModelCapability struct {
+	Available           bool    `json:"available"`
+	MeasurementBitDepth int     `json:"measurement_bit_depth"`
+	ScoreMin            float64 `json:"score_min"`
+	ScoreMax            float64 `json:"score_max"`
+	Reason              string  `json:"reason,omitempty"`
+}
+
+type QualityCapabilities struct {
+	LibvmafVersion string                            `json:"libvmaf_version,omitempty"`
+	Models         map[string]QualityModelCapability `json:"models,omitempty"`
+	CAMBIFullRef   bool                              `json:"cambi_full_ref"`
+	CAMBIOutput    string                            `json:"cambi_output,omitempty"`
+	ProbeError     string                            `json:"probe_error,omitempty"`
+}
+
 // WorkerCapabilities represents the versioned capability report of a transcode worker node.
 type WorkerCapabilities struct {
 	ProtocolVersion       int                            `json:"protocol_version"`
@@ -49,6 +67,7 @@ type WorkerCapabilities struct {
 	Encoders              map[string]bool                `json:"encoders"`
 	EncoderDetails        map[string]EncoderCapabilities `json:"encoder_details,omitempty"`
 	Filters               map[string]bool                `json:"filters"`
+	Quality               *QualityCapabilities           `json:"quality,omitempty"`
 	ProbeErrors           []ProbeError                   `json:"probe_errors,omitempty"`
 	CapabilityFingerprint string                         `json:"capability_fingerprint,omitempty"`
 }
@@ -85,6 +104,7 @@ type fingerprintPayload struct {
 	Encoders        map[string]bool                `json:"encoders"`
 	EncoderDetails  map[string]EncoderCapabilities `json:"encoder_details,omitempty"`
 	Filters         map[string]bool                `json:"filters"`
+	Quality         *QualityCapabilities           `json:"quality,omitempty"`
 	ProbeErrors     []ProbeError                   `json:"probe_errors,omitempty"`
 }
 
@@ -119,6 +139,7 @@ func ComputeCapabilityFingerprint(caps WorkerCapabilities) (string, error) {
 		Encoders:        caps.Encoders,
 		EncoderDetails:  detCopy,
 		Filters:         caps.Filters,
+		Quality:         caps.Quality,
 		ProbeErrors:     caps.ProbeErrors,
 	}
 

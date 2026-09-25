@@ -9,6 +9,13 @@ import (
 
 func (e *Engine) observeTranscodeStatus(ec *ExecutionContext, st transcode.JobStatus) {
 	mirrorTranscodeWorkerMetadata(ec, st)
+	if st.QualityEvidence != nil {
+		ec.State["quality_evidence"] = st.QualityEvidence
+		ec.Outputs["quality_evidence"] = st.QualityEvidence
+	} else {
+		delete(ec.State, "quality_evidence")
+		delete(ec.Outputs, "quality_evidence")
+	}
 	// Cheap independent identity metadata for lightweight post-publish
 	// verification: the accepted local candidate's size and content digest,
 	// attested by the worker before publish.
@@ -93,7 +100,7 @@ func (e *Engine) observeTranscodeStatus(ec *ExecutionContext, st transcode.JobSt
 
 func transcodeTelemetryOutputs(ec *ExecutionContext) map[string]any {
 	out := map[string]any{}
-	for _, key := range []string{"transcode_status", "transcode_phase", "finalization_retry_count", "next_finalization_at", "recovery_required", "progress", "speed", "fps", "progress_is_stale", "last_progress_at", "worker_heartbeat_at", "last_known_progress", "last_worker_poll_at", "worker_completed_at", "reconciled_at", "queue_duration_ms", "encode_duration_ms", "worker_validation_duration_ms", "validation_duration_ms", "worker_wall_duration_ms", "reconcile_lag_ms", "worker_slots_total", "worker_slots_used", "queue_position", "storage_backend", "navigatorr_path", "worker_resolved_path", "smb_share", "smb_relative_path"} {
+	for _, key := range []string{"transcode_status", "transcode_phase", "quality_evidence", "finalization_retry_count", "next_finalization_at", "recovery_required", "progress", "speed", "fps", "progress_is_stale", "last_progress_at", "worker_heartbeat_at", "last_known_progress", "last_worker_poll_at", "worker_completed_at", "reconciled_at", "queue_duration_ms", "encode_duration_ms", "worker_validation_duration_ms", "validation_duration_ms", "worker_wall_duration_ms", "reconcile_lag_ms", "worker_slots_total", "worker_slots_used", "queue_position", "storage_backend", "navigatorr_path", "worker_resolved_path", "smb_share", "smb_relative_path"} {
 		if v, ok := ec.State[key]; ok {
 			out[key] = v
 		}
@@ -108,6 +115,13 @@ func (e *Engine) recordWorkerPoll(ec *ExecutionContext) {
 
 func (e *Engine) observeBenchmarkStatus(ec *ExecutionContext, st transcode.BenchmarkStatus) {
 	ec.State["benchmark_status"] = st.Status
+	if len(st.Quality) > 0 {
+		ec.State["benchmark_quality"] = st.Quality
+		ec.Outputs["benchmark_quality"] = st.Quality
+	} else {
+		delete(ec.State, "benchmark_quality")
+		delete(ec.Outputs, "benchmark_quality")
+	}
 	if st.Phase != "" {
 		ec.State["phase"] = st.Phase
 	}

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/quality"
 	"gopkg.in/yaml.v3"
 )
 
@@ -436,6 +437,9 @@ func NormalizeOptimizationPolicy(opt *OptimizationPolicy) {
 			opt.Quality.PreferredMetric = DefaultPreferredMetric
 		}
 		if opt.Quality.VMAF != nil {
+			if opt.Quality.VMAF.Model != "" && opt.Quality.VMAF.WorstWindowSeconds == 0 {
+				opt.Quality.VMAF.WorstWindowSeconds = 5
+			}
 			if opt.Quality.VMAF.Target == 0 {
 				opt.Quality.VMAF.Target = DefaultVMAFTarget
 			}
@@ -465,6 +469,20 @@ func NormalizeOptimizationPolicy(opt *OptimizationPolicy) {
 		} else if opt.Quality.PreferredMetric == "ssim" {
 			v := DefaultSSIMMarginalTolerance
 			opt.Quality.SSIM = &MetricTarget{Target: DefaultSSIMTarget, Minimum: DefaultSSIMMinimum, MarginalTolerance: &v}
+		}
+	}
+	if ((opt.Quality.VMAF != nil && opt.Quality.VMAF.Model != "") || (opt.Quality.Banding != nil && opt.Quality.Banding.Enabled)) && opt.Quality.FinalValidation == nil {
+		opt.Quality.FinalValidation = &FinalValidationPolicy{Mode: "sampled"}
+	}
+	if opt.Quality.Banding != nil && opt.Quality.Banding.Enabled {
+		if opt.Quality.Banding.Metric == "" {
+			opt.Quality.Banding.Metric = "cambi"
+		}
+		if opt.Quality.Banding.Mode == "" {
+			opt.Quality.Banding.Mode = "full_ref"
+		}
+		if opt.Quality.Banding.Enforcement == "" {
+			opt.Quality.Banding.Enforcement = "observe"
 		}
 	}
 
@@ -574,6 +592,56 @@ func ValidateOptimizationPolicy(name string, opt *OptimizationPolicy) error {
 	}
 	if err := validateMetricTarget("ssim", q.SSIM, 1.0); err != nil {
 		return err
+	}
+	if q.VMAF != nil {
+		v := q.VMAF
+		if v.Model != "" {
+			model, err := quality.Model(v.Model)
+			if err != nil {
+				return fmt.Errorf("profile %q: %w", name, err)
+			}
+			if v.Target > model.MaxScore || v.Minimum > model.MaxScore {
+				return fmt.Errorf("profile %q: VMAF target/minimum exceeds model score range", name)
+			}
+			for field, value := range map[string]*float64{"p5_minimum": v.P5Minimum, "worst_window_minimum": v.WorstWindowMinimum, "frame_threshold": v.FrameThreshold} {
+				if value != nil && (!isFinite(*value) || *value < model.MinScore || *value > model.MaxScore) {
+					return fmt.Errorf("profile %q: VMAF %s outside model score range", name, field)
+				}
+			}
+			if !isFinite(v.WorstWindowSeconds) || v.WorstWindowSeconds <= 0 || v.WorstWindowSeconds > 120 {
+				return fmt.Errorf("profile %q: invalid VMAF worst_window_seconds", name)
+			}
+		} else if v.P5Minimum != nil || v.WorstWindowMinimum != nil || v.FrameThreshold != nil || v.MaxFramesBelowThreshold != nil || v.WorstWindowSeconds != 0 {
+			return fmt.Errorf("profile %q: VMAF frame guardrails require an explicit model", name)
+		}
+		if v.GuardrailEnforcement != "" && v.GuardrailEnforcement != "observe" && v.GuardrailEnforcement != "reject" {
+			return fmt.Errorf("profile %q: invalid VMAF guardrail_enforcement", name)
+		}
+		if v.MaxFramesBelowThreshold != nil && (v.FrameThreshold == nil || *v.MaxFramesBelowThreshold < 0) {
+			return fmt.Errorf("profile %q: max_frames_below_threshold requires frame_threshold and a nonnegative limit", name)
+		}
+	}
+	if q.Banding != nil {
+		b := q.Banding
+		if b.Enabled {
+			if b.Metric != "cambi" || b.Mode != "full_ref" {
+				return fmt.Errorf("profile %q: banding must use cambi full_ref", name)
+			}
+			if b.Enforcement != "observe" && b.Enforcement != "reject" {
+				return fmt.Errorf("profile %q: banding enforcement must be observe or reject", name)
+			}
+			for _, limit := range []*float64{b.MaxMean, b.MaxPeak} {
+				if limit != nil && (!isFinite(*limit) || *limit < 0) {
+					return fmt.Errorf("profile %q: invalid CAMBI limit", name)
+				}
+			}
+			if b.Enforcement == "reject" && b.MaxMean == nil && b.MaxPeak == nil {
+				return fmt.Errorf("profile %q: rejecting CAMBI requires a limit", name)
+			}
+		}
+	}
+	if q.FinalValidation != nil && q.FinalValidation.Mode != "sampled" {
+		return fmt.Errorf("profile %q: final_validation mode must be sampled", name)
 	}
 
 	// 3. Search validation

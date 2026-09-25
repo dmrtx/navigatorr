@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jakenesler/navigatorr/transcode/optimization"
+	"github.com/jakenesler/navigatorr/transcode/quality"
 )
 
 var (
@@ -84,16 +85,47 @@ func ValidateBenchmarkJobID(id string) error {
 
 // BenchmarkQualityThresholds specifies target, minimum acceptable score, and optional marginal tolerance.
 type BenchmarkQualityThresholds struct {
-	Target            float64  `json:"target,omitempty"`
-	Minimum           float64  `json:"minimum,omitempty"`
-	MarginalTolerance *float64 `json:"marginal_tolerance,omitempty"`
+	Target                  float64  `json:"target,omitempty"`
+	Minimum                 float64  `json:"minimum,omitempty"`
+	MarginalTolerance       *float64 `json:"marginal_tolerance,omitempty"`
+	Model                   string   `json:"model,omitempty"`
+	GuardrailEnforcement    string   `json:"guardrail_enforcement,omitempty"`
+	P5Minimum               *float64 `json:"p5_minimum,omitempty"`
+	WorstWindowMinimum      *float64 `json:"worst_window_minimum,omitempty"`
+	WorstWindowSeconds      float64  `json:"worst_window_seconds,omitempty"`
+	FrameThreshold          *float64 `json:"frame_threshold,omitempty"`
+	MaxFramesBelowThreshold *int     `json:"max_frames_below_threshold,omitempty"`
+}
+
+type BenchmarkBandingConfig struct {
+	Enabled     bool     `json:"enabled"`
+	Metric      string   `json:"metric,omitempty"`
+	Mode        string   `json:"mode,omitempty"`
+	Enforcement string   `json:"enforcement,omitempty"`
+	MaxMean     *float64 `json:"max_mean,omitempty"`
+	MaxPeak     *float64 `json:"max_peak,omitempty"`
+}
+
+type BenchmarkFinalValidationConfig struct {
+	Mode string `json:"mode,omitempty"`
+}
+
+type BenchmarkCandidateQualityEvidence struct {
+	CandidateID           string              `json:"candidate_id"`
+	CapabilityFingerprint string              `json:"capability_fingerprint,omitempty"`
+	VMAF                  *quality.VMAFStats  `json:"vmaf,omitempty"`
+	CAMBI                 *quality.CAMBIStats `json:"cambi,omitempty"`
+	Verdict               string              `json:"verdict"`
+	ReasonCodes           []string            `json:"reason_codes,omitempty"`
 }
 
 // BenchmarkQualityConfig configures quality evaluation policies for a benchmark run.
 type BenchmarkQualityConfig struct {
-	PreferredMetric string                      `json:"preferred_metric,omitempty"`
-	VMAF            *BenchmarkQualityThresholds `json:"vmaf,omitempty"`
-	SSIM            *BenchmarkQualityThresholds `json:"ssim,omitempty"`
+	PreferredMetric string                          `json:"preferred_metric,omitempty"`
+	VMAF            *BenchmarkQualityThresholds     `json:"vmaf,omitempty"`
+	SSIM            *BenchmarkQualityThresholds     `json:"ssim,omitempty"`
+	Banding         *BenchmarkBandingConfig         `json:"banding,omitempty"`
+	FinalValidation *BenchmarkFinalValidationConfig `json:"final_validation,omitempty"`
 }
 
 // BenchmarkAdaptiveConfig selects the candidate evaluation strategy.
@@ -297,25 +329,26 @@ type BenchmarkProgressDetails struct {
 
 // BenchmarkStatus captures the current execution status and metadata of a benchmark job.
 type BenchmarkStatus struct {
-	ProtocolVersion int                       `json:"protocol_version"`
-	ID              string                    `json:"id"`
-	Status          string                    `json:"status"` // queued, running, completed, failed, cancelled
-	SourcePath      string                    `json:"source_path"`
-	Metric          string                    `json:"metric,omitempty"`
-	Progress        float64                   `json:"progress"`
-	Phase           string                    `json:"phase,omitempty"`
-	HeartbeatAt     time.Time                 `json:"heartbeat_at,omitempty"`
-	LastProgressAt  time.Time                 `json:"last_progress_at,omitempty"`
-	ProgressIsStale bool                      `json:"progress_is_stale"`
-	ProgressDetails *BenchmarkProgressDetails `json:"progress_details,omitempty"`
-	Error           string                    `json:"error,omitempty"`
-	SamplesPlanned  int                       `json:"samples_planned"`
-	CandidatesCount int                       `json:"candidates_count"`
-	Attempt         int                       `json:"attempt,omitempty"`
-	CreatedAt       time.Time                 `json:"created_at"`
-	StartedAt       time.Time                 `json:"started_at,omitempty"`
-	FinishedAt      time.Time                 `json:"finished_at,omitempty"`
-	Decision        *BenchmarkDecision        `json:"decision,omitempty"`
+	ProtocolVersion int                                 `json:"protocol_version"`
+	ID              string                              `json:"id"`
+	Status          string                              `json:"status"` // queued, running, completed, failed, cancelled
+	SourcePath      string                              `json:"source_path"`
+	Metric          string                              `json:"metric,omitempty"`
+	Progress        float64                             `json:"progress"`
+	Phase           string                              `json:"phase,omitempty"`
+	HeartbeatAt     time.Time                           `json:"heartbeat_at,omitempty"`
+	LastProgressAt  time.Time                           `json:"last_progress_at,omitempty"`
+	ProgressIsStale bool                                `json:"progress_is_stale"`
+	ProgressDetails *BenchmarkProgressDetails           `json:"progress_details,omitempty"`
+	Error           string                              `json:"error,omitempty"`
+	SamplesPlanned  int                                 `json:"samples_planned"`
+	CandidatesCount int                                 `json:"candidates_count"`
+	Attempt         int                                 `json:"attempt,omitempty"`
+	CreatedAt       time.Time                           `json:"created_at"`
+	StartedAt       time.Time                           `json:"started_at,omitempty"`
+	FinishedAt      time.Time                           `json:"finished_at,omitempty"`
+	Decision        *BenchmarkDecision                  `json:"decision,omitempty"`
+	Quality         []BenchmarkCandidateQualityEvidence `json:"quality,omitempty"`
 }
 
 // DigestBenchmarkRequest computes a deterministic sha256 digest of the benchmark request payload.
@@ -394,6 +427,35 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 		}
 
 		if req.Quality.VMAF != nil {
+			v := req.Quality.VMAF
+			if v.Model != "" {
+				if v.WorstWindowSeconds == 0 {
+					v.WorstWindowSeconds = 5
+				}
+				if req.Quality.FinalValidation == nil {
+					req.Quality.FinalValidation = &BenchmarkFinalValidationConfig{Mode: "sampled"}
+				}
+				model, err := quality.Model(v.Model)
+				if err != nil {
+					return err
+				}
+				if v.WorstWindowSeconds <= 0 || v.WorstWindowSeconds > 120 || math.IsNaN(v.WorstWindowSeconds) || math.IsInf(v.WorstWindowSeconds, 0) {
+					return fmt.Errorf("invalid VMAF worst_window_seconds")
+				}
+				for _, value := range []*float64{v.P5Minimum, v.WorstWindowMinimum, v.FrameThreshold} {
+					if value != nil && (math.IsNaN(*value) || math.IsInf(*value, 0) || *value < model.MinScore || *value > model.MaxScore) {
+						return fmt.Errorf("VMAF guardrail outside model score range")
+					}
+				}
+			} else if v.P5Minimum != nil || v.WorstWindowMinimum != nil || v.FrameThreshold != nil || v.MaxFramesBelowThreshold != nil {
+				return fmt.Errorf("VMAF frame guardrails require explicit model")
+			}
+			if v.GuardrailEnforcement != "" && v.GuardrailEnforcement != "observe" && v.GuardrailEnforcement != "reject" {
+				return fmt.Errorf("invalid VMAF guardrail_enforcement")
+			}
+			if v.MaxFramesBelowThreshold != nil && (v.FrameThreshold == nil || *v.MaxFramesBelowThreshold < 0) {
+				return fmt.Errorf("max_frames_below_threshold requires frame_threshold")
+			}
 			tol := optimization.DefaultVMAFPolicy().Tolerance()
 			if req.Quality.VMAF.MarginalTolerance != nil {
 				tol = *req.Quality.VMAF.MarginalTolerance
@@ -402,6 +464,32 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 			if err := optimization.ValidatePolicy(p); err != nil {
 				return fmt.Errorf("invalid vmaf quality policy: %w", err)
 			}
+		}
+		if req.Quality.Banding != nil && req.Quality.Banding.Enabled {
+			b := req.Quality.Banding
+			if req.Quality.FinalValidation == nil {
+				req.Quality.FinalValidation = &BenchmarkFinalValidationConfig{Mode: "sampled"}
+			}
+			if b.Enforcement == "" {
+				b.Enforcement = "observe"
+			}
+			if b.Metric != "cambi" || b.Mode != "full_ref" || (b.Enforcement != "observe" && b.Enforcement != "reject") {
+				return fmt.Errorf("invalid CAMBI full-reference policy")
+			}
+			for _, value := range []*float64{b.MaxMean, b.MaxPeak} {
+				if value != nil && (math.IsNaN(*value) || math.IsInf(*value, 0) || *value < 0) {
+					return fmt.Errorf("invalid CAMBI limit")
+				}
+			}
+			if b.Enforcement == "reject" && b.MaxMean == nil && b.MaxPeak == nil {
+				return fmt.Errorf("CAMBI reject policy requires a limit")
+			}
+		}
+		if req.Quality.FinalValidation != nil && req.Quality.FinalValidation.Mode != "sampled" {
+			return fmt.Errorf("final validation mode must be sampled")
+		}
+		if req.Quality.FinalValidation != nil && (normMetric == "vmaf" || normMetric == "both" || normMetric == "vmaf+ssim") && (req.Quality.VMAF == nil || req.Quality.VMAF.Model == "") {
+			return fmt.Errorf("sampled final VMAF validation requires an explicit model")
 		}
 		if req.Quality.SSIM != nil {
 			tol := optimization.DefaultSSIMPolicy().Tolerance()

@@ -44,6 +44,12 @@ type CandidateAttestation struct {
 }
 
 func verifyCheckpointCandidate(ctx context.Context, job *JobRecord, path string) error {
+	if job.Plan != nil && job.Plan.QualityValidation != nil {
+		e := job.QualityEvidence
+		if e == nil || e.Verdict != "pass" || e.CandidateSHA256 != job.CandidateSHA256 || e.CandidateSizeBytes != job.CandidateSizeBytes || e.PlanDigest != job.Plan.PlanDigest || e.BenchmarkRequestDigest != job.Plan.QualityValidation.BenchmarkRequestDigest {
+			return fmt.Errorf("%w: final perceptual quality attestation missing or mismatched; never publish", ErrSourceInvalid)
+		}
+	}
 	// Pre-attestation worker records remain readable. A partial or missing
 	// identity on a modern validated checkpoint is always an error.
 	if job.CandidateSHA256 == "" && job.CandidateSizeBytes == 0 && job.ValidationFinishedAt.IsZero() {

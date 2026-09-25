@@ -113,9 +113,24 @@ func (s *SamplingPolicy) Clone() *SamplingPolicy {
 
 // QualityPolicy configures target objective quality metrics and acceptability thresholds.
 type QualityPolicy struct {
-	PreferredMetric string        `json:"preferred_metric,omitempty" yaml:"preferred_metric,omitempty"`
-	VMAF            *MetricTarget `json:"vmaf,omitempty" yaml:"vmaf,omitempty"`
-	SSIM            *MetricTarget `json:"ssim,omitempty" yaml:"ssim,omitempty"`
+	PreferredMetric string                 `json:"preferred_metric,omitempty" yaml:"preferred_metric,omitempty"`
+	VMAF            *MetricTarget          `json:"vmaf,omitempty" yaml:"vmaf,omitempty"`
+	SSIM            *MetricTarget          `json:"ssim,omitempty" yaml:"ssim,omitempty"`
+	Banding         *BandingPolicy         `json:"banding,omitempty" yaml:"banding,omitempty"`
+	FinalValidation *FinalValidationPolicy `json:"final_validation,omitempty" yaml:"final_validation,omitempty"`
+}
+
+type BandingPolicy struct {
+	Enabled     bool     `json:"enabled" yaml:"enabled"`
+	Metric      string   `json:"metric,omitempty" yaml:"metric,omitempty"`
+	Mode        string   `json:"mode,omitempty" yaml:"mode,omitempty"`
+	Enforcement string   `json:"enforcement,omitempty" yaml:"enforcement,omitempty"`
+	MaxMean     *float64 `json:"max_mean,omitempty" yaml:"max_mean,omitempty"`
+	MaxPeak     *float64 `json:"max_peak,omitempty" yaml:"max_peak,omitempty"`
+}
+
+type FinalValidationPolicy struct {
+	Mode string `json:"mode,omitempty" yaml:"mode,omitempty"`
 }
 
 // Clone creates a deep copy of QualityPolicy.
@@ -127,14 +142,46 @@ func (q *QualityPolicy) Clone() *QualityPolicy {
 		PreferredMetric: q.PreferredMetric,
 		VMAF:            q.VMAF.Clone(),
 		SSIM:            q.SSIM.Clone(),
+		FinalValidation: cloneFinalValidation(q.FinalValidation),
+		Banding:         cloneBanding(q.Banding),
 	}
+}
+
+func cloneFinalValidation(p *FinalValidationPolicy) *FinalValidationPolicy {
+	if p == nil {
+		return nil
+	}
+	cp := *p
+	return &cp
+}
+func cloneBanding(p *BandingPolicy) *BandingPolicy {
+	if p == nil {
+		return nil
+	}
+	cp := *p
+	if p.MaxMean != nil {
+		v := *p.MaxMean
+		cp.MaxMean = &v
+	}
+	if p.MaxPeak != nil {
+		v := *p.MaxPeak
+		cp.MaxPeak = &v
+	}
+	return &cp
 }
 
 // MetricTarget specifies target, minimum acceptable scores, and metric-specific marginal tolerance.
 type MetricTarget struct {
-	Target            float64  `json:"target" yaml:"target"`
-	Minimum           float64  `json:"minimum" yaml:"minimum"`
-	MarginalTolerance *float64 `json:"marginal_tolerance,omitempty" yaml:"marginal_tolerance,omitempty"`
+	Target                  float64  `json:"target" yaml:"target"`
+	Minimum                 float64  `json:"minimum" yaml:"minimum"`
+	MarginalTolerance       *float64 `json:"marginal_tolerance,omitempty" yaml:"marginal_tolerance,omitempty"`
+	Model                   string   `json:"model,omitempty" yaml:"model,omitempty"`
+	GuardrailEnforcement    string   `json:"guardrail_enforcement,omitempty" yaml:"guardrail_enforcement,omitempty"`
+	P5Minimum               *float64 `json:"p5_minimum,omitempty" yaml:"p5_minimum,omitempty"`
+	WorstWindowMinimum      *float64 `json:"worst_window_minimum,omitempty" yaml:"worst_window_minimum,omitempty"`
+	WorstWindowSeconds      float64  `json:"worst_window_seconds,omitempty" yaml:"worst_window_seconds,omitempty"`
+	FrameThreshold          *float64 `json:"frame_threshold,omitempty" yaml:"frame_threshold,omitempty"`
+	MaxFramesBelowThreshold *int     `json:"max_frames_below_threshold,omitempty" yaml:"max_frames_below_threshold,omitempty"`
 }
 
 // Clone creates a deep copy of MetricTarget.
@@ -148,10 +195,25 @@ func (m *MetricTarget) Clone() *MetricTarget {
 		tol = &v
 	}
 	return &MetricTarget{
-		Target:            m.Target,
-		Minimum:           m.Minimum,
-		MarginalTolerance: tol,
+		Target:                  m.Target,
+		Minimum:                 m.Minimum,
+		MarginalTolerance:       tol,
+		Model:                   m.Model,
+		GuardrailEnforcement:    m.GuardrailEnforcement,
+		P5Minimum:               cloneFloat(m.P5Minimum),
+		WorstWindowMinimum:      cloneFloat(m.WorstWindowMinimum),
+		WorstWindowSeconds:      m.WorstWindowSeconds,
+		FrameThreshold:          cloneFloat(m.FrameThreshold),
+		MaxFramesBelowThreshold: cloneInt(m.MaxFramesBelowThreshold),
 	}
+}
+
+func cloneFloat(p *float64) *float64 {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
 }
 
 // SearchPolicy defines parameter space and candidate selection bounds.

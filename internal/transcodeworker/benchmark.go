@@ -693,6 +693,9 @@ func (w *Worker) BenchmarkStatus(ctx context.Context, jobID string) (transcode.B
 	if record.Evidence != nil && record.Evidence.Decision != nil {
 		st.Decision = record.Evidence.Decision
 	}
+	if record.Evidence != nil {
+		st.Quality = record.Evidence.Quality
+	}
 
 	if record.Status == "running" || record.Status == "queued" {
 		if !IsBenchmarkExecutionAlive(record) {
@@ -704,6 +707,9 @@ func (w *Worker) BenchmarkStatus(ctx context.Context, jobID string) (transcode.B
 				if lErr == nil && latest != nil && (latest.Status == "running" || latest.Status == "queued") {
 					if latest.Evidence != nil && latest.Evidence.Decision != nil {
 						st.Decision = latest.Evidence.Decision
+					}
+					if latest.Evidence != nil {
+						st.Quality = latest.Evidence.Quality
 					}
 					if !IsBenchmarkExecutionAlive(latest) {
 						latest.Status = "failed"

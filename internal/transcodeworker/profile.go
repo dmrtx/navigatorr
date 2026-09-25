@@ -2,10 +2,12 @@ package transcodeworker
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"strings"
 
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/quality"
 )
 
 type WorkerCapabilities struct {
@@ -66,6 +68,35 @@ func ValidatePlan(p *transcode.Plan) error {
 	}
 	if !p.PreserveMetadata || !p.PreserveChapters || !p.PreserveAttachments {
 		return fmt.Errorf("current worker requires metadata, chapters, and attachments preservation (fail closed)")
+	}
+	if q := p.QualityValidation; q != nil {
+		if q.Quality.FinalValidation == nil || q.Quality.FinalValidation.Mode != "sampled" {
+			return fmt.Errorf("quality validation plan must use sampled mode")
+		}
+		if q.Metric != "vmaf" && q.Metric != "both" && q.Metric != "vmaf+ssim" && q.Metric != "ssim" {
+			return fmt.Errorf("unsupported final quality metric")
+		}
+		if q.Metric != "ssim" && (q.Quality.VMAF == nil || q.Quality.VMAF.Model == "") {
+			return fmt.Errorf("final VMAF validation requires an explicit model")
+		}
+		if len(q.Samples) == 0 || len(q.Samples) > transcode.MaxBenchmarkSamples {
+			return fmt.Errorf("invalid final quality sample count")
+		}
+		if !regexp.MustCompile(`^sha256:[a-f0-9]{64}$`).MatchString(q.BenchmarkRequestDigest) {
+			return fmt.Errorf("final quality benchmark request digest is missing")
+		}
+		seenSample := map[int]bool{}
+		for _, sample := range q.Samples {
+			if sample.Index < 0 || seenSample[sample.Index] || math.IsNaN(sample.StartSeconds) || math.IsInf(sample.StartSeconds, 0) || sample.StartSeconds < 0 || math.IsNaN(sample.DurationSeconds) || math.IsInf(sample.DurationSeconds, 0) || sample.DurationSeconds <= 0 || sample.DurationSeconds > 120 {
+				return fmt.Errorf("invalid final quality sample")
+			}
+			seenSample[sample.Index] = true
+		}
+		if q.Quality.VMAF != nil && q.Quality.VMAF.Model != "" {
+			if _, err := quality.Model(q.Quality.VMAF.Model); err != nil {
+				return err
+			}
+		}
 	}
 	if strings.TrimSpace(p.RecipeVersion) == "" || !regexp.MustCompile(`^sha256:[a-f0-9]{64}$`).MatchString(p.RecipeDigest) {
 		return fmt.Errorf("valid recipe identity is required in resolved plans (fail closed)")

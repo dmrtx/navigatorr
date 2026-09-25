@@ -43,8 +43,9 @@ type JobRecord struct {
 	// CandidateSizeBytes/CandidateSHA256 attest the accepted worker-local
 	// candidate computed during pre-publish validation. They are the cheap
 	// identity metadata exposed to the coordinator for post-publish checks.
-	CandidateSizeBytes int64  `json:"candidate_size_bytes,omitempty"`
-	CandidateSHA256    string `json:"candidate_sha256,omitempty"`
+	CandidateSizeBytes int64                           `json:"candidate_size_bytes,omitempty"`
+	CandidateSHA256    string                          `json:"candidate_sha256,omitempty"`
+	QualityEvidence    *transcode.FinalQualityEvidence `json:"quality_evidence,omitempty"`
 	// Minimal transport metadata (no retry engine): mirrors transcode.JobStatus.
 	Attempt               int      `json:"attempt,omitempty"`
 	RetryCount            int      `json:"retry_count,omitempty"`
