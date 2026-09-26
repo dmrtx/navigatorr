@@ -421,6 +421,10 @@ The `transcode_batch` action coordinates persistent batch transcoding across lib
 | `surface_worker_busy` | bool | No | `true` | When `true`, worker capacity saturation surfaces `waiting_for_slot` without failing or burning retry budgets. |
 | `max_items` | int | No | unlimited | Deterministic bound on episode files prepared, persisted, and scheduled by the batch. |
 | `max_output_items` | int | No | `25` | Bound on returned item summaries in outputs (default 25, capped at max 100). This does not affect scheduling. |
+| `shared_calibration` | bool | No | `true` for `anime-x265-calibrated` | Benchmark up to three representative files once, choose a common CRF, and validate each completed candidate with sampled VMAF/CAMBI. Requires one explicit optimized x265 profile. |
+| `calibration_items` | int | No | `2` | Number of representative episode files, from 1 to 3. |
+| `promote_candidates` | bool | No | `false` | After the batch finishes, offer one approval for every completed, verified candidate. Promotion uses Sonarr and recovery copies. |
+| `promotion_parallelism` | int | No | `2` | Concurrent Sonarr promotions after batch approval, from 1 to 2. |
 
 > [!IMPORTANT]
 > `idempotency_key` is a **top-level** MCP argument to `action_run`, NOT nested within the `inputs` JSON object.
@@ -464,6 +468,20 @@ Processes Season 2 files, skipping items that are already HEVC or do not meet sa
 }
 ```
 If `profile` is omitted, the engine honors `config.Transcode.DefaultProfile` (which can be set to `auto` or a specific profile), falling back to `hevc-vt` if unset.
+
+#### Calibrated anime series with one promotion decision
+
+Use one `transcode_batch` action for the series. The `anime-x265-calibrated` recipe defaults to shared calibration: Navigatorr benchmarks two representative episodes at CRF 20 and 22, picks the highest CRF that passes quality and projected savings on both, and uses that fixed setting for the other files. It does not repeat the CRF sweep for every episode. Each completed file still gets sampled final VMAF/CAMBI validation and the actual minimum size saving check before its candidate is accepted. Files outside the supported 8-bit SDR, below-45-fps class are skipped with their originals intact. A failed file remains unpromoted; other verified candidates can continue.
+
+```json
+{
+  "action": "transcode_batch",
+  "inputs": "{\"service\":\"sonarr\",\"series_id\":10,\"profile\":\"anime-x265-calibrated\",\"promote_candidates\":true}",
+  "idempotency_key": "anime-series-10-calibrated"
+}
+```
+
+The action runs asynchronously and survives restarts. After all candidate jobs finish, `promote_candidates: true` presents the exact list once as `waiting_decision`. Resume the **batch** with `decision: "approve"` to promote those candidates; no per-episode approvals are needed. `reject` leaves originals and candidates in place. Promotion still verifies each physical file, keeps a recovery copy until Sonarr confirms its replacement, and runs at most two files concurrently. Omit `promote_candidates` to keep every original and only create validated candidates.
 
 > [!NOTE]
 > `replace_original` defaults to `false` and must remain `false`. Any request specifying `replace_original: true` is rejected fail-closed to guarantee original library files are never touched or overwritten.
@@ -525,7 +543,7 @@ To prevent unbounded JSON responses when batching entire series or large seasons
 - **Crash and daemon restart resilience**: If the Navigatorr daemon stops or restarts mid-batch, calling `Resume(ctx, instanceID, "", nil)` re-attaches to the batch. Items are recovered via stable child idempotency lookup (`batch-<batch_id>-<item_key>`) across all statuses, preventing duplicate job submissions.
 - **Concurrency & slot occupancy**: Active in-flight items occupy slots up to `config.Transcode.MaxParallelJobs` across resumes.
 - **Decision forwarding**: When a child item requires user decision (e.g. `max_size_increase_percent` exceeded), the batch surfaces `waiting_decision`. Calling `action_resume` with `decision: "accept_loss"` or `"reject"` automatically forwards the decision to the child action.
-- **Safe cancellation semantics**: Calling `action_resume` with `decision: "cancel"` marks queued and waiting items as cancelled. Active remote transcode jobs already in flight on workers are **not** stopped and remain running on workers. The batch surfaces this explicitly rather than falsely claiming remote jobs were terminated.
+- **Safe cancellation semantics**: Calling `action_resume` with `decision: "cancel"` records cancellation before new work can start, cancels active child actions and benchmark jobs, and records any cancellation errors in the batch result.
 - **Pause/resume semantics**: Passing `paused: true` or resuming with `decision: "pause"` transitions the batch to `waiting_decision`. Resuming with `decision: "resume"` cleanly continues remaining items.
 
 ### Concurrency and `worker_busy` behavior

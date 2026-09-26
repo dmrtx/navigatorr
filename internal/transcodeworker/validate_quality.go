@@ -178,6 +178,12 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 		if combined.Mean < v.Minimum {
 			e.ReasonCodes = append(e.ReasonCodes, "quality_vmaf_mean_below_minimum")
 		}
+		for _, sample := range vmafSamples {
+			if sample.Mean < v.Minimum {
+				e.ReasonCodes = append(e.ReasonCodes, "quality_vmaf_sample_below_minimum")
+				break
+			}
+		}
 		if v.GuardrailEnforcement == "reject" {
 			if v.P5Minimum != nil && combined.P5 < *v.P5Minimum {
 				e.ReasonCodes = append(e.ReasonCodes, "quality_vmaf_p5_below_minimum")

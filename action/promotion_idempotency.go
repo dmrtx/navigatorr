@@ -24,7 +24,7 @@ func promotionIdempotency(inputs map[string]any) (string, error) {
 
 func (e *Engine) existingPromotion(ctx context.Context, inst *store.ActionInstance, tmpl ActionTemplate, inputs map[string]any) (*ActionResult, error) {
 	ec := parseExecutionContext(inst, e)
-	for _, key := range []string{"service", "transcode_action_id", "series_id"} {
+	for _, key := range []string{"service", "transcode_action_id", "series_id", "batch_promote_parent_id", "batch_promote_item_key", "batch_promote_digest"} {
 		if fmt.Sprint(ec.Inputs[key]) != fmt.Sprint(inputs[key]) {
 			return nil, fmt.Errorf("promotion already exists for this candidate with different %s", key)
 		}

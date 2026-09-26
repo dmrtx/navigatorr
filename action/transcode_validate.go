@@ -2,6 +2,7 @@ package action
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -46,6 +47,18 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 	if plan == nil {
 		return StepResult{Status: StepFailed, Error: "resolved plan missing during validation (fail closed)"}, nil
 	}
+	if plan.QualityValidation != nil {
+		var evidence struct {
+			Verdict                string `json:"verdict"`
+			CandidateSHA256        string `json:"candidate_sha256"`
+			PlanDigest             string `json:"plan_digest"`
+			BenchmarkRequestDigest string `json:"benchmark_request_digest"`
+		}
+		encoded, err := json.Marshal(ec.State["quality_evidence"])
+		if err != nil || json.Unmarshal(encoded, &evidence) != nil || evidence.Verdict != "pass" || evidence.CandidateSHA256 == "" || evidence.CandidateSHA256 != getString(ec.State, "candidate_sha256") || evidence.PlanDigest != plan.PlanDigest || evidence.BenchmarkRequestDigest != plan.QualityValidation.BenchmarkRequestDigest {
+			return StepResult{Status: StepFailed, Error: "final quality validation evidence is missing or does not match the candidate and plan; original preserved"}, nil
+		}
+	}
 	observedSize, err := e.verifyPublishedCandidateLight(ctx, ec, outputPath)
 	if err != nil {
 		return StepResult{Status: StepFailed, Error: err.Error()}, nil
@@ -69,6 +82,9 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 		increasePct := float64(candidateSize-origSize) / float64(origSize) * 100
 		if increasePct > maxInc {
 			reason := fmt.Sprintf("Candidate file size (%d bytes) exceeds original (%d bytes) by %.1f%%, which is greater than max_size_increase_percent (%.1f%%)", candidateSize, origSize, increasePct, maxInc)
+			if getBool(ec.State, "batch_shared_validation") {
+				return StepResult{Status: StepFailed, Error: reason + "; original preserved"}, nil
+			}
 			return StepResult{Status: StepWaitingDecision, WaitingReason: reason, WaitingOptions: []WaitingOption{{Decision: "reject", Description: "Reject candidate and keep original"}, {Decision: "accept_loss", Description: "Accept candidate despite validation discrepancy"}}}, nil
 		}
 	}
@@ -76,6 +92,12 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 	pct := float64(0)
 	if origSize > 0 {
 		pct = float64(saved) / float64(origSize) * 100
+	}
+	if getBool(ec.State, "batch_shared_validation") {
+		minSavings, _ := e.effectiveSizeGuardrails(ec)
+		if pct < minSavings {
+			return StepResult{Status: StepFailed, Error: fmt.Sprintf("calibrated candidate saved %.1f%%, below required %.1f%%; original preserved", pct, minSavings)}, nil
+		}
 	}
 	// Populate the result/validation maps from the immutable plan and the
 	// original report. The candidate's own stream attributes were validated
