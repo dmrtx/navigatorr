@@ -20,12 +20,22 @@ const defaultBatchCalibrationItems = 2
 // BatchCalibrationResult is persisted on the parent before any full-file job
 // starts. Children verify its digest and apply the same encoder settings.
 type BatchCalibrationResult struct {
-	Profile       string   `json:"profile"`
-	ProfileDigest string   `json:"profile_digest"`
-	Quality       int      `json:"quality"`
-	ItemKeys      []string `json:"item_keys"`
-	ActionIDs     []string `json:"action_ids"`
-	Digest        string   `json:"digest"`
+	Profile       string         `json:"profile"`
+	ProfileDigest string         `json:"profile_digest"`
+	Quality       int            `json:"quality"`
+	ItemKeys      []string       `json:"item_keys"`
+	ActionIDs     []string       `json:"action_ids"`
+	Digest        string         `json:"digest"`
+	Priority      string         `json:"priority,omitempty"`
+	ItemQualities map[string]int `json:"item_qualities,omitempty"`
+	SkippedItems  []string       `json:"skipped_items,omitempty"`
+}
+
+func (r *BatchCalibrationResult) qualityFor(key string) int {
+	if q, ok := r.ItemQualities[key]; ok {
+		return q
+	}
+	return r.Quality
 }
 
 func batchCalibrationEnabled(inputs map[string]any) bool {
@@ -60,6 +70,14 @@ func strictBatchInteger(raw any) (int, bool) {
 }
 
 func validateBatchCalibrationInputs(inputs map[string]any, requestedProfile string) error {
+	if raw, ok := inputs["priority"]; ok {
+		if raw != "quality" && raw != "savings" {
+			return fmt.Errorf("priority must be quality or savings")
+		}
+		if !batchCalibrationEnabled(inputs) {
+			return fmt.Errorf("priority requires shared calibration")
+		}
+	}
 	if raw, present := inputs["shared_calibration"]; present {
 		if _, ok := raw.(bool); !ok {
 			return fmt.Errorf("shared_calibration must be a boolean")
@@ -186,8 +204,8 @@ func chooseSharedBatchQuality(decisions []*transcode.BenchmarkDecision, search [
 }
 
 func (e *Engine) ensureSharedBatchCalibration(ctx context.Context, ec *ExecutionContext, items []store.TranscodeBatchItem) (StepResult, bool) {
-	if getBatchCalibrationResult(ec.State["shared_calibration_result"]) != nil {
-		return StepResult{}, true
+	if result := getBatchCalibrationResult(ec.State["shared_calibration_result"]); result != nil {
+		return e.applyCalibrationSkips(result, items)
 	}
 	selected := representativeBatchItems(items, getBatchCalibrationItems(ec.Inputs))
 	if len(selected) == 0 {
@@ -276,11 +294,40 @@ func (e *Engine) ensureSharedBatchCalibration(ctx context.Context, ec *Execution
 		actionIDs = append(actionIDs, result.ID)
 	}
 	minSavings, _ := e.effectiveSizeGuardrails(ec)
-	quality, err := chooseSharedBatchQuality(decisions, profile.Optimization.Search.QualityValues, minSavings)
-	if err != nil {
-		return StepResult{Status: StepFailed, Error: err.Error()}, false
+	result := BatchCalibrationResult{Profile: profileName, ProfileDigest: profileDigest, ItemKeys: keys, ActionIDs: actionIDs}
+	priority := getString(ec.State, "batch_priority")
+	if priority == "" {
+		priority = getString(ec.Inputs, "priority")
 	}
-	result := BatchCalibrationResult{Profile: profileName, ProfileDigest: profileDigest, Quality: quality, ItemKeys: keys, ActionIDs: actionIDs}
+	if priority == "" { // Preserve the policy of batches created before priority support.
+		quality, err := chooseSharedBatchQuality(decisions, profile.Optimization.Search.QualityValues, minSavings)
+		if err != nil {
+			return StepResult{Status: StepFailed, Error: err.Error()}, false
+		}
+		result.Quality = quality
+	} else {
+		result.Priority = priority
+		result.ItemQualities = make(map[string]int)
+		for i, decision := range decisions {
+			q := chooseBatchItemQuality(decision, profile.Optimization.Search.QualityValues, minSavings, priority)
+			if q == 0 {
+				result.SkippedItems = append(result.SkippedItems, keys[i])
+				continue
+			}
+			result.ItemQualities[keys[i]] = q
+			if result.Quality == 0 || priority == "quality" && q < result.Quality || priority == "savings" && q > result.Quality {
+				result.Quality = q
+			}
+		}
+		if result.Quality == 0 {
+			result.SkippedItems = nil
+			for _, item := range items {
+				if item.Status == "queued" {
+					result.SkippedItems = append(result.SkippedItems, item.ItemKey)
+				}
+			}
+		}
+	}
 	encoded, err := json.Marshal(result)
 	if err != nil {
 		return StepResult{Status: StepFailed, Error: err.Error()}, false
@@ -291,7 +338,7 @@ func (e *Engine) ensureSharedBatchCalibration(ctx context.Context, ec *Execution
 	if err := e.persistExecutionState(ctx, ec); err != nil {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("persisting shared calibration: %v", err)}, false
 	}
-	return StepResult{}, true
+	return e.applyCalibrationSkips(&result, items)
 }
 
 // A calibrated batch never asks for per-episode approval. A child that needs
@@ -319,4 +366,48 @@ func (e *Engine) rejectCalibratedBatchDecisions(ctx context.Context, items []sto
 		}
 	}
 	return nil
+}
+
+// Only reuse measurements already made. A difficult representative never vetoes
+// another episode, and no additional benchmark or full encode retry is started.
+func chooseBatchItemQuality(decision *transcode.BenchmarkDecision, search []int, minSavings float64, priority string) int {
+	best := 0
+	if decision == nil {
+		return best
+	}
+	for _, ev := range decision.Evaluations {
+		allowed := false
+		for _, q := range search {
+			if ev.Quality == q {
+				allowed = true
+				break
+			}
+		}
+		if !allowed || !ev.Eligible || !ev.MinimumMet || ev.VideoCodec != transcode.VideoCodecLibX265 || ev.MetricType != "vmaf" || ev.EstimatedBytes <= 0 || ev.SavingsPercent < minSavings {
+			continue
+		}
+		if best == 0 || priority == "quality" && ev.Quality < best || priority == "savings" && ev.Quality > best {
+			best = ev.Quality
+		}
+	}
+	return best
+}
+
+func (e *Engine) applyCalibrationSkips(result *BatchCalibrationResult, items []store.TranscodeBatchItem) (StepResult, bool) {
+	skipped := make(map[string]bool)
+	for _, key := range result.SkippedItems {
+		skipped[key] = true
+	}
+	for i := range items {
+		item := &items[i]
+		if !skipped[item.ItemKey] || item.Status != "queued" {
+			continue
+		}
+		item.Status, item.Decision = "skip", "skip"
+		item.Reasons = append(item.Reasons, "calibration found no suitable candidate within the bounded search; original preserved")
+		if err := e.deps.Store.UpdateTranscodeBatchItem(*item); err != nil {
+			return StepResult{Status: StepFailed, Error: err.Error()}, false
+		}
+	}
+	return StepResult{}, true
 }

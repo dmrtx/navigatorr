@@ -421,7 +421,8 @@ The `transcode_batch` action coordinates persistent batch transcoding across lib
 | `surface_worker_busy` | bool | No | `true` | When `true`, worker capacity saturation surfaces `waiting_for_slot` without failing or burning retry budgets. |
 | `max_items` | int | No | unlimited | Deterministic bound on episode files prepared, persisted, and scheduled by the batch. |
 | `max_output_items` | int | No | `25` | Bound on returned item summaries in outputs (default 25, capped at max 100). This does not affect scheduling. |
-| `shared_calibration` | bool | No | `true` for `anime-x265-calibrated` | Benchmark up to three representative files once, choose a common CRF, and validate each completed candidate with sampled VMAF/CAMBI. Requires one explicit optimized x265 profile. |
+| `shared_calibration` | bool | No | `true` for `anime-x265-calibrated` | Benchmark up to three representative files once, reuse measured CRFs according to the chosen priority, and validate each completed candidate with sampled VMAF/CAMBI. Requires one explicit optimized x265 profile. |
+| `priority` | string | No | `quality` | Shared calibration: `quality` selects the lowest passing CRF; `savings` selects the highest passing CRF. Known exceptions keep their originals without blocking the batch. |
 | `calibration_items` | int | No | `2` | Number of representative episode files, from 1 to 3. |
 | `promote_candidates` | bool | No | `false` | After the batch finishes, offer one approval for every completed, verified candidate. Promotion uses Sonarr and recovery copies. |
 | `promotion_parallelism` | int | No | `2` | Concurrent Sonarr promotions after batch approval, from 1 to 2. |
@@ -471,7 +472,9 @@ If `profile` is omitted, the engine honors `config.Transcode.DefaultProfile` (wh
 
 #### Calibrated anime series with one promotion decision
 
-Use one `transcode_batch` action for the series. The `anime-x265-calibrated` recipe defaults to shared calibration: Navigatorr benchmarks two representative episodes at CRF 20 and 22, picks the highest CRF that passes quality and projected savings on both, and uses that fixed setting for the other files. It does not repeat the CRF sweep for every episode. Each completed file still gets sampled final VMAF/CAMBI validation and the actual minimum size saving check before its candidate is accepted. Files outside the supported 8-bit SDR, below-45-fps class are skipped with their originals intact. A failed file remains unpromoted; other verified candidates can continue.
+Use one `transcode_batch` action for the series. With `anime-x265-calibrated`, Navigatorr benchmarks two representative episodes at CRF 20 and 22. `priority: "quality"` chooses each representative's lowest passing CRF; `priority: "savings"` chooses its highest passing CRF. Representatives retain their measured settings. Other episodes reuse the lowest of those settings for quality, or the highest for savings. These priorities use the same quality and minimum savings limits.
+
+A representative without a suitable candidate is skipped, keeping its original. It does not block the other episodes. If none of the representatives passes, the batch keeps all originals and completes without full encodes. Each full candidate is still validated by sampled VMAF/CAMBI and actual size savings. A rejected candidate leaves its original intact while other episodes continue. There are no additional candidate sweeps or automatic full-file quality retries. Technical failures remain errors, rather than being reported as quality skips. Previously created batches retain their original selection policy.
 
 ```json
 {

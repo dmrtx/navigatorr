@@ -34,7 +34,7 @@ func (e *Engine) applySharedBatchCalibration(ec *ExecutionContext, plan *transco
 		return fmt.Errorf("parent batch does not own shared calibration")
 	}
 	calibration := getBatchCalibrationResult(parentState["shared_calibration_result"])
-	if calibration == nil || calibration.Digest != getString(ec.Inputs, "batch_calibration_digest") || calibration.ProfileDigest != profileDigest || calibration.ProfileDigest != getString(parentState, "shared_calibration_profile_digest") || calibration.Quality != getInt(ec.Inputs, "batch_fixed_quality") {
+	if calibration == nil || calibration.Digest != getString(ec.Inputs, "batch_calibration_digest") || calibration.ProfileDigest != profileDigest || calibration.ProfileDigest != getString(parentState, "shared_calibration_profile_digest") || calibration.qualityFor(itemKey) != getInt(ec.Inputs, "batch_fixed_quality") {
 		return fmt.Errorf("fixed quality does not match persisted parent calibration")
 	}
 	item, err := e.deps.Store.GetTranscodeBatchItem(parentID, itemKey)
@@ -46,7 +46,7 @@ func (e *Engine) applySharedBatchCalibration(ec *ExecutionContext, plan *transco
 	}
 	allowed := false
 	for _, quality := range profile.Optimization.Search.QualityValues {
-		if quality == calibration.Quality {
+		if quality == calibration.qualityFor(itemKey) {
 			allowed = true
 			break
 		}
@@ -80,12 +80,12 @@ func (e *Engine) applySharedBatchCalibration(ec *ExecutionContext, plan *transco
 		Quality           int                               `json:"quality"`
 		Samples           []transcode.BenchmarkSampleWindow `json:"samples"`
 		Policy            *transcode.BenchmarkQualityConfig `json:"policy"`
-	}{calibration.Digest, sourceSHA, calibration.Quality, windows, qualityConfig})
+	}{calibration.Digest, sourceSHA, calibration.qualityFor(itemKey), windows, qualityConfig})
 	if err != nil {
 		return fmt.Errorf("encoding validation provenance: %w", err)
 	}
 	sum := sha256.Sum256(provenance)
-	plan.Quality = calibration.Quality
+	plan.Quality = calibration.qualityFor(itemKey)
 	plan.AverageBitrateKbps = 0
 	plan.QualityValidation = &transcode.QualityValidationPlan{Metric: "vmaf", Samples: windows, Quality: *qualityConfig, BenchmarkRequestDigest: "sha256:" + hex.EncodeToString(sum[:])}
 	plan.PlanDigest = ""
@@ -96,6 +96,6 @@ func (e *Engine) applySharedBatchCalibration(ec *ExecutionContext, plan *transco
 	plan.PlanDigest = digest
 	ec.State["batch_shared_validation"] = true
 	ec.State["batch_calibration_digest"] = calibration.Digest
-	ec.State["batch_fixed_quality"] = calibration.Quality
+	ec.State["batch_fixed_quality"] = calibration.qualityFor(itemKey)
 	return nil
 }
