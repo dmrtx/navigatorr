@@ -114,55 +114,90 @@ func calibratedTestProfileConfig() map[string]any {
 }
 
 func TestSharedBatchCalibrationReusesCompletedRepresentativeActions(t *testing.T) {
-	st, err := store.Open(filepath.Join(t.TempDir(), "actions.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-	profile := calibratedTestProfileConfig()
-	_, profileDigest, _, err := decodeEphemeralProfileInput(map[string]any{"profile_config": profile})
-	if err != nil {
-		t.Fatal(err)
-	}
-	inputs := map[string]any{"service": "sonarr", "series_id": 10, "profile_config": profile, "shared_calibration": true, "calibration_items": 2}
-	if err := st.CreateActionInstance(store.ActionInstance{ID: "batch-calibration-test", ActionName: "transcode_batch", Status: StatusWaitingExternal, InputsJSON: toJSON(inputs), OutputsJSON: "{}", StateJSON: "{}"}); err != nil {
-		t.Fatal(err)
-	}
-	items := []store.TranscodeBatchItem{
-		{BatchID: "batch-calibration-test", ItemKey: "epfile-1", FilePath: "/media/first.mkv", EpisodeInfo: "S01E01", Decision: "transcode", Status: "queued"},
-		{BatchID: "batch-calibration-test", ItemKey: "epfile-2", FilePath: "/media/last.mkv", EpisodeInfo: "S01E12", Decision: "transcode", Status: "queued"},
-	}
-	for _, item := range items {
-		if err := st.CreateTranscodeBatchItem(item); err != nil {
-			t.Fatal(err)
-		}
-	}
-	good := func(q int, eligible bool) transcode.BenchmarkCandidateEvaluation {
-		return transcode.BenchmarkCandidateEvaluation{VideoCodec: transcode.VideoCodecLibX265, Quality: q, MetricType: "vmaf", Eligible: eligible, MinimumMet: eligible, EstimatedBytes: 100, SavingsPercent: 30}
-	}
-	for i, item := range items {
-		decision := transcode.BenchmarkDecision{Evaluations: []transcode.BenchmarkCandidateEvaluation{good(20, true), good(22, i == 0)}}
-		outputs := map[string]any{"benchmark_decision": decision, "ephemeral_recipe_digest": profileDigest}
-		if err := st.CreateActionInstance(store.ActionInstance{ID: "representative-" + item.ItemKey, ActionName: "benchmark_transcode", Status: StatusCompleted, IdempotencyKey: "batch-calibration-batch-calibration-test-" + item.ItemKey, InputsJSON: "{}", OutputsJSON: toJSON(outputs), StateJSON: "{}"}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	engine := NewEngine(EngineDeps{Store: st})
-	ec := &ExecutionContext{InstanceID: "batch-calibration-test", ActionName: "transcode_batch", Inputs: inputs, Outputs: map[string]any{}, State: map[string]any{}}
-	step, done := engine.ensureSharedBatchCalibration(context.Background(), ec, items)
-	if !done || step.Status == StepFailed {
-		t.Fatalf("calibration should use persisted evidence: done=%v step=%+v", done, step)
-	}
-	result := getBatchCalibrationResult(ec.State["shared_calibration_result"])
-	if result == nil || result.Quality != 20 || len(result.ActionIDs) != 2 || result.Digest == "" {
-		t.Fatalf("expected conservative common CRF20, got %+v", result)
-	}
-	parent, err := st.GetActionInstance("batch-calibration-test")
-	if err != nil || !strings.Contains(parent.StateJSON, result.Digest) {
-		t.Fatalf("calibration was not persisted before full-file dispatch: %v %+v", err, parent)
-	}
-	if _, done := engine.ensureSharedBatchCalibration(context.Background(), ec, items); !done {
-		t.Fatal("persisted calibration should be reused after resume")
+	for _, mode := range []string{"legacy", "quality", "savings", "none"} {
+		t.Run(mode, func(t *testing.T) {
+			st, err := store.Open(filepath.Join(t.TempDir(), "actions.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer st.Close()
+			profile := calibratedTestProfileConfig()
+			_, profileDigest, _, err := decodeEphemeralProfileInput(map[string]any{"profile_config": profile})
+			if err != nil {
+				t.Fatal(err)
+			}
+			inputs := map[string]any{"service": "sonarr", "series_id": 10, "profile_config": profile, "shared_calibration": true, "calibration_items": 2}
+			if mode != "legacy" {
+				inputs["priority"] = "quality"
+				if mode == "savings" {
+					inputs["priority"] = "savings"
+				}
+			}
+			if err := st.CreateActionInstance(store.ActionInstance{ID: "batch-calibration-test", ActionName: "transcode_batch", Status: StatusWaitingExternal, InputsJSON: toJSON(inputs), OutputsJSON: "{}", StateJSON: "{}"}); err != nil {
+				t.Fatal(err)
+			}
+			items := []store.TranscodeBatchItem{
+				{BatchID: "batch-calibration-test", ItemKey: "epfile-1", FilePath: "/media/first.mkv", EpisodeInfo: "S01E01", Decision: "transcode", Status: "queued"},
+				{BatchID: "batch-calibration-test", ItemKey: "epfile-2", FilePath: "/media/last.mkv", EpisodeInfo: "S01E12", Decision: "transcode", Status: "queued"},
+			}
+			for _, item := range items {
+				if err := st.CreateTranscodeBatchItem(item); err != nil {
+					t.Fatal(err)
+				}
+			}
+			good := func(q int, eligible bool) transcode.BenchmarkCandidateEvaluation {
+				return transcode.BenchmarkCandidateEvaluation{VideoCodec: transcode.VideoCodecLibX265, Quality: q, MetricType: "vmaf", Eligible: eligible, MinimumMet: eligible, EstimatedBytes: 100, SavingsPercent: 30}
+			}
+			for i, item := range items {
+				decision := transcode.BenchmarkDecision{Evaluations: []transcode.BenchmarkCandidateEvaluation{good(20, true), good(22, i == 0)}}
+				if mode != "legacy" && (i == 1 || mode == "none") {
+					decision.Evaluations = []transcode.BenchmarkCandidateEvaluation{good(20, false), good(22, false)}
+				}
+				outputs := map[string]any{"benchmark_decision": decision, "ephemeral_recipe_digest": profileDigest}
+				if err := st.CreateActionInstance(store.ActionInstance{ID: "representative-" + item.ItemKey, ActionName: "benchmark_transcode", Status: StatusCompleted, IdempotencyKey: "batch-calibration-batch-calibration-test-" + item.ItemKey, InputsJSON: "{}", OutputsJSON: toJSON(outputs), StateJSON: "{}"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			engine := NewEngine(EngineDeps{Store: st})
+			ec := &ExecutionContext{InstanceID: "batch-calibration-test", ActionName: "transcode_batch", Inputs: inputs, Outputs: map[string]any{}, State: map[string]any{}}
+			step, done := engine.ensureSharedBatchCalibration(context.Background(), ec, items)
+			if !done || step.Status == StepFailed {
+				t.Fatalf("calibration should use persisted evidence: done=%v step=%+v", done, step)
+			}
+			result := getBatchCalibrationResult(ec.State["shared_calibration_result"])
+			expected := 20
+			if mode == "savings" {
+				expected = 22
+			}
+			if mode == "none" {
+				expected = 0
+			}
+			if result == nil || result.Quality != expected || len(result.ActionIDs) != 2 || result.Digest == "" {
+				t.Fatalf("expected conservative common CRF20, got %+v", result)
+			}
+			parent, err := st.GetActionInstance("batch-calibration-test")
+			if err != nil || !strings.Contains(parent.StateJSON, result.Digest) {
+				t.Fatalf("calibration was not persisted before full-file dispatch: %v %+v", err, parent)
+			}
+			if _, done := engine.ensureSharedBatchCalibration(context.Background(), ec, items); !done {
+				t.Fatal("persisted calibration should be reused after resume")
+			}
+
+			if mode != "legacy" {
+				second, err := st.GetTranscodeBatchItem(ec.InstanceID, "epfile-2")
+				if err != nil || second.Status != "skip" {
+					t.Fatalf("exception must be persisted as skip: %+v %v", second, err)
+				}
+				first, err := st.GetTranscodeBatchItem(ec.InstanceID, "epfile-1")
+				expectedStatus := "queued"
+				if mode == "none" {
+					expectedStatus = "skip"
+				}
+				if err != nil || first.Status != expectedStatus {
+					t.Fatalf("unexpected first episode: %+v %v", first, err)
+				}
+			}
+		})
 	}
 }
 
@@ -206,7 +241,7 @@ func TestSharedBatchFinalPlanBoundToParentAndSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	result := BatchCalibrationResult{Profile: "anime-x265-calibrated", ProfileDigest: "sha256:profile", Quality: 22, ItemKeys: []string{"epfile-1"}, ActionIDs: []string{"act-benchmark-1"}, Digest: "sha256:calibration"}
+	result := BatchCalibrationResult{Profile: "anime-x265-calibrated", ProfileDigest: "sha256:profile", Quality: 20, ItemQualities: map[string]int{"epfile-1": 22}, ItemKeys: []string{"epfile-1"}, ActionIDs: []string{"act-benchmark-1"}, Digest: "sha256:calibration"}
 	parentInputs, _ := json.Marshal(map[string]any{"profile": "anime-x265-calibrated"})
 	parentState, _ := json.Marshal(map[string]any{"shared_calibration_result": result, "shared_calibration_profile_digest": result.ProfileDigest})
 	if err := st.CreateActionInstance(store.ActionInstance{ID: "parent-batch", ActionName: "transcode_batch", Status: StatusWaitingExternal, InputsJSON: string(parentInputs), StateJSON: string(parentState)}); err != nil {
@@ -238,6 +273,11 @@ func TestSharedBatchFinalPlanBoundToParentAndSource(t *testing.T) {
 		t.Fatal("final validation provenance digest missing")
 	}
 	bad := makeContext()
+	bad.Inputs["batch_fixed_quality"] = 20
+	if err := engine.applySharedBatchCalibration(bad, &transcode.Plan{VideoCodec: transcode.VideoCodecLibX265}, source, profile, "source-sha", result.ProfileDigest, "/media/episode.mkv"); err == nil {
+		t.Fatal("representative must use its own measured quality, not the batch default")
+	}
+	bad = makeContext()
 	bad.Inputs["batch_calibration_digest"] = "sha256:wrong"
 	if err := engine.applySharedBatchCalibration(bad, &transcode.Plan{VideoCodec: transcode.VideoCodecLibX265}, source, profile, "source-sha", result.ProfileDigest, "/media/episode.mkv"); err == nil {
 		t.Fatal("mismatched parent calibration must fail closed")

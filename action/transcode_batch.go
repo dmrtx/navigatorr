@@ -22,7 +22,7 @@ func (e *Engine) registerTranscodeBatchTemplate() {
 		AutoReconcile:   true,
 		ImmutableInputs: true,
 		Name:            "transcode_batch",
-		Version:         2,
+		Version:         3,
 		Description:     "Coordinates persistent Sonarr batch transcoding, shared calibration, and optional promotion after one explicit approval.",
 		RequiredInputs:  []string{"service", "series_id"},
 		OptionalInputs: []string{
@@ -42,6 +42,7 @@ func (e *Engine) registerTranscodeBatchTemplate() {
 			"max_items",
 			"shared_calibration",
 			"calibration_items",
+			"priority",
 			"promote_candidates",
 			"promotion_parallelism",
 		},
@@ -257,6 +258,13 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 	}
 	if err := validateBatchCalibrationInputs(ec.Inputs, requestedProfile); err != nil {
 		return StepResult{Status: StepFailed, Error: err.Error()}, nil
+	}
+	if batchCalibrationEnabled(ec.Inputs) {
+		priority := getString(ec.Inputs, "priority")
+		if priority == "" {
+			priority = "quality"
+		}
+		ec.State["batch_priority"] = priority
 	}
 	mediaType := "tv"
 	if isAnime {
@@ -974,7 +982,7 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 			return false, fmt.Errorf("shared batch calibration result missing before child dispatch")
 		}
 		childInputs["profile_config"] = ec.State["shared_calibration_profile"]
-		childInputs["batch_fixed_quality"] = calibration.Quality
+		childInputs["batch_fixed_quality"] = calibration.qualityFor(item.ItemKey)
 		childInputs["batch_calibration_digest"] = calibration.Digest
 		childInputs["batch_item_key"] = item.ItemKey
 	} else if ephemeralProfile, ok := ec.Inputs["profile_config"]; ok && ephemeralProfile != nil {
