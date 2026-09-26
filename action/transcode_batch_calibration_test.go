@@ -292,3 +292,66 @@ func TestSharedBatchFinalPlanBoundToParentAndSource(t *testing.T) {
 		t.Fatal("10-bit source must not inherit 8-bit calibration")
 	}
 }
+
+func TestBalancedBatchQualityTargetsBeforeSavings(t *testing.T) {
+	candidate := func(q int, target bool, savings float64) transcode.BenchmarkCandidateEvaluation {
+		return transcode.BenchmarkCandidateEvaluation{VideoCodec: transcode.VideoCodecLibX265, Quality: q, MetricType: "vmaf", Eligible: true, MinimumMet: true, TargetReached: target, EstimatedBytes: 100, SavingsPercent: savings}
+	}
+	for _, tc := range []struct {
+		name        string
+		evaluations []transcode.BenchmarkCandidateEvaluation
+		want        int
+	}{
+		{"target before compression", []transcode.BenchmarkCandidateEvaluation{candidate(22, false, 81), candidate(20, true, 77)}, 20},
+		{"savings among target candidates", []transcode.BenchmarkCandidateEvaluation{candidate(20, true, 77), candidate(22, true, 81)}, 22},
+		{"measured savings before CRF", []transcode.BenchmarkCandidateEvaluation{candidate(20, true, 82), candidate(22, true, 81)}, 20},
+		{"conservative fallback", []transcode.BenchmarkCandidateEvaluation{candidate(22, false, 81), candidate(20, false, 77)}, 20},
+		{"minimum savings still required", []transcode.BenchmarkCandidateEvaluation{candidate(20, true, 5), candidate(22, false, 81)}, 22},
+		{"no passing candidate", []transcode.BenchmarkCandidateEvaluation{candidate(20, true, 5)}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := chooseBatchItemQuality(&transcode.BenchmarkDecision{Evaluations: tc.evaluations}, []int{20, 22}, 15, "balanced")
+			if got != tc.want {
+				t.Fatalf("got CRF %d, want %d", got, tc.want)
+			}
+		})
+	}
+	rejected := candidate(22, true, 90)
+	rejected.Eligible = false
+	if got := chooseBatchItemQuality(&transcode.BenchmarkDecision{Evaluations: []transcode.BenchmarkCandidateEvaluation{rejected, candidate(20, true, 77)}}, []int{20, 22}, 15, "balanced"); got != 20 {
+		t.Fatalf("ineligible target selected: %d", got)
+	}
+	if err := validateBatchCalibrationInputs(map[string]any{"profile": "anime-x265-calibrated", "priority": "balanced"}, "anime-x265-calibrated"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPreserveQualityFreezesTargetAndSkipsBelowTarget(t *testing.T) {
+	profile, _, _, err := decodeEphemeralProfileInput(map[string]any{"profile_config": calibratedTestProfileConfig()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	strict := batchPriorityProfile(profile, "preserve_quality", "")
+	if strict.Optimization.Quality.VMAF.Minimum != 91 || profile.Optimization.Quality.VMAF.Minimum != 88 {
+		t.Fatal("preservation must enforce target without mutating shared recipe")
+	}
+	if _, _, _, err := decodeEphemeralProfileInput(map[string]any{"profile_config": strict}); err != nil {
+		t.Fatal(err)
+	}
+	below := transcode.BenchmarkCandidateEvaluation{VideoCodec: transcode.VideoCodecLibX265, Quality: 20, MetricType: "vmaf", Eligible: true, MinimumMet: true, EstimatedBytes: 100, SavingsPercent: 30}
+	decision := &transcode.BenchmarkDecision{Evaluations: []transcode.BenchmarkCandidateEvaluation{below}}
+	if q := chooseBatchItemQuality(decision, []int{20, 22}, 15, "preserve_quality"); q != 0 {
+		t.Fatalf("below target must retain original: %d", q)
+	}
+	decision.Evaluations[0].TargetReached = true
+	higher := decision.Evaluations[0]
+	higher.Quality = 22
+	higher.SavingsPercent = 40
+	decision.Evaluations = append(decision.Evaluations, higher)
+	if q := chooseBatchItemQuality(decision, []int{20, 22}, 15, "preserve_quality"); q != 20 {
+		t.Fatalf("preservation must prefer conservative candidate: %d", q)
+	}
+	if err := validateBatchCalibrationInputs(map[string]any{"profile": "anime-x265-calibrated", "priority": "preserve_quality"}, "anime-x265-calibrated"); err != nil {
+		t.Fatal(err)
+	}
+}

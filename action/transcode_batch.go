@@ -22,8 +22,8 @@ func (e *Engine) registerTranscodeBatchTemplate() {
 		AutoReconcile:   true,
 		ImmutableInputs: true,
 		Name:            "transcode_batch",
-		Version:         3,
-		Description:     "Coordinates persistent Sonarr batch transcoding, shared calibration, and optional promotion after one explicit approval.",
+		Version:         4,
+		Description:     "Coordinates persistent Sonarr batch transcoding, shared calibration with priorities: balanced (calidad con ahorro, default), quality (calidad), preserve_quality (misma calidad en x265, approximate; requires quality target), savings (ahorro), and optional promotion after one explicit approval.",
 		RequiredInputs:  []string{"service", "series_id"},
 		OptionalInputs: []string{
 			"season",
@@ -262,7 +262,7 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 	if batchCalibrationEnabled(ec.Inputs) {
 		priority := getString(ec.Inputs, "priority")
 		if priority == "" {
-			priority = "quality"
+			priority = "balanced"
 		}
 		ec.State["batch_priority"] = priority
 	}

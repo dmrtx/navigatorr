@@ -71,8 +71,8 @@ func strictBatchInteger(raw any) (int, bool) {
 
 func validateBatchCalibrationInputs(inputs map[string]any, requestedProfile string) error {
 	if raw, ok := inputs["priority"]; ok {
-		if raw != "quality" && raw != "savings" {
-			return fmt.Errorf("priority must be quality or savings")
+		if raw != "quality" && raw != "balanced" && raw != "preserve_quality" && raw != "savings" {
+			return fmt.Errorf("priority must be quality, balanced, preserve_quality, or savings")
 		}
 		if !batchCalibrationEnabled(inputs) {
 			return fmt.Errorf("priority requires shared calibration")
@@ -240,6 +240,9 @@ func (e *Engine) ensureSharedBatchCalibration(ctx context.Context, ec *Execution
 	if profile.Video.Codec != transcode.VideoCodecLibX265 || profile.Optimization == nil || !profile.Optimization.Enabled || profile.Optimization.Search == nil || len(profile.Optimization.Search.QualityValues) == 0 || profile.Optimization.Quality == nil || profile.Optimization.Quality.VMAF == nil || profile.Optimization.Quality.VMAF.Model == "" || profile.Optimization.Quality.VMAF.GuardrailEnforcement != "reject" || profile.Optimization.Quality.Banding == nil || !profile.Optimization.Quality.Banding.Enabled || profile.Optimization.Quality.Banding.Enforcement != "reject" || profile.Optimization.Quality.FinalValidation == nil || profile.Optimization.Quality.FinalValidation.Mode != "sampled" {
 		return StepResult{Status: StepFailed, Error: "shared calibration requires an optimized libx265 profile with VMAF model and sampled final validation"}, false
 	}
+	if ec.State["shared_calibration_profile"] == nil {
+		profile = batchPriorityProfile(profile, getString(ec.State, "batch_priority"), getString(ec.Inputs, "priority"))
+	}
 	_, profileDigest, _, err := decodeEphemeralProfileInput(map[string]any{"profile_config": profile})
 	if err != nil {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("snapshotting calibration profile: %v", err)}, false
@@ -315,7 +318,7 @@ func (e *Engine) ensureSharedBatchCalibration(ctx context.Context, ec *Execution
 				continue
 			}
 			result.ItemQualities[keys[i]] = q
-			if result.Quality == 0 || priority == "quality" && q < result.Quality || priority == "savings" && q > result.Quality {
+			if result.Quality == 0 || priority != "savings" && q < result.Quality || priority == "savings" && q > result.Quality {
 				result.Quality = q
 			}
 		}
@@ -372,6 +375,8 @@ func (e *Engine) rejectCalibratedBatchDecisions(ctx context.Context, items []sto
 // another episode, and no additional benchmark or full encode retry is started.
 func chooseBatchItemQuality(decision *transcode.BenchmarkDecision, search []int, minSavings float64, priority string) int {
 	best := 0
+	targetBest := 0
+	targetSavings := -1.0
 	if decision == nil {
 		return best
 	}
@@ -386,9 +391,18 @@ func chooseBatchItemQuality(decision *transcode.BenchmarkDecision, search []int,
 		if !allowed || !ev.Eligible || !ev.MinimumMet || ev.VideoCodec != transcode.VideoCodecLibX265 || ev.MetricType != "vmaf" || ev.EstimatedBytes <= 0 || ev.SavingsPercent < minSavings {
 			continue
 		}
-		if best == 0 || priority == "quality" && ev.Quality < best || priority == "savings" && ev.Quality > best {
+		if priority == "preserve_quality" && !ev.TargetReached {
+			continue
+		}
+		if best == 0 || priority != "savings" && ev.Quality < best || priority == "savings" && ev.Quality > best {
 			best = ev.Quality
 		}
+		if priority == "balanced" && ev.TargetReached && (targetBest == 0 || ev.SavingsPercent > targetSavings || ev.SavingsPercent == targetSavings && ev.Quality < targetBest) {
+			targetBest, targetSavings = ev.Quality, ev.SavingsPercent
+		}
+	}
+	if targetBest != 0 {
+		return targetBest
 	}
 	return best
 }
@@ -410,4 +424,23 @@ func (e *Engine) applyCalibrationSkips(result *BatchCalibrationResult, items []s
 		}
 	}
 	return StepResult{}, true
+}
+
+// Freeze the preservation target as the minimum for benchmarks and final files.
+// Copy nested policy values so a batch never changes the shared recipe.
+func batchPriorityProfile(profile recipe.Profile, priority, inputPriority string) recipe.Profile {
+	if priority == "" {
+		priority = inputPriority
+	}
+	if priority != "preserve_quality" {
+		return profile
+	}
+	optimization := *profile.Optimization
+	quality := *optimization.Quality
+	vmaf := *quality.VMAF
+	vmaf.Minimum = math.Max(vmaf.Minimum, vmaf.Target)
+	quality.VMAF = &vmaf
+	optimization.Quality = &quality
+	profile.Optimization = &optimization
+	return profile
 }
