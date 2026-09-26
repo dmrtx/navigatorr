@@ -22,10 +22,9 @@ func (e *Engine) registerTranscodeBatchTemplate() {
 		AutoReconcile:   true,
 		ImmutableInputs: true,
 		Name:            "transcode_batch",
-		Version:         1,
-		Description: "Coordinates persistent batch transcoding for media libraries (Sonarr), resolving episodes, " +
-			"applying deterministic auto-profile selection, respecting concurrency limits, and tracking per-item status in SQLite.",
-		RequiredInputs: []string{"service", "series_id"},
+		Version:         2,
+		Description:     "Coordinates persistent Sonarr batch transcoding, shared calibration, and optional promotion after one explicit approval.",
+		RequiredInputs:  []string{"service", "series_id"},
 		OptionalInputs: []string{
 			"season",
 			"profile",
@@ -41,8 +40,12 @@ func (e *Engine) registerTranscodeBatchTemplate() {
 			"max_size_increase_percent",
 			"max_output_items",
 			"max_items",
+			"shared_calibration",
+			"calibration_items",
+			"promote_candidates",
+			"promotion_parallelism",
 		},
-		Destructive: false,
+		Destructive: true,
 		Steps: []StepDefinition{
 			{
 				Name:        "resolve_and_inspect",
@@ -54,12 +57,20 @@ func (e *Engine) registerTranscodeBatchTemplate() {
 				Description: "Schedule and execute transcode jobs respecting max_parallel_jobs, handle worker_busy, and track per-item status",
 				Run:         e.stepTranscodeBatchSchedule,
 			},
+			{
+				Name:        "promote_batch",
+				Description: "After one approval, promote verified candidates through Sonarr with bounded concurrency and durable recovery",
+				Run:         e.stepTranscodeBatchPromote,
+			},
 		},
 	})
 }
 
 func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
 	if err := e.validateTranscodeInputs(ec); err != nil {
+		return StepResult{Status: StepFailed, Error: err.Error()}, nil
+	}
+	if err := e.validateBatchPromotionInputs(ec.Inputs); err != nil {
 		return StepResult{Status: StepFailed, Error: err.Error()}, nil
 	}
 	if getBool(ec.Inputs, "replace_original") {
@@ -244,6 +255,9 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 	} else if requestedProfile == "" {
 		requestedProfile = "auto"
 	}
+	if err := validateBatchCalibrationInputs(ec.Inputs, requestedProfile); err != nil {
+		return StepResult{Status: StepFailed, Error: err.Error()}, nil
+	}
 	mediaType := "tv"
 	if isAnime {
 		mediaType = "anime"
@@ -351,6 +365,17 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 			batchItems = append(batchItems, item)
 			continue
 		}
+		if batchCalibrationEnabled(ec.Inputs) && (len(rep.Video) != 1 || rep.Video[0].BitDepth != 8 || rep.Video[0].FPS <= 0 || rep.Video[0].FPS >= 45 || isSourceHDRorDV(&rep)) {
+			item := store.TranscodeBatchItem{
+				BatchID: ec.InstanceID, ItemKey: itemKey, FilePath: cleanPath,
+				DisplayLabel: displayLabel, EpisodeInfo: episodeInfo,
+				Decision: "skip", Status: "skip",
+				Reasons: []string{"shared VMAF/CAMBI calibration supports 8-bit SDR video below 45 fps; original preserved"},
+			}
+			_ = e.deps.Store.CreateTranscodeBatchItem(item)
+			batchItems = append(batchItems, item)
+			continue
+		}
 
 		var itemDecision, itemProfile, itemStatus string
 		var itemReasons []string
@@ -429,9 +454,13 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 
 	// In dry run, resolution and auto-selection are complete; no jobs are scheduled.
 	if dryRun {
+		outputs := buildBatchOutputs(ec.InstanceID, items, seriesTitle, isAnime, dryRun, getMaxOutputItems(ec.Inputs))
+		if batchCalibrationEnabled(ec.Inputs) {
+			outputs["calibration"] = previewBatchCalibration(items, getBatchCalibrationItems(ec.Inputs))
+		}
 		return StepResult{
 			Status:  StepCompleted,
-			Outputs: buildBatchOutputs(ec.InstanceID, items, seriesTitle, isAnime, dryRun, getMaxOutputItems(ec.Inputs)),
+			Outputs: outputs,
 		}, nil
 	}
 
@@ -457,6 +486,21 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 		}
 
 		var cancelErrors []string
+		if batchCalibrationEnabled(ec.Inputs) {
+			for _, sample := range representativeBatchItems(items, getBatchCalibrationItems(ec.Inputs)) {
+				key := fmt.Sprintf("batch-calibration-%s-%s", ec.InstanceID, sample.ItemKey)
+				probe, err := e.deps.Store.FindActionByIdempotencyKey("benchmark_transcode", key)
+				if err != nil {
+					cancelErrors = append(cancelErrors, fmt.Sprintf("%s: read calibration action: %v", sample.ItemKey, err))
+					continue
+				}
+				if probe != nil && probe.Status != StatusCompleted && probe.Status != StatusFailed && probe.Status != StatusCancelled {
+					if _, err := e.Cancel(ctx, probe.ID, "cancelled by parent transcode batch "+ec.InstanceID); err != nil {
+						cancelErrors = append(cancelErrors, fmt.Sprintf("%s: cancel calibration: %v", sample.ItemKey, err))
+					}
+				}
+			}
+		}
 		for i := range items {
 			it := &items[i]
 			if it.Status == "completed" || it.Status == "failed" || it.Status == "skip" {
@@ -573,6 +617,11 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 			}
 		}
 	}
+	if batchCalibrationEnabled(ec.Inputs) {
+		if result, done := e.ensureSharedBatchCalibration(ctx, ec, items); !done {
+			return result, nil
+		}
+	}
 
 	// Recover existing child actions across all statuses to ensure no duplicate submits
 	for i := range items {
@@ -666,6 +715,11 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 					}
 				}
 			}
+		}
+	}
+	if batchCalibrationEnabled(ec.Inputs) {
+		if err := e.rejectCalibratedBatchDecisions(ctx, items); err != nil {
+			return StepResult{Status: StepFailed, Error: err.Error()}, nil
 		}
 	}
 
@@ -807,8 +861,16 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 	}
 
 	latest, _ := e.deps.Store.ListTranscodeBatchItems(ec.InstanceID)
+	if batchCalibrationEnabled(ec.Inputs) {
+		if err := e.rejectCalibratedBatchDecisions(ctx, latest); err != nil {
+			return StepResult{Status: StepFailed, Error: err.Error()}, nil
+		}
+	}
 	outLimit := getMaxOutputItems(ec.Inputs)
 	batchOutputs := buildBatchOutputs(ec.InstanceID, latest, seriesTitle, isAnime, dryRun, outLimit)
+	if batchCalibrationEnabled(ec.Inputs) {
+		batchOutputs["calibration"] = ec.State["shared_calibration_result"]
+	}
 
 	// Check if any item is waiting for decision
 	if res, ok := e.batchWaitingDecisionResult(latest, batchOutputs); ok {
@@ -906,7 +968,16 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 		// batch is cancelled or paused, including across restarts.
 		"parent_action_id": ec.InstanceID,
 	}
-	if ephemeralProfile, ok := ec.Inputs["profile_config"]; ok && ephemeralProfile != nil {
+	if batchCalibrationEnabled(ec.Inputs) {
+		calibration := getBatchCalibrationResult(ec.State["shared_calibration_result"])
+		if calibration == nil {
+			return false, fmt.Errorf("shared batch calibration result missing before child dispatch")
+		}
+		childInputs["profile_config"] = ec.State["shared_calibration_profile"]
+		childInputs["batch_fixed_quality"] = calibration.Quality
+		childInputs["batch_calibration_digest"] = calibration.Digest
+		childInputs["batch_item_key"] = item.ItemKey
+	} else if ephemeralProfile, ok := ec.Inputs["profile_config"]; ok && ephemeralProfile != nil {
 		childInputs["profile_config"] = ephemeralProfile
 	} else {
 		childInputs["profile"] = item.Profile

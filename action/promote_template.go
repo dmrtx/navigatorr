@@ -19,7 +19,7 @@ func (e *Engine) registerPromoteTranscodeTemplate() {
 		AutoReconcile:   true,
 		ImmutableInputs: true,
 		Description:     "Promotes a completed, validated transcode into Sonarr after explicit approval, preserving a verified recovery copy until import, old-file cleanup, rename and rescan are verified. Persists external command intents and never blindly resubmits uncertain imports.",
-		RequiredInputs:  []string{"transcode_action_id", "series_id"}, OptionalInputs: []string{"service"},
+		RequiredInputs:  []string{"transcode_action_id", "series_id"}, OptionalInputs: []string{"service", "batch_promote_parent_id", "batch_promote_item_key", "batch_promote_digest"},
 		Steps: []StepDefinition{
 			{Name: "plan_promotion", Description: "Verify original and candidate, and resolve all episodes sharing the original file", Run: e.stepPromotePlan},
 			{Name: "approve_promotion", Description: "Present the exact replacement for an explicit approve decision", Run: e.stepPromoteApprove},
@@ -152,6 +152,12 @@ func (e *Engine) stepPromoteApprove(ctx context.Context, ec *ExecutionContext) (
 	}
 	if !e.AllowDestructive() {
 		return promoteFailed(fmt.Errorf("allow_destructive must be enabled for candidate promotion"))
+	}
+	if getString(ec.Inputs, "batch_promote_parent_id") != "" || getString(ec.Inputs, "batch_promote_item_key") != "" || getString(ec.Inputs, "batch_promote_digest") != "" {
+		if err := e.verifyBatchPromotionApproval(ec, p); err != nil {
+			return promoteFailed(err)
+		}
+		p.Approved = true
 	}
 	if !p.Approved {
 		switch strings.ToLower(ec.Decision) {

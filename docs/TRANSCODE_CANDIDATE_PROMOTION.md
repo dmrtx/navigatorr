@@ -1,5 +1,11 @@
 # Promoting a transcode candidate
 
+For a whole Sonarr series, set `promote_candidates: true` on
+`transcode_batch`. After candidate validation, the batch presents one approval
+covering its completed candidates and promotes them with bounded concurrency.
+Each file still uses the recovery and integrity checks described below. See
+[Batch transcoding](TRANSCODING.md#batch-transcoding-transcode_batch).
+
 `transcode_media` remains candidate-only. To replace a Sonarr library file, run
 the separate `promote_transcode_candidate` action with the completed
 `transcode_action_id`, the Sonarr `series_id`, and optional `service` (default

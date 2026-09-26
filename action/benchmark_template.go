@@ -24,7 +24,7 @@ func (e *Engine) registerBenchmarkTemplate() {
 		Version:         1,
 		Description:     "Coordinates safe candidate-only benchmark evaluation of encoder parameters over deterministic source samples, returning quality metrics, size estimates, and an explainable decision without modifying media or creating permanent candidates.",
 		RequiredInputs:  []string{"path"},
-		OptionalInputs:  []string{"profile", "profile_config", "metric", "replace_original", "surface_worker_busy"},
+		OptionalInputs:  []string{"profile", "profile_config", "metric", "replace_original", "surface_worker_busy", "parent_action_id"},
 		Destructive:     false,
 		Steps: []StepDefinition{
 			{Name: "preflight", Description: "Inspect source, hash original, resolve profile and optimization policy", Run: e.stepTranscodePreflight},

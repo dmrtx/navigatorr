@@ -22,7 +22,7 @@ func (e *Engine) registerTranscodeTemplate() {
 		ImmutableInputs: true,
 		Name:            "transcode_media", Version: 2,
 		Description:    "Coordinates safe candidate-only media transcoding using an immutable recipe-resolved plan, bounded transient retries, worker revalidation, post-transcode stream validation, and original SHA-256 verification.",
-		RequiredInputs: []string{"path"}, OptionalInputs: []string{"profile", "profile_config", "preserve_source_bit_depth", "replace_original", "expected_video_codec", "max_size_increase_percent", "media_type", "is_anime", "min_savings_percent", "surface_worker_busy", "metric", "parent_action_id"}, Destructive: false,
+		RequiredInputs: []string{"path"}, OptionalInputs: []string{"profile", "profile_config", "preserve_source_bit_depth", "replace_original", "expected_video_codec", "max_size_increase_percent", "media_type", "is_anime", "min_savings_percent", "surface_worker_busy", "metric", "parent_action_id", "batch_fixed_quality", "batch_calibration_digest", "batch_item_key"}, Destructive: false,
 		Steps: []StepDefinition{
 			{Name: "preflight", Description: "Inspect source, hash original, resolve profile/recipe and per-stream compatibility plan", Run: e.stepTranscodePreflight},
 			{Name: "submit_benchmark", Description: "Submit benchmark request if profile optimization is enabled", Run: e.stepBenchmarkSubmit},
@@ -264,6 +264,13 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		optPolicy = &recipe.OptimizationPolicy{Enabled: true}
 		recipe.NormalizeOptimizationPolicy(optPolicy)
 		optEnabled = true
+	}
+	if _, shared := ec.Inputs["batch_fixed_quality"]; shared {
+		if err := e.applySharedBatchCalibration(ec, plan, &rep, recipeProfile, origSHA, ephemeralDigest, cleanPath); err != nil {
+			return StepResult{Status: StepFailed, Error: fmt.Sprintf("shared batch calibration: %v", err)}, nil
+		}
+		optEnabled = false
+		optPolicy = nil
 	}
 
 	if optEnabled && optPolicy != nil {
