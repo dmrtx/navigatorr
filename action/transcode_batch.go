@@ -483,7 +483,7 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 	}
 
 	// Cancellation is evaluated before pause so it also works from paused:true.
-	if strings.EqualFold(ec.Decision, "cancel") {
+	if strings.EqualFold(ec.Decision, "cancel") || getBool(ec.State, "cancel_requested") {
 		ec.Decision = ""
 		ec.State["paused"] = false
 		// Durable batch-cancel control: persist the intent first so no new child
@@ -511,7 +511,7 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 		}
 		for i := range items {
 			it := &items[i]
-			if it.Status == "completed" || it.Status == "failed" || it.Status == "skip" {
+			if it.Status == "completed" || it.Status == "failed" || it.Status == "cancelled" || it.Status == "skip" {
 				continue
 			}
 			if it.ChildActionID != "" {
@@ -534,9 +534,11 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 					continue
 				}
 			}
-			it.Status = "failed"
+			it.Status = "cancelled"
 			it.Error = "cancelled by user decision"
-			_ = e.deps.Store.UpdateTranscodeBatchItem(*it)
+			if err := e.deps.Store.UpdateTranscodeBatchItem(*it); err != nil {
+				cancelErrors = append(cancelErrors, fmt.Sprintf("%s: persist cancellation: %v", it.ItemKey, err))
+			}
 		}
 
 		items, _ = e.deps.Store.ListTranscodeBatchItems(ec.InstanceID)
@@ -551,8 +553,9 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 			}, nil
 		}
 		return StepResult{
-			Status:  StepCompleted,
-			Outputs: outputs,
+			Status:        StepCancelled,
+			WaitingReason: "Batch cancelled by user",
+			Outputs:       outputs,
 		}, nil
 	}
 
@@ -693,12 +696,9 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 						_ = e.deps.Store.UpdateTranscodeBatchItem(*it)
 					}
 				case StatusCancelled:
-					// A durably cancelled child is projected as failed so a later
-					// projection never reverts it to running. Batch cancellation now
-					// cascades through child actions, so accepted worker jobs are
-					// stopped instead of being left to consume worker slots.
-					if it.Status != "failed" {
-						it.Status = "failed"
+					// Preserve cancellation separately from an encoding failure.
+					if it.Status != "cancelled" {
+						it.Status = "cancelled"
 						if it.Error == "" {
 							it.Error = "cancelled"
 						}
@@ -1151,7 +1151,7 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 
 	case StatusCancelled:
 		// A durably cancelled child stays terminal; never project it as running.
-		item.Status = "failed"
+		item.Status = "cancelled"
 		if item.Error == "" {
 			item.Error = "cancelled"
 		}
@@ -1299,6 +1299,7 @@ func buildBatchOutputs(batchID string, items []store.TranscodeBatchItem, seriesT
 		"running":          0,
 		"completed":        0,
 		"failed":           0,
+		"cancelled":        0,
 	}
 
 	for _, it := range items {
@@ -1322,6 +1323,8 @@ func buildBatchOutputs(batchID string, items []store.TranscodeBatchItem, seriesT
 			counts["completed"]++
 		case "failed":
 			counts["failed"]++
+		case "cancelled":
+			counts["cancelled"]++
 		}
 	}
 
@@ -1367,6 +1370,7 @@ func buildBatchOutputs(batchID string, items []store.TranscodeBatchItem, seriesT
 		"running":          counts["running"],
 		"completed":        counts["completed"],
 		"failed":           counts["failed"],
+		"cancelled":        counts["cancelled"],
 		"total_items":      totalItems,
 		"returned_items":   len(bounded),
 		"truncated":        truncated,

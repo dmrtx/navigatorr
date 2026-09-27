@@ -1460,7 +1460,7 @@ func TestTranscodeBatch_CancelStopsActiveRemoteJobs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cancel resume failed: %v", err)
 	}
-	if cancelledRes.Status != StatusCompleted {
+	if cancelledRes.Status != StatusCancelled {
 		t.Fatalf("expected batch cancellation to complete after stopping active remote job, got %s", cancelledRes.Status)
 	}
 	if atomic.LoadInt32(&mockExecutor.cancelCalls) != 1 {
@@ -1475,12 +1475,12 @@ func TestTranscodeBatch_CancelStopsActiveRemoteJobs(t *testing.T) {
 	items, _ := st.ListTranscodeBatchItems(res.ID)
 	for _, it := range items {
 		if it.ItemKey == "epfile-103" {
-			if it.Status != "failed" || !strings.Contains(it.Error, "cancelled") {
+			if it.Status != "cancelled" || !strings.Contains(it.Error, "cancelled") {
 				t.Errorf("expected epfile-103 failed due to cancellation, got status=%s err=%s", it.Status, it.Error)
 			}
 		}
 		if it.ItemKey == "epfile-101" {
-			if it.Status != "failed" || !strings.Contains(it.Error, "cancelled") {
+			if it.Status != "cancelled" || !strings.Contains(it.Error, "cancelled") {
 				t.Errorf("expected epfile-101 cancelled after remote worker stop, got status=%s err=%s", it.Status, it.Error)
 			}
 		}

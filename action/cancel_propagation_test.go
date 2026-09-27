@@ -219,7 +219,7 @@ func TestBatchCancelDecisionStopsAlreadyAdmittedWorkerJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cancel decision: %v", err)
 	}
-	if cancelled.Status != StatusCompleted {
+	if cancelled.Status != StatusCancelled {
 		t.Fatalf("cancel decision status=%s error=%s", cancelled.Status, cancelled.Error)
 	}
 	if atomic.LoadInt32(&mock.cancelCalls) != 1 {
@@ -229,7 +229,7 @@ func TestBatchCancelDecisionStopsAlreadyAdmittedWorkerJob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 1 || items[0].Status != "failed" || !strings.Contains(items[0].Error, "cancelled") {
+	if len(items) != 1 || items[0].Status != "cancelled" || !strings.Contains(items[0].Error, "cancelled") {
 		t.Fatalf("unexpected cancelled batch items: %+v", items)
 	}
 }

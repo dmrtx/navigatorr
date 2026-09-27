@@ -37,7 +37,7 @@ func TestWorker_PathValidation(t *testing.T) {
 		ID:            "test-same-path",
 		SourcePath:    sourceFile,
 		CandidatePath: sourceFile,
-	}, os.Args[0], "")
+	}, filepath.Join(t.TempDir(), "unexpected-worker-runner"), "")
 	if err == nil {
 		t.Fatalf("expected error when candidate == source, got res: %+v", res)
 	}
@@ -54,7 +54,7 @@ func TestWorker_PathValidation(t *testing.T) {
 		ID:            "test-outside-source",
 		SourcePath:    outsideFile,
 		CandidatePath: filepath.Join(tempDir, "cand.mkv"),
-	}, os.Args[0], "")
+	}, filepath.Join(t.TempDir(), "unexpected-worker-runner"), "")
 	if err == nil {
 		t.Fatalf("expected error for source outside allowed roots")
 	}
@@ -67,7 +67,7 @@ func TestWorker_PathValidation(t *testing.T) {
 		ID:            "test-outside-cand",
 		SourcePath:    sourceFile,
 		CandidatePath: filepath.Join(outsideDir, "cand.mkv"),
-	}, os.Args[0], "")
+	}, filepath.Join(t.TempDir(), "unexpected-worker-runner"), "")
 	if err == nil {
 		t.Fatalf("expected error for candidate outside allowed roots")
 	}
@@ -209,7 +209,7 @@ func TestWorker_BusyWorker(t *testing.T) {
 		ID:            "job-new",
 		SourcePath:    sourceFile,
 		CandidatePath: filepath.Join(tempDir, "out2.mkv"),
-	}, os.Args[0], "")
+	}, filepath.Join(t.TempDir(), "unexpected-worker-runner"), "")
 
 	if err != nil {
 		t.Fatalf("PR3 durable queue: expected queued success under full capacity, got err %v", err)
@@ -256,7 +256,7 @@ func TestWorker_IdempotentSubmit(t *testing.T) {
 		ID:            "job-idemp",
 		SourcePath:    sourceFile,
 		CandidatePath: filepath.Join(tempDir, "out-idemp.mkv"),
-	}, os.Args[0], "")
+	}, filepath.Join(t.TempDir(), "unexpected-worker-runner"), "")
 
 	if err != nil {
 		t.Fatalf("unexpected error on idempotent submit: %v", err)
@@ -883,7 +883,7 @@ func TestWorker_SubmitRejectsInvalidPlanBeforeSpawning(t *testing.T) {
 		SourcePath:    sourceFile,
 		CandidatePath: candidateFile,
 		Plan:          p,
-	}, os.Args[0], "")
+	}, filepath.Join(t.TempDir(), "unexpected-worker-runner"), "")
 
 	if err == nil {
 		t.Fatal("expected Submit to reject invalid plan, but it succeeded")

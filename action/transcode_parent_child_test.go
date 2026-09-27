@@ -469,7 +469,7 @@ func TestBatchCancelDecisionFromPausedCancelsPendingItems(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cancel from pause: %v", err)
 	}
-	if cancelled.Status != StatusCompleted {
+	if cancelled.Status != StatusCancelled {
 		t.Fatalf("cancel from pause must complete, got %s (%s)", cancelled.Status, cancelled.Error)
 	}
 	items, _ := st.ListTranscodeBatchItems(res.ID)
@@ -525,7 +525,7 @@ func TestBatchPauseFromExecutionPersistsPausedFlag(t *testing.T) {
 	}
 }
 
-func TestBatchProjectsCancelledChildAsFailed(t *testing.T) {
+func TestBatchProjectsCancelledChildAsCancelled(t *testing.T) {
 	st := setupTestStore(t)
 	parentID := "batch-proj"
 	seedBatchParent(t, st, parentID, StatusWaitingExternal, map[string]any{})
@@ -551,8 +551,8 @@ func TestBatchProjectsCancelledChildAsFailed(t *testing.T) {
 		t.Fatalf("schedule: %v", err)
 	}
 	items, _ := st.ListTranscodeBatchItems(parentID)
-	if len(items) != 1 || items[0].Status != "failed" {
-		t.Fatalf("cancelled child must project failed, got %+v", items)
+	if len(items) != 1 || items[0].Status != "cancelled" {
+		t.Fatalf("cancelled child must project cancelled, got %+v", items)
 	}
 	if res.Status == StatusWaitingExternal && res.WaitingCondition == "transcode_running" {
 		t.Fatal("cancelled child must not keep the batch waiting as running")

@@ -1092,10 +1092,11 @@ func (s *Store) ListBlocked(limit int) ([]map[string]any, error) {
 
 // Context is the compact LLM briefing produced by GetContext.
 type Context struct {
-	Preferences []Preference      `json:"preferences"`
-	ActiveItems []MaintenanceItem `json:"active_items"`
-	Decisions   []ReleaseDecision `json:"decisions"`
-	RecentLog   []map[string]any  `json:"recent_actions"`
+	Preferences   []Preference      `json:"preferences"`
+	ActiveItems   []MaintenanceItem `json:"active_items"`
+	Decisions     []ReleaseDecision `json:"decisions"`
+	RecentLog     []map[string]any  `json:"recent_actions"`
+	ActiveActions []ActionBriefing  `json:"active_actions"`
 }
 
 // GetContext builds a strictly bounded briefing: relevant preferences, active
@@ -1107,6 +1108,11 @@ func (s *Store) GetContext(scope, mediaType, mediaID string, itemLimit int) (Con
 		itemLimit = 5
 	}
 	ctx := Context{}
+	var err error
+	ctx.ActiveActions, err = s.activeActionBriefingsLocked(itemLimit)
+	if err != nil {
+		return ctx, err
+	}
 	scopes := []string{"global"}
 	if scope != "" && scope != "global" {
 		scopes = append(scopes, scope)
@@ -1186,20 +1192,23 @@ func (s *Store) GetContext(scope, mediaType, mediaID string, itemLimit int) (Con
 		drows.Close()
 	}
 
-	lrows, err := s.db.Query(`SELECT action, service, media, args_json, result, created_at
+	// Keep raw workflow payloads in the audit/detail tools, not the briefing.
+	lrows, err := s.db.Query(`SELECT id, action, service, substr(media,1,256), substr(identifiers,1,256),
+		CASE WHEN substr(ltrim(result),1,1) IN ('{','[') THEN '' ELSE substr(result,1,256) END, created_at
 		FROM action_log ORDER BY id DESC LIMIT 10`)
 	if err != nil {
 		return ctx, err
 	}
 	defer lrows.Close()
 	for lrows.Next() {
-		var action, service, media, args, result, at string
-		if err := lrows.Scan(&action, &service, &media, &args, &result, &at); err != nil {
+		var id int64
+		var action, service, media, identifiers, result, at string
+		if err := lrows.Scan(&id, &action, &service, &media, &identifiers, &result, &at); err != nil {
 			return ctx, err
 		}
 		ctx.RecentLog = append(ctx.RecentLog, map[string]any{
 			"action": action, "service": service, "media": media,
-			"args": args, "result": result, "at": at,
+			"id": id, "identifiers": identifiers, "result_summary": result, "at": at,
 		})
 	}
 	return ctx, lrows.Err()

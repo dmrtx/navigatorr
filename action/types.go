@@ -32,6 +32,7 @@ const (
 	StepWaitingDecision StepStatus = "waiting_decision"
 	StepFailed          StepStatus = "failed"
 	StepSkipped         StepStatus = "skipped"
+	StepCancelled       StepStatus = "cancelled"
 )
 
 // WaitingOption represents a choice presented to the LLM during waiting_decision

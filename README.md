@@ -21,7 +21,7 @@ Navigatorr acts as a bridge between AI coding assistants and your self-hosted me
 - **Transmission** — Torrent client
 - **qBittorrent** — Torrent client
 - **SABnzbd** — Usenet downloader
-- **Transcoding** — Apple Silicon SSH worker executor for hardware-accelerated FFmpeg transcoding (hevc_videotoolbox)
+- **Transcoding** — Persistent HTTP worker (with an SSH adapter) for FFmpeg transcoding, including VideoToolbox and libx265, calibration, and candidate validation
 
 ## Architecture
 
@@ -30,10 +30,10 @@ Claude Code / MCP Client
         │
         ▼
    ┌─────────────┐
-   │ Navigatorr  │  MCP Server (stdio transport)
+   │ Navigatorr  │  MCP Server (stdio or streamable HTTP)
    │              │
    │  ┌────────┐  │
-   │  │ Tools  │  │  16 MCP tools exposed
+   │  │ Tools  │  │  Tools registered by configured capability
    │  └───┬────┘  │
    │      │       │
    │  ┌───▼────┐  │
@@ -66,7 +66,8 @@ Claude Code / MCP Client
 | `mediainspect` | Real-file inspection via ffprobe (no shell, fixed argv) plus sidecar detection |
 | `fsop` | Root-confined filesystem ops (stat, list, hash, move, delete) |
 | `action` | Multi-step persistent workflow engine with idempotency and safety gates |
-| `transcode` | SSH executor for hardware-accelerated remote transcoding, path mapping, and process lifecycle |
+| `transcode` | Worker protocol, HTTP/SSH adapters, immutable plans, recipes, and quality policies |
+| `internal/transcodeworker` | Independent worker daemon: queue, FFmpeg, storage, and candidate validation |
 | `internal` | Shared logging utilities |
 
 ### How It Works
@@ -147,7 +148,26 @@ Persistent, declarative multi-step workflows tracked in SQLite. Workflows surviv
 | `action_status` | Query workflow lifecycle state, current step, and execution log |
 | `action_resume` | Resume a paused workflow from `waiting_external` or `waiting_decision` |
 | `action_retry` | Retry a failed action from its last safe checkpoint |
-| `action_list` | Filter workflows by status (`running`, `waiting_external`, `waiting_decision`, `completed`, `failed`) |
+| `action_list` | Filter workflows by status (`running`, `waiting_external`, `waiting_decision`, `completed`, `failed`, `cancelled`) |
+
+Operational summaries separate workflow status from the library outcome. For
+`transcode_batch`, `batch` contains episode counts and an `outcome` such as
+`preview`, `candidates_ready`, `partial`, `failed`, `cancelled`, or `promoted`.
+A completed workflow can have unsuccessful items; use these counts before
+reporting success. Cancelling an encoding batch is terminal and never advances
+into promotion. Cancelled items are counted separately from failures.
+
+The default `action_status` shows the latest observation of each logical step,
+not repeated polling records. `action_detail(section="steps")` retains access
+to the full audit history. `get_context` includes a global `active_actions`
+inbox, prioritizes pending decisions, and returns references to recent actions
+instead of their raw inputs and outputs. Its `effective_policy` comes from
+runtime configuration; stored user preferences remain separate.
+
+Navigatorr owns library selection, approvals, and Sonarr/Radarr integration.
+The worker owns encoding and candidate publication behind the `Executor`
+interface. They already run as separate processes; keep that protocol boundary
+when evolving the code without requiring users to operate two MCP workflows.
 
 **Transcoding Workflow (`transcode_media`):**
 1. **Preflight**: Confines path within `allowed_read_roots`, verifies existence, computes initial SHA-256 hash, and extracts baseline stream metadata via `ffprobe`. Destructive replacement (`replace_original: true`) is strictly rejected.

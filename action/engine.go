@@ -789,6 +789,30 @@ func (e *Engine) execute(ctx context.Context, inst *store.ActionInstance, ec *Ex
 			return buildActionResult(inst, totalSteps, ec), nil
 		}
 
+		// Cancellation is terminal. In particular, a cancelled batch must not
+		// advance into promotion or be recorded as successfully completed.
+		if res.Status == StepCancelled {
+			mergeMap(ec.State, res.Outputs)
+			mergeMap(ec.Outputs, res.Outputs)
+			delete(ec.State, "next_poll_at")
+			delete(ec.Outputs, "next_poll_at")
+			inst.Status = StatusCancelled
+			inst.WaitingReason = res.WaitingReason
+			inst.WaitingCondition, inst.WaitingOptionsJSON, inst.ErrorJSON = "", "[]", ""
+			inst.StateJSON, inst.OutputsJSON = toJSON(ec.State), toJSON(ec.Outputs)
+			if err := e.updateInstance(ctx, inst); err != nil {
+				return nil, err
+			}
+			_ = e.deps.Store.LogActionStep(store.ActionStepLog{
+				InstanceID: inst.ID, StepIndex: stepIdx, StepName: step.Name,
+				Primitive: step.Name, InputsJSON: toJSON(ec.Inputs), OutputsJSON: toJSON(res.Outputs),
+				Status: string(StepCancelled), DurationMs: durationMs,
+			})
+			_ = e.deps.Store.LogActionEnriched("action_cancelled", "", inst.ID,
+				"{}", res.WaitingReason, "", inst.ID, durationMs)
+			return buildActionResult(inst, totalSteps, ec), nil
+		}
+
 		// Handle external waiting (e.g. torrent downloading)
 		if res.Status == StepWaitingExternal {
 			mergeMap(ec.State, res.Outputs)

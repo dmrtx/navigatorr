@@ -156,7 +156,19 @@ func registerScanTools(s *server.MCPServer, d *Deps, registry *arrservice.Regist
 			if err != nil {
 				return toolErr("%v", err), nil
 			}
-			return toolJSON(c), nil
+			// Seeded defaults are not live configuration. Keep user preferences,
+			// but expose the execution gate from its authoritative config source.
+			prefs := c.Preferences[:0]
+			for _, pref := range c.Preferences {
+				if pref.Key != "allow_destructive" || pref.Source != "default" {
+					prefs = append(prefs, pref)
+				}
+			}
+			c.Preferences = prefs
+			return toolJSON(struct {
+				store.Context
+				EffectivePolicy map[string]bool `json:"effective_policy"`
+			}{c, map[string]bool{"allow_destructive": d.Config != nil && d.Config.AllowDestructive}}), nil
 		},
 	)
 
