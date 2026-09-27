@@ -11,9 +11,9 @@ import (
 	"time"
 )
 
-// newHTTPTestSetup builds a Worker + Server backed by temp dirs. selfExe is
-// os.Args[0] but tests avoid spawning by using validation failures, busy
-// slots, or pre-seeded job records.
+// newHTTPTestSetup never points selfExe at the test executable: an accidental
+// spawn must fail, not recursively execute the entire suite. Tests requiring
+// successful admission install a deterministic spawner explicitly.
 func newHTTPTestSetup(t *testing.T, token string) (*Worker, *Server, string, string) {
 	t.Helper()
 	tempDir := t.TempDir()
@@ -28,7 +28,7 @@ func newHTTPTestSetup(t *testing.T, token string) (*Worker, *Server, string, str
 		Quality:         65,
 	}
 	worker := NewWorker(cfg)
-	srv := NewServer(worker, os.Args[0], "", token)
+	srv := NewServer(worker, filepath.Join(t.TempDir(), "unexpected-worker-runner"), "", token)
 	return worker, srv, tempDir, sourceFile
 }
 
@@ -304,7 +304,7 @@ func TestHTTP_ReadyVerifiesWritable(t *testing.T) {
 		AllowedRoots:    []string{tempDir},
 		MaxParallelJobs: 1,
 	}
-	badSrv := NewServer(NewWorker(badCfg), os.Args[0], "", "")
+	badSrv := NewServer(NewWorker(badCfg), filepath.Join(t.TempDir(), "unexpected-worker-runner"), "", "")
 	badRec := httptest.NewRecorder()
 	badSrv.Handler().ServeHTTP(badRec, httptest.NewRequest(http.MethodGet, "/v1/ready", nil))
 	if badRec.Code != http.StatusServiceUnavailable {

@@ -82,6 +82,7 @@ type ActionCompactSummary struct {
 	Worker               map[string]any         `json:"worker,omitempty"`
 	Reconciliation       map[string]any         `json:"reconciliation,omitempty"`
 	Promotion            map[string]any         `json:"promotion,omitempty"`
+	Batch                *BatchSummary          `json:"batch,omitempty"`
 	CreatedAt            string                 `json:"created_at,omitempty"`
 	UpdatedAt            string                 `json:"updated_at,omitempty"`
 }
@@ -143,6 +144,7 @@ func toCompactSummary(res *action.ActionResult) ActionCompactSummary {
 			"next_poll_at", "last_worker_poll_at", "worker_completed_at", "reconciled_at",
 		}),
 		Promotion: compactPromotion(res),
+		Batch:     compactBatch(res),
 		CreatedAt: res.CreatedAt,
 		UpdatedAt: res.UpdatedAt,
 	}
@@ -395,10 +397,11 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 				return toolErr("action_status failed: %v", err), nil
 			}
 
-			// Include logged step details
-			loggedSteps, _ := engine.Deps().Store.GetActionSteps(id)
-
 			if verbose {
+				loggedSteps, err := engine.Deps().Store.GetActionSteps(id)
+				if err != nil {
+					return toolErr("reading action steps: %v", err), nil
+				}
 				fullMap := map[string]any{
 					"action": res,
 					"steps":  loggedSteps,
@@ -416,23 +419,18 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 				}), nil
 			}
 
-			// Include logged step details (compact summaries, bounded to most recent 25 steps if many)
-			stepSummaries := toStepSummaries(loggedSteps)
-			var stepsField any = stepSummaries
-			var totalLoggedSteps *int
-			if len(stepSummaries) > 25 {
-				n := len(stepSummaries)
-				totalLoggedSteps = &n
-				stepsField = stepSummaries[n-25:]
+			loggedSteps, totalLoggedSteps, err := engine.Deps().Store.GetActionStepSummaries(id, 25)
+			if err != nil {
+				return toolErr("reading action step summaries: %v", err), nil
 			}
 
 			compactMap := map[string]any{
 				"action": toCompactSummary(res),
-				"steps":  stepsField,
+				"steps":  toStepSummaries(loggedSteps),
 			}
-			if totalLoggedSteps != nil {
-				compactMap["total_steps_logged"] = *totalLoggedSteps
-				compactMap["steps_note"] = fmt.Sprintf("Showing latest 25 of %d steps. Use action_detail(id=%q, section='steps') for earlier steps.", *totalLoggedSteps, id)
+			if totalLoggedSteps > len(loggedSteps) {
+				compactMap["total_steps_logged"] = totalLoggedSteps
+				compactMap["steps_note"] = fmt.Sprintf("Showing latest observation per logical step (up to 25); %d audit records retained. Use action_detail(id=%q, section='steps') for history.", totalLoggedSteps, id)
 			}
 			return toolBoundedJSON(compactMap, MaxActionResponseBytes, nil), nil
 		},
@@ -650,8 +648,8 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 	// action_list — list recent actions with optional status filtering
 	s.AddTool(
 		mcp.NewTool("action_list",
-			mcp.WithDescription("List action workflow instances with optional status filtering (running, waiting_external, waiting_decision, completed, failed, or all). Returns compact summaries; use action_status for each job's worker telemetry and timing breakdown."),
-			mcp.WithString("status", mcp.Description("Filter status: running, waiting_external, waiting_decision, completed, failed, all (default all)")),
+			mcp.WithDescription("List action workflow instances with optional status filtering (running, waiting_external, waiting_decision, completed, failed, cancelled, or all). Returns compact summaries; use action_status for each job's worker telemetry and timing breakdown."),
+			mcp.WithString("status", mcp.Description("Filter status: running, waiting_external, waiting_decision, completed, failed, cancelled, all (default all)")),
 			mcp.WithString("limit", mcp.Description("Max items to return (1-100, default 20)")),
 			mcp.WithString("offset", mcp.Description("Pagination offset (default 0)")),
 		),
