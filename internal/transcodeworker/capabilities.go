@@ -138,8 +138,8 @@ func ProbeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratch
 	return probeWorkerCapabilitiesWithScratch(ctx, ffmpegPath, scratchRoot, true)
 }
 
-// Legacy benchmarks need the encoder/filter inventory but do not request
-// perceptual capabilities. Avoid running synthetic metric jobs in that path.
+// Legacy 8-bit benchmarks need only the encoder/filter inventory. Native
+// 10-bit VMAF also needs executable proof, even without an explicit model.
 func probeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratchRoot string, probeQuality bool) (transcode.WorkerCapabilities, error) {
 	ver, commit := GetBuildMetadata()
 	caps := transcode.WorkerCapabilities{
