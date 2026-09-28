@@ -322,6 +322,93 @@ func TestActionRunRejectsInvalidInputsJSON(t *testing.T) {
 	}
 }
 
+func TestCatalogExamplesCanBeSentThroughActionRun(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "catalog_examples.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	engine := action.NewEngine(action.EngineDeps{Store: st, Config: &config.Config{}})
+	s := server.NewMCPServer("test", "0.0.0")
+	registerActionTools(s, engine)
+	var catalog []action.ActionCatalogEntry
+	if err := json.Unmarshal([]byte(resultText(t, callTool(t, s, "action_catalog", map[string]any{}))), &catalog); err != nil {
+		t.Fatal(err)
+	}
+	var batch action.ActionCatalogEntry
+	for _, entry := range catalog {
+		if entry.Name == "transcode_batch" {
+			batch = entry
+		}
+	}
+	if len(batch.Examples) != 3 {
+		t.Fatalf("missing direct/tuning/preview examples: %+v", batch)
+	}
+	allowed := map[string]bool{}
+	for _, key := range append(batch.RequiredInputs, batch.OptionalInputs...) {
+		allowed[key] = true
+	}
+	var captured map[string]any
+	// Exercise the real MCP transport and persisted inputs without invoking a
+	// live library. The action suite separately exercises encoding/calibration.
+	engine.RegisterTemplate(action.ActionTemplate{Name: batch.Name, ImmutableInputs: true, Steps: []action.StepDefinition{{Name: "capture", Run: func(_ context.Context, ec *action.ExecutionContext) (action.StepResult, error) {
+		captured = ec.Inputs
+		return action.StepResult{Status: action.StepCompleted}, nil
+	}}}})
+	for i, example := range batch.Examples {
+		inputs, err := parseJSONObject(example.Inputs)
+		if err != nil {
+			t.Fatalf("example is not an action_run JSON string: %v", err)
+		}
+		for key := range inputs {
+			if !allowed[key] {
+				t.Fatalf("example advertises unsupported input %q", key)
+			}
+		}
+		for _, key := range batch.RequiredInputs {
+			if inputs[key] == nil {
+				t.Fatalf("example missing %q", key)
+			}
+		}
+		res := callTool(t, s, "action_run", map[string]any{"action": batch.Name, "inputs": example.Inputs, "idempotency_key": fmt.Sprintf("example-%d", i)})
+		if res.IsError {
+			t.Fatal(resultText(t, res))
+		}
+		if captured["series_id"] != float64(10) || captured["priority"] != inputs["priority"] || captured["profile"] != inputs["profile"] || captured["dry_run"] != inputs["dry_run"] {
+			t.Fatalf("example intent changed in transit: %+v", captured)
+		}
+	}
+}
+
+func TestCompletedPreviewCannotBeChangedByResume(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "preview_guidance.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.CreateActionInstance(store.ActionInstance{ID: "preview", ActionName: "transcode_batch", Status: action.StatusCompleted, InputsJSON: `{"service":"sonarr","series_id":10,"priority":"balanced","dry_run":true}`, StateJSON: `{}`, OutputsJSON: `{"dry_run":true,"counts":{"total":1,"queued":1}}`}); err != nil {
+		t.Fatal(err)
+	}
+	engine := action.NewEngine(action.EngineDeps{Store: st, Config: &config.Config{}})
+	s := server.NewMCPServer("test", "0.0.0")
+	registerActionTools(s, engine)
+	status := resultText(t, callTool(t, s, "action_status", map[string]any{"id": "preview"}))
+	var got struct {
+		Action ActionCompactSummary `json:"action"`
+	}
+	if err := json.Unmarshal([]byte(status), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Action.Batch == nil || got.Action.Batch.Outcome != "preview" || !strings.Contains(got.Action.Batch.NextStep, "new action_run") {
+		t.Fatalf("preview suggests wrong continuation: %s", status)
+	}
+	callTool(t, s, "action_resume", map[string]any{"id": "preview", "inputs": `{"dry_run":false}`})
+	inst, err := st.GetActionInstance("preview")
+	if err != nil || inst.Status != action.StatusCompleted || !strings.Contains(inst.InputsJSON, `"dry_run":true`) {
+		t.Fatalf("resume mutated preview: %+v %v", inst, err)
+	}
+}
+
 func TestActionResumeRejectsInvalidInputsJSONWithoutAdvancing(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "action_invalid_resume_inputs.db"))
 	if err != nil {

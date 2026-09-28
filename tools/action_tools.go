@@ -260,11 +260,11 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 	// action_run — start a declarative multi-step action workflow
 	s.AddTool(
 		mcp.NewTool("action_run",
-			mcp.WithDescription("Run a declarative multi-step action workflow (e.g. transcode_batch, transcode_media, promote_transcode_candidate, validate_torrent, safe_media_replacement). State is persistently tracked in SQLite and tolerates disconnects and reboots. Transcode and benchmark external waits reconcile automatically; candidate promotion requires explicit approval. Note: 'inputs' must be provided as a JSON object string, and 'idempotency_key' is a top-level string argument. Returns a compact operational summary."),
+			mcp.WithDescription("Run a declarative multi-step action workflow (e.g. transcode_batch, transcode_media, promote_transcode_candidate, validate_torrent, safe_media_replacement). State is persistently tracked in SQLite and tolerates disconnects and reboots. Transcode and benchmark external waits reconcile automatically; candidate promotion requires explicit approval. Note: 'inputs' must be provided as a JSON object string, and 'idempotency_key' is a top-level string argument. Discover input examples with action_catalog. Returns a compact operational summary."),
 			mcp.WithString("action", mcp.Required(), mcp.Description("Workflow name: transcode_batch, transcode_media, benchmark_transcode, promote_transcode_candidate, validate_torrent, safe_media_replacement")),
 			mcp.WithString("inputs", mcp.Description("JSON object string with action parameters (e.g. \"{\\\"service\\\":\\\"sonarr\\\",\\\"series_id\\\":\\\"10\\\"}\" or \"{\\\"path\\\":\\\"/media/...\\\"}\"). Must be a JSON-encoded string, not a raw object.")),
 			mcp.WithString("service", mcp.Description("Shortcut: *arr service name (sonarr, radarr)")),
-			mcp.WithString("media_id", mcp.Description("Shortcut: media ID in *arr service")),
+			mcp.WithString("media_id", mcp.Description("Shortcut: media ID in *arr service; for transcode_batch use series_id inside inputs instead")),
 			mcp.WithString("hash", mcp.Description("Shortcut: torrent infohash")),
 			mcp.WithString("url", mcp.Description("Shortcut: magnet link or torrent URL")),
 			mcp.WithString("path", mcp.Description("Shortcut: local file path")),
@@ -313,7 +313,7 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 	// action_catalog — discover registered action workflows
 	s.AddTool(
 		mcp.NewTool("action_catalog",
-			mcp.WithDescription("Discover all registered action workflows, their versions, inputs, immutable-input policy, steps, and safety profiles."),
+			mcp.WithDescription("Discover action workflows, versions, required/optional inputs, usage examples, immutable-input policy, steps, and safety profiles. Example inputs are already JSON strings for action_run; replace example media IDs."),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			catalog := engine.Catalog()
@@ -346,7 +346,7 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 	// action_resume — resume an action from waiting_external or waiting_decision
 	s.AddTool(
 		mcp.NewTool("action_resume",
-			mcp.WithDescription("Resume an active or paused action workflow using its action ID. For actions in waiting_external (e.g. transcode running in background or waiting for worker slot), call with id only to poll/advance progress. For actions in waiting_decision, provide 'decision' matching one of waiting_options (e.g. approve, reject, accept_loss, resume, pause, cancel). Workflows advertised by action_catalog with immutable_inputs=true reject additional inputs after creation. Cancelling a transcode batch propagates cancellation to admitted child actions so active remote transcode jobs are stopped when supported. Returns a compact operational summary."),
+			mcp.WithDescription("Resume an active or paused action workflow using its action ID. Prefer action_status for read-only monitoring: transcode and benchmark external waits advance automatically. Calling resume with id only can actively advance a waiting_external action. A completed dry_run preview cannot become an encode through resume; start a new action_run. For actions in waiting_decision, provide 'decision' matching one of waiting_options (e.g. approve, reject, accept_loss, resume, pause, cancel). Workflows advertised by action_catalog with immutable_inputs=true reject additional inputs after creation. Cancelling a transcode batch propagates cancellation to admitted child actions so active remote transcode jobs are stopped when supported. Returns a compact operational summary."),
 			mcp.WithString("id", mcp.Required(), mcp.Description("Action instance ID (e.g. act-transcode_batch-a1b2c3d4)")),
 			mcp.WithString("decision", mcp.Description("Decision choice when resuming from waiting_decision (matches one of the action's waiting_options, e.g. resume, pause, cancel, approve, reject, accept_loss). Omit when resuming waiting_external.")),
 			mcp.WithString("inputs", mcp.Description("Optional JSON object string with additional parameters. Rejected for workflows whose template declares immutable inputs.")),
@@ -380,7 +380,7 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 	// action_status — query the status, current step, and step log of an action
 	s.AddTool(
 		mcp.NewTool("action_status",
-			mcp.WithDescription("Check current status, step progress, waiting reasons/options, and step summaries of an action instance. Returns a compact operational summary by default. Set verbose=true to request full logs (bounded to 64 KiB)."),
+			mcp.WithDescription("Read current status, step progress, waiting reasons/options, and step summaries without advancing the action. For batches, inspect batch.outcome and batch.next_step: status=completed alone does not mean files were promoted. Returns a compact operational summary by default. Set verbose=true to request full logs (bounded to 64 KiB)."),
 			mcp.WithString("id", mcp.Required(), mcp.Description("Action instance ID")),
 			mcp.WithBoolean("verbose", mcp.Description("Optional: when true, attempts to return full inputs, outputs, state, and step payloads. Subject to a 64 KiB size guard. Defaults to false.")),
 		),

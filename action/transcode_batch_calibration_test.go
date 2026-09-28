@@ -18,64 +18,74 @@ import (
 )
 
 func TestCalibratedBatchChildSkipsBenchmarkAndValidatesFinalCandidate(t *testing.T) {
-	var submitted *transcode.Plan
-	var candidatePath string
-	mock := &mockTranscodeExecutor{
-		submitFunc: func(_ context.Context, request transcode.Request) (transcode.Job, error) {
-			submitted = request.Plan
-			candidatePath = request.CandidatePath
-			if err := os.MkdirAll(filepath.Dir(candidatePath), 0755); err != nil {
-				return transcode.Job{}, err
+	for _, mode := range []string{"explicit", "automatic"} {
+		t.Run(mode, func(t *testing.T) {
+			var submitted *transcode.Plan
+			var candidatePath string
+			mock := &mockTranscodeExecutor{
+				submitFunc: func(_ context.Context, request transcode.Request) (transcode.Job, error) {
+					submitted = request.Plan
+					candidatePath = request.CandidatePath
+					if err := os.MkdirAll(filepath.Dir(candidatePath), 0755); err != nil {
+						return transcode.Job{}, err
+					}
+					if err := os.WriteFile(candidatePath, []byte("small"), 0644); err != nil {
+						return transcode.Job{}, err
+					}
+					return transcode.Job{ID: request.ID}, nil
+				},
+				statusFunc: func(_ context.Context, id string) (transcode.JobStatus, error) {
+					sum := sha256.Sum256([]byte("small"))
+					sha := hex.EncodeToString(sum[:])
+					return transcode.JobStatus{ID: id, Status: transcode.StatusCompleted, CandidatePath: candidatePath, CandidateSHA256: sha, CandidateSizeBytes: 5, QualityEvidence: &transcode.FinalQualityEvidence{Verdict: "pass", CandidateSHA256: sha, CandidateSizeBytes: 5, PlanDigest: submitted.PlanDigest, BenchmarkRequestDigest: submitted.QualityValidation.BenchmarkRequestDigest}}, nil
+				},
 			}
-			if err := os.WriteFile(candidatePath, []byte("small"), 0644); err != nil {
-				return transcode.Job{}, err
+			sourceJSON := strings.Replace(standard8BitProbeJSON, `"pix_fmt": "yuv420p"`, `"pix_fmt": "yuv420p", "r_frame_rate": "24/1", "avg_frame_rate": "24/1"`, 1)
+			engine, st, mediaFile, _ := setupBenchmarkTestEnv(t, mock, sourceJSON, nil)
+			defer st.Close()
+			resolvedMediaFile, err := engine.Deps().Fs.ResolveRead(mediaFile)
+			if err != nil {
+				t.Fatal(err)
 			}
-			return transcode.Job{ID: request.ID}, nil
-		},
-		statusFunc: func(_ context.Context, id string) (transcode.JobStatus, error) {
-			sum := sha256.Sum256([]byte("small"))
-			sha := hex.EncodeToString(sum[:])
-			return transcode.JobStatus{ID: id, Status: transcode.StatusCompleted, CandidatePath: candidatePath, CandidateSHA256: sha, CandidateSizeBytes: 5, QualityEvidence: &transcode.FinalQualityEvidence{Verdict: "pass", CandidateSHA256: sha, CandidateSizeBytes: 5, PlanDigest: submitted.PlanDigest, BenchmarkRequestDigest: submitted.QualityValidation.BenchmarkRequestDigest}}, nil
-		},
-	}
-	sourceJSON := strings.Replace(standard8BitProbeJSON, `"pix_fmt": "yuv420p"`, `"pix_fmt": "yuv420p", "r_frame_rate": "24/1", "avg_frame_rate": "24/1"`, 1)
-	engine, st, mediaFile, _ := setupBenchmarkTestEnv(t, mock, sourceJSON, nil)
-	defer st.Close()
-	resolvedMediaFile, err := engine.Deps().Fs.ResolveRead(mediaFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	profile := calibratedTestProfileConfig()
-	_, profileDigest, _, err := decodeEphemeralProfileInput(map[string]any{"profile_config": profile})
-	if err != nil {
-		t.Fatal(err)
-	}
-	calibration := BatchCalibrationResult{Profile: "anime-x265-calibrated", ProfileDigest: profileDigest, Quality: 22, ItemKeys: []string{"epfile-1"}, ActionIDs: []string{"representative-1"}, Digest: "sha256:calibration"}
-	stateJSON := toJSON(map[string]any{"shared_calibration_result": calibration, "shared_calibration_profile_digest": profileDigest})
-	if err := st.CreateActionInstance(store.ActionInstance{ID: "batch-parent-test", ActionName: "transcode_batch", Status: StatusWaitingExternal, InputsJSON: `{"profile":"anime-x265-calibrated"}`, StateJSON: stateJSON}); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: "batch-parent-test", ItemKey: "epfile-1", FilePath: resolvedMediaFile, Decision: "transcode", Status: "queued"}); err != nil {
-		t.Fatal(err)
-	}
-	result, err := engine.Run(context.Background(), "transcode_media", map[string]any{
-		"path": mediaFile, "profile_config": profile, "parent_action_id": "batch-parent-test", "batch_item_key": "epfile-1", "batch_fixed_quality": 22, "batch_calibration_digest": calibration.Digest,
-		"replace_original": false, "min_savings_percent": 15.0,
-	})
-	if err != nil || result == nil {
-		t.Fatalf("calibrated child run: result=%+v err=%v", result, err)
-	}
-	if result.Status != StatusCompleted {
-		t.Fatalf("calibrated child status=%s error=%s", result.Status, result.Error)
-	}
-	if got := atomic.LoadInt32(&mock.benchmarkSubmitCalls); got != 0 {
-		t.Fatalf("child repeated benchmark %d times", got)
-	}
-	if submitted == nil || submitted.Quality != 22 || submitted.QualityValidation == nil || len(submitted.QualityValidation.Samples) != 2 {
-		t.Fatalf("full-file request lacks fixed quality and sampled validation: %+v", submitted)
-	}
-	if _, err := os.Stat(mediaFile); err != nil {
-		t.Fatalf("original file was modified: %v", err)
+			profile := calibratedTestProfileConfig()
+			_, profileDigest, _, err := decodeEphemeralProfileInput(map[string]any{"profile_config": profile})
+			if err != nil {
+				t.Fatal(err)
+			}
+			calibration := BatchCalibrationResult{Profile: "anime-x265-calibrated", ProfileDigest: profileDigest, Quality: 22, ItemKeys: []string{"epfile-1"}, ActionIDs: []string{"representative-1"}, Digest: "sha256:calibration"}
+			state := map[string]any{"shared_calibration_result": calibration, "shared_calibration_profile_digest": profileDigest}
+			parentInputs := `{"profile":"anime-x265-calibrated"}`
+			if mode == "automatic" {
+				state["batch_auto_profile"] = "anime-x265-calibrated"
+				parentInputs = `{"service":"sonarr","series_id":10}`
+			}
+			stateJSON := toJSON(state)
+			if err := st.CreateActionInstance(store.ActionInstance{ID: "batch-parent-test", ActionName: "transcode_batch", Status: StatusWaitingExternal, InputsJSON: parentInputs, StateJSON: stateJSON}); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: "batch-parent-test", ItemKey: "epfile-1", FilePath: resolvedMediaFile, Decision: "transcode", Status: "queued"}); err != nil {
+				t.Fatal(err)
+			}
+			result, err := engine.Run(context.Background(), "transcode_media", map[string]any{
+				"path": mediaFile, "profile_config": profile, "parent_action_id": "batch-parent-test", "batch_item_key": "epfile-1", "batch_fixed_quality": 22, "batch_calibration_digest": calibration.Digest,
+				"replace_original": false, "min_savings_percent": 15.0,
+			})
+			if err != nil || result == nil {
+				t.Fatalf("calibrated child run: result=%+v err=%v", result, err)
+			}
+			if result.Status != StatusCompleted {
+				t.Fatalf("calibrated child status=%s error=%s", result.Status, result.Error)
+			}
+			if got := atomic.LoadInt32(&mock.benchmarkSubmitCalls); got != 0 {
+				t.Fatalf("child repeated benchmark %d times", got)
+			}
+			if submitted == nil || submitted.Quality != 22 || submitted.QualityValidation == nil || len(submitted.QualityValidation.Samples) != 2 {
+				t.Fatalf("full-file request lacks fixed quality and sampled validation: %+v", submitted)
+			}
+			if _, err := os.Stat(mediaFile); err != nil {
+				t.Fatalf("original file was modified: %v", err)
+			}
+		})
 	}
 }
 
@@ -146,7 +156,7 @@ func TestSharedBatchCalibrationReusesCompletedRepresentativeActions(t *testing.T
 				}
 			}
 			good := func(q int, eligible bool) transcode.BenchmarkCandidateEvaluation {
-				return transcode.BenchmarkCandidateEvaluation{VideoCodec: transcode.VideoCodecLibX265, Quality: q, MetricType: "vmaf", Eligible: eligible, MinimumMet: eligible, EstimatedBytes: 100, SavingsPercent: 30}
+				return transcode.BenchmarkCandidateEvaluation{VideoCodec: transcode.VideoCodecLibX265, Quality: q, MetricType: "vmaf", Eligible: eligible, MinimumMet: eligible, EstimatedBytes: 100, SavingsPercent: 30, Score: 92}
 			}
 			for i, item := range items {
 				decision := transcode.BenchmarkDecision{Evaluations: []transcode.BenchmarkCandidateEvaluation{good(20, true), good(22, i == 0)}}
@@ -174,6 +184,16 @@ func TestSharedBatchCalibrationReusesCompletedRepresentativeActions(t *testing.T
 			}
 			if result == nil || result.Quality != expected || len(result.ActionIDs) != 2 || result.Digest == "" {
 				t.Fatalf("expected conservative common CRF20, got %+v", result)
+			}
+			if mode == "none" {
+				if ec.State["batch_evidence"] != nil {
+					t.Fatal("rejected samples advertised as accepted")
+				}
+			} else {
+				ev, ok := ec.State["batch_evidence"].(BatchCalibrationEvidence)
+				if !ok || ev.AcceptedSamples < 1 || ev.MinimumSampleVMAF != 92 || ev.EstimatedSavingsMin != 30 || ev.EstimatedSavingsMax != 30 {
+					t.Fatalf("missing sample evidence: %+v", ev)
+				}
 			}
 			parent, err := st.GetActionInstance("batch-calibration-test")
 			if err != nil || !strings.Contains(parent.StateJSON, result.Digest) {
@@ -338,7 +358,7 @@ func TestPreserveQualityFreezesTargetAndSkipsBelowTarget(t *testing.T) {
 	if _, _, _, err := decodeEphemeralProfileInput(map[string]any{"profile_config": strict}); err != nil {
 		t.Fatal(err)
 	}
-	below := transcode.BenchmarkCandidateEvaluation{VideoCodec: transcode.VideoCodecLibX265, Quality: 20, MetricType: "vmaf", Eligible: true, MinimumMet: true, EstimatedBytes: 100, SavingsPercent: 30}
+	below := transcode.BenchmarkCandidateEvaluation{VideoCodec: transcode.VideoCodecLibX265, Quality: 20, MetricType: "vmaf", Eligible: true, MinimumMet: true, EstimatedBytes: 100, SavingsPercent: 30, Score: 92}
 	decision := &transcode.BenchmarkDecision{Evaluations: []transcode.BenchmarkCandidateEvaluation{below}}
 	if q := chooseBatchItemQuality(decision, []int{20, 22}, 15, "preserve_quality"); q != 0 {
 		t.Fatalf("below target must retain original: %d", q)

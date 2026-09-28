@@ -77,6 +77,7 @@ type ActionTemplate struct {
 	Name            string
 	Version         int
 	Description     string
+	Examples        []ActionExample
 	RequiredInputs  []string
 	OptionalInputs  []string
 	Destructive     bool
@@ -87,16 +88,23 @@ type ActionTemplate struct {
 	Steps         []StepDefinition
 }
 
+// Inputs uses the same JSON string format accepted by action_run.
+type ActionExample struct {
+	Description string `json:"description"`
+	Inputs      string `json:"inputs"`
+}
+
 // ActionCatalogEntry describes an action workflow definition for discovery
 type ActionCatalogEntry struct {
-	Name            string   `json:"name"`
-	Version         int      `json:"version"`
-	Description     string   `json:"description"`
-	RequiredInputs  []string `json:"required_inputs"`
-	OptionalInputs  []string `json:"optional_inputs"`
-	Steps           []string `json:"steps"`
-	Destructive     bool     `json:"destructive"`
-	ImmutableInputs bool     `json:"immutable_inputs"`
+	Name            string          `json:"name"`
+	Version         int             `json:"version"`
+	Description     string          `json:"description"`
+	Examples        []ActionExample `json:"examples,omitempty"`
+	RequiredInputs  []string        `json:"required_inputs"`
+	OptionalInputs  []string        `json:"optional_inputs"`
+	Steps           []string        `json:"steps"`
+	Destructive     bool            `json:"destructive"`
+	ImmutableInputs bool            `json:"immutable_inputs"`
 }
 
 // ActionResult is returned when running, resuming, or querying an action

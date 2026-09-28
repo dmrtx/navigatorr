@@ -403,6 +403,60 @@ A safe rollout is:
 
 The `transcode_batch` action coordinates persistent batch transcoding across library series (supporting Sonarr). It resolves media files, inspects media streams, applies deterministic auto-profile selection, limits concurrency to `config.Transcode.MaxParallelJobs`, and tracks execution per item in a dedicated SQLite table (`transcode_batch_items`).
 
+### Simple series workflow
+
+Supply `service: "sonarr"`, `series_id`, and `priority: "balanced"` (or `quality` /
+`savings`). Leave the profile unspecified or use `auto`. Navigatorr creates a temporary recipe from a bounded sample search: three x265 quality
+settings, three 10-second windows, two representative files by default. Choosing `shared_calibration: true` with `auto` also enables this path and defaults
+to `balanced`. The encoder and
+preset stay fixed; anime receives animation tuning. This is one pass with no
+refinement rounds or automatic catalog entries.
+
+Navigatorr picks one setting that meets the quality and savings limits on all
+representatives, freezes it for the batch, and validates each final candidate.
+If none passes, it preserves the originals and ends without starting full
+encodes. A restart reuses the persisted search/results. Explicit profiles and
+`profile_config` keep their existing behavior; resolved older batches keep their
+original routing. Bare `auto` without priority/calibration also retains its
+existing routing, so current integrations do not change behavior.
+
+`dry_run: true` previews eligibility without encoding. `batch.selection` explains
+whether the recipe is pending, ready, or unsuitable. Its `scope: "batch_only"`
+means the generated label is not a reusable catalog profile name. Inspect
+`action_detail(section="state", key="shared_calibration_profile")` for the typed
+recipe if needed. `batch.next_step` gives status-specific continuation guidance.
+A completed preview requires a new `action_run` with `dry_run: false`; resuming it
+cannot change its immutable inputs. `batch.sample_evidence`
+appears only after passing samples exist: sample VMAF is measured, while savings
+are projections for the sampled files, not a guarantee for the entire series.
+
+The automatic path currently covers eligible oversized H.264 1080p, 8-bit SDR
+files below 45 fps. Other files retain their originals with a skip/review reason.
+Use `promote_candidates: true` to request one approval after candidates are ready;
+without it, the action only creates candidates. No worker protocol change or
+recipe catalog update is required.
+
+For direct encoding, choose a non-optimizing profile or supply a `profile_config`
+with optimization disabled, and omit `priority`. This uses ordinary file/stream
+validation without requiring a VMAF/CAMBI calibration. Profiles with optimization
+enabled retain their own behavior. For example:
+
+```json
+{"action":"transcode_batch","inputs":"{\"service\":\"sonarr\",\"series_id\":10,\"profile\":\"general-hevc\"}"}
+```
+
+For the bounded sample search:
+
+```json
+{"action":"transcode_batch","inputs":"{\"service\":\"sonarr\",\"series_id\":10,\"priority\":\"balanced\"}"}
+```
+
+The scope follows the small-control approach of
+[Tdarr's encoder step](https://docs.tdarr.io/docs/plugins/flow-plugins/index/ffmpegCommand/Set%20Video%20Encoder/)
+and [HandBrake's quality adjustment](https://handbrake.fr/docs/en/latest/workflow/adjust-quality.html):
+fix the encoder/preset, adjust quality, and continue. Navigatorr adds its existing
+sample checks and approval flow; it does not add a flow editor or another search engine.
+
 ### Action inputs & defaults
 
 | Input | Type | Required | Default | Description |
@@ -410,7 +464,7 @@ The `transcode_batch` action coordinates persistent batch transcoding across lib
 | `service` | string | Yes | — | Media service name (must be `sonarr`). |
 | `series_id` | string/int | Yes | — | Sonarr series ID to transcode. |
 | `season` | int | No | `nil` (all) | Optional season number filter. Omit to transcode the entire series. |
-| `profile` | string | No | `auto` | Recipe profile name or `auto` for deterministic stream-based selection. If omitted in `transcode_media`, honors configured `DefaultProfile` (including `auto`), else falls back to legacy `hevc-vt`. |
+| `profile` | string | No | `auto` | Recipe profile name or `auto` for deterministic selection. With a priority, `auto` generates one temporary x265 recipe from a bounded sample search. If omitted in `transcode_media`, honors configured `DefaultProfile` (including `auto`), else falls back to legacy `hevc-vt`. |
 | `metric` | string | No | profile default | Optimization metric (`vmaf`, `ssim`, or `both`) propagated to every `transcode_media` child. Use `ssim` for 10-bit sources when VMAF is unavailable. |
 | `replace_original` | bool | No | `false` | Must remain `false`. Setting `true` is rejected fail-closed; original files are never overwritten. |
 | `dry_run` | bool | No | `false` | If `true`, inspects and selects profiles without queuing or running transcode jobs. |
@@ -421,7 +475,7 @@ The `transcode_batch` action coordinates persistent batch transcoding across lib
 | `surface_worker_busy` | bool | No | `true` | When `true`, worker capacity saturation surfaces `waiting_for_slot` without failing or burning retry budgets. |
 | `max_items` | int | No | unlimited | Deterministic bound on episode files prepared, persisted, and scheduled by the batch. |
 | `max_output_items` | int | No | `25` | Bound on returned item summaries in outputs (default 25, capped at max 100). This does not affect scheduling. |
-| `shared_calibration` | bool | No | `true` for `anime-x265-calibrated` | Benchmark up to three representative files once, reuse measured CRFs according to the chosen priority, and validate each completed candidate with sampled VMAF/CAMBI. Requires one explicit optimized x265 profile. |
+| `shared_calibration` | bool | No | `true` for intent-based `auto` and `anime-x265-calibrated` | Benchmark up to three representative files once, reuse measured CRFs according to the chosen priority, and validate each completed candidate with sampled VMAF/CAMBI. Automatic batches generate and freeze a temporary x265 recipe internally; custom profiles must support the same quality checks. |
 | `priority` | string | No | `balanced` | Shared calibration: `balanced` maximizes measured savings among candidates reaching the quality target, falling back to the lowest passing CRF. `preserve_quality` selects the lowest CRF reaching the target and enforces that target in final validation; `quality` selects the lowest passing CRF; `savings` selects the highest passing CRF. Known exceptions keep their originals without blocking the batch. |
 | `calibration_items` | int | No | `2` | Number of representative episode files, from 1 to 3. |
 | `promote_candidates` | bool | No | `false` | After the batch finishes, offer one approval for every completed, verified candidate. Promotion uses Sonarr and recovery copies. |
@@ -442,7 +496,7 @@ Probes all episode files in Season 1, evaluates each stream against deterministi
 ```json
 {
   "action": "transcode_batch",
-  "inputs": "{\"service\":\"sonarr\",\"series_id\":10,\"season\":1,\"profile\":\"auto\",\"dry_run\":true}",
+  "inputs": "{\"service\":\"sonarr\",\"series_id\":10,\"season\":1,\"dry_run\":true}",
   "idempotency_key": "batch-sonarr-10-s1"
 }
 ```
@@ -454,7 +508,7 @@ Processes Season 2 files, skipping items that are already HEVC or do not meet sa
 ```json
 {
   "action": "transcode_batch",
-  "inputs": "{\"service\":\"sonarr\",\"series_id\":10,\"season\":2,\"profile\":\"auto\",\"dry_run\":false,\"replace_original\":false,\"max_size_increase_percent\":0.0}",
+  "inputs": "{\"service\":\"sonarr\",\"series_id\":10,\"season\":2,\"priority\":\"balanced\"}",
   "idempotency_key": "batch-sonarr-10-s2"
 }
 ```
@@ -470,7 +524,7 @@ Processes Season 2 files, skipping items that are already HEVC or do not meet sa
 ```
 If `profile` is omitted, the engine honors `config.Transcode.DefaultProfile` (which can be set to `auto` or a specific profile), falling back to `hevc-vt` if unset.
 
-#### Calibrated anime series with one promotion decision
+#### Calibrated series with one promotion decision
 
 User-facing priorities, in display order:
 
@@ -483,14 +537,14 @@ User-facing priorities, in display order:
 
 All four reuse the same bounded sample search. “Same quality” is a perceptual goal, not a lossless guarantee or restoration of missing detail. MP4 is a container; inspect the video codec before deciding whether conversion is useful. These priorities do not expand the calibrated profile's source compatibility.
 
-Use one `transcode_batch` action for the series. With `anime-x265-calibrated`, Navigatorr benchmarks two representative episodes at CRF 20 and 22. The default `priority: "balanced"` chooses the greatest measured savings among candidates reaching the quality target; if none reaches it, it uses the lowest CRF passing the minimum limits. This aims for perceptually similar quality, not mathematically lossless output. `priority: "quality"` chooses each representative's lowest passing CRF; `priority: "savings"` chooses its highest passing CRF. Representatives retain their measured settings. Other episodes reuse the lowest of those settings for balanced, quality, or preservation, or the highest for savings. Balanced, quality, and savings use the same minimum limits. Preservation additionally requires the configured quality target in both the benchmark and final validation.
+Use one `transcode_batch` action for the series. Intent-based automatic selection benchmarks CRF 20, 23, and 26 and freezes one passing setting for the whole batch. The advanced explicit `anime-x265-calibrated` profile retains its existing CRF 20/22 search and per-representative selection described below. The default `priority: "balanced"` chooses the greatest measured savings among candidates reaching the quality target; if none reaches it, it uses the lowest CRF passing the minimum limits. This aims for perceptually similar quality, not mathematically lossless output. `priority: "quality"` chooses each representative's lowest passing CRF; `priority: "savings"` chooses its highest passing CRF. With explicit profiles, representatives retain their measured settings. Other episodes reuse the lowest of those settings for balanced, quality, or preservation, or the highest for savings. Balanced, quality, and savings use the same minimum limits. Preservation additionally requires the configured quality target in both the benchmark and final validation.
 
 A representative without a suitable candidate is skipped, keeping its original. It does not block the other episodes. If none of the representatives passes, the batch keeps all originals and completes without full encodes. Each full candidate is still validated by sampled VMAF/CAMBI and actual size savings. A rejected candidate leaves its original intact while other episodes continue. There are no additional candidate sweeps or automatic full-file quality retries. Technical failures remain errors, rather than being reported as quality skips. Previously created batches retain their original selection policy.
 
 ```json
 {
   "action": "transcode_batch",
-  "inputs": "{\"service\":\"sonarr\",\"series_id\":10,\"profile\":\"anime-x265-calibrated\",\"promote_candidates\":true}",
+  "inputs": "{\"service\":\"sonarr\",\"series_id\":10,\"priority\":\"balanced\",\"promote_candidates\":true}",
   "idempotency_key": "anime-series-10-calibrated"
 }
 ```
