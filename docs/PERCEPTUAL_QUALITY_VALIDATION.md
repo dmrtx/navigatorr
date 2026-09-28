@@ -92,7 +92,7 @@ not offered because per-frame JSON logs are bounded.
 
 ## Finish a search instead of chaining rounds
 
-`action_status`, `action_run` and `action_list` include a compact `benchmark`
+`action_status` and `action_run` include a compact `benchmark`
 summary with its outcome, next step, rejected checks, configured limits where
 available, and a source timestamp to review. Progress refers to sample testing;
 `completed` means the benchmark finished, not that a candidate passed. A VMAF
@@ -120,3 +120,6 @@ checks and the original, but does not claim the failed perceptual checks passed.
 conversion: the benchmark measures video and estimates audio size. In compact
 mode, an EAC3 track is copied and has no invented AAC bitrate target. Rejected
 benchmark size estimates are not achieved savings.
+
+`action_list` keeps its small listing shape; use `action_status` for the
+benchmark explanation, planned audio and concrete review proposal.

@@ -20,7 +20,9 @@ func TestCompactTranscodeStatusPreservesWorkerEvidence(t *testing.T) {
 		CurrentStep: 2, TotalSteps: 5, DurationMs: 25240000, WallDurationMs: 25240000,
 		EncodeDurationMs: &encodeMs, ReconcileLagMs: &lagMs,
 		Outputs: map[string]any{
-			"transcode_status": "running", "transcode_phase": "encoding", "progress": 26.2,
+			"transcode_status": "running", "transcode_phase": "encoding",
+			"optimization_enabled": true, "benchmark_status": "completed",
+			"benchmark_decision": map[string]any{"winner": map[string]any{"candidate_id": "c1"}}, "progress": 26.2,
 			"progress_is_stale": true, "worker_heartbeat_at": "2026-01-01T00:00:00Z",
 			"last_known_progress": map[string]any{"progress": 26.2, "speed": 15.5, "fps": 366.1},
 			"source_report":       strings.Repeat("private-metadata", 10000),
@@ -574,7 +576,9 @@ func TestActionList_OneHundredTranscodesRemainBounded(t *testing.T) {
 	stamp := now.Format(time.RFC3339)
 	telemetry := map[string]any{
 		"transcode_status": "running", "transcode_phase": "encoding",
-		"progress": 26.2, "speed": 15.5, "fps": 366.1,
+		"optimization_enabled": true, "benchmark_status": "completed",
+		"benchmark_decision": map[string]any{"winner": map[string]any{"candidate_id": "c1"}},
+		"progress":           26.2, "speed": 15.5, "fps": 366.1,
 		"last_progress_at": stamp, "worker_heartbeat_at": stamp,
 		"progress_is_stale":   false,
 		"last_known_progress": map[string]any{"progress": 26.2, "speed": 15.5, "fps": 366.1, "updated_at": stamp},
@@ -623,7 +627,7 @@ func TestActionList_OneHundredTranscodesRemainBounded(t *testing.T) {
 		if row["status"] != action.StatusWaitingExternal || row["current_step"] != float64(2) || row["wall_duration_ms"] == nil {
 			t.Fatalf("list lost operational fields: %+v", row)
 		}
-		for _, field := range []string{"worker", "reconciliation", "queue_duration_ms", "encode_duration_ms", "validation_duration_ms", "reconcile_lag_ms"} {
+		for _, field := range []string{"worker", "benchmark", "reconciliation", "queue_duration_ms", "encode_duration_ms", "validation_duration_ms", "reconcile_lag_ms"} {
 			if _, exists := row[field]; exists {
 				t.Fatalf("per-action detail %q should remain in action_status: %+v", field, row)
 			}
