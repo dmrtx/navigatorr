@@ -183,6 +183,15 @@ func (s *Store) ListActionInstances(status string, limit int) ([]ActionInstance,
 
 // ListActionInstancesPaged returns action instances optionally filtered by status with offset pagination.
 func (s *Store) ListActionInstancesPaged(status string, limit, offset int) ([]ActionInstance, error) {
+	return s.listActionInstances(status, "", limit, offset)
+}
+
+// ListActionInstancesByName pages one workflow without loading unrelated state.
+func (s *Store) ListActionInstancesByName(name string, limit, offset int) ([]ActionInstance, error) {
+	return s.listActionInstances("", name, limit, offset)
+}
+
+func (s *Store) listActionInstances(status, name string, limit, offset int) ([]ActionInstance, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -199,6 +208,10 @@ func (s *Store) ListActionInstancesPaged(status string, limit, offset int) ([]Ac
 		error_json, idempotency_key, created_at, updated_at
 		FROM action_instances WHERE 1=1`
 	var args []any
+	if name != "" {
+		q += ` AND action_name=?`
+		args = append(args, name)
+	}
 	if status != "" && !strings.EqualFold(status, "all") {
 		q += ` AND status=?`
 		args = append(args, status)
