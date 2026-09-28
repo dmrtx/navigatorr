@@ -253,10 +253,10 @@ func (r *ProductionBenchmarkRunner) runPipelinedEncodeMetrics(
 	}
 
 	// 10-bit media validation, matching sequential runMetrics fail-closed behavior.
-	if evidence.SourceBitDepth > 8 && runVMAF {
+	if evidence.SourceBitDepth > 8 && runVMAF && !caps.SupportsNative10BitQuality() {
 		return fmt.Errorf("worker capability unsupported: source media has bit depth %d (> 8-bit) but worker does not have verified 10-bit VMAF capability; silent 8-bit downconversion is prohibited (fail closed)", evidence.SourceBitDepth)
 	}
-	if evidence.SourceBitDepth > 8 && runCAMBI {
+	if evidence.SourceBitDepth > 8 && runCAMBI && !caps.SupportsNative10BitQuality() {
 		return fmt.Errorf("quality_cambi_native_main10_unverified: native %d-bit source is not eligible for CAMBI (fail closed)", evidence.SourceBitDepth)
 	}
 

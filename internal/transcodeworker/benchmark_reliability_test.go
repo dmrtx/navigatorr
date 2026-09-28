@@ -254,3 +254,26 @@ func TestBenchmarkCapacityReconcilePreservesNewerState(t *testing.T) {
 		})
 	}
 }
+
+func TestBenchmarkCompactAudioEstimateUsesOutputPolicy(t *testing.T) {
+	candidate := transcode.BenchmarkCandidate{ID: "q65", Quality: 65}
+	for _, mode := range []string{"copy", "compact"} {
+		record := &BenchmarkRecord{AudioMode: mode, Metric: "vmaf", SourceDuration: 100, Candidates: []transcode.BenchmarkCandidate{candidate}, Samples: []transcode.BenchmarkSampleWindow{{Index: 0, DurationSeconds: 5}}}
+		evidence := &BenchmarkExecutionEvidence{SourceBitDepth: 8,
+			CandidateSamples: []BenchmarkCandidateSampleResult{{CandidateID: "q65", SampleIndex: 0, SizeBytes: 100000}},
+			CandidateMetrics: []BenchmarkCandidateMetricAggregate{{CandidateID: "q65", MetricType: optimization.MetricTypeVMAF, Aggregate: optimization.MetricAggregate{MetricType: optimization.MetricTypeVMAF, Valid: true, MeanScore: 97, SampleScores: []optimization.SampleScore{{SampleIndex: 0, Score: 97, Valid: true}}}}},
+		}
+		rep := mediainspect.DetailedReport{SizeBytes: 100000000, DurationSec: 100, Audio: []mediainspect.DetailedStream{{Index: 1, Codec: "dts", Channels: 2, BitRate: 2000000}}}
+		err := (&ProductionBenchmarkRunner{}).runSelection(context.Background(), record, evidence, []validatedCandidate{{candidate: candidate, bitDepth: 8, profile: "main", pixelFormat: "yuv420p"}}, rep, rep.SizeBytes)
+		if err != nil || evidence.Decision == nil || evidence.Decision.Winner == nil {
+			t.Fatalf("selection: %v %+v", err, evidence.Decision)
+		}
+		want := int64(25000000)
+		if mode == "compact" {
+			want = 2400000
+		}
+		if evidence.Decision.Winner.EstimatedAudioBytes != want {
+			t.Fatalf("%s: got %d want %d", mode, evidence.Decision.Winner.EstimatedAudioBytes, want)
+		}
+	}
+}

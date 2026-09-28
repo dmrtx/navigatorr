@@ -75,10 +75,10 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 	if sourceRep.Video[0].FPS <= 0 || !isFiniteQuality(sourceRep.Video[0].FPS) {
 		return fail("quality_final_source_timing_unavailable", fmt.Errorf("source FPS unavailable"))
 	}
-	if sourceRep.Video[0].BitDepth > 8 && runVMAF {
+	if sourceRep.Video[0].BitDepth > 8 && runVMAF && !caps.SupportsNative10BitQuality() {
 		return fail("quality_vmaf_native_main10_unverified", fmt.Errorf("native %d-bit source not eligible for VMAF", sourceRep.Video[0].BitDepth))
 	}
-	if sourceRep.Video[0].BitDepth > 8 && runCAMBI {
+	if sourceRep.Video[0].BitDepth > 8 && runCAMBI && !caps.SupportsNative10BitQuality() {
 		return fail("quality_cambi_native_main10_unverified", fmt.Errorf("native %d-bit source not eligible for CAMBI", sourceRep.Video[0].BitDepth))
 	}
 	if sourceRep.Video[0].FPS >= 45 && runVMAF {

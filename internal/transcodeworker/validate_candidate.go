@@ -252,13 +252,17 @@ func validateAudioPreservation(plan *transcode.Plan, src, cand []SourceStream) e
 	}
 	for i := range srcAudio {
 		a, b := srcAudio[i], candAudio[i]
-		if norm(plan.AudioMode) == "copy" && !codecMatches(norm(a.Codec), norm(b.Codec)) {
-			return fmt.Errorf("%w: local candidate audio codec %q at stream %d != source %q (fail closed, never publish)", ErrSourceInvalid, b.Codec, i, a.Codec)
+		target, _ := transcode.AudioTarget(plan.AudioMode, a.Codec, a.Channels)
+		if target == "copy" {
+			target = norm(a.Codec)
 		}
-		if a.Language != "" && b.Language != "" && norm(a.Language) != norm(b.Language) {
+		if !codecMatches(target, norm(b.Codec)) {
+			return fmt.Errorf("%w: local candidate audio codec %q at stream %d != expected %q (fail closed, never publish)", ErrSourceInvalid, b.Codec, i, target)
+		}
+		if a.Language != "" && !(norm(a.Language) == "und" && b.Language == "") && norm(a.Language) != norm(b.Language) {
 			return fmt.Errorf("%w: local candidate audio language %q at stream %d != source %q (fail closed, never publish)", ErrSourceInvalid, b.Language, i, a.Language)
 		}
-		if a.Channels > 0 && b.Channels > 0 && a.Channels != b.Channels {
+		if a.Channels > 0 && a.Channels != b.Channels {
 			return fmt.Errorf("%w: local candidate audio channels %d at stream %d != source %d (fail closed, never publish)", ErrSourceInvalid, b.Channels, i, a.Channels)
 		}
 	}

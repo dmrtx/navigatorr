@@ -273,6 +273,7 @@ type BenchmarkSampleWindow struct {
 // It is strictly versioned and does NOT accept candidate output paths or replace_original parameters,
 // making original media mutation completely impossible.
 type BenchmarkRequest struct {
+	AudioMode                 string                      `json:"audio_mode,omitempty"`
 	ProtocolVersion           int                         `json:"protocol_version"`
 	ID                        string                      `json:"id"`
 	SourcePath                string                      `json:"source_path"`
@@ -397,6 +398,9 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 		return fmt.Errorf("invalid metric %q: must be explicit enum 'vmaf', 'ssim', or 'both'", req.Metric)
 	}
 
+	if req.AudioMode != "" && req.AudioMode != "copy" && req.AudioMode != "compact" {
+		return fmt.Errorf("invalid audio_mode %q", req.AudioMode)
+	}
 	if req.FallbackAudioBitrateBps < 0 {
 		return fmt.Errorf("invalid fallback_audio_bitrate_bps %d: cannot be negative", req.FallbackAudioBitrateBps)
 	}

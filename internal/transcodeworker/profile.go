@@ -25,7 +25,7 @@ func Capabilities() WorkerCapabilities {
 	return WorkerCapabilities{
 		Containers:           []string{"mkv"},
 		VideoCodecs:          []string{"hevc_videotoolbox", "libx265"},
-		AudioOperations:      []string{"copy"},
+		AudioOperations:      []string{"copy", "compact"},
 		SubtitleOperations:   []string{"copy", "transcode"},
 		SubtitleEncodeCodecs: []string{"subrip"},
 		SubtitleCopyCodecs:   []string{"subrip", "srt", "ass", "ssa", "hdmv_pgs_subtitle", "pgs", "dvd_subtitle", "vobsub", "dvb_subtitle", "dvb_teletext", "webvtt", "text"},
@@ -60,7 +60,7 @@ func ValidatePlan(p *transcode.Plan) error {
 	if _, err := BuildVideoEncoderArgs(p); err != nil {
 		return err
 	}
-	if norm(p.AudioMode) != "copy" {
+	if norm(p.AudioMode) != "copy" && norm(p.AudioMode) != "compact" {
 		return fmt.Errorf("unsupported audio mode %q (fail closed)", p.AudioMode)
 	}
 	if norm(p.SubtitleMode) != "preserve" {

@@ -160,6 +160,7 @@ type StreamAction struct {
 	TypeIndex   int    `json:"type_index"`
 	Codec       string `json:"codec"`
 	TargetCodec string `json:"target_codec"`
+	BitrateKbps int    `json:"bitrate_kbps,omitempty"`
 }
 type ExecutionPlan struct {
 	Plan        *transcode.Plan              `json:"plan"`
@@ -183,7 +184,11 @@ func BuildExecutionPlan(plan *transcode.Plan, streams []SourceStream, duration f
 		case "video":
 			ep.Streams = append(ep.Streams, StreamAction{Kind: "video", SourceIndex: s.Index, TypeIndex: s.TypeIndex, Codec: s.Codec, TargetCodec: plan.VideoCodec})
 		case "audio":
-			ep.Streams = append(ep.Streams, StreamAction{Kind: "audio", SourceIndex: s.Index, TypeIndex: s.TypeIndex, Codec: s.Codec, TargetCodec: "copy"})
+			target, bitrate := transcode.AudioTarget(plan.AudioMode, s.Codec, s.Channels)
+			ep.Streams = append(ep.Streams, StreamAction{Kind: "audio", SourceIndex: s.Index, TypeIndex: s.TypeIndex, Codec: s.Codec, TargetCodec: target, BitrateKbps: bitrate})
+			if target != "copy" {
+				ep.Conversions = append(ep.Conversions, transcode.ConversionRecord{StreamType: "audio", StreamIndex: s.TypeIndex, FromCodec: s.Codec, ToCodec: target, Reason: "compact audio requested; AAC at bounded bitrate, preserving channels and language (lossy)"})
+			}
 		case "subtitle":
 			a, ok := subtitleActions[s.TypeIndex]
 			if !ok && plan.RecipeVersion == "legacy-worker-shim" {

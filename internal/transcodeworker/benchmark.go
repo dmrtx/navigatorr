@@ -31,6 +31,7 @@ const (
 
 // BenchmarkRecord represents the persistent state stored in benchmark.json on the worker.
 type BenchmarkRecord struct {
+	AudioMode                 string                                `json:"audio_mode,omitempty"`
 	ProtocolVersion           int                                   `json:"protocol_version"`
 	ID                        string                                `json:"id"`
 	Status                    string                                `json:"status"` // queued, running, completed, failed, cancelled
@@ -432,6 +433,7 @@ func (w *Worker) BenchmarkSubmit(ctx context.Context, req transcode.BenchmarkReq
 		Adaptive:                  req.Adaptive,
 		Concurrency:               req.Concurrency,
 		FallbackAudioBitrateBps:   req.FallbackAudioBitrateBps,
+		AudioMode:                 req.AudioMode,
 		FallbackSubtitleSizeBytes: req.FallbackSubtitleSizeBytes,
 		DeclaredVideoBitrateBps:   req.DeclaredVideoBitrateBps,
 		AttachmentBytes:           req.AttachmentBytes,

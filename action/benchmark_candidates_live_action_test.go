@@ -165,3 +165,41 @@ func TestBuildBenchmarkRequestRejectsNativeMain10CAMBI(t *testing.T) {
 		t.Fatalf("native Main10 CAMBI was not rejected: %v", err)
 	}
 }
+
+func TestBuildBenchmarkRequestMain10CompactAudio(t *testing.T) {
+	rep := &mediainspect.DetailedReport{DurationSec: 100, Video: []mediainspect.DetailedStream{{BitDepth: 10, BitRate: 5000000, FPS: 24}}}
+	opt := &recipe.OptimizationPolicy{
+		Enabled:  true,
+		Sampling: &recipe.SamplingPolicy{SampleSeconds: 5, SampleCount: 1, Positions: []float64{0.5}},
+		Search:   &recipe.SearchPolicy{MaxCandidates: 3, QualityValues: []int{20, 23, 26}},
+		Quality:  &recipe.QualityPolicy{PreferredMetric: "vmaf", VMAF: &recipe.MetricTarget{Model: "v1_1080p_3h", Target: 96, Minimum: 95}, Banding: &recipe.BandingPolicy{Enabled: true, Metric: "cambi", Mode: "full_ref", Enforcement: "observe"}},
+	}
+	caps := transcode.WorkerCapabilities{ProtocolVersion: transcode.WorkerProtocolVersion, CompactAudio: true, Encoders: map[string]bool{"libx265": true}, Filters: map[string]bool{"libvmaf": true, "ssim": true}, Quality: &transcode.QualityCapabilities{Native10Bit: true, CAMBIFullRef: true, Models: map[string]transcode.QualityModelCapability{"v1_1080p_3h": {Available: true}}}}
+	ec := &ExecutionContext{InstanceID: "bench-main10-compact", Inputs: map[string]any{}, State: map[string]any{"plan": &transcode.Plan{VideoCodec: "libx265", Quality: 23, AudioMode: "compact"}}}
+	req, err := buildBenchmarkRequest(ec, "/media/source.mkv", rep, opt, caps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.AudioMode != "compact" || req.Metric != "vmaf" || len(req.Candidates) != 3 {
+		t.Fatalf("unexpected request: %+v", req)
+	}
+	for _, c := range req.Candidates {
+		if c.VideoProfile != "main10" || c.PixelFormat != "p010le" {
+			t.Fatalf("lost source precision: %+v", c)
+		}
+	}
+	if metric, err := resolveAutoBenchmarkMetric("auto", caps, 10); err != nil || metric != "vmaf" {
+		t.Fatalf("verified auto: %s %v", metric, err)
+	}
+	caps.CompactAudio = false
+	if _, err := buildBenchmarkRequest(ec, "/media/source.mkv", rep, opt, caps); err == nil || !strings.Contains(err.Error(), "compact audio") {
+		t.Fatalf("old worker accepted audio: %v", err)
+	}
+	caps.Quality.Native10Bit = false
+	if err := validateWorkerCapabilitiesForBenchmark(caps, "vmaf", 10, "libx265"); err == nil {
+		t.Fatal("unverified native VMAF accepted")
+	}
+	if metric, err := resolveAutoBenchmarkMetric("auto", caps, 10); err != nil || metric != "ssim" {
+		t.Fatalf("legacy auto: %s %v", metric, err)
+	}
+}

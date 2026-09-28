@@ -3,9 +3,11 @@
 Navigatorr can measure a selected VMAF v1 model and an independent CAMBI
 full-reference banding metric during benchmarking. The final encoded candidate
 is checked again on the same deterministic source windows before publication.
-The existing 10-bit source restriction remains: native Main10 material uses
-SSIM when `metric: auto` is requested. CAMBI on native Main10 remains gated
-until its source-to-worker path is verified end to end.
+Native SDR Main10 can use VMAF/CAMBI when the worker advertises
+`quality.native_10_bit`: both metrics must execute on a native 10-bit synthetic
+pattern with automatic pixel conversion disabled. Older/unverified workers
+retain the VMAF/CAMBI gate and the existing SSIM fallback for `metric: auto`.
+This applies to both libx265 and VideoToolbox; libx265 receives yuv420p10le.
 
 ## Opt in
 
@@ -40,7 +42,7 @@ change. The worker executes a synthetic probe before claiming support for the
 model or CAMBI. A worker that exposes `libvmaf` but cannot initialize the model
 is reported as unsupported. Explicit VMAF requests fail closed; an explicit
 `metric: auto` may choose SSIM when the model is unavailable or the source is
-native 10-bit/HFR. Non-HFR VMAF v1 is rejected for sources at 45 FPS or above.
+unverified native 10-bit or HFR. Non-HFR VMAF v1 is rejected for sources at 45 FPS or above.
 
 `guardrail_enforcement: observe` records p5, the worst sample-local window,
 and frame counts without changing candidate selection. `reject` makes a
