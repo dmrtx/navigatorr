@@ -201,6 +201,9 @@ func buildLibX265Args(plan *transcode.Plan) ([]string, error) {
 	if tune != "" && !transcode.IsValidLibX265Tune(tune) {
 		return nil, fmt.Errorf("unsupported libx265 tune %q (allowed: %v)", plan.Tune, transcode.ValidLibX265Tunes())
 	}
+	if pixelFormat == "p010le" {
+		pixelFormat = "yuv420p10le"
+	}
 	args := []string{"-c:v", "libx265", "-crf", strconv.Itoa(crf), "-preset", preset}
 	if tune != "" {
 		args = append(args, "-tune", tune)
@@ -287,8 +290,21 @@ func BuildFFmpegArgs(execPlan *ExecutionPlan, sourcePath, candidatePath, progres
 	}
 	args = append(args, videoArgs...)
 
-	// Audio mode: copy
+	// Keep every audio stream; compact only selected source codecs, never
+	// downmix or remove languages. Already compact/unknown formats are copied.
 	args = append(args, "-c:a", "copy")
+	for _, stream := range execPlan.Streams {
+		if stream.Kind == "audio" && stream.TargetCodec != "copy" {
+			if stream.TargetCodec != "aac" || stream.BitrateKbps < 1 {
+				return nil, fmt.Errorf("invalid compact audio action")
+			}
+			args = append(args, fmt.Sprintf("-c:a:%d", stream.TypeIndex), "aac", fmt.Sprintf("-b:a:%d", stream.TypeIndex), strconv.Itoa(stream.BitrateKbps)+"k")
+			// Source muxer bitrate/size tags no longer describe an encoded track.
+			for _, tag := range []string{"BPS", "NUMBER_OF_BYTES", "NUMBER_OF_FRAMES", "DURATION", "_STATISTICS_WRITING_APP", "_STATISTICS_WRITING_DATE_UTC", "_STATISTICS_TAGS"} {
+				args = append(args, fmt.Sprintf("-metadata:s:a:%d", stream.TypeIndex), tag+"=")
+			}
+		}
+	}
 
 	// Subtitle streams: specify explicitly per subtitle stream index
 	for _, stream := range execPlan.Streams {

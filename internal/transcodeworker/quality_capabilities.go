@@ -138,14 +138,18 @@ func probeQualityCapabilities(ctx context.Context, ffmpegPath, scratchRoot strin
 			}
 		}
 	}
+	out.Native10Bit = out.ProbeError == "" && out.Models[model.ID].Available && out.CAMBIFullRef
 	return out
 }
 
 func runSyntheticQualityProbe(ctx context.Context, ffmpegPath, filter string) ([]byte, error) {
+	// The low two bits carry actual signal. Disabling automatic conversion
+	// proves the metric accepts native 10-bit inputs instead of downconverting.
+	source := "nullsrc=size=640x360:rate=24:duration=0.25,format=yuv420p10le,geq=lum='64+mod(X+3*Y,877)':cb=512:cr=512"
 	cmd := exec.CommandContext(ctx, ffmpegPath,
-		"-nostdin", "-hide_banner", "-v", "error",
-		"-f", "lavfi", "-i", "testsrc2=size=640x360:rate=24:duration=0.25",
-		"-f", "lavfi", "-i", "testsrc2=size=640x360:rate=24:duration=0.25",
+		"-nostdin", "-hide_banner", "-v", "error", "-noauto_conversion_filters",
+		"-f", "lavfi", "-i", source,
+		"-f", "lavfi", "-i", source,
 		"-filter_complex", filter, "-f", "null", "-")
 	return cmd.CombinedOutput()
 }

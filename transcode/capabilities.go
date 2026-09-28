@@ -50,6 +50,7 @@ type QualityModelCapability struct {
 }
 
 type QualityCapabilities struct {
+	Native10Bit    bool                              `json:"native_10_bit,omitempty"`
 	LibvmafVersion string                            `json:"libvmaf_version,omitempty"`
 	Models         map[string]QualityModelCapability `json:"models,omitempty"`
 	CAMBIFullRef   bool                              `json:"cambi_full_ref"`
@@ -59,6 +60,7 @@ type QualityCapabilities struct {
 
 // WorkerCapabilities represents the versioned capability report of a transcode worker node.
 type WorkerCapabilities struct {
+	CompactAudio          bool                           `json:"compact_audio,omitempty"`
 	ProtocolVersion       int                            `json:"protocol_version"`
 	WorkerVersion         string                         `json:"worker_version,omitempty"`
 	BuildGitCommit        string                         `json:"build_git_commit,omitempty"`
@@ -97,6 +99,7 @@ func (c WorkerCapabilities) HasComponentError(component string) bool {
 // Machine-specific paths like FFmpegPath are excluded to ensure capability equivalence
 // across different worker nodes with identical capability sets.
 type fingerprintPayload struct {
+	CompactAudio    bool                           `json:"compact_audio,omitempty"`
 	ProtocolVersion int                            `json:"protocol_version"`
 	WorkerVersion   string                         `json:"worker_version,omitempty"`
 	BuildGitCommit  string                         `json:"build_git_commit,omitempty"`
@@ -132,6 +135,7 @@ func ComputeCapabilityFingerprint(caps WorkerCapabilities) (string, error) {
 	}
 
 	payload := fingerprintPayload{
+		CompactAudio:    caps.CompactAudio,
 		ProtocolVersion: caps.ProtocolVersion,
 		WorkerVersion:   caps.WorkerVersion,
 		BuildGitCommit:  caps.BuildGitCommit,
@@ -174,4 +178,10 @@ func VerifyCapabilityFingerprint(caps WorkerCapabilities) error {
 		return fmt.Errorf("worker capability fingerprint mismatch: got %s, want %s (fail closed)", caps.CapabilityFingerprint, expected)
 	}
 	return nil
+}
+
+// Both metrics must have executed on native 10-bit synthetic inputs without
+// automatic pixel conversion. Older workers cannot claim this capability.
+func (c WorkerCapabilities) SupportsNative10BitQuality() bool {
+	return c.Quality != nil && c.Quality.Native10Bit && c.Quality.ProbeError == "" && c.Quality.Models["v1_1080p_3h"].Available && c.Quality.CAMBIFullRef
 }

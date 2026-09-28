@@ -619,3 +619,24 @@ To prevent unbounded JSON responses when batching entire series or large seasons
 - **Parallelism**: Respects `config.Transcode.MaxParallelJobs` (default: 1). When `max_parallel_jobs: 1`, media files are transcoded serially one after another.
 - **Worker busy handling**: If the remote transcode worker returns `worker_busy` (or reaches max parallel slots), the current item transitions to `waiting_for_slot`. Normal background transcodes remain in `running`.
 - **Retry budget safety**: Encountering `worker_busy` does **not** increment item `attempts` or consume the transient retry budget. The batch transitions to `waiting_external` with `waiting_condition: "worker_busy"` and resumes cleanly once worker capacity becomes available.
+
+## Compact audio without another optimizer
+
+Existing recipes and direct encoding preserve audio (`audio: {mode: copy}`).
+An opt-in recipe can set `audio: {mode: compact}` while using either existing
+video encoder. This does not expand automatic profile selection to HEVC.
+For a HEVC Main10 source, use an explicit recipe or `profile_config`; video
+benchmarking stays bounded by its existing candidate and sample limits.
+
+Compact mode keeps all tracks, languages and channel counts. DTS, TrueHD/MLP,
+FLAC, ALAC and PCM become AAC: 128 kbps mono, 192 kbps stereo, 384 kbps up to
+5.1, 512 kbps up to 7.1. AAC/AC3/EAC3/Opus and other codecs are copied, as are
+tracks with unknown channel count or more than eight channels. This is lossy
+audio conversion; lossless quality and object-audio metadata are not preserved.
+Use copy when those are required. There is no audio parameter search.
+
+Benchmark size estimates include the selected audio policy (AAC estimates are
+nominal, not measured guarantees). The final encode checks audio codecs, track
+counts, languages and channels. VMAF/CAMBI validate video, not perceived audio
+quality. The original remains protected by the existing candidate/promotion
+workflow. Deploy the worker and server together before opting in.
