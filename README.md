@@ -157,6 +157,20 @@ A completed workflow can have unsuccessful items; use these counts before
 reporting success. Cancelling an encoding batch is terminal and never advances
 into promotion. Cancelled items are counted separately from failures.
 
+For simple series tuning, supply `service: "sonarr"`, `series_id`, and
+`priority: "balanced"` (or `"quality"` / `"savings"`), without a profile.
+Navigatorr tests three quality settings on short samples and creates one temporary
+recipe for the batch, ending the search after that pass. Direct encoding with an
+explicit non-optimizing profile remains available. Existing bare `auto` requests
+keep their behavior. Use `dry_run: true` for a preview and `promote_candidates: true`
+to request approval before replacement. `batch.selection` explains the choice;
+`batch.sample_evidence` separates measured sample quality from estimated savings.
+See [the series workflow](docs/TRANSCODING.md#simple-series-workflow). The MCP
+`action_catalog` includes copyable input examples; `batch.next_step` explains how
+to continue. Preview actions finish without encoding: start a new action to
+execute. Generated recipes have `scope: "batch_only"`; their label is not a name
+accepted by `recipe_get`.
+
 The default `action_status` shows the latest observation of each logical step,
 not repeated polling records. `action_detail(section="steps")` retains access
 to the full audit history. `get_context` includes a global `active_actions`

@@ -30,7 +30,7 @@ func (e *Engine) applySharedBatchCalibration(ec *ExecutionContext, plan *transco
 		return fmt.Errorf("calibrated parent batch is unavailable")
 	}
 	var parentInputs, parentState map[string]any
-	if json.Unmarshal([]byte(parent.InputsJSON), &parentInputs) != nil || json.Unmarshal([]byte(parent.StateJSON), &parentState) != nil || !batchCalibrationEnabled(parentInputs) {
+	if json.Unmarshal([]byte(parent.InputsJSON), &parentInputs) != nil || json.Unmarshal([]byte(parent.StateJSON), &parentState) != nil || !batchCalibrationEnabled(parentInputs, parentState) {
 		return fmt.Errorf("parent batch does not own shared calibration")
 	}
 	calibration := getBatchCalibrationResult(parentState["shared_calibration_result"])
