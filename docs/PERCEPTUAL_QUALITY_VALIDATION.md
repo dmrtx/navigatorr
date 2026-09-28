@@ -89,3 +89,34 @@ The current implementation supports the standard 1080p 3H VMAF v1 model.
 Other VMAF v1 models, including HFR and 4K, require registry entries and
 their own executable capability probes. Full-file validation is intentionally
 not offered because per-frame JSON logs are bounded.
+
+## Finish a search instead of chaining rounds
+
+`action_status`, `action_run` and `action_list` include a compact `benchmark`
+summary with its outcome, next step, rejected checks, configured limits where
+available, and a source timestamp to review. Progress refers to sample testing;
+`completed` means the benchmark finished, not that a candidate passed. A VMAF
+pass means the configured sampled checks passed, not guaranteed perceptual
+transparency. Full-reference CAMBI measures additional banding relative to the
+source, so existing source banding alone does not explain a rejection.
+
+Two completed no-winner rounds for the same source SHA-256 trigger a review
+before any further new benchmark admission. This uses durable action history
+across recipes, paths, restarts and new action IDs. Technical execution failures
+and unfinished jobs do not count; already accepted jobs continue to reconcile.
+The limit does not retroactively cancel concurrently admitted jobs. History is
+retained until the source bytes change; an explicit review authorizes one action,
+not a reset of future searches. No database migration or tuning setting is added.
+
+The pending action shows the proposed candidates, samples and quality policy.
+Use `action_resume` with `cancel` to stop, or `run_once_after_review` only after
+an explicit user decision to run that displayed round. Agents must not select
+that decision automatically or start successive CRF ladders after no-winner
+results. A user can still choose direct candidate encoding with a non-optimizing
+profile or `profile_config.optimization.enabled=false`; this preserves structural
+checks and the original, but does not claim the failed perceptual checks passed.
+
+`planned_audio` describes the future encoding policy, never a completed audio
+conversion: the benchmark measures video and estimates audio size. In compact
+mode, an EAC3 track is copied and has no invented AAC bitrate target. Rejected
+benchmark size estimates are not achieved savings.
