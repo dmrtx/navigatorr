@@ -99,3 +99,26 @@ files, including approval, multiple episodes per file, source/candidate changes,
 lost import responses, ambiguous command histories, old-ID drift, failed rename
 resumption, internal Sonarr deletion, cleanup checkpoints and redirect replay.
 The tests do not modify a live Sonarr library.
+
+## Backup cleanup
+
+Call `transcode_backups` without arguments to list retained `original.bak`
+files and `.partial` copies, their bytes, owning action and cleanup availability.
+Follow `next_offset` until absent, even for an empty page; `page_bytes` is the
+subtotal for that page. This reads registered promotion paths, not every backup
+on the filesystem. Listing does not hash or delete media.
+
+To clean a listed failed finalization:
+
+```json
+{"mode":"clean","action_id":"<action_id returned by transcode_backups>"}
+```
+
+`cleanup_available` means final verification can be attempted. Cleanup verifies
+the adopted library file, affected episodes and recorded hashes before removing
+owned recovery/temporary files and completing the existing action. It requires
+`allow_destructive`; it never approves a promotion or repeats import/rename/rescan.
+Earlier failures, active/cancelled work and unknown files are retained with a
+reason. A failed verification retains recovery. After a timeout, use
+`action_status` to check the result before retrying. Normal successful promotion
+already performs this cleanup automatically.

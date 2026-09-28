@@ -52,6 +52,13 @@ unknown files or shared source cache. Failed/rejected work is not garbage merely
 because it is old; deleting its recovery requires resolving the action first.
 Existing historical orphans are not swept by these changes.
 
+Use `transcode_backups` to inventory registered recovery files and partials.
+`mode: "clean"` with a listed `action_id` retries only a failed finalization,
+using the same final-file, episode and hash checks as normal promotion. It
+completes the existing action without repeating import, rename or rescan.
+Earlier failures, active work and unknown files are retained. See
+[backup cleanup](TRANSCODE_CANDIDATE_PROMOTION.md#backup-cleanup).
+
 ## Expected I/O
 
 Heavy encode, media probes and additional source/candidate checks run on local

@@ -256,6 +256,7 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 	if engine == nil {
 		return
 	}
+	registerTranscodeBackupTool(s, engine)
 
 	// action_run — start a declarative multi-step action workflow
 	s.AddTool(
