@@ -684,6 +684,7 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 				summaries[i].Worker = nil
 				summaries[i].Reconciliation = nil
 				summaries[i].Promotion = nil
+				summaries[i].Benchmark = nil
 				summaries[i].QueueDurationMs = nil
 				summaries[i].EncodeDurationMs = nil
 				summaries[i].ValidationDurationMs = nil
