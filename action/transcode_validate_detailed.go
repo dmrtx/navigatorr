@@ -106,7 +106,11 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 	}
 	for i, a := range origAudio {
 		b := outRep.Audio[i]
-		if plan.AudioMode == "copy" && normCodec(a.Codec) != normCodec(b.Codec) {
+		target, _ := transcode.AudioTarget(plan.AudioMode, a.Codec, a.Channels)
+		if target == "copy" {
+			target = normCodec(a.Codec)
+		}
+		if target != normCodec(b.Codec) {
 			return waitDecision(fmt.Sprintf("Audio codec mismatch at stream %d: original=%s output=%s", i, a.Codec, b.Codec)), nil
 		}
 		if a.Language != "" && normCodec(a.Language) != normCodec(b.Language) {

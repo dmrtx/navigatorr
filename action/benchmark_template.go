@@ -801,10 +801,9 @@ func resolveAutoBenchmarkMetric(metric string, caps transcode.WorkerCapabilities
 	if metric != "auto" {
 		return metric, nil
 	}
-	// VMAF is preferred only where this coordinator has a verified safe path.
-	// For 10-bit sources, selecting it would require the prohibited silent
-	// down-conversion, so auto deterministically chooses SSIM instead.
-	if sourceBitDepth <= 8 && caps.Filters["libvmaf"] {
+	// Native 10-bit uses VMAF only after the executable precision probe.
+	// Older workers keep the existing SSIM fallback.
+	if (sourceBitDepth <= 8 || caps.SupportsNative10BitQuality()) && caps.Filters["libvmaf"] {
 		return "vmaf", nil
 	}
 	if caps.Filters["ssim"] {
@@ -934,9 +933,6 @@ func validateWorkerCapabilitiesForBenchmark(caps transcode.WorkerCapabilities, m
 	if !caps.Encoders[normCodec] {
 		return fmt.Errorf("required encoder %q is not available on worker (fail closed)", normCodec)
 	}
-	if normCodec == transcode.VideoCodecLibX265 && sourceBitDepth > 8 {
-		return fmt.Errorf("worker capability unsupported: libx265 benchmark is 8-bit only, got source bit depth %d (fail closed)", sourceBitDepth)
-	}
 	needVMAF := metric == "vmaf" || metric == "both"
 	needSSIM := metric == "ssim" || metric == "both"
 	if needVMAF && !caps.Filters["libvmaf"] {
@@ -945,7 +941,7 @@ func validateWorkerCapabilitiesForBenchmark(caps transcode.WorkerCapabilities, m
 	if needSSIM && !caps.Filters["ssim"] {
 		return errors.New("required filter 'ssim' is not available on worker (fail closed)")
 	}
-	if sourceBitDepth > 8 && needVMAF {
+	if sourceBitDepth > 8 && needVMAF && !caps.SupportsNative10BitQuality() {
 		return fmt.Errorf("worker capability unsupported: source media has bit depth %d (> 8-bit) but worker does not have verified 10-bit VMAF capability; silent 8-bit downconversion is prohibited (fail closed)", sourceBitDepth)
 	}
 	return nil
@@ -1010,7 +1006,7 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 		}
 	}
 	if opt.Quality != nil && opt.Quality.Banding != nil && opt.Quality.Banding.Enabled {
-		if bitDepth > 8 {
+		if bitDepth > 8 && !caps.SupportsNative10BitQuality() {
 			return nil, fmt.Errorf("quality_cambi_native_main10_unverified: native %d-bit source is not eligible for CAMBI", bitDepth)
 		}
 		if caps.Quality == nil || caps.Quality.ProbeError != "" || !caps.Quality.CAMBIFullRef {
@@ -1061,6 +1057,12 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 		SourceSHA256:            getString(ec.State, "original_sha256"),
 	}
 
+	if plan.AudioMode == "compact" {
+		if !caps.CompactAudio {
+			return nil, fmt.Errorf("worker does not support compact audio; upgrade the worker before benchmarking")
+		}
+		req.AudioMode = "compact"
+	}
 	if err := transcode.ValidateBenchmarkRequest(req); err != nil {
 		return nil, fmt.Errorf("validating benchmark request: %w", err)
 	}

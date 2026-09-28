@@ -68,6 +68,15 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 	if plan == nil {
 		return StepResult{Status: StepFailed, Error: "resolved transcode plan is missing (fail closed)"}, nil
 	}
+	if plan.AudioMode == "compact" && !getBool(ec.State, "transcode_reconcile") {
+		caps, err := e.deps.Transcode.Capabilities(ctx)
+		if err != nil {
+			return StepResult{Status: StepFailed, Error: fmt.Sprintf("checking compact audio capability: %v", err)}, nil
+		}
+		if !caps.CompactAudio {
+			return StepResult{Status: StepFailed, Error: "worker does not support compact audio; upgrade the worker before encoding"}, nil
+		}
+	}
 	req := transcode.Request{ID: jobID, SourcePath: cleanPath, CandidatePath: candidatePath, Profile: profile, Plan: plan, IdempotencyKey: jobID, SourceSHA256: getString(ec.State, "original_sha256")}
 
 	// Transport-uncertainty reconciliation before reuse. This is a read-only
