@@ -22,7 +22,7 @@ func (e *Engine) registerBenchmarkTemplate() {
 		ImmutableInputs: true,
 		Name:            "benchmark_transcode",
 		Version:         1,
-		Description:     "Coordinates safe candidate-only benchmark evaluation of encoder parameters over deterministic source samples, returning quality metrics, size estimates, and an explainable decision without modifying media or creating permanent candidates.",
+		Description:     "Test bounded video samples without modifying media or creating a final file. Read benchmark.outcome and next_step, not just status/progress. No winner is a search outcome, not proof of an encoder fault. After two no-winner rounds for the same source bytes, another round requires an explicit review decision, even with a different recipe/action ID. Do not automatically chain CRF ladders or lower thresholds. Benchmarks estimate audio size but do not encode audio.",
 		RequiredInputs:  []string{"path"},
 		OptionalInputs:  []string{"profile", "profile_config", "metric", "replace_original", "surface_worker_busy", "parent_action_id"},
 		Destructive:     false,
@@ -116,6 +116,19 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 	defer lease.Close()
 	actx := lease.Context(ctx)
 
+	if getBool(ec.State, "benchmark_search_review_required") {
+		if review := e.reviewBenchmarkSearch(ec); review != nil {
+			return *review, nil
+		}
+	}
+	if req == nil && getBool(ec.State, "benchmark_search_reviewed") {
+		// Submit exactly the proposal displayed at the review boundary, even
+		// if capability auto-selection would now choose a different metric.
+		b, err := json.Marshal(ec.State["benchmark_request"])
+		if err != nil || json.Unmarshal(b, &req) != nil || req == nil {
+			return StepResult{Status: StepFailed, Error: "Reviewed benchmark proposal is missing or unreadable."}, nil
+		}
+	}
 	if req == nil {
 		rep := getSourceReport(ec.State["source_report"])
 		if rep == nil {
@@ -140,6 +153,12 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 		if err != nil {
 			return StepResult{Status: StepFailed, Error: err.Error()}, nil
 		}
+	}
+	// Keep the proposed parameters inspectable while waiting for a search
+	// review, but do not mark the request accepted or uncertain yet.
+	ec.State["benchmark_request"] = req
+	if review := e.reviewBenchmarkSearch(ec); review != nil {
+		return *review, nil
 	}
 	digest, err := transcode.DigestBenchmarkRequest(req)
 	if err != nil {
@@ -464,7 +483,7 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 			}
 			return StepResult{
 				Status:  StepFailed,
-				Error:   fmt.Sprintf("benchmark completed with no winning candidate (%s): manual review required (fail closed)", reason),
+				Error:   fmt.Sprintf("Benchmark finished with no winning candidate (%s). Full encoding did not start; original unchanged. Review the rejected checks before another search, or explicitly choose direct encoding with optimization disabled.", reason),
 				Outputs: outputs,
 			}, nil
 		}
