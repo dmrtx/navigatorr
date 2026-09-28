@@ -83,6 +83,7 @@ type ActionCompactSummary struct {
 	Reconciliation       map[string]any         `json:"reconciliation,omitempty"`
 	Promotion            map[string]any         `json:"promotion,omitempty"`
 	Batch                *BatchSummary          `json:"batch,omitempty"`
+	Benchmark            *benchmarkSummary      `json:"benchmark,omitempty"`
 	CreatedAt            string                 `json:"created_at,omitempty"`
 	UpdatedAt            string                 `json:"updated_at,omitempty"`
 }
@@ -145,6 +146,7 @@ func toCompactSummary(res *action.ActionResult) ActionCompactSummary {
 		}),
 		Promotion: compactPromotion(res),
 		Batch:     compactBatch(res),
+		Benchmark: compactBenchmark(res),
 		CreatedAt: res.CreatedAt,
 		UpdatedAt: res.UpdatedAt,
 	}
@@ -381,7 +383,7 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 	// action_status — query the status, current step, and step log of an action
 	s.AddTool(
 		mcp.NewTool("action_status",
-			mcp.WithDescription("Read current status, step progress, waiting reasons/options, and step summaries without advancing the action. For batches, inspect batch.outcome and batch.next_step: status=completed alone does not mean files were promoted. Returns a compact operational summary by default. Set verbose=true to request full logs (bounded to 64 KiB)."),
+			mcp.WithDescription("Read current status without advancing the action. For benchmarks, lead with benchmark.outcome, message and next_step; progress measures sample testing, not quality or full encoding. planned_audio is intent, not proof of conversion. Do not automatically start another search or select run_once_after_review. For batches, inspect batch.outcome and batch.next_step: completed does not mean promoted. Set verbose=true for full logs (bounded to 64 KiB)."),
 			mcp.WithString("id", mcp.Required(), mcp.Description("Action instance ID")),
 			mcp.WithBoolean("verbose", mcp.Description("Optional: when true, attempts to return full inputs, outputs, state, and step payloads. Subject to a 64 KiB size guard. Defaults to false.")),
 		),
