@@ -200,7 +200,10 @@ func (r *ProductionBenchmarkRunner) runPipelinedEncodeMetrics(
 	if normMetric == "" {
 		normMetric = "vmaf"
 	}
+	runVMAF := normMetric == "vmaf" || normMetric == "both" || normMetric == "vmaf+ssim"
 	needQualityProbe := record.Quality != nil && ((record.Quality.VMAF != nil && record.Quality.VMAF.Model != "") || (record.Quality.Banding != nil && record.Quality.Banding.Enabled))
+	// Native-depth proof is required even when a legacy request omits the model.
+	needQualityProbe = needQualityProbe || (evidence.SourceBitDepth > 8 && runVMAF)
 	caps, err := probeWorkerCapabilitiesWithScratch(ctx, w.ffmpegPath, filepath.Join(w.cfg.StateDir, "quality-probe-scratch"), needQualityProbe)
 	if err != nil {
 		return fmt.Errorf("probing worker capabilities: %w (fail closed)", err)
@@ -224,7 +227,6 @@ func (r *ProductionBenchmarkRunner) runPipelinedEncodeMetrics(
 	default:
 		return fmt.Errorf("unsupported benchmark metric %q (fail closed)", record.Metric)
 	}
-	runVMAF := normMetric == "vmaf" || normMetric == "both" || normMetric == "vmaf+ssim"
 	runSSIM := normMetric == "ssim" || normMetric == "both" || normMetric == "vmaf+ssim"
 	runCAMBI := record.Quality != nil && record.Quality.Banding != nil && record.Quality.Banding.Enabled
 	var vmafModel *quality.VMAFModel
@@ -576,6 +578,9 @@ func (sh *pipelineShared) runMetricUnit(ctx context.Context, u pipelineUnit, idx
 				fail(err)
 				return
 			}
+		}
+		if sh.evidence.SourceBitDepth > 8 {
+			args = append([]string{"-noauto_conversion_filters"}, args...)
 		}
 		cmd := exec.CommandContext(ctx, sh.w.ffmpegPath, args...)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

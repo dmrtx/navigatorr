@@ -8,6 +8,11 @@ Native SDR Main10 can use VMAF/CAMBI when the worker advertises
 pattern with automatic pixel conversion disabled. Older/unverified workers
 retain the VMAF/CAMBI gate and the existing SSIM fallback for `metric: auto`.
 This applies to both libx265 and VideoToolbox; libx265 receives yuv420p10le.
+Main10 benchmarks also run this capability check when `vmaf.model` is omitted
+(legacy/default VMAF, including combined VMAF/SSIM). Omitting the model does not
+change the scoring policy or bypass native-depth verification. Main10 benchmark
+VMAF commands disable automatic pixel conversion, so incompatible inputs fail
+instead of silently measuring an 8-bit conversion.
 
 ## Opt in
 
