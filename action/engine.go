@@ -108,6 +108,7 @@ func (e *Engine) Catalog() []ActionCatalogEntry {
 			Name:            t.Name,
 			Version:         t.Version,
 			Description:     t.Description,
+			Examples:        t.Examples,
 			RequiredInputs:  reqInputs,
 			OptionalInputs:  optInputs,
 			Steps:           steps,

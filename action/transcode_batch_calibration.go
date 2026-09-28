@@ -38,12 +38,16 @@ func (r *BatchCalibrationResult) qualityFor(key string) int {
 	return r.Quality
 }
 
-func batchCalibrationEnabled(inputs map[string]any) bool {
+func batchCalibrationEnabled(inputs map[string]any, states ...map[string]any) bool {
+	if len(states) > 0 && getString(states[0], "batch_auto_profile") != "" {
+		return true
+	}
 	if raw, ok := inputs["shared_calibration"]; ok {
 		value, _ := raw.(bool)
 		return value
 	}
-	return strings.TrimSpace(getString(inputs, "profile")) == "anime-x265-calibrated"
+	profile := strings.TrimSpace(getString(inputs, "profile"))
+	return profile == "anime-x265-calibrated"
 }
 
 func getBatchCalibrationItems(inputs map[string]any) int {
@@ -69,13 +73,13 @@ func strictBatchInteger(raw any) (int, bool) {
 	return 0, false
 }
 
-func validateBatchCalibrationInputs(inputs map[string]any, requestedProfile string) error {
+func validateBatchCalibrationInputs(inputs map[string]any, requestedProfile string, states ...map[string]any) error {
 	if raw, ok := inputs["priority"]; ok {
 		if raw != "quality" && raw != "balanced" && raw != "preserve_quality" && raw != "savings" {
 			return fmt.Errorf("priority must be quality, balanced, preserve_quality, or savings")
 		}
-		if !batchCalibrationEnabled(inputs) {
-			return fmt.Errorf("priority requires shared calibration")
+		if !batchCalibrationEnabled(inputs, states...) {
+			return fmt.Errorf("priority requires shared calibration: omit profile to generate a batch recipe, or omit priority for direct encoding")
 		}
 	}
 	if raw, present := inputs["shared_calibration"]; present {
@@ -89,10 +93,10 @@ func validateBatchCalibrationInputs(inputs map[string]any, requestedProfile stri
 			return fmt.Errorf("calibration_items must be 1-3")
 		}
 	}
-	if !batchCalibrationEnabled(inputs) {
+	if !batchCalibrationEnabled(inputs, states...) {
 		return nil
 	}
-	if requestedProfile == "auto" {
+	if requestedProfile == "auto" && (len(states) == 0 || getString(states[0], "batch_auto_profile") == "") {
 		return fmt.Errorf("shared_calibration requires one explicit optimized libx265 profile")
 	}
 	if metric := strings.ToLower(strings.TrimSpace(getString(inputs, "metric"))); metric != "" && metric != "vmaf" {
@@ -211,7 +215,10 @@ func (e *Engine) ensureSharedBatchCalibration(ctx context.Context, ec *Execution
 	if len(selected) == 0 {
 		return StepResult{}, true
 	}
-	profileName := strings.TrimSpace(getString(ec.Inputs, "profile"))
+	profileName := getString(ec.State, "batch_auto_profile")
+	if profileName == "" {
+		profileName = strings.TrimSpace(getString(ec.Inputs, "profile"))
+	}
 	if profileName == "" {
 		profileName = "ephemeral"
 	}
@@ -237,8 +244,8 @@ func (e *Engine) ensureSharedBatchCalibration(ctx context.Context, ec *Execution
 		}
 		profile = parsed
 	}
-	if profile.Video.Codec != transcode.VideoCodecLibX265 || profile.Optimization == nil || !profile.Optimization.Enabled || profile.Optimization.Search == nil || len(profile.Optimization.Search.QualityValues) == 0 || profile.Optimization.Quality == nil || profile.Optimization.Quality.VMAF == nil || profile.Optimization.Quality.VMAF.Model == "" || profile.Optimization.Quality.VMAF.GuardrailEnforcement != "reject" || profile.Optimization.Quality.Banding == nil || !profile.Optimization.Quality.Banding.Enabled || profile.Optimization.Quality.Banding.Enforcement != "reject" || profile.Optimization.Quality.FinalValidation == nil || profile.Optimization.Quality.FinalValidation.Mode != "sampled" {
-		return StepResult{Status: StepFailed, Error: "shared calibration requires an optimized libx265 profile with VMAF model and sampled final validation"}, false
+	if err := validateSharedBatchProfile(profile); err != nil {
+		return StepResult{Status: StepFailed, Error: err.Error()}, false
 	}
 	if ec.State["shared_calibration_profile"] == nil {
 		profile = batchPriorityProfile(profile, getString(ec.State, "batch_priority"), getString(ec.Inputs, "priority"))
@@ -302,7 +309,39 @@ func (e *Engine) ensureSharedBatchCalibration(ctx context.Context, ec *Execution
 	if priority == "" {
 		priority = getString(ec.Inputs, "priority")
 	}
-	if priority == "" { // Preserve the policy of batches created before priority support.
+	if getString(ec.State, "batch_auto_profile") != "" {
+		result.Priority = priority
+		result.Quality = chooseAutomaticBatchQuality(decisions, profile.Optimization.Search.QualityValues, minSavings, priority)
+		selection := BatchSelection{Profile: profileName, Scope: "batch_only", Priority: priority, Status: "no_suitable_recipe", Reason: "bounded sample search found no setting that passed on every representative; originals preserved"}
+		if result.Quality == 0 {
+			for _, item := range items {
+				if item.Status == "queued" {
+					result.SkippedItems = append(result.SkippedItems, item.ItemKey)
+				}
+			}
+		} else {
+			// Materialize exactly one recipe from the measured winner. Children
+			// reuse it with final validation; there is no second search or catalog write.
+			ec.State["batch_search_profile_digest"] = profileDigest
+			profile.Video.Quality = result.Quality
+			profile.Optimization = profile.Optimization.Clone()
+			profile.Optimization.Search = &recipe.SearchPolicy{MaxCandidates: 1, QualityValues: []int{result.Quality}}
+			_, finalDigest, _, err := decodeEphemeralProfileInput(map[string]any{"profile_config": profile})
+			if err != nil {
+				return StepResult{Status: StepFailed, Error: err.Error()}, false
+			}
+			result.ProfileDigest = finalDigest
+			ec.State["shared_calibration_profile"] = profile
+			ec.State["shared_calibration_profile_digest"] = finalDigest
+			result.ItemQualities = make(map[string]int, len(keys))
+			for _, key := range keys {
+				result.ItemQualities[key] = result.Quality
+			}
+			selection.Status, selection.Quality = "ready", result.Quality
+			selection.Reason = "one temporary recipe selected from samples; batch-only, not a catalog profile name"
+		}
+		ec.State["batch_selection"] = selection
+	} else if priority == "" { // Preserve the policy of batches created before priority support.
 		quality, err := chooseSharedBatchQuality(decisions, profile.Optimization.Search.QualityValues, minSavings)
 		if err != nil {
 			return StepResult{Status: StepFailed, Error: err.Error()}, false
@@ -338,6 +377,32 @@ func (e *Engine) ensureSharedBatchCalibration(ctx context.Context, ec *Execution
 	sum := sha256.Sum256(encoded)
 	result.Digest = "sha256:" + hex.EncodeToString(sum[:])
 	ec.State["shared_calibration_result"] = result
+	evidence := BatchCalibrationEvidence{}
+	for i, decision := range decisions {
+		quality := result.qualityFor(keys[i])
+		// A representative with no passing setting must not inherit the
+		// default quality when describing accepted sample evidence.
+		if result.Priority != "" {
+			quality = result.ItemQualities[keys[i]]
+		}
+		for _, ev := range decision.Evaluations {
+			if quality == 0 || ev.Quality != quality {
+				continue
+			}
+			if evidence.AcceptedSamples == 0 {
+				evidence.MinimumSampleVMAF = ev.Score
+				evidence.EstimatedSavingsMin, evidence.EstimatedSavingsMax = ev.SavingsPercent, ev.SavingsPercent
+			}
+			evidence.AcceptedSamples++
+			evidence.MinimumSampleVMAF = math.Min(evidence.MinimumSampleVMAF, ev.Score)
+			evidence.EstimatedSavingsMin = math.Min(evidence.EstimatedSavingsMin, ev.SavingsPercent)
+			evidence.EstimatedSavingsMax = math.Max(evidence.EstimatedSavingsMax, ev.SavingsPercent)
+			break
+		}
+	}
+	if evidence.AcceptedSamples > 0 {
+		ec.State["batch_evidence"] = evidence
+	}
 	if err := e.persistExecutionState(ctx, ec); err != nil {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("persisting shared calibration: %v", err)}, false
 	}
@@ -443,4 +508,11 @@ func batchPriorityProfile(profile recipe.Profile, priority, inputPriority string
 	optimization.Quality = &quality
 	profile.Optimization = &optimization
 	return profile
+}
+
+func validateSharedBatchProfile(profile recipe.Profile) error {
+	if profile.Video.Codec != transcode.VideoCodecLibX265 || profile.Optimization == nil || !profile.Optimization.Enabled || profile.Optimization.Search == nil || len(profile.Optimization.Search.QualityValues) == 0 || profile.Optimization.Quality == nil || profile.Optimization.Quality.VMAF == nil || profile.Optimization.Quality.VMAF.Model == "" || profile.Optimization.Quality.VMAF.GuardrailEnforcement != "reject" || profile.Optimization.Quality.Banding == nil || !profile.Optimization.Quality.Banding.Enabled || profile.Optimization.Quality.Banding.Enforcement != "reject" || profile.Optimization.Quality.FinalValidation == nil || profile.Optimization.Quality.FinalValidation.Mode != "sampled" {
+		return fmt.Errorf("shared calibration requires an optimized libx265 profile with VMAF model and sampled final validation")
+	}
+	return nil
 }

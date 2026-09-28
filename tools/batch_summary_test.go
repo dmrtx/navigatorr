@@ -79,3 +79,43 @@ func TestContextEffectivePolicyDoesNotRepeatSeededDefault(t *testing.T) {
 		t.Fatalf("user preference lost: %s", text)
 	}
 }
+
+func TestCompactBatchShowsSelectionWithoutInventingSampleEvidence(t *testing.T) {
+	r := &action.ActionResult{ActionName: "transcode_batch", Status: action.StatusCompleted,
+		State:   map[string]any{"batch_selection": action.BatchSelection{Profile: "anime-x265-calibrated", Priority: "balanced", Reason: "anime series"}},
+		Outputs: map[string]any{"dry_run": true, "counts": map[string]int{"total": 3, "queued": 2, "skip": 1}}}
+	s := toCompactSummary(r)
+	if s.Batch.Selection == nil || s.Batch.Selection.Priority != "balanced" || s.Batch.SampleEvidence != nil || s.Batch.Outcome != "preview" {
+		t.Fatalf("preview must explain selection without fabricated measurements: %+v", s.Batch)
+	}
+	r.Outputs["dry_run"] = false
+	r.State["batch_evidence"] = action.BatchCalibrationEvidence{AcceptedSamples: 2, MinimumSampleVMAF: 92, EstimatedSavingsMin: 22, EstimatedSavingsMax: 35}
+	r.State["shared_calibration_profile"] = strings.Repeat("private-recipe-details", 10000)
+	s = toCompactSummary(r)
+	b, err := json.Marshal(s)
+	if err != nil || len(b) > 2048 || strings.Contains(string(b), "private-recipe") || s.Batch.SampleEvidence == nil || s.Batch.SampleEvidence.EstimatedSavingsMax != 35 {
+		t.Fatalf("sample evidence missing or unbounded: %+v %v", s.Batch, err)
+	}
+}
+
+func TestBatchGuidanceKeepsMonitoringDecisionsAndCandidatesSeparate(t *testing.T) {
+	for _, tc := range []struct {
+		status, outcome, hint string
+		counts                map[string]int
+	}{
+		{action.StatusWaitingExternal, "in_progress", "action_status", map[string]int{"running": 1}},
+		{action.StatusWaitingDecision, "needs_decision", "waiting_options", map[string]int{"completed": 1}},
+		{action.StatusCompleted, "candidates_ready", "originals are unchanged", map[string]int{"completed": 1}},
+		{action.StatusCompleted, "partial", "completed candidates may already exist", map[string]int{"completed": 1, "failed": 1}},
+		{action.StatusCancelled, "cancelled", "", map[string]int{"cancelled": 1}},
+	} {
+		r := &action.ActionResult{ActionName: "transcode_batch", Status: tc.status, Outputs: map[string]any{"counts": tc.counts}}
+		b := compactBatch(r)
+		if b.Outcome != tc.outcome || !strings.Contains(b.NextStep, tc.hint) {
+			t.Fatalf("misleading guidance: %+v", b)
+		}
+		if tc.status == action.StatusCancelled && b.NextStep != "" {
+			t.Fatal("terminal cancellation should not suggest more work")
+		}
+	}
+}
