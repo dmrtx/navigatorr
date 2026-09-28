@@ -281,6 +281,10 @@ func immutableActionInputsMatch(existingJSON string, requested map[string]any) (
 
 // Retry re-runs a failed action from its last safe step without repeating confirmed side effects.
 func (e *Engine) Retry(ctx context.Context, instanceID string) (*ActionResult, error) {
+	return e.retry(ctx, instanceID, nil)
+}
+
+func (e *Engine) retry(ctx context.Context, instanceID string, guard func(*store.ActionInstance) error) (*ActionResult, error) {
 	if e.deps.Store == nil {
 		return nil, fmt.Errorf("maintenance store is required for action engine")
 	}
@@ -298,6 +302,13 @@ func (e *Engine) Retry(ctx context.Context, instanceID string) (*ActionResult, e
 		return nil, fmt.Errorf("action instance not found: %s", instanceID)
 	}
 
+	// Specialized cleanup checks run under the same lease as the retry, so a
+	// concurrent action cannot move the checkpoint between checking and acting.
+	if guard != nil {
+		if err := guard(inst); err != nil {
+			return nil, err
+		}
+	}
 	if inst.Status != StatusFailed {
 		return nil, fmt.Errorf("only failed actions can be retried (current status: %s)", inst.Status)
 	}
