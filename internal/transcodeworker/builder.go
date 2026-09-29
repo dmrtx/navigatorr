@@ -2,6 +2,7 @@ package transcodeworker
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -294,6 +295,20 @@ func BuildFFmpegArgs(execPlan *ExecutionPlan, sourcePath, candidatePath, progres
 	// downmix or remove languages. Already compact/unknown formats are copied.
 	args = append(args, "-c:a", "copy")
 	for _, stream := range execPlan.Streams {
+		if stream.Kind == "audio" && stream.Disposition != nil {
+			var flags []string
+			for name, value := range stream.Disposition {
+				if value > 0 {
+					flags = append(flags, name)
+				}
+			}
+			sort.Strings(flags)
+			disposition := strings.Join(flags, "+")
+			if disposition == "" {
+				disposition = "0"
+			}
+			args = append(args, fmt.Sprintf("-disposition:a:%d", stream.TypeIndex), disposition)
+		}
 		if stream.Kind == "audio" && stream.TargetCodec != "copy" {
 			if stream.TargetCodec != "aac" || stream.BitrateKbps < 1 {
 				return nil, fmt.Errorf("invalid compact audio action")

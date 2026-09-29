@@ -168,14 +168,23 @@ func compactPromotion(res *action.ActionResult) map[string]any {
 		return nil
 	}
 	var plan map[string]any
-	if json.Unmarshal(encoded, &plan) != nil {
+	if json.Unmarshal(encoded, &plan) != nil || plan == nil {
 		return nil
 	}
+	// Project old successful records without inventing an unrecorded check.
+	if res.Outputs["original_integrity"] == "verified_before_replacement" {
+		plan["recovery_verified_before_replacement"] = true
+	}
+	if res.Status == action.StatusCompleted && res.Outputs["recovery_retained"] == false && plan["recovery_cleanup_started"] == true {
+		plan["recovery_cleanup_completed"] = true
+	}
+	plan["recovery_note"] = "Verification before replacement is historical. Cleanup is a completed workflow step; use transcode_backups for current filesystem presence. recovery_verified is a legacy retained-backup flag."
 	return compactOperationalFields(&action.ActionResult{Outputs: plan}, []string{
 		"transcode_action_id", "service", "series_id", "original_path", "candidate_path",
 		"original_episode_file_id", "episode_ids", "original_bytes", "candidate_bytes",
 		"original_sha256", "candidate_sha256", "approved", "new_episode_file_id", "new_path",
 		"recovery_path", "recovery_verified",
+		"recovery_verified_before_replacement", "recovery_cleanup_started", "recovery_cleanup_completed", "recovery_note",
 	})
 }
 

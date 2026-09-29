@@ -188,33 +188,43 @@ type BenchmarkWinner struct {
 
 // BenchmarkCandidateEvaluation records the evaluation summary for one candidate.
 type BenchmarkCandidateEvaluation struct {
-	CandidateID        string   `json:"candidate_id"`
-	CandidateIndex     int      `json:"candidate_index"`
-	VideoCodec         string   `json:"video_codec,omitempty"`
-	Quality            int      `json:"quality"`
-	Preset             string   `json:"preset,omitempty"`
-	Tune               string   `json:"tune,omitempty"`
-	AverageBitrateKbps int      `json:"average_bitrate_kbps,omitempty"`
-	VideoProfile       string   `json:"video_profile,omitempty"`
-	PixelFormat        string   `json:"pixel_format,omitempty"`
-	ExpectedBitDepth   int      `json:"expected_bit_depth"`
-	Score              float64  `json:"score"`
-	MetricType         string   `json:"metric_type"`
-	Eligible           bool     `json:"eligible"`
-	TargetReached      bool     `json:"target_reached"`
-	MinimumMet         bool     `json:"minimum_met"`
-	EvaluationReason   string   `json:"evaluation_reason"`
-	EstimatedBytes     int64    `json:"estimated_bytes"`
-	EstimatedMB        float64  `json:"estimated_mb"`
-	SavingsPercent     float64  `json:"savings_percent"`
-	Uncertainties      []string `json:"uncertainties,omitempty"`
+	FailedSamples      []BenchmarkSampleFailure `json:"failed_samples,omitempty"`
+	CandidateID        string                   `json:"candidate_id"`
+	CandidateIndex     int                      `json:"candidate_index"`
+	VideoCodec         string                   `json:"video_codec,omitempty"`
+	Quality            int                      `json:"quality"`
+	Preset             string                   `json:"preset,omitempty"`
+	Tune               string                   `json:"tune,omitempty"`
+	AverageBitrateKbps int                      `json:"average_bitrate_kbps,omitempty"`
+	VideoProfile       string                   `json:"video_profile,omitempty"`
+	PixelFormat        string                   `json:"pixel_format,omitempty"`
+	ExpectedBitDepth   int                      `json:"expected_bit_depth"`
+	Score              float64                  `json:"score"`
+	MetricType         string                   `json:"metric_type"`
+	Eligible           bool                     `json:"eligible"`
+	TargetReached      bool                     `json:"target_reached"`
+	MinimumMet         bool                     `json:"minimum_met"`
+	EvaluationReason   string                   `json:"evaluation_reason"`
+	EstimatedBytes     int64                    `json:"estimated_bytes"`
+	EstimatedMB        float64                  `json:"estimated_mb"`
+	SavingsPercent     float64                  `json:"savings_percent"`
+	Uncertainties      []string                 `json:"uncertainties,omitempty"`
 }
 
 // BenchmarkDecision records the explainable Phase 6 candidate selection outcome.
 type BenchmarkDecision struct {
-	Winner         *BenchmarkWinner               `json:"winner,omitempty"`
-	DecisionReason string                         `json:"decision_reason"`
-	Evaluations    []BenchmarkCandidateEvaluation `json:"evaluations"`
+	Selection      *optimization.SelectionExplanation `json:"selection,omitempty"`
+	Winner         *BenchmarkWinner                   `json:"winner,omitempty"`
+	DecisionReason string                             `json:"decision_reason"`
+	Evaluations    []BenchmarkCandidateEvaluation     `json:"evaluations"`
+}
+
+type BenchmarkSampleFailure struct {
+	SampleIndex   int     `json:"sample_index"`
+	SourceSeconds float64 `json:"source_seconds"`
+	Metric        string  `json:"metric"`
+	Actual        float64 `json:"actual"`
+	Minimum       float64 `json:"minimum"`
 }
 
 // BenchmarkCandidate specifies one encoder candidate to evaluate during a benchmark.

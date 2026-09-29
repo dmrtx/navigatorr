@@ -665,3 +665,26 @@ func TestCandidateSelector_NonCopiedAudioCannotWinByUnderestimation(t *testing.T
 		t.Errorf("Winner ID = %q, want %q", res.Winner.CandidateID, "cand_properly_estimated")
 	}
 }
+
+func TestCandidateSelectorEminenceExplainsQualityMargin(t *testing.T) {
+	scores := []float64{95.6818, 94.8815, 93.8003, 92.5063}
+	sizes := []int64{252026156, 214098884, 186143984, 165337383}
+	ids := []string{"crf20", "crf22", "crf24", "crf26"}
+	var candidates []CandidateInput
+	for i, id := range ids {
+		candidates = append(candidates, CandidateInput{CandidateID: id, EncodeSuccess: true, ColorInfo: ColorInfo{ColorPrimaries: "bt709", ColorTransfer: "bt709"}, AggregateResult: AggregateSampleScores(MetricTypeVMAF, []SampleScore{{Score: scores[i], Valid: true}}), EstimatedOutput: EstimationResult{SuitableForSelection: true, EstimatedVideoBytes: sizes[i] - 68000000, EstimatedTotalBytes: sizes[i]}})
+	}
+	for _, tc := range []struct {
+		tolerance float64
+		winner    string
+		excluded  int
+	}{{0.5, "crf20", 3}, {4, "crf26", 0}} {
+		for i := 0; i < 4; i++ { // Input order never determines the winner.
+			candidates = append(candidates[1:], candidates[0])
+			got := SelectCandidate(SelectorInput{Policy: NewVMAFPolicy(92, 88, tc.tolerance), Candidates: candidates})
+			if got.Winner == nil || got.Winner.CandidateID != tc.winner || got.Selection == nil || len(got.Selection.OutsideMargin) != tc.excluded {
+				t.Fatalf("selection: %+v", got)
+			}
+		}
+	}
+}

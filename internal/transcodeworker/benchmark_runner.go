@@ -1543,13 +1543,29 @@ func (r *ProductionBenchmarkRunner) runSelection(
 	selRes := optimization.SelectCandidate(selIn)
 
 	decision := &transcode.BenchmarkDecision{
+		Selection:      selRes.Selection,
 		DecisionReason: selRes.DecisionReason,
 		Evaluations:    make([]transcode.BenchmarkCandidateEvaluation, 0, len(validatedCandidates)),
 	}
 
 	for i, vc := range validatedCandidates {
 		ec := selRes.AllEvaluated[i]
+		var failedSamples []transcode.BenchmarkSampleFailure
+		if ec.EvaluationReason == optimization.ReasonSampleBelowMinimum {
+			for _, sample := range candidateInputs[i].AggregateResult.SampleScores {
+				if !sample.Valid || sample.Score >= selectorPolicy.MinScore() {
+					continue
+				}
+				for _, window := range record.Samples {
+					if window.Index == sample.SampleIndex {
+						failedSamples = append(failedSamples, transcode.BenchmarkSampleFailure{SampleIndex: sample.SampleIndex, SourceSeconds: window.StartSeconds, Metric: string(selectorPolicy.Metric()), Actual: sample.Score, Minimum: selectorPolicy.MinScore()})
+						break
+					}
+				}
+			}
+		}
 		decision.Evaluations = append(decision.Evaluations, transcode.BenchmarkCandidateEvaluation{
+			FailedSamples:      failedSamples,
 			CandidateID:        vc.candidate.ID,
 			CandidateIndex:     vc.index,
 			VideoCodec:         transcode.BenchmarkCandidateVideoCodec(vc.candidate),

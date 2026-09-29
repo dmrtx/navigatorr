@@ -314,3 +314,31 @@ func TestRecipeHistoryReturnsRecentCompactEntries(t *testing.T) {
 		}
 	}
 }
+
+func TestRecipeGetExplainsShadowingAndAudioPolicy(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Transcode.Recipes.CacheDir = t.TempDir()
+	if err := cfg.Transcode.InitializeRecipes(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	mgr := cfg.Transcode.RecipeManager()
+	p, err := cfg.Transcode.ResolveProfile("anime-hevc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Audio.Mode = "compact"
+	rec, err := mgr.SaveManagedProfile("anime-hevc", p, "compact", "", 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	warnings := recipeShadowing(cfg, rec)
+	if len(warnings) != 1 || warnings[0]["source"] != "active_bundle" || warnings[0]["differs"] != true {
+		t.Fatalf("shadowing not visible: %+v", warnings)
+	}
+	s := server.NewMCPServer("test", "0")
+	registerRecipeTools(s, cfg)
+	txt := resultText(t, callTool(t, s, "recipe_get", map[string]any{"name": "anime-hevc"}))
+	if !strings.Contains(txt, "compact_audio_policy") || !strings.Contains(txt, "shadowed_profiles") || !strings.Contains(txt, "192") {
+		t.Fatal(txt)
+	}
+}

@@ -422,3 +422,36 @@ func TestDiagnosticsNeverExposesSecrets(t *testing.T) {
 		t.Errorf("expected ***REDACTED*** markers in diagnostics output")
 	}
 }
+
+func TestDiagnosticsCountsMaintenanceAndReportsDatabaseFailure(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err = st.AddItem(store.MaintenanceItem{Service: "sonarr", MediaType: "series", MediaID: "1", Title: "Test series", IssueType: "oversized"}); err != nil {
+		t.Fatal(err)
+	}
+	if err = st.CreateActionInstance(store.ActionInstance{ID: "waiting", ActionName: "transcode_media", Status: "waiting_decision"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{}
+	s := server.NewMCPServer("test", "0")
+	RegisterDiagnostics(s, cfg, arrservice.NewRegistry(cfg), nil, nil, nil, nil, st)
+	read := func() map[string]any {
+		var v map[string]any
+		if err := json.Unmarshal([]byte(callDiagnosticsWithContext(t, s, context.Background(), map[string]any{"check_connectivity": false})), &v); err != nil {
+			t.Fatal(err)
+		}
+		return v["database"].(map[string]any)
+	}
+	d := read()
+	if d["active_maintenance_jobs"] != float64(1) || d["running_actions"] != float64(0) || d["non_terminal_actions"] != float64(1) {
+		t.Fatalf("incorrect counts: %+v", d)
+	}
+	st.Close()
+	d = read()
+	if d["status"] != "error" || d["active_maintenance_jobs"] != nil {
+		t.Fatalf("database error disguised as zero: %+v", d)
+	}
+}
