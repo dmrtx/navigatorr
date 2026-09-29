@@ -373,6 +373,9 @@ func TestPromotionRequiresApprovalAndDeletesOnlyAfterAdoption(t *testing.T) {
 	if _, err := os.Stat(p.BackupPath); !os.IsNotExist(err) {
 		t.Fatalf("backup remains after success: %v", err)
 	}
+	if !p.RecoveryVerifiedBeforeReplacement || !p.RecoveryCleanupCompleted || p.BackupVerified {
+		t.Fatalf("recovery history lost: %+v", p)
+	}
 	// Completed resume and a new request for the same source both remain
 	// idempotent, including after a durable-store reload.
 	h.restart()
@@ -937,5 +940,44 @@ func TestPromotionFinalizeFailsClosedWhenNewPathIsTemporary(t *testing.T) {
 	}
 	if _, err := os.Stat(p.BackupPath); err != nil {
 		t.Fatalf("recovery must be preserved when new_path is temporary: %v", err)
+	}
+}
+
+func TestPromotionLostAdoptionBeforeRemovalKeepsRecovery(t *testing.T) {
+	h := newPromotionHarness(t)
+	r := h.run()
+	inst, err := h.st.GetActionInstance(r.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ec := parseExecutionContext(inst, h.engine)
+	p, err := loadPromotion(ec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Approved = true
+	if err = h.engine.savePromotion(context.Background(), ec, p); err != nil {
+		t.Fatal(err)
+	}
+	if step, err := h.engine.stepPromotePreserve(context.Background(), ec); err != nil || step.Status != StepCompleted {
+		t.Fatalf("preserve: %+v %v", step, err)
+	}
+	p, err = loadPromotion(ec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.NewFileID = 202 // Import was observed, but Sonarr no longer adopts this ID.
+	if err = h.engine.savePromotion(context.Background(), ec, p); err != nil {
+		t.Fatal(err)
+	}
+	step, err := h.engine.stepPromoteRemoveOld(context.Background(), ec)
+	if err != nil || step.Status != StepFailed || !strings.Contains(step.Error, "no longer adopted") || h.deletes != 0 {
+		t.Fatalf("unsafe removal: %+v %v", step, err)
+	}
+	if err := h.engine.verifyPromotionHash(context.Background(), p.BackupPath, p.OriginalSHA); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.engine.verifyPromotionHash(context.Background(), p.OriginalPath, p.OriginalSHA); err != nil {
+		t.Fatal(err)
 	}
 }
