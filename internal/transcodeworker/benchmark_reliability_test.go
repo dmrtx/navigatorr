@@ -277,3 +277,24 @@ func TestBenchmarkCompactAudioEstimateUsesOutputPolicy(t *testing.T) {
 		}
 	}
 }
+
+func TestBenchmarkDecisionPersistsFailedSampleEvidence(t *testing.T) {
+	candidate := transcode.BenchmarkCandidate{ID: "q65", Quality: 65}
+	record := &BenchmarkRecord{Metric: "vmaf", SourceDuration: 100, Candidates: []transcode.BenchmarkCandidate{candidate}, Samples: []transcode.BenchmarkSampleWindow{{Index: 3, StartSeconds: 42, DurationSeconds: 5}}}
+	evidence := &BenchmarkExecutionEvidence{SourceBitDepth: 8,
+		CandidateSamples: []BenchmarkCandidateSampleResult{{CandidateID: "q65", SampleIndex: 3, SizeBytes: 100000}},
+		CandidateMetrics: []BenchmarkCandidateMetricAggregate{{CandidateID: "q65", MetricType: optimization.MetricTypeVMAF, Aggregate: optimization.MetricAggregate{MetricType: optimization.MetricTypeVMAF, Valid: true, MeanScore: 80, SampleScores: []optimization.SampleScore{{SampleIndex: 3, Score: 80, Valid: true}}}}},
+	}
+	rep := mediainspect.DetailedReport{SizeBytes: 100000000, DurationSec: 100}
+	err := (&ProductionBenchmarkRunner{}).runSelection(context.Background(), record, evidence, []validatedCandidate{{candidate: candidate, bitDepth: 8, profile: "main", pixelFormat: "yuv420p"}}, rep, rep.SizeBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evidence.Decision == nil || evidence.Decision.Winner != nil || len(evidence.Decision.Evaluations) != 1 {
+		t.Fatalf("wrong decision: %+v", evidence.Decision)
+	}
+	failures := evidence.Decision.Evaluations[0].FailedSamples
+	if len(failures) != 1 || failures[0].SampleIndex != 3 || failures[0].SourceSeconds != 42 || failures[0].Actual != 80 || failures[0].Minimum != optimization.DefaultVMAFPolicy().MinScore() {
+		t.Fatalf("missing failed sample evidence: %+v", failures)
+	}
+}

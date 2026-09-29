@@ -40,9 +40,36 @@ type EvaluatedCandidate struct {
 
 // SelectionResult represents the explainable, deterministic output of candidate selection.
 type SelectionResult struct {
-	Winner         *EvaluatedCandidate  `json:"winner,omitempty"`
-	DecisionReason string               `json:"decision_reason"`
-	AllEvaluated   []EvaluatedCandidate `json:"all_evaluated"`
+	Selection      *SelectionExplanation `json:"selection,omitempty"`
+	Winner         *EvaluatedCandidate   `json:"winner,omitempty"`
+	DecisionReason string                `json:"decision_reason"`
+	AllEvaluated   []EvaluatedCandidate  `json:"all_evaluated"`
+}
+
+// SelectionExplanation exposes the existing quality-versus-size policy.
+// Excluded candidates remain eligible; they are outside the final size contest.
+type SelectionExplanation struct {
+	BestScore     float64  `json:"best_score"`
+	Tolerance     float64  `json:"marginal_tolerance"`
+	ScoreFloor    float64  `json:"score_floor"`
+	OutsideMargin []string `json:"outside_quality_margin,omitempty"`
+}
+
+func ExplainTargetSelection(candidates []EvaluatedCandidate, tolerance float64) *SelectionExplanation {
+	var out *SelectionExplanation
+	for _, c := range candidates {
+		if c.Eligible && c.TargetReached && (out == nil || c.Score > out.BestScore) {
+			out = &SelectionExplanation{BestScore: c.Score, Tolerance: tolerance, ScoreFloor: c.Score - tolerance}
+		}
+	}
+	if out != nil {
+		for _, c := range candidates {
+			if c.Eligible && c.TargetReached && c.Score < out.ScoreFloor {
+				out.OutsideMargin = append(out.OutsideMargin, c.CandidateID)
+			}
+		}
+	}
+	return out
 }
 
 // SelectCandidate implements deterministic quality/size trade-off candidate selection:
@@ -140,17 +167,8 @@ func SelectCandidate(in SelectorInput) SelectionResult {
 
 	// Case 1: Target-reaching candidates exist
 	if len(targetReaching) > 0 {
-		// Find highest quality score among target-reaching candidates
-		var maxScore float64 = -math.MaxFloat64
-		for _, c := range targetReaching {
-			if c.Score > maxScore {
-				maxScore = c.Score
-			}
-		}
-
-		// Filter candidates within marginal-quality tolerance of maxScore
-		tolerance := in.Policy.Tolerance()
-		scoreFloor := maxScore - tolerance
+		res.Selection = ExplainTargetSelection(targetReaching, in.Policy.Tolerance())
+		scoreFloor := res.Selection.ScoreFloor
 
 		var qualified []EvaluatedCandidate
 		for _, c := range targetReaching {

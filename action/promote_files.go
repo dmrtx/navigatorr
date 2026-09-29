@@ -439,6 +439,7 @@ func (e *Engine) stepPromotePreserve(ctx context.Context, ec *ExecutionContext) 
 	}
 preserved:
 	p.BackupVerified = true
+	p.RecoveryVerifiedBeforeReplacement = true
 	if err := e.savePromotion(ctx, ec, p); err != nil {
 		return promoteFailed(err)
 	}

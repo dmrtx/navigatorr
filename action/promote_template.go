@@ -42,31 +42,33 @@ type promotionCommand struct {
 }
 
 type promotionState struct {
-	SourceActionID         string                       `json:"transcode_action_id"`
-	Service                string                       `json:"service"`
-	SeriesID               int                          `json:"series_id"`
-	SeriesPath             string                       `json:"series_path"`
-	OriginalPath           string                       `json:"original_path"`
-	CandidatePath          string                       `json:"candidate_path"`
-	OriginalSHA            string                       `json:"original_sha256"`
-	CandidateSHA           string                       `json:"candidate_sha256"`
-	OriginalBytes          int64                        `json:"original_bytes"`
-	CandidateBytes         int64                        `json:"candidate_bytes"`
-	CandidateMediaVerified bool                         `json:"candidate_media_verified,omitempty"`
-	OriginalFileID         int                          `json:"original_episode_file_id"`
-	EpisodeIDs             []int                        `json:"episode_ids"`
-	Quality                json.RawMessage              `json:"quality"`
-	Languages              json.RawMessage              `json:"languages"`
-	ReleaseGroup           string                       `json:"release_group,omitempty"`
-	Approved               bool                         `json:"approved"`
-	BackupPath             string                       `json:"recovery_path,omitempty"`
-	BackupVerified         bool                         `json:"recovery_verified"`
-	NewFileID              int                          `json:"new_episode_file_id,omitempty"`
-	NewPath                string                       `json:"new_path,omitempty"`
-	Commands               map[string]*promotionCommand `json:"commands,omitempty"`
-	DeleteSentAt           string                       `json:"delete_sent_at,omitempty"`
-	OldRemoved             bool                         `json:"old_removed"`
-	RecoveryCleanupStarted bool                         `json:"recovery_cleanup_started,omitempty"`
+	SourceActionID                    string                       `json:"transcode_action_id"`
+	Service                           string                       `json:"service"`
+	SeriesID                          int                          `json:"series_id"`
+	SeriesPath                        string                       `json:"series_path"`
+	OriginalPath                      string                       `json:"original_path"`
+	CandidatePath                     string                       `json:"candidate_path"`
+	OriginalSHA                       string                       `json:"original_sha256"`
+	CandidateSHA                      string                       `json:"candidate_sha256"`
+	OriginalBytes                     int64                        `json:"original_bytes"`
+	CandidateBytes                    int64                        `json:"candidate_bytes"`
+	CandidateMediaVerified            bool                         `json:"candidate_media_verified,omitempty"`
+	OriginalFileID                    int                          `json:"original_episode_file_id"`
+	EpisodeIDs                        []int                        `json:"episode_ids"`
+	Quality                           json.RawMessage              `json:"quality"`
+	Languages                         json.RawMessage              `json:"languages"`
+	ReleaseGroup                      string                       `json:"release_group,omitempty"`
+	Approved                          bool                         `json:"approved"`
+	BackupPath                        string                       `json:"recovery_path,omitempty"`
+	BackupVerified                    bool                         `json:"recovery_verified"`
+	RecoveryVerifiedBeforeReplacement bool                         `json:"recovery_verified_before_replacement,omitempty"`
+	RecoveryCleanupCompleted          bool                         `json:"recovery_cleanup_completed,omitempty"`
+	NewFileID                         int                          `json:"new_episode_file_id,omitempty"`
+	NewPath                           string                       `json:"new_path,omitempty"`
+	Commands                          map[string]*promotionCommand `json:"commands,omitempty"`
+	DeleteSentAt                      string                       `json:"delete_sent_at,omitempty"`
+	OldRemoved                        bool                         `json:"old_removed"`
+	RecoveryCleanupStarted            bool                         `json:"recovery_cleanup_started,omitempty"`
 }
 
 func loadPromotion(ec *ExecutionContext) (*promotionState, error) {

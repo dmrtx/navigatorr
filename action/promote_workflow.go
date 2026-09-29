@@ -451,6 +451,7 @@ func (e *Engine) stepPromoteFinalize(ctx context.Context, ec *ExecutionContext) 
 		}
 	}
 	p.BackupVerified = false
+	p.RecoveryCleanupCompleted = true
 	if err := e.savePromotion(ctx, ec, p); err != nil {
 		return promoteFailed(err)
 	}

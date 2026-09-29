@@ -335,7 +335,7 @@ type VideoProfile struct {
 }
 
 type AudioProfile struct {
-	Mode string `json:"mode" yaml:"mode"`
+	Mode string `json:"mode" yaml:"mode" jsonschema:"description=copy preserves audio; compact converts DTS/lossless to lossy AAC without downmix and copies existing compact codecs. Use recipe_get for the exact compact_audio_policy."`
 }
 type SubtitleProfile struct {
 	Mode                string `json:"mode" yaml:"mode"`

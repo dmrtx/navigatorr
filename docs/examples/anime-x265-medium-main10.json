@@ -1,0 +1,92 @@
+{
+  "container": "mkv",
+  "video": {
+    "codec": "libx265",
+    "quality": 22,
+    "preset": "medium",
+    "tune": "animation",
+    "profile": "main10",
+    "pixel_format": "p010le"
+  },
+  "audio": {
+    "mode": "compact"
+  },
+  "subtitles": {
+    "mode": "preserve",
+    "convert_incompatible": true
+  },
+  "preserve": {
+    "metadata": true,
+    "chapters": true,
+    "attachments": true
+  },
+  "resilience": {
+    "max_attempts": 3,
+    "transient_retries": 2,
+    "retry_backoff_seconds": [
+      5,
+      20
+    ],
+    "max_fallbacks": 1,
+    "fallbacks": [
+      {
+        "when": "container_subtitle_incompatible",
+        "action": "apply_container_conversion"
+      },
+      {
+        "when": "worker_busy",
+        "action": "retry"
+      },
+      {
+        "when": "ssh_transient",
+        "action": "retry"
+      }
+    ]
+  },
+  "optimization": {
+    "enabled": true,
+    "sampling": {
+      "strategy": "distributed",
+      "sample_count": 3,
+      "sample_seconds": 20,
+      "positions": [
+        0.2,
+        0.5,
+        0.8
+      ]
+    },
+    "quality": {
+      "preferred_metric": "vmaf",
+      "vmaf": {
+        "target": 92,
+        "minimum": 88,
+        "marginal_tolerance": 0.5,
+        "model": "v1_1080p_3h",
+        "guardrail_enforcement": "reject",
+        "p5_minimum": 84,
+        "worst_window_minimum": 85,
+        "worst_window_seconds": 5
+      },
+      "banding": {
+        "enabled": true,
+        "metric": "cambi",
+        "mode": "full_ref",
+        "enforcement": "reject",
+        "max_mean": 6,
+        "max_peak": 16
+      },
+      "final_validation": {
+        "mode": "sampled"
+      }
+    },
+    "search": {
+      "max_candidates": 4,
+      "quality_values": [
+        20,
+        22,
+        24,
+        26
+      ]
+    }
+  }
+}

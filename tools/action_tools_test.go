@@ -163,6 +163,26 @@ func TestActionToolsLifecycle(t *testing.T) {
 	}
 }
 
+func TestCompactPromotionRecoveryHistoryAndMissingPlan(t *testing.T) {
+	r := &action.ActionResult{ActionName: "promote_transcode_candidate", Status: action.StatusFailed}
+	if compactPromotion(r) != nil {
+		t.Fatal("missing plan should stay absent")
+	}
+	r.Status = action.StatusCompleted
+	r.State = map[string]any{"promotion": map[string]any{"recovery_verified": false, "recovery_cleanup_started": true}}
+	r.Outputs = map[string]any{"original_integrity": "verified_before_replacement", "recovery_retained": false}
+	p := compactPromotion(r)
+	if p["recovery_verified"] != false || p["recovery_verified_before_replacement"] != true || p["recovery_cleanup_completed"] != true {
+		t.Fatalf("historical recovery evidence: %+v", p)
+	}
+	r.Status = action.StatusFailed
+	delete(r.Outputs, "original_integrity")
+	p = compactPromotion(r)
+	if p["recovery_verified_before_replacement"] == true || p["recovery_cleanup_completed"] == true {
+		t.Fatal("invented evidence on unfinished promotion")
+	}
+}
+
 func TestIdempotencyKeyMCPToolSchemaAndProtocol(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "action_idempotency_schema_test.db"))
 	if err != nil {

@@ -417,6 +417,22 @@ func (t *TranscodeConfig) ResolveProfile(profileName string) (recipe.Profile, er
 	return p, err
 }
 
+// RecipeBaseProfiles exposes lower layers for override diagnostics only.
+func (t *TranscodeConfig) RecipeBaseProfiles(name string) map[string]recipe.Profile {
+	out := map[string]recipe.Profile{}
+	if t.recipeManager != nil {
+		if snap := t.recipeManager.Snapshot(); snap != nil {
+			if p, ok := snap.Bundle.Profiles[name]; ok {
+				out["active_bundle"] = p
+			}
+		}
+	}
+	if p, ok := t.Profiles[name]; ok {
+		out["static_config"] = profileToRecipe(name, p)
+	}
+	return out
+}
+
 func (t *TranscodeConfig) validateRecipeSource() error {
 	src := strings.ToLower(strings.TrimSpace(t.Recipes.Source))
 	if src == "" {

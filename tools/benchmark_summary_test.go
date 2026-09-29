@@ -77,3 +77,25 @@ func TestCompactBenchmarkSeparatesProgressErrorsReviewAndWarnings(t *testing.T) 
 		t.Fatalf("observe warning reported as rejection: %+v", s.Rejected)
 	}
 }
+
+func TestHistoricalSelectionAndFailedSampleExplanation(t *testing.T) {
+	tolerance := 0.5
+	r := &action.ActionResult{ActionName: "benchmark_transcode", Status: action.StatusCompleted, State: map[string]any{
+		"benchmark_request": transcode.BenchmarkRequest{Quality: &transcode.BenchmarkQualityConfig{VMAF: &transcode.BenchmarkQualityThresholds{MarginalTolerance: &tolerance}}},
+		"benchmark_decision": transcode.BenchmarkDecision{DecisionReason: "target_reached_smallest_size", Winner: &transcode.BenchmarkWinner{CandidateID: "crf20", MetricType: "vmaf"}, Evaluations: []transcode.BenchmarkCandidateEvaluation{
+			{CandidateID: "crf20", Eligible: true, TargetReached: true, Score: 95.6818}, {CandidateID: "crf26", Eligible: true, TargetReached: true, Score: 92.5063},
+			{CandidateID: "q65", EvaluationReason: "sample_below_minimum_quality", FailedSamples: []transcode.BenchmarkSampleFailure{{SampleIndex: 2, SourceSeconds: 1127, Metric: "vmaf", Actual: 94.7, Minimum: 95}}},
+		}},
+	}}
+	s := compactBenchmark(r)
+	if s.Selection == nil || s.Selection.BestScore != 95.6818 || len(s.Selection.OutsideMargin) != 1 || !strings.Contains(s.Message, "margin") {
+		t.Fatalf("selection explanation: %+v", s)
+	}
+	if len(s.Rejected) != 1 || len(s.Rejected[0].FailedSamples) != 1 || s.Rejected[0].FailedSamples[0].SourceSeconds != 1127 {
+		t.Fatal("missing sample evidence")
+	}
+	delete(r.State, "benchmark_request")
+	if compactBenchmark(r).Selection != nil {
+		t.Fatal("invented historical tolerance without the request")
+	}
+}

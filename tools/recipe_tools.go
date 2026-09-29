@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/jakenesler/navigatorr/config"
+	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/recipe"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -32,6 +33,35 @@ const (
 	defaultRecipeHistoryLimit = 10
 	maxRecipeHistoryLimit     = 50
 )
+
+func compactAudioPolicy() map[string]any {
+	targets := map[int]int{}
+	for _, channels := range []int{1, 2, 3, 4, 5, 6, 7, 8} {
+		_, targets[channels] = transcode.AudioTarget("compact", "dts", channels)
+	}
+	return map[string]any{"convert_to": "aac", "convert_codecs": []string{"dts", "truehd", "mlp", "flac", "alac", "pcm_*"}, "target_kbps_by_channels": targets, "otherwise": "copy (including AAC/AC3/EAC3/Opus, unknown channel count, and more than 8 channels)", "preserve": "track count, languages, channels and dispositions", "lossy": true, "note": "Nominal targets, not measured audio quality. Benchmark estimates audio; fallback_audio_bitrate_bps is an estimation fallback, not the encoding target."}
+}
+
+func recipeShadowing(cfg *config.Config, rec recipe.ManagedProfileRecord) []map[string]any {
+	var out []map[string]any
+	base := cfg.Transcode.RecipeBaseProfiles(rec.Name)
+	for _, source := range []string{"static_config", "active_bundle"} {
+		p, ok := base[source]
+		if !ok {
+			continue
+		}
+		_, digest, err := recipe.NormalizeAndDigestProfile(rec.Name, p)
+		entry := map[string]any{"source": source, "warning": "Managed profile fully overrides this layer; base updates are not inherited."}
+		if err == nil {
+			entry["digest"], entry["differs"] = digest, digest != rec.Digest
+		}
+		if source == "active_bundle" {
+			entry["bundle_version"] = cfg.Transcode.RecipeManager().Status().ActiveVersion
+		}
+		out = append(out, entry)
+	}
+	return out
+}
 
 func managedProfileSummary(rec recipe.ManagedProfileRecord) map[string]any {
 	return map[string]any{
@@ -105,7 +135,11 @@ func registerRecipeTools(s *server.MCPServer, cfg *config.Config) {
 		}
 		managedSummaries := make([]map[string]any, 0, end-offset)
 		for _, rec := range managed[offset:end] {
-			managedSummaries = append(managedSummaries, managedProfileSummary(rec))
+			summary := managedProfileSummary(rec)
+			if shadowed := recipeShadowing(cfg, rec); len(shadowed) > 0 {
+				summary["shadowed_profiles"] = shadowed
+			}
+			managedSummaries = append(managedSummaries, summary)
 		}
 
 		bundleNames := []string{}
@@ -134,7 +168,7 @@ func registerRecipeTools(s *server.MCPServer, cfg *config.Config) {
 	})
 
 	s.AddTool(mcp.NewTool("recipe_get",
-		mcp.WithDescription("Get the effective typed profile by name and identify which recipe layer supplies it."),
+		mcp.WithDescription("Get the effective typed profile, compact audio policy, and lower recipe layers hidden by a managed override. Overrides are complete profiles and do not inherit bundle updates."),
 		mcp.WithString("name", mcp.Required(), mcp.Description("Recipe profile name")),
 	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		name := strings.TrimSpace(argString(req.GetArguments(), "name", ""))
@@ -148,7 +182,7 @@ func registerRecipeTools(s *server.MCPServer, cfg *config.Config) {
 		if rec, ok, err := mgr.GetManagedProfile(name); err != nil {
 			return toolErr("reading managed recipe registry: %v", err), nil
 		} else if ok {
-			return toolJSON(map[string]any{"name": name, "source": "managed", "record": rec, "profile": rec.Profile}), nil
+			return toolJSON(map[string]any{"name": name, "source": "managed", "record": rec, "profile": rec.Profile, "shadowed_profiles": recipeShadowing(cfg, rec), "compact_audio_policy": compactAudioPolicy()}), nil
 		}
 		profile, err := cfg.Transcode.ResolveProfile(name)
 		if err != nil {
@@ -158,7 +192,7 @@ func registerRecipeTools(s *server.MCPServer, cfg *config.Config) {
 		if _, ok := cfg.Transcode.Profiles[name]; ok {
 			source = "static_config"
 		}
-		return toolJSON(map[string]any{"name": name, "source": source, "profile": profile}), nil
+		return toolJSON(map[string]any{"name": name, "source": source, "profile": profile, "compact_audio_policy": compactAudioPolicy()}), nil
 	})
 
 	s.AddTool(mcp.NewTool("recipe_save",
