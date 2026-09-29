@@ -317,6 +317,59 @@ func TestPromotionAcceptsStringSeriesIDFromMCPInputs(t *testing.T) {
 	}
 }
 
+func TestPromotionNormalizesExplicitExpectedEncoder(t *testing.T) {
+	for _, expected := range []string{"libx265", "  LIBX265  ", "hevc_videotoolbox", "hevc", "h264"} {
+		t.Run(expected, func(t *testing.T) {
+			h := newPromotionHarness(t)
+			source, err := h.st.GetActionInstance("source-transcode")
+			if err != nil {
+				t.Fatal(err)
+			}
+			source.InputsJSON = toJSON(map[string]any{"expected_video_codec": expected})
+			// Reproduce the completed Main10 candidate with an explicit encoder
+			// expectation persisted in its immutable inputs.
+			state := parseExecutionContext(source, h.engine).State
+			plan := getPlan(state["plan"])
+			plan.VideoCodec, plan.ExpectedBitDepth = "libx265", 10
+			state["plan"] = plan
+			source.StateJSON = toJSON(state)
+			probe, err := os.ReadFile(h.engine.deps.Ffprobe)
+			if err != nil {
+				t.Fatal(err)
+			}
+			probe = []byte(strings.ReplaceAll(string(probe), `"bits_per_raw_sample":"8"`, `"bits_per_raw_sample":"10"`))
+			probe = []byte(strings.ReplaceAll(string(probe), `"pix_fmt":"yuv420p"`, `"pix_fmt":"yuv420p10le"`))
+			if err := os.WriteFile(h.engine.deps.Ffprobe, probe, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := h.st.UpdateActionInstance(*source); err != nil {
+				t.Fatal(err)
+			}
+			r, err := h.engine.Run(context.Background(), "promote_transcode_candidate", map[string]any{"transcode_action_id": source.ID, "series_id": 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if expected == "h264" {
+				if r.Status != StatusFailed || !strings.Contains(r.Error, "Video codec mismatch") || h.imports != 0 {
+					t.Fatalf("real codec mismatch accepted: %+v", r)
+				}
+				return
+			}
+			if r.Status != StatusWaitingDecision || h.imports != 0 {
+				t.Fatalf("encoder alias blocked promotion planning: status=%s error=%s", r.Status, r.Error)
+			}
+			r = h.finish(h.resume(r.ID, "approve"))
+			if r.Status != StatusCompleted || h.imports != 1 {
+				t.Fatalf("existing candidate promotion failed: status=%s error=%s", r.Status, r.Error)
+			}
+			unchanged, err := h.st.GetActionInstance(source.ID)
+			if err != nil || unchanged.InputsJSON != source.InputsJSON {
+				t.Fatal("promotion rewrote source inputs")
+			}
+		})
+	}
+}
+
 func (h *promotionHarness) resume(id, decision string) *ActionResult {
 	h.t.Helper()
 	result, err := h.engine.Resume(context.Background(), id, decision, nil)

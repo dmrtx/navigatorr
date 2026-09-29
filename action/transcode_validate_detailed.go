@@ -70,7 +70,9 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 			return waitDecision(fmt.Sprintf("Duration discrepancy: original was %.1fs, output is %.1fs (difference: %.1fs)", origDur, outRep.DurationSec, d)), nil
 		}
 	}
-	expected := strings.ToLower(strings.TrimSpace(getString(ec.Inputs, "expected_video_codec")))
+	// Explicit expectations may use the same encoder names as recipe.video.codec.
+	// Normalize them just like the plan: ffprobe reports hevc, not libx265.
+	expected := expectedVideoCodec(getString(ec.Inputs, "expected_video_codec"))
 	if expected == "" {
 		expected = expectedVideoCodec(plan.VideoCodec)
 	}
