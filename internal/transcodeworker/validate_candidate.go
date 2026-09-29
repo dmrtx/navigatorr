@@ -134,6 +134,11 @@ func (w *Worker) validateEncodedCandidateFull(ctx context.Context, localCandidat
 	if err := validateAudioPreservation(execPlan.Plan, srcProbe.Streams, candProbe.Streams); err != nil {
 		return attest, err
 	}
+	if execPlan.Plan.AudioMode == "compact" && countStreams(srcProbe.Streams, "audio") > 0 {
+		if err := w.validateAudioPackets(ctx, execPlan.Plan, srcProbe.Path, localCandidate, srcProbe, candProbe); err != nil {
+			return attest, err
+		}
+	}
 	if err := validateSubtitlePreservation(execPlan.Plan, srcProbe.Streams, candProbe.Streams); err != nil {
 		return attest, err
 	}
@@ -264,6 +269,11 @@ func validateAudioPreservation(plan *transcode.Plan, src, cand []SourceStream) e
 		}
 		if a.Channels > 0 && a.Channels != b.Channels {
 			return fmt.Errorf("%w: local candidate audio channels %d at stream %d != source %d (fail closed, never publish)", ErrSourceInvalid, b.Channels, i, a.Channels)
+		}
+		for disposition, value := range a.Disposition {
+			if b.Disposition[disposition] != value {
+				return fmt.Errorf("%w: audio disposition %s changed at stream %d (fail closed, never publish)", ErrSourceInvalid, disposition, i)
+			}
 		}
 	}
 	return nil

@@ -215,15 +215,26 @@ func registerDiagnosticsTools(s *server.MCPServer, d DiagnosticsDeps) {
 				"configured": d.Store != nil,
 			}
 			if d.Store != nil {
-				activeActions, _ := d.Store.ListActionInstances("running", 100)
-				waitingActions, _ := d.Store.ListActionInstances("waiting_external", 100)
-				decisionActions, _ := d.Store.ListActionInstances("waiting_decision", 100)
-				maintItems, _ := d.Store.ListItems(store.ItemFilter{Status: "open", Limit: 100})
-
-				dbStats["active_actions"] = len(activeActions)
-				dbStats["waiting_external_actions"] = len(waitingActions)
-				dbStats["waiting_decision_actions"] = len(decisionActions)
-				dbStats["active_maintenance_jobs"] = len(maintItems)
+				actions, maintenance, err := d.Store.StatusCounts()
+				if err != nil {
+					overallStatus = "degraded"
+					dbStats["status"] = "error"
+					dbStats["error"] = "Could not count persisted jobs; counts are unavailable."
+				} else {
+					dbStats["status"] = "ok"
+					dbStats["actions_by_status"], dbStats["maintenance_by_status"] = actions, maintenance
+					dbStats["active_actions"], dbStats["running_actions"] = actions["running"], actions["running"]
+					dbStats["waiting_external_actions"], dbStats["waiting_decision_actions"] = actions["waiting_external"], actions["waiting_decision"]
+					dbStats["non_terminal_actions"] = actions["pending"] + actions["running"] + actions["waiting_external"] + actions["waiting_decision"]
+					unfinished := 0
+					for status, count := range maintenance {
+						if status != "done" && status != "failed" {
+							unfinished += count
+						}
+					}
+					dbStats["active_maintenance_jobs"], dbStats["non_terminal_maintenance_jobs"] = unfinished, unfinished
+					dbStats["count_semantics"] = "active_actions is the legacy alias for running_actions; non_terminal includes pending/waiting. Maintenance non_terminal excludes done/failed, matching get_context."
+				}
 			}
 
 			// 6. Transcode executor. Automatic execution is HTTP-only; SSH is

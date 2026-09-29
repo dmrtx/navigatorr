@@ -2,6 +2,45 @@
 
 Navigatorr treats transcoding policy as data, not as worker code.
 
+## Reading benchmark and recovery results
+
+Use `action_status` for the operational outcome and next step, including old
+actions. `action_detail` exposes the persisted record without backfilling newer
+derived summaries. A selected candidate competes on estimated size only within
+the quality margin of the best target-reaching candidate. `benchmark.selection`
+reports that best score, `marginal_tolerance`, `score_floor`, and candidate IDs
+outside the margin. Eligibility alone does not imply participation in the final
+size comparison. Newly recorded sample-minimum rejections include sample index,
+source timestamp, measured value and minimum; absent historical evidence remains
+absent.
+
+`recipe_get` exposes `compact_audio_policy` and managed `shadowed_profiles`.
+Managed profiles are complete overrides: updates to a same-named bundle or
+static profile do not flow into them. `fallback_audio_bitrate_bps` affects size
+estimation only; it does not select an encoding bitrate. The reviewed Main10
+profile is in [the example JSON](examples/anime-x265-medium-main10.json); updating
+an existing managed recipe requires its current generation/digest via `recipe_save`.
+
+Before publishing compact audio, the worker checks codecs, track count,
+languages, channels and dispositions. It also streams audio packet metadata from
+the staged source and candidate to check each track's duration and original A/V
+offset (250 ms tolerance for priming/frame rounding). This reads both files once
+more with bounded memory; it does not trust copied Matroska duration/bitrate tags.
+Converted tracks longer than ten seconds also reject gross bitrate overshoot
+(above twice the nominal target plus 16 kb/s). AAC may legitimately use fewer
+bits for silence, so no lower bitrate floor is imposed. These checks detect
+structural/timing failures, not audible transparency or every packet discontinuity.
+
+Promotion summaries distinguish `recovery_verified_before_replacement` from
+`recovery_cleanup_completed`. `recovery_verified` remains the legacy retained-copy
+flag and becomes false after successful cleanup. For current physical backup
+presence, use `transcode_backups`; workflow history is not a filesystem inventory.
+
+`diagnostics.database` reports exact `actions_by_status` and
+`maintenance_by_status`, plus `running_actions` and `non_terminal_actions`.
+The legacy `active_actions` alias still means running only. Database failures
+return unavailable counts and degraded health instead of reporting zero jobs.
+
 The stable image/worker exposes a small hard-coded **capability boundary**: supported containers, encoders, stream operations, preservation features, and safe codec conversions. A versioned **recipe bundle** decides which of those capabilities to use for a profile and how to handle container compatibility. Recipes cannot add worker capabilities, raw FFmpeg arguments, shell commands, or arbitrary binaries.
 
 This separation is intentional: a compatibility or tuning problem should normally be fixed by publishing/editing a recipe and reloading it, not by rebuilding the Navigatorr or worker image.

@@ -21,6 +21,7 @@ type SourceStream struct {
 	Title       string         `json:"title,omitempty"`
 	Channels    int            `json:"channels,omitempty"`
 	Disposition map[string]int `json:"disposition,omitempty"`
+	StartTime   *float64       `json:"start_time,omitempty"`
 	// Detailed video fields (zero/empty when the probe could not determine
 	// them). They drive the worker-local pre-publish policy validation so an
 	// invalid candidate is rejected before any NAS publish.
@@ -34,6 +35,7 @@ type SourceStream struct {
 // SourceProbe is the full local structural/media probe result used for
 // pre-publish validation. Chapters is the container chapter count.
 type SourceProbe struct {
+	Path        string
 	Streams     []SourceStream
 	DurationSec float64
 	Chapters    int
@@ -73,6 +75,7 @@ func ProbeSourceDetails(ctx context.Context, ffprobePath, filePath string) (Sour
 			Channels         int               `json:"channels"`
 			Tags             map[string]string `json:"tags"`
 			Disposition      map[string]int    `json:"disposition"`
+			StartTime        string            `json:"start_time"`
 		} `json:"streams"`
 		Chapters []struct {
 			Index int `json:"index"`
@@ -104,13 +107,18 @@ func ProbeSourceDetails(ctx context.Context, ffprobePath, filePath string) (Sour
 			}
 		}
 		bitDepth := parseBitDepth(st.BitsPerRawSample, st.BitsPerSample, st.PixFmt)
+		var startTime *float64
+		if v, err := strconv.ParseFloat(st.StartTime, 64); err == nil && isFiniteQuality(v) {
+			startTime = &v
+		}
 		out = append(out, SourceStream{
 			Index: st.Index, TypeIndex: typeIdx, Kind: kind, Codec: norm(st.CodecName),
 			Language: lang, Title: title, Channels: st.Channels, Disposition: st.Disposition,
-			Width: st.Width, Height: st.Height, BitDepth: bitDepth, PixelFormat: norm(st.PixFmt), Profile: strings.TrimSpace(st.Profile),
+			StartTime: startTime,
+			Width:     st.Width, Height: st.Height, BitDepth: bitDepth, PixelFormat: norm(st.PixFmt), Profile: strings.TrimSpace(st.Profile),
 		})
 	}
-	return SourceProbe{Streams: out, DurationSec: duration, Chapters: len(probe.Chapters)}, nil
+	return SourceProbe{Path: filePath, Streams: out, DurationSec: duration, Chapters: len(probe.Chapters)}, nil
 }
 
 // parseBitDepth resolves the video bit depth from ffprobe fields, falling back
@@ -155,12 +163,13 @@ func anyToString(v any) string {
 }
 
 type StreamAction struct {
-	Kind        string `json:"kind"`
-	SourceIndex int    `json:"source_index"`
-	TypeIndex   int    `json:"type_index"`
-	Codec       string `json:"codec"`
-	TargetCodec string `json:"target_codec"`
-	BitrateKbps int    `json:"bitrate_kbps,omitempty"`
+	Disposition map[string]int `json:"disposition,omitempty"`
+	Kind        string         `json:"kind"`
+	SourceIndex int            `json:"source_index"`
+	TypeIndex   int            `json:"type_index"`
+	Codec       string         `json:"codec"`
+	TargetCodec string         `json:"target_codec"`
+	BitrateKbps int            `json:"bitrate_kbps,omitempty"`
 }
 type ExecutionPlan struct {
 	Plan        *transcode.Plan              `json:"plan"`
@@ -185,7 +194,7 @@ func BuildExecutionPlan(plan *transcode.Plan, streams []SourceStream, duration f
 			ep.Streams = append(ep.Streams, StreamAction{Kind: "video", SourceIndex: s.Index, TypeIndex: s.TypeIndex, Codec: s.Codec, TargetCodec: plan.VideoCodec})
 		case "audio":
 			target, bitrate := transcode.AudioTarget(plan.AudioMode, s.Codec, s.Channels)
-			ep.Streams = append(ep.Streams, StreamAction{Kind: "audio", SourceIndex: s.Index, TypeIndex: s.TypeIndex, Codec: s.Codec, TargetCodec: target, BitrateKbps: bitrate})
+			ep.Streams = append(ep.Streams, StreamAction{Kind: "audio", SourceIndex: s.Index, TypeIndex: s.TypeIndex, Codec: s.Codec, TargetCodec: target, BitrateKbps: bitrate, Disposition: s.Disposition})
 			if target != "copy" {
 				ep.Conversions = append(ep.Conversions, transcode.ConversionRecord{StreamType: "audio", StreamIndex: s.TypeIndex, FromCodec: s.Codec, ToCodec: target, Reason: "compact audio requested; AAC at bounded bitrate, preserving channels and language (lossy)"})
 			}

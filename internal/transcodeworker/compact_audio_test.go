@@ -67,7 +67,7 @@ func TestCompactAudioMain10RealEncode(t *testing.T) {
 	dir := t.TempDir()
 	source := filepath.Join(dir, "source.mkv")
 	candidate := filepath.Join(dir, "candidate.mkv")
-	args := []string{"-nostdin", "-v", "error", "-f", "lavfi", "-i", "nullsrc=size=320x180:rate=24:duration=1,format=yuv420p10le,geq=lum='64+mod(X+3*Y,877)':cb=512:cr=512", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1", "-f", "lavfi", "-i", "sine=frequency=880:sample_rate=48000:duration=1", "-map", "0:v", "-map", "1:a", "-map", "2:a", "-c:v", "ffv1", "-c:a", "flac", "-ac", "2", "-metadata:s:a:0", "language=eng", "-metadata:s:a:1", "language=jpn", source}
+	args := []string{"-nostdin", "-v", "error", "-f", "lavfi", "-i", "nullsrc=size=320x180:rate=24:duration=12,format=yuv420p10le,geq=lum='64+mod(X+3*Y,877)':cb=512:cr=512", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=12", "-f", "lavfi", "-i", "sine=frequency=880:sample_rate=48000:duration=12", "-map", "0:v", "-map", "1:a", "-map", "2:a", "-c:v", "ffv1", "-c:a", "flac", "-ac", "2", "-metadata:s:a:0", "language=eng", "-metadata:s:a:1", "language=jpn", "-disposition:a:0", "0", "-disposition:a:1", "default", source}
 	if out, err := exec.Command(ffmpeg, args...).CombinedOutput(); err != nil {
 		t.Fatalf("fixture: %v %s", err, out)
 	}
@@ -107,6 +107,24 @@ func TestCompactAudioMain10RealEncode(t *testing.T) {
 	if len(ep.Conversions) != 2 {
 		t.Fatalf("missing conversion evidence: %+v", ep.Conversions)
 	}
+	w := NewWorker(&WorkerConfig{StateDir: dir, FFmpeg: ffmpeg, FFprobe: ffprobe})
+	if err := w.validateAudioPackets(context.Background(), plan, source, candidate, probe, result); err != nil {
+		t.Fatal(err)
+	}
+	for _, filter := range []string{"atrim=duration=0.3", "asetpts=PTS+0.6/TB"} {
+		broken := filepath.Join(t.TempDir(), "broken.mkv")
+		out, err := exec.Command(ffmpeg, "-nostdin", "-v", "error", "-i", candidate, "-map", "0", "-c:v", "copy", "-c:a", "aac", "-af", filter, broken).CombinedOutput()
+		if err != nil {
+			t.Fatalf("damaged fixture: %v %s", err, out)
+		}
+		badProbe, err := ProbeSourceDetails(context.Background(), ffprobe, broken)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := w.validateAudioPackets(context.Background(), plan, source, broken, probe, badProbe); err == nil {
+			t.Fatalf("accepted %s", filter)
+		}
+	}
 }
 
 func TestNative10BitRealQualityProbe(t *testing.T) {
@@ -124,5 +142,22 @@ func TestNative10BitRealQualityProbe(t *testing.T) {
 	}
 	if !caps.Native10Bit || !caps.CAMBIFullRef || caps.ProbeError != "" {
 		t.Fatalf("native 10-bit executable probe failed: %+v", caps)
+	}
+}
+
+func TestCompactAudioDispositionValidation(t *testing.T) {
+	plan := &transcode.Plan{AudioMode: "compact"}
+	src := []SourceStream{{Kind: "audio", Codec: "dts", Channels: 2, Language: "eng", Disposition: map[string]int{"default": 1, "comment": 0}}}
+	cand := []SourceStream{{Kind: "audio", Codec: "aac", Channels: 2, Language: "eng", Disposition: map[string]int{"default": 0, "comment": 0}}}
+	if err := validateAudioPreservation(plan, src, cand); err == nil {
+		t.Fatal("lost default track accepted")
+	}
+	cand[0].Disposition["default"] = 1
+	if err := validateAudioPreservation(plan, src, cand); err != nil {
+		t.Fatal(err)
+	}
+	cand[0].Disposition["comment"] = 1
+	if err := validateAudioPreservation(plan, src, cand); err == nil {
+		t.Fatal("invented commentary flag accepted")
 	}
 }

@@ -7,26 +7,29 @@ import (
 	"github.com/jakenesler/navigatorr/action"
 	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/optimization"
 )
 
 type benchmarkSummary struct {
-	Outcome            string                            `json:"outcome"`
-	Message            string                            `json:"message"`
-	NextStep           string                            `json:"next_step"`
-	ProgressScope      string                            `json:"progress_scope"`
-	PreviousRounds     []string                          `json:"previous_unsuccessful_actions,omitempty"`
-	ProposedCandidates []transcode.BenchmarkCandidate    `json:"proposed_candidates,omitempty"`
-	ProposedQuality    *transcode.BenchmarkQualityConfig `json:"proposed_quality,omitempty"`
-	ProposedSamples    []transcode.BenchmarkSampleWindow `json:"proposed_samples,omitempty"`
-	Rejected           []benchmarkRejection              `json:"rejected,omitempty"`
-	Audio              []benchmarkAudio                  `json:"planned_audio,omitempty"`
-	AudioNote          string                            `json:"audio_note,omitempty"`
+	Selection          *optimization.SelectionExplanation `json:"selection,omitempty"`
+	Outcome            string                             `json:"outcome"`
+	Message            string                             `json:"message"`
+	NextStep           string                             `json:"next_step"`
+	ProgressScope      string                             `json:"progress_scope"`
+	PreviousRounds     []string                           `json:"previous_unsuccessful_actions,omitempty"`
+	ProposedCandidates []transcode.BenchmarkCandidate     `json:"proposed_candidates,omitempty"`
+	ProposedQuality    *transcode.BenchmarkQualityConfig  `json:"proposed_quality,omitempty"`
+	ProposedSamples    []transcode.BenchmarkSampleWindow  `json:"proposed_samples,omitempty"`
+	Rejected           []benchmarkRejection               `json:"rejected,omitempty"`
+	Audio              []benchmarkAudio                   `json:"planned_audio,omitempty"`
+	AudioNote          string                             `json:"audio_note,omitempty"`
 }
 
 type benchmarkRejection struct {
-	CandidateID         string           `json:"candidate_id"`
-	Checks              []benchmarkCheck `json:"checks"`
-	ReviewSourceSeconds *float64         `json:"review_source_seconds,omitempty"`
+	FailedSamples       []transcode.BenchmarkSampleFailure `json:"failed_samples,omitempty"`
+	CandidateID         string                             `json:"candidate_id"`
+	Checks              []benchmarkCheck                   `json:"checks"`
+	ReviewSourceSeconds *float64                           `json:"review_source_seconds,omitempty"`
 }
 
 type benchmarkCheck struct {
@@ -102,13 +105,39 @@ func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
 	var evidence []transcode.BenchmarkCandidateQualityEvidence
 	var request transcode.BenchmarkRequest
 	benchmarkField(res, "benchmark_quality", &evidence)
-	benchmarkField(res, "benchmark_request", &request)
+	hasRequest := benchmarkField(res, "benchmark_request", &request)
 	if decision != nil {
+		s.Selection = decision.Selection
+		// Historical decisions can be explained from their immutable request.
+		if s.Selection == nil && hasRequest && decision.DecisionReason == optimization.ReasonTargetReachedSmallestSize && decision.Winner != nil {
+			tolerance := optimization.DefaultVMAFPolicy().Tolerance()
+			var thresholds *transcode.BenchmarkQualityThresholds
+			if decision.Winner.MetricType == "ssim" {
+				tolerance = optimization.DefaultSSIMPolicy().Tolerance()
+			}
+			if request.Quality != nil {
+				thresholds = request.Quality.VMAF
+				if decision.Winner.MetricType == "ssim" {
+					thresholds = request.Quality.SSIM
+				}
+			}
+			if thresholds != nil && thresholds.MarginalTolerance != nil {
+				tolerance = *thresholds.MarginalTolerance
+			}
+			var candidates []optimization.EvaluatedCandidate
+			for _, c := range decision.Evaluations {
+				candidates = append(candidates, optimization.EvaluatedCandidate{CandidateID: c.CandidateID, Eligible: c.Eligible, TargetReached: c.TargetReached, Score: c.Score})
+			}
+			s.Selection = optimization.ExplainTargetSelection(candidates, tolerance)
+		}
+		if s.Selection != nil && s.Outcome == "selected" {
+			s.Message = "Selected the smallest estimated file among target-reaching candidates within the configured quality margin of the best score. Sampled video is not a guarantee of full-file or audio quality."
+		}
 		for _, ev := range decision.Evaluations {
 			if ev.Eligible || len(s.Rejected) >= transcode.MaxBenchmarkCandidates {
 				continue
 			}
-			r := benchmarkRejection{CandidateID: ev.CandidateID}
+			r := benchmarkRejection{CandidateID: ev.CandidateID, FailedSamples: ev.FailedSamples}
 			for _, q := range evidence {
 				if q.CandidateID != ev.CandidateID {
 					continue
