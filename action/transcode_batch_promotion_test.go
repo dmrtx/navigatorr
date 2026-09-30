@@ -5,12 +5,104 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 
+	"github.com/jakenesler/navigatorr/arrservice"
+	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/store"
 )
+
+func TestBatchPromotionLimitsAdmissionsAcrossExternalWaits(t *testing.T) {
+	for _, parallelism := range []int{1, 2} {
+		t.Run(fmt.Sprint(parallelism), func(t *testing.T) {
+			st := setupTestStore(t)
+			var rescans atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/api/v3/command" {
+					t.Errorf("unexpected final rescan call: %s %s", r.Method, r.URL.Path)
+				}
+				rescans.Add(1)
+				_ = json.NewEncoder(w).Encode(promotionCommandResponse{ID: 1, Status: "completed"})
+			}))
+			defer server.Close()
+			cfg := &config.Config{AllowDestructive: true, Services: map[string]config.ServiceConfig{"sonarr": {URL: server.URL, APIVersion: "/api/v3"}}}
+			e := NewEngine(EngineDeps{Store: st, Config: cfg, Registry: arrservice.NewRegistry(cfg)})
+			var calls atomic.Int32
+			var complete atomic.Bool
+			e.RegisterTemplate(ActionTemplate{Name: "promote_transcode_candidate", AutoReconcile: true, ImmutableInputs: true,
+				Steps: []StepDefinition{{Name: "external_import", Run: func(_ context.Context, ec *ExecutionContext) (StepResult, error) {
+					calls.Add(1)
+					if complete.Load() {
+						return StepResult{Status: StepCompleted}, nil
+					}
+					return promoteWait("Sonarr import is pending")
+				}}}})
+			plan := &batchPromotionPlan{BatchID: "bounded-promotions", SeriesID: 1, Digest: "approved-plan"}
+			for i := 0; i < 5; i++ {
+				plan.Members = append(plan.Members, batchPromotionMember{ItemKey: fmt.Sprint(i), SourceAction: fmt.Sprintf("source-%d", i)})
+			}
+			if err := st.CreateActionInstance(store.ActionInstance{ID: plan.BatchID, ActionName: "transcode_batch", Status: StatusWaitingExternal, CurrentStep: 2,
+				InputsJSON: toJSON(map[string]any{"series_id": 1, "promote_candidates": true, "promotion_parallelism": parallelism}),
+				StateJSON:  toJSON(map[string]any{"batch_promotion_plan": plan, "batch_promotion_approved": true})}); err != nil {
+				t.Fatal(err)
+			}
+			// Resume a legacy import at the end of the plan before admitting
+			// earlier queued members; plan order must not hide an occupied slot.
+			if r, err := e.Run(context.Background(), "promote_transcode_candidate", map[string]any{
+				"transcode_action_id": "source-4", "series_id": 1, "service": "sonarr",
+				"batch_promote_parent_id": plan.BatchID, "batch_promote_item_key": "4", "batch_promote_digest": plan.Digest,
+			}); err != nil || r.Status != StatusWaitingExternal {
+				t.Fatalf("legacy import fixture: %+v %v", r, err)
+			}
+			resume := func() *ActionResult {
+				t.Helper()
+				r, err := e.Resume(context.Background(), plan.BatchID, "", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return r
+			}
+			for pass := 0; pass < 2; pass++ {
+				before := calls.Load()
+				r := resume()
+				children, err := st.ListActionInstances("", 100)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if r.Status != StatusWaitingExternal || calls.Load()-before != int32(parallelism) || len(children) != parallelism+1 {
+					t.Fatalf("external waits exceeded promotion slots: status=%s calls=%d children=%d", r.Status, calls.Load()-before, len(children)-1)
+				}
+				p := r.Outputs["batch_promotion"].(map[string]any)
+				if p["pending"] != 5 {
+					t.Fatalf("unadmitted candidates must remain pending: %+v", p)
+				}
+			}
+			// Rebuild the coordinator and complete the admitted imports. Later
+			// passes must fill released slots without duplicating child actions.
+			complete.Store(true)
+			tmpl, _ := e.GetTemplate("promote_transcode_candidate")
+			e = NewEngine(e.Deps())
+			e.RegisterTemplate(tmpl)
+			var r *ActionResult
+			for i := 0; i < 10; i++ {
+				r = resume()
+				if r.Status == StatusCompleted {
+					break
+				}
+			}
+			children, err := st.ListActionInstances("", 100)
+			if err != nil || r.Status != StatusCompleted || len(children) != 6 || rescans.Load() != 1 {
+				t.Fatalf("batch did not finish idempotently: status=%s children=%d err=%v", r.Status, len(children), err)
+			}
+		})
+	}
+}
 
 func setupApprovedPromotionBatch(t *testing.T) (*promotionHarness, string) {
 	t.Helper()

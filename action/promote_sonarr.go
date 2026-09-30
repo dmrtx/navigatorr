@@ -284,10 +284,18 @@ func promotionUncertain(sentAt, reason string) (StepResult, error) {
 }
 
 func (e *Engine) promotionCommand(ctx context.Context, ec *ExecutionContext, p *promotionState, svc *arrservice.Service, key string, payload map[string]any, retryConfirmedFailure bool) (StepResult, error) {
-	cmd := p.Commands[key]
+	return e.promotionCommandWithSave(ctx, svc, p.Commands, key, payload, retryConfirmedFailure, func() error {
+		return e.savePromotion(ctx, ec, p)
+	})
+}
+
+// Both a file promotion and its batch coordinator persist command intent before
+// submitting it, and reconcile a lost response without duplicating the command.
+func (e *Engine) promotionCommandWithSave(ctx context.Context, svc *arrservice.Service, commands map[string]*promotionCommand, key string, payload map[string]any, retryConfirmedFailure bool, save func() error) (StepResult, error) {
+	cmd := commands[key]
 	if cmd == nil {
 		cmd = &promotionCommand{}
-		p.Commands[key] = cmd
+		commands[key] = cmd
 	}
 	if cmd.Done {
 		return StepResult{Status: StepCompleted}, nil
@@ -299,12 +307,12 @@ func (e *Engine) promotionCommand(ctx context.Context, ec *ExecutionContext, p *
 		// This step previously returned failed, so only explicit action_retry
 		// re-enters here. Reconcile its observed effect before this helper.
 		cmd = &promotionCommand{}
-		p.Commands[key] = cmd
+		commands[key] = cmd
 	}
 	var response promotionCommandResponse
 	if cmd.SentAt == "" {
 		cmd.SentAt, cmd.Payload = time.Now().UTC().Format(time.RFC3339Nano), payload
-		if err := e.savePromotion(ctx, ec, p); err != nil {
+		if err := save(); err != nil {
 			return promoteFailed(err)
 		}
 		body, err := json.Marshal(payload)
@@ -321,7 +329,7 @@ func (e *Engine) promotionCommand(ctx context.Context, ec *ExecutionContext, p *
 			return promotionUncertain(cmd.SentAt, "Sonarr command response did not identify the accepted command")
 		}
 		cmd.ID = response.ID
-		if err := e.savePromotion(ctx, ec, p); err != nil {
+		if err := save(); err != nil {
 			return promoteFailed(err)
 		}
 	} else if cmd.ID > 0 {
@@ -348,20 +356,20 @@ func (e *Engine) promotionCommand(ctx context.Context, ec *ExecutionContext, p *
 		}
 		response = *found
 		cmd.ID = response.ID
-		if err := e.savePromotion(ctx, ec, p); err != nil {
+		if err := save(); err != nil {
 			return promoteFailed(err)
 		}
 	}
 	switch promotionCommandState(response) {
 	case "completed":
 		cmd.Done = true
-		if err := e.savePromotion(ctx, ec, p); err != nil {
+		if err := save(); err != nil {
 			return promoteFailed(err)
 		}
 		return StepResult{Status: StepCompleted}, nil
 	case "failed", "aborted", "cancelled":
 		cmd.Failed = true
-		if err := e.savePromotion(ctx, ec, p); err != nil {
+		if err := save(); err != nil {
 			return promoteFailed(err)
 		}
 		return promoteFailed(fmt.Errorf("Sonarr %s command %d failed; recovery copy retained", key, cmd.ID))

@@ -29,10 +29,39 @@ type BatchSummary struct {
 }
 
 type batchPromotionSummary struct {
-	Eligible int  `json:"eligible"`
-	Promoted int  `json:"promoted"`
-	Pending  int  `json:"pending"`
-	Approved bool `json:"approved"`
+	Eligible              int    `json:"eligible"`
+	Promoted              int    `json:"promoted"`
+	Pending               int    `json:"pending"`
+	Approved              bool   `json:"approved"`
+	LastObservationErrors int    `json:"last_observation_errors"`
+	CountsNote            string `json:"counts_note"`
+}
+
+func compactBatchPromotion(res *action.ActionResult) *batchPromotionSummary {
+	raw, exists := res.Outputs["batch_promotion"]
+	if !exists {
+		raw = res.State["batch_promotion"]
+	}
+	p, ok := raw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	// Project scalar counts before applying the size guard. A long error list
+	// must not erase the entire promotion summary or enter compact responses.
+	fields := compactOperationalFields(&action.ActionResult{Outputs: p}, []string{"eligible", "promoted", "pending", "approved"})
+	encoded, err := json.Marshal(fields)
+	var result batchPromotionSummary
+	if err != nil || json.Unmarshal(encoded, &result) != nil {
+		return nil
+	}
+	switch failures := p["failed"].(type) {
+	case []string:
+		result.LastObservationErrors = len(failures)
+	case []any:
+		result.LastObservationErrors = len(failures)
+	}
+	result.CountsNote = "Last saved coordinator observation; child actions may have advanced. Error details: action_detail(section=state,key=batch_promotion)."
+	return &result
 }
 
 func compactBatch(res *action.ActionResult) *BatchSummary {
@@ -40,12 +69,11 @@ func compactBatch(res *action.ActionResult) *BatchSummary {
 		return nil
 	}
 	// Project only known fields, never serialize raw items or ephemeral recipes.
-	fields := compactOperationalFields(res, []string{"series_title", "dry_run", "counts", "batch_promotion", "batch_promotion_approved", "cancel_requested", "batch_selection", "batch_evidence"})
+	fields := compactOperationalFields(res, []string{"series_title", "dry_run", "counts", "batch_promotion_approved", "cancel_requested", "batch_selection", "batch_evidence"})
 	var data struct {
 		Title           string                           `json:"series_title"`
 		DryRun          bool                             `json:"dry_run"`
 		Counts          BatchSummary                     `json:"counts"`
-		Promotion       *batchPromotionSummary           `json:"batch_promotion"`
 		Approved        bool                             `json:"batch_promotion_approved"`
 		CancelRequested bool                             `json:"cancel_requested"`
 		Selection       *action.BatchSelection           `json:"batch_selection"`
@@ -56,7 +84,7 @@ func compactBatch(res *action.ActionResult) *BatchSummary {
 		return nil
 	}
 	result := data.Counts
-	result.Title, result.DryRun, result.Promotion = data.Title, data.DryRun, data.Promotion
+	result.Title, result.DryRun, result.Promotion = data.Title, data.DryRun, compactBatchPromotion(res)
 	result.Selection, result.SampleEvidence = data.Selection, data.SampleEvidence
 	if result.Promotion != nil && data.Approved {
 		result.Promotion.Approved = true

@@ -46,6 +46,42 @@ func TestCompactBatchReportsLibraryOutcome(t *testing.T) {
 	}
 }
 
+func TestCompactBatchExposesInterruptedPromotionObservation(t *testing.T) {
+	for _, status := range []string{action.StatusRunning, action.StatusWaitingExternal, action.StatusFailed} {
+		t.Run(status, func(t *testing.T) {
+			failures := make([]string, 17)
+			for i := range failures {
+				failures[i] = "epfile: context canceled " + strings.Repeat("private-details", 100)
+			}
+			r := &action.ActionResult{ActionName: "transcode_batch", Status: status,
+				State: map[string]any{"batch_promotion_approved": true},
+				Outputs: map[string]any{"counts": map[string]int{"total": 20, "completed": 19, "failed": 1},
+					"batch_promotion": map[string]any{"eligible": 19, "promoted": 0, "pending": 2, "failed": failures}}}
+			// Match action_status reading JSON from SQLite, including []any
+			// error arrays and numeric counts decoded as float64.
+			persisted, err := json.Marshal(r)
+			if err != nil || json.Unmarshal(persisted, r) != nil {
+				t.Fatal("could not round-trip persisted action")
+			}
+			summary := toCompactSummary(r)
+			if summary.Batch == nil || summary.Batch.Promotion == nil {
+				t.Fatalf("promotion observation omitted: %+v", summary.Batch)
+			}
+			p := summary.Batch.Promotion
+			if p.LastObservationErrors != 17 || p.Pending != 2 || !p.Approved || summary.Batch.Failed != 1 {
+				t.Fatalf("promotion attempts confused with failed encodes: %+v", summary.Batch)
+			}
+			if !strings.Contains(p.CountsNote, "Last saved") || !strings.Contains(p.CountsNote, "action_detail") {
+				t.Fatalf("missing snapshot scope or error discovery: %+v", p)
+			}
+			encoded, err := json.Marshal(summary)
+			if err != nil || len(encoded) > 2048 || strings.Contains(string(encoded), "private-details") {
+				t.Fatalf("unbounded promotion summary: %d bytes %v", len(encoded), err)
+			}
+		})
+	}
+}
+
 func TestContextEffectivePolicyDoesNotRepeatSeededDefault(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "context.db"))
 	if err != nil {

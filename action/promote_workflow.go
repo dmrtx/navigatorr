@@ -136,7 +136,10 @@ func (e *Engine) stepPromoteRemoveOld(ctx context.Context, ec *ExecutionContext)
 			return promoteFailed(err)
 		}
 		if _, err := os.Lstat(old.Path); err == nil {
-			if err := e.verifyPromotionHash(ctx, old.Path, p.OriginalSHA); err != nil {
+			// NAS metadata can still report the inode after Sonarr has removed
+			// it. A missing original needs only record reconciliation; every
+			// other integrity error must continue to block deletion.
+			if err := e.verifyPromotionHash(ctx, old.Path, p.OriginalSHA); err != nil && !os.IsNotExist(err) {
 				return promoteFailed(err)
 			}
 		} else if !os.IsNotExist(err) {
@@ -178,17 +181,21 @@ func (e *Engine) stepPromoteRemoveOld(ctx context.Context, ec *ExecutionContext)
 			if _, err := e.promotionPath(p.OriginalPath, true); err != nil {
 				return promoteFailed(err)
 			}
-			if err := e.verifyPromotionHash(ctx, p.OriginalPath, p.OriginalSHA); err != nil {
+			if err := e.verifyPromotionHash(ctx, p.OriginalPath, p.OriginalSHA); os.IsNotExist(err) {
+				// The optional orphan disappeared after discovery. Do not issue
+				// a remove against a pathname that could now contain a new file.
+			} else if err != nil {
 				return promoteFailed(err)
-			}
-			if err := e.savePromotion(ctx, ec, p); err != nil {
-				return promoteFailed(err)
-			}
-			if err := ctx.Err(); err != nil {
-				return promoteFailed(err)
-			}
-			if err := os.Remove(p.OriginalPath); err != nil {
-				return promoteFailed(err)
+			} else {
+				if err := e.savePromotion(ctx, ec, p); err != nil {
+					return promoteFailed(err)
+				}
+				if err := ctx.Err(); err != nil {
+					return promoteFailed(err)
+				}
+				if err := os.Remove(p.OriginalPath); err != nil && !os.IsNotExist(err) {
+					return promoteFailed(err)
+				}
 			}
 		} else if !os.IsNotExist(err) {
 			return promoteFailed(err)
@@ -314,6 +321,12 @@ func (e *Engine) stepPromoteRescan(ctx context.Context, ec *ExecutionContext) (S
 	p, svc, err := e.promotionMutation(ec)
 	if err != nil {
 		return promoteFailed(err)
+	}
+	if getString(ec.Inputs, "batch_promote_parent_id") != "" {
+		// Scanning the series while a sibling's original is still present can
+		// make Sonarr adopt that original again. The batch scans once, only
+		// after every approved candidate has reached its verified final path.
+		return StepResult{Status: StepCompleted, Outputs: map[string]any{"rescan_deferred_to_batch": true}}, nil
 	}
 	return e.promotionCommand(ctx, ec, p, svc, "rescan", map[string]any{"name": "RescanSeries", "seriesId": p.SeriesID}, true)
 }
