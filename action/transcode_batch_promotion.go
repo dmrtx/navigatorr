@@ -287,6 +287,13 @@ func mustPromotionTemplate(e *Engine) ActionTemplate {
 }
 
 func (e *Engine) verifyBatchPromotionApproval(ec *ExecutionContext, p *promotionState) error {
+	return e.verifyBatchPromotionApprovalState(ec, p, false)
+}
+
+// A failed coordinator retains its approved plan. Explicit recovery of an
+// already approved child can validate that plan while new approvals remain
+// blocked. Cancellation and revoked or changed plans always remain blocked.
+func (e *Engine) verifyBatchPromotionApprovalState(ec *ExecutionContext, p *promotionState, allowFailedParent bool) error {
 	parentID := strings.TrimSpace(getString(ec.Inputs, "batch_promote_parent_id"))
 	itemKey := strings.TrimSpace(getString(ec.Inputs, "batch_promote_item_key"))
 	digest := strings.TrimSpace(getString(ec.Inputs, "batch_promote_digest"))
@@ -294,7 +301,7 @@ func (e *Engine) verifyBatchPromotionApproval(ec *ExecutionContext, p *promotion
 		return fmt.Errorf("batch promotion approval link is incomplete")
 	}
 	parent, err := e.deps.Store.GetActionInstance(parentID)
-	if err != nil || parent == nil || parent.ActionName != "transcode_batch" || parent.Status == StatusFailed || parent.Status == StatusCancelled {
+	if err != nil || parent == nil || parent.ActionName != "transcode_batch" || (parent.Status == StatusFailed && (!allowFailedParent || !p.Approved)) || parent.Status == StatusCancelled {
 		return fmt.Errorf("approved parent batch is unavailable")
 	}
 	var state, inputs map[string]any
