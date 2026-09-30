@@ -329,6 +329,9 @@ func (e *Engine) retry(ctx context.Context, instanceID string, guard func(*store
 	if err != nil {
 		return nil, err
 	}
+	if err := e.preparePromotionRetry(ctx, inst, ec, tmpl, resumeStep); err != nil {
+		return nil, err
+	}
 	inst.StateJSON, inst.OutputsJSON = toJSON(ec.State), toJSON(ec.Outputs)
 
 	inst.CurrentStep = resumeStep
