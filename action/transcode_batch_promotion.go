@@ -158,26 +158,62 @@ func (e *Engine) stepTranscodeBatchPromote(ctx context.Context, ec *ExecutionCon
 		Err    error
 	}
 	outcomes := make([]promotionOutcome, len(plan.Members))
-	sem := make(chan struct{}, parallelism)
-	var wg sync.WaitGroup
+	type promotionWork struct {
+		Index  int
+		Member batchPromotionMember
+		Prior  *store.ActionInstance
+		Inputs map[string]any
+	}
+	active, queued := []promotionWork{}, []promotionWork{}
 	for i, member := range plan.Members {
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(i int, member batchPromotionMember) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			key := "promote:sonarr:" + member.SourceAction
-			prior, err := e.deps.Store.FindActionByIdempotencyKey("promote_transcode_candidate", key)
-			if err != nil {
-				outcomes[i] = promotionOutcome{member, nil, err}
-				return
+		key := "promote:sonarr:" + member.SourceAction
+		prior, err := e.deps.Store.FindActionByIdempotencyKey("promote_transcode_candidate", key)
+		if err != nil {
+			outcomes[i] = promotionOutcome{member, nil, err}
+			continue
+		}
+		inputs := map[string]any{"transcode_action_id": member.SourceAction, "series_id": plan.SeriesID, "service": "sonarr", "batch_promote_parent_id": ec.InstanceID, "batch_promote_item_key": member.ItemKey, "batch_promote_digest": plan.Digest}
+		work := promotionWork{i, member, prior, inputs}
+		// Unadmitted members are still pending, but must not each start a
+		// multi-GB recovery copy in this pass. Finish existing imports first.
+		outcomes[i] = promotionOutcome{member, &ActionResult{Status: StatusPending}, nil}
+		if prior == nil || prior.Status == StatusPending {
+			queued = append(queued, work)
+			continue
+		}
+		if prior.Status == StatusFailed && prior.CurrentStep == 0 {
+			// existingPromotion can safely retry a validation-only failure.
+			// It is an execution too, so keep it inside the per-pass budget.
+			active = append(active, work)
+			continue
+		}
+		result, err := e.existingPromotion(ctx, prior, mustPromotionTemplate(e), inputs)
+		outcomes[i] = promotionOutcome{member, result, err}
+		if err == nil && result != nil {
+			switch result.Status {
+			case StatusWaitingDecision, StatusWaitingExternal, StatusRunning:
+				active = append(active, work)
 			}
-			inputs := map[string]any{"transcode_action_id": member.SourceAction, "series_id": plan.SeriesID, "service": "sonarr", "batch_promote_parent_id": ec.InstanceID, "batch_promote_item_key": member.ItemKey, "batch_promote_digest": plan.Digest}
+		}
+	}
+	// Bound the whole pass, not just simultaneous goroutines. Otherwise every
+	// external wait releases a slot and a season-long pass blocks the next
+	// reconciler sweep from noticing already completed Sonarr commands.
+	work := append(active, queued...)
+	if len(work) > parallelism {
+		work = work[:parallelism]
+	}
+	var wg sync.WaitGroup
+	for _, item := range work {
+		wg.Add(1)
+		go func(item promotionWork) {
+			defer wg.Done()
 			var result *ActionResult
-			if prior == nil {
-				result, err = e.Run(ctx, "promote_transcode_candidate", inputs)
+			var err error
+			if item.Prior == nil {
+				result, err = e.Run(ctx, "promote_transcode_candidate", item.Inputs)
 			} else {
-				result, err = e.existingPromotion(ctx, prior, mustPromotionTemplate(e), inputs)
+				result, err = e.existingPromotion(ctx, item.Prior, mustPromotionTemplate(e), item.Inputs)
 				if err == nil && result != nil {
 					switch result.Status {
 					case StatusWaitingDecision:
@@ -187,8 +223,8 @@ func (e *Engine) stepTranscodeBatchPromote(ctx context.Context, ec *ExecutionCon
 					}
 				}
 			}
-			outcomes[i] = promotionOutcome{member, result, err}
-		}(i, member)
+			outcomes[item.Index] = promotionOutcome{item.Member, result, err}
+		}(item)
 	}
 	wg.Wait()
 	completed := 0
@@ -219,7 +255,30 @@ func (e *Engine) stepTranscodeBatchPromote(ctx context.Context, ec *ExecutionCon
 	if pending > 0 {
 		return StepResult{Status: StepWaitingExternal, WaitingCondition: "batch_promotion", WaitingReason: fmt.Sprintf("Promoting %d verified candidates; %d completed", len(plan.Members), completed), Outputs: map[string]any{"batch_promotion": progress}}, nil
 	}
-	return StepResult{Status: StepCompleted, Outputs: map[string]any{"batch_promotion": progress}}, nil
+	res, err := e.batchPromotionRescan(ctx, ec, plan.SeriesID)
+	res.Outputs = map[string]any{"batch_promotion": progress}
+	return res, err
+}
+
+func (e *Engine) batchPromotionRescan(ctx context.Context, ec *ExecutionContext, seriesID int) (StepResult, error) {
+	commands := map[string]*promotionCommand{}
+	if raw := ec.State["batch_promotion_commands"]; raw != nil {
+		data, err := json.Marshal(raw)
+		if err != nil {
+			return promoteFailed(err)
+		}
+		if err := json.Unmarshal(data, &commands); err != nil || commands == nil {
+			return promoteFailed(fmt.Errorf("unreadable persisted batch promotion commands"))
+		}
+	}
+	svc, err := e.promotionService(&promotionState{Service: "sonarr"})
+	if err != nil {
+		return promoteFailed(err)
+	}
+	return e.promotionCommandWithSave(ctx, svc, commands, "rescan", map[string]any{"name": "RescanSeries", "seriesId": seriesID}, true, func() error {
+		ec.State["batch_promotion_commands"] = commands
+		return e.persistExecutionState(ctx, ec)
+	})
 }
 
 func mustPromotionTemplate(e *Engine) ActionTemplate {

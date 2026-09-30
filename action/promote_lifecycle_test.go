@@ -8,6 +8,107 @@ import (
 	"testing"
 )
 
+func TestPromotionRemoveOldToleratesOriginalDisappearingBeforeHash(t *testing.T) {
+	for _, oldRecordRetained := range []bool{true, false} {
+		name := "orphaned_original"
+		if oldRecordRetained {
+			name = "old_record_retained"
+		}
+		t.Run(name, func(t *testing.T) {
+			h := newPromotionHarness(t)
+			h.dropImportResponse = true // Suspend after adoption, before old-file cleanup.
+			r := h.resume(h.run().ID, "approve")
+			h.mu.Lock() // The dropped response can precede the handler's return.
+			imports := h.imports
+			if !oldRecordRetained {
+				delete(h.files, 101)
+			}
+			h.mu.Unlock()
+			if r.Status != StatusWaitingExternal || imports != 1 {
+				t.Fatalf("import fixture: %s %s", r.Status, r.Error)
+			}
+			// A NAS pathname cache reports the original at discovery, but
+			// Sonarr's completed removal becomes visible when hashing opens it.
+			stale, err := os.Lstat(h.original)
+			if err != nil {
+				t.Fatal(err)
+			}
+			disappeared := false
+			h.engine.promotionLstatHook = func(path string) (os.FileInfo, error) {
+				if path == h.original {
+					if !disappeared {
+						disappeared = true
+						if err := os.Remove(path); err != nil {
+							t.Fatal(err)
+						}
+					}
+					return stale, nil
+				}
+				return os.Lstat(path)
+			}
+			r = h.finish(r)
+			if !disappeared || r.Status != StatusCompleted {
+				t.Fatalf("original disappearance blocked promotion: %s %s", r.Status, r.Error)
+			}
+			wantDeletes := 0
+			if oldRecordRetained {
+				wantDeletes = 1
+			}
+			if h.imports != 1 || h.deletes != wantDeletes || h.renames != 1 || h.rescans != 1 {
+				t.Fatalf("unexpected mutations: import=%d delete=%d rename=%d rescan=%d", h.imports, h.deletes, h.renames, h.rescans)
+			}
+			p, err := loadPromotion(&ExecutionContext{State: r.State})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := h.engine.verifyPromotionHash(context.Background(), h.final, p.CandidateSHA); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestPromotionRemoveOldRejectsChangedOrUnreadableOriginal(t *testing.T) {
+	for _, failure := range []string{"changed", "permission_denied"} {
+		t.Run(failure, func(t *testing.T) {
+			h := newPromotionHarness(t)
+			h.dropImportResponse = true
+			r := h.resume(h.run().ID, "approve")
+			h.mu.Lock()
+			delete(h.files, 101) // The original remains as an optional orphan.
+			h.mu.Unlock()
+			wantError := "SHA-256 changed"
+			if failure == "changed" {
+				if err := os.WriteFile(h.original, []byte("unapproved original"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				wantError = "permission denied"
+				h.engine.promotionLstatHook = func(path string) (os.FileInfo, error) {
+					if path == h.original {
+						return nil, &os.PathError{Op: "lstat", Path: path, Err: os.ErrPermission}
+					}
+					return os.Lstat(path)
+				}
+			}
+			r = h.finish(r)
+			if r.Status != StatusFailed || !strings.Contains(r.Error, wantError) || h.deletes != 0 || h.renames != 0 {
+				t.Fatalf("unsafe cleanup: %s %s deletes=%d renames=%d", r.Status, r.Error, h.deletes, h.renames)
+			}
+			p, err := loadPromotion(&ExecutionContext{State: r.State})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := h.engine.verifyPromotionHash(context.Background(), p.BackupPath, p.OriginalSHA); err != nil {
+				t.Fatalf("recovery lost after blocked cleanup: %v", err)
+			}
+			if _, err := os.Stat(h.original); err != nil {
+				t.Fatalf("unverified original removed: %v", err)
+			}
+		})
+	}
+}
+
 func TestPromotionFinalizeRejectsUnrelatedTemporaryPath(t *testing.T) {
 	h := newPromotionHarness(t)
 	h.adoptedPathOverride = filepath.Join(filepath.Dir(h.candidate), "unrelated.mkv")
