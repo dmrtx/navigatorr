@@ -50,7 +50,7 @@ func (e *Engine) preparePromotionRetry(ctx context.Context, inst *store.ActionIn
 		}
 	}
 	if getString(ec.Inputs, "batch_promote_parent_id") != "" {
-		if err := e.verifyBatchPromotionApproval(ec, p); err != nil {
+		if err := e.verifyBatchPromotionApprovalState(ec, p, true); err != nil {
 			return err
 		}
 	}
