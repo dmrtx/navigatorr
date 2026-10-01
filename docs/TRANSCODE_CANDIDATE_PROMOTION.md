@@ -94,6 +94,25 @@ Different candidates for the same old Sonarr file cannot promote concurrently;
 the durable original-file reservation remains with its original promotion if an
 outcome needs recovery.
 
+Promotions also reserve the whole Sonarr series until completion, across clients
+and restarts. Independent promotions wait before preservation/import; approved
+batch children share their parent's reservation and defer their rescan to that
+parent. This prevents one promotion's series-wide rescan from discarding a
+sibling's temporary file association. A failed or cancelled owner with submitted
+side effects retains the reservation; a standalone owner stopped before its
+first import can release it safely.
+
+An explicit retry can recover a rescan that readopted the unchanged original
+under a new file ID. It verifies the prior import command is completed with the
+recorded payload, the exact approved episode set, the original and candidate
+hashes, and the retained recovery copy. It also requires the previous candidate
+record to be absent and no deletion to have been submitted. Only then can it
+record the previous intent in recovery history and prepare a new import. Missing
+or uncertain commands, changed content and ambiguous associations block recovery.
+A crash between preparation and checkpoint advancement resumes that saved
+intent. A rediscovered candidate already in the final path is reconciled without
+another import.
+
 These workflows are covered with a fake Sonarr server and temporary physical
 files, including approval, multiple episodes per file, source/candidate changes,
 lost import responses, ambiguous command histories, old-ID drift, failed rename

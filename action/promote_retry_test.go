@@ -10,13 +10,38 @@ import (
 	"github.com/jakenesler/navigatorr/store"
 )
 
-func rediscoveredPromotionFixture(t *testing.T, checkpoint int) (*promotionHarness, *ActionResult) {
+func rediscoveredPromotionFixture(t *testing.T, checkpoint int, batch ...bool) (*promotionHarness, *ActionResult) {
 	t.Helper()
 	h := newPromotionHarness(t)
+	var batchID string
+	if len(batch) > 0 && batch[0] {
+		h, batchID = setupApprovedPromotionBatch(t)
+		if _, err := h.engine.Resume(context.Background(), batchID, "", nil); err != nil {
+			t.Fatal(err)
+		}
+		parent, _ := h.st.GetActionInstance(batchID)
+		ec := parseExecutionContext(parent, h.engine)
+		ec.State["batch_promotion_approved"] = true
+		parent.StateJSON = toJSON(ec.State)
+		if err := h.st.UpdateActionInstance(*parent); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if checkpoint == 5 {
 		h.renameFailures = 1
 	}
-	r := h.resume(h.run().ID, "approve")
+	var r *ActionResult
+	if batchID == "" {
+		r = h.resume(h.run().ID, "approve")
+	} else {
+		parent, _ := h.st.GetActionInstance(batchID)
+		plan := getBatchPromotionPlan(parseExecutionContext(parent, h.engine).State["batch_promotion_plan"])
+		var err error
+		r, err = h.engine.Run(context.Background(), "promote_transcode_candidate", map[string]any{"transcode_action_id": "source-transcode", "series_id": 1, "batch_promote_parent_id": batchID, "batch_promote_item_key": "epfile-101", "batch_promote_digest": plan.Digest})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	if r.Status != StatusWaitingExternal || r.CurrentStep != 4 {
 		t.Fatalf("expected completed import and issued deletion: %+v", r)
 	}
@@ -152,7 +177,12 @@ func seedFailedPromotionParent(t *testing.T, h *promotionHarness, failed *Action
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan := &batchPromotionPlan{BatchID: "failed-approved-parent", SeriesID: p.SeriesID, Digest: "approved-digest",
+	parentID := getString(ec.Inputs, "batch_promote_parent_id")
+	if parentID == "" {
+		t.Fatal("batch recovery fixture must own its series reservation from admission")
+	}
+	digest := getString(ec.Inputs, "batch_promote_digest")
+	plan := &batchPromotionPlan{BatchID: parentID, SeriesID: p.SeriesID, Digest: digest,
 		Members: []batchPromotionMember{{ItemKey: "epfile-101", SourceAction: p.SourceActionID, OriginalPath: p.OriginalPath, CandidatePath: p.CandidatePath, CandidateSHA: p.CandidateSHA}}}
 	status, approved := StatusFailed, true
 	switch problem {
@@ -165,17 +195,14 @@ func seedFailedPromotionParent(t *testing.T, h *promotionHarness, failed *Action
 	case "changed_candidate":
 		plan.Members[0].CandidateSHA = "changed-candidate"
 	}
-	if err := h.st.CreateActionInstance(store.ActionInstance{ID: plan.BatchID, ActionName: "transcode_batch", Status: status, CurrentStep: 2,
+	if err := h.st.UpdateActionInstance(store.ActionInstance{ID: plan.BatchID, ActionName: "transcode_batch", Status: status, CurrentStep: 2,
 		InputsJSON: toJSON(map[string]any{"series_id": p.SeriesID, "promote_candidates": true}),
 		StateJSON:  toJSON(map[string]any{"batch_promotion_plan": plan, "batch_promotion_approved": approved})}); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: plan.BatchID, ItemKey: "epfile-101", Status: "completed", ChildActionID: p.SourceActionID, CandidatePath: p.CandidatePath}); err != nil {
-		t.Fatal(err)
-	}
 	ec.Inputs["batch_promote_parent_id"] = plan.BatchID
 	ec.Inputs["batch_promote_item_key"] = "epfile-101"
-	ec.Inputs["batch_promote_digest"] = "approved-digest"
+	ec.Inputs["batch_promote_digest"] = digest
 	inst.InputsJSON = toJSON(ec.Inputs)
 	if err := h.st.UpdateActionInstance(*inst); err != nil {
 		t.Fatal(err)
@@ -187,7 +214,7 @@ func seedFailedPromotionParent(t *testing.T, h *promotionHarness, failed *Action
 }
 
 func TestPromotionRetryRecoversAlreadyApprovedChildOfFailedBatch(t *testing.T) {
-	h, failed := rediscoveredPromotionFixture(t, 5)
+	h, failed := rediscoveredPromotionFixture(t, 5, true)
 	seedFailedPromotionParent(t, h, failed, "")
 	h.restart()
 	r, err := h.engine.Retry(context.Background(), failed.ID)
@@ -203,7 +230,7 @@ func TestPromotionRetryRecoversAlreadyApprovedChildOfFailedBatch(t *testing.T) {
 func TestPromotionRetryRejectsCancelledOrChangedParentApproval(t *testing.T) {
 	for _, problem := range []string{"cancelled", "revoked", "changed_digest", "changed_candidate"} {
 		t.Run(problem, func(t *testing.T) {
-			h, failed := rediscoveredPromotionFixture(t, 4)
+			h, failed := rediscoveredPromotionFixture(t, 4, true)
 			seedFailedPromotionParent(t, h, failed, problem)
 			if r, err := h.engine.Retry(context.Background(), failed.ID); err == nil {
 				t.Fatalf("unsafe parent approval was accepted: %+v", r)

@@ -149,7 +149,12 @@ func (h *promotionHarness) serve(w http.ResponseWriter, r *http.Request) {
 			f.Path = h.candidate
 		}
 		write(f)
-	case r.Method == "DELETE" && r.URL.Path == "/api/v3/episodefile/101":
+	case r.Method == "DELETE" && strings.HasPrefix(r.URL.Path, "/api/v3/episodefile/"):
+		id, _ := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/api/v3/episodefile/"))
+		if _, exists := h.files[id]; !exists {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		for _, ep := range h.episodes {
 			if ep.EpisodeFileID != 202 {
 				h.t.Errorf("DELETE before episode %d adopted candidate", ep.ID)
@@ -160,7 +165,7 @@ func (h *promotionHarness) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		h.deletes++
 		h.mutationOrder = append(h.mutationOrder, "delete")
-		delete(h.files, 101)
+		delete(h.files, id)
 		_ = os.Remove(h.original)
 		write(map[string]any{})
 	case r.Method == "GET" && r.URL.Path == "/api/v3/command":
@@ -699,7 +704,7 @@ func TestPromotionDifferentCandidatesCannotClaimSameOriginal(t *testing.T) {
 		t.Fatalf("first submit: %s %s", first.Status, first.Error)
 	}
 	second = h.resume(second.ID, "approve")
-	if second.Status != StatusFailed || !strings.Contains(second.Error, "reserved") || h.imports != 1 {
+	if second.Status != StatusWaitingExternal || second.CurrentStep != 2 || h.imports != 1 {
 		t.Fatalf("original reservation bypassed: %s %s imports=%d", second.Status, second.Error, h.imports)
 	}
 }

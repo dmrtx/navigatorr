@@ -240,6 +240,9 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		return StepResult{Status: StepFailed, Error: err.Error()}, nil
 	}
 	if len(rep.Video) > 0 {
+		if hasProfileConfig && (ephemeralProfile.Video.Profile != "" || ephemeralProfile.Video.PixelFormat != "") && preserveBitDepth && plan.ExpectedBitDepth > 0 && (rep.Video[0].BitDepth == 8 || rep.Video[0].BitDepth == 10) && plan.ExpectedBitDepth != rep.Video[0].BitDepth {
+			return StepResult{Status: StepFailed, Error: fmt.Sprintf("profile_config requests %d-bit output for a %d-bit source; set preserve_source_bit_depth=false to use the requested conversion", plan.ExpectedBitDepth, rep.Video[0].BitDepth)}, nil
+		}
 		if err := preserveSourceBitDepth(plan, rep.Video[0].BitDepth, preserveBitDepth); err != nil {
 			return StepResult{Status: StepFailed, Error: fmt.Sprintf("resolving transcode profile %q: %v", profile, err)}, nil
 		}

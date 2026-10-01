@@ -40,6 +40,19 @@ func TestBuildBenchmarkCandidatesLibX265(t *testing.T) {
 	}
 }
 
+func TestLibX265BenchmarkUsesResolvedMain10OnEightBitSource(t *testing.T) {
+	base := &transcode.Plan{VideoCodec: transcode.VideoCodecLibX265, Quality: 20, Preset: "medium", Tune: "animation", VideoProfile: "main10", PixelFormat: "yuv420p10le", ExpectedBitDepth: 10}
+	candidates, err := buildBenchmarkCandidates(base, 8, &recipe.SearchPolicy{MaxCandidates: 3, QualityValues: []int{18, 20, 22}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range candidates {
+		if c.VideoProfile != "main10" || c.PixelFormat != "yuv420p10le" || c.Preset != "medium" || c.Tune != "animation" {
+			t.Fatalf("x265 experiment was changed to source shape: %+v", c)
+		}
+	}
+}
+
 func TestBuildBenchmarkCandidatesVideoToolboxUnchanged(t *testing.T) {
 	base := &transcode.Plan{VideoCodec: transcode.VideoCodecHEVCVideoToolbox, Quality: 65}
 	srch := &recipe.SearchPolicy{MaxCandidates: 5, QualityValues: []int{60, 65, 70}}

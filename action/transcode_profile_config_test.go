@@ -1,11 +1,63 @@
 package action
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/jakenesler/navigatorr/transcode"
 )
+
+func TestBenchmarkExplicitMain10RequiresOptOutAndReachesWorkerUnchanged(t *testing.T) {
+	for _, optOut := range []bool{false, true} {
+		t.Run(map[bool]string{false: "conflicting_default", true: "explicit_conversion"}[optOut], func(t *testing.T) {
+			var submitted *transcode.BenchmarkRequest
+			mock := &mockTranscodeExecutor{
+				benchmarkSubmitFunc: func(_ context.Context, req transcode.BenchmarkRequest) (transcode.BenchmarkJob, error) {
+					submitted = &req
+					return transcode.BenchmarkJob{ID: req.ID}, nil
+				},
+				benchmarkStatusFunc: func(_ context.Context, id string) (transcode.BenchmarkStatus, error) {
+					return transcode.BenchmarkStatus{ProtocolVersion: transcode.WorkerProtocolVersion, ID: id, Status: transcode.StatusRunning}, nil
+				},
+			}
+			e, _, path, _ := setupBenchmarkTestEnv(t, mock, standard8BitProbeJSON, nil)
+			profile := testEphemeralBatchProfileConfig()
+			video := profile["video"].(map[string]any)
+			video["codec"], video["profile"], video["pixel_format"] = "hevc_videotoolbox", "main10", "p010le"
+			delete(video, "preset")
+			delete(video, "tune")
+			video["quality"] = 65
+			profile["optimization"] = map[string]any{"enabled": true, "search": map[string]any{"quality_values": []int{65}, "max_candidates": 1}}
+			inputs := map[string]any{"path": path, "profile_config": profile}
+			if optOut {
+				inputs["preserve_source_bit_depth"] = false
+			}
+			r, err := e.Run(context.Background(), "benchmark_transcode", inputs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !optOut {
+				if r.Status != StatusFailed || !strings.Contains(r.Error, "preserve_source_bit_depth=false") || submitted != nil {
+					t.Fatalf("explicit Main10 silently changed: %+v", r)
+				}
+				return
+			}
+			if r.Status != StatusWaitingExternal || submitted == nil || len(submitted.Candidates) != 1 {
+				t.Fatalf("Main10 benchmark not submitted: %+v", r)
+			}
+			for _, candidate := range submitted.Candidates {
+				if candidate.VideoProfile != "main10" || candidate.PixelFormat != "p010le" {
+					t.Fatalf("worker received changed Main10 settings: %+v", candidate)
+				}
+			}
+			plan := getPlan(r.State["plan"])
+			if plan == nil || plan.ExpectedBitDepth != 10 {
+				t.Fatalf("plan lost actual 10-bit output: %+v", plan)
+			}
+		})
+	}
+}
 
 func TestValidateTranscodeInputsRejectsIgnoredKnobs(t *testing.T) {
 	e := NewEngine(EngineDeps{})

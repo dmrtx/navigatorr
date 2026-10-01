@@ -20,7 +20,7 @@ import (
 )
 
 // SchemaVersion is the current schema revision. Migrations run in order.
-const SchemaVersion = 6
+const SchemaVersion = 7
 
 // MaxPreferenceValueLen bounds a stored preference value. Values ride into
 // memory_get/memory_list/get_context verbatim, so one huge blob would tax
@@ -330,6 +330,13 @@ var migrations = []migration{
 			expires_at_ms INTEGER NOT NULL)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_action_promotion_idempotency ON action_instances(action_name, idempotency_key)
 		 WHERE action_name='promote_transcode_candidate' AND idempotency_key != ''`,
+	}},
+	{version: 7, statements: []string{
+		`CREATE TABLE IF NOT EXISTS promotion_series_claims (
+			service TEXT NOT NULL,
+			series_id INTEGER NOT NULL,
+			owner_action_id TEXT NOT NULL REFERENCES action_instances(id),
+			PRIMARY KEY(service, series_id))`,
 	}},
 }
 

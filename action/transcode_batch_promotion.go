@@ -261,6 +261,9 @@ func (e *Engine) stepTranscodeBatchPromote(ctx context.Context, ec *ExecutionCon
 }
 
 func (e *Engine) batchPromotionRescan(ctx context.Context, ec *ExecutionContext, seriesID int) (StepResult, error) {
+	if err := e.claimPromotionSeries(ec, "sonarr", seriesID); err != nil {
+		return promoteFailed(err)
+	}
 	commands := map[string]*promotionCommand{}
 	if raw := ec.State["batch_promotion_commands"]; raw != nil {
 		data, err := json.Marshal(raw)
