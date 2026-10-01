@@ -1049,7 +1049,11 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 		}
 	}
 
-	if err := validateWorkerCapabilitiesForBenchmark(caps, metric, bitDepth, planCodec); err != nil {
+	qualityBitDepth := bitDepth
+	if plan.ExpectedBitDepth > qualityBitDepth {
+		qualityBitDepth = plan.ExpectedBitDepth
+	}
+	if err := validateWorkerCapabilitiesForBenchmark(caps, metric, qualityBitDepth, planCodec); err != nil {
 		return nil, err
 	}
 
@@ -1076,6 +1080,7 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 	}
 
 	req := &transcode.BenchmarkRequest{
+		Allow8BitTo10Bit:        bitDepth == 8 && plan.ExpectedBitDepth == 10 && !getBool(ec.Inputs, "preserve_source_bit_depth"),
 		ProtocolVersion:         transcode.WorkerProtocolVersion,
 		ID:                      benchJobID,
 		SourcePath:              cleanPath,
@@ -1097,6 +1102,9 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 			return nil, fmt.Errorf("worker does not support compact audio; upgrade the worker before benchmarking")
 		}
 		req.AudioMode = "compact"
+	}
+	if req.Allow8BitTo10Bit && !caps.ExplicitMain10Benchmarks {
+		return nil, fmt.Errorf("worker does not support explicit 8-bit to Main10 benchmarks; upgrade the worker before benchmarking")
 	}
 	if err := transcode.ValidateBenchmarkRequest(req); err != nil {
 		return nil, fmt.Errorf("validating benchmark request: %w", err)

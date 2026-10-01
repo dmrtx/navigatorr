@@ -283,6 +283,9 @@ type BenchmarkSampleWindow struct {
 // It is strictly versioned and does NOT accept candidate output paths or replace_original parameters,
 // making original media mutation completely impossible.
 type BenchmarkRequest struct {
+	// Allow8BitTo10Bit is an explicit experiment opt-in, never an automatic
+	// optimization. Quality measurement must use an explicit native-depth model.
+	Allow8BitTo10Bit          bool                        `json:"allow_8bit_to_10bit,omitempty"`
 	AudioMode                 string                      `json:"audio_mode,omitempty"`
 	ProtocolVersion           int                         `json:"protocol_version"`
 	ID                        string                      `json:"id"`
@@ -404,6 +407,9 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 	}
 
 	normMetric := strings.ToLower(strings.TrimSpace(req.Metric))
+	if req.Allow8BitTo10Bit && (normMetric != "vmaf" || req.Quality == nil || req.Quality.VMAF == nil || req.Quality.VMAF.Model == "") {
+		return errors.New("explicit 8-bit to Main10 benchmark requires VMAF with an explicit native-depth model")
+	}
 	if normMetric != "vmaf" && normMetric != "ssim" && normMetric != "both" && normMetric != "vmaf+ssim" {
 		return fmt.Errorf("invalid metric %q: must be explicit enum 'vmaf', 'ssim', or 'both'", req.Metric)
 	}

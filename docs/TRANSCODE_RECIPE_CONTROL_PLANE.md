@@ -131,6 +131,13 @@ and do not require recipe synchronization.
 
 ## MCP action input parsing
 
+Explicit 8-bit to Main10 experiments require `preserve_source_bit_depth: false`,
+an explicit `main10`/`p010le` profile, and an explicit native-depth VMAF model.
+The coordinator sends `allow_8bit_to_10bit: true` only for this resolved shape.
+The worker must advertise `explicit_main10_benchmarks` and prove native 10-bit
+VMAF/CAMBI support. The opt-in is persisted in the worker request identity;
+automatic upconversion and 10-bit to 8-bit downgrades remain prohibited.
+
 `action_run.inputs` and `action_resume.inputs` are JSON object strings and
 fail closed. Malformed JSON, arrays, scalars, and `null` are rejected explicitly
 instead of being treated as omitted inputs. `action_catalog` exposes

@@ -31,6 +31,7 @@ const (
 
 // BenchmarkRecord represents the persistent state stored in benchmark.json on the worker.
 type BenchmarkRecord struct {
+	Allow8BitTo10Bit          bool                                  `json:"allow_8bit_to_10bit,omitempty"`
 	AudioMode                 string                                `json:"audio_mode,omitempty"`
 	ProtocolVersion           int                                   `json:"protocol_version"`
 	ID                        string                                `json:"id"`
@@ -419,6 +420,7 @@ func (w *Worker) BenchmarkSubmit(ctx context.Context, req transcode.BenchmarkReq
 	}
 
 	record := &BenchmarkRecord{
+		Allow8BitTo10Bit:          req.Allow8BitTo10Bit,
 		ProtocolVersion:           transcode.WorkerProtocolVersion,
 		ID:                        req.ID,
 		Status:                    "queued",

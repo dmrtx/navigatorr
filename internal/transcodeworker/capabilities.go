@@ -143,12 +143,13 @@ func ProbeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratch
 func probeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratchRoot string, probeQuality bool) (transcode.WorkerCapabilities, error) {
 	ver, commit := GetBuildMetadata()
 	caps := transcode.WorkerCapabilities{
-		ProtocolVersion: transcode.WorkerProtocolVersion,
-		WorkerVersion:   ver,
-		BuildGitCommit:  commit,
-		FFmpegPath:      ffmpegPath,
-		Encoders:        make(map[string]bool),
-		Filters:         make(map[string]bool),
+		ExplicitMain10Benchmarks: true,
+		ProtocolVersion:          transcode.WorkerProtocolVersion,
+		WorkerVersion:            ver,
+		BuildGitCommit:           commit,
+		FFmpegPath:               ffmpegPath,
+		Encoders:                 make(map[string]bool),
+		Filters:                  make(map[string]bool),
 	}
 
 	// 1. Probe FFmpeg version
