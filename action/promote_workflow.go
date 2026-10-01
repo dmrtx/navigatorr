@@ -23,6 +23,7 @@ func (e *Engine) stepPromoteImport(ctx context.Context, ec *ExecutionContext) (S
 		_, adopted, err := e.promotionAdopted(ctx, svc, p)
 		if err == nil && adopted {
 			cmd.Done = true
+			delete(ec.State, "promotion_reimport_pending")
 			if err := e.savePromotion(ctx, ec, p); err != nil {
 				return promoteFailed(err)
 			}
@@ -70,6 +71,7 @@ func (e *Engine) stepPromoteImport(ctx context.Context, ec *ExecutionContext) (S
 	if !adopted {
 		return promoteFailed(fmt.Errorf("Sonarr import completed without adopting the candidate for every approved episode; recovery retained"))
 	}
+	delete(ec.State, "promotion_reimport_pending")
 	if err := e.savePromotion(ctx, ec, p); err != nil {
 		return promoteFailed(err)
 	}

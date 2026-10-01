@@ -101,7 +101,31 @@ func (e *Engine) savePromotion(ctx context.Context, ec *ExecutionContext, p *pro
 }
 
 func promoteFailed(err error) (StepResult, error) {
+	if _, busy := err.(*promotionBusyError); busy {
+		return promoteWait(err.Error())
+	}
 	return StepResult{Status: StepFailed, Error: err.Error()}, nil
+}
+
+type promotionBusyError struct{}
+
+func (*promotionBusyError) Error() string {
+	return "Waiting for the other promotion of this Sonarr series to finish or be recovered"
+}
+
+func (e *Engine) claimPromotionSeries(ec *ExecutionContext, service string, seriesID int) error {
+	owner := ec.InstanceID
+	if parent := getString(ec.Inputs, "batch_promote_parent_id"); parent != "" {
+		owner = parent
+	}
+	claimed, err := e.deps.Store.ClaimPromotionSeries(service, seriesID, owner)
+	if err != nil {
+		return err
+	}
+	if !claimed {
+		return &promotionBusyError{}
+	}
+	return nil
 }
 
 func promoteWait(reason string) (StepResult, error) {
@@ -128,6 +152,9 @@ func (e *Engine) promotionMutation(ec *ExecutionContext) (*promotionState, *arrs
 	}
 	if e.deps.Fs == nil {
 		return nil, nil, fmt.Errorf("filesystem resolver is required")
+	}
+	if err := e.claimPromotionSeries(ec, p.Service, p.SeriesID); err != nil {
+		return nil, nil, err
 	}
 	svc, err := e.promotionService(p)
 	return p, svc, err

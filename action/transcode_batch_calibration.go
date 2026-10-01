@@ -270,6 +270,9 @@ func (e *Engine) ensureSharedBatchCalibration(ctx context.Context, ec *Execution
 	for _, item := range selected {
 		idempotencyKey := fmt.Sprintf("batch-calibration-%s-%s", ec.InstanceID, item.ItemKey)
 		inputs := map[string]any{"path": item.FilePath, "profile_config": profile, "metric": "vmaf", "replace_original": false, "surface_worker_busy": true, "parent_action_id": ec.InstanceID}
+		if preserve, ok := ec.Inputs["preserve_source_bit_depth"]; ok {
+			inputs["preserve_source_bit_depth"] = preserve
+		}
 		var result *ActionResult
 		var err error
 		prior, lookupErr := e.deps.Store.FindActionByIdempotencyKey("benchmark_transcode", idempotencyKey)

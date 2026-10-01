@@ -72,6 +72,13 @@ bit depth is preserved by default even when an older recipe resolves a
 different profile/pixel format. A caller must set
 `preserve_source_bit_depth: false` explicitly to opt into that conversion; the
 resolved plan and digest still record the actual profile and pixel format used.
+This option is supported by `benchmark_transcode`, `transcode_media`, and
+`transcode_batch`. For a Main10 experiment on an 8-bit source, set
+`preserve_source_bit_depth: false` and verify that the action's resolved plan
+and benchmark candidates report `main10` and 10 bits before interpreting the
+metrics. The metric's measurement bit depth alone does not prove a 10-bit encode.
+An explicit `profile_config` that conflicts with source preservation is rejected
+with this instruction rather than silently changing the requested experiment.
 
 A successful experiment can be persisted with `recipe_save`, copying the
 normalized profile returned by the action. The MCP schema exposes `profile`

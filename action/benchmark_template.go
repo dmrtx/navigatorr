@@ -24,7 +24,7 @@ func (e *Engine) registerBenchmarkTemplate() {
 		Version:         1,
 		Description:     "Test bounded video samples without modifying media or creating a final file. Read benchmark.outcome and next_step, not just status/progress. No winner is a search outcome, not proof of an encoder fault. After two no-winner rounds for the same source bytes, another round requires an explicit review decision, even with a different recipe/action ID. Do not automatically chain CRF ladders or lower thresholds. Benchmarks estimate audio size but do not encode audio.",
 		RequiredInputs:  []string{"path"},
-		OptionalInputs:  []string{"profile", "profile_config", "metric", "replace_original", "surface_worker_busy", "parent_action_id"},
+		OptionalInputs:  []string{"profile", "profile_config", "preserve_source_bit_depth", "metric", "replace_original", "surface_worker_busy", "parent_action_id"},
 		Destructive:     false,
 		Steps: []StepDefinition{
 			{Name: "preflight", Description: "Inspect source, hash original, resolve profile and optimization policy", Run: e.stepTranscodePreflight},
@@ -622,11 +622,27 @@ func buildBenchmarkCandidates(basePlan *transcode.Plan, bitDepth int, srch *reci
 	if srch == nil {
 		return nil, fmt.Errorf("search policy is required to build benchmark candidates (fail closed)")
 	}
+	// Source depth controls metric safety; the resolved plan controls the encode.
+	// Otherwise an explicitly requested Main10 experiment on an 8-bit source
+	// would still be submitted as Main, even with preservation disabled.
+	targetDepth := bitDepth
+	if basePlan.ExpectedBitDepth != 0 {
+		targetDepth = basePlan.ExpectedBitDepth
+	}
+	if targetDepth != 8 && targetDepth != 10 {
+		return nil, fmt.Errorf("unsupported output bit depth %d", targetDepth)
+	}
 	targetProf := "main"
 	targetPix := "yuv420p"
-	if bitDepth == 10 {
+	if targetDepth == 10 {
 		targetProf = "main10"
 		targetPix = "p010le"
+	}
+	if basePlan.VideoProfile != "" {
+		targetProf = basePlan.VideoProfile
+	}
+	if basePlan.PixelFormat != "" {
+		targetPix = basePlan.PixelFormat
 	}
 
 	normCodec := transcode.NormalizeVideoCodec(basePlan.VideoCodec)

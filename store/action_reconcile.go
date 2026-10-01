@@ -89,3 +89,36 @@ func (s *Store) ClaimPromotionOriginal(service string, episodeFileID int, action
 	err := s.db.QueryRow(`SELECT action_id FROM promotion_original_claims WHERE service=? AND episode_file_id=?`, service, episodeFileID).Scan(&owner)
 	return owner == actionID, err
 }
+
+// ClaimPromotionSeries coordinates the whole promotion, including external
+// waits and the final series-wide rescan. Batch children share their parent's
+// reservation. Failed or cancelled owners retain it when Sonarr side effects
+// may need recovery. A standalone action stopped before its first import can
+// safely release the series; its original-file reservation remains intact.
+func (s *Store) ClaimPromotionSeries(service string, seriesID int, actionID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	service = strings.ToLower(strings.TrimSpace(service))
+	if service == "" || seriesID <= 0 || actionID == "" {
+		return false, fmt.Errorf("service, positive series_id, and action_id are required")
+	}
+	_, err := s.db.Exec(`INSERT INTO promotion_series_claims(service, series_id, owner_action_id)
+		VALUES (?, ?, ?) ON CONFLICT(service, series_id) DO UPDATE SET owner_action_id=excluded.owner_action_id
+		WHERE EXISTS (SELECT 1 FROM action_instances WHERE id=promotion_series_claims.owner_action_id AND (
+			status='completed' OR (status IN ('failed','cancelled') AND action_name='promote_transcode_candidate'
+			AND CASE WHEN json_valid(state_json) THEN
+				json_extract(state_json, '$.promotion.approved')=1
+				AND COALESCE(json_extract(state_json, '$.promotion.commands.import.sent_at'), '')=''
+				AND COALESCE(json_extract(state_json, '$.promotion.new_episode_file_id'), 0)=0
+				AND COALESCE(json_extract(state_json, '$.promotion.delete_sent_at'), '')=''
+				AND COALESCE(json_extract(state_json, '$.promotion.old_removed'), 0)=0
+				AND COALESCE(json_array_length(state_json, '$.promotion_reimport_history'), 0)=0
+			ELSE 0 END)))`,
+		service, seriesID, actionID)
+	if err != nil {
+		return false, err
+	}
+	var owner string
+	err = s.db.QueryRow(`SELECT owner_action_id FROM promotion_series_claims WHERE service=? AND series_id=?`, service, seriesID).Scan(&owner)
+	return owner == actionID, err
+}
