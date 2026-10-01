@@ -9,10 +9,23 @@ import (
 )
 
 func TestBenchmarkExplicitMain10RequiresOptOutAndReachesWorkerUnchanged(t *testing.T) {
-	for _, optOut := range []bool{false, true} {
-		t.Run(map[bool]string{false: "conflicting_default", true: "explicit_conversion"}[optOut], func(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		optOut, supported bool
+	}{
+		{"conflicting_default", false, true},
+		{"explicit_conversion", true, true},
+		{"old_worker", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			var submitted *transcode.BenchmarkRequest
 			mock := &mockTranscodeExecutor{
+				capabilitiesFunc: func(ctx context.Context) (transcode.WorkerCapabilities, error) {
+					caps, err := (&mockTranscodeExecutor{}).Capabilities(ctx)
+					caps.ExplicitMain10Benchmarks = tc.supported
+					caps.Quality = &transcode.QualityCapabilities{Native10Bit: true, CAMBIFullRef: true, Models: map[string]transcode.QualityModelCapability{"v1_1080p_3h": {Available: true}}}
+					return caps, err
+				},
 				benchmarkSubmitFunc: func(_ context.Context, req transcode.BenchmarkRequest) (transcode.BenchmarkJob, error) {
 					submitted = &req
 					return transcode.BenchmarkJob{ID: req.ID}, nil
@@ -28,23 +41,32 @@ func TestBenchmarkExplicitMain10RequiresOptOutAndReachesWorkerUnchanged(t *testi
 			delete(video, "preset")
 			delete(video, "tune")
 			video["quality"] = 65
-			profile["optimization"] = map[string]any{"enabled": true, "search": map[string]any{"quality_values": []int{65}, "max_candidates": 1}}
+			profile["optimization"] = map[string]any{"enabled": true, "search": map[string]any{"quality_values": []int{65}, "max_candidates": 1}, "quality": map[string]any{"vmaf": map[string]any{"model": "v1_1080p_3h", "minimum": 88, "target": 92}}}
 			inputs := map[string]any{"path": path, "profile_config": profile}
-			if optOut {
+			if tc.optOut {
 				inputs["preserve_source_bit_depth"] = false
 			}
 			r, err := e.Run(context.Background(), "benchmark_transcode", inputs)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !optOut {
+			if !tc.optOut {
 				if r.Status != StatusFailed || !strings.Contains(r.Error, "preserve_source_bit_depth=false") || submitted != nil {
 					t.Fatalf("explicit Main10 silently changed: %+v", r)
 				}
 				return
 			}
+			if !tc.supported {
+				if r.Status != StatusFailed || !strings.Contains(r.Error, "upgrade the worker") || submitted != nil {
+					t.Fatalf("unsupported worker received conversion request: %+v", r)
+				}
+				return
+			}
 			if r.Status != StatusWaitingExternal || submitted == nil || len(submitted.Candidates) != 1 {
 				t.Fatalf("Main10 benchmark not submitted: %+v", r)
+			}
+			if !submitted.Allow8BitTo10Bit {
+				t.Fatal("explicit Main10 opt-in was not sent to the worker")
 			}
 			for _, candidate := range submitted.Candidates {
 				if candidate.VideoProfile != "main10" || candidate.PixelFormat != "p010le" {

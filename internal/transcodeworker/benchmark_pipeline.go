@@ -201,9 +201,18 @@ func (r *ProductionBenchmarkRunner) runPipelinedEncodeMetrics(
 		normMetric = "vmaf"
 	}
 	runVMAF := normMetric == "vmaf" || normMetric == "both" || normMetric == "vmaf+ssim"
+	if record.Allow8BitTo10Bit && (normMetric != "vmaf" || record.Quality == nil || record.Quality.VMAF == nil || record.Quality.VMAF.Model == "") {
+		return errors.New("explicit 8-bit to Main10 benchmark requires VMAF with an explicit native-depth model")
+	}
+	qualityBitDepth := evidence.SourceBitDepth
+	for _, vc := range vcs {
+		if vc.bitDepth > qualityBitDepth {
+			qualityBitDepth = vc.bitDepth
+		}
+	}
 	needQualityProbe := record.Quality != nil && ((record.Quality.VMAF != nil && record.Quality.VMAF.Model != "") || (record.Quality.Banding != nil && record.Quality.Banding.Enabled))
 	// Native-depth proof is required even when a legacy request omits the model.
-	needQualityProbe = needQualityProbe || (evidence.SourceBitDepth > 8 && runVMAF)
+	needQualityProbe = needQualityProbe || (qualityBitDepth > 8 && runVMAF)
 	caps, err := probeWorkerCapabilitiesWithScratch(ctx, w.ffmpegPath, filepath.Join(w.cfg.StateDir, "quality-probe-scratch"), needQualityProbe)
 	if err != nil {
 		return fmt.Errorf("probing worker capabilities: %w (fail closed)", err)
@@ -255,11 +264,11 @@ func (r *ProductionBenchmarkRunner) runPipelinedEncodeMetrics(
 	}
 
 	// 10-bit media validation, matching sequential runMetrics fail-closed behavior.
-	if evidence.SourceBitDepth > 8 && runVMAF && !caps.SupportsNative10BitQuality() {
-		return fmt.Errorf("worker capability unsupported: source media has bit depth %d (> 8-bit) but worker does not have verified 10-bit VMAF capability; silent 8-bit downconversion is prohibited (fail closed)", evidence.SourceBitDepth)
+	if qualityBitDepth > 8 && runVMAF && !caps.SupportsNative10BitQuality() {
+		return fmt.Errorf("worker capability unsupported: source or candidate media has bit depth %d (> 8-bit) but worker does not have verified 10-bit VMAF capability; silent 8-bit downconversion is prohibited (fail closed)", qualityBitDepth)
 	}
-	if evidence.SourceBitDepth > 8 && runCAMBI && !caps.SupportsNative10BitQuality() {
-		return fmt.Errorf("quality_cambi_native_main10_unverified: native %d-bit source is not eligible for CAMBI (fail closed)", evidence.SourceBitDepth)
+	if qualityBitDepth > 8 && runCAMBI && !caps.SupportsNative10BitQuality() {
+		return fmt.Errorf("quality_cambi_native_main10_unverified: native %d-bit media is not eligible for CAMBI (fail closed)", qualityBitDepth)
 	}
 
 	encodeN, metricN := resolvePipelineConcurrency(record)

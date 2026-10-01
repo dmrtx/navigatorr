@@ -339,7 +339,7 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 	// libx265 candidates fail clearly when the worker FFmpeg lacks libx265.
 	validatedCandidates := make([]validatedCandidate, 0, len(record.Candidates))
 	for candIdx, c := range record.Candidates {
-		prof, pix, bd, err := resolveCandidateBitDepth(&c, sourceBitDepth)
+		prof, pix, bd, err := resolveBenchmarkCandidateBitDepth(&c, sourceBitDepth, record.Allow8BitTo10Bit)
 		if err != nil {
 			return err
 		}
@@ -762,6 +762,13 @@ func candidateFileKey(index int, rawID string, quality int) string {
 		sanitized = sanitized[:16]
 	}
 	return fmt.Sprintf("cand_%d_%s_%s_q%d", index, sanitized, shortHash, quality)
+}
+
+func resolveBenchmarkCandidateBitDepth(c *transcode.BenchmarkCandidate, sourceBitDepth int, allow8BitTo10Bit bool) (profile, pixFmt string, bitDepth int, err error) {
+	if allow8BitTo10Bit && sourceBitDepth == 8 && norm(c.VideoProfile) == "main10" && norm(c.PixelFormat) == "p010le" {
+		return resolveCandidateBitDepth(c, 10)
+	}
+	return resolveCandidateBitDepth(c, sourceBitDepth)
 }
 
 func resolveCandidateBitDepth(c *transcode.BenchmarkCandidate, sourceBitDepth int) (profile, pixFmt string, bitDepth int, err error) {

@@ -38,6 +38,31 @@ func TestValidateBenchmarkRequest_Valid(t *testing.T) {
 	}
 }
 
+func TestExplicitMain10BenchmarkRequiresNativeModelAndChangesIdentity(t *testing.T) {
+	req := validTestBenchmarkRequest()
+	req.Allow8BitTo10Bit = true
+	if err := ValidateBenchmarkRequest(&req); err == nil {
+		t.Fatal("conversion accepted without an explicit native model")
+	}
+	req.Quality = &BenchmarkQualityConfig{VMAF: &BenchmarkQualityThresholds{Model: "v1_1080p_3h", Minimum: 88, Target: 92}}
+	if err := ValidateBenchmarkRequest(&req); err != nil {
+		t.Fatal(err)
+	}
+	approved, err := DigestBenchmarkRequest(&req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Allow8BitTo10Bit = false
+	defaultDigest, err := DigestBenchmarkRequest(&req)
+	if err != nil || defaultDigest == approved {
+		t.Fatal("conversion opt-in was not bound to benchmark identity")
+	}
+	req.Allow8BitTo10Bit, req.Metric = true, "ssim"
+	if err := ValidateBenchmarkRequest(&req); err == nil {
+		t.Fatal("conversion accepted without the native VMAF measurement path")
+	}
+}
+
 func TestValidateBenchmarkRequest_ProtocolMismatch(t *testing.T) {
 	req := validTestBenchmarkRequest()
 	req.ProtocolVersion = WorkerProtocolVersion + 1

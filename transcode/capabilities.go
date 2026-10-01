@@ -60,18 +60,19 @@ type QualityCapabilities struct {
 
 // WorkerCapabilities represents the versioned capability report of a transcode worker node.
 type WorkerCapabilities struct {
-	CompactAudio          bool                           `json:"compact_audio,omitempty"`
-	ProtocolVersion       int                            `json:"protocol_version"`
-	WorkerVersion         string                         `json:"worker_version,omitempty"`
-	BuildGitCommit        string                         `json:"build_git_commit,omitempty"`
-	FFmpegVersion         string                         `json:"ffmpeg_version"`
-	FFmpegPath            string                         `json:"ffmpeg_path,omitempty"`
-	Encoders              map[string]bool                `json:"encoders"`
-	EncoderDetails        map[string]EncoderCapabilities `json:"encoder_details,omitempty"`
-	Filters               map[string]bool                `json:"filters"`
-	Quality               *QualityCapabilities           `json:"quality,omitempty"`
-	ProbeErrors           []ProbeError                   `json:"probe_errors,omitempty"`
-	CapabilityFingerprint string                         `json:"capability_fingerprint,omitempty"`
+	ExplicitMain10Benchmarks bool                           `json:"explicit_main10_benchmarks,omitempty"`
+	CompactAudio             bool                           `json:"compact_audio,omitempty"`
+	ProtocolVersion          int                            `json:"protocol_version"`
+	WorkerVersion            string                         `json:"worker_version,omitempty"`
+	BuildGitCommit           string                         `json:"build_git_commit,omitempty"`
+	FFmpegVersion            string                         `json:"ffmpeg_version"`
+	FFmpegPath               string                         `json:"ffmpeg_path,omitempty"`
+	Encoders                 map[string]bool                `json:"encoders"`
+	EncoderDetails           map[string]EncoderCapabilities `json:"encoder_details,omitempty"`
+	Filters                  map[string]bool                `json:"filters"`
+	Quality                  *QualityCapabilities           `json:"quality,omitempty"`
+	ProbeErrors              []ProbeError                   `json:"probe_errors,omitempty"`
+	CapabilityFingerprint    string                         `json:"capability_fingerprint,omitempty"`
 }
 
 // Fingerprint returns the canonical capability fingerprint.
@@ -99,16 +100,17 @@ func (c WorkerCapabilities) HasComponentError(component string) bool {
 // Machine-specific paths like FFmpegPath are excluded to ensure capability equivalence
 // across different worker nodes with identical capability sets.
 type fingerprintPayload struct {
-	CompactAudio    bool                           `json:"compact_audio,omitempty"`
-	ProtocolVersion int                            `json:"protocol_version"`
-	WorkerVersion   string                         `json:"worker_version,omitempty"`
-	BuildGitCommit  string                         `json:"build_git_commit,omitempty"`
-	FFmpegVersion   string                         `json:"ffmpeg_version"`
-	Encoders        map[string]bool                `json:"encoders"`
-	EncoderDetails  map[string]EncoderCapabilities `json:"encoder_details,omitempty"`
-	Filters         map[string]bool                `json:"filters"`
-	Quality         *QualityCapabilities           `json:"quality,omitempty"`
-	ProbeErrors     []ProbeError                   `json:"probe_errors,omitempty"`
+	ExplicitMain10Benchmarks bool                           `json:"explicit_main10_benchmarks,omitempty"`
+	CompactAudio             bool                           `json:"compact_audio,omitempty"`
+	ProtocolVersion          int                            `json:"protocol_version"`
+	WorkerVersion            string                         `json:"worker_version,omitempty"`
+	BuildGitCommit           string                         `json:"build_git_commit,omitempty"`
+	FFmpegVersion            string                         `json:"ffmpeg_version"`
+	Encoders                 map[string]bool                `json:"encoders"`
+	EncoderDetails           map[string]EncoderCapabilities `json:"encoder_details,omitempty"`
+	Filters                  map[string]bool                `json:"filters"`
+	Quality                  *QualityCapabilities           `json:"quality,omitempty"`
+	ProbeErrors              []ProbeError                   `json:"probe_errors,omitempty"`
 }
 
 // ComputeCapabilityFingerprint returns a deterministic sha256 digest of WorkerCapabilities
@@ -135,16 +137,17 @@ func ComputeCapabilityFingerprint(caps WorkerCapabilities) (string, error) {
 	}
 
 	payload := fingerprintPayload{
-		CompactAudio:    caps.CompactAudio,
-		ProtocolVersion: caps.ProtocolVersion,
-		WorkerVersion:   caps.WorkerVersion,
-		BuildGitCommit:  caps.BuildGitCommit,
-		FFmpegVersion:   caps.FFmpegVersion,
-		Encoders:        caps.Encoders,
-		EncoderDetails:  detCopy,
-		Filters:         caps.Filters,
-		Quality:         caps.Quality,
-		ProbeErrors:     caps.ProbeErrors,
+		ExplicitMain10Benchmarks: caps.ExplicitMain10Benchmarks,
+		CompactAudio:             caps.CompactAudio,
+		ProtocolVersion:          caps.ProtocolVersion,
+		WorkerVersion:            caps.WorkerVersion,
+		BuildGitCommit:           caps.BuildGitCommit,
+		FFmpegVersion:            caps.FFmpegVersion,
+		Encoders:                 caps.Encoders,
+		EncoderDetails:           detCopy,
+		Filters:                  caps.Filters,
+		Quality:                  caps.Quality,
+		ProbeErrors:              caps.ProbeErrors,
 	}
 
 	if len(payload.ProbeErrors) > 1 {
