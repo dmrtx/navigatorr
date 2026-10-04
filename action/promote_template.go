@@ -15,10 +15,10 @@ import (
 // importing any of its outputs.
 func (e *Engine) registerPromoteTranscodeTemplate() {
 	e.RegisterTemplate(ActionTemplate{
-		Name: "promote_transcode_candidate", Version: 1, Destructive: true,
+		Name: "promote_transcode_candidate", Version: 2, Destructive: true,
 		AutoReconcile:   true,
 		ImmutableInputs: true,
-		Description:     "Promotes a completed, validated transcode into Sonarr or Radarr after explicit approval, preserving a verified recovery copy until import, old-file cleanup, rename and rescan are verified. Persists external command intents and never blindly resubmits uncertain imports.",
+		Description:     "Replaces a completed, validated transcode locally with service=filesystem (no library IDs), or promotes it into Sonarr/Radarr, after explicit approval, preserving a verified recovery copy until import, old-file cleanup, rename and rescan are verified. Persists external command intents and never blindly resubmits uncertain imports.",
 		RequiredInputs:  []string{"transcode_action_id"}, OptionalInputs: []string{"service", "series_id", "movie_id", "batch_promote_parent_id", "batch_promote_item_key", "batch_promote_digest"},
 		Steps: []StepDefinition{
 			{Name: "plan_promotion", Description: "Verify original and candidate, and resolve the movie or all episodes sharing the original file", Run: e.stepPromotePlan},
@@ -81,7 +81,7 @@ func loadPromotion(ec *ExecutionContext) (*promotionState, error) {
 	if err := json.Unmarshal(b, p); err != nil {
 		return nil, err
 	}
-	if p.SourceActionID == "" || p.OriginalSHA == "" || p.CandidateSHA == "" || p.OriginalFileID <= 0 || len(p.EpisodeIDs) == 0 {
+	if p.SourceActionID == "" || p.OriginalSHA == "" || p.CandidateSHA == "" || (p.Service != "filesystem" && (p.OriginalFileID <= 0 || len(p.EpisodeIDs) == 0)) {
 		return nil, fmt.Errorf("promotion integrity baseline is missing")
 	}
 	if p.Commands == nil {
@@ -153,6 +153,12 @@ func (e *Engine) promotionMutation(ec *ExecutionContext) (*promotionState, *arrs
 	}
 	if e.deps.Fs == nil {
 		return nil, nil, fmt.Errorf("filesystem resolver is required")
+	}
+	if p.Service == "filesystem" {
+		if err := e.claimPromotionSeries(ec, "filesystem-destination:"+p.NewPath, 1); err != nil {
+			return nil, nil, err
+		}
+		return p, nil, nil
 	}
 	if err := e.claimPromotionSeries(ec, p.Service, p.SeriesID); err != nil {
 		return nil, nil, err

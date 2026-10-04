@@ -112,6 +112,8 @@ func (s *Store) ClaimPromotionSeries(service string, seriesID int, actionID stri
 				AND COALESCE(json_extract(state_json, '$.promotion.new_episode_file_id'), 0)=0
 				AND COALESCE(json_extract(state_json, '$.promotion.delete_sent_at'), '')=''
 				AND COALESCE(json_extract(state_json, '$.promotion.old_removed'), 0)=0
+				AND COALESCE(json_extract(state_json, '$.filesystem_publish_started'), 0)=0
+				AND COALESCE(json_extract(state_json, '$.filesystem_published'), 0)=0
 				AND COALESCE(json_array_length(state_json, '$.promotion_reimport_history'), 0)=0
 			ELSE 0 END)))`,
 		service, seriesID, actionID)

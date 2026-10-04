@@ -336,11 +336,59 @@ summary {
 }
 .job-row {
   display: grid;
-  grid-template-columns: 1fr 170px 100px;
+  grid-template-columns: minmax(0, 1fr) minmax(150px, 210px);
   align-items: center;
   gap: 20px;
   padding: 22px 0;
   border-bottom: 1px solid var(--line);
+}
+.operations-panel {
+  margin-top: 24px;
+}
+.savings-dashboard {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 22px;
+  padding-bottom: 22px;
+  margin-bottom: 22px;
+  border-bottom: 1px solid var(--line);
+}
+.savings-dashboard strong {
+  display: block;
+  margin: 8px 0;
+  font:
+    30px Georgia,
+    serif;
+  color: var(--forest);
+}
+.job-actions {
+  grid-column: 1/-1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.job-actions button {
+  padding: 8px 12px;
+  font-size: 12px;
+}
+.savings-line {
+  color: var(--forest);
+}
+.savings-history-row {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+.batch-item-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+.batch-item-row > span:first-child {
+  flex: 1;
+  min-width: 180px;
 }
 .job-row h3 {
   margin: 0 0 4px;
@@ -481,7 +529,7 @@ footer {
     display: none;
   }
   .job-row {
-    grid-template-columns: 1fr 100px;
+    grid-template-columns: 1fr;
   }
   .job-progress {
     grid-column: 1/-1;
@@ -516,6 +564,10 @@ footer {
   }
   .field-grid {
     grid-template-columns: 1fr;
+  }
+  .savings-dashboard {
+    grid-template-columns: 1fr;
+    gap: 18px;
   }
   .section-label {
     font-size: 10px;

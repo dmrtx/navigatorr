@@ -60,7 +60,7 @@
                 <span>01 / ORIGEN</span><span id="library-total"></span>
               </div>
               <div class="toolbar">
-                <label>Biblioteca<select id="service"></select></label
+                <label>Origen<select id="service"></select></label
                 ><label class="grow"
                   >Buscar<input
                     id="search"
@@ -71,7 +71,7 @@
               <div class="breadcrumbs">
                 <button id="back" class="quiet" hidden>← Biblioteca</button
                 ><span id="selection-title"
-                  >Selecciona una película o serie</span
+                  >Selecciona una carpeta o un título</span
                 >
               </div>
               <div id="library-items" class="library-items"></div>
@@ -80,7 +80,7 @@
                 ><button id="library-next">Siguiente →</button>
               </div>
               <details class="file-browser">
-                <summary>Explorar carpetas y archivos</summary>
+                <summary>Ruta manual e inspección</summary>
                 <div class="toolbar">
                   <select id="root" aria-label="Carpeta permitida"></select
                   ><button id="browse-root">Abrir</button>
@@ -102,16 +102,23 @@
               </div>
               <h2>Define el transcode</h2>
               <p id="source-summary" class="metadata">
-                Selecciona un archivo o una serie.
+                Selecciona un archivo o una carpeta.
               </p>
               <p class="muted">
                 Cada trabajo conserva sus parámetros. El original se mantiene
                 hasta un reemplazo aprobado.
               </p>
               <label
+                >Contenido<select id="media-kind">
+                  <option value="movie">Películas / vídeos</option>
+                  <option value="tv">Series</option>
+                  <option value="anime">Anime</option>
+                </select></label
+              >
+              <label
                 >Alcance<select id="scope">
                   <option value="file">Archivo seleccionado</option>
-                  <option value="batch">Serie / temporada</option>
+                  <option value="batch">Lote / temporada / carpeta</option>
                 </select></label
               >
               <div id="batch-options" hidden>
@@ -128,6 +135,10 @@
                       placeholder="Sin límite"
                   /></label>
                 </div>
+                <label class="check"
+                  ><input id="recursive" type="checkbox" />Incluir subcarpetas
+                  (hasta 1000 vídeos)</label
+                >
                 <label class="check"
                   ><input id="selected-only" type="checkbox" />Solo archivos
                   marcados</label
@@ -362,10 +373,29 @@
             </form>
           </div>
         </section>
-        <section id="jobs" class="panel tab-content" hidden>
+        <section id="jobs" class="panel operations-panel">
+          <div class="savings-dashboard" aria-label="Ahorro de espacio">
+            <div>
+              <span class="metadata">ESPACIO LIBERADO</span
+              ><strong id="saved-total">—</strong
+              ><span id="saved-count" class="metadata"></span>
+            </div>
+            <div>
+              <span class="metadata">AHORRO EN CANDIDATOS</span
+              ><strong id="candidate-total">—</strong
+              ><span class="metadata">Pendiente de reemplazo aprobado</span>
+            </div>
+            <div>
+              <span class="metadata">AHORRO ESTIMADO</span
+              ><strong id="estimated-total">—</strong
+              ><span class="metadata"
+                >Estimación de perfiles o muestras; puede cambiar</span
+              >
+            </div>
+          </div>
           <div class="toolbar">
             <div>
-              <h2>Trabajo en curso. Historia conservada.</h2>
+              <h2>Cola, lotes e historial</h2>
               <p class="muted">
                 También aparecen las acciones creadas por agentes mediante MCP.
               </p>
@@ -373,22 +403,32 @@
             <label
               >Estado<select id="job-filter">
                 <option value="all">Todos</option>
-                <option>pending</option>
-                <option>running</option>
-                <option>waiting_external</option>
-                <option>waiting_decision</option>
-                <option>completed</option>
-                <option>failed</option>
-                <option>cancelled</option>
+                <option value="pending">En cola</option>
+                <option value="running">En ejecución</option>
+                <option value="waiting_external">Esperando worker</option>
+                <option value="waiting_decision">Necesita decisión</option>
+                <option value="completed">Completado</option>
+                <option value="failed">Falló</option>
+                <option value="cancelled">Cancelado</option>
               </select></label
             ><button id="refresh-jobs">Actualizar</button>
           </div>
+          <p id="jobs-updated" class="metadata" role="status"></p>
           <div id="jobs-list"></div>
           <div class="pagination">
             <button id="jobs-prev">← Anterior</button
             ><span id="jobs-page"></span
             ><button id="jobs-next">Siguiente →</button>
           </div>
+          <details>
+            <summary>Trazado del ahorro liberado</summary>
+            <p class="muted">
+              Solo cuenta reemplazos completados con limpieza de recuperación
+              verificada. Un candidato conserva el original y todavía no libera
+              espacio.
+            </p>
+            <div id="savings-history"></div>
+          </details>
         </section>
         <section id="recipes" class="panel tab-content" hidden>
           <div class="section-label">
@@ -463,19 +503,31 @@
       </div>
       <div id="detail-summary"></div>
       <div id="detail-controls" class="submit-actions"></div>
-      <div class="toolbar">
-        <label
-          >Sección<select id="detail-section">
-            <option>state</option>
-            <option>inputs</option>
-            <option>outputs</option>
-            <option>steps</option>
-            <option value="logs">Log del worker</option>
-          </select></label
-        ><button id="load-detail">Consultar</button
-        ><button id="detail-next" hidden>Siguiente fragmento</button>
-      </div>
-      <pre id="detail-content"></pre>
+      <section id="batch-items-panel" hidden>
+        <h3>Archivos del lote</h3>
+        <p id="batch-items-note" class="metadata"></p>
+        <div id="batch-items-list"></div>
+        <div class="pagination">
+          <button id="batch-items-prev">← Anterior</button
+          ><button id="batch-items-next">Siguiente →</button>
+        </div>
+      </section>
+      <details class="job-diagnostics">
+        <summary>Diagnóstico y registros</summary>
+        <div class="toolbar">
+          <label
+            >Sección<select id="detail-section">
+              <option>state</option>
+              <option>inputs</option>
+              <option>outputs</option>
+              <option>steps</option>
+              <option value="logs">Log del worker</option>
+            </select></label
+          ><button id="load-detail">Consultar</button
+          ><button id="detail-next" hidden>Siguiente fragmento</button>
+        </div>
+        <pre id="detail-content"></pre>
+      </details>
     </dialog>
     <dialog id="batch-review">
       <h2>Revisar reemplazo del lote</h2>
