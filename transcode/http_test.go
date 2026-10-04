@@ -933,3 +933,39 @@ func TestHTTPExecutor_BenchmarkProtocolMismatch(t *testing.T) {
 		t.Fatalf("uncertain error must preserve protocol context, got %v", err)
 	}
 }
+
+func TestHTTPLogsBoundedAuthenticatedAndErrors(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Header.Get("Authorization") != "Bearer log-token" || r.URL.Query().Get("tail_bytes") != "65536" {
+			t.Errorf("missing authentication or bound: %s", r.URL)
+		}
+		if r.URL.Path == "/v1/jobs/missing/logs" {
+			w.WriteHeader(404)
+			_, _ = w.Write([]byte(`{"error":"unknown job"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"stdout_tail":"encoded","stderr_tail":""}`))
+	}))
+	defer srv.Close()
+	e, err := NewHTTPExecutor(HTTPConfig{BaseURL: srv.URL, Token: "log-token", RequestTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := e.Logs(context.Background(), "job-123")
+	if err != nil || result["stdout_tail"] != "encoded" {
+		t.Fatalf("result=%v error=%v", result, err)
+	}
+	if _, err := e.Logs(context.Background(), "missing"); err == nil {
+		t.Fatal("HTTP error treated as successful log")
+	}
+	for _, id := range []string{"../escape", ".", "..", "job?x=1"} {
+		if _, err := e.Logs(context.Background(), id); err == nil {
+			t.Fatal("unsafe job id accepted", id)
+		}
+	}
+	if calls != 2 {
+		t.Fatalf("unsafe ID reached worker: calls=%d", calls)
+	}
+}

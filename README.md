@@ -66,6 +66,7 @@ Claude Code / MCP Client
 | `mediainspect` | Real-file inspection via ffprobe (no shell, fixed argv) plus sidecar detection |
 | `fsop` | Root-confined filesystem ops (stat, list, hash, move, delete) |
 | `action` | Multi-step persistent workflow engine with idempotency and safety gates |
+| `maintenanceui` | Opt-in browser console sharing the action engine, recipes and HTTP listener |
 | `transcode` | Worker protocol, HTTP/SSH adapters, immutable plans, recipes, and quality policies |
 | `internal/transcodeworker` | Independent worker daemon: queue, FFmpeg, storage, and candidate validation |
 | `internal` | Shared logging utilities |
@@ -86,6 +87,12 @@ Claude Code / MCP Client
    - **SABnzbd tools** — manage Usenet downloads (queue, history, add, pause, resume, delete, reprioritise, move)
 
 5. **Stdio Transport** — Communicates with the MCP client over stdin/stdout using JSON-RPC, making it compatible with any MCP host (Claude Code, Cursor, etc.).
+
+## Browser maintenance console
+
+An optional web console provides movie/series navigation, single-file and series/season transcode batches, typed target controls, benchmarks, profiles, queue/history and approved candidate replacement through Sonarr or Radarr. It shares the existing HTTP worker and persistent actions with MCP; closing the browser does not stop jobs. Audio-only conversion is deferred, while video audio tracks retain copy/compact support.
+
+Enable `web.enabled` with a dedicated token and persistent `streamable-http` transport. See [setup and workflow](docs/MAINTENANCE_UI.md) for configuration, access controls and extension boundaries.
 
 ## MCP Tools
 

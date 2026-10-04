@@ -155,3 +155,11 @@ func TestBatchGuidanceKeepsMonitoringDecisionsAndCandidatesSeparate(t *testing.T
 		}
 	}
 }
+
+func TestBatchPromotionPlanIsVisibleBeforeAnyPromotionObservation(t *testing.T) {
+	r := &action.ActionResult{ActionName: "transcode_batch", Status: action.StatusWaitingDecision, State: map[string]any{"batch_promotion_plan": map[string]any{"batch_id": "batch", "digest": "sha256:plan", "members": []any{}}}, Outputs: map[string]any{}}
+	summary := compactBatch(r)
+	if summary == nil || !summary.PromotionPlanReady || summary.Promotion != nil {
+		t.Fatalf("approval plan hidden before coordinator starts: %+v", summary)
+	}
+}

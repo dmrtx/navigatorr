@@ -52,7 +52,7 @@ func (s *Store) ListReconcilableActions(afterID string, limit int) ([]ActionInst
 	rows, err := s.db.Query(`SELECT id, action_name, status, current_step, inputs_json,
 		outputs_json, state_json, waiting_reason, waiting_condition, waiting_options_json,
 		error_json, idempotency_key, created_at, updated_at FROM action_instances
-		WHERE status IN ('waiting_external', 'running') AND id > ? ORDER BY id LIMIT ?`, afterID, limit)
+		WHERE status IN ('pending', 'waiting_external', 'running') AND id > ? ORDER BY id LIMIT ?`, afterID, limit)
 	if err != nil {
 		return nil, err
 	}

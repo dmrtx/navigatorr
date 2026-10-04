@@ -115,7 +115,13 @@ func (e *Engine) ReconcileOnce(ctx context.Context) error {
 }
 
 func (e *Engine) shouldReconcile(inst *store.ActionInstance, tmpl ActionTemplate, ec *ExecutionContext) bool {
-	if !tmpl.AutoReconcile || (inst.Status != StatusWaitingExternal && inst.Status != StatusRunning) {
+	if !tmpl.AutoReconcile {
+		return false
+	}
+	if inst.Status == StatusPending {
+		return getBool(ec.State, "background_admission")
+	}
+	if inst.Status != StatusWaitingExternal && inst.Status != StatusRunning {
 		return false
 	}
 	if getBool(ec.State, "paused") {

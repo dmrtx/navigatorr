@@ -26,6 +26,7 @@ import (
 
 type promotionHarness struct {
 	t                                  *testing.T
+	movie                              bool
 	mu                                 sync.Mutex
 	engine                             *Engine
 	st                                 *store.Store
@@ -41,6 +42,7 @@ type promotionHarness struct {
 	importDeletesOriginal              bool
 	renameFailures                     int
 	poisonOldPath                      bool
+	poisonOldMovie                     bool
 	poisonCandidateOnImport            bool
 	stalePathAfterRescan               bool
 	stalePathAfterRename               bool
@@ -116,12 +118,22 @@ func (h *promotionHarness) serve(w http.ResponseWriter, r *http.Request) {
 			h.t.Error(err)
 		}
 	}
+	if h.movie && (strings.Contains(r.URL.Path, "/episode") || strings.Contains(r.URL.Path, "/series")) {
+		h.t.Errorf("movie promotion used Sonarr endpoint %s", r.URL.Path)
+		w.WriteHeader(400)
+		return
+	}
 	switch {
 	case r.Method == "GET" && r.URL.Path == "/api/v3/series/1":
 		write(map[string]any{"id": 1, "path": filepath.Join(h.root, "Series")})
+	case r.Method == "GET" && r.URL.Path == "/api/v3/movie/1":
+		write(map[string]any{"id": 1, "path": filepath.Join(h.root, "Series"), "movieFileId": h.episodes[0].EpisodeFileID})
 	case r.Method == "GET" && r.URL.Path == "/api/v3/episode":
 		write(h.episodes)
-	case r.Method == "GET" && r.URL.Path == "/api/v3/episodefile":
+	case r.Method == "GET" && (r.URL.Path == "/api/v3/episodefile" || r.URL.Path == "/api/v3/moviefile"):
+		if h.movie && r.URL.Query().Get("movieId") != "1" {
+			h.t.Errorf("missing movie filter: %s", r.URL)
+		}
 		files := []promotionFile{}
 		for _, f := range h.files {
 			if f.ID == 202 {
@@ -138,8 +150,8 @@ func (h *promotionHarness) serve(w http.ResponseWriter, r *http.Request) {
 			files = append(files, f)
 		}
 		write(files)
-	case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/api/v3/episodefile/"):
-		id, _ := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/api/v3/episodefile/"))
+	case r.Method == "GET" && (strings.HasPrefix(r.URL.Path, "/api/v3/episodefile/") || strings.HasPrefix(r.URL.Path, "/api/v3/moviefile/")):
+		id, _ := strconv.Atoi(filepath.Base(r.URL.Path))
 		f, ok := h.files[id]
 		if !ok {
 			w.WriteHeader(404)
@@ -148,9 +160,12 @@ func (h *promotionHarness) serve(w http.ResponseWriter, r *http.Request) {
 		if h.poisonOldPath && id == 101 {
 			f.Path = h.candidate
 		}
+		if h.poisonOldMovie && id == 101 {
+			f.MovieID = 999
+		}
 		write(f)
-	case r.Method == "DELETE" && strings.HasPrefix(r.URL.Path, "/api/v3/episodefile/"):
-		id, _ := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/api/v3/episodefile/"))
+	case r.Method == "DELETE" && (strings.HasPrefix(r.URL.Path, "/api/v3/episodefile/") || strings.HasPrefix(r.URL.Path, "/api/v3/moviefile/")):
+		id, _ := strconv.Atoi(filepath.Base(r.URL.Path))
 		if _, exists := h.files[id]; !exists {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -224,7 +239,11 @@ func (h *promotionHarness) serve(w http.ResponseWriter, r *http.Request) {
 			if len(files) == 1 {
 				f, _ := files[0].(map[string]any)
 				ids, _ := f["episodeIds"].([]any)
-				if len(ids) != 2 {
+				if h.movie {
+					if getInt(f, "movieId") != 1 || f["seriesId"] != nil || f["episodeIds"] != nil {
+						h.t.Errorf("invalid Radarr import payload: %v", f)
+					}
+				} else if len(ids) != 2 {
 					h.t.Errorf("multi-episode import lost IDs: %v", f)
 				}
 			}
@@ -235,6 +254,9 @@ func (h *promotionHarness) serve(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				file := promotionFile{ID: 202, SeriesID: 1, Path: h.candidate, Size: candidate.Size()}
+				if h.movie {
+					file.MovieID = 1
+				}
 				file.MediaInfo.VideoCodec = "HEVC"
 				h.files[202] = file
 				for i := range h.episodes {
@@ -259,6 +281,9 @@ func (h *promotionHarness) serve(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		case "RenameFiles":
+			if h.movie && (getInt(payload, "movieId") != 1 || payload["seriesId"] != nil) {
+				h.t.Errorf("invalid Radarr rename: %v", payload)
+			}
 			h.renames++
 			h.mutationOrder = append(h.mutationOrder, "rename")
 			if h.renameFailures > 0 {
@@ -277,7 +302,10 @@ func (h *promotionHarness) serve(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
-		case "RescanSeries":
+		case "RescanSeries", "RescanMovie":
+			if h.movie && (name != "RescanMovie" || getInt(payload, "movieId") != 1 || payload["seriesId"] != nil) {
+				h.t.Errorf("invalid Radarr rescan: %v", payload)
+			}
 			h.rescans++
 			h.mutationOrder = append(h.mutationOrder, "rescan")
 			if h.stalePathAfterRescan {

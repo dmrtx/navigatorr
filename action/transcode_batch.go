@@ -31,6 +31,7 @@ func (e *Engine) registerTranscodeBatchTemplate() {
 		},
 		RequiredInputs: []string{"service", "series_id"},
 		OptionalInputs: []string{
+			"episode_file_ids",
 			"season",
 			"profile",
 			"profile_config",
@@ -213,6 +214,20 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 			fileMap[id] = ef
 		}
 	}
+	selected := map[int64]bool{}
+	if raw, present := ec.Inputs["episode_file_ids"]; present {
+		b, err := json.Marshal(raw)
+		var ids []int64
+		if err != nil || json.Unmarshal(b, &ids) != nil || len(ids) == 0 || len(ids) > 1000 {
+			return StepResult{Status: StepFailed, Error: "episode_file_ids must be a non-empty array of up to 1000 positive file IDs"}, nil
+		}
+		for _, id := range ids {
+			if id <= 0 || fileMap[id] == nil {
+				return StepResult{Status: StepFailed, Error: "selected episode file is not in this series"}, nil
+			}
+			selected[id] = true
+		}
+	}
 
 	type episodeMeta struct {
 		seasonNumber  int
@@ -230,6 +245,9 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 		}
 		fID := int64(numVal(ep["episodeFileId"]))
 		if fID <= 0 {
+			continue
+		}
+		if len(selected) > 0 && !selected[fID] {
 			continue
 		}
 		seasonNum := int(numVal(ep["seasonNumber"]))

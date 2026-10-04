@@ -16,6 +16,9 @@ func promotionIdempotency(inputs map[string]any) (string, error) {
 	service := strings.ToLower(strings.TrimSpace(getString(inputs, "service")))
 	if service == "" {
 		service = "sonarr"
+		if getInt(inputs, "movie_id") > 0 {
+			service = "radarr"
+		}
 	}
 	inputs["service"] = service
 	inputs["transcode_action_id"] = source
@@ -24,7 +27,7 @@ func promotionIdempotency(inputs map[string]any) (string, error) {
 
 func (e *Engine) existingPromotion(ctx context.Context, inst *store.ActionInstance, tmpl ActionTemplate, inputs map[string]any) (*ActionResult, error) {
 	ec := parseExecutionContext(inst, e)
-	for _, key := range []string{"service", "transcode_action_id", "series_id", "batch_promote_parent_id", "batch_promote_item_key", "batch_promote_digest"} {
+	for _, key := range []string{"service", "transcode_action_id", "series_id", "movie_id", "batch_promote_parent_id", "batch_promote_item_key", "batch_promote_digest"} {
 		if fmt.Sprint(ec.Inputs[key]) != fmt.Sprint(inputs[key]) {
 			return nil, fmt.Errorf("promotion already exists for this candidate with different %s", key)
 		}

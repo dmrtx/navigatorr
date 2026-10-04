@@ -19,6 +19,7 @@ type promotionEpisode struct {
 	EpisodeFileID int `json:"episodeFileId"`
 }
 type promotionFile struct {
+	MovieID      int             `json:"movieId,omitempty"`
 	ID           int             `json:"id"`
 	SeriesID     int             `json:"seriesId"`
 	Path         string          `json:"path"`
@@ -37,6 +38,9 @@ type promotionLibrary struct {
 }
 
 func (e *Engine) promotionSnapshot(ctx context.Context, svc *arrservice.Service, p *promotionState) (*promotionLibrary, error) {
+	if p.MovieID > 0 {
+		return e.promotionMovieSnapshot(ctx, svc, p)
+	}
 	snap := new(promotionLibrary)
 	query := map[string]string{"seriesId": strconv.Itoa(p.SeriesID)}
 	data, err := svc.Get(ctx, "/api/v3/episode", query)

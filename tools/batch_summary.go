@@ -9,23 +9,24 @@ import (
 // BatchSummary separates workflow completion from the result for the library.
 // Counts are small and independent of the (possibly truncated) item list.
 type BatchSummary struct {
-	Title           string                           `json:"title,omitempty"`
-	Outcome         string                           `json:"outcome"`
-	NextStep        string                           `json:"next_step,omitempty"`
-	DryRun          bool                             `json:"dry_run"`
-	Total           int                              `json:"total"`
-	Completed       int                              `json:"completed"`
-	Failed          int                              `json:"failed"`
-	Cancelled       int                              `json:"cancelled"`
-	Skipped         int                              `json:"skip"`
-	Review          int                              `json:"review"`
-	Queued          int                              `json:"queued"`
-	Running         int                              `json:"running"`
-	WaitingForSlot  int                              `json:"waiting_for_slot"`
-	WaitingDecision int                              `json:"waiting_decision"`
-	Promotion       *batchPromotionSummary           `json:"promotion,omitempty"`
-	Selection       *action.BatchSelection           `json:"selection,omitempty"`
-	SampleEvidence  *action.BatchCalibrationEvidence `json:"sample_evidence,omitempty"`
+	PromotionPlanReady bool                             `json:"promotion_plan_ready,omitempty"`
+	Title              string                           `json:"title,omitempty"`
+	Outcome            string                           `json:"outcome"`
+	NextStep           string                           `json:"next_step,omitempty"`
+	DryRun             bool                             `json:"dry_run"`
+	Total              int                              `json:"total"`
+	Completed          int                              `json:"completed"`
+	Failed             int                              `json:"failed"`
+	Cancelled          int                              `json:"cancelled"`
+	Skipped            int                              `json:"skip"`
+	Review             int                              `json:"review"`
+	Queued             int                              `json:"queued"`
+	Running            int                              `json:"running"`
+	WaitingForSlot     int                              `json:"waiting_for_slot"`
+	WaitingDecision    int                              `json:"waiting_decision"`
+	Promotion          *batchPromotionSummary           `json:"promotion,omitempty"`
+	Selection          *action.BatchSelection           `json:"selection,omitempty"`
+	SampleEvidence     *action.BatchCalibrationEvidence `json:"sample_evidence,omitempty"`
 }
 
 type batchPromotionSummary struct {
@@ -84,6 +85,7 @@ func compactBatch(res *action.ActionResult) *BatchSummary {
 		return nil
 	}
 	result := data.Counts
+	result.PromotionPlanReady = res.State["batch_promotion_plan"] != nil || res.Outputs["batch_promotion_plan"] != nil
 	result.Title, result.DryRun, result.Promotion = data.Title, data.DryRun, compactBatchPromotion(res)
 	result.Selection, result.SampleEvidence = data.Selection, data.SampleEvidence
 	if result.Promotion != nil && data.Approved {
