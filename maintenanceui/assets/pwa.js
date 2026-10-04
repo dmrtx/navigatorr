@@ -1,29 +1,44 @@
 const installButton = document.getElementById("install-app");
 const help = document.getElementById("install-help");
 let prompt;
-const standalone =
+let installed =
   window.matchMedia("(display-mode: standalone)").matches ||
   navigator.standalone === true;
-if (!standalone) {
-  installButton.hidden = false;
-  installButton.addEventListener("click", async () => {
-    if (prompt) {
-      await prompt.prompt();
-      await prompt.userChoice;
-      prompt = undefined;
-    } else {
-      help.hidden = !help.hidden;
-    }
-  });
+const ios =
+  /iPhone|iPad|iPod/.test(navigator.userAgent) ||
+  (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+const mobile = ios || /Android/.test(navigator.userAgent);
+function updateInstall() {
+  installButton.hidden =
+    installed || !window.isSecureContext || (!prompt && !mobile);
+  installButton.textContent = prompt ? "Install app" : "Add app";
 }
+updateInstall();
+document.getElementById("install-instructions").textContent = ios
+  ? "Share → Add to Home Screen."
+  : "Browser menu → Install app or Add to Home Screen.";
+installButton.addEventListener("click", async () => {
+  if (prompt) {
+    const event = prompt;
+    prompt = undefined;
+    await event.prompt();
+    await event.userChoice;
+    updateInstall();
+  } else if (mobile && !installed) help.showModal();
+});
+document
+  .getElementById("close-install")
+  .addEventListener("click", () => help.close());
 window.addEventListener("beforeinstallprompt", (event) => {
   event.preventDefault();
   prompt = event;
+  updateInstall();
 });
 window.addEventListener("appinstalled", () => {
-  installButton.hidden = true;
-  help.hidden = true;
+  installed = true;
   prompt = undefined;
+  help.close();
+  updateInstall();
 });
 if ("serviceWorker" in navigator && window.isSecureContext) {
   const showOfflineAvailability = () => {
@@ -31,7 +46,7 @@ if ("serviceWorker" in navigator && window.isSecureContext) {
     document.documentElement.dataset.pwaReady = String(ready);
     if (ready)
       document.getElementById("install-status").textContent =
-        "Inicio disponible sin conexión. Para consultar trabajos y enviar cambios necesitas conexión con Navigatorr.";
+        "The app opens offline. Jobs and changes need a connection.";
   };
   navigator.serviceWorker.addEventListener(
     "controllerchange",
@@ -43,9 +58,8 @@ if ("serviceWorker" in navigator && window.isSecureContext) {
     .then(showOfflineAvailability)
     .catch(() => {
       document.getElementById("install-status").textContent =
-        "No se pudo preparar el inicio sin conexión. Puedes seguir usando la web.";
+        "Offline start is unavailable. You can keep using the web app.";
     });
-} else {
+} else
   document.getElementById("install-status").textContent =
-    "La instalación PWA necesita HTTPS (o localhost en pruebas).";
-}
+    "Installation requires HTTPS.";

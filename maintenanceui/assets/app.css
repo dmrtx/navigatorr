@@ -254,7 +254,7 @@ h2 {
   font-size: 12px;
 }
 .disconnected #jobs-updated::after {
-  content: " · SIN CONEXIÓN";
+  content: " · SERVER UNAVAILABLE";
   color: var(--accent);
 }
 .text-button {
@@ -1054,4 +1054,561 @@ footer {
   * {
     transition: none !important;
   }
+}
+/* Calm, compact navigation and distinct workspaces. */
+.tabs {
+  gap: 8px;
+}
+.tabs button {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 12px;
+  font-size: 13px;
+}
+.nav-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+}
+.tab-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.operations-panel {
+  margin-top: 0;
+}
+.queue-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.queue-toolbar h2 {
+  margin: 0;
+  font-size: 21px;
+}
+.queue-filters {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.queue-filters select {
+  width: 170px;
+  margin: 0;
+  height: 36px;
+  padding: 5px 8px;
+  font-size: 12px;
+}
+.icon-button {
+  width: 36px;
+  height: 36px;
+  padding: 8px;
+  display: inline-grid;
+  place-items: center;
+}
+.icon-button svg {
+  width: 18px;
+  height: 18px;
+}
+#jobs-updated {
+  font: 11px/1.4 var(--body);
+  margin: 4px 0 8px;
+}
+.list-footer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 10px;
+  position: relative;
+  font-size: 11px;
+}
+#jobs-sentinel,
+#library-sentinel {
+  display: block;
+  position: absolute;
+  bottom: 0;
+  height: 1px;
+  width: 100%;
+  pointer-events: none;
+}
+.job-row {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px;
+  padding: 10px 0;
+}
+.job-row .job-title {
+  text-align: left;
+  font-size: 13px;
+  font-weight: 600;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  min-height: 28px;
+  width: 100%;
+  overflow-wrap: anywhere;
+}
+.job-row .job-title:hover {
+  color: var(--forest);
+  text-decoration: underline;
+}
+.job-row h3 {
+  padding: 0;
+  margin: 0;
+}
+.job-row .badge {
+  font: 10px/1.3 var(--body);
+  border: 0;
+  padding: 2px 5px;
+  border-radius: 3px;
+  margin: 2px 5px 2px 0;
+}
+.job-row .badge:last-of-type {
+  background: transparent;
+  padding: 2px 0;
+}
+.job-row .savings-line {
+  font: 11px/1.4 var(--body);
+}
+.job-actions {
+  gap: 4px;
+}
+.job-actions button {
+  padding: 5px 8px;
+  font-size: 12px;
+  min-height: 32px;
+}
+.worker-progress {
+  max-width: 520px;
+}
+.savings-dashboard {
+  margin: 12px 0 18px;
+  gap: 12px;
+}
+.savings-dashboard .metadata {
+  font: 12px/1.4 var(--body);
+}
+.savings-history-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 8px;
+}
+.savings-history-row .metadata {
+  font: 12px/1.4 var(--body);
+}
+.recipe-layout {
+  grid-template-columns: minmax(180px, 240px) minmax(0, 600px);
+  gap: 24px;
+}
+.recipe-sidebar {
+  border-right: 1px solid var(--line);
+  padding-right: 16px;
+}
+#recipes-list {
+  max-height: 60vh;
+  overflow: auto;
+}
+.recipe-button {
+  border: 0;
+  border-radius: 4px;
+  padding: 9px 8px;
+  margin: 0;
+  font-size: 12px;
+}
+.recipe-button[aria-pressed="true"] {
+  background: #244d4010;
+  color: var(--forest);
+  font-weight: 600;
+}
+#recipe-source {
+  font-size: 11px;
+  margin: 8px 0;
+}
+.profile-controls > label:not(.check) {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  align-items: center;
+}
+.profile-controls .field-grid {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+.profile-history {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: pre-line;
+  margin-top: 12px;
+}
+#recipe-form > .submit-actions button {
+  flex: initial;
+  min-width: 0;
+}
+#recipe-extra-fields fieldset {
+  border: 0;
+  padding: 0;
+  margin: 14px 0;
+}
+#recipe-extra-fields legend {
+  font-weight: 600;
+  color: var(--forest);
+  font-size: 13px;
+}
+#recipe-extra-fields label:not(.check) {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+.settings-row .job-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+#advanced {
+  max-width: 800px;
+}
+.detail-extras {
+  display: flex;
+  gap: 6px;
+  border-top: 1px solid var(--line);
+  margin-top: 12px;
+}
+#detail-summary > .metadata {
+  font-family: var(--body);
+}
+#detail-summary > .metadata:first-child {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+}
+#recipe-form input:not([type="checkbox"]),
+#recipe-form select {
+  padding: 8px;
+}
+#path-dialog {
+  max-width: 640px;
+}
+.media-row > button.media-title {
+  border: 0;
+  background: none;
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  padding: 5px 0;
+  font-size: 13px;
+}
+#selection-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@media (max-width: 900px) {
+  .recipe-layout {
+    grid-template-columns: minmax(150px, 200px) minmax(0, 1fr);
+    gap: 12px;
+  }
+  .queue-filters select,
+  .icon-button {
+    height: 44px;
+  }
+  .icon-button {
+    min-width: 44px;
+  }
+  .job-actions button {
+    min-height: 44px;
+  }
+}
+@media (max-width: 600px) {
+  .tabs {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    padding-top: 4px;
+  }
+  .tabs button {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 3px;
+    min-height: 54px;
+    padding: 4px 0;
+    border: 0;
+    font-size: 10px;
+  }
+  .tabs button::before {
+    content: none;
+  }
+  .tabs .tab-label {
+    display: inline;
+  }
+  .tabs .nav-icon {
+    width: 21px;
+    height: 21px;
+    flex-basis: 21px;
+    padding: 1px;
+  }
+  .tabs button[aria-selected="true"] {
+    color: var(--forest);
+    font-weight: 600;
+    background: #244d4008;
+    border-radius: 6px;
+  }
+  #active-count {
+    font-size: 9px;
+  }
+  .panel {
+    padding: 10px;
+  }
+  .queue-toolbar h2 {
+    font-size: 18px;
+  }
+  .queue-filters select {
+    width: 148px;
+    font-size: 13px;
+  }
+  .queue-toolbar {
+    gap: 6px;
+    margin-bottom: 5px;
+  }
+  #jobs-updated {
+    margin: 2px 0;
+    font-size: 10px;
+  }
+  .job-row {
+    padding: 7px 0;
+    gap: 2px;
+  }
+  .job-row .job-title {
+    min-height: 36px;
+  }
+  .job-row .job-progress .metadata {
+    font: 10px/1.3 var(--body);
+  }
+  .job-row .job-actions button {
+    font-size: 11px;
+    min-height: 44px;
+  }
+  .recipe-layout {
+    display: block;
+  }
+  .recipe-sidebar {
+    border: 0;
+    padding: 0;
+  }
+  #recipes-list {
+    display: flex;
+    gap: 4px;
+    overflow-x: auto;
+    max-height: none;
+    padding: 4px 0 8px;
+  }
+  .recipe-button {
+    white-space: nowrap;
+    width: auto;
+    flex: 0 0 auto;
+    font-size: 11px;
+    border: 1px solid var(--line);
+  }
+  #recipe-search {
+    margin: 0;
+  }
+  .savings-dashboard {
+    grid-template-columns: 1fr 1fr;
+    margin: 12px 0;
+  }
+  .savings-dashboard > div:first-child {
+    grid-column: 1/-1;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--line);
+  }
+  .savings-dashboard > div:first-child strong {
+    font-size: 32px;
+    margin: 4px 0;
+  }
+  .savings-dashboard strong {
+    font-size: 23px;
+    margin: 5px 0;
+  }
+  .savings-dashboard > div > .metadata:first-child {
+    min-height: 0;
+    font-size: 12px;
+  }
+  .savings-dashboard > div > .metadata:last-child {
+    display: block;
+    font-size: 10px;
+  }
+  .settings-row {
+    font-size: 12px;
+    align-items: flex-start;
+  }
+  .settings-row .job-actions {
+    max-width: 65%;
+  }
+  main {
+    padding-bottom: calc(76px + env(safe-area-inset-bottom));
+  }
+  #notice {
+    bottom: calc(70px + env(safe-area-inset-bottom));
+  }
+}
+/* Adapted from the Stitch Queue: actions beside each job, telemetry below. */
+.job-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+.job-row > .job-actions {
+  grid-column: 2;
+  grid-row: 1;
+  align-self: center;
+}
+.job-row > .worker-progress {
+  grid-column: 1/-1;
+  grid-row: 2;
+}
+.job-row:has(.multiple-actions) {
+  grid-template-columns: minmax(0, 1fr);
+}
+.job-row > .multiple-actions {
+  grid-column: 1;
+  grid-row: auto;
+}
+.job-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+.job-actions button svg {
+  width: 14px;
+  height: 14px;
+  order: -1;
+}
+.job-row .job-actions button {
+  border: 1px solid var(--line);
+  background: transparent;
+  border-radius: 4px;
+}
+.job-row .job-title {
+  min-height: 30px;
+}
+@media (max-width: 600px) {
+  .job-row .job-actions button {
+    font-size: 10px;
+    padding: 4px 7px;
+  }
+  .job-row .job-title {
+    min-height: 36px;
+  }
+  .job-row > .job-actions:not(.multiple-actions) {
+    max-width: 105px;
+  }
+  .job-row .job-meta .savings-line {
+    font-size: 10px;
+  }
+}
+/* Compact field typography: labels do not make values bold. */
+input,
+select,
+textarea {
+  font-weight: 400;
+}
+#recipe-form > label {
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  border-bottom: 1px solid var(--line);
+}
+#recipe-form > label input {
+  border: 0;
+  background: transparent;
+  margin: 0;
+}
+#recipe-source {
+  margin: 6px 0;
+}
+.preservation-note {
+  font-size: 10px;
+  line-height: 1.4;
+  margin: 6px 0;
+}
+@media (max-width: 900px), (pointer: coarse) {
+  input:not([type="checkbox"]),
+  select,
+  textarea {
+    font-size: 13px;
+    font-weight: 400;
+  }
+}
+@media (max-width: 600px) {
+  body {
+    font-size: 12px;
+  }
+  .queue-toolbar h2 {
+    font-size: 17px;
+  }
+  label {
+    font-size: 10px;
+    font-weight: 500;
+  }
+  #recipe-form input:not([type="checkbox"]),
+  #recipe-form select {
+    font-size: 13px;
+    min-height: 36px;
+    padding: 5px 6px;
+    font-weight: 400;
+  }
+  #recipe-form > label {
+    min-height: 44px;
+  }
+  #recipe-form .profile-controls > label {
+    grid-template-columns: 74px minmax(0, 1fr);
+  }
+  #recipe-form .profile-controls .field-grid label {
+    margin: 4px 0;
+  }
+  #recipes-list {
+    padding-bottom: 6px;
+  }
+  .recipe-button {
+    padding: 5px 8px;
+    font-size: 10px;
+    min-height: 36px;
+  }
+  #recipe-search {
+    font-size: 12px;
+    min-height: 36px;
+  }
+  #recipe-form > .submit-actions button {
+    font-size: 11px;
+  }
+  .queue-toolbar > button {
+    font-size: 11px;
+  }
+  .profile-controls {
+    margin-top: 6px;
+  }
+  #recipe-advanced {
+    min-height: 36px;
+    font-size: 11px;
+  }
+}
+
+#connection-status {
+  padding: 8px 12px;
+  margin-bottom: 10px;
+  border-left: 2px solid var(--accent);
+  color: var(--muted);
+  font-size: 12px;
+}
+.login h1 {
+  font-size: 22px;
 }
