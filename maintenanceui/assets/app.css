@@ -1,3 +1,4 @@
+/* Theme and shared control dimensions. Touch targets change in one place. */
 :root {
   --paper: #f3f1eb;
   --ink: #24302d;
@@ -8,6 +9,8 @@
   --forest: #244d40;
   --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   --body: "Avenir Next", "Segoe UI", sans-serif;
+  --control-size: 36px;
+  --dialog-control-size: 32px;
 }
 * {
   box-sizing: border-box;
@@ -19,30 +22,30 @@ body {
   margin: 0;
   background: var(--paper);
   color: var(--ink);
-  font-family: var(--body);
-  font-size: 13px;
-  line-height: 1.4;
+  font: 400 13px/1.4 var(--body);
+}
+a {
+  color: inherit;
 }
 button,
 input,
 select,
 textarea {
-  font: inherit;
+  font: 400 13px/1.4 var(--body);
 }
 button {
-  cursor: pointer;
-  background: transparent;
+  min-height: var(--control-size);
+  max-width: 100%;
+  padding: 5px 9px;
   border: 1px solid var(--line);
   border-radius: 3px;
-  padding: 6px 10px;
+  background: transparent;
   color: var(--ink);
+  cursor: pointer;
+  overflow-wrap: anywhere;
   transition:
     background 0.15s,
     border-color 0.15s;
-}
-button:hover {
-  background: #e9e9df;
-  border-color: var(--muted);
 }
 button:disabled {
   opacity: 0.4;
@@ -53,22 +56,179 @@ button.primary {
   border-color: var(--forest);
   color: #fff;
 }
-button.primary:hover {
-  background: #19372e;
-}
 .quiet {
   border: 0;
+  padding: 5px 8px;
+}
+.icon-button {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 var(--control-size);
+  width: var(--control-size);
+  height: var(--control-size);
+  min-width: var(--control-size);
   padding: 8px;
+  border: 0;
+  background: transparent;
 }
-a {
-  color: inherit;
+.icon-button svg {
+  width: 18px;
+  height: 18px;
 }
+input,
+select,
+textarea {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  min-height: var(--control-size);
+  margin-top: 3px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: #fff;
+  color: var(--ink);
+}
+textarea {
+  resize: vertical;
+}
+input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  min-height: 0;
+  flex: 0 0 16px;
+  margin: 0;
+  accent-color: var(--forest);
+}
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+summary:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+label {
+  display: block;
+  min-width: 0;
+  margin: 5px 0;
+  font-size: 11px;
+  font-weight: 400;
+  overflow-wrap: anywhere;
+}
+.check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: var(--control-size);
+  margin: 0;
+}
+h1,
+h2 {
+  font:
+    400 20px/1.2 Georgia,
+    serif;
+  letter-spacing: -0.4px;
+  margin: 8px 0;
+}
+h3 {
+  font:
+    400 18px/1.3 Georgia,
+    serif;
+  margin: 12px 0 6px;
+}
+p {
+  margin: 6px 0;
+}
+.metadata,
+.muted {
+  color: var(--muted);
+  font: 400 11px/1.4 var(--body);
+  overflow-wrap: anywhere;
+}
+.metadata {
+  display: block;
+}
+.accent,
+.brand-dot {
+  color: var(--accent);
+}
+.empty {
+  padding: 16px 8px;
+  text-align: center;
+  color: var(--muted);
+}
+.field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: end;
+  gap: 0 8px;
+}
+.field-grid > * {
+  min-width: 0;
+}
+.submit-actions,
+.job-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.submit-actions {
+  margin: 8px 0;
+}
+.submit-actions button {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+.job-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  font-size: 12px;
+}
+.job-actions button svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  order: -1;
+}
+.pagination,
+.list-footer {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.pagination {
+  justify-content: space-between;
+}
+.list-footer {
+  position: relative;
+  justify-content: center;
+  font-size: 11px;
+}
+#jobs-sentinel,
+#library-sentinel {
+  position: absolute;
+  display: block;
+  bottom: 0;
+  width: 100%;
+  height: 1px;
+  pointer-events: none;
+}
+
+/* App shell and navigation. */
 .masthead {
-  padding: 10px 3vw;
-  border-bottom: 1px solid var(--line);
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
+  padding: 10px 3vw;
+  border-bottom: 1px solid var(--line);
 }
 .brand {
   text-decoration: none;
@@ -77,469 +237,260 @@ a {
   letter-spacing: -1px;
 }
 .brand span:last-child {
+  padding-left: 14px;
   font-size: 18px;
   font-weight: 500;
   letter-spacing: -0.5px;
-  padding-left: 14px;
-}
-.brand-dot,
-.accent {
-  color: var(--accent);
 }
 .masthead-right {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   color: var(--muted);
   font-size: 12px;
-}
-.indicator {
-  height: 7px;
-  width: 7px;
-  border-radius: 100%;
-  background: var(--forest);
 }
 main {
   max-width: 1580px;
   margin: 0 auto;
-  padding: 16px 3vw 50px;
-}
-.page-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin: 0 0 14px;
-}
-.eyebrow,
-.section-label {
-  font: 11px var(--mono);
-  letter-spacing: 1.4px;
-  color: var(--muted);
-}
-h1 {
-  font:
-    30px/1.15 Georgia,
-    serif;
-  letter-spacing: -1px;
-  margin: 14px 0;
-}
-h2 {
-  font:
-    21px/1.2 Georgia,
-    serif;
-  letter-spacing: -0.6px;
-  margin: 12px 0 8px;
-}
-.heading-note {
-  color: var(--muted);
-  padding-left: 25px;
-  border-left: 2px solid var(--line);
-  font-size: 13px;
+  padding: 16px 3vw 40px;
 }
 .tabs {
   display: flex;
-  gap: 20px;
+  gap: 8px;
   border-bottom: 1px solid var(--line);
   margin-bottom: 14px;
 }
 .tabs button {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: -1px;
+  padding: 7px 12px;
   border: 0;
   border-bottom: 3px solid transparent;
   border-radius: 0;
-  padding: 7px 0;
-  margin-bottom: -1px;
   color: var(--muted);
 }
 .tabs button[aria-selected="true"] {
   border-color: var(--accent);
   color: var(--ink);
 }
+.nav-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+}
+.tab-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
 .panel {
-  background: var(--surface);
+  min-width: 0;
+  padding: 14px;
   border: 1px solid var(--line);
   border-radius: 4px;
-  padding: 14px;
+  background: var(--surface);
 }
+.section-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+#connection-status,
+#access-expired {
+  padding: 8px 12px;
+  margin-bottom: 10px;
+  border-left: 2px solid var(--accent);
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.disconnected #jobs-updated::after {
+  content: " · SERVER UNAVAILABLE";
+  color: var(--accent);
+}
+.login {
+  max-width: 400px;
+  margin: 24px auto;
+}
+.login p {
+  color: var(--muted);
+}
+.login form {
+  margin-top: 12px;
+}
+.login button {
+  width: 100%;
+  margin-top: 8px;
+}
+#notice {
+  position: fixed;
+  z-index: 40;
+  bottom: 22px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: min(680px, calc(100% - 24px));
+  padding: 10px 12px;
+  background: var(--ink);
+  color: #fff;
+  box-shadow: 0 8px 40px #0002;
+  overflow-wrap: anywhere;
+}
+
+/* Files: a stable source/search grid and wrapping folder navigation. */
 .library-layout {
   display: grid;
   grid-template-columns: minmax(0, 1.2fr) minmax(340px, 1fr);
   gap: 18px;
 }
-.library-browser {
+.library-browser,
+.target-editor {
   min-width: 0;
 }
 .target-editor {
   padding-left: 18px;
   border-left: 1px solid var(--line);
 }
-.section-label {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
-}
 .toolbar {
   display: flex;
-  align-items: end;
-  gap: 12px;
-  margin-bottom: 12px;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
 }
-.grow {
-  flex: 1;
+.toolbar > * {
+  min-width: 0;
 }
 .toolbar label {
   margin: 0;
 }
-.toolbar > div:first-child {
+.grow {
   flex: 1;
 }
-.toolbar h2 {
-  margin-top: 0;
+.library-browser > .toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--control-size);
+  align-items: center;
+  gap: 4px 6px;
+}
+.library-browser > .toolbar > label:first-child {
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr);
+  grid-column: 1;
+  grid-row: 1;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+}
+.library-browser > .toolbar select {
+  height: var(--control-size);
+  margin: 0;
+}
+#toggle-library-search {
+  grid-column: 2;
+  grid-row: 1;
+}
+#toggle-library-search svg {
+  width: 17px;
+  height: 17px;
+}
+#library-search-label {
+  grid-column: 1;
+  grid-row: 2;
+  margin: 0;
+}
+#search-button {
+  grid-column: 2;
+  grid-row: 2;
+  align-self: end;
 }
 .breadcrumbs {
   display: flex;
-  gap: 10px;
   align-items: center;
-  padding: 7px 0;
+  gap: 6px;
+  min-width: 0;
+  padding: 4px 0;
   border-top: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
 }
-.library-items {
-  min-height: 0;
+#selection-title {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-weight: 400;
+}
+#folder-breadcrumbs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+  min-width: 0;
+}
+.breadcrumb-button {
+  max-width: 100%;
+  padding: 4px 6px;
+  border: 0;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--muted);
+}
+.breadcrumb-button[aria-current] {
+  color: var(--forest);
+}
+.breadcrumb-separator {
+  color: var(--muted);
+  font-size: 11px;
 }
 .media-row {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 6px 2px;
-  border-bottom: 1px solid var(--line);
+  gap: 8px;
   min-width: 0;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--line);
 }
+.media-row > button,
 .media-row .open-media {
-  border: 0;
-  padding: 0;
-  text-align: left;
   flex: 1;
   min-width: 0;
-  background: none;
-}
-.media-row > input[type="checkbox"] {
-  width: 16px;
-  height: 16px;
-  flex: 0 0 16px;
-  margin: 0;
-  accent-color: var(--forest);
-}
-.media-check {
-  margin: 0;
-  flex: 0 0 44px;
-  min-height: 44px;
-  display: grid;
-  place-items: center;
-}
-.media-check input {
-  width: 22px;
-  height: 22px;
-  margin: 0;
-  accent-color: var(--forest);
-}
-.compact-help {
-  padding: 12px;
-  border: 1px solid var(--line);
-  background: var(--surface);
-  margin-bottom: 12px;
-}
-.compact-help p {
-  margin: 4px 0 8px;
-  font-size: 12px;
-}
-.disconnected #jobs-updated::after {
-  content: " · SERVER UNAVAILABLE";
-  color: var(--accent);
-}
-.text-button {
-  padding: 3px 0;
+  padding: 5px 0;
   border: 0;
-  font-size: 11px;
-  color: var(--forest);
+  background: none;
+  text-align: left;
+  overflow-wrap: anywhere;
 }
 .media-title {
-  font-size: 15px;
   display: block;
+  font-size: 13px;
   overflow-wrap: anywhere;
 }
-.metadata {
+.media-check {
+  display: grid;
+  place-items: center;
+  flex: 0 0 var(--control-size);
+  width: var(--control-size);
+  min-height: var(--control-size);
+  margin: 0;
+}
+.media-row > .media-size {
   color: var(--muted);
-  font: 11px/1.4 var(--mono);
-  display: block;
-  overflow-wrap: anywhere;
-}
-.media-size {
-  font: 12px var(--mono);
+  font: 400 11px/1.4 var(--body);
   white-space: nowrap;
 }
 .media-icon {
+  display: inline-flex;
   color: var(--accent);
-  font: 18px var(--mono);
+  flex-shrink: 0;
 }
-.pagination {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-top: 18px;
-  gap: 10px;
+.media-icon svg {
+  width: 18px;
+  height: 18px;
 }
-label {
-  display: block;
-  font-size: 12px;
-  font-weight: 600;
-  margin: 8px 0;
-}
-input,
-select,
-textarea {
-  width: 100%;
-  display: block;
-  border: 1px solid var(--line);
-  border-radius: 3px;
-  background: #fff;
-  padding: 10px;
-  color: var(--ink);
-  margin-top: 3px;
-}
-textarea {
-  font: 12px/1.6 var(--mono);
-  resize: vertical;
-  tab-size: 2;
-}
-input:focus-visible,
-select:focus-visible,
-textarea:focus-visible,
-button:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 3px;
-}
-.field-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0 14px;
-}
-.check {
-  display: flex;
-  align-items: start;
-  gap: 10px;
-  font-weight: 400;
-}
-.check input {
-  width: 15px;
-  height: 15px;
-  margin: 2px 0;
-  accent-color: var(--forest);
-}
-.muted {
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.7;
-}
-details {
-  margin: 10px 0;
-  padding: 10px;
-  border: 1px solid var(--line);
-}
-summary {
-  cursor: pointer;
-  font-size: 12px;
-  font-weight: 600;
-}
-.submit-actions {
-  display: flex;
-  gap: 9px;
-  flex-wrap: wrap;
-  margin: 12px 0;
-}
-.submit-actions button {
-  flex: 0 0 auto;
-  min-width: 0;
-}
-.job-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(150px, 210px);
-  align-items: center;
-  gap: 6px 12px;
-  padding: 10px 0;
-  border-bottom: 1px solid var(--line);
-}
-.operations-panel {
-  margin-top: 14px;
-}
-.savings-dashboard {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 14px;
-  padding-bottom: 12px;
-  margin-bottom: 12px;
-  border-bottom: 1px solid var(--line);
-}
-.savings-dashboard strong {
-  display: block;
-  margin: 8px 0;
-  font:
-    24px Georgia,
-    serif;
-  color: var(--forest);
-}
-.job-actions {
-  grid-column: 1/-1;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.job-actions button {
-  padding: 8px 12px;
-  font-size: 12px;
-}
-.savings-line {
-  color: var(--forest);
-}
-.savings-history-row {
-  padding: 10px 0;
-  border-bottom: 1px solid var(--line);
-}
-.batch-item-row {
-  display: flex;
-  gap: 12px;
-  align-items: center;
-  flex-wrap: wrap;
-  padding: 10px 0;
-  border-bottom: 1px solid var(--line);
-}
-.batch-item-row > span:first-child {
-  flex: 1;
-  min-width: 180px;
-}
-.job-row h3 {
-  margin: 0 0 4px;
-  font-size: 15px;
-  font-weight: 500;
-  overflow-wrap: anywhere;
-}
-.badge {
-  display: inline-block;
-  font: 10px var(--mono);
-  padding: 4px 7px;
-  border: 1px solid var(--line);
-  margin: 5px 8px 5px 0;
-  color: var(--muted);
-}
-.badge.failed {
-  color: #a52929;
-  border-color: #e2b9b0;
-}
-.badge.waiting_decision {
-  color: #9b6519;
-  background: #fff2d6;
-}
-.badge.completed {
-  color: var(--forest);
-  background: #edf4e9;
-}
-.job-meta {
-  min-width: 0;
-}
-.job-progress meter {
-  width: 100%;
-  height: 8px;
-  accent-color: var(--forest);
-}
-.recipe-layout {
-  display: grid;
-  grid-template-columns: 1fr 1.35fr;
-  gap: 24px;
-}
-.recipe-button {
-  display: block;
-  width: 100%;
-  text-align: left;
-  margin: 8px 0;
-}
-.empty {
-  padding: 20px 12px;
-  text-align: center;
-  color: var(--muted);
-}
-pre {
-  background: #f0f1ea;
-  padding: 18px;
-  overflow: auto;
-  max-height: 440px;
-  font: 12px/1.6 var(--mono);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  border: 1px solid var(--line);
-}
-.login {
-  max-width: 580px;
-  margin: 24px auto;
-}
-.login h1 {
-  font-size: 36px;
-  margin-bottom: 14px;
-}
-.login p {
-  color: var(--muted);
-}
-.login form {
-  max-width: 400px;
-  margin-top: 30px;
-}
-.login button {
-  width: 100%;
-  margin-top: 10px;
-}
-#notice {
-  position: fixed;
-  bottom: 22px;
-  left: 50%;
-  transform: translateX(-50%);
-  max-width: 90vw;
-  background: var(--ink);
-  color: white;
-  padding: 16px 25px;
-  z-index: 5;
-  box-shadow: 0 8px 40px #0002;
-  overflow-wrap: anywhere;
-}
-dialog {
-  border: 1px solid var(--line);
-  background: var(--surface);
-  color: var(--ink);
-  border-radius: 5px;
-  width: min(680px, 94vw);
-  max-height: 90vh;
-  padding: 16px;
-}
-dialog::backdrop {
-  background: #14201b88;
-}
-.dialog-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-.dialog-heading h2 {
-  margin-top: 0;
-}
-.dialog-heading button {
-  font-size: 22px;
-  padding: 3px 12px;
-}
-footer {
-  border-top: 1px solid var(--line);
-  padding: 24px 4vw;
-  font: 11px var(--mono);
-  display: flex;
-  justify-content: space-between;
-  color: var(--muted);
+#source-summary {
+  margin: 4px 0;
 }
 #job-form > label:not(.check),
 #custom-fields > label:not(.check) {
@@ -552,80 +503,389 @@ footer {
 }
 #job-form > label:not(.check) > select,
 #custom-fields > label:not(.check) > select {
+  margin: 0;
   border: 0;
   background: transparent;
+}
+
+/* Queue: actions beside the job, actual worker progress across the row. */
+.queue-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.queue-toolbar h2 {
+  flex-shrink: 0;
   margin: 0;
 }
-@media (max-width: 900px) {
-  .library-layout,
-  .recipe-layout {
-    grid-template-columns: 1fr;
-  }
-  .target-editor {
-    padding-left: 0;
-    padding-top: 12px;
-    border-left: 0;
-    border-top: 1px solid var(--line);
-  }
-  .heading-note {
-    display: none;
-  }
-  .job-row {
-    grid-template-columns: 1fr;
-  }
-  .job-progress {
-    grid-column: 1/-1;
-    grid-row: 2;
-  }
-  .toolbar {
-    flex-wrap: wrap;
-  }
-  .tabs {
-    gap: 18px;
-  }
-  .masthead-right > span:last-of-type {
-    display: none;
-  }
+.queue-filters {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
 }
-/* Compact operation rows keep status, savings and actions visible together. */
-.job-meta > .source-path {
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
+.queue-filters select {
+  width: 170px;
+  margin: 0;
 }
-.job-meta > .savings-line {
-  margin: 3px 0 0;
+#jobs-updated {
+  margin: 4px 0 6px;
 }
+.job-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+.job-meta {
+  min-width: 0;
+}
+.job-row h3 {
+  margin: 0;
+  font: inherit;
+}
+.job-row .job-title {
+  width: 100%;
+  min-height: var(--control-size);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  font-size: 13px;
+}
+.job-row > .job-actions {
+  grid-column: 2;
+  grid-row: 1;
+  align-self: center;
+}
+.job-row:has(.multiple-actions) {
+  grid-template-columns: minmax(0, 1fr);
+}
+.job-row > .multiple-actions {
+  grid-column: 1;
+  grid-row: auto;
+}
+.job-row > .worker-progress {
+  grid-column: 1 / -1;
+  grid-row: 2;
+}
+.job-meta > .savings-line,
 .job-meta > .muted {
   margin: 3px 0;
+}
+.savings-line {
+  color: var(--forest);
+}
+.badge {
+  display: inline-block;
+  padding: 2px 5px;
+  margin: 2px 5px 2px 0;
+  border-radius: 3px;
+  color: var(--muted);
+  font: 400 10px/1.3 var(--body);
+  overflow-wrap: anywhere;
+}
+.badge.failed {
+  color: #a52929;
+  background: #a5292909;
+}
+.badge.waiting_decision {
+  color: #9b6519;
+  background: #fff2d6;
+}
+.badge.completed {
+  color: var(--forest);
+  background: #edf4e9;
+}
+.job-row .badge:last-of-type {
+  padding: 2px 0;
+  background: transparent;
 }
 .worker-progress {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 2px 6px;
+  width: 100%;
+  min-width: 0;
 }
 .worker-progress > .metadata:first-child {
   grid-column: 1;
 }
-.worker-progress > meter {
-  grid-column: 1/-1;
-  grid-row: 2;
+.job-progress meter {
+  width: 100%;
+  min-width: 0;
   height: 5px;
+  accent-color: var(--forest);
+}
+.worker-progress > meter {
+  grid-column: 1 / -1;
+  grid-row: 2;
 }
 .worker-progress > meter + .metadata {
   grid-column: 2;
   grid-row: 1;
 }
 .worker-progress > .progress-observed-at {
-  grid-column: 1/-1;
+  grid-column: 1 / -1;
 }
+.batch-item-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+.batch-item-row > span:first-child {
+  flex: 1 1 180px;
+  min-width: 0;
+}
+.batch-item-row > .muted {
+  flex-basis: 100%;
+}
+
+/* Savings and completed replacement history. */
+.savings-dashboard {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 12px 0;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+.savings-dashboard > div {
+  min-width: 0;
+}
+.savings-dashboard strong {
+  display: block;
+  margin: 5px 0;
+  color: var(--forest);
+  font:
+    400 24px/1.2 Georgia,
+    serif;
+  overflow-wrap: anywhere;
+}
+.savings-history-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+.savings-history-row > * {
+  min-width: 0;
+}
+
+/* Profiles: ordinary compact controls, with advanced options in a dialog. */
+.recipe-layout {
+  display: grid;
+  grid-template-columns: minmax(180px, 240px) minmax(0, 600px);
+  gap: 24px;
+}
+.recipe-sidebar {
+  min-width: 0;
+  padding-right: 16px;
+  border-right: 1px solid var(--line);
+}
+#recipe-form {
+  min-width: 0;
+}
+#recipes-list {
+  max-height: 60vh;
+  overflow: auto;
+}
+.recipe-button {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 4px;
+  text-align: left;
+  font-size: 12px;
+}
+.recipe-button[aria-pressed="true"] {
+  background: #244d4010;
+  color: var(--forest);
+}
+#recipe-form > label {
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  border-bottom: 1px solid var(--line);
+}
+#recipe-form > label input {
+  margin: 0;
+  border: 0;
+  background: transparent;
+}
+#recipe-source {
+  margin: 6px 0;
+}
+.profile-controls > label:not(.check) {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+}
+.preservation-note {
+  margin: 6px 0;
+  font-size: 10px;
+}
+.profile-history {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+#recipe-extra-fields fieldset {
+  min-width: 0;
+  padding: 0;
+  margin: 12px 0;
+  border: 0;
+}
+#recipe-extra-fields legend {
+  color: var(--forest);
+  font-size: 13px;
+  font-weight: 400;
+}
+#recipe-extra-fields label:not(.check) {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: center;
+  gap: 8px;
+}
+
+/* Settings and dialogs. */
+#advanced {
+  max-width: 800px;
+}
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+.settings-row > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.settings-row .job-actions {
+  justify-content: flex-end;
+}
+dialog {
+  width: min(680px, calc(100% - 16px));
+  max-width: 680px;
+  max-height: calc(
+    100dvh - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom)
+  );
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--ink);
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+dialog::backdrop {
+  background: #14201b88;
+}
+.dialog-heading {
+  position: sticky;
+  top: -12px;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 0;
+  background: var(--surface);
+}
+.dialog-heading h2 {
+  min-width: 0;
+  margin: 0;
+  font-size: 18px;
+  overflow-wrap: anywhere;
+}
+.dialog-heading button {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 var(--control-size);
+  width: var(--control-size);
+  height: var(--control-size);
+  padding: 4px;
+  border: 0;
+  font-size: 22px;
+}
+dialog .submit-actions {
+  justify-content: flex-end;
+  margin: 8px 0 0;
+}
+dialog .submit-actions button {
+  width: auto;
+  min-height: var(--dialog-control-size);
+  padding: 4px 8px;
+  font-size: 12px;
+}
+#detail-summary > .metadata:first-child {
+  color: var(--ink);
+  font-size: 13px;
+}
+.detail-extras {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+  border-top: 1px solid var(--line);
+}
+pre {
+  max-width: 100%;
+  max-height: min(440px, 40dvh);
+  padding: 10px;
+  border: 1px solid var(--line);
+  background: #f0f1ea;
+  font: 400 11px/1.5 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow: auto;
+}
+
+/* Tablet layout, without competing component overrides. */
+@media (max-width: 900px) {
+  .library-layout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+  .target-editor {
+    padding: 10px 0 0;
+    border-left: 0;
+    border-top: 1px solid var(--line);
+  }
+  .recipe-layout {
+    grid-template-columns: minmax(150px, 200px) minmax(0, 1fr);
+    gap: 12px;
+  }
+}
+
+/* Phones: five navigation icons, a single content column, compact spacing. */
 @media (max-width: 600px) {
   .masthead {
+    min-height: 44px;
     padding: max(2px, env(safe-area-inset-top))
       max(10px, env(safe-area-inset-right)) 2px
       max(10px, env(safe-area-inset-left));
-    min-height: 44px;
   }
   .brand {
     font-size: 19px;
@@ -638,717 +898,47 @@ footer {
     gap: 2px;
     font-size: 11px;
   }
-  .indicator,
-  .page-heading {
-    display: none;
-  }
   main {
     padding: 8px max(8px, env(safe-area-inset-right))
-      calc(64px + env(safe-area-inset-bottom))
+      calc(76px + env(safe-area-inset-bottom))
       max(8px, env(safe-area-inset-left));
   }
-  h1 {
-    font-size: 23px;
-    margin: 0;
-  }
+  h1,
   h2 {
     font-size: 18px;
-    margin: 8px 0;
+  }
+  .panel {
+    padding: 10px;
   }
   .tabs {
     position: fixed;
-    bottom: 0;
-    left: 0;
-    right: 0;
     z-index: 20;
+    inset: auto 0 0;
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     gap: 0;
     margin: 0;
-    padding: 0 6px env(safe-area-inset-bottom);
+    padding: 4px max(6px, env(safe-area-inset-right))
+      env(safe-area-inset-bottom) max(6px, env(safe-area-inset-left));
     border-top: 1px solid var(--line);
     border-bottom: 0;
     background: var(--surface);
   }
   .tabs button {
-    min-height: 48px;
-    padding: 4px 2px;
-    margin: 0;
-    border-bottom: 0;
-    border-top: 2px solid transparent;
-    font-size: 11px;
-  }
-  .tabs button::before {
-    content: attr(data-short);
-  }
-  .tab-label {
-    display: none;
-  }
-  #active-count {
-    font-size: 10px;
-  }
-  .panel {
-    padding: 10px;
-    min-width: 0;
-  }
-  .operations-panel {
-    margin-top: 8px;
-  }
-  .section-label {
-    font-size: 10px;
-    letter-spacing: 0;
-    margin-bottom: 6px;
-  }
-  .toolbar {
-    gap: 6px;
-    margin-bottom: 6px;
-  }
-  .toolbar label {
-    min-width: 0;
-  }
-  .library-browser .toolbar {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
-  .library-browser .toolbar > label:first-child {
-    grid-column: 1/-1;
-  }
-  .library-browser .toolbar > .grow {
-    grid-column: 1;
-  }
-  .library-browser .toolbar > label:first-child {
-    display: grid;
-    grid-template-columns: 48px minmax(0, 1fr);
-    align-items: center;
-    gap: 4px;
-  }
-  .breadcrumbs {
-    font-size: 11px;
-    gap: 6px;
-    padding: 5px 0;
-    min-width: 0;
-  }
-  .breadcrumbs span {
-    min-width: 0;
-    overflow-wrap: anywhere;
-  }
-  .media-row {
-    gap: 4px;
-    padding: 2px 0;
-    min-height: 44px;
-  }
-  .media-row > button {
-    min-width: 0;
-    flex: 1;
-    border: 0;
-    text-align: left;
-    padding: 4px;
-    overflow-wrap: anywhere;
-  }
-  .media-title {
-    font-size: 13px;
-  }
-  .media-size {
-    font-size: 10px;
-  }
-  .pagination {
-    margin-top: 6px;
-    gap: 4px;
-    font-size: 10px;
-  }
-  button {
-    padding: 4px 8px;
-    font-size: 12px;
-  }
-  summary {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    font-size: 11px;
-  }
-  summary::before {
-    content: "+";
-    color: var(--forest);
-  }
-  details[open] > summary::before {
-    content: "−";
-  }
-  details {
-    margin: 6px 0;
-    padding: 0 8px;
-  }
-  input,
-  select,
-  textarea {
-    margin-top: 2px;
-    padding: 5px 6px;
-  }
-  label {
-    font-size: 11px;
-    margin: 5px 0;
-  }
-  .check {
-    margin: 0;
-    gap: 6px;
-  }
-  .check input {
-    width: 16px;
-    height: 16px;
-    flex: 0 0 16px;
-    margin: 0;
-  }
-  .media-check {
-    flex-basis: 36px;
-    width: 36px;
-  }
-  .media-check input {
-    width: 18px;
-    height: 18px;
-  }
-  .target-editor {
-    padding-top: 10px;
-  }
-  .target-editor > .muted {
-    display: none;
-  }
-  #source-summary {
-    font-size: 10px;
-    margin: 4px 0;
-  }
-  #job-form > label:not(.check),
-  #custom-fields > label:not(.check) {
-    display: grid;
-    grid-template-columns: 80px minmax(0, 1fr);
-    align-items: center;
-    gap: 6px;
-    margin: 0;
-    border-bottom: 1px solid var(--line);
-  }
-  #job-form > label:not(.check) > select,
-  #custom-fields > label:not(.check) > select {
-    border: 0;
-    background: transparent;
-    margin: 0;
-  }
-  .field-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 0 8px;
-  }
-  .submit-actions {
-    margin: 6px 0;
-    gap: 6px;
-  }
-  .submit-actions button {
-    min-width: 0;
-    flex-basis: 45%;
-  }
-  #enqueue {
-    flex-basis: 100%;
-  }
-  .savings-dashboard {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 6px;
-    margin-bottom: 8px;
-    padding-bottom: 8px;
-  }
-  .savings-dashboard .metadata {
-    font: 10px/1.3 var(--body);
-  }
-  .savings-dashboard > div > .metadata:first-child {
-    display: block;
-    min-height: 26px;
-  }
-  .savings-dashboard strong {
-    font:
-      18px/1.2 Georgia,
-      serif;
-    white-space: nowrap;
-    margin: 2px 0 0;
-  }
-  .savings-dashboard > div > .metadata:last-child {
-    display: none;
-  }
-  #jobs > .toolbar > div > .muted {
-    display: none;
-  }
-  #jobs > .toolbar {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto auto;
-    align-items: center;
-  }
-  #jobs > .toolbar > div {
-    min-width: 0;
-  }
-  #jobs .toolbar label {
-    font-size: 0;
-    margin: 0;
-  }
-  #job-filter {
-    font-size: 13px;
-    margin: 0;
-    max-width: 112px;
-  }
-  #jobs h2 {
-    margin: 0;
-    font:
-      16px/1.3 Georgia,
-      serif;
-    letter-spacing: 0;
-  }
-  #jobs-updated {
-    font: 10px/1.3 var(--body);
-    margin: 2px 0;
-  }
-  .job-row {
-    position: relative;
-    gap: 3px;
-    padding: 8px 0 4px;
-  }
-  .job-row h3 {
-    padding-right: 44px;
-  }
-  .job-row .detail-link {
-    position: absolute;
-    top: 3px;
-    right: 0;
-    width: 44px;
-    min-height: 44px;
-    font-size: 0;
-    background: transparent;
-  }
-  .job-row .detail-link::after {
-    content: "›";
-    font: 24px/1 var(--body);
-    color: var(--muted);
-  }
-  .job-actions:has(> .detail-link:only-child) {
-    display: contents;
-  }
-  .job-row h3 {
-    font-size: 13px;
-    font-weight: 600;
-    margin: 0 0 2px;
-  }
-  .job-meta > .source-path {
-    display: none;
-  }
-  .job-meta .metadata {
-    font: 11px/1.35 var(--body);
-  }
-  .job-meta .muted {
-    display: -webkit-box;
-    -webkit-line-clamp: 1;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-    font-size: 11px;
-    line-height: 1.35;
-    margin: 2px 0;
-  }
-  .badge {
-    font: 10px/1.2 var(--body);
-    margin: 1px 4px 1px 0;
-    padding: 1px 4px;
-  }
-  .job-actions {
-    gap: 2px 6px;
-  }
-  .job-actions button {
-    font-size: 11px;
-    padding: 3px 6px;
-    border-color: transparent;
-  }
-  .job-actions button:not(.quiet) {
-    color: var(--forest);
-    background: #244d4008;
-  }
-  .job-row .workflow-progress {
-    display: none;
-  }
-  .job-progress .metadata {
-    font: 10px/1.3 var(--body);
-  }
-  .worker-progress {
-    gap: 1px 6px;
-  }
-  .job-row .worker-progress > .progress-observed-at {
-    display: none;
-  }
-  dialog {
-    width: calc(100% - 12px);
-    max-width: none;
-    max-height: calc(
-      100dvh - 16px - env(safe-area-inset-top) - env(safe-area-inset-bottom)
-    );
-    padding: 12px;
-    overscroll-behavior: contain;
-  }
-  .dialog-heading {
-    position: sticky;
-    top: -12px;
-    padding: 3px 0;
-    background: var(--surface);
-    z-index: 1;
-  }
-  .dialog-heading h2 {
-    margin: 0;
-    font-size: 18px;
-  }
-  .batch-item-row {
-    gap: 6px;
-    padding: 5px 0;
-  }
-  .batch-item-row > span:first-child {
-    min-width: 0;
-    flex: 1 0 65%;
-  }
-  pre {
-    padding: 8px;
-    max-height: 40dvh;
-    font-size: 11px;
-  }
-  .login {
-    margin: 16px auto;
-  }
-  .login h1 {
-    font-size: 28px;
-    margin-bottom: 8px;
-  }
-  .login form {
-    margin-top: 10px;
-  }
-  footer {
-    padding: 8px;
-    margin-bottom: calc(48px + env(safe-area-inset-bottom));
-  }
-  footer span {
-    display: none;
-  }
-  #notice {
-    bottom: calc(58px + env(safe-area-inset-bottom));
-    width: calc(100% - 16px);
-    max-width: none;
-    padding: 10px 12px;
-  }
-}
-/* Keep hit areas usable without inflating type or gaps between controls. */
-@media (pointer: coarse), (max-width: 900px) {
-  button,
-  summary {
-    min-height: 44px;
-  }
-  input:not([type="checkbox"]),
-  select,
-  textarea {
-    min-height: 40px;
-    font-size: 16px;
-  }
-  .check {
-    min-height: 40px;
-    align-items: center;
-  }
-  .media-check {
-    min-height: 44px;
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  * {
-    transition: none !important;
-  }
-}
-/* Calm, compact navigation and distinct workspaces. */
-.tabs {
-  gap: 8px;
-}
-.tabs button {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 9px 12px;
-  font-size: 13px;
-}
-.nav-icon {
-  width: 18px;
-  height: 18px;
-  flex: 0 0 18px;
-}
-.tab-text {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-.operations-panel {
-  margin-top: 0;
-}
-.queue-toolbar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 8px;
-}
-.queue-toolbar h2 {
-  margin: 0;
-  font-size: 21px;
-}
-.queue-filters {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-}
-.queue-filters select {
-  width: 170px;
-  margin: 0;
-  height: 36px;
-  padding: 5px 8px;
-  font-size: 12px;
-}
-.icon-button {
-  width: 36px;
-  height: 36px;
-  padding: 8px;
-  display: inline-grid;
-  place-items: center;
-}
-.icon-button svg {
-  width: 18px;
-  height: 18px;
-}
-#jobs-updated {
-  font: 11px/1.4 var(--body);
-  margin: 4px 0 8px;
-}
-.list-footer {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  margin-top: 10px;
-  position: relative;
-  font-size: 11px;
-}
-#jobs-sentinel,
-#library-sentinel {
-  display: block;
-  position: absolute;
-  bottom: 0;
-  height: 1px;
-  width: 100%;
-  pointer-events: none;
-}
-.job-row {
-  grid-template-columns: minmax(0, 1fr);
-  gap: 4px;
-  padding: 10px 0;
-}
-.job-row .job-title {
-  text-align: left;
-  font-size: 13px;
-  font-weight: 600;
-  border: 0;
-  background: transparent;
-  padding: 0;
-  min-height: 28px;
-  width: 100%;
-  overflow-wrap: anywhere;
-}
-.job-row .job-title:hover {
-  color: var(--forest);
-  text-decoration: underline;
-}
-.job-row h3 {
-  padding: 0;
-  margin: 0;
-}
-.job-row .badge {
-  font: 10px/1.3 var(--body);
-  border: 0;
-  padding: 2px 5px;
-  border-radius: 3px;
-  margin: 2px 5px 2px 0;
-}
-.job-row .badge:last-of-type {
-  background: transparent;
-  padding: 2px 0;
-}
-.job-row .savings-line {
-  font: 11px/1.4 var(--body);
-}
-.job-actions {
-  gap: 4px;
-}
-.job-actions button {
-  padding: 5px 8px;
-  font-size: 12px;
-  min-height: 32px;
-}
-.worker-progress {
-  width: 100%;
-  min-width: 0;
-}
-.savings-dashboard {
-  margin: 12px 0 18px;
-  gap: 12px;
-}
-.savings-dashboard .metadata {
-  font: 12px/1.4 var(--body);
-}
-.savings-history-row {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  align-items: center;
-  gap: 8px;
-}
-.savings-history-row .metadata {
-  font: 12px/1.4 var(--body);
-}
-.recipe-layout {
-  grid-template-columns: minmax(180px, 240px) minmax(0, 600px);
-  gap: 24px;
-}
-.recipe-sidebar {
-  border-right: 1px solid var(--line);
-  padding-right: 16px;
-}
-#recipes-list {
-  max-height: 60vh;
-  overflow: auto;
-}
-.recipe-button {
-  border: 0;
-  border-radius: 4px;
-  padding: 9px 8px;
-  margin: 0;
-  font-size: 12px;
-}
-.recipe-button[aria-pressed="true"] {
-  background: #244d4010;
-  color: var(--forest);
-  font-weight: 600;
-}
-#recipe-source {
-  font-size: 11px;
-  margin: 8px 0;
-}
-.profile-controls > label:not(.check) {
-  display: grid;
-  grid-template-columns: 110px 1fr;
-  align-items: center;
-}
-.profile-controls .field-grid {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-}
-.profile-history {
-  color: var(--muted);
-  font-size: 12px;
-  white-space: pre-line;
-  margin-top: 12px;
-}
-#recipe-form > .submit-actions button {
-  flex: initial;
-  min-width: 0;
-}
-#recipe-extra-fields fieldset {
-  border: 0;
-  padding: 0;
-  margin: 14px 0;
-}
-#recipe-extra-fields legend {
-  font-weight: 600;
-  color: var(--forest);
-  font-size: 13px;
-}
-#recipe-extra-fields label:not(.check) {
-  display: grid;
-  grid-template-columns: minmax(140px, 1fr) minmax(0, 1fr);
-  align-items: center;
-  gap: 8px;
-}
-.settings-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 12px 0;
-  border-bottom: 1px solid var(--line);
-}
-.settings-row .job-actions {
-  flex-wrap: wrap;
-  justify-content: flex-end;
-}
-#advanced {
-  max-width: 800px;
-}
-.detail-extras {
-  display: flex;
-  gap: 6px;
-  border-top: 1px solid var(--line);
-  margin-top: 12px;
-}
-#detail-summary > .metadata {
-  font-family: var(--body);
-}
-#detail-summary > .metadata:first-child {
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--ink);
-}
-#recipe-form input:not([type="checkbox"]),
-#recipe-form select {
-  padding: 8px;
-}
-#path-dialog {
-  max-width: 640px;
-}
-.media-row > button.media-title {
-  border: 0;
-  background: none;
-  flex: 1;
-  min-width: 0;
-  text-align: left;
-  padding: 5px 0;
-  font-size: 13px;
-}
-#selection-title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-@media (max-width: 900px) {
-  .recipe-layout {
-    grid-template-columns: minmax(150px, 200px) minmax(0, 1fr);
-    gap: 12px;
-  }
-  .queue-filters select,
-  .icon-button {
-    height: 44px;
-  }
-  .icon-button {
-    min-width: 44px;
-  }
-  .job-actions button {
-    min-height: 44px;
-  }
-}
-@media (max-width: 600px) {
-  .tabs {
-    grid-template-columns: repeat(5, minmax(0, 1fr));
-    padding-top: 4px;
-  }
-  .tabs button {
-    display: flex;
     flex-direction: column;
     justify-content: center;
     gap: 3px;
+    min-width: 0;
     min-height: 54px;
+    margin: 0;
     padding: 4px 0;
     border: 0;
     font-size: 10px;
   }
-  .tabs button::before {
-    content: none;
-  }
-  .tabs .tab-label {
-    display: inline;
+  .tabs button[aria-selected="true"] {
+    color: var(--forest);
+    background: #244d4008;
+    border-radius: 6px;
   }
   .tabs .nav-icon {
     width: 21px;
@@ -1356,313 +946,135 @@ footer {
     flex-basis: 21px;
     padding: 1px;
   }
-  .tabs button[aria-selected="true"] {
-    color: var(--forest);
-    font-weight: 600;
-    background: #244d4008;
-    border-radius: 6px;
-  }
   #active-count {
     font-size: 9px;
   }
-  .panel {
-    padding: 10px;
+  .media-row {
+    gap: 4px;
+    padding: 2px 0;
   }
-  .queue-toolbar h2 {
-    font-size: 18px;
-  }
-  .queue-filters select {
-    width: 148px;
-    font-size: 13px;
+  #job-form > label:not(.check),
+  #custom-fields > label:not(.check) {
+    grid-template-columns: 80px minmax(0, 1fr);
   }
   .queue-toolbar {
     gap: 6px;
-    margin-bottom: 5px;
+    margin-bottom: 4px;
+  }
+  .queue-filters select {
+    width: 148px;
   }
   #jobs-updated {
     margin: 2px 0;
     font-size: 10px;
   }
   .job-row {
+    gap: 2px 6px;
     padding: 7px 0;
-    gap: 2px;
   }
-  .job-row .job-title {
-    min-height: 36px;
-  }
-  .job-row .job-progress .metadata {
-    font: 10px/1.3 var(--body);
+  .job-row > .job-actions:not(.multiple-actions) {
+    max-width: 105px;
   }
   .job-row .job-actions button {
     font-size: 11px;
-    min-height: 44px;
+    padding: 4px 7px;
+  }
+  .job-row .savings-line,
+  .job-progress .metadata {
+    font-size: 10px;
+  }
+  .savings-dashboard {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .savings-dashboard > div:first-child {
+    grid-column: 1 / -1;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--line);
+  }
+  .savings-dashboard > div:first-child strong {
+    font-size: 28px;
+  }
+  .savings-dashboard strong {
+    font-size: 22px;
+  }
+  .savings-history-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
   }
   .recipe-layout {
     display: block;
   }
   .recipe-sidebar {
-    border: 0;
     padding: 0;
-  }
-  #recipes-list {
-    display: flex;
-    gap: 4px;
-    overflow-x: auto;
-    max-height: none;
-    padding: 4px 0 8px;
-  }
-  .recipe-button {
-    white-space: nowrap;
-    width: auto;
-    flex: 0 0 auto;
-    font-size: 11px;
-    border: 1px solid var(--line);
+    border: 0;
   }
   #recipe-search {
     margin: 0;
   }
-  .savings-dashboard {
-    grid-template-columns: 1fr 1fr;
-    margin: 12px 0;
-  }
-  .savings-dashboard > div:first-child {
-    grid-column: 1/-1;
-    padding-bottom: 12px;
-    border-bottom: 1px solid var(--line);
-  }
-  .savings-dashboard > div:first-child strong {
-    font-size: 32px;
-    margin: 4px 0;
-  }
-  .savings-dashboard strong {
-    font-size: 23px;
-    margin: 5px 0;
-  }
-  .savings-dashboard > div > .metadata:first-child {
-    min-height: 0;
-    font-size: 12px;
-  }
-  .savings-dashboard > div > .metadata:last-child {
-    display: block;
-    font-size: 10px;
-  }
-  .settings-row {
-    font-size: 12px;
-    align-items: flex-start;
-  }
-  .settings-row .job-actions {
-    max-width: 65%;
-  }
-  main {
-    padding-bottom: calc(76px + env(safe-area-inset-bottom));
-  }
-  #notice {
-    bottom: calc(70px + env(safe-area-inset-bottom));
-  }
-}
-/* Adapted from the Stitch Queue: actions beside each job, telemetry below. */
-.job-row {
-  grid-template-columns: minmax(0, 1fr) auto;
-}
-.job-row > .job-actions {
-  grid-column: 2;
-  grid-row: 1;
-  align-self: center;
-}
-.job-row > .worker-progress {
-  grid-column: 1/-1;
-  grid-row: 2;
-}
-.job-row:has(.multiple-actions) {
-  grid-template-columns: minmax(0, 1fr);
-}
-.job-row > .multiple-actions {
-  grid-column: 1;
-  grid-row: auto;
-}
-.job-actions button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-}
-.job-actions button svg {
-  width: 14px;
-  height: 14px;
-  order: -1;
-}
-.job-row .job-actions button {
-  border: 1px solid var(--line);
-  background: transparent;
-  border-radius: 4px;
-}
-.job-row .job-title {
-  min-height: 30px;
-}
-@media (max-width: 600px) {
-  .job-row .job-actions button {
-    font-size: 10px;
-    padding: 4px 7px;
-  }
-  .job-row .job-title {
-    min-height: 36px;
-  }
-  .job-row > .job-actions:not(.multiple-actions) {
-    max-width: 105px;
-  }
-  .job-row .job-meta .savings-line {
-    font-size: 10px;
-  }
-}
-/* Compact field typography: labels do not make values bold. */
-input,
-select,
-textarea {
-  font-weight: 400;
-}
-#recipe-form > label {
-  display: grid;
-  grid-template-columns: 74px minmax(0, 1fr);
-  align-items: center;
-  gap: 8px;
-  margin: 0;
-  border-bottom: 1px solid var(--line);
-}
-#recipe-form > label input {
-  border: 0;
-  background: transparent;
-  margin: 0;
-}
-#recipe-source {
-  margin: 6px 0;
-}
-.preservation-note {
-  font-size: 10px;
-  line-height: 1.4;
-  margin: 6px 0;
-}
-@media (max-width: 900px), (pointer: coarse) {
-  input:not([type="checkbox"]),
-  select,
-  textarea {
-    font-size: 13px;
-    font-weight: 400;
-  }
-}
-@media (max-width: 600px) {
-  body {
-    font-size: 12px;
-  }
-  .queue-toolbar h2 {
-    font-size: 17px;
-  }
-  label {
-    font-size: 10px;
-    font-weight: 500;
-  }
-  #recipe-form input:not([type="checkbox"]),
-  #recipe-form select {
-    font-size: 13px;
-    min-height: 36px;
-    padding: 5px 6px;
-    font-weight: 400;
-  }
-  #recipe-form > label {
-    min-height: 44px;
-  }
-  #recipe-form .profile-controls > label {
-    grid-template-columns: 74px minmax(0, 1fr);
-  }
-  #recipe-form .profile-controls .field-grid label {
-    margin: 4px 0;
-  }
   #recipes-list {
-    padding-bottom: 6px;
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 4px;
+    max-height: none;
+    padding: 4px 0 6px;
+    overflow-x: auto;
+    overflow-y: hidden;
   }
   .recipe-button {
+    width: auto;
+    flex: 0 0 auto;
+    white-space: nowrap;
     padding: 5px 8px;
-    font-size: 10px;
-    min-height: 36px;
-  }
-  #recipe-search {
-    font-size: 12px;
-    min-height: 36px;
-  }
-  #recipe-form > .submit-actions button {
-    font-size: 11px;
-  }
-  .queue-toolbar > button {
+    border: 1px solid var(--line);
     font-size: 11px;
   }
   .profile-controls {
     margin-top: 6px;
   }
-  #recipe-advanced {
-    min-height: 36px;
-    font-size: 11px;
+  .profile-controls > label:not(.check) {
+    grid-template-columns: 74px minmax(0, 1fr);
+  }
+  .settings-row {
+    font-size: 12px;
+  }
+  #notice {
+    bottom: calc(70px + env(safe-area-inset-bottom));
   }
 }
 
-#connection-status {
-  padding: 8px 12px;
-  margin-bottom: 10px;
-  border-left: 2px solid var(--accent);
-  color: var(--muted);
-  font-size: 12px;
-}
-.login h1 {
-  font-size: 22px;
-}
-
-dialog .submit-actions {
-  justify-content: flex-end;
-  margin: 12px 0 0;
-}
-dialog .submit-actions button {
-  flex: 0 0 auto;
-  width: auto;
-  min-width: 0;
-  min-height: 32px;
-  padding: 6px 10px;
-  font-size: 12px;
-}
-#batch-review pre {
-  padding: 12px;
-}
-@media (max-width: 600px), (pointer: coarse) {
-  dialog .submit-actions button {
-    min-height: 44px;
+/* Use one dimension token for every touch target, including landscape phones. */
+@media (pointer: coarse), (max-width: 900px) {
+  :root {
+    --control-size: 44px;
+    --dialog-control-size: 44px;
+  }
+  .media-check input {
+    width: 18px;
+    height: 18px;
+    flex-basis: 18px;
   }
 }
-
-#folder-breadcrumbs {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 2px;
-  min-width: 0;
+@media (hover: hover) {
+  button:hover {
+    background: #e9e9df;
+    border-color: var(--muted);
+  }
+  button.primary:hover {
+    background: #19372e;
+  }
+  .icon-button:hover,
+  .quiet:hover {
+    border-color: transparent;
+  }
+  .job-row .job-title:hover {
+    background: transparent;
+    color: var(--forest);
+    text-decoration: underline;
+  }
 }
-.breadcrumb-button {
-  padding: 4px 6px;
-  border: 0;
-  font-size: 12px;
-  color: var(--muted);
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.breadcrumb-button[aria-current] {
-  color: var(--forest);
-  font-weight: 600;
-}
-.breadcrumb-separator {
-  color: var(--muted);
-  font-size: 11px;
-}
-.library-browser > .toolbar > label:first-child {
-  flex: 1;
-}
-.media-icon svg {
-  width: 18px;
-  height: 18px;
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+  }
 }
