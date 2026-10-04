@@ -553,3 +553,23 @@ test("Cloudflare mode opens the workspace without a local sign-in or sign-out", 
   assert.equal(h.elements.get("login").hidden, true);
   assert.equal(h.elements.get("logout").hidden, true);
 });
+
+test("folder breadcrumbs navigate directly and clear stale file/search selection", async () => {
+  const h = harness();
+  h.context.paths = [];
+  h.run(
+    'controls = () => {}; api = async (request) => { paths.push(request); return {path:"/media",total:0,items:[],has_more:false}; }; state.folder = "/media/Series/Season 1"; state.folderSelected = new Set(["/media/old.mp4"]);',
+  );
+  h.document.getElementById("service").value = "folder:/media";
+  h.document.getElementById("search").value = "episode";
+  h.document.getElementById("path").value = "/media/old.mp4";
+  h.run('folderBreadcrumbs("/media", state.folder);');
+  await h.elements
+    .get("folder-breadcrumbs")
+    .children[0].listeners.get("click")();
+  assert.equal(h.run("state.folder"), "/media");
+  assert.equal(h.run("state.folderSelected.size"), 0);
+  assert.equal(h.elements.get("search").value, "");
+  assert.equal(h.elements.get("path").value, "");
+  assert.match(h.context.paths[0], /path=%2Fmedia&q=&offset=0/);
+});

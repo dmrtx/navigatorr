@@ -358,8 +358,8 @@ summary {
   margin: 12px 0;
 }
 .submit-actions button {
-  flex: 1;
-  min-width: 130px;
+  flex: 0 0 auto;
+  min-width: 0;
 }
 .job-row {
   display: grid;
@@ -514,7 +514,7 @@ dialog {
   background: var(--surface);
   color: var(--ink);
   border-radius: 5px;
-  width: min(1000px, 94vw);
+  width: min(680px, 94vw);
   max-height: 90vh;
   padding: 16px;
 }
@@ -1182,7 +1182,8 @@ footer {
   min-height: 32px;
 }
 .worker-progress {
-  max-width: 520px;
+  width: 100%;
+  min-width: 0;
 }
 .savings-dashboard {
   margin: 12px 0 18px;
@@ -1611,4 +1612,57 @@ textarea {
 }
 .login h1 {
   font-size: 22px;
+}
+
+dialog .submit-actions {
+  justify-content: flex-end;
+  margin: 12px 0 0;
+}
+dialog .submit-actions button {
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 0;
+  min-height: 32px;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+#batch-review pre {
+  padding: 12px;
+}
+@media (max-width: 600px), (pointer: coarse) {
+  dialog .submit-actions button {
+    min-height: 44px;
+  }
+}
+
+#folder-breadcrumbs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+  min-width: 0;
+}
+.breadcrumb-button {
+  padding: 4px 6px;
+  border: 0;
+  font-size: 12px;
+  color: var(--muted);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.breadcrumb-button[aria-current] {
+  color: var(--forest);
+  font-weight: 600;
+}
+.breadcrumb-separator {
+  color: var(--muted);
+  font-size: 11px;
+}
+.library-browser > .toolbar > label:first-child {
+  flex: 1;
+}
+.media-icon svg {
+  width: 18px;
+  height: 18px;
 }
