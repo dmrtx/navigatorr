@@ -82,6 +82,9 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.HandleFunc("GET /api/maintenance/bootstrap", s.bootstrap)
 	mux.HandleFunc("GET /api/maintenance/library", s.library)
+	mux.HandleFunc("GET /api/maintenance/operations", s.operations)
+	mux.HandleFunc("GET /api/maintenance/batch-items", s.batchItems)
+	mux.HandleFunc("GET /api/maintenance/folder", s.folder)
 	mux.HandleFunc("POST /api/maintenance/tool", s.tool)
 	mux.HandleFunc("GET /api/maintenance/logs", s.logs)
 	files, _ := fs.Sub(assets, "assets")
@@ -244,13 +247,31 @@ func (s *Server) tool(w http.ResponseWriter, r *http.Request) {
 			fail(w, 400, "unsupported maintenance action")
 			return
 		}
-		var inputs map[string]any
-		raw, ok := body.Arguments["inputs"].(string)
-		if !ok || json.Unmarshal([]byte(raw), &inputs) != nil || inputs == nil {
-			fail(w, 400, "inputs must be a JSON object string")
-			return
+		inputs := map[string]any{}
+		if value, present := body.Arguments["inputs"]; present {
+			raw, ok := value.(string)
+			if !ok || raw != "" && (json.Unmarshal([]byte(raw), &inputs) != nil || inputs == nil) {
+				fail(w, 400, "inputs must be a JSON object string")
+				return
+			}
+		}
+		for _, k := range []string{"service", "media_id", "hash", "url", "path", "objective"} {
+			if v, ok := body.Arguments[k].(string); ok && v != "" && inputs[k] == nil {
+				inputs[k] = v
+			}
 		}
 		key, _ := body.Arguments["idempotency_key"].(string)
+		if strings.TrimSpace(key) == "" {
+			key, _ = inputs["idempotency_key"].(string)
+		}
+		if strings.TrimSpace(key) == "" {
+			b := make([]byte, 16)
+			if _, err := rand.Read(b); err != nil {
+				fail(w, 500, "unable to create submission receipt")
+				return
+			}
+			key = hex.EncodeToString(b)
+		}
 		res, err := s.engine.Enqueue(action.WithOrigin(r.Context(), "web"), name, inputs, key)
 		if err != nil {
 			fail(w, 409, err.Error())
@@ -258,6 +279,14 @@ func (s *Server) tool(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, 202, map[string]any{"id": res.ID, "status": res.Status, "action_name": res.ActionName})
 		return
+	}
+	if body.Name == "action_resume" || body.Name == "action_retry" || body.Name == "action_cancel" {
+		id, _ := body.Arguments["id"].(string)
+		inst, err := s.engine.Deps().Store.GetActionInstance(id)
+		if err != nil || inst == nil || !allowedActions[inst.ActionName] {
+			fail(w, 403, "action is not available on the maintenance surface")
+			return
+		}
 	}
 	t := s.mcp.GetTool(body.Name)
 	if t == nil {

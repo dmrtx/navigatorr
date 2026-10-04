@@ -13,6 +13,9 @@ import (
 )
 
 func (e *Engine) stepPromoteImport(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+	if getString(ec.Inputs, "service") == "filesystem" {
+		return e.localPromotionPublish(ctx, ec)
+	}
 	p, svc, err := e.promotionMutation(ec)
 	if err != nil {
 		return promoteFailed(err)
@@ -83,6 +86,9 @@ func (e *Engine) stepPromoteImport(ctx context.Context, ec *ExecutionContext) (S
 }
 
 func (e *Engine) stepPromoteRemoveOld(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+	if getString(ec.Inputs, "service") == "filesystem" {
+		return e.localPromotionRemoveOriginal(ctx, ec)
+	}
 	p, svc, err := e.promotionMutation(ec)
 	if err != nil {
 		return promoteFailed(err)
@@ -242,6 +248,9 @@ func (e *Engine) promotionNoOldReferences(ctx context.Context, svc *arrservice.S
 }
 
 func (e *Engine) stepPromoteRename(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+	if getString(ec.Inputs, "service") == "filesystem" {
+		return e.localPromotionVerifyFinal(ctx, ec)
+	}
 	p, svc, err := e.promotionMutation(ec)
 	if err != nil {
 		return promoteFailed(err)
@@ -331,6 +340,9 @@ func (e *Engine) stepPromoteRename(ctx context.Context, ec *ExecutionContext) (S
 }
 
 func (e *Engine) stepPromoteRescan(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+	if getString(ec.Inputs, "service") == "filesystem" {
+		return e.localPromotionVerifyFinal(ctx, ec)
+	}
 	p, svc, err := e.promotionMutation(ec)
 	if err != nil {
 		return promoteFailed(err)
@@ -349,6 +361,9 @@ func (e *Engine) stepPromoteRescan(ctx context.Context, ec *ExecutionContext) (S
 }
 
 func (e *Engine) stepPromoteFinalize(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+	if getString(ec.Inputs, "service") == "filesystem" {
+		return e.localPromotionFinalize(ctx, ec)
+	}
 	p, svc, err := e.promotionMutation(ec)
 	if err != nil {
 		return promoteFailed(err)

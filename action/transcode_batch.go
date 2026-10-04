@@ -2,6 +2,7 @@ package action
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -22,15 +23,17 @@ func (e *Engine) registerTranscodeBatchTemplate() {
 		AutoReconcile:   true,
 		ImmutableInputs: true,
 		Name:            "transcode_batch",
-		Version:         5,
-		Description:     "Sonarr series batch; series_id is required inside inputs. Direct encoding: choose a non-optimizing profile or profile_config and omit priority; inspect recipe_get if unsure. Bounded tuning: omit profile and set priority=balanced, quality, savings, or preserve_quality (perceptual target, not lossless). Tuning tests three settings on short samples, creates a batch-only recipe and continues; currently oversized H264 1080p 8-bit SDR below 45fps. Bare auto without priority keeps legacy selection. dry_run=true is a completed preview, not a paused encode: start a new action with dry_run=false to encode. promote_candidates=true offers one approval before replacement; otherwise originals remain unchanged. Monitor with action_status.",
+		Version:         6,
+		Description:     "Video batch from explicit paths (1–1000 files inside allowed read roots), or a Sonarr series using service and series_id. paths cannot be combined with service, series_id, season, episode_file_ids, or promote_candidates=true; filesystem batches produce candidates only. Direct encoding: choose a non-optimizing profile or profile_config and omit priority; inspect recipe_get if unsure. Bounded tuning: omit profile and set priority=balanced, quality, savings, or preserve_quality (perceptual target, not lossless). Tuning tests three settings on short samples, creates a batch-only recipe and continues; currently oversized H264 1080p 8-bit SDR below 45fps. Bare auto without priority keeps legacy selection. dry_run=true is a completed preview, not a paused encode: start a new action with dry_run=false to encode. promote_candidates=true offers one approval before replacement; otherwise originals remain unchanged. Monitor with action_status.",
 		Examples: []ActionExample{
+			{Description: "Encode a frozen filesystem selection, without a library service or replacing originals.", Inputs: `{"paths":["/media/movies/Film.mkv","/media/series/Season 1/Episode 1.mp4"],"profile":"general-hevc","media_type":"movie"}`},
 			{Description: "Direct candidates using a non-optimizing profile; substitute the actual series ID and chosen profile.", Inputs: `{"service":"sonarr","series_id":10,"profile":"general-hevc"}`},
 			{Description: "Bounded tuning and candidate encoding, without catalog changes or replacement.", Inputs: `{"service":"sonarr","series_id":10,"priority":"balanced"}`},
 			{Description: "Preview that same intent without encoding. To execute later, start a new action with dry_run=false and a new top-level idempotency_key.", Inputs: `{"service":"sonarr","series_id":10,"priority":"balanced","dry_run":true}`},
 		},
-		RequiredInputs: []string{"service", "series_id"},
+		RequiredInputs: []string{},
 		OptionalInputs: []string{
+			"paths", "service", "series_id",
 			"episode_file_ids",
 			"season",
 			"profile",
@@ -56,7 +59,7 @@ func (e *Engine) registerTranscodeBatchTemplate() {
 		Steps: []StepDefinition{
 			{
 				Name:        "resolve_and_inspect",
-				Description: "Resolve series and episode files from Sonarr, deduplicate, inspect media streams, and select transcode profiles",
+				Description: "Resolve explicit filesystem files or a Sonarr series, deduplicate, inspect media streams, and select transcode profiles",
 				Run:         e.stepTranscodeBatchResolve,
 			},
 			{
@@ -95,48 +98,16 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 		ec.State["ephemeral_recipe_digest"] = ephemeralDigest
 	}
 
-	service := strings.ToLower(strings.TrimSpace(getString(ec.Inputs, "service")))
-	if service == "" {
-		return StepResult{Status: StepFailed, Error: "input 'service' is required"}, nil
-	}
-	if service != "sonarr" {
-		return StepResult{Status: StepFailed, Error: fmt.Sprintf("service %q is not supported; only 'sonarr' is supported for transcode_batch", service)}, nil
-	}
-
-	var seriesID string
-	if sVal, ok := ec.Inputs["series_id"]; ok && sVal != nil {
-		seriesID = strings.TrimSpace(fmt.Sprintf("%v", sVal))
-	}
-	if seriesID == "" || seriesID == "<nil>" {
-		return StepResult{Status: StepFailed, Error: "input 'series_id' is required"}, nil
-	}
-
-	var targetSeason *int
-	if sVal, ok := ec.Inputs["season"]; ok && sVal != nil {
-		sStr := strings.TrimSpace(fmt.Sprintf("%v", sVal))
-		if sStr != "" && sStr != "<nil>" {
-			sInt, err := strconv.Atoi(sStr)
-			if err != nil {
-				return StepResult{Status: StepFailed, Error: fmt.Sprintf("invalid season %q: %v", sStr, err)}, nil
-			}
-			targetSeason = &sInt
-		}
-	}
-
-	if e.deps.Registry == nil {
-		return StepResult{Status: StepFailed, Error: "arr service registry is required for transcode_batch"}, nil
-	}
-	svc, err := e.deps.Registry.Get(service)
-	if err != nil {
-		return StepResult{Status: StepFailed, Error: fmt.Sprintf("arr service %q not configured: %v", service, err)}, nil
-	}
 	if e.deps.Fs == nil {
 		return StepResult{Status: StepFailed, Error: "filesystem resolver is required for transcode_batch"}, nil
 	}
 	if e.deps.Store == nil {
 		return StepResult{Status: StepFailed, Error: "store is required for transcode_batch"}, nil
 	}
-
+	paths, filesystemBatch, pathErr := e.resolveBatchPaths(ec.Inputs)
+	if pathErr != nil {
+		return StepResult{Status: StepFailed, Error: pathErr.Error()}, nil
+	}
 	dryRun := getBool(ec.Inputs, "dry_run")
 
 	// If items already exist in the database for this batch (e.g. on resume / restart), load them
@@ -155,122 +126,176 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 		}, nil
 	}
 
-	// 1. Fetch Series info
-	seriesData, err := svc.Get(ctx, "/series/"+seriesID, nil)
-	if err != nil {
-		return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to query Sonarr series %s: %v", seriesID, err)}, nil
-	}
-	var seriesObj map[string]any
-	if err := json.Unmarshal(seriesData, &seriesObj); err != nil {
-		return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to parse Sonarr series %s response: %v", seriesID, err)}, nil
-	}
-	seriesTitle, _ := seriesObj["title"].(string)
-	seriesType, _ := seriesObj["seriesType"].(string)
-	isAnime := strings.EqualFold(seriesType, "anime")
-	if !isAnime {
-		if genres, ok := seriesObj["genres"].([]any); ok {
-			for _, g := range genres {
-				if strings.EqualFold(fmt.Sprintf("%v", g), "anime") {
-					isAnime = true
-					break
-				}
-			}
-		}
-	}
-	if getBool(ec.Inputs, "is_anime") || strings.EqualFold(getString(ec.Inputs, "media_type"), "anime") {
-		isAnime = true
-	}
-
-	ec.State["series_title"] = seriesTitle
-	ec.State["series_type"] = seriesType
-	ec.State["is_anime"] = isAnime
-	ec.State["service"] = service
-	ec.State["series_id"] = seriesID
-
-	// 2. Fetch Episodes
-	epData, err := svc.Get(ctx, "/episode", map[string]string{"seriesId": seriesID})
-	if err != nil {
-		return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to query Sonarr episodes for series %s: %v", seriesID, err)}, nil
-	}
-	var epList []map[string]any
-	if err := json.Unmarshal(epData, &epList); err != nil {
-		return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to parse Sonarr episodes for series %s: %v", seriesID, err)}, nil
-	}
-
-	// 3. Fetch Episode Files
-	epFileData, err := svc.Get(ctx, "/episodefile", map[string]string{"seriesId": seriesID})
-	if err != nil {
-		return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to query Sonarr episode files for series %s: %v", seriesID, err)}, nil
-	}
-	var epFileList []map[string]any
-	if err := json.Unmarshal(epFileData, &epFileList); err != nil {
-		return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to parse Sonarr episode files for series %s: %v", seriesID, err)}, nil
-	}
-
-	fileMap := make(map[int64]map[string]any)
-	for _, ef := range epFileList {
-		id := int64(numVal(ef["id"]))
-		if id > 0 {
-			fileMap[id] = ef
-		}
-	}
-	selected := map[int64]bool{}
-	if raw, present := ec.Inputs["episode_file_ids"]; present {
-		b, err := json.Marshal(raw)
-		var ids []int64
-		if err != nil || json.Unmarshal(b, &ids) != nil || len(ids) == 0 || len(ids) > 1000 {
-			return StepResult{Status: StepFailed, Error: "episode_file_ids must be a non-empty array of up to 1000 positive file IDs"}, nil
-		}
-		for _, id := range ids {
-			if id <= 0 || fileMap[id] == nil {
-				return StepResult{Status: StepFailed, Error: "selected episode file is not in this series"}, nil
-			}
-			selected[id] = true
-		}
-	}
-
 	type episodeMeta struct {
 		seasonNumber  int
 		episodeNumber int
 		title         string
 	}
+	var seriesTitle string
+	isAnime := getBool(ec.Inputs, "is_anime") || strings.EqualFold(getString(ec.Inputs, "media_type"), "anime")
+	fileMap := make(map[int64]map[string]any)
 	episodesByFile := make(map[int64][]episodeMeta)
 	var fileIDs []int64
-	seenFile := make(map[int64]bool)
+	if filesystemBatch {
+		seriesTitle = "Archivos seleccionados"
+		ec.State["series_title"] = seriesTitle
+		ec.State["source_kind"] = "filesystem"
+		ec.State["is_anime"] = isAnime
+		if maxItems := getMaxBatchItems(ec.Inputs); maxItems > 0 && len(paths) > maxItems {
+			paths = paths[:maxItems]
+		}
+		for i, path := range paths {
+			id := int64(i + 1)
+			fileIDs = append(fileIDs, id)
+			fileMap[id] = map[string]any{"path": path}
+		}
+	} else {
+		service := strings.ToLower(strings.TrimSpace(getString(ec.Inputs, "service")))
+		if service == "" {
+			return StepResult{Status: StepFailed, Error: "input 'service' is required"}, nil
+		}
+		if service != "sonarr" {
+			return StepResult{Status: StepFailed, Error: fmt.Sprintf("service %q is not supported; only 'sonarr' is supported for transcode_batch", service)}, nil
+		}
 
-	for _, ep := range epList {
-		hasFile, _ := ep["hasFile"].(bool)
-		if !hasFile {
-			continue
+		var seriesID string
+		if sVal, ok := ec.Inputs["series_id"]; ok && sVal != nil {
+			seriesID = strings.TrimSpace(fmt.Sprintf("%v", sVal))
 		}
-		fID := int64(numVal(ep["episodeFileId"]))
-		if fID <= 0 {
-			continue
+		if seriesID == "" || seriesID == "<nil>" {
+			return StepResult{Status: StepFailed, Error: "input 'series_id' is required"}, nil
 		}
-		if len(selected) > 0 && !selected[fID] {
-			continue
+
+		var targetSeason *int
+		if sVal, ok := ec.Inputs["season"]; ok && sVal != nil {
+			sStr := strings.TrimSpace(fmt.Sprintf("%v", sVal))
+			if sStr != "" && sStr != "<nil>" {
+				sInt, err := strconv.Atoi(sStr)
+				if err != nil {
+					return StepResult{Status: StepFailed, Error: fmt.Sprintf("invalid season %q: %v", sStr, err)}, nil
+				}
+				targetSeason = &sInt
+			}
 		}
-		seasonNum := int(numVal(ep["seasonNumber"]))
-		if targetSeason != nil && seasonNum != *targetSeason {
-			continue
+
+		if e.deps.Registry == nil {
+			return StepResult{Status: StepFailed, Error: "arr service registry is required for transcode_batch"}, nil
 		}
-		if !seenFile[fID] {
-			seenFile[fID] = true
-			fileIDs = append(fileIDs, fID)
+		svc, err := e.deps.Registry.Get(service)
+		if err != nil {
+			return StepResult{Status: StepFailed, Error: fmt.Sprintf("arr service %q not configured: %v", service, err)}, nil
 		}
-		epNum := int(numVal(ep["episodeNumber"]))
-		epTitle, _ := ep["title"].(string)
-		episodesByFile[fID] = append(episodesByFile[fID], episodeMeta{
-			seasonNumber:  seasonNum,
-			episodeNumber: epNum,
-			title:         epTitle,
+		// 1. Fetch Series info
+		seriesData, err := svc.Get(ctx, "/series/"+seriesID, nil)
+		if err != nil {
+			return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to query Sonarr series %s: %v", seriesID, err)}, nil
+		}
+		var seriesObj map[string]any
+		if err := json.Unmarshal(seriesData, &seriesObj); err != nil {
+			return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to parse Sonarr series %s response: %v", seriesID, err)}, nil
+		}
+		seriesTitle, _ = seriesObj["title"].(string)
+		seriesType, _ := seriesObj["seriesType"].(string)
+		isAnime = strings.EqualFold(seriesType, "anime")
+		if !isAnime {
+			if genres, ok := seriesObj["genres"].([]any); ok {
+				for _, g := range genres {
+					if strings.EqualFold(fmt.Sprintf("%v", g), "anime") {
+						isAnime = true
+						break
+					}
+				}
+			}
+		}
+		if getBool(ec.Inputs, "is_anime") || strings.EqualFold(getString(ec.Inputs, "media_type"), "anime") {
+			isAnime = true
+		}
+
+		ec.State["series_title"] = seriesTitle
+		ec.State["series_type"] = seriesType
+		ec.State["is_anime"] = isAnime
+		ec.State["service"] = service
+		ec.State["series_id"] = seriesID
+
+		// 2. Fetch Episodes
+		epData, err := svc.Get(ctx, "/episode", map[string]string{"seriesId": seriesID})
+		if err != nil {
+			return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to query Sonarr episodes for series %s: %v", seriesID, err)}, nil
+		}
+		var epList []map[string]any
+		if err := json.Unmarshal(epData, &epList); err != nil {
+			return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to parse Sonarr episodes for series %s: %v", seriesID, err)}, nil
+		}
+
+		// 3. Fetch Episode Files
+		epFileData, err := svc.Get(ctx, "/episodefile", map[string]string{"seriesId": seriesID})
+		if err != nil {
+			return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to query Sonarr episode files for series %s: %v", seriesID, err)}, nil
+		}
+		var epFileList []map[string]any
+		if err := json.Unmarshal(epFileData, &epFileList); err != nil {
+			return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to parse Sonarr episode files for series %s: %v", seriesID, err)}, nil
+		}
+
+		fileMap = make(map[int64]map[string]any)
+		for _, ef := range epFileList {
+			id := int64(numVal(ef["id"]))
+			if id > 0 {
+				fileMap[id] = ef
+			}
+		}
+		selected := map[int64]bool{}
+		if raw, present := ec.Inputs["episode_file_ids"]; present {
+			b, err := json.Marshal(raw)
+			var ids []int64
+			if err != nil || json.Unmarshal(b, &ids) != nil || len(ids) == 0 || len(ids) > 1000 {
+				return StepResult{Status: StepFailed, Error: "episode_file_ids must be a non-empty array of up to 1000 positive file IDs"}, nil
+			}
+			for _, id := range ids {
+				if id <= 0 || fileMap[id] == nil {
+					return StepResult{Status: StepFailed, Error: "selected episode file is not in this series"}, nil
+				}
+				selected[id] = true
+			}
+		}
+
+		seenFile := make(map[int64]bool)
+
+		for _, ep := range epList {
+			hasFile, _ := ep["hasFile"].(bool)
+			if !hasFile {
+				continue
+			}
+			fID := int64(numVal(ep["episodeFileId"]))
+			if fID <= 0 {
+				continue
+			}
+			if len(selected) > 0 && !selected[fID] {
+				continue
+			}
+			seasonNum := int(numVal(ep["seasonNumber"]))
+			if targetSeason != nil && seasonNum != *targetSeason {
+				continue
+			}
+			if !seenFile[fID] {
+				seenFile[fID] = true
+				fileIDs = append(fileIDs, fID)
+			}
+			epNum := int(numVal(ep["episodeNumber"]))
+			epTitle, _ := ep["title"].(string)
+			episodesByFile[fID] = append(episodesByFile[fID], episodeMeta{
+				seasonNumber:  seasonNum,
+				episodeNumber: epNum,
+				title:         epTitle,
+			})
+		}
+		sort.Slice(fileIDs, func(i, j int) bool {
+			return fileIDs[i] < fileIDs[j]
 		})
-	}
-	sort.Slice(fileIDs, func(i, j int) bool {
-		return fileIDs[i] < fileIDs[j]
-	})
-	if maxItems := getMaxBatchItems(ec.Inputs); maxItems > 0 && len(fileIDs) > maxItems {
-		fileIDs = fileIDs[:maxItems]
+		if maxItems := getMaxBatchItems(ec.Inputs); maxItems > 0 && len(fileIDs) > maxItems {
+			fileIDs = fileIDs[:maxItems]
+		}
+
 	}
 
 	requestedProfile := strings.TrimSpace(getString(ec.Inputs, "profile"))
@@ -310,6 +335,9 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 	var batchItems []store.TranscodeBatchItem
 	for _, fID := range fileIDs {
 		itemKey := fmt.Sprintf("epfile-%d", fID)
+		if filesystemBatch {
+			itemKey = fmt.Sprintf("file-%x", sha256.Sum256([]byte(getString(fileMap[fID], "path"))))
+		}
 		existing, _ := e.deps.Store.GetTranscodeBatchItem(ec.InstanceID, itemKey)
 		if existing != nil {
 			batchItems = append(batchItems, *existing)
@@ -380,8 +408,8 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 		}
 
 		rep, err := mediainspect.InspectDetailed(ctx, e.deps.Ffprobe, cleanPath)
-		if err != nil || !rep.Probed {
-			reason := "ffprobe did not produce a trustworthy inspection"
+		if err != nil || !rep.Probed || len(rep.Video) == 0 {
+			reason := "ffprobe did not produce a trustworthy video inspection"
 			if err != nil {
 				reason = fmt.Sprintf("mediainspect failed: %v", err)
 			}

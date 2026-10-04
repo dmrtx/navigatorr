@@ -133,6 +133,8 @@ func TestPromotionSeriesReservationReleasesOnlyBeforeFirstImport(t *testing.T) {
 			`{"promotion":{"approved":true}}`,
 			`{"promotion":{"approved":true,"commands":{"import":{"sent_at":"accepted-or-uncertain"}}}}`,
 			`{"promotion":{"approved":true},"promotion_reimport_history":[{"previous_import":{"done":true}}]}`,
+			`{"promotion":{"approved":true},"filesystem_publish_started":true}`,
+			`{"promotion":{"approved":true},"filesystem_published":true}`,
 		} {
 			s, err := Open(filepath.Join(t.TempDir(), "reservation.db"))
 			if err != nil {

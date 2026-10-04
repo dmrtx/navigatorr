@@ -5,6 +5,7 @@ const state = {
   files: new Map(),
   selected: new Set(),
   libraryOffset: 0,
+  libraryRevision: 0,
   jobsOffset: 0,
   recipe: null,
   recipes: [],
@@ -12,8 +13,17 @@ const state = {
   detail: null,
   chunk: 0,
   stepOffset: 0,
+  batchItemsOffset: 0,
+  jobsRevision: 0,
+  detailRevision: 0,
+  busyJobs: new Set(),
+  submitting: false,
 };
 const names = {
+  queued: "En cola",
+  waiting_for_slot: "Esperando turno",
+  skip: "Omitido",
+  review: "Requiere revisión",
   pending: "En cola",
   running: "En ejecución",
   waiting_external: "Esperando worker",
@@ -120,7 +130,8 @@ function selectTab(tab) {
     .forEach((n) =>
       n.setAttribute("aria-selected", String(n.dataset.tab === tab)),
     );
-  if (tab === "jobs") safe(loadJobs);
+  $("jobs").hidden = !["library", "jobs"].includes(tab);
+  if (["library", "jobs"].includes(tab)) safe(loadJobs);
   if (tab === "recipes") safe(loadRecipes);
 }
 document
@@ -150,11 +161,16 @@ async function initialize() {
   $("workspace").hidden = false;
   $("logout").hidden = false;
   $("service").replaceChildren();
+  info.roots.forEach((r) =>
+    option($("service"), `folder:${r}`, `Carpeta · ${r.split("/").pop() || r}`),
+  );
   info.services.forEach((s) =>
     option(
       $("service"),
       s.name,
-      s.kind === "movie" ? "Películas · Radarr" : "Series · Sonarr",
+      s.kind === "movie"
+        ? "Películas (catálogo e importación)"
+        : "Series (catálogo e importación)",
     ),
   );
   $("root").replaceChildren();
@@ -170,20 +186,24 @@ async function initialize() {
     notify(
       "Transcode está desactivado en la configuración del servidor. Puedes consultar biblioteca e historial.",
     );
-  if (info.services.length) await loadLibrary();
+  resetLibrary();
+  if (info.roots.length || info.services.length) await loadLibrary();
   else
     $("library-items").replaceChildren(
       node(
         "p",
-        "Configura Sonarr o Radarr para navegar la biblioteca. También puedes elegir un archivo en las carpetas permitidas.",
+        "Configura media.allowed_read_roots para navegar tus carpetas.",
         "empty",
       ),
     );
   if (info.tools.includes("recipe_list")) await loadRecipes(true);
   controls();
+  await loadJobs();
 }
 
 async function loadLibrary() {
+  const revision = ++state.libraryRevision;
+  if ($("service").value.startsWith("folder:")) return loadFolder(revision);
   const query = new URLSearchParams({
     service: $("service").value,
     q: $("search").value,
@@ -192,6 +212,7 @@ async function loadLibrary() {
   });
   if (state.media) query.set("id", state.media.id);
   const page = await api(`library?${query}`);
+  if (revision !== state.libraryRevision) return;
   $("library-total").textContent =
     `${page.total} ${state.media ? "archivos" : "títulos"}`;
   $("library-items").replaceChildren();
@@ -287,7 +308,10 @@ async function loadLibrary() {
   }
 }
 function resetLibrary() {
+  state.libraryRevision++;
   state.media = null;
+  state.folder = null;
+  state.folderSelected = new Set();
   state.file = null;
   state.fileMedia = null;
   state.fileService = null;
@@ -305,7 +329,16 @@ $("service").addEventListener("change", () => {
   safe(loadLibrary);
 });
 $("back").addEventListener("click", () => {
-  resetLibrary();
+  if ($("service").value.startsWith("folder:")) {
+    const root = $("service").value.slice(7);
+    state.folder =
+      state.folder === root
+        ? root
+        : state.folder?.slice(0, state.folder.lastIndexOf("/")) || root;
+    state.folderSelected = new Set();
+    state.libraryOffset = 0;
+    clearFileSelection();
+  } else resetLibrary();
   safe(loadLibrary);
 });
 $("search-button").addEventListener("click", () => {
@@ -327,30 +360,91 @@ $("library-next").addEventListener("click", () => {
   state.libraryOffset += 100;
   safe(loadLibrary);
 });
-async function browse(path) {
-  const entries = await tool("fs_list", { path, depth: 1, limit: 100 });
-  $("file-items").replaceChildren();
-  const files = Array.isArray(entries)
-    ? entries
-    : entries.entries || entries.files || [];
-  for (const file of files)
-    $("file-items").append(
+const videoFile = (path) =>
+  /\.(mkv|mp4|m4v|avi|mov|ts|m2ts|webm|mpg|mpeg)$/i.test(path);
+function clearFileSelection() {
+  $("path").value = "";
+  state.file = null;
+  state.fileMedia = null;
+  state.fileService = null;
+  controls();
+}
+async function loadFolder(revision = ++state.libraryRevision) {
+  const root = $("service").value.slice(7);
+  if (
+    !state.folder ||
+    (state.folder !== root &&
+      !state.folder.startsWith(`${root.replace(/\/$/, "")}/`))
+  )
+    state.folder = root;
+  state.folderSelected ||= new Set();
+  const page = await api(
+    `folder?${new URLSearchParams({ path: state.folder, q: $("search").value, offset: state.libraryOffset })}`,
+  );
+  if (revision !== state.libraryRevision) return;
+  $("selection-title").textContent = page.path;
+  $("back").hidden = state.folder === root;
+  $("library-total").textContent =
+    `${page.total} carpetas / vídeos · tamaños del disco`;
+  $("library-items").replaceChildren();
+  for (const file of page.items) {
+    const row = node("div", "", "media-row");
+    if (!file.is_dir) {
+      const check = document.createElement("input");
+      check.type = "checkbox";
+      check.checked = state.folderSelected.has(file.path);
+      check.setAttribute("aria-label", `Marcar ${file.path.split("/").pop()}`);
+      check.addEventListener("change", () =>
+        check.checked
+          ? state.folderSelected.add(file.path)
+          : state.folderSelected.delete(file.path),
+      );
+      row.append(check);
+    } else row.append(node("span", "↳", "media-icon"));
+    row.append(
       button(
-        `${file.is_dir ? "↳ " : "▰ "}${file.path}`,
-        () =>
-          file.is_dir
-            ? browse(file.path)
-            : (() => {
-                $("path").value = file.path;
-                state.file = null;
-                state.fileMedia = null;
-                state.fileService = null;
-                $("scope").value = "file";
-                controls();
-              })(),
-        "recipe-button",
+        file.path.split("/").pop(),
+        async () => {
+          if (file.is_dir) {
+            state.folder = file.path;
+            state.folderSelected.clear();
+            state.libraryOffset = 0;
+            clearFileSelection();
+            await loadFolder();
+          } else {
+            $("path").value = file.path;
+            state.file = file;
+            state.fileMedia = null;
+            state.fileService = null;
+            $("scope").value = "file";
+          }
+          controls();
+        },
+        "media-title",
       ),
+      node("span", file.is_dir ? "Carpeta" : bytes(file.size), "media-size"),
     );
+    $("library-items").append(row);
+  }
+  if (!page.items.length)
+    $("library-items").append(
+      node("p", "Sin vídeos o carpetas en esta selección.", "empty"),
+    );
+  $("library-prev").disabled = state.libraryOffset === 0;
+  $("library-next").disabled = !page.has_more;
+  controls();
+}
+async function browse(path) {
+  if (
+    ![...$("service").options].some(
+      (o) => o.value === `folder:${$("root").value}`,
+    )
+  )
+    return;
+  $("service").value = `folder:${$("root").value}`;
+  resetLibrary();
+  state.folder = path;
+  await loadFolder();
 }
 $("browse-root").addEventListener("click", () =>
   safe(() => browse($("root").value)),
@@ -359,6 +453,7 @@ $("path").addEventListener("input", () => {
   state.file = null;
   state.fileMedia = null;
   state.fileService = null;
+  $("scope").value = "file";
   controls();
 });
 $("inspect").addEventListener("click", () =>
@@ -373,9 +468,15 @@ $("inspect").addEventListener("click", () =>
 function controls() {
   const batch = $("scope").value === "batch";
   $("source-summary").textContent = batch
-    ? `Lote: ${state.media?.title || "Selecciona una serie de Sonarr"}`
+    ? `Lote: ${state.folder || state.media?.title || "Selecciona una carpeta o serie"}`
     : $("path").value || "Selecciona un archivo.";
   $("batch-options").hidden = !batch;
+  const folder = $("service").value.startsWith("folder:");
+  $("media-kind").closest("label").hidden = !folder;
+  $("season").closest("label").hidden = folder;
+  $("recursive").closest("label").hidden = !folder;
+  $("promote-batch").closest("label").hidden =
+    folder || $("service").value !== "sonarr";
   $("priority-label").hidden =
     !batch || $("profile").value !== "auto" || $("custom").checked;
   $("custom-fields").hidden = !$("custom").checked;
@@ -392,9 +493,9 @@ function controls() {
   $("preview").hidden = !batch;
   $("benchmark").hidden = batch;
   $("audio-note").hidden = $("audio").value !== "compact";
-  $("enqueue").disabled = !state.info?.transcode_enabled;
-  $("benchmark").disabled = !state.info?.transcode_enabled;
-  $("preview").disabled = !state.info?.transcode_enabled;
+  $("enqueue").disabled = !state.info?.transcode_enabled || state.submitting;
+  $("benchmark").disabled = !state.info?.transcode_enabled || state.submitting;
+  $("preview").disabled = !state.info?.transcode_enabled || state.submitting;
 }
 for (const id of [
   "scope",
@@ -488,25 +589,53 @@ $("sync-profile").addEventListener("click", () =>
   }),
 );
 async function submitJob(mode = "encode") {
+  if (state.submitting) return;
+  state.submitting = true;
+  controls();
+  try {
+    return await buildAndSubmitJob(mode);
+  } finally {
+    state.submitting = false;
+    controls();
+  }
+}
+async function buildAndSubmitJob(mode = "encode") {
   const batch = $("scope").value === "batch";
   let name = batch ? "transcode_batch" : "transcode_media";
   const inputs = { preserve_source_bit_depth: $("preserve-depth").checked };
   if (batch) {
-    if (!state.media || $("service").value !== "sonarr")
-      throw new Error("Selecciona una serie de Sonarr antes de crear un lote.");
-    Object.assign(inputs, { service: "sonarr", series_id: state.media.id });
-    if ($("season").value !== "") inputs.season = Number($("season").value);
-    if ($("max-items").value) inputs.max_items = numeric("max-items");
-    if ($("selected-only").checked) {
-      if (!state.selected.size) throw new Error("Marca al menos un archivo.");
-      inputs.episode_file_ids = [...state.selected];
+    if ($("service").value.startsWith("folder:")) {
+      if ($("selected-only").checked) {
+        if (!state.folderSelected?.size)
+          throw new Error("Marca al menos un vídeo.");
+        inputs.paths = [...state.folderSelected];
+      } else {
+        const selection = await api(
+          `folder?${new URLSearchParams({ path: state.folder, files: "1", recursive: $("recursive").checked ? "1" : "0" })}`,
+        );
+        inputs.paths = selection.paths;
+      }
+      if (!inputs.paths.length)
+        throw new Error("La carpeta no contiene vídeos.");
+      inputs.media_type = $("media-kind").value;
+    } else {
+      if (!state.media || $("service").value !== "sonarr")
+        throw new Error("Selecciona una serie o una carpeta para el lote.");
+      Object.assign(inputs, { service: "sonarr", series_id: state.media.id });
+      if ($("season").value !== "") inputs.season = Number($("season").value);
+      if ($("selected-only").checked) {
+        if (!state.selected.size) throw new Error("Marca al menos un archivo.");
+        inputs.episode_file_ids = [...state.selected];
+      }
+      if ($("promote-batch").checked) inputs.promote_candidates = true;
     }
-    if ($("promote-batch").checked) inputs.promote_candidates = true;
+    if ($("max-items").value) inputs.max_items = numeric("max-items");
     if (mode === "preview") inputs.dry_run = true;
   } else {
     if (!$("path").value.trim())
       throw new Error("Selecciona o escribe la ruta de un archivo.");
     inputs.path = $("path").value.trim();
+    inputs.media_type = $("media-kind").value;
     if (state.fileMedia) {
       inputs.media_type = state.fileService === "radarr" ? "movie" : "tv";
       inputs.is_anime =
@@ -568,7 +697,10 @@ async function submitJob(mode = "encode") {
     $("job-feedback").textContent = `Admitido: ${r.id}`;
     state.jobsOffset = 0;
     selectTab("jobs");
-    await openJob(r.id);
+    await loadJobs();
+    notify(
+      `Trabajo admitido: ${r.id}. Puedes seguir preparando archivos mientras avanza.`,
+    );
   } finally {
     $("preview").disabled = false;
     $("benchmark").disabled = false;
@@ -584,18 +716,271 @@ $("benchmark").addEventListener("click", () =>
   safe(() => submitJob("benchmark")),
 );
 
+function focusedControl(container) {
+  const active = document.activeElement;
+  return container.contains(active) && active.dataset.jobControl
+    ? { id: active.dataset.jobControl, label: active.textContent }
+    : null;
+}
+function restoreControl(container, focus) {
+  if (!focus) return;
+  [...container.querySelectorAll("[data-job-control]")]
+    .find(
+      (b) => b.dataset.jobControl === focus.id && b.textContent === focus.label,
+    )
+    ?.focus({ preventScroll: true });
+}
+function savingsLine(savings) {
+  if (!savings) return null;
+  const parts = [];
+  if (savings.source_bytes != null)
+    parts.push(`Origen ${bytes(savings.source_bytes)}`);
+  if (savings.estimated_saved_bytes != null)
+    parts.push(
+      `${savings.estimate_kind === "sampled_benchmark" ? "Ahorro estimado por muestras" : "Orientación de perfiles"} ${bytes(savings.estimated_saved_bytes)}`,
+    );
+  if (savings.candidate_saved_bytes != null)
+    parts.push(
+      savings.candidate_saved_bytes < 0
+        ? `Candidato: crece ${bytes(-savings.candidate_saved_bytes)}`
+        : `Ahorro en candidato ${bytes(savings.candidate_saved_bytes)}`,
+    );
+  if (savings.realized_saved_bytes != null)
+    parts.push(`Liberado ${bytes(savings.realized_saved_bytes)}`);
+  if (savings.partial)
+    parts.push(`Medición parcial: ${savings.measured_files || 0} archivos`);
+  return parts.length
+    ? node("p", parts.join(" · "), "metadata savings-line")
+    : null;
+}
+function telemetry(job) {
+  const result = node("div", "", "job-progress");
+  const w = job.worker;
+  if (!w) {
+    result.append(node("span", job.progress || "En cola", "metadata"));
+    return result;
+  }
+  const phase = w.transcode_phase || w.benchmark_phase || w.phase;
+  const phases = {
+    queued: "En cola",
+    preparing: "Preparando",
+    encoding: "Codificando",
+    validating: "Validando",
+    publishing: "Publicando",
+    completed: "Completado",
+    benchmarking: "Calibrando",
+  };
+  const parts = [
+    phases[phase] || phase,
+    w.queue_position > 0 ? `Cola #${w.queue_position}` : null,
+    w.speed > 0 ? `${Number(w.speed).toFixed(2)}×` : null,
+    w.fps > 0 ? `${Number(w.fps).toFixed(1)} fps` : null,
+    w.progress_is_stale ? "Última medición; sin actualizar" : null,
+  ];
+  const eta = job.savings?.eta_seconds;
+  if (Number.isFinite(eta) && eta > 0 && !w.progress_is_stale)
+    parts.push(`Restante aprox. ${Math.ceil(eta / 60)} min`);
+  result.append(
+    node("span", parts.filter(Boolean).join(" · ") || job.progress, "metadata"),
+  );
+  const measured = w.progress ?? w.last_known_progress?.progress;
+  if (measured != null && Number.isFinite(Number(measured))) {
+    const p = Math.max(0, Math.min(100, Number(measured)));
+    const meter = document.createElement("meter");
+    meter.min = 0;
+    meter.max = 100;
+    meter.value = p;
+    meter.setAttribute("aria-label", `Progreso del worker ${p.toFixed(1)}%`);
+    result.append(meter, node("span", `${p.toFixed(1)}%`, "metadata"));
+  }
+  if (w.last_progress_at)
+    result.append(
+      node(
+        "span",
+        `Medición ${new Date(w.last_progress_at).toLocaleTimeString()}`,
+        "metadata",
+      ),
+    );
+  return result;
+}
+function renderSavings(data) {
+  const savings = data.savings || {};
+  $("saved-total").textContent = bytes(savings.realized_bytes ?? 0);
+  $("saved-count").textContent =
+    `${savings.completed_replacements || 0} reemplazos verificados`;
+  $("candidate-total").textContent = bytes(
+    savings.candidate_saved_bytes ?? savings.candidate_bytes ?? 0,
+  );
+  $("estimated-total").textContent = bytes(
+    savings.estimated_saved_bytes ?? savings.estimated_bytes ?? 0,
+  );
+  $("savings-history").replaceChildren();
+  for (const item of data.history || []) {
+    const row = node("div", "", "savings-history-row");
+    row.append(
+      node(
+        "span",
+        `${new Date(item.completed_at).toLocaleString()} · ${item.source_path}`,
+        "metadata",
+      ),
+      node(
+        "strong",
+        `${bytes(item.saved_bytes)} · acumulado ${bytes(item.cumulative_bytes)}`,
+        "metadata",
+      ),
+    );
+    $("savings-history").append(row);
+  }
+  if (!$("savings-history").children.length)
+    $("savings-history").append(
+      node(
+        "p",
+        "El trazado aparecerá al completar reemplazos verificados y retirar las copias de recuperación.",
+        "muted",
+      ),
+    );
+}
+async function jobControl(id, name, args = {}) {
+  if (state.busyJobs.has(id)) return;
+  state.busyJobs.add(id);
+  document.querySelectorAll("[data-job-control]").forEach((b) => {
+    if (b.dataset.jobControl === id) b.disabled = true;
+  });
+  try {
+    await tool(name, { id, ...args });
+    if (state.detail === id && $("job-detail").open) await refreshDetail();
+    await loadJobs();
+  } finally {
+    state.busyJobs.delete(id);
+    document.querySelectorAll("[data-job-control]").forEach((b) => {
+      if (b.dataset.jobControl === id) b.disabled = false;
+    });
+  }
+}
+async function prepareReplacement(job) {
+  if (state.busyJobs.has(job.id)) return;
+  state.busyJobs.add(job.id);
+  try {
+    let integration;
+    try {
+      integration = JSON.parse(
+        localStorage.getItem(`navigatorr_media:${job.id}`) || "null",
+      );
+    } catch {}
+    const inputs = { transcode_action_id: job.id, service: "filesystem" };
+    if (
+      ["sonarr", "radarr"].includes(integration?.service) &&
+      Number.isInteger(integration.id) &&
+      integration.id > 0
+    ) {
+      inputs.service = integration.service;
+      inputs[integration.service === "radarr" ? "movie_id" : "series_id"] =
+        integration.id;
+    }
+    const result = await tool("action_run", {
+      action: "promote_transcode_candidate",
+      inputs: JSON.stringify(inputs),
+      idempotency_key: submissionID(),
+    });
+    await loadJobs();
+    await openJob(result.id);
+  } finally {
+    state.busyJobs.delete(job.id);
+  }
+}
+function batchCounts(batch) {
+  return `${batch.dry_run ? "Vista previa · " : ""}${batch.total ?? 0} archivos · ${batch.queued ?? 0} en cola · ${batch.running ?? 0} activos · ${batch.waiting_for_slot ?? 0} esperando turno · ${batch.completed ?? 0} listos · ${batch.failed ?? 0} fallos · ${batch.waiting_decision ?? batch.review ?? 0} requieren decisión · ${batch.skip ?? 0} omitidos`;
+}
+function jobControls(job) {
+  const controls = node("div", "", "job-actions");
+  const add = (label, fn) => {
+    const b = button(label, fn);
+    b.dataset.jobControl = job.id;
+    b.disabled = state.busyJobs.has(job.id);
+    controls.append(b);
+  };
+  const decisionLabels = {
+    approve: "Revisar reemplazo",
+    reject: "Conservar originales",
+    resume: "Reanudar lote",
+    retry: "Reintentar",
+    pause: "Pausar lote",
+    accept_loss: "Aceptar pérdida de calidad",
+    abort: "Cancelar",
+  };
+  for (const choice of job.waiting_options || []) {
+    add(
+      decisionLabels[choice.decision] || choice.description || choice.decision,
+      async () => {
+        if (choice.decision === "approve" && job.batch?.promotion_plan_ready) {
+          await reviewBatchPromotion(job.id);
+          return;
+        }
+        if (
+          ["approve", "accept_loss"].includes(choice.decision) &&
+          !confirm(
+            `${choice.description}\n\n${job.promotion ? `${job.promotion.original_path}\n→ ${job.promotion.candidate_path}` : job.waiting_reason}`,
+          )
+        )
+          return;
+        await jobControl(job.id, "action_resume", {
+          decision: choice.decision,
+        });
+      },
+    );
+    controls.children[controls.children.length - 1].title =
+      choice.description || choice.decision;
+  }
+  if (job.status === "failed")
+    add("Reintentar", () => jobControl(job.id, "action_retry"));
+  if (
+    job.action_name === "transcode_batch" &&
+    ["running", "waiting_external"].includes(job.status)
+  )
+    add("Pausar lote", () =>
+      jobControl(job.id, "action_resume", { decision: "pause" }),
+    );
+  if (
+    ["pending", "running", "waiting_external", "waiting_decision"].includes(
+      job.status,
+    )
+  )
+    add("Cancelar", async () => {
+      if (
+        confirm("Cancelar este trabajo y detener los jobs remotos admitidos?")
+      )
+        await jobControl(job.id, "action_cancel", {
+          reason: "Cancelled from maintenance UI",
+        });
+    });
+  if (
+    job.action_name === "transcode_media" &&
+    job.status === "completed" &&
+    job.candidate_ready &&
+    state.info.allow_destructive
+  )
+    add("Preparar reemplazo", () => prepareReplacement(job));
+  return controls;
+}
 async function loadJobs() {
   if ($("workspace").hidden) return;
-  const page = await tool("action_list", {
+  const revision = ++state.jobsRevision;
+  const query = new URLSearchParams({
     status: $("job-filter").value,
     limit: 25,
     offset: state.jobsOffset,
   });
+  const data = await api(`operations?${query}`);
+  if (revision !== state.jobsRevision || $("workspace").hidden) return;
+  const page = data.jobs;
   if (!Array.isArray(page))
     throw new Error("Respuesta de historial inesperada.");
+  renderSavings(data);
+  state.operationJobs = new Map(page.map((j) => [j.id, j]));
+  const focus = focusedControl($("jobs-list"));
   $("jobs-list").replaceChildren();
-  for (const job of page.filter((j) => workflows[j.action_name])) {
-    const row = node("div", "", "job-row"),
+  for (const job of page) {
+    const row = node("article", "", "job-row"),
       meta = node("div", "", "job-meta");
     meta.append(
       node(
@@ -606,14 +991,6 @@ async function loadJobs() {
       ),
     );
     if (job.source_path) meta.append(node("span", job.source_path, "metadata"));
-    if (job.parent_action_id)
-      meta.append(
-        button(
-          "Ver lote principal",
-          () => openJob(job.parent_action_id),
-          "text-button",
-        ),
-      );
     meta.append(
       node("span", names[job.status] || job.status, `badge ${job.status}`),
       node(
@@ -622,38 +999,39 @@ async function loadJobs() {
           ? "Interfaz"
           : job.origin === "mcp"
             ? "Agente MCP"
-            : "Origen histórico desconocido",
+            : "Histórico",
         "badge",
       ),
-      node("span", job.id, "metadata"),
     );
     if (job.batch)
-      meta.append(
-        node(
-          "span",
-          `Resultado: ${job.batch.outcome || "en curso"} · ${job.batch.completed ?? 0} candidatos listos · ${job.batch.failed ?? 0} fallos`,
-          "metadata",
-        ),
-      );
+      meta.append(node("span", batchCounts(job.batch), "metadata"));
     if (job.waiting_reason || job.error)
       meta.append(node("p", job.error || job.waiting_reason, "muted"));
-    const progress = node("div", "", "job-progress");
-    progress.append(node("span", job.progress || "En cola", "metadata"));
-    row.append(
-      meta,
-      progress,
-      button("Ver trabajo ↗", () => openJob(job.id)),
-    );
+    const savings = savingsLine(job.savings);
+    if (savings) meta.append(savings);
+    const actions = jobControls(job);
+    actions.append(button("Detalle", () => openJob(job.id), "quiet"));
+    if (job.parent_action_id)
+      actions.append(
+        button("Ver lote", () => openJob(job.parent_action_id), "quiet"),
+      );
+    row.append(meta, telemetry(job), actions);
     $("jobs-list").append(row);
   }
-  if (!$("jobs-list").children.length)
+  if (!page.length)
     $("jobs-list").append(
-      node("p", "No hay trabajos en esta página.", "empty"),
+      node("p", "No hay trabajos para este estado.", "empty"),
     );
+  restoreControl($("jobs-list"), focus);
   $("jobs-prev").disabled = state.jobsOffset === 0;
-  $("jobs-next").disabled = page.length < 25;
-  $("jobs-page").textContent = `Página ${1 + state.jobsOffset / 25}`;
-  $("active-count").textContent = "";
+  $("jobs-next").disabled = !data.has_more;
+  $("jobs-page").textContent =
+    `Página ${1 + state.jobsOffset / 25} · ${data.total} trabajos`;
+  $("active-count").textContent = data.active_count
+    ? `(${data.active_count})`
+    : "";
+  $("jobs-updated").textContent =
+    `Actualizado ${new Date().toLocaleTimeString()} · cada 5 s`;
 }
 $("refresh-jobs").addEventListener("click", () => safe(loadJobs));
 $("job-filter").addEventListener("change", () => {
@@ -672,55 +1050,48 @@ async function openJob(id) {
   state.detail = id;
   state.chunk = 0;
   state.stepOffset = 0;
-  await refreshDetail();
+  state.batchItemsOffset = 0;
+  $("batch-items-panel").hidden = true;
+  state.detailRevision++;
   if (!$("job-detail").open) $("job-detail").showModal();
-  await loadDetail();
+  $("detail-summary").replaceChildren(
+    node("p", "Consultando trabajo…", "muted"),
+  );
+  $("detail-controls").replaceChildren();
+  $("detail-content").textContent = "";
+  await refreshDetail();
+  if (state.detail === id && $("job-detail").open) await loadDetail();
 }
 async function refreshDetail() {
-  const data = await tool("action_status", { id: state.detail }),
-    job = data.action || data;
+  const id = state.detail,
+    revision = ++state.detailRevision;
+  const data = await api(`operations?id=${encodeURIComponent(id)}`),
+    job = data.jobs?.[0];
+  if (!job) throw new Error("El trabajo ya no está disponible.");
+  if (
+    state.detail !== id ||
+    revision !== state.detailRevision ||
+    !$("job-detail").open
+  )
+    return;
+  const logsOption = $("detail-section").querySelector?.(
+    'option[value="logs"]',
+  );
+  if (logsOption) {
+    logsOption.disabled = !job.logs_available;
+    if (!job.logs_available && $("detail-section").value === "logs")
+      $("detail-section").value = "outputs";
+  }
   state.detailJob = job;
+  const focus = focusedControl($("detail-controls"));
   const summary = $("detail-summary");
   summary.replaceChildren(
     node("p", job.id, "metadata"),
     node("span", names[job.status] || job.status, `badge ${job.status}`),
     node("p", job.error || job.waiting_reason || job.progress, "muted"),
+    telemetry(job),
   );
-  if (job.worker) {
-    const w = job.worker,
-      p = Number(w.progress);
-    summary.append(
-      node(
-        "p",
-        [
-          w.transcode_phase || w.benchmark_phase,
-          w.queue_position ? `Cola #${w.queue_position}` : null,
-          w.speed != null ? `${w.speed}×` : null,
-          w.fps != null ? `${w.fps} fps` : null,
-          w.progress_is_stale ? "Progreso sin actualizar" : null,
-        ]
-          .filter(Boolean)
-          .join(" · "),
-        "metadata",
-      ),
-    );
-    if (Number.isFinite(p)) {
-      const m = document.createElement("meter");
-      m.min = 0;
-      m.max = 100;
-      m.value = p;
-      m.setAttribute("aria-label", `Progreso ${p}%`);
-      summary.append(m, node("span", `${p.toFixed(1)}%`, "metadata"));
-    }
-  }
-  if (job.batch)
-    summary.append(
-      node(
-        "p",
-        `Resultado del lote: ${job.batch.outcome}. Un flujo completado puede contener archivos omitidos o fallidos.`,
-        "muted",
-      ),
-    );
+  if (job.batch) summary.append(node("p", batchCounts(job.batch), "muted"));
   if (job.promotion)
     summary.append(
       node(
@@ -729,116 +1100,75 @@ async function refreshDetail() {
         "metadata",
       ),
     );
+  const savings = savingsLine(job.savings);
+  if (savings) summary.append(savings);
   const controls = $("detail-controls");
-  controls.replaceChildren();
-  const control = async (name, args) => {
-    await tool(name, { id: state.detail, ...args });
-    await refreshDetail();
-    await loadJobs();
-  };
-  for (const choice of job.waiting_options || [])
-    controls.append(
-      button(choice.description || choice.decision, async () => {
-        if (choice.decision === "approve" && job.batch?.promotion_plan_ready) {
-          await reviewBatchPromotion(job.id);
-          return;
-        }
-        if (
-          ["approve", "accept_loss"].includes(choice.decision) &&
-          !confirm(
-            `${choice.description}\n\n${job.promotion ? `${job.promotion.original_path}\n→ ${job.promotion.candidate_path}` : job.waiting_reason}`,
-          )
-        )
-          return;
-        await control("action_resume", { decision: choice.decision });
-      }),
-    );
-  if (job.status === "failed")
-    controls.append(
-      button("Reintentar desde punto seguro", () =>
-        control("action_retry", {}),
-      ),
-    );
-  if (
-    ["pending", "running", "waiting_external", "waiting_decision"].includes(
-      job.status,
-    )
-  )
-    controls.append(
-      button("Cancelar trabajo", async () => {
-        if (
-          confirm("Cancelar este trabajo y detener los jobs remotos admitidos?")
-        )
-          await control("action_cancel", {
-            reason: "Cancelled from maintenance UI",
-          });
-      }),
-    );
-  if (
-    job.action_name === "transcode_batch" &&
-    ["running", "waiting_external"].includes(job.status)
-  )
-    controls.append(
-      button("Pausar admisión del lote", () =>
-        control("action_resume", { decision: "pause" }),
-      ),
-    );
-  if (
-    job.action_name === "transcode_media" &&
-    job.status === "completed" &&
-    state.info.allow_destructive
-  )
-    controls.append(
-      button("Preparar reemplazo aprobado", async () => {
-        let context;
-        try {
-          context = JSON.parse(
-            localStorage.getItem(`navigatorr_media:${job.id}`) || "null",
-          );
-        } catch {}
-        if (!context) {
-          const service = prompt(
-            "Servicio de biblioteca (sonarr o radarr):",
-            "sonarr",
-          );
-          if (!["sonarr", "radarr"].includes(service)) return;
-          const id = Number(
-            prompt(
-              service === "radarr"
-                ? "ID de película en Radarr:"
-                : "ID de serie en Sonarr:",
-            ),
-          );
-          if (!Number.isInteger(id) || id <= 0) return;
-          context = { service, id };
-        }
-        const inputs = {
-          transcode_action_id: job.id,
-          service: context.service,
-          [context.service === "radarr" ? "movie_id" : "series_id"]: context.id,
-        };
-        const r = await tool("action_run", {
-          action: "promote_transcode_candidate",
-          inputs: JSON.stringify(inputs),
-          idempotency_key: submissionID(),
-        });
-        await openJob(r.id);
-      }),
-    );
+  controls.replaceChildren(jobControls(job));
+  $("batch-items-panel").hidden = !job.batch;
+  if (job.batch) await loadBatchItems(id, revision, job.batch.total);
+  restoreControl(controls, focus);
 }
+async function loadBatchItems(id, revision) {
+  const offset = state.batchItemsOffset;
+  const response = await api(
+    `batch-items?${new URLSearchParams({ id, offset, limit: 25 })}`,
+  );
+  if (
+    id !== state.detail ||
+    revision !== state.detailRevision ||
+    offset !== state.batchItemsOffset ||
+    !$("job-detail").open
+  )
+    return;
+  $("batch-items-list").replaceChildren();
+  for (const item of response.items || []) {
+    const row = node("div", "", "batch-item-row");
+    row.append(
+      node("span", item.display_label || item.file_path, "metadata"),
+      node("span", names[item.status] || item.status || item.decision, "badge"),
+    );
+    if (item.child_action_id)
+      row.append(
+        button("Ver archivo", () => openJob(item.child_action_id), "quiet"),
+      );
+    if (item.error) row.append(node("span", item.error, "muted"));
+    $("batch-items-list").append(row);
+  }
+  $("batch-items-note").textContent =
+    `${response.items?.length || 0} de ${response.total} archivos · página ${1 + offset / 25}`;
+  $("batch-items-prev").disabled = offset === 0;
+  $("batch-items-next").disabled = !response.has_more;
+}
+$("batch-items-prev").addEventListener("click", () => {
+  state.batchItemsOffset = Math.max(0, state.batchItemsOffset - 25);
+  safe(() => loadBatchItems(state.detail, state.detailRevision));
+});
+$("batch-items-next").addEventListener("click", () => {
+  state.batchItemsOffset += 25;
+  safe(() => loadBatchItems(state.detail, state.detailRevision));
+});
 async function loadDetail() {
-  const section = $("detail-section").value;
+  const id = state.detail,
+    section = $("detail-section").value,
+    chunk = state.chunk,
+    stepOffset = state.stepOffset;
   let data;
-  if (section === "logs")
-    data = await api(`logs?id=${encodeURIComponent(state.detail)}`);
+  if (section === "logs") data = await api(`logs?id=${encodeURIComponent(id)}`);
   else
     data = await tool("action_detail", {
-      id: state.detail,
+      id,
       section,
-      chunk: state.chunk,
-      step_offset: state.stepOffset,
+      chunk,
+      step_offset: stepOffset,
       step_limit: 10,
     });
+  if (
+    state.detail !== id ||
+    $("detail-section").value !== section ||
+    state.chunk !== chunk ||
+    !$("job-detail").open
+  )
+    return;
   showData("detail-content", data);
   $("detail-next").hidden = !data.has_more;
 }
@@ -893,6 +1223,7 @@ $("approve-batch-review").addEventListener("click", () =>
   }),
 );
 $("close-detail").addEventListener("click", () => $("job-detail").close());
+$("job-detail").addEventListener("close", () => state.detailRevision++);
 $("load-detail").addEventListener("click", () => safe(loadDetail));
 $("detail-section").addEventListener("change", () => {
   state.chunk = 0;
@@ -1046,9 +1377,15 @@ function describeTool() {
   );
 }
 $("tool-name").addEventListener("change", describeTool);
-setInterval(() => {
-  if (document.hidden || $("workspace").hidden) return;
-  if (state.tab === "jobs") safe(loadJobs);
-  if ($("job-detail").open) safe(refreshDetail);
+let polling = false;
+setInterval(async () => {
+  if (polling || document.hidden || $("workspace").hidden) return;
+  polling = true;
+  try {
+    if (["library", "jobs"].includes(state.tab)) await safe(loadJobs);
+    if ($("job-detail").open) await safe(refreshDetail);
+  } finally {
+    polling = false;
+  }
 }, 5000);
 safe(initialize);
