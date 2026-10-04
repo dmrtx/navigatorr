@@ -7,6 +7,10 @@ const source = await readFile(
   new URL("./assets/app.js", import.meta.url),
   "utf8",
 );
+const markup = await readFile(
+  new URL("./assets/index.html", import.meta.url),
+  "utf8",
+);
 class Element {
   children = [];
   listeners = new Map();
@@ -83,6 +87,161 @@ function deferred() {
   });
   return { promise, resolve };
 }
+
+test("every startup control exists in the shipped HTML", () => {
+  const ids = [...markup.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
+  assert.equal(new Set(ids).size, ids.length, "duplicate HTML ids");
+  const elements = new Map(ids.map((id) => [id, new Element()]));
+  const context = vm.createContext({
+    document: {
+      getElementById: (id) => elements.get(id) || null,
+      createElement: () => new Element(),
+      querySelectorAll: () => [],
+    },
+    URLSearchParams,
+    setTimeout() {},
+    clearTimeout() {},
+    setInterval() {},
+  });
+  assert.doesNotThrow(() =>
+    vm.runInContext(source.replace(/safe\(initialize\);\s*$/, ""), context),
+  );
+});
+
+test("search can close, clear its filter and restore the browse view", () => {
+  const h = harness(),
+    attrs = {};
+  const toggle = h.elements.get("toggle-library-search");
+  toggle.setAttribute = (key, value) => (attrs[key] = value);
+  h.document.getElementById("library-search-label").hidden = true;
+  h.run(
+    'loadLibrary = async () => { state.restoredSearch = $("search").value; };',
+  );
+  toggle.listeners.get("click")();
+  assert.equal(attrs["aria-expanded"], "true");
+  assert.equal(attrs["aria-label"], "Close search");
+  h.elements.get("search").value = "no matching file";
+  toggle.listeners.get("click")();
+  assert.equal(h.elements.get("library-search-label").hidden, true);
+  assert.equal(h.elements.get("search-button").hidden, true);
+  assert.equal(h.elements.get("search").value, "");
+  assert.equal(attrs["aria-expanded"], "false");
+  assert.equal(attrs["aria-label"], "Show search");
+  assert.equal(h.run("state.restoredSearch"), "");
+});
+
+test("a slow folder change removes old actionable rows before it returns", async () => {
+  const h = harness(),
+    pending = deferred();
+  h.context.response = pending.promise;
+  h.run(
+    'controls = () => {}; api = async () => response; state.folder = "/media/A";',
+  );
+  h.document.getElementById("service").value = "folder:/media";
+  h.document.getElementById("path").value = "/media/A/old.mp4";
+  const host = h.document.getElementById("library-items"),
+    old = new Element();
+  old.textContent = "old selectable file";
+  host.append(old);
+  const loading = h.run('navigateFolder("/media/B")');
+  assert.equal(host.children.includes(old), false);
+  assert.equal(h.elements.get("path").value, "");
+  assert.equal(h.run("state.libraryLoading"), true);
+  pending.resolve({ path: "/media/B", total: 0, items: [], has_more: false });
+  await loading;
+  assert.equal(h.run("state.libraryLoading"), false);
+});
+
+test("file read failure replaces loading with an error and a usable retry", async () => {
+  const h = harness();
+  h.run(
+    'controls = () => {}; api = async () => { throw new Error("Folder unavailable"); };',
+  );
+  h.document.getElementById("service").value = "folder:/media";
+  await assert.rejects(h.run("loadLibrary()"), /Folder unavailable/);
+  const labels = h.elements
+    .get("library-items")
+    .children.map((n) => n.textContent);
+  assert.deepEqual(labels, ["Folder unavailable", "Retry"]);
+  assert.equal(h.run("state.libraryLoading"), false);
+  assert.equal(h.run("state.libraryError"), true);
+});
+
+test("notifications appear inside the active modal instead of behind it", () => {
+  const h = harness(),
+    dialog = new Element(),
+    main = new Element();
+  h.document.querySelector = (selector) =>
+    selector === "dialog[open]" ? dialog : main;
+  h.run('notify("Inspection failed");');
+  assert.ok(dialog.children.includes(h.elements.get("notice")));
+  assert.equal(h.elements.get("notice").className, "dialog-notice");
+  assert.equal(h.elements.get("notice").hidden, false);
+});
+
+test("failed job reads replace stale controls with an inline retry", async () => {
+  const h = harness();
+  h.run('api = async () => { throw new Error("Job unavailable"); };');
+  await h.run('openJob("gone")');
+  assert.deepEqual(
+    h.elements.get("detail-summary").children.map((n) => n.textContent),
+    ["Job unavailable", "Retry"],
+  );
+  assert.equal(h.elements.get("detail-controls").children.length, 0);
+  assert.equal(h.elements.get("batch-items-panel").hidden, true);
+});
+
+test("repeated batch next taps cannot skip a page while its request is pending", async () => {
+  const h = harness(),
+    pending = deferred();
+  let requests = 0;
+  h.context.readPage = () => {
+    requests++;
+    return pending.promise;
+  };
+  h.run('state.detail="batch"; state.batchItemsHasMore=true; api=readPage;');
+  h.document.getElementById("job-detail").open = true;
+  const first = h.run("changeBatchPage(25)");
+  await h.run("changeBatchPage(25)");
+  assert.equal(requests, 1);
+  assert.equal(h.run("state.batchItemsOffset"), 25);
+  pending.resolve({
+    items: [{ display_label: "File 26", status: "completed" }],
+    total: 26,
+    has_more: false,
+  });
+  await first;
+  assert.equal(h.run("state.batchItemsOffset"), 25);
+  assert.equal(h.elements.get("batch-items-next").disabled, true);
+  assert.equal(h.run("state.batchItemsPaging"), null);
+});
+
+test("failed batch paging restores the previous page instead of advancing it", async () => {
+  const h = harness();
+  h.run(
+    'state.detail="batch"; state.batchItemsHasMore=true; api=async()=>{throw new Error("Unavailable");};',
+  );
+  h.document.getElementById("job-detail").open = true;
+  await assert.rejects(h.run("changeBatchPage(25)"), /Unavailable/);
+  assert.equal(h.run("state.batchItemsOffset"), 0);
+  assert.equal(h.elements.get("batch-items-next").disabled, false);
+});
+
+test("replaced sources suppress pending savings and link their existing replacement", () => {
+  const h = harness();
+  h.run("state.info.allow_destructive=true;");
+  const controls = h.run(
+    'jobControls({id:"source",action_name:"transcode_media",status:"completed",candidate_ready:false,replaced:true,replacement_action_id:"replacement"})',
+  );
+  assert.deepEqual(
+    controls.children.map((n) => n.textContent),
+    ["View replacement"],
+  );
+  const line = h.run(
+    "savingsLine({source_bytes:1000,candidate_saved_bytes:700,estimated_saved_bytes:600},true,true)",
+  );
+  assert.doesNotMatch(line.textContent, /Potential|Estimate/);
+});
 
 test("network loss blocks mutations and automatically retries a server read", async () => {
   const h = harness();
@@ -341,6 +500,26 @@ test("profile reads discard late selections and retain the current loading state
   assert.equal(h.elements.get("recipe-form").inert, false);
 });
 
+test("failed profile reads keep the previous draft inactive until a successful retry", async () => {
+  const h = harness();
+  h.run(
+    'state.recipe = {name:"old"}; $("recipe-name").value = "old"; tool = async () => { throw new Error("read failed"); };',
+  );
+  await assert.rejects(h.run('readRecipe("new")'), /read failed/);
+  assert.equal(h.elements.get("recipe-form").inert, true);
+  assert.equal(h.elements.get("recipe-name").value, "old");
+  assert.match(
+    h.elements.get("recipe-source").textContent,
+    /Could not load new/,
+  );
+  h.run(
+    'tool = async () => ({name:"new",profile:{container:"mkv",video:{codec:"libx265",quality:24}}}); renderAdvancedProfile = () => {}; renderRecipeList = () => {};',
+  );
+  await h.run('readRecipe("new")');
+  assert.equal(h.elements.get("recipe-name").value, "new");
+  assert.equal(h.elements.get("recipe-form").inert, false);
+});
+
 test("creating a new profile supersedes an in-flight read", async () => {
   const h = harness(),
     pending = deferred();
@@ -572,4 +751,93 @@ test("folder breadcrumbs navigate directly and clear stale file/search selection
   assert.equal(h.elements.get("search").value, "");
   assert.equal(h.elements.get("path").value, "");
   assert.match(h.context.paths[0], /path=%2Fmedia&q=&offset=0/);
+});
+
+test("Access edge login redirects invalidate stale dialogs without following login", async () => {
+  for (const response of [
+    { type: "opaqueredirect", status: 0 },
+    { status: 302, type: "basic" },
+    { status: 200, redirected: true, type: "basic" },
+  ]) {
+    const h = harness();
+    let options;
+    h.run('state.authMode = "cloudflare_access"; controls = () => {};');
+    h.document.getElementById("workspace").hidden = false;
+    h.document.getElementById("job-detail").showModal();
+    h.document.getElementById("batch-review").showModal();
+    h.context.fetch = async (_url, init) => {
+      options = init;
+      return {
+        ...response,
+        json: () => assert.fail("login HTML parsed as API JSON"),
+      };
+    };
+    await assert.rejects(h.run('api("bootstrap")'), /Cloudflare Access/);
+    assert.equal(options.redirect, "manual");
+    assert.equal(h.elements.get("workspace").hidden, true);
+    assert.equal(h.elements.get("job-detail").open, false);
+    assert.equal(h.elements.get("batch-review").open, false);
+    assert.equal(h.elements.get("access-expired").hidden, false);
+    assert.equal(h.elements.get("login").hidden, true);
+    assert.equal(h.run("serverReachable"), true);
+  }
+});
+
+test("Access edge HTML denials invalidate authentication before decoding the body", async () => {
+  for (const status of [401, 403]) {
+    const h = harness();
+    h.run('state.authMode = "cloudflare_access"; controls = () => {};');
+    h.document.getElementById("workspace").hidden = false;
+    h.document.getElementById("path-dialog").showModal();
+    h.context.fetch = async () => ({
+      ok: false,
+      status,
+      headers: { get: () => "text/html; charset=utf-8" },
+      json: () => {
+        assert.equal(h.elements.get("workspace").hidden, true);
+        assert.equal(h.elements.get("path-dialog").open, false);
+        throw new SyntaxError("HTML is not JSON");
+      },
+    });
+    await assert.rejects(h.run('api("bootstrap")'), /Cloudflare Access/);
+    assert.equal(h.elements.get("login").hidden, true);
+    assert.equal(h.elements.get("access-expired").hidden, false);
+    assert.equal(h.run("state.authRevision"), 1);
+  }
+});
+
+test("Access edge redirect during auth discovery never exposes a local token form", async () => {
+  const h = harness();
+  h.run("controls = () => {};");
+  h.context.fetch = async () => ({ type: "opaqueredirect", status: 0 });
+  await assert.rejects(h.run('api("auth-info")'), /Cloudflare Access/);
+  assert.equal(h.run("state.authMode"), "cloudflare_access");
+  assert.equal(h.elements.get("login").hidden, true);
+  assert.equal(h.elements.get("access-expired").hidden, false);
+  assert.equal(h.elements.get("logout").hidden, true);
+});
+
+test("Access network outages and JSON permission failures do not report session expiry", async () => {
+  const h = harness();
+  h.run('state.authMode = "cloudflare_access"; controls = () => {};');
+  h.document.getElementById("workspace").hidden = false;
+  h.document.getElementById("access-expired").hidden = true;
+  h.context.fetch = async () => {
+    throw new TypeError("network unavailable");
+  };
+  await assert.rejects(h.run('api("bootstrap")'), /Cannot connect/);
+  assert.equal(h.run("state.authRevision"), 0);
+  assert.equal(h.elements.get("access-expired").hidden, true);
+  assert.equal(h.elements.get("workspace").hidden, false);
+  assert.equal(h.run("serverReachable"), false);
+  h.context.fetch = async () => ({
+    ok: false,
+    status: 403,
+    headers: { get: () => "application/json" },
+    json: async () => ({ error: "missing same-origin request header" }),
+  });
+  await assert.rejects(h.run('api("bootstrap")'), /same-origin/);
+  assert.equal(h.run("state.authRevision"), 0);
+  assert.equal(h.elements.get("access-expired").hidden, true);
+  assert.equal(h.elements.get("workspace").hidden, false);
 });

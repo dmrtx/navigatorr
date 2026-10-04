@@ -87,16 +87,31 @@ function bytes(n) {
   if (n == null) return "—";
   const v = Number(n);
   if (!Number.isFinite(v)) return "—";
-  return v >= 1e9 ? `${(v / 1e9).toFixed(2)} GB` : `${(v / 1e6).toFixed(1)} MB`;
+  if (v >= 1e9) return `${(v / 1e9).toFixed(2)} GB`;
+  if (v >= 1e6) return `${(v / 1e6).toFixed(1)} MB`;
+  if (v >= 1e3) return `${(v / 1e3).toFixed(1)} KB`;
+  return `${Math.round(v)} B`;
 }
 function notify(text) {
-  $("notice").textContent = text;
-  $("notice").hidden = false;
+  const notice = $("notice");
+  const dialog = document.querySelector?.("dialog[open]");
+  (dialog || document.querySelector?.("main"))?.append(notice);
+  notice.className = dialog ? "dialog-notice" : "";
+  notice.textContent = text;
+  notice.hidden = false;
   clearTimeout(notify.timer);
   notify.timer = setTimeout(() => {
     $("notice").hidden = true;
   }, 9000);
 }
+document.querySelectorAll("dialog").forEach((dialog) => {
+  dialog.addEventListener("close", () => {
+    if (dialog.contains($("notice"))) {
+      document.querySelector?.("main")?.append($("notice"));
+      $("notice").className = "";
+    }
+  });
+});
 async function safe(fn) {
   try {
     return await fn();
@@ -125,6 +140,7 @@ async function reconnect() {
   if ($("workspace").hidden) await initialize();
   else {
     await loadJobs();
+    if (state.tab === "library" && state.libraryError) await loadLibrary();
     if ($("job-detail").open) await refreshDetail();
   }
 }
@@ -135,6 +151,30 @@ if (typeof window !== "undefined") {
     if (!document.hidden) safe(reconnect);
   });
 }
+function invalidateAuthentication() {
+  state.authRevision++;
+  state.libraryRevision++;
+  state.jobsRevision++;
+  state.detailRevision++;
+  state.detail = null;
+  state.batchApproval = null;
+  state.replacementChoice = null;
+  $("job-detail").close();
+  $("batch-review").close();
+  $("path-dialog").close();
+  $("recipe-settings").close();
+  $("replacement-choice").close();
+  $("login").hidden = state.authMode !== "token";
+  $("access-expired").hidden = state.authMode !== "cloudflare_access";
+  $("workspace").hidden = true;
+  $("logout").hidden = true;
+  $("local-session").hidden = true;
+}
+function authenticationMessage() {
+  return state.authMode === "cloudflare_access"
+    ? "Cloudflare Access sign-in required. Reload to sign in."
+    : "sign in to Navigatorr";
+}
 async function api(path, body) {
   if (body !== undefined && !serverReachable)
     throw new Error(
@@ -144,6 +184,7 @@ async function api(path, body) {
   try {
     res = await fetch(`/api/maintenance/${path}`, {
       method: body === undefined ? "GET" : "POST",
+      redirect: "manual",
       headers: {
         "Content-Type": "application/json",
         "X-Navigatorr-Request": "1",
@@ -159,23 +200,39 @@ async function api(path, body) {
     throw new Error("Navigatorr is unavailable. Retrying automatically.");
   }
   setConnection(true);
-  const data = await res.json();
-  if (res.status === 401) {
-    state.authRevision++;
-    state.libraryRevision++;
-    state.jobsRevision++;
-    state.detailRevision++;
-    state.detail = null;
-    state.batchApproval = null;
-    $("job-detail").close();
-    $("batch-review").close();
-    $("path-dialog").close();
-    $("recipe-settings").close();
-    $("login").hidden = state.authMode !== "token";
-    $("access-expired").hidden = state.authMode !== "cloudflare_access";
-    $("workspace").hidden = true;
-    $("logout").hidden = true;
+  const redirected =
+    res.type === "opaqueredirect" ||
+    res.redirected === true ||
+    (res.status >= 300 && res.status < 400);
+  if (redirected) {
+    // Access can intercept auth-info before the console knows its auth mode.
+    // Never follow its login chain inside an API request or parse login HTML.
+    if (state.authMode === "cloudflare_access" || path === "auth-info") {
+      state.authMode = "cloudflare_access";
+      invalidateAuthentication();
+      throw new Error(authenticationMessage());
+    }
+    throw new Error("Unexpected API redirect. Reload the application.");
   }
+  const contentType = res.headers?.get("Content-Type") || "";
+  if (
+    state.authMode === "cloudflare_access" &&
+    res.status === 403 &&
+    /text\/html/i.test(contentType)
+  ) {
+    invalidateAuthentication();
+    throw new Error(authenticationMessage());
+  }
+  if (res.status === 401) {
+    invalidateAuthentication();
+    // Invalidate before parsing: an HTML denial must close stale approvals too.
+    let denial;
+    try {
+      denial = await res.json();
+    } catch {}
+    throw new Error(denial?.error || authenticationMessage());
+  }
+  const data = await res.json();
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
 }
@@ -254,6 +311,7 @@ async function initialize() {
   const auth = await api("auth-info");
   state.authMode = auth.auth_mode;
   $("logout").hidden = state.authMode !== "token";
+  $("local-session").hidden = state.authMode !== "token";
   const info = await api("bootstrap");
   state.info = info;
   $("login").hidden = true;
@@ -298,13 +356,15 @@ async function loadLibrary(more = false) {
   if (!more) {
     state.libraryHasMore = false;
     $("library-more").hidden = true;
+    $("library-items").replaceChildren(node("p", "Loading files…", "muted"));
   }
+  controls();
   try {
     if (!more) state.libraryOffset = 0;
     else state.libraryOffset = state.libraryLoaded || 0;
 
     if ($("service").value.startsWith("folder:"))
-      return loadFolder(revision, more);
+      return await loadFolder(revision, more);
     const query = new URLSearchParams({
       service: $("service").value,
       q: $("search").value,
@@ -399,6 +459,7 @@ async function loadLibrary(more = false) {
       );
     state.libraryLoaded = state.libraryOffset + page.items.length;
     state.libraryHasMore = page.has_more;
+    state.libraryError = false;
     $("library-more").hidden = !page.has_more;
     if (state.media && $("service").value === "sonarr") {
       const selectedSeason = $("season").value;
@@ -414,9 +475,28 @@ async function loadLibrary(more = false) {
       seasons.forEach((n) => option($("season"), n, `Season ${n}`));
       $("season").value = selectedSeason;
     }
+  } catch (error) {
+    if (
+      revision === state.libraryRevision &&
+      !$("service").value.startsWith("folder:")
+    )
+      libraryFailure(error, more);
+    throw error;
   } finally {
-    if (revision === state.libraryRevision) state.libraryLoading = false;
+    if (revision === state.libraryRevision) {
+      state.libraryLoading = false;
+      controls();
+    }
   }
+}
+function libraryFailure(error, more) {
+  state.libraryError = true;
+  const host = $("library-items");
+  if (!more) host.replaceChildren();
+  host.append(
+    node("p", error.message || "Could not load files.", "muted"),
+    button("Retry", () => loadLibrary(more), "quiet"),
+  );
 }
 function resetLibrary() {
   state.libraryRevision++;
@@ -438,6 +518,7 @@ function resetLibrary() {
   $("selection-title").hidden = false;
   $("folder-breadcrumbs").hidden = true;
   $("scope").value = "file";
+  $("library-items").replaceChildren();
   controls();
 }
 $("service").addEventListener("change", () => {
@@ -465,8 +546,19 @@ $("toggle-library-search").addEventListener("click", () => {
   const open = $("library-search-label").hidden;
   $("library-search-label").hidden = !open;
   $("search-button").hidden = !open;
-  $("toggle-library-search").hidden = open;
+  $("toggle-library-search").setAttribute("aria-expanded", String(open));
+  $("toggle-library-search").setAttribute(
+    "aria-label",
+    open ? "Close search" : "Show search",
+  );
+  $("toggle-library-search").title = open ? "Close search" : "Search";
+  $("toggle-library-search").classList?.toggle("search-open", open);
   if (open) $("search").focus();
+  else {
+    $("search").value = "";
+    state.libraryOffset = 0;
+    safe(loadLibrary);
+  }
 });
 $("search").addEventListener("keydown", (e) => {
   if (e.key === "Enter") {
@@ -541,7 +633,9 @@ async function loadFolder(revision = ++state.libraryRevision, more = false) {
   if (!more) {
     state.libraryHasMore = false;
     $("library-more").hidden = true;
+    $("library-items").replaceChildren(node("p", "Loading files…", "muted"));
   }
+  controls();
   try {
     if (!more) state.libraryOffset = 0;
     const root = $("service").value.slice(7);
@@ -616,10 +710,17 @@ async function loadFolder(revision = ++state.libraryRevision, more = false) {
       );
     state.libraryLoaded = state.libraryOffset + page.items.length;
     state.libraryHasMore = page.has_more;
+    state.libraryError = false;
     $("library-more").hidden = !page.has_more;
     controls();
+  } catch (error) {
+    if (revision === state.libraryRevision) libraryFailure(error, more);
+    throw error;
   } finally {
-    if (revision === state.libraryRevision) state.libraryLoading = false;
+    if (revision === state.libraryRevision) {
+      state.libraryLoading = false;
+      controls();
+    }
   }
 }
 async function browse(path) {
@@ -635,7 +736,10 @@ async function browse(path) {
   await loadFolder();
 }
 $("browse-root").addEventListener("click", () =>
-  safe(() => browse($("root").value)),
+  safe(async () => {
+    await browse($("root").value);
+    $("path-dialog").close();
+  }),
 );
 $("path").addEventListener("input", () => {
   state.file = null;
@@ -646,7 +750,14 @@ $("path").addEventListener("input", () => {
 });
 $("inspect").addEventListener("click", () =>
   safe(async () => {
-    const report = await tool("inspect_media", { path: $("path").value });
+    let report;
+    try {
+      report = await tool("inspect_media", { path: $("path").value });
+    } catch (error) {
+      if (/no such file or directory/i.test(error.message))
+        throw new Error("File not found. Choose an existing file.");
+      throw error;
+    }
     showData(
       "inspection",
       [
@@ -690,15 +801,31 @@ function controls() {
     : "CRF (lower is better)";
   $("quality").disabled = vt && $("rate-mode").value === "bitrate";
   $("bitrate").disabled = $("rate-mode").value !== "bitrate";
+  $("max-bitrate").disabled = $("rate-mode").value !== "bitrate";
   $("preview").hidden = !batch;
   $("benchmark").hidden = batch;
   $("audio-note").hidden = $("audio").value !== "compact";
+  const hasSource = batch
+    ? Boolean(folder ? state.folder : state.media)
+    : Boolean($("path").value.trim());
   $("enqueue").disabled =
-    !state.info?.transcode_enabled || state.submitting || !serverReachable;
+    !state.info?.transcode_enabled ||
+    state.submitting ||
+    state.libraryLoading ||
+    !serverReachable ||
+    !hasSource;
   $("benchmark").disabled =
-    !state.info?.transcode_enabled || state.submitting || !serverReachable;
+    !state.info?.transcode_enabled ||
+    state.submitting ||
+    state.libraryLoading ||
+    !serverReachable ||
+    !hasSource;
   $("preview").disabled =
-    !state.info?.transcode_enabled || state.submitting || !serverReachable;
+    !state.info?.transcode_enabled ||
+    state.submitting ||
+    state.libraryLoading ||
+    !serverReachable ||
+    !hasSource;
 }
 for (const id of [
   "scope",
@@ -842,6 +969,11 @@ async function buildAndSubmitJob(mode = "encode") {
         (state.fileMedia.genres || []).some((g) => g.toLowerCase() === "anime");
     }
     if (mode === "benchmark") name = "benchmark_transcode";
+    else if (state.fileMedia)
+      inputs.library_context = {
+        service: state.fileService,
+        id: state.fileMedia.id,
+      };
   }
   if ($("custom").checked) {
     inputs.profile_config = profileFromControls();
@@ -925,16 +1057,17 @@ function restoreControl(container, focus) {
     )
     ?.focus({ preventScroll: true });
 }
-function savingsLine(savings, compact = false) {
+function savingsLine(savings, compact = false, replaced = false) {
   if (!savings) return null;
   const parts = [];
   if (savings.source_bytes != null)
     parts.push(`Source ${bytes(savings.source_bytes)}`);
-  if (savings.estimated_saved_bytes != null)
+  if (!replaced && savings.estimated_saved_bytes != null)
     parts.push(
       `${savings.estimate_kind === "sampled_benchmark" ? (compact ? "Estimate (samples)" : "Sample estimate") : compact ? "Estimate (profile)" : "Profile estimate"} ${bytes(savings.estimated_saved_bytes)}`,
     );
   if (
+    !replaced &&
     savings.candidate_saved_bytes != null &&
     savings.realized_saved_bytes == null
   )
@@ -1057,35 +1190,130 @@ async function jobControl(id, name, args = {}) {
 }
 async function prepareReplacement(job) {
   if (state.busyJobs.has(job.id)) return;
+  if (job.replacement_action_id) {
+    await openJob(job.replacement_action_id);
+    return;
+  }
+  const durable = job.replacement_context;
+  if (
+    durable?.service === "filesystem" ||
+    (["sonarr", "radarr"].includes(durable?.service) &&
+      Number.isInteger(
+        durable[durable.service === "radarr" ? "movie_id" : "series_id"],
+      ) &&
+      durable[durable.service === "radarr" ? "movie_id" : "series_id"] > 0)
+  ) {
+    await enqueueReplacement(job, durable);
+    return;
+  }
+  let legacy;
+  try {
+    legacy = JSON.parse(
+      localStorage.getItem(`navigatorr_media:${job.id}`) || "null",
+    );
+  } catch {}
+  const integrations = (state.info.services || []).filter((entry) =>
+    ["sonarr", "radarr"].includes(entry.name),
+  );
+  if (!integrations.length && !["sonarr", "radarr"].includes(legacy?.service)) {
+    await enqueueReplacement(job, { service: "filesystem" });
+    return;
+  }
+  // Old browser-only hints cannot decide how an agent-created or historical
+  // candidate is imported. Ask once, then show the engine's exact approval plan.
+  state.replacementChoice = { job, legacy };
+  const method = $("replacement-method");
+  method.replaceChildren();
+  option(method, "filesystem", "Replace local file");
+  for (const integration of integrations)
+    option(
+      method,
+      integration.name,
+      integration.name === "radarr"
+        ? "Import through Radarr"
+        : "Import through Sonarr",
+    );
+  method.value = integrations.some((entry) => entry.name === legacy?.service)
+    ? legacy.service
+    : "filesystem";
+  $("replacement-source").textContent = job.source_path || job.id;
+  $("prepare-replacement-choice").dataset.jobControl = job.id;
+  $("prepare-replacement-choice").disabled = !serverReachable;
+  updateReplacementChoice();
+  if (!$("replacement-choice").open) $("replacement-choice").showModal();
+}
+function updateReplacementChoice() {
+  const service = $("replacement-method").value;
+  $("replacement-library-id-label").hidden = service === "filesystem";
+  const legacy = state.replacementChoice?.legacy;
+  $("replacement-library-id").value =
+    service === legacy?.service && Number.isInteger(legacy.id) && legacy.id > 0
+      ? String(legacy.id)
+      : "";
+  $("replacement-library-id").setAttribute(
+    "aria-label",
+    service === "radarr" ? "Movie ID" : "Series ID",
+  );
+}
+async function enqueueReplacement(job, context) {
+  if (state.busyJobs.has(job.id)) return;
   state.busyJobs.add(job.id);
   try {
-    let integration;
-    try {
-      integration = JSON.parse(
-        localStorage.getItem(`navigatorr_media:${job.id}`) || "null",
-      );
-    } catch {}
-    const inputs = { transcode_action_id: job.id, service: "filesystem" };
-    if (
-      ["sonarr", "radarr"].includes(integration?.service) &&
-      Number.isInteger(integration.id) &&
-      integration.id > 0
-    ) {
-      inputs.service = integration.service;
-      inputs[integration.service === "radarr" ? "movie_id" : "series_id"] =
-        integration.id;
+    const latest = (await api(`operations?id=${encodeURIComponent(job.id)}`))
+      .jobs?.[0];
+    if (latest?.replacement_action_id) {
+      $("replacement-choice").close();
+      await openJob(latest.replacement_action_id);
+      return;
     }
+    if (!latest?.candidate_ready)
+      throw new Error(
+        "This candidate is no longer ready for replacement. Refresh the queue.",
+      );
+    const inputs = { transcode_action_id: job.id, service: context.service };
+    if (["sonarr", "radarr"].includes(context.service)) {
+      const key = context.service === "radarr" ? "movie_id" : "series_id";
+      if (!Number.isInteger(context[key]) || context[key] <= 0)
+        throw new Error("Choose a positive library ID.");
+      inputs[key] = context[key];
+    } else if (context.service !== "filesystem")
+      throw new Error("Choose a supported replacement method.");
     const result = await tool("action_run", {
       action: "promote_transcode_candidate",
       inputs: JSON.stringify(inputs),
       idempotency_key: submissionID(),
     });
+    $("replacement-choice").close();
     await loadJobs();
     await openJob(result.id);
   } finally {
     state.busyJobs.delete(job.id);
   }
 }
+$("replacement-method").addEventListener("change", updateReplacementChoice);
+$("dismiss-replacement-choice").addEventListener("click", () =>
+  $("replacement-choice").close(),
+);
+$("replacement-choice").addEventListener("close", () => {
+  state.replacementChoice = null;
+});
+$("prepare-replacement-choice").addEventListener("click", () =>
+  safe(async () => {
+    const selection = state.replacementChoice;
+    if (!selection) return;
+    const service = $("replacement-method").value;
+    const context = { service };
+    if (service !== "filesystem") {
+      const id = Number($("replacement-library-id").value);
+      if (!Number.isInteger(id) || id <= 0)
+        throw new Error(
+          "Enter a positive library ID before reviewing the replacement.",
+        );
+      context[service === "radarr" ? "movie_id" : "series_id"] = id;
+    }
+    await enqueueReplacement(selection.job, context);
+  }),
+);
 function batchCounts(batch, compact = false) {
   if (compact) {
     const counts = [
@@ -1173,9 +1401,12 @@ function jobControls(job) {
     job.action_name === "transcode_media" &&
     job.status === "completed" &&
     job.candidate_ready &&
+    !job.replacement_action_id &&
     state.info.allow_destructive
   )
     add("Replace file", () => prepareReplacement(job));
+  if (job.replacement_action_id)
+    add("View replacement", () => openJob(job.replacement_action_id));
   return controls;
 }
 async function loadJobs(more = false) {
@@ -1229,7 +1460,11 @@ async function loadJobs(more = false) {
       meta.append(heading);
 
       meta.append(
-        node("span", names[job.status] || job.status, `badge ${job.status}`),
+        node(
+          "span",
+          job.replaced ? "Replaced" : names[job.status] || job.status,
+          `badge ${job.status}`,
+        ),
         node(
           "span",
           job.origin === "web"
@@ -1245,7 +1480,7 @@ async function loadJobs(more = false) {
           node("span", batchCounts(job.batch, true), "metadata batch-counts"),
         );
 
-      const savings = savingsLine(job.savings, true);
+      const savings = savingsLine(job.savings, true, job.replaced);
       if (savings) meta.append(savings);
       const actions = jobControls(job);
       if (job.parent_action_id)
@@ -1305,6 +1540,8 @@ async function openJob(id) {
   state.chunk = 0;
   state.stepOffset = 0;
   state.batchItemsOffset = 0;
+  state.batchItemsPaging = null;
+  state.batchItemsHasMore = false;
   $("batch-items-panel").hidden = true;
   state.detailRevision++;
   if (!$("job-detail").open) $("job-detail").showModal();
@@ -1317,47 +1554,67 @@ async function openJob(id) {
 async function refreshDetail() {
   const id = state.detail,
     revision = ++state.detailRevision;
-  const data = await api(`operations?id=${encodeURIComponent(id)}`),
-    job = data.jobs?.[0];
-  if (!job) throw new Error("This job is no longer available.");
-  if (
-    state.detail !== id ||
-    revision !== state.detailRevision ||
-    !$("job-detail").open
-  )
-    return;
-  $("load-detail").hidden = !job.logs_available;
-  state.detailJob = job;
-  const focus = focusedControl($("detail-controls"));
-  const summary = $("detail-summary");
-  summary.replaceChildren(
-    node(
-      "p",
-      job.batch?.title || job.source_path?.split("/").pop() || job.id,
-      "metadata",
-    ),
-    node("span", names[job.status] || job.status, `badge ${job.status}`),
-    node("p", job.error || job.waiting_reason || job.progress, "muted"),
-  );
-  if (job.worker) summary.append(telemetry(job));
-  if (job.batch)
-    summary.append(node("p", batchCounts(job.batch, true), "muted"));
-  if (job.source_path) summary.append(node("p", job.source_path, "metadata"));
-  if (job.promotion)
-    summary.append(
+  try {
+    const data = await api(`operations?id=${encodeURIComponent(id)}`),
+      job = data.jobs?.[0];
+    if (!job) throw new Error("This job is no longer available.");
+    if (
+      state.detail !== id ||
+      revision !== state.detailRevision ||
+      !$("job-detail").open
+    )
+      return;
+    $("load-detail").hidden = !job.logs_available;
+    state.detailJob = job;
+    const focus = focusedControl($("detail-controls"));
+    const summary = $("detail-summary");
+    summary.replaceChildren(
       node(
         "p",
-        `${job.promotion.original_path} → ${job.promotion.candidate_path} · ${bytes(job.promotion.original_bytes)} → ${bytes(job.promotion.candidate_bytes)}`,
+        job.batch?.title || job.source_path?.split("/").pop() || job.id,
         "metadata",
       ),
+      node(
+        "span",
+        job.replaced ? "Replaced" : names[job.status] || job.status,
+        `badge ${job.status}`,
+      ),
+      node("p", job.error || job.waiting_reason || job.progress, "muted"),
     );
-  const savings = savingsLine(job.savings);
-  if (savings) summary.append(savings);
-  const controls = $("detail-controls");
-  controls.replaceChildren(jobControls(job));
-  $("batch-items-panel").hidden = !job.batch;
-  if (job.batch) await loadBatchItems(id, revision, job.batch.total);
-  restoreControl(controls, focus);
+    if (job.worker) summary.append(telemetry(job));
+    if (job.batch)
+      summary.append(node("p", batchCounts(job.batch, true), "muted"));
+    if (job.source_path) summary.append(node("p", job.source_path, "metadata"));
+    if (job.promotion)
+      summary.append(
+        node(
+          "p",
+          `${job.promotion.original_path} → ${job.promotion.candidate_path} · ${bytes(job.promotion.original_bytes)} → ${bytes(job.promotion.candidate_bytes)}`,
+          "metadata",
+        ),
+      );
+    const savings = savingsLine(job.savings, false, job.replaced);
+    if (savings) summary.append(savings);
+    const controls = $("detail-controls");
+    controls.replaceChildren(jobControls(job));
+    $("batch-items-panel").hidden = !job.batch;
+    if (job.batch) await loadBatchItems(id, revision, job.batch.total);
+    restoreControl(controls, focus);
+  } catch (error) {
+    if (
+      state.detail === id &&
+      revision === state.detailRevision &&
+      $("job-detail").open
+    ) {
+      $("detail-summary").replaceChildren(
+        node("p", error.message || "Could not load this job.", "muted"),
+        button("Retry", refreshDetail, "quiet"),
+      );
+      $("detail-controls").replaceChildren();
+      $("batch-items-panel").hidden = true;
+      $("load-detail").hidden = true;
+    }
+  }
 }
 async function loadBatchItems(id, revision) {
   const offset = state.batchItemsOffset;
@@ -1387,19 +1644,46 @@ async function loadBatchItems(id, revision) {
   }
   $("batch-items-note").textContent =
     `${response.items?.length || 0} of ${response.total} files`;
+  state.batchItemsHasMore = response.has_more;
   $("batch-items-prev").disabled = offset === 0;
   $("batch-items-next").disabled = !response.has_more;
   $("batch-items-prev").hidden = offset === 0 && !response.has_more;
   $("batch-items-next").hidden = offset === 0 && !response.has_more;
 }
-$("batch-items-prev").addEventListener("click", () => {
-  state.batchItemsOffset = Math.max(0, state.batchItemsOffset - 25);
-  safe(() => loadBatchItems(state.detail, state.detailRevision));
-});
-$("batch-items-next").addEventListener("click", () => {
-  state.batchItemsOffset += 25;
-  safe(() => loadBatchItems(state.detail, state.detailRevision));
-});
+async function changeBatchPage(delta) {
+  if (state.batchItemsPaging || !state.detail) return;
+  if (delta > 0 && !state.batchItemsHasMore) return;
+  if (delta < 0 && state.batchItemsOffset === 0) return;
+  const id = state.detail,
+    revision = state.detailRevision;
+  const previous = state.batchItemsOffset;
+  const paging = { id, revision };
+  state.batchItemsPaging = paging;
+  state.batchItemsOffset = Math.max(0, previous + delta);
+  $("batch-items-prev").disabled = true;
+  $("batch-items-next").disabled = true;
+  try {
+    await loadBatchItems(id, revision);
+  } catch (error) {
+    if (state.detail === id && revision === state.detailRevision)
+      state.batchItemsOffset = previous;
+    throw error;
+  } finally {
+    if (state.batchItemsPaging === paging) {
+      state.batchItemsPaging = null;
+      if (state.detail === id && revision === state.detailRevision) {
+        $("batch-items-prev").disabled = state.batchItemsOffset === 0;
+        $("batch-items-next").disabled = !state.batchItemsHasMore;
+      }
+    }
+  }
+}
+$("batch-items-prev").addEventListener("click", () =>
+  safe(() => changeBatchPage(-25)),
+);
+$("batch-items-next").addEventListener("click", () =>
+  safe(() => changeBatchPage(25)),
+);
 async function loadDetail() {
   const id = state.detail;
   const data = await api(`logs?id=${encodeURIComponent(id)}`);
@@ -1515,9 +1799,13 @@ async function readRecipe(name) {
     $("delete-recipe").disabled = r.source !== "managed";
     $("recipe-feedback").hidden = true;
     renderRecipeList();
-  } finally {
-    // A later selection owns the form's loading state.
-    if (revision === state.recipeRevision) $("recipe-form").inert = false;
+  } catch (error) {
+    if (revision === state.recipeRevision && auth === state.authRevision)
+      $("recipe-source").textContent =
+        `Could not load ${name}. Select it again to retry.`;
+    // A failed read must not reactivate the previous profile's editable form.
+    // Successful reads and new profile creation enable it in setRecipeControls.
+    throw error;
   }
 }
 $("new-recipe").addEventListener("click", () =>
@@ -1693,6 +1981,8 @@ $("recipe-encoder").addEventListener("change", () => {
   } else recipeControls();
 });
 function recipeFromControls() {
+  if (state.recipeAdvancedErrors?.size)
+    throw new Error([...state.recipeAdvancedErrors.values()][0]);
   const p = JSON.parse(JSON.stringify(state.recipeDraft || {}));
   p.container = $("recipe-container").value;
   p.video ||= {};
@@ -1709,20 +1999,142 @@ function recipeFromControls() {
     p.preserve[key] = $("recipe-" + key).checked;
   return p;
 }
-// Edit the less common fields in-place with typed controls, retaining unknown fields.
+// Defaults describe available controls; merely opening the dialog does not
+// insert optional values into an existing profile.
+function advancedProfileDefaults(profile) {
+  const vt = profile.video?.codec === "hevc_videotoolbox";
+  const bitrate = vt && profile.video?.average_bitrate_kbps > 0;
+  const video = { profile: "", pixel_format: "" };
+  if (vt) {
+    Object.assign(video, {
+      average_bitrate_kbps: null,
+      max_bitrate_kbps: null,
+      constant_bitrate: null,
+      prioritize_speed: null,
+      spatial_aq: null,
+      realtime: null,
+      qmin: null,
+      qmax: null,
+      gop_size: null,
+      b_frames: null,
+      closed_gop: null,
+      power_efficient: null,
+      max_ref_frames: null,
+    });
+  } else video.tune = "";
+  return {
+    video,
+    preserve: { metadata: true, chapters: true, attachments: true },
+    optimization: {
+      enabled: false,
+      sampling: {
+        strategy: "distributed",
+        sample_count: 3,
+        sample_seconds: 20,
+      },
+      quality: {
+        preferred_metric: "vmaf",
+        vmaf: { target: 96, minimum: 95, marginal_tolerance: 0.5 },
+        ssim: { target: 0.99, minimum: 0.98, marginal_tolerance: 0.005 },
+      },
+      search: {
+        max_candidates: 3,
+        [bitrate ? "bitrate_values" : "quality_values"]: bitrate
+          ? [
+              Math.round(profile.video.average_bitrate_kbps * 0.8),
+              profile.video.average_bitrate_kbps,
+              Math.round(profile.video.average_bitrate_kbps * 1.2),
+            ]
+          : vt
+            ? [55, 65, 75]
+            : [20, 23, 26],
+      },
+    },
+  };
+}
+function mergeAdvancedDefaults(defaults, profile) {
+  const result = JSON.parse(JSON.stringify(profile || {}));
+  for (const [key, value] of Object.entries(defaults)) {
+    if (value && typeof value === "object" && !Array.isArray(value))
+      result[key] = mergeAdvancedDefaults(value, result[key]);
+    else if (!(key in result)) result[key] = value;
+  }
+  return result;
+}
+function updatePreservationNote() {
+  const note = document.querySelector?.(".preservation-note");
+  if (!note) return;
+  const kept = ["metadata", "chapters", "attachments"].filter(
+    (key) => $("recipe-" + key).checked,
+  );
+  note.textContent =
+    kept.length === 3
+      ? "Metadata, chapters and attachments are preserved."
+      : `Unsupported policy: ${["metadata", "chapters", "attachments"].filter((key) => !kept.includes(key)).join(", ")} must be enabled before saving.`;
+}
 function renderAdvancedProfile(profile) {
   const host = $("recipe-extra-fields");
   host.replaceChildren();
+  state.recipeAdvancedErrors = new Map();
+  const defaults = advancedProfileDefaults(profile);
+  const view = mergeAdvancedDefaults(defaults, profile);
   const represented = new Set([
     "container",
     "video.codec",
     "video.quality",
     "video.preset",
     "audio.mode",
-    "preserve.metadata",
-    "preserve.chapters",
-    "preserve.attachments",
   ]);
+  const booleans = new Set([
+    "constant_bitrate",
+    "prioritize_speed",
+    "spatial_aq",
+    "realtime",
+    "closed_gop",
+    "power_efficient",
+  ]);
+  const bounds = {
+    average_bitrate_kbps: [1, 1000000],
+    max_bitrate_kbps: [1, 1000000],
+    qmin: [0, 69],
+    qmax: [0, 69],
+    gop_size: [1, 100000],
+    b_frames: [0, 1],
+    max_ref_frames: [1, 16],
+    sample_count: [1, 20],
+    sample_seconds: [0.1, 120],
+    max_candidates: [1, 20],
+  };
+  const choices = {
+    "video.profile": ["", "main", "main10"],
+    "video.pixel_format": ["", "yuv420p", "p010le"],
+    "video.tune": [
+      "",
+      "animation",
+      "grain",
+      "fastdecode",
+      "zerolatency",
+      "psnr",
+      "ssim",
+    ],
+    "optimization.sampling.strategy": [
+      "distributed",
+      "uniform",
+      "relative_positions",
+    ],
+    "optimization.quality.preferred_metric": ["vmaf", "ssim"],
+  };
+  const setValue = (path, value) => {
+    const keys = path.split(".");
+    let target = state.recipeDraft;
+    for (const part of keys.slice(0, -1)) target = target[part] ||= {};
+    if (value === undefined) delete target[keys.at(-1)];
+    else target[keys.at(-1)] = value;
+    if (path.startsWith("preserve.")) {
+      $("recipe-" + keys.at(-1)).checked = value !== false;
+      updatePreservationNote();
+    }
+  };
   const visit = (obj, path, parent) => {
     for (const [key, value] of Object.entries(obj)) {
       const current = path ? `${path}.${key}` : key;
@@ -1730,44 +2142,185 @@ function renderAdvancedProfile(profile) {
       const caption = key
         .replaceAll("_", " ")
         .replace(/^./, (c) => c.toUpperCase());
-      if (value && typeof value === "object") {
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        const group = node("fieldset");
+        group.append(node("legend", caption));
+        if (
+          current === "video" &&
+          profile.video?.codec === "hevc_videotoolbox"
+        ) {
+          const label = node("label", "Rate control");
+          const select = document.createElement("select");
+          select.dataset.profileField = "video.rate_control";
+          option(select, "quality", "Quality");
+          option(select, "bitrate", "Bitrate");
+          select.value =
+            profile.video.average_bitrate_kbps > 0 ? "bitrate" : "quality";
+          select.addEventListener("change", () => {
+            const p = state.recipeDraft;
+            if (select.value === "bitrate") {
+              p.video.average_bitrate_kbps ||= 3500;
+              p.video.quality = 0;
+              $("recipe-quality").value = "0";
+            } else {
+              delete p.video.average_bitrate_kbps;
+              delete p.video.max_bitrate_kbps;
+              delete p.video.constant_bitrate;
+              p.video.quality = 65;
+              $("recipe-quality").value = "65";
+            }
+            if (p.optimization?.search) {
+              delete p.optimization.search.quality_values;
+              delete p.optimization.search.bitrate_values;
+              Object.assign(
+                p.optimization.search,
+                advancedProfileDefaults(p).optimization.search,
+              );
+            }
+            renderAdvancedProfile(p);
+            recipeControls();
+          });
+          label.append(select);
+          group.append(label);
+        }
+        visit(value, current, group);
+        if (group.children.length > 1) parent.append(group);
+      } else if (
+        Array.isArray(value) &&
+        value.some((v) => typeof v === "object")
+      ) {
         const group = node("fieldset");
         group.append(node("legend", caption));
         visit(value, current, group);
-        parent.append(group);
+        if (group.children.length > 1) parent.append(group);
       } else {
         const label = node("label", caption);
-        const input = document.createElement("input");
-        input.type =
-          typeof value === "boolean"
-            ? "checkbox"
-            : typeof value === "number"
-              ? "number"
-              : "text";
-        if (input.type === "checkbox") {
-          input.checked = value;
-          label.className = "check";
-        } else {
+        const optionalBoolean = booleans.has(key);
+        const enumValues = choices[current];
+        const input = document.createElement(
+          optionalBoolean || enumValues ? "select" : "input",
+        );
+        input.dataset.profileField = current;
+        const list = Array.isArray(value);
+        if (optionalBoolean) {
+          option(input, "", "Automatic");
+          option(input, "true", "On");
+          option(input, "false", "Off");
+          input.value = value == null ? "" : String(value);
+        } else if (enumValues) {
+          for (const v of enumValues) option(input, v, v || "Automatic");
+          if (value && !enumValues.includes(value)) option(input, value);
           input.value = value ?? "";
-          if (input.type === "number") input.step = "any";
+        } else {
+          input.type =
+            typeof value === "boolean"
+              ? "checkbox"
+              : typeof value === "number" || value === null
+                ? "number"
+                : "text";
+          if (input.type === "checkbox") {
+            input.checked = value;
+            label.className = "check";
+            if (current.startsWith("preserve.")) {
+              label.textContent = `${caption} (required)`;
+              input.disabled = value === true;
+            }
+          } else {
+            input.value = list ? value.join(", ") : (value ?? "");
+            if (value === null) input.placeholder = "Automatic";
+            if (input.type === "number") {
+              input.step =
+                key === "sample_seconds" || current.includes(".quality.")
+                  ? "any"
+                  : "1";
+              if (bounds[key]) [input.min, input.max] = bounds[key].map(String);
+            }
+          }
         }
-        input.addEventListener("input", () => {
-          let target = state.recipeDraft;
-          const keys = current.split(".");
-          for (const part of keys.slice(0, -1)) target = target[part];
-          target[keys.at(-1)] =
-            input.type === "checkbox"
-              ? input.checked
-              : input.type === "number"
-                ? Number(input.value)
-                : input.value;
-        });
+        const bitrateOnly =
+          current.startsWith("video.") &&
+          [
+            "average_bitrate_kbps",
+            "max_bitrate_kbps",
+            "constant_bitrate",
+          ].includes(key);
+        if (bitrateOnly)
+          input.disabled = !(profile.video?.average_bitrate_kbps > 0);
+        input.addEventListener(
+          optionalBoolean || enumValues ? "change" : "input",
+          () => {
+            let next;
+            if (optionalBoolean)
+              next = input.value === "" ? undefined : input.value === "true";
+            else if (input.type === "checkbox") {
+              if (current.startsWith("preserve.")) {
+                input.checked = true;
+                input.disabled = true;
+              }
+              next = input.checked;
+            } else if (list) {
+              next = input.value.trim()
+                ? input.value.split(",").map((v) => Number(v.trim()))
+                : [];
+              if (
+                next.some((v) => !Number.isFinite(v)) ||
+                input.value.split(",").some((v) => !v.trim())
+              ) {
+                state.recipeAdvancedErrors.set(
+                  current,
+                  `${caption} must be a comma-separated list of numbers.`,
+                );
+                input.setCustomValidity?.("Enter comma-separated numbers.");
+                return;
+              }
+            } else if (input.type === "number") {
+              if (!input.value.trim() && key === "average_bitrate_kbps") {
+                state.recipeAdvancedErrors.set(
+                  current,
+                  "Average bitrate is required in bitrate mode.",
+                );
+                input.setCustomValidity?.("Enter an average bitrate.");
+                return;
+              }
+              if (!input.value.trim()) next = undefined;
+              else {
+                next = Number(input.value);
+                if (
+                  !Number.isFinite(next) ||
+                  (bounds[key] &&
+                    (next < bounds[key][0] || next > bounds[key][1])) ||
+                  (input.step === "1" && !Number.isInteger(next))
+                ) {
+                  state.recipeAdvancedErrors.set(
+                    current,
+                    `${caption} is outside its valid range.`,
+                  );
+                  input.setCustomValidity?.(
+                    "Enter a value within the allowed range.",
+                  );
+                  return;
+                }
+              }
+            } else next = input.value || undefined;
+            state.recipeAdvancedErrors.delete(current);
+            input.setCustomValidity?.("");
+            setValue(current, next);
+            if (current === "optimization.enabled" && next) {
+              state.recipeDraft.optimization = mergeAdvancedDefaults(
+                advancedProfileDefaults(state.recipeDraft).optimization,
+                state.recipeDraft.optimization,
+              );
+            }
+            recipeControls();
+          },
+        );
         label.append(input);
         parent.append(label);
       }
     }
   };
-  visit(profile, "", host);
+  visit(view, "", host);
+  updatePreservationNote();
 }
 $("reload-profiles").addEventListener("click", () =>
   safe(async () => {
