@@ -87,6 +87,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/maintenance/folder", s.folder)
 	mux.HandleFunc("POST /api/maintenance/tool", s.tool)
 	mux.HandleFunc("GET /api/maintenance/logs", s.logs)
+	mux.HandleFunc("GET /sw.js", serveWorker)
 	files, _ := fs.Sub(assets, "assets")
 	static := http.FileServer(http.FS(files))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -94,9 +95,12 @@ func (s *Server) Handler() http.Handler {
 			http.Error(w, "method not allowed", 405)
 			return
 		}
-		if r.URL.Path != "/" && r.URL.Path != "/app.js" && r.URL.Path != "/app.css" {
+		if !publicShellPath(r.URL.Path) {
 			http.NotFound(w, r)
 			return
+		}
+		if r.URL.Path == "/manifest.webmanifest" {
+			w.Header().Set("Content-Type", "application/manifest+json")
 		}
 		static.ServeHTTP(w, r)
 	})
