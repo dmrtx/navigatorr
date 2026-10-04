@@ -63,6 +63,7 @@ function actionIcon(label) {
     "Keep originals": "M5 4h14v16H5ZM8 8h8M8 12h8",
     "Pause batch": "M8 4v16M16 4v16",
     "Resume batch": "M7 4l13 8-13 8Z",
+    Folder: "M3 6h7l2 2h9v12H3Z",
   };
   if (!paths[label]) return null;
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -434,6 +435,8 @@ function resetLibrary() {
   $("path").value = "";
   $("back").hidden = true;
   $("selection-title").textContent = "Choose a movie or series";
+  $("selection-title").hidden = false;
+  $("folder-breadcrumbs").hidden = true;
   $("scope").value = "file";
   controls();
 }
@@ -457,6 +460,13 @@ $("back").addEventListener("click", () => {
 $("search-button").addEventListener("click", () => {
   state.libraryOffset = 0;
   safe(loadLibrary);
+});
+$("toggle-library-search").addEventListener("click", () => {
+  const open = $("library-search-label").hidden;
+  $("library-search-label").hidden = !open;
+  $("search-button").hidden = !open;
+  $("toggle-library-search").hidden = open;
+  if (open) $("search").focus();
 });
 $("search").addEventListener("keydown", (e) => {
   if (e.key === "Enter") {
@@ -495,6 +505,37 @@ function clearFileSelection() {
   state.fileService = null;
   controls();
 }
+async function navigateFolder(path) {
+  state.folder = path;
+  state.folderSelected = new Set();
+  state.libraryOffset = 0;
+  $("search").value = "";
+  clearFileSelection();
+  await loadFolder();
+}
+function folderBreadcrumbs(root, path) {
+  const host = $("folder-breadcrumbs");
+  host.hidden = false;
+  $("selection-title").hidden = true;
+  host.replaceChildren();
+  const parts =
+    path === root
+      ? []
+      : path.slice(root.replace(/\/$/, "").length + 1).split("/");
+  let current = root;
+  const add = (label, target, last) => {
+    const b = button(label, () => navigateFolder(target), "breadcrumb-button");
+    b.title = target;
+    if (last) b.setAttribute("aria-current", "location");
+    host.append(b);
+  };
+  add(root.split("/").filter(Boolean).pop() || "/", root, parts.length === 0);
+  parts.forEach((part, index) => {
+    current = `${current.replace(/\/$/, "")}/${part}`;
+    host.append(node("span", "/", "breadcrumb-separator"));
+    add(part, current, index === parts.length - 1);
+  });
+}
 async function loadFolder(revision = ++state.libraryRevision, more = false) {
   state.libraryLoading = true;
   if (!more) {
@@ -520,8 +561,10 @@ async function loadFolder(revision = ++state.libraryRevision, more = false) {
         ? root.split("/").pop() || root
         : page.path.slice(root.length + 1);
     $("selection-title").title = page.path;
+    folderBreadcrumbs(root, page.path);
     $("back").hidden = state.folder === root;
-    $("library-total").textContent = `${page.total} files and folders`;
+    $("library-total").textContent =
+      `${page.total} item${page.total === 1 ? "" : "s"}`;
     if (!more) $("library-items").replaceChildren();
     for (const file of page.items) {
       const row = node("div", "", "media-row");
@@ -541,17 +584,17 @@ async function loadFolder(revision = ++state.libraryRevision, more = false) {
         const checkLabel = node("label", "", "media-check");
         checkLabel.append(check);
         row.append(checkLabel);
-      } else row.append(node("span", "↳", "media-icon"));
+      } else {
+        const icon = node("span", "", "media-icon");
+        icon.append(actionIcon("Folder") || node("span", "↳"));
+        row.append(icon);
+      }
       row.append(
         button(
           file.path.split("/").pop(),
           async () => {
             if (file.is_dir) {
-              state.folder = file.path;
-              state.folderSelected.clear();
-              state.libraryOffset = 0;
-              clearFileSelection();
-              await loadFolder();
+              await navigateFolder(file.path);
             } else {
               $("path").value = file.path;
               state.file = file;
@@ -1295,9 +1338,10 @@ async function refreshDetail() {
     ),
     node("span", names[job.status] || job.status, `badge ${job.status}`),
     node("p", job.error || job.waiting_reason || job.progress, "muted"),
-    telemetry(job),
   );
-  if (job.batch) summary.append(node("p", batchCounts(job.batch), "muted"));
+  if (job.worker) summary.append(telemetry(job));
+  if (job.batch)
+    summary.append(node("p", batchCounts(job.batch, true), "muted"));
   if (job.source_path) summary.append(node("p", job.source_path, "metadata"));
   if (job.promotion)
     summary.append(
@@ -1345,6 +1389,8 @@ async function loadBatchItems(id, revision) {
     `${response.items?.length || 0} of ${response.total} files`;
   $("batch-items-prev").disabled = offset === 0;
   $("batch-items-next").disabled = !response.has_more;
+  $("batch-items-prev").hidden = offset === 0 && !response.has_more;
+  $("batch-items-next").hidden = offset === 0 && !response.has_more;
 }
 $("batch-items-prev").addEventListener("click", () => {
   state.batchItemsOffset = Math.max(0, state.batchItemsOffset - 25);

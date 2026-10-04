@@ -140,16 +140,70 @@
               </div>
               <div class="toolbar">
                 <label>Source<select id="service"></select></label
-                ><label class="grow"
+                ><label id="library-search-label" class="grow" hidden
                   >Search<input
                     id="search"
                     type="search"
                     placeholder="Title or filename" /></label
-                ><button id="search-button">Search</button>
+                ><button
+                  id="search-button"
+                  class="icon-button"
+                  aria-label="Search files"
+                  title="Search"
+                  hidden
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.7"
+                    aria-hidden="true"
+                  >
+                    <circle cx="10" cy="10" r="6" />
+                    <path d="m15 15 5 5" />
+                  </svg></button
+                ><button
+                  id="toggle-library-search"
+                  class="icon-button"
+                  aria-label="Show search"
+                  title="Search"
+                  aria-expanded="false"
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.7"
+                    aria-hidden="true"
+                  >
+                    <circle cx="10" cy="10" r="6" />
+                    <path d="m15 15 5 5" />
+                  </svg>
+                </button>
               </div>
               <div class="breadcrumbs">
-                <button id="back" class="quiet" hidden>← Back</button
+                <button
+                  id="back"
+                  class="icon-button quiet"
+                  aria-label="Parent folder"
+                  title="Back"
+                  hidden
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.7"
+                    aria-hidden="true"
+                  >
+                    <path d="m13 6-6 6 6 6M7 12h13" />
+                  </svg></button
                 ><span id="selection-title">Choose a folder or title</span>
+                <nav
+                  id="folder-breadcrumbs"
+                  aria-label="Folder path"
+                  hidden
+                ></nav>
               </div>
               <div id="library-items" class="library-items"></div>
               <div class="list-footer">
