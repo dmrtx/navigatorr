@@ -88,11 +88,11 @@ Claude Code / MCP Client
 
 5. **Stdio Transport** — Communicates with the MCP client over stdin/stdout using JSON-RPC, making it compatible with any MCP host (Claude Code, Cursor, etc.).
 
-## Browser maintenance console
+## Browser maintenance interface
 
-An optional web console provides movie/series navigation, single-file and series/season transcode batches, typed target controls, benchmarks, profiles, queue/history and approved candidate replacement through Sonarr or Radarr. It shares the existing HTTP worker and persistent actions with MCP; closing the browser does not stop jobs. Audio-only conversion is deferred, while video audio tracks retain copy/compact support.
+An optional web interface provides direct folder navigation, single-file and series/season batches, typed target controls, benchmarks, profiles, a live queue and persistent savings statistics. Candidate replacement requires approval; Sonarr/Radarr catalog and import integrations are optional. It shares the existing HTTP worker and persistent actions with MCP; closing the browser does not stop jobs. Audio-only conversion is deferred, while video audio tracks retain copy/compact support.
 
-Enable `web.enabled` with a dedicated token and persistent `streamable-http` transport. See [setup and workflow](docs/MAINTENANCE_UI.md) for configuration, access controls and extension boundaries.
+Enable `web.enabled` with persistent `streamable-http` transport and either Cloudflare Access authentication or a standalone token. Cloudflare mode uses its existing Google sign-in without a second app login. See [setup and workflow](docs/MAINTENANCE_UI.md) for configuration, access controls and extension boundaries.
 
 ## MCP Tools
 

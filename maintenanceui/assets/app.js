@@ -686,8 +686,8 @@ function controls() {
   $("x265-fields").hidden = vt;
   $("quality").max = vt ? "100" : "51";
   $("quality-label").firstChild.textContent = vt
-    ? "VideoToolbox quality (higher is better)"
-    : "x265 CRF (lower is better)";
+    ? "Quality (higher is better)"
+    : "CRF (lower is better)";
   $("quality").disabled = vt && $("rate-mode").value === "bitrate";
   $("bitrate").disabled = $("rate-mode").value !== "bitrate";
   $("preview").hidden = !batch;
