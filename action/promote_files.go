@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -212,6 +211,15 @@ func (e *Engine) stepPromotePlan(ctx context.Context, ec *ExecutionContext) (Ste
 	}
 	id := strings.TrimSpace(getString(ec.Inputs, "transcode_action_id"))
 	seriesID := getInt(ec.Inputs, "series_id")
+	movieID := getInt(ec.Inputs, "movie_id")
+	if movieID > 0 {
+		if seriesID > 0 || getString(ec.Inputs, "service") != "radarr" || getString(ec.Inputs, "batch_promote_parent_id") != "" {
+			return promoteFailed(fmt.Errorf("movie promotion requires service=radarr, movie_id and no series/batch inputs"))
+		}
+		seriesID = movieID // Durable media claims are namespaced by service.
+	} else if getString(ec.Inputs, "service") == "radarr" {
+		return promoteFailed(fmt.Errorf("Radarr promotion requires movie_id"))
+	}
 	if id == "" || seriesID <= 0 {
 		return promoteFailed(fmt.Errorf("transcode_action_id and a positive series_id are required"))
 	}
@@ -230,6 +238,7 @@ func (e *Engine) stepPromotePlan(ctx context.Context, ec *ExecutionContext) (Ste
 		return promoteFailed(fmt.Errorf("the source action did not produce a candidate"))
 	}
 	p := &promotionState{SourceActionID: id, Service: getString(ec.Inputs, "service"), SeriesID: seriesID, OriginalPath: getString(source.State, "resolved_path"), CandidatePath: getString(source.State, "candidate_path"), OriginalSHA: getString(source.State, "original_sha256"), Commands: map[string]*promotionCommand{}}
+	p.MovieID = movieID
 	if p.Service == "" {
 		p.Service = "sonarr"
 	}
@@ -294,7 +303,7 @@ func (e *Engine) stepPromotePlan(ctx context.Context, ec *ExecutionContext) (Ste
 		ID   int    `json:"id"`
 		Path string `json:"path"`
 	}
-	data, err := svc.Get(ctx, "/api/v3/series/"+strconv.Itoa(seriesID), nil)
+	data, err := svc.Get(ctx, p.mediaEndpoint(), nil)
 	if err != nil {
 		return promoteFailed(fmt.Errorf("resolve Sonarr series: %w", err))
 	}

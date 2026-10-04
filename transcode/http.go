@@ -242,6 +242,31 @@ func NewHTTPExecutor(cfg HTTPConfig, opts ...HTTPExecutorOption) (*HTTPExecutor,
 // BaseURL returns the normalized daemon origin (no trailing slash).
 func (e *HTTPExecutor) BaseURL() string { return e.base }
 
+// Logs reads a bounded runner-log tail without exposing the worker credential.
+func (e *HTTPExecutor) Logs(ctx context.Context, jobID string) (map[string]any, error) {
+	if !validJobIDRegex.MatchString(jobID) || jobID == "." || jobID == ".." {
+		return nil, fmt.Errorf("invalid job ID")
+	}
+	ctx, cancel := context.WithTimeout(ctx, e.reqTO)
+	defer cancel()
+	req, err := e.newRequest(ctx, http.MethodGet, "/v1/jobs/"+url.PathEscape(jobID)+"/logs?tail_bytes=65536", nil)
+	if err != nil {
+		return nil, err
+	}
+	b, code, _, err := e.do(req, "logs", jobID, false)
+	if err != nil {
+		return nil, err
+	}
+	if code != http.StatusOK {
+		return nil, &HTTPError{Method: http.MethodGet, URL: redactURL(e.base + "/v1/jobs/" + jobID + "/logs"), StatusCode: code, Message: parseErrorMessage(b)}
+	}
+	var result map[string]any
+	if err := json.Unmarshal(b, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 // TranslateLocalToRemote mirrors SSHExecutor longest-prefix semantics.
 func (e *HTTPExecutor) TranslateLocalToRemote(localPath string) (string, error) {
 	if len(e.cfg.PathMappings) == 0 {

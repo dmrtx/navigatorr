@@ -32,9 +32,17 @@ type Config struct {
 	Maintenance       MaintenanceConfig        `yaml:"maintenance"`
 	Concurrency       ConcurrencyConfig        `yaml:"concurrency"`
 	MCP               MCPConfig                `yaml:"mcp"`
+	Web               WebConfig                `yaml:"web"`
 	MaxResponseSizeKB int                      `yaml:"max_response_size_kb"`
 	AllowDestructive  bool                     `yaml:"allow_destructive"`
 	LoadedPath        string                   `yaml:"-"`
+}
+
+// Web is opt-in and shares the persistent MCP HTTP listener.
+type WebConfig struct {
+	Enabled   bool   `yaml:"enabled"`
+	Token     string `yaml:"token"`
+	TokenFile string `yaml:"token_file"`
 }
 
 type MCPConfig struct {
