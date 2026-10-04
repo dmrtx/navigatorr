@@ -190,6 +190,7 @@ function selectTab(tab) {
       n.setAttribute("aria-selected", String(n.dataset.tab === tab)),
     );
   $("jobs").hidden = !["library", "jobs"].includes(tab);
+  if (typeof window !== "undefined") window.scrollTo({ top: 0 });
   if (["library", "jobs"].includes(tab)) safe(loadJobs);
   if (tab === "recipes") safe(loadRecipes);
 }
@@ -801,20 +802,20 @@ function restoreControl(container, focus) {
     )
     ?.focus({ preventScroll: true });
 }
-function savingsLine(savings) {
+function savingsLine(savings, compact = false) {
   if (!savings) return null;
   const parts = [];
   if (savings.source_bytes != null)
     parts.push(`Origen ${bytes(savings.source_bytes)}`);
   if (savings.estimated_saved_bytes != null)
     parts.push(
-      `${savings.estimate_kind === "sampled_benchmark" ? "Ahorro estimado por muestras" : "Orientación de perfiles"} ${bytes(savings.estimated_saved_bytes)}`,
+      `${savings.estimate_kind === "sampled_benchmark" ? (compact ? "Estimado (muestras)" : "Ahorro estimado por muestras") : compact ? "Estimado (perfil)" : "Orientación de perfiles"} ${bytes(savings.estimated_saved_bytes)}`,
     );
   if (savings.candidate_saved_bytes != null)
     parts.push(
       savings.candidate_saved_bytes < 0
         ? `Candidato: crece ${bytes(-savings.candidate_saved_bytes)}`
-        : `Ahorro en candidato ${bytes(savings.candidate_saved_bytes)}`,
+        : `${compact ? "Ahorro candidato" : "Ahorro en candidato"} ${bytes(savings.candidate_saved_bytes)}`,
     );
   if (savings.realized_saved_bytes != null)
     parts.push(`Liberado ${bytes(savings.realized_saved_bytes)}`);
@@ -825,8 +826,12 @@ function savingsLine(savings) {
     : null;
 }
 function telemetry(job) {
-  const result = node("div", "", "job-progress");
   const w = job.worker;
+  const result = node(
+    "div",
+    "",
+    `job-progress ${w ? "worker-progress" : "workflow-progress"}`,
+  );
   if (!w) {
     result.append(node("span", job.progress || "En cola", "metadata"));
     return result;
@@ -869,7 +874,7 @@ function telemetry(job) {
       node(
         "span",
         `Medición ${new Date(w.last_progress_at).toLocaleTimeString()}`,
-        "metadata",
+        "metadata progress-observed-at",
       ),
     );
   return result;
@@ -959,7 +964,25 @@ async function prepareReplacement(job) {
     state.busyJobs.delete(job.id);
   }
 }
-function batchCounts(batch) {
+function batchCounts(batch, compact = false) {
+  if (compact) {
+    const counts = [
+      [batch.queued, "en cola"],
+      [batch.running, "activos"],
+      [batch.waiting_for_slot, "esperando turno"],
+      [batch.completed, "listos"],
+      [batch.failed, "fallos"],
+      [batch.waiting_decision ?? batch.review, "requieren decisión"],
+      [batch.skip, "omitidos"],
+    ];
+    return (
+      `${batch.dry_run ? "Vista previa · " : ""}${batch.total ?? 0} archivos` +
+      counts
+        .filter(([count]) => count > 0)
+        .map(([count, label]) => ` · ${count} ${label}`)
+        .join("")
+    );
+  }
   return `${batch.dry_run ? "Vista previa · " : ""}${batch.total ?? 0} archivos · ${batch.queued ?? 0} en cola · ${batch.running ?? 0} activos · ${batch.waiting_for_slot ?? 0} esperando turno · ${batch.completed ?? 0} listos · ${batch.failed ?? 0} fallos · ${batch.waiting_decision ?? batch.review ?? 0} requieren decisión · ${batch.skip ?? 0} omitidos`;
 }
 function jobControls(job) {
@@ -1076,13 +1099,22 @@ async function loadJobs() {
       ),
     );
     if (job.batch)
-      meta.append(node("span", batchCounts(job.batch), "metadata"));
+      meta.append(
+        node("span", batchCounts(job.batch, true), "metadata batch-counts"),
+      );
     if (job.waiting_reason || job.error)
       meta.append(node("p", job.error || job.waiting_reason, "muted"));
-    const savings = savingsLine(job.savings);
+    const savings = savingsLine(job.savings, true);
     if (savings) meta.append(savings);
     const actions = jobControls(job);
-    actions.append(button("Detalle", () => openJob(job.id), "quiet"));
+    const detail = button(
+      "Detalle",
+      () => openJob(job.id),
+      "quiet detail-link",
+    );
+    detail.title = "Ver detalle del trabajo";
+    detail.setAttribute("aria-label", "Detalle");
+    actions.append(detail);
     if (job.parent_action_id)
       actions.append(
         button("Ver lote", () => openJob(job.parent_action_id), "quiet"),
@@ -1164,6 +1196,7 @@ async function refreshDetail() {
     telemetry(job),
   );
   if (job.batch) summary.append(node("p", batchCounts(job.batch), "muted"));
+  if (job.source_path) summary.append(node("p", job.source_path, "metadata"));
   if (job.promotion)
     summary.append(
       node(
