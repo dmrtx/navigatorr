@@ -1,6 +1,6 @@
 # Adversarial review — 2026-10-04
 
-The local review is complete. All reported layout and navigation concerns were checked against the running interface, together with delayed responses, failed reads, repeated taps, expired authentication and consumed replacement candidates. Findings below are fixed in the review branch. No deployment or merge was performed; the requested Cloudflare deployment is cancelled.
+The initial local review and the subsequent mobile-flow corrections are recorded here. Reported layout and navigation concerns were checked against the running interface, together with delayed responses, failed reads, repeated taps, expired authentication and consumed replacement candidates. Findings below are fixed in the review branch. No deployment or merge was performed; the requested Cloudflare deployment is cancelled.
 
 ## Findings fixed
 
@@ -18,7 +18,15 @@ The local review is complete. All reported layout and navigation concerns were c
 
 Files, Queue, Profiles, Stats and Settings were checked at 320, 360, 390, 430 and 768 pixels, landscape 844×390 and desktop 1280×900. No page overflow or clipped form fields remained in these checks. Modal settings, replacement selection, exact batch approval and manual-path errors were inspected on the running temporary preview.
 
-The interface is English, with compact typography, icon navigation and refresh, full-row progress, separate statistics, continuous Files/Queue loading and direct folder breadcrumbs. Installation help is opt-in and dismissible. Marketing headers, duplicate listings, generic MCP/JSON consoles and persistent installation instructions are absent. Settings uses dedicated profile-bundle and recovery controls.
+The interface is English, with compact typography, icon navigation and refresh, full-row progress, separate statistics, continuous Files/Queue loading and direct folder breadcrumbs. Installation help is opt-in and dismissible. Marketing headers, duplicate listings, generic MCP/JSON consoles and persistent installation instructions are absent. Settings uses dedicated shared-preset and recovery controls.
+
+## Follow-up corrections
+
+- Single-column Files layouts now have two steps: selection and configuration. This applies through 900 pixels, including phone landscape. Wider desktop views retain both panes. Back preserves settings and selection and restores keyboard focus. Single-file, multi-file, whole-folder and manual-path transitions were exercised on the running preview; no jobs were submitted.
+- File checkboxes now have a 14-pixel visual, with the original generous hit area and aligned folder-icon column. Open a path is an icon in the source toolbar.
+- Queue rows align the filename, status, concise result/size summary and available actions. Failed jobs expose their error reason when available, candidate savings remain distinct from freed bytes, and decision rows no longer display stale worker telemetry or misleading zero-file counts.
+- Shared presets replaces Profile bundle. Refresh presets replaces the duplicate Reload/Update operations; Restore previous remains. The UI identifies their scope as new jobs only.
+- These changes were visually checked at 320 and 390 pixels, landscape 844×390 and desktop 1280×900. No horizontal overflow or clipped form fields remained. Fresh preview console checks found no runtime errors.
 
 Screenshots in [screenshots](screenshots/) show synthetic fixtures, including deliberately tiny files whose sizes come from disk. They are visual evidence, not production media measurements.
 
@@ -26,7 +34,8 @@ Screenshots in [screenshots](screenshots/) show synthetic fixtures, including de
 
 - Full Go suite: `CGO_ENABLED=0 go test -count=1 ./...` passed.
 - `go vet ./...`, Go formatting, JavaScript syntax and diff checks passed.
-- 59 UI/PWA regressions passed, including authentication edge responses, delayed selections, failed reads, single-flight paging/submission, optional profile settings, durable replacement routing and shell-cache isolation.
+- 65 UI/PWA regressions passed, including authentication edge responses, delayed selections, failed reads, single-flight paging/submission, optional profile settings, durable replacement routing, two-step selection/focus and shell-cache isolation.
+- The focused Go UI server suite passed again after the follow-up interface changes.
 - Serialized x265 and VideoToolbox optimization/bitrate profiles passed strict Go schema validation.
 
 ## Remaining acceptance checks

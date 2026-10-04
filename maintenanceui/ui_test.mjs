@@ -108,6 +108,117 @@ test("every startup control exists in the shipped HTML", () => {
   );
 });
 
+test("mobile file selection advances and back preserves the prepared conversion", () => {
+  const h = harness();
+  h.run(
+    'controls = () => {}; $("service").value = "folder:/media"; state.folderSelected = new Set(["/media/one.mp4"]); $("profile").value = "general-hevc"; $("min-savings").value = "8"; configureSelection();',
+  );
+  assert.equal(h.run("state.fileStep"), "configure");
+  assert.equal(h.elements.get("library").dataset.fileStep, "configure");
+  assert.equal(h.elements.get("path").value, "/media/one.mp4");
+  assert.equal(h.elements.get("scope").value, "file");
+  h.elements.get("back-to-files").listeners.get("click")();
+  assert.equal(h.run("state.fileStep"), "browse");
+  assert.equal(h.elements.get("path").value, "/media/one.mp4");
+  assert.equal(h.elements.get("profile").value, "general-hevc");
+  assert.equal(h.elements.get("min-savings").value, "8");
+});
+
+test("single-column step changes move keyboard focus to a visible control", () => {
+  const h = harness();
+  h.context.matchMedia = (query) => ({
+    matches: query === "(max-width: 900px)",
+  });
+  let focused;
+  h.run('$("configure-selection").hidden = false;');
+  for (const id of ["back-to-files", "configure-selection", "service"])
+    h.run(`$("${id}")`).focus = () => {
+      focused = id;
+    };
+  h.run('setFileStep("configure");');
+  assert.equal(focused, "back-to-files");
+  h.run('setFileStep("browse");');
+  assert.equal(focused, "configure-selection");
+  h.run(
+    'setFileStep("configure"); $("configure-selection").hidden = true; setFileStep("browse");',
+  );
+  assert.equal(focused, "service");
+});
+
+test("multiple selected files configure an explicit batch and using a folder clears selection-only scope", () => {
+  const h = harness();
+  h.run(
+    'controls = () => {}; $("service").value = "folder:/media"; state.folder = "/media/season"; state.folderSelected = new Set(["/media/season/one.mp4", "/media/season/two.mp4"]); configureSelection();',
+  );
+  assert.equal(h.elements.get("scope").value, "batch");
+  assert.equal(h.elements.get("selected-only").checked, true);
+  assert.equal(h.run("state.folderSelected.size"), 2);
+  h.elements.get("back-to-files").listeners.get("click")();
+  h.elements.get("use-container").listeners.get("click")();
+  assert.equal(h.elements.get("scope").value, "batch");
+  assert.equal(h.elements.get("selected-only").checked, false);
+  assert.equal(h.run("state.fileStep"), "configure");
+});
+
+test("catalog selection retains its import context and an empty selection cannot advance", () => {
+  const h = harness();
+  h.run('controls = () => {}; $("service").value = "sonarr";');
+  assert.throws(() => h.run("configureSelection()"), /Choose a file first/);
+  assert.equal(h.run("state.fileStep"), "browse");
+  h.run(
+    'state.media = {id:12}; state.selected = new Set([34]); state.files.set(34, {id:34,path:"/series/episode.mp4"}); configureSelection();',
+  );
+  assert.equal(h.elements.get("path").value, "/series/episode.mp4");
+  assert.equal(h.run("state.fileMedia.id"), 12);
+  assert.equal(h.run("state.fileService"), "sonarr");
+});
+
+test("queue results distinguish candidates, replacements and failures without inventing measurements", () => {
+  const h = harness();
+  const candidate = h.run(
+    'queuePresentation({action_name:"transcode_media",status:"completed",candidate_ready:true,source_path:"/media/one.mp4",savings:{source_bytes:1000000000,candidate_bytes:400000000,candidate_saved_bytes:600000000}})',
+  );
+  assert.equal(candidate.status, "Candidate ready");
+  assert.match(candidate.summary, /1.00 GB → 400.0 MB/);
+  assert.match(candidate.summary, /potential savings/);
+  assert.doesNotMatch(candidate.summary, /freed/);
+  const replaced = h.run(
+    'queuePresentation({action_name:"promote_transcode_candidate",status:"completed",promotion:{original_path:"/media/one.mp4"},savings:{realized_saved_bytes:600000000}})',
+  );
+  assert.equal(replaced.title, "one.mp4");
+  assert.match(replaced.summary, /Replacement.*600.0 MB freed/);
+  assert.match(
+    h.run(
+      'queuePresentation({status:"failed",error:"stat /private/path/one.mp4: no such file or directory"}).summary',
+    ),
+    /File not found/,
+  );
+  assert.match(
+    h.run('queuePresentation({status:"failed"}).summary'),
+    /Error details unavailable/,
+  );
+});
+
+test("decision rows show the next step instead of stale worker telemetry or contradictory zero-file counts", () => {
+  const h = harness();
+  const waiting = h.run(
+    'queuePresentation({status:"waiting_decision",worker:{progress:100,speed:2},waiting_reason:"Review quality result"})',
+  );
+  assert.equal(waiting.showTelemetry, false);
+  assert.match(waiting.summary, /Review quality result/);
+  assert.equal(
+    h.run(
+      'queuePresentation({status:"running",worker:{progress:30}}).showTelemetry',
+    ),
+    true,
+  );
+  const batch = h.run(
+    'queuePresentation({status:"waiting_decision",batch:{total:0,promotion_plan_ready:true}})',
+  );
+  assert.match(batch.summary, /Replacement approval required/);
+  assert.doesNotMatch(batch.summary, /0 files/);
+});
+
 test("search can close, clear its filter and restore the browse view", () => {
   const h = harness(),
     attrs = {};

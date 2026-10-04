@@ -352,6 +352,10 @@ main {
 .target-editor {
   min-width: 0;
 }
+.mobile-selection-actions,
+.mobile-step-heading {
+  display: none;
+}
 .target-editor {
   padding-left: 18px;
   border-left: 1px solid var(--line);
@@ -377,7 +381,7 @@ main {
 }
 .library-browser > .toolbar {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) var(--control-size);
+  grid-template-columns: minmax(0, 1fr) repeat(2, var(--control-size));
   align-items: center;
   gap: 4px 6px;
 }
@@ -394,8 +398,12 @@ main {
   height: var(--control-size);
   margin: 0;
 }
-#toggle-library-search {
+#open-path {
   grid-column: 2;
+  grid-row: 1;
+}
+#toggle-library-search {
+  grid-column: 3;
   grid-row: 1;
 }
 #toggle-library-search svg {
@@ -410,12 +418,12 @@ main {
   display: block;
 }
 #library-search-label {
-  grid-column: 1;
+  grid-column: 1 / 3;
   grid-row: 2;
   margin: 0;
 }
 #search-button {
-  grid-column: 2;
+  grid-column: 3;
   grid-row: 2;
   align-self: end;
 }
@@ -486,6 +494,11 @@ main {
   min-height: var(--control-size);
   margin: 0;
 }
+.media-check input {
+  width: 14px;
+  height: 14px;
+  flex-basis: 14px;
+}
 .media-row > .media-size {
   color: var(--muted);
   font: 400 11px/1.4 var(--body);
@@ -550,7 +563,7 @@ main {
 .job-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
+  align-items: start;
   gap: 4px 8px;
   padding: 8px 0;
   border-bottom: 1px solid var(--line);
@@ -562,8 +575,14 @@ main {
   margin: 0;
   font: inherit;
 }
+.job-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0 8px;
+}
 .job-row .job-title {
-  width: 100%;
+  width: auto;
   min-height: var(--control-size);
   padding: 0;
   border: 0;
@@ -574,18 +593,19 @@ main {
 .job-row > .job-actions {
   grid-column: 2;
   grid-row: 1;
-  align-self: center;
-}
-.job-row:has(.multiple-actions) {
-  grid-template-columns: minmax(0, 1fr);
-}
-.job-row > .multiple-actions {
-  grid-column: 1;
-  grid-row: auto;
+  align-self: start;
+  max-width: 370px;
 }
 .job-row > .worker-progress {
   grid-column: 1 / -1;
-  grid-row: 2;
+  grid-row: auto;
+}
+.job-summary {
+  margin: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 .job-meta > .savings-line,
 .job-meta > .muted {
@@ -614,10 +634,6 @@ main {
 .badge.completed {
   color: var(--forest);
   background: #edf4e9;
-}
-.job-row .badge:last-of-type {
-  padding: 2px 0;
-  background: transparent;
 }
 .worker-progress {
   display: grid;
@@ -885,20 +901,48 @@ pre {
   overflow: auto;
 }
 
-/* Tablet layout, without competing component overrides. */
+/* Single-column layouts use selection and configuration as separate steps. */
 @media (max-width: 900px) {
   .library-layout {
     grid-template-columns: minmax(0, 1fr);
     gap: 12px;
   }
-  .target-editor {
-    padding: 10px 0 0;
-    border-left: 0;
-    border-top: 1px solid var(--line);
-  }
   .recipe-layout {
     grid-template-columns: minmax(150px, 200px) minmax(0, 1fr);
     gap: 12px;
+  }
+  #library .target-editor {
+    border: 0;
+    padding: 0;
+  }
+  #library:not([data-file-step="configure"]) .target-editor,
+  #library[data-file-step="configure"] .library-browser {
+    display: none;
+  }
+  .mobile-selection-actions,
+  .mobile-step-heading {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 8px;
+  }
+  .mobile-selection-actions > .metadata {
+    flex: 1;
+    text-align: right;
+  }
+  .mobile-step-heading {
+    justify-content: space-between;
+    margin: 0 0 8px;
+  }
+  .mobile-step-heading button {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding-left: 0;
+  }
+  .mobile-step-heading svg {
+    width: 18px;
+    height: 18px;
   }
 }
 
@@ -998,6 +1042,11 @@ pre {
   .job-row > .job-actions:not(.multiple-actions) {
     max-width: 105px;
   }
+  .job-row > .multiple-actions {
+    grid-column: 1 / -1;
+    grid-row: auto;
+    max-width: none;
+  }
   .job-row .job-actions button {
     font-size: 11px;
     padding: 4px 7px;
@@ -1071,11 +1120,6 @@ pre {
   :root {
     --control-size: 44px;
     --dialog-control-size: 44px;
-  }
-  .media-check input {
-    width: 18px;
-    height: 18px;
-    flex-basis: 18px;
   }
 }
 @media (hover: hover) {

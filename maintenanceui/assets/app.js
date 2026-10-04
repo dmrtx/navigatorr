@@ -21,6 +21,7 @@ const state = {
   busyJobs: new Set(),
   submitting: false,
   approvingBatch: false,
+  fileStep: "browse",
 };
 const names = {
   queued: "Queued",
@@ -57,6 +58,7 @@ function actionIcon(label) {
   if (typeof document.createElementNS !== "function") return null;
   const paths = {
     Retry: "M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M18 18A8 8 0 0 1 4 12",
+    Review: "M5 4h14v16H5ZM8 8h8M8 12h8",
     Cancel: "M6 6l12 12M6 18L18 6",
     "Replace file": "M4 7h16M16 3l4 4-4 4M20 17H4M8 13l-4 4 4 4",
     "Review replacements": "M9 12l2 2 4-4M5 4h14v16H5Z",
@@ -391,6 +393,7 @@ async function loadLibrary(more = false) {
           check.checked
             ? state.selected.add(item.id)
             : state.selected.delete(item.id);
+          controls();
         });
         const checkLabel = node("label", "", "media-check");
         checkLabel.append(check);
@@ -416,7 +419,7 @@ async function loadLibrary(more = false) {
             state.fileMedia = state.media;
             $("scope").value = "file";
             controls();
-            notify(`Selected: ${title}`);
+            setFileStep("configure");
             return;
           }
           state.media = item;
@@ -499,6 +502,7 @@ function libraryFailure(error, more) {
   );
 }
 function resetLibrary() {
+  setFileStep("browse");
   state.libraryRevision++;
   state.libraryLoaded = 0;
   state.libraryHasMore = false;
@@ -670,11 +674,12 @@ async function loadFolder(revision = ++state.libraryRevision, more = false) {
           "aria-label",
           `Select ${file.path.split("/").pop()}`,
         );
-        check.addEventListener("change", () =>
+        check.addEventListener("change", () => {
           check.checked
             ? state.folderSelected.add(file.path)
-            : state.folderSelected.delete(file.path),
-        );
+            : state.folderSelected.delete(file.path);
+          controls();
+        });
         const checkLabel = node("label", "", "media-check");
         checkLabel.append(check);
         row.append(checkLabel);
@@ -695,6 +700,7 @@ async function loadFolder(revision = ++state.libraryRevision, more = false) {
               state.fileMedia = null;
               state.fileService = null;
               $("scope").value = "file";
+              setFileStep("configure");
             }
             controls();
           },
@@ -773,8 +779,60 @@ $("inspect").addEventListener("click", () =>
         .filter(Boolean)
         .join(" · "),
     );
+    $("path-dialog").close();
+    setFileStep("configure");
   }),
 );
+
+function setFileStep(step) {
+  const previous = state.fileStep;
+  state.fileStep = step;
+  $("library").dataset.fileStep = step;
+  if (
+    typeof matchMedia === "function" &&
+    matchMedia("(max-width: 900px)").matches
+  ) {
+    $("library").scrollIntoView?.({ block: "start" });
+    if (step === "configure") $("back-to-files").focus();
+    else if (previous === "configure")
+      ($("configure-selection").hidden
+        ? $("service")
+        : $("configure-selection")
+      ).focus();
+  }
+}
+function configureSelection() {
+  const folder = $("service").value.startsWith("folder:");
+  const selected = folder
+    ? [...(state.folderSelected || [])]
+    : [...state.selected];
+  if (selected.length > 1) {
+    $("scope").value = "batch";
+    $("selected-only").checked = true;
+  } else if (selected.length === 1) {
+    const file = folder ? { path: selected[0] } : state.files.get(selected[0]);
+    if (!file?.path) throw new Error("Choose a file with a valid path.");
+    $("path").value = file.path;
+    state.file = file;
+    state.fileMedia = folder ? null : state.media;
+    state.fileService = folder ? null : $("service").value;
+    $("scope").value = "file";
+  } else if (!$("path").value.trim()) {
+    throw new Error("Choose a file first.");
+  }
+  controls();
+  setFileStep("configure");
+}
+$("configure-selection").addEventListener("click", () =>
+  safe(configureSelection),
+);
+$("back-to-files").addEventListener("click", () => setFileStep("browse"));
+$("use-container").addEventListener("click", () => {
+  $("scope").value = "batch";
+  $("selected-only").checked = false;
+  controls();
+  setFileStep("configure");
+});
 
 function controls() {
   const batch = $("scope").value === "batch";
@@ -783,6 +841,19 @@ function controls() {
     : $("path").value.split("/").pop() || "Choose a file.";
   $("batch-options").hidden = !batch;
   const folder = $("service").value.startsWith("folder:");
+  const selectedCount = folder
+    ? state.folderSelected?.size || 0
+    : state.selected.size;
+  $("selection-count").textContent = selectedCount
+    ? `${selectedCount} selected`
+    : "";
+  $("configure-selection").hidden = !selectedCount && !$("path").value.trim();
+  $("configure-selection").disabled = state.libraryLoading;
+  $("use-container").hidden = folder
+    ? !state.folder
+    : $("service").value !== "sonarr" || !state.media;
+  $("use-container").disabled = state.libraryLoading;
+  $("use-container").textContent = folder ? "Use folder" : "Use series";
   $("media-kind").closest("label").hidden = !folder;
   $("season").closest("label").hidden = folder;
   $("recursive").closest("label").hidden = !folder;
@@ -1377,6 +1448,8 @@ function jobControls(job) {
     controls.children[controls.children.length - 1].title =
       choice.description || choice.decision;
   }
+  if (job.status === "waiting_decision" && !job.waiting_options?.length)
+    add("Review", () => openJob(job.id));
   if (job.status === "failed")
     add("Retry", () => jobControl(job.id, "action_retry"));
   if (
@@ -1408,6 +1481,83 @@ function jobControls(job) {
   if (job.replacement_action_id)
     add("View replacement", () => openJob(job.replacement_action_id));
   return controls;
+}
+function shortJobReason(reason) {
+  const text = String(reason || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (/no such file or directory/i.test(text)) return "File not found";
+  if (/permission denied/i.test(text)) return "Permission denied";
+  return text.length > 140 ? `${text.slice(0, 137)}…` : text;
+}
+function queuePresentation(job) {
+  const kind = job.batch
+    ? "Batch"
+    : job.action_name === "promote_transcode_candidate"
+      ? "Replacement"
+      : job.action_name === "benchmark_transcode"
+        ? "Benchmark"
+        : "File";
+  const source = job.source_path || job.promotion?.original_path;
+  const title =
+    job.batch?.title ||
+    source?.split("/").pop() ||
+    workflows[job.action_name] ||
+    job.action_name;
+  const outcomes = {
+    preview: "Preview",
+    partial: "Partial",
+    needs_review: "Needs review",
+    no_changes: "No changes",
+    promoted: "Replaced",
+    cancelling: "Cancelling",
+  };
+  const status = job.replaced
+    ? "Replaced"
+    : outcomes[job.batch?.outcome] ||
+      (job.candidate_ready && !job.replacement_action_id
+        ? "Candidate ready"
+        : names[job.status] || job.status);
+  const s = job.savings || {},
+    metrics = [];
+  if (s.source_bytes != null) {
+    metrics.push(
+      s.candidate_bytes != null && !job.replaced
+        ? `${bytes(s.source_bytes)} → ${bytes(s.candidate_bytes)}`
+        : `${bytes(s.source_bytes)} source`,
+    );
+  }
+  if (s.realized_saved_bytes != null)
+    metrics.push(`${bytes(s.realized_saved_bytes)} freed`);
+  else if (!job.replaced && s.candidate_saved_bytes != null)
+    metrics.push(
+      s.candidate_saved_bytes < 0
+        ? `${bytes(-s.candidate_saved_bytes)} larger`
+        : `${bytes(s.candidate_saved_bytes)} potential savings`,
+    );
+  else if (!job.replaced && s.estimated_saved_bytes != null)
+    metrics.push(`${bytes(s.estimated_saved_bytes)} estimated savings`);
+  let result;
+  if (job.status === "failed")
+    result = shortJobReason(job.error) || "Error details unavailable";
+  else if (job.replaced) result = "Original replaced";
+  else if (job.batch?.promotion_plan_ready)
+    result = "Replacement approval required";
+  else if (job.batch) result = batchCounts(job.batch, true);
+  else if (job.status === "waiting_decision")
+    result = shortJobReason(job.waiting_reason) || "Review required";
+  else if (job.status === "cancelled") result = "Stopped";
+  const summary = [kind, result, metrics.join(" · ")]
+    .filter(Boolean)
+    .join(" · ");
+  return {
+    title,
+    status,
+    summary,
+    showTelemetry:
+      Boolean(job.worker) &&
+      ["running", "waiting_external"].includes(job.status),
+  };
 }
 async function loadJobs(more = false) {
   if (
@@ -1446,54 +1596,27 @@ async function loadJobs(more = false) {
     for (const job of state.operationJobs.values()) {
       const row = node("article", "", "job-row"),
         meta = node("div", "", "job-meta");
-      const heading = node("h3");
+      const presentation = queuePresentation(job);
+      const heading = node("h3", "", "job-heading");
       heading.append(
-        button(
-          job.batch?.title ||
-            job.source_path?.split("/").pop() ||
-            workflows[job.action_name] ||
-            job.action_name,
-          () => openJob(job.id),
-          "job-title",
-        ),
+        button(presentation.title, () => openJob(job.id), "job-title"),
       );
-      meta.append(heading);
-
-      meta.append(
-        node(
-          "span",
-          job.replaced ? "Replaced" : names[job.status] || job.status,
-          `badge ${job.status}`,
-        ),
-        node(
-          "span",
-          job.origin === "web"
-            ? "Web"
-            : job.origin === "mcp"
-              ? "MCP"
-              : "History",
-          "badge",
-        ),
-      );
-      if (job.batch)
-        meta.append(
-          node("span", batchCounts(job.batch, true), "metadata batch-counts"),
-        );
-
-      const savings = savingsLine(job.savings, true, job.replaced);
-      if (savings) meta.append(savings);
+      heading.append(node("span", presentation.status, `badge ${job.status}`));
+      const summary = node("p", presentation.summary, "metadata job-summary");
+      summary.title = presentation.summary;
+      meta.append(heading, summary);
       const actions = jobControls(job);
       if (job.parent_action_id)
         actions.append(
           button("View batch", () => openJob(job.parent_action_id), "quiet"),
         );
       row.append(meta);
-      if (job.worker && job.status !== "completed") row.append(telemetry(job));
       if (actions.children.length) {
         if (actions.children.length > 1)
           actions.classList.add("multiple-actions");
         row.append(actions);
       }
+      if (presentation.showTelemetry) row.append(telemetry(job));
       $("jobs-list").append(row);
     }
     if (!state.operationJobs.size)
@@ -2327,15 +2450,7 @@ $("reload-profiles").addEventListener("click", () =>
     const r = await tool("recipe_reload");
     if (r.error) throw new Error(r.error);
     await loadRecipes();
-    notify("Profiles reloaded.");
-  }),
-);
-$("update-profiles").addEventListener("click", () =>
-  safe(async () => {
-    const r = await tool("recipe_update");
-    if (r.error) throw new Error(r.error);
-    await loadRecipes();
-    notify("Profile bundle updated.");
+    notify("Shared presets refreshed.");
   }),
 );
 $("rollback-profiles").addEventListener("click", () =>
