@@ -365,6 +365,10 @@ main {
 .toolbar > * {
   min-width: 0;
 }
+.toolbar > button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
 .toolbar label {
   margin: 0;
 }
@@ -397,6 +401,13 @@ main {
 #toggle-library-search svg {
   width: 17px;
   height: 17px;
+}
+#toggle-library-search .close-search-icon,
+#toggle-library-search.search-open .search-icon {
+  display: none;
+}
+#toggle-library-search.search-open .close-search-icon {
+  display: block;
 }
 #library-search-label {
   grid-column: 1;
@@ -481,9 +492,12 @@ main {
   white-space: nowrap;
 }
 .media-icon {
-  display: inline-flex;
+  display: inline-grid;
+  place-items: center;
   color: var(--accent);
-  flex-shrink: 0;
+  flex: 0 0 var(--control-size);
+  width: var(--control-size);
+  min-height: var(--control-size);
 }
 .media-icon svg {
   width: 18px;
@@ -801,6 +815,15 @@ dialog {
 }
 dialog::backdrop {
   background: #14201b88;
+}
+#notice.dialog-notice {
+  position: sticky;
+  bottom: 0;
+  left: auto;
+  width: auto;
+  max-width: none;
+  margin-top: 8px;
+  transform: none;
 }
 .dialog-heading {
   position: sticky;

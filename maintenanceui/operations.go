@@ -99,6 +99,63 @@ func operationSourceKey(r operationRecord) string {
 	return path + "\x00" + sha
 }
 
+// Import context is a durable routing hint, never evidence that replacement is
+// safe. The existing promotion workflow must independently resolve the exact
+// original file and validate the candidate again before any mutation.
+func operationLibraryID(value any) int64 {
+	if text, ok := value.(string); ok {
+		n, err := strconv.ParseInt(text, 10, 32)
+		if err == nil && n > 0 {
+			return n
+		}
+		return 0
+	}
+	n, ok := value.(float64)
+	if ok && n > 0 && n <= math.MaxInt32 && math.Trunc(n) == n {
+		return int64(n)
+	}
+	return 0
+}
+
+func operationReplacementContext(r operationRecord, recordsByID map[string]operationRecord) map[string]any {
+	context := func(service string, id int64, source string) map[string]any {
+		if id <= 0 || (service != "sonarr" && service != "radarr") {
+			return nil
+		}
+		key := "series_id"
+		if service == "radarr" {
+			key = "movie_id"
+		}
+		return map[string]any{"service": service, key: id, "source": source}
+	}
+	if library := operationMap(r.inputs["library_context"]); library != nil {
+		if hint := context(operationString(library["service"]), operationLibraryID(library["id"]), "job_inputs"); hint != nil {
+			return hint
+		}
+	}
+	service := operationString(r.inputs["service"])
+	key := "series_id"
+	if service == "radarr" {
+		key = "movie_id"
+	}
+	id := operationLibraryID(r.inputs[key])
+	if id == 0 {
+		id = operationLibraryID(r.inputs["media_id"])
+	}
+	if hint := context(service, id, "job_inputs"); hint != nil {
+		return hint
+	}
+	if parent, found := recordsByID[operationString(r.inputs["parent_action_id"])]; found && parent.inst.ActionName == "transcode_batch" {
+		if hint := context(operationString(parent.inputs["service"]), operationLibraryID(parent.inputs["series_id"]), "parent_batch"); hint != nil {
+			return hint
+		}
+		if _, filesystemBatch := parent.inputs["paths"]; filesystemBatch {
+			return map[string]any{"service": "filesystem", "source": "parent_batch"}
+		}
+	}
+	return nil
+}
+
 func projectOperationSavings(r operationRecord, now time.Time) operationSavings {
 	var s operationSavings
 	original := operationMap(operationValue(r, "original"))
@@ -282,6 +339,20 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 	aggregateBatchSavings(records)
+	recordsByID := make(map[string]operationRecord, len(records))
+	existingReplacements := map[string]string{}
+	for _, r := range records {
+		recordsByID[r.inst.ID] = r
+		if r.inst.ActionName == "promote_transcode_candidate" {
+			source := operationString(r.inputs["transcode_action_id"])
+			if source == "" {
+				source = operationString(operationMap(operationValue(r, "promotion"))["transcode_action_id"])
+			}
+			if source != "" && existingReplacements[source] == "" {
+				existingReplacements[source] = r.inst.ID
+			}
+		}
+	}
 	// Oldest verified replacement wins an identical original-content claim.
 	// Later transcodes of the new content have a different original digest and
 	// remain distinct. Failed cleanups and candidate-only jobs are excluded.
@@ -364,7 +435,18 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 				return
 			}
 			job["savings"] = r.savings
-			job["candidate_ready"] = r.inst.ActionName == "transcode_media" && r.inst.Status == store.ActionStatusCompleted && operationValue(r, "skip_transcode") != true && operationValue(r, "original_intact") == true && r.savings.CandidateBytes != nil
+			job["candidate_ready"] = r.inst.ActionName == "transcode_media" && r.inst.Status == store.ActionStatusCompleted && operationValue(r, "skip_transcode") != true && operationValue(r, "original_intact") == true && r.savings.CandidateBytes != nil && !replacedActions[r.inst.ID] && !replaced[operationSourceKey(r)]
+			if r.inst.ActionName == "transcode_media" {
+				job["replaced"] = replacedActions[r.inst.ID] || replaced[operationSourceKey(r)]
+			}
+			if r.inst.ActionName == "transcode_media" {
+				if context := operationReplacementContext(r, recordsByID); context != nil {
+					job["replacement_context"] = context
+				}
+				if existing := existingReplacements[r.inst.ID]; existing != "" {
+					job["replacement_action_id"] = existing
+				}
+			}
 			_, httpWorker := s.engine.Deps().Transcode.(*transcode.HTTPExecutor)
 			job["logs_available"] = httpWorker && (operationString(r.state["job_id"]) != "" || operationString(r.state["transcode_job_id"]) != "")
 			if r.inst.ActionName == "transcode_batch" {
