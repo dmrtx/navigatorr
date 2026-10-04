@@ -137,7 +137,7 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 	episodesByFile := make(map[int64][]episodeMeta)
 	var fileIDs []int64
 	if filesystemBatch {
-		seriesTitle = "Archivos seleccionados"
+		seriesTitle = "Selected files"
 		ec.State["series_title"] = seriesTitle
 		ec.State["source_kind"] = "filesystem"
 		ec.State["is_anime"] = isAnime

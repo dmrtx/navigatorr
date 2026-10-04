@@ -143,7 +143,7 @@ func TestUIQueueAndMCPShareHistory(t *testing.T) {
 	if !origins["web"] || !origins["mcp"] {
 		t.Fatal("UI and MCP histories diverged", jobs)
 	}
-	if w := request(h, "GET", "/", "", false); w.Code != 200 || !strings.Contains(w.Body.String(), "Mantenimiento") {
+	if w := request(h, "GET", "/", "", false); w.Code != 200 || !strings.Contains(w.Body.String(), "Navigatorr · Maintenance") {
 		t.Fatal("embedded UI missing")
 	}
 }

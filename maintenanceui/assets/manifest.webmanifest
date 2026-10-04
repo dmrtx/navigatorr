@@ -1,9 +1,9 @@
 {
   "id": "/",
-  "name": "Navigatorr · Mantenimiento",
+  "name": "Navigatorr \u00b7 Maintenance",
   "short_name": "Navigatorr",
-  "lang": "es",
-  "description": "Archivos, cola de transcodes y ahorro de tu biblioteca.",
+  "lang": "en",
+  "description": "Files, transcode jobs and space savings.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

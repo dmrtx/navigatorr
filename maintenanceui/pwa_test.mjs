@@ -149,3 +149,82 @@ test("a stalled shell request aborts and falls back to cache", async () => {
   expire();
   assert.equal(await pending, "offline shell");
 });
+
+const installSource = await readFile(
+  new URL("./assets/pwa.js", import.meta.url),
+  "utf8",
+);
+function installClient({
+  userAgent = "Desktop",
+  standalone = false,
+  secure = true,
+} = {}) {
+  const elements = new Map(),
+    events = new Map();
+  const document = {
+    documentElement: { dataset: {} },
+    getElementById(id) {
+      if (!elements.has(id))
+        elements.set(id, {
+          hidden: true,
+          open: false,
+          handlers: new Map(),
+          addEventListener(name, fn) {
+            this.handlers.set(name, fn);
+          },
+          showModal() {
+            this.open = true;
+          },
+          close() {
+            this.open = false;
+          },
+        });
+      return elements.get(id);
+    },
+  };
+  vm.runInNewContext(installSource, {
+    document,
+    navigator: { userAgent },
+    window: {
+      isSecureContext: secure,
+      matchMedia: () => ({ matches: standalone }),
+      addEventListener: (name, fn) => events.set(name, fn),
+    },
+  });
+  return { elements, events };
+}
+test("desktop install appears only for a native browser install offer", async () => {
+  const h = installClient();
+  const button = h.elements.get("install-app");
+  assert.equal(button.hidden, true);
+  let prompted = 0;
+  h.events.get("beforeinstallprompt")({
+    preventDefault() {},
+    prompt: async () => prompted++,
+    userChoice: Promise.resolve({ outcome: "dismissed" }),
+  });
+  assert.equal(button.hidden, false);
+  await button.handlers.get("click")();
+  assert.equal(prompted, 1);
+  assert.equal(button.hidden, true);
+  assert.equal(h.elements.get("install-help").open, false);
+});
+test("mobile home-screen help is opt-in and dismissible", async () => {
+  const h = installClient({ userAgent: "iPhone" });
+  assert.equal(h.elements.get("install-app").hidden, false);
+  assert.equal(h.elements.get("install-help").open, false);
+  await h.elements.get("install-app").handlers.get("click")();
+  assert.equal(h.elements.get("install-help").open, true);
+  h.elements.get("close-install").handlers.get("click")();
+  assert.equal(h.elements.get("install-help").open, false);
+  assert.match(h.elements.get("install-instructions").textContent, /Share/);
+});
+test("installed and insecure clients do not advertise installation", () => {
+  for (const settings of [
+    { userAgent: "iPhone", standalone: true },
+    { userAgent: "Android", secure: false },
+  ]) {
+    const h = installClient(settings);
+    assert.equal(h.elements.get("install-app").hidden, true);
+  }
+});

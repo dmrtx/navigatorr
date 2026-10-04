@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="es">
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta
@@ -13,7 +13,7 @@
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="icon" href="/icon-192.png" type="image/png" />
     <script type="module" src="/pwa.js"></script>
-    <title>Navigatorr · Mantenimiento</title>
+    <title>Navigatorr · Maintenance</title>
     <link rel="stylesheet" href="/app.css" />
     <script type="module" src="/app.js"></script>
   </head>
@@ -23,204 +23,201 @@
         >N<span class="brand-dot">↗</span> <span>navigatorr</span></a
       >
       <div class="masthead-right">
-        <button id="install-app" class="quiet" hidden>Instalar</button
-        ><span class="indicator"></span><span>Mantenimiento de biblioteca</span
-        ><button id="logout" class="quiet" hidden>Salir</button>
+        <button id="install-app" class="quiet" hidden>Install app</button>
       </div>
     </header>
     <main>
-      <aside id="install-help" class="compact-help" hidden>
-        <strong>Navigatorr en tu pantalla de inicio</strong>
-        <p>
-          En iPhone/iPad: Compartir → Añadir a pantalla de inicio. En Android:
-          menú del navegador → Instalar aplicación.
-        </p>
-        <p id="install-status">
-          Usa el acceso HTTPS de Navigatorr para instalar y abrir en modo
-          aplicación.
-        </p>
+      <aside id="connection-status" role="status" hidden>
+        Server unavailable · retrying…
       </aside>
-      <aside id="connection-status" class="compact-help" role="status" hidden>
-        <p>
-          Sin conexión con Navigatorr. Los datos visibles pueden estar
-          desactualizados. Reconecta para consultar la cola.
-        </p>
-        <button id="reconnect" type="button">Reconectar</button>
+      <aside id="access-expired" role="status" hidden>
+        Access session expired. <a href="/">Reload to sign in</a>
       </aside>
       <section id="login" class="login" hidden>
-        <p class="eyebrow">ACCESO A LA CONSOLA</p>
-        <h1>Tu biblioteca.<br />En buenas manos.</h1>
-        <p>
-          Inspecciona tus archivos, define la conversión y deja la cola
-          trabajando.
-        </p>
+        <h1>Sign in</h1>
         <form id="login-form">
           <label
-            >Token de acceso<input
+            >Access token<input
               id="token"
               type="password"
               autocomplete="current-password"
               required /></label
-          ><button class="primary">Entrar a Navigatorr ↗</button>
+          ><button class="primary">Sign in</button>
         </form>
       </section>
       <div id="workspace" hidden>
-        <div class="page-heading">
-          <div>
-            <p class="eyebrow">ARCHIVOS / OPERACIONES</p>
-            <h1>Mantenimiento<span class="accent">.</span></h1>
-          </div>
-          <p class="heading-note">
-            Elige el archivo. Define el resultado.<br />Navigatorr se encarga
-            del recorrido.
-          </p>
-        </div>
-        <nav class="tabs" aria-label="Secciones">
-          <button
-            data-tab="library"
-            aria-label="Biblioteca"
-            data-short="Archivos"
-            aria-selected="true"
-          >
-            <span class="tab-label">Biblioteca</span>
-          </button>
-          <button
-            data-tab="jobs"
-            aria-label="Cola e historial"
-            data-short="Cola"
-          >
-            <span class="tab-label">Cola e historial</span>
-            <span id="active-count"></span>
-          </button>
-          <button
+        <nav class="tabs" aria-label="Main navigation">
+          <button data-tab="library" aria-label="Files" aria-selected="true">
+            <svg
+              class="nav-icon"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10H3Z" /></svg
+            ><span class="tab-text"
+              ><span class="tab-label">Files</span></span
+            ></button
+          ><button data-tab="jobs" aria-label="Queue" aria-selected="false">
+            <svg
+              class="nav-icon"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <rect x="4" y="4" width="16" height="16" rx="2" />
+              <path d="M8 8h8M8 12h8M8 16h5" /></svg
+            ><span class="tab-text"
+              ><span class="tab-label">Queue</span
+              ><span id="active-count"></span
+            ></span></button
+          ><button
             data-tab="recipes"
-            aria-label="Perfiles"
-            data-short="Perfiles"
+            aria-label="Profiles"
+            aria-selected="false"
           >
-            <span class="tab-label">Perfiles</span>
-          </button>
-          <button
-            data-tab="advanced"
-            aria-label="Herramientas"
-            data-short="Más"
-          >
-            <span class="tab-label">Herramientas</span>
+            <svg
+              class="nav-icon"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M4 7h16M4 17h16" />
+              <circle cx="9" cy="7" r="3" />
+              <circle cx="15" cy="17" r="3" /></svg
+            ><span class="tab-text"
+              ><span class="tab-label">Profiles</span></span
+            ></button
+          ><button data-tab="stats" aria-label="Stats" aria-selected="false">
+            <svg
+              class="nav-icon"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M4 3v17h17M8 16v-5M13 16V7M18 16V4" /></svg
+            ><span class="tab-text"
+              ><span class="tab-label">Stats</span></span
+            ></button
+          ><button data-tab="advanced" aria-label="More" aria-selected="false">
+            <svg
+              class="nav-icon"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <circle cx="5" cy="12" r="1" />
+              <circle cx="12" cy="12" r="1" />
+              <circle cx="19" cy="12" r="1" /></svg
+            ><span class="tab-text"><span class="tab-label">More</span></span>
           </button>
         </nav>
         <section id="library" class="panel tab-content">
           <div class="library-layout">
             <div class="library-browser">
               <div class="section-label">
-                <span>01 / ORIGEN</span><span id="library-total"></span>
+                <span>Files</span><span id="library-total"></span>
               </div>
               <div class="toolbar">
-                <label>Origen<select id="service"></select></label
+                <label>Source<select id="service"></select></label
                 ><label class="grow"
-                  >Buscar<input
+                  >Search<input
                     id="search"
                     type="search"
-                    placeholder="Título o archivo" /></label
-                ><button id="search-button">Buscar</button>
+                    placeholder="Title or filename" /></label
+                ><button id="search-button">Search</button>
               </div>
               <div class="breadcrumbs">
-                <button id="back" class="quiet" hidden>← Biblioteca</button
-                ><span id="selection-title"
-                  >Selecciona una carpeta o un título</span
-                >
+                <button id="back" class="quiet" hidden>← Back</button
+                ><span id="selection-title">Choose a folder or title</span>
               </div>
               <div id="library-items" class="library-items"></div>
-              <div class="pagination">
-                <button id="library-prev">← Anterior</button
-                ><button id="library-next">Siguiente →</button>
+              <div class="list-footer">
+                <button id="library-more" class="quiet" hidden>Load more</button
+                ><span id="library-sentinel" aria-hidden="true"></span>
               </div>
-              <details class="file-browser">
-                <summary>Ruta manual e inspección</summary>
-                <div class="toolbar">
-                  <select id="root" aria-label="Carpeta permitida"></select
-                  ><button id="browse-root">Abrir</button>
-                </div>
-                <div id="file-items"></div>
-                <label
-                  >Archivo seleccionado<input
-                    id="path"
-                    placeholder="Ruta dentro de las carpetas permitidas" /></label
-                ><button id="inspect" type="button">
-                  Inspeccionar archivo
-                </button>
-                <pre id="inspection" hidden></pre>
-              </details>
+              <button id="open-path" class="quiet">Open a path</button>
             </div>
             <form id="job-form" class="target-editor">
-              <div class="section-label">
-                <span>02 / RESULTADO</span><span>VÍDEO → HEVC / MKV</span>
-              </div>
-              <h2>Define el transcode</h2>
+              <h2>Transcode</h2>
               <p id="source-summary" class="metadata">
-                Selecciona un archivo o una carpeta.
+                Choose a file or folder.
               </p>
-              <p class="muted">
-                Cada trabajo conserva sus parámetros. El original se mantiene
-                hasta un reemplazo aprobado.
-              </p>
+
               <label
-                >Contenido<select id="media-kind">
-                  <option value="movie">Películas / vídeos</option>
-                  <option value="tv">Series</option>
+                >Content<select id="media-kind">
+                  <option value="movie">Movies / videos</option>
+                  <option value="tv">TV</option>
                   <option value="anime">Anime</option>
                 </select></label
               >
               <label
-                >Alcance<select id="scope">
-                  <option value="file">Archivo seleccionado</option>
-                  <option value="batch">Lote / temporada / carpeta</option>
+                >Scope<select id="scope">
+                  <option value="file">Selected file</option>
+                  <option value="batch">Batch / season / folder</option>
                 </select></label
               >
               <div id="batch-options" hidden>
                 <div class="field-grid">
                   <label
-                    >Temporada<select id="season">
-                      <option value="">Toda la serie</option>
+                    >Season<select id="season">
+                      <option value="">All seasons</option>
                     </select></label
                   ><label
-                    >Máximo de archivos<input
+                    >File limit<input
                       id="max-items"
                       type="number"
                       min="1"
-                      placeholder="Sin límite"
+                      placeholder="Unlimited"
                   /></label>
                 </div>
                 <label class="check"
-                  ><input id="recursive" type="checkbox" />Incluir subcarpetas
-                  (hasta 1000 vídeos)</label
+                  ><input id="recursive" type="checkbox" />Include subfolders
+                  (up to 1000 videos)</label
                 >
                 <label class="check"
-                  ><input id="selected-only" type="checkbox" />Solo archivos
-                  marcados</label
+                  ><input id="selected-only" type="checkbox" />Selected files
+                  only</label
                 ><label class="check"
-                  ><input id="promote-batch" type="checkbox" />Solicitar
-                  aprobación para reemplazar el lote al terminar</label
+                  ><input id="promote-batch" type="checkbox" />Request
+                  replacement approval when finished</label
                 >
               </div>
               <label
-                >Perfil<select id="profile">
-                  <option value="auto">Automático</option>
+                >Profile<select id="profile">
+                  <option value="auto">Automatic</option>
                 </select></label
               >
               <label id="priority-label"
-                >Objetivo del lote automático<select id="priority">
-                  <option value="balanced">
-                    Equilibrio entre calidad y ahorro
-                  </option>
-                  <option value="quality">Priorizar calidad</option>
-                  <option value="savings">Priorizar ahorro</option>
-                  <option value="preserve_quality">
-                    Exigir el objetivo de calidad
-                  </option>
+                >Batch priority<select id="priority">
+                  <option value="balanced">Balanced</option>
+                  <option value="quality">Quality</option>
+                  <option value="savings">Space savings</option>
+                  <option value="preserve_quality">Meet quality target</option>
                 </select></label
               >
               <label class="check"
-                ><input id="custom" type="checkbox" />Personalizar este
-                trabajo</label
+                ><input id="custom" type="checkbox" />Customize</label
               >
               <div id="custom-fields" hidden>
                 <div class="field-grid">
@@ -232,7 +229,7 @@
                       </option>
                     </select></label
                   ><label id="quality-label"
-                    >Calidad / CRF<input
+                    >Quality / CRF<input
                       id="quality"
                       type="number"
                       value="23"
@@ -243,7 +240,11 @@
                 <div class="field-grid" id="x265-fields">
                   <label
                     >Preset<select id="preset">
-                      <option>medium</option>
+                      <option>ultrafast</option>
+                      <option>superfast</option>
+                      <option>faster</option>
+                      <option selected>medium</option>
+                      <option>placebo</option>
                       <option>slow</option>
                       <option>slower</option>
                       <option>fast</option>
@@ -252,7 +253,7 @@
                     </select></label
                   ><label
                     >Tune<select id="tune">
-                      <option value="">Sin ajuste</option>
+                      <option value="">None</option>
                       <option>animation</option>
                       <option>grain</option>
                       <option>ssim</option>
@@ -264,20 +265,20 @@
                 </div>
                 <div id="vt-fields" hidden>
                   <label
-                    >Control de tasa<select id="rate-mode">
-                      <option value="quality">Calidad constante</option>
-                      <option value="bitrate">Bitrate medio</option>
+                    >Rate control<select id="rate-mode">
+                      <option value="quality">Constant quality</option>
+                      <option value="bitrate">Average bitrate</option>
                     </select></label
                   >
                   <div class="field-grid">
                     <label
-                      >Bitrate medio (kbps)<input
+                      >Bitrate (kbps)<input
                         id="bitrate"
                         type="number"
                         min="1"
-                        placeholder="Solo modo bitrate" /></label
+                        placeholder="Bitrate mode only" /></label
                     ><label
-                      >Máximo (kbps)<input
+                      >Maximum (kbps)<input
                         id="max-bitrate"
                         type="number"
                         min="1"
@@ -285,40 +286,38 @@
                   </div>
                 </div>
                 <label
-                  >Audio del vídeo<select id="audio">
-                    <option value="copy">Conservar todas las pistas</option>
-                    <option value="compact">
-                      Compactar DTS / lossless a AAC
-                    </option>
+                  >Audio tracks<select id="audio">
+                    <option value="copy">Copy all tracks</option>
+                    <option value="compact">DTS / lossless → AAC</option>
                   </select></label
                 >
                 <p id="audio-note" class="muted" hidden>
-                  AAC es con pérdida. Se conservan pistas, idiomas y canales; no
-                  conserva metadatos de audio por objetos.
+                  AAC is lossy. Keeps tracks, languages and channels; object
+                  audio metadata is lost.
                 </p>
                 <label class="check"
-                  ><input id="optimize" type="checkbox" />Calibrar con muestras
-                  antes de convertir</label
+                  ><input id="optimize" type="checkbox" />Calibrate with
+                  samples</label
                 >
                 <div id="optimization-fields" hidden>
                   <div class="field-grid">
                     <label
-                      >Métrica<select id="metric">
-                        <option value="auto">Automática según la fuente</option>
+                      >Metric<select id="metric">
+                        <option value="auto">Automatic</option>
                         <option value="vmaf">VMAF</option>
                         <option value="ssim">SSIM</option>
                         <option value="both">VMAF + SSIM</option>
                       </select></label
                     ><label
-                      >Valores de búsqueda<input
+                      >Search values<input
                         id="ladder"
                         value="20,23,26"
-                        placeholder="CRF, Q o kbps según el modo"
+                        placeholder="CRF, Q or kbps"
                     /></label>
                   </div>
                   <div class="field-grid">
                     <label
-                      >Objetivo VMAF<input
+                      >VMAF target<input
                         id="vmaf-target"
                         type="number"
                         value="96"
@@ -326,7 +325,7 @@
                         max="100"
                         step="0.1" /></label
                     ><label
-                      >Mínimo VMAF<input
+                      >VMAF minimum<input
                         id="vmaf-min"
                         type="number"
                         value="95"
@@ -334,7 +333,7 @@
                         max="100"
                         step="0.1" /></label
                     ><label
-                      >Objetivo SSIM<input
+                      >SSIM target<input
                         id="ssim-target"
                         type="number"
                         value="0.99"
@@ -342,7 +341,7 @@
                         max="1"
                         step="0.001" /></label
                     ><label
-                      >Mínimo SSIM<input
+                      >SSIM minimum<input
                         id="ssim-min"
                         type="number"
                         value="0.98"
@@ -350,14 +349,14 @@
                         max="1"
                         step="0.001" /></label
                     ><label
-                      >Muestras<input
+                      >Samples<input
                         id="sample-count"
                         type="number"
                         value="3"
                         min="1"
                         max="20" /></label
                     ><label
-                      >Segundos por muestra<input
+                      >Seconds per sample<input
                         id="sample-seconds"
                         type="number"
                         value="20"
@@ -366,43 +365,24 @@
                     /></label>
                   </div>
                   <label
-                    >Validación final<select id="final-validation">
-                      <option value="sampled">Por muestras</option>
-                      <option value="">Solo estructura de archivo</option>
+                    >Final validation<select id="final-validation">
+                      <option value="sampled">Sampled</option>
+                      <option value="">File structure only</option>
                     </select></label
                   >
                 </div>
-                <details>
-                  <summary>Perfil completo y controles avanzados</summary>
-                  <p class="muted">
-                    Opciones tipadas de MCP: modelos, banding, guardrails, GOP,
-                    metadatos y resiliencia. Se validan en el servidor. Si el
-                    editor contiene JSON, ese perfil tiene prioridad sobre los
-                    controles.
-                  </p>
-                  <button id="sync-profile" type="button">
-                    Pasar controles al editor</button
-                  ><textarea
-                    id="profile-json"
-                    rows="12"
-                    spellcheck="false"
-                    aria-label="Perfil JSON completo"
-                    placeholder="Opcional: perfil completo JSON"
-                  ></textarea>
-                </details>
               </div>
-              <details class="size-guardrails">
-                <summary>Límites y conservación</summary>
+              <div class="size-guardrails">
                 <div class="field-grid">
                   <label
-                    >Ahorro mínimo (%)<input
+                    >Minimum savings (%)<input
                       id="min-savings"
                       type="number"
                       min="0"
                       max="100"
-                      placeholder="Configuración del servidor" /></label
+                      placeholder="Server default" /></label
                   ><label
-                    >Crecimiento permitido (%)<input
+                    >Allowed growth (%)<input
                       id="max-growth"
                       type="number"
                       min="0"
@@ -410,209 +390,313 @@
                   /></label>
                 </div>
                 <label class="check"
-                  ><input
-                    id="preserve-depth"
-                    type="checkbox"
-                    checked
-                  />Conservar profundidad de bits de la fuente</label
+                  ><input id="preserve-depth" type="checkbox" checked />Preserve
+                  source bit depth</label
                 >
                 <p class="muted">
-                  Se conserva la resolución. El tamaño proyectado de las
-                  muestras es una estimación.
+                  Resolution is preserved. Sample sizes are estimates.
                 </p>
-              </details>
+              </div>
               <div class="submit-actions">
-                <button id="preview" type="button">Vista previa del lote</button
-                ><button id="benchmark" type="button">
-                  Benchmark del archivo</button
-                ><button class="primary" id="enqueue">
-                  Encolar transcode ↗
-                </button>
+                <button id="preview" type="button">Preview batch</button
+                ><button id="benchmark" type="button">Benchmark</button
+                ><button class="primary" id="enqueue">Queue transcode</button>
               </div>
               <p id="job-feedback" role="status"></p>
             </form>
           </div>
         </section>
-        <section id="jobs" class="panel operations-panel">
-          <div class="savings-dashboard" aria-label="Ahorro de espacio">
+        <section id="jobs" class="panel tab-content operations-panel" hidden>
+          <div class="queue-toolbar">
+            <h2>Queue</h2>
+            <div class="queue-filters">
+              <select id="job-filter" aria-label="Filter jobs by status">
+                <option value="all">All jobs</option>
+                <option value="pending">Queued</option>
+                <option value="running">Running</option>
+                <option value="waiting_external">Waiting for worker</option>
+                <option value="waiting_decision">Needs decision</option>
+                <option value="completed">Completed</option>
+                <option value="failed">Failed</option>
+                <option value="cancelled">Cancelled</option></select
+              ><button
+                id="refresh-jobs"
+                class="icon-button"
+                aria-label="Refresh jobs"
+                title="Refresh"
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.7"
+                  aria-hidden="true"
+                >
+                  <path
+                    d="M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M18 18A8 8 0 0 1 4 12"
+                  />
+                </svg>
+              </button>
+            </div>
+          </div>
+          <p id="jobs-updated" class="metadata" role="status"></p>
+          <div id="jobs-list"></div>
+          <div class="list-footer">
+            <span id="jobs-page" class="muted"></span
+            ><button id="jobs-more" class="quiet" hidden>Load more</button
+            ><span id="jobs-sentinel" aria-hidden="true"></span>
+          </div>
+        </section>
+        <section id="stats" class="panel tab-content" hidden>
+          <div class="queue-toolbar"><h2>Stats</h2></div>
+          <div class="savings-dashboard" aria-label="Space savings">
             <div>
-              <span class="metadata">ESPACIO LIBERADO</span
+              <span class="metadata">Space freed</span
               ><strong id="saved-total">—</strong
               ><span id="saved-count" class="metadata"></span>
             </div>
             <div>
-              <span class="metadata">AHORRO EN CANDIDATOS</span
+              <span class="metadata">Ready to replace</span
               ><strong id="candidate-total">—</strong
-              ><span class="metadata">Pendiente de reemplazo aprobado</span>
+              ><span class="metadata">Potential savings</span>
             </div>
             <div>
-              <span class="metadata">AHORRO ESTIMADO</span
+              <span class="metadata">Estimated savings</span
               ><strong id="estimated-total">—</strong
-              ><span class="metadata"
-                >Estimación de perfiles o muestras; puede cambiar</span
-              >
+              ><span class="metadata">From profiles or samples</span>
             </div>
           </div>
-          <div class="toolbar">
-            <div>
-              <h2>Cola, lotes e historial</h2>
-              <p class="muted">
-                También aparecen las acciones creadas por agentes mediante MCP.
-              </p>
-            </div>
-            <label
-              >Estado<select id="job-filter">
-                <option value="all">Todos</option>
-                <option value="pending">En cola</option>
-                <option value="running">En ejecución</option>
-                <option value="waiting_external">Esperando worker</option>
-                <option value="waiting_decision">Necesita decisión</option>
-                <option value="completed">Completado</option>
-                <option value="failed">Falló</option>
-                <option value="cancelled">Cancelado</option>
-              </select></label
-            ><button id="refresh-jobs">Actualizar</button>
-          </div>
-          <p id="jobs-updated" class="metadata" role="status"></p>
-          <div id="jobs-list"></div>
-          <div class="pagination">
-            <button id="jobs-prev">← Anterior</button
-            ><span id="jobs-page"></span
-            ><button id="jobs-next">Siguiente →</button>
-          </div>
-          <details>
-            <summary>Trazado del ahorro liberado</summary>
-            <p class="muted">
-              Solo cuenta reemplazos completados con limpieza de recuperación
-              verificada. Un candidato conserva el original y todavía no libera
-              espacio.
-            </p>
-            <div id="savings-history"></div>
-          </details>
+          <h3>Space freed over time</h3>
+          <p class="muted">
+            Verified replacements with recovery copies removed.
+          </p>
+          <div id="savings-history"></div>
         </section>
         <section id="recipes" class="panel tab-content" hidden>
-          <div class="section-label">
-            PERFILES / CATÁLOGO COMPARTIDO CON MCP
+          <div class="queue-toolbar">
+            <h2>Profiles</h2>
+            <button id="new-recipe">New profile</button>
           </div>
           <div class="recipe-layout">
-            <div>
-              <h2>Un perfil.<br />Un resultado reproducible.</h2>
-              <p class="muted">
-                Los cambios afectan trabajos nuevos. Los trabajos admitidos
-                conservan su plan.
-              </p>
+            <div class="recipe-sidebar">
+              <input
+                id="recipe-search"
+                type="search"
+                aria-label="Search profiles"
+                placeholder="Search profiles"
+              />
               <div id="recipes-list"></div>
-              <button id="recipes-more" hidden>Cargar más perfiles</button
-              ><button id="new-recipe">Crear perfil</button>
+              <button id="recipes-more" hidden>Load more profiles</button>
             </div>
             <form id="recipe-form">
-              <label>Nombre<input id="recipe-name" required /></label
-              ><label>Descripción<input id="recipe-description" /></label>
+              <label>Name<input id="recipe-name" required /></label
+              ><label>Description<input id="recipe-description" /></label>
               <div id="recipe-source" class="muted"></div>
-              <label
-                >Perfil completo<textarea
-                  id="recipe-body"
-                  rows="20"
-                  spellcheck="false"
-                  required
-                ></textarea>
-              </label>
-              <div class="submit-actions">
-                <button class="primary">Guardar perfil</button
-                ><button id="delete-recipe" type="button">
-                  Eliminar override</button
-                ><button id="recipe-history" type="button">Historial</button>
+              <div class="profile-controls">
+                <div class="field-grid">
+                  <label
+                    >Container<select id="recipe-container" disabled>
+                      <option>mkv</option>
+                    </select></label
+                  ><label
+                    >Encoder<select id="recipe-encoder">
+                      <option value="libx265">x265 · software</option>
+                      <option value="hevc_videotoolbox">
+                        VideoToolbox · hardware
+                      </option>
+                    </select></label
+                  >
+                </div>
+                <div class="field-grid">
+                  <label
+                    >Quality<input
+                      id="recipe-quality"
+                      type="number"
+                      min="0"
+                      max="100"
+                      required /></label
+                  ><label
+                    >Preset<select id="recipe-preset">
+                      <option>ultrafast</option>
+                      <option>superfast</option>
+                      <option>faster</option>
+                      <option selected>medium</option>
+                      <option>placebo</option>
+                      <option>slow</option>
+                      <option>slower</option>
+                      <option>fast</option>
+                      <option>veryfast</option>
+                      <option>veryslow</option>
+                    </select></label
+                  >
+                </div>
+                <label
+                  >Audio tracks<select id="recipe-audio">
+                    <option value="copy">Copy all tracks</option>
+                    <option value="compact">DTS / lossless → AAC</option>
+                  </select></label
+                >
+                <input
+                  id="recipe-metadata"
+                  type="checkbox"
+                  checked
+                  hidden
+                /><input
+                  id="recipe-chapters"
+                  type="checkbox"
+                  checked
+                  hidden
+                /><input
+                  id="recipe-attachments"
+                  type="checkbox"
+                  checked
+                  hidden
+                />
               </div>
-              <pre id="recipe-feedback" hidden></pre>
+              <p class="preservation-note muted">
+                Metadata, chapters and attachments are preserved.
+              </p>
+              <button id="recipe-advanced" type="button" class="quiet">
+                More settings
+              </button>
+              <div class="submit-actions">
+                <button class="primary">Save profile</button
+                ><button id="delete-recipe" type="button">
+                  Reset to built-in</button
+                ><button
+                  id="recipe-history"
+                  class="icon-button"
+                  type="button"
+                  aria-label="Profile history"
+                  title="Profile history"
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.7"
+                    aria-hidden="true"
+                  >
+                    <circle cx="12" cy="12" r="9" />
+                    <path d="M12 7v5l3 2" />
+                  </svg>
+                </button>
+              </div>
+              <div id="recipe-feedback" class="profile-history" hidden></div>
             </form>
           </div>
         </section>
         <section id="advanced" class="panel tab-content" hidden>
-          <div class="section-label">OPERACIONES / PARIDAD CON MCP</div>
-          <h2>Controles completos</h2>
-          <p class="muted">
-            Catálogo de acciones, detalle por secciones, perfiles y
-            recuperación. Las mismas validaciones y permisos de MCP.
-          </p>
-          <form id="tool-form">
-            <label>Herramienta<select id="tool-name"></select></label>
-            <p id="tool-description" class="muted"></p>
-            <details>
-              <summary>Parámetros de la herramienta</summary>
-              <pre id="tool-schema"></pre>
-            </details>
-            <label
-              >Argumentos JSON<textarea
-                id="tool-args"
-                rows="10"
-                spellcheck="false"
-              >
-{}</textarea
-              ></label
-            ><button class="primary">Ejecutar</button>
-          </form>
-          <pre id="tool-output" hidden></pre>
+          <h2>Settings</h2>
+          <div class="settings-row">
+            <span>Profile bundle</span>
+            <div class="job-actions">
+              <button id="reload-profiles">Reload</button
+              ><button id="update-profiles">Update</button
+              ><button id="rollback-profiles">Restore previous</button>
+            </div>
+          </div>
+          <div class="settings-row">
+            <span>Recovery copies</span
+            ><button id="load-backups">View copies</button>
+          </div>
+          <div id="backup-list" hidden></div>
+          <button id="backups-more" hidden>Load more</button>
+          <div class="settings-row">
+            <span>Local session</span
+            ><button id="logout" class="quiet" hidden>Sign out</button>
+          </div>
         </section>
       </div>
       <div id="notice" role="alert" hidden></div>
     </main>
+    <dialog id="install-help">
+      <div class="dialog-heading">
+        <h2>Add Navigatorr</h2>
+        <button
+          id="close-install"
+          class="icon-button"
+          aria-label="Close installation help"
+        >
+          ×
+        </button>
+      </div>
+
+      <p id="install-instructions">
+        Use your browser’s menu to add Navigatorr to your home screen.
+      </p>
+      <p id="install-status">Use HTTPS to install the app.</p>
+    </dialog>
+    <dialog id="path-dialog">
+      <div class="dialog-heading">
+        <h2>Open a path</h2>
+        <button id="close-path" type="button" aria-label="Close path">×</button>
+      </div>
+
+      <div class="toolbar">
+        <select id="root" aria-label="Allowed folder"></select
+        ><button id="browse-root">Open</button>
+      </div>
+      <div id="file-items"></div>
+      <label
+        >Selected file<input
+          id="path"
+          placeholder="Path inside an allowed folder" /></label
+      ><button id="inspect" type="button">Inspect file</button>
+      <pre id="inspection" hidden></pre>
+    </dialog>
+    <dialog id="recipe-settings">
+      <div class="dialog-heading">
+        <h2>Profile settings</h2>
+        <button
+          id="close-recipe-settings"
+          type="button"
+          aria-label="Close profile settings"
+        >
+          ×
+        </button>
+      </div>
+      <div id="recipe-extra-fields"></div>
+    </dialog>
     <dialog id="job-detail">
       <div class="dialog-heading">
-        <h2>Detalle del trabajo</h2>
-        <button id="close-detail" aria-label="Cerrar">×</button>
+        <h2>Job details</h2>
+        <button id="close-detail" aria-label="Close">×</button>
       </div>
       <p class="dialog-connection muted" role="status" hidden>
-        Sin conexión con Navigatorr. Cierra este detalle y pulsa Reconectar para
-        consultar datos actuales o enviar cambios.
+        Server unavailable. Retrying automatically.
       </p>
       <div id="detail-summary"></div>
       <div id="detail-controls" class="submit-actions"></div>
       <section id="batch-items-panel" hidden>
-        <h3>Archivos del lote</h3>
+        <h3>Batch files</h3>
         <p id="batch-items-note" class="metadata"></p>
         <div id="batch-items-list"></div>
         <div class="pagination">
-          <button id="batch-items-prev">← Anterior</button
-          ><button id="batch-items-next">Siguiente →</button>
+          <button id="batch-items-prev">← Previous</button
+          ><button id="batch-items-next">Next →</button>
         </div>
       </section>
-      <details class="job-diagnostics">
-        <summary>Diagnóstico y registros</summary>
-        <div class="toolbar">
-          <label
-            >Sección<select id="detail-section">
-              <option>state</option>
-              <option>inputs</option>
-              <option>outputs</option>
-              <option>steps</option>
-              <option value="logs">Log del worker</option>
-            </select></label
-          ><button id="load-detail">Consultar</button
-          ><button id="detail-next" hidden>Siguiente fragmento</button>
-        </div>
-        <pre id="detail-content"></pre>
-      </details>
+      <div class="detail-extras">
+        <button id="load-detail" class="quiet" hidden>Worker log</button>
+      </div>
+      <pre id="detail-content" hidden></pre>
     </dialog>
     <dialog id="batch-review">
-      <h2>Revisar reemplazo del lote</h2>
+      <h2>Review replacements</h2>
       <p class="dialog-connection muted" role="status" hidden>
-        Sin conexión con Navigatorr. Vuelve sin aprobar y pulsa Reconectar antes
-        de enviar cambios.
+        Server unavailable. Approval is paused until it responds.
       </p>
       <p class="muted">
-        Esta aprobación afecta a todos los archivos listados. El motor volverá a
-        verificar cada candidato y conservará una copia de recuperación.
+        Replaces every file below after verification, with recovery copies.
       </p>
       <pre id="batch-review-data"></pre>
       <div class="submit-actions">
-        <button id="dismiss-batch-review">Volver sin aprobar</button
+        <button id="dismiss-batch-review">Back</button
         ><button id="approve-batch-review" class="primary">
-          Aprobar estos reemplazos
+          Approve replacements
         </button>
       </div>
     </dialog>
-    <footer>
-      Navigatorr <span>La biblioteca permanece bajo tu control.</span>
-    </footer>
   </body>
 </html>

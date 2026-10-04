@@ -40,9 +40,58 @@ type Config struct {
 
 // Web is opt-in and shares the persistent MCP HTTP listener.
 type WebConfig struct {
-	Enabled   bool   `yaml:"enabled"`
-	Token     string `yaml:"token"`
-	TokenFile string `yaml:"token_file"`
+	Enabled          bool                   `yaml:"enabled"`
+	AuthMode         string                 `yaml:"auth_mode"`
+	Token            string                 `yaml:"token"`
+	TokenFile        string                 `yaml:"token_file"`
+	CloudflareAccess CloudflareAccessConfig `yaml:"cloudflare_access"`
+}
+
+type CloudflareAccessConfig struct {
+	TeamDomain string `yaml:"team_domain"`
+	Audience   string `yaml:"audience"`
+}
+
+func (w WebConfig) AuthModeValue() string {
+	mode := strings.ToLower(strings.TrimSpace(w.AuthMode))
+	if mode == "" {
+		return "token"
+	}
+	return mode
+}
+
+// CloudflareIssuer restricts the signing-key source to the configured Access team.
+func (w WebConfig) CloudflareIssuer() (string, error) {
+	domain := strings.TrimSpace(w.CloudflareAccess.TeamDomain)
+	if !strings.Contains(domain, "://") {
+		domain = "https://" + domain
+	}
+	u, err := url.Parse(domain)
+	if err != nil || u.Scheme != "https" || u.User != nil || u.Port() != "" || u.RawQuery != "" || u.Fragment != "" || u.Path != "" && u.Path != "/" || !regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}\.cloudflareaccess\.com$`).MatchString(strings.ToLower(u.Host)) {
+		return "", fmt.Errorf("web.cloudflare_access.team_domain must be an HTTPS Cloudflare Access team domain")
+	}
+	return "https://" + strings.ToLower(u.Host), nil
+}
+
+func (w WebConfig) ValidateAuth() error {
+	switch w.AuthModeValue() {
+	case "token":
+		return nil
+	case "cloudflare_access":
+		if w.Token != "" || w.TokenFile != "" {
+			return fmt.Errorf("web token authentication cannot be configured with cloudflare_access")
+		}
+		if _, err := w.CloudflareIssuer(); err != nil {
+			return err
+		}
+		aud := strings.TrimSpace(w.CloudflareAccess.Audience)
+		if aud == "" || len(aud) > 512 || strings.ContainsAny(aud, " \t\r\n") {
+			return fmt.Errorf("web.cloudflare_access.audience must identify the Access application")
+		}
+		return nil
+	default:
+		return fmt.Errorf("web.auth_mode must be token or cloudflare_access")
+	}
 }
 
 type MCPConfig struct {
@@ -875,6 +924,9 @@ func Load(path string) (*Config, error) {
 	// block, so a missing/unusable base_url still fails closed at load time.
 	if cfg.Transcode.Enabled && strings.TrimSpace(cfg.Transcode.Executor) == "" {
 		cfg.Transcode.Executor = DefaultTranscodeExecutor
+	}
+	if err := cfg.Web.ValidateAuth(); err != nil {
+		return nil, err
 	}
 	if err := cfg.Transcode.Validate(); err != nil {
 		return nil, fmt.Errorf("parsing config %s: %w", path, err)
