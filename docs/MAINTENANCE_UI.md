@@ -19,6 +19,14 @@ Create the token file with a random token of at least 24 characters, readable on
 
 Use HTTPS through the existing reverse proxy for remote access. The web token protects `/api/maintenance/*`, with bounded, 12-hour HttpOnly/SameSite sessions and same-origin mutation checks. The worker token and *arr API keys stay on the server. Existing `/mcp` authentication is unchanged: protect that endpoint separately at the proxy. Static assets contain no credentials. Enabling the web console does not enable destructive actions or audio-only transcoding.
 
+## Mobile and PWA
+
+The mobile view opens on the queue, with fixed bottom navigation, compact savings and job telemetry, 44-pixel minimum controls (including landscape/tablet) and safe-area spacing. File selection remains directly available in **Files**, and advanced profile/size controls expand in place. Returning to the foreground refreshes monitoring without discarding the current prepared conversion. The browser is not the transcoding worker: backgrounding or closing the PWA leaves durable jobs on the server.
+
+The same origin exposes a standalone manifest, maskable 192/512 icons, an Apple touch icon and an **Install** button. Android browsers can offer their installation prompt; iPhone/iPad use Share → Add to Home Screen. Installation requires HTTPS (localhost is sufficient for development). A plain HTTP LAN address can still use the web interface, but does not provide the secure context required for the service worker.
+
+The versioned service worker caches only the public HTML/CSS/JS/icons. API responses, sessions, tokens, job history and mutation requests are never cached or replayed. With the server unreachable, a previously visited PWA can reopen its shell; it displays a disconnection notice and requires reconnection for job data or changes. In an already-open page, the last visible measurements are marked stale and mutation controls are disabled. **Reconnect** and browser online/foreground events revalidate the server/session. An uncertain submission keeps its existing durable receipt; reconnection does not automatically resubmit it. The public shell falls back to cache on network failure, proxy 5xx or a five-second network timeout; cache-write failure still permits the live response. Asset changes update the worker and retire only Navigatorr's old shell cache. Expired sessions dismiss stale approval/detail dialogs and expose sign-in.
+
 ## Workflow
 
 - Browse configured filesystem read roots directly. File sizes come from disk; folder navigation, search and pagination work without Sonarr/Radarr. Optional Series/Movies catalogs add metadata and library import associations, rather than defining the transcode source.
@@ -42,3 +50,5 @@ Library navigation is paginated in the adapter (100 records maximum per page); S
 ## Validation
 
 Backend regressions cover durable admission/restart/cancel/retry receipts, authenticated same-origin requests, restricted tools, bounded library reads, selected-file/season and filesystem filtering, worker log errors, filesystem/Radarr approval/recovery/identity drift, savings accounting/restart and UI response-race regressions. Existing Sonarr promotion and batch tests remain in the suite. Manual browser verification uses an isolated synthetic Sonarr/Radarr library and temporary database; it does not replace acceptance against a live NAS/worker.
+
+Mobile browser checks cover 320, 360, 390 and 430-pixel widths, tablet (768), landscape (844×390), desktop (1280), file/profile selection, batch preview/details, inline retry, replacement-plan review, advanced controls and actual server-stop/offline reload/reconnect. PWA regressions cover public routes/icon dimensions, cache isolation, network-first fallback, mutation blocking and preservation of prepared inputs on reconnect. Installation and keyboard behavior on physical iOS/Android devices remain device acceptance checks.

@@ -2,7 +2,17 @@
 <html lang="es">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#244d40" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Navigatorr" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" href="/icon-192.png" type="image/png" />
+    <script type="module" src="/pwa.js"></script>
     <title>Navigatorr · Mantenimiento</title>
     <link rel="stylesheet" href="/app.css" />
     <script type="module" src="/app.js"></script>
@@ -13,11 +23,30 @@
         >N<span class="brand-dot">↗</span> <span>navigatorr</span></a
       >
       <div class="masthead-right">
-        <span class="indicator"></span><span>Mantenimiento de biblioteca</span
+        <button id="install-app" class="quiet" hidden>Instalar</button
+        ><span class="indicator"></span><span>Mantenimiento de biblioteca</span
         ><button id="logout" class="quiet" hidden>Salir</button>
       </div>
     </header>
     <main>
+      <aside id="install-help" class="compact-help" hidden>
+        <strong>Navigatorr en tu pantalla de inicio</strong>
+        <p>
+          En iPhone/iPad: Compartir → Añadir a pantalla de inicio. En Android:
+          menú del navegador → Instalar aplicación.
+        </p>
+        <p id="install-status">
+          Usa el acceso HTTPS de Navigatorr para instalar y abrir en modo
+          aplicación.
+        </p>
+      </aside>
+      <aside id="connection-status" class="compact-help" role="status" hidden>
+        <p>
+          Sin conexión con Navigatorr. Los datos visibles pueden estar
+          desactualizados. Reconecta para consultar la cola.
+        </p>
+        <button id="reconnect" type="button">Reconectar</button>
+      </aside>
       <section id="login" class="login" hidden>
         <p class="eyebrow">ACCESO A LA CONSOLA</p>
         <h1>Tu biblioteca.<br />En buenas manos.</h1>
@@ -47,11 +76,36 @@
           </p>
         </div>
         <nav class="tabs" aria-label="Secciones">
-          <button data-tab="library" aria-selected="true">Biblioteca</button
-          ><button data-tab="jobs">
-            Cola e historial <span id="active-count"></span></button
-          ><button data-tab="recipes">Perfiles</button
-          ><button data-tab="advanced">Herramientas</button>
+          <button
+            data-tab="library"
+            aria-label="Biblioteca"
+            data-short="Archivos"
+            aria-selected="true"
+          >
+            <span class="tab-label">Biblioteca</span>
+          </button>
+          <button
+            data-tab="jobs"
+            aria-label="Cola e historial"
+            data-short="Cola"
+          >
+            <span class="tab-label">Cola e historial</span>
+            <span id="active-count"></span>
+          </button>
+          <button
+            data-tab="recipes"
+            aria-label="Perfiles"
+            data-short="Perfiles"
+          >
+            <span class="tab-label">Perfiles</span>
+          </button>
+          <button
+            data-tab="advanced"
+            aria-label="Herramientas"
+            data-short="Más"
+          >
+            <span class="tab-label">Herramientas</span>
+          </button>
         </nav>
         <section id="library" class="panel tab-content">
           <div class="library-layout">
@@ -337,30 +391,36 @@
                   ></textarea>
                 </details>
               </div>
-              <div class="field-grid">
-                <label
-                  >Ahorro mínimo (%)<input
-                    id="min-savings"
-                    type="number"
-                    min="0"
-                    max="100"
-                    placeholder="Configuración del servidor" /></label
-                ><label
-                  >Crecimiento permitido (%)<input
-                    id="max-growth"
-                    type="number"
-                    min="0"
-                    value="0"
-                /></label>
-              </div>
-              <label class="check"
-                ><input id="preserve-depth" type="checkbox" checked />Conservar
-                profundidad de bits de la fuente</label
-              >
-              <p class="muted">
-                Se conserva la resolución. El tamaño proyectado de las muestras
-                es una estimación.
-              </p>
+              <details class="size-guardrails">
+                <summary>Límites y conservación</summary>
+                <div class="field-grid">
+                  <label
+                    >Ahorro mínimo (%)<input
+                      id="min-savings"
+                      type="number"
+                      min="0"
+                      max="100"
+                      placeholder="Configuración del servidor" /></label
+                  ><label
+                    >Crecimiento permitido (%)<input
+                      id="max-growth"
+                      type="number"
+                      min="0"
+                      value="0"
+                  /></label>
+                </div>
+                <label class="check"
+                  ><input
+                    id="preserve-depth"
+                    type="checkbox"
+                    checked
+                  />Conservar profundidad de bits de la fuente</label
+                >
+                <p class="muted">
+                  Se conserva la resolución. El tamaño proyectado de las
+                  muestras es una estimación.
+                </p>
+              </details>
               <div class="submit-actions">
                 <button id="preview" type="button">Vista previa del lote</button
                 ><button id="benchmark" type="button">
@@ -501,6 +561,10 @@
         <h2>Detalle del trabajo</h2>
         <button id="close-detail" aria-label="Cerrar">×</button>
       </div>
+      <p class="dialog-connection muted" role="status" hidden>
+        Sin conexión con Navigatorr. Cierra este detalle y pulsa Reconectar para
+        consultar datos actuales o enviar cambios.
+      </p>
       <div id="detail-summary"></div>
       <div id="detail-controls" class="submit-actions"></div>
       <section id="batch-items-panel" hidden>
@@ -531,6 +595,10 @@
     </dialog>
     <dialog id="batch-review">
       <h2>Revisar reemplazo del lote</h2>
+      <p class="dialog-connection muted" role="status" hidden>
+        Sin conexión con Navigatorr. Vuelve sin aprobar y pulsa Reconectar antes
+        de enviar cambios.
+      </p>
       <p class="muted">
         Esta aprobación afecta a todos los archivos listados. El motor volverá a
         verificar cada candidato y conservará una copia de recuperación.

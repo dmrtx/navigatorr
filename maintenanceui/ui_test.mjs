@@ -84,6 +84,99 @@ function deferred() {
   return { promise, resolve };
 }
 
+test("network loss blocks mutations and polling until a successful read reconnects", async () => {
+  const h = harness();
+  let calls = 0;
+  h.run("controls = () => {}; state.tab = 'jobs';");
+  h.document.getElementById("workspace").hidden = false;
+  h.context.fetch = async () => {
+    calls++;
+    throw new Error("offline");
+  };
+  await assert.rejects(h.run('api("operations")'), /No se puede conectar/);
+  assert.equal(h.elements.get("connection-status").hidden, false);
+  await assert.rejects(
+    h.run('api("tool", {name:"action_retry"})'),
+    /Sin conexión/,
+  );
+  await h.interval();
+  assert.equal(calls, 1);
+  h.context.fetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({}),
+  });
+  await h.run('api("bootstrap")');
+  assert.equal(h.elements.get("connection-status").hidden, true);
+  assert.equal(h.run("serverReachable"), true);
+});
+
+test("reconnection refreshes monitoring without discarding a prepared transcode", async () => {
+  const h = harness();
+  h.run(
+    "controls = () => {}; state.paths = ['prepared.mp4']; state.tab = 'library'; api = async () => ({}); loadJobs = async () => {}; initialize = async () => {throw new Error('discarded draft');};",
+  );
+  h.document.getElementById("workspace").hidden = false;
+  await h.run("reconnect()");
+  assert.equal(h.run("state.paths[0]"), "prepared.mp4");
+  assert.equal(h.run("state.tab"), "library");
+});
+
+test("expired session closes stale approval dialogs and exposes sign-in", async () => {
+  const h = harness();
+  h.run(
+    "controls = () => {}; state.detail = 'old'; state.batchApproval = 'old';",
+  );
+  h.document.getElementById("job-detail").open = true;
+  h.document.getElementById("batch-review").open = true;
+  h.context.fetch = async () => ({
+    ok: false,
+    status: 401,
+    json: async () => ({ error: "sign in to Navigatorr" }),
+  });
+  await assert.rejects(h.run('api("bootstrap")'), /sign in/);
+  assert.equal(h.elements.get("job-detail").open, false);
+  assert.equal(h.elements.get("batch-review").open, false);
+  assert.equal(h.elements.get("login").hidden, false);
+  assert.equal(h.run("state.batchApproval"), null);
+  assert.equal(h.run("state.authRevision"), 1);
+});
+
+test("proxy unavailability blocks changes without parsing an HTML error as JSON", async () => {
+  const h = harness();
+  h.run("controls = () => {};");
+  h.context.fetch = async () => ({
+    status: 503,
+    json: () => assert.fail("HTML proxy body must not be parsed"),
+  });
+  await assert.rejects(h.run('api("bootstrap")'), /no está disponible/);
+  assert.equal(h.run("serverReachable"), false);
+  assert.equal(h.elements.get("approve-batch-review").disabled, true);
+});
+
+test("session invalidation prevents a delayed batch approval from reopening", async () => {
+  const h = harness(),
+    plan = deferred();
+  h.context.plan = plan.promise;
+  h.run("tool = async () => plan; controls = () => {};");
+  const pending = h.run('reviewBatchPromotion("batch-a")');
+  h.context.fetch = async () => ({
+    ok: false,
+    status: 401,
+    json: async () => ({ error: "sign in to Navigatorr" }),
+  });
+  await assert.rejects(h.run('api("bootstrap")'), /sign in/);
+  plan.resolve({
+    data: {
+      batch_id: "batch-a",
+      digest: "verified",
+      members: [{ item_key: "file" }],
+    },
+  });
+  await pending;
+  assert.equal(h.elements.get("batch-review").open, false);
+});
+
 test("late detail response cannot overwrite the newly opened job", async () => {
   const h = harness(),
     a = deferred(),

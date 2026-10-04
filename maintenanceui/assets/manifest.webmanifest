@@ -1,0 +1,26 @@
+{
+  "id": "/",
+  "name": "Navigatorr · Mantenimiento",
+  "short_name": "Navigatorr",
+  "lang": "es",
+  "description": "Archivos, cola de transcodes y ahorro de tu biblioteca.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f3f1eb",
+  "theme_color": "#244d40",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

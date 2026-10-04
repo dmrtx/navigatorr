@@ -16,8 +16,10 @@ const state = {
   batchItemsOffset: 0,
   jobsRevision: 0,
   detailRevision: 0,
+  authRevision: 0,
   busyJobs: new Set(),
   submitting: false,
+  approvingBatch: false,
 };
 const names = {
   queued: "En cola",
@@ -34,7 +36,7 @@ const names = {
 };
 const workflows = {
   transcode_media: "Transcode de archivo",
-  transcode_batch: "Lote de serie",
+  transcode_batch: "Lote de archivos",
   benchmark_transcode: "Benchmark",
   promote_transcode_candidate: "Reemplazo aprobado",
 };
@@ -68,20 +70,77 @@ async function safe(fn) {
   try {
     return await fn();
   } catch (e) {
-    notify(e.message);
+    if (e.message !== "sign in to Navigatorr") notify(e.message);
   }
 }
-async function api(path, body) {
-  const res = await fetch(`/api/maintenance/${path}`, {
-    method: body === undefined ? "GET" : "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Navigatorr-Request": "1",
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
+let serverReachable =
+  typeof navigator === "undefined" || navigator.onLine !== false;
+function setConnection(online) {
+  serverReachable = online;
+  $("connection-status").hidden = online;
+  document.body?.classList.toggle("disconnected", !online);
+  if (!online && $("workspace").hidden) $("login").hidden = false;
+  document.querySelectorAll("[data-job-control]").forEach((button) => {
+    button.disabled = !online || state.busyJobs.has(button.dataset.jobControl);
   });
+  document.querySelectorAll(".dialog-connection").forEach((notice) => {
+    notice.hidden = online;
+  });
+  $("approve-batch-review").disabled = !online || state.approvingBatch;
+  controls();
+}
+async function reconnect() {
+  await api("bootstrap");
+  if ($("workspace").hidden) await initialize();
+  else {
+    await loadJobs();
+    if ($("job-detail").open) await refreshDetail();
+  }
+}
+$("reconnect").addEventListener("click", () => safe(reconnect));
+if (typeof window !== "undefined") {
+  window.addEventListener("offline", () => setConnection(false));
+  window.addEventListener("online", () => safe(reconnect));
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) safe(reconnect);
+  });
+}
+async function api(path, body) {
+  if (body !== undefined && !serverReachable)
+    throw new Error("Sin conexión: reconecta antes de enviar cambios.");
+  let res;
+  try {
+    res = await fetch(`/api/maintenance/${path}`, {
+      method: body === undefined ? "GET" : "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Navigatorr-Request": "1",
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch {
+    setConnection(false);
+    throw new Error(
+      "No se puede conectar con Navigatorr. Reconecta para consultar el estado.",
+    );
+  }
+  if ([502, 503, 504].includes(res.status)) {
+    setConnection(false);
+    throw new Error(
+      "Navigatorr no está disponible. Reconecta para consultar el estado.",
+    );
+  }
+  setConnection(true);
   const data = await res.json();
   if (res.status === 401) {
+    state.authRevision++;
+    state.libraryRevision++;
+    state.jobsRevision++;
+    state.detailRevision++;
+    state.detail = null;
+    state.batchApproval = null;
+    $("job-detail").close();
+    $("batch-review").close();
     $("login").hidden = false;
     $("workspace").hidden = true;
     $("logout").hidden = true;
@@ -198,6 +257,11 @@ async function initialize() {
     );
   if (info.tools.includes("recipe_list")) await loadRecipes(true);
   controls();
+  if (
+    typeof matchMedia === "function" &&
+    matchMedia("(max-width: 600px)").matches
+  )
+    selectTab("jobs");
   await loadJobs();
 }
 
@@ -231,7 +295,9 @@ async function loadLibrary() {
           ? state.selected.add(item.id)
           : state.selected.delete(item.id);
       });
-      row.append(check);
+      const checkLabel = node("label", "", "media-check");
+      checkLabel.append(check);
+      row.append(checkLabel);
       state.files.set(item.id, item);
     } else
       row.append(
@@ -399,7 +465,9 @@ async function loadFolder(revision = ++state.libraryRevision) {
           ? state.folderSelected.add(file.path)
           : state.folderSelected.delete(file.path),
       );
-      row.append(check);
+      const checkLabel = node("label", "", "media-check");
+      checkLabel.append(check);
+      row.append(checkLabel);
     } else row.append(node("span", "↳", "media-icon"));
     row.append(
       button(
@@ -493,9 +561,12 @@ function controls() {
   $("preview").hidden = !batch;
   $("benchmark").hidden = batch;
   $("audio-note").hidden = $("audio").value !== "compact";
-  $("enqueue").disabled = !state.info?.transcode_enabled || state.submitting;
-  $("benchmark").disabled = !state.info?.transcode_enabled || state.submitting;
-  $("preview").disabled = !state.info?.transcode_enabled || state.submitting;
+  $("enqueue").disabled =
+    !state.info?.transcode_enabled || state.submitting || !serverReachable;
+  $("benchmark").disabled =
+    !state.info?.transcode_enabled || state.submitting || !serverReachable;
+  $("preview").disabled =
+    !state.info?.transcode_enabled || state.submitting || !serverReachable;
 }
 for (const id of [
   "scope",
@@ -853,7 +924,7 @@ async function jobControl(id, name, args = {}) {
   } finally {
     state.busyJobs.delete(id);
     document.querySelectorAll("[data-job-control]").forEach((b) => {
-      if (b.dataset.jobControl === id) b.disabled = false;
+      if (b.dataset.jobControl === id) b.disabled = !serverReachable;
     });
   }
 }
@@ -896,7 +967,7 @@ function jobControls(job) {
   const add = (label, fn) => {
     const b = button(label, fn);
     b.dataset.jobControl = job.id;
-    b.disabled = state.busyJobs.has(job.id);
+    b.disabled = !serverReachable || state.busyJobs.has(job.id);
     controls.append(b);
   };
   const decisionLabels = {
@@ -990,7 +1061,8 @@ async function loadJobs() {
           workflows[job.action_name],
       ),
     );
-    if (job.source_path) meta.append(node("span", job.source_path, "metadata"));
+    if (job.source_path)
+      meta.append(node("span", job.source_path, "metadata source-path"));
     meta.append(
       node("span", names[job.status] || job.status, `badge ${job.status}`),
       node(
@@ -1174,6 +1246,7 @@ async function loadDetail() {
 }
 
 async function reviewBatchPromotion(id) {
+  const authRevision = state.authRevision;
   const args = { id, section: "state", key: "batch_promotion_plan", chunk: 0 };
   const first = await tool("action_detail", args);
   let plan = first.data;
@@ -1187,6 +1260,7 @@ async function reviewBatchPromotion(id) {
       content += (await tool("action_detail", { ...args, chunk })).content;
     plan = JSON.parse(content);
   }
+  if (authRevision !== state.authRevision || $("workspace").hidden) return;
   if (
     plan?.batch_id !== id ||
     !plan.digest ||
@@ -1211,6 +1285,7 @@ $("dismiss-batch-review").addEventListener("click", () =>
 $("approve-batch-review").addEventListener("click", () =>
   safe(async () => {
     const id = state.batchApproval;
+    state.approvingBatch = true;
     $("approve-batch-review").disabled = true;
     try {
       await tool("action_resume", { id, decision: "approve" });
@@ -1218,7 +1293,8 @@ $("approve-batch-review").addEventListener("click", () =>
       await refreshDetail();
       await loadJobs();
     } finally {
-      $("approve-batch-review").disabled = false;
+      state.approvingBatch = false;
+      $("approve-batch-review").disabled = !serverReachable;
     }
   }),
 );
@@ -1379,7 +1455,8 @@ function describeTool() {
 $("tool-name").addEventListener("change", describeTool);
 let polling = false;
 setInterval(async () => {
-  if (polling || document.hidden || $("workspace").hidden) return;
+  if (polling || !serverReachable || document.hidden || $("workspace").hidden)
+    return;
   polling = true;
   try {
     if (["library", "jobs"].includes(state.tab)) await safe(loadJobs);
@@ -1388,4 +1465,5 @@ setInterval(async () => {
     polling = false;
   }
 }, 5000);
+if (typeof window !== "undefined") setConnection(serverReachable);
 safe(initialize);
