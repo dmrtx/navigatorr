@@ -2295,6 +2295,9 @@ function queuePresentation(job) {
     job.action_name;
   const outcomes = {
     preview: "Preview",
+    failed: "Failed",
+    cancelled: "Cancelled",
+    needs_decision: "Needs decision",
     partial: "Partial",
     needs_review: "Needs review",
     no_changes: "No changes",
