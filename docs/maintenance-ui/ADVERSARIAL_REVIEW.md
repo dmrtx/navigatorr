@@ -60,3 +60,16 @@ Final visual acceptance covered 320×844 and 390×844, landscape 844×390, and d
 Real Google/Cloudflare Access login and private-host policy, live NAS/worker encoding and replacement, and installation/keyboard behavior on physical iOS/Android devices were not exercised. The preview uses a simulated authenticated gateway, temporary SQLite data and synthetic media. No production files were replaced.
 
 Queue pagination uses bounded offset pages rather than a server snapshot token. A changing large queue can shift records between continuation reads; deduplication and the next full visible-window refresh correct the view. Batch file details keep bounded paging. Savings reports verified file-content reduction after recovery cleanup, rather than disk-volume free space.
+
+
+## Queue follow-up: real batches and replacement lifecycle
+
+A LAN production review found anonymous filesystem batches, omitted skip reasons, a separate replacement row for an existing conversion, and no visible progress during local promotion steps. Queue projection now groups only durable parent/candidate links before filtering and pagination, retains a stable workflow number, and puts active work first. Independently submitted previews and executions remain distinct. Global savings accounting still uses the ungrouped lifetime ledger.
+
+Batch rows show their folder/season, two actual filenames, total file count and bounded skip reasons; the file dialog keeps the full paginated contents and reasons. Preview eligibility is labelled eligible rather than queued. Active batch telemetry identifies the measured child file. Replacement rows show the current named step, and details show all eight numbered stages without inventing a byte percentage. Conversion and its linked replacement use the same queue identity, with the original conversion available in details.
+
+Replacement approval uses an application dialog with original/candidate paths and sizes, potential savings and recovery behavior. Opening it is read-only. Approval rechecks action status, available decision and both content hashes; expiration or a changed plan prevents submission. Review and Replace retain short visible labels and consistent control sizing.
+
+Validation: full Go tests and vet, 74 JavaScript tests, grouping/filter/pagination and live-child telemetry regressions, plus browser inspection of synthetic running/review/skipped states at desktop, 390 and 320 pixels. No production media was changed by this review.
+
+A single mobile queue action now stays beside the row content, eliminating the empty action-only line. Multiple decisions keep their shared action rail. The 320- and 390-pixel checks confirmed no horizontal overflow and retained 44-pixel touch targets.
