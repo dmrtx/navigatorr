@@ -8,7 +8,22 @@ import (
 	"time"
 
 	"github.com/jakenesler/navigatorr/action"
+	"github.com/jakenesler/navigatorr/transcode"
 )
+
+func (s *Server) workerActivity(w http.ResponseWriter, r *http.Request) {
+	executor, ok := s.engine.Deps().Transcode.(*transcode.HTTPExecutor)
+	if !ok {
+		writeJSON(w, 200, map[string]any{"available": false, "message": "Live worker activity requires the HTTP video worker."})
+		return
+	}
+	activity, err := executor.Activity(r.Context())
+	if err != nil {
+		writeJSON(w, 200, map[string]any{"available": false, "message": "Worker activity unavailable. Slot occupancy is unknown."})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"available": true, "activity": activity})
+}
 
 func (s *Server) workers(w http.ResponseWriter, r *http.Request) {
 	transport := s.cfg.Transcode.Executor

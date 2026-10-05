@@ -114,6 +114,8 @@ func (e *Engine) recordWorkerPoll(ec *ExecutionContext) {
 }
 
 func (e *Engine) observeBenchmarkStatus(ec *ExecutionContext, st transcode.BenchmarkStatus) {
+	ec.State["benchmark_comparison_available"] = st.ComparisonAvailable
+	ec.Outputs["benchmark_comparison_available"] = st.ComparisonAvailable
 	ec.State["benchmark_status"] = st.Status
 	if len(st.Quality) > 0 {
 		ec.State["benchmark_quality"] = st.Quality

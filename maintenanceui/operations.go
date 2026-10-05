@@ -502,6 +502,13 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 				}
 			}
 			_, httpWorker := s.engine.Deps().Transcode.(*transcode.HTTPExecutor)
+			comparison := r
+			if r.inst.ActionName == "promote_transcode_candidate" {
+				comparison = recordsByID[root]
+			}
+			if httpWorker && operationValue(comparison, "benchmark_comparison_available") == true {
+				job["comparison_action_id"] = comparison.inst.ID
+			}
 			job["logs_available"] = httpWorker && (operationString(r.state["job_id"]) != "" || operationString(r.state["transcode_job_id"]) != "")
 			if r.inst.ActionName == "transcode_batch" {
 				job["paused"] = operationValue(r, "paused") == true
@@ -512,6 +519,7 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 				}
 				job["batch_files"] = batchQueueFeedback(items)
 				if operationActive(r.inst.Status) {
+					activities := []map[string]any{}
 					for _, child := range members[root] {
 						if child.inst.ID == r.inst.ID || (child.inst.Status != store.ActionStatusRunning && child.inst.Status != store.ActionStatusWaitingExternal) {
 							continue
@@ -526,14 +534,15 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 								}
 							}
 							childJob := operationMap(data["action"])
+							activities = append(activities, map[string]any{"id": child.inst.ID, "file": operationString(child.inputs["path"]), "worker": childJob["worker"], "waiting_condition": childJob["waiting_condition"]})
 							job["activity_waiting_condition"] = childJob["waiting_condition"]
 							if worker := operationMap(childJob["worker"]); worker != nil {
 								job["worker"] = worker
 								job["activity_file"] = operationString(child.inputs["path"])
 							}
 						}
-						break
 					}
+					job["activities"] = activities
 				}
 			}
 			page.Jobs = append(page.Jobs, job)

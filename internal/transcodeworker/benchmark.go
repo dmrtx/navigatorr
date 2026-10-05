@@ -31,6 +31,7 @@ const (
 
 // BenchmarkRecord represents the persistent state stored in benchmark.json on the worker.
 type BenchmarkRecord struct {
+	Comparison                *transcode.BenchmarkComparison        `json:"comparison,omitempty"`
 	Allow8BitTo10Bit          bool                                  `json:"allow_8bit_to_10bit,omitempty"`
 	AudioMode                 string                                `json:"audio_mode,omitempty"`
 	ProtocolVersion           int                                   `json:"protocol_version"`
@@ -693,6 +694,10 @@ func (w *Worker) BenchmarkStatus(ctx context.Context, jobID string) (transcode.B
 	st.FinishedAt = record.FinishedAt
 	st.Error = record.Error
 	st.Status = record.Status
+	if record.Status == "completed" && record.Comparison != nil {
+		_, err := w.BenchmarkComparison(cleanID)
+		st.ComparisonAvailable = err == nil
+	}
 	applyBenchmarkProgressStatus(&st, record)
 	if record.Evidence != nil && record.Evidence.Decision != nil {
 		st.Decision = record.Evidence.Decision
@@ -917,6 +922,14 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) 
 		runErr = runner.RunBenchmark(ctx, w, record)
 	}
 
+	// Save only a few lossless PNG pairs before deleting the large scratch
+	// videos. Failure to create an optional preview never changes the decision.
+	if runErr == nil {
+		if record.Evidence != nil && record.Evidence.Decision != nil && record.Evidence.Decision.Winner != nil {
+			_ = w.UpdateBenchmarkProgress(jobID, runToken, min(record.Progress, 99), "capturing_comparison")
+		}
+		_ = w.captureBenchmarkComparison(ctx, record)
+	}
 	// Clean samples workspace regardless of outcome
 	_ = w.CleanBenchmarkSamples(jobID)
 	stopHeartbeat()
@@ -974,6 +987,7 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) 
 	latest.LastProgressAt = latest.HeartbeatAt
 	latest.Error = ""
 	latest.Evidence = record.Evidence
+	latest.Comparison = record.Comparison
 	if err := SaveBenchmarkAtomic(benchFile, latest); err != nil {
 		return fmt.Errorf("updating benchmark to completed: %w", err)
 	}

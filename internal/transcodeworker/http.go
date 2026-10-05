@@ -168,6 +168,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/jobs/", s.handleJobByID)
 	mux.HandleFunc("/v1/benchmarks", s.handleBenchmarks)
 	mux.HandleFunc("/v1/benchmarks/", s.handleBenchmarkByID)
+	mux.HandleFunc("/v1/activity", s.handleActivity)
 	// Auth applies first so the documented invariant holds: when a token is
 	// configured it protects ALL /v1/* including malformed/traversal paths
 	// (unauthenticated traversal -> 401). rejectTraversal still runs before
@@ -578,12 +579,16 @@ func (s *Server) handleBenchmarkByID(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(trimmed, "/")
 	var id string
 	var isCancel bool
+	var isComparison bool
 	switch {
 	case len(parts) == 1:
 		id = parts[0]
 	case len(parts) == 2 && parts[1] == "cancel":
 		id = parts[0]
 		isCancel = true
+	case len(parts) == 2 && parts[1] == "comparison":
+		id = parts[0]
+		isComparison = true
 	default:
 		writeHTTPError(w, http.StatusNotFound, "not found")
 		return
@@ -604,6 +609,36 @@ func (s *Server) handleBenchmarkByID(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.worker == nil {
 		writeHTTPError(w, http.StatusInternalServerError, "worker is not configured")
+		return
+	}
+	if isComparison {
+		if r.Method != http.MethodGet {
+			writeHTTPError(w, 405, "use GET")
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		if raw := r.URL.Query().Get("image"); raw != "" {
+			index, err := strconv.Atoi(raw)
+			if err != nil || index < 0 || index > 100 {
+				writeHTTPError(w, 400, "invalid comparison sample")
+				return
+			}
+			data, err := s.worker.BenchmarkComparisonImage(id, index, r.URL.Query().Get("side"))
+			if err != nil {
+				writeHTTPError(w, 404, "comparison image unavailable")
+				return
+			}
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write(data)
+			return
+		}
+		manifest, err := s.worker.BenchmarkComparison(id)
+		if err != nil {
+			writeHTTPError(w, 404, "comparison unavailable; images were not saved or have expired")
+			return
+		}
+		writeHTTPJSON(w, 200, manifest)
 		return
 	}
 	switch {

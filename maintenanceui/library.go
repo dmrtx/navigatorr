@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -52,8 +53,18 @@ func (s *Server) library(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items := []map[string]any{}
+	seasonCounts := map[int]int{}
 	search := strings.ToLower(r.URL.Query().Get("q"))
 	for _, rec := range records {
+		// Declared seasons include empty specials and unaired episodes. Only
+		// episode files returned for this series can be selected for a batch.
+		if name == "sonarr" && id != "" {
+			path, _ := rec["path"].(string)
+			relative, _ := rec["relativePath"].(string)
+			if n, ok := rec["seasonNumber"].(float64); ok && n >= 0 && n == float64(int(n)) && (path != "" || relative != "") {
+				seasonCounts[int(n)]++
+			}
+		}
 		item := map[string]any{}
 		for _, key := range []string{"id", "title", "year", "path", "relativePath", "size", "seasonNumber", "seasons", "seriesType", "genres", "episodeCount", "hasFile", "movieId", "seriesId", "mediaInfo", "quality", "languages"} {
 			if val, ok := rec[key]; ok {
@@ -74,6 +85,12 @@ func (s *Server) library(w http.ResponseWriter, r *http.Request) {
 		item["metadata_source"] = "arr"
 		items = append(items, item)
 	}
+	sortLibraryItems(items, r.URL.Query().Get("sort"))
+	seasons := []map[string]int{}
+	for n, count := range seasonCounts {
+		seasons = append(seasons, map[string]int{"seasonNumber": n, "fileCount": count})
+	}
+	sort.Slice(seasons, func(i, j int) bool { return seasons[i]["seasonNumber"] < seasons[j]["seasonNumber"] })
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	if limit <= 0 || limit > 100 {
 		limit = 100
@@ -86,7 +103,49 @@ func (s *Server) library(w http.ResponseWriter, r *http.Request) {
 		offset = len(items)
 	}
 	end := min(offset+limit, len(items))
-	writeJSON(w, 200, map[string]any{"items": items[offset:end], "total": len(items), "offset": offset, "has_more": end < len(items), "service": name})
+	if r.URL.Query().Get("all") == "1" {
+		if id == "" {
+			fail(w, 400, "select a title before selecting files")
+			return
+		}
+		if len(items) > 1000 {
+			fail(w, 400, "selection exceeds 1000 files; filter or choose a smaller collection")
+			return
+		}
+		offset, end = 0, len(items)
+	}
+	writeJSON(w, 200, map[string]any{"items": items[offset:end], "total": len(items), "offset": offset, "has_more": end < len(items), "service": name, "seasons": seasons})
+}
+
+func sortLibraryItems(items []map[string]any, order string) {
+	sort.SliceStable(items, func(i, j int) bool {
+		a, b := items[i], items[j]
+		if order == "size_desc" || order == "size_asc" {
+			av, aok := a["size"].(float64)
+			bv, bok := b["size"].(float64)
+			if aok != bok {
+				return aok
+			} // Unknown sizes always follow measured sizes.
+			if av != bv {
+				if order == "size_desc" {
+					return av > bv
+				}
+				return av < bv
+			}
+		}
+		label := func(item map[string]any) string {
+			for _, key := range []string{"title", "relativePath", "path"} {
+				if value, ok := item[key].(string); ok && value != "" {
+					return strings.ToLower(value)
+				}
+			}
+			return ""
+		}
+		if al, bl := label(a), label(b); al != bl {
+			return al < bl
+		}
+		return fmt.Sprint(a["id"]) < fmt.Sprint(b["id"])
+	})
 }
 
 // Logs are always looked up through a known action, never through an arbitrary
