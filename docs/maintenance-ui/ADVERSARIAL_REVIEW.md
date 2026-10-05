@@ -71,3 +71,5 @@ Batch rows show their folder/season, two actual filenames, total file count and 
 Replacement approval uses an application dialog with original/candidate paths and sizes, potential savings and recovery behavior. Opening it is read-only. Approval rechecks action status, available decision and both content hashes; expiration or a changed plan prevents submission. Review and Replace retain short visible labels and consistent control sizing.
 
 Validation: full Go tests and vet, 74 JavaScript tests, grouping/filter/pagination and live-child telemetry regressions, plus browser inspection of synthetic running/review/skipped states at desktop, 390 and 320 pixels. No production media was changed by this review.
+
+A single mobile queue action now stays beside the row content, eliminating the empty action-only line. Multiple decisions keep their shared action rail. The 320- and 390-pixel checks confirmed no horizontal overflow and retained 44-pixel touch targets.
