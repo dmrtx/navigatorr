@@ -62,9 +62,15 @@ function actionIcon(label) {
     Cancel: "M6 6l12 12M6 18L18 6",
     "Replace file": "M4 7h16M16 3l4 4-4 4M20 17H4M8 13l-4 4 4 4",
     "Review replacements": "M9 12l2 2 4-4M5 4h14v16H5Z",
-    "Keep originals": "M5 4h14v16H5ZM8 8h8M8 12h8",
+    "Keep originals": "M4 4h16v4H4ZM6 8v12h12V8M10 12h4",
+    "View replacement": "M5 4h14v16H5ZM8 8h8M8 12h8",
+    "View batch": "M8 5h12v15H8ZM4 16V2h12",
+    "Accept quality loss": "M12 3 2 21h20ZM12 9v5M12 17v1",
     "Pause batch": "M8 4v16M16 4v16",
     "Resume batch": "M7 4l13 8-13 8Z",
+    "Restore built-in profile": "M4 4v5h5M4 9a8 8 0 1 1 1 9",
+    "Delete custom profile":
+      "M3 6h18M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7",
     Folder: "M3 6h7l2 2h9v12H3Z",
   };
   if (!paths[label]) return null;
@@ -268,6 +274,7 @@ function option(select, value, text = value) {
   const o = node("option", text);
   o.value = value;
   select.append(o);
+  return o;
 }
 function selectTab(tab) {
   state.tab = tab;
@@ -277,7 +284,7 @@ function selectTab(tab) {
   document
     .querySelectorAll("[data-tab]")
     .forEach((n) =>
-      n.setAttribute("aria-selected", String(n.dataset.tab === tab)),
+      n.setAttribute("aria-current", n.dataset.tab === tab ? "page" : "false"),
     );
 
   if (typeof window !== "undefined") window.scrollTo({ top: 0 });
@@ -321,14 +328,17 @@ async function initialize() {
   $("logout").hidden = state.authMode !== "token";
   $("access-expired").hidden = true;
   $("service").replaceChildren();
-  info.roots.forEach((r) =>
-    option($("service"), `folder:${r}`, `Folder · ${r.split("/").pop() || r}`),
+  info.roots.forEach(
+    (r) =>
+      (option($("service"), `folder:${r}`, r.split("/").pop() || r).title = r),
   );
   info.services.forEach((s) =>
     option($("service"), s.name, s.kind === "movie" ? "Movies" : "TV"),
   );
   $("root").replaceChildren();
-  info.roots.forEach((r) => option($("root"), r));
+  info.roots.forEach((r) => {
+    option($("root"), r, r.split("/").pop() || r).title = r;
+  });
 
   document.querySelector('[data-tab="recipes"]').disabled =
     !info.tools.includes("recipe_list");
@@ -384,6 +394,7 @@ async function loadLibrary(more = false) {
       if (state.media) {
         const check = document.createElement("input");
         check.type = "checkbox";
+        check.dataset.selection = String(item.id);
         check.checked = state.selected.has(item.id);
         check.setAttribute(
           "aria-label",
@@ -393,7 +404,7 @@ async function loadLibrary(more = false) {
           check.checked
             ? state.selected.add(item.id)
             : state.selected.delete(item.id);
-          controls();
+          fileSelectionChanged();
         });
         const checkLabel = node("label", "", "media-check");
         checkLabel.append(check);
@@ -413,6 +424,7 @@ async function loadLibrary(more = false) {
         "",
         async () => {
           if (state.media) {
+            selectOneFile(item.id);
             $("path").value = item.path || "";
             state.file = item;
             state.fileService = $("service").value;
@@ -669,6 +681,7 @@ async function loadFolder(revision = ++state.libraryRevision, more = false) {
       if (!file.is_dir) {
         const check = document.createElement("input");
         check.type = "checkbox";
+        check.dataset.selection = file.path;
         check.checked = state.folderSelected.has(file.path);
         check.setAttribute(
           "aria-label",
@@ -678,7 +691,7 @@ async function loadFolder(revision = ++state.libraryRevision, more = false) {
           check.checked
             ? state.folderSelected.add(file.path)
             : state.folderSelected.delete(file.path);
-          controls();
+          fileSelectionChanged();
         });
         const checkLabel = node("label", "", "media-check");
         checkLabel.append(check);
@@ -695,6 +708,7 @@ async function loadFolder(revision = ++state.libraryRevision, more = false) {
             if (file.is_dir) {
               await navigateFolder(file.path);
             } else {
+              selectOneFile(file.path);
               $("path").value = file.path;
               state.file = file;
               state.fileMedia = null;
@@ -801,7 +815,7 @@ function setFileStep(step) {
       ).focus();
   }
 }
-function configureSelection() {
+function configureSelection(advance = true) {
   const folder = $("service").value.startsWith("folder:");
   const selected = folder
     ? [...(state.folderSelected || [])]
@@ -821,7 +835,59 @@ function configureSelection() {
     throw new Error("Choose a file first.");
   }
   controls();
-  setFileStep("configure");
+  if (advance) setFileStep("configure");
+}
+function selectOneFile(key) {
+  if ($("service").value.startsWith("folder:"))
+    state.folderSelected = new Set([key]);
+  else state.selected = new Set([key]);
+  $("library-items")
+    .querySelectorAll('input[type="checkbox"]')
+    .forEach((input) => {
+      input.checked = input.dataset.selection === String(key);
+    });
+}
+function fileSelectionChanged() {
+  const count = $("service").value.startsWith("folder:")
+    ? state.folderSelected?.size || 0
+    : state.selected.size;
+  const singleColumn =
+    typeof matchMedia === "function" &&
+    matchMedia("(max-width: 900px)").matches;
+  if (!count) {
+    $("scope").value = "file";
+    $("selected-only").checked = false;
+    clearFileSelection();
+  } else if (!singleColumn) configureSelection(false);
+  else controls();
+}
+function sourceSummary() {
+  if ($("scope").value !== "batch")
+    return $("path").value.split("/").pop() || "Choose a file.";
+  const folder = $("service").value.startsWith("folder:");
+  const count = folder ? state.folderSelected?.size || 0 : state.selected.size;
+  const title =
+    state.folder?.split("/").filter(Boolean).pop() ||
+    state.media?.title ||
+    "Choose a folder or series";
+  return $("selected-only").checked
+    ? `${count} selected ${count === 1 ? "file" : "files"} · ${title}`
+    : `Batch: ${title}`;
+}
+function finishSubmission(mode) {
+  if (mode === "encode") {
+    state.selected.clear();
+    state.folderSelected?.clear();
+    $("library-items")
+      .querySelectorAll('input[type="checkbox"]')
+      .forEach((input) => {
+        input.checked = false;
+      });
+    $("scope").value = "file";
+    $("selected-only").checked = false;
+    clearFileSelection();
+  }
+  setFileStep("browse");
 }
 $("configure-selection").addEventListener("click", () =>
   safe(configureSelection),
@@ -836,9 +902,7 @@ $("use-container").addEventListener("click", () => {
 
 function controls() {
   const batch = $("scope").value === "batch";
-  $("source-summary").textContent = batch
-    ? `Batch: ${state.folder?.split("/").filter(Boolean).pop() || state.media?.title || "Choose a folder or series"}`
-    : $("path").value.split("/").pop() || "Choose a file.";
+  $("source-summary").textContent = sourceSummary();
   $("batch-options").hidden = !batch;
   const folder = $("service").value.startsWith("folder:");
   const selectedCount = folder
@@ -877,7 +941,8 @@ function controls() {
   $("benchmark").hidden = batch;
   $("audio-note").hidden = $("audio").value !== "compact";
   const hasSource = batch
-    ? Boolean(folder ? state.folder : state.media)
+    ? Boolean(folder ? state.folder : state.media) &&
+      (!$("selected-only").checked || selectedCount > 0)
     : Boolean($("path").value.trim());
   $("enqueue").disabled =
     !state.info?.transcode_enabled ||
@@ -1096,6 +1161,7 @@ async function buildAndSubmitJob(mode = "encode") {
     }
     $("job-feedback").textContent = `Queued: ${r.id}`;
     state.jobsLoaded = 0;
+    finishSubmission(mode);
     selectTab("jobs");
     await loadJobs();
     notify(`Job queued: ${r.id}.`);
@@ -1559,6 +1625,24 @@ function queuePresentation(job) {
       ["running", "waiting_external"].includes(job.status),
   };
 }
+function compactQueueActions(actions) {
+  for (const b of actions.children) {
+    const icon = b.querySelector?.("svg");
+    if (!icon) continue;
+    const label = b.textContent.trim();
+    b.setAttribute("aria-label", label);
+    b.title ||= label;
+    b.replaceChildren(node("span", label, "sr-only"), icon);
+    b.className += " action-control";
+    if (
+      ["Replace file", "Review replacements", "Resume batch"].includes(label)
+    ) {
+      b.className += " primary";
+    } else if (label === "Retry") b.className += " recovery";
+    else if (["Cancel", "Pause batch"].includes(label))
+      b.className += " dismissive";
+  }
+}
 async function loadJobs(more = false) {
   if (
     $("workspace").hidden ||
@@ -1606,10 +1690,17 @@ async function loadJobs(more = false) {
       summary.title = presentation.summary;
       meta.append(heading, summary);
       const actions = jobControls(job);
-      if (job.parent_action_id)
-        actions.append(
-          button("View batch", () => openJob(job.parent_action_id), "quiet"),
+      if (job.parent_action_id) {
+        const parent = button(
+          "View batch",
+          () => openJob(job.parent_action_id),
+          "quiet",
         );
+        const icon = actionIcon("View batch");
+        if (icon) parent.append(icon);
+        actions.append(parent);
+      }
+      compactQueueActions(actions);
       row.append(meta);
       if (actions.children.length) {
         if (actions.children.length > 1)
@@ -1920,6 +2011,15 @@ async function readRecipe(name) {
     $("recipe-source").textContent =
       `${r.source === "managed" ? "Custom profile" : "Built-in profile"}${r.shadowed_profiles?.length ? " · Overrides built-in" : ""}`;
     $("delete-recipe").disabled = r.source !== "managed";
+    $("delete-recipe").hidden = r.source !== "managed";
+    $("recipe-history").disabled = false;
+    const resetLabel = r.shadowed_profiles?.length
+      ? "Restore built-in profile"
+      : "Delete custom profile";
+    $("delete-recipe").setAttribute("aria-label", resetLabel);
+    $("delete-recipe").title = resetLabel;
+    const resetIcon = actionIcon(resetLabel);
+    if (resetIcon) $("delete-recipe").replaceChildren(resetIcon);
     $("recipe-feedback").hidden = true;
     renderRecipeList();
   } catch (error) {
@@ -1940,6 +2040,9 @@ $("new-recipe").addEventListener("click", () =>
     setRecipeControls(profileFromControls());
     $("recipe-feedback").hidden = true;
     $("delete-recipe").disabled = true;
+    $("delete-recipe").hidden = true;
+    $("recipe-history").disabled = true;
+    renderRecipeList();
   }),
 );
 async function saveRecipe() {
@@ -1974,9 +2077,14 @@ $("recipe-form").addEventListener("submit", (e) => {
 $("delete-recipe").addEventListener("click", () =>
   safe(async () => {
     const r = state.recipe;
+    const restore = Boolean(r?.shadowed_profiles?.length);
     if (
       !r?.record ||
-      !confirm(`Reset profile ${r.name} to its built-in version?`)
+      !confirm(
+        restore
+          ? `Restore the built-in version of ${r.name}?`
+          : `Delete custom profile ${r.name}?`,
+      )
     )
       return;
     await tool("recipe_delete", {
@@ -1989,7 +2097,7 @@ $("delete-recipe").addEventListener("click", () =>
     state.recipes = [];
     await loadRecipes();
     if (state.recipes.length) await readRecipe(state.recipes[0]);
-    notify("Profile reset.");
+    notify(restore ? "Built-in profile restored." : "Custom profile deleted.");
   }),
 );
 $("recipe-history").addEventListener("click", () =>
@@ -2012,6 +2120,10 @@ $("recipe-history").addEventListener("click", () =>
   }),
 );
 function renderRecipeList() {
+  $("recipe-picker").replaceChildren();
+  option($("recipe-picker"), "", "Choose a profile");
+  state.recipes.forEach((name) => option($("recipe-picker"), name));
+  $("recipe-picker").value = state.recipe?.name || "";
   $("recipes-list").replaceChildren();
   const query = $("recipe-search").value.toLowerCase();
   for (const name of state.recipes.filter((n) =>
@@ -2022,6 +2134,10 @@ function renderRecipeList() {
     $("recipes-list").append(b);
   }
 }
+$("recipe-picker").addEventListener("change", () => {
+  const name = $("recipe-picker").value;
+  if (name) safe(() => readRecipe(name));
+});
 $("recipe-search").addEventListener("input", renderRecipeList);
 function setRecipeControls(profile) {
   // New profile creation also supersedes any in-flight profile request.
@@ -2469,6 +2585,9 @@ $("recipe-advanced").addEventListener("click", () =>
   $("recipe-settings").showModal(),
 );
 $("close-recipe-settings").addEventListener("click", () =>
+  $("recipe-settings").close(),
+);
+$("done-recipe-settings").addEventListener("click", () =>
   $("recipe-settings").close(),
 );
 async function loadBackups(more = false) {

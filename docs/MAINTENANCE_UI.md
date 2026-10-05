@@ -63,3 +63,5 @@ The [adversarial review](maintenance-ui/ADVERSARIAL_REVIEW.md) records the lates
 ## Design reference
 
 The compact English interface follows the [Navigatorr Stitch project](https://stitch.withgoogle.com/projects/6967843794345897924): paper/forest theme, outline icon tabs and actions, icon-only refresh, no marketing header or duplicate queue, and structured profile controls. Generated examples are design references; savings and job states always come from the real ledger. Installation instructions appear only on request in a dismissible mobile dialog. Desktop installation is offered only after the browser emits its native installation event.
+
+Queue and Profile actions use uniform icon controls with accessible names, differentiated primary/review/retry/cancel treatments, and shared desktop/touch dimensions. Mobile Profiles uses one native selector. Desktop checkboxes prepare the selected job immediately; successful encoding clears the submitted selection while retaining preferences.

@@ -10,7 +10,6 @@
   --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   --body: "Avenir Next", "Segoe UI", sans-serif;
   --control-size: 36px;
-  --dialog-control-size: 32px;
 }
 * {
   box-sizing: border-box;
@@ -75,6 +74,65 @@ button.primary {
   width: 18px;
   height: 18px;
 }
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.action-control {
+  position: relative;
+  isolation: isolate;
+  display: inline-grid;
+  place-items: center;
+  width: var(--control-size);
+  height: var(--control-size);
+  min-width: var(--control-size);
+  min-height: var(--control-size);
+  flex: 0 0 var(--control-size);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--forest);
+}
+.action-control::before {
+  position: absolute;
+  z-index: -1;
+  width: 32px;
+  height: 32px;
+  content: "";
+  border-radius: 7px;
+  background: #244d4009;
+}
+.action-control.primary {
+  background: transparent;
+  border: 0;
+  color: var(--surface);
+}
+.action-control.primary::before {
+  background: var(--forest);
+}
+.action-control svg {
+  width: 18px;
+  height: 18px;
+}
+.action-control.recovery {
+  color: var(--accent);
+}
+.action-control.recovery::before {
+  background: #fbf1ee;
+}
+.action-control.dismissive {
+  color: var(--muted);
+}
+.action-control.dismissive::before {
+  background: transparent;
+}
 input,
 select,
 textarea {
@@ -88,6 +146,10 @@ textarea {
   border-radius: 3px;
   background: #fff;
   color: var(--ink);
+}
+select {
+  padding-right: 26px;
+  text-overflow: ellipsis;
 }
 textarea {
   resize: vertical;
@@ -271,7 +333,7 @@ main {
   border-radius: 0;
   color: var(--muted);
 }
-.tabs button[aria-selected="true"] {
+.tabs button[aria-current="page"] {
   border-color: var(--accent);
   color: var(--ink);
 }
@@ -355,6 +417,17 @@ main {
 .mobile-selection-actions,
 .mobile-step-heading {
   display: none;
+}
+.selection-totals {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+#selection-count:empty {
+  display: none;
+}
+#batch-options .field-grid:has(> label[hidden]) {
+  grid-template-columns: minmax(0, 1fr);
 }
 .target-editor {
   padding-left: 18px;
@@ -535,7 +608,7 @@ main {
   background: transparent;
 }
 
-/* Queue: actions beside the job, actual worker progress across the row. */
+/* Queue: compact action rail beside desktop rows, below mobile summaries. */
 .queue-toolbar {
   display: flex;
   align-items: center;
@@ -593,8 +666,18 @@ main {
 .job-row > .job-actions {
   grid-column: 2;
   grid-row: 1;
-  align-self: start;
-  max-width: 370px;
+  align-self: center;
+  justify-content: flex-end;
+  max-width: none;
+  gap: 4px;
+}
+.job-row .job-actions .action-control {
+  display: inline-grid;
+  padding: 0;
+}
+.job-row .job-actions .action-control svg {
+  width: 18px;
+  height: 18px;
 }
 .job-row > .worker-progress {
   grid-column: 1 / -1;
@@ -722,6 +805,20 @@ main {
   min-width: 0;
   padding-right: 16px;
   border-right: 1px solid var(--line);
+}
+.mobile-recipe-picker {
+  display: none;
+}
+.profile-action-bar {
+  justify-content: flex-end;
+  gap: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
+#delete-recipe {
+  order: -1;
+  margin-right: auto;
+  color: var(--accent);
 }
 #recipe-form {
   min-width: 0;
@@ -874,7 +971,7 @@ dialog .submit-actions {
 }
 dialog .submit-actions button {
   width: auto;
-  min-height: var(--dialog-control-size);
+  min-height: var(--control-size);
   padding: 4px 8px;
   font-size: 12px;
 }
@@ -925,10 +1022,7 @@ pre {
     align-items: center;
     gap: 6px;
     margin-top: 8px;
-  }
-  .mobile-selection-actions > .metadata {
-    flex: 1;
-    text-align: right;
+    justify-content: space-between;
   }
   .mobile-step-heading {
     justify-content: space-between;
@@ -1002,7 +1096,7 @@ pre {
     border: 0;
     font-size: 10px;
   }
-  .tabs button[aria-selected="true"] {
+  .tabs button[aria-current="page"] {
     color: var(--forest);
     background: #244d4008;
     border-radius: 6px;
@@ -1029,18 +1123,22 @@ pre {
     margin-bottom: 4px;
   }
   .queue-filters select {
-    width: 148px;
+    width: 176px;
+    max-width: 100%;
   }
   #jobs-updated {
     margin: 2px 0;
     font-size: 10px;
   }
   .job-row {
+    grid-template-columns: minmax(0, 1fr);
     gap: 2px 6px;
     padding: 7px 0;
   }
-  .job-row > .job-actions:not(.multiple-actions) {
-    max-width: 105px;
+  .job-row > .job-actions {
+    grid-column: 1;
+    grid-row: auto;
+    align-self: start;
   }
   .job-row > .multiple-actions {
     grid-column: 1 / -1;
@@ -1081,6 +1179,14 @@ pre {
     padding: 0;
     border: 0;
   }
+  .recipe-sidebar #recipe-search,
+  .recipe-sidebar #recipes-list {
+    display: none;
+  }
+  .mobile-recipe-picker {
+    display: block;
+    margin: 0 0 8px;
+  }
   #recipe-search {
     margin: 0;
   }
@@ -1114,12 +1220,20 @@ pre {
     bottom: calc(70px + env(safe-area-inset-bottom));
   }
 }
+@media (max-width: 360px) {
+  #job-form > label:not(.check),
+  #custom-fields > label:not(.check),
+  .profile-controls > label:not(.check) {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+    padding: 4px 0;
+  }
+}
 
 /* Use one dimension token for every touch target, including landscape phones. */
 @media (pointer: coarse), (max-width: 900px) {
   :root {
     --control-size: 44px;
-    --dialog-control-size: 44px;
   }
 }
 @media (hover: hover) {
@@ -1127,8 +1241,23 @@ pre {
     background: #e9e9df;
     border-color: var(--muted);
   }
-  button.primary:hover {
+  .action-control:hover {
+    background: transparent;
+  }
+  .action-control:not(.primary):hover::before {
+    background: #244d4020;
+  }
+  button.primary:not(.action-control):hover {
     background: #19372e;
+  }
+  .action-control.primary:hover::before {
+    background: #19372e;
+  }
+  .action-control.recovery:hover::before {
+    background: #e8c5be;
+  }
+  .action-control.dismissive:hover::before {
+    background: #244d4009;
   }
   .icon-button:hover,
   .quiet:hover {

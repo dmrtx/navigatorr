@@ -47,7 +47,7 @@
       </section>
       <div id="workspace" hidden>
         <nav class="tabs" aria-label="Main navigation">
-          <button data-tab="library" aria-label="Files" aria-selected="true">
+          <button data-tab="library" aria-label="Files" aria-current="page">
             <svg
               class="nav-icon"
               viewBox="0 0 24 24"
@@ -62,7 +62,7 @@
             ><span class="tab-text"
               ><span class="tab-label">Files</span></span
             ></button
-          ><button data-tab="jobs" aria-label="Queue" aria-selected="false">
+          ><button data-tab="jobs" aria-label="Queue" aria-current="false">
             <svg
               class="nav-icon"
               viewBox="0 0 24 24"
@@ -82,7 +82,7 @@
           ><button
             data-tab="recipes"
             aria-label="Profiles"
-            aria-selected="false"
+            aria-current="false"
           >
             <svg
               class="nav-icon"
@@ -100,7 +100,7 @@
             ><span class="tab-text"
               ><span class="tab-label">Profiles</span></span
             ></button
-          ><button data-tab="stats" aria-label="Stats" aria-selected="false">
+          ><button data-tab="stats" aria-label="Stats" aria-current="false">
             <svg
               class="nav-icon"
               viewBox="0 0 24 24"
@@ -115,7 +115,7 @@
             ><span class="tab-text"
               ><span class="tab-label">Stats</span></span
             ></button
-          ><button data-tab="advanced" aria-label="More" aria-selected="false">
+          ><button data-tab="advanced" aria-label="More" aria-current="false">
             <svg
               class="nav-icon"
               viewBox="0 0 24 24"
@@ -136,7 +136,11 @@
           <div class="library-layout">
             <div class="library-browser">
               <div class="section-label">
-                <span>Files</span><span id="library-total"></span>
+                <span>Files</span
+                ><span class="selection-totals"
+                  ><span id="selection-count" class="metadata"></span
+                  ><span id="library-total"></span
+                ></span>
               </div>
               <div class="toolbar">
                 <label>Source<select id="service"></select></label
@@ -242,7 +246,6 @@
               </div>
               <div class="mobile-selection-actions">
                 <button id="use-container" class="quiet">Use folder</button>
-                <span id="selection-count" class="metadata"></span>
                 <button id="configure-selection" class="primary" hidden>
                   Continue
                 </button>
@@ -583,10 +586,35 @@
         <section id="recipes" class="panel tab-content" hidden>
           <div class="queue-toolbar">
             <h2>Profiles</h2>
-            <button id="new-recipe">New profile</button>
+            <button
+              id="new-recipe"
+              type="button"
+              class="action-control"
+              aria-label="New profile"
+              title="New profile"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.7"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+            </button>
           </div>
           <div class="recipe-layout">
             <div class="recipe-sidebar">
+              <select
+                id="recipe-picker"
+                class="mobile-recipe-picker"
+                aria-label="Profile"
+              >
+                <option value="">Choose a profile</option>
+              </select>
               <input
                 id="recipe-search"
                 type="search"
@@ -662,29 +690,82 @@
               <p class="preservation-note muted">
                 Metadata, chapters and attachments are preserved.
               </p>
-              <button id="recipe-advanced" type="button" class="quiet">
-                More settings
-              </button>
-              <div class="submit-actions">
-                <button class="primary">Save profile</button
-                ><button id="delete-recipe" type="button">
-                  Reset to built-in</button
-                ><button
-                  id="recipe-history"
-                  class="icon-button"
+              <div class="submit-actions profile-action-bar">
+                <button
+                  id="recipe-advanced"
                   type="button"
-                  aria-label="Profile history"
-                  title="Profile history"
+                  class="action-control"
+                  aria-label="Profile settings"
+                  title="Profile settings"
                 >
                   <svg
                     viewBox="0 0 24 24"
                     fill="none"
                     stroke="currentColor"
                     stroke-width="1.7"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
                     aria-hidden="true"
                   >
-                    <circle cx="12" cy="12" r="9" />
-                    <path d="M12 7v5l3 2" />
+                    <path d="M4 7h16M4 17h16M9 4v6M15 14v6" />
+                  </svg>
+                </button>
+                <button
+                  id="recipe-history"
+                  type="button"
+                  class="action-control"
+                  aria-label="Profile history"
+                  title="Profile history"
+                  disabled
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.7"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18M12 7v5l3 2" />
+                  </svg>
+                </button>
+                <button
+                  id="delete-recipe"
+                  type="button"
+                  class="action-control"
+                  aria-label="Restore built-in profile"
+                  title="Restore built-in profile"
+                  hidden
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.7"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M4 4v5h5M4 9a8 8 0 1 1 1 9" />
+                  </svg>
+                </button>
+                <button
+                  id="save-recipe"
+                  class="primary action-control"
+                  aria-label="Save profile"
+                  title="Save profile"
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.7"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M4 3h13l3 3v15H4ZM8 3v6h8V3M8 21v-7h8v7" />
                   </svg>
                 </button>
               </div>
@@ -717,9 +798,9 @@
       </div>
       <div id="notice" role="alert" hidden></div>
     </main>
-    <dialog id="install-help">
+    <dialog id="install-help" aria-labelledby="install-title">
       <div class="dialog-heading">
-        <h2>Add Navigatorr</h2>
+        <h2 id="install-title">Add Navigatorr</h2>
         <button
           id="close-install"
           class="icon-button"
@@ -734,10 +815,17 @@
       </p>
       <p id="install-status">Use HTTPS to install the app.</p>
     </dialog>
-    <dialog id="path-dialog">
+    <dialog id="path-dialog" aria-labelledby="path-title">
       <div class="dialog-heading">
-        <h2>Open a path</h2>
-        <button id="close-path" type="button" aria-label="Close path">×</button>
+        <h2 id="path-title">Open a path</h2>
+        <button
+          id="close-path"
+          class="icon-button"
+          type="button"
+          aria-label="Close path"
+        >
+          ×
+        </button>
       </div>
 
       <div class="toolbar">
@@ -748,14 +836,15 @@
         >Selected file<input
           id="path"
           placeholder="Path inside an allowed folder" /></label
-      ><button id="inspect" type="button">Inspect file</button>
+      ><button id="inspect" type="button" class="primary">Use file</button>
       <pre id="inspection" hidden></pre>
     </dialog>
-    <dialog id="recipe-settings">
+    <dialog id="recipe-settings" aria-labelledby="recipe-settings-title">
       <div class="dialog-heading">
-        <h2>Profile settings</h2>
+        <h2 id="recipe-settings-title">Profile settings</h2>
         <button
           id="close-recipe-settings"
+          class="icon-button"
           type="button"
           aria-label="Close profile settings"
         >
@@ -763,12 +852,18 @@
         </button>
       </div>
       <div id="recipe-extra-fields"></div>
+      <div class="submit-actions">
+        <button id="done-recipe-settings" type="button" class="primary">
+          Done
+        </button>
+      </div>
     </dialog>
-    <dialog id="replacement-choice">
+    <dialog id="replacement-choice" aria-labelledby="replacement-choice-title">
       <div class="dialog-heading">
-        <h2>Replacement method</h2>
+        <h2 id="replacement-choice-title">Replacement method</h2>
         <button
           id="dismiss-replacement-choice"
+          class="icon-button"
           type="button"
           aria-label="Close replacement method"
         >
@@ -793,10 +888,12 @@
         </button>
       </div>
     </dialog>
-    <dialog id="job-detail">
+    <dialog id="job-detail" aria-labelledby="job-detail-title">
       <div class="dialog-heading">
-        <h2>Job details</h2>
-        <button id="close-detail" aria-label="Close">×</button>
+        <h2 id="job-detail-title">Job details</h2>
+        <button id="close-detail" class="icon-button" aria-label="Close">
+          ×
+        </button>
       </div>
       <p class="dialog-connection muted" role="status" hidden>
         Server unavailable. Retrying automatically.
@@ -817,8 +914,8 @@
       </div>
       <pre id="detail-content" hidden></pre>
     </dialog>
-    <dialog id="batch-review">
-      <h2>Review replacements</h2>
+    <dialog id="batch-review" aria-labelledby="batch-review-title">
+      <h2 id="batch-review-title">Review replacements</h2>
       <p class="dialog-connection muted" role="status" hidden>
         Server unavailable. Approval is paused until it responds.
       </p>
