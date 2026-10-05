@@ -423,6 +423,17 @@ main {
   justify-content: flex-end;
   gap: 10px;
 }
+.file-selection-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--line);
+}
+.file-selection-actions button {
+  font-size: 11px;
+}
 #selection-count:empty {
   display: none;
 }
