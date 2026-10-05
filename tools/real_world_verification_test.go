@@ -580,6 +580,7 @@ func TestRealWorld_MCPSchemaFootprint(t *testing.T) {
 		"action_list":       true,
 		"action_catalog":    true,
 		"action_retry":      true,
+		"action_cancel":     true,
 		"diagnostics":       true,
 		"action_history":    true,
 		"transcode_backups": true,
@@ -610,14 +611,14 @@ func TestRealWorld_MCPSchemaFootprint(t *testing.T) {
 		}
 	}
 
-	if toolsTotal != 64 {
-		t.Errorf("expected exactly 64 tools total, got %d", toolsTotal)
+	if toolsTotal != 65 {
+		t.Errorf("expected exactly 65 tools total, got %d", toolsTotal)
 	}
 	if len(baseToolsList) != 54 {
 		t.Errorf("expected exactly 54 base tools, got %d", len(baseToolsList))
 	}
-	if len(newToolsList) != 10 {
-		t.Errorf("expected exactly 10 new tools, got %d", len(newToolsList))
+	if len(newToolsList) != 11 {
+		t.Errorf("expected exactly 11 new tools, got %d", len(newToolsList))
 	}
 }
 

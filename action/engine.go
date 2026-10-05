@@ -526,6 +526,11 @@ func (e *Engine) Cancel(ctx context.Context, instanceID, reason string) (*Action
 	if inst == nil {
 		return nil, fmt.Errorf("action instance not found: %s", instanceID)
 	}
+	// A browser cancellation can arrive after the last poll showed running.
+	// Recheck under the execution lease so it cannot overwrite a completed job.
+	if inst.Status == StatusCompleted {
+		return nil, fmt.Errorf("action already completed; cancellation was not applied")
+	}
 
 	inst.Status = StatusCancelled
 	inst.WaitingReason = reason

@@ -72,7 +72,9 @@ func (s *Store) CreateActionInstance(inst ActionInstance) error {
 	if inst.WaitingOptionsJSON == "" {
 		inst.WaitingOptionsJSON = "[]"
 	}
-	now := nowStr()
+	// Sub-second creation times keep queue identity stable when several jobs
+	// are submitted during the same second, regardless of their random IDs.
+	now := time.Now().UTC().Format(time.RFC3339Nano)
 	inst.CreatedAt = now
 	inst.UpdatedAt = now
 

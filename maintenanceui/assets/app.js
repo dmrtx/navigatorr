@@ -63,6 +63,8 @@ function actionIcon(label) {
     "Replace file": "M4 7h16M16 3l4 4-4 4M20 17H4M8 13l-4 4 4 4",
     "Review replacements": "M9 12l2 2 4-4M5 4h14v16H5Z",
     "Review replacement": "M9 12l2 2 4-4M5 4h14v16H5Z",
+    "Review candidate": "M5 4h14v16H5ZM8 8h8M8 12h8",
+    "Set up benchmark": "M8 5h12v15H8ZM4 16V2h12",
     "Keep originals": "M4 4h16v4H4ZM6 8v12h12V8M10 12h4",
     "View replacement": "M5 4h14v16H5ZM8 8h8M8 12h8",
     "View batch": "M8 5h12v15H8ZM4 16V2h12",
@@ -143,6 +145,9 @@ function setConnection(online) {
   });
   $("approve-batch-review").disabled = !online || state.approvingBatch;
   $("approve-file-review").disabled = !online || state.approvingFile;
+  $("confirm-action-review").disabled = !online;
+  if (!online) state.workerInfo = null;
+  renderWorkers();
   controls();
 }
 async function reconnect() {
@@ -162,7 +167,13 @@ if (typeof window !== "undefined") {
   });
 }
 function invalidateAuthentication() {
+  finishActionReview(false);
   state.authRevision++;
+  state.workerInfo = null;
+  state.workerCheckedAt = 0;
+  $("worker-status").hidden = true;
+  $("workers-dialog").close();
+  clearTimeout(state.folderSizesTimer);
   state.libraryRevision++;
   state.jobsRevision++;
   state.detailRevision++;
@@ -293,6 +304,10 @@ function selectTab(tab) {
 
   if (typeof window !== "undefined") window.scrollTo({ top: 0 });
   if (["jobs", "stats"].includes(tab)) safe(loadJobs);
+  if (tab === "library" && $("service").value.startsWith("folder:") && state.folderSizeTargets?.size) {
+    clearTimeout(state.folderSizesTimer);
+    void updateFolderSizes(state.libraryRevision, state.folder, $("search").value, state.libraryLoaded);
+  }
   if (tab === "recipes")
     safe(async () => {
       await loadRecipes();
@@ -320,6 +335,50 @@ $("logout").addEventListener("click", () =>
   }),
 );
 
+function renderWorkers() {
+  const info = state.workerInfo;
+  $("worker-status").hidden = !state.info || $("workspace").hidden;
+  $("worker-status").textContent = !serverReachable ? "Worker · Unknown"
+    : !info ? "Worker · Checking…" : info.ready ? "Worker · Connected" : info.nodes?.some(node=>node.connected) ? "Worker · Blocked" : "Worker · Unavailable";
+  $("worker-status").dataset.ready = String(Boolean(info?.ready && serverReachable));
+  $("worker-submit-status").textContent = !serverReachable ? "Server disconnected. New jobs are blocked."
+    : !info ? "Checking video worker before submitting…"
+    : info.ready ? "Video worker connected. Connection is checked again before submitting."
+    : info.nodes?.[0]?.message || "Video worker offline or not ready. New jobs are blocked.";
+  $("worker-nodes").replaceChildren();
+  for (const worker of info?.nodes || []) {
+    const row = node("div", "", "worker-node");
+    row.append(node("strong", worker.name), node("span", worker.ready ? "Connected · Ready" : worker.connected ? "Connected · Blocked" : "Unavailable", "badge"), node("p", `${worker.address || "No address configured"}${worker.transport ? ` · ${worker.transport.toUpperCase()}` : ""}`, "metadata"), node("p", worker.message, "muted"));
+    $("worker-nodes").append(row);
+  }
+  if (!info) $("worker-nodes").append(node("p", serverReachable ? "Checking connection…" : "Server disconnected; node status is unknown.", "muted"));
+  $("workers-checked").textContent = info?.checked_at ? `Checked ${new Date(info.checked_at).toLocaleTimeString()}` : "";
+}
+async function refreshWorkers() {
+  if (state.workerRequest) return state.workerRequest;
+  const auth = state.authRevision;
+  state.workerRequest = (async () => {
+    try {
+      const info = await api("workers");
+      if (auth !== state.authRevision || $("workspace").hidden) return;
+      state.workerInfo = info;
+      state.workerCheckedAt = Date.now();
+    } catch {
+      if (auth === state.authRevision) state.workerInfo = null;
+    } finally {
+      state.workerRequest = null;
+      renderWorkers();
+      controls();
+    }
+  })();
+  return state.workerRequest;
+}
+$("worker-status").addEventListener("click", () => {
+  $("workers-dialog").showModal();
+  void refreshWorkers();
+});
+$("close-workers").addEventListener("click", () => $("workers-dialog").close());
+$("refresh-workers").addEventListener("click", () => void refreshWorkers());
 async function initialize() {
   const auth = await api("auth-info");
   state.authMode = auth.auth_mode;
@@ -329,6 +388,8 @@ async function initialize() {
   state.info = info;
   $("login").hidden = true;
   $("workspace").hidden = false;
+  $("worker-status").hidden = false;
+  void refreshWorkers();
   $("logout").hidden = state.authMode !== "token";
   $("access-expired").hidden = true;
   $("service").replaceChildren();
@@ -649,6 +710,7 @@ function folderBreadcrumbs(root, path) {
   });
 }
 async function loadFolder(revision = ++state.libraryRevision, more = false) {
+  clearTimeout(state.folderSizesTimer);
   state.libraryLoading = true;
   if (!more) {
     state.libraryHasMore = false;
@@ -679,7 +741,11 @@ async function loadFolder(revision = ++state.libraryRevision, more = false) {
     $("back").hidden = state.folder === root;
     $("library-total").textContent =
       `${page.total} item${page.total === 1 ? "" : "s"}`;
-    if (!more) $("library-items").replaceChildren();
+    if (!more) {
+      $("library-items").replaceChildren();
+      state.folderSizeTargets = new Map();
+    }
+    state.folderSizeTargets ||= new Map();
     for (const file of page.items) {
       const row = node("div", "", "media-row");
       if (!file.is_dir) {
@@ -705,6 +771,12 @@ async function loadFolder(revision = ++state.libraryRevision, more = false) {
         icon.append(actionIcon("Folder") || node("span", "↳"));
         row.append(icon);
       }
+      const sizeLabel = node("span", file.is_dir ? "Calculating…" : bytes(file.size), "media-size");
+      if (file.is_dir) {
+        const targets = state.folderSizeTargets.get(file.path) || [];
+        targets.push(sizeLabel);
+        state.folderSizeTargets.set(file.path, targets);
+      }
       row.append(
         button(
           file.path.split("/").pop(),
@@ -724,7 +796,7 @@ async function loadFolder(revision = ++state.libraryRevision, more = false) {
           },
           "media-title",
         ),
-        node("span", file.is_dir ? "Folder" : bytes(file.size), "media-size"),
+        sizeLabel,
       );
       $("library-items").append(row);
     }
@@ -737,6 +809,7 @@ async function loadFolder(revision = ++state.libraryRevision, more = false) {
     state.libraryError = false;
     $("library-more").hidden = !page.has_more;
     controls();
+    void updateFolderSizes(revision, page.path, $("search").value, state.libraryLoaded);
   } catch (error) {
     if (revision === state.libraryRevision) libraryFailure(error, more);
     throw error;
@@ -744,6 +817,42 @@ async function loadFolder(revision = ++state.libraryRevision, more = false) {
     if (revision === state.libraryRevision) {
       state.libraryLoading = false;
       controls();
+    }
+  }
+}
+function showFolderSize(target, size) {
+  target.textContent = size?.status === "calculating" ? "Calculating…"
+    : size?.bytes != null ? `${size.status === "partial" ? "≥ " : ""}${bytes(size.bytes)}`
+    : "Unavailable";
+  target.title = size?.note || (size?.status !== "calculating" && size?.measured_at
+    ? `Total file bytes, excluding symbolic links. Measured ${new Date(size.measured_at).toLocaleString()}; cached for up to 5 minutes.`
+    : "Measuring total file bytes in this folder.");
+}
+async function updateFolderSizes(revision, path, query, loaded) {
+  const auth = state.authRevision;
+  const current = () => revision === state.libraryRevision && auth === state.authRevision &&
+    state.folder === path && state.tab === "library" && !$("workspace").hidden;
+  if (!current() || !state.folderSizeTargets?.size) return;
+  let pending = false;
+  try {
+    for (let offset = 0; offset < loaded; offset += 100) {
+      const page = await api(`folder?${new URLSearchParams({path, q:query, offset, sizes:"1"})}`);
+      if (!current()) return;
+      for (const item of page.items || []) {
+        const target = state.folderSizeTargets.get(item.path);
+        if (!target) continue;
+        for (const label of Array.isArray(target) ? target : [target]) showFolderSize(label, item.folder_size);
+        pending ||= item.folder_size?.status === "calculating";
+      }
+    }
+    if (pending && current()) state.folderSizesTimer = setTimeout(() => {
+      void updateFolderSizes(revision, path, query, loaded);
+    }, 3000);
+  } catch {
+    if (current()) for (const targets of state.folderSizeTargets.values()) {
+      for (const target of Array.isArray(targets) ? targets : [targets]) {
+        if (target.textContent === "Calculating…") showFolderSize(target, {note:"Could not retrieve folder size. Refresh to try again."});
+      }
     }
   }
 }
@@ -950,18 +1059,21 @@ function controls() {
     : Boolean($("path").value.trim());
   $("enqueue").disabled =
     !state.info?.transcode_enabled ||
+    !state.workerInfo?.ready ||
     state.submitting ||
     state.libraryLoading ||
     !serverReachable ||
     !hasSource;
   $("benchmark").disabled =
     !state.info?.transcode_enabled ||
+    !state.workerInfo?.ready ||
     state.submitting ||
     state.libraryLoading ||
     !serverReachable ||
     !hasSource;
   $("preview").disabled =
     !state.info?.transcode_enabled ||
+    !state.workerInfo?.ready ||
     state.submitting ||
     state.libraryLoading ||
     !serverReachable ||
@@ -1059,6 +1171,8 @@ async function submitJob(mode = "encode") {
   state.submitting = true;
   controls();
   try {
+    await refreshWorkers();
+    if (!state.workerInfo?.ready) throw new Error("Video worker offline or not ready. No job was submitted.");
     return await buildAndSubmitJob(mode);
   } finally {
     state.submitting = false;
@@ -1101,8 +1215,8 @@ async function buildAndSubmitJob(mode = "encode") {
     if (!$("path").value.trim())
       throw new Error("Choose a file or enter its path.");
     inputs.path = $("path").value.trim();
-    inputs.media_type = $("media-kind").value;
-    if (state.fileMedia) {
+    if (mode !== "benchmark") inputs.media_type = $("media-kind").value;
+    if (state.fileMedia && mode !== "benchmark") {
       inputs.media_type = state.fileService === "radarr" ? "movie" : "tv";
       inputs.is_anime =
         state.fileMedia.seriesType === "anime" ||
@@ -1232,6 +1346,16 @@ function telemetry(job) {
     "",
     `job-progress ${w ? "worker-progress" : "workflow-progress"}`,
   );
+  if (workerUnavailable(job) || w?.progress_is_stale) {
+    result.className = "job-progress stalled-progress";
+    const measured = w?.progress ?? w?.last_known_progress?.progress;
+    const last = measured != null && Number.isFinite(Number(measured))
+      ? ` Last reported: ${Number(measured).toFixed(1)}%.` : "";
+    result.append(node("span", (workerUnavailable(job)
+      ? "Worker unreachable. Retrying connection automatically."
+      : "No recent progress from the worker.") + last, "metadata"));
+    return result;
+  }
   if (!w) {
     const stages = job.stages || [];
     const current = stages[job.current_step];
@@ -1257,7 +1381,6 @@ function telemetry(job) {
     w.queue_position > 0 ? `Queue #${w.queue_position}` : null,
     w.speed > 0 ? `${Number(w.speed).toFixed(2)}×` : null,
     w.fps > 0 ? `${Number(w.fps).toFixed(1)} fps` : null,
-    w.progress_is_stale ? "Last measurement; stale" : null,
   ];
   const eta = job.savings?.eta_seconds;
   if (Number.isFinite(eta) && eta > 0 && !w.progress_is_stale)
@@ -1363,6 +1486,77 @@ async function jobControl(id, name, args = {}) {
     document.querySelectorAll("[data-job-control]").forEach((b) => {
       if (b.dataset.jobControl === id) b.disabled = !serverReachable;
     });
+  }
+}
+function finishActionReview(accepted) {
+  const review = state.actionReview;
+  state.actionReview = null;
+  $("action-review").close();
+  review?.resolve(Boolean(accepted));
+}
+function reviewAction({title, message, content, confirmLabel, cancelLabel = "Back"}) {
+  finishActionReview(false);
+  if (!serverReachable || $("workspace").hidden) return Promise.resolve(false);
+  $("action-review-title").textContent = title;
+  $("action-review-content").replaceChildren(...(content || [node("p", message)]));
+  $("confirm-action-review").textContent = confirmLabel;
+  $("confirm-action-review").disabled = !serverReachable;
+  $("dismiss-action-review").textContent = cancelLabel;
+  return new Promise(resolve => {
+    state.actionReview = {resolve};
+    $("action-review").showModal();
+  });
+}
+$("close-action-review").addEventListener("click", () => finishActionReview(false));
+$("dismiss-action-review").addEventListener("click", () => finishActionReview(false));
+$("action-review").addEventListener("cancel", (event) => {
+  event.preventDefault();
+  finishActionReview(false);
+});
+$("confirm-action-review").addEventListener("click", () => {
+  if (serverReachable) finishActionReview(true);
+});
+function candidateReview(job) {
+  const match = String(job.waiting_reason || "").match(/Candidate file size \((\d+) bytes\) exceeds original \((\d+) bytes\) by ([\d.]+)%, which is greater than max_size_increase_percent \(([\d.]+)%\)/);
+  return {
+    source: job.savings?.source_bytes ?? (match ? Number(match[2]) : null),
+    candidate: job.savings?.candidate_bytes ?? (match ? Number(match[1]) : null),
+    reason: match ? `The candidate is ${match[3]}% larger. This job allows up to ${match[4]}% growth.` : shortJobReason(job.waiting_reason) || "The candidate did not meet this job's validation limits.",
+  };
+}
+function decisionStamp(job, decision) {
+  return JSON.stringify([job.id, job.status, job.current_step, job.waiting_reason, job.waiting_options?.find(option => option.decision === decision), job.savings, job.promotion]);
+}
+async function reviewJobDecision(id, decision) {
+  if (state.reviewingDecision) return;
+  state.reviewingDecision = id;
+  const auth = state.authRevision;
+  try {
+    const read = async () => (await api(`operations?id=${encodeURIComponent(id)}`)).jobs?.[0];
+    const job = await read();
+    if (auth !== state.authRevision || $("workspace").hidden) return;
+    if (job?.status !== "waiting_decision" || !job.waiting_options?.some(option => option.decision === decision))
+      throw new Error("This job is no longer waiting for that decision. Refresh the queue.");
+    const stamp = decisionStamp(job, decision);
+    const info = candidateReview(job);
+    const content = [node("p", queuePresentation(job).title, "review-filename")];
+    if (decision === "accept_loss") {
+      for (const [label, size] of [["Original", info.source], ["Candidate", info.candidate]]) {
+        const row = node("div", "", "review-file");
+        row.append(node("span", label, "muted"), node("strong", bytes(size)));
+        content.push(row);
+      }
+      content.push(node("p", info.reason));
+      content.push(node("p", "Accept this candidate despite the validation result. Replacing the library file requires a separate review.", "muted"));
+    } else content.push(node("p", shortJobReason(job.waiting_reason) || "Review this job before continuing."));
+    if (!await reviewAction({title:decision === "accept_loss" ? "Review candidate" : "Review decision", content, confirmLabel:decision === "accept_loss" ? "Accept candidate" : "Approve"})) return;
+    const latest = await read();
+    if (auth !== state.authRevision || $("workspace").hidden) return;
+    if (decisionStamp(latest || {}, decision) !== stamp)
+      throw new Error("The candidate or decision changed. Review the job again.");
+    await jobControl(id, "action_resume", {decision});
+  } finally {
+    state.reviewingDecision = null;
   }
 }
 async function prepareReplacement(job) {
@@ -1513,14 +1707,14 @@ function batchCounts(batch, compact = false) {
   return `${batch.dry_run ? "Preview · " : ""}${batch.total ?? 0} files · ${batch.queued ?? 0} queued · ${batch.running ?? 0} active · ${batch.waiting_for_slot ?? 0} waiting for slot · ${batch.completed ?? 0} completed · ${batch.failed ?? 0} failed · ${batch.waiting_decision ?? batch.review ?? 0} need a decision · ${batch.skip ?? 0} skipped`;
 }
 function jobControls(job) {
-  const controls = node("div", "", "job-actions");
+  const actionRail = node("div", "", "job-actions");
   const add = (label, fn) => {
     const b = button(label, fn);
     const icon = actionIcon(label);
     if (icon) b.append(icon);
     b.dataset.jobControl = job.id;
     b.disabled = !serverReachable || state.busyJobs.has(job.id);
-    controls.append(b);
+    actionRail.append(b);
   };
   const decisionLabels = {
     approve: job.promotion ? "Review replacement" : "Review replacements",
@@ -1528,7 +1722,7 @@ function jobControls(job) {
     resume: "Resume batch",
     retry: "Retry",
     pause: "Pause batch",
-    accept_loss: "Accept quality loss",
+    accept_loss: "Review candidate",
     abort: "Cancel",
   };
   for (const choice of job.waiting_options || []) {
@@ -1543,25 +1737,33 @@ function jobControls(job) {
           await reviewFilePromotion(job.id);
           return;
         }
-        if (
-          ["approve", "accept_loss"].includes(choice.decision) &&
-          !confirm(
-            `${choice.description}\n\n${job.promotion ? `${job.promotion.original_path}\n→ ${job.promotion.candidate_path}` : job.waiting_reason}`,
-          )
-        )
+        if (["approve", "accept_loss"].includes(choice.decision)) {
+          await reviewJobDecision(job.id, choice.decision);
           return;
+        }
         await jobControl(job.id, "action_resume", {
           decision: choice.decision,
         });
       },
     );
-    controls.children[controls.children.length - 1].title =
-      choice.description || choice.decision;
+    actionRail.children[actionRail.children.length - 1].title =
+      decisionLabels[choice.decision] || choice.description || choice.decision;
   }
   if (job.status === "waiting_decision" && !job.waiting_options?.length)
     add("Review", () => openJob(job.id));
-  if (job.status === "failed")
-    add("Retry", () => jobControl(job.id, "action_retry"));
+  if (job.status === "failed") {
+    if (job.action_name === "benchmark_transcode" && /unsupported input/.test(job.error || ""))
+      add("Set up benchmark", () => {
+        $("path").value = job.source_path || "";
+        $("scope").value = "file";
+        state.fileMedia = null;
+        state.fileService = null;
+        selectTab("library");
+        setFileStep("configure");
+        controls();
+      });
+    else add("Retry", () => jobControl(job.id, "action_retry"));
+  }
   if (
     job.action_name === "transcode_batch" &&
     ["running", "waiting_external"].includes(job.status)
@@ -1575,7 +1777,7 @@ function jobControls(job) {
     )
   )
     add("Cancel", async () => {
-      if (confirm("Cancel this job and stop its remote work?"))
+      if (await reviewAction({title:"Cancel job?", message:`Stop ${queuePresentation(job).title} and its active work.`, confirmLabel:"Cancel job", cancelLabel:"Keep job"}))
         await jobControl(job.id, "action_cancel", {
           reason: "Cancelled from maintenance UI",
         });
@@ -1590,7 +1792,7 @@ function jobControls(job) {
     add("Replace file", () => prepareReplacement(job));
   if (job.replacement_action_id)
     add("View replacement", () => openJob(job.replacement_action_id));
-  return controls;
+  return actionRail;
 }
 function shortJobReason(reason) {
   const text = String(reason || "")
@@ -1604,11 +1806,18 @@ function shortJobReason(reason) {
     "10bit": "10-bit source requires review",
   };
   if (reasons[text]) return reasons[text];
+  const growth = text.match(/Candidate file size \(\d+ bytes\) exceeds original \(\d+ bytes\) by ([\d.]+)%, which is greater than max_size_increase_percent \(([\d.]+)%\)/);
+  if (growth) return `Candidate is ${growth[1]}% larger; allowed growth is ${growth[2]}%`;
   if (/no such file or directory/i.test(text)) return "File not found";
   if (/permission denied/i.test(text)) return "Permission denied";
+  if (/unsupported input.*benchmark_transcode/.test(text)) return "Unsupported benchmark settings. Set up a new benchmark.";
+  if (/smb_transport_error|connecting to SMB server/.test(text)) return "Worker cannot access media storage. Fix the connection before retrying.";
   if (/shared VMAF\/CAMBI calibration supports 8-bit SDR video below 45 fps/.test(text))
     return "Source format does not support automatic calibration; original kept";
   return text.length > 140 ? `${text.slice(0, 137)}…` : text;
+}
+function workerUnavailable(job) {
+  return job.waiting_condition === "worker_unreachable" || job.activity_waiting_condition === "worker_unreachable";
 }
 function queuePresentation(job) {
   const kind = job.batch
@@ -1641,7 +1850,7 @@ function queuePresentation(job) {
       (job.candidate_ready && !job.replacement_action_id
         ? "Candidate ready"
         : ["running", "waiting_external"].includes(job.status)
-          ? ({encoding:"Encoding",validating:"Verifying",publishing:"Saving candidate",benchmarking:"Calibrating",queued:"Queued on worker",preparing:"Preparing"}[phase] || (job.promotion ? "Replacing" : "In progress"))
+          ? (workerUnavailable(job) ? "Worker offline" : job.worker?.progress_is_stale ? "No updates" : {encoding:"Encoding",validating:"Verifying",publishing:"Saving candidate",benchmarking:"Calibrating",queued:"Queued on worker",preparing:"Preparing"}[phase] || (job.promotion ? "Replacing" : "In progress"))
           : names[job.status] || job.status);
   const s = job.savings || {},
     metrics = [];
@@ -1693,8 +1902,8 @@ function compactQueueActions(actions) {
     const icon = b.querySelector?.("svg");
     if (!icon) continue;
     const label = b.textContent.trim();
-    if (["Review replacement", "Review replacements", "Replace file"].includes(label)) {
-      b.replaceChildren(icon, node("span", label === "Replace file" ? "Replace" : "Review"));
+    if (["Set up benchmark", "Review candidate", "Review replacement", "Review replacements", "Replace file"].includes(label)) {
+      b.replaceChildren(icon, node("span", label === "Replace file" ? "Replace" : label === "Set up benchmark" ? "Set up" : "Review"));
       b.className += " primary queue-primary";
       b.setAttribute("aria-label", label);
       b.title ||= label;
@@ -1712,6 +1921,18 @@ function compactQueueActions(actions) {
     else if (["Cancel", "Pause batch"].includes(label))
       b.className += " dismissive";
   }
+}
+function queueOutcome(job) {
+  if (job.status === "waiting_decision") return "Awaiting your review";
+  if (job.status === "failed") return "Open job for error details";
+  if (job.status === "cancelled") return "Stopped by user";
+  if (job.status === "pending") return "Waiting to start";
+  if (job.savings?.realized_saved_bytes != null || job.replaced) return "Replacement verified";
+  if (job.batch?.dry_run) return "Preview only · Files unchanged";
+  if (job.batch?.outcome === "no_changes") return "Originals preserved";
+  if (job.candidate_ready) return "Original preserved · Candidate available";
+  if (job.action_name === "benchmark_transcode") return "Sample test complete · Original preserved";
+  return "Finished · Open job for details";
 }
 async function loadJobs(more = false) {
   if (
@@ -1750,22 +1971,23 @@ async function loadJobs(more = false) {
     for (const job of state.operationJobs.values()) {
       const row = node("article", "", "job-row"),
         meta = node("div", "", "job-meta");
+      if (job.batch) row.className += " batch-job";
       const presentation = queuePresentation(job);
       const heading = node("h3", "", "job-heading");
-      if (job.number) heading.append(node("span", `#${job.number}`, "job-number"));
+      heading.append(node("span", job.number ? `#${job.number}` : "", "job-number"));
       heading.append(
         button(presentation.title, () => openJob(job.id), "job-title"),
       );
       heading.append(node("span", presentation.status, `badge ${job.status}`));
       const summary = node("p", presentation.summary, "metadata job-summary");
       summary.title = presentation.summary;
-      meta.append(heading, summary);
+      meta.append(summary);
       if (job.batch_files?.files?.length) {
         const files = node("p", job.batch_files.files.map(file => file.display_label || file.file_path?.split("/").pop()).join(" · ") + (job.batch_files.file_count > 2 ? ` · +${job.batch_files.file_count - 2} more` : ""), "metadata batch-file-preview");
         files.title = files.textContent;
         meta.append(files);
       }
-      for (const reason of job.batch_files?.reasons || []) {
+      for (const reason of (job.batch_files?.reasons || []).slice(0, 1)) {
         const text = shortJobReason(reason.reason);
         const line = node("p", `${reason.count} ${reason.count === 1 ? "file" : "files"}: ${text}`, "metadata batch-reason");
         line.title = reason.reason;
@@ -1783,13 +2005,15 @@ async function loadJobs(more = false) {
         actions.append(parent);
       }
       compactQueueActions(actions);
-      row.append(meta);
+      row.append(heading, meta);
+      const footer = node("div", "", "job-footer");
+      footer.append(presentation.showTelemetry ? telemetry(job) : node("div", queueOutcome(job), "metadata job-outcome"));
       if (actions.children.length) {
         if (actions.children.length > 1)
           actions.classList.add("multiple-actions");
-        row.append(actions);
+        footer.append(actions);
       }
-      if (presentation.showTelemetry) row.append(telemetry(job));
+      row.append(footer);
       $("jobs-list").append(row);
     }
     if (!state.operationJobs.size)
@@ -2218,11 +2442,7 @@ $("delete-recipe").addEventListener("click", () =>
     const restore = Boolean(r?.shadowed_profiles?.length);
     if (
       !r?.record ||
-      !confirm(
-        restore
-          ? `Restore the built-in version of ${r.name}?`
-          : `Delete custom profile ${r.name}?`,
-      )
+      !await reviewAction({title:restore ? "Restore built-in profile?" : "Delete custom profile?", message:restore ? `Restore the built-in settings for ${r.name}.` : `Remove ${r.name} from your custom profiles.`, confirmLabel:restore ? "Restore profile" : "Delete profile"})
     )
       return;
     await tool("recipe_delete", {
@@ -2709,7 +2929,7 @@ $("reload-profiles").addEventListener("click", () =>
 );
 $("rollback-profiles").addEventListener("click", () =>
   safe(async () => {
-    if (!confirm("Restore the previous profile bundle?")) return;
+    if (!await reviewAction({title:"Restore previous shared presets?", message:"Use the previous version of the shared presets. Custom profiles are preserved.", confirmLabel:"Restore presets"})) return;
     const r = await tool("recipe_rollback");
     if (r.error) throw new Error(r.error);
     await loadRecipes();
@@ -2746,7 +2966,7 @@ async function loadBackups(more = false) {
       row.append(
         button("Verify & clean up", async () => {
           if (
-            !confirm("Verify the replacement and remove its recovery copies?")
+            !await reviewAction({title:"Remove recovery copies?", message:`Verify the replacement for ${copy.path?.split("/").pop() || copy.action_id}, then permanently remove its recovery copies.`, confirmLabel:"Verify and remove"})
           )
             return;
           await tool("transcode_backups", {
@@ -2779,6 +2999,7 @@ setInterval(async () => {
       return;
     }
     if ($("workspace").hidden) return;
+    if (!state.workerCheckedAt || Date.now() - state.workerCheckedAt > 10000) await refreshWorkers();
     if (!state.jobsLoading) await safe(() => loadJobs());
     if ($("job-detail").open) await safe(refreshDetail);
   } finally {

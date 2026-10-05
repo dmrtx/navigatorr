@@ -12,6 +12,7 @@ import (
 	"github.com/jakenesler/navigatorr/action"
 	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/store"
+	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/mark3labs/mcp-go/server"
 )
 
@@ -343,13 +344,67 @@ func TestActionRunRejectsInvalidInputsJSON(t *testing.T) {
 	}
 }
 
+type readyAdmissionWorker struct{ transcode.Executor }
+
+func (readyAdmissionWorker) Ready(context.Context) error  { return nil }
+func (readyAdmissionWorker) Health(context.Context) error { return nil }
+func (readyAdmissionWorker) Doctor(context.Context) error { return nil }
+
+func TestMCPWorkerGateDoesNotCreateOfflineJobsAndCancelIsRegistered(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "worker-gate.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	e := action.NewEngine(action.EngineDeps{Store: st, Config: &config.Config{}})
+	s := server.NewMCPServer("test", "1")
+	registerActionTools(s, e)
+	for _, name := range []string{"transcode_media", "transcode_batch", "benchmark_transcode"} {
+		result := callTool(t, s, "action_run", map[string]any{"action": name, "inputs": `{"path":"/offline.mkv"}`})
+		if !result.IsError || !strings.Contains(resultText(t, result), "no job was submitted") {
+			t.Fatal("offline submission not blocked", result)
+		}
+	}
+	rows, _ := st.ListActionInstances("", 100)
+	if len(rows) != 0 {
+		t.Fatal("offline job persisted", rows)
+	}
+	for _, control := range []string{"action_retry", "action_resume"} {
+		status := store.ActionStatusFailed
+		if control == "action_resume" {
+			status = store.ActionStatusWaitingExternal
+		}
+		id := "blocked-" + control
+		if err := st.CreateActionInstance(store.ActionInstance{ID: id, ActionName: "transcode_media", Status: status}); err != nil {
+			t.Fatal(err)
+		}
+		result := callTool(t, s, control, map[string]any{"id": id})
+		if !result.IsError || !strings.Contains(resultText(t, result), "no job was submitted") {
+			t.Fatal("offline control was admitted", control, result)
+		}
+		inst, _ := st.GetActionInstance(id)
+		if inst.Status != status || inst.CurrentStep != 0 {
+			t.Fatal("blocked control changed job", inst)
+		}
+	}
+	st.CreateActionInstance(store.ActionInstance{ID: "cancel-fixture", ActionName: "transcode_media", Status: "pending", InputsJSON: `{"path":"/fixture.mkv"}`})
+	result := callTool(t, s, "action_cancel", map[string]any{"id": "cancel-fixture", "reason": "test"})
+	if result.IsError {
+		t.Fatal(resultText(t, result))
+	}
+	job, _ := st.GetActionInstance("cancel-fixture")
+	if job.Status != "cancelled" {
+		t.Fatal(job)
+	}
+}
+
 func TestCatalogExamplesCanBeSentThroughActionRun(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "catalog_examples.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	engine := action.NewEngine(action.EngineDeps{Store: st, Config: &config.Config{}})
+	engine := action.NewEngine(action.EngineDeps{Store: st, Config: &config.Config{}, Transcode: readyAdmissionWorker{}})
 	s := server.NewMCPServer("test", "0.0.0")
 	registerActionTools(s, engine)
 	var catalog []action.ActionCatalogEntry
