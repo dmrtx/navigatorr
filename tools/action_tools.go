@@ -340,6 +340,11 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 				}
 			}
 
+			if action.RequiresWorker(actionName) {
+				if err := engine.CheckWorkerAdmission(ctx); err != nil {
+					return toolErr("action_run failed: %v", err), nil
+				}
+			}
 			res, err := engine.Run(action.WithOrigin(ctx, "mcp"), actionName, inputs, idempotencyKey)
 			if err != nil {
 				return toolErr("action_run failed: %v", err), nil
@@ -373,6 +378,11 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 				return toolErr("id is required"), nil
 			}
 
+			if inst, err := engine.Deps().Store.GetActionInstance(id); err == nil && inst != nil && action.RequiresWorker(inst.ActionName) {
+				if err := engine.CheckWorkerAdmission(ctx); err != nil {
+					return toolErr("action_retry blocked: %v", err), nil
+				}
+			}
 			res, err := engine.Retry(ctx, id)
 			if err != nil {
 				return toolErr("action_retry failed: %v", err), nil
@@ -381,6 +391,24 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 			return toolBoundedJSON(toCompactSummary(res), MaxActionResponseBytes, nil), nil
 		},
 	)
+
+	// The web and MCP adapters share the engine's cancellation and child cascade.
+	s.AddTool(mcp.NewTool("action_cancel",
+		mcp.WithDescription("Cancel an action and its admitted batch children. Stops remote encoding when reachable; uncertain remote cancellation is reconciled automatically. Does not delete library files or recovery copies."),
+		mcp.WithString("id", mcp.Required(), mcp.Description("Action instance ID")),
+		mcp.WithString("reason", mcp.Description("Optional cancellation reason")),
+	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		id := strings.TrimSpace(argString(args, "id", ""))
+		if id == "" {
+			return toolErr("id is required"), nil
+		}
+		res, err := engine.Cancel(ctx, id, strings.TrimSpace(argString(args, "reason", "Cancelled by user")))
+		if err != nil {
+			return toolErr("action_cancel failed: %v", err), nil
+		}
+		return toolBoundedJSON(toCompactSummary(res), MaxActionResponseBytes, nil), nil
+	})
 
 	// action_resume — resume an action from waiting_external or waiting_decision
 	s.AddTool(
@@ -407,6 +435,13 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 				}
 			}
 
+			if decision == "" || decision == "resume" || decision == "retry" {
+				if inst, err := engine.Deps().Store.GetActionInstance(id); err == nil && inst != nil && action.RequiresWorker(inst.ActionName) {
+					if err := engine.CheckWorkerAdmission(ctx); err != nil {
+						return toolErr("action_resume blocked: %v", err), nil
+					}
+				}
+			}
 			res, err := engine.Resume(ctx, id, decision, extraInputs)
 			if err != nil {
 				return toolErr("action_resume failed: %v", err), nil

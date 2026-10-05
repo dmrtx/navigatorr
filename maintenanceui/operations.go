@@ -424,13 +424,9 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 	}
 	if grouped {
 		sort.SliceStable(filtered, func(i, j int) bool {
-			if operationActive(filtered[i].inst.Status) != operationActive(filtered[j].inst.Status) {
-				return operationActive(filtered[i].inst.Status)
-			}
-			if filtered[i].inst.UpdatedAt == filtered[j].inst.UpdatedAt {
-				return numbers[roots[filtered[i].inst.ID]] > numbers[roots[filtered[j].inst.ID]]
-			}
-			return filtered[i].inst.UpdatedAt > filtered[j].inst.UpdatedAt
+			// Workflow creation order survives polling, state changes and a
+			// conversion becoming a replacement. New submissions appear first.
+			return numbers[roots[filtered[i].inst.ID]] > numbers[roots[filtered[j].inst.ID]]
 		})
 	}
 	page.Savings.EstimatedSavedBytes = page.Savings.EstimatedBytes
@@ -515,7 +511,9 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 									break
 								}
 							}
-							if worker := operationMap(operationMap(data["action"])["worker"]); worker != nil {
+							childJob := operationMap(data["action"])
+							job["activity_waiting_condition"] = childJob["waiting_condition"]
+							if worker := operationMap(childJob["worker"]); worker != nil {
 								job["worker"] = worker
 								job["activity_file"] = operationString(child.inputs["path"])
 							}

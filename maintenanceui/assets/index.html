@@ -23,6 +23,7 @@
         >N<span class="brand-dot">↗</span> <span>navigatorr</span></a
       >
       <div class="masthead-right">
+        <button id="worker-status" class="quiet" hidden>Worker · Checking…</button>
         <button id="install-app" class="quiet" hidden>Install app</button>
       </div>
     </header>
@@ -513,6 +514,7 @@
                 ><button id="benchmark" type="button">Benchmark</button
                 ><button class="primary" id="enqueue">Queue transcode</button>
               </div>
+              <p id="worker-submit-status" class="metadata" role="status">Checking video worker…</p>
               <p id="job-feedback" role="status"></p>
             </form>
           </div>
@@ -926,6 +928,27 @@
       <p class="muted">The original is kept as a recovery copy until the replacement is verified, then removed.</p>
       <div class="submit-actions">
         <button id="approve-file-review" class="primary">Replace file</button>
+      </div>
+    </dialog>
+    <dialog id="workers-dialog" aria-labelledby="workers-title">
+      <div class="dialog-heading">
+        <h2 id="workers-title">Connected nodes</h2>
+        <button id="close-workers" class="icon-button" aria-label="Close">×</button>
+      </div>
+      <div id="worker-nodes"></div>
+      <p id="workers-checked" class="metadata"></p>
+      <button id="refresh-workers">Check connection</button>
+    </dialog>
+    <dialog id="action-review" aria-labelledby="action-review-title">
+      <div class="dialog-heading">
+        <h2 id="action-review-title">Review action</h2>
+        <button id="close-action-review" class="icon-button" aria-label="Close">×</button>
+      </div>
+      <p class="dialog-connection muted" role="status" hidden>Server unavailable. Changes are paused until it responds.</p>
+      <div id="action-review-content"></div>
+      <div class="submit-actions">
+        <button id="dismiss-action-review">Back</button>
+        <button id="confirm-action-review" class="primary">Continue</button>
       </div>
     </dialog>
     <dialog id="batch-review" aria-labelledby="batch-review-title">

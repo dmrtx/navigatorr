@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jakenesler/navigatorr/store"
 )
@@ -33,10 +34,19 @@ func queueWorkflows(records []operationRecord, byID map[string]operationRecord, 
 		members[root] = append(members[root], r)
 	}
 	ordered := []operationRecord{}
-	for root := range members {
-		ordered = append(ordered, byID[root])
+	// Reserve each original action's number even while its row is nested in a
+	// batch. Promoting a child later must not renumber the rest of the queue.
+	for _, record := range records {
+		if record.inst.ActionName != "promote_transcode_candidate" || roots[record.inst.ID] == record.inst.ID {
+			ordered = append(ordered, record)
+		}
 	}
 	sort.Slice(ordered, func(i, j int) bool {
+		left, leftErr := time.Parse(time.RFC3339Nano, ordered[i].inst.CreatedAt)
+		right, rightErr := time.Parse(time.RFC3339Nano, ordered[j].inst.CreatedAt)
+		if leftErr == nil && rightErr == nil && !left.Equal(right) {
+			return left.Before(right)
+		}
 		if ordered[i].inst.CreatedAt == ordered[j].inst.CreatedAt {
 			return ordered[i].inst.ID < ordered[j].inst.ID
 		}

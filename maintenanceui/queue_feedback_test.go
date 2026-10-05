@@ -3,10 +3,59 @@ package maintenanceui
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"testing"
 
 	"github.com/jakenesler/navigatorr/store"
 )
+
+func TestQueueOrderAndNumbersSurviveStateChangesAndChildPromotion(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	for _, record := range []struct {
+		id, name, status string
+		inputs           map[string]any
+	}{
+		{"batch", "transcode_batch", "waiting_external", nil},
+		{"child", "transcode_media", "running", map[string]any{"parent_action_id": "batch", "path": "/child.mkv"}},
+		{"newer", "benchmark_transcode", "completed", map[string]any{"path": "/newer.mkv"}},
+	} {
+		seedOperation(t, st, record.id, record.name, record.status, record.inputs, nil, nil)
+	}
+	read := func() []map[string]any {
+		w := request(h, "GET", "/api/maintenance/operations?group=workflow", "", true)
+		var page operationsPage
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil {
+			t.Fatal(w.Body.String())
+		}
+		return page.Jobs
+	}
+	before := read()
+	if before[0]["id"] != "newer" || before[1]["id"] != "batch" {
+		t.Fatal("active jobs displaced creation order", before)
+	}
+	old, _ := st.GetActionInstance("batch")
+	old.Status = "completed"
+	st.UpdateActionInstance(*old)
+	old, _ = st.GetActionInstance("newer")
+	old.Status = "running"
+	st.UpdateActionInstance(*old)
+	after := read()
+	for i := range before {
+		if !reflect.DeepEqual([]any{before[i]["workflow_id"], before[i]["number"]}, []any{after[i]["workflow_id"], after[i]["number"]}) {
+			t.Fatal("state change moved or renumbered row", before, after)
+		}
+	}
+	seedOperation(t, st, "promote", "promote_transcode_candidate", "waiting_decision", map[string]any{"transcode_action_id": "child"}, nil, nil)
+	after = read()
+	for _, job := range after {
+		for _, previous := range before {
+			if job["workflow_id"] == previous["workflow_id"] && job["number"] != previous["number"] {
+				t.Fatal("child promotion renumbered existing rows", after)
+			}
+		}
+	}
+}
 
 func TestQueueGroupsDurableWorkflowsBeforeFilteringAndPaging(t *testing.T) {
 	s, h := testUI(t)
@@ -26,12 +75,13 @@ func TestQueueGroupsDurableWorkflowsBeforeFilteringAndPaging(t *testing.T) {
 		return page
 	}
 	page := read("group=workflow&limit=1")
-	if page.Total != 3 || page.ActiveCount != 1 || !page.HasMore || len(page.Jobs) != 1 || page.Jobs[0]["id"] != "replace" || page.Jobs[0]["workflow_id"] != "source" {
+	if page.Total != 3 || page.ActiveCount != 1 || !page.HasMore || len(page.Jobs) != 1 || page.Jobs[0]["id"] != "independent" {
 		t.Fatalf("wrong grouped page: %+v", page)
 	}
-	number := page.Jobs[0]["number"]
-	if number == nil || len(page.Jobs[0]["workflow_actions"].([]any)) != 2 {
-		t.Fatal("lost original workflow identity/history", page.Jobs[0])
+	linked := read("group=workflow&offset=1&limit=1").Jobs[0]
+	number := linked["number"]
+	if linked["id"] != "replace" || linked["workflow_id"] != "source" || number == nil || len(linked["workflow_actions"].([]any)) != 2 {
+		t.Fatal("lost original workflow identity/history", linked)
 	}
 	completed := read("group=workflow&status=completed")
 	if completed.Total != 2 {
@@ -119,5 +169,25 @@ func TestBatchQueueFailureReasonsDoNotClaimSelectionCriteriaAreErrors(t *testing
 	reasonFeedback := batchQueueFeedback([]store.TranscodeBatchItem{{FilePath: "/media/one.mkv", Status: "failed", Reasons: []string{"oversized", "Missing source"}}})
 	if reasonFeedback["reasons"].([]map[string]any)[0]["reason"] != "Missing source" {
 		t.Fatal("recorded failure reason was lost", reasonFeedback)
+	}
+}
+
+func TestQueueNumbersAppendWithinOneSecondRegardlessOfRandomID(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	seedOperation(t, st, "z-first", "transcode_media", "completed", nil, nil, nil)
+	read := func() operationsPage {
+		w := request(h, "GET", "/api/maintenance/operations?group=workflow", "", true)
+		var page operationsPage
+		if json.Unmarshal(w.Body.Bytes(), &page) != nil {
+			t.Fatal(w.Body.String())
+		}
+		return page
+	}
+	before := read().Jobs[0]["number"]
+	seedOperation(t, st, "a-second", "transcode_media", "pending", nil, nil, nil)
+	after := read()
+	if after.Jobs[0]["id"] != "a-second" || after.Jobs[1]["number"] != before {
+		t.Fatal("new random ID renumbered earlier job", after)
 	}
 }
