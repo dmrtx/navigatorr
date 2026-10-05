@@ -59,6 +59,8 @@ function actionIcon(label) {
   const paths = {
     Retry: "M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M18 18A8 8 0 0 1 4 12",
     Review: "M5 4h14v16H5ZM8 8h8M8 12h8",
+    "Review preview": "M5 4h14v16H5ZM8 8h8M8 12h8",
+    "Start batch": "M7 4l13 8-13 8Z",
     Cancel: "M6 6l12 12M6 18L18 6",
     "Replace file": "M4 7h16M16 3l4 4-4 4M20 17H4M8 13l-4 4 4 4",
     "Review replacements": "M9 12l2 2 4-4M5 4h14v16H5Z",
@@ -1403,7 +1405,26 @@ function savingsLine(savings, compact = false, replaced = false) {
     ? node("p", parts.join(" · "), "metadata savings-line")
     : null;
 }
+function batchProgress(job) {
+  const batch = job.batch;
+  if (!batch || batch.dry_run || !Number.isInteger(batch.total) || batch.total <= 0) return null;
+  const count = key => Number.isInteger(batch[key]) && batch[key] > 0 ? batch[key] : 0;
+  const processed = Math.min(batch.total, ["completed", "failed", "skip"].reduce((total, key) => total + count(key), 0));
+  const percent = processed / batch.total * 100;
+  const result = node("div", "", `job-progress batch-progress ${job.status === "failed" ? "failed" : job.status === "cancelled" ? "cancelled" : ""}`);
+  const counts = node("span", `${processed} / ${batch.total} files processed`, "batch-progress-count");
+  counts.title = "Processed includes completed, failed and skipped files. Cancelled files and files waiting for a decision are not counted as processed.";
+  const value = node("strong", `${Math.round(percent)}%`, "batch-progress-percent");
+  const bar = document.createElement("progress");
+  bar.max = batch.total;
+  bar.value = processed;
+  bar.setAttribute("aria-label", `${processed} of ${batch.total} files processed`);
+  result.append(counts, value, bar);
+  return result;
+}
 function telemetry(job) {
+  const batch = batchProgress(job);
+  if (batch) return batch;
   const w = job.worker;
   const result = node(
     "div",
@@ -1763,6 +1784,7 @@ function batchCounts(batch, compact = false) {
       [batch.waiting_for_slot, "waiting for slot"],
       [batch.completed, "completed"],
       [batch.failed, "failed"],
+      [batch.cancelled, "cancelled"],
       [batch.waiting_decision ?? batch.review, "need a decision"],
       [batch.skip, "skipped"],
     ];
@@ -1776,16 +1798,75 @@ function batchCounts(batch, compact = false) {
   }
   return `${batch.dry_run ? "Preview · " : ""}${batch.total ?? 0} files · ${batch.queued ?? 0} queued · ${batch.running ?? 0} active · ${batch.waiting_for_slot ?? 0} waiting for slot · ${batch.completed ?? 0} completed · ${batch.failed ?? 0} failed · ${batch.waiting_decision ?? batch.review ?? 0} need a decision · ${batch.skip ?? 0} skipped`;
 }
-function jobControls(job) {
+function statusClass(status) {
+  if (["completed", "Completed", "Replaced", "Candidate ready"].includes(status)) return "completed";
+  if (["running", "Running", "waiting_external", "In progress", "Encoding", "Calibrating", "Preparing", "Verifying", "Replacing", "Saving candidate"].includes(status)) return "running";
+  if (["failed", "Failed", "Worker offline", "No updates"].includes(status)) return "failed";
+  if (["review", "waiting_decision", "Needs review", "Needs decision", "Partial", "Cancelling"].includes(status)) return "waiting_decision";
+  if (["Preview complete", "Eligible"].includes(status)) return "preview";
+  return "neutral";
+}
+function statusBadge(label, status = label) {
+  const result = node("span", "", `badge status-badge ${statusClass(status)}`);
+  const icon = node("span", {completed:"✓", running:"●", failed:"!", waiting_decision:"!", preview:"◌", neutral:"–"}[statusClass(status)], "status-symbol");
+  icon.setAttribute("aria-hidden", "true");
+  result.append(icon, node("span", label));
+  return result;
+}
+async function startBatchPreview(id) {
+  if (state.busyJobs.has(id)) return;
+  const auth = state.authRevision;
+  const current = () => auth === state.authRevision && !$('workspace').hidden && serverReachable;
+  state.busyJobs.add(id);
+  setConnection(serverReachable);
+  try {
+    const read = () => api(`batch-preview?id=${encodeURIComponent(id)}`);
+    const plan = await read();
+    if (!current()) return;
+    if (plan.execution_action_id) return await openJob(plan.execution_action_id);
+    if (!plan.eligible) throw new Error("This preview has no eligible files. Review the skipped files or configure a new batch.");
+    const content = [node("p", plan.title, "review-filename"), node("p", `${plan.eligible} eligible files will be checked again and encoded.${plan.other > 0 ? ` ${plan.other} skipped or review-only files will stay unchanged.` : ""}`)];
+    for (const setting of plan.settings || []) {
+      const row = node("div", "", "review-file");
+      row.append(node("span", setting.label, "muted"), node("strong", setting.value));
+      content.push(row);
+    }
+    const files = node("ul", "", "preview-file-list");
+    for (const file of plan.files || []) files.append(node("li", file));
+    content.push(files);
+    if (plan.eligible > (plan.files?.length || 0)) content.push(node("p", `+${plan.eligible - plan.files.length} more files from this preview`, "metadata"));
+    content.push(node("p", "The original preview stays as a record. Nothing starts until you choose Start batch.", "muted"));
+    if (!await reviewAction({title:"Start this preview's batch?", content, confirmLabel:"Start batch"})) return;
+    const latest = await read();
+    if (!current()) return;
+    if (latest.execution_action_id) return await openJob(latest.execution_action_id);
+    if (JSON.stringify(plan) !== JSON.stringify(latest)) throw new Error("The preview changed. Review it again before starting.");
+    await refreshWorkers();
+    if (!current()) return;
+    if (!state.workerInfo?.ready) throw new Error("Video worker offline or not ready. No job was submitted.");
+    const result = await api("batch-preview", {id});
+    if (!current()) return;
+    await loadJobs();
+    if (!current()) return;
+    await openJob(result.id);
+    notify("Batch started from the preview. Follow its progress here.");
+  } finally {
+    state.busyJobs.delete(id);
+    setConnection(serverReachable);
+  }
+}
+function jobControls(job, detail = false) {
   const actionRail = node("div", "", "job-actions");
   const add = (label, fn) => {
     const b = button(label, fn);
+    if (label === "Start batch") b.className = "primary";
     const icon = actionIcon(label);
     if (icon) b.append(icon);
     b.dataset.jobControl = job.id;
     b.dataset.requiresWorker = String(
       (label === "Retry" && ["transcode_media", "transcode_batch", "benchmark_transcode"].includes(job.action_name)) ||
       label === "Resume batch" ||
+      label === "Start batch" ||
       (job.action_name === "transcode_batch" && !job.batch?.promotion_plan_ready &&
         ["Review candidate", "Review replacements", "Keep originals"].includes(label))
     );
@@ -1828,6 +1909,13 @@ function jobControls(job) {
   }
   if (job.status === "waiting_decision" && !job.waiting_options?.length)
     add("Review", () => openJob(job.id));
+  if (job.status === "completed" && job.batch?.dry_run) {
+    if (job.preview_execution_action_id) add("View batch", () => openJob(job.preview_execution_action_id));
+    else {
+      if (!detail) add("Review preview", () => openJob(job.id));
+      if (job.batch.queued > 0) add("Start batch", () => startBatchPreview(job.id));
+    }
+  }
   if (job.status === "failed") {
     if (job.action_name === "benchmark_transcode" && /unsupported input/.test(job.error || ""))
       add("Set up benchmark", () => {
@@ -2002,7 +2090,7 @@ function queuePresentation(job) {
     workflows[job.action_name] ||
     job.action_name;
   const outcomes = {
-    preview: "Preview",
+    preview: "Preview complete",
     partial: "Partial",
     needs_review: "Needs review",
     no_changes: "No changes",
@@ -2074,9 +2162,9 @@ function compactQueueActions(actions) {
     const icon = b.querySelector?.("svg");
     if (!icon) continue;
     const label = b.textContent.trim();
-    if (["Set up benchmark", "Review candidate", "Review replacement", "Review replacements", "Replace file"].includes(label)) {
-      b.replaceChildren(icon, node("span", label === "Replace file" ? "Replace" : label === "Set up benchmark" ? "Set up" : "Review"));
-      b.className += " primary queue-primary";
+    if (["Set up benchmark", "Review candidate", "Review replacement", "Review replacements", "Replace file", "Start batch", "Review preview", "View batch"].includes(label)) {
+      b.replaceChildren(icon, node("span", label === "Replace file" ? "Replace" : label === "Set up benchmark" ? "Set up" : ["Start batch", "View batch"].includes(label) ? label : "Review"));
+      b.className += ["Review preview", "View batch"].includes(label) ? " queue-secondary" : " primary queue-primary";
       b.setAttribute("aria-label", label);
       b.title ||= label;
       continue;
@@ -2100,7 +2188,7 @@ function queueOutcome(job) {
   if (job.status === "cancelled") return "Stopped by user";
   if (job.status === "pending") return "Waiting to start";
   if (job.savings?.realized_saved_bytes != null || job.replaced) return "Replacement verified";
-  if (job.batch?.dry_run) return "Preview only · Files unchanged";
+  if (job.batch?.dry_run) return job.preview_execution_action_id ? "Batch started · View its progress" : job.batch.queued > 0 ? "Preview finished · Nothing starts automatically" : "Preview finished · No eligible files";
   if (job.batch?.outcome === "no_changes") return "Originals preserved";
   if (job.candidate_ready) return "Original preserved · Candidate available";
   if (job.action_name === "benchmark_transcode") return "Sample test complete · Original preserved";
@@ -2152,7 +2240,7 @@ async function loadJobs(more = false) {
       heading.append(
         button(presentation.title, () => openJob(job.id), "job-title"),
       );
-      heading.append(node("span", presentation.status, `badge ${job.status}`));
+      heading.append(statusBadge(presentation.status));
       const summary = node("p", presentation.summary, "metadata job-summary");
       summary.title = presentation.summary;
       meta.append(summary);
@@ -2181,7 +2269,7 @@ async function loadJobs(more = false) {
       compactQueueActions(actions);
       row.append(heading, meta);
       const footer = node("div", "", "job-footer");
-      footer.append(presentation.showTelemetry ? telemetry(job) : node("div", queueOutcome(job), "metadata job-outcome"));
+      footer.append(presentation.showTelemetry ? telemetry(job) : batchProgress(job) || node("div", queueOutcome(job), "metadata job-outcome"));
       if (actions.children.length) {
         if (actions.children.length > 1)
           actions.classList.add("multiple-actions");
@@ -2343,14 +2431,13 @@ async function refreshDetail() {
         job.batch || job.source_path || job.promotion ? queuePresentation(job).title : job.id,
         "metadata",
       ),
-      node(
-        "span",
-        queuePresentation(job).status,
-        `badge ${job.status}`,
-      ),
+      statusBadge(queuePresentation(job).status),
       node("p", queuePresentation(job).summary, "muted"),
     );
     if (queuePresentation(job).showTelemetry) summary.append(telemetry(job));
+    else if (batchProgress(job)) summary.append(batchProgress(job));
+    if (job.batch?.dry_run) summary.append(node("p", queueOutcome(job) + (job.batch.queued > 0 && !job.preview_execution_action_id ? ". Review the eligible files, then choose Start batch to convert them." : "."), "preview-notice"));
+    if (job.batch && !job.batch.dry_run) renderBatchCounts(summary, job.batch);
     renderStages(job);
     const related = $("detail-related");
     related.replaceChildren();
@@ -2364,7 +2451,7 @@ async function refreshDetail() {
       if (location) summary.append(node("p", `Library: ${location.slice(0, location.lastIndexOf("/"))}`, "metadata"));
     }
     const controls = $("detail-controls");
-    controls.replaceChildren(jobControls(job));
+    controls.replaceChildren(jobControls(job, true));
     $("batch-items-panel").hidden = !job.batch;
     if (job.batch) await loadBatchItems(id, revision, job.batch.total);
     restoreControl(controls, focus);
@@ -2403,13 +2490,13 @@ async function loadBatchItems(id, revision) {
     const row = node("div", "", "batch-item-row");
     row.append(
       node("span", item.display_label || item.file_path, "metadata"),
-      node("span", names[item.status] || item.status || item.decision, "badge"),
+      statusBadge(state.detailJob?.batch?.dry_run && item.status === "queued" ? "Eligible" : names[item.status] || item.status || item.decision, state.detailJob?.batch?.dry_run && item.status === "queued" ? "Eligible" : item.status),
     );
     if (item.child_action_id)
       row.append(
         button("View file", () => openJob(item.child_action_id), "quiet"),
       );
-    for (const reason of [item.error, ...(item.reasons || [])].filter(Boolean))
+    for (const reason of [item.error, ...(item.reasons || [])].filter(reason => reason && !/^(explicit profile requested|eligible for transcode)$/i.test(reason)))
       row.append(node("span", shortJobReason(reason), "muted"));
     $("batch-items-list").append(row);
   }
@@ -2466,13 +2553,20 @@ async function loadDetail() {
   );
 }
 
+function renderBatchCounts(container, batch) {
+  const counts = node("div", "", "batch-counts");
+  for (const [key, label, status] of [["completed","Completed","completed"],["running","Active","running"],["queued","Queued","queued"],["waiting_for_slot","Waiting for slot","queued"],["waiting_decision","Needs decision","waiting_decision"],["review","Needs review","review"],["failed","Failed","failed"],["skip","Skipped","skip"],["cancelled","Cancelled","cancelled"]]) {
+    if (batch[key] > 0) counts.append(statusBadge(`${batch[key]} ${label}`, status));
+  }
+  container.append(counts);
+}
 function renderStages(job) {
   const list = $("detail-stages");
   list.replaceChildren();
   if (job.batch?.dry_run || job.batch?.outcome === "no_changes") return;
   for (const [index, stage] of (job.stages || []).entries()) {
     const row = node("li", "", `stage ${stage.status}`);
-    row.append(node("span", String(index + 1), "stage-number"), node("span", stageLabel(stage.name)), node("span", stage.status === "pending" ? "Next" : names[stage.status] || stage.status, "metadata"));
+    row.append(node("span", String(index + 1), "stage-number"), node("span", stageLabel(stage.name)), statusBadge(stage.status === "pending" ? "Next" : names[stage.status] || stage.status, stage.status));
     if (index === job.current_step && ["running", "waiting_external", "waiting_decision"].includes(job.status)) row.setAttribute("aria-current", "step");
     list.append(row);
   }

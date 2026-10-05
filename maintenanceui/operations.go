@@ -342,8 +342,12 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 	aggregateBatchSavings(records)
 	recordsByID := make(map[string]operationRecord, len(records))
 	existingReplacements := map[string]string{}
+	previewExecutions := map[string]string{}
 	for _, r := range records {
 		recordsByID[r.inst.ID] = r
+		if r.inst.ActionName == "transcode_batch" && strings.HasPrefix(r.inst.IdempotencyKey, previewExecutionPrefix) {
+			previewExecutions[strings.TrimPrefix(r.inst.IdempotencyKey, previewExecutionPrefix)] = r.inst.ID
+		}
 		if r.inst.ActionName == "promote_transcode_candidate" {
 			source := operationString(r.inputs["transcode_action_id"])
 			if source == "" {
@@ -511,13 +515,29 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 			}
 			job["logs_available"] = httpWorker && (operationString(r.state["job_id"]) != "" || operationString(r.state["transcode_job_id"]) != "")
 			if r.inst.ActionName == "transcode_batch" {
+				if r.inputs["dry_run"] == true && r.inst.Status == store.ActionStatusCompleted {
+					job["preview_execution_action_id"] = previewExecutions[r.inst.ID]
+				}
 				job["paused"] = operationValue(r, "paused") == true
 				items, err := s.engine.Deps().Store.ListTranscodeBatchItems(r.inst.ID)
+				inferred := false
+				if err == nil {
+					items, inferred, err = s.previewPendingItems(r.inst, items)
+				}
 				if err != nil {
 					fail(w, 500, "read batch contents")
 					return
 				}
 				job["batch_files"] = batchQueueFeedback(items)
+				if inferred {
+					batch := operationMap(job["batch"])
+					if batch == nil {
+						batch = map[string]any{}
+					}
+					batch["total"] = len(items)
+					batch[items[0].Status] = len(items)
+					job["batch"] = batch
+				}
 				if operationActive(r.inst.Status) {
 					activities := []map[string]any{}
 					for _, child := range members[root] {

@@ -686,8 +686,10 @@ main {
   overflow: hidden;
 }
 .batch-job .job-meta {
-  height: 54px;
+  height: 34px;
 }
+.batch-job:not(.terminal-job) .batch-reason { display: none; }
+.batch-job:not(.terminal-job) .job-summary { -webkit-line-clamp: 1; }
 .job-row.terminal-job .job-meta {
   height: auto;
 }
@@ -786,6 +788,14 @@ main {
   border: 0;
   background: transparent;
 }
+.job-row .job-actions .queue-secondary {
+  padding: 0 6px;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--forest);
+  border: 0;
+  background: transparent;
+}
 .job-row .job-actions .queue-primary::before {
   content: "";
   position: absolute;
@@ -841,10 +851,18 @@ main {
 }
 .stage-number {
   font-variant-numeric: tabular-nums;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #f0f0eb;
 }
 .stage.completed {
   color: var(--forest);
 }
+.stage.completed .stage-number { background: #e3eedf; }
+.stage[aria-current="step"] .stage-number { color: #fff; background: var(--forest); }
 .stage[aria-current="step"] {
   color: var(--ink);
   font-weight: 600;
@@ -948,6 +966,51 @@ main {
   color: var(--forest);
   background: #edf4e9;
 }
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 500;
+}
+.status-symbol { flex: 0 0 auto; font-weight: 700; }
+.status-badge.running { color: #20577a; background: #e8f1f8; }
+.status-badge.preview { color: #465791; background: #edf0fa; }
+.status-badge.neutral { color: #62665e; background: #f0f0eb; }
+.status-badge.failed { background: #fbe9e7; }
+.batch-progress {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 2px 8px;
+  width: 100%;
+  color: var(--forest);
+  font-variant-numeric: tabular-nums;
+}
+.batch-progress-count { font-size: 12px; }
+.batch-progress-percent { font-size: 18px; line-height: 1.15; }
+.batch-progress progress {
+  grid-column: 1 / -1;
+  width: 100%;
+  height: 6px;
+  border: 0;
+  border-radius: 3px;
+  overflow: hidden;
+  accent-color: var(--forest);
+  background: #e6e9e2;
+}
+.batch-progress progress::-webkit-progress-bar { background: #e6e9e2; }
+.batch-progress progress::-webkit-progress-value { background: var(--forest); border-radius: 3px; }
+.batch-progress progress::-moz-progress-bar { background: var(--forest); border-radius: 3px; }
+.batch-progress.failed { color: #a52929; }
+.batch-progress.failed progress { accent-color: #a52929; }
+.batch-progress.failed progress::-webkit-progress-value { background: #a52929; }
+.batch-progress.failed progress::-moz-progress-bar { background: #a52929; }
+.batch-progress.cancelled { color: var(--muted); }
+#detail-summary > .batch-progress { margin: 10px 0; }
+.batch-counts { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0; }
+.batch-counts .badge { margin: 0; }
+.preview-notice { padding: 8px 10px; color: #465791; background: #edf0fa; border-left: 3px solid #8293cb; font-size: 12px; }
+.preview-file-list { margin: 10px 0; padding-left: 20px; font-size: 12px; overflow-wrap: anywhere; }
 .worker-progress {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -988,6 +1051,7 @@ main {
   flex: 1 1 180px;
   min-width: 0;
 }
+.batch-item-row > .badge { flex: 0 0 auto; min-width: 68px; justify-content: center; }
 .batch-item-row > .muted {
   flex-basis: 100%;
 }
@@ -1370,10 +1434,10 @@ pre {
     -webkit-line-clamp: 2;
   }
   .job-meta { height: 32px; }
-  .batch-job .job-meta { height: 66px; }
+  .batch-job .job-meta { height: 36px; }
   .job-footer { height: var(--control-size); }
   .job-heading {
-    grid-template-columns: 34px minmax(0, 1fr) 80px;
+    grid-template-columns: 34px minmax(0, 1fr) 88px;
     gap: 0 6px;
   }
   .job-row > .job-meta, .job-row > .job-footer { margin-left: 40px; }
