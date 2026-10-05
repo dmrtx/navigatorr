@@ -1596,6 +1596,14 @@ function shortJobReason(reason) {
   const text = String(reason || "")
     .replace(/\s+/g, " ")
     .trim();
+  const reasons = {
+    already_hevc: "Already HEVC; original kept",
+    reasonable_size: "Already within the size target; original kept",
+    not_oversized: "Already within the size target; original kept",
+    below_min_savings: "Savings below the minimum; original kept",
+    "10bit": "10-bit source requires review",
+  };
+  if (reasons[text]) return reasons[text];
   if (/no such file or directory/i.test(text)) return "File not found";
   if (/permission denied/i.test(text)) return "Permission denied";
   if (/shared VMAF\/CAMBI calibration supports 8-bit SDR video below 45 fps/.test(text))
@@ -1625,7 +1633,9 @@ function queuePresentation(job) {
     cancelling: "Cancelling",
   };
   const phase = job.worker?.transcode_phase || job.worker?.benchmark_phase || job.worker?.phase;
-  const status = job.replaced || job.savings?.realized_saved_bytes != null
+  const replacementComplete = job.savings?.realized_saved_bytes != null ||
+    (job.replaced && job.status === "completed");
+  const status = replacementComplete
     ? "Replaced"
     : outcomes[job.batch?.outcome] ||
       (job.candidate_ready && !job.replacement_action_id
@@ -1655,7 +1665,7 @@ function queuePresentation(job) {
   let result;
   if (job.status === "failed")
     result = shortJobReason(job.error) || "Error details unavailable";
-  else if (job.replaced) result = "Original replaced";
+  else if (job.replaced && job.status === "completed") result = "Original replaced";
   else if (job.batch?.promotion_plan_ready)
     result = "Replacement approval required";
   else if (job.batch) result = batchCounts(job.batch, true);

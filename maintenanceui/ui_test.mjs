@@ -314,6 +314,11 @@ test("decision rows show the next step instead of stale worker telemetry or cont
   );
   assert.match(batch.summary, /Replacement approval required/);
   assert.doesNotMatch(batch.summary, /0 files/);
+  const replacedSource = h.run('queuePresentation({status:"waiting_decision",replaced:true,waiting_reason:"Review quality result"})');
+  assert.equal(replacedSource.status, "Needs decision");
+  assert.match(replacedSource.summary, /Review quality result/);
+  assert.doesNotMatch(replacedSource.summary, /Original replaced/);
+  assert.equal(h.run('shortJobReason("already_hevc")'), "Already HEVC; original kept");
 });
 
 test("loading another page cannot duplicate a conversion whose replacement has started", async () => {
