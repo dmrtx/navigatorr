@@ -73,3 +73,5 @@ Replacement approval uses an application dialog with original/candidate paths an
 Validation: full Go tests and vet, 74 JavaScript tests, grouping/filter/pagination and live-child telemetry regressions, plus browser inspection of synthetic running/review/skipped states at desktop, 390 and 320 pixels. No production media was changed by this review.
 
 A single mobile queue action now stays beside the row content, eliminating the empty action-only line. Multiple decisions keep their shared action rail. The 320- and 390-pixel checks confirmed no horizontal overflow and retained 44-pixel touch targets.
+
+The production history also exposed a pending quality decision on a source that had separately been replaced. Its actual decision status now takes precedence over the source replacement hint. Batch outcome feedback uses the recorded error for failed files, a neutral details prompt when no error was retained, and excludes positive eligibility flags from skip reasons. Common skip codes have readable labels. These changes preserve the underlying action records and decisions.
