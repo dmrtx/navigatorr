@@ -42,7 +42,7 @@ func TestTranscodeBackupCleanupUsesFinalizer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Items) != 1 || !page.Items[0].CleanupAvailable || page.Items[0].ActionID != id || page.Bytes != 2*int64(len(original)) || page.Items[0].PartialBytes != int64(len(original)) {
+	if len(page.Items) != 1 || !page.Items[0].CleanupAvailable || page.Items[0].ActionID != id || page.Items[0].OriginalPath != p.OriginalPath || page.Bytes != 2*int64(len(original)) || page.Items[0].PartialBytes != int64(len(original)) {
 		t.Fatalf("inventory: %+v", page)
 	}
 	if _, err := os.Stat(p.BackupPath); err != nil {

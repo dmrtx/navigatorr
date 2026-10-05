@@ -216,15 +216,12 @@
                   </svg>
                 </button>
               </div>
-              <div class="library-order">
-                <label for="library-sort">Sort</label>
-                <select id="library-sort">
+              <select id="library-sort" aria-label="Library sort order" hidden>
                   <option value="name">Name · A–Z</option>
+                  <option value="name_desc">Name · Z–A</option>
                   <option value="size_desc">Size · Largest first</option>
                   <option value="size_asc">Size · Smallest first</option>
-                </select>
-                <button id="reload-library" class="quiet" title="Reload sizes and order">Reload</button>
-              </div>
+              </select>
               <p id="size-order-note" class="metadata" hidden>Order uses saved sizes. Reload to include newly measured folders.</p>
               <div class="breadcrumbs">
                 <button
@@ -249,11 +246,18 @@
                   aria-label="Folder path"
                   hidden
                 ></nav>
+                <button id="reload-library" class="icon-button quiet" aria-label="Reload files and sizes" title="Reload sizes and order">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M18 18A8 8 0 0 1 4 12" /></svg>
+                </button>
               </div>
               <div id="selection-toolbar" class="file-selection-actions" aria-label="File selection">
-                <button id="select-all-files" class="quiet">Select all files</button>
                 <button id="clear-selected-files" class="quiet" hidden>Clear selection</button>
                 <button id="use-container" class="quiet">Select folder</button>
+              </div>
+              <div class="library-columns" aria-label="Library columns">
+                <label class="media-check"><input id="select-all-files" type="checkbox" aria-label="Select all videos" /></label>
+                <button id="sort-name" class="quiet column-sort" aria-label="Sort by name">Name <span id="sort-name-direction" aria-hidden="true">↑</span></button>
+                <button id="sort-size" class="quiet column-sort" aria-label="Sort by size">Size <span id="sort-size-direction" aria-hidden="true"></span></button>
               </div>
               <div id="library-items" class="library-items"></div>
               <div class="list-footer">
@@ -545,7 +549,8 @@
                 <option value="waiting_decision">Needs decision</option>
                 <option value="completed">Completed</option>
                 <option value="failed">Failed</option>
-                <option value="cancelled">Cancelled</option></select
+                <option value="cancelled">Cancelled</option>
+                <option value="archived">Archived</option></select
               ><button
                 id="refresh-jobs"
                 class="icon-button"
@@ -808,6 +813,8 @@
             <span>Recovery copies</span
             ><button id="load-backups">View copies</button>
           </div>
+          <p id="backup-summary" class="metadata" role="status" hidden></p>
+          <p id="backup-progress" class="metadata" role="status" hidden></p>
           <div id="backup-list" hidden></div>
           <button id="backups-more" hidden>Load more</button>
           <div id="local-session" class="settings-row" hidden>

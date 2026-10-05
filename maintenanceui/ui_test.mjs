@@ -20,6 +20,8 @@ class Element {
   value = "";
   textContent = "";
   open = false;
+  firstChild = {textContent:""};
+  closest() { return this; }
   addEventListener(name, fn) {
     this.listeners.set(name, fn);
   }
@@ -87,6 +89,203 @@ function deferred() {
   });
   return { promise, resolve };
 }
+
+test("URL state preserves tabs, sources, folders, sorting, filters and open details", () => {
+  const h=harness();
+  h.run('state.tab="jobs";$("service").value="folder:/media";state.folder="/media/Series/Season 1";$("library-sort").value="size_desc";$("job-filter").value="archived";state.detail="job-one";$("job-detail").open=true;');
+  const query=h.run('navigationQuery()');
+  const route=h.run(`navigationRoute(${JSON.stringify(query)})`);
+  assert.equal(route.tab,"jobs"); assert.equal(route.folder,"/media/Series/Season 1");
+  assert.equal(route.source,"folder:/media"); assert.equal(route.sort,"size_desc");
+  assert.equal(route.status,"archived"); assert.equal(route.job,"job-one");
+  const invalid=h.run('navigationRoute("?view=bad&media=-1&sort=bad&status=bad")');
+  assert.equal(invalid.tab,"library"); assert.equal(invalid.media,null); assert.equal(invalid.sort,"name"); assert.equal(invalid.status,"all");
+});
+
+test("URL updates add one browser history entry per navigation and canonical restoration replaces it", () => {
+  const h=harness(), writes=[];
+  h.context.window={location:{pathname:"/",search:""},history:{pushState(_s,_t,url){writes.push(["push",url]);h.context.window.location.search=url.slice(1);},replaceState(_s,_t,url){writes.push(["replace",url]);h.context.window.location.search=url.slice(1);}}};
+  h.run('state.routeReady=true;state.tab="jobs";writeNavigation();writeNavigation();');
+  assert.deepEqual(writes,[["push","/?view=queue"]]);
+  h.run('state.applyingNavigation=true;state.tab="advanced";writeNavigation();state.applyingNavigation=false;writeNavigation(true);');
+  assert.deepEqual(writes[1],["replace","/?view=more"]);
+});
+
+test("deep links restore an Arr title and selected file; late routes cannot replace newer navigation", async () => {
+  const h=harness(), pending=deferred();
+  h.run('controls=()=>{};loadLibrary=async()=>{};loadJobs=async()=>{};state.info={roots:["/media"],services:[{name:"sonarr"}]};api=async()=>({media:{id:7,title:"Synthetic title"},items:[{id:1,path:"/media/title/episode.mkv"}]});');
+  await h.run('applyNavigation(navigationRoute("?view=files&source=sonarr&media=7&file=%2Fmedia%2Ftitle%2Fepisode.mkv&sort=size_asc"))');
+  assert.equal(h.run('state.media.id'),7);assert.equal(h.run('state.fileStep'),"configure");assert.equal(h.elements.get("path").value,"/media/title/episode.mkv");
+  h.context.pending=pending.promise;
+  h.run('api=async()=>pending;');
+  const older=h.run('applyNavigation(navigationRoute("?view=files&source=sonarr&media=8"))');
+  await h.run('applyNavigation(navigationRoute("?view=queue&source=folder%3A%2Fmedia&folder=%2Fmedia%2Fnew"))');
+  pending.resolve({media:{id:8,title:"Old title"}});await older;
+  assert.equal(h.run('state.tab'),"jobs");assert.equal(h.run('state.folder'),"/media/new");assert.equal(h.run('state.media'),null);
+});
+
+test("Back hides recovery inventory and late inventory cannot restore the copies route", async () => {
+  const h=harness(), pending=deferred();
+  h.context.pending=pending.promise;
+  h.run('controls=()=>{};state.info={roots:[],services:[]};tool=async()=>pending;');
+  const older=h.run('applyNavigation(navigationRoute("?view=more&copies=1"))');
+  assert.equal(h.run('state.backupsVisible'),true);
+  await h.run('applyNavigation(navigationRoute("?view=more"))');
+  pending.resolve({items:[{action_id:"old",path:"/media/original.bak",bytes:1000}]});
+  await older;
+  assert.equal(h.run('state.backupsVisible'),false);
+  assert.equal(h.run('state.backups.length'),0);
+  assert.equal(h.elements.get("backup-list").hidden,true);
+  assert.equal(h.elements.get("backup-summary").hidden,true);
+  assert.doesNotMatch(h.run('navigationQuery()'),/copies=/);
+});
+
+test("Back clears the selected profile and supersedes its pending read", async () => {
+  const h=harness(), pending=deferred();
+  h.context.pending=pending.promise;
+  h.run('controls=()=>{};state.info={roots:[],services:[]};state.recipe={name:"previous"};renderRecipeList=()=>{};tool=async()=>pending;');
+  const older=h.run('applyNavigation(navigationRoute("?view=profiles&profile=old"))');
+  await h.run('applyNavigation(navigationRoute("?view=profiles"))');
+  pending.resolve({name:"old",profile:{container:"mkv",video:{codec:"libx265",quality:23}}});
+  await older;
+  assert.equal(h.run('state.recipe'),null);
+  assert.equal(h.elements.get("recipe-name").value,"");
+  assert.equal(h.elements.get("recipe-form").inert,true);
+  assert.doesNotMatch(h.run('navigationQuery()'),/profile=/);
+});
+
+test("automatic profile selection replaces the tab route and cannot undo a newer Back navigation", async () => {
+  for (const back of [false,true]) {
+    const h=harness(), pending=deferred(), writes=[];
+    h.context.window={location:{pathname:"/",search:"?view=queue"},scrollTo(){},history:{pushState(_s,_t,url){writes.push(["push",url]);h.context.window.location.search=url.slice(1);},replaceState(_s,_t,url){writes.push(["replace",url]);h.context.window.location.search=url.slice(1);}}};
+    h.context.pending=pending.promise;
+    h.run('controls=()=>{};state.info={roots:[],services:[]};state.routeReady=true;state.recipes=["default"];loadRecipes=async()=>pending;renderRecipeList=()=>{};renderAdvancedProfile=()=>{};tool=async()=>({name:"default",profile:{container:"mkv",video:{codec:"libx265",quality:23}}});selectTab("recipes");');
+    if(back) await h.run('applyNavigation(navigationRoute("?view=profiles"))');
+    pending.resolve();
+    for(let i=0;i<12;i++) await Promise.resolve();
+    assert.deepEqual(writes[0],["push","/?view=profiles"]);
+    if(back) {assert.equal(h.run('state.recipe'),null);assert.equal(writes.length,1);}
+    else assert.deepEqual(writes[1],["replace","/?view=profiles&profile=default"]);
+  }
+});
+
+test("signed-out views never canonicalize or append navigation history", () => {
+  const h=harness();let writes=0;
+  h.context.window={location:{pathname:"/",search:"?view=profiles&profile=private"},history:{pushState(){writes++;},replaceState(){writes++;}}};
+  h.run('state.routeReady=true;$("workspace").hidden=true;writeNavigation();writeNavigation(true);');
+  assert.equal(writes,0);
+});
+
+test("cleanup finishing after Back does not reopen or reload the hidden recovery inventory", async () => {
+  const h=harness();let reloads=0;
+  h.context.record=()=>reloads++;
+  h.run('controls=()=>{};state.info={roots:[],services:[]};state.backupsVisible=true;state.backupCleaning={id:"cleanup",name:"episode.mkv",auth:state.authRevision,started:Date.now()};loadBackups=async()=>record();loadJobs=async()=>{};');
+  await h.run('applyNavigation(navigationRoute("?view=more"))');
+  await h.run('finishBackupCleanup({status:"completed"})');
+  assert.equal(reloads,0);
+  assert.equal(h.elements.get("backup-progress").hidden,true);
+  assert.equal(h.run('state.backupCleaning'),null);
+});
+
+test("column headers toggle both directions and persist the order through the library read", async () => {
+  const h=harness(), orders=[];
+  h.context.record=order=>orders.push(order);
+  h.run('loadLibrary=async()=>record($("library-sort").value);$("library-sort").value="name";');
+  await h.run('toggleLibrarySort("name")');await h.run('toggleLibrarySort("name")');await h.run('toggleLibrarySort("size")');await h.run('toggleLibrarySort("size")');
+  assert.deepEqual(orders,["name_desc","name","size_desc","size_asc"]);
+});
+
+test("header checkbox selects recursive folder videos, shows partial selection and clears without submission", async () => {
+  const h=harness(), requests=[];
+  h.context.record=url=>{requests.push(url);return {paths:["/media/a.mkv","/media/nested/b.mp4"]};};
+  h.run('$("service").value="folder:/media";state.folder="/media";state.folderSelected=new Set();api=async url=>record(url);');
+  await h.run('selectAllFiles()');
+  assert.match(requests[0],/recursive=1/);
+  assert.equal(h.elements.get("select-all-files").checked,true);assert.equal(h.elements.get("select-all-files").indeterminate,false);
+  h.run('state.folderSelected.delete("/media/a.mkv");controls();');
+  assert.equal(h.elements.get("select-all-files").checked,false);assert.equal(h.elements.get("select-all-files").indeterminate,true);
+  h.elements.get("select-all-files").checked=false;
+  h.elements.get("select-all-files").listeners.get("change")();
+  assert.equal(h.run('state.folderSelected.size'),0);assert.equal(h.elements.get("select-all-files").indeterminate,false);
+  assert.equal(requests.length,1);
+});
+
+test("folder checkbox resolves only its videos, supports unchecking and ignores late replies", async () => {
+  const h=harness(), pending=deferred();
+  h.run('controls=()=>{};$("service").value="folder:/media";state.folderSelected=new Set(["/media/other.mkv"]);api=async()=>({paths:["/media/series/a.mkv","/media/series/b.mkv"]});');
+  await h.run('selectFolderFiles("/media/series",true)');assert.equal(h.run('state.folderSelected.size'),3);
+  await h.run('selectFolderFiles("/media/series",false)');assert.deepEqual([...h.run('state.folderSelected')],["/media/other.mkv"]);
+  h.context.pending=pending.promise;h.run('api=async()=>pending;');
+  const read=h.run('selectFolderFiles("/media/series",true)');h.run('state.libraryRevision++;state.folderSelected.clear();');
+  pending.resolve({paths:["/media/series/a.mkv"]});await read;assert.equal(h.run('state.folderSelected.size'),0);
+});
+
+test("terminal jobs expose archive and archived jobs restore; active jobs never offer archive", async () => {
+  const h=harness(), pending=deferred(), calls=[];
+  h.context.record=(...args)=>{calls.push(args);return pending.promise;};
+  h.run('controls=()=>{};loadJobs=async()=>{};api=async(...args)=>record(...args);');
+  assert.ok(h.run('jobControls({id:"done",status:"completed",can_archive:true}).children.some(b=>b.textContent==="Archive")'));
+  assert.deepEqual(h.run('jobControls({id:"old",status:"completed",archived:true}).children.map(b=>b.textContent)').join(),"Restore");
+  assert.equal(h.run('jobControls({id:"active",status:"running",can_archive:false}).children.some(b=>b.textContent==="Archive")'),false);
+  const first=h.run('archiveJob({id:"done"},true)');await h.run('archiveJob({id:"done"},true)');assert.equal(calls.length,1);
+  pending.resolve({archived:true});await first;assert.equal(h.run('state.busyJobs.size'),0);
+});
+
+test("recovery inventory loads through empty pages, deduplicates and exposes original locations and blocked reasons", async () => {
+  const h=harness(), offsets=[];
+  h.context.read=(_name,args)=>{offsets.push(args.offset);return args.offset===0 ? {items:[],next_offset:25} : {items:[{action_id:"copy",status:"failed",original_path:"/media/Series/episode.mkv",path:"/media/.recovery/original.bak",bytes:1000,partial_bytes:500,reason:"promotion stopped before final cleanup"}],next_offset:args.offset===25 ? 50:null};};
+  h.run('tool=async(...args)=>read(...args);');await h.run('loadBackups()');
+  assert.deepEqual(offsets,[0,25,50]);assert.equal(h.run('state.backups.length'),1);
+  const row=h.elements.get("backup-list").children[0];
+  assert.equal(row.children[0].children[0].textContent,"episode.mkv");assert.match(row.children[1].textContent,/Original: \/media\/Series\/episode.mkv/);
+  assert.match(row.children[3].textContent,/earlier error/);assert.equal(row.children[4].children.length,1);
+  assert.match(h.elements.get("backup-summary").textContent,/1 recovery copy · 1.5 KB retained/);
+  assert.equal(h.elements.get("backups-more").hidden,true);
+});
+
+test("cleanup shows live work and is single-flight; dismissal and expired sessions cannot remove copies", async () => {
+  for (const scenario of ["pending","dismissed","expired"]) {
+    const h=harness(), pending=deferred();let writes=0;
+    h.context.copy={action_id:"cleanup",original_path:"/media/episode.mkv",path:"/media/recovery/original.bak",bytes:1000,cleanup_available:true};
+    h.context.remove=()=>{writes++;return pending.promise;};
+    h.run(`reviewAction=async()=>${scenario!=="dismissed"};loadBackups=async()=>{};loadJobs=async()=>{};tool=async()=>remove();`);
+    const clean=h.run('cleanBackup(copy)');for(let i=0;i<5;i++) await Promise.resolve();
+    if(scenario==="dismissed") {await clean;assert.equal(writes,0);continue;}
+    assert.match(h.elements.get("backup-progress").textContent,/Verifying replacement.*episode.mkv.*elapsed/);
+    await h.run('cleanBackup(copy)');assert.equal(writes,1);
+    if(scenario==="expired") h.run('invalidateAuthentication()');
+    pending.resolve({status:"completed"});await clean;
+    assert.equal(h.run('state.backupCleaning'),null);
+    if(scenario==="pending") assert.match(h.elements.get("backup-progress").textContent,/completed/);
+    else assert.equal(h.elements.get("backup-progress").hidden,true);
+  }
+});
+
+test("lost cleanup responses keep removal disabled until the durable job outcome is known", async () => {
+  const h=harness();let writes=0;
+  h.context.write=()=>{writes++;throw new Error("Lost response");};
+  h.run('reviewAction=async()=>true;loadBackups=async()=>{};loadJobs=async()=>{};tool=async()=>write();api=async()=>({jobs:[{id:"cleanup",status:"running"}]});');
+  await assert.rejects(h.run('cleanBackup({action_id:"cleanup",original_path:"/media/a.mkv",cleanup_available:true})'),/Lost response/);
+  assert.equal(h.run('state.backupCleaning.id'),"cleanup");assert.match(h.elements.get("backup-progress").textContent,/Checking cleanup outcome/);
+  await h.run('cleanBackup({action_id:"cleanup"})');assert.equal(writes,1);
+  h.run('api=async()=>({jobs:[{id:"cleanup",status:"completed"}]});');await h.run('refreshBackupCleanup()');assert.equal(h.run('state.backupCleaning'),null);
+});
+
+test("linked execution keeps preview access in job details and preserves the compact queue controls", () => {
+  const h=harness();
+  h.run('state.workerInfo={ready:true};');
+  h.context.job={id:"execution",action_name:"transcode_batch",status:"waiting_external",preview_action_id:"preview"};
+  assert.equal(h.run('jobControls(job).children.some(b=>b.textContent==="View preview")'),false);
+  assert.equal(h.run('jobControls(job,true).children.some(b=>b.textContent==="View preview")'),true);
+});
+
+test("missing Arr deep links recover to the library and keep other tabs usable", async () => {
+  const h=harness();let jobs=0;
+  h.context.readJobs=()=>jobs++;
+  h.run('controls=()=>{};loadLibrary=async()=>{};loadJobs=async()=>readJobs();state.info={roots:["/media"],services:[{name:"sonarr"}]};api=async()=>{throw new Error("Title unavailable");};');
+  await h.run('applyNavigation(navigationRoute("?view=queue&source=sonarr&media=999"))');
+  assert.equal(h.run('state.tab'),"jobs");assert.equal(h.run('state.media'),null);assert.equal(jobs,1);assert.equal(h.run('state.applyingNavigation'),false);
+});
 
 test("season choices use the complete available file summary, never declared empty seasons", async () => {
   const h=harness();
@@ -1354,12 +1553,12 @@ test("a batch with multiple active files never inherits one child's stale measur
 test("batch progress counts resolved files independently of individual worker percentages", () => {
   const h = harness();
   const progress = h.run('telemetry({batch:{total:23,completed:20,running:2,queued:1},activities:[{},{}],worker:{progress:99,progress_is_stale:true}})');
-  assert.equal(progress.children[0].textContent, "20 / 23 files processed");
+  assert.equal(progress.children[0].textContent, "20 / 23 files");
   assert.equal(progress.children[1].textContent, "87%");
   assert.equal(progress.children[2].value, 20);
   assert.equal(progress.children[2].max, 23);
   const mixed = h.run('batchProgress({batch:{total:10,completed:3,failed:2,skip:1,cancelled:1,waiting_decision:2,running:1}})');
-  assert.equal(mixed.children[0].textContent, "6 / 10 files processed");
+  assert.equal(mixed.children[0].textContent, "6 / 10 files");
   assert.equal(mixed.children[1].textContent, "60%");
   assert.match(mixed.children[0].title, /Cancelled files.*not counted/);
   assert.equal(h.run('batchProgress({batch:{dry_run:true,total:10,queued:10}})'), null);
@@ -1375,7 +1574,7 @@ test("a completed preview offers review and start, while active work retains can
   assert.deepEqual(controls.children.map(c=>c.textContent), ["Review preview", "Start batch"]);
   assert.equal(controls.children[1].disabled, false);
   assert.match(h.run('queueOutcome({status:"completed",batch:{dry_run:true,queued:8}})'), /Nothing starts automatically/);
-  assert.equal(h.run('queuePresentation({status:"completed",batch:{dry_run:true,outcome:"preview"}}).status'), "Preview complete");
+  assert.equal(h.run('queuePresentation({status:"completed",batch:{dry_run:true,outcome:"preview"}}).status'), "Preview");
   assert.deepEqual(h.run('jobControls({id:"p",status:"completed",batch:{dry_run:true,queued:0}})').children.map(c=>c.textContent), ["Review preview"]);
   assert.deepEqual(h.run('jobControls({id:"p",status:"completed",batch:{dry_run:true,queued:8},preview_execution_action_id:"encode"})').children.map(c=>c.textContent), ["View batch"]);
   assert.ok(h.run('jobControls({id:"p",status:"running",batch:{dry_run:true}})').children.some(c=>c.textContent === "Cancel"));
