@@ -39,7 +39,7 @@ func TestFolderSourcesWithoutArr(t *testing.T) {
 	for _, tc := range []struct {
 		query string
 		count int
-	}{{"&files=1", 1}, {"&files=1&recursive=1", 2}} {
+	}{{"&files=1", 1}, {"&files=1&recursive=1", 2}, {"&files=1&q=FILM", 1}, {"&files=1&q=episode", 0}, {"&files=1&recursive=1&q=episode", 1}} {
 		w := request(h, "GET", base+tc.query, "", true)
 		var selection struct {
 			Paths []string `json:"paths"`

@@ -191,3 +191,19 @@ func TestQueueNumbersAppendWithinOneSecondRegardlessOfRandomID(t *testing.T) {
 		t.Fatal("new random ID renumbered earlier job", after)
 	}
 }
+
+func TestReplacementHasFileContextBeforePlanningCheckpoint(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	seedOperation(t, st, "original", "transcode_media", "completed", map[string]any{"path": "/media/movie.mkv"}, map[string]any{"original": map[string]any{"size_bytes": 1000}, "result": map[string]any{"size_bytes": 400}}, nil)
+	seedOperation(t, st, "replacement", "promote_transcode_candidate", "running", map[string]any{"transcode_action_id": "original"}, nil, nil)
+	w := request(h, "GET", "/api/maintenance/operations?group=workflow", "", true)
+	var page operationsPage
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil || len(page.Jobs) != 1 {
+		t.Fatal(w.Body.String())
+	}
+	job := page.Jobs[0]
+	if job["workflow_id"] != "original" || job["source_path"] != "/media/movie.mkv" || operationMap(job["savings"])["candidate_bytes"] != float64(400) {
+		t.Fatal("planning lost durable file context", job)
+	}
+}
