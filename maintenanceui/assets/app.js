@@ -171,9 +171,13 @@ function invalidateAuthentication() {
   finishActionReview(false);
   state.authRevision++;
   state.workerInfo = null;
+  state.activitySlotIDs = null;
   state.workerCheckedAt = 0;
   $("worker-status").hidden = true;
   $("workers-dialog").close();
+  $("benchmark-comparison").close();
+  state.comparisonRevision = (state.comparisonRevision || 0) + 1;
+  $("comparison-frame").replaceChildren();
   clearTimeout(state.folderSizesTimer);
   state.libraryRevision++;
   state.jobsRevision++;
@@ -399,10 +403,10 @@ async function initialize() {
   $("service").replaceChildren();
   info.roots.forEach(
     (r) =>
-      (option($("service"), `folder:${r}`, r.split("/").pop() || r).title = r),
+      (option($("service"), `folder:${r}`, `Folder · ${r.split("/").pop() || r}`).title = r),
   );
   info.services.forEach((s) =>
-    option($("service"), s.name, s.kind === "movie" ? "Movies" : "TV"),
+    option($("service"), s.name, s.name === "radarr" ? "Radarr · Movies" : "Sonarr · TV"),
   );
   $("root").replaceChildren();
   info.roots.forEach((r) => {
@@ -451,6 +455,7 @@ async function loadLibrary(more = false) {
       q: $("search").value,
       offset: state.libraryOffset,
       limit: 100,
+      sort: $("library-sort").value || "name",
     });
     if (state.media) query.set("id", state.media.id);
     const page = await api(`library?${query}`);
@@ -547,17 +552,11 @@ async function loadLibrary(more = false) {
     $("library-more").hidden = !page.has_more;
     if (state.media && $("service").value === "sonarr") {
       const selectedSeason = $("season").value;
-      const seasons = [
-        ...new Set(
-          [...(state.media.seasons || []), ...state.files.values()]
-            .map((f) => f.seasonNumber)
-            .filter((n) => n != null),
-        ),
-      ].sort((a, b) => a - b);
+      const seasons = page.seasons || [];
       $("season").replaceChildren();
       option($("season"), "", "All seasons");
-      seasons.forEach((n) => option($("season"), n, `Season ${n}`));
-      $("season").value = selectedSeason;
+      seasons.forEach(({seasonNumber:n,fileCount:count}) => option($("season"), n, `${n === 0 ? "Specials" : `Season ${n}`} · ${count} file${count === 1 ? "" : "s"}`));
+      $("season").value = seasons.some(s => String(s.seasonNumber) === selectedSeason) ? selectedSeason : "";
     }
   } catch (error) {
     if (
@@ -587,6 +586,9 @@ function resetLibrary() {
   state.libraryRevision++;
   state.libraryLoaded = 0;
   state.libraryHasMore = false;
+  state.folderListing = null;
+  $("season").value = "";
+  $("size-order-note").hidden = true;
   $("library-more").hidden = true;
   state.media = null;
   state.folder = null;
@@ -610,6 +612,8 @@ $("service").addEventListener("change", () => {
   resetLibrary();
   safe(loadLibrary);
 });
+$("library-sort").addEventListener("change", () => safe(loadLibrary));
+$("reload-library").addEventListener("click", () => safe(loadLibrary));
 $("back").addEventListener("click", () => {
   if ($("service").value.startsWith("folder:")) {
     const root = $("service").value.slice(7);
@@ -724,6 +728,7 @@ async function loadFolder(revision = ++state.libraryRevision, more = false) {
   controls();
   try {
     if (!more) state.libraryOffset = 0;
+    if (!more) state.folderListing = null;
     const root = $("service").value.slice(7);
     if (
       !state.folder ||
@@ -733,9 +738,11 @@ async function loadFolder(revision = ++state.libraryRevision, more = false) {
       state.folder = root;
     state.folderSelected ||= new Set();
     const page = await api(
-      `folder?${new URLSearchParams({ path: state.folder, q: $("search").value, offset: state.libraryOffset, sizes:"1" })}`,
+      `folder?${new URLSearchParams({ path: state.folder, q: $("search").value, offset: state.libraryOffset, sizes:"1", sort: $("library-sort").value || "name", listing:state.folderListing || "" })}`,
     );
     if (revision !== state.libraryRevision) return;
+    state.folderListing = page.listing || null;
+    $("size-order-note").hidden = !page.size_order_pending;
     $("selection-title").textContent =
       page.path === root
         ? root.split("/").pop() || root
@@ -847,7 +854,7 @@ async function updateFolderSizes(revision, path, query, loaded) {
   let pending = false;
   try {
     for (let offset = 0; offset < loaded; offset += 100) {
-      const page = await api(`folder?${new URLSearchParams({path, q:query, offset, sizes:"1"})}`);
+      const page = await api(`folder?${new URLSearchParams({path, q:query, offset, sizes:"1", sort:$("library-sort").value || "name", listing:state.folderListing || ""})}`);
       if (!current()) return;
       for (const item of page.items || []) {
         const target = state.folderSizeTargets.get(item.path);
@@ -992,13 +999,20 @@ async function selectAllFiles() {
   state.selectionLoading = true;
   controls();
   try {
-    const keys = folder
-      ? (await api(`folder?${new URLSearchParams({path:state.folder,files:"1",q:$("search").value})}`)).paths
-      : [...state.files.keys()];
+    let keys, files;
+    if (folder) keys = (await api(`folder?${new URLSearchParams({path:state.folder,files:"1",q:$("search").value})}`)).paths;
+    else {
+      const page = await api(`library?${new URLSearchParams({service:$("service").value,id:state.media.id,q:$("search").value,all:"1"})}`);
+      files = page.items;
+      keys = files.map(file => file.id);
+    }
     if (revision !== state.libraryRevision || auth !== state.authRevision) return;
     if (!keys.length) throw new Error("No videos found to select.");
     if (folder) state.folderSelected = new Set(keys);
-    else state.selected = new Set(keys);
+    else {
+      files.forEach(file => state.files.set(file.id,file));
+      state.selected = new Set(keys);
+    }
     $("library-items").querySelectorAll('input[type="checkbox"]').forEach(input => { input.checked = true; });
     fileSelectionChanged();
   } finally {
@@ -1396,6 +1410,10 @@ function telemetry(job) {
     "",
     `job-progress ${w ? "worker-progress" : "workflow-progress"}`,
   );
+  if (job.activities?.length > 1) {
+    result.append(node("span",`${job.activities.length} active files · See worker slots above for each file and phase`,"metadata"));
+    return result;
+  }
   if (workerUnavailable(job) || w?.progress_is_stale) {
     result.className = "job-progress stalled-progress";
     const measured = w?.progress ?? w?.last_known_progress?.progress;
@@ -1427,12 +1445,14 @@ function telemetry(job) {
   };
   const parts = [
     job.activity_file ? `Current: ${job.activity_file.split("/").pop()}` : null,
-    phases[phase] || phase,
+    workerPhaseLabel(phase) || phases[phase] || phase,
     w.queue_position > 0 ? `Queue #${w.queue_position}` : null,
     w.speed > 0 ? `${Number(w.speed).toFixed(2)}×` : null,
     w.fps > 0 ? `${Number(w.fps).toFixed(1)} fps` : null,
   ];
   const eta = job.savings?.eta_seconds;
+  const details = w.progress_details || w.benchmark_progress_details;
+  if (details?.total_units > 0) parts.push(`${details.completed_units}/${details.total_units} sample tasks`);
   if (Number.isFinite(eta) && eta > 0 && !w.progress_is_stale)
     parts.push(`About ${Math.ceil(eta / 60)} min`);
   result.append(
@@ -1849,8 +1869,98 @@ function jobControls(job) {
     add("Replace file", () => prepareReplacement(job));
   if (job.replacement_action_id)
     add("View replacement", () => openJob(job.replacement_action_id));
+  if (job.comparison_action_id)
+    add("Compare frames", () => openComparison(job));
   return actionRail;
 }
+
+async function openComparison(job) {
+  const revision = state.comparisonRevision = (state.comparisonRevision || 0) + 1;
+  const auth = state.authRevision;
+  state.comparison = null;
+  state.comparisonAction = job.comparison_action_id;
+  $("comparison-file").textContent = queuePresentation(job).title;
+  $("comparison-note").textContent = "Loading saved sample frames…";
+  $("comparison-controls").hidden = true;
+  $("comparison-view").hidden = true;
+  $("comparison-metrics").textContent = "";
+  $("comparison-frame").replaceChildren();
+  $("benchmark-comparison").showModal();
+  try {
+    const comparison = await api(`benchmark-comparison?id=${encodeURIComponent(job.comparison_action_id)}`);
+    if (auth !== state.authRevision || revision !== state.comparisonRevision || !$("benchmark-comparison").open) return;
+    if (!Array.isArray(comparison.frames) || !comparison.frames.length) throw new Error("No saved frames for this benchmark.");
+    state.comparison = comparison;
+    $("comparison-sample").replaceChildren();
+    comparison.frames.forEach((frame,index) => option($("comparison-sample"),index,`Sample ${index+1} · ${formatFrameTime(frame.source_seconds)}`));
+    $("comparison-sample").value = "0";
+    $("comparison-controls").hidden = false;
+    showComparisonFrame();
+  } catch (error) {
+    if (revision === state.comparisonRevision && auth === state.authRevision)
+      $("comparison-note").textContent = error.message || "Could not load the comparison. Check the worker connection and reopen it.";
+  }
+}
+function formatFrameTime(seconds) {
+  const s = Math.max(0,Number(seconds)||0);
+  return `${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,"0")}.${String(Math.floor((s%1)*1000)).padStart(3,"0")}`;
+}
+function showComparisonFrame() {
+  const frame = state.comparison?.frames[Number($("comparison-sample").value)];
+  if (!frame) return;
+  const revision = state.comparisonRevision = (state.comparisonRevision || 0) + 1;
+  const host = $("comparison-frame");
+  host.replaceChildren();
+  host.className = "comparison-frame";
+  host.style?.setProperty("--frame-width",`${frame.width}px`);
+  $("comparison-zoom").textContent = "View at 100%";
+  $("comparison-zoom").setAttribute("aria-pressed","false");
+  $("comparison-slider").value = "50";
+  $("comparison-note").textContent = "Loading both images…";
+  $("comparison-view").hidden = true;
+  $("comparison-metrics").textContent = [
+    `${frame.width} × ${frame.height} · Frame ${frame.frame_index} · ${formatFrameTime(frame.source_seconds)}`,
+    frame.vmaf != null ? `VMAF ${Number(frame.vmaf).toFixed(2)}` : null,
+    frame.ssim != null ? `SSIM ${Number(frame.ssim).toFixed(4)}` : null,
+  ].filter(Boolean).join(" · ");
+  let loaded = 0, failed = false;
+  for (const side of ["original","candidate"]) {
+    const img = document.createElement("img");
+    img.alt = `${side === "original" ? "Original reference" : "Selected candidate"} at ${formatFrameTime(frame.source_seconds)}`;
+    if (side === "candidate") img.className = "comparison-candidate";
+    img.addEventListener("load", () => {
+      if (revision !== state.comparisonRevision || failed) return;
+      if (++loaded === 2) { $("comparison-view").hidden = false; $("comparison-note").textContent = "Drag the slider or use its arrow keys to compare the same frame."; }
+    });
+    img.addEventListener("error", () => {
+      if (revision !== state.comparisonRevision) return;
+      failed = true;
+      $("comparison-view").hidden = true;
+      $("comparison-note").textContent = "Could not load both images. They may have expired, or the worker is disconnected. Reopen the comparison to retry.";
+    });
+    img.src = `/api/maintenance/benchmark-comparison?${new URLSearchParams({id:state.comparisonAction,image:frame.sample_index,side})}`;
+    host.append(img);
+  }
+  host.append(node("span","","comparison-divider"));
+}
+$("close-comparison").addEventListener("click", () => $("benchmark-comparison").close());
+$("benchmark-comparison").addEventListener("close", () => {
+  state.comparisonRevision = (state.comparisonRevision || 0) + 1;
+  state.comparison = null;
+  $("comparison-frame").replaceChildren();
+});
+$("comparison-sample").addEventListener("change", showComparisonFrame);
+$("comparison-slider").addEventListener("input", () => {
+  const value = Math.max(0,Math.min(100,Number($("comparison-slider").value)||0));
+  const host = $("comparison-frame");
+  host.querySelector(".comparison-candidate").style.clipPath = `inset(0 ${100-value}% 0 0)`;
+  host.querySelector(".comparison-divider").style.left = `${value}%`;
+});
+$("comparison-zoom").addEventListener("click", () => {
+  const native = $("comparison-frame").classList.toggle("native-size");
+  $("comparison-zoom").textContent = native ? "Fit to view" : "View at 100%";
+  $("comparison-zoom").setAttribute("aria-pressed",String(native));
+});
 function shortJobReason(reason) {
   const text = String(reason || "")
     .replace(/\s+/g, " ")
@@ -2000,6 +2110,7 @@ async function loadJobs(more = false) {
     return;
   const revision = ++state.jobsRevision;
   state.jobsLoading = true;
+  if (state.tab === "jobs" && (!state.activityCheckedAt || Date.now() - state.activityCheckedAt > 5000)) void refreshWorkerActivity();
   $("jobs-more").disabled = true;
   const status = $("job-filter").value;
   const offset = more ? state.jobsLoaded || 0 : 0;
@@ -2030,6 +2141,7 @@ async function loadJobs(more = false) {
       const row = node("article", "", "job-row"),
         meta = node("div", "", "job-meta");
       if (job.batch) row.className += " batch-job";
+      if (["completed", "failed", "cancelled"].includes(job.status)) row.className += " terminal-job";
       const presentation = queuePresentation(job);
       const heading = node("h3", "", "job-heading");
       heading.append(node("span", job.number ? `#${job.number}` : "", "job-number"));
@@ -2092,6 +2204,79 @@ async function loadJobs(more = false) {
       $("jobs-more").disabled = false;
     }
   }
+}
+
+function workerPhaseLabel(phase) {
+  return {
+    queued:"Waiting for a worker slot",preparing:"Preparing source",reading_source:"Reading source from media storage",
+    probing_source:"Inspecting source",extracting_samples:"Extracting reference samples",encoding_samples:"Encoding test samples",
+    evaluating_metrics:"Measuring sample quality",estimating_final_size:"Estimating final file size",selecting_candidate:"Selecting the best candidate",
+    capturing_comparison:"Saving comparison frames",encoding:"Encoding full video",validating:"Verifying output",publishing:"Saving candidate to media storage",
+    benchmarking:"Calibrating quality",completed:"Completed",
+  }[phase] || (phase ? phase.replaceAll("_"," ") : "Preparing job");
+}
+function activityElapsed(value) {
+  const at = Date.parse(value || "");
+  if (!Number.isFinite(at) || at < Date.UTC(2000,0,1)) return null;
+  const seconds = Math.max(0,Math.floor((Date.now()-at)/1000));
+  return seconds >= 60 ? `${Math.floor(seconds/60)}m ${seconds%60}s` : `${seconds}s`;
+}
+function renderWorkerActivity(data) {
+  $("worker-slots").replaceChildren();
+  if (!serverReachable || !data?.available) {
+    $("worker-capacity").textContent = "Worker slots · Unknown";
+    $("activity-checked").textContent = "";
+    $("worker-slots").append(node("p",data?.message || "Worker disconnected; slot occupancy is unknown.","metadata"));
+    return;
+  }
+  const activity = data.activity;
+  $("worker-capacity").textContent = `Worker slots · ${activity.worker_slots_used}/${activity.worker_slots_total} occupied`;
+  $("activity-checked").textContent = "Updated now · Job reservations";
+  const jobs = activity.jobs || [];
+  // Keep a live reservation in the same visual slot as other jobs finish.
+  // Slot labels describe this node's reservations, not physical CPU cores.
+  const assigned = state.activitySlotIDs ||= new Map();
+  const live = new Set(jobs.map(job => job.id));
+  for (const [id,slot] of assigned) if (!live.has(id) || slot >= activity.worker_slots_total) assigned.delete(id);
+  for (const job of jobs) if (!assigned.has(job.id)) {
+    const used = new Set(assigned.values());
+    for (let slot=0;slot<Math.min(16,activity.worker_slots_total);slot++) if (!used.has(slot)) { assigned.set(job.id,slot);break; }
+  }
+  for (let i=0;i<Math.min(16,activity.worker_slots_total);i++) {
+    const row = node("div","","worker-slot"), job = jobs.find(job => assigned.get(job.id) === i);
+    if (!job) {
+      const unknownOccupied = !activity.details_available && i < activity.worker_slots_used;
+      row.append(node("strong",`Slot ${i+1} · ${unknownOccupied ? "Occupied" : "Available"}`));
+      row.append(node("p",unknownOccupied ? "File details require the updated video worker." : "Ready for the next job.","metadata"));
+    } else {
+      const stale = !activityElapsed(job.heartbeat_at) || Date.now()-Date.parse(job.heartbeat_at)>30000;
+      row.append(node("strong",`Slot ${i+1} · ${job.file}`));
+      row.children[0].title = job.file;
+      const phase = workerPhaseLabel(job.phase);
+      const parts = [job.kind === "benchmark" ? "Sample benchmark" : "Full conversion",phase,activityElapsed(job.started_at) ? `${activityElapsed(job.started_at)} elapsed` : null];
+      if (job.progress != null) parts.push(`${Number(job.progress).toFixed(1)}%${job.kind === "benchmark" ? " of sample work" : ""}`);
+      row.append(node("p",parts.filter(Boolean).join(" · "),"metadata"));
+      const detail = job.details;
+      if (detail?.total_units>0) row.append(node("p",`${detail.completed_units}/${detail.total_units} sample tasks resolved${detail.sample_number ? ` · Latest sample ${detail.sample_number}` : ""}${detail.candidate_number ? ` · Candidate ${detail.candidate_number}` : ""}${detail.metric ? ` · ${detail.metric.toUpperCase()}` : ""}`,"metadata"));
+      const last = activityElapsed(job.last_progress_at);
+      row.append(node("p",stale ? "No recent worker heartbeat. Last reported state." : last ? `Last advance ${last} ago` : "Worker connected · Waiting for the next measurement", "metadata"));
+      if (job.phase === "evaluating_metrics") row.append(node("p","Quality measurement compares the sample frames and can take longer than encoding them.","metadata"));
+    }
+    $("worker-slots").append(row);
+  }
+}
+async function refreshWorkerActivity() {
+  if (state.activityRequest || $("workspace").hidden) return;
+  const auth = state.authRevision;
+  state.activityRequest = true;
+  try {
+    const data = await api("worker-activity");
+    if (auth !== state.authRevision || $("workspace").hidden) return;
+    state.activityCheckedAt = Date.now();
+    renderWorkerActivity(data);
+  } catch {
+    if (auth === state.authRevision) renderWorkerActivity(null);
+  } finally { state.activityRequest = false; }
 }
 $("refresh-jobs").addEventListener("click", () => safe(() => loadJobs()));
 $("job-filter").addEventListener("change", () => {

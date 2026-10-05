@@ -88,6 +88,17 @@ function deferred() {
   return { promise, resolve };
 }
 
+test("season choices use the complete available file summary, never declared empty seasons", async () => {
+  const h=harness();
+  h.run('controls=()=>{}; $("service").value="sonarr"; state.media={id:1,seasons:[{seasonNumber:0},{seasonNumber:1},{seasonNumber:9}]}; $("season").value="0"; api=async()=>({total:105,items:[],seasons:[{seasonNumber:1,fileCount:100},{seasonNumber:2,fileCount:5}]});');
+  await h.run('loadLibrary()');
+  assert.equal(h.elements.get("season").value,"");
+  assert.deepEqual(h.elements.get("season").children.map(c=>c.textContent),["All seasons","Season 1 · 100 files","Season 2 · 5 files"]);
+  h.run('$("season").value="2";');
+  await h.run('loadLibrary()');
+  assert.equal(h.elements.get("season").value,"2");
+});
+
 test("maintenance actions never use native browser confirmations", () => {
   assert.doesNotMatch(source, /\bconfirm\s*\(/);
 });
@@ -1001,6 +1012,7 @@ test("continuous jobs loading appends a page and refreshes the entire loaded win
   const h = harness(),
     requests = [];
   h.context.request = (path) => {
+    if (path === "worker-activity") return {available:false};
     const q = new URLSearchParams(path.split("?")[1]);
     const offset = Number(q.get("offset")),
       limit = Number(q.get("limit"));
@@ -1029,6 +1041,55 @@ test("continuous jobs loading appends a page and refreshes the entire loaded win
   await h.run("loadJobs(true)");
   assert.equal(h.run("state.operationJobs.size"), 60);
   assert.equal(h.elements.get("jobs-more").hidden, true);
+});
+
+test("worker activity shows occupied slots, sample work, elapsed time and unknown connection honestly", () => {
+  const h=harness();
+  h.context.activity={available:true,activity:{details_available:true,worker_slots_total:2,worker_slots_used:2,jobs:[
+    {id:"first",file:"sample-one.mkv",kind:"benchmark",phase:"evaluating_metrics",started_at:new Date(Date.now()-120000).toISOString(),heartbeat_at:new Date().toISOString(),last_progress_at:new Date(Date.now()-10000).toISOString(),progress:84.4,details:{total_units:20,completed_units:17,sample_number:2,candidate_number:3,metric:"vmaf"}},
+    {id:"second",file:"sample-two.mkv",kind:"transcode",phase:"encoding",heartbeat_at:new Date().toISOString(),progress:30},
+  ]}};
+  h.run('renderWorkerActivity(activity)');
+  assert.match(h.elements.get("worker-capacity").textContent,/2\/2 occupied/);
+  const first=h.elements.get("worker-slots").children[0];
+  assert.match(first.children[0].textContent,/sample-one/);
+  assert.match(first.children[1].textContent,/Measuring sample quality.*elapsed.*of sample work/);
+  assert.match(first.children[2].textContent,/17\/20.*VMAF/);
+  h.run('activity.activity.jobs.shift(); activity.activity.worker_slots_used=1;renderWorkerActivity(activity)');
+  assert.match(h.elements.get("worker-slots").children[0].children[0].textContent,/Slot 1 · Available/);
+  assert.match(h.elements.get("worker-slots").children[1].children[0].textContent,/Slot 2 · sample-two/);
+  h.run('renderWorkerActivity({available:false})');
+  assert.match(h.elements.get("worker-capacity").textContent,/Unknown/);
+  assert.doesNotMatch(h.elements.get("worker-capacity").textContent,/0\/2/);
+});
+
+test("a late comparison response cannot reopen a closed dialog or expired session", async () => {
+  for (const expired of [false,true]) {
+    const h=harness(),pending=deferred();h.context.pending=pending.promise;
+    h.run('api=async()=>pending;');
+    const open=h.run('openComparison({id:"action",comparison_action_id:"action",action_name:"benchmark_transcode",status:"completed",source_path:"/media/sample.mkv"})');
+    if (expired) h.run('invalidateAuthentication()');
+    else { h.elements.get("benchmark-comparison").close();h.elements.get("benchmark-comparison").listeners.get("close")(); }
+    pending.resolve({frames:[{sample_index:0,width:128,height:72,frame_index:5,source_seconds:5}]});
+    await open;
+    assert.equal(h.elements.get("comparison-frame").children.length,0);
+    assert.equal(h.elements.get("benchmark-comparison").open,false);
+  }
+});
+
+test("comparison waits for both paired images and never shows one as a successful comparison", async () => {
+  const h=harness();
+  h.run('api=async()=>({frames:[{sample_index:0,width:128,height:72,frame_index:5,source_seconds:5}]});');
+  await h.run('openComparison({id:"action",comparison_action_id:"action",action_name:"benchmark_transcode",status:"completed",source_path:"/media/sample.mkv"})');
+  const imgs=h.elements.get("comparison-frame").children;
+  assert.match(imgs[0].src,/side=original/);assert.match(imgs[1].src,/side=candidate/);
+  imgs[0].listeners.get("load")();
+  assert.equal(h.elements.get("comparison-view").hidden,true);
+  imgs[1].listeners.get("load")();
+  assert.equal(h.elements.get("comparison-view").hidden,false);
+  imgs[1].listeners.get("error")();
+  assert.equal(h.elements.get("comparison-view").hidden,true);
+  assert.match(h.elements.get("comparison-note").textContent,/Could not load both/);
 });
 test("changing a root blocks old continuation controls until the new first page loads", async () => {
   const h = harness(),
@@ -1267,6 +1328,15 @@ test("late select-all replies cannot select another folder or expired session",a
   const select=h.run('selectAllFiles()');h.run(change);pending.resolve({paths:["/media/old/a.mkv"]});await select;
   assert.equal(h.run('state.folderSelected.size'),0);
  }
+});
+
+test("select all in an Arr collection selects files beyond the loaded page",async()=>{
+ const h=harness(),calls=[]; h.context.calls=calls;
+ h.run('controls=()=>{};$("service").value="sonarr";$("search").value="episode";state.media={id:42};state.files=new Map([[1,{id:1}]]);api=async(path)=>{calls.push(path);return {items:Array.from({length:105},(_,i)=>({id:i+1,path:"/media/episode"+(i+1)+".mkv"}))};};');
+ await h.run('selectAllFiles()');
+ assert.match(calls[0],/all=1/);assert.match(calls[0],/id=42/);assert.match(calls[0],/q=episode/);
+ assert.equal(h.run('state.selected.size'),105);assert.equal(h.run('state.files.get(105).path'),'/media/episode105.mkv');
+ assert.equal(h.elements.get('selected-only').checked,true);
 });
 
 test("replacement planning keeps the filename and replacement status before hashes are ready",()=>{
