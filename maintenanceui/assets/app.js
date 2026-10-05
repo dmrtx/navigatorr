@@ -1047,6 +1047,7 @@ $("back-to-files").addEventListener("click", () => setFileStep("browse"));
 $("use-container").addEventListener("click", () => {
   $("scope").value = "batch";
   $("selected-only").checked = false;
+  if ($("service").value.startsWith("folder:")) $("recursive").checked = true;
   controls();
   setFileStep("configure");
 });
@@ -1070,6 +1071,8 @@ function controls() {
   $("use-container").disabled = state.libraryLoading || state.selectionLoading;
   $("use-container").textContent = folder ? "Select folder" : "Select series";
   $("select-all-files").hidden = !folder && !state.files?.size;
+  $("selection-toolbar").hidden = $("select-all-files").hidden && $("use-container").hidden && !selectedCount;
+  $("use-container").title = folder ? "Choose this folder, including its subfolders" : "Choose this series";
   $("select-all-files").disabled = state.libraryLoading || state.selectionLoading;
   $("clear-selected-files").hidden = !selectedCount;
   $("clear-selected-files").disabled = state.libraryLoading || state.selectionLoading;
