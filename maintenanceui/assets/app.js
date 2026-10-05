@@ -814,10 +814,11 @@ async function loadFolder(revision = ++state.libraryRevision, more = false) {
     state.libraryError = false;
     $("library-more").hidden = !page.has_more;
     controls();
-    if ([...state.folderSizeTargets.values()].flat().some(label => label.dataset.pending === "1")) {
+    if (state.folderSizeTargets.size) {
+      const pending = [...state.folderSizeTargets.values()].flat().some(label => label.dataset.pending === "1");
       state.folderSizesTimer = setTimeout(() => {
         void updateFolderSizes(revision, page.path, $("search").value, state.libraryLoaded);
-      }, 3000);
+      }, pending ? 3000 : 30000);
     }
   } catch (error) {
     if (revision === state.libraryRevision) libraryFailure(error, more);
@@ -855,9 +856,9 @@ async function updateFolderSizes(revision, path, query, loaded) {
         pending ||= item.folder_size?.status === "calculating" || item.folder_size?.updating;
       }
     }
-    if (pending && current()) state.folderSizesTimer = setTimeout(() => {
+    if (current()) state.folderSizesTimer = setTimeout(() => {
       void updateFolderSizes(revision, path, query, loaded);
-    }, 3000);
+    }, pending ? 3000 : 30000);
   } catch {
     if (current()) for (const targets of state.folderSizeTargets.values()) {
       for (const target of Array.isArray(targets) ? targets : [targets]) {
