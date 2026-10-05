@@ -1245,14 +1245,14 @@ pre {
     font-size: 10px;
   }
   .job-row {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) auto;
     gap: 2px 6px;
     padding: 7px 0;
   }
   .job-row > .job-actions {
-    grid-column: 1;
-    grid-row: auto;
-    align-self: start;
+    grid-column: 2;
+    grid-row: 1;
+    align-self: center;
   }
   .job-row > .multiple-actions {
     grid-column: 1 / -1;
