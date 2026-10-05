@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -212,7 +211,16 @@ func (e *Engine) stepPromotePlan(ctx context.Context, ec *ExecutionContext) (Ste
 	}
 	id := strings.TrimSpace(getString(ec.Inputs, "transcode_action_id"))
 	seriesID := getInt(ec.Inputs, "series_id")
-	if id == "" || seriesID <= 0 {
+	movieID := getInt(ec.Inputs, "movie_id")
+	if movieID > 0 {
+		if seriesID > 0 || getString(ec.Inputs, "service") != "radarr" || getString(ec.Inputs, "batch_promote_parent_id") != "" {
+			return promoteFailed(fmt.Errorf("movie promotion requires service=radarr, movie_id and no series/batch inputs"))
+		}
+		seriesID = movieID // Durable media claims are namespaced by service.
+	} else if getString(ec.Inputs, "service") == "radarr" {
+		return promoteFailed(fmt.Errorf("Radarr promotion requires movie_id"))
+	}
+	if id == "" || (seriesID <= 0 && getString(ec.Inputs, "service") != "filesystem") {
 		return promoteFailed(fmt.Errorf("transcode_action_id and a positive series_id are required"))
 	}
 	inst, err := e.deps.Store.GetActionInstance(id)
@@ -230,6 +238,7 @@ func (e *Engine) stepPromotePlan(ctx context.Context, ec *ExecutionContext) (Ste
 		return promoteFailed(fmt.Errorf("the source action did not produce a candidate"))
 	}
 	p := &promotionState{SourceActionID: id, Service: getString(ec.Inputs, "service"), SeriesID: seriesID, OriginalPath: getString(source.State, "resolved_path"), CandidatePath: getString(source.State, "candidate_path"), OriginalSHA: getString(source.State, "original_sha256"), Commands: map[string]*promotionCommand{}}
+	p.MovieID = movieID
 	if p.Service == "" {
 		p.Service = "sonarr"
 	}
@@ -286,6 +295,22 @@ func (e *Engine) stepPromotePlan(ctx context.Context, ec *ExecutionContext) (Ste
 	if err := e.verifyPromotionHash(ctx, p.CandidatePath, p.CandidateSHA); err != nil {
 		return promoteFailed(err)
 	}
+	if p.Service == "filesystem" {
+		if seriesID > 0 || movieID > 0 || getString(ec.Inputs, "batch_promote_parent_id") != "" {
+			return promoteFailed(fmt.Errorf("filesystem promotion cannot include library or batch IDs"))
+		}
+		p.SeriesPath = filepath.Dir(p.OriginalPath)
+		p.NewPath = strings.TrimSuffix(p.OriginalPath, filepath.Ext(p.OriginalPath)) + filepath.Ext(p.CandidatePath)
+		if _, err := e.promotionPath(p.NewPath, true); err != nil {
+			return promoteFailed(err)
+		}
+		if p.NewPath != p.OriginalPath {
+			if _, err := os.Lstat(p.NewPath); !os.IsNotExist(err) {
+				return promoteFailed(fmt.Errorf("filesystem replacement destination already exists or cannot be inspected"))
+			}
+		}
+		return StepResult{Status: StepCompleted, Outputs: map[string]any{"promotion": p, "candidate_path": p.CandidatePath, "original_path": p.OriginalPath, "final_path": p.NewPath, "estimated_bytes_saved": p.OriginalBytes - p.CandidateBytes}}, nil
+	}
 	svc, err := e.promotionService(p)
 	if err != nil {
 		return promoteFailed(err)
@@ -294,7 +319,7 @@ func (e *Engine) stepPromotePlan(ctx context.Context, ec *ExecutionContext) (Ste
 		ID   int    `json:"id"`
 		Path string `json:"path"`
 	}
-	data, err := svc.Get(ctx, "/api/v3/series/"+strconv.Itoa(seriesID), nil)
+	data, err := svc.Get(ctx, p.mediaEndpoint(), nil)
 	if err != nil {
 		return promoteFailed(fmt.Errorf("resolve Sonarr series: %w", err))
 	}
@@ -353,10 +378,23 @@ func (e *Engine) stepPromotePreserve(ctx context.Context, ec *ExecutionContext) 
 	if err := e.verifyPromotionHash(ctx, p.CandidatePath, p.CandidateSHA); err != nil {
 		return promoteFailed(err)
 	}
-	if err := e.promotionOriginalStillActive(ctx, svc, p); err != nil {
+	if p.Service != "filesystem" {
+		if err := e.promotionOriginalStillActive(ctx, svc, p); err != nil {
+			return promoteFailed(err)
+		}
+	}
+	// Every adapter reserves the same original bytes, preventing a local and
+	// library promotion from concurrently replacing one physical source.
+	claimed, err := e.deps.Store.ClaimPromotionOriginal(promotionPhysicalIdentity(p), 1, ec.InstanceID)
+	if err != nil || !claimed {
+		if err == nil {
+			err = fmt.Errorf("original file is reserved by another promotion")
+		}
 		return promoteFailed(err)
 	}
-	claimed, err := e.deps.Store.ClaimPromotionOriginal(p.Service, p.OriginalFileID, ec.InstanceID)
+	if p.Service != "filesystem" {
+		claimed, err = e.deps.Store.ClaimPromotionOriginal(p.Service, p.OriginalFileID, ec.InstanceID)
+	}
 	if err != nil {
 		return promoteFailed(err)
 	}

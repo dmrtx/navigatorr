@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -361,8 +362,8 @@ func TestCatalogExamplesCanBeSentThroughActionRun(t *testing.T) {
 			batch = entry
 		}
 	}
-	if len(batch.Examples) != 3 {
-		t.Fatalf("missing direct/tuning/preview examples: %+v", batch)
+	if len(batch.Examples) < 4 {
+		t.Fatalf("missing filesystem/direct/tuning/preview examples: %+v", batch)
 	}
 	allowed := map[string]bool{}
 	for _, key := range append(batch.RequiredInputs, batch.OptionalInputs...) {
@@ -394,7 +395,7 @@ func TestCatalogExamplesCanBeSentThroughActionRun(t *testing.T) {
 		if res.IsError {
 			t.Fatal(resultText(t, res))
 		}
-		if captured["series_id"] != float64(10) || captured["priority"] != inputs["priority"] || captured["profile"] != inputs["profile"] || captured["dry_run"] != inputs["dry_run"] {
+		if !reflect.DeepEqual(captured, inputs) {
 			t.Fatalf("example intent changed in transit: %+v", captured)
 		}
 	}

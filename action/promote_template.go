@@ -15,20 +15,20 @@ import (
 // importing any of its outputs.
 func (e *Engine) registerPromoteTranscodeTemplate() {
 	e.RegisterTemplate(ActionTemplate{
-		Name: "promote_transcode_candidate", Version: 1, Destructive: true,
+		Name: "promote_transcode_candidate", Version: 2, Destructive: true,
 		AutoReconcile:   true,
 		ImmutableInputs: true,
-		Description:     "Promotes a completed, validated transcode into Sonarr after explicit approval, preserving a verified recovery copy until import, old-file cleanup, rename and rescan are verified. Persists external command intents and never blindly resubmits uncertain imports.",
-		RequiredInputs:  []string{"transcode_action_id", "series_id"}, OptionalInputs: []string{"service", "batch_promote_parent_id", "batch_promote_item_key", "batch_promote_digest"},
+		Description:     "Replaces a completed, validated transcode locally with service=filesystem (no library IDs), or promotes it into Sonarr/Radarr, after explicit approval, preserving a verified recovery copy until import, old-file cleanup, rename and rescan are verified. Persists external command intents and never blindly resubmits uncertain imports.",
+		RequiredInputs:  []string{"transcode_action_id"}, OptionalInputs: []string{"service", "series_id", "movie_id", "batch_promote_parent_id", "batch_promote_item_key", "batch_promote_digest"},
 		Steps: []StepDefinition{
-			{Name: "plan_promotion", Description: "Verify original and candidate, and resolve all episodes sharing the original file", Run: e.stepPromotePlan},
+			{Name: "plan_promotion", Description: "Verify original and candidate, and resolve the movie or all episodes sharing the original file", Run: e.stepPromotePlan},
 			{Name: "approve_promotion", Description: "Present the exact replacement for an explicit approve decision", Run: e.stepPromoteApprove},
-			{Name: "preserve_original", Description: "Create and verify a recovery copy before any Sonarr mutation", Run: e.stepPromotePreserve},
-			{Name: "import_candidate", Description: "Import once and reconcile Sonarr episode IDs, physical candidate SHA and streams", Run: e.stepPromoteImport},
-			{Name: "remove_old_file", Description: "Reverify adoption and integrity before removing the old episodeFile", Run: e.stepPromoteRemoveOld},
-			{Name: "rename_candidate", Description: "Move the active file out of the temporary candidate directory through Sonarr", Run: e.stepPromoteRename},
-			{Name: "rescan_library", Description: "Rescan and verify Sonarr's final library state", Run: e.stepPromoteRescan},
-			{Name: "finalize_promotion", Description: "Verify one active file per affected episode, record savings and remove the recovery copy", Run: e.stepPromoteFinalize},
+			{Name: "preserve_original", Description: "Create and verify a recovery copy before any library mutation", Run: e.stepPromotePreserve},
+			{Name: "import_candidate", Description: "Import once and reconcile library associations, physical candidate SHA and streams", Run: e.stepPromoteImport},
+			{Name: "remove_old_file", Description: "Reverify adoption and integrity before removing the old library file", Run: e.stepPromoteRemoveOld},
+			{Name: "rename_candidate", Description: "Move the active file out of the temporary candidate directory through the library service", Run: e.stepPromoteRename},
+			{Name: "rescan_library", Description: "Rescan and verify the final library state", Run: e.stepPromoteRescan},
+			{Name: "finalize_promotion", Description: "Verify one active file per affected library item, record savings and remove the recovery copy", Run: e.stepPromoteFinalize},
 		},
 	})
 }
@@ -42,6 +42,7 @@ type promotionCommand struct {
 }
 
 type promotionState struct {
+	MovieID                           int                          `json:"movie_id,omitempty"`
 	SourceActionID                    string                       `json:"transcode_action_id"`
 	Service                           string                       `json:"service"`
 	SeriesID                          int                          `json:"series_id"`
@@ -80,7 +81,7 @@ func loadPromotion(ec *ExecutionContext) (*promotionState, error) {
 	if err := json.Unmarshal(b, p); err != nil {
 		return nil, err
 	}
-	if p.SourceActionID == "" || p.OriginalSHA == "" || p.CandidateSHA == "" || p.OriginalFileID <= 0 || len(p.EpisodeIDs) == 0 {
+	if p.SourceActionID == "" || p.OriginalSHA == "" || p.CandidateSHA == "" || (p.Service != "filesystem" && (p.OriginalFileID <= 0 || len(p.EpisodeIDs) == 0)) {
 		return nil, fmt.Errorf("promotion integrity baseline is missing")
 	}
 	if p.Commands == nil {
@@ -153,6 +154,12 @@ func (e *Engine) promotionMutation(ec *ExecutionContext) (*promotionState, *arrs
 	if e.deps.Fs == nil {
 		return nil, nil, fmt.Errorf("filesystem resolver is required")
 	}
+	if p.Service == "filesystem" {
+		if err := e.claimPromotionSeries(ec, "filesystem-destination:"+p.NewPath, 1); err != nil {
+			return nil, nil, err
+		}
+		return p, nil, nil
+	}
 	if err := e.claimPromotionSeries(ec, p.Service, p.SeriesID); err != nil {
 		return nil, nil, err
 	}
@@ -195,7 +202,7 @@ func (e *Engine) stepPromoteApprove(ctx context.Context, ec *ExecutionContext) (
 		case "reject", "cancel":
 			return promoteFailed(fmt.Errorf("candidate promotion rejected; original and candidate remain untouched"))
 		default:
-			return StepResult{Status: StepWaitingDecision, WaitingReason: "Approve the verified candidate and affected Sonarr episodes before library replacement", WaitingOptions: []WaitingOption{{Decision: "approve", Description: "Promote this candidate, preserve recovery copy until verified, and remove the old library file"}, {Decision: "reject", Description: "Keep original and candidate unchanged"}}, Outputs: map[string]any{"promotion": p}}, nil
+			return StepResult{Status: StepWaitingDecision, WaitingReason: "Approve the verified candidate and affected library items before replacement", WaitingOptions: []WaitingOption{{Decision: "approve", Description: "Promote this candidate, preserve recovery copy until verified, and remove the old library file"}, {Decision: "reject", Description: "Keep original and candidate unchanged"}}, Outputs: map[string]any{"promotion": p}}, nil
 		}
 	}
 	if err := e.savePromotion(ctx, ec, p); err != nil {

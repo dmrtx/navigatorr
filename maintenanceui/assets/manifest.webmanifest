@@ -1,0 +1,26 @@
+{
+  "id": "/",
+  "name": "Navigatorr \u00b7 Maintenance",
+  "short_name": "Navigatorr",
+  "lang": "en",
+  "description": "Files, transcode jobs and space savings.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f3f1eb",
+  "theme_color": "#244d40",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

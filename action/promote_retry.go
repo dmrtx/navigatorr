@@ -17,6 +17,9 @@ import (
 // Explicit retry reconciles a rediscovered candidate without another import,
 // or prepares a verified reimport when the original has been restored.
 func (e *Engine) preparePromotionRetry(ctx context.Context, inst *store.ActionInstance, ec *ExecutionContext, tmpl ActionTemplate, resume int) (int, error) {
+	if getString(ec.Inputs, "service") == "filesystem" {
+		return resume, nil
+	}
 	first, last := actionStepIndex(tmpl, "import_candidate"), actionStepIndex(tmpl, "rename_candidate")
 	if inst.ActionName != "promote_transcode_candidate" || first < 0 || last < 0 || resume < first || resume > last {
 		return resume, nil

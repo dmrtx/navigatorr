@@ -54,7 +54,31 @@ and `recovery_path` identifies it. Savings are final only after successful
 cleanup. Recovery paths are confined to write roots and symlink traversal is
 rejected.
 
-## Why import alone is insufficient
+## Radarr movies
+
+The same approved recovery workflow also supports a Radarr movie candidate:
+
+```json
+{
+  "action": "promote_transcode_candidate",
+  "inputs": "{\"transcode_action_id\":\"act-transcode-media-example\",\"movie_id\":42,\"service\":\"radarr\"}"
+}
+```
+
+Use `movie_id` instead of `series_id`; the two cannot be combined. Omitting
+`service` with a positive `movie_id` selects Radarr. The adapter resolves the
+movie's active `movieFileId`, checks that each returned movie file belongs to the
+approved movie/root, imports with `movieId`, then removes only the reverified old
+`moviefile`, renames and rescans. Radarr's
+[RenameFiles](https://github.com/Radarr/Radarr/blob/develop/src/NzbDrone.Core/MediaFiles/Commands/RenameFilesCommand.cs)
+and [RescanMovie](https://github.com/Radarr/Radarr/blob/develop/src/NzbDrone.Core/MediaFiles/Commands/RescanMovieCommand.cs)
+commands use the movie ID. The compact action summary exposes `movie_id`,
+`original_movie_file_id` and `new_movie_file_id`; completed outputs report
+`one_active_file_per_movie`. Library claims are namespaced by service, so a
+Radarr movie and a Sonarr series with the same numeric ID remain independent.
+Season/series batch promotion remains the existing Sonarr workflow.
+
+## Why import alone is insufficient for Sonarr
 
 Sonarr's
 [ManualImportService](https://github.com/Sonarr/Sonarr/blob/develop/src/NzbDrone.Core/MediaFiles/EpisodeImport/Manual/ManualImportService.cs)

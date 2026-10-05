@@ -7,13 +7,15 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"time"
 
 	"github.com/jakenesler/navigatorr/arrservice"
 )
 
 func (e *Engine) stepPromoteImport(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+	if getString(ec.Inputs, "service") == "filesystem" {
+		return e.localPromotionPublish(ctx, ec)
+	}
 	p, svc, err := e.promotionMutation(ec)
 	if err != nil {
 		return promoteFailed(err)
@@ -50,7 +52,7 @@ func (e *Engine) stepPromoteImport(ctx context.Context, ec *ExecutionContext) (S
 		var series struct {
 			Path string `json:"path"`
 		}
-		data, err := svc.Get(ctx, "/api/v3/series/"+strconv.Itoa(p.SeriesID), nil)
+		data, err := svc.Get(ctx, p.mediaEndpoint(), nil)
 		if err != nil {
 			return promoteFailed(err)
 		}
@@ -59,6 +61,11 @@ func (e *Engine) stepPromoteImport(ctx context.Context, ec *ExecutionContext) (S
 		}
 	}
 	file := map[string]any{"path": p.CandidatePath, "seriesId": p.SeriesID, "episodeIds": p.EpisodeIDs, "quality": p.Quality, "languages": p.Languages, "releaseGroup": p.ReleaseGroup}
+	if p.MovieID > 0 {
+		delete(file, "seriesId")
+		delete(file, "episodeIds")
+		file["movieId"] = p.MovieID
+	}
 	payload := map[string]any{"name": "ManualImport", "importMode": "copy", "files": []any{file}}
 	res, err := e.promotionCommand(ctx, ec, p, svc, "import", payload, false)
 	if err != nil || res.Status != StepCompleted {
@@ -79,6 +86,9 @@ func (e *Engine) stepPromoteImport(ctx context.Context, ec *ExecutionContext) (S
 }
 
 func (e *Engine) stepPromoteRemoveOld(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+	if getString(ec.Inputs, "service") == "filesystem" {
+		return e.localPromotionRemoveOriginal(ctx, ec)
+	}
 	p, svc, err := e.promotionMutation(ec)
 	if err != nil {
 		return promoteFailed(err)
@@ -114,7 +124,7 @@ func (e *Engine) stepPromoteRemoveOld(ctx context.Context, ec *ExecutionContext)
 		}
 		// Reload the exact object immediately before DELETE. Never trust an
 		// old snapshot: the ID/path could now refer to the imported file.
-		data, code, err := svc.DoRequest(ctx, http.MethodGet, "/api/v3/episodefile/"+strconv.Itoa(p.OriginalFileID), nil, nil)
+		data, code, err := svc.DoRequest(ctx, http.MethodGet, p.fileEndpoint(p.OriginalFileID), nil, nil)
 		if err != nil {
 			return promoteWait("Unable to recheck the old episodeFile before deletion")
 		}
@@ -127,6 +137,9 @@ func (e *Engine) stepPromoteRemoveOld(ctx context.Context, ec *ExecutionContext)
 		var old promotionFile
 		if err := json.Unmarshal(data, &old); err != nil {
 			return promoteFailed(err)
+		}
+		if p.MovieID > 0 {
+			old.SeriesID = old.MovieID
 		}
 		if old.Path == "" && old.RelativePath != "" {
 			old.Path = filepath.Join(p.SeriesPath, old.RelativePath)
@@ -158,7 +171,7 @@ func (e *Engine) stepPromoteRemoveOld(ctx context.Context, ec *ExecutionContext)
 		if err := e.savePromotion(ctx, ec, p); err != nil {
 			return promoteFailed(err)
 		}
-		_, code, err = svc.DoRequestOnce(ctx, http.MethodDelete, "/api/v3/episodefile/"+strconv.Itoa(p.OriginalFileID), nil, nil)
+		_, code, err = svc.DoRequestOnce(ctx, http.MethodDelete, p.fileEndpoint(p.OriginalFileID), nil, nil)
 		if err != nil || (code < 200 || code >= 300) && code != http.StatusNotFound {
 			return promotionUncertain(p.DeleteSentAt, "Sonarr old episodeFile deletion response was not conclusive")
 		}
@@ -235,6 +248,9 @@ func (e *Engine) promotionNoOldReferences(ctx context.Context, svc *arrservice.S
 }
 
 func (e *Engine) stepPromoteRename(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+	if getString(ec.Inputs, "service") == "filesystem" {
+		return e.localPromotionVerifyFinal(ctx, ec)
+	}
 	p, svc, err := e.promotionMutation(ec)
 	if err != nil {
 		return promoteFailed(err)
@@ -292,6 +308,10 @@ func (e *Engine) stepPromoteRename(ctx context.Context, ec *ExecutionContext) (S
 		return promoteFailed(err)
 	}
 	payload := map[string]any{"name": "RenameFiles", "seriesId": p.SeriesID, "files": []int{adopted.ID}}
+	if p.MovieID > 0 {
+		delete(payload, "seriesId")
+		payload["movieId"] = p.MovieID
+	}
 	res, err := e.promotionCommand(ctx, ec, p, svc, "rename", payload, true)
 	if err != nil || res.Status != StepCompleted {
 		return res, err
@@ -320,6 +340,9 @@ func (e *Engine) stepPromoteRename(ctx context.Context, ec *ExecutionContext) (S
 }
 
 func (e *Engine) stepPromoteRescan(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+	if getString(ec.Inputs, "service") == "filesystem" {
+		return e.localPromotionVerifyFinal(ctx, ec)
+	}
 	p, svc, err := e.promotionMutation(ec)
 	if err != nil {
 		return promoteFailed(err)
@@ -330,10 +353,17 @@ func (e *Engine) stepPromoteRescan(ctx context.Context, ec *ExecutionContext) (S
 		// after every approved candidate has reached its verified final path.
 		return StepResult{Status: StepCompleted, Outputs: map[string]any{"rescan_deferred_to_batch": true}}, nil
 	}
-	return e.promotionCommand(ctx, ec, p, svc, "rescan", map[string]any{"name": "RescanSeries", "seriesId": p.SeriesID}, true)
+	payload := map[string]any{"name": "RescanSeries", "seriesId": p.SeriesID}
+	if p.MovieID > 0 {
+		payload = map[string]any{"name": "RescanMovie", "movieId": p.MovieID}
+	}
+	return e.promotionCommand(ctx, ec, p, svc, "rescan", payload, true)
 }
 
 func (e *Engine) stepPromoteFinalize(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+	if getString(ec.Inputs, "service") == "filesystem" {
+		return e.localPromotionFinalize(ctx, ec)
+	}
 	p, svc, err := e.promotionMutation(ec)
 	if err != nil {
 		return promoteFailed(err)
@@ -475,5 +505,14 @@ func (e *Engine) stepPromoteFinalize(ctx context.Context, ec *ExecutionContext) 
 	if p.OriginalBytes > 0 {
 		percent = float64(saved) / float64(p.OriginalBytes) * 100
 	}
-	return StepResult{Status: StepCompleted, Outputs: map[string]any{"promoted": true, "promotion": p, "final_path": finalPath, "new_episode_file_id": p.NewFileID, "episode_ids": p.EpisodeIDs, "original_integrity": "verified_before_replacement", "candidate_sha256": p.CandidateSHA, "one_active_file_per_episode": true, "recovery_retained": false, "size_saved_bytes": saved, "size_saved_percent": percent}}, nil
+	outputs := map[string]any{"promoted": true, "promotion": p, "final_path": finalPath, "new_episode_file_id": p.NewFileID, "episode_ids": p.EpisodeIDs, "original_integrity": "verified_before_replacement", "candidate_sha256": p.CandidateSHA, "one_active_file_per_episode": true, "recovery_retained": false, "size_saved_bytes": saved, "size_saved_percent": percent}
+	if p.MovieID > 0 {
+		delete(outputs, "new_episode_file_id")
+		delete(outputs, "episode_ids")
+		delete(outputs, "one_active_file_per_episode")
+		outputs["movie_id"] = p.MovieID
+		outputs["new_movie_file_id"] = p.NewFileID
+		outputs["one_active_file_per_movie"] = true
+	}
+	return StepResult{Status: StepCompleted, Outputs: outputs}, nil
 }

@@ -62,6 +62,9 @@ func chunkPayload(id, actionName, section, key string, rawBytes []byte, chunkIdx
 // ActionCompactSummary contains operational fields needed to monitor or continue workflows,
 // omitting full inputs/outputs/state to protect the model's context window.
 type ActionCompactSummary struct {
+	SourcePath           string                 `json:"source_path,omitempty"`
+	ParentActionID       string                 `json:"parent_action_id,omitempty"`
+	Origin               string                 `json:"origin"`
 	ID                   string                 `json:"id"`
 	ActionName           string                 `json:"action_name"`
 	Status               string                 `json:"status"`
@@ -117,6 +120,9 @@ func toCompactSummary(res *action.ActionResult) ActionCompactSummary {
 		return ActionCompactSummary{}
 	}
 	return ActionCompactSummary{
+		SourcePath:           summaryInput(res, "path"),
+		ParentActionID:       summaryInput(res, "parent_action_id"),
+		Origin:               actionOrigin(res.State),
 		ID:                   res.ID,
 		ActionName:           res.ActionName,
 		Status:               res.Status,
@@ -152,6 +158,18 @@ func toCompactSummary(res *action.ActionResult) ActionCompactSummary {
 	}
 }
 
+func actionOrigin(state map[string]any) string {
+	if origin, ok := state["request_origin"].(string); ok && origin != "" {
+		return origin
+	}
+	return "unknown"
+}
+
+func summaryInput(res *action.ActionResult, key string) string {
+	value, _ := res.Inputs[key].(string)
+	return value
+}
+
 // Approval must show the concrete files and episodes it will replace, even in
 // the default compact response. Do not require a second detail request merely
 // to discover what an approve option refers to.
@@ -179,7 +197,16 @@ func compactPromotion(res *action.ActionResult) map[string]any {
 		plan["recovery_cleanup_completed"] = true
 	}
 	plan["recovery_note"] = "Verification before replacement is historical. Cleanup is a completed workflow step; use transcode_backups for current filesystem presence. recovery_verified is a legacy retained-backup flag."
+	if movieID, ok := plan["movie_id"].(float64); ok && movieID > 0 {
+		plan["original_movie_file_id"] = plan["original_episode_file_id"]
+		plan["new_movie_file_id"] = plan["new_episode_file_id"]
+		delete(plan, "series_id")
+		delete(plan, "episode_ids")
+		delete(plan, "original_episode_file_id")
+		delete(plan, "new_episode_file_id")
+	}
 	return compactOperationalFields(&action.ActionResult{Outputs: plan}, []string{
+		"movie_id", "original_movie_file_id", "new_movie_file_id",
 		"transcode_action_id", "service", "series_id", "original_path", "candidate_path",
 		"original_episode_file_id", "episode_ids", "original_bytes", "candidate_bytes",
 		"original_sha256", "candidate_sha256", "approved", "new_episode_file_id", "new_path",
@@ -313,7 +340,7 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 				}
 			}
 
-			res, err := engine.Run(ctx, actionName, inputs, idempotencyKey)
+			res, err := engine.Run(action.WithOrigin(ctx, "mcp"), actionName, inputs, idempotencyKey)
 			if err != nil {
 				return toolErr("action_run failed: %v", err), nil
 			}

@@ -503,6 +503,7 @@ sample checks and approval flow; it does not add a flow editor or another search
 | `service` | string | Yes | — | Media service name (must be `sonarr`). |
 | `series_id` | string/int | Yes | — | Sonarr series ID to transcode. |
 | `season` | int | No | `nil` (all) | Optional season number filter. Omit to transcode the entire series. |
+| `episode_file_ids` | array of ints | No | all eligible files | Select up to 1000 positive episode-file IDs belonging to this series. Intersects with `season`; duplicate/shared episode files are encoded once. Empty arrays and foreign IDs are rejected. |
 | `profile` | string | No | `auto` | Recipe profile name or `auto` for deterministic selection. With a priority, `auto` generates one temporary x265 recipe from a bounded sample search. If omitted in `transcode_media`, honors configured `DefaultProfile` (including `auto`), else falls back to legacy `hevc-vt`. |
 | `metric` | string | No | profile default | Optimization metric (`vmaf`, `ssim`, or `both`) propagated to every `transcode_media` child. Use `ssim` for 10-bit sources when VMAF is unavailable. |
 | `replace_original` | bool | No | `false` | Must remain `false`. Setting `true` is rejected fail-closed; original files are never overwritten. |

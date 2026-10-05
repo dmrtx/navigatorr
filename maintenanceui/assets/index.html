@@ -1,0 +1,934 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#244d40" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Navigatorr" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" href="/icon-192.png" type="image/png" />
+    <script type="module" src="/pwa.js"></script>
+    <title>Navigatorr · Maintenance</title>
+    <link rel="stylesheet" href="/app.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <header class="masthead">
+      <a class="brand" href="/"
+        >N<span class="brand-dot">↗</span> <span>navigatorr</span></a
+      >
+      <div class="masthead-right">
+        <button id="install-app" class="quiet" hidden>Install app</button>
+      </div>
+    </header>
+    <main>
+      <aside id="connection-status" role="status" hidden>
+        Server unavailable · retrying…
+      </aside>
+      <aside id="access-expired" role="status" hidden>
+        Access session expired. <a href="/">Reload to sign in</a>
+      </aside>
+      <section id="login" class="login" hidden>
+        <h1>Sign in</h1>
+        <form id="login-form">
+          <label
+            >Access token<input
+              id="token"
+              type="password"
+              autocomplete="current-password"
+              required /></label
+          ><button class="primary">Sign in</button>
+        </form>
+      </section>
+      <div id="workspace" hidden>
+        <nav class="tabs" aria-label="Main navigation">
+          <button data-tab="library" aria-label="Files" aria-current="page">
+            <svg
+              class="nav-icon"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10H3Z" /></svg
+            ><span class="tab-text"
+              ><span class="tab-label">Files</span></span
+            ></button
+          ><button data-tab="jobs" aria-label="Queue" aria-current="false">
+            <svg
+              class="nav-icon"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <rect x="4" y="4" width="16" height="16" rx="2" />
+              <path d="M8 8h8M8 12h8M8 16h5" /></svg
+            ><span class="tab-text"
+              ><span class="tab-label">Queue</span
+              ><span id="active-count"></span
+            ></span></button
+          ><button
+            data-tab="recipes"
+            aria-label="Profiles"
+            aria-current="false"
+          >
+            <svg
+              class="nav-icon"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M4 7h16M4 17h16" />
+              <circle cx="9" cy="7" r="3" />
+              <circle cx="15" cy="17" r="3" /></svg
+            ><span class="tab-text"
+              ><span class="tab-label">Profiles</span></span
+            ></button
+          ><button data-tab="stats" aria-label="Stats" aria-current="false">
+            <svg
+              class="nav-icon"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M4 3v17h17M8 16v-5M13 16V7M18 16V4" /></svg
+            ><span class="tab-text"
+              ><span class="tab-label">Stats</span></span
+            ></button
+          ><button data-tab="advanced" aria-label="More" aria-current="false">
+            <svg
+              class="nav-icon"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <circle cx="5" cy="12" r="1" />
+              <circle cx="12" cy="12" r="1" />
+              <circle cx="19" cy="12" r="1" /></svg
+            ><span class="tab-text"><span class="tab-label">More</span></span>
+          </button>
+        </nav>
+        <section id="library" class="panel tab-content">
+          <div class="library-layout">
+            <div class="library-browser">
+              <div class="section-label">
+                <span>Files</span
+                ><span class="selection-totals"
+                  ><span id="selection-count" class="metadata"></span
+                  ><span id="library-total"></span
+                ></span>
+              </div>
+              <div class="toolbar">
+                <label>Source<select id="service"></select></label
+                ><label id="library-search-label" class="grow" hidden
+                  >Search<input
+                    id="search"
+                    type="search"
+                    placeholder="Title or filename" /></label
+                ><button
+                  id="search-button"
+                  class="icon-button"
+                  aria-label="Search files"
+                  title="Search"
+                  hidden
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.7"
+                    aria-hidden="true"
+                  >
+                    <circle cx="10" cy="10" r="6" />
+                    <path d="m15 15 5 5" />
+                  </svg></button
+                ><button
+                  id="toggle-library-search"
+                  class="icon-button"
+                  aria-label="Show search"
+                  title="Search"
+                  aria-expanded="false"
+                >
+                  <svg
+                    class="search-icon"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.7"
+                    aria-hidden="true"
+                  >
+                    <circle cx="10" cy="10" r="6" />
+                    <path d="m15 15 5 5" />
+                  </svg>
+                  <svg
+                    class="close-search-icon"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.7"
+                    aria-hidden="true"
+                  >
+                    <path d="m6 6 12 12M6 18 18 6" />
+                  </svg>
+                </button>
+                <button
+                  id="open-path"
+                  class="icon-button"
+                  aria-label="Open a path"
+                  title="Open a path"
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.7"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M3 6h7l2 2h9v12H3Z" />
+                    <path d="M12 11v6m-3-3h6" />
+                  </svg>
+                </button>
+              </div>
+              <div class="breadcrumbs">
+                <button
+                  id="back"
+                  class="icon-button quiet"
+                  aria-label="Parent folder"
+                  title="Back"
+                  hidden
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.7"
+                    aria-hidden="true"
+                  >
+                    <path d="m13 6-6 6 6 6M7 12h13" />
+                  </svg></button
+                ><span id="selection-title">Choose a folder or title</span>
+                <nav
+                  id="folder-breadcrumbs"
+                  aria-label="Folder path"
+                  hidden
+                ></nav>
+              </div>
+              <div id="library-items" class="library-items"></div>
+              <div class="list-footer">
+                <button id="library-more" class="quiet" hidden>Load more</button
+                ><span id="library-sentinel" aria-hidden="true"></span>
+              </div>
+              <div class="mobile-selection-actions">
+                <button id="use-container" class="quiet">Use folder</button>
+                <button id="configure-selection" class="primary" hidden>
+                  Continue
+                </button>
+              </div>
+            </div>
+            <form id="job-form" class="target-editor">
+              <div class="mobile-step-heading">
+                <button
+                  id="back-to-files"
+                  type="button"
+                  class="quiet"
+                  aria-label="Back to files"
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.7"
+                    aria-hidden="true"
+                  >
+                    <path d="m13 6-6 6 6 6M7 12h13" />
+                  </svg>
+                  Files
+                </button>
+                <span class="metadata">2 of 2</span>
+              </div>
+              <h2>Transcode</h2>
+              <p id="source-summary" class="metadata">
+                Choose a file or folder.
+              </p>
+
+              <label
+                >Content<select id="media-kind">
+                  <option value="movie">Movies / videos</option>
+                  <option value="tv">TV</option>
+                  <option value="anime">Anime</option>
+                </select></label
+              >
+              <label
+                >Scope<select id="scope">
+                  <option value="file">Selected file</option>
+                  <option value="batch">Batch / season / folder</option>
+                </select></label
+              >
+              <div id="batch-options" hidden>
+                <div class="field-grid">
+                  <label
+                    >Season<select id="season">
+                      <option value="">All seasons</option>
+                    </select></label
+                  ><label
+                    >File limit<input
+                      id="max-items"
+                      type="number"
+                      min="1"
+                      placeholder="Unlimited"
+                  /></label>
+                </div>
+                <label class="check"
+                  ><input id="recursive" type="checkbox" />Include subfolders
+                  (up to 1000 videos)</label
+                >
+                <label class="check"
+                  ><input id="selected-only" type="checkbox" />Selected files
+                  only</label
+                ><label class="check"
+                  ><input id="promote-batch" type="checkbox" />Request
+                  replacement approval when finished</label
+                >
+              </div>
+              <label
+                >Profile<select id="profile">
+                  <option value="auto">Automatic</option>
+                </select></label
+              >
+              <label id="priority-label"
+                >Batch priority<select id="priority">
+                  <option value="balanced">Balanced</option>
+                  <option value="quality">Quality</option>
+                  <option value="savings">Space savings</option>
+                  <option value="preserve_quality">Meet quality target</option>
+                </select></label
+              >
+              <label class="check"
+                ><input id="custom" type="checkbox" />Customize</label
+              >
+              <div id="custom-fields" hidden>
+                <div class="field-grid">
+                  <label
+                    >Encoder<select id="encoder">
+                      <option value="libx265">x265</option>
+                      <option value="hevc_videotoolbox">VideoToolbox</option>
+                    </select></label
+                  ><label id="quality-label"
+                    >Quality / CRF<input
+                      id="quality"
+                      type="number"
+                      value="23"
+                      min="1"
+                      max="51"
+                  /></label>
+                </div>
+                <div class="field-grid" id="x265-fields">
+                  <label
+                    >Preset<select id="preset">
+                      <option>ultrafast</option>
+                      <option>superfast</option>
+                      <option>faster</option>
+                      <option selected>medium</option>
+                      <option>placebo</option>
+                      <option>slow</option>
+                      <option>slower</option>
+                      <option>fast</option>
+                      <option>veryfast</option>
+                      <option>veryslow</option>
+                    </select></label
+                  ><label
+                    >Tune<select id="tune">
+                      <option value="">None</option>
+                      <option>animation</option>
+                      <option>grain</option>
+                      <option>ssim</option>
+                      <option>psnr</option>
+                      <option>fastdecode</option>
+                      <option>zerolatency</option>
+                    </select></label
+                  >
+                </div>
+                <div id="vt-fields" hidden>
+                  <label
+                    >Rate control<select id="rate-mode">
+                      <option value="quality">Constant quality</option>
+                      <option value="bitrate">Average bitrate</option>
+                    </select></label
+                  >
+                  <div class="field-grid">
+                    <label
+                      >Bitrate (kbps)<input
+                        id="bitrate"
+                        type="number"
+                        min="1"
+                        placeholder="Bitrate mode only" /></label
+                    ><label
+                      >Maximum (kbps)<input
+                        id="max-bitrate"
+                        type="number"
+                        min="1"
+                    /></label>
+                  </div>
+                </div>
+                <label
+                  >Audio tracks<select id="audio">
+                    <option value="copy">Copy all tracks</option>
+                    <option value="compact">DTS / lossless → AAC</option>
+                  </select></label
+                >
+                <p id="audio-note" class="muted" hidden>
+                  AAC is lossy. Keeps tracks, languages and channels; object
+                  audio metadata is lost.
+                </p>
+                <label class="check"
+                  ><input id="optimize" type="checkbox" />Calibrate with
+                  samples</label
+                >
+                <div id="optimization-fields" hidden>
+                  <div class="field-grid">
+                    <label
+                      >Metric<select id="metric">
+                        <option value="auto">Automatic</option>
+                        <option value="vmaf">VMAF</option>
+                        <option value="ssim">SSIM</option>
+                        <option value="both">VMAF + SSIM</option>
+                      </select></label
+                    ><label
+                      >Search values<input
+                        id="ladder"
+                        value="20,23,26"
+                        placeholder="CRF, Q or kbps"
+                    /></label>
+                  </div>
+                  <div class="field-grid">
+                    <label
+                      >VMAF target<input
+                        id="vmaf-target"
+                        type="number"
+                        value="96"
+                        min="0"
+                        max="100"
+                        step="0.1" /></label
+                    ><label
+                      >VMAF minimum<input
+                        id="vmaf-min"
+                        type="number"
+                        value="95"
+                        min="0"
+                        max="100"
+                        step="0.1" /></label
+                    ><label
+                      >SSIM target<input
+                        id="ssim-target"
+                        type="number"
+                        value="0.99"
+                        min="0"
+                        max="1"
+                        step="0.001" /></label
+                    ><label
+                      >SSIM minimum<input
+                        id="ssim-min"
+                        type="number"
+                        value="0.98"
+                        min="0"
+                        max="1"
+                        step="0.001" /></label
+                    ><label
+                      >Samples<input
+                        id="sample-count"
+                        type="number"
+                        value="3"
+                        min="1"
+                        max="20" /></label
+                    ><label
+                      >Seconds per sample<input
+                        id="sample-seconds"
+                        type="number"
+                        value="20"
+                        min="1"
+                        max="120"
+                    /></label>
+                  </div>
+                  <label
+                    >Final validation<select id="final-validation">
+                      <option value="sampled">Sampled</option>
+                      <option value="">File structure only</option>
+                    </select></label
+                  >
+                </div>
+              </div>
+              <div class="size-guardrails">
+                <div class="field-grid">
+                  <label
+                    >Minimum savings (%)<input
+                      id="min-savings"
+                      type="number"
+                      min="0"
+                      max="100"
+                      placeholder="Server default" /></label
+                  ><label
+                    >Allowed growth (%)<input
+                      id="max-growth"
+                      type="number"
+                      min="0"
+                      value="0"
+                  /></label>
+                </div>
+                <label class="check"
+                  ><input id="preserve-depth" type="checkbox" checked />Preserve
+                  source bit depth</label
+                >
+                <p class="muted">
+                  Resolution is preserved. Sample sizes are estimates.
+                </p>
+              </div>
+              <div class="submit-actions">
+                <button id="preview" type="button">Preview batch</button
+                ><button id="benchmark" type="button">Benchmark</button
+                ><button class="primary" id="enqueue">Queue transcode</button>
+              </div>
+              <p id="job-feedback" role="status"></p>
+            </form>
+          </div>
+        </section>
+        <section id="jobs" class="panel tab-content operations-panel" hidden>
+          <div class="queue-toolbar">
+            <h2>Queue</h2>
+            <div class="queue-filters">
+              <select id="job-filter" aria-label="Filter jobs by status">
+                <option value="all">All jobs</option>
+                <option value="pending">Queued</option>
+                <option value="running">Running</option>
+                <option value="waiting_external">Waiting for worker</option>
+                <option value="waiting_decision">Needs decision</option>
+                <option value="completed">Completed</option>
+                <option value="failed">Failed</option>
+                <option value="cancelled">Cancelled</option></select
+              ><button
+                id="refresh-jobs"
+                class="icon-button"
+                aria-label="Refresh jobs"
+                title="Refresh"
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.7"
+                  aria-hidden="true"
+                >
+                  <path
+                    d="M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M18 18A8 8 0 0 1 4 12"
+                  />
+                </svg>
+              </button>
+            </div>
+          </div>
+          <p id="jobs-updated" class="metadata" role="status"></p>
+          <div id="jobs-list"></div>
+          <div class="list-footer">
+            <span id="jobs-page" class="muted"></span
+            ><button id="jobs-more" class="quiet" hidden>Load more</button
+            ><span id="jobs-sentinel" aria-hidden="true"></span>
+          </div>
+        </section>
+        <section id="stats" class="panel tab-content" hidden>
+          <div class="queue-toolbar"><h2>Stats</h2></div>
+          <div class="savings-dashboard" aria-label="Space savings">
+            <div>
+              <span class="metadata">Space freed</span
+              ><strong id="saved-total">—</strong
+              ><span id="saved-count" class="metadata"></span>
+            </div>
+            <div>
+              <span class="metadata">Ready to replace</span
+              ><strong id="candidate-total">—</strong
+              ><span class="metadata">Potential savings</span>
+            </div>
+            <div>
+              <span class="metadata">Estimated savings</span
+              ><strong id="estimated-total">—</strong
+              ><span class="metadata">From profiles or samples</span>
+            </div>
+          </div>
+          <h3>Space freed over time</h3>
+          <p class="muted">
+            Verified replacements with recovery copies removed.
+          </p>
+          <div id="savings-history"></div>
+        </section>
+        <section id="recipes" class="panel tab-content" hidden>
+          <div class="queue-toolbar">
+            <h2>Profiles</h2>
+            <button
+              id="new-recipe"
+              type="button"
+              class="action-control"
+              aria-label="New profile"
+              title="New profile"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.7"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+            </button>
+          </div>
+          <div class="recipe-layout">
+            <div class="recipe-sidebar">
+              <select
+                id="recipe-picker"
+                class="mobile-recipe-picker"
+                aria-label="Profile"
+              >
+                <option value="">Choose a profile</option>
+              </select>
+              <input
+                id="recipe-search"
+                type="search"
+                aria-label="Search profiles"
+                placeholder="Search profiles"
+              />
+              <div id="recipes-list"></div>
+              <button id="recipes-more" hidden>Load more profiles</button>
+            </div>
+            <form id="recipe-form">
+              <label>Name<input id="recipe-name" required /></label
+              ><label>Description<input id="recipe-description" /></label>
+              <div id="recipe-source" class="muted"></div>
+              <div class="profile-controls">
+                <div class="field-grid">
+                  <label
+                    >Container<select id="recipe-container" disabled>
+                      <option>mkv</option>
+                    </select></label
+                  ><label
+                    >Encoder<select id="recipe-encoder">
+                      <option value="libx265">x265</option>
+                      <option value="hevc_videotoolbox">VideoToolbox</option>
+                    </select></label
+                  >
+                </div>
+                <div class="field-grid">
+                  <label
+                    >Quality<input
+                      id="recipe-quality"
+                      type="number"
+                      min="0"
+                      max="100"
+                      required /></label
+                  ><label
+                    >Preset<select id="recipe-preset">
+                      <option>ultrafast</option>
+                      <option>superfast</option>
+                      <option>faster</option>
+                      <option selected>medium</option>
+                      <option>placebo</option>
+                      <option>slow</option>
+                      <option>slower</option>
+                      <option>fast</option>
+                      <option>veryfast</option>
+                      <option>veryslow</option>
+                    </select></label
+                  >
+                </div>
+                <label
+                  >Audio tracks<select id="recipe-audio">
+                    <option value="copy">Copy all tracks</option>
+                    <option value="compact">DTS / lossless → AAC</option>
+                  </select></label
+                >
+                <input
+                  id="recipe-metadata"
+                  type="checkbox"
+                  checked
+                  hidden
+                /><input
+                  id="recipe-chapters"
+                  type="checkbox"
+                  checked
+                  hidden
+                /><input
+                  id="recipe-attachments"
+                  type="checkbox"
+                  checked
+                  hidden
+                />
+              </div>
+              <p class="preservation-note muted">
+                Metadata, chapters and attachments are preserved.
+              </p>
+              <div class="submit-actions profile-action-bar">
+                <button
+                  id="recipe-advanced"
+                  type="button"
+                  class="action-control"
+                  aria-label="Profile settings"
+                  title="Profile settings"
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.7"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M4 7h16M4 17h16M9 4v6M15 14v6" />
+                  </svg>
+                </button>
+                <button
+                  id="recipe-history"
+                  type="button"
+                  class="action-control"
+                  aria-label="Profile history"
+                  title="Profile history"
+                  disabled
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.7"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18M12 7v5l3 2" />
+                  </svg>
+                </button>
+                <button
+                  id="delete-recipe"
+                  type="button"
+                  class="action-control"
+                  aria-label="Restore built-in profile"
+                  title="Restore built-in profile"
+                  hidden
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.7"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M4 4v5h5M4 9a8 8 0 1 1 1 9" />
+                  </svg>
+                </button>
+                <button
+                  id="save-recipe"
+                  class="primary action-control"
+                  aria-label="Save profile"
+                  title="Save profile"
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.7"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M4 3h13l3 3v15H4ZM8 3v6h8V3M8 21v-7h8v7" />
+                  </svg>
+                </button>
+              </div>
+              <div id="recipe-feedback" class="profile-history" hidden></div>
+            </form>
+          </div>
+        </section>
+        <section id="advanced" class="panel tab-content" hidden>
+          <h2>Settings</h2>
+          <div class="settings-row">
+            <span
+              >Shared presets<span class="metadata">New jobs only</span></span
+            >
+            <div class="job-actions">
+              <button id="reload-profiles">Refresh presets</button
+              ><button id="rollback-profiles">Restore previous</button>
+            </div>
+          </div>
+          <div class="settings-row">
+            <span>Recovery copies</span
+            ><button id="load-backups">View copies</button>
+          </div>
+          <div id="backup-list" hidden></div>
+          <button id="backups-more" hidden>Load more</button>
+          <div id="local-session" class="settings-row" hidden>
+            <span>Local session</span
+            ><button id="logout" class="quiet" hidden>Sign out</button>
+          </div>
+        </section>
+      </div>
+      <div id="notice" role="alert" hidden></div>
+    </main>
+    <dialog id="install-help" aria-labelledby="install-title">
+      <div class="dialog-heading">
+        <h2 id="install-title">Add Navigatorr</h2>
+        <button
+          id="close-install"
+          class="icon-button"
+          aria-label="Close installation help"
+        >
+          ×
+        </button>
+      </div>
+
+      <p id="install-instructions">
+        Use your browser’s menu to add Navigatorr to your home screen.
+      </p>
+      <p id="install-status">Use HTTPS to install the app.</p>
+    </dialog>
+    <dialog id="path-dialog" aria-labelledby="path-title">
+      <div class="dialog-heading">
+        <h2 id="path-title">Open a path</h2>
+        <button
+          id="close-path"
+          class="icon-button"
+          type="button"
+          aria-label="Close path"
+        >
+          ×
+        </button>
+      </div>
+
+      <div class="toolbar">
+        <select id="root" aria-label="Allowed folder"></select
+        ><button id="browse-root">Open</button>
+      </div>
+      <label
+        >Selected file<input
+          id="path"
+          placeholder="Path inside an allowed folder" /></label
+      ><button id="inspect" type="button" class="primary">Use file</button>
+      <pre id="inspection" hidden></pre>
+    </dialog>
+    <dialog id="recipe-settings" aria-labelledby="recipe-settings-title">
+      <div class="dialog-heading">
+        <h2 id="recipe-settings-title">Profile settings</h2>
+        <button
+          id="close-recipe-settings"
+          class="icon-button"
+          type="button"
+          aria-label="Close profile settings"
+        >
+          ×
+        </button>
+      </div>
+      <div id="recipe-extra-fields"></div>
+      <div class="submit-actions">
+        <button id="done-recipe-settings" type="button" class="primary">
+          Done
+        </button>
+      </div>
+    </dialog>
+    <dialog id="replacement-choice" aria-labelledby="replacement-choice-title">
+      <div class="dialog-heading">
+        <h2 id="replacement-choice-title">Replacement method</h2>
+        <button
+          id="dismiss-replacement-choice"
+          class="icon-button"
+          type="button"
+          aria-label="Close replacement method"
+        >
+          ×
+        </button>
+      </div>
+      <p id="replacement-source" class="metadata"></p>
+      <label>Method<select id="replacement-method"></select></label>
+      <label id="replacement-library-id-label" hidden
+        >Library ID<input
+          id="replacement-library-id"
+          type="number"
+          min="1"
+          step="1"
+      /></label>
+      <p class="muted">
+        Files change only after you approve the replacement plan.
+      </p>
+      <div class="submit-actions">
+        <button id="prepare-replacement-choice" type="button" class="primary">
+          Review replacement
+        </button>
+      </div>
+    </dialog>
+    <dialog id="job-detail" aria-labelledby="job-detail-title">
+      <div class="dialog-heading">
+        <h2 id="job-detail-title">Job details</h2>
+        <button id="close-detail" class="icon-button" aria-label="Close">
+          ×
+        </button>
+      </div>
+      <p class="dialog-connection muted" role="status" hidden>
+        Server unavailable. Retrying automatically.
+      </p>
+      <div id="detail-summary"></div>
+      <div id="detail-controls" class="submit-actions"></div>
+      <section id="batch-items-panel" hidden>
+        <h3>Batch files</h3>
+        <p id="batch-items-note" class="metadata"></p>
+        <div id="batch-items-list"></div>
+        <div class="pagination">
+          <button id="batch-items-prev">← Previous</button
+          ><button id="batch-items-next">Next →</button>
+        </div>
+      </section>
+      <div class="detail-extras">
+        <button id="load-detail" class="quiet" hidden>Worker log</button>
+      </div>
+      <pre id="detail-content" hidden></pre>
+    </dialog>
+    <dialog id="batch-review" aria-labelledby="batch-review-title">
+      <h2 id="batch-review-title">Review replacements</h2>
+      <p class="dialog-connection muted" role="status" hidden>
+        Server unavailable. Approval is paused until it responds.
+      </p>
+      <p class="muted">
+        Replaces every file below after verification, with recovery copies.
+      </p>
+      <pre id="batch-review-data"></pre>
+      <div class="submit-actions">
+        <button id="dismiss-batch-review">Back</button
+        ><button id="approve-batch-review" class="primary">
+          Approve replacements
+        </button>
+      </div>
+    </dialog>
+  </body>
+</html>

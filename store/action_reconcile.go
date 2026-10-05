@@ -52,7 +52,7 @@ func (s *Store) ListReconcilableActions(afterID string, limit int) ([]ActionInst
 	rows, err := s.db.Query(`SELECT id, action_name, status, current_step, inputs_json,
 		outputs_json, state_json, waiting_reason, waiting_condition, waiting_options_json,
 		error_json, idempotency_key, created_at, updated_at FROM action_instances
-		WHERE status IN ('waiting_external', 'running') AND id > ? ORDER BY id LIMIT ?`, afterID, limit)
+		WHERE status IN ('pending', 'waiting_external', 'running') AND id > ? ORDER BY id LIMIT ?`, afterID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -112,6 +112,8 @@ func (s *Store) ClaimPromotionSeries(service string, seriesID int, actionID stri
 				AND COALESCE(json_extract(state_json, '$.promotion.new_episode_file_id'), 0)=0
 				AND COALESCE(json_extract(state_json, '$.promotion.delete_sent_at'), '')=''
 				AND COALESCE(json_extract(state_json, '$.promotion.old_removed'), 0)=0
+				AND COALESCE(json_extract(state_json, '$.filesystem_publish_started'), 0)=0
+				AND COALESCE(json_extract(state_json, '$.filesystem_published'), 0)=0
 				AND COALESCE(json_array_length(state_json, '$.promotion_reimport_history'), 0)=0
 			ELSE 0 END)))`,
 		service, seriesID, actionID)

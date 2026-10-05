@@ -15,6 +15,7 @@ import (
 	"github.com/jakenesler/navigatorr/arrservice"
 	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/internal"
+	"github.com/jakenesler/navigatorr/maintenanceui"
 	"github.com/jakenesler/navigatorr/openapi"
 	"github.com/jakenesler/navigatorr/qbit"
 	"github.com/jakenesler/navigatorr/queue"
@@ -42,6 +43,10 @@ func main() {
 	transportOpts, err := config.ResolveTransport(cfg, *transportFlag, *listenFlag)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	if cfg.Web.Enabled && transportOpts.Transport != "streamable-http" {
+		fmt.Fprintln(os.Stderr, "error: web.enabled requires the persistent streamable-http transport")
 		os.Exit(1)
 	}
 
@@ -187,6 +192,14 @@ func main() {
 		}()
 	}
 	tools.RegisterDiagnostics(s, cfg, registry, specStore, txClient, qbClient, sabClient, mStore, transcodeExecutor)
+	var webUI *maintenanceui.Server
+	if cfg.Web.Enabled {
+		webUI, err = maintenanceui.New(cfg, registry, actEngine, s)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: maintenance UI: %v\n", err)
+			os.Exit(1)
+		}
+	}
 
 	if transportOpts.Transport == "streamable-http" {
 		endpointPath := "/mcp"
@@ -202,6 +215,9 @@ func main() {
 		mux := http.NewServeMux()
 		mux.Handle(endpointPath, mcpHTTP)
 		mux.Handle(endpointPath+"/", mcpHTTP)
+		if webUI != nil {
+			mux.Handle("/", webUI.Handler())
+		}
 		srv.Handler = mux
 
 		ln, err := net.Listen("tcp", transportOpts.Listen)
