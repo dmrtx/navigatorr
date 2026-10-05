@@ -314,7 +314,7 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 	status := strings.TrimSpace(req.URL.Query().Get("status"))
 	selectedID := strings.TrimSpace(req.URL.Query().Get("id"))
 	grouped := req.URL.Query().Get("group") == "workflow" && selectedID == ""
-	if status != "" && status != "all" && status != "active" && status != "pending" && status != "running" && status != "waiting_external" && status != "waiting_decision" && status != "completed" && status != "failed" && status != "cancelled" {
+	if status != "" && status != "all" && status != "archived" && status != "active" && status != "pending" && status != "running" && status != "waiting_external" && status != "waiting_decision" && status != "completed" && status != "failed" && status != "cancelled" {
 		fail(w, 400, "invalid workflow status")
 		return
 	}
@@ -325,6 +325,11 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 	instances, err := s.engine.Deps().Store.ListMaintenanceActionSnapshot()
 	if err != nil {
 		fail(w, 500, "read maintenance history")
+		return
+	}
+	archives, err := s.engine.Deps().Store.MaintenanceArchives()
+	if err != nil {
+		fail(w, 500, "read archive state")
 		return
 	}
 	now := time.Now().UTC()
@@ -341,29 +346,32 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 	}
 	aggregateBatchSavings(records)
 	recordsByID := make(map[string]operationRecord, len(records))
-	existingReplacements := map[string]string{}
+	existingReplacements := queueReplacementLinks(records)
 	previewExecutions := map[string]string{}
 	for _, r := range records {
 		recordsByID[r.inst.ID] = r
-		if r.inst.ActionName == "transcode_batch" && strings.HasPrefix(r.inst.IdempotencyKey, previewExecutionPrefix) {
-			previewExecutions[strings.TrimPrefix(r.inst.IdempotencyKey, previewExecutionPrefix)] = r.inst.ID
-		}
-		if r.inst.ActionName == "promote_transcode_candidate" {
-			source := operationString(r.inputs["transcode_action_id"])
-			if source == "" {
-				source = operationString(operationMap(operationValue(r, "promotion"))["transcode_action_id"])
-			}
-			if source != "" && existingReplacements[source] == "" {
-				existingReplacements[source] = r.inst.ID
-			}
-		}
 	}
 	roots, numbers, members := queueWorkflows(records, recordsByID, existingReplacements)
+	for _, r := range records {
+		root := roots[r.inst.ID]
+		if r.inst.ActionName == "transcode_batch" && r.inst.ID != root && recordsByID[root].inputs["dry_run"] == true {
+			previewExecutions[root] = r.inst.ID
+		}
+	}
+	activeWorkflows := map[string]bool{}
+	for _, r := range records {
+		if operationActive(r.inst.Status) {
+			activeWorkflows[roots[r.inst.ID]] = true
+		}
+	}
 	representatives := map[string]string{}
 	for root := range members {
 		representatives[root] = root
 		if replacement := existingReplacements[root]; replacement != "" {
 			representatives[root] = replacement
+		}
+		if execution := previewExecutions[root]; execution != "" {
+			representatives[root] = execution
 		}
 	}
 	if grouped {
@@ -422,7 +430,13 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 		if grouped && representatives[roots[r.inst.ID]] != r.inst.ID {
 			continue
 		}
-		if (selectedID == "" || selectedID == r.inst.ID) && (status == "" || status == "all" || r.inst.Status == status || status == "active" && operationActive(r.inst.Status)) {
+		archived := archives[roots[r.inst.ID]] != "" && !activeWorkflows[roots[r.inst.ID]]
+		// An archived workflow that resumes through another client must remain
+		// visible while active. Direct detail links can always read its history.
+		if selectedID == "" && archived != (status == "archived") {
+			continue
+		}
+		if (selectedID == "" || selectedID == r.inst.ID) && (status == "" || status == "all" || status == "archived" || r.inst.Status == status || status == "active" && operationActive(r.inst.Status)) {
 			filtered = append(filtered, r)
 		}
 	}
@@ -468,6 +482,12 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 			job["savings"] = r.savings
 			root := roots[r.inst.ID]
 			job["workflow_id"] = root
+			job["archive_id"] = root
+			job["can_archive"] = !activeWorkflows[root]
+			job["archived"] = archives[root] != "" && !activeWorkflows[root]
+			if r.inst.ID != root && recordsByID[root].inputs["dry_run"] == true {
+				job["preview_action_id"] = root
+			}
 			job["number"] = numbers[root]
 			job["stages"] = s.queueStages(r)
 			// Planning can hash large files before a promotion checkpoint exists.

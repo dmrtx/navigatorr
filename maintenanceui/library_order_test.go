@@ -11,6 +11,40 @@ import (
 	"github.com/jakenesler/navigatorr/config"
 )
 
+func TestLibraryTitleDeepLinkReadsOnlySelectedPublicFields(t *testing.T) {
+	s, h := testUI(t)
+	paths := []string{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		json.NewEncoder(w).Encode(map[string]any{"id": 7, "title": "Synthetic title", "path": "/media/title", "seasons": []any{}, "apiKey": "must-never-project"})
+	}))
+	defer upstream.Close()
+	s.registry = arrservice.NewRegistry(&config.Config{Services: map[string]config.ServiceConfig{"sonarr": {URL: upstream.URL}, "radarr": {URL: upstream.URL}}})
+	for _, service := range []string{"sonarr", "radarr"} {
+		w := request(h, "GET", "/api/maintenance/library?service="+service+"&id=7&title=1", "", true)
+		var page struct {
+			Media map[string]any `json:"media"`
+		}
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil || page.Media["id"] != float64(7) || page.Media["title"] != "Synthetic title" || page.Media["apiKey"] != nil {
+			t.Fatal(w.Code, w.Body.String())
+		}
+	}
+	if len(paths) != 2 || paths[0] != "/api/v3/series/7" || paths[1] != "/api/v3/movie/7" {
+		t.Fatal(paths)
+	}
+	for _, id := range []string{"0", "-7", "7/other", "x"} {
+		if w := request(h, "GET", "/api/maintenance/library?service=sonarr&title=1&id="+id, "", true); w.Code != 400 {
+			t.Fatal(id, w.Code)
+		}
+	}
+	if w := request(h, "GET", "/api/maintenance/library?service=sonarr&title=1&id=7", "", false); w.Code != 401 {
+		t.Fatal("unauthenticated title read", w.Code)
+	}
+	if len(paths) != 2 {
+		t.Fatal("invalid reads reached upstream", paths)
+	}
+}
+
 func TestLibrarySizeSortBeforePaginationAndAvailableSeasons(t *testing.T) {
 	s, h := testUI(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

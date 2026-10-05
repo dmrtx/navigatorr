@@ -93,6 +93,9 @@ func sortFolderItems(items []folderItem, order string) {
 				return av < bv
 			}
 		}
+		if order == "name_desc" {
+			return strings.ToLower(a.Path) > strings.ToLower(b.Path)
+		}
 		return strings.ToLower(a.Path) < strings.ToLower(b.Path)
 	})
 }

@@ -24,6 +24,31 @@ func (s *Server) library(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.URL.Query().Get("id")
+	if id != "" && r.URL.Query().Get("title") == "1" {
+		n, err := strconv.Atoi(id)
+		if err != nil || n <= 0 {
+			fail(w, 400, "invalid media ID")
+			return
+		}
+		endpoint := "/api/v3/series/" + strconv.Itoa(n)
+		if name == "radarr" {
+			endpoint = "/api/v3/movie/" + strconv.Itoa(n)
+		}
+		b, err := svc.Get(r.Context(), endpoint, nil)
+		var raw map[string]any
+		if err != nil || json.Unmarshal(b, &raw) != nil {
+			fail(w, 502, "library title unavailable")
+			return
+		}
+		media := map[string]any{}
+		for _, key := range []string{"id", "title", "year", "path", "seasons", "seriesType", "genres"} {
+			if value, ok := raw[key]; ok {
+				media[key] = value
+			}
+		}
+		writeJSON(w, 200, map[string]any{"media": media})
+		return
+	}
 	endpoint := "/api/v3/series"
 	if name == "radarr" {
 		endpoint = "/api/v3/movie"
@@ -142,6 +167,9 @@ func sortLibraryItems(items []map[string]any, order string) {
 			return ""
 		}
 		if al, bl := label(a), label(b); al != bl {
+			if order == "name_desc" {
+				return al > bl
+			}
 			return al < bl
 		}
 		return fmt.Sprint(a["id"]) < fmt.Sprint(b["id"])

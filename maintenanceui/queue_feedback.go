@@ -11,12 +11,34 @@ import (
 
 // Queue grouping follows durable action links, never filenames: independent
 // requests for the same media must retain their own outcome and identity.
+func queueReplacementLinks(records []operationRecord) map[string]string {
+	links := map[string]string{}
+	for _, r := range records {
+		if r.inst.ActionName != "promote_transcode_candidate" {
+			continue
+		}
+		source := operationString(r.inputs["transcode_action_id"])
+		if source == "" {
+			source = operationString(operationMap(operationValue(r, "promotion"))["transcode_action_id"])
+		}
+		if source != "" && links[source] == "" {
+			links[source] = r.inst.ID
+		}
+	}
+	return links
+}
+
 func queueWorkflows(records []operationRecord, byID map[string]operationRecord, replacements map[string]string) (map[string]string, map[string]int, map[string][]operationRecord) {
 	roots := map[string]string{}
 	members := map[string][]operationRecord{}
 	for _, r := range records {
 		root := r.inst.ID
-		if r.inst.ActionName == "promote_transcode_candidate" {
+		if r.inst.ActionName == "transcode_batch" && strings.HasPrefix(r.inst.IdempotencyKey, previewExecutionPrefix) {
+			preview := strings.TrimPrefix(r.inst.IdempotencyKey, previewExecutionPrefix)
+			if original, ok := byID[preview]; ok && original.inst.ActionName == "transcode_batch" && original.inputs["dry_run"] == true {
+				root = preview
+			}
+		} else if r.inst.ActionName == "promote_transcode_candidate" {
 			source := operationString(r.inputs["transcode_action_id"])
 			if source == "" {
 				source = operationString(operationMap(operationValue(r, "promotion"))["transcode_action_id"])
@@ -29,6 +51,15 @@ func queueWorkflows(records []operationRecord, byID map[string]operationRecord, 
 			if batch, ok := byID[parent]; ok && batch.inst.ActionName == "transcode_batch" {
 				root = parent
 			}
+		}
+		roots[r.inst.ID] = root
+	}
+	for _, r := range records {
+		root := roots[r.inst.ID]
+		seen := map[string]bool{r.inst.ID: true}
+		for roots[root] != "" && roots[root] != root && !seen[root] {
+			seen[root] = true
+			root = roots[root]
 		}
 		roots[r.inst.ID] = root
 		members[root] = append(members[root], r)

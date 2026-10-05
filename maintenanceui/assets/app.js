@@ -68,8 +68,11 @@ function actionIcon(label) {
     "Review candidate": "M5 4h14v16H5ZM8 8h8M8 12h8",
     "Set up benchmark": "M8 5h12v15H8ZM4 16V2h12",
     "Keep originals": "M4 4h16v4H4ZM6 8v12h12V8M10 12h4",
+    Archive: "M4 4h16v4H4ZM6 8v12h12V8M10 12h4",
+    Restore: "M12 19V9M8 13l4-4 4 4M4 4h16v4H4Z",
     "View replacement": "M5 4h14v16H5ZM8 8h8M8 12h8",
     "View batch": "M8 5h12v15H8ZM4 16V2h12",
+    "View preview": "M5 4h14v16H5ZM8 8h8M8 12h8",
     "Accept quality loss": "M12 3 2 21h20ZM12 9v5M12 17v1",
     "Pause batch": "M8 4v16M16 4v16",
     "Resume batch": "M7 4l13 8-13 8Z",
@@ -172,6 +175,14 @@ if (typeof window !== "undefined") {
 function invalidateAuthentication() {
   finishActionReview(false);
   state.authRevision++;
+  state.backupRevision = (state.backupRevision || 0) + 1;
+  state.backupCleaning = null;
+  state.backupsLoading = false;
+  state.backupsVisible = false;
+  state.backups = [];
+  $("backup-list").replaceChildren();
+  $("backup-summary").hidden = true;
+  $("backup-progress").hidden = true;
   state.workerInfo = null;
   state.activitySlotIDs = null;
   state.workerCheckedAt = 0;
@@ -298,7 +309,117 @@ function option(select, value, text = value) {
   select.append(o);
   return o;
 }
-function selectTab(tab) {
+const routeTabs = {files:"library",queue:"jobs",profiles:"recipes",stats:"stats",more:"advanced"};
+const routeStatuses = ["all","pending","running","waiting_external","waiting_decision","completed","failed","cancelled","archived"];
+function navigationRoute(search = "") {
+  const q = new URLSearchParams(search);
+  return {
+    tab:routeTabs[q.get("view")] || "library", explicit:q.has("view"),
+    source:q.get("source") || "", folder:q.get("folder") || "",
+    media:/^[1-9]\d*$/.test(q.get("media") || "") ? Number(q.get("media")) : null,
+    file:q.get("file") || "", search:(q.get("q") || "").slice(0,256),
+    sort:["name","name_desc","size_asc","size_desc"].includes(q.get("sort")) ? q.get("sort") : "name",
+    status:routeStatuses.includes(q.get("status")) ? q.get("status") : "all",
+    job:(q.get("job") || "").slice(0,200), profile:(q.get("profile") || "").slice(0,128),
+    copies:q.get("copies") === "1",
+  };
+}
+function navigationQuery() {
+  const q = new URLSearchParams({view:Object.entries(routeTabs).find(([,tab])=>tab===state.tab)?.[0] || "files"});
+  if ($("service").value) q.set("source",$("service").value);
+  if ($("service").value.startsWith("folder:") && state.folder) q.set("folder",state.folder);
+  if (state.media?.id) q.set("media",state.media.id);
+  if (state.fileStep === "configure" && $("scope").value === "file" && state.file?.path) q.set("file",state.file.path);
+  if ($("search").value) q.set("q",$("search").value);
+  if ($("library-sort").value && $("library-sort").value !== "name") q.set("sort",$("library-sort").value);
+  if ($("job-filter").value && $("job-filter").value !== "all") q.set("status",$("job-filter").value);
+  if ($("job-detail").open && state.detail) q.set("job",state.detail);
+  if (state.tab === "recipes" && state.recipe?.name) q.set("profile",state.recipe.name);
+  if (state.tab === "advanced" && state.backupsVisible) q.set("copies","1");
+  return q.toString();
+}
+function writeNavigation(replace = false) {
+  if (typeof window === "undefined" || !window.history || !state.routeReady || state.applyingNavigation || $("workspace").hidden) return;
+  const url = `${window.location.pathname}?${navigationQuery()}`;
+  if (url === window.location.pathname + window.location.search) return;
+  window.history[replace ? "replaceState" : "pushState"]({navigatorr:true},"",url);
+}
+async function applyNavigation(route) {
+  const revision = state.routeRevision = (state.routeRevision || 0) + 1;
+  const auth = state.authRevision;
+  const current = () => revision === state.routeRevision && auth === state.authRevision && !$("workspace").hidden;
+  state.applyingNavigation = true;
+  try {
+    state.detailRevision++;
+    if ($("job-detail").open) $("job-detail").close();
+    if (!route.copies) {
+      state.backupRevision = (state.backupRevision || 0) + 1;
+      state.backupsLoading = false;
+      state.backupsVisible = false;
+      $("load-backups").disabled = false;
+      $("backup-list").hidden = true;
+      $("backup-summary").hidden = true;
+      $("backup-progress").hidden = true;
+    }
+    if (route.tab === "recipes" && !route.profile) resetRecipeView();
+    const sources = [...state.info.roots.map(r=>`folder:${r}`), ...state.info.services.map(s=>s.name)];
+    $("service").value = sources.includes(route.source) ? route.source : sources[0] || "";
+    resetLibrary();
+    $("library-sort").value = route.sort;
+    renderLibrarySort();
+    $("job-filter").value = route.status;
+    $("search").value = route.search;
+    $("library-search-label").hidden = !route.search;
+    $("search-button").hidden = !route.search;
+    $("toggle-library-search").setAttribute("aria-expanded",String(Boolean(route.search)));
+    $("toggle-library-search").setAttribute("aria-label",route.search ? "Close search" : "Show search");
+    $("toggle-library-search").classList?.toggle("search-open",Boolean(route.search));
+    if ($("service").value.startsWith("folder:")) state.folder = route.folder || $("service").value.slice(7);
+    else if (route.media && $("service").value) {
+      try {
+        const result = await api(`library?${new URLSearchParams({service:$("service").value,id:route.media,title:"1"})}`);
+        if (!current()) return;
+        if (result.media?.id !== route.media) throw new Error("This library title is unavailable.");
+        state.media = result.media;
+        $("selection-title").textContent = result.media.title || `Title ${route.media}`;
+        $("back").hidden = false;
+        $("scope").value = $("service").value === "sonarr" ? "batch" : "file";
+      } catch (error) {
+        if (!current()) return;
+        notify(`${error.message} Choose a title from the library.`);
+      }
+    }
+    const tab = !route.explicit && typeof matchMedia === "function" && matchMedia("(max-width:600px)").matches ? "jobs" : route.tab;
+    selectTab(tab, true);
+    state.libraryNeedsLoad = true;
+    if (tab === "library" && $("service").value) {
+      await loadLibrary();
+      if (!current()) return;
+      if (route.file) {
+        const folder = $("service").value.startsWith("folder:");
+        const page = await api(`${folder ? "folder" : "library"}?${new URLSearchParams(folder ? {path:state.folder,q:route.file.split("/").pop(),limit:100} : {service:$("service").value,id:state.media?.id || "",q:route.file.split("/").pop(),limit:100})}`);
+        if (!current()) return;
+        const file = page.items?.find(f=>(f.path || "")===route.file && !f.is_dir);
+        if (file) {
+          state.file = file; state.fileMedia = state.media; state.fileService = folder ? null : $("service").value;
+          $("path").value = file.path; $("scope").value = "file"; setFileStep("configure"); controls();
+        } else notify("The selected file is unavailable. Showing its folder or title.");
+      }
+    } else if (tab === "library") $("library-items").replaceChildren(node("p", "No media folders configured.", "empty"));
+    if (!current()) return;
+    if (tab === "recipes" && route.profile) await readRecipe(route.profile);
+    if (tab === "advanced" && route.copies) await loadBackups();
+    if (tab === "jobs" || tab === "stats") await loadJobs();
+    if (current() && route.job) await openJob(route.job);
+  } finally {
+    if (revision === state.routeRevision) { state.applyingNavigation=false; writeNavigation(true); }
+  }
+}
+if (typeof window !== "undefined") window.addEventListener("popstate", () => {
+  if (state.routeReady && !$("workspace").hidden) safe(() => applyNavigation(navigationRoute(window.location.search)));
+});
+function selectTab(tab, fromRoute = false) {
+  if (!fromRoute && state.applyingNavigation) { state.routeRevision++; state.applyingNavigation=false; }
   state.tab = tab;
   document
     .querySelectorAll(".tab-content")
@@ -310,16 +431,19 @@ function selectTab(tab) {
     );
 
   if (typeof window !== "undefined") window.scrollTo({ top: 0 });
-  if (["jobs", "stats"].includes(tab)) safe(loadJobs);
+  writeNavigation();
+  if (["jobs", "stats"].includes(tab) && !fromRoute) safe(loadJobs);
+  if (tab === "library" && state.libraryNeedsLoad && !fromRoute) safe(loadLibrary);
   if (tab === "library" && $("service").value.startsWith("folder:") && state.folderSizeTargets?.size) {
     clearTimeout(state.folderSizesTimer);
     void updateFolderSizes(state.libraryRevision, state.folder, $("search").value, state.libraryLoaded);
   }
-  if (tab === "recipes")
+  if (tab === "recipes" && !fromRoute)
     safe(async () => {
+      const route = state.routeRevision, auth = state.authRevision;
       await loadRecipes();
-      if (!state.recipe && state.recipes.length)
-        await readRecipe(state.recipes[0]);
+      if (state.tab === "recipes" && route === state.routeRevision && auth === state.authRevision && !state.recipe && state.recipes.length)
+        await readRecipe(state.recipes[0], true);
     });
 }
 document
@@ -390,6 +514,7 @@ $("worker-status").addEventListener("click", () => {
 $("close-workers").addEventListener("click", () => $("workers-dialog").close());
 $("refresh-workers").addEventListener("click", () => void refreshWorkers());
 async function initialize() {
+  state.routeReady=false;
   const auth = await api("auth-info");
   state.authMode = auth.auth_mode;
   $("logout").hidden = state.authMode !== "token";
@@ -421,20 +546,17 @@ async function initialize() {
   $("enqueue").disabled = !info.transcode_enabled;
   if (!info.transcode_enabled)
     notify("Transcoding is disabled. You can still browse files and jobs.");
-  resetLibrary();
-  if (info.roots.length || info.services.length) await loadLibrary();
-  else
-    $("library-items").replaceChildren(
-      node("p", "No media folders configured.", "empty"),
-    );
   if (info.tools.includes("recipe_list")) await loadRecipes(true);
+  try {
+    await applyNavigation(navigationRoute(typeof window !== "undefined" ? window.location.search : ""));
+  } finally {
+    if (!$("workspace").hidden) {
+      state.routeReady=true;
+      writeNavigation(true);
+    }
+  }
   controls();
-  if (
-    typeof matchMedia === "function" &&
-    matchMedia("(max-width: 600px)").matches
-  )
-    selectTab("jobs");
-  await loadJobs();
+  if (!["jobs","stats"].includes(state.tab)) await loadJobs();
 }
 
 async function loadLibrary(more = false) {
@@ -508,6 +630,7 @@ async function loadLibrary(more = false) {
             $("scope").value = "file";
             controls();
             setFileStep("configure");
+            writeNavigation();
             return;
           }
           state.media = item;
@@ -551,6 +674,8 @@ async function loadLibrary(more = false) {
     state.libraryLoaded = state.libraryOffset + page.items.length;
     state.libraryHasMore = page.has_more;
     state.libraryError = false;
+    state.libraryNeedsLoad = false;
+    if (!more) writeNavigation();
     $("library-more").hidden = !page.has_more;
     if (state.media && $("service").value === "sonarr") {
       const selectedSeason = $("season").value;
@@ -584,6 +709,8 @@ function libraryFailure(error, more) {
   );
 }
 function resetLibrary() {
+  state.allSelectionKeys=null;
+  state.folderSelectionMembers=new Map();
   setFileStep("browse");
   state.libraryRevision++;
   state.libraryLoaded = 0;
@@ -615,6 +742,24 @@ $("service").addEventListener("change", () => {
   safe(loadLibrary);
 });
 $("library-sort").addEventListener("change", () => safe(loadLibrary));
+function renderLibrarySort() {
+  const sort = $("library-sort").value || "name";
+  const size = sort.startsWith("size");
+  $("sort-name").setAttribute("aria-pressed",String(!size));
+  $("sort-size").setAttribute("aria-pressed",String(size));
+  $("sort-name-direction").textContent = size ? "" : sort === "name_desc" ? "↓" : "↑";
+  $("sort-size-direction").textContent = size ? sort === "size_desc" ? "↓" : "↑" : "";
+  $("sort-name").setAttribute("aria-label",`Sort by name${!size ? sort === "name_desc" ? ", descending" : ", ascending" : ""}`);
+  $("sort-size").setAttribute("aria-label",`Sort by size${size ? sort === "size_desc" ? ", largest first" : ", smallest first" : ""}`);
+}
+async function toggleLibrarySort(column) {
+  const current = $("library-sort").value;
+  $("library-sort").value = column === "size" ? current === "size_desc" ? "size_asc" : "size_desc" : current === "name" ? "name_desc" : "name";
+  renderLibrarySort();
+  await loadLibrary();
+}
+$("sort-name").addEventListener("click", () => safe(() => toggleLibrarySort("name")));
+$("sort-size").addEventListener("click", () => safe(() => toggleLibrarySort("size")));
 $("reload-library").addEventListener("click", () => safe(loadLibrary));
 $("back").addEventListener("click", () => {
   if ($("service").value.startsWith("folder:")) {
@@ -689,6 +834,8 @@ function clearFileSelection() {
   controls();
 }
 async function navigateFolder(path) {
+  state.allSelectionKeys=null;
+  state.folderSelectionMembers=new Map();
   state.folder = path;
   state.folderSelected = new Set();
   state.libraryOffset = 0;
@@ -761,16 +908,18 @@ async function loadFolder(revision = ++state.libraryRevision, more = false) {
     state.folderSizeTargets ||= new Map();
     for (const file of page.items) {
       const row = node("div", "", "media-row");
-      if (!file.is_dir) {
+      {
         const check = document.createElement("input");
         check.type = "checkbox";
         check.dataset.selection = file.path;
+        if (file.is_dir) check.dataset.folder = file.path;
         check.checked = state.folderSelected.has(file.path);
         check.setAttribute(
           "aria-label",
           `Select ${file.path.split("/").pop()}`,
         );
         check.addEventListener("change", () => {
+          if (file.is_dir) { safe(() => selectFolderFiles(file.path,check.checked)); return; }
           check.checked
             ? state.folderSelected.add(file.path)
             : state.folderSelected.delete(file.path);
@@ -779,10 +928,6 @@ async function loadFolder(revision = ++state.libraryRevision, more = false) {
         const checkLabel = node("label", "", "media-check");
         checkLabel.append(check);
         row.append(checkLabel);
-      } else {
-        const icon = node("span", "", "media-icon");
-        icon.append(actionIcon("Folder") || node("span", "↳"));
-        row.append(icon);
       }
       const sizeLabel = node("span", file.is_dir ? "Calculating…" : bytes(file.size), "media-size");
       if (file.is_dir) {
@@ -791,8 +936,7 @@ async function loadFolder(revision = ++state.libraryRevision, more = false) {
         targets.push(sizeLabel);
         state.folderSizeTargets.set(file.path, targets);
       }
-      row.append(
-        button(
+      const title = button(
           file.path.split("/").pop(),
           async () => {
             if (file.is_dir) {
@@ -805,13 +949,20 @@ async function loadFolder(revision = ++state.libraryRevision, more = false) {
               state.fileService = null;
               $("scope").value = "file";
               setFileStep("configure");
+              writeNavigation();
             }
             controls();
           },
           "media-title",
-        ),
-        sizeLabel,
       );
+      if (file.is_dir) {
+        const icon = actionIcon("Folder");
+        if (icon) {
+          title.replaceChildren(icon, node("span", file.path.split("/").pop()));
+          title.className += " folder-title";
+        }
+      }
+      row.append(title, sizeLabel);
       $("library-items").append(row);
     }
     if (!page.items.length)
@@ -821,6 +972,8 @@ async function loadFolder(revision = ++state.libraryRevision, more = false) {
     state.libraryLoaded = state.libraryOffset + page.items.length;
     state.libraryHasMore = page.has_more;
     state.libraryError = false;
+    state.libraryNeedsLoad = false;
+    if (!more) writeNavigation();
     $("library-more").hidden = !page.has_more;
     controls();
     if (state.folderSizeTargets.size) {
@@ -968,7 +1121,7 @@ function configureSelection(advance = true) {
     throw new Error("Choose a file first.");
   }
   controls();
-  if (advance) setFileStep("configure");
+  if (advance) {setFileStep("configure"); writeNavigation();}
 }
 function selectOneFile(key) {
   if ($("service").value.startsWith("folder:"))
@@ -1002,7 +1155,7 @@ async function selectAllFiles() {
   controls();
   try {
     let keys, files;
-    if (folder) keys = (await api(`folder?${new URLSearchParams({path:state.folder,files:"1",q:$("search").value})}`)).paths;
+    if (folder) keys = (await api(`folder?${new URLSearchParams({path:state.folder,files:"1",recursive:"1",q:$("search").value})}`)).paths;
     else {
       const page = await api(`library?${new URLSearchParams({service:$("service").value,id:state.media.id,q:$("search").value,all:"1"})}`);
       files = page.items;
@@ -1010,6 +1163,7 @@ async function selectAllFiles() {
     }
     if (revision !== state.libraryRevision || auth !== state.authRevision) return;
     if (!keys.length) throw new Error("No videos found to select.");
+    state.allSelectionKeys=new Set(keys);
     if (folder) state.folderSelected = new Set(keys);
     else {
       files.forEach(file => state.files.set(file.id,file));
@@ -1022,7 +1176,23 @@ async function selectAllFiles() {
     controls();
   }
 }
-$("select-all-files").addEventListener("click", () => safe(selectAllFiles));
+async function selectFolderFiles(path, checked) {
+  if (state.selectionLoading || state.libraryLoading) return;
+  const revision=state.libraryRevision, auth=state.authRevision;
+  state.selectionLoading=true; controls();
+  try {
+    const keys=(await api(`folder?${new URLSearchParams({path,files:"1",recursive:"1",q:$("search").value})}`)).paths;
+    if (revision!==state.libraryRevision || auth!==state.authRevision) return;
+    state.folderSelectionMembers ||= new Map();
+    state.folderSelectionMembers.set(path,keys);
+    for (const key of keys) checked ? state.folderSelected.add(key) : state.folderSelected.delete(key);
+    fileSelectionChanged();
+  } finally { state.selectionLoading=false; controls(); }
+}
+$("select-all-files").addEventListener("change", () => {
+  if ($("select-all-files").checked) safe(selectAllFiles);
+  else { state.folderSelected?.clear(); state.selected.clear(); $("library-items").querySelectorAll('input[type="checkbox"]').forEach(input=>input.checked=false); fileSelectionChanged(); }
+});
 $("clear-selected-files").addEventListener("click", () => {
   state.folderSelected?.clear();
   state.selected.clear();
@@ -1060,7 +1230,7 @@ function finishSubmission(mode) {
 $("configure-selection").addEventListener("click", () =>
   safe(configureSelection),
 );
-$("back-to-files").addEventListener("click", () => setFileStep("browse"));
+$("back-to-files").addEventListener("click", () => { setFileStep("browse"); writeNavigation(); });
 $("use-container").addEventListener("click", () => {
   $("scope").value = "batch";
   $("selected-only").checked = false;
@@ -1088,9 +1258,20 @@ function controls() {
   $("use-container").disabled = state.libraryLoading || state.selectionLoading;
   $("use-container").textContent = folder ? "Select folder" : "Select series";
   $("select-all-files").hidden = !folder && !state.files?.size;
-  $("selection-toolbar").hidden = $("select-all-files").hidden && $("use-container").hidden && !selectedCount;
+  $("selection-toolbar").hidden = true;
   $("use-container").title = folder ? "Choose this folder, including its subfolders" : "Choose this series";
   $("select-all-files").disabled = state.libraryLoading || state.selectionLoading;
+  const selectedKeys=folder ? state.folderSelected || new Set() : state.selected;
+  $("library-items").querySelectorAll('input[type="checkbox"]').forEach(input=>{
+    const key=folder ? input.dataset.selection : Number(input.dataset.selection);
+    const keys=input.dataset.folder ? state.folderSelectionMembers?.get(input.dataset.folder) || [...(state.allSelectionKeys || selectedKeys)].filter(key=>key.startsWith(input.dataset.folder+"/")) : [key];
+    const selected=keys.filter(key=>selectedKeys.has(key)).length;
+    input.checked=keys.length>0 && selected===keys.length;
+    input.indeterminate=selected>0 && !input.checked;
+    input.disabled=Boolean(state.selectionLoading);
+  });
+  $("select-all-files").checked = state.allSelectionKeys?.size>0 && [...state.allSelectionKeys].every(key=>selectedKeys.has(key));
+  $("select-all-files").indeterminate = selectedCount > 0 && !$("select-all-files").checked;
   $("clear-selected-files").hidden = !selectedCount;
   $("clear-selected-files").disabled = state.libraryLoading || state.selectionLoading;
   $("configure-selection").disabled ||= state.selectionLoading;
@@ -1412,7 +1593,7 @@ function batchProgress(job) {
   const processed = Math.min(batch.total, ["completed", "failed", "skip"].reduce((total, key) => total + count(key), 0));
   const percent = processed / batch.total * 100;
   const result = node("div", "", `job-progress batch-progress ${job.status === "failed" ? "failed" : job.status === "cancelled" ? "cancelled" : ""}`);
-  const counts = node("span", `${processed} / ${batch.total} files processed`, "batch-progress-count");
+  const counts = node("span", `${processed} / ${batch.total} files`, "batch-progress-count");
   counts.title = "Processed includes completed, failed and skipped files. Cancelled files and files waiting for a decision are not counted as processed.";
   const value = node("strong", `${Math.round(percent)}%`, "batch-progress-percent");
   const bar = document.createElement("progress");
@@ -1803,7 +1984,7 @@ function statusClass(status) {
   if (["running", "Running", "waiting_external", "In progress", "Encoding", "Calibrating", "Preparing", "Verifying", "Replacing", "Saving candidate"].includes(status)) return "running";
   if (["failed", "Failed", "Worker offline", "No updates"].includes(status)) return "failed";
   if (["review", "waiting_decision", "Needs review", "Needs decision", "Partial", "Cancelling"].includes(status)) return "waiting_decision";
-  if (["Preview complete", "Eligible"].includes(status)) return "preview";
+  if (["Preview", "Preview complete", "Eligible"].includes(status)) return "preview";
   return "neutral";
 }
 function statusBadge(label, status = label) {
@@ -1855,6 +2036,21 @@ async function startBatchPreview(id) {
     setConnection(serverReachable);
   }
 }
+async function archiveJob(job, archived) {
+  if (state.busyJobs.has(job.id)) return;
+  const auth = state.authRevision;
+  state.busyJobs.add(job.id);
+  try {
+    await api("archive", {id:job.id,archived});
+    if (auth !== state.authRevision || $("workspace").hidden) return;
+    if (state.detailJob?.id === job.id) $("job-detail").close();
+    await loadJobs();
+    notify(archived ? "Job archived. Find it under Archived to restore it." : "Job restored to the queue.");
+  } finally {
+    state.busyJobs.delete(job.id);
+    setConnection(serverReachable);
+  }
+}
 function jobControls(job, detail = false) {
   const actionRail = node("div", "", "job-actions");
   const add = (label, fn) => {
@@ -1874,6 +2070,10 @@ function jobControls(job, detail = false) {
       (b.dataset.requiresWorker === "true" && !state.workerInfo?.ready);
     actionRail.append(b);
   };
+  if (job.archived) {
+    add("Restore", () => archiveJob(job, false));
+    return actionRail;
+  }
   const decisionLabels = {
     approve: job.promotion ? "Review replacement" : "Review replacements",
     reject: "Keep originals",
@@ -1959,6 +2159,10 @@ function jobControls(job, detail = false) {
     add("View replacement", () => openJob(job.replacement_action_id));
   if (job.comparison_action_id)
     add("Compare frames", () => openComparison(job));
+  if (job.preview_action_id && detail)
+    add("View preview", () => openJob(job.preview_action_id));
+  if (job.can_archive && ["completed", "failed", "cancelled"].includes(job.status))
+    add("Archive", () => archiveJob(job, true));
   return actionRail;
 }
 
@@ -2090,7 +2294,7 @@ function queuePresentation(job) {
     workflows[job.action_name] ||
     job.action_name;
   const outcomes = {
-    preview: "Preview complete",
+    preview: "Preview",
     partial: "Partial",
     needs_review: "Needs review",
     no_changes: "No changes",
@@ -2162,9 +2366,9 @@ function compactQueueActions(actions) {
     const icon = b.querySelector?.("svg");
     if (!icon) continue;
     const label = b.textContent.trim();
-    if (["Set up benchmark", "Review candidate", "Review replacement", "Review replacements", "Replace file", "Start batch", "Review preview", "View batch"].includes(label)) {
-      b.replaceChildren(icon, node("span", label === "Replace file" ? "Replace" : label === "Set up benchmark" ? "Set up" : ["Start batch", "View batch"].includes(label) ? label : "Review"));
-      b.className += ["Review preview", "View batch"].includes(label) ? " queue-secondary" : " primary queue-primary";
+    if (["Set up benchmark", "Review candidate", "Review replacement", "Review replacements", "Replace file", "Start batch", "Review preview", "View batch", "View preview", "Archive", "Restore"].includes(label)) {
+      b.replaceChildren(icon, node("span", label === "Replace file" ? "Replace" : label === "Set up benchmark" ? "Set up" : ["Start batch", "View batch", "View preview", "Archive", "Restore"].includes(label) ? label : "Review"));
+      b.className += ["Review preview", "View batch", "View preview", "Archive", "Restore"].includes(label) ? " queue-secondary" : " primary queue-primary";
       b.setAttribute("aria-label", label);
       b.title ||= label;
       continue;
@@ -2183,6 +2387,7 @@ function compactQueueActions(actions) {
   }
 }
 function queueOutcome(job) {
+  if (job.archived) return "Archived · Restore to return to the queue";
   if (job.status === "waiting_decision") return "Awaiting your review";
   if (job.status === "failed") return "Open job for error details";
   if (job.status === "cancelled") return "Stopped by user";
@@ -2233,6 +2438,7 @@ async function loadJobs(more = false) {
       const row = node("article", "", "job-row"),
         meta = node("div", "", "job-meta");
       if (job.batch) row.className += " batch-job";
+      if (job.batch?.dry_run) row.className += " preview-job";
       if (["completed", "failed", "cancelled"].includes(job.status)) row.className += " terminal-job";
       const presentation = queuePresentation(job);
       const heading = node("h3", "", "job-heading");
@@ -2255,6 +2461,7 @@ async function loadJobs(more = false) {
         line.title = reason.reason;
         meta.append(line);
       }
+      if (job.batch?.dry_run) meta.append(node("p", queueOutcome(job), "metadata preview-note"));
       const actions = jobControls(job);
       if (job.parent_action_id) {
         const parent = button(
@@ -2374,6 +2581,7 @@ $("refresh-jobs").addEventListener("click", () => safe(() => loadJobs()));
 $("job-filter").addEventListener("change", () => {
   state.jobsLoaded = 0;
   state.jobsHasMore = false;
+  writeNavigation();
   safe(() => loadJobs());
 });
 $("jobs-more").addEventListener("click", () => safe(() => loadJobs(true)));
@@ -2400,6 +2608,7 @@ async function openJob(id) {
   $("batch-items-panel").hidden = true;
   state.detailRevision++;
   if (!$("job-detail").open) $("job-detail").showModal();
+  writeNavigation();
   $("detail-summary").replaceChildren(node("p", "Loading job…", "muted"));
   $("detail-controls").replaceChildren();
   $("detail-stages").replaceChildren();
@@ -2664,7 +2873,7 @@ $("approve-batch-review").addEventListener("click", () =>
   }),
 );
 $("close-detail").addEventListener("click", () => $("job-detail").close());
-$("job-detail").addEventListener("close", () => state.detailRevision++);
+$("job-detail").addEventListener("close", () => { state.detailRevision++; state.detail=null; writeNavigation(); });
 $("load-detail").addEventListener("click", () => safe(loadDetail));
 
 async function loadRecipes(initial = false, more = false) {
@@ -2697,7 +2906,20 @@ async function loadRecipes(initial = false, more = false) {
 $("recipes-more").addEventListener("click", () =>
   safe(() => loadRecipes(false, true)),
 );
-async function readRecipe(name) {
+function resetRecipeView() {
+  state.recipeRevision = (state.recipeRevision || 0) + 1;
+  state.recipe = null;
+  $("recipe-form").inert = true;
+  $("recipe-name").value = "";
+  $("recipe-description").value = "";
+  $("recipe-source").textContent = "Choose a profile.";
+  $("recipe-feedback").hidden = true;
+  $("delete-recipe").disabled = true;
+  $("delete-recipe").hidden = true;
+  $("recipe-history").disabled = true;
+  renderRecipeList();
+}
+async function readRecipe(name, replaceRoute = false) {
   const revision = (state.recipeRevision || 0) + 1;
   const auth = state.authRevision;
   state.recipeRevision = revision;
@@ -2725,6 +2947,7 @@ async function readRecipe(name) {
     if (resetIcon) $("delete-recipe").replaceChildren(resetIcon);
     $("recipe-feedback").hidden = true;
     renderRecipeList();
+    writeNavigation(replaceRoute);
   } catch (error) {
     if (revision === state.recipeRevision && auth === state.authRevision)
       $("recipe-source").textContent =
@@ -2746,6 +2969,7 @@ $("new-recipe").addEventListener("click", () =>
     $("delete-recipe").hidden = true;
     $("recipe-history").disabled = true;
     renderRecipeList();
+    writeNavigation();
   }),
 );
 async function saveRecipe() {
@@ -3289,41 +3513,140 @@ $("close-recipe-settings").addEventListener("click", () =>
 $("done-recipe-settings").addEventListener("click", () =>
   $("recipe-settings").close(),
 );
-async function loadBackups(more = false) {
-  const result = await tool("transcode_backups", {
-    offset: more ? state.backupOffset || 0 : 0,
-  });
-  $("backup-list").hidden = false;
-  if (!more) $("backup-list").replaceChildren();
-  for (const copy of result.items || []) {
-    const row = node("div", "", "settings-row");
-    row.append(
-      node(
-        "span",
-        `${copy.path?.split("/").pop() || copy.action_id} · ${bytes(copy.bytes || 0)}`,
-      ),
-    );
-    if (copy.cleanup_available)
-      row.append(
-        button("Verify & clean up", async () => {
-          if (
-            !await reviewAction({title:"Remove recovery copies?", message:`Verify the replacement for ${copy.path?.split("/").pop() || copy.action_id}, then permanently remove its recovery copies.`, confirmLabel:"Verify and remove"})
-          )
-            return;
-          await tool("transcode_backups", {
-            mode: "clean",
-            action_id: copy.action_id,
-          });
-          await loadBackups();
-          await loadJobs();
-        }),
-      );
+function backupName(copy) {
+  return copy.original_path?.split("/").pop() || copy.path?.split("/").slice(-2,-1)[0] || copy.action_id;
+}
+function backupReason(copy) {
+  if (copy.cleanup_available) return "The replacement will be verified before this recovery copy is removed.";
+  if (operationIsActive(copy.status)) return "Job active. This recovery copy is retained until the replacement finishes.";
+  if (copy.status === "cancelled") return "Job cancelled before cleanup. Review its details to resolve the replacement.";
+  if (/stopped before final cleanup/.test(copy.reason || "")) return "Replacement failed before cleanup. Resolve the earlier error in job details first.";
+  if (/was not approved/.test(copy.reason || "")) return "Replacement approval is required. This recovery copy is retained.";
+  if (/allow_destructive/.test(copy.reason || "")) return "Recovery cleanup is disabled in the server settings.";
+  return copy.reason || "Review job details before cleaning up this recovery copy.";
+}
+function operationIsActive(status) {
+  return ["pending","running","waiting_external","waiting_decision"].includes(status);
+}
+function renderBackups() {
+  $("backup-list").replaceChildren();
+  for (const copy of state.backups || []) {
+    const row = node("div", "", "backup-row");
+    const heading = node("div", "", "backup-heading");
+    heading.append(node("span", backupName(copy)), node("span", bytes(Number(copy.bytes || 0) + Number(copy.partial_bytes || 0)), "metadata"));
+    row.append(heading);
+    if (copy.original_path) row.append(node("p", `Original: ${copy.original_path}`, "backup-path"));
+    if (copy.path) row.append(node("p", `Recovery: ${copy.path}${copy.partial_bytes ? ` · Partial copy: ${bytes(copy.partial_bytes)}` : ""}`, "backup-path"));
+    row.append(node("p", backupReason(copy), `backup-reason${copy.cleanup_available ? "" : " waiting"}`));
+    const actions = node("div", "", "backup-actions");
+    actions.append(button("View job", () => openJob(copy.action_id), "text-button"));
+    if (copy.cleanup_available) {
+      const clean = button(state.backupCleaning?.id === copy.action_id ? "Verifying & cleaning…" : "Verify & clean up", () => cleanBackup(copy));
+      clean.disabled = Boolean(state.backupCleaning) || !serverReachable;
+      actions.append(clean);
+    }
+    row.append(actions);
     $("backup-list").append(row);
   }
-  if (!(result.items || []).length && result.next_offset == null && !more)
-    $("backup-list").append(node("p", "No retained recovery copies.", "muted"));
-  state.backupOffset = result.next_offset;
-  $("backups-more").hidden = result.next_offset == null;
+  const copies = state.backups || [];
+  const total = copies.reduce((sum,c)=>sum + Number(c.bytes || 0) + Number(c.partial_bytes || 0),0);
+  $("backup-summary").hidden = !state.backupsVisible;
+  $("backup-summary").textContent = `${copies.length} recovery ${copies.length === 1 ? "copy" : "copies"} · ${bytes(total)} retained${state.backupsLoading ? " · Loading remaining copies…" : ""}`;
+  if (!copies.length && !state.backupsLoading) $("backup-list").append(node("p", "No retained recovery copies.", "muted"));
+}
+async function loadBackups() {
+  if (state.backupsLoading) return;
+  const revision = state.backupRevision = (state.backupRevision || 0) + 1;
+  const auth = state.authRevision;
+  state.backupsVisible = true;
+  state.backupsLoading = true;
+  state.backups = [];
+  $("backup-list").hidden = false;
+  $("load-backups").disabled = true;
+  $("backups-more").hidden = true;
+  writeNavigation();
+  renderBackups();
+  const offsets = new Set(), keys = new Set();
+  let offset = 0;
+  try {
+    while (offset != null) {
+      if (offsets.has(offset)) throw new Error("Recovery inventory did not advance. Reload to try again.");
+      offsets.add(offset);
+      const result = await tool("transcode_backups", {offset});
+      if (revision !== state.backupRevision || auth !== state.authRevision) return;
+      for (const copy of result.items || []) {
+        const key = `${copy.action_id}:${copy.path || ""}`;
+        if (!keys.has(key)) {keys.add(key);state.backups.push(copy);}
+      }
+      renderBackups();
+      offset = result.next_offset;
+    }
+  } catch (error) {
+    if (revision === state.backupRevision && auth === state.authRevision) {
+      $("backup-progress").hidden = false;
+      $("backup-progress").textContent = `Could not finish loading recovery copies: ${error.message}. Reload to try again.`;
+    }
+    throw error;
+  } finally {
+    if (revision === state.backupRevision) {
+      state.backupsLoading = false;
+      $("load-backups").disabled = false;
+      $("load-backups").textContent = "Reload copies";
+      renderBackups();
+    }
+  }
+}
+function renderBackupCleanup() {
+  if (!state.backupCleaning) return;
+  const task = state.backupCleaning;
+  $("backup-progress").hidden = !state.backupsVisible;
+  $("backup-progress").textContent = `${task.checking ? "Checking cleanup outcome" : "Verifying replacement and cleaning recovery copy"}: ${task.name} · ${Math.max(0,Math.floor((Date.now()-task.started)/1000))}s elapsed`;
+}
+async function finishBackupCleanup(job) {
+  const task = state.backupCleaning;
+  if (!task || task.auth !== state.authRevision) return;
+  if (operationIsActive(job.status)) { renderBackupCleanup(); return; }
+  state.backupCleaning = null;
+  $("backup-progress").hidden = !state.backupsVisible;
+  $("backup-progress").textContent = job.status === "completed" ? `Recovery cleanup completed for ${task.name}.` : `Recovery cleanup stopped for ${task.name}. ${job.error || "The recovery copy is retained; review job details."}`;
+  if (state.backupsVisible) await loadBackups();
+  await loadJobs();
+}
+async function refreshBackupCleanup() {
+  const task = state.backupCleaning;
+  if (!task || task.auth !== state.authRevision) return;
+  renderBackupCleanup();
+  if (task.pendingResponse) return;
+  const result = await api(`operations?${new URLSearchParams({id:task.id})}`);
+  if (state.backupCleaning !== task || task.auth !== state.authRevision) return;
+  const job = result.jobs?.find(j=>j.id===task.id);
+  if (job) await finishBackupCleanup(job);
+}
+async function cleanBackup(copy) {
+  if (state.backupCleaning) return;
+  const auth = state.authRevision;
+  if (!await reviewAction({title:"Remove recovery copy?", message:`Verify the replacement for ${backupName(copy)}, then permanently remove ${bytes(Number(copy.bytes || 0)+Number(copy.partial_bytes || 0))} of recovery data.\nOriginal: ${copy.original_path || "See job details"}\nRecovery: ${copy.path || "See job details"}`, confirmLabel:"Verify and remove"}) || auth !== state.authRevision) return;
+  if (state.backupCleaning) return;
+  const task = state.backupCleaning = {id:copy.action_id,name:backupName(copy),auth,started:Date.now(),pendingResponse:true};
+  renderBackups();
+  renderBackupCleanup();
+  try {
+    const result = await tool("transcode_backups", {mode:"clean",action_id:copy.action_id});
+    if (state.backupCleaning !== task || auth !== state.authRevision) return;
+    task.pendingResponse = false;
+    const job = result.action || result;
+    if (job.status) await finishBackupCleanup(job);
+    else await refreshBackupCleanup();
+  } catch (error) {
+    if (state.backupCleaning !== task || auth !== state.authRevision) return;
+    task.pendingResponse = false;
+    task.checking = true;
+    renderBackupCleanup();
+    // A lost HTTP response does not authorize another cleanup request.
+    // Poll the durable job before enabling the control again.
+    await safe(refreshBackupCleanup);
+    throw error;
+  }
 }
 $("load-backups").addEventListener("click", () => safe(() => loadBackups()));
 $("backups-more").addEventListener("click", () =>
@@ -3343,6 +3666,7 @@ setInterval(async () => {
     if (!state.workerCheckedAt || Date.now() - state.workerCheckedAt > 10000) await refreshWorkers();
     if (!state.jobsLoading) await safe(() => loadJobs());
     if ($("job-detail").open) await safe(refreshDetail);
+    if (state.backupCleaning) await safe(refreshBackupCleanup);
   } finally {
     polling = false;
   }
