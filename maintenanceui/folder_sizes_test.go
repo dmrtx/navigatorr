@@ -3,6 +3,7 @@ package maintenanceui
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/jakenesler/navigatorr/action"
 	"github.com/jakenesler/navigatorr/fsop"
+	"github.com/jakenesler/navigatorr/store"
 )
 
 func TestFolderSizeCountsAllRegularFilesWithoutFollowingLinks(t *testing.T) {
@@ -83,29 +85,97 @@ func TestFolderSizesAreAuthenticatedBoundedAndCached(t *testing.T) {
 	if value.Status != "ready" || value.Bytes == nil || *value.Bytes != 12 {
 		t.Fatal(value)
 	}
-	os.WriteFile(filepath.Join(folder, "another.mkv"), make([]byte, 20), 0600)
-	cached := read()
-	if *cached.Bytes != 12 {
-		t.Fatal("cache did not retain measured snapshot")
-	}
+
+	// A newly constructed UI cache reads the persisted total immediately.
 	c := &s.folderSizes
+	cold := &folderSizeCache{}
+	restored := cold.get(folder, deps.Fs, deps.Store)
+	if restored.Status != "ready" || *restored.Bytes != 12 {
+		t.Fatal("lost total on restart", restored)
+	}
+	os.WriteFile(filepath.Join(folder, "another.mkv"), make([]byte, 20), 0600)
 	c.mu.Lock()
 	entry := c.entries[folder]
-	entry.MeasuredAt = time.Now().Add(-6 * time.Minute)
+	entry.CheckedAt = time.Now().Add(-time.Minute)
 	c.entries[folder] = entry
 	c.mu.Unlock()
+	cached := read()
+	if cached.Status != "ready" || *cached.Bytes != 12 || !cached.Updating {
+		t.Fatal("refresh hid cached total", cached)
+	}
 	deadline = time.Now().Add(2 * time.Second)
-	for value = read(); value.Status == "calculating" && time.Now().Before(deadline); value = read() {
+	for value = read(); value.Updating && time.Now().Before(deadline); value = read() {
 		time.Sleep(time.Millisecond)
 	}
-	if value.Status != "ready" || value.Bytes == nil || *value.Bytes != 32 {
-		t.Fatal("expired cache not refreshed", value)
+	if value.Status != "ready" || *value.Bytes != 32 {
+		t.Fatal("changed directory not refreshed", value)
 	}
-	c.slots <- struct{}{}
-	c.slots <- struct{}{}
-	if c.get(filepath.Join(root, "not-admitted"), deps.Fs).Status != "calculating" {
-		t.Fatal("busy walks not bounded")
+	// Editing a file leaves the directory timestamp unchanged. Periodic metadata
+	// verification must still refresh that size and the metadata fingerprint.
+	c.mu.Lock()
+	entry = c.entries[folder]
+	before := entry.Fingerprint
+	entry.CheckedAt = time.Now().Add(-time.Minute)
+	entry.Size.MeasuredAt = time.Now().Add(-31 * time.Minute)
+	c.entries[folder] = entry
+	c.mu.Unlock()
+	os.WriteFile(filepath.Join(folder, "another.mkv"), make([]byte, 30), 0600)
+	deadline = time.Now().Add(2 * time.Second)
+	for value = read(); value.Updating && time.Now().Before(deadline); value = read() {
+		time.Sleep(time.Millisecond)
 	}
-	<-c.slots
-	<-c.slots
+	if *value.Bytes != 42 {
+		t.Fatal("in-place edit missed", value)
+	}
+	c.mu.Lock()
+	after := c.entries[folder].Fingerprint
+	c.mu.Unlock()
+	if before == after {
+		t.Fatal("metadata fingerprint unchanged after file growth")
+	}
+}
+
+func TestFolderScansFinishWithoutBrowserPollingAndCacheSurvivesStoreReopen(t *testing.T) {
+	root := t.TempDir()
+	resolver, _ := fsop.NewResolver([]string{root}, nil)
+	root, _ = resolver.ResolveRead(root)
+	db := filepath.Join(t.TempDir(), "cache.db")
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := &folderSizeCache{}
+	for i := 0; i < 6; i++ {
+		path := filepath.Join(root, fmt.Sprint(i))
+		os.Mkdir(path, 0700)
+		os.WriteFile(filepath.Join(path, "video.mkv"), make([]byte, i+1), 0600)
+		cache.get(path, resolver, st)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		done := true
+		cache.mu.Lock()
+		for _, entry := range cache.entries {
+			done = done && !entry.Size.Updating
+		}
+		cache.mu.Unlock()
+		if done {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("pending folders require another poll")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	st.Close()
+	st, err = store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cold := &folderSizeCache{}
+	restored := cold.get(filepath.Join(root, "5"), resolver, st)
+	if restored.Status != "ready" || restored.Bytes == nil || *restored.Bytes != 6 || restored.Updating {
+		t.Fatal("cache did not survive database reopen", restored)
+	}
 }

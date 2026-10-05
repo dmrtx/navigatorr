@@ -1244,3 +1244,32 @@ test("worker loss disables retry and resume but preserves stop and read-only set
  h.run('state.workerInfo={ready:true};renderWorkers();');assert.equal(retry.disabled,false);
  h.run('state.workerInfo={ready:false};renderWorkers();');assert.equal(retry.disabled,true);
 });
+
+test("select all includes unloaded folder files and applies the current filter without submitting",async()=>{
+ const h=harness(), calls=[];
+ h.context.calls=calls;
+ h.run('controls=()=>{}; $("service").value="folder:/media";$("search").value="episode";state.folder="/media/season";state.libraryRevision=3;state.folderSelected=new Set(); api=async(path)=>{calls.push(path);return {paths:["/media/season/episode1.mkv","/media/season/episode2.mkv"]};};');
+ await h.run('selectAllFiles()');
+ assert.match(calls[0],/files=1/);assert.match(calls[0],/q=episode/);assert.doesNotMatch(calls[0],/offset=/);
+ assert.equal(h.run('state.folderSelected.size'),2);
+ assert.equal(h.elements.get("scope").value,"batch");
+ assert.equal(h.elements.get("selected-only").checked,true);
+ h.elements.get("clear-selected-files").listeners.get("click")();
+ assert.equal(h.run('state.folderSelected.size'),0);
+ assert.equal(h.elements.get("scope").value,"file");
+});
+
+test("late select-all replies cannot select another folder or expired session",async()=>{
+ for(const change of ['state.libraryRevision++','state.authRevision++']) {
+  const h=harness(),pending=deferred();h.context.pending=pending.promise;
+  h.run('controls=()=>{};$("service").value="folder:/media";state.folder="/media/old";state.folderSelected=new Set();api=async()=>pending;');
+  const select=h.run('selectAllFiles()');h.run(change);pending.resolve({paths:["/media/old/a.mkv"]});await select;
+  assert.equal(h.run('state.folderSelected.size'),0);
+ }
+});
+
+test("replacement planning keeps the filename and replacement status before hashes are ready",()=>{
+ const h=harness();
+ const p=h.run('queuePresentation({action_name:"promote_transcode_candidate",status:"running",source_path:"/media/movie.mkv",workflow_actions:[{action_name:"transcode_media"}],savings:{source_bytes:1000,candidate_bytes:400}})');
+ assert.equal(p.title,"movie.mkv");assert.equal(p.status,"Replacing");assert.match(p.summary,/Conversion complete/);
+});

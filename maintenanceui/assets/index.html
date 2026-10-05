@@ -240,13 +240,17 @@
                   hidden
                 ></nav>
               </div>
+              <div class="file-selection-actions" aria-label="File selection">
+                <button id="select-all-files" class="quiet">Select all files</button>
+                <button id="clear-selected-files" class="quiet" hidden>Clear selection</button>
+                <button id="use-container" class="quiet">Select folder</button>
+              </div>
               <div id="library-items" class="library-items"></div>
               <div class="list-footer">
                 <button id="library-more" class="quiet" hidden>Load more</button
                 ><span id="library-sentinel" aria-hidden="true"></span>
               </div>
               <div class="mobile-selection-actions">
-                <button id="use-container" class="quiet">Use folder</button>
                 <button id="configure-selection" class="primary" hidden>
                   Continue
                 </button>
