@@ -1233,3 +1233,14 @@ test("unsupported historical benchmarks open a usable new setup without retrying
  assert.equal(h.elements.get('scope').value,'file');
  assert.equal(h.run('state.tab'),'library');assert.equal(h.run('state.fileStep'),'configure');assert.equal(writes,0);
 });
+
+test("worker loss disables retry and resume but preserves stop and read-only setup controls", () => {
+ const h=harness();h.run('controls=()=>{};state.workerInfo={ready:false};');
+ const retry=h.run('jobControls({id:"failed",action_name:"transcode_media",status:"failed"}).children[0]');
+ assert.equal(retry.disabled,true);
+ const rail=h.run('jobControls({id:"paused",action_name:"transcode_batch",status:"waiting_decision",waiting_options:[{decision:"resume"}]})');
+ assert.equal(rail.children[0].disabled,true);assert.equal(rail.children[1].disabled,false);
+ h.document.querySelectorAll=selector=>selector.includes('data-requires-worker')?[retry]:[];
+ h.run('state.workerInfo={ready:true};renderWorkers();');assert.equal(retry.disabled,false);
+ h.run('state.workerInfo={ready:false};renderWorkers();');assert.equal(retry.disabled,true);
+});
