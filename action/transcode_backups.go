@@ -15,6 +15,7 @@ type TranscodeBackup struct {
 	ActionID         string `json:"action_id"`
 	Status           string `json:"status"`
 	Path             string `json:"path,omitempty"`
+	OriginalPath     string `json:"original_path,omitempty"`
 	Bytes            int64  `json:"bytes"`
 	PartialBytes     int64  `json:"partial_bytes"`
 	CleanupAvailable bool   `json:"cleanup_available"`
@@ -92,6 +93,7 @@ func (e *Engine) ListTranscodeBackups(ctx context.Context, offset int) (*Transco
 			continue
 		}
 		item.Path = p.BackupPath
+		item.OriginalPath = p.OriginalPath
 		present := false
 		for _, path := range []string{p.BackupPath, p.BackupPath + ".partial"} {
 			if _, err := e.promotionPath(path, false); err != nil {

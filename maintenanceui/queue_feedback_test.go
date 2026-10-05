@@ -9,6 +9,82 @@ import (
 	"github.com/jakenesler/navigatorr/store"
 )
 
+func TestPreviewExecutionIsOneStableWorkflowWithReadableHistory(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	seedOperation(t, st, "preview", "transcode_batch", "completed", map[string]any{"dry_run": true}, map[string]any{"dry_run": true}, nil)
+	seedOperation(t, st, "independent", "transcode_batch", "completed", nil, nil, nil)
+	read := func(query string) operationsPage {
+		t.Helper()
+		w := request(h, "GET", "/api/maintenance/operations?"+query, "", true)
+		var page operationsPage
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		return page
+	}
+	before := read("group=workflow")
+	numbers := map[string]any{}
+	for _, job := range before.Jobs {
+		numbers[job["id"].(string)] = job["number"]
+	}
+	seedOperation(t, st, "execution", "transcode_batch", "waiting_external", nil, nil, nil)
+	execution, _ := st.GetActionInstance("execution")
+	execution.IdempotencyKey = previewExecutionPrefix + "preview"
+	if err := st.UpdateActionInstance(*execution); err != nil {
+		t.Fatal(err)
+	}
+	seedOperation(t, st, "child", "transcode_media", "running", map[string]any{"parent_action_id": "execution"}, nil, nil)
+	page := read("group=workflow")
+	if page.Total != 2 || page.ActiveCount != 1 {
+		t.Fatal("duplicate preview or child row", page)
+	}
+	for _, job := range page.Jobs {
+		if job["id"] == "execution" {
+			if job["workflow_id"] != "preview" || job["preview_action_id"] != "preview" || job["number"] != numbers["preview"] || job["can_archive"] != false {
+				t.Fatal(job)
+			}
+		} else if job["id"] != "independent" || job["number"] != numbers["independent"] {
+			t.Fatal(job)
+		}
+	}
+	for _, id := range []string{"preview", "execution", "child"} {
+		if detail := read("id=" + id); len(detail.Jobs) != 1 || detail.Jobs[0]["id"] != id {
+			t.Fatal("history inaccessible", id, detail)
+		}
+		if w := request(h, "POST", "/api/maintenance/archive", `{"id":"`+id+`","archived":true}`, true); w.Code != 409 {
+			t.Fatal("active workflow archived", w.Code)
+		}
+	}
+	for _, id := range []string{"execution", "child"} {
+		inst, _ := st.GetActionInstance(id)
+		inst.Status = "completed"
+		st.UpdateActionInstance(*inst)
+	}
+	if w := request(h, "POST", "/api/maintenance/archive", `{"id":"execution","archived":true}`, true); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if page := read("group=workflow"); page.Total != 1 {
+		t.Fatal(page)
+	}
+	if page := read("group=workflow&status=archived"); page.Total != 1 || page.Jobs[0]["id"] != "execution" {
+		t.Fatal(page)
+	}
+	if w := request(h, "POST", "/api/maintenance/archive", `{"id":"preview","archived":false}`, true); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if page := read("group=workflow"); page.Total != 2 {
+		t.Fatal(page)
+	}
+	// A malformed receipt cannot attach a batch to an unrelated job.
+	execution.IdempotencyKey = previewExecutionPrefix + "independent"
+	execution.Status = "completed"
+	st.UpdateActionInstance(*execution)
+	if page := read("group=workflow"); page.Total != 3 {
+		t.Fatal("invalid preview relation hid an independent job", page)
+	}
+}
+
 func TestQueueOrderAndNumbersSurviveStateChangesAndChildPromotion(t *testing.T) {
 	s, h := testUI(t)
 	st := s.engine.Deps().Store
