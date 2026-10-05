@@ -96,3 +96,28 @@ func TestQueueBatchTelemetryIdentifiesTheActualActiveFile(t *testing.T) {
 		t.Fatal("batch progress is not the child's measured progress", worker)
 	}
 }
+
+func TestBatchQueueFailureReasonsDoNotClaimSelectionCriteriaAreErrors(t *testing.T) {
+	feedback := batchQueueFeedback([]store.TranscodeBatchItem{
+		{FilePath: "/media/one.mkv", Status: "failed", Reasons: []string{"h264_1080p", "oversized"}, Error: "Worker connection failed"},
+		{FilePath: "/media/two.mkv", Status: "failed", Reasons: []string{"h264_1080p", "oversized"}},
+		{FilePath: "/media/three.mkv", Status: "skip", Reasons: []string{"anime", "No suitable candidate"}},
+	})
+	reasons := feedback["reasons"].([]map[string]any)
+	for _, reason := range reasons {
+		if reason["reason"] == "h264_1080p" || reason["reason"] == "oversized" || reason["reason"] == "anime" {
+			t.Fatal("selection criteria presented as outcome", reasons)
+		}
+	}
+	if len(reasons) != 2 {
+		t.Fatal("missing bounded failure feedback", reasons)
+	}
+	errorFeedback := batchQueueFeedback([]store.TranscodeBatchItem{{FilePath: "/media/one.mkv", Status: "failed", Reasons: []string{"oversized"}, Error: "Worker connection failed"}})
+	if errorFeedback["reasons"].([]map[string]any)[0]["reason"] != "Worker connection failed" {
+		t.Fatal("file error was lost", errorFeedback)
+	}
+	reasonFeedback := batchQueueFeedback([]store.TranscodeBatchItem{{FilePath: "/media/one.mkv", Status: "failed", Reasons: []string{"oversized", "Missing source"}}})
+	if reasonFeedback["reasons"].([]map[string]any)[0]["reason"] != "Missing source" {
+		t.Fatal("recorded failure reason was lost", reasonFeedback)
+	}
+}

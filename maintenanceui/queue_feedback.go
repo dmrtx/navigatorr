@@ -90,7 +90,20 @@ func batchQueueFeedback(items []store.TranscodeBatchItem) map[string]any {
 		}
 		if item.Status == "skip" || item.Status == "failed" || item.Status == "review" {
 			seen := map[string]bool{}
+			itemReasons := []string{}
 			for _, reason := range item.Reasons {
+				// Positive selection criteria describe eligibility, not why work
+				// was skipped or needs a decision.
+				if reason != "" && reason != "anime" && reason != "h264_1080p" && reason != "oversized" && reason != "explicit profile requested" {
+					itemReasons = append(itemReasons, reason)
+				}
+			}
+			if item.Error != "" {
+				itemReasons = []string{item.Error}
+			} else if item.Status == "failed" && len(itemReasons) == 0 {
+				itemReasons = []string{"Conversion failed; open file details"}
+			}
+			for _, reason := range itemReasons {
 				if reason != "" && !seen[reason] {
 					reasons[reason]++
 					seen[reason] = true
