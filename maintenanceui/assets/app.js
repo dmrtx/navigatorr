@@ -138,7 +138,8 @@ function setConnection(online) {
   $("connection-status").hidden = online;
   document.body?.classList.toggle("disconnected", !online);
   document.querySelectorAll("[data-job-control]").forEach((button) => {
-    button.disabled = !online || state.busyJobs.has(button.dataset.jobControl);
+    button.disabled = !online || state.busyJobs.has(button.dataset.jobControl) ||
+      (button.dataset.requiresWorker === "true" && !state.workerInfo?.ready);
   });
   document.querySelectorAll(".dialog-connection").forEach((notice) => {
     notice.hidden = online;
@@ -337,6 +338,9 @@ $("logout").addEventListener("click", () =>
 
 function renderWorkers() {
   const info = state.workerInfo;
+  document.querySelectorAll('[data-job-control][data-requires-worker="true"]').forEach(button => {
+    button.disabled = !serverReachable || !info?.ready || state.busyJobs.has(button.dataset.jobControl);
+  });
   $("worker-status").hidden = !state.info || $("workspace").hidden;
   $("worker-status").textContent = !serverReachable ? "Worker · Unknown"
     : !info ? "Worker · Checking…" : info.ready ? "Worker · Connected" : info.nodes?.some(node=>node.connected) ? "Worker · Blocked" : "Worker · Unavailable";
@@ -1713,7 +1717,14 @@ function jobControls(job) {
     const icon = actionIcon(label);
     if (icon) b.append(icon);
     b.dataset.jobControl = job.id;
-    b.disabled = !serverReachable || state.busyJobs.has(job.id);
+    b.dataset.requiresWorker = String(
+      (label === "Retry" && ["transcode_media", "transcode_batch", "benchmark_transcode"].includes(job.action_name)) ||
+      label === "Resume batch" ||
+      (job.action_name === "transcode_batch" && !job.batch?.promotion_plan_ready &&
+        ["Review candidate", "Review replacements", "Keep originals"].includes(label))
+    );
+    b.disabled = !serverReachable || state.busyJobs.has(job.id) ||
+      (b.dataset.requiresWorker === "true" && !state.workerInfo?.ready);
     actionRail.append(b);
   };
   const decisionLabels = {
