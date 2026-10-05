@@ -387,6 +387,20 @@ func TestMCPWorkerGateDoesNotCreateOfflineJobsAndCancelIsRegistered(t *testing.T
 			t.Fatal("blocked control changed job", inst)
 		}
 	}
+	for _, decision := range []string{"approve", "accept_loss", "reject"} {
+		id := "offline-batch-" + decision
+		if err := st.CreateActionInstance(store.ActionInstance{ID: id, ActionName: "transcode_batch", Status: store.ActionStatusWaitingDecision}); err != nil {
+			t.Fatal(err)
+		}
+		result := callTool(t, s, "action_resume", map[string]any{"id": id, "decision": decision})
+		if !result.IsError || !strings.Contains(resultText(t, result), "no job was submitted") {
+			t.Fatal("batch continuation was admitted offline", result)
+		}
+		inst, _ := st.GetActionInstance(id)
+		if inst.Status != store.ActionStatusWaitingDecision {
+			t.Fatal("offline decision changed batch", inst)
+		}
+	}
 	st.CreateActionInstance(store.ActionInstance{ID: "cancel-fixture", ActionName: "transcode_media", Status: "pending", InputsJSON: `{"path":"/fixture.mkv"}`})
 	result := callTool(t, s, "action_cancel", map[string]any{"id": "cancel-fixture", "reason": "test"})
 	if result.IsError {
