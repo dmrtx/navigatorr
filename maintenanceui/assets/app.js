@@ -2010,6 +2010,10 @@ function queuePresentation(job) {
     cancelling: "Cancelling",
   };
   const phase = job.worker?.transcode_phase || job.worker?.benchmark_phase || job.worker?.phase;
+  const multipleActive = job.activities?.length > 1;
+  const offline = multipleActive
+    ? job.activities.every(activity => activity.waiting_condition === "worker_unreachable")
+    : workerUnavailable(job);
   const replacementComplete = job.savings?.realized_saved_bytes != null ||
     (job.replaced && job.status === "completed");
   const status = replacementComplete
@@ -2018,7 +2022,7 @@ function queuePresentation(job) {
       (job.candidate_ready && !job.replacement_action_id
         ? "Candidate ready"
         : ["running", "waiting_external"].includes(job.status)
-          ? (workerUnavailable(job) ? "Worker offline" : job.worker?.progress_is_stale ? "No updates" : {encoding:"Encoding",validating:"Verifying",publishing:"Saving candidate",benchmarking:"Calibrating",queued:"Queued on worker",preparing:"Preparing"}[phase] || (replacement || job.promotion ? "Replacing" : "In progress"))
+          ? (offline ? "Worker offline" : multipleActive ? "In progress" : job.worker?.progress_is_stale ? "No updates" : {encoding:"Encoding",validating:"Verifying",publishing:"Saving candidate",benchmarking:"Calibrating",queued:"Queued on worker",preparing:"Preparing"}[phase] || (replacement || job.promotion ? "Replacing" : "In progress"))
           : names[job.status] || job.status);
   const s = job.savings || {},
     metrics = [];
