@@ -11,6 +11,19 @@ import (
 	"github.com/jakenesler/navigatorr/transcode"
 )
 
+func TestLateCancelPreservesCompletedOutcome(t *testing.T) {
+	st := setupTestStore(t)
+	seedActionInstance(t, st, "finished", "transcode_media", StatusCompleted, 7, "", nil, nil)
+	e := NewEngine(EngineDeps{Store: st})
+	if _, err := e.Cancel(context.Background(), "finished", "stale browser control"); err == nil {
+		t.Fatal("late cancellation was applied")
+	}
+	inst, _ := st.GetActionInstance("finished")
+	if inst.Status != StatusCompleted || inst.CurrentStep != 7 {
+		t.Fatal("completed outcome changed", inst)
+	}
+}
+
 func TestCancelTranscodeMediaStopsRemoteJob(t *testing.T) {
 	st := setupTestStore(t)
 	state := submitStepState()
