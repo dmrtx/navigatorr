@@ -1350,3 +1350,91 @@ test("a batch with multiple active files never inherits one child's stale measur
  assert.equal(h.run('queuePresentation({status:"waiting_external",batch:{},worker:{phase:"encoding",progress_is_stale:true},activity_waiting_condition:"worker_unreachable",activities:[{waiting_condition:"worker_unreachable"},{}]}).status'),'In progress');
  assert.equal(h.run('queuePresentation({status:"waiting_external",batch:{},activities:[{waiting_condition:"worker_unreachable"},{waiting_condition:"worker_unreachable"}]}).status'),'Worker offline');
 });
+
+test("batch progress counts resolved files independently of individual worker percentages", () => {
+  const h = harness();
+  const progress = h.run('telemetry({batch:{total:23,completed:20,running:2,queued:1},activities:[{},{}],worker:{progress:99,progress_is_stale:true}})');
+  assert.equal(progress.children[0].textContent, "20 / 23 files processed");
+  assert.equal(progress.children[1].textContent, "87%");
+  assert.equal(progress.children[2].value, 20);
+  assert.equal(progress.children[2].max, 23);
+  const mixed = h.run('batchProgress({batch:{total:10,completed:3,failed:2,skip:1,cancelled:1,waiting_decision:2,running:1}})');
+  assert.equal(mixed.children[0].textContent, "6 / 10 files processed");
+  assert.equal(mixed.children[1].textContent, "60%");
+  assert.match(mixed.children[0].title, /Cancelled files.*not counted/);
+  assert.equal(h.run('batchProgress({batch:{dry_run:true,total:10,queued:10}})'), null);
+  assert.equal(h.run('batchProgress({batch:{total:0}})'), null);
+  assert.equal(h.run('batchProgress({batch:{completed:2}})'), null);
+  assert.equal(h.run('batchProgress({status:"completed",batch:{total:2,completed:2}})').children[1].textContent, "100%");
+});
+
+test("a completed preview offers review and start, while active work retains cancellation", () => {
+  const h = harness();
+  h.run('state.workerInfo={ready:true};');
+  const controls = h.run('jobControls({id:"p",status:"completed",batch:{dry_run:true,queued:8}})');
+  assert.deepEqual(controls.children.map(c=>c.textContent), ["Review preview", "Start batch"]);
+  assert.equal(controls.children[1].disabled, false);
+  assert.match(h.run('queueOutcome({status:"completed",batch:{dry_run:true,queued:8}})'), /Nothing starts automatically/);
+  assert.equal(h.run('queuePresentation({status:"completed",batch:{dry_run:true,outcome:"preview"}}).status'), "Preview complete");
+  assert.deepEqual(h.run('jobControls({id:"p",status:"completed",batch:{dry_run:true,queued:0}})').children.map(c=>c.textContent), ["Review preview"]);
+  assert.deepEqual(h.run('jobControls({id:"p",status:"completed",batch:{dry_run:true,queued:8},preview_execution_action_id:"encode"})').children.map(c=>c.textContent), ["View batch"]);
+  assert.ok(h.run('jobControls({id:"p",status:"running",batch:{dry_run:true}})').children.some(c=>c.textContent === "Cancel"));
+  h.run('state.workerInfo={ready:false};');
+  const offline = h.run('jobControls({id:"p",status:"completed",batch:{dry_run:true,queued:8}})');
+  assert.equal(offline.children[0].disabled, false);
+  assert.equal(offline.children[1].disabled, true);
+});
+
+test("preview start is read-only until review approval and uses the source preview ID once", async () => {
+  const h = harness(), writes = [], opens = [];
+  h.context.plan = {id:"p",title:"Example",eligible:2,other:1,files:["One","Three"],settings:[{label:"Profile",value:"general-hevc"}]};
+  h.context.record = (...args) => writes.push(args);
+  h.context.open = id=>opens.push(id);
+  h.run('controls=()=>{};api=async(path,body)=>body ? (record(path,body),{id:"encode"}) : plan; refreshWorkers=async()=>{state.workerInfo={ready:true}}; loadJobs=async()=>{}; openJob=async(id)=>open(id);');
+  const pending = h.run('startBatchPreview("p")');
+  await Promise.resolve();
+  assert.equal(h.elements.get("action-review").open, true);
+  assert.equal(h.elements.get("confirm-action-review").textContent, "Start batch");
+  assert.equal(writes.length, 0);
+  await h.run('startBatchPreview("p")');
+  assert.equal(writes.length, 0);
+  h.run('finishActionReview(true)');
+  await pending;
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0][0], "batch-preview");
+  assert.equal(writes[0][1].id, "p");
+  assert.deepEqual(opens, ["encode"]);
+  assert.equal(h.run('state.busyJobs.size'), 0);
+});
+
+test("dismissed, changed, signed-out and worker-offline previews never submit", async () => {
+  for (const mode of ["dismiss", "changed", "signed-out", "offline"]) {
+    const h = harness(), writes = [];
+    h.context.plan = {id:"p",title:"Example",eligible:2,files:["One","Three"],settings:[]};
+    h.context.record = (...args)=>writes.push(args);
+    h.run('controls=()=>{};api=async(path,body)=>body ? record(path,body) : plan; refreshWorkers=async()=>{state.workerInfo={ready:false}};');
+    const pending = h.run('startBatchPreview("p")');
+    await Promise.resolve();
+    if (mode === "signed-out") h.run('state.authRevision++;');
+    if (mode === "changed") h.context.plan = {...h.context.plan, eligible:3};
+    h.run(`finishActionReview(${mode !== "dismiss"})`);
+    if (mode === "changed") await assert.rejects(pending, /preview changed/);
+    else if (mode === "offline") await assert.rejects(pending, /No job was submitted/);
+    else await pending;
+    assert.equal(writes.length, 0, mode);
+  }
+});
+
+test("preview item statuses indicate eligibility, while failures and completed items retain distinct colors", async () => {
+  const h = harness();
+  h.run('state.detail="p";state.detailRevision=1;state.detailJob={batch:{dry_run:true}};$("job-detail").open=true;api=async()=>({total:2,items:[{status:"queued",display_label:"One",reasons:["explicit profile requested"]},{status:"skip",display_label:"Two",reasons:["Already HEVC; original kept"]}]});');
+  await h.run('loadBatchItems("p",1)');
+  const rows = h.elements.get("batch-items-list").children;
+  assert.equal(rows[0].children[1].children[1].textContent, "Eligible");
+  assert.equal(rows[0].children.length, 2);
+  assert.equal(rows[1].children[1].children[1].textContent, "Skipped");
+  assert.equal(rows[1].children.length, 3);
+  assert.equal(h.run('statusClass("completed")'), "completed");
+  assert.equal(h.run('statusClass("failed")'), "failed");
+  assert.equal(h.run('statusClass("waiting_decision")'), "waiting_decision");
+});

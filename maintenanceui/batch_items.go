@@ -46,6 +46,9 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	items, err := st.ListTranscodeBatchItems(id)
+	if err == nil {
+		items, _, err = s.previewPendingItems(*inst, items)
+	}
 	if err != nil {
 		fail(w, 500, "read batch items")
 		return
