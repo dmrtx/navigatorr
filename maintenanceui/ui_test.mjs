@@ -1550,6 +1550,19 @@ test("a batch with multiple active files never inherits one child's stale measur
  assert.equal(h.run('queuePresentation({status:"waiting_external",batch:{},activities:[{waiting_condition:"worker_unreachable"},{waiting_condition:"worker_unreachable"}]}).status'),'Worker offline');
 });
 
+test("batch result badges use the library outcome when the coordinator has finished", () => {
+  const h=harness();
+  for(const [outcome,status,color] of [["failed","Failed","failed"],["cancelled","Cancelled","neutral"],["partial","Partial","waiting_decision"],["needs_decision","Needs decision","waiting_decision"]]) {
+    h.context.fixture={action_name:"transcode_batch",status:"completed",batch:{outcome,total:8,failed:8}};
+    const label=h.run('queuePresentation(fixture).status');
+    assert.equal(label,status);
+    h.context.label=label;
+    assert.equal(h.run('statusClass(label)'),color);
+  }
+  assert.equal(h.run('queuePresentation({status:"completed",batch:{outcome:"preview",dry_run:true,total:8,queued:8}}).status'),"Preview");
+  assert.equal(h.run('queuePresentation({status:"completed",batch:{outcome:"candidates_ready",total:8,completed:8}}).status'),"Completed");
+});
+
 test("batch progress counts resolved files independently of individual worker percentages", () => {
   const h = harness();
   const progress = h.run('telemetry({batch:{total:23,completed:20,running:2,queued:1},activities:[{},{}],worker:{progress:99,progress_is_stale:true}})');
