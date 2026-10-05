@@ -435,11 +435,9 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 				}
 			}
 
-			if decision == "" || decision == "resume" || decision == "retry" {
-				if inst, err := engine.Deps().Store.GetActionInstance(id); err == nil && inst != nil && action.RequiresWorker(inst.ActionName) {
-					if err := engine.CheckWorkerAdmission(ctx); err != nil {
-						return toolErr("action_resume blocked: %v", err), nil
-					}
+			if inst, err := engine.Deps().Store.GetActionInstance(id); err == nil && action.ResumeRequiresWorker(inst, decision) {
+				if err := engine.CheckWorkerAdmission(ctx); err != nil {
+					return toolErr("action_resume blocked: %v", err), nil
 				}
 			}
 			res, err := engine.Resume(ctx, id, decision, extraInputs)
