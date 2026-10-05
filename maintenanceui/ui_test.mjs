@@ -255,6 +255,7 @@ test("multiple selected files configure an explicit batch and using a folder cle
   h.elements.get("use-container").listeners.get("click")();
   assert.equal(h.elements.get("scope").value, "batch");
   assert.equal(h.elements.get("selected-only").checked, false);
+  assert.equal(h.elements.get("recursive").checked, true);
   assert.equal(h.run("state.fileStep"), "configure");
 });
 
