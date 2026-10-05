@@ -635,41 +635,80 @@ main {
 }
 .job-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   align-items: start;
-  gap: 4px 8px;
-  padding: 8px 0;
+  gap: 2px 8px;
+  padding: 5px 0;
   border-bottom: 1px solid var(--line);
 }
 .job-meta {
   min-width: 0;
+  height: 18px;
+  overflow: hidden;
+}
+.batch-job .job-meta {
+  height: 54px;
 }
 .job-row h3 {
   margin: 0;
   font: inherit;
 }
 .job-heading {
-  display: flex;
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) 96px;
+  grid-column: 1 / -1;
   align-items: center;
-  flex-wrap: wrap;
   gap: 0 8px;
+}
+.job-heading .badge {
+  justify-self: end;
+  text-align: right;
+}
+.job-row > .job-meta {
+  grid-row: 2;
+  grid-column: 1 / -1;
 }
 .job-row .job-title {
   width: auto;
-  min-height: var(--control-size);
+  min-height: 28px;
   padding: 0;
   border: 0;
   background: transparent;
   text-align: left;
   font-size: 13px;
+  height: 28px;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
 }
-.job-row > .job-actions {
-  grid-column: 2;
-  grid-row: 1;
+.job-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: 32px;
+  min-width: 0;
+}
+.job-row > .job-meta, .job-row > .job-footer {
+  margin-left: 50px;
+}
+.job-footer > .job-progress, .job-footer > .job-outcome {
+  min-width: 0;
+  flex: 1;
+  max-height: var(--control-size);
+  overflow: hidden;
+}
+.job-footer > .job-outcome {
+  color: var(--muted);
+}
+.job-row .job-footer > .job-actions {
   align-self: center;
   justify-content: flex-end;
   max-width: none;
   gap: 4px;
+  flex-wrap: nowrap;
+  flex: 0 0 auto;
 }
 .job-row .job-actions .action-control {
   display: inline-grid;
@@ -678,10 +717,6 @@ main {
 .job-row .job-actions .action-control svg {
   width: 18px;
   height: 18px;
-}
-.job-row > .job-progress {
-  grid-column: 1 / -1;
-  grid-row: auto;
 }
 .job-number {
   color: var(--muted);
@@ -739,7 +774,7 @@ main {
 }
 .batch-file-preview {
   display: -webkit-box;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 1;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
@@ -792,6 +827,41 @@ main {
 }
 #file-review {
   max-width: 540px;
+}
+#action-review {
+  max-width: 460px;
+}
+#workers-dialog {
+  max-width: 460px;
+}
+.worker-node {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+.worker-node p {
+  grid-column: 1 / -1;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+#worker-status {
+  font-size: 11px;
+}
+#worker-status::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+#worker-status[data-ready="true"]::before {
+  background: var(--forest);
+}
+#worker-submit-status {
+  color: var(--muted);
+  min-height: 32px;
 }
 #batch-items-panel h3 {
   margin: 12px 0 6px;
@@ -1245,20 +1315,22 @@ pre {
     font-size: 10px;
   }
   .job-row {
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr);
     gap: 2px 6px;
     padding: 7px 0;
   }
-  .job-row > .job-actions {
-    grid-column: 2;
-    grid-row: 1;
-    align-self: center;
+  .job-row .job-title {
+    height: 36px;
+    -webkit-line-clamp: 2;
   }
-  .job-row > .multiple-actions {
-    grid-column: 1 / -1;
-    grid-row: auto;
-    max-width: none;
+  .job-meta { height: 32px; }
+  .batch-job .job-meta { height: 66px; }
+  .job-footer { height: var(--control-size); }
+  .job-heading {
+    grid-template-columns: 34px minmax(0, 1fr) 80px;
+    gap: 0 6px;
   }
+  .job-row > .job-meta, .job-row > .job-footer { margin-left: 40px; }
   .job-row .job-actions button {
     font-size: 11px;
     padding: 4px 7px;

@@ -88,6 +88,104 @@ function deferred() {
   return { promise, resolve };
 }
 
+test("maintenance actions never use native browser confirmations", () => {
+  assert.doesNotMatch(source, /\bconfirm\s*\(/);
+});
+
+test("candidate review reads only, shows measured sizes and rechecks before approval", async () => {
+  const h = harness(), calls = [];
+  h.context.fixture = {id:"candidate",status:"waiting_decision",waiting_reason:"Candidate file size (1910766036 bytes) exceeds original (1599600732 bytes) by 19.5%, which is greater than max_size_increase_percent (0.0%)",waiting_options:[{decision:"accept_loss"}],source_path:"/media/Uzumaki.mkv"};
+  h.context.record = (...args) => calls.push(args);
+  h.run('api=async()=>({jobs:[fixture]}); jobControl=async(...args)=>record(...args);');
+  const review = h.run('reviewJobDecision("candidate","accept_loss")');
+  for (let i=0;i<6;i++) await Promise.resolve();
+  assert.equal(h.elements.get("action-review").open, true);
+  assert.equal(calls.length, 0);
+  const content = h.elements.get("action-review-content").children;
+  assert.match(content[1].children[1].textContent, /1\.60 GB/);
+  assert.match(content[2].children[1].textContent, /1\.91 GB/);
+  assert.match(content[3].textContent, /19\.5% larger/);
+  assert.doesNotMatch(content.map(c=>c.textContent).join(" "), /max_size_increase_percent|1910766036/);
+  h.elements.get("confirm-action-review").listeners.get("click")();
+  await review;
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [["candidate","action_resume",{decision:"accept_loss"}]]);
+});
+
+test("changed, expired, dismissed or offline candidate reviews never resume a job", async () => {
+  for (const scenario of ["changed","expired","dismissed","offline"]) {
+    const h=harness(); let writes=0;
+    h.context.fixture={id:"candidate",status:"waiting_decision",waiting_reason:"Review quality",waiting_options:[{decision:"accept_loss"}]};
+    h.context.write=()=>writes++;
+    h.run('controls=()=>{}; api=async()=>({jobs:[fixture]}); jobControl=async()=>write();');
+    const review=h.run('reviewJobDecision("candidate","accept_loss")');
+    for(let i=0;i<6;i++) await Promise.resolve();
+    if(scenario==="changed") h.context.fixture.waiting_reason="Candidate changed";
+    if(scenario==="expired") h.run('invalidateAuthentication()');
+    if(scenario==="offline") {
+      h.run('setConnection(false)');
+      h.elements.get("confirm-action-review").listeners.get("click")();
+      assert.equal(h.elements.get("action-review").open,true);
+    }
+    if(["dismissed","offline"].includes(scenario)) h.elements.get("dismiss-action-review").listeners.get("click")();
+    else h.elements.get("confirm-action-review").listeners.get("click")();
+    if(scenario==="changed") await assert.rejects(review,/changed/);
+    else await review;
+    assert.equal(writes,0,scenario);
+  }
+});
+
+test("opening another app review cancels the previous one and Escape cancels the current one", async () => {
+  const h=harness();
+  const first=h.run('reviewAction({title:"First",message:"First",confirmLabel:"Approve"})');
+  const second=h.run('reviewAction({title:"Second",message:"Second",confirmLabel:"Delete"})');
+  assert.equal(await first,false);
+  let prevented=false;
+  h.elements.get("action-review").listeners.get("cancel")({preventDefault(){prevented=true;}});
+  assert.equal(await second,false);
+  assert.equal(prevented,true);
+});
+
+test("stale or disconnected workers do not display a live progress meter or old speed", () => {
+  const h=harness();
+  for(const condition of [{waiting_condition:"worker_unreachable"},{worker:{progress:2.1,speed:14.7,fps:238,progress_is_stale:true}}]) {
+    h.context.condition=condition;
+    const result=h.run('telemetry({status:"waiting_external",...condition})');
+    assert.equal(result.children.length,1);
+    assert.doesNotMatch(result.children[0].textContent,/14\.70|238|Step/);
+    assert.match(result.children[0].textContent,/unreachable|No recent progress/);
+    assert.match(h.run('queuePresentation({status:"waiting_external",...condition}).status'),/Worker offline|No updates/);
+  }
+});
+
+test("new submissions require a fresh ready worker and do not reach submission when offline", async () => {
+  const h=harness(); let builds=0, checks=0;
+  h.context.check=()=>checks++;
+  h.context.build=()=>builds++;
+  h.run('controls=()=>{}; refreshWorkers=async()=>{check();state.workerInfo={ready:false};}; buildAndSubmitJob=async()=>build(); state.workerInfo={ready:true};');
+  await assert.rejects(h.run('submitJob()'),/No job was submitted/);
+  assert.equal(builds,0); assert.equal(checks,1);
+  h.run('refreshWorkers=async()=>{check();state.workerInfo={ready:true};};');
+  await h.run('submitJob()');
+  assert.equal(builds,1); assert.equal(checks,2);
+});
+
+test("folder sizes distinguish empty, partial and unavailable measurements; late results cannot alter another folder", async () => {
+  const h=harness(), pending=deferred();
+  h.context.target=new Element(); h.context.pending=pending.promise;
+  h.run('showFolderSize(target,{status:"ready",bytes:0})');
+  assert.equal(h.context.target.textContent,"0 B");
+  h.run('showFolderSize(target,{status:"partial",bytes:5000,note:"Incomplete"})');
+  assert.match(h.context.target.textContent,/^≥ /);
+  h.run('showFolderSize(target,{status:"unavailable"})');
+  assert.equal(h.context.target.textContent,"Unavailable");
+  h.run('target.textContent="Calculating…"; state.folder="/old";state.libraryRevision=1;state.folderSizeTargets=new Map([["/old/child",target]]);api=async()=>pending;');
+  const load=h.run('updateFolderSizes(1,"/old","",1)');
+  h.run('state.libraryRevision=2;state.folder="/new";');
+  pending.resolve({items:[{path:"/old/child",folder_size:{status:"ready",bytes:100}}]});
+  await load;
+  assert.equal(h.context.target.textContent,"Calculating…");
+});
+
 test("every startup control exists in the shipped HTML", () => {
   const ids = [...markup.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
   assert.equal(new Set(ids).size, ids.length, "duplicate HTML ids");
@@ -268,6 +366,17 @@ test("benchmark retains its source for encoding while failed submissions retain 
   assert.equal(failed.h.run("state.fileStep"), "configure");
   assert.equal(failed.h.elements.get("path").value, "/media/one.mp4");
   assert.equal(failed.receipts.size, 1);
+});
+
+test("benchmark submission obeys its strict input schema even for an anime library selection", async () => {
+  for(const library of [false,true]) {
+    const {h}=submissionHarness(); let submission;
+    h.context.capture=(_name,args)=>{submission=JSON.parse(args.inputs); return {id:"submitted"};};
+    if(library) h.run('state.fileMedia={id:12,seriesType:"anime"}; state.fileService="sonarr";');
+    h.run('$("media-kind").value="tv"; $("preserve-depth").checked=true; tool=async(...args)=>capture(...args);');
+    await h.run('buildAndSubmitJob("benchmark")');
+    assert.deepEqual(Object.keys(submission).sort(),["path","preserve_source_bit_depth","profile"]);
+  }
 });
 
 test("queue results distinguish candidates, replacements and failures without inventing measurements", () => {
@@ -672,7 +781,7 @@ test("timer does not overlap operations polls", async () => {
     calls++;
     return pending.promise;
   };
-  h.run("loadJobs = async () => wait();");
+  h.run("refreshWorkers = async () => {}; loadJobs = async () => wait();");
   const first = h.interval();
   await h.interval();
   assert.equal(calls, 1);
@@ -724,7 +833,7 @@ test("submission is single-flight while gathering folder files", async () => {
     builds++;
     return pending.promise;
   };
-  h.run("controls = () => {}; buildAndSubmitJob = async () => wait();");
+  h.run("controls = () => {}; refreshWorkers = async () => {state.workerInfo={ready:true};}; buildAndSubmitJob = async () => wait();");
   const first = h.run("submitJob()");
   await h.run("submitJob()");
   assert.equal(builds, 1);
@@ -1100,4 +1209,27 @@ test("Access network outages and JSON permission failures do not report session 
   assert.equal(h.run("state.authRevision"), 0);
   assert.equal(h.elements.get("access-expired").hidden, true);
   assert.equal(h.elements.get("workspace").hidden, false);
+});
+
+test("folder measurements update every alias and resume on returning to Files", async () => {
+ const h=harness();h.context.one=new Element();h.context.two=new Element();h.context.controls=()=>{};
+ h.run('state.folder="/media";state.libraryRevision=1;state.libraryLoaded=1;state.tab="library";state.folderSizeTargets=new Map([["/media/child",[one,two]]]);$("service").value="folder:/media";api=async()=>({items:[{path:"/media/child",folder_size:{status:"ready",bytes:200}}]});');
+ await h.run('updateFolderSizes(1,"/media","",1)');
+ assert.equal(h.context.one.textContent,"200 B");assert.equal(h.context.two.textContent,"200 B");
+ let calls=0;h.context.record=()=>calls++;
+ h.run('updateFolderSizes=async()=>record();selectTab("more");selectTab("library");');
+ assert.equal(calls,1);
+ h.run('showFolderSize(one,{status:"calculating",measured_at:"0001-01-01T00:00:00Z"})');
+ assert.doesNotMatch(h.context.one.title,/Measured/);
+});
+
+test("unsupported historical benchmarks open a usable new setup without retrying invalid inputs", async () => {
+ const h=harness(); let writes=0;h.context.record=()=>writes++;
+ h.run('controls=()=>{}; selectTab=tab=>{state.tab=tab;};setFileStep=step=>{state.fileStep=step;};jobControl=async()=>record();');
+ const rail=h.run(`jobControls({id:"old",action_name:"benchmark_transcode",status:"failed",error:'unsupported input "media_type" for benchmark_transcode',source_path:"/media/episode.mkv"})`);
+ assert.equal(rail.children.length,1);
+ await rail.children[0].listeners.get('click')();
+ assert.equal(h.elements.get('path').value,'/media/episode.mkv');
+ assert.equal(h.elements.get('scope').value,'file');
+ assert.equal(h.run('state.tab'),'library');assert.equal(h.run('state.fileStep'),'configure');assert.equal(writes,0);
 });

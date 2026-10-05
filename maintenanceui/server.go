@@ -38,14 +38,15 @@ var allowedTools = map[string]bool{
 var allowedActions = map[string]bool{"transcode_media": true, "transcode_batch": true, "benchmark_transcode": true, "promote_transcode_candidate": true}
 
 type Server struct {
-	cfg       *config.Config
-	registry  *arrservice.Registry
-	engine    *action.Engine
-	mcp       *server.MCPServer
-	access    *cloudflareAccessVerifier
-	tokenHash [32]byte
-	mu        sync.Mutex
-	sessions  map[string]time.Time
+	cfg         *config.Config
+	registry    *arrservice.Registry
+	engine      *action.Engine
+	mcp         *server.MCPServer
+	access      *cloudflareAccessVerifier
+	tokenHash   [32]byte
+	mu          sync.Mutex
+	sessions    map[string]time.Time
+	folderSizes folderSizeCache
 }
 
 func New(cfg *config.Config, registry *arrservice.Registry, engine *action.Engine, mcpServer *server.MCPServer) (*Server, error) {
@@ -100,6 +101,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/maintenance/operations", s.operations)
 	mux.HandleFunc("GET /api/maintenance/batch-items", s.batchItems)
 	mux.HandleFunc("GET /api/maintenance/folder", s.folder)
+	mux.HandleFunc("GET /api/maintenance/workers", s.workers)
 	mux.HandleFunc("POST /api/maintenance/tool", s.tool)
 	mux.HandleFunc("GET /api/maintenance/logs", s.logs)
 	mux.HandleFunc("GET /sw.js", serveWorker)
@@ -298,6 +300,12 @@ func (s *Server) tool(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			key = hex.EncodeToString(b)
+		}
+		if action.RequiresWorker(name) {
+			if err := s.engine.CheckWorkerAdmission(r.Context()); err != nil {
+				fail(w, http.StatusConflict, err.Error())
+				return
+			}
 		}
 		res, err := s.engine.Enqueue(action.WithOrigin(r.Context(), "web"), name, inputs, key)
 		if err != nil {

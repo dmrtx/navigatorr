@@ -106,5 +106,14 @@ func (s *Server) folder(w http.ResponseWriter, r *http.Request) {
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 	offset = max(0, min(offset, len(items)))
 	end := min(offset+100, len(items))
-	writeJSON(w, 200, map[string]any{"path": path, "items": items[offset:end], "total": len(items), "has_more": end < len(items)})
+	page := make([]folderItem, 0, end-offset)
+	for _, stat := range items[offset:end] {
+		item := folderItem{Stat: stat}
+		if stat.IsDir && r.URL.Query().Get("sizes") == "1" {
+			size := s.folderSizes.get(stat.Path, resolver)
+			item.FolderSize = &size
+		}
+		page = append(page, item)
+	}
+	writeJSON(w, 200, map[string]any{"path": path, "items": page, "total": len(items), "has_more": end < len(items)})
 }
