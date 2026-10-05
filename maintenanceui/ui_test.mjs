@@ -316,6 +316,53 @@ test("decision rows show the next step instead of stale worker telemetry or cont
   assert.doesNotMatch(batch.summary, /0 files/);
 });
 
+test("loading another page cannot duplicate a conversion whose replacement has started", async () => {
+  const h = harness();
+  const existing = [{id:"convert",workflow_id:"same",status:"completed"}, ...Array.from({length:24},(_,i)=>({id:`other-${i}`,status:"completed"}))];
+  h.context.responses = [{jobs:existing,has_more:true,total:25},{jobs:[{id:"replace",workflow_id:"same",status:"running"}],has_more:false,total:25}];
+  h.run('api=async()=>responses.shift(); renderSavings=()=>{};');
+  await h.run('loadJobs()');
+  await h.run('loadJobs(true)');
+  assert.equal(h.run('state.operationJobs.size'), 25);
+  assert.equal(h.run('state.operationJobs.get("same").id'), "replace");
+});
+
+test("replacement progress exposes real stages without inventing a byte percentage", () => {
+  const h = harness();
+  const result = h.run('telemetry({status:"running",current_step:2,stages:[{name:"plan_promotion"},{name:"approve_promotion"},{name:"preserve_original"},{name:"import_candidate"}]})');
+  assert.match(result.children[0].textContent, /Step 3\/4.*Save and verify recovery copy/);
+  assert.equal(result.children.length, 1, "workflow stages are not measured byte progress");
+  assert.equal(h.run('queuePresentation({status:"running",promotion:{}}).showTelemetry'), true);
+  assert.equal(h.run('queuePresentation({status:"waiting_external",worker:{transcode_phase:"encoding",progress:34}}).status'), "Encoding");
+  assert.equal(h.run('queuePresentation({status:"waiting_external",promotion:{}}).status'), "Replacing");
+});
+
+test("preview eligibility never claims files are queued on the worker", () => {
+  const h = harness();
+  const preview = h.run('queuePresentation({status:"completed",batch:{dry_run:true,outcome:"preview",total:4,queued:2,skip:2},batch_files:{context:"Series · Season 2"}})');
+  assert.equal(preview.title, "Series · Season 2");
+  assert.match(preview.summary, /2 eligible.*Originals unchanged/);
+  assert.doesNotMatch(preview.summary, /queued/);
+  assert.equal(preview.showTelemetry, false);
+});
+
+test("replacement review is read-only and a changed plan blocks approval", async () => {
+  const h = harness(), mutations = [];
+  h.context.current = {id:"replace",status:"waiting_decision",waiting_options:[{decision:"approve"}],promotion:{original_path:"/media/one.mkv",candidate_path:"/media/.candidates/one.mkv",original_sha256:"original",candidate_sha256:"candidate",original_bytes:1000,candidate_bytes:400}};
+  h.context.recordMutation = (...args) => mutations.push(args);
+  h.run('api = async () => ({jobs:[current]}); jobControl = async (...args) => recordMutation(...args);');
+  await h.run('reviewFilePromotion("replace")');
+  assert.equal(h.elements.get("file-review").open, true);
+  assert.equal(mutations.length, 0);
+  h.context.current.promotion.candidate_sha256 = "changed";
+  await h.elements.get("approve-file-review").listeners.get("click")();
+  assert.equal(mutations.length, 0);
+  assert.match(h.elements.get("notice").textContent, /plan changed/);
+  h.run('invalidateAuthentication()');
+  assert.equal(h.elements.get("file-review").open, false);
+  assert.equal(h.run('state.fileApproval'), null);
+});
+
 test("search can close, clear its filter and restore the browse view", () => {
   const h = harness(),
     attrs = {};

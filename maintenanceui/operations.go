@@ -313,6 +313,7 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 	}
 	status := strings.TrimSpace(req.URL.Query().Get("status"))
 	selectedID := strings.TrimSpace(req.URL.Query().Get("id"))
+	grouped := req.URL.Query().Get("group") == "workflow" && selectedID == ""
 	if status != "" && status != "all" && status != "active" && status != "pending" && status != "running" && status != "waiting_external" && status != "waiting_decision" && status != "completed" && status != "failed" && status != "cancelled" {
 		fail(w, 400, "invalid workflow status")
 		return
@@ -350,6 +351,22 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 			}
 			if source != "" && existingReplacements[source] == "" {
 				existingReplacements[source] = r.inst.ID
+			}
+		}
+	}
+	roots, numbers, members := queueWorkflows(records, recordsByID, existingReplacements)
+	representatives := map[string]string{}
+	for root := range members {
+		representatives[root] = root
+		if replacement := existingReplacements[root]; replacement != "" {
+			representatives[root] = replacement
+		}
+	}
+	if grouped {
+		page.ActiveCount = 0
+		for _, id := range representatives {
+			if operationActive(recordsByID[id].inst.Status) {
+				page.ActiveCount++
 			}
 		}
 	}
@@ -398,9 +415,23 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 				seenEstimates[key] = true
 			}
 		}
+		if grouped && representatives[roots[r.inst.ID]] != r.inst.ID {
+			continue
+		}
 		if (selectedID == "" || selectedID == r.inst.ID) && (status == "" || status == "all" || r.inst.Status == status || status == "active" && operationActive(r.inst.Status)) {
 			filtered = append(filtered, r)
 		}
+	}
+	if grouped {
+		sort.SliceStable(filtered, func(i, j int) bool {
+			if operationActive(filtered[i].inst.Status) != operationActive(filtered[j].inst.Status) {
+				return operationActive(filtered[i].inst.Status)
+			}
+			if filtered[i].inst.UpdatedAt == filtered[j].inst.UpdatedAt {
+				return numbers[roots[filtered[i].inst.ID]] > numbers[roots[filtered[j].inst.ID]]
+			}
+			return filtered[i].inst.UpdatedAt > filtered[j].inst.UpdatedAt
+		})
 	}
 	page.Savings.EstimatedSavedBytes = page.Savings.EstimatedBytes
 	page.Savings.CandidateSavedBytes = page.Savings.CandidateBytes
@@ -435,6 +466,19 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 				return
 			}
 			job["savings"] = r.savings
+			root := roots[r.inst.ID]
+			job["workflow_id"] = root
+			job["number"] = numbers[root]
+			job["stages"] = s.queueStages(r)
+			if recordsByID[root].inst.ActionName != "transcode_batch" && len(members[root]) > 1 {
+				related := []map[string]any{}
+				for _, id := range []string{root, existingReplacements[root]} {
+					if member, ok := recordsByID[id]; ok {
+						related = append(related, map[string]any{"id": id, "action_name": member.inst.ActionName, "status": member.inst.Status, "created_at": member.inst.CreatedAt, "stages": s.queueStages(member)})
+					}
+				}
+				job["workflow_actions"] = related
+			}
 			job["candidate_ready"] = r.inst.ActionName == "transcode_media" && r.inst.Status == store.ActionStatusCompleted && operationValue(r, "skip_transcode") != true && operationValue(r, "original_intact") == true && r.savings.CandidateBytes != nil && !replacedActions[r.inst.ID] && !replaced[operationSourceKey(r)]
 			if r.inst.ActionName == "transcode_media" {
 				job["replaced"] = replacedActions[r.inst.ID] || replaced[operationSourceKey(r)]
@@ -451,6 +495,34 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 			job["logs_available"] = httpWorker && (operationString(r.state["job_id"]) != "" || operationString(r.state["transcode_job_id"]) != "")
 			if r.inst.ActionName == "transcode_batch" {
 				job["paused"] = operationValue(r, "paused") == true
+				items, err := s.engine.Deps().Store.ListTranscodeBatchItems(r.inst.ID)
+				if err != nil {
+					fail(w, 500, "read batch contents")
+					return
+				}
+				job["batch_files"] = batchQueueFeedback(items)
+				if operationActive(r.inst.Status) {
+					for _, child := range members[root] {
+						if child.inst.ID == r.inst.ID || (child.inst.Status != store.ActionStatusRunning && child.inst.Status != store.ActionStatusWaitingExternal) {
+							continue
+						}
+						res, err := t.Handler(req.Context(), mcp.CallToolRequest{Params: mcp.CallToolParams{Name: "action_status", Arguments: map[string]any{"id": child.inst.ID}}})
+						if err == nil && res != nil && !res.IsError {
+							var data map[string]any
+							for _, content := range res.Content {
+								if text, ok := content.(mcp.TextContent); ok {
+									_ = json.Unmarshal([]byte(text.Text), &data)
+									break
+								}
+							}
+							if worker := operationMap(operationMap(data["action"])["worker"]); worker != nil {
+								job["worker"] = worker
+								job["activity_file"] = operationString(child.inputs["path"])
+							}
+						}
+						break
+					}
+				}
 			}
 			page.Jobs = append(page.Jobs, job)
 		}

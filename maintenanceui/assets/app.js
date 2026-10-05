@@ -30,7 +30,7 @@ const names = {
   review: "Needs review",
   pending: "Queued",
   running: "Running",
-  waiting_external: "Waiting for worker",
+  waiting_external: "In progress",
   waiting_decision: "Needs decision",
   completed: "Completed",
   failed: "Failed",
@@ -62,6 +62,7 @@ function actionIcon(label) {
     Cancel: "M6 6l12 12M6 18L18 6",
     "Replace file": "M4 7h16M16 3l4 4-4 4M20 17H4M8 13l-4 4 4 4",
     "Review replacements": "M9 12l2 2 4-4M5 4h14v16H5Z",
+    "Review replacement": "M9 12l2 2 4-4M5 4h14v16H5Z",
     "Keep originals": "M4 4h16v4H4ZM6 8v12h12V8M10 12h4",
     "View replacement": "M5 4h14v16H5ZM8 8h8M8 12h8",
     "View batch": "M8 5h12v15H8ZM4 16V2h12",
@@ -141,6 +142,7 @@ function setConnection(online) {
     notice.hidden = online;
   });
   $("approve-batch-review").disabled = !online || state.approvingBatch;
+  $("approve-file-review").disabled = !online || state.approvingFile;
   controls();
 }
 async function reconnect() {
@@ -169,6 +171,8 @@ function invalidateAuthentication() {
   state.replacementChoice = null;
   $("job-detail").close();
   $("batch-review").close();
+  $("file-review").close();
+  state.fileApproval = null;
   $("path-dialog").close();
   $("recipe-settings").close();
   $("replacement-choice").close();
@@ -1229,7 +1233,12 @@ function telemetry(job) {
     `job-progress ${w ? "worker-progress" : "workflow-progress"}`,
   );
   if (!w) {
-    result.append(node("span", job.progress || "Queued", "metadata"));
+    const stages = job.stages || [];
+    const current = stages[job.current_step];
+    const text = current
+      ? `Step ${job.current_step + 1}/${stages.length} · ${stageLabel(current.name)}`
+      : job.waiting_reason || "Starting job";
+    result.append(node("span", text, "metadata"));
     return result;
   }
   const phase = w.transcode_phase || w.benchmark_phase || w.phase;
@@ -1243,6 +1252,7 @@ function telemetry(job) {
     benchmarking: "Calibrating",
   };
   const parts = [
+    job.activity_file ? `Current: ${job.activity_file.split("/").pop()}` : null,
     phases[phase] || phase,
     w.queue_position > 0 ? `Queue #${w.queue_position}` : null,
     w.speed > 0 ? `${Number(w.speed).toFixed(2)}×` : null,
@@ -1256,7 +1266,7 @@ function telemetry(job) {
     node("span", parts.filter(Boolean).join(" · ") || job.progress, "metadata"),
   );
   const measured = w.progress ?? w.last_known_progress?.progress;
-  if (measured != null && Number.isFinite(Number(measured))) {
+  if (!["queued", "preparing"].includes(phase) && measured != null && Number.isFinite(Number(measured))) {
     const p = Math.max(0, Math.min(100, Number(measured)));
     const meter = document.createElement("meter");
     meter.min = 0;
@@ -1274,6 +1284,36 @@ function telemetry(job) {
       ),
     );
   return result;
+}
+function stageLabel(name) {
+  const labels = {
+    plan_promotion: "Verify original and candidate",
+    approve_promotion: "Review replacement",
+    preserve_original: "Save and verify recovery copy",
+    import_candidate: "Import verified candidate",
+    remove_old_file: "Remove original library file",
+    rename_candidate: "Finalize filename",
+    rescan_library: "Refresh library",
+    finalize_promotion: "Verify replacement and clean up recovery copy",
+    resolve_source: "Inspect source",
+    resolve_media: "Inspect source",
+    resolve_batch: "Inspect selected files",
+    resolve_and_inspect: "Inspect selected files",
+    preflight: "Inspect original and prepare conversion",
+    submit_benchmark: "Start quality calibration",
+    wait_benchmark: "Measure quality samples",
+    submit_transcode: "Send conversion to worker",
+    wait_transcode: "Convert file",
+    schedule_batch: "Process selected files",
+    promote_batch: "Replace approved files",
+    benchmark: "Calibrate quality",
+    benchmark_transcode: "Calibrate quality",
+    build_plan: "Prepare conversion",
+    execute_transcode: "Convert file",
+    validate_result: "Verify converted file",
+    accept_result: "Review converted file",
+  };
+  return labels[name] || String(name || "Processing").replaceAll("_", " ");
 }
 function renderSavings(data) {
   const savings = data.savings || {};
@@ -1454,7 +1494,7 @@ $("prepare-replacement-choice").addEventListener("click", () =>
 function batchCounts(batch, compact = false) {
   if (compact) {
     const counts = [
-      [batch.queued, "queued"],
+      [batch.queued, batch.dry_run ? "eligible" : "queued"],
       [batch.running, "active"],
       [batch.waiting_for_slot, "waiting for slot"],
       [batch.completed, "completed"],
@@ -1483,7 +1523,7 @@ function jobControls(job) {
     controls.append(b);
   };
   const decisionLabels = {
-    approve: "Review replacements",
+    approve: job.promotion ? "Review replacement" : "Review replacements",
     reject: "Keep originals",
     resume: "Resume batch",
     retry: "Retry",
@@ -1497,6 +1537,10 @@ function jobControls(job) {
       async () => {
         if (choice.decision === "approve" && job.batch?.promotion_plan_ready) {
           await reviewBatchPromotion(job.id);
+          return;
+        }
+        if (choice.decision === "approve" && job.promotion) {
+          await reviewFilePromotion(job.id);
           return;
         }
         if (
@@ -1554,6 +1598,8 @@ function shortJobReason(reason) {
     .trim();
   if (/no such file or directory/i.test(text)) return "File not found";
   if (/permission denied/i.test(text)) return "Permission denied";
+  if (/shared VMAF\/CAMBI calibration supports 8-bit SDR video below 45 fps/.test(text))
+    return "Source format does not support automatic calibration; original kept";
   return text.length > 140 ? `${text.slice(0, 137)}…` : text;
 }
 function queuePresentation(job) {
@@ -1566,7 +1612,7 @@ function queuePresentation(job) {
         : "File";
   const source = job.source_path || job.promotion?.original_path;
   const title =
-    job.batch?.title ||
+    job.batch_files?.context || job.batch?.title ||
     source?.split("/").pop() ||
     workflows[job.action_name] ||
     job.action_name;
@@ -1578,12 +1624,15 @@ function queuePresentation(job) {
     promoted: "Replaced",
     cancelling: "Cancelling",
   };
-  const status = job.replaced
+  const phase = job.worker?.transcode_phase || job.worker?.benchmark_phase || job.worker?.phase;
+  const status = job.replaced || job.savings?.realized_saved_bytes != null
     ? "Replaced"
     : outcomes[job.batch?.outcome] ||
       (job.candidate_ready && !job.replacement_action_id
         ? "Candidate ready"
-        : names[job.status] || job.status);
+        : ["running", "waiting_external"].includes(job.status)
+          ? ({encoding:"Encoding",validating:"Verifying",publishing:"Saving candidate",benchmarking:"Calibrating",queued:"Queued on worker",preparing:"Preparing"}[phase] || (job.promotion ? "Replacing" : "In progress"))
+          : names[job.status] || job.status);
   const s = job.savings || {},
     metrics = [];
   if (s.source_bytes != null) {
@@ -1611,8 +1660,13 @@ function queuePresentation(job) {
     result = "Replacement approval required";
   else if (job.batch) result = batchCounts(job.batch, true);
   else if (job.status === "waiting_decision")
-    result = shortJobReason(job.waiting_reason) || "Review required";
+    result = job.promotion ? "Review replacement before files change" : shortJobReason(job.waiting_reason) || "Review required";
   else if (job.status === "cancelled") result = "Stopped";
+  if (job.workflow_actions?.length && job.promotion && job.status !== "failed") {
+    result = `Conversion complete · ${job.savings?.realized_saved_bytes != null ? "Replacement verified" : result || "Replacement in progress"}`;
+  }
+  if (job.batch?.dry_run) result += " · Originals unchanged";
+  else if (job.batch?.outcome === "no_changes") result += " · Originals kept";
   const summary = [kind, result, metrics.join(" · ")]
     .filter(Boolean)
     .join(" · ");
@@ -1621,7 +1675,6 @@ function queuePresentation(job) {
     status,
     summary,
     showTelemetry:
-      Boolean(job.worker) &&
       ["running", "waiting_external"].includes(job.status),
   };
 }
@@ -1630,6 +1683,13 @@ function compactQueueActions(actions) {
     const icon = b.querySelector?.("svg");
     if (!icon) continue;
     const label = b.textContent.trim();
+    if (["Review replacement", "Review replacements", "Replace file"].includes(label)) {
+      b.replaceChildren(icon, node("span", label === "Replace file" ? "Replace" : "Review"));
+      b.className += " primary queue-primary";
+      b.setAttribute("aria-label", label);
+      b.title ||= label;
+      continue;
+    }
     b.setAttribute("aria-label", label);
     b.title ||= label;
     b.replaceChildren(node("span", label, "sr-only"), icon);
@@ -1661,7 +1721,7 @@ async function loadJobs(more = false) {
     // The server bounds each page to 100. Refresh the complete visible window.
     while (page.length < target) {
       data = await api(
-        `operations?${new URLSearchParams({ status, limit: Math.min(100, target - page.length), offset: offset + page.length })}`,
+        `operations?${new URLSearchParams({ group: "workflow", status, limit: Math.min(100, target - page.length), offset: offset + page.length })}`,
       );
       if (revision !== state.jobsRevision || $("workspace").hidden) return;
       if (!Array.isArray(data.jobs))
@@ -1672,7 +1732,7 @@ async function loadJobs(more = false) {
     renderSavings(data);
     if (!more) state.operationJobs = new Map();
     state.operationJobs ||= new Map();
-    for (const job of page) state.operationJobs.set(job.id, job);
+    for (const job of page) state.operationJobs.set(job.workflow_id || job.id, job);
     state.jobsLoaded = offset + page.length;
     state.jobsHasMore = data.has_more;
     const focus = focusedControl($("jobs-list"));
@@ -1682,6 +1742,7 @@ async function loadJobs(more = false) {
         meta = node("div", "", "job-meta");
       const presentation = queuePresentation(job);
       const heading = node("h3", "", "job-heading");
+      if (job.number) heading.append(node("span", `#${job.number}`, "job-number"));
       heading.append(
         button(presentation.title, () => openJob(job.id), "job-title"),
       );
@@ -1689,6 +1750,17 @@ async function loadJobs(more = false) {
       const summary = node("p", presentation.summary, "metadata job-summary");
       summary.title = presentation.summary;
       meta.append(heading, summary);
+      if (job.batch_files?.files?.length) {
+        const files = node("p", job.batch_files.files.map(file => file.display_label || file.file_path?.split("/").pop()).join(" · ") + (job.batch_files.file_count > 2 ? ` · +${job.batch_files.file_count - 2} more` : ""), "metadata batch-file-preview");
+        files.title = files.textContent;
+        meta.append(files);
+      }
+      for (const reason of job.batch_files?.reasons || []) {
+        const text = shortJobReason(reason.reason);
+        const line = node("p", `${reason.count} ${reason.count === 1 ? "file" : "files"}: ${text}`, "metadata batch-reason");
+        line.title = reason.reason;
+        meta.append(line);
+      }
       const actions = jobControls(job);
       if (job.parent_action_id) {
         const parent = button(
@@ -1761,6 +1833,8 @@ async function openJob(id) {
   if (!$("job-detail").open) $("job-detail").showModal();
   $("detail-summary").replaceChildren(node("p", "Loading job…", "muted"));
   $("detail-controls").replaceChildren();
+  $("detail-stages").replaceChildren();
+  $("detail-related").replaceChildren();
   $("detail-content").textContent = "";
   $("detail-content").hidden = true;
   await refreshDetail();
@@ -1785,30 +1859,29 @@ async function refreshDetail() {
     summary.replaceChildren(
       node(
         "p",
-        job.batch?.title || job.source_path?.split("/").pop() || job.id,
+        job.batch || job.source_path || job.promotion ? queuePresentation(job).title : job.id,
         "metadata",
       ),
       node(
         "span",
-        job.replaced ? "Replaced" : names[job.status] || job.status,
+        queuePresentation(job).status,
         `badge ${job.status}`,
       ),
-      node("p", job.error || job.waiting_reason || job.progress, "muted"),
+      node("p", queuePresentation(job).summary, "muted"),
     );
-    if (job.worker) summary.append(telemetry(job));
-    if (job.batch)
-      summary.append(node("p", batchCounts(job.batch, true), "muted"));
+    if (queuePresentation(job).showTelemetry) summary.append(telemetry(job));
+    renderStages(job);
+    const related = $("detail-related");
+    related.replaceChildren();
+    for (const action of job.workflow_actions || []) {
+      if (action.id === job.id) continue;
+      related.append(button(`${workflows[action.action_name] || action.action_name} · ${names[action.status] || action.status}`, () => openJob(action.id), "quiet"));
+    }
     if (job.source_path) summary.append(node("p", job.source_path, "metadata"));
-    if (job.promotion)
-      summary.append(
-        node(
-          "p",
-          `${job.promotion.original_path} → ${job.promotion.candidate_path} · ${bytes(job.promotion.original_bytes)} → ${bytes(job.promotion.candidate_bytes)}`,
-          "metadata",
-        ),
-      );
-    const savings = savingsLine(job.savings, false, job.replaced);
-    if (savings) summary.append(savings);
+    if (job.promotion) {
+      const location = job.promotion.new_path || job.promotion.original_path;
+      if (location) summary.append(node("p", `Library: ${location.slice(0, location.lastIndexOf("/"))}`, "metadata"));
+    }
     const controls = $("detail-controls");
     controls.replaceChildren(jobControls(job));
     $("batch-items-panel").hidden = !job.batch;
@@ -1825,6 +1898,8 @@ async function refreshDetail() {
         button("Retry", refreshDetail, "quiet"),
       );
       $("detail-controls").replaceChildren();
+      $("detail-stages").replaceChildren();
+      $("detail-related").replaceChildren();
       $("batch-items-panel").hidden = true;
       $("load-detail").hidden = true;
     }
@@ -1853,7 +1928,8 @@ async function loadBatchItems(id, revision) {
       row.append(
         button("View file", () => openJob(item.child_action_id), "quiet"),
       );
-    if (item.error) row.append(node("span", item.error, "muted"));
+    for (const reason of [item.error, ...(item.reasons || [])].filter(Boolean))
+      row.append(node("span", shortJobReason(reason), "muted"));
     $("batch-items-list").append(row);
   }
   $("batch-items-note").textContent =
@@ -1908,6 +1984,58 @@ async function loadDetail() {
       "No worker output yet.",
   );
 }
+
+function renderStages(job) {
+  const list = $("detail-stages");
+  list.replaceChildren();
+  if (job.batch?.dry_run || job.batch?.outcome === "no_changes") return;
+  for (const [index, stage] of (job.stages || []).entries()) {
+    const row = node("li", "", `stage ${stage.status}`);
+    row.append(node("span", String(index + 1), "stage-number"), node("span", stageLabel(stage.name)), node("span", stage.status === "pending" ? "Next" : names[stage.status] || stage.status, "metadata"));
+    if (index === job.current_step && ["running", "waiting_external", "waiting_decision"].includes(job.status)) row.setAttribute("aria-current", "step");
+    list.append(row);
+  }
+}
+
+async function reviewFilePromotion(id) {
+  const auth = state.authRevision;
+  const job = (await api(`operations?id=${encodeURIComponent(id)}`)).jobs?.[0];
+  if (auth !== state.authRevision || $("workspace").hidden) return;
+  if (!job?.promotion?.original_path || !job.promotion.candidate_path || !job.promotion.original_sha256 || !job.promotion.candidate_sha256 || job.status !== "waiting_decision" || !job.waiting_options?.some(option => option.decision === "approve"))
+    throw new Error("This replacement is no longer waiting for approval. Refresh the queue.");
+  state.fileApproval = { id, original: job.promotion.original_sha256, candidate: job.promotion.candidate_sha256 };
+  const data = $("file-review-data");
+  data.replaceChildren(node("p", job.promotion.original_path.split("/").pop(), "review-filename"));
+  for (const [label, path, size] of [["Original", job.promotion.original_path, job.promotion.original_bytes], ["Verified candidate", job.promotion.candidate_path, job.promotion.candidate_bytes]]) {
+    const row = node("div", "", "review-file");
+    row.append(node("span", label, "muted"), node("strong", bytes(size)), node("span", path, "metadata review-path"));
+    data.append(row);
+  }
+  const savings = savingsLine(job.savings);
+  if (savings) data.append(savings);
+  $("approve-file-review").disabled = !serverReachable || state.approvingFile;
+  $("file-review").showModal();
+}
+$("dismiss-file-review").addEventListener("click", () => $("file-review").close());
+$("file-review").addEventListener("close", () => { state.fileApproval = null; });
+$("approve-file-review").addEventListener("click", () => safe(async () => {
+  const approval = state.fileApproval;
+  if (!approval || state.approvingFile || !serverReachable) return;
+  state.approvingFile = true;
+  $("approve-file-review").disabled = true;
+  try {
+    const current = (await api(`operations?id=${encodeURIComponent(approval.id)}`)).jobs?.[0];
+    if (state.fileApproval !== approval || !$("file-review").open) return;
+    if (current?.status !== "waiting_decision" || !current.waiting_options?.some(option => option.decision === "approve") || current.promotion?.original_sha256 !== approval.original || current.promotion?.candidate_sha256 !== approval.candidate)
+      throw new Error("The replacement plan changed. Close this review and open it again.");
+    await jobControl(approval.id, "action_resume", { decision: "approve" });
+    $("file-review").close();
+    await openJob(approval.id);
+  } finally {
+    state.approvingFile = false;
+    $("approve-file-review").disabled = !serverReachable;
+  }
+}));
 
 async function reviewBatchPromotion(id) {
   const authRevision = state.authRevision;
