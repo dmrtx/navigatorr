@@ -173,6 +173,103 @@ test("catalog selection retains its import context and an empty selection cannot
   assert.equal(h.run("state.fileService"), "sonarr");
 });
 
+test("desktop checkbox selection prepares single and batch jobs without changing the step", () => {
+  const h = harness();
+  h.run(
+    'controls = () => {}; $("service").value = "folder:/media"; state.folderSelected = new Set(["/media/one.mp4"]); fileSelectionChanged();',
+  );
+  assert.equal(h.elements.get("path").value, "/media/one.mp4");
+  assert.equal(h.elements.get("scope").value, "file");
+  assert.equal(h.run("state.fileStep"), "browse");
+  h.run('state.folderSelected.add("/media/two.mp4"); fileSelectionChanged();');
+  assert.equal(h.elements.get("scope").value, "batch");
+  assert.equal(h.elements.get("selected-only").checked, true);
+  h.run("state.folderSelected.clear(); fileSelectionChanged();");
+  assert.equal(h.elements.get("path").value, "");
+  assert.equal(h.elements.get("scope").value, "file");
+  assert.equal(h.elements.get("selected-only").checked, false);
+});
+
+test("mobile checkbox selection waits for Continue and batch summaries show the explicit count", () => {
+  const h = harness();
+  h.context.matchMedia = () => ({ matches: true });
+  h.run(
+    'controls = () => {}; $("service").value = "folder:/media"; state.folder = "/media/season"; state.folderSelected = new Set(["/media/season/one.mp4", "/media/season/two.mp4"]); fileSelectionChanged();',
+  );
+  assert.equal(h.run("state.fileStep"), "browse");
+  assert.equal(h.elements.get("path").value, "");
+  h.run("configureSelection();");
+  assert.equal(h.run("sourceSummary()"), "2 selected files · season");
+  h.run('$("selected-only").checked = false;');
+  assert.equal(h.run("sourceSummary()"), "Batch: season");
+  h.run(
+    '$("path").value = "/media/season/one.mp4"; state.folderSelected.clear(); fileSelectionChanged();',
+  );
+  assert.equal(h.elements.get("path").value, "");
+  assert.equal(h.elements.get("scope").value, "file");
+});
+
+function submissionHarness() {
+  const h = harness(),
+    receipts = new Map();
+  h.context.sessionStorage = {
+    getItem: (key) => receipts.get(key),
+    setItem: (key, value) => receipts.set(key, value),
+    removeItem: (key) => receipts.delete(key),
+  };
+  h.run(
+    'controls = () => {}; loadJobs = async () => {}; selectTab = (tab) => state.tab = tab; notify = () => {}; submissionID = () => "receipt"; tool = async () => ({id:"submitted"}); $("service").value = "folder:/media"; $("scope").value = "file"; $("path").value = "/media/one.mp4"; $("profile").value = "general-hevc"; $("min-savings").value = "10"; $("max-growth").value = "0"; state.fileStep = "configure"; state.folderSelected = new Set(["/media/one.mp4"]); state.selected.add(12);',
+  );
+  return { h, receipts };
+}
+
+test("opening a file makes its single selection explicit and clears an old batch", () => {
+  const h = harness();
+  h.run(
+    '$("service").value = "folder:/media"; state.folderSelected = new Set(["/media/one.mp4", "/media/two.mp4"]);',
+  );
+  const first = { dataset: { selection: "/media/one.mp4" }, checked: true };
+  const second = { dataset: { selection: "/media/two.mp4" }, checked: true };
+  h.run('$("library-items")').querySelectorAll = () => [first, second];
+  h.run('selectOneFile("/media/two.mp4");');
+  assert.equal(h.run("state.folderSelected.size"), 1);
+  assert.equal(first.checked, false);
+  assert.equal(second.checked, true);
+  h.run(
+    '$("service").value = "sonarr"; state.selected = new Set([1, 2]); selectOneFile(2);',
+  );
+  assert.equal(h.run("state.selected.size"), 1);
+  assert.equal(h.run("state.selected.has(2)"), true);
+});
+
+test("successful encoding clears submitted sources, retains preferences and returns to browse", async () => {
+  const { h, receipts } = submissionHarness();
+  await h.run('buildAndSubmitJob("encode")');
+  assert.equal(h.run("state.fileStep"), "browse");
+  assert.equal(h.run("state.tab"), "jobs");
+  assert.equal(h.run("state.folderSelected.size + state.selected.size"), 0);
+  assert.equal(h.elements.get("path").value, "");
+  assert.equal(h.elements.get("profile").value, "general-hevc");
+  assert.equal(h.elements.get("min-savings").value, "10");
+  assert.equal(receipts.size, 0);
+});
+
+test("benchmark retains its source for encoding while failed submissions retain source and receipt", async () => {
+  const benchmark = submissionHarness();
+  await benchmark.h.run('buildAndSubmitJob("benchmark")');
+  assert.equal(benchmark.h.run("state.fileStep"), "browse");
+  assert.equal(benchmark.h.elements.get("path").value, "/media/one.mp4");
+  const failed = submissionHarness();
+  failed.h.run('tool = async () => { throw new Error("Connection lost"); };');
+  await assert.rejects(
+    failed.h.run('buildAndSubmitJob("encode")'),
+    /Connection lost/,
+  );
+  assert.equal(failed.h.run("state.fileStep"), "configure");
+  assert.equal(failed.h.elements.get("path").value, "/media/one.mp4");
+  assert.equal(failed.receipts.size, 1);
+});
+
 test("queue results distinguish candidates, replacements and failures without inventing measurements", () => {
   const h = harness();
   const candidate = h.run(
