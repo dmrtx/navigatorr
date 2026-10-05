@@ -238,6 +238,22 @@ func (e *Engine) Run(ctx context.Context, actionName string, inputs map[string]a
 		Outputs:    make(map[string]any),
 		Engine:     e,
 	}
+	if origin, ok := ctx.Value(requestOriginKey{}).(string); ok {
+		ec.State["request_origin"] = origin
+	} else {
+		for _, key := range []string{"parent_action_id", "batch_promote_parent_id"} {
+			if parentID := getString(inputs, key); parentID != "" {
+				if parent, err := e.deps.Store.GetActionInstance(parentID); err == nil {
+					state := map[string]any{}
+					if json.Unmarshal([]byte(parent.StateJSON), &state) == nil {
+						if origin, ok := state["request_origin"].(string); ok {
+							ec.State["request_origin"] = origin
+						}
+					}
+				}
+			}
+		}
+	}
 
 	claimCtx, release, err := e.claimExecution(ctx, inst.ID, true)
 	if err != nil {

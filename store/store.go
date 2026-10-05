@@ -20,7 +20,7 @@ import (
 )
 
 // SchemaVersion is the current schema revision. Migrations run in order.
-const SchemaVersion = 7
+const SchemaVersion = 8
 
 // MaxPreferenceValueLen bounds a stored preference value. Values ride into
 // memory_get/memory_list/get_context verbatim, so one huge blob would tax
@@ -337,6 +337,11 @@ var migrations = []migration{
 			series_id INTEGER NOT NULL,
 			owner_action_id TEXT NOT NULL REFERENCES action_instances(id),
 			PRIMARY KEY(service, series_id))`,
+	}},
+	{version: 8, statements: []string{
+		`CREATE TABLE action_submissions (
+			submission_key TEXT PRIMARY KEY,
+			action_id TEXT NOT NULL UNIQUE REFERENCES action_instances(id))`,
 	}},
 }
 

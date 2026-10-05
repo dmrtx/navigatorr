@@ -120,6 +120,19 @@ func TestValidateTranscodeInputsAcceptsProfileConfig(t *testing.T) {
 		})
 	}
 }
+func TestValidateTranscodeInputsAcceptsDurableLibraryContext(t *testing.T) {
+	e := NewEngine(EngineDeps{})
+	err := e.validateTranscodeInputs(&ExecutionContext{
+		ActionName: "transcode_media",
+		Inputs: map[string]any{
+			"path":            "/media/movie.mkv",
+			"library_context": map[string]any{"service": "radarr", "id": 42},
+		},
+	})
+	if err != nil {
+		t.Fatalf("durable display context should be a declared transcode input: %v", err)
+	}
+}
 
 func testEphemeralBatchProfileConfig() map[string]any {
 	return map[string]any{

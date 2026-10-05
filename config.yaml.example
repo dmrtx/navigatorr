@@ -25,6 +25,26 @@
 #   - Destructive operations are permitted, subject to tool-level authorization checks.
 allow_destructive: false
 
+# Optional maintenance console on the existing persistent HTTP listener.
+# See docs/MAINTENANCE_UI.md. Requires mcp.transport=streamable-http when enabled.
+web:
+  enabled: false
+  auth_mode: "token" # Default; choose cloudflare_access for Google login at Cloudflare
+  token_file: "/run/secrets/navigatorr-web-token" # Random token, at least 24 characters
+# For Cloudflare Access, replace the web block above (no token/token_file):
+# web:
+#   enabled: true
+#   auth_mode: "cloudflare_access"
+#   cloudflare_access:
+#     team_domain: "https://your-team.cloudflareaccess.com"
+#     audience: "YOUR_ACCESS_APPLICATION_AUD_TAG"
+# Configure the Google identity provider and allowed identities in Cloudflare
+# Access. Navigatorr validates Access's signed assertion for this audience;
+# merely forwarding an identity/email header does not grant access.
+# mcp:
+#   transport: "streamable-http"
+#   listen: "127.0.0.1:8098"
+
 # ==============================================================================
 # 2. RESPONSE SIZE & CONCURRENCY GUARDS
 # ==============================================================================
