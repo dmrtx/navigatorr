@@ -216,6 +216,16 @@
                   </svg>
                 </button>
               </div>
+              <div class="library-order">
+                <label for="library-sort">Sort</label>
+                <select id="library-sort">
+                  <option value="name">Name · A–Z</option>
+                  <option value="size_desc">Size · Largest first</option>
+                  <option value="size_asc">Size · Smallest first</option>
+                </select>
+                <button id="reload-library" class="quiet" title="Reload sizes and order">Reload</button>
+              </div>
+              <p id="size-order-note" class="metadata" hidden>Order uses saved sizes. Reload to include newly measured folders.</p>
               <div class="breadcrumbs">
                 <button
                   id="back"
@@ -557,6 +567,10 @@
             </div>
           </div>
           <p id="jobs-updated" class="metadata" role="status"></p>
+          <section id="worker-activity" class="worker-activity" aria-label="Video worker activity">
+            <div class="activity-heading"><strong id="worker-capacity">Checking worker slots…</strong><span id="activity-checked" class="metadata"></span></div>
+            <div id="worker-slots" class="worker-slots"></div>
+          </section>
           <div id="jobs-list"></div>
           <div class="list-footer">
             <span id="jobs-page" class="muted"></span
@@ -893,6 +907,30 @@
           Review replacement
         </button>
       </div>
+    </dialog>
+    <dialog id="benchmark-comparison" aria-labelledby="comparison-title">
+      <div class="dialog-heading">
+        <h2 id="comparison-title">Compare sample frames</h2>
+        <button id="close-comparison" class="icon-button" aria-label="Close comparison">×</button>
+      </div>
+      <p id="comparison-file" class="metadata"></p>
+      <p id="comparison-note" class="muted" role="status"></p>
+      <div id="comparison-controls" class="comparison-toolbar" hidden>
+        <label for="comparison-sample">Sample</label>
+        <select id="comparison-sample"></select>
+        <button id="comparison-zoom" class="quiet" aria-pressed="false">View at 100%</button>
+      </div>
+      <p id="comparison-metrics" class="metadata"></p>
+      <div id="comparison-view" hidden>
+        <div class="comparison-labels"><span>Candidate</span><span>Original</span></div>
+        <div class="comparison-viewport">
+          <div id="comparison-frame" class="comparison-frame"></div>
+        </div>
+        <label class="comparison-slider" for="comparison-slider">Reveal candidate
+          <input id="comparison-slider" type="range" min="0" max="100" value="50" />
+        </label>
+      </div>
+      <p class="metadata">Same frame from the original reference and the selected encode. PNG images preserve frame detail; use 100% to inspect compression. These frames are kept for up to 7 days and the latest 16 benchmarks. The original file is preserved.</p>
     </dialog>
     <dialog id="job-detail" aria-labelledby="job-detail-title">
       <div class="dialog-heading">

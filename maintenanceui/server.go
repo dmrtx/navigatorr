@@ -38,15 +38,16 @@ var allowedTools = map[string]bool{
 var allowedActions = map[string]bool{"transcode_media": true, "transcode_batch": true, "benchmark_transcode": true, "promote_transcode_candidate": true}
 
 type Server struct {
-	cfg         *config.Config
-	registry    *arrservice.Registry
-	engine      *action.Engine
-	mcp         *server.MCPServer
-	access      *cloudflareAccessVerifier
-	tokenHash   [32]byte
-	mu          sync.Mutex
-	sessions    map[string]time.Time
-	folderSizes folderSizeCache
+	cfg            *config.Config
+	registry       *arrservice.Registry
+	engine         *action.Engine
+	mcp            *server.MCPServer
+	access         *cloudflareAccessVerifier
+	tokenHash      [32]byte
+	mu             sync.Mutex
+	sessions       map[string]time.Time
+	folderSizes    folderSizeCache
+	folderListings folderListingCache
 }
 
 func New(cfg *config.Config, registry *arrservice.Registry, engine *action.Engine, mcpServer *server.MCPServer) (*Server, error) {
@@ -102,8 +103,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/maintenance/batch-items", s.batchItems)
 	mux.HandleFunc("GET /api/maintenance/folder", s.folder)
 	mux.HandleFunc("GET /api/maintenance/workers", s.workers)
+	mux.HandleFunc("GET /api/maintenance/worker-activity", s.workerActivity)
 	mux.HandleFunc("POST /api/maintenance/tool", s.tool)
 	mux.HandleFunc("GET /api/maintenance/logs", s.logs)
+	mux.HandleFunc("GET /api/maintenance/benchmark-comparison", s.benchmarkComparison)
 	mux.HandleFunc("GET /sw.js", serveWorker)
 	files, _ := fs.Sub(assets, "assets")
 	static := http.FileServer(http.FS(files))
