@@ -733,7 +733,7 @@ async function loadFolder(revision = ++state.libraryRevision, more = false) {
       state.folder = root;
     state.folderSelected ||= new Set();
     const page = await api(
-      `folder?${new URLSearchParams({ path: state.folder, q: $("search").value, offset: state.libraryOffset })}`,
+      `folder?${new URLSearchParams({ path: state.folder, q: $("search").value, offset: state.libraryOffset, sizes:"1" })}`,
     );
     if (revision !== state.libraryRevision) return;
     $("selection-title").textContent =
@@ -777,6 +777,7 @@ async function loadFolder(revision = ++state.libraryRevision, more = false) {
       }
       const sizeLabel = node("span", file.is_dir ? "Calculating…" : bytes(file.size), "media-size");
       if (file.is_dir) {
+        showFolderSize(sizeLabel, file.folder_size || {status:"calculating"});
         const targets = state.folderSizeTargets.get(file.path) || [];
         targets.push(sizeLabel);
         state.folderSizeTargets.set(file.path, targets);
@@ -813,7 +814,12 @@ async function loadFolder(revision = ++state.libraryRevision, more = false) {
     state.libraryError = false;
     $("library-more").hidden = !page.has_more;
     controls();
-    void updateFolderSizes(revision, page.path, $("search").value, state.libraryLoaded);
+    if (state.folderSizeTargets.size) {
+      const pending = [...state.folderSizeTargets.values()].flat().some(label => label.dataset.pending === "1");
+      state.folderSizesTimer = setTimeout(() => {
+        void updateFolderSizes(revision, page.path, $("search").value, state.libraryLoaded);
+      }, pending ? 3000 : 30000);
+    }
   } catch (error) {
     if (revision === state.libraryRevision) libraryFailure(error, more);
     throw error;
@@ -825,11 +831,12 @@ async function loadFolder(revision = ++state.libraryRevision, more = false) {
   }
 }
 function showFolderSize(target, size) {
+  target.dataset.pending = size?.status === "calculating" || size?.updating ? "1" : "0";
   target.textContent = size?.status === "calculating" ? "Calculating…"
     : size?.bytes != null ? `${size.status === "partial" ? "≥ " : ""}${bytes(size.bytes)}`
     : "Unavailable";
   target.title = size?.note || (size?.status !== "calculating" && size?.measured_at
-    ? `Total file bytes, excluding symbolic links. Measured ${new Date(size.measured_at).toLocaleString()}; cached for up to 5 minutes.`
+    ? `Total file bytes, excluding symbolic links. Measured ${new Date(size.measured_at).toLocaleString()}. Saved across restarts; changes checked in the background.${size.updating ? " Updating; last measured total remains visible." : ""}`
     : "Measuring total file bytes in this folder.");
 }
 async function updateFolderSizes(revision, path, query, loaded) {
@@ -846,12 +853,12 @@ async function updateFolderSizes(revision, path, query, loaded) {
         const target = state.folderSizeTargets.get(item.path);
         if (!target) continue;
         for (const label of Array.isArray(target) ? target : [target]) showFolderSize(label, item.folder_size);
-        pending ||= item.folder_size?.status === "calculating";
+        pending ||= item.folder_size?.status === "calculating" || item.folder_size?.updating;
       }
     }
-    if (pending && current()) state.folderSizesTimer = setTimeout(() => {
+    if (current()) state.folderSizesTimer = setTimeout(() => {
       void updateFolderSizes(revision, path, query, loaded);
-    }, 3000);
+    }, pending ? 3000 : 30000);
   } catch {
     if (current()) for (const targets of state.folderSizeTargets.values()) {
       for (const target of Array.isArray(targets) ? targets : [targets]) {
@@ -978,6 +985,34 @@ function fileSelectionChanged() {
   } else if (!singleColumn) configureSelection(false);
   else controls();
 }
+async function selectAllFiles() {
+  if (state.libraryLoading || state.selectionLoading) return;
+  const revision = state.libraryRevision, auth = state.authRevision;
+  const folder = $("service").value.startsWith("folder:");
+  state.selectionLoading = true;
+  controls();
+  try {
+    const keys = folder
+      ? (await api(`folder?${new URLSearchParams({path:state.folder,files:"1",q:$("search").value})}`)).paths
+      : [...state.files.keys()];
+    if (revision !== state.libraryRevision || auth !== state.authRevision) return;
+    if (!keys.length) throw new Error("No videos found to select.");
+    if (folder) state.folderSelected = new Set(keys);
+    else state.selected = new Set(keys);
+    $("library-items").querySelectorAll('input[type="checkbox"]').forEach(input => { input.checked = true; });
+    fileSelectionChanged();
+  } finally {
+    state.selectionLoading = false;
+    controls();
+  }
+}
+$("select-all-files").addEventListener("click", () => safe(selectAllFiles));
+$("clear-selected-files").addEventListener("click", () => {
+  state.folderSelected?.clear();
+  state.selected.clear();
+  $("library-items").querySelectorAll('input[type="checkbox"]').forEach(input => { input.checked = false; });
+  fileSelectionChanged();
+});
 function sourceSummary() {
   if ($("scope").value !== "batch")
     return $("path").value.split("/").pop() || "Choose a file.";
@@ -1013,6 +1048,7 @@ $("back-to-files").addEventListener("click", () => setFileStep("browse"));
 $("use-container").addEventListener("click", () => {
   $("scope").value = "batch";
   $("selected-only").checked = false;
+  if ($("service").value.startsWith("folder:")) $("recursive").checked = true;
   controls();
   setFileStep("configure");
 });
@@ -1033,8 +1069,15 @@ function controls() {
   $("use-container").hidden = folder
     ? !state.folder
     : $("service").value !== "sonarr" || !state.media;
-  $("use-container").disabled = state.libraryLoading;
-  $("use-container").textContent = folder ? "Use folder" : "Use series";
+  $("use-container").disabled = state.libraryLoading || state.selectionLoading;
+  $("use-container").textContent = folder ? "Select folder" : "Select series";
+  $("select-all-files").hidden = !folder && !state.files?.size;
+  $("selection-toolbar").hidden = $("select-all-files").hidden && $("use-container").hidden && !selectedCount;
+  $("use-container").title = folder ? "Choose this folder, including its subfolders" : "Choose this series";
+  $("select-all-files").disabled = state.libraryLoading || state.selectionLoading;
+  $("clear-selected-files").hidden = !selectedCount;
+  $("clear-selected-files").disabled = state.libraryLoading || state.selectionLoading;
+  $("configure-selection").disabled ||= state.selectionLoading;
   $("media-kind").closest("label").hidden = !folder;
   $("season").closest("label").hidden = folder;
   $("recursive").closest("label").hidden = !folder;
@@ -1065,6 +1108,7 @@ function controls() {
     !state.info?.transcode_enabled ||
     !state.workerInfo?.ready ||
     state.submitting ||
+    state.selectionLoading ||
     state.libraryLoading ||
     !serverReachable ||
     !hasSource;
@@ -1072,6 +1116,7 @@ function controls() {
     !state.info?.transcode_enabled ||
     !state.workerInfo?.ready ||
     state.submitting ||
+    state.selectionLoading ||
     state.libraryLoading ||
     !serverReachable ||
     !hasSource;
@@ -1079,6 +1124,7 @@ function controls() {
     !state.info?.transcode_enabled ||
     !state.workerInfo?.ready ||
     state.submitting ||
+    state.selectionLoading ||
     state.libraryLoading ||
     !serverReachable ||
     !hasSource;
@@ -1171,7 +1217,7 @@ function profileFromControls() {
 }
 
 async function submitJob(mode = "encode") {
-  if (state.submitting) return;
+  if (state.submitting || state.selectionLoading) return;
   state.submitting = true;
   controls();
   try {
@@ -1831,6 +1877,7 @@ function workerUnavailable(job) {
   return job.waiting_condition === "worker_unreachable" || job.activity_waiting_condition === "worker_unreachable";
 }
 function queuePresentation(job) {
+  const replacement = job.action_name === "promote_transcode_candidate";
   const kind = job.batch
     ? "Batch"
     : job.action_name === "promote_transcode_candidate"
@@ -1861,7 +1908,7 @@ function queuePresentation(job) {
       (job.candidate_ready && !job.replacement_action_id
         ? "Candidate ready"
         : ["running", "waiting_external"].includes(job.status)
-          ? (workerUnavailable(job) ? "Worker offline" : job.worker?.progress_is_stale ? "No updates" : {encoding:"Encoding",validating:"Verifying",publishing:"Saving candidate",benchmarking:"Calibrating",queued:"Queued on worker",preparing:"Preparing"}[phase] || (job.promotion ? "Replacing" : "In progress"))
+          ? (workerUnavailable(job) ? "Worker offline" : job.worker?.progress_is_stale ? "No updates" : {encoding:"Encoding",validating:"Verifying",publishing:"Saving candidate",benchmarking:"Calibrating",queued:"Queued on worker",preparing:"Preparing"}[phase] || (replacement || job.promotion ? "Replacing" : "In progress"))
           : names[job.status] || job.status);
   const s = job.savings || {},
     metrics = [];
@@ -1892,7 +1939,7 @@ function queuePresentation(job) {
   else if (job.status === "waiting_decision")
     result = job.promotion ? "Review replacement before files change" : shortJobReason(job.waiting_reason) || "Review required";
   else if (job.status === "cancelled") result = "Stopped";
-  if (job.workflow_actions?.length && job.promotion && job.status !== "failed") {
+  if (job.workflow_actions?.length && replacement && job.status !== "failed") {
     result = `Conversion complete · ${job.savings?.realized_saved_bytes != null ? "Replacement verified" : result || "Replacement in progress"}`;
   }
   if (job.batch?.dry_run) result += " · Originals unchanged";

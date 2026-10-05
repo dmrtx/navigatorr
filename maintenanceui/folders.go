@@ -37,6 +37,7 @@ func (s *Server) folder(w http.ResponseWriter, r *http.Request) {
 		paths := []string{}
 		visited := 0
 		recursive := r.URL.Query().Get("recursive") == "1"
+		query := strings.ToLower(r.URL.Query().Get("q"))
 		err = filepath.WalkDir(path, func(p string, d fs.DirEntry, walkErr error) error {
 			if walkErr != nil {
 				return walkErr
@@ -54,7 +55,7 @@ func (s *Server) folder(w http.ResponseWriter, r *http.Request) {
 				}
 				return nil
 			}
-			if d.Type()&os.ModeSymlink != 0 || !videoPath(p) {
+			if d.Type()&os.ModeSymlink != 0 || !videoPath(p) || (query != "" && !strings.Contains(strings.ToLower(d.Name()), query)) {
 				return nil
 			}
 			real, err := resolver.ResolveRead(p)
@@ -110,7 +111,7 @@ func (s *Server) folder(w http.ResponseWriter, r *http.Request) {
 	for _, stat := range items[offset:end] {
 		item := folderItem{Stat: stat}
 		if stat.IsDir && r.URL.Query().Get("sizes") == "1" {
-			size := s.folderSizes.get(stat.Path, resolver)
+			size := s.folderSizes.get(stat.Path, resolver, s.engine.Deps().Store)
 			item.FolderSize = &size
 		}
 		page = append(page, item)

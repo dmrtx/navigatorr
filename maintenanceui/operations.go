@@ -466,6 +466,20 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 			job["workflow_id"] = root
 			job["number"] = numbers[root]
 			job["stages"] = s.queueStages(r)
+			// Planning can hash large files before a promotion checkpoint exists.
+			// Its durable source link already identifies the file during that stage.
+			if r.inst.ActionName == "promote_transcode_candidate" {
+				if original, ok := recordsByID[root]; ok && original.inst.ActionName == "transcode_media" {
+					path := operationString(original.inputs["path"])
+					if resolved := operationString(original.state["resolved_path"]); resolved != "" {
+						path = resolved
+					}
+					job["source_path"] = path
+					if r.savings.SourceBytes == nil {
+						job["savings"] = original.savings
+					}
+				}
+			}
 			if recordsByID[root].inst.ActionName != "transcode_batch" && len(members[root]) > 1 {
 				related := []map[string]any{}
 				for _, id := range []string{root, existingReplacements[root]} {
