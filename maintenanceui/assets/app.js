@@ -1732,7 +1732,7 @@ async function loadJobs(more = false) {
     renderSavings(data);
     if (!more) state.operationJobs = new Map();
     state.operationJobs ||= new Map();
-    for (const job of page) state.operationJobs.set(job.id, job);
+    for (const job of page) state.operationJobs.set(job.workflow_id || job.id, job);
     state.jobsLoaded = offset + page.length;
     state.jobsHasMore = data.has_more;
     const focus = focusedControl($("jobs-list"));

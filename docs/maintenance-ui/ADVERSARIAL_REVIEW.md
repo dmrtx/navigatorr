@@ -70,4 +70,4 @@ Batch rows show their folder/season, two actual filenames, total file count and 
 
 Replacement approval uses an application dialog with original/candidate paths and sizes, potential savings and recovery behavior. Opening it is read-only. Approval rechecks action status, available decision and both content hashes; expiration or a changed plan prevents submission. Review and Replace retain short visible labels and consistent control sizing.
 
-Validation: full Go tests and vet, 73 JavaScript tests, grouping/filter/pagination and live-child telemetry regressions, plus browser inspection of synthetic running/review/skipped states at desktop, 390 and 320 pixels. No production media was changed by this review.
+Validation: full Go tests and vet, 74 JavaScript tests, grouping/filter/pagination and live-child telemetry regressions, plus browser inspection of synthetic running/review/skipped states at desktop, 390 and 320 pixels. No production media was changed by this review.
