@@ -147,6 +147,20 @@ func TestQueueBatchTelemetryIdentifiesTheActualActiveFile(t *testing.T) {
 	}
 }
 
+func TestQueueBatchIncludesEveryActiveFile(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	seedOperation(t, st, "batch", "transcode_batch", "waiting_external", nil, nil, nil)
+	for _, id := range []string{"one", "two"} {
+		seedOperation(t, st, id, "transcode_media", "waiting_external", map[string]any{"parent_action_id": "batch", "path": "/media/" + id + ".mkv"}, nil, map[string]any{"phase": "evaluating_metrics", "progress": 84.4})
+	}
+	w := request(h, "GET", "/api/maintenance/operations?group=workflow&status=active", "", true)
+	var page operationsPage
+	if json.Unmarshal(w.Body.Bytes(), &page) != nil || len(page.Jobs) != 1 || len(page.Jobs[0]["activities"].([]any)) != 2 {
+		t.Fatal(w.Body.String())
+	}
+}
+
 func TestBatchQueueFailureReasonsDoNotClaimSelectionCriteriaAreErrors(t *testing.T) {
 	feedback := batchQueueFeedback([]store.TranscodeBatchItem{
 		{FilePath: "/media/one.mkv", Status: "failed", Reasons: []string{"h264_1080p", "oversized"}, Error: "Worker connection failed"},

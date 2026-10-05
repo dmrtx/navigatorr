@@ -343,6 +343,7 @@ type BenchmarkProgressDetails struct {
 
 // BenchmarkStatus captures the current execution status and metadata of a benchmark job.
 type BenchmarkStatus struct {
+	ComparisonAvailable bool `json:"comparison_available,omitempty"`
 	ProtocolVersion int                                 `json:"protocol_version"`
 	ID              string                              `json:"id"`
 	Status          string                              `json:"status"` // queued, running, completed, failed, cancelled

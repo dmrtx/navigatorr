@@ -434,6 +434,34 @@ main {
 .file-selection-actions button {
   font-size: 11px;
 }
+.library-order {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+.library-order label { font-size: 11px; color: var(--muted); }
+.library-order select { flex: 1; min-width: 0; }
+.library-order button { font-size: 11px; }
+#benchmark-comparison { width: min(1100px, calc(100vw - 32px)); max-width:1100px; }
+.comparison-toolbar { display:flex; align-items:center; gap:8px; }
+.comparison-toolbar select { flex:1; min-width:0; }
+.comparison-labels { display:flex; justify-content:space-between; padding:6px 0; font-size:11px; }
+.comparison-viewport { overflow:auto; background:#14221d; max-height:clamp(120px, calc(100dvh - 300px), 60vh); }
+.comparison-frame { position:relative; width:100%; }
+.comparison-frame.native-size { width:var(--frame-width); }
+.comparison-frame img { display:block; width:100%; height:auto; }
+.comparison-frame .comparison-candidate { position:absolute; inset:0; height:100%; clip-path:inset(0 50% 0 0); }
+.comparison-divider { position:absolute; top:0; bottom:0; left:50%; width:2px; background:white; box-shadow:0 0 2px #000; pointer-events:none; }
+.comparison-slider { display:flex; align-items:center; gap:12px; padding-top:12px; font-size:11px; }
+.comparison-slider input { flex:1; min-width:0; accent-color:var(--forest); }
+.worker-activity { padding:10px 0; border-bottom:1px solid var(--line); }
+.activity-heading { display:flex; justify-content:space-between; gap:8px; font-size:11px; }
+.worker-slots { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(270px,100%),1fr)); gap:8px; margin-top:8px; }
+.worker-slot { min-width:0; min-height:82px; padding:8px; border:1px solid var(--line); border-radius:4px; }
+.worker-slot strong { display:block; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.worker-slot p { margin:4px 0 0; }
 #selection-count:empty {
   display: none;
 }
@@ -660,6 +688,9 @@ main {
 .batch-job .job-meta {
   height: 54px;
 }
+.job-row.terminal-job .job-meta {
+  height: auto;
+}
 .job-row h3 {
   margin: 0;
   font: inherit;
@@ -700,6 +731,10 @@ main {
   gap: 8px;
   height: 32px;
   min-width: 0;
+}
+.job-row.terminal-job .job-footer {
+  height: auto;
+  min-height: 18px;
 }
 .job-row > .job-meta, .job-row > .job-footer {
   margin-left: 50px;

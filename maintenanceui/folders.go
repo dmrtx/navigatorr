@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-
-	"github.com/jakenesler/navigatorr/fsop"
 )
 
 func videoPath(path string) bool {
@@ -82,39 +80,65 @@ func (s *Server) folder(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"path": path, "paths": paths})
 		return
 	}
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		fail(w, 400, err.Error())
-		return
-	}
-	items := []fsop.Stat{}
 	q := strings.ToLower(r.URL.Query().Get("q"))
-	for _, d := range entries {
-		if strings.HasPrefix(d.Name(), ".") || (!d.IsDir() && !videoPath(d.Name())) || (q != "" && !strings.Contains(strings.ToLower(d.Name()), q)) {
-			continue
-		}
-		// Skip escaped links and nonregular files. Stat supplies measured bytes.
-		stat, err := resolver.FileStat(filepath.Join(path, d.Name()))
+	order := r.URL.Query().Get("sort")
+	listing := r.URL.Query().Get("listing")
+	var items []folderItem
+	pending := false
+	if listing != "" {
+		list, err := s.folderListings.load(listing, path, q, order)
 		if err != nil {
-			continue
+			fail(w, 400, err.Error())
+			return
 		}
-		info, err := os.Stat(stat.Path)
-		if err != nil || (!info.IsDir() && !info.Mode().IsRegular()) {
-			continue
+		items, pending = list.Items, list.Pending
+	} else {
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			fail(w, 400, err.Error())
+			return
 		}
-		items = append(items, stat)
+		items = []folderItem{}
+		for _, d := range entries {
+			if strings.HasPrefix(d.Name(), ".") || (!d.IsDir() && !videoPath(d.Name())) || (q != "" && !strings.Contains(strings.ToLower(d.Name()), q)) {
+				continue
+			}
+			// Skip escaped links and nonregular files. Stat supplies measured bytes.
+			stat, err := resolver.FileStat(filepath.Join(path, d.Name()))
+			if err != nil {
+				continue
+			}
+			info, err := os.Stat(stat.Path)
+			if err != nil || (!info.IsDir() && !info.Mode().IsRegular()) {
+				continue
+			}
+			item := folderItem{Stat: stat}
+			if stat.IsDir && (order == "size_desc" || order == "size_asc") {
+				size := s.folderSizes.get(stat.Path, resolver, s.engine.Deps().Store)
+				item.FolderSize = &size
+				pending = pending || size.Status != "ready" || size.Updating
+			}
+			items = append(items, item)
+		}
+		sortFolderItems(items, order)
+		if order == "size_desc" || order == "size_asc" {
+			listing, err = s.folderListings.save(folderListing{Path: path, Query: q, Order: order, Items: items, Pending: pending})
+			if err != nil {
+				fail(w, 400, err.Error())
+				return
+			}
+		}
 	}
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 	offset = max(0, min(offset, len(items)))
 	end := min(offset+100, len(items))
 	page := make([]folderItem, 0, end-offset)
-	for _, stat := range items[offset:end] {
-		item := folderItem{Stat: stat}
-		if stat.IsDir && r.URL.Query().Get("sizes") == "1" {
-			size := s.folderSizes.get(stat.Path, resolver, s.engine.Deps().Store)
+	for _, item := range items[offset:end] {
+		if item.IsDir && r.URL.Query().Get("sizes") == "1" {
+			size := s.folderSizes.get(item.Path, resolver, s.engine.Deps().Store)
 			item.FolderSize = &size
 		}
 		page = append(page, item)
 	}
-	writeJSON(w, 200, map[string]any{"path": path, "items": page, "total": len(items), "has_more": end < len(items)})
+	writeJSON(w, 200, map[string]any{"path": path, "items": page, "total": len(items), "has_more": end < len(items), "listing": listing, "size_order_pending": pending})
 }
