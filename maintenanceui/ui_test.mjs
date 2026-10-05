@@ -316,6 +316,17 @@ test("decision rows show the next step instead of stale worker telemetry or cont
   assert.doesNotMatch(batch.summary, /0 files/);
 });
 
+test("loading another page cannot duplicate a conversion whose replacement has started", async () => {
+  const h = harness();
+  const existing = [{id:"convert",workflow_id:"same",status:"completed"}, ...Array.from({length:24},(_,i)=>({id:`other-${i}`,status:"completed"}))];
+  h.context.responses = [{jobs:existing,has_more:true,total:25},{jobs:[{id:"replace",workflow_id:"same",status:"running"}],has_more:false,total:25}];
+  h.run('api=async()=>responses.shift(); renderSavings=()=>{};');
+  await h.run('loadJobs()');
+  await h.run('loadJobs(true)');
+  assert.equal(h.run('state.operationJobs.size'), 25);
+  assert.equal(h.run('state.operationJobs.get("same").id'), "replace");
+});
+
 test("replacement progress exposes real stages without inventing a byte percentage", () => {
   const h = harness();
   const result = h.run('telemetry({status:"running",current_step:2,stages:[{name:"plan_promotion"},{name:"approve_promotion"},{name:"preserve_original"},{name:"import_candidate"}]})');
