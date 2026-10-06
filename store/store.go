@@ -83,8 +83,9 @@ func CanTransition(from, to string) bool {
 
 // Store wraps the SQLite database.
 type Store struct {
-	mu sync.Mutex
-	db *sql.DB
+	maintenanceMemo map[string]maintenanceMemo
+	mu              sync.Mutex
+	db              *sql.DB
 }
 
 // Open creates the parent directory, opens (or creates) the database,
