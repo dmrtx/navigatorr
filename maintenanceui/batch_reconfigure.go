@@ -15,12 +15,14 @@ import (
 )
 
 type batchReconfigurePlan struct {
-	ID       string         `json:"id"`
-	Title    string         `json:"title"`
-	Selected int            `json:"selected"`
-	Kept     int            `json:"kept"`
-	Files    []string       `json:"files"`
-	Settings map[string]any `json:"settings"`
+	CandidateID     string         `json:"candidate_id,omitempty"`
+	DecisionVersion string         `json:"decision_version,omitempty"`
+	ID              string         `json:"id"`
+	Title           string         `json:"title"`
+	Selected        int            `json:"selected"`
+	Kept            int            `json:"kept"`
+	Files           []string       `json:"files"`
+	Settings        map[string]any `json:"settings"`
 }
 
 // Restore the frozen failed/cancelled subset, never expand it from a live catalog.
@@ -124,12 +126,14 @@ var reconfigureKey = regexp.MustCompile(`^[A-Za-z0-9_-]{1,80}$`)
 
 func (s *Server) batchReconfigure(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		ID         string   `json:"id"`
-		Profile    string   `json:"profile"`
-		Priority   string   `json:"priority"`
-		MinSavings *float64 `json:"min_savings_percent"`
-		MaxGrowth  *float64 `json:"max_size_increase_percent"`
-		Key        string   `json:"key"`
+		ID              string   `json:"id"`
+		CandidateID     string   `json:"candidate_id"`
+		DecisionVersion string   `json:"decision_version"`
+		Profile         string   `json:"profile"`
+		Priority        string   `json:"priority"`
+		MinSavings      *float64 `json:"min_savings_percent"`
+		MaxGrowth       *float64 `json:"max_size_increase_percent"`
+		Key             string   `json:"key"`
 	}
 	id := r.URL.Query().Get("id")
 	if r.Method == http.MethodPost {
@@ -139,7 +143,14 @@ func (s *Server) batchReconfigure(w http.ResponseWriter, r *http.Request) {
 		}
 		id = body.ID
 	}
-	p, inputs, err := s.reconfigurePlan(id)
+	var p batchReconfigurePlan
+	var inputs map[string]any
+	var err error
+	if body.CandidateID != "" || r.URL.Query().Get("candidate") == "1" {
+		p, inputs, err = s.candidateReconfigurePlan(id, body.CandidateID)
+	} else {
+		p, inputs, err = s.reconfigurePlan(id)
+	}
 	if err != nil {
 		fail(w, 409, err.Error())
 		return
@@ -192,6 +203,9 @@ func (s *Server) batchReconfigure(w http.ResponseWriter, r *http.Request) {
 		inputs[field.key] = *field.value
 	}
 	key := "web-reconfigure:" + id + ":" + body.Key
+	if p.CandidateID != "" {
+		key = "web-candidate-reconfigure:" + p.CandidateID
+	}
 	if len(key) > 200 {
 		fail(w, 400, "invalid batch identifier")
 		return
@@ -213,6 +227,24 @@ func (s *Server) batchReconfigure(w http.ResponseWriter, r *http.Request) {
 	if err := s.engine.CheckWorkerAdmission(r.Context()); err != nil {
 		fail(w, 409, err.Error())
 		return
+	}
+	if p.CandidateID != "" {
+		child, readErr := st.GetActionInstance(p.CandidateID)
+		if readErr != nil || child == nil {
+			fail(w, 500, "read candidate")
+			return
+		}
+		if child.Status == store.ActionStatusWaitingDecision {
+			if _, err := s.engine.ResumeReviewedCandidate(r.Context(), id, p.CandidateID, body.DecisionVersion, "reject"); err != nil {
+				fail(w, 409, err.Error())
+				return
+			}
+		}
+		child, readErr = st.GetActionInstance(p.CandidateID)
+		if readErr != nil || !rejectedCandidate(child) {
+			fail(w, 409, "candidate was not rejected; no new attempt submitted")
+			return
+		}
 	}
 	result, err := s.engine.Enqueue(action.WithOrigin(r.Context(), "web"), "transcode_batch", inputs, key)
 	if err != nil {
