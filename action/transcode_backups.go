@@ -19,6 +19,7 @@ type TranscodeBackup struct {
 	Bytes              int64  `json:"bytes"`
 	PartialBytes       int64  `json:"partial_bytes"`
 	CleanupAvailable   bool   `json:"cleanup_available"`
+	DeleteAvailable    bool   `json:"delete_available"`
 	DuplicateAvailable bool   `json:"duplicate_available"`
 	Error              string `json:"error,omitempty"`
 	Reason             string `json:"reason"`
@@ -129,6 +130,7 @@ func (e *Engine) ListTranscodeBackups(ctx context.Context, offset int) (*Transco
 			continue
 		}
 		if item.Reason == "" {
+			item.DeleteAvailable = e.AllowDestructive() && (inst.Status == StatusFailed || inst.Status == StatusCompleted || inst.Status == StatusCancelled)
 			if _, err := e.duplicateBackupGuard(&inst, ec); err == nil && e.AllowDestructive() && item.Bytes > 0 {
 				item.DuplicateAvailable = true
 			}

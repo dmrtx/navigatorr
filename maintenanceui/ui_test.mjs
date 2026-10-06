@@ -12,6 +12,7 @@ const markup = await readFile(
   "utf8",
 );
 class Element {
+  classList = { toggle() {} };
   children = [];
   listeners = new Map();
   dataset = {};
@@ -1746,4 +1747,53 @@ test("a nested benchmark contributes to its parent workflow once and replacement
 test("a lost duplicate-cleanup reply retains the lock while byte observations show ongoing verification",async()=>{
  const h=harness();h.run('state.backupCleaning={id:"copy",auth:state.authRevision,name:"a.mkv",started:Date.now()-1000};api=async()=>({jobs:[{id:"copy",status:"failed",cleanup:{phase:"verifying_replacement",bytes_read:50,total_bytes:100,updated_at:new Date().toISOString()}}]});');
  await h.run('refreshBackupCleanup()');assert.ok(h.run('state.backupCleaning'));assert.equal(h.run('state.backupCleaning.progress.bytes_read'),50);
+});
+
+test("candidate review offers rejection, later and settings for exactly the waiting file", async()=>{
+ for(const chosen of ['reject','reconfigure','later']) {
+  const h=harness(),writes=[];
+  h.context.parent={id:'batch',action_name:'transcode_batch',status:'waiting_decision',waiting_reason:'Candidate too large',waiting_options:[{decision:'reject'},{decision:'accept_loss'}],savings:{source_bytes:9000000000,candidate_bytes:12000000000}};
+  h.context.child={id:'child',action_name:'transcode_media',status:'waiting_decision',source_path:'/media/episode.mkv',waiting_reason:'Candidate file size (2000000000 bytes) exceeds original (1000000000 bytes) by 100.0%, which is greater than max_size_increase_percent (0.0%)'};
+  h.context.plan={id:'batch',candidate_id:'child',decision_version:'reviewed',title:'Episode 1',selected:1,kept:7,files:['Episode 1'],settings:{profile_label:'Original profile',min_savings_percent:15}};
+  h.context.record=(...args)=>writes.push(args);
+  h.run('api=async(path,body)=>body?(record(path,body),{}):path.includes("batch-reconfigure")?plan:{jobs:[path.includes("id=child")?child:parent]};loadJobs=async()=>{};notify=()=>{};');
+  const review=h.run('reviewJobDecision("batch","accept_loss")');
+  for(let i=0;i<12;i++) await Promise.resolve();
+  const content=h.elements.get('action-review-content').children;
+  assert.equal(content[0].textContent,'Episode 1');
+  assert.equal(content[1].children[1].textContent,'1.00 GB');
+  assert.equal(content[2].children[1].textContent,'2.00 GB');
+  assert.equal(h.elements.get('dismiss-action-review').textContent,'Decide later');
+  const choices=content.at(-1).children;
+  assert.deepEqual(choices.map(b=>b.textContent),['Reject · keep original','Transcode with other settings']);
+  if(chosen==='later') h.elements.get('dismiss-action-review').listeners.get('click')();
+  else await choices[chosen==='reject'?0:1].listeners.get('click')();
+  await review;
+  if(chosen==='reject') {
+   assert.equal(writes.length,1);
+   assert.equal(writes[0][0],'candidate-decision');
+   assert.equal(writes[0][1].candidate_id,'child');assert.equal(writes[0][1].decision,'reject');
+  } else assert.equal(writes.length,0);
+  if(chosen==='reconfigure') {
+   assert.equal(h.elements.get('reconfigure-batch').open,true);
+   assert.equal(h.elements.get('submit-reconfigure').textContent,'Reject & queue new attempt');
+   assert.equal(h.run('state.reconfigurePlan.candidate_id'),'child');
+  }
+ }
+});
+
+test("explicit copy removal offers one confirmation and never resumes or verifies old jobs",async()=>{
+ const h=harness(),writes=[];
+ h.context.copy={action_id:'old',delete_available:true,original_path:'/media/episode.mkv',path:'/media/recovery/original.bak',bytes:1000};
+ h.context.record=(...args)=>writes.push(args);
+ h.run('tool=async(...args)=>{record(...args);return {status:"failed",cleanup:{phase:"completed",updated_at:new Date().toISOString()}}};loadJobs=async()=>{};loadBackups=async()=>{};');
+ const removal=h.run('cleanBackup(copy,"discard")');
+ for(let i=0;i<5;i++) await Promise.resolve();
+ assert.equal(writes.length,0);
+ assert.equal(h.elements.get('confirm-action-review').textContent,'Remove copy');
+ assert.match(h.elements.get('action-review-content').children[2].textContent,/cannot be undone/);
+ h.elements.get('confirm-action-review').listeners.get('click')();await removal;
+ assert.equal(writes.length,1);assert.equal(writes[0][1].mode,'discard');
+ assert.match(h.elements.get('backup-progress').textContent,/by your choice/);
+ assert.doesNotMatch(h.elements.get('backup-progress').textContent,/Replacement verified/);
 });
