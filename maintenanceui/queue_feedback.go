@@ -174,8 +174,12 @@ func batchQueueFeedback(items []store.TranscodeBatchItem) map[string]any {
 		preview = append(preview, batchItemView{FilePath: item.FilePath, DisplayLabel: item.DisplayLabel, Status: item.Status, Reasons: item.Reasons, Error: item.Error})
 	}
 	reasons := map[string]int{}
+	rejected := 0
 	commonDir := ""
 	for i, item := range items {
+		if item.Status == "failed" && strings.Contains(batchReasonText(item.Error, true), "transcode candidate rejected by user decision") {
+			rejected++
+		}
 		dir := filepath.Dir(item.FilePath)
 		if i == 0 {
 			commonDir = dir
@@ -225,5 +229,5 @@ func batchQueueFeedback(items []store.TranscodeBatchItem) map[string]any {
 			context = filepath.Base(filepath.Dir(commonDir)) + " · " + context
 		}
 	}
-	return map[string]any{"files": preview, "file_count": len(items), "context": context, "reasons": reasonViews}
+	return map[string]any{"files": preview, "file_count": len(items), "context": context, "reasons": reasonViews, "rejected_count": rejected}
 }

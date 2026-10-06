@@ -36,6 +36,7 @@ const names = {
   partial: "Partial",
   failed: "Failed",
   cancelled: "Cancelled",
+  rejected: "Rejected",
 };
 const workflows = {
   transcode_media: "File transcode",
@@ -71,6 +72,8 @@ function actionIcon(label) {
   if (typeof document.createElementNS !== "function") return null;
   const paths = {
     Reconfigure: "M4 7h16M4 17h16M8 4v6M16 14v6",
+    "Change settings": "M4 7h16M4 17h16M8 4v6M16 14v6",
+    "Try another profile": "M4 7h16M4 17h16M8 4v6M16 14v6",
     Retry: "M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M18 18A8 8 0 0 1 4 12",
     Review: "M5 4h14v16H5ZM8 8h8M8 12h8",
     "Review preview": "M5 4h14v16H5ZM8 8h8M8 12h8",
@@ -1292,6 +1295,7 @@ $("use-container").addEventListener("click", () => {
 
 function controls() {
   const batch = $("scope").value === "batch";
+  $("enqueue").textContent = batch ? "Create candidates" : "Create candidate";
   $("source-summary").textContent = sourceSummary();
   $("batch-options").hidden = !batch;
   const folder = $("service").value.startsWith("folder:");
@@ -1333,6 +1337,8 @@ function controls() {
     folder || $("service").value !== "sonarr";
   $("priority-label").hidden =
     !batch || $("profile").value !== "auto" || $("custom").checked;
+  $("profile-mode-note").hidden = $("profile").value !== "auto" || $("custom").checked;
+  $("profile-mode-note").textContent = batch ? "Tests short samples to choose settings. Unsupported videos are skipped; preview the selection first, or choose an explicit profile." : "Chooses whether this file needs conversion. It may keep the original without encoding; choose an explicit profile to request conversion.";
   $("custom-fields").hidden = !$("custom").checked;
   $("optimization-fields").hidden = !$("optimize").checked;
   const vt = $("encoder").value === "hevc_videotoolbox";
@@ -1640,10 +1646,11 @@ function batchReasonLabel(job, reason) {
   return job.batch?.failed > reason.count ? `Example (${reason.count} of ${job.batch.failed} failed files)` : `${reason.count} ${reason.count === 1 ? "file" : "files"}`;
 }
 function batchProgress(job) {
-  const batch = job.batch;
-  if (!batch || batch.dry_run || !Number.isInteger(batch.total) || batch.total <= 0) return null;
+  const batch = visibleBatch(job);
+  if (["completed", "failed", "cancelled"].includes(job.status)) return null;
+  if (!batch || batch.dry_run || batch.outcome === "no_changes" || !Number.isInteger(batch.total) || batch.total <= 0) return null;
   const count = key => Number.isInteger(batch[key]) && batch[key] > 0 ? batch[key] : 0;
-  const processed = Math.min(batch.total, ["completed", "failed", "skip"].reduce((total, key) => total + count(key), 0));
+  const processed = Math.min(batch.total, ["completed", "failed", "skip", "rejected"].reduce((total, key) => total + count(key), 0));
   // Workflow steps have equal estimated weight, rather than pretending their
   // durations are known. Worker telemetry supplies the measured current step.
   const byFile = new Map();
@@ -1683,7 +1690,7 @@ function batchProgress(job) {
   const percent = Math.min(active ? 99 : 100, estimate * 100);
   const result = node("div", "", `job-progress batch-progress ${queuePresentation(job).status === "Failed" ? "failed" : queuePresentation(job).status === "Cancelled" ? "cancelled" : ""}`);
   const counts = node("span", `${processed} / ${batch.total} processed`, "batch-progress-count");
-  counts.title = "Processed includes completed, failed and skipped files. Cancelled files and files waiting for a decision are not counted as processed.";
+  counts.title = "Processed includes completed, failed, skipped and rejected files. Cancelled files and files waiting for a decision are not counted as processed.";
   const value = node("strong", `${active ? "~" : ""}${active ? Math.min(99,Math.round(percent)) : Math.round(percent)}%`, "batch-progress-percent");
   value.title = active ? "Estimated overall workflow progress: finished files plus active workflow steps and measured worker work. Steps have equal weight; requested replacements reserve 15% of work. This is not a time estimate." : "Files processed";
   const bar = document.createElement("progress");
@@ -2086,11 +2093,12 @@ function batchCounts(batch, compact = false) {
       [batch.completed, "completed"],
       [batch.failed, "failed"],
       [batch.cancelled, "cancelled"],
+      [batch.rejected, "rejected"],
       [batch.waiting_decision ?? batch.review, "need a decision"],
       [batch.skip, "skipped"],
     ];
     return (
-      `${batch.dry_run ? "Preview · " : ""}${batch.total ?? 0} files` +
+      `${batch.dry_run ? "Preview · " : ""}${batch.total ?? 0} ${batch.total === 1 ? "file" : "files"}` +
       counts
         .filter(([count]) => count > 0)
         .map(([count, label]) => ` · ${count} ${label}`)
@@ -2100,7 +2108,7 @@ function batchCounts(batch, compact = false) {
   return `${batch.dry_run ? "Preview · " : ""}${batch.total ?? 0} files · ${batch.queued ?? 0} queued · ${batch.running ?? 0} active · ${batch.waiting_for_slot ?? 0} waiting for slot · ${batch.completed ?? 0} completed · ${batch.failed ?? 0} failed · ${batch.waiting_decision ?? batch.review ?? 0} need a decision · ${batch.skip ?? 0} skipped`;
 }
 function statusClass(status) {
-  if (["completed", "Completed", "Replaced", "Candidate ready"].includes(status)) return "completed";
+  if (["completed", "Completed", "Replaced", "Candidate ready", "Candidates ready"].includes(status)) return "completed";
   if (["running", "Running", "waiting_external", "In progress", "Encoding", "Calibrating", "Preparing", "Verifying", "Replacing", "Saving candidate"].includes(status)) return "running";
   if (["failed", "Failed", "Worker offline", "No updates"].includes(status)) return "failed";
   if (["review", "waiting_decision", "Needs review", "Needs decision", "partial", "Partial", "Cancelling"].includes(status)) return "waiting_decision";
@@ -2167,13 +2175,13 @@ async function reconfigureBatch(id, candidate = false, savedPlan = null) {
   $("reconfigure-batch").showModal();
   try {
     const candidateID = candidate ? savedPlan?.candidate_id : null;
-    const plan = await api(`batch-settings?${new URLSearchParams({id,scope:candidateID ? "candidate" : "unfinished",...(candidateID ? {candidate_id:candidateID} : {})})}`);
+    let plan = await api(`batch-settings?${new URLSearchParams({id,scope:candidateID ? "candidate" : "unfinished",...(candidateID ? {candidate_id:candidateID} : {})})}`);
+    if (!candidateID && plan.selected === 0) plan = await api(`batch-settings?${new URLSearchParams({id,scope:"all"})}`);
     if (auth !== state.authRevision || revision !== state.reconfigureRevision || !$("reconfigure-batch").open) return;
     state.reconfigurePlan = plan;
-    $("reconfigure-note").textContent = "Updates this same batch. Previous attempts remain in each file’s history. Active files finish before another attempt starts; originals are preserved.";
-    $("reconfigure-title").textContent = "Change batch settings";
-    $("reconfigure-summary").textContent = `${plan.title || "Saved selection"} · ${plan.selected} files selected · ${plan.active || 0} active files will finish first`;
-    $("submit-reconfigure").textContent = "Apply to this batch";
+    $("reconfigure-note").textContent = "Same task · Originals kept · Previous attempts saved";
+    $("reconfigure-title").textContent = plan.requires_explicit_profile ? "Try another profile" : "Change settings";
+    $("reconfigure-summary").textContent = batchSettingsSummary(plan);
     $("reconfigure-scope").replaceChildren();
     if (plan.candidate_id) option($("reconfigure-scope"),"candidate","This file");
     option($("reconfigure-scope"),"unfinished","Unfinished files");
@@ -2182,22 +2190,45 @@ async function reconfigureBatch(id, candidate = false, savedPlan = null) {
     for (const file of plan.files) $("reconfigure-files").append(node("p",file));
     if (plan.selected > plan.files.length) $("reconfigure-files").append(node("p",`+${plan.selected-plan.files.length} more files`));
     $("reconfigure-profile").replaceChildren();
+    option($("reconfigure-profile"), "", "Choose a profile…");
     option($("reconfigure-profile"), "same", plan.settings.profile_label);
     for (const profile of state.recipes) if (profile !== "auto") option($("reconfigure-profile"),profile,profile);
-    $("reconfigure-profile").value = "same";
+    $("reconfigure-profile").value = plan.requires_explicit_profile ? "" : "same";
     $("reconfigure-priority").value = plan.settings.priority || "balanced";
     $("reconfigure-priority-label").hidden = true;
     $("reconfigure-savings").value = plan.settings.min_savings_percent > 0 ? plan.settings.min_savings_percent : "";
     $("reconfigure-growth").value = plan.settings.max_size_increase_percent ?? "";
+    state.reconfigureOriginalLimits = batchSettingsLimits();
     $("reconfigure-settings").textContent = `${plan.settings.preserve_source_bit_depth ? "Preserve source bit depth · " : ""}${plan.settings.promote_candidates ? "Ask for replacement approval after conversion" : "Create candidates; keep originals"}`;
     $("reconfigure-form").hidden = false;
-    $("submit-reconfigure").disabled = !serverReachable || plan.selected === 0;
+    updateBatchSettingsProfile();
   } catch (error) {
     if (auth === state.authRevision && revision === state.reconfigureRevision)
       $("reconfigure-summary").textContent = error.message;
   }
 }
 
+function batchSettingsSummary(plan) {
+  const selection = plan.selected === 1 && plan.files?.[0] ? plan.files[0] : `${plan.title || "Saved selection"} · ${plan.selected} files`;
+  return `${selection}${plan.active > 0 ? ` · ${plan.active} active ${plan.active === 1 ? "file finishes" : "files finish"} first` : ""}`;
+}
+function updateBatchSettingsProfile() {
+  const plan = state.reconfigurePlan;
+  if (!plan) return;
+  $("reconfigure-scope-label").hidden = plan.selected + plan.kept === 1;
+  $("reconfigure-selection").hidden = plan.selected === 1;
+  $("reconfigure-savings").placeholder = $("reconfigure-growth").placeholder = plan.settings?.mixed_limits ? "Different per file" : "Default";
+  if (plan.requires_explicit_profile && $("reconfigure-profile").value === "same") $("reconfigure-profile").value = "";
+  const same = [...$("reconfigure-profile").children].find(option=>option.value === "same");
+  if (same) same.disabled = Boolean(plan.requires_explicit_profile);
+  $("reconfigure-profile-note").textContent = plan.requires_explicit_profile ? "Automatic testing skipped this video. Choose a profile to try again." : "";
+  $("reconfigure-profile-note").hidden = !plan.requires_explicit_profile;
+  $("submit-reconfigure").disabled = !serverReachable || state.busyJobs.has(plan.id) || plan.selected === 0 || !$("reconfigure-profile").value;
+  if (!state.busyJobs.has(plan.id)) $("submit-reconfigure").textContent = plan.selected === 1 ? "Create new candidate" : plan.selected > 1 ? `Apply to ${plan.selected} files` : "Apply settings";
+}
+function batchSettingsLimits() {
+  return JSON.stringify([String($("reconfigure-savings").value),String($("reconfigure-growth").value)]);
+}
 $("reconfigure-scope").addEventListener("change", () => safe(async () => {
   const plan=state.reconfigurePlan;
   if (!plan) return;
@@ -2207,27 +2238,35 @@ $("reconfigure-scope").addEventListener("change", () => safe(async () => {
     const next=await api(`batch-settings?${new URLSearchParams({id:plan.id,scope:$("reconfigure-scope").value,...(plan.candidate_id ? {candidate_id:plan.candidate_id} : {})})}`);
     if (revision!==state.reconfigureScopeRevision || state.reconfigurePlan?.id!==plan.id || !$("reconfigure-batch").open) return;
     state.reconfigurePlan={...next,candidate_id:plan.candidate_id,decision_version:plan.decision_version};
-    $("reconfigure-summary").textContent=`${next.title || "Saved selection"} · ${next.selected} files selected · ${next.active || 0} active files will finish first`;
+    if (state.reconfigureOriginalLimits === batchSettingsLimits()) {
+      $("reconfigure-savings").value = next.settings.min_savings_percent > 0 ? next.settings.min_savings_percent : "";
+      $("reconfigure-growth").value = next.settings.max_size_increase_percent ?? "";
+      state.reconfigureOriginalLimits = batchSettingsLimits();
+    }
+    $("reconfigure-summary").textContent=batchSettingsSummary(next);
     $("reconfigure-files").replaceChildren(...next.files.map(file=>node("p",file)));
     if (next.selected>next.files.length) $("reconfigure-files").append(node("p",`+${next.selected-next.files.length} more files`));
-    $("submit-reconfigure").disabled=!serverReachable || next.selected===0;
+    updateBatchSettingsProfile();
   } catch (error) {
     if (revision===state.reconfigureScopeRevision && $("reconfigure-batch").open) {
       $("reconfigure-scope").value=state.reconfigurePlan.scope;
-      $("submit-reconfigure").disabled=!serverReachable;
+      updateBatchSettingsProfile();
     }
     throw error;
   }
 }));
 $("close-reconfigure").addEventListener("click", () => $("reconfigure-batch").close());
+$("dismiss-reconfigure").addEventListener("click", () => $("reconfigure-batch").close());
 $("reconfigure-profile").addEventListener("change", () => {
   $("reconfigure-priority-label").hidden = $("reconfigure-profile").value !== "auto";
+  updateBatchSettingsProfile();
 });
 async function submitReconfiguredBatch() {
   const plan = state.reconfigurePlan;
   if (!plan || state.busyJobs.has(plan.id)) return;
   const revision = state.reconfigureRevision, auth = state.authRevision;
   const current = () => auth === state.authRevision && revision === state.reconfigureRevision && $("reconfigure-batch").open;
+  if (!$("reconfigure-profile").value || (plan.requires_explicit_profile && $("reconfigure-profile").value === "same")) throw new Error("Choose a profile to try again.");
   const limit = id => {
     if (!$(id).value.trim()) return null;
     const value = Number($(id).value);
@@ -2235,6 +2274,11 @@ async function submitReconfiguredBatch() {
     return value;
   };
   const body = {id:plan.id,scope:plan.scope,selection_version:plan.selection_version,profile:$("reconfigure-profile").value,priority:$("reconfigure-priority").value,min_savings_percent:limit("reconfigure-savings"),max_size_increase_percent:limit("reconfigure-growth")};
+  body.preserve_limits = state.reconfigureOriginalLimits === batchSettingsLimits();
+  let savedLimits;
+  try { savedLimits = JSON.parse(state.reconfigureOriginalLimits); } catch {}
+  body.preserve_savings = savedLimits?.[0] === String($("reconfigure-savings").value);
+  body.preserve_growth = savedLimits?.[1] === String($("reconfigure-growth").value);
   if (plan.candidate_id) { body.candidate_id = plan.candidate_id; body.decision_version = plan.decision_version; }
   const request = JSON.stringify(body);
   let receipt;
@@ -2257,7 +2301,7 @@ async function submitReconfiguredBatch() {
     notify("Settings updated in this batch. Active files finish first; previous attempts remain in file history.");
   } finally {
     state.busyJobs.delete(plan.id);
-    if (current()) { $("submit-reconfigure").disabled = !serverReachable; $("submit-reconfigure").textContent = "Apply to this batch"; }
+    if (current()) updateBatchSettingsProfile();
     setConnection(serverReachable);
   }
 }
@@ -2343,9 +2387,11 @@ function jobControls(job, detail = false) {
     }
   }
   const reconfigurable = job.action_name === "transcode_batch" && !job.batch?.dry_run && !job.batch?.promotion_plan_ready;
-  if (reconfigurable) add("Reconfigure", () => reconfigureBatch(job.id));
+  if (reconfigurable) add(job.batch?.outcome === "no_changes" ? "Try another profile" : "Change settings", () => reconfigureBatch(job.id));
   if (job.status === "failed" && !reconfigurable) {
-    if (job.action_name === "benchmark_transcode" && /unsupported input/.test(job.error || ""))
+    if (rejectedCandidate(job)) {
+      if (job.parent_action_id) add("Change settings", () => reconfigureBatch(job.parent_action_id, true, {candidate_id:job.id}));
+    } else if (job.action_name === "benchmark_transcode" && /unsupported input/.test(job.error || ""))
       add("Set up benchmark", () => {
         $("path").value = job.source_path || "";
         $("scope").value = "file";
@@ -2493,6 +2539,7 @@ function shortJobReason(reason) {
     "10bit": "10-bit source requires review",
   };
   if (reasons[text]) return reasons[text];
+  if (isCandidateRejection(text)) return "Candidate rejected by you; original kept";
   const growth = text.match(/Candidate file size \(\d+ bytes\) exceeds original \(\d+ bytes\) by ([\d.]+)%, which is greater than max_size_increase_percent \(([\d.]+)%\)/);
   if (growth) return `Candidate is ${growth[1]}% larger; allowed growth is ${growth[2]}%`;
   if (/no such file or directory/i.test(text)) return "File not found";
@@ -2500,24 +2547,39 @@ function shortJobReason(reason) {
   if (/unsupported input.*benchmark_transcode/.test(text)) return "Unsupported benchmark settings. Set up a new benchmark.";
   if (/smb_transport_error|connecting to SMB server/.test(text)) return "Worker cannot access media storage. Fix the connection before retrying.";
   if (/shared VMAF\/CAMBI calibration supports 8-bit SDR video below 45 fps/.test(text))
-    return "Source format does not support automatic calibration; original kept";
+    return "Automatic testing does not support this video format";
   return text.length > 140 ? `${text.slice(0, 137)}…` : text;
 }
 function workerUnavailable(job) {
   return job.waiting_condition === "worker_unreachable" || job.activity_waiting_condition === "worker_unreachable";
 }
+function isCandidateRejection(reason) {
+  return String(reason || "").includes("transcode candidate rejected by user decision");
+}
+function rejectedCandidate(job) {
+  return job.status === "failed" && isCandidateRejection(job.error);
+}
+function visibleBatch(job) {
+  if (!job.batch) return null;
+  const rejected = Math.min(job.batch.failed || 0, job.batch_files?.rejected_count ?? (job.batch_files?.reasons || []).filter(reason=>isCandidateRejection(reason.reason)).reduce((count,reason)=>count+reason.count,0));
+  if (!rejected) return job.batch;
+  return {...job.batch,failed:job.batch.failed-rejected,rejected,outcome:rejected===job.batch.total && job.status === "completed" ? "rejected" : job.batch.outcome};
+}
 function queuePresentation(job) {
+  const batch = visibleBatch(job);
   const replacement = job.action_name === "promote_transcode_candidate";
   const kind = job.batch
-    ? "Batch"
+    ? job.batch.total === 1 ? "File" : "Batch"
     : job.action_name === "promote_transcode_candidate"
       ? "Replacement"
       : job.action_name === "benchmark_transcode"
         ? "Benchmark"
         : "File";
   const source = job.source_path || job.promotion?.original_path;
+  const context = job.batch_files?.context || job.batch?.title;
+  const singleFile = job.batch_files?.file_count === 1 ? job.batch_files.files?.[0] : null;
   const title =
-    job.batch_files?.context || job.batch?.title ||
+    singleFile?.display_label || singleFile?.file_path?.split("/").pop() || context ||
     source?.split("/").pop() ||
     workflows[job.action_name] ||
     job.action_name;
@@ -2528,7 +2590,9 @@ function queuePresentation(job) {
     needs_decision: "Needs decision",
     partial: "Partial",
     needs_review: "Needs review",
-    no_changes: "No changes",
+    no_changes: "Not converted",
+    rejected: "Rejected",
+    candidates_ready: "Candidates ready",
     promoted: "Replaced",
     cancelling: "Cancelling",
   };
@@ -2541,7 +2605,7 @@ function queuePresentation(job) {
     (job.replaced && job.status === "completed");
   const status = replacementComplete
     ? "Replaced"
-    : outcomes[job.batch?.outcome] ||
+    : rejectedCandidate(job) ? "Rejected" : outcomes[batch?.outcome] ||
       (job.candidate_ready && !job.replacement_action_id
         ? "Candidate ready"
         : ["running", "waiting_external"].includes(job.status)
@@ -2572,7 +2636,7 @@ function queuePresentation(job) {
   else if (job.replaced && job.status === "completed") result = "Original replaced";
   else if (job.batch?.promotion_plan_ready)
     result = "Replacement approval required";
-  else if (job.batch) result = batchCounts(job.batch, true);
+  else if (job.batch) result = batchCounts(batch, true);
   else if (job.status === "waiting_decision")
     result = job.promotion ? "Review replacement before files change" : shortJobReason(job.waiting_reason) || "Review required";
   else if (job.status === "cancelled") result = "Stopped";
@@ -2586,6 +2650,7 @@ function queuePresentation(job) {
     .join(" · ");
   return {
     title,
+    context,
     status,
     summary,
     showTelemetry:
@@ -2597,9 +2662,9 @@ function compactQueueActions(actions) {
     const icon = b.querySelector?.("svg");
     if (!icon) continue;
     const label = b.textContent.trim();
-    if (["Set up benchmark", "Review candidate", "Review replacement", "Review replacements", "Replace file", "Start batch", "Review preview", "View batch", "View preview", "Archive", "Restore", "Reconfigure"].includes(label)) {
-      b.replaceChildren(icon, node("span", label === "Replace file" ? "Replace" : label === "Set up benchmark" ? "Set up" : ["Start batch", "View batch", "View preview", "Archive", "Restore", "Reconfigure"].includes(label) ? label : "Review"));
-      b.className += ["Review preview", "View batch", "View preview", "Archive", "Restore", "Reconfigure"].includes(label) ? " queue-secondary" : " primary queue-primary";
+    if (["Set up benchmark", "Review candidate", "Review replacement", "Review replacements", "Replace file", "Start batch", "Review preview", "View batch", "View preview", "Archive", "Restore", "Reconfigure", "Change settings", "Try another profile"].includes(label)) {
+      b.replaceChildren(icon, node("span", label === "Replace file" ? "Replace" : label === "Set up benchmark" ? "Set up" : ["Start batch", "View batch", "View preview", "Archive", "Restore", "Reconfigure", "Change settings", "Try another profile"].includes(label) ? label : "Review"));
+      b.className += ["Review preview", "View batch", "View preview", "Archive", "Restore", "Reconfigure", "Change settings"].includes(label) ? " queue-secondary" : " primary queue-primary";
       b.setAttribute("aria-label", label);
       b.title ||= label;
       continue;
@@ -2619,6 +2684,8 @@ function compactQueueActions(actions) {
 }
 function queueOutcome(job) {
   if (job.archived) return "Archived · Restore to return to the queue";
+  const batch = visibleBatch(job);
+  if (rejectedCandidate(job) || batch?.outcome === "rejected") return "Candidate rejected · Original preserved";
   if (job.status === "waiting_decision") return "Awaiting your review";
   if (job.status === "failed") return "Open job for error details";
   if (job.status === "cancelled") return "Stopped by user";
@@ -2626,9 +2693,21 @@ function queueOutcome(job) {
   if (job.savings?.realized_saved_bytes != null || job.replaced) return "Replacement verified";
   if (job.batch?.dry_run) return job.preview_execution_action_id ? "Batch started · View its progress" : job.batch.queued > 0 ? "Preview finished · Nothing starts automatically" : "Preview finished · No eligible files";
   if (job.batch?.outcome === "no_changes") return "Originals preserved";
+  if (batch?.outcome === "failed") return "No candidates created · Change settings to try again";
+  if (batch?.completed > 0) return `${batch.completed} ${batch.completed === 1 ? "candidate ready" : "candidates ready"} · Originals unchanged`;
   if (job.candidate_ready) return "Original preserved · Candidate available";
   if (job.action_name === "benchmark_transcode") return "Sample test complete · Original preserved";
   return "Finished · Open job for details";
+}
+function skippedBatchOutcome(job) {
+  const result = node("div", "", "skipped-outcome");
+  const reasons = job.batch_files?.reasons || [];
+  const reason = reasons[0];
+  const total = job.batch?.total || 0;
+  const text = reason ? shortJobReason(reason.reason) : "No conversion was started";
+  result.append(node("p", `${reason && reason.count < total ? `${reason.count} of ${total} files: ` : ""}${text}`, "skipped-reason"));
+  result.append(node("p", "Choose another profile to try again. Your originals are unchanged.", "metadata"));
+  return result;
 }
 async function loadJobs(more = false) {
   if (
@@ -2672,21 +2751,25 @@ async function loadJobs(more = false) {
       if (job.batch?.dry_run) row.className += " preview-job";
       if (["completed", "failed", "cancelled"].includes(job.status)) row.className += " terminal-job";
       const presentation = queuePresentation(job);
+      const skipped = job.batch?.outcome === "no_changes" && !job.batch?.dry_run;
+      if (skipped) row.className += " skipped-job";
+      const singleFile = job.batch_files?.file_count === 1 ? job.batch_files.files?.[0] : null;
       const heading = node("h3", "", "job-heading");
       heading.append(node("span", job.number ? `#${job.number}` : "", "job-number"));
       heading.append(
-        button(presentation.title, () => openJob(job.id), "job-title"),
+        button(singleFile?.display_label || presentation.title, () => openJob(job.id), "job-title"),
       );
       heading.append(statusBadge(presentation.status));
-      const summary = node("p", presentation.summary, "metadata job-summary");
-      summary.title = presentation.summary;
+      const summaryText = skipped ? [singleFile ? presentation.context : `${job.batch.total} files`, job.batch.total === 1 ? "Original kept" : "Originals kept"].filter(Boolean).join(" · ") : presentation.summary;
+      const summary = node("p", summaryText, "metadata job-summary");
+      summary.title = summaryText;
       meta.append(summary);
-      if (job.batch_files?.files?.length) {
+      if (!skipped && !singleFile && job.batch_files?.files?.length) {
         const files = node("p", job.batch_files.files.map(file => file.display_label || file.file_path?.split("/").pop()).join(" · ") + (job.batch_files.file_count > 2 ? ` · +${job.batch_files.file_count - 2} more` : ""), "metadata batch-file-preview");
         files.title = files.textContent;
         meta.append(files);
       }
-      for (const reason of (job.batch_files?.reasons || []).slice(0, 1)) {
+      for (const reason of (skipped ? [] : job.batch_files?.reasons || []).slice(0, 1)) {
         const text = shortJobReason(reason.reason);
         const count = batchReasonLabel(job, reason);
         const line = node("p", `${count}: ${text}`, "metadata batch-reason");
@@ -2708,7 +2791,7 @@ async function loadJobs(more = false) {
       compactQueueActions(actions);
       row.append(heading, meta);
       const footer = node("div", "", "job-footer");
-      footer.append(presentation.showTelemetry ? telemetry(job) : batchProgress(job) || node("div", queueOutcome(job), "metadata job-outcome"));
+      footer.append(skipped ? skippedBatchOutcome(job) : presentation.showTelemetry ? telemetry(job) : batchProgress(job) || node("div", queueOutcome(job), "metadata job-outcome"));
       if (actions.children.length) {
         if (actions.children.length > 1)
           actions.classList.add("multiple-actions");
@@ -2877,9 +2960,10 @@ async function refreshDetail() {
     );
     if (queuePresentation(job).showTelemetry) summary.append(telemetry(job));
     else if (batchProgress(job)) summary.append(batchProgress(job));
+    if (job.batch?.outcome === "no_changes") summary.append(skippedBatchOutcome(job));
     if (job.batch?.dry_run) summary.append(node("p", queueOutcome(job) + (job.batch.queued > 0 && !job.preview_execution_action_id ? ". Review the eligible files, then choose Start batch to convert them." : "."), "preview-notice"));
-    if (job.batch && !job.batch.dry_run) renderBatchCounts(summary, job.batch);
-    if (job.batch?.failed && job.batch_files?.reasons?.length) {
+    if (job.batch && !job.batch.dry_run) renderBatchCounts(summary, visibleBatch(job));
+    if (visibleBatch(job)?.failed && job.batch_files?.reasons?.length) {
       const reason = job.batch_files.reasons[0];
       summary.append(node("p", `${batchReasonLabel(job,reason)}: ${shortJobReason(reason.reason)}`, "muted"));
     }
@@ -2935,7 +3019,7 @@ async function loadBatchItems(id, revision) {
     const row = node("div", "", "batch-item-row");
     row.append(
       node("span", item.display_label || item.file_path, "metadata"),
-      statusBadge(state.detailJob?.batch?.dry_run && item.status === "queued" ? "Eligible" : names[item.status] || item.status || item.decision, state.detailJob?.batch?.dry_run && item.status === "queued" ? "Eligible" : item.status),
+      statusBadge(rejectedCandidate(item) ? "Rejected" : state.detailJob?.batch?.dry_run && item.status === "queued" ? "Eligible" : names[item.status] || item.status || item.decision, rejectedCandidate(item) ? "rejected" : state.detailJob?.batch?.dry_run && item.status === "queued" ? "Eligible" : item.status),
     );
     if (item.child_action_id)
       row.append(
@@ -3008,6 +3092,7 @@ async function loadDetail() {
 
 function renderBatchCounts(container, batch) {
   const counts = node("div", "", "batch-counts");
+  if (batch.rejected > 0) counts.append(statusBadge(`${batch.rejected} Rejected`, "rejected"));
   for (const [key, label, status] of [["completed","Completed","completed"],["running","Active","running"],["queued","Queued","queued"],["waiting_for_slot","Waiting for slot","queued"],["waiting_decision","Needs decision","waiting_decision"],["review","Needs review","review"],["failed","Failed","failed"],["skip","Skipped","skip"],["cancelled","Cancelled","cancelled"]]) {
     if (batch[key] > 0) counts.append(statusBadge(`${batch[key]} ${label}`, status));
   }
@@ -3016,7 +3101,7 @@ function renderBatchCounts(container, batch) {
 function renderStages(job) {
   const list = $("detail-stages");
   list.replaceChildren();
-  if (job.batch?.dry_run || job.batch?.outcome === "no_changes") return;
+  if (job.batch?.dry_run || job.batch?.outcome === "no_changes" || (job.batch && ["completed","failed","cancelled"].includes(job.status))) return;
   for (const [index, stage] of (job.stages || []).entries()) {
     const row = node("li", "", `stage ${stage.status}`);
     row.append(node("span", String(index + 1), "stage-number"), node("span", stageLabel(stage.name)), statusBadge(stage.status === "pending" ? "Next" : names[stage.status] || stage.status, stage.status));
