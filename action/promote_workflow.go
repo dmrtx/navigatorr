@@ -360,7 +360,20 @@ func (e *Engine) stepPromoteRescan(ctx context.Context, ec *ExecutionContext) (S
 	return e.promotionCommand(ctx, ec, p, svc, "rescan", payload, true)
 }
 
-func (e *Engine) stepPromoteFinalize(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+func (e *Engine) stepPromoteFinalize(ctx context.Context, ec *ExecutionContext) (result StepResult, resultErr error) {
+	ctx = e.observeCleanup(ctx, ec)
+	if err := e.cleanupProgress(ctx, ec, "checking_library", "", 0, 0); err != nil {
+		return promoteFailed(err)
+	}
+	defer func() {
+		phase := "waiting_library"
+		if result.Status == StepCompleted {
+			phase = "completed"
+		} else if result.Status == StepFailed || resultErr != nil {
+			phase = "stopped"
+		}
+		_ = e.cleanupProgress(ctx, ec, phase, "", 0, 0, result.Error)
+	}()
 	if getString(ec.Inputs, "service") == "filesystem" {
 		return e.localPromotionFinalize(ctx, ec)
 	}
@@ -472,6 +485,9 @@ func (e *Engine) stepPromoteFinalize(ctx context.Context, ec *ExecutionContext) 
 			return promoteFailed(err)
 		}
 		if err := ctx.Err(); err != nil {
+			return promoteFailed(err)
+		}
+		if err := e.cleanupProgress(ctx, ec, "removing_recovery", p.BackupPath, 0, p.OriginalBytes); err != nil {
 			return promoteFailed(err)
 		}
 		if err := os.Remove(p.BackupPath); err != nil {

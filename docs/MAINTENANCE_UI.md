@@ -66,3 +66,14 @@ The [adversarial review](maintenance-ui/ADVERSARIAL_REVIEW.md) records the lates
 The compact English interface follows the [Navigatorr Stitch project](https://stitch.withgoogle.com/projects/6967843794345897924): paper/forest theme, outline icon tabs and actions, icon-only refresh, no marketing header or duplicate queue, and structured profile controls. Generated examples are design references; savings and job states always come from the real ledger. Installation instructions appear only on request in a dismissible mobile dialog. Desktop installation is offered only after the browser emits its native installation event.
 
 Queue and Profile actions use uniform icon controls with accessible names, differentiated primary/review/retry/cancel treatments, and shared desktop/touch dimensions. Mobile Profiles uses one native selector. Desktop checkboxes prepare the selected job immediately; successful encoding clears the submitted selection while retaining preferences.
+
+
+### Process progress and retained copies
+
+Batch bars retain the exact processed-file count. Active overall progress is marked `~`: equal workflow-step weights plus measured partial worker work or source-hash bytes, not elapsed-time prediction. Nested benchmarks contribute once through their parent file. Requested replacements reserve 15% of estimated work until replacement checks finish; active coordinators never report 100%. Failed and skipped files remain resolved work, not successful conversions.
+
+Recovery inventory lists owned artifacts currently present on disk, with the last recorded error. Final-checkpoint cleanup retains all library, SHA-256 and ownership checks. A separate `transcode_backups(mode=discard_duplicate)` can discard redundant owned recovery artifacts from a failed promotion only while its unchanged original and full backup match the recorded digest, no delete/publication intent exists, and all recorded library commands resolved. It claims the original action's execution lease, repeats no conversion/import/rename/rescan, preserves failed status/checkpoint/error, and does not count a successful replacement or realized savings. Equal sizes only enable verification; they never authorize deletion.
+
+Cleanup publishes durable phases and byte observations, at most once per second while hashing. Clients poll them while the cleanup HTTP request is still pending, retain the lock on a lost response with ongoing observations, and show the terminal result. The confirmation groups file, removable bytes and collapsed locations; the actual outcome may retain the copy on verification failure.
+
+Queue accounting reads a small SQLite JSON projection rather than decoding entire media reports on each poll. Full action history remains unchanged. Independent queue/detail/worker/cleanup refreshes run together.

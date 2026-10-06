@@ -245,7 +245,7 @@ async function api(path, body) {
     setConnection(false);
     throw new Error("Navigatorr is unavailable. Retrying automatically.");
   }
-  setConnection(true);
+  if (!serverReachable) setConnection(true);
   const redirected =
     res.type === "opaqueredirect" ||
     res.redirected === true ||
@@ -1599,16 +1599,57 @@ function batchProgress(job) {
   if (!batch || batch.dry_run || !Number.isInteger(batch.total) || batch.total <= 0) return null;
   const count = key => Number.isInteger(batch[key]) && batch[key] > 0 ? batch[key] : 0;
   const processed = Math.min(batch.total, ["completed", "failed", "skip"].reduce((total, key) => total + count(key), 0));
-  const percent = processed / batch.total * 100;
+  // Workflow steps have equal estimated weight, rather than pretending their
+  // durations are known. Worker telemetry supplies the measured current step.
+  const byFile = new Map();
+  const activities = job.activities || [];
+  const activityIDs = new Set(activities.map(a => a.id).filter(Boolean));
+  for (const activity of activities) {
+    if (activity.parent_action_id && activityIDs.has(activity.parent_action_id)) continue;
+    const stages = activity.stages || [];
+    const step = Number(activity.current_step);
+    const child = activities.find(a => a.parent_action_id === activity.id);
+    const w = child?.worker || activity.worker || {};
+    const phase = w.transcode_phase || w.benchmark_phase || w.phase;
+    const details = w.progress_details || w.benchmark_progress_details;
+    let fraction = 0;
+    const stage = stages[step]?.name;
+    const workerStage = ["wait_benchmark","wait_transcode"].includes(stage);
+    if (workerStage && !w.progress_is_stale) {
+      if (details?.total_units > 0) fraction = Math.max(0, Math.min(1, Number(details.completed_units || 0) / details.total_units));
+      else if (Number.isFinite(Number(w.progress)) && w.progress != null && !["queued","preparing"].includes(phase)) fraction = Math.max(0, Math.min(1, Number(w.progress)/100));
+    }
+    if (stage === "preflight" && activity.work?.total_bytes > 0) fraction = Math.min(.8, Math.max(0, Number(activity.work.bytes_read || 0)/activity.work.total_bytes*.8));
+    else if (stage === "preflight" && activity.work?.phase === "probing_source") fraction = .8;
+    const progress = stages.length && Number.isInteger(step) ? Math.min(.99, (step + fraction)/stages.length) : 0;
+    const key = activity.file || activity.id || "Active file";
+    const prior = byFile.get(key);
+    if (!prior || progress > prior.progress) byFile.set(key, {progress, label: `${key.split("/").pop() || "Active file"}: ${workerStage && phase ? workerPhaseLabel(phase) : stage === "preflight" && activity.work?.phase === "hashing_source" ? `Verifying source SHA-256 (${bytes(activity.work.bytes_read || 0)} / ${bytes(activity.work.total_bytes)})` : stageLabel(stage || "preflight")}${workerStage && w.progress_is_stale ? " · Last measurement; stale" : ""}`});
+  }
+  const partial = Math.min(count("running"), byFile.size) ? [...byFile.values()].slice(0,count("running")).reduce((sum,a)=>sum+a.progress,0) : 0;
+  const active = operationIsActive(job.status);
+  let estimate = (processed + partial) / batch.total;
+  if (active && job.replacement_requested) {
+    const promotion = batch.promotion;
+    const conversion = Math.min(1,estimate);
+    const replacement = promotion?.eligible > 0 ? Math.min(1,Number(promotion.promoted || 0)/promotion.eligible) : 0;
+    estimate = conversion * .85 + replacement * .15;
+  }
+  const percent = Math.min(active ? 99 : 100, estimate * 100);
   const result = node("div", "", `job-progress batch-progress ${queuePresentation(job).status === "Failed" ? "failed" : queuePresentation(job).status === "Cancelled" ? "cancelled" : ""}`);
   const counts = node("span", `${processed} / ${batch.total} processed`, "batch-progress-count");
   counts.title = "Processed includes completed, failed and skipped files. Cancelled files and files waiting for a decision are not counted as processed.";
-  const value = node("strong", `${Math.round(percent)}%`, "batch-progress-percent");
+  const value = node("strong", `${active ? "~" : ""}${active ? Math.min(99,Math.round(percent)) : Math.round(percent)}%`, "batch-progress-percent");
+  value.title = active ? "Estimated overall workflow progress: finished files plus active workflow steps and measured worker work. Steps have equal weight; requested replacements reserve 15% of work. This is not a time estimate." : "Files processed";
   const bar = document.createElement("progress");
   bar.max = batch.total;
-  bar.value = processed;
-  bar.setAttribute("aria-label", `${processed} of ${batch.total} files processed`);
+  bar.value = percent / 100 * batch.total;
+  bar.setAttribute("aria-label", active ? `Estimated overall workflow progress ${percent.toFixed(1)}%` : `${processed} of ${batch.total} files processed`);
   result.append(counts, value, bar);
+  if (active) {
+    const phases = [...byFile.values()].map(a=>a.label);
+    result.append(node("span", phases.join(" · ") || (processed === batch.total ? "Finishing batch / replacement checks" : "Waiting for worker / preparing selected files"), "batch-progress-phase metadata"));
+  }
   return result;
 }
 function telemetry(job) {
@@ -1759,12 +1800,11 @@ async function jobControl(id, name, args = {}) {
   });
   try {
     await tool(name, { id, ...args });
-    if (state.detail === id && $("job-detail").open) await refreshDetail();
-    await loadJobs();
+    await Promise.all([state.detail === id && $("job-detail").open ? refreshDetail() : Promise.resolve(), loadJobs()]);
   } finally {
     state.busyJobs.delete(id);
     document.querySelectorAll("[data-job-control]").forEach((b) => {
-      if (b.dataset.jobControl === id) b.disabled = !serverReachable;
+      if (b.dataset.jobControl === id) b.disabled = !serverReachable || (b.dataset.requiresWorker === "true" && !state.workerInfo?.ready);
     });
   }
 }
@@ -3612,6 +3652,7 @@ function backupName(copy) {
   return copy.original_path?.split("/").pop() || copy.path?.split("/").slice(-2,-1)[0] || copy.action_id;
 }
 function backupReason(copy) {
+  if (copy.duplicate_available) return "Original still present. Verify both SHA-256 hashes to remove only the redundant recovery data; the failed job stays unchanged.";
   if (copy.cleanup_available) return "The replacement will be verified before this recovery copy is removed.";
   if (operationIsActive(copy.status)) return "Job active. This recovery copy is retained until the replacement finishes.";
   if (copy.status === "cancelled") return "Job cancelled before cleanup. Review its details to resolve the replacement.";
@@ -3623,6 +3664,9 @@ function backupReason(copy) {
 function operationIsActive(status) {
   return ["pending","running","waiting_external","waiting_decision"].includes(status);
 }
+function cleanupError(value) {
+  try { const parsed = JSON.parse(value); return parsed.error || value; } catch { return value || "Verification did not complete."; }
+}
 function renderBackups() {
   $("backup-list").replaceChildren();
   for (const copy of state.backups || []) {
@@ -3633,10 +3677,11 @@ function renderBackups() {
     if (copy.original_path) row.append(node("p", `Original: ${copy.original_path}`, "backup-path"));
     if (copy.path) row.append(node("p", `Recovery: ${copy.path}${copy.partial_bytes ? ` · Partial copy: ${bytes(copy.partial_bytes)}` : ""}`, "backup-path"));
     row.append(node("p", backupReason(copy), `backup-reason${copy.cleanup_available ? "" : " waiting"}`));
+    if (copy.error) row.append(node("p", `Last verification error: ${cleanupError(copy.error)}`, "backup-reason waiting"));
     const actions = node("div", "", "backup-actions");
     actions.append(button("View job", () => openJob(copy.action_id), "text-button"));
-    if (copy.cleanup_available) {
-      const clean = button(state.backupCleaning?.id === copy.action_id ? "Verifying & cleaning…" : "Verify & clean up", () => cleanBackup(copy));
+    if (copy.cleanup_available || copy.duplicate_available) {
+      const clean = button(state.backupCleaning?.id === copy.action_id ? "Verifying…" : copy.duplicate_available ? "Verify duplicate & remove" : "Verify & clean up", () => cleanBackup(copy));
       clean.disabled = Boolean(state.backupCleaning) || !serverReachable;
       actions.append(clean);
     }
@@ -3695,15 +3740,29 @@ function renderBackupCleanup() {
   if (!state.backupCleaning) return;
   const task = state.backupCleaning;
   $("backup-progress").hidden = !state.backupsVisible;
-  $("backup-progress").textContent = `${task.checking ? "Checking cleanup outcome" : "Verifying replacement and cleaning recovery copy"}: ${task.name} · ${Math.max(0,Math.floor((Date.now()-task.started)/1000))}s elapsed`;
+  const p = task.progress;
+  const phase = {checking_library:"Checking the active library file",verifying_replacement:"Verifying replacement SHA-256",verifying_recovery:"Verifying recovery SHA-256",removing_recovery:"Removing verified recovery copy",waiting_library:"Waiting for the library",completed:"Cleanup completed",stopped:"Cleanup stopped"}[p?.phase] || (task.checking ? "Checking cleanup outcome" : "Waiting for server to start verification");
+  const notice = $("backup-progress");
+  notice.replaceChildren(node("strong", phase), node("span", `${task.name} · ${Math.max(0,Math.floor((Date.now()-task.started)/1000))}s elapsed`));
+  if (p?.total_bytes > 0 && p.phase.startsWith("verifying")) {
+    const bar = document.createElement("progress");
+    bar.max = p.total_bytes; bar.value = p.bytes_read || 0;
+    bar.setAttribute("aria-label", phase);
+    notice.append(bar, node("span", `${bytes(p.bytes_read || 0)} / ${bytes(p.total_bytes)} verified · ${Math.min(100,Math.floor((p.bytes_read || 0)/p.total_bytes*100))}%`));
+  } else if (!["completed","stopped"].includes(p?.phase)) {
+    const bar = document.createElement("progress"); bar.setAttribute("aria-label", phase); notice.append(bar);
+  }
+  if (p?.path) notice.append(node("span", p.path, "backup-path"));
 }
 async function finishBackupCleanup(job) {
   const task = state.backupCleaning;
   if (!task || task.auth !== state.authRevision) return;
-  if (operationIsActive(job.status)) { renderBackupCleanup(); return; }
+  const currentObservation = Date.parse(job.cleanup?.updated_at) >= task.started;
+  if (operationIsActive(job.status) || currentObservation && !["completed","stopped"].includes(job.cleanup?.phase)) { renderBackupCleanup(); return; }
   state.backupCleaning = null;
   $("backup-progress").hidden = !state.backupsVisible;
-  $("backup-progress").textContent = job.status === "completed" ? `Recovery cleanup completed for ${task.name}.` : `Recovery cleanup stopped for ${task.name}. ${job.error || "The recovery copy is retained; review job details."}`;
+  $("backup-progress").replaceChildren();
+  $("backup-progress").textContent = job.status === "completed" || job.cleanup?.phase === "completed" ? `Removed recovery data for ${task.name}. ${task.mode === "discard_duplicate" ? "Original preserved; failed job unchanged." : "Replacement verified."}` : `Cleanup stopped for ${task.name}. ${cleanupError(job.cleanup?.error || task.error || job.error)} Remaining recovery data is listed below.`;
   if (state.backupsVisible) await loadBackups();
   await loadJobs();
 }
@@ -3711,22 +3770,35 @@ async function refreshBackupCleanup() {
   const task = state.backupCleaning;
   if (!task || task.auth !== state.authRevision) return;
   renderBackupCleanup();
-  if (task.pendingResponse) return;
+  if (task.polling) return;
+  task.polling = true;
+  try {
   const result = await api(`operations?${new URLSearchParams({id:task.id})}`);
   if (state.backupCleaning !== task || task.auth !== state.authRevision) return;
   const job = result.jobs?.find(j=>j.id===task.id);
-  if (job) await finishBackupCleanup(job);
+  if (job) {
+    // The request can still be pending while hashing. Never interpret the
+    // previous failed checkpoint as the result of this cleanup attempt.
+    const observed = Date.parse(job.cleanup?.updated_at);
+    if (Number.isFinite(observed) && observed >= task.started) task.progress = job.cleanup;
+    renderBackupCleanup();
+    if (!task.pendingResponse) await finishBackupCleanup(job);
+  }
+  } finally { task.polling = false; }
 }
 async function cleanBackup(copy) {
   if (state.backupCleaning) return;
   const auth = state.authRevision;
-  if (!await reviewAction({title:"Remove recovery copy?", message:`Verify the replacement for ${backupName(copy)}, then permanently remove ${bytes(Number(copy.bytes || 0)+Number(copy.partial_bytes || 0))} of recovery data.\nOriginal: ${copy.original_path || "See job details"}\nRecovery: ${copy.path || "See job details"}`, confirmLabel:"Verify and remove"}) || auth !== state.authRevision) return;
+  const mode = copy.duplicate_available ? "discard_duplicate" : "clean";
+  const content = [node("p", backupName(copy), "cleanup-file"), node("p", `${bytes(Number(copy.bytes || 0)+Number(copy.partial_bytes || 0))} to remove if verification passes`, "cleanup-space"), node("p", mode === "discard_duplicate" ? "Checks that the original and recovery copy match the recorded SHA-256. Removes only redundant recovery data. The original and failed job stay unchanged." : "Checks the active library file and both SHA-256 hashes. If any check fails, the recovery copy stays.")];
+  const locations = node("details", "", "cleanup-locations"); locations.append(node("summary", "File locations"), node("p", `Library file: ${copy.original_path || "See job details"}`, "backup-path"), node("p", `Copy to remove: ${copy.path || "See job details"}`, "backup-path")); content.push(locations);
+  if (!await reviewAction({title:"Verify and remove extra copy", content, confirmLabel:"Verify & remove copy"}) || auth !== state.authRevision) return;
   if (state.backupCleaning) return;
-  const task = state.backupCleaning = {id:copy.action_id,name:backupName(copy),auth,started:Date.now(),pendingResponse:true};
+  const task = state.backupCleaning = {id:copy.action_id,name:backupName(copy),mode,auth,started:Date.now(),pendingResponse:true};
   renderBackups();
   renderBackupCleanup();
   try {
-    const result = await tool("transcode_backups", {mode:"clean",action_id:copy.action_id});
+    const result = await tool("transcode_backups", {mode,action_id:copy.action_id});
     if (state.backupCleaning !== task || auth !== state.authRevision) return;
     task.pendingResponse = false;
     const job = result.action || result;
@@ -3736,6 +3808,7 @@ async function cleanBackup(copy) {
     if (state.backupCleaning !== task || auth !== state.authRevision) return;
     task.pendingResponse = false;
     task.checking = true;
+    task.error = error.message;
     renderBackupCleanup();
     // A lost HTTP response does not authorize another cleanup request.
     // Poll the durable job before enabling the control again.
@@ -3758,10 +3831,12 @@ setInterval(async () => {
       return;
     }
     if ($("workspace").hidden) return;
-    if (!state.workerCheckedAt || Date.now() - state.workerCheckedAt > 10000) await refreshWorkers();
-    if (!state.jobsLoading) await safe(() => loadJobs());
-    if ($("job-detail").open) await safe(refreshDetail);
-    if (state.backupCleaning) await safe(refreshBackupCleanup);
+    await Promise.allSettled([
+      !state.workerCheckedAt || Date.now() - state.workerCheckedAt > 10000 ? refreshWorkers() : Promise.resolve(),
+      !state.jobsLoading ? safe(() => loadJobs()) : Promise.resolve(),
+      $("job-detail").open ? safe(refreshDetail) : Promise.resolve(),
+      state.backupCleaning ? safe(refreshBackupCleanup) : Promise.resolve(),
+    ]);
   } finally {
     polling = false;
   }
