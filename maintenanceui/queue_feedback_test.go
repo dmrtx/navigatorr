@@ -76,6 +76,55 @@ func TestBatchStagesShowPartialAndUnexecutedWork(t *testing.T) {
 	}
 }
 
+func TestSkippedBatchAndFailedFileDoNotClaimUnperformedStages(t *testing.T) {
+	s, _ := testUI(t)
+	r := operationRecord{inst: store.ActionInstance{ActionName: "transcode_batch", Status: "completed", CurrentStep: 3}, inputs: map[string]any{"promote_candidates": true}, outputs: map[string]any{"counts": map[string]any{"total": float64(1), "skip": float64(1)}}}
+	stages := s.queueStages(r)
+	if stages[1]["status"] != "skip" || stages[2]["status"] != "skip" {
+		t.Fatal("skipped work marked complete", stages)
+	}
+	r.inst = store.ActionInstance{ActionName: "transcode_media", Status: "failed", CurrentStep: 2}
+	stages = s.queueStages(r)
+	for i := 3; i < len(stages); i++ {
+		if stages[i]["status"] != "skip" || stages[i]["note"] != "Not run." {
+			t.Fatal("future work labelled next after failure", stages)
+		}
+	}
+}
+
+func TestWorkflowFiltersMatchFailuresAndTreatRejectionsAsFinishedResults(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	for _, tc := range []struct{ id, reason string }{
+		{"blocked", "benchmark winner predicts only -33.2% savings, below required minimum 15.0%"},
+		{"rejected", "transcode candidate rejected by user decision; original file remains untouched"},
+	} {
+		seedOperation(t, st, tc.id, "transcode_batch", "completed", nil, nil, map[string]any{"counts": map[string]int{"total": 1, "failed": 1}})
+		if err := st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: tc.id, ItemKey: "one", Status: "failed", Error: tc.reason}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seedOperation(t, st, "cancelled", "transcode_media", "cancelled", nil, nil, nil)
+	read := func(query string) operationsPage {
+		w := request(h, "GET", "/api/maintenance/operations?"+query, "", true)
+		var page operationsPage
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		return page
+	}
+	failed := read("group=workflow&status=failed")
+	if failed.Total != 1 || failed.Jobs[0]["id"] != "blocked" {
+		t.Fatal("failed season disappeared or rejection became failure", failed)
+	}
+	if finished := read("group=workflow&status=completed"); finished.Total != 3 {
+		t.Fatal("finished outcomes missing", finished)
+	}
+	if legacy := read("status=completed"); legacy.Total != 2 {
+		t.Fatal("ungrouped durable status changed", legacy)
+	}
+}
+
 func TestPreviewExecutionIsOneStableWorkflowWithReadableHistory(t *testing.T) {
 	s, h := testUI(t)
 	st := s.engine.Deps().Store

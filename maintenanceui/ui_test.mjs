@@ -1692,6 +1692,7 @@ test("reconfiguration keeps the same batch and a stable receipt across lost resp
   assert.equal(writes.length,2);assert.equal(writes[0][1].key,writes[1][1].key);
   assert.equal(writes[0][0],'batch-settings'); assert.equal(writes[0][1].scope,'all');
   assert.equal(writes[0][1].id,'b'); assert.equal(writes[0][1].min_savings_percent,15);
+  assert.deepEqual(Object.keys(writes[0][1]).sort(),['id','key','max_size_increase_percent','min_savings_percent','preserve_growth','preserve_limits','preserve_savings','profile','scope','selection_version'].sort());
   const pending=deferred();h.context.pending=pending.promise;
   h.run('api=async()=>pending');
   const next=h.run('submitReconfiguredBatch()');
@@ -1870,12 +1871,63 @@ test("declining a candidate is distinct from an error and cannot blindly resume 
  assert.equal(h.run('queuePresentation({status:"completed",batch:{total:3,failed:3,outcome:"failed"},batch_files:{reasons:[feedback.reasons[0]]}}).status'),'Rejected');
 });
 
-test("completed batch details report results without presenting unperformed stages as successful",()=>{
+test("completed batch details retain the server's actual stage outcomes",()=>{
  const h=harness();
- h.run('renderStages({status:"completed",batch:{outcome:"failed"},stages:[{name:"resolve_and_inspect",status:"completed"},{name:"schedule_batch",status:"completed"},{name:"promote_batch",status:"completed"}]})');
- assert.equal(h.elements.get('detail-stages').children.length,0);
+ h.run('renderStages({status:"completed",batch:{outcome:"failed"},stages:[{name:"resolve_and_inspect",status:"completed"},{name:"schedule_batch",status:"failed",note:"0 converted · 3 failed"},{name:"promote_batch",status:"skip",note:"No eligible candidates"}]})');
+ assert.equal(h.elements.get('detail-stages').children.length,3);
+ assert.equal(h.elements.get('detail-stages').children[1].children[3].textContent,"0 converted · 3 failed");
  assert.equal(h.run('batchProgress({status:"failed",batch:{total:3,failed:3}})'),null);
  assert.equal(h.run('queueOutcome({status:"completed",batch:{total:3,completed:3,outcome:"candidates_ready"}})'),'3 candidates ready · Originals unchanged');
+});
+
+test("decisions and pauses show the actual stop reason instead of fabricated worker progress",()=>{
+ const h=harness();
+ const decision={status:"waiting_decision",batch:{total:8,waiting_decision:1,queued:7},waiting_reason:"Candidate file size (200 bytes) exceeds original (100 bytes) by 100.0%, which is greater than max_size_increase_percent (0.0%)"};
+ h.context.decision=decision;
+ assert.equal(h.run('batchProgress(decision)'),null);
+ assert.match(h.run('queueOutcome(decision)'),/100.0% larger.*0.0%.*Originals unchanged/);
+ assert.match(h.run('queueOutcome({status:"waiting_decision",paused:true})'),/^Paused/);
+ assert.match(h.run('queueOutcome({status:"waiting_decision",batch:{promotion_plan_ready:true}})'),/Waiting for replacement approval/);
+ const active=h.run('batchProgress({status:"waiting_external",batch:{total:3,running:1,waiting_decision:1}})');
+ assert.match(active.children[3].textContent,/1 file needs your decision/);
+});
+
+test("job details show the decision reason where the user must act",async()=>{
+ const h=harness();
+ h.run('api=async()=>({jobs:[{id:"decision",action_name:"transcode_batch",status:"waiting_decision",batch:{total:1,waiting_decision:1},waiting_reason:"Candidate file size (200 bytes) exceeds original (100 bytes) by 100.0%, which is greater than max_size_increase_percent (0.0%)"}]});loadBatchItems=async()=>{};');
+ await h.run('openJob("decision")');
+ assert.ok(h.elements.get('detail-summary').children.some(element=>/100.0% larger/.test(element.textContent)));
+});
+
+test("rejected candidates remain rejected in the workflow stages instead of turning back into failures",()=>{
+ const h=harness();
+ h.run('renderStages({status:"completed",batch:{total:1,failed:1},batch_files:{rejected_count:1},stages:[{name:"schedule_batch",status:"failed",note:"0 converted · 1 failed"}]})');
+ const row=h.elements.get('detail-stages').children[0];
+ assert.match(row.className,/rejected/);
+ assert.equal(row.children[3].textContent,'0 candidates · 1 rejected');
+ assert.equal(h.run('queuePresentation({status:"completed",batch:{total:1,failed:1},batch_files:{rejected_count:1},savings:{source_bytes:1000,estimated_saved_bytes:400}}).summary').includes('estimated savings'),false);
+});
+
+test("queue controls open candidate review instead of rejecting an unseen batch file",()=>{
+ const h=harness();
+ const controls=h.run('jobControls({id:"b",action_name:"transcode_batch",status:"waiting_decision",batch:{total:8},waiting_options:[{decision:"reject"},{decision:"accept_loss"}]})');
+ assert.ok(controls.children.some(button=>button.textContent === "Review candidate"));
+ assert.ok(!controls.children.some(button=>button.textContent === "Keep originals"));
+});
+
+test("profile details describe the encoder and ignore an obsolete selection",async()=>{
+ const h=harness(),pending=deferred();
+ h.run('$("reconfigure-batch").open=true;state.reconfigureRevision=1;$("reconfigure-profile").value="general-hevc";');
+ h.context.pending=pending.promise;
+ h.run('tool=async()=>pending');
+ const request=h.run('showReconfigureProfile()');
+ h.run('$("reconfigure-profile").value="hevc-vt"');
+ pending.resolve({profile:{video:{codec:"libx265",quality:23,preset:"medium"},audio:{mode:"copy"},container:"mkv"}});
+ await request;
+ assert.doesNotMatch(h.elements.get('reconfigure-profile-info').textContent,/Software HEVC/);
+ h.run('tool=async()=>({profile:{video:{codec:"hevc_videotoolbox",average_bitrate_kbps:4000},audio:{mode:"copy"},container:"mkv"}})');
+ await h.run('showReconfigureProfile()');
+ assert.match(h.elements.get('reconfigure-profile-info').textContent,/Hardware HEVC.*4000 kbps.*Audio: copy.*MKV/);
 });
 
 test("changing only the profile preserves current limits, including mixed per-file settings",async()=>{

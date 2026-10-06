@@ -216,6 +216,22 @@ func TestBatchSettingsReadsCurrentLimitsAndCanPreserveMixedValues(t *testing.T) 
 		t.Fatal(res, err)
 	}
 	current := read("all")["settings"].(map[string]any)
+	profiles := current["current_profiles"].([]any)
+	if len(profiles) != 1 || operationMap(profiles[0])["name"] != "general-hevc" || operationMap(profiles[0])["files"] != float64(3) {
+		t.Fatal("saved profile not visible", current)
+	}
+	w = request(h, "GET", "/api/maintenance/batch-items?id=failed-batch", "", true)
+	var fileView struct {
+		Items []batchItemView `json:"items"`
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &fileView) != nil || len(fileView.Items) != 3 {
+		t.Fatal("file settings unavailable", w.Body.String())
+	}
+	for _, item := range fileView.Items {
+		if item.RequestedProfile != "general-hevc" {
+			t.Fatal("new settings hidden from file details", item)
+		}
+	}
 	if current["mixed_limits"] != true {
 		t.Fatal("per-file limits were replaced", current)
 	}

@@ -108,8 +108,17 @@ func (s *Server) queueStages(r operationRecord) []map[string]any {
 			status = r.inst.Status
 		}
 		stage := map[string]any{"name": step.Name, "status": status}
+		if (r.inst.Status == store.ActionStatusFailed || r.inst.Status == store.ActionStatusCancelled) && i > r.inst.CurrentStep {
+			stage["status"], stage["note"] = "skip", "Not run."
+		}
 		if r.inst.ActionName == "transcode_batch" {
 			counts := operationMap(operationValue(r, "counts"))
+			if step.Name == "promote_batch" && r.inputs["promote_candidates"] != true {
+				stage["status"], stage["note"] = "skip", "Replacement not requested; originals kept."
+			}
+			if step.Name == "schedule_batch" && status == "completed" && operationNumber(counts["completed"]) == 0 && operationNumber(counts["failed"]) == 0 && operationNumber(counts["skip"]) > 0 {
+				stage["status"], stage["note"] = "skip", "No conversions started; selected files were skipped."
+			}
 			if step.Name == "schedule_batch" && status == "completed" && operationNumber(counts["failed"]) > 0 {
 				stage["status"] = "failed"
 				if operationNumber(counts["completed"]) > 0 {
@@ -121,14 +130,11 @@ func (s *Server) queueStages(r operationRecord) []map[string]any {
 				promotion := operationMap(operationValue(r, "batch_promotion"))
 				if r.inputs["promote_candidates"] != true {
 					stage["status"], stage["note"] = "skip", "Replacement not requested; originals kept."
-				} else if (promotion != nil && operationNumber(promotion["eligible"]) == 0) || (promotion == nil && operationNumber(counts["completed"]) == 0 && operationNumber(counts["failed"]) > 0) {
+				} else if (promotion != nil && operationNumber(promotion["eligible"]) == 0) || (promotion == nil && operationNumber(counts["completed"]) == 0 && (operationNumber(counts["failed"]) > 0 || operationNumber(counts["skip"]) > 0)) {
 					stage["status"], stage["note"] = "skip", "No eligible candidates to replace; originals kept."
 				} else if promotion != nil && promotion["approved"] == false && operationNumber(promotion["promoted"]) == 0 {
 					stage["status"], stage["note"] = "skip", "Replacement not approved; originals kept."
 				}
-			}
-			if (r.inst.Status == store.ActionStatusFailed || r.inst.Status == store.ActionStatusCancelled) && i > r.inst.CurrentStep {
-				stage["status"], stage["note"] = "skip", "Not run."
 			}
 		}
 		stages = append(stages, stage)

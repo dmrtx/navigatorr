@@ -450,7 +450,27 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 		if selectedID == "" && archived != (status == "archived") {
 			continue
 		}
-		if (selectedID == "" || selectedID == r.inst.ID) && (status == "" || status == "all" || status == "archived" || r.inst.Status == status || status == "active" && operationActive(r.inst.Status)) {
+		matches := status == "" || status == "all" || status == "archived" || r.inst.Status == status || status == "active" && operationActive(r.inst.Status)
+		if grouped && status == "completed" {
+			matches = r.inst.Status == "completed" || r.inst.Status == "failed" || r.inst.Status == "cancelled"
+		}
+		if grouped && status == "failed" {
+			matches = r.inst.Status == "failed" && !strings.Contains(r.inst.ErrorJSON, "transcode candidate rejected by user decision")
+			if r.inst.ActionName == "transcode_batch" && r.inst.Status == "completed" {
+				items, err := s.engine.Deps().Store.ListTranscodeBatchItems(r.inst.ID)
+				if err != nil {
+					fail(w, 500, "read batch results")
+					return
+				}
+				for _, item := range items {
+					if item.Status == "failed" && !strings.Contains(item.Error, "transcode candidate rejected by user decision") {
+						matches = true
+						break
+					}
+				}
+			}
+		}
+		if (selectedID == "" || selectedID == r.inst.ID) && matches {
 			filtered = append(filtered, r)
 		}
 	}
