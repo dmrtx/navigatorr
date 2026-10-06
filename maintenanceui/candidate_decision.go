@@ -91,6 +91,8 @@ func (s *Server) candidateDecision(w http.ResponseWriter, r *http.Request) {
 		CandidateID string `json:"candidate_id"`
 		Version     string `json:"decision_version"`
 		Decision    string `json:"decision"`
+		Background  bool   `json:"background"`
+		Key         string `json:"key"`
 	}
 	if decode(w, r, &body) != nil {
 		fail(w, 400, "invalid candidate decision")
@@ -98,6 +100,10 @@ func (s *Server) candidateDecision(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Decision != "reject" && body.Decision != "accept_loss" {
 		fail(w, 400, "unsupported candidate decision")
+		return
+	}
+	if body.Background {
+		s.admitCommand(w, r, map[string]any{"kind": "candidate", "id": body.ID, "candidate_id": body.CandidateID, "decision_version": body.Version, "decision": body.Decision}, body.Key)
 		return
 	}
 	if body.Decision == "accept_loss" {

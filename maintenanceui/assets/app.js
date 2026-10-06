@@ -52,7 +52,19 @@ function node(tag, text = "", className = "") {
 function button(text, onClick, className = "") {
   const b = node("button", text, className);
   b.type = "button";
-  b.addEventListener("click", () => safe(onClick));
+  b.addEventListener("click", () => safe(async () => {
+    const result = onClick();
+    if (!result?.then) return result;
+    b.disabled = true;
+    b.setAttribute("aria-busy", "true");
+    b.classList.add("button-pending");
+    try { return await result; }
+    finally {
+      b.removeAttribute("aria-busy");
+      b.classList.remove("button-pending");
+      b.disabled = !serverReachable || state.busyJobs.has(b.dataset.jobControl) || (b.dataset.requiresWorker === "true" && !state.workerInfo?.ready);
+    }
+  }));
   return b;
 }
 function actionIcon(label) {
@@ -284,7 +296,10 @@ async function api(path, body) {
   return data;
 }
 async function tool(name, args = {}) {
-  const result = await api("tool", { name, arguments: args });
+  const mutates = ["action_run","action_resume","action_retry","action_cancel"].includes(name) || name === "transcode_backups" && ["clean","discard_duplicate","discard"].includes(args.mode);
+  const result = mutates
+    ? await commandRequest("tool", {name,arguments:args,background:true})
+    : await api("tool", {name,arguments:args});
   if (!result.content) return result;
   const text = result.content
     .filter((c) => c.type === "text")
@@ -296,6 +311,36 @@ async function tool(name, args = {}) {
   } catch {
     return text;
   }
+}
+
+const commandLabels = {resume:"Applying decision",retry:"Retrying job",cancel:"Stopping job",candidate:"Applying candidate decision",clean:"Verifying recovery data",discard_duplicate:"Verifying duplicate",discard:"Removing recovery copy",reconfigure:"Updating batch settings"};
+async function commandRequest(path, body) {
+  const request = JSON.stringify([path,body]);
+  let receipts = {};
+  try { receipts = JSON.parse(sessionStorage.getItem("navigatorr_commands") || "{}"); } catch {}
+  const receipt = receipts[request] ||= {key:submissionID()};
+  sessionStorage.setItem("navigatorr_commands",JSON.stringify(receipts));
+  const auth = state.authRevision;
+  let result = receipt.command_id ? {command_id:receipt.command_id,id:receipt.id} : await api(path,{...body,key:receipt.key});
+  if (!result.command_id) { delete receipts[request]; sessionStorage.setItem("navigatorr_commands",JSON.stringify(receipts)); return result; }
+  receipt.command_id = result.command_id; receipt.id = result.id;
+  sessionStorage.setItem("navigatorr_commands",JSON.stringify(receipts));
+  notify("Request saved. Processing…");
+  while (auth === state.authRevision && !$("workspace").hidden) {
+    result = await api(`commands?id=${encodeURIComponent(receipt.command_id)}`);
+    if (["completed","failed","cancelled"].includes(result.status)) {
+      // Merge with current storage: other actions can finish concurrently.
+      let latest = {};
+      try { latest=JSON.parse(sessionStorage.getItem("navigatorr_commands") || "{}"); } catch {}
+      delete latest[request]; sessionStorage.setItem("navigatorr_commands",JSON.stringify(latest));
+      if (result.status!=="completed") throw new Error(shortJobReason(result.error) || "The action could not be applied.");
+      notify("Action applied.");
+      return {id:result.id,command_id:result.command_id};
+    }
+    notify(`${commandLabels[result.kind] || "Processing request"}… ${result.status === "pending" ? "Waiting for the current step to finish." : "You can keep browsing."}`);
+    await new Promise(resolve => setTimeout(resolve,1000));
+  }
+  throw new Error("Session ended. The saved action continues on the server.");
 }
 function showData(id, data) {
   $(id).hidden = false;
@@ -1424,8 +1469,7 @@ async function submitJob(mode = "encode") {
   state.submitting = true;
   controls();
   try {
-    await refreshWorkers();
-    if (!state.workerInfo?.ready) throw new Error("Video worker offline or not ready. No job was submitted.");
+    notify("Submitting job…");
     return await buildAndSubmitJob(mode);
   } finally {
     state.submitting = false;
@@ -1899,7 +1943,7 @@ async function reviewJobDecision(id, decision) {
       throw new Error("The candidate or decision changed. Review the job again.");
     const selected = chosen === "reject" ? "reject" : decision;
     if (candidatePlan) {
-      await api("candidate-decision",{id,candidate_id:candidatePlan.candidate_id,decision_version:candidatePlan.decision_version,decision:selected});
+      await commandRequest("candidate-decision",{id,candidate_id:candidatePlan.candidate_id,decision_version:candidatePlan.decision_version,decision:selected,background:true});
       await Promise.all([loadJobs(),state.detail === id && $("job-detail").open ? refreshDetail() : Promise.resolve()]);
       notify(selected === "reject" ? "Candidate rejected. Original preserved; other batch files continue." : "Candidate accepted. Replacement requires separate approval.");
     } else await jobControl(id, "action_resume", {decision:selected});
@@ -2113,6 +2157,7 @@ async function startBatchPreview(id) {
   }
 }
 async function reconfigureBatch(id, candidate = false, savedPlan = null) {
+  state.reconfigureScopeRevision=(state.reconfigureScopeRevision || 0)+1;
   const revision = state.reconfigureRevision = (state.reconfigureRevision || 0) + 1;
   const auth = state.authRevision;
   state.reconfigurePlan = null;
@@ -2121,18 +2166,23 @@ async function reconfigureBatch(id, candidate = false, savedPlan = null) {
   $("reconfigure-summary").textContent = "Loading saved selection…";
   $("reconfigure-batch").showModal();
   try {
-    const plan = savedPlan || await api(`batch-reconfigure?id=${encodeURIComponent(id)}${candidate ? "&candidate=1" : ""}`);
+    const candidateID = candidate ? savedPlan?.candidate_id : null;
+    const plan = await api(`batch-settings?${new URLSearchParams({id,scope:candidateID ? "candidate" : "unfinished",...(candidateID ? {candidate_id:candidateID} : {})})}`);
     if (auth !== state.authRevision || revision !== state.reconfigureRevision || !$("reconfigure-batch").open) return;
     state.reconfigurePlan = plan;
-    $("reconfigure-note").textContent = plan.candidate_id ? "No change is made until you submit. This creates a separate attempt; the previous candidate and history remain available." : "Only failed or cancelled files will be submitted. Completed candidates stay in the previous job. Opening this form starts nothing.";
-    $("reconfigure-title").textContent = plan.candidate_id ? "Transcode with other settings" : "Reconfigure batch";
-    $("reconfigure-summary").textContent = plan.candidate_id ? `${plan.title} · Reject this candidate and queue a new attempt for this file only. Other batch files continue; the original is preserved.` : `${plan.title} · ${plan.selected} failed/cancelled files · ${plan.kept} other files kept out of this attempt`;
-    $("submit-reconfigure").textContent = plan.candidate_id ? "Reject & queue new attempt" : "Queue new attempt";
+    $("reconfigure-note").textContent = "Updates this same batch. Previous attempts remain in each file’s history. Active files finish before another attempt starts; originals are preserved.";
+    $("reconfigure-title").textContent = "Change batch settings";
+    $("reconfigure-summary").textContent = `${plan.title || "Saved selection"} · ${plan.selected} files selected · ${plan.active || 0} active files will finish first`;
+    $("submit-reconfigure").textContent = "Apply to this batch";
+    $("reconfigure-scope").replaceChildren();
+    if (plan.candidate_id) option($("reconfigure-scope"),"candidate","This file");
+    option($("reconfigure-scope"),"unfinished","Unfinished files");
+    option($("reconfigure-scope"),"all","All files in this batch");
+    $("reconfigure-scope").value = plan.scope;
     for (const file of plan.files) $("reconfigure-files").append(node("p",file));
     if (plan.selected > plan.files.length) $("reconfigure-files").append(node("p",`+${plan.selected-plan.files.length} more files`));
     $("reconfigure-profile").replaceChildren();
     option($("reconfigure-profile"), "same", plan.settings.profile_label);
-    option($("reconfigure-profile"), "auto", "Automatic sample tuning");
     for (const profile of state.recipes) if (profile !== "auto") option($("reconfigure-profile"),profile,profile);
     $("reconfigure-profile").value = "same";
     $("reconfigure-priority").value = plan.settings.priority || "balanced";
@@ -2147,6 +2197,28 @@ async function reconfigureBatch(id, candidate = false, savedPlan = null) {
       $("reconfigure-summary").textContent = error.message;
   }
 }
+
+$("reconfigure-scope").addEventListener("change", () => safe(async () => {
+  const plan=state.reconfigurePlan;
+  if (!plan) return;
+  const revision=state.reconfigureScopeRevision=(state.reconfigureScopeRevision || 0)+1;
+  $("submit-reconfigure").disabled=true;
+  try {
+    const next=await api(`batch-settings?${new URLSearchParams({id:plan.id,scope:$("reconfigure-scope").value,...(plan.candidate_id ? {candidate_id:plan.candidate_id} : {})})}`);
+    if (revision!==state.reconfigureScopeRevision || state.reconfigurePlan?.id!==plan.id || !$("reconfigure-batch").open) return;
+    state.reconfigurePlan={...next,candidate_id:plan.candidate_id,decision_version:plan.decision_version};
+    $("reconfigure-summary").textContent=`${next.title || "Saved selection"} · ${next.selected} files selected · ${next.active || 0} active files will finish first`;
+    $("reconfigure-files").replaceChildren(...next.files.map(file=>node("p",file)));
+    if (next.selected>next.files.length) $("reconfigure-files").append(node("p",`+${next.selected-next.files.length} more files`));
+    $("submit-reconfigure").disabled=!serverReachable || next.selected===0;
+  } catch (error) {
+    if (revision===state.reconfigureScopeRevision && $("reconfigure-batch").open) {
+      $("reconfigure-scope").value=state.reconfigurePlan.scope;
+      $("submit-reconfigure").disabled=!serverReachable;
+    }
+    throw error;
+  }
+}));
 $("close-reconfigure").addEventListener("click", () => $("reconfigure-batch").close());
 $("reconfigure-profile").addEventListener("change", () => {
   $("reconfigure-priority-label").hidden = $("reconfigure-profile").value !== "auto";
@@ -2162,7 +2234,7 @@ async function submitReconfiguredBatch() {
     if (!Number.isFinite(value)) throw new Error("Enter a valid savings or growth limit.");
     return value;
   };
-  const body = {id:plan.id,profile:$("reconfigure-profile").value,priority:$("reconfigure-priority").value,min_savings_percent:limit("reconfigure-savings"),max_size_increase_percent:limit("reconfigure-growth")};
+  const body = {id:plan.id,scope:plan.scope,selection_version:plan.selection_version,profile:$("reconfigure-profile").value,priority:$("reconfigure-priority").value,min_savings_percent:limit("reconfigure-savings"),max_size_increase_percent:limit("reconfigure-growth")};
   if (plan.candidate_id) { body.candidate_id = plan.candidate_id; body.decision_version = plan.decision_version; }
   const request = JSON.stringify(body);
   let receipt;
@@ -2174,20 +2246,18 @@ async function submitReconfiguredBatch() {
   state.busyJobs.add(plan.id);
   $("submit-reconfigure").disabled = true;
   try {
-    await refreshWorkers();
-    if (!current()) return;
-    if (!state.workerInfo?.ready) throw new Error("Video worker offline or not ready. No new attempt was submitted.");
-    const result = await api("batch-reconfigure", {...body,key:receipt.key});
+    $("submit-reconfigure").textContent = "Applying settings…";
+    const result = await commandRequest("batch-settings", {...body,key:receipt.key});
     if (!current()) return;
     sessionStorage.removeItem("navigatorr_reconfigure");
     $("reconfigure-batch").close();
     await loadJobs();
     if (auth !== state.authRevision || revision !== state.reconfigureRevision) return;
     await openJob(result.id);
-    notify(plan.candidate_id ? "Candidate rejected; new attempt queued for this file. Original and previous history preserved." : "New attempt queued for the failed/cancelled files. Previous history is preserved.");
+    notify("Settings updated in this batch. Active files finish first; previous attempts remain in file history.");
   } finally {
     state.busyJobs.delete(plan.id);
-    if (current()) $("submit-reconfigure").disabled = !serverReachable;
+    if (current()) { $("submit-reconfigure").disabled = !serverReachable; $("submit-reconfigure").textContent = "Apply to this batch"; }
     setConnection(serverReachable);
   }
 }
@@ -2272,7 +2342,7 @@ function jobControls(job, detail = false) {
       if (job.batch.queued > 0) add("Start batch", () => startBatchPreview(job.id));
     }
   }
-  const reconfigurable = job.action_name === "transcode_batch" && !job.batch?.dry_run && ["completed","failed","cancelled"].includes(job.status) && (job.batch?.failed > 0 || job.batch?.cancelled > 0);
+  const reconfigurable = job.action_name === "transcode_batch" && !job.batch?.dry_run && !job.batch?.promotion_plan_ready;
   if (reconfigurable) add("Reconfigure", () => reconfigureBatch(job.id));
   if (job.status === "failed" && !reconfigurable) {
     if (job.action_name === "benchmark_transcode" && /unsupported input/.test(job.error || ""))
@@ -2871,6 +2941,14 @@ async function loadBatchItems(id, revision) {
       row.append(
         button("View file", () => openJob(item.child_action_id), "quiet"),
       );
+
+    if (item.retry_pending) row.append(node("span","New settings saved · current attempt finishes first","muted"));
+    if (item.previous_attempts?.length) {
+      const history=node("details","","batch-attempt-history");
+      history.append(node("summary",`${item.previous_attempts.length} previous ${item.previous_attempts.length===1 ? "attempt" : "attempts"}`));
+      item.previous_attempts.forEach((attempt,index)=>history.append(button(`Attempt ${index+1} · ${names[attempt.status] || attempt.status}`,()=>openJob(attempt.child_action_id),"quiet")));
+      row.append(history);
+    }
     for (const reason of [item.error, ...(item.reasons || [])].filter(reason => reason && !/^(explicit profile requested|eligible for transcode)$/i.test(reason)))
       row.append(node("span", shortJobReason(reason), "muted"));
     $("batch-items-list").append(row);

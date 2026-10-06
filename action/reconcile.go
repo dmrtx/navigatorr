@@ -51,6 +51,7 @@ func (e *Engine) StartReconciler(ctx context.Context) <-chan struct{} {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
+				case <-e.reconcileWake:
 				}
 			}
 		}()
@@ -263,4 +264,12 @@ func (r contextReader) Read(p []byte) (int, error) {
 		return 0, err
 	}
 	return r.reader.Read(p)
+}
+
+// WakeReconciler starts admitted browser work without waiting for the poll tick.
+func (e *Engine) WakeReconciler() {
+	select {
+	case e.reconcileWake <- struct{}{}:
+	default:
+	}
 }

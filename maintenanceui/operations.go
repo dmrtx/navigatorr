@@ -268,6 +268,20 @@ func aggregateBatchSavings(records []operationRecord) {
 		}
 		seen := map[string]bool{}
 		for _, child := range children[records[i].inst.ID] {
+			generations := operationMap(records[i].state["batch_item_generations"])
+			base := "batch-" + records[i].inst.ID + "-"
+			if strings.HasPrefix(child.inst.IdempotencyKey, base) {
+				key := strings.TrimPrefix(child.inst.IdempotencyKey, base)
+				itemKey := strings.Split(key, "-attempt-")[0]
+				expected := base + itemKey
+				if gen := operationLibraryID(generations[itemKey]); gen > 0 {
+					expected += fmt.Sprintf("-attempt-%d", int(gen))
+				}
+				if child.inst.IdempotencyKey != expected {
+					continue
+				}
+			}
+
 			key := operationSourceKey(child)
 			if seen[key] {
 				continue
@@ -539,6 +553,7 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 					job["preview_execution_action_id"] = previewExecutions[r.inst.ID]
 				}
 				job["replacement_requested"] = r.inputs["promote_candidates"] == true
+				job["settings_revision"] = r.state["batch_settings_revision"]
 				job["paused"] = operationValue(r, "paused") == true
 				items, err := s.engine.Deps().Store.ListTranscodeBatchItems(r.inst.ID)
 				inferred := false
