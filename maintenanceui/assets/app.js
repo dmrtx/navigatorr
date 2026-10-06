@@ -154,6 +154,7 @@ function setConnection(online) {
   $("approve-batch-review").disabled = !online || state.approvingBatch;
   $("approve-file-review").disabled = !online || state.approvingFile;
   $("confirm-action-review").disabled = !online;
+  document.querySelectorAll("[data-review-choice]").forEach(b => { b.disabled = !online; });
   if (!online) state.workerInfo = null;
   renderWorkers();
   controls();
@@ -1812,13 +1813,23 @@ function finishActionReview(accepted) {
   const review = state.actionReview;
   state.actionReview = null;
   $("action-review").close();
-  review?.resolve(Boolean(accepted));
+  review?.resolve(accepted);
 }
-function reviewAction({title, message, content, confirmLabel, cancelLabel = "Back"}) {
+function reviewAction({title, message, content, confirmLabel, cancelLabel = "Back", choices = []}) {
   finishActionReview(false);
   if (!serverReachable || $("workspace").hidden) return Promise.resolve(false);
   $("action-review-title").textContent = title;
   $("action-review-content").replaceChildren(...(content || [node("p", message)]));
+  if (choices.length) {
+    const decisions = node("div", "", "candidate-decisions");
+    for (const choice of choices) {
+      const b = button(choice.label, () => { if (serverReachable) finishActionReview(choice.value); });
+      b.dataset.reviewChoice = choice.value;
+      b.disabled = !serverReachable;
+      decisions.append(b);
+    }
+    $("action-review-content").append(decisions);
+  }
   $("confirm-action-review").textContent = confirmLabel;
   $("confirm-action-review").disabled = !serverReachable;
   $("dismiss-action-review").textContent = cancelLabel;
@@ -1839,8 +1850,8 @@ $("confirm-action-review").addEventListener("click", () => {
 function candidateReview(job) {
   const match = String(job.waiting_reason || "").match(/Candidate file size \((\d+) bytes\) exceeds original \((\d+) bytes\) by ([\d.]+)%, which is greater than max_size_increase_percent \(([\d.]+)%\)/);
   return {
-    source: job.savings?.source_bytes ?? (match ? Number(match[2]) : null),
-    candidate: job.savings?.candidate_bytes ?? (match ? Number(match[1]) : null),
+    source: match ? Number(match[2]) : job.savings?.source_bytes,
+    candidate: match ? Number(match[1]) : job.savings?.candidate_bytes,
     reason: match ? `The candidate is ${match[3]}% larger. This job allows up to ${match[4]}% growth.` : shortJobReason(job.waiting_reason) || "The candidate did not meet this job's validation limits.",
   };
 }
@@ -1854,12 +1865,18 @@ async function reviewJobDecision(id, decision) {
   try {
     const read = async () => (await api(`operations?id=${encodeURIComponent(id)}`)).jobs?.[0];
     const job = await read();
+    let candidatePlan = null, reviewed = job;
+    if (decision === "accept_loss" && job?.action_name === "transcode_batch") {
+      candidatePlan = await api(`batch-reconfigure?id=${encodeURIComponent(id)}&candidate=1`);
+      reviewed = (await api(`operations?id=${encodeURIComponent(candidatePlan.candidate_id)}`)).jobs?.[0];
+      if (!reviewed) throw new Error("Candidate details unavailable. Refresh the queue.");
+    }
     if (auth !== state.authRevision || $("workspace").hidden) return;
     if (job?.status !== "waiting_decision" || !job.waiting_options?.some(option => option.decision === decision))
       throw new Error("This job is no longer waiting for that decision. Refresh the queue.");
     const stamp = decisionStamp(job, decision);
-    const info = candidateReview(job);
-    const content = [node("p", queuePresentation(job).title, "review-filename")];
+    const info = candidateReview(reviewed);
+    const content = [node("p", candidatePlan?.title || queuePresentation(reviewed).title, "review-filename")];
     if (decision === "accept_loss") {
       for (const [label, size] of [["Original", info.source], ["Candidate", info.candidate]]) {
         const row = node("div", "", "review-file");
@@ -1869,12 +1886,23 @@ async function reviewJobDecision(id, decision) {
       content.push(node("p", info.reason));
       content.push(node("p", "Accept this candidate despite the validation result. Replacing the library file requires a separate review.", "muted"));
     } else content.push(node("p", shortJobReason(job.waiting_reason) || "Review this job before continuing."));
-    if (!await reviewAction({title:decision === "accept_loss" ? "Review candidate" : "Review decision", content, confirmLabel:decision === "accept_loss" ? "Accept candidate" : "Approve"})) return;
+    const candidateChoices = decision === "accept_loss" ? [
+      ...(job.waiting_options.some(o=>o.decision === "reject") ? [{label:"Reject · keep original",value:"reject"}] : []),
+      ...(candidatePlan ? [{label:"Transcode with other settings",value:"reconfigure"}] : []),
+    ] : [];
+    const chosen = await reviewAction({title:decision === "accept_loss" ? "Review candidate" : "Review decision", content, choices:candidateChoices, cancelLabel:decision === "accept_loss" ? "Decide later" : "Back", confirmLabel:decision === "accept_loss" ? "Accept candidate" : "Approve"});
+    if (!chosen) return;
+    if (chosen === "reconfigure") { await reconfigureBatch(id,true,candidatePlan); return; }
     const latest = await read();
     if (auth !== state.authRevision || $("workspace").hidden) return;
     if (decisionStamp(latest || {}, decision) !== stamp)
       throw new Error("The candidate or decision changed. Review the job again.");
-    await jobControl(id, "action_resume", {decision});
+    const selected = chosen === "reject" ? "reject" : decision;
+    if (candidatePlan) {
+      await api("candidate-decision",{id,candidate_id:candidatePlan.candidate_id,decision_version:candidatePlan.decision_version,decision:selected});
+      await Promise.all([loadJobs(),state.detail === id && $("job-detail").open ? refreshDetail() : Promise.resolve()]);
+      notify(selected === "reject" ? "Candidate rejected. Original preserved; other batch files continue." : "Candidate accepted. Replacement requires separate approval.");
+    } else await jobControl(id, "action_resume", {decision:selected});
   } finally {
     state.reviewingDecision = null;
   }
@@ -2084,7 +2112,7 @@ async function startBatchPreview(id) {
     setConnection(serverReachable);
   }
 }
-async function reconfigureBatch(id) {
+async function reconfigureBatch(id, candidate = false, savedPlan = null) {
   const revision = state.reconfigureRevision = (state.reconfigureRevision || 0) + 1;
   const auth = state.authRevision;
   state.reconfigurePlan = null;
@@ -2093,10 +2121,13 @@ async function reconfigureBatch(id) {
   $("reconfigure-summary").textContent = "Loading saved selection…";
   $("reconfigure-batch").showModal();
   try {
-    const plan = await api(`batch-reconfigure?id=${encodeURIComponent(id)}`);
+    const plan = savedPlan || await api(`batch-reconfigure?id=${encodeURIComponent(id)}${candidate ? "&candidate=1" : ""}`);
     if (auth !== state.authRevision || revision !== state.reconfigureRevision || !$("reconfigure-batch").open) return;
     state.reconfigurePlan = plan;
-    $("reconfigure-summary").textContent = `${plan.title} · ${plan.selected} failed/cancelled files · ${plan.kept} other files kept out of this attempt`;
+    $("reconfigure-note").textContent = plan.candidate_id ? "No change is made until you submit. This creates a separate attempt; the previous candidate and history remain available." : "Only failed or cancelled files will be submitted. Completed candidates stay in the previous job. Opening this form starts nothing.";
+    $("reconfigure-title").textContent = plan.candidate_id ? "Transcode with other settings" : "Reconfigure batch";
+    $("reconfigure-summary").textContent = plan.candidate_id ? `${plan.title} · Reject this candidate and queue a new attempt for this file only. Other batch files continue; the original is preserved.` : `${plan.title} · ${plan.selected} failed/cancelled files · ${plan.kept} other files kept out of this attempt`;
+    $("submit-reconfigure").textContent = plan.candidate_id ? "Reject & queue new attempt" : "Queue new attempt";
     for (const file of plan.files) $("reconfigure-files").append(node("p",file));
     if (plan.selected > plan.files.length) $("reconfigure-files").append(node("p",`+${plan.selected-plan.files.length} more files`));
     $("reconfigure-profile").replaceChildren();
@@ -2132,6 +2163,7 @@ async function submitReconfiguredBatch() {
     return value;
   };
   const body = {id:plan.id,profile:$("reconfigure-profile").value,priority:$("reconfigure-priority").value,min_savings_percent:limit("reconfigure-savings"),max_size_increase_percent:limit("reconfigure-growth")};
+  if (plan.candidate_id) { body.candidate_id = plan.candidate_id; body.decision_version = plan.decision_version; }
   const request = JSON.stringify(body);
   let receipt;
   try { receipt = JSON.parse(sessionStorage.getItem("navigatorr_reconfigure") || "null"); } catch {}
@@ -2152,7 +2184,7 @@ async function submitReconfiguredBatch() {
     await loadJobs();
     if (auth !== state.authRevision || revision !== state.reconfigureRevision) return;
     await openJob(result.id);
-    notify("New attempt queued for the failed/cancelled files. Previous history is preserved.");
+    notify(plan.candidate_id ? "Candidate rejected; new attempt queued for this file. Original and previous history preserved." : "New attempt queued for the failed/cancelled files. Previous history is preserved.");
   } finally {
     state.busyJobs.delete(plan.id);
     if (current()) $("submit-reconfigure").disabled = !serverReachable;
@@ -3656,7 +3688,7 @@ function backupReason(copy) {
   if (copy.cleanup_available) return "The replacement will be verified before this recovery copy is removed.";
   if (operationIsActive(copy.status)) return "Job active. This recovery copy is retained until the replacement finishes.";
   if (copy.status === "cancelled") return "Job cancelled before cleanup. Review its details to resolve the replacement.";
-  if (/stopped before final cleanup/.test(copy.reason || "")) return "Replacement failed before cleanup. Resolve the earlier error in job details first.";
+  if (/stopped before final cleanup/.test(copy.reason || "")) return copy.delete_available ? "Verification is blocked by the earlier replacement failure. Remove copy discards the backup without repairing that job." : "Replacement failed before cleanup. Resolve the earlier error in job details first.";
   if (/was not approved/.test(copy.reason || "")) return "Replacement approval is required. This recovery copy is retained.";
   if (/allow_destructive/.test(copy.reason || "")) return "Recovery cleanup is disabled in the server settings.";
   return copy.reason || "Review job details before cleaning up this recovery copy.";
@@ -3665,7 +3697,10 @@ function operationIsActive(status) {
   return ["pending","running","waiting_external","waiting_decision"].includes(status);
 }
 function cleanupError(value) {
-  try { const parsed = JSON.parse(value); return parsed.error || value; } catch { return value || "Verification did not complete."; }
+  let reason = value;
+  try { reason = JSON.parse(value).error || value; } catch {}
+  if (/imported file size differs from the validated candidate/.test(reason || "")) return "Sonarr reports a different size for the replacement than the validated candidate. The backup was kept. Use Remove copy if you no longer need that backup.";
+  return reason || "Verification did not complete.";
 }
 function renderBackups() {
   $("backup-list").replaceChildren();
@@ -3684,6 +3719,11 @@ function renderBackups() {
       const clean = button(state.backupCleaning?.id === copy.action_id ? "Verifying…" : copy.duplicate_available ? "Verify duplicate & remove" : "Verify & clean up", () => cleanBackup(copy));
       clean.disabled = Boolean(state.backupCleaning) || !serverReachable;
       actions.append(clean);
+    }
+    if (copy.delete_available) {
+      const remove = button("Remove copy", () => cleanBackup(copy,"discard"));
+      remove.disabled = Boolean(state.backupCleaning) || !serverReachable;
+      actions.append(remove);
     }
     row.append(actions);
     $("backup-list").append(row);
@@ -3741,8 +3781,9 @@ function renderBackupCleanup() {
   const task = state.backupCleaning;
   $("backup-progress").hidden = !state.backupsVisible;
   const p = task.progress;
-  const phase = {checking_library:"Checking the active library file",verifying_replacement:"Verifying replacement SHA-256",verifying_recovery:"Verifying recovery SHA-256",removing_recovery:"Removing verified recovery copy",waiting_library:"Waiting for the library",completed:"Cleanup completed",stopped:"Cleanup stopped"}[p?.phase] || (task.checking ? "Checking cleanup outcome" : "Waiting for server to start verification");
+  const phase = {checking_library:"Checking the active library file",verifying_replacement:"Verifying replacement SHA-256",verifying_recovery:"Verifying recovery SHA-256",removing_recovery:"Removing verified recovery copy",removing_copy:"Removing recovery copy",waiting_library:"Waiting for the library",completed:"Cleanup completed",stopped:"Cleanup stopped"}[p?.phase] || (task.checking ? "Checking cleanup outcome" : "Waiting for server to start verification");
   const notice = $("backup-progress");
+  notice.classList.toggle("cleanup-stopped", p?.phase === "stopped");
   notice.replaceChildren(node("strong", phase), node("span", `${task.name} · ${Math.max(0,Math.floor((Date.now()-task.started)/1000))}s elapsed`));
   if (p?.total_bytes > 0 && p.phase.startsWith("verifying")) {
     const bar = document.createElement("progress");
@@ -3758,11 +3799,13 @@ async function finishBackupCleanup(job) {
   const task = state.backupCleaning;
   if (!task || task.auth !== state.authRevision) return;
   const currentObservation = Date.parse(job.cleanup?.updated_at) >= task.started;
+  if (task.mode === "discard" && !currentObservation && !task.error) { renderBackupCleanup(); return; }
   if (operationIsActive(job.status) || currentObservation && !["completed","stopped"].includes(job.cleanup?.phase)) { renderBackupCleanup(); return; }
   state.backupCleaning = null;
   $("backup-progress").hidden = !state.backupsVisible;
   $("backup-progress").replaceChildren();
-  $("backup-progress").textContent = job.status === "completed" || job.cleanup?.phase === "completed" ? `Removed recovery data for ${task.name}. ${task.mode === "discard_duplicate" ? "Original preserved; failed job unchanged." : "Replacement verified."}` : `Cleanup stopped for ${task.name}. ${cleanupError(job.cleanup?.error || task.error || job.error)} Remaining recovery data is listed below.`;
+  $("backup-progress").classList.toggle("cleanup-stopped", job.status !== "completed" && job.cleanup?.phase !== "completed");
+  $("backup-progress").textContent = (task.mode === "discard" ? currentObservation && job.cleanup?.phase === "completed" : job.status === "completed" || job.cleanup?.phase === "completed") ? `Removed recovery data for ${task.name}. ${task.mode === "discard" ? "Backup removed by your choice; library files and job history unchanged." : task.mode === "discard_duplicate" ? "Original preserved; failed job unchanged." : "Replacement verified."}` : `Cleanup stopped for ${task.name}. ${cleanupError(job.cleanup?.error || task.error || job.error)} Remaining recovery data is listed below.`;
   if (state.backupsVisible) await loadBackups();
   await loadJobs();
 }
@@ -3786,13 +3829,13 @@ async function refreshBackupCleanup() {
   }
   } finally { task.polling = false; }
 }
-async function cleanBackup(copy) {
+async function cleanBackup(copy, requestedMode = null) {
   if (state.backupCleaning) return;
   const auth = state.authRevision;
-  const mode = copy.duplicate_available ? "discard_duplicate" : "clean";
-  const content = [node("p", backupName(copy), "cleanup-file"), node("p", `${bytes(Number(copy.bytes || 0)+Number(copy.partial_bytes || 0))} to remove if verification passes`, "cleanup-space"), node("p", mode === "discard_duplicate" ? "Checks that the original and recovery copy match the recorded SHA-256. Removes only redundant recovery data. The original and failed job stay unchanged." : "Checks the active library file and both SHA-256 hashes. If any check fails, the recovery copy stays.")];
+  const mode = requestedMode || (copy.duplicate_available ? "discard_duplicate" : "clean");
+  const content = [node("p", backupName(copy), "cleanup-file"), node("p", `${bytes(Number(copy.bytes || 0)+Number(copy.partial_bytes || 0))} ${mode === "discard" ? "will be permanently removed" : "to remove if verification passes"}`, "cleanup-space"), node("p", mode === "discard" ? "Deletes this backup only, without verifying the replacement or repairing the old job. This cannot be undone. Library files are untouched." : mode === "discard_duplicate" ? "Checks that the original and recovery copy match the recorded SHA-256. Removes only redundant recovery data. The original and failed job stay unchanged." : "Checks the active library file and both SHA-256 hashes. If any check fails, the recovery copy stays.")];
   const locations = node("details", "", "cleanup-locations"); locations.append(node("summary", "File locations"), node("p", `Library file: ${copy.original_path || "See job details"}`, "backup-path"), node("p", `Copy to remove: ${copy.path || "See job details"}`, "backup-path")); content.push(locations);
-  if (!await reviewAction({title:"Verify and remove extra copy", content, confirmLabel:"Verify & remove copy"}) || auth !== state.authRevision) return;
+  if (!await reviewAction({title:mode === "discard" ? "Remove recovery copy?" : "Verify and remove extra copy", content, confirmLabel:mode === "discard" ? "Remove copy" : "Verify & remove copy"}) || auth !== state.authRevision) return;
   if (state.backupCleaning) return;
   const task = state.backupCleaning = {id:copy.action_id,name:backupName(copy),mode,auth,started:Date.now(),pendingResponse:true};
   renderBackups();
