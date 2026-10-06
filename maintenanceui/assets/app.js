@@ -3876,7 +3876,7 @@ function renderBackupCleanup() {
 async function finishBackupCleanup(job) {
   const task = state.backupCleaning;
   if (!task || task.auth !== state.authRevision) return;
-  const currentObservation = Date.parse(job.cleanup?.updated_at) >= task.started;
+  const currentObservation = task.commandCompleted || Date.parse(job.cleanup?.updated_at) >= task.started;
   if (task.mode === "discard" && !currentObservation && !task.error) { renderBackupCleanup(); return; }
   if (operationIsActive(job.status) || currentObservation && !["completed","stopped"].includes(job.cleanup?.phase)) { renderBackupCleanup(); return; }
   state.backupCleaning = null;
@@ -3901,7 +3901,7 @@ async function refreshBackupCleanup() {
     // The request can still be pending while hashing. Never interpret the
     // previous failed checkpoint as the result of this cleanup attempt.
     const observed = Date.parse(job.cleanup?.updated_at);
-    if (Number.isFinite(observed) && observed >= task.started) task.progress = job.cleanup;
+    if (task.commandCompleted || Number.isFinite(observed) && observed >= task.started) task.progress = job.cleanup;
     renderBackupCleanup();
     if (!task.pendingResponse) await finishBackupCleanup(job);
   }
@@ -3922,6 +3922,7 @@ async function cleanBackup(copy, requestedMode = null) {
     const result = await tool("transcode_backups", {mode,action_id:copy.action_id});
     if (state.backupCleaning !== task || auth !== state.authRevision) return;
     task.pendingResponse = false;
+    task.commandCompleted = Boolean(result.command_id);
     const job = result.action || result;
     if (job.status) await finishBackupCleanup(job);
     else await refreshBackupCleanup();
