@@ -57,7 +57,7 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 	end := min(offset, len(items)) + min(limit, max(0, len(items)-offset))
 	if offset < len(items) {
 		for _, item := range items[offset:end] {
-			views = append(views, batchItemView{ItemKey: item.ItemKey, FilePath: item.FilePath, DisplayLabel: item.DisplayLabel, Status: item.Status, ChildActionID: item.ChildActionID, Decision: item.Decision, Error: item.Error, Profile: item.Profile, Reasons: item.Reasons})
+			views = append(views, batchItemView{ItemKey: item.ItemKey, FilePath: item.FilePath, DisplayLabel: item.DisplayLabel, Status: item.Status, ChildActionID: item.ChildActionID, Decision: item.Decision, Error: batchReasonText(item.Error, true), Profile: item.Profile, Reasons: item.Reasons})
 		}
 	}
 	writeJSON(w, 200, map[string]any{"items": views, "total": len(items), "offset": offset, "has_more": end < len(items)})

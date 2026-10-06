@@ -4,10 +4,77 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/jakenesler/navigatorr/store"
 )
+
+func TestSavingsGateGroupsFilesButPreservesEachEstimate(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	seedOperation(t, st, "batch", "transcode_batch", "completed", map[string]any{"promote_candidates": true}, map[string]any{"counts": map[string]int{"total": 8, "failed": 8}, "batch_promotion": map[string]int{"eligible": 0, "promoted": 0}}, nil)
+	var firstRaw string
+	for i := 0; i < 8; i++ {
+		reason := fmt.Sprintf("benchmark winner predicts only -%.1f%% savings, below required minimum 15.0%% (min_savings_percent=15.0): full transcode not started", 33.2+float64(i))
+		if i == 0 {
+			reason = mustJSON(t, map[string]string{"step": "wait_benchmark", "error": reason})
+			firstRaw = reason
+		}
+		if err := st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: "batch", ItemKey: fmt.Sprint(i), FilePath: fmt.Sprintf("/media/%d.mkv", i), Status: "failed", Error: reason}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := request(h, "GET", "/api/maintenance/operations?id=batch", "", true)
+	var page operationsPage
+	json.Unmarshal(w.Body.Bytes(), &page)
+	if w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	feedback := operationMap(page.Jobs[0]["batch_files"])
+	reasons := feedback["reasons"].([]any)
+	if len(reasons) != 1 || operationMap(reasons[0])["count"] != float64(8) {
+		t.Fatal("misleading failure count", feedback)
+	}
+	stages := page.Jobs[0]["stages"].([]any)
+	if operationMap(stages[1])["status"] != "failed" || operationMap(stages[2])["status"] != "skip" {
+		t.Fatal("failed files or skipped replacement marked complete", stages)
+	}
+	w = request(h, "GET", "/api/maintenance/batch-items?id=batch", "", true)
+	if !strings.Contains(w.Body.String(), "33.2% larger") || strings.Contains(w.Body.String(), "wait_benchmark") || !strings.Contains(w.Body.String(), "15.0% savings required") {
+		t.Fatal("opaque file error", w.Body.String())
+	}
+	items, _ := st.ListTranscodeBatchItems("batch")
+	if items[0].Error != firstRaw {
+		t.Fatal("projection rewrote history")
+	}
+	if got := batchReasonText("benchmark winner predicts only 10.5% savings, below required minimum 15.0%", true); !strings.Contains(got, "Estimated savings 10.5%") {
+		t.Fatal(got)
+	}
+	if got := batchReasonText(`{"step":"copy","error":"Storage unavailable"}`, true); got != "Storage unavailable" {
+		t.Fatal(got)
+	}
+}
+
+func TestBatchStagesShowPartialAndUnexecutedWork(t *testing.T) {
+	s, _ := testUI(t)
+	for _, tc := range []struct {
+		status                             string
+		step                               int
+		completed                          int
+		expectedProcess, expectedPromotion string
+	}{
+		{"completed", 3, 2, "partial", "skip"},
+		{"failed", 1, 0, "failed", "skip"},
+		{"cancelled", 1, 0, "cancelled", "skip"},
+	} {
+		r := operationRecord{inst: store.ActionInstance{ActionName: "transcode_batch", Status: tc.status, CurrentStep: tc.step}, inputs: map[string]any{}, outputs: map[string]any{"counts": map[string]any{"completed": float64(tc.completed), "failed": float64(2)}}}
+		stages := s.queueStages(r)
+		if stages[1]["status"] != tc.expectedProcess || stages[2]["status"] != tc.expectedPromotion {
+			t.Fatal(tc, stages)
+		}
+	}
+}
 
 func TestPreviewExecutionIsOneStableWorkflowWithReadableHistory(t *testing.T) {
 	s, h := testUI(t)
