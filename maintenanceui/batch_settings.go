@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"reflect"
+	"strings"
 
 	"github.com/jakenesler/navigatorr/action"
 )
@@ -19,6 +21,9 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 		Profile         string   `json:"profile"`
 		MinSavings      *float64 `json:"min_savings_percent"`
 		MaxGrowth       *float64 `json:"max_size_increase_percent"`
+		PreserveLimits  bool     `json:"preserve_limits"`
+		PreserveSavings bool     `json:"preserve_savings"`
+		PreserveGrowth  bool     `json:"preserve_growth"`
 		Key             string   `json:"key"`
 	}
 	if r.Method == http.MethodGet {
@@ -53,11 +58,32 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 	plan := map[string]any{"id": body.ID, "scope": body.Scope, "selection_version": action.BatchSelectionVersion(inst, items), "title": operationString(decodeOperationJSON(inst.OutputsJSON)["series_title"]), "settings": map[string]any{"profile_label": "Keep each file's current profile", "min_savings_percent": inputs["min_savings_percent"], "max_size_increase_percent": inputs["max_size_increase_percent"]}}
 	files := []string{}
 	selected, active := 0, 0
+	requiresProfile := false
+	limits, mixed := map[string]any{}, map[string]bool{}
+	itemSettings := operationMap(state["batch_item_settings"])
 	for _, item := range items {
 		if !action.BatchRevisionSelects(item, body.Scope, body.CandidateID) {
 			continue
 		}
 		selected++
+		for _, key := range []string{"min_savings_percent", "max_size_increase_percent"} {
+			value := inputs[key]
+			if overrides := operationMap(itemSettings[item.ItemKey]); overrides != nil {
+				if override, exists := overrides[key]; exists {
+					value = override
+				}
+			}
+			if selected == 1 {
+				limits[key] = value
+			} else if !reflect.DeepEqual(limits[key], value) {
+				mixed[key] = true
+			}
+		}
+		for _, reason := range item.Reasons {
+			if item.Status == "skip" && strings.Contains(reason, "shared VMAF/CAMBI calibration supports 8-bit SDR video below 45 fps") {
+				requiresProfile = true
+			}
+		}
 		if item.ChildActionID != "" {
 			child, err := st.GetActionInstance(item.ChildActionID)
 			if err != nil {
@@ -76,6 +102,16 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	plan["selected"], plan["kept"], plan["active"], plan["files"] = selected, len(items)-selected, active, files
+	plan["requires_explicit_profile"] = requiresProfile
+	settingsView := plan["settings"].(map[string]any)
+	for key, value := range limits {
+		if mixed[key] {
+			value = nil
+		}
+		settingsView[key] = value
+	}
+	settingsView["mixed_limits"] = mixed["min_savings_percent"] || mixed["max_size_increase_percent"]
+	settingsView["preserve_source_bit_depth"] = inputs["preserve_source_bit_depth"]
 	if r.Method == http.MethodGet {
 		writeJSON(w, 200, plan)
 		return
@@ -85,6 +121,10 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	settings := map[string]any{}
+	if requiresProfile && body.Profile == "same" {
+		fail(w, 400, "automatic testing skipped this video; choose an explicit profile to try again")
+		return
+	}
 	if body.Profile != "same" {
 		if body.Profile == "" || body.Profile == "auto" {
 			fail(w, 400, "choose an explicit profile for this attempt")
@@ -101,6 +141,9 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 		value *float64
 		max   float64
 	}{{"min_savings_percent", body.MinSavings, 100}, {"max_size_increase_percent", body.MaxGrowth, 1000}} {
+		if body.PreserveLimits || field.key == "min_savings_percent" && body.PreserveSavings || field.key == "max_size_increase_percent" && body.PreserveGrowth {
+			continue
+		}
 		settings[field.key] = nil
 		if field.value == nil {
 			continue
