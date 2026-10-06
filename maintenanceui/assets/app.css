@@ -998,7 +998,8 @@ main {
   font-variant-numeric: tabular-nums;
   flex-wrap: wrap;
 }
-.batch-progress-phase { flex-basis: 100%; color: var(--muted); line-height: 1.45; }
+.batch-progress-phase { order: 3; flex-basis: 100%; min-width: 0; overflow-wrap: anywhere; color: var(--muted); line-height: 1.45; }
+.job-row .job-footer:has(.batch-progress-phase) { height: auto; min-height: var(--control-size); align-items: flex-start; }
 #backup-progress:not([hidden]) { display: flex; flex-direction: column; gap: 6px; border-left: 3px solid var(--forest); padding: 10px 12px; background: #edf3eb; }
 #backup-progress progress { width: min(100%, 420px); height: 6px; accent-color: var(--forest); }
 .cleanup-file { font-weight: 500; margin: 8px 0 4px; }
