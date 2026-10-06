@@ -1640,11 +1640,11 @@ function batchProgress(job) {
   const counts = node("span", `${processed} / ${batch.total} processed`, "batch-progress-count");
   counts.title = "Processed includes completed, failed and skipped files. Cancelled files and files waiting for a decision are not counted as processed.";
   const value = node("strong", `${active ? "~" : ""}${active ? Math.min(99,Math.round(percent)) : Math.round(percent)}%`, "batch-progress-percent");
-  value.title = active ? "Estimated overall workflow progress: finished files plus active workflow steps and measured worker work. Steps have equal weight; this is not a time estimate." : "Files processed";
+  value.title = active ? "Estimated overall workflow progress: finished files plus active workflow steps and measured worker work. Steps have equal weight; requested replacements reserve 15% of work. This is not a time estimate." : "Files processed";
   const bar = document.createElement("progress");
   bar.max = batch.total;
   bar.value = percent / 100 * batch.total;
-  bar.setAttribute("aria-label", `${processed} of ${batch.total} files processed`);
+  bar.setAttribute("aria-label", active ? `Estimated overall workflow progress ${percent.toFixed(1)}%` : `${processed} of ${batch.total} files processed`);
   result.append(counts, value, bar);
   if (active) {
     const phases = [...byFile.values()].map(a=>a.label);
