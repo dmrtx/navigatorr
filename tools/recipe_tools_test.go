@@ -238,6 +238,9 @@ func TestRecipeListReturnsPaginatedManagedSummaries(t *testing.T) {
 	if int(payload["managed_total"].(float64)) != 3 || int(payload["managed_returned"].(float64)) != 1 {
 		t.Fatalf("unexpected managed pagination metadata: %+v", payload)
 	}
+	if _, ok := payload["selection_details"]; ok {
+		t.Fatal("default MCP listing must remain compact")
+	}
 	items, ok := payload["managed_profiles"].([]any)
 	if !ok || len(items) != 1 {
 		t.Fatalf("unexpected managed summaries: %+v", payload["managed_profiles"])
@@ -340,5 +343,44 @@ func TestRecipeGetExplainsShadowingAndAudioPolicy(t *testing.T) {
 	txt := resultText(t, callTool(t, s, "recipe_get", map[string]any{"name": "anime-hevc"}))
 	if !strings.Contains(txt, "compact_audio_policy") || !strings.Contains(txt, "shadowed_profiles") || !strings.Contains(txt, "192") {
 		t.Fatal(txt)
+	}
+}
+
+func TestRecipeSelectionDetailsUseEffectiveOverrideOutsideManagedPage(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Transcode.Recipes.CacheDir = t.TempDir()
+	if err := cfg.Transcode.InitializeRecipes(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	mgr := cfg.Transcode.RecipeManager()
+	for _, name := range []string{"aaa", "general-hevc"} {
+		if _, err := mgr.SaveManagedProfile(name, structuredRecipeProfile(), "Custom CPU settings", "", 0, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := server.NewMCPServer("test", "0.0.0")
+	registerRecipeTools(s, cfg)
+	res := callTool(t, s, "recipe_list", map[string]any{"limit": 1, "include_selection_details": true})
+	var payload struct {
+		Details map[string]struct {
+			Source      string         `json:"source"`
+			Description string         `json:"description"`
+			Profile     recipe.Profile `json:"profile"`
+		} `json:"selection_details"`
+	}
+	if err := json.Unmarshal([]byte(resultText(t, res)), &payload); err != nil {
+		t.Fatal(err)
+	}
+	override := payload.Details["general-hevc"]
+	if override.Source != "managed" || override.Description != "Custom CPU settings" || override.Profile.Video.Codec != "libx265" || override.Profile.Video.Quality != 24 {
+		t.Fatalf("selector described shadowed bundle instead of effective profile: %+v", override)
+	}
+	live := payload.Details["live-action-hevc"]
+	if live.Profile.Optimization == nil || !live.Profile.Optimization.Enabled {
+		t.Fatal("sample testing omitted", live)
+	}
+	hardware := payload.Details["anime-hevc-space"]
+	if hardware.Source != "active_bundle" || hardware.Profile.Video.Codec != "hevc_videotoolbox" || hardware.Profile.Video.Quality != 55 {
+		t.Fatal(hardware)
 	}
 }
