@@ -112,7 +112,13 @@ func (e *Engine) promotionHash(ctx context.Context, path string) (string, int64,
 		return "", 0, fmt.Errorf("file changed while opening: %s", path)
 	}
 	h := sha256.New()
-	n, err := io.Copy(h, &promotionContextReader{ctx: ctx, r: f})
+	observer, _ := ctx.Value(promotionHashProgressKey{}).(promotionHashProgress)
+	if observer != nil {
+		if err := observer(path, 0, opened.Size()); err != nil {
+			return "", 0, err
+		}
+	}
+	n, err := io.Copy(h, &promotionContextReader{ctx: ctx, r: f, path: path, total: opened.Size(), progress: observer})
 	if err != nil {
 		return "", 0, err
 	}
@@ -134,15 +140,25 @@ func (e *Engine) promotionHash(ctx context.Context, path string) (string, int64,
 }
 
 type promotionContextReader struct {
-	ctx context.Context
-	r   io.Reader
+	ctx         context.Context
+	r           io.Reader
+	path        string
+	total, read int64
+	progress    promotionHashProgress
 }
 
 func (r *promotionContextReader) Read(p []byte) (int, error) {
 	if err := r.ctx.Err(); err != nil {
 		return 0, err
 	}
-	return r.r.Read(p)
+	n, err := r.r.Read(p)
+	r.read += int64(n)
+	if r.progress != nil && n > 0 {
+		if observeErr := r.progress(r.path, r.read, r.total); observeErr != nil {
+			return n, observeErr
+		}
+	}
+	return n, err
 }
 
 func (e *Engine) verifyPromotionHash(ctx context.Context, path, expected string) error {
