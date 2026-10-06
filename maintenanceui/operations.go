@@ -267,7 +267,17 @@ func aggregateBatchSavings(records []operationRecord) {
 			}
 		}
 		seen := map[string]bool{}
+		previousAttempts := map[string]bool{}
+		for _, entries := range operationMap(records[i].state["batch_attempt_history"]) {
+			attempts, _ := entries.([]any)
+			for _, entry := range attempts {
+				previousAttempts[operationString(operationMap(entry)["child_action_id"])] = true
+			}
+		}
 		for _, child := range children[records[i].inst.ID] {
+			if previousAttempts[child.inst.ID] {
+				continue
+			}
 			generations := operationMap(records[i].state["batch_item_generations"])
 			base := "batch-" + records[i].inst.ID + "-"
 			if strings.HasPrefix(child.inst.IdempotencyKey, base) {

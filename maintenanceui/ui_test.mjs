@@ -1928,6 +1928,9 @@ test("profile details describe the encoder and ignore an obsolete selection",asy
  h.run('tool=async()=>({profile:{video:{codec:"hevc_videotoolbox",average_bitrate_kbps:4000},audio:{mode:"copy"},container:"mkv"}})');
  await h.run('showReconfigureProfile()');
  assert.match(h.elements.get('reconfigure-profile-info').textContent,/Hardware HEVC.*4000 kbps.*Audio: copy.*MKV/);
+ h.run('tool=async()=>({profile:{video:{codec:"libx265",quality:24,preset:"slow"},optimization:{enabled:true}}})');
+ await h.run('showReconfigureProfile()');
+ assert.match(h.elements.get('reconfigure-profile-info').textContent,/Tests quality samples before full conversion/);
 });
 
 test("changing only the profile preserves current limits, including mixed per-file settings",async()=>{

@@ -125,6 +125,19 @@ func TestWorkflowFiltersMatchFailuresAndTreatRejectionsAsFinishedResults(t *test
 	}
 }
 
+func TestBatchSavingsExcludeExplicitAttemptHistoryWithoutDependingOnChildKeyFormat(t *testing.T) {
+	oldSource, oldEstimate, newSource := int64(1000), int64(400), int64(900)
+	records := []operationRecord{
+		{inst: store.ActionInstance{ID: "batch", ActionName: "transcode_batch"}, state: map[string]any{"batch_attempt_history": map[string]any{"file": []any{map[string]any{"child_action_id": "old"}}}}},
+		{inst: store.ActionInstance{ID: "old", ActionName: "transcode_media"}, inputs: map[string]any{"parent_action_id": "batch", "path": "/media/one.mkv"}, savings: operationSavings{SourceBytes: &oldSource, EstimatedSavedBytes: &oldEstimate}},
+		{inst: store.ActionInstance{ID: "current", ActionName: "transcode_media"}, inputs: map[string]any{"parent_action_id": "batch", "path": "/media/one.mkv"}, savings: operationSavings{SourceBytes: &newSource}},
+	}
+	aggregateBatchSavings(records)
+	if records[0].savings.SourceBytes == nil || *records[0].savings.SourceBytes != newSource || records[0].savings.EstimatedSavedBytes != nil {
+		t.Fatal("old estimate leaked into the new attempt", records[0].savings)
+	}
+}
+
 func TestPreviewExecutionIsOneStableWorkflowWithReadableHistory(t *testing.T) {
 	s, h := testUI(t)
 	st := s.engine.Deps().Store
