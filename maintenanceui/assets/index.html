@@ -548,7 +548,7 @@
                 <option value="running">Running</option>
                 <option value="waiting_external">Processing</option>
                 <option value="waiting_decision">Needs decision</option>
-                <option value="completed">Completed</option>
+                <option value="completed">Finished</option>
                 <option value="failed">Failed</option>
                 <option value="cancelled">Cancelled</option>
                 <option value="archived">Archived</option></select
@@ -898,9 +898,8 @@
         <label id="reconfigure-scope-label">Apply to<select id="reconfigure-scope"></select></label>
         <label>Profile<select id="reconfigure-profile" required aria-describedby="reconfigure-profile-note"></select></label>
         <p id="reconfigure-profile-note" class="profile-guidance" hidden></p>
-        <label id="reconfigure-priority-label" hidden>Quality intent<select id="reconfigure-priority">
-          <option value="balanced">Balanced</option><option value="quality">Quality</option><option value="savings">Savings</option><option value="preserve_quality">Preserve quality</option>
-        </select></label>
+        <p id="reconfigure-current-profiles" class="metadata"></p>
+        <div id="reconfigure-profile-info" class="profile-guidance" hidden></div>
         <details class="reconfigure-limits"><summary>Savings and size limits</summary><div class="form-grid">
           <label>Minimum savings (%)<input id="reconfigure-savings" type="number" min="0.1" max="100" step="any" placeholder="Default" /></label>
           <label>Maximum output growth (%)<input id="reconfigure-growth" type="number" min="0" max="1000" step="any" placeholder="Default" /></label>
