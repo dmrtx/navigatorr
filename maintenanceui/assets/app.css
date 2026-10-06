@@ -996,7 +996,20 @@ main {
   max-width: 450px;
   color: var(--forest);
   font-variant-numeric: tabular-nums;
+  flex-wrap: wrap;
 }
+.batch-progress-phase { order: 3; flex-basis: 100%; min-width: 0; overflow-wrap: anywhere; color: var(--muted); line-height: 1.45; }
+.job-row .job-footer:has(.batch-progress-phase) { height: auto; min-height: var(--control-size); align-items: flex-start; }
+.job-footer > .batch-progress:has(.batch-progress-phase) { max-height: none; overflow: visible; row-gap: 0; }
+.batch-progress:has(.batch-progress-phase) .batch-progress-count,
+.batch-progress:has(.batch-progress-phase) .batch-progress-percent { line-height: var(--control-size); }
+.job-row .job-footer:has(.batch-progress-phase) > .job-actions { align-self: flex-start; }
+#backup-progress:not([hidden]) { display: flex; flex-direction: column; gap: 6px; border-left: 3px solid var(--forest); padding: 10px 12px; background: #edf3eb; }
+#backup-progress progress { width: min(100%, 420px); height: 6px; accent-color: var(--forest); }
+.cleanup-file { font-weight: 500; margin: 8px 0 4px; }
+.cleanup-space { color: var(--forest); margin-top: 0; }
+.cleanup-locations { padding-top: 8px; }
+.cleanup-locations summary { cursor: pointer; color: var(--muted); }
 .job-footer > .batch-progress { flex: 0 1 450px; }
 .batch-progress-count { flex-shrink: 0; font-size: 12px; min-width: 0; white-space: nowrap; }
 .preview-note { display: none; }

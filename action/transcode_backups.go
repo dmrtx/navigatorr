@@ -12,14 +12,16 @@ import (
 // Availability means final verification can be retried, not that deletion has
 // already been authorized by a size/mtime-only inventory.
 type TranscodeBackup struct {
-	ActionID         string `json:"action_id"`
-	Status           string `json:"status"`
-	Path             string `json:"path,omitempty"`
-	OriginalPath     string `json:"original_path,omitempty"`
-	Bytes            int64  `json:"bytes"`
-	PartialBytes     int64  `json:"partial_bytes"`
-	CleanupAvailable bool   `json:"cleanup_available"`
-	Reason           string `json:"reason"`
+	ActionID           string `json:"action_id"`
+	Status             string `json:"status"`
+	Path               string `json:"path,omitempty"`
+	OriginalPath       string `json:"original_path,omitempty"`
+	Bytes              int64  `json:"bytes"`
+	PartialBytes       int64  `json:"partial_bytes"`
+	CleanupAvailable   bool   `json:"cleanup_available"`
+	DuplicateAvailable bool   `json:"duplicate_available"`
+	Error              string `json:"error,omitempty"`
+	Reason             string `json:"reason"`
 }
 
 type TranscodeBackupPage struct {
@@ -83,6 +85,10 @@ func (e *Engine) ListTranscodeBackups(ctx context.Context, offset int) (*Transco
 			continue
 		}
 		item := TranscodeBackup{ActionID: inst.ID, Status: inst.Status}
+		item.Error = inst.ErrorJSON
+		if observation, ok := ec.State["cleanup_progress"].(map[string]any); ok && getString(observation, "error") != "" {
+			item.Error = getString(observation, "error")
+		}
 		p, err := loadPromotion(ec)
 		if err != nil {
 			item.Reason = err.Error()
@@ -123,6 +129,9 @@ func (e *Engine) ListTranscodeBackups(ctx context.Context, offset int) (*Transco
 			continue
 		}
 		if item.Reason == "" {
+			if _, err := e.duplicateBackupGuard(&inst, ec); err == nil && e.AllowDestructive() && item.Bytes > 0 {
+				item.DuplicateAvailable = true
+			}
 			if err := e.backupCleanupGuard(&inst); err != nil {
 				item.Reason = err.Error()
 			} else if !e.AllowDestructive() {

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
@@ -69,12 +70,29 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to open original file %s: %v", cleanPath, err)}, nil
 	}
 	h := sha256.New()
-	_, hashErr := io.Copy(h, contextReader{ctx: ctx, reader: f})
+	var lastObservation time.Time
+	observe := promotionHashProgress(func(_ string, read, total int64) error {
+		if read != 0 && read != total && time.Since(lastObservation) < time.Second {
+			return nil
+		}
+		lastObservation = time.Now()
+		ec.State["work_progress"] = map[string]any{"phase": "hashing_source", "bytes_read": read, "total_bytes": total, "updated_at": time.Now().UTC().Format(time.RFC3339Nano)}
+		return e.persistExecutionState(ctx, ec)
+	})
+	if err := observe(cleanPath, 0, fi.Size()); err != nil {
+		_ = f.Close()
+		return StepResult{Status: StepFailed, Error: err.Error()}, nil
+	}
+	_, hashErr := io.Copy(h, &promotionContextReader{ctx: ctx, r: f, path: cleanPath, total: fi.Size(), progress: observe})
 	_ = f.Close()
 	if hashErr != nil {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to compute hash of original file %s: %v", cleanPath, hashErr)}, nil
 	}
 	origSHA := hex.EncodeToString(h.Sum(nil))
+	ec.State["work_progress"] = map[string]any{"phase": "probing_source", "updated_at": time.Now().UTC().Format(time.RFC3339Nano)}
+	if err := e.persistExecutionState(ctx, ec); err != nil {
+		return StepResult{Status: StepFailed, Error: err.Error()}, nil
+	}
 	rep, err := mediainspect.InspectDetailed(ctx, e.deps.Ffprobe, cleanPath)
 	if err != nil {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to probe original media %s: %v", cleanPath, err)}, nil

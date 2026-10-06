@@ -83,6 +83,8 @@ type ActionCompactSummary struct {
 	ValidationDurationMs *int64                 `json:"validation_duration_ms,omitempty"`
 	ReconcileLagMs       *int64                 `json:"reconcile_lag_ms,omitempty"`
 	Worker               map[string]any         `json:"worker,omitempty"`
+	Cleanup              map[string]any         `json:"cleanup,omitempty"`
+	Work                 map[string]any         `json:"work,omitempty"`
 	Reconciliation       map[string]any         `json:"reconciliation,omitempty"`
 	Promotion            map[string]any         `json:"promotion,omitempty"`
 	Batch                *BatchSummary          `json:"batch,omitempty"`
@@ -150,12 +152,19 @@ func toCompactSummary(res *action.ActionResult) ActionCompactSummary {
 		Reconciliation: compactOperationalFields(res, []string{
 			"next_poll_at", "last_worker_poll_at", "worker_completed_at", "reconciled_at",
 		}),
+		Work:      compactOperationalFields(&action.ActionResult{State: actionProgressMap(res.State["work_progress"])}, []string{"phase", "bytes_read", "total_bytes", "updated_at"}),
+		Cleanup:   compactOperationalFields(&action.ActionResult{State: actionProgressMap(res.State["cleanup_progress"])}, []string{"phase", "path", "bytes_read", "total_bytes", "updated_at", "error"}),
 		Promotion: compactPromotion(res),
 		Batch:     compactBatch(res),
 		Benchmark: compactBenchmark(res),
 		CreatedAt: res.CreatedAt,
 		UpdatedAt: res.UpdatedAt,
 	}
+}
+
+func actionProgressMap(value any) map[string]any {
+	progress, _ := value.(map[string]any)
+	return progress
 }
 
 func actionOrigin(state map[string]any) string {
