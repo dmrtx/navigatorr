@@ -2191,7 +2191,7 @@ async function reconfigureBatch(id, candidate = false, savedPlan = null) {
     $("reconfigure-growth").value = plan.settings.max_size_increase_percent ?? "";
     $("reconfigure-settings").textContent = `${plan.settings.preserve_source_bit_depth ? "Preserve source bit depth · " : ""}${plan.settings.promote_candidates ? "Ask for replacement approval after conversion" : "Create candidates; keep originals"}`;
     $("reconfigure-form").hidden = false;
-    $("submit-reconfigure").disabled = !serverReachable;
+    $("submit-reconfigure").disabled = !serverReachable || plan.selected === 0;
   } catch (error) {
     if (auth === state.authRevision && revision === state.reconfigureRevision)
       $("reconfigure-summary").textContent = error.message;
