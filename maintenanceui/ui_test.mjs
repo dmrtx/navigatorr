@@ -1808,3 +1808,11 @@ test("explicit copy removal offers one confirmation and never resumes or verifie
   await h.run('commandRequest("tool",{name:"action_cancel",arguments:{id:"batch"},background:true})');
   assert.equal(calls.filter(([,body])=>body).length,before,'lost response must not resubmit the mutation');
  });
+
+test("cleanup completion uses the confirmed command receipt when browser and server clocks differ", async()=>{
+ const h=harness();
+ h.run('state.backupsVisible=true;state.backupCleaning={id:"copy",auth:state.authRevision,name:"episode.mkv",mode:"discard",started:Date.now(),commandCompleted:true};loadBackups=async()=>{};loadJobs=async()=>{};');
+ await h.run('finishBackupCleanup({status:"failed",cleanup:{phase:"completed",updated_at:"2000-01-01T00:00:00Z"}})');
+ assert.equal(h.run('state.backupCleaning'),null);
+ assert.match(h.elements.get('backup-progress').textContent,/Removed recovery data/);
+});
