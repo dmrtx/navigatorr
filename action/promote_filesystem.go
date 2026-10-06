@@ -176,6 +176,9 @@ func (e *Engine) localPromotionFinalize(ctx context.Context, ec *ExecutionContex
 		if err := ctx.Err(); err != nil {
 			return promoteFailed(err)
 		}
+		if err := e.cleanupProgress(ctx, ec, "removing_recovery", p.BackupPath, 0, p.OriginalBytes); err != nil {
+			return promoteFailed(err)
+		}
 		if err := os.Remove(p.BackupPath); err != nil {
 			return promoteFailed(err)
 		}

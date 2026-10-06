@@ -251,12 +251,12 @@ test("cleanup shows live work and is single-flight; dismissal and expired sessio
     h.run(`reviewAction=async()=>${scenario!=="dismissed"};loadBackups=async()=>{};loadJobs=async()=>{};tool=async()=>remove();`);
     const clean=h.run('cleanBackup(copy)');for(let i=0;i<5;i++) await Promise.resolve();
     if(scenario==="dismissed") {await clean;assert.equal(writes,0);continue;}
-    assert.match(h.elements.get("backup-progress").textContent,/Verifying replacement.*episode.mkv.*elapsed/);
+    assert.match(h.elements.get("backup-progress").children.map(c=>c.textContent).join(" "),/Waiting for server.*episode.mkv.*elapsed/);
     await h.run('cleanBackup(copy)');assert.equal(writes,1);
     if(scenario==="expired") h.run('invalidateAuthentication()');
     pending.resolve({status:"completed"});await clean;
     assert.equal(h.run('state.backupCleaning'),null);
-    if(scenario==="pending") assert.match(h.elements.get("backup-progress").textContent,/completed/);
+    if(scenario==="pending") assert.match(h.elements.get("backup-progress").textContent,/Removed recovery data/);
     else assert.equal(h.elements.get("backup-progress").hidden,true);
   }
 });
@@ -266,7 +266,7 @@ test("lost cleanup responses keep removal disabled until the durable job outcome
   h.context.write=()=>{writes++;throw new Error("Lost response");};
   h.run('reviewAction=async()=>true;loadBackups=async()=>{};loadJobs=async()=>{};tool=async()=>write();api=async()=>({jobs:[{id:"cleanup",status:"running"}]});');
   await assert.rejects(h.run('cleanBackup({action_id:"cleanup",original_path:"/media/a.mkv",cleanup_available:true})'),/Lost response/);
-  assert.equal(h.run('state.backupCleaning.id'),"cleanup");assert.match(h.elements.get("backup-progress").textContent,/Checking cleanup outcome/);
+  assert.equal(h.run('state.backupCleaning.id'),"cleanup");assert.match(h.elements.get("backup-progress").children[0].textContent,/Checking cleanup outcome/);
   await h.run('cleanBackup({action_id:"cleanup"})');assert.equal(writes,1);
   h.run('api=async()=>({jobs:[{id:"cleanup",status:"completed"}]});');await h.run('refreshBackupCleanup()');assert.equal(h.run('state.backupCleaning'),null);
 });
@@ -1702,4 +1702,48 @@ test("reconfiguration is single flight, checks fresh worker readiness and keeps 
   h.run('invalidateAuthentication()');ready.resolve();await next;
   assert.equal(writes.length,2);
   assert.equal(h.run('state.reconfigurePlan'),null);
+});
+
+
+test("overall batch progress includes sample work, conversion and validation while retaining true finished counts", () => {
+ const h=harness();
+ const stages=["preflight","submit_benchmark","wait_benchmark","submit_transcode","wait_transcode","validate_result","accept_result"].map(name=>({name}));
+ h.context.stages=stages;
+ const progress=h.run('batchProgress({status:"waiting_external",batch:{total:2,running:2,completed:0},activities:[{id:"one",file:"one.mkv",current_step:2,stages,worker:{benchmark_phase:"evaluating_metrics",benchmark_progress_details:{completed_units:20,total_units:40}}},{id:"two",file:"two.mkv",current_step:5,stages}]})');
+ assert.equal(progress.children[0].textContent,"0 / 2 processed");
+ assert.equal(progress.children[1].textContent,"~54%");
+ assert.match(progress.children[3].textContent,/Measuring sample quality.*Verify/);
+ const finish=h.run('batchProgress({status:"waiting_external",batch:{total:2,completed:2}})');
+ assert.equal(finish.children[1].textContent,"~99%");assert.match(finish.children[3].textContent,/Finishing/);
+});
+
+test("pending cleanup polls measured bytes without interpreting an old failed checkpoint as its result", async () => {
+ const h=harness();
+ h.run('state.backupsVisible=true;state.backupCleaning={id:"copy",auth:state.authRevision,name:"episode.mkv",started:Date.now()-1000,pendingResponse:true};api=async()=>({jobs:[{id:"copy",status:"failed",cleanup:{phase:"verifying_recovery",bytes_read:500,total_bytes:1000,updated_at:new Date().toISOString()}}]});');
+ await h.run('refreshBackupCleanup()');
+ assert.ok(h.run('state.backupCleaning'));
+ const parts=h.elements.get("backup-progress").children;
+ assert.match(parts[0].textContent,/recovery SHA-256/);assert.equal(parts[2].value,500);assert.match(parts[3].textContent,/50%/);
+ h.run('api=async()=>({jobs:[{id:"copy",status:"failed",cleanup:{phase:"completed",updated_at:"2000-01-01T00:00:00Z"}}]});');
+ await h.run('refreshBackupCleanup()');assert.equal(h.run('state.backupCleaning.progress.phase'),"verifying_recovery");
+});
+
+test("duplicate cleanup reports removal separately from a failed conversion and sends only the duplicate mode", async () => {
+ const h=harness();let args;
+ h.context.write=(_name,value)=>{args=value;return {status:"failed",error:"Old conversion error",cleanup:{phase:"completed"}};};
+ h.run('reviewAction=async()=>true;tool=async(...args)=>write(...args);loadBackups=async()=>{};loadJobs=async()=>{};');
+ await h.run('cleanBackup({action_id:"copy",original_path:"/media/a.mkv",duplicate_available:true,bytes:1000})');
+ assert.equal(args.mode,"discard_duplicate");assert.match(h.elements.get("backup-progress").textContent,/Original preserved; failed job unchanged/);
+});
+
+test("a nested benchmark contributes to its parent workflow once and replacement checks retain their share",()=>{
+ const h=harness();h.context.stages=["preflight","submit_benchmark","wait_benchmark","submit_transcode","wait_transcode","validate_result","accept_result"].map(name=>({name}));
+ const progress=h.run('batchProgress({status:"waiting_external",batch:{total:1,running:1},activities:[{id:"parent",file:"a.mkv",current_step:2,stages},{id:"benchmark",parent_action_id:"parent",file:"a.mkv",current_step:2,stages:stages.slice(0,3),worker:{benchmark_phase:"encoding_samples",progress:50}}]})');
+ assert.equal(progress.children[1].textContent,"~36%");assert.equal(progress.children[3].textContent.split("a.mkv").length,2);
+ const replacing=h.run('batchProgress({status:"waiting_external",replacement_requested:true,batch:{total:2,completed:2,promotion:{eligible:2,promoted:1}}})');assert.equal(replacing.children[1].textContent,"~93%");
+});
+
+test("a lost duplicate-cleanup reply retains the lock while byte observations show ongoing verification",async()=>{
+ const h=harness();h.run('state.backupCleaning={id:"copy",auth:state.authRevision,name:"a.mkv",started:Date.now()-1000};api=async()=>({jobs:[{id:"copy",status:"failed",cleanup:{phase:"verifying_replacement",bytes_read:50,total_bytes:100,updated_at:new Date().toISOString()}}]});');
+ await h.run('refreshBackupCleanup()');assert.ok(h.run('state.backupCleaning'));assert.equal(h.run('state.backupCleaning.progress.bytes_read'),50);
 });
