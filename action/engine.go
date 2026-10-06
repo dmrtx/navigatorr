@@ -24,6 +24,7 @@ type Engine struct {
 	templates      map[string]ActionTemplate
 	reconcilerOnce sync.Once
 	reconcilerDone chan struct{}
+	reconcileWake  chan struct{}
 
 	// promotionCopyBoundaryHook, when set by tests, runs after a private
 	// recovery copy has been flushed and closed and before it is verified or
@@ -41,8 +42,10 @@ func NewEngine(deps EngineDeps) *Engine {
 		deps:           deps,
 		templates:      make(map[string]ActionTemplate),
 		reconcilerDone: make(chan struct{}),
+		reconcileWake:  make(chan struct{}, 1),
 	}
 	e.registerBuiltinTemplates()
+	e.registerMaintenanceCommand()
 	return e
 }
 
@@ -77,6 +80,9 @@ func (e *Engine) ListTemplates() []map[string]string {
 	defer e.mu.RUnlock()
 	res := make([]map[string]string, 0, len(e.templates))
 	for _, t := range e.templates {
+		if t.Name == "maintenance_command" {
+			continue
+		}
 		res = append(res, map[string]string{
 			"name":        t.Name,
 			"description": t.Description,
@@ -92,6 +98,9 @@ func (e *Engine) Catalog() []ActionCatalogEntry {
 
 	entries := make([]ActionCatalogEntry, 0, len(e.templates))
 	for _, t := range e.templates {
+		if t.Name == "maintenance_command" {
+			continue
+		}
 		steps := make([]string, 0, len(t.Steps))
 		for _, s := range t.Steps {
 			steps = append(steps, s.Name)

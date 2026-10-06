@@ -1612,3 +1612,10 @@ pre {
 .candidate-decisions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
 
 #backup-progress.cleanup-stopped { color: var(--color-warning, #8a5b12); }
+
+.button-pending { cursor: progress; opacity: .75; }
+.button-pending::before { content: ""; width: 10px; height: 10px; border: 1px solid currentColor; border-right-color: transparent; border-radius: 50%; display: inline-block; animation: pending-spin .8s linear infinite; }
+@keyframes pending-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .button-pending::before { animation: none; } }
+.batch-attempt-history { grid-column: 1 / -1; font-size: 12px; }
+.batch-attempt-history summary { cursor: pointer; }

@@ -513,6 +513,8 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 		ec.State["paused"] = getBool(ec.Inputs, "paused")
 	}
 
+	stateObject(ec.State, "batch_item_settings")
+	stateObject(ec.State, "batch_item_generations")
 	dryRun := getBool(ec.Inputs, "dry_run")
 	seriesTitle := getString(ec.State, "series_title")
 	isAnime := getBool(ec.State, "is_anime")
@@ -520,6 +522,10 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 	items, err := e.deps.Store.ListTranscodeBatchItems(ec.InstanceID)
 	if err != nil {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to list batch items: %v", err)}, nil
+	}
+
+	if err := e.applyPendingBatchAttempts(ctx, ec, items); err != nil {
+		return StepResult{Status: StepFailed, Error: err.Error()}, nil
 	}
 
 	// In dry run, resolution and auto-selection are complete; no jobs are scheduled.
@@ -690,7 +696,7 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 			}
 		}
 	}
-	if batchCalibrationEnabled(ec.Inputs, ec.State) {
+	if batchNeedsCalibration(ec, items) {
 		if result, done := e.ensureSharedBatchCalibration(ctx, ec, items); !done {
 			return result, nil
 		}
@@ -699,7 +705,7 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 	// Recover existing child actions across all statuses to ensure no duplicate submits
 	for i := range items {
 		it := &items[i]
-		childIdempotencyKey := fmt.Sprintf("batch-%s-%s", ec.InstanceID, it.ItemKey)
+		childIdempotencyKey := batchChildKey(ec, *it)
 
 		if it.ChildActionID == "" {
 			if existingChild, err := e.deps.Store.FindActionByIdempotencyKey("transcode_media", childIdempotencyKey); err == nil && existingChild != nil {
@@ -817,6 +823,10 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 				return StepResult{Status: StepFailed, Error: ctx.Err().Error()}, nil
 			}
 		}
+	}
+
+	if err := e.applyPendingBatchAttempts(ctx, ec, items); err != nil {
+		return StepResult{Status: StepFailed, Error: err.Error()}, nil
 	}
 
 	var workerBusyEncountered bool
@@ -1006,6 +1016,34 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 		return false, err
 	}
 
+	// A reconfigured item owns new child inputs; existing child inputs stay frozen.
+	if settings, ok := stateObject(ec.State, "batch_item_settings")[item.ItemKey].(map[string]any); ok {
+		copy := *ec
+		copy.Inputs = map[string]any{}
+		for key, value := range ec.Inputs {
+			copy.Inputs[key] = value
+		}
+		for key, value := range settings {
+			if value == nil {
+				delete(copy.Inputs, key)
+			} else {
+				copy.Inputs[key] = value
+			}
+		}
+		if profile := getString(settings, "profile"); profile != "" && profile != "same" {
+			copy.State = map[string]any{}
+			for key, value := range ec.State {
+				copy.State[key] = value
+			}
+			delete(copy.State, "batch_auto_profile")
+			copy.Inputs["shared_calibration"] = false
+			delete(copy.Inputs, "profile_config")
+			delete(copy.Inputs, "priority")
+			item.Profile = profile
+		}
+		ec = &copy
+	}
+
 	mediaType := "tv"
 	if isAnime {
 		mediaType = "anime"
@@ -1058,7 +1096,7 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 	if preserve, ok := ec.Inputs["preserve_source_bit_depth"]; ok {
 		childInputs["preserve_source_bit_depth"] = preserve
 	}
-	childIdempotencyKey := fmt.Sprintf("batch-%s-%s", ec.InstanceID, item.ItemKey)
+	childIdempotencyKey := batchChildKey(ec, *item)
 
 	// Stable child action lookup across all statuses to prevent duplicate submits across restarts
 	if item.ChildActionID == "" {
