@@ -76,4 +76,4 @@ Recovery inventory lists owned artifacts currently present on disk, with the las
 
 Cleanup publishes durable phases and byte observations, at most once per second while hashing. Clients poll them while the cleanup HTTP request is still pending, retain the lock on a lost response with ongoing observations, and show the terminal result. The confirmation groups file, removable bytes and collapsed locations; the actual outcome may retain the copy on verification failure.
 
-Queue accounting reads a small SQLite JSON projection rather than decoding entire media reports on each poll. Full action history remains unchanged. Independent queue/detail/worker/cleanup refreshes run together.
+Queue accounting rereads authoritative SQLite rows but memoizes bounded JSON projections. Complete input/output/state strings are compared before reuse, including same-size writes in the same timestamp; status, checkpoints and metadata are always fresh. The memo has a 64 MiB limit and drops removed rows. Full action history remains unchanged. Independent queue/detail/worker/cleanup refreshes run together.
