@@ -105,6 +105,7 @@ func registerRecipeTools(s *server.MCPServer, cfg *config.Config) {
 		mcp.WithDescription("List available transcode recipe profiles without embedding full managed profile bodies. Managed summaries are paginated; use recipe_get for one complete effective profile."),
 		mcp.WithNumber("limit", mcp.Description("Optional managed-profile page size (default 50, max 100)"), mcp.Min(1), mcp.Max(maxRecipeListLimit)),
 		mcp.WithNumber("offset", mcp.Description("Optional zero-based managed-profile offset"), mcp.Min(0)),
+		mcp.WithBoolean("include_selection_details", mcp.Description("Include compact effective encoder, quality, audio, and sample-testing settings for profile selection")),
 	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		mgr := cfg.Transcode.RecipeManager()
 		if mgr == nil {
@@ -163,6 +164,49 @@ func registerRecipeTools(s *server.MCPServer, cfg *config.Config) {
 			"managed_limit":          limit,
 			"static_config_profiles": staticNames,
 			"active_bundle_profiles": bundleNames,
+		}
+		if args["include_selection_details"] == true {
+			// Resolve the effective layer, including managed overrides outside
+			// this page. Selection must never describe the shadowed bundle.
+			managedByName := map[string]recipe.ManagedProfileRecord{}
+			for _, rec := range managed {
+				managedByName[rec.Name] = rec
+			}
+			names := map[string]bool{}
+			for _, name := range append(bundleNames, staticNames...) {
+				names[name] = true
+			}
+			for _, rec := range managed[offset:end] {
+				names[rec.Name] = true
+			}
+			details := map[string]any{}
+			for name := range names {
+				// Reuse the registry read above instead of reading and decoding
+				// the entire registry again for every dropdown option.
+				base := cfg.Transcode.RecipeBaseProfiles(name)
+				profile := base["active_bundle"]
+				source, description := "active_bundle", ""
+				if p, ok := base["static_config"]; ok {
+					profile, source = p, "static_config"
+				}
+				if rec, ok := managedByName[name]; ok {
+					profile, source, description = rec.Profile, "managed", rec.Description
+				}
+				if err := recipe.ValidateProfile(name, profile); err != nil {
+					continue
+				}
+
+				v := profile.Video
+				details[name] = map[string]any{
+					"source": source, "description": description,
+					"profile": map[string]any{
+						"container": profile.Container, "audio": profile.Audio,
+						"video":        map[string]any{"codec": v.Codec, "quality": v.Quality, "average_bitrate_kbps": v.AverageBitrateKbps, "preset": v.Preset, "profile": v.Profile, "pixel_format": v.PixelFormat, "spatial_aq": v.SpatialAQ},
+						"optimization": map[string]any{"enabled": profile.Optimization != nil && profile.Optimization.Enabled},
+					},
+				}
+			}
+			payload["selection_details"] = details
 		}
 		return toolBoundedJSON(payload, MaxActionResponseBytes, nil), nil
 	})

@@ -9,6 +9,7 @@ const state = {
   jobsLoaded: 0,
   recipe: null,
   recipes: [],
+  recipeDetails: {},
   recipeOffset: 0,
   detail: null,
   chunk: 0,
@@ -201,6 +202,7 @@ function invalidateAuthentication() {
   $("backup-list").replaceChildren();
   $("backup-summary").hidden = true;
   $("backup-progress").hidden = true;
+  state.recipeDetails = {};
   state.workerInfo = null;
   state.activitySlotIDs = null;
   state.workerCheckedAt = 0;
@@ -2194,8 +2196,8 @@ async function reconfigureBatch(id, candidate = false, savedPlan = null) {
     if (plan.selected > plan.files.length) $("reconfigure-files").append(node("p",`+${plan.selected-plan.files.length} more files`));
     $("reconfigure-profile").replaceChildren();
     option($("reconfigure-profile"), "", "Choose a profile…");
-    option($("reconfigure-profile"), "same", plan.settings.profile_label);
-    for (const profile of state.recipes) if (profile !== "auto") option($("reconfigure-profile"),profile,profile);
+    option($("reconfigure-profile"), "same", "Keep current settings");
+    for (const profile of state.recipes) if (profile !== "auto") option($("reconfigure-profile"),profile,profileOptionLabel(profile));
     $("reconfigure-profile").value = plan.requires_explicit_profile ? "" : "same";
     $("reconfigure-savings").value = plan.settings.min_savings_percent > 0 ? plan.settings.min_savings_percent : "";
     $("reconfigure-growth").value = plan.settings.max_size_increase_percent ?? "";
@@ -2225,7 +2227,7 @@ function updateBatchSettingsProfile() {
   $("reconfigure-profile-note").textContent = plan.requires_explicit_profile ? "Automatic testing skipped this video. Choose a profile to try again." : "";
   $("reconfigure-profile-note").hidden = !plan.requires_explicit_profile;
   const currentProfiles = plan.settings?.current_profiles || [];
-  $("reconfigure-current-profiles").textContent = currentProfiles.length ? `Saved profile: ${currentProfiles.map(profile=>`${profile.name}${currentProfiles.length > 1 ? ` (${profile.files} files)` : ""}`).join(" · ")}` : "";
+  $("reconfigure-current-profiles").textContent = currentProfiles.length ? `Saved profile: ${currentProfiles.map(profile=>`${profileOptionLabel(profile.name)}${currentProfiles.length > 1 ? ` (${profile.files} files)` : ""}`).join(" · ")}` : "";
   const profile = $("reconfigure-profile").value;
   $("reconfigure-settings").textContent = !profile ? "Choose a profile before starting another attempt." : profile !== "same" ? `Create and validate ${plan.selected === 1 ? "a candidate for this file" : `candidates for ${plan.selected} files`} with this profile. Originals stay in place.` : "Retry with each file’s current settings. Originals stay in place.";
   $("submit-reconfigure").disabled = !serverReachable || state.busyJobs.has(plan.id) || plan.selected === 0 || !$("reconfigure-profile").value;
@@ -2238,11 +2240,26 @@ async function showReconfigureProfile() {
   if (output.hidden) return;
   output.textContent = "Loading profile settings…";
   try {
-    const data = await tool("recipe_get", {name});
+    const data = state.recipeDetails[name] || await tool("recipe_get", {name});
     if (!$("reconfigure-batch").open || revision !== state.reconfigureRevision || auth !== state.authRevision || $("reconfigure-profile").value !== name) return;
+    state.recipeDetails[name] = data;
+    output.textContent = "";
+    output.replaceChildren();
+    const description = data.description || data.record?.description;
+    if (description) output.append(node("p", description, "metadata"));
     const p = data.profile || {}, v = p.video || {};
-    const encoder = v.codec === "hevc_videotoolbox" ? "Hardware HEVC" : v.codec === "libx265" ? "Software HEVC" : v.codec;
-    output.textContent = [encoder,v.average_bitrate_kbps > 0 ? `${v.average_bitrate_kbps} kbps` : v.quality != null ? `${v.codec === "libx265" ? "CRF" : "Quality"} ${v.quality}` : "",v.preset ? `${v.preset} preset` : "",p.audio?.mode ? `Audio: ${p.audio.mode}` : "",p.container?.toUpperCase(),p.optimization?.enabled ? "Tests quality samples before full conversion" : ""].filter(Boolean).join(" · ") || "Profile settings unavailable";
+    const facts = node("dl", "", "profile-facts");
+    const add = (label, value) => { facts.append(node("dt", label), node("dd", value)); };
+    add("Encoder", profileEncoder(p));
+    add("Quality", profileRate(p));
+    add("Process", p.optimization?.enabled ? "Tests quality samples before full conversion" : "Converts full video using this profile");
+    if (v.pixel_format || v.profile) add("Color depth", v.profile === "main10" || /10/.test(v.pixel_format || "") ? "10-bit output" : "8-bit output");
+    if (v.spatial_aq != null) add("Image detail", v.spatial_aq ? "Adaptive allocation across image details" : "Standard allocation");
+    add("Audio", p.audio?.mode === "copy" ? "Keep original audio tracks" : p.audio?.mode === "compact" ? "Compact · Convert lossless tracks to AAC" : p.audio?.mode || "Profile default");
+    add("Output", p.container?.toUpperCase() || "Profile default");
+    output.append(facts, node("p", `Profile ID: ${name}`, "metadata"));
+    if (state.reconfigurePlan?.settings?.preserve_source_bit_depth) output.append(node("p", "This batch preserves the source color depth, overriding the profile depth.", "metadata"));
+
   } catch {
     if (revision === state.reconfigureRevision && auth === state.authRevision && $("reconfigure-profile").value === name) output.textContent = "Could not load the profile details. Try selecting it again.";
   }
@@ -3031,6 +3048,27 @@ async function refreshDetail() {
     }
   }
 }
+function batchFileActivity(item, job) {
+  if (job?.batch?.dry_run) return "";
+  if (item.retry_pending) return "New settings saved · Current attempt finishes before the next attempt starts";
+  if (item.status === "queued" && !item.child_action_id) {
+    if (job?.paused) return "Batch paused · Resume the batch to start this file";
+    if (job?.status === "waiting_decision") return "Waiting for the batch decision before starting this file";
+    if (["failed", "cancelled"].includes(job?.status)) return "Batch stopped · This file has not started";
+    return "Waiting for batch scheduling · Not sent to the worker yet";
+  }
+  const activity = job?.activities?.find(activity => activity.id === item.child_action_id);
+  if (activity?.waiting_condition === "worker_unreachable") return "Worker unreachable · Waiting for connection";
+  const worker = activity?.worker;
+  const phase = worker?.transcode_phase || worker?.benchmark_phase || worker?.phase;
+  if (phase) return workerPhaseLabel(phase) + (worker.progress_is_stale ? " · Last measurement; stale" : "");
+  if (activity?.work?.phase === "hashing_source") return `Verifying source${activity.work.total_bytes > 0 ? ` · ${bytes(activity.work.bytes_read || 0)} / ${bytes(activity.work.total_bytes)}` : ""}`;
+  if (activity?.work?.phase) return workerPhaseLabel(activity.work.phase);
+  if (item.status === "waiting_for_slot") return "Waiting for an available worker slot";
+  if (item.status === "queued" && item.child_action_id) return "File task created · Waiting to start";
+  return "";
+}
+
 async function loadBatchItems(id, revision) {
   const offset = state.batchItemsOffset;
   const response = await api(
@@ -3055,15 +3093,16 @@ async function loadBatchItems(id, revision) {
         button("View file", () => openJob(item.child_action_id), "quiet"),
       );
 
-    if (item.retry_pending) row.append(node("span","New settings saved · current attempt finishes first","muted"));
-    if (item.requested_profile || item.profile) row.append(node("span", `${item.retry_pending ? "Next attempt" : "Profile"}: ${item.requested_profile || item.profile}`, "metadata"));
+    const activity = batchFileActivity(item, state.detailJob);
+    if (activity) row.append(node("span", activity, "batch-file-activity"));
+    if (item.requested_profile || item.profile) row.append(node("span", `${item.retry_pending ? "Next attempt" : "Profile"}: ${profileOptionLabel(item.requested_profile || item.profile)}`, "metadata batch-file-profile"));
     if (item.previous_attempts?.length) {
       const history=node("details","","batch-attempt-history");
       history.append(node("summary",`${item.previous_attempts.length} previous ${item.previous_attempts.length===1 ? "attempt" : "attempts"}`));
       item.previous_attempts.forEach((attempt,index)=>history.append(button(`Attempt ${index+1} · ${names[attempt.status] || attempt.status}`,()=>openJob(attempt.child_action_id),"quiet")));
       row.append(history);
     }
-    for (const reason of [item.error, ...(item.reasons || [])].filter(reason => reason && !/^(explicit profile requested|eligible for transcode)$/i.test(reason)))
+    for (const reason of [item.error, ...(item.reasons || [])].filter(reason => reason && !/^(explicit profile requested|eligible for transcode|New settings requested; previous attempt retained in history)$/i.test(reason)))
       row.append(node("span", shortJobReason(reason), "muted"));
     $("batch-items-list").append(row);
   }
@@ -3241,15 +3280,56 @@ $("close-detail").addEventListener("click", () => $("job-detail").close());
 $("job-detail").addEventListener("close", () => { state.detailRevision++; state.detail=null; writeNavigation(); });
 $("load-detail").addEventListener("click", () => safe(loadDetail));
 
+function profileEncoder(p) {
+  return p?.video?.codec === "hevc_videotoolbox" ? "Hardware HEVC" : p?.video?.codec === "libx265" ? "Software HEVC · CPU" : p?.video?.codec || "Encoder unavailable";
+}
+function profileRate(p) {
+  const v = p?.video || {};
+  if (v.average_bitrate_kbps > 0) return `${v.average_bitrate_kbps} kbps target bitrate`;
+  if (v.quality == null) return "Profile default";
+  if (v.codec === "libx265") return `CRF ${v.quality} · Lower means higher quality${v.preset ? ` · ${v.preset} preset` : ""}`;
+  if (v.codec === "hevc_videotoolbox") return `Quality ${v.quality} · Higher means higher quality`;
+  return `Quality ${v.quality}`;
+}
+function profileOptionLabel(name) {
+  const data = state.recipeDetails[name];
+  if (!data) return name;
+  const labels = {
+    "general-hevc": `General · Quality ${data.profile?.video?.quality ?? "default"}`,
+    "hevc-vt": `General · Quality ${data.profile?.video?.quality ?? "default"}`,
+    "hevc-vt-balanced": "General · Balanced",
+    "hevc-vt-quality": "General · Higher quality",
+    "hevc-vt-space": "General · Smaller files",
+    "anime-hevc": `Anime · Quality ${data.profile?.video?.quality ?? "default"}`,
+    "anime-hevc-balanced": "Anime · Balanced",
+    "anime-hevc-balanced-aq": "Anime · Balanced + adaptive detail",
+    "anime-hevc-quality": "Anime · Higher quality + adaptive detail",
+    "anime-hevc-space": "Anime · Smaller files",
+    "anime-hevc-main10": "Anime · Balanced, 10-bit",
+    "anime-hevc-main10-aq": "Anime · Balanced, 10-bit + adaptive detail",
+    "live-action-hevc": "Live action",
+    "live-action-hevc-vt": "Live action",
+  };
+  const title = data.source === "active_bundle" ? labels[name] || name : name;
+  const p = data.profile || {};
+  const encoder = p.video?.codec === "hevc_videotoolbox" ? "Hardware" : p.video?.codec === "libx265" ? "CPU" : p.video?.codec;
+  return [title, encoder, p.optimization?.enabled ? "Test samples" : "", data.source === "managed" ? "Custom" : ""].filter(Boolean).join(" · ");
+}
+
 async function loadRecipes(initial = false, more = false) {
   if (!more) {
     state.recipeOffset = 0;
     state.recipes = [];
+    state.recipeDetails = {};
   }
+  const auth = state.authRevision;
   const page = await tool("recipe_list", {
     offset: state.recipeOffset,
     limit: 100,
+    include_selection_details: true,
   });
+  if (auth !== state.authRevision) return;
+  Object.assign(state.recipeDetails, page.selection_details || {});
   const names = [
     ...new Set([
       ...(page.active_bundle_profiles || []),
@@ -3263,7 +3343,7 @@ async function loadRecipes(initial = false, more = false) {
   const selected = $("profile").value;
   $("profile").replaceChildren();
   option($("profile"), "auto", "Automatic");
-  state.recipes.forEach((n) => option($("profile"), n));
+  state.recipes.forEach((n) => option($("profile"), n, profileOptionLabel(n)));
   $("profile").value = state.recipes.includes(selected) ? selected : "auto";
   renderRecipeList();
   if (initial) return;
@@ -3383,6 +3463,7 @@ $("delete-recipe").addEventListener("click", () =>
     state.recipe = null;
     state.recipeOffset = 0;
     state.recipes = [];
+    state.recipeDetails = {};
     await loadRecipes();
     if (state.recipes.length) await readRecipe(state.recipes[0]);
     notify(restore ? "Built-in profile restored." : "Custom profile deleted.");
