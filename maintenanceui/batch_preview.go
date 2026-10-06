@@ -182,6 +182,14 @@ func (s *Server) batchPreview(w http.ResponseWriter, r *http.Request) {
 // selection with its admission status. This is a read-only projection, never
 // execution state; even cancelling before inspection must retain the names.
 func (s *Server) previewPendingItems(inst store.ActionInstance, items []store.TranscodeBatchItem) ([]store.TranscodeBatchItem, bool, error) {
+	return s.pendingBatchItems(inst, items, map[string]bool{})
+}
+
+func (s *Server) pendingBatchItems(inst store.ActionInstance, items []store.TranscodeBatchItem, seen map[string]bool) ([]store.TranscodeBatchItem, bool, error) {
+	if seen[inst.ID] || len(seen) >= 32 {
+		return items, false, nil
+	}
+	seen[inst.ID] = true
 	if len(items) != 0 || inst.CurrentStep != 0 || inst.Status == store.ActionStatusCompleted {
 		return items, false, nil
 	}
@@ -200,6 +208,18 @@ func (s *Server) previewPendingItems(inst store.ActionInstance, items []store.Tr
 	source, err := s.engine.Deps().Store.ListTranscodeBatchItems(sourceID)
 	if err != nil {
 		return nil, false, err
+	}
+	if len(source) == 0 {
+		sourceInst, readErr := s.engine.Deps().Store.GetActionInstanceIfExists(sourceID)
+		if readErr != nil {
+			return nil, false, readErr
+		}
+		if sourceInst != nil {
+			source, _, err = s.pendingBatchItems(*sourceInst, source, seen)
+			if err != nil {
+				return nil, false, err
+			}
+		}
 	}
 	inputs := decodeOperationJSON(inst.InputsJSON)
 	selected := map[string]bool{}
