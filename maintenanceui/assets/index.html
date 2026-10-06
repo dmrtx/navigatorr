@@ -885,6 +885,28 @@
         </button>
       </div>
     </dialog>
+    <dialog id="reconfigure-batch" aria-labelledby="reconfigure-title">
+      <div class="dialog-heading">
+        <h2 id="reconfigure-title">Reconfigure batch</h2>
+        <button id="close-reconfigure" type="button" class="icon-button" aria-label="Close reconfiguration">×</button>
+      </div>
+      <p id="reconfigure-summary" class="metadata"></p>
+      <p class="muted">Only failed or cancelled files will be submitted. Completed candidates stay in the previous job. Opening this form starts nothing.</p>
+      <div id="reconfigure-files" class="metadata"></div>
+      <form id="reconfigure-form" hidden>
+        <label>Profile<select id="reconfigure-profile"></select></label>
+        <label id="reconfigure-priority-label" hidden>Quality intent<select id="reconfigure-priority">
+          <option value="balanced">Balanced</option><option value="quality">Quality</option><option value="savings">Savings</option><option value="preserve_quality">Preserve quality</option>
+        </select></label>
+        <div class="form-grid">
+          <label>Minimum savings (%)<input id="reconfigure-savings" type="number" min="0.1" max="100" step="any" placeholder="Default" /></label>
+          <label>Maximum output growth (%)<input id="reconfigure-growth" type="number" min="0" max="1000" step="any" placeholder="Default" /></label>
+        </div>
+        <p id="reconfigure-settings" class="muted"></p>
+        <p class="muted">Blank limits use the defaults. Other original settings are preserved. Changed encoding settings require new samples; earlier estimates may not apply. A new attempt keeps the previous job history.</p>
+        <div class="submit-actions"><button id="submit-reconfigure" type="submit" class="primary">Queue new attempt</button></div>
+      </form>
+    </dialog>
     <dialog id="replacement-choice" aria-labelledby="replacement-choice-title">
       <div class="dialog-heading">
         <h2 id="replacement-choice-title">Replacement method</h2>

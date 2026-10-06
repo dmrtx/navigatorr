@@ -182,10 +182,21 @@ func (s *Server) batchPreview(w http.ResponseWriter, r *http.Request) {
 // selection with its admission status. This is a read-only projection, never
 // execution state; even cancelling before inspection must retain the names.
 func (s *Server) previewPendingItems(inst store.ActionInstance, items []store.TranscodeBatchItem) ([]store.TranscodeBatchItem, bool, error) {
-	if len(items) != 0 || inst.CurrentStep != 0 || inst.Status == store.ActionStatusCompleted || !strings.HasPrefix(inst.IdempotencyKey, previewExecutionPrefix) {
+	if len(items) != 0 || inst.CurrentStep != 0 || inst.Status == store.ActionStatusCompleted {
 		return items, false, nil
 	}
-	sourceID := strings.TrimPrefix(inst.IdempotencyKey, previewExecutionPrefix)
+	sourceID := ""
+	if strings.HasPrefix(inst.IdempotencyKey, previewExecutionPrefix) {
+		sourceID = strings.TrimPrefix(inst.IdempotencyKey, previewExecutionPrefix)
+	} else if strings.HasPrefix(inst.IdempotencyKey, "web-reconfigure:") {
+		value := strings.TrimPrefix(inst.IdempotencyKey, "web-reconfigure:")
+		if index := strings.LastIndex(value, ":"); index > 0 {
+			sourceID = value[:index]
+		}
+	}
+	if sourceID == "" {
+		return items, false, nil
+	}
 	source, err := s.engine.Deps().Store.ListTranscodeBatchItems(sourceID)
 	if err != nil {
 		return nil, false, err

@@ -104,6 +104,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/maintenance/batch-items", s.batchItems)
 	mux.HandleFunc("GET /api/maintenance/batch-preview", s.batchPreview)
 	mux.HandleFunc("POST /api/maintenance/batch-preview", s.batchPreview)
+	mux.HandleFunc("GET /api/maintenance/batch-reconfigure", s.batchReconfigure)
+	mux.HandleFunc("POST /api/maintenance/batch-reconfigure", s.batchReconfigure)
 	mux.HandleFunc("GET /api/maintenance/folder", s.folder)
 	mux.HandleFunc("GET /api/maintenance/workers", s.workers)
 	mux.HandleFunc("GET /api/maintenance/worker-activity", s.workerActivity)
