@@ -1927,10 +1927,10 @@ test("profile details describe the encoder and ignore an obsolete selection",asy
  assert.doesNotMatch(h.elements.get('reconfigure-profile-info').textContent,/Software HEVC/);
  h.run('tool=async()=>({profile:{video:{codec:"hevc_videotoolbox",average_bitrate_kbps:4000},audio:{mode:"copy"},container:"mkv"}})');
  await h.run('showReconfigureProfile()');
- assert.match(h.elements.get('reconfigure-profile-info').textContent,/Hardware HEVC.*4000 kbps.*Audio: copy.*MKV/);
- h.run('tool=async()=>({profile:{video:{codec:"libx265",quality:24,preset:"slow"},optimization:{enabled:true}}})');
+ assert.match(JSON.stringify(h.elements.get('reconfigure-profile-info').children),/Hardware HEVC.*4000 kbps.*Keep original audio tracks.*MKV/);
+ h.run('state.recipeDetails={};tool=async()=>({profile:{video:{codec:"libx265",quality:24,preset:"slow"},optimization:{enabled:true}}})');
  await h.run('showReconfigureProfile()');
- assert.match(h.elements.get('reconfigure-profile-info').textContent,/Tests quality samples before full conversion/);
+ assert.match(JSON.stringify(h.elements.get('reconfigure-profile-info').children),/Tests quality samples before full conversion/);
 });
 
 test("changing only the profile preserves current limits, including mixed per-file settings",async()=>{
@@ -1949,4 +1949,37 @@ test("changing only the profile preserves current limits, including mixed per-fi
  assert.equal(requests[1].preserve_savings,false);
  assert.equal(requests[1].preserve_growth,true);
  assert.equal(requests[1].min_savings_percent,12);
+});
+
+
+test("profile choices describe effective hardware and custom overrides while preserving IDs", async () => {
+  const h = harness();
+  h.run('renderRecipeList=()=>{};tool=async()=>({active_bundle_profiles:["anime-hevc-quality","live-action-hevc"],managed_profiles:[{name:"anime-hevc-quality"}],managed_returned:1,managed_total:1,selection_details:{"anime-hevc-quality":{source:"managed",description:"My CPU preset",profile:{video:{codec:"libx265",quality:25}}},"live-action-hevc":{source:"active_bundle",profile:{video:{codec:"libx265",quality:24},optimization:{enabled:true}}}}})');
+  await h.run('loadRecipes(true)');
+  const options = h.elements.get('profile').children;
+  assert.equal(options[1].value, 'anime-hevc-quality');
+  assert.equal(options[1].textContent, 'anime-hevc-quality · CPU · Custom');
+  assert.equal(options[2].textContent, 'Live action · CPU · Test samples');
+  h.run('state.recipeDetails["anime-hevc-space"]={source:"active_bundle",profile:{video:{codec:"hevc_videotoolbox",quality:55}}}');
+  assert.equal(h.run('profileOptionLabel("anime-hevc-space")'), 'Anime · Smaller files · Hardware');
+});
+
+test("cached selection details show meaningful settings without another profile request", async () => {
+  const h = harness();
+  h.run('$("reconfigure-batch").open=true;$("reconfigure-profile").value="live-action-hevc";state.recipeDetails={"live-action-hevc":{source:"active_bundle",profile:{video:{codec:"libx265",quality:24,preset:"slow",profile:"main"},optimization:{enabled:true}}}};tool=async()=>{throw new Error("extra request")};');
+  await h.run('showReconfigureProfile()');
+  const facts = JSON.stringify(h.elements.get('reconfigure-profile-info').children);
+  assert.match(facts, /Software HEVC.*CPU/);
+  assert.match(facts, /Lower means higher quality.*slow preset/);
+  assert.match(facts, /Tests quality samples before full conversion/);
+  assert.match(facts, /Profile ID: live-action-hevc/);
+});
+
+test("batch file context distinguishes scheduling, paused work and actual worker phases", () => {
+  const h = harness();
+  assert.match(h.run('batchFileActivity({status:"queued"},{status:"running"})'), /Not sent to the worker yet/);
+  assert.match(h.run('batchFileActivity({status:"queued"},{paused:true})'), /Resume the batch/);
+  assert.match(h.run('batchFileActivity({status:"queued",child_action_id:"child"},{})'), /File task created/);
+  assert.equal(h.run('batchFileActivity({status:"running",child_action_id:"child"},{activities:[{id:"child",worker:{benchmark_phase:"evaluating_metrics"}}]})'), 'Measuring sample quality');
+  assert.match(h.run('batchFileActivity({retry_pending:true},{})'), /Current attempt finishes/);
 });

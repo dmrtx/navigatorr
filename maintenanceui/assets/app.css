@@ -1634,3 +1634,12 @@ pre {
 @media (prefers-reduced-motion: reduce) { .button-pending::before { animation: none; } }
 .batch-attempt-history { grid-column: 1 / -1; font-size: 12px; }
 .batch-attempt-history summary { cursor: pointer; }
+
+/* Effective profile settings, separate from selection and file execution. */
+.profile-facts { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 7px 12px; margin: 0; font-size: 12px; }
+.profile-facts dt { color: var(--muted); }
+.profile-facts dd { margin: 0; }
+#reconfigure-profile-info { color: var(--ink); padding: 12px; border: 1px solid var(--line); border-radius: 4px; }
+#reconfigure-profile-info > p { margin: 8px 0 0; }
+.batch-item-row > .batch-file-profile { flex-basis: 100%; }
+.batch-file-activity { flex-basis: 100%; color: var(--forest); font-size: 12px; }
