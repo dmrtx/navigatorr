@@ -396,6 +396,10 @@ func (e *Engine) resume(ctx context.Context, instanceID string, decision string,
 		return nil, fmt.Errorf("action instance not found: %s", instanceID)
 	}
 
+	if err := e.checkReviewedCandidate(ctx, inst, decision); err != nil {
+		return nil, err
+	}
+
 	tmpl, ok := e.GetTemplate(inst.ActionName)
 	if !ok {
 		return nil, fmt.Errorf("unknown action template: %s", inst.ActionName)
