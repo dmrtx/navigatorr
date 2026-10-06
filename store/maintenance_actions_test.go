@@ -45,3 +45,51 @@ func TestMaintenanceSnapshotProjectsWithoutChangingHistory(t *testing.T) {
 		t.Fatal("audit modified")
 	}
 }
+
+func TestMaintenanceMemoTracksSameSizeWritesAndFreshMetadata(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ledger.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	writer, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	inst := ActionInstance{ID: "active", ActionName: "transcode_media", Status: ActionStatusWaitingExternal, StateJSON: `{"progress":12.5}`, OutputsJSON: `{"original_intact":true}`, UpdatedAt: "2026-10-06T12:00:00Z"}
+	if err := writer.CreateActionInstance(inst); err != nil {
+		t.Fatal(err)
+	}
+	first, err := s.ListMaintenanceActionSnapshot()
+	if err != nil || len(first) != 1 {
+		t.Fatalf("%v %v", first, err)
+	}
+	if len(s.maintenanceMemo) != 1 {
+		t.Fatal("projection not memoized")
+	}
+	inst.StateJSON = `{"progress":99.5}` // Identical size and timestamp, another connection.
+	inst.Status = ActionStatusFailed
+	inst.CurrentStep = 4
+	inst.ErrorJSON = `{"error":"fresh failure"}`
+	if err := writer.UpdateActionInstance(inst); err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.ListMaintenanceActionSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second[0].StateJSON != `{"progress":99.5}` || second[0].Status != ActionStatusFailed || second[0].CurrentStep != 4 || second[0].ErrorJSON != inst.ErrorJSON {
+		t.Fatalf("stale checkpoint: %+v", second[0])
+	}
+	if first[0].StateJSON != `{"progress":12.5}` {
+		t.Fatal("previous snapshot mutated")
+	}
+	if _, err := writer.db.Exec("DELETE FROM action_instances WHERE id=?", inst.ID); err != nil {
+		t.Fatal(err)
+	}
+	if rows, err := s.ListMaintenanceActionSnapshot(); err != nil || len(rows) != 0 || len(s.maintenanceMemo) != 0 {
+		t.Fatal("removed row retained", rows, err)
+	}
+}

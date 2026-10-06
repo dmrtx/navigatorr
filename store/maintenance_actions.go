@@ -1,34 +1,73 @@
 package store
 
-import "fmt"
+import "encoding/json"
 
-// Project only the ledger fields needed for grouping and accounting. JSON is
-// filtered in SQLite before allocating/decoding large media and audit reports.
-// Original action payloads and the full-history APIs remain untouched.
-func maintenanceProjection(column, keys string) string {
-	return fmt.Sprintf(`(SELECT COALESCE('{' || group_concat(json_quote(key) || ':' ||
-		CASE WHEN type='object' AND key='original' THEN json_object('size_bytes',json_extract(value,'$.size_bytes'),'duration_sec',json_extract(value,'$.duration_sec'))
-		WHEN type='object' AND key='result' THEN json_object('size_bytes',json_extract(value,'$.size_bytes'))
-		WHEN type='object' AND key='promotion' THEN json_remove(value,'$.quality','$.languages','$.commands')
-		WHEN type='object' AND key='benchmark_decision' THEN json_object('winner',json_object('estimated_bytes',json_extract(value,'$.winner.estimated_bytes')))
-		ELSE CASE type WHEN 'object' THEN value WHEN 'array' THEN value
-		WHEN 'true' THEN 'true' WHEN 'false' THEN 'false' WHEN 'null' THEN 'null'
-		ELSE json_quote(value) END END) || '}', '{}')
-		FROM json_each(CASE WHEN json_valid(%s) THEN %s ELSE '{}' END)
-		WHERE key IN (%s))`, column, column, keys)
+// Memoize only JSON projections, never status/checkpoints or the ledger itself.
+// Every snapshot rereads authoritative rows and compares the complete source
+// JSON, so same-second and same-size writes also invalidate an entry.
+const maintenanceMemoLimit = 64 * 1024 * 1024
+
+type maintenanceMemo struct {
+	source, projected [3]string
+}
+
+func (m maintenanceMemo) bytes() int {
+	n := 0
+	for i := range m.source {
+		n += len(m.source[i]) + len(m.projected[i])
+	}
+	return n
+}
+
+var maintenanceInputKeys = []string{"path", "parent_action_id", "transcode_action_id", "library_context", "service", "series_id", "movie_id", "media_id", "paths", "episode_file_ids", "dry_run", "promote_candidates"}
+var maintenanceOutputKeys = []string{"resolved_path", "original_sha256", "original", "result", "candidate_size_bytes", "promotion", "recovery_retained", "original_integrity", "promoted", "original_intact", "benchmark_decision", "expected_savings_percent", "transcode_phase", "progress_is_stale", "progress", "speed", "last_progress_at", "counts", "batch_promotion", "benchmark_comparison_available", "job_id", "transcode_job_id", "paused", "skip_transcode"}
+
+func maintenanceJSON(raw string, keys []string) string {
+	var source map[string]json.RawMessage
+	if json.Unmarshal([]byte(raw), &source) != nil {
+		return "{}"
+	}
+	result := make(map[string]json.RawMessage, len(keys))
+	for _, key := range keys {
+		value, ok := source[key]
+		if !ok {
+			continue
+		}
+		var nested map[string]json.RawMessage
+		if json.Unmarshal(value, &nested) == nil && nested != nil {
+			switch key {
+			case "original":
+				value = json.RawMessage(maintenanceJSON(string(value), []string{"size_bytes", "duration_sec"}))
+			case "result":
+				value = json.RawMessage(maintenanceJSON(string(value), []string{"size_bytes"}))
+			case "promotion":
+				delete(nested, "quality")
+				delete(nested, "languages")
+				delete(nested, "commands")
+				value, _ = json.Marshal(nested)
+			case "benchmark_decision":
+				if winner, exists := nested["winner"]; exists {
+					nested = map[string]json.RawMessage{"winner": json.RawMessage(maintenanceJSON(string(winner), []string{"estimated_bytes"}))}
+				} else {
+					nested = map[string]json.RawMessage{}
+				}
+				value, _ = json.Marshal(nested)
+			}
+		}
+		result[key] = value
+	}
+	data, _ := json.Marshal(result)
+	return string(data)
 }
 
 // ListMaintenanceActionSnapshot reads the shared workflow ledger consistently.
-// Filtering and accounting must precede UI pagination, and offset scans ordered
-// by updated_at could otherwise miss or duplicate actions while reconciliation
-// updates them. No separate browser queue or savings ledger is maintained.
+// Filtering and accounting precede UI pagination. Full action history remains
+// unchanged, and all metadata is fresh even when a payload projection is reused.
 func (s *Store) ListMaintenanceActionSnapshot() ([]ActionInstance, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	inputs := maintenanceProjection("inputs_json", `'path','parent_action_id','transcode_action_id','library_context','service','series_id','movie_id','media_id','paths','episode_file_ids','dry_run','promote_candidates'`)
-	keys := `'resolved_path','original_sha256','original','result','candidate_size_bytes','promotion','recovery_retained','original_integrity','promoted','original_intact','benchmark_decision','expected_savings_percent','transcode_phase','progress_is_stale','progress','speed','last_progress_at','counts','batch_promotion','benchmark_comparison_available','job_id','transcode_job_id','paused','skip_transcode'`
-	rows, err := s.db.Query(`SELECT id, action_name, status, current_step, ` +
-		inputs + `, ` + maintenanceProjection("outputs_json", keys) + `, ` + maintenanceProjection("state_json", keys) + `, waiting_reason, waiting_condition,
+	rows, err := s.db.Query(`SELECT id, action_name, status, current_step,
+		inputs_json, outputs_json, state_json, waiting_reason, waiting_condition,
 		waiting_options_json, error_json, idempotency_key, created_at, updated_at
 		FROM action_instances WHERE action_name IN
 		('transcode_media','transcode_batch','benchmark_transcode','promote_transcode_candidate')
@@ -37,6 +76,11 @@ func (s *Store) ListMaintenanceActionSnapshot() ([]ActionInstance, error) {
 		return nil, err
 	}
 	defer rows.Close()
+	if s.maintenanceMemo == nil {
+		s.maintenanceMemo = map[string]maintenanceMemo{}
+	}
+	next := make(map[string]maintenanceMemo)
+	nextBytes := 0
 	var actions []ActionInstance
 	for rows.Next() {
 		var inst ActionInstance
@@ -46,7 +90,22 @@ func (s *Store) ListMaintenanceActionSnapshot() ([]ActionInstance, error) {
 			&inst.IdempotencyKey, &inst.CreatedAt, &inst.UpdatedAt); err != nil {
 			return nil, err
 		}
+		source := [3]string{inst.InputsJSON, inst.OutputsJSON, inst.StateJSON}
+		memo, ok := s.maintenanceMemo[inst.ID]
+		if !ok || memo.source != source {
+			memo = maintenanceMemo{source: source, projected: [3]string{maintenanceJSON(source[0], maintenanceInputKeys), maintenanceJSON(source[1], maintenanceOutputKeys), maintenanceJSON(source[2], maintenanceOutputKeys)}}
+		}
+		if size := memo.bytes(); nextBytes+size <= maintenanceMemoLimit {
+			next[inst.ID] = memo
+			nextBytes += size
+		}
+		inst.InputsJSON, inst.OutputsJSON, inst.StateJSON = memo.projected[0], memo.projected[1], memo.projected[2]
 		actions = append(actions, inst)
 	}
-	return actions, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Drop removed actions and enforce a bounded memory budget every snapshot.
+	s.maintenanceMemo = next
+	return actions, nil
 }
