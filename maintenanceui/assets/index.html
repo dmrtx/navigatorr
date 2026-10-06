@@ -351,6 +351,7 @@
               <label class="check"
                 ><input id="custom" type="checkbox" />Customize</label
               >
+              <p id="profile-mode-note" class="muted"></p>
               <div id="custom-fields" hidden>
                 <div class="field-grid">
                   <label
@@ -528,9 +529,9 @@
                 </p>
               </div>
               <div class="submit-actions">
-                <button id="preview" type="button">Preview batch</button
-                ><button id="benchmark" type="button">Benchmark</button
-                ><button class="primary" id="enqueue">Queue transcode</button>
+                <button id="preview" type="button">Preview selection</button
+                ><button id="benchmark" type="button">Test samples</button
+                ><button class="primary" id="enqueue">Create candidate</button>
               </div>
               <p id="worker-submit-status" class="metadata" role="status">Checking video worker…</p>
               <p id="job-feedback" role="status"></p>
@@ -887,25 +888,25 @@
     </dialog>
     <dialog id="reconfigure-batch" aria-labelledby="reconfigure-title">
       <div class="dialog-heading">
-        <h2 id="reconfigure-title">Reconfigure batch</h2>
+        <h2 id="reconfigure-title">Change settings</h2>
         <button id="close-reconfigure" type="button" class="icon-button" aria-label="Close reconfiguration">×</button>
       </div>
       <p id="reconfigure-summary" class="metadata"></p>
-      <p id="reconfigure-note" class="muted">Only failed or cancelled files will be submitted. Completed candidates stay in the previous job. Opening this form starts nothing.</p>
-      <div id="reconfigure-files" class="metadata"></div>
+      <p id="reconfigure-note" class="muted">Same task · Originals kept · Previous attempts saved</p>
+      <details id="reconfigure-selection" class="reconfigure-selection"><summary>Selected files</summary><div id="reconfigure-files" class="metadata"></div></details>
       <form id="reconfigure-form" hidden>
-        <label>Apply to<select id="reconfigure-scope"></select></label>
-        <label>Profile<select id="reconfigure-profile"></select></label>
+        <label id="reconfigure-scope-label">Apply to<select id="reconfigure-scope"></select></label>
+        <label>Profile<select id="reconfigure-profile" required aria-describedby="reconfigure-profile-note"></select></label>
+        <p id="reconfigure-profile-note" class="profile-guidance" hidden></p>
         <label id="reconfigure-priority-label" hidden>Quality intent<select id="reconfigure-priority">
           <option value="balanced">Balanced</option><option value="quality">Quality</option><option value="savings">Savings</option><option value="preserve_quality">Preserve quality</option>
         </select></label>
-        <div class="form-grid">
+        <details class="reconfigure-limits"><summary>Savings and size limits</summary><div class="form-grid">
           <label>Minimum savings (%)<input id="reconfigure-savings" type="number" min="0.1" max="100" step="any" placeholder="Default" /></label>
           <label>Maximum output growth (%)<input id="reconfigure-growth" type="number" min="0" max="1000" step="any" placeholder="Default" /></label>
-        </div>
+        </div><p class="muted">Current limits stay unless edited. Blank edited limits use the defaults.</p></details>
         <p id="reconfigure-settings" class="muted"></p>
-        <p class="muted">Blank limits use the defaults. Other original settings are preserved. Changed encoding settings require new samples; earlier estimates may not apply. A new attempt keeps the previous job history.</p>
-        <div class="submit-actions"><button id="submit-reconfigure" type="submit" class="primary">Queue new attempt</button></div>
+        <div class="submit-actions"><button id="dismiss-reconfigure" type="button">Back</button><button id="submit-reconfigure" type="submit" class="primary">Apply settings</button></div>
       </form>
     </dialog>
     <dialog id="replacement-choice" aria-labelledby="replacement-choice-title">
