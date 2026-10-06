@@ -2227,7 +2227,7 @@ function updateBatchSettingsProfile() {
   const currentProfiles = plan.settings?.current_profiles || [];
   $("reconfigure-current-profiles").textContent = currentProfiles.length ? `Saved profile: ${currentProfiles.map(profile=>`${profile.name}${currentProfiles.length > 1 ? ` (${profile.files} files)` : ""}`).join(" · ")}` : "";
   const profile = $("reconfigure-profile").value;
-  $("reconfigure-settings").textContent = !profile ? "Choose a profile before starting another attempt." : profile !== "same" ? `Encode ${plan.selected === 1 ? "this file" : `${plan.selected} files`} with this profile, then validate the candidate. No automatic sample search. Originals stay in place.` : "Retry with each file’s current settings. Originals stay in place.";
+  $("reconfigure-settings").textContent = !profile ? "Choose a profile before starting another attempt." : profile !== "same" ? `Create and validate ${plan.selected === 1 ? "a candidate for this file" : `candidates for ${plan.selected} files`} with this profile. Originals stay in place.` : "Retry with each file’s current settings. Originals stay in place.";
   $("submit-reconfigure").disabled = !serverReachable || state.busyJobs.has(plan.id) || plan.selected === 0 || !$("reconfigure-profile").value;
   if (!state.busyJobs.has(plan.id)) $("submit-reconfigure").textContent = plan.selected === 1 ? "Create new candidate" : plan.selected > 1 ? `Apply to ${plan.selected} files` : "Apply settings";
 }
@@ -2242,7 +2242,7 @@ async function showReconfigureProfile() {
     if (!$("reconfigure-batch").open || revision !== state.reconfigureRevision || auth !== state.authRevision || $("reconfigure-profile").value !== name) return;
     const p = data.profile || {}, v = p.video || {};
     const encoder = v.codec === "hevc_videotoolbox" ? "Hardware HEVC" : v.codec === "libx265" ? "Software HEVC" : v.codec;
-    output.textContent = [encoder,v.average_bitrate_kbps > 0 ? `${v.average_bitrate_kbps} kbps` : v.quality != null ? `${v.codec === "libx265" ? "CRF" : "Quality"} ${v.quality}` : "",v.preset ? `${v.preset} preset` : "",p.audio?.mode ? `Audio: ${p.audio.mode}` : "",p.container?.toUpperCase()].filter(Boolean).join(" · ") || "Profile settings unavailable";
+    output.textContent = [encoder,v.average_bitrate_kbps > 0 ? `${v.average_bitrate_kbps} kbps` : v.quality != null ? `${v.codec === "libx265" ? "CRF" : "Quality"} ${v.quality}` : "",v.preset ? `${v.preset} preset` : "",p.audio?.mode ? `Audio: ${p.audio.mode}` : "",p.container?.toUpperCase(),p.optimization?.enabled ? "Tests quality samples before full conversion" : ""].filter(Boolean).join(" · ") || "Profile settings unavailable";
   } catch {
     if (revision === state.reconfigureRevision && auth === state.authRevision && $("reconfigure-profile").value === name) output.textContent = "Could not load the profile details. Try selecting it again.";
   }

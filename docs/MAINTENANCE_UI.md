@@ -97,3 +97,5 @@ Settings review reads the current per-file limit overrides. Uniform selections d
 
 
 Settings submission uses only fields accepted by the batch-settings API; the obsolete quality-intent field is absent. Review shows the saved profile distribution and the selected profile’s encoder, quality/bitrate, preset, audio mode and container. Per-file details show the requested profile, including settings waiting for an active attempt to finish. A validation decision shows its actual stop reason instead of a worker progress bar; batch pauses and replacement approval are distinct. Command receipts distinguish queued requests from commands currently applying, without assuming a pending command is waiting for a media step.
+
+Workflow filters use Finished for all terminal outcomes; Failed includes failed batch items even when their coordinator completed, and excludes deliberate candidate rejection. Batch savings exclude children explicitly recorded as previous attempts, including legacy child keys. Profile review identifies optimization-enabled profiles that test quality samples before full conversion.
