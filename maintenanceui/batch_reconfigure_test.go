@@ -164,3 +164,32 @@ func TestReconfigureAutoClearsCustomProfile(t *testing.T) {
 		t.Fatal(inputs)
 	}
 }
+
+func TestRepeatedCancelledAdmissionsKeepFrozenSelection(t *testing.T) {
+	s, h := testUI(t)
+	seedFailedBatch(t, s, true)
+	source := "failed-batch"
+	for i := 0; i < 3; i++ {
+		w := request(h, "POST", "/api/maintenance/batch-reconfigure", `{"id":"`+source+`","profile":"same","min_savings_percent":15,"key":"repeat"}`, true)
+		var receipt map[string]string
+		json.Unmarshal(w.Body.Bytes(), &receipt)
+		if w.Code != 202 {
+			t.Fatal(i, w.Code, w.Body.String())
+		}
+		inst, _ := s.engine.Deps().Store.GetActionInstance(receipt["id"])
+		inst.Status = store.ActionStatusCancelled
+		if err := s.engine.Deps().Store.UpdateActionInstance(*inst); err != nil {
+			t.Fatal(err)
+		}
+		w = request(h, "GET", "/api/maintenance/batch-items?id="+inst.ID, "", true)
+		var files struct {
+			Total int
+			Items []batchItemView
+		}
+		json.Unmarshal(w.Body.Bytes(), &files)
+		if files.Total != 2 || files.Items[0].Status != "cancelled" {
+			t.Fatal(i, "lost uninspected cancelled files", w.Body.String())
+		}
+		source = inst.ID
+	}
+}
