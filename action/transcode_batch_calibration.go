@@ -420,6 +420,15 @@ func (e *Engine) rejectCalibratedBatchDecisions(ctx context.Context, items []sto
 		if item.Status != "waiting_decision" || item.ChildActionID == "" {
 			continue
 		}
+		child, err := e.deps.Store.GetActionInstance(item.ChildActionID)
+		if err != nil {
+			return err
+		}
+		childInputs := map[string]any{}
+		_ = json.Unmarshal([]byte(child.InputsJSON), &childInputs)
+		if getString(childInputs, "batch_calibration_digest") == "" {
+			continue
+		}
 		result, err := e.Resume(ctx, item.ChildActionID, "reject", nil)
 		if err != nil {
 			return fmt.Errorf("rejecting calibrated candidate %s: %w", item.ItemKey, err)

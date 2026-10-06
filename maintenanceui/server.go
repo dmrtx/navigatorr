@@ -97,6 +97,9 @@ func (s *Server) Handler() http.Handler {
 		http.SetCookie(w, &http.Cookie{Name: "navigatorr_session", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode})
 		writeJSON(w, 200, map[string]bool{"ok": true})
 	})
+	mux.HandleFunc("GET /api/maintenance/commands", s.commandStatus)
+	mux.HandleFunc("GET /api/maintenance/batch-settings", s.batchSettings)
+	mux.HandleFunc("POST /api/maintenance/batch-settings", s.batchSettings)
 	mux.HandleFunc("GET /api/maintenance/bootstrap", s.bootstrap)
 	mux.HandleFunc("GET /api/maintenance/library", s.library)
 	mux.HandleFunc("GET /api/maintenance/operations", s.operations)
@@ -265,8 +268,10 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) tool(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Name      string         `json:"name"`
-		Arguments map[string]any `json:"arguments"`
+		Name       string         `json:"name"`
+		Background bool           `json:"background"`
+		Key        string         `json:"key"`
+		Arguments  map[string]any `json:"arguments"`
 	}
 	if err := decode(w, r, &body); err != nil {
 		fail(w, 400, "invalid tool request: "+err.Error())
@@ -310,7 +315,7 @@ func (s *Server) tool(w http.ResponseWriter, r *http.Request) {
 			}
 			key = hex.EncodeToString(b)
 		}
-		if action.RequiresWorker(name) {
+		if action.RequiresWorker(name) && !body.Background {
 			if err := s.engine.CheckWorkerAdmission(r.Context()); err != nil {
 				fail(w, http.StatusConflict, err.Error())
 				return
@@ -329,6 +334,30 @@ func (s *Server) tool(w http.ResponseWriter, r *http.Request) {
 		inst, err := s.engine.Deps().Store.GetActionInstance(id)
 		if err != nil || inst == nil || !allowedActions[inst.ActionName] {
 			fail(w, 403, "action is not available on the maintenance surface")
+			return
+		}
+	}
+	if body.Background {
+		kind := map[string]string{"action_resume": "resume", "action_retry": "retry", "action_cancel": "cancel"}[body.Name]
+		if body.Name == "transcode_backups" {
+			mode, _ := body.Arguments["mode"].(string)
+			if mode == "clean" || mode == "discard_duplicate" || mode == "discard" {
+				kind = mode
+				body.Arguments["id"] = body.Arguments["action_id"]
+			}
+		}
+		if kind != "" {
+			if body.Arguments["inputs"] != nil {
+				fail(w, 400, "command inputs cannot be changed")
+				return
+			}
+			inputs := map[string]any{"kind": kind}
+			for _, key := range []string{"id", "decision", "reason"} {
+				if value, ok := body.Arguments[key]; ok {
+					inputs[key] = value
+				}
+			}
+			s.admitCommand(w, r, inputs, body.Key)
 			return
 		}
 	}

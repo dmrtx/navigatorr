@@ -12,7 +12,7 @@ const markup = await readFile(
   "utf8",
 );
 class Element {
-  classList = { toggle() {} };
+  classList = { toggle() {}, add() {}, remove() {} };
   children = [];
   listeners = new Map();
   dataset = {};
@@ -27,6 +27,7 @@ class Element {
     this.listeners.set(name, fn);
   }
   setAttribute() {}
+  removeAttribute() {}
   append(...children) {
     this.children.push(...children);
   }
@@ -368,16 +369,13 @@ test("stale or disconnected workers do not display a live progress meter or old 
   }
 });
 
-test("new submissions require a fresh ready worker and do not reach submission when offline", async () => {
+test("new submissions avoid a duplicate browser worker probe and rely on durable server admission", async () => {
   const h=harness(); let builds=0, checks=0;
   h.context.check=()=>checks++;
   h.context.build=()=>builds++;
-  h.run('controls=()=>{}; refreshWorkers=async()=>{check();state.workerInfo={ready:false};}; buildAndSubmitJob=async()=>build(); state.workerInfo={ready:true};');
-  await assert.rejects(h.run('submitJob()'),/No job was submitted/);
-  assert.equal(builds,0); assert.equal(checks,1);
-  h.run('refreshWorkers=async()=>{check();state.workerInfo={ready:true};};');
+  h.run('controls=()=>{}; refreshWorkers=async()=>{check();}; buildAndSubmitJob=async()=>build();');
   await h.run('submitJob()');
-  assert.equal(builds,1); assert.equal(checks,2);
+  assert.equal(builds,1); assert.equal(checks,0);
 });
 
 test("folder sizes distinguish empty, partial and unavailable measurements; late results cannot alter another folder", async () => {
@@ -1684,27 +1682,23 @@ test("reconfiguration loads saved settings without sending work and ignores a di
   assert.equal(h.run('state.reconfigurePlan'),null);
 });
 
-test("reconfiguration is single flight, checks fresh worker readiness and keeps a receipt for lost responses",async()=>{
+test("reconfiguration keeps the same batch and a stable receipt across lost responses without an extra worker probe",async()=>{
   const h=harness(),writes=[],saved=new Map();
   h.context.sessionStorage={getItem:k=>saved.get(k)||null,setItem:(k,v)=>saved.set(k,v),removeItem:k=>saved.delete(k)};
   h.context.record=(...args)=>writes.push(args);
-  h.run('state.reconfigurePlan={id:"b"};state.reconfigureRevision=1;$("reconfigure-batch").open=true;$("reconfigure-profile").value="same";$("reconfigure-priority").value="balanced";$("reconfigure-savings").value="15";$("reconfigure-growth").value="0";submissionID=()=>"attempt-key";setConnection=()=>{};loadJobs=async()=>{};openJob=async()=>{};notify=()=>{};refreshWorkers=async()=>{state.workerInfo={ready:false}};api=async(path,body)=>{record(path,body);throw new Error("Lost reply")};');
-  await assert.rejects(h.run('submitReconfiguredBatch()'),/offline/);
-  assert.equal(writes.length,0);
-  h.run('refreshWorkers=async()=>{state.workerInfo={ready:true}}');
+  h.run('state.reconfigurePlan={id:"b",scope:"all",selection_version:"v"};state.reconfigureRevision=1;$("reconfigure-batch").open=true;$("reconfigure-profile").value="same";$("reconfigure-priority").value="balanced";$("reconfigure-savings").value="15";$("reconfigure-growth").value="0";submissionID=()=>"attempt-key";setConnection=()=>{};loadJobs=async()=>{};openJob=async()=>{};notify=()=>{};refreshWorkers=async()=>{throw new Error("extra worker probe")};api=async(path,body)=>{record(path,body);throw new Error("Lost reply")};');
   await assert.rejects(h.run('submitReconfiguredBatch()'),/Lost reply/);
   await assert.rejects(h.run('submitReconfiguredBatch()'),/Lost reply/);
   assert.equal(writes.length,2);assert.equal(writes[0][1].key,writes[1][1].key);
-  assert.equal(writes[0][1].min_savings_percent,15);
-  const ready=deferred();h.context.ready=ready.promise;
-  h.run('refreshWorkers=async()=>ready');
+  assert.equal(writes[0][0],'batch-settings'); assert.equal(writes[0][1].scope,'all');
+  assert.equal(writes[0][1].id,'b'); assert.equal(writes[0][1].min_savings_percent,15);
+  const pending=deferred();h.context.pending=pending.promise;
+  h.run('api=async()=>pending');
   const next=h.run('submitReconfiguredBatch()');
   await h.run('submitReconfiguredBatch()');
-  h.run('invalidateAuthentication()');ready.resolve();await next;
-  assert.equal(writes.length,2);
+  h.run('invalidateAuthentication()');pending.resolve({id:"b"});await next;
   assert.equal(h.run('state.reconfigurePlan'),null);
 });
-
 
 test("overall batch progress includes sample work, conversion and validation while retaining true finished counts", () => {
  const h=harness();
@@ -1756,7 +1750,7 @@ test("candidate review offers rejection, later and settings for exactly the wait
   h.context.child={id:'child',action_name:'transcode_media',status:'waiting_decision',source_path:'/media/episode.mkv',waiting_reason:'Candidate file size (2000000000 bytes) exceeds original (1000000000 bytes) by 100.0%, which is greater than max_size_increase_percent (0.0%)'};
   h.context.plan={id:'batch',candidate_id:'child',decision_version:'reviewed',title:'Episode 1',selected:1,kept:7,files:['Episode 1'],settings:{profile_label:'Original profile',min_savings_percent:15}};
   h.context.record=(...args)=>writes.push(args);
-  h.run('api=async(path,body)=>body?(record(path,body),{}):path.includes("batch-reconfigure")?plan:{jobs:[path.includes("id=child")?child:parent]};loadJobs=async()=>{};notify=()=>{};');
+  h.run('api=async(path,body)=>body?(record(path,body),{}):path.includes("batch-reconfigure") || path.includes("batch-settings") ? {...plan,scope:"candidate"}:{jobs:[path.includes("id=child")?child:parent]};commandRequest=async(path,body)=>api(path,body);loadJobs=async()=>{};notify=()=>{};');
   const review=h.run('reviewJobDecision("batch","accept_loss")');
   for(let i=0;i<12;i++) await Promise.resolve();
   const content=h.elements.get('action-review-content').children;
@@ -1776,7 +1770,7 @@ test("candidate review offers rejection, later and settings for exactly the wait
   } else assert.equal(writes.length,0);
   if(chosen==='reconfigure') {
    assert.equal(h.elements.get('reconfigure-batch').open,true);
-   assert.equal(h.elements.get('submit-reconfigure').textContent,'Reject & queue new attempt');
+   assert.equal(h.elements.get('submit-reconfigure').textContent,'Apply to this batch');
    assert.equal(h.run('state.reconfigurePlan.candidate_id'),'child');
   }
  }
@@ -1796,4 +1790,29 @@ test("explicit copy removal offers one confirmation and never resumes or verifie
  assert.equal(writes.length,1);assert.equal(writes[0][1].mode,'discard');
  assert.match(h.elements.get('backup-progress').textContent,/by your choice/);
  assert.doesNotMatch(h.elements.get('backup-progress').textContent,/Replacement verified/);
+});
+
+ test("a durable command exposes pending work, polls its receipt and preserves it on connection loss",async()=>{
+  const h=harness(),saved=new Map(),calls=[];
+  h.context.sessionStorage={getItem:k=>saved.get(k)||null,setItem:(k,v)=>saved.set(k,v),removeItem:k=>saved.delete(k)};
+  h.context.record=(...args)=>calls.push(args);
+  h.run('submissionID=()=>"receipt";notify=()=>{};api=async(path,body)=>{record(path,body);return body ? {command_id:"cmd",id:"batch"} : {status:"completed",id:"batch"};}');
+  const result=await h.run('commandRequest("tool",{name:"action_cancel",arguments:{id:"batch"},background:true})');
+  assert.equal(result.id,'batch'); assert.equal(calls[0][1].key,'receipt'); assert.equal(calls[1][0],'commands?id=cmd');
+  assert.equal(saved.get('navigatorr_commands'),'{}');
+  h.run('api=async(path,body)=>{record(path,body);if(body)return {command_id:"lost",id:"batch"};throw new Error("connection lost")};');
+  await assert.rejects(h.run('commandRequest("tool",{name:"action_cancel",arguments:{id:"batch"},background:true})'),/connection lost/);
+  assert.match(saved.get('navigatorr_commands'),/lost/);
+  const before=calls.filter(([,body])=>body).length;
+  h.run('api=async(path,body)=>{record(path,body);return {status:"completed",id:"batch"}}');
+  await h.run('commandRequest("tool",{name:"action_cancel",arguments:{id:"batch"},background:true})');
+  assert.equal(calls.filter(([,body])=>body).length,before,'lost response must not resubmit the mutation');
+ });
+
+test("cleanup completion uses the confirmed command receipt when browser and server clocks differ", async()=>{
+ const h=harness();
+ h.run('state.backupsVisible=true;state.backupCleaning={id:"copy",auth:state.authRevision,name:"episode.mkv",mode:"discard",started:Date.now(),commandCompleted:true};loadBackups=async()=>{};loadJobs=async()=>{};');
+ await h.run('finishBackupCleanup({status:"failed",cleanup:{phase:"completed",updated_at:"2000-01-01T00:00:00Z"}})');
+ assert.equal(h.run('state.backupCleaning'),null);
+ assert.match(h.elements.get('backup-progress').textContent,/Removed recovery data/);
 });
