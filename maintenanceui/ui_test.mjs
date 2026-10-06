@@ -1566,12 +1566,12 @@ test("batch result badges use the library outcome when the coordinator has finis
 test("batch progress counts resolved files independently of individual worker percentages", () => {
   const h = harness();
   const progress = h.run('telemetry({batch:{total:23,completed:20,running:2,queued:1},activities:[{},{}],worker:{progress:99,progress_is_stale:true}})');
-  assert.equal(progress.children[0].textContent, "20 / 23 files");
+  assert.equal(progress.children[0].textContent, "20 / 23 processed");
   assert.equal(progress.children[1].textContent, "87%");
   assert.equal(progress.children[2].value, 20);
   assert.equal(progress.children[2].max, 23);
   const mixed = h.run('batchProgress({batch:{total:10,completed:3,failed:2,skip:1,cancelled:1,waiting_decision:2,running:1}})');
-  assert.equal(mixed.children[0].textContent, "6 / 10 files");
+  assert.equal(mixed.children[0].textContent, "6 / 10 processed");
   assert.equal(mixed.children[1].textContent, "60%");
   assert.match(mixed.children[0].title, /Cancelled files.*not counted/);
   assert.equal(h.run('batchProgress({batch:{dry_run:true,total:10,queued:10}})'), null);
@@ -1649,4 +1649,57 @@ test("preview item statuses indicate eligibility, while failures and completed i
   assert.equal(h.run('statusClass("completed")'), "completed");
   assert.equal(h.run('statusClass("failed")'), "failed");
   assert.equal(h.run('statusClass("waiting_decision")'), "waiting_decision");
+});
+
+test("failed coordinator batches show failed progress and offer reconfiguration instead of blind retry",()=>{
+  const h=harness();
+  const job='{id:"b",action_name:"transcode_batch",status:"completed",batch:{total:8,failed:8,outcome:"failed"}}';
+  assert.match(h.run(`batchProgress(${job}).className`),/failed/);
+  assert.equal(h.run(`batchProgress(${job}).children[0].textContent`),'8 / 8 processed');
+  h.run('state.workerInfo={ready:false}');
+  const controls=h.run(`jobControls(${job})`);
+  assert.equal(controls.children[0].textContent,'Reconfigure');
+  assert.equal(controls.children[0].disabled,false);
+  assert.ok(!h.run(`jobControls({...${job},status:"failed"})`).children.some(b=>b.textContent==='Retry'));
+  assert.equal(h.run('batchReasonLabel({batch:{failed:8}},{count:1})'),'Example (1 of 8 failed files)');
+  assert.equal(h.run('batchReasonLabel({batch:{failed:8}},{count:8})'),'8 files');
+});
+
+test("reconfiguration loads saved settings without sending work and ignores a dismissed or expired form",async()=>{
+  const h=harness(),writes=[];
+  h.context.plan={id:'b',title:'Example',selected:2,kept:1,files:['One','Three'],settings:{profile_label:'Original custom profile',min_savings_percent:15,max_size_increase_percent:0,promote_candidates:true}};
+  h.context.record=(...args)=>writes.push(args);
+  h.run('api=async(path,body)=>body?(record(path,body),{}):plan;state.recipes=["general-hevc"]');
+  await h.run('reconfigureBatch("b")');
+  assert.equal(writes.length,0);
+  assert.equal(h.elements.get('reconfigure-profile').value,'same');
+  assert.equal(h.elements.get('reconfigure-savings').value,15);
+  assert.equal(h.elements.get('reconfigure-growth').value,0);
+  assert.equal(h.elements.get('reconfigure-files').children.length,2);
+  const pending=deferred();h.context.pending=pending.promise;
+  h.run('api=async()=>pending');
+  const next=h.run('reconfigureBatch("b")');
+  h.run('$("reconfigure-batch").close()');pending.resolve(h.context.plan);await next;
+  assert.equal(h.run('state.reconfigurePlan'),null);
+});
+
+test("reconfiguration is single flight, checks fresh worker readiness and keeps a receipt for lost responses",async()=>{
+  const h=harness(),writes=[],saved=new Map();
+  h.context.sessionStorage={getItem:k=>saved.get(k)||null,setItem:(k,v)=>saved.set(k,v),removeItem:k=>saved.delete(k)};
+  h.context.record=(...args)=>writes.push(args);
+  h.run('state.reconfigurePlan={id:"b"};state.reconfigureRevision=1;$("reconfigure-batch").open=true;$("reconfigure-profile").value="same";$("reconfigure-priority").value="balanced";$("reconfigure-savings").value="15";$("reconfigure-growth").value="0";submissionID=()=>"attempt-key";setConnection=()=>{};loadJobs=async()=>{};openJob=async()=>{};notify=()=>{};refreshWorkers=async()=>{state.workerInfo={ready:false}};api=async(path,body)=>{record(path,body);throw new Error("Lost reply")};');
+  await assert.rejects(h.run('submitReconfiguredBatch()'),/offline/);
+  assert.equal(writes.length,0);
+  h.run('refreshWorkers=async()=>{state.workerInfo={ready:true}}');
+  await assert.rejects(h.run('submitReconfiguredBatch()'),/Lost reply/);
+  await assert.rejects(h.run('submitReconfiguredBatch()'),/Lost reply/);
+  assert.equal(writes.length,2);assert.equal(writes[0][1].key,writes[1][1].key);
+  assert.equal(writes[0][1].min_savings_percent,15);
+  const ready=deferred();h.context.ready=ready.promise;
+  h.run('refreshWorkers=async()=>ready');
+  const next=h.run('submitReconfiguredBatch()');
+  await h.run('submitReconfiguredBatch()');
+  h.run('invalidateAuthentication()');ready.resolve();await next;
+  assert.equal(writes.length,2);
+  assert.equal(h.run('state.reconfigurePlan'),null);
 });

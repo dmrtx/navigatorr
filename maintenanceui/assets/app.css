@@ -868,6 +868,10 @@ main {
   color: var(--forest);
 }
 .stage.completed .stage-number { background: #e3eedf; }
+.stage.failed { color: #a52929; }
+.stage.failed .stage-number { background: #fbe9e7; }
+.stage.partial { color: #806426; }
+.stage-note { grid-column: 2 / -1; font-size: 11px; color: var(--muted); }
 .stage[aria-current="step"] .stage-number { color: #fff; background: var(--forest); }
 .stage[aria-current="step"] {
   color: var(--ink);
@@ -1586,3 +1590,8 @@ pre {
     transition: none !important;
   }
 }
+
+#reconfigure-files { max-height: 150px; overflow: auto; margin-bottom: 12px; }
+#reconfigure-files p { margin: 3px 0; overflow-wrap: anywhere; }
+#reconfigure-form .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 480px) { #reconfigure-form .form-grid { grid-template-columns: 1fr; } }

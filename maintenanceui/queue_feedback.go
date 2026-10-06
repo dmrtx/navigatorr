@@ -1,8 +1,12 @@
 package maintenanceui
 
 import (
+	"encoding/json"
+	"fmt"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -103,9 +107,58 @@ func (s *Server) queueStages(r operationRecord) []map[string]any {
 		} else if i == r.inst.CurrentStep {
 			status = r.inst.Status
 		}
-		stages = append(stages, map[string]any{"name": step.Name, "status": status})
+		stage := map[string]any{"name": step.Name, "status": status}
+		if r.inst.ActionName == "transcode_batch" {
+			counts := operationMap(operationValue(r, "counts"))
+			if step.Name == "schedule_batch" && status == "completed" && operationNumber(counts["failed"]) > 0 {
+				stage["status"] = "failed"
+				if operationNumber(counts["completed"]) > 0 {
+					stage["status"] = "partial"
+				}
+				stage["note"] = fmt.Sprintf("%.0f converted · %.0f failed", operationNumber(counts["completed"]), operationNumber(counts["failed"]))
+			}
+			if step.Name == "promote_batch" && status == "completed" {
+				promotion := operationMap(operationValue(r, "batch_promotion"))
+				if r.inputs["promote_candidates"] != true {
+					stage["status"], stage["note"] = "skip", "Replacement not requested; originals kept."
+				} else if (promotion != nil && operationNumber(promotion["eligible"]) == 0) || (promotion == nil && operationNumber(counts["completed"]) == 0 && operationNumber(counts["failed"]) > 0) {
+					stage["status"], stage["note"] = "skip", "No eligible candidates to replace; originals kept."
+				} else if promotion != nil && promotion["approved"] == false && operationNumber(promotion["promoted"]) == 0 {
+					stage["status"], stage["note"] = "skip", "Replacement not approved; originals kept."
+				}
+			}
+			if (r.inst.Status == store.ActionStatusFailed || r.inst.Status == store.ActionStatusCancelled) && i > r.inst.CurrentStep {
+				stage["status"], stage["note"] = "skip", "Not run."
+			}
+		}
+		stages = append(stages, stage)
 	}
 	return stages
+}
+
+var savingsFailurePattern = regexp.MustCompile(`benchmark winner predicts only (-?\d+(?:\.\d+)?)% savings, below required minimum (\d+(?:\.\d+)?)%`)
+
+// Percentages differ by file, but they describe the same failed savings gate.
+// Keep per-file estimates in details while grouping that common cause in the queue.
+func batchReasonText(raw string, details bool) string {
+	text := strings.TrimSpace(raw)
+	var stored struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal([]byte(text), &stored) == nil && stored.Error != "" {
+		text = stored.Error
+	}
+	if match := savingsFailurePattern.FindStringSubmatch(text); match != nil {
+		if !details {
+			return "Sample estimates do not meet the minimum savings; originals kept."
+		}
+		estimate, _ := strconv.ParseFloat(match[1], 64)
+		if estimate < 0 {
+			return fmt.Sprintf("Estimated output is %s%% larger; at least %s%% savings required. Full conversion not started; original kept.", strconv.FormatFloat(-estimate, 'f', -1, 64), match[2])
+		}
+		return fmt.Sprintf("Estimated savings %s%%; at least %s%% required. Full conversion not started; original kept.", match[1], match[2])
+	}
+	return text
 }
 
 func batchQueueFeedback(items []store.TranscodeBatchItem) map[string]any {
@@ -136,11 +189,11 @@ func batchQueueFeedback(items []store.TranscodeBatchItem) map[string]any {
 				// Positive selection criteria describe eligibility, not why work
 				// was skipped or needs a decision.
 				if reason != "" && reason != "anime" && reason != "h264_1080p" && reason != "oversized" && reason != "explicit profile requested" {
-					itemReasons = append(itemReasons, reason)
+					itemReasons = append(itemReasons, batchReasonText(reason, false))
 				}
 			}
 			if item.Error != "" {
-				itemReasons = []string{item.Error}
+				itemReasons = []string{batchReasonText(item.Error, false)}
 			} else if item.Status == "failed" && len(itemReasons) == 0 {
 				itemReasons = []string{"Conversion failed; open file details"}
 			}

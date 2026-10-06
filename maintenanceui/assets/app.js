@@ -33,6 +33,7 @@ const names = {
   waiting_external: "In progress",
   waiting_decision: "Needs decision",
   completed: "Completed",
+  partial: "Partial",
   failed: "Failed",
   cancelled: "Cancelled",
 };
@@ -57,6 +58,7 @@ function button(text, onClick, className = "") {
 function actionIcon(label) {
   if (typeof document.createElementNS !== "function") return null;
   const paths = {
+    Reconfigure: "M4 7h16M4 17h16M8 4v6M16 14v6",
     Retry: "M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M18 18A8 8 0 0 1 4 12",
     Review: "M5 4h14v16H5ZM8 8h8M8 12h8",
     "Review preview": "M5 4h14v16H5ZM8 8h8M8 12h8",
@@ -201,6 +203,9 @@ function invalidateAuthentication() {
   $("job-detail").close();
   $("batch-review").close();
   $("file-review").close();
+  state.reconfigureRevision = (state.reconfigureRevision || 0) + 1;
+  state.reconfigurePlan = null;
+  $("reconfigure-batch").close();
   state.fileApproval = null;
   $("path-dialog").close();
   $("recipe-settings").close();
@@ -1586,14 +1591,17 @@ function savingsLine(savings, compact = false, replaced = false) {
     ? node("p", parts.join(" · "), "metadata savings-line")
     : null;
 }
+function batchReasonLabel(job, reason) {
+  return job.batch?.failed > reason.count ? `Example (${reason.count} of ${job.batch.failed} failed files)` : `${reason.count} ${reason.count === 1 ? "file" : "files"}`;
+}
 function batchProgress(job) {
   const batch = job.batch;
   if (!batch || batch.dry_run || !Number.isInteger(batch.total) || batch.total <= 0) return null;
   const count = key => Number.isInteger(batch[key]) && batch[key] > 0 ? batch[key] : 0;
   const processed = Math.min(batch.total, ["completed", "failed", "skip"].reduce((total, key) => total + count(key), 0));
   const percent = processed / batch.total * 100;
-  const result = node("div", "", `job-progress batch-progress ${job.status === "failed" ? "failed" : job.status === "cancelled" ? "cancelled" : ""}`);
-  const counts = node("span", `${processed} / ${batch.total} files`, "batch-progress-count");
+  const result = node("div", "", `job-progress batch-progress ${queuePresentation(job).status === "Failed" ? "failed" : queuePresentation(job).status === "Cancelled" ? "cancelled" : ""}`);
+  const counts = node("span", `${processed} / ${batch.total} processed`, "batch-progress-count");
   counts.title = "Processed includes completed, failed and skipped files. Cancelled files and files waiting for a decision are not counted as processed.";
   const value = node("strong", `${Math.round(percent)}%`, "batch-progress-percent");
   const bar = document.createElement("progress");
@@ -1983,7 +1991,7 @@ function statusClass(status) {
   if (["completed", "Completed", "Replaced", "Candidate ready"].includes(status)) return "completed";
   if (["running", "Running", "waiting_external", "In progress", "Encoding", "Calibrating", "Preparing", "Verifying", "Replacing", "Saving candidate"].includes(status)) return "running";
   if (["failed", "Failed", "Worker offline", "No updates"].includes(status)) return "failed";
-  if (["review", "waiting_decision", "Needs review", "Needs decision", "Partial", "Cancelling"].includes(status)) return "waiting_decision";
+  if (["review", "waiting_decision", "Needs review", "Needs decision", "partial", "Partial", "Cancelling"].includes(status)) return "waiting_decision";
   if (["Preview", "Preview complete", "Eligible"].includes(status)) return "preview";
   return "neutral";
 }
@@ -2036,6 +2044,82 @@ async function startBatchPreview(id) {
     setConnection(serverReachable);
   }
 }
+async function reconfigureBatch(id) {
+  const revision = state.reconfigureRevision = (state.reconfigureRevision || 0) + 1;
+  const auth = state.authRevision;
+  state.reconfigurePlan = null;
+  $("reconfigure-form").hidden = true;
+  $("reconfigure-files").replaceChildren();
+  $("reconfigure-summary").textContent = "Loading saved selection…";
+  $("reconfigure-batch").showModal();
+  try {
+    const plan = await api(`batch-reconfigure?id=${encodeURIComponent(id)}`);
+    if (auth !== state.authRevision || revision !== state.reconfigureRevision || !$("reconfigure-batch").open) return;
+    state.reconfigurePlan = plan;
+    $("reconfigure-summary").textContent = `${plan.title} · ${plan.selected} failed/cancelled files · ${plan.kept} other files kept out of this attempt`;
+    for (const file of plan.files) $("reconfigure-files").append(node("p",file));
+    if (plan.selected > plan.files.length) $("reconfigure-files").append(node("p",`+${plan.selected-plan.files.length} more files`));
+    $("reconfigure-profile").replaceChildren();
+    option($("reconfigure-profile"), "same", plan.settings.profile_label);
+    option($("reconfigure-profile"), "auto", "Automatic sample tuning");
+    for (const profile of state.recipes) if (profile !== "auto") option($("reconfigure-profile"),profile,profile);
+    $("reconfigure-profile").value = "same";
+    $("reconfigure-priority").value = plan.settings.priority || "balanced";
+    $("reconfigure-priority-label").hidden = true;
+    $("reconfigure-savings").value = plan.settings.min_savings_percent > 0 ? plan.settings.min_savings_percent : "";
+    $("reconfigure-growth").value = plan.settings.max_size_increase_percent ?? "";
+    $("reconfigure-settings").textContent = `${plan.settings.preserve_source_bit_depth ? "Preserve source bit depth · " : ""}${plan.settings.promote_candidates ? "Ask for replacement approval after conversion" : "Create candidates; keep originals"}`;
+    $("reconfigure-form").hidden = false;
+    $("submit-reconfigure").disabled = !serverReachable;
+  } catch (error) {
+    if (auth === state.authRevision && revision === state.reconfigureRevision)
+      $("reconfigure-summary").textContent = error.message;
+  }
+}
+$("close-reconfigure").addEventListener("click", () => $("reconfigure-batch").close());
+$("reconfigure-profile").addEventListener("change", () => {
+  $("reconfigure-priority-label").hidden = $("reconfigure-profile").value !== "auto";
+});
+async function submitReconfiguredBatch() {
+  const plan = state.reconfigurePlan;
+  if (!plan || state.busyJobs.has(plan.id)) return;
+  const revision = state.reconfigureRevision, auth = state.authRevision;
+  const current = () => auth === state.authRevision && revision === state.reconfigureRevision && $("reconfigure-batch").open;
+  const limit = id => {
+    if (!$(id).value.trim()) return null;
+    const value = Number($(id).value);
+    if (!Number.isFinite(value)) throw new Error("Enter a valid savings or growth limit.");
+    return value;
+  };
+  const body = {id:plan.id,profile:$("reconfigure-profile").value,priority:$("reconfigure-priority").value,min_savings_percent:limit("reconfigure-savings"),max_size_increase_percent:limit("reconfigure-growth")};
+  const request = JSON.stringify(body);
+  let receipt;
+  try { receipt = JSON.parse(sessionStorage.getItem("navigatorr_reconfigure") || "null"); } catch {}
+  if (!receipt || receipt.request !== request) {
+    receipt = {request,key:submissionID()};
+    sessionStorage.setItem("navigatorr_reconfigure",JSON.stringify(receipt));
+  }
+  state.busyJobs.add(plan.id);
+  $("submit-reconfigure").disabled = true;
+  try {
+    await refreshWorkers();
+    if (!current()) return;
+    if (!state.workerInfo?.ready) throw new Error("Video worker offline or not ready. No new attempt was submitted.");
+    const result = await api("batch-reconfigure", {...body,key:receipt.key});
+    if (!current()) return;
+    sessionStorage.removeItem("navigatorr_reconfigure");
+    $("reconfigure-batch").close();
+    await loadJobs();
+    if (auth !== state.authRevision || revision !== state.reconfigureRevision) return;
+    await openJob(result.id);
+    notify("New attempt queued for the failed/cancelled files. Previous history is preserved.");
+  } finally {
+    state.busyJobs.delete(plan.id);
+    if (current()) $("submit-reconfigure").disabled = !serverReachable;
+    setConnection(serverReachable);
+  }
+}
+$("reconfigure-form").addEventListener("submit", event => { event.preventDefault(); safe(submitReconfiguredBatch); });
 async function archiveJob(job, archived) {
   if (state.busyJobs.has(job.id)) return;
   const auth = state.authRevision;
@@ -2116,7 +2200,9 @@ function jobControls(job, detail = false) {
       if (job.batch.queued > 0) add("Start batch", () => startBatchPreview(job.id));
     }
   }
-  if (job.status === "failed") {
+  const reconfigurable = job.action_name === "transcode_batch" && !job.batch?.dry_run && ["completed","failed","cancelled"].includes(job.status) && (job.batch?.failed > 0 || job.batch?.cancelled > 0);
+  if (reconfigurable) add("Reconfigure", () => reconfigureBatch(job.id));
+  if (job.status === "failed" && !reconfigurable) {
     if (job.action_name === "benchmark_transcode" && /unsupported input/.test(job.error || ""))
       add("Set up benchmark", () => {
         $("path").value = job.source_path || "";
@@ -2369,9 +2455,9 @@ function compactQueueActions(actions) {
     const icon = b.querySelector?.("svg");
     if (!icon) continue;
     const label = b.textContent.trim();
-    if (["Set up benchmark", "Review candidate", "Review replacement", "Review replacements", "Replace file", "Start batch", "Review preview", "View batch", "View preview", "Archive", "Restore"].includes(label)) {
-      b.replaceChildren(icon, node("span", label === "Replace file" ? "Replace" : label === "Set up benchmark" ? "Set up" : ["Start batch", "View batch", "View preview", "Archive", "Restore"].includes(label) ? label : "Review"));
-      b.className += ["Review preview", "View batch", "View preview", "Archive", "Restore"].includes(label) ? " queue-secondary" : " primary queue-primary";
+    if (["Set up benchmark", "Review candidate", "Review replacement", "Review replacements", "Replace file", "Start batch", "Review preview", "View batch", "View preview", "Archive", "Restore", "Reconfigure"].includes(label)) {
+      b.replaceChildren(icon, node("span", label === "Replace file" ? "Replace" : label === "Set up benchmark" ? "Set up" : ["Start batch", "View batch", "View preview", "Archive", "Restore", "Reconfigure"].includes(label) ? label : "Review"));
+      b.className += ["Review preview", "View batch", "View preview", "Archive", "Restore", "Reconfigure"].includes(label) ? " queue-secondary" : " primary queue-primary";
       b.setAttribute("aria-label", label);
       b.title ||= label;
       continue;
@@ -2460,7 +2546,8 @@ async function loadJobs(more = false) {
       }
       for (const reason of (job.batch_files?.reasons || []).slice(0, 1)) {
         const text = shortJobReason(reason.reason);
-        const line = node("p", `${reason.count} ${reason.count === 1 ? "file" : "files"}: ${text}`, "metadata batch-reason");
+        const count = batchReasonLabel(job, reason);
+        const line = node("p", `${count}: ${text}`, "metadata batch-reason");
         line.title = reason.reason;
         meta.append(line);
       }
@@ -2650,6 +2737,10 @@ async function refreshDetail() {
     else if (batchProgress(job)) summary.append(batchProgress(job));
     if (job.batch?.dry_run) summary.append(node("p", queueOutcome(job) + (job.batch.queued > 0 && !job.preview_execution_action_id ? ". Review the eligible files, then choose Start batch to convert them." : "."), "preview-notice"));
     if (job.batch && !job.batch.dry_run) renderBatchCounts(summary, job.batch);
+    if (job.batch?.failed && job.batch_files?.reasons?.length) {
+      const reason = job.batch_files.reasons[0];
+      summary.append(node("p", `${batchReasonLabel(job,reason)}: ${shortJobReason(reason.reason)}`, "muted"));
+    }
     renderStages(job);
     const related = $("detail-related");
     related.replaceChildren();
@@ -2779,6 +2870,7 @@ function renderStages(job) {
   for (const [index, stage] of (job.stages || []).entries()) {
     const row = node("li", "", `stage ${stage.status}`);
     row.append(node("span", String(index + 1), "stage-number"), node("span", stageLabel(stage.name)), statusBadge(stage.status === "pending" ? "Next" : names[stage.status] || stage.status, stage.status));
+    if (stage.note) row.append(node("span", stage.note, "stage-note"));
     if (index === job.current_step && ["running", "waiting_external", "waiting_decision"].includes(job.status)) row.setAttribute("aria-current", "step");
     list.append(row);
   }
