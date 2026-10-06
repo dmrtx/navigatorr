@@ -364,3 +364,27 @@ func TestReplacementHasFileContextBeforePlanningCheckpoint(t *testing.T) {
 		t.Fatal("planning lost durable file context", job)
 	}
 }
+
+func TestRejectionCountIsIndependentOfTruncatedQueueReasons(t *testing.T) {
+	items := []store.TranscodeBatchItem{}
+	for i := 0; i < 6; i++ {
+		message := "A storage error"
+		if i > 2 {
+			message = "Another worker error"
+		}
+		items = append(items, store.TranscodeBatchItem{Status: "failed", Error: message})
+	}
+	items = append(items, store.TranscodeBatchItem{Status: "failed", Error: `{"step":"validate","error":"transcode candidate rejected by user decision; original file remains untouched"}`})
+	feedback := batchQueueFeedback(items)
+	if feedback["rejected_count"] != 1 {
+		t.Fatal(feedback)
+	}
+	for _, reason := range feedback["reasons"].([]map[string]any) {
+		if strings.Contains(reason["reason"].(string), "rejected") {
+			t.Fatal("fixture did not truncate rejection reason", feedback)
+		}
+	}
+	if items[6].Status != "failed" {
+		t.Fatal("presentation changed stored execution status")
+	}
+}

@@ -125,3 +125,112 @@ func TestBatchSettingsUsesSameCoordinatorAndFrozenSelection(t *testing.T) {
 		t.Fatal("repeat command", err)
 	}
 }
+
+func TestSkippedCalibrationSettingsRequireExplicitProfile(t *testing.T) {
+	s, h := testUI(t)
+	seedFailedBatch(t, s, false)
+	st := s.engine.Deps().Store
+	items, err := st.ListTranscodeBatchItems("failed-batch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	items[0].Status = "skip"
+	items[0].Reasons = []string{"shared VMAF/CAMBI calibration supports 8-bit SDR video below 45 fps; original preserved"}
+	if err := st.UpdateTranscodeBatchItem(items[0]); err != nil {
+		t.Fatal(err)
+	}
+	read := func(scope string) map[string]any {
+		t.Helper()
+		w := request(h, "GET", "/api/maintenance/batch-settings?id=failed-batch&scope="+scope, "", true)
+		var plan map[string]any
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &plan) != nil {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		return plan
+	}
+	unfinished := read("unfinished")
+	if unfinished["requires_explicit_profile"] != false || unfinished["selected"] != float64(1) {
+		t.Fatal(unfinished)
+	}
+	all := read("all")
+	if all["requires_explicit_profile"] != true {
+		t.Fatal(all)
+	}
+	body := map[string]any{"id": "failed-batch", "scope": "all", "selection_version": all["selection_version"], "profile": "same", "key": "skip-retry"}
+	w := request(h, "POST", "/api/maintenance/batch-settings", mustJSON(t, body), true)
+	if w.Code != 400 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	rows, _ := st.ListActionInstances("", 100)
+	if len(rows) != 1 {
+		t.Fatal("invalid retry submitted work", len(rows))
+	}
+	body["profile"] = "general-hevc"
+	w = request(h, "POST", "/api/maintenance/batch-settings", mustJSON(t, body), true)
+	if w.Code != 202 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+}
+
+func TestBatchSettingsReadsCurrentLimitsAndCanPreserveMixedValues(t *testing.T) {
+	s, h := testUI(t)
+	seedFailedBatch(t, s, false)
+	st := s.engine.Deps().Store
+	inst, _ := st.GetActionInstance("failed-batch")
+	inst.StateJSON = mustJSON(t, map[string]any{"batch_item_settings": map[string]any{"epfile-101": map[string]any{"min_savings_percent": 10, "max_size_increase_percent": 2}, "epfile-103": map[string]any{"min_savings_percent": 10, "max_size_increase_percent": 2}}})
+	if err := st.UpdateActionInstance(*inst); err != nil {
+		t.Fatal(err)
+	}
+	read := func(scope string) map[string]any {
+		t.Helper()
+		w := request(h, "GET", "/api/maintenance/batch-settings?id=failed-batch&scope="+scope, "", true)
+		var p map[string]any
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &p) != nil {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		return p
+	}
+	unfinished := read("unfinished")
+	settings := unfinished["settings"].(map[string]any)
+	if settings["min_savings_percent"] != float64(10) || settings["max_size_increase_percent"] != float64(2) || settings["mixed_limits"] != false {
+		t.Fatal(settings)
+	}
+	all := read("all")
+	settings = all["settings"].(map[string]any)
+	if settings["mixed_limits"] != true || settings["min_savings_percent"] != nil || settings["max_size_increase_percent"] != nil {
+		t.Fatal(settings)
+	}
+	w := request(h, "POST", "/api/maintenance/batch-settings", mustJSON(t, map[string]any{"id": "failed-batch", "scope": "all", "selection_version": all["selection_version"], "profile": "general-hevc", "preserve_limits": true, "key": "preserve-mixed"}), true)
+	if w.Code != 202 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	var receipt map[string]string
+	json.Unmarshal(w.Body.Bytes(), &receipt)
+	command, _ := st.GetActionInstance(receipt["command_id"])
+	commandSettings := decodeOperationJSON(command.InputsJSON)["settings"].(map[string]any)
+	if _, exists := commandSettings["min_savings_percent"]; exists {
+		t.Fatal("limit override leaked into request", commandSettings)
+	}
+	res, err := s.engine.Resume(context.Background(), command.ID, "", nil)
+	if err != nil || res.Status != "completed" {
+		t.Fatal(res, err)
+	}
+	current := read("all")["settings"].(map[string]any)
+	if current["mixed_limits"] != true {
+		t.Fatal("per-file limits were replaced", current)
+	}
+	next := read("all")
+	w = request(h, "POST", "/api/maintenance/batch-settings", mustJSON(t, map[string]any{"id": "failed-batch", "scope": "all", "selection_version": next["selection_version"], "profile": "same", "min_savings_percent": 12, "preserve_growth": true, "key": "edit-savings-only"}), true)
+	if w.Code != 202 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	json.Unmarshal(w.Body.Bytes(), &receipt)
+	res, err = s.engine.Resume(context.Background(), receipt["command_id"], "", nil)
+	if err != nil || res.Status != "completed" {
+		t.Fatal(res, err)
+	}
+	current = read("all")["settings"].(map[string]any)
+	if current["min_savings_percent"] != float64(12) || current["max_size_increase_percent"] != nil || current["mixed_limits"] != true {
+		t.Fatal("editing savings changed per-file growth limits", current)
+	}
+}

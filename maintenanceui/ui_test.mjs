@@ -1559,7 +1559,7 @@ test("batch result badges use the library outcome when the coordinator has finis
     assert.equal(h.run('statusClass(label)'),color);
   }
   assert.equal(h.run('queuePresentation({status:"completed",batch:{outcome:"preview",dry_run:true,total:8,queued:8}}).status'),"Preview");
-  assert.equal(h.run('queuePresentation({status:"completed",batch:{outcome:"candidates_ready",total:8,completed:8}}).status'),"Completed");
+  assert.equal(h.run('queuePresentation({status:"completed",batch:{outcome:"candidates_ready",total:8,completed:8}}).status'),"Candidates ready");
 });
 
 test("batch progress counts resolved files independently of individual worker percentages", () => {
@@ -1576,7 +1576,7 @@ test("batch progress counts resolved files independently of individual worker pe
   assert.equal(h.run('batchProgress({batch:{dry_run:true,total:10,queued:10}})'), null);
   assert.equal(h.run('batchProgress({batch:{total:0}})'), null);
   assert.equal(h.run('batchProgress({batch:{completed:2}})'), null);
-  assert.equal(h.run('batchProgress({status:"completed",batch:{total:2,completed:2}})').children[1].textContent, "100%");
+  assert.equal(h.run('batchProgress({status:"completed",batch:{total:2,completed:2}})'), null);
 });
 
 test("a completed preview offers review and start, while active work retains cancellation", () => {
@@ -1650,14 +1650,14 @@ test("preview item statuses indicate eligibility, while failures and completed i
   assert.equal(h.run('statusClass("waiting_decision")'), "waiting_decision");
 });
 
-test("failed coordinator batches show failed progress and offer reconfiguration instead of blind retry",()=>{
+test("finished failed batches show an outcome and offer reconfiguration instead of success progress or blind retry",()=>{
   const h=harness();
   const job='{id:"b",action_name:"transcode_batch",status:"completed",batch:{total:8,failed:8,outcome:"failed"}}';
-  assert.match(h.run(`batchProgress(${job}).className`),/failed/);
-  assert.equal(h.run(`batchProgress(${job}).children[0].textContent`),'8 / 8 processed');
+  assert.equal(h.run(`batchProgress(${job})`),null);
+  assert.match(h.run(`queueOutcome(${job})`),/No candidates created/);
   h.run('state.workerInfo={ready:false}');
   const controls=h.run(`jobControls(${job})`);
-  assert.equal(controls.children[0].textContent,'Reconfigure');
+  assert.equal(controls.children[0].textContent,'Change settings');
   assert.equal(controls.children[0].disabled,false);
   assert.ok(!h.run(`jobControls({...${job},status:"failed"})`).children.some(b=>b.textContent==='Retry'));
   assert.equal(h.run('batchReasonLabel({batch:{failed:8}},{count:1})'),'Example (1 of 8 failed files)');
@@ -1770,7 +1770,7 @@ test("candidate review offers rejection, later and settings for exactly the wait
   } else assert.equal(writes.length,0);
   if(chosen==='reconfigure') {
    assert.equal(h.elements.get('reconfigure-batch').open,true);
-   assert.equal(h.elements.get('submit-reconfigure').textContent,'Apply to this batch');
+   assert.equal(h.elements.get('submit-reconfigure').textContent,'Create new candidate');
    assert.equal(h.run('state.reconfigurePlan.candidate_id'),'child');
   }
  }
@@ -1815,4 +1815,83 @@ test("cleanup completion uses the confirmed command receipt when browser and ser
  await h.run('finishBackupCleanup({status:"failed",cleanup:{phase:"completed",updated_at:"2000-01-01T00:00:00Z"}})');
  assert.equal(h.run('state.backupCleaning'),null);
  assert.match(h.elements.get('backup-progress').textContent,/Removed recovery data/);
+});
+
+test("an omitted video shows its reason and another-profile action instead of conversion progress", async () => {
+  const h=harness();
+  h.context.job={id:'omitted',number:580,action_name:'transcode_batch',status:'completed',can_archive:true,batch:{title:'The Peripheral',total:1,skip:1,outcome:'no_changes'},batch_files:{context:'The Peripheral · Season 1',file_count:1,files:[{display_label:'The Peripheral - S01E04'}],reasons:[{count:1,reason:'shared VMAF/CAMBI calibration supports 8-bit SDR video below 45 fps; original preserved'}]}};
+  assert.equal(h.run('queuePresentation(job).status'),'Not converted');
+  assert.equal(h.run('batchProgress(job)'),null);
+  assert.equal(h.run('jobControls(job).children[0].textContent'),'Try another profile');
+  h.run('api=async()=>({jobs:[job],total:1,has_more:false});renderSavings=()=>{};');
+  await h.run('loadJobs()');
+  const row=h.elements.get('jobs-list').children[0];
+  assert.equal(row.children[0].children[1].textContent,'The Peripheral - S01E04');
+  assert.equal(row.children[1].children.length,1,'no repeated filename or reason');
+  const outcome=row.children[2].children[0];
+  assert.match(outcome.children[0].textContent,/Automatic testing does not support/);
+  assert.match(outcome.children[1].textContent,/Choose another profile/);
+});
+
+test("an all-skipped retry selects the saved files and requires another profile without sending work",async()=>{
+  const h=harness(), reads=[], writes=[];
+  h.context.reads=reads;h.context.writes=writes;
+  h.context.plan={id:'b',title:'The Peripheral',scope:'all',selected:1,files:['S01E04'],requires_explicit_profile:true,settings:{profile_label:"Keep each file's current profile",max_size_increase_percent:0}};
+  h.run('state.recipes=["general-hevc"];api=async(path,body)=>{if(body){writes.push(body);return {}}reads.push(path);return path.includes("scope=unfinished")?{...plan,scope:"unfinished",selected:0,files:[]}:plan};');
+  await h.run('reconfigureBatch("b")');
+  assert.equal(reads.length,2);
+  assert.equal(writes.length,0);
+  assert.equal(h.elements.get('reconfigure-scope').value,'all');
+  assert.equal(h.elements.get('reconfigure-profile').value,'');
+  assert.equal(h.elements.get('submit-reconfigure').disabled,true);
+  assert.match(h.elements.get('reconfigure-profile-note').textContent,/Choose a profile/);
+  await assert.rejects(h.run('submitReconfiguredBatch()'),/Choose a profile/);
+  assert.equal(writes.length,0);
+  h.run('$("reconfigure-profile").value="general-hevc";updateBatchSettingsProfile()');
+  assert.equal(h.elements.get('submit-reconfigure').disabled,false);
+  h.run('$("reconfigure-profile").value="same";updateBatchSettingsProfile()');
+  assert.equal(h.elements.get('submit-reconfigure').disabled,true);
+});
+
+test("declining a candidate is distinct from an error and cannot blindly resume that rejected candidate",()=>{
+ const h=harness();
+ h.context.job={id:'file',parent_action_id:'season',action_name:'transcode_media',status:'failed',error:'transcode candidate rejected by user decision; original file remains untouched'};
+ assert.equal(h.run('queuePresentation(job).status'),'Rejected');
+ assert.match(h.run('queueOutcome(job)'),/Candidate rejected/);
+ assert.equal(h.run('jobControls(job).children[0].textContent'),'Change settings');
+ assert.equal(h.run('jobControls(job).children.some(button=>button.textContent==="Retry")'),false);
+ const original=h.run('({total:8,failed:4,queued:2,running:1,waiting_decision:1,outcome:"needs_decision"})');
+ h.context.batch=original;
+ h.context.feedback={reasons:[{count:3,reason:'transcode candidate rejected by user decision; original file remains untouched'},{count:1,reason:'Worker connection failed'}]};
+ const displayed=h.run('visibleBatch({status:"waiting_decision",batch,batch_files:feedback})');
+ assert.equal(displayed.failed,1);assert.equal(displayed.rejected,3);assert.equal(original.failed,4);
+ assert.match(h.run('queuePresentation({status:"waiting_decision",batch,batch_files:feedback}).summary'),/3 rejected/);
+ assert.match(h.run('queuePresentation({status:"waiting_decision",batch,batch_files:feedback}).summary'),/1 failed/);
+ assert.equal(h.run('queuePresentation({status:"completed",batch:{total:3,failed:3,outcome:"failed"},batch_files:{reasons:[feedback.reasons[0]]}}).status'),'Rejected');
+});
+
+test("completed batch details report results without presenting unperformed stages as successful",()=>{
+ const h=harness();
+ h.run('renderStages({status:"completed",batch:{outcome:"failed"},stages:[{name:"resolve_and_inspect",status:"completed"},{name:"schedule_batch",status:"completed"},{name:"promote_batch",status:"completed"}]})');
+ assert.equal(h.elements.get('detail-stages').children.length,0);
+ assert.equal(h.run('batchProgress({status:"failed",batch:{total:3,failed:3}})'),null);
+ assert.equal(h.run('queueOutcome({status:"completed",batch:{total:3,completed:3,outcome:"candidates_ready"}})'),'3 candidates ready · Originals unchanged');
+});
+
+test("changing only the profile preserves current limits, including mixed per-file settings",async()=>{
+ const h=harness(),requests=[];
+ h.context.plan={id:'b',scope:'all',title:'Season',selected:2,kept:0,files:['One','Two'],selection_version:'version',settings:{profile_label:'Current profiles',mixed_limits:true,max_size_increase_percent:null,min_savings_percent:null}};
+ h.context.requests=requests;
+ h.run('api=async()=>plan;state.recipes=["general-hevc"];loadJobs=async()=>{};openJob=async()=>{};notify=()=>{};setConnection=()=>{};submissionID=()=>"key";commandRequest=async(path,body)=>{requests.push(body);return {id:"b"}};sessionStorage={getItem:()=>null,setItem:()=>{},removeItem:()=>{}};');
+ await h.run('reconfigureBatch("b")');
+ h.run('$("reconfigure-profile").value="general-hevc"');
+ await h.run('submitReconfiguredBatch()');
+ assert.equal(requests[0].preserve_limits,true);
+ await h.run('reconfigureBatch("b")');
+ h.run('$("reconfigure-savings").value="12"');
+ await h.run('submitReconfiguredBatch()');
+ assert.equal(requests[1].preserve_limits,false);
+ assert.equal(requests[1].preserve_savings,false);
+ assert.equal(requests[1].preserve_growth,true);
+ assert.equal(requests[1].min_savings_percent,12);
 });
