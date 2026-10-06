@@ -18,6 +18,7 @@ type batchItemView struct {
 	Decision         string                     `json:"decision"`
 	Error            string                     `json:"error,omitempty"`
 	Profile          string                     `json:"profile,omitempty"`
+	RequestedProfile string                     `json:"requested_profile,omitempty"`
 	Reasons          []string                   `json:"reasons,omitempty"`
 }
 
@@ -58,6 +59,7 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	state := decodeOperationJSON(inst.StateJSON)
+	settings := operationMap(state["batch_item_settings"])
 	history, pending := operationMap(state["batch_attempt_history"]), operationMap(state["batch_retry_pending"])
 	views := []batchItemView{}
 	end := min(offset, len(items)) + min(limit, max(0, len(items)-offset))
@@ -66,7 +68,7 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 			var previous []store.TranscodeBatchItem
 			data, _ := json.Marshal(history[item.ItemKey])
 			_ = json.Unmarshal(data, &previous)
-			views = append(views, batchItemView{PreviousAttempts: previous, RetryPending: pending[item.ItemKey] == true, ItemKey: item.ItemKey, FilePath: item.FilePath, DisplayLabel: item.DisplayLabel, Status: item.Status, ChildActionID: item.ChildActionID, Decision: item.Decision, Error: batchReasonText(item.Error, true), Profile: item.Profile, Reasons: item.Reasons})
+			views = append(views, batchItemView{RequestedProfile: operationString(operationMap(settings[item.ItemKey])["profile"]), PreviousAttempts: previous, RetryPending: pending[item.ItemKey] == true, ItemKey: item.ItemKey, FilePath: item.FilePath, DisplayLabel: item.DisplayLabel, Status: item.Status, ChildActionID: item.ChildActionID, Decision: item.Decision, Error: batchReasonText(item.Error, true), Profile: item.Profile, Reasons: item.Reasons})
 		}
 	}
 	writeJSON(w, 200, map[string]any{"items": views, "total": len(items), "offset": offset, "has_more": end < len(items)})

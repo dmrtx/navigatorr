@@ -5,6 +5,7 @@ import (
 	"math"
 	"net/http"
 	"reflect"
+	"sort"
 	"strings"
 
 	"github.com/jakenesler/navigatorr/action"
@@ -61,11 +62,26 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 	requiresProfile := false
 	limits, mixed := map[string]any{}, map[string]bool{}
 	itemSettings := operationMap(state["batch_item_settings"])
+	profiles := map[string]int{}
 	for _, item := range items {
 		if !action.BatchRevisionSelects(item, body.Scope, body.CandidateID) {
 			continue
 		}
 		selected++
+		profile := item.Profile
+		if profile == "" {
+			profile = operationString(inputs["profile"])
+		}
+		if override := operationString(operationMap(itemSettings[item.ItemKey])["profile"]); override != "" {
+			profile = override
+		}
+		if profile == "" || profile == "auto" || profile == "batch-generated" {
+			profile = "Automatic"
+			if inputs["profile_config"] != nil {
+				profile = "Custom profile"
+			}
+		}
+		profiles[profile]++
 		for _, key := range []string{"min_savings_percent", "max_size_increase_percent"} {
 			value := inputs[key]
 			if overrides := operationMap(itemSettings[item.ItemKey]); overrides != nil {
@@ -98,12 +114,29 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if len(files) < 25 {
-			files = append(files, item.DisplayLabel)
+			label := item.DisplayLabel
+			if label == "" {
+				label = item.FilePath[strings.LastIndex(item.FilePath, "/")+1:]
+			}
+			files = append(files, label)
 		}
 	}
 	plan["selected"], plan["kept"], plan["active"], plan["files"] = selected, len(items)-selected, active, files
 	plan["requires_explicit_profile"] = requiresProfile
 	settingsView := plan["settings"].(map[string]any)
+	profileNames := make([]string, 0, len(profiles))
+	for name := range profiles {
+		profileNames = append(profileNames, name)
+	}
+	sort.Strings(profileNames)
+	profileViews := []map[string]any{}
+	for _, name := range profileNames {
+		profileViews = append(profileViews, map[string]any{"name": name, "files": profiles[name]})
+	}
+	settingsView["current_profiles"] = profileViews
+	if len(profileNames) == 1 {
+		settingsView["profile_label"] = "Keep saved: " + profileNames[0]
+	}
 	for key, value := range limits {
 		if mixed[key] {
 			value = nil
