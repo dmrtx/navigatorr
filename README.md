@@ -22,6 +22,7 @@ Navigatorr acts as a bridge between AI coding assistants and your self-hosted me
 - **qBittorrent** — Torrent client
 - **SABnzbd** — Usenet downloader
 - **Transcoding** — Persistent HTTP worker (with an SSH adapter) for FFmpeg transcoding, including VideoToolbox and libx265, calibration, and candidate validation
+- **Podcast cleaning** — Durable native ASR and validated audio cuts, with classification supplied by the orchestrating LLM. See [setup and MCP workflow](docs/podcast-cleaning.md).
 
 ## Architecture
 

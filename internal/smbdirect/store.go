@@ -258,7 +258,13 @@ func (s *Store) DownloadAtomic(ctx context.Context, remoteLocalPath, localPath s
 // Publish uploads a local candidate to an exclusive job-owned partial, reads
 // the entire partial back for SHA-256 verification, and renames without
 // replacement. A retry succeeds only if an existing final is byte-identical.
-func (s *Store) Publish(ctx context.Context, localCandidate, destination, jobID string) (retErr error) {
+func (s *Store) Publish(ctx context.Context, localCandidate, destination, jobID string) error {
+	return s.PublishGuarded(ctx, localCandidate, destination, jobID, nil)
+}
+
+// PublishGuarded copies and verifies outside the guard, then guards only the
+// atomic no-replace rename. Recovery repeats that guard on every fresh session.
+func (s *Store) PublishGuarded(ctx context.Context, localCandidate, destination, jobID string, guard func(func() error) error) (retErr error) {
 	defer func() { retErr = wrapError("publish", retErr) }()
 	remote, ok := s.RemotePath(destination)
 	if !ok {
@@ -335,7 +341,14 @@ func (s *Store) Publish(ctx context.Context, localCandidate, destination, jobID 
 		if size != localSize || hash != localHash {
 			return fmt.Errorf("SMB partial readback mismatch: bytes=%d/%d sha256=%s/%s", size, localSize, hash, localHash)
 		}
-		if err := fs.RenameNoReplace(partial, remote); err != nil {
+		rename := func() error { return fs.RenameNoReplace(partial, remote) }
+		var renameErr error
+		if guard != nil {
+			renameErr = guard(rename)
+		} else {
+			renameErr = rename()
+		}
+		if err := renameErr; err != nil {
 			if os.IsExist(err) {
 				hash, size, verifyErr := hashRemote(ctx, fs, remote)
 				if verifyErr != nil {

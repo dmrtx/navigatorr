@@ -18,7 +18,7 @@ type WorkerAdmissionError struct {
 func (e *WorkerAdmissionError) Error() string { return e.Message }
 
 func RequiresWorker(name string) bool {
-	return name == "transcode_media" || name == "transcode_batch" || name == "benchmark_transcode"
+	return name == "clean_podcast_ads" || name == "transcode_media" || name == "transcode_batch" || name == "benchmark_transcode"
 }
 
 // Replacement retries use already encoded candidates at the final batch step.
@@ -54,6 +54,19 @@ func ResumeRequiresWorker(inst *store.ActionInstance, decision string) bool {
 		if decision == "reject" {
 			return inst.ActionName == "transcode_batch"
 		}
+	}
+	if inst.ActionName == "clean_podcast_ads" && inst.CurrentStep == 2 {
+		if decision != "plan" {
+			return false
+		}
+		var checkpoint struct {
+			Policy struct {
+				ReviewRequired bool `json:"review_required"`
+			} `json:"podcast_policy"`
+		}
+		// Planning into the review boundary needs only durable local artifacts.
+		// With review disabled, planning can immediately submit render work.
+		return json.Unmarshal([]byte(inst.StateJSON), &checkpoint) != nil || !checkpoint.Policy.ReviewRequired
 	}
 	return true
 }

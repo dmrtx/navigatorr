@@ -35,7 +35,10 @@ jobs:
         run: go vet ./...
 
       - name: UI regressions
-        run: node --test maintenanceui/*_test.mjs
+        run: node --test maintenanceui/*_test.mjs scripts/podcast-worker/moonstation-hook.test.mjs
+
+      - name: Podcast benchmark regressions
+        run: python3 -B -m unittest discover -s scripts/podcast-benchmark -v
 
       - name: Test
         run: go test -count=1 ./...

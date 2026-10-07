@@ -27,3 +27,18 @@ func TestResumeAdmissionKeepsOfflineReviewAndStopAvailable(t *testing.T) {
 		t.Fatal("active work bypassed worker readiness")
 	}
 }
+
+func TestPodcastClassificationPlanningDoesNotDependOnASRWorker(t *testing.T) {
+	inst := &store.ActionInstance{ActionName: "clean_podcast_ads", CurrentStep: 2, StateJSON: `{"podcast_policy":{"review_required":true}}`}
+	if ResumeRequiresWorker(inst, "plan") {
+		t.Fatal("local classification planning requires remote ASR worker")
+	}
+	inst.StateJSON = `{"podcast_policy":{"review_required":false}}`
+	if !ResumeRequiresWorker(inst, "plan") {
+		t.Fatal("automatic render bypasses worker admission")
+	}
+	inst.CurrentStep = 3
+	if !ResumeRequiresWorker(inst, "render") {
+		t.Fatal("render bypasses worker admission")
+	}
+}

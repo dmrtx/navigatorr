@@ -501,16 +501,37 @@ func commitNoReplace(ctx context.Context, src, dst string) error {
 // so tests can exercise each publication path, including filesystems without
 // hard-link support, without depending on the host filesystem.
 func commitNoReplaceWith(ctx context.Context, src, dst string, rename, link func(src, dst string) error) error {
-	err := rename(src, dst)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	guard, guarded := ctx.Value(podcastPublicationGuardKey{}).(podcastPublicationGuard)
+	commit := func(fn func(string, string) error) error {
+		if guarded {
+			return guard(func() error { return fn(src, dst) })
+		}
+		return fn(src, dst)
+	}
+	err := commit(rename)
 	switch {
 	case err == nil:
 		return nil
+	case errors.Is(err, errPodcastPublicationCancelled):
+		return err
 	case errors.Is(err, fs.ErrExist):
 		return fmt.Errorf("%w: %s", ErrDestinationExists, dst)
 	case errors.Is(err, errNoReplaceUnsupported):
-		if lerr := link(src, dst); lerr != nil {
+		if lerr := commit(link); lerr != nil {
+			if errors.Is(lerr, errPodcastPublicationCancelled) {
+				return lerr
+			}
 			if errors.Is(lerr, fs.ErrExist) {
 				return fmt.Errorf("%w: %s", ErrDestinationExists, dst)
+			}
+			if guarded {
+				// An exclusive-create copy exposes incomplete audio and would
+				// hold the cancellation lock throughout a second NAS transfer.
+				// Podcasts require an atomic commit; direct SMB supplies one.
+				return errPodcastAtomicPublicationUnsupported
 			}
 			// Neither an exclusive rename nor hard links are usable on this
 			// filesystem. Fall back to an exclusive-create copy, which still
