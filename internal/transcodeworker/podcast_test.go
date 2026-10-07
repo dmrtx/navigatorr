@@ -1,6 +1,7 @@
 package transcodeworker
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -581,7 +582,7 @@ func podcastWorkerRoundtrip(t *testing.T, native bool) {
 	if after != hash {
 		t.Fatal("original changed")
 	}
-	// A no-ad MP3 remains byte-identical, including original metadata.
+	// No-ad MP3 preserves audio and metadata, adding the transcript attachment.
 	empty := cuts
 	empty.Ranges = []podcast.Cut{}
 	empty.RemovedMS = 0
@@ -596,9 +597,24 @@ func podcastWorkerRoundtrip(t *testing.T, native bool) {
 		t.Fatal(err)
 	}
 	sameHash, err := hashLocalFileSHA256(ctx, noAds.CandidatePath)
-	if err != nil || sameHash != hash {
-		t.Fatal("no-ad MP3 was unnecessarily changed", err)
+	if err != nil || sameHash == hash {
+		t.Fatal("missing embedded transcript", err)
 	}
+	audioHash := func(file string) string {
+		b, e := exec.Command(w.ffmpegPath, "-v", "error", "-i", file, "-map", "0:a:0", "-c:a", "copy", "-f", "hash", "-hash", "sha256", "-").Output()
+		if e != nil {
+			t.Fatal(e)
+		}
+		return string(b)
+	}
+	if audioHash(source) != audioHash(noAds.CandidatePath) {
+		t.Fatal("no-ad audio packets changed")
+	}
+	b, _ := os.ReadFile(noAds.CandidatePath)
+	if !bytes.Contains(b, []byte("navigatorr-transcript.json")) {
+		t.Fatal("missing transcript attachment")
+	}
+
 	// The same request is terminally idempotent; changed cut evidence conflicts.
 	if res, err := w.Submit(ctx, render, "unused", "unused"); err != nil || !res.Reused {
 		t.Fatalf("idempotency %+v %v", res, err)

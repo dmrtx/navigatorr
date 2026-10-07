@@ -114,6 +114,9 @@ func (w *Worker) executePodcast(ctx context.Context, dir, file string, job *JobR
 		} else if err := w.podcastCommand(ctx, dir, w.ffmpegPath, args...); err != nil {
 			return fail(err)
 		}
+		if err := podcast.EmbedTranscript(tmp, task.ASRJobID, t, *task.Cuts); err != nil {
+			return fail(fmt.Errorf("embed transcript: %w", err))
+		}
 		duration, err := w.podcastDuration(ctx, tmp)
 		if err != nil {
 			return fail(err)
