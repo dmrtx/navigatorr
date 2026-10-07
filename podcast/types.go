@@ -33,6 +33,7 @@ type Transcript struct {
 	Units             []Unit  `json:"units"`
 }
 type Policy struct {
+	KnownAdsFirstPass  bool     `json:"known_ads_first_pass,omitempty" yaml:"known_ads_first_pass"`
 	Language           string   `json:"language" yaml:"language"`
 	Remove             []string `json:"remove" yaml:"remove"`
 	WindowMS           int64    `json:"window_ms" yaml:"window_ms"`
@@ -68,10 +69,11 @@ type Block struct {
 	Digest string `json:"digest"`
 }
 type Decision struct {
-	FirstID string `json:"first_id"`
-	LastID  string `json:"last_id"`
-	Label   string `json:"label"`
-	Reason  string `json:"reason"`
+	FirstID  string      `json:"first_id"`
+	LastID   string      `json:"last_id"`
+	Label    string      `json:"label"`
+	Reason   string      `json:"reason"`
+	Evidence *AdEvidence `json:"evidence,omitempty"`
 }
 type Classification struct {
 	BlockID          string     `json:"block_id"`
@@ -101,11 +103,14 @@ type Cuts struct {
 
 // Task travels through the existing worker queue, not a second scheduler.
 type Task struct {
-	Version   int    `json:"version"`
-	Operation string `json:"operation"`
-	Language  string `json:"language"`
-	ASRJobID  string `json:"asr_job_id,omitempty"`
-	Cuts      *Cuts  `json:"cuts,omitempty"`
+	Version    int         `json:"version"`
+	Operation  string      `json:"operation"`
+	Language   string      `json:"language"`
+	ASRJobID   string      `json:"asr_job_id,omitempty"`
+	Cuts       *Cuts       `json:"cuts,omitempty"`
+	Catalog    *AdCatalog  `json:"catalog,omitempty"`
+	Learning   *AdLearning `json:"learning,omitempty"`
+	MatchJobID string      `json:"match_job_id,omitempty"`
 }
 type Result struct {
 	Operation        string  `json:"operation"`
@@ -118,6 +123,8 @@ type Result struct {
 	RemovedMS        int64   `json:"removed_ms,omitempty"`
 	OutputDurationMS int64   `json:"output_duration_ms,omitempty"`
 	DecodePassed     bool    `json:"decode_passed,omitempty"`
+	MatchDigest      string  `json:"match_digest,omitempty"`
+	LearnedAds       int     `json:"learned_ads,omitempty"`
 }
 
 func Digest(v any) string {
@@ -149,15 +156,31 @@ func (t Task) Validate() error {
 		return fmt.Errorf("invalid podcast task identity")
 	}
 	switch t.Operation {
+	case "match_ads":
+		if t.Catalog == nil || t.Cuts != nil || t.ASRJobID != "" || t.Learning != nil || t.MatchJobID != "" {
+			return fmt.Errorf("matching requires only a frozen catalog")
+		}
+		return t.Catalog.Validate()
 	case "transcribe":
-		if t.Cuts != nil || t.ASRJobID != "" {
+		if t.Cuts != nil || t.ASRJobID != "" || t.Catalog != nil || t.Learning != nil || t.MatchJobID != "" {
 			return fmt.Errorf("transcription cannot include cuts")
 		}
 	case "render":
+		if t.Catalog != nil {
+			return fmt.Errorf("render cannot include a catalog")
+		}
 		if !regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`).MatchString(t.ASRJobID) || t.Cuts == nil {
 			return fmt.Errorf("render requires an ASR job and cuts")
 		}
-		return t.Cuts.Validate()
+		if err := t.Cuts.Validate(); err != nil {
+			return err
+		}
+		if t.MatchJobID != "" && !regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`).MatchString(t.MatchJobID) {
+			return fmt.Errorf("invalid matching job")
+		}
+		if t.Learning != nil {
+			return t.Learning.Validate(*t.Cuts)
+		}
 	default:
 		return fmt.Errorf("unsupported podcast operation")
 	}

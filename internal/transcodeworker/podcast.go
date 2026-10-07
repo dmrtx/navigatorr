@@ -38,6 +38,8 @@ func (w *Worker) executePodcast(ctx context.Context, dir, file string, job *JobR
 	phase := "transcribing"
 	if task.Operation == "render" {
 		phase = "cutting"
+	} else if task.Operation == "match_ads" {
+		phase = "matching_known_ads"
 	}
 	if cancelled, err := w.persistOperationalProgress(dir, file, job, func(l *JobRecord) { l.Phase = phase }); err != nil {
 		return err
@@ -49,7 +51,34 @@ func (w *Worker) executePodcast(ctx context.Context, dir, file string, job *JobR
 	}
 	// Keep a private transcript in the worker job even after shared-storage cleanup.
 	transcriptPath := filepath.Join(dir, "podcast-transcript.json")
-	if task.Operation == "transcribe" {
+	if task.Operation == "match_ads" {
+		path := filepath.Join(dir, "podcast-matches.json")
+		var report podcast.AdMatchReport
+		if err := podcast.ReadJSON(path, &report); os.IsNotExist(err) {
+			report, err = w.matchAds(ctx, dir, r.effectiveInput, result.SourceHash, *task.Catalog)
+			if err != nil {
+				return fail(err)
+			}
+			if err := podcast.WriteJSON(path, report); err != nil {
+				return fail(err)
+			}
+		} else if err != nil {
+			return fail(err)
+		}
+		if err := report.Validate(); err != nil {
+			return fail(err)
+		}
+		if report.SourceHash != result.SourceHash || podcast.Digest(report.Catalog) != podcast.Digest(task.Catalog) {
+			return fail(fmt.Errorf("matching checkpoint identity differs"))
+		}
+		result.MatchDigest = podcast.Digest(report)
+		result.DurationMS = report.DurationMS
+		if cancelled, err := w.publishPodcastFile(ctx, dir, file, path, r.localCandidate); err != nil {
+			return fail(err)
+		} else if cancelled {
+			return nil
+		}
+	} else if task.Operation == "transcribe" {
 		var t podcast.Transcript
 		if err := podcast.ReadJSON(transcriptPath, &t); err != nil {
 			args := []string{r.effectiveInput, transcriptPath, task.Language}
@@ -97,6 +126,14 @@ func (w *Worker) executePodcast(ctx context.Context, dir, file string, job *JobR
 		if err := podcast.VerifyCuts(t, *task.Cuts); err != nil {
 			return fail(err)
 		}
+		if task.Learning != nil {
+			if _, err := podcast.AdSeeds(t, *task.Learning, *task.Cuts); err != nil {
+				return fail(err)
+			}
+		}
+		if err := w.verifyAdDecisionEvidence(task, t, job.SourceSHA256); err != nil {
+			return fail(err)
+		}
 		result.TranscriptDigest = podcast.Digest(t)
 		result.DurationMS = t.DurationMS
 		result.RemovedMS = task.Cuts.RemovedMS
@@ -132,6 +169,14 @@ func (w *Worker) executePodcast(ctx context.Context, dir, file string, job *JobR
 		if err := verifyLocalDigest(ctx, r.effectiveInput, job.SourceSHA256); err != nil {
 			return fail(err)
 		}
+		learned, err := w.learnAds(ctx, dir, file, r.effectiveInput, t, task)
+		if errors.Is(err, errPodcastPublicationCancelled) {
+			return nil
+		}
+		if err != nil {
+			return fail(err)
+		}
+		result.LearnedAds = learned
 		if cancelled, err := w.publishPodcastFile(ctx, dir, file, tmp, r.localCandidate); err != nil {
 			return fail(err)
 		} else if cancelled {
@@ -240,7 +285,14 @@ func podcastFilter(c podcast.Cuts) string {
 // runner died before updating job.json. Requeue the SAME identity and let the
 // existing scheduler run validation/publication without invoking ASR again.
 func podcastASRCheckpoint(dir string, job *JobRecord) bool {
-	if job.Plan == nil || job.Plan.Podcast == nil || job.Plan.Podcast.Operation != "transcribe" {
+	if job.Plan == nil || job.Plan.Podcast == nil {
+		return false
+	}
+	if job.Plan.Podcast.Operation == "match_ads" {
+		var r podcast.AdMatchReport
+		return podcast.ReadJSON(filepath.Join(dir, "podcast-matches.json"), &r) == nil && r.Validate() == nil && r.SourceHash == "sha256:"+strings.TrimPrefix(job.SourceSHA256, "sha256:") && podcast.Digest(r.Catalog) == podcast.Digest(job.Plan.Podcast.Catalog)
+	}
+	if job.Plan.Podcast.Operation != "transcribe" {
 		return false
 	}
 	var t podcast.Transcript
@@ -278,7 +330,7 @@ func (w *Worker) publishPodcastFile(ctx context.Context, dir, file, src, dst str
 	err := publishPodcastFile(ctx, src, dst, func(publish func() error) error {
 		// Copying happens outside the lock so Cancel remains responsive. Only
 		// the atomic commit is serialized with its durable cancellation state.
-		return w.guardPodcastPublication(ctx, dir, file, publish)
+		return w.guardPodcastAdPublication(ctx, dir, file, publish)
 	})
 	if errors.Is(err, errPodcastPublicationCancelled) {
 		return true, nil
