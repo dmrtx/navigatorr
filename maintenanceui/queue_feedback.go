@@ -43,6 +43,10 @@ func queueWorkflows(records []operationRecord, byID map[string]operationRecord, 
 				root = preview
 			}
 		} else if r.inst.ActionName == "promote_transcode_candidate" {
+			if parent := operationString(r.inputs["batch_promote_parent_id"]); byID[parent].inst.ActionName == "transcode_batch" {
+				roots[r.inst.ID] = parent
+				continue
+			}
 			source := operationString(r.inputs["transcode_action_id"])
 			if source == "" {
 				source = operationString(operationMap(operationValue(r, "promotion"))["transcode_action_id"])
@@ -50,7 +54,7 @@ func queueWorkflows(records []operationRecord, byID map[string]operationRecord, 
 			if original, ok := byID[source]; ok && original.inst.ActionName == "transcode_media" {
 				root = source
 			}
-		} else if (r.inst.ActionName == "transcode_media" || r.inst.ActionName == "benchmark_transcode") && replacements[root] == "" {
+		} else if (r.inst.ActionName == "transcode_media" || r.inst.ActionName == "benchmark_transcode") && (replacements[root] == "" || operationString(byID[replacements[root]].inputs["batch_promote_parent_id"]) == operationString(r.inputs["parent_action_id"])) {
 			parent := operationString(r.inputs["parent_action_id"])
 			if batch, ok := byID[parent]; ok && batch.inst.ActionName == "transcode_batch" {
 				root = parent
@@ -113,7 +117,7 @@ func (s *Server) queueStages(r operationRecord) []map[string]any {
 		}
 		if r.inst.ActionName == "transcode_batch" {
 			counts := operationMap(operationValue(r, "counts"))
-			if step.Name == "promote_batch" && r.inputs["promote_candidates"] != true {
+			if step.Name == "promote_batch" && (r.inputs["promote_candidates"] != true && r.state["post_batch_promotion"] != true) {
 				stage["status"], stage["note"] = "skip", "Replacement not requested; originals kept."
 			}
 			if step.Name == "schedule_batch" && status == "completed" && operationNumber(counts["completed"]) == 0 && operationNumber(counts["failed"]) == 0 && operationNumber(counts["skip"]) > 0 {
@@ -128,7 +132,7 @@ func (s *Server) queueStages(r operationRecord) []map[string]any {
 			}
 			if step.Name == "promote_batch" && status == "completed" {
 				promotion := operationMap(operationValue(r, "batch_promotion"))
-				if r.inputs["promote_candidates"] != true {
+				if r.inputs["promote_candidates"] != true && r.state["post_batch_promotion"] != true {
 					stage["status"], stage["note"] = "skip", "Replacement not requested; originals kept."
 				} else if (promotion != nil && operationNumber(promotion["eligible"]) == 0) || (promotion == nil && operationNumber(counts["completed"]) == 0 && (operationNumber(counts["failed"]) > 0 || operationNumber(counts["skip"]) > 0)) {
 					stage["status"], stage["note"] = "skip", "No eligible candidates to replace; originals kept."
@@ -180,9 +184,12 @@ func batchQueueFeedback(items []store.TranscodeBatchItem) map[string]any {
 		preview = append(preview, batchItemView{FilePath: item.FilePath, DisplayLabel: item.DisplayLabel, Status: item.Status, Reasons: item.Reasons, Error: item.Error})
 	}
 	reasons := map[string]int{}
-	rejected := 0
+	rejected, policy := 0, 0
 	commonDir := ""
 	for i, item := range items {
+		if item.Status == "failed" && savingsFailurePattern.MatchString(item.Error) {
+			policy++
+		}
 		if item.Status == "failed" && strings.Contains(batchReasonText(item.Error, true), "transcode candidate rejected by user decision") {
 			rejected++
 		}
@@ -235,5 +242,5 @@ func batchQueueFeedback(items []store.TranscodeBatchItem) map[string]any {
 			context = filepath.Base(filepath.Dir(commonDir)) + " · " + context
 		}
 	}
-	return map[string]any{"files": preview, "file_count": len(items), "context": context, "reasons": reasonViews, "rejected_count": rejected}
+	return map[string]any{"files": preview, "file_count": len(items), "context": context, "reasons": reasonViews, "rejected_count": rejected, "policy_count": policy}
 }

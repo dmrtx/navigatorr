@@ -387,7 +387,7 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 				return toolErr("id is required"), nil
 			}
 
-			if inst, err := engine.Deps().Store.GetActionInstance(id); err == nil && inst != nil && action.RequiresWorker(inst.ActionName) {
+			if inst, err := engine.Deps().Store.GetActionInstance(id); err == nil && action.RetryRequiresWorker(inst) {
 				if err := engine.CheckWorkerAdmission(ctx); err != nil {
 					return toolErr("action_retry blocked: %v", err), nil
 				}
