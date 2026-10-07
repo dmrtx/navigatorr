@@ -13,13 +13,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jakenesler/navigatorr/podcast"
 	"github.com/jakenesler/navigatorr/transcode"
 )
 
 // JobRecord represents the persistent state stored in job.json on the worker.
 type JobRecord struct {
-	ReasonCode      string `json:"reason_code,omitempty"`
-	SourceSizeBytes int64  `json:"source_size_bytes,omitempty"`
+	Podcast         *podcast.Result `json:"podcast,omitempty"`
+	ReasonCode      string          `json:"reason_code,omitempty"`
+	SourceSizeBytes int64           `json:"source_size_bytes,omitempty"`
 	transcode.JobTelemetry
 	ID                  string          `json:"id"`
 	Status              string          `json:"status"` // queued, running, completed, failed, cancelled

@@ -38,6 +38,22 @@ func ValidatePlan(p *transcode.Plan) error {
 	if p == nil {
 		return fmt.Errorf("transcode plan is nil (fail closed)")
 	}
+	if p.Podcast != nil {
+		if err := p.Podcast.Validate(); err != nil {
+			return err
+		}
+		want := "mp3"
+		if p.Podcast.Operation == "transcribe" {
+			want = "json"
+		}
+		expected := &transcode.Plan{Podcast: p.Podcast, Container: want}
+		digest, _ := transcode.DigestPlan(expected)
+		actual, _ := transcode.DigestPlan(p)
+		if actual != digest || p.PlanDigest != digest {
+			return fmt.Errorf("podcast plan contains unsupported options or an invalid digest")
+		}
+		return nil
+	}
 	if p.Mode != "" {
 		min := 15.0
 		switch p.Mode {

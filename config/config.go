@@ -21,6 +21,7 @@ import (
 )
 
 type Config struct {
+	Podcasts          PodcastConfig            `yaml:"podcasts"`
 	Services          map[string]ServiceConfig `yaml:"services"`
 	Transmission      TransmissionConfig       `yaml:"transmission"`
 	QBittorrent       QBittorrentConfig        `yaml:"qbittorrent"`
@@ -778,7 +779,7 @@ var notFoundFieldRegex = regexp.MustCompile(`field\s+([a-zA-Z0-9_-]+)\s+not\s+fo
 var structTypeToSection = map[string]string{
 	"config.MediaConfig": "media", "MediaConfig": "media", "config.MaintenanceConfig": "maintenance", "MaintenanceConfig": "maintenance", "config.ConcurrencyConfig": "concurrency", "ConcurrencyConfig": "concurrency", "config.MCPConfig": "mcp", "MCPConfig": "mcp", "config.DatabaseConfig": "database", "DatabaseConfig": "database", "config.QueueConfig": "queue", "QueueConfig": "queue", "config.TransmissionConfig": "transmission", "TransmissionConfig": "transmission", "config.QBittorrentConfig": "qbittorrent", "QBittorrentConfig": "qbittorrent", "config.SABnzbdConfig": "sabnzbd", "SABnzbdConfig": "sabnzbd", "config.TranscodeConfig": "transcode", "TranscodeConfig": "transcode", "config.TranscodeRecipeConfig": "transcode.recipes", "TranscodeRecipeConfig": "transcode.recipes", "config.SSHExecutorConfig": "transcode", "SSHExecutorConfig": "transcode", "config.HTTPExecutorConfig": "transcode", "HTTPExecutorConfig": "transcode", "config.TranscodePathMapping": "transcode", "TranscodePathMapping": "transcode", "config.TranscodeProfileConfig": "transcode.profiles", "TranscodeProfileConfig": "transcode.profiles", "config.VideoProfileConfig": "transcode.profiles.video", "VideoProfileConfig": "transcode.profiles.video", "config.AudioProfileConfig": "transcode.profiles.audio", "AudioProfileConfig": "transcode.profiles.audio", "config.SubtitleProfileConfig": "transcode.profiles.subtitles", "SubtitleProfileConfig": "transcode.profiles.subtitles", "config.PreserveProfileConfig": "transcode.profiles.preserve", "PreserveProfileConfig": "transcode.profiles.preserve", "config.ResilienceProfileConfig": "transcode.profiles.resilience", "ResilienceProfileConfig": "transcode.profiles.resilience", "config.ServiceConfig": "services", "ServiceConfig": "services",
 }
-var topLevelKeys = map[string]bool{"services": true, "transmission": true, "qbittorrent": true, "sabnzbd": true, "transcode": true, "queue": true, "database": true, "media": true, "maintenance": true, "concurrency": true, "mcp": true, "max_response_size_kb": true, "allow_destructive": true}
+var topLevelKeys = map[string]bool{"podcasts": true, "services": true, "transmission": true, "qbittorrent": true, "sabnzbd": true, "transcode": true, "queue": true, "database": true, "media": true, "maintenance": true, "concurrency": true, "mcp": true, "max_response_size_kb": true, "allow_destructive": true}
 
 type TransportOptions struct {
 	Transport string // "stdio" or "streamable-http"
@@ -859,6 +860,9 @@ func Load(path string) (*Config, error) {
 	dec.KnownFields(true)
 	if err := dec.Decode(cfg); err != nil && !errors.Is(err, io.EOF) {
 		return nil, formatConfigError(path, err)
+	}
+	if err := cfg.Podcasts.Validate(); err != nil {
+		return nil, err
 	}
 	for name, svc := range cfg.Services {
 		if svc.AuthMethod == "" {

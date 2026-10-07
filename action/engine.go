@@ -152,6 +152,11 @@ func (e *Engine) Run(ctx context.Context, actionName string, inputs map[string]a
 		inputCopy[key] = value
 	}
 	inputs = inputCopy
+	if actionName == "clean_podcast_ads" {
+		if err := e.freezePodcastInputs(inputs); err != nil {
+			return nil, err
+		}
+	}
 
 	var idempotencyKey string
 	if len(idempotencyKeys) > 0 {
@@ -173,6 +178,13 @@ func (e *Engine) Run(ctx context.Context, actionName string, inputs map[string]a
 			return nil, err
 		} else if existing != nil {
 			return e.existingPromotion(ctx, existing, tmpl, inputs)
+		}
+	}
+	if actionName == "clean_podcast_ads" && idempotencyKey != "" {
+		if existing, err := e.deps.Store.FindActionByIdempotencyKey(actionName, idempotencyKey); err != nil {
+			return nil, err
+		} else if existing != nil {
+			return e.existingPodcast(existing, tmpl, inputs)
 		}
 	}
 	// Idempotency check: if non-terminal action with same name and key exists, return it
@@ -216,13 +228,38 @@ func (e *Engine) Run(ctx context.Context, actionName string, inputs map[string]a
 		IdempotencyKey: idempotencyKey,
 	}
 
-	if err := e.deps.Store.CreateActionInstance(inst); err != nil {
+	// Use the same durable receipt as background admission for keyed podcasts.
+	// This also closes the race where a concurrent run becomes terminal between
+	// the lookup above and insertion, after releasing the active-only index.
+	if actionName == "clean_podcast_ads" && idempotencyKey != "" {
+		initialState := map[string]any{"background_admission": true}
+		if origin, ok := ctx.Value(requestOriginKey{}).(string); ok {
+			initialState["request_origin"] = origin
+		}
+		inst.StateJSON = toJSON(initialState)
+		var admittedID string
+		admittedID, err = e.deps.Store.QueueAction(inst, actionName+":"+idempotencyKey)
+		if err == nil && admittedID != inst.ID {
+			existing, getErr := e.deps.Store.GetActionInstance(admittedID)
+			if getErr != nil {
+				return nil, getErr
+			}
+			return e.existingPodcast(existing, tmpl, inputs)
+		}
+	} else {
+		err = e.deps.Store.CreateActionInstance(inst)
+	}
+	if err != nil {
 		// A concurrent caller can win the unique idempotency key between the
 		// lookup and INSERT. Return that same workflow only when its immutable
 		// request is the same; never hide a conflicting action configuration.
 		if actionName == "promote_transcode_candidate" {
 			if existing, lookupErr := e.deps.Store.FindActionByIdempotencyKey(actionName, idempotencyKey); lookupErr == nil && existing != nil {
 				return e.existingPromotion(ctx, existing, tmpl, inputs)
+			}
+		} else if actionName == "clean_podcast_ads" && idempotencyKey != "" {
+			if existing, lookupErr := e.deps.Store.FindActionByIdempotencyKey(actionName, idempotencyKey); lookupErr == nil && existing != nil {
+				return e.existingPodcast(existing, tmpl, inputs)
 			}
 		} else if idempotencyKey != "" {
 			if existing, lookupErr := e.deps.Store.FindActiveActionByIdempotencyKey(actionName, idempotencyKey); lookupErr == nil && existing != nil {
@@ -250,6 +287,9 @@ func (e *Engine) Run(ctx context.Context, actionName string, inputs map[string]a
 		Outputs:    make(map[string]any),
 		Engine:     e,
 	}
+	if actionName == "clean_podcast_ads" && idempotencyKey != "" {
+		ec.State["background_admission"] = true
+	}
 	if origin, ok := ctx.Value(requestOriginKey{}).(string); ok {
 		ec.State["request_origin"] = origin
 	} else {
@@ -275,6 +315,12 @@ func (e *Engine) Run(ctx context.Context, actionName string, inputs map[string]a
 	stored, err := e.deps.Store.GetActionInstance(inst.ID)
 	if err != nil {
 		return nil, err
+	}
+	if actionName == "clean_podcast_ads" && idempotencyKey != "" && stored.Status != StatusPending {
+		// The service reconciler may have claimed the durable receipt before
+		// this request acquired the execution lease. Its saved state wins;
+		// never execute a terminal action or replace progress with fresh state.
+		return e.existingPodcast(stored, tmpl, inputs)
 	}
 	return e.execute(claimCtx, stored, ec, tmpl)
 }
@@ -353,6 +399,11 @@ func (e *Engine) retry(ctx context.Context, instanceID string, guard func(*store
 		return nil, fmt.Errorf("invalid retry checkpoint %d", resumeStep)
 	}
 	ec := parseExecutionContext(inst, e)
+	if inst.ActionName == "clean_podcast_ads" {
+		if err := e.preparePodcastRetry(ctx, ec); err != nil {
+			return nil, err
+		}
+	}
 	resumeStep, err = e.prepareRemoteRetry(ctx, inst, ec, tmpl, resumeStep)
 	if err != nil {
 		return nil, err
@@ -926,6 +977,7 @@ func (e *Engine) execute(ctx context.Context, inst *store.ActionInstance, ec *Ex
 			inst.CurrentStep = stepIdx
 			inst.WaitingReason = res.WaitingReason
 			inst.WaitingOptionsJSON = toJSON(res.WaitingOptions)
+			inst.WaitingCondition = res.WaitingCondition
 			inst.StateJSON = toJSON(ec.State)
 			inst.OutputsJSON = toJSON(ec.Outputs)
 			if saveErr := e.updateInstance(ctx, inst); saveErr != nil {

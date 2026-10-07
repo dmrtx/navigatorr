@@ -15,18 +15,23 @@ import (
 	"time"
 
 	"github.com/jakenesler/navigatorr/internal/smbdirect"
+	"github.com/jakenesler/navigatorr/podcast"
 	"github.com/jakenesler/navigatorr/transcode"
 	"gopkg.in/yaml.v3"
 )
 
 // WorkerConfig holds the configuration for the remote worker node.
 type WorkerConfig struct {
-	FFmpeg          string   `json:"ffmpeg" yaml:"ffmpeg"`
-	FFprobe         string   `json:"ffprobe" yaml:"ffprobe"`
-	StateDir        string   `json:"state_dir" yaml:"state_dir"`
-	AllowedRoots    []string `json:"allowed_roots" yaml:"allowed_roots"`
-	MaxParallelJobs int      `json:"max_parallel_jobs" yaml:"max_parallel_jobs"`
-	Quality         int      `json:"quality" yaml:"quality"`
+	AppleSpeechProbeAudio    string   `json:"apple_speech_probe_audio" yaml:"apple_speech_probe_audio"`
+	AppleSpeechProbeLanguage string   `json:"apple_speech_probe_language" yaml:"apple_speech_probe_language"`
+	AppleSpeechPath          string   `json:"apple_speech_path" yaml:"apple_speech_path"`
+	AppleSpeechInstallAssets bool     `json:"apple_speech_install_assets" yaml:"apple_speech_install_assets"`
+	FFmpeg                   string   `json:"ffmpeg" yaml:"ffmpeg"`
+	FFprobe                  string   `json:"ffprobe" yaml:"ffprobe"`
+	StateDir                 string   `json:"state_dir" yaml:"state_dir"`
+	AllowedRoots             []string `json:"allowed_roots" yaml:"allowed_roots"`
+	MaxParallelJobs          int      `json:"max_parallel_jobs" yaml:"max_parallel_jobs"`
+	Quality                  int      `json:"quality" yaml:"quality"`
 	// HTTP daemon (PR1 `serve` mode) settings. Empty tokens mean "no auth",
 	// which is only permitted on loopback binds (enforced in http.go).
 	HTTPListen    string `json:"http_listen" yaml:"http_listen"`
@@ -117,6 +122,8 @@ func (cfg *WorkerConfig) normalizeOperational() error {
 		return p
 	}
 
+	cfg.AppleSpeechProbeAudio = expand(cfg.AppleSpeechProbeAudio)
+	cfg.AppleSpeechPath = expand(cfg.AppleSpeechPath)
 	cfg.StateDir = expand(cfg.StateDir)
 	cfg.HTTPTokenFile = expand(cfg.HTTPTokenFile)
 	cfg.LocalWorkDir = expand(cfg.LocalWorkDir)
@@ -684,6 +691,26 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("invalid transcode profile or plan: %v", err)}, err
 	}
 
+	if plan.Podcast != nil {
+		for _, path := range []string{cleanSource, cleanCandidate} {
+			if err := w.requirePodcastMediaPath(path); err != nil {
+				return SubmitResponse{}, err
+			}
+		}
+		if sourceSHA == "" {
+			return SubmitResponse{}, fmt.Errorf("podcast requires source_sha256")
+		}
+		if plan.Podcast.Operation == "transcribe" && w.cfg.AppleSpeechPath == "" {
+			return SubmitResponse{}, fmt.Errorf("apple_speech_path is not configured")
+		}
+		want := ".mp3"
+		if plan.Podcast.Operation == "transcribe" {
+			want = ".json"
+		}
+		if strings.ToLower(filepath.Ext(cleanCandidate)) != want {
+			return SubmitResponse{}, fmt.Errorf("podcast candidate must use %s", want)
+		}
+	}
 	// Canonical execution-spec digest over the immutable resolved request,
 	// including the source content identity when the coordinator supplied it.
 	// Never trust caller-supplied digest text: recompute and verify.
@@ -1478,6 +1505,9 @@ func (w *Worker) InternalRun(ctx context.Context, jobID string) error {
 	if postEncodeResume || job.EncodeComplete {
 		return w.finalizeOperational(ctx, jobDir, jobFile, job, resolved)
 	}
+	if job.Plan != nil && job.Plan.Podcast != nil {
+		return w.executePodcast(ctx, jobDir, jobFile, job, resolved)
+	}
 	return w.executeOperational(ctx, jobDir, jobFile, job, resolved)
 }
 
@@ -1742,6 +1772,10 @@ func (w *Worker) reconcileJob(jobDir, jobFile string) error {
 		return nil
 	}
 
+	if podcastASRCheckpoint(jobDir, job) {
+		job.Status, job.Phase, job.PID, job.ProcessStartTime = "queued", "transcribing", 0, ""
+		return SaveJobAtomic(jobFile, job)
+	}
 	job.Status = "failed"
 	job.FinishedAt = time.Now().UTC()
 	job.Error = "process terminated unexpectedly"
@@ -1758,7 +1792,8 @@ func (w *Worker) reconcileJob(jobDir, jobFile string) error {
 
 // JobStatusResponse is returned by the status subcommand.
 type JobStatusResponse struct {
-	ReasonCode string `json:"reason_code,omitempty"`
+	Podcast    *podcast.Result `json:"podcast,omitempty"`
+	ReasonCode string          `json:"reason_code,omitempty"`
 	transcode.JobTelemetry
 	ID                    string                       `json:"id"`
 	Status                string                       `json:"status"`
@@ -1851,6 +1886,7 @@ func (w *Worker) Status(ctx context.Context, jobID string) (JobStatusResponse, e
 
 	return JobStatusResponse{
 		JobTelemetry:          telemetry,
+		Podcast:               job.Podcast,
 		ID:                    job.ID,
 		Status:                job.Status,
 		Progress:              metrics.Progress,
@@ -2018,6 +2054,25 @@ func (w *Worker) cleanupCancelledArtifacts(job *JobRecord) {
 	source := strings.TrimSpace(job.Source)
 	candidate := strings.TrimSpace(job.Candidate)
 	destination := strings.TrimSpace(job.Destination())
+	if job.Plan != nil && job.Plan.Podcast != nil {
+		// Podcast candidates are exclusively published, fully validated files,
+		// never an encoder's mutable output. The semantic path may also have
+		// been created by somebody else while this job waited in the queue.
+		// Cancellation only owns private scratch; it must preserve that path.
+		if validateJobID(job.ID) != nil {
+			return
+		}
+		_ = os.Remove(filepath.Join(w.cfg.StateDir, job.ID, "podcast-render.mp3"))
+		local := strings.TrimSpace(job.LocalCandidatePath)
+		if expected, err := LocalCandidatePath(w.localWorkDir(), job.ID, candidate); err == nil && local == expected && local != source && local != candidate && local != destination && !w.isCachePath(local) {
+			_ = os.Remove(local)
+		}
+		partial := strings.TrimSpace(job.PartialPath)
+		if partial != "" && partial == PartialPathFor(destination, job.ID) && partial != source && partial != destination {
+			_ = os.Remove(partial)
+		}
+		return
+	}
 
 	if fs := FinalizationState(strings.TrimSpace(job.FinalizationState)); fs != "" && fs != FinalizationStateNotRequired {
 		local := strings.TrimSpace(job.LocalCandidatePath)
