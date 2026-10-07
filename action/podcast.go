@@ -12,6 +12,8 @@ import (
 )
 
 type podcastSession struct {
+	Matches         *podcast.AdMatchReport            `json:"matches,omitempty"`
+	Known           map[string]podcast.AdKnownUnit    `json:"known,omitempty"`
 	Version         int                               `json:"version"`
 	Policy          podcast.Policy                    `json:"policy"`
 	Transcript      podcast.Transcript                `json:"transcript"`
@@ -80,6 +82,11 @@ func (e *Engine) podcastPreflight(ctx context.Context, ec *ExecutionContext) (St
 		}
 		return StepResult{}, err
 	}
+	if policy.KnownAdsFirstPass {
+		if _, ok := e.deps.Transcode.(transcode.PodcastAdExecutor); !ok || caps.Podcast == nil || caps.Podcast.AdAlgorithm != podcast.AdAlgorithm {
+			return StepResult{}, fmt.Errorf("worker does not support the configured known-ad first pass")
+		}
+	}
 	if caps.Podcast == nil || !caps.Podcast.Available || !caps.Podcast.NativeTimingVerified || !caps.Podcast.MP3RenderVerified || strings.ReplaceAll(caps.Podcast.VerifiedLanguage, "-", "_") != strings.ReplaceAll(policy.Language, "-", "_") {
 		reason := "worker did not report podcast capability"
 		if caps.Podcast != nil {
@@ -136,12 +143,30 @@ func loadPodcastSession(ec *ExecutionContext) (podcastSession, error) {
 			err = fmt.Errorf("immutable transcript checkpoint changed")
 		}
 	}
+	if err == nil && s.Policy.KnownAdsFirstPass {
+		known, e := podcast.KnownAdUnits(s.Transcript, valueAdReport(s.Matches), s.Policy)
+		if e != nil || s.Matches.Catalog.Scope != getString(ec.Inputs, "podcast_id") || podcast.Digest(s.Matches) != podcastSummary(ec)["match_digest"] || podcast.Digest(known) != podcast.Digest(s.Known) {
+			err = fmt.Errorf("acoustic checkpoint evidence changed")
+		}
+	}
 	return s, err
 }
 func savePodcastSession(ec *ExecutionContext, s podcastSession) error {
 	return podcast.WriteJSON(getString(ec.State, "podcast_session"), s)
 }
 func (e *Engine) podcastWorkerStage(ctx context.Context, ec *ExecutionContext, op string) (StepResult, error) {
+	if op == "transcribe" {
+		var p podcast.Policy
+		if err := decodePodcastValue(ec.State["podcast_policy"], &p); err != nil {
+			return StepResult{}, err
+		}
+		if p.KnownAdsFirstPass && getString(ec.State, "podcast_match_path") == "" {
+			r, err := e.podcastWorkerStage(ctx, ec, "match_ads")
+			if err != nil || r.Status != StepCompleted {
+				return r, err
+			}
+		}
+	}
 	if op == "transcribe" && getString(ec.Inputs, "cached_transcript_path") != "" {
 		return e.podcastReuseTranscript(ctx, ec)
 	}
@@ -153,6 +178,13 @@ func (e *Engine) podcastWorkerStage(ctx context.Context, ec *ExecutionContext, o
 	if id == "" {
 		id = fmt.Sprintf("podcast-%s-%s-%d", ec.InstanceID, op, getInt(ec.State, "podcast_"+op+"_attempt"))
 		ec.State[key] = id
+		ec.State["job_id"] = id
+		ec.State["external_reference"] = id
+		if err := e.persistExecutionState(ctx, ec); err != nil {
+			return StepResult{}, err
+		}
+	}
+	if getString(ec.State, "job_id") != id {
 		ec.State["job_id"] = id
 		ec.State["external_reference"] = id
 		if err := e.persistExecutionState(ctx, ec); err != nil {
@@ -175,6 +207,28 @@ func (e *Engine) podcastWorkerStage(ctx context.Context, ec *ExecutionContext, o
 			return StepResult{}, err
 		}
 		task := &podcast.Task{Version: podcast.Version, Operation: op, Language: policy.Language}
+		if op == "match_ads" {
+			var catalog podcast.AdCatalog
+			if raw := ec.State["podcast_ad_catalog"]; raw != nil {
+				if err := decodePodcastValue(raw, &catalog); err != nil {
+					return StepResult{}, err
+				}
+			} else {
+				client, ok := e.deps.Transcode.(transcode.PodcastAdExecutor)
+				if !ok {
+					return StepResult{}, fmt.Errorf("ad catalog API unavailable")
+				}
+				catalog, err = client.AdCatalog(ctx, getString(ec.Inputs, "podcast_id"))
+				if err != nil {
+					if isRetryableWorkerPollError(err) {
+						return wait("Waiting for known-ad catalog")
+					}
+					return StepResult{}, err
+				}
+				ec.State["podcast_ad_catalog"] = catalog
+			}
+			task.Catalog = &catalog
+		}
 		container := "json"
 		candidate := filepath.Join(filepath.Dir(getString(ec.State, "podcast_output")), ".navigatorr-"+id+".json")
 		if op == "render" {
@@ -187,6 +241,13 @@ func (e *Engine) podcastWorkerStage(ctx context.Context, ec *ExecutionContext, o
 			}
 			if s.Policy.ReviewRequired && s.ApprovedDigest != podcast.Digest(s.Cuts) {
 				return StepResult{}, fmt.Errorf("cuts approval is missing or stale")
+			}
+			if err := e.checkKnownAds(ctx, s); err != nil {
+				return StepResult{}, err
+			}
+			if s.Policy.KnownAdsFirstPass {
+				task.Learning = &podcast.AdLearning{Scope: getString(ec.Inputs, "podcast_id"), Policy: s.Policy, Classifications: s.Classifications, ApprovedDigest: s.ApprovedDigest}
+				task.MatchJobID = getString(ec.State, "podcast_match_ads_job")
 			}
 			task.Cuts = s.Cuts
 			task.ASRJobID = getString(ec.State, "podcast_transcribe_job")
@@ -234,7 +295,31 @@ func (e *Engine) podcastWorkerStage(ctx context.Context, ec *ExecutionContext, o
 		if strings.TrimPrefix(actual, "sha256:") != strings.TrimPrefix(st.CandidateSHA256, "sha256:") || size != st.CandidateSizeBytes {
 			return StepResult{}, fmt.Errorf("worker output identity mismatch")
 		}
-		if op == "transcribe" {
+		if op == "match_ads" {
+			var report podcast.AdMatchReport
+			if err := podcast.ReadJSON(candidate, &report); err != nil {
+				return StepResult{}, err
+			}
+			var catalog podcast.AdCatalog
+			if err := decodePodcastValue(ec.State["podcast_ad_catalog"], &catalog); err != nil {
+				return StepResult{}, err
+			}
+			if err := report.Validate(); err != nil {
+				return StepResult{}, err
+			}
+			if report.SourceHash != st.Podcast.SourceHash || podcast.Digest(report) != st.Podcast.MatchDigest || podcast.Digest(report.Catalog) != podcast.Digest(catalog) {
+				return StepResult{}, fmt.Errorf("known-ad report identity differs")
+			}
+			path := filepath.Join(filepath.Dir(getString(ec.State, "podcast_session")), "matches.json")
+			if err := podcast.WriteJSON(path, report); err != nil {
+				return StepResult{}, err
+			}
+			ec.State["podcast_match_path"] = path
+			podcastSummary(ec)["match_digest"] = podcast.Digest(report)
+			podcastSummary(ec)["known_ad_matches"] = len(report.Matches)
+			podcastSummary(ec)["first_pass_wall_seconds"] = report.WallSeconds
+			podcastSummary(ec)["ad_catalog_digest"] = podcast.Digest(catalog)
+		} else if op == "transcribe" {
 			var t podcast.Transcript
 			if err := podcast.ReadJSON(candidate, &t); err != nil {
 				return StepResult{}, err
@@ -252,7 +337,11 @@ func (e *Engine) podcastWorkerStage(ctx context.Context, ec *ExecutionContext, o
 			}
 			// Recovery must not erase classifications already durably saved.
 			if _, err := os.Stat(getString(ec.State, "podcast_session")); os.IsNotExist(err) {
-				if err := savePodcastSession(ec, podcastSession{Version: podcast.Version, Policy: p, Transcript: t, Blocks: blocks, Classifications: map[string]podcast.Classification{}, Reads: map[string]map[int]bool{}}); err != nil {
+				s := podcastSession{Version: podcast.Version, Policy: p, Transcript: t, Blocks: blocks, Classifications: map[string]podcast.Classification{}, Reads: map[string]map[int]bool{}}
+				if err := attachKnownAds(ec, &s); err != nil {
+					return StepResult{}, err
+				}
+				if err := savePodcastSession(ec, s); err != nil {
 					return StepResult{}, err
 				}
 			} else if err != nil {
@@ -273,11 +362,19 @@ func (e *Engine) podcastWorkerStage(ctx context.Context, ec *ExecutionContext, o
 			m["asr_wall_seconds"] = t.WallSeconds
 			m["realtime_factor"] = t.RealtimeFactor
 		} else {
+			s, err := loadPodcastSession(ec)
+			if err != nil {
+				return StepResult{}, err
+			}
+			if err := e.checkKnownAds(ctx, s); err != nil {
+				return StepResult{}, err
+			}
 			if !st.Podcast.DecodePassed {
 				return StepResult{}, fmt.Errorf("worker did not validate full audio decode")
 			}
 			ec.State["podcast_render_evidence"] = st.Podcast
 			ec.State["podcast_output_sha256"] = actual
+			podcastSummary(ec)["learned_ads"] = st.Podcast.LearnedAds
 		}
 		return StepResult{Status: StepCompleted, Outputs: ec.State}, nil
 	default:
@@ -290,6 +387,9 @@ func (e *Engine) podcastClassification(ctx context.Context, ec *ExecutionContext
 		return StepResult{}, err
 	}
 	m := podcastSummary(ec)
+	if err := e.checkKnownAds(ctx, s); err != nil {
+		return StepResult{}, err
+	}
 	m["classified_blocks"] = len(s.Classifications)
 	m["total_blocks"] = len(s.Blocks)
 	if ec.Decision != "plan" {
@@ -346,6 +446,9 @@ func (e *Engine) podcastAccept(ctx context.Context, ec *ExecutionContext) (StepR
 	}
 	s, err := loadPodcastSession(ec)
 	if err != nil {
+		return StepResult{}, err
+	}
+	if err := e.checkKnownAds(ctx, s); err != nil {
 		return StepResult{}, err
 	}
 	var result podcast.Result

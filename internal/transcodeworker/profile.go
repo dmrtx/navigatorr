@@ -43,7 +43,7 @@ func ValidatePlan(p *transcode.Plan) error {
 			return err
 		}
 		want := "mp3"
-		if p.Podcast.Operation == "transcribe" {
+		if p.Podcast.Operation != "render" {
 			want = "json"
 		}
 		expected := &transcode.Plan{Podcast: p.Podcast, Container: want}

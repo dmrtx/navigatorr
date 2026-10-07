@@ -12,6 +12,7 @@ type PodcastConfig struct {
 	Podcasts    map[string]PodcastSettings `yaml:"podcasts"`
 }
 type PodcastSettings struct {
+	KnownAdsFirstPass  bool     `yaml:"known_ads_first_pass"`
 	Enabled            bool     `yaml:"enabled"`
 	Language           string   `yaml:"language"`
 	Remove             []string `yaml:"remove"`
@@ -24,6 +25,7 @@ type PodcastSettings struct {
 func (c PodcastConfig) Policy(id string) (podcast.Policy, error) {
 	p := podcast.DefaultPolicy()
 	s, ok := c.Podcasts[id]
+	p.KnownAdsFirstPass = s.KnownAdsFirstPass
 	if !c.Enabled || !ok || !s.Enabled {
 		return p, fmt.Errorf("podcast %q is not enabled", id)
 	}

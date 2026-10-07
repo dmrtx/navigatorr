@@ -21,6 +21,8 @@ podcasts:
   podcasts:
     generation-why:
       enabled: true
+      # Optional: confirmed acoustic + native-text first pass; default false.
+      known_ads_first_pass: true
       language: en_US
       remove: [paid_ad]
       window_ms: 240000
@@ -212,3 +214,56 @@ tag structures fail before publication. Decode and output hash validation
 cover the final MP3 including its attachment. The private immutable original
 is still required to restore removed material; embedding text does not embed
 the original audio. No additional ASR or model invocation occurs for embedding.
+
+## Confirmed-ad first pass
+
+Set `known_ads_first_pass: true` per podcast profile after upgrading both hosts.
+This changes the frozen policy digest, so new selections/revisions get a new
+identity. Existing completed episodes and native transcripts remain valid.
+
+The existing transcription step first queues `match_ads` against a frozen
+library snapshot, including when reusing a cached transcript. FFmpeg decodes
+the original to private mono 8 kHz PCM. Spectral signatures select candidates;
+sample alignment and every half-second of the full recording, including its
+edges, must pass waveform verification. The original native ASR must also
+agree with **all** normalized seed words before automatic labels are admitted.
+A common music bed with different speech therefore remains for the LLM.
+This version saves LLM analysis of confirmed repeats; it still transcribes the
+original when no valid cached native transcript exists.
+
+Only native units wholly inside the match, with a 30 ms boundary margin, are
+automatically labeled. Partial matches, changed copy, boundary words, ambiguous
+categories and unknown ads stay with the orchestrator. Use `podcast_block` with
+`unknown_only=true`; offsets still refer to the original block and receipts
+cover only delivered units. `podcast_blocks` reports unknown-unit counts, and
+`podcast_block` includes the known ID ranges and their evidence. Classify all
+unknown units in order; omit known units and never submit evidence fields.
+The server merges both sources of labels and still requires complete coverage
+and overlap agreement. Normal review, one final render and one atomic
+publication follow. There is no intermediate cleaned enclosure.
+
+After audio validation, learning derives seeds from reviewed native ID labels,
+splitting adjacent categories instead of using merged cut ranges. Entries carry
+source/transcript/classification/cuts provenance, normalized-text digest and
+immutable PCM. Automatic decisions never become new seeds. The private library
+is scoped to one podcast, bounded to 128 references of 8–180 seconds, deduplicated
+outside cancellation locks and committed atomically with a catalog compare-and-
+swap. New seed PCM is capped at 16 MiB per render. Source PCM stays on disk with
+a twelve-hour output limit and is removed after use.
+
+`podcast_ad_library(podcast_id, offset)` pages references through MCP or the
+UI's **Ad library** control. Passing `revoke=<reference ID>` writes a durable
+tombstone. Pending classifications/cuts that depend on it are blocked and need
+a new action/revision; they cannot reuse that approval. Workers check tombstones
+under the catalog lock at publication and terminal recovery, and the coordinator
+checks again before accepting output. Historical published files are retained.
+The same recording/text cannot silently relearn a revoked reference.
+
+The immutable render proof is limited to 8 MiB, with a 9 MiB worker job-request
+limit. Oversized classification proofs are rejected before saving the affected
+block; compact reasons/ranges rather than retrying a larger payload. Benchmarks
+keep their existing 1 MiB request limit.
+
+The [real-audio first-pass benchmark](reviews/2026-10-07-podcast-known-ads.md)
+records held-out matches, rejected candidates and M1 Max timings. These checks
+do not establish human listening acceptance or overall ad-detection recall.

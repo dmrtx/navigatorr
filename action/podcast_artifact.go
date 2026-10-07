@@ -121,7 +121,11 @@ func (e *Engine) podcastReuseTranscript(ctx context.Context, ec *ExecutionContex
 		if !os.IsNotExist(err) {
 			return StepResult{}, err
 		}
-		if err = savePodcastSession(ec, podcastSession{Version: podcast.Version, Policy: policy, Transcript: t, Blocks: blocks, Classifications: map[string]podcast.Classification{}, Reads: map[string]map[int]bool{}}); err != nil {
+		s := podcastSession{Version: podcast.Version, Policy: policy, Transcript: t, Blocks: blocks, Classifications: map[string]podcast.Classification{}, Reads: map[string]map[int]bool{}}
+		if err = attachKnownAds(ec, &s); err != nil {
+			return StepResult{}, err
+		}
+		if err = savePodcastSession(ec, s); err != nil {
 			return StepResult{}, err
 		}
 	}

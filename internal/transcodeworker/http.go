@@ -23,6 +23,10 @@ import (
 // legitimate plan while bounding memory use.
 const maxHTTPBodyBytes = 1 << 20
 
+// Reviewed podcast classifications travel in the immutable render plan. Their
+// proof is capped at 8 MiB, with 1 MiB for bounded cuts and request metadata.
+const maxHTTPJobBodyBytes = 9 << 20
+
 // validTranscodeJobIDRegex mirrors transcode.validJobIDRegex (SSH path):
 // safe filesystem identifier without separators. Traversal, bench- namespace,
 // and reserved names are enforced separately in ValidateTranscodeJobID.
@@ -164,6 +168,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/ready", s.handleReady)
 	mux.HandleFunc("/v1/doctor", s.handleDoctor)
 	mux.HandleFunc("/v1/capabilities", s.handleCapabilities)
+	mux.HandleFunc("/v1/podcast-ad-library", s.handleAdLibrary)
 	mux.HandleFunc("/v1/jobs", s.handleJobs)
 	mux.HandleFunc("/v1/jobs/", s.handleJobByID)
 	mux.HandleFunc("/v1/benchmarks", s.handleBenchmarks)
@@ -336,7 +341,7 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		writeHTTPError(w, http.StatusMethodNotAllowed, "use POST")
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxHTTPBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, maxHTTPJobBodyBytes)
 	var req SubmitRequest
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()

@@ -42,6 +42,9 @@ func Labels(t Transcript, b Block, c Classification) ([]string, error) {
 	labels := make([]string, b.Last-b.First+1)
 	idx := b.First
 	for _, d := range c.Decisions {
+		if d.Evidence != nil && (!ValidHash(d.Evidence.ReferenceID) || !ValidHash(d.Evidence.MatchDigest)) {
+			return nil, fmt.Errorf("invalid acoustic evidence identity")
+		}
 		if !Label(d.Label) || d.Reason == "" || len(d.Reason) > 1024 || idx > b.Last || t.Units[idx].ID != d.FirstID {
 			return nil, fmt.Errorf("decisions must cover every unit in order, without gaps or duplicates")
 		}
