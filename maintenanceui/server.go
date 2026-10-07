@@ -98,6 +98,8 @@ func (s *Server) Handler() http.Handler {
 		writeJSON(w, 200, map[string]bool{"ok": true})
 	})
 	mux.HandleFunc("GET /api/maintenance/commands", s.commandStatus)
+	mux.HandleFunc("GET /api/maintenance/batch-candidates", s.batchCandidates)
+	mux.HandleFunc("POST /api/maintenance/batch-candidates", s.batchCandidates)
 	mux.HandleFunc("GET /api/maintenance/batch-settings", s.batchSettings)
 	mux.HandleFunc("POST /api/maintenance/batch-settings", s.batchSettings)
 	mux.HandleFunc("GET /api/maintenance/bootstrap", s.bootstrap)
@@ -264,7 +266,11 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 	for _, name := range toolNames {
 		definitions = append(definitions, s.mcp.GetTool(name).Tool)
 	}
-	writeJSON(w, 200, map[string]any{"services": services, "roots": s.cfg.Media.AllowedReadRoots, "tools": toolNames, "tool_definitions": definitions, "allow_destructive": s.cfg.AllowDestructive, "transcode_enabled": s.cfg.Transcode.Enabled, "asset_kinds": []string{"video"}})
+	minimumSavings := s.cfg.Transcode.MinSavingsPercent
+	if minimumSavings <= 0 {
+		minimumSavings = action.DefaultMinSavingsPercent
+	}
+	writeJSON(w, 200, map[string]any{"services": services, "roots": s.cfg.Media.AllowedReadRoots, "tools": toolNames, "tool_definitions": definitions, "allow_destructive": s.cfg.AllowDestructive, "transcode_enabled": s.cfg.Transcode.Enabled, "asset_kinds": []string{"video"}, "min_savings_percent": minimumSavings})
 }
 func (s *Server) tool(w http.ResponseWriter, r *http.Request) {
 	var body struct {

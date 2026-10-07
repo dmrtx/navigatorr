@@ -33,7 +33,7 @@ func (e *Engine) applyMaintenanceCommand(ctx context.Context, ec *ExecutionConte
 	if err != nil {
 		return StepResult{Status: StepFailed, Error: err.Error()}, nil
 	}
-	if (kind == "retry" && RequiresWorker(inst.ActionName)) || kind == "resume" && ResumeRequiresWorker(inst, getString(ec.Inputs, "decision")) || kind == "candidate" && getString(ec.Inputs, "decision") == "accept_loss" || kind == "reconfigure" {
+	if (kind == "retry" && RetryRequiresWorker(inst)) || kind == "resume" && ResumeRequiresWorker(inst, getString(ec.Inputs, "decision")) || kind == "candidate" && getString(ec.Inputs, "decision") == "accept_loss" || kind == "reconfigure" {
 		if err := e.CheckWorkerAdmission(ctx); err != nil {
 			return StepResult{Status: StepFailed, Error: err.Error()}, nil
 		}
@@ -58,6 +58,21 @@ func (e *Engine) applyMaintenanceCommand(ctx context.Context, ec *ExecutionConte
 		result, err = e.DiscardDuplicateTranscodeBackup(ctx, id)
 	case "discard":
 		result, err = e.DiscardTranscodeBackup(ctx, id)
+	case "prepare_batch_promotion":
+		keys := []string{}
+		switch raw := ec.Inputs["item_keys"].(type) {
+		case []any:
+			for _, key := range raw {
+				if value, ok := key.(string); ok {
+					keys = append(keys, value)
+				}
+			}
+		case []string:
+			keys = raw
+		}
+		result, err = e.PrepareBatchPromotion(ctx, id, getString(ec.Inputs, "version"), ec.InstanceID, keys)
+	case "review_batch_promotion":
+		result, err = e.ResumeReviewedBatch(ctx, id, getString(ec.Inputs, "digest"), getString(ec.Inputs, "decision"), ec.InstanceID)
 	case "reconfigure":
 		settings, ok := ec.Inputs["settings"].(map[string]any)
 		if !ok {

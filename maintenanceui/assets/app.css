@@ -1643,3 +1643,10 @@ pre {
 #reconfigure-profile-info > p { margin: 8px 0 0; }
 .batch-item-row > .batch-file-profile { flex-basis: 100%; }
 .batch-file-activity { flex-basis: 100%; color: var(--forest); font-size: 12px; }
+
+.profile-info { margin: 8px 0 12px; padding: 12px; background: #f4f5ef; border-left: 2px solid var(--forest); }
+.profile-info > p:first-child { margin-top: 0; }
+.batch-progress-explanation { order: 3; flex-basis: 100%; font-size: 11px; line-height: 1.4; }
+.job-command { margin: 6px 0 0; padding: 6px 9px; border-left: 2px solid var(--forest); background: #edf3eb; font-size: 12px; }
+.job-command.failed { border-color: #a52929; background: #fbe9e7; }
+.candidate-review-row { padding: 10px 0; border-bottom: 1px solid var(--line); }

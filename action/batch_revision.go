@@ -120,28 +120,30 @@ func (e *Engine) ReconfigureBatch(ctx context.Context, id, scope, candidateID, v
 			return nil, fmt.Errorf("candidate no longer awaits your decision")
 		}
 	}
-	// No selected candidate may already be reserved for a library replacement.
-	selected := 0
+
+	// A completed or reserved replacement keeps its own file and history.
+	// Only the remaining original candidates may receive new encoding settings.
+	selectedKeys := map[string]bool{}
 	for _, item := range items {
 		if !BatchRevisionSelects(item, scope, candidateID) {
 			continue
 		}
-		selected++
-		for _, service := range []string{"sonarr", "radarr"} {
-			if old, err := e.deps.Store.FindActionByIdempotencyKey("promote_transcode_candidate", "promote:"+service+":"+item.ChildActionID); err != nil {
-				return nil, err
-			} else if old != nil {
-				return nil, fmt.Errorf("a selected file has a replacement job; keep its recovery history separate")
-			}
+		reserved, err := e.BatchItemReplacementReserved(item)
+		if err != nil {
+			return nil, err
 		}
+		if reserved {
+			continue
+		}
+		selectedKeys[item.ItemKey] = true
 	}
-	if selected == 0 {
-		return nil, fmt.Errorf("no files selected")
+	if len(selectedKeys) == 0 {
+		return nil, fmt.Errorf("no unreplaced files selected")
 	}
 	var changed []store.TranscodeBatchItem
 	for i := range items {
 		item := &items[i]
-		if !BatchRevisionSelects(*item, scope, candidateID) {
+		if !selectedKeys[item.ItemKey] {
 			continue
 		}
 		merged := map[string]any{}
@@ -266,4 +268,20 @@ func batchNeedsCalibration(ec *ExecutionContext, items []store.TranscodeBatchIte
 		}
 	}
 	return false
+}
+
+func (e *Engine) BatchItemReplacementReserved(item store.TranscodeBatchItem) (bool, error) {
+	if item.ChildActionID == "" {
+		return false, nil
+	}
+	for _, service := range []string{"sonarr", "radarr", "filesystem"} {
+		old, err := e.deps.Store.FindActionByIdempotencyKey("promote_transcode_candidate", "promote:"+service+":"+item.ChildActionID)
+		if err != nil {
+			return false, err
+		}
+		if old != nil {
+			return true, nil
+		}
+	}
+	return false, nil
 }

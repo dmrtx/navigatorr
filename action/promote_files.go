@@ -312,8 +312,8 @@ func (e *Engine) stepPromotePlan(ctx context.Context, ec *ExecutionContext) (Ste
 		return promoteFailed(err)
 	}
 	if p.Service == "filesystem" {
-		if seriesID > 0 || movieID > 0 || getString(ec.Inputs, "batch_promote_parent_id") != "" {
-			return promoteFailed(fmt.Errorf("filesystem promotion cannot include library or batch IDs"))
+		if seriesID > 0 || movieID > 0 {
+			return promoteFailed(fmt.Errorf("filesystem promotion cannot include library IDs"))
 		}
 		p.SeriesPath = filepath.Dir(p.OriginalPath)
 		p.NewPath = strings.TrimSuffix(p.OriginalPath, filepath.Ext(p.OriginalPath)) + filepath.Ext(p.CandidatePath)
