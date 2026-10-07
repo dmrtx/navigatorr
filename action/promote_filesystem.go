@@ -28,6 +28,31 @@ func (e *Engine) localPromotionState(ec *ExecutionContext) (*promotionState, err
 	return p, nil
 }
 
+// Hashing can take minutes. Recheck the reviewed batch under its execution
+// lease at the actual mutation, so cancellation cannot race publication or
+// recovery cleanup. Never wait for a parent while holding a child lease.
+func (e *Engine) withBatchPromotionMutation(ctx context.Context, ec *ExecutionContext, p *promotionState, mutate func() error) error {
+	parent := getString(ec.Inputs, "batch_promote_parent_id")
+	if parent != "" {
+		if owner, _ := ctx.Value(actionLeaseOwnerKey{actionID: parent}).(string); owner == "" {
+			leased, release, err := e.claimExecution(ctx, parent, false)
+			if err != nil {
+				return err
+			}
+			defer release()
+			ctx = leased
+		}
+		allowRecovery := getString(ec.State, "promotion_recovery_parent_digest") == getString(ec.Inputs, "batch_promote_digest")
+		if err := e.verifyBatchPromotionApprovalState(ec, p, allowRecovery); err != nil {
+			return err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return mutate()
+}
+
 // The durable publish intent precedes the atomic move. After a crash, only the
 // recorded candidate digest at the recorded destination proves publication;
 // unknown destination bytes never trigger another overwrite or cleanup.
@@ -70,11 +95,12 @@ func (e *Engine) localPromotionPublish(ctx context.Context, ec *ExecutionContext
 	if err := e.verifyPromotionHashStable(ctx, p.CandidatePath, p.CandidateSHA); err != nil {
 		return promoteFailed(err)
 	}
-	if p.NewPath == p.OriginalPath {
-		err = os.Rename(p.CandidatePath, p.NewPath)
-	} else {
-		err = renamePromotionNoReplace(p.CandidatePath, p.NewPath)
-	}
+	err = e.withBatchPromotionMutation(ctx, ec, p, func() error {
+		if p.NewPath == p.OriginalPath {
+			return os.Rename(p.CandidatePath, p.NewPath)
+		}
+		return renamePromotionNoReplace(p.CandidatePath, p.NewPath)
+	})
 	if err != nil {
 		return promoteFailed(fmt.Errorf("publish filesystem candidate: %w; recovery retained", err))
 	}
@@ -121,7 +147,7 @@ func (e *Engine) localPromotionRemoveOriginal(ctx context.Context, ec *Execution
 			if err := e.verifyPromotionHashStable(ctx, p.OriginalPath, p.OriginalSHA); err != nil {
 				return promoteFailed(err)
 			}
-			if err := os.Remove(p.OriginalPath); err != nil {
+			if err := e.withBatchPromotionMutation(ctx, ec, p, func() error { return os.Remove(p.OriginalPath) }); err != nil {
 				return promoteFailed(err)
 			}
 		} else if !os.IsNotExist(err) || p.DeleteSentAt == "" {
@@ -179,7 +205,7 @@ func (e *Engine) localPromotionFinalize(ctx context.Context, ec *ExecutionContex
 		if err := e.cleanupProgress(ctx, ec, "removing_recovery", p.BackupPath, 0, p.OriginalBytes); err != nil {
 			return promoteFailed(err)
 		}
-		if err := os.Remove(p.BackupPath); err != nil {
+		if err := e.withBatchPromotionMutation(ctx, ec, p, func() error { return os.Remove(p.BackupPath) }); err != nil {
 			return promoteFailed(err)
 		}
 	} else if !os.IsNotExist(err) || !p.RecoveryCleanupStarted {

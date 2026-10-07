@@ -250,3 +250,54 @@ func TestBatchSettingsReadsCurrentLimitsAndCanPreserveMixedValues(t *testing.T) 
 		t.Fatal("editing savings changed per-file growth limits", current)
 	}
 }
+
+func TestBatchCandidateReviewHTTPAdmissionIsAuthenticatedFastAndIdempotent(t *testing.T) {
+	s, h := testUI(t)
+	s.cfg.AllowDestructive = true
+	st := s.engine.Deps().Store
+	seedOperation(t, st, "finished", "transcode_batch", "completed", map[string]any{"paths": []string{"/media/file.mkv"}}, nil, nil)
+	w := request(h, "GET", "/api/maintenance/batch-candidates?id=finished", "", true)
+	if w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if request(h, "GET", "/api/maintenance/batch-candidates?id=finished", "", false).Code != 401 {
+		t.Fatal("unauthenticated review")
+	}
+	if request(h, "POST", "/api/maintenance/batch-candidates", `{"id":"finished","decision":"approve","key":"review-once"}`, true).Code != 400 {
+		t.Fatal("approval without digest admitted")
+	}
+	ok, err := st.ClaimActionExecution("finished", "slow-check", time.Now(), time.Minute)
+	if err != nil || !ok {
+		t.Fatal(err)
+	}
+	defer st.ReleaseActionExecution("finished", "slow-check")
+	body := `{"id":"finished","version":"frozen-review","item_keys":["file"],"key":"review-once"}`
+	start := time.Now()
+	w = request(h, "POST", "/api/maintenance/batch-candidates", body, true)
+	if w.Code != 202 || time.Since(start) > 500*time.Millisecond {
+		t.Fatal("review waited for target execution", w.Code, w.Body.String())
+	}
+	var receipt, again map[string]string
+	json.Unmarshal(w.Body.Bytes(), &receipt)
+	w = request(h, "POST", "/api/maintenance/batch-candidates", body, true)
+	json.Unmarshal(w.Body.Bytes(), &again)
+	if w.Code != 202 || receipt["command_id"] != again["command_id"] {
+		t.Fatal("repeated review duplicated command", w.Body.String())
+	}
+	parent, _ := st.GetActionInstance("finished")
+	if parent.Status != "completed" {
+		t.Fatal("HTTP request executed replacement inline")
+	}
+	command, _ := st.GetActionInstance(receipt["command_id"])
+	inputs := decodeOperationJSON(command.InputsJSON)
+	if inputs["kind"] != "prepare_batch_promotion" || inputs["version"] != "frozen-review" {
+		t.Fatal(inputs)
+	}
+	if request(h, "POST", "/api/maintenance/batch-candidates", body, false).Code != 401 {
+		t.Fatal("unauthenticated review mutation")
+	}
+	s.cfg.AllowDestructive = false
+	if request(h, "POST", "/api/maintenance/batch-candidates", body, true).Code != 403 {
+		t.Fatal("disabled replacement admitted")
+	}
+}

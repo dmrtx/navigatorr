@@ -3,6 +3,7 @@ package action
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -102,6 +103,9 @@ func (e *Engine) savePromotion(ctx context.Context, ec *ExecutionContext, p *pro
 }
 
 func promoteFailed(err error) (StepResult, error) {
+	if errors.Is(err, errActionBusy) {
+		return promoteWait("Waiting for batch coordination before replacement")
+	}
 	if _, busy := err.(*promotionBusyError); busy {
 		return promoteWait(err.Error())
 	}
@@ -153,6 +157,12 @@ func (e *Engine) promotionMutation(ec *ExecutionContext) (*promotionState, *arrs
 	}
 	if e.deps.Fs == nil {
 		return nil, nil, fmt.Errorf("filesystem resolver is required")
+	}
+	if getString(ec.Inputs, "batch_promote_parent_id") != "" {
+		allowRecovery := getString(ec.State, "promotion_recovery_parent_digest") == getString(ec.Inputs, "batch_promote_digest")
+		if err := e.verifyBatchPromotionApprovalState(ec, p, allowRecovery); err != nil {
+			return nil, nil, err
+		}
 	}
 	if p.Service == "filesystem" {
 		if err := e.claimPromotionSeries(ec, "filesystem-destination:"+p.NewPath, 1); err != nil {

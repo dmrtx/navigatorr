@@ -23,6 +23,8 @@ type batchPromotionMember struct {
 }
 
 type batchPromotionPlan struct {
+	ReviewID string                 `json:"review_id,omitempty"`
+	Service  string                 `json:"service,omitempty"`
 	BatchID  string                 `json:"batch_id"`
 	SeriesID int                    `json:"series_id"`
 	Members  []batchPromotionMember `json:"members"`
@@ -41,7 +43,7 @@ func getBatchPromotionPlan(raw any) *batchPromotionPlan {
 		return nil
 	}
 	var p batchPromotionPlan
-	if json.Unmarshal(b, &p) != nil || p.Digest == "" || p.BatchID == "" || p.SeriesID <= 0 {
+	if json.Unmarshal(b, &p) != nil || p.Digest == "" || p.BatchID == "" || (planService(&p) == "sonarr" && p.SeriesID <= 0) {
 		return nil
 	}
 	return &p
@@ -71,14 +73,37 @@ func (e *Engine) validateBatchPromotionInputs(inputs map[string]any) error {
 	return nil
 }
 
-func (e *Engine) buildBatchPromotionPlan(ec *ExecutionContext, items []store.TranscodeBatchItem) (*batchPromotionPlan, error) {
-	seriesID, err := strconv.Atoi(strings.TrimSpace(fmt.Sprint(ec.Inputs["series_id"])))
-	if err != nil || seriesID <= 0 {
-		return nil, fmt.Errorf("batch promotion requires a numeric Sonarr series_id")
+func planService(p *batchPromotionPlan) string {
+	if p.Service == "filesystem" {
+		return "filesystem"
 	}
-	p := &batchPromotionPlan{BatchID: ec.InstanceID, SeriesID: seriesID, Members: []batchPromotionMember{}}
+	return "sonarr"
+}
+func batchPromotionDigest(p *batchPromotionPlan) string {
+	copy := *p
+	copy.Digest = ""
+	b, _ := json.Marshal(copy)
+	sum := sha256.Sum256(b)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+func (e *Engine) buildBatchPromotionPlan(ec *ExecutionContext, items []store.TranscodeBatchItem) (*batchPromotionPlan, error) {
+	seriesID, _ := strconv.Atoi(strings.TrimSpace(fmt.Sprint(ec.Inputs["series_id"])))
+	service := "sonarr"
+	if ec.Inputs["paths"] != nil {
+		service = "filesystem"
+	} else if (getString(ec.Inputs, "service") != "sonarr" && getString(ec.Inputs, "service") != "") || seriesID <= 0 {
+		return nil, fmt.Errorf("batch replacement requires Sonarr or explicit filesystem files")
+	}
+	p := &batchPromotionPlan{BatchID: ec.InstanceID, Service: service, SeriesID: seriesID, Members: []batchPromotionMember{}}
 	for _, item := range items {
 		if item.Status != "completed" || item.Decision != "transcode" {
+			continue
+		}
+		reserved, err := e.BatchItemReplacementReserved(item)
+		if err != nil {
+			return nil, err
+		}
+		if reserved {
 			continue
 		}
 		if item.ChildActionID == "" || item.CandidatePath == "" {
@@ -110,7 +135,7 @@ func (e *Engine) stepTranscodeBatchPromote(ctx context.Context, ec *ExecutionCon
 	if err := e.validateBatchPromotionInputs(ec.Inputs); err != nil {
 		return StepResult{Status: StepFailed, Error: err.Error()}, nil
 	}
-	if !getBool(ec.Inputs, "promote_candidates") || getBool(ec.Inputs, "dry_run") {
+	if (!getBool(ec.Inputs, "promote_candidates") && !getBool(ec.State, "post_batch_promotion")) || getBool(ec.Inputs, "dry_run") {
 		return StepResult{Status: StepCompleted}, nil
 	}
 	parallelism := 2
@@ -133,7 +158,7 @@ func (e *Engine) stepTranscodeBatchPromote(ctx context.Context, ec *ExecutionCon
 			return StepResult{Status: StepFailed, Error: fmt.Sprintf("persisting batch promotion plan: %v", err)}, nil
 		}
 	}
-	if plan.BatchID != ec.InstanceID || plan.SeriesID <= 0 {
+	if plan.BatchID != ec.InstanceID || (planService(plan) == "sonarr" && plan.SeriesID <= 0) {
 		return StepResult{Status: StepFailed, Error: "batch promotion plan does not match parent"}, nil
 	}
 	if len(plan.Members) == 0 {
@@ -142,11 +167,20 @@ func (e *Engine) stepTranscodeBatchPromote(ctx context.Context, ec *ExecutionCon
 	if !getBool(ec.State, "batch_promotion_approved") {
 		switch strings.ToLower(ec.Decision) {
 		case "approve":
+			recordBatchReviewDecision(ctx, ec, plan)
 			ec.State["batch_promotion_approved"] = true
 			if err := e.persistExecutionState(ctx, ec); err != nil {
 				return StepResult{Status: StepFailed, Error: fmt.Sprintf("persisting batch approval: %v", err)}, nil
 			}
 		case "reject", "cancel":
+			recordBatchReviewDecision(ctx, ec, plan)
+			stateObject(ec.State, "batch_review_history")[plan.Digest] = plan
+			delete(ec.State, "batch_promotion_plan")
+			delete(ec.Outputs, "batch_promotion_plan")
+			delete(ec.State, "post_batch_promotion")
+			if err := e.persistExecutionState(ctx, ec); err != nil {
+				return StepResult{Status: StepFailed, Error: err.Error()}, nil
+			}
 			return StepResult{Status: StepCompleted, Outputs: map[string]any{"batch_promotion": map[string]any{"eligible": len(plan.Members), "promoted": 0, "approved": false}}}, nil
 		default:
 			return StepResult{Status: StepWaitingDecision, WaitingReason: fmt.Sprintf("Approve promotion of %d verified candidates in one batch", len(plan.Members)), WaitingOptions: []WaitingOption{{Decision: "approve", Description: "Promote all listed candidates with recovery copies and per-file verification"}, {Decision: "reject", Description: "Keep all originals and candidates unchanged"}}, Outputs: map[string]any{"batch_promotion_plan": plan}}, nil
@@ -166,13 +200,16 @@ func (e *Engine) stepTranscodeBatchPromote(ctx context.Context, ec *ExecutionCon
 	}
 	active, queued := []promotionWork{}, []promotionWork{}
 	for i, member := range plan.Members {
-		key := "promote:sonarr:" + member.SourceAction
+		key := "promote:" + planService(plan) + ":" + member.SourceAction
 		prior, err := e.deps.Store.FindActionByIdempotencyKey("promote_transcode_candidate", key)
 		if err != nil {
 			outcomes[i] = promotionOutcome{member, nil, err}
 			continue
 		}
-		inputs := map[string]any{"transcode_action_id": member.SourceAction, "series_id": plan.SeriesID, "service": "sonarr", "batch_promote_parent_id": ec.InstanceID, "batch_promote_item_key": member.ItemKey, "batch_promote_digest": plan.Digest}
+		inputs := map[string]any{"transcode_action_id": member.SourceAction, "service": planService(plan), "batch_promote_parent_id": ec.InstanceID, "batch_promote_item_key": member.ItemKey, "batch_promote_digest": plan.Digest}
+		if planService(plan) == "sonarr" {
+			inputs["series_id"] = plan.SeriesID
+		}
 		work := promotionWork{i, member, prior, inputs}
 		// Unadmitted members are still pending, but must not each start a
 		// multi-GB recovery copy in this pass. Finish existing imports first.
@@ -255,8 +292,15 @@ func (e *Engine) stepTranscodeBatchPromote(ctx context.Context, ec *ExecutionCon
 	if pending > 0 {
 		return StepResult{Status: StepWaitingExternal, WaitingCondition: "batch_promotion", WaitingReason: fmt.Sprintf("Promoting %d verified candidates; %d completed", len(plan.Members), completed), Outputs: map[string]any{"batch_promotion": progress}}, nil
 	}
+	if planService(plan) == "filesystem" {
+		closeBatchPromotionReview(ec, plan)
+		return StepResult{Status: StepCompleted, Outputs: map[string]any{"batch_promotion": progress}}, nil
+	}
 	res, err := e.batchPromotionRescan(ctx, ec, plan.SeriesID)
 	res.Outputs = map[string]any{"batch_promotion": progress}
+	if err == nil && res.Status == StepCompleted {
+		closeBatchPromotionReview(ec, plan)
+	}
 	return res, err
 }
 
@@ -308,11 +352,11 @@ func (e *Engine) verifyBatchPromotionApprovalState(ec *ExecutionContext, p *prom
 		return fmt.Errorf("approved parent batch is unavailable")
 	}
 	var state, inputs map[string]any
-	if json.Unmarshal([]byte(parent.StateJSON), &state) != nil || json.Unmarshal([]byte(parent.InputsJSON), &inputs) != nil || !getBool(inputs, "promote_candidates") || !getBool(state, "batch_promotion_approved") {
+	if json.Unmarshal([]byte(parent.StateJSON), &state) != nil || json.Unmarshal([]byte(parent.InputsJSON), &inputs) != nil || (!getBool(inputs, "promote_candidates") && !getBool(state, "post_batch_promotion")) || !getBool(state, "batch_promotion_approved") {
 		return fmt.Errorf("parent batch has not approved candidate promotion")
 	}
 	plan := getBatchPromotionPlan(state["batch_promotion_plan"])
-	if plan == nil || plan.BatchID != parentID || plan.Digest != digest || plan.SeriesID != p.SeriesID {
+	if plan == nil || plan.BatchID != parentID || plan.Digest != digest || plan.SeriesID != p.SeriesID || planService(plan) != p.Service {
 		return fmt.Errorf("parent batch promotion plan does not match candidate")
 	}
 	item, err := e.deps.Store.GetTranscodeBatchItem(parentID, itemKey)
@@ -325,4 +369,13 @@ func (e *Engine) verifyBatchPromotionApprovalState(ec *ExecutionContext, p *prom
 		}
 	}
 	return fmt.Errorf("candidate is not in the approved batch promotion plan")
+}
+
+// Once all selected replacements have finished, the remaining candidates may
+// be reviewed in the same coordinator. Preserve the old plan as history.
+func closeBatchPromotionReview(ec *ExecutionContext, plan *batchPromotionPlan) {
+	stateObject(ec.State, "batch_review_history")[plan.Digest] = plan
+	delete(ec.State, "batch_promotion_plan")
+	delete(ec.Outputs, "batch_promotion_plan")
+	delete(ec.State, "batch_promotion_commands")
 }

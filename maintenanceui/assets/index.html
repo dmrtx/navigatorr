@@ -352,6 +352,8 @@
                 ><input id="custom" type="checkbox" />Customize</label
               >
               <p id="profile-mode-note" class="muted"></p>
+              <div id="creation-profile-info" class="profile-info" hidden></div>
+              <p id="creation-limits-note" class="metadata"></p>
               <div id="custom-fields" hidden>
                 <div class="field-grid">
                   <label
@@ -1031,9 +1033,10 @@
       <p class="muted">
         Replaces every file below after verification, with recovery copies.
       </p>
-      <pre id="batch-review-data"></pre>
+      <div id="batch-review-data"></div>
       <div class="submit-actions">
         <button id="dismiss-batch-review">Back</button
+        ><button id="reject-batch-review">Keep originals</button
         ><button id="approve-batch-review" class="primary">
           Approve replacements
         </button>

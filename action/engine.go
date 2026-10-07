@@ -354,6 +354,16 @@ func (e *Engine) retry(ctx context.Context, instanceID string, guard func(*store
 	if err != nil {
 		return nil, err
 	}
+	if inst.ActionName == "promote_transcode_candidate" && getString(ec.Inputs, "batch_promote_parent_id") != "" && inst.CurrentStep > actionStepIndex(tmpl, "approve_promotion") {
+		p, err := loadPromotion(ec)
+		if err != nil {
+			return nil, err
+		}
+		if err := e.verifyBatchPromotionApprovalState(ec, p, true); err != nil {
+			return nil, err
+		}
+		ec.State["promotion_recovery_parent_digest"] = getString(ec.Inputs, "batch_promote_digest")
+	}
 	resumeStep, err = e.preparePromotionRetry(ctx, inst, ec, tmpl, resumeStep)
 	if err != nil {
 		return nil, err
@@ -405,6 +415,12 @@ func (e *Engine) resume(ctx context.Context, instanceID string, decision string,
 		return nil, fmt.Errorf("action instance not found: %s", instanceID)
 	}
 
+	if e.batchReviewReceiptApplied(ctx, inst) {
+		return e.Status(ctx, inst.ID)
+	}
+	if err := e.checkReviewedBatch(ctx, inst); err != nil {
+		return nil, err
+	}
 	if err := e.checkReviewedCandidate(ctx, inst, decision); err != nil {
 		return nil, err
 	}
@@ -1008,6 +1024,16 @@ func parseExecutionContext(inst *store.ActionInstance, e *Engine) *ExecutionCont
 	outputs := make(map[string]any)
 	if inst.OutputsJSON != "" {
 		_ = json.Unmarshal([]byte(inst.OutputsJSON), &outputs)
+	}
+	// Older records can contain JSON null. Execution always needs writable maps.
+	if inputs == nil {
+		inputs = make(map[string]any)
+	}
+	if state == nil {
+		state = make(map[string]any)
+	}
+	if outputs == nil {
+		outputs = make(map[string]any)
 	}
 
 	return &ExecutionContext{

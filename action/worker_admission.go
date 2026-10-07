@@ -21,6 +21,11 @@ func RequiresWorker(name string) bool {
 	return name == "transcode_media" || name == "transcode_batch" || name == "benchmark_transcode"
 }
 
+// Replacement retries use already encoded candidates at the final batch step.
+func RetryRequiresWorker(inst *store.ActionInstance) bool {
+	return inst != nil && RequiresWorker(inst.ActionName) && !(inst.ActionName == "transcode_batch" && inst.CurrentStep >= 2)
+}
+
 // Reviewing a single existing candidate does not submit an encode.
 // A batch result decision may advance to its next file, so it needs a worker
 // unless it is already at the final replacement-plan review.
