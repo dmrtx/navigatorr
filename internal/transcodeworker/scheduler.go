@@ -75,8 +75,10 @@ func (w *Worker) RunScheduler(ctx context.Context, selfExe, configPath string, i
 		interval = DefaultSchedulerInterval
 	}
 	// Finish a due publication before filling capacity with new encodes.
-	_, _ = w.ResumePostEncode(ctx, selfExe, configPath)
-	_, _ = w.ScheduleQueued(ctx, selfExe, configPath)
+	w.schedulerMu.Lock()
+	w.schedulerInterval = interval
+	w.schedulerMu.Unlock()
+	w.runSchedulerSweeps(ctx, selfExe, configPath)
 
 	ticker := time.NewTicker(interval)
 	stopCh := make(chan struct{})
@@ -96,8 +98,7 @@ func (w *Worker) RunScheduler(ctx context.Context, selfExe, configPath string, i
 			case <-stopCh:
 				return
 			case <-ticker.C:
-				_, _ = w.ResumePostEncode(ctx, selfExe, configPath)
-				_, _ = w.ScheduleQueued(ctx, selfExe, configPath)
+				w.runSchedulerSweeps(ctx, selfExe, configPath)
 			}
 		}
 	}()

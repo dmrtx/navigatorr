@@ -7,6 +7,8 @@ import (
 
 // CandidateInput represents one candidate transcode variant evaluated for selection.
 type CandidateInput struct {
+	VideoCodec      string           `json:"video_codec,omitempty"`
+	MeasuredSeconds *float64         `json:"measured_seconds,omitempty"`
 	CandidateID     string           `json:"candidate_id"`
 	Profile         string           `json:"profile,omitempty"`
 	EncodeSuccess   bool             `json:"encode_success"`
@@ -18,13 +20,17 @@ type CandidateInput struct {
 // SelectorInput encapsulates the inputs provided to the CandidateSelector.
 type SelectorInput struct {
 	// Policy is the quality policy (e.g. VMAFPolicy or SSIMPolicy) used to evaluate candidates.
-	Policy QualityPolicy `json:"-"`
+	Policy      QualityPolicy `json:"-"`
+	Mode        string        `json:"mode,omitempty"`
+	SourceBytes int64         `json:"source_bytes,omitempty"`
 	// Candidates is the set of candidate transcode profiles/configurations tested.
 	Candidates []CandidateInput `json:"candidates"`
 }
 
 // EvaluatedCandidate captures the post-evaluation metrics and eligibility status of a candidate.
 type EvaluatedCandidate struct {
+	VideoCodec       string   `json:"video_codec,omitempty"`
+	MeasuredSeconds  *float64 `json:"measured_seconds,omitempty"`
 	CandidateID      string   `json:"candidate_id"`
 	Profile          string   `json:"profile,omitempty"`
 	Score            float64  `json:"score"`
@@ -112,6 +118,7 @@ func SelectCandidate(in SelectorInput) SelectionResult {
 
 	for _, c := range in.Candidates {
 		ec := EvaluatedCandidate{
+			VideoCodec: c.VideoCodec, MeasuredSeconds: c.MeasuredSeconds,
 			CandidateID:    c.CandidateID,
 			Profile:        c.Profile,
 			EstimatedBytes: c.EstimatedOutput.EstimatedTotalBytes,
@@ -165,6 +172,9 @@ func SelectCandidate(in SelectorInput) SelectionResult {
 		res.AllEvaluated = append(res.AllEvaluated, ec)
 	}
 
+	if in.Mode != "" {
+		return SelectMeasuredCandidates(res.AllEvaluated, in.Mode, in.Policy.Tolerance(), in.SourceBytes)
+	}
 	// Case 1: Target-reaching candidates exist
 	if len(targetReaching) > 0 {
 		res.Selection = ExplainTargetSelection(targetReaching, in.Policy.Tolerance())
@@ -222,4 +232,109 @@ func SelectCandidate(in SelectorInput) SelectionResult {
 	}
 
 	return res
+}
+
+// SelectMeasuredCandidates selects complete, already evaluated plans. Codec/rate
+// numbers never participate in ranking. The 2% equivalence band is relative to
+// the smallest qualifying estimate, keeping the ordering transitive and stable.
+func SelectMeasuredCandidates(candidates []EvaluatedCandidate, mode string, tolerance float64, sourceBytes int64) SelectionResult {
+	r := SelectionResult{AllEvaluated: append([]EvaluatedCandidate(nil), candidates...), DecisionReason: ReasonAllCandidatesInvalid}
+	if mode != "size" && mode != "quality" && mode != "x265_preserve" {
+		r.DecisionReason = "invalid_mode"
+		return r
+	}
+	if math.IsNaN(tolerance) || math.IsInf(tolerance, 0) || tolerance < 0 {
+		r.DecisionReason = "invalid_tolerance"
+		return r
+	}
+	var eligible []EvaluatedCandidate
+	for i := range r.AllEvaluated {
+		c := &r.AllEvaluated[i]
+		if !c.Eligible || !c.MinimumMet || c.EstimatedBytes <= 0 || math.IsNaN(c.Score) || math.IsInf(c.Score, 0) {
+			c.Eligible = false
+			continue
+		}
+		if mode == "x265_preserve" && c.VideoCodec != "libx265" {
+			c.Eligible = false
+			c.EvaluationReason = "encoder_not_allowed"
+			continue
+		}
+		if sourceBytes <= 0 {
+			c.Eligible = false
+			c.EvaluationReason = "source_size_unknown"
+			continue
+		}
+		// Compare unrounded bytes; avoid integer multiplication overflow.
+		if !ModeSizeAllowed(mode, sourceBytes, c.EstimatedBytes) {
+			c.Eligible = false
+			c.EvaluationReason = "insufficient_savings"
+			continue
+		}
+		eligible = append(eligible, *c)
+	}
+	if len(eligible) == 0 {
+		return r
+	}
+	if mode != "size" {
+		best := eligible[0].Score
+		for _, c := range eligible {
+			if c.Score > best {
+				best = c.Score
+			}
+		}
+		r.Selection = &SelectionExplanation{BestScore: best, Tolerance: tolerance, ScoreFloor: best - tolerance}
+		filtered := eligible[:0]
+		for _, c := range eligible {
+			if c.Score >= best-tolerance {
+				filtered = append(filtered, c)
+			} else {
+				r.Selection.OutsideMargin = append(r.Selection.OutsideMargin, c.CandidateID)
+			}
+		}
+		eligible = filtered
+	}
+	smallest := eligible[0].EstimatedBytes
+	for _, c := range eligible {
+		if c.EstimatedBytes < smallest {
+			smallest = c.EstimatedBytes
+		}
+	}
+	var finalists []EvaluatedCandidate
+	for _, c := range eligible {
+		if float64(c.EstimatedBytes) <= float64(smallest)*1.02 {
+			finalists = append(finalists, c)
+		}
+	}
+	sort.Slice(finalists, func(i, j int) bool {
+		a, b := finalists[i], finalists[j]
+		knownA := a.MeasuredSeconds != nil && *a.MeasuredSeconds > 0 && !math.IsNaN(*a.MeasuredSeconds) && !math.IsInf(*a.MeasuredSeconds, 0)
+		knownB := b.MeasuredSeconds != nil && *b.MeasuredSeconds > 0 && !math.IsNaN(*b.MeasuredSeconds) && !math.IsInf(*b.MeasuredSeconds, 0)
+		if knownA != knownB {
+			return knownA
+		}
+		if knownA && *a.MeasuredSeconds != *b.MeasuredSeconds {
+			return *a.MeasuredSeconds < *b.MeasuredSeconds
+		}
+		return a.CandidateID < b.CandidateID
+	})
+	winner := finalists[0]
+	r.Winner = &winner
+	r.DecisionReason = "measured_plan_selected"
+	return r
+}
+
+// ModeSizeAllowed compares fixed mode policies with exact integer bytes. Splitting
+// the quotient and remainder avoids overflow even at MaxInt64.
+func ModeSizeAllowed(mode string, source, candidate int64) bool {
+	if source <= 0 || candidate <= 0 {
+		return false
+	}
+	if mode == "x265_preserve" {
+		return candidate <= source
+	}
+	if mode != "size" && mode != "quality" {
+		return false
+	}
+	maximum := (source/100)*85 + ((source%100)*85)/100
+	return candidate <= maximum
 }

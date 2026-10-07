@@ -24,7 +24,7 @@ func (e *Engine) registerTranscodeBatchTemplate() {
 		ImmutableInputs: true,
 		Name:            "transcode_batch",
 		Version:         6,
-		Description:     "Video batch from explicit paths (1–1000 files inside allowed read roots), or a Sonarr series using service and series_id. paths cannot be combined with service, series_id, season, episode_file_ids, or promote_candidates=true; filesystem batches produce candidates only. Direct encoding: choose a non-optimizing profile or profile_config and omit priority; inspect recipe_get if unsure. Bounded tuning: omit profile and set priority=balanced, quality, savings, or preserve_quality (perceptual target, not lossless). Tuning tests three settings on short samples, creates a batch-only recipe and continues; currently oversized H264 1080p 8-bit SDR below 45fps. Bare auto without priority keeps legacy selection. dry_run=true is a completed preview, not a paused encode: start a new action with dry_run=false to encode. promote_candidates=true offers one approval before replacement; otherwise originals remain unchanged. Monitor with action_status.",
+		Description:     "Simple goals: set mode=quality (strict sampled quality), size (acceptable sampled quality), or x265_preserve (strict libx265 conversion, already HEVC omitted). Modes forbid profiles/priority/manual tuning, preserve original depth/tracks and require final byte/quality validation; policy snapshots and finite per-source/operation search budgets are durable. Omit mode for legacy technical behavior. Video batch from explicit paths (1–1000 files inside allowed read roots), or a Sonarr series using service and series_id. paths cannot be combined with service, series_id, season, episode_file_ids, or promote_candidates=true; filesystem batches produce candidates only. Direct encoding: choose a non-optimizing profile or profile_config and omit priority; inspect recipe_get if unsure. Bounded tuning: omit profile and set priority=balanced, quality, savings, or preserve_quality (perceptual target, not lossless). Tuning tests three settings on short samples, creates a batch-only recipe and continues; currently oversized H264 1080p 8-bit SDR below 45fps. Bare auto without priority keeps legacy selection. dry_run=true is a completed preview, not a paused encode: start a new action with dry_run=false to encode. promote_candidates=true offers one approval before replacement; otherwise originals remain unchanged. Monitor with action_status.",
 		Examples: []ActionExample{
 			{Description: "Encode a frozen filesystem selection, without a library service or replacing originals.", Inputs: `{"paths":["/media/movies/Film.mkv","/media/series/Season 1/Episode 1.mp4"],"profile":"general-hevc","media_type":"movie"}`},
 			{Description: "Direct candidates using a non-optimizing profile; substitute the actual series ID and chosen profile.", Inputs: `{"service":"sonarr","series_id":10,"profile":"general-hevc"}`},
@@ -33,7 +33,7 @@ func (e *Engine) registerTranscodeBatchTemplate() {
 		},
 		RequiredInputs: []string{},
 		OptionalInputs: []string{
-			"paths", "service", "series_id",
+			"mode", "paths", "service", "series_id",
 			"episode_file_ids",
 			"season",
 			"profile",
@@ -60,7 +60,7 @@ func (e *Engine) registerTranscodeBatchTemplate() {
 			{
 				Name:        "resolve_and_inspect",
 				Description: "Resolve explicit filesystem files or a Sonarr series, deduplicate, inspect media streams, and select transcode profiles",
-				Run:         e.stepTranscodeBatchResolve,
+				Run:         e.measureCoordinatorPhase("coordinator_inventory", e.stepTranscodeBatchResolve),
 			},
 			{
 				Name:        "schedule_batch",
@@ -70,7 +70,7 @@ func (e *Engine) registerTranscodeBatchTemplate() {
 			{
 				Name:        "promote_batch",
 				Description: "After one approval, promote verified candidates through Sonarr with bounded concurrency and durable recovery",
-				Run:         e.stepTranscodeBatchPromote,
+				Run:         e.measureCoordinatorPhase("coordinator_promotion", e.stepTranscodeBatchPromote),
 			},
 		},
 	})
@@ -78,6 +78,9 @@ func (e *Engine) registerTranscodeBatchTemplate() {
 
 func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
 	if err := e.validateTranscodeInputs(ec); err != nil {
+		return StepResult{Status: StepFailed, Error: err.Error()}, nil
+	}
+	if err := validateModeInputs(ec.Inputs); err != nil {
 		return StepResult{Status: StepFailed, Error: err.Error()}, nil
 	}
 	if err := e.validateBatchPromotionInputs(ec.Inputs); err != nil {
@@ -298,6 +301,10 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 
 	}
 
+	ec.State["resolved_is_anime"] = isAnime
+	if _, err := freezeModePolicy(ec); err != nil {
+		return StepResult{Status: StepFailed, Error: err.Error()}, nil
+	}
 	requestedProfile := strings.TrimSpace(getString(ec.Inputs, "profile"))
 	if hasProfileConfig {
 		requestedProfile = "ephemeral"
@@ -442,7 +449,16 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 		var itemDecision, itemProfile, itemStatus string
 		var itemReasons []string
 
-		if strings.EqualFold(requestedProfile, "auto") {
+		if mode := getString(ec.Inputs, "mode"); mode != "" {
+			reason := modeSourceReason(mode, &rep)
+			if reason != "" {
+				itemDecision, itemStatus = "skip", "skip"
+				itemReasons = []string{reason}
+			} else {
+				itemDecision, itemStatus, itemProfile = "transcode", "queued", "mode-"+mode
+				itemReasons = []string{"per-source bounded samples required before full encode"}
+			}
+		} else if strings.EqualFold(requestedProfile, "auto") {
 			selInput := selector.Input{
 				Report:            rep,
 				MediaType:         mediaType,
@@ -726,7 +742,7 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 
 				switch existingChild.Status {
 				case StatusCompleted:
-					if it.Status != "completed" {
+					if it.Status != "completed" && !(getString(ec.Inputs, "mode") != "" && it.Status == "skip") {
 						it.Status = "completed"
 						var out map[string]any
 						_ = json.Unmarshal([]byte(existingChild.OutputsJSON), &out)
@@ -735,6 +751,10 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 							cand = getString(out, "output_path")
 						}
 						it.CandidatePath = cand
+						if getString(ec.Inputs, "mode") != "" && getBool(out, "skipped") {
+							it.Status, it.Decision = "skip", "skip"
+							it.Reasons = append(it.Reasons, getString(out, "reason_code"))
+						}
 						it.Error = ""
 						if it.Attempts == 0 {
 							it.Attempts = 1
@@ -855,7 +875,7 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 			}
 		}
 
-		if hasWaitingDecision {
+		if hasWaitingDecision && getString(ec.Inputs, "mode") == "" {
 			break
 		}
 
@@ -876,6 +896,22 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 			break
 		}
 
+		if getString(ec.Inputs, "mode") != "" {
+			e.settleModeSearches(ec, items)
+			admitted := pendingIndices[:0]
+			for _, idx := range pendingIndices {
+				if reserveModeSearch(ec, batchChildKey(ec, items[idx])) {
+					admitted = append(admitted, idx)
+				}
+			}
+			pendingIndices = admitted
+			if err := e.persistExecutionState(ctx, ec); err != nil {
+				return StepResult{Status: StepFailed, Error: err.Error()}, nil
+			}
+			if len(pendingIndices) == 0 {
+				break
+			}
+		}
 		toSchedule := pendingIndices
 		if len(toSchedule) > availableSlots {
 			toSchedule = toSchedule[:availableSlots]
@@ -952,6 +988,25 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 		batchOutputs["calibration"] = ec.State["shared_calibration_result"]
 	}
 
+	// A mode parent must remain reconciliable while independent work runs.
+	if getString(ec.Inputs, "mode") != "" {
+		e.settleModeSearches(ec, latest)
+		active, queued := 0, 0
+		for _, it := range latest {
+			if it.Status == "running" || it.Status == "waiting_for_slot" {
+				active++
+			}
+			if it.Status == "queued" {
+				queued++
+			}
+		}
+		if active > 0 {
+			return StepResult{Status: StepWaitingExternal, WaitingCondition: "transcode_running", WaitingReason: "Independent mode searches or encodes are still active", Outputs: batchOutputs}, nil
+		}
+		if queued > 0 {
+			return modeAttention(ec, "search_budget_exhausted", "Operation search budget is reserved or exhausted; remaining sources have no measured conclusion. Originals preserved."), nil
+		}
+	}
 	// Check if any item is waiting for decision
 	if res, ok := e.batchWaitingDecisionResult(latest, batchOutputs); ok {
 		return res, nil
@@ -1076,7 +1131,12 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 		// batch is cancelled or paused, including across restarts.
 		"parent_action_id": ec.InstanceID,
 	}
-	if batchCalibrationEnabled(ec.Inputs, ec.State) {
+	if mode := getString(ec.Inputs, "mode"); mode != "" {
+		childInputs["mode"] = mode
+		childInputs["batch_item_key"] = item.ItemKey
+		delete(childInputs, "min_savings_percent")
+		delete(childInputs, "max_size_increase_percent")
+	} else if batchCalibrationEnabled(ec.Inputs, ec.State) {
 		calibration := getBatchCalibrationResult(ec.State["shared_calibration_result"])
 		if calibration == nil {
 			return false, fmt.Errorf("shared batch calibration result missing before child dispatch")
@@ -1219,6 +1279,10 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 	switch childRes.Status {
 	case StatusCompleted:
 		item.Status = "completed"
+		if getString(ec.Inputs, "mode") != "" && getBool(childRes.Outputs, "skipped") {
+			item.Status, item.Decision = "skip", "skip"
+			item.Reasons = append(item.Reasons, getString(childRes.Outputs, "reason_code"))
+		}
 		cand := getString(childRes.Outputs, "candidate_path")
 		if cand == "" {
 			cand = getString(childRes.Outputs, "output_path")

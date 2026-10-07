@@ -151,6 +151,10 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 		}
 		req, err = buildBenchmarkRequest(ec, cleanPath, rep, opt, caps)
 		if err != nil {
+			if getString(ec.Inputs, "mode") != "" {
+				reason := "quality_policy_unavailable"
+				return modeAttention(ec, reason, err.Error()+"; original preserved"), nil
+			}
 			return StepResult{Status: StepFailed, Error: err.Error()}, nil
 		}
 	}
@@ -272,6 +276,12 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("benchmark status failed; no resubmit: %v", err)}, nil
 	}
 	e.observeBenchmarkStatus(ec, st)
+	if st.SearchSeconds != nil && (st.Status == transcode.StatusCompleted || st.Status == transcode.StatusFailed || st.Status == transcode.StatusCancelled) {
+		ec.State["benchmark_search_seconds"] = *st.SearchSeconds
+	}
+	if getString(ec.Inputs, "mode") != "" && st.ReasonCode == "search_budget_exhausted" {
+		return modeAttention(ec, "search_budget_exhausted", "Finite search budget exhausted without a reliable conclusion; original preserved"), nil
+	}
 
 	switch st.Status {
 	case transcode.StatusRunning, transcode.StatusQueued:
@@ -353,6 +363,9 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 		var winningPlan *transcode.Plan
 		if hasWinner {
 			winner := st.Decision.Winner
+			if err := verifyModeBenchmarkWinner(ec, winner); err != nil {
+				return StepResult{Status: StepFailed, Error: err.Error()}, nil
+			}
 			ec.State["benchmark_winner"] = winner
 
 			basePlan := getPlan(ec.State["plan"])
@@ -416,6 +429,10 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 				// VideoToolbox encoder (and vice versa).
 				if codec := strings.TrimSpace(winner.VideoCodec); codec != "" {
 					wp.VideoCodec = codec
+					if codec == transcode.VideoCodecHEVCVideoToolbox {
+						wp.Preset = ""
+						wp.Tune = ""
+					}
 				}
 				if preset := strings.TrimSpace(winner.Preset); preset != "" {
 					wp.Preset = preset
@@ -476,6 +493,13 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 		}
 
 		// If this is transcode_media, require a valid winner before proceeding to full transcode.
+		if ec.ActionName == "transcode_media" && !hasWinner && getString(ec.Inputs, "mode") != "" {
+			ec.State["skip_transcode"] = true
+			ec.State["reason_code"] = "no_suitable_candidate"
+			outputs["skipped"] = true
+			outputs["reason_code"] = "no_suitable_candidate"
+			return StepResult{Status: StepCompleted, Outputs: outputs}, nil
+		}
 		if ec.ActionName == "transcode_media" && !hasWinner {
 			reason := "no winner selected"
 			if st.Decision.DecisionReason != "" {
@@ -1012,8 +1036,19 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 		return nil, errors.New("resolved plan is missing or unreadable from state; refusing to default benchmark encoder to VideoToolbox (fail closed)")
 	}
 	planCodec := plan.VideoCodec
+	candidateSearch := opt.Search
+	if mode := getString(ec.Inputs, "mode"); mode != "" && mode != "x265_preserve" && !caps.Encoders[transcode.VideoCodecLibX265] && caps.Encoders[transcode.VideoCodecHEVCVideoToolbox] {
+		clone := *plan
+		clone.VideoCodec = transcode.VideoCodecHEVCVideoToolbox
+		clone.Preset = ""
+		clone.Tune = ""
+		clone.Quality = 70
+		plan = &clone
+		planCodec = clone.VideoCodec
+		candidateSearch = &recipe.SearchPolicy{MaxCandidates: 3, QualityValues: []int{65, 70, 75}}
+	}
 
-	candidates, err := buildBenchmarkCandidates(plan, bitDepth, opt.Search)
+	candidates, err := buildBenchmarkCandidates(plan, bitDepth, candidateSearch)
 	if err != nil {
 		return nil, err
 	}
@@ -1097,6 +1132,33 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 		SourceSHA256:            getString(ec.State, "original_sha256"),
 	}
 
+	if mode := getString(ec.Inputs, "mode"); mode != "" {
+		req.Mode = mode
+		req.SearchBudgetSeconds = getInt(ec.State, "search_budget_seconds")
+		if mode != "x265_preserve" && planCodec != transcode.VideoCodecHEVCVideoToolbox && caps.Encoders[transcode.VideoCodecHEVCVideoToolbox] {
+			vt := *plan
+			vt.VideoCodec = transcode.VideoCodecHEVCVideoToolbox
+			vt.Preset = ""
+			vt.Tune = ""
+			vt.Quality = 70
+			if bitDepth == 10 {
+				vt.PixelFormat = "p010le"
+			} else {
+				vt.PixelFormat = "yuv420p"
+			}
+			if err := validateWorkerCapabilitiesForBenchmark(caps, metric, qualityBitDepth, transcode.VideoCodecHEVCVideoToolbox); err != nil {
+				return nil, err
+			}
+			hardware, err := buildBenchmarkCandidates(&vt, bitDepth, &recipe.SearchPolicy{MaxCandidates: 3, QualityValues: []int{65, 70, 75}})
+			if err != nil {
+				return nil, err
+			}
+			for i := range hardware {
+				hardware[i].ID = "vt-" + hardware[i].ID
+			}
+			req.Candidates = append(req.Candidates, hardware...)
+		}
+	}
 	if plan.AudioMode == "compact" {
 		if !caps.CompactAudio {
 			return nil, fmt.Errorf("worker does not support compact audio; upgrade the worker before benchmarking")

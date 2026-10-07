@@ -381,8 +381,17 @@ func (w *Worker) ensureSourceCached(ctx context.Context, cleanSource, expectedSH
 		return "", err
 	}
 	if hit, ok := lookupSourceCache(cacheDir, cleanSource, fi, norm); ok {
+		if cost := sourceCost(ctx); cost != nil {
+			cost.CacheHits = knownCount(1)
+			cost.CacheMisses = knownCount(0)
+			cost.NASReadBytes = knownCount(0)
+		}
 		_ = w.sweepSourceCache()
 		return hit, nil
+	}
+	if cost := sourceCost(ctx); cost != nil {
+		cost.CacheHits = knownCount(0)
+		cost.CacheMisses = knownCount(1)
 	}
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return "", fmt.Errorf("%w: creating cache dir: %v", ErrStorageIO, err)
@@ -426,6 +435,11 @@ func (w *Worker) ensureSourceCached(ctx context.Context, cleanSource, expectedSH
 	di, err := os.Lstat(tmpName)
 	if err != nil || !di.Mode().IsRegular() || di.Size() != fi.Size() {
 		return "", fmt.Errorf("%w: downloaded source %s size mismatch (fail closed)", ErrSizeMismatch, cleanSource)
+	}
+	if cost := sourceCost(ctx); cost != nil {
+		if w.mediaStore != nil && w.mediaStore.Maps(cleanSource) {
+			cost.NASReadBytes = knownCount(di.Size())
+		}
 	}
 	if err := verifyLocalDigest(ctx, tmpName, norm); err != nil {
 		return "", err

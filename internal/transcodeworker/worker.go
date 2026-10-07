@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -183,6 +184,11 @@ func cleanRootPaths(roots []string) []string {
 
 // Worker manages the local transcode execution on the node.
 type Worker struct {
+	schedulerMu        sync.Mutex
+	schedulerHealth    transcode.SchedulerObservation
+	schedulerInterval  time.Duration
+	schedulerSweepHook func(string) error
+
 	cfg             *WorkerConfig
 	ffmpegPath      string
 	ffprobePath     string
@@ -820,7 +826,7 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 		// is non-reentrant. capLock stays held.
 		if match.Status == "queued" {
 			unlockMatch()
-			_ = w.scheduleQueuedLocked(ctx, selfExe, configPath)
+			_, _ = w.scheduleQueuedLocked(ctx, selfExe, configPath)
 			if refreshed, rerr := LoadJob(matchFile); rerr == nil && refreshed != nil {
 				match = refreshed
 			}
@@ -947,7 +953,7 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 				// Release the job lock first: the scheduler re-acquires it
 				// (flock is non-reentrant; holding it would self-deadlock).
 				unlockJob()
-				_ = w.scheduleQueuedLocked(ctx, selfExe, configPath)
+				_, _ = w.scheduleQueuedLocked(ctx, selfExe, configPath)
 				if refreshed, rerr := LoadJob(jobFile); rerr == nil && refreshed != nil {
 					existing = refreshed
 				}
@@ -1032,7 +1038,7 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 	// (flock is non-reentrant; holding it would self-deadlock). capLock stays
 	// held, so no concurrent submit can interleave.
 	unlockJob()
-	_ = w.scheduleQueuedLocked(ctx, selfExe, configPath)
+	_, _ = w.scheduleQueuedLocked(ctx, selfExe, configPath)
 	if refreshed, rerr := LoadJob(jobFile); rerr == nil && refreshed != nil {
 		job = refreshed
 	}
@@ -1162,26 +1168,47 @@ func (w *Worker) findJobByIdempotencyKeyLocked(key string) (*JobRecord, error) {
 // listQueuedJobsLocked returns persisted queued jobs in durable FIFO order
 // (CreatedAt, then ID). Callers must hold the capacity lock.
 func (w *Worker) listQueuedJobsLocked() []*JobRecord {
+	jobs, _ := w.listQueuedJobsObserved()
+	return jobs
+}
+func (w *Worker) listQueuedJobsObserved() ([]*JobRecord, error) {
 	entries, err := os.ReadDir(w.cfg.StateDir)
 	if err != nil {
-		return nil
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
 	}
-	var out []*JobRecord
+	var jobs []*JobRecord
+	var errs []error
 	for _, entry := range entries {
 		name := entry.Name()
 		if !entry.IsDir() || strings.HasPrefix(name, ".") {
 			continue
 		}
-		jobPath := filepath.Join(w.cfg.StateDir, name, "job.json")
-		job, err := LoadJob(jobPath)
-		if err != nil || job == nil || job.ID != name || job.Status != "queued" {
+		path := filepath.Join(w.cfg.StateDir, name, "job.json")
+		if _, err := os.Stat(path); err != nil {
+			if !os.IsNotExist(err) {
+				errs = append(errs, err)
+			}
 			continue
 		}
-		cp := *job
-		out = append(out, &cp)
+		job, err := LoadJob(path)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if job.ID != name {
+			errs = append(errs, fmt.Errorf("durable queued job identity mismatch"))
+			continue
+		}
+		if job.Status == "queued" {
+			cp := *job
+			jobs = append(jobs, &cp)
+		}
 	}
-	sortQueuedJobs(out)
-	return out
+	sortQueuedJobs(jobs)
+	return jobs, errors.Join(errs...)
 }
 
 func sortQueuedJobs(jobs []*JobRecord) {
@@ -1205,36 +1232,49 @@ func (w *Worker) runningCountLocked(excludeID string) (int, error) {
 // aggregate) and never double-spawns: each spawn happens under capLock +
 // per-job lock after re-verifying status==queued and slot availability.
 // Cancelled jobs are skipped and never spawn. Returns the number started.
-func (w *Worker) scheduleQueuedLocked(ctx context.Context, selfExe, configPath string) int {
-	_ = ctx
+func (w *Worker) scheduleQueuedLocked(ctx context.Context, selfExe, configPath string) (int, error) {
+	var errs []error
 	maxJobs := w.cfg.MaxParallelJobs
 	if maxJobs <= 0 {
 		maxJobs = 1
 	}
 	started := 0
 	for {
-		active, err := w.runningCountLocked("")
-		if err != nil || active >= maxJobs {
-			return started
+		if err := ctx.Err(); err != nil {
+			return started, errors.Join(append(errs, err)...)
 		}
-		queued := w.listQueuedJobsLocked()
+		active, err := w.runningCountLocked("")
+		if err != nil {
+			errs = append(errs, err)
+		}
+		if err != nil || active >= maxJobs {
+			return started, errors.Join(errs...)
+		}
+		queued, scanErr := w.listQueuedJobsObserved()
+		if scanErr != nil {
+			errs = append(errs, scanErr)
+		}
 		if len(queued) == 0 {
-			return started
+			return started, errors.Join(errs...)
 		}
 		progressed := false
 		for _, q := range queued {
 			if active >= maxJobs {
-				return started
+				return started, errors.Join(errs...)
 			}
 			jobDir := filepath.Join(w.cfg.StateDir, q.ID)
 			jobLock, err := acquireJobLock(jobDir)
 			if err != nil {
+				errs = append(errs, err)
 				continue
 			}
 			func() {
 				defer jobLock.Unlock()
 				jobFile := filepath.Join(jobDir, "job.json")
 				latest, err := LoadJob(jobFile)
+				if err != nil {
+					errs = append(errs, err)
+				}
 				if err != nil || latest == nil || latest.Status != "queued" {
 					return // cancelled/terminal/running: never spawn
 				}
@@ -1245,16 +1285,23 @@ func (w *Worker) scheduleQueuedLocked(ctx context.Context, selfExe, configPath s
 					// Stale PID from a crashed spawner: reset to schedulable.
 					latest.PID = 0
 					latest.ProcessStartTime = ""
-					_ = SaveJobAtomic(jobFile, latest)
+					if err := SaveJobAtomic(jobFile, latest); err != nil {
+						errs = append(errs, err)
+						return
+					}
 				}
 				// Re-check capacity under both locks before spawning.
 				cur, err := w.runningCountLocked("")
+				if err != nil {
+					errs = append(errs, err)
+				}
 				if err != nil || cur >= maxJobs {
 					active = cur
 					return
 				}
 				pid, lstart, err := w.spawnTranscodeProcess(selfExe, configPath, latest.ID)
 				if err != nil {
+					errs = append(errs, err)
 					latest.Status = "failed"
 					latest.Error = fmt.Sprintf("spawning worker process: %v", err)
 					latest.FinishedAt = time.Now().UTC()
@@ -1267,6 +1314,7 @@ func (w *Worker) scheduleQueuedLocked(ctx context.Context, selfExe, configPath s
 				latest.PID = pid
 				latest.ProcessStartTime = lstart
 				if err := SaveJobAtomic(jobFile, latest); err != nil {
+					errs = append(errs, err)
 					killTranscodeProcess(pid)
 					latest.Status = "failed"
 					latest.Error = fmt.Sprintf("persisting transcode process identity: %v", err)
@@ -1282,7 +1330,7 @@ func (w *Worker) scheduleQueuedLocked(ctx context.Context, selfExe, configPath s
 			}()
 		}
 		if !progressed {
-			return started
+			return started, errors.Join(errs...)
 		}
 	}
 }
@@ -1299,7 +1347,7 @@ func (w *Worker) ScheduleQueued(ctx context.Context, selfExe, configPath string)
 		return 0, err
 	}
 	defer capLock.Unlock()
-	return w.scheduleQueuedLocked(ctx, selfExe, configPath), nil
+	return w.scheduleQueuedLocked(ctx, selfExe, configPath)
 }
 
 func (w *Worker) countActiveJobs(excludeID string) (int, error) {
@@ -1710,6 +1758,7 @@ func (w *Worker) reconcileJob(jobDir, jobFile string) error {
 
 // JobStatusResponse is returned by the status subcommand.
 type JobStatusResponse struct {
+	ReasonCode string `json:"reason_code,omitempty"`
 	transcode.JobTelemetry
 	ID                    string                       `json:"id"`
 	Status                string                       `json:"status"`
@@ -1809,6 +1858,7 @@ func (w *Worker) Status(ctx context.Context, jobID string) (JobStatusResponse, e
 		Speed:                 metrics.Speed,
 		CandidatePath:         job.Candidate,
 		QualityEvidence:       job.QualityEvidence,
+		ReasonCode:            job.ReasonCode,
 		Error:                 job.Error,
 		Profile:               job.Profile,
 		RecipeVersion:         recipeVersion,

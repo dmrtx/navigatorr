@@ -48,6 +48,11 @@ func resolveTranscodeSizeGuardrails(inputs map[string]any, configMinSavingsPerce
 // carry explicit values, so this helper only changes the direct-call path
 // that previously had no guardrails at all.
 func (e *Engine) effectiveSizeGuardrails(ec *ExecutionContext) (float64, float64) {
+	if getString(ec.Inputs, "mode") != "" {
+		if p, err := freezeModePolicy(ec); err == nil && p != nil {
+			return p.MinSavingsPercent, p.MaxSizeIncreasePercent
+		}
+	}
 	var configMin float64
 	if e.deps.Config != nil {
 		configMin = e.deps.Config.Transcode.MinSavingsPercent
