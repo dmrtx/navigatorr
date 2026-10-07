@@ -3,6 +3,7 @@ package action
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -145,7 +146,9 @@ func loadPodcastSession(ec *ExecutionContext) (podcastSession, error) {
 	}
 	if err == nil && s.Policy.KnownAdsFirstPass {
 		known, e := podcast.KnownAdUnits(s.Transcript, valueAdReport(s.Matches), s.Policy)
-		if e != nil || s.Matches.Catalog.Scope != getString(ec.Inputs, "podcast_id") || podcast.Digest(s.Matches) != podcastSummary(ec)["match_digest"] || podcast.Digest(known) != podcast.Digest(s.Known) {
+		// An empty map is omitted in the checkpoint and decodes as nil. Compare
+		// actual unit evidence so a no-match pass survives serialization/restart.
+		if e != nil || s.Matches == nil || s.Matches.Catalog.Scope != getString(ec.Inputs, "podcast_id") || podcast.Digest(s.Matches) != podcastSummary(ec)["match_digest"] || !maps.Equal(known, s.Known) {
 			err = fmt.Errorf("acoustic checkpoint evidence changed")
 		}
 	}
