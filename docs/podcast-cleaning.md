@@ -44,8 +44,17 @@ sh scripts/podcast-worker/build-apple-speech.sh /absolute/bin/apple-speech
 /absolute/bin/apple-speech /absolute/spoken-fixture.mp3 /tmp/asr-check.json en_US --install-assets
 ```
 
-The fixture must contain speech and be at most 15 seconds. Install language
-assets explicitly before starting the worker. Worker configuration:
+Compilation requires the macOS 26+ SDK as well as macOS 26+. If Command Line
+Tools selects an older SDK, set `DEVELOPER_DIR` to the installed compatible
+Xcode's `Contents/Developer` directory for this build.
+
+The fixture must contain speech and be at most 15 seconds. On a system daemon,
+keep it on the worker SSD in a dedicated directory outside `state_dir` and
+`local_work_dir`, and add only that directory to `allowed_roots`. A user-mounted
+SMB fixture may be readable over SSH but unavailable in the daemon's context.
+Install language assets explicitly before starting the worker. Validate through
+the running HTTP service after invalidating its `_podcast-probe` capability
+receipt; a cached CLI probe does not prove daemon execution. Worker configuration:
 
 ```yaml
 apple_speech_path: /absolute/bin/apple-speech
