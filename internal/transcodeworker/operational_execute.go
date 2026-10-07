@@ -554,7 +554,7 @@ func (w *Worker) finalizeOperational(ctx context.Context, jobDir, jobFile string
 	publishedNew := false
 	isPodcast := job.Plan != nil && job.Plan.Podcast != nil
 	guard := podcastPublicationGuard(func(publish func() error) error {
-		return w.guardPodcastPublication(ctx, jobDir, jobFile, publish)
+		return w.guardPodcastAdPublication(ctx, jobDir, jobFile, publish)
 	})
 	if directSMB {
 		if _, statErr := w.mediaStore.Stat(ctx, r.destination); os.IsNotExist(statErr) {

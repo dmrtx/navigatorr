@@ -704,7 +704,7 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 			return SubmitResponse{}, fmt.Errorf("apple_speech_path is not configured")
 		}
 		want := ".mp3"
-		if plan.Podcast.Operation == "transcribe" {
+		if plan.Podcast.Operation != "render" {
 			want = ".json"
 		}
 		if strings.ToLower(filepath.Ext(cleanCandidate)) != want {
@@ -1628,6 +1628,19 @@ func (w *Worker) persistTerminalJob(jobDir, jobFile string, job *JobRecord) erro
 		return nil
 	}
 
+	var adEvidenceErr error
+	if job.Status == "completed" && job.Plan != nil && job.Plan.Podcast != nil {
+		release, e := w.lockAdEvidence(job)
+		if e != nil {
+			adEvidenceErr = e
+			job.Status = "failed"
+			job.ExitCode = 1
+			job.Error = "podcast acoustic evidence no longer valid: " + e.Error()
+			job.FailureClassification = "podcast_ad_evidence_invalid"
+		} else {
+			defer release()
+		}
+	}
 	// A heartbeat may have advanced since the runner's last phase transition.
 	// Preserve its measurements without replacing the terminal decision.
 	if latest.LastProgressAt.After(job.LastProgressAt) {
@@ -1645,6 +1658,9 @@ func (w *Worker) persistTerminalJob(jobDir, jobFile string, job *JobRecord) erro
 	marker := terminalMarkerFromJob(job)
 	if err := SaveTerminalMarkerAtomic(filepath.Join(jobDir, "terminal.json"), marker); err != nil {
 		return fmt.Errorf("saving terminal marker for job %q: %w", job.ID, err)
+	}
+	if adEvidenceErr != nil {
+		return adEvidenceErr
 	}
 	return nil
 }
@@ -2063,6 +2079,7 @@ func (w *Worker) cleanupCancelledArtifacts(job *JobRecord) {
 			return
 		}
 		_ = os.Remove(filepath.Join(w.cfg.StateDir, job.ID, "podcast-render.mp3"))
+		_ = os.Remove(filepath.Join(w.cfg.StateDir, job.ID, "podcast-ads.pcm"))
 		local := strings.TrimSpace(job.LocalCandidatePath)
 		if expected, err := LocalCandidatePath(w.localWorkDir(), job.ID, candidate); err == nil && local == expected && local != source && local != candidate && local != destination && !w.isCachePath(local) {
 			_ = os.Remove(local)

@@ -2623,6 +2623,7 @@ function jobControls(job, detail = false) {
       decisionLabels[choice.decision] || choice.description || choice.decision;
   }
   if (job.podcast) {
+ add("Ad library", () => viewPodcastAdLibrary(job.podcast.podcast_id));
  if (job.waiting_condition === "podcast_review") add("Review cuts", () => reviewPodcastCuts(job.id));
  if (job.waiting_condition === "podcast_classification") { add("View transcript", () => viewPodcastTranscript(job.id)); if (job.podcast.total_blocks > 0 && job.podcast.classified_blocks === job.podcast.total_blocks) add("Validate classifications", () => jobControl(job.id,"action_resume",{decision:"plan"})); }
  }
@@ -3247,7 +3248,7 @@ async function refreshDetail() {
       statusBadge(queuePresentation(job).status),
       node("p", queuePresentation(job).summary, "muted"),
     );
-    if (job.podcast) { const p=job.podcast; summary.append(node("p",`${p.classified_blocks || 0}/${p.total_blocks || 0} transcript blocks classified · ${((p.removed_ms || 0)/1000).toFixed(1)} seconds removed`,"metadata")); if (p.output_path && job.status === "completed") summary.append(node("p",`Validated MP3: ${p.output_path}`,"metadata")); }
+    if (job.podcast) { const p=job.podcast; summary.append(node("p",`${p.classified_blocks || 0}/${p.total_blocks || 0} transcript blocks classified · ${((p.removed_ms || 0)/1000).toFixed(1)} seconds removed · ${p.known_ad_units || 0} units verified by known ads`,"metadata")); if (p.output_path && job.status === "completed") summary.append(node("p",`Validated MP3: ${p.output_path}`,"metadata")); }
  renderPhaseCosts(summary, job);
     if (queuePresentation(job).showTelemetry) summary.append(telemetry(job));
     else if (batchProgress(job)) summary.append(batchProgress(job));
@@ -4521,6 +4522,13 @@ async function viewPodcastTranscript(id) {
  const content=[node("p","Your connected LLM reads these blocks through podcast_block and saves labels through podcast_classify. All blocks and overlaps must be covered before cuts can be planned.")]; let offset=0,manifest;
  do { manifest=await tool("podcast_blocks",{id,offset}); for (const b of manifest.blocks || []) content.push(button(`${b.id} · ${b.first_id}–${b.last_id} · ${b.classified ? "Classified" : "Pending"}`,()=>safe(async()=>{ const pages=[]; let at=0,page; do { page=await tool("podcast_block",{id,block_id:b.id,offset:at}); pages.push(...page.units.map(u=>node("p",`${u.id} · ${u.text}`,"metadata"))); at=page.next_offset; } while(page.has_more); await reviewAction({title:`Transcript ${b.id}`,content:pages,confirmLabel:"Close"}); }))); offset=manifest.next_offset; } while(manifest.has_more);
  await reviewAction({title:"Podcast transcript",content,confirmLabel:"Close"});
+}
+
+async function viewPodcastAdLibrary(podcastId) {
+ const content=[node("p","Known ads are scoped to this podcast. Audio and original transcript text must both match. Revoking a reference blocks pending cuts that depend on it; reprocess those episodes to review them again.")]; let offset=0,page;
+ do { page=await tool("podcast_ad_library",{podcast_id:podcastId,offset}); for (const ref of page.references || []) { const row=node("div"); row.append(node("p",`${ref.label} · ${(ref.duration_ms/1000).toFixed(2)} s · ${ref.first_id}–${ref.last_id} · ${ref.revoked ? "Revoked" : "Active"}`,"metadata")); row.append(node("p",ref.id,"metadata")); if (!ref.revoked) row.append(button("Revoke reference",()=>safe(async()=>{ await tool("podcast_ad_library",{podcast_id:podcastId,revoke:ref.id}); row.replaceChildren(node("p","Reference revoked. Pending episodes that used it need a new review.","metadata")); }))); content.push(row); } offset=page.next_offset; } while(page.has_more);
+ if (!page.total_references) content.push(node("p","The library will learn confirmed ads when an approved episode finishes processing."));
+ await reviewAction({title:"Podcast ad library",content,confirmLabel:"Close"});
 }
 
 safe(initialize);

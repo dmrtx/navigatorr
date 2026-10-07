@@ -26,7 +26,7 @@ func decisions(t Transcript, p Policy) map[string]Classification {
 			if i >= 20 && i <= 25 {
 				label = "paid_ad"
 			}
-			c.Decisions = append(c.Decisions, Decision{t.Units[i].ID, t.Units[i].ID, label, "evidence"})
+			c.Decisions = append(c.Decisions, Decision{FirstID: t.Units[i].ID, LastID: t.Units[i].ID, Label: label, Reason: "evidence"})
 		}
 		cs[b.ID] = c
 	}

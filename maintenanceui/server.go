@@ -33,7 +33,7 @@ var assets embed.FS
 var allowedTools = map[string]bool{
 	"action_run": true, "action_catalog": true, "action_list": true, "action_status": true, "action_detail": true, "action_resume": true, "action_retry": true, "action_cancel": true,
 	"recipe_list": true, "recipe_get": true, "recipe_save": true, "recipe_delete": true, "recipe_history": true, "recipe_status": true, "recipe_reload": true, "recipe_update": true, "recipe_rollback": true,
-	"podcast_artifact": true, "podcast_blocks": true, "podcast_block": true, "podcast_classify": true, "podcast_review": true,
+	"podcast_ad_library": true, "podcast_artifact": true, "podcast_blocks": true, "podcast_block": true, "podcast_classify": true, "podcast_review": true,
 	"inspect_media": true, "fs_list": true, "fs_stat": true, "fs_hash": true, "transcode_backups": true,
 }
 var allowedActions = map[string]bool{"clean_podcast_ads": true, "transcode_media": true, "transcode_batch": true, "benchmark_transcode": true, "promote_transcode_candidate": true}
