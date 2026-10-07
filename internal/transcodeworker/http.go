@@ -260,10 +260,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	ver, commit := GetBuildMetadata()
 	writeHTTPJSON(w, http.StatusOK, map[string]any{
-		"ok":      true,
-		"service": "navigatorr-transcode",
-		"version": ver,
-		"commit":  commit,
+		"ok":        true,
+		"service":   "navigatorr-transcode",
+		"version":   ver,
+		"commit":    commit,
+		"scheduler": s.worker.SchedulerObservation(time.Now().UTC()),
 	})
 }
 

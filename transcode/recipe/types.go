@@ -378,6 +378,8 @@ type Snapshot struct {
 }
 
 type Status struct {
+	PreviousVersion string    `json:"previous_version,omitempty"`
+	PreviousDigest  string    `json:"previous_digest,omitempty"`
 	Source          string    `json:"source"`
 	Channel         string    `json:"channel,omitempty"`
 	Revision        string    `json:"revision,omitempty"`

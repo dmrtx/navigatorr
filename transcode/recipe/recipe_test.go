@@ -270,3 +270,71 @@ func TestManifestDigestFormatHelper(t *testing.T) {
 		t.Fatal("bad sha helper")
 	}
 }
+
+func TestReviewedRollbackChecksBothVersionsWithoutMutation(t *testing.T) {
+	p := &mutableProvider{name: "file", data: versionedBundle("10.0.0", 60)}
+	m, err := NewManager(p, t.TempDir(), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = m.Update(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	p.set(versionedBundle("10.1.0", 65), nil)
+	if _, err = m.Update(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	reviewed := m.Status()
+	if reviewed.PreviousVersion != "10.0.0" || reviewed.PreviousDigest == "" {
+		t.Fatalf("missing reviewed destination: %+v", reviewed)
+	}
+	running := m.Snapshot()
+	metadataBefore, err := os.ReadFile(m.metadataPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tokens := range [][2]string{{reviewed.ActiveDigest, ""}, {"", reviewed.PreviousDigest}, {"stale", reviewed.PreviousDigest}, {reviewed.ActiveDigest, "stale"}} {
+		if _, err = m.RollbackReviewed(tokens[0], tokens[1]); err == nil {
+			t.Fatalf("accepted stale/incomplete review %v", tokens)
+		}
+		after, _ := os.ReadFile(m.metadataPath())
+		if string(after) != string(metadataBefore) || m.Status().ActiveDigest != reviewed.ActiveDigest {
+			t.Fatal("failed review mutated bundle")
+		}
+	}
+	restored, err := m.RollbackReviewed(reviewed.ActiveDigest, reviewed.PreviousDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.ActiveDigest != reviewed.PreviousDigest || running.Identity.Digest != reviewed.ActiveDigest {
+		t.Fatal("reviewed rollback changed wrong bundle or running snapshot")
+	}
+	if _, err = m.RollbackReviewed(reviewed.ActiveDigest, reviewed.PreviousDigest); err == nil {
+		t.Fatal("duplicate stale review accepted")
+	}
+}
+
+func TestReviewedRollbackRejectsActivationDuringConfirmation(t *testing.T) {
+	p := &mutableProvider{name: "file", data: versionedBundle("11.0.0", 60)}
+	m, err := NewManager(p, t.TempDir(), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, version := range []string{"11.0.0", "11.1.0"} {
+		p.set(versionedBundle(version, 65), nil)
+		if _, err = m.Update(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reviewed := m.Status()
+	p.set(versionedBundle("11.2.0", 70), nil)
+	if _, err = m.Update(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = m.RollbackReviewed(reviewed.ActiveDigest, reviewed.PreviousDigest); err == nil || !strings.Contains(err.Error(), "conflict") {
+		t.Fatalf("expected reviewed-version conflict, got %v", err)
+	}
+	if m.Status().ActiveVersion != "11.2.0" {
+		t.Fatal("stale dialog changed newly activated bundle")
+	}
+}

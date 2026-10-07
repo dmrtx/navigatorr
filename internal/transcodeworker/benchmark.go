@@ -31,6 +31,13 @@ const (
 
 // BenchmarkRecord represents the persistent state stored in benchmark.json on the worker.
 type BenchmarkRecord struct {
+	SearchSeconds             *float64                              `json:"search_seconds,omitempty"`
+	PhaseCosts                map[string]transcode.PhaseCost        `json:"phase_costs,omitempty"`
+	SearchBudgetSeconds       int                                   `json:"search_budget_seconds,omitempty"`
+	SearchStartedAt           time.Time                             `json:"search_started_at,omitzero"`
+	ReasonCode                string                                `json:"reason_code,omitempty"`
+	Mode                      string                                `json:"mode,omitempty"`
+	SearchDeadline            time.Time                             `json:"search_deadline,omitzero"`
 	Comparison                *transcode.BenchmarkComparison        `json:"comparison,omitempty"`
 	Allow8BitTo10Bit          bool                                  `json:"allow_8bit_to_10bit,omitempty"`
 	AudioMode                 string                                `json:"audio_mode,omitempty"`
@@ -421,6 +428,7 @@ func (w *Worker) BenchmarkSubmit(ctx context.Context, req transcode.BenchmarkReq
 	}
 
 	record := &BenchmarkRecord{
+		Mode: req.Mode, SearchDeadline: req.SearchDeadline, SearchBudgetSeconds: req.SearchBudgetSeconds,
 		Allow8BitTo10Bit:          req.Allow8BitTo10Bit,
 		ProtocolVersion:           transcode.WorkerProtocolVersion,
 		ID:                        req.ID,
@@ -684,6 +692,11 @@ func (w *Worker) BenchmarkStatus(ctx context.Context, jobID string) (transcode.B
 		return st, err
 	}
 
+	st.SearchSeconds = record.SearchSeconds
+	st.PhaseCosts = record.PhaseCosts
+	st.ReasonCode = record.ReasonCode
+	st.SearchStartedAt = record.SearchStartedAt
+	st.SearchBudgetSeconds = record.SearchBudgetSeconds
 	st.SourcePath = record.Source
 	st.Metric = record.Metric
 	st.SamplesPlanned = len(record.Samples)
@@ -861,6 +874,10 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) 
 	stopHeartbeat := w.startBenchmarkHeartbeat(ctx, jobID, runToken, benchmarkHeartbeatInterval)
 	defer stopHeartbeat()
 
+	// A resumed search has an unmeasured prior process interval. Do not expose
+	// this invocation's duration as the complete cost and refund its reservation.
+	resumedSearchCostUnknown := !record.SearchStartedAt.IsZero()
+
 	// Phase 2: Execute benchmark runner outside lock so cancellation/status can acquire lock.
 	// Direct-SMB sources are first materialized on local SSD; the durable Source
 	// remains the semantic NAS path used by status and idempotency.
@@ -870,6 +887,9 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) 
 	// cache entry is shared and is never removed by per-job cleanup; only the
 	// per-job samples workspace and any legacy per-job download are cleaned.
 	var runErr error
+	stageStart := time.Now()
+	stageCost := transcode.PhaseCost{}
+	ctx = context.WithValue(ctx, sourceCostKey{}, &stageCost)
 	semanticSource := record.Source
 	effectiveSource := strings.TrimSpace(record.EffectiveSource)
 	if effectiveSource == "" {
@@ -915,11 +935,57 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) 
 			}
 		}
 	}
+	stageCost.DurationMs = time.Since(stageStart).Milliseconds()
+	stageCost.Attempts = 1
+	if record.PhaseCosts == nil {
+		record.PhaseCosts = map[string]transcode.PhaseCost{}
+	}
+	record.PhaseCosts["staging"] = stageCost
 	if runErr == nil {
 		_ = w.UpdateBenchmarkProgress(jobID, runToken, 0, "probing_source")
 		record.Source = effectiveSource
 		runner := w.getBenchmarkRunner()
+		if record.SearchBudgetSeconds > 0 {
+			if record.SearchStartedAt.IsZero() {
+				record.SearchStartedAt = time.Now().UTC()
+				budgetLock, budgetErr := acquireJobLock(jobDir)
+				if budgetErr != nil {
+					return budgetErr
+				}
+				current, budgetErr := LoadBenchmark(benchFile)
+				if budgetErr == nil {
+					if current.Status == "cancelled" {
+						budgetLock.Unlock()
+						return nil
+					}
+					if current.SearchStartedAt.IsZero() {
+						current.SearchStartedAt = record.SearchStartedAt
+						budgetErr = SaveBenchmarkAtomic(benchFile, current)
+					} else {
+						record.SearchStartedAt = current.SearchStartedAt
+					}
+				}
+				budgetLock.Unlock()
+				if budgetErr != nil {
+					return budgetErr
+				}
+			}
+			var budgetCancel context.CancelFunc
+			ctx, budgetCancel = context.WithDeadline(ctx, record.SearchStartedAt.Add(time.Duration(record.SearchBudgetSeconds)*time.Second))
+			defer budgetCancel()
+		} else if !record.SearchDeadline.IsZero() {
+			var budgetCancel context.CancelFunc
+			ctx, budgetCancel = context.WithDeadline(ctx, record.SearchDeadline)
+			defer budgetCancel()
+		}
+		searchStart := time.Now()
 		runErr = runner.RunBenchmark(ctx, w, record)
+		searchSeconds := time.Since(searchStart).Seconds()
+		if resumedSearchCostUnknown {
+			record.SearchSeconds = nil
+		} else {
+			record.SearchSeconds = &searchSeconds
+		}
 	}
 
 	// Save only a few lossless PNG pairs before deleting the large scratch
@@ -951,6 +1017,9 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) 
 		return nil
 	}
 
+	latest.SearchSeconds = record.SearchSeconds
+	latest.PhaseCosts = record.PhaseCosts
+
 	// If job was cancelled while runner was executing, preserve cancelled status!
 	// Copy partial evidence if available without resurrecting or modifying cancelled state.
 	if latest.Status == "cancelled" {
@@ -967,6 +1036,10 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) 
 	if runErr != nil {
 		latest.Status = "failed"
 		latest.Error = runErr.Error()
+		if (record.SearchBudgetSeconds > 0 || !record.SearchDeadline.IsZero()) && errors.Is(runErr, context.DeadlineExceeded) {
+			latest.ReasonCode = "search_budget_exhausted"
+			latest.Error = "search_budget_exhausted: bounded search stopped; no claim about untested candidates"
+		}
 		latest.FinishedAt = time.Now().UTC()
 		latest.HeartbeatAt = time.Now().UTC()
 		if record.Progress > latest.Progress {

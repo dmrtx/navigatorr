@@ -70,6 +70,12 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 	if err != nil || len(candidateRep.Video) != 1 {
 		return fail("quality_final_candidate_probe_failed", fmt.Errorf("candidate video probe: %v", err))
 	}
+	if plan.Mode != "" {
+		sourceVideo, candidateVideo := sourceRep.Video[0], candidateRep.Video[0]
+		if mediainspect.IsHDRorDolbyVisionReport(&sourceRep) || mediainspect.IsHDRorDolbyVisionReport(&candidateRep) || (sourceVideo.BitDepth != 8 && sourceVideo.BitDepth != 10) || candidateVideo.BitDepth != sourceVideo.BitDepth || !isSupportedSourceChroma(sourceVideo.PixelFormat, sourceVideo.BitDepth) || !isSupportedSourceChroma(candidateVideo.PixelFormat, candidateVideo.BitDepth) {
+			return fail("quality_source_class_unsupported", fmt.Errorf("source/candidate measurement class is unsupported or changed"))
+		}
+	}
 	e.SourceBitDepth = sourceRep.Video[0].BitDepth
 	e.CandidateBitDepth = candidateRep.Video[0].BitDepth
 	if sourceRep.Video[0].FPS <= 0 || !isFiniteQuality(sourceRep.Video[0].FPS) {
@@ -297,3 +303,37 @@ func verifySampleAlignment(ref, cand []float64, fps float64) error {
 }
 
 func isFiniteQuality(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
+
+// Mode preflight rejects unsupported measurement classes on the staged local
+// source before committing to a full encode. It never relaxes depth/chroma.
+func (w *Worker) validateModeSourceQuality(ctx context.Context, source string, plan *transcode.Plan) error {
+	if plan == nil || plan.Mode == "" {
+		return nil
+	}
+	rep, err := mediainspect.InspectDetailed(ctx, w.ffprobePath, source)
+	if err != nil || len(rep.Video) != 1 {
+		return fmt.Errorf("quality_source_evidence_missing: source class unavailable: %v", err)
+	}
+	v := rep.Video[0]
+	if plan.Mode == "x265_preserve" && (norm(v.Codec) == "hevc" || norm(v.Codec) == "h265") {
+		return &transcode.PolicyRejectionError{ReasonCode: "already_hevc", Message: "source is already HEVC; no conversion required"}
+	}
+	if mediainspect.IsHDRorDolbyVisionReport(&rep) || (v.BitDepth != 8 && v.BitDepth != 10) || !isSupportedSourceChroma(v.PixelFormat, v.BitDepth) || v.FPS <= 0 || v.FPS >= 45 {
+		return fmt.Errorf("quality_source_class_unsupported: native SDR 8/10-bit 4:2:0 non-HFR evidence required")
+	}
+	q := plan.QualityValidation
+	if q == nil || q.Quality.VMAF == nil || q.Quality.VMAF.Model == "" || (q.Metric != "vmaf" && q.Metric != "both" && q.Metric != "vmaf+ssim") {
+		return fmt.Errorf("quality_model_unavailable: mode requires its frozen VMAF policy")
+	}
+	caps, err := w.Capabilities(ctx)
+	if err != nil {
+		return err
+	}
+	if caps.Quality == nil || caps.Quality.ProbeError != "" || !caps.Quality.Models[q.Quality.VMAF.Model].Available {
+		return fmt.Errorf("quality_model_unavailable: requested executable model is unavailable")
+	}
+	if v.BitDepth == 10 && !caps.SupportsNative10BitQuality() {
+		return fmt.Errorf("quality_native_main10_unverified: executable native depth path is unavailable")
+	}
+	return nil
+}

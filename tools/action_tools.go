@@ -62,6 +62,10 @@ func chunkPayload(id, actionName, section, key string, rawBytes []byte, chunkIdx
 // ActionCompactSummary contains operational fields needed to monitor or continue workflows,
 // omitting full inputs/outputs/state to protect the model's context window.
 type ActionCompactSummary struct {
+	PhaseCosts           map[string]any         `json:"phase_costs,omitempty"`
+	Mode                 string                 `json:"mode,omitempty"`
+	PolicyDigest         string                 `json:"policy_digest,omitempty"`
+	ReasonCode           string                 `json:"reason_code,omitempty"`
 	SourcePath           string                 `json:"source_path,omitempty"`
 	ParentActionID       string                 `json:"parent_action_id,omitempty"`
 	Origin               string                 `json:"origin"`
@@ -122,6 +126,8 @@ func toCompactSummary(res *action.ActionResult) ActionCompactSummary {
 		return ActionCompactSummary{}
 	}
 	return ActionCompactSummary{
+		PhaseCosts: actionProgressMap(res.State["phase_costs"]),
+		Mode:       summaryInput(res, "mode"), PolicyDigest: summaryStateString(res, "policy_digest"), ReasonCode: summaryStateString(res, "reason_code"),
 		SourcePath:           summaryInput(res, "path"),
 		ParentActionID:       summaryInput(res, "parent_action_id"),
 		Origin:               actionOrigin(res.State),
@@ -143,7 +149,7 @@ func toCompactSummary(res *action.ActionResult) ActionCompactSummary {
 		ValidationDurationMs: res.ValidationDurationMs,
 		ReconcileLagMs:       res.ReconcileLagMs,
 		Worker: compactOperationalFields(res, []string{
-			"transcode_status", "transcode_phase", "quality_evidence", "benchmark_status", "benchmark_quality", "benchmark_phase", "phase",
+			"benchmark_search_seconds", "search_budget_seconds", "operation_search_budget_seconds", "transcode_status", "transcode_phase", "quality_evidence", "benchmark_status", "benchmark_quality", "benchmark_phase", "phase",
 			"progress", "speed", "fps", "last_progress_at", "worker_heartbeat_at",
 			"progress_is_stale", "last_known_progress", "progress_details", "benchmark_progress_details",
 			"worker_slots_total", "worker_slots_used", "queue_position", "storage_backend",
@@ -772,4 +778,14 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 			return toolBoundedJSON(summaries, MaxActionResponseBytes, nil), nil
 		},
 	)
+}
+
+func summaryStateString(res *action.ActionResult, key string) string {
+	if res == nil {
+		return ""
+	}
+	if value, ok := res.State[key].(string); ok {
+		return value
+	}
+	return ""
 }

@@ -188,6 +188,7 @@ type BenchmarkWinner struct {
 
 // BenchmarkCandidateEvaluation records the evaluation summary for one candidate.
 type BenchmarkCandidateEvaluation struct {
+	MeasuredSeconds    *float64                 `json:"measured_seconds,omitempty"`
 	FailedSamples      []BenchmarkSampleFailure `json:"failed_samples,omitempty"`
 	CandidateID        string                   `json:"candidate_id"`
 	CandidateIndex     int                      `json:"candidate_index"`
@@ -283,6 +284,9 @@ type BenchmarkSampleWindow struct {
 // It is strictly versioned and does NOT accept candidate output paths or replace_original parameters,
 // making original media mutation completely impossible.
 type BenchmarkRequest struct {
+	SearchBudgetSeconds int       `json:"search_budget_seconds,omitempty"`
+	Mode                string    `json:"mode,omitempty"`
+	SearchDeadline      time.Time `json:"search_deadline,omitzero"`
 	// Allow8BitTo10Bit is an explicit experiment opt-in, never an automatic
 	// optimization. Quality measurement must use an explicit native-depth model.
 	Allow8BitTo10Bit          bool                        `json:"allow_8bit_to_10bit,omitempty"`
@@ -343,6 +347,11 @@ type BenchmarkProgressDetails struct {
 
 // BenchmarkStatus captures the current execution status and metadata of a benchmark job.
 type BenchmarkStatus struct {
+	SearchSeconds       *float64                            `json:"search_seconds,omitempty"`
+	PhaseCosts          map[string]PhaseCost                `json:"phase_costs,omitempty"`
+	ReasonCode          string                              `json:"reason_code,omitempty"`
+	SearchStartedAt     time.Time                           `json:"search_started_at,omitzero"`
+	SearchBudgetSeconds int                                 `json:"search_budget_seconds,omitempty"`
 	ComparisonAvailable bool                                `json:"comparison_available,omitempty"`
 	ProtocolVersion     int                                 `json:"protocol_version"`
 	ID                  string                              `json:"id"`
@@ -384,6 +393,24 @@ func DigestBenchmarkRequest(req *BenchmarkRequest) (string, error) {
 func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 	if req == nil {
 		return errors.New("benchmark request cannot be nil")
+	}
+	if req.Mode != "" {
+		if req.Mode != "size" && req.Mode != "quality" && req.Mode != "x265_preserve" {
+			return errors.New("unsupported processing mode")
+		}
+		if req.SearchBudgetSeconds <= 0 || req.SearchBudgetSeconds > 3600 {
+			return errors.New("mode search requires finite search budget (1..3600 seconds)")
+		}
+		if req.Allow8BitTo10Bit {
+			return errors.New("mode cannot opt into a bit-depth conversion")
+		}
+		if req.Mode == "x265_preserve" {
+			for _, candidate := range req.Candidates {
+				if BenchmarkCandidateVideoCodec(candidate) != VideoCodecLibX265 {
+					return errors.New("x265_preserve requires libx265 candidates only")
+				}
+			}
+		}
 	}
 
 	if req.ProtocolVersion != WorkerProtocolVersion {

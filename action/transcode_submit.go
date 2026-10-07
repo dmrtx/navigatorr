@@ -376,6 +376,17 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 		return StepResult{Status: StepWaitingExternal, WaitingCondition: "transcode_complete", WaitingReason: reason, Outputs: meta}, nil
 	case transcode.StatusFailed:
 		mirrorTranscodeWorkerMetadata(ec, st)
+		if getString(ec.Inputs, "mode") != "" {
+			switch st.ReasonCode {
+			case "insufficient_savings", "size_growth", "size_growth_exceeded", "quality_not_met", "preservation_not_met", "already_target_codec":
+				ec.State["skip_transcode"] = true
+				ec.State["reason_code"] = st.ReasonCode
+				if st.ReasonCode == "size_growth_exceeded" {
+					ec.State["reason_code"] = "size_growth"
+				}
+				return StepResult{Status: StepCompleted, Outputs: map[string]any{"skipped": true, "reason_code": st.ReasonCode}}, nil
+			}
+		}
 		msg := st.Error
 		if msg == "" {
 			msg = "transcode executor reported job failure"

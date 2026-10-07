@@ -22,10 +22,10 @@ func (e *Engine) registerTranscodeTemplate() {
 		AutoReconcile:   true,
 		ImmutableInputs: true,
 		Name:            "transcode_media", Version: 2,
-		Description:    "Coordinates safe candidate-only media transcoding using an immutable recipe-resolved plan, bounded transient retries, worker revalidation, post-transcode stream validation, and original SHA-256 verification.",
-		RequiredInputs: []string{"path"}, OptionalInputs: []string{"profile", "profile_config", "preserve_source_bit_depth", "replace_original", "expected_video_codec", "max_size_increase_percent", "media_type", "is_anime", "min_savings_percent", "surface_worker_busy", "metric", "parent_action_id", "batch_fixed_quality", "batch_calibration_digest", "batch_item_key", "library_context"}, Destructive: false,
+		Description:    "Set mode=size|quality|x265_preserve for immutable sampled quality and final size policies without profile/priority/tuning; quality is the UI default. x265_preserve requires libx265, skips existing HEVC and permits 0% minimum savings; size/quality require 15%, all reject growth. Unsupported sources or unavailable quality capabilities preserve the original. Omit mode for legacy technical behavior. Coordinates safe candidate-only media transcoding using an immutable recipe-resolved plan, bounded transient retries, worker revalidation, post-transcode stream validation, and original SHA-256 verification.",
+		RequiredInputs: []string{"path"}, OptionalInputs: []string{"mode", "profile", "profile_config", "preserve_source_bit_depth", "replace_original", "expected_video_codec", "max_size_increase_percent", "media_type", "is_anime", "min_savings_percent", "surface_worker_busy", "metric", "parent_action_id", "batch_fixed_quality", "batch_calibration_digest", "batch_item_key", "library_context"}, Destructive: false,
 		Steps: []StepDefinition{
-			{Name: "preflight", Description: "Inspect source, hash original, resolve profile/recipe and per-stream compatibility plan", Run: e.stepTranscodePreflight},
+			{Name: "preflight", Description: "Inspect source, hash original, resolve profile/recipe and per-stream compatibility plan", Run: e.measureCoordinatorPhase("coordinator_preflight", e.stepTranscodePreflight)},
 			{Name: "submit_benchmark", Description: "Submit benchmark request if profile optimization is enabled", Run: e.stepBenchmarkSubmit},
 			{Name: "wait_benchmark", Description: "Wait for benchmark completion and materialize winning plan if optimization is enabled", Run: e.stepBenchmarkWait},
 			{Name: "submit_transcode", Description: "Submit the immutable structured plan to the remote worker with bounded transient retries", Run: e.stepTranscodeSubmit},
@@ -39,6 +39,16 @@ func (e *Engine) registerTranscodeTemplate() {
 func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
 	if err := e.validateTranscodeInputs(ec); err != nil {
 		return StepResult{Status: StepFailed, Error: err.Error()}, nil
+	}
+	if err := validateModeInputs(ec.Inputs); err != nil {
+		return StepResult{Status: StepFailed, Error: err.Error()}, nil
+	}
+	if err := e.bindModeParent(ec); err != nil {
+		return StepResult{Status: StepFailed, Error: err.Error()}, nil
+	}
+	modeSnapshot, modeErr := freezeModePolicy(ec)
+	if modeErr != nil {
+		return StepResult{Status: StepFailed, Error: modeErr.Error()}, nil
 	}
 	if getBool(ec.Inputs, "replace_original") {
 		return StepResult{Status: StepFailed, Error: "destructive replacement (replace_original: true) is not supported; transcoding is candidate-only and never modifies the original"}, nil
@@ -83,8 +93,10 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		_ = f.Close()
 		return StepResult{Status: StepFailed, Error: err.Error()}, nil
 	}
+	hashStarted := e.now()
 	_, hashErr := io.Copy(h, &promotionContextReader{ctx: ctx, r: f, path: cleanPath, total: fi.Size(), progress: observe})
 	_ = f.Close()
+	e.recordCoordinatorPhase(ec, "coordinator_source_hash", hashStarted, e.now())
 	if hashErr != nil {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to compute hash of original file %s: %v", cleanPath, hashErr)}, nil
 	}
@@ -93,7 +105,9 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	if err := e.persistExecutionState(ctx, ec); err != nil {
 		return StepResult{Status: StepFailed, Error: err.Error()}, nil
 	}
+	probeStarted := e.now()
 	rep, err := mediainspect.InspectDetailed(ctx, e.deps.Ffprobe, cleanPath)
+	e.recordCoordinatorPhase(ec, "coordinator_probe", probeStarted, e.now())
 	if err != nil {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to probe original media %s: %v", cleanPath, err)}, nil
 	}
@@ -168,7 +182,20 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	if profileConfigErr != nil {
 		return StepResult{Status: StepFailed, Error: profileConfigErr.Error()}, nil
 	}
-	if hasProfileConfig {
+	if modeSnapshot != nil {
+		reason := modeSourceReason(modeSnapshot.Mode, &rep)
+		if reason != "" {
+			ec.State["skip_transcode"] = true
+			ec.State["reason_code"] = reason
+			ec.State["resolved_path"] = cleanPath
+			ec.State["original_sha256"] = origSHA
+			ec.State["original"] = origMap
+			return StepResult{Status: StepCompleted, Outputs: map[string]any{"skipped": true, "reason_code": reason, "mode": modeSnapshot.Mode, "policy_digest": modeSnapshot.Digest}}, nil
+		}
+		ephemeralProfile = modeSnapshot.Profile
+		hasProfileConfig = true
+		profile = "mode-" + modeSnapshot.Mode
+	} else if hasProfileConfig {
 		profile = "ephemeral"
 	} else {
 		if profile == "" && e.deps.Config != nil && strings.TrimSpace(e.deps.Config.Transcode.DefaultProfile) != "" {
@@ -258,11 +285,16 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		return StepResult{Status: StepFailed, Error: err.Error()}, nil
 	}
 	if len(rep.Video) > 0 {
-		if hasProfileConfig && (ephemeralProfile.Video.Profile != "" || ephemeralProfile.Video.PixelFormat != "") && preserveBitDepth && plan.ExpectedBitDepth > 0 && (rep.Video[0].BitDepth == 8 || rep.Video[0].BitDepth == 10) && plan.ExpectedBitDepth != rep.Video[0].BitDepth {
+		if modeSnapshot == nil && hasProfileConfig && (ephemeralProfile.Video.Profile != "" || ephemeralProfile.Video.PixelFormat != "") && preserveBitDepth && plan.ExpectedBitDepth > 0 && (rep.Video[0].BitDepth == 8 || rep.Video[0].BitDepth == 10) && plan.ExpectedBitDepth != rep.Video[0].BitDepth {
 			return StepResult{Status: StepFailed, Error: fmt.Sprintf("profile_config requests %d-bit output for a %d-bit source; set preserve_source_bit_depth=false to use the requested conversion", plan.ExpectedBitDepth, rep.Video[0].BitDepth)}, nil
 		}
 		if err := preserveSourceBitDepth(plan, rep.Video[0].BitDepth, preserveBitDepth); err != nil {
 			return StepResult{Status: StepFailed, Error: fmt.Sprintf("resolving transcode profile %q: %v", profile, err)}, nil
+		}
+	}
+	if modeSnapshot != nil {
+		if err := applyModePlan(plan, modeSnapshot); err != nil {
+			return StepResult{Status: StepFailed, Error: err.Error()}, nil
 		}
 	}
 	ext, err := transcode.ContainerExtension(plan.Container)

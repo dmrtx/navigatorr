@@ -28,11 +28,12 @@ import (
 
 // BenchmarkSampleRef describes an extracted reference sample window.
 type BenchmarkSampleRef struct {
-	Index           int     `json:"index"`
-	StartSeconds    float64 `json:"start_seconds"`
-	DurationSeconds float64 `json:"duration_seconds"`
-	File            string  `json:"file"`
-	SizeBytes       int64   `json:"size_bytes"`
+	ExtractionDurationSec float64 `json:"extraction_duration_sec,omitempty"`
+	Index                 int     `json:"index"`
+	StartSeconds          float64 `json:"start_seconds"`
+	DurationSeconds       float64 `json:"duration_seconds"`
+	File                  string  `json:"file"`
+	SizeBytes             int64   `json:"size_bytes"`
 }
 
 // BenchmarkCandidateSampleResult describes one candidate encode for one sample window.
@@ -251,6 +252,29 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		return errors.New("worker instance cannot be nil (fail closed)")
 	}
 
+	defer func() {
+		if record.PhaseCosts == nil {
+			record.PhaseCosts = map[string]transcode.PhaseCost{}
+		}
+		if record.Evidence != nil {
+			var samples, encode, metrics float64
+			for _, ref := range record.Evidence.ReferenceSamples {
+				samples += ref.ExtractionDurationSec
+			}
+			for _, candidate := range record.Evidence.CandidateSamples {
+				encode += candidate.EncodeDurationSec
+			}
+			for _, metric := range record.Evidence.MetricSamples {
+				metrics += metric.MetricDurationSec
+			}
+			for name, seconds := range map[string]float64{"samples": samples, "sample_encode": encode, "sample_validation": metrics} {
+				if seconds > 0 {
+					record.PhaseCosts[name] = transcode.PhaseCost{DurationMs: int64(seconds * 1000), Attempts: 1}
+				}
+			}
+		}
+	}()
+
 	// 1. Source stability snapshot before inspection
 	sourceStat, err := os.Stat(record.Source)
 	if err != nil {
@@ -296,7 +320,12 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		return err
 	}
 
+	probeStart := time.Now()
 	rep, err := mediainspect.InspectDetailed(ctx, w.ffprobePath, record.Source)
+	if record.PhaseCosts == nil {
+		record.PhaseCosts = map[string]transcode.PhaseCost{}
+	}
+	record.PhaseCosts["probe"] = transcode.PhaseCost{DurationMs: time.Since(probeStart).Milliseconds(), Attempts: 1}
 	if err != nil {
 		return fmt.Errorf("inspecting source media %s: %w", record.Source, err)
 	}
@@ -460,6 +489,7 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		cmd.Stderr = stderrBuf
 		cmd.Stdout = nil
 
+		extractionStart := time.Now()
 		if err := cmd.Run(); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -478,11 +508,12 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		}
 
 		evidence.ReferenceSamples = append(evidence.ReferenceSamples, BenchmarkSampleRef{
-			Index:           window.Index,
-			StartSeconds:    window.StartSeconds,
-			DurationSeconds: window.DurationSeconds,
-			File:            filepath.Base(refPath),
-			SizeBytes:       fi.Size(),
+			ExtractionDurationSec: time.Since(extractionStart).Seconds(),
+			Index:                 window.Index,
+			StartSeconds:          window.StartSeconds,
+			DurationSeconds:       window.DurationSeconds,
+			File:                  filepath.Base(refPath),
+			SizeBytes:             fi.Size(),
 		})
 
 		progressReporter.CompleteUnit()
@@ -1478,6 +1509,8 @@ func (r *ProductionBenchmarkRunner) runSelection(
 		// Determine candidate encode success and total sample bytes
 		encodeSuccess := true
 		var candSampleBytes int64
+		var measuredSeconds float64
+		measuredTimeKnown := true
 		sampleCount := 0
 		for _, cs := range evidence.CandidateSamples {
 			if cs.CandidateID == vc.candidate.ID {
@@ -1485,6 +1518,10 @@ func (r *ProductionBenchmarkRunner) runSelection(
 					encodeSuccess = false
 				} else {
 					candSampleBytes += cs.SizeBytes
+					measuredSeconds += cs.EncodeDurationSec
+					if cs.EncodeDurationSec <= 0 || math.IsNaN(cs.EncodeDurationSec) || math.IsInf(cs.EncodeDurationSec, 0) {
+						measuredTimeKnown = false
+					}
 					sampleCount++
 				}
 			}
@@ -1532,8 +1569,14 @@ func (r *ProductionBenchmarkRunner) runSelection(
 			}
 		}
 
+		var measured *float64
+		if measuredTimeKnown && sampleCount > 0 {
+			measured = &measuredSeconds
+		}
 		candidateInputs = append(candidateInputs, optimization.CandidateInput{
 			CandidateID:     vc.candidate.ID,
+			VideoCodec:      transcode.BenchmarkCandidateVideoCodec(vc.candidate),
+			MeasuredSeconds: measured,
 			Profile:         vc.profile,
 			EncodeSuccess:   encodeSuccess,
 			AggregateResult: candAgg,
@@ -1544,6 +1587,7 @@ func (r *ProductionBenchmarkRunner) runSelection(
 
 	// Deterministic selection
 	selIn := optimization.SelectorInput{
+		Mode: record.Mode, SourceBytes: sourceSize,
 		Policy:     selectorPolicy,
 		Candidates: candidateInputs,
 	}
@@ -1573,6 +1617,7 @@ func (r *ProductionBenchmarkRunner) runSelection(
 		}
 		decision.Evaluations = append(decision.Evaluations, transcode.BenchmarkCandidateEvaluation{
 			FailedSamples:      failedSamples,
+			MeasuredSeconds:    ec.MeasuredSeconds,
 			CandidateID:        vc.candidate.ID,
 			CandidateIndex:     vc.index,
 			VideoCodec:         transcode.BenchmarkCandidateVideoCodec(vc.candidate),
