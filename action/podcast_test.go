@@ -263,12 +263,23 @@ func TestPodcastConcurrentSubmissionReceipt(t *testing.T) {
 	var submits int32
 	var workerMu sync.Mutex
 	statuses := map[string]transcode.JobStatus{}
+	var holdPoll int32
+	pollEntered, releasePoll := make(chan struct{}), make(chan struct{})
 	tc := &mockTranscodeExecutor{capabilitiesFunc: func(context.Context) (transcode.WorkerCapabilities, error) {
 		return transcode.WorkerCapabilities{Podcast: &transcode.PodcastCapabilities{Available: true, NativeTimingVerified: true, MP3RenderVerified: true, VerifiedLanguage: "en_US"}}, nil
-	}, statusFunc: func(_ context.Context, id string) (transcode.JobStatus, error) {
+	}, statusFunc: func(ctx context.Context, id string) (transcode.JobStatus, error) {
 		workerMu.Lock()
-		defer workerMu.Unlock()
-		if status, ok := statuses[id]; ok {
+		status, ok := statuses[id]
+		workerMu.Unlock()
+		if ok {
+			if atomic.CompareAndSwapInt32(&holdPoll, 1, 2) {
+				close(pollEntered)
+				select {
+				case <-releasePoll:
+				case <-ctx.Done():
+					return transcode.JobStatus{}, ctx.Err()
+				}
+			}
 			return status, nil
 		}
 		return transcode.JobStatus{}, &transcode.HTTPError{StatusCode: 404}
@@ -309,9 +320,32 @@ func TestPodcastConcurrentSubmissionReceipt(t *testing.T) {
 	if atomic.LoadInt32(&submits) != 1 {
 		t.Fatalf("concurrent replay repeated ASR: %d", submits)
 	}
-	current, err := e.Status(ctx, results[0].ID)
-	if err != nil || current.Status != StatusWaitingExternal || getString(current.State, "podcast_session") == "" {
+	// Reproduce the CI interleaving: a status snapshot during another worker
+	// poll can legitimately show running. Inspect the stable checkpoint under
+	// the same execution lease instead of racing that transition.
+	atomic.StoreInt32(&holdPoll, 1)
+	select {
+	case <-pollEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("service reconciler did not poll the existing worker job")
+	}
+	duringPoll, err := e.Status(ctx, results[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("unleased snapshot during worker poll: status=%s step=%d", duringPoll.Status, duringPoll.CurrentStep)
+	close(releasePoll)
+	leaseCtx, release, err := e.claimExecution(ctx, results[0].ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	current, err := e.Status(leaseCtx, results[0].ID)
+	if err != nil || current.Status != StatusWaitingExternal || current.CurrentStep != 1 || getString(current.State, "podcast_session") == "" || getString(current.State, "podcast_transcribe_job") == "" || getString(current.State, "resolved_path") == "" {
 		t.Fatalf("service/request admission lost progress: %+v err=%v", current, err)
+	}
+	if atomic.LoadInt32(&submits) != 1 {
+		t.Fatalf("service reconciliation repeated ASR: %d", submits)
 	}
 }
 
