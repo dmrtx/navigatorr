@@ -3,6 +3,7 @@ package transcode
 // Availability is based on a real, bounded ASR fixture and audio filter/encoder
 // execution. Installed locale names alone do not prove usable native timing.
 type PodcastCapabilities struct {
+	AdAlgorithm          string `json:"ad_algorithm,omitempty"`
 	Available            bool   `json:"available"`
 	Provider             string `json:"provider"`
 	ProviderVersion      string `json:"provider_version,omitempty"`

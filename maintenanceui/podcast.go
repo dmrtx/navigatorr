@@ -14,7 +14,7 @@ func (s *Server) podcasts(w http.ResponseWriter, r *http.Request) {
 			if p.Enabled {
 				ids = append(ids, id)
 				if policy, err := s.cfg.Podcasts.Policy(id); err == nil {
-					policies[id] = map[string]any{"digest": podcast.Digest(policy), "pipeline_version": podcast.Version, "prompt_version": podcast.PromptVersion}
+					policies[id] = map[string]any{"digest": podcast.Digest(policy), "pipeline_version": podcast.Version, "prompt_version": podcast.PromptVersion, "known_ads_first_pass": policy.KnownAdsFirstPass}
 				}
 			}
 		}
