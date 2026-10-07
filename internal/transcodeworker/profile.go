@@ -38,6 +38,22 @@ func ValidatePlan(p *transcode.Plan) error {
 	if p == nil {
 		return fmt.Errorf("transcode plan is nil (fail closed)")
 	}
+	if p.Mode != "" {
+		min := 15.0
+		switch p.Mode {
+		case "size", "quality":
+		case "x265_preserve":
+			min = 0
+			if p.VideoCodec != transcode.VideoCodecLibX265 {
+				return fmt.Errorf("x265_preserve requires libx265")
+			}
+		default:
+			return fmt.Errorf("unsupported processing mode")
+		}
+		if p.SizePolicy == nil || p.SizePolicy.MinSavingsPercent != min || p.SizePolicy.MaxSizeIncreasePercent != 0 || p.PolicyDigest == "" || p.QualityValidation == nil || p.AudioMode != "copy" {
+			return fmt.Errorf("mode plan requires frozen size/quality policy and audio preservation")
+		}
+	}
 	if normalizeContainer(p.Container) != "mkv" {
 		return fmt.Errorf("unsupported container %q (only mkv is allowed; fail closed)", p.Container)
 	}

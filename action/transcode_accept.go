@@ -66,6 +66,12 @@ func (e *Engine) stepTranscodeAccept(ctx context.Context, ec *ExecutionContext) 
 			"validation":         validation,
 			"message":            msg,
 		}
+		if mode := getString(ec.Inputs, "mode"); mode != "" {
+			out["mode"] = mode
+			out["policy_digest"] = getString(ec.State, "policy_digest")
+			out["reason_code"] = getString(ec.State, "reason_code")
+			out["message"] = "Original preserved: " + getString(ec.State, "reason_code")
+		}
 		if p := getString(ec.State, "auto_profile"); p != "" {
 			out["profile"] = p
 		}

@@ -82,6 +82,7 @@ func RegisterMaintenance(s *server.MCPServer, cfg *config.Config, registry *arrs
 		StartTime: time.Now(),
 	})
 	registerActionTools(s, actEngine)
+	registerWorkerHealth(s, actEngine)
 	return actEngine
 }
 

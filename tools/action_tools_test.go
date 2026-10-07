@@ -567,3 +567,25 @@ func TestActionResumeRejectsInvalidInputsJSONWithoutAdvancing(t *testing.T) {
 		t.Fatalf("valid empty object should resume normally, got %s", okTxt)
 	}
 }
+
+func TestCompactActionPhaseCostsRetainEvidenceAndUnknowns(t *testing.T) {
+	cost := map[string]any{"duration_ms": float64(15), "attempts": float64(1), "active_compute_ms": nil, "nas_read_bytes": nil, "provenance": "coordinator_measured"}
+	result := toCompactSummary(&action.ActionResult{State: map[string]any{"phase_costs": map[string]any{"coordinator_inventory": cost}}, Inputs: map[string]any{}})
+	b, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var projected map[string]any
+	if err = json.Unmarshal(b, &projected); err != nil {
+		t.Fatal(err)
+	}
+	costs := projected["phase_costs"].(map[string]any)
+	measured := costs["coordinator_inventory"].(map[string]any)
+	if measured["duration_ms"] != float64(15) || measured["active_compute_ms"] != nil || measured["nas_read_bytes"] != nil {
+		t.Fatalf("compact response changed evidence: %s", b)
+	}
+	legacy := toCompactSummary(&action.ActionResult{State: map[string]any{}})
+	if legacy.PhaseCosts != nil {
+		t.Fatal("legacy action fabricated phase costs")
+	}
+}

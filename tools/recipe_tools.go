@@ -362,12 +362,15 @@ func registerRecipeTools(s *server.MCPServer, cfg *config.Config) {
 		}
 		return toolJSON(map[string]any{"status": st, "activated": true}), nil
 	})
-	s.AddTool(mcp.NewTool("recipe_rollback", mcp.WithDescription("Atomically restore the previous validated cached bundle recipe. Managed profile overrides and running immutable plans are not altered.")), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	s.AddTool(mcp.NewTool("recipe_rollback", mcp.WithDescription("Atomically restore the previous validated cached bundle recipe. Supply both expected digests from recipe_status to reject stale reviewed restoration. Managed profile overrides and running immutable plans are not altered."),
+		mcp.WithString("expected_active_digest", mcp.Description("Reviewed active digest from recipe_status; requires expected_previous_digest")),
+		mcp.WithString("expected_previous_digest", mcp.Description("Reviewed restoration destination digest from recipe_status; requires expected_active_digest"))), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		mgr := cfg.Transcode.RecipeManager()
 		if mgr == nil {
 			return toolErr("transcode recipe manager is not initialized"), nil
 		}
-		st, err := mgr.Rollback()
+		args := req.GetArguments()
+		st, err := mgr.RollbackReviewed(argString(args, "expected_active_digest", ""), argString(args, "expected_previous_digest", ""))
 		if err != nil {
 			return toolJSON(map[string]any{"status": st, "rolled_back": false, "error": err.Error()}), nil
 		}

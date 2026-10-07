@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -382,5 +384,53 @@ func TestRecipeSelectionDetailsUseEffectiveOverrideOutsideManagedPage(t *testing
 	hardware := payload.Details["anime-hevc-space"]
 	if hardware.Source != "active_bundle" || hardware.Profile.Video.Codec != "hevc_videotoolbox" || hardware.Profile.Video.Quality != 55 {
 		t.Fatal(hardware)
+	}
+}
+
+func TestRecipeRollbackMCPReviewedVersionsRejectStaleDialog(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Transcode.Recipes.Source = "file"
+	cfg.Transcode.Recipes.Path = filepath.Join(t.TempDir(), "bundle.yaml")
+	cfg.Transcode.Recipes.CacheDir = t.TempDir()
+	write := func(version string) {
+		t.Helper()
+		raw := strings.Replace(string(recipe.EmbeddedBytes()), `bundle_version: "2026.09.4"`, fmt.Sprintf(`bundle_version: %q`, version), 1)
+		if err := os.WriteFile(cfg.Transcode.Recipes.Path, []byte(raw), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("review-1")
+	if err := cfg.Transcode.InitializeRecipes(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	s := server.NewMCPServer("test", "0.0.0")
+	registerRecipeTools(s, cfg)
+	write("review-2")
+	callTool(t, s, "recipe_reload", nil)
+	reviewed := cfg.Transcode.RecipeManager().Status()
+	if reviewed.PreviousDigest == "" {
+		t.Fatalf("status omitted previous digest: %+v", reviewed)
+	}
+	status := resultText(t, callTool(t, s, "recipe_status", nil))
+	if !strings.Contains(status, `"previous_version": "review-1"`) {
+		t.Fatalf("MCP cannot review target: %s", status)
+	}
+	incomplete := resultText(t, callTool(t, s, "recipe_rollback", map[string]any{"expected_active_digest": reviewed.ActiveDigest}))
+	if !strings.Contains(incomplete, "both expected_active_digest") {
+		t.Fatalf("incomplete review accepted: %s", incomplete)
+	}
+	write("review-3")
+	callTool(t, s, "recipe_reload", nil)
+	conflict := resultText(t, callTool(t, s, "recipe_rollback", map[string]any{"expected_active_digest": reviewed.ActiveDigest, "expected_previous_digest": reviewed.PreviousDigest}))
+	if !strings.Contains(conflict, "version conflict") {
+		t.Fatalf("stale review accepted: %s", conflict)
+	}
+	if cfg.Transcode.RecipeManager().Status().ActiveVersion != "review-3" {
+		t.Fatal("stale dialog replaced new active bundle")
+	}
+	current := cfg.Transcode.RecipeManager().Status()
+	result := resultText(t, callTool(t, s, "recipe_rollback", map[string]any{"expected_active_digest": current.ActiveDigest, "expected_previous_digest": current.PreviousDigest}))
+	if !strings.Contains(result, `"rolled_back": true`) {
+		t.Fatalf("reviewed destination not restored: %s", result)
 	}
 }

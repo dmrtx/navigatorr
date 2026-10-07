@@ -176,7 +176,8 @@ function setConnection(online) {
   $("approve-file-review").disabled = !online || state.approvingFile;
   $("confirm-action-review").disabled = !online;
   document.querySelectorAll("[data-review-choice]").forEach(b => { b.disabled = !online; });
-  if (!online) state.workerInfo = null;
+  // Keep the last observation for age/diagnostics; disconnected state makes
+  // its verdict unknown and blocks writes without implying remote jobs stopped.
   renderWorkers();
   controls();
 }
@@ -435,7 +436,7 @@ function option(select, value, text = value) {
   select.append(o);
   return o;
 }
-const routeTabs = {files:"library",queue:"jobs",profiles:"recipes",stats:"stats",more:"advanced"};
+const routeTabs = {files:"library",queue:"jobs",profiles:"recipes",stats:"stats",settings:"advanced",more:"advanced"};
 const routeStatuses = ["all","pending","running","waiting_external","waiting_decision","completed","failed","cancelled","archived"];
 function navigationRoute(search = "") {
   const q = new URLSearchParams(search);
@@ -448,10 +449,13 @@ function navigationRoute(search = "") {
     status:routeStatuses.includes(q.get("status")) ? q.get("status") : "all",
     job:(q.get("job") || "").slice(0,200), profile:(q.get("profile") || "").slice(0,128),
     copies:q.get("copies") === "1", configure:q.get("configure") === "1",
+    mode:["size","quality","x265_preserve"].includes(q.get("mode")) ? q.get("mode") : "quality", technical:q.get("technical") === "1",
   };
 }
 function navigationQuery() {
   const q = new URLSearchParams({view:Object.entries(routeTabs).find(([,tab])=>tab===state.tab)?.[0] || "files"});
+  if (processingMode() !== "quality") q.set("mode", processingMode());
+  if ($("technical").checked) q.set("technical", "1");
   if ($("service").value) q.set("source",$("service").value);
   if ($("service").value.startsWith("folder:") && state.folder) q.set("folder",state.folder);
   if (state.media?.id) q.set("media",state.media.id);
@@ -472,6 +476,8 @@ function writeNavigation(replace = false) {
   window.history[replace ? "replaceState" : "pushState"]({navigatorr:true},"",url);
 }
 async function applyNavigation(route) {
+  if (route.tab === "recipes" && route.profile !== state.recipe?.name && recipeIsDirty() && !await confirmRecipeDiscard()) { writeNavigation(true); return; }
+  if (route.tab === "recipes" && route.profile !== state.recipe?.name) state.recipeBaseline = null;
   const revision = state.routeRevision = (state.routeRevision || 0) + 1;
   const auth = state.authRevision;
   const current = () => revision === state.routeRevision && auth === state.authRevision && !$("workspace").hidden;
@@ -489,6 +495,8 @@ async function applyNavigation(route) {
       $("backup-progress").hidden = true;
     }
     if (route.tab === "recipes" && !route.profile) resetRecipeView();
+    $("technical").checked = Boolean(route.technical);
+    setProcessingMode(route.mode || "quality");
     const sources = [...state.info.roots.map(r=>`folder:${r}`), ...state.info.services.map(s=>s.name)];
     $("service").value = sources.includes(route.source) ? route.source : sources[0] || "";
     resetLibrary();
@@ -535,7 +543,10 @@ async function applyNavigation(route) {
       }
     } else if (tab === "library") $("library-items").replaceChildren(node("p", "No media folders configured.", "empty"));
     if (!current()) return;
-    if (tab === "recipes" && route.profile) await readRecipe(route.profile);
+    setProcessingMode(route.mode || "quality");
+    $("technical").checked = Boolean(route.technical);
+    controls();
+    if (tab === "recipes" && route.profile && !(recipeIsDirty() && route.profile === state.recipe?.name)) await readRecipe(route.profile);
     if (tab === "advanced" && route.copies) await loadBackups();
     if (tab === "jobs" || tab === "stats") await loadJobs();
     if (current() && route.job) await openJob(route.job);
@@ -594,6 +605,35 @@ $("logout").addEventListener("click", () =>
   }),
 );
 
+function workerObservationFresh(worker) {
+  const observed = Date.parse(worker.observed_at);
+  const until = Date.parse(worker.fresh_until) || observed + 15000;
+  return serverReachable && !worker.stale && Number.isFinite(observed) && observed <= Date.now() && Date.now() < until;
+}
+function schedulerSummary(info = state.workerInfo) {
+  if (!serverReachable || !info) return "Scheduler · Unknown";
+  const nodes = info.nodes || [];
+  const ages = nodes.map(w => Date.parse(w.observed_at)).filter(Number.isFinite).map(at => Math.max(0, Math.floor((Date.now()-at)/1000)));
+  const age = ages.length ? ` · ${Math.max(...ages)}s old` : "";
+  const fresh = nodes.filter(w => workerObservationFresh(w) && ["ok", "degraded"].includes(w.scheduler_health));
+  if (!fresh.length || fresh.length !== nodes.length) return "Scheduler · Unknown" + age;
+  return (fresh.some(w => w.scheduler_health === "degraded") ? "Scheduler · Degraded" : "Scheduler · Normal") + age;
+}
+function renderWorkerDetails(host, info) {
+  host.replaceChildren();
+  for (const worker of info?.nodes || []) {
+    const fresh = workerObservationFresh(worker);
+    const row = node("div", "", "worker-node");
+    row.append(node("strong", worker.name), node("span", !serverReachable ? "Unknown" : worker.ready ? "Reachable · Ready" : worker.reachable || worker.connected ? "Reachable · Blocked" : "Unavailable", "badge"));
+    row.append(node("p", `Scheduler: ${fresh ? worker.scheduler_health || "unknown" : "unknown (outdated observation)"}`, "metadata"));
+    row.append(node("p", `Last successful sweep: ${worker.last_success_at ? new Date(worker.last_success_at).toLocaleString() : "Unknown"}`, "metadata"));
+    row.append(node("p", `Observation: ${worker.observed_at ? new Date(worker.observed_at).toLocaleString() : "Unknown"}${Number.isFinite(Date.parse(worker.observed_at)) ? ` · ${Math.max(0,Math.floor((Date.now()-Date.parse(worker.observed_at))/1000))}s old` : ""}`, "metadata"));
+    for (const [name, sweep] of Object.entries(worker.sweeps || {})) row.append(node("p", `${name === "post_encode" ? "Post-encode" : "Queue"} sweep: ${fresh && sweep.observed_at ? sweep.last_error || sweep.consecutive_errors > 0 ? "degraded" : "normal" : "unknown"}${sweep.consecutive_errors ? ` · ${sweep.consecutive_errors} consecutive errors` : ""}`, "metadata"));
+    if (worker.last_error?.message) row.append(node("p", `${fresh ? "Last error" : "Previous error"}: ${worker.last_error.class || "scheduler"} · ${worker.last_error.message}`, "muted"));
+    host.append(row);
+  }
+  if (!info) host.append(node("p", serverReachable ? "Checking shared worker observation…" : "Server disconnected; worker and scheduler status are unknown. Jobs may continue remotely.", "muted"));
+}
 function renderWorkers() {
   const info = state.workerInfo;
   document.querySelectorAll('[data-job-control][data-requires-worker="true"]').forEach(button => {
@@ -607,13 +647,10 @@ function renderWorkers() {
     : !info ? "Checking video worker before submitting…"
     : info.ready ? "Video worker connected. Connection is checked again before submitting."
     : info.nodes?.[0]?.message || "Video worker offline or not ready. New jobs are blocked.";
-  $("worker-nodes").replaceChildren();
-  for (const worker of info?.nodes || []) {
-    const row = node("div", "", "worker-node");
-    row.append(node("strong", worker.name), node("span", worker.ready ? "Connected · Ready" : worker.connected ? "Connected · Blocked" : "Unavailable", "badge"), node("p", `${worker.address || "No address configured"}${worker.transport ? ` · ${worker.transport.toUpperCase()}` : ""}`, "metadata"), node("p", worker.message, "muted"));
-    $("worker-nodes").append(row);
-  }
-  if (!info) $("worker-nodes").append(node("p", serverReachable ? "Checking connection…" : "Server disconnected; node status is unknown.", "muted"));
+  renderWorkerDetails($("worker-nodes"), info);
+  renderWorkerDetails($("settings-worker"), info);
+  $("activity-scheduler").textContent = schedulerSummary(info);
+  $("worker-status").textContent += ` · ${schedulerSummary(info).replace("Scheduler · ", "Scheduler ")}`;
   $("workers-checked").textContent = info?.checked_at ? `Checked ${new Date(info.checked_at).toLocaleTimeString()}` : "";
 }
 async function refreshWorkers() {
@@ -843,7 +880,7 @@ function libraryFailure(error, more) {
     button("Retry", () => loadLibrary(more), "quiet"),
   );
 }
-const draftFields = ["scope","path","season","recursive","selected-only","promote-batch","profile","priority","custom","encoder","quality","preset","tune","rate-mode","bitrate","max-bitrate","audio","optimize","ladder","metric","vmaf-target","vmaf-min","ssim-target","ssim-min","sample-count","sample-seconds","final-validation","max-items","preserve-depth","min-savings","max-growth","media-kind"];
+const draftFields = ["technical","scope","path","season","recursive","selected-only","promote-batch","profile","priority","custom","encoder","quality","preset","tune","rate-mode","bitrate","max-bitrate","audio","optimize","ladder","metric","vmaf-target","vmaf-min","ssim-target","ssim-min","sample-count","sample-seconds","final-validation","max-items","preserve-depth","min-savings","max-growth","media-kind"];
 function libraryDraftKey() {
   const source = $("service").value;
   return source.startsWith("folder:") ? source : `${source}:${state.media?.id || "catalog"}`;
@@ -852,7 +889,7 @@ function saveLibraryDraft() {
   if (!state.draftKey || typeof sessionStorage === "undefined" || $("workspace").hidden) return;
   const fields = {};
   for (const id of draftFields) if ($(id)) fields[id] = {value:id === "season" ? state.draftSeason ?? $(id).value : $(id).value,checked:$(id).checked};
-  const draft = {fields,folderSelected:[...(state.folderSelected || [])],selected:[...state.selected],files:[...state.files].filter(([id])=>state.selected.has(id))};
+  const draft = {fields,mode:processingMode(),folderSelected:[...(state.folderSelected || [])],selected:[...state.selected],files:[...state.files].filter(([id])=>state.selected.has(id))};
   try { sessionStorage.setItem(`navigatorr_draft:${state.draftKey}`,JSON.stringify(draft)); } catch {}
 }
 function restoreLibraryDraft() {
@@ -863,6 +900,7 @@ function restoreLibraryDraft() {
   let draft;
   try { draft = JSON.parse(sessionStorage.getItem(`navigatorr_draft:${key}`)); } catch {}
   if (!draft) return;
+  setProcessingMode(draft.mode || "quality");
   const root = $("service").value.slice(7).replace(/\/$/, "");
   state.folderSelected = new Set((draft.folderSelected || []).filter(path=>typeof path === "string" && path.startsWith(root+"/")));
   state.selected = new Set(draft.selected || []);
@@ -1404,13 +1442,19 @@ $("configure-selection").addEventListener("click", () =>
   safe(configureSelection),
 );
 $("back-to-files").addEventListener("click", () => { setFileStep("browse"); writeNavigation(); });
-$("use-container").addEventListener("click", () => {
-  $("scope").value = "batch";
-  $("selected-only").checked = false;
-  if ($("service").value.startsWith("folder:")) $("recursive").checked = true;
-  controls();
-  setFileStep("configure");
-});
+$("use-container").addEventListener("click", () => safe(async () => {
+  // Freeze discovery into the same explicit selection used by checkboxes.
+  await selectAllFiles();
+  configureSelection();
+}));
+function processingMode() {
+  return document.querySelector?.('input[name="processing-mode"]:checked')?.value || "quality";
+}
+function setProcessingMode(mode) {
+  document.querySelectorAll('input[name="processing-mode"]').forEach(input => { input.checked = input.value === mode; });
+}
+document.querySelectorAll('input[name="processing-mode"]').forEach(input => input.addEventListener("change", controls));
+$("technical").addEventListener("change", controls);
 
 function renderProfileFacts(output, data, name, preserveDepth) {
   output.replaceChildren();
@@ -1429,6 +1473,10 @@ function renderProfileFacts(output, data, name, preserveDepth) {
   output.append(facts, node("p", `Profile ID: ${name}`, "metadata"));
 }
 function renderCreationProfile() {
+  if (!$("technical").checked) {
+    $("creation-profile-info").hidden = true;
+    return;
+  }
   const name = $("profile").value, output = $("creation-profile-info");
   output.hidden = name === "auto" && !$("custom").checked;
   if (!output.hidden) {
@@ -1445,14 +1493,19 @@ function controls() {
   renderCreationProfile();
   saveLibraryDraft();
   const batch = $("scope").value === "batch";
-  $("enqueue").textContent = batch ? "Create candidates" : "Create candidate";
+  const technical = $("technical").checked;
+  $("legacy-controls").hidden = !technical;
+  $("processing-goal").hidden = technical;
+  $("processing-policy").hidden = technical;
+  $("processing-policy").textContent = "Automatic analyzes samples and chooses an effective plan for your goal. Quality and savings must pass validation; a result is not guaranteed. Candidates only; replacing originals requires separate approval." + (!state.fileMedia && !state.media ? " Content type is unclassified; a conservative general-video policy applies." : "");
+  $("enqueue").textContent = technical ? (batch ? "Create candidates" : "Create candidate") : "Process";
   $("source-summary").textContent = sourceSummary();
   $("batch-options").hidden = !batch;
   const folder = $("service").value.startsWith("folder:");
   const selectedCount = folder
     ? state.folderSelected?.size || 0
     : state.selected.size;
-  const folderCount = folder ? new Set([...state.folderSelected].map(path=>path.slice(0,path.lastIndexOf("/")))).size : 0;
+  const folderCount = folder ? new Set([...(state.folderSelected || [])].map(path=>path.slice(0,path.lastIndexOf("/")))).size : 0;
   $("selection-count").textContent = selectedCount ? `${selectedCount} selected${folder ? ` across ${folderCount} ${folderCount === 1 ? "folder" : "folders"}` : ""}` : "";
   $("configure-selection").hidden = !selectedCount && !$("path").value.trim();
   $("configure-selection").disabled = state.libraryLoading;
@@ -1480,16 +1533,20 @@ function controls() {
   $("clear-selected-files").hidden = !selectedCount;
   $("clear-selected-files").disabled = state.libraryLoading || state.selectionLoading;
   $("configure-selection").disabled ||= state.selectionLoading;
+  const explicitSelection = selectedCount > 0 && $("selected-only").checked;
+  $("scope").closest("label").hidden = !technical || Boolean($("path").value.trim()) || explicitSelection;
+  $("max-items").closest("label").hidden = explicitSelection;
+  $("selected-only").closest("label").hidden = explicitSelection;
   $("media-kind").closest("label").hidden = !folder;
   $("season").closest("label").hidden = folder;
-  $("recursive").closest("label").hidden = !folder;
+  $("recursive").closest("label").hidden = !folder || explicitSelection;
   $("promote-batch").closest("label").hidden =
     folder || $("service").value !== "sonarr";
   $("priority-label").hidden =
     !batch || $("profile").value !== "auto" || $("custom").checked;
   $("profile-mode-note").hidden = $("profile").value !== "auto" || $("custom").checked;
-  $("profile-mode-note").textContent = batch ? "Tests short samples to choose settings. Unsupported videos are skipped; preview the selection first, or choose an explicit profile." : "Chooses whether this file needs conversion. It may keep the original without encoding; choose an explicit profile to request conversion.";
-  $("custom-fields").hidden = !$("custom").checked;
+  $("profile-mode-note").textContent = "Automatic analyzes samples and chooses effective settings for the objective. Test samples is a technical benchmark: it does not convert the full video or replace originals.";
+  $("custom-fields").hidden = !technical || !$("custom").checked;
   $("optimization-fields").hidden = !$("optimize").checked;
   const vt = $("encoder").value === "hevc_videotoolbox";
   $("vt-fields").hidden = !vt;
@@ -1501,12 +1558,12 @@ function controls() {
   $("quality").disabled = vt && $("rate-mode").value === "bitrate";
   $("bitrate").disabled = $("rate-mode").value !== "bitrate";
   $("max-bitrate").disabled = $("rate-mode").value !== "bitrate";
-  $("preview").hidden = !batch;
-  $("benchmark").hidden = batch;
+  $("preview").hidden = !technical || !batch;
+  $("benchmark").hidden = !technical || batch;
   $("audio-note").hidden = $("audio").value !== "compact";
   const hasSource = batch
     ? Boolean(folder ? state.folder : state.media) &&
-      (!$("selected-only").checked || selectedCount > 0)
+      (technical ? !$("selected-only").checked || selectedCount > 0 : selectedCount > 0)
     : Boolean($("path").value.trim());
   $("enqueue").disabled =
     !state.info?.transcode_enabled ||
@@ -1635,10 +1692,13 @@ async function submitJob(mode = "encode") {
 async function buildAndSubmitJob(mode = "encode") {
   const batch = $("scope").value === "batch";
   let name = batch ? "transcode_batch" : "transcode_media";
-  const inputs = { preserve_source_bit_depth: $("preserve-depth").checked };
+  const simple = !$("technical").checked && mode !== "benchmark";
+  const inputs = simple ? {mode:processingMode()} : { preserve_source_bit_depth: $("preserve-depth").checked };
+  const folderSource = $("service").value.startsWith("folder:");
+  const explicitSelection = (folderSource ? state.folderSelected?.size : state.selected.size) > 0 && (simple || $("selected-only").checked);
   if (batch) {
     if ($("service").value.startsWith("folder:")) {
-      if ($("selected-only").checked) {
+      if (explicitSelection) {
         if (!state.folderSelected?.size)
           throw new Error("Select at least one video.");
         inputs.paths = [...state.folderSelected];
@@ -1650,25 +1710,25 @@ async function buildAndSubmitJob(mode = "encode") {
       }
       if (!inputs.paths.length)
         throw new Error("No videos found in this folder.");
-      inputs.media_type = $("media-kind").value;
+      if (!simple) inputs.media_type = $("media-kind").value;
     } else {
       if (!state.media || $("service").value !== "sonarr")
         throw new Error("Choose a series or folder for the batch.");
       Object.assign(inputs, { service: "sonarr", series_id: state.media.id });
-      if ($("season").value !== "") inputs.season = Number($("season").value);
-      if ($("selected-only").checked) {
+      if (!explicitSelection && $("season").value !== "") inputs.season = Number($("season").value);
+      if (explicitSelection) {
         if (!state.selected.size) throw new Error("Select at least one file.");
         inputs.episode_file_ids = [...state.selected];
       }
-      if ($("promote-batch").checked) inputs.promote_candidates = true;
+      if (!simple && $("promote-batch").checked) inputs.promote_candidates = true;
     }
-    if ($("max-items").value) inputs.max_items = numeric("max-items");
+    if (!simple && !explicitSelection && $("max-items").value) inputs.max_items = numeric("max-items");
     if (mode === "preview") inputs.dry_run = true;
   } else {
     if (!$("path").value.trim())
       throw new Error("Choose a file or enter its path.");
     inputs.path = $("path").value.trim();
-    if (mode !== "benchmark") inputs.media_type = $("media-kind").value;
+    if (!simple && mode !== "benchmark") inputs.media_type = $("media-kind").value;
     if (state.fileMedia && mode !== "benchmark") {
       inputs.media_type = state.fileService === "radarr" ? "movie" : "tv";
       inputs.is_anime =
@@ -1682,16 +1742,16 @@ async function buildAndSubmitJob(mode = "encode") {
         id: state.fileMedia.id,
       };
   }
-  if ($("custom").checked) {
+  if (!simple && $("custom").checked) {
     inputs.profile_config = profileFromControls();
     if (inputs.profile_config.optimization?.enabled)
       inputs.metric = $("metric").value;
-  } else {
+  } else if (!simple) {
     inputs.profile = $("profile").value;
     if (batch && inputs.profile === "auto")
       inputs.priority = $("priority").value;
   }
-  if (name !== "benchmark_transcode") {
+  if (!simple && $("custom").checked && name !== "benchmark_transcode") {
     if ($("min-savings").value)
       inputs.min_savings_percent = numeric("min-savings");
     inputs.max_size_increase_percent = numeric("max-growth");
@@ -3113,6 +3173,29 @@ if (typeof IntersectionObserver !== "undefined") {
     { rootMargin: "200px" },
   ).observe($("jobs-sentinel"));
 }
+function renderPhaseCosts(host, job) {
+  const entries = Object.entries(job.phase_costs || {});
+  const search = job.worker?.benchmark_search_seconds;
+  const sourceBudget = job.worker?.search_budget_seconds;
+  const operationBudget = job.worker?.operation_search_budget_seconds;
+  if (!entries.length && search == null && sourceBudget == null && operationBudget == null) return;
+  const detail = node("details", "", "phase-costs");
+  detail.append(node("summary", "Measured phase costs"));
+  detail.append(node("p", "Elapsed wall measurements include synchronous I/O. Coordinator measurements count returned invocations and exclude waits between them. CPU time is unknown; phases may overlap and are not added into a total.", "metadata"));
+  if (search != null || sourceBudget != null || operationBudget != null) detail.append(node("p", `Sample search measured wall: ${search == null ? "Unknown" : search + " s"} · Source budget: ${sourceBudget == null ? "Unknown" : sourceBudget + " s"} · Operation budget: ${operationBudget == null ? "Unknown" : operationBudget + " s"}. Pending reservations are not measured consumption.`, "metadata"));
+  const table = node("table");
+  const header = node("tr");
+  for (const label of ["Phase", "Wall time", "Invocations", "NAS read", "NAS written", "Cache hits / misses"]) header.append(node("th", label));
+  table.append(header);
+  const labels = {coordinator_inventory:"Coordinator · Inventory",coordinator_preflight:"Coordinator · Preflight",coordinator_source_hash:"Coordinator · Source hash",coordinator_probe:"Coordinator · Probe",coordinator_promotion:"Coordinator · Promotion"};
+  for (const [phase, cost] of entries) {
+    const row = node("tr");
+    const label = labels[phase] || phase.replace(/^worker_benchmark_/, "Worker samples · ").replace(/^worker_/, "Worker · ").replaceAll("_", " ");
+    row.append(node("td", label), node("td", Number.isFinite(cost.duration_ms) ? `${cost.duration_ms} ms` : "Unknown"), node("td", Number.isFinite(cost.attempts) ? String(cost.attempts) : "Unknown"), node("td", cost.nas_read_bytes == null ? "Unknown" : bytes(cost.nas_read_bytes)), node("td", cost.nas_written_bytes == null ? "Unknown" : bytes(cost.nas_written_bytes)), node("td", `${cost.cache_hits == null ? "Unknown" : cost.cache_hits} / ${cost.cache_misses == null ? "Unknown" : cost.cache_misses}`));
+    table.append(row);
+  }
+  detail.append(table); host.append(detail);
+}
 async function openJob(id) {
   state.detail = id;
   state.chunk = 0;
@@ -3158,6 +3241,7 @@ async function refreshDetail() {
       statusBadge(queuePresentation(job).status),
       node("p", queuePresentation(job).summary, "muted"),
     );
+    renderPhaseCosts(summary, job);
     if (queuePresentation(job).showTelemetry) summary.append(telemetry(job));
     else if (batchProgress(job)) summary.append(batchProgress(job));
     else if (!job.batch?.dry_run && job.batch?.outcome !== "no_changes") summary.append(node("p", queueOutcome(job), "job-outcome metadata"));
@@ -3549,9 +3633,28 @@ async function loadRecipes(initial = false, more = false) {
 $("recipes-more").addEventListener("click", () =>
   safe(() => loadRecipes(false, true)),
 );
+function recipeSnapshot() {
+  try { return JSON.stringify({name:$("recipe-name").value,description:$("recipe-description").value,profile:recipeFromControls()}); }
+  catch { return "invalid:" + $("recipe-name").value + ":" + $("recipe-description").value; }
+}
+function recipeIsDirty() { return state.recipeBaseline != null && recipeSnapshot() !== state.recipeBaseline; }
+function markRecipeClean() { state.recipeBaseline = recipeSnapshot(); renderRecipeDirty(); }
+function renderRecipeDirty() {
+  const dirty = recipeIsDirty();
+  $("recipe-dirty").textContent = dirty ? "Unsaved changes" : "No unsaved changes.";
+  $("recipe-dirty").dataset.dirty = String(dirty);
+}
+async function confirmRecipeDiscard() {
+  if (!recipeIsDirty()) return true;
+  return reviewAction({title:"Discard unsaved profile changes?",message:"Your profile draft will be discarded. Saved profiles and active jobs are unchanged.",confirmLabel:"Discard changes"});
+}
+$("recipe-form").addEventListener("input", () => { state.recipeEditRevision = (state.recipeEditRevision || 0) + 1; renderRecipeDirty(); });
+$("recipe-settings").addEventListener("input", () => { state.recipeEditRevision = (state.recipeEditRevision || 0) + 1; renderRecipeDirty(); });
+if (typeof window !== "undefined") window.addEventListener("beforeunload", event => { if (recipeIsDirty()) { event.preventDefault(); event.returnValue = ""; } });
 function resetRecipeView() {
   state.recipeRevision = (state.recipeRevision || 0) + 1;
   state.recipe = null;
+  state.recipeBaseline = null;
   $("recipe-form").inert = true;
   $("recipe-name").value = "";
   $("recipe-description").value = "";
@@ -3563,6 +3666,8 @@ function resetRecipeView() {
   renderRecipeList();
 }
 async function readRecipe(name, replaceRoute = false) {
+  if (recipeIsDirty() && !await confirmRecipeDiscard()) { renderRecipeList(); return; }
+  const editRevision = state.recipeEditRevision || 0;
   const revision = (state.recipeRevision || 0) + 1;
   const auth = state.authRevision;
   state.recipeRevision = revision;
@@ -3570,14 +3675,16 @@ async function readRecipe(name, replaceRoute = false) {
   $("recipe-source").textContent = `Loading ${name}…`;
   try {
     const r = await tool("recipe_get", { name });
-    if (revision !== state.recipeRevision || auth !== state.authRevision)
+    if (revision !== state.recipeRevision || auth !== state.authRevision || editRevision !== (state.recipeEditRevision || 0))
       return;
     state.recipe = r;
     $("recipe-name").value = name;
-    $("recipe-description").value = r.record?.description || "";
+    $("recipe-description").value = r.record?.description || r.description || "";
     setRecipeControls(r.profile);
     $("recipe-source").textContent =
       `${r.source === "managed" ? "Custom profile" : "Built-in profile"}${r.shadowed_profiles?.length ? " · Overrides built-in" : ""}`;
+    $("recipe-save-effect").textContent = r.source === "managed" ? "Save creates a new managed version for new jobs. Active plans keep their saved settings." : "Save creates a managed override of this built-in profile for new jobs. The built-in bundle and active plans stay intact.";
+    markRecipeClean();
     $("delete-recipe").disabled = r.source !== "managed";
     $("delete-recipe").hidden = r.source !== "managed";
     $("recipe-history").disabled = false;
@@ -3601,12 +3708,15 @@ async function readRecipe(name, replaceRoute = false) {
   }
 }
 $("new-recipe").addEventListener("click", () =>
-  safe(() => {
+  safe(async () => {
+    if (recipeIsDirty() && !await confirmRecipeDiscard()) return;
     state.recipe = null;
     $("recipe-name").value = "";
     $("recipe-description").value = "";
     $("recipe-source").textContent = "New profile";
+    $("recipe-save-effect").textContent = "Save creates a managed profile for new jobs.";
     setRecipeControls(profileFromControls());
+    markRecipeClean();
     $("recipe-feedback").hidden = true;
     $("delete-recipe").disabled = true;
     $("delete-recipe").hidden = true;
@@ -3620,22 +3730,38 @@ async function saveRecipe() {
   state.recipeSaving = true;
   const revision = state.recipeRevision;
   const auth = state.authRevision;
+  const editRevision = state.recipeEditRevision || 0;
   try {
     const args = {
       name: $("recipe-name").value.trim(),
       description: $("recipe-description").value,
       profile: recipeFromControls(),
     };
+    const q = args.profile.video.quality;
+    const bitrate = args.profile.video.codec === "hevc_videotoolbox" && args.profile.video.average_bitrate_kbps > 0;
+    if (!bitrate && (!Number.isFinite(q) || q < 1 || q > (args.profile.video.codec === "libx265" ? 51 : 100))) throw new Error("Quality is outside the effective encoder's supported scale");
     if (state.recipe?.record && state.recipe.name === args.name) {
       args.expected_generation = state.recipe.record.generation;
       args.expected_digest = state.recipe.record.digest;
     }
-    await tool("recipe_save", args);
+    const saved = await tool("recipe_save", args);
     if (auth !== state.authRevision) return;
+    if (revision === state.recipeRevision) {
+      // Update CAS metadata even if the user edited while the request was in
+      // flight. Their newer controls stay untouched and remain dirty against
+      // the precise submitted version, so a next save does not conflict with us.
+      if (saved.record) state.recipe = {...(state.recipe || {}),name:args.name,source:"managed",record:saved.record};
+      state.recipeBaseline = JSON.stringify({name:args.name,description:args.description,profile:args.profile});
+      renderRecipeDirty();
+    }
     await loadRecipes();
-    if (revision === state.recipeRevision && auth === state.authRevision)
+    if (revision === state.recipeRevision && auth === state.authRevision && editRevision === (state.recipeEditRevision || 0))
       await readRecipe(args.name);
+    showData("recipe-feedback", "Profile saved. New jobs use this version; active plans are unchanged.");
     notify("Profile saved.");
+  } catch (error) {
+    if (revision === state.recipeRevision && auth === state.authRevision) showData("recipe-feedback", `Save failed: ${error.message}. Your draft is preserved. If this is a version conflict, review the current saved version before discarding or retrying.`);
+    throw error;
   } finally {
     state.recipeSaving = false;
   }
@@ -3650,7 +3776,7 @@ $("delete-recipe").addEventListener("click", () =>
     const restore = Boolean(r?.shadowed_profiles?.length);
     if (
       !r?.record ||
-      !await reviewAction({title:restore ? "Restore built-in profile?" : "Delete custom profile?", message:restore ? `Restore the built-in settings for ${r.name}.` : `Remove ${r.name} from your custom profiles.`, confirmLabel:restore ? "Restore profile" : "Delete profile"})
+      !await reviewAction({title:restore ? "Restore built-in profile?" : "Delete custom profile?", message:(restore ? `Restore the built-in settings for ${r.name}.` : `Remove ${r.name} from your custom profiles.`) + (recipeIsDirty() ? " Your unsaved draft will also be discarded." : ""), confirmLabel:restore ? "Restore profile" : "Delete profile"})
     )
       return;
     await tool("recipe_delete", {
@@ -3659,6 +3785,7 @@ $("delete-recipe").addEventListener("click", () =>
       expected_digest: r.record.digest,
     });
     state.recipe = null;
+    state.recipeBaseline = null;
     state.recipeOffset = 0;
     state.recipes = [];
     state.recipeDetails = {};
@@ -3740,6 +3867,8 @@ function recipeControls() {
   $("recipe-quality").disabled = bitrate;
   $("recipe-quality").max = software ? "51" : "100";
   $("recipe-quality").min = bitrate ? "0" : "1";
+  $("recipe-quality-label").textContent = bitrate ? "Quality (bitrate mode)" : software ? "CRF · lower preserves more detail" : "VideoToolbox Q · higher preserves more detail";
+  $("recipe-scale-note").textContent = bitrate ? "Bitrate is measured in kbps; estimated output size requires an applicable sample test." : software ? "x265 CRF: 1–51, lower favors quality. This is not a quality percentage. Estimated size: requires sample test." : "VideoToolbox Q: 1–100, higher favors quality. Q 70 is not 70% quality and cannot be compared to x265 CRF. Estimated size: requires sample test.";
   if (bitrate) $("recipe-quality").value = "0";
   else if (!software && Number($("recipe-quality").value) === 0)
     $("recipe-quality").value = "65";
@@ -3781,6 +3910,7 @@ $("recipe-encoder").addEventListener("change", () => {
       delete p.optimization.search.bitrate_values;
     }
     setRecipeControls(p);
+    renderRecipeDirty();
     notify(
       "Encoder changed. Incompatible settings and sample search values were reset; review before saving.",
     );
@@ -4130,6 +4260,7 @@ function renderAdvancedProfile(profile) {
 }
 $("reload-profiles").addEventListener("click", () =>
   safe(async () => {
+    if (!await reviewAction({title:"Load configured presets?",message:"Validate and activate the configured preset source for new jobs. Managed overrides, your editor draft and active plans are preserved.",confirmLabel:"Load presets"})) return;
     const r = await tool("recipe_reload");
     if (r.error) throw new Error(r.error);
     await loadRecipes();
@@ -4138,8 +4269,11 @@ $("reload-profiles").addEventListener("click", () =>
 );
 $("rollback-profiles").addEventListener("click", () =>
   safe(async () => {
-    if (!await reviewAction({title:"Restore previous shared presets?", message:"Use the previous version of the shared presets. Custom profiles are preserved.", confirmLabel:"Restore presets"})) return;
-    const r = await tool("recipe_rollback");
+    const result = await tool("recipe_status");
+    const status = result.bundle || {};
+    if (!status.active_digest || !status.previous_digest) throw new Error("No previous validated preset version is available to review.");
+    if (!await reviewAction({title:"Restore previous preset version?", message:`Replace active version ${status.active_version || status.active_digest.slice(0,12)} with previous version ${status.previous_version || status.previous_digest.slice(0,12)} for new jobs. Managed overrides, your editor draft, active plans and permissions are preserved.`, confirmLabel:"Restore reviewed version"})) return;
+    const r = await tool("recipe_rollback", {expected_active_digest:status.active_digest,expected_previous_digest:status.previous_digest});
     if (r.error) throw new Error(r.error);
     await loadRecipes();
     notify("Previous profile bundle restored.");
@@ -4357,7 +4491,7 @@ setInterval(async () => {
     if ($("workspace").hidden) return;
     resumeCommandTracking();
     await Promise.allSettled([
-      !state.workerCheckedAt || Date.now() - state.workerCheckedAt > 10000 ? refreshWorkers() : Promise.resolve(),
+      !state.workerCheckedAt || Date.now() - state.workerCheckedAt > 10000 ? refreshWorkers() : Promise.resolve(renderWorkers()),
       !state.jobsLoading ? safe(() => loadJobs()) : Promise.resolve(),
       $("job-detail").open ? safe(refreshDetail) : Promise.resolve(),
       state.backupCleaning ? safe(refreshBackupCleanup) : Promise.resolve(),

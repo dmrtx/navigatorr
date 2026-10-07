@@ -148,8 +148,16 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 	}
 	// Cache population is best effort, but the source identity is not. Check
 	// the staged local bytes even when caching is disabled or staging resumed.
-	if err := verifyLocalDigest(ctx, r.effectiveInput, job.SourceSHA256); err != nil {
+	hashStart := time.Now()
+	hashErr := verifyLocalDigest(ctx, r.effectiveInput, job.SourceSHA256)
+	w.persistPhaseCost(jobDir, jobFile, job, "source_hash", hashStart, transcode.PhaseCost{})
+	if err := hashErr; err != nil {
 		return w.failJobTerminal(jobDir, jobFile, job, fmt.Errorf("staged source integrity: %w", err))
+	}
+
+	sourceInfo, sourceErr := os.Stat(r.effectiveInput)
+	if sourceErr != nil {
+		return w.failJobTerminal(jobDir, jobFile, job, sourceErr)
 	}
 
 	// Ensure plan is resolved
@@ -165,7 +173,9 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 	// semantic source when a staged copy exists. The detailed probe supplies
 	// the chapter count and video attributes needed for local pre-publish
 	// policy validation.
+	probeStart := time.Now()
 	srcProbe, probeErr := w.probeSourceDetailsForJob(ctx, r.effectiveInput)
+	w.persistPhaseCost(jobDir, jobFile, job, "probe", probeStart, transcode.PhaseCost{})
 	if srcProbe.DurationSec > 0 {
 		job.DurationSec = srcProbe.DurationSec
 	}
@@ -173,6 +183,14 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 		return w.failJobTerminal(jobDir, jobFile, job, fmt.Errorf("probing source streams: %w", probeErr))
 	}
 
+	if err := w.validateModeSourceQuality(ctx, r.effectiveInput, job.Plan); err != nil {
+		var rejected *transcode.PolicyRejectionError
+		if errors.As(err, &rejected) {
+			job.ReasonCode = rejected.ReasonCode
+			job.FailureClassification = "policy_rejected"
+		}
+		return w.failJobTerminal(jobDir, jobFile, job, err)
+	}
 	execPlan, planErr := BuildExecutionPlan(job.Plan, srcProbe.Streams, job.DurationSec)
 	if planErr != nil {
 		return w.failJobTerminal(jobDir, jobFile, job, fmt.Errorf("building execution plan: %w", planErr))
@@ -180,6 +198,8 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 	job.Conversions = execPlan.Conversions
 
 	if cancelled, err := w.persistOperationalProgress(jobDir, jobFile, job, func(l *JobRecord) {
+		l.Plan = job.Plan
+		l.SourceSizeBytes = sourceInfo.Size()
 		l.DurationSec = job.DurationSec
 		l.Conversions = job.Conversions
 		l.Phase = "encoding"
@@ -216,6 +236,9 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 	}
 
 	attest, verr := w.validateEncodedCandidateFull(ctx, r.localCandidate, execPlan, srcProbe, 0)
+	if verr == nil {
+		verr = transcode.ValidateFinalSize(job.SourceSizeBytes, attest.SizeBytes, job.Plan.SizePolicy)
+	}
 	if verr == nil && job.Plan != nil && job.Plan.QualityValidation != nil {
 		if job.SourceSHA256 == "" {
 			verr = fmt.Errorf("quality_final_source_identity_missing: immutable source digest required before final validation")
@@ -245,6 +268,24 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 		}
 	}
 	if verr != nil {
+		var rejected *transcode.PolicyRejectionError
+		if errors.As(verr, &rejected) {
+			job.ReasonCode = rejected.ReasonCode
+			job.FailureClassification = "policy_rejected"
+		}
+		if job.Plan != nil && job.Plan.Mode != "" && job.QualityEvidence != nil && job.QualityEvidence.Verdict == "fail" {
+			for _, code := range job.QualityEvidence.ReasonCodes {
+				if strings.Contains(code, "below_minimum") || strings.Contains(code, "above_maximum") || strings.Contains(code, "limit_exceeded") {
+					job.ReasonCode = "quality_not_met"
+					job.FailureClassification = "policy_rejected"
+					break
+				}
+			}
+		}
+		if job.Plan != nil && job.Plan.Mode != "" && job.ReasonCode == "" && errors.Is(verr, ErrSourceInvalid) {
+			job.ReasonCode = "preservation_not_met"
+			job.FailureClassification = "policy_rejected"
+		}
 		// A bad local candidate must never be published. Remove only the
 		// worker-owned local candidate; the semantic source and the shared
 		// source cache are never touched. For local-only jobs the local
@@ -299,6 +340,9 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 // transfer. Cache misses, disabled caches, and local sources fall back to the
 // legacy direct staging path exactly.
 func (w *Worker) ensureStaged(ctx context.Context, jobDir, jobFile string, job *JobRecord, r *resolvedOperational) (bool, error) {
+	stageStart := time.Now()
+	stageCost := transcode.PhaseCost{}
+	defer func() { w.persistPhaseCost(jobDir, jobFile, job, "staging", stageStart, stageCost) }()
 	switch r.staging {
 	case StagingStateNotRequired:
 		return false, nil
@@ -335,11 +379,18 @@ func (w *Worker) ensureStaged(ctx context.Context, jobDir, jobFile string, job *
 					if lease, lerr := w.acquireCachedSourceLease(ctx, hit, r.stagedInput); lerr == nil {
 						_ = lease
 						stagedFromCache = true
+						stageCost.CacheHits = knownCount(1)
+						stageCost.CacheMisses = knownCount(0)
+						stageCost.NASReadBytes = knownCount(0)
 					}
 				}
 			}
 		}
 		if !stagedFromCache {
+			if w.sourceCacheEnabled() {
+				stageCost.CacheHits = knownCount(0)
+				stageCost.CacheMisses = knownCount(1)
+			}
 			if w.mediaStore != nil && w.mediaStore.Maps(job.Source) {
 				err = w.mediaStore.DownloadAtomic(ctx, job.Source, r.stagedInput)
 			} else {
@@ -347,6 +398,11 @@ func (w *Worker) ensureStaged(ctx context.Context, jobDir, jobFile string, job *
 			}
 			if err != nil {
 				return false, err
+			}
+			if info, statErr := os.Stat(r.stagedInput); statErr == nil {
+				if w.mediaStore != nil && w.mediaStore.Maps(job.Source) {
+					stageCost.NASReadBytes = knownCount(info.Size())
+				}
 			}
 			// Best-effort: share this fresh NAS read with future jobs for the
 			// same immutable source. Local bytes are hashed against the
@@ -377,6 +433,9 @@ func (w *Worker) ensureStaged(ctx context.Context, jobDir, jobFile string, job *
 // failure after EncodeComplete leaves the job nonterminal/resumable with a
 // distinct classification and never reruns encode.
 func (w *Worker) finalizeOperational(ctx context.Context, jobDir, jobFile string, job *JobRecord, r *resolvedOperational) error {
+	publicationStart := time.Now()
+	publicationCost := transcode.PhaseCost{}
+	defer func() { w.persistPhaseCost(jobDir, jobFile, job, "publication", publicationStart, publicationCost) }()
 	switch r.finalization {
 	case FinalizationStateNotRequired:
 		if err := verifyCheckpointCandidate(ctx, job, r.localCandidate); err != nil {
@@ -492,7 +551,12 @@ func (w *Worker) finalizeOperational(ctx context.Context, jobDir, jobFile string
 	}
 
 	var ferr error
+	publishedNew := false
 	if directSMB {
+		if _, statErr := w.mediaStore.Stat(ctx, r.destination); os.IsNotExist(statErr) {
+			publishedNew = true
+		}
+
 		ferr = w.mediaStore.Publish(ctx, r.localCandidate, r.destination, job.ID)
 	} else {
 		finalize := w.finalizeOutput
@@ -540,6 +604,9 @@ func (w *Worker) finalizeOperational(ctx context.Context, jobDir, jobFile string
 	cancelled, err = w.persistOperationalProgress(jobDir, jobFile, job, func(l *JobRecord) {
 		l.FinalizationState = string(FinalizationStateCompleted)
 	})
+	if directSMB && publishedNew {
+		publicationCost.NASWrittenBytes = knownCount(job.CandidateSizeBytes)
+	}
 	if err != nil {
 		return err
 	} else if cancelled {
@@ -560,7 +627,9 @@ func (w *Worker) completeOperationalJob(jobDir, jobFile string, job *JobRecord, 
 	if perr := w.persistTerminalJob(jobDir, jobFile, job); perr != nil {
 		return perr
 	}
+	cleanupStart := time.Now()
 	w.cleanupOperationalArtifacts(job, r)
+	w.persistPhaseCost(jobDir, jobFile, job, "cleanup", cleanupStart, transcode.PhaseCost{})
 	return nil
 }
 
@@ -620,6 +689,7 @@ func (w *Worker) failJobTerminal(jobDir, jobFile string, job *JobRecord, cause e
 			job.FailureClassification = "worker_setup_failed"
 		}
 	}
+	job.ExitReason = job.FailureClassification
 	job.Status = "failed"
 	job.FinishedAt = time.Now().UTC()
 	job.ExitCode = 1

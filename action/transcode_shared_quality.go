@@ -22,7 +22,7 @@ func (e *Engine) applySharedBatchCalibration(ec *ExecutionContext, plan *transco
 	}
 	parentID := strings.TrimSpace(getString(ec.Inputs, "parent_action_id"))
 	itemKey := strings.TrimSpace(getString(ec.Inputs, "batch_item_key"))
-	if parentID == "" || itemKey == "" || !strings.HasPrefix(itemKey, "epfile-") || profileDigest == "" {
+	if parentID == "" || itemKey == "" || profileDigest == "" {
 		return fmt.Errorf("batch parent, item key, and frozen profile are required")
 	}
 	parent, err := e.deps.Store.GetActionInstance(parentID)
