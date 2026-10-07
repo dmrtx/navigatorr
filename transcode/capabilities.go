@@ -60,6 +60,7 @@ type QualityCapabilities struct {
 
 // WorkerCapabilities represents the versioned capability report of a transcode worker node.
 type WorkerCapabilities struct {
+	Podcast                  *PodcastCapabilities           `json:"podcast,omitempty"`
 	ExplicitMain10Benchmarks bool                           `json:"explicit_main10_benchmarks,omitempty"`
 	CompactAudio             bool                           `json:"compact_audio,omitempty"`
 	ProtocolVersion          int                            `json:"protocol_version"`
@@ -100,6 +101,7 @@ func (c WorkerCapabilities) HasComponentError(component string) bool {
 // Machine-specific paths like FFmpegPath are excluded to ensure capability equivalence
 // across different worker nodes with identical capability sets.
 type fingerprintPayload struct {
+	Podcast                  *PodcastCapabilities           `json:"podcast,omitempty"`
 	ExplicitMain10Benchmarks bool                           `json:"explicit_main10_benchmarks,omitempty"`
 	CompactAudio             bool                           `json:"compact_audio,omitempty"`
 	ProtocolVersion          int                            `json:"protocol_version"`
@@ -137,6 +139,7 @@ func ComputeCapabilityFingerprint(caps WorkerCapabilities) (string, error) {
 	}
 
 	payload := fingerprintPayload{
+		Podcast:                  caps.Podcast,
 		ExplicitMain10Benchmarks: caps.ExplicitMain10Benchmarks,
 		CompactAudio:             caps.CompactAudio,
 		ProtocolVersion:          caps.ProtocolVersion,

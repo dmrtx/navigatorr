@@ -551,8 +551,19 @@
           </div>
         </section>
         <section id="jobs" class="panel tab-content operations-panel" hidden>
+          <details id="podcast-new"><summary>Clean podcast</summary>
+              <form id="podcast-form">
+                <p class="muted">Create a separate MP3. The original is kept. Your connected LLM classifies the transcript before cuts are reviewed.</p>
+                <label>Podcast<select id="podcast-id" required></select></label>
+                <label>Original audio path<input id="podcast-source" required placeholder="/media/podcasts/episode.mp3" /></label>
+                <label>Cleaned MP3 path<input id="podcast-output" required placeholder="/media/podcasts/episode.cleaned.mp3" /></label>
+                <button class="primary" type="submit">Start transcription</button>
+                <p id="podcast-create-status" class="muted" role="status"></p>
+              </form>
+            </details>
           <div class="queue-toolbar">
             <h2>Queue</h2>
+
             <div class="queue-filters">
               <select id="job-filter" aria-label="Filter jobs by status">
                 <option value="all">All jobs</option>

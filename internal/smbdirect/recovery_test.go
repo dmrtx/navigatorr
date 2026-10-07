@@ -49,6 +49,81 @@ func (f failedRead) Read(p []byte) (int, error) {
 
 func (failedRead) Close() error { return nil }
 
+func TestPublishGuardCoversOnlyAtomicRename(t *testing.T) {
+	for _, cancelled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cancelled=%t", cancelled), func(t *testing.T) {
+			root := t.TempDir()
+			fs := &memoryShare{files: map[string][]byte{}}
+			s := testStore(fs, root)
+			local := filepath.Join(t.TempDir(), "candidate.mp3")
+			payload := []byte("fully copied and verified audio")
+			if err := os.WriteFile(local, payload, 0600); err != nil {
+				t.Fatal(err)
+			}
+			insideGuard, renames := false, 0
+			s.connect = func(_ context.Context, fn func(share) error) error {
+				return fn(faultShare{share: fs, rename: func(from, to string) error {
+					if !insideGuard {
+						t.Fatal("rename occurred outside publication guard")
+					}
+					renames++
+					return fs.RenameNoReplace(from, to)
+				}})
+			}
+			errCancelled := errors.New("durable cancellation")
+			err := s.PublishGuarded(context.Background(), local, filepath.Join(root, "out.mp3"), "job", func(commit func() error) error {
+				if !bytes.Equal(fs.files["out.mp3.partial.job"], payload) {
+					t.Fatal("upload was not completed outside the guard")
+				}
+				if cancelled {
+					return errCancelled
+				}
+				insideGuard = true
+				defer func() { insideGuard = false }()
+				return commit()
+			})
+			if cancelled {
+				if !errors.Is(err, errCancelled) || renames != 0 || len(fs.files) != 0 {
+					t.Fatalf("cancelled publication: err=%v renames=%d files=%v", err, renames, fs.files)
+				}
+			} else if err != nil || renames != 1 || !bytes.Equal(fs.files["out.mp3"], payload) {
+				t.Fatalf("guarded publication: err=%v renames=%d files=%v", err, renames, fs.files)
+			}
+		})
+	}
+}
+
+func TestPublishRecoveryRechecksGuardBeforeRename(t *testing.T) {
+	root := t.TempDir()
+	fs := &memoryShare{files: map[string][]byte{}}
+	s := testStore(fs, root)
+	local := filepath.Join(t.TempDir(), "candidate.mp3")
+	if err := os.WriteFile(local, []byte("candidate bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	connections, guards, renames := 0, 0, 0
+	cancelled := false
+	s.connect = func(_ context.Context, fn func(share) error) error {
+		connections++
+		return fn(faultShare{share: fs, rename: func(string, string) error {
+			renames++
+			cancelled = true
+			return &smb2.TransportError{Err: syscall.ECONNRESET}
+		}})
+	}
+	errCancelled := errors.New("durable cancellation")
+	err := s.PublishGuarded(context.Background(), local, filepath.Join(root, "out.mp3"), "job", func(commit func() error) error {
+		guards++
+		if cancelled {
+			return errCancelled
+		}
+		return commit()
+	})
+	if !errors.Is(err, errCancelled) || connections != 2 || guards != 2 || renames != 1 || len(fs.files) != 0 {
+		t.Fatalf("recovery bypassed cancellation: err=%v connections=%d guards=%d renames=%d files=%v", err, connections, guards, renames, fs.files)
+	}
+}
+
 func TestDownloadRecoversSignedSessionBeforeEncode(t *testing.T) {
 	root := t.TempDir()
 	fs := &memoryShare{files: map[string][]byte{"source.mkv": []byte("complete source")}}

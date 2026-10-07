@@ -41,6 +41,11 @@ func (e *Engine) Enqueue(ctx context.Context, name string, inputs map[string]any
 	if err := json.Unmarshal(b, &copy); err != nil || copy == nil {
 		return nil, fmt.Errorf("inputs must be an object")
 	}
+	if name == "clean_podcast_ads" {
+		if err := e.freezePodcastInputs(copy); err != nil {
+			return nil, err
+		}
+	}
 	if name == "promote_transcode_candidate" {
 		key, err = promotionIdempotency(copy)
 		if err != nil {

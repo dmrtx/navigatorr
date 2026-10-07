@@ -92,6 +92,18 @@ function deferred() {
   return { promise, resolve };
 }
 
+test("podcast controls expose transcript coverage and exact cut review",()=>{
+	const h=harness();h.context.job={id:"podcast",action_name:"clean_podcast_ads",status:"waiting_decision",waiting_condition:"podcast_classification",podcast:{total_blocks:2,classified_blocks:1}};
+	let labels=h.run('jobControls(job).children.map(b=>b.textContent)');assert.ok(labels.includes("View transcript"));assert.ok(!labels.includes("Validate classifications"));
+	h.run('job.podcast.classified_blocks=2');labels=h.run('jobControls(job).children.map(b=>b.textContent)');assert.ok(labels.includes("Validate classifications"));
+	h.run('job.waiting_condition="podcast_review"');labels=h.run('jobControls(job).children.map(b=>b.textContent)');assert.ok(labels.includes("Review cuts"));assert.ok(!labels.includes("View transcript"));
+});
+
+test("podcast cut review reads all pages and approves the returned digest before render",async()=>{
+	const h=harness();h.context.calls=[];h.run('tool=async(name,args)=>{calls.push({name,args});return {digest:"frozen-cuts",total_cuts:2,removed_ms:1000,boundaries:[],next_offset:args.offset===0?1:2,has_more:args.offset===0}};reviewAction=async()=>true;jobControl=async(id,name,args)=>calls.push({id,name,args});');
+	await h.run('reviewPodcastCuts("podcast")');const calls=h.context.calls;assert.equal(calls[0].args.offset,0);assert.equal(calls[1].args.offset,1);assert.equal(calls[2].args.digest,"frozen-cuts");assert.equal(calls[2].args.approve,true);assert.equal(calls[3].args.decision,"render");
+});
+
 test("URL state preserves tabs, sources, folders, sorting, filters and open details", () => {
   const h=harness();
   h.run('state.tab="jobs";$("service").value="folder:/media";state.folder="/media/Series/Season 1";$("library-sort").value="size_desc";$("job-filter").value="archived";state.detail="job-one";$("job-detail").open=true;');
