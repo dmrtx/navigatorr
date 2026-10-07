@@ -1,13 +1,9 @@
 package maintenanceui
 
 import (
-	"errors"
 	"net/http"
 	"net/url"
-	"strings"
-	"time"
 
-	"github.com/jakenesler/navigatorr/action"
 	"github.com/jakenesler/navigatorr/transcode"
 )
 
@@ -33,23 +29,17 @@ func (s *Server) workers(w http.ResponseWriter, r *http.Request) {
 			address = endpoint.Host
 		}
 	}
-	configured := s.engine.Deps().Transcode != nil
-	status, message := "unconfigured", "Configure a video worker before submitting jobs."
-	ready := false
-	connected := false
-	if configured {
-		if err := s.engine.CheckWorkerAdmission(r.Context()); err == nil {
-			connected, ready, status, message = true, true, "ready", "Connected. Media storage and encoder checks passed."
-		} else {
-			status, message = "unavailable", "Worker offline or not ready. New jobs are blocked."
-			var admission *action.WorkerAdmissionError
-			if errors.As(err, &admission) && admission.Connected {
-				connected, status, message = true, "blocked", "Connected, but media storage or encoder checks failed. New jobs are blocked."
-				if strings.Contains(admission.Message, "media storage") {
-					message = "Connected, but media storage is inaccessible. New jobs are blocked."
-				}
-			}
+	observation := s.engine.WorkerObservation(r.Context())
+	status := "unconfigured"
+	if observation.Configured {
+		status = "unavailable"
+		if observation.Reachable {
+			status = "blocked"
+		}
+		if observation.Ready {
+			status = "ready"
 		}
 	}
-	writeJSON(w, 200, map[string]any{"ready": ready, "checked_at": time.Now().UTC(), "nodes": []map[string]any{{"name": "Video worker", "address": address, "transport": transport, "configured": configured, "connected": connected, "ready": ready, "status": status, "message": message}}})
+	node := map[string]any{"name": "Video worker", "address": address, "transport": transport, "configured": observation.Configured, "connected": observation.Reachable, "reachable": observation.Reachable, "ready": observation.Ready, "status": status, "message": observation.Message, "scheduler_health": observation.Health, "observed_at": observation.ObservedAt, "fresh_until": observation.FreshUntil, "last_success_at": observation.LastSuccessAt, "observation_age_seconds": observation.ObservationAgeSeconds, "stale": observation.Stale, "last_error": observation.LastError, "sweeps": observation.Sweeps}
+	writeJSON(w, 200, map[string]any{"ready": observation.Ready, "checked_at": observation.CheckedAt, "observation": observation, "nodes": []map[string]any{node}})
 }

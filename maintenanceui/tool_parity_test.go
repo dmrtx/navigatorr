@@ -43,3 +43,48 @@ func TestWebAdmissionShortcutsAndRestrictedMutation(t *testing.T) {
 		}
 	}
 }
+
+func TestPhaseCostsShareTheActionStatusProjection(t *testing.T) {
+	s, h := testUI(t)
+	costs := map[string]any{"coordinator_inventory": map[string]any{"duration_ms": 15, "attempts": 1, "active_compute_ms": nil, "nas_read_bytes": nil, "provenance": "coordinator_measured"}}
+	seedOperation(t, s.engine.Deps().Store, "measured", "transcode_batch", "completed", nil, nil, map[string]any{"phase_costs": costs})
+	w := request(h, "GET", "/api/maintenance/operations?status=all", "", true)
+	if w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	var page operationsPage
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Jobs) != 1 {
+		t.Fatalf("unexpected jobs: %+v", page)
+	}
+	ui, _ := json.Marshal(page.Jobs[0]["phase_costs"])
+	response := request(h, "POST", "/api/maintenance/tool", `{"name":"action_status","arguments":{"id":"measured"}}`, true)
+	if response.Code != 200 {
+		t.Fatal(response.Code, response.Body.String())
+	}
+	var mcpResult struct {
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &mcpResult); err != nil {
+		t.Fatal(err)
+	}
+	var summary struct {
+		Action struct {
+			PhaseCosts map[string]any `json:"phase_costs"`
+		} `json:"action"`
+	}
+	if len(mcpResult.Content) == 0 {
+		t.Fatal(response.Body.String())
+	}
+	if err := json.Unmarshal([]byte(mcpResult.Content[0].Text), &summary); err != nil {
+		t.Fatal(err)
+	}
+	mcpCosts, _ := json.Marshal(summary.Action.PhaseCosts)
+	if string(ui) != string(mcpCosts) {
+		t.Fatalf("UI/MCP measured costs differ: UI=%s MCP=%s", ui, mcpCosts)
+	}
+}

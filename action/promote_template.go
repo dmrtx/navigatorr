@@ -22,14 +22,14 @@ func (e *Engine) registerPromoteTranscodeTemplate() {
 		Description:     "Replaces a completed, validated transcode locally with service=filesystem (no library IDs), or promotes it into Sonarr/Radarr, after explicit approval, preserving a verified recovery copy until import, old-file cleanup, rename and rescan are verified. Persists external command intents and never blindly resubmits uncertain imports.",
 		RequiredInputs:  []string{"transcode_action_id"}, OptionalInputs: []string{"service", "series_id", "movie_id", "batch_promote_parent_id", "batch_promote_item_key", "batch_promote_digest"},
 		Steps: []StepDefinition{
-			{Name: "plan_promotion", Description: "Verify original and candidate, and resolve the movie or all episodes sharing the original file", Run: e.stepPromotePlan},
+			{Name: "plan_promotion", Description: "Verify original and candidate, and resolve the movie or all episodes sharing the original file", Run: e.measureCoordinatorPhase("coordinator_promotion", e.stepPromotePlan)},
 			{Name: "approve_promotion", Description: "Present the exact replacement for an explicit approve decision", Run: e.stepPromoteApprove},
-			{Name: "preserve_original", Description: "Create and verify a recovery copy before any library mutation", Run: e.stepPromotePreserve},
-			{Name: "import_candidate", Description: "Import once and reconcile library associations, physical candidate SHA and streams", Run: e.stepPromoteImport},
-			{Name: "remove_old_file", Description: "Reverify adoption and integrity before removing the old library file", Run: e.stepPromoteRemoveOld},
-			{Name: "rename_candidate", Description: "Move the active file out of the temporary candidate directory through the library service", Run: e.stepPromoteRename},
-			{Name: "rescan_library", Description: "Rescan and verify the final library state", Run: e.stepPromoteRescan},
-			{Name: "finalize_promotion", Description: "Verify one active file per affected library item, record savings and remove the recovery copy", Run: e.stepPromoteFinalize},
+			{Name: "preserve_original", Description: "Create and verify a recovery copy before any library mutation", Run: e.measureCoordinatorPhase("coordinator_promotion", e.stepPromotePreserve)},
+			{Name: "import_candidate", Description: "Import once and reconcile library associations, physical candidate SHA and streams", Run: e.measureCoordinatorPhase("coordinator_promotion", e.stepPromoteImport)},
+			{Name: "remove_old_file", Description: "Reverify adoption and integrity before removing the old library file", Run: e.measureCoordinatorPhase("coordinator_promotion", e.stepPromoteRemoveOld)},
+			{Name: "rename_candidate", Description: "Move the active file out of the temporary candidate directory through the library service", Run: e.measureCoordinatorPhase("coordinator_promotion", e.stepPromoteRename)},
+			{Name: "rescan_library", Description: "Rescan and verify the final library state", Run: e.measureCoordinatorPhase("coordinator_promotion", e.stepPromoteRescan)},
+			{Name: "finalize_promotion", Description: "Verify one active file per affected library item, record savings and remove the recovery copy", Run: e.measureCoordinatorPhase("coordinator_promotion", e.stepPromoteFinalize)},
 		},
 	})
 }

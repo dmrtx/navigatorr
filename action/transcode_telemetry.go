@@ -8,6 +8,7 @@ import (
 )
 
 func (e *Engine) observeTranscodeStatus(ec *ExecutionContext, st transcode.JobStatus) {
+	mirrorWorkerPhaseCosts(ec, "worker_", st.PhaseCosts)
 	mirrorTranscodeWorkerMetadata(ec, st)
 	if st.QualityEvidence != nil {
 		ec.State["quality_evidence"] = st.QualityEvidence
@@ -100,7 +101,7 @@ func (e *Engine) observeTranscodeStatus(ec *ExecutionContext, st transcode.JobSt
 
 func transcodeTelemetryOutputs(ec *ExecutionContext) map[string]any {
 	out := map[string]any{}
-	for _, key := range []string{"transcode_status", "transcode_phase", "quality_evidence", "finalization_retry_count", "next_finalization_at", "recovery_required", "progress", "speed", "fps", "progress_is_stale", "last_progress_at", "worker_heartbeat_at", "last_known_progress", "last_worker_poll_at", "worker_completed_at", "reconciled_at", "queue_duration_ms", "encode_duration_ms", "worker_validation_duration_ms", "validation_duration_ms", "worker_wall_duration_ms", "reconcile_lag_ms", "worker_slots_total", "worker_slots_used", "queue_position", "storage_backend", "navigatorr_path", "worker_resolved_path", "smb_share", "smb_relative_path"} {
+	for _, key := range []string{"phase_costs", "transcode_status", "transcode_phase", "quality_evidence", "finalization_retry_count", "next_finalization_at", "recovery_required", "progress", "speed", "fps", "progress_is_stale", "last_progress_at", "worker_heartbeat_at", "last_known_progress", "last_worker_poll_at", "worker_completed_at", "reconciled_at", "queue_duration_ms", "encode_duration_ms", "worker_validation_duration_ms", "validation_duration_ms", "worker_wall_duration_ms", "reconcile_lag_ms", "worker_slots_total", "worker_slots_used", "queue_position", "storage_backend", "navigatorr_path", "worker_resolved_path", "smb_share", "smb_relative_path"} {
 		if v, ok := ec.State[key]; ok {
 			out[key] = v
 		}
@@ -114,6 +115,10 @@ func (e *Engine) recordWorkerPoll(ec *ExecutionContext) {
 }
 
 func (e *Engine) observeBenchmarkStatus(ec *ExecutionContext, st transcode.BenchmarkStatus) {
+	mirrorWorkerPhaseCosts(ec, "worker_benchmark_", st.PhaseCosts)
+	if st.SearchBudgetSeconds > 0 {
+		ec.State["search_budget_seconds"] = st.SearchBudgetSeconds
+	}
 	ec.State["benchmark_comparison_available"] = st.ComparisonAvailable
 	ec.Outputs["benchmark_comparison_available"] = st.ComparisonAvailable
 	ec.State["benchmark_status"] = st.Status
@@ -160,7 +165,7 @@ func (e *Engine) observeBenchmarkStatus(ec *ExecutionContext, st transcode.Bench
 			ec.State["reconcile_lag_ms"] = ec.State["benchmark_reconcile_lag_ms"]
 		}
 	}
-	for _, key := range []string{"benchmark_status", "phase", "progress", "progress_is_stale", "last_progress_at", "worker_heartbeat_at", "progress_details", "samples_planned", "candidates_count", "benchmark_worker_completed_at", "benchmark_reconciled_at", "benchmark_reconcile_lag_ms", "worker_completed_at", "reconciled_at", "reconcile_lag_ms"} {
+	for _, key := range []string{"phase_costs", "benchmark_status", "phase", "progress", "progress_is_stale", "last_progress_at", "worker_heartbeat_at", "progress_details", "samples_planned", "candidates_count", "benchmark_worker_completed_at", "benchmark_reconciled_at", "benchmark_reconcile_lag_ms", "worker_completed_at", "reconciled_at", "reconcile_lag_ms"} {
 		if v, ok := ec.State[key]; ok {
 			ec.Outputs[key] = v
 		}

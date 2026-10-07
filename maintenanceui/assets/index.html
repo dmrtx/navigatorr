@@ -63,7 +63,7 @@
             ><span class="tab-text"
               ><span class="tab-label">Files</span></span
             ></button
-          ><button data-tab="jobs" aria-label="Queue" aria-current="false">
+          ><button data-tab="jobs" aria-label="Activity" aria-current="false">
             <svg
               class="nav-icon"
               viewBox="0 0 24 24"
@@ -77,7 +77,7 @@
               <rect x="4" y="4" width="16" height="16" rx="2" />
               <path d="M8 8h8M8 12h8M8 16h5" /></svg
             ><span class="tab-text"
-              ><span class="tab-label">Queue</span
+              ><span class="tab-label">Activity</span
               ><span id="active-count"></span
             ></span></button
           ><button
@@ -116,7 +116,7 @@
             ><span class="tab-text"
               ><span class="tab-label">Stats</span></span
             ></button
-          ><button data-tab="advanced" aria-label="More" aria-current="false">
+          ><button data-tab="advanced" aria-label="Settings" aria-current="false">
             <svg
               class="nav-icon"
               viewBox="0 0 24 24"
@@ -130,7 +130,7 @@
               <circle cx="5" cy="12" r="1" />
               <circle cx="12" cy="12" r="1" />
               <circle cx="19" cy="12" r="1" /></svg
-            ><span class="tab-text"><span class="tab-label">More</span></span>
+            ><span class="tab-text"><span class="tab-label">Settings</span></span>
           </button>
         </nav>
         <section id="library" class="panel tab-content">
@@ -291,11 +291,20 @@
                 </button>
                 <span class="metadata">2 of 2</span>
               </div>
-              <h2>Transcode</h2>
+              <h2>Process videos</h2>
               <p id="source-summary" class="metadata">
                 Choose a file or folder.
               </p>
 
+              <fieldset id="processing-goal" class="processing-goal">
+                <legend>Choose your goal</legend>
+                <label><input type="radio" name="processing-mode" value="size" /><span><strong>Smaller files</strong><small>Acceptable quality, at least 15% measured savings.</small></span></label>
+                <label><input type="radio" name="processing-mode" value="quality" checked /><span><strong>Prioritize quality</strong><small>Strict quality checks, at least 15% measured savings.</small></span></label>
+                <label><input type="radio" name="processing-mode" value="x265_preserve" /><span><strong>Preserve quality · Convert to x265</strong><small>Strict quality checks, no file growth. Existing HEVC stays unchanged.</small></span></label>
+              </fieldset>
+              <p id="processing-policy" class="metadata">Automatic: samples determine the effective plan. Savings and quality must pass validation; a result is not guaranteed.</p>
+              <label class="check technical-toggle"><input id="technical" type="checkbox" />Technical tools and legacy profiles</label>
+              <div id="legacy-controls" hidden>
               <label
                 >Content<select id="media-kind">
                   <option value="movie">Movies / videos</option>
@@ -530,6 +539,7 @@
                   Resolution is preserved. Sample sizes are estimates.
                 </p>
               </div>
+              </div>
               <div class="submit-actions">
                 <button id="preview" type="button">Preview selection</button
                 ><button id="benchmark" type="button">Test samples</button
@@ -576,6 +586,7 @@
           </div>
           <p id="jobs-updated" class="metadata" role="status"></p>
           <section id="worker-activity" class="worker-activity" aria-label="Video worker activity">
+            <p id="activity-scheduler" class="metadata" role="status"></p>
             <div class="activity-heading"><strong id="worker-capacity">Checking worker slots…</strong><span id="activity-checked" class="metadata"></span></div>
             <div id="worker-slots" class="worker-slots"></div>
           </section>
@@ -656,6 +667,8 @@
               <label>Name<input id="recipe-name" required /></label
               ><label>Description<input id="recipe-description" /></label>
               <div id="recipe-source" class="muted"></div>
+              <p id="recipe-save-effect" class="metadata"></p>
+              <p id="recipe-dirty" class="metadata" role="status">No unsaved changes.</p>
               <div class="profile-controls">
                 <div class="field-grid">
                   <label
@@ -671,7 +684,7 @@
                 </div>
                 <div class="field-grid">
                   <label
-                    >Quality<input
+                    ><span id="recipe-quality-label">CRF</span><input
                       id="recipe-quality"
                       type="number"
                       min="0"
@@ -715,6 +728,7 @@
                   hidden
                 />
               </div>
+              <p id="recipe-scale-note" class="metadata"></p>
               <p class="preservation-note muted">
                 Metadata, chapters and attachments are preserved.
               </p>
@@ -737,7 +751,7 @@
                   >
                     <path d="M4 7h16M4 17h16M9 4v6M15 14v6" />
                   </svg>
-                </button>
+                <span>Advanced options</span></button>
                 <button
                   id="recipe-history"
                   type="button"
@@ -757,7 +771,7 @@
                   >
                     <path d="M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18M12 7v5l3 2" />
                   </svg>
-                </button>
+                <span>History</span></button>
                 <button
                   id="delete-recipe"
                   type="button"
@@ -795,23 +809,25 @@
                   >
                     <path d="M4 3h13l3 3v15H4ZM8 3v6h8V3M8 21v-7h8v7" />
                   </svg>
-                </button>
+                <span>Save</span></button>
               </div>
-              <div id="recipe-feedback" class="profile-history" hidden></div>
+              <div id="recipe-feedback" class="profile-history" role="status" hidden></div>
             </form>
           </div>
         </section>
         <section id="advanced" class="panel tab-content" hidden>
           <h2>Settings</h2>
+          <section id="settings-worker" aria-label="Worker and scheduler health"></section>
           <div class="settings-row">
             <span
               >Shared presets<span class="metadata">New jobs only</span></span
             >
             <div class="job-actions">
-              <button id="reload-profiles">Refresh presets</button
-              ><button id="rollback-profiles">Restore previous</button>
+              <button id="reload-profiles">Load configured presets</button
+              ><button id="rollback-profiles" class="quiet recovery">Restore previous version…</button>
             </div>
           </div>
+          <p class="metadata">Loading validates and activates the configured preset source. Restoring activates a reviewed previous version. Both affect new jobs only; custom overrides and active plans are preserved.</p>
           <div class="settings-row">
             <span>Recovery copies</span
             ><button id="load-backups">View copies</button>

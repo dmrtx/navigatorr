@@ -36,8 +36,11 @@ type ResiliencePlan struct {
 }
 
 type Plan struct {
-	Container  string `json:"container" yaml:"container"`
-	VideoCodec string `json:"video_codec" yaml:"video_codec"`
+	Mode         string      `json:"mode,omitempty" yaml:"mode,omitempty"`
+	PolicyDigest string      `json:"policy_digest,omitempty" yaml:"policy_digest,omitempty"`
+	SizePolicy   *SizePolicy `json:"size_policy,omitempty" yaml:"size_policy,omitempty"`
+	Container    string      `json:"container" yaml:"container"`
+	VideoCodec   string      `json:"video_codec" yaml:"video_codec"`
 	// Quality is the rate-control knob. For hevc_videotoolbox it maps to -q:v
 	// (higher = higher quality). For libx265 it maps to -crf (LOWER = higher
 	// quality, valid range 1..51). See VideoProfile.Preset for x265 preset.
@@ -84,6 +87,11 @@ type Plan struct {
 
 // QualityValidationPlan is the immutable bridge from the benchmark's sampled
 // policy to the final candidate. It is included in the plan digest.
+type SizePolicy struct {
+	MinSavingsPercent      float64 `json:"min_savings_percent" yaml:"min_savings_percent"`
+	MaxSizeIncreasePercent float64 `json:"max_size_increase_percent" yaml:"max_size_increase_percent"`
+}
+
 type QualityValidationPlan struct {
 	Metric                 string                  `json:"metric" yaml:"metric"`
 	Samples                []BenchmarkSampleWindow `json:"samples" yaml:"samples"`
@@ -241,7 +249,23 @@ type ProgressSnapshot struct {
 // JobTelemetry is additive to the stable queued/running/terminal status model.
 // Phase describes actual work; runner slots include preparation and publication
 // as well as encoding. Durations are omitted when older workers lack evidence.
+// PhaseCost measurements are elapsed wall intervals, including synchronous I/O
+// wait. They are not CPU time and overlapping phases must not be added as wall
+// duration. NAS bytes count only confirmed completed logical transfers; nil
+// means unknown (including partial transfers), never zero inferred from errors.
+type PhaseCost struct {
+	DurationMs      int64  `json:"duration_ms"`
+	Attempts        int    `json:"attempts"`
+	NASReadBytes    *int64 `json:"nas_read_bytes,omitempty"`
+	NASWrittenBytes *int64 `json:"nas_written_bytes,omitempty"`
+	CacheHits       *int64 `json:"cache_hits,omitempty"`
+	CacheMisses     *int64 `json:"cache_misses,omitempty"`
+}
+
 type JobTelemetry struct {
+	PhaseCosts map[string]PhaseCost `json:"phase_costs,omitempty"`
+	ExitReason string               `json:"exit_reason,omitempty"`
+
 	Phase                  string            `json:"phase,omitempty"`
 	CreatedAt              time.Time         `json:"created_at,omitzero"`
 	StartedAt              time.Time         `json:"started_at,omitzero"`
@@ -273,6 +297,7 @@ type JobTelemetry struct {
 }
 
 type JobStatus struct {
+	ReasonCode string `json:"reason_code,omitempty"`
 	JobTelemetry
 	ID                    string                `json:"id"`
 	Status                string                `json:"status"`

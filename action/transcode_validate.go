@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/jakenesler/navigatorr/transcode/optimization"
 	"os"
 	"strings"
 )
@@ -35,6 +36,9 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 			return StepResult{Status: StepFailed, Error: "transcode candidate rejected by user decision; original file remains untouched"}, nil
 		}
 	}
+	if getString(ec.Inputs, "mode") != "" && (strings.EqualFold(ec.Decision, "accept_loss") || strings.EqualFold(ec.Decision, "approve")) {
+		return StepResult{Status: StepFailed, Error: "mode policy cannot accept validation loss; original preserved"}, nil
+	}
 	acceptValidationLoss := strings.EqualFold(ec.Decision, "accept_loss") || strings.EqualFold(ec.Decision, "approve")
 	outputPath := getString(ec.State, "candidate_path")
 	if outputPath == "" {
@@ -46,6 +50,17 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 	plan := getPlan(ec.State["plan"])
 	if plan == nil {
 		return StepResult{Status: StepFailed, Error: "resolved plan missing during validation (fail closed)"}, nil
+	}
+	if getString(ec.Inputs, "mode") != "" {
+		snapshot, err := freezeModePolicy(ec)
+		if err != nil || snapshot == nil || plan.Mode != snapshot.Mode || plan.PolicyDigest != snapshot.Digest || plan.QualityValidation == nil {
+			return StepResult{Status: StepFailed, Error: "mode final quality policy is missing or mismatched; original preserved"}, nil
+		}
+		expected, _ := json.Marshal(ensureBenchmarkQualityMetric(buildBenchmarkQualityConfig(snapshot.Profile.Optimization.Quality), "vmaf"))
+		actual, _ := json.Marshal(plan.QualityValidation.Quality)
+		if plan.QualityValidation.Metric != "vmaf" || string(expected) != string(actual) {
+			return StepResult{Status: StepFailed, Error: "final quality validation does not enforce frozen mode policy; original preserved"}, nil
+		}
 	}
 	if plan.QualityValidation != nil {
 		var evidence struct {
@@ -69,6 +84,21 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 	}
 	if candidateSize <= 0 {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("accepted candidate size is unknown for %q (fail closed)", outputPath)}, nil
+	}
+	if plan.Mode != "" {
+		original := getInt64(ec.State, "original_size")
+		if original <= 0 {
+			original = getInt64(stateObject(ec.State, "original"), "size_bytes")
+		}
+		minimum, maximum := e.effectiveSizeGuardrails(ec)
+		if original <= 0 || plan.SizePolicy == nil || plan.Mode != getString(ec.Inputs, "mode") || plan.PolicyDigest != getString(ec.State, "policy_digest") || plan.SizePolicy.MinSavingsPercent != minimum || plan.SizePolicy.MaxSizeIncreasePercent != maximum {
+			return StepResult{Status: StepFailed, Error: "mode size policy or source identity missing; original preserved"}, nil
+		}
+		if !optimization.ModeSizeAllowed(plan.Mode, original, candidateSize) {
+			ec.State["skip_transcode"] = true
+			ec.State["reason_code"] = "insufficient_savings"
+			return StepResult{Status: StepCompleted, Outputs: map[string]any{"skipped": true, "reason_code": "insufficient_savings", "candidate_size_bytes": candidateSize}}, nil
+		}
 	}
 	if ec.Decision != "" {
 		ec.State["validation_decision_applied"] = ec.Decision

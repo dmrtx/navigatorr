@@ -560,7 +560,7 @@ func TestRealWorld_MCPSchemaFootprint(t *testing.T) {
 	}
 	defer mSt.Close()
 
-	// Measure all 60 tools registered in full production mode
+	// Measure the exact registered schema, including the shared worker health read.
 	RegisterAll(s, cfg, nil, nil, txClient, qbClient, sabClient, qSt)
 	RegisterMaintenance(s, cfg, nil, qbClient, mSt)
 	RegisterDiagnostics(s, cfg, nil, nil, txClient, qbClient, sabClient, mSt)
@@ -584,6 +584,7 @@ func TestRealWorld_MCPSchemaFootprint(t *testing.T) {
 		"diagnostics":       true,
 		"action_history":    true,
 		"transcode_backups": true,
+		"worker_health":     true,
 	}
 
 	for name, st := range toolsMap {
@@ -611,14 +612,14 @@ func TestRealWorld_MCPSchemaFootprint(t *testing.T) {
 		}
 	}
 
-	if toolsTotal != 65 {
-		t.Errorf("expected exactly 65 tools total, got %d", toolsTotal)
+	if toolsTotal != 66 {
+		t.Errorf("expected exactly 66 tools total, got %d", toolsTotal)
 	}
 	if len(baseToolsList) != 54 {
 		t.Errorf("expected exactly 54 base tools, got %d", len(baseToolsList))
 	}
-	if len(newToolsList) != 11 {
-		t.Errorf("expected exactly 11 new tools, got %d", len(newToolsList))
+	if len(newToolsList) != 12 {
+		t.Errorf("expected exactly 12 new tools, got %d", len(newToolsList))
 	}
 }
 

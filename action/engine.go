@@ -19,6 +19,9 @@ import (
 
 // Engine manages declarative, persistent, multi-step actions.
 type Engine struct {
+	workerObservationMu sync.Mutex
+	workerObservation   transcode.WorkerObservation
+
 	mu             sync.RWMutex
 	deps           EngineDeps
 	templates      map[string]ActionTemplate

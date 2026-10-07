@@ -124,6 +124,10 @@ func durationMilliseconds(start, end time.Time) *int64 {
 
 func telemetryFor(job *JobRecord, now time.Time) transcode.JobTelemetry {
 	t := job.JobTelemetry
+	t.PhaseCosts = make(map[string]transcode.PhaseCost, len(job.PhaseCosts)+3)
+	for name, cost := range job.PhaseCosts {
+		t.PhaseCosts[name] = cost
+	}
 	t.CreatedAt, t.StartedAt, t.FinishedAt = job.CreatedAt, job.StartedAt, job.FinishedAt
 	if isTerminalStatus(job.Status) {
 		t.Phase = job.Status
@@ -152,6 +156,11 @@ func telemetryFor(job *JobRecord, now time.Time) transcode.JobTelemetry {
 	end := job.FinishedAt
 	if end.IsZero() && !isTerminalStatus(job.Status) {
 		end = now
+	}
+	for name, duration := range map[string]*int64{"queue": t.QueueDurationMs, "encode": t.EncodeDurationMs, "validation": t.ValidationDurationMs} {
+		if duration != nil {
+			t.PhaseCosts[name] = transcode.PhaseCost{DurationMs: *duration, Attempts: 1}
+		}
 	}
 	t.WallDurationMs = durationMilliseconds(job.CreatedAt, end)
 	return t
@@ -245,4 +254,43 @@ func (w *Worker) validateJobStorageBackend(job *JobRecord, r *resolvedOperationa
 		return fmt.Errorf("storage_backend_mismatch: smb_direct requires local staging and explicit SMB publication")
 	}
 	return nil
+}
+
+func knownCount(n int64) *int64 { return &n }
+
+func (w *Worker) persistPhaseCost(jobDir, jobFile string, job *JobRecord, phase string, start time.Time, cost transcode.PhaseCost) {
+	cost.DurationMs = time.Since(start).Milliseconds()
+	cost.Attempts = 1
+	shadow := *job
+	_, _ = w.persistOperationalProgress(jobDir, jobFile, &shadow, func(latest *JobRecord) {
+		if latest.PhaseCosts == nil {
+			latest.PhaseCosts = map[string]transcode.PhaseCost{}
+		}
+		previous := latest.PhaseCosts[phase]
+		cost.DurationMs += previous.DurationMs
+		cost.Attempts += previous.Attempts
+		add := func(a, b *int64) *int64 {
+			if a == nil || b == nil {
+				return nil
+			}
+			return knownCount(*a + *b)
+		}
+		if previous.Attempts > 0 {
+			cost.NASReadBytes = add(previous.NASReadBytes, cost.NASReadBytes)
+			cost.NASWrittenBytes = add(previous.NASWrittenBytes, cost.NASWrittenBytes)
+			cost.CacheHits = add(previous.CacheHits, cost.CacheHits)
+			cost.CacheMisses = add(previous.CacheMisses, cost.CacheMisses)
+		}
+		latest.PhaseCosts[phase] = cost
+	})
+	job.PhaseCosts = shadow.PhaseCosts
+}
+
+// A measurement collector lives on this one request context, never on Worker:
+// concurrent jobs cannot steal each other's cache/transfer evidence.
+type sourceCostKey struct{}
+
+func sourceCost(ctx context.Context) *transcode.PhaseCost {
+	cost, _ := ctx.Value(sourceCostKey{}).(*transcode.PhaseCost)
+	return cost
 }

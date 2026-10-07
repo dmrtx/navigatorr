@@ -66,14 +66,7 @@ func (m *Manager) Snapshot() *Snapshot {
 func (m *Manager) Status() Status {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	s := m.active.Load()
-	st := Status{Source: m.source, Channel: m.channel, Revision: m.revision, LastCheckedAt: m.lastChecked, LastUpdateError: m.lastError}
-	if s != nil {
-		st.ActiveVersion = s.Identity.Version
-		st.ActiveDigest = s.Identity.Digest
-		st.LastKnownGood = s.Identity.Version
-	}
-	return st
+	return m.statusLocked()
 }
 func (m *Manager) Reload(ctx context.Context) (Status, error) { return m.Update(ctx) }
 func (m *Manager) Update(ctx context.Context) (Status, error) {
@@ -111,18 +104,45 @@ func (m *Manager) Update(ctx context.Context) (Status, error) {
 	m.lastError = ""
 	return m.statusLocked(), nil
 }
-func (m *Manager) Rollback() (Status, error) {
+func (m *Manager) Rollback() (Status, error) { return m.RollbackReviewed("", "") }
+
+// RollbackReviewed compares both the reviewed active bundle and restoration
+// destination under the activation lock before changing disk or runtime state.
+// Empty tokens preserve the existing technical API's legacy behavior.
+func (m *Manager) RollbackReviewed(expectedActive, expectedPrevious string) (Status, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.cacheDir == "" {
-		return m.statusLocked(), fmt.Errorf("recipe cache is disabled")
+	if (expectedActive == "") != (expectedPrevious == "") {
+		return m.statusLocked(), fmt.Errorf("both expected_active_digest and expected_previous_digest are required for reviewed restoration")
 	}
-	md, err := m.readMetadata()
+	cur := m.active.Load()
+	snap, err := m.previousSnapshotLocked()
 	if err != nil {
 		return m.statusLocked(), err
 	}
+	if expectedActive != "" && (cur == nil || cur.Identity.Digest != expectedActive || snap.Identity.Digest != expectedPrevious) {
+		return m.statusLocked(), fmt.Errorf("recipe version conflict: reviewed active or previous bundle changed; review current versions before restoring")
+	}
+	previous := cur
+	if err := m.writeMetadata(snap, previous); err != nil {
+		return m.statusLocked(), err
+	}
+	m.active.Store(snap)
+	m.lastError = ""
+	return m.statusLocked(), nil
+}
+
+// previousSnapshotLocked is shared by status and rollback so the UI reviews
+// the exact validated destination that the mutation will compare.
+func (m *Manager) previousSnapshotLocked() (*Snapshot, error) {
+	if m.cacheDir == "" {
+		return nil, fmt.Errorf("recipe cache is disabled")
+	}
+	md, err := m.readMetadata()
+	if err != nil {
+		return nil, err
+	}
 	cur := m.active.Load()
-	var snap *Snapshot
 	for i := len(md.History) - 1; i >= 0; i-- {
 		target := md.History[i]
 		if cur != nil && target == cur.Identity.Version {
@@ -133,22 +153,12 @@ func (m *Manager) Rollback() (Status, error) {
 			continue
 		}
 		candidate, parseErr := Parse(b)
-		if parseErr != nil {
+		if parseErr != nil || candidate.Identity.Version != target {
 			continue
 		}
-		snap = candidate
-		break
+		return candidate, nil
 	}
-	if snap == nil {
-		return m.statusLocked(), fmt.Errorf("no previous valid cached recipe bundle available")
-	}
-	previous := cur
-	if err := m.writeMetadata(snap, previous); err != nil {
-		return m.statusLocked(), err
-	}
-	m.active.Store(snap)
-	m.lastError = ""
-	return m.statusLocked(), nil
+	return nil, fmt.Errorf("no previous valid cached recipe bundle available")
 }
 func (m *Manager) statusLocked() Status {
 	s := m.active.Load()
@@ -157,6 +167,10 @@ func (m *Manager) statusLocked() Status {
 		st.ActiveVersion = s.Identity.Version
 		st.ActiveDigest = s.Identity.Digest
 		st.LastKnownGood = s.Identity.Version
+	}
+	if previous, err := m.previousSnapshotLocked(); err == nil {
+		st.PreviousVersion = previous.Identity.Version
+		st.PreviousDigest = previous.Identity.Digest
 	}
 	return st
 }

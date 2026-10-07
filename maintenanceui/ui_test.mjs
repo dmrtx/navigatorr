@@ -110,7 +110,7 @@ test("URL updates add one browser history entry per navigation and canonical res
   h.run('state.routeReady=true;state.tab="jobs";writeNavigation();writeNavigation();');
   assert.deepEqual(writes,[["push","/?view=queue"]]);
   h.run('state.applyingNavigation=true;state.tab="advanced";writeNavigation();state.applyingNavigation=false;writeNavigation(true);');
-  assert.deepEqual(writes[1],["replace","/?view=more"]);
+  assert.deepEqual(writes[1],["replace","/?view=settings"]);
 });
 
 test("deep links restore an Arr title and selected file; late routes cannot replace newer navigation", async () => {
@@ -452,7 +452,7 @@ test("single-column step changes move keyboard focus to a visible control", () =
   assert.equal(focused, "service");
 });
 
-test("multiple selected files configure an explicit batch and using a folder clears selection-only scope", () => {
+test("multiple selections and folder discovery freeze the explicit batch before configuration", async () => {
   const h = harness();
   h.run(
     'controls = () => {}; $("service").value = "folder:/media"; state.folder = "/media/season"; state.folderSelected = new Set(["/media/season/one.mp4", "/media/season/two.mp4"]); configureSelection();',
@@ -461,10 +461,11 @@ test("multiple selected files configure an explicit batch and using a folder cle
   assert.equal(h.elements.get("selected-only").checked, true);
   assert.equal(h.run("state.folderSelected.size"), 2);
   h.elements.get("back-to-files").listeners.get("click")();
-  h.elements.get("use-container").listeners.get("click")();
+  h.run('api=async()=>({paths:["/media/season/one.mp4","/media/season/two.mp4","/media/season/three.mp4"]});');
+  await h.elements.get("use-container").listeners.get("click")();
   assert.equal(h.elements.get("scope").value, "batch");
-  assert.equal(h.elements.get("selected-only").checked, false);
-  assert.equal(h.elements.get("recursive").checked, true);
+  assert.equal(h.elements.get("selected-only").checked, true);
+  assert.equal(h.run("state.folderSelected.size"), 3);
   assert.equal(h.run("state.fileStep"), "configure");
 });
 
@@ -1325,7 +1326,7 @@ test("saving one profile does not replace a different selection made during the 
     pending = deferred();
   h.context.saved = pending.promise;
   h.run(
-    'recipeFromControls = () => ({}); state.recipeRevision = 1; tool = async () => saved; loadRecipes = async () => {}; readRecipe = async () => { throw new Error("overwrote new selection"); };',
+    'recipeFromControls = () => ({video:{codec:"libx265",quality:23}}); state.recipeRevision = 1; tool = async () => saved; loadRecipes = async () => {}; readRecipe = async () => { throw new Error("overwrote new selection"); };',
   );
   h.document.getElementById("recipe-name").value = "profile-a";
   const saving = h.run("saveRecipe()");
@@ -1986,7 +1987,7 @@ test("batch file context distinguishes scheduling, paused work and actual worker
 
 test("creation exposes the same effective profile facts and depth precedence as reconfiguration",()=>{
  const h=harness();
- h.run('state.info={min_savings_percent:15};$("profile").value="anime-hevc-main10";$("preserve-depth").checked=true;state.recipeDetails={"anime-hevc-main10":{description:"Balanced anime",profile:{video:{codec:"hevc_videotoolbox",quality:65,profile:"main10",pixel_format:"p010le"},audio:{mode:"compact"},container:"mkv"}}};renderCreationProfile();');
+ h.run('$("technical").checked=true;state.info={min_savings_percent:15};$("profile").value="anime-hevc-main10";$("preserve-depth").checked=true;state.recipeDetails={"anime-hevc-main10":{description:"Balanced anime",profile:{video:{codec:"hevc_videotoolbox",quality:65,profile:"main10",pixel_format:"p010le"},audio:{mode:"compact"},container:"mkv"}}};renderCreationProfile();');
  let facts=JSON.stringify(h.elements.get("creation-profile-info").children);
  assert.match(facts,/Same as source.*Overrides profile depth/);assert.match(facts,/Convert lossless tracks to AAC/);assert.match(facts,/Converts full video/);assert.match(facts,/Quality 65/);
  assert.match(h.elements.get("creation-limits-note").textContent,/15%/);
@@ -2059,4 +2060,98 @@ test("partial replacement does not claim that all originals were replaced",()=>{
  const view=h.run('queuePresentation({status:"completed",action_name:"transcode_batch",replaced_files:1,remaining_candidates:1,savings:{realized_saved_bytes:100},batch:{total:2,completed:2,outcome:"promoted"}})');
  assert.equal(view.status,'Candidates ready');assert.match(view.summary,/1 replaced.*1 candidates available/);
  assert.equal(h.run('queuePresentation({status:"failed",savings:{realized_saved_bytes:100},batch:{total:2,completed:1,failed:1,outcome:"partial"}}).status'),'Failed');
+});
+
+test("three processing modes omit stale tuning and keep anime library context", async () => {
+  for (const mode of ["size","quality","x265_preserve"]) {
+    const {h}=submissionHarness();let sent;
+    h.context.capture=(_tool,args)=>{sent=JSON.parse(args.inputs);return {id:"submitted"};};
+    h.run(`processingMode=()=>${JSON.stringify(mode)};$("custom").checked=true;$("min-savings").value="2";$("max-growth").value="40";$("priority").value="savings";$("preserve-depth").checked=false;state.fileMedia={id:7,seriesType:"anime"};state.fileService="sonarr";tool=async(...args)=>capture(...args);`);
+    await h.run('buildAndSubmitJob("encode")');
+    assert.deepEqual(sent,{mode,path:"/media/one.mp4",media_type:"tv",is_anime:true,library_context:{service:"sonarr",id:7}});
+  }
+});
+
+test("explicit mode batches cannot be truncated or expanded by hidden discovery fields", async () => {
+  for (const source of ["folder:/media","sonarr"]) {
+    const {h}=submissionHarness();let sent;
+    h.context.capture=(_tool,args)=>{sent=JSON.parse(args.inputs);return {id:"submitted"};};
+    h.run(`$("service").value=${JSON.stringify(source)};$("scope").value="batch";$("selected-only").checked=false;$("max-items").value="1";$("season").value="10";$("recursive").checked=true;$("promote-batch").checked=true;state.folderSelected=new Set(["/media/a.mkv","/media/b.mkv"]);state.selected=new Set([8,9]);state.media={id:4};tool=async(...args)=>capture(...args);api=async()=>{throw new Error("expanded selection")};`);
+    await h.run('buildAndSubmitJob("encode")');
+    assert.equal(sent.max_items,undefined);assert.equal(sent.season,undefined);assert.equal(sent.promote_candidates,undefined);
+    assert.deepEqual(source==="sonarr"?sent.episode_file_ids:sent.paths,source==="sonarr"?[8,9]:["/media/a.mkv","/media/b.mkv"]);
+  }
+});
+
+test("legacy profile submissions retain compatibility without hidden inactive savings overrides",async()=>{
+ const {h}=submissionHarness();let sent;h.context.capture=(_tool,args)=>{sent=JSON.parse(args.inputs);return {id:"submitted"};};
+ h.run('$("technical").checked=true;$("custom").checked=false;$("max-growth").value="40";tool=async(...args)=>capture(...args);');
+ await h.run('buildAndSubmitJob("encode")');assert.equal(sent.profile,"general-hevc");assert.equal(sent.mode,undefined);assert.equal(sent.min_savings_percent,undefined);assert.equal(sent.max_size_increase_percent,undefined);
+});
+
+test("scheduler unknown, degradation and recovery share one observation across visible surfaces",()=>{
+ const h=harness();h.run('state.workerInfo={ready:true,nodes:[{name:"Fixture",ready:true,scheduler_health:"degraded",observed_at:new Date().toISOString(),observation_age_seconds:4,last_error:{class:"dependency",message:"Unavailable"}}]};renderWorkers();');
+ assert.match(h.elements.get("worker-status").textContent,/Scheduler Degraded/);assert.match(h.elements.get("activity-scheduler").textContent,/Degraded/);
+ assert.deepEqual(JSON.stringify(h.elements.get("settings-worker").children),JSON.stringify(h.elements.get("worker-nodes").children));
+ h.run('state.workerInfo.nodes[0].stale=true;renderWorkers();');assert.match(h.elements.get("activity-scheduler").textContent,/Unknown/);
+ h.run('state.workerInfo.nodes[0].stale=false;state.workerInfo.nodes[0].scheduler_health="ok";state.workerInfo.nodes[0].last_error=null;renderWorkers();');assert.match(h.elements.get("activity-scheduler").textContent,/Normal/);assert.doesNotMatch(JSON.stringify(h.elements.get("settings-worker").children),/Unavailable/);
+ h.run('setConnection(false);');assert.match(h.elements.get("activity-scheduler").textContent,/Unknown/);assert.equal(h.run('state.workerInfo.nodes.length'),1);
+});
+
+test("failed and conflicting saves preserve dirty editor values and announce the failure",async()=>{
+ const h=harness();h.run('renderAdvancedProfile=()=>{};renderRecipeList=()=>{};setRecipeControls({container:"mkv",video:{codec:"libx265",quality:23}});state.recipe={name:"fixture",source:"managed",record:{generation:2,digest:"reviewed"}};$("recipe-name").value="fixture";$("recipe-description").value="Saved";markRecipeClean();$("recipe-description").value="Unsaved text";renderRecipeDirty();tool=async()=>{throw new Error("version conflict")};');
+ await assert.rejects(h.run('saveRecipe()'),/version conflict/);assert.equal(h.elements.get("recipe-description").value,"Unsaved text");assert.equal(h.run('recipeIsDirty()'),true);assert.match(h.elements.get("recipe-feedback").textContent,/draft is preserved/);
+});
+
+test("discard cancellation keeps a draft and does not read another profile",async()=>{
+ const h=harness();h.run('renderAdvancedProfile=()=>{};renderRecipeList=()=>{};setRecipeControls({video:{codec:"libx265",quality:23}});$("recipe-name").value="fixture";markRecipeClean();$("recipe-description").value="Edited";reviewAction=async()=>false;tool=async()=>{throw new Error("discarded draft")};');
+ await h.run('readRecipe("another")');assert.equal(h.elements.get("recipe-description").value,"Edited");assert.equal(h.run('recipeIsDirty()'),true);
+});
+
+test("restoration submits the exact reviewed bundle digests and handles conflicts",async()=>{
+ const h=harness();let sent;h.context.capture=(_tool,args)=>{sent=args;return {error:"recipe version conflict"};};
+ h.run('reviewAction=async()=>true;tool=async(name,args)=>name==="recipe_status"?{bundle:{active_version:"2",active_digest:"current",previous_version:"1",previous_digest:"previous"}}:capture(name,args);');
+ await h.elements.get("rollback-profiles").listeners.get("click")();assert.deepEqual(JSON.parse(JSON.stringify(sent)),{expected_active_digest:"current",expected_previous_digest:"previous"});
+ assert.match(h.elements.get("notice").textContent,/conflict/);
+});
+
+test("an old observation expires locally even if the response stale flag was false",()=>{
+ const h=harness();h.run('state.workerInfo={ready:true,nodes:[{name:"Fixture",scheduler_health:"ok",stale:false,observed_at:new Date(Date.now()-60000).toISOString()}]};renderWorkers();');assert.match(h.elements.get("worker-status").textContent,/Scheduler Unknown/);assert.match(h.elements.get("activity-scheduler").textContent,/Unknown/);
+});
+
+test("simple folder discovery freezes every path and ignores old hidden limits and content",async()=>{
+ const {h}=submissionHarness();let sent;h.context.capture=(_tool,args)=>{sent=JSON.parse(args.inputs);return {id:"submitted"};};
+ h.run('$("scope").value="batch";state.folder="/media";state.folderSelected.clear();$("max-items").value="1";$("media-kind").value="anime";api=async()=>({paths:["/media/a.mkv","/media/b.mkv","/media/c.mkv"]});tool=async(...args)=>capture(...args);');
+ await h.run('buildAndSubmitJob("encode")');assert.deepEqual(sent.paths,["/media/a.mkv","/media/b.mkv","/media/c.mkv"]);assert.equal(sent.max_items,undefined);assert.equal(sent.media_type,undefined);
+});
+
+test("history leaving and returning to the same dirty profile preserves its draft without a discard prompt",async()=>{
+ const h=harness();h.run('controls=()=>{};loadJobs=async()=>{};loadRecipes=async()=>{};state.info={roots:[],services:[]};renderAdvancedProfile=()=>{};renderRecipeList=()=>{};setRecipeControls({video:{codec:"libx265",quality:23}});state.recipe={name:"fixture"};$("recipe-name").value="fixture";markRecipeClean();$("recipe-description").value="Unsaved";reviewAction=async()=>{throw new Error("misleading discard prompt")};tool=async()=>{throw new Error("overwrote draft")};');
+ await h.run('applyNavigation(navigationRoute("?view=queue"))');await h.run('applyNavigation(navigationRoute("?view=profiles&profile=fixture"))');assert.equal(h.elements.get("recipe-description").value,"Unsaved");assert.equal(h.run('recipeIsDirty()'),true);
+});
+
+test("editing during save retains the newer draft and advances CAS metadata for the next save",async()=>{
+ const h=harness(), pending=deferred();let requests=[];h.context.pending=pending.promise;h.context.capture=args=>{requests.push(JSON.parse(JSON.stringify(args)));return pending.promise;};
+ h.run('renderAdvancedProfile=()=>{};renderRecipeList=()=>{};loadRecipes=async()=>{};setRecipeControls({video:{codec:"libx265",quality:23}});state.recipe={name:"fixture",record:{generation:1,digest:"old"}};$("recipe-name").value="fixture";$("recipe-description").value="Submitted";markRecipeClean();tool=async(_name,args)=>capture(args);');
+ const saving=h.run('saveRecipe()');h.run('$("recipe-description").value="Newer draft";state.recipeEditRevision=(state.recipeEditRevision||0)+1;');pending.resolve({record:{generation:2,digest:"saved"}});await saving;
+ assert.equal(h.elements.get("recipe-description").value,"Newer draft");assert.equal(h.run('recipeIsDirty()'),true);assert.equal(h.run('state.recipe.record.generation'),2);
+ h.context.capture=args=>{requests.push(JSON.parse(JSON.stringify(args)));return {record:{generation:3,digest:"next"}};};h.run('readRecipe=async()=>{};');await h.run('saveRecipe()');assert.equal(requests[1].expected_generation,2);assert.equal(requests[1].expected_digest,"saved");assert.equal(requests[1].description,"Newer draft");
+});
+
+test("initial worker response can render controls before folder selection initializes",()=>{
+ const h=harness();h.run('state.info={transcode_enabled:true};state.workerInfo={ready:true};$("service").value="folder:/media";state.folderSelected=undefined;controls();');assert.equal(h.elements.get("enqueue").disabled,true);assert.equal(h.elements.get("selection-count").textContent,"");
+});
+
+test("simple series processing requires a frozen selection before admission",()=>{
+ const h=harness();h.run('state.info={transcode_enabled:true};state.workerInfo={ready:true};$("service").value="sonarr";state.media={id:7};$("scope").value="batch";$("selected-only").checked=false;controls();');assert.equal(h.elements.get("enqueue").disabled,true);
+ h.run('state.selected.add(8);controls();');assert.equal(h.elements.get("enqueue").disabled,false);
+});
+
+test("phase cost detail distinguishes measured wall intervals from unknown bytes and CPU",()=>{
+ const h=harness();h.run('renderPhaseCosts($("detail-summary"),{phase_costs:{coordinator_inventory:{duration_ms:20,attempts:1,active_compute_ms:null},worker_encode:{duration_ms:500,attempts:2,nas_read_bytes:null,nas_written_bytes:400}}});');
+ const rendered=JSON.stringify(h.elements.get("detail-summary").children);assert.match(rendered,/Coordinator · Inventory/);assert.match(rendered,/20 ms/);assert.match(rendered,/Unknown/);assert.match(rendered,/CPU time is unknown/);assert.match(rendered,/phases may overlap/);assert.doesNotMatch(rendered,/Total.*520/);
+});
+
+test("phase cost detail shows known cache observations and distinguishes search budget from consumption",()=>{
+ const h=harness();h.run('renderPhaseCosts($("detail-summary"),{worker:{benchmark_search_seconds:4,search_budget_seconds:600,operation_search_budget_seconds:3600},phase_costs:{worker_staging:{duration_ms:1,attempts:1,cache_hits:0,cache_misses:1}}});');const rendered=JSON.stringify(h.elements.get("detail-summary").children);assert.match(rendered,/0 \/ 1/);assert.match(rendered,/measured wall: 4 s/);assert.match(rendered,/Source budget: 600 s/);assert.match(rendered,/Operation budget: 3600 s/);assert.match(rendered,/reservations are not measured consumption/);
 });
