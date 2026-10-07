@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -251,6 +252,92 @@ func TestPodcastExplicitRetryRetainsSubmissionIdentity(t *testing.T) {
 	replayed, err = e.Run(ctx, "clean_podcast_ads", inputs, "same-episode-policy")
 	if err != nil || replayed.ID != retried.ID || getString(replayed.State, "podcast_transcribe_job") != getString(retried.State, "podcast_transcribe_job") || submits != 2 {
 		t.Fatalf("retry receipt diverged: %+v submits=%d err=%v", replayed, submits, err)
+	}
+}
+
+func TestPodcastRetryAfterRejectedWorkerAdmission(t *testing.T) {
+	for _, kind := range []string{"missing", "wrapped_missing", "uncertain", "uncertain_wrapped_missing"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := t.TempDir()
+			source := filepath.Join(dir, "source.mp3")
+			if err := os.WriteFile(source, []byte("original audio"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			var statusErr error
+			var requests []transcode.Request
+			var accepted *transcode.Request
+			var completed *transcode.JobStatus
+			tc := &mockTranscodeExecutor{capabilitiesFunc: func(context.Context) (transcode.WorkerCapabilities, error) {
+				return transcode.WorkerCapabilities{Podcast: &transcode.PodcastCapabilities{Available: true, NativeTimingVerified: true, MP3RenderVerified: true, VerifiedLanguage: "en_US"}}, nil
+			}, statusFunc: func(_ context.Context, id string) (transcode.JobStatus, error) {
+				if statusErr != nil {
+					return transcode.JobStatus{}, statusErr
+				}
+				if completed != nil {
+					return *completed, nil
+				}
+				if accepted != nil {
+					return transcode.JobStatus{ID: id, Status: transcode.StatusQueued}, nil
+				}
+				return transcode.JobStatus{}, &transcode.HTTPError{StatusCode: 404}
+			}, submitFunc: func(_ context.Context, req transcode.Request) (transcode.Job, error) {
+				requests = append(requests, req)
+				if len(requests) == 1 {
+					// The worker rejects before admission: no job or ASR side effect.
+					return transcode.Job{}, &transcode.HTTPError{StatusCode: 400, Message: "source SMB path temporarily unavailable"}
+				}
+				accepted, statusErr = &req, nil
+				return transcode.Job{ID: req.ID}, nil
+			}}
+			e, st := setupTranscodeEngine(t, tc, "", []string{dir}, []string{dir}, false)
+			defer st.Close()
+			e.deps.Config.Podcasts = config.PodcastConfig{Enabled: true, ArtifactDir: filepath.Join(dir, "private"), Podcasts: map[string]config.PodcastSettings{"genwhy": {Enabled: true}}}
+			ctx := context.Background()
+			failed, err := e.Run(ctx, "clean_podcast_ads", map[string]any{"path": source, "output_path": filepath.Join(dir, "clean.mp3"), "podcast_id": "genwhy"}, "same-episode-policy")
+			if err != nil || failed.Status != StatusFailed || failed.CurrentStep != 1 || accepted != nil {
+				t.Fatalf("rejected admission=%+v err=%v", failed, err)
+			}
+			jobID := getString(failed.State, "podcast_transcribe_job")
+			switch kind {
+			case "wrapped_missing":
+				statusErr = fmt.Errorf("worker status: %w", &transcode.HTTPError{StatusCode: 404})
+			case "uncertain":
+				statusErr = &transcode.UncertainError{Op: "status", JobID: jobID, Err: fmt.Errorf("connection closed")}
+			case "uncertain_wrapped_missing":
+				statusErr = &transcode.UncertainError{Op: "status", JobID: jobID, Err: &transcode.HTTPError{StatusCode: 404}}
+			}
+			e = NewEngine(e.Deps())
+			if transcode.IsTransportUncertain(statusErr) {
+				if _, err := e.Retry(ctx, failed.ID); !errors.Is(err, statusErr) {
+					t.Fatalf("uncertain status did not stop retry: %v", err)
+				}
+				blocked, err := e.Status(ctx, failed.ID)
+				if err != nil || blocked.Status != StatusFailed || getString(blocked.State, "podcast_transcribe_job") != jobID || getInt(blocked.State, "podcast_transcribe_attempt") != 0 || len(requests) != 1 || accepted != nil {
+					t.Fatalf("uncertain retry changed admission: %+v requests=%d err=%v", blocked, len(requests), err)
+				}
+				statusErr = nil // A later, definitive read proves the original ID absent.
+			}
+			retried, err := e.Retry(ctx, failed.ID)
+			if err != nil || retried.ID != failed.ID || retried.Status != StatusWaitingExternal || getString(retried.State, "podcast_transcribe_job") != jobID || getInt(retried.State, "podcast_transcribe_attempt") != 0 || len(requests) != 2 || accepted == nil || podcast.Digest(requests[0]) != podcast.Digest(requests[1]) {
+				t.Fatalf("missing-job retry changed identity: %+v requests=%d err=%v", retried, len(requests), err)
+			}
+			// Import the one admitted transcription and prove polling never submits
+			// another ASR operation or allocates a new attempt.
+			tr := podcast.Transcript{SchemaVersion: podcast.Version, Provider: "apple_speech", ProviderVersion: "fixture", Language: "en_US", SourceHash: "sha256:" + accepted.SourceSHA256, DurationMS: 40000, Units: []podcast.Unit{{ID: "u000001", StartMS: 0, EndMS: 39900, Text: "episode content", Timing: "native_result"}}}
+			if err := podcast.WriteJSON(accepted.CandidatePath, tr); err != nil {
+				t.Fatal(err)
+			}
+			b, err := os.ReadFile(accepted.CandidatePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			hash := sha256.Sum256(b)
+			completed = &transcode.JobStatus{ID: jobID, Status: transcode.StatusCompleted, CandidatePath: accepted.CandidatePath, CandidateSHA256: hex.EncodeToString(hash[:]), CandidateSizeBytes: int64(len(b)), Podcast: &podcast.Result{Operation: "transcribe", SourceHash: tr.SourceHash, TranscriptDigest: podcast.Digest(tr)}}
+			classified, err := e.Resume(ctx, failed.ID, "", nil)
+			if err != nil || classified.WaitingCondition != "podcast_classification" || getString(classified.State, "podcast_transcribe_job") != jobID || len(requests) != 2 {
+				t.Fatalf("admitted transcription was repeated: %+v requests=%d err=%v", classified, len(requests), err)
+			}
+		})
 	}
 }
 
