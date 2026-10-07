@@ -174,8 +174,7 @@ NAVIGATORR_PODCAST_AUDIO=/absolute/spoken-fixture.mp3 \
 
 Tests cover coverage/overlap errors, native timing/source binding, durable
 classification across coordinator restart, a lost submit acknowledgement,
-review digests, HTTP workflow execution, real FFmpeg output, byte-identical
-no-ad MP3s, worker restart recovery and hook publication identity. The native
+review digests, HTTP workflow execution, real FFmpeg output, unchanged no-ad audio packets with embedded transcripts, worker restart recovery and hook publication identity. The native
 worker smoke test was run separately on the M1 Max with spoken Generation Why
 audio; the normal suite deliberately skips that opt-in native test.
 
@@ -187,3 +186,29 @@ external model token usage/cost is not measured by Navigatorr.
 
 The [pipeline review](reviews/2026-10-07-podcast-pipeline-review.md) records
 the review fixes, cross-review and production-pipeline validation scope.
+
+## Episode transcripts and explicit reanalysis
+
+`podcast_artifact(id, artifact, offset)` exports complete bounded pages of the
+native transcript, classifications or cuts, including completed actions. Page
+identities and digests bind the export to the original audio. Exporting does
+not count as reading a block for classification or approve any cuts.
+
+MoonStation saves the native transcript and its manifest in the episode's
+private `.podupload/navigatorr` directory. A new explicit revision can supply
+`cached_transcript_path`, `cached_transcript_digest` and `cached_asr_job_id`.
+All three are required. The coordinator checks the source, language, transcript
+digest and completed native worker checkpoint before reuse. The ASR reference
+is borrowed: it is not a new owned worker job. Missing or mismatched evidence
+fails without silently transcribing again. A revision starts with empty block
+read receipts, classifications, cuts and approval, using the current policy.
+
+Each newly rendered MP3 also contains `navigatorr-transcript.json` in an ID3
+GEOB attachment, with the native transcript, original source hash, transcript
+digest, ASR reference and applied cut map. Times explicitly refer to the
+**original audio**, including removed speech. MPEG audio bytes and existing
+unflagged ID3v2.3/4 frames are preserved when adding the attachment. Unsupported
+tag structures fail before publication. Decode and output hash validation
+cover the final MP3 including its attachment. The private immutable original
+is still required to restore removed material; embedding text does not embed
+the original audio. No additional ASR or model invocation occurs for embedding.

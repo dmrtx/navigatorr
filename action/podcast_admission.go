@@ -2,6 +2,7 @@ package action
 
 import (
 	"fmt"
+	"regexp"
 
 	"github.com/jakenesler/navigatorr/podcast"
 	"github.com/jakenesler/navigatorr/store"
@@ -10,6 +11,18 @@ import (
 func (e *Engine) freezePodcastInputs(inputs map[string]any) error {
 	if e.deps.Config == nil {
 		return fmt.Errorf("podcast configuration missing")
+	}
+	cached := 0
+	for _, key := range []string{"cached_transcript_path", "cached_transcript_digest", "cached_asr_job_id"} {
+		if getString(inputs, key) != "" {
+			cached++
+		}
+	}
+	if cached != 0 && cached != 3 {
+		return fmt.Errorf("cached transcript requires path, digest and ASR job ID together")
+	}
+	if cached == 3 && (!podcast.ValidHash(getString(inputs, "cached_transcript_digest")) || !regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`).MatchString(getString(inputs, "cached_asr_job_id"))) {
+		return fmt.Errorf("invalid cached transcript identity")
 	}
 	p, err := e.deps.Config.Podcasts.Policy(getString(inputs, "podcast_id"))
 	if err != nil {
