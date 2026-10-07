@@ -1673,3 +1673,9 @@ pre {
 .phase-costs summary { cursor: pointer; }
 .phase-costs table { width: 100%; border-collapse: collapse; font-size: .82rem; }
 .phase-costs th, .phase-costs td { padding: .45rem; text-align: left; border-bottom: 1px solid var(--line); }
+
+#podcast-new { margin-bottom: 12px; }
+#podcast-new summary { cursor: pointer; }
+#podcast-form { display: grid; gap: 12px; max-width: 640px; padding: 16px 0; }
+#podcast-form label { display: grid; gap: 4px; min-width: 0; }
+#podcast-form input, #podcast-form select { width: 100%; }

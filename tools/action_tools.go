@@ -62,6 +62,7 @@ func chunkPayload(id, actionName, section, key string, rawBytes []byte, chunkIdx
 // ActionCompactSummary contains operational fields needed to monitor or continue workflows,
 // omitting full inputs/outputs/state to protect the model's context window.
 type ActionCompactSummary struct {
+	Podcast              map[string]any         `json:"podcast,omitempty"`
 	PhaseCosts           map[string]any         `json:"phase_costs,omitempty"`
 	Mode                 string                 `json:"mode,omitempty"`
 	PolicyDigest         string                 `json:"policy_digest,omitempty"`
@@ -126,6 +127,7 @@ func toCompactSummary(res *action.ActionResult) ActionCompactSummary {
 		return ActionCompactSummary{}
 	}
 	return ActionCompactSummary{
+		Podcast:    actionProgressMap(res.State["podcast"]),
 		PhaseCosts: actionProgressMap(res.State["phase_costs"]),
 		Mode:       summaryInput(res, "mode"), PolicyDigest: summaryStateString(res, "policy_digest"), ReasonCode: summaryStateString(res, "reason_code"),
 		SourcePath:           summaryInput(res, "path"),

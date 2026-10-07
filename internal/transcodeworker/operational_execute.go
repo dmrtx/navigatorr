@@ -552,20 +552,42 @@ func (w *Worker) finalizeOperational(ctx context.Context, jobDir, jobFile string
 
 	var ferr error
 	publishedNew := false
+	isPodcast := job.Plan != nil && job.Plan.Podcast != nil
+	guard := podcastPublicationGuard(func(publish func() error) error {
+		return w.guardPodcastPublication(ctx, jobDir, jobFile, publish)
+	})
 	if directSMB {
 		if _, statErr := w.mediaStore.Stat(ctx, r.destination); os.IsNotExist(statErr) {
 			publishedNew = true
 		}
 
-		ferr = w.mediaStore.Publish(ctx, r.localCandidate, r.destination, job.ID)
+		if isPodcast {
+			guarded, ok := w.mediaStore.(interface {
+				PublishGuarded(context.Context, string, string, string, func(func() error) error) error
+			})
+			if !ok {
+				ferr = fmt.Errorf("%w: SMB adapter lacks guarded commits", errPodcastAtomicPublicationUnsupported)
+			} else {
+				ferr = guarded.PublishGuarded(ctx, r.localCandidate, r.destination, job.ID, guard)
+			}
+		} else {
+			ferr = w.mediaStore.Publish(ctx, r.localCandidate, r.destination, job.ID)
+		}
 	} else {
 		finalize := w.finalizeOutput
 		if finalize == nil {
 			finalize = FinalizeOutputAtomic
 		}
-		ferr = finalize(ctx, r.localCandidate, r.destination, job.ID)
+		publishCtx := ctx
+		if isPodcast {
+			publishCtx = context.WithValue(ctx, podcastPublicationGuardKey{}, guard)
+		}
+		ferr = finalize(publishCtx, r.localCandidate, r.destination, job.ID)
 	}
 	if ferr != nil {
+		if errors.Is(ferr, errPodcastPublicationCancelled) {
+			return nil
+		}
 		if ctx.Err() != nil {
 			// Runner is shutting down mid-finalize: leave the job resumable
 			// without recording a spurious finalization failure.
@@ -644,6 +666,8 @@ func (w *Worker) recordFinalizationFailure(jobDir, jobFile string, job *JobRecor
 		classification = string(class)
 	}
 	switch {
+	case errors.Is(cause, errPodcastAtomicPublicationUnsupported):
+		classification = "podcast_atomic_publication_unsupported"
 	case errors.Is(cause, ErrDestinationExists), errors.Is(cause, smbdirect.ErrDestinationExists):
 		classification = string(resilience.IdempotencyConflict)
 	case errors.Is(cause, ErrAmbiguousPublication):

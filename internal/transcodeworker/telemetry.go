@@ -35,6 +35,8 @@ func (w *Worker) reconcileStoppedRunner(jobDir, jobFile string) (*JobRecord, err
 	}
 	if IsPostEncodeFinalizationPending(job) {
 		job.PID, job.ProcessStartTime, job.Phase = 0, "", "publishing"
+	} else if podcastASRCheckpoint(jobDir, job) {
+		job.Status, job.Phase, job.PID, job.ProcessStartTime = "queued", "transcribing", 0, ""
 	} else {
 		job.Status, job.Phase = "failed", "failed"
 		job.FinishedAt = time.Now().UTC()

@@ -40,6 +40,7 @@ const names = {
   rejected: "Rejected",
 };
 const workflows = {
+ clean_podcast_ads:"Podcast cleaning",
   transcode_media: "File transcode",
   transcode_batch: "File batch",
   benchmark_transcode: "Benchmark",
@@ -2621,7 +2622,11 @@ function jobControls(job, detail = false) {
     actionRail.children[actionRail.children.length - 1].title =
       decisionLabels[choice.decision] || choice.description || choice.decision;
   }
-  if (job.status === "waiting_decision" && !job.waiting_options?.length)
+  if (job.podcast) {
+ if (job.waiting_condition === "podcast_review") add("Review cuts", () => reviewPodcastCuts(job.id));
+ if (job.waiting_condition === "podcast_classification") { add("View transcript", () => viewPodcastTranscript(job.id)); if (job.podcast.total_blocks > 0 && job.podcast.classified_blocks === job.podcast.total_blocks) add("Validate classifications", () => jobControl(job.id,"action_resume",{decision:"plan"})); }
+ }
+ if (!job.podcast && job.status === "waiting_decision" && !job.waiting_options?.length)
     add("Review", () => openJob(job.id));
   if (job.status === "completed" && job.batch?.dry_run) {
     if (job.preview_execution_action_id) add("View batch", () => openJob(job.preview_execution_action_id));
@@ -2816,7 +2821,8 @@ function visibleBatch(job) {
   return {...job.batch,failed,rejected,policy,outcome:rejected > 0 && rejected===job.batch.total && job.status === "completed" ? "rejected" : policy > 0 && policy===job.batch.total ? "minimum_savings" : policy > 0 && failed === 0 && job.batch.outcome === "failed" ? "no_changes" : job.batch.outcome};
 }
 function queuePresentation(job) {
-  const batch = visibleBatch(job);
+  if (job.podcast) { const p=job.podcast; return {kind:"Podcast",title:job.source_path?.split("/").pop() || p.podcast_id || "Podcast",status:job.waiting_condition === "podcast_classification" ? "Awaiting LLM" : job.waiting_condition === "podcast_review" ? "Review cuts" : names[job.status] || job.status,summary:job.status === "failed" ? shortJobReason(job.error) : `${p.classified_blocks || 0}/${p.total_blocks || 0} blocks · ${((p.removed_ms || 0)/1000).toFixed(1)} seconds removed · Original kept`,showTelemetry:false}; }
+ const batch = visibleBatch(job);
   const replacement = job.action_name === "promote_transcode_candidate";
   const kind = job.batch
     ? job.batch.total === 1 ? "File" : "Batch"
@@ -3241,7 +3247,8 @@ async function refreshDetail() {
       statusBadge(queuePresentation(job).status),
       node("p", queuePresentation(job).summary, "muted"),
     );
-    renderPhaseCosts(summary, job);
+    if (job.podcast) { const p=job.podcast; summary.append(node("p",`${p.classified_blocks || 0}/${p.total_blocks || 0} transcript blocks classified · ${((p.removed_ms || 0)/1000).toFixed(1)} seconds removed`,"metadata")); if (p.output_path && job.status === "completed") summary.append(node("p",`Validated MP3: ${p.output_path}`,"metadata")); }
+ renderPhaseCosts(summary, job);
     if (queuePresentation(job).showTelemetry) summary.append(telemetry(job));
     else if (batchProgress(job)) summary.append(batchProgress(job));
     else if (!job.batch?.dry_run && job.batch?.outcome !== "no_changes") summary.append(node("p", queueOutcome(job), "job-outcome metadata"));
@@ -4501,4 +4508,19 @@ setInterval(async () => {
   }
 }, 5000);
 if (typeof window !== "undefined") setConnection(serverReachable);
+
+$("podcast-new").addEventListener("toggle", () => { if (!$("podcast-new").open) return; safe(async () => { const data=await api("podcasts"); const select=$("podcast-id"); select.replaceChildren(); for (const id of data.podcasts || []) option(select,id,id); $("podcast-create-status").textContent=data.enabled && data.podcasts?.length ? "" : "Enable a podcast in the server configuration first."; }); });
+$("podcast-form").addEventListener("submit", event => { event.preventDefault(); safe(async () => { const result=await tool("action_run",{action:"clean_podcast_ads",inputs:JSON.stringify({podcast_id:$("podcast-id").value,path:$("podcast-source").value,output_path:$("podcast-output").value})}); $("podcast-new").open=false; await loadJobs(); await openJob(result.id || result.action?.id); }); });
+async function reviewPodcastCuts(id) {
+ const content=[]; let offset=0,review;
+ do { review=await tool("podcast_review",{id,offset}); if (!review.digest) throw new Error("Could not read cut review."); for (const b of review.boundaries || []) content.push(node("p",`${(b.cut.start_ms/1000).toFixed(2)}–${(b.cut.end_ms/1000).toFixed(2)} s · ${b.cut.first_id}–${b.cut.last_id}: ${b.first.text} … ${b.last.text}. Before: ${b.before.map(u=>u.text).join(" ")} · After: ${b.after.map(u=>u.text).join(" ")}`,"metadata")); offset=review.next_offset; } while(review.has_more);
+ content.unshift(node("p",`Remove ${(review.removed_ms/1000).toFixed(1)} seconds in ${review.total_cuts} cuts. A separate MP3 will be validated and published; the original is kept. This is a text boundary review, not a listening test.`));
+ if (await reviewAction({title:"Review podcast cuts",content,confirmLabel:"Approve cuts and render"})) { await tool("podcast_review",{id,digest:review.digest,approve:true}); await jobControl(id,"action_resume",{decision:"render"}); }
+}
+async function viewPodcastTranscript(id) {
+ const content=[node("p","Your connected LLM reads these blocks through podcast_block and saves labels through podcast_classify. All blocks and overlaps must be covered before cuts can be planned.")]; let offset=0,manifest;
+ do { manifest=await tool("podcast_blocks",{id,offset}); for (const b of manifest.blocks || []) content.push(button(`${b.id} · ${b.first_id}–${b.last_id} · ${b.classified ? "Classified" : "Pending"}`,()=>safe(async()=>{ const pages=[]; let at=0,page; do { page=await tool("podcast_block",{id,block_id:b.id,offset:at}); pages.push(...page.units.map(u=>node("p",`${u.id} · ${u.text}`,"metadata"))); at=page.next_offset; } while(page.has_more); await reviewAction({title:`Transcript ${b.id}`,content:pages,confirmLabel:"Close"}); }))); offset=manifest.next_offset; } while(manifest.has_more);
+ await reviewAction({title:"Podcast transcript",content,confirmLabel:"Close"});
+}
+
 safe(initialize);

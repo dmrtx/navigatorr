@@ -323,6 +323,10 @@ func (e *SSHExecutor) Status(ctx context.Context, jobID string) (JobStatus, erro
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
+		var missing JobStatus
+		if json.Unmarshal(stdout.Bytes(), &missing) == nil && missing.ID == jobID && missing.Status == StatusFailed && missing.Error == "job not found" {
+			return JobStatus{}, &HTTPError{Method: "GET", StatusCode: 404, Message: "job not found"}
+		}
 		return JobStatus{}, fmt.Errorf("ssh status failed: %w (stderr: %s, stdout: %s)", err, stderr.String(), stdout.String())
 	}
 
