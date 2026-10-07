@@ -251,6 +251,12 @@ func (e *Engine) preparePodcastRetry(ctx context.Context, ec *ExecutionContext) 
 	}
 	st, err := e.deps.Transcode.Status(ctx, id)
 	if err != nil {
+		// A rejected submission can leave a durable coordinator identity with
+		// no worker job. A definitive 404 lets the stage resubmit that SAME
+		// identity; uncertain reads never authorize an attempt or submission.
+		if he, ok := transcodeHTTPError(err); ok && he.StatusCode == 404 && !transcode.IsTransportUncertain(err) {
+			return nil
+		}
 		return err
 	}
 	if st.Status != transcode.StatusFailed && st.Status != transcode.StatusCancelled {
