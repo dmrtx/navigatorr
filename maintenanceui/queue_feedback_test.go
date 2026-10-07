@@ -98,6 +98,7 @@ func TestWorkflowFiltersMatchFailuresAndTreatRejectionsAsFinishedResults(t *test
 	for _, tc := range []struct{ id, reason string }{
 		{"blocked", "benchmark winner predicts only -33.2% savings, below required minimum 15.0%"},
 		{"rejected", "transcode candidate rejected by user decision; original file remains untouched"},
+		{"technical", "Storage disconnected"},
 	} {
 		seedOperation(t, st, tc.id, "transcode_batch", "completed", nil, nil, map[string]any{"counts": map[string]int{"total": 1, "failed": 1}})
 		if err := st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: tc.id, ItemKey: "one", Status: "failed", Error: tc.reason}); err != nil {
@@ -114,13 +115,13 @@ func TestWorkflowFiltersMatchFailuresAndTreatRejectionsAsFinishedResults(t *test
 		return page
 	}
 	failed := read("group=workflow&status=failed")
-	if failed.Total != 1 || failed.Jobs[0]["id"] != "blocked" {
+	if failed.Total != 1 || failed.Jobs[0]["id"] != "technical" {
 		t.Fatal("failed season disappeared or rejection became failure", failed)
 	}
-	if finished := read("group=workflow&status=completed"); finished.Total != 3 {
+	if finished := read("group=workflow&status=completed"); finished.Total != 4 {
 		t.Fatal("finished outcomes missing", finished)
 	}
-	if legacy := read("status=completed"); legacy.Total != 2 {
+	if legacy := read("status=completed"); legacy.Total != 3 {
 		t.Fatal("ungrouped durable status changed", legacy)
 	}
 }
@@ -448,5 +449,29 @@ func TestRejectionCountIsIndependentOfTruncatedQueueReasons(t *testing.T) {
 	}
 	if items[6].Status != "failed" {
 		t.Fatal("presentation changed stored execution status")
+	}
+}
+
+func TestBatchApprovedReplacementsKeepOneQueueRow(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	seedOperation(t, st, "season", "transcode_batch", "waiting_external", map[string]any{"paths": []string{"/media/one.mkv", "/media/two.mkv"}}, nil, map[string]any{"counts": map[string]int{"completed": 2, "total": 2}})
+	for _, id := range []string{"one", "two"} {
+		seedOperation(t, st, id, "transcode_media", "completed", map[string]any{"parent_action_id": "season", "path": "/media/" + id + ".mkv"}, nil, map[string]any{"original_intact": true})
+		seedOperation(t, st, "replace-"+id, "promote_transcode_candidate", "waiting_external", map[string]any{"transcode_action_id": id, "batch_promote_parent_id": "season"}, nil, nil)
+	}
+	w := request(h, "GET", "/api/maintenance/operations?group=workflow", "", true)
+	var page operationsPage
+	json.Unmarshal(w.Body.Bytes(), &page)
+	if w.Code != 200 || page.Total != 1 || page.Jobs[0]["id"] != "season" || page.ActiveCount != 1 {
+		t.Fatal("batch replacement split into file tasks", w.Body.String())
+	}
+	// Independent single-file replacements retain their own workflow.
+	seedOperation(t, st, "solo", "transcode_media", "completed", map[string]any{"path": "/media/solo.mkv"}, nil, nil)
+	seedOperation(t, st, "replace-solo", "promote_transcode_candidate", "waiting_external", map[string]any{"transcode_action_id": "solo"}, nil, nil)
+	w = request(h, "GET", "/api/maintenance/operations?group=workflow", "", true)
+	json.Unmarshal(w.Body.Bytes(), &page)
+	if page.Total != 2 {
+		t.Fatal("independent replacement hidden", w.Body.String())
 	}
 }

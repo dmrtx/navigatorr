@@ -976,9 +976,9 @@ test("batch approval first shows the concrete plan without resuming", async () =
   await controls.children[0].listeners.get("click")();
   assert.deepEqual(calls, ["action_detail"]);
   assert.equal(h.elements.get("batch-review").open, true);
-  assert.match(h.elements.get("batch-review-data").textContent, /\/source.mkv/);
+  assert.match(JSON.stringify(h.elements.get("batch-review-data").children), /\/source.mkv/);
   assert.match(
-    h.elements.get("batch-review-data").textContent,
+    JSON.stringify(h.elements.get("batch-review-data").children),
     /\/candidate.mkv/,
   );
 });
@@ -1362,7 +1362,7 @@ test("Cloudflare mode opens the workspace without a local sign-in or sign-out", 
   assert.equal(h.elements.get("logout").hidden, true);
 });
 
-test("folder breadcrumbs navigate directly and clear stale file/search selection", async () => {
+test("folder breadcrumbs preserve selected files while clearing the focused file/search", async () => {
   const h = harness();
   h.context.paths = [];
   h.run(
@@ -1376,7 +1376,7 @@ test("folder breadcrumbs navigate directly and clear stale file/search selection
     .get("folder-breadcrumbs")
     .children[0].listeners.get("click")();
   assert.equal(h.run("state.folder"), "/media");
-  assert.equal(h.run("state.folderSelected.size"), 0);
+  assert.equal(h.run("state.folderSelected.size"), 1);
   assert.equal(h.elements.get("search").value, "");
   assert.equal(h.elements.get("path").value, "");
   assert.match(h.context.paths[0], /path=%2Fmedia&q=&offset=0/);
@@ -1565,12 +1565,12 @@ test("batch result badges use the library outcome when the coordinator has finis
 test("batch progress counts resolved files independently of individual worker percentages", () => {
   const h = harness();
   const progress = h.run('telemetry({batch:{total:23,completed:20,running:2,queued:1},activities:[{},{}],worker:{progress:99,progress_is_stale:true}})');
-  assert.equal(progress.children[0].textContent, "20 / 23 processed");
+  assert.equal(progress.children[0].textContent, "20 / 23 files finished");
   assert.equal(progress.children[1].textContent, "87%");
   assert.equal(progress.children[2].value, 20);
   assert.equal(progress.children[2].max, 23);
   const mixed = h.run('batchProgress({batch:{total:10,completed:3,failed:2,skip:1,cancelled:1,waiting_decision:2,running:1}})');
-  assert.equal(mixed.children[0].textContent, "6 / 10 processed");
+  assert.equal(mixed.children[0].textContent, "6 / 10 files finished");
   assert.equal(mixed.children[1].textContent, "60%");
   assert.match(mixed.children[0].title, /Cancelled files.*not counted/);
   assert.equal(h.run('batchProgress({batch:{dry_run:true,total:10,queued:10}})'), null);
@@ -1706,7 +1706,7 @@ test("overall batch progress includes sample work, conversion and validation whi
  const stages=["preflight","submit_benchmark","wait_benchmark","submit_transcode","wait_transcode","validate_result","accept_result"].map(name=>({name}));
  h.context.stages=stages;
  const progress=h.run('batchProgress({status:"waiting_external",batch:{total:2,running:2,completed:0},activities:[{id:"one",file:"one.mkv",current_step:2,stages,worker:{benchmark_phase:"evaluating_metrics",benchmark_progress_details:{completed_units:20,total_units:40}}},{id:"two",file:"two.mkv",current_step:5,stages}]})');
- assert.equal(progress.children[0].textContent,"0 / 2 processed");
+ assert.equal(progress.children[0].textContent,"0 / 2 files finished");
  assert.equal(progress.children[1].textContent,"~54%");
  assert.match(progress.children[3].textContent,/Measuring sample quality.*Verify/);
  const finish=h.run('batchProgress({status:"waiting_external",batch:{total:2,completed:2}})');
@@ -1958,7 +1958,7 @@ test("profile choices describe effective hardware and custom overrides while pre
   await h.run('loadRecipes(true)');
   const options = h.elements.get('profile').children;
   assert.equal(options[1].value, 'anime-hevc-quality');
-  assert.equal(options[1].textContent, 'anime-hevc-quality · CPU · Custom');
+  assert.equal(options[1].textContent, 'Anime · CRF 25 · CPU · Custom (anime-hevc-quality)');
   assert.equal(options[2].textContent, 'Live action · CPU · Test samples');
   h.run('state.recipeDetails["anime-hevc-space"]={source:"active_bundle",profile:{video:{codec:"hevc_videotoolbox",quality:55}}}');
   assert.equal(h.run('profileOptionLabel("anime-hevc-space")'), 'Anime · Smaller files · Hardware');
@@ -1982,4 +1982,81 @@ test("batch file context distinguishes scheduling, paused work and actual worker
   assert.match(h.run('batchFileActivity({status:"queued",child_action_id:"child"},{})'), /File task created/);
   assert.equal(h.run('batchFileActivity({status:"running",child_action_id:"child"},{activities:[{id:"child",worker:{benchmark_phase:"evaluating_metrics"}}]})'), 'Measuring sample quality');
   assert.match(h.run('batchFileActivity({retry_pending:true},{})'), /Current attempt finishes/);
+});
+
+test("creation exposes the same effective profile facts and depth precedence as reconfiguration",()=>{
+ const h=harness();
+ h.run('state.info={min_savings_percent:15};$("profile").value="anime-hevc-main10";$("preserve-depth").checked=true;state.recipeDetails={"anime-hevc-main10":{description:"Balanced anime",profile:{video:{codec:"hevc_videotoolbox",quality:65,profile:"main10",pixel_format:"p010le"},audio:{mode:"compact"},container:"mkv"}}};renderCreationProfile();');
+ let facts=JSON.stringify(h.elements.get("creation-profile-info").children);
+ assert.match(facts,/Same as source.*Overrides profile depth/);assert.match(facts,/Convert lossless tracks to AAC/);assert.match(facts,/Converts full video/);assert.match(facts,/Quality 65/);
+ assert.match(h.elements.get("creation-limits-note").textContent,/15%/);
+ h.run('$("preserve-depth").checked=false;renderCreationProfile();');
+ facts=JSON.stringify(h.elements.get("creation-profile-info").children);assert.match(facts,/10-bit/);assert.doesNotMatch(facts,/Same as source/);
+});
+
+test("selection and configuration drafts survive reload and are isolated by source and series",()=>{
+ const h=harness(), saved=new Map();h.context.sessionStorage={getItem:key=>saved.get(key),setItem:(key,value)=>saved.set(key,value)};
+ h.run('$("service").value="folder:/media";state.draftKey=libraryDraftKey();state.folderSelected=new Set(["/media/Series/Season 1/a.mkv","/media/Series/Season 2/b.mkv"]);$("profile").value="hevc-vt";$("preserve-depth").checked=false;state.recipes=["hevc-vt"];saveLibraryDraft();state.draftKey=null;state.folderSelected=new Set();$("profile").value="auto";restoreLibraryDraft();');
+ assert.equal(h.run('state.folderSelected.size'),2);assert.equal(h.elements.get("profile").value,"hevc-vt");assert.equal(h.elements.get("preserve-depth").checked,false);
+ h.run('state.draftKey=null;state.folderSelected=new Set();$("service").value="folder:/other";restoreLibraryDraft();');assert.equal(h.run('state.folderSelected.size'),0);
+});
+
+test("minimum-savings policy is distinct from technical failures in mixed batches",()=>{
+ const h=harness();
+ let view=h.run('queuePresentation({status:"completed",action_name:"transcode_batch",batch:{total:8,failed:8,outcome:"failed"},batch_files:{policy_count:8}})');
+ assert.equal(view.status,"Minimum savings not met");assert.match(view.summary,/8 below minimum savings/);assert.doesNotMatch(view.summary,/8 failed/);
+ const counts=h.run('visibleBatch({batch:{total:5,failed:3,completed:2,outcome:"partial"},batch_files:{policy_count:2}})');assert.equal(counts.failed,1);assert.equal(counts.policy,2);assert.equal(counts.completed,2);
+ const item=h.run('savingsPolicyFailure("Estimated output is 33.2% larger; at least 15% savings required. Full conversion not started; original kept.")');assert.equal(item,true);
+});
+
+test("a finished batch exposes candidates as its next action before settings or archive",()=>{
+ const h=harness();h.run('state.info={allow_destructive:true};');
+ const actions=h.run('jobControls({id:"batch",action_name:"transcode_batch",status:"completed",can_archive:true,batch:{completed:23,total:23,outcome:"candidates_ready"}})');
+ assert.deepEqual(actions.children.map(c=>c.textContent),["Review candidates","Change settings","Archive"]);
+ const preview=h.run('jobControls({id:"preview",action_name:"transcode_batch",status:"completed",batch:{dry_run:true,completed:0,queued:2}})');assert.equal(preview.children.some(c=>c.textContent==="Review candidates"),false);
+});
+
+test("restoring a receipt reattaches cleanup and polls the same command without writing again",async()=>{
+ const h=harness(), saved=new Map();h.context.sessionStorage={getItem:key=>saved.get(key),setItem:(key,value)=>saved.set(key,value)};
+ saved.set('navigatorr_commands',JSON.stringify({'same request':{command_id:'cmd',id:'copy',label:'Removing copy',cleanup:{id:'copy',name:'episode.mkv',mode:'discard',started:Date.now()}}}));
+ let writes=0;h.context.request=(path,body)=>{if(body)writes++;return {command_id:'cmd',id:'copy',status:'completed',kind:'discard'}};
+ h.run('api=async(path,body)=>request(path,body);loadJobs=async()=>{};refreshBackupCleanup=async()=>{state.cleanupRestored=state.backupCleaning.commandCompleted;};notify=()=>{};restoreCommands();');
+ for(let i=0;i<12;i++)await Promise.resolve();
+ assert.equal(writes,0);assert.equal(h.run('state.backupCleaning.name'),'episode.mkv');assert.equal(h.run('state.cleanupRestored'),true);assert.equal(saved.get('navigatorr_commands'),'{}');
+});
+
+test("remaining candidates can be reviewed after a partial batch replacement",()=>{
+ const h=harness();h.run('state.info={allow_destructive:true}');
+ const actions=h.run('jobControls({id:"batch",action_name:"transcode_batch",status:"completed",remaining_candidates:1,batch:{total:2,completed:2,promotion:{promoted:1}}})');
+ assert.equal(actions.children.some(c=>c.textContent==="Review candidates"),true);
+ const done=h.run('jobControls({id:"batch",action_name:"transcode_batch",status:"completed",remaining_candidates:0,batch:{total:2,completed:2,promotion:{promoted:1}}})');
+ assert.equal(done.children.some(c=>c.textContent==="Review candidates"),false);
+});
+
+test("saved season stays pending until series options are available",()=>{
+ const h=harness(),saved=new Map();h.context.sessionStorage={getItem:key=>saved.get(key),setItem:(key,value)=>saved.set(key,value)};
+ saved.set('navigatorr_draft:sonarr:10',JSON.stringify({fields:{season:{value:"2",checked:false}}}));
+ h.run('$("service").value="sonarr";state.media={id:10};restoreLibraryDraft();');
+ assert.equal(h.run('state.draftSeason'),"2");
+ // Real select elements clear values when their option does not exist yet.
+ h.run('$("season").value="";saveLibraryDraft();');
+ assert.equal(JSON.parse(saved.get('navigatorr_draft:sonarr:10')).fields.season.value,"2");
+});
+
+test("empty batch counts do not manufacture a savings-policy rejection",()=>{
+ const h=harness();
+ assert.equal(h.run('visibleBatch({status:"waiting_decision",batch:{total:0,failed:0,outcome:"needs_decision"}}).outcome'),"needs_decision");
+});
+
+test("restoring a one-file season draft preserves its batch scope",()=>{
+ const h=harness();h.run('controls=()=>{};$("service").value="sonarr";$("scope").value="batch";state.selected=new Set([101]);state.files=new Map([[101,{path:"/media/a.mkv"}]]);state.media={id:10};configureSelection(false,true)');
+ assert.equal(h.elements.get('scope').value,'batch');
+ assert.equal(h.run('state.file.path'),'/media/a.mkv');
+});
+
+test("partial replacement does not claim that all originals were replaced",()=>{
+ const h=harness();
+ const view=h.run('queuePresentation({status:"completed",action_name:"transcode_batch",replaced_files:1,remaining_candidates:1,savings:{realized_saved_bytes:100},batch:{total:2,completed:2,outcome:"promoted"}})');
+ assert.equal(view.status,'Candidates ready');assert.match(view.summary,/1 replaced.*1 candidates available/);
+ assert.equal(h.run('queuePresentation({status:"failed",savings:{realized_saved_bytes:100},batch:{total:2,completed:1,failed:1,outcome:"partial"}}).status'),'Failed');
 });

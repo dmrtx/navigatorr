@@ -465,7 +465,7 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 			matches = r.inst.Status == "completed" || r.inst.Status == "failed" || r.inst.Status == "cancelled"
 		}
 		if grouped && status == "failed" {
-			matches = r.inst.Status == "failed" && !strings.Contains(r.inst.ErrorJSON, "transcode candidate rejected by user decision")
+			matches = r.inst.Status == "failed" && !strings.Contains(r.inst.ErrorJSON, "transcode candidate rejected by user decision") && !savingsFailurePattern.MatchString(r.inst.ErrorJSON)
 			if r.inst.ActionName == "transcode_batch" && r.inst.Status == "completed" {
 				items, err := s.engine.Deps().Store.ListTranscodeBatchItems(r.inst.ID)
 				if err != nil {
@@ -473,7 +473,7 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 					return
 				}
 				for _, item := range items {
-					if item.Status == "failed" && !strings.Contains(item.Error, "transcode candidate rejected by user decision") {
+					if item.Status == "failed" && !strings.Contains(item.Error, "transcode candidate rejected by user decision") && !savingsFailurePattern.MatchString(item.Error) {
 						matches = true
 						break
 					}
@@ -582,7 +582,7 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 				if r.inputs["dry_run"] == true && r.inst.Status == store.ActionStatusCompleted {
 					job["preview_execution_action_id"] = previewExecutions[r.inst.ID]
 				}
-				job["replacement_requested"] = r.inputs["promote_candidates"] == true
+				job["replacement_requested"] = r.inputs["promote_candidates"] == true || r.state["post_batch_promotion"] == true
 				job["settings_revision"] = r.state["batch_settings_revision"]
 				job["paused"] = operationValue(r, "paused") == true
 				items, err := s.engine.Deps().Store.ListTranscodeBatchItems(r.inst.ID)
@@ -595,6 +595,18 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 					return
 				}
 				job["batch_files"] = batchQueueFeedback(items)
+				remaining, replacedFiles := 0, 0
+				for _, item := range items {
+					child := recordsByID[item.ChildActionID]
+					if replacement := recordsByID[existingReplacements[item.ChildActionID]]; replacement.inst.Status == "completed" && replacement.savings.RealizedSavedBytes != nil {
+						replacedFiles++
+					}
+					if item.Status == "completed" && item.Decision == "transcode" && child.inst.Status == "completed" && child.outputs["original_intact"] == true && item.CandidatePath != "" && existingReplacements[item.ChildActionID] == "" {
+						remaining++
+					}
+				}
+				job["remaining_candidates"] = remaining
+				job["replaced_files"] = replacedFiles
 				if inferred {
 					batch := operationMap(job["batch"])
 					if batch == nil {

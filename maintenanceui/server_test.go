@@ -190,3 +190,20 @@ func TestUILibraryBoundedAndNoCredentials(t *testing.T) {
 		t.Fatal("invalid media id accepted")
 	}
 }
+
+func TestBootstrapShowsEffectiveSavingsDefault(t *testing.T) {
+	s, h := testUI(t)
+	for _, minimum := range []float64{0, 20} {
+		s.cfg.Transcode.MinSavingsPercent = minimum
+		w := request(h, "GET", "/api/maintenance/bootstrap", "", true)
+		var body map[string]any
+		json.Unmarshal(w.Body.Bytes(), &body)
+		want := minimum
+		if want == 0 {
+			want = 15
+		}
+		if w.Code != 200 || body["min_savings_percent"] != want {
+			t.Fatal("incorrect effective minimum", w.Body.String())
+		}
+	}
+}

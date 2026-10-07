@@ -67,6 +67,14 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 		if !action.BatchRevisionSelects(item, body.Scope, body.CandidateID) {
 			continue
 		}
+		reserved, err := s.engine.BatchItemReplacementReserved(item)
+		if err != nil {
+			fail(w, 500, "read replacement history")
+			return
+		}
+		if reserved {
+			continue
+		}
 		selected++
 		profile := item.Profile
 		if profile == "" {

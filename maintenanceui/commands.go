@@ -36,5 +36,5 @@ func (s *Server) commandStatus(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, "read command")
 		return
 	}
-	writeJSON(w, 200, map[string]any{"command_id": id, "id": decodeOperationJSON(inst.InputsJSON)["id"], "status": result.Status, "error": result.Error, "kind": decodeOperationJSON(inst.InputsJSON)["kind"]})
+	writeJSON(w, 200, map[string]any{"command_id": id, "id": decodeOperationJSON(inst.InputsJSON)["id"], "status": result.Status, "error": result.Error, "kind": decodeOperationJSON(inst.InputsJSON)["kind"], "waiting_reason": result.WaitingReason})
 }
