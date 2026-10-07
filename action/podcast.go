@@ -26,7 +26,7 @@ type podcastSession struct {
 func (e *Engine) registerPodcastTemplate() {
 	e.RegisterTemplate(ActionTemplate{Name: "clean_podcast_ads", Version: podcast.Version, AutoReconcile: true, ImmutableInputs: true,
 		Description:    "Durable podcast cleaning. Original preserved. ASR runs on the existing worker queue. The orchestrating LLM reads EVERY podcast_block page and submits ID-based labels with podcast_classify; Navigatorr never invokes a classifier model. Resume with decision=plan after complete coverage. Review cuts with podcast_review before rendering when required. Output is a validated, separate MP3 for the existing feed/download integration.",
-		RequiredInputs: []string{"path", "podcast_id", "output_path"}, OptionalInputs: []string{"episode_id", "feed_id", "idempotency_key", "source_sha256"},
+		RequiredInputs: []string{"path", "podcast_id", "output_path"}, OptionalInputs: []string{"episode_id", "feed_id", "idempotency_key", "source_sha256", "cached_transcript_path", "cached_transcript_digest", "cached_asr_job_id"},
 		Steps: []StepDefinition{
 			{Name: "podcast_preflight", Run: e.podcastPreflight},
 			{Name: "podcast_transcribe", Run: func(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
@@ -142,6 +142,9 @@ func savePodcastSession(ec *ExecutionContext, s podcastSession) error {
 	return podcast.WriteJSON(getString(ec.State, "podcast_session"), s)
 }
 func (e *Engine) podcastWorkerStage(ctx context.Context, ec *ExecutionContext, op string) (StepResult, error) {
+	if op == "transcribe" && getString(ec.Inputs, "cached_transcript_path") != "" {
+		return e.podcastReuseTranscript(ctx, ec)
+	}
 	key := "podcast_" + op + "_job"
 	id := getString(ec.State, key)
 	wait := func(reason string) (StepResult, error) {

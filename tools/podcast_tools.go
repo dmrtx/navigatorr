@@ -13,6 +13,14 @@ import (
 )
 
 func registerPodcastTools(s *server.MCPServer, e *action.Engine) {
+	s.AddTool(mcp.NewTool("podcast_artifact", mcp.WithDescription("Read bounded, complete pages of the immutable original-audio transcript, previous classifications or cuts, including completed actions. artifact=transcript|classifications|cuts. Follow next_offset until has_more=false. Original native times do not describe the cleaned audio. Export into private podcast storage for later reanalysis; reads here do not grant classification/review coverage."), mcp.WithString("id", mcp.Required()), mcp.WithString("artifact", mcp.Required()), mcp.WithNumber("offset")), func(ctx context.Context, r mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		a := r.GetArguments()
+		v, err := e.PodcastArtifact(ctx, argString(a, "id", ""), argString(a, "artifact", ""), int(argInt64(a, "offset", 0)))
+		if err != nil {
+			return toolErr("%v", err), nil
+		}
+		return toolBoundedJSON(v, MaxActionResponseBytes, nil), nil
+	})
 	s.AddTool(mcp.NewTool("podcast_blocks", mcp.WithDescription("List frozen transcript windows, policy and classification coverage for clean_podcast_ads. Paginated 40 blocks. The orchestrating LLM owns analysis; read every podcast_block page before classifying."), mcp.WithString("id", mcp.Required()), mcp.WithNumber("offset")), func(ctx context.Context, r mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		v, err := e.PodcastBlocks(ctx, argString(r.GetArguments(), "id", ""), int(argInt64(r.GetArguments(), "offset", 0)))
 		if err != nil {
