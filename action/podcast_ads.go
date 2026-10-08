@@ -271,7 +271,10 @@ func (e *Engine) lockPodcastCatalog(ctx context.Context, scope string) (func(), 
 				}
 			}
 			return func() { syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }, nil
-		} else if err != syscall.EWOULDBLOCK {
+		} else if err != syscall.EWOULDBLOCK && err != syscall.EACCES {
+			// SMB can report an overlapping nonblocking byte-range lock as
+			// EACCES. Opening the file and chmod errors remain fatal; only this
+			// flock contention waits, bounded by the request context below.
 			f.Close()
 			return nil, err
 		}
