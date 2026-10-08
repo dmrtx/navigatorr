@@ -101,6 +101,42 @@ func Plan(t Transcript, p Policy, cs map[string]Classification) (Cuts, error) {
 		}
 	}
 	cuts := Cuts{Version: Version, SourceHash: t.SourceHash, TranscriptDigest: Digest(t), PolicyDigest: Digest(p), ClassificationDigest: Digest(ordered), DurationMS: t.DurationMS, Ranges: []Cut{}}
+	return planLabels(t, p, labels, cuts)
+}
+
+// PlanKnownAds publishes a preliminary pass, leaving unknown units untouched.
+// Its digest binds the native transcript and acoustic/text evidence, not a
+// fabricated complete classification. Full LLM review remains a separate pass.
+func PlanKnownAds(t Transcript, p Policy, report AdMatchReport) (Cuts, error) {
+	if !p.KnownAdsFirstPass {
+		return Cuts{}, fmt.Errorf("automatic cleaning requires a known-ad policy")
+	}
+	if err := t.Validate(); err != nil {
+		return Cuts{}, err
+	}
+	if err := p.Validate(); err != nil {
+		return Cuts{}, err
+	}
+	known, err := KnownAdUnits(t, report, p)
+	if err != nil {
+		return Cuts{}, err
+	}
+	labels := make([]string, len(t.Units))
+	for i, u := range t.Units {
+		if k, ok := known[u.ID]; ok {
+			labels[i] = k.Label
+		}
+	}
+	evidence := struct {
+		Mode        string
+		MatchDigest string
+		Known       map[string]AdKnownUnit
+	}{AnalysisKnownAdsOnly, Digest(report), known}
+	cuts := Cuts{Version: Version, AnalysisMode: AnalysisKnownAdsOnly, SourceHash: t.SourceHash, TranscriptDigest: Digest(t), PolicyDigest: Digest(p), ClassificationDigest: Digest(evidence), DurationMS: t.DurationMS, Ranges: []Cut{}}
+	return planLabels(t, p, labels, cuts)
+}
+
+func planLabels(t Transcript, p Policy, labels []string, cuts Cuts) (Cuts, error) {
 	remove := map[string]bool{}
 	for _, l := range p.Remove {
 		remove[l] = true

@@ -48,6 +48,9 @@ func attachKnownAds(ec *ExecutionContext, s *podcastSession) error {
 	s.Matches = &report
 	s.Known = known
 	for _, b := range s.Blocks {
+		if podcastAnalysisMode(ec) == podcast.AnalysisKnownAdsOnly {
+			break // No pretend complete classifications for an automatic pass.
+		}
 		complete := true
 		for i := b.First; i <= b.Last; i++ {
 			if _, ok := known[s.Transcript.Units[i].ID]; !ok {

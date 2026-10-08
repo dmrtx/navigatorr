@@ -411,12 +411,29 @@ func TestPodcastCapabilityCacheTracksExecutableBytes(t *testing.T) {
 		if caps == nil || caps.Available != wantAvailable {
 			t.Fatalf("capability available=%t: %+v", wantAvailable, caps)
 		}
+		if wantAvailable && (!caps.AutomaticKnownAds || caps.AdAlgorithm != podcast.AdAlgorithm) {
+			t.Fatalf("current worker omitted automatic known-ad capability: %+v", caps)
+		}
 		b, err := os.ReadFile(count)
 		if err != nil || strings.Count(string(b), "call\n") != wantCalls {
 			t.Fatalf("ASR calls: want=%d got=%q err=%v", wantCalls, b, err)
 		}
 	}
 	check(true, 1)
+	// A native ASR/render proof from an older build can be reused, but only
+	// this implementing worker advertises the new deterministic render mode.
+	proofs, err := filepath.Glob(filepath.Join(cfg.StateDir, "_podcast-probe", "*", "capability.json"))
+	if err != nil || len(proofs) != 1 {
+		t.Fatalf("cached proof: %v %v", proofs, err)
+	}
+	var legacy transcode.PodcastCapabilities
+	if err := podcast.ReadJSON(proofs[0], &legacy); err != nil {
+		t.Fatal(err)
+	}
+	legacy.AutomaticKnownAds = false
+	if err := podcast.WriteJSON(proofs[0], legacy); err != nil {
+		t.Fatal(err)
+	}
 	check(true, 1)
 	// A substituted encoder must not inherit the old executable's proof.
 	write(encoder, "#!/bin/sh\nexit 1\n")
