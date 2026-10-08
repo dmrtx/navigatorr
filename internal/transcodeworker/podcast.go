@@ -169,14 +169,16 @@ func (w *Worker) executePodcast(ctx context.Context, dir, file string, job *JobR
 		if err := verifyLocalDigest(ctx, r.effectiveInput, job.SourceSHA256); err != nil {
 			return fail(err)
 		}
-		learned, err := w.learnAds(ctx, dir, file, r.effectiveInput, t, task)
-		if errors.Is(err, errPodcastPublicationCancelled) {
-			return nil
+		if task.Learning != nil {
+			learned, err := w.learnAds(ctx, dir, file, r.effectiveInput, t, task)
+			if errors.Is(err, errPodcastPublicationCancelled) {
+				return nil
+			}
+			if err != nil {
+				return fail(err)
+			}
+			result.LearnedAds = learned
 		}
-		if err != nil {
-			return fail(err)
-		}
-		result.LearnedAds = learned
 		if cancelled, err := w.publishPodcastFile(ctx, dir, file, tmp, r.localCandidate); err != nil {
 			return fail(err)
 		} else if cancelled {

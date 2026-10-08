@@ -407,6 +407,10 @@ func (w *Worker) verifyAdDecisionEvidence(task *podcast.Task, t podcast.Transcri
 	if err != nil {
 		return err
 	}
+	if task.Automatic != nil {
+		_, err := automaticAdReferences(task, t, report)
+		return err
+	}
 	known := map[string]podcast.AdKnownUnit{}
 	if report != nil {
 		if task.Learning == nil || report.Catalog.Scope != task.Learning.Scope {
@@ -444,6 +448,43 @@ func (w *Worker) verifyAdDecisionEvidence(task *podcast.Task, t podcast.Transcri
 	return nil
 }
 
+// Recompute automatic cuts from durable native timings and the frozen report.
+// No unknown unit receives an invented content label or review approval.
+func automaticAdReferences(task *podcast.Task, t podcast.Transcript, report *podcast.AdMatchReport) (map[string]bool, error) {
+	if err := task.Validate(); err != nil {
+		return nil, err
+	}
+	if task.Automatic == nil || report == nil || report.Catalog.Scope != task.Automatic.Scope || !strings.EqualFold(strings.ReplaceAll(t.Language, "-", "_"), strings.ReplaceAll(task.Automatic.Policy.Language, "-", "_")) {
+		return nil, fmt.Errorf("automatic matching scope/native policy missing or incorrect")
+	}
+	expected, err := podcast.PlanKnownAds(t, task.Automatic.Policy, *report)
+	if err != nil {
+		return nil, err
+	}
+	if podcast.Digest(task.Cuts) != podcast.Digest(expected) {
+		return nil, fmt.Errorf("automatic cuts differ from verified native known-ad evidence")
+	}
+	known, err := podcast.KnownAdUnits(t, *report, task.Automatic.Policy)
+	if err != nil {
+		return nil, err
+	}
+	ids := map[string]bool{}
+	index := map[string]int{}
+	for i, u := range t.Units {
+		index[u.ID] = i
+	}
+	for _, cut := range expected.Ranges {
+		for i := index[cut.FirstID]; i <= index[cut.LastID]; i++ {
+			k, ok := known[t.Units[i].ID]
+			if !ok {
+				return nil, fmt.Errorf("automatic cut contains an unverified native unit")
+			}
+			ids[k.Evidence.ReferenceID] = true
+		}
+	}
+	return ids, nil
+}
+
 // Tombstones serialize with the actual atomic publication, including recovery
 // of an EncodeComplete checkpoint. Revoke cannot race the last verification.
 func (w *Worker) guardPodcastAdPublication(ctx context.Context, dir, file string, publish func() error) error {
@@ -474,9 +515,30 @@ func (w *Worker) lockAdEvidence(job *JobRecord) (func(), error) {
 		return nil, err
 	}
 	if report == nil {
+		if task.Automatic != nil {
+			return nil, fmt.Errorf("automatic matching evidence missing")
+		}
 		return noop, nil
 	}
 	ids := map[string]bool{}
+	if task.Automatic != nil {
+		asrDir := filepath.Join(w.cfg.StateDir, task.ASRJobID)
+		asr, err := LoadJob(filepath.Join(asrDir, "job.json"))
+		if err != nil {
+			return nil, err
+		}
+		var t podcast.Transcript
+		if err := podcast.ReadJSON(filepath.Join(asrDir, "podcast-transcript.json"), &t); err != nil {
+			return nil, err
+		}
+		if asr.Status != "completed" || asr.Plan == nil || asr.Plan.Podcast == nil || asr.Plan.Podcast.Operation != "transcribe" || asr.SourceSHA256 != job.SourceSHA256 || asr.Podcast == nil || asr.Podcast.TranscriptDigest != podcast.Digest(t) || asr.Podcast.SourceHash != t.SourceHash {
+			return nil, fmt.Errorf("automatic rendering requires immutable completed native ASR evidence")
+		}
+		ids, err = automaticAdReferences(task, t, report)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if task.Learning != nil {
 		for _, c := range task.Learning.Classifications {
 			for _, d := range c.Decisions {

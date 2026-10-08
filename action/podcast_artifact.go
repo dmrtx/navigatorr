@@ -24,6 +24,8 @@ func (e *Engine) PodcastArtifact(ctx context.Context, id, artifact string, offse
 	}
 	rows := []any{}
 	info := map[string]any{}
+	info["analysis_mode"] = podcastAnalysisMode(ec)
+	info["llm_reviewed"] = podcastSummary(ec)["llm_reviewed"]
 	artifactDigest := ""
 	switch artifact {
 	case "transcript":

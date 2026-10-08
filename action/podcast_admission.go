@@ -28,6 +28,13 @@ func (e *Engine) freezePodcastInputs(inputs map[string]any) error {
 	if err != nil {
 		return err
 	}
+	mode := getString(inputs, "processing_mode")
+	if mode != "" && mode != podcast.AnalysisFull && mode != podcast.AnalysisKnownAdsOnly {
+		return fmt.Errorf("unsupported podcast processing_mode")
+	}
+	if mode == podcast.AnalysisKnownAdsOnly && !p.KnownAdsFirstPass {
+		return fmt.Errorf("automatic cleaning requires known_ads_first_pass in the podcast profile")
+	}
 	inputs["podcast_policy_digest"] = podcast.Digest(p)
 	inputs["podcast_pipeline_version"] = podcast.Version
 	return nil
