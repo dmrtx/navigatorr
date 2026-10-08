@@ -2624,7 +2624,7 @@ function jobControls(job, detail = false) {
   }
   if (job.podcast) {
  add("Ad library", () => viewPodcastAdLibrary(job.podcast.podcast_id));
- if (job.waiting_condition === "podcast_review") add("Review cuts", () => reviewPodcastCuts(job.id));
+ if (job.waiting_condition === "podcast_review") { add("Review cuts", () => reviewPodcastCuts(job.id)); add("Revise labels", () => revisePodcastLabels(job.id,job.podcast.cuts_digest)); }
  if (job.waiting_condition === "podcast_classification") { add("View transcript", () => viewPodcastTranscript(job.id)); if (job.podcast.total_blocks > 0 && job.podcast.classified_blocks === job.podcast.total_blocks) add("Validate classifications", () => jobControl(job.id,"action_resume",{decision:"plan"})); }
  }
  if (!job.podcast && job.status === "waiting_decision" && !job.waiting_options?.length)
@@ -4517,6 +4517,11 @@ async function reviewPodcastCuts(id) {
  do { review=await tool("podcast_review",{id,offset}); if (!review.digest) throw new Error("Could not read cut review."); for (const b of review.boundaries || []) content.push(node("p",`${(b.cut.start_ms/1000).toFixed(2)}–${(b.cut.end_ms/1000).toFixed(2)} s · ${b.cut.first_id}–${b.cut.last_id}: ${b.first.text} … ${b.last.text}. Before: ${b.before.map(u=>u.text).join(" ")} · After: ${b.after.map(u=>u.text).join(" ")}`,"metadata")); offset=review.next_offset; } while(review.has_more);
  content.unshift(node("p",`Remove ${(review.removed_ms/1000).toFixed(1)} seconds in ${review.total_cuts} cuts. A separate MP3 will be validated and published; the original is kept. This is a text boundary review, not a listening test.`));
  if (await reviewAction({title:"Review podcast cuts",content,confirmLabel:"Approve cuts and render"})) { await tool("podcast_review",{id,digest:review.digest,approve:true}); await jobControl(id,"action_resume",{decision:"render"}); }
+}
+async function revisePodcastLabels(id,digest) {
+ if (!digest) { const review=await tool("podcast_review",{id,offset:0}); if (!review.digest || review.approved) throw new Error("Only unapproved cuts can be revised."); digest=review.digest; }
+ await tool("podcast_review",{id,digest,reclassify:true});
+ await loadJobs(); await openJob(id);
 }
 async function viewPodcastTranscript(id) {
  const content=[node("p","Your connected LLM reads these blocks through podcast_block and saves labels through podcast_classify. All blocks and overlaps must be covered before cuts can be planned.")]; let offset=0,manifest;

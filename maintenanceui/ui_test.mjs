@@ -96,12 +96,21 @@ test("podcast controls expose transcript coverage and exact cut review",()=>{
 	const h=harness();h.context.job={id:"podcast",action_name:"clean_podcast_ads",status:"waiting_decision",waiting_condition:"podcast_classification",podcast:{total_blocks:2,classified_blocks:1}};
 	let labels=h.run('jobControls(job).children.map(b=>b.textContent)');assert.ok(labels.includes("View transcript"));assert.ok(!labels.includes("Validate classifications"));
 	h.run('job.podcast.classified_blocks=2');labels=h.run('jobControls(job).children.map(b=>b.textContent)');assert.ok(labels.includes("Validate classifications"));
-	h.run('job.waiting_condition="podcast_review"');labels=h.run('jobControls(job).children.map(b=>b.textContent)');assert.ok(labels.includes("Review cuts"));assert.ok(!labels.includes("View transcript"));
+	h.run('job.waiting_condition="podcast_review"');labels=h.run('jobControls(job).children.map(b=>b.textContent)');assert.ok(labels.includes("Review cuts"));assert.ok(labels.includes("Revise labels"));assert.ok(!labels.includes("View transcript"));
 });
 
 test("podcast cut review reads all pages and approves the returned digest before render",async()=>{
 	const h=harness();h.context.calls=[];h.run('tool=async(name,args)=>{calls.push({name,args});return {digest:"frozen-cuts",total_cuts:2,removed_ms:1000,boundaries:[],next_offset:args.offset===0?1:2,has_more:args.offset===0}};reviewAction=async()=>true;jobControl=async(id,name,args)=>calls.push({id,name,args});');
 	await h.run('reviewPodcastCuts("podcast")');const calls=h.context.calls;assert.equal(calls[0].args.offset,0);assert.equal(calls[1].args.offset,1);assert.equal(calls[2].args.digest,"frozen-cuts");assert.equal(calls[2].args.approve,true);assert.equal(calls[3].args.decision,"render");
+});
+
+test("podcast revision reopens only the current unapproved review and never renders",async()=>{
+	const h=harness();h.context.calls=[];h.run('tool=async(name,args)=>{calls.push({name,args});return {digest:"pending-cuts",approved:false}};loadJobs=async()=>{};openJob=async()=>{};');
+	await h.run('revisePodcastLabels("podcast")');assert.equal(h.context.calls.length,2);assert.equal(h.context.calls[1].args.digest,"pending-cuts");assert.equal(h.context.calls[1].args.reclassify,true);assert.ok(!h.context.calls.some(c=>c.args.approve || c.args.decision));
+	h.run('calls=[];tool=async(name,args)=>{calls.push({name,args});if(!args.reclassify)throw new Error("cuts are not planned yet");return {reopened:true}};');
+	await h.run('revisePodcastLabels("podcast","durable-pre-crash-cuts")');assert.equal(h.context.calls.length,1);assert.equal(h.context.calls[0].args.digest,"durable-pre-crash-cuts");assert.equal(h.context.calls[0].args.reclassify,true);
+	h.run('calls=[];tool=async(name,args)=>{calls.push({name,args});return {digest:"approved-cuts",approved:true}};');
+	await assert.rejects(h.run('revisePodcastLabels("podcast")'),/Only unapproved/);assert.equal(h.context.calls.length,1);
 });
 
 test("URL state preserves tabs, sources, folders, sorting, filters and open details", () => {
