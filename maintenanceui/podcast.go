@@ -22,3 +22,12 @@ func (s *Server) podcasts(w http.ResponseWriter, r *http.Request) {
 	sort.Strings(ids)
 	writeJSON(w, 200, map[string]any{"enabled": s.cfg.Podcasts.Enabled, "podcasts": ids, "policies": policies})
 }
+
+func (s *Server) podcastLocalLibrary(w http.ResponseWriter, r *http.Request) {
+	v, err := s.engine.PodcastLocalLibrary(r.URL.Query().Get("podcast_id"))
+	if err != nil {
+		fail(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, v)
+}

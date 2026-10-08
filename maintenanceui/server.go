@@ -115,6 +115,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/maintenance/candidate-decision", s.candidateDecision)
 	mux.HandleFunc("GET /api/maintenance/folder", s.folder)
 	mux.HandleFunc("GET /api/maintenance/podcasts", s.podcasts)
+	mux.HandleFunc("GET /api/maintenance/podcast-local-library", s.podcastLocalLibrary)
 	mux.HandleFunc("GET /api/maintenance/workers", s.workers)
 	mux.HandleFunc("GET /api/maintenance/worker-activity", s.workerActivity)
 	mux.HandleFunc("POST /api/maintenance/tool", s.tool)

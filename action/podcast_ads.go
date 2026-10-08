@@ -2,7 +2,12 @@ package action
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
+	"os"
+	"path/filepath"
+	"syscall"
+	"time"
 
 	"github.com/jakenesler/navigatorr/podcast"
 	"github.com/jakenesler/navigatorr/transcode"
@@ -78,11 +83,11 @@ func (e *Engine) checkKnownAds(ctx context.Context, s podcastSession) error {
 	if s.Matches == nil || len(s.Known) == 0 {
 		return nil
 	}
-	client, ok := e.deps.Transcode.(transcode.PodcastAdExecutor)
+	_, ok := e.deps.Transcode.(transcode.PodcastAdExecutor)
 	if !ok {
 		return fmt.Errorf("ad catalog API unavailable")
 	}
-	catalog, err := client.AdCatalog(ctx, s.Matches.Catalog.Scope)
+	catalog, err := e.PodcastAdLibrary(ctx, s.Matches.Catalog.Scope, "")
 	if err != nil {
 		return err
 	}
@@ -108,6 +113,16 @@ func (e *Engine) PodcastAdLibrary(ctx context.Context, scope, revoke string) (po
 	if e.deps.Config == nil {
 		return podcast.AdCatalog{}, fmt.Errorf("podcast config unavailable")
 	}
+	unlock, err := e.lockPodcastCatalog(ctx, scope)
+	if err != nil {
+		return podcast.AdCatalog{}, err
+	}
+	defer unlock()
+	e.podcastCatalogMu.Lock()
+	defer e.podcastCatalogMu.Unlock()
+	if e.deps.Config == nil {
+		return podcast.AdCatalog{}, fmt.Errorf("podcast config unavailable")
+	}
 	if _, err := e.deps.Config.Podcasts.Policy(scope); err != nil {
 		return podcast.AdCatalog{}, err
 	}
@@ -116,9 +131,188 @@ func (e *Engine) PodcastAdLibrary(ctx context.Context, scope, revoke string) (po
 		return podcast.AdCatalog{}, fmt.Errorf("ad catalog API unavailable")
 	}
 	if revoke != "" {
+		if !podcast.ValidHash(revoke) {
+			return podcast.AdCatalog{}, fmt.Errorf("invalid reference ID")
+		}
+		tombstones, err := e.podcastTombstones(scope)
+		if err != nil {
+			return podcast.AdCatalog{}, err
+		}
+		tombstones[revoke] = true
+		if err := podcast.WriteJSON(e.podcastCatalogPath(scope)+".tombstones", tombstones); err != nil {
+			return podcast.AdCatalog{}, err
+		}
+		// Persist the conservative tombstone before contacting an intermittent worker.
+		// A lost acknowledgement must never leave a local publisher using this reference.
+		var cached podcast.AdCatalog
+		if err := podcast.ReadJSON(e.podcastCatalogPath(scope), &cached); err == nil {
+			if err := cached.Validate(); err != nil {
+				return cached, err
+			}
+			for i := range cached.References {
+				if cached.References[i].ID == revoke {
+					cached.References[i].Revoked = true
+				}
+			}
+			if err := e.writePodcastCatalog(scope, cached); err != nil {
+				return cached, err
+			}
+		} else if !os.IsNotExist(err) {
+			return cached, err
+		}
 		if err := client.RevokeAd(ctx, scope, revoke); err != nil {
 			return podcast.AdCatalog{}, err
 		}
 	}
-	return client.AdCatalog(ctx, scope)
+	catalog, err := client.AdCatalog(ctx, scope)
+	if err != nil {
+		return catalog, err
+	}
+	if err := catalog.Validate(); err != nil {
+		return catalog, err
+	}
+	if catalog.Scope != scope {
+		return catalog, fmt.Errorf("ad catalog scope differs")
+	}
+	tombstones, err := e.podcastTombstones(scope)
+	if err != nil {
+		return catalog, err
+	}
+	for i := range catalog.References {
+		if tombstones[catalog.References[i].ID] {
+			if !catalog.References[i].Revoked {
+				_ = client.RevokeAd(ctx, scope, catalog.References[i].ID)
+			}
+			catalog.References[i].Revoked = true
+		}
+	}
+	// Tombstones survive stale worker responses and restarts.
+	var prior podcast.AdCatalog
+	if err := podcast.ReadJSON(e.podcastCatalogPath(scope), &prior); err == nil {
+		if err := prior.Validate(); err != nil {
+			return catalog, err
+		}
+		for _, old := range prior.References {
+			if !old.Revoked {
+				continue
+			}
+			found := false
+			for i := range catalog.References {
+				if catalog.References[i].ID == old.ID {
+					catalog.References[i].Revoked = true
+					found = true
+				}
+			}
+			if !found {
+				catalog.References = append(catalog.References, old)
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return catalog, err
+	}
+	if err := catalog.Validate(); err != nil {
+		return catalog, err
+	}
+	return catalog, e.writePodcastCatalog(scope, catalog)
+}
+
+func (e *Engine) podcastCatalogPath(scope string) string {
+	dir := e.deps.Config.Podcasts.LocalCatalogDir
+	if dir == "" {
+		dir = filepath.Join(e.deps.Config.Podcasts.ArtifactDir, "_ad-catalog")
+	}
+	return filepath.Join(dir, fmt.Sprintf("%x", sha256.Sum256([]byte(scope)))+".json")
+}
+
+func (e *Engine) podcastTombstones(scope string) (map[string]bool, error) {
+	m := map[string]bool{}
+	if err := podcast.ReadJSON(e.podcastCatalogPath(scope)+".tombstones", &m); err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	for id, v := range m {
+		if !v || !podcast.ValidHash(id) {
+			return nil, fmt.Errorf("invalid ad tombstone")
+		}
+	}
+	return m, nil
+}
+
+func (e *Engine) writePodcastCatalog(scope string, catalog podcast.AdCatalog) error {
+	file := e.podcastCatalogPath(scope)
+	if err := podcast.WriteJSON(file, catalog); err != nil {
+		return err
+	}
+	if e.deps.Config.Podcasts.LocalCatalogDir != "" {
+		return os.Chmod(file, 0644)
+	}
+	return nil
+}
+
+// The consumer holds this same stable inode through the final audio swap.
+func (e *Engine) lockPodcastCatalog(ctx context.Context, scope string) (func(), error) {
+	file := e.podcastCatalogPath(scope) + ".lock"
+	if err := os.MkdirAll(filepath.Dir(file), 0700); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(file, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0666)
+	if err != nil {
+		return nil, err
+	}
+	if e.deps.Config.Podcasts.LocalCatalogDir != "" {
+		if err := f.Chmod(0666); err != nil {
+			f.Close()
+			return nil, err
+		}
+	}
+	for {
+		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
+			return func() { syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }, nil
+		} else if err != syscall.EWOULDBLOCK {
+			f.Close()
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			f.Close()
+			return nil, ctx.Err()
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+}
+
+// PodcastLocalLibrary reads current policy and a durable metadata mirror only.
+// Waveforms stay on the consumer host; this never wakes or contacts the worker.
+func (e *Engine) PodcastLocalLibrary(scope string) (map[string]any, error) {
+	e.podcastCatalogMu.Lock()
+	defer e.podcastCatalogMu.Unlock()
+	if e.deps.Config == nil {
+		return nil, fmt.Errorf("podcast config unavailable")
+	}
+	policy, err := e.deps.Config.Podcasts.Policy(scope)
+	if err != nil {
+		return nil, err
+	}
+	if !policy.KnownAdsFirstPass {
+		return nil, fmt.Errorf("known-ad matching disabled for profile")
+	}
+	var catalog podcast.AdCatalog
+	if err := podcast.ReadJSON(e.podcastCatalogPath(scope), &catalog); err != nil {
+		return nil, fmt.Errorf("local catalog not synchronized; list podcast_ad_library while the worker is available")
+	}
+	if err := catalog.Validate(); err != nil {
+		return nil, err
+	}
+	if catalog.Scope != scope {
+		return nil, fmt.Errorf("ad catalog scope differs")
+	}
+	tombstones, err := e.podcastTombstones(scope)
+	if err != nil {
+		return nil, err
+	}
+	for i := range catalog.References {
+		if tombstones[catalog.References[i].ID] {
+			catalog.References[i].Revoked = true
+		}
+	}
+	return map[string]any{"policy": policy, "policy_digest": podcast.Digest(policy), "catalog": catalog, "catalog_digest": podcast.Digest(catalog)}, nil
 }

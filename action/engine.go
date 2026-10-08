@@ -19,6 +19,7 @@ import (
 
 // Engine manages declarative, persistent, multi-step actions.
 type Engine struct {
+	podcastCatalogMu    sync.Mutex
 	workerObservationMu sync.Mutex
 	workerObservation   transcode.WorkerObservation
 
