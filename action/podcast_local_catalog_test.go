@@ -2,10 +2,13 @@ package action
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/podcast"
+	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -101,4 +104,77 @@ func TestLocalPublicationLockSerializesRevocationAndReleasesOnCancel(t *testing.
 		t.Fatal(err)
 	}
 	release()
+}
+
+func TestLocalSharedCatalogWaitPreservesPermissionsUntilLockAcquired(t *testing.T) {
+	dir := t.TempDir()
+	e, store := setupTranscodeEngine(t, &mockTranscodeExecutor{}, "", []string{dir}, []string{dir}, false)
+	defer store.Close()
+	e.deps.Config.Podcasts = config.PodcastConfig{ArtifactDir: filepath.Join(dir, "private"), LocalCatalogDir: filepath.Join(dir, "shared")}
+	file := e.podcastCatalogPath("show") + ".lock"
+	if err := os.MkdirAll(filepath.Dir(file), 0700); err != nil {
+		t.Fatal(err)
+	}
+	helper, err := os.OpenFile(file, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer helper.Close()
+	if err := helper.Chmod(0600); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := helper.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(helper.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Flock(int(helper.Fd()), syscall.LOCK_UN)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+	if release, err := e.lockPodcastCatalog(ctx, "show"); !errors.Is(err, context.DeadlineExceeded) {
+		if release != nil {
+			release()
+		}
+		t.Fatalf("blocked waiter did not cancel: %v", err)
+	}
+	whileHeld, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if whileHeld.Mode().Perm() != 0600 {
+		t.Fatalf("permissions changed before ownership: %v", whileHeld.Mode())
+	}
+	if !os.SameFile(initial, whileHeld) {
+		t.Fatal("lock inode replaced during wait")
+	}
+	if err := syscall.Flock(int(helper.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+	release, err := e.lockPodcastCatalog(context.Background(), "show")
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(file)
+	if err != nil {
+		release()
+		t.Fatal(err)
+	}
+	if after.Mode().Perm() != 0666 {
+		release()
+		t.Fatalf("shared permissions not restored after ownership: %v", after.Mode())
+	}
+	if !os.SameFile(initial, after) {
+		release()
+		t.Fatal("lock inode replaced after acquire")
+	}
+	if err := syscall.Flock(int(helper.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != syscall.EWOULDBLOCK {
+		release()
+		t.Fatalf("second descriptor bypassed acquired lock: %v", err)
+	}
+	release()
+	if err := syscall.Flock(int(helper.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatalf("unlock or cancel leaked lock: %v", err)
+	}
 }
