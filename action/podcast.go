@@ -28,8 +28,8 @@ type podcastSession struct {
 
 func (e *Engine) registerPodcastTemplate() {
 	e.RegisterTemplate(ActionTemplate{Name: "clean_podcast_ads", Version: podcast.Version, AutoReconcile: true, ImmutableInputs: true,
-		Description:    "Durable podcast cleaning. Original preserved. ASR runs on the existing worker queue. The orchestrating LLM reads EVERY podcast_block page and submits ID-based labels with podcast_classify; Navigatorr never invokes a classifier model. Resume with decision=plan after complete coverage. Review cuts with podcast_review before rendering when required. Output is a validated, separate MP3 for the existing feed/download integration.",
-		RequiredInputs: []string{"path", "podcast_id", "output_path"}, OptionalInputs: []string{"episode_id", "feed_id", "idempotency_key", "source_sha256", "cached_transcript_path", "cached_transcript_digest", "cached_asr_job_id"},
+		Description:    "Durable podcast cleaning. Original preserved. ASR runs on the existing worker queue. Default processing_mode=full: the orchestrating LLM reads EVERY podcast_block page, submits ID-based labels with podcast_classify, resumes decision=plan, and reviews exact cuts when required. processing_mode=known_ads_only automatically renders only verified acoustic/native-text matches without LLM, leaves unknown audio intact and publishes with llm_reviewed=false. Use a full revision from the preserved original and cached transcript for later review. Output is a validated, separate MP3 for the existing feed/download integration.",
+		RequiredInputs: []string{"path", "podcast_id", "output_path"}, OptionalInputs: []string{"episode_id", "feed_id", "idempotency_key", "source_sha256", "cached_transcript_path", "cached_transcript_digest", "cached_asr_job_id", "processing_mode"},
 		Steps: []StepDefinition{
 			{Name: "podcast_preflight", Run: e.podcastPreflight},
 			{Name: "podcast_transcribe", Run: func(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
@@ -88,6 +88,9 @@ func (e *Engine) podcastPreflight(ctx context.Context, ec *ExecutionContext) (St
 			return StepResult{}, fmt.Errorf("worker does not support the configured known-ad first pass")
 		}
 	}
+	if podcastAnalysisMode(ec) == podcast.AnalysisKnownAdsOnly && (caps.Podcast == nil || !caps.Podcast.AutomaticKnownAds) {
+		return StepResult{}, fmt.Errorf("worker does not support automatic known-ad publication; upgrade the worker")
+	}
 	if caps.Podcast == nil || !caps.Podcast.Available || !caps.Podcast.NativeTimingVerified || !caps.Podcast.MP3RenderVerified || strings.ReplaceAll(caps.Podcast.VerifiedLanguage, "-", "_") != strings.ReplaceAll(policy.Language, "-", "_") {
 		reason := "worker did not report podcast capability"
 		if caps.Podcast != nil {
@@ -113,6 +116,8 @@ func (e *Engine) podcastPreflight(ctx context.Context, ec *ExecutionContext) (St
 	ec.State["podcast_session"] = path
 	ec.State["podcast_policy"] = policy
 	ec.State["podcast"] = summary
+	summary["analysis_mode"] = podcastAnalysisMode(ec)
+	summary["llm_reviewed"] = false
 	ec.State["resolved_path"] = source
 	ec.State["podcast_output"] = output
 	ec.State["source_sha256"] = strings.TrimPrefix(hash, "sha256:")
@@ -125,6 +130,12 @@ func podcastSummary(ec *ExecutionContext) map[string]any {
 		ec.State["podcast"] = m
 	}
 	return m
+}
+func podcastAnalysisMode(ec *ExecutionContext) string {
+	if getString(ec.Inputs, "processing_mode") == podcast.AnalysisKnownAdsOnly {
+		return podcast.AnalysisKnownAdsOnly
+	}
+	return podcast.AnalysisFull
 }
 func loadPodcastSession(ec *ExecutionContext) (podcastSession, error) {
 	var s podcastSession
@@ -150,6 +161,12 @@ func loadPodcastSession(ec *ExecutionContext) (podcastSession, error) {
 		// actual unit evidence so a no-match pass survives serialization/restart.
 		if e != nil || s.Matches == nil || s.Matches.Catalog.Scope != getString(ec.Inputs, "podcast_id") || podcast.Digest(s.Matches) != podcastSummary(ec)["match_digest"] || !maps.Equal(known, s.Known) {
 			err = fmt.Errorf("acoustic checkpoint evidence changed")
+		}
+	}
+	if err == nil && s.Cuts != nil && podcastAnalysisMode(ec) == podcast.AnalysisKnownAdsOnly {
+		cuts, e := podcast.PlanKnownAds(s.Transcript, s.Policy, valueAdReport(s.Matches))
+		if e != nil || podcast.Digest(s.Cuts) != podcast.Digest(cuts) || s.ApprovedDigest != "" {
+			err = fmt.Errorf("automatic cut checkpoint evidence changed")
 		}
 	}
 	return s, err
@@ -242,13 +259,17 @@ func (e *Engine) podcastWorkerStage(ctx context.Context, ec *ExecutionContext, o
 			if s.Cuts == nil {
 				return StepResult{}, fmt.Errorf("cuts checkpoint missing")
 			}
-			if s.Policy.ReviewRequired && s.ApprovedDigest != podcast.Digest(s.Cuts) {
+			automatic := podcastAnalysisMode(ec) == podcast.AnalysisKnownAdsOnly
+			if !automatic && s.Policy.ReviewRequired && s.ApprovedDigest != podcast.Digest(s.Cuts) {
 				return StepResult{}, fmt.Errorf("cuts approval is missing or stale")
 			}
 			if err := e.checkKnownAds(ctx, s); err != nil {
 				return StepResult{}, err
 			}
-			if s.Policy.KnownAdsFirstPass {
+			if automatic {
+				task.Automatic = &podcast.AdAutomatic{Scope: getString(ec.Inputs, "podcast_id"), Policy: s.Policy}
+				task.MatchJobID = getString(ec.State, "podcast_match_ads_job")
+			} else if s.Policy.KnownAdsFirstPass {
 				task.Learning = &podcast.AdLearning{Scope: getString(ec.Inputs, "podcast_id"), Policy: s.Policy, Classifications: s.Classifications, ApprovedDigest: s.ApprovedDigest}
 				task.MatchJobID = getString(ec.State, "podcast_match_ads_job")
 			}
@@ -393,6 +414,25 @@ func (e *Engine) podcastClassification(ctx context.Context, ec *ExecutionContext
 	if err := e.checkKnownAds(ctx, s); err != nil {
 		return StepResult{}, err
 	}
+	if podcastAnalysisMode(ec) == podcast.AnalysisKnownAdsOnly {
+		cuts, err := podcast.PlanKnownAds(s.Transcript, s.Policy, valueAdReport(s.Matches))
+		if err != nil {
+			return StepResult{}, err
+		}
+		s.Cuts, s.ApprovedDigest, s.ReviewReads = &cuts, "", nil
+		if err := savePodcastSession(ec, s); err != nil {
+			return StepResult{}, err
+		}
+		if err := podcast.WriteJSON(filepath.Join(filepath.Dir(getString(ec.State, "podcast_session")), "cuts.json"), cuts); err != nil {
+			return StepResult{}, err
+		}
+		m["phase"] = "automatic_cuts_ready"
+		m["coverage"] = float64(len(s.Known)) / float64(len(s.Transcript.Units))
+		m["cuts_digest"] = podcast.Digest(cuts)
+		m["removed_ms"] = cuts.RemovedMS
+		m["cut_count"] = len(cuts.Ranges)
+		return StepResult{Status: StepCompleted, Outputs: ec.State}, nil
+	}
 	m["classified_blocks"] = len(s.Classifications)
 	m["total_blocks"] = len(s.Blocks)
 	if ec.Decision != "plan" {
@@ -430,7 +470,7 @@ func (e *Engine) podcastReview(ctx context.Context, ec *ExecutionContext) (StepR
 	if s.Cuts == nil {
 		return StepResult{}, fmt.Errorf("cuts missing")
 	}
-	if s.Policy.ReviewRequired && s.ApprovedDigest != podcast.Digest(s.Cuts) {
+	if podcastAnalysisMode(ec) != podcast.AnalysisKnownAdsOnly && s.Policy.ReviewRequired && s.ApprovedDigest != podcast.Digest(s.Cuts) {
 		return StepResult{Status: StepWaitingDecision, WaitingCondition: "podcast_review", WaitingReason: "Read podcast_review, inspect ID-derived boundaries, approve its exact digest to render a separate copy", Outputs: ec.State}, nil
 	}
 	return StepResult{Status: StepCompleted}, nil
@@ -468,5 +508,8 @@ func (e *Engine) podcastAccept(ctx context.Context, ec *ExecutionContext) (StepR
 	m["output_sha256"] = ec.State["podcast_output_sha256"]
 	m["output_duration_ms"] = result.OutputDurationMS
 	m["decode_passed"] = true
+	m["analysis_mode"] = podcastAnalysisMode(ec)
+	m["llm_reviewed"] = podcastAnalysisMode(ec) == podcast.AnalysisFull
+	m["pending_llm"] = podcastAnalysisMode(ec) == podcast.AnalysisKnownAdsOnly
 	return StepResult{Status: StepCompleted, Outputs: ec.State}, nil
 }

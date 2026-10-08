@@ -1,4 +1,4 @@
-# Podcast cleaning with the orchestrating LLM
+# Podcast cleaning with automatic publication and optional LLM review
 
 `clean_podcast_ads` uses the existing Action Engine, SQLite execution leases,
 reconciler and worker queue. Navigatorr never calls a classification model.
@@ -78,7 +78,37 @@ podcasts instead of exposing partially copied audio.
 Upgrade coordinator and worker together when enabling podcasts. Older workers
 have no verified podcast capability and are rejected before job submission.
 
-## Orchestrate through MCP
+## Automatic first publication
+
+`processing_mode="known_ads_only"` is an explicit, immutable admission mode.
+It requires a profile with `known_ads_first_pass=true` and a worker reporting
+`automatic_known_ads=true`. The existing action, worker queue and reconciler
+run matching, native ASR, deterministic planning, rendering and acceptance
+without block reads, LLM classification or cut approval. Native ASR independently
+checks the full seed text against the acoustic match; this still uses ASR but
+has no LLM dependency or model charge.
+
+Only confirmed native units strictly inside unambiguous matches are removed.
+Unknown text, unmatched boundaries and conflicting categories stay in the audio.
+The original, cached transcript and cut map are retained, including the MP3's
+embedded original-audio transcript. No-match and empty-library passes publish
+unchanged audio with its transcript. Automatic passes never teach new references
+or manufacture classification/read/approval receipts. Policy removal limits,
+source/candidate hashes, full decode and reference revocation guards still apply.
+
+The completed result exposes `analysis_mode="known_ads_only"`,
+`llm_reviewed=false`, `pending_llm=true` and actual known-unit `coverage`.
+`feed_ready=true` means the validated copy can be offered; it does not mean the
+whole episode has been reviewed. MoonStation can replace the existing enclosure
+atomically and expose this separate state. An explicit later full revision uses
+the preserved original and cached ASR, leaving the automatic version available
+while the LLM reads remaining units. Full mode retains complete block coverage
+and exact cut review requirements, then publishes `analysis_mode="full"`,
+`llm_reviewed=true`. The same feed, filename and episode GUID are used by both
+passes. A player that already downloaded a local copy decides when to fetch it
+again; retaining the URL cannot replace a copy on that device.
+
+## Orchestrate the full review through MCP
 
 1. `action_run(action="clean_podcast_ads", inputs=<JSON string>)` with `path`,
    `podcast_id`, `output_path`. Optionally pass `source_sha256`, `feed_id`,
