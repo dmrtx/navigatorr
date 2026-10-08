@@ -258,14 +258,18 @@ func (e *Engine) lockPodcastCatalog(ctx context.Context, scope string) (func(), 
 	if err != nil {
 		return nil, err
 	}
-	if e.deps.Config.Podcasts.LocalCatalogDir != "" {
-		if err := f.Chmod(0666); err != nil {
-			f.Close()
-			return nil, err
-		}
-	}
 	for {
 		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
+			// SMB implements flock as a mandatory byte-range lock. A chmod on
+			// another descriptor can fail while the consumer holds that lock.
+			// Update shared permissions only after we own the same stable inode.
+			if e.deps.Config.Podcasts.LocalCatalogDir != "" {
+				if err := f.Chmod(0666); err != nil {
+					syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+					f.Close()
+					return nil, err
+				}
+			}
 			return func() { syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }, nil
 		} else if err != syscall.EWOULDBLOCK {
 			f.Close()
