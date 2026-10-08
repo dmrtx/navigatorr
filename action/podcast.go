@@ -234,11 +234,7 @@ func (e *Engine) podcastWorkerStage(ctx context.Context, ec *ExecutionContext, o
 					return StepResult{}, err
 				}
 			} else {
-				client, ok := e.deps.Transcode.(transcode.PodcastAdExecutor)
-				if !ok {
-					return StepResult{}, fmt.Errorf("ad catalog API unavailable")
-				}
-				catalog, err = client.AdCatalog(ctx, getString(ec.Inputs, "podcast_id"))
+				catalog, err = e.PodcastAdLibrary(ctx, getString(ec.Inputs, "podcast_id"), "")
 				if err != nil {
 					if isRetryableWorkerPollError(err) {
 						return wait("Waiting for known-ad catalog")
@@ -500,6 +496,16 @@ func (e *Engine) podcastAccept(ctx context.Context, ec *ExecutionContext) (StepR
 	}
 	if s.Cuts == nil || result.TranscriptDigest != podcast.Digest(s.Transcript) || result.RemovedMS != s.Cuts.RemovedMS {
 		return StepResult{}, fmt.Errorf("render validation does not match reviewed cuts")
+	}
+	if s.Policy.KnownAdsFirstPass && podcastAnalysisMode(ec) == podcast.AnalysisFull {
+		// Rendering learned approved recordings. Refresh the consumer's durable mirror
+		// before accepting this review, so the next download needs no worker.
+		if _, err := e.PodcastAdLibrary(ctx, getString(ec.Inputs, "podcast_id"), ""); err != nil {
+			if isRetryableWorkerPollError(err) {
+				return StepResult{Status: StepWaitingExternal, WaitingCondition: "worker_reconciling", WaitingReason: "Waiting to synchronize learned ad references"}, nil
+			}
+			return StepResult{}, err
+		}
 	}
 	m := podcastSummary(ec)
 	m["phase"] = "completed"
