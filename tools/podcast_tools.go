@@ -70,8 +70,18 @@ func registerPodcastTools(s *server.MCPServer, e *action.Engine) {
 		}
 		return toolBoundedJSON(v, MaxActionResponseBytes, nil), nil
 	})
-	s.AddTool(mcp.NewTool("podcast_review", mcp.WithDescription("Read planned cuts with native transcript boundary context. To approve pass approve=true and the exact digest returned by this tool; then action_resume decision=render continues rendering a separate validated MP3. Approval is textual cut review, not human listening acceptance. No existing feed is rewritten."), mcp.WithString("id", mcp.Required()), mcp.WithString("digest"), mcp.WithBoolean("approve"), mcp.WithNumber("offset")), func(ctx context.Context, r mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	s.AddTool(mcp.NewTool("podcast_review", mcp.WithDescription("Read planned cuts with native transcript boundary context. To approve pass approve=true and the exact digest; then action_resume decision=render. If a boundary is wrong before approval, pass reclassify=true and the exact digest to reopen affected ID labels while retaining transcript/read receipts. Regenerate the plan and review its new digest. Reopening is forbidden after approval/render. Approval is textual review, not listening acceptance."), mcp.WithString("id", mcp.Required()), mcp.WithString("digest"), mcp.WithBoolean("approve"), mcp.WithBoolean("reclassify"), mcp.WithNumber("offset")), func(ctx context.Context, r mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		a := r.GetArguments()
+		if argBool(a, "reclassify", false) {
+			if argBool(a, "approve", false) {
+				return toolErr("approve and reclassify are mutually exclusive"), nil
+			}
+			v, err := e.PodcastReclassify(ctx, argString(a, "id", ""), argString(a, "digest", ""))
+			if err != nil {
+				return toolErr("%v", err), nil
+			}
+			return toolBoundedJSON(v, MaxActionResponseBytes, nil), nil
+		}
 		v, err := e.PodcastReview(ctx, argString(a, "id", ""), argString(a, "digest", ""), argBool(a, "approve", false), int(argInt64(a, "offset", 0)))
 		if err != nil {
 			return toolErr("%v", err), nil
