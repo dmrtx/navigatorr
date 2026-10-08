@@ -251,6 +251,85 @@ func TestKnownAdEmptyFirstPassDurableClassification(t *testing.T) {
 	if err != nil || s.Cuts.RemovedMS != 0 {
 		t.Fatalf("empty evidence altered cuts: %v %+v", err, s.Cuts)
 	}
+	oldDigest := podcast.Digest(s.Cuts)
+	if _, err := e.PodcastReview(ctx, r.ID, "", false, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.PodcastReclassify(ctx, r.ID, "sha256:"+strings.Repeat("f", 64)); err == nil {
+		t.Fatal("stale review could reopen classification")
+	}
+	// Simulate the session rename succeeding just before a coordinator crash,
+	// while SQLite still points at the current unapproved review.
+	s.Cuts = nil
+	if err := savePodcastSession(ec, s); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.PodcastReclassify(ctx, r.ID, oldDigest); err != nil {
+		t.Fatal(err)
+	}
+	e = NewEngine(e.Deps())
+	inst, _ = st.GetActionInstance(r.ID)
+	if inst.CurrentStep != 2 || inst.WaitingCondition != "podcast_classification" {
+		t.Fatalf("review did not reopen the durable classification step: %+v", inst)
+	}
+	ec = parseExecutionContextMust(t, e, r.ID)
+	s, err = loadPodcastSession(ec)
+	if err != nil || s.Cuts != nil || s.ApprovedDigest != "" || len(s.ReviewReads) != 0 || getString(ec.State, "podcast_transcribe_job") != "cached-asr" || getString(ec.State, "podcast_match_ads_job") != matchID {
+		t.Fatalf("reopen lost native evidence or kept stale review: %v", err)
+	}
+	if _, err := e.PodcastReview(ctx, r.ID, oldDigest, true, 0); err == nil {
+		t.Fatal("old cuts approval survived reopening")
+	}
+	b := s.Blocks[0]
+	c := s.Classifications[b.ID]
+	c.Decisions = []podcast.Decision{{FirstID: tr.Units[b.First].ID, LastID: tr.Units[b.First].ID, Label: "paid_ad", Reason: "corrected promo boundary"}, {FirstID: tr.Units[b.First+1].ID, LastID: tr.Units[b.Last].ID, Label: "content", Reason: "case discussion"}}
+	if _, err := e.PodcastClassify(ctx, r.ID, c); err != nil {
+		t.Fatal("reopening lost delivered read receipts: ", err)
+	}
+	if _, err := e.PodcastReclassify(ctx, r.ID, oldDigest); err != nil {
+		t.Fatal("lost reopen response could not be replayed: ", err)
+	}
+	s, _ = loadPodcastSession(parseExecutionContextMust(t, e, r.ID))
+	if podcast.Digest(s.Classifications[b.ID]) != podcast.Digest(c) {
+		t.Fatal("reopen response replay erased replacement labels")
+	}
+	r, err = e.Resume(ctx, r.ID, "plan", nil)
+	if err != nil || r.WaitingCondition != "podcast_review" || len(requests) != 1 {
+		t.Fatalf("revised plan repeated worker jobs: %+v %v", r, err)
+	}
+	ec = parseExecutionContextMust(t, e, r.ID)
+	s, err = loadPodcastSession(ec)
+	if err != nil || s.Cuts.RemovedMS == 0 || podcast.Digest(s.Cuts) == oldDigest {
+		t.Fatal("replacement labels did not produce new cuts", err)
+	}
+	newDigest := podcast.Digest(s.Cuts)
+	if _, err := e.PodcastReview(ctx, r.ID, newDigest, true, 0); err == nil {
+		t.Fatal("old review receipts approved the revised cut without reading it")
+	}
+	ec.State["podcast_render_job"] = "already-admitted-render"
+	if err := e.persistExecutionState(ctx, ec); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.PodcastReclassify(ctx, r.ID, newDigest); err == nil {
+		t.Fatal("admitted render could be reopened")
+	}
+	delete(ec.State, "podcast_render_job")
+	if err := e.persistExecutionState(ctx, ec); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.PodcastReview(ctx, r.ID, "", false, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.PodcastReview(ctx, r.ID, newDigest, true, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.PodcastReclassify(ctx, r.ID, newDigest); err == nil {
+		t.Fatal("approved cuts could be reopened")
+	}
+	s, err = loadPodcastSession(ec)
+	if err != nil {
+		t.Fatal(err)
+	}
 	s.Known = map[string]podcast.AdKnownUnit{tr.Units[0].ID: {Label: "paid_ad"}}
 	if err := savePodcastSession(ec, s); err != nil {
 		t.Fatal(err)
