@@ -7,9 +7,10 @@ import (
 )
 
 type PodcastConfig struct {
-	Enabled     bool                       `yaml:"enabled"`
-	ArtifactDir string                     `yaml:"artifact_dir"`
-	Podcasts    map[string]PodcastSettings `yaml:"podcasts"`
+	Enabled         bool                       `yaml:"enabled"`
+	ArtifactDir     string                     `yaml:"artifact_dir"`
+	LocalCatalogDir string                     `yaml:"local_catalog_dir"`
+	Podcasts        map[string]PodcastSettings `yaml:"podcasts"`
 }
 type PodcastSettings struct {
 	KnownAdsFirstPass  bool     `yaml:"known_ads_first_pass"`
@@ -56,6 +57,9 @@ func (c PodcastConfig) Validate() error {
 	}
 	if !filepath.IsAbs(c.ArtifactDir) || c.ArtifactDir == "/" {
 		return fmt.Errorf("podcasts.artifact_dir must be an absolute private checkpoint directory")
+	}
+	if c.LocalCatalogDir != "" && (!filepath.IsAbs(c.LocalCatalogDir) || c.LocalCatalogDir == "/") {
+		return fmt.Errorf("podcasts.local_catalog_dir must be an absolute private shared directory")
 	}
 	for id, s := range c.Podcasts {
 		if id == "" {

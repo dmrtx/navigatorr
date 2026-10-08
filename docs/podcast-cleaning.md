@@ -18,6 +18,8 @@ Coordinator configuration (disabled by default):
 podcasts:
   enabled: true
   artifact_dir: /var/lib/navigatorr/podcasts
+  # Optional private directory shared with MoonStation for local publication locks.
+  local_catalog_dir: /volume1/Media/PodcastServer/podcast/.podupload/ad-catalog
   podcasts:
     generation-why:
       enabled: true
@@ -109,6 +111,27 @@ passes. A player that already downloaded a local copy decides when to fetch it
 again; retaining the URL cannot replace a copy on that device.
 
 ## Orchestrate the full review through MCP
+
+MoonStation also supports a first acoustic pass on its own host while this
+worker is offline. `GET /api/maintenance/podcast-local-library?podcast_id=...`
+returns the current enabled policy and the durable catalog metadata mirror
+without contacting the worker. Initialize the mirror once with
+`podcast_ad_library`; full reviews refresh it after learning. The consumer
+reconstructs only these active approved references from its retained original
+audio and complete native review artifacts. A missing mirror stays withheld;
+an incomplete local waveform library keeps all audio pending later review.
+This pass has no transcript yet; its first full review runs native ASR later.
+
+Both containers must mount the **same** private `local_catalog_dir` inode.
+MoonStation sets `NAVIGATORR_AD_CATALOG_DIR` to its corresponding local path.
+Provision access for both service users to this directory only. Catalog
+metadata is readable within that private directory, and the stable per-scope
+lockfile is writable by both. Local publication holds that lock through the
+candidate's atomic rename, performed by the lock-owning helper. Revocation
+uses the same lock and persists a separate tombstone before contacting the
+worker, retaining it across lost acknowledgements and stale catalog responses.
+Current policy/catalog are revalidated before every local publication/recovery.
+This adds no scheduler or classification provider.
 
 1. `action_run(action="clean_podcast_ads", inputs=<JSON string>)` with `path`,
    `podcast_id`, `output_path`. Optionally pass `source_sha256`, `feed_id`,
