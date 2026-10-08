@@ -8,10 +8,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strings"
 )
 
 const Version = 1
 const PromptVersion = "podcast-labels-v1"
+const AnalysisFull = "full"
+const AnalysisKnownAdsOnly = "known_ads_only"
 
 type Unit struct {
 	ID      string `json:"id"`
@@ -91,6 +94,7 @@ type Cut struct {
 	EndMS   int64  `json:"end_ms"`
 }
 type Cuts struct {
+	AnalysisMode         string `json:"analysis_mode,omitempty"`
 	Version              int    `json:"version"`
 	SourceHash           string `json:"source_hash"`
 	TranscriptDigest     string `json:"transcript_digest"`
@@ -101,16 +105,31 @@ type Cuts struct {
 	Ranges               []Cut  `json:"ranges"`
 }
 
+// Automatic is a deterministic first pass over verified existing references.
+// It supplies no LLM classifications or textual review approval.
+type AdAutomatic struct {
+	Scope  string `json:"scope"`
+	Policy Policy `json:"policy"`
+}
+
+func (a AdAutomatic) Validate(c Cuts) error {
+	if a.Scope == "" || len(a.Scope) > 128 || !a.Policy.KnownAdsFirstPass || c.AnalysisMode != AnalysisKnownAdsOnly || Digest(a.Policy) != c.PolicyDigest {
+		return fmt.Errorf("invalid automatic known-ad scope/policy/mode")
+	}
+	return a.Policy.Validate()
+}
+
 // Task travels through the existing worker queue, not a second scheduler.
 type Task struct {
-	Version    int         `json:"version"`
-	Operation  string      `json:"operation"`
-	Language   string      `json:"language"`
-	ASRJobID   string      `json:"asr_job_id,omitempty"`
-	Cuts       *Cuts       `json:"cuts,omitempty"`
-	Catalog    *AdCatalog  `json:"catalog,omitempty"`
-	Learning   *AdLearning `json:"learning,omitempty"`
-	MatchJobID string      `json:"match_job_id,omitempty"`
+	Version    int          `json:"version"`
+	Operation  string       `json:"operation"`
+	Language   string       `json:"language"`
+	ASRJobID   string       `json:"asr_job_id,omitempty"`
+	Cuts       *Cuts        `json:"cuts,omitempty"`
+	Catalog    *AdCatalog   `json:"catalog,omitempty"`
+	Learning   *AdLearning  `json:"learning,omitempty"`
+	Automatic  *AdAutomatic `json:"automatic,omitempty"`
+	MatchJobID string       `json:"match_job_id,omitempty"`
 }
 type Result struct {
 	Operation        string  `json:"operation"`
@@ -157,12 +176,12 @@ func (t Task) Validate() error {
 	}
 	switch t.Operation {
 	case "match_ads":
-		if t.Catalog == nil || t.Cuts != nil || t.ASRJobID != "" || t.Learning != nil || t.MatchJobID != "" {
+		if t.Catalog == nil || t.Cuts != nil || t.ASRJobID != "" || t.Learning != nil || t.Automatic != nil || t.MatchJobID != "" {
 			return fmt.Errorf("matching requires only a frozen catalog")
 		}
 		return t.Catalog.Validate()
 	case "transcribe":
-		if t.Cuts != nil || t.ASRJobID != "" || t.Catalog != nil || t.Learning != nil || t.MatchJobID != "" {
+		if t.Cuts != nil || t.ASRJobID != "" || t.Catalog != nil || t.Learning != nil || t.Automatic != nil || t.MatchJobID != "" {
 			return fmt.Errorf("transcription cannot include cuts")
 		}
 	case "render":
@@ -178,6 +197,15 @@ func (t Task) Validate() error {
 		if t.MatchJobID != "" && !regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`).MatchString(t.MatchJobID) {
 			return fmt.Errorf("invalid matching job")
 		}
+		if t.Automatic != nil {
+			if t.MatchJobID == "" || t.Learning != nil || !strings.EqualFold(strings.ReplaceAll(t.Language, "-", "_"), strings.ReplaceAll(t.Automatic.Policy.Language, "-", "_")) {
+				return fmt.Errorf("automatic known-ad rendering requires matching evidence without classifications")
+			}
+			return t.Automatic.Validate(*t.Cuts)
+		}
+		if t.Cuts.AnalysisMode == AnalysisKnownAdsOnly {
+			return fmt.Errorf("known-ad cuts require an automatic proof")
+		}
 		if t.Learning != nil {
 			return t.Learning.Validate(*t.Cuts)
 		}
@@ -187,6 +215,9 @@ func (t Task) Validate() error {
 	return nil
 }
 func (c Cuts) Validate() error {
+	if c.AnalysisMode != "" && c.AnalysisMode != AnalysisFull && c.AnalysisMode != AnalysisKnownAdsOnly {
+		return fmt.Errorf("invalid cuts analysis mode")
+	}
 	if c.Version != Version || !ValidHash(c.SourceHash) || !ValidHash(c.TranscriptDigest) || !ValidHash(c.PolicyDigest) || !ValidHash(c.ClassificationDigest) || c.DurationMS <= 0 || len(c.Ranges) > 1000 {
 		return fmt.Errorf("invalid cut identity")
 	}

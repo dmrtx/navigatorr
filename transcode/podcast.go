@@ -4,6 +4,7 @@ package transcode
 // execution. Installed locale names alone do not prove usable native timing.
 type PodcastCapabilities struct {
 	AdAlgorithm          string `json:"ad_algorithm,omitempty"`
+	AutomaticKnownAds    bool   `json:"automatic_known_ads,omitempty"`
 	Available            bool   `json:"available"`
 	Provider             string `json:"provider"`
 	ProviderVersion      string `json:"provider_version,omitempty"`

@@ -69,6 +69,7 @@ func (w *Worker) podcastCapabilities(ctx context.Context) *transcode.PodcastCapa
 	var cached transcode.PodcastCapabilities
 	if podcast.ReadJSON(checkpoint, &cached) == nil && cached.Available {
 		cached.AdAlgorithm = podcast.AdAlgorithm
+		cached.AutomaticKnownAds = true
 		return &cached
 	}
 	if err := os.MkdirAll(dir, 0700); err != nil {
@@ -104,6 +105,7 @@ func (w *Worker) podcastCapabilities(ctx context.Context) *transcode.PodcastCapa
 	c.NativeTimingVerified = true
 	c.MP3RenderVerified = true
 	c.AdAlgorithm = podcast.AdAlgorithm
+	c.AutomaticKnownAds = true
 	c.VerifiedLanguage = language
 	if err := podcast.WriteJSON(checkpoint, c); err != nil {
 		return fail(err)
