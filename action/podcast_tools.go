@@ -271,6 +271,74 @@ func (e *Engine) PodcastReview(ctx context.Context, id, digest string, approve b
 	}
 	return response(), nil
 }
+
+// Reopening is an explicit review decision. Policy, transcript, delivered reads
+// and completed worker identities stay immutable; no render may be admitted.
+func (e *Engine) PodcastReclassify(ctx context.Context, id, digest string) (map[string]any, error) {
+	ctx, ec, release, err := e.podcastContext(ctx, id, true)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	inst, err := e.deps.Store.GetActionInstance(id)
+	if err != nil {
+		return nil, err
+	}
+	s, err := loadPodcastSession(ec)
+	if err != nil {
+		return nil, err
+	}
+	if err := e.checkKnownAds(ctx, s); err != nil {
+		return nil, err
+	}
+	if !podcast.ValidHash(digest) || s.ApprovedDigest != "" || getString(ec.State, "podcast_render_job") != "" {
+		return nil, fmt.Errorf("reclassification requires an unapproved review digest and no admitted render")
+	}
+	tmpl, ok := e.GetTemplate("clean_podcast_ads")
+	if !ok {
+		return nil, fmt.Errorf("podcast template unavailable")
+	}
+	classifyStep, reviewStep := actionStepIndex(tmpl, "podcast_classify"), actionStepIndex(tmpl, "podcast_review")
+	response := func() map[string]any {
+		return map[string]any{"action_id": id, "reopened": true, "retained_blocks": len(s.Classifications), "transcript_digest": podcast.Digest(s.Transcript), "next_step": "Replace affected blocks through podcast_classify, then action_resume decision=plan and review the new exact digest before rendering."}
+	}
+	if inst.CurrentStep == classifyStep && inst.WaitingCondition == "podcast_classification" && s.Cuts == nil && getString(ec.State, "podcast_reopened_cuts_digest") == digest {
+		return response(), nil // Lost response replay does not erase replacement labels.
+	}
+	if inst.CurrentStep != reviewStep || inst.WaitingCondition != "podcast_review" {
+		return nil, fmt.Errorf("reclassification requires current waiting podcast review")
+	}
+	// Recover a crash after clearing the session but before moving the SQLite
+	// checkpoint. The old digest is still in the durable action summary then.
+	expected, _ := podcastSummary(ec)["cuts_digest"].(string)
+	if s.Cuts != nil {
+		expected = podcast.Digest(s.Cuts)
+	}
+	if digest != expected {
+		return nil, fmt.Errorf("reclassification requires the exact current cuts digest")
+	}
+	s.Cuts, s.ReviewReads, s.ApprovedDigest = nil, nil, ""
+	if err := savePodcastSession(ec, s); err != nil {
+		return nil, err
+	}
+	m := podcastSummary(ec)
+	for _, key := range []string{"cuts_digest", "coverage", "removed_ms", "cut_count", "classification_error"} {
+		delete(m, key)
+	}
+	m["phase"] = "awaiting_classification"
+	m["classified_blocks"] = len(s.Classifications)
+	ec.State["podcast_reopened_cuts_digest"] = digest
+	inst.StateJSON, inst.OutputsJSON = toJSON(ec.State), toJSON(ec.Outputs)
+	inst.CurrentStep = classifyStep
+	inst.WaitingCondition = "podcast_classification"
+	inst.WaitingReason = "Revise affected ID classifications, then plan and review new cuts"
+	inst.WaitingOptionsJSON = "[]"
+	if err := e.updateInstance(ctx, inst); err != nil {
+		return nil, err
+	}
+	return response(), nil
+}
+
 func (e *Engine) preparePodcastRetry(ctx context.Context, ec *ExecutionContext) error {
 	op := "transcribe"
 	if getString(ec.State, "podcast_match_ads_job") != "" && getString(ec.State, "podcast_match_path") == "" {

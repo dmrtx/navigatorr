@@ -217,6 +217,14 @@ the original audio. No additional ASR or model invocation occurs for embedding.
 
 ## Confirmed-ad first pass
 
+Before approving a cut review, `podcast_review(reclassify=true, digest=...)`
+explicitly reopens classification if a boundary is wrong. The UI's **Revise
+labels** control uses the same operation. It retains native ASR, known evidence,
+read receipts and existing block labels; replace only affected blocks, regenerate
+the plan, then read and approve its new exact digest. Approved reviews and
+admitted renders cannot be reopened. A response replay retains replacement
+labels; this uses the same durable Action Engine checkpoint.
+
 Set `known_ads_first_pass: true` per podcast profile after upgrading both hosts.
 This changes the frozen policy digest, so new selections/revisions get a new
 identity. Existing completed episodes and native transcripts remain valid.
