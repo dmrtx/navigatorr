@@ -252,11 +252,11 @@ func (e *Engine) writePodcastCatalog(scope string, catalog podcast.AdCatalog) er
 func (e *Engine) lockPodcastCatalog(ctx context.Context, scope string) (func(), error) {
 	file := e.podcastCatalogPath(scope) + ".lock"
 	if err := os.MkdirAll(filepath.Dir(file), 0700); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create ad catalog lock directory: %w", err)
 	}
 	f, err := os.OpenFile(file, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0666)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("open ad catalog lock: %w", err)
 	}
 	for {
 		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
@@ -267,7 +267,7 @@ func (e *Engine) lockPodcastCatalog(ctx context.Context, scope string) (func(), 
 				if err := f.Chmod(0666); err != nil {
 					syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 					f.Close()
-					return nil, err
+					return nil, fmt.Errorf("set shared ad catalog lock permissions: %w", err)
 				}
 			}
 			return func() { syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }, nil
@@ -276,7 +276,7 @@ func (e *Engine) lockPodcastCatalog(ctx context.Context, scope string) (func(), 
 			// EACCES. Opening the file and chmod errors remain fatal; only this
 			// flock contention waits, bounded by the request context below.
 			f.Close()
-			return nil, err
+			return nil, fmt.Errorf("acquire ad catalog flock: %w", err)
 		}
 		select {
 		case <-ctx.Done():
