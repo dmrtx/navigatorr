@@ -55,9 +55,20 @@ func TestLocalCatalogSurvivesOfflineRestartRevocationAndPolicyChange(t *testing.
 	if err != nil || !v["catalog"].(podcast.AdCatalog).References[0].Revoked {
 		t.Fatalf("tombstone lost %v %v", v, err)
 	}
+	unknown := ref
+	unknown.ID = podcast.Digest("not mirrored yet")
+	unknown.Digest = unknown.ID
+	if _, err := e.PodcastAdLibrary(context.Background(), scope, unknown.ID); err == nil {
+		t.Fatal("offline unknown revoke acknowledged")
+	}
+	tc.catalog.References = append(tc.catalog.References, unknown)
 	tc.offline = false
 	if c, err := e.PodcastAdLibrary(context.Background(), scope, ""); err != nil || !c.References[0].Revoked {
 		t.Fatalf("stale worker resurrected ad: %v %v", c, err)
+	}
+	v, err = e.PodcastLocalLibrary(scope)
+	if err != nil || !v["catalog"].(podcast.AdCatalog).References[1].Revoked {
+		t.Fatal("new reference ignored durable tombstone")
 	}
 	e.deps.Config.Podcasts.Podcasts[scope] = config.PodcastSettings{Enabled: true, KnownAdsFirstPass: true, Remove: []string{"cross_promo"}}
 	v, err = e.PodcastLocalLibrary(scope)
