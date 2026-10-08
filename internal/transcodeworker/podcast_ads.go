@@ -283,6 +283,11 @@ func (w *Worker) learnAds(ctx context.Context, dir, file, input string, t podcas
 					found = true
 					break
 				}
+				// Keep conflicting active categories so automatic labels remain
+				// ambiguous. A tombstone still suppresses the recording across labels.
+				if !old.Revoked && old.Label != ref.Label {
+					continue
+				}
 				if old.TextDigest != ref.TextDigest || old.DurationMS-ref.DurationMS > 2000 || ref.DurationMS-old.DurationMS > 2000 {
 					continue
 				}
@@ -304,7 +309,7 @@ func (w *Worker) learnAds(ctx context.Context, dir, file, input string, t podcas
 			}
 			if !found {
 				for _, prior := range fresh {
-					if r.TextDigest != prior.TextDigest {
+					if r.Label != prior.Label || r.TextDigest != prior.TextDigest {
 						continue
 					}
 					same, err := acoustic.SameRecording(ctx, r.PCM, prior.PCM)
