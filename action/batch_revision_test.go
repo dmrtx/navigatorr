@@ -9,6 +9,49 @@ import (
 	"github.com/jakenesler/navigatorr/store"
 )
 
+func TestBatchRevisionFromUnsubmittedSearchReview(t *testing.T) {
+	for _, deferred := range []bool{false, true} {
+		t.Run(fmt.Sprintf("deferred=%v", deferred), func(t *testing.T) {
+			st := setupTestStore(t)
+			e := NewEngine(EngineDeps{Store: st, Config: &config.Config{}})
+			state := map[string]any{}
+			if deferred {
+				state["batch_retry_pending"] = map[string]any{"one": true}
+			}
+			seedActionInstance(t, st, "batch-review", "transcode_batch", StatusWaitingDecision, 1, "", map[string]any{"mode": "x265_preserve"}, state)
+			seedActionInstance(t, st, "search-review", "transcode_media", StatusWaitingDecision, 1, "", map[string]any{"profile": "old", "replace_original": false, "parent_action_id": "batch-review"}, map[string]any{"benchmark_search_review_required": true})
+			child, _ := st.GetActionInstance("search-review")
+			child.WaitingCondition = "benchmark_search_review"
+			child.WaitingOptionsJSON = toJSON([]WaitingOption{{Decision: "cancel"}, {Decision: "run_once_after_review"}})
+			st.UpdateActionInstance(*child)
+			st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: "batch-review", ItemKey: "one", FilePath: "/media/one.mkv", Status: "waiting_decision", Decision: "transcode", ChildActionID: child.ID, Profile: "old"})
+			root, _ := st.GetActionInstance("batch-review")
+			items, _ := st.ListTranscodeBatchItems(root.ID)
+			if deferred {
+				ctx, release, err := e.claimExecution(context.Background(), root.ID, true)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer release()
+				if err := e.applyPendingBatchAttempts(ctx, parseExecutionContext(root, e), items); err != nil {
+					t.Fatal(err)
+				}
+			} else if _, err := e.ReconfigureBatch(context.Background(), root.ID, "unfinished", "", BatchSelectionVersion(root, items), "", "new-profile", map[string]any{"profile": "live-action-hevc"}); err != nil {
+				t.Fatal(err)
+			}
+			items, _ = st.ListTranscodeBatchItems(root.ID)
+			child, _ = st.GetActionInstance(child.ID)
+			if child.Status != StatusCancelled || items[0].Status != "queued" || items[0].ChildActionID != "" {
+				t.Fatal("search review blocked or admitted old work", child, items)
+			}
+			root, _ = st.GetActionInstance(root.ID)
+			if stateObject(parseExecutionContext(root, e).State, "batch_attempt_history")["one"] == nil {
+				t.Fatal("previous search review was lost")
+			}
+		})
+	}
+}
+
 func TestModeBatchExplicitProfileContinuesWithExhaustedBudget(t *testing.T) {
 	st := setupTestStore(t)
 	e := NewEngine(EngineDeps{Store: st, Config: &config.Config{Transcode: config.TranscodeConfig{MaxParallelJobs: 2}}})

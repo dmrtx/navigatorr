@@ -76,6 +76,28 @@ func recordBatchAttempt(ec *ExecutionContext, item *store.TranscodeBatchItem) {
 	item.Reasons = []string{"New settings requested; previous attempt retained in history"}
 }
 
+// A search review has no encoded candidate to reject. Retire its unsubmitted
+// attempt with cancellation; validated candidates retain their versioned review.
+func (e *Engine) retireBatchDecision(ctx context.Context, child *store.ActionInstance) error {
+	var options []WaitingOption
+	if err := json.Unmarshal([]byte(child.WaitingOptionsJSON), &options); err != nil {
+		return err
+	}
+	canCancel := false
+	for _, option := range options {
+		if option.Decision == "reject" {
+			_, err := e.ResumeReviewedCandidate(ctx, child.ID, child.ID, CandidateDecisionVersion(child), "reject")
+			return err
+		}
+		canCancel = canCancel || option.Decision == "cancel"
+	}
+	if canCancel {
+		_, err := e.Cancel(ctx, child.ID, "Encoding settings changed; previous attempt retained and original preserved")
+		return err
+	}
+	return fmt.Errorf("resolve the previous attempt's decision before changing encoding settings")
+}
+
 // Change scheduling intent in the same coordinator. Original InputsJSON and
 // old child inputs remain audit records. Active files finish their existing
 // attempt before a replacement attempt is admitted, never concurrently.
@@ -187,7 +209,7 @@ func (e *Engine) ReconfigureBatch(ctx context.Context, id, scope, candidateID, v
 			continue
 		}
 		if child != nil && child.Status == StatusWaitingDecision {
-			if _, err := e.ResumeReviewedCandidate(ctx, child.ID, child.ID, CandidateDecisionVersion(child), "reject"); err != nil {
+			if err := e.retireBatchDecision(ctx, child); err != nil {
 				return nil, err
 			}
 		}
@@ -238,7 +260,7 @@ func (e *Engine) applyPendingBatchAttempts(ctx context.Context, ec *ExecutionCon
 			continue
 		}
 		if child.Status == StatusWaitingDecision {
-			if _, err := e.ResumeReviewedCandidate(ctx, child.ID, child.ID, CandidateDecisionVersion(child), "reject"); err != nil {
+			if err := e.retireBatchDecision(ctx, child); err != nil {
 				return err
 			}
 		}
