@@ -284,6 +284,8 @@ type BenchmarkSampleWindow struct {
 // It is strictly versioned and does NOT accept candidate output paths or replace_original parameters,
 // making original media mutation completely impossible.
 type BenchmarkRequest struct {
+	Automatic           bool      `json:"automatic,omitempty"`
+	ModePolicyVersion   string    `json:"mode_policy_version,omitempty"`
 	SearchBudgetSeconds int       `json:"search_budget_seconds,omitempty"`
 	Mode                string    `json:"mode,omitempty"`
 	SearchDeadline      time.Time `json:"search_deadline,omitzero"`
@@ -345,8 +347,21 @@ type BenchmarkProgressDetails struct {
 	TotalUnits      int    `json:"total_units"`
 }
 
+// Automatic evidence explains one bounded search; discovery is not final validation.
+type BenchmarkAutomaticStage struct {
+	Stage      string   `json:"stage"`
+	Candidates []string `json:"candidates"`
+	Outcome    string   `json:"outcome"`
+}
+type BenchmarkAutomaticEvidence struct {
+	Stages          []BenchmarkAutomaticStage `json:"stages"`
+	Discovery       *BenchmarkDecision        `json:"discovery,omitempty"`
+	VerifiedSamples int                       `json:"verified_samples"`
+}
+
 // BenchmarkStatus captures the current execution status and metadata of a benchmark job.
 type BenchmarkStatus struct {
+	Automatic           *BenchmarkAutomaticEvidence         `json:"automatic,omitempty"`
 	SearchSeconds       *float64                            `json:"search_seconds,omitempty"`
 	PhaseCosts          map[string]PhaseCost                `json:"phase_costs,omitempty"`
 	ReasonCode          string                              `json:"reason_code,omitempty"`
@@ -393,6 +408,24 @@ func DigestBenchmarkRequest(req *BenchmarkRequest) (string, error) {
 func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 	if req == nil {
 		return errors.New("benchmark request cannot be nil")
+	}
+	if req.ModePolicyVersion != "" && req.ModePolicyVersion != "transcode-modes-v1" && req.ModePolicyVersion != optimization.ModePolicyV2 {
+		return errors.New("unsupported mode policy version")
+	}
+	if req.Automatic && (req.Mode == "" || req.ModePolicyVersion != optimization.ModePolicyV2 || len(req.Samples) != 5 || len(req.Candidates) > 12) {
+		return errors.New("automatic search requires v2 mode, five windows and at most twelve candidates")
+	}
+	if req.Automatic {
+		if req.Metric != "vmaf" || req.Quality == nil || req.Quality.VMAF == nil || req.Quality.VMAF.Model == "" {
+			return errors.New("automatic search requires explicit VMAF quality policy")
+		}
+		for i, a := range req.Samples {
+			for _, b := range req.Samples[i+1:] {
+				if a.StartSeconds < b.StartSeconds+b.DurationSeconds && b.StartSeconds < a.StartSeconds+a.DurationSeconds {
+					return errors.New("automatic quality windows must not overlap")
+				}
+			}
+		}
 	}
 	if req.Mode != "" {
 		if req.Mode != "size" && req.Mode != "quality" && req.Mode != "x265_preserve" {

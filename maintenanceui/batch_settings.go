@@ -14,6 +14,7 @@ import (
 // Uses the stored item relation, never the current Sonarr/folder catalog.
 func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 	var body struct {
+		Mode            string   `json:"mode"`
 		ID              string   `json:"id"`
 		Scope           string   `json:"scope"`
 		CandidateID     string   `json:"candidate_id"`
@@ -131,6 +132,10 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	plan["selected"], plan["kept"], plan["active"], plan["files"] = selected, len(items)-selected, active, files
 	plan["requires_explicit_profile"] = requiresProfile
+	plan["mode"] = inputs["mode"]
+	if goal := operationString(state["batch_goal"]); goal != "" {
+		plan["mode"] = goal
+	}
 	settingsView := plan["settings"].(map[string]any)
 	profileNames := make([]string, 0, len(profiles))
 	for name := range profiles {
@@ -159,6 +164,14 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if selected == 0 {
 		fail(w, 409, "no files selected")
+		return
+	}
+	if body.Mode != "" {
+		if operationString(inputs["mode"]) == "" || !containsMode(body.Mode) {
+			fail(w, 400, "invalid processing goal")
+			return
+		}
+		s.admitCommand(w, r, map[string]any{"kind": "reconfigure", "id": body.ID, "scope": body.Scope, "candidate_id": body.CandidateID, "selection_version": body.Version, "decision_version": body.DecisionVersion, "settings": map[string]any{"mode": body.Mode}}, body.Key)
 		return
 	}
 	settings := map[string]any{}
@@ -196,4 +209,8 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 		settings[field.key] = *field.value
 	}
 	s.admitCommand(w, r, map[string]any{"kind": "reconfigure", "id": body.ID, "scope": body.Scope, "candidate_id": body.CandidateID, "selection_version": body.Version, "decision_version": body.DecisionVersion, "settings": settings}, body.Key)
+}
+
+func containsMode(mode string) bool {
+	return mode == "size" || mode == "quality" || mode == "x265_preserve"
 }

@@ -62,40 +62,41 @@ func chunkPayload(id, actionName, section, key string, rawBytes []byte, chunkIdx
 // ActionCompactSummary contains operational fields needed to monitor or continue workflows,
 // omitting full inputs/outputs/state to protect the model's context window.
 type ActionCompactSummary struct {
-	Podcast              map[string]any         `json:"podcast,omitempty"`
-	PhaseCosts           map[string]any         `json:"phase_costs,omitempty"`
-	Mode                 string                 `json:"mode,omitempty"`
-	PolicyDigest         string                 `json:"policy_digest,omitempty"`
-	ReasonCode           string                 `json:"reason_code,omitempty"`
-	SourcePath           string                 `json:"source_path,omitempty"`
-	ParentActionID       string                 `json:"parent_action_id,omitempty"`
-	Origin               string                 `json:"origin"`
-	ID                   string                 `json:"id"`
-	ActionName           string                 `json:"action_name"`
-	Status               string                 `json:"status"`
-	CurrentStep          int                    `json:"current_step"`
-	TotalSteps           int                    `json:"total_steps"`
-	Progress             string                 `json:"progress"`
-	WaitingReason        string                 `json:"waiting_reason,omitempty"`
-	WaitingCondition     string                 `json:"waiting_condition,omitempty"`
-	WaitingOptions       []action.WaitingOption `json:"waiting_options,omitempty"`
-	Error                string                 `json:"error,omitempty"`
-	IdempotencyKey       string                 `json:"idempotency_key,omitempty"`
-	DurationMs           int64                  `json:"duration_ms"`
-	WallDurationMs       int64                  `json:"wall_duration_ms"`
-	QueueDurationMs      *int64                 `json:"queue_duration_ms,omitempty"`
-	EncodeDurationMs     *int64                 `json:"encode_duration_ms,omitempty"`
-	ValidationDurationMs *int64                 `json:"validation_duration_ms,omitempty"`
-	ReconcileLagMs       *int64                 `json:"reconcile_lag_ms,omitempty"`
-	Worker               map[string]any         `json:"worker,omitempty"`
-	Cleanup              map[string]any         `json:"cleanup,omitempty"`
-	Work                 map[string]any         `json:"work,omitempty"`
-	Reconciliation       map[string]any         `json:"reconciliation,omitempty"`
-	Promotion            map[string]any         `json:"promotion,omitempty"`
-	Batch                *BatchSummary          `json:"batch,omitempty"`
-	Benchmark            *benchmarkSummary      `json:"benchmark,omitempty"`
-	CreatedAt            string                 `json:"created_at,omitempty"`
-	UpdatedAt            string                 `json:"updated_at,omitempty"`
+	Transcode            *action.TranscodeExplanation `json:"transcode,omitempty"`
+	Podcast              map[string]any               `json:"podcast,omitempty"`
+	PhaseCosts           map[string]any               `json:"phase_costs,omitempty"`
+	Mode                 string                       `json:"mode,omitempty"`
+	PolicyDigest         string                       `json:"policy_digest,omitempty"`
+	ReasonCode           string                       `json:"reason_code,omitempty"`
+	SourcePath           string                       `json:"source_path,omitempty"`
+	ParentActionID       string                       `json:"parent_action_id,omitempty"`
+	Origin               string                       `json:"origin"`
+	ID                   string                       `json:"id"`
+	ActionName           string                       `json:"action_name"`
+	Status               string                       `json:"status"`
+	CurrentStep          int                          `json:"current_step"`
+	TotalSteps           int                          `json:"total_steps"`
+	Progress             string                       `json:"progress"`
+	WaitingReason        string                       `json:"waiting_reason,omitempty"`
+	WaitingCondition     string                       `json:"waiting_condition,omitempty"`
+	WaitingOptions       []action.WaitingOption       `json:"waiting_options,omitempty"`
+	Error                string                       `json:"error,omitempty"`
+	IdempotencyKey       string                       `json:"idempotency_key,omitempty"`
+	DurationMs           int64                        `json:"duration_ms"`
+	WallDurationMs       int64                        `json:"wall_duration_ms"`
+	QueueDurationMs      *int64                       `json:"queue_duration_ms,omitempty"`
+	EncodeDurationMs     *int64                       `json:"encode_duration_ms,omitempty"`
+	ValidationDurationMs *int64                       `json:"validation_duration_ms,omitempty"`
+	ReconcileLagMs       *int64                       `json:"reconcile_lag_ms,omitempty"`
+	Worker               map[string]any               `json:"worker,omitempty"`
+	Cleanup              map[string]any               `json:"cleanup,omitempty"`
+	Work                 map[string]any               `json:"work,omitempty"`
+	Reconciliation       map[string]any               `json:"reconciliation,omitempty"`
+	Promotion            map[string]any               `json:"promotion,omitempty"`
+	Batch                *BatchSummary                `json:"batch,omitempty"`
+	Benchmark            *benchmarkSummary            `json:"benchmark,omitempty"`
+	CreatedAt            string                       `json:"created_at,omitempty"`
+	UpdatedAt            string                       `json:"updated_at,omitempty"`
 }
 
 // StepSummary represents a compact execution step record omitting raw JSON payloads.
@@ -127,6 +128,7 @@ func toCompactSummary(res *action.ActionResult) ActionCompactSummary {
 		return ActionCompactSummary{}
 	}
 	return ActionCompactSummary{
+		Transcode:  action.ExplainTranscode(res),
 		Podcast:    actionProgressMap(res.State["podcast"]),
 		PhaseCosts: actionProgressMap(res.State["phase_costs"]),
 		Mode:       summaryInput(res, "mode"), PolicyDigest: summaryStateString(res, "policy_digest"), ReasonCode: summaryStateString(res, "reason_code"),
@@ -183,6 +185,11 @@ func actionOrigin(state map[string]any) string {
 }
 
 func summaryInput(res *action.ActionResult, key string) string {
+	if key == "mode" {
+		if goal, _ := res.State["batch_goal"].(string); goal != "" {
+			return goal
+		}
+	}
 	value, _ := res.Inputs[key].(string)
 	return value
 }
@@ -308,6 +315,7 @@ func toolBoundedJSON(v any, maxBytes int, onExceeded func(actualBytes int) any) 
 }
 
 func registerActionTools(s *server.MCPServer, engine *action.Engine) {
+	registerTranscodeGoalTool(s, engine)
 	if engine == nil {
 		return
 	}

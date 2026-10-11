@@ -1088,6 +1088,17 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 				copy.Inputs[key] = value
 			}
 		}
+		if mode := getString(settings, "mode"); mode != "" {
+			copy.State = map[string]any{}
+			for key, value := range ec.State {
+				copy.State[key] = value
+			}
+			copy.State["mode_policy"] = settings["mode_policy"]
+			for _, key := range []string{"profile", "profile_config", "priority", "metric", "min_savings_percent", "max_size_increase_percent", "preserve_source_bit_depth", "shared_calibration"} {
+				delete(copy.Inputs, key)
+			}
+			item.Profile = "mode-" + mode
+		}
 		if profile := getString(settings, "profile"); profile != "" && profile != "same" {
 			copy.State = map[string]any{}
 			for key, value := range ec.State {

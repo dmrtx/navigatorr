@@ -54,6 +54,9 @@ func batchChildKey(ec *ExecutionContext, item store.TranscodeBatchItem) string {
 // changes only future attempts and does not consume the original mode's budget.
 func batchItemMode(ec *ExecutionContext, item store.TranscodeBatchItem) string {
 	settings, _ := stateObject(ec.State, "batch_item_settings")[item.ItemKey].(map[string]any)
+	if mode := getString(settings, "mode"); mode != "" {
+		return mode
+	}
 	if profile := getString(settings, "profile"); profile != "" && profile != "same" {
 		return ""
 	}
@@ -153,6 +156,16 @@ func (e *Engine) ReconfigureBatch(ctx context.Context, id, scope, candidateID, v
 		}
 	}
 
+	if mode := getString(settings, "mode"); mode != "" {
+		if getString(ec.Inputs, "mode") == "" || len(settings) != 1 {
+			return nil, fmt.Errorf("goal changes cannot include technical settings")
+		}
+		policy, err := modePolicy(mode, getBool(ec.State, "is_anime"))
+		if err != nil {
+			return nil, err
+		}
+		settings = map[string]any{"mode": mode, "mode_policy": policy}
+	}
 	// A completed or reserved replacement keeps its own file and history.
 	// Only the remaining original candidates may receive new encoding settings.
 	selectedKeys := map[string]bool{}
@@ -183,6 +196,9 @@ func (e *Engine) ReconfigureBatch(ctx context.Context, id, scope, candidateID, v
 			for key, value := range old {
 				merged[key] = value
 			}
+		}
+		if getString(settings, "mode") != "" {
+			merged = map[string]any{}
 		}
 		for key, value := range settings {
 			merged[key] = value
@@ -222,6 +238,9 @@ func (e *Engine) ReconfigureBatch(ctx context.Context, id, scope, candidateID, v
 		}
 		recordBatchAttempt(ec, item)
 		changed = append(changed, *item)
+	}
+	if getString(settings, "mode") != "" && scope == "all" {
+		ec.State["batch_goal"] = getString(settings, "mode")
 	}
 	ec.State["batch_settings_revision"] = getInt(ec.State, "batch_settings_revision") + 1
 	stateObject(ec.State, "batch_revision_receipts")[receipt] = true

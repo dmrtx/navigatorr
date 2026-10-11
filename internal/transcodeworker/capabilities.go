@@ -144,6 +144,7 @@ func probeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratch
 	ver, commit := GetBuildMetadata()
 	caps := transcode.WorkerCapabilities{
 		ExplicitMain10Benchmarks: true,
+		AutomaticModesV2:         true,
 		ProtocolVersion:          transcode.WorkerProtocolVersion,
 		WorkerVersion:            ver,
 		BuildGitCommit:           commit,

@@ -299,8 +299,8 @@
               <fieldset id="processing-goal" class="processing-goal">
                 <legend>Choose your goal</legend>
                 <label><input type="radio" name="processing-mode" value="size" /><span><strong>Smaller files</strong><small>Acceptable quality, at least 15% measured savings.</small></span></label>
-                <label><input type="radio" name="processing-mode" value="quality" checked /><span><strong>Prioritize quality</strong><small>Strict quality checks, at least 15% measured savings.</small></span></label>
-                <label><input type="radio" name="processing-mode" value="x265_preserve" /><span><strong>Preserve quality · Convert to x265</strong><small>Strict quality checks, no file growth. Existing HEVC stays unchanged.</small></span></label>
+                <label><input type="radio" name="processing-mode" value="quality" checked /><span><strong>Prioritize quality</strong><small>Strict quality checks, no file growth.</small></span></label>
+                <label><input type="radio" name="processing-mode" value="x265_preserve" /><span><strong>Convert to HEVC · Strict quality</strong><small>Strict quality checks, no file growth. Existing HEVC stays unchanged.</small></span></label>
               </fieldset>
               <p id="processing-policy" class="metadata">Automatic: samples determine the effective plan. Savings and quality must pass validation; a result is not guaranteed.</p>
               <label class="check technical-toggle"><input id="technical" type="checkbox" />Technical tools and legacy profiles</label>
@@ -925,11 +925,12 @@
       <details id="reconfigure-selection" class="reconfigure-selection"><summary>Selected files</summary><div id="reconfigure-files" class="metadata"></div></details>
       <form id="reconfigure-form" hidden>
         <label id="reconfigure-scope-label">Apply to<select id="reconfigure-scope"></select></label>
+        <label id="reconfigure-mode-label" hidden>Goal<select id="reconfigure-mode"><option value="size">Smaller files · At least 15% savings</option><option value="quality">Prioritize quality · No file growth</option><option value="x265_preserve">Convert to HEVC · Strict quality</option></select></label>
         <label>Profile<select id="reconfigure-profile" required aria-describedby="reconfigure-profile-note"></select></label>
         <p id="reconfigure-profile-note" class="profile-guidance" hidden></p>
         <p id="reconfigure-current-profiles" class="metadata"></p>
         <div id="reconfigure-profile-info" class="profile-guidance" hidden></div>
-        <details class="reconfigure-limits"><summary>Savings and size limits</summary><div class="form-grid">
+        <details id="reconfigure-limits" class="reconfigure-limits"><summary>Savings and size limits</summary><div class="form-grid">
           <label>Minimum savings (%)<input id="reconfigure-savings" type="number" min="0.1" max="100" step="any" placeholder="Default" /></label>
           <label>Maximum output growth (%)<input id="reconfigure-growth" type="number" min="0" max="1000" step="any" placeholder="Default" /></label>
         </div><p class="muted">Current limits stay unless edited. Blank edited limits use the defaults.</p></details>
