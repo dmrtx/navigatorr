@@ -30,6 +30,13 @@ func (e *Engine) prepareRemoteRetry(ctx context.Context, inst *store.ActionInsta
 				ec.State["transcode_reconcile"] = true
 				return submit, nil
 			}
+			if he, ok := transcodeHTTPError(err); ok && he.StatusCode == 404 {
+				// A rejected admission leaves a coordinator identity but no worker
+				// job. Reconcile/resubmit the same identity under the submit guard;
+				// do not allocate another attempt or repeat a completed benchmark.
+				ec.State["transcode_reconcile"] = true
+				return submit, nil
+			}
 			return resume, fmt.Errorf("cannot retry before confirming remote job %s: %w", jobID, err)
 		}
 		e.observeTranscodeStatus(ec, st)
@@ -81,6 +88,10 @@ func (e *Engine) prepareRemoteRetry(ctx context.Context, inst *store.ActionInsta
 		st, err := e.deps.Transcode.BenchmarkStatus(ctx, jobID)
 		if err != nil {
 			if isRetryableWorkerPollError(err) {
+				ec.State["benchmark_reconcile"] = true
+				return submit, nil
+			}
+			if he, ok := transcodeHTTPError(err); ok && he.StatusCode == 404 {
 				ec.State["benchmark_reconcile"] = true
 				return submit, nil
 			}

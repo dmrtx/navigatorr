@@ -239,6 +239,92 @@ func TestRetryCreatesNewWorkerIdentityOnlyAfterConfirmedFailure(t *testing.T) {
 	}
 }
 
+func TestRetryAfterRejectedTranscodeAdmissionRetainsAnalysisAndIdentity(t *testing.T) {
+	for _, kind := range []string{"missing", "wrapped_missing", "uncertain_missing", "forbidden"} {
+		t.Run(kind, func(t *testing.T) {
+			st := setupTestStore(t)
+			accepted := false
+			statusErr := error(&transcode.HTTPError{StatusCode: 404})
+			if kind == "wrapped_missing" {
+				statusErr = fmt.Errorf("status: %w", statusErr)
+			}
+			if kind == "uncertain_missing" {
+				statusErr = &transcode.UncertainError{Op: "status", Err: statusErr}
+			}
+			if kind == "forbidden" {
+				statusErr = &transcode.HTTPError{StatusCode: 403}
+			}
+			mock := &mockTranscodeExecutor{
+				statusFunc: func(_ context.Context, id string) (transcode.JobStatus, error) {
+					if !accepted {
+						return transcode.JobStatus{}, statusErr
+					}
+					return transcode.JobStatus{ID: id, Status: transcode.StatusRunning}, nil
+				},
+				submitFunc: func(_ context.Context, req transcode.Request) (transcode.Job, error) {
+					if req.ID != "job-rejected" || req.IdempotencyKey != "job-rejected" {
+						t.Fatalf("identity changed: %+v", req)
+					}
+					accepted = true
+					return transcode.Job{ID: req.ID}, nil
+				},
+			}
+			e := NewEngine(EngineDeps{Store: st, Transcode: mock})
+			registerReconcileTestFlow(e, func(context.Context, *ExecutionContext) (StepResult, error) {
+				return StepResult{Status: StepCompleted}, nil
+			})
+			ec := testReconcileEC("")
+			ec.State["job_id"], ec.State["benchmark_done"], ec.State["benchmark_job_id"] = "job-rejected", true, "bench-approved"
+			ec.State["benchmark_request_digest"], ec.State["benchmark_search_seconds"] = "approved-digest", 83.0
+			inst := store.ActionInstance{ID: "retry-rejected", ActionName: "transcode_media", Status: StatusFailed, CurrentStep: 1, StateJSON: toJSON(ec.State)}
+			if err := st.CreateActionInstance(inst); err != nil {
+				t.Fatal(err)
+			}
+			r, err := e.Retry(context.Background(), inst.ID)
+			if kind == "forbidden" {
+				if err == nil || mock.submitCalls != 0 {
+					t.Fatalf("unauthorized read permitted retry: %+v %v", r, err)
+				}
+				return
+			}
+			wantSubmits := int32(1)
+			if kind == "uncertain_missing" {
+				wantSubmits = 0
+			}
+			if err != nil || r.Status != StatusWaitingExternal || mock.submitCalls != wantSubmits {
+				t.Fatalf("retry: %+v err=%v submits=%d", r, err, mock.submitCalls)
+			}
+			if getString(r.State, "job_id") != "job-rejected" || getInt(r.State, "manual_retry_count") != 0 || !getBool(r.State, "benchmark_done") || getString(r.State, "benchmark_job_id") != "bench-approved" || getString(r.State, "benchmark_request_digest") != "approved-digest" || r.State["benchmark_search_seconds"] != 83.0 || mock.benchmarkSubmitCalls != 0 {
+				t.Fatalf("retry discarded analysis or changed admission: %+v", r.State)
+			}
+		})
+	}
+}
+
+func TestRejectedBenchmarkAdmissionRetryKeepsRequestAndBudget(t *testing.T) {
+	for _, code := range []int{404, 403} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			mock := &mockTranscodeExecutor{benchmarkStatusFunc: func(context.Context, string) (transcode.BenchmarkStatus, error) {
+				return transcode.BenchmarkStatus{}, fmt.Errorf("worker read: %w", &transcode.HTTPError{StatusCode: code})
+			}}
+			e := NewEngine(EngineDeps{Transcode: mock})
+			ec := testReconcileEC("")
+			ec.State["benchmark_job_id"], ec.State["benchmark_request_digest"], ec.State["search_budget_seconds"] = "bench-rejected", "frozen-request", 600
+			tmpl := ActionTemplate{Steps: []StepDefinition{{Name: "preflight"}, {Name: "submit_benchmark"}, {Name: "wait_benchmark"}}}
+			resume, err := e.prepareRemoteRetry(context.Background(), &store.ActionInstance{ActionName: "benchmark_transcode"}, ec, tmpl, 2)
+			if code == 404 && (err != nil || resume != 1 || !getBool(ec.State, "benchmark_reconcile")) {
+				t.Fatalf("missing admission cannot reconcile: %d %v %+v", resume, err, ec.State)
+			}
+			if code == 403 && (err == nil || getBool(ec.State, "benchmark_reconcile")) {
+				t.Fatalf("forbidden read admitted retry: %v", err)
+			}
+			if getString(ec.State, "benchmark_job_id") != "bench-rejected" || getString(ec.State, "benchmark_request_digest") != "frozen-request" || getInt(ec.State, "search_budget_seconds") != 600 || getInt(ec.State, "benchmark_manual_retry_count") != 0 || mock.benchmarkSubmitCalls != 0 {
+				t.Fatalf("retry preparation changed request or budget: %+v", ec.State)
+			}
+		})
+	}
+}
+
 func TestAcceptResolvesSHAOnlyAfterActualVerification(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "original.mkv")
 	if err := os.WriteFile(p, []byte("original bytes"), 0600); err != nil {
