@@ -679,6 +679,7 @@ main {
   margin: 4px 0 6px;
 }
 .job-row {
+  --job-content-indent: 50px;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   align-items: start;
@@ -745,7 +746,7 @@ main {
   min-height: 18px;
 }
 .job-row > .job-meta, .job-row > .job-footer {
-  margin-left: 50px;
+  margin-left: var(--job-content-indent);
 }
 .job-footer > .job-progress, .job-footer > .job-outcome {
   min-width: 0;
@@ -1455,6 +1456,7 @@ pre {
     font-size: 10px;
   }
   .job-row {
+    --job-content-indent: 40px;
     grid-template-columns: minmax(0, 1fr);
     gap: 2px 6px;
     padding: 7px 0;
@@ -1473,7 +1475,6 @@ pre {
     grid-template-columns: 34px minmax(0, 1fr) 88px;
     gap: 0 6px;
   }
-  .job-row > .job-meta, .job-row > .job-footer { margin-left: 40px; }
   .job-row .job-actions button {
     font-size: 11px;
     padding: 4px 7px;
@@ -1647,7 +1648,21 @@ pre {
 .profile-info { margin: 8px 0 12px; padding: 12px; background: #f4f5ef; border-left: 2px solid var(--forest); }
 .profile-info > p:first-child { margin-top: 0; }
 .batch-progress-explanation { order: 3; flex-basis: 100%; font-size: 11px; line-height: 1.4; }
-.job-command { margin: 6px 0 0; padding: 6px 9px; border-left: 2px solid var(--forest); background: #edf3eb; font-size: 12px; }
+.job-command {
+  justify-self: start;
+  width: fit-content;
+  max-width: min(100%, 36rem);
+  margin: 4px 0 0;
+  padding: 4px 8px;
+  border-left: 2px solid var(--forest);
+  background: #edf3eb;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+.job-row > .job-command {
+  margin-left: var(--job-content-indent);
+  max-width: min(calc(100% - var(--job-content-indent)), 36rem);
+}
 .job-command.failed { border-color: #a52929; background: #fbe9e7; }
 .candidate-review-row { padding: 10px 0; border-bottom: 1px solid var(--line); }
 
