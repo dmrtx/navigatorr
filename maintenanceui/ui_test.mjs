@@ -1816,6 +1816,16 @@ test("overall batch progress includes sample work, conversion and validation whi
  assert.equal(finish.children[1].textContent,"~99%");assert.match(finish.children[3].textContent,/Finishing/);
 });
 
+test("full conversion progress does not show counters from completed sample testing", () => {
+ const h=harness();
+ const encoding=h.run('telemetry({worker:{transcode_status:"running",transcode_phase:"encoding",progress:64,progress_details:{completed_units:65,total_units:185}}})');
+ assert.match(encoding.children[0].textContent,/Encoding full video/);
+ assert.doesNotMatch(encoding.children[0].textContent,/sample tasks/);
+ assert.equal(encoding.children[1].value,64);
+ const testing=h.run('telemetry({worker:{benchmark_status:"running",benchmark_phase:"evaluating_metrics",progress:35,progress_details:{completed_units:65,total_units:185}}})');
+ assert.match(testing.children[0].textContent,/65\/185 sample tasks/);
+});
+
 test("pending cleanup polls measured bytes without interpreting an old failed checkpoint as its result", async () => {
  const h=harness();
  h.run('state.backupsVisible=true;state.backupCleaning={id:"copy",auth:state.authRevision,name:"episode.mkv",started:Date.now()-1000,pendingResponse:true};api=async()=>({jobs:[{id:"copy",status:"failed",cleanup:{phase:"verifying_recovery",bytes_read:500,total_bytes:1000,updated_at:new Date().toISOString()}}]});');
