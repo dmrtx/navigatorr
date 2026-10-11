@@ -877,6 +877,12 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) 
 	// A resumed search has an unmeasured prior process interval. Do not expose
 	// this invocation's duration as the complete cost and refund its reservation.
 	resumedSearchCostUnknown := !record.SearchStartedAt.IsZero()
+	if resumedSearchCostUnknown {
+		record.SearchSeconds = nil
+	} else {
+		zero := 0.0
+		record.SearchSeconds = &zero
+	}
 
 	// Phase 2: Execute benchmark runner outside lock so cancellation/status can acquire lock.
 	// Direct-SMB sources are first materialized on local SSD; the durable Source
@@ -1025,9 +1031,9 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) 
 	if latest.Status == "cancelled" {
 		if record.Evidence != nil {
 			latest.Evidence = record.Evidence
-			if err := SaveBenchmarkAtomic(benchFile, latest); err != nil {
-				return fmt.Errorf("persisting partial evidence on cancelled benchmark %s: %w", jobID, err)
-			}
+		}
+		if err := SaveBenchmarkAtomic(benchFile, latest); err != nil {
+			return fmt.Errorf("persisting search cost on cancelled benchmark %s: %w", jobID, err)
 		}
 		return nil
 	}
