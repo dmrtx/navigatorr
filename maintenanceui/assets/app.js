@@ -3052,7 +3052,7 @@ function skippedBatchOutcome(job) {
   const total = job.batch?.total || 0;
   const text = reason ? shortJobReason(reason.reason) : "No conversion was started";
   result.append(node("p", `${reason && reason.count < total ? `${reason.count} of ${total} files: ` : ""}${text}`, "skipped-reason"));
-  result.append(node("p", "Choose another profile to try again. Your originals are unchanged.", "metadata"));
+  result.append(node("p", job.mode ? "None of the tested settings met this goal. You can change the goal; your originals are unchanged." : "Choose another profile to try again. Your originals are unchanged.", "metadata"));
   return result;
 }
 async function loadJobs(more = false) {
