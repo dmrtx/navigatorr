@@ -102,6 +102,13 @@ func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
 	case status == "failed" || res.Status == action.StatusFailed:
 		s.Outcome, s.Message, s.NextStep = "execution_error", "The benchmark could not finish reliably.", "Inspect the action error and fix the execution problem before retrying; changing compression settings is not an established remedy."
 	}
+	if getString := summaryInput(res, "mode"); getString != "" {
+		if explanation := action.ExplainTranscode(res); explanation != nil && (explanation.Outcome == "no_suitable_candidate" || explanation.Outcome == "size_rejected") {
+			s.Outcome = explanation.Outcome
+			s.Message = explanation.Message
+			s.NextStep = "Keep the original, or explicitly choose another processing goal. Technical profiles are optional; quality requirements are never relaxed automatically."
+		}
+	}
 	var evidence []transcode.BenchmarkCandidateQualityEvidence
 	var request transcode.BenchmarkRequest
 	benchmarkField(res, "benchmark_quality", &evidence)

@@ -11,6 +11,24 @@ const markup = await readFile(
   new URL("./assets/index.html", import.meta.url),
   "utf8",
 );
+
+test("automatic recovery keeps processing goals and sends no technical profile", async()=>{
+  const h=harness();
+  h.context.savedPlan={id:"automatic-batch",mode:"quality",scope:"all",selected:2,kept:0,active:0,files:["one","two"],selection_version:"reviewed",settings:{},requires_explicit_profile:true};
+  h.run('state.info={};state.recipes=[];api=async()=>savedPlan;');
+  await h.run('reconfigureBatch("automatic-batch")');
+  assert.equal(h.elements.get("reconfigure-mode-label").hidden,false);
+  assert.equal(h.elements.get("reconfigure-profile").hidden,true);
+  assert.equal(h.elements.get("reconfigure-limits").hidden,true);
+  assert.equal(h.elements.get("submit-reconfigure").disabled,false);
+  const calls=[];h.context.record=(path,body)=>calls.push([path,body]);
+  h.context.sessionStorage={getItem:()=>null,setItem(){},removeItem(){}};
+  h.run('$("reconfigure-mode").value="size";submissionID=()=>"goal-receipt";commandRequest=async(path,body)=>{record(path,body);return {id:"automatic-batch"}};loadJobs=async()=>{};openJob=async()=>{};notify=()=>{};');
+  await h.run('submitReconfiguredBatch()');
+  assert.equal(calls[0][1].mode,"size");
+  assert.equal(calls[0][1].selection_version,"reviewed");
+  assert.equal("profile" in calls[0][1],false);
+});
 class Element {
   classList = { toggle() {}, add() {}, remove() {} };
   children = [];

@@ -42,7 +42,7 @@ func TestModePolicyFreezeAndDigest(t *testing.T) {
 		t.Fatalf("restart %+v %v", after, err)
 	}
 	altered := *after
-	altered.MinSavingsPercent = 0
+	altered.MinSavingsPercent = 15
 	ec.State["mode_policy"] = altered
 	if _, err := freezeModePolicy(ec); err == nil {
 		t.Fatal("policy tampering not rejected")
@@ -79,7 +79,7 @@ func TestModeSearchBudgetReservationsAndSettlement(t *testing.T) {
 	}
 }
 func modeTestCapabilities() transcode.WorkerCapabilities {
-	return transcode.WorkerCapabilities{ProtocolVersion: transcode.WorkerProtocolVersion, Encoders: map[string]bool{transcode.VideoCodecLibX265: true, transcode.VideoCodecHEVCVideoToolbox: true}, Filters: map[string]bool{"libvmaf": true}, Quality: &transcode.QualityCapabilities{Native10Bit: true, CAMBIFullRef: true, Models: map[string]transcode.QualityModelCapability{"v1_1080p_3h": {Available: true, MeasurementBitDepth: 10}}}}
+	return transcode.WorkerCapabilities{AutomaticModesV2: true, ProtocolVersion: transcode.WorkerProtocolVersion, Encoders: map[string]bool{transcode.VideoCodecLibX265: true, transcode.VideoCodecHEVCVideoToolbox: true}, Filters: map[string]bool{"libvmaf": true}, Quality: &transcode.QualityCapabilities{Native10Bit: true, CAMBIFullRef: true, Models: map[string]transcode.QualityModelCapability{"v1_1080p_3h": {Available: true, MeasurementBitDepth: 10}}}}
 }
 func TestModeMixedCandidatesBudgetAndMain10(t *testing.T) {
 	for _, mode := range []string{"size", "quality", "x265_preserve"} {
@@ -99,9 +99,9 @@ func TestModeMixedCandidatesBudgetAndMain10(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := 6
+			want := 12
 			if mode == "x265_preserve" {
-				want = 3
+				want = 9
 			}
 			if len(req.Candidates) != want || req.SearchBudgetSeconds != 600 {
 				t.Fatalf("%s/%d: %+v", mode, depth, req)
@@ -132,7 +132,7 @@ func TestModeFinalUnroundedSizeGate(t *testing.T) {
 		mode  string
 		bytes int
 		skip  bool
-	}{{"size", 85, false}, {"quality", 95, true}, {"x265_preserve", 95, false}, {"x265_preserve", 110, true}} {
+	}{{"size", 85, false}, {"quality", 95, false}, {"quality", 101, true}, {"x265_preserve", 95, false}, {"x265_preserve", 110, true}} {
 		candidate := t.TempDir() + "/candidate.mkv"
 		if err := os.WriteFile(candidate, make([]byte, tc.bytes), 0600); err != nil {
 			t.Fatal(err)
@@ -229,7 +229,7 @@ JSON
 	}
 	seconds := 2.0
 	executor := &mockTranscodeExecutor{capabilitiesFunc: func(context.Context) (transcode.WorkerCapabilities, error) { return modeTestCapabilities(), nil }, benchmarkStatusFunc: func(_ context.Context, id string) (transcode.BenchmarkStatus, error) {
-		return transcode.BenchmarkStatus{ID: id, Status: transcode.StatusCompleted, SearchSeconds: &seconds, Decision: &transcode.BenchmarkDecision{DecisionReason: "no_suitable_candidate"}}, nil
+		return transcode.BenchmarkStatus{Automatic: &transcode.BenchmarkAutomaticEvidence{VerifiedSamples: 5}, ID: id, Status: transcode.StatusCompleted, SearchSeconds: &seconds, Decision: &transcode.BenchmarkDecision{DecisionReason: "no_suitable_candidate"}}, nil
 	}}
 	e, st := setupTranscodeEngine(t, executor, probe, []string{dir}, []string{dir}, true)
 	defer st.Close()
@@ -278,7 +278,7 @@ JSON
 			plans := []*transcode.Plan{}
 			executor := &mockTranscodeExecutor{capabilitiesFunc: func(context.Context) (transcode.WorkerCapabilities, error) { return modeTestCapabilities(), nil }, benchmarkStatusFunc: func(_ context.Context, id string) (transcode.BenchmarkStatus, error) {
 				seconds := 1.0
-				return transcode.BenchmarkStatus{ID: id, Status: transcode.StatusCompleted, SearchSeconds: &seconds, Decision: &transcode.BenchmarkDecision{Winner: &transcode.BenchmarkWinner{CandidateID: "cand_crf20", VideoCodec: transcode.VideoCodecLibX265, Quality: 20, Preset: "medium", VideoProfile: "main", PixelFormat: "yuv420p", ExpectedBitDepth: 8, Score: 99, MetricType: "vmaf", TargetReached: true, MinimumMet: true, EstimatedTotalBytes: 800, SavingsPercent: 20}}}, nil
+				return transcode.BenchmarkStatus{Automatic: &transcode.BenchmarkAutomaticEvidence{VerifiedSamples: 5}, ID: id, Status: transcode.StatusCompleted, SearchSeconds: &seconds, Decision: &transcode.BenchmarkDecision{Winner: &transcode.BenchmarkWinner{CandidateID: "cand_crf20", VideoCodec: transcode.VideoCodecLibX265, Quality: 20, Preset: "medium", VideoProfile: "main", PixelFormat: "yuv420p", ExpectedBitDepth: 8, Score: 99, MetricType: "vmaf", TargetReached: true, MinimumMet: true, EstimatedTotalBytes: 800, SavingsPercent: 20}}}, nil
 			}, submitFunc: func(_ context.Context, req transcode.Request) (transcode.Job, error) {
 				plans = append(plans, req.Plan)
 				return transcode.Job{ID: req.ID}, nil

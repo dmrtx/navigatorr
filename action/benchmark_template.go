@@ -88,6 +88,10 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 				_ = json.Unmarshal(b, &req)
 			}
 		} else {
+			if st.Automatic != nil {
+				ec.State["automatic_search"] = st.Automatic
+				ec.Outputs["automatic_search"] = st.Automatic
+			}
 			switch st.Status {
 			case transcode.StatusQueued, transcode.StatusRunning, transcode.StatusCompleted, transcode.StatusFailed, transcode.StatusCancelled:
 				ec.State["benchmark_submitted"] = true
@@ -279,6 +283,10 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 	if st.SearchSeconds != nil && (st.Status == transcode.StatusCompleted || st.Status == transcode.StatusFailed || st.Status == transcode.StatusCancelled) {
 		ec.State["benchmark_search_seconds"] = *st.SearchSeconds
 	}
+	if st.Automatic != nil {
+		ec.State["automatic_search"] = st.Automatic
+		ec.Outputs["automatic_search"] = st.Automatic
+	}
 	if getString(ec.Inputs, "mode") != "" && st.ReasonCode == "search_budget_exhausted" {
 		return modeAttention(ec, "search_budget_exhausted", "Finite search budget exhausted without a reliable conclusion; original preserved"), nil
 	}
@@ -343,6 +351,13 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 		}
 
 		hasWinner := st.Decision.Winner != nil
+		var request transcode.BenchmarkRequest
+		raw, _ := json.Marshal(ec.State["benchmark_request"])
+		_ = json.Unmarshal(raw, &request)
+		if hasWinner && request.Automatic && (st.Automatic == nil || st.Automatic.VerifiedSamples != len(request.Samples)) {
+			return StepResult{Status: StepFailed, Error: "automatic winner has no complete independent sample verification"}, nil
+		}
+
 		ec.State["benchmark_done"] = true
 		ec.State["benchmark_decision"] = st.Decision
 		ec.State["decision_reason"] = st.Decision.DecisionReason
@@ -1134,6 +1149,11 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 
 	if mode := getString(ec.Inputs, "mode"); mode != "" {
 		req.Mode = mode
+		policy, err := freezeModePolicy(ec)
+		if err != nil {
+			return nil, err
+		}
+		req.ModePolicyVersion = policy.Version
 		req.SearchBudgetSeconds = getInt(ec.State, "search_budget_seconds")
 		if mode != "x265_preserve" && planCodec != transcode.VideoCodecHEVCVideoToolbox && caps.Encoders[transcode.VideoCodecHEVCVideoToolbox] {
 			vt := *plan
@@ -1157,6 +1177,14 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 				hardware[i].ID = "vt-" + hardware[i].ID
 			}
 			req.Candidates = append(req.Candidates, hardware...)
+		}
+		if policy.Version == ModePolicyVersion {
+			if !caps.AutomaticModesV2 {
+				return nil, fmt.Errorf("automatic quality search requires an updated worker")
+			}
+			if err := configureAutomaticRequest(req, plan, bitDepth); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if plan.AudioMode == "compact" {

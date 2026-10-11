@@ -14,7 +14,7 @@ import (
 	"github.com/jakenesler/navigatorr/transcode/recipe"
 )
 
-const ModePolicyVersion = "transcode-modes-v1"
+const ModePolicyVersion = "transcode-modes-v2"
 const modeOperationBudgetSeconds = 3600
 const modeSearchBudgetSeconds = 600
 
@@ -36,7 +36,7 @@ func modePolicy(mode string, anime bool) (ModePolicySnapshot, error) {
 		return ModePolicySnapshot{}, fmt.Errorf("mode must be size, quality, or x265_preserve")
 	}
 	p := automaticBatchSearchProfile(anime)
-	p.Optimization.Search.MaxCandidates = 6
+	p.Optimization.Search.MaxCandidates = 12
 	if mode != "size" {
 		p.Optimization.Quality.VMAF.Target = 96
 		p.Optimization.Quality.VMAF.Minimum = 95
@@ -45,7 +45,7 @@ func modePolicy(mode string, anime bool) (ModePolicySnapshot, error) {
 		p.Optimization.Quality.VMAF.WorstWindowMinimum = &worst
 	}
 	snapshot := ModePolicySnapshot{Version: ModePolicyVersion, Mode: mode, MinSavingsPercent: 15, SearchBudgetSeconds: modeSearchBudgetSeconds, OperationBudgetSeconds: modeOperationBudgetSeconds, Profile: p}
-	if mode == "x265_preserve" {
+	if mode == "x265_preserve" || mode == "quality" {
 		snapshot.MinSavingsPercent = 0
 	}
 	b, err := json.Marshal(snapshot)
@@ -99,6 +99,8 @@ func freezeModePolicy(ec *ExecutionContext) (*ModePolicySnapshot, error) {
 		if "sha256:"+hex.EncodeToString(sum[:]) != digest {
 			return nil, fmt.Errorf("frozen mode policy digest does not match its content")
 		}
+		ec.State["policy_digest"] = p.Digest
+		ec.State["mode"] = p.Mode
 		ec.State["search_budget_seconds"] = p.SearchBudgetSeconds
 		ec.State["operation_search_budget_seconds"] = p.OperationBudgetSeconds
 		return &p, nil
@@ -135,6 +137,7 @@ func modeAttention(ec *ExecutionContext, reason, message string) StepResult {
 
 func applyModePlan(plan *transcode.Plan, p *ModePolicySnapshot) error {
 	plan.Mode = p.Mode
+	plan.ModePolicyVersion = p.Version
 	plan.PolicyDigest = p.Digest
 	plan.SizePolicy = &transcode.SizePolicy{MinSavingsPercent: p.MinSavingsPercent, MaxSizeIncreasePercent: p.MaxSizeIncreasePercent}
 	plan.PlanDigest = ""
@@ -155,16 +158,25 @@ func (e *Engine) bindModeParent(ec *ExecutionContext) error {
 		return fmt.Errorf("mode parent is unavailable")
 	}
 	var inputs, states map[string]any
-	if json.Unmarshal([]byte(parent.InputsJSON), &inputs) != nil || json.Unmarshal([]byte(parent.StateJSON), &states) != nil || getString(inputs, "mode") != getString(ec.Inputs, "mode") {
+	if json.Unmarshal([]byte(parent.InputsJSON), &inputs) != nil || json.Unmarshal([]byte(parent.StateJSON), &states) != nil {
 		return fmt.Errorf("mode does not match frozen parent")
 	}
 	item, err := e.deps.Store.GetTranscodeBatchItem(parent.ID, getString(ec.Inputs, "batch_item_key"))
 	if err != nil || item == nil || item.FilePath != getString(ec.Inputs, "path") || item.Decision != "transcode" {
 		return fmt.Errorf("mode source is not a member of parent inventory")
 	}
-	ec.State["mode_policy"] = states["mode_policy"]
+	mode, policy := getString(inputs, "mode"), states["mode_policy"]
+	settings := stateObject(states, "batch_item_settings")
+	if row, ok := settings[getString(ec.Inputs, "batch_item_key")].(map[string]any); ok && getString(row, "mode") != "" {
+		mode = getString(row, "mode")
+		policy = row["mode_policy"]
+	}
+	if mode != getString(ec.Inputs, "mode") {
+		return fmt.Errorf("mode does not match frozen parent attempt")
+	}
+	ec.State["mode_policy"] = policy
 	ec.State["policy_digest"] = getString(states, "policy_digest")
-	ec.State["mode"] = getString(inputs, "mode")
+	ec.State["mode"] = mode
 	ec.State["search_budget_seconds"] = getInt(states, "search_budget_seconds")
 	ec.State["operation_search_budget_seconds"] = getInt(states, "operation_search_budget_seconds")
 	return nil

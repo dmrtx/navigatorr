@@ -80,17 +80,18 @@ type BenchmarkCandidateMetricAggregate struct {
 
 // BenchmarkExecutionEvidence records all physical sample outcomes and metric measurements.
 type BenchmarkExecutionEvidence struct {
-	SourceVideoIndex  int                                 `json:"source_video_index"`
-	SourceBitDepth    int                                 `json:"source_bit_depth"`
-	SourcePixelFormat string                              `json:"source_pixel_format"`
-	SourceResolution  string                              `json:"source_resolution"`
-	SourceFPS         float64                             `json:"source_fps,omitempty"`
-	Quality           []CandidateQualityEvidence          `json:"quality,omitempty"`
-	ReferenceSamples  []BenchmarkSampleRef                `json:"reference_samples"`
-	CandidateSamples  []BenchmarkCandidateSampleResult    `json:"candidate_samples"`
-	MetricSamples     []BenchmarkMetricSampleResult       `json:"metric_samples,omitempty"`
-	CandidateMetrics  []BenchmarkCandidateMetricAggregate `json:"candidate_metrics,omitempty"`
-	Decision          *transcode.BenchmarkDecision        `json:"decision,omitempty"`
+	Automatic         *transcode.BenchmarkAutomaticEvidence `json:"automatic,omitempty"`
+	SourceVideoIndex  int                                   `json:"source_video_index"`
+	SourceBitDepth    int                                   `json:"source_bit_depth"`
+	SourcePixelFormat string                                `json:"source_pixel_format"`
+	SourceResolution  string                                `json:"source_resolution"`
+	SourceFPS         float64                               `json:"source_fps,omitempty"`
+	Quality           []CandidateQualityEvidence            `json:"quality,omitempty"`
+	ReferenceSamples  []BenchmarkSampleRef                  `json:"reference_samples"`
+	CandidateSamples  []BenchmarkCandidateSampleResult      `json:"candidate_samples"`
+	MetricSamples     []BenchmarkMetricSampleResult         `json:"metric_samples,omitempty"`
+	CandidateMetrics  []BenchmarkCandidateMetricAggregate   `json:"candidate_metrics,omitempty"`
+	Decision          *transcode.BenchmarkDecision          `json:"decision,omitempty"`
 }
 
 type CandidateQualityEvidence = transcode.BenchmarkCandidateQualityEvidence
@@ -222,6 +223,7 @@ type validatedCandidate struct {
 // It extracts lossless reference samples, encodes candidate samples using hevc_videotoolbox,
 // computes perceptual quality metrics (VMAF/SSIM), and deterministically selects the winning candidate.
 type ProductionBenchmarkRunner struct {
+	automaticHook func(context.Context,*BenchmarkRecord,*BenchmarkExecutionEvidence,[]validatedCandidate) error
 	metricsHook   func(ctx context.Context, w *Worker, record *BenchmarkRecord, evidence *BenchmarkExecutionEvidence) error
 	selectionHook func(ctx context.Context, w *Worker, record *BenchmarkRecord, evidence *BenchmarkExecutionEvidence) error
 }
@@ -522,7 +524,11 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 	// 5+6. Candidate encode and metric evaluation: adaptive probing with
 	// exhaustive fallback, bounded pipelined execution for real runs, or the
 	// legacy sequential path for test-hook injection.
-	if isAdaptiveEnabled(record, r) {
+	if record.Automatic && r.metricsHook == nil && r.selectionHook == nil {
+		if err := r.runAutomaticCandidates(ctx, w, record, evidence, samplesDir, validatedCandidates, rep, sourceInitialSize, sourceInitialModTime, progressReporter); err != nil {
+			return err
+		}
+	} else if isAdaptiveEnabled(record, r) {
 		if err := r.runAdaptiveCandidates(ctx, w, record, evidence, samplesDir, validatedCandidates, rep, sourceInitialSize, sourceInitialModTime, progressReporter, passesPerSample); err != nil {
 			return err
 		}
@@ -649,7 +655,7 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		if err := r.selectionHook(ctx, w, record, evidence); err != nil {
 			return fmt.Errorf("candidate selection failed: %w", err)
 		}
-	} else {
+	} else if !record.Automatic || r.metricsHook != nil {
 		if err := r.runSelection(ctx, record, evidence, validatedCandidates, rep, sourceInitialSize); err != nil {
 			return fmt.Errorf("candidate selection failed: %w", err)
 		}
@@ -1587,7 +1593,7 @@ func (r *ProductionBenchmarkRunner) runSelection(
 
 	// Deterministic selection
 	selIn := optimization.SelectorInput{
-		Mode: record.Mode, SourceBytes: sourceSize,
+		Mode: record.Mode, ModePolicyVersion: record.ModePolicyVersion, SourceBytes: sourceSize,
 		Policy:     selectorPolicy,
 		Candidates: candidateInputs,
 	}

@@ -79,6 +79,7 @@ function actionIcon(label) {
   const paths = {
     Reconfigure: "M4 7h16M4 17h16M8 4v6M16 14v6",
     "Change settings": "M4 7h16M4 17h16M8 4v6M16 14v6",
+    "Change goal": "M4 7h16M4 17h16M8 4v6M16 14v6",
     "Try another profile": "M4 7h16M4 17h16M8 4v6M16 14v6",
     Retry: "M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M18 18A8 8 0 0 1 4 12",
     Review: "M5 4h14v16H5ZM8 8h8M8 12h8",
@@ -1564,7 +1565,7 @@ function controls() {
   $("legacy-controls").hidden = !technical;
   $("processing-goal").hidden = technical;
   $("processing-policy").hidden = technical;
-  $("processing-policy").textContent = "Automatic analyzes samples and chooses an effective plan for your goal. Quality and savings must pass validation; a result is not guaranteed. Candidates only; replacing originals requires separate approval." + (!state.fileMedia && !state.media ? " Content type is unclassified; a conservative general-video policy applies." : "");
+  $("processing-policy").textContent = "Automatic tests suitable settings, checks additional samples, then converts and verifies the result. Originals stay in place; replacing them requires separate approval." + (!state.fileMedia && !state.media ? " Content type is unclassified; a conservative general-video policy applies." : "");
   $("enqueue").textContent = technical ? (batch ? "Create candidates" : "Create candidate") : "Process";
   $("source-summary").textContent = sourceSummary();
   $("batch-options").hidden = !batch;
@@ -2462,9 +2463,14 @@ async function reconfigureBatch(id, candidate = false, savedPlan = null) {
     if (!candidateID && plan.selected === 0) plan = await api(`batch-settings?${new URLSearchParams({id,scope:"all"})}`);
     if (auth !== state.authRevision || revision !== state.reconfigureRevision || !$("reconfigure-batch").open) return;
     state.reconfigurePlan = plan;
+    $("reconfigure-mode-label").hidden = !plan.mode;
+    $("reconfigure-mode").value = plan.mode || "quality";
+    $("reconfigure-profile").closest("label").hidden = Boolean(plan.mode);
+    $("reconfigure-limits").hidden = Boolean(plan.mode);
+
     $("reconfigure-profile-info").hidden = true;
     $("reconfigure-note").textContent = "Same task · Originals kept · Previous attempts saved";
-    $("reconfigure-title").textContent = plan.requires_explicit_profile ? "Try another profile" : "Change settings";
+    $("reconfigure-title").textContent = plan.mode ? "Change goal" : plan.requires_explicit_profile ? "Try another profile" : "Change settings";
     $("reconfigure-summary").textContent = batchSettingsSummary(plan);
     $("reconfigure-scope").replaceChildren();
     if (plan.candidate_id) option($("reconfigure-scope"),"candidate","This file");
@@ -2500,6 +2506,14 @@ function updateBatchSettingsProfile() {
   $("reconfigure-scope-label").hidden = plan.selected + plan.kept === 1;
   $("reconfigure-selection").hidden = plan.selected === 1;
   $("reconfigure-savings").placeholder = $("reconfigure-growth").placeholder = plan.settings?.mixed_limits ? "Different per file" : "Default";
+  if (plan.mode) {
+    $("reconfigure-profile-note").hidden = $("reconfigure-current-profiles").hidden = $("reconfigure-profile-info").hidden = true;
+    $("reconfigure-settings").textContent = "Automatic will test and verify settings for this goal. Originals stay in place.";
+    $("submit-reconfigure").disabled = !serverReachable || jobIsBusy(plan.id) || plan.selected === 0;
+    $("submit-reconfigure").textContent = "Process with this goal";
+    return;
+  }
+  $("reconfigure-current-profiles").hidden = false;
   if (plan.requires_explicit_profile && $("reconfigure-profile").value === "same") $("reconfigure-profile").value = "";
   const same = [...$("reconfigure-profile").children].find(option=>option.value === "same");
   if (same) same.disabled = Boolean(plan.requires_explicit_profile);
@@ -2570,14 +2584,14 @@ async function submitReconfiguredBatch() {
   if (!plan || jobIsBusy(plan.id)) return;
   const revision = state.reconfigureRevision, auth = state.authRevision;
   const current = () => auth === state.authRevision && revision === state.reconfigureRevision && $("reconfigure-batch").open;
-  if (!$("reconfigure-profile").value || (plan.requires_explicit_profile && $("reconfigure-profile").value === "same")) throw new Error("Choose a profile to try again.");
+  if (!plan.mode && (!$("reconfigure-profile").value || (plan.requires_explicit_profile && $("reconfigure-profile").value === "same"))) throw new Error("Choose a profile to try again.");
   const limit = id => {
     if (!$(id).value.trim()) return null;
     const value = Number($(id).value);
     if (!Number.isFinite(value)) throw new Error("Enter a valid savings or growth limit.");
     return value;
   };
-  const body = {id:plan.id,scope:plan.scope,selection_version:plan.selection_version,profile:$("reconfigure-profile").value,min_savings_percent:limit("reconfigure-savings"),max_size_increase_percent:limit("reconfigure-growth")};
+  const body = {id:plan.id,scope:plan.scope,selection_version:plan.selection_version,...(plan.mode ? {mode:$("reconfigure-mode").value} : {profile:$("reconfigure-profile").value,min_savings_percent:limit("reconfigure-savings"),max_size_increase_percent:limit("reconfigure-growth")})};
   body.preserve_limits = state.reconfigureOriginalLimits === batchSettingsLimits();
   let savedLimits;
   try { savedLimits = JSON.parse(state.reconfigureOriginalLimits); } catch {}
@@ -2706,7 +2720,7 @@ function jobControls(job, detail = false) {
   if (job.action_name === "transcode_batch" && !job.batch?.dry_run && !job.batch?.promotion_plan_ready && ["completed","failed"].includes(job.status) && (job.remaining_candidates != null ? job.remaining_candidates > 0 : job.batch?.completed > 0 && !job.batch?.promotion?.promoted))
     add("Review candidates", () => reviewBatchCandidates(job.id));
   const reconfigurable = job.action_name === "transcode_batch" && !job.batch?.dry_run && !job.batch?.promotion_plan_ready;
-  if (reconfigurable) add(job.batch?.outcome === "no_changes" ? "Try another profile" : "Change settings", () => reconfigureBatch(job.id));
+  if (reconfigurable) add(job.mode ? "Change goal" : job.batch?.outcome === "no_changes" ? "Try another profile" : "Change settings", () => reconfigureBatch(job.id));
   if (job.status === "failed" && !reconfigurable) {
     if (rejectedCandidate(job)) {
       if (job.parent_action_id) add("Change settings", () => reconfigureBatch(job.parent_action_id, true, {candidate_id:job.id}));
@@ -2988,9 +3002,9 @@ function compactQueueActions(actions) {
     const icon = b.querySelector?.("svg");
     if (!icon) continue;
     const label = b.textContent.trim();
-    if (["Set up benchmark", "Review candidates", "Review candidate", "Review replacement", "Review replacements", "Replace file", "Start batch", "Review preview", "View batch", "View preview", "Archive", "Restore", "Reconfigure", "Change settings", "Try another profile"].includes(label)) {
-      b.replaceChildren(icon, node("span", label === "Replace file" ? "Replace" : label === "Set up benchmark" ? "Set up" : ["Start batch", "View batch", "View preview", "Archive", "Restore", "Reconfigure", "Change settings", "Try another profile"].includes(label) ? label : "Review"));
-      b.className += ["Review preview", "View batch", "View preview", "Archive", "Restore", "Reconfigure", "Change settings"].includes(label) ? " queue-secondary" : " primary queue-primary";
+    if (["Set up benchmark", "Review candidates", "Review candidate", "Review replacement", "Review replacements", "Replace file", "Start batch", "Review preview", "View batch", "View preview", "Archive", "Restore", "Reconfigure", "Change settings", "Try another profile", "Change goal"].includes(label)) {
+      b.replaceChildren(icon, node("span", label === "Replace file" ? "Replace" : label === "Set up benchmark" ? "Set up" : ["Start batch", "View batch", "View preview", "Archive", "Restore", "Reconfigure", "Change settings", "Try another profile", "Change goal"].includes(label) ? label : "Review"));
+      b.className += ["Review preview", "View batch", "View preview", "Archive", "Restore", "Reconfigure", "Change settings", "Change goal"].includes(label) ? " queue-secondary" : " primary queue-primary";
       b.setAttribute("aria-label", label);
       b.title ||= label;
       continue;
@@ -3158,7 +3172,7 @@ function workerPhaseLabel(phase) {
   return {
     queued:"Waiting for a worker slot",preparing:"Preparing source",reading_source:"Reading source from media storage",
     probing_source:"Inspecting source",extracting_samples:"Extracting reference samples",encoding_samples:"Encoding test samples",
-    evaluating_metrics:"Measuring sample quality",estimating_final_size:"Estimating final file size",selecting_candidate:"Selecting the best candidate",
+    testing_initial:"Testing suitable settings",testing_alternatives:"Trying a measured alternative",verifying_samples:"Checking additional video samples",evaluating_metrics:"Measuring sample quality",estimating_final_size:"Estimating final file size",selecting_candidate:"Selecting the best candidate",
     capturing_comparison:"Saving comparison frames",encoding:"Encoding full video",validating:"Verifying output",publishing:"Saving candidate to media storage",
     benchmarking:"Calibrating quality",completed:"Completed",
   }[phase] || (phase ? phase.replaceAll("_"," ") : "Preparing job");
@@ -3316,6 +3330,10 @@ async function refreshDetail() {
       node("p", queuePresentation(job).summary, "muted"),
     );
     if (job.podcast) { const p=job.podcast; summary.append(node("p",`${p.classified_blocks || 0}/${p.total_blocks || 0} transcript blocks classified · ${((p.removed_ms || 0)/1000).toFixed(1)} seconds removed · ${p.known_ad_units || 0} units verified by known ads`,"metadata")); if (p.output_path && job.status === "completed") summary.append(node("p",`Validated MP3: ${p.output_path}`,"metadata")); }
+    if (job.transcode) {
+      summary.append(node("p", job.transcode.message, "job-outcome metadata"));
+      if (job.transcode.tested_candidates) summary.append(node("p", `${job.transcode.tested_candidates} configurations tested${job.transcode.verified_samples ? ` · ${job.transcode.verified_samples} quality samples verified` : ""}`, "metadata"));
+    }
  renderPhaseCosts(summary, job);
     if (queuePresentation(job).showTelemetry) summary.append(telemetry(job));
     else if (batchProgress(job)) summary.append(batchProgress(job));

@@ -31,6 +31,8 @@ const (
 
 // BenchmarkRecord represents the persistent state stored in benchmark.json on the worker.
 type BenchmarkRecord struct {
+	Automatic                 bool                                  `json:"automatic,omitempty"`
+	ModePolicyVersion         string                                `json:"mode_policy_version,omitempty"`
 	SearchSeconds             *float64                              `json:"search_seconds,omitempty"`
 	PhaseCosts                map[string]transcode.PhaseCost        `json:"phase_costs,omitempty"`
 	SearchBudgetSeconds       int                                   `json:"search_budget_seconds,omitempty"`
@@ -428,7 +430,7 @@ func (w *Worker) BenchmarkSubmit(ctx context.Context, req transcode.BenchmarkReq
 	}
 
 	record := &BenchmarkRecord{
-		Mode: req.Mode, SearchDeadline: req.SearchDeadline, SearchBudgetSeconds: req.SearchBudgetSeconds,
+		ModePolicyVersion: req.ModePolicyVersion, Automatic: req.Automatic, Mode: req.Mode, SearchDeadline: req.SearchDeadline, SearchBudgetSeconds: req.SearchBudgetSeconds,
 		Allow8BitTo10Bit:          req.Allow8BitTo10Bit,
 		ProtocolVersion:           transcode.WorkerProtocolVersion,
 		ID:                        req.ID,
@@ -717,6 +719,7 @@ func (w *Worker) BenchmarkStatus(ctx context.Context, jobID string) (transcode.B
 	}
 	if record.Evidence != nil {
 		st.Quality = record.Evidence.Quality
+		st.Automatic = record.Evidence.Automatic
 	}
 
 	if record.Status == "running" || record.Status == "queued" {

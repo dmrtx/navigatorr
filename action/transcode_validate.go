@@ -94,7 +94,7 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 		if original <= 0 || plan.SizePolicy == nil || plan.Mode != getString(ec.Inputs, "mode") || plan.PolicyDigest != getString(ec.State, "policy_digest") || plan.SizePolicy.MinSavingsPercent != minimum || plan.SizePolicy.MaxSizeIncreasePercent != maximum {
 			return StepResult{Status: StepFailed, Error: "mode size policy or source identity missing; original preserved"}, nil
 		}
-		if !optimization.ModeSizeAllowed(plan.Mode, original, candidateSize) {
+		if !optimization.ModeSizeAllowedVersion(plan.Mode, original, candidateSize, plan.ModePolicyVersion) {
 			ec.State["skip_transcode"] = true
 			ec.State["reason_code"] = "insufficient_savings"
 			return StepResult{Status: StepCompleted, Outputs: map[string]any{"skipped": true, "reason_code": "insufficient_savings", "candidate_size_bytes": candidateSize}}, nil
