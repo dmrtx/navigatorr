@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/optimization"
 	"github.com/jakenesler/navigatorr/transcode/quality"
 )
 
@@ -55,11 +56,14 @@ func ValidatePlan(p *transcode.Plan) error {
 		return nil
 	}
 	if p.Mode != "" {
-		min := 15.0
+		minimum, valid := optimization.ModeMinimumSavings(p.Mode, p.ModePolicyVersion)
+		if !valid {
+			return fmt.Errorf("unsupported processing mode policy")
+		}
+		min := float64(minimum)
 		switch p.Mode {
 		case "size", "quality":
 		case "x265_preserve":
-			min = 0
 			if p.VideoCodec != transcode.VideoCodecLibX265 {
 				return fmt.Errorf("x265_preserve requires libx265")
 			}

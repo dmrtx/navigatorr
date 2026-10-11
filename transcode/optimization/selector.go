@@ -328,27 +328,43 @@ func SelectMeasuredCandidatesVersion(candidates []EvaluatedCandidate, mode strin
 	return r
 }
 
-// ModeSizeAllowed compares fixed mode policies with exact integer bytes. Splitting
-// the quotient and remainder avoids overflow even at MaxInt64.
 const ModePolicyV2 = "transcode-modes-v2"
 
+// ModeSizeAllowed compares fixed mode policies with exact integer bytes. Splitting
+// the quotient and remainder avoids overflow even at MaxInt64.
 func ModeSizeAllowed(mode string, source, candidate int64) bool {
 	return ModeSizeAllowedVersion(mode, source, candidate, "")
 }
 
 func ModeSizeAllowedVersion(mode string, source, candidate int64, version string) bool {
-	if version != "" && version != "transcode-modes-v1" && version != ModePolicyV2 {
+	minimum, valid := ModeMinimumSavings(mode, version)
+	if !valid || source <= 0 || candidate <= 0 {
 		return false
 	}
-	if source <= 0 || candidate <= 0 {
-		return false
-	}
-	if mode == "x265_preserve" || mode == "quality" && version == ModePolicyV2 {
+	if minimum == 0 {
 		return candidate <= source
-	}
-	if mode != "size" && mode != "quality" {
-		return false
 	}
 	maximum := (source/100)*85 + ((source%100)*85)/100
 	return candidate <= maximum
+}
+
+// ModeMinimumSavings is shared by sample selection and full-plan admission,
+// including historical plans.
+func ModeMinimumSavings(mode, version string) (int, bool) {
+	if version != "" && version != "transcode-modes-v1" && version != ModePolicyV2 {
+		return 0, false
+	}
+	switch mode {
+	case "x265_preserve":
+		return 0, true
+	case "quality":
+		if version == ModePolicyV2 {
+			return 0, true
+		}
+		return 15, true
+	case "size":
+		return 15, true
+	default:
+		return 0, false
+	}
 }
