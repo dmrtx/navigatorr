@@ -24,6 +24,21 @@ func (s *Server) library(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.URL.Query().Get("id")
+	season := r.URL.Query().Get("season")
+	if season != "" {
+		if name != "sonarr" || id == "" {
+			fail(w, 400, "select a series before selecting a season")
+			return
+		}
+		if season != "unknown" {
+			n, err := strconv.Atoi(season)
+			if err != nil || n < 0 {
+				fail(w, 400, "invalid season")
+				return
+			}
+			season = strconv.Itoa(n)
+		}
+	}
 	if id != "" && r.URL.Query().Get("title") == "1" {
 		n, err := strconv.Atoi(id)
 		if err != nil || n <= 0 {
@@ -79,6 +94,7 @@ func (s *Server) library(w http.ResponseWriter, r *http.Request) {
 	}
 	items := []map[string]any{}
 	seasonCounts := map[int]int{}
+	seasonFiles := map[int][]map[string]any{}
 	search := strings.ToLower(r.URL.Query().Get("q"))
 	for _, rec := range records {
 		// Declared seasons include empty specials and unaired episodes. Only
@@ -108,6 +124,13 @@ func (s *Server) library(w http.ResponseWriter, r *http.Request) {
 		}
 		// Local navigation does not claim that cached *arr mediaInfo was probed.
 		item["metadata_source"] = "arr"
+		if name == "sonarr" && id != "" {
+			n := libraryFileSeason(item)
+			seasonFiles[n] = append(seasonFiles[n], item)
+			if season != "" && (season == "unknown" && n != -1 || season != "unknown" && strconv.Itoa(n) != season) {
+				continue
+			}
+		}
 		items = append(items, item)
 	}
 	sortLibraryItems(items, r.URL.Query().Get("sort"))
@@ -139,7 +162,60 @@ func (s *Server) library(w http.ResponseWriter, r *http.Request) {
 		}
 		offset, end = 0, len(items)
 	}
-	writeJSON(w, 200, map[string]any{"items": items[offset:end], "total": len(items), "offset": offset, "has_more": end < len(items), "service": name, "seasons": seasons})
+	writeJSON(w, 200, map[string]any{"items": items[offset:end], "total": len(items), "offset": offset, "has_more": end < len(items), "service": name, "seasons": seasons, "season_groups": librarySeasonGroups(seasonFiles, r.URL.Query().Get("sort"))})
+}
+
+func libraryFileSeason(item map[string]any) int {
+	if n, ok := item["seasonNumber"].(float64); ok && n >= 0 && n == float64(int(n)) {
+		return int(n)
+	}
+	return -1
+}
+
+func librarySeasonGroups(files map[int][]map[string]any, order string) []map[string]any {
+	groups := []map[string]any{}
+	for n, items := range files {
+		group := map[string]any{"seasonNumber": nil, "fileCount": len(items), "size": nil}
+		if n >= 0 {
+			group["seasonNumber"] = n
+		}
+		size, known := float64(0), true
+		for _, item := range items {
+			value, ok := item["size"].(float64)
+			known = known && ok && value >= 0
+			size += value
+		}
+		if known {
+			group["size"] = size
+		}
+		groups = append(groups, group)
+	}
+	sort.Slice(groups, func(i, j int) bool {
+		a, b := groups[i], groups[j]
+		if order == "size_desc" || order == "size_asc" {
+			av, aok := a["size"].(float64)
+			bv, bok := b["size"].(float64)
+			if aok != bok {
+				return aok
+			}
+			if av != bv {
+				if order == "size_desc" {
+					return av > bv
+				}
+				return av < bv
+			}
+		}
+		an, aok := a["seasonNumber"].(int)
+		bn, bok := b["seasonNumber"].(int)
+		if aok != bok {
+			return aok
+		}
+		if order == "name_desc" {
+			return an > bn
+		}
+		return an < bn
+	})
+	return groups
 }
 
 func sortLibraryItems(items []map[string]any, order string) {

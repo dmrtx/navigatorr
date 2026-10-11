@@ -321,6 +321,69 @@ test("season choices use the complete available file summary, never declared emp
   assert.equal(h.elements.get("season").value,"2");
 });
 
+test("Sonarr series open a complete season list and seasons open only their episodes", async () => {
+  const h=harness(), calls=[];
+  h.context.record=path=>calls.push(path);
+  h.run('controls=()=>{};$("service").value="sonarr";state.media={id:7,title:"Road Notes"};api=async(path)=>{record(path);const season=new URLSearchParams(path.split("?")[1]).get("season");return season===null ? {total:194,items:[{id:1,path:"/media/Season 1/one.mkv"}],has_more:true,seasons:[],season_groups:[{seasonNumber:1,fileCount:10,size:200},{seasonNumber:2,fileCount:12,size:300},{seasonNumber:10,fileCount:8,size:100},{seasonNumber:0,fileCount:2,size:50}]} : {total:1,has_more:false,seasons:[],items:[{id:2,path:"/media/Season 2/two.mkv",relativePath:"Season 2/two.mkv",seasonNumber:Number(season)}]};};');
+  await h.run('loadLibrary()');
+  assert.deepEqual(h.elements.get('library-items').children.map(row=>row.children[1].children[0].textContent),['Season 1','Season 2','Season 10','Specials']);
+  assert.equal(h.elements.get('library-more').hidden,true);
+  assert.equal(h.run('state.libraryHasMore'),false);
+  assert.equal(h.run('state.files.size'),0,'season rows must not become selectable episode IDs');
+  assert.equal(h.elements.get('library-total').textContent,'4 seasons · 194 files');
+  await h.run('navigateSeriesSeason(2)');
+  assert.equal(new URLSearchParams(calls.at(-1).split('?')[1]).get('season'),'2');
+  assert.equal(h.elements.get('selection-title').textContent,'Road Notes · Season 2');
+  assert.equal(h.elements.get('library-items').children[0].children[1].children[0].textContent,'two.mkv');
+  assert.match(h.run('navigationQuery()'),/season=2/);
+  h.elements.get('back').listeners.get('click')();
+  for(let i=0;i<12;i++) await Promise.resolve();
+  assert.equal(h.run('state.media.id'),7);
+  assert.equal(h.run('state.librarySeason'),null);
+  assert.equal(h.elements.get('library-items').children.length,4);
+});
+
+test("season selection is scoped across pages, preserves other seasons and drops late results",async()=>{
+  const h=harness(), calls=[];
+  h.context.record=path=>calls.push(path);
+  h.run('controls=()=>{};$("service").value="sonarr";state.media={id:7};state.librarySeason=2;state.selected=new Set([101]);state.files.set(101,{id:101,path:"/media/one.mkv",seasonNumber:1});api=async(path)=>{record(path);return {items:[{id:201,path:"/media/two.mkv",seasonNumber:2},{id:202,path:"/media/three.mkv",seasonNumber:2}]}};');
+  await h.run('selectAllFiles()');
+  const query=new URLSearchParams(calls[0].split('?')[1]);
+  assert.equal(query.get('all'),'1'); assert.equal(query.get('season'),'2');
+  assert.deepEqual(Array.from(h.run('state.selected')),[101,201,202]);
+  h.elements.get('select-all-files').checked=false;
+  h.elements.get('select-all-files').listeners.get('change')();
+  assert.deepEqual(Array.from(h.run('state.selected')),[101]);
+  const pending=deferred();h.context.pending=pending.promise;
+  h.run('api=async()=>pending;');
+  const selecting=h.run('selectAllFiles()');
+  h.run('state.libraryRevision++;state.librarySeason=10;');
+  pending.resolve({items:[{id:203,path:"/media/four.mkv",seasonNumber:2}]});
+  await selecting;
+  assert.deepEqual(Array.from(h.run('state.selected')),[101]);
+});
+
+test("season routes preserve specials and unknown files and restore the same season on Back",async()=>{
+  const h=harness(), calls=[];
+  h.context.record=path=>calls.push(path);
+  h.run('controls=()=>{};state.info={roots:[],services:[{name:"sonarr"}]};loadJobs=async()=>{};api=async(path)=>{record(path);return path.includes("title=1") ? {media:{id:7,title:"Road Notes"}} : {total:0,items:[],seasons:[],season_groups:[]};};');
+  for(const season of ['0','2','unknown']) {
+    await h.run(`applyNavigation(navigationRoute("?view=files&source=sonarr&media=7&season=${season}"))`);
+    assert.equal(new URLSearchParams(calls.at(-1).split('?')[1]).get('season'),season);
+    assert.match(h.run('navigationQuery()'),new RegExp('season='+season));
+  }
+  assert.equal(h.run('navigationRoute("?season=-1").season'),null);
+  assert.equal(h.run('navigationRoute("?season=1.5").season'),null);
+});
+
+test("the season header ignores selections from other seasons before all pages are loaded",()=>{
+  const h=harness();
+  h.run('state.info={transcode_enabled:true};state.workerInfo={ready:true};$("service").value="sonarr";state.media={id:7};state.librarySeason=2;state.libraryHasMore=true;state.selected=new Set([101]);state.files.set(101,{id:101,seasonNumber:1,path:"/media/one.mkv"});controls();');
+  assert.equal(h.elements.get('select-all-files').indeterminate,false);
+  h.run('state.files.set(201,{id:201,seasonNumber:2,path:"/media/two.mkv"});state.selected.add(201);controls();');
+  assert.equal(h.elements.get('select-all-files').indeterminate,true);
+});
+
 test("maintenance actions never use native browser confirmations", () => {
   assert.doesNotMatch(source, /\bconfirm\s*\(/);
 });

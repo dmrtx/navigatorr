@@ -2,6 +2,7 @@ const $ = (id) => document.getElementById(id);
 const state = {
   tab: "library",
   media: null,
+  librarySeason: null,
   files: new Map(),
   selected: new Set(),
   libraryOffset: 0,
@@ -441,10 +442,12 @@ const routeTabs = {files:"library",queue:"jobs",profiles:"recipes",stats:"stats"
 const routeStatuses = ["all","pending","running","waiting_external","waiting_decision","completed","failed","cancelled","archived"];
 function navigationRoute(search = "") {
   const q = new URLSearchParams(search);
+  const season = q.get("season");
   return {
     tab:routeTabs[q.get("view")] || "library", explicit:q.has("view"),
     source:q.get("source") || "", folder:q.get("folder") || "",
     media:/^[1-9]\d*$/.test(q.get("media") || "") ? Number(q.get("media")) : null,
+    season:season === "unknown" ? season : /^(0|[1-9]\d*)$/.test(season || "") && Number.isSafeInteger(Number(season)) ? Number(season) : null,
     file:q.get("file") || "", search:(q.get("q") || "").slice(0,256),
     sort:["name","name_desc","size_asc","size_desc"].includes(q.get("sort")) ? q.get("sort") : "name",
     status:routeStatuses.includes(q.get("status")) ? q.get("status") : "all",
@@ -460,6 +463,7 @@ function navigationQuery() {
   if ($("service").value) q.set("source",$("service").value);
   if ($("service").value.startsWith("folder:") && state.folder) q.set("folder",state.folder);
   if (state.media?.id) q.set("media",state.media.id);
+  if (seriesSeasonSelected()) q.set("season",state.librarySeason);
   if (state.fileStep === "configure") q.set("configure","1");
   if (state.fileStep === "configure" && $("scope").value === "file" && state.file?.path) q.set("file",state.file.path);
   if ($("search").value) q.set("q",$("search").value);
@@ -517,6 +521,7 @@ async function applyNavigation(route) {
         if (!current()) return;
         if (result.media?.id !== route.media) throw new Error("This library title is unavailable.");
         state.media = result.media;
+        state.librarySeason = $("service").value === "sonarr" ? route.season ?? null : null;
         $("selection-title").textContent = result.media.title || `Title ${route.media}`;
         $("back").hidden = false;
         $("scope").value = $("service").value === "sonarr" ? "batch" : "file";
@@ -534,7 +539,9 @@ async function applyNavigation(route) {
       if (route.configure && !route.file && (state.folderSelected?.size || state.selected.size)) configureSelection(true,true);
       if (route.file) {
         const folder = $("service").value.startsWith("folder:");
-        const page = await api(`${folder ? "folder" : "library"}?${new URLSearchParams(folder ? {path:state.folder,q:route.file.split("/").pop(),limit:100} : {service:$("service").value,id:state.media?.id || "",q:route.file.split("/").pop(),limit:100})}`);
+        const query = new URLSearchParams(folder ? {path:state.folder,q:route.file.split("/").pop(),limit:100} : {service:$("service").value,id:state.media?.id || "",q:route.file.split("/").pop(),limit:100});
+        if (!folder && seriesSeasonSelected()) query.set("season",state.librarySeason);
+        const page = await api(`${folder ? "folder" : "library"}?${query}`);
         if (!current()) return;
         const file = page.items?.find(f=>(f.path || "")===route.file && !f.is_dir);
         if (file) {
@@ -750,12 +757,23 @@ async function loadLibrary(more = false) {
       sort: $("library-sort").value || "name",
     });
     if (state.media) query.set("id", state.media.id);
+    if (seriesSeasonSelected()) query.set("season", state.librarySeason);
     const page = await api(`library?${query}`);
     if (revision !== state.libraryRevision) return;
-    $("library-total").textContent =
-      `${page.total} ${state.media ? "files" : "titles"}`;
-    if (!more) $("library-items").replaceChildren();
-    for (const item of page.items) {
+    const grouped = $("service").value === "sonarr" && state.media && !seriesSeasonSelected() && Array.isArray(page.season_groups);
+    state.libraryShowsSeasons = Boolean(grouped);
+    $("library-total").textContent = grouped ? `${page.season_groups.length} seasons · ${page.total} files` : `${page.total} ${state.media ? "files" : "titles"}`;
+    if (state.media && $("service").value === "sonarr") {
+      $("selection-title").textContent = (state.media.title || "Series") + (seriesSeasonSelected() ? ` · ${seriesSeasonLabel(state.librarySeason)}` : "");
+      $("back").setAttribute("aria-label",seriesSeasonSelected() ? "Back to seasons" : "Back to series");
+    }
+    if (!more) {
+      $("library-items").replaceChildren();
+      state.libraryFileKeys = new Set();
+      state.allSelectionKeys = null;
+    }
+    if (grouped) renderSeriesSeasons(page.season_groups);
+    for (const item of grouped ? [] : page.items) {
       const row = node("div", "", "media-row");
       if (state.media) {
         const check = document.createElement("input");
@@ -776,6 +794,7 @@ async function loadLibrary(more = false) {
         checkLabel.append(check);
         row.append(checkLabel);
         state.files.set(item.id, item);
+        state.libraryFileKeys.add(item.id);
       } else
         row.append(
           node(
@@ -784,8 +803,7 @@ async function loadLibrary(more = false) {
             "media-icon",
           ),
         );
-      const title =
-        item.title || item.relativePath || item.path || `File ${item.id}`;
+      const title = item.title || (seriesSeasonSelected() ? (item.relativePath || item.path || "").split(/[\\/]/).pop() : item.relativePath || item.path) || `File ${item.id}`;
       const b = button(
         "",
         async () => {
@@ -806,6 +824,7 @@ async function loadLibrary(more = false) {
           state.draftSeason = null;
           $("selected-only").checked = false;
           state.media = item;
+          state.librarySeason = null;
           state.libraryOffset = 0;
           state.selected.clear();
           state.files.clear();
@@ -839,16 +858,16 @@ async function loadLibrary(more = false) {
       row.append(b, node("span", bytes(item.size), "media-size"));
       $("library-items").append(row);
     }
-    if (!page.items.length)
+    if (!(grouped ? page.season_groups : page.items).length)
       $("library-items").append(
         node("p", "No matching files or titles.", "empty"),
       );
-    state.libraryLoaded = state.libraryOffset + page.items.length;
-    state.libraryHasMore = page.has_more;
+    state.libraryLoaded = grouped ? page.season_groups.length : state.libraryOffset + page.items.length;
+    state.libraryHasMore = !grouped && page.has_more;
     state.libraryError = false;
     state.libraryNeedsLoad = false;
     if (!more) writeNavigation();
-    $("library-more").hidden = !page.has_more;
+    $("library-more").hidden = !state.libraryHasMore;
     if (state.media && $("service").value === "sonarr") {
       const selectedSeason = state.draftSeason ?? $("season").value;
       const seasons = page.seasons || [];
@@ -856,6 +875,7 @@ async function loadLibrary(more = false) {
       option($("season"), "", "All seasons");
       seasons.forEach(({seasonNumber:n,fileCount:count}) => option($("season"), n, `${n === 0 ? "Specials" : `Season ${n}`} · ${count} file${count === 1 ? "" : "s"}`));
       $("season").value = seasons.some(s => String(s.seasonNumber) === selectedSeason) ? selectedSeason : "";
+      if (seriesSeasonSelected() && state.librarySeason !== "unknown") $("season").value = String(state.librarySeason);
       state.draftSeason = null;
     }
   } catch (error) {
@@ -871,6 +891,37 @@ async function loadLibrary(more = false) {
       controls();
     }
   }
+}
+function seriesSeasonSelected() {
+  return $("service").value === "sonarr" && state.media && state.librarySeason != null;
+}
+function seriesSeasonLabel(season) {
+  return season == null || season === "unknown" ? "Other files" : season === 0 ? "Specials" : `Season ${season}`;
+}
+function fileInCurrentSeason(file) {
+  if (!file) return false;
+  const season = Number.isInteger(file.seasonNumber) && file.seasonNumber >= 0 ? file.seasonNumber : "unknown";
+  const search = $("search").value.toLowerCase();
+  return season === state.librarySeason && (!search || `${file.title || ""} ${file.path || ""} ${file.relativePath || ""}`.toLowerCase().includes(search));
+}
+function renderSeriesSeasons(seasons) {
+  for (const season of seasons) {
+    const row = node("div", "", "media-row"), icon = node("span", "", "media-icon");
+    const folder = actionIcon("Folder");
+    if (folder) icon.append(folder); else icon.textContent = "▤";
+    const open = button("", () => navigateSeriesSeason(season.seasonNumber ?? "unknown"), "open-media");
+    open.append(node("span",seriesSeasonLabel(season.seasonNumber),"media-title"),node("span",`${season.fileCount} ${season.fileCount === 1 ? "file" : "files"}`,"metadata"));
+    row.append(icon,open,node("span",bytes(season.size),"media-size"));
+    $("library-items").append(row);
+  }
+}
+async function navigateSeriesSeason(season) {
+  state.librarySeason = season;
+  state.allSelectionKeys = null;
+  state.libraryOffset = 0;
+  clearFileSelection();
+  setFileStep("browse");
+  await loadLibrary();
 }
 function libraryFailure(error, more) {
   state.libraryError = true;
@@ -931,6 +982,9 @@ function resetLibrary() {
   $("size-order-note").hidden = true;
   $("library-more").hidden = true;
   state.media = null;
+  state.librarySeason = null;
+  state.libraryShowsSeasons = false;
+  state.libraryFileKeys = null;
   state.folder = null;
   state.folderSelected = new Set();
   state.file = null;
@@ -941,6 +995,7 @@ function resetLibrary() {
   state.selected.clear();
   $("path").value = "";
   $("back").hidden = true;
+  $("back").setAttribute("aria-label","Parent folder");
   $("selection-title").textContent = "Choose a movie or series";
   $("selection-title").hidden = false;
   $("folder-breadcrumbs").hidden = true;
@@ -973,6 +1028,7 @@ $("sort-name").addEventListener("click", () => safe(() => toggleLibrarySort("nam
 $("sort-size").addEventListener("click", () => safe(() => toggleLibrarySort("size")));
 $("reload-library").addEventListener("click", () => safe(loadLibrary));
 $("back").addEventListener("click", () => {
+  if (seriesSeasonSelected()) { safe(() => navigateSeriesSeason(null)); return; }
   if ($("service").value.startsWith("folder:")) {
     const root = $("service").value.slice(7);
     state.folder =
@@ -1369,7 +1425,9 @@ async function selectAllFiles() {
     let keys, files;
     if (folder) keys = (await api(`folder?${new URLSearchParams({path:state.folder,files:"1",recursive:"1",q:$("search").value})}`)).paths;
     else {
-      const page = await api(`library?${new URLSearchParams({service:$("service").value,id:state.media.id,q:$("search").value,all:"1"})}`);
+      const query = new URLSearchParams({service:$("service").value,id:state.media.id,q:$("search").value,all:"1"});
+      if (seriesSeasonSelected()) query.set("season",state.librarySeason);
+      const page = await api(`library?${query}`);
       files = page.items;
       keys = files.map(file => file.id);
     }
@@ -1379,7 +1437,7 @@ async function selectAllFiles() {
     if (folder) state.folderSelected = new Set(keys);
     else {
       files.forEach(file => state.files.set(file.id,file));
-      state.selected = new Set(keys);
+      state.selected = new Set(seriesSeasonSelected() ? [...state.selected,...keys] : keys);
     }
     $("library-items").querySelectorAll('input[type="checkbox"]').forEach(input => { input.checked = true; });
     fileSelectionChanged();
@@ -1403,7 +1461,15 @@ async function selectFolderFiles(path, checked) {
 }
 $("select-all-files").addEventListener("change", () => {
   if ($("select-all-files").checked) safe(selectAllFiles);
-  else { state.folderSelected?.clear(); state.selected.clear(); $("library-items").querySelectorAll('input[type="checkbox"]').forEach(input=>input.checked=false); fileSelectionChanged(); }
+  else {
+    if (seriesSeasonSelected()) {
+      for (const [id,file] of state.files) {
+        if (fileInCurrentSeason(file)) state.selected.delete(id);
+      }
+    } else { state.folderSelected?.clear(); state.selected.clear(); }
+    $("library-items").querySelectorAll('input[type="checkbox"]').forEach(input=>input.checked=false);
+    fileSelectionChanged();
+  }
 });
 $("clear-selected-files").addEventListener("click", () => {
   state.folderSelected?.clear();
@@ -1514,10 +1580,10 @@ function controls() {
     ? !state.folder
     : $("service").value !== "sonarr" || !state.media;
   $("use-container").disabled = state.libraryLoading || state.selectionLoading;
-  $("use-container").textContent = folder ? "Select folder" : "Select series";
-  $("select-all-files").hidden = !folder && !state.files?.size;
+  $("use-container").textContent = folder ? "Select folder" : seriesSeasonSelected() ? "Select season" : "Select series";
+  $("select-all-files").hidden = !folder && (state.libraryShowsSeasons || !state.files?.size);
   $("selection-toolbar").hidden = true;
-  $("use-container").title = folder ? "Choose this folder, including its subfolders" : "Choose this series";
+  $("use-container").title = folder ? "Choose this folder, including its subfolders" : seriesSeasonSelected() ? "Choose this season" : "Choose this series";
   $("select-all-files").disabled = state.libraryLoading || state.selectionLoading;
   const selectedKeys=folder ? state.folderSelected || new Set() : state.selected;
   $("library-items").querySelectorAll('input[type="checkbox"]').forEach(input=>{
@@ -1528,9 +1594,10 @@ function controls() {
     input.indeterminate=selected>0 && !input.checked;
     input.disabled=Boolean(state.selectionLoading);
   });
-  const headerKeys = state.allSelectionKeys || (folder ? state.folderHeaderKeys : state.media && !state.libraryHasMore ? new Set(state.files.keys()) : null);
+  const headerKeys = state.allSelectionKeys || (folder ? state.folderHeaderKeys : state.media && !state.libraryShowsSeasons && !state.libraryHasMore ? state.libraryFileKeys || new Set(state.files.keys()) : null);
   $("select-all-files").checked = headerKeys?.size>0 && [...headerKeys].every(key=>selectedKeys.has(key));
-  $("select-all-files").indeterminate = !$("select-all-files").checked && (headerKeys ? [...headerKeys].some(key=>selectedKeys.has(key)) : selectedCount > 0);
+  const visibleSelected = seriesSeasonSelected() ? [...state.selected].some(id => fileInCurrentSeason(state.files.get(id))) : selectedCount > 0;
+  $("select-all-files").indeterminate = !$("select-all-files").checked && (headerKeys ? [...headerKeys].some(key=>selectedKeys.has(key)) : visibleSelected);
   $("clear-selected-files").hidden = !selectedCount;
   $("clear-selected-files").disabled = state.libraryLoading || state.selectionLoading;
   $("configure-selection").disabled ||= state.selectionLoading;
