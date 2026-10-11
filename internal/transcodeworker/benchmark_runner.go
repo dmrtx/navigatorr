@@ -223,7 +223,7 @@ type validatedCandidate struct {
 // It extracts lossless reference samples, encodes candidate samples using hevc_videotoolbox,
 // computes perceptual quality metrics (VMAF/SSIM), and deterministically selects the winning candidate.
 type ProductionBenchmarkRunner struct {
-	automaticHook func(context.Context,*BenchmarkRecord,*BenchmarkExecutionEvidence,[]validatedCandidate) error
+	automaticHook func(context.Context, *BenchmarkRecord, *BenchmarkExecutionEvidence, []validatedCandidate) error
 	metricsHook   func(ctx context.Context, w *Worker, record *BenchmarkRecord, evidence *BenchmarkExecutionEvidence) error
 	selectionHook func(ctx context.Context, w *Worker, record *BenchmarkRecord, evidence *BenchmarkExecutionEvidence) error
 }
