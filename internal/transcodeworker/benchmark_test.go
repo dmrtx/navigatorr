@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -907,6 +908,36 @@ func TestBenchmark_MonotonicLifecycleAndCancelDuringExecution(t *testing.T) {
 	finalRec, _ := LoadBenchmark(benchFileCancel)
 	if finalRec.Status != "cancelled" {
 		t.Fatalf("expected status to remain 'cancelled', got %q", finalRec.Status)
+	}
+	if finalRec.SearchSeconds == nil || *finalRec.SearchSeconds < 0 {
+		t.Fatal("cancelled search without evidence lost measured cost", finalRec)
+	}
+}
+
+func TestBenchmarkStagingFailureReportsZeroSearchCost(t *testing.T) {
+	for _, resumed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("resumed=%v", resumed), func(t *testing.T) {
+			stateDir := t.TempDir()
+			worker := NewWorker(&WorkerConfig{StateDir: stateDir, MaxParallelJobs: 2})
+			record := &BenchmarkRecord{ProtocolVersion: transcode.WorkerProtocolVersion, ID: "bench-staging-cost", Status: "queued", Source: "/nas/source.mkv", EffectiveSource: filepath.Join(stateDir, "source.mkv"), RunToken: "staging-cost-token", SearchBudgetSeconds: 600}
+			if resumed {
+				record.SearchStartedAt = time.Now().UTC().Add(-time.Second)
+			}
+			path := filepath.Join(stateDir, record.ID, "benchmark.json")
+			if err := SaveBenchmarkAtomic(path, record); err != nil {
+				t.Fatal(err)
+			}
+			if err := worker.InternalBenchmark(context.Background(), record.ID, record.RunToken); err == nil {
+				t.Fatal("missing SMB staging store should fail")
+			}
+			final, err := LoadBenchmark(path)
+			if err != nil || final.Status != "failed" {
+				t.Fatal(final, err)
+			}
+			if resumed && final.SearchSeconds != nil || !resumed && (final.SearchSeconds == nil || *final.SearchSeconds != 0) {
+				t.Fatal("pre-search staging cost confused with unknown resumed cost", final)
+			}
+		})
 	}
 }
 

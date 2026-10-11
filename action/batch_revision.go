@@ -50,6 +50,16 @@ func batchChildKey(ec *ExecutionContext, item store.TranscodeBatchItem) string {
 	return key
 }
 
+// The parent inputs remain immutable audit evidence. A saved explicit profile
+// changes only future attempts and does not consume the original mode's budget.
+func batchItemMode(ec *ExecutionContext, item store.TranscodeBatchItem) string {
+	settings, _ := stateObject(ec.State, "batch_item_settings")[item.ItemKey].(map[string]any)
+	if profile := getString(settings, "profile"); profile != "" && profile != "same" {
+		return ""
+	}
+	return getString(ec.Inputs, "mode")
+}
+
 func recordBatchAttempt(ec *ExecutionContext, item *store.TranscodeBatchItem) {
 	history := stateObject(ec.State, "batch_attempt_history")
 	var rows []store.TranscodeBatchItem
@@ -196,11 +206,14 @@ func (e *Engine) ReconfigureBatch(ctx context.Context, id, scope, candidateID, v
 	ec.State["batch_revision_receipt"], ec.State["batch_revision_at"] = receipt, time.Now().UTC().Format(time.RFC3339Nano)
 	ec.State["paused"], ec.State["cancel_requested"] = false, false
 	ec.State["batch_promotion_approved"] = false
+	delete(ec.State, "reason_code")
 	delete(ec.State, "next_poll_at")
 	inst.Status, inst.CurrentStep = StatusRunning, 1
 	inst.WaitingReason, inst.WaitingCondition, inst.WaitingOptionsJSON, inst.ErrorJSON = "", "", "[]", ""
+	outputs := buildBatchOutputs(id, items, getString(ec.State, "series_title"), getBool(ec.State, "is_anime"), false)
+	ec.State["counts"] = outputs["counts"]
 	inst.StateJSON = toJSON(ec.State)
-	inst.OutputsJSON = toJSON(buildBatchOutputs(id, items, getString(ec.State, "series_title"), getBool(ec.State, "is_anime"), false))
+	inst.OutputsJSON = toJSON(outputs)
 	owner, _ := ctx.Value(actionLeaseOwnerKey{actionID: id}).(string)
 	if err := e.deps.Store.CommitBatchRevision(*inst, owner, changed); err != nil {
 		return nil, err

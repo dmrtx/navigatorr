@@ -111,7 +111,7 @@ func Classify(err error) string {
 	}
 	s := strings.ToLower(err.Error())
 	switch {
-	case strings.Contains(s, "signing required") || strings.Contains(s, SMBSigningRequired):
+	case strings.Contains(s, "signing required") || strings.Contains(s, "signature verification") || strings.Contains(s, SMBSigningRequired):
 		return SMBSigningRequired
 	case strings.Contains(s, "session expired") || strings.Contains(s, "session has expired") || strings.Contains(s, "session deleted") || strings.Contains(s, "session has been deleted") || strings.Contains(s, "invalid session") || strings.Contains(s, SMBSessionInvalid):
 		return SMBSessionInvalid

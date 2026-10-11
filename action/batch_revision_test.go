@@ -2,11 +2,108 @@ package action
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/store"
 )
+
+func TestModeBatchExplicitProfileContinuesWithExhaustedBudget(t *testing.T) {
+	st := setupTestStore(t)
+	e := NewEngine(EngineDeps{Store: st, Config: &config.Config{Transcode: config.TranscodeConfig{MaxParallelJobs: 2}}})
+	e.RegisterTemplate(ActionTemplate{Name: "transcode_media", ImmutableInputs: true, Steps: []StepDefinition{{Name: "encode", Run: func(ctx context.Context, child *ExecutionContext) (StepResult, error) {
+		if getString(child.Inputs, "profile") != "live-action-hevc-vt" || getString(child.Inputs, "mode") != "" || getBool(child.Inputs, "replace_original") {
+			t.Errorf("saved profile or original protection lost: %s", toJSON(child.Inputs))
+		}
+		return StepResult{Status: StepWaitingExternal, WaitingCondition: "transcode_processing"}, nil
+	}}}})
+	ec := &ExecutionContext{InstanceID: "mode-parent", Inputs: map[string]any{"mode": "x265_preserve"}, State: map[string]any{}}
+	if _, err := freezeModePolicy(ec); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 6; i++ {
+		reserveModeSearch(ec, fmt.Sprintf("old-%d", i))
+	}
+	seedActionInstance(t, st, ec.InstanceID, "transcode_batch", StatusWaitingDecision, 1, "", ec.Inputs, ec.State)
+	for i := 0; i < 10; i++ {
+		if err := st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: ec.InstanceID, ItemKey: fmt.Sprintf("file-%d", i), FilePath: fmt.Sprintf("/media/%d.mkv", i), Status: "failed", Decision: "transcode", Profile: "mode-x265_preserve"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root, _ := st.GetActionInstance(ec.InstanceID)
+	items, _ := st.ListTranscodeBatchItems(ec.InstanceID)
+	if _, err := e.ReconfigureBatch(context.Background(), ec.InstanceID, "unfinished", "", BatchSelectionVersion(root, items), "", "profile-choice", map[string]any{"profile": "live-action-hevc-vt"}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := e.Resume(context.Background(), ec.InstanceID, "", nil)
+	if err != nil || res.Status != StatusWaitingExternal || res.WaitingCondition == "search_budget_exhausted" {
+		t.Fatalf("explicit profile blocked by old budget: %+v %v", res, err)
+	}
+	items, _ = st.ListTranscodeBatchItems(ec.InstanceID)
+	children := 0
+	for _, item := range items {
+		if item.ChildActionID != "" {
+			children++
+		}
+	}
+	root, _ = st.GetActionInstance(ec.InstanceID)
+	if children != 2 || root.InputsJSON != toJSON(ec.Inputs) || len(modeBudgetEntries(parseExecutionContext(root, e))) != 6 {
+		t.Fatal("bounded admission or immutable original intent lost", children, root)
+	}
+}
+
+func TestModeBatchReservesOnlyAvailableSlots(t *testing.T) {
+	st := setupTestStore(t)
+	e := NewEngine(EngineDeps{Store: st, Config: &config.Config{Transcode: config.TranscodeConfig{MaxParallelJobs: 2}}})
+	e.RegisterTemplate(ActionTemplate{Name: "transcode_media", ImmutableInputs: true, Steps: []StepDefinition{{Name: "search", Run: func(context.Context, *ExecutionContext) (StepResult, error) {
+		return StepResult{Status: StepWaitingExternal, WaitingCondition: "benchmark_processing"}, nil
+	}}}})
+	ec := &ExecutionContext{InstanceID: "mode-slots", Inputs: map[string]any{"mode": "quality"}, State: map[string]any{}}
+	_, _ = freezeModePolicy(ec)
+	seedActionInstance(t, st, ec.InstanceID, "transcode_batch", StatusWaitingExternal, 1, "", ec.Inputs, ec.State)
+	for i := 0; i < 10; i++ {
+		st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: ec.InstanceID, ItemKey: fmt.Sprintf("file-%d", i), FilePath: fmt.Sprintf("/media/%d.mkv", i), Status: "queued", Decision: "transcode"})
+	}
+	if _, err := e.Resume(context.Background(), ec.InstanceID, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	root, _ := st.GetActionInstance(ec.InstanceID)
+	if entries := modeBudgetEntries(parseExecutionContext(root, e)); len(entries) != 2 {
+		t.Fatalf("unscheduled sources consumed budget: %+v", entries)
+	}
+}
+
+func TestModeBudgetSettlesHistoricalAttemptsAfterRevisionAndRestart(t *testing.T) {
+	for _, submitted := range []bool{false, true} {
+		t.Run(fmt.Sprintf("submitted=%v", submitted), func(t *testing.T) {
+			st := setupTestStore(t)
+			e := NewEngine(EngineDeps{Store: st})
+			ec := &ExecutionContext{InstanceID: "parent", Inputs: map[string]any{"mode": "x265_preserve"}, State: map[string]any{}}
+			_, _ = freezeModePolicy(ec)
+			item := store.TranscodeBatchItem{ItemKey: "file-a", ChildActionID: "cancelled-child"}
+			key := batchChildKey(ec, item)
+			seedActionInstance(t, st, item.ChildActionID, "transcode_media", StatusCancelled, 1, "", ec.Inputs, map[string]any{"benchmark_submitted": submitted})
+			child, _ := st.GetActionInstance(item.ChildActionID)
+			child.IdempotencyKey = key
+			st.UpdateActionInstance(*child)
+			reserveModeSearch(ec, key)
+			for i := 0; i < 5; i++ {
+				reserveModeSearch(ec, fmt.Sprintf("other-%d", i))
+			}
+			recordBatchAttempt(ec, &item)
+			// Reload serialized coordinator state, with the previous child only in history.
+			seedActionInstance(t, st, ec.InstanceID, "transcode_batch", StatusWaitingExternal, 1, "", ec.Inputs, ec.State)
+			root, _ := st.GetActionInstance(ec.InstanceID)
+			ec = parseExecutionContext(root, e)
+			e.settleModeSearches(ec, []store.TranscodeBatchItem{item})
+			admitted := reserveModeSearch(ec, batchChildKey(ec, item))
+			if admitted == submitted {
+				t.Fatalf("historical cost settlement wrong: submitted=%v admitted=%v entries=%s", submitted, admitted, toJSON(modeBudgetEntries(ec)))
+			}
+		})
+	}
+}
 
 func TestBatchRevisionRetainsIdentityAndDefersActiveFilesWithoutDuplicateAdmission(t *testing.T) {
 	st := setupTestStore(t)

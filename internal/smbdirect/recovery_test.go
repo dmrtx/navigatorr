@@ -191,6 +191,7 @@ func TestStorageRecoveryIsBoundedAndSkipsPermanentErrors(t *testing.T) {
 		connections int
 	}{
 		{"signing", &smb2.InvalidResponseError{Message: "signing required"}, SMBSigningRequired, 2},
+		{"invalid signature", &smb2.InvalidResponseError{Message: "packet failed signature verification"}, SMBSigningRequired, 2},
 		{"expired session", &smb2.ResponseError{Code: 0xC000035C}, SMBSessionInvalid, 2},
 		{"bad credentials", &smb2.ResponseError{Code: 0xC000006D}, SMBAuthFailed, 1},
 		{"access denied", &smb2.ResponseError{Code: 0xC0000022}, StoragePermissionDenied, 1},

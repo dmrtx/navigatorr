@@ -898,10 +898,13 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 
 		if getString(ec.Inputs, "mode") != "" {
 			e.settleModeSearches(ec, items)
-			admitted := pendingIndices[:0]
+			admitted := make([]int, 0, availableSlots)
 			for _, idx := range pendingIndices {
-				if reserveModeSearch(ec, batchChildKey(ec, items[idx])) {
+				if batchItemMode(ec, items[idx]) == "" || reserveModeSearch(ec, batchChildKey(ec, items[idx])) {
 					admitted = append(admitted, idx)
+				}
+				if len(admitted) == availableSlots {
+					break
 				}
 			}
 			pendingIndices = admitted
@@ -996,7 +999,7 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 			if it.Status == "running" || it.Status == "waiting_for_slot" {
 				active++
 			}
-			if it.Status == "queued" {
+			if it.Status == "queued" && batchItemMode(ec, it) != "" {
 				queued++
 			}
 		}
@@ -1091,6 +1094,7 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 				copy.State[key] = value
 			}
 			delete(copy.State, "batch_auto_profile")
+			delete(copy.Inputs, "mode")
 			copy.Inputs["shared_calibration"] = false
 			delete(copy.Inputs, "profile_config")
 			delete(copy.Inputs, "priority")
