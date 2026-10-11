@@ -215,11 +215,22 @@ func reserveModeSearch(ec *ExecutionContext, key string) bool {
 
 func (e *Engine) settleModeSearches(ec *ExecutionContext, items []store.TranscodeBatchItem) {
 	entries := modeBudgetEntries(ec)
-	for _, item := range items {
-		if item.ChildActionID == "" {
+	// Reservations own stable child keys, even after a settings revision moves
+	// the visible row to a new generation. Settle old attempts as well as current
+	// ones, retaining the full reservation whenever execution cost is uncertain.
+	for key, entry := range entries {
+		if entry.Consumed != nil {
 			continue
 		}
-		child, err := e.deps.Store.GetActionInstance(item.ChildActionID)
+		child, err := e.deps.Store.FindActionByIdempotencyKey("transcode_media", key)
+		if err == nil && child == nil {
+			for _, item := range items {
+				if item.ChildActionID != "" && batchChildKey(ec, item) == key {
+					child, err = e.deps.Store.GetActionInstance(item.ChildActionID)
+					break
+				}
+			}
+		}
 		if err != nil || child == nil {
 			continue
 		}
@@ -238,9 +249,7 @@ func (e *Engine) settleModeSearches(ec *ExecutionContext, items []store.Transcod
 		if !valid {
 			continue
 		}
-		key := batchChildKey(ec, item)
-		entry, exists := entries[key]
-		if !exists || entry.Consumed != nil || value > entry.Reserved {
+		if value > entry.Reserved {
 			continue
 		}
 		entry.Consumed = &value

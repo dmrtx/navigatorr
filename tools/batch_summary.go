@@ -126,6 +126,9 @@ func compactBatch(res *action.ActionResult) *BatchSummary {
 		result.NextStep = "Monitor this action with action_status; external waits advance automatically. Do not start a duplicate batch."
 	case "needs_decision":
 		result.NextStep = "Use this action's waiting_options with action_resume. An approve decision authorizes the displayed replacement."
+		if res.State["reason_code"] == "search_budget_exhausted" || res.Outputs["reason_code"] == "search_budget_exhausted" {
+			result.NextStep = "Search budget is reserved or exhausted. In the batch settings, choose an explicit profile for remaining files to continue without another mode search. Originals remain unchanged; cancel stops the batch."
+		}
 	case "candidates_ready":
 		result.NextStep = "Candidates are ready; originals are unchanged. Inspect action_detail(section=outputs,key=items) for candidate paths and child action IDs; do not encode again to promote them."
 	case "partial", "needs_review", "failed":

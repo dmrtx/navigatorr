@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/getkin/kin-openapi v0.133.0
-	github.com/hirochachacha/go-smb2 v1.1.0
+	github.com/hirochachacha/go-smb2 v1.1.1-0.20260923165503-436b880f7ab8
 	github.com/mark3labs/mcp-go v0.44.0
 	golang.org/x/sys v0.47.0
 	gopkg.in/yaml.v3 v3.0.1

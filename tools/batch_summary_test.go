@@ -12,6 +12,14 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
+func TestCompactBatchBudgetStopExplainsProfileRecovery(t *testing.T) {
+	res := &action.ActionResult{ActionName: "transcode_batch", Status: action.StatusWaitingDecision, State: map[string]any{"reason_code": "search_budget_exhausted"}, Outputs: map[string]any{"counts": map[string]int{"total": 10, "queued": 10}}}
+	batch := compactBatch(res)
+	if batch == nil || !strings.Contains(batch.NextStep, "explicit profile") || strings.Contains(batch.NextStep, "approve") {
+		t.Fatal("budget stop advertised a replacement approval", batch)
+	}
+}
+
 func TestCompactBatchReportsLibraryOutcome(t *testing.T) {
 	for _, tc := range []struct {
 		name, status, want           string
