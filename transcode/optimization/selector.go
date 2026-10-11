@@ -19,6 +19,7 @@ type CandidateInput struct {
 
 // SelectorInput encapsulates the inputs provided to the CandidateSelector.
 type SelectorInput struct {
+	ModePolicyVersion string `json:"mode_policy_version,omitempty"`
 	// Policy is the quality policy (e.g. VMAFPolicy or SSIMPolicy) used to evaluate candidates.
 	Policy      QualityPolicy `json:"-"`
 	Mode        string        `json:"mode,omitempty"`
@@ -173,7 +174,7 @@ func SelectCandidate(in SelectorInput) SelectionResult {
 	}
 
 	if in.Mode != "" {
-		return SelectMeasuredCandidates(res.AllEvaluated, in.Mode, in.Policy.Tolerance(), in.SourceBytes)
+		return SelectMeasuredCandidatesVersion(res.AllEvaluated, in.Mode, in.Policy.Tolerance(), in.SourceBytes, in.ModePolicyVersion)
 	}
 	// Case 1: Target-reaching candidates exist
 	if len(targetReaching) > 0 {
@@ -238,6 +239,10 @@ func SelectCandidate(in SelectorInput) SelectionResult {
 // numbers never participate in ranking. The 2% equivalence band is relative to
 // the smallest qualifying estimate, keeping the ordering transitive and stable.
 func SelectMeasuredCandidates(candidates []EvaluatedCandidate, mode string, tolerance float64, sourceBytes int64) SelectionResult {
+	return SelectMeasuredCandidatesVersion(candidates, mode, tolerance, sourceBytes, "")
+}
+
+func SelectMeasuredCandidatesVersion(candidates []EvaluatedCandidate, mode string, tolerance float64, sourceBytes int64, version string) SelectionResult {
 	r := SelectionResult{AllEvaluated: append([]EvaluatedCandidate(nil), candidates...), DecisionReason: ReasonAllCandidatesInvalid}
 	if mode != "size" && mode != "quality" && mode != "x265_preserve" {
 		r.DecisionReason = "invalid_mode"
@@ -265,7 +270,7 @@ func SelectMeasuredCandidates(candidates []EvaluatedCandidate, mode string, tole
 			continue
 		}
 		// Compare unrounded bytes; avoid integer multiplication overflow.
-		if !ModeSizeAllowed(mode, sourceBytes, c.EstimatedBytes) {
+		if !ModeSizeAllowedVersion(mode, sourceBytes, c.EstimatedBytes, version) {
 			c.Eligible = false
 			c.EvaluationReason = "insufficient_savings"
 			continue
@@ -325,11 +330,20 @@ func SelectMeasuredCandidates(candidates []EvaluatedCandidate, mode string, tole
 
 // ModeSizeAllowed compares fixed mode policies with exact integer bytes. Splitting
 // the quotient and remainder avoids overflow even at MaxInt64.
+const ModePolicyV2 = "transcode-modes-v2"
+
 func ModeSizeAllowed(mode string, source, candidate int64) bool {
+	return ModeSizeAllowedVersion(mode, source, candidate, "")
+}
+
+func ModeSizeAllowedVersion(mode string, source, candidate int64, version string) bool {
+	if version != "" && version != "transcode-modes-v1" && version != ModePolicyV2 {
+		return false
+	}
 	if source <= 0 || candidate <= 0 {
 		return false
 	}
-	if mode == "x265_preserve" {
+	if mode == "x265_preserve" || mode == "quality" && version == ModePolicyV2 {
 		return candidate <= source
 	}
 	if mode != "size" && mode != "quality" {

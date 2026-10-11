@@ -37,12 +37,13 @@ type ResiliencePlan struct {
 }
 
 type Plan struct {
-	Podcast      *podcast.Task `json:"podcast,omitempty" yaml:"podcast,omitempty"`
-	Mode         string        `json:"mode,omitempty" yaml:"mode,omitempty"`
-	PolicyDigest string        `json:"policy_digest,omitempty" yaml:"policy_digest,omitempty"`
-	SizePolicy   *SizePolicy   `json:"size_policy,omitempty" yaml:"size_policy,omitempty"`
-	Container    string        `json:"container" yaml:"container"`
-	VideoCodec   string        `json:"video_codec" yaml:"video_codec"`
+	ModePolicyVersion string        `json:"mode_policy_version,omitempty" yaml:"mode_policy_version,omitempty"`
+	Podcast           *podcast.Task `json:"podcast,omitempty" yaml:"podcast,omitempty"`
+	Mode              string        `json:"mode,omitempty" yaml:"mode,omitempty"`
+	PolicyDigest      string        `json:"policy_digest,omitempty" yaml:"policy_digest,omitempty"`
+	SizePolicy        *SizePolicy   `json:"size_policy,omitempty" yaml:"size_policy,omitempty"`
+	Container         string        `json:"container" yaml:"container"`
+	VideoCodec        string        `json:"video_codec" yaml:"video_codec"`
 	// Quality is the rate-control knob. For hevc_videotoolbox it maps to -q:v
 	// (higher = higher quality). For libx265 it maps to -crf (LOWER = higher
 	// quality, valid range 1..51). See VideoProfile.Preset for x265 preset.
