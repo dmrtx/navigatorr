@@ -1,11 +1,66 @@
 package transcodeworker
 
 import (
+	"encoding/json"
+	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/jakenesler/navigatorr/transcode"
 )
+
+// Exercise the same HTTP handoff as a real automatic benchmark winner. Sample
+// selection passing must not be followed by admission under another policy.
+func TestHTTP_ModeWinnerHandoffUsesFrozenPolicyVersion(t *testing.T) {
+	for _, tc := range []struct {
+		name, mode, version string
+		minimum             float64
+		accepted            bool
+	}{
+		{"quality v2 no growth", "quality", "transcode-modes-v2", 0, true},
+		{"quality v1 savings", "quality", "transcode-modes-v1", 15, true},
+		{"legacy quality savings", "quality", "", 15, true},
+		{"quality v1 cannot loosen", "quality", "transcode-modes-v1", 0, false},
+		{"quality v2 cannot drift", "quality", "transcode-modes-v2", 15, false},
+		{"size v2 savings", "size", "transcode-modes-v2", 15, true},
+		{"size cannot loosen", "size", "transcode-modes-v2", 0, false},
+		{"preserve v2 no growth", "x265_preserve", "transcode-modes-v2", 0, true},
+		{"unknown version", "quality", "transcode-modes-v3", 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := newStubSpawn()
+			w, root, source := newPR3Worker(t, 1, stub)
+			p := signedPlan(t, nil)
+			p.VideoCodec, p.Quality, p.Preset = "libx265", 20, "medium"
+			p.Mode, p.ModePolicyVersion = tc.mode, tc.version
+			p.PolicyDigest = "sha256:" + strings.Repeat("0", 64)
+			p.SizePolicy = &transcode.SizePolicy{MinSavingsPercent: tc.minimum}
+			p.QualityValidation = &transcode.QualityValidationPlan{
+				Metric: "vmaf", BenchmarkRequestDigest: "sha256:" + strings.Repeat("1", 64),
+				Quality: transcode.BenchmarkQualityConfig{
+					VMAF:            &transcode.BenchmarkQualityThresholds{Model: "v1_1080p_3h", Minimum: 95, Target: 96},
+					FinalValidation: &transcode.BenchmarkFinalValidationConfig{Mode: "sampled"},
+				},
+			}
+			for i := 0; i < 5; i++ {
+				p.QualityValidation.Samples = append(p.QualityValidation.Samples, transcode.BenchmarkSampleWindow{Index: i, StartSeconds: float64(i * 20), DurationSeconds: 10})
+			}
+			p.PlanDigest, _ = transcode.DigestPlan(p)
+			payload, err := json.Marshal(SubmitRequest{ID: "mode-handoff", SourcePath: source, CandidatePath: filepath.Join(root, "candidate.mkv"), Plan: p})
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec := doRequest(t, NewServer(w, "test-exe", "", ""), http.MethodPost, "/v1/jobs", string(payload), "")
+			if tc.accepted && rec.Code != http.StatusCreated {
+				t.Fatalf("winner rejected: status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			if !tc.accepted && rec.Code != http.StatusBadRequest {
+				t.Fatalf("invalid frozen policy admitted: status=%d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
 
 func signedPlan(t *testing.T, actions []transcode.SubtitleAction) *transcode.Plan {
 	t.Helper()
