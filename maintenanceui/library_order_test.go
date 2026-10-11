@@ -109,6 +109,69 @@ func TestLibraryAllSelectionIsBoundedAndRequiresCollection(t *testing.T) {
 	}
 }
 
+func TestLibrarySeasonNavigationFiltersBeforePaginationAndSelection(t *testing.T) {
+	s, h := testUI(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		records := []map[string]any{
+			{"id": 200, "path": "/media/Season 2/two.mkv", "seasonNumber": 2, "size": 20},
+			{"id": 1000, "path": "/media/Season 10/ten.mkv", "seasonNumber": 10, "size": 100},
+			{"id": 500, "path": "/media/Specials/special.mkv", "seasonNumber": 0, "size": 5},
+			{"id": 900, "path": "/media/unsorted.mkv"},
+		}
+		for i := 0; i < 105; i++ {
+			records = append(records, map[string]any{"id": i + 1, "path": fmt.Sprintf("/media/Season 1/%03d.mkv", i), "seasonNumber": 1, "size": 10})
+		}
+		json.NewEncoder(w).Encode(records)
+	}))
+	defer upstream.Close()
+	s.registry = arrservice.NewRegistry(&config.Config{Services: map[string]config.ServiceConfig{"sonarr": {URL: upstream.URL}, "radarr": {URL: upstream.URL}}})
+	read := func(query string) map[string]any {
+		t.Helper()
+		w := request(h, "GET", "/api/maintenance/library?service=sonarr&id=1&"+query, "", true)
+		var page map[string]any
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		return page
+	}
+	page := read("limit=1")
+	groups := page["season_groups"].([]any)
+	if len(groups) != 5 || groups[0].(map[string]any)["seasonNumber"] != float64(0) || groups[1].(map[string]any)["seasonNumber"] != float64(1) || groups[2].(map[string]any)["seasonNumber"] != float64(2) || groups[3].(map[string]any)["seasonNumber"] != float64(10) || groups[4].(map[string]any)["seasonNumber"] != nil {
+		t.Fatal("season list must be complete and numerically ordered", groups)
+	}
+	if groups[1].(map[string]any)["fileCount"] != float64(105) || groups[1].(map[string]any)["size"] != float64(1050) || groups[4].(map[string]any)["size"] != nil {
+		t.Fatal("season totals must use all files and retain unknown sizes", groups)
+	}
+	for _, tc := range []struct {
+		query string
+		id    float64
+		total float64
+	}{{"season=2&limit=1", 200, 1}, {"season=0", 500, 1}, {"season=unknown", 900, 1}, {"season=1&offset=100&limit=1", 101, 105}, {"season=10&all=1", 1000, 1}} {
+		page := read(tc.query)
+		items := page["items"].([]any)
+		if page["total"] != tc.total || len(items) != 1 || items[0].(map[string]any)["id"] != tc.id {
+			t.Fatal("filter must precede pagination and select-all", tc, page)
+		}
+	}
+	page = read("season=1&all=1")
+	if len(page["items"].([]any)) != 105 || page["has_more"] != false {
+		t.Fatal("select season must include files beyond the first page", page)
+	}
+	page = read("q=ten")
+	if groups := page["season_groups"].([]any); len(groups) != 1 || groups[0].(map[string]any)["seasonNumber"] != float64(10) {
+		t.Fatal("search must group only matching files", page)
+	}
+	page = read("sort=size_desc")
+	if page["season_groups"].([]any)[0].(map[string]any)["seasonNumber"] != float64(1) {
+		t.Fatal("season sizes must remain sortable", page)
+	}
+	for _, query := range []string{"service=sonarr&id=1&season=-1", "service=sonarr&id=1&season=x", "service=sonarr&id=1&season=1.5", "service=sonarr&season=1", "service=radarr&id=1&season=1"} {
+		if w := request(h, "GET", "/api/maintenance/library?"+query, "", true); w.Code != 400 {
+			t.Fatal("invalid season accepted", query, w.Code)
+		}
+	}
+}
+
 func TestFolderSizeOrderFrozenWhileMeasurementsChange(t *testing.T) {
 	a, b := int64(10), int64(20)
 	items := []folderItem{{FolderSize: &folderSize{Status: "ready", Bytes: &a}}, {FolderSize: &folderSize{Status: "ready", Bytes: &b}}}
