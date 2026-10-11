@@ -2038,7 +2038,8 @@ function telemetry(job) {
   ];
   const eta = job.savings?.eta_seconds;
   const details = w.progress_details || w.benchmark_progress_details;
-  if (details?.total_units > 0) parts.push(`${details.completed_units}/${details.total_units} sample tasks`);
+  if (!w.transcode_status && !w.transcode_phase && details?.total_units > 0)
+    parts.push(`${details.completed_units}/${details.total_units} sample tasks`);
   if (Number.isFinite(eta) && eta > 0 && !w.progress_is_stale)
     parts.push(`About ${Math.ceil(eta / 60)} min`);
   result.append(
