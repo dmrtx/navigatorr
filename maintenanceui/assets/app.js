@@ -1883,14 +1883,14 @@ $("benchmark").addEventListener("click", () =>
 function focusedControl(container) {
   const active = document.activeElement;
   return container.contains(active) && active.dataset.jobControl
-    ? { id: active.dataset.jobControl, label: active.textContent }
+    ? { id: active.dataset.jobControl, label: active.textContent, itemKey: active.dataset.batchItemKey }
     : null;
 }
 function restoreControl(container, focus) {
   if (!focus) return;
   [...container.querySelectorAll("[data-job-control]")]
     .find(
-      (b) => b.dataset.jobControl === focus.id && b.textContent === focus.label,
+      (b) => b.dataset.jobControl === focus.id && b.textContent === focus.label && b.dataset.batchItemKey === focus.itemKey,
     )
     ?.focus({ preventScroll: true });
 }
@@ -2394,14 +2394,16 @@ function batchCounts(batch, compact = false) {
 }
 function statusClass(status) {
   if (["completed", "Completed", "Replaced", "Candidate ready", "Candidates ready"].includes(status)) return "completed";
-  if (["running", "Running", "waiting_external", "In progress", "Encoding", "Calibrating", "Preparing", "Verifying", "Replacing", "Saving candidate"].includes(status)) return "running";
+  if (["running", "Running", "waiting_external", "In progress", "Encoding", "Calibrating", "Preparing", "Verifying", "Replacing", "Replacement in progress", "Saving candidate"].includes(status)) return "running";
   if (["failed", "Failed", "Worker offline", "No updates"].includes(status)) return "failed";
-  if (["review", "waiting_decision", "Needs review", "Needs decision", "partial", "Partial", "Cancelling"].includes(status)) return "waiting_decision";
+  if (["review", "waiting_decision", "Needs review", "Needs decision", "Needs attention", "partial", "Partial", "Cancelling"].includes(status)) return "waiting_decision";
   if (["Preview", "Preview complete", "Eligible"].includes(status)) return "preview";
   return "neutral";
 }
-function statusBadge(label, status = label) {
-  const result = node("span", "", `badge status-badge ${statusClass(status)}`);
+function statusBadge(label, status = label, onClick = null) {
+  const className = `badge status-badge ${statusClass(status)}`;
+  const result = onClick ? button("", onClick, `${className} status-action`) : node("span", "", className);
+  if (onClick) result.setAttribute("aria-label", `${label} · View options`);
   const icon = node("span", {completed:"✓", running:"●", failed:"!", waiting_decision:"!", preview:"◌", neutral:"–"}[statusClass(status)], "status-symbol");
   icon.setAttribute("aria-hidden", "true");
   result.append(icon, node("span", label));
@@ -2460,8 +2462,9 @@ async function reconfigureBatch(id, candidate = false, savedPlan = null) {
   $("reconfigure-batch").showModal();
   try {
     const candidateID = candidate ? savedPlan?.candidate_id : null;
-    let plan = await api(`batch-settings?${new URLSearchParams({id,scope:candidateID ? "candidate" : "unfinished",...(candidateID ? {candidate_id:candidateID} : {})})}`);
-    if (!candidateID && plan.selected === 0) plan = await api(`batch-settings?${new URLSearchParams({id,scope:"all"})}`);
+    const itemKey = savedPlan?.item_key;
+    let plan = await api(`batch-settings?${new URLSearchParams({id,scope:itemKey ? "file" : candidateID ? "candidate" : "unfinished",...(candidateID ? {candidate_id:candidateID} : {}),...(itemKey ? {item_key:itemKey} : {})})}`);
+    if (!candidateID && !itemKey && plan.selected === 0) plan = await api(`batch-settings?${new URLSearchParams({id,scope:"all"})}`);
     if (auth !== state.authRevision || revision !== state.reconfigureRevision || !$("reconfigure-batch").open) return;
     state.reconfigurePlan = plan;
     $("reconfigure-mode-label").hidden = !plan.mode;
@@ -2475,6 +2478,7 @@ async function reconfigureBatch(id, candidate = false, savedPlan = null) {
     $("reconfigure-summary").textContent = batchSettingsSummary(plan);
     $("reconfigure-scope").replaceChildren();
     if (plan.candidate_id) option($("reconfigure-scope"),"candidate","This file");
+    if (plan.item_key) option($("reconfigure-scope"),"file","This file");
     option($("reconfigure-scope"),"unfinished","Unfinished files");
     option($("reconfigure-scope"),"all","All unreplaced files in this batch");
     $("reconfigure-scope").value = plan.scope;
@@ -2554,9 +2558,9 @@ $("reconfigure-scope").addEventListener("change", () => safe(async () => {
   const revision=state.reconfigureScopeRevision=(state.reconfigureScopeRevision || 0)+1;
   $("submit-reconfigure").disabled=true;
   try {
-    const next=await api(`batch-settings?${new URLSearchParams({id:plan.id,scope:$("reconfigure-scope").value,...(plan.candidate_id ? {candidate_id:plan.candidate_id} : {})})}`);
+    const next=await api(`batch-settings?${new URLSearchParams({id:plan.id,scope:$("reconfigure-scope").value,...(plan.candidate_id ? {candidate_id:plan.candidate_id} : {}),...(plan.item_key ? {item_key:plan.item_key} : {})})}`);
     if (revision!==state.reconfigureScopeRevision || state.reconfigurePlan?.id!==plan.id || !$("reconfigure-batch").open) return;
-    state.reconfigurePlan={...next,candidate_id:plan.candidate_id,decision_version:plan.decision_version};
+    state.reconfigurePlan={...next,candidate_id:plan.candidate_id,item_key:plan.item_key,decision_version:next.decision_version ?? plan.decision_version};
     if (state.reconfigureOriginalLimits === batchSettingsLimits()) {
       $("reconfigure-savings").value = next.settings.min_savings_percent > 0 ? next.settings.min_savings_percent : "";
       $("reconfigure-growth").value = next.settings.max_size_increase_percent ?? "";
@@ -2599,6 +2603,7 @@ async function submitReconfiguredBatch() {
   body.preserve_savings = savedLimits?.[0] === String($("reconfigure-savings").value);
   body.preserve_growth = savedLimits?.[1] === String($("reconfigure-growth").value);
   if (plan.candidate_id) { body.candidate_id = plan.candidate_id; body.decision_version = plan.decision_version; }
+  if (plan.scope === "file") { body.item_key = plan.item_key; body.decision_version = plan.decision_version; }
   const request = JSON.stringify(body);
   let receipt;
   try { receipt = JSON.parse(sessionStorage.getItem("navigatorr_reconfigure") || "null"); } catch {}
@@ -2670,6 +2675,7 @@ function jobControls(job, detail = false) {
     pause: "Pause batch",
     accept_loss: "Review candidate",
     abort: "Cancel",
+    cancel: job.batch ? "Stop batch · keep originals" : "Keep original",
   };
   for (const choice of job.waiting_options || []) {
     // Candidate rejection is offered in the review with its frozen file ID and
@@ -2678,6 +2684,11 @@ function jobControls(job, detail = false) {
     add(
       decisionLabels[choice.decision] || choice.description || choice.decision,
       async () => {
+        if (choice.decision === "cancel") {
+          if (await reviewAction({title:job.batch ? "Stop this batch?" : "Keep this original?",message:job.batch ? "Stop the remaining work. Originals and completed candidates are kept." : "Stop this file’s operation and keep its original.",confirmLabel:decisionLabels.cancel,cancelLabel:"Decide later"}))
+            await jobControl(job.id, "action_resume", {decision:"cancel"});
+          return;
+        }
         if (choice.decision === "reject" && job.batch?.promotion_plan_ready) {
           const plan = await readBatchPromotionPlan(job.id);
           if (!plan?.digest) throw new Error("Reopen the replacement review before deciding.");
@@ -2721,8 +2732,10 @@ function jobControls(job, detail = false) {
   if (job.action_name === "transcode_batch" && !job.batch?.dry_run && !job.batch?.promotion_plan_ready && ["completed","failed"].includes(job.status) && (job.remaining_candidates != null ? job.remaining_candidates > 0 : job.batch?.completed > 0 && !job.batch?.promotion?.promoted))
     add("Review candidates", () => reviewBatchCandidates(job.id));
   const reconfigurable = job.action_name === "transcode_batch" && !job.batch?.dry_run && !job.batch?.promotion_plan_ready;
+  if (job.parent_item_key && job.parent_action_id && !job.candidate_ready && !job.replacement_action_id && ["completed","failed","cancelled","waiting_decision"].includes(job.status))
+    add(job.mode ? "Change goal" : "Change settings", () => reconfigureBatch(job.parent_action_id, false, {item_key:job.parent_item_key}));
   if (reconfigurable) add(job.mode ? "Change goal" : job.batch?.outcome === "no_changes" ? "Try another profile" : "Change settings", () => reconfigureBatch(job.id));
-  if (job.status === "failed" && !reconfigurable) {
+  if (job.status === "failed" && !reconfigurable && !job.parent_item_key) {
     if (rejectedCandidate(job)) {
       if (job.parent_action_id) add("Change settings", () => reconfigureBatch(job.parent_action_id, true, {candidate_id:job.id}));
     } else if (job.action_name === "benchmark_transcode" && /unsupported input/.test(job.error || ""))
@@ -2747,7 +2760,7 @@ function jobControls(job, detail = false) {
   if (
     ["pending", "running", "waiting_external", "waiting_decision"].includes(
       job.status,
-    )
+    ) && !job.waiting_options?.some(option=>option.decision === "cancel")
   )
     add("Cancel", async () => {
       if (await reviewAction({title:"Cancel job?", message:`Stop ${queuePresentation(job).title} and its active work.`, confirmLabel:"Cancel job", cancelLabel:"Keep job"}))
@@ -2871,6 +2884,13 @@ function shortJobReason(reason) {
     not_oversized: "Already within the size target; original kept",
     below_min_savings: "Savings below the minimum; original kept",
     "10bit": "10-bit source requires review",
+    quality_not_met: "The encoded result did not meet the quality target; original kept",
+    insufficient_savings: "The encoded result did not save enough space; original kept",
+    size_growth: "The encoded result was larger than allowed; original kept",
+    size_growth_exceeded: "The encoded result was larger than allowed; original kept",
+    preservation_not_met: "The encoded result did not preserve the required tracks or video properties; original kept",
+    already_target_codec: "Already in the target codec; original kept",
+    search_budget_exhausted: "Automatic testing reached its limit without finding a reliable result; original kept",
   };
   if (reasons[text]) return reasons[text];
   if (isCandidateRejection(text)) return "Candidate rejected by you; original kept";
@@ -2943,7 +2963,8 @@ function queuePresentation(job) {
     : workerUnavailable(job);
   const replacementComplete = job.savings?.realized_saved_bytes != null ||
     (job.replaced && job.status === "completed");
-  const status = job.status === "failed" && !rejectedCandidate(job) && !savingsPolicyFailure(job.error) ? "Failed" : job.replaced_files > 0 && job.remaining_candidates > 0 ? "Candidates ready" : replacementComplete
+  const skippedFile = job.action_name === "transcode_media" && job.status === "completed" && !job.candidate_ready && ["quality_not_met","insufficient_savings","size_growth","size_growth_exceeded","preservation_not_met","already_target_codec"].includes(job.reason_code);
+  const status = skippedFile ? "Skipped" : job.status === "waiting_decision" && job.reason_code === "search_budget_exhausted" ? "Needs attention" : job.status === "failed" && !rejectedCandidate(job) && !savingsPolicyFailure(job.error) ? "Failed" : job.replaced_files > 0 && job.remaining_candidates > 0 ? "Candidates ready" : replacementComplete
     ? "Replaced"
     : rejectedCandidate(job) ? "Rejected" : savingsPolicyFailure(job.error) ? "Minimum savings not met" : outcomes[batch?.outcome] ||
       (job.candidate_ready && !job.replacement_action_id
@@ -2971,7 +2992,8 @@ function queuePresentation(job) {
   else if (!job.replaced && !rejectedCandidate(job) && batch?.outcome !== "rejected" && s.estimated_saved_bytes != null)
     metrics.push(`${bytes(s.estimated_saved_bytes)} estimated savings`);
   let result;
-  if (job.status === "failed")
+  if (skippedFile) result = shortJobReason(job.reason_code);
+  else if (job.status === "failed")
     result = shortJobReason(job.error) || "Error details unavailable";
   else if (job.replaced && job.status === "completed") result = "Original replaced";
   else if (job.batch?.promotion_plan_ready)
@@ -3043,6 +3065,7 @@ function queueOutcome(job) {
   if (batch?.outcome === "failed") return "No candidates created · Change settings to try again";
   if (batch?.completed > 0) return `${batch.completed} ${batch.completed === 1 ? "candidate ready" : "candidates ready"} · Originals unchanged`;
   if (job.candidate_ready) return "Original preserved · Candidate available";
+  if (job.action_name === "transcode_media" && job.reason_code && job.status === "completed") return shortJobReason(job.reason_code);
   if (job.action_name === "benchmark_transcode") return "Sample test complete · Original preserved";
   return "Finished · Open job for details";
 }
@@ -3107,7 +3130,7 @@ async function loadJobs(more = false) {
       heading.append(
         button(singleFile?.display_label || presentation.title, () => openJob(job.id), "job-title"),
       );
-      heading.append(statusBadge(presentation.status));
+      heading.append(statusBadge(presentation.status, presentation.status, job.status === "waiting_decision" || job.batch?.outcome === "no_changes" ? () => openJob(job.id) : null));
       const summaryText = skipped ? [singleFile ? presentation.context : `${job.batch.total} files`, job.batch.total === 1 ? "Original kept" : "Originals kept"].filter(Boolean).join(" · ") : presentation.summary;
       const summary = node("p", summaryText, "metadata job-summary");
       summary.title = summaryText;
@@ -3332,7 +3355,7 @@ async function refreshDetail() {
     );
     if (job.podcast) { const p=job.podcast; summary.append(node("p",`${p.classified_blocks || 0}/${p.total_blocks || 0} transcript blocks classified · ${((p.removed_ms || 0)/1000).toFixed(1)} seconds removed · ${p.known_ad_units || 0} units verified by known ads`,"metadata")); if (p.output_path && job.status === "completed") summary.append(node("p",`Validated MP3: ${p.output_path}`,"metadata")); }
     if (job.transcode) {
-      summary.append(node("p", job.transcode.message, "job-outcome metadata"));
+      summary.append(node("p", job.status === "completed" && !job.candidate_ready && job.reason_code ? shortJobReason(job.reason_code) : job.transcode.message, "job-outcome metadata"));
       if (job.transcode.tested_candidates) summary.append(node("p", `${job.transcode.tested_candidates} configurations tested${job.transcode.verified_samples ? ` · ${job.transcode.verified_samples} quality samples verified` : ""}`, "metadata"));
     }
  renderPhaseCosts(summary, job);
@@ -3404,6 +3427,13 @@ function batchFileActivity(item, job) {
   return "";
 }
 
+async function replaceBatchFile(batchID, childID) {
+  const auth = state.authRevision;
+  const job = (await api(`operations?id=${encodeURIComponent(childID)}`)).jobs?.[0];
+  if (auth !== state.authRevision || $("workspace").hidden) return;
+  if (!job || job.parent_action_id !== batchID || !job.candidate_ready || job.replacement_action_id) throw new Error("This candidate changed. Refresh the batch before reviewing replacement.");
+  await prepareReplacement(job);
+}
 async function loadBatchItems(id, revision) {
   const offset = state.batchItemsOffset;
   const response = await api(
@@ -3416,31 +3446,52 @@ async function loadBatchItems(id, revision) {
     !$("job-detail").open
   )
     return;
+  const focus = focusedControl($("batch-items-list"));
   $("batch-items-list").replaceChildren();
   for (const item of response.items || []) {
     const row = node("div", "", "batch-item-row");
-    row.append(
-      node("span", item.display_label || item.file_path, "metadata"),
-      statusBadge(savingsPolicyFailure(item.error) ? "Below minimum savings" : rejectedCandidate(item) ? "Rejected" : state.detailJob?.batch?.dry_run && item.status === "queued" ? "Eligible" : names[item.status] || item.status || item.decision, savingsPolicyFailure(item.error) ? "neutral" : rejectedCandidate(item) ? "rejected" : state.detailJob?.batch?.dry_run && item.status === "queued" ? "Eligible" : item.status),
-    );
+    const label = item.replaced ? "Replaced" : item.replacement_action_id ? ({waiting_decision:"Replacement needs decision",failed:"Replacement failed",cancelled:"Replacement cancelled"}[item.replacement_status] || "Replacement in progress") : item.candidate_ready ? "Candidate ready" : item.status === "waiting_decision" && item.reason_code === "search_budget_exhausted" ? "Needs attention" : savingsPolicyFailure(item.error) ? "Below minimum savings" : rejectedCandidate(item) ? "Rejected" : state.detailJob?.batch?.dry_run && item.status === "queued" ? "Eligible" : names[item.status] || item.status || item.decision;
+    const review = item.replacement_action_id ? () => openJob(item.replacement_action_id) : item.status === "waiting_decision" && item.child_action_id ? () => openJob(item.child_action_id) : ["skip","review"].includes(item.status) && item.can_reconfigure ? () => reconfigureBatch(id, false, {item_key:item.item_key}) : item.candidate_ready ? () => openJob(item.child_action_id) : null;
+    row.append(node("span", item.display_label || item.file_path, "metadata"), statusBadge(label, item.replacement_status || label, review));
     if (item.child_action_id)
       row.append(
         button("View file", () => openJob(item.child_action_id), "quiet"),
       );
 
+    const actions = node("div", "", "batch-file-actions");
+    const add = (label, fn) => {
+      const control = button(label, fn, label === "Replace file" ? "primary" : "");
+      control.dataset.jobControl = id;
+      control.dataset.batchItemKey = item.item_key;
+      control.disabled = !serverReachable || jobIsBusy(id);
+      actions.append(control);
+    };
+    if (item.candidate_ready && state.info.allow_destructive) add("Replace file", () => replaceBatchFile(id, item.child_action_id));
+    if (item.replacement_action_id) add("View replacement", () => openJob(item.replacement_action_id));
+    if (item.can_reconfigure && ["skip","review","failed","cancelled","waiting_decision"].includes(item.status)) add(item.mode ? "Change goal" : "Change settings", () => reconfigureBatch(id, false, {item_key:item.item_key}));
+    if (actions.children.length) row.append(actions);
     const activity = batchFileActivity(item, state.detailJob);
     if (activity) row.append(node("span", activity, "batch-file-activity"));
-    if (item.requested_profile || item.profile) row.append(node("span", `${item.retry_pending ? "Next attempt" : "Profile"}: ${profileOptionLabel(item.requested_profile || item.profile)}`, "metadata batch-file-profile"));
+    if (item.mode) row.append(node("span", `Goal: ${{size:"Reduce size",quality:"Preserve quality",x265_preserve:"Convert to x265"}[item.mode] || item.mode}`, "metadata batch-file-profile"));
+    else if (item.requested_profile || item.profile) row.append(node("span", `${item.retry_pending ? "Next attempt" : "Profile"}: ${profileOptionLabel(item.requested_profile || item.profile)}`, "metadata batch-file-profile"));
     if (item.previous_attempts?.length) {
       const history=node("details","","batch-attempt-history");
       history.append(node("summary",`${item.previous_attempts.length} previous ${item.previous_attempts.length===1 ? "attempt" : "attempts"}`));
       item.previous_attempts.forEach((attempt,index)=>history.append(button(`Attempt ${index+1} · ${names[attempt.status] || attempt.status}`,()=>openJob(attempt.child_action_id),"quiet")));
       row.append(history);
     }
-    for (const reason of [item.error, ...(item.reasons || [])].filter(reason => reason && !/^(explicit profile requested|eligible for transcode|New settings requested; previous attempt retained in history)$/i.test(reason)))
-      row.append(node("span", shortJobReason(reason), "muted"));
+    const reasons = item.waiting_reason ? [item.waiting_reason] : item.reason_code ? [item.reason_code] : item.error ? [item.error] : item.reasons || [];
+    const visibleReasons = [...new Set(reasons.filter(reason => reason && !/^(explicit profile requested|eligible for transcode|per-source bounded samples required before full encode|New settings requested; previous attempt retained in history)$/i.test(reason)).map(shortJobReason))];
+    if (!visibleReasons.length && item.status === "skip") visibleReasons.push("This file was omitted by the processing plan; original kept. View the file details or change settings to try again.");
+    for (const reason of visibleReasons) row.append(node("span", reason, "muted"));
+    if (item.candidate_ready) row.append(node("span", state.info.allow_destructive ? "Candidate verified · Original kept until replacement is approved" : "Candidate verified · Replacement is disabled in server settings", "muted"));
+    for (const control of row.querySelectorAll("button")) {
+      control.dataset.batchItemKey = item.item_key;
+      control.dataset.jobControl ||= item.child_action_id || id;
+    }
     $("batch-items-list").append(row);
   }
+  restoreControl($("batch-items-list"), focus);
   $("batch-items-note").textContent =
     `${response.items?.length || 0} of ${response.total} files`;
   state.batchItemsHasMore = response.has_more;

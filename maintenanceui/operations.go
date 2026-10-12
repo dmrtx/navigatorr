@@ -562,6 +562,29 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 				job["replaced"] = replacedActions[r.inst.ID] || replaced[operationSourceKey(r)]
 			}
 			if r.inst.ActionName == "transcode_media" {
+				if parent := recordsByID[operationString(r.inputs["parent_action_id"])]; parent.inst.ActionName == "transcode_batch" && parent.inputs["dry_run"] != true && parent.state["batch_promotion_plan"] == nil {
+					items, err := s.engine.Deps().Store.ListTranscodeBatchItems(parent.inst.ID)
+					if err != nil {
+						fail(w, 500, "read batch file selection")
+						return
+					}
+					for _, item := range items {
+						if item.ChildActionID == r.inst.ID && item.FilePath == operationString(r.inputs["path"]) {
+							reserved, err := s.engine.BatchItemReplacementReserved(item)
+							if err != nil {
+								fail(w, 500, "read file replacement")
+								return
+							}
+							if operationMap(parent.state["batch_retry_pending"])[item.ItemKey] == true {
+								job["candidate_ready"] = false
+							}
+							if !reserved {
+								job["parent_item_key"] = item.ItemKey
+							}
+							break
+						}
+					}
+				}
 				if context := operationReplacementContext(r, recordsByID); context != nil {
 					job["replacement_context"] = context
 				}
