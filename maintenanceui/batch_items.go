@@ -2,12 +2,23 @@ package maintenanceui
 
 import (
 	"encoding/json"
-	"github.com/jakenesler/navigatorr/store"
 	"net/http"
 	"strings"
+	"time"
+
+	"github.com/jakenesler/navigatorr/store"
 )
 
 type batchItemView struct {
+	WaitingReason       string `json:"waiting_reason,omitempty"`
+	ReasonCode          string `json:"reason_code,omitempty"`
+	CandidateReady      bool   `json:"candidate_ready,omitempty"`
+	ReplacementActionID string `json:"replacement_action_id,omitempty"`
+	ReplacementStatus   string `json:"replacement_status,omitempty"`
+	Replaced            bool   `json:"replaced,omitempty"`
+	CanReconfigure      bool   `json:"can_reconfigure,omitempty"`
+	Mode                string `json:"mode,omitempty"`
+
 	PreviousAttempts []store.TranscodeBatchItem `json:"previous_attempts,omitempty"`
 	RetryPending     bool                       `json:"retry_pending,omitempty"`
 	ItemKey          string                     `json:"item_key"`
@@ -58,6 +69,7 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 		fail(w, 500, "read batch items")
 		return
 	}
+	inputs := decodeOperationJSON(inst.InputsJSON)
 	state := decodeOperationJSON(inst.StateJSON)
 	settings := operationMap(state["batch_item_settings"])
 	history, pending := operationMap(state["batch_attempt_history"]), operationMap(state["batch_retry_pending"])
@@ -68,7 +80,53 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 			var previous []store.TranscodeBatchItem
 			data, _ := json.Marshal(history[item.ItemKey])
 			_ = json.Unmarshal(data, &previous)
-			views = append(views, batchItemView{RequestedProfile: operationString(operationMap(settings[item.ItemKey])["profile"]), PreviousAttempts: previous, RetryPending: pending[item.ItemKey] == true, ItemKey: item.ItemKey, FilePath: item.FilePath, DisplayLabel: item.DisplayLabel, Status: item.Status, ChildActionID: item.ChildActionID, Decision: item.Decision, Error: batchReasonText(item.Error, true), Profile: item.Profile, Reasons: item.Reasons})
+			view := batchItemView{RequestedProfile: operationString(operationMap(settings[item.ItemKey])["profile"]), PreviousAttempts: previous, RetryPending: pending[item.ItemKey] == true, ItemKey: item.ItemKey, FilePath: item.FilePath, DisplayLabel: item.DisplayLabel, Status: item.Status, ChildActionID: item.ChildActionID, Decision: item.Decision, Error: batchReasonText(item.Error, true), Profile: item.Profile, Reasons: item.Reasons}
+			view.Mode = operationString(inputs["mode"])
+			if mode := operationString(operationMap(settings[item.ItemKey])["mode"]); mode != "" {
+				view.Mode = mode
+			}
+			reserved, err := s.engine.BatchItemReplacementReserved(item)
+			if err != nil {
+				fail(w, 500, "read file replacement")
+				return
+			}
+			view.CanReconfigure = inputs["dry_run"] != true && state["batch_promotion_plan"] == nil && !reserved && !view.RetryPending
+			if item.ChildActionID != "" {
+				child, err := st.GetActionInstanceIfExists(item.ChildActionID)
+				if err != nil {
+					fail(w, 500, "read file attempt")
+					return
+				}
+				if child != nil && child.ActionName == "transcode_media" {
+					childInputs := decodeOperationJSON(child.InputsJSON)
+					if childInputs["parent_action_id"] == id && childInputs["path"] == item.FilePath {
+						r := operationRecord{inst: *child, inputs: childInputs, outputs: decodeOperationJSON(child.OutputsJSON), state: decodeOperationJSON(child.StateJSON)}
+						view.WaitingReason = batchReasonText(child.WaitingReason, true)
+						view.ReasonCode = operationString(operationValue(r, "reason_code"))
+						if !view.RetryPending {
+							if child.Status == store.ActionStatusCompleted && (operationValue(r, "skip_transcode") == true || operationValue(r, "skipped") == true) {
+								view.Status = "skip"
+							} else if child.Status == store.ActionStatusCompleted || child.Status == store.ActionStatusFailed || child.Status == store.ActionStatusCancelled || child.Status == store.ActionStatusWaitingDecision {
+								view.Status = child.Status
+							}
+						}
+						view.CandidateReady = !view.RetryPending && child.Status == store.ActionStatusCompleted && operationValue(r, "skip_transcode") != true && operationValue(r, "skipped") != true && operationValue(r, "original_intact") == true && projectOperationSavings(r, time.Now()).CandidateBytes != nil && !reserved
+						for _, service := range []string{"sonarr", "radarr", "filesystem"} {
+							prior, err := st.FindActionByIdempotencyKey("promote_transcode_candidate", "promote:"+service+":"+child.ID)
+							if err != nil {
+								fail(w, 500, "read file replacement")
+								return
+							}
+							if prior != nil {
+								view.ReplacementActionID, view.ReplacementStatus = prior.ID, prior.Status
+								view.Replaced = prior.Status == store.ActionStatusCompleted && decodeOperationJSON(prior.OutputsJSON)["promoted"] == true
+								break
+							}
+						}
+					}
+				}
+			}
+			views = append(views, view)
 		}
 	}
 	writeJSON(w, 200, map[string]any{"items": views, "total": len(items), "offset": offset, "has_more": end < len(items)})

@@ -78,7 +78,11 @@ func (e *Engine) applyMaintenanceCommand(ctx context.Context, ec *ExecutionConte
 		if !ok {
 			return StepResult{Status: StepFailed, Error: "invalid settings"}, nil
 		}
-		result, err = e.ReconfigureBatch(ctx, id, getString(ec.Inputs, "scope"), getString(ec.Inputs, "candidate_id"), getString(ec.Inputs, "selection_version"), getString(ec.Inputs, "decision_version"), ec.InstanceID, settings)
+		selectionID := getString(ec.Inputs, "candidate_id")
+		if getString(ec.Inputs, "scope") == "file" {
+			selectionID = getString(ec.Inputs, "item_key")
+		}
+		result, err = e.ReconfigureBatch(ctx, id, getString(ec.Inputs, "scope"), selectionID, getString(ec.Inputs, "selection_version"), getString(ec.Inputs, "decision_version"), ec.InstanceID, settings)
 	default:
 		err = fmt.Errorf("unsupported maintenance command")
 	}

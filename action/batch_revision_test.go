@@ -249,3 +249,74 @@ func TestBatchRevisionRejectsStaleSelectionAndPreservesCompletedSubset(t *testin
 		t.Fatal("replacement plan superseded")
 	}
 }
+
+func TestBatchFileRevisionPreservesOtherCandidatesAndRejectsChangedDecision(t *testing.T) {
+	for _, status := range []string{"skip", "waiting_decision"} {
+		t.Run(status, func(t *testing.T) {
+			st := setupTestStore(t)
+			e := NewEngine(EngineDeps{Store: st, Config: &config.Config{}})
+			seedActionInstance(t, st, "batch", "transcode_batch", StatusWaitingDecision, 1, "", map[string]any{"mode": "size"}, nil)
+			seedActionInstance(t, st, "child", "transcode_media", StatusCompleted, 7, "", map[string]any{"parent_action_id": "batch", "path": "/media/one"}, nil)
+			child, _ := st.GetActionInstance("child")
+			if status == "waiting_decision" {
+				child.Status = StatusWaitingDecision
+				child.WaitingReason = "Search exhausted"
+				child.WaitingOptionsJSON = toJSON([]WaitingOption{{Decision: "cancel"}})
+				st.UpdateActionInstance(*child)
+			}
+			st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: "batch", ItemKey: "one", FilePath: "/media/one", Status: status, ChildActionID: "child", Decision: "transcode"})
+			st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: "batch", ItemKey: "ready", FilePath: "/media/ready", Status: "completed", CandidatePath: "/candidate/keep", Decision: "transcode"})
+			root, _ := st.GetActionInstance("batch")
+			items, _ := st.ListTranscodeBatchItems("batch")
+			decision := ""
+			if status == "waiting_decision" {
+				decision = CandidateDecisionVersion(child)
+				if _, err := e.ReconfigureBatch(context.Background(), "batch", "file", "one", BatchSelectionVersion(root, items), "stale", "stale-receipt", map[string]any{"mode": "quality"}); err == nil {
+					t.Fatal("changed file decision accepted")
+				}
+			}
+			if _, err := e.ReconfigureBatch(context.Background(), "batch", "file", "one", BatchSelectionVersion(root, items), decision, "receipt", map[string]any{"mode": "quality"}); err != nil {
+				t.Fatal(err)
+			}
+			items, _ = st.ListTranscodeBatchItems("batch")
+			for _, item := range items {
+				if item.ItemKey == "one" && (item.Status != "queued" || item.ChildActionID != "") {
+					t.Fatal("selected file not rescheduled", item)
+				}
+				if item.ItemKey == "ready" && (item.Status != "completed" || item.CandidatePath != "/candidate/keep") {
+					t.Fatal("unselected candidate changed", item)
+				}
+			}
+			root, _ = st.GetActionInstance("batch")
+			if stateObject(parseExecutionContext(root, e).State, "batch_attempt_history")["one"] == nil {
+				t.Fatal("lost prior attempt")
+			}
+			child, _ = st.GetActionInstance("child")
+			if status == "waiting_decision" && child.Status != StatusCancelled {
+				t.Fatal("search review not retired", child)
+			}
+		})
+	}
+}
+
+func TestBatchFileRevisionSelectsOmittedFileWithoutChild(t *testing.T) {
+	st := setupTestStore(t)
+	e := NewEngine(EngineDeps{Store: st, Config: &config.Config{}})
+	seedActionInstance(t, st, "batch", "transcode_batch", StatusCompleted, 2, "", map[string]any{"paths": []string{"/media/one", "/media/two"}}, nil)
+	st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: "batch", ItemKey: "one", FilePath: "/media/one", Status: "skip"})
+	st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: "batch", ItemKey: "two", FilePath: "/media/two", Status: "skip"})
+	root, _ := st.GetActionInstance("batch")
+	items, _ := st.ListTranscodeBatchItems("batch")
+	if _, err := e.ReconfigureBatch(context.Background(), "batch", "file", "missing", BatchSelectionVersion(root, items), "", "bad", map[string]any{"profile": "new"}); err == nil {
+		t.Fatal("missing file broadened selection")
+	}
+	if _, err := e.ReconfigureBatch(context.Background(), "batch", "file", "one", BatchSelectionVersion(root, items), "", "one", map[string]any{"profile": "new"}); err != nil {
+		t.Fatal(err)
+	}
+	items, _ = st.ListTranscodeBatchItems("batch")
+	for _, item := range items {
+		if item.ItemKey == "one" && item.Status != "queued" || item.ItemKey == "two" && item.Status != "skip" {
+			t.Fatal(items)
+		}
+	}
+}

@@ -1694,3 +1694,9 @@ pre {
 #podcast-form { display: grid; gap: 12px; max-width: 640px; padding: 16px 0; }
 #podcast-form label { display: grid; gap: 4px; min-width: 0; }
 #podcast-form input, #podcast-form select { width: 100%; }
+
+/* File outcomes expose their review without competing with the file title. */
+button.status-action { border: 1px solid currentColor; min-height: 28px; cursor: pointer; }
+button.status-action:hover { text-decoration: underline; }
+button.status-action:focus-visible { outline: 2px solid var(--forest); outline-offset: 3px; }
+.batch-file-actions { display: flex; flex-wrap: wrap; gap: 6px; flex-basis: 100%; }
