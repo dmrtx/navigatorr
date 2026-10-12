@@ -18,6 +18,7 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 		ID              string   `json:"id"`
 		Scope           string   `json:"scope"`
 		CandidateID     string   `json:"candidate_id"`
+		ItemKey         string   `json:"item_key"`
 		Version         string   `json:"selection_version"`
 		DecisionVersion string   `json:"decision_version"`
 		Profile         string   `json:"profile"`
@@ -30,6 +31,7 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodGet {
 		body.ID, body.Scope, body.CandidateID = r.URL.Query().Get("id"), r.URL.Query().Get("scope"), r.URL.Query().Get("candidate_id")
+		body.ItemKey = r.URL.Query().Get("item_key")
 	} else if decode(w, r, &body) != nil {
 		fail(w, 400, "invalid settings request")
 		return
@@ -48,9 +50,17 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 		fail(w, 409, "resolve the preview or replacement review before changing settings")
 		return
 	}
-	if body.Scope != "all" && body.Scope != "unfinished" && body.Scope != "candidate" {
+	if body.Scope != "all" && body.Scope != "unfinished" && body.Scope != "candidate" && body.Scope != "file" {
 		fail(w, 400, "invalid scope")
 		return
+	}
+	selectionID := body.CandidateID
+	if body.Scope == "file" {
+		selectionID = body.ItemKey
+		if selectionID == "" {
+			fail(w, 400, "file selection is required")
+			return
+		}
 	}
 	items, err := st.ListTranscodeBatchItems(body.ID)
 	if err != nil || len(items) == 0 {
@@ -65,7 +75,7 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 	itemSettings := operationMap(state["batch_item_settings"])
 	profiles := map[string]int{}
 	for _, item := range items {
-		if !action.BatchRevisionSelects(item, body.Scope, body.CandidateID) {
+		if !action.BatchRevisionSelects(item, body.Scope, selectionID) {
 			continue
 		}
 		reserved, err := s.engine.BatchItemReplacementReserved(item)
@@ -77,6 +87,9 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		selected++
+		if body.Scope == "file" {
+			plan["item_key"] = item.ItemKey
+		}
 		profile := item.Profile
 		if profile == "" {
 			profile = operationString(inputs["profile"])
@@ -118,6 +131,9 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 			if child.Status == "running" || child.Status == "pending" || child.Status == "waiting_external" {
 				active++
 			}
+			if body.Scope == "file" && child.Status == "waiting_decision" {
+				plan["decision_version"] = action.CandidateDecisionVersion(child)
+			}
 			if body.Scope == "candidate" {
 				plan["candidate_id"], plan["decision_version"] = child.ID, action.CandidateDecisionVersion(child)
 			}
@@ -135,6 +151,15 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 	plan["mode"] = inputs["mode"]
 	if goal := operationString(state["batch_goal"]); goal != "" {
 		plan["mode"] = goal
+	}
+	if body.Scope == "file" {
+		if selected != 1 {
+			fail(w, 409, "this file is no longer available for new settings")
+			return
+		}
+		if goal := operationString(operationMap(itemSettings[body.ItemKey])["mode"]); goal != "" {
+			plan["mode"] = goal
+		}
 	}
 	settingsView := plan["settings"].(map[string]any)
 	profileNames := make([]string, 0, len(profiles))
@@ -171,7 +196,7 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 			fail(w, 400, "invalid processing goal")
 			return
 		}
-		s.admitCommand(w, r, map[string]any{"kind": "reconfigure", "id": body.ID, "scope": body.Scope, "candidate_id": body.CandidateID, "selection_version": body.Version, "decision_version": body.DecisionVersion, "settings": map[string]any{"mode": body.Mode}}, body.Key)
+		s.admitCommand(w, r, map[string]any{"kind": "reconfigure", "id": body.ID, "scope": body.Scope, "candidate_id": body.CandidateID, "item_key": body.ItemKey, "selection_version": body.Version, "decision_version": body.DecisionVersion, "settings": map[string]any{"mode": body.Mode}}, body.Key)
 		return
 	}
 	settings := map[string]any{}
@@ -208,7 +233,7 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		settings[field.key] = *field.value
 	}
-	s.admitCommand(w, r, map[string]any{"kind": "reconfigure", "id": body.ID, "scope": body.Scope, "candidate_id": body.CandidateID, "selection_version": body.Version, "decision_version": body.DecisionVersion, "settings": settings}, body.Key)
+	s.admitCommand(w, r, map[string]any{"kind": "reconfigure", "id": body.ID, "scope": body.Scope, "candidate_id": body.CandidateID, "item_key": body.ItemKey, "selection_version": body.Version, "decision_version": body.DecisionVersion, "settings": settings}, body.Key)
 }
 
 func containsMode(mode string) bool {

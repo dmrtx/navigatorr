@@ -2267,3 +2267,79 @@ test("phase cost detail distinguishes measured wall intervals from unknown bytes
 test("phase cost detail shows known cache observations and distinguishes search budget from consumption",()=>{
  const h=harness();h.run('renderPhaseCosts($("detail-summary"),{worker:{benchmark_search_seconds:4,search_budget_seconds:600,operation_search_budget_seconds:3600},phase_costs:{worker_staging:{duration_ms:1,attempts:1,cache_hits:0,cache_misses:1}}});');const rendered=JSON.stringify(h.elements.get("detail-summary").children);assert.match(rendered,/0 \/ 1/);assert.match(rendered,/measured wall: 4 s/);assert.match(rendered,/Source budget: 600 s/);assert.match(rendered,/Operation budget: 3600 s/);assert.match(rendered,/reservations are not measured consumption/);
 });
+
+
+test("batch outcome buttons reveal current decisions, readable skips and ready replacements while another file waits", async () => {
+  const h = harness();
+  h.context.items = [
+    {item_key:"ready",child_action_id:"ready-child",display_label:"Ready",status:"completed",candidate_ready:true,mode:"size",reasons:["per-source bounded samples required before full encode"]},
+    {item_key:"skip",child_action_id:"skip-child",display_label:"Skipped",status:"skip",reason_code:"quality_not_met",can_reconfigure:true,mode:"size",reasons:["per-source bounded samples required before full encode","quality_not_met"]},
+    {item_key:"wait",child_action_id:"wait-child",display_label:"Waiting",status:"waiting_decision",reason_code:"search_budget_exhausted",waiting_reason:"Search reached its limit; original preserved",can_reconfigure:true,mode:"size",reasons:["per-source bounded samples required before full encode"]}
+  ];
+  const calls=[]; h.context.record=(...args)=>calls.push(args);
+  h.run('state.info={allow_destructive:true};state.detail="batch";state.detailRevision=2;$("job-detail").open=true;state.detailJob={status:"waiting_decision",batch:{}};api=async()=>({items,total:3});openJob=async(id)=>record("open",id);reconfigureBatch=async(id,_candidate,selection)=>record("settings",id,selection.item_key);replaceBatchFile=async(id,child)=>record("replace",id,child);');
+  await h.run('loadBatchItems("batch",2)');
+  const rows=h.elements.get("batch-items-list").children;
+  const all = row=>[row,...row.children.flatMap(all)];
+  const text = row=>all(row).map(el=>el.textContent).filter(Boolean).join(" ");
+  assert.match(text(rows[0]),/Candidate ready.*Replace file/);
+  assert.match(text(rows[1]),/quality target; original kept/);
+  assert.match(text(rows[2]),/Needs attention.*Change goal.*Search reached its limit/);
+  assert.doesNotMatch(rows.map(text).join(" "),/quality_not_met|per-source bounded|Profile: mode-size/);
+  for (const [index,label] of [[0,"Candidate ready"],[1,"Skipped"],[2,"Needs attention"]]) {
+    const badge=rows[index].children.find(el=>el.className.includes("status-action"));
+    assert.ok(badge,`${label} is actionable`);
+    await badge.listeners.get("click")();
+  }
+  await all(rows[0]).find(el=>el.textContent==="Replace file").listeners.get("click")();
+  assert.deepEqual(calls,[["open","ready-child"],["settings","batch","skip"],["open","wait-child"],["replace","batch","ready-child"]]);
+});
+
+test("file recovery freezes one item across review and submission and never falls back to the whole batch",async()=>{
+  const h=harness(), calls=[];
+  h.context.record=(path,body)=>calls.push([path,body]);
+  h.context.plan={id:"batch",scope:"file",item_key:"skipped",selection_version:"frozen",selected:1,kept:9,files:["One omitted file"],settings:{},mode:"size",decision_version:"review-version"};
+  h.run('api=async(path)=>{record(path);return plan};');
+  await h.run('reconfigureBatch("batch",false,{item_key:"skipped"})');
+  assert.match(calls[0][0],/scope=file&item_key=skipped/);
+  assert.equal(h.elements.get("reconfigure-scope").value,"file");
+  h.context.sessionStorage={getItem:()=>null,setItem(){},removeItem(){}};
+  h.run('submissionID=()=>"receipt";commandRequest=async(path,body)=>record(path,body);loadJobs=async()=>{};openJob=async()=>{};notify=()=>{};');
+  await h.run('submitReconfiguredBatch()');
+  assert.equal(calls[1][1].scope,"file");
+  assert.equal(calls[1][1].item_key,"skipped");
+  assert.equal(calls[1][1].decision_version,"review-version");
+  assert.equal(calls[1][1].selection_version,"frozen");
+  assert.equal(calls[1][1].mode,"size");
+});
+
+test("file details offer goal changes and keep-original decisions without duplicate cancellation",()=>{
+  const h=harness();
+  const labels=h.run('jobControls({id:"child",action_name:"transcode_media",status:"waiting_decision",reason_code:"search_budget_exhausted",mode:"size",parent_action_id:"batch",parent_item_key:"one",waiting_options:[{decision:"cancel"}]}).children.map(b=>b.textContent)');
+  assert.ok(labels.includes("Keep original"));assert.ok(labels.includes("Change goal"));assert.ok(!labels.includes("Cancel"));
+  const skipped=h.run('queuePresentation({action_name:"transcode_media",status:"completed",reason_code:"quality_not_met",candidate_ready:false})');
+  assert.equal(skipped.status,"Skipped");assert.match(skipped.summary,/quality target; original kept/);
+});
+
+test("replacement from a batch row rechecks the exact candidate and ignores stale or unrelated files",async()=>{
+  const h=harness();let prepared;
+  h.context.record=job=>prepared=job;
+  h.run('api=async()=>({jobs:[{id:"child",parent_action_id:"batch",candidate_ready:true}]});prepareReplacement=async(job)=>record(job);');
+  await h.run('replaceBatchFile("batch","child")');assert.equal(prepared.id,"child");
+  h.run('api=async()=>({jobs:[{id:"child",parent_action_id:"other",candidate_ready:true}]});');
+  await assert.rejects(h.run('replaceBatchFile("batch","child")'),/candidate changed/);
+  h.run('api=async()=>({jobs:[{id:"child",parent_action_id:"batch",candidate_ready:false}]});');
+  await assert.rejects(h.run('replaceBatchFile("batch","child")'),/candidate changed/);
+});
+
+
+test("polling restores the same file control when multiple rows have identical actions",()=>{
+  const h=harness();
+  const container=new Element(),first=new Element(),second=new Element();
+  first.dataset={jobControl:"batch",batchItemKey:"one"};second.dataset={jobControl:"batch",batchItemKey:"two"};
+  first.textContent=second.textContent="Change goal";container.children=[first,second];
+  h.context.container=container;h.document.activeElement=second;
+  let focused;first.focus=()=>focused="one";second.focus=()=>focused="two";
+  h.run('restoreControl(container,focusedControl(container))');
+  assert.equal(focused,"two");
+});
