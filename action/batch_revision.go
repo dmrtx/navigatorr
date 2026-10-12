@@ -32,9 +32,12 @@ func BatchSelectionVersion(inst *store.ActionInstance, items []store.TranscodeBa
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(toJSON(map[string]any{"items": identity, "revision": state["batch_settings_revision"]}))))
 }
 
-func BatchRevisionSelects(item store.TranscodeBatchItem, scope, candidateID string) bool {
+func BatchRevisionSelects(item store.TranscodeBatchItem, scope, selectionID string) bool {
+	if scope == "file" {
+		return item.ItemKey == selectionID && selectionID != ""
+	}
 	if scope == "candidate" {
-		return item.ChildActionID == candidateID && candidateID != ""
+		return item.ChildActionID == selectionID && selectionID != ""
 	}
 	if scope == "all" {
 		return true
@@ -104,7 +107,7 @@ func (e *Engine) retireBatchDecision(ctx context.Context, child *store.ActionIns
 // Change scheduling intent in the same coordinator. Original InputsJSON and
 // old child inputs remain audit records. Active files finish their existing
 // attempt before a replacement attempt is admitted, never concurrently.
-func (e *Engine) ReconfigureBatch(ctx context.Context, id, scope, candidateID, version, decisionVersion, receipt string, settings map[string]any) (*ActionResult, error) {
+func (e *Engine) ReconfigureBatch(ctx context.Context, id, scope, selectionID, version, decisionVersion, receipt string, settings map[string]any) (*ActionResult, error) {
 	ctx, release, err := e.claimExecution(ctx, id, true)
 	if err != nil {
 		return nil, err
@@ -127,7 +130,7 @@ func (e *Engine) ReconfigureBatch(ctx context.Context, id, scope, candidateID, v
 	if stateObject(ec.State, "batch_revision_receipts")[receipt] == true {
 		return e.Status(ctx, id)
 	}
-	if getBool(ec.Inputs, "dry_run") || scope != "all" && scope != "unfinished" && scope != "candidate" {
+	if getBool(ec.Inputs, "dry_run") || scope != "all" && scope != "unfinished" && scope != "candidate" && scope != "file" {
 		return nil, fmt.Errorf("invalid batch scope")
 	}
 	if ec.State["batch_promotion_plan"] != nil {
@@ -144,7 +147,7 @@ func (e *Engine) ReconfigureBatch(ctx context.Context, id, scope, candidateID, v
 		return nil, fmt.Errorf("batch selection changed; reopen the settings")
 	}
 	if scope == "candidate" {
-		child, err := e.deps.Store.GetActionInstance(candidateID)
+		child, err := e.deps.Store.GetActionInstance(selectionID)
 		if err != nil {
 			return nil, err
 		}
@@ -170,7 +173,7 @@ func (e *Engine) ReconfigureBatch(ctx context.Context, id, scope, candidateID, v
 	// Only the remaining original candidates may receive new encoding settings.
 	selectedKeys := map[string]bool{}
 	for _, item := range items {
-		if !BatchRevisionSelects(item, scope, candidateID) {
+		if !BatchRevisionSelects(item, scope, selectionID) {
 			continue
 		}
 		reserved, err := e.BatchItemReplacementReserved(item)
@@ -179,6 +182,15 @@ func (e *Engine) ReconfigureBatch(ctx context.Context, id, scope, candidateID, v
 		}
 		if reserved {
 			continue
+		}
+		if scope == "file" && item.ChildActionID != "" {
+			child, err := e.deps.Store.GetActionInstance(item.ChildActionID)
+			if err != nil {
+				return nil, err
+			}
+			if (child.Status == StatusWaitingDecision || decisionVersion != "") && CandidateDecisionVersion(child) != decisionVersion {
+				return nil, fmt.Errorf("file decision changed; reopen the settings")
+			}
 		}
 		selectedKeys[item.ItemKey] = true
 	}
