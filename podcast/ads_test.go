@@ -1,6 +1,9 @@
 package podcast
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestLearningSplitsCategoriesAndNeverAmplifiesAcousticDecisions(t *testing.T) {
 	tr, p := fixture()
@@ -11,6 +14,7 @@ func TestLearningSplitsCategoriesAndNeverAmplifiesAcousticDecisions(t *testing.T
 	p.OverlapMS = 5000
 	classes := decisions(tr, p)
 	for id, c := range classes {
+		c.Reasoning = strings.Repeat("Ad categories are independently identified. ", 4)
 		for j, d := range c.Decisions {
 			for i, u := range tr.Units {
 				if u.ID != d.FirstID {

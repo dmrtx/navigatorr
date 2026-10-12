@@ -100,7 +100,7 @@ func TestKnownAdFirstPassCachedASRRestartAndMixedCoverage(t *testing.T) {
 		t.Fatal("missing evidence or altered native transcript")
 	}
 	b := s.Blocks[0]
-	c := podcast.Classification{BlockID: b.ID, BlockDigest: b.Digest, TranscriptDigest: podcast.Digest(tr), PromptVersion: podcast.PromptVersion, Model: "luna"}
+	c := podcast.Classification{BlockID: b.ID, BlockDigest: b.Digest, TranscriptDigest: podcast.Digest(tr), PromptVersion: podcast.PromptVersion, Model: "luna", Reasoning: strings.Repeat("Known advertisements retain verified evidence. ", 4)}
 	for offset := 0; ; {
 		page, err := e.PodcastBlock(ctx, r.ID, b.ID, offset, true)
 		if err != nil {

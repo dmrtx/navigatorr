@@ -16,6 +16,10 @@ const PromptVersion = "podcast-labels-v1"
 const AnalysisFull = "full"
 const AnalysisKnownAdsOnly = "known_ads_only"
 
+// Reasoning is optional model provenance. Older callers also submit a short
+// classification summary here; retain it without changing classification digests.
+const MaxClassificationReasoningBytes = 1024
+
 type Unit struct {
 	ID      string `json:"id"`
 	StartMS int64  `json:"start_ms"`

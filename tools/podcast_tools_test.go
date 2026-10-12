@@ -111,3 +111,96 @@ func TestPodcastReviewDeliversBoundedPagesBeforeApproval(t *testing.T) {
 		})
 	}
 }
+
+func TestPodcastClassificationRetryPreservesTranscriptAndSavedWork(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "actions.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	policy := podcast.DefaultPolicy()
+	tr := podcast.Transcript{SchemaVersion: podcast.Version, Provider: "apple_speech", ProviderVersion: "fixture", Language: "en_US", SourceHash: "sha256:" + strings.Repeat("a", 64), DurationMS: 3000}
+	for i := 0; i < 3; i++ {
+		tr.Units = append(tr.Units, podcast.Unit{ID: fmt.Sprintf("u%06d", i+1), StartMS: int64(i * 1000), EndMS: int64(i*1000 + 900), Text: "episode discussion", Timing: "native_result"})
+	}
+	blocks, err := podcast.Blocks(tr, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := filepath.Join(dir, "session.json")
+	if err := podcast.WriteJSON(checkpoint, map[string]any{"version": podcast.Version, "policy": policy, "transcript": tr, "blocks": blocks}); err != nil {
+		t.Fatal(err)
+	}
+	state, _ := json.Marshal(map[string]any{"podcast_session": checkpoint, "source_sha256": strings.TrimPrefix(tr.SourceHash, "sha256:"), "podcast": map[string]any{"policy_digest": podcast.Digest(policy), "transcript_digest": podcast.Digest(tr)}})
+	if err := st.CreateActionInstance(store.ActionInstance{ID: "classify", ActionName: "clean_podcast_ads", Status: action.StatusWaitingDecision, WaitingCondition: "podcast_classification", StateJSON: string(state)}); err != nil {
+		t.Fatal(err)
+	}
+	newServer := func() *server.MCPServer {
+		s := server.NewMCPServer("test", "0.0.0")
+		registerPodcastTools(s, action.NewEngine(action.EngineDeps{Store: st, Config: &config.Config{}}))
+		return s
+	}
+	s := newServer()
+	b := blocks[0]
+	c := podcast.Classification{BlockID: b.ID, BlockDigest: b.Digest, TranscriptDigest: podcast.Digest(tr), PromptVersion: podcast.PromptVersion, Model: "orchestrator", Reasoning: strings.Repeat("This block contains substantive episode discussion. ", 4), Decisions: []podcast.Decision{{FirstID: tr.Units[0].ID, LastID: tr.Units[2].ID, Label: "content", Reason: "episode discussion"}}}
+	classify := func(c podcast.Classification, want string) {
+		t.Helper()
+		raw, _ := json.Marshal(c)
+		result := callTool(t, s, "podcast_classify", map[string]any{"id": "classify", "classification": string(raw)})
+		if want == "" {
+			if result.IsError {
+				t.Fatal(resultText(t, result))
+			}
+		} else if !result.IsError || !strings.Contains(resultText(t, result), want) {
+			t.Fatalf("expected %q, got %s", want, resultText(t, result))
+		}
+	}
+	classify(c, "read every podcast_block page")
+	page := callTool(t, s, "podcast_block", map[string]any{"id": "classify", "block_id": b.ID})
+	if page.IsError {
+		t.Fatal(resultText(t, page))
+	}
+	for _, tc := range []struct {
+		edit func(*podcast.Classification)
+		want string
+	}{
+		{func(c *podcast.Classification) {
+			c.Reasoning = strings.Repeat("r", podcast.MaxClassificationReasoningBytes+1)
+		}, "reasoning exceeds 1024 bytes"},
+		{func(c *podcast.Classification) { c.TranscriptDigest = tr.SourceHash }, "transcript_digest mismatch"},
+		{func(c *podcast.Classification) { c.BlockDigest = tr.SourceHash }, "block_digest mismatch"},
+	} {
+		bad := c
+		tc.edit(&bad)
+		classify(bad, tc.want)
+	}
+	classify(c, "")
+	// A later failed replacement must not erase the already accepted block.
+	bad := c
+	bad.Reasoning = strings.Repeat("r", podcast.MaxClassificationReasoningBytes+1)
+	classify(bad, "reasoning exceeds 1024 bytes")
+	var saved struct {
+		Transcript      podcast.Transcript                `json:"transcript"`
+		Classifications map[string]podcast.Classification `json:"classifications"`
+		Reads           map[string]map[int]bool           `json:"reads"`
+	}
+	if err := podcast.ReadJSON(checkpoint, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if podcast.Digest(saved.Transcript) != podcast.Digest(tr) || podcast.Digest(saved.Classifications[b.ID]) != podcast.Digest(c) || len(saved.Reads[b.ID]) != len(tr.Units) {
+		t.Fatal("retry changed the transcript, accepted classification or read receipts")
+	}
+	s = newServer()
+	manifest := callTool(t, s, "podcast_blocks", map[string]any{"id": "classify"})
+	var data struct {
+		Classified int            `json:"classified_blocks"`
+		Limits     map[string]int `json:"classification_limits"`
+	}
+	if err := json.Unmarshal([]byte(resultText(t, manifest)), &data); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.IsError || data.Classified != 1 || data.Limits["reasoning_bytes"] != podcast.MaxClassificationReasoningBytes {
+		t.Fatalf("restart lost classification or limits: %+v", data)
+	}
+}
