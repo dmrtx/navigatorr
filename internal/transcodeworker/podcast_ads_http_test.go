@@ -27,7 +27,7 @@ func TestReviewedPodcastProofAboveOneMiBAcceptedOverHTTP(t *testing.T) {
 	bs, _ := podcast.Blocks(tr, p)
 	classes := map[string]podcast.Classification{}
 	for _, b := range bs {
-		c := podcast.Classification{BlockID: b.ID, BlockDigest: b.Digest, TranscriptDigest: podcast.Digest(tr), PromptVersion: podcast.PromptVersion, Model: "luna"}
+		c := podcast.Classification{BlockID: b.ID, BlockDigest: b.Digest, TranscriptDigest: podcast.Digest(tr), PromptVersion: podcast.PromptVersion, Model: "luna", Reasoning: strings.Repeat("Native transcript reviewed for advertisements. ", 4)}
 		for i := b.First; i <= b.Last; i++ {
 			label := "content"
 			if i < 15 {

@@ -1,6 +1,9 @@
 package podcast
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 func Blocks(t Transcript, p Policy) ([]Block, error) {
 	if err := t.Validate(); err != nil {
@@ -36,8 +39,24 @@ func Blocks(t Transcript, p Policy) ([]Block, error) {
 	return blocks, nil
 }
 func Labels(t Transcript, b Block, c Classification) ([]string, error) {
-	if c.BlockID != b.ID || c.BlockDigest != b.Digest || c.TranscriptDigest != Digest(t) || c.PromptVersion != PromptVersion || c.Model == "" || len(c.Model) > 128 || len(c.Reasoning) > 64 || len(c.Decisions) == 0 || len(c.Decisions) > b.Last-b.First+1 {
-		return nil, fmt.Errorf("classification is not bound to this transcript/block/prompt")
+	for _, field := range []struct{ name, got, want string }{
+		{"block_id", c.BlockID, b.ID},
+		{"block_digest", c.BlockDigest, b.Digest},
+		{"transcript_digest", c.TranscriptDigest, Digest(t)},
+		{"prompt_version", c.PromptVersion, PromptVersion},
+	} {
+		if field.got != field.want {
+			return nil, fmt.Errorf("classification %s mismatch for block %s; reread podcast_blocks and use its exact %s", field.name, b.ID, field.name)
+		}
+	}
+	if strings.TrimSpace(c.Model) == "" || len(c.Model) > 128 {
+		return nil, fmt.Errorf("classification model must be non-empty and at most 128 bytes")
+	}
+	if len(c.Reasoning) > MaxClassificationReasoningBytes {
+		return nil, fmt.Errorf("classification reasoning exceeds %d bytes; use the model reasoning level (e.g. high) and put label explanations in decisions[].reason", MaxClassificationReasoningBytes)
+	}
+	if len(c.Decisions) == 0 || len(c.Decisions) > b.Last-b.First+1 {
+		return nil, fmt.Errorf("classification decisions must contain 1 to %d ordered ID ranges for block %s", b.Last-b.First+1, b.ID)
 	}
 	labels := make([]string, b.Last-b.First+1)
 	idx := b.First
@@ -74,8 +93,17 @@ func Plan(t Transcript, p Policy, cs map[string]Classification) (Cuts, error) {
 	if err != nil {
 		return Cuts{}, err
 	}
+	missing := []string{}
+	for _, b := range bs {
+		if _, ok := cs[b.ID]; !ok {
+			missing = append(missing, b.ID)
+		}
+	}
+	if len(missing) > 0 {
+		return Cuts{}, fmt.Errorf("classification coverage incomplete; missing blocks: %s", strings.Join(missing, ", "))
+	}
 	if len(cs) != len(bs) {
-		return Cuts{}, fmt.Errorf("classification coverage incomplete")
+		return Cuts{}, fmt.Errorf("classification contains blocks outside this transcript; use only blocks returned by podcast_blocks")
 	}
 	labels := make([]string, len(t.Units))
 	ordered := make([]Classification, 0, len(bs))
