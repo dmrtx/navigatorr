@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -83,7 +84,7 @@ func TestPodcastDurableOrchestratorClassification(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, b := range s.Blocks {
-		c := podcast.Classification{BlockID: b.ID, BlockDigest: b.Digest, TranscriptDigest: podcast.Digest(tr), PromptVersion: podcast.PromptVersion, Model: "orchestrator", Decisions: []podcast.Decision{{FirstID: tr.Units[b.First].ID, LastID: tr.Units[b.Last].ID, Label: "content", Reason: "Case discussion"}}}
+		c := podcast.Classification{BlockID: b.ID, BlockDigest: b.Digest, TranscriptDigest: podcast.Digest(tr), PromptVersion: podcast.PromptVersion, Model: "orchestrator", Reasoning: strings.Repeat("Substantive case discussion. ", 5), Decisions: []podcast.Decision{{FirstID: tr.Units[b.First].ID, LastID: tr.Units[b.Last].ID, Label: "content", Reason: "Case discussion"}}}
 		if _, err := e.PodcastClassify(ctx, r.ID, c); err == nil {
 			t.Fatal("unread block accepted")
 		}
