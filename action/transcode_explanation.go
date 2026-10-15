@@ -2,6 +2,7 @@ package action
 
 import (
 	"encoding/json"
+
 	"github.com/jakenesler/navigatorr/transcode"
 )
 
@@ -17,13 +18,12 @@ type TranscodeExplanation struct {
 }
 
 func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
-	if res == nil || getString(res.Inputs, "mode") == "" {
+	// Batches have their own library outcome (preview, candidates, promotion,
+	// partial results). Per-file search evidence cannot describe that outcome.
+	if res == nil || res.ActionName != "transcode_media" || getString(res.Inputs, "mode") == "" {
 		return nil
 	}
 	e := &TranscodeExplanation{Goal: getString(res.Inputs, "mode"), Outcome: "processing", Message: "Automatic testing and verification; originals are preserved."}
-	if goal := getString(res.State, "batch_goal"); goal != "" {
-		e.Goal = goal
-	}
 	read := func(key string) any {
 		if value := res.Outputs[key]; value != nil {
 			return value
@@ -50,21 +50,38 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 	case res.Status == StatusCancelled:
 		e.Outcome = "cancelled"
 		e.Message = "Stopped; originals preserved."
-	case reason == "no_suitable_candidate":
-		e.Outcome = "no_suitable_candidate"
-		e.Message = "None of the tested configurations met this goal. Originals preserved."
-	case reason == "insufficient_savings":
-		e.Outcome = "size_rejected"
-		e.Message = "The full conversion did not meet this goal's size limit. Original preserved."
 	case res.Status == StatusFailed:
 		e.Outcome = "execution_error"
-		e.Message = "Processing could not finish reliably. Original preserved; inspect the execution error."
+		e.Message = "Processing could not finish reliably. Inspect the execution error and recorded integrity checks."
 	case res.Status == StatusWaitingDecision:
 		e.Outcome = "attention"
 		e.Message = res.WaitingReason
-	case res.ActionName == "transcode_media" && res.Status == StatusCompleted && !getBool(res.State, "skip_transcode") && getBool(res.Outputs, "original_intact"):
+	case res.Status != StatusCompleted:
+		return e
+	case reason == "no_suitable_candidate":
+		e.Outcome = "no_suitable_candidate"
+		e.Message = "None of the tested configurations met this goal. Originals preserved."
+	case reason == "insufficient_savings" || reason == "size_growth" || reason == "size_growth_exceeded":
+		e.Outcome = "size_rejected"
+		e.Message = "The full conversion did not meet this goal's size limit. Original preserved."
+	case reason == "quality_not_met":
+		e.Outcome = "quality_rejected"
+		e.Message = "The encoded result did not meet the quality requirements. Original preserved."
+	case reason == "preservation_not_met":
+		e.Outcome = "preservation_rejected"
+		e.Message = "The encoded result did not preserve the required tracks or video properties. Original preserved."
+	case reason == "already_target_codec":
+		e.Outcome = "no_changes"
+		e.Message = "The source already uses the target codec. Original preserved."
+	case getBool(res.State, "skip_transcode") || getBool(res.Outputs, "skip_transcode") || getBool(res.State, "skipped") || getBool(res.Outputs, "skipped"):
+		e.Outcome = "no_changes"
+		e.Message = "No candidate was accepted. Inspect the recorded skip reason."
+	case getBool(res.Outputs, "original_intact"):
 		e.Outcome = "candidate_ready"
 		e.Message = "Candidate verified; original preserved. Quality was measured on samples."
+	default:
+		e.Outcome = "completed"
+		e.Message = "Workflow finished. Inspect the recorded result before replacing any file."
 	}
 	return e
 }
