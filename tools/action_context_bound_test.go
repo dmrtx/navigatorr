@@ -45,6 +45,24 @@ func TestCompactTranscodeStatusPreservesWorkerEvidence(t *testing.T) {
 	}
 }
 
+func TestCompactHistoricalRejectionUsesTerminalWorkerObservation(t *testing.T) {
+	res := &action.ActionResult{ActionName: "transcode_media", Status: action.StatusCompleted,
+		Inputs: map[string]any{"mode": "size"},
+		State: map[string]any{"skip_transcode": true, "reason_code": "quality_not_met",
+			"transcode_status": "failed", "transcode_phase": "failed", "progress_is_stale": false},
+		Outputs: map[string]any{"skipped": true, "original_intact": true,
+			"transcode_status": "running", "transcode_phase": "validating_quality", "progress_is_stale": true}}
+	before, _ := json.Marshal(res)
+	summary := toCompactSummary(res)
+	if summary.Transcode.Outcome != "quality_rejected" || summary.Worker["transcode_status"] != "failed" || summary.Worker["transcode_phase"] != "failed" || summary.Worker["progress_is_stale"] != false {
+		t.Fatalf("historical action still appears active: %+v", summary)
+	}
+	after, _ := json.Marshal(res)
+	if string(before) != string(after) {
+		t.Fatal("read-only projection rewrote history")
+	}
+}
+
 func TestCompactPromotionApprovalIncludesConcreteReplacement(t *testing.T) {
 	res := &action.ActionResult{
 		ID: "promotion-approval", ActionName: "promote_transcode_candidate", Status: action.StatusWaitingDecision,

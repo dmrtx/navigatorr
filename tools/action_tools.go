@@ -127,6 +127,14 @@ func toCompactSummary(res *action.ActionResult) ActionCompactSummary {
 	if res == nil {
 		return ActionCompactSummary{}
 	}
+	worker := res
+	// Older rejected conversions retained the last running poll in Outputs.
+	// Prefer the actual terminal worker observation without rewriting history
+	// or inferring worker success from workflow completion (which can skip).
+	switch summaryStateString(res, "transcode_status") {
+	case "completed", "failed", "cancelled":
+		worker = &action.ActionResult{Outputs: res.State, State: res.Outputs}
+	}
 	return ActionCompactSummary{
 		Transcode:  action.ExplainTranscode(res),
 		Podcast:    actionProgressMap(res.State["podcast"]),
@@ -152,7 +160,7 @@ func toCompactSummary(res *action.ActionResult) ActionCompactSummary {
 		EncodeDurationMs:     res.EncodeDurationMs,
 		ValidationDurationMs: res.ValidationDurationMs,
 		ReconcileLagMs:       res.ReconcileLagMs,
-		Worker: compactOperationalFields(res, []string{
+		Worker: compactOperationalFields(worker, []string{
 			"benchmark_search_seconds", "search_budget_seconds", "operation_search_budget_seconds", "transcode_status", "transcode_phase", "quality_evidence", "benchmark_status", "benchmark_quality", "benchmark_phase", "phase",
 			"progress", "speed", "fps", "last_progress_at", "worker_heartbeat_at",
 			"progress_is_stale", "last_known_progress", "progress_details", "benchmark_progress_details",
