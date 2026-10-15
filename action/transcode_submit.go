@@ -384,7 +384,9 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 				if st.ReasonCode == "size_growth_exceeded" {
 					ec.State["reason_code"] = "size_growth"
 				}
-				return StepResult{Status: StepCompleted, Outputs: map[string]any{"skipped": true, "reason_code": st.ReasonCode}}, nil
+				out := transcodeWorkerMetadataOutputs(ec, st)
+				out["skipped"], out["reason_code"] = true, getString(ec.State, "reason_code")
+				return StepResult{Status: StepCompleted, Outputs: out}, nil
 			}
 		}
 		msg := st.Error

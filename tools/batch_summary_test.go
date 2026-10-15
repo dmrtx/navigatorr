@@ -35,14 +35,19 @@ func TestCompactBatchReportsLibraryOutcome(t *testing.T) {
 		{"cancel_in_progress", action.StatusWaitingExternal, "cancelling", 0, 0, 0, false, true},
 		{"preview", action.StatusCompleted, "preview", 0, 0, 0, true, false},
 		{"waiting", action.StatusWaitingDecision, "needs_decision", 6, 0, 0, false, false},
+		{"no_changes", action.StatusCompleted, "no_changes", 0, 0, 0, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			res := &action.ActionResult{ActionName: "transcode_batch", Status: tc.status,
-				State: map[string]any{"cancel_requested": tc.cancel},
+				Inputs: map[string]any{"mode": "size"},
+				State:  map[string]any{"cancel_requested": tc.cancel},
 				Outputs: map[string]any{"series_title": "Example", "dry_run": tc.dry,
 					"counts": map[string]int{"total": 6, "completed": tc.completed, "failed": tc.failed, "cancelled": tc.cancelled},
 					"items":  strings.Repeat("large-items", 10000), "ephemeral_profile": strings.Repeat("large-profile", 10000)}}
 			summary := toCompactSummary(res)
+			if summary.Transcode != nil {
+				t.Fatalf("batch has a contradictory per-file result: %+v", summary.Transcode)
+			}
 			if summary.Batch == nil || summary.Batch.Outcome != tc.want || summary.Batch.Total != 6 || summary.Batch.Completed != tc.completed {
 				t.Fatalf("unexpected batch: %+v", summary.Batch)
 			}
@@ -51,6 +56,17 @@ func TestCompactBatchReportsLibraryOutcome(t *testing.T) {
 				t.Fatalf("summary not bounded: %d bytes %v", len(b), err)
 			}
 		})
+	}
+}
+
+func TestCompactPromotedBatchDoesNotClaimOriginalsPreserved(t *testing.T) {
+	res := &action.ActionResult{ActionName: "transcode_batch", Status: action.StatusCompleted,
+		Inputs: map[string]any{"mode": "size"},
+		Outputs: map[string]any{"counts": map[string]int{"total": 10, "completed": 10},
+			"batch_promotion": map[string]any{"eligible": 10, "promoted": 10, "pending": 0}}}
+	summary := toCompactSummary(res)
+	if summary.Batch == nil || summary.Batch.Outcome != "promoted" || summary.Transcode != nil {
+		t.Fatalf("contradictory promoted batch summary: %+v", summary)
 	}
 }
 
