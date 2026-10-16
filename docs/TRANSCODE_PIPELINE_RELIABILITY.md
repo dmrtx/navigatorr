@@ -107,6 +107,17 @@ validation, publication, or completion. Worker slot counts measure occupied runn
 preparation and publication as well as encoding. Queue position is reported
 separately.
 
+### Copied-track duration metadata
+
+A changed Matroska `DURATION` tag alone does not establish audio/subtitle
+desynchronization. Remuxing can rewrite that statistic using the final packet's
+end timestamp, while the source tag describes the interval from the first
+packet to the last packet's end. For example, a subtitle starting at 29.363 s
+and ending at 2801.009 s can have tags of either 2771.646 s or 2801.009 s even
+when every packet timestamp is unchanged. Check packet timestamps, durations,
+counts and sizes alongside copied payload hashes before reporting a timing
+regression. Identical payload hashes alone do not verify synchronization.
+
 ## Storage failures
 
 Direct SMB errors retain their storage origin: `smb_signing_required`,
