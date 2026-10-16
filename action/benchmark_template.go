@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -1140,15 +1139,9 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 		declaredVideoBitrate = rep.BitRate
 	}
 
-	var attachmentBytes int64
-	for _, att := range rep.Attachments {
-		if att.Tags != nil {
-			if sBytes, ok := att.Tags["NUMBER_OF_BYTES"]; ok {
-				if b, err := strconv.ParseInt(sBytes, 10, 64); err == nil && b > 0 {
-					attachmentBytes += b
-				}
-			}
-		}
+	attachmentBytes, err := mediainspect.AttachmentPayloadBytes(rep.Attachments)
+	if err != nil {
+		return nil, fmt.Errorf("estimating preserved attachments: %w", err)
 	}
 
 	req := &transcode.BenchmarkRequest{
