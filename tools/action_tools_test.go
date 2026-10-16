@@ -441,7 +441,7 @@ func TestCatalogExamplesCanBeSentThroughActionRun(t *testing.T) {
 	var captured map[string]any
 	// Exercise the real MCP transport and persisted inputs without invoking a
 	// live library. The action suite separately exercises encoding/calibration.
-	engine.RegisterTemplate(action.ActionTemplate{Name: batch.Name, ImmutableInputs: true, Steps: []action.StepDefinition{{Name: "capture", Run: func(_ context.Context, ec *action.ExecutionContext) (action.StepResult, error) {
+	engine.RegisterTemplate(action.ActionTemplate{Name: batch.Name, AutoReconcile: true, ImmutableInputs: true, Steps: []action.StepDefinition{{Name: "capture", Run: func(_ context.Context, ec *action.ExecutionContext) (action.StepResult, error) {
 		captured = ec.Inputs
 		return action.StepResult{Status: action.StepCompleted}, nil
 	}}}})
@@ -463,6 +463,9 @@ func TestCatalogExamplesCanBeSentThroughActionRun(t *testing.T) {
 		res := callTool(t, s, "action_run", map[string]any{"action": batch.Name, "inputs": example.Inputs, "idempotency_key": fmt.Sprintf("example-%d", i)})
 		if res.IsError {
 			t.Fatal(resultText(t, res))
+		}
+		if err := engine.ReconcileOnce(context.Background()); err != nil {
+			t.Fatal(err)
 		}
 		if !reflect.DeepEqual(captured, inputs) {
 			t.Fatalf("example intent changed in transit: %+v", captured)

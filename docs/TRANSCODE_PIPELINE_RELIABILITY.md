@@ -5,6 +5,20 @@ The server starts the action reconciler with its maintenance engine and stops
 it before closing the state database. MCP clients can disconnect without
 stopping polling or result acceptance.
 
+MCP `action_run` admits worker workflows through the same durable queue as the
+web interface. It returns the persisted action ID before source inspection or
+hashing; `pending` means accepted, not successfully encoded. Preflight belongs
+to the service reconciler, so a client timeout or disconnect cannot cancel it
+and force another source hash. Use `action_status` for subsequent progress and
+real preflight errors. Reusing the same `idempotency_key` and immutable inputs
+returns the same action, including failed/completed results and older actions
+created before durable receipts. A changed request under that key is rejected.
+Omitting the key creates an independent submission and returns its generated
+key; supply your own key to recover a response lost before its ID is received.
+New admissions still require worker readiness. Recovering an existing receipt
+does not require contacting the worker. Process shutdown remains a checkpoint
+boundary; this does not promise to resume a partially read hash after a crash.
+
 ## Reconciliation
 
 Opted-in workflows resume external waits automatically. A normal poll is due
