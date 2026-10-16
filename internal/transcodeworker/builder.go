@@ -13,6 +13,9 @@ func BuildVideoEncoderArgs(plan *transcode.Plan) ([]string, error) {
 	if plan == nil {
 		return nil, fmt.Errorf("video plan cannot be nil (fail closed)")
 	}
+	if err := plan.X265.Validate(plan.VideoCodec, plan.Quality); err != nil {
+		return nil, err
+	}
 	switch norm(plan.VideoCodec) {
 	case "hevc_videotoolbox":
 		return buildVideoToolboxArgs(plan)
@@ -188,7 +191,7 @@ func buildLibX265Args(plan *transcode.Plan) ([]string, error) {
 		return nil, err
 	}
 	crf := plan.Quality
-	if crf < transcode.LibX265CRFMin || crf > transcode.LibX265CRFMax {
+	if plan.X265 == nil && (crf < transcode.LibX265CRFMin || crf > transcode.LibX265CRFMax) {
 		return nil, fmt.Errorf("invalid libx265 crf %d (must be %d-%d)", crf, transcode.LibX265CRFMin, transcode.LibX265CRFMax)
 	}
 	preset := norm(plan.Preset)
@@ -205,7 +208,14 @@ func buildLibX265Args(plan *transcode.Plan) ([]string, error) {
 	if pixelFormat == "p010le" {
 		pixelFormat = "yuv420p10le"
 	}
-	args := []string{"-c:v", "libx265", "-crf", strconv.Itoa(crf), "-preset", preset}
+	args := []string{"-c:v", "libx265", "-preset", preset}
+	if plan.X265 == nil {
+		args = []string{"-c:v", "libx265", "-crf", strconv.Itoa(crf), "-preset", preset}
+	} else {
+		x := plan.X265
+		params := fmt.Sprintf("rc-lookahead=%d:bframes=%d:ref=%d:aq-mode=%d:aq-strength=%g:psy-rd=%g:psy-rdoq=%g:ssim-rd=%s:rdoq-level=2", x.Lookahead, x.BFrames, x.RefFrames, x.AQMode, x.AQStrength, x.PsyRD, x.PsyRDOQ, boolFFmpeg(x.SSIMRD))
+		args = append(args, "-b:v", strconv.Itoa(x.BitrateKbps)+"k", "-x265-params", params)
+	}
 	if tune != "" {
 		args = append(args, "-tune", tune)
 	}
@@ -313,7 +323,12 @@ func BuildFFmpegArgs(execPlan *ExecutionPlan, sourcePath, candidatePath, progres
 			if stream.TargetCodec != "aac" || stream.BitrateKbps < 1 {
 				return nil, fmt.Errorf("invalid compact audio action")
 			}
-			args = append(args, fmt.Sprintf("-c:a:%d", stream.TypeIndex), "aac", fmt.Sprintf("-b:a:%d", stream.TypeIndex), strconv.Itoa(stream.BitrateKbps)+"k")
+			encoder := "aac"
+			if execPlan.Plan.AudioMode == "he_aac" {
+				encoder = "aac_at"
+				args = append(args, fmt.Sprintf("-profile:a:%d", stream.TypeIndex), "4")
+			}
+			args = append(args, fmt.Sprintf("-c:a:%d", stream.TypeIndex), encoder, fmt.Sprintf("-b:a:%d", stream.TypeIndex), strconv.Itoa(stream.BitrateKbps)+"k")
 			// Source muxer bitrate/size tags no longer describe an encoded track.
 			for _, tag := range []string{"BPS", "NUMBER_OF_BYTES", "NUMBER_OF_FRAMES", "DURATION", "_STATISTICS_WRITING_APP", "_STATISTICS_WRITING_DATE_UTC", "_STATISTICS_TAGS"} {
 				args = append(args, fmt.Sprintf("-metadata:s:a:%d", stream.TypeIndex), tag+"=")

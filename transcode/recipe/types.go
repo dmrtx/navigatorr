@@ -1,6 +1,9 @@
 package recipe
 
-import "time"
+import (
+	"github.com/jakenesler/navigatorr/transcode"
+	"time"
+)
 
 const (
 	MinSchemaVersion         = 1
@@ -303,7 +306,8 @@ type Profile struct {
 }
 
 type VideoProfile struct {
-	Codec string `json:"codec" yaml:"codec"`
+	X265  *transcode.X265Settings `json:"x265,omitempty" yaml:"x265,omitempty"`
+	Codec string                  `json:"codec" yaml:"codec"`
 	// Quality is -q:v for hevc_videotoolbox (higher = higher quality) and CRF
 	// for libx265 (LOWER = higher quality, 1..51).
 	Quality int `json:"quality" yaml:"quality"`
@@ -335,7 +339,7 @@ type VideoProfile struct {
 }
 
 type AudioProfile struct {
-	Mode string `json:"mode" yaml:"mode" jsonschema:"description=copy preserves audio; compact converts DTS/lossless to lossy AAC without downmix and copies existing compact codecs. Use recipe_get for the exact compact_audio_policy."`
+	Mode string `json:"mode" yaml:"mode" jsonschema:"description=copy preserves audio; compact converts DTS/lossless to lossy AAC; he_aac explicitly encodes 1-6 channels with AudioToolbox HE-AAC (64/160 kbps), otherwise copies. Use recipe_get for the exact compact_audio_policy."`
 }
 type SubtitleProfile struct {
 	Mode                string `json:"mode" yaml:"mode"`

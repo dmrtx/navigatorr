@@ -1,0 +1,287 @@
+{
+  "audio_target_kbps": 160,
+  "cambi_combined": {
+    "mode": "full_ref",
+    "output_metric": "cambi_full_reference",
+    "libvmaf_version": "3.2.0",
+    "mean": 0.0003938466587112171,
+    "max": 0.172475,
+    "frames_total": 1676,
+    "worst_sample_index": 1,
+    "worst_frame": 1,
+    "worst_source_sec": 0.04,
+    "location_timing": "nominal_fps"
+  },
+  "production_jobs_submitted": 0,
+  "profile": "transcode-profile-joy-1600.json",
+  "profile_plan_digest": "sha256:42093f6974084fb582b34a8a065273f8543b61fad0104af7431757967ef7a1ef",
+  "quality_accepted": true,
+  "reference": "The Grand Tour S03E01 QOQ H264 8-bit + EAC3 5.1; stream-copy fragments; seek may include keyframe lead-in",
+  "samples": [
+    {
+      "cambi": {
+        "mode": "full_ref",
+        "output_metric": "cambi_full_reference",
+        "libvmaf_version": "3.2.0",
+        "mean": 0,
+        "max": 0,
+        "frames_total": 596,
+        "worst_sample_index": 0,
+        "worst_frame": 0,
+        "worst_source_sec": 0.0,
+        "location_timing": "nominal_fps"
+      },
+      "candidate": "candidate-0.mkv",
+      "candidate_bytes": 5217502,
+      "candidate_sha256": "797473b65fe82124d00f76844c647a3ea8803c49bf357518e02f72084506961c",
+      "duration_seconds": 24.12,
+      "encode_seconds": 83.500858958,
+      "quality_accepted": true,
+      "requested_source_seek_seconds": 826,
+      "sample": 0,
+      "source": "joy-source-0.mkv",
+      "source_bytes": 21298355,
+      "source_sha256": "1f066b6ae841f46e737cd84d8e5860ac2cd4582a35307b7e35d5353fbb1ec477",
+      "structural_audio_timing_decode_validated": true,
+      "vmaf": {
+        "model_id": "v1_1080p_3h",
+        "libvmaf_model": "vmaf_v1.0.16_3d0h",
+        "libvmaf_version": "3.2.0",
+        "measurement_bit_depth": 10,
+        "score_min": 0,
+        "score_max": 100,
+        "mean": 94.19530776006707,
+        "p5": 89.566512,
+        "min": 81.016443,
+        "max": 100,
+        "frames_total": 596,
+        "worst_window_seconds": 5,
+        "worst_window_mean": 92.00078355199996,
+        "worst_window_sample_index": 0,
+        "worst_window_start_sec": 10.2,
+        "worst_window_source_sec": 10.2,
+        "window_timing": "nominal_fps"
+      },
+      "verified_video_packet_counts": {
+        "source": 596,
+        "candidate": 596
+      }
+    },
+    {
+      "cambi": {
+        "mode": "full_ref",
+        "output_metric": "cambi_full_reference",
+        "libvmaf_version": "3.2.0",
+        "mean": 0.0011600826010544814,
+        "max": 0.172475,
+        "frames_total": 569,
+        "worst_sample_index": 1,
+        "worst_frame": 1,
+        "worst_source_sec": 0.04,
+        "location_timing": "nominal_fps"
+      },
+      "candidate": "candidate-1.mkv",
+      "candidate_bytes": 4906449,
+      "candidate_sha256": "41f8ecdcbfff67fe258fb7040702f6530b821df16196d405188fa54929000102",
+      "duration_seconds": 23,
+      "encode_seconds": 116.071197625,
+      "quality_accepted": true,
+      "requested_source_seek_seconds": 2067,
+      "sample": 1,
+      "source": "joy-source-1.mkv",
+      "source_bytes": 22097316,
+      "source_sha256": "1c7c9b64056425c3ecd9409f807d38af4b6c426097f33788b95ea2df87a01896",
+      "structural_audio_timing_decode_validated": true,
+      "vmaf": {
+        "model_id": "v1_1080p_3h",
+        "libvmaf_model": "vmaf_v1.0.16_3d0h",
+        "libvmaf_version": "3.2.0",
+        "measurement_bit_depth": 10,
+        "score_min": 0,
+        "score_max": 100,
+        "mean": 95.04699498769766,
+        "p5": 90.701901,
+        "min": 82.519446,
+        "max": 100,
+        "frames_total": 569,
+        "worst_window_seconds": 5,
+        "worst_window_mean": 93.19261761600004,
+        "worst_window_sample_index": 1,
+        "worst_window_start_sec": 13.28,
+        "worst_window_source_sec": 13.28,
+        "window_timing": "nominal_fps"
+      },
+      "verified_video_packet_counts": {
+        "source": 569,
+        "candidate": 569
+      }
+    },
+    {
+      "cambi": {
+        "mode": "full_ref",
+        "output_metric": "cambi_full_reference",
+        "libvmaf_version": "3.2.0",
+        "mean": 0,
+        "max": 0,
+        "frames_total": 511,
+        "worst_sample_index": 2,
+        "worst_frame": 0,
+        "worst_source_sec": 0.0,
+        "location_timing": "nominal_fps"
+      },
+      "candidate": "candidate-2.mkv",
+      "candidate_bytes": 4473907,
+      "candidate_sha256": "38c263e77635f9ff35ac10704df6c41b010debbfd979fe356b0cb1edf73be2bc",
+      "duration_seconds": 20.6,
+      "encode_seconds": 86.799405208,
+      "quality_accepted": true,
+      "requested_source_seek_seconds": 3308,
+      "sample": 2,
+      "source": "joy-source-2.mkv",
+      "source_bytes": 21338836,
+      "source_sha256": "338ed0cfd060dc1ec25ad1f0a5f3183f2362e4108da3e453dcbb3ae2d36fc8bf",
+      "structural_audio_timing_decode_validated": true,
+      "vmaf": {
+        "model_id": "v1_1080p_3h",
+        "libvmaf_model": "vmaf_v1.0.16_3d0h",
+        "libvmaf_version": "3.2.0",
+        "measurement_bit_depth": 10,
+        "score_min": 0,
+        "score_max": 100,
+        "mean": 93.70052650293536,
+        "p5": 90.839494,
+        "min": 83.403141,
+        "max": 100,
+        "frames_total": 511,
+        "worst_window_seconds": 5,
+        "worst_window_mean": 92.71808650399997,
+        "worst_window_sample_index": 2,
+        "worst_window_start_sec": 3.68,
+        "worst_window_source_sec": 3.68,
+        "window_timing": "nominal_fps"
+      },
+      "verified_video_packet_counts": {
+        "source": 511,
+        "candidate": 511
+      }
+    }
+  ],
+  "sampling_note": "Verified 25 fps; metric locations are local to each stream-copy fragment. Requested episode seeks may include keyframe lead-in.",
+  "status": "completed",
+  "video_target_kbps": 1600,
+  "vmaf_combined": {
+    "model_id": "v1_1080p_3h",
+    "libvmaf_model": "vmaf_v1.0.16_3d0h",
+    "libvmaf_version": "3.2.0",
+    "measurement_bit_depth": 10,
+    "score_min": 0,
+    "score_max": 100,
+    "mean": 94.33359941288776,
+    "p5": 90.669014,
+    "min": 81.016443,
+    "max": 100,
+    "frames_total": 1676,
+    "worst_window_seconds": 5,
+    "worst_window_mean": 92.00078355199996,
+    "worst_window_sample_index": 0,
+    "worst_window_start_sec": 10.2,
+    "worst_window_source_sec": 10.2,
+    "window_timing": "nominal_fps"
+  },
+  "profile_config": {
+    "container": "mkv",
+    "video": {
+      "codec": "libx265",
+      "quality": 0,
+      "preset": "slow",
+      "profile": "main10",
+      "pixel_format": "p010le",
+      "x265": {
+        "bitrate_kbps": 1600,
+        "two_pass": true,
+        "lookahead": 80,
+        "b_frames": 6,
+        "ref_frames": 4,
+        "aq_mode": 1,
+        "aq_strength": 0.8,
+        "psy_rd": 0,
+        "psy_rdoq": 1,
+        "ssim_rd": true
+      }
+    },
+    "audio": {
+      "mode": "he_aac"
+    },
+    "subtitles": {
+      "mode": "preserve",
+      "convert_incompatible": true
+    },
+    "preserve": {
+      "metadata": true,
+      "chapters": true,
+      "attachments": true
+    },
+    "resilience": {
+      "max_attempts": 1,
+      "transient_retries": 0,
+      "retry_backoff_seconds": [],
+      "max_fallbacks": 1,
+      "fallbacks": [
+        {
+          "when": "container_subtitle_incompatible",
+          "action": "apply_container_conversion"
+        }
+      ]
+    },
+    "optimization": {
+      "enabled": true,
+      "sampling": {
+        "strategy": "distributed",
+        "sample_count": 3,
+        "sample_seconds": 20,
+        "positions": [
+          0.2,
+          0.5,
+          0.8
+        ]
+      },
+      "quality": {
+        "preferred_metric": "vmaf",
+        "vmaf": {
+          "model": "v1_1080p_3h",
+          "target": 95,
+          "minimum": 93,
+          "marginal_tolerance": 0,
+          "guardrail_enforcement": "reject",
+          "p5_minimum": 88,
+          "worst_window_minimum": 90,
+          "worst_window_seconds": 5
+        },
+        "banding": {
+          "enabled": true,
+          "metric": "cambi",
+          "mode": "full_ref",
+          "enforcement": "reject",
+          "max_mean": 6,
+          "max_peak": 16
+        },
+        "final_validation": {
+          "mode": "sampled"
+        }
+      },
+      "search": {
+        "max_candidates": 1,
+        "bitrate_values": [
+          1600
+        ],
+        "encode_concurrency": 1,
+        "metric_concurrency": 1
+      }
+    }
+  },
+  "profile_file_sha256": "e5b79e7f49768ffad3eedcb954c079803ecb2de55d3b56cd8f5c3097d06b1755",
+  "metric_location_basis": "fragment-local seconds; requested_source_seek_seconds is approximate original-episode context",
+  "platform": "Apple Silicon MacBook Air; isolated local experiment, production worker unchanged",
+  "ffmpeg_version": "9.0.1",
+  "copied_libvmaf_version": "3.2.0"
+}

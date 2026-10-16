@@ -7,6 +7,7 @@ const source = await readFile(
   new URL("./assets/app.js", import.meta.url),
   "utf8",
 );
+const joyProfile = JSON.parse(await readFile(new URL("../docs/examples/transcode-profile-joy.json", import.meta.url), "utf8"));
 class Element {
   children = [];
   listeners = new Map();
@@ -92,6 +93,26 @@ function harness(codec = "hevc_videotoolbox", extra = {}) {
   const result = () => JSON.parse(JSON.stringify(run("recipeFromControls()")));
   return { run, field, edit, result, elements, profile: context.profile };
 }
+
+test("Joy profile round trips ABR, two passes and HE-AAC without inserting a CRF search", async () => {
+  const h = harness("libx265", joyProfile);
+  assert.equal(h.elements.get("recipe-quality").disabled, true);
+  assert.deepEqual(h.result(), joyProfile);
+  h.edit("video.x265.b_frames", 8);
+  h.edit("video.x265.aq_strength", 0.85);
+  const p = h.result();
+  assert.equal(p.video.quality, 0);
+  assert.equal(p.video.x265.b_frames, 8);
+  assert.equal(p.video.x265.aq_strength, 0.85);
+  assert.deepEqual(p.optimization.search.bitrate_values, [1200]);
+  assert.equal(p.optimization.search.quality_values, undefined);
+  assert.equal(p.audio.mode, "he_aac");
+  assert.match(h.run("profileRate(profile)"), /1200 kbps.*Two-pass/);
+  h.run('$("recipe-name").value="joy";tool=async(name,args)=>{globalThis.savedJoy=args;return {}};loadRecipes=async()=>{};readRecipe=async()=>{};notify=()=>{};showData=()=>{};renderRecipeDirty=()=>{};');
+  await h.run("saveRecipe()");
+  assert.equal(h.run("savedJoy.profile.video.quality"), 0);
+  assert.equal(h.run("savedJoy.profile.video.x265.bitrate_kbps"), 1200);
+});
 
 test("a new VideoToolbox profile exposes typed optional controls without inserting defaults", () => {
   const h = harness();

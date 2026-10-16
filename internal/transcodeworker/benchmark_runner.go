@@ -376,6 +376,7 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		}
 		codec := transcode.BenchmarkCandidateVideoCodec(c)
 		plan := &transcode.Plan{
+			X265:               c.X265.Clone(),
 			VideoCodec:         codec,
 			Quality:            c.Quality,
 			Preset:             norm(c.Preset),
@@ -588,7 +589,7 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 				cmd.Stderr = stderrBuf
 				cmd.Stdout = nil
 
-				if err := cmd.Run(); err != nil {
+				if err := runEncoderCommand(ctx, cmd, candArgs, vc.plan, candPath); err != nil {
 					if ctx.Err() != nil {
 						return ctx.Err()
 					}
@@ -1654,6 +1655,7 @@ func (r *ProductionBenchmarkRunner) runSelection(
 			if vc.candidate.ID == selRes.Winner.CandidateID {
 				est := candidateEstimates[i]
 				decision.Winner = &transcode.BenchmarkWinner{
+					X265:                      vc.candidate.X265.Clone(),
 					CandidateID:               vc.candidate.ID,
 					CandidateIndex:            vc.index,
 					VideoCodec:                transcode.BenchmarkCandidateVideoCodec(vc.candidate),

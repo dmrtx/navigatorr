@@ -1536,7 +1536,7 @@ function renderProfileFacts(output, data, name, preserveDepth) {
   add("Process", p.optimization?.enabled ? "Tests quality samples before full conversion" : "Converts full video using this profile");
   add("Output depth", preserveDepth ? "Same as source · Overrides profile depth" : v.profile === "main10" || /10/.test(v.pixel_format || "") ? "10-bit" : v.pixel_format || v.profile ? "8-bit" : "Encoder default");
   if (v.spatial_aq != null) add("Image detail", v.spatial_aq ? "Adaptive allocation across image details" : "Standard allocation");
-  add("Audio", p.audio?.mode === "copy" ? "Keep original audio tracks" : p.audio?.mode === "compact" ? "Compact · Convert lossless tracks to AAC" : p.audio?.mode || "Profile default");
+  add("Audio", p.audio?.mode === "copy" ? "Keep original audio tracks" : p.audio?.mode === "compact" ? "Compact · Convert lossless tracks to AAC" : p.audio?.mode === "he_aac" ? "HE-AAC · 64 kbps mono/stereo, 160 kbps surround (lossy)" : p.audio?.mode || "Profile default");
   add("Output", p.container?.toUpperCase() || "Profile default");
   output.append(facts, node("p", `Profile ID: ${name}`, "metadata"));
 }
@@ -1629,7 +1629,7 @@ function controls() {
   $("max-bitrate").disabled = $("rate-mode").value !== "bitrate";
   $("preview").hidden = !technical || !batch;
   $("benchmark").hidden = !technical || batch;
-  $("audio-note").hidden = $("audio").value !== "compact";
+  $("audio-note").hidden = !["compact", "he_aac"].includes($("audio").value);
   const hasSource = batch
     ? Boolean(folder ? state.folder : state.media) &&
       (technical ? !$("selected-only").checked || selectedCount > 0 : selectedCount > 0)
@@ -2073,6 +2073,8 @@ function telemetry(job) {
     result.append(node("span", `${observation.heartbeat === "fresh" ? `Worker heartbeat ${activityElapsed(w.worker_heartbeat_at)} ago` : "Worker heartbeat unavailable"}${last ? ` · Last advance ${last} ago` : ""}`, "metadata progress-observation"));
     if (phase === "evaluating_metrics")
       result.append(node("span", "Quality measurement can take several minutes. Progress updates when a sample task finishes.", "metadata progress-observation"));
+    if (phase === "analysing_video")
+      result.append(node("span", "The first x265 pass analyzes the video. Encoding progress starts during the second pass.", "metadata progress-observation"));
     if (phase === "validating_quality")
       result.append(node("span", "Final quality validation can take several minutes. The percentage reflects the last encoding measurement.", "metadata progress-observation"));
   }
@@ -2945,7 +2947,7 @@ function workerProgressObservation(job) {
   if (heartbeat === "stale") return {...result, warning: true, status: "No heartbeat", message: `No recent worker heartbeat.${phase ? ` Last reported phase: ${workerPhaseLabel(phase)}.` : ""}`};
   // These phases report completed units, not a continuous encoder percentage.
   // A heartbeat proves liveness only; preserve the actual last measurement.
-  const discreteProgress = ["preparing", "reading_source", "probing_source", "extracting_samples", "encoding_samples", "testing_initial", "testing_alternatives", "verifying_samples", "evaluating_metrics", "estimating_final_size", "selecting_candidate", "capturing_comparison", "validating", "validating_quality", "publishing"].includes(phase);
+  const discreteProgress = ["preparing", "reading_source", "probing_source", "extracting_samples", "encoding_samples", "testing_initial", "testing_alternatives", "verifying_samples", "evaluating_metrics", "estimating_final_size", "selecting_candidate", "capturing_comparison", "validating", "validating_quality", "analysing_video", "publishing"].includes(phase);
   if (w.progress_is_stale && !(discreteProgress && heartbeat === "fresh"))
     return {...result, warning: true, status: "No updates", message: `No recent ${phase === "encoding" ? "encoding progress" : "progress from the worker"}. ${heartbeat === "fresh" ? `Worker heartbeat ${activityElapsed(w.worker_heartbeat_at)} ago.` : "Worker heartbeat unavailable."}`};
   return result;
@@ -3014,7 +3016,7 @@ function queuePresentation(job) {
       (job.candidate_ready && !job.replacement_action_id
         ? "Candidate ready"
         : ["running", "waiting_external"].includes(job.status)
-          ? (offline ? "Worker offline" : multipleActive ? "In progress" : observation.status || {encoding:"Encoding",encoding_samples:"Encoding samples",evaluating_metrics:"Measuring quality",validating:"Verifying",validating_quality:"Verifying quality",publishing:"Saving candidate",benchmarking:"Calibrating",queued:"Queued on worker",preparing:"Preparing"}[phase] || (replacement || job.promotion ? "Replacing" : "In progress"))
+          ? (offline ? "Worker offline" : multipleActive ? "In progress" : observation.status || {encoding:"Encoding",encoding_samples:"Encoding samples",evaluating_metrics:"Measuring quality",validating:"Verifying",validating_quality:"Verifying quality",analysing_video:"Analyzing video",publishing:"Saving candidate",benchmarking:"Calibrating",queued:"Queued on worker",preparing:"Preparing"}[phase] || (replacement || job.promotion ? "Replacing" : "In progress"))
           : names[job.status] || job.status);
   const s = job.savings || {},
     metrics = [];
@@ -3241,7 +3243,7 @@ function workerPhaseLabel(phase) {
     queued:"Waiting for a worker slot",preparing:"Preparing source",reading_source:"Reading source from media storage",
     probing_source:"Inspecting source",extracting_samples:"Extracting reference samples",encoding_samples:"Encoding test samples",
     testing_initial:"Testing suitable settings",testing_alternatives:"Trying a measured alternative",verifying_samples:"Checking additional video samples",evaluating_metrics:"Measuring sample quality",estimating_final_size:"Estimating final file size",selecting_candidate:"Selecting the best candidate",
-    capturing_comparison:"Saving comparison frames",encoding:"Encoding full video",validating:"Verifying output",validating_quality:"Measuring final quality",publishing:"Saving candidate to media storage",
+    analysing_video:"Analyzing video · x265 pass 1 of 2",capturing_comparison:"Saving comparison frames",encoding:"Encoding full video",validating:"Verifying output",validating_quality:"Measuring final quality",publishing:"Saving candidate to media storage",
     benchmarking:"Calibrating quality",completed:"Completed",
   }[phase] || (phase ? phase.replaceAll("_"," ") : "Preparing job");
 }
@@ -3757,6 +3759,7 @@ function profileEncoder(p) {
 }
 function profileRate(p) {
   const v = p?.video || {};
+  if (v.x265) return `${v.x265.bitrate_kbps} kbps target bitrate · Two-pass x265${v.preset ? ` · ${v.preset} preset` : ""}`;
   if (v.average_bitrate_kbps > 0) return `${v.average_bitrate_kbps} kbps target bitrate`;
   if (v.quality == null) return "Profile default";
   if (v.codec === "libx265") return `CRF ${v.quality} · Lower means higher quality${v.preset ? ` · ${v.preset} preset` : ""}`;
@@ -3784,7 +3787,7 @@ function profileOptionLabel(name) {
   };
   const p = data.profile || {};
   const category = /^anime/.test(name) ? "Anime" : /^live-action/.test(name) ? "Live action" : "General";
-  const effective = p.video?.codec === "copy" ? "Keep video" : p.video?.quality != null ? `${p.video.codec === "libx265" ? "CRF" : "Quality"} ${p.video.quality}` : "Custom settings";
+  const effective = p.video?.codec === "copy" ? "Keep video" : p.video?.x265 ? `${p.video.x265.bitrate_kbps} kbps · Two passes` : p.video?.quality != null ? `${p.video.codec === "libx265" ? "CRF" : "Quality"} ${p.video.quality}` : "Custom settings";
   const title = data.source === "active_bundle" ? labels[name] || name : `${category} · ${effective}`;
   const encoder = p.video?.codec === "hevc_videotoolbox" ? "Hardware" : p.video?.codec === "libx265" ? "CPU" : p.video?.codec;
   return [title, encoder, p.optimization?.enabled ? "Test samples" : "", data.source === "managed" ? `Custom (${name})` : ""].filter(Boolean).join(" · ");
@@ -3930,7 +3933,7 @@ async function saveRecipe() {
       profile: recipeFromControls(),
     };
     const q = args.profile.video.quality;
-    const bitrate = args.profile.video.codec === "hevc_videotoolbox" && args.profile.video.average_bitrate_kbps > 0;
+    const bitrate = (args.profile.video.codec === "hevc_videotoolbox" && args.profile.video.average_bitrate_kbps > 0) || !!args.profile.video.x265;
     if (!bitrate && (!Number.isFinite(q) || q < 1 || q > (args.profile.video.codec === "libx265" ? 51 : 100))) throw new Error("Quality is outside the effective encoder's supported scale");
     if (state.recipe?.record && state.recipe.name === args.name) {
       args.expected_generation = state.recipe.record.generation;
@@ -4052,7 +4055,7 @@ function setRecipeControls(profile) {
 function recipeControls() {
   const software = $("recipe-encoder").value === "libx265";
   const bitrate =
-    !software && state.recipeDraft?.video?.average_bitrate_kbps > 0;
+    (!software && state.recipeDraft?.video?.average_bitrate_kbps > 0) || (software && !!state.recipeDraft?.video?.x265);
   $("recipe-preset").disabled = !software;
   const presetLabel = $("recipe-preset").closest?.("label");
   if (presetLabel) presetLabel.hidden = !software;
@@ -4092,6 +4095,7 @@ $("recipe-encoder").addEventListener("change", () => {
     } else {
       delete p.video.preset;
       delete p.video.tune;
+      delete p.video.x265;
       p.video.quality = 65;
     }
     if (p.optimization?.search) {
@@ -4116,7 +4120,7 @@ function recipeFromControls() {
   p.video ||= {};
   p.video.codec = $("recipe-encoder").value;
   p.video.quality =
-    p.video.codec === "hevc_videotoolbox" && p.video.average_bitrate_kbps > 0
+    (p.video.codec === "hevc_videotoolbox" && p.video.average_bitrate_kbps > 0) || p.video.x265
       ? 0
       : Number($("recipe-quality").value);
   if (p.video.codec === "libx265") p.video.preset = $("recipe-preset").value;
@@ -4131,7 +4135,7 @@ function recipeFromControls() {
 // insert optional values into an existing profile.
 function advancedProfileDefaults(profile) {
   const vt = profile.video?.codec === "hevc_videotoolbox";
-  const bitrate = vt && profile.video?.average_bitrate_kbps > 0;
+  const bitrate = (vt && profile.video?.average_bitrate_kbps > 0) || !!profile.video?.x265;
   const video = { profile: "", pixel_format: "" };
   if (vt) {
     Object.assign(video, {
@@ -4168,7 +4172,7 @@ function advancedProfileDefaults(profile) {
       search: {
         max_candidates: 3,
         [bitrate ? "bitrate_values" : "quality_values"]: bitrate
-          ? [
+          ? profile.video?.x265 ? [profile.video.x265.bitrate_kbps] : [
               Math.round(profile.video.average_bitrate_kbps * 0.8),
               profile.video.average_bitrate_kbps,
               Math.round(profile.video.average_bitrate_kbps * 1.2),
@@ -4330,6 +4334,8 @@ function renderAdvancedProfile(profile) {
         );
         input.dataset.profileField = current;
         const list = Array.isArray(value);
+        const x265Bounds = {bitrate_kbps:[64,50000],lookahead:[5,250],b_frames:[0,16],ref_frames:[1,16],aq_mode:[0,4],aq_strength:[0,3],psy_rd:[0,3],psy_rdoq:[0,3]};
+        const fieldBounds = current.startsWith("video.x265.") ? x265Bounds[key] : bounds[key];
         if (optionalBoolean) {
           option(input, "", "Automatic");
           option(input, "true", "On");
@@ -4358,10 +4364,10 @@ function renderAdvancedProfile(profile) {
             if (value === null) input.placeholder = "Automatic";
             if (input.type === "number") {
               input.step =
-                key === "sample_seconds" || current.includes(".quality.")
+                key === "sample_seconds" || current.includes(".quality.") || (current.startsWith("video.x265.") && ["aq_strength","psy_rd","psy_rdoq"].includes(key))
                   ? "any"
                   : "1";
-              if (bounds[key]) [input.min, input.max] = bounds[key].map(String);
+              if (fieldBounds) [input.min, input.max] = fieldBounds.map(String);
             }
           }
         }
@@ -4415,8 +4421,8 @@ function renderAdvancedProfile(profile) {
                 next = Number(input.value);
                 if (
                   !Number.isFinite(next) ||
-                  (bounds[key] &&
-                    (next < bounds[key][0] || next > bounds[key][1])) ||
+                  (fieldBounds &&
+                    (next < fieldBounds[0] || next > fieldBounds[1])) ||
                   (input.step === "1" && !Number.isInteger(next))
                 ) {
                   state.recipeAdvancedErrors.set(

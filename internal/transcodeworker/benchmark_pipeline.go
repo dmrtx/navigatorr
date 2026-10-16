@@ -458,7 +458,7 @@ func (sh *pipelineShared) runEncodeUnit(ctx context.Context, u pipelineUnit, idx
 	stderrBuf := newBoundedBuffer(16 * 1024)
 	cmd.Stderr = stderrBuf
 	cmd.Stdout = nil
-	if err := cmd.Run(); err != nil {
+	if err := runEncoderCommand(ctx, cmd, candArgs, vc.plan, candPath); err != nil {
 		if ctx.Err() != nil {
 			fail(ctx.Err())
 			return

@@ -140,7 +140,7 @@ func ValidateProfile(name string, p Profile) error {
 	}
 	codec := normalizeCodec(p.Video.Codec)
 	if codec == transcode.VideoCodecLibX265 {
-		if p.Video.Quality < transcode.LibX265CRFMin || p.Video.Quality > transcode.LibX265CRFMax {
+		if p.Video.X265 == nil && (p.Video.Quality < transcode.LibX265CRFMin || p.Video.Quality > transcode.LibX265CRFMax) {
 			return fmt.Errorf("profile %q: libx265 crf (quality) %d out of range %d-%d", name, p.Video.Quality, transcode.LibX265CRFMin, transcode.LibX265CRFMax)
 		}
 		if preset := normalizeCodec(p.Video.Preset); preset != "" && !transcode.IsValidLibX265Preset(preset) {
@@ -166,6 +166,9 @@ func ValidateProfile(name string, p Profile) error {
 			return err
 		}
 	}
+	if err := p.Video.X265.Validate(p.Video.Codec, p.Video.Quality); err != nil {
+		return err
+	}
 	videoProfile := normalizeCodec(p.Video.Profile)
 	pixelFormat := normalizeCodec(p.Video.PixelFormat)
 	if videoProfile != "" && videoProfile != "main" && videoProfile != "main10" {
@@ -183,7 +186,7 @@ func ValidateProfile(name string, p Profile) error {
 	if videoProfile == "main" && pixelFormat == "p010le" {
 		return fmt.Errorf("profile %q: HEVC main is incompatible with pixel_format p010le", name)
 	}
-	if mode := strings.ToLower(strings.TrimSpace(p.Audio.Mode)); mode != "copy" && mode != "compact" {
+	if mode := strings.ToLower(strings.TrimSpace(p.Audio.Mode)); mode != "copy" && mode != "compact" && mode != "he_aac" {
 		return fmt.Errorf("profile %q: unsupported audio mode %q", name, p.Audio.Mode)
 	}
 	if strings.ToLower(strings.TrimSpace(p.Subtitles.Mode)) != "preserve" {
@@ -243,9 +246,12 @@ func ValidateProfile(name string, p Profile) error {
 		}
 		// For libx265, search quality values are CRF values and must respect the
 		// narrower x265 range even though the generic policy allows 1..100.
-		// Bitrate sweeps are hevc_videotoolbox-only; libx265 is CRF-only.
+		// libx265 bitrate sweeps require explicit bounded two-pass settings.
 		if codec == transcode.VideoCodecLibX265 && p.Optimization.Search != nil {
-			if len(p.Optimization.Search.BitrateValues) > 0 {
+			if p.Video.X265 != nil && (len(p.Optimization.Search.QualityValues) > 0 || len(p.Optimization.Search.BitrateValues) == 0 || p.Optimization.Search.AdaptiveMode == "adaptive") {
+				return fmt.Errorf("x265 ABR requires an explicit bitrate sweep and exhaustive search")
+			}
+			if p.Video.X265 == nil && len(p.Optimization.Search.BitrateValues) > 0 {
 				return fmt.Errorf("profile %q: search bitrate_values are only supported for hevc_videotoolbox, not libx265 (fail closed)", name)
 			}
 			for _, q := range p.Optimization.Search.QualityValues {
