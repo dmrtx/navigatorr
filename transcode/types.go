@@ -37,6 +37,7 @@ type ResiliencePlan struct {
 }
 
 type Plan struct {
+	X265              *X265Settings `json:"x265,omitempty" yaml:"x265,omitempty"`
 	ModePolicyVersion string        `json:"mode_policy_version,omitempty" yaml:"mode_policy_version,omitempty"`
 	Podcast           *podcast.Task `json:"podcast,omitempty" yaml:"podcast,omitempty"`
 	Mode              string        `json:"mode,omitempty" yaml:"mode,omitempty"`

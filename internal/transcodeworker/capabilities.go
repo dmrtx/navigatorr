@@ -37,6 +37,12 @@ func ValidateEncoderCapabilities(ctx context.Context, ffmpegPath string, plan *t
 	if plan == nil {
 		return fmt.Errorf("encoder_capability_unsupported: transcode plan is nil")
 	}
+	if norm(plan.AudioMode) == "he_aac" {
+		available, err := ProbeAvailableEncoders(ctx, ffmpegPath)
+		if err != nil || !available["aac_at"] {
+			return fmt.Errorf("encoder_capability_unsupported: HE-AAC requires AudioToolbox aac_at: %v", err)
+		}
+	}
 	if norm(plan.AudioMode) == "compact" {
 		available, err := ProbeAvailableEncoders(ctx, ffmpegPath)
 		if err != nil || !available["aac"] {
@@ -190,6 +196,8 @@ func probeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratch
 	}
 	caps.Encoders = ParseAvailableEncoders(string(encOut))
 	caps.CompactAudio = encErr == nil && caps.Encoders["aac"]
+	caps.X265TwoPass = encErr == nil && caps.Encoders["libx265"]
+	caps.HEAACAudio = encErr == nil && caps.Encoders["aac_at"]
 	if vtCaps.Available {
 		caps.Encoders[videoToolboxEncoder] = true
 	}
