@@ -386,6 +386,7 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 			basePlan := getPlan(ec.State["plan"])
 			if basePlan != nil {
 				wp := *basePlan
+				wp.X265 = winner.X265.Clone()
 				// The swept rate dimension is authoritative verbatim: quality
 				// winners carry Quality with zero bitrate, bitrate winners
 				// carry AverageBitrateKbps with zero quality.
@@ -770,6 +771,27 @@ func buildBenchmarkCandidates(basePlan *transcode.Plan, bitDepth int, srch *reci
 		}
 		return candidates, nil
 	case transcode.VideoCodecLibX265:
+		if basePlan.X265 != nil {
+			if err := basePlan.X265.Validate(normCodec, basePlan.Quality); err != nil {
+				return nil, err
+			}
+			if !hasBitrate || hasQuality {
+				return nil, fmt.Errorf("x265 ABR requires bitrate_values")
+			}
+			var candidates []transcode.BenchmarkCandidate
+			for _, br := range srch.BitrateValues {
+				x := basePlan.X265.Clone()
+				x.BitrateKbps = br
+				if err := x.Validate(normCodec, 0); err != nil {
+					return nil, err
+				}
+				candidates = append(candidates, transcode.BenchmarkCandidate{ID: fmt.Sprintf("x265_abr_%dk", br), VideoCodec: normCodec, X265: x, Preset: normPreset, Tune: normTune, VideoProfile: targetProf, PixelFormat: targetPix})
+				if len(candidates) >= maxCandidates {
+					break
+				}
+			}
+			return candidates, nil
+		}
 		if hasBitrate {
 			return nil, fmt.Errorf("search bitrate_values are only supported for hevc_videotoolbox, not libx265: libx265 is CRF-only (fail closed)")
 		}
@@ -1186,6 +1208,15 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 				return nil, err
 			}
 		}
+	}
+	if plan.X265 != nil && !caps.X265TwoPass {
+		return nil, fmt.Errorf("worker does not support two-pass x265; upgrade before benchmarking")
+	}
+	if plan.AudioMode == "he_aac" {
+		if !caps.HEAACAudio {
+			return nil, fmt.Errorf("worker does not support HE-AAC audio; upgrade before benchmarking")
+		}
+		req.AudioMode = "he_aac"
 	}
 	if plan.AudioMode == "compact" {
 		if !caps.CompactAudio {

@@ -182,6 +182,17 @@ func BuildExecutionPlan(plan *transcode.Plan, streams []SourceStream, duration f
 	if err := ValidatePlan(plan); err != nil {
 		return nil, err
 	}
+	if plan.X265 != nil {
+		n := 0
+		for _, s := range streams {
+			if s.Kind == "video" {
+				n++
+			}
+		}
+		if n != 1 {
+			return nil, fmt.Errorf("two-pass x265 requires exactly one video stream")
+		}
+	}
 	ep := &ExecutionPlan{Plan: plan, DurationSec: duration}
 	subtitleActions := map[int]transcode.SubtitleAction{}
 	for _, a := range plan.SubtitleActions {
@@ -196,7 +207,7 @@ func BuildExecutionPlan(plan *transcode.Plan, streams []SourceStream, duration f
 			target, bitrate := transcode.AudioTarget(plan.AudioMode, s.Codec, s.Channels)
 			ep.Streams = append(ep.Streams, StreamAction{Kind: "audio", SourceIndex: s.Index, TypeIndex: s.TypeIndex, Codec: s.Codec, TargetCodec: target, BitrateKbps: bitrate, Disposition: s.Disposition})
 			if target != "copy" {
-				ep.Conversions = append(ep.Conversions, transcode.ConversionRecord{StreamType: "audio", StreamIndex: s.TypeIndex, FromCodec: s.Codec, ToCodec: target, Reason: "compact audio requested; AAC at bounded bitrate, preserving channels and language (lossy)"})
+				ep.Conversions = append(ep.Conversions, transcode.ConversionRecord{StreamType: "audio", StreamIndex: s.TypeIndex, FromCodec: s.Codec, ToCodec: target, Reason: fmt.Sprintf("%s audio requested; AAC at %d kbps, preserving channels and language (lossy)", plan.AudioMode, bitrate)})
 			}
 		case "subtitle":
 			a, ok := subtitleActions[s.TypeIndex]

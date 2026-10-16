@@ -139,7 +139,7 @@ func (w *Worker) validateEncodedCandidateFull(ctx context.Context, localCandidat
 	if err := validateAudioPreservation(execPlan.Plan, srcProbe.Streams, candProbe.Streams); err != nil {
 		return attest, err
 	}
-	if execPlan.Plan.AudioMode == "compact" && countStreams(srcProbe.Streams, "audio") > 0 {
+	if (execPlan.Plan.AudioMode == "compact" || execPlan.Plan.AudioMode == "he_aac") && countStreams(srcProbe.Streams, "audio") > 0 {
 		if err := w.validateAudioPackets(ctx, execPlan.Plan, srcProbe.Path, localCandidate, srcProbe, candProbe); err != nil {
 			return attest, err
 		}
@@ -263,6 +263,9 @@ func validateAudioPreservation(plan *transcode.Plan, src, cand []SourceStream) e
 	for i := range srcAudio {
 		a, b := srcAudio[i], candAudio[i]
 		target, _ := transcode.AudioTarget(plan.AudioMode, a.Codec, a.Channels)
+		if plan.AudioMode == "he_aac" && target != "copy" && !strings.EqualFold(b.Profile, "HE-AAC") {
+			return fmt.Errorf("HE-AAC audio profile not present in candidate stream %d", i)
+		}
 		if target == "copy" {
 			target = norm(a.Codec)
 		}

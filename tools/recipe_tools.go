@@ -201,7 +201,7 @@ func registerRecipeTools(s *server.MCPServer, cfg *config.Config) {
 					"source": source, "description": description,
 					"profile": map[string]any{
 						"container": profile.Container, "audio": profile.Audio,
-						"video":        map[string]any{"codec": v.Codec, "quality": v.Quality, "average_bitrate_kbps": v.AverageBitrateKbps, "preset": v.Preset, "profile": v.Profile, "pixel_format": v.PixelFormat, "spatial_aq": v.SpatialAQ},
+						"video":        map[string]any{"x265": v.X265, "codec": v.Codec, "quality": v.Quality, "average_bitrate_kbps": v.AverageBitrateKbps, "preset": v.Preset, "profile": v.Profile, "pixel_format": v.PixelFormat, "spatial_aq": v.SpatialAQ},
 						"optimization": map[string]any{"enabled": profile.Optimization != nil && profile.Optimization.Enabled},
 					},
 				}
@@ -226,7 +226,7 @@ func registerRecipeTools(s *server.MCPServer, cfg *config.Config) {
 		if rec, ok, err := mgr.GetManagedProfile(name); err != nil {
 			return toolErr("reading managed recipe registry: %v", err), nil
 		} else if ok {
-			return toolJSON(map[string]any{"name": name, "source": "managed", "record": rec, "profile": rec.Profile, "shadowed_profiles": recipeShadowing(cfg, rec), "compact_audio_policy": compactAudioPolicy()}), nil
+			return toolJSON(map[string]any{"name": name, "source": "managed", "record": rec, "profile": rec.Profile, "shadowed_profiles": recipeShadowing(cfg, rec), "compact_audio_policy": compactAudioPolicy(), "he_aac_audio_policy": map[string]any{"encoder": "aac_at", "profile": "HE-AAC", "target_kbps_mono_stereo": 64, "target_kbps_3_to_6_channels": 160, "otherwise": "copy unknown or more than 6 channels", "lossy": true, "benchmark_audio": "estimated; explicit audio samples still require validation"}}), nil
 		}
 		profile, err := cfg.Transcode.ResolveProfile(name)
 		if err != nil {
@@ -236,7 +236,7 @@ func registerRecipeTools(s *server.MCPServer, cfg *config.Config) {
 		if _, ok := cfg.Transcode.Profiles[name]; ok {
 			source = "static_config"
 		}
-		return toolJSON(map[string]any{"name": name, "source": source, "profile": profile, "compact_audio_policy": compactAudioPolicy()}), nil
+		return toolJSON(map[string]any{"name": name, "source": source, "profile": profile, "compact_audio_policy": compactAudioPolicy(), "he_aac_audio_policy": map[string]any{"encoder": "aac_at", "profile": "HE-AAC", "target_kbps_mono_stereo": 64, "target_kbps_3_to_6_channels": 160, "otherwise": "copy unknown or more than 6 channels", "lossy": true, "benchmark_audio": "estimated; explicit audio samples still require validation"}}), nil
 	})
 
 	s.AddTool(mcp.NewTool("recipe_save",

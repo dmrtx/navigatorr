@@ -68,6 +68,12 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 	if plan == nil {
 		return StepResult{Status: StepFailed, Error: "resolved transcode plan is missing (fail closed)"}, nil
 	}
+	if (plan.X265 != nil || plan.AudioMode == "he_aac") && !getBool(ec.State, "transcode_reconcile") {
+		caps, err := e.deps.Transcode.Capabilities(ctx)
+		if err != nil || (plan.X265 != nil && !caps.X265TwoPass) || (plan.AudioMode == "he_aac" && !caps.HEAACAudio) {
+			return StepResult{Status: StepFailed, Error: "worker does not support the explicit x265/HE-AAC experiment; upgrade before encoding"}, nil
+		}
+	}
 	if plan.AudioMode == "compact" && !getBool(ec.State, "transcode_reconcile") {
 		caps, err := e.deps.Transcode.Capabilities(ctx)
 		if err != nil {

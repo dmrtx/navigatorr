@@ -148,42 +148,43 @@ type BenchmarkConcurrencyConfig struct {
 
 // BenchmarkWinner records the selected winning candidate and its concrete parameters.
 type BenchmarkWinner struct {
-	CandidateID               string   `json:"candidate_id"`
-	CandidateIndex            int      `json:"candidate_index"`
-	VideoCodec                string   `json:"video_codec,omitempty"`
-	Quality                   int      `json:"quality"`
-	Preset                    string   `json:"preset,omitempty"`
-	Tune                      string   `json:"tune,omitempty"`
-	AverageBitrateKbps        int      `json:"average_bitrate_kbps,omitempty"`
-	MaxBitrateKbps            int      `json:"max_bitrate_kbps,omitempty"`
-	ConstantBitrate           *bool    `json:"constant_bitrate,omitempty"`
-	QMin                      *int     `json:"qmin,omitempty"`
-	QMax                      *int     `json:"qmax,omitempty"`
-	GOPSize                   *int     `json:"gop_size,omitempty"`
-	BFrames                   *int     `json:"b_frames,omitempty"`
-	ClosedGOP                 *bool    `json:"closed_gop,omitempty"`
-	PowerEfficient            *bool    `json:"power_efficient,omitempty"`
-	MaxRefFrames              *int     `json:"max_ref_frames,omitempty"`
-	PrioritizeSpeed           *bool    `json:"prioritize_speed,omitempty"`
-	SpatialAQ                 *bool    `json:"spatial_aq,omitempty"`
-	Realtime                  *bool    `json:"realtime,omitempty"`
-	VideoProfile              string   `json:"video_profile,omitempty"`
-	PixelFormat               string   `json:"pixel_format,omitempty"`
-	ExpectedBitDepth          int      `json:"expected_bit_depth"`
-	MetricType                string   `json:"metric_type"`
-	Score                     float64  `json:"score"`
-	TargetReached             bool     `json:"target_reached"`
-	MinimumMet                bool     `json:"minimum_met"`
-	EstimatedVideoBytes       int64    `json:"estimated_video_bytes"`
-	EstimatedAudioBytes       int64    `json:"estimated_audio_bytes"`
-	EstimatedSubtitleBytes    int64    `json:"estimated_subtitle_bytes"`
-	EstimatedAttachmentBytes  int64    `json:"estimated_attachment_bytes"`
-	EstimatedMuxOverheadBytes int64    `json:"estimated_mux_overhead_bytes"`
-	EstimatedTotalBytes       int64    `json:"estimated_total_bytes"`
-	EstimatedTotalMB          float64  `json:"estimated_total_mb"`
-	SavingsBytes              int64    `json:"savings_bytes"`
-	SavingsPercent            float64  `json:"savings_percent"`
-	Uncertainties             []string `json:"uncertainties,omitempty"`
+	X265                      *X265Settings `json:"x265,omitempty"`
+	CandidateID               string        `json:"candidate_id"`
+	CandidateIndex            int           `json:"candidate_index"`
+	VideoCodec                string        `json:"video_codec,omitempty"`
+	Quality                   int           `json:"quality"`
+	Preset                    string        `json:"preset,omitempty"`
+	Tune                      string        `json:"tune,omitempty"`
+	AverageBitrateKbps        int           `json:"average_bitrate_kbps,omitempty"`
+	MaxBitrateKbps            int           `json:"max_bitrate_kbps,omitempty"`
+	ConstantBitrate           *bool         `json:"constant_bitrate,omitempty"`
+	QMin                      *int          `json:"qmin,omitempty"`
+	QMax                      *int          `json:"qmax,omitempty"`
+	GOPSize                   *int          `json:"gop_size,omitempty"`
+	BFrames                   *int          `json:"b_frames,omitempty"`
+	ClosedGOP                 *bool         `json:"closed_gop,omitempty"`
+	PowerEfficient            *bool         `json:"power_efficient,omitempty"`
+	MaxRefFrames              *int          `json:"max_ref_frames,omitempty"`
+	PrioritizeSpeed           *bool         `json:"prioritize_speed,omitempty"`
+	SpatialAQ                 *bool         `json:"spatial_aq,omitempty"`
+	Realtime                  *bool         `json:"realtime,omitempty"`
+	VideoProfile              string        `json:"video_profile,omitempty"`
+	PixelFormat               string        `json:"pixel_format,omitempty"`
+	ExpectedBitDepth          int           `json:"expected_bit_depth"`
+	MetricType                string        `json:"metric_type"`
+	Score                     float64       `json:"score"`
+	TargetReached             bool          `json:"target_reached"`
+	MinimumMet                bool          `json:"minimum_met"`
+	EstimatedVideoBytes       int64         `json:"estimated_video_bytes"`
+	EstimatedAudioBytes       int64         `json:"estimated_audio_bytes"`
+	EstimatedSubtitleBytes    int64         `json:"estimated_subtitle_bytes"`
+	EstimatedAttachmentBytes  int64         `json:"estimated_attachment_bytes"`
+	EstimatedMuxOverheadBytes int64         `json:"estimated_mux_overhead_bytes"`
+	EstimatedTotalBytes       int64         `json:"estimated_total_bytes"`
+	EstimatedTotalMB          float64       `json:"estimated_total_mb"`
+	SavingsBytes              int64         `json:"savings_bytes"`
+	SavingsPercent            float64       `json:"savings_percent"`
+	Uncertainties             []string      `json:"uncertainties,omitempty"`
 }
 
 // BenchmarkCandidateEvaluation records the evaluation summary for one candidate.
@@ -231,12 +232,14 @@ type BenchmarkSampleFailure struct {
 // BenchmarkCandidate specifies one encoder candidate to evaluate during a benchmark.
 // Arbitrary ffmpeg arguments are strictly forbidden.
 type BenchmarkCandidate struct {
-	ID string `json:"id"`
+	X265 *X265Settings `json:"x265,omitempty"`
+	ID   string        `json:"id"`
 	// VideoCodec selects the encoder. Empty means hevc_videotoolbox for
 	// backwards compatibility. libx265 is also accepted.
 	VideoCodec string `json:"video_codec,omitempty"`
 	// Quality is -q:v for VideoToolbox (1..100, higher = better) and CRF for
-	// libx265 (1..51, lower = better). For VideoToolbox average-bitrate mode,
+	// libx265 (1..51, lower = better), or zero for explicit X265 ABR settings.
+	// For VideoToolbox average-bitrate mode,
 	// Quality must be 0 and AverageBitrateKbps carries the -b:v target.
 	Quality int `json:"quality"`
 	// Preset is the libx265 preset; it must be empty for hevc_videotoolbox.
@@ -475,7 +478,7 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 		return fmt.Errorf("invalid metric %q: must be explicit enum 'vmaf', 'ssim', or 'both'", req.Metric)
 	}
 
-	if req.AudioMode != "" && req.AudioMode != "copy" && req.AudioMode != "compact" {
+	if req.AudioMode != "" && req.AudioMode != "copy" && req.AudioMode != "compact" && req.AudioMode != "he_aac" {
 		return fmt.Errorf("invalid audio_mode %q", req.AudioMode)
 	}
 	if req.FallbackAudioBitrateBps < 0 {
@@ -683,6 +686,9 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 		seenCandidateIDs[cID] = true
 
 		codec := BenchmarkCandidateVideoCodec(c)
+		if err := c.X265.Validate(codec, c.Quality); err != nil {
+			return err
+		}
 		preset := strings.ToLower(strings.TrimSpace(c.Preset))
 		tune := strings.ToLower(strings.TrimSpace(c.Tune))
 		switch codec {
@@ -758,7 +764,7 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 			if tune != "" && !IsValidLibX265Tune(tune) {
 				return fmt.Errorf("candidate %q has unsupported libx265 tune %q", cID, c.Tune)
 			}
-			if c.Quality < LibX265CRFMin || c.Quality > LibX265CRFMax {
+			if c.X265 == nil && (c.Quality < LibX265CRFMin || c.Quality > LibX265CRFMax) {
 				return fmt.Errorf("candidate %q crf %d out of valid range %d..%d for libx265", cID, c.Quality, LibX265CRFMin, LibX265CRFMax)
 			}
 			if err := rejectLibX265VideoToolboxKnobs(cID, c); err != nil {
@@ -768,6 +774,10 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 			return fmt.Errorf("candidate %q has unsupported video codec %q", cID, c.VideoCodec)
 		}
 		qualityKey := codec + ":" + preset + ":" + tune + ":" + strconv.Itoa(c.Quality) + ":br" + strconv.Itoa(c.AverageBitrateKbps)
+		if c.X265 != nil {
+			b, _ := json.Marshal(c.X265)
+			qualityKey += string(b)
+		}
 		if seenQualities[qualityKey] {
 			return fmt.Errorf("duplicate candidate quality %d (bitrate %d) for codec %s (candidate %q)", c.Quality, c.AverageBitrateKbps, codec, cID)
 		}
