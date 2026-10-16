@@ -1045,20 +1045,22 @@ func BuildVMAFArgs(candPath, refPath, logPath string) []string {
 
 // BuildVMAFModelArgs makes the model and measurement precision explicit. The
 // encoded files retain their own bit depths; conversion exists only in the
-// metric graph. framesync must end at the shorter input without repeats.
-func BuildVMAFModelArgs(candPath, refPath, logPath string, model quality.VMAFModel) ([]string, error) {
-	if model.ID == "" || model.LibvmafModel == "" || model.MeasurementBitDepth != 10 {
+// metric graph. CAMBI must still know the encoded depth: otherwise an 8-bit
+// encode upconverted for measurement is incorrectly evaluated as 10-bit.
+// framesync must end at the shorter input without repeats.
+func BuildVMAFModelArgs(candPath, refPath, logPath string, model quality.VMAFModel, encodedBitDepth int) ([]string, error) {
+	if model.ID == "" || model.LibvmafModel == "" || model.MeasurementBitDepth != 10 || (encodedBitDepth != 8 && encodedBitDepth != 10) {
 		return nil, fmt.Errorf("unsupported VMAF model measurement contract")
 	}
-	filter := fmt.Sprintf("[0:v]format=yuv420p10le,setpts=PTS-STARTPTS[d];[1:v]format=yuv420p10le,setpts=PTS-STARTPTS[r];[d][r]libvmaf=model=version=%s:log_fmt=json:log_path=%s:shortest=1:repeatlast=0", model.LibvmafModel, escapeFFmpegFilterPath(logPath))
+	filter := fmt.Sprintf("[0:v]format=yuv420p10le,setpts=PTS-STARTPTS[d];[1:v]format=yuv420p10le,setpts=PTS-STARTPTS[r];[d][r]libvmaf=model='version=%s\\:cambi.enc_bitdepth=%d':log_fmt=json:log_path=%s:shortest=1:repeatlast=0", model.LibvmafModel, encodedBitDepth, escapeFFmpegFilterPath(logPath))
 	return []string{"-nostdin", "-nostats", "-i", candPath, "-i", refPath, "-filter_complex", filter, "-f", "null", "-"}, nil
 }
 
 // BuildCAMBIArgs runs a separate, bounded full-reference pass. VMAF v1 has an
 // internal CAMBI feature, so adding another to that invocation is unsafe on
 // several libvmaf builds.
-func BuildCAMBIArgs(candPath, refPath, logPath string) []string {
-	filter := fmt.Sprintf("[0:v]format=yuv420p10le,setpts=PTS-STARTPTS[d];[1:v]format=yuv420p10le,setpts=PTS-STARTPTS[r];[d][r]libvmaf=model=version=vmaf_v0.6.1:feature=name=cambi\\\\:full_ref=true:log_fmt=json:log_path=%s:shortest=1:repeatlast=0", escapeFFmpegFilterPath(logPath))
+func BuildCAMBIArgs(candPath, refPath, logPath string, encodedBitDepth int) []string {
+	filter := fmt.Sprintf("[0:v]format=yuv420p10le,setpts=PTS-STARTPTS[d];[1:v]format=yuv420p10le,setpts=PTS-STARTPTS[r];[d][r]libvmaf=model=version=vmaf_v0.6.1:feature='name=cambi\\:full_ref=true\\:enc_bitdepth=%d':log_fmt=json:log_path=%s:shortest=1:repeatlast=0", encodedBitDepth, escapeFFmpegFilterPath(logPath))
 	return []string{"-nostdin", "-nostats", "-i", candPath, "-i", refPath, "-filter_complex", filter, "-f", "null", "-"}
 }
 
