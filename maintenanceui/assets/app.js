@@ -2073,6 +2073,8 @@ function telemetry(job) {
     result.append(node("span", `${observation.heartbeat === "fresh" ? `Worker heartbeat ${activityElapsed(w.worker_heartbeat_at)} ago` : "Worker heartbeat unavailable"}${last ? ` · Last advance ${last} ago` : ""}`, "metadata progress-observation"));
     if (phase === "evaluating_metrics")
       result.append(node("span", "Quality measurement can take several minutes. Progress updates when a sample task finishes.", "metadata progress-observation"));
+    if (phase === "validating_quality")
+      result.append(node("span", "Final quality validation can take several minutes. The percentage reflects the last encoding measurement.", "metadata progress-observation"));
   }
   return result;
 }
@@ -2405,7 +2407,7 @@ function batchCounts(batch, compact = false) {
 }
 function statusClass(status) {
   if (["completed", "Completed", "Replaced", "Candidate ready", "Candidates ready"].includes(status)) return "completed";
-  if (["running", "Running", "waiting_external", "In progress", "Encoding", "Encoding samples", "Measuring quality", "Calibrating", "Preparing", "Verifying", "Replacing", "Replacement in progress", "Saving candidate"].includes(status)) return "running";
+  if (["running", "Running", "waiting_external", "In progress", "Encoding", "Encoding samples", "Measuring quality", "Calibrating", "Preparing", "Verifying", "Replacing", "Replacement in progress", "Saving candidate", "Verifying quality"].includes(status)) return "running";
   if (["failed", "Failed", "Worker offline", "No heartbeat", "No updates"].includes(status)) return "failed";
   if (["review", "waiting_decision", "Needs review", "Needs decision", "Needs attention", "partial", "Partial", "Cancelling"].includes(status)) return "waiting_decision";
   if (["Preview", "Preview complete", "Eligible"].includes(status)) return "preview";
@@ -2943,7 +2945,7 @@ function workerProgressObservation(job) {
   if (heartbeat === "stale") return {...result, warning: true, status: "No heartbeat", message: `No recent worker heartbeat.${phase ? ` Last reported phase: ${workerPhaseLabel(phase)}.` : ""}`};
   // These phases report completed units, not a continuous encoder percentage.
   // A heartbeat proves liveness only; preserve the actual last measurement.
-  const discreteProgress = ["preparing", "reading_source", "probing_source", "extracting_samples", "encoding_samples", "testing_initial", "testing_alternatives", "verifying_samples", "evaluating_metrics", "estimating_final_size", "selecting_candidate", "capturing_comparison", "validating", "publishing"].includes(phase);
+  const discreteProgress = ["preparing", "reading_source", "probing_source", "extracting_samples", "encoding_samples", "testing_initial", "testing_alternatives", "verifying_samples", "evaluating_metrics", "estimating_final_size", "selecting_candidate", "capturing_comparison", "validating", "validating_quality", "publishing"].includes(phase);
   if (w.progress_is_stale && !(discreteProgress && heartbeat === "fresh"))
     return {...result, warning: true, status: "No updates", message: `No recent ${phase === "encoding" ? "encoding progress" : "progress from the worker"}. ${heartbeat === "fresh" ? `Worker heartbeat ${activityElapsed(w.worker_heartbeat_at)} ago.` : "Worker heartbeat unavailable."}`};
   return result;
@@ -3012,7 +3014,7 @@ function queuePresentation(job) {
       (job.candidate_ready && !job.replacement_action_id
         ? "Candidate ready"
         : ["running", "waiting_external"].includes(job.status)
-          ? (offline ? "Worker offline" : multipleActive ? "In progress" : observation.status || {encoding:"Encoding",encoding_samples:"Encoding samples",evaluating_metrics:"Measuring quality",validating:"Verifying",publishing:"Saving candidate",benchmarking:"Calibrating",queued:"Queued on worker",preparing:"Preparing"}[phase] || (replacement || job.promotion ? "Replacing" : "In progress"))
+          ? (offline ? "Worker offline" : multipleActive ? "In progress" : observation.status || {encoding:"Encoding",encoding_samples:"Encoding samples",evaluating_metrics:"Measuring quality",validating:"Verifying",validating_quality:"Verifying quality",publishing:"Saving candidate",benchmarking:"Calibrating",queued:"Queued on worker",preparing:"Preparing"}[phase] || (replacement || job.promotion ? "Replacing" : "In progress"))
           : names[job.status] || job.status);
   const s = job.savings || {},
     metrics = [];
@@ -3239,7 +3241,7 @@ function workerPhaseLabel(phase) {
     queued:"Waiting for a worker slot",preparing:"Preparing source",reading_source:"Reading source from media storage",
     probing_source:"Inspecting source",extracting_samples:"Extracting reference samples",encoding_samples:"Encoding test samples",
     testing_initial:"Testing suitable settings",testing_alternatives:"Trying a measured alternative",verifying_samples:"Checking additional video samples",evaluating_metrics:"Measuring sample quality",estimating_final_size:"Estimating final file size",selecting_candidate:"Selecting the best candidate",
-    capturing_comparison:"Saving comparison frames",encoding:"Encoding full video",validating:"Verifying output",publishing:"Saving candidate to media storage",
+    capturing_comparison:"Saving comparison frames",encoding:"Encoding full video",validating:"Verifying output",validating_quality:"Measuring final quality",publishing:"Saving candidate to media storage",
     benchmarking:"Calibrating quality",completed:"Completed",
   }[phase] || (phase ? phase.replaceAll("_"," ") : "Preparing job");
 }
