@@ -1151,6 +1151,16 @@ func (w *Worker) runOperationalFFmpeg(ctx context.Context, execPlan *ExecutionPl
 	if w.runFFmpeg != nil {
 		return w.runFFmpeg(ctx, execPlan, job, inputPath, outputPath, progressPath, logPath)
 	}
+	if execPlan.Plan.X265 != nil {
+		ctx = context.WithValue(ctx, encoderPhaseContextKey{}, func(phase string) error {
+			dir := filepath.Dir(progressPath)
+			cancelled, err := w.persistOperationalProgress(dir, filepath.Join(dir, "job.json"), job, func(l *JobRecord) { l.Phase = phase })
+			if cancelled {
+				return context.Canceled
+			}
+			return err
+		})
+	}
 	return RunFFmpegPaths(ctx, w.ffmpegPath, execPlan, inputPath, outputPath, progressPath, logPath)
 }
 

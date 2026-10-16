@@ -220,7 +220,7 @@ func RunFFmpegPaths(ctx context.Context, ffmpegPath string, execPlan *ExecutionP
 		cmd.Stderr = logFile
 	}
 
-	if err := cmd.Run(); err != nil {
+	if err := runEncoderCommand(ctx, cmd, args, execPlan.Plan, outputPath); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}

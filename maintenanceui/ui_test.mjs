@@ -547,7 +547,7 @@ test("full encoding still warns about stale progress with a live heartbeat and h
 });
 
 test("validation, publication and sample encoding have discrete progress but require a fresh heartbeat", () => {
-  for (const [phase, status] of [["validating", "Verifying"], ["validating_quality", "Verifying quality"], ["publishing", "Saving candidate"], ["encoding_samples", "Encoding samples"]]) {
+  for (const [phase, status] of [["analysing_video", "Analyzing video"], ["validating", "Verifying"], ["validating_quality", "Verifying quality"], ["publishing", "Saving candidate"], ["encoding_samples", "Encoding samples"]]) {
     const h = metricProgressHarness();
     h.context.phase = phase;
     h.run('progressJob.worker.phase=phase;if(phase!=="encoding_samples"){progressJob.worker.transcode_phase=phase;progressJob.worker.transcode_status="running";}progressJob.worker.speed=14.7;progressJob.worker.fps=238;progressJob.savings={eta_seconds:600};');

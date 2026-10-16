@@ -81,6 +81,7 @@ func Resolve(s *Snapshot, profileName string, overrides map[string]Profile, subt
 		expectedBitDepth = 8
 	}
 	plan := &transcode.Plan{
+		X265:      p.Video.X265.Clone(),
 		Container: container, VideoCodec: normalizeCodec(p.Video.Codec), Quality: p.Video.Quality,
 		Preset:       normalizeCodec(p.Video.Preset),
 		Tune:         normalizeCodec(p.Video.Tune),
