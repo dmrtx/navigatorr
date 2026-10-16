@@ -332,7 +332,7 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 	// action_run — start a declarative multi-step action workflow
 	s.AddTool(
 		mcp.NewTool("action_run",
-			mcp.WithDescription("Run a declarative multi-step action workflow (e.g. transcode_batch, transcode_media, promote_transcode_candidate, validate_torrent, safe_media_replacement). State is persistently tracked in SQLite and tolerates disconnects and reboots. Transcode and benchmark external waits reconcile automatically; candidate promotion requires explicit approval. Note: 'inputs' must be provided as a JSON object string, and 'idempotency_key' is a top-level string argument. Discover input examples with action_catalog. Returns a compact operational summary."),
+			mcp.WithDescription("Run a declarative multi-step action workflow (e.g. transcode_batch, transcode_media, promote_transcode_candidate, validate_torrent, safe_media_replacement). Worker workflows return a persisted action ID before preflight; the service reconciler executes them independently of this request. Use action_status to monitor progress or errors. Reuse idempotency_key after a lost response to recover the same action, including terminal results. State is persistently tracked in SQLite and tolerates disconnects and reboots. Transcode and benchmark external waits reconcile automatically; candidate promotion requires explicit approval. Note: 'inputs' must be provided as a JSON object string, and 'idempotency_key' is a top-level string argument. Discover input examples with action_catalog. Returns a compact operational summary."),
 			mcp.WithString("action", mcp.Required(), mcp.Description("Workflow name: transcode_batch, transcode_media, benchmark_transcode, promote_transcode_candidate, validate_torrent, safe_media_replacement")),
 			mcp.WithString("inputs", mcp.Description("JSON object string with action parameters (e.g. \"{\\\"service\\\":\\\"sonarr\\\",\\\"series_id\\\":\\\"10\\\"}\" or \"{\\\"path\\\":\\\"/media/...\\\"}\"). Must be a JSON-encoded string, not a raw object.")),
 			mcp.WithString("service", mcp.Description("Shortcut: *arr service name (sonarr, radarr)")),
@@ -373,12 +373,14 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 				}
 			}
 
+			var res *action.ActionResult
+			var err error
+			ctx = action.WithOrigin(ctx, "mcp")
 			if action.RequiresWorker(actionName) {
-				if err := engine.CheckWorkerAdmission(ctx); err != nil {
-					return toolErr("action_run failed: %v", err), nil
-				}
+				res, err = engine.EnqueueWorker(ctx, actionName, inputs, idempotencyKey)
+			} else {
+				res, err = engine.Run(ctx, actionName, inputs, idempotencyKey)
 			}
-			res, err := engine.Run(action.WithOrigin(ctx, "mcp"), actionName, inputs, idempotencyKey)
 			if err != nil {
 				return toolErr("action_run failed: %v", err), nil
 			}

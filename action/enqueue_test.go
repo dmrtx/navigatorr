@@ -135,3 +135,32 @@ func TestEnqueueConcurrentReceiptCreatesOneAction(t *testing.T) {
 		t.Fatalf("executed %d times", executions.Load())
 	}
 }
+
+func TestEnqueueWorkerRecoversLegacyIdentitiesWithoutProbingOfflineWorker(t *testing.T) {
+	for _, status := range []string{StatusPending, StatusRunning, StatusWaitingExternal, StatusCompleted, StatusFailed, StatusCancelled} {
+		t.Run(status, func(t *testing.T) {
+			st, err := store.Open(filepath.Join(t.TempDir(), "legacy.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer st.Close()
+			// A legacy synchronous action has no entry in action_submissions.
+			inst := store.ActionInstance{ID: "legacy", ActionName: "transcode_media", Status: status, InputsJSON: `{"path":"/original.mkv"}`, StateJSON: "{}", IdempotencyKey: "legacy-key"}
+			if err := st.CreateActionInstance(inst); err != nil {
+				t.Fatal(err)
+			}
+			e := NewEngine(EngineDeps{Store: st}) // deliberately no worker
+			res, err := e.EnqueueWorker(context.Background(), inst.ActionName, map[string]any{"path": "/original.mkv"}, inst.IdempotencyKey)
+			if err != nil || res.ID != inst.ID || res.Status != status {
+				t.Fatalf("legacy identity lost: %+v %v", res, err)
+			}
+			if _, err := e.EnqueueWorker(context.Background(), inst.ActionName, map[string]any{"path": "/different.mkv"}, inst.IdempotencyKey); err == nil {
+				t.Fatal("legacy receipt accepted changed immutable inputs")
+			}
+			rows, err := st.ListActionInstances("", 10)
+			if err != nil || len(rows) != 1 {
+				t.Fatalf("legacy retry created another action: %d, %v", len(rows), err)
+			}
+		})
+	}
+}
