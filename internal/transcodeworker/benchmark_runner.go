@@ -1500,14 +1500,10 @@ func (r *ProductionBenchmarkRunner) runSelection(
 	if record.AttachmentBytes > 0 {
 		attachmentBytes = record.AttachmentBytes
 	} else {
-		for _, att := range rep.Attachments {
-			if att.Tags != nil {
-				if sBytes, ok := att.Tags["NUMBER_OF_BYTES"]; ok {
-					if b, err := strconv.ParseInt(sBytes, 10, 64); err == nil && b > 0 {
-						attachmentBytes += b
-					}
-				}
-			}
+		var err error
+		attachmentBytes, err = mediainspect.AttachmentPayloadBytes(rep.Attachments)
+		if err != nil {
+			return fmt.Errorf("%s: %w", optimization.ReasonInvalidEstimatorInput, err)
 		}
 	}
 

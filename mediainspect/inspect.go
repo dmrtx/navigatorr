@@ -184,6 +184,7 @@ type DetailedStream struct {
 	FrameRate         string                     `json:"frame_rate,omitempty"` // aliases avg_frame_rate or r_frame_rate for backwards compatibility
 	FPS               float64                    `json:"fps,omitempty"`
 	BitRate           int64                      `json:"bit_rate,omitempty"`
+	ExtraDataSize     int64                      `json:"extradata_size,omitempty"`
 	ColorRange        string                     `json:"color_range,omitempty"`
 	ColorSpace        string                     `json:"color_space,omitempty"`
 	ColorPrimaries    string                     `json:"color_primaries,omitempty"`
@@ -255,6 +256,7 @@ func InspectDetailed(ctx context.Context, ffprobePath, path string) (DetailedRep
 			ChannelLayout    string            `json:"channel_layout"`
 			BitsPerRawSample any               `json:"bits_per_raw_sample"`
 			BitRate          any               `json:"bit_rate"`
+			ExtraDataSize    int64             `json:"extradata_size"`
 			ColorRange       string            `json:"color_range"`
 			ColorSpace       string            `json:"color_space"`
 			ColorPrimaries   string            `json:"color_primaries"`
@@ -317,6 +319,7 @@ func InspectDetailed(ctx context.Context, ffprobePath, path string) (DetailedRep
 			FrameRate:      frameRate,
 			FPS:            fps,
 			BitRate:        bitRate,
+			ExtraDataSize:  st.ExtraDataSize,
 			ColorRange:     st.ColorRange,
 			ColorSpace:     st.ColorSpace,
 			ColorPrimaries: st.ColorPrimaries,
