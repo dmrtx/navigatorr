@@ -5,6 +5,20 @@ The server starts the action reconciler with its maintenance engine and stops
 it before closing the state database. MCP clients can disconnect without
 stopping polling or result acceptance.
 
+MCP `action_run` admits worker workflows through the same durable queue as the
+web interface. It returns the persisted action ID before source inspection or
+hashing; `pending` means accepted, not successfully encoded. Preflight belongs
+to the service reconciler, so a client timeout or disconnect cannot cancel it
+and force another source hash. Use `action_status` for subsequent progress and
+real preflight errors. Reusing the same `idempotency_key` and immutable inputs
+returns the same action, including failed/completed results and older actions
+created before durable receipts. A changed request under that key is rejected.
+Omitting the key creates an independent submission and returns its generated
+key; supply your own key to recover a response lost before its ID is received.
+New admissions still require worker readiness. Recovering an existing receipt
+does not require contacting the worker. Process shutdown remains a checkpoint
+boundary; this does not promise to resume a partially read hash after a crash.
+
 ## Reconciliation
 
 Opted-in workflows resume external waits automatically. A normal poll is due
@@ -77,12 +91,32 @@ things; both remain visible.
   Older workers may omit these values; missing measurements are not zero.
 - `last_progress_at`, `worker_heartbeat_at`, `progress_is_stale`, and
   `last_known_progress` distinguish a live worker from a fresh encoder sample.
+  A stale percentage alone does not mean the worker stopped. During sample
+  metrics (VMAF/CAMBI), validation or publication, the queue shows the phase,
+  last measured percentage and heartbeat separately. Sample metrics also show
+  the latest reported sample/candidate and resolved units; work can overlap.
+  Heartbeats never advance the percentage or refresh `last_progress_at`.
+  Missing heartbeat evidence remains unknown, and a heartbeat older than 30
+  seconds is warned about even if the percentage is fresh. Full-video encoding
+  still warns when progress is stale despite a live heartbeat. External waits,
+  recovery decisions and terminal outcomes take precedence over telemetry.
 
 The stable `queued`, `running`, and terminal job statuses are retained. The
 additional phase describes acceptance, preparation, reading, encoding,
 validation, publication, or completion. Worker slot counts measure occupied runner slots, which include
 preparation and publication as well as encoding. Queue position is reported
 separately.
+
+### Copied-track duration metadata
+
+A changed Matroska `DURATION` tag alone does not establish audio/subtitle
+desynchronization. Remuxing can rewrite that statistic using the final packet's
+end timestamp, while the source tag describes the interval from the first
+packet to the last packet's end. For example, a subtitle starting at 29.363 s
+and ending at 2801.009 s can have tags of either 2771.646 s or 2801.009 s even
+when every packet timestamp is unchanged. Check packet timestamps, durations,
+counts and sizes alongside copied payload hashes before reporting a timing
+regression. Identical payload hashes alone do not verify synchronization.
 
 ## Storage failures
 

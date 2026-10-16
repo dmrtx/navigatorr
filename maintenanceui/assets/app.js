@@ -1956,7 +1956,9 @@ function batchProgress(job) {
     const progress = stages.length && Number.isInteger(step) ? Math.min(.99, (step + fraction)/stages.length) : 0;
     const key = activity.file || activity.id || "Active file";
     const prior = byFile.get(key);
-    if (!prior || progress > prior.progress) byFile.set(key, {progress, label: `${key.split("/").pop() || "Active file"}: ${workerStage && phase ? workerPhaseLabel(phase) : stage === "preflight" && activity.work?.phase === "hashing_source" ? `Verifying source SHA-256 (${bytes(activity.work.bytes_read || 0)} / ${bytes(activity.work.total_bytes)})` : stageLabel(stage || "preflight")}${workerStage && w.progress_is_stale ? " · Last measurement; stale" : ""}`});
+    const observation = workerProgressObservation({...(child || activity), worker: w, status: "running"});
+    const measurement = workerStage ? observation.message || (w.progress_is_stale ? observation.heartbeat === "fresh" ? "Worker heartbeat received; last measurement shown" : "Last measurement; stale" : "") : "";
+    if (!prior || progress > prior.progress) byFile.set(key, {progress, label: `${key.split("/").pop() || "Active file"}: ${workerStage && phase ? workerPhaseLabel(phase) : stage === "preflight" && activity.work?.phase === "hashing_source" ? `Verifying source SHA-256 (${bytes(activity.work.bytes_read || 0)} / ${bytes(activity.work.total_bytes)})` : stageLabel(stage || "preflight")}${measurement ? ` · ${measurement}` : ""}`});
   }
   const partial = Math.min(count("running"), byFile.size) ? [...byFile.values()].slice(0,count("running")).reduce((sum,a)=>sum+a.progress,0) : 0;
   const active = operationIsActive(job.status);
@@ -2000,14 +2002,13 @@ function telemetry(job) {
     result.append(node("span",`${job.activities.length} active files · See worker slots above for each file and phase`,"metadata"));
     return result;
   }
-  if (workerUnavailable(job) || w?.progress_is_stale) {
-    result.className = "job-progress stalled-progress";
+  const observation = workerProgressObservation(job);
+  if (observation.message) {
+    result.className = `job-progress ${observation.warning ? "stalled-progress" : "workflow-progress"}`;
     const measured = w?.progress ?? w?.last_known_progress?.progress;
     const last = measured != null && Number.isFinite(Number(measured))
       ? ` Last reported: ${Number(measured).toFixed(1)}%.` : "";
-    result.append(node("span", (workerUnavailable(job)
-      ? "Worker unreachable. Retrying connection automatically."
-      : "No recent progress from the worker.") + last, "metadata"));
+    result.append(node("span", observation.message + (observation.warning ? last : ""), "metadata"));
     return result;
   }
   if (!w) {
@@ -2033,14 +2034,18 @@ function telemetry(job) {
     job.activity_file ? `Current: ${job.activity_file.split("/").pop()}` : null,
     workerPhaseLabel(phase) || phases[phase] || phase,
     w.queue_position > 0 ? `Queue #${w.queue_position}` : null,
-    w.speed > 0 ? `${Number(w.speed).toFixed(2)}×` : null,
-    w.fps > 0 ? `${Number(w.fps).toFixed(1)} fps` : null,
+    phase === "encoding" && !w.progress_is_stale && w.speed > 0 ? `${Number(w.speed).toFixed(2)}×` : null,
+    phase === "encoding" && !w.progress_is_stale && w.fps > 0 ? `${Number(w.fps).toFixed(1)} fps` : null,
   ];
   const eta = job.savings?.eta_seconds;
   const details = w.progress_details || w.benchmark_progress_details;
-  if (!w.transcode_status && !w.transcode_phase && details?.total_units > 0)
-    parts.push(`${details.completed_units}/${details.total_units} sample tasks`);
-  if (Number.isFinite(eta) && eta > 0 && !w.progress_is_stale)
+  if (!w.transcode_status && !w.transcode_phase && details?.total_units > 0) {
+    parts.push(`${details.completed_units}/${details.total_units} sample tasks resolved`);
+    if (details.sample_number) parts.push(`Latest sample ${details.sample_number}`);
+    if (details.candidate_number) parts.push(`Candidate ${details.candidate_number}`);
+    if (details.metric) parts.push(String(details.metric).toUpperCase());
+  }
+  if (phase === "encoding" && Number.isFinite(eta) && eta > 0 && !w.progress_is_stale)
     parts.push(`About ${Math.ceil(eta / 60)} min`);
   result.append(
     node("span", parts.filter(Boolean).join(" · ") || job.progress, "metadata"),
@@ -2052,8 +2057,8 @@ function telemetry(job) {
     meter.min = 0;
     meter.max = 100;
     meter.value = p;
-    meter.setAttribute("aria-label", `Worker progress ${p.toFixed(1)}%`);
-    result.append(meter, node("span", `${p.toFixed(1)}%`, "metadata"));
+    meter.setAttribute("aria-label", `${w.progress_is_stale ? "Last measured" : "Worker"} progress ${p.toFixed(1)}%`);
+    result.append(meter, node("span", `${w.progress_is_stale ? "Last measured: " : ""}${p.toFixed(1)}%`, "metadata"));
   }
   if (w.last_progress_at)
     result.append(
@@ -2063,6 +2068,14 @@ function telemetry(job) {
         "metadata progress-observed-at",
       ),
     );
+  if (observation.active) {
+    const last = activityElapsed(w.last_progress_at);
+    result.append(node("span", `${observation.heartbeat === "fresh" ? `Worker heartbeat ${activityElapsed(w.worker_heartbeat_at)} ago` : "Worker heartbeat unavailable"}${last ? ` · Last advance ${last} ago` : ""}`, "metadata progress-observation"));
+    if (phase === "evaluating_metrics")
+      result.append(node("span", "Quality measurement can take several minutes. Progress updates when a sample task finishes.", "metadata progress-observation"));
+    if (phase === "validating_quality")
+      result.append(node("span", "Final quality validation can take several minutes. The percentage reflects the last encoding measurement.", "metadata progress-observation"));
+  }
   return result;
 }
 function stageLabel(name) {
@@ -2394,8 +2407,8 @@ function batchCounts(batch, compact = false) {
 }
 function statusClass(status) {
   if (["completed", "Completed", "Replaced", "Candidate ready", "Candidates ready"].includes(status)) return "completed";
-  if (["running", "Running", "waiting_external", "In progress", "Encoding", "Calibrating", "Preparing", "Verifying", "Replacing", "Replacement in progress", "Saving candidate"].includes(status)) return "running";
-  if (["failed", "Failed", "Worker offline", "No updates"].includes(status)) return "failed";
+  if (["running", "Running", "waiting_external", "In progress", "Encoding", "Encoding samples", "Measuring quality", "Calibrating", "Preparing", "Verifying", "Replacing", "Replacement in progress", "Saving candidate", "Verifying quality"].includes(status)) return "running";
+  if (["failed", "Failed", "Worker offline", "No heartbeat", "No updates"].includes(status)) return "failed";
   if (["review", "waiting_decision", "Needs review", "Needs decision", "Needs attention", "partial", "Partial", "Cancelling"].includes(status)) return "waiting_decision";
   if (["Preview", "Preview complete", "Eligible"].includes(status)) return "preview";
   return "neutral";
@@ -2907,6 +2920,36 @@ function shortJobReason(reason) {
 function workerUnavailable(job) {
   return job.waiting_condition === "worker_unreachable" || job.activity_waiting_condition === "worker_unreachable";
 }
+function workerHeartbeatState(value, now = Date.now()) {
+  const at = Date.parse(value || "");
+  if (!Number.isFinite(at) || at < Date.UTC(2000, 0, 1) || at > now) return "unknown";
+  return now - at <= 30000 ? "fresh" : "stale";
+}
+function workerProgressObservation(job) {
+  const w = job.worker || {};
+  const phase = w.transcode_phase || w.benchmark_phase || w.phase;
+  const heartbeat = workerHeartbeatState(w.worker_heartbeat_at);
+  const result = {active: false, heartbeat, status: "", message: "", warning: false};
+  if (!["running", "waiting_external"].includes(job.status)) return result;
+  if (workerUnavailable(job)) return {...result, warning: true, status: "Worker offline", message: "Worker unreachable. Retrying connection automatically."};
+  if (w.recovery_required) return {...result, warning: true, status: "Needs decision", message: job.waiting_reason || "Candidate preserved; publication requires intervention."};
+  const waiting = job.activity_waiting_condition || job.waiting_condition;
+  if (["worker_busy", "parent_busy", "queued", "benchmark_retry", "transcode_retry", "worker_reconciling"].includes(waiting))
+    return {...result, status: "Waiting", message: job.waiting_reason || "Waiting for worker coordination."};
+  // A finished worker can leave telemetry behind while the coordinator validates
+  // or requests a decision. Its old heartbeat is not evidence of a live failure.
+  const status = w.transcode_status || w.benchmark_status;
+  if (["completed", "failed", "cancelled"].includes(status) || ["completed", "failed", "cancelled"].includes(phase)) return result;
+  if (phase === "queued" || status === "queued" || !job.worker) return result;
+  result.active = true;
+  if (heartbeat === "stale") return {...result, warning: true, status: "No heartbeat", message: `No recent worker heartbeat.${phase ? ` Last reported phase: ${workerPhaseLabel(phase)}.` : ""}`};
+  // These phases report completed units, not a continuous encoder percentage.
+  // A heartbeat proves liveness only; preserve the actual last measurement.
+  const discreteProgress = ["preparing", "reading_source", "probing_source", "extracting_samples", "encoding_samples", "testing_initial", "testing_alternatives", "verifying_samples", "evaluating_metrics", "estimating_final_size", "selecting_candidate", "capturing_comparison", "validating", "validating_quality", "publishing"].includes(phase);
+  if (w.progress_is_stale && !(discreteProgress && heartbeat === "fresh"))
+    return {...result, warning: true, status: "No updates", message: `No recent ${phase === "encoding" ? "encoding progress" : "progress from the worker"}. ${heartbeat === "fresh" ? `Worker heartbeat ${activityElapsed(w.worker_heartbeat_at)} ago.` : "Worker heartbeat unavailable."}`};
+  return result;
+}
 function isCandidateRejection(reason) {
   return String(reason || "").includes("transcode candidate rejected by user decision");
 }
@@ -2961,6 +3004,7 @@ function queuePresentation(job) {
   const offline = multipleActive
     ? job.activities.every(activity => activity.waiting_condition === "worker_unreachable")
     : workerUnavailable(job);
+  const observation = workerProgressObservation(job);
   const replacementComplete = job.savings?.realized_saved_bytes != null ||
     (job.replaced && job.status === "completed");
   const skippedFile = job.action_name === "transcode_media" && job.status === "completed" && !job.candidate_ready && ["quality_not_met","insufficient_savings","size_growth","size_growth_exceeded","preservation_not_met","already_target_codec"].includes(job.reason_code);
@@ -2970,7 +3014,7 @@ function queuePresentation(job) {
       (job.candidate_ready && !job.replacement_action_id
         ? "Candidate ready"
         : ["running", "waiting_external"].includes(job.status)
-          ? (offline ? "Worker offline" : multipleActive ? "In progress" : job.worker?.progress_is_stale ? "No updates" : {encoding:"Encoding",validating:"Verifying",publishing:"Saving candidate",benchmarking:"Calibrating",queued:"Queued on worker",preparing:"Preparing"}[phase] || (replacement || job.promotion ? "Replacing" : "In progress"))
+          ? (offline ? "Worker offline" : multipleActive ? "In progress" : observation.status || {encoding:"Encoding",encoding_samples:"Encoding samples",evaluating_metrics:"Measuring quality",validating:"Verifying",validating_quality:"Verifying quality",publishing:"Saving candidate",benchmarking:"Calibrating",queued:"Queued on worker",preparing:"Preparing"}[phase] || (replacement || job.promotion ? "Replacing" : "In progress"))
           : names[job.status] || job.status);
   const s = job.savings || {},
     metrics = [];
@@ -3197,7 +3241,7 @@ function workerPhaseLabel(phase) {
     queued:"Waiting for a worker slot",preparing:"Preparing source",reading_source:"Reading source from media storage",
     probing_source:"Inspecting source",extracting_samples:"Extracting reference samples",encoding_samples:"Encoding test samples",
     testing_initial:"Testing suitable settings",testing_alternatives:"Trying a measured alternative",verifying_samples:"Checking additional video samples",evaluating_metrics:"Measuring sample quality",estimating_final_size:"Estimating final file size",selecting_candidate:"Selecting the best candidate",
-    capturing_comparison:"Saving comparison frames",encoding:"Encoding full video",validating:"Verifying output",publishing:"Saving candidate to media storage",
+    capturing_comparison:"Saving comparison frames",encoding:"Encoding full video",validating:"Verifying output",validating_quality:"Measuring final quality",publishing:"Saving candidate to media storage",
     benchmarking:"Calibrating quality",completed:"Completed",
   }[phase] || (phase ? phase.replaceAll("_"," ") : "Preparing job");
 }
@@ -3235,7 +3279,7 @@ function renderWorkerActivity(data) {
       row.append(node("strong",`Slot ${i+1} · ${unknownOccupied ? "Occupied" : "Available"}`));
       row.append(node("p",unknownOccupied ? "File details require the updated video worker." : "Ready for the next job.","metadata"));
     } else {
-      const stale = !activityElapsed(job.heartbeat_at) || Date.now()-Date.parse(job.heartbeat_at)>30000;
+      const stale = workerHeartbeatState(job.heartbeat_at) !== "fresh";
       row.append(node("strong",`Slot ${i+1} · ${job.file}`));
       row.children[0].title = job.file;
       const phase = workerPhaseLabel(job.phase);
@@ -3419,7 +3463,10 @@ function batchFileActivity(item, job) {
   if (activity?.waiting_condition === "worker_unreachable") return "Worker unreachable · Waiting for connection";
   const worker = activity?.worker;
   const phase = worker?.transcode_phase || worker?.benchmark_phase || worker?.phase;
-  if (phase) return workerPhaseLabel(phase) + (worker.progress_is_stale ? " · Last measurement; stale" : "");
+  if (phase) {
+    const observation = workerProgressObservation({...activity, status: item.status});
+    return workerPhaseLabel(phase) + (observation.message ? ` · ${observation.message}` : worker.progress_is_stale && observation.heartbeat === "fresh" ? " · Worker heartbeat received; last measurement shown" : "");
+  }
   if (activity?.work?.phase === "hashing_source") return `Verifying source${activity.work.total_bytes > 0 ? ` · ${bytes(activity.work.bytes_read || 0)} / ${bytes(activity.work.total_bytes)}` : ""}`;
   if (activity?.work?.phase) return workerPhaseLabel(activity.work.phase);
   if (item.status === "waiting_for_slot") return "Waiting for an available worker slot";

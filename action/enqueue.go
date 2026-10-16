@@ -16,6 +16,30 @@ func WithOrigin(ctx context.Context, origin string) context.Context {
 	return context.WithValue(ctx, requestOriginKey{}, origin)
 }
 
+// EnqueueWorker returns a persisted receipt before expensive preflight work.
+// Existing identities remain readable when the worker is offline; readiness
+// gates only new admissions, not recovery of a response lost in transport.
+func (e *Engine) EnqueueWorker(ctx context.Context, name string, inputs map[string]any, key string) (*ActionResult, error) {
+	if !RequiresWorker(name) {
+		return nil, fmt.Errorf("action %q is not a worker workflow", name)
+	}
+	if e.deps.Store == nil {
+		return nil, fmt.Errorf("action store is required")
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		key = generateActionID("submission")
+	}
+	if old, err := e.deps.Store.FindActionByIdempotencyKey(name, key); err != nil {
+		return nil, err
+	} else if old == nil {
+		if err := e.CheckWorkerAdmission(ctx); err != nil {
+			return nil, err
+		}
+	}
+	return e.Enqueue(ctx, name, inputs, key)
+}
+
 // Enqueue admits work durably without inspecting files or contacting a worker.
 // The process reconciler owns execution, including the initial preflight.
 func (e *Engine) Enqueue(ctx context.Context, name string, inputs map[string]any, key string) (*ActionResult, error) {
@@ -51,15 +75,17 @@ func (e *Engine) Enqueue(ctx context.Context, name string, inputs map[string]any
 		if err != nil {
 			return nil, err
 		}
-		if old, err := e.deps.Store.FindActionByIdempotencyKey(name, key); err != nil {
-			return nil, err
-		} else if old != nil {
-			matches, err := immutableActionInputsMatch(old.InputsJSON, copy)
-			if err != nil || !matches {
-				return nil, fmt.Errorf("candidate promotion already exists with different inputs")
-			}
-			return e.Status(ctx, old.ID)
+	}
+	// Recover synchronous admissions from earlier versions too, including
+	// terminal actions that predate durable submission receipts.
+	if old, err := e.deps.Store.FindActionByIdempotencyKey(name, key); err != nil {
+		return nil, err
+	} else if old != nil {
+		matches, err := immutableActionInputsMatch(old.InputsJSON, copy)
+		if err != nil || !matches {
+			return nil, fmt.Errorf("submission key already belongs to different immutable inputs")
 		}
+		return e.Status(ctx, old.ID)
 	}
 	b, err = json.Marshal(copy)
 	if err != nil {
