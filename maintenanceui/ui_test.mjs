@@ -471,6 +471,139 @@ test("stale or disconnected workers do not display a live progress meter or old 
   }
 });
 
+function metricProgressHarness() {
+  const h = harness();
+  h.run(`Date.now = () => Date.parse("2026-10-16T12:22:54Z");
+    globalThis.progressJob = {status:"waiting_external",waiting_condition:"benchmark_complete",worker:{
+      benchmark_status:"running",phase:"evaluating_metrics",progress:73.3,progress_is_stale:true,
+      last_progress_at:"2026-10-16T12:22:18.667341Z",worker_heartbeat_at:"2026-10-16T12:22:53Z",
+      progress_details:{completed_units:22,total_units:30,candidate_number:2,sample_number:3,metric:"vmaf"}
+    }};`);
+  return h;
+}
+function progressText(element) {
+  return [element.textContent, ...element.children.map(progressText)].join(" ");
+}
+
+test("long VMAF and CAMBI measurements show real units and heartbeat without declaring a stall", () => {
+  for (const metric of ["vmaf", "cambi"]) {
+    for (const progress of [70, 73.3]) {
+      const h = metricProgressHarness();
+      h.context.metric = metric;
+      h.context.measuredProgress = progress;
+      h.run('progressJob.worker.progress_details.metric=metric;progressJob.worker.progress=measuredProgress;');
+      // Also cover a single metric lasting ten minutes, with only heartbeats.
+      h.run('progressJob.worker.last_progress_at="2026-10-16T12:12:54Z";');
+      const before = h.run('JSON.stringify(progressJob)');
+      const rendered = h.run('telemetry(progressJob)');
+      const text = progressText(rendered);
+      assert.equal(h.run('queuePresentation(progressJob).status'), "Measuring quality");
+      assert.equal(h.run('statusClass(queuePresentation(progressJob).status)'), "running");
+      assert.match(text, /Measuring sample quality.*22\/30 sample tasks resolved.*Latest sample 3.*Candidate 2/);
+      assert.ok(text.includes(metric.toUpperCase()));
+      assert.match(text, /Worker heartbeat 1s ago.*Last advance 10m 0s ago/);
+      assert.match(text, /Progress updates when a sample task finishes/);
+      assert.ok(text.includes(`Last measured: ${progress.toFixed(1)}%`));
+      assert.equal(rendered.children[1].value, progress);
+      assert.doesNotMatch(text, /No updates|No recent progress|stale|About .* min/);
+      assert.equal(h.run('JSON.stringify(progressJob)'), before);
+    }
+  }
+});
+
+test("a missing, invalid or expired heartbeat cannot make a long metric look live", () => {
+  for (const heartbeat of [undefined, "invalid", "0001-01-01T00:00:00Z", "2026-10-16T12:25:00Z", "2026-10-16T12:22:23Z"]) {
+    const h = metricProgressHarness();
+    h.context.heartbeat = heartbeat;
+    h.run('progressJob.worker.worker_heartbeat_at=heartbeat;');
+    const text = progressText(h.run('telemetry(progressJob)'));
+    const stale = heartbeat === "2026-10-16T12:22:23Z";
+    assert.equal(h.run('queuePresentation(progressJob).status'), stale ? "No heartbeat" : "No updates");
+    assert.match(text, stale ? /No recent worker heartbeat.*Measuring sample quality/ : /Worker heartbeat unavailable/);
+    assert.match(text, /Last reported: 73.3%/);
+    assert.equal(h.run('telemetry(progressJob).children.length'), 1);
+  }
+  const h = metricProgressHarness();
+  h.run('progressJob.worker.worker_heartbeat_at="2026-10-16T12:22:23Z";progressJob.worker.progress_is_stale=false;');
+  assert.equal(h.run('queuePresentation(progressJob).status'), "No heartbeat", "fresh percentage must not hide a lost heartbeat");
+  h.run('progressJob.worker.worker_heartbeat_at="2026-10-16T12:22:24Z";');
+  assert.equal(h.run('queuePresentation(progressJob).status'), "Measuring quality");
+  h.run('Date.now=()=>Date.parse("2026-10-16T12:22:55Z");');
+  assert.equal(h.run('queuePresentation(progressJob).status'), "No heartbeat", "heartbeat must expire without new API data");
+});
+
+test("full encoding still warns about stale progress with a live heartbeat and hides stale rates", () => {
+  const h = metricProgressHarness();
+  h.run('progressJob.worker.transcode_status="running";progressJob.worker.transcode_phase="encoding";progressJob.worker.speed=14.7;progressJob.worker.fps=238;progressJob.savings={eta_seconds:600};');
+  const stale = progressText(h.run('telemetry(progressJob)'));
+  assert.equal(h.run('queuePresentation(progressJob).status'), "No updates");
+  assert.match(stale, /No recent encoding progress.*Worker heartbeat 1s ago.*73.3%/);
+  assert.doesNotMatch(stale, /14.70|238|About|sample tasks/);
+  h.run('progressJob.worker.progress_is_stale=false;');
+  const fresh = progressText(h.run('telemetry(progressJob)'));
+  assert.equal(h.run('queuePresentation(progressJob).status'), "Encoding");
+  assert.match(fresh, /Encoding full video.*14.70.*238.0 fps.*About 10 min/);
+  assert.doesNotMatch(fresh, /sample tasks|VMAF/);
+});
+
+test("validation, publication and sample encoding have discrete progress but require a fresh heartbeat", () => {
+  for (const [phase, status] of [["validating", "Verifying"], ["publishing", "Saving candidate"], ["encoding_samples", "Encoding samples"]]) {
+    const h = metricProgressHarness();
+    h.context.phase = phase;
+    h.run('progressJob.worker.phase=phase;progressJob.worker.speed=14.7;progressJob.worker.fps=238;progressJob.savings={eta_seconds:600};');
+    assert.equal(h.run('queuePresentation(progressJob).status'), status);
+    const text = progressText(h.run('telemetry(progressJob)'));
+    assert.match(text, /Last measured: 73.3%.*Worker heartbeat/);
+    assert.doesNotMatch(text, /14.70|238|About|No recent/);
+    h.run('progressJob.worker.worker_heartbeat_at="2026-10-16T12:20:00Z";');
+    assert.equal(h.run('queuePresentation(progressJob).status'), "No heartbeat");
+  }
+});
+
+test("external waits and confirmed recovery take precedence over a recent heartbeat", () => {
+  const h = metricProgressHarness();
+  for (const condition of ["worker_unreachable", "benchmark_retry", "transcode_retry", "worker_reconciling", "worker_busy"]) {
+    h.context.condition = condition;
+    h.run('progressJob.waiting_condition=condition;progressJob.waiting_reason="Waiting for coordination";');
+    assert.equal(h.run('queuePresentation(progressJob).status'), condition === "worker_unreachable" ? "Worker offline" : "Waiting");
+    assert.doesNotMatch(progressText(h.run('telemetry(progressJob)')), /Measuring sample quality|Worker heartbeat/);
+  }
+  h.run('progressJob.waiting_condition="transcode_complete";progressJob.worker.recovery_required=true;progressJob.waiting_reason="Publication requires intervention";');
+  assert.equal(h.run('queuePresentation(progressJob).status'), "Needs decision");
+  assert.match(progressText(h.run('telemetry(progressJob)')), /Publication requires intervention/);
+});
+
+test("terminal actions and decision waits cannot be replaced by telemetry warnings", () => {
+  const h = metricProgressHarness();
+  h.run('progressJob.worker.worker_heartbeat_at="2026-10-16T12:00:00Z";');
+  for (const status of ["completed", "failed", "cancelled", "waiting_decision"]) {
+    h.context.status = status;
+    h.run('progressJob.status=status;');
+    assert.equal(h.run('queuePresentation(progressJob).showTelemetry'), false);
+    assert.doesNotMatch(h.run('queuePresentation(progressJob).status'), /No heartbeat|No updates|Measuring quality/);
+    assert.doesNotMatch(progressText(h.run('telemetry(progressJob)')), /No recent|Worker heartbeat/);
+  }
+  for (const status of ["completed", "failed", "cancelled", "queued"]) {
+    h.context.status = status;
+    h.run('progressJob.status="running";progressJob.worker.benchmark_status=status;progressJob.worker.phase=status;');
+    assert.doesNotMatch(progressText(h.run('telemetry(progressJob)')), /No recent|Worker heartbeat/);
+  }
+});
+
+test("batch file detail and worker slots agree about a long metric and lost heartbeat", () => {
+  const h = metricProgressHarness();
+  h.run('progressJob.batch={total:2,running:1};progressJob.activities=[{id:"child",worker:progressJob.worker,waiting_condition:"benchmark_complete",current_step:0,stages:[{name:"wait_benchmark"},{name:"wait_transcode"}]}];');
+  const label = h.run('batchFileActivity({status:"running",child_action_id:"child"},progressJob)');
+  assert.match(label, /Measuring sample quality.*Worker heartbeat received/);
+  assert.doesNotMatch(label, /stale|No updates/);
+  assert.match(progressText(h.run('batchProgress(progressJob)')), /Measuring sample quality.*Worker heartbeat received/);
+  h.run('progressJob.worker.worker_heartbeat_at="2026-10-16T12:20:00Z";');
+  assert.match(h.run('batchFileActivity({status:"running",child_action_id:"child"},progressJob)'), /No recent worker heartbeat/);
+  assert.match(progressText(h.run('batchProgress(progressJob)')), /No recent worker heartbeat/);
+  h.run('renderWorkerActivity({available:true,activity:{details_available:true,worker_slots_total:1,worker_slots_used:1,jobs:[{id:"child",kind:"benchmark",file:"episode.mkv",phase:"evaluating_metrics",heartbeat_at:progressJob.worker.worker_heartbeat_at}]}});');
+  assert.match(progressText(h.elements.get("worker-slots")), /No recent worker heartbeat/);
+});
+
 test("new submissions avoid a duplicate browser worker probe and rely on durable server admission", async () => {
   const h=harness(); let builds=0, checks=0;
   h.context.check=()=>checks++;

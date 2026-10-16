@@ -1067,8 +1067,19 @@ main {
   grid-column: 2;
   grid-row: 1;
 }
-.worker-progress > .progress-observed-at {
+.worker-progress > .progress-observed-at,
+.worker-progress > .progress-observation {
   grid-column: 1 / -1;
+}
+.job-row .job-footer:has(.progress-observation),
+.job-row .job-footer:has(.stalled-progress) {
+  height: auto;
+  min-height: var(--control-size);
+}
+.job-footer > .worker-progress:has(.progress-observation),
+.job-footer > .stalled-progress {
+  max-height: none;
+  overflow: visible;
 }
 .batch-item-row {
   display: flex;
