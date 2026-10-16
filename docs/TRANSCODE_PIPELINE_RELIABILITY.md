@@ -77,6 +77,15 @@ things; both remain visible.
   Older workers may omit these values; missing measurements are not zero.
 - `last_progress_at`, `worker_heartbeat_at`, `progress_is_stale`, and
   `last_known_progress` distinguish a live worker from a fresh encoder sample.
+  A stale percentage alone does not mean the worker stopped. During sample
+  metrics (VMAF/CAMBI), validation or publication, the queue shows the phase,
+  last measured percentage and heartbeat separately. Sample metrics also show
+  the latest reported sample/candidate and resolved units; work can overlap.
+  Heartbeats never advance the percentage or refresh `last_progress_at`.
+  Missing heartbeat evidence remains unknown, and a heartbeat older than 30
+  seconds is warned about even if the percentage is fresh. Full-video encoding
+  still warns when progress is stale despite a live heartbeat. External waits,
+  recovery decisions and terminal outcomes take precedence over telemetry.
 
 The stable `queued`, `running`, and terminal job statuses are retained. The
 additional phase describes acceptance, preparation, reading, encoding,
