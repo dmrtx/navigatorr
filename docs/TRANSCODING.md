@@ -657,6 +657,7 @@ To prevent unbounded JSON responses when batching entire series or large seasons
 ### Concurrency and `worker_busy` behavior
 
 - **Parallelism**: Respects `config.Transcode.MaxParallelJobs` (default: 1). When `max_parallel_jobs: 1`, media files are transcoded serially one after another.
+- **Metric threads**: The worker's `metric_threads` sets libvmaf `n_threads` for each VMAF and CAMBI pass. The default `0` divides the host CPUs among simultaneous metric passes (`metric_concurrency` × `max_parallel_jobs`). Thread count changes wall time only; per-frame scores are identical.
 - **Worker busy handling**: If the remote transcode worker returns `worker_busy` (or reaches max parallel slots), the current item transitions to `waiting_for_slot`. Normal background transcodes remain in `running`.
 - **Retry budget safety**: Encountering `worker_busy` does **not** increment item `attempts` or consume the transient retry budget. The batch transitions to `waiting_external` with `waiting_condition: "worker_busy"` and resumes cleanly once worker capacity becomes available.
 

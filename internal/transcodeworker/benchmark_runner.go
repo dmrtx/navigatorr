@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -1049,20 +1050,48 @@ func BuildVMAFArgs(candPath, refPath, logPath string) []string {
 // metric graph. CAMBI must still know the encoded depth: otherwise an 8-bit
 // encode upconverted for measurement is incorrectly evaluated as 10-bit.
 // framesync must end at the shorter input without repeats.
-func BuildVMAFModelArgs(candPath, refPath, logPath string, model quality.VMAFModel, encodedBitDepth int) ([]string, error) {
+// threads > 0 sets libvmaf n_threads; zero keeps the libvmaf default.
+func BuildVMAFModelArgs(candPath, refPath, logPath string, model quality.VMAFModel, encodedBitDepth, threads int) ([]string, error) {
 	if model.ID == "" || model.LibvmafModel == "" || model.MeasurementBitDepth != 10 || (encodedBitDepth != 8 && encodedBitDepth != 10) {
 		return nil, fmt.Errorf("unsupported VMAF model measurement contract")
 	}
-	filter := fmt.Sprintf("[0:v]format=yuv420p10le,setpts=PTS-STARTPTS[d];[1:v]format=yuv420p10le,setpts=PTS-STARTPTS[r];[d][r]libvmaf=model='version=%s\\:cambi.enc_bitdepth=%d':log_fmt=json:log_path=%s:shortest=1:repeatlast=0", model.LibvmafModel, encodedBitDepth, escapeFFmpegFilterPath(logPath))
+	filter := fmt.Sprintf("[0:v]format=yuv420p10le,setpts=PTS-STARTPTS[d];[1:v]format=yuv420p10le,setpts=PTS-STARTPTS[r];[d][r]libvmaf=model='version=%s\\:cambi.enc_bitdepth=%d':log_fmt=json:log_path=%s:shortest=1:repeatlast=0%s", model.LibvmafModel, encodedBitDepth, escapeFFmpegFilterPath(logPath), libvmafThreadsOption(threads))
 	return []string{"-nostdin", "-nostats", "-i", candPath, "-i", refPath, "-filter_complex", filter, "-f", "null", "-"}, nil
 }
 
 // BuildCAMBIArgs runs a separate, bounded full-reference pass. VMAF v1 has an
 // internal CAMBI feature, so adding another to that invocation is unsafe on
 // several libvmaf builds.
-func BuildCAMBIArgs(candPath, refPath, logPath string, encodedBitDepth int) []string {
-	filter := fmt.Sprintf("[0:v]format=yuv420p10le,setpts=PTS-STARTPTS[d];[1:v]format=yuv420p10le,setpts=PTS-STARTPTS[r];[d][r]libvmaf=model=version=vmaf_v0.6.1:feature='name=cambi\\:full_ref=true\\:enc_bitdepth=%d':log_fmt=json:log_path=%s:shortest=1:repeatlast=0", encodedBitDepth, escapeFFmpegFilterPath(logPath))
+func BuildCAMBIArgs(candPath, refPath, logPath string, encodedBitDepth, threads int) []string {
+	filter := fmt.Sprintf("[0:v]format=yuv420p10le,setpts=PTS-STARTPTS[d];[1:v]format=yuv420p10le,setpts=PTS-STARTPTS[r];[d][r]libvmaf=model=version=vmaf_v0.6.1:feature='name=cambi\\:full_ref=true\\:enc_bitdepth=%d':log_fmt=json:log_path=%s:shortest=1:repeatlast=0%s", encodedBitDepth, escapeFFmpegFilterPath(logPath), libvmafThreadsOption(threads))
 	return []string{"-nostdin", "-nostats", "-i", candPath, "-i", refPath, "-filter_complex", filter, "-f", "null", "-"}
+}
+
+func libvmafThreadsOption(threads int) string {
+	if threads <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(":n_threads=%d", threads)
+}
+
+// metricThreads resolves libvmaf n_threads for one of concurrent simultaneous
+// metric invocations. An explicit worker setting wins; otherwise the host CPUs
+// are shared across the invocations of every parallel job.
+func (w *Worker) metricThreads(concurrent int) int {
+	if w != nil && w.cfg != nil && w.cfg.MetricThreads > 0 {
+		return w.cfg.MetricThreads
+	}
+	if concurrent < 1 {
+		concurrent = 1
+	}
+	if w != nil && w.cfg != nil && w.cfg.MaxParallelJobs > 1 {
+		concurrent *= w.cfg.MaxParallelJobs
+	}
+	threads := runtime.NumCPU() / concurrent
+	if threads < 1 {
+		threads = 1
+	}
+	return threads
 }
 
 // BuildSSIMArgs constructs the exact, safe FFmpeg argument slice
