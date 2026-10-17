@@ -18,6 +18,14 @@ At most two candidates receive verification. Only a candidate passing all five
 windows can start a full conversion. Actual final bytes, sampled final quality,
 streams and source/candidate integrity still must pass before publication.
 
+Workers that advertise `automatic_quality_pruning` receive `quality_pruning`
+frozen in the request. Each stage then measures every family's best setting first
+(lowest x265 CRF, highest VideoToolbox `-q:v`, all other options equal). When that
+setting fails a quality check (VMAF minimum, p5, worst window, frames below
+threshold, CAMBI mean or peak), the family's lower-quality settings are not
+measured; they appear as `skipped_quality_dominated` and in the stage's `skipped`
+list. Incomplete evidence, encode errors and size rejections never skip anything.
+
 All choices and limits are frozen before admission. No profile is created by
 this search, no quality threshold is relaxed, and no new action restarts its
 600-second deadline. The operation's existing 3600-second search allowance and

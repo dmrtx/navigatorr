@@ -238,7 +238,7 @@ func (r *ProductionBenchmarkRunner) runAdaptiveCandidates(
 		// One probe candidate at a time: samples pipeline within the probe while
 		// planner decisions stay strictly sequential, so adaptive search still
 		// avoids unnecessary candidates.
-		if err := r.runPipelinedEncodeMetrics(ctx, w, record, evidence, samplesDir, []validatedCandidate{vc}, sourceInitialSize, sourceInitialModTime, progressReporter); err != nil {
+		if err := r.runPipelinedEncodeMetrics(ctx, w, record, evidence, samplesDir, []validatedCandidate{vc}, sourceInitialSize, sourceInitialModTime, progressReporter, nil); err != nil {
 			return err
 		}
 		evaluatedCount++

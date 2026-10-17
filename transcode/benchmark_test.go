@@ -404,3 +404,37 @@ func TestValidateBenchmarkRequest_PreferredMetric(t *testing.T) {
 		}
 	}
 }
+
+func TestQualityPruningRequiresAutomaticAndChangesIdentity(t *testing.T) {
+	req := validTestBenchmarkRequest()
+	before, err := DigestBenchmarkRequest(&req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.QualityPruning = true
+	if err := ValidateBenchmarkRequest(&req); err == nil || !strings.Contains(err.Error(), "automatic") {
+		t.Fatalf("pruning accepted without automatic search: %v", err)
+	}
+	after, err := DigestBenchmarkRequest(&req)
+	if err != nil || after == before {
+		t.Fatal("quality pruning was not bound to benchmark identity")
+	}
+}
+
+func TestMinSavingsPercentIsBoundedAndProfileOnly(t *testing.T) {
+	req := validTestBenchmarkRequest()
+	req.MinSavingsPercent = 30
+	if err := ValidateBenchmarkRequest(&req); err != nil {
+		t.Fatalf("profile benchmark rejected savings minimum: %v", err)
+	}
+	for _, bad := range []float64{-1, 100, 150} {
+		req.MinSavingsPercent = bad
+		if err := ValidateBenchmarkRequest(&req); err == nil {
+			t.Fatalf("accepted min_savings_percent %v", bad)
+		}
+	}
+	req.MinSavingsPercent, req.Mode, req.SearchBudgetSeconds = 30, "size", 600
+	if err := ValidateBenchmarkRequest(&req); err == nil || !strings.Contains(err.Error(), "min_savings_percent") {
+		t.Fatalf("mode benchmark accepted a profile savings minimum: %v", err)
+	}
+}
