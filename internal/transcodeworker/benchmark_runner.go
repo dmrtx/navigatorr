@@ -526,6 +526,7 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 	// 5+6. Candidate encode and metric evaluation: adaptive probing with
 	// exhaustive fallback, bounded pipelined execution for real runs, or the
 	// legacy sequential path for test-hook injection.
+	sizeDoomed := false
 	if record.Automatic && r.metricsHook == nil && r.selectionHook == nil {
 		if err := r.runAutomaticCandidates(ctx, w, record, evidence, samplesDir, validatedCandidates, rep, sourceInitialSize, sourceInitialModTime, progressReporter); err != nil {
 			return err
@@ -538,9 +539,16 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		// Exhaustive real path: bounded concurrent encode->metric pipeline across
 		// all candidates. Evidence is assembled deterministically in
 		// (candidate, sample) order, so completion order never affects results.
-		if err := r.runPipelinedEncodeMetrics(ctx, w, record, evidence, samplesDir, validatedCandidates, sourceInitialSize, sourceInitialModTime, progressReporter); err != nil {
+		var savings *savingsGate
+		if record.MinSavingsPercent > 0 && r.selectionHook == nil {
+			if base, err := benchmarkEstimateBase(record, evidence, rep, sourceInitialSize); err == nil {
+				savings = &savingsGate{base: base, minSavings: record.MinSavingsPercent}
+			}
+		}
+		if err := r.runPipelinedEncodeMetrics(ctx, w, record, evidence, samplesDir, validatedCandidates, sourceInitialSize, sourceInitialModTime, progressReporter, savings); err != nil {
 			return err
 		}
+		sizeDoomed = savings != nil && savings.doomed.Load()
 	} else {
 		// 5. Encode candidate samples sequentially (legacy path for test-hook injection)
 		for _, vc := range validatedCandidates {
@@ -660,6 +668,9 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 	} else if !record.Automatic || r.metricsHook != nil {
 		if err := r.runSelection(ctx, record, evidence, validatedCandidates, rep, sourceInitialSize); err != nil {
 			return fmt.Errorf("candidate selection failed: %w", err)
+		}
+		if sizeDoomed {
+			markInsufficientSavings(evidence.Decision)
 		}
 	}
 	progressReporter.SetPhase("selecting_candidate")
@@ -1447,94 +1458,11 @@ func (r *ProductionBenchmarkRunner) runSelection(
 		}
 	}
 
-	// Media size and duration
-	sourceSize := rep.SizeBytes
-	if sourceSize <= 0 {
-		sourceSize = sourceInitialSize
+	base, err := benchmarkEstimateBase(record, evidence, rep, sourceInitialSize)
+	if err != nil {
+		return err
 	}
-	totalDuration := record.SourceDuration
-	if totalDuration <= 0 {
-		totalDuration = rep.DurationSec
-	}
-
-	// Total planned sample duration
-	var totalSampleDurationSec float64
-	for _, s := range record.Samples {
-		totalSampleDurationSec += s.DurationSeconds
-	}
-	if totalSampleDurationSec <= 0 {
-		for _, ref := range evidence.ReferenceSamples {
-			totalSampleDurationSec += ref.DurationSeconds
-		}
-	}
-
-	// Assemble stream estimates (audio, subtitle, attachments)
-	audioEstimates := make([]optimization.AudioStreamEstimate, 0, len(rep.Audio))
-	for _, a := range rep.Audio {
-		ae := optimization.AudioStreamEstimate{
-			Index:      a.Index,
-			Codec:      a.Codec,
-			Channels:   a.Channels,
-			BitrateBps: a.BitRate,
-			Copied:     true,
-		}
-		if ae.BitrateBps == 0 && a.Tags != nil {
-			if s, ok := a.Tags["BPS"]; ok {
-				if bps, err := strconv.ParseInt(s, 10, 64); err == nil && bps > 0 {
-					ae.BitrateBps = bps
-				}
-			}
-			if ae.BitrateBps == 0 {
-				if s, ok := a.Tags["NUMBER_OF_BYTES"]; ok {
-					if bytes, err := strconv.ParseInt(s, 10, 64); err == nil && bytes > 0 {
-						ae.SizeBytes = bytes
-					}
-				}
-			}
-		}
-		if ae.BitrateBps == 0 && ae.SizeBytes == 0 && record.FallbackAudioBitrateBps > 0 {
-			ae.FallbackBitrateBps = record.FallbackAudioBitrateBps
-		}
-		if target, kbps := transcode.AudioTarget(record.AudioMode, a.Codec, a.Channels); target != "copy" {
-			ae.Codec, ae.Copied, ae.BitrateBps, ae.SizeBytes, ae.FallbackBitrateBps = target, false, int64(kbps)*1000, 0, 0
-		}
-		audioEstimates = append(audioEstimates, ae)
-	}
-
-	subEstimates := make([]optimization.SubtitleStreamEstimate, 0, len(rep.Subtitles))
-	for _, s := range rep.Subtitles {
-		se := optimization.SubtitleStreamEstimate{
-			Index: s.Index,
-			Codec: s.Codec,
-		}
-		if s.Tags != nil {
-			if sBytes, ok := s.Tags["NUMBER_OF_BYTES"]; ok {
-				sBytes = strings.TrimSpace(sBytes)
-				if sBytes != "" && !strings.EqualFold(sBytes, "N/A") {
-					b, err := strconv.ParseInt(sBytes, 10, 64)
-					if err != nil || b < 0 {
-						return fmt.Errorf("%s: invalid subtitle byte count for stream_%d", optimization.ReasonInvalidEstimatorInput, s.Index)
-					}
-					se.SizeBytes = b
-				}
-			}
-		}
-		if se.SizeBytes == 0 && record.FallbackSubtitleSizeBytes > 0 {
-			se.FallbackSizeBytes = record.FallbackSubtitleSizeBytes
-		}
-		subEstimates = append(subEstimates, se)
-	}
-
-	var attachmentBytes int64
-	if record.AttachmentBytes > 0 {
-		attachmentBytes = record.AttachmentBytes
-	} else {
-		var err error
-		attachmentBytes, err = mediainspect.AttachmentPayloadBytes(rep.Attachments)
-		if err != nil {
-			return fmt.Errorf("%s: %w", optimization.ReasonInvalidEstimatorInput, err)
-		}
-	}
+	sourceSize := base.SourceSizeBytes
 
 	candidateInputs := make([]optimization.CandidateInput, 0, len(validatedCandidates))
 	candidateEstimates := make([]optimization.EstimationResult, len(validatedCandidates))
@@ -1565,17 +1493,8 @@ func (r *ProductionBenchmarkRunner) runSelection(
 		}
 
 		// Estimate candidate output size
-		estInput := optimization.OutputEstimateInput{
-			SourceSizeBytes:         sourceSize,
-			TotalDurationSeconds:    totalDuration,
-			SampleDurationSeconds:   totalSampleDurationSec,
-			SampleVideoBytes:        candSampleBytes,
-			DeclaredVideoBitrateBps: record.DeclaredVideoBitrateBps,
-			AudioStreams:            audioEstimates,
-			SubtitleStreams:         subEstimates,
-			AttachmentBytes:         attachmentBytes,
-			ContainerOverheadRate:   optimization.DefaultContainerOverheadRate,
-		}
+		estInput := base
+		estInput.SampleVideoBytes = candSampleBytes
 		est, err := optimization.EstimateOutput(estInput)
 		if err != nil {
 			est.SuitableForSelection = false
@@ -1725,4 +1644,123 @@ func (r *ProductionBenchmarkRunner) runSelection(
 
 	evidence.Decision = decision
 	return nil
+}
+
+// benchmarkEstimateBase assembles every size-estimator input except the
+// candidate's own sample bytes, which callers fill per candidate.
+func benchmarkEstimateBase(record *BenchmarkRecord, evidence *BenchmarkExecutionEvidence, rep mediainspect.DetailedReport, sourceInitialSize int64) (optimization.OutputEstimateInput, error) {
+	// Media size and duration
+	sourceSize := rep.SizeBytes
+	if sourceSize <= 0 {
+		sourceSize = sourceInitialSize
+	}
+	totalDuration := record.SourceDuration
+	if totalDuration <= 0 {
+		totalDuration = rep.DurationSec
+	}
+
+	// Total planned sample duration
+	var totalSampleDurationSec float64
+	for _, s := range record.Samples {
+		totalSampleDurationSec += s.DurationSeconds
+	}
+	if totalSampleDurationSec <= 0 {
+		for _, ref := range evidence.ReferenceSamples {
+			totalSampleDurationSec += ref.DurationSeconds
+		}
+	}
+
+	// Assemble stream estimates (audio, subtitle, attachments)
+	audioEstimates := make([]optimization.AudioStreamEstimate, 0, len(rep.Audio))
+	for _, a := range rep.Audio {
+		ae := optimization.AudioStreamEstimate{
+			Index:      a.Index,
+			Codec:      a.Codec,
+			Channels:   a.Channels,
+			BitrateBps: a.BitRate,
+			Copied:     true,
+		}
+		if ae.BitrateBps == 0 && a.Tags != nil {
+			if s, ok := a.Tags["BPS"]; ok {
+				if bps, err := strconv.ParseInt(s, 10, 64); err == nil && bps > 0 {
+					ae.BitrateBps = bps
+				}
+			}
+			if ae.BitrateBps == 0 {
+				if s, ok := a.Tags["NUMBER_OF_BYTES"]; ok {
+					if bytes, err := strconv.ParseInt(s, 10, 64); err == nil && bytes > 0 {
+						ae.SizeBytes = bytes
+					}
+				}
+			}
+		}
+		if ae.BitrateBps == 0 && ae.SizeBytes == 0 && record.FallbackAudioBitrateBps > 0 {
+			ae.FallbackBitrateBps = record.FallbackAudioBitrateBps
+		}
+		if target, kbps := transcode.AudioTarget(record.AudioMode, a.Codec, a.Channels); target != "copy" {
+			ae.Codec, ae.Copied, ae.BitrateBps, ae.SizeBytes, ae.FallbackBitrateBps = target, false, int64(kbps)*1000, 0, 0
+		}
+		audioEstimates = append(audioEstimates, ae)
+	}
+
+	subEstimates := make([]optimization.SubtitleStreamEstimate, 0, len(rep.Subtitles))
+	for _, s := range rep.Subtitles {
+		se := optimization.SubtitleStreamEstimate{
+			Index: s.Index,
+			Codec: s.Codec,
+		}
+		if s.Tags != nil {
+			if sBytes, ok := s.Tags["NUMBER_OF_BYTES"]; ok {
+				sBytes = strings.TrimSpace(sBytes)
+				if sBytes != "" && !strings.EqualFold(sBytes, "N/A") {
+					b, err := strconv.ParseInt(sBytes, 10, 64)
+					if err != nil || b < 0 {
+						return optimization.OutputEstimateInput{}, fmt.Errorf("%s: invalid subtitle byte count for stream_%d", optimization.ReasonInvalidEstimatorInput, s.Index)
+					}
+					se.SizeBytes = b
+				}
+			}
+		}
+		if se.SizeBytes == 0 && record.FallbackSubtitleSizeBytes > 0 {
+			se.FallbackSizeBytes = record.FallbackSubtitleSizeBytes
+		}
+		subEstimates = append(subEstimates, se)
+	}
+
+	var attachmentBytes int64
+	if record.AttachmentBytes > 0 {
+		attachmentBytes = record.AttachmentBytes
+	} else {
+		var err error
+		attachmentBytes, err = mediainspect.AttachmentPayloadBytes(rep.Attachments)
+		if err != nil {
+			return optimization.OutputEstimateInput{}, fmt.Errorf("%s: %w", optimization.ReasonInvalidEstimatorInput, err)
+		}
+	}
+
+	return optimization.OutputEstimateInput{
+		SourceSizeBytes:         sourceSize,
+		TotalDurationSeconds:    totalDuration,
+		SampleDurationSeconds:   totalSampleDurationSec,
+		DeclaredVideoBitrateBps: record.DeclaredVideoBitrateBps,
+		AudioStreams:            audioEstimates,
+		SubtitleStreams:         subEstimates,
+		AttachmentBytes:         attachmentBytes,
+		ContainerOverheadRate:   optimization.DefaultContainerOverheadRate,
+	}, nil
+}
+
+// markInsufficientSavings explains a run stopped by the savings gate: every
+// candidate's encoded size already failed the caller's minimum savings, using
+// the same estimate the caller's guardrail applies, so none can be accepted.
+func markInsufficientSavings(d *transcode.BenchmarkDecision) {
+	if d == nil {
+		return
+	}
+	d.Winner, d.Selection = nil, nil
+	d.DecisionReason = "all_candidates_insufficient_savings"
+	for i := range d.Evaluations {
+		d.Evaluations[i].Eligible = false
+		d.Evaluations[i].EvaluationReason = "insufficient_savings"
+	}
 }
