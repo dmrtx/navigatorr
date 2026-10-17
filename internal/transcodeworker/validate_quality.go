@@ -131,7 +131,7 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 		}
 		if runVMAF {
 			logPath := filepath.Join(scratch, fmt.Sprintf("vmaf_%d.json", window.Index))
-			args, err := BuildVMAFModelArgs(candPath, refPath, logPath, *model, candidateRep.Video[0].BitDepth)
+			args, err := BuildVMAFModelArgs(candPath, refPath, logPath, *model, candidateRep.Video[0].BitDepth, w.metricThreads(1))
 			if err != nil {
 				return fail("quality_vmaf_measurement_path_unavailable", err)
 			}
@@ -149,7 +149,7 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 			vmafSamples = append(vmafSamples, stats)
 		}
 		if runCAMBI {
-			stats, err := runCAMBIMetricSample(ctx, w.ffmpegPath, scratch, candPath, refPath, 0, "final", window.Index, window.StartSeconds, sourceRep.Video[0].FPS, candidateRep.Video[0].BitDepth, caps.Quality.CAMBIOutput)
+			stats, err := runCAMBIMetricSample(ctx, w.ffmpegPath, scratch, candPath, refPath, 0, "final", window.Index, window.StartSeconds, sourceRep.Video[0].FPS, candidateRep.Video[0].BitDepth, caps.Quality.CAMBIOutput, w.metricThreads(1))
 			if err != nil || stats.FramesTotal != len(refPTS) {
 				return fail("quality_cambi_evidence_incomplete", fmt.Errorf("sample %d: %v", window.Index, err))
 			}

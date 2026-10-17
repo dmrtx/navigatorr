@@ -89,7 +89,7 @@ func TestJoyRealSourceSamples(t *testing.T) {
 			t.Fatalf("candidate decode: %v %s", err, b)
 		}
 		vlog := filepath.Join(out, fmt.Sprintf("vmaf-%d.json", i))
-		args, err := BuildVMAFModelArgs(candidate, source, vlog, model, 10)
+		args, err := BuildVMAFModelArgs(candidate, source, vlog, model, 10, w.metricThreads(1))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -106,7 +106,7 @@ func TestJoyRealSourceSamples(t *testing.T) {
 			t.Fatal(err)
 		}
 		clog := filepath.Join(out, fmt.Sprintf("cambi-%d.json", i))
-		if b, err := exec.CommandContext(ctx, ffmpeg, BuildCAMBIArgs(candidate, source, clog, 10)...).CombinedOutput(); err != nil {
+		if b, err := exec.CommandContext(ctx, ffmpeg, BuildCAMBIArgs(candidate, source, clog, 10, w.metricThreads(1))...).CombinedOutput(); err != nil {
 			t.Fatalf("CAMBI: %v %s", err, b)
 		}
 		b, err = os.ReadFile(clog)
