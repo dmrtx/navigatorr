@@ -287,7 +287,13 @@ type BenchmarkSampleWindow struct {
 // It is strictly versioned and does NOT accept candidate output paths or replace_original parameters,
 // making original media mutation completely impossible.
 type BenchmarkRequest struct {
-	Automatic           bool      `json:"automatic,omitempty"`
+	Automatic bool `json:"automatic,omitempty"`
+	// QualityPruning lets automatic search skip the rest of a rate-control
+	// family once its highest-quality setting fails the quality policy.
+	QualityPruning bool `json:"quality_pruning,omitempty"`
+	// MinSavingsPercent lets the worker stop measuring once every encoded
+	// candidate is already too large for the caller's size guardrail.
+	MinSavingsPercent   float64   `json:"min_savings_percent,omitempty"`
 	ModePolicyVersion   string    `json:"mode_policy_version,omitempty"`
 	SearchBudgetSeconds int       `json:"search_budget_seconds,omitempty"`
 	Mode                string    `json:"mode,omitempty"`
@@ -354,7 +360,10 @@ type BenchmarkProgressDetails struct {
 type BenchmarkAutomaticStage struct {
 	Stage      string   `json:"stage"`
 	Candidates []string `json:"candidates"`
-	Outcome    string   `json:"outcome"`
+	// Skipped lists candidates not measured because a higher-quality setting
+	// of the same family already failed the quality policy.
+	Skipped []string `json:"skipped,omitempty"`
+	Outcome string   `json:"outcome"`
 }
 type BenchmarkAutomaticEvidence struct {
 	Stages          []BenchmarkAutomaticStage `json:"stages"`
@@ -417,6 +426,12 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 	}
 	if req.Automatic && (req.Mode == "" || req.ModePolicyVersion != optimization.ModePolicyV2 || len(req.Samples) != 5 || len(req.Candidates) > 12) {
 		return errors.New("automatic search requires v2 mode, five windows and at most twelve candidates")
+	}
+	if req.QualityPruning && !req.Automatic {
+		return errors.New("quality pruning requires automatic search")
+	}
+	if math.IsNaN(req.MinSavingsPercent) || req.MinSavingsPercent < 0 || req.MinSavingsPercent >= 100 || (req.MinSavingsPercent > 0 && (req.Automatic || req.Mode != "")) {
+		return errors.New("min_savings_percent must be in [0,100) and only for profile benchmarks")
 	}
 	if req.Automatic {
 		if req.Metric != "vmaf" || req.Quality == nil || req.Quality.VMAF == nil || req.Quality.VMAF.Model == "" {
