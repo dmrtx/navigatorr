@@ -63,6 +63,8 @@ type WorkerCapabilities struct {
 	X265TwoPass              bool                           `json:"x265_two_pass,omitempty"`
 	HEAACAudio               bool                           `json:"he_aac_audio,omitempty"`
 	AutomaticModesV2         bool                           `json:"automatic_modes_v2,omitempty"`
+	AutomaticQualityPruning  bool                           `json:"automatic_quality_pruning,omitempty"`
+	SavingsPrecheck          bool                           `json:"savings_precheck,omitempty"`
 	Podcast                  *PodcastCapabilities           `json:"podcast,omitempty"`
 	ExplicitMain10Benchmarks bool                           `json:"explicit_main10_benchmarks,omitempty"`
 	CompactAudio             bool                           `json:"compact_audio,omitempty"`
@@ -107,6 +109,8 @@ type fingerprintPayload struct {
 	X265TwoPass              bool                           `json:"x265_two_pass,omitempty"`
 	HEAACAudio               bool                           `json:"he_aac_audio,omitempty"`
 	AutomaticModesV2         bool                           `json:"automatic_modes_v2,omitempty"`
+	AutomaticQualityPruning  bool                           `json:"automatic_quality_pruning,omitempty"`
+	SavingsPrecheck          bool                           `json:"savings_precheck,omitempty"`
 	Podcast                  *PodcastCapabilities           `json:"podcast,omitempty"`
 	ExplicitMain10Benchmarks bool                           `json:"explicit_main10_benchmarks,omitempty"`
 	CompactAudio             bool                           `json:"compact_audio,omitempty"`
@@ -147,6 +151,8 @@ func ComputeCapabilityFingerprint(caps WorkerCapabilities) (string, error) {
 	payload := fingerprintPayload{
 		X265TwoPass: caps.X265TwoPass, HEAACAudio: caps.HEAACAudio,
 		AutomaticModesV2:         caps.AutomaticModesV2,
+		AutomaticQualityPruning:  caps.AutomaticQualityPruning,
+		SavingsPrecheck:          caps.SavingsPrecheck,
 		Podcast:                  caps.Podcast,
 		ExplicitMain10Benchmarks: caps.ExplicitMain10Benchmarks,
 		CompactAudio:             caps.CompactAudio,

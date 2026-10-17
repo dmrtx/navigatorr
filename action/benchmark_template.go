@@ -160,6 +160,13 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 			}
 			return StepResult{Status: StepFailed, Error: err.Error()}, nil
 		}
+		// transcode_media rejects a winner below its size guardrail after the
+		// benchmark; the worker can reach that verdict before measuring quality.
+		if ec.ActionName == "transcode_media" && getString(ec.Inputs, "mode") == "" && !req.Automatic && caps.SavingsPrecheck {
+			if minSavings, _ := e.effectiveSizeGuardrails(ec); minSavings > 0 && minSavings < 100 {
+				req.MinSavingsPercent = minSavings
+			}
+		}
 	}
 	// Keep the proposed parameters inspectable while waiting for a search
 	// review, but do not mark the request accepted or uncertain yet.
@@ -1200,6 +1207,7 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 			if err := configureAutomaticRequest(req, plan, bitDepth); err != nil {
 				return nil, err
 			}
+			req.QualityPruning = req.Automatic && caps.AutomaticQualityPruning
 		}
 	}
 	if plan.X265 != nil && !caps.X265TwoPass {

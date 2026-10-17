@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -158,6 +159,8 @@ type pipelineShared struct {
 	qualityCaps          *transcode.QualityCapabilities
 	capFingerprint       string
 	passesPerSample      int
+	metricThreads        int
+	savings              *savingsGate
 	poisons              []*candidatePoison
 	encodeOut            []pipelineEncodeOutcome
 	metricOut            []pipelineMetricOutcome
@@ -188,6 +191,7 @@ func (r *ProductionBenchmarkRunner) runPipelinedEncodeMetrics(
 	sourceInitialSize int64,
 	sourceInitialModTime time.Time,
 	progressReporter *benchmarkProgressReporter,
+	savings *savingsGate,
 ) error {
 	if len(vcs) == 0 {
 		return errors.New("no validated candidates for pipelined evaluation (fail closed)")
@@ -307,6 +311,8 @@ func (r *ProductionBenchmarkRunner) runPipelinedEncodeMetrics(
 		qualityCaps:          caps.Quality,
 		capFingerprint:       caps.CapabilityFingerprint,
 		passesPerSample:      passesPerSample,
+		metricThreads:        w.metricThreads(metricN),
+		savings:              savings,
 		poisons:              poisons,
 		encodeOut:            make([]pipelineEncodeOutcome, nUnits),
 		metricOut:            make([]pipelineMetricOutcome, nUnits),
@@ -353,6 +359,9 @@ func (r *ProductionBenchmarkRunner) runPipelinedEncodeMetrics(
 						return
 					}
 					sh.runEncodeUnit(ctx, units[idx], idx)
+					if sh.savings != nil && sh.savings.encoded.Add(1) == int64(nUnits) {
+						sh.checkSavingsGate()
+					}
 					if ctx.Err() != nil {
 						return
 					}
@@ -545,6 +554,9 @@ func (sh *pipelineShared) runMetricUnit(ctx context.Context, u pipelineUnit, idx
 	}
 	candPath := filepath.Join(sh.samplesDir, vc.fileKey+"_sample_"+strconv.Itoa(window.Index)+".mkv")
 
+	if sh.savings != nil && sh.savings.doomed.Load() {
+		sh.poisons[u.vcOrd].setFailed(savingsGateReason)
+	}
 	poisoned, reason := sh.poisons[u.vcOrd].isFailed()
 	candStat, statErr := os.Stat(candPath)
 	if statErr != nil || !candStat.Mode().IsRegular() || candStat.Size() == 0 {
@@ -582,7 +594,7 @@ func (sh *pipelineShared) runMetricUnit(ctx context.Context, u pipelineUnit, idx
 		sh.progressReporter.StartSampleUnit("evaluating_metrics", u.sampOrd+1, vc.index+1, vc.candidate.ID, "vmaf")
 		args := BuildVMAFArgs(candPath, refPath, logPath)
 		if sh.vmafModel != nil {
-			args, err = BuildVMAFModelArgs(candPath, refPath, logPath, *sh.vmafModel, vc.bitDepth)
+			args, err = BuildVMAFModelArgs(candPath, refPath, logPath, *sh.vmafModel, vc.bitDepth, sh.metricThreads)
 			if err != nil {
 				fail(err)
 				return
@@ -785,7 +797,7 @@ func (sh *pipelineShared) runMetricUnit(ctx context.Context, u pipelineUnit, idx
 	if sh.runCAMBI {
 		sh.progressReporter.StartSampleUnit("evaluating_metrics", u.sampOrd+1, vc.index+1, vc.candidate.ID, "cambi_full_ref")
 		start := time.Now()
-		stats, err := runCAMBIMetricSample(ctx, sh.w.ffmpegPath, sh.samplesDir, candPath, refPath, candIdx, vc.candidate.ID, window.Index, window.StartSeconds, sh.evidence.SourceFPS, vc.bitDepth, sh.qualityCaps.CAMBIOutput)
+		stats, err := runCAMBIMetricSample(ctx, sh.w.ffmpegPath, sh.samplesDir, candPath, refPath, candIdx, vc.candidate.ID, window.Index, window.StartSeconds, sh.evidence.SourceFPS, vc.bitDepth, sh.qualityCaps.CAMBIOutput, sh.metricThreads)
 		out.cambiDurSec = time.Since(start).Seconds()
 		sh.progressReporter.ResolveUnit()
 		if ctx.Err() != nil {
@@ -850,7 +862,7 @@ func invalidMetricOutcome(candidateID string, candIdx, sampleIdx int, reason str
 	return out
 }
 
-func runCAMBIMetricSample(ctx context.Context, ffmpegPath, samplesDir, candPath, refPath string, candIdx int, candidateID string, sampleIdx int, sourceStartSec, fps float64, encodedBitDepth int, outputMetric string) (quality.CAMBIStats, error) {
+func runCAMBIMetricSample(ctx context.Context, ffmpegPath, samplesDir, candPath, refPath string, candIdx int, candidateID string, sampleIdx int, sourceStartSec, fps float64, encodedBitDepth int, outputMetric string, threads int) (quality.CAMBIStats, error) {
 	logPath, err := derivedMetricLogPath(samplesDir, "cambi", candIdx, candidateID, sampleIdx)
 	if err != nil {
 		return quality.CAMBIStats{}, err
@@ -861,7 +873,7 @@ func runCAMBIMetricSample(ctx context.Context, ffmpegPath, samplesDir, candPath,
 	if encodedBitDepth != 8 && encodedBitDepth != 10 {
 		return quality.CAMBIStats{}, fmt.Errorf("unsupported CAMBI encoded bit depth %d", encodedBitDepth)
 	}
-	args := BuildCAMBIArgs(candPath, refPath, logPath, encodedBitDepth)
+	args := BuildCAMBIArgs(candPath, refPath, logPath, encodedBitDepth, threads)
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
@@ -1075,4 +1087,39 @@ func (sh *pipelineShared) evaluateCandidateQuality(vcOrd int, candidateID string
 		e.Verdict = "observe"
 	}
 	return e, reject
+}
+
+const savingsGateReason = "insufficient_savings_before_metrics"
+
+// savingsGate stops quality measurement once every encoded candidate is
+// already estimated below the caller's minimum savings. No quality result
+// can then produce an acceptable winner, so the verdict does not change.
+type savingsGate struct {
+	base       optimization.OutputEstimateInput
+	minSavings float64
+	encoded    atomic.Int64
+	doomed     atomic.Bool
+}
+
+// checkSavingsGate runs once, after the last encode unit. Any failed encode
+// or unusable estimate keeps measuring so the normal selection decides.
+func (sh *pipelineShared) checkSavingsGate() {
+	n := len(sh.record.Samples)
+	for vcOrd := range sh.vcs {
+		var sampleBytes int64
+		for sampOrd := 0; sampOrd < n; sampOrd++ {
+			out := sh.encodeOut[vcOrd*n+sampOrd]
+			if out.err != nil || out.entry.Error != "" || out.entry.SizeBytes <= 0 {
+				return
+			}
+			sampleBytes += out.entry.SizeBytes
+		}
+		in := sh.savings.base
+		in.SampleVideoBytes = sampleBytes
+		est, err := optimization.EstimateOutput(in)
+		if err != nil || !est.SuitableForSelection || est.SavingsPercent >= sh.savings.minSavings {
+			return
+		}
+	}
+	sh.savings.doomed.Store(true)
 }

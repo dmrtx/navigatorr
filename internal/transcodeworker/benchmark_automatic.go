@@ -2,6 +2,7 @@ package transcodeworker
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -53,7 +54,7 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 		if r.automaticHook != nil {
 			err = r.automaticHook(ctx, stageRecord, evidence, candidates)
 		} else {
-			err = r.runPipelinedEncodeMetrics(ctx, w, stageRecord, evidence, dir, candidates, sourceSize, sourceMod, progress)
+			err = r.runPipelinedEncodeMetrics(ctx, w, stageRecord, evidence, dir, candidates, sourceSize, sourceMod, progress, nil)
 		}
 		if err != nil {
 			return err
@@ -61,7 +62,56 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 		automatic.Stages[len(automatic.Stages)-1].Outcome = "completed"
 		return nil
 	}
-	if err := run("testing_initial", &discovery, tested); err != nil {
+	var skipped []transcode.BenchmarkCandidateEvaluation
+	// measure runs one stage. With quality pruning, each rate-control family's
+	// highest-quality setting runs first; when it fails the quality policy the
+	// family's remaining settings, which only spend fewer bits, are not measured.
+	measure := func(stage string, stageRecord *BenchmarkRecord, candidates []validatedCandidate) ([]validatedCandidate, error) {
+		leaders, followers := splitQualityFamilies(candidates)
+		if !record.QualityPruning || len(followers) == 0 {
+			return candidates, run(stage, stageRecord, candidates)
+		}
+		if err := run(stage, stageRecord, leaders); err != nil {
+			return nil, err
+		}
+		if err := r.runSelection(ctx, stageRecord, evidence, leaders, rep, sourceSize); err != nil {
+			return nil, err
+		}
+		failed := map[string]bool{}
+		for _, e := range evidence.Decision.Evaluations {
+			if qualityRejection(e.EvaluationReason) {
+				failed[e.CandidateID] = true
+			}
+		}
+		measured := leaders
+		var rest []validatedCandidate
+		var skippedIDs []string
+		for _, f := range followers {
+			if !failed[f.leader] {
+				rest = append(rest, f.vc)
+				continue
+			}
+			skippedIDs = append(skippedIDs, f.vc.candidate.ID)
+			skipped = append(skipped, transcode.BenchmarkCandidateEvaluation{
+				CandidateID: f.vc.candidate.ID, CandidateIndex: f.vc.index, VideoCodec: transcode.BenchmarkCandidateVideoCodec(f.vc.candidate),
+				Quality: f.vc.candidate.Quality, Preset: f.vc.candidate.Preset, Tune: f.vc.candidate.Tune, VideoProfile: f.vc.profile, PixelFormat: f.vc.pixelFormat,
+				ExpectedBitDepth: f.vc.bitDepth, EvaluationReason: "skipped_quality_dominated", Uncertainties: []string{"not measured: " + f.leader + " failed quality"},
+			})
+		}
+		if len(rest) > 0 {
+			if err := run(stage, stageRecord, rest); err != nil {
+				return nil, err
+			}
+			measured = append(append([]validatedCandidate{}, leaders...), rest...)
+		}
+		automatic.Stages[len(automatic.Stages)-1].Skipped = skippedIDs
+		return measured, nil
+	}
+	finish := func() {
+		evidence.Decision.Evaluations = append(evidence.Decision.Evaluations, skipped...)
+	}
+	tested, err := measure("testing_initial", &discovery, tested)
+	if err != nil {
 		return err
 	}
 	if err := r.runSelection(ctx, &discovery, evidence, tested, rep, sourceSize); err != nil {
@@ -82,10 +132,11 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 			}
 		}
 		if len(alternatives) > 0 {
-			if err := run("testing_alternatives", &discovery, alternatives); err != nil {
+			measured, err := measure("testing_alternatives", &discovery, alternatives)
+			if err != nil {
 				return err
 			}
-			tested = append(tested, alternatives...)
+			tested = append(tested, measured...)
 			if err := r.runSelection(ctx, &discovery, evidence, tested, rep, sourceSize); err != nil {
 				return err
 			}
@@ -126,6 +177,7 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 			automatic.VerifiedSamples = 5
 			evidence.Decision.Evaluations = append(evidence.Decision.Evaluations, verificationFailures...)
 			appendAutomaticRejections(evidence.Decision, automatic.Discovery)
+			finish()
 			return nil
 		}
 		verificationFailures = append(verificationFailures, evidence.Decision.Evaluations...)
@@ -150,7 +202,72 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 	// confirmation allowance or search deadline has been exhausted.
 	evidence.Decision = &transcode.BenchmarkDecision{DecisionReason: "no_verified_candidate", Evaluations: verificationFailures}
 	appendAutomaticRejections(evidence.Decision, automatic.Discovery)
+	finish()
 	return nil
+}
+
+// qualityRejection reports measured quality-policy failures. Incomplete
+// evidence, encode errors and size rejections are not quality verdicts.
+func qualityRejection(reason string) bool {
+	switch reason {
+	case optimization.ReasonBelowMinimumQuality, optimization.ReasonSampleBelowMinimum,
+		"quality_vmaf_p5_below_minimum", "quality_vmaf_worst_window_below_minimum", "quality_vmaf_frames_below_limit_exceeded",
+		"quality_cambi_mean_above_maximum", "quality_cambi_peak_above_maximum":
+		return true
+	}
+	return false
+}
+
+type qualityFollower struct {
+	vc     validatedCandidate
+	leader string
+}
+
+// splitQualityFamilies groups constant-quality candidates that differ only in
+// their quality value. Each family's best setting (lowest x265 CRF, highest
+// VideoToolbox -q:v) leads; bitrate sweeps and singletons are always leaders.
+func splitQualityFamilies(vcs []validatedCandidate) (leaders []validatedCandidate, followers []qualityFollower) {
+	type family struct {
+		members       []validatedCandidate
+		lowerIsBetter bool
+	}
+	var order []string
+	families := map[string]*family{}
+	for _, vc := range vcs {
+		c := vc.candidate
+		codec := transcode.BenchmarkCandidateVideoCodec(c)
+		if c.Quality <= 0 || c.AverageBitrateKbps != 0 || (codec != "libx265" && codec != "hevc_videotoolbox") {
+			order = append(order, "\x00"+c.ID)
+			families["\x00"+c.ID] = &family{members: []validatedCandidate{vc}}
+			continue
+		}
+		key := c
+		key.ID, key.Quality = "", 0
+		b, _ := json.Marshal(key)
+		k := codec + string(b)
+		if families[k] == nil {
+			order = append(order, k)
+			families[k] = &family{lowerIsBetter: codec == "libx265"}
+		}
+		families[k].members = append(families[k].members, vc)
+	}
+	for _, k := range order {
+		f := families[k]
+		best := 0
+		for i, vc := range f.members {
+			q, bq := vc.candidate.Quality, f.members[best].candidate.Quality
+			if (f.lowerIsBetter && q < bq) || (!f.lowerIsBetter && q > bq) {
+				best = i
+			}
+		}
+		leaders = append(leaders, f.members[best])
+		for i, vc := range f.members {
+			if i != best {
+				followers = append(followers, qualityFollower{vc: vc, leader: f.members[best].candidate.ID})
+			}
+		}
+	}
+	return leaders, followers
 }
 
 func appendAutomaticRejections(final, discovery *transcode.BenchmarkDecision) {

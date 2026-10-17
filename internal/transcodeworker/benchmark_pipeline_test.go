@@ -860,3 +860,55 @@ func TestResolvePipelineConcurrency(t *testing.T) {
 		})
 	}
 }
+
+func TestPipeline_SavingsGateStopsMetricsWhenEveryCandidateIsTooLarge(t *testing.T) {
+	for _, minSavings := range []float64{0, 99.9999} {
+		dir := t.TempDir()
+		sourceFile := filepath.Join(dir, "source.mkv")
+		if err := os.WriteFile(sourceFile, []byte("fake source media"), 0644); err != nil {
+			t.Fatalf("writing source: %v", err)
+		}
+		// Sample 0 metrics are slow, so every encode finishes while the first
+		// metric passes are still running.
+		spec := timedMockSpec{
+			probeJSON: sdr8BitProbeJSON,
+			metSleep:  map[int]float64{0: 0.7},
+			vmafScore: map[int]float64{0: 96.5, 1: 96.5},
+		}
+		mockFFmpeg, mockProbe, logFile := setupTimedMockTools(t, dir, spec)
+		record := &BenchmarkRecord{
+			ProtocolVersion:   transcode.WorkerProtocolVersion,
+			ID:                "bench-pipe-savings-gate",
+			Status:            "running",
+			Source:            sourceFile,
+			Metric:            "vmaf",
+			MinSavingsPercent: minSavings,
+			Samples: []transcode.BenchmarkSampleWindow{
+				{Index: 0, StartSeconds: 5.0, DurationSeconds: 5.0},
+				{Index: 1, StartSeconds: 20.0, DurationSeconds: 5.0},
+			},
+			Candidates: []transcode.BenchmarkCandidate{{ID: "cand_q60", Quality: 60}, {ID: "cand_q65", Quality: 65}, {ID: "cand_q70", Quality: 70}},
+			Attempt:    1,
+		}
+		runPipelineBenchmarkForTest(t, record, mockFFmpeg, mockProbe, dir)
+		mets := filterIntervals(parseTSIntervals(t, timedTSFile(logFile)), "met")
+		dec := record.Evidence.Decision
+		if minSavings == 0 {
+			if len(mets) != 6 || dec == nil || dec.Winner == nil {
+				t.Fatalf("without a savings minimum every unit is measured: metrics=%d decision=%+v", len(mets), dec)
+			}
+			continue
+		}
+		if len(mets) >= 6 {
+			t.Fatalf("savings gate measured every unit (%d metric passes)", len(mets))
+		}
+		if dec == nil || dec.Winner != nil || dec.DecisionReason != "all_candidates_insufficient_savings" {
+			t.Fatalf("decision = %+v", dec)
+		}
+		for _, ev := range dec.Evaluations {
+			if ev.Eligible || ev.EvaluationReason != "insufficient_savings" || ev.SavingsPercent >= minSavings {
+				t.Fatalf("evaluation not explained by size: %+v", ev)
+			}
+		}
+	}
+}

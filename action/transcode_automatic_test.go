@@ -40,6 +40,36 @@ func TestAutomaticRequestAndLegacyFrozenPolicy(t *testing.T) {
 	}
 }
 
+func TestAutomaticQualityPruningFollowsWorkerCapability(t *testing.T) {
+	for _, advertised := range []bool{false, true} {
+		ec := &ExecutionContext{InstanceID: "automatic", Inputs: map[string]any{"mode": "quality"}, State: map[string]any{"plan": &transcode.Plan{VideoCodec: "libx265", Quality: 23, Preset: "medium", ExpectedBitDepth: 8, PixelFormat: "yuv420p", VideoProfile: "main"}}}
+		policy, _ := freezeModePolicy(ec)
+		caps := modeTestCapabilities()
+		caps.AutomaticQualityPruning = advertised
+		req, err := buildBenchmarkRequest(ec, "/media/source.mkv", &mediainspect.DetailedReport{DurationSec: 100, Video: []mediainspect.DetailedStream{{BitDepth: 8, FPS: 25}}}, policy.Profile.Optimization, caps)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if req.QualityPruning != advertised {
+			t.Fatalf("advertised=%v but request pruning=%v", advertised, req.QualityPruning)
+		}
+		if err := transcode.ValidateBenchmarkRequest(req); err != nil {
+			t.Fatal(err)
+		}
+	}
+	short := &ExecutionContext{InstanceID: "short", Inputs: map[string]any{"mode": "quality"}, State: map[string]any{"plan": &transcode.Plan{VideoCodec: "libx265", Quality: 23, Preset: "medium", ExpectedBitDepth: 8, PixelFormat: "yuv420p", VideoProfile: "main"}}}
+	policy, _ := freezeModePolicy(short)
+	caps := modeTestCapabilities()
+	caps.AutomaticQualityPruning = true
+	req, err := buildBenchmarkRequest(short, "/media/source.mkv", &mediainspect.DetailedReport{DurationSec: 20, Video: []mediainspect.DetailedStream{{BitDepth: 8, FPS: 25}}}, policy.Profile.Optimization, caps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.Automatic || req.QualityPruning {
+		t.Fatal("short source must not request automatic pruning")
+	}
+}
+
 func TestGoalRevisionFreezesNewAttemptWithoutChangingParent(t *testing.T) {
 	st := setupTestStore(t)
 	defer st.Close()
