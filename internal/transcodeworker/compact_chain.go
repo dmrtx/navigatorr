@@ -306,7 +306,7 @@ func compactFilterForRun(p *transcode.CompactPlan) (string, error) {
 // compactEncoderArgs are the video args a compact plan adds to an encode:
 // the picture chain on the first output video stream and explicit SDR
 // BT.709 stream signalling.
-func compactEncoderArgs(p *transcode.CompactPlan) ([]string, error) {
+func compactEncoderArgs(p *transcode.CompactPlan, videoCodec string) ([]string, error) {
 	if p == nil {
 		return nil, nil
 	}
@@ -314,13 +314,19 @@ func compactEncoderArgs(p *transcode.CompactPlan) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return []string{
+	args := []string{
 		"-filter:v:0", chain,
 		"-color_primaries:v:0", transcode.CompactColorPrimaries,
 		"-color_trc:v:0", transcode.CompactColorTransfer,
 		"-colorspace:v:0", transcode.CompactColorMatrix,
 		"-color_range:v:0", transcode.CompactColorRange,
-	}, nil
+	}
+	if norm(videoCodec) == libX265Encoder {
+		// The Dolby Vision configuration record is stream side data that
+		// survives the chain; "auto" would re-emit Dolby Vision signalling.
+		args = append(args, "-dolbyvision:v:0", "0")
+	}
+	return args, nil
 }
 
 // compactChainEvidence records the transform for final and benchmark

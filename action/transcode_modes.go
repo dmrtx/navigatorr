@@ -198,8 +198,13 @@ func freezeModePolicy(ec *ExecutionContext) (*ModePolicySnapshot, error) {
 // evidence.
 func modeSourceReason(mode string, rep *mediainspect.DetailedReport, hfrSupported bool) string {
 	video := rep.MainVideo()
-	if len(video) != 1 || video[0].BitDepth != 8 && video[0].BitDepth != 10 || (mode != "compact" && isSourceHDRorDV(rep)) {
+	if len(video) != 1 || video[0].BitDepth != 8 && video[0].BitDepth != 10 {
 		return "unsupported_source"
+	}
+	// Only the compact goal converts HDR and Dolby Vision; a goal change can
+	// pick these files up, unlike unsupported_source.
+	if mode != "compact" && isSourceHDRorDV(rep) {
+		return "hdr_requires_compact"
 	}
 	factor, err := quality.TemporalDecimationForStream(video[0].FPS, video[0].FieldOrder)
 	if err != nil {

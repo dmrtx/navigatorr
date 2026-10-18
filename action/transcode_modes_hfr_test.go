@@ -35,7 +35,7 @@ func TestModeSourceReasonFrameRateGate(t *testing.T) {
 		}
 	}
 	hdr := &mediainspect.DetailedReport{Video: []mediainspect.DetailedStream{{Codec: "h264", BitDepth: 10, FPS: 50, ColorTransfer: "smpte2084"}}}
-	if modeSourceReason("size", hdr, true) != "unsupported_source" {
+	if modeSourceReason("size", hdr, true) != "hdr_requires_compact" {
 		t.Fatal("HFR capability relaxed the HDR gate")
 	}
 	deep := &mediainspect.DetailedReport{Video: []mediainspect.DetailedStream{{Codec: "h264", BitDepth: 12, FPS: 50}}}

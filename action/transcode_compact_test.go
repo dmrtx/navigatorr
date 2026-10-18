@@ -41,8 +41,10 @@ func TestCompactModePolicy(t *testing.T) {
 	if min, ok := optimization.ModeMinimumSavings("compact", optimization.ModePolicyV2); !ok || min != 30 {
 		t.Fatalf("selector compact minimum %d %v", min, ok)
 	}
-	if _, ok := optimization.ModeMinimumSavings("compact", "transcode-modes-v1"); ok {
-		t.Fatal("compact must not exist under policy v1")
+	for _, version := range []string{"transcode-modes-v1", ""} {
+		if _, ok := optimization.ModeMinimumSavings("compact", version); ok {
+			t.Fatalf("compact must not exist under policy %q", version)
+		}
 	}
 }
 

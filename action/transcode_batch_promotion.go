@@ -183,7 +183,14 @@ func (e *Engine) stepTranscodeBatchPromote(ctx context.Context, ec *ExecutionCon
 			}
 			return StepResult{Status: StepCompleted, Outputs: map[string]any{"batch_promotion": map[string]any{"eligible": len(plan.Members), "promoted": 0, "approved": false}}}, nil
 		default:
-			return StepResult{Status: StepWaitingDecision, WaitingReason: fmt.Sprintf("Approve promotion of %d verified candidates in one batch", len(plan.Members)), WaitingOptions: []WaitingOption{{Decision: "approve", Description: "Promote all listed candidates with recovery copies and per-file verification"}, {Decision: "reject", Description: "Keep all originals and candidates unchanged"}}, Outputs: map[string]any{"batch_promotion_plan": plan}}, nil
+			reason := fmt.Sprintf("Approve promotion of %d verified candidates in one batch", len(plan.Members))
+			if notice := e.batchPromotionNotice(ctx, plan); notice != nil {
+				ec.State["batch_promotion_notice"] = notice
+				reason += ". " + CompactRegrabWarning
+			} else {
+				delete(ec.State, "batch_promotion_notice")
+			}
+			return StepResult{Status: StepWaitingDecision, WaitingReason: reason, WaitingOptions: []WaitingOption{{Decision: "approve", Description: "Promote all listed candidates with recovery copies and per-file verification"}, {Decision: "reject", Description: "Keep all originals and candidates unchanged"}}, Outputs: map[string]any{"batch_promotion_plan": plan}}, nil
 		}
 	}
 	type promotionOutcome struct {

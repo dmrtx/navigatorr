@@ -30,7 +30,7 @@ func BuildVideoEncoderArgs(plan *transcode.Plan) ([]string, error) {
 	if err != nil || plan.Compact == nil {
 		return args, err
 	}
-	compact, err := compactEncoderArgs(plan.Compact)
+	compact, err := compactEncoderArgs(plan.Compact, plan.VideoCodec)
 	if err != nil {
 		return nil, err
 	}
@@ -277,6 +277,55 @@ func boolFFmpeg(v bool) string {
 	return "0"
 }
 
+// statisticsTags are the per-track muxer statistics (mkvmerge writes them)
+// that describe the source bitstream, not a re-encoded one.
+var statisticsTags = []string{"BPS", "NUMBER_OF_BYTES", "NUMBER_OF_FRAMES", "DURATION", "_STATISTICS_WRITING_APP", "_STATISTICS_WRITING_DATE_UTC", "_STATISTICS_TAGS"}
+
+func clearStatisticsTags(kind string, typeIndex int) []string {
+	args := make([]string, 0, 2*len(statisticsTags))
+	for _, tag := range statisticsTags {
+		args = append(args, fmt.Sprintf("-metadata:s:%s:%d", kind, typeIndex), tag+"=")
+	}
+	return args
+}
+
+// sourceFormatWords mark a track title that describes the source format.
+var sourceFormatWords = []string{"truehd", "atmos", "dts", "flac", "pcm", "alac", "mlp", "lossless", "master audio", "hd ma", "hd-ma", "dolby", "uncompressed"}
+
+// convertedAudioTitle retitles a track converted to AAC when its title names
+// the format it no longer has ("TrueHD Atmos 7.1" becomes "AAC 7.1"). Other
+// titles ("Commentary") are kept; ok is false when the title stays. Without a
+// reported layout (PCM in Matroska) the channel count names it.
+func convertedAudioTitle(title, layout string, channels int) (string, bool) {
+	lower := strings.ToLower(title)
+	named := false
+	for _, w := range sourceFormatWords {
+		if strings.Contains(lower, w) {
+			named = true
+			break
+		}
+	}
+	if !named {
+		return "", false
+	}
+	l := strings.ToLower(strings.TrimSpace(layout))
+	if i := strings.IndexByte(l, '('); i > 0 {
+		l = l[:i]
+	}
+	if l == "" {
+		l = map[int]string{1: "mono", 2: "stereo", 6: "5.1", 8: "7.1"}[channels]
+	}
+	switch l {
+	case "mono":
+		return "AAC Mono", true
+	case "stereo":
+		return "AAC Stereo", true
+	case "":
+		return "AAC", true
+	}
+	return "AAC " + l, true
+}
+
 // BuildFFmpegArgs generates the exact, safe FFmpeg argument slice from an ExecutionPlan.
 // It explicitly specifies codec mapping per stream type and subtitle stream index,
 // avoiding dangerous global defaults that could corrupt stylized subtitles or mux incompatible codecs.
@@ -335,6 +384,13 @@ func BuildFFmpegArgsWithCoverArt(execPlan *ExecutionPlan, sourcePath, candidateP
 		return nil, err
 	}
 	args = append(args, videoArgs...)
+	if execPlan.Plan.Compact != nil {
+		// The source title often names the dropped format ("... Dolby
+		// Vision", "... HDR10"), and its muxer statistics describe the old
+		// bitstream; neither may survive on the SDR stream.
+		args = append(args, "-metadata:s:v:0", "title=")
+		args = append(args, clearStatisticsTags("v", 0)...)
+	}
 
 	// Keep every audio stream; compact only selected source codecs, never
 	// downmix or remove languages. Already compact/unknown formats are copied.
@@ -365,8 +421,9 @@ func BuildFFmpegArgsWithCoverArt(execPlan *ExecutionPlan, sourcePath, candidateP
 			}
 			args = append(args, fmt.Sprintf("-c:a:%d", stream.TypeIndex), encoder, fmt.Sprintf("-b:a:%d", stream.TypeIndex), strconv.Itoa(stream.BitrateKbps)+"k")
 			// Source muxer bitrate/size tags no longer describe an encoded track.
-			for _, tag := range []string{"BPS", "NUMBER_OF_BYTES", "NUMBER_OF_FRAMES", "DURATION", "_STATISTICS_WRITING_APP", "_STATISTICS_WRITING_DATE_UTC", "_STATISTICS_TAGS"} {
-				args = append(args, fmt.Sprintf("-metadata:s:a:%d", stream.TypeIndex), tag+"=")
+			args = append(args, clearStatisticsTags("a", stream.TypeIndex)...)
+			if title, ok := convertedAudioTitle(stream.Title, stream.Layout, stream.Channels); ok {
+				args = append(args, fmt.Sprintf("-metadata:s:a:%d", stream.TypeIndex), "title="+title)
 			}
 		}
 	}

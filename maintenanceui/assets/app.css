@@ -1893,6 +1893,15 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
   background: var(--warning-wash);
   color: var(--warning-strong);
 }
+.regrab-warning {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border-left: 3px solid var(--warning-line);
+  border-radius: 3px;
+  background: var(--warning-wash);
+  color: var(--warning-strong);
+}
+.regrab-warning p { margin: 4px 0 0; }
 .benchmark-list { margin: 4px 0 6px; padding-left: 18px; }
 .benchmark-list li { margin: 4px 0; }
 .benchmark-list li > p { margin: 2px 0; }

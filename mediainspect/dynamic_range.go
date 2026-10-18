@@ -242,7 +242,10 @@ func ClassifyDynamicRange(rep *DetailedReport, frames *FrameSignals) DynamicRang
 		return d.labelled()
 	}
 	v := video[0]
-	streamHDR := (rep.HDR != nil && rep.HDR.Present) || IsHDRorDolbyVisionStream(v)
+	// Structural signalling of the main stream only: a title such as "HEVC
+	// Dolby Vision" says nothing about the bitstream, and rep.HDR is set by
+	// that tag heuristic for any video stream, cover art included.
+	streamHDR := HasStructuralHDRSignalling(v)
 	if frames != nil && frames.Probed {
 		d.FramesProbed = frames.Frames
 	}

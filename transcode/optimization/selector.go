@@ -373,8 +373,9 @@ func ModeMinimumSavings(mode, version string) (int, bool) {
 	case "size":
 		return 15, true
 	case "compact":
-		// Compact mode was introduced with policy v2; it never ran under v1.
-		if version == "transcode-modes-v1" {
+		// Compact mode was introduced with policy v2; it never ran under v1
+		// or the unversioned legacy policy, so only v2 is accepted.
+		if version != ModePolicyV2 {
 			return 0, false
 		}
 		return CompactMinimumSavingsPercent, true

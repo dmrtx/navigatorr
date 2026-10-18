@@ -1538,7 +1538,7 @@ function renderProfileFacts(output, data, name, preserveDepth) {
   add("Process", p.optimization?.enabled ? "Tests quality samples before full conversion" : "Converts full video using this profile");
   add("Output depth", preserveDepth ? "Same as source · Overrides profile depth" : v.profile === "main10" || /10/.test(v.pixel_format || "") ? "10-bit" : v.pixel_format || v.profile ? "8-bit" : "Encoder default");
   if (v.spatial_aq != null) add("Image detail", v.spatial_aq ? "Adaptive allocation across image details" : "Standard allocation");
-  add("Audio", p.audio?.mode === "copy" ? "Keep original audio tracks" : p.audio?.mode === "compact" ? "Compact · Convert lossless tracks to AAC" : p.audio?.mode === "he_aac" ? "HE-AAC · 64 kbps mono/stereo, 160 kbps surround (lossy)" : p.audio?.mode || "Profile default");
+  add("Audio", p.audio?.mode === "copy" ? "Keep original audio tracks" : p.audio?.mode === "compact" ? "Compact · Convert lossless tracks to AAC, same layout; E-AC-3/AC-3/AAC copied" : p.audio?.mode === "he_aac" ? "HE-AAC · 64 kbps mono/stereo, 160 kbps surround (lossy)" : p.audio?.mode || "Profile default");
   add("Output", p.container?.toUpperCase() || "Profile default");
   output.append(facts, node("p", `Profile ID: ${name}`, "metadata"));
 }
@@ -2939,6 +2939,7 @@ function shortJobReason(reason) {
     search_budget_exhausted: "Automatic testing reached its limit without finding a reliable result; original kept",
     no_suitable_candidate: "None of the tested settings met this goal; original kept",
     unsupported_source: "Automatic testing does not support this source format yet; original kept",
+    hdr_requires_compact: "HDR or Dolby Vision source; only the Much smaller goal converts it. Original kept",
     hfr_quality_unavailable: "The worker cannot measure quality at this frame rate yet; original kept",
     quality_policy_unavailable: "The worker cannot run the quality checks this goal needs; original kept",
     quality_vmaf_model_unavailable: "The worker cannot measure quality for this video (VMAF model unavailable); original kept",
@@ -3051,7 +3052,7 @@ function queuePresentation(job) {
   const observation = workerProgressObservation(job);
   const replacementComplete = job.savings?.realized_saved_bytes != null ||
     (job.replaced && job.status === "completed");
-  const skippedFile = job.action_name === "transcode_media" && job.status === "completed" && !job.candidate_ready && ["quality_not_met","insufficient_savings","size_growth","size_growth_exceeded","preservation_not_met","already_target_codec","no_suitable_candidate","unsupported_source"].includes(job.reason_code);
+  const skippedFile = job.action_name === "transcode_media" && job.status === "completed" && !job.candidate_ready && ["quality_not_met","insufficient_savings","size_growth","size_growth_exceeded","preservation_not_met","already_target_codec","no_suitable_candidate","unsupported_source","hdr_requires_compact"].includes(job.reason_code);
   const status = skippedFile ? "Skipped" : job.status === "waiting_decision" && job.reason_code === "search_budget_exhausted" ? "Needs attention" : job.status === "failed" && !rejectedCandidate(job) && !savingsPolicyFailure(job.error) ? "Failed" : job.replaced_files > 0 && job.remaining_candidates > 0 ? "Candidates ready" : replacementComplete
     ? "Replaced"
     : rejectedCandidate(job) ? "Rejected" : savingsPolicyFailure(job.error) ? "Minimum savings not met" : outcomes[batch?.outcome] ||
@@ -3686,7 +3687,7 @@ async function loadBatchItems(id, revision) {
     if (actions.children.length) row.append(actions);
     const activity = batchFileActivity(item, state.detailJob);
     if (activity) row.append(node("span", activity, "batch-file-activity"));
-    if (item.mode) row.append(node("span", `Goal: ${{size:"Reduce size",quality:"Preserve quality",x265_preserve:"Convert to x265",compact:"Much smaller · SDR 1080p"}[item.mode] || item.mode}`, "metadata batch-file-profile"));
+    if (item.mode) row.append(node("span", `Goal: ${{size:"Reduce size",quality:"Preserve quality",x265_preserve:"Convert to x265",compact:`Much smaller · SDR ${item.max_height || 1080}p`}[item.mode] || item.mode}`, "metadata batch-file-profile"));
     else if (item.requested_profile || item.profile) row.append(node("span", `${item.retry_pending ? "Next attempt" : "Profile"}: ${profileOptionLabel(item.requested_profile || item.profile)}`, "metadata batch-file-profile"));
     if (item.previous_attempts?.length) {
       const history=node("details","","batch-attempt-history");
@@ -3789,6 +3790,27 @@ function renderStages(job) {
   }
 }
 
+// Compact replacements can be re-grabbed by Radarr/Sonarr. The tracking
+// shown is read-only; Navigatorr never changes monitoring or profiles.
+function regrabWarning(notice) {
+  if (!notice?.regrab_warning) return null;
+  const box = node("div", "", "regrab-warning");
+  box.setAttribute("role", "alert");
+  box.append(node("strong", "Radarr or Sonarr may download the original again"), node("p", notice.regrab_warning));
+  const tracking = [];
+  if (typeof notice.arr_monitored === "boolean") tracking.push(notice.arr_monitored ? "Monitored" : "Not monitored");
+  if (notice.arr_quality_profile) tracking.push(`Quality profile: ${notice.arr_quality_profile}`);
+  if (tracking.length) box.append(node("p", `Library tracking now: ${tracking.join(" · ")}`, "metadata"));
+  return box;
+}
+async function readBatchPromotionNotice(id) {
+  try {
+    const notice = (await tool("action_detail", { id, section: "state", key: "batch_promotion_notice", chunk: 0 })).data;
+    return notice && typeof notice === "object" ? notice : null;
+  } catch {
+    return null;
+  }
+}
 async function reviewFilePromotion(id) {
   const auth = state.authRevision;
   const job = (await api(`operations?id=${encodeURIComponent(id)}`)).jobs?.[0];
@@ -3805,6 +3827,8 @@ async function reviewFilePromotion(id) {
   }
   const savings = savingsLine(job.savings);
   if (savings) data.append(savings);
+  const warning = regrabWarning(job.promotion);
+  if (warning) data.prepend(warning);
   $("approve-file-review").disabled = !serverReachable || state.approvingFile;
   $("file-review").showModal();
 }
@@ -3882,10 +3906,13 @@ async function readBatchPromotionPlan(id) {
 async function reviewBatchPromotion(id) {
   const authRevision = state.authRevision;
   const plan = await readBatchPromotionPlan(id);
+  const notice = await readBatchPromotionNotice(id);
   if (authRevision !== state.authRevision || $("workspace").hidden) return;
   state.batchApproval = {id,digest:plan.digest};
   const host=$("batch-review-data");
   host.replaceChildren(node("p",`${plan.members.length} ${plan.members.length === 1 ? "candidate selected" : "candidates selected"}`,"metadata"));
+  const warning = regrabWarning(notice);
+  if (warning) host.prepend(warning);
   for (const member of plan.members) {
     const row=node("div","","candidate-review-row");
     row.append(node("strong",member.episode || member.original_path.split("/").pop()));

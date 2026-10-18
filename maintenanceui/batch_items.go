@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jakenesler/navigatorr/store"
+	"github.com/jakenesler/navigatorr/transcode"
 )
 
 type batchItemView struct {
@@ -18,6 +19,9 @@ type batchItemView struct {
 	Replaced            bool   `json:"replaced,omitempty"`
 	CanReconfigure      bool   `json:"can_reconfigure,omitempty"`
 	Mode                string `json:"mode,omitempty"`
+	// MaxHeight is the frozen compact output height, so the goal label
+	// names the size actually produced.
+	MaxHeight int `json:"max_height,omitempty"`
 
 	PreviousAttempts []store.TranscodeBatchItem `json:"previous_attempts,omitempty"`
 	RetryPending     bool                       `json:"retry_pending,omitempty"`
@@ -82,8 +86,12 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 			_ = json.Unmarshal(data, &previous)
 			view := batchItemView{RequestedProfile: operationString(operationMap(settings[item.ItemKey])["profile"]), PreviousAttempts: previous, RetryPending: pending[item.ItemKey] == true, ItemKey: item.ItemKey, FilePath: item.FilePath, DisplayLabel: item.DisplayLabel, Status: item.Status, ChildActionID: item.ChildActionID, Decision: item.Decision, Error: batchReasonText(item.Error, true), Profile: item.Profile, Reasons: item.Reasons}
 			view.Mode = operationString(inputs["mode"])
+			policy := state["mode_policy"]
 			if mode := operationString(operationMap(settings[item.ItemKey])["mode"]); mode != "" {
-				view.Mode = mode
+				view.Mode, policy = mode, operationMap(settings[item.ItemKey])["mode_policy"]
+			}
+			if view.Mode == "compact" {
+				view.MaxHeight = compactMaxHeight(policy)
 			}
 			reserved, err := s.engine.BatchItemReplacementReserved(item)
 			if err != nil {
@@ -130,4 +138,13 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 	writeJSON(w, 200, map[string]any{"items": views, "total": len(items), "offset": offset, "has_more": end < len(items)})
+}
+
+// compactMaxHeight reads a frozen compact policy's output height; the
+// default applies when none was frozen yet.
+func compactMaxHeight(policy any) int {
+	if h := int(operationNumber(operationMap(operationMap(policy)["compact"])["max_height"])); h > 0 {
+		return h
+	}
+	return transcode.CompactDefaultMaxHeight
 }

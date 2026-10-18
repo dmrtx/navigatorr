@@ -14,9 +14,10 @@ import (
 )
 
 type promotionEpisode struct {
-	ID            int `json:"id"`
-	SeriesID      int `json:"seriesId"`
-	EpisodeFileID int `json:"episodeFileId"`
+	ID            int  `json:"id"`
+	SeriesID      int  `json:"seriesId"`
+	EpisodeFileID int  `json:"episodeFileId"`
+	Monitored     bool `json:"monitored"`
 }
 type promotionFile struct {
 	MovieID      int             `json:"movieId,omitempty"`

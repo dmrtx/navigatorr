@@ -330,9 +330,21 @@ func TestBenchmarkMeasurementColorInfoCompact(t *testing.T) {
 // compactModePlan is a resolved compact-mode plan as the server freezes it.
 func compactModePlan(t *testing.T, c *transcode.CompactPlan) *transcode.Plan {
 	t.Helper()
+	return compactModePlanFor(t, c, 10)
+}
+
+// compactModePlanFor derives the output shape exactly as a benchmark does:
+// the compact chain keeps the source bit depth (HDR sources are 10-bit), and
+// resolveCandidateBitDepth turns that into the HEVC profile and pixel format.
+func compactModePlanFor(t *testing.T, c *transcode.CompactPlan, sourceBitDepth int) *transcode.Plan {
+	t.Helper()
 	p := signedPlan(t, nil)
 	p.VideoCodec, p.Quality, p.Preset = transcode.VideoCodecLibX265, 24, "ultrafast"
-	p.VideoProfile, p.PixelFormat, p.ExpectedBitDepth = "main10", "p010le", 10
+	prof, pix, bd, err := resolveCandidateBitDepth(&transcode.BenchmarkCandidate{ID: "compact", VideoCodec: transcode.VideoCodecLibX265}, sourceBitDepth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.VideoProfile, p.PixelFormat, p.ExpectedBitDepth = prof, pix, bd
 	p.AudioMode = "compact"
 	p.Mode, p.ModePolicyVersion = "compact", optimization.ModePolicyV2
 	p.PolicyDigest = "sha256:" + strings.Repeat("0", 64)
@@ -412,8 +424,8 @@ func compactRealEnv(t *testing.T) (ctx context.Context, ffmpeg, ffprobe string) 
 	return ctx, ffmpeg, ffprobe
 }
 
-// compactRealSource writes a short synthetic 4K clip with a 5.1 PCM track,
-// a second stereo FLAC track and an SRT subtitle.
+// compactRealSource writes a short synthetic 4K clip (10-bit HDR10 or 8-bit
+// SDR) with a 5.1 PCM track, a second stereo FLAC track and an SRT subtitle.
 func compactRealSource(t *testing.T, ctx context.Context, ffmpeg, path string, hdr10 bool) {
 	t.Helper()
 	srt := filepath.Join(filepath.Dir(path), "sub.srt")
@@ -429,6 +441,11 @@ func compactRealSource(t *testing.T, ctx context.Context, ffmpeg, path string, h
 		"-filter:a:0", "pan=5.1|FL=c0|FR=c0|FC=c0|LFE=c0|BL=c0|BR=c0",
 		"-c:a:0", "pcm_s24le", "-c:a:1", "flac", "-ac:a:1", "2", "-c:s", "srt",
 		"-metadata:s:a:0", "language=eng", "-metadata:s:a:1", "language=spa", "-metadata:s:s:0", "language=eng",
+		// Titles and mkvmerge statistics as release groups write them; the
+		// video title claims Dolby Vision although the stream has none.
+		"-metadata:s:v:0", "title=HEVC Dolby Vision HDR10", "-metadata:s:v:0", "BPS=40000000",
+		"-metadata:s:a:0", "title=LPCM 5.1", "-metadata:s:a:0", "BPS=6912000", "-metadata:s:a:0", "NUMBER_OF_BYTES=864000",
+		"-metadata:s:a:1", "title=Commentary",
 	}
 	if hdr10 {
 		args = append(args, "-vf", "format=yuv420p10le,setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc:range=tv",
@@ -480,7 +497,12 @@ func TestRealCompactEncode(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			plan := compactModePlan(t, c)
+			// The output shape comes from the production derivation: 8-bit
+			// SDR 4K stays Main, HDR10 becomes Main10.
+			plan := compactModePlanFor(t, c, rep.Video[0].BitDepth)
+			if want := map[bool]int{true: 10, false: 8}[tc.hdr10]; plan.ExpectedBitDepth != want || rep.Video[0].BitDepth != want {
+				t.Fatalf("source %d-bit gave a %d-bit plan (%s/%s)", rep.Video[0].BitDepth, plan.ExpectedBitDepth, plan.VideoProfile, plan.PixelFormat)
+			}
 			probe, err := ProbeSourceDetails(ctx, ffprobe, source)
 			if err != nil {
 				t.Fatal(err)
@@ -515,8 +537,16 @@ func TestRealCompactEncode(t *testing.T) {
 			if e.Verdict != "pass" || e.Width != 1920 || e.Height != 1080 || e.FramesProbed == 0 {
 				t.Fatalf("output not clean SDR: %+v", e)
 			}
-			if v := out.Video[0]; v.Codec != "hevc" || v.BitDepth != 10 {
+			if v := out.Video[0]; v.Codec != "hevc" || v.BitDepth != plan.ExpectedBitDepth || v.PixelFormat != map[int]string{8: "yuv420p", 10: "yuv420p10le"}[plan.ExpectedBitDepth] {
 				t.Fatalf("video %+v", v)
+			}
+			// The misleading title and the source statistics are gone; the
+			// converted track is retitled, the commentary title is kept.
+			if v := out.Video[0]; v.Tags["title"] != "" || v.Tags["BPS"] != "" || mediainspect.HasDolbyVision(v) {
+				t.Fatalf("video tags survived: %v", v.Tags)
+			}
+			if a := out.Audio; a[0].Tags["title"] != "AAC 5.1" || a[0].Tags["BPS"] != "" || a[0].Tags["NUMBER_OF_BYTES"] != "" || a[1].Tags["title"] != "Commentary" {
+				t.Fatalf("audio tags: %v / %v", a[0].Tags, a[1].Tags)
 			}
 			// Re-classifying the output gives SDR: nothing HDR survived.
 			if od, err := classifySourceDynamicRange(ctx, ffprobe, candidate, &out); err != nil || od.Class != mediainspect.DynamicRangeSDR {

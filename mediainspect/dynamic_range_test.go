@@ -249,3 +249,26 @@ func TestParseFrameSignals(t *testing.T) {
 		t.Fatal("empty frames accepted")
 	}
 }
+
+// Free-text tags never decide Dolby Vision or HDR: only the configuration
+// record, a Dolby Vision codec tag or frame RPUs do.
+func TestDolbyVisionNeedsStructuralEvidence(t *testing.T) {
+	sdr := DetailedStream{Kind: "video", Codec: "hevc", PixelFormat: "yuv420p", BitDepth: 8, ColorPrimaries: "bt709", ColorTransfer: "bt709", ColorSpace: "bt709",
+		Tags: map[string]string{"title": "HEVC Dolby Vision", "handler_name": "DoVi HDR"}}
+	if d := ClassifyDynamicRange(&DetailedReport{Video: []DetailedStream{sdr}, HDR: &HDRReport{Present: true}}, nil); d.Class != DynamicRangeSDR || d.DolbyVision != nil {
+		t.Fatalf("titled SDR stream classified %+v", d)
+	}
+	if HasDolbyVision(sdr) || HasStructuralHDRSignalling(sdr) || !IsHDRorDolbyVisionStream(sdr) {
+		t.Fatal("tag heuristics: structural checks must ignore tags, the fail-closed gate must keep them")
+	}
+	for _, tag := range []string{"dvh1", "dvhe", "dav1"} {
+		s := sdr
+		s.Tags, s.CodecTag = nil, tag
+		if !HasDolbyVision(s) || !HasStructuralHDRSignalling(s) {
+			t.Fatalf("codec tag %s not detected", tag)
+		}
+	}
+	if codecTag("[0][0][0][0]") != "" || codecTag(" DVH1 ") != "dvh1" || codecTag("hvc1") != "hvc1" {
+		t.Fatal("codec tag normalization")
+	}
+}

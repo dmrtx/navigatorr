@@ -50,6 +50,7 @@ type promotionHarness struct {
 	adoptedPathOverride                string
 	stalePathReads                     int
 	backupSeen                         bool
+	tracking                           map[string]any // monitored/qualityProfileId on the series or movie
 }
 
 func newPromotionHarness(t *testing.T) *promotionHarness {
@@ -125,9 +126,19 @@ func (h *promotionHarness) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case r.Method == "GET" && r.URL.Path == "/api/v3/series/1":
-		write(map[string]any{"id": 1, "path": filepath.Join(h.root, "Series")})
+		item := map[string]any{"id": 1, "path": filepath.Join(h.root, "Series")}
+		for k, v := range h.tracking {
+			item[k] = v
+		}
+		write(item)
 	case r.Method == "GET" && r.URL.Path == "/api/v3/movie/1":
-		write(map[string]any{"id": 1, "path": filepath.Join(h.root, "Series"), "movieFileId": h.episodes[0].EpisodeFileID})
+		item := map[string]any{"id": 1, "path": filepath.Join(h.root, "Series"), "movieFileId": h.episodes[0].EpisodeFileID}
+		for k, v := range h.tracking {
+			item[k] = v
+		}
+		write(item)
+	case r.Method == "GET" && r.URL.Path == "/api/v3/qualityprofile/4":
+		write(map[string]any{"id": 4, "name": "HD-1080p"})
 	case r.Method == "GET" && r.URL.Path == "/api/v3/episode":
 		write(h.episodes)
 	case r.Method == "GET" && (r.URL.Path == "/api/v3/episodefile" || r.URL.Path == "/api/v3/moviefile"):
