@@ -2692,7 +2692,7 @@ test("icon-only queue actions keep their full name in aria-label and title", () 
   assert.equal(rail.children[0].attrs["aria-label"], "Resume batch");
 });
 
-test("past three icon actions the rest go into a More actions menu with the same buttons", () => {
+test("with five or more icon actions, three show and the rest go into a More actions menu", () => {
   const { rail } = queueRail(["Review candidate", "Run one more test", "Keep original", "Change goal", "Archive", "View batch"]);
   assert.equal(rail.children.length, 5);
   const more = rail.children.at(-1);
@@ -2707,8 +2707,20 @@ test("past three icon actions the rest go into a More actions menu with the same
   more.open = true;
   more.listeners.get("click")({ target: { closest: () => menu.children[0] } });
   assert.equal(more.open, false);
-  const three = queueRail(["Review", "Change goal", "Archive", "View batch"]).rail;
-  assert.equal(three.children.some((c) => c.className === "more-actions"), false);
+});
+
+test("four icon actions all show; a More menu never holds a single item", () => {
+  const four = queueRail(["Review", "Run one more test", "Keep original", "Change goal", "View batch"]).rail;
+  assert.equal(four.children.some((c) => c.className === "more-actions"), false);
+  assert.deepEqual(
+    four.children.filter((b) => /\baction-icon\b/.test(b.className)).map((b) => b.attrs["aria-label"]),
+    ["Run one more test", "Keep original", "Change goal", "View batch"],
+  );
+  const five = queueRail(["Review", "Run one more test", "Keep original", "Cancel", "Change goal", "View batch"]).rail;
+  const more = five.children.at(-1);
+  assert.equal(more.className, "more-actions");
+  assert.equal(five.children.filter((b) => /\baction-icon\b/.test(b.className)).length, 3);
+  assert.equal(more.children[1].children.length, 2);
 });
 
 test("sample test results explain each rejected setting with its measurement and next step", () => {

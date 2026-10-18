@@ -3195,9 +3195,10 @@ const mainQueueActions = ["Replace file", "Review replacements", "Review replace
 const visibleQueueIcons = 3;
 function compactQueueActions(actions) {
   // A card shows at most one labelled main action, then square icon buttons
-  // whose full name lives in aria-label and title. Past three icons the rest
-  // move, as the same elements with their handlers and state, into a More
-  // actions menu that lists them with icon and label.
+  // whose full name lives in aria-label and title. Up to four icons show; with
+  // five or more, three stay and the rest move, as the same elements with
+  // their handlers and state, into a More actions menu that lists them with
+  // icon and label.
   const short = {"Replace file":"Replace","Set up benchmark":"Set up","Review candidates":"Review","Review candidate":"Review","Review replacement":"Review","Review replacements":"Review","Resume batch":"Resume","Start batch":"Start"};
   const buttons = [...actions.children];
   const labelOf = (b) => b.textContent.trim();
@@ -3218,8 +3219,10 @@ function compactQueueActions(actions) {
     b.className = ["Cancel", "Stop batch · keep originals"].includes(label) ? "action-icon danger" : "action-icon";
     icons.push(b);
   }
-  const overflow = icons.slice(visibleQueueIcons);
-  const rail = [main, ...icons.slice(0, visibleQueueIcons)].filter(Boolean);
+  // A menu never holds a single item: four icons fit where three and More do.
+  const shown = icons.length > visibleQueueIcons + 1 ? visibleQueueIcons : icons.length;
+  const overflow = icons.slice(shown);
+  const rail = [main, ...icons.slice(0, shown)].filter(Boolean);
   if (overflow.length) {
     const more = node("details", "", "more-actions");
     more.dataset.menuFor = buttons[0]?.dataset.jobControl || "";
