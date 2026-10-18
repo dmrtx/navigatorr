@@ -99,3 +99,39 @@ func TestHistoricalSelectionAndFailedSampleExplanation(t *testing.T) {
 		t.Fatal("invented historical tolerance without the request")
 	}
 }
+
+func TestCompactBenchmarkExplainsSkippedAndSavingsReasons(t *testing.T) {
+	r := &action.ActionResult{ActionName: "benchmark_transcode", Status: action.StatusCompleted, State: map[string]any{
+		"benchmark_decision": transcode.BenchmarkDecision{Evaluations: []transcode.BenchmarkCandidateEvaluation{
+			{CandidateID: "crf23", EvaluationReason: "skipped_quality_dominated", Uncertainties: []string{"not measured: crf20 failed quality"}},
+			{CandidateID: "crf26", EvaluationReason: "insufficient_savings"},
+			{CandidateID: "crf28", EvaluationReason: "insufficient_savings_before_metrics"},
+			{CandidateID: "crf30", EvaluationReason: "verification_not_passed"},
+		}},
+	}}
+	s := compactBenchmark(r)
+	if s == nil || len(s.Rejected) != 4 {
+		t.Fatalf("bad summary: %+v", s)
+	}
+	want := []string{"Not encoded: crf20 is a higher-quality setting", "does not save enough space", "below the minimum savings", "additional verification"}
+	for i, w := range want {
+		if got := s.Rejected[i].Checks[0].Reason; !strings.Contains(got, w) || strings.Contains(got, "This check did not pass") {
+			t.Fatalf("%s: reason %q lacks %q", s.Rejected[i].CandidateID, got, w)
+		}
+	}
+}
+
+func TestCompactBenchmarkWarnsWhenSelectedCandidateGrowsFile(t *testing.T) {
+	winner := &transcode.BenchmarkWinner{CandidateID: "crf22", SavingsPercent: -39.57}
+	r := &action.ActionResult{ActionName: "benchmark_transcode", Status: action.StatusCompleted, State: map[string]any{
+		"benchmark_decision": &transcode.BenchmarkDecision{Winner: winner, Evaluations: []transcode.BenchmarkCandidateEvaluation{{CandidateID: "crf22", Eligible: true, SavingsPercent: -39.57}}},
+	}}
+	s := compactBenchmark(r)
+	if s == nil || s.Outcome != "selected" || !strings.Contains(s.SizeWarning, "39.6% larger") || !strings.Contains(s.NextStep, "Keep the original") {
+		t.Fatalf("growth not flagged: %+v", s)
+	}
+	winner.SavingsPercent = 38
+	if s := compactBenchmark(r); s.SizeWarning != "" {
+		t.Fatalf("savings flagged as growth: %q", s.SizeWarning)
+	}
+}
