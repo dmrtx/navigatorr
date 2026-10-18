@@ -500,6 +500,11 @@ func (e *Engine) resume(ctx context.Context, instanceID string, decision string,
 	if (automatic && !e.shouldReconcile(inst, tmpl, ec)) || (inst.Status == StatusWaitingDecision && decision == "" && !(automatic && legacyBudgetStoppedBatch(inst))) {
 		return buildActionResult(inst, len(tmpl.Steps), ec), nil
 	}
+	if automatic && legacyBudgetStoppedBatch(inst) && getString(ec.State, "reason_code") == "search_budget_exhausted" {
+		// The retired flat cap's stop is no longer a reason; later decision
+		// points must not repeat its guidance.
+		delete(ec.State, "reason_code")
+	}
 	if decision != "" {
 		ec.Decision = decision
 	}

@@ -180,6 +180,11 @@ func roundComparable(prior, proposal *transcode.BenchmarkRequest) bool {
 	if prior.MinSavingsPercent > proposal.MinSavingsPercent {
 		return false
 	}
+	// A different audio plan, compact transform, metric, sample set or goal
+	// policy measures a different output; its verdict is not evidence here.
+	if prior.AudioMode != proposal.AudioMode || prior.Metric != proposal.Metric || prior.ModePolicyVersion != proposal.ModePolicyVersion || !sameJSON(prior.Compact, proposal.Compact) || (len(prior.Samples) > 0 || len(proposal.Samples) > 0) && !sameJSON(prior.Samples, proposal.Samples) {
+		return false
+	}
 	pq, nq := prior.Quality, proposal.Quality
 	if pq == nil {
 		return true
@@ -225,15 +230,29 @@ func reviewFloor(q *transcode.BenchmarkQualityConfig) *SearchReviewFloor {
 	return &SearchReviewFloor{Minimum: q.VMAF.Minimum, P5Minimum: q.VMAF.P5Minimum, WorstWindowMinimum: q.VMAF.WorstWindowMinimum}
 }
 
-// candidateMeasured is true when a round produced a result for the setting,
-// including a skip inferred from a failed higher-quality or smaller sibling.
-// Settings a worker could not run are not evidence.
+// measuredVerdicts are evaluation reasons that are a quality or savings
+// result for the setting, including a skip inferred from a failed
+// higher-quality or smaller sibling. Encode, metric and estimate failures are
+// technical and never count as the setting having been tried.
+var measuredVerdicts = map[string]bool{
+	"sample_below_minimum_quality":             true,
+	"below_minimum_quality":                    true,
+	"insufficient_savings":                     true,
+	"insufficient_savings_before_metrics":      true,
+	"skipped_quality_dominated":                true,
+	"skipped_savings_dominated":                true,
+	"quality_vmaf_mean_below_minimum":          true,
+	"quality_vmaf_sample_below_minimum":        true,
+	"quality_vmaf_p5_below_minimum":            true,
+	"quality_vmaf_worst_window_below_minimum":  true,
+	"quality_vmaf_frames_below_limit_exceeded": true,
+	"quality_ssim_mean_below_minimum":          true,
+	"quality_cambi_mean_above_maximum":         true,
+	"quality_cambi_peak_above_maximum":         true,
+}
+
 func candidateMeasured(ev transcode.BenchmarkCandidateEvaluation) bool {
-	switch ev.EvaluationReason {
-	case "", "encoder_not_allowed", "source_size_unknown":
-		return false
-	}
-	return true
+	return measuredVerdicts[ev.EvaluationReason]
 }
 
 // candidateIdentity ignores the candidate ID, which differs between rounds.
@@ -242,6 +261,12 @@ func candidateIdentity(c transcode.BenchmarkCandidate) string {
 	c.VideoCodec = transcode.BenchmarkCandidateVideoCodec(c)
 	raw, _ := json.Marshal(c)
 	return string(raw)
+}
+
+func sameJSON(a, b any) bool {
+	x, _ := json.Marshal(a)
+	y, _ := json.Marshal(b)
+	return string(x) == string(y)
 }
 
 func plural(n int, one, many string) string {

@@ -117,7 +117,7 @@ func TestBenchmarkHistoryIgnoresTechnicalFailuresAndAcceptedJobsStillReconcile(t
 	}
 }
 
-func seedSearchRound(t *testing.T, st *store.Store, id, mode string, floor float64, candidates []transcode.BenchmarkCandidate) {
+func seedSearchRound(t *testing.T, st *store.Store, id, mode string, floor float64, candidates []transcode.BenchmarkCandidate, adjust ...func(*transcode.BenchmarkRequest, *transcode.BenchmarkDecision)) {
 	t.Helper()
 	p5 := floor - 2
 	req := transcode.BenchmarkRequest{Candidates: candidates, Quality: &transcode.BenchmarkQualityConfig{VMAF: &transcode.BenchmarkQualityThresholds{Minimum: floor, P5Minimum: &p5, GuardrailEnforcement: "reject"}}}
@@ -126,6 +126,9 @@ func seedSearchRound(t *testing.T, st *store.Store, id, mode string, floor float
 	for _, c := range candidates {
 		decision.Evaluations = append(decision.Evaluations, transcode.BenchmarkCandidateEvaluation{CandidateID: c.ID, VideoCodec: c.VideoCodec, Quality: c.Quality, Preset: c.Preset, MetricType: "vmaf", Score: floor - 1, EvaluationReason: "sample_below_minimum_quality"})
 		evidence = append(evidence, transcode.BenchmarkCandidateQualityEvidence{CandidateID: c.ID, VMAF: &quality.VMAFStats{ModelID: "vmaf_v0.6.1", Mean: floor - 1, P5: floor - 4, Min: floor - 6, WorstWindowMean: floor - 3, FramesTotal: 240}})
+	}
+	for _, f := range adjust {
+		f(&req, &decision)
 	}
 	state := map[string]any{"original_sha256": "source", "benchmark_done": true, "has_winner": false, "benchmark_request": req, "benchmark_decision": decision, "benchmark_quality": evidence}
 	if err := st.CreateActionInstance(store.ActionInstance{ID: id, ActionName: "transcode_media", InputsJSON: toJSON(map[string]any{"mode": mode}), StateJSON: toJSON(state)}); err != nil {
@@ -189,5 +192,49 @@ func TestSearchReviewOffersNoRepeatOfTheSameLadder(t *testing.T) {
 	ec.Decision = "run_once_after_review"
 	if res := e.reviewBenchmarkSearch(ec); res != nil || !getBool(ec.State, "benchmark_search_reviewed") {
 		t.Fatalf("explicit run of a new setting refused: %+v", res)
+	}
+}
+
+func TestSearchReviewDoesNotCountTechnicalFailuresOrOtherOutputsAsTried(t *testing.T) {
+	ladder := []transcode.BenchmarkCandidate{x265("a", 16, "slow"), x265("b", 20, "medium")}
+	for _, reason := range []string{"candidate_encode_failed", "no_valid_metric", "metric_missing", "incomplete_sample_scores", "invalid_metric", "score_out_of_bounds", "unusable_estimate", "verification_not_passed", "quality_vmaf_evidence_incomplete"} {
+		st := setupTestStore(t)
+		technical := func(_ *transcode.BenchmarkRequest, d *transcode.BenchmarkDecision) {
+			for i := range d.Evaluations {
+				d.Evaluations[i].EvaluationReason = reason
+			}
+		}
+		seedSearchRound(t, st, "r1", "size", 88, ladder, technical)
+		seedSearchRound(t, st, "r2", "size", 88, ladder, technical)
+		e := NewEngine(EngineDeps{Store: st})
+		res := e.reviewBenchmarkSearch(reviewProposal(88, ladder...))
+		if res == nil || len(res.WaitingOptions) != 2 || res.WaitingOptions[1].Decision != "run_once_after_review" {
+			t.Fatalf("%s removed the explicit retry: %+v", reason, res)
+		}
+	}
+	// An earlier goal policy (different audio plan) measured a different
+	// output: its savings verdict does not block the current one.
+	st := setupTestStore(t)
+	v2 := func(r *transcode.BenchmarkRequest, d *transcode.BenchmarkDecision) {
+		r.ModePolicyVersion, r.AudioMode = "size-v2", "compact"
+		for i := range d.Evaluations {
+			d.Evaluations[i].EvaluationReason = "insufficient_savings"
+		}
+	}
+	seedSearchRound(t, st, "v2-1", "size", 88, ladder, v2)
+	seedSearchRound(t, st, "v2-2", "size", 88, ladder, v2)
+	e := NewEngine(EngineDeps{Store: st})
+	ec := reviewProposal(88, ladder...)
+	req := ec.State["benchmark_request"].(transcode.BenchmarkRequest)
+	req.ModePolicyVersion, req.AudioMode = "size-v3", "compact_lossless"
+	ec.State["benchmark_request"] = req
+	if res := e.reviewBenchmarkSearch(ec); res != nil {
+		t.Fatalf("a v2 round blocked a v3 proposal: %+v", res)
+	}
+	// The same policy's savings verdicts do count.
+	req.ModePolicyVersion, req.AudioMode = "size-v2", "compact"
+	ec.State["benchmark_request"] = req
+	if res := e.reviewBenchmarkSearch(ec); res == nil || len(res.WaitingOptions) != 1 {
+		t.Fatalf("same-policy savings verdicts ignored: %+v", res)
 	}
 }

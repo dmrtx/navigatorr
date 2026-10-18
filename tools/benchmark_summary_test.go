@@ -222,6 +222,10 @@ func TestCompactBenchmarkListsMeasuredVMAFPerCandidate(t *testing.T) {
 	if s == nil || len(s.Measured) != 1 || s.Measured[0].CandidateID != "crf16" || s.Measured[0].VMAF.WorstWindowMean != 92.8 || s.Measured[0].Passed {
 		t.Fatalf("measured VMAF not reported per candidate: %+v", s)
 	}
+	testing := compactBenchmark(&action.ActionResult{ActionName: "transcode_media", Status: action.StatusWaitingExternal, State: map[string]any{"optimization_enabled": true, "benchmark_status": "running"}})
+	if testing == nil || testing.Outcome != "testing" || testing.UserNextStep == "" || strings.Contains(testing.UserNextStep, "action_status") {
+		t.Fatalf("testing outcome has no plain next step: %+v", testing)
+	}
 	if s.UserNextStep == "" || strings.Contains(s.UserNextStep, "optimization.enabled") {
 		t.Fatalf("user next step carries agent guidance: %q", s.UserNextStep)
 	}

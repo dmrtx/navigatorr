@@ -105,7 +105,7 @@ func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
 	if !enabled && status == "" && decision == nil && !review {
 		return nil
 	}
-	s := &benchmarkSummary{ProgressScope: "Worker progress is for the benchmark only, not the full encode.", Outcome: "testing", Message: "Testing short video samples; no quality decision yet.", NextStep: "Monitor this action with action_status. A progress percentage does not mean quality passed; do not launch another search."}
+	s := &benchmarkSummary{ProgressScope: "Worker progress is for the benchmark only, not the full encode.", Outcome: "testing", Message: "Testing short video samples; no quality decision yet.", NextStep: "Monitor this action with action_status. A progress percentage does not mean quality passed; do not launch another search.", UserNextStep: "Nothing to do yet. Short samples are being tested; progress does not mean the quality check passed."}
 	switch {
 	case res.Status == action.StatusCancelled:
 		s.Outcome, s.Message, s.NextStep = "cancelled", "Search cancelled.", "Keep the original; inspect action details before starting other work."

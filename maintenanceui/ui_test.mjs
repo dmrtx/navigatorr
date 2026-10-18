@@ -569,6 +569,11 @@ test("batch rows show a smoothed encode ETA and the files left, only while speed
   text = progressText(h.run('batchProgress(progressJob)'));
   assert.doesNotMatch(text, / left/);
   assert.match(text, /Estimated workflow progress · Not time remaining/);
+  // Files that finished are forgotten; the smoothing map stays bounded.
+  h.run('for(let i=0;i<100;i++)encodeEta("old-"+i,{transcode_phase:"encoding",speed:1},600);');
+  assert.ok(h.run('encodeEtas.size') <= 64);
+  h.run('Date.now=()=>Date.parse("2026-10-16T12:40:00Z");encodeEta("fresh",{transcode_phase:"encoding",speed:1},600);');
+  assert.equal(h.run('encodeEtas.size'), 1);
   assert.equal(h.run('remainingLabel(45)'), "less than a minute left");
   assert.equal(h.run('remainingLabel(3600)'), "~1 h left");
 });

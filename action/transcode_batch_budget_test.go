@@ -149,6 +149,7 @@ func TestLegacyBudgetStoppedBatchResumesAutomatically(t *testing.T) {
 		reserveModeSearch(ec, fmt.Sprintf("earlier-%d", i))
 	}
 	root, _ := st.GetActionInstance(ec.InstanceID)
+	ec.State["reason_code"] = "search_budget_exhausted"
 	root.WaitingCondition, root.WaitingReason, root.StateJSON = "search_budget_exhausted", "Operation search budget is reserved or exhausted", toJSON(ec.State)
 	if err := st.UpdateActionInstance(*root); err != nil {
 		t.Fatal(err)
@@ -166,6 +167,9 @@ func TestLegacyBudgetStoppedBatchResumesAutomatically(t *testing.T) {
 	}
 	if root.Status == StatusWaitingDecision || admitted != len(items) {
 		t.Fatalf("legacy stopped batch not resumed: %s %s admitted=%d", root.Status, root.WaitingCondition, admitted)
+	}
+	if reason := getString(parseExecutionContext(root, e).State, "reason_code"); reason != "" {
+		t.Fatalf("resumed batch still reports %q", reason)
 	}
 	// Other waiting decisions still need the person.
 	seedActionInstance(t, st, "other", "transcode_batch", StatusWaitingDecision, 1, "", ec.Inputs, ec.State)

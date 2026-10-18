@@ -1956,7 +1956,14 @@ function encodeEta(key, worker, seconds) {
     if (prior.raw === raw) value = projected;
     else if (Math.abs(projected - raw) <= Math.max(120, projected * .5)) value = projected * .7 + raw * .3;
   }
+  // Re-insert so the map stays in last-seen order, then drop entries no
+  // render has refreshed for ten minutes and cap what remains.
+  encodeEtas.delete(key);
   encodeEtas.set(key, {value, raw, at: now});
+  for (const [k, entry] of encodeEtas) {
+    if (encodeEtas.size <= 64 && now - entry.at <= 600000) break;
+    encodeEtas.delete(k);
+  }
   return remainingLabel(value);
 }
 function remainingLabel(seconds) {
