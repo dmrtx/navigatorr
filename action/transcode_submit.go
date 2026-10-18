@@ -85,6 +85,15 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 			return StepResult{Status: StepFailed, Error: "worker does not support lossless audio compaction; upgrade the worker before encoding"}, nil
 		}
 	}
+	if transcode.IsSizeAudioOnlyPlan(plan) && !getBool(ec.State, "transcode_reconcile") {
+		caps, err := e.deps.Transcode.Capabilities(ctx)
+		if err != nil {
+			return StepResult{Status: StepFailed, Error: fmt.Sprintf("checking audio-only capability: %v", err)}, nil
+		}
+		if !caps.SizeAudioOnly {
+			return StepResult{Status: StepFailed, Error: "worker cannot prove a copied video stream; upgrade the worker before encoding"}, nil
+		}
+	}
 	if plan.AudioMode == "compact" && !getBool(ec.State, "transcode_reconcile") {
 		caps, err := e.deps.Transcode.Capabilities(ctx)
 		if err != nil {

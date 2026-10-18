@@ -380,6 +380,14 @@ func (w *Worker) validateModeSourceQuality(ctx context.Context, source string, p
 			return err
 		}
 	}
+	// An audio-only plan copies the video untouched, so there is no frame to
+	// measure; the source must still be the SDR class size mode admitted.
+	if transcode.IsSizeAudioOnlyPlan(plan) {
+		if mediainspect.IsHDRorDolbyVisionReport(&rep) || v.BitDepth != plan.ExpectedBitDepth {
+			return &transcode.PolicyRejectionError{ReasonCode: "preservation_not_met", Message: "audio-only source no longer matches its frozen SDR plan"}
+		}
+		return nil
+	}
 	if _, err := quality.TemporalDecimationForStream(v.FPS, v.FieldOrder); err != nil || (plan.Compact == nil && mediainspect.IsHDRorDolbyVisionReport(&rep)) || (v.BitDepth != 8 && v.BitDepth != 10) || !isSupportedSourceChroma(v.PixelFormat, v.BitDepth) {
 		return fmt.Errorf("quality_source_class_unsupported: native SDR 8/10-bit 4:2:0 evidence at a measurable frame rate (up to %.0f FPS) required", quality.HFRMaxFPS)
 	}

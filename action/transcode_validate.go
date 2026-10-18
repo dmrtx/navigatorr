@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/jakenesler/navigatorr/transcode/optimization"
 	"os"
 	"strings"
+
+	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/optimization"
 )
 
 // stepTranscodeValidate is the coordinator's LIGHTWEIGHT independent
@@ -53,13 +55,24 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 	}
 	if getString(ec.Inputs, "mode") != "" {
 		snapshot, err := freezeModePolicy(ec)
-		if err != nil || snapshot == nil || plan.Mode != snapshot.Mode || plan.PolicyDigest != snapshot.Digest || plan.QualityValidation == nil {
+		audioOnly := transcode.IsSizeAudioOnlyPlan(plan)
+		if err != nil || snapshot == nil || plan.Mode != snapshot.Mode || plan.PolicyDigest != snapshot.Digest || (plan.QualityValidation == nil) != audioOnly {
 			return StepResult{Status: StepFailed, Error: "mode final quality policy is missing or mismatched; original preserved"}, nil
 		}
-		expected, _ := json.Marshal(ensureBenchmarkQualityMetric(buildBenchmarkQualityConfig(snapshot.Profile.Optimization.Quality), "vmaf"))
-		actual, _ := json.Marshal(plan.QualityValidation.Quality)
-		if plan.QualityValidation.Metric != "vmaf" || string(expected) != string(actual) {
-			return StepResult{Status: StepFailed, Error: "final quality validation does not enforce frozen mode policy; original preserved"}, nil
+		if audioOnly {
+			// The video was copied, so the proof is bit-identical video, not
+			// a perceptual score; only a policy that allows it may use it.
+			var evidence transcode.FinalQualityEvidence
+			encoded, err := json.Marshal(ec.State["quality_evidence"])
+			if snapshot.Size == nil || !snapshot.Size.AudioOnlyFallback || transcode.ValidateSizeAudioOnlyShape(plan) != nil || err != nil || json.Unmarshal(encoded, &evidence) != nil || evidence.Verdict != "pass" || evidence.CandidateSHA256 == "" || evidence.CandidateSHA256 != getString(ec.State, "candidate_sha256") || evidence.PlanDigest != plan.PlanDigest || evidence.VideoCopy.Check() != nil {
+				return StepResult{Status: StepFailed, Error: "video copy evidence is missing or does not match the candidate and plan; original preserved"}, nil
+			}
+		} else {
+			expected, _ := json.Marshal(ensureBenchmarkQualityMetric(buildBenchmarkQualityConfig(snapshot.Profile.Optimization.Quality), "vmaf"))
+			actual, _ := json.Marshal(plan.QualityValidation.Quality)
+			if plan.QualityValidation.Metric != "vmaf" || string(expected) != string(actual) {
+				return StepResult{Status: StepFailed, Error: "final quality validation does not enforce frozen mode policy; original preserved"}, nil
+			}
 		}
 	}
 	if plan.QualityValidation != nil {
@@ -145,6 +158,9 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 	// worker-local before publish; the coordinator reports the expected target
 	// attributes rather than re-probing over NAS.
 	videoCodec := expectedVideoCodec(plan.VideoCodec)
+	if transcode.IsSizeAudioOnlyPlan(plan) {
+		videoCodec = normCodec(getString(origMap, "video_codec"))
+	}
 	resolution := getString(origMap, "resolution")
 	if c := plan.Compact; c != nil {
 		resolution = fmt.Sprintf("%dx%d", c.TargetWidth, c.TargetHeight)

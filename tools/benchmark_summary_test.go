@@ -168,3 +168,21 @@ func TestCompactBenchmarkReportsSettledPlanSource(t *testing.T) {
 		t.Fatalf("selected plan source missing: %+v", s)
 	}
 }
+
+func TestCompactBenchmarkExplainsAudioOnlyFallback(t *testing.T) {
+	res := &action.ActionResult{ActionName: "transcode_media", Status: action.StatusRunning, State: map[string]any{
+		"optimization_enabled": true,
+		"plan_source":          "audio_only",
+		"benchmark_decision":   transcode.BenchmarkDecision{DecisionReason: "all_candidates_invalid"},
+		"plan":                 transcode.Plan{Mode: "size", VideoCodec: transcode.VideoCodecCopy, AudioMode: transcode.AudioModeCompactLossless},
+	}}
+	data, _ := json.Marshal(res)
+	var persisted action.ActionResult
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	s := toCompactSummary(&persisted).Benchmark
+	if s == nil || s.Outcome != "audio_only" || !strings.Contains(s.Message, "copied unchanged") || !strings.Contains(s.NextStep, "bit-identical") {
+		t.Fatalf("audio-only fallback summary: %+v", s)
+	}
+}

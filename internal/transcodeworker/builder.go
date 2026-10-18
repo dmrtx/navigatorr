@@ -21,6 +21,13 @@ func BuildVideoEncoderArgs(plan *transcode.Plan) ([]string, error) {
 	var args []string
 	var err error
 	switch norm(plan.VideoCodec) {
+	case transcode.VideoCodecCopy:
+		// Only the size v3 audio-only shape copies video; any encoder knob
+		// alongside it is a malformed plan.
+		if err := transcode.ValidateSizeAudioOnlyShape(plan); err != nil {
+			return nil, err
+		}
+		return []string{"-c:v", "copy"}, nil
 	case "hevc_videotoolbox":
 		args, err = buildVideoToolboxArgs(plan)
 	case "libx265":

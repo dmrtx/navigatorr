@@ -2630,6 +2630,12 @@ test("size mode details show the expected size, final VMAF and compacted audio",
   assert.equal(h.run('codecLabel("dts")'), "DTS");
   assert.equal(h.run("sizeModeNote({})"), null);
   assert.equal(h.run("sizeModeNote({size_mode:{}})"), null);
+  const copied = allText(h.run('sizeModeNote({size_mode:{expected_bytes:6500000000,video_copied:true,video_copy_verified:true,compacted_audio:[{stream_index:0,from_codec:"truehd",to_codec:"aac"}]}})'));
+  assert.match(copied, /Expected size 6\.50 GB/);
+  assert.match(copied, /Video copied unchanged · verified bit-identical/);
+  assert.doesNotMatch(copied, /10-bit|VMAF/);
+  assert.match(allText(h.run('sizeModeNote({size_mode:{video_copied:true}})')), /only lossless audio is compacted/);
+  assert.match(h.run('shortJobReason("audio_compaction_insufficient")'), /lossless audio alone would not save enough/);
 });
 
 test("the encoding plan line says whether a sample test backs the settings", () => {

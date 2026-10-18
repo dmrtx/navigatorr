@@ -24,7 +24,7 @@ func TestSizeModePolicyV3Snapshot(t *testing.T) {
 	if p.Version != optimization.ModePolicyV3 || p.Size == nil || p.MinSavingsPercent != 15 || p.Profile.Audio.Mode != transcode.AudioModeCompactLossless {
 		t.Fatalf("size v3 snapshot %+v", p)
 	}
-	if !reflect.DeepEqual(p.Profile.Optimization.Search.QualityValues, []int{22, 24, 26, 28, 30}) || !p.Size.EightBitMain10 || p.Size.VideoToolboxCandidates {
+	if !reflect.DeepEqual(p.Profile.Optimization.Search.QualityValues, []int{22, 24, 26, 28, 30}) || !p.Size.EightBitMain10 || p.Size.VideoToolboxCandidates || !p.Size.AudioOnlyFallback {
 		t.Fatalf("size v3 search %+v %+v", p.Profile.Optimization.Search, p.Size)
 	}
 	if s := p.Size; s.FinalWindowSeconds != 10 || s.FinalWindowEverySeconds != 600 || s.FinalWindowsMinimum != 5 || s.FinalWindowsMaximum != 12 {

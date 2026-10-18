@@ -83,6 +83,10 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 	expected := expectedVideoCodec(getString(ec.Inputs, "expected_video_codec"))
 	if expected == "" {
 		expected = expectedVideoCodec(plan.VideoCodec)
+		// A copied video stream keeps the source codec.
+		if transcode.IsSizeAudioOnlyPlan(plan) {
+			expected = normCodec(getString(origMap, "video_codec"))
+		}
 	}
 	if expected != "" && !strings.Contains(strings.ToLower(outVideo[0].Codec), expected) {
 		return waitDecision(fmt.Sprintf("Video codec mismatch: expected %s, transcoded output is %s", expected, outVideo[0].Codec)), nil

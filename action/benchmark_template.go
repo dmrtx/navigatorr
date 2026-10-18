@@ -530,6 +530,9 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 
 		// If this is transcode_media, require a valid winner before proceeding to full transcode.
 		if ec.ActionName == "transcode_media" && !hasWinner && getString(ec.Inputs, "mode") != "" {
+			if result, handled := e.sizeAudioOnlyFallback(ctx, ec, outputs); handled {
+				return result, nil
+			}
 			ec.State["skip_transcode"] = true
 			ec.State["reason_code"] = "no_suitable_candidate"
 			outputs["skipped"] = true

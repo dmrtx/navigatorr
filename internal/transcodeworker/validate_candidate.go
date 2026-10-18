@@ -49,6 +49,12 @@ func verifyCheckpointCandidate(ctx context.Context, job *JobRecord, path string)
 			return err
 		}
 	}
+	if transcode.IsSizeAudioOnlyPlan(job.Plan) {
+		e := job.QualityEvidence
+		if e == nil || e.Verdict != "pass" || e.CandidateSHA256 != job.CandidateSHA256 || e.CandidateSizeBytes != job.CandidateSizeBytes || e.PlanDigest != job.Plan.PlanDigest || e.VideoCopy.Check() != nil {
+			return fmt.Errorf("%w: video copy attestation missing or mismatched; never publish", ErrSourceInvalid)
+		}
+	}
 	if job.Plan != nil && job.Plan.QualityValidation != nil {
 		e := job.QualityEvidence
 		if e == nil || e.Verdict != "pass" || e.CandidateSHA256 != job.CandidateSHA256 || e.CandidateSizeBytes != job.CandidateSizeBytes || e.PlanDigest != job.Plan.PlanDigest || e.BenchmarkRequestDigest != job.Plan.QualityValidation.BenchmarkRequestDigest {

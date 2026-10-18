@@ -80,14 +80,23 @@ func ValidatePlan(p *transcode.Plan) error {
 		default:
 			return fmt.Errorf("unsupported processing mode")
 		}
-		if p.SizePolicy == nil || p.SizePolicy.MinSavingsPercent != min || p.SizePolicy.MaxSizeIncreasePercent != 0 || p.PolicyDigest == "" || p.QualityValidation == nil || p.AudioMode != modeAudioMode(p.Mode, p.ModePolicyVersion) {
+		// An audio-only size plan copies the video, so a bit-identical
+		// stream proof replaces perceptual validation; every other mode plan
+		// carries its frozen quality policy.
+		audioOnly := transcode.IsSizeAudioOnlyPlan(p)
+		if p.SizePolicy == nil || p.SizePolicy.MinSavingsPercent != min || p.SizePolicy.MaxSizeIncreasePercent != 0 || p.PolicyDigest == "" || (p.QualityValidation == nil) != audioOnly || p.AudioMode != modeAudioMode(p.Mode, p.ModePolicyVersion) {
 			return fmt.Errorf("mode plan requires frozen size/quality policy and audio preservation")
+		}
+		if audioOnly {
+			if err := transcode.ValidateSizeAudioOnlyShape(p); err != nil {
+				return err
+			}
 		}
 	}
 	if normalizeContainer(p.Container) != "mkv" {
 		return fmt.Errorf("unsupported container %q (only mkv is allowed; fail closed)", p.Container)
 	}
-	if norm(p.VideoCodec) != "hevc_videotoolbox" && norm(p.VideoCodec) != "libx265" {
+	if norm(p.VideoCodec) != "hevc_videotoolbox" && norm(p.VideoCodec) != "libx265" && !transcode.IsSizeAudioOnlyPlan(p) {
 		return fmt.Errorf("unsupported video codec %q (fail closed)", p.VideoCodec)
 	}
 	// VideoToolbox rate control is exactly one dimension: quality mode
