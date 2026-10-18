@@ -2504,6 +2504,39 @@ test("sample test results explain each rejected setting with its measurement and
   assert.match(allText(larger.report), /6\.3% larger.*Next step:\s+Keep the original/);
 });
 
+test("the encoding plan line says whether a sample test backs the settings", () => {
+  const h = harness();
+  const note = "No benchmark candidate was selected; the stored plan is the profile's untested starting configuration.";
+  const untested = h.run(`encodingPlanNote({benchmark:{outcome:"no_acceptable_candidate",plan_source:"profile_base",plan_note:${JSON.stringify(note)}}})`);
+  assert.match(allText(untested), /Encoding plan:.*untested starting configuration/);
+  assert.match(untested.className, /plan-profile_base/);
+  assert.match(allText(h.run('encodingPlanNote({benchmark:{outcome:"selected",plan_source:"benchmark_winner"}})')), /selected by the sample test/);
+  assert.equal(h.run('encodingPlanNote({benchmark:{outcome:"testing"}})'), null, "a provisional preflight plan is not shown");
+  assert.equal(h.run("encodingPlanNote({})"), null);
+});
+
+test("a job paused because quality checks are unavailable is not shown as still testing", () => {
+  const h = harness();
+  h.context.job = {id:"p",action_name:"transcode_media",mode:"compact",status:"waiting_decision",waiting_reason:"quality_vmaf_model_unavailable: v1_1080p_3h; original preserved",
+    benchmark:{outcome:"quality_policy_unavailable",message:"No sample test was started: the worker cannot run the quality checks this goal requires. The original is preserved.",next_step:"Cancel to keep the original."}};
+  const text = allText(h.run("benchmarkReport(job)"));
+  assert.match(text, /Quality checks unavailable/);
+  assert.match(text, /No sample test was started/);
+  assert.match(text, /Next step: .*Cancel to keep the original/);
+  assert.doesNotMatch(text, /quality_policy_unavailable/);
+  assert.match(allText(h.run('benchmarkReport({benchmark:{outcome:"attention",message:"Search budget exhausted.",next_step:"Review."}})')), /Needs your decision/);
+});
+
+test("the worker details explain why a connected worker still refuses jobs", () => {
+  const h = harness();
+  h.context.host = new Element();
+  const note = "The worker is ready, but its deep checks failed, and job submission runs the same checks: transcode jobs will be refused until the doctor error is fixed.";
+  h.run(`renderWorkerDetails(host, {nodes:[{name:"Video worker",connected:true,reachable:true,ready:false,admission_note:${JSON.stringify(note)}}]})`);
+  assert.match(allText(h.context.host), /deep checks failed.*refused/);
+  h.run('renderWorkerDetails(host, {nodes:[{name:"Video worker",connected:true,reachable:true,ready:true}]})');
+  assert.doesNotMatch(allText(h.context.host), /deep checks/);
+});
+
 test("negative sizes and machine reason codes are readable", () => {
   const h = harness();
   assert.match(h.run("bytes(-408021893)"), /^−\d/);

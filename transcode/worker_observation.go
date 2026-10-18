@@ -39,7 +39,18 @@ type WorkerObservation struct {
 	Ready      bool      `json:"ready"`
 	CheckedAt  time.Time `json:"checked_at"`
 	Message    string    `json:"message"`
+	// AdmissionNote states what the readiness result means for job
+	// submission when the deep checks failed or did not finish.
+	AdmissionNote string `json:"admission_note,omitempty"`
 }
+
+// Admission notes are shared by diagnostics and the worker observation, so
+// the web UI and MCP clients explain one admission gate the same way.
+const (
+	AdmissionNoteReadinessOnly     = "can_accept_jobs reflects worker readiness only. Job submission also checks media storage and encoders; use worker_health or check_deep=true for that full gate."
+	AdmissionNoteDeepChecksFailed  = "The worker is ready, but its deep checks failed, and job submission runs the same checks: transcode jobs will be refused until the doctor error is fixed."
+	AdmissionNoteDeepChecksTimeout = "The deep checks timed out, so job admission is unknown; check worker health again before submitting."
+)
 
 // Scheduler probes the same bounded liveness response used by Health; it does
 // not turn HTTP success into a claim that either scheduler sweep is healthy.

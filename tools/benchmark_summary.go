@@ -25,6 +25,8 @@ type benchmarkSummary struct {
 	Rejected           []benchmarkRejection               `json:"rejected,omitempty"`
 	Audio              []benchmarkAudio                   `json:"planned_audio,omitempty"`
 	AudioNote          string                             `json:"audio_note,omitempty"`
+	PlanSource         string                             `json:"plan_source,omitempty"`
+	PlanNote           string                             `json:"plan_note,omitempty"`
 }
 
 type benchmarkRejection struct {
@@ -92,6 +94,20 @@ func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
 			s.ProposedCandidates = req.Candidates
 			s.ProposedQuality, s.ProposedSamples = req.Quality, req.Samples
 		}
+	case res.Status == action.StatusWaitingDecision && decision == nil:
+		// A paused workflow is not testing anything. Mode attention stops
+		// before or between searches and waits only for the user.
+		var reason string
+		benchmarkField(res, "reason_code", &reason)
+		s.Outcome, s.Message = "attention", res.WaitingReason
+		if s.Message == "" {
+			s.Message = "Waiting for your decision; no quality result was recorded."
+		}
+		s.NextStep = "Review the waiting reason and choose one of the displayed decisions. Do not start another search automatically."
+		if reason == "quality_policy_unavailable" {
+			s.Outcome, s.Message = reason, "No sample test was started: the worker cannot run the quality checks this goal requires. The original is preserved."
+			s.NextStep = "Cancel to keep the original. To process this file, make the missing quality check available on the worker (the waiting reason names it) and start the goal again; quality requirements are never relaxed automatically."
+		}
 	case decision != nil && decision.Winner == nil:
 		s.Outcome, s.Message = "no_acceptable_candidate", "The benchmark finished, but no candidate met all configured checks. Full encoding did not start."
 		s.NextStep = "Inspect the rejected checks and indicated source fragment before choosing a next step. Keep the original, or explicitly choose direct encoding via a new transcode_media action with a non-optimizing profile/profile_config (optimization.enabled=false). Direct encoding does not claim a perceptual quality pass and never replaces the original. Do not automatically start another CRF ladder or relax thresholds."
@@ -116,6 +132,14 @@ func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
 			s.Message = explanation.Message
 			s.NextStep = "Keep the original, or explicitly choose another processing goal. Technical profiles are optional; quality requirements are never relaxed automatically."
 		}
+	}
+	// Preflight stores profile_base as a provisional plan before any search,
+	// so the source is reported only once the benchmark settled it.
+	benchmarkField(res, "plan_note", &s.PlanNote)
+	var planSource string
+	benchmarkField(res, "plan_source", &planSource)
+	if planSource == "benchmark_winner" || s.PlanNote != "" {
+		s.PlanSource = planSource
 	}
 	var evidence []transcode.BenchmarkCandidateQualityEvidence
 	var request transcode.BenchmarkRequest

@@ -101,3 +101,19 @@ func (w *observationFakeWorker) Health(context.Context) error {
 	return nil
 }
 func (w liveTimestampWorker) Health(context.Context) error { return nil }
+func TestWorkerObservationExplainsFailedAndTimedOutAdmission(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want string
+	}{
+		{nil, ""},
+		{errors.New("smb_auth_failed"), transcode.AdmissionNoteDeepChecksFailed},
+		{context.DeadlineExceeded, transcode.AdmissionNoteDeepChecksTimeout},
+	} {
+		worker := &observationFakeWorker{observation: transcode.SchedulerObservation{Health: "ok", ObservedAt: time.Now().UTC()}, doctorErr: tc.err}
+		out := NewEngine(EngineDeps{Transcode: worker}).WorkerObservation(context.Background())
+		if out.AdmissionNote != tc.want || out.Ready != (tc.err == nil) {
+			t.Fatalf("%v: %+v", tc.err, out)
+		}
+	}
+}
