@@ -42,7 +42,7 @@ func TestVMAFRealEncodedDepthIsIndependentOfMeasurementDepth(t *testing.T) {
 	scores := map[int]float64{}
 	for _, depth := range []int{8, 10} {
 		log := filepath.Join(dir, "metric.json")
-		args, err := BuildVMAFModelArgs(cand, ref, log, model, depth, 0)
+		args, err := BuildVMAFModelArgs(cand, ref, log, model, depth, 1, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -51,7 +51,7 @@ func TestVMAFRealEncodedDepthIsIndependentOfMeasurementDepth(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		stats, err := quality.ParseVMAF(data, MaxMetricLogSizeBytes, model, 0, 0, 24, 0.2, nil)
+		stats, err := quality.ParseVMAF(data, MaxMetricLogSizeBytes, model, 0, 0, 24, 1, 0.2, nil)
 		if err != nil || stats.FramesTotal != 6 || stats.MeasurementBitDepth != 10 {
 			t.Fatalf("invalid measurement: %+v, %v", stats, err)
 		}
@@ -96,7 +96,7 @@ func TestVMAFRealEncodedDepthIsIndependentOfMeasurementDepth(t *testing.T) {
 func TestVMAFRejectsUnknownEncodedDepth(t *testing.T) {
 	model, _ := quality.Model("v1_1080p_3h")
 	for _, depth := range []int{0, 9, 12} {
-		if _, err := BuildVMAFModelArgs("candidate", "reference", "metric.json", model, depth, 0); err == nil {
+		if _, err := BuildVMAFModelArgs("candidate", "reference", "metric.json", model, depth, 1, 0); err == nil {
 			t.Fatalf("accepted unverified encoded bit depth %d", depth)
 		}
 	}

@@ -89,8 +89,16 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 	if sourceVideoStreams[0].BitDepth > 8 && runCAMBI && !caps.SupportsNative10BitQuality() {
 		return fail("quality_cambi_native_main10_unverified", fmt.Errorf("native %d-bit source not eligible for CAMBI", sourceVideoStreams[0].BitDepth))
 	}
-	if sourceVideoStreams[0].FPS >= 45 && runVMAF {
-		return fail("quality_vmaf_hfr_model_unavailable", fmt.Errorf("non-HFR model requested for %.3f FPS source", sourceVideoStreams[0].FPS))
+	vmafDecimation := 1
+	if runVMAF {
+		// The non-HFR model only sees HFR motion on a frame-exact decimation;
+		// rates outside the supported class still fail closed.
+		if vmafDecimation, err = quality.TemporalDecimation(sourceVideoStreams[0].FPS); err != nil {
+			return fail("quality_vmaf_hfr_model_unavailable", err)
+		}
+		if vmafDecimation > 1 && !caps.SupportsHFRQuality() {
+			return fail("quality_vmaf_hfr_model_unavailable", fmt.Errorf("no proven decimated VMAF path for %.3f FPS source", sourceVideoStreams[0].FPS))
+		}
 	}
 	if sourceRep.DurationSec <= 0 || candidateRep.DurationSec <= 0 {
 		return fail("quality_final_duration_unavailable", fmt.Errorf("source or candidate duration missing"))
@@ -133,7 +141,7 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 		}
 		if runVMAF {
 			logPath := filepath.Join(scratch, fmt.Sprintf("vmaf_%d.json", window.Index))
-			args, err := BuildVMAFModelArgs(candPath, refPath, logPath, *model, candidateVideoStreams[0].BitDepth, w.metricThreads(1))
+			args, err := BuildVMAFModelArgs(candPath, refPath, logPath, *model, candidateVideoStreams[0].BitDepth, vmafDecimation, w.metricThreads(1))
 			if err != nil {
 				return fail("quality_vmaf_measurement_path_unavailable", err)
 			}
@@ -144,8 +152,8 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 			if err != nil {
 				return fail("quality_vmaf_evidence_incomplete", err)
 			}
-			stats, err := quality.ParseVMAF(data, MaxMetricLogSizeBytes, *model, window.Index, window.StartSeconds, sourceVideoStreams[0].FPS, q.Quality.VMAF.WorstWindowSeconds, q.Quality.VMAF.FrameThreshold)
-			if err != nil || stats.FramesTotal != len(refPTS) {
+			stats, err := quality.ParseVMAF(data, MaxMetricLogSizeBytes, *model, window.Index, window.StartSeconds, sourceVideoStreams[0].FPS, vmafDecimation, q.Quality.VMAF.WorstWindowSeconds, q.Quality.VMAF.FrameThreshold)
+			if err != nil || stats.FramesTotal != quality.DecimatedFrameCount(len(refPTS), vmafDecimation) {
 				return fail("quality_vmaf_evidence_incomplete", fmt.Errorf("sample %d: %v", window.Index, err))
 			}
 			vmafSamples = append(vmafSamples, stats)
@@ -199,7 +207,7 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 			if v.WorstWindowMinimum != nil && combined.WorstWindowMean < *v.WorstWindowMinimum {
 				e.ReasonCodes = append(e.ReasonCodes, "quality_vmaf_worst_window_below_minimum")
 			}
-			if v.MaxFramesBelowThreshold != nil && combined.FramesBelowThreshold > *v.MaxFramesBelowThreshold {
+			if v.MaxFramesBelowThreshold != nil && combined.SourceEquivalentFramesBelowThreshold() > *v.MaxFramesBelowThreshold {
 				e.ReasonCodes = append(e.ReasonCodes, "quality_vmaf_frames_below_limit_exceeded")
 			}
 		}
@@ -321,8 +329,8 @@ func (w *Worker) validateModeSourceQuality(ctx context.Context, source string, p
 	if plan.Mode == "x265_preserve" && (norm(v.Codec) == "hevc" || norm(v.Codec) == "h265") {
 		return &transcode.PolicyRejectionError{ReasonCode: "already_hevc", Message: "source is already HEVC; no conversion required"}
 	}
-	if mediainspect.IsHDRorDolbyVisionReport(&rep) || (v.BitDepth != 8 && v.BitDepth != 10) || !isSupportedSourceChroma(v.PixelFormat, v.BitDepth) || v.FPS <= 0 || v.FPS >= 45 {
-		return fmt.Errorf("quality_source_class_unsupported: native SDR 8/10-bit 4:2:0 non-HFR evidence required")
+	if _, err := quality.TemporalDecimation(v.FPS); err != nil || mediainspect.IsHDRorDolbyVisionReport(&rep) || (v.BitDepth != 8 && v.BitDepth != 10) || !isSupportedSourceChroma(v.PixelFormat, v.BitDepth) {
+		return fmt.Errorf("quality_source_class_unsupported: native SDR 8/10-bit 4:2:0 evidence at a measurable frame rate (up to %.0f FPS) required", quality.HFRMaxFPS)
 	}
 	q := plan.QualityValidation
 	if q == nil || q.Quality.VMAF == nil || q.Quality.VMAF.Model == "" || (q.Metric != "vmaf" && q.Metric != "both" && q.Metric != "vmaf+ssim") {
@@ -337,6 +345,9 @@ func (w *Worker) validateModeSourceQuality(ctx context.Context, source string, p
 	}
 	if v.BitDepth == 10 && !caps.SupportsNative10BitQuality() {
 		return fmt.Errorf("quality_native_main10_unverified: executable native depth path is unavailable")
+	}
+	if !caps.SupportsQualityFPS(v.FPS) {
+		return fmt.Errorf("quality_source_class_unsupported: no proven decimated VMAF path for %.3f FPS source", v.FPS)
 	}
 	return nil
 }

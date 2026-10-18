@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/jakenesler/navigatorr/transcode/quality"
 )
 
 // WorkerProtocolVersion is the current version of the worker capability
@@ -55,7 +57,11 @@ type QualityCapabilities struct {
 	Models         map[string]QualityModelCapability `json:"models,omitempty"`
 	CAMBIFullRef   bool                              `json:"cambi_full_ref"`
 	CAMBIOutput    string                            `json:"cambi_output,omitempty"`
-	ProbeError     string                            `json:"probe_error,omitempty"`
+	// HFRTemporalDecimation is the VMAF decimation factor the worker executed
+	// on a synthetic high-frame-rate pair. Zero means HFR sources are
+	// unsupported (older workers), so coordinators must not dispatch them.
+	HFRTemporalDecimation int    `json:"hfr_temporal_decimation,omitempty"`
+	ProbeError            string `json:"probe_error,omitempty"`
 }
 
 // WorkerCapabilities represents the versioned capability report of a transcode worker node.
@@ -201,6 +207,20 @@ func VerifyCapabilityFingerprint(caps WorkerCapabilities) error {
 		return fmt.Errorf("worker capability fingerprint mismatch: got %s, want %s (fail closed)", caps.CapabilityFingerprint, expected)
 	}
 	return nil
+}
+
+// SupportsHFRQuality reports a proven decimated VMAF measurement path for
+// sources between quality.HFRMinFPS and quality.HFRMaxFPS.
+func (c WorkerCapabilities) SupportsHFRQuality() bool {
+	return c.Quality != nil && c.Quality.ProbeError == "" && c.Quality.Models["v1_1080p_3h"].Available && c.Quality.HFRTemporalDecimation == quality.HFRDecimationFactor
+}
+
+// SupportsQualityFPS is the single coordinator/worker frame-rate gate for
+// modeled VMAF measurement: native rates below quality.HFRMinFPS always,
+// the HFR class only on a worker that proved decimation, nothing else.
+func (c WorkerCapabilities) SupportsQualityFPS(fps float64) bool {
+	factor, err := quality.TemporalDecimation(fps)
+	return err == nil && (factor == 1 || c.SupportsHFRQuality())
 }
 
 // Both metrics must have executed on native 10-bit synthetic inputs without

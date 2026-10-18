@@ -53,7 +53,12 @@ type VMAFStats struct {
 	WorstWindowStartSec    float64  `json:"worst_window_start_sec,omitempty"`
 	WorstWindowSourceSec   float64  `json:"worst_window_source_sec,omitempty"`
 	WindowTiming           string   `json:"window_timing,omitempty"`
-	frameScores            []float64
+	// TemporalDecimation is the frame decimation applied to both inputs
+	// before measurement (1 = every frame); MeasuredFPS is the resulting
+	// nominal rate the model saw. Zero only appears in legacy evidence.
+	TemporalDecimation int     `json:"temporal_decimation,omitempty"`
+	MeasuredFPS        float64 `json:"measured_fps,omitempty"`
+	frameScores        []float64
 }
 
 type metricLog struct {
@@ -69,7 +74,10 @@ type metricLog struct {
 
 // ParseVMAF validates every frame even when a pooled score is present. The
 // nearest-rank p5 is sortedScores[ceil(.05*n)-1], clamped to the first item.
-func ParseVMAF(data []byte, maxBytes int, model VMAFModel, sampleIndex int, sourceStartSec, fps, windowSeconds float64, frameThreshold *float64) (VMAFStats, error) {
+// decimation is the factor the metric graph applied to both inputs; frame
+// times and windows use the measured rate sourceFPS/decimation, so locations
+// still map back to the source timeline.
+func ParseVMAF(data []byte, maxBytes int, model VMAFModel, sampleIndex int, sourceStartSec, sourceFPS float64, decimation int, windowSeconds float64, frameThreshold *float64) (VMAFStats, error) {
 	var out VMAFStats
 	if len(data) == 0 || len(data) > maxBytes || maxBytes <= 0 {
 		return out, fmt.Errorf("empty or oversized VMAF JSON log")
@@ -77,9 +85,13 @@ func ParseVMAF(data []byte, maxBytes int, model VMAFModel, sampleIndex int, sour
 	if model.ID == "" || !finite(model.MinScore) || !finite(model.MaxScore) || model.MinScore >= model.MaxScore {
 		return out, fmt.Errorf("invalid VMAF model bounds")
 	}
-	if !finite(sourceStartSec) || sourceStartSec < 0 || !finite(fps) || fps <= 0 || !finite(windowSeconds) || windowSeconds <= 0 {
+	if !finite(sourceStartSec) || sourceStartSec < 0 || !finite(sourceFPS) || sourceFPS <= 0 || !finite(windowSeconds) || windowSeconds <= 0 {
 		return out, fmt.Errorf("invalid sample timing")
 	}
+	if !validDecimation(decimation) {
+		return out, fmt.Errorf("unsupported temporal decimation factor %d", decimation)
+	}
+	fps := sourceFPS / float64(decimation)
 	if frameThreshold != nil && (!finite(*frameThreshold) || *frameThreshold < model.MinScore || *frameThreshold > model.MaxScore) {
 		return out, fmt.Errorf("invalid VMAF frame threshold")
 	}
@@ -151,6 +163,8 @@ func ParseVMAF(data []byte, maxBytes int, model VMAFModel, sampleIndex int, sour
 	out.WorstWindowStartSec = float64(worstStart) / fps
 	out.WorstWindowSourceSec = sourceStartSec + out.WorstWindowStartSec
 	out.WindowTiming = "nominal_fps"
+	out.TemporalDecimation = decimation
+	out.MeasuredFPS = fps
 	out.frameScores = scores
 	return out, nil
 }
@@ -167,7 +181,7 @@ func CombineVMAF(samples []VMAFStats) (VMAFStats, error) {
 	all := make([]float64, 0)
 	sum := 0.0
 	for i, sample := range samples {
-		if sample.ModelID != out.ModelID || sample.LibvmafModel != out.LibvmafModel || sample.MeasurementBitDepth != out.MeasurementBitDepth || sample.ScoreMin != out.ScoreMin || sample.ScoreMax != out.ScoreMax || sample.FrameThreshold == nil != (out.FrameThreshold == nil) {
+		if sample.ModelID != out.ModelID || sample.LibvmafModel != out.LibvmafModel || sample.MeasurementBitDepth != out.MeasurementBitDepth || sample.ScoreMin != out.ScoreMin || sample.ScoreMax != out.ScoreMax || sample.FrameThreshold == nil != (out.FrameThreshold == nil) || sample.TemporalDecimation != out.TemporalDecimation {
 			return VMAFStats{}, fmt.Errorf("incompatible VMAF sample %d", i)
 		}
 		if len(sample.frameScores) == 0 || len(sample.frameScores) != sample.FramesTotal {
@@ -198,6 +212,17 @@ func CombineVMAF(samples []VMAFStats) (VMAFStats, error) {
 	out.FramesTotal = len(all)
 	out.frameScores = nil
 	return out, nil
+}
+
+// SourceEquivalentFramesBelowThreshold scales the measured count by the
+// decimation factor: each measured frame stands for that many source frames,
+// so a frame-count limit keeps its meaning in source time instead of becoming
+// twice as lenient on decimated HFR evidence.
+func (s VMAFStats) SourceEquivalentFramesBelowThreshold() int {
+	if s.TemporalDecimation > 1 {
+		return s.FramesBelowThreshold * s.TemporalDecimation
+	}
+	return s.FramesBelowThreshold
 }
 
 func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }

@@ -1,6 +1,7 @@
 package action
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/quality"
 	"github.com/jakenesler/navigatorr/transcode/recipe"
 )
 
@@ -117,15 +119,47 @@ func freezeModePolicy(ec *ExecutionContext) (*ModePolicySnapshot, error) {
 	return &p, nil
 }
 
-func modeSourceReason(mode string, rep *mediainspect.DetailedReport) string {
+// modeSourceReason classifies a source for an automatic mode. hfrSupported
+// must come from the worker's proven decimated-VMAF capability; without it
+// 45-61 FPS sources stay unsupported, as do rates above that class.
+func modeSourceReason(mode string, rep *mediainspect.DetailedReport, hfrSupported bool) string {
 	video := rep.MainVideo()
-	if len(video) != 1 || video[0].BitDepth != 8 && video[0].BitDepth != 10 || video[0].FPS <= 0 || video[0].FPS >= 45 || isSourceHDRorDV(rep) {
+	if len(video) != 1 || video[0].BitDepth != 8 && video[0].BitDepth != 10 || isSourceHDRorDV(rep) {
+		return "unsupported_source"
+	}
+	if factor, err := quality.TemporalDecimation(video[0].FPS); err != nil || factor > 1 && !hfrSupported {
 		return "unsupported_source"
 	}
 	if mode == "x265_preserve" && strings.EqualFold(video[0].Codec, "hevc") {
 		return "already_target_codec"
 	}
 	return ""
+}
+
+// hfrQualitySupport asks the worker at most once per step, and only when a
+// source actually needs decimation. Any capability error fails closed.
+type hfrQualitySupport struct {
+	e         *Engine
+	checked   bool
+	supported bool
+}
+
+func (h *hfrQualitySupport) forSource(ctx context.Context, rep *mediainspect.DetailedReport) bool {
+	if rep == nil {
+		return false
+	}
+	if video := rep.MainVideo(); len(video) != 1 || !quality.IsHFR(video[0].FPS) {
+		return false
+	}
+	if !h.checked {
+		h.checked = true
+		if h.e != nil && h.e.deps.Transcode != nil {
+			if caps, err := h.e.deps.Transcode.Capabilities(ctx); err == nil {
+				h.supported = caps.SupportsHFRQuality()
+			}
+		}
+	}
+	return h.supported
 }
 
 func modeAttention(ec *ExecutionContext, reason, message string) StepResult {

@@ -87,12 +87,15 @@ type BenchmarkExecutionEvidence struct {
 	SourcePixelFormat string                                `json:"source_pixel_format"`
 	SourceResolution  string                                `json:"source_resolution"`
 	SourceFPS         float64                               `json:"source_fps,omitempty"`
-	Quality           []CandidateQualityEvidence            `json:"quality,omitempty"`
-	ReferenceSamples  []BenchmarkSampleRef                  `json:"reference_samples"`
-	CandidateSamples  []BenchmarkCandidateSampleResult      `json:"candidate_samples"`
-	MetricSamples     []BenchmarkMetricSampleResult         `json:"metric_samples,omitempty"`
-	CandidateMetrics  []BenchmarkCandidateMetricAggregate   `json:"candidate_metrics,omitempty"`
-	Decision          *transcode.BenchmarkDecision          `json:"decision,omitempty"`
+	// VMAFTemporalDecimation records the frame decimation used for modeled
+	// VMAF (2 for HFR sources) so sampled evidence stays auditable.
+	VMAFTemporalDecimation int                                 `json:"vmaf_temporal_decimation,omitempty"`
+	Quality                []CandidateQualityEvidence          `json:"quality,omitempty"`
+	ReferenceSamples       []BenchmarkSampleRef                `json:"reference_samples"`
+	CandidateSamples       []BenchmarkCandidateSampleResult    `json:"candidate_samples"`
+	MetricSamples          []BenchmarkMetricSampleResult       `json:"metric_samples,omitempty"`
+	CandidateMetrics       []BenchmarkCandidateMetricAggregate `json:"candidate_metrics,omitempty"`
+	Decision               *transcode.BenchmarkDecision        `json:"decision,omitempty"`
 }
 
 type CandidateQualityEvidence = transcode.BenchmarkCandidateQualityEvidence
@@ -343,8 +346,10 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		return fmt.Errorf("source media %s has %d video streams; benchmark requires exactly 1 (fail closed)", record.Source, len(mainVideo))
 	}
 	sourceVideo := mainVideo[0]
-	if record.Quality != nil && record.Quality.VMAF != nil && record.Quality.VMAF.Model != "" && sourceVideo.FPS >= 45 {
-		return fmt.Errorf("VMAF model %q is non-HFR and source FPS %.3f requires an HFR model (fail closed)", record.Quality.VMAF.Model, sourceVideo.FPS)
+	// HFR sources are measured on a decimated pair (the pipeline requires the
+	// proven capability before encoding); faster rates have no such path.
+	if record.Quality != nil && record.Quality.VMAF != nil && record.Quality.VMAF.Model != "" && sourceVideo.FPS > quality.HFRMaxFPS {
+		return fmt.Errorf("quality_vmaf_hfr_model_unavailable: VMAF model %q cannot measure a %.3f FPS source above %.0f FPS (fail closed)", record.Quality.VMAF.Model, sourceVideo.FPS, quality.HFRMaxFPS)
 	}
 
 	// HDR / Dolby Vision rejection: automatic benchmark optimization is strictly SDR-only
@@ -1059,11 +1064,17 @@ func BuildVMAFArgs(candPath, refPath, logPath string) []string {
 // encode upconverted for measurement is incorrectly evaluated as 10-bit.
 // framesync must end at the shorter input without repeats.
 // threads > 0 sets libvmaf n_threads; zero keeps the libvmaf default.
-func BuildVMAFModelArgs(candPath, refPath, logPath string, model quality.VMAFModel, encodedBitDepth, threads int) ([]string, error) {
+// decimation (quality.TemporalDecimation) drops the same frame indices from
+// both PTS-normalized inputs, so pairs stay aligned for HFR sources.
+func BuildVMAFModelArgs(candPath, refPath, logPath string, model quality.VMAFModel, encodedBitDepth, decimation, threads int) ([]string, error) {
 	if model.ID == "" || model.LibvmafModel == "" || model.MeasurementBitDepth != 10 || (encodedBitDepth != 8 && encodedBitDepth != 10) {
 		return nil, fmt.Errorf("unsupported VMAF model measurement contract")
 	}
-	filter := fmt.Sprintf("[0:v]format=yuv420p10le,setpts=PTS-STARTPTS[d];[1:v]format=yuv420p10le,setpts=PTS-STARTPTS[r];[d][r]libvmaf=model='version=%s\\:cambi.enc_bitdepth=%d':log_fmt=json:log_path=%s:shortest=1:repeatlast=0%s", model.LibvmafModel, encodedBitDepth, escapeFFmpegFilterPath(logPath), libvmafThreadsOption(threads))
+	decimate, err := quality.DecimationFilter(decimation)
+	if err != nil {
+		return nil, err
+	}
+	filter := fmt.Sprintf("[0:v]format=yuv420p10le,setpts=PTS-STARTPTS%s[d];[1:v]format=yuv420p10le,setpts=PTS-STARTPTS%s[r];[d][r]libvmaf=model='version=%s\\:cambi.enc_bitdepth=%d':log_fmt=json:log_path=%s:shortest=1:repeatlast=0%s", decimate, decimate, model.LibvmafModel, encodedBitDepth, escapeFFmpegFilterPath(logPath), libvmafThreadsOption(threads))
 	return []string{"-nostdin", "-nostats", "-i", candPath, "-i", refPath, "-filter_complex", filter, "-f", "null", "-"}, nil
 }
 

@@ -47,7 +47,31 @@ change. The worker executes a synthetic probe before claiming support for the
 model or CAMBI. A worker that exposes `libvmaf` but cannot initialize the model
 is reported as unsupported. Explicit VMAF requests fail closed; an explicit
 `metric: auto` may choose SSIM when the model is unavailable or the source is
-unverified native 10-bit or HFR. Non-HFR VMAF v1 is rejected for sources at 45 FPS or above.
+unverified native 10-bit or HFR on a worker without the decimation capability.
+
+### High-frame-rate sources (45–61 FPS)
+
+The VMAF models were not trained on 50/59.94/60 FPS motion. Sources from 45 up
+to 61 FPS are therefore measured on a frame-exact 2:1 temporal decimation: after
+PTS normalization both reference and candidate keep frame indices 0, 2, 4, ...
+(`select=not(mod(n\,2))`), so every pair stays aligned and the model sees
+25/29.97/30 FPS motion. Sources above 61 FPS, or with missing timing, still fail
+closed. VMAF evidence records `temporal_decimation` and `measured_fps`; window
+lengths keep their configured duration in seconds, and frame locations map back
+to the source timeline. A `max_frames_below_threshold` limit is compared with
+the measured count multiplied by the decimation factor, so it keeps its meaning
+in source time. CAMBI is a purely spatial per-frame metric and keeps every frame:
+decimating it would only skip half of the frames its peak guardrail inspects.
+
+A worker advertises `quality.hfr_temporal_decimation: 2` only after executing
+the decimated model graph on a synthetic 48 FPS pair. Coordinators treat HFR as
+unsupported on workers without it, so a coordinator never dispatches HFR work a
+worker would reject. Deploy the worker before relying on HFR support. Shared
+batch calibration still requires sources below 45 FPS.
+
+Decimation reuses the non-HFR model's calibration; it is not an HFR-trained
+model. Scores for HFR sources are comparable with 25/30 FPS content, not with
+an HFR model, and thresholds were not separately calibrated for HFR libraries.
 
 `guardrail_enforcement: observe` records p5, the worst sample-local window,
 and frame counts without changing candidate selection. `reject` makes a
@@ -91,7 +115,7 @@ status exposes `quality_evidence`. Action results carry these as
 available through action detail when the compact MCP response omits them.
 
 The current implementation supports the standard 1080p 3H VMAF v1 model.
-Other VMAF v1 models, including HFR and 4K, require registry entries and
+Other VMAF v1 models, including HFR-trained and 4K ones, require registry entries and
 their own executable capability probes. Full-file validation is intentionally
 not offered because per-frame JSON logs are bounded.
 

@@ -89,7 +89,7 @@ func TestJoyRealSourceSamples(t *testing.T) {
 			t.Fatalf("candidate decode: %v %s", err, b)
 		}
 		vlog := filepath.Join(out, fmt.Sprintf("vmaf-%d.json", i))
-		args, err := BuildVMAFModelArgs(candidate, source, vlog, model, 10, w.metricThreads(1))
+		args, err := BuildVMAFModelArgs(candidate, source, vlog, model, 10, 1, w.metricThreads(1))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -101,7 +101,7 @@ func TestJoyRealSourceSamples(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		v, err := quality.ParseVMAF(b, MaxMetricLogSizeBytes, model, i, 0, 25, 5, nil)
+		v, err := quality.ParseVMAF(b, MaxMetricLogSizeBytes, model, i, 0, 25, 1, 5, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

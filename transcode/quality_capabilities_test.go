@@ -25,3 +25,35 @@ func TestQualityCapabilityChangesFingerprint(t *testing.T) {
 		t.Fatal("CAMBI capability did not change fingerprint")
 	}
 }
+
+// Coordinator and worker share this gate, so a coordinator that admits an HFR
+// source is talking to a worker that proved it can measure one.
+func TestSupportsQualityFPSRequiresProvenHFRDecimation(t *testing.T) {
+	model := map[string]QualityModelCapability{"v1_1080p_3h": {Available: true, MeasurementBitDepth: 10, ScoreMax: 100}}
+	old := WorkerCapabilities{Quality: &QualityCapabilities{Models: model}}
+	hfr := WorkerCapabilities{Quality: &QualityCapabilities{Models: model, HFRTemporalDecimation: 2}}
+	broken := WorkerCapabilities{Quality: &QualityCapabilities{Models: model, HFRTemporalDecimation: 2, ProbeError: "vmaf_probe_execution_failed"}}
+	wrongFactor := WorkerCapabilities{Quality: &QualityCapabilities{Models: model, HFRTemporalDecimation: 3}}
+	for _, tc := range []struct {
+		fps       float64
+		old, want bool
+	}{{0, false, false}, {25, true, true}, {29.97, true, true}, {30, true, true}, {50, false, true}, {59.94, false, true}, {60, false, true}, {120, false, false}} {
+		if got := old.SupportsQualityFPS(tc.fps); got != tc.old {
+			t.Fatalf("old worker %.3f fps: %v", tc.fps, got)
+		}
+		if got := hfr.SupportsQualityFPS(tc.fps); got != tc.want {
+			t.Fatalf("HFR worker %.3f fps: %v", tc.fps, got)
+		}
+		if tc.fps >= 45 && (broken.SupportsQualityFPS(tc.fps) || wrongFactor.SupportsQualityFPS(tc.fps)) {
+			t.Fatalf("unproven worker admitted %.3f fps", tc.fps)
+		}
+	}
+	if (WorkerCapabilities{}).SupportsHFRQuality() {
+		t.Fatal("missing quality report claimed HFR")
+	}
+	before, _ := ComputeCapabilityFingerprint(WorkerCapabilities{ProtocolVersion: WorkerProtocolVersion, Quality: old.Quality})
+	after, _ := ComputeCapabilityFingerprint(WorkerCapabilities{ProtocolVersion: WorkerProtocolVersion, Quality: hfr.Quality})
+	if before == after {
+		t.Fatal("HFR capability did not change fingerprint")
+	}
+}

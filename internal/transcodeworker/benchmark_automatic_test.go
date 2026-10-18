@@ -42,7 +42,7 @@ func TestAutomaticSearchFallbackAndIndependentVerification(t *testing.T) {
 						}
 						data, _ := json.Marshal(map[string]any{"frames": frames})
 						model, _ := quality.Model("v1_1080p_3h")
-						stats, err := quality.ParseVMAF(data, MaxMetricLogSizeBytes, model, window.Index, window.StartSeconds, 25, 4, nil)
+						stats, err := quality.ParseVMAF(data, MaxMetricLogSizeBytes, model, window.Index, window.StartSeconds, 25, 1, 4, nil)
 						if err != nil {
 							t.Fatal(err)
 						}
@@ -108,7 +108,7 @@ func TestAutomaticQualityPruningSkipsDominatedSettings(t *testing.T) {
 					}
 					data, _ := json.Marshal(map[string]any{"frames": frames})
 					model, _ := quality.Model("v1_1080p_3h")
-					stats, err := quality.ParseVMAF(data, MaxMetricLogSizeBytes, model, window.Index, window.StartSeconds, 25, 4, nil)
+					stats, err := quality.ParseVMAF(data, MaxMetricLogSizeBytes, model, window.Index, window.StartSeconds, 25, 1, 4, nil)
 					if err != nil {
 						t.Fatal(err)
 					}

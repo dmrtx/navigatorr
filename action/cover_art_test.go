@@ -27,7 +27,7 @@ func coverArtReport() *mediainspect.DetailedReport {
 func TestModeAndCalibrationGatesIgnoreCoverArt(t *testing.T) {
 	rep := coverArtReport()
 	for _, mode := range []string{"size", "quality", "x265_preserve"} {
-		if reason := modeSourceReason(mode, rep); reason != "" {
+		if reason := modeSourceReason(mode, rep, false); reason != "" {
 			t.Fatalf("%s: cover art made the source %q", mode, reason)
 		}
 	}
@@ -35,11 +35,11 @@ func TestModeAndCalibrationGatesIgnoreCoverArt(t *testing.T) {
 		t.Fatal("shared calibration rejected a source with cover art")
 	}
 	rep.Video[1].Codec = "hevc"
-	if modeSourceReason("x265_preserve", rep) != "already_target_codec" {
+	if modeSourceReason("x265_preserve", rep, false) != "already_target_codec" {
 		t.Fatal("codec gate read the cover instead of the main video")
 	}
 	rep.Video = append(rep.Video, rep.Video[1])
-	if modeSourceReason("size", rep) != "unsupported_source" || sharedCalibrationSourceSupported(rep) {
+	if modeSourceReason("size", rep, false) != "unsupported_source" || sharedCalibrationSourceSupported(rep) {
 		t.Fatal("two programme video streams accepted")
 	}
 	rep = coverArtReport()
@@ -76,7 +76,7 @@ func TestCoverArtGatesFallBackWithoutWorkerCapability(t *testing.T) {
 		t.Fatalf("legacy view: main=%d cover=%d", len(legacy.MainVideo()), len(legacy.CoverArt()))
 	}
 	for _, mode := range []string{"size", "quality", "x265_preserve"} {
-		if reason := modeSourceReason(mode, legacy); reason != "unsupported_source" {
+		if reason := modeSourceReason(mode, legacy, false); reason != "unsupported_source" {
 			t.Fatalf("%s against an old worker: %q", mode, reason)
 		}
 	}

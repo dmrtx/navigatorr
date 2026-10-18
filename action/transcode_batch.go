@@ -24,7 +24,7 @@ func (e *Engine) registerTranscodeBatchTemplate() {
 		ImmutableInputs: true,
 		Name:            "transcode_batch",
 		Version:         6,
-		Description:     "Simple goals: set mode=quality (strict sampled quality), size (acceptable sampled quality), or x265_preserve (strict libx265 conversion, already HEVC omitted). Modes forbid profiles/priority/manual tuning, preserve original depth/tracks and require final byte/quality validation; policy snapshots and finite per-source/operation search budgets are durable. Omit mode for legacy technical behavior. Video batch from explicit paths (1–1000 files inside allowed read roots), or a Sonarr series using service and series_id. paths cannot be combined with service, series_id, season, episode_file_ids, or promote_candidates=true; filesystem batches produce candidates only. Direct encoding: choose a non-optimizing profile or profile_config and omit priority; inspect recipe_get if unsure. Bounded tuning: omit profile and set priority=balanced, quality, savings, or preserve_quality (perceptual target, not lossless). Tuning tests three settings on short samples, creates a batch-only recipe and continues; currently oversized H264 1080p 8-bit SDR below 45fps. Bare auto without priority keeps legacy selection. dry_run=true is a completed preview, not a paused encode: start a new action with dry_run=false to encode. promote_candidates=true offers one approval before replacement; otherwise originals remain unchanged. Monitor with action_status.",
+		Description:     "Simple goals: set mode=quality (strict sampled quality), size (acceptable sampled quality), or x265_preserve (strict libx265 conversion, already HEVC omitted). Modes forbid profiles/priority/manual tuning, preserve original depth/tracks and require final byte/quality validation; 45-61fps sources are measured on frame-exact 2:1 decimated VMAF and only on workers that advertise it; policy snapshots and finite per-source/operation search budgets are durable. Omit mode for legacy technical behavior. Video batch from explicit paths (1–1000 files inside allowed read roots), or a Sonarr series using service and series_id. paths cannot be combined with service, series_id, season, episode_file_ids, or promote_candidates=true; filesystem batches produce candidates only. Direct encoding: choose a non-optimizing profile or profile_config and omit priority; inspect recipe_get if unsure. Bounded tuning: omit profile and set priority=balanced, quality, savings, or preserve_quality (perceptual target, not lossless). Tuning tests three settings on short samples, creates a batch-only recipe and continues; currently oversized H264 1080p 8-bit SDR below 45fps. Bare auto without priority keeps legacy selection. dry_run=true is a completed preview, not a paused encode: start a new action with dry_run=false to encode. promote_candidates=true offers one approval before replacement; otherwise originals remain unchanged. Monitor with action_status.",
 		Examples: []ActionExample{
 			{Description: "Encode a frozen filesystem selection, without a library service or replacing originals.", Inputs: `{"paths":["/media/movies/Film.mkv","/media/series/Season 1/Episode 1.mp4"],"profile":"general-hevc","media_type":"movie"}`},
 			{Description: "Direct candidates using a non-optimizing profile; substitute the actual series ID and chosen profile.", Inputs: `{"service":"sonarr","series_id":10,"profile":"general-hevc"}`},
@@ -341,6 +341,7 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 
 	var batchItems []store.TranscodeBatchItem
 	coverArtSupported := e.cachedCoverArtSupport(ctx)
+	hfr := &hfrQualitySupport{e: e}
 	for _, fID := range fileIDs {
 		itemKey := fmt.Sprintf("epfile-%d", fID)
 		if filesystemBatch {
@@ -452,7 +453,7 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 		var itemReasons []string
 
 		if mode := getString(ec.Inputs, "mode"); mode != "" {
-			reason := modeSourceReason(mode, gateRep)
+			reason := modeSourceReason(mode, gateRep, hfr.forSource(ctx, gateRep))
 			if reason != "" {
 				itemDecision, itemStatus = "skip", "skip"
 				itemReasons = []string{reason}

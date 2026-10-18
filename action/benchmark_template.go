@@ -11,6 +11,7 @@ import (
 	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/optimization"
+	"github.com/jakenesler/navigatorr/transcode/quality"
 	"github.com/jakenesler/navigatorr/transcode/recipe"
 	"github.com/jakenesler/navigatorr/transcode/resilience"
 )
@@ -1120,7 +1121,11 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 			return nil, fmt.Errorf("quality VMAF capability probe failed: %s", caps.Quality.ProbeError)
 		}
 		modelAvailable := caps.Quality != nil && caps.Quality.Models[modelID].Available
-		if (metric == "vmaf" || metric == "both") && (!modelAvailable || v0.FPS >= 45) {
+		// HFR is measurable only on a worker that proved decimated VMAF; this
+		// mirrors the worker gate so it is never dispatched work it rejects.
+		// Missing timing still fails later at measurement, as before.
+		fpsUnmeasurable := v0.FPS > quality.HFRMaxFPS || quality.IsHFR(v0.FPS) && !caps.SupportsHFRQuality()
+		if (metric == "vmaf" || metric == "both") && (!modelAvailable || fpsUnmeasurable) {
 			if strings.EqualFold(strings.TrimSpace(getString(ec.Inputs, "metric")), "auto") && caps.Filters["ssim"] {
 				metric = "ssim"
 			} else {

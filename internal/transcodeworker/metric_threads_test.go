@@ -21,11 +21,11 @@ func TestMetricArgsThreadsOption(t *testing.T) {
 		t.Fatalf("no filter in %q", args)
 		return ""
 	}
-	vmaf0, err := BuildVMAFModelArgs("c.mkv", "r.mkv", "v.json", model, 10, 0)
+	vmaf0, err := BuildVMAFModelArgs("c.mkv", "r.mkv", "v.json", model, 10, 1, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	vmaf5, err := BuildVMAFModelArgs("c.mkv", "r.mkv", "v.json", model, 10, 5)
+	vmaf5, err := BuildVMAFModelArgs("c.mkv", "r.mkv", "v.json", model, 10, 1, 5)
 	if err != nil {
 		t.Fatal(err)
 	}

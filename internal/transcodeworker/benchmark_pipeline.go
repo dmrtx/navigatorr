@@ -156,6 +156,7 @@ type pipelineShared struct {
 	runSSIM              bool
 	runCAMBI             bool
 	vmafModel            *quality.VMAFModel
+	vmafDecimation       int
 	qualityCaps          *transcode.QualityCapabilities
 	capFingerprint       string
 	passesPerSample      int
@@ -243,6 +244,7 @@ func (r *ProductionBenchmarkRunner) runPipelinedEncodeMetrics(
 	runSSIM := normMetric == "ssim" || normMetric == "both" || normMetric == "vmaf+ssim"
 	runCAMBI := record.Quality != nil && record.Quality.Banding != nil && record.Quality.Banding.Enabled
 	var vmafModel *quality.VMAFModel
+	vmafDecimation := 1
 	if runVMAF && record.Quality != nil && record.Quality.VMAF != nil && record.Quality.VMAF.Model != "" {
 		model, err := quality.Model(record.Quality.VMAF.Model)
 		if err != nil {
@@ -252,6 +254,16 @@ func (r *ProductionBenchmarkRunner) runPipelinedEncodeMetrics(
 			return fmt.Errorf("quality_vmaf_model_unavailable: model %s is not executable on worker (fail closed)", model.ID)
 		}
 		vmafModel = &model
+		// Unknown timing keeps factor 1 and fails per sample in ParseVMAF.
+		if evidence.SourceFPS > 0 {
+			if vmafDecimation, err = quality.TemporalDecimation(evidence.SourceFPS); err != nil {
+				return fmt.Errorf("quality_vmaf_hfr_model_unavailable: %v (fail closed)", err)
+			}
+		}
+		if vmafDecimation > 1 && !caps.SupportsHFRQuality() {
+			return fmt.Errorf("quality_vmaf_hfr_model_unavailable: worker has no proven decimated VMAF path for %.3f FPS (fail closed)", evidence.SourceFPS)
+		}
+		evidence.VMAFTemporalDecimation = vmafDecimation
 	}
 	if runCAMBI && (caps.Quality == nil || caps.Quality.ProbeError != "" || !caps.Quality.CAMBIFullRef) {
 		return fmt.Errorf("quality_cambi_full_ref_unavailable: CAMBI full-reference is not executable on worker (fail closed)")
@@ -308,6 +320,7 @@ func (r *ProductionBenchmarkRunner) runPipelinedEncodeMetrics(
 		runSSIM:              runSSIM,
 		runCAMBI:             runCAMBI,
 		vmafModel:            vmafModel,
+		vmafDecimation:       vmafDecimation,
 		qualityCaps:          caps.Quality,
 		capFingerprint:       caps.CapabilityFingerprint,
 		passesPerSample:      passesPerSample,
@@ -639,7 +652,7 @@ func (sh *pipelineShared) runMetricUnit(ctx context.Context, u pipelineUnit, idx
 		sh.progressReporter.StartSampleUnit("evaluating_metrics", u.sampOrd+1, vc.index+1, vc.candidate.ID, "vmaf")
 		args := BuildVMAFArgs(candPath, refPath, logPath)
 		if sh.vmafModel != nil {
-			args, err = BuildVMAFModelArgs(candPath, refPath, logPath, *sh.vmafModel, vc.bitDepth, sh.metricThreads)
+			args, err = BuildVMAFModelArgs(candPath, refPath, logPath, *sh.vmafModel, vc.bitDepth, sh.vmafDecimation, sh.metricThreads)
 			if err != nil {
 				fail(err)
 				return
@@ -680,7 +693,7 @@ func (sh *pipelineShared) runMetricUnit(ctx context.Context, u pipelineUnit, idx
 				var score float64
 				if sh.vmafModel != nil {
 					windowSec := sh.record.Quality.VMAF.WorstWindowSeconds
-					stats, parseErr := quality.ParseVMAF(logData, MaxMetricLogSizeBytes, *sh.vmafModel, window.Index, window.StartSeconds, sh.evidence.SourceFPS, windowSec, sh.record.Quality.VMAF.FrameThreshold)
+					stats, parseErr := quality.ParseVMAF(logData, MaxMetricLogSizeBytes, *sh.vmafModel, window.Index, window.StartSeconds, sh.evidence.SourceFPS, sh.vmafDecimation, windowSec, sh.record.Quality.VMAF.FrameThreshold)
 					err = parseErr
 					if err == nil {
 						score = stats.Mean
@@ -1098,7 +1111,7 @@ func (sh *pipelineShared) evaluateCandidateQuality(vcOrd int, candidateID string
 				if policy.WorstWindowMinimum != nil && combined.WorstWindowMean < *policy.WorstWindowMinimum {
 					e.ReasonCodes = append(e.ReasonCodes, "quality_vmaf_worst_window_below_minimum")
 				}
-				if policy.MaxFramesBelowThreshold != nil && combined.FramesBelowThreshold > *policy.MaxFramesBelowThreshold {
+				if policy.MaxFramesBelowThreshold != nil && combined.SourceEquivalentFramesBelowThreshold() > *policy.MaxFramesBelowThreshold {
 					e.ReasonCodes = append(e.ReasonCodes, "quality_vmaf_frames_below_limit_exceeded")
 				}
 			}

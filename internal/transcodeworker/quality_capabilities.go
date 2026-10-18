@@ -91,13 +91,14 @@ func probeQualityCapabilities(ctx context.Context, ffmpegPath, scratchRoot strin
 		}
 	} else if data, err := os.ReadFile(modelLog); err != nil {
 		out.ProbeError = "vmaf_probe_log_missing"
-	} else if stats, err := quality.ParseVMAF(data, MaxMetricLogSizeBytes, model, 0, 0, 24, 0.2, nil); err != nil {
+	} else if stats, err := quality.ParseVMAF(data, MaxMetricLogSizeBytes, model, 0, 0, 24, 1, 0.2, nil); err != nil {
 		out.ProbeError = fmt.Sprintf("invalid VMAF probe evidence: %v", err)
 	} else {
 		entry.Available = true
 		entry.Reason = ""
 		out.Models[model.ID] = entry
 		out.LibvmafVersion = stats.LibvmafVersion
+		out.HFRTemporalDecimation = probeHFRDecimation(probeCtx, ffmpegPath, dir, model)
 	}
 	if probeCtx.Err() != nil {
 		out.ProbeError = "quality_probe_timeout_or_cancelled"
@@ -142,10 +143,43 @@ func probeQualityCapabilities(ctx context.Context, ffmpegPath, scratchRoot strin
 	return out
 }
 
+// probeHFRDecimation executes the exact decimated model graph on a 48 fps
+// pair and requires every second frame, numbered contiguously. A worker that
+// cannot prove it advertises zero and receives no HFR source.
+func probeHFRDecimation(ctx context.Context, ffmpegPath, dir string, model quality.VMAFModel) int {
+	logPath := filepath.Join(dir, "vmaf-hfr.json")
+	decimate, err := quality.DecimationFilter(quality.HFRDecimationFactor)
+	if err != nil {
+		return 0
+	}
+	filter := fmt.Sprintf("[0:v]format=yuv420p10le,setpts=PTS-STARTPTS%s[d];[1:v]format=yuv420p10le,setpts=PTS-STARTPTS%s[r];[d][r]libvmaf=model=version=%s:log_fmt=json:log_path=%s:shortest=1:repeatlast=0", decimate, decimate, model.LibvmafModel, escapeFFmpegFilterPath(logPath))
+	if _, err := runSyntheticQualityProbeAt(ctx, ffmpegPath, filter, hfrProbeFPS); err != nil {
+		return 0
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		return 0
+	}
+	stats, err := quality.ParseVMAF(data, MaxMetricLogSizeBytes, model, 0, 0, hfrProbeFPS, quality.HFRDecimationFactor, 0.2, nil)
+	if err != nil || stats.FramesTotal != quality.DecimatedFrameCount(hfrProbeFrames, quality.HFRDecimationFactor) {
+		return 0
+	}
+	return quality.HFRDecimationFactor
+}
+
+const (
+	hfrProbeFPS    = 48
+	hfrProbeFrames = 12 // 0.25 s at hfrProbeFPS
+)
+
 func runSyntheticQualityProbe(ctx context.Context, ffmpegPath, filter string) ([]byte, error) {
+	return runSyntheticQualityProbeAt(ctx, ffmpegPath, filter, 24)
+}
+
+func runSyntheticQualityProbeAt(ctx context.Context, ffmpegPath, filter string, fps int) ([]byte, error) {
 	// The low two bits carry actual signal. Disabling automatic conversion
 	// proves the metric accepts native 10-bit inputs instead of downconverting.
-	source := "nullsrc=size=640x360:rate=24:duration=0.25,format=yuv420p10le,geq=lum='64+mod(X+3*Y,877)':cb=512:cr=512"
+	source := fmt.Sprintf("nullsrc=size=640x360:rate=%d:duration=0.25,format=yuv420p10le,geq=lum='64+mod(X+3*Y,877)':cb=512:cr=512", fps)
 	cmd := exec.CommandContext(ctx, ffmpegPath,
 		"-nostdin", "-hide_banner", "-v", "error", "-noauto_conversion_filters",
 		"-f", "lavfi", "-i", source,

@@ -29,7 +29,7 @@ func TestPooledVMAFStillValidatesFrames(t *testing.T) {
 
 func TestQualityGuardrailRejectsCandidateAndObserveDoesNot(t *testing.T) {
 	model, _ := quality.Model("v1_1080p_3h")
-	stats, err := quality.ParseVMAF([]byte(`{"frames":[{"frameNum":0,"metrics":{"vmaf":90}},{"frameNum":1,"metrics":{"vmaf":100}}]}`), 4096, model, 0, 10, 1, 2, nil)
+	stats, err := quality.ParseVMAF([]byte(`{"frames":[{"frameNum":0,"metrics":{"vmaf":90}},{"frameNum":1,"metrics":{"vmaf":100}}]}`), 4096, model, 0, 10, 1, 1, 2, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
