@@ -453,7 +453,12 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 		var itemReasons []string
 
 		if mode := getString(ec.Inputs, "mode"); mode != "" {
-			reason := modeSourceReason(mode, gateRep, hfr.forSource(ctx, gateRep))
+			hfrSupported, err := hfr.forSource(ctx, gateRep)
+			if err != nil {
+				// Items already created are reused when the step resumes.
+				return hfrCapabilityLookupResult(err), nil
+			}
+			reason := modeSourceReason(mode, gateRep, hfrSupported)
 			if reason != "" {
 				itemDecision, itemStatus = "skip", "skip"
 				itemReasons = []string{reason}

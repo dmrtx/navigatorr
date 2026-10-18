@@ -87,6 +87,7 @@ type BenchmarkExecutionEvidence struct {
 	SourcePixelFormat string                                `json:"source_pixel_format"`
 	SourceResolution  string                                `json:"source_resolution"`
 	SourceFPS         float64                               `json:"source_fps,omitempty"`
+	SourceFieldOrder  string                                `json:"source_field_order,omitempty"`
 	// VMAFTemporalDecimation records the frame decimation used for modeled
 	// VMAF (2 for HFR sources) so sampled evidence stays auditable.
 	VMAFTemporalDecimation int                                 `json:"vmaf_temporal_decimation,omitempty"`
@@ -346,10 +347,23 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		return fmt.Errorf("source media %s has %d video streams; benchmark requires exactly 1 (fail closed)", record.Source, len(mainVideo))
 	}
 	sourceVideo := mainVideo[0]
-	// HFR sources are measured on a decimated pair (the pipeline requires the
-	// proven capability before encoding); faster rates have no such path.
-	if record.Quality != nil && record.Quality.VMAF != nil && record.Quality.VMAF.Model != "" && sourceVideo.FPS > quality.HFRMaxFPS {
-		return fmt.Errorf("quality_vmaf_hfr_model_unavailable: VMAF model %q cannot measure a %.3f FPS source above %.0f FPS (fail closed)", record.Quality.VMAF.Model, sourceVideo.FPS, quality.HFRMaxFPS)
+	// HFR sources are measured on a decimated pair, only on a worker that
+	// proved it; faster or interlaced HFR sources have no such path. Checked
+	// before any sample is extracted. Unknown timing fails per sample later.
+	if record.Quality != nil && record.Quality.VMAF != nil && record.Quality.VMAF.Model != "" && sourceVideo.FPS > 0 {
+		factor, err := quality.TemporalDecimationForStream(sourceVideo.FPS, sourceVideo.FieldOrder)
+		if err != nil {
+			return fmt.Errorf("quality_vmaf_hfr_model_unavailable: VMAF model %q cannot measure this source: %v (fail closed)", record.Quality.VMAF.Model, err)
+		}
+		if factor > 1 {
+			caps, err := probeWorkerCapabilitiesWithScratch(ctx, w.ffmpegPath, filepath.Join(w.cfg.StateDir, "quality-probe-scratch"), true)
+			if err != nil {
+				return fmt.Errorf("probing worker capabilities: %w (fail closed)", err)
+			}
+			if !caps.SupportsHFRQuality() {
+				return fmt.Errorf("quality_vmaf_hfr_model_unavailable: worker has no proven decimated VMAF path for %.3f FPS (fail closed)", sourceVideo.FPS)
+			}
+		}
 	}
 
 	// HDR / Dolby Vision rejection: automatic benchmark optimization is strictly SDR-only
@@ -431,6 +445,7 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		SourcePixelFormat: sourceVideo.PixelFormat,
 		SourceResolution:  resStr,
 		SourceFPS:         sourceVideo.FPS,
+		SourceFieldOrder:  sourceVideo.FieldOrder,
 		ReferenceSamples:  make([]BenchmarkSampleRef, 0, len(record.Samples)),
 		CandidateSamples:  make([]BenchmarkCandidateSampleResult, 0, len(record.Candidates)*len(record.Samples)),
 	}

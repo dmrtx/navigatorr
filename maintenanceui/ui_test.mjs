@@ -2102,6 +2102,28 @@ test("a goal batch skipped for an unsupported source explains it and does not of
   assert.ok(h.run('jobControls(job).children.map(b=>b.textContent)').includes("Try another profile"));
 });
 
+test("HFR sources skipped for a missing worker capability say so and offer no goal change", async () => {
+  const h=harness();
+  h.context.job={id:'hfr',number:582,action_name:'transcode_batch',status:'completed',mode:'size',can_archive:true,batch:{title:'Clips',total:2,skip:2,outcome:'no_changes'},batch_files:{context:'Clips',file_count:2,files:[{display_label:'Clip 1'},{display_label:'Clip 2'}],reasons:[{count:2,reason:'hfr_quality_unavailable'}]}};
+  assert.ok(!h.run('jobControls(job).children.map(b=>b.textContent)').includes("Change goal"));
+  const outcome=h.run('skippedBatchOutcome(job)');
+  assert.match(outcome.children[0].textContent,/cannot measure quality at this frame rate yet/);
+  assert.match(outcome.children[1].textContent,/frame rate yet, so changing the goal will not help/);
+  h.context.job.batch_files.reasons=[{count:1,reason:'hfr_quality_unavailable'},{count:1,reason:'unsupported_source'}];
+  assert.ok(!h.run('jobControls(job).children.map(b=>b.textContent)').includes("Change goal"));
+  assert.match(h.run('skippedBatchOutcome(job)').children[1].textContent,/does not support this source format yet/);
+  const child=h.run('jobControls({id:"child",action_name:"transcode_media",status:"completed",reason_code:"hfr_quality_unavailable",mode:"size",parent_action_id:"batch",parent_item_key:"one"}).children.map(b=>b.textContent)');
+  assert.ok(!child.includes("Change goal"));
+  h.context.items=[{item_key:"hfr",display_label:"Clip",status:"skip",can_reconfigure:true,mode:"size",reasons:["hfr_quality_unavailable"]}];
+  h.run('state.info={};state.detail="batch";state.detailRevision=2;$("job-detail").open=true;state.detailJob={status:"completed",batch:{}};api=async()=>({items,total:1});');
+  await h.run('loadBatchItems("batch",2)');
+  const row=h.elements.get("batch-items-list").children[0];
+  const all = el=>[el,...el.children.flatMap(all)];
+  const text=all(row).map(el=>el.textContent).filter(Boolean).join(" ");
+  assert.match(text,/cannot measure quality at this frame rate yet/);
+  assert.doesNotMatch(text,/Change goal/);
+});
+
 test("an unsupported-source file row offers no goal change", async () => {
   const h=harness();
   h.context.items=[

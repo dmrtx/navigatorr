@@ -1124,7 +1124,8 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 		// HFR is measurable only on a worker that proved decimated VMAF; this
 		// mirrors the worker gate so it is never dispatched work it rejects.
 		// Missing timing still fails later at measurement, as before.
-		fpsUnmeasurable := v0.FPS > quality.HFRMaxFPS || quality.IsHFR(v0.FPS) && !caps.SupportsHFRQuality()
+		factor, fpsErr := quality.TemporalDecimationForStream(v0.FPS, v0.FieldOrder)
+		fpsUnmeasurable := v0.FPS > 0 && fpsErr != nil || factor > 1 && !caps.SupportsHFRQuality()
 		if (metric == "vmaf" || metric == "both") && (!modelAvailable || fpsUnmeasurable) {
 			if strings.EqualFold(strings.TrimSpace(getString(ec.Inputs, "metric")), "auto") && caps.Filters["ssim"] {
 				metric = "ssim"

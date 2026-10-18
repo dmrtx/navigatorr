@@ -1,6 +1,9 @@
 package quality
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // The VMAF models in use were trained on content at or below 30 fps; their
 // temporal (motion) features are out of distribution for 50/59.94/60 fps.
@@ -31,6 +34,22 @@ func TemporalDecimation(fps float64) (int, error) {
 	default:
 		return 0, fmt.Errorf("source FPS %.3f exceeds the supported %.0f FPS class", fps, HFRMaxFPS)
 	}
+}
+
+// TemporalDecimationForStream is TemporalDecimation for one inspected video
+// stream. An interlaced stream (ffprobe field_order tt, bb, tb or bt) in the
+// HFR class may report its field rate; dropping every second picture would
+// then keep only one field parity, so decimation is refused for it.
+func TemporalDecimationForStream(fps float64, fieldOrder string) (int, error) {
+	factor, err := TemporalDecimation(fps)
+	if err != nil || factor == 1 {
+		return factor, err
+	}
+	switch strings.ToLower(strings.TrimSpace(fieldOrder)) {
+	case "tt", "bb", "tb", "bt":
+		return 0, fmt.Errorf("interlaced %.3f FPS source (field order %s) cannot be decimated", fps, fieldOrder)
+	}
+	return factor, nil
 }
 
 // IsHFR reports whether a rate needs decimation to be measured.

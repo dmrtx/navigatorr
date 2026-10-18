@@ -121,14 +121,19 @@ func freezeModePolicy(ec *ExecutionContext) (*ModePolicySnapshot, error) {
 
 // modeSourceReason classifies a source for an automatic mode. hfrSupported
 // must come from the worker's proven decimated-VMAF capability; without it
-// 45-61 FPS sources stay unsupported, as do rates above that class.
+// 45-61 FPS sources wait for a capable worker (hfr_quality_unavailable), and
+// rates above that class stay unsupported.
 func modeSourceReason(mode string, rep *mediainspect.DetailedReport, hfrSupported bool) string {
 	video := rep.MainVideo()
 	if len(video) != 1 || video[0].BitDepth != 8 && video[0].BitDepth != 10 || isSourceHDRorDV(rep) {
 		return "unsupported_source"
 	}
-	if factor, err := quality.TemporalDecimation(video[0].FPS); err != nil || factor > 1 && !hfrSupported {
+	factor, err := quality.TemporalDecimationForStream(video[0].FPS, video[0].FieldOrder)
+	if err != nil {
 		return "unsupported_source"
+	}
+	if factor > 1 && !hfrSupported {
+		return "hfr_quality_unavailable"
 	}
 	if mode == "x265_preserve" && strings.EqualFold(video[0].Codec, "hevc") {
 		return "already_target_codec"
@@ -137,29 +142,48 @@ func modeSourceReason(mode string, rep *mediainspect.DetailedReport, hfrSupporte
 }
 
 // hfrQualitySupport asks the worker at most once per step, and only when a
-// source actually needs decimation. Any capability error fails closed.
+// source actually needs decimation. A failed lookup is returned, never
+// cached as "unsupported": callers wait on retryable errors and fail closed
+// on the rest.
 type hfrQualitySupport struct {
 	e         *Engine
 	checked   bool
 	supported bool
 }
 
-func (h *hfrQualitySupport) forSource(ctx context.Context, rep *mediainspect.DetailedReport) bool {
+func (h *hfrQualitySupport) forSource(ctx context.Context, rep *mediainspect.DetailedReport) (bool, error) {
 	if rep == nil {
-		return false
+		return false, nil
 	}
-	if video := rep.MainVideo(); len(video) != 1 || !quality.IsHFR(video[0].FPS) {
-		return false
+	video := rep.MainVideo()
+	if len(video) != 1 {
+		return false, nil
 	}
-	if !h.checked {
+	if factor, err := quality.TemporalDecimationForStream(video[0].FPS, video[0].FieldOrder); err != nil || factor == 1 {
+		return false, nil
+	}
+	if h.checked {
+		return h.supported, nil
+	}
+	if h.e == nil || h.e.deps.Transcode == nil {
 		h.checked = true
-		if h.e != nil && h.e.deps.Transcode != nil {
-			if caps, err := h.e.deps.Transcode.Capabilities(ctx); err == nil {
-				h.supported = caps.SupportsHFRQuality()
-			}
-		}
+		return false, nil
 	}
-	return h.supported
+	caps, err := h.e.deps.Transcode.Capabilities(ctx)
+	if err != nil {
+		return false, err
+	}
+	h.checked, h.supported = true, caps.SupportsHFRQuality()
+	return h.supported, nil
+}
+
+// hfrCapabilityLookupResult turns a failed HFR capability lookup into the
+// step result: a transient worker error waits, anything else fails closed.
+func hfrCapabilityLookupResult(err error) StepResult {
+	if isRetryableWorkerPollError(err) {
+		return StepResult{Status: StepWaitingExternal, WaitingCondition: "worker_unreachable", WaitingReason: fmt.Sprintf("Worker capabilities temporarily unavailable: %v", err)}
+	}
+	return StepResult{Status: StepFailed, Error: fmt.Sprintf("querying worker HFR quality capability: %v (fail closed)", err)}
 }
 
 func modeAttention(ec *ExecutionContext, reason, message string) StepResult {

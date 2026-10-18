@@ -255,8 +255,9 @@ func (r *ProductionBenchmarkRunner) runPipelinedEncodeMetrics(
 		}
 		vmafModel = &model
 		// Unknown timing keeps factor 1 and fails per sample in ParseVMAF.
+		// RunBenchmark already rejected unsupported HFR; this stays defensive.
 		if evidence.SourceFPS > 0 {
-			if vmafDecimation, err = quality.TemporalDecimation(evidence.SourceFPS); err != nil {
+			if vmafDecimation, err = quality.TemporalDecimationForStream(evidence.SourceFPS, evidence.SourceFieldOrder); err != nil {
 				return fmt.Errorf("quality_vmaf_hfr_model_unavailable: %v (fail closed)", err)
 			}
 		}

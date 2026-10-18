@@ -93,7 +93,7 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 	if runVMAF {
 		// The non-HFR model only sees HFR motion on a frame-exact decimation;
 		// rates outside the supported class still fail closed.
-		if vmafDecimation, err = quality.TemporalDecimation(sourceVideoStreams[0].FPS); err != nil {
+		if vmafDecimation, err = quality.TemporalDecimationForStream(sourceVideoStreams[0].FPS, sourceVideoStreams[0].FieldOrder); err != nil {
 			return fail("quality_vmaf_hfr_model_unavailable", err)
 		}
 		if vmafDecimation > 1 && !caps.SupportsHFRQuality() {
@@ -329,7 +329,7 @@ func (w *Worker) validateModeSourceQuality(ctx context.Context, source string, p
 	if plan.Mode == "x265_preserve" && (norm(v.Codec) == "hevc" || norm(v.Codec) == "h265") {
 		return &transcode.PolicyRejectionError{ReasonCode: "already_hevc", Message: "source is already HEVC; no conversion required"}
 	}
-	if _, err := quality.TemporalDecimation(v.FPS); err != nil || mediainspect.IsHDRorDolbyVisionReport(&rep) || (v.BitDepth != 8 && v.BitDepth != 10) || !isSupportedSourceChroma(v.PixelFormat, v.BitDepth) {
+	if _, err := quality.TemporalDecimationForStream(v.FPS, v.FieldOrder); err != nil || mediainspect.IsHDRorDolbyVisionReport(&rep) || (v.BitDepth != 8 && v.BitDepth != 10) || !isSupportedSourceChroma(v.PixelFormat, v.BitDepth) {
 		return fmt.Errorf("quality_source_class_unsupported: native SDR 8/10-bit 4:2:0 evidence at a measurable frame rate (up to %.0f FPS) required", quality.HFRMaxFPS)
 	}
 	q := plan.QualityValidation
