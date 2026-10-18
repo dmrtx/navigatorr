@@ -3352,6 +3352,10 @@ test("a recovery copy redraw keeps focus on its button, or the first enabled one
   h.run("renderBackups()");
   assert.notEqual(doc.activeElement, remove);
   assert.equal(doc.activeElement, buttonsOf("copy-b").find((b) => b.textContent === "Remove copy"));
+  // A button that appears ahead of the focused one does not take its focus.
+  h.run('state.backups[1].cleanup_available=true;renderBackups();');
+  assert.equal(buttonsOf("copy-b").length, 3);
+  assert.equal(doc.activeElement, buttonsOf("copy-b").find((b) => b.textContent === "Remove copy"));
   buttonsOf("copy-a").find((b) => b.textContent === "Verify & clean up").focus();
   h.run('state.backupCleaning={id:"copy-a"};renderBackups();');
   assert.equal(doc.activeElement, buttonsOf("copy-a")[0]);
@@ -3371,7 +3375,7 @@ test("only a command that is still waiting shows its waiting reason", () => {
   h.run('trackCommand({kind:"retry"},receipt,{status:"waiting_external",waiting_reason:"Waiting for the worker to come back"})');
   assert.equal(chip().title, "Retrying job · Waiting to apply · Waiting for the worker to come back");
   timers.length = 0;
-  // The server still returns the last reason once the command has finished.
+  // A reason that outlives the wait is not read out.
   h.run('trackCommand({kind:"retry"},receipt,{status:"completed",waiting_reason:"Waiting for the worker to come back"})');
   timers.shift()();
   assert.equal(h.elements.get("command-announcer").textContent, "Job #7: Retrying job, applied.");

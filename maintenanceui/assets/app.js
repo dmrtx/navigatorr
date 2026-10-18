@@ -381,8 +381,8 @@ const commandVerbs = {"Preparing replacement review":"Preparing review","Applyin
 const commandFailures = {"Preparing replacement review":"Review failed","Applying replacement decision":"Decision failed","Applying decision":"Decision failed","Retrying job":"Retry failed","Stopping job":"Stop failed","Applying candidate decision":"Decision failed","Verifying recovery data":"Check failed","Verifying duplicate":"Check failed","Removing recovery copy":"Removal failed","Updating batch settings":"Update failed"};
 const commandStatusText = {pending:"Waiting to apply",running:"Applying",waiting_external:"Waiting to apply",completed:"Applied",failed:"Failed",cancelled:"Cancelled"};
 function commandLabel(command) { return commandLabels[command.kind] || command.label || "Update"; }
-// A command keeps its last waiting reason after it moves on, so a finished
-// one could still read "Waiting for a free worker". Only a waiting one says why.
+// The engine keeps waiting_reason when a command runs again after a wait, and
+// a cancelled one stores its cancel reason there. Only a waiting one says why.
 function commandWaitingReason(command) { return command.status === "waiting_external" ? command.waiting_reason || "" : ""; }
 function jobCommands(id) {
   return [...(state.commands?.values() || [])].filter((c) => c.id === id).sort((a, b) => (b.started || 0) - (a.started || 0));
@@ -2105,9 +2105,9 @@ function restoreControl(container, focus) {
     const row = [...container.querySelectorAll("[data-operation-id]")].find((r) => r.dataset.operationId === focus.row);
     if (!row) return;
     const buttons = [...row.querySelectorAll(".backup-actions button")];
-    // A button that is now disabled (Verifying…) hands focus to the row's first enabled one.
+    // A button that is gone or now disabled (Verifying…) hands focus to the row's first enabled one.
     let next = focus.title ? row.querySelector(".job-title") : buttons.find((b) => b.textContent === focus.label) || buttons[focus.index];
-    if (next?.disabled) next = buttons.find((b) => !b.disabled);
+    if (!focus.title && (!next || next.disabled)) next = buttons.find((b) => !b.disabled);
     if (next && document.activeElement !== next) next.focus({ preventScroll: true });
     return;
   }
