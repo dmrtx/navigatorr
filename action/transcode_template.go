@@ -229,10 +229,6 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		}
 	}
 
-	if getBool(ec.Inputs, "surface_worker_busy") {
-		ec.State["surface_worker_busy"] = true
-	}
-
 	var autoResult *selector.Result
 	if !hasProfileConfig && strings.EqualFold(profile, "auto") {
 		mediaType := strings.ToLower(strings.TrimSpace(getString(ec.Inputs, "media_type")))

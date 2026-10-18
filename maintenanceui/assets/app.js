@@ -3205,6 +3205,7 @@ function shortJobReason(reason) {
   };
   if (reasons[text]) return reasons[text];
   if (isCandidateRejection(text)) return "Candidate rejected by you; original kept";
+  if (workerBusyFailure(text)) return workerBusyFailureText;
   const growth = text.match(/Candidate file size \(\d+ bytes\) exceeds original \(\d+ bytes\) by ([\d.]+)%, which is greater than max_size_increase_percent \(([\d.]+)%\)/);
   if (growth) return `Candidate is ${growth[1]}% larger; allowed growth is ${growth[2]}%`;
   if (/no such file or directory/i.test(text)) return "File not found";
@@ -3221,6 +3222,12 @@ function shortJobReason(reason) {
   const coded = text.match(/^([a-z0-9]+(?:_[a-z0-9]+)+)(?::\s*(.*))?$/);
   if (coded) return reasons[coded[1]] || `${coded[1].replace(/_/g, " ").replace(/^./, c => c.toUpperCase())}${coded[2] ? `: ${coded[2]}` : ""}`;
   return text.length > 140 ? `${text.slice(0, 137)}…` : text;
+}
+// Jobs from before slot waits failed when the worker was full. The raw error
+// names the worker URL and says nothing useful: nothing was sent to run.
+const workerBusyFailureText = "The worker was full and nothing ran. Retry when a slot is free.";
+function workerBusyFailure(reason) {
+  return /\(worker_busy\)|worker busy|maximum parallel jobs/i.test(String(reason || ""));
 }
 function workerUnavailable(job) {
   return job.waiting_condition === "worker_unreachable" || job.activity_waiting_condition === "worker_unreachable";
@@ -3247,6 +3254,9 @@ function workerProgressObservation(job) {
   if (workerUnavailable(job)) return {...result, warning: true, status: "Worker offline", message: "Worker unreachable. Retrying connection automatically."};
   if (w.recovery_required) return {...result, warning: true, status: "Needs decision", message: job.waiting_reason || "Candidate preserved; publication requires intervention."};
   const waiting = job.activity_waiting_condition || job.waiting_condition;
+  // A batch reports its own slot counts; a single job just waits its turn.
+  if (waiting === "worker_busy" && !job.batch)
+    return {...result, status: "Waiting for a free worker slot", message: "The worker is running as many jobs as it allows. This job continues automatically when a slot is free."};
   if (["worker_busy", "parent_busy", "queued", "benchmark_retry", "transcode_retry", "worker_reconciling"].includes(waiting))
     return {...result, status: "Waiting", message: job.waiting_reason || "Waiting for worker coordination."};
   // A finished worker can leave telemetry behind while the coordinator validates
@@ -3966,7 +3976,7 @@ async function refreshDetail() {
     if (job.batch?.outcome === "no_changes") summary.append(skippedBatchOutcome(job));
     if (job.batch?.dry_run) summary.append(node("p", queueOutcome(job) + (job.batch.queued > 0 && !job.preview_execution_action_id ? ". Review the eligible files, then choose Start batch to convert them." : "."), "preview-notice"));
     const raw = job.status === "waiting_decision" ? job.waiting_reason : job.status === "failed" ? job.error : "";
-    if (raw && shortJobReason(raw) !== raw) {
+    if (raw && shortJobReason(raw) !== raw && !workerBusyFailure(raw)) {
       const technical = node("details", "", "technical-reason");
       technical.append(node("summary", "Technical details"), node("p", raw, "metadata"));
       summary.append(technical);

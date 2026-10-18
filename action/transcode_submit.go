@@ -162,6 +162,11 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 	// Admission critical section: when the child belongs to a batch, hold the
 	// parent's durable lease across the policy re-read, identity persistence and
 	// the submit outcome so Engine.Cancel cannot interleave a confirmed cancel.
+	// A worker that refused a submit as busy asked for a pause; only new
+	// writes wait for it, reconciliation above is a read.
+	if res, waiting := e.workerBusyBackoff(ec, transcodeSlotWaitReason); waiting {
+		return res, nil
+	}
 	lease, blockedRes, handled := e.beginAdmission(ctx, ec, "transcode")
 	if handled {
 		return blockedRes, nil
@@ -217,6 +222,7 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 		return res, nil
 	}
 	ec.State["transcode_submitted"] = true
+	clearWorkerBusy(ec)
 	ec.State["job_id"] = job.ID
 	ec.State["external_reference"] = job.ID
 	ec.State["candidate_path"] = candidatePath
@@ -333,22 +339,63 @@ func classifyWorkerFailure(err error) resilience.FailureClass {
 	return resilience.Classify(err.Error())
 }
 
+// workerBusyNotBeforeKey holds the earliest time a submit the worker refused
+// as busy may be sent again, from the worker's Retry-After hint.
+const workerBusyNotBeforeKey = "worker_busy_not_before"
+
+// workerBusyRetryMargin is added to Retry-After so the next submit lands
+// after the window the worker asked for, not on its edge.
+const workerBusyRetryMargin = time.Second
+
+// workerBusyWait turns a worker_busy refusal into a wait for a free slot. The
+// worker created nothing, so the wait never consumes attempts or retry budget,
+// and it lasts until a slot frees up or the action is cancelled, the same way
+// batch children wait. The reconciler resumes it: next_poll_at honours
+// Retry-After through workerBusyNotBeforeKey.
+func (e *Engine) workerBusyWait(ec *ExecutionContext, err error, reason string, outputs map[string]any) StepResult {
+	if he, ok := transcodeHTTPError(err); ok && he.RetryAfter > 0 {
+		ec.State[workerBusyNotBeforeKey] = e.now().Add(he.RetryAfter + workerBusyRetryMargin).Format(time.RFC3339Nano)
+	} else {
+		delete(ec.State, workerBusyNotBeforeKey)
+	}
+	outputs["failure_classification"] = string(resilience.WorkerBusy)
+	outputs["worker_busy"] = true
+	return StepResult{Status: StepWaitingExternal, WaitingCondition: "worker_busy", WaitingReason: reason, Outputs: outputs}
+}
+
+// workerBusyBackoff keeps a slot wait waiting until the worker's Retry-After
+// has passed, whoever resumes the action (the reconciler or a batch parent).
+func (e *Engine) workerBusyBackoff(ec *ExecutionContext, reason string) (StepResult, bool) {
+	raw := getString(ec.State, workerBusyNotBeforeKey)
+	if raw == "" {
+		return StepResult{}, false
+	}
+	if at, err := time.Parse(time.RFC3339Nano, raw); err == nil && e.now().Before(at) {
+		return StepResult{Status: StepWaitingExternal, WaitingCondition: "worker_busy", WaitingReason: reason, Outputs: map[string]any{"worker_busy": true}}, true
+	}
+	delete(ec.State, workerBusyNotBeforeKey)
+	return StepResult{}, false
+}
+
+// clearWorkerBusy drops slot-wait markers once the worker accepted a job.
+func clearWorkerBusy(ec *ExecutionContext) {
+	for _, key := range []string{workerBusyNotBeforeKey, "worker_busy"} {
+		delete(ec.State, key)
+		delete(ec.Outputs, key)
+	}
+}
+
+const transcodeSlotWaitReason = "Waiting for a free worker slot to start the encode"
+
 func (e *Engine) handleTransientFailure(ec *ExecutionContext, plan *transcode.Plan, err error, phase string) (StepResult, error) {
 	class := classifyWorkerFailure(err)
 	ec.State["failure_classification"] = string(class)
 	appendFailureHistory(ec, phase, string(class), err.Error())
-	if class == resilience.WorkerBusy && (getBool(ec.Inputs, "surface_worker_busy") || getBool(ec.State, "surface_worker_busy")) {
-		return StepResult{
-			Status:           StepWaitingExternal,
-			WaitingCondition: "worker_busy",
-			WaitingReason:    "Worker is busy; waiting for transcode slot",
-			Outputs: map[string]any{
-				"attempt":                getInt(ec.State, "attempt"),
-				"retry_count":            getInt(ec.State, "retry_count"),
-				"failure_classification": string(class),
-				"worker_busy":            true,
-			},
-		}, nil
+	if class == resilience.WorkerBusy {
+		return e.workerBusyWait(ec, err, transcodeSlotWaitReason, map[string]any{
+			"attempt":     getInt(ec.State, "attempt"),
+			"retry_count": getInt(ec.State, "retry_count"),
+		}), nil
 	}
 	retries := getInt(ec.State, "retry_count")
 	attempt := getInt(ec.State, "attempt")
