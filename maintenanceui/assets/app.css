@@ -1684,7 +1684,21 @@ pre {
 .processing-goal label:has(input:checked) { border-color: var(--accent); background: var(--surface); }
 .processing-goal input { width: auto; margin-top: .25rem; }
 .processing-goal small { display: block; font-size: .82rem; margin-top: .25rem; line-height: 1.5; }
-.technical-toggle { margin: 1rem 0; }
+.technical-toggle { margin: .75rem 0; }
+.processing-goal:disabled { opacity: .55; }
+.processing-goal:disabled label { cursor: not-allowed; }
+.goal-overridden { margin: -.5rem 0 1rem; padding: .55rem .7rem; border-left: 3px solid var(--accent); background: var(--surface); font-size: 12px; }
+.advanced-profiles { margin: 1rem 0; padding: 0 .85rem; border: 1px solid var(--line); border-radius: 8px; }
+.advanced-profiles > summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; cursor: pointer; font-weight: 600; }
+.advanced-profiles > summary::before { content: "▸"; color: var(--muted); }
+.advanced-profiles[open] > summary::before { content: "▾"; }
+.advanced-profiles > summary > span:first-child { flex: 1; }
+.advanced-profiles > summary::-webkit-details-marker { display: none; }
+.advanced-profiles > summary { list-style: none; }
+.advanced-state { flex-shrink: 0; padding: 1px 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 11px; font-weight: 500; }
+.advanced-state[data-on="true"] { border-color: var(--accent); color: var(--accent); }
+.advanced-profiles[open] { padding-bottom: .5rem; }
+.advanced-explain { margin: 0 0 .25rem; }
 #recipe-description { border: 1px solid var(--line); padding: .65rem; min-height: 42px; }
 #recipe-dirty[data-dirty="true"] { font-weight: 600; }
 #settings-worker { margin-bottom: 1.25rem; }
@@ -1700,9 +1714,11 @@ pre {
 .phase-costs table { width: 100%; border-collapse: collapse; font-size: .82rem; }
 .phase-costs th, .phase-costs td { padding: .45rem; text-align: left; border-bottom: 1px solid var(--line); }
 
-#podcast-new { margin-bottom: 12px; }
-#podcast-new summary { cursor: pointer; }
-#podcast-form { display: grid; gap: 12px; max-width: 640px; padding: 16px 0; }
+/* Podcast cleaning is occasional: a quiet link beside the queue status opens it. */
+.queue-meta { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.queue-meta #jobs-updated { min-width: 0; }
+.queue-meta .podcast-new { flex-shrink: 0; min-height: var(--control-size); padding: 4px 0; border: 0; background: none; color: var(--forest); font-size: 12px; text-decoration: underline; text-underline-offset: 3px; }
+#podcast-form { display: grid; gap: 12px; padding: 8px 0 0; }
 #podcast-form label { display: grid; gap: 4px; min-width: 0; }
 #podcast-form input, #podcast-form select { width: 100%; }
 
