@@ -489,11 +489,13 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 				winningPlan = &wp
 
 				ec.State["plan"] = winningPlan
+				ec.State["plan_source"] = "benchmark_winner"
 				ec.State["plan_digest"] = digest
 				ec.State["recipe_version"] = winningPlan.RecipeVersion
 				ec.State["recipe_digest"] = winningPlan.RecipeDigest
 
 				outputs["plan"] = winningPlan
+				outputs["plan_source"] = "benchmark_winner"
 				outputs["plan_digest"] = digest
 				outputs["recipe_version"] = winningPlan.RecipeVersion
 				outputs["recipe_digest"] = winningPlan.RecipeDigest
@@ -512,6 +514,13 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 			outputs["winner_metric"] = winner.MetricType
 			outputs["estimated_total_mb"] = winner.EstimatedTotalMB
 			outputs["estimated_savings_percent"] = winner.SavingsPercent
+		}
+
+		// The preflight plan stays in state for audio and validation, but its
+		// video settings are the profile's starting point, not a tested result.
+		if !hasWinner {
+			outputs["plan_source"] = "profile_base"
+			outputs["plan_note"] = "No benchmark candidate was selected; the stored plan is the profile's untested starting configuration."
 		}
 
 		// If this is transcode_media, require a valid winner before proceeding to full transcode.

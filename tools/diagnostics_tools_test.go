@@ -455,3 +455,19 @@ func TestDiagnosticsCountsMaintenanceAndReportsDatabaseFailure(t *testing.T) {
 		t.Fatalf("database error disguised as zero: %+v", d)
 	}
 }
+
+func TestDiagnosticsExplainsAdmissionBeyondReadiness(t *testing.T) {
+	ok := inspectTranscodeAvailability(context.Background(), &diagDoctorStub{}, false)
+	if ok["can_accept_jobs"] != true || !strings.Contains(ok["admission_note"].(string), "worker_health") {
+		t.Fatalf("readiness-only scope not stated: %v", ok)
+	}
+	smb := &diagDoctorStub{doctorFunc: func(context.Context) error { return errors.New("smb_auth_failed") }}
+	blocked := inspectTranscodeAvailability(context.Background(), smb, true)
+	if blocked["can_accept_jobs"] != true || blocked["admission_blocked"] != true || !strings.Contains(blocked["admission_note"].(string), "refused") {
+		t.Fatalf("doctor failure did not flag admission: %v", blocked)
+	}
+	healthy := inspectTranscodeAvailability(context.Background(), &diagDoctorStub{}, true)
+	if _, flagged := healthy["admission_blocked"]; flagged || healthy["admission_note"] != nil {
+		t.Fatalf("healthy deep check annotated: %v", healthy)
+	}
+}
