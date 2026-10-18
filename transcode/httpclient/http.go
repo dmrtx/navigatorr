@@ -18,6 +18,8 @@ package httpclient
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,6 +31,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -66,13 +69,25 @@ const DefaultHTTPSubmitTimeout = 60 * time.Second
 // HTTPError is a typed non-2xx daemon response. It preserves method, URL
 // (without secrets), status code, and a bounded server message so callers
 // (and phase-4 reconciliation) can classify without string-sniffing raw
-// bodies. In particular, 409 busy responses preserve the "worker busy"
-// substring the action layer already classifies.
+// bodies. Busy responses keep the "worker busy" substring the action layer's
+// string classifier still reads.
 type HTTPError struct {
 	Method     string
 	URL        string
 	StatusCode int
 	Message    string
+	// Code is the worker's envelope code (transcode.WorkerError*). It is
+	// empty for workers that predate the envelope and for responses that did
+	// not come from the worker (a proxy error page); the Is* methods fall
+	// back to status and message for those.
+	Code string
+	// Retryable is the worker's hint that repeating the same request later
+	// may succeed. Without a code it is inferred from the status.
+	Retryable bool
+	// RetryAfter is the Retry-After header, or zero when absent.
+	RetryAfter time.Duration
+	// RequestID is the X-Request-ID this request carried; the worker logs it.
+	RequestID string
 }
 
 func (e *HTTPError) Error() string {
@@ -83,7 +98,107 @@ func (e *HTTPError) Error() string {
 	if msg == "" {
 		msg = http.StatusText(e.StatusCode)
 	}
-	return fmt.Sprintf("transcode http %s %s: status %d: %s", e.Method, e.URL, e.StatusCode, msg)
+	out := fmt.Sprintf("transcode http %s %s: status %d: %s", e.Method, e.URL, e.StatusCode, msg)
+	if e.RequestID != "" {
+		out += " [request_id=" + e.RequestID + "]"
+	}
+	return out
+}
+
+// IsWorkerBusy reports a capacity refusal: nothing was created and the same
+// request may be sent again later. Older workers sent busy as a 409 with a
+// "worker busy" message; newer ones send 429 with code worker_busy.
+func (e *HTTPError) IsWorkerBusy() bool {
+	if e == nil {
+		return false
+	}
+	if e.Code != "" {
+		return e.Code == transcode.WorkerErrorBusy
+	}
+	msg := strings.ToLower(e.Message)
+	return (e.StatusCode == http.StatusConflict || e.StatusCode == http.StatusTooManyRequests) &&
+		(strings.Contains(msg, "worker busy") || strings.Contains(msg, "max parallel jobs") || strings.Contains(msg, "maximum parallel jobs"))
+}
+
+// IsIdempotencyConflict reports that the idempotency key already names a job
+// with a different execution spec. It is definitive: never retry it.
+func (e *HTTPError) IsIdempotencyConflict() bool {
+	if e == nil {
+		return false
+	}
+	if e.Code != "" {
+		return e.Code == transcode.WorkerErrorIdempotencyConflict
+	}
+	return e.StatusCode == http.StatusConflict && strings.Contains(strings.ToLower(e.Message), "idempotency_conflict")
+}
+
+// IsWorkerBusy reports whether err carries a worker capacity refusal.
+func IsWorkerBusy(err error) bool {
+	var he *HTTPError
+	return errors.As(err, &he) && he.IsWorkerBusy()
+}
+
+// IsIdempotencyConflict reports whether err carries a definitive idempotency
+// conflict from the worker.
+func IsIdempotencyConflict(err error) bool {
+	var he *HTTPError
+	return errors.As(err, &he) && he.IsIdempotencyConflict()
+}
+
+// inferRetryable classifies a response from a worker that sent no code the
+// way callers did before the envelope existed.
+func inferRetryable(status int, message string) bool {
+	switch status {
+	case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests,
+		http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	}
+	probe := HTTPError{StatusCode: status, Message: message}
+	return probe.IsWorkerBusy()
+}
+
+func parseRetryAfter(v string) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+		return time.Duration(secs) * time.Second
+	}
+	if at, err := http.ParseTime(v); err == nil {
+		if d := time.Until(at); d > 0 {
+			return d
+		}
+	}
+	return 0
+}
+
+// newHTTPError builds the typed error for a complete non-2xx response. Every
+// worker error body, whether the plain envelope or a submit/status/benchmark
+// struct, carries "error"; newer workers add "code" and "retryable".
+func newHTTPError(req *http.Request, status int, data []byte, header http.Header) *HTTPError {
+	var env httpErrorEnvelope
+	_ = json.Unmarshal(data, &env)
+	he := &HTTPError{
+		Method:     req.Method,
+		URL:        redactURL(req.URL.String()),
+		StatusCode: status,
+		Message:    boundHTTPErrorMessage(env.Error),
+		Code:       strings.TrimSpace(env.Code),
+		RequestID:  req.Header.Get(transcode.RequestIDHeader),
+	}
+	if he.Message == "" {
+		he.Message = http.StatusText(status)
+	}
+	if he.Code != "" && env.Retryable != nil {
+		he.Retryable = *env.Retryable
+	} else {
+		he.Retryable = inferRetryable(status, he.Message)
+	}
+	if header != nil {
+		he.RetryAfter = parseRetryAfter(header.Get("Retry-After"))
+	}
+	return he
 }
 
 // UncertainError reports that the daemon's decision is UNKNOWN and the
@@ -262,12 +377,12 @@ func (e *HTTPExecutor) Logs(ctx context.Context, jobID string) (map[string]any, 
 	if err != nil {
 		return nil, err
 	}
-	b, code, _, err := e.do(req, "logs", jobID, false)
+	b, code, hdr, err := e.do(req, "logs", jobID, false)
 	if err != nil {
 		return nil, err
 	}
 	if code != http.StatusOK {
-		return nil, &HTTPError{Method: http.MethodGet, URL: redactURL(e.base + "/v1/jobs/" + jobID + "/logs"), StatusCode: code, Message: parseErrorMessage(b)}
+		return nil, newHTTPError(req, code, b, hdr)
 	}
 	var result map[string]any
 	if err := json.Unmarshal(b, &result); err != nil {
@@ -368,6 +483,7 @@ func (e *HTTPExecutor) newRequest(ctx context.Context, method, path string, body
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set(transcode.RequestIDHeader, newRequestID())
 	if e.token != "" {
 		req.Header.Set("Authorization", "Bearer "+e.token)
 	}
@@ -389,9 +505,15 @@ func (e *HTTPExecutor) newRequest(ctx context.Context, method, path string, body
 // and is returned as a typed *HTTPError (never UncertainError).
 func (e *HTTPExecutor) do(req *http.Request, op, jobID string, mutating bool) ([]byte, int, http.Header, error) {
 	reqOp := req.Method + " " + req.URL.Path
+	if jobID != "" {
+		req.Header.Set(transcode.JobIDHeader, jobID)
+	}
 	resp, err := e.client.Do(req)
 	if err != nil {
-		return nil, 0, nil, errNoRedirect(reqOp, err)
+		// %w keeps url.Error/net.Error/context chains intact for errors.As
+		// and errors.Is; the ID lets an operator find the attempt in the
+		// worker log if it arrived.
+		return nil, 0, nil, fmt.Errorf("%w [request_id=%s]", errNoRedirect(reqOp, err), req.Header.Get(transcode.RequestIDHeader))
 	}
 	defer resp.Body.Close()
 	// Never follow redirects: surface 3xx fail-closed instead of silently
@@ -403,6 +525,7 @@ func (e *HTTPExecutor) do(req *http.Request, op, jobID string, mutating bool) ([
 			URL:        redactURL(req.URL.String()),
 			StatusCode: resp.StatusCode,
 			Message:    fmt.Sprintf("redirect (%d) is never followed by the transcode http transport (fail closed); location=%q", resp.StatusCode, resp.Header.Get("Location")),
+			RequestID:  req.Header.Get(transcode.RequestIDHeader),
 		}
 	}
 	lr := io.LimitReader(resp.Body, maxHTTPResponseBytes+1)
@@ -422,6 +545,7 @@ func (e *HTTPExecutor) do(req *http.Request, op, jobID string, mutating bool) ([
 			URL:        redactURL(req.URL.String()),
 			StatusCode: resp.StatusCode,
 			Message:    fmt.Sprintf("daemon response body exceeds %d bytes (bounded; fail closed)", maxHTTPResponseBytes),
+			RequestID:  req.Header.Get(transcode.RequestIDHeader),
 		}
 	}
 	return data, resp.StatusCode, resp.Header, nil
@@ -441,15 +565,18 @@ func redactURL(s string) string {
 }
 
 type httpErrorEnvelope struct {
-	Error string `json:"error"`
+	Error     string `json:"error"`
+	Code      string `json:"code"`
+	Retryable *bool  `json:"retryable"`
 }
 
-func parseErrorMessage(data []byte) string {
-	var env httpErrorEnvelope
-	if err := json.Unmarshal(data, &env); err != nil {
-		return ""
+// newRequestID returns a random correlation ID for X-Request-ID.
+func newRequestID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("t%x", time.Now().UnixNano())
 	}
-	return boundHTTPErrorMessage(env.Error)
+	return hex.EncodeToString(b[:])
 }
 
 func isTransportFailure(err error) bool {
@@ -538,7 +665,7 @@ func (e *HTTPExecutor) availability(ctx context.Context, op, field string) error
 	if err != nil {
 		return fmt.Errorf("building %s request: %w", op, err)
 	}
-	data, code, _, err := e.do(req, op, "", false)
+	data, code, hdr, err := e.do(req, op, "", false)
 	if err != nil {
 		if isTransportFailure(err) {
 			return e.failUncertain(op, "", err)
@@ -546,7 +673,7 @@ func (e *HTTPExecutor) availability(ctx context.Context, op, field string) error
 		return fmt.Errorf("transcode http %s: %w", op, err)
 	}
 	if code != http.StatusOK {
-		return &HTTPError{Method: http.MethodGet, URL: redactURL(e.base + path), StatusCode: code, Message: parseErrorMessage(data)}
+		return newHTTPError(req, code, data, hdr)
 	}
 	var result map[string]json.RawMessage
 	if err := json.Unmarshal(data, &result); err != nil {
@@ -569,7 +696,7 @@ func (e *HTTPExecutor) Doctor(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("building doctor request: %w", err)
 	}
-	data, code, _, err := e.do(req, "doctor", "", false)
+	data, code, hdr, err := e.do(req, "doctor", "", false)
 	if err != nil {
 		if isTransportFailure(err) {
 			return e.failUncertain("doctor", "", err)
@@ -598,11 +725,7 @@ func (e *HTTPExecutor) Doctor(ctx context.Context) error {
 			return fmt.Errorf("remote doctor check failed: %s", boundHTTPErrorMessage(res.Error))
 		}
 	}
-	msg := parseErrorMessage(data)
-	if msg == "" {
-		msg = http.StatusText(code)
-	}
-	return &HTTPError{Method: http.MethodGet, URL: redactURL(e.base + "/v1/doctor"), StatusCode: code, Message: msg}
+	return newHTTPError(req, code, data, hdr)
 }
 
 // Capabilities fetches the versioned capability report and applies
@@ -615,7 +738,7 @@ func (e *HTTPExecutor) Capabilities(ctx context.Context) (transcode.WorkerCapabi
 	if err != nil {
 		return transcode.WorkerCapabilities{}, fmt.Errorf("building capabilities request: %w", err)
 	}
-	data, code, _, err := e.do(req, "capabilities", "", false)
+	data, code, hdr, err := e.do(req, "capabilities", "", false)
 	if err != nil {
 		if isTransportFailure(err) {
 			return transcode.WorkerCapabilities{}, e.failUncertain("capabilities", "", err)
@@ -623,11 +746,7 @@ func (e *HTTPExecutor) Capabilities(ctx context.Context) (transcode.WorkerCapabi
 		return transcode.WorkerCapabilities{}, fmt.Errorf("transcode http capabilities: %w", err)
 	}
 	if code != http.StatusOK {
-		msg := parseErrorMessage(data)
-		if msg == "" {
-			msg = http.StatusText(code)
-		}
-		return transcode.WorkerCapabilities{}, &HTTPError{Method: http.MethodGet, URL: redactURL(e.base + "/v1/capabilities"), StatusCode: code, Message: msg}
+		return transcode.WorkerCapabilities{}, newHTTPError(req, code, data, hdr)
 	}
 	var caps transcode.WorkerCapabilities
 	if err := json.Unmarshal(data, &caps); err != nil {
@@ -714,7 +833,7 @@ func (e *HTTPExecutor) Submit(ctx context.Context, req transcode.Request) (trans
 	if err != nil {
 		return transcode.Job{}, fmt.Errorf("building submit request: %w", err)
 	}
-	data, code, _, err := e.do(hreq, "submit", req.ID, true)
+	data, code, hdr, err := e.do(hreq, "submit", req.ID, true)
 	if err != nil {
 		// The request may already have reached the worker: a transport
 		// failure with no definitive response is UNKNOWN. A definitive
@@ -741,17 +860,9 @@ func (e *HTTPExecutor) Submit(ctx context.Context, req transcode.Request) (trans
 		}
 		return transcode.Job{ID: res.ID}, nil
 	default:
-		// Try the structured submit envelope first so "worker busy" (409)
-		// keeps the exact substring the action classifier expects.
-		var res httpSubmitResult
-		if err := json.Unmarshal(data, &res); err == nil && res.Error != "" {
-			return transcode.Job{}, &HTTPError{Method: http.MethodPost, URL: redactURL(e.base + "/v1/jobs"), StatusCode: code, Message: boundHTTPErrorMessage(res.Error)}
-		}
-		msg := parseErrorMessage(data)
-		if msg == "" {
-			msg = http.StatusText(code)
-		}
-		return transcode.Job{}, &HTTPError{Method: http.MethodPost, URL: redactURL(e.base + "/v1/jobs"), StatusCode: code, Message: msg}
+		// The submit error body's "error" keeps the exact "worker busy" and
+		// "idempotency_conflict" text older classifiers expect.
+		return transcode.Job{}, newHTTPError(hreq, code, data, hdr)
 	}
 }
 
@@ -771,7 +882,7 @@ func (e *HTTPExecutor) Status(ctx context.Context, jobID string) (transcode.JobS
 	if err != nil {
 		return transcode.JobStatus{}, fmt.Errorf("building status request: %w", err)
 	}
-	data, code, _, err := e.do(hreq, "status", jobID, false)
+	data, code, hdr, err := e.do(hreq, "status", jobID, false)
 	if err != nil {
 		if isTransportFailure(err) {
 			return transcode.JobStatus{}, e.failUncertain("status", jobID, err)
@@ -779,18 +890,9 @@ func (e *HTTPExecutor) Status(ctx context.Context, jobID string) (transcode.JobS
 		return transcode.JobStatus{}, fmt.Errorf("transcode http status: %w", err)
 	}
 	if code != http.StatusOK {
-		msg := parseErrorMessage(data)
-		if msg == "" {
-			// Status error bodies are JobStatusResponse-shaped; surface
-			// their error field when present.
-			var st transcode.JobStatus
-			if jerr := json.Unmarshal(data, &st); jerr == nil && st.Error != "" {
-				msg = boundHTTPErrorMessage(st.Error)
-			} else {
-				msg = http.StatusText(code)
-			}
-		}
-		return transcode.JobStatus{}, &HTTPError{Method: http.MethodGet, URL: redactURL(e.base + path), StatusCode: code, Message: msg}
+		// Status error bodies are JobStatusResponse-shaped; their "error"
+		// field is the envelope message.
+		return transcode.JobStatus{}, newHTTPError(hreq, code, data, hdr)
 	}
 	var st transcode.JobStatus
 	if err := json.Unmarshal(data, &st); err != nil {
@@ -807,12 +909,14 @@ func (e *HTTPExecutor) Status(ctx context.Context, jobID string) (transcode.JobS
 	return st, nil
 }
 
-// Cancel POSTs /v1/jobs/{id}/cancel exactly once. Once the request may have
-// reached the worker, ANY failure to obtain and validate a definitive 2xx
-// cancelled acknowledgement (transport error, truncated body, malformed
-// JSON, or an id/status mismatch) yields *UncertainError (cancel may or may
-// not have applied; reconcile via Status). No retries at this layer. A
-// complete non-2xx response stays a definitive typed *HTTPError.
+// Cancel POSTs /v1/jobs/{id}/cancel exactly once. A nil result means the job
+// is no longer running: it is cancelled now, was cancelled earlier, or had
+// already completed or failed (the worker leaves finished jobs untouched).
+// Once the request may have reached the worker, ANY failure to obtain and
+// validate a definitive 2xx acknowledgement (transport error, truncated body,
+// malformed JSON, or an id/status mismatch) yields *UncertainError (cancel
+// may or may not have applied; reconcile via Status). No retries at this
+// layer. A complete non-2xx response stays a definitive typed *HTTPError.
 func (e *HTTPExecutor) Cancel(ctx context.Context, jobID string) error {
 	if strings.TrimSpace(jobID) == "" {
 		return errors.New("jobID is required")
@@ -827,7 +931,7 @@ func (e *HTTPExecutor) Cancel(ctx context.Context, jobID string) error {
 	if err != nil {
 		return fmt.Errorf("building cancel request: %w", err)
 	}
-	data, code, _, err := e.do(hreq, "cancel", jobID, true)
+	data, code, hdr, err := e.do(hreq, "cancel", jobID, true)
 	if err != nil {
 		// The cancel may already have applied server-side: a transport
 		// failure with no definitive response is UNKNOWN (reconcile via
@@ -836,15 +940,20 @@ func (e *HTTPExecutor) Cancel(ctx context.Context, jobID string) error {
 		return e.mutatingDoErr("cancel", jobID, err)
 	}
 	if code != http.StatusOK {
-		msg := parseErrorMessage(data)
-		if msg == "" {
-			msg = http.StatusText(code)
-		}
-		return &HTTPError{Method: http.MethodPost, URL: redactURL(e.base + path), StatusCode: code, Message: msg}
+		return newHTTPError(hreq, code, data, hdr)
 	}
 	var res httpSubmitResult
 	if err := json.Unmarshal(data, &res); err != nil {
 		return e.failUncertain("cancel", jobID, fmt.Errorf("parsing cancel acknowledgement (bounded body %d bytes): %w", len(data), err))
+	}
+	// A finished job's record is immutable, so the worker answers with its
+	// terminal status (newer workers add code already_terminal; older ones
+	// send the same body without it, and only in this case). That is a
+	// definitive answer: treating it as ambiguous sent every cancel of a
+	// finished job through a needless Status reconcile. Its "error" field is
+	// the job's own failure reason, so this check precedes the one below.
+	if res.ID == jobID && (res.Status == transcode.StatusCompleted || res.Status == transcode.StatusFailed) {
+		return nil
 	}
 	// A 2xx carrying res.Error is contradictory: the cancel POST was
 	// accepted at the HTTP layer yet the ack reports failure. The cancel
@@ -887,7 +996,7 @@ func (e *HTTPExecutor) BenchmarkSubmit(ctx context.Context, req transcode.Benchm
 	if err != nil {
 		return transcode.BenchmarkJob{}, fmt.Errorf("building benchmark submit request: %w", err)
 	}
-	data, code, _, err := e.do(hreq, "benchmark_submit", req.ID, true)
+	data, code, hdr, err := e.do(hreq, "benchmark_submit", req.ID, true)
 	if err != nil {
 		// The benchmark may already have been accepted: a transport failure
 		// with no definitive response is UNKNOWN. A definitive *HTTPError
@@ -921,13 +1030,8 @@ func (e *HTTPExecutor) BenchmarkSubmit(ctx context.Context, req transcode.Benchm
 			if res.ProtocolVersion != 0 && res.ProtocolVersion != transcode.WorkerProtocolVersion {
 				return transcode.BenchmarkJob{}, fmt.Errorf("worker returned unsupported protocol version %d (expected %d) (fail closed)", res.ProtocolVersion, transcode.WorkerProtocolVersion)
 			}
-			return transcode.BenchmarkJob{}, &HTTPError{Method: http.MethodPost, URL: redactURL(e.base + "/v1/benchmarks"), StatusCode: code, Message: boundHTTPErrorMessage(res.Error)}
 		}
-		msg := parseErrorMessage(data)
-		if msg == "" {
-			msg = http.StatusText(code)
-		}
-		return transcode.BenchmarkJob{}, &HTTPError{Method: http.MethodPost, URL: redactURL(e.base + "/v1/benchmarks"), StatusCode: code, Message: msg}
+		return transcode.BenchmarkJob{}, newHTTPError(hreq, code, data, hdr)
 	}
 }
 
@@ -948,7 +1052,7 @@ func (e *HTTPExecutor) BenchmarkStatus(ctx context.Context, jobID string) (trans
 	if err != nil {
 		return transcode.BenchmarkStatus{}, fmt.Errorf("building benchmark status request: %w", err)
 	}
-	data, code, _, err := e.do(hreq, "benchmark_status", trimmedID, false)
+	data, code, hdr, err := e.do(hreq, "benchmark_status", trimmedID, false)
 	if err != nil {
 		if isTransportFailure(err) {
 			return transcode.BenchmarkStatus{}, e.failUncertain("benchmark_status", trimmedID, err)
@@ -956,16 +1060,7 @@ func (e *HTTPExecutor) BenchmarkStatus(ctx context.Context, jobID string) (trans
 		return transcode.BenchmarkStatus{}, fmt.Errorf("transcode http benchmark status: %w", err)
 	}
 	if code != http.StatusOK {
-		msg := parseErrorMessage(data)
-		if msg == "" {
-			var st transcode.BenchmarkStatus
-			if jerr := json.Unmarshal(data, &st); jerr == nil && st.Error != "" {
-				msg = boundHTTPErrorMessage(st.Error)
-			} else {
-				msg = http.StatusText(code)
-			}
-		}
-		return transcode.BenchmarkStatus{}, &HTTPError{Method: http.MethodGet, URL: redactURL(e.base + path), StatusCode: code, Message: msg}
+		return transcode.BenchmarkStatus{}, newHTTPError(hreq, code, data, hdr)
 	}
 	var st transcode.BenchmarkStatus
 	if err := json.Unmarshal(data, &st); err != nil {
@@ -1001,7 +1096,7 @@ func (e *HTTPExecutor) BenchmarkCancel(ctx context.Context, jobID string) error 
 	if err != nil {
 		return fmt.Errorf("building benchmark cancel request: %w", err)
 	}
-	data, code, _, err := e.do(hreq, "benchmark_cancel", trimmedID, true)
+	data, code, hdr, err := e.do(hreq, "benchmark_cancel", trimmedID, true)
 	if err != nil {
 		// The cancel may already have applied server-side: a transport
 		// failure with no definitive response is UNKNOWN (reconcile via
@@ -1010,11 +1105,7 @@ func (e *HTTPExecutor) BenchmarkCancel(ctx context.Context, jobID string) error 
 		return e.mutatingDoErr("benchmark_cancel", trimmedID, err)
 	}
 	if code != http.StatusOK {
-		msg := parseErrorMessage(data)
-		if msg == "" {
-			msg = http.StatusText(code)
-		}
-		return &HTTPError{Method: http.MethodPost, URL: redactURL(e.base + path), StatusCode: code, Message: msg}
+		return newHTTPError(hreq, code, data, hdr)
 	}
 	var res transcode.BenchmarkCancelResponse
 	if err := json.Unmarshal(data, &res); err != nil {

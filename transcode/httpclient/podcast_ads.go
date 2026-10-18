@@ -19,12 +19,12 @@ func (e *HTTPExecutor) AdCatalog(ctx context.Context, scope string) (podcast.AdC
 	if err != nil {
 		return c, err
 	}
-	b, code, _, err := e.do(req, "ad_catalog", "", false)
+	b, code, hdr, err := e.do(req, "ad_catalog", "", false)
 	if err != nil {
 		return c, err
 	}
 	if code != 200 {
-		return c, &HTTPError{Method: http.MethodGet, URL: redactURL(e.base + path), StatusCode: code, Message: parseErrorMessage(b)}
+		return c, newHTTPError(req, code, b, hdr)
 	}
 	if err := json.Unmarshal(b, &c); err != nil {
 		return c, err
@@ -46,12 +46,12 @@ func (e *HTTPExecutor) RevokeAd(ctx context.Context, scope, id string) error {
 	if err != nil {
 		return err
 	}
-	b, code, _, err := e.do(req, "revoke_ad", "", true)
+	b, code, hdr, err := e.do(req, "revoke_ad", "", true)
 	if err != nil {
 		return err
 	}
 	if code != 200 {
-		return &HTTPError{Method: http.MethodPost, URL: redactURL(e.base + path), StatusCode: code, Message: parseErrorMessage(b)}
+		return newHTTPError(req, code, b, hdr)
 	}
 	var ack struct {
 		Revoked bool `json:"revoked"`

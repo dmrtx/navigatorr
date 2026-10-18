@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"os"
 	"os/exec"
@@ -83,6 +84,25 @@ type BenchmarkRecord struct {
 // BenchmarkRunner defines the pluggable executor interface for running benchmarks.
 type BenchmarkRunner interface {
 	RunBenchmark(ctx context.Context, w *Worker, record *BenchmarkRecord) error
+}
+
+// ErrBenchmarkNotFound is the benchmark counterpart of ErrJobNotFound: only a
+// missing benchmark.json maps to it.
+var ErrBenchmarkNotFound = errors.New("benchmark job not found")
+
+func loadBenchmarkForAPI(path string) (*BenchmarkRecord, error) {
+	record, err := LoadBenchmark(path)
+	if err != nil && errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("%w: %w", ErrBenchmarkNotFound, err)
+	}
+	return record, err
+}
+
+func benchmarkLoadErrorMessage(err error) string {
+	if errors.Is(err, ErrBenchmarkNotFound) {
+		return err.Error()
+	}
+	return fmt.Sprintf("reading benchmark state: %v", err)
 }
 
 // LoadBenchmark loads a BenchmarkRecord from benchmark.json.
@@ -690,9 +710,9 @@ func (w *Worker) BenchmarkStatus(ctx context.Context, jobID string) (transcode.B
 	}
 
 	benchFile := filepath.Join(jobDir, "benchmark.json")
-	record, err := LoadBenchmark(benchFile)
+	record, err := loadBenchmarkForAPI(benchFile)
 	if err != nil {
-		st.Error = fmt.Sprintf("benchmark job not found: %v", err)
+		st.Error = benchmarkLoadErrorMessage(err)
 		return st, err
 	}
 
@@ -784,6 +804,13 @@ func (w *Worker) BenchmarkCancel(ctx context.Context, jobID string) (transcode.B
 		return resp, fmt.Errorf("invalid jobID: path traversal")
 	}
 
+	benchFile := filepath.Join(jobDir, "benchmark.json")
+	// An unknown ID is answered before taking the lock, which would otherwise
+	// create an empty job directory for it.
+	if _, err := os.Stat(benchFile); errors.Is(err, fs.ErrNotExist) {
+		resp.Error = fmt.Sprintf("benchmark job not found: %v", err)
+		return resp, fmt.Errorf("%w: %w", ErrBenchmarkNotFound, err)
+	}
 	jobLock, err := acquireJobLock(jobDir)
 	if err != nil {
 		resp.Error = fmt.Sprintf("acquiring job lock: %v", err)
@@ -791,10 +818,9 @@ func (w *Worker) BenchmarkCancel(ctx context.Context, jobID string) (transcode.B
 	}
 	defer jobLock.Unlock()
 
-	benchFile := filepath.Join(jobDir, "benchmark.json")
-	record, err := LoadBenchmark(benchFile)
+	record, err := loadBenchmarkForAPI(benchFile)
 	if err != nil {
-		resp.Error = fmt.Sprintf("benchmark job not found: %v", err)
+		resp.Error = benchmarkLoadErrorMessage(err)
 		return resp, err
 	}
 

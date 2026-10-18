@@ -592,7 +592,7 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 }
 
 func (e *Engine) handleBenchmarkTransientFailure(ec *ExecutionContext, plan *transcode.Plan, err error, phase string) (StepResult, error) {
-	class := resilience.Classify(err.Error())
+	class := classifyWorkerFailure(err)
 	ec.State["failure_classification"] = string(class)
 	appendFailureHistory(ec, phase, string(class), err.Error())
 

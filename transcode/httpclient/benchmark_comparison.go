@@ -28,7 +28,7 @@ func (e *HTTPExecutor) comparisonGET(ctx context.Context, id, query string) ([]b
 		return nil, nil, err
 	}
 	if code != http.StatusOK {
-		return nil, nil, &HTTPError{Method: http.MethodGet, URL: redactURL(e.base + path), StatusCode: code, Message: parseErrorMessage(data)}
+		return nil, nil, newHTTPError(req, code, data, headers)
 	}
 	return data, headers, nil
 }

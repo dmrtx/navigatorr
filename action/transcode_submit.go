@@ -213,11 +213,22 @@ func transcodeHTTPError(err error) (*httpclient.HTTPError, bool) {
 // An unavailable status endpoint is not evidence that the encode failed. Keep
 // the same identity and poll with backoff; only a remote terminal status can
 // authorize creating a fresh attempt.
+//
+// A worker_busy refusal is retryable but definitive: the worker created
+// nothing, so it goes to the transient-failure path (WorkerBusy) instead of
+// reconciliation. Responses with an envelope code are classified by it;
+// older workers and non-worker responses fall back to the status.
 func isRetryableWorkerPollError(err error) bool {
 	if httpclient.IsTransportUncertain(err) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
 	if he, ok := transcodeHTTPError(err); ok {
+		if he.IsWorkerBusy() {
+			return false
+		}
+		if he.Code != "" {
+			return he.Retryable
+		}
 		switch he.StatusCode {
 		case 408, 425, 429, 500, 502, 503, 504:
 			return true
@@ -227,6 +238,9 @@ func isRetryableWorkerPollError(err error) bool {
 }
 
 func isTranscodeIdempotencyConflict(err error) bool {
+	if he, ok := transcodeHTTPError(err); ok && he.Code != "" {
+		return he.IsIdempotencyConflict()
+	}
 	msg := strings.ToLower(err.Error())
 	if strings.Contains(msg, "idempotency_conflict") || strings.Contains(msg, "idempotency conflict") {
 		return true
@@ -274,8 +288,22 @@ func transcodeWorkerMetadataOutputs(ec *ExecutionContext, st transcode.JobStatus
 	return out
 }
 
+// classifyWorkerFailure prefers the worker's envelope code for the two
+// classes it names and falls back to message classification otherwise.
+func classifyWorkerFailure(err error) resilience.FailureClass {
+	if he, ok := transcodeHTTPError(err); ok && he.Code != "" {
+		switch {
+		case he.IsWorkerBusy():
+			return resilience.WorkerBusy
+		case he.IsIdempotencyConflict():
+			return resilience.IdempotencyConflict
+		}
+	}
+	return resilience.Classify(err.Error())
+}
+
 func (e *Engine) handleTransientFailure(ec *ExecutionContext, plan *transcode.Plan, err error, phase string) (StepResult, error) {
-	class := resilience.Classify(err.Error())
+	class := classifyWorkerFailure(err)
 	ec.State["failure_classification"] = string(class)
 	appendFailureHistory(ec, phase, string(class), err.Error())
 	if class == resilience.WorkerBusy && (getBool(ec.Inputs, "surface_worker_busy") || getBool(ec.State, "surface_worker_busy")) {
