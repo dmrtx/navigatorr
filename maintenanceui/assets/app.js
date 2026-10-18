@@ -2712,7 +2712,7 @@ function confirmDecision(job, choice, label) {
   if (choice.decision === "run_once_after_review") {
     const report = benchmarkReport(job);
     if (report) content.push(report);
-    content.push(node("p", "This authorizes one more bounded sample test with the settings listed above. Quality limits stay the same, and the original is not changed.", "muted"));
+    content.push(node("p", "This authorizes one more bounded sample test of the new settings listed above. Quality limits stay the same, and the original is not changed.", "muted"));
   } else if (choice.description) content.push(node("p", choice.description, "muted"));
   return reviewAction({title: `${label}?`, content, confirmLabel: label, cancelLabel: "Decide later"});
 }
@@ -2994,6 +2994,8 @@ function shortJobReason(reason) {
   if (/shared VMAF\/CAMBI calibration supports 8-bit SDR video below 45 fps/.test(text))
     return "Automatic testing does not support this video format";
   if (/^Two benchmark rounds for these source bytes already found no acceptable candidate/.test(text)) return reasons.benchmark_search_review;
+  if (/^Two earlier test rounds already tried every setting/.test(text)) return "Earlier test rounds already tried these settings; another test is not offered. Original kept";
+  if (/^Two earlier test rounds found no acceptable setting/.test(text)) return reasons.benchmark_search_review;
   if (/^Encoding finished for job .*publication requires intervention/.test(text)) return "Encoding finished, but saving the candidate failed. The candidate is kept; check storage, then ask the worker again";
   // Engine reasons often start with a machine code ("code: detail").
   const coded = text.match(/^([a-z0-9]+(?:_[a-z0-9]+)+)(?::\s*(.*))?$/);
@@ -3200,6 +3202,15 @@ function benchmarkHeadline(job) {
   if (["no_acceptable_candidate", "no_suitable_candidate"].includes(b.outcome)) return `No tested setting passed${b.rejected?.length ? ` (${b.rejected.length} rejected)` : ""} · Original kept`;
   return "";
 }
+function vmafSummaryLabel(v) {
+  if (!v) return "VMAF not measured";
+  const f = x => Number(x).toFixed(1);
+  return `VMAF mean ${f(v.mean)} · p5 ${f(v.p5)}${v.worst_window_mean ? ` · worst ${v.worst_window_seconds || 5} s ${f(v.worst_window_mean)}` : ""} · lowest frame ${f(v.min)}`;
+}
+function vmafFloorLabel(floor) {
+  if (!floor) return "";
+  return [floor.minimum ? `VMAF ≥ ${floor.minimum}` : "", floor.p5_minimum != null ? `p5 ≥ ${floor.p5_minimum}` : "", floor.worst_window_minimum != null ? `worst window ≥ ${floor.worst_window_minimum}` : ""].filter(Boolean).join(", ");
+}
 function benchmarkCandidateLabel(c) {
   const codec = c.video_codec === "libx265" ? "x265" : c.video_codec || "VideoToolbox";
   const rate = c.average_bitrate_kbps ? `${c.average_bitrate_kbps} kbps` : c.video_codec === "libx265" ? `CRF ${c.quality}` : `quality ${c.quality}`;
@@ -3219,7 +3230,17 @@ function benchmarkReport(job) {
   if (b.size_warning) box.append(node("p", b.size_warning, "benchmark-warning"));
   if (b.selection?.best_score != null)
     box.append(node("p", `Best sampled score ${Number(b.selection.best_score).toFixed(1)}; settings within ${b.selection.marginal_tolerance} of it (≥ ${Number(b.selection.score_floor).toFixed(1)}) were compared by size.`, "metadata"));
-  if (b.previous_unsuccessful_actions?.length) {
+  if (b.previous_rounds?.length) {
+    for (const [i, round] of b.previous_rounds.entries()) {
+      const head = node("p", "", "metadata");
+      const goal = round.mode ? `${round.mode[0].toUpperCase()}${round.mode.slice(1)} goal` : "Earlier round";
+      const floor = vmafFloorLabel(round.floor);
+      head.append(node("span", `Earlier round ${i + 1} · ${goal}${floor ? ` (${floor})` : ""} · `), button("Open", () => openJob(round.action_id), "quiet link-button"));
+      const list = node("ul", "", "benchmark-list");
+      for (const c of round.candidates || []) list.append(node("li", `${benchmarkCandidateLabel(c)} · ${vmafSummaryLabel(c.vmaf)}`));
+      box.append(head, list);
+    }
+  } else if (b.previous_unsuccessful_actions?.length) {
     const list = node("ul", "", "benchmark-list");
     for (const id of b.previous_unsuccessful_actions) {
       const item = node("li");
@@ -3230,8 +3251,14 @@ function benchmarkReport(job) {
   }
   if (b.proposed_candidates?.length) {
     const list = node("ul", "", "benchmark-list");
-    for (const c of b.proposed_candidates) list.append(node("li", benchmarkCandidateLabel(c)));
+    const known = Array.isArray(b.new_candidates);
+    for (const c of b.proposed_candidates) list.append(node("li", `${benchmarkCandidateLabel(c)}${known ? b.new_candidates.includes(c.id) ? " · new" : " · already tried" : ""}`));
     box.append(node("p", "Settings the next round would test:", "metadata"), list);
+  }
+  if (b.measured?.length) {
+    const list = node("ul", "", "benchmark-list");
+    for (const m of b.measured) list.append(node("li", `${benchmarkCandidateLabel({...m, id: m.candidate_id})} · ${vmafSummaryLabel(m.vmaf)} · ${m.selected ? "selected" : m.passed ? "passed" : "did not pass"}`));
+    box.append(node("p", "Measured quality per setting:", "metadata"), list);
   }
   if (b.rejected?.length) {
     const details = node("details", "", "benchmark-rejected");
@@ -3253,9 +3280,10 @@ function benchmarkReport(job) {
     details.append(list);
     box.append(details);
   }
-  if (b.next_step && (b.outcome !== "selected" || b.size_warning)) {
+  const nextStep = b.user_next_step || b.next_step?.replace(/the displayed run_once_after_review decision/g, "“Run one more test”");
+  if (nextStep && (b.outcome !== "selected" || b.size_warning)) {
     const next = node("p", "", "benchmark-next");
-    next.append(node("strong", "Next step: "), node("span", b.next_step.replace(/the displayed run_once_after_review decision/g, "“Run one more test”")));
+    next.append(node("strong", "Next step: "), node("span", nextStep));
     box.append(next);
   }
   return box;
@@ -3551,12 +3579,11 @@ function renderPhaseCosts(host, job) {
   const entries = Object.entries(job.phase_costs || {});
   const search = job.worker?.benchmark_search_seconds;
   const sourceBudget = job.worker?.search_budget_seconds;
-  const operationBudget = job.worker?.operation_search_budget_seconds;
-  if (!entries.length && search == null && sourceBudget == null && operationBudget == null) return;
+  if (!entries.length && search == null && sourceBudget == null) return;
   const detail = node("details", "", "phase-costs");
   detail.append(node("summary", "Measured phase costs"));
   detail.append(node("p", "Elapsed wall measurements include synchronous I/O. Coordinator measurements count returned invocations and exclude waits between them. CPU time is unknown; phases may overlap and are not added into a total.", "metadata"));
-  if (search != null || sourceBudget != null || operationBudget != null) detail.append(node("p", `Sample search measured wall: ${search == null ? "Unknown" : search + " s"} · Source budget: ${sourceBudget == null ? "Unknown" : sourceBudget + " s"} · Operation budget: ${operationBudget == null ? "Unknown" : operationBudget + " s"}. Pending reservations are not measured consumption.`, "metadata"));
+  if (search != null || sourceBudget != null) detail.append(node("p", `Sample search measured wall: ${search == null ? "Unknown" : search + " s"} · Budget per file: ${sourceBudget == null ? "Unknown" : sourceBudget + " s"}. Pending reservations are not measured consumption.`, "metadata"));
   const table = node("table");
   const header = node("tr");
   for (const label of ["Phase", "Wall time", "Invocations", "NAS read", "NAS written", "Cache hits / misses"]) header.append(node("th", label));

@@ -5,7 +5,13 @@ package store
 // errors and unfinished jobs are not quality-search attempts. No new ledger is
 // needed: the action checkpoints already contain the authoritative outcome.
 func (s *Store) UnsuccessfulBenchmarks(sourceSHA, excludeID string) ([]string, error) {
-	if sourceSHA == "" {
+	return s.UnsuccessfulBenchmarkHistory(sourceSHA, excludeID, 2)
+}
+
+// UnsuccessfulBenchmarkHistory returns up to limit such rounds, newest first,
+// so a caller can keep only the rounds comparable with a new proposal.
+func (s *Store) UnsuccessfulBenchmarkHistory(sourceSHA, excludeID string, limit int) ([]string, error) {
+	if sourceSHA == "" || limit <= 0 {
 		return nil, nil
 	}
 	s.mu.Lock()
@@ -15,7 +21,7 @@ func (s *Store) UnsuccessfulBenchmarks(sourceSHA, excludeID string) ([]string, e
 		AND json_extract(state_json, '$.original_sha256') = ?
 		AND json_extract(state_json, '$.benchmark_done') = 1
 		AND json_extract(state_json, '$.has_winner') = 0
-		ORDER BY created_at DESC, id DESC LIMIT 2`, excludeID, sourceSHA)
+		ORDER BY created_at DESC, id DESC LIMIT ?`, excludeID, sourceSHA, limit)
 	if err != nil {
 		return nil, err
 	}

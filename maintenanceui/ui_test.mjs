@@ -2537,7 +2537,7 @@ test("phase cost detail distinguishes measured wall intervals from unknown bytes
 });
 
 test("phase cost detail shows known cache observations and distinguishes search budget from consumption",()=>{
- const h=harness();h.run('renderPhaseCosts($("detail-summary"),{worker:{benchmark_search_seconds:4,search_budget_seconds:600,operation_search_budget_seconds:3600},phase_costs:{worker_staging:{duration_ms:1,attempts:1,cache_hits:0,cache_misses:1}}});');const rendered=JSON.stringify(h.elements.get("detail-summary").children);assert.match(rendered,/0 \/ 1/);assert.match(rendered,/measured wall: 4 s/);assert.match(rendered,/Source budget: 600 s/);assert.match(rendered,/Operation budget: 3600 s/);assert.match(rendered,/reservations are not measured consumption/);
+ const h=harness();h.run('renderPhaseCosts($("detail-summary"),{worker:{benchmark_search_seconds:4,search_budget_seconds:600,operation_search_budget_seconds:3600},phase_costs:{worker_staging:{duration_ms:1,attempts:1,cache_hits:0,cache_misses:1}}});');const rendered=JSON.stringify(h.elements.get("detail-summary").children);assert.match(rendered,/0 \/ 1/);assert.match(rendered,/measured wall: 4 s/);assert.match(rendered,/Budget per file: 600 s/);assert.doesNotMatch(rendered,/Operation budget/);assert.match(rendered,/reservations are not measured consumption/);
 });
 
 
@@ -2730,6 +2730,29 @@ test("an extra benchmark round runs only after the evidence was shown and confir
     for (let i = 0; i < 12; i++) await Promise.resolve();
     assert.deepEqual(JSON.parse(JSON.stringify(calls)), confirm ? [["review","action_resume",{decision:"run_once_after_review"}]] : []);
   }
+});
+
+test("the search review shows earlier measurements, marks new settings and hides a repeat", () => {
+  const h = harness();
+  const vmaf = {mean:94.87,p5:91.5,min:90.3,worst_window_mean:92.8,worst_window_seconds:5};
+  h.context.job = {id:"review",action_name:"transcode_media",mode:"size",status:"waiting_decision",source_path:"/media/episode.mkv",
+    waiting_reason:"Two earlier test rounds already tried every setting this test would use, with the same or a more lenient quality requirement, and none was acceptable. Running it again would repeat them, so it is not offered. The original is unchanged.",
+    waiting_options:[{decision:"cancel",description:"Stop and keep the original."}],
+    benchmark:{outcome:"search_review_required",message:"Two earlier rounds found no acceptable candidate.",new_candidates:[],
+      previous_rounds:[{action_id:"act-1",mode:"size",floor:{minimum:88,p5_minimum:84,worst_window_minimum:85},candidates:[{id:"crf16",video_codec:"libx265",quality:16,preset:"slow",vmaf}]}],
+      proposed_candidates:[{id:"next-1",video_codec:"libx265",quality:16,preset:"slow"}],
+      measured:[{candidate_id:"crf20",video_codec:"libx265",quality:20,passed:false,vmaf:{mean:90,p5:85.5,min:84,worst_window_mean:85.95,worst_window_seconds:5}}],
+      next_step:"Every proposed candidate was already measured; run_once_after_review is not offered.",
+      user_next_step:"Keep the original. Every setting this test would try already failed in earlier rounds, so testing them again is not offered."}};
+  assert.equal(h.run('jobControls(job).children.find(b=>b.textContent==="Run one more test")'), undefined);
+  const text = progressText(h.run('benchmarkReport(job)'));
+  assert.match(text, /Earlier round 1 · Size goal \(VMAF ≥ 88, p5 ≥ 84, worst window ≥ 85\)/);
+  assert.match(text, /crf16 · x265 CRF 16 · slow · VMAF mean 94.9 · p5 91.5 · worst 5 s 92.8 · lowest frame 90.3/);
+  assert.match(text, /next-1 .* already tried/);
+  assert.match(text, /crf20 .* p5 85.5 .* did not pass/);
+  assert.match(text, /Next step: .*already failed in earlier rounds/);
+  assert.doesNotMatch(text, /run_once|action/);
+  assert.match(h.run('shortJobReason(job.waiting_reason)'), /already tried these settings; another test is not offered/);
 });
 
 test("the process button says how many files it starts", () => {

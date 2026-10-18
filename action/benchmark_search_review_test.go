@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/quality"
 	"github.com/jakenesler/navigatorr/transcode/recipe"
 )
 
@@ -112,5 +114,80 @@ func TestBenchmarkHistoryIgnoresTechnicalFailuresAndAcceptedJobsStillReconcile(t
 	r, err := e.stepBenchmarkSubmit(context.Background(), ec)
 	if err != nil || r.Status != StepCompleted {
 		t.Fatalf("accepted job tracking gated: %v %+v", err, r)
+	}
+}
+
+func seedSearchRound(t *testing.T, st *store.Store, id, mode string, floor float64, candidates []transcode.BenchmarkCandidate) {
+	t.Helper()
+	p5 := floor - 2
+	req := transcode.BenchmarkRequest{Candidates: candidates, Quality: &transcode.BenchmarkQualityConfig{VMAF: &transcode.BenchmarkQualityThresholds{Minimum: floor, P5Minimum: &p5, GuardrailEnforcement: "reject"}}}
+	decision := transcode.BenchmarkDecision{DecisionReason: "no_candidate_met_minimum"}
+	var evidence []transcode.BenchmarkCandidateQualityEvidence
+	for _, c := range candidates {
+		decision.Evaluations = append(decision.Evaluations, transcode.BenchmarkCandidateEvaluation{CandidateID: c.ID, VideoCodec: c.VideoCodec, Quality: c.Quality, Preset: c.Preset, MetricType: "vmaf", Score: floor - 1, EvaluationReason: "sample_below_minimum_quality"})
+		evidence = append(evidence, transcode.BenchmarkCandidateQualityEvidence{CandidateID: c.ID, VMAF: &quality.VMAFStats{ModelID: "vmaf_v0.6.1", Mean: floor - 1, P5: floor - 4, Min: floor - 6, WorstWindowMean: floor - 3, FramesTotal: 240}})
+	}
+	state := map[string]any{"original_sha256": "source", "benchmark_done": true, "has_winner": false, "benchmark_request": req, "benchmark_decision": decision, "benchmark_quality": evidence}
+	if err := st.CreateActionInstance(store.ActionInstance{ID: id, ActionName: "transcode_media", InputsJSON: toJSON(map[string]any{"mode": mode}), StateJSON: toJSON(state)}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func x265(id string, crf int, preset string) transcode.BenchmarkCandidate {
+	return transcode.BenchmarkCandidate{ID: id, VideoCodec: "libx265", Quality: crf, Preset: preset}
+}
+
+func reviewProposal(floor float64, candidates ...transcode.BenchmarkCandidate) *ExecutionContext {
+	p5 := floor - 2
+	return &ExecutionContext{InstanceID: "current", State: map[string]any{"original_sha256": "source", "benchmark_request": transcode.BenchmarkRequest{Candidates: candidates, Quality: &transcode.BenchmarkQualityConfig{VMAF: &transcode.BenchmarkQualityThresholds{Minimum: floor, P5Minimum: &p5, GuardrailEnforcement: "reject"}}}}}
+}
+
+func TestSearchReviewIgnoresRoundsUnderAStricterGoal(t *testing.T) {
+	st := setupTestStore(t)
+	ladder := []transcode.BenchmarkCandidate{x265("a", 16, "slow"), x265("b", 20, "medium")}
+	seedSearchRound(t, st, "quality-1", "quality", 95, ladder)
+	seedSearchRound(t, st, "quality-2", "quality", 95, ladder)
+	e := NewEngine(EngineDeps{Store: st})
+	// The size goal's floor is lower: failing at 95 says nothing about 88.
+	ec := reviewProposal(88, ladder...)
+	if res := e.reviewBenchmarkSearch(ec); res != nil {
+		t.Fatalf("stricter rounds blocked a lenient goal: %+v", res)
+	}
+	// A legacy review recorded before this check resumes without a decision.
+	ec.State["benchmark_search_review_required"] = true
+	if res := e.reviewBenchmarkSearch(ec); res != nil || getBool(ec.State, "benchmark_search_review_required") {
+		t.Fatalf("legacy review stayed blocked: %+v", res)
+	}
+}
+
+func TestSearchReviewOffersNoRepeatOfTheSameLadder(t *testing.T) {
+	st := setupTestStore(t)
+	ladder := []transcode.BenchmarkCandidate{x265("a", 16, "slow"), x265("b", 20, "medium")}
+	seedSearchRound(t, st, "size-1", "size", 88, ladder)
+	seedSearchRound(t, st, "size-2", "size", 88, []transcode.BenchmarkCandidate{x265("c", 18, "slow")})
+	e := NewEngine(EngineDeps{Store: st})
+	// Same settings under new IDs and an equally strict floor: nothing new.
+	ec := reviewProposal(88, x265("next-1", 16, "slow"), x265("next-2", 18, "slow"))
+	res := e.reviewBenchmarkSearch(ec)
+	if res == nil || res.Status != StepWaitingDecision || len(res.WaitingOptions) != 1 || res.WaitingOptions[0].Decision != "cancel" || !strings.Contains(res.WaitingReason, "would repeat them") {
+		t.Fatalf("identical ladder offered again: %+v", res)
+	}
+	review := ec.State["benchmark_search_review"].(*SearchReview)
+	if len(review.Rounds) != 2 || len(review.NewCandidates) != 0 || review.Rounds[0].Candidates[0].VMAF == nil || review.Rounds[0].Candidates[0].VMAF.P5 != 84 {
+		t.Fatalf("review lacks the measured evidence: %+v", review)
+	}
+	ec.Decision = "run_once_after_review"
+	if res := e.reviewBenchmarkSearch(ec); res == nil || res.Status != StepWaitingDecision || getBool(ec.State, "benchmark_search_reviewed") {
+		t.Fatalf("a repeat was authorized: %+v", res)
+	}
+	// A proposal with an unmeasured setting may run once, naming what is new.
+	ec = reviewProposal(88, x265("next-1", 16, "slow"), x265("grain", 18, "slower"))
+	res = e.reviewBenchmarkSearch(ec)
+	if res == nil || len(res.WaitingOptions) != 2 || !strings.Contains(res.WaitingReason, "1 setting not measured before (grain)") {
+		t.Fatalf("new setting not offered: %+v", res)
+	}
+	ec.Decision = "run_once_after_review"
+	if res := e.reviewBenchmarkSearch(ec); res != nil || !getBool(ec.State, "benchmark_search_reviewed") {
+		t.Fatalf("explicit run of a new setting refused: %+v", res)
 	}
 }

@@ -365,6 +365,7 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 			return StepResult{Status: StepFailed, Error: "automatic winner has no complete independent sample verification"}, nil
 		}
 
+		transcode.AttachVMAFEvidence(st.Decision, st.Quality)
 		ec.State["benchmark_done"] = true
 		ec.State["benchmark_decision"] = st.Decision
 		ec.State["decision_reason"] = st.Decision.DecisionReason

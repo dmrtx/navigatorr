@@ -186,3 +186,43 @@ func TestCompactBenchmarkExplainsAudioOnlyFallback(t *testing.T) {
 		t.Fatalf("audio-only fallback summary: %+v", s)
 	}
 }
+
+func TestCompactBenchmarkReviewSaysInPlainLanguageWhenNothingNewCanBeTested(t *testing.T) {
+	vmaf := &transcode.BenchmarkVMAFSummary{Mean: 94.87, P5: 91.5, Min: 90.3, WorstWindowMean: 92.8}
+	history := action.SearchReview{NewCandidates: []string{}, Rounds: []action.SearchReviewRound{
+		{ActionID: "earlier-1", Mode: "size", Candidates: []action.SearchReviewCandidate{{ID: "crf16", VideoCodec: "libx265", Quality: 16, Preset: "slow", Result: "sample_below_minimum_quality", VMAF: vmaf}}},
+		{ActionID: "earlier-2", Mode: "size"},
+	}}
+	res := &action.ActionResult{ActionName: "transcode_media", Status: action.StatusWaitingDecision, State: map[string]any{
+		"optimization_enabled": true, "benchmark_search_review_required": true, "benchmark_search_review": history,
+		"previous_unsuccessful_benchmarks": []string{"earlier-1", "earlier-2"},
+	}}
+	data, _ := json.Marshal(res)
+	var persisted action.ActionResult
+	_ = json.Unmarshal(data, &persisted)
+	s := compactBenchmark(&persisted)
+	if s == nil || len(s.PreviousResults) != 2 || s.PreviousResults[0].Candidates[0].VMAF.P5 != 91.5 {
+		t.Fatalf("earlier measurements missing: %+v", s)
+	}
+	if !strings.Contains(s.NextStep, "not offered") || !strings.Contains(s.UserNextStep, "already failed in earlier rounds") || strings.Contains(s.UserNextStep, "run_once") || strings.Contains(s.UserNextStep, "action") {
+		t.Fatalf("next step not split for people and agents: %+v", s)
+	}
+}
+
+func TestCompactBenchmarkListsMeasuredVMAFPerCandidate(t *testing.T) {
+	res := &action.ActionResult{ActionName: "transcode_media", Status: action.StatusCompleted, State: map[string]any{
+		"optimization_enabled": true,
+		"benchmark_decision": transcode.BenchmarkDecision{DecisionReason: "no_candidate_met_minimum", Evaluations: []transcode.BenchmarkCandidateEvaluation{
+			{CandidateID: "crf16", VideoCodec: "libx265", Quality: 16, EvaluationReason: "sample_below_minimum_quality"},
+			{CandidateID: "crf20", VideoCodec: "libx265", Quality: 20, EvaluationReason: "skipped_quality_dominated"},
+		}},
+		"benchmark_quality": []transcode.BenchmarkCandidateQualityEvidence{{CandidateID: "crf16", VMAF: &quality.VMAFStats{Mean: 94.87, P5: 91.5, Min: 90.3, WorstWindowMean: 92.8, FramesTotal: 716}}},
+	}}
+	s := compactBenchmark(res)
+	if s == nil || len(s.Measured) != 1 || s.Measured[0].CandidateID != "crf16" || s.Measured[0].VMAF.WorstWindowMean != 92.8 || s.Measured[0].Passed {
+		t.Fatalf("measured VMAF not reported per candidate: %+v", s)
+	}
+	if s.UserNextStep == "" || strings.Contains(s.UserNextStep, "optimization.enabled") {
+		t.Fatalf("user next step carries agent guidance: %q", s.UserNextStep)
+	}
+}
