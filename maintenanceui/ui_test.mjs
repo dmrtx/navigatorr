@@ -617,7 +617,7 @@ test("external waits and confirmed recovery take precedence over a recent heartb
   for (const condition of ["worker_unreachable", "benchmark_retry", "transcode_retry", "worker_reconciling", "worker_busy"]) {
     h.context.condition = condition;
     h.run('progressJob.waiting_condition=condition;progressJob.waiting_reason="Waiting for coordination";');
-    assert.equal(h.run('queuePresentation(progressJob).status'), condition === "worker_unreachable" ? "Worker offline" : "Waiting");
+    assert.equal(h.run('queuePresentation(progressJob).status'), condition === "worker_unreachable" ? "Worker offline" : condition === "worker_busy" ? "Waiting for a free worker slot" : "Waiting");
     assert.doesNotMatch(progressText(h.run('telemetry(progressJob)')), /Measuring sample quality|Worker heartbeat/);
   }
   h.run('progressJob.waiting_condition="transcode_complete";progressJob.worker.recovery_required=true;progressJob.waiting_reason="Publication requires intervention";');
@@ -3491,4 +3491,41 @@ test("only a command that is still waiting shows its waiting reason", () => {
     h.run('state.commands.get("w1").status=status;');
     assert.doesNotMatch(h.run('commandChip("job-w").title'), /Waiting for/);
   }
+});
+
+test("a single job waiting for a full worker shows a slot wait, never a failure", () => {
+  const h = harness();
+  for (const job of [
+    {action_name:"transcode_media",status:"waiting_external",waiting_condition:"worker_busy",waiting_reason:"Waiting for a free worker slot to start the benchmark",source_path:"/media/Sample Film One (2010).mkv"},
+    // A finished benchmark leaves telemetry behind while the encode waits.
+    {action_name:"transcode_media",status:"waiting_external",waiting_condition:"worker_busy",source_path:"/media/Sample Film One (2010).mkv",worker:{benchmark_status:"completed",benchmark_phase:"completed"}},
+    {action_name:"benchmark_transcode",status:"waiting_external",waiting_condition:"worker_busy",source_path:"/media/Sample Film One (2010).mkv"},
+  ]) {
+    h.context.job = job;
+    const view = h.run("queuePresentation(job)");
+    assert.equal(view.status, "Waiting for a free worker slot");
+    assert.notEqual(h.run("statusClass(queuePresentation(job).status)"), "failed");
+    assert.equal(view.showTelemetry, true);
+    assert.match(h.run("telemetry(job)").children[0].textContent, /continues automatically when a slot is free/);
+  }
+  // A batch keeps its own slot counts and the generic waiting label.
+  h.context.job = {action_name:"transcode_batch",status:"waiting_external",waiting_condition:"worker_busy",batch:{total:3,running:2,waiting_for_slot:1}};
+  assert.equal(h.run("queuePresentation(job).status"), "Waiting");
+});
+
+test("an old worker-busy failure reads plainly and hides the worker URL", () => {
+  const h = harness();
+  for (const error of [
+    "benchmark_submit failed (worker_busy): transcode http POST http://worker.example.test/v1/benchmarks: status 429: worker busy: maximum parallel jobs (2) reached",
+    "submit failed (worker_busy): transcode http POST http://worker.example.test/v1/jobs: status 409: worker busy: maximum parallel jobs (2) reached",
+  ]) {
+    h.context.job = {action_name:"transcode_media",status:"failed",error,source_path:"/media/Sample Film One (2010).mkv"};
+    const view = h.run("queuePresentation(job)");
+    assert.equal(view.status, "Failed");
+    assert.match(view.summary, /The worker was full and nothing ran\. Retry when a slot is free\./);
+    assert.doesNotMatch(view.summary, /http|429|409|example/);
+    assert.equal(h.run("workerBusyFailure(job.error)"), true);
+  }
+  assert.equal(h.run('workerBusyFailure("ssh: handshake failed")'), false);
+  assert.equal(h.run('shortJobReason("benchmark_submit failed (worker_busy): status 429")'), "The worker was full and nothing ran. Retry when a slot is free.");
 });
