@@ -20,7 +20,7 @@ import (
 // between and have it replaced. NFS has a similar client-side window. Those
 // mounts, and anything unrecognised, keep the hard-link commit, which the
 // server refuses atomically when the name exists.
-var localNoReplaceFilesystems = map[int64]bool{
+var localNoReplaceFilesystems = map[uint32]bool{
 	0xEF53:     true, // ext2/3/4
 	0x58465342: true, // xfs
 	0x9123683E: true, // btrfs
@@ -37,7 +37,7 @@ var localNoReplaceFilesystems = map[int64]bool{
 // uses the hard-link commit. It never degrades to a clobbering rename.
 func renameNoReplace(src, dst string) error {
 	var st unix.Statfs_t
-	if err := unix.Statfs(filepath.Dir(dst), &st); err != nil || !localNoReplaceFilesystems[int64(st.Type)] {
+	if err := unix.Statfs(filepath.Dir(dst), &st); err != nil || !localNoReplaceFilesystems[uint32(st.Type)] {
 		return errNoReplaceUnsupported
 	}
 	err := unix.Renameat2(unix.AT_FDCWD, src, unix.AT_FDCWD, dst, unix.RENAME_NOREPLACE)

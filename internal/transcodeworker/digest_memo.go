@@ -60,12 +60,12 @@ func withDigestMemoScope(ctx context.Context, privateRoots, sharedRoots []string
 	m := &digestMemo{byFile: map[fileFingerprint]string{}}
 	for _, r := range privateRoots {
 		if r = strings.TrimSpace(r); r != "" {
-			m.roots = append(m.roots, resolvedPath(r))
+			m.roots = append(m.roots, resolvedRoot(r))
 		}
 	}
 	for _, r := range sharedRoots {
 		if r = strings.TrimSpace(r); r != "" {
-			m.shared = append(m.shared, resolvedPath(r))
+			m.shared = append(m.shared, resolvedRoot(r))
 		}
 	}
 	return context.WithValue(ctx, digestMemoKey{}, m)
@@ -90,6 +90,17 @@ func resolvedPath(path string) string {
 		return filepath.Join(dir, filepath.Base(clean))
 	}
 	return clean
+}
+
+// resolvedRoot resolves a scope root completely, so a symlinked work dir (or
+// share mount) compares equal to the real paths its files resolve to. A root
+// that does not exist yet falls back to resolving its directory.
+func resolvedRoot(path string) string {
+	clean := filepath.Clean(path)
+	if real, err := filepath.EvalSymlinks(clean); err == nil {
+		return real
+	}
+	return resolvedPath(clean)
 }
 
 func pathWithin(root, path string) bool {

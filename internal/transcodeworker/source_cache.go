@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -661,6 +662,20 @@ func (w *Worker) shouldCacheSourceForBenchmark(cleanSource string) bool {
 	return stage
 }
 
+// unlinkFreesBlocks reports whether removing path releases its disk blocks,
+// i.e. it is the file's only link. Hard-linked entries (the populate link,
+// active leases) keep the bytes alive until the other names go. Unknown link
+// counts are treated as not freeing, so the disk-floor estimate never
+// overstates the space reclaimed.
+func unlinkFreesBlocks(path string) bool {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return false
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	return ok && st.Nlink == 1
+}
+
 // sweepSourceCache enforces the bounded size/TTL without ever failing a job.
 // It never touches temp files, meta sidecars without data, per-job work dirs,
 // or entries that fail to stat. Deletion is best-effort. Active jobs hold their
@@ -740,10 +755,14 @@ func (w *Worker) sweepSourceCache() error {
 		}
 		sort.SliceStable(remaining, func(i, j int) bool { return remaining[i].mod.Before(remaining[j].mod) })
 		evict := func(d entry) {
+			// Decide before unlinking: afterwards the link count is gone.
+			frees := unlinkFreesBlocks(d.path)
 			if err := os.Remove(d.path); err == nil {
 				_ = os.Remove(cacheMetaPathForData(cacheDir, filepath.Base(d.path)))
 				tot -= d.size
-				free += d.size
+				if frees {
+					free += d.size
+				}
 			}
 		}
 		gone := map[string]bool{}
@@ -768,6 +787,11 @@ func (w *Worker) sweepSourceCache() error {
 					break
 				}
 				if gone[d.path] || now.Sub(d.mod) < time.Hour {
+					continue
+				}
+				// A name that shares its bytes with a job's link (populate
+				// link, lease) frees nothing now; keep it for later.
+				if !unlinkFreesBlocks(d.path) {
 					continue
 				}
 				evict(d)
