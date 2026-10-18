@@ -2127,6 +2127,21 @@ test("HFR sources skipped for a missing worker capability say so and offer no go
   assert.doesNotMatch(text,/Change goal/);
 });
 
+test("a compact file skipped for unreadable frame evidence can be tried again", async () => {
+  const h=harness();
+  assert.match(h.run('shortJobReason("compact_frame_evidence_unavailable")'),/Could not read this video's frames.*try again/);
+  const child=h.run('jobControls({id:"child",action_name:"transcode_media",status:"completed",reason_code:"compact_frame_evidence_unavailable",mode:"compact",parent_action_id:"batch",parent_item_key:"one"}).children.map(b=>b.textContent)');
+  assert.ok(child.includes("Change goal"));
+  h.context.items=[{item_key:"dv",display_label:"Clip",status:"skip",can_reconfigure:true,mode:"compact",reasons:["compact_frame_evidence_unavailable"]}];
+  h.run('state.info={};state.detail="batch";state.detailRevision=2;$("job-detail").open=true;state.detailJob={status:"completed",batch:{}};api=async()=>({items,total:1});');
+  await h.run('loadBatchItems("batch",2)');
+  const row=h.elements.get("batch-items-list").children[0];
+  const all = el=>[el,...el.children.flatMap(all)];
+  const text=all(row).map(el=>el.textContent).filter(Boolean).join(" ");
+  assert.match(text,/Could not read this video's frames/);
+  assert.match(text,/Change goal/);
+});
+
 test("an unsupported-source file row offers no goal change", async () => {
   const h=harness();
   h.context.items=[

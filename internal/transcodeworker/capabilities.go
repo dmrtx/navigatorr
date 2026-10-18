@@ -68,8 +68,13 @@ func ValidateEncoderCapabilities(ctx context.Context, ffmpegPath string, plan *t
 			return fmt.Errorf("encoder_capability_unsupported: unsupported libx265 preset %q", plan.Preset)
 		}
 		if plan.Compact != nil {
-			if ok, err := libX265HasDolbyVisionOption(ctx, ffmpegPath); err != nil || !ok {
-				return fmt.Errorf("encoder_capability_unsupported: compact libx265 encodes need FFmpeg's -dolbyvision option (FFmpeg 7.1 or later) to switch Dolby Vision RPU coding off: %v", err)
+			const need = "encoder_capability_unsupported: compact libx265 encodes need FFmpeg's -dolbyvision option (FFmpeg 7.1 or later) to switch Dolby Vision RPU coding off"
+			ok, err := libX265HasDolbyVisionOption(ctx, ffmpegPath)
+			if err != nil {
+				return fmt.Errorf("%s: %w", need, err)
+			}
+			if !ok {
+				return fmt.Errorf("%s; the configured FFmpeg lacks it", need)
 			}
 		}
 		return nil

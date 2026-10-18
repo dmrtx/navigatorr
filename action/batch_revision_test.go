@@ -320,3 +320,27 @@ func TestBatchFileRevisionSelectsOmittedFileWithoutChild(t *testing.T) {
 		}
 	}
 }
+
+// A compact skip for missing frame evidence may be a transient probe timeout:
+// resubmitting the same goal for that file is the retry.
+func TestBatchFileRevisionRetriesFrameEvidenceSkipWithSameGoal(t *testing.T) {
+	st := setupTestStore(t)
+	e := NewEngine(EngineDeps{Store: st, Config: &config.Config{}})
+	seedActionInstance(t, st, "batch", "transcode_batch", StatusCompleted, 2, "", map[string]any{"mode": "compact"}, nil)
+	seedActionInstance(t, st, "child", "transcode_media", StatusCompleted, 7, "", map[string]any{"parent_action_id": "batch", "path": "/media/one"}, nil)
+	st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: "batch", ItemKey: "one", FilePath: "/media/one", Status: "skip", ChildActionID: "child", Decision: "transcode", Reasons: []string{"compact_frame_evidence_unavailable"}})
+	root, _ := st.GetActionInstance("batch")
+	items, _ := st.ListTranscodeBatchItems("batch")
+	if _, err := e.ReconfigureBatch(context.Background(), "batch", "file", "one", BatchSelectionVersion(root, items), "", "retry", map[string]any{"mode": "compact"}); err != nil {
+		t.Fatal(err)
+	}
+	items, _ = st.ListTranscodeBatchItems("batch")
+	if len(items) != 1 || items[0].Status != "queued" || items[0].ChildActionID != "" {
+		t.Fatal("frame-evidence skip not requeued", items)
+	}
+	root, _ = st.GetActionInstance("batch")
+	ec := parseExecutionContext(root, e)
+	if batchItemMode(ec, items[0]) != "compact" || batchChildKey(ec, items[0]) == "batch-batch-one" {
+		t.Fatal("retry did not keep the goal under a new attempt key", batchItemMode(ec, items[0]), batchChildKey(ec, items[0]))
+	}
+}

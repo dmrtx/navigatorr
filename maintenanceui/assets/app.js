@@ -2941,6 +2941,7 @@ function shortJobReason(reason) {
     unsupported_source: "Automatic testing does not support this source format yet; original kept",
     hdr_requires_compact: "HDR or Dolby Vision source; only the Much smaller goal converts it. Original kept",
     hfr_quality_unavailable: "The worker cannot measure quality at this frame rate yet; original kept",
+    compact_frame_evidence_unavailable: "Could not read this video's frames to plan the conversion (it may have timed out); original kept. Use Change goal to try again",
     quality_policy_unavailable: "The worker cannot run the quality checks this goal needs; original kept",
     quality_vmaf_model_unavailable: "The worker cannot measure quality for this video (VMAF model unavailable); original kept",
     benchmark_search_review: "Earlier test rounds found nothing acceptable; review before testing again",

@@ -300,6 +300,10 @@ func validateAudioPreservation(plan *transcode.Plan, src, cand []SourceStream) e
 		if plan.AudioMode == "he_aac" && target != "copy" && !strings.EqualFold(b.Profile, "HE-AAC") {
 			return fmt.Errorf("HE-AAC audio profile not present in candidate stream %d", i)
 		}
+		// Only a compact AAC conversion can remap the layout. A copied track
+		// keeps its bitstream, and Matroska reports no layout for PCM, so a
+		// copy from MOV/MP4/AVI legitimately comes back as "".
+		checkLayout := plan.AudioMode == "compact" && target != "copy"
 		if target == "copy" {
 			target = norm(a.Codec)
 		}
@@ -312,7 +316,7 @@ func validateAudioPreservation(plan *transcode.Plan, src, cand []SourceStream) e
 		if a.Channels > 0 && a.Channels != b.Channels {
 			return fmt.Errorf("%w: local candidate audio channels %d at stream %d != source %d (fail closed, never publish)", ErrSourceInvalid, b.Channels, i, a.Channels)
 		}
-		if !transcode.SameAudioLayout(a.Layout, b.Layout) {
+		if checkLayout && !transcode.SameAudioLayout(a.Layout, b.Layout) {
 			return fmt.Errorf("%w: local candidate audio layout %q at stream %d != source %q (fail closed, never publish)", ErrSourceInvalid, b.Layout, i, a.Layout)
 		}
 		for disposition, value := range a.Disposition {
