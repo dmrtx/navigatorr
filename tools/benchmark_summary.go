@@ -2,6 +2,7 @@ package tools
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/jakenesler/navigatorr/action"
@@ -20,6 +21,7 @@ type benchmarkSummary struct {
 	ProposedCandidates []transcode.BenchmarkCandidate     `json:"proposed_candidates,omitempty"`
 	ProposedQuality    *transcode.BenchmarkQualityConfig  `json:"proposed_quality,omitempty"`
 	ProposedSamples    []transcode.BenchmarkSampleWindow  `json:"proposed_samples,omitempty"`
+	SizeWarning        string                             `json:"size_warning,omitempty"`
 	Rejected           []benchmarkRejection               `json:"rejected,omitempty"`
 	Audio              []benchmarkAudio                   `json:"planned_audio,omitempty"`
 	AudioNote          string                             `json:"audio_note,omitempty"`
@@ -98,6 +100,12 @@ func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
 		s.NextStep = "For transcode_media, monitor the same action as it continues. A standalone benchmark produces no final file; use its selected settings explicitly for encoding."
 		if res.Status == action.StatusFailed {
 			s.NextStep = "The benchmark selected a candidate, but a later action step failed. Inspect the action error; do not repeat the successful search automatically."
+		}
+		// Plain benchmarks rank by size without a savings floor, so the
+		// smallest passing candidate can still be larger than the source.
+		if decision.Winner != nil && decision.Winner.SavingsPercent < 0 {
+			s.SizeWarning = fmt.Sprintf("The selected candidate is estimated %.1f%% larger than the original. Encoding it would not save space, and transcode_media rejects growth beyond its max_size_increase_percent (0%% by default).", -decision.Winner.SavingsPercent)
+			s.NextStep = "Keep the original: this source is already efficiently encoded for these quality limits. Do not encode the selected settings to save space."
 		}
 	case status == "failed" || res.Status == action.StatusFailed:
 		s.Outcome, s.Message, s.NextStep = "execution_error", "The benchmark could not finish reliably.", "Inspect the action error and fix the execution problem before retrying; changing compression settings is not an established remedy."
@@ -187,7 +195,11 @@ func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
 				}
 			}
 			if len(r.Checks) == 0 {
-				r.Checks = []benchmarkCheck{{Code: ev.EvaluationReason, Reason: benchmarkFailureText(ev.EvaluationReason)}}
+				reason := benchmarkFailureText(ev.EvaluationReason)
+				if ev.EvaluationReason == "skipped_quality_dominated" {
+					reason = dominatedText(ev.Uncertainties)
+				}
+				r.Checks = []benchmarkCheck{{Code: ev.EvaluationReason, Reason: reason}}
 			}
 			s.Rejected = append(s.Rejected, r)
 		}
@@ -225,7 +237,28 @@ func benchmarkFailureText(code string) string {
 		return "The worst sampled time window is below the configured VMAF limit."
 	case "sample_below_minimum_quality", "below_minimum_quality":
 		return "Sampled video did not meet the configured minimum quality."
+	case "skipped_quality_dominated":
+		return dominatedText(nil)
+	case "insufficient_savings":
+		return "Quality passed, but the estimated file does not save enough space compared with the original."
+	case "insufficient_savings_before_metrics":
+		return "Not measured: every encoded sample was already estimated below the minimum savings, so no quality result could produce an acceptable winner."
+	case "verification_not_passed":
+		return "Passed the initial samples but failed the additional verification samples."
 	default:
 		return "This check did not pass; inspect its detailed evidence before deciding whether another encode can address it."
 	}
+}
+
+// dominatedText explains a candidate that quality pruning never encoded,
+// naming the failed higher-quality leader the worker recorded.
+func dominatedText(uncertainties []string) string {
+	for _, u := range uncertainties {
+		if leader, ok := strings.CutPrefix(u, "not measured: "); ok {
+			if leader, ok = strings.CutSuffix(leader, " failed quality"); ok && leader != "" {
+				return "Not encoded: " + leader + " is a higher-quality setting of the same encoder and already failed quality, so this setting cannot pass."
+			}
+		}
+	}
+	return "Not encoded: a higher-quality setting of the same encoder already failed quality, so this setting cannot pass."
 }

@@ -349,6 +349,7 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	ec.State["source_report"] = rep
 	ec.State["profile"] = profile
 	ec.State["plan"] = plan
+	ec.State["plan_source"] = "profile_base"
 	ec.State["candidate_extension"] = ext
 	ec.State["recipe_version"] = plan.RecipeVersion
 	ec.State["recipe_digest"] = plan.RecipeDigest
@@ -368,6 +369,7 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		"resolved_path":             cleanPath,
 		"profile":                   profile,
 		"plan":                      plan,
+		"plan_source":               "profile_base",
 		"recipe_version":            plan.RecipeVersion,
 		"recipe_digest":             plan.RecipeDigest,
 		"plan_digest":               plan.PlanDigest,
