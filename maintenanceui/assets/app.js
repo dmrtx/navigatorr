@@ -3232,6 +3232,29 @@ function encodingPlanNote(job) {
   line.append(node("strong", "Encoding plan: "), node("span", text));
   return line;
 }
+// Size mode reports what it predicted and measured for the file: the sampled
+// output size, the final VMAF and which audio tracks became AAC.
+function sizeModeLines(size) {
+  if (!size) return [];
+  const lines = [];
+  if (size.expected_bytes != null) lines.push(`Expected size ${bytes(size.expected_bytes)}${size.main10 ? " · 10-bit HEVC" : ""}`);
+  else if (size.main10) lines.push("10-bit HEVC");
+  const q = size.final_quality;
+  if (q) lines.push(`Final VMAF ${Number(q.vmaf_mean).toFixed(1)} mean · ${Number(q.vmaf_p5).toFixed(1)} p5${q.worst_window_mean != null ? ` · ${Number(q.worst_window_mean).toFixed(1)} worst ${Math.round(q.worst_window_seconds || 0)} s window` : ""}`);
+  const audio = size.compacted_audio || [];
+  if (audio.length) lines.push(`Audio compacted: ${audio.map(a => `track ${a.stream_index + 1} ${codecLabel(a.from_codec)} → ${codecLabel(a.to_codec)}`).join(", ")}`);
+  return lines;
+}
+function codecLabel(codec) {
+  return {truehd:"TrueHD",dts:"DTS-HD MA",flac:"FLAC",alac:"ALAC",mlp:"MLP",aac:"AAC"}[codec] || (String(codec || "").startsWith("pcm_") ? "PCM" : String(codec || "").toUpperCase());
+}
+function sizeModeNote(job) {
+  const lines = sizeModeLines(job.size_mode);
+  if (!lines.length) return null;
+  const box = node("div", "", "size-mode-summary metadata");
+  for (const line of lines) box.append(node("p", line));
+  return box;
+}
 function queueOutcome(job) {
   if (job.archived) return "Archived · Restore to return to the queue";
   const bench = benchmarkHeadline(job);
@@ -3565,6 +3588,8 @@ async function refreshDetail() {
     if (report) summary.append(report);
     const plan = encodingPlanNote(job);
     if (plan) summary.append(plan);
+    const size = sizeModeNote(job);
+    if (size) summary.append(size);
     if (queuePresentation(job).showTelemetry) summary.append(telemetry(job));
     else if (batchProgress(job)) summary.append(batchProgress(job));
     else if (!job.batch?.dry_run && job.batch?.outcome !== "no_changes") summary.append(node("p", queueOutcome(job), "job-outcome metadata"));

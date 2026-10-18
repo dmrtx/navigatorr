@@ -149,7 +149,7 @@ func (w *Worker) validateEncodedCandidateFull(ctx context.Context, localCandidat
 	if err := validateAudioPreservation(execPlan.Plan, srcProbe.Streams, candProbe.Streams); err != nil {
 		return attest, err
 	}
-	if (execPlan.Plan.AudioMode == "compact" || execPlan.Plan.AudioMode == "he_aac") && countStreams(srcProbe.Streams, "audio") > 0 {
+	if (execPlan.Plan.AudioMode == "compact" || execPlan.Plan.AudioMode == "he_aac" || execPlan.Plan.AudioMode == transcode.AudioModeCompactLossless) && countStreams(srcProbe.Streams, "audio") > 0 {
 		if err := w.validateAudioPackets(ctx, execPlan.Plan, srcProbe.Path, localCandidate, srcProbe, candProbe); err != nil {
 			return attest, err
 		}
@@ -296,14 +296,14 @@ func validateAudioPreservation(plan *transcode.Plan, src, cand []SourceStream) e
 	}
 	for i := range srcAudio {
 		a, b := srcAudio[i], candAudio[i]
-		target, _ := transcode.AudioTarget(plan.AudioMode, a.Codec, a.Channels, a.Layout)
+		target, _ := transcode.AudioTarget(plan.AudioMode, a.Codec, a.Profile, a.Channels, a.Layout)
 		if plan.AudioMode == "he_aac" && target != "copy" && !strings.EqualFold(b.Profile, "HE-AAC") {
 			return fmt.Errorf("HE-AAC audio profile not present in candidate stream %d", i)
 		}
-		// Only a compact AAC conversion can remap the layout. A copied track
-		// keeps its bitstream, and Matroska reports no layout for PCM, so a
-		// copy from MOV/MP4/AVI legitimately comes back as "".
-		checkLayout := plan.AudioMode == "compact" && target != "copy"
+		// Only an AAC conversion can remap the layout. A copied track keeps
+		// its bitstream, and Matroska reports no layout for PCM, so a copy
+		// from MOV/MP4/AVI legitimately comes back as "".
+		checkLayout := target != "copy"
 		if target == "copy" {
 			target = norm(a.Codec)
 		}

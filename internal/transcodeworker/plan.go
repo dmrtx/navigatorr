@@ -301,7 +301,7 @@ func BuildExecutionPlan(plan *transcode.Plan, streams []SourceStream, duration f
 		case "video":
 			ep.Streams = append(ep.Streams, StreamAction{Kind: "video", SourceIndex: s.Index, TypeIndex: s.TypeIndex, Codec: s.Codec, TargetCodec: plan.VideoCodec})
 		case "audio":
-			target, bitrate := transcode.AudioTarget(plan.AudioMode, s.Codec, s.Channels, s.Layout)
+			target, bitrate := transcode.AudioTarget(plan.AudioMode, s.Codec, s.Profile, s.Channels, s.Layout)
 			ep.Streams = append(ep.Streams, StreamAction{Kind: "audio", SourceIndex: s.Index, TypeIndex: s.TypeIndex, Codec: s.Codec, TargetCodec: target, BitrateKbps: bitrate, Disposition: s.Disposition, Title: s.Title, Channels: s.Channels, Layout: s.Layout})
 			if target != "copy" {
 				ep.Conversions = append(ep.Conversions, transcode.ConversionRecord{StreamType: "audio", StreamIndex: s.TypeIndex, FromCodec: s.Codec, ToCodec: target, Reason: fmt.Sprintf("%s audio requested; AAC at %d kbps, preserving channels and language (lossy)", plan.AudioMode, bitrate)})

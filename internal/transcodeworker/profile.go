@@ -26,7 +26,7 @@ func Capabilities() WorkerCapabilities {
 	return WorkerCapabilities{
 		Containers:           []string{"mkv"},
 		VideoCodecs:          []string{"hevc_videotoolbox", "libx265"},
-		AudioOperations:      []string{"copy", "compact", "he_aac"},
+		AudioOperations:      []string{"copy", "compact", "he_aac", transcode.AudioModeCompactLossless},
 		SubtitleOperations:   []string{"copy", "transcode"},
 		SubtitleEncodeCodecs: []string{"subrip"},
 		SubtitleCopyCodecs:   []string{"subrip", "srt", "ass", "ssa", "hdmv_pgs_subtitle", "pgs", "dvd_subtitle", "vobsub", "dvb_subtitle", "dvb_teletext", "webvtt", "text"},
@@ -80,7 +80,7 @@ func ValidatePlan(p *transcode.Plan) error {
 		default:
 			return fmt.Errorf("unsupported processing mode")
 		}
-		if p.SizePolicy == nil || p.SizePolicy.MinSavingsPercent != min || p.SizePolicy.MaxSizeIncreasePercent != 0 || p.PolicyDigest == "" || p.QualityValidation == nil || p.AudioMode != modeAudioMode(p.Mode) {
+		if p.SizePolicy == nil || p.SizePolicy.MinSavingsPercent != min || p.SizePolicy.MaxSizeIncreasePercent != 0 || p.PolicyDigest == "" || p.QualityValidation == nil || p.AudioMode != modeAudioMode(p.Mode, p.ModePolicyVersion) {
 			return fmt.Errorf("mode plan requires frozen size/quality policy and audio preservation")
 		}
 	}
@@ -106,8 +106,11 @@ func ValidatePlan(p *transcode.Plan) error {
 	if _, err := BuildVideoEncoderArgs(p); err != nil {
 		return err
 	}
-	if norm(p.AudioMode) != "copy" && norm(p.AudioMode) != "compact" && norm(p.AudioMode) != "he_aac" {
+	if norm(p.AudioMode) != "copy" && norm(p.AudioMode) != "compact" && norm(p.AudioMode) != "he_aac" && norm(p.AudioMode) != transcode.AudioModeCompactLossless {
 		return fmt.Errorf("unsupported audio mode %q (fail closed)", p.AudioMode)
+	}
+	if norm(p.AudioMode) == transcode.AudioModeCompactLossless && (p.Mode != "size" || p.ModePolicyVersion != optimization.ModePolicyV3) {
+		return fmt.Errorf("compact_lossless audio requires size mode policy v3 (fail closed)")
 	}
 	if norm(p.SubtitleMode) != "preserve" {
 		return fmt.Errorf("unsupported subtitle mode %q (fail closed)", p.SubtitleMode)
@@ -252,10 +255,14 @@ func normalizeContainer(s string) string {
 }
 
 // modeAudioMode is the only audio policy a mode plan may carry: compact mode
-// converts lossless and high-bitrate tracks to AAC, every other mode copies.
-func modeAudioMode(mode string) string {
+// converts lossless and high-bitrate tracks to AAC, size v3 converts only
+// lossless tracks, every other mode copies.
+func modeAudioMode(mode, version string) string {
 	if mode == "compact" {
 		return "compact"
+	}
+	if mode == "size" && version == optimization.ModePolicyV3 {
+		return transcode.AudioModeCompactLossless
 	}
 	return "copy"
 }

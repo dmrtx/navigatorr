@@ -156,6 +156,45 @@ func operationReplacementContext(r operationRecord, recordsByID map[string]opera
 	return nil
 }
 
+// operationSizeMode summarises what mode=size decided for one file: the
+// sampled output estimate, the final quality measurement and the audio
+// tracks it compacted. It is nil for every other mode.
+func operationSizeMode(r operationRecord) map[string]any {
+	if r.inst.ActionName != "transcode_media" || operationString(r.state["mode"]) != "size" {
+		return nil
+	}
+	out := map[string]any{}
+	if r.savings.EstimatedBytes != nil && r.savings.EstimateKind == "sampled_benchmark" {
+		out["expected_bytes"] = *r.savings.EstimatedBytes
+	}
+	if r.state["size_main10"] == true {
+		out["main10"] = true
+	}
+	if vmaf := operationMap(operationMap(operationValue(r, "quality_evidence"))["vmaf"]); vmaf["mean"] != nil {
+		final := map[string]any{"vmaf_mean": operationNumber(vmaf["mean"]), "vmaf_p5": operationNumber(vmaf["p5"])}
+		if worst, ok := vmaf["worst_window_mean"].(float64); ok {
+			final["worst_window_mean"] = worst
+			final["worst_window_seconds"] = operationNumber(vmaf["worst_window_seconds"])
+		}
+		out["final_quality"] = final
+	}
+	audio := []map[string]any{}
+	conversions, _ := operationValue(r, "conversions").([]any)
+	for _, raw := range conversions {
+		c := operationMap(raw)
+		if operationString(c["stream_type"]) == "audio" {
+			audio = append(audio, map[string]any{"stream_index": int(operationNumber(c["stream_index"])), "from_codec": operationString(c["from_codec"]), "to_codec": operationString(c["to_codec"])})
+		}
+	}
+	if len(audio) > 0 {
+		out["compacted_audio"] = audio
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func projectOperationSavings(r operationRecord, now time.Time) operationSavings {
 	var s operationSavings
 	original := operationMap(operationValue(r, "original"))
@@ -524,6 +563,9 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 				return
 			}
 			job["savings"] = r.savings
+			if size := operationSizeMode(r); size != nil {
+				job["size_mode"] = size
+			}
 			root := roots[r.inst.ID]
 			job["workflow_id"] = root
 			job["archive_id"] = root

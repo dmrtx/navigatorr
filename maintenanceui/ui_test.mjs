@@ -2619,6 +2619,17 @@ test("sample test results explain each rejected setting with its measurement and
   assert.match(allText(larger.report), /6\.3% larger.*Next step:\s+Keep the original/);
 });
 
+test("size mode details show the expected size, final VMAF and compacted audio", () => {
+  const h = harness();
+  const text = allText(h.run('sizeModeNote({size_mode:{expected_bytes:2150000000,main10:true,final_quality:{vmaf_mean:93.44,vmaf_p5:89.12,worst_window_mean:88.04,worst_window_seconds:10},compacted_audio:[{stream_index:0,from_codec:"dts",to_codec:"aac"},{stream_index:2,from_codec:"pcm_s24le",to_codec:"aac"}]}})'));
+  assert.match(text, /Expected size 2\.15 GB · 10-bit HEVC/);
+  assert.match(text, /Final VMAF 93\.4 mean · 89\.1 p5 · 88\.0 worst 10 s window/);
+  assert.match(text, /Audio compacted: track 1 DTS-HD MA → AAC, track 3 PCM → AAC/);
+  assert.doesNotMatch(allText(h.run('sizeModeNote({size_mode:{final_quality:{vmaf_mean:91,vmaf_p5:86}}})')), /worst|Audio/);
+  assert.equal(h.run("sizeModeNote({})"), null);
+  assert.equal(h.run("sizeModeNote({size_mode:{}})"), null);
+});
+
 test("the encoding plan line says whether a sample test backs the settings", () => {
   const h = harness();
   const note = "No benchmark candidate was selected; the stored plan is the profile's untested starting configuration.";

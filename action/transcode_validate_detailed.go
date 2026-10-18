@@ -118,10 +118,10 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 	}
 	for i, a := range origAudio {
 		b := outRep.Audio[i]
-		target, _ := transcode.AudioTarget(plan.AudioMode, a.Codec, a.Channels, a.ChannelLayout)
-		// Only a compact AAC conversion can remap the layout; a copied track
-		// (PCM in Matroska reports none) is checked by codec and channels.
-		checkLayout := plan.AudioMode == "compact" && target != "copy"
+		target, _ := transcode.AudioTarget(plan.AudioMode, a.Codec, a.Profile, a.Channels, a.ChannelLayout)
+		// Only an AAC conversion can remap the layout; a copied track (PCM in
+		// Matroska reports none) is checked by codec and channels.
+		checkLayout := target != "copy"
 		if target == "copy" {
 			target = normCodec(a.Codec)
 		}

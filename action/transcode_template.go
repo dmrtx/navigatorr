@@ -302,6 +302,18 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		}
 	}
 	if modeSnapshot != nil {
+		if video := rep.MainVideo(); modeSnapshot.Size != nil && modeSnapshot.Size.EightBitMain10 && len(video) > 0 && video[0].BitDepth == 8 {
+			caps, err := e.deps.Transcode.Capabilities(ctx)
+			if err != nil {
+				return workerCapabilityLookupResult(err, "size Main10"), nil
+			}
+			if sizeMain10Supported(caps) {
+				if err := setMain10(plan); err != nil {
+					return StepResult{Status: StepFailed, Error: err.Error()}, nil
+				}
+				ec.State["size_main10"] = true
+			}
+		}
 		if modeSnapshot.Mode == "compact" {
 			c := compactPlan
 			if c == nil {

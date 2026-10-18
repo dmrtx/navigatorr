@@ -186,3 +186,29 @@ func TestSplitQualityFamilies(t *testing.T) {
 		}
 	}
 }
+
+// A family failing banding at 8-bit says nothing about Main10 settings: the
+// resolved output depth splits families, so higher CRFs of a different depth
+// are measured rather than skipped as quality dominated.
+func TestQualityFamiliesSplitByOutputBitDepth(t *testing.T) {
+	vc := func(id string, q, depth int) validatedCandidate {
+		profile, pix := "main", "yuv420p"
+		if depth == 10 {
+			profile, pix = "main10", "p010le"
+		}
+		return validatedCandidate{candidate: transcode.BenchmarkCandidate{ID: id, VideoCodec: "libx265", Quality: q, Preset: "medium"}, bitDepth: depth, profile: profile, pixelFormat: pix}
+	}
+	leaders, followers := splitQualityFamilies([]validatedCandidate{vc("m20", 20, 8), vc("m26", 26, 8), vc("t24", 24, 10), vc("t30", 30, 10)})
+	var ids []string
+	for _, l := range leaders {
+		ids = append(ids, l.candidate.ID)
+	}
+	if got := strings.Join(ids, ","); got != "m20,t24" {
+		t.Fatalf("leaders = %s", got)
+	}
+	for _, f := range followers {
+		if (f.vc.candidate.ID == "t30") != (f.leader == "t24") {
+			t.Fatalf("%s led by %s across bit depths", f.vc.candidate.ID, f.leader)
+		}
+	}
+}

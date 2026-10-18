@@ -14,6 +14,7 @@ import (
 
 	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/optimization"
 	"github.com/jakenesler/navigatorr/transcode/quality"
 )
 
@@ -105,7 +106,7 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 		}
 	} else if plan.Mode != "" {
 		sourceVideo, candidateVideo := sourceVideoStreams[0], candidateVideoStreams[0]
-		if mediainspect.IsHDRorDolbyVisionReport(&sourceRep) || mediainspect.IsHDRorDolbyVisionReport(&candidateRep) || (sourceVideo.BitDepth != 8 && sourceVideo.BitDepth != 10) || candidateVideo.BitDepth != sourceVideo.BitDepth || !isSupportedSourceChroma(sourceVideo.PixelFormat, sourceVideo.BitDepth) || !isSupportedSourceChroma(candidateVideo.PixelFormat, candidateVideo.BitDepth) {
+		if mediainspect.IsHDRorDolbyVisionReport(&sourceRep) || mediainspect.IsHDRorDolbyVisionReport(&candidateRep) || (sourceVideo.BitDepth != 8 && sourceVideo.BitDepth != 10) || candidateVideo.BitDepth != modeCandidateBitDepth(plan, sourceVideo.BitDepth) || !isSupportedSourceChroma(sourceVideo.PixelFormat, sourceVideo.BitDepth) || !isSupportedSourceChroma(candidateVideo.PixelFormat, candidateVideo.BitDepth) {
 			return fail("quality_source_class_unsupported", fmt.Errorf("source/candidate measurement class is unsupported or changed"))
 		}
 	}
@@ -113,6 +114,9 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 	e.CandidateBitDepth = candidateVideoStreams[0].BitDepth
 	if sourceVideoStreams[0].FPS <= 0 || !isFiniteQuality(sourceVideoStreams[0].FPS) {
 		return fail("quality_final_source_timing_unavailable", fmt.Errorf("source FPS unavailable"))
+	}
+	if candidateVideoStreams[0].BitDepth > 8 && sourceVideoStreams[0].BitDepth == 8 && (runVMAF || runCAMBI) && !caps.SupportsNative10BitQuality() {
+		return fail("quality_native_main10_unverified", fmt.Errorf("8-bit source encoded as Main10 needs the proven native 10-bit path"))
 	}
 	if sourceVideoStreams[0].BitDepth > 8 && runVMAF && !caps.SupportsNative10BitQuality() {
 		return fail("quality_vmaf_native_main10_unverified", fmt.Errorf("native %d-bit source not eligible for VMAF", sourceVideoStreams[0].BitDepth))
@@ -390,11 +394,21 @@ func (w *Worker) validateModeSourceQuality(ctx context.Context, source string, p
 	if caps.Quality == nil || caps.Quality.ProbeError != "" || !caps.Quality.Models[q.Quality.VMAF.Model].Available {
 		return fmt.Errorf("quality_model_unavailable: requested executable model is unavailable")
 	}
-	if v.BitDepth == 10 && !caps.SupportsNative10BitQuality() {
+	if (v.BitDepth == 10 || plan.ExpectedBitDepth == 10) && !caps.SupportsNative10BitQuality() {
 		return fmt.Errorf("quality_native_main10_unverified: executable native depth path is unavailable")
 	}
 	if !caps.SupportsQualityFPS(v.FPS, v.FieldOrder) {
 		return fmt.Errorf("quality_source_class_unsupported: no proven decimated VMAF path for %.3f FPS source", v.FPS)
 	}
 	return nil
+}
+
+// modeCandidateBitDepth is the output depth a mode plan may produce: the
+// source depth, except that size v3 encodes an 8-bit source as Main10 when
+// its frozen plan says so.
+func modeCandidateBitDepth(plan *transcode.Plan, sourceBitDepth int) int {
+	if sourceBitDepth == 8 && plan.Mode == "size" && plan.ModePolicyVersion == optimization.ModePolicyV3 && plan.ExpectedBitDepth == 10 {
+		return 10
+	}
+	return sourceBitDepth
 }

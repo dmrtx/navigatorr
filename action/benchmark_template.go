@@ -477,7 +477,11 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 						if err != nil || requestDigest != getString(ec.State, "benchmark_request_digest") {
 							return StepResult{Status: StepFailed, Error: "immutable benchmark request digest changed before final-validation handoff"}, nil
 						}
-						wp.QualityValidation = &transcode.QualityValidationPlan{Metric: benchmarkRequest.Metric, Samples: append([]transcode.BenchmarkSampleWindow(nil), benchmarkRequest.Samples...), Quality: *benchmarkRequest.Quality, BenchmarkRequestDigest: getString(ec.State, "benchmark_request_digest")}
+						samples := append([]transcode.BenchmarkSampleWindow(nil), benchmarkRequest.Samples...)
+						if windows := sizeFinalWindows(ec, benchmarkRequest.SourceDuration); windows != nil {
+							samples = windows
+						}
+						wp.QualityValidation = &transcode.QualityValidationPlan{Metric: benchmarkRequest.Metric, Samples: samples, Quality: *benchmarkRequest.Quality, BenchmarkRequestDigest: getString(ec.State, "benchmark_request_digest")}
 					}
 				} else if ec.State["benchmark_request_digest"] != nil {
 					return StepResult{Status: StepFailed, Error: "immutable benchmark request missing at final-validation handoff"}, nil
@@ -1193,7 +1197,10 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 		}
 		req.ModePolicyVersion = policy.Version
 		req.SearchBudgetSeconds = getInt(ec.State, "search_budget_seconds")
-		if mode != "x265_preserve" && planCodec != transcode.VideoCodecHEVCVideoToolbox && caps.Encoders[transcode.VideoCodecHEVCVideoToolbox] {
+		// Size v3 spends the search budget on x265 only: VideoToolbox
+		// candidates rarely won its smallest-qualifying selection.
+		vtCandidates := policy.Size == nil || policy.Size.VideoToolboxCandidates
+		if mode != "x265_preserve" && vtCandidates && planCodec != transcode.VideoCodecHEVCVideoToolbox && caps.Encoders[transcode.VideoCodecHEVCVideoToolbox] {
 			vt := *plan
 			vt.VideoCodec = transcode.VideoCodecHEVCVideoToolbox
 			vt.Preset = ""
@@ -1216,11 +1223,18 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 			}
 			req.Candidates = append(req.Candidates, hardware...)
 		}
-		if policy.Version == ModePolicyVersion {
+		if policy.Version == SizeModePolicyVersion && !caps.SizeModeV3 {
+			return nil, fmt.Errorf("size mode policy v3 requires an updated worker")
+		}
+		if policy.Version == ModePolicyVersion || policy.Version == SizeModePolicyVersion {
 			if !caps.AutomaticModesV2 {
 				return nil, fmt.Errorf("automatic quality search requires an updated worker")
 			}
-			if err := configureAutomaticRequest(req, plan, bitDepth); err != nil {
+			families := defaultAutomaticFallbacks
+			if policy.Size != nil {
+				families = automaticFallbacks{Quality: policy.Size.FallbackQualityValues, Savings: policy.Size.FallbackSavingsValues}
+			}
+			if err := configureAutomaticRequest(req, plan, bitDepth, families); err != nil {
 				return nil, err
 			}
 			req.QualityPruning = req.Automatic && caps.AutomaticQualityPruning
@@ -1243,6 +1257,12 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 			return nil, fmt.Errorf("worker does not support compact audio; upgrade the worker before benchmarking")
 		}
 		req.AudioMode = "compact"
+	}
+	if plan.AudioMode == transcode.AudioModeCompactLossless {
+		if !caps.SizeModeV3 {
+			return nil, fmt.Errorf("worker does not support lossless audio compaction; upgrade the worker before benchmarking")
+		}
+		req.AudioMode = transcode.AudioModeCompactLossless
 	}
 	if plan.Compact != nil {
 		if !caps.SupportsCompactTranscode() {

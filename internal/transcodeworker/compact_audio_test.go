@@ -164,8 +164,8 @@ func TestCompactAudioDispositionValidation(t *testing.T) {
 
 // A copied track keeps its bitstream; Matroska reports no layout for PCM, so
 // a copy from MOV/MP4/AVI comes back without one and must still publish.
-// Only compact AAC conversions are held to the source layout.
-func TestAudioLayoutCheckedOnlyForCompactConversions(t *testing.T) {
+// Only AAC conversions are held to the source layout.
+func TestAudioLayoutCheckedOnlyForAACConversions(t *testing.T) {
 	for _, tc := range []struct {
 		mode, codec, srcLayout, outCodec, outLayout string
 		channels                                    int
@@ -177,7 +177,16 @@ func TestAudioLayoutCheckedOnlyForCompactConversions(t *testing.T) {
 		{"compact", "pcm_s24le", "5.1(side)", "aac", "5.1", 6, true},
 		{"compact", "truehd", "7.1", "aac", "7.1(wide)", 8, false},
 		{"compact", "eac3", "5.1", "eac3", "", 6, true}, // copied under compact
-		{"he_aac", "pcm_s16le", "6.0", "aac", "hexagonal", 6, true},
+		// HE-AAC cannot keep 6.0 either: the track is copied, and an AAC
+		// remap is rejected for every conversion, not only compact.
+		{"he_aac", "pcm_s16le", "6.0", "aac", "hexagonal", 6, false},
+		{"he_aac", "pcm_s16le", "6.0", "pcm_s16le", "", 6, true},
+		{"he_aac", "pcm_s16le", "5.1", "aac", "5.1", 6, true},
+		{"he_aac", "pcm_s16le", "5.1", "aac", "5.1(side)", 6, true},
+		{"he_aac", "flac", "4.0", "aac", "quad", 4, false},
+		{transcode.AudioModeCompactLossless, "truehd", "7.1", "aac", "7.1", 8, true},
+		{transcode.AudioModeCompactLossless, "truehd", "7.1", "aac", "7.1(wide)", 8, false},
+		{transcode.AudioModeCompactLossless, "pcm_s24le", "6.0", "pcm_s24le", "", 6, true}, // kept: AAC would remap 6.0
 	} {
 		plan := &transcode.Plan{AudioMode: tc.mode}
 		src := []SourceStream{{Kind: "audio", Codec: tc.codec, Channels: tc.channels, Layout: tc.srcLayout}}
@@ -210,6 +219,16 @@ func TestConvertedAudioTitle(t *testing.T) {
 		{"PCM Stereo", "", 2, "AAC Stereo", true},
 		{"Audio Description FLAC 2.0", "stereo", 2, "Audio Description AAC Stereo", true},
 		{"", "7.1", 8, "", false},
+		// Codec variants, sample specs and whole-word matching.
+		{"DTS-ES 5.1", "5.1(side)", 6, "AAC 5.1", true},
+		{"LPCM 24-bit 2.0", "stereo", 2, "AAC Stereo", true},
+		{"FLAC 24/96", "stereo", 2, "AAC Stereo", true},
+		{"FLAC 24-bit/96kHz Stereo", "stereo", 2, "AAC Stereo", true},
+		{"DTS-HD High Resolution Audio", "5.1", 6, "AAC 5.1", true},
+		{"DTS-HD HRA 7.1", "7.1", 8, "AAC 7.1", true},
+		{"Dolby Digital 5.1 Commentary", "5.1", 6, "Commentary AAC 5.1", true},
+		{"Atmosphere", "stereo", 2, "", false},
+		{"Atmospheric Score", "5.1", 6, "", false},
 	} {
 		got, ok := convertedAudioTitle(tc.title, tc.layout, tc.channels)
 		if got != tc.want || ok != tc.ok {
@@ -248,5 +267,95 @@ func TestCompactEncodeArgsClearTitlesAndDisableDolbyVision(t *testing.T) {
 	plain.Compact = nil
 	if args, _ := BuildVideoEncoderArgs(&plain); strings.Contains(strings.Join(args, " "), "dolbyvision") {
 		t.Fatal("non-compact encodes keep the encoder default")
+	}
+}
+
+// Mixed copy and convert tracks pair by audio index: each conversion keeps
+// its own language, layout and disposition, and each copy its codec.
+func TestCompactAudioMultiTrackPairing(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		mode    string
+		src     []SourceStream
+		targets []string
+		kbps    []int
+	}{
+		{"compact mixed", "compact", []SourceStream{
+			{Index: 1, Kind: "audio", Codec: "pcm_s24le", Channels: 6, Language: "eng", Disposition: map[string]int{"default": 1}},
+			{Index: 2, Kind: "audio", Codec: "eac3", Channels: 6, Layout: "", Language: "spa"},
+			{Index: 3, Kind: "audio", Codec: "truehd", Channels: 8, Layout: "7.1", Language: "fra", Disposition: map[string]int{"comment": 1}},
+		}, []string{"aac", "copy", "aac"}, []int{384, 0, 512}},
+		{"size two DTS-HD MA", transcode.AudioModeCompactLossless, []SourceStream{
+			{Index: 1, Kind: "audio", Codec: "dts", Profile: "DTS-HD MA", Channels: 6, Layout: "5.1(side)", Language: "jpn", Disposition: map[string]int{"default": 1}},
+			{Index: 2, Kind: "audio", Codec: "dts", Profile: "DTS-HD MA", Channels: 6, Layout: "5.1(side)", Language: "eng"},
+		}, []string{"aac", "aac"}, []int{384, 384}},
+		{"size mixed", transcode.AudioModeCompactLossless, []SourceStream{
+			{Index: 1, Kind: "audio", Codec: "pcm_s16le", Channels: 2, Language: "eng"},
+			{Index: 2, Kind: "audio", Codec: "dts", Profile: "DTS", Channels: 6, Layout: "5.1(side)", Language: "deu"},
+			{Index: 3, Kind: "audio", Codec: "eac3", Channels: 6, Layout: "", Language: "spa"},
+			{Index: 4, Kind: "audio", Codec: "truehd", Channels: 8, Layout: "7.1", Language: "fra"},
+			{Index: 5, Kind: "audio", Codec: "truehd", Profile: "Dolby TrueHD + Dolby Atmos", Channels: 8, Layout: "7.1", Language: "ita"},
+		}, []string{"aac", "copy", "copy", "aac", "copy"}, []int{192, 0, 0, 512, 0}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			plan := sizeV3TestPlan(true)
+			if tc.mode == "compact" {
+				// The audio rules alone; compact's video chain is not involved.
+				plan = &transcode.Plan{Container: "mkv", VideoCodec: "libx265", Quality: 23, AudioMode: "compact", SubtitleMode: "preserve", PreserveMetadata: true, PreserveChapters: true, PreserveAttachments: true, RecipeVersion: "test", RecipeDigest: "sha256:" + strings.Repeat("0", 64), Resilience: transcode.ResiliencePlan{MaxAttempts: 1}}
+				plan.PlanDigest, _ = transcode.DigestPlan(plan)
+			}
+			streams := append([]SourceStream{{Index: 0, Kind: "video", Codec: "h264", TypeIndex: 0}}, tc.src...)
+			for i := range streams[1:] {
+				streams[i+1].TypeIndex = i
+			}
+			ep, err := BuildExecutionPlan(plan, streams, 600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var audio []StreamAction
+			for _, s := range ep.Streams {
+				if s.Kind == "audio" {
+					audio = append(audio, s)
+				}
+			}
+			if len(audio) != len(tc.targets) {
+				t.Fatalf("audio actions %d", len(audio))
+			}
+			cand := make([]SourceStream, len(tc.src))
+			for i, a := range audio {
+				if a.TargetCodec != tc.targets[i] || a.BitrateKbps != tc.kbps[i] || a.SourceIndex != tc.src[i].Index || a.TypeIndex != i {
+					t.Fatalf("track %d: %+v", i, a)
+				}
+				cand[i] = tc.src[i]
+				cand[i].Profile = ""
+				if a.TargetCodec == "aac" {
+					cand[i].Codec = "aac"
+					cand[i].Layout = map[string]string{"5.1(side)": "5.1"}[tc.src[i].Layout]
+					if cand[i].Layout == "" {
+						cand[i].Layout = tc.src[i].Layout
+					}
+				}
+			}
+			if err := validateAudioPreservation(plan, tc.src, cand); err != nil {
+				t.Fatal(err)
+			}
+			// Swapping two tracks' languages, or remapping one converted
+			// layout, must be caught at its own index.
+			swapped := append([]SourceStream(nil), cand...)
+			swapped[0].Language, swapped[1].Language = cand[1].Language, cand[0].Language
+			if err := validateAudioPreservation(plan, tc.src, swapped); err == nil {
+				t.Fatal("swapped languages accepted")
+			}
+			last := len(cand) - 1
+			for i := last; i >= 0; i-- {
+				if audio[i].TargetCodec == "aac" && cand[i].Channels == 8 {
+					remapped := append([]SourceStream(nil), cand...)
+					remapped[i].Layout = "7.1(wide)"
+					if err := validateAudioPreservation(plan, tc.src, remapped); err == nil {
+						t.Fatalf("remapped layout at %d accepted", i)
+					}
+				}
+			}
+		})
 	}
 }

@@ -106,7 +106,7 @@ func (w *Worker) validateAudioPackets(ctx context.Context, plan *transcode.Plan,
 		if math.Abs((x.start-*sv.StartTime)-(y.start-*cv.StartTime)) > 0.25 || math.Abs((x.end-x.start)-(y.end-y.start)) > 0.25 {
 			return fmt.Errorf("audio stream %d duration or A/V offset changed (fail closed, never publish)", i)
 		}
-		if codec, kbps := transcode.AudioTarget(plan.AudioMode, s.Codec, s.Channels, s.Layout); codec != "copy" && y.end-y.start > 10 {
+		if codec, kbps := transcode.AudioTarget(plan.AudioMode, s.Codec, s.Profile, s.Channels, s.Layout); codec != "copy" && y.end-y.start > 10 {
 			bps := float64(y.bytes) * 8 / (y.end - y.start)
 			// AAC is variable bitrate; reject gross overshoot, not silence or padding.
 			if bps > float64(kbps*2000+16000) {

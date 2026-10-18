@@ -1,16 +1,32 @@
 package transcode
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
+
+// AudioModeCompactLossless is size mode's audio policy: like compact, but only
+// lossless tracks are converted. Lossy tracks, DTS core included, are copied.
+const AudioModeCompactLossless = "compact_lossless"
 
 // AudioTarget implements opt-in audio policies without a second optimizer.
 // he_aac explicitly converts 1-6 channels to HE-AAC via AudioToolbox.
-// Preserve track count, channels and layout. Efficient lossy codecs (E-AC-3
+// Preserve track count, channels and layout: every mode copies a track whose
+// reported layout AAC cannot carry unchanged. Efficient lossy codecs (E-AC-3
 // JOC included, so Atmos survives on them), >7.1 tracks and reported layouts
 // AAC cannot carry unchanged are copied. DTS/lossless tracks become AAC (lossy).
-func AudioTarget(mode, codec string, channels int, layout string) (string, int) {
+// profile is the stream's reported codec profile; compact_lossless needs it
+// to tell DTS-HD MA from DTS core and to keep object audio (Atmos, DTS:X).
+func AudioTarget(mode, codec, profile string, channels int, layout string) (string, int) {
 	codec = strings.ToLower(strings.TrimSpace(codec))
+	if mode == AudioModeCompactLossless {
+		if !losslessAudio(codec, profile) || objectAudio(profile) {
+			return "copy", 0
+		}
+		mode = "compact"
+	}
 	if mode == "he_aac" {
-		if channels < 1 || channels > 6 {
+		if channels < 1 || channels > 6 || !aacKeepsLayout(layout, channels) {
 			return "copy", 0
 		}
 		if channels <= 2 {
@@ -39,6 +55,26 @@ func AudioTarget(mode, codec string, channels int, layout string) (string, int) 
 	}
 	return "aac", bitrate
 }
+
+// losslessAudio reports a lossless track. DTS is lossless only with a
+// reported DTS-HD MA profile; an unreported DTS profile is treated as core.
+func losslessAudio(codec, profile string) bool {
+	switch codec {
+	case "truehd", "mlp", "flac", "alac":
+		return true
+	case "dts":
+		return strings.HasPrefix(strings.ToUpper(strings.TrimSpace(profile)), "DTS-HD MA")
+	}
+	return strings.HasPrefix(codec, "pcm_")
+}
+
+// objectAudio reports Dolby Atmos or DTS:X object metadata, which AAC cannot
+// carry, so size mode copies those tracks rather than flattening them.
+func objectAudio(profile string) bool {
+	return objectAudioProfile.MatchString(profile)
+}
+
+var objectAudioProfile = regexp.MustCompile(`(?i)\batmos\b|\bdts:x\b`)
 
 // aacLayouts are the channel layouts FFmpeg's AAC encoder writes back
 // unchanged, keyed to their channel count. AAC has one channel

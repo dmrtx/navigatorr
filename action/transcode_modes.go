@@ -18,6 +18,10 @@ import (
 )
 
 const ModePolicyVersion = "transcode-modes-v2"
+
+// SizeModePolicyVersion freezes new size-mode operations. Older frozen size
+// policies keep their own version and behaviour.
+const SizeModePolicyVersion = optimization.ModePolicyV3
 const modeOperationBudgetSeconds = 3600
 const modeSearchBudgetSeconds = 600
 
@@ -34,7 +38,30 @@ type ModePolicySnapshot struct {
 	// Compact is set only for mode=compact, so other snapshots and their
 	// digests are unchanged.
 	Compact *ModeCompactPolicy `json:"compact,omitempty"`
-	Digest  string             `json:"digest"`
+	// Size is set only for size policy v3, so v2 snapshots and their digests
+	// are unchanged.
+	Size   *ModeSizePolicy `json:"size,omitempty"`
+	Digest string          `json:"digest"`
+}
+
+// ModeSizePolicy freezes what size v3 adds on top of the v2 quality floor:
+// Main10 output for 8-bit sources on workers that prove native 10-bit
+// quality, an x265-only ladder, and final windows scaled with duration.
+type ModeSizePolicy struct {
+	EightBitMain10          bool  `json:"eight_bit_main10"`
+	VideoToolboxCandidates  bool  `json:"videotoolbox_candidates"`
+	FallbackQualityValues   []int `json:"fallback_quality_values"`
+	FallbackSavingsValues   []int `json:"fallback_savings_values"`
+	FinalWindowSeconds      int   `json:"final_window_seconds"`
+	FinalWindowEverySeconds int   `json:"final_window_every_seconds"`
+	FinalWindowsMinimum     int   `json:"final_windows_minimum"`
+	FinalWindowsMaximum     int   `json:"final_windows_maximum"`
+}
+
+// sizeModeV3Policy is the frozen size v3 addition. The ladder is x265 only:
+// medium CRF 22-30 first, then one slow family chosen from what failed.
+func sizeModeV3Policy() *ModeSizePolicy {
+	return &ModeSizePolicy{EightBitMain10: true, FallbackQualityValues: []int{16, 18, 20}, FallbackSavingsValues: []int{24, 27, 30}, FinalWindowSeconds: 10, FinalWindowEverySeconds: 600, FinalWindowsMinimum: 5, FinalWindowsMaximum: 12}
 }
 
 // ModeCompactPolicy freezes the output shape of compact mode: SDR BT.709 no
@@ -71,7 +98,11 @@ func modePolicyFor(mode string, anime bool, maxHeight int) (ModePolicySnapshot, 
 		// Compact keeps the size-mode quality floor: the visible change is
 		// the intended SDR/resolution conversion, measured separately.
 		p.Audio.Mode = "compact"
-	} else if mode != "size" {
+	} else if mode == "size" {
+		// Same quality floor as v2; only lossless audio is converted.
+		p.Audio.Mode = transcode.AudioModeCompactLossless
+		p.Optimization.Search.QualityValues = []int{22, 24, 26, 28, 30}
+	} else {
 		p.Optimization.Quality.VMAF.Target = 96
 		p.Optimization.Quality.VMAF.Minimum = 95
 		p5, worst := 93.0, 92.0
@@ -81,6 +112,10 @@ func modePolicyFor(mode string, anime bool, maxHeight int) (ModePolicySnapshot, 
 	snapshot := ModePolicySnapshot{Version: ModePolicyVersion, Mode: mode, MinSavingsPercent: 15, SearchBudgetSeconds: modeSearchBudgetSeconds, OperationBudgetSeconds: modeOperationBudgetSeconds, Profile: p}
 	if mode == "x265_preserve" || mode == "quality" {
 		snapshot.MinSavingsPercent = 0
+	}
+	if mode == "size" {
+		snapshot.Version = SizeModePolicyVersion
+		snapshot.Size = sizeModeV3Policy()
 	}
 	if mode == "compact" {
 		snapshot.MinSavingsPercent = optimization.CompactMinimumSavingsPercent
@@ -258,10 +293,33 @@ func (h *hfrQualitySupport) forSource(ctx context.Context, rep *mediainspect.Det
 // hfrCapabilityLookupResult turns a failed HFR capability lookup into the
 // step result: a transient worker error waits, anything else fails closed.
 func hfrCapabilityLookupResult(err error) StepResult {
+	return workerCapabilityLookupResult(err, "HFR quality")
+}
+
+func workerCapabilityLookupResult(err error, what string) StepResult {
 	if isRetryableWorkerPollError(err) {
 		return StepResult{Status: StepWaitingExternal, WaitingCondition: "worker_unreachable", WaitingReason: fmt.Sprintf("Worker capabilities temporarily unavailable: %v", err)}
 	}
-	return StepResult{Status: StepFailed, Error: fmt.Sprintf("querying worker HFR quality capability: %v (fail closed)", err)}
+	return StepResult{Status: StepFailed, Error: fmt.Sprintf("querying worker %s capability: %v (fail closed)", what, err)}
+}
+
+// sizeMain10Supported reports a worker that can encode and measure an 8-bit
+// source as Main10 under size v3: x265, explicit Main10 benchmarks and the
+// proven native 10-bit VMAF and CAMBI path. Otherwise the source stays 8-bit.
+func sizeMain10Supported(caps transcode.WorkerCapabilities) bool {
+	return caps.SizeModeV3 && caps.ExplicitMain10Benchmarks && caps.SupportsNative10BitQuality() && caps.Encoders[transcode.VideoCodecLibX265]
+}
+
+// setMain10 switches a resolved plan to 10-bit HEVC output.
+func setMain10(plan *transcode.Plan) error {
+	if plan.VideoCodec != transcode.VideoCodecLibX265 {
+		return fmt.Errorf("size Main10 requires a libx265 plan (fail closed)")
+	}
+	plan.VideoProfile, plan.PixelFormat, plan.ExpectedBitDepth = "main10", "p010le", 10
+	plan.PlanDigest = ""
+	digest, err := transcode.DigestPlan(plan)
+	plan.PlanDigest = digest
+	return err
 }
 
 func modeAttention(ec *ExecutionContext, reason, message string) StepResult {

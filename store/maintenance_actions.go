@@ -20,7 +20,7 @@ func (m maintenanceMemo) bytes() int {
 }
 
 var maintenanceInputKeys = []string{"path", "parent_action_id", "batch_promote_parent_id", "transcode_action_id", "library_context", "service", "series_id", "movie_id", "media_id", "paths", "episode_file_ids", "dry_run", "promote_candidates"}
-var maintenanceOutputKeys = []string{"resolved_path", "original_sha256", "original", "result", "candidate_size_bytes", "promotion", "recovery_retained", "original_integrity", "promoted", "original_intact", "benchmark_decision", "expected_savings_percent", "transcode_phase", "progress_is_stale", "progress", "speed", "last_progress_at", "counts", "batch_promotion", "benchmark_comparison_available", "job_id", "transcode_job_id", "paused", "skip_transcode", "batch_item_generations", "batch_settings_revision", "batch_retry_pending", "post_batch_promotion"}
+var maintenanceOutputKeys = []string{"resolved_path", "original_sha256", "original", "result", "candidate_size_bytes", "promotion", "recovery_retained", "original_integrity", "promoted", "original_intact", "benchmark_decision", "expected_savings_percent", "transcode_phase", "progress_is_stale", "progress", "speed", "last_progress_at", "counts", "batch_promotion", "benchmark_comparison_available", "job_id", "transcode_job_id", "paused", "skip_transcode", "batch_item_generations", "batch_settings_revision", "batch_retry_pending", "post_batch_promotion", "mode", "size_main10", "quality_evidence", "conversions"}
 
 func maintenanceJSON(raw string, keys []string) string {
 	var source map[string]json.RawMessage
@@ -32,6 +32,18 @@ func maintenanceJSON(raw string, keys []string) string {
 		value, ok := source[key]
 		if !ok {
 			continue
+		}
+		if key == "conversions" {
+			// Only the stream identity and codecs are shown; reasons stay in
+			// the full action history.
+			var conversions []json.RawMessage
+			if json.Unmarshal(value, &conversions) != nil {
+				continue
+			}
+			for i, c := range conversions {
+				conversions[i] = json.RawMessage(maintenanceJSON(string(c), []string{"stream_type", "stream_index", "from_codec", "to_codec"}))
+			}
+			value, _ = json.Marshal(conversions)
 		}
 		var nested map[string]json.RawMessage
 		if json.Unmarshal(value, &nested) == nil && nested != nil {
@@ -45,6 +57,12 @@ func maintenanceJSON(raw string, keys []string) string {
 				delete(nested, "languages")
 				delete(nested, "commands")
 				value, _ = json.Marshal(nested)
+			case "quality_evidence":
+				projected := map[string]json.RawMessage{}
+				if vmaf, exists := nested["vmaf"]; exists {
+					projected["vmaf"] = json.RawMessage(maintenanceJSON(string(vmaf), []string{"mean", "p5", "worst_window_mean", "worst_window_seconds"}))
+				}
+				value, _ = json.Marshal(projected)
 			case "benchmark_decision":
 				if winner, exists := nested["winner"]; exists {
 					nested = map[string]json.RawMessage{"winner": json.RawMessage(maintenanceJSON(string(winner), []string{"estimated_bytes"}))}

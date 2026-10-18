@@ -76,6 +76,15 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 			return StepResult{Status: StepFailed, Error: "worker does not support the explicit x265/HE-AAC experiment; upgrade before encoding"}, nil
 		}
 	}
+	if plan.AudioMode == transcode.AudioModeCompactLossless && !getBool(ec.State, "transcode_reconcile") {
+		caps, err := e.deps.Transcode.Capabilities(ctx)
+		if err != nil {
+			return StepResult{Status: StepFailed, Error: fmt.Sprintf("checking lossless audio capability: %v", err)}, nil
+		}
+		if !caps.SizeModeV3 {
+			return StepResult{Status: StepFailed, Error: "worker does not support lossless audio compaction; upgrade the worker before encoding"}, nil
+		}
+	}
 	if plan.AudioMode == "compact" && !getBool(ec.State, "transcode_reconcile") {
 		caps, err := e.deps.Transcode.Capabilities(ctx)
 		if err != nil {
