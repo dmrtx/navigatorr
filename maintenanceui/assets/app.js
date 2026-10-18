@@ -360,10 +360,12 @@ function trackCommand(request, receipt, result) {
   const info = {request,...receipt,...result,id:result.id || receipt.id,status:result.status || "pending"};
   // When this page first saw the current status: Applied shows for a while
   // after completion, measured from here rather than with a timer per job.
-  info.seenAt = previous?.status === info.status ? previous.seenAt : Date.now();
+  info.seenAt = previous?.status === info.status ? previous.seenAt : commandClock();
   if (previous?.dismissed) info.dismissed = true;
   state.commands.set(receipt.command_id, info);
-  if (previous && previous.status !== info.status) announceCommand(info);
+  // After a reload the first poll replaces a placeholder; only an outcome is news.
+  const placeholder = previous?.restored && commandActiveStatuses.includes(info.status);
+  if (previous && previous.status !== info.status && !placeholder) announceCommand(info);
   renderCommandIndicators();
   document.querySelectorAll("[data-job-control]").forEach(button => {
     if (button.dataset.jobControl === info.id) button.disabled = !serverReachable || jobIsBusy(info.id) || (button.dataset.requiresWorker === "true" && !state.workerInfo?.ready);
@@ -371,6 +373,8 @@ function trackCommand(request, receipt, result) {
   return info;
 }
 // Command status on a job card: one compact chip under the status badge.
+// Monotonic, so a wall-clock change cannot keep Applied up or hide it early.
+const commandClock = () => globalThis.performance?.now?.() ?? Date.now();
 const commandActiveStatuses = ["pending", "running", "waiting_external"];
 const appliedChipMs = 8000;
 const commandVerbs = {"Preparing replacement review":"Preparing review","Applying replacement decision":"Applying decision","Applying decision":"Applying decision","Retrying job":"Retrying","Stopping job":"Stopping","Applying candidate decision":"Applying decision","Verifying recovery data":"Verifying","Verifying duplicate":"Verifying","Removing recovery copy":"Removing copy","Updating batch settings":"Updating settings"};
@@ -383,7 +387,7 @@ function jobCommands(id) {
 // A failed command wins (until the job's next command or a dismissal), then
 // one still in flight, then one completed within the last few seconds.
 // Cancelled commands show no chip.
-function commandChip(id, now = Date.now()) {
+function commandChip(id, now = commandClock()) {
   const commands = jobCommands(id);
   const newest = commands[0];
   if (!newest) return null;
@@ -419,13 +423,13 @@ function commandChipNode(chip) {
 }
 function commandFailureLine(command) {
   const line = node("p", "", "command-failure");
+  line.dataset.commandId = command.command_id;
   const reason = shortJobReason(command.error) || "The action could not be applied.";
   const text = node("span", reason);
   text.title = reason;
+  // The redraw removes the line and moves focus to the same card.
   const dismiss = button("", () => {
     command.dismissed = true;
-    // The line goes away; keep keyboard focus on the same card.
-    line.closest?.("[data-operation-id]")?.querySelector?.(".job-title")?.focus({ preventScroll: true });
     renderCommandIndicators();
   }, "command-dismiss");
   dismiss.setAttribute("aria-label", "Dismiss");
@@ -435,33 +439,83 @@ function commandFailureLine(command) {
   line.append(text, dismiss);
   return line;
 }
-// Screen readers hear a status change once, through one polite live region,
-// not every time the queue redraws its cards.
+function commandJobName(id) {
+  const job = state.detailJob?.id === id ? state.detailJob : [...(state.operationJobs?.values() || [])].find((j) => j.id === id);
+  if (job?.number) return `Job #${job.number}`;
+  return state.backups?.some((copy) => copy.action_id === id) ? "Recovery copy" : "Job";
+}
+// Screen readers hear a status change once, not every time the queue redraws
+// its cards. Changes that land together are read as one message.
+const commandAnnouncements = [];
 function announceCommand(command) {
-  const status = commandStatusText[command.status] || "Applying";
+  const status = (commandStatusText[command.status] || "Applying").toLowerCase();
   const reason = command.status === "failed" ? shortJobReason(command.error) : command.waiting_reason;
-  $("command-announcer").textContent = `${commandLabel(command)}: ${status}${reason ? `. ${reason}` : ""}`;
+  const detail = reason ? ` ${/[.!?]$/.test(reason) ? reason : `${reason}.`}` : "";
+  commandAnnouncements.push(`${commandJobName(command.id)}: ${commandLabel(command)}, ${status}.${detail}`);
+  if (commandAnnouncements.length === 1) setTimeout(flushCommandAnnouncements, 250);
+}
+function flushCommandAnnouncements() {
+  const text = commandAnnouncements.splice(0).join(" ");
+  // The open job detail is modal and makes the page behind it inert, so
+  // speak from the live region inside the dialog while it is open.
+  const inDialog = Boolean($("job-detail").open);
+  $("detail-command-announcer").textContent = inDialog ? text : "";
+  $("command-announcer").textContent = inDialog ? "" : text;
+}
+// Keyboard focus on a Dismiss button survives redraws of the cards.
+function commandFocus() {
+  const line = document.activeElement?.closest?.(".command-failure");
+  if (!line) return null;
+  return {commandId: line.dataset.commandId, operationId: line.closest("[data-operation-id]")?.dataset.operationId};
+}
+function commandTargets() {
+  return [...document.querySelectorAll("[data-operation-id]")].filter((target) => target.id !== "detail-summary");
+}
+function restoreCommandFocus(focus) {
+  if (!focus) return;
+  const targets = commandTargets();
+  const line = targets.map((target) => target.querySelector(".command-failure")).find((l) => l?.dataset.commandId === focus.commandId);
+  const card = targets.find((target) => target.dataset.operationId === focus.operationId);
+  const next = line?.querySelector(".command-dismiss") || card?.querySelector(".job-title, .backup-actions button");
+  if (next && document.activeElement !== next) next.focus({ preventScroll: true });
 }
 let commandChipTimer = null;
 function renderCommandIndicators() {
-  document.querySelectorAll(".command-chip, .command-failure").forEach((el) => el.remove());
-  const now = Date.now();
+  const focus = commandFocus();
+  const now = commandClock();
   let expires = Infinity;
-  for (const target of document.querySelectorAll("[data-operation-id]")) {
-    if (target.id === "detail-summary") continue;
-    const chip = commandChip(target.dataset.operationId, now);
-    if (!chip) continue;
-    if (chip.expires) expires = Math.min(expires, chip.expires);
-    (target.querySelector(".job-heading, .backup-heading") || target).append(commandChipNode(chip));
-    if (chip.kind !== "failed") continue;
-    const line = commandFailureLine(chip.command);
-    const footer = target.querySelector(":scope > .job-footer, :scope > .backup-actions");
-    if (footer) footer.before(line); else target.append(line);
+  for (const target of commandTargets()) {
+    let chip = commandChip(target.dataset.operationId, now);
+    // The backup cleanup notice already says that work is under way.
+    if (chip?.kind === "active" && target.querySelector(".job-command")) chip = null;
+    if (chip?.expires) expires = Math.min(expires, chip.expires);
+    // Leave an unchanged chip or failure line in place so focus stays put.
+    const key = chip ? `${chip.kind}:${chip.command.command_id}:${chip.command.status}:${chip.text}` : "";
+    const current = target.querySelector(".command-chip");
+    if ((current?.dataset.key || "") !== key) {
+      current?.remove();
+      if (chip) {
+        const next = commandChipNode(chip);
+        next.dataset.key = key;
+        (target.querySelector(".job-heading, .backup-heading") || target).append(next);
+      }
+    }
+    const failed = chip?.kind === "failed" ? chip.command.command_id : "";
+    const line = target.querySelector(".command-failure");
+    if ((line?.dataset.commandId || "") !== failed) {
+      line?.remove();
+      if (failed) {
+        const next = commandFailureLine(chip.command);
+        const footer = target.querySelector(":scope > .job-footer, :scope > .backup-actions");
+        if (footer) footer.before(next); else target.append(next);
+      }
+    }
   }
-  renderCommandHistory(now);
+  renderCommandHistory();
+  restoreCommandFocus(focus);
   // One redraw when the next Applied chip expires, in case nothing else redraws.
   clearTimeout(commandChipTimer);
-  commandChipTimer = expires < Infinity ? setTimeout(renderCommandIndicators, expires - now + 50) : null;
+  commandChipTimer = expires < Infinity ? setTimeout(renderCommandIndicators, Math.max(0, expires - now) + 50) : null;
 }
 function commandAge(started, now = Date.now()) {
   if (!started) return "";
@@ -530,7 +584,7 @@ function resumeCommandTracking() {
 function restoreCommands() {
   for (const [request,receipt] of Object.entries(readCommandReceipts())) {
     if (!receipt.command_id) continue;
-    trackCommand(request,receipt,{status:"pending"});
+    trackCommand(request,receipt,{status:"pending"}).restored = true;
     if (receipt.cleanup && !state.backupCleaning) state.backupCleaning = {...receipt.cleanup,auth:state.authRevision,command_id:receipt.command_id,pendingResponse:true};
     void safe(()=>waitCommand(request,receipt));
   }
@@ -3629,6 +3683,7 @@ async function loadJobs(more = false) {
     state.jobsHasMore = data.has_more;
     const focus = focusedControl($("jobs-list"));
     const menu = openActionMenu($("jobs-list"));
+    const commandFocused = commandFocus();
     $("jobs-list").replaceChildren();
     for (const job of state.operationJobs.values()) {
       const row = node("article", "", "job-row"),
@@ -3690,6 +3745,7 @@ async function loadJobs(more = false) {
     if (!state.operationJobs.size)
       $("jobs-list").append(node("p", "No jobs for this filter.", "empty"));
     renderCommandIndicators();
+    restoreCommandFocus(commandFocused);
     restoreActionMenu($("jobs-list"), menu);
     restoreControl($("jobs-list"), focus);
 
@@ -5026,6 +5082,7 @@ function cleanupError(value) {
   return reason || "Verification did not complete.";
 }
 function renderBackups() {
+  const commandFocused = commandFocus();
   $("backup-list").replaceChildren();
   for (const copy of state.backups || []) {
     const row = node("div", "", "backup-row");
@@ -5058,6 +5115,9 @@ function renderBackups() {
   $("backup-summary").hidden = !state.backupsVisible;
   $("backup-summary").textContent = `${copies.length} recovery ${copies.length === 1 ? "copy" : "copies"} · ${bytes(total)} retained${state.backupsLoading ? " · Loading remaining copies…" : ""}`;
   if (!copies.length && !state.backupsLoading) $("backup-list").append(node("p", "No retained recovery copies.", "muted"));
+  // Rebuilt rows get their command chips back now, not on the next poll.
+  renderCommandIndicators();
+  restoreCommandFocus(commandFocused);
 }
 async function loadBackups() {
   if (state.backupsLoading) return;

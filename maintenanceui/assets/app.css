@@ -2008,6 +2008,18 @@ pre {
   color: inherit;
 }
 .command-failure .command-dismiss svg { width: 12px; height: 12px; }
+/* Phones: the reason gets two lines before it is cut short. */
+@media (max-width: 600px) {
+  .command-failure { align-items: flex-start; }
+  .command-failure > span {
+    display: -webkit-box;
+    padding-top: 3px;
+    white-space: normal;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+  }
+}
 /* Job detail: what this session asked of the job, newest first. */
 .command-history { margin: 12px 0; }
 .command-history h3 { margin: 0 0 6px; font-size: 13px; }
