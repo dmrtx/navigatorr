@@ -60,8 +60,11 @@ type QualityCapabilities struct {
 	// HFRTemporalDecimation is the VMAF decimation factor the worker executed
 	// on a synthetic high-frame-rate pair. Zero means HFR sources are
 	// unsupported (older workers), so coordinators must not dispatch them.
-	HFRTemporalDecimation int    `json:"hfr_temporal_decimation,omitempty"`
-	ProbeError            string `json:"probe_error,omitempty"`
+	HFRTemporalDecimation int `json:"hfr_temporal_decimation,omitempty"`
+	// HFRProbeReason says why HFRTemporalDecimation is zero on a worker that
+	// ran the probe. It never grants support.
+	HFRProbeReason string `json:"hfr_probe_reason,omitempty"`
+	ProbeError     string `json:"probe_error,omitempty"`
 }
 
 // WorkerCapabilities represents the versioned capability report of a transcode worker node.

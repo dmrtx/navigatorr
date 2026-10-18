@@ -41,6 +41,15 @@ func TestDecimationFilterConstruction(t *testing.T) {
 			t.Fatalf("factor %d accepted", bad)
 		}
 	}
+	if got, err := MetricPairInputs(1); err != nil || got != "[0:v]format=yuv420p10le,settb=AVTB,setpts=N[d];[1:v]format=yuv420p10le,settb=AVTB,setpts=N[r];[d][r]" {
+		t.Fatalf("native pair inputs %q %v", got, err)
+	}
+	if got, err := MetricPairInputs(2); err != nil || got != `[0:v]format=yuv420p10le,select=not(mod(n\,2)),settb=AVTB,setpts=N[d];[1:v]format=yuv420p10le,select=not(mod(n\,2)),settb=AVTB,setpts=N[r];[d][r]` {
+		t.Fatalf("decimated pair inputs %q %v", got, err)
+	}
+	if _, err := MetricPairInputs(3); err == nil {
+		t.Fatal("factor 3 pair inputs accepted")
+	}
 	for _, tc := range [][3]int{{0, 2, 0}, {1, 2, 1}, {2, 2, 1}, {99, 2, 50}, {100, 2, 50}, {100, 1, 100}, {5, 0, 0}} {
 		if got := DecimatedFrameCount(tc[0], tc[1]); got != tc[2] {
 			t.Fatalf("DecimatedFrameCount(%d,%d)=%d want %d", tc[0], tc[1], got, tc[2])

@@ -40,8 +40,8 @@ func IsHFR(fps float64) bool {
 }
 
 // DecimationFilter returns the filtergraph suffix that keeps frame indices
-// 0, factor, 2*factor, ... of one input. It must follow PTS normalization on
-// both inputs so source and candidate drop exactly the same frames. The comma
+// 0, factor, 2*factor, ... of one input. select counts input frames, so both
+// inputs drop exactly the same indices whatever their timestamps. The comma
 // is escaped for -filter_complex, where an unescaped one separates filters.
 func DecimationFilter(factor int) (string, error) {
 	switch factor {
@@ -52,6 +52,22 @@ func DecimationFilter(factor int) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported temporal decimation factor %d", factor)
 	}
+}
+
+// MetricPairInputs returns the filtergraph prefix that prepares the candidate
+// ([0:v]) and reference ([1:v]) of a two-input metric and ends with "[d][r]".
+// Each input is converted to 10-bit measurement precision, decimated by frame
+// index and then restamped by frame index. libvmaf's framesync pairs frames by
+// timestamp; lossless extraction rounds both samples to a 1 ms timebase, so
+// at 59.94 fps a source and candidate frame can land 1 ms apart and pair with
+// a neighbour. Restamping both inputs identically pairs frame k with frame k.
+func MetricPairInputs(decimation int) (string, error) {
+	decimate, err := DecimationFilter(decimation)
+	if err != nil {
+		return "", err
+	}
+	chain := "format=yuv420p10le" + decimate + ",settb=AVTB,setpts=N"
+	return "[0:v]" + chain + "[d];[1:v]" + chain + "[r];[d][r]", nil
 }
 
 // DecimatedFrameCount is the number of frames DecimationFilter keeps from n.

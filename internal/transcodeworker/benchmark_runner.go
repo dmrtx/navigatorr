@@ -1065,25 +1065,32 @@ func BuildVMAFArgs(candPath, refPath, logPath string) []string {
 // framesync must end at the shorter input without repeats.
 // threads > 0 sets libvmaf n_threads; zero keeps the libvmaf default.
 // decimation (quality.TemporalDecimation) drops the same frame indices from
-// both PTS-normalized inputs, so pairs stay aligned for HFR sources.
+// both inputs; both are then restamped by index (quality.MetricPairInputs).
 func BuildVMAFModelArgs(candPath, refPath, logPath string, model quality.VMAFModel, encodedBitDepth, decimation, threads int) ([]string, error) {
 	if model.ID == "" || model.LibvmafModel == "" || model.MeasurementBitDepth != 10 || (encodedBitDepth != 8 && encodedBitDepth != 10) {
 		return nil, fmt.Errorf("unsupported VMAF model measurement contract")
 	}
-	decimate, err := quality.DecimationFilter(decimation)
+	inputs, err := quality.MetricPairInputs(decimation)
 	if err != nil {
 		return nil, err
 	}
-	filter := fmt.Sprintf("[0:v]format=yuv420p10le,setpts=PTS-STARTPTS%s[d];[1:v]format=yuv420p10le,setpts=PTS-STARTPTS%s[r];[d][r]libvmaf=model='version=%s\\:cambi.enc_bitdepth=%d':log_fmt=json:log_path=%s:shortest=1:repeatlast=0%s", decimate, decimate, model.LibvmafModel, encodedBitDepth, escapeFFmpegFilterPath(logPath), libvmafThreadsOption(threads))
+	filter := inputs + vmafModelFilter(model, encodedBitDepth, logPath) + libvmafThreadsOption(threads)
 	return []string{"-nostdin", "-nostats", "-i", candPath, "-i", refPath, "-filter_complex", filter, "-f", "null", "-"}, nil
 }
 
 // BuildCAMBIArgs runs a separate, bounded full-reference pass. VMAF v1 has an
 // internal CAMBI feature, so adding another to that invocation is unsafe on
-// several libvmaf builds.
+// several libvmaf builds. CAMBI is spatial and measures every frame.
 func BuildCAMBIArgs(candPath, refPath, logPath string, encodedBitDepth, threads int) []string {
-	filter := fmt.Sprintf("[0:v]format=yuv420p10le,setpts=PTS-STARTPTS[d];[1:v]format=yuv420p10le,setpts=PTS-STARTPTS[r];[d][r]libvmaf=model=version=vmaf_v0.6.1:feature='name=cambi\\:full_ref=true\\:enc_bitdepth=%d':log_fmt=json:log_path=%s:shortest=1:repeatlast=0%s", encodedBitDepth, escapeFFmpegFilterPath(logPath), libvmafThreadsOption(threads))
+	inputs, _ := quality.MetricPairInputs(1)
+	filter := inputs + fmt.Sprintf("libvmaf=model=version=vmaf_v0.6.1:feature='name=cambi\\:full_ref=true\\:enc_bitdepth=%d':log_fmt=json:log_path=%s:shortest=1:repeatlast=0%s", encodedBitDepth, escapeFFmpegFilterPath(logPath), libvmafThreadsOption(threads))
 	return []string{"-nostdin", "-nostats", "-i", candPath, "-i", refPath, "-filter_complex", filter, "-f", "null", "-"}
+}
+
+// vmafModelFilter is the libvmaf invocation shared by measurement and the
+// capability probes, so a probe executes the production model options.
+func vmafModelFilter(model quality.VMAFModel, encodedBitDepth int, logPath string) string {
+	return fmt.Sprintf("libvmaf=model='version=%s\\:cambi.enc_bitdepth=%d':log_fmt=json:log_path=%s:shortest=1:repeatlast=0", model.LibvmafModel, encodedBitDepth, escapeFFmpegFilterPath(logPath))
 }
 
 func libvmafThreadsOption(threads int) string {

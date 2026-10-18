@@ -18,8 +18,12 @@ func TestBuildVMAFModelArgsDecimatesBothInputsIdentically(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(filterOf(native), "select") {
-		t.Fatalf("native-rate graph decimated: %s", filterOf(native))
+	if graph := filterOf(native); strings.Contains(graph, "select") || !strings.HasPrefix(graph, "[0:v]format=yuv420p10le,settb=AVTB,setpts=N[d];[1:v]format=yuv420p10le,settb=AVTB,setpts=N[r];[d][r]libvmaf=") {
+		t.Fatalf("native-rate graph must pair by frame index without decimating: %s", graph)
+	}
+	cambi := filterOf(BuildCAMBIArgs("c.mkv", "r.mkv", "c.json", 8, 0))
+	if strings.Contains(cambi, "select") || strings.Count(cambi, "settb=AVTB,setpts=N") != 2 {
+		t.Fatalf("CAMBI must pair every frame by index: %s", cambi)
 	}
 	args, err := BuildVMAFModelArgs("c.mkv", "r.mkv", "v.json", model, 8, 2, 0)
 	if err != nil {
@@ -30,9 +34,9 @@ func TestBuildVMAFModelArgsDecimatesBothInputsIdentically(t *testing.T) {
 	if len(branches) != 3 {
 		t.Fatalf("unexpected graph shape: %s", graph)
 	}
-	want := `format=yuv420p10le,setpts=PTS-STARTPTS,select=not(mod(n\,2))`
+	want := `format=yuv420p10le,select=not(mod(n\,2)),settb=AVTB,setpts=N`
 	if branches[0] != "[0:v]"+want+"[d]" || branches[1] != "[1:v]"+want+"[r]" {
-		t.Fatalf("reference and candidate must drop the same frame indices after PTS normalization: %s", graph)
+		t.Fatalf("reference and candidate must drop the same frame indices, then restamp by index: %s", graph)
 	}
 	if strings.Count(graph, "select=") != 2 || !strings.HasPrefix(branches[2], "[d][r]libvmaf=") || !strings.Contains(branches[2], ":shortest=1:repeatlast=0") {
 		t.Fatalf("decimation leaked into the metric options: %s", graph)
@@ -84,12 +88,18 @@ func TestProbeHFRDecimationExecutesDecimatedGraph(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	model := hfrTestModel(t, ctx, ffmpeg)
-	if got := probeHFRDecimation(ctx, ffmpeg, t.TempDir(), model); got != quality.HFRDecimationFactor {
-		t.Fatalf("decimated probe failed on a working libvmaf: %d", got)
+	if got, reason := probeHFRDecimation(ctx, ffmpeg, t.TempDir(), model); got != quality.HFRDecimationFactor || reason != "" {
+		t.Fatalf("decimated probe failed on a working libvmaf: %d %q", got, reason)
 	}
-	model.LibvmafModel = "vmaf_model_that_does_not_exist"
-	if got := probeHFRDecimation(ctx, ffmpeg, t.TempDir(), model); got != 0 {
-		t.Fatalf("failed probe advertised HFR: %d", got)
+	broken := model
+	broken.LibvmafModel = "vmaf_model_that_does_not_exist"
+	if got, reason := probeHFRDecimation(ctx, ffmpeg, t.TempDir(), broken); got != 0 || reason != "hfr_probe_execution_failed" {
+		t.Fatalf("failed probe advertised HFR: %d %q", got, reason)
+	}
+	expired, cancelExpired := context.WithCancel(ctx)
+	cancelExpired()
+	if got, reason := probeHFRDecimation(expired, ffmpeg, t.TempDir(), model); got != 0 || reason != hfrProbeTimeout {
+		t.Fatalf("cancelled probe must report a retryable timeout: %d %q", got, reason)
 	}
 }
 
@@ -104,9 +114,7 @@ func TestHFRDecimatedVMAFRealScores(t *testing.T) {
 	dir := t.TempDir()
 	run := func(args ...string) {
 		t.Helper()
-		if out, err := exec.CommandContext(ctx, ffmpeg, append([]string{"-y", "-nostdin", "-v", "error"}, args...)...).CombinedOutput(); err != nil {
-			t.Fatalf("ffmpeg %v: %v: %s", args, err, out)
-		}
+		runFFmpeg(t, ctx, ffmpeg, append([]string{"-y", "-nostdin", "-v", "error"}, args...)...)
 	}
 	ref := filepath.Join(dir, "reference.mkv")
 	low := filepath.Join(dir, "compressed.mkv")
@@ -122,7 +130,7 @@ func TestHFRDecimatedVMAFRealScores(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		run(args[1:]...) // drop -nostdin; run adds it
+		runFFmpeg(t, ctx, ffmpeg, args...)
 		data, err := os.ReadFile(logPath)
 		if err != nil {
 			t.Fatal(err)
@@ -149,4 +157,82 @@ func TestHFRDecimatedVMAFRealScores(t *testing.T) {
 		t.Fatalf("one-frame misalignment hidden by decimation: %.2f vs %.2f", shift.Mean, same.Mean)
 	}
 	t.Logf("model=%s identical=%.2f compressed=%.2f shifted=%.2f", model.LibvmafModel, same.Mean, lowStats.Mean, shift.Mean)
+}
+
+func runFFmpeg(t *testing.T, ctx context.Context, ffmpeg string, args ...string) {
+	t.Helper()
+	if out, err := exec.CommandContext(ctx, ffmpeg, args...).CombinedOutput(); err != nil {
+		t.Fatalf("ffmpeg %v: %v: %s", args, err, out)
+	}
+}
+
+// Regression: lossless extraction rounds both samples to a 1 ms timebase, and
+// at 60000/1001 a source and a differently muxed candidate can disagree by
+// 1 ms on some frames. verifySampleAlignment tolerates that, so the metric
+// graph must pair by frame index; pairing by timestamp matched those frames
+// with a neighbour and scored them far below the rest.
+func TestMetricGraphPairsNTSCHFRByFrameIndex(t *testing.T) {
+	ffmpeg := requireLibvmaf(t)
+	ffprobe, err := exec.LookPath("ffprobe")
+	if err != nil {
+		t.Skip("ffprobe unavailable")
+	}
+	encoders, err := exec.Command(ffmpeg, "-hide_banner", "-encoders").CombinedOutput()
+	if err != nil || !strings.Contains(string(encoders), " libx264 ") || !strings.Contains(string(encoders), " libx265 ") {
+		t.Skip("libx264/libx265 unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+	model := hfrTestModel(t, ctx, ffmpeg)
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.mp4")
+	candidate := filepath.Join(dir, "candidate.mkv")
+	runFFmpeg(t, ctx, ffmpeg, "-y", "-nostdin", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=960x540:rate=60000/1001:duration=6", "-c:v", "libx264", "-crf", "10", "-pix_fmt", "yuv420p", source)
+	runFFmpeg(t, ctx, ffmpeg, "-y", "-nostdin", "-v", "error", "-i", source, "-c:v", "libx265", "-crf", "20", "-x265-params", "log-level=error", "-pix_fmt", "yuv420p", candidate)
+	refSample := filepath.Join(dir, "ref.mkv")
+	candSample := filepath.Join(dir, "cand.mkv")
+	runFFmpeg(t, ctx, ffmpeg, append([]string{"-v", "error"}, BuildReferenceExtractionArgs(source, refSample, 0, 3.217, 2)...)...)
+	runFFmpeg(t, ctx, ffmpeg, append([]string{"-v", "error"}, BuildReferenceExtractionArgs(candidate, candSample, 0, 3.217, 2)...)...)
+	refPTS, err := probeSamplePTS(ctx, ffprobe, refSample)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candPTS, err := probeSamplePTS(ctx, ffprobe, candSample)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifySampleAlignment(refPTS, candPTS, 60000.0/1001); err != nil {
+		t.Fatalf("samples must pass the production alignment check: %v", err)
+	}
+	offset := 0
+	for i := range refPTS {
+		if refPTS[i]-refPTS[0] != candPTS[i]-candPTS[0] {
+			offset++
+		}
+	}
+	for _, decimation := range []int{1, quality.HFRDecimationFactor} {
+		logPath := filepath.Join(dir, "vmaf.json")
+		args, err := BuildVMAFModelArgs(candSample, refSample, logPath, model, 8, decimation, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runFFmpeg(t, ctx, ffmpeg, append([]string{"-v", "error"}, args...)...)
+		data, err := os.ReadFile(logPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stats, err := quality.ParseVMAF(data, MaxMetricLogSizeBytes, model, 0, 0, 60000.0/1001, decimation, 0.5, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stats.FramesTotal != quality.DecimatedFrameCount(len(refPTS), decimation) {
+			t.Fatalf("decimation %d measured %d of %d frames", decimation, stats.FramesTotal, len(refPTS))
+		}
+		// A crf 20 copy of this pattern scores ~95 on every correctly paired
+		// frame; a frame paired with its neighbour drops to ~30-50.
+		if stats.Min < 80 {
+			t.Fatalf("decimation %d: a frame was paired with its neighbour (min %.2f, mean %.2f; %d samples with 1 ms timestamp offsets)", decimation, stats.Min, stats.Mean, offset)
+		}
+		t.Logf("decimation=%d frames=%d min=%.2f mean=%.2f timestamp_offsets=%d", decimation, stats.FramesTotal, stats.Min, stats.Mean, offset)
+	}
 }
