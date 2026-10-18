@@ -1937,6 +1937,36 @@ function savingsLine(savings, compact = false, replaced = false) {
 function batchReasonLabel(job, reason) {
   return job.batch?.failed > reason.count ? `Example (${reason.count} of ${job.batch.failed} failed files)` : `${reason.count} ${reason.count === 1 ? "file" : "files"}`;
 }
+// ffmpeg reports a cumulative average speed, so each new remaining-time
+// measurement is blended with the previous one projected forward; a jump of
+// more than half the projection (restart, second pass) starts over.
+const encodeEtas = new Map();
+function encodeEta(key, worker, seconds) {
+  const phase = worker?.transcode_phase || worker?.benchmark_phase || worker?.phase;
+  const raw = Number(seconds);
+  if (!key || phase !== "encoding" || worker.progress_is_stale || !(Number(worker.speed) > 0) || seconds == null || !Number.isFinite(raw) || raw <= 0) {
+    if (key) encodeEtas.delete(key);
+    return "";
+  }
+  const now = Date.now();
+  const prior = encodeEtas.get(key);
+  let value = raw;
+  if (prior) {
+    const projected = Math.max(0, prior.value - (now - prior.at) / 1000);
+    if (prior.raw === raw) value = projected;
+    else if (Math.abs(projected - raw) <= Math.max(120, projected * .5)) value = projected * .7 + raw * .3;
+  }
+  encodeEtas.set(key, {value, raw, at: now});
+  return remainingLabel(value);
+}
+function remainingLabel(seconds) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "";
+  if (seconds < 60) return "less than a minute left";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `~${minutes} min left`;
+  const hours = Math.floor(minutes / 60), rest = minutes % 60;
+  return `~${hours} h${rest ? ` ${rest} min` : ""} left`;
+}
 function batchProgress(job) {
   const batch = visibleBatch(job);
   if (["completed", "failed", "cancelled"].includes(job.status)) return null;
@@ -1970,8 +2000,9 @@ function batchProgress(job) {
     const key = activity.file || activity.id || "Active file";
     const prior = byFile.get(key);
     const observation = workerProgressObservation({...(child || activity), worker: w, status: "running"});
-    const measurement = workerStage ? observation.message || (w.progress_is_stale ? observation.heartbeat === "fresh" ? "Worker heartbeat received; last measurement shown" : "Last measurement; stale" : "") : "";
-    if (!prior || progress > prior.progress) byFile.set(key, {progress, label: `${key.split("/").pop() || "Active file"}: ${workerStage && phase ? workerPhaseLabel(phase) : stage === "preflight" && activity.work?.phase === "hashing_source" ? `Verifying source SHA-256 (${bytes(activity.work.bytes_read || 0)} / ${bytes(activity.work.total_bytes)})` : stageLabel(stage || "preflight")}${measurement ? ` · ${measurement}` : ""}`});
+    const eta = workerStage && !observation.message ? encodeEta(activity.id || key, w, child?.eta_seconds ?? activity.eta_seconds) : "";
+    const measurement = workerStage ? observation.message || (w.progress_is_stale ? observation.heartbeat === "fresh" ? "Worker heartbeat received; last measurement shown" : "Last measurement; stale" : eta) : "";
+    if (!prior || progress > prior.progress) byFile.set(key, {progress, eta: eta ? encodeEtas.get(activity.id || key)?.value : null, label: `${key.split("/").pop() || "Active file"}: ${workerStage && phase ? workerPhaseLabel(phase) : stage === "preflight" && activity.work?.phase === "hashing_source" ? `Verifying source SHA-256 (${bytes(activity.work.bytes_read || 0)} / ${bytes(activity.work.total_bytes)})` : stageLabel(stage || "preflight")}${measurement ? ` · ${measurement}` : ""}`});
   }
   const partial = Math.min(count("running"), byFile.size) ? [...byFile.values()].slice(0,count("running")).reduce((sum,a)=>sum+a.progress,0) : 0;
   const active = operationIsActive(job.status);
@@ -1999,7 +2030,11 @@ function batchProgress(job) {
     const waiting = count("waiting_decision") ? `${count("waiting_decision")} ${count("waiting_decision") === 1 ? "file needs" : "files need"} your decision` : "";
     result.append(node("span", [...phases,waiting].filter(Boolean).join(" · ") || (processed === batch.total ? "Finishing batch / replacement checks" : "Waiting for worker / preparing selected files"), "batch-progress-phase metadata"));
   }
-  result.append(node("span", "Estimated workflow progress · Not time remaining", "batch-progress-explanation metadata"));
+  const etas = active ? [...byFile.values()].map(a => a.eta).filter(eta => eta > 0) : [];
+  const left = Math.max(0, batch.total - processed - count("waiting_decision") - count("cancelled"));
+  result.append(node("span", etas.length
+    ? `Current encode ${remainingLabel(Math.max(...etas))}${left > 0 ? ` · about ${left} ${left === 1 ? "file" : "files"} left` : ""}`
+    : "Estimated workflow progress · Not time remaining", "batch-progress-explanation metadata"));
   return result;
 }
 function telemetry(job) {
@@ -2058,8 +2093,7 @@ function telemetry(job) {
     if (details.candidate_number) parts.push(`Candidate ${details.candidate_number}`);
     if (details.metric) parts.push(String(details.metric).toUpperCase());
   }
-  if (phase === "encoding" && Number.isFinite(eta) && eta > 0 && !w.progress_is_stale)
-    parts.push(`About ${Math.ceil(eta / 60)} min`);
+  parts.push(encodeEta(job.id || "job", w, eta));
   result.append(
     node("span", parts.filter(Boolean).join(" · ") || job.progress, "metadata"),
   );
@@ -3664,7 +3698,8 @@ function batchFileActivity(item, job) {
   const phase = worker?.transcode_phase || worker?.benchmark_phase || worker?.phase;
   if (phase) {
     const observation = workerProgressObservation({...activity, status: item.status});
-    return workerPhaseLabel(phase) + (observation.message ? ` · ${observation.message}` : worker.progress_is_stale && observation.heartbeat === "fresh" ? " · Worker heartbeat received; last measurement shown" : "");
+    const eta = observation.message ? "" : encodeEta(activity.id, worker, activity.eta_seconds);
+    return workerPhaseLabel(phase) + (observation.message ? ` · ${observation.message}` : worker.progress_is_stale && observation.heartbeat === "fresh" ? " · Worker heartbeat received; last measurement shown" : eta ? ` · ${eta}` : "");
   }
   if (activity?.work?.phase === "hashing_source") return `Verifying source${activity.work.total_bytes > 0 ? ` · ${bytes(activity.work.bytes_read || 0)} / ${bytes(activity.work.total_bytes)}` : ""}`;
   if (activity?.work?.phase) return workerPhaseLabel(activity.work.phase);

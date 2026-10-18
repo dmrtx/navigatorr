@@ -541,12 +541,36 @@ test("full encoding still warns about stale progress with a live heartbeat and h
   const stale = progressText(h.run('telemetry(progressJob)'));
   assert.equal(h.run('queuePresentation(progressJob).status'), "No updates");
   assert.match(stale, /No recent encoding progress.*Worker heartbeat 1s ago.*73.3%/);
-  assert.doesNotMatch(stale, /14.70|238|About|sample tasks/);
+  assert.doesNotMatch(stale, /14.70|238|About|left|sample tasks/);
   h.run('progressJob.worker.progress_is_stale=false;');
   const fresh = progressText(h.run('telemetry(progressJob)'));
   assert.equal(h.run('queuePresentation(progressJob).status'), "Encoding");
-  assert.match(fresh, /Encoding full video.*14.70.*238.0 fps.*About 10 min/);
+  assert.match(fresh, /Encoding full video.*14.70.*238.0 fps.*~10 min left/);
   assert.doesNotMatch(fresh, /sample tasks|VMAF/);
+});
+
+test("batch rows show a smoothed encode ETA and the files left, only while speed is known", () => {
+  const h = metricProgressHarness();
+  h.run(`progressJob.status="waiting_external";progressJob.batch={total:8,completed:2,running:1,queued:4,waiting_decision:1};
+    progressJob.worker={transcode_status:"running",transcode_phase:"encoding",progress:40,speed:1.5,fps:36,progress_is_stale:false,
+      last_progress_at:"2026-10-16T12:22:53Z",worker_heartbeat_at:"2026-10-16T12:22:53Z"};
+    progressJob.activities=[{id:"child",file:"/media/episode.mkv",eta_seconds:4200,worker:progressJob.worker,current_step:1,stages:[{name:"wait_benchmark"},{name:"wait_transcode"}]}];`);
+  let text = progressText(h.run('batchProgress(progressJob)'));
+  assert.match(text, /episode.mkv: Encoding full video · ~1 h 10 min left/);
+  assert.match(text, /Current encode ~1 h 10 min left · about 5 files left/);
+  assert.doesNotMatch(text, /Not time remaining/);
+  assert.match(h.run('batchFileActivity({status:"running",child_action_id:"child"},progressJob)'), /Encoding full video · ~1 h 10 min left/);
+  // A noisy new measurement 30 s later moves the estimate only part of the way.
+  h.run('Date.now=()=>Date.parse("2026-10-16T12:23:24Z");progressJob.activities[0].eta_seconds=3000;progressJob.worker.last_progress_at="2026-10-16T12:23:23Z";progressJob.worker.worker_heartbeat_at="2026-10-16T12:23:23Z";');
+  text = progressText(h.run('batchProgress(progressJob)'));
+  assert.match(text, /~1 h 4 min left/);
+  // Unknown speed hides the ETA rather than inventing one.
+  h.run('progressJob.worker.speed=0;');
+  text = progressText(h.run('batchProgress(progressJob)'));
+  assert.doesNotMatch(text, / left/);
+  assert.match(text, /Estimated workflow progress · Not time remaining/);
+  assert.equal(h.run('remainingLabel(45)'), "less than a minute left");
+  assert.equal(h.run('remainingLabel(3600)'), "~1 h left");
 });
 
 test("validation, publication and sample encoding have discrete progress but require a fresh heartbeat", () => {
@@ -557,7 +581,7 @@ test("validation, publication and sample encoding have discrete progress but req
     assert.equal(h.run('queuePresentation(progressJob).status'), status);
     const text = progressText(h.run('telemetry(progressJob)'));
     assert.match(text, /Last measured: 73.3%.*Worker heartbeat/);
-    assert.doesNotMatch(text, /14.70|238|About|No recent/);
+    assert.doesNotMatch(text, /14.70|238|About|left|No recent/);
     h.run('progressJob.worker.worker_heartbeat_at="2026-10-16T12:20:00Z";');
     assert.equal(h.run('queuePresentation(progressJob).status'), "No heartbeat");
   }

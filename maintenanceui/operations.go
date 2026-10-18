@@ -718,7 +718,7 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 							if file == "" {
 								file = operationString(operationMap(operationValue(child, "promotion"))["original_path"])
 							}
-							activities = append(activities, map[string]any{"id": child.inst.ID, "parent_action_id": child.inputs["parent_action_id"], "action_name": child.inst.ActionName, "current_step": child.inst.CurrentStep, "stages": s.queueStages(child), "file": file, "worker": childJob["worker"], "work": childJob["work"], "waiting_condition": childJob["waiting_condition"]})
+							activities = append(activities, map[string]any{"id": child.inst.ID, "parent_action_id": child.inputs["parent_action_id"], "action_name": child.inst.ActionName, "current_step": child.inst.CurrentStep, "stages": s.queueStages(child), "file": file, "worker": childJob["worker"], "work": childJob["work"], "waiting_condition": childJob["waiting_condition"], "eta_seconds": child.savings.ETASeconds})
 							job["activity_waiting_condition"] = childJob["waiting_condition"]
 							if worker := operationMap(childJob["worker"]); worker != nil {
 								job["worker"] = worker
