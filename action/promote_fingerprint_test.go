@@ -239,6 +239,10 @@ func TestPromotionReadsEachFileFewerTimes(t *testing.T) {
 		{"library/copy-clone", passCopyClone, false, false, 2, 4, promotionCopyClone},
 		{"library/copy-no-clone", passCopyStream, false, false, 3, 4, ""},
 		{"filesystem/copy-no-clone", passCopyStream, true, false, 3, 3, ""},
+		// In copy mode the queued import's extra wait also costs one more
+		// read of the original-sized file.
+		{"library/copy-clone/queued-import", passCopyClone, false, true, 3, 5, promotionCopyClone},
+		{"library/copy-no-clone/queued-import", passCopyStream, false, true, 4, 5, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			original, candidate, p := promotionPasses(t, tc.mode, tc.local, tc.queued)
