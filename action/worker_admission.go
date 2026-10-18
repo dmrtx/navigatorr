@@ -3,6 +3,7 @@ package action
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"time"
 
@@ -12,7 +13,10 @@ import (
 
 type WorkerAdmissionError struct {
 	Connected bool
-	Message   string
+	// TimedOut marks deep checks that did not finish: admission is unknown,
+	// not proven broken. Submission is still refused.
+	TimedOut bool
+	Message  string
 }
 
 func (e *WorkerAdmissionError) Error() string { return e.Message }
@@ -93,7 +97,7 @@ func (e *Engine) CheckWorkerAdmission(ctx context.Context) error {
 		if text := strings.ToLower(err.Error()); strings.Contains(text, "root") || strings.Contains(text, "smb") || strings.Contains(text, "storage") {
 			message = "video worker is connected but cannot access its media storage; no job was submitted"
 		}
-		return &WorkerAdmissionError{Connected: true, Message: message}
+		return &WorkerAdmissionError{Connected: true, TimedOut: errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded), Message: message}
 	}
 	return nil
 }
