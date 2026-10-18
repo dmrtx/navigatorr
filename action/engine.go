@@ -42,6 +42,13 @@ type Engine struct {
 	// Test seam for delayed pathname metadata on network mounts. Descriptor
 	// stats still use the real opened file.
 	promotionLstatHook func(string) (os.FileInfo, error)
+	// Test seams for recovery copy offload: a clone and a kernel range copy
+	// that a test can refuse or slow down. Production leaves them nil.
+	promotionCloneHook     func(dst, src *os.File) error
+	promotionCopyRangeHook func(dst, src *os.File, n int) (int, error)
+	// promotionReadHook, when set by tests, sees every byte count this process
+	// reads from a promotion file: full hashes and streamed copies.
+	promotionReadHook func(path string, n int64)
 }
 
 // NewEngine creates a new Action Engine.
@@ -814,6 +821,9 @@ func (e *Engine) cancelBenchmarkJobConfirmed(ctx context.Context, jobID string) 
 // execute runs steps sequentially with persistence, idempotency, and wait handling.
 func (e *Engine) execute(ctx context.Context, inst *store.ActionInstance, ec *ExecutionContext, tmpl ActionTemplate) (*ActionResult, error) {
 	totalSteps := len(tmpl.Steps)
+	// One call is one continuous execution: every wait returns from it, so a
+	// file hashed here may be re-proved by fingerprint only until it returns.
+	ctx = withPromotionVerifiedFiles(ctx, ec)
 
 	// current_step and state are one durable checkpoint; step logs are audit
 	// records, never recovery authority.

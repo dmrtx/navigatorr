@@ -33,5 +33,7 @@ func (e *Engine) observeCleanup(ctx context.Context, ec *ExecutionContext) conte
 		}
 		return e.cleanupProgress(ctx, ec, phase, path, read, total)
 	})
-	return context.WithValue(ctx, promotionHashProgressKey{}, observer)
+	// Removing recovery data rests on whole-file reads only, never on an
+	// earlier hash's fingerprint.
+	return context.WithValue(withoutPromotionVerifiedFiles(ctx), promotionHashProgressKey{}, observer)
 }
