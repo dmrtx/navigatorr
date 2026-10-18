@@ -42,9 +42,10 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 		}
 		delete(ec.State, "retry_not_before")
 	}
-	// A worker that refused a submit as busy asked for a pause. Only a new
-	// write waits for it, before any capability probe; reconciling an
-	// uncertain submit is a read and never waits.
+	// A worker that refused a submit as busy asked for a pause. Checking here
+	// skips capability probes inside the window; reconciling an uncertain
+	// submit is a read and never waits. The check before admission below is
+	// the one that guards the write.
 	if !getBool(ec.State, "transcode_reconcile") {
 		if res, waiting := e.workerBusyBackoff(ec, transcodeSlotWaitReason); waiting {
 			return res, nil
@@ -168,6 +169,10 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 		}
 	}
 
+	// Only new writes wait for the busy window, as for benchmarks.
+	if res, waiting := e.workerBusyBackoff(ec, transcodeSlotWaitReason); waiting {
+		return res, nil
+	}
 	// Admission critical section: when the child belongs to a batch, hold the
 	// parent's durable lease across the policy re-read, identity persistence and
 	// the submit outcome so Engine.Cancel cannot interleave a confirmed cancel.
@@ -198,6 +203,7 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 	if err != nil {
 		if isRetryableWorkerPollError(err) {
 			ec.State["transcode_reconcile"] = true
+			clearWorkerBusy(ec) // This send may have been accepted; it was not refused as busy.
 			res := StepResult{Status: StepWaitingExternal, WaitingCondition: "worker_reconciling", WaitingReason: fmt.Sprintf("Transcode submit uncertain for job %s; reconciling with worker", jobID), Outputs: map[string]any{"job_id": jobID, "external_reference": jobID, "candidate_path": candidatePath, "output_path": candidatePath, "attempt": getInt(ec.State, "attempt"), "retry_count": getInt(ec.State, "retry_count"), "failure_classification": string(resilience.WorkerUnreachable)}}
 			if perr := e.persistExecutionState(actx, ec); perr != nil {
 				return StepResult{}, perr
@@ -207,6 +213,7 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 		clearTranscodeReconcileFlags(ec) // A definitive rejection did not accept the job.
 		var res StepResult
 		if isTranscodeIdempotencyConflict(err) {
+			clearWorkerBusy(ec)
 			class := resilience.IdempotencyConflict
 			ec.State["failure_classification"] = string(class)
 			appendFailureHistory(ec, "submit", string(class), err.Error())
@@ -382,10 +389,12 @@ func (e *Engine) workerBusyBackoff(ec *ExecutionContext, reason string) (StepRes
 	return StepResult{}, false
 }
 
-// clearWorkerBusy drops slot-wait markers once the worker accepted a job, so
-// the busy refusal is not reported as the job's failure class afterwards.
+// clearWorkerBusy drops slot-wait markers once a submit had any outcome other
+// than a busy refusal, so the refusal is not reported as the job's state or
+// failure class afterwards. awaitingBusySlot relies on this: worker_busy is
+// set only while the last send of the current identity was refused as busy.
 func clearWorkerBusy(ec *ExecutionContext) {
-	for _, key := range []string{workerBusyNotBeforeKey, "worker_busy"} {
+	for _, key := range []string{workerBusyNotBeforeKey, "worker_busy", slotWaitLogKey} {
 		delete(ec.State, key)
 		delete(ec.Outputs, key)
 	}
@@ -395,6 +404,26 @@ func clearWorkerBusy(ec *ExecutionContext) {
 			delete(ec.Outputs, key)
 		}
 	}
+}
+
+// slotWaitLogKey remembers the worker_busy wait last written to the step log,
+// so one slot wait is one row however many polls it takes.
+const slotWaitLogKey = "slot_wait_logged"
+
+// repeatedSlotWait reports whether a waiting result repeats the worker_busy
+// wait already logged for this step with the same reason, and records a new
+// one. Any other wait ends the run; clearWorkerBusy ends it too.
+func repeatedSlotWait(ec *ExecutionContext, stepIdx int, res StepResult) bool {
+	if res.WaitingCondition != "worker_busy" {
+		delete(ec.State, slotWaitLogKey)
+		return false
+	}
+	key := fmt.Sprintf("%d|%s", stepIdx, res.WaitingReason)
+	if getString(ec.State, slotWaitLogKey) == key {
+		return true
+	}
+	ec.State[slotWaitLogKey] = key
+	return false
 }
 
 // awaitingBusySlot reports that the pending submit was refused as busy and
@@ -440,6 +469,9 @@ func (e *Engine) handleTransientFailure(ec *ExecutionContext, plan *transcode.Pl
 			"retry_count": getInt(ec.State, "retry_count"),
 		}), nil
 	}
+	// A different outcome ends the slot wait; the markers would otherwise
+	// report a failed or retrying job as still waiting for a slot.
+	clearWorkerBusy(ec)
 	appendFailureHistory(ec, phase, string(class), err.Error())
 	retries := getInt(ec.State, "retry_count")
 	attempt := getInt(ec.State, "attempt")

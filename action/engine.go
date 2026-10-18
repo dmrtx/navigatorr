@@ -954,6 +954,7 @@ func (e *Engine) execute(ctx context.Context, inst *store.ActionInstance, ec *Ex
 			outJSON, _ := json.Marshal(res.Outputs)
 
 			e.scheduleReconcile(ec, res.WaitingCondition)
+			repeated := repeatedSlotWait(ec, stepIdx, res)
 			inst.Status = StatusWaitingExternal
 			inst.CurrentStep = stepIdx
 			inst.WaitingReason = res.WaitingReason
@@ -963,16 +964,18 @@ func (e *Engine) execute(ctx context.Context, inst *store.ActionInstance, ec *Ex
 			if saveErr := e.updateInstance(ctx, inst); saveErr != nil {
 				return nil, saveErr
 			}
-			_ = e.deps.Store.LogActionStep(store.ActionStepLog{
-				InstanceID:  inst.ID,
-				StepIndex:   stepIdx,
-				StepName:    step.Name,
-				Primitive:   step.Name,
-				InputsJSON:  string(inpJSON),
-				OutputsJSON: string(outJSON),
-				Status:      string(StepWaitingExternal),
-				DurationMs:  durationMs,
-			})
+			if !repeated {
+				_ = e.deps.Store.LogActionStep(store.ActionStepLog{
+					InstanceID:  inst.ID,
+					StepIndex:   stepIdx,
+					StepName:    step.Name,
+					Primitive:   step.Name,
+					InputsJSON:  string(inpJSON),
+					OutputsJSON: string(outJSON),
+					Status:      string(StepWaitingExternal),
+					DurationMs:  durationMs,
+				})
+			}
 
 			return buildActionResult(inst, totalSteps, ec), nil
 		}

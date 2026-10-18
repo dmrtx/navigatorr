@@ -416,7 +416,7 @@ Before any benchmark the coordinator fetches versioned `WorkerCapabilities` (pro
 
 | Symptom | Meaning | Action |
 |---|---|---|
-| `worker_busy` / `waiting_for_slot` | All worker slots occupied | Wait; retries use bounded backoff and do not burn the transient budget |
+| `worker_busy` / `waiting_for_slot` | All worker slots occupied; nothing was sent to run | Wait, or cancel; the job resubmits by itself after the worker's `Retry-After` (plus one second), for as long as it waits, without using its retry budget |
 | No winner, reason `no_candidate_met_minimum_quality` | Nothing cleared the quality floor | Loosen thresholds deliberately, or keep the original; the engine will not guess |
 | HDR/DV review | Fail-closed on HDR metadata | Expected; do not force SDR thresholds onto HDR |
 | `encoder_capability_unsupported` | Recipe asks for an option the worker FFmpeg lacks | Change the recipe (typed fields only), bump `bundle_version`, `recipe_reload` |
@@ -657,9 +657,10 @@ To prevent unbounded JSON responses when batching entire series or large seasons
 - **Parallelism**: Respects `config.Transcode.MaxParallelJobs` (default: 1). When `max_parallel_jobs: 1`, media files are transcoded serially one after another.
 - **Metric threads**: The worker's `metric_threads` sets libvmaf `n_threads` for each VMAF and CAMBI pass. The default `0` divides the host CPUs among simultaneous metric passes (`metric_concurrency` × `max_parallel_jobs`). Thread count changes wall time only; per-frame scores are identical.
 - **Savings precheck**: For profile-based `transcode_media`, workers that advertise `savings_precheck` receive the effective `min_savings_percent`. Once every candidate sample is encoded, the worker estimates each candidate's final size with the same estimator selection uses. If every candidate is below the minimum, pending quality passes are skipped and the decision is `all_candidates_insufficient_savings`. The outcome matches the post-benchmark guardrail; only the wasted metric time is removed.
-- **Worker busy handling**: If the remote transcode worker returns `worker_busy` (or reaches max parallel slots), the current item transitions to `waiting_for_slot`. Normal background transcodes remain in `running`.
-- **Retry budget safety**: Encountering `worker_busy` does **not** increment item `attempts` or consume the transient retry budget. The batch transitions to `waiting_external` with `waiting_condition: "worker_busy"` and resumes cleanly once worker capacity becomes available.
-- **Single files wait too**: A standalone `transcode_media` or `benchmark_transcode` whose benchmark or encode submit is refused as busy waits in `waiting_external` / `worker_busy` ("Waiting for a free worker slot") instead of failing, whatever its retry budget. The next submit is sent no earlier than the worker's `Retry-After` plus one second, with the same job identity and idempotency key; the wait lasts until a slot frees up or the action is cancelled. `surface_worker_busy` is still accepted on child inputs but no longer changes this behaviour.
+- **Worker busy handling**: When every worker slot is in use, the worker refuses a new benchmark or encode with `worker_busy` and creates nothing. The refused job waits in `waiting_external` with `waiting_condition: "worker_busy"`; in a batch, its item shows as `waiting_for_slot` while the files that already have a slot keep `running`.
+- **Retry budget safety**: Waiting for a slot does **not** increment item `attempts` or consume the transient retry budget, and it has no deadline: it lasts until a slot frees up or the action is cancelled. The next submit is sent no earlier than the worker's `Retry-After` plus one second, with the same job identity and idempotency key.
+- **Single files wait too**: A standalone `transcode_media` or `benchmark_transcode` waits the same way ("Waiting for a free worker slot") instead of failing, whatever its retry budget. `surface_worker_busy` is still accepted on child inputs but no longer changes this behaviour.
+- **Recipe settings**: A recipe's `fallbacks` entry `when: worker_busy` and a `worker_busy` entry in `retry_on` no longer change how busy submit refusals are handled: those always wait for a slot. Both are still accepted, so existing recipes keep validating.
 
 ## Compact audio without another optimizer
 

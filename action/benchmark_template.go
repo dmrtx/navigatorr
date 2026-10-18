@@ -206,6 +206,7 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 	job, err := e.deps.Transcode.BenchmarkSubmit(actx, *req)
 	if err != nil {
 		if isRetryableWorkerPollError(err) {
+			clearWorkerBusy(ec) // This send may have been accepted; it was not refused as busy.
 			res := StepResult{Status: StepWaitingExternal, WaitingCondition: "worker_reconciling", WaitingReason: "Benchmark submit uncertain; reconciling the existing remote identity", Outputs: map[string]any{"benchmark_job_id": req.ID}}
 			if perr := e.persistExecutionState(actx, ec); perr != nil {
 				return StepResult{}, perr
@@ -613,6 +614,8 @@ func (e *Engine) handleBenchmarkTransientFailure(ec *ExecutionContext, plan *tra
 	class := classifyWorkerFailure(err)
 	ec.State["failure_classification"] = string(class)
 	if class != resilience.WorkerBusy {
+		// A different outcome ends the slot wait.
+		clearWorkerBusy(ec)
 		appendFailureHistory(ec, phase, string(class), err.Error())
 	}
 
