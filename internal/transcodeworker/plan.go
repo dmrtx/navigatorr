@@ -311,7 +311,11 @@ func BuildExecutionPlan(plan *transcode.Plan, streams []SourceStream, duration f
 			target, bitrate := transcode.AudioTarget(plan.AudioMode, s.AudioTrack())
 			ep.Streams = append(ep.Streams, StreamAction{Kind: "audio", SourceIndex: s.Index, TypeIndex: s.TypeIndex, Codec: s.Codec, TargetCodec: target, BitrateKbps: bitrate, Disposition: s.Disposition, Title: s.Title, Handler: s.Handler, Channels: s.Channels, Layout: s.Layout})
 			if target != "copy" {
-				ep.Conversions = append(ep.Conversions, transcode.ConversionRecord{StreamType: "audio", StreamIndex: s.TypeIndex, FromCodec: s.Codec, ToCodec: target, Reason: fmt.Sprintf("%s audio requested; AAC at %d kbps, preserving channels and language (lossy)", plan.AudioMode, bitrate)})
+				reason := fmt.Sprintf("%s audio requested; AAC at %d kbps, preserving channels and language (lossy)", plan.AudioMode, bitrate)
+				if transcode.ObjectAudio(s.AudioTrack()) {
+					reason += "; Atmos/DTS:X object and height metadata dropped, channel bed kept"
+				}
+				ep.Conversions = append(ep.Conversions, transcode.ConversionRecord{StreamType: "audio", StreamIndex: s.TypeIndex, FromCodec: s.Codec, ToCodec: target, Reason: reason})
 			}
 		case "subtitle":
 			a, ok := subtitleActions[s.TypeIndex]

@@ -229,6 +229,20 @@ func TestConvertedAudioTitle(t *testing.T) {
 		{"Dolby Digital 5.1 Commentary", "5.1", 6, "Commentary AAC 5.1", true},
 		{"Atmosphere", "stereo", 2, "", false},
 		{"Atmospheric Score", "5.1", 6, "", false},
+		// Compound words, bitrate claims and object-audio spellings.
+		{"Dolby TrueHD/Atmos 7.1", "7.1", 8, "AAC 7.1", true},
+		{"English TrueHD+Atmos 7.1", "7.1", 8, "English AAC 7.1", true},
+		{"TrueHD.Atmos.7.1", "7.1", 8, "AAC 7.1", true},
+		{"English_TrueHD_Atmos", "7.1", 8, "English AAC 7.1", true},
+		{"Dolby TrueHD Atmos 7.1 @ 4000 kbps", "7.1", 8, "AAC 7.1", true},
+		{"DTS-HD MA 5.1 @4.5Mbps", "5.1(side)", 6, "AAC 5.1", true},
+		{"Commentary FLAC 2.0 1536 kb/s", "stereo", 2, "Commentary AAC Stereo", true},
+		{"DTS:X 7.1", "7.1", 8, "AAC 7.1", true},
+		{"English DTS-X", "7.1", 8, "English AAC 7.1", true},
+		{"DTSX 7.1", "7.1", 8, "AAC 7.1", true},
+		{"Atmos/Commentary", "7.1", 8, "Commentary AAC 7.1", true},
+		{"Spanish/Latin TrueHD 7.1", "7.1", 8, "Spanish/Latin AAC 7.1", true},
+		{"Atmos-Mix 7.1", "7.1", 8, "AAC 7.1", true},
 	} {
 		got, ok := convertedAudioTitle(tc.title, tc.layout, tc.channels)
 		if got != tc.want || ok != tc.ok {

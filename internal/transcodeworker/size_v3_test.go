@@ -189,6 +189,14 @@ func TestSizeV3ConvertsLosslessObjectAudio(t *testing.T) {
 	if strings.Join(targets, ",") != "aac/512,copy/0,aac/384" {
 		t.Fatalf("audio targets %v", targets)
 	}
+	if len(ep.Conversions) != 2 {
+		t.Fatalf("conversions %+v", ep.Conversions)
+	}
+	for _, c := range ep.Conversions {
+		if !strings.Contains(c.Reason, "object and height metadata dropped") {
+			t.Fatalf("conversion reason hides the object audio loss: %q", c.Reason)
+		}
+	}
 	args, err := BuildFFmpegArgs(ep, "/media/movies/Movie/Movie.mkv", "/tmp/candidate.mkv", "/tmp/progress")
 	if err != nil {
 		t.Fatal(err)

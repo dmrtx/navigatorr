@@ -307,16 +307,32 @@ var sourceFormatWords = regexp.MustCompile(`(?i)\b(truehd|atmos|dts|flac|l?pcm|a
 var (
 	sourceFormatPhrases = regexp.MustCompile(`(?i)\bdts[-:\s]?(hd|x|es)\b([\s-]+(master\s+audio|ma|high\s+resolution(\s+audio)?|hra)\b)?|\bmaster\s+audio\b|\bhd[\s-]?ma\b|\bhigh\s+resolution(\s+audio)?\b|\bdolby\s+digital(\s+plus)?\b`)
 	sourceFormatTokens  = regexp.MustCompile(`(?i)^(truehd|atmos|dts|flac|l?pcm|alac|mlp|lossless|dolby|uncompressed|hra|stereo|mono|surround|\d+ch|\d(\.\d){1,2}(ch)?|\d+-?bits?|\d+(\.\d+)?k?hz|\d+-?bits?/\d+(\.\d+)?(k?hz)?|\d+/\d+(\.\d+)?(k?hz)?)$`)
+	// sourceBitrate is a bitrate claim ("@ 4000 kbps", "4.5Mbps"), which
+	// describes the source track, not the AAC one.
+	sourceBitrate = regexp.MustCompile(`(?i)@?\s*\b\d+(\.\d+)?\s*[km]?(bps|b/s|bit/s)\b`)
+	// titleJoiners split compound words ("TrueHD/Atmos", "TrueHD+Atmos",
+	// "TrueHD.Atmos.7.1", "English_TrueHD") into their parts.
+	titleJoiners = regexp.MustCompile(`[/+._]+`)
+	bareNumber   = regexp.MustCompile(`^\d+$`)
 )
 
+const titleTrim = "()[]{},;:|/+-·@"
+
 // convertedAudioTitle retitles a track converted to AAC when its title names
-// the format it no longer has: the format and channel words are replaced by
-// the AAC layout ("TrueHD Atmos 7.1" becomes "AAC 7.1", "Director's
-// Commentary DTS-HD MA 5.1" becomes "Director's Commentary AAC 5.1"). Titles
-// that name no source format ("Commentary") are kept; ok is false then.
-// Without a reported layout (PCM in Matroska) the channel count names it.
+// the format it no longer has: the format, channel and bitrate words are
+// replaced by the AAC layout ("TrueHD Atmos 7.1" becomes "AAC 7.1", "Director's
+// Commentary DTS-HD MA 5.1" becomes "Director's Commentary AAC 5.1"), also
+// inside compound words ("English TrueHD+Atmos" becomes "English AAC 7.1").
+// Titles that name no source format ("Commentary") are kept; ok is false
+// then. Without a reported layout (PCM in Matroska) the channel count names
+// it. A label that would still name a source format is dropped (fail safe).
 func convertedAudioTitle(title, layout string, channels int) (string, bool) {
-	if !sourceFormatWords.MatchString(title) {
+	// "_" is a word character, so "English_TrueHD" is checked split.
+	namesFormat := func(s string) bool {
+		s = titleJoiners.ReplaceAllString(s, " ")
+		return sourceFormatWords.MatchString(s) || transcode.ObjectAudioText(s)
+	}
+	if !namesFormat(title) {
 		return "", false
 	}
 	l := strings.ToLower(strings.TrimSpace(layout))
@@ -335,16 +351,31 @@ func convertedAudioTitle(title, layout string, channels int) (string, bool) {
 	case "":
 		format = "AAC"
 	}
+	formatPart := func(part string) bool {
+		return part == "" || bareNumber.MatchString(part) || sourceFormatTokens.MatchString(part)
+	}
+	cleaned := sourceFormatPhrases.ReplaceAllString(sourceBitrate.ReplaceAllString(title, " "), " ")
 	var label []string
-	for _, word := range strings.Fields(sourceFormatPhrases.ReplaceAllString(title, " ")) {
-		core := strings.Trim(word, "()[]{},;:|/+-·")
+	for _, word := range strings.Fields(cleaned) {
+		core := strings.Trim(word, titleTrim)
 		if core == "" || sourceFormatTokens.MatchString(core) {
 			continue
 		}
-		label = append(label, word)
+		parts := titleJoiners.Split(core, -1)
+		var kept []string
+		for _, part := range parts {
+			if part = strings.Trim(part, titleTrim); !formatPart(part) {
+				kept = append(kept, part)
+			}
+		}
+		if len(kept) == len(parts) {
+			label = append(label, word)
+		} else {
+			label = append(label, kept...)
+		}
 	}
-	rest := strings.Trim(strings.Join(label, " "), " ()[]{},;:|/+-·")
-	if rest == "" {
+	rest := strings.Trim(strings.Join(label, " "), " "+titleTrim)
+	if rest == "" || namesFormat(rest) {
 		return format, true
 	}
 	return rest + " " + format, true
