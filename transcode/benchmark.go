@@ -326,6 +326,60 @@ type BenchmarkSampleWindow struct {
 	CenterSeconds   float64 `json:"center_seconds,omitempty"`
 }
 
+// Search extension bounds. The longest a search can run, verification included,
+// never exceeds the largest finite search budget a request may carry.
+const (
+	MaxSearchBudgetSeconds = 3600
+	MinSearchSteadySeconds = 30
+	MaxSearchSteadySeconds = 600
+)
+
+// SearchExtension is the frozen rule for running a finite search past its base
+// budget. After the base budget the worker keeps going only while a unit of
+// work (sample extraction, encode or metric pass) finished within the last
+// SteadySeconds, and stops at MaxSeconds from the search start. A search that
+// has begun verifying its winner on holdout windows may run VerifySeconds
+// beyond that, so a winner found just before the cap is not thrown away
+// unverified.
+type SearchExtension struct {
+	MaxSeconds    int `json:"max_seconds"`
+	SteadySeconds int `json:"steady_seconds"`
+	VerifySeconds int `json:"verify_seconds,omitempty"`
+}
+
+// TotalSeconds is the longest a search can run under the rule, whatever its
+// progress: MaxSeconds plus the verification allowance.
+func (e *SearchExtension) TotalSeconds() int {
+	if e == nil {
+		return 0
+	}
+	return e.MaxSeconds + e.VerifySeconds
+}
+
+// Validate reports whether the extension is a bounded rule over base.
+func (e *SearchExtension) Validate(base int) error {
+	if e == nil {
+		return nil
+	}
+	// Each field is bounded before they are summed, so the sum cannot wrap.
+	if base <= 0 || e.MaxSeconds <= base || e.MaxSeconds > MaxSearchBudgetSeconds || e.VerifySeconds < 0 || e.VerifySeconds > MaxSearchBudgetSeconds || e.TotalSeconds() > MaxSearchBudgetSeconds {
+		return fmt.Errorf("search extension max_seconds must be above the base budget and, with verify_seconds, at most %d", MaxSearchBudgetSeconds)
+	}
+	if e.SteadySeconds < MinSearchSteadySeconds || e.SteadySeconds > MaxSearchSteadySeconds {
+		return fmt.Errorf("search extension steady_seconds must be in [%d,%d]", MinSearchSteadySeconds, MaxSearchSteadySeconds)
+	}
+	return nil
+}
+
+// Clone returns an independent copy.
+func (e *SearchExtension) Clone() *SearchExtension {
+	if e == nil {
+		return nil
+	}
+	c := *e
+	return &c
+}
+
 // BenchmarkRequest defines the parameters sent from the coordinator to the worker to execute a benchmark.
 // It is strictly versioned and does NOT accept candidate output paths or replace_original parameters,
 // making original media mutation completely impossible.
@@ -341,6 +395,9 @@ type BenchmarkRequest struct {
 	SearchBudgetSeconds int       `json:"search_budget_seconds,omitempty"`
 	Mode                string    `json:"mode,omitempty"`
 	SearchDeadline      time.Time `json:"search_deadline,omitzero"`
+	// SearchExtension lets a mode search run past SearchBudgetSeconds while it
+	// keeps completing work, up to a hard cap. Unset keeps the fixed budget.
+	SearchExtension *SearchExtension `json:"search_extension,omitempty"`
 	// Allow8BitTo10Bit is an explicit experiment opt-in, never an automatic
 	// optimization. Quality measurement must use an explicit native-depth model.
 	Allow8BitTo10Bit          bool                        `json:"allow_8bit_to_10bit,omitempty"`
@@ -419,6 +476,9 @@ type BenchmarkAutomaticEvidence struct {
 }
 
 // BenchmarkStatus captures the current execution status and metadata of a benchmark job.
+// SearchWorkerBusy is set when a search stopped at its budget and another job
+// held a worker slot for most of it, so the shortfall says nothing about the
+// source.
 type BenchmarkStatus struct {
 	Automatic           *BenchmarkAutomaticEvidence         `json:"automatic,omitempty"`
 	SearchSeconds       *float64                            `json:"search_seconds,omitempty"`
@@ -426,6 +486,8 @@ type BenchmarkStatus struct {
 	ReasonCode          string                              `json:"reason_code,omitempty"`
 	SearchStartedAt     time.Time                           `json:"search_started_at,omitzero"`
 	SearchBudgetSeconds int                                 `json:"search_budget_seconds,omitempty"`
+	SearchExtension     *SearchExtension                    `json:"search_extension,omitempty"`
+	SearchWorkerBusy    bool                                `json:"search_worker_busy,omitempty"`
 	ComparisonAvailable bool                                `json:"comparison_available,omitempty"`
 	ProtocolVersion     int                                 `json:"protocol_version"`
 	ID                  string                              `json:"id"`
@@ -481,6 +543,9 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 	if req.QualityPruning && !req.Automatic {
 		return errors.New("quality pruning requires automatic search")
 	}
+	if req.SearchExtension != nil && req.Mode == "" {
+		return errors.New("search extension requires a mode search budget")
+	}
 	if req.Compact != nil {
 		if err := req.Compact.Validate(); err != nil {
 			return err
@@ -510,8 +575,11 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 		if req.Mode != "size" && req.Mode != "quality" && req.Mode != "x265_preserve" && req.Mode != "compact" {
 			return errors.New("unsupported processing mode")
 		}
-		if req.SearchBudgetSeconds <= 0 || req.SearchBudgetSeconds > 3600 {
+		if req.SearchBudgetSeconds <= 0 || req.SearchBudgetSeconds > MaxSearchBudgetSeconds {
 			return errors.New("mode search requires finite search budget (1..3600 seconds)")
+		}
+		if err := req.SearchExtension.Validate(req.SearchBudgetSeconds); err != nil {
+			return err
 		}
 		// Size v3 encodes 8-bit sources as Main10; no other mode converts.
 		if req.Allow8BitTo10Bit && !sizeV3 {

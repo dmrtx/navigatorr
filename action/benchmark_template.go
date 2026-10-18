@@ -249,6 +249,10 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 	}, nil
 }
 
+// busySearchBudgetReason stays under the UI's 140-character reason limit so the
+// hint is shown whole.
+const busySearchBudgetReason = "Ran out of time while the worker was busy with other jobs; this says nothing about the file. Try again when it is idle. Original preserved"
+
 func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
 	if !getBool(ec.State, "optimization_enabled") {
 		return StepResult{Status: StepSkipped}, nil
@@ -302,6 +306,13 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 		ec.Outputs["automatic_search"] = st.Automatic
 	}
 	if getString(ec.Inputs, "mode") != "" && st.ReasonCode == "search_budget_exhausted" {
+		if st.SearchWorkerBusy {
+			// The worker shared its slots for most of the search, so the time
+			// ran out on contention, not on this source.
+			ec.State["search_worker_busy"] = true
+			return modeAttention(ec, "search_budget_exhausted", busySearchBudgetReason), nil
+		}
+		delete(ec.State, "search_worker_busy") // a later attempt must not inherit it
 		return modeAttention(ec, "search_budget_exhausted", "Finite search budget exhausted without a reliable conclusion; original preserved"), nil
 	}
 
@@ -1205,6 +1216,10 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 		}
 		req.ModePolicyVersion = policy.Version
 		req.SearchBudgetSeconds = getInt(ec.State, "search_budget_seconds")
+		// An older worker rejects the field, so it keeps the fixed budget.
+		if ext := policy.searchExtension(); ext != nil && caps.SearchBudgetExtension && ext.Validate(req.SearchBudgetSeconds) == nil {
+			req.SearchExtension = ext.Clone()
+		}
 		// Size v3 spends the search budget on x265 only: VideoToolbox
 		// candidates rarely won its smallest-qualifying selection.
 		vtCandidates := policy.Size == nil || policy.Size.VideoToolboxCandidates

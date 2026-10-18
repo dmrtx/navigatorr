@@ -17,6 +17,7 @@ func TestAutomaticSearchFallbackAndIndependentVerification(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			p5 := 93.0
 			record := &BenchmarkRecord{Mode: "quality", ModePolicyVersion: optimization.ModePolicyV2, Automatic: true, Metric: "vmaf", SourceDuration: 100, Quality: &transcode.BenchmarkQualityConfig{VMAF: &transcode.BenchmarkQualityThresholds{Model: "v1_1080p_3h", Target: 96, Minimum: 95, P5Minimum: &p5, GuardrailEnforcement: "reject"}}}
+			record.searchBudget = newSearchBudget(time.Now(), 600, testSearchExtension())
 			for i, start := range []float64{15, 45, 75, 30, 60} {
 				record.Samples = append(record.Samples, transcode.BenchmarkSampleWindow{Index: i, StartSeconds: start, DurationSeconds: 10})
 			}
@@ -58,6 +59,11 @@ func TestAutomaticSearchFallbackAndIndependentVerification(t *testing.T) {
 			err := runner.runAutomaticCandidates(context.Background(), nil, record, evidence, "", vcs, mediainspect.DetailedReport{DurationSec: 100, Video: []mediainspect.DetailedStream{{BitDepth: 8, FPS: 25}}}, 100000, time.Time{}, progress)
 			if err != nil {
 				t.Fatal(err)
+			}
+			// Only a search that found a winner to verify earns the verification
+			// allowance of its budget.
+			if got, want := record.searchBudget.verifying, scenario != "all_rejected"; got != want {
+				t.Fatalf("verification reached the search budget: %v, want %v", got, want)
 			}
 			if scenario == "all_rejected" {
 				if evidence.Decision.Winner != nil || evidence.Automatic.VerifiedSamples != 0 {

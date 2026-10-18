@@ -36,8 +36,11 @@ func TestSizeModePolicyV3Snapshot(t *testing.T) {
 	// Pinned: any change to what v3 freezes must change this digest, so an
 	// operation frozen under an earlier v3 snapshot never runs a new rule.
 	// The previous v3 snapshot copied lossless Atmos/DTS:X (digest
-	// sha256:0b92adbc...0177f) and was never deployed.
-	if p.Digest != "sha256:c7a085119dcbdfca077be0f37cb27f7aff8158afc038a32a1b5061af63a26ca3" {
+	// sha256:0b92adbc...0177f) and was never deployed. Adding the search
+	// extension gave new snapshots the digest below; snapshots frozen before it
+	// have no such field and still re-hash to sha256:c7a08511...26ca3 (see
+	// TestSizeModePolicyV3FreezesSearchExtension).
+	if p.Digest != "sha256:7239d124b7e3d2f00bed145aba8b4d2bf1aab66ad93a6da964a3281a153743ad" {
 		t.Fatalf("size v3 snapshot digest changed: %s", p.Digest)
 	}
 	// The quality floor is v2's, unchanged: VMAF mean 88, p5 84, worst 5 s

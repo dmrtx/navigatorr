@@ -25,7 +25,17 @@ func seasonChildTemplate(spent float64) ActionTemplate {
 
 func seedModeSeason(t *testing.T, st *store.Store, id, mode string, files int, status string) *ExecutionContext {
 	t.Helper()
+	return seedModeSeasonWithPolicy(t, st, id, mode, files, status, nil)
+}
+
+// seedModeSeasonWithPolicy starts the season from an already frozen policy,
+// such as one frozen before search extensions existed.
+func seedModeSeasonWithPolicy(t *testing.T, st *store.Store, id, mode string, files int, status string, frozen *ModePolicySnapshot) *ExecutionContext {
+	t.Helper()
 	ec := &ExecutionContext{InstanceID: id, Inputs: map[string]any{"mode": mode}, State: map[string]any{}}
+	if frozen != nil {
+		ec.State["mode_policy"] = *frozen
+	}
 	if _, err := freezeModePolicy(ec); err != nil {
 		t.Fatal(err)
 	}
@@ -39,10 +49,23 @@ func seedModeSeason(t *testing.T, st *store.Store, id, mode string, files int, s
 }
 
 func TestModeBatchAdmitsWholeSeasonWithTwoSlots(t *testing.T) {
+	// A search that stops at its hard cap reports a hair over it. Under the
+	// extended policy that cap is 3000 s (with verification), so the
+	// reservation is too.
+	runWholeSeason(t, nil, 3000.006, 3000)
+}
+
+func TestModeBatchLegacyPolicyKeepsTheFixedReservation(t *testing.T) {
+	legacy := legacySizeSnapshot(t)
+	runWholeSeason(t, &legacy, 600.006, 600)
+}
+
+func runWholeSeason(t *testing.T, frozen *ModePolicySnapshot, spent, settledAt float64) {
+	t.Helper()
 	st := setupTestStore(t)
 	e := NewEngine(EngineDeps{Store: st, Config: &config.Config{Transcode: config.TranscodeConfig{MaxParallelJobs: 2}}})
-	e.RegisterTemplate(seasonChildTemplate(600.006))
-	ec := seedModeSeason(t, st, "season", "size", 10, StatusWaitingExternal)
+	e.RegisterTemplate(seasonChildTemplate(spent))
+	ec := seedModeSeasonWithPolicy(t, st, "season", "size", 10, StatusWaitingExternal, frozen)
 	for round := 0; round < 20; round++ {
 		if _, err := e.Resume(context.Background(), ec.InstanceID, "", nil); err != nil {
 			t.Fatal(err)
@@ -67,7 +90,7 @@ func TestModeBatchAdmitsWholeSeasonWithTwoSlots(t *testing.T) {
 				t.Fatalf("expected one reservation per file, got %d", len(entries))
 			}
 			for key, entry := range entries {
-				if entry.Consumed == nil || *entry.Consumed != 600 || entry.Provisional {
+				if entry.Consumed == nil || *entry.Consumed != settledAt || entry.Reserved != settledAt || entry.Provisional {
 					t.Fatalf("overshooting search not settled at its reservation: %s %+v", key, entry)
 				}
 			}
@@ -103,7 +126,7 @@ func TestModeBatchWaitingDecisionHoldsNoBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.settleModeSearches(ec, []store.TranscodeBatchItem{item})
-	if entry := modeBudgetEntries(ec)[key]; entry.Consumed != nil || entry.Reserved != 600 {
+	if entry := modeBudgetEntries(ec)[key]; entry.Consumed != nil || entry.Reserved != 3000 {
 		t.Fatalf("resumed search lost its reservation: %+v", entry)
 	}
 	child.Status, child.StateJSON = StatusWaitingDecision, toJSON(map[string]any{"benchmark_submitted": true, "benchmark_search_seconds": 120.5, "reason_code": "search_budget_exhausted"})
