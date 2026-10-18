@@ -10,6 +10,7 @@ import (
 	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/optimization"
+	"github.com/jakenesler/navigatorr/transcode/quality"
 	"github.com/jakenesler/navigatorr/transcode/recipe"
 )
 
@@ -45,8 +46,8 @@ func (e *Engine) applySharedBatchCalibration(ec *ExecutionContext, plan *transco
 		return fmt.Errorf("frozen profile has no supported x265 quality policy")
 	}
 	allowed := false
-	for _, quality := range profile.Optimization.Search.QualityValues {
-		if quality == calibration.qualityFor(itemKey) {
+	for _, value := range profile.Optimization.Search.QualityValues {
+		if value == calibration.qualityFor(itemKey) {
 			allowed = true
 			break
 		}
@@ -102,8 +103,9 @@ func (e *Engine) applySharedBatchCalibration(ec *ExecutionContext, plan *transco
 
 // sharedCalibrationSourceSupported reports whether a source is in the class
 // the shared VMAF/CAMBI calibration measures: one programme video stream
-// (cover art does not count), 8-bit SDR, below 45 fps.
+// (cover art does not count), 8-bit SDR, below quality.HFRMinFPS: shared
+// calibration was never run on decimated HFR measurements.
 func sharedCalibrationSourceSupported(rep *mediainspect.DetailedReport) bool {
 	video := rep.MainVideo()
-	return len(video) == 1 && video[0].BitDepth == 8 && video[0].FPS > 0 && video[0].FPS < 45 && !isSourceHDRorDV(rep)
+	return len(video) == 1 && video[0].BitDepth == 8 && video[0].FPS > 0 && video[0].FPS < quality.HFRMinFPS && !isSourceHDRorDV(rep)
 }

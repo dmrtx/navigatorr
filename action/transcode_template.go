@@ -184,7 +184,11 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	}
 	gateRep := coverArtGateReport(&rep, func() bool { return e.workerSupportsCoverArt(ctx) })
 	if modeSnapshot != nil {
-		reason := modeSourceReason(modeSnapshot.Mode, gateRep)
+		hfrSupported, err := (&hfrQualitySupport{e: e}).forSource(ctx, gateRep)
+		if err != nil {
+			return hfrCapabilityLookupResult(err), nil
+		}
+		reason := modeSourceReason(modeSnapshot.Mode, gateRep, hfrSupported)
 		if reason != "" {
 			ec.State["skip_transcode"] = true
 			ec.State["reason_code"] = reason

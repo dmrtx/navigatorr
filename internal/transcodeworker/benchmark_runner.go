@@ -87,12 +87,16 @@ type BenchmarkExecutionEvidence struct {
 	SourcePixelFormat string                                `json:"source_pixel_format"`
 	SourceResolution  string                                `json:"source_resolution"`
 	SourceFPS         float64                               `json:"source_fps,omitempty"`
-	Quality           []CandidateQualityEvidence            `json:"quality,omitempty"`
-	ReferenceSamples  []BenchmarkSampleRef                  `json:"reference_samples"`
-	CandidateSamples  []BenchmarkCandidateSampleResult      `json:"candidate_samples"`
-	MetricSamples     []BenchmarkMetricSampleResult         `json:"metric_samples,omitempty"`
-	CandidateMetrics  []BenchmarkCandidateMetricAggregate   `json:"candidate_metrics,omitempty"`
-	Decision          *transcode.BenchmarkDecision          `json:"decision,omitempty"`
+	SourceFieldOrder  string                                `json:"source_field_order,omitempty"`
+	// VMAFTemporalDecimation records the frame decimation used for modeled
+	// VMAF (2 for HFR sources) so sampled evidence stays auditable.
+	VMAFTemporalDecimation int                                 `json:"vmaf_temporal_decimation,omitempty"`
+	Quality                []CandidateQualityEvidence          `json:"quality,omitempty"`
+	ReferenceSamples       []BenchmarkSampleRef                `json:"reference_samples"`
+	CandidateSamples       []BenchmarkCandidateSampleResult    `json:"candidate_samples"`
+	MetricSamples          []BenchmarkMetricSampleResult       `json:"metric_samples,omitempty"`
+	CandidateMetrics       []BenchmarkCandidateMetricAggregate `json:"candidate_metrics,omitempty"`
+	Decision               *transcode.BenchmarkDecision        `json:"decision,omitempty"`
 }
 
 type CandidateQualityEvidence = transcode.BenchmarkCandidateQualityEvidence
@@ -343,8 +347,23 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		return fmt.Errorf("source media %s has %d video streams; benchmark requires exactly 1 (fail closed)", record.Source, len(mainVideo))
 	}
 	sourceVideo := mainVideo[0]
-	if record.Quality != nil && record.Quality.VMAF != nil && record.Quality.VMAF.Model != "" && sourceVideo.FPS >= 45 {
-		return fmt.Errorf("VMAF model %q is non-HFR and source FPS %.3f requires an HFR model (fail closed)", record.Quality.VMAF.Model, sourceVideo.FPS)
+	// HFR sources are measured on a decimated pair, only on a worker that
+	// proved it; faster or interlaced HFR sources have no such path. Checked
+	// before any sample is extracted. Unknown timing fails per sample later.
+	if record.Quality != nil && record.Quality.VMAF != nil && record.Quality.VMAF.Model != "" && sourceVideo.FPS > 0 {
+		factor, err := quality.TemporalDecimationForStream(sourceVideo.FPS, sourceVideo.FieldOrder)
+		if err != nil {
+			return fmt.Errorf("quality_vmaf_hfr_model_unavailable: VMAF model %q cannot measure this source: %v (fail closed)", record.Quality.VMAF.Model, err)
+		}
+		if factor > 1 {
+			caps, err := probeWorkerCapabilitiesWithScratch(ctx, w.ffmpegPath, filepath.Join(w.cfg.StateDir, "quality-probe-scratch"), true)
+			if err != nil {
+				return fmt.Errorf("probing worker capabilities: %w (fail closed)", err)
+			}
+			if !caps.SupportsHFRQuality() {
+				return fmt.Errorf("quality_vmaf_hfr_model_unavailable: worker has no proven decimated VMAF path for %.3f FPS (fail closed)", sourceVideo.FPS)
+			}
+		}
 	}
 
 	// HDR / Dolby Vision rejection: automatic benchmark optimization is strictly SDR-only
@@ -426,6 +445,7 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		SourcePixelFormat: sourceVideo.PixelFormat,
 		SourceResolution:  resStr,
 		SourceFPS:         sourceVideo.FPS,
+		SourceFieldOrder:  sourceVideo.FieldOrder,
 		ReferenceSamples:  make([]BenchmarkSampleRef, 0, len(record.Samples)),
 		CandidateSamples:  make([]BenchmarkCandidateSampleResult, 0, len(record.Candidates)*len(record.Samples)),
 	}
@@ -1059,20 +1079,33 @@ func BuildVMAFArgs(candPath, refPath, logPath string) []string {
 // encode upconverted for measurement is incorrectly evaluated as 10-bit.
 // framesync must end at the shorter input without repeats.
 // threads > 0 sets libvmaf n_threads; zero keeps the libvmaf default.
-func BuildVMAFModelArgs(candPath, refPath, logPath string, model quality.VMAFModel, encodedBitDepth, threads int) ([]string, error) {
+// decimation (quality.TemporalDecimation) drops the same frame indices from
+// both inputs; both are then restamped by index (quality.MetricPairInputs).
+func BuildVMAFModelArgs(candPath, refPath, logPath string, model quality.VMAFModel, encodedBitDepth, decimation, threads int) ([]string, error) {
 	if model.ID == "" || model.LibvmafModel == "" || model.MeasurementBitDepth != 10 || (encodedBitDepth != 8 && encodedBitDepth != 10) {
 		return nil, fmt.Errorf("unsupported VMAF model measurement contract")
 	}
-	filter := fmt.Sprintf("[0:v]format=yuv420p10le,setpts=PTS-STARTPTS[d];[1:v]format=yuv420p10le,setpts=PTS-STARTPTS[r];[d][r]libvmaf=model='version=%s\\:cambi.enc_bitdepth=%d':log_fmt=json:log_path=%s:shortest=1:repeatlast=0%s", model.LibvmafModel, encodedBitDepth, escapeFFmpegFilterPath(logPath), libvmafThreadsOption(threads))
+	inputs, err := quality.MetricPairInputs(decimation)
+	if err != nil {
+		return nil, err
+	}
+	filter := inputs + vmafModelFilter(model, encodedBitDepth, logPath) + libvmafThreadsOption(threads)
 	return []string{"-nostdin", "-nostats", "-i", candPath, "-i", refPath, "-filter_complex", filter, "-f", "null", "-"}, nil
 }
 
 // BuildCAMBIArgs runs a separate, bounded full-reference pass. VMAF v1 has an
 // internal CAMBI feature, so adding another to that invocation is unsafe on
-// several libvmaf builds.
+// several libvmaf builds. CAMBI is spatial and measures every frame.
 func BuildCAMBIArgs(candPath, refPath, logPath string, encodedBitDepth, threads int) []string {
-	filter := fmt.Sprintf("[0:v]format=yuv420p10le,setpts=PTS-STARTPTS[d];[1:v]format=yuv420p10le,setpts=PTS-STARTPTS[r];[d][r]libvmaf=model=version=vmaf_v0.6.1:feature='name=cambi\\:full_ref=true\\:enc_bitdepth=%d':log_fmt=json:log_path=%s:shortest=1:repeatlast=0%s", encodedBitDepth, escapeFFmpegFilterPath(logPath), libvmafThreadsOption(threads))
+	inputs, _ := quality.MetricPairInputs(1)
+	filter := inputs + fmt.Sprintf("libvmaf=model=version=vmaf_v0.6.1:feature='name=cambi\\:full_ref=true\\:enc_bitdepth=%d':log_fmt=json:log_path=%s:shortest=1:repeatlast=0%s", encodedBitDepth, escapeFFmpegFilterPath(logPath), libvmafThreadsOption(threads))
 	return []string{"-nostdin", "-nostats", "-i", candPath, "-i", refPath, "-filter_complex", filter, "-f", "null", "-"}
+}
+
+// vmafModelFilter is the libvmaf invocation shared by measurement and the
+// capability probes, so a probe executes the production model options.
+func vmafModelFilter(model quality.VMAFModel, encodedBitDepth int, logPath string) string {
+	return fmt.Sprintf("libvmaf=model='version=%s\\:cambi.enc_bitdepth=%d':log_fmt=json:log_path=%s:shortest=1:repeatlast=0", model.LibvmafModel, encodedBitDepth, escapeFFmpegFilterPath(logPath))
 }
 
 func libvmafThreadsOption(threads int) string {

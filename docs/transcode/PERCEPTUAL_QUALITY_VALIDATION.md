@@ -47,7 +47,55 @@ change. The worker executes a synthetic probe before claiming support for the
 model or CAMBI. A worker that exposes `libvmaf` but cannot initialize the model
 is reported as unsupported. Explicit VMAF requests fail closed; an explicit
 `metric: auto` may choose SSIM when the model is unavailable or the source is
-unverified native 10-bit or HFR. Non-HFR VMAF v1 is rejected for sources at 45 FPS or above.
+unverified native 10-bit or HFR on a worker without the decimation capability.
+
+### Frame pairing
+
+Every VMAF and CAMBI graph restamps both inputs by frame index
+(`settb=AVTB,setpts=N`) before libvmaf. libvmaf pairs frames by timestamp, and
+lossless sample extraction rounds both samples to a 1 ms timebase; at 59.94 FPS
+a source and candidate frame can land 1 ms apart and would otherwise be paired
+with a neighbour. The final check still requires equal frame counts and
+relative timestamps within a quarter frame before it measures.
+
+### High-frame-rate sources (45–61 FPS)
+
+The VMAF models were not trained on 50/59.94/60 FPS motion. Sources from 45 up
+to 61 FPS are therefore measured on a frame-exact 2:1 temporal decimation: both
+reference and candidate keep frame indices 0, 2, 4, ... (`select=not(mod(n\,2))`)
+and are then restamped by index, so every pair stays aligned and the model sees
+25/29.97/30 FPS motion. Sources above 61 FPS, with missing timing, or
+interlaced (`field_order` tt, bb, tb or bt) in the HFR class still fail
+closed: an interlaced stream may report its field rate, and dropping every
+second picture would keep one field parity. VMAF evidence records
+`temporal_decimation` and `measured_fps`; window lengths keep their configured
+duration in seconds, and frame locations map back to the source timeline. A
+`max_frames_below_threshold` limit is compared with the measured count
+multiplied by the decimation factor, so it keeps its meaning in source time.
+CAMBI is a purely spatial per-frame metric and keeps every frame: decimating
+it would only skip half of the frames its peak guardrail inspects.
+
+A worker advertises `quality.hfr_temporal_decimation: 2` only after running
+the production decimated model graph (including `cambi.enc_bitdepth`) on a
+synthetic, temporally varying 48 FPS pair: the aligned pair must score near
+the top and a candidate one source frame late must score clearly lower, so the
+probe proves index alignment and not only the frame count. The probe has its
+own timeout; a slow probe withholds HFR only, never native-rate VMAF/CAMBI.
+Without the capability the worker reports `quality.hfr_probe_reason`, and a
+timed-out probe is retried on the next capability lookup.
+
+Coordinators treat HFR as unavailable on workers without the capability, so a
+coordinator never dispatches HFR work a worker would reject. Automatic modes
+skip such sources with `hfr_quality_unavailable` (distinct from
+`unsupported_source`: a capable worker clears it, a new goal does not). A
+transient capability lookup failure waits for the worker instead of skipping.
+Explicit benchmarks and recipe searches with a VMAF model follow the same
+capability gate. Deploy the worker before relying on HFR support. Shared
+batch calibration still requires sources below 45 FPS.
+
+Decimation reuses the non-HFR model's calibration; it is not an HFR-trained
+model. Scores for HFR sources are comparable with 25/30 FPS content, not with
+an HFR model, and thresholds were not separately calibrated for HFR libraries.
 
 `guardrail_enforcement: observe` records p5, the worst sample-local window,
 and frame counts without changing candidate selection. `reject` makes a
@@ -91,7 +139,7 @@ status exposes `quality_evidence`. Action results carry these as
 available through action detail when the compact MCP response omits them.
 
 The current implementation supports the standard 1080p 3H VMAF v1 model.
-Other VMAF v1 models, including HFR and 4K, require registry entries and
+Other VMAF v1 models, including HFR-trained and 4K ones, require registry entries and
 their own executable capability probes. Full-file validation is intentionally
 not offered because per-frame JSON logs are bounded.
 

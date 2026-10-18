@@ -48,3 +48,19 @@ func TestMainVideoExcludesAttachedPictures(t *testing.T) {
 		t.Fatal("nil report must have no streams")
 	}
 }
+
+func TestInspectDetailedRecordsFieldOrder(t *testing.T) {
+	dir := t.TempDir()
+	media := filepath.Join(dir, "field.mkv")
+	if err := os.WriteFile(media, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	probe := `{"streams":[{"index":0,"codec_type":"video","codec_name":"mpeg2video","pix_fmt":"yuv420p","width":1920,"height":1080,"avg_frame_rate":"50/1","field_order":"tt"}],"format":{"format_name":"matroska","duration":"10","size":"100"}}`
+	rep, err := InspectDetailed(context.Background(), createMockFFprobe(t, dir, probe), media)
+	if err != nil || len(rep.MainVideo()) != 1 {
+		t.Fatalf("inspect: %v", err)
+	}
+	if got := rep.MainVideo()[0]; got.FieldOrder != "tt" || got.FPS != 50 {
+		t.Fatalf("field order not recorded: %+v", got)
+	}
+}

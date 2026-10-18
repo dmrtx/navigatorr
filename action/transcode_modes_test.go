@@ -119,11 +119,11 @@ func TestModeMixedCandidatesBudgetAndMain10(t *testing.T) {
 }
 func TestModeSourceEligibility(t *testing.T) {
 	report := &mediainspect.DetailedReport{Video: []mediainspect.DetailedStream{{Codec: "hevc", BitDepth: 10, FPS: 24}}}
-	if modeSourceReason("x265_preserve", report) != "already_target_codec" || modeSourceReason("size", report) != "" {
+	if modeSourceReason("x265_preserve", report, false) != "already_target_codec" || modeSourceReason("size", report, false) != "" {
 		t.Fatal("HEVC routing wrong")
 	}
 	report.Video[0].BitDepth = 12
-	if modeSourceReason("quality", report) != "unsupported_source" {
+	if modeSourceReason("quality", report, false) != "unsupported_source" {
 		t.Fatal("unsupported class admitted")
 	}
 }
