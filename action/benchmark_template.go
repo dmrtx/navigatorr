@@ -97,6 +97,7 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 				ec.State["benchmark_submitted"] = true
 				ec.State["benchmark_job_id"] = id
 				delete(ec.State, "benchmark_reconcile")
+				delete(ec.State, benchmarkRejectedKey)
 				clearWorkerBusy(ec)
 				if perr := e.persistExecutionState(ctx, ec); perr != nil {
 					return StepResult{}, perr
@@ -190,6 +191,7 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 	ec.State["benchmark_request"] = req
 	ec.State["benchmark_request_digest"] = digest
 	ec.State["benchmark_reconcile"] = true
+	delete(ec.State, benchmarkRejectedKey)
 	if caps.CapabilityFingerprint != "" {
 		ec.State["capability_fingerprint"] = caps.CapabilityFingerprint
 	}
@@ -206,6 +208,7 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 	job, err := e.deps.Transcode.BenchmarkSubmit(actx, *req)
 	if err != nil {
 		if isRetryableWorkerPollError(err) {
+			clearWorkerBusy(ec) // This send may have been accepted; it was not refused as busy.
 			res := StepResult{Status: StepWaitingExternal, WaitingCondition: "worker_reconciling", WaitingReason: "Benchmark submit uncertain; reconciling the existing remote identity", Outputs: map[string]any{"benchmark_job_id": req.ID}}
 			if perr := e.persistExecutionState(actx, ec); perr != nil {
 				return StepResult{}, perr
@@ -213,6 +216,7 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 			return res, nil
 		}
 		delete(ec.State, "benchmark_reconcile")
+		ec.State[benchmarkRejectedKey] = true // A definitive rejection did not accept the job.
 		plan := getPlan(ec.State["plan"])
 		res, herr := e.handleBenchmarkTransientFailure(ec, plan, err, "benchmark_submit")
 		if herr != nil {
@@ -227,6 +231,7 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 	}
 
 	delete(ec.State, "benchmark_reconcile")
+	delete(ec.State, benchmarkRejectedKey)
 	clearWorkerBusy(ec)
 	ec.State["benchmark_submitted"] = true
 	ec.State["benchmark_job_id"] = job.ID
@@ -624,6 +629,8 @@ func (e *Engine) handleBenchmarkTransientFailure(ec *ExecutionContext, plan *tra
 	class := classifyWorkerFailure(err)
 	ec.State["failure_classification"] = string(class)
 	if class != resilience.WorkerBusy {
+		// A different outcome ends the slot wait.
+		clearWorkerBusy(ec)
 		appendFailureHistory(ec, phase, string(class), err.Error())
 	}
 

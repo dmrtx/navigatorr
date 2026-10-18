@@ -62,7 +62,7 @@ func (e *Engine) prepareRemoteRetry(ctx context.Context, inst *store.ActionInsta
 		}
 		retry := getInt(ec.State, "manual_retry_count") + 1
 		appendFailureHistory(ec, "manual_retry", class, fmt.Sprintf("confirmed terminal worker job %s; allocating attempt %d", jobID, retry))
-		for _, key := range []string{"recovery_required", "worker_error", "finalization_retry_count", "next_finalization_at", "transcode_submitted", "transcode_reconcile", "transcode_done", "transcode_status", "transcode_phase", "candidate_path", "output_path", "idempotency_key", "worker_completed_at", "reconciled_at", "reconcile_lag_ms", "next_poll_at", "retry_not_before", workerBusyNotBeforeKey, "worker_busy", "validation", "result", "original_intact", "original_integrity", "progress", "speed", "fps", "last_known_progress", "last_progress_at", "worker_heartbeat_at", "failure_classification", "queue_duration_ms", "encode_duration_ms", "validation_duration_ms", "worker_validation_duration_ms", "coordinator_validation_duration_ms", "worker_wall_duration_ms"} {
+		for _, key := range []string{"recovery_required", "worker_error", "finalization_retry_count", "next_finalization_at", "transcode_submitted", "transcode_reconcile", "transcode_done", "transcode_status", "transcode_phase", "candidate_path", "output_path", "idempotency_key", "worker_completed_at", "reconciled_at", "reconcile_lag_ms", "next_poll_at", "retry_not_before", workerBusyNotBeforeKey, "worker_busy", slotWaitLogKey, transcodeRejectedKey, "validation", "result", "original_intact", "original_integrity", "progress", "speed", "fps", "last_known_progress", "last_progress_at", "worker_heartbeat_at", "failure_classification", "queue_duration_ms", "encode_duration_ms", "validation_duration_ms", "worker_validation_duration_ms", "coordinator_validation_duration_ms", "worker_wall_duration_ms"} {
 			delete(ec.State, key)
 			delete(ec.Outputs, key)
 		}
@@ -110,7 +110,7 @@ func (e *Engine) prepareRemoteRetry(ctx context.Context, inst *store.ActionInsta
 			return resume, lerr
 		}
 		retry := getInt(ec.State, "benchmark_manual_retry_count") + 1
-		for _, key := range []string{"benchmark_submitted", "benchmark_reconcile", "benchmark_done", "benchmark_status", "benchmark_decision", "benchmark_request", "benchmark_request_digest", "benchmark_retry_not_before", workerBusyNotBeforeKey, "worker_busy", "next_poll_at", "failure_classification"} {
+		for _, key := range []string{"benchmark_submitted", "benchmark_reconcile", "benchmark_done", "benchmark_status", "benchmark_decision", "benchmark_request", "benchmark_request_digest", "benchmark_retry_not_before", workerBusyNotBeforeKey, "worker_busy", slotWaitLogKey, benchmarkRejectedKey, "next_poll_at", "failure_classification"} {
 			delete(ec.State, key)
 			delete(ec.Outputs, key)
 		}
