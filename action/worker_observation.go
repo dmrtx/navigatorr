@@ -54,6 +54,10 @@ func (e *Engine) WorkerObservation(ctx context.Context) transcode.WorkerObservat
 		if errors.As(err, &admission) && admission.Connected {
 			out.Reachable = true
 			out.Message = "Connected, but media storage or encoder checks failed. New jobs are blocked."
+			out.AdmissionNote = transcode.AdmissionNoteDeepChecksFailed
+			if admission.TimedOut {
+				out.AdmissionNote = transcode.AdmissionNoteDeepChecksTimeout
+			}
 		}
 	}
 	if !out.Reachable {

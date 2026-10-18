@@ -401,15 +401,15 @@ func annotateAdmission(result map[string]any, deep bool) {
 		return
 	}
 	if !deep {
-		result["admission_note"] = "can_accept_jobs reflects worker readiness only. Job submission also checks media storage and encoders; use worker_health or check_deep=true for that full gate."
+		result["admission_note"] = transcode.AdmissionNoteReadinessOnly
 		return
 	}
 	if doctor, _ := result["doctor"].(map[string]any); doctor != nil && doctor["status"] != "ok" {
 		result["admission_blocked"] = true
-		result["admission_note"] = "The worker is ready, but its deep checks failed, and job submission runs the same checks: transcode jobs will be refused until the doctor error is fixed."
+		result["admission_note"] = transcode.AdmissionNoteDeepChecksFailed
 		if doctor["error_class"] == "diagnostic_timeout" {
 			result["admission_blocked"] = nil
-			result["admission_note"] = "The deep checks timed out, so job admission is unknown; use worker_health for the submit gate."
+			result["admission_note"] = transcode.AdmissionNoteDeepChecksTimeout
 		}
 	}
 }
