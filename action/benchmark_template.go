@@ -97,6 +97,7 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 				ec.State["benchmark_submitted"] = true
 				ec.State["benchmark_job_id"] = id
 				delete(ec.State, "benchmark_reconcile")
+				clearWorkerBusy(ec)
 				if perr := e.persistExecutionState(ctx, ec); perr != nil {
 					return StepResult{}, perr
 				}
@@ -113,6 +114,11 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 	// benchmark that was already accepted/uncertain is reconciled above and is
 	// never blocked from being tracked. Admission is evaluated before any worker
 	// capability probe or request build.
+	// A worker that refused a submit as busy asked for a pause; only new
+	// writes wait for it, reconciliation above is a read.
+	if res, waiting := e.workerBusyBackoff(ec, benchmarkSlotWaitReason); waiting {
+		return res, nil
+	}
 	lease, blockedRes, handled := e.beginAdmission(ctx, ec, "benchmark")
 	if handled {
 		return blockedRes, nil
@@ -221,6 +227,7 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 	}
 
 	delete(ec.State, "benchmark_reconcile")
+	clearWorkerBusy(ec)
 	ec.State["benchmark_submitted"] = true
 	ec.State["benchmark_job_id"] = job.ID
 	ec.State["benchmark_request_digest"] = digest
@@ -600,10 +607,14 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 	}
 }
 
+const benchmarkSlotWaitReason = "Waiting for a free worker slot to start the benchmark"
+
 func (e *Engine) handleBenchmarkTransientFailure(ec *ExecutionContext, plan *transcode.Plan, err error, phase string) (StepResult, error) {
 	class := classifyWorkerFailure(err)
 	ec.State["failure_classification"] = string(class)
-	appendFailureHistory(ec, phase, string(class), err.Error())
+	if class != resilience.WorkerBusy {
+		appendFailureHistory(ec, phase, string(class), err.Error())
+	}
 
 	retries := getInt(ec.State, "benchmark_retry_count")
 	attempt := getInt(ec.State, "benchmark_attempt")
@@ -611,18 +622,11 @@ func (e *Engine) handleBenchmarkTransientFailure(ec *ExecutionContext, plan *tra
 		attempt = 1
 	}
 
-	if class == resilience.WorkerBusy && (getBool(ec.Inputs, "surface_worker_busy") || getBool(ec.State, "surface_worker_busy")) {
-		return StepResult{
-			Status:           StepWaitingExternal,
-			WaitingCondition: "worker_busy",
-			WaitingReason:    "Worker is busy; waiting for benchmark slot",
-			Outputs: map[string]any{
-				"benchmark_attempt":      attempt,
-				"benchmark_retry_count":  retries,
-				"failure_classification": string(class),
-				"worker_busy":            true,
-			},
-		}, nil
+	if class == resilience.WorkerBusy {
+		return e.workerBusyWait(ec, err, phase, benchmarkSlotWaitReason, map[string]any{
+			"benchmark_attempt":     attempt,
+			"benchmark_retry_count": retries,
+		}), nil
 	}
 	var res transcode.ResiliencePlan
 	if plan != nil {

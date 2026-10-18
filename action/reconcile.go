@@ -274,7 +274,7 @@ func (e *Engine) scheduleReconcile(ec *ExecutionContext, condition string) {
 		delete(ec.State, "worker_poll_failures")
 	}
 	next := e.now().Add(delay)
-	for _, key := range []string{"retry_not_before", "benchmark_retry_not_before"} {
+	for _, key := range []string{"retry_not_before", "benchmark_retry_not_before", workerBusyNotBeforeKey} {
 		if at, err := time.Parse(time.RFC3339Nano, getString(ec.State, key)); err == nil && at.After(next) {
 			next = at
 		}

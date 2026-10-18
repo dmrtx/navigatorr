@@ -97,8 +97,10 @@ template. Resume/reconciliation may supply a decision, but cannot inject or
 replace inputs. Batch pause/resume/cancel control lives in durable `State`, so
 `InputsJSON` remains the exact action-creation request. This keeps encoder
 settings, size guardrails and validation expectations tied to the same immutable
-action configuration that produced the resolved Plan. Batch children receive
-`surface_worker_busy` at creation and are resumed without extra inputs.
+action configuration that produced the resolved Plan. Batch children are
+resumed without extra inputs; every transcode action waits for a free worker
+slot on `worker_busy`, so the `surface_worker_busy` input they still receive
+no longer changes behaviour.
 Reusing an active action's idempotency key is accepted only when the complete
 immutable input payload matches; a changed profile or guardrail fails instead
 of silently returning an action created with different settings.
