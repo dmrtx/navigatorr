@@ -326,8 +326,8 @@ type BenchmarkSampleWindow struct {
 	CenterSeconds   float64 `json:"center_seconds,omitempty"`
 }
 
-// Search extension bounds. The cap never exceeds the largest finite search
-// budget a request may carry.
+// Search extension bounds. The longest a search can run, verification included,
+// never exceeds the largest finite search budget a request may carry.
 const (
 	MaxSearchBudgetSeconds = 3600
 	MinSearchSteadySeconds = 30
@@ -337,10 +337,23 @@ const (
 // SearchExtension is the frozen rule for running a finite search past its base
 // budget. After the base budget the worker keeps going only while a unit of
 // work (sample extraction, encode or metric pass) finished within the last
-// SteadySeconds, and always stops at MaxSeconds from the search start.
+// SteadySeconds, and stops at MaxSeconds from the search start. A search that
+// has begun verifying its winner on holdout windows may run VerifySeconds
+// beyond that, so a winner found just before the cap is not thrown away
+// unverified.
 type SearchExtension struct {
 	MaxSeconds    int `json:"max_seconds"`
 	SteadySeconds int `json:"steady_seconds"`
+	VerifySeconds int `json:"verify_seconds,omitempty"`
+}
+
+// TotalSeconds is the longest a search can run under the rule, whatever its
+// progress: MaxSeconds plus the verification allowance.
+func (e *SearchExtension) TotalSeconds() int {
+	if e == nil {
+		return 0
+	}
+	return e.MaxSeconds + e.VerifySeconds
 }
 
 // Validate reports whether the extension is a bounded rule over base.
@@ -348,8 +361,8 @@ func (e *SearchExtension) Validate(base int) error {
 	if e == nil {
 		return nil
 	}
-	if base <= 0 || e.MaxSeconds <= base || e.MaxSeconds > MaxSearchBudgetSeconds {
-		return fmt.Errorf("search extension max_seconds must be above the base budget and at most %d", MaxSearchBudgetSeconds)
+	if base <= 0 || e.MaxSeconds <= base || e.VerifySeconds < 0 || e.TotalSeconds() > MaxSearchBudgetSeconds {
+		return fmt.Errorf("search extension max_seconds must be above the base budget and, with verify_seconds, at most %d", MaxSearchBudgetSeconds)
 	}
 	if e.SteadySeconds < MinSearchSteadySeconds || e.SteadySeconds > MaxSearchSteadySeconds {
 		return fmt.Errorf("search extension steady_seconds must be in [%d,%d]", MinSearchSteadySeconds, MaxSearchSteadySeconds)

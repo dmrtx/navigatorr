@@ -29,13 +29,22 @@ const modeOperationBudgetSeconds = 3600
 const modeSearchBudgetSeconds = 600
 
 // Size v3 may run a source's search past modeSearchBudgetSeconds while it keeps
-// finishing work, up to this hard cap from the search start. A worker shared
-// with a long encode otherwise spends the base budget on contention, not on
-// the source. Policies frozen before this carry no extension and keep the
-// fixed budget.
+// finishing work, up to sizeSearchMaxSeconds from the search start, plus
+// sizeSearchVerifySeconds for a search that already has a winner to verify. A
+// worker shared with other encodes otherwise spends the base budget on
+// contention, not on the source. Policies frozen before this carry no
+// extension and keep the fixed budget.
+//
+// The numbers come from the timings of a batch of one-hour 1080p episodes of
+// 2-4 GB searched two at a time: the base budget covered roughly 6-9 of 15-17
+// planned sample encodes (each with its quality passes), and a search that also
+// needs the fallback candidates and two verification attempts takes about
+// three times as long. 2400 s covers that with margin; 600 s covers the two
+// holdout windows of a verification attempt under the same load.
 const (
-	sizeSearchMaxSeconds    = 1800
+	sizeSearchMaxSeconds    = 2400
 	sizeSearchSteadySeconds = 180
+	sizeSearchVerifySeconds = 600
 )
 
 // ModePolicySnapshot is frozen with each operation. These thresholds are a
@@ -86,7 +95,7 @@ type ModeSizePolicy struct {
 // sizeModeV3Policy is the frozen size v3 addition. The ladder is x265 only:
 // medium CRF 22-30 first, then one slow family chosen from what failed.
 func sizeModeV3Policy() *ModeSizePolicy {
-	return &ModeSizePolicy{EightBitMain10: true, FallbackQualityValues: []int{16, 18, 20}, FallbackSavingsValues: []int{24, 27, 30}, FinalWindowSeconds: 10, FinalWindowEverySeconds: 600, FinalWindowsMinimum: 5, FinalWindowsMaximum: 12, AudioOnlyFallback: true, LosslessObjectAudioToAAC: true, SearchExtension: &transcode.SearchExtension{MaxSeconds: sizeSearchMaxSeconds, SteadySeconds: sizeSearchSteadySeconds}}
+	return &ModeSizePolicy{EightBitMain10: true, FallbackQualityValues: []int{16, 18, 20}, FallbackSavingsValues: []int{24, 27, 30}, FinalWindowSeconds: 10, FinalWindowEverySeconds: 600, FinalWindowsMinimum: 5, FinalWindowsMaximum: 12, AudioOnlyFallback: true, LosslessObjectAudioToAAC: true, SearchExtension: &transcode.SearchExtension{MaxSeconds: sizeSearchMaxSeconds, SteadySeconds: sizeSearchSteadySeconds, VerifySeconds: sizeSearchVerifySeconds}}
 }
 
 // searchExtension is the frozen rule for running past the base budget, or nil
@@ -108,7 +117,7 @@ func searchCeilingSeconds(policy any, base int) int {
 	}
 	snapshot.SearchBudgetSeconds = base
 	if ext := snapshot.searchExtension(); ext != nil {
-		return ext.MaxSeconds
+		return ext.TotalSeconds()
 	}
 	return base
 }

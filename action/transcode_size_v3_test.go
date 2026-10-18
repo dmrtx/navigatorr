@@ -40,7 +40,7 @@ func TestSizeModePolicyV3Snapshot(t *testing.T) {
 	// extension gave new snapshots the digest below; snapshots frozen before it
 	// have no such field and still re-hash to sha256:c7a08511...26ca3 (see
 	// TestSizeModePolicyV3FreezesSearchExtension).
-	if p.Digest != "sha256:3610a763223885ee0b9caa12d51e5e941ce3b11c7c5abe0a87d6452a788315a0" {
+	if p.Digest != "sha256:027afa7f2f2cd44b068ef01ad45491cd7ddb5bb3123e4ad4788621b7d4d80d03" {
 		t.Fatalf("size v3 snapshot digest changed: %s", p.Digest)
 	}
 	// The quality floor is v2's, unchanged: VMAF mean 88, p5 84, worst 5 s

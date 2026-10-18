@@ -50,8 +50,9 @@ func seedModeSeasonWithPolicy(t *testing.T, st *store.Store, id, mode string, fi
 
 func TestModeBatchAdmitsWholeSeasonWithTwoSlots(t *testing.T) {
 	// A search that stops at its hard cap reports a hair over it. Under the
-	// extended policy that cap is 1800 s, so the reservation is too.
-	runWholeSeason(t, nil, 1800.006, 1800)
+	// extended policy that cap is 3000 s (with verification), so the
+	// reservation is too.
+	runWholeSeason(t, nil, 3000.006, 3000)
 }
 
 func TestModeBatchLegacyPolicyKeepsTheFixedReservation(t *testing.T) {
@@ -125,7 +126,7 @@ func TestModeBatchWaitingDecisionHoldsNoBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.settleModeSearches(ec, []store.TranscodeBatchItem{item})
-	if entry := modeBudgetEntries(ec)[key]; entry.Consumed != nil || entry.Reserved != 1800 {
+	if entry := modeBudgetEntries(ec)[key]; entry.Consumed != nil || entry.Reserved != 3000 {
 		t.Fatalf("resumed search lost its reservation: %+v", entry)
 	}
 	child.Status, child.StateJSON = StatusWaitingDecision, toJSON(map[string]any{"benchmark_submitted": true, "benchmark_search_seconds": 120.5, "reason_code": "search_budget_exhausted"})

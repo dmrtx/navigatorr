@@ -14,7 +14,11 @@ func TestSearchExtensionValidate(t *testing.T) {
 		ok   bool
 	}{
 		{"absent is fixed", nil, 600, true},
-		{"typical", &SearchExtension{MaxSeconds: 1800, SteadySeconds: 180}, 600, true},
+		{"typical", &SearchExtension{MaxSeconds: 2400, SteadySeconds: 180, VerifySeconds: 600}, 600, true},
+		{"without a verification allowance", &SearchExtension{MaxSeconds: 1800, SteadySeconds: 180}, 600, true},
+		{"cap and allowance exactly at the ceiling", &SearchExtension{MaxSeconds: 3000, SteadySeconds: 180, VerifySeconds: 600}, 600, true},
+		{"allowance pushes past the ceiling", &SearchExtension{MaxSeconds: 3000, SteadySeconds: 180, VerifySeconds: 601}, 600, false},
+		{"negative allowance", &SearchExtension{MaxSeconds: 1800, SteadySeconds: 180, VerifySeconds: -1}, 600, false},
 		{"ceiling", &SearchExtension{MaxSeconds: MaxSearchBudgetSeconds, SteadySeconds: MaxSearchSteadySeconds}, 600, true},
 		{"smallest window", &SearchExtension{MaxSeconds: 601, SteadySeconds: MinSearchSteadySeconds}, 600, true},
 		{"cap equals base", &SearchExtension{MaxSeconds: 600, SteadySeconds: 180}, 600, false},
@@ -82,6 +86,17 @@ func TestSearchExtensionWireShape(t *testing.T) {
 	raw, _ = json.Marshal(req)
 	if !strings.Contains(string(raw), `"search_extension":{"max_seconds":1800,"steady_seconds":180}`) {
 		t.Fatalf("extension not on the wire: %s", raw)
+	}
+	req.SearchExtension = &SearchExtension{MaxSeconds: 2400, SteadySeconds: 180, VerifySeconds: 600}
+	raw, _ = json.Marshal(req)
+	if !strings.Contains(string(raw), `"search_extension":{"max_seconds":2400,"steady_seconds":180,"verify_seconds":600}`) {
+		t.Fatalf("verification allowance not on the wire: %s", raw)
+	}
+	if got := req.SearchExtension.TotalSeconds(); got != 3000 {
+		t.Fatalf("total %d", got)
+	}
+	if (*SearchExtension)(nil).TotalSeconds() != 0 {
+		t.Fatal("an absent extension has no total")
 	}
 	status, _ := json.Marshal(BenchmarkStatus{})
 	if strings.Contains(string(status), "search_worker_busy") || strings.Contains(string(status), "search_extension") {

@@ -224,6 +224,9 @@ func (p *benchmarkProgressReporter) CompletedUnits() int {
 }
 
 func (p *benchmarkProgressReporter) SetPhase(phase string) {
+	if p != nil && p.record != nil && phase == phaseVerifyingSamples {
+		p.record.searchBudget.noteVerifying()
+	}
 	p.StartUnit(phase)
 }
 

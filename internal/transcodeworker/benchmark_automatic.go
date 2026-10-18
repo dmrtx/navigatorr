@@ -164,7 +164,7 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 		}
 		holdout := *record
 		holdout.Samples = record.Samples[3:]
-		if err := run("verifying_samples", &holdout, []validatedCandidate{winner}); err != nil {
+		if err := run(phaseVerifyingSamples, &holdout, []validatedCandidate{winner}); err != nil {
 			return err
 		}
 		if err := mergeAutomaticQuality(record, evidence, winner); err != nil {

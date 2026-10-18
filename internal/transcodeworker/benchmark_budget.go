@@ -19,6 +19,12 @@ var errSearchBudgetStopped = errors.New("search budget exhausted")
 // searchBudgetPollInterval is how often the watcher samples a running search.
 const searchBudgetPollInterval = 10 * time.Second
 
+// phaseVerifyingSamples is the automatic search's stage in which its winner is
+// checked on holdout windows. Reaching it lifts the cap for the verification
+// allowance: a search that found a winner must not be cut before it can
+// confirm it.
+const phaseVerifyingSamples = "verifying_samples"
+
 // searchBudget decides how long one mode search may run. Without an extension
 // it is the fixed wall-clock budget from the persisted search start. With one,
 // the search may go on past that budget only while it keeps finishing units of
@@ -31,6 +37,7 @@ type searchBudget struct {
 	start   time.Time
 	base    time.Duration
 	hardCap time.Duration
+	verify  time.Duration
 	steady  time.Duration
 	poll    time.Duration
 	now     func() time.Time
@@ -41,6 +48,7 @@ type searchBudget struct {
 	observed  time.Duration
 	shared    time.Duration
 	stopped   bool
+	verifying bool
 }
 
 func newSearchBudget(start time.Time, baseSeconds int, ext *transcode.SearchExtension) *searchBudget {
@@ -48,6 +56,7 @@ func newSearchBudget(start time.Time, baseSeconds int, ext *transcode.SearchExte
 	b.hardCap = b.base
 	if ext != nil && ext.Validate(baseSeconds) == nil {
 		b.hardCap = time.Duration(ext.MaxSeconds) * time.Second
+		b.verify = time.Duration(ext.VerifySeconds) * time.Second
 		b.steady = time.Duration(ext.SteadySeconds) * time.Second
 	}
 	return b
@@ -55,8 +64,19 @@ func newSearchBudget(start time.Time, baseSeconds int, ext *transcode.SearchExte
 
 func (b *searchBudget) elastic() bool { return b.steady > 0 }
 
-// hardDeadline is the latest instant the search can run to.
-func (b *searchBudget) hardDeadline() time.Time { return b.start.Add(b.hardCap) }
+// hardDeadline is the latest instant the search can run to: the cap plus the
+// verification allowance, which only a search that reached verification may use.
+func (b *searchBudget) hardDeadline() time.Time { return b.start.Add(b.hardCap + b.verify) }
+
+// noteVerifying records that the search found a winner and began verifying it.
+func (b *searchBudget) noteVerifying() {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	b.verifying = true
+	b.mu.Unlock()
+}
 
 // noteUnit records that a unit of real work (not a skipped one) finished.
 func (b *searchBudget) noteUnit() {
@@ -73,7 +93,13 @@ func (b *searchBudget) noteUnit() {
 // has shown none and stops at once; that is as conservative as the fixed budget.
 func (b *searchBudget) continues(now time.Time) bool {
 	elapsed := now.Sub(b.start)
-	if elapsed >= b.hardCap {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	limit := b.hardCap
+	if b.verifying {
+		limit += b.verify
+	}
+	if elapsed >= limit {
 		return false
 	}
 	if elapsed < b.base {
@@ -82,8 +108,6 @@ func (b *searchBudget) continues(now time.Time) bool {
 	if !b.elastic() {
 		return false
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
 	return !b.lastUnit.IsZero() && now.Sub(b.lastUnit) <= b.steady
 }
 
@@ -153,9 +177,12 @@ func (b *searchBudget) watch(ctx context.Context, cancel context.CancelCauseFunc
 				return
 			}
 			wait := b.poll
-			// Check exactly when the base budget ends rather than a poll late.
-			if untilBase := b.start.Add(b.base).Sub(now); untilBase > 0 && untilBase < wait {
-				wait = untilBase
+			// Check exactly when the base budget and the cap end rather than a
+			// poll late.
+			for _, edge := range []time.Duration{b.base, b.hardCap} {
+				if until := b.start.Add(edge).Sub(now); until > 0 && until < wait {
+					wait = until
+				}
 			}
 			timer.Reset(wait)
 		}

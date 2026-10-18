@@ -39,10 +39,10 @@ func TestSizeModePolicyV3FreezesSearchExtension(t *testing.T) {
 		t.Fatal(err)
 	}
 	ext := p.Size.SearchExtension
-	if ext == nil || ext.MaxSeconds != 1800 || ext.SteadySeconds != 180 || p.SearchBudgetSeconds != 600 {
+	if ext == nil || ext.MaxSeconds != 2400 || ext.SteadySeconds != 180 || ext.VerifySeconds != 600 || p.SearchBudgetSeconds != 600 {
 		t.Fatalf("size policy extension %+v base=%d", ext, p.SearchBudgetSeconds)
 	}
-	if got := p.searchExtension(); got == nil || got.MaxSeconds != 1800 {
+	if got := p.searchExtension(); got == nil || got.TotalSeconds() != 3000 {
 		t.Fatalf("policy does not expose its extension: %+v", got)
 	}
 
@@ -103,8 +103,8 @@ func TestSearchCeilingSeconds(t *testing.T) {
 		policy any
 		want   int
 	}{
-		"extended size":                 {elastic, 1800},
-		"stored extended size":          {map[string]any{"version": elastic.Version, "mode": "size", "size": map[string]any{"search_extension": map[string]any{"max_seconds": 1800, "steady_seconds": 180}}}, 1800},
+		"extended size":                 {elastic, 3000},
+		"stored extended size":          {map[string]any{"version": elastic.Version, "mode": "size", "size": map[string]any{"search_extension": map[string]any{"max_seconds": 2400, "steady_seconds": 180, "verify_seconds": 600}}}, 3000},
 		"size frozen before extensions": {legacy, 600},
 		"other mode":                    {quality, 600},
 		"cap not above the base":        {narrow, 600},
@@ -127,7 +127,7 @@ func TestReserveModeSearchReservesTheLongestSearch(t *testing.T) {
 	}
 	elastic, _ := modePolicy("size", false)
 	legacy := legacySizeSnapshot(t)
-	if got := reserved(map[string]any{"mode_policy": elastic, "search_budget_seconds": 600}); got != 1800 {
+	if got := reserved(map[string]any{"mode_policy": elastic, "search_budget_seconds": 600}); got != 3000 {
 		t.Errorf("extended search reserved %v, want its hard cap", got)
 	}
 	if got := reserved(map[string]any{"mode_policy": legacy, "search_budget_seconds": 600}); got != 600 {
@@ -153,13 +153,13 @@ func TestBatchItemReservationFollowsItsOwnFrozenGoal(t *testing.T) {
 		"requality": map[string]any{"mode": "quality", "mode_policy": quality},
 		"plain":     map[string]any{"profile": "x"},
 	}}}
-	for key, want := range map[string]int{"revised": 1800, "requality": 600, "plain": 600, "untouched": 600} {
+	for key, want := range map[string]int{"revised": 3000, "requality": 600, "plain": 600, "untouched": 600} {
 		if got := batchItemSearchCeiling(ec, store.TranscodeBatchItem{ItemKey: key}); got != want {
 			t.Errorf("%s: ceiling %d want %d", key, got, want)
 		}
 	}
 	ec.State["mode_policy"] = elastic
-	if got := batchItemSearchCeiling(ec, store.TranscodeBatchItem{ItemKey: "untouched"}); got != 1800 {
+	if got := batchItemSearchCeiling(ec, store.TranscodeBatchItem{ItemKey: "untouched"}); got != 3000 {
 		t.Errorf("an item on the batch's extended goal: ceiling %d", got)
 	}
 }
@@ -189,7 +189,7 @@ func TestBenchmarkRequestSendsTheSearchExtensionOnlyWhereItIsUnderstood(t *testi
 	legacy := legacySizeSnapshot(t)
 
 	req := extensionRequestFor(t, nil, capable)
-	if req.SearchBudgetSeconds != 600 || req.SearchExtension == nil || req.SearchExtension.MaxSeconds != 1800 || req.SearchExtension.SteadySeconds != 180 {
+	if req.SearchBudgetSeconds != 600 || req.SearchExtension == nil || req.SearchExtension.MaxSeconds != 2400 || req.SearchExtension.SteadySeconds != 180 || req.SearchExtension.VerifySeconds != 600 {
 		t.Fatalf("a new operation on a capable worker: %+v", req.SearchExtension)
 	}
 	if err := req.SearchExtension.Validate(req.SearchBudgetSeconds); err != nil {
@@ -197,7 +197,7 @@ func TestBenchmarkRequestSendsTheSearchExtensionOnlyWhereItIsUnderstood(t *testi
 	}
 	// Mutating the request must not reach the frozen policy.
 	req.SearchExtension.MaxSeconds = 1
-	if again := extensionRequestFor(t, nil, capable); again.SearchExtension.MaxSeconds != 1800 {
+	if again := extensionRequestFor(t, nil, capable); again.SearchExtension.MaxSeconds != 2400 {
 		t.Fatal("request shares the frozen extension")
 	}
 
@@ -216,7 +216,7 @@ func busyExhaustedExecutor(busy bool) *mockTranscodeExecutor {
 		return transcode.BenchmarkStatus{
 			ProtocolVersion: transcode.WorkerProtocolVersion, ID: jobID, Status: transcode.StatusFailed,
 			ReasonCode: "search_budget_exhausted", Error: "search_budget_exhausted: bounded search stopped; no claim about untested candidates",
-			SearchWorkerBusy: busy, SearchExtension: &transcode.SearchExtension{MaxSeconds: 1800, SteadySeconds: 180},
+			SearchWorkerBusy: busy, SearchExtension: &transcode.SearchExtension{MaxSeconds: 2400, SteadySeconds: 180, VerifySeconds: 600},
 		}, nil
 	}}
 }
@@ -251,7 +251,7 @@ func TestSearchOutOfTimeOnABusyWorkerSaysSoAndKeepsTheSameDecision(t *testing.T)
 	if len(res.WaitingOptions) != 1 || res.WaitingOptions[0].Decision != "cancel" {
 		t.Fatalf("options %+v", res.WaitingOptions)
 	}
-	if !getBool(ec.State, "search_worker_busy") || getInt(ec.State, "search_budget_max_seconds") != 1800 {
+	if !getBool(ec.State, "search_worker_busy") || getInt(ec.State, "search_budget_max_seconds") != 3000 {
 		t.Fatalf("telemetry not recorded: %+v", ec.State)
 	}
 }
@@ -276,8 +276,8 @@ func TestSearchOutOfTimeOnAnIdleWorkerKeepsTheGenericMessage(t *testing.T) {
 func TestObservedStatusDropsSearchTelemetryTheNewerAttemptLacks(t *testing.T) {
 	e := NewEngine(EngineDeps{})
 	ec := &ExecutionContext{InstanceID: "bench-stale", ActionName: "transcode_media", Inputs: map[string]any{}, Outputs: map[string]any{}, State: map[string]any{}}
-	e.observeBenchmarkStatus(ec, transcode.BenchmarkStatus{Status: transcode.StatusFailed, SearchBudgetSeconds: 600, SearchWorkerBusy: true, SearchExtension: &transcode.SearchExtension{MaxSeconds: 1800, SteadySeconds: 180}})
-	if getInt(ec.State, "search_budget_max_seconds") != 1800 {
+	e.observeBenchmarkStatus(ec, transcode.BenchmarkStatus{Status: transcode.StatusFailed, SearchBudgetSeconds: 600, SearchWorkerBusy: true, SearchExtension: &transcode.SearchExtension{MaxSeconds: 2400, SteadySeconds: 180, VerifySeconds: 600}})
+	if getInt(ec.State, "search_budget_max_seconds") != 3000 {
 		t.Fatalf("setup did not record telemetry: %+v", ec.State)
 	}
 	ec.State["search_worker_busy"] = true // as the exhausted wait leaves it
