@@ -136,7 +136,7 @@ clients do not need to keep calling `action_resume` to finish accepted jobs.
 an optional Sonarr `service` name. It verifies a concrete replacement and waits
 for `action_resume` with `decision="approve"` before importing or deleting.
 Ordinary transcoding still creates a candidate only. See
-[transcode operational status](docs/TRANSCODE_PIPELINE_RELIABILITY.md) for
+[transcode operational status](docs/transcode/TRANSCODE_PIPELINE_RELIABILITY.md) for
 progress, timing, diagnostics and recovery behavior.
 
 ---

@@ -41,7 +41,7 @@ func TestJoyRealSourceSamples(t *testing.T) {
 	}
 	profileFile := os.Getenv("NAVIGATORR_JOY_PROFILE_FILE")
 	if profileFile == "" {
-		profileFile = "../../docs/examples/transcode-profile-joy.json"
+		profileFile = "../../docs/transcode/examples/transcode-profile-joy.json"
 	}
 	p := joyPlanFromFile(t, profileFile)
 	w := NewWorker(&WorkerConfig{FFmpeg: ffmpeg, FFprobe: ffprobe, StateDir: filepath.Join(out, "isolated-state"), AllowedRoots: []string{sources, out}, MaxParallelJobs: 1})
@@ -140,6 +140,6 @@ func TestJoyRealSourceSamples(t *testing.T) {
 	for _, s := range samples {
 		accepted = accepted && s["quality_accepted"].(bool)
 	}
-	write(map[string]any{"status": "completed", "profile": filepath.Base(profileFile), "profile_plan_digest": p.PlanDigest, "reference": "The Grand Tour S03E01 QOQ H264 8-bit + EAC3 5.1; stream-copy fragments; seek may include keyframe lead-in", "sampling_note": "Metric locations are local to each verified 25 fps fragment; requested seeks are not exact cuts on the full episode.", "samples": samples, "vmaf_combined": v, "cambi_combined": c, "quality_accepted": accepted, "video_target_kbps": p.X265.BitrateKbps, "audio_target_kbps": 160, "production_jobs_submitted": 0})
+	write(map[string]any{"status": "completed", "profile": filepath.Base(profileFile), "profile_plan_digest": p.PlanDigest, "reference": "Road Notes S03E01 QOQ H264 8-bit + EAC3 5.1; stream-copy fragments; seek may include keyframe lead-in", "sampling_note": "Metric locations are local to each verified 25 fps fragment; requested seeks are not exact cuts on the full episode.", "samples": samples, "vmaf_combined": v, "cambi_combined": c, "quality_accepted": accepted, "video_target_kbps": p.X265.BitrateKbps, "audio_target_kbps": 160, "production_jobs_submitted": 0})
 	t.Logf("completed isolated source experiment: quality accepted=%v", accepted)
 }

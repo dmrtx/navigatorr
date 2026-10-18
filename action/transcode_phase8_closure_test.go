@@ -11,7 +11,7 @@ package action
 // doubles used throughout this file's suite: a fake ffprobe shell script
 // (createSmartFakeFFprobeScript) and mockTranscodeExecutor. Nothing here
 // exercises real Apple Silicon hardware; live-hardware evidence is recorded
-// separately in docs/TRANSCODE_OPTIMIZATION_IMPLEMENTATION_PLAN.md.
+// separately in docs/transcode/TRANSCODE_OPTIMIZATION_IMPLEMENTATION_PLAN.md.
 
 import (
 	"context"

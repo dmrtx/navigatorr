@@ -22,7 +22,7 @@ Navigatorr acts as a bridge between AI coding assistants and your self-hosted me
 - **qBittorrent** — Torrent client
 - **SABnzbd** — Usenet downloader
 - **Transcoding** — Persistent HTTP worker (with an SSH adapter) for FFmpeg transcoding, including VideoToolbox and libx265, calibration, and candidate validation
-- **Podcast cleaning** — Durable native ASR and validated audio cuts, with classification supplied by the orchestrating LLM. See [setup and MCP workflow](docs/podcast-cleaning.md).
+- **Podcast cleaning** — Durable native ASR and validated audio cuts, with classification supplied by the orchestrating LLM. See [setup and MCP workflow](docs/podcast/podcast-cleaning.md).
 
 ## Architecture
 
@@ -174,7 +174,7 @@ explicit non-optimizing profile remains available. Existing bare `auto` requests
 keep their behavior. Use `dry_run: true` for a preview and `promote_candidates: true`
 to request approval before replacement. `batch.selection` explains the choice;
 `batch.sample_evidence` separates measured sample quality from estimated savings.
-See [the series workflow](docs/TRANSCODING.md#simple-series-workflow). The MCP
+See [the series workflow](docs/transcode/TRANSCODING.md#simple-series-workflow). The MCP
 `action_catalog` includes copyable input examples; `batch.next_step` explains how
 to continue. Preview actions finish without encoding: start a new action to
 execute. Generated recipes have `scope: "batch_only"`; their label is not a name

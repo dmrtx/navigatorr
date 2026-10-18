@@ -378,7 +378,7 @@ Omitted blocks fall back to the defaults above; an explicitly requested metric b
 
 Recipes select exactly one encoder family (`hevc_videotoolbox` or `libx265`) plus only typed knobs valid for that family — cross-family knobs (VideoToolbox rate/offline switches on `libx265`, `preset`/CRF semantics on VideoToolbox) fail recipe validation. The profile's rate-control mode must match its search dimension (`quality` with `quality_values`, `average_bitrate_kbps` with `bitrate_values`). All non-swept typed knobs are inherited verbatim into every benchmark candidate, so benchmark encodes exercise the exact configuration the full transcode would run; the winner carries the full knob set back into the materialized plan. Adaptive probing applies to quality-ordered VideoToolbox sweeps only — libx265 CRF sweeps and VideoToolbox bitrate sweeps always run exhaustive, with identical VMAF/SSIM selection and size guardrails.
 
-A complete, loader-validated example lives in `docs/examples/transcode-recipes-optimization.yaml`. The embedded builtin bundle stays schema_version 1; optimization is adopted via `file`/`https`/`github` sources, never by editing worker code.
+A complete, loader-validated example lives in `docs/transcode/examples/transcode-recipes-optimization.yaml`. The embedded builtin bundle stays schema_version 1; optimization is adopted via `file`/`https`/`github` sources, never by editing worker code.
 
 ### Sampling
 
@@ -406,7 +406,7 @@ Automatic selection supports SDR only. HDR/Dolby Vision sources (transfer, prima
 
 ### Speed priority
 
-There is no separate "fast" benchmark mode. Speed is expressed per profile through the typed VideoToolbox switches documented in `docs/VIDEOTOOLBOX_PROFILES.md` (`prioritize_speed`, `spatial_aq`, `realtime` with pointer-boolean semantics: omitted means "emit nothing", explicit values are required capabilities and fail closed when unsupported).
+There is no separate "fast" benchmark mode. Speed is expressed per profile through the typed VideoToolbox switches documented in `docs/transcode/VIDEOTOOLBOX_PROFILES.md` (`prioritize_speed`, `spatial_aq`, `realtime` with pointer-boolean semantics: omitted means "emit nothing", explicit values are required capabilities and fail closed when unsupported).
 
 ### Capabilities
 
@@ -425,7 +425,7 @@ Before any benchmark the coordinator fetches versioned `WorkerCapabilities` (pro
 
 ### Validation status
 
-Automated suites cover the full orchestration matrix with stubbed executors and fixture probes (8-bit/10-bit SDR, HDR/DV fail-closed, vmaf/ssim/both, no-winner, busy/retry/backoff, cancellation on both sides of the benchmark boundary, reload/resume, deterministic digests, candidate-only acceptance, source immutability, no secret/path leakage). Live Apple Silicon evidence (real capability handshake, real inspection, real VMAF/SSIM scoring, real recipe loading) versus blocked items (hardware VideoToolbox encodes unavailable in the validation sandbox) is recorded per item in `docs/TRANSCODE_OPTIMIZATION_IMPLEMENTATION_PLAN.md` phase 8.
+Automated suites cover the full orchestration matrix with stubbed executors and fixture probes (8-bit/10-bit SDR, HDR/DV fail-closed, vmaf/ssim/both, no-winner, busy/retry/backoff, cancellation on both sides of the benchmark boundary, reload/resume, deterministic digests, candidate-only acceptance, source immutability, no secret/path leakage). Live Apple Silicon evidence (real capability handshake, real inspection, real VMAF/SSIM scoring, real recipe loading) versus blocked items (hardware VideoToolbox encodes unavailable in the validation sandbox) is recorded per item in `docs/transcode/TRANSCODE_OPTIMIZATION_IMPLEMENTATION_PLAN.md` phase 8.
 
 ## Rollout
 

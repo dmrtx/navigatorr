@@ -486,8 +486,8 @@ Demostrado mediante tests que:
 - [x] Confirmar compatibilidad básica con `transcode_batch`.
 
 ### Fase 8 — Documentación y validación real
-- [x] Actualizar `docs/TRANSCODING.md` (sección benchmark-driven optimization con pipeline, actions, policy, sampling, métricas, selección, bit depth, HDR/DV, speed priority, capabilities y troubleshooting).
-- [x] Añadir ejemplo v2 (`docs/examples/transcode-recipes-optimization.yaml`, validado con el loader real) sin cambiar perfiles existentes ni la recipe embebida (se preserva el digest del bundle builtin; decisión documentada abajo).
+- [x] Actualizar `docs/transcode/TRANSCODING.md` (sección benchmark-driven optimization con pipeline, actions, policy, sampling, métricas, selección, bit depth, HDR/DV, speed priority, capabilities y troubleshooting).
+- [x] Añadir ejemplo v2 (`docs/transcode/examples/transcode-recipes-optimization.yaml`, validado con el loader real) sin cambiar perfiles existentes ni la recipe embebida (se preserva el digest del bundle builtin; decisión documentada abajo).
 - [x] Documentar sampling, métricas, bit depth y troubleshooting. Nota FAST: no existe un modo "FAST" separado en la implementación; la velocidad se expresa por perfil con los switches tipados (`prioritize_speed`, `spatial_aq`, `realtime`), documentado como tal.
 - [x] Ejecutar suite completa uncached (`go test -count=1 ./...`): ejecutada; subset sandbox-safe en verde, resto bloqueado por el sandbox (ver evidencia).
 - [x] Compilar el worker desde el commit actual (`go build ./...` exit 0; binario `navigatorr-transcode` compilado desde `d2e7d25`).

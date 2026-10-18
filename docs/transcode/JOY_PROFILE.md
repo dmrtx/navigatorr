@@ -1,6 +1,6 @@
 # Perfil Joy: experimento con muestras
 
-Los archivos Joy existentes de The Grand Tour T3E09, T3E12 y T3E14 conservan
+Los archivos Joy existentes de Road Notes T3E09, T3E12 y T3E14 conservan
 metadatos de x265: Main10, ABR de 1.200 kb/s, estadísticas de una pasada previa,
 lookahead 80 y HE-AAC 5.1 de aproximadamente 162–190 kb/s. La variante toma
 como referencia los ajustes principales del T3E12: seis B-frames, cuatro
@@ -34,7 +34,7 @@ Para una fuente de ocho bits, un benchmark Main10 requiere la decisión explíci
 
 ## Validación real del 16 de octubre de 2026
 
-Fuente: The Grand Tour T3E01, edición QOQ, H.264 1080p de ocho bits y E-AC3 5.1.
+Fuente: Road Notes T3E01, edición QOQ, H.264 1080p de ocho bits y E-AC3 5.1.
 Se copiaron pistas de tres fragmentos alrededor del 20 %, 50 % y 80 % del
 episodio; el inicio puede incluir el fotograma clave anterior. Los fragmentos
 duran 24,12, 23,00 y 20,60 s. No son un muestreo exhaustivo del episodio.
