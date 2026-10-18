@@ -48,11 +48,11 @@
   --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   --body: "Avenir Next", "Segoe UI", sans-serif;
   --control-size: 36px;
-  /* Job actions share one visible box; --control-size stays the touch target. */
-  --action-height: 32px;
+  /* Job actions share one visible height; --control-size stays the touch
+     target. The gap between icon buttons keeps their targets from overlapping. */
+  --action-height: 28px;
   --action-min-width: 88px;
-  /* Narrow screens: two equal columns on a phone, more as the card widens. */
-  --action-column: 128px;
+  --action-gap: max(6px, calc(var(--control-size) - var(--action-height)));
 }
 /* Dark palette: once for the system preference, once for an explicit choice. */
 @media (prefers-color-scheme: dark) {
@@ -880,17 +880,16 @@ main {
 .job-footer > .job-outcome {
   color: var(--muted);
 }
-/* Actions stay beside the outcome while they fit; otherwise they wrap below it,
-   right-aligned, and then onto further rows. The 12px row gap keeps the touch
-   targets of wrapped rows from overlapping. */
+/* One row of actions per card: the labelled main action on the left, icon
+   buttons on the right. It sits beside the outcome while it fits. */
 .job-row .job-footer > .job-actions {
   align-self: center;
   justify-content: flex-end;
   max-width: 100%;
   min-width: 0;
   margin-left: auto;
-  gap: 12px 6px;
-  flex-wrap: wrap;
+  gap: var(--action-gap);
+  flex-wrap: nowrap;
   flex: 0 1 auto;
 }
 .job-number {
@@ -905,10 +904,10 @@ main {
 .batch-file-preview {
   color: var(--ink);
 }
-/* Job actions: one compact box for every kind of button, in the queue rows and
-   the job detail dialog. Hierarchy comes from fill, never from size: primary is
-   filled, a plain button is outlined, a labelled icon action is tinted.
-   ::after keeps the shared touch target without making the visible box taller. */
+/* Job actions: one compact height for every button, in the queue rows and the
+   job detail dialog. In the rows one main action is labelled and filled; every
+   other action is a square icon button named by aria-label and title.
+   ::after keeps the shared touch target without making the visible box larger. */
 .job-row .job-actions button,
 #detail-controls .job-actions button {
   position: relative;
@@ -931,7 +930,6 @@ main {
 .job-row .job-footer > .job-actions button {
   flex: 0 0 auto;
   max-width: 100%;
-  white-space: normal;
 }
 .job-row .job-actions button::after,
 #detail-controls .job-actions button::after {
@@ -968,11 +966,108 @@ main {
   background: var(--forest);
   color: var(--on-forest);
 }
-.job-row .job-actions button.queue-secondary {
-  border-color: transparent;
-  background: var(--forest-wash);
-  color: var(--forest);
+.job-row .job-actions .action-main {
+  min-width: 0;
+  margin-right: auto;
+  padding: 0 10px;
 }
+/* Icon buttons: a quiet 28px square, a 44px target on touch screens. The label
+   is kept for the More menu and hidden in the row. */
+.job-row .job-actions .action-icon {
+  flex: 0 0 var(--action-height);
+  width: var(--action-height);
+  min-width: 0;
+  height: var(--action-height);
+  min-height: 0;
+  padding: 0;
+  border-color: var(--line);
+  color: var(--ink);
+}
+.job-row .job-actions .action-icon.danger { color: var(--danger); }
+.job-row .job-actions .action-icon .action-label { display: none; }
+.job-row .job-actions .action-icon svg { width: 16px; height: 16px; }
+.job-row .job-actions .action-icon::after {
+  left: 50%;
+  right: auto;
+  width: max(100%, var(--control-size));
+  transform: translate(-50%, -50%);
+}
+.job-row .job-actions button.action-icon.button-pending::before {
+  flex-basis: 16px;
+  width: 16px;
+  height: 16px;
+}
+/* More actions: a native disclosure, so Enter, Space and screen readers work
+   without scripting; app.js closes it on Escape, outside presses and choice. */
+.job-row .more-actions {
+  position: relative;
+  flex: 0 0 auto;
+}
+.job-row .more-actions > summary {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--ink);
+  list-style: none;
+  cursor: pointer;
+}
+.job-row .more-actions > summary::-webkit-details-marker { display: none; }
+.job-row .more-actions > summary::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: max(100%, var(--control-size));
+  height: max(100%, var(--control-size));
+  transform: translate(-50%, -50%);
+}
+.job-row .more-actions[open] > summary { background: var(--hover); border-color: var(--control-line); }
+.job-row .more-actions > summary svg { width: 16px; height: 16px; }
+/* A choice made from the menu still shows its spinner on the toggle. */
+.job-row .more-actions:has(.button-pending) > summary svg { display: none; }
+.job-row .more-actions:has(.button-pending) > summary::before {
+  content: "";
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  border: 1px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: pending-spin .8s linear infinite;
+}
+.job-row .more-menu {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 6px);
+  right: 0;
+  display: grid;
+  gap: 2px;
+  min-width: 200px;
+  max-width: calc(100vw - 32px);
+  padding: 4px;
+  border: 1px solid var(--control-line);
+  border-radius: 6px;
+  background: var(--surface);
+  box-shadow: 0 6px 18px var(--shadow);
+}
+.job-row .more-menu button.action-icon {
+  justify-content: flex-start;
+  gap: 10px;
+  width: 100%;
+  height: auto;
+  min-height: var(--control-size);
+  padding: 4px 10px;
+  border-color: transparent;
+  font-size: 13px;
+  text-align: left;
+  white-space: normal;
+}
+.job-row .more-menu button.action-icon::after { display: none; }
+.job-row .more-menu .action-icon .action-label { display: inline; }
 .workflow-progress {
   display: flex;
   align-items: center;
@@ -1770,10 +1865,11 @@ pre {
     border-color: var(--forest-strong);
     background: var(--forest-strong);
   }
-  .job-row .job-actions button.queue-secondary:hover {
-    border-color: transparent;
-    background: var(--forest-wash-strong);
+  .job-row .more-actions > summary:hover {
+    border-color: var(--muted);
+    background: var(--hover);
   }
+  .job-row .more-menu button.action-icon:hover { border-color: transparent; }
 }
 @media (prefers-reduced-motion: reduce) {
   * {
@@ -1795,7 +1891,7 @@ pre {
 .skipped-outcome .metadata { margin-top: 3px; }
 @media (max-width: 700px) {
   .skipped-job .job-footer { flex-wrap: wrap; }
-  .skipped-job .job-footer > .job-actions { width: 100%; justify-content: flex-start; }
+  .skipped-job .job-footer > .job-actions { width: 100%; }
 }
 #reconfigure-form .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 @media (max-width: 480px) { #reconfigure-form .form-grid { grid-template-columns: 1fr; } }
@@ -1807,7 +1903,7 @@ pre {
 .button-pending { cursor: progress; opacity: .75; }
 .button-pending::before { content: ""; width: 10px; height: 10px; border: 1px solid currentColor; border-right-color: transparent; border-radius: 50%; display: inline-block; animation: pending-spin .8s linear infinite; }
 @keyframes pending-spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .button-pending::before { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .button-pending::before, .more-actions > summary::before { animation: none; } }
 .batch-attempt-history { grid-column: 1 / -1; font-size: 12px; }
 .batch-attempt-history summary { cursor: pointer; }
 
@@ -1984,23 +2080,11 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
   /* The count only shares a line with buttons on wide screens. */
   .batch-progress:has(.batch-progress-phase) .batch-progress-count,
   .batch-progress:has(.batch-progress-phase) .batch-progress-percent { line-height: 1.4; }
-  /* Equal columns: buttons line up across cards and wrap into full rows that
-     share one height. The 12px row gap keeps 44px touch targets apart. */
+  /* The actions take their own full-width row under the outcome: main action
+     on the left, icons on the right. */
   .job-row .job-footer > .job-actions {
-    display: grid;
     flex: 1 1 100%;
-    grid-template-columns: repeat(auto-fill, minmax(var(--action-column), 1fr));
-    align-items: stretch;
-    gap: 12px 6px;
     margin-left: 0;
-  }
-  .job-row .job-footer > .job-actions button {
-    width: auto;
-    min-width: 0;
-    max-width: none;
-    gap: 4px;
-    padding-inline: 4px;
-    font-size: 11px;
   }
 }
 
