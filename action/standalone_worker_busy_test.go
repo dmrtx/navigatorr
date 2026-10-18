@@ -2,6 +2,8 @@ package action
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -101,8 +103,8 @@ func TestStandaloneTranscodeSubmitWaitsForWorkerSlot(t *testing.T) {
 	}
 }
 
-// Without Retry-After the wait still holds; the reconciler's own interval
-// paces the next try.
+// Without Retry-After the wait still holds and no earlier not-before is
+// kept; the reconciler's own interval paces the next try.
 func TestStandaloneTranscodeWorkerBusyWithoutRetryAfter(t *testing.T) {
 	mock := &mockTranscodeExecutor{
 		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
@@ -112,32 +114,102 @@ func TestStandaloneTranscodeWorkerBusyWithoutRetryAfter(t *testing.T) {
 	e := NewEngine(EngineDeps{Transcode: mock})
 	ec := testReconcileEC("job-test-inst")
 	ec.State["attempt"], ec.State["retry_count"] = 3, 2 // budget spent by earlier attempts
-	ec.State[workerBusyNotBeforeKey] = "2000-01-01T00:00:00Z"
 	res, _ := e.stepTranscodeSubmit(context.Background(), ec)
 	if res.Status != StepWaitingExternal || res.WaitingCondition != "worker_busy" {
 		t.Fatalf("got %s/%s %q", res.Status, res.WaitingCondition, res.Error)
 	}
-	if _, ok := ec.State[workerBusyNotBeforeKey]; ok {
-		t.Fatal("no Retry-After must not leave a stale not-before")
-	}
 	if getInt(ec.State, "attempt") != 3 || getInt(ec.State, "retry_count") != 2 {
 		t.Fatal("busy must not touch the retry budget")
+	}
+
+	ec.State[workerBusyNotBeforeKey] = "2999-01-01T00:00:00Z"
+	e.workerBusyWait(ec, errors.New("worker busy"), "submit", transcodeSlotWaitReason, map[string]any{})
+	if _, ok := ec.State[workerBusyNotBeforeKey]; ok {
+		t.Fatal("a refusal without Retry-After must not keep an earlier not-before")
 	}
 }
 
 // Other transient failures still spend and respect the budget.
-func TestStandaloneTranscodeOtherTransientStillFailsWhenBudgetSpent(t *testing.T) {
+func TestStandaloneTranscodeOtherTransientStillUsesBudget(t *testing.T) {
 	mock := &mockTranscodeExecutor{
 		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
-			return transcode.Job{}, &httpclient.HTTPError{StatusCode: 400, Message: "ssh: handshake failed"}
+			return transcode.Job{}, errors.New("ssh: broken pipe")
 		},
 	}
 	e := NewEngine(EngineDeps{Transcode: mock})
 	ec := testReconcileEC("job-test-inst")
-	ec.State["attempt"], ec.State["retry_count"] = 3, 2
 	res, _ := e.stepTranscodeSubmit(context.Background(), ec)
+	if res.WaitingCondition != "transcode_retry" || getInt(ec.State, "retry_count") != 1 {
+		t.Fatalf("got %s/%s retry=%v, want a counted transcode_retry", res.Status, res.WaitingCondition, ec.State["retry_count"])
+	}
+	ec.State["attempt"], ec.State["retry_count"] = 3, 2
+	delete(ec.State, "retry_not_before")
+	res, _ = e.stepTranscodeSubmit(context.Background(), ec)
 	if res.Status != StepFailed {
-		t.Fatalf("got %s/%s, want failed", res.Status, res.WaitingCondition)
+		t.Fatalf("got %s/%s, want failed once the budget is spent", res.Status, res.WaitingCondition)
+	}
+}
+
+// A long slot wait keeps one history entry per run of refusals, not one per
+// poll, so the stored state stays small.
+func TestWorkerBusyHistoryStaysBounded(t *testing.T) {
+	mock := &mockTranscodeExecutor{
+		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
+			return transcode.Job{}, workerBusyError(0)
+		},
+	}
+	e := NewEngine(EngineDeps{Transcode: mock})
+	ec := testReconcileEC("job-test-inst")
+	appendFailureHistory(ec, "benchmark_submit", "ssh_transient", "earlier failure")
+	for i := 0; i < 50; i++ {
+		if res, _ := e.stepTranscodeSubmit(context.Background(), ec); res.WaitingCondition != "worker_busy" {
+			t.Fatalf("poll %d: %s/%s", i, res.Status, res.WaitingCondition)
+		}
+		// Persisted state round-trips through JSON between polls.
+		raw, _ := json.Marshal(ec.State["failure_history"])
+		var history []any
+		_ = json.Unmarshal(raw, &history)
+		ec.State["failure_history"] = history
+	}
+	history, _ := ec.State["failure_history"].([]any)
+	if len(history) != 2 {
+		t.Fatalf("history has %d entries, want the earlier failure and one busy run", len(history))
+	}
+	busy, _ := history[1].(map[string]any)
+	if getString(busy, "classification") != "worker_busy" || getInt(busy, "count") != 50 || getString(busy, "last_at") == "" {
+		t.Fatalf("busy entry = %v", busy)
+	}
+}
+
+// When a resubmit after a slot wait was uncertain and reconciliation finds
+// the job, acceptance clears the busy markers like a direct acceptance.
+func TestReconciledAcceptanceAfterSlotWaitClearsBusyMarkers(t *testing.T) {
+	calls := 0
+	mock := &mockTranscodeExecutor{
+		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
+			calls++
+			if calls == 1 {
+				return transcode.Job{}, workerBusyError(0)
+			}
+			return transcode.Job{}, &httpclient.UncertainError{Op: "submit", Err: context.DeadlineExceeded}
+		},
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{ID: jobID, Status: transcode.StatusRunning}, nil
+		},
+	}
+	e := NewEngine(EngineDeps{Transcode: mock})
+	ec := testReconcileEC("job-test-inst")
+	_, _ = e.stepTranscodeSubmit(context.Background(), ec)
+	mergeMap(ec.State, map[string]any{"worker_busy": true})
+	_, _ = e.stepTranscodeSubmit(context.Background(), ec)
+	res, _ := e.stepTranscodeSubmit(context.Background(), ec)
+	if res.Status != StepCompleted || calls != 2 {
+		t.Fatalf("got %s/%s after %d submits", res.Status, res.WaitingCondition, calls)
+	}
+	for _, key := range []string{"worker_busy", workerBusyNotBeforeKey, "failure_classification"} {
+		if _, ok := ec.State[key]; ok {
+			t.Fatalf("%s left in state after reconciled acceptance", key)
+		}
 	}
 }
 
@@ -207,8 +279,12 @@ func TestStandaloneBenchmarkWaitsForSlotAndReconcilerResubmits(t *testing.T) {
 	if len(ids) != 1 {
 		t.Fatalf("reconciler resubmitted inside Retry-After: %v", ids)
 	}
-
+	// A direct resume (as a batch parent does) inside the window sends nothing either.
 	busy = false
+	if got, err := engine.Resume(context.Background(), res.ID, "", nil); err != nil || got.WaitingCondition != "worker_busy" || len(ids) != 1 {
+		t.Fatalf("resume inside Retry-After: %v %+v submits=%v", err, got, ids)
+	}
+
 	clock.Advance(11 * time.Second)
 	if err := engine.ReconcileOnce(context.Background()); err != nil {
 		t.Fatal(err)
@@ -231,11 +307,19 @@ func TestStandaloneBenchmarkWaitsForSlotAndReconcilerResubmits(t *testing.T) {
 	}
 }
 
-// A slot wait stays cancellable, so it needs no admission deadline.
+// A slot wait stays cancellable, so it needs no admission deadline. The
+// worker never created the refused job and would answer a cancel with 404,
+// so cancelling sends nothing and reports no remote failure.
 func TestStandaloneSlotWaitIsCancellable(t *testing.T) {
 	mock := &mockTranscodeExecutor{
 		benchmarkSubmitFunc: func(ctx context.Context, req transcode.BenchmarkRequest) (transcode.BenchmarkJob, error) {
 			return transcode.BenchmarkJob{}, workerBusyError(0)
+		},
+		benchmarkCancelFunc: func(ctx context.Context, jobID string) error {
+			return &httpclient.HTTPError{Method: "POST", URL: "/v1/benchmarks/" + jobID + "/cancel", StatusCode: 404, Message: "benchmark not found", Code: transcode.WorkerErrorNotFound}
+		},
+		cancelFunc: func(ctx context.Context, jobID string) error {
+			return &httpclient.HTTPError{Method: "POST", URL: "/v1/jobs/" + jobID + "/cancel", StatusCode: 404, Message: "job not found", Code: transcode.WorkerErrorNotFound}
 		},
 	}
 	engine, _, mediaFile, _ := setupBenchmarkTestEnv(t, mock, standard8BitProbeJSON, &recipe.OptimizationPolicy{Enabled: true})
@@ -249,6 +333,9 @@ func TestStandaloneSlotWaitIsCancellable(t *testing.T) {
 	got, _ := engine.Status(context.Background(), res.ID)
 	if got.Status != StatusCancelled {
 		t.Fatalf("status = %s", got.Status)
+	}
+	if mock.benchmarkCancelCalls != 0 || mock.cancelCalls != 0 {
+		t.Fatalf("cancelled a job the worker never created: benchmark=%d transcode=%d", mock.benchmarkCancelCalls, mock.cancelCalls)
 	}
 	before := mock.benchmarkSubmitCalls
 	if err := engine.ReconcileOnce(context.Background()); err != nil {

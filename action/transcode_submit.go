@@ -42,6 +42,14 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 		}
 		delete(ec.State, "retry_not_before")
 	}
+	// A worker that refused a submit as busy asked for a pause. Only a new
+	// write waits for it, before any capability probe; reconciling an
+	// uncertain submit is a read and never waits.
+	if !getBool(ec.State, "transcode_reconcile") {
+		if res, waiting := e.workerBusyBackoff(ec, transcodeSlotWaitReason); waiting {
+			return res, nil
+		}
+	}
 	cleanPath := getString(ec.State, "resolved_path")
 	if cleanPath == "" {
 		cleanPath = getString(ec.Inputs, "path")
@@ -143,6 +151,7 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 				ec.State["output_path"] = candidatePath
 				ec.State["transcode_submitted"] = true
 				clearTranscodeReconcileFlags(ec)
+				clearWorkerBusy(ec)
 				e.observeTranscodeStatus(ec, st)
 				if st.CandidatePath != "" {
 					ec.State["candidate_path"] = st.CandidatePath
@@ -162,11 +171,6 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 	// Admission critical section: when the child belongs to a batch, hold the
 	// parent's durable lease across the policy re-read, identity persistence and
 	// the submit outcome so Engine.Cancel cannot interleave a confirmed cancel.
-	// A worker that refused a submit as busy asked for a pause; only new
-	// writes wait for it, reconciliation above is a read.
-	if res, waiting := e.workerBusyBackoff(ec, transcodeSlotWaitReason); waiting {
-		return res, nil
-	}
 	lease, blockedRes, handled := e.beginAdmission(ctx, ec, "transcode")
 	if handled {
 		return blockedRes, nil
@@ -352,7 +356,8 @@ const workerBusyRetryMargin = time.Second
 // and it lasts until a slot frees up or the action is cancelled, the same way
 // batch children wait. The reconciler resumes it: next_poll_at honours
 // Retry-After through workerBusyNotBeforeKey.
-func (e *Engine) workerBusyWait(ec *ExecutionContext, err error, reason string, outputs map[string]any) StepResult {
+func (e *Engine) workerBusyWait(ec *ExecutionContext, err error, phase, reason string, outputs map[string]any) StepResult {
+	recordWorkerBusyHistory(ec, phase, err.Error())
 	if he, ok := transcodeHTTPError(err); ok && he.RetryAfter > 0 {
 		ec.State[workerBusyNotBeforeKey] = e.now().Add(he.RetryAfter + workerBusyRetryMargin).Format(time.RFC3339Nano)
 	} else {
@@ -377,12 +382,51 @@ func (e *Engine) workerBusyBackoff(ec *ExecutionContext, reason string) (StepRes
 	return StepResult{}, false
 }
 
-// clearWorkerBusy drops slot-wait markers once the worker accepted a job.
+// clearWorkerBusy drops slot-wait markers once the worker accepted a job, so
+// the busy refusal is not reported as the job's failure class afterwards.
 func clearWorkerBusy(ec *ExecutionContext) {
 	for _, key := range []string{workerBusyNotBeforeKey, "worker_busy"} {
 		delete(ec.State, key)
 		delete(ec.Outputs, key)
 	}
+	if getString(ec.State, "failure_classification") == string(resilience.WorkerBusy) {
+		for _, key := range []string{"failure_classification", "error_class"} {
+			delete(ec.State, key)
+			delete(ec.Outputs, key)
+		}
+	}
+}
+
+// awaitingBusySlot reports that the pending submit was refused as busy and
+// not sent again yet: the worker holds no job under that identity.
+func awaitingBusySlot(ec *ExecutionContext, submittedKey, reconcileKey string) bool {
+	return getBool(ec.State, "worker_busy") && !getBool(ec.State, submittedKey) && !getBool(ec.State, reconcileKey)
+}
+
+// recordWorkerBusyHistory keeps one history entry per run of busy refusals in
+// a phase, counting them; a long slot wait would otherwise add one per poll.
+func recordWorkerBusyHistory(ec *ExecutionContext, phase, msg string) {
+	var last map[string]any
+	switch v := ec.State["failure_history"].(type) {
+	case []map[string]any:
+		if len(v) > 0 {
+			last = v[len(v)-1]
+		}
+	case []any:
+		if len(v) > 0 {
+			last, _ = v[len(v)-1].(map[string]any)
+		}
+	}
+	if last != nil && getString(last, "phase") == phase && getString(last, "classification") == string(resilience.WorkerBusy) {
+		count := getInt(last, "count")
+		if count < 1 {
+			count = 1
+		}
+		last["count"] = count + 1
+		last["last_at"] = time.Now().UTC().Format(time.RFC3339)
+		return
+	}
+	appendFailureHistory(ec, phase, string(resilience.WorkerBusy), msg)
 }
 
 const transcodeSlotWaitReason = "Waiting for a free worker slot to start the encode"
@@ -390,13 +434,13 @@ const transcodeSlotWaitReason = "Waiting for a free worker slot to start the enc
 func (e *Engine) handleTransientFailure(ec *ExecutionContext, plan *transcode.Plan, err error, phase string) (StepResult, error) {
 	class := classifyWorkerFailure(err)
 	ec.State["failure_classification"] = string(class)
-	appendFailureHistory(ec, phase, string(class), err.Error())
 	if class == resilience.WorkerBusy {
-		return e.workerBusyWait(ec, err, transcodeSlotWaitReason, map[string]any{
+		return e.workerBusyWait(ec, err, phase, transcodeSlotWaitReason, map[string]any{
 			"attempt":     getInt(ec.State, "attempt"),
 			"retry_count": getInt(ec.State, "retry_count"),
 		}), nil
 	}
+	appendFailureHistory(ec, phase, string(class), err.Error())
 	retries := getInt(ec.State, "retry_count")
 	attempt := getInt(ec.State, "attempt")
 	if attempt <= 0 {

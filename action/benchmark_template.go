@@ -97,6 +97,7 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 				ec.State["benchmark_submitted"] = true
 				ec.State["benchmark_job_id"] = id
 				delete(ec.State, "benchmark_reconcile")
+				clearWorkerBusy(ec)
 				if perr := e.persistExecutionState(ctx, ec); perr != nil {
 					return StepResult{}, perr
 				}
@@ -611,7 +612,9 @@ const benchmarkSlotWaitReason = "Waiting for a free worker slot to start the ben
 func (e *Engine) handleBenchmarkTransientFailure(ec *ExecutionContext, plan *transcode.Plan, err error, phase string) (StepResult, error) {
 	class := classifyWorkerFailure(err)
 	ec.State["failure_classification"] = string(class)
-	appendFailureHistory(ec, phase, string(class), err.Error())
+	if class != resilience.WorkerBusy {
+		appendFailureHistory(ec, phase, string(class), err.Error())
+	}
 
 	retries := getInt(ec.State, "benchmark_retry_count")
 	attempt := getInt(ec.State, "benchmark_attempt")
@@ -620,7 +623,7 @@ func (e *Engine) handleBenchmarkTransientFailure(ec *ExecutionContext, plan *tra
 	}
 
 	if class == resilience.WorkerBusy {
-		return e.workerBusyWait(ec, err, benchmarkSlotWaitReason, map[string]any{
+		return e.workerBusyWait(ec, err, phase, benchmarkSlotWaitReason, map[string]any{
 			"benchmark_attempt":     attempt,
 			"benchmark_retry_count": retries,
 		}), nil
