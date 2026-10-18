@@ -3125,6 +3125,48 @@ test("the original's re-check keeps a waiting reason and also shows for a skippe
   assert.match(progressText(h.run('telemetry(progressJob)')), /Checking the original is unchanged/);
 });
 
+test("saving the recovery copy names and measures each stage instead of a frozen step", () => {
+  const h = harness();
+  h.run(`globalThis.promotionJob = {id:"promote",status:"running",current_step:2,
+    stages:["plan_promotion","approve_promotion","preserve_original","import_candidate","remove_old_file","rename_candidate","rescan_library","finalize_promotion"].map(name=>({name}))};`);
+  // Without coordinator work the step itself is all there is to show.
+  assert.match(progressText(h.run('telemetry(promotionJob)')), /Step 3\/8 · Save and verify recovery copy/);
+
+  h.run('promotionJob.work={phase:"waiting_for_hash_slot",total_bytes:34e9};');
+  const waiting = h.run('telemetry(promotionJob)');
+  assert.match(progressText(waiting), /Step 3\/8 · Save and verify recovery copy · Waiting for a hash slot/);
+  assert.equal(meterOf(waiting), undefined);
+
+  for (const [phase, label] of [
+    ["verifying_original", "Re-checking the original"],
+    ["verifying_candidate", "Re-checking the converted file"],
+    ["copying_recovery", "Copying the recovery copy"],
+    ["verifying_recovery", "Verifying the recovery copy"],
+  ]) {
+    h.run(`promotionJob.work={phase:"${phase}",bytes_read:17e9,total_bytes:34e9};`);
+    const element = h.run('telemetry(promotionJob)');
+    assert.match(progressText(element), new RegExp(`Step 3/8 · Save and verify recovery copy · ${label} · 50%.*17\\.00 GB / 34\\.00 GB`));
+    assert.equal(meterOf(element).max, 34e9);
+    assert.equal(meterOf(element).value, 17e9);
+  }
+  // Only the whole file reads as 100%.
+  h.run('promotionJob.work={phase:"copying_recovery",bytes_read:34e9-1,total_bytes:34e9};');
+  assert.match(h.run('postEncodeWork(promotionJob).label'), / · 99%$/);
+
+  // The same stage reads correctly as a batch replacement's file activity.
+  h.run('promotionJob.work={phase:"verifying_recovery",bytes_read:1e9,total_bytes:4e9};');
+  h.run('globalThis.batchJob={status:"running",activities:[{...promotionJob,id:"promote"}]};');
+  assert.equal(h.run('batchFileActivity({status:"running",child_action_id:"promote"},batchJob)'), "Verifying the recovery copy · 25% · 1.00 GB / 4.00 GB");
+
+  // Another step's leftover work is not the recovery copy's.
+  h.run('promotionJob.current_step=3;');
+  assert.equal(h.run('preserveWork(promotionJob)'), null);
+  assert.match(progressText(h.run('telemetry(promotionJob)')), /Step 4\/8 · Import verified candidate/);
+  // A stopped promotion shows no current work.
+  h.run('promotionJob.current_step=2;promotionJob.status="failed";');
+  assert.equal(h.run('postEncodeWork(promotionJob)'), null);
+});
+
 test("full-output checks and publication after 100% name the converted file and the encode's end", () => {
   for (const [phase, label] of [["validating", "Verifying converted file"], ["publishing", "Saving converted file"]]) {
     const h = finishedEncodeHarness();

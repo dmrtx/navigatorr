@@ -2280,13 +2280,13 @@ function telemetry(job) {
   }
   const after = postEncodeWork(job);
   if (after) {
-    result.append(node("span", [job.activity_file ? `Current: ${job.activity_file.split("/").pop()}` : null, after.label].filter(Boolean).join(" · "), "metadata"));
+    result.append(node("span", [job.activity_file ? `Current: ${job.activity_file.split("/").pop()}` : null, after.step, after.label].filter(Boolean).join(" · "), "metadata"));
     if (after.read != null && after.total > 0) {
       const meter = document.createElement("meter");
       meter.min = 0;
       meter.max = after.total;
       meter.value = after.read;
-      meter.setAttribute("aria-label", `Original checked ${(after.read / after.total * 100).toFixed(1)}%`);
+      meter.setAttribute("aria-label", `${after.measure || "Original checked"} ${(after.read / after.total * 100).toFixed(1)}%`);
       result.append(meter, node("span", `${bytes(after.read)} / ${bytes(after.total)}`, "metadata"));
     }
     if (postEncodeWorkerPhases.includes(w?.transcode_phase) && w.last_progress_at)
@@ -3810,6 +3810,8 @@ const postEncodeWorkerPhases = ["validating", "validating_quality", "publishing"
 // rather than the finished encode or calibration; null while neither applies.
 function postEncodeWork(job) {
   if (!["running", "waiting_external"].includes(job?.status)) return null;
+  const preserve = preserveWork(job);
+  if (preserve) return preserve;
   const w = job.worker || {};
   // Only the full conversion: a finished calibration hands back to the worker.
   const converted = w.transcode_phase === "completed" || w.transcode_status === "completed";
@@ -3825,6 +3827,25 @@ function postEncodeWork(job) {
   if (work.phase === "waiting_for_hash_slot" && (stage === "accept_result" || converted && stage !== "preflight")) return {label: "Waiting to verify original", total};
   if (!converted) return null;
   return {label: ["validate_result", "accept_result"].includes(stage) ? `Conversion finished · ${stageLabel(stage)}` : "Conversion finished"};
+}
+// Saving the recovery copy re-checks the original and the converted file,
+// copies the original and verifies that copy: on a large file, well over
+// 100 GB of storage reads. Name and measure each stage; null outside it.
+const preserveWorkLabels = {waiting_for_hash_slot:"Waiting for a hash slot",verifying_original:"Re-checking the original",verifying_candidate:"Re-checking the converted file",copying_recovery:"Copying the recovery copy",verifying_recovery:"Verifying the recovery copy"};
+function preserveWork(job) {
+  const stages = job?.stages || [];
+  if (stages[job?.current_step]?.name !== "preserve_original") return null;
+  const work = job.work || {};
+  const label = preserveWorkLabels[work.phase];
+  if (!label) return null;
+  const total = Number(work.total_bytes) > 0 ? Number(work.total_bytes) : 0;
+  const step = `Step ${job.current_step + 1}/${stages.length} · ${stageLabel("preserve_original")}`;
+  if (work.phase === "waiting_for_hash_slot") return {label, total, step};
+  const read = Math.max(0, Number(work.bytes_read) || 0);
+  if (!total) return {label, read, total, step};
+  const done = Math.min(read, total);
+  // Floor: 100% only once the whole file has been read.
+  return {label: `${label} · ${Math.floor(done / total * 100)}%`, measure: label, read: done, total, step};
 }
 function postEncodeWorkLabel(work) {
   return work.read != null && work.total > 0 ? `${work.label} · ${bytes(work.read)} / ${bytes(work.total)}` : work.label;
