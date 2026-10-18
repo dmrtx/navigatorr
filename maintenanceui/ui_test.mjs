@@ -3057,6 +3057,90 @@ test("a source hash queued behind others reads as waiting, not stuck at zero byt
   assert.match(h.run('batchFileActivity({status:"running",child_action_id:"child"},progressJob)'), /^Verifying source · /);
 });
 
+function finishedEncodeHarness() {
+  const h = harness();
+  h.run(`Date.now = () => Date.parse("2026-10-16T12:22:54Z");
+    globalThis.progressJob = {id:"file",status:"running",current_step:6,
+      stages:["preflight","submit_benchmark","wait_benchmark","submit_transcode","wait_transcode","validate_result","accept_result"].map(name=>({name})),
+      worker:{transcode_status:"completed",transcode_phase:"completed",progress:100,progress_is_stale:true,
+        last_progress_at:"2026-10-16T12:00:00Z",worker_heartbeat_at:"2026-10-16T12:22:50Z"},
+      work:{phase:"probing_source"}};
+    progressJob.activities=[{...progressJob,id:"child"}];`);
+  return h;
+}
+const meterOf = element => element.children.find(child => child.max != null);
+
+test("a finished encode shows the original's re-check, never Completed", () => {
+  const h = finishedEncodeHarness();
+  // Preflight's last phase is all an older coordinator leaves behind.
+  let text = progressText(h.run('telemetry(progressJob)'));
+  assert.match(text, /Conversion finished · Review converted file/);
+  assert.match(text, /Encode finished /);
+  assert.doesNotMatch(text, /Completed|100\.0%|Measured|Inspecting source/);
+  assert.equal(h.run('queuePresentation(progressJob).status'), "In progress");
+
+  h.run('progressJob.work={phase:"waiting_for_hash_slot",total_bytes:34e9};progressJob.activities[0].work=progressJob.work;');
+  const waiting = h.run('telemetry(progressJob)');
+  assert.match(progressText(waiting), /Waiting to verify original/);
+  assert.equal(meterOf(waiting), undefined);
+  assert.equal(h.run('batchFileActivity({status:"running",child_action_id:"child"},progressJob)'), "Waiting to verify original");
+
+  h.run('progressJob.work={phase:"verifying_original",bytes_read:12e9,total_bytes:34e9};progressJob.activities[0].work=progressJob.work;');
+  const checking = h.run('telemetry(progressJob)');
+  text = progressText(checking);
+  assert.match(text, /Checking the original is unchanged.*12\.00 GB \/ 34\.00 GB.*Encode finished /);
+  assert.doesNotMatch(text, /Completed|100\.0%|Measured/);
+  assert.equal(meterOf(checking).max, 34e9);
+  assert.equal(meterOf(checking).value, 12e9);
+  assert.equal(h.run('batchFileActivity({status:"running",child_action_id:"child"},progressJob)'), "Checking the original is unchanged · 12.00 GB / 34.00 GB");
+
+  // Preflight queues its own source hash; that is not the original's re-check.
+  h.run('progressJob.current_step=0;progressJob.work={phase:"waiting_for_hash_slot",total_bytes:34e9};');
+  assert.doesNotMatch(progressText(h.run('telemetry(progressJob)')), /Waiting to verify original/);
+
+  // Once the step hands the candidate over, telemetry is no longer current work.
+  h.run('progressJob.current_step=6;progressJob.status="waiting_decision";progressJob.work={phase:"verifying_original",bytes_read:34e9,total_bytes:34e9};');
+  assert.equal(h.run('postEncodeWork(progressJob)'), null);
+  // A finished calibration is not a finished conversion.
+  assert.equal(h.run('postEncodeWork({status:"running",worker:{benchmark_status:"completed",phase:"completed"}})'), null);
+});
+
+test("the original's re-check keeps a waiting reason and also shows for a skipped conversion", () => {
+  const h = finishedEncodeHarness();
+  h.run('progressJob.activities[0].waiting_condition="worker_reconciling";progressJob.activities[0].waiting_reason="Coordinator request interrupted";');
+  assert.equal(h.run('batchFileActivity({status:"running",child_action_id:"child"},progressJob)'), "Conversion finished · Review converted file · Coordinator request interrupted");
+
+  // A skipped conversion re-checks the original without any worker telemetry.
+  h.run('delete progressJob.worker;progressJob.activities=[{...progressJob,id:"child"}];');
+  h.run('progressJob.work=progressJob.activities[0].work={phase:"waiting_for_hash_slot",total_bytes:34e9};');
+  assert.equal(h.run('batchFileActivity({status:"running",child_action_id:"child"},progressJob)'), "Waiting to verify original");
+  assert.match(progressText(h.run('telemetry(progressJob)')), /Waiting to verify original/);
+  h.run('progressJob.work=progressJob.activities[0].work={phase:"verifying_original",bytes_read:1e9,total_bytes:34e9};');
+  assert.equal(h.run('batchFileActivity({status:"running",child_action_id:"child"},progressJob)'), "Checking the original is unchanged · 1.00 GB / 34.00 GB");
+  const text = progressText(h.run('telemetry(progressJob)'));
+  assert.match(text, /Checking the original is unchanged.*1\.00 GB \/ 34\.00 GB/);
+  assert.doesNotMatch(text, /Encode finished/);
+  // After a calibration only, too: its "Completed" is not the current work.
+  h.run('progressJob.worker={benchmark_status:"completed",phase:"completed"};');
+  assert.match(progressText(h.run('telemetry(progressJob)')), /Checking the original is unchanged/);
+});
+
+test("full-output checks and publication after 100% name the converted file and the encode's end", () => {
+  for (const [phase, label] of [["validating", "Verifying converted file"], ["publishing", "Saving converted file"]]) {
+    const h = finishedEncodeHarness();
+    h.context.phase = phase;
+    h.run('progressJob.worker.transcode_status="running";progressJob.worker.transcode_phase=phase;');
+    const text = progressText(h.run('telemetry(progressJob)'));
+    assert.match(text, new RegExp(`${label}.*100\\.0%.*Encode finished `));
+    assert.doesNotMatch(text, /Measured /);
+  }
+  const h = finishedEncodeHarness();
+  h.run('progressJob.worker={transcode_status:"running",transcode_phase:"encoding",progress:64,last_progress_at:"2026-10-16T12:22:50Z",worker_heartbeat_at:"2026-10-16T12:22:50Z"};');
+  const text = progressText(h.run('telemetry(progressJob)'));
+  assert.match(text, /Measured /);
+  assert.doesNotMatch(text, /Encode finished/);
+});
+
 test("every shortened main action label is a prefix of its accessible name", () => {
   const h = harness();
   const pairs = JSON.parse(h.run("JSON.stringify(Object.entries(shortActionLabels))"));
