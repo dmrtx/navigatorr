@@ -87,6 +87,10 @@ type WorkerCapabilities struct {
 	// from ffprobe's demuxed payload hashes, and lossless audio is
 	// compacted to AAC.
 	SizeAudioOnly bool `json:"size_audio_only,omitempty"`
+	// SearchBudgetExtension reports a worker that accepts search_extension on
+	// mode benchmarks: the search budget stretches while work keeps finishing,
+	// up to a hard cap. Older workers reject the field.
+	SearchBudgetExtension bool `json:"search_budget_extension,omitempty"`
 	// CompactTranscode reports an executable proof of the compact SDR chain
 	// (setparams, swscale, lut3d and sidedata delete) in the worker FFmpeg.
 	CompactTranscode      bool                           `json:"compact_transcode,omitempty"`
@@ -139,6 +143,7 @@ type fingerprintPayload struct {
 	CoverArt                 bool                           `json:"cover_art,omitempty"`
 	SizeModeV3               bool                           `json:"size_mode_v3,omitempty"`
 	SizeAudioOnly            bool                           `json:"size_audio_only,omitempty"`
+	SearchBudgetExtension    bool                           `json:"search_budget_extension,omitempty"`
 	CompactTranscode         bool                           `json:"compact_transcode,omitempty"`
 	ProtocolVersion          int                            `json:"protocol_version"`
 	WorkerVersion            string                         `json:"worker_version,omitempty"`
@@ -185,6 +190,7 @@ func ComputeCapabilityFingerprint(caps WorkerCapabilities) (string, error) {
 		CoverArt:                 caps.CoverArt,
 		SizeModeV3:               caps.SizeModeV3,
 		SizeAudioOnly:            caps.SizeAudioOnly,
+		SearchBudgetExtension:    caps.SearchBudgetExtension,
 		CompactTranscode:         caps.CompactTranscode,
 		ProtocolVersion:          caps.ProtocolVersion,
 		WorkerVersion:            caps.WorkerVersion,

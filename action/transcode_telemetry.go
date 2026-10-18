@@ -119,6 +119,9 @@ func (e *Engine) observeBenchmarkStatus(ec *ExecutionContext, st transcode.Bench
 	if st.SearchBudgetSeconds > 0 {
 		ec.State["search_budget_seconds"] = st.SearchBudgetSeconds
 	}
+	if st.SearchExtension != nil {
+		ec.State["search_budget_max_seconds"] = st.SearchExtension.MaxSeconds
+	}
 	ec.State["benchmark_comparison_available"] = st.ComparisonAvailable
 	ec.Outputs["benchmark_comparison_available"] = st.ComparisonAvailable
 	ec.State["benchmark_status"] = st.Status

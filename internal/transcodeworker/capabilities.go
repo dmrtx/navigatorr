@@ -224,6 +224,8 @@ func probeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratch
 	// Audio-only size plans stream-copy the video (keeping leading non-key
 	// packets) and prove it unchanged from ffprobe's per-packet hashes.
 	caps.SizeAudioOnly = caps.SizeModeV3
+	// Mode searches may stretch their budget while work keeps finishing.
+	caps.SearchBudgetExtension = true
 	if vtCaps.Available {
 		caps.Encoders[videoToolboxEncoder] = true
 	}

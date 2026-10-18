@@ -911,7 +911,7 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 			e.settleModeSearches(ec, items)
 			admitted := make([]int, 0, availableSlots)
 			for _, idx := range pendingIndices {
-				if batchItemMode(ec, items[idx]) == "" || reserveModeSearch(ec, batchChildKey(ec, items[idx])) {
+				if batchItemMode(ec, items[idx]) == "" || reserveModeSearchUpTo(ec, batchChildKey(ec, items[idx]), batchItemSearchCeiling(ec, items[idx])) {
 					admitted = append(admitted, idx)
 				}
 				if len(admitted) == availableSlots {

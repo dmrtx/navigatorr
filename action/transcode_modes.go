@@ -28,6 +28,16 @@ const SizeModePolicyVersion = optimization.ModePolicyV3
 const modeOperationBudgetSeconds = 3600
 const modeSearchBudgetSeconds = 600
 
+// Size v3 may run a source's search past modeSearchBudgetSeconds while it keeps
+// finishing work, up to this hard cap from the search start. A worker shared
+// with a long encode otherwise spends the base budget on contention, not on
+// the source. Policies frozen before this carry no extension and keep the
+// fixed budget.
+const (
+	sizeSearchMaxSeconds    = 1800
+	sizeSearchSteadySeconds = 180
+)
+
 // ModePolicySnapshot is frozen with each operation. These thresholds are a
 // bounded SDR sample policy, never a claim of perceptual transparency.
 type ModePolicySnapshot struct {
@@ -67,12 +77,40 @@ type ModeSizePolicy struct {
 	// DTS-HD MA) to AAC on their channel bed, like any lossless track; lossy
 	// object audio (E-AC-3 JOC) is still copied.
 	LosslessObjectAudioToAAC bool `json:"lossless_object_audio_to_aac"`
+	// SearchExtension lets the source search run past the base budget while
+	// work keeps finishing. It is absent from snapshots frozen before it
+	// existed, so their digests and fixed budget are unchanged.
+	SearchExtension *transcode.SearchExtension `json:"search_extension,omitempty"`
 }
 
 // sizeModeV3Policy is the frozen size v3 addition. The ladder is x265 only:
 // medium CRF 22-30 first, then one slow family chosen from what failed.
 func sizeModeV3Policy() *ModeSizePolicy {
-	return &ModeSizePolicy{EightBitMain10: true, FallbackQualityValues: []int{16, 18, 20}, FallbackSavingsValues: []int{24, 27, 30}, FinalWindowSeconds: 10, FinalWindowEverySeconds: 600, FinalWindowsMinimum: 5, FinalWindowsMaximum: 12, AudioOnlyFallback: true, LosslessObjectAudioToAAC: true}
+	return &ModeSizePolicy{EightBitMain10: true, FallbackQualityValues: []int{16, 18, 20}, FallbackSavingsValues: []int{24, 27, 30}, FinalWindowSeconds: 10, FinalWindowEverySeconds: 600, FinalWindowsMinimum: 5, FinalWindowsMaximum: 12, AudioOnlyFallback: true, LosslessObjectAudioToAAC: true, SearchExtension: &transcode.SearchExtension{MaxSeconds: sizeSearchMaxSeconds, SteadySeconds: sizeSearchSteadySeconds}}
+}
+
+// searchExtension is the frozen rule for running past the base budget, or nil
+// for a fixed budget.
+func (p *ModePolicySnapshot) searchExtension() *transcode.SearchExtension {
+	if p == nil || p.Size == nil || p.Size.SearchExtension.Validate(p.SearchBudgetSeconds) != nil {
+		return nil
+	}
+	return p.Size.SearchExtension
+}
+
+// searchCeilingSeconds is the most one source's search can run under a frozen
+// policy, read from stored state without verifying its digest: that happens
+// when the policy executes. It falls back to the base budget.
+func searchCeilingSeconds(policy any, base int) int {
+	var snapshot ModePolicySnapshot
+	if b, err := json.Marshal(policy); err != nil || json.Unmarshal(b, &snapshot) != nil {
+		return base
+	}
+	snapshot.SearchBudgetSeconds = base
+	if ext := snapshot.searchExtension(); ext != nil {
+		return ext.MaxSeconds
+	}
+	return base
 }
 
 // ModeCompactPolicy freezes the output shape of compact mode: SDR BT.709 no
@@ -415,18 +453,34 @@ func modeBudgetEntries(ec *ExecutionContext) map[string]SearchBudgetEntry {
 // separate cap: a flat cap admitted only six sources of a season and blocked
 // retries. The frozen operation_budget_seconds is kept for digest
 // compatibility only.
+//
+// The reservation is the longest the search can run: the hard cap of a frozen
+// search extension, else the base budget.
 func reserveModeSearch(ec *ExecutionContext, key string) bool {
+	return reserveModeSearchUpTo(ec, key, searchCeilingSeconds(ec.State["mode_policy"], getInt(ec.State, "search_budget_seconds")))
+}
+
+func reserveModeSearchUpTo(ec *ExecutionContext, key string, ceiling int) bool {
 	entries := modeBudgetEntries(ec)
 	if _, ok := entries[key]; ok {
 		return true
 	}
-	sourceBudget := getInt(ec.State, "search_budget_seconds")
-	if sourceBudget <= 0 {
+	if getInt(ec.State, "search_budget_seconds") <= 0 || ceiling <= 0 {
 		return false
 	}
-	entries[key] = SearchBudgetEntry{Reserved: float64(sourceBudget)}
+	entries[key] = SearchBudgetEntry{Reserved: float64(ceiling)}
 	ec.State["search_budget_entries"] = entries
 	return true
+}
+
+// batchItemSearchCeiling is reserveModeSearch's ceiling for one batch item,
+// whose revised goal carries its own frozen policy.
+func batchItemSearchCeiling(ec *ExecutionContext, item store.TranscodeBatchItem) int {
+	policy := ec.State["mode_policy"]
+	if row, ok := stateObject(ec.State, "batch_item_settings")[item.ItemKey].(map[string]any); ok && getString(row, "mode") != "" {
+		policy = row["mode_policy"]
+	}
+	return searchCeilingSeconds(policy, getInt(ec.State, "search_budget_seconds"))
 }
 
 func (e *Engine) settleModeSearches(ec *ExecutionContext, items []store.TranscodeBatchItem) {

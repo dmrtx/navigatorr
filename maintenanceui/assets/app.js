@@ -3882,11 +3882,12 @@ function renderPhaseCosts(host, job) {
   const entries = Object.entries(job.phase_costs || {});
   const search = job.worker?.benchmark_search_seconds;
   const sourceBudget = job.worker?.search_budget_seconds;
+  const maxBudget = job.worker?.search_budget_max_seconds;
   if (!entries.length && search == null && sourceBudget == null) return;
   const detail = node("details", "", "phase-costs");
   detail.append(node("summary", "Measured phase costs"));
   detail.append(node("p", "Elapsed wall measurements include synchronous I/O. Coordinator measurements count returned invocations and exclude waits between them. CPU time is unknown; phases may overlap and are not added into a total.", "metadata"));
-  if (search != null || sourceBudget != null) detail.append(node("p", `Sample search measured wall: ${search == null ? "Unknown" : search + " s"} · Budget per file: ${sourceBudget == null ? "Unknown" : sourceBudget + " s"}. Pending reservations are not measured consumption.`, "metadata"));
+  if (search != null || sourceBudget != null) detail.append(node("p", `Sample search measured wall: ${search == null ? "Unknown" : search + " s"} · Budget per file: ${sourceBudget == null ? "Unknown" : sourceBudget + " s"}${maxBudget > sourceBudget ? `, extended to at most ${maxBudget} s while samples keep finishing` : ""}. Pending reservations are not measured consumption.`, "metadata"));
   const table = node("table");
   const header = node("tr");
   for (const label of ["Phase", "Wall time", "Invocations", "NAS read", "NAS written", "Cache hits / misses"]) header.append(node("th", label));

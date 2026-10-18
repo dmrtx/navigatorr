@@ -162,10 +162,20 @@ func (p *benchmarkProgressReporter) persistLocked() {
 
 func (p *benchmarkProgressReporter) CompleteUnit() {
 	p.ResolveUnits(1)
+	p.noteWork()
 }
 
 func (p *benchmarkProgressReporter) ResolveUnit() {
 	p.ResolveUnits(1)
+	p.noteWork()
+}
+
+// noteWork tells the search budget that real work finished. Skipped units
+// never do: a pruned family must not look like steady progress.
+func (p *benchmarkProgressReporter) noteWork() {
+	if p != nil && p.record != nil {
+		p.record.searchBudget.noteUnit()
+	}
 }
 
 func (p *benchmarkProgressReporter) SkipUnits(n int) {

@@ -2568,6 +2568,23 @@ test("phase cost detail shows known cache observations and distinguishes search 
  const h=harness();h.run('renderPhaseCosts($("detail-summary"),{worker:{benchmark_search_seconds:4,search_budget_seconds:600,operation_search_budget_seconds:3600},phase_costs:{worker_staging:{duration_ms:1,attempts:1,cache_hits:0,cache_misses:1}}});');const rendered=JSON.stringify(h.elements.get("detail-summary").children);assert.match(rendered,/0 \/ 1/);assert.match(rendered,/measured wall: 4 s/);assert.match(rendered,/Budget per file: 600 s/);assert.doesNotMatch(rendered,/Operation budget/);assert.match(rendered,/reservations are not measured consumption/);
 });
 
+test("phase cost detail names the extended search ceiling only when the worker reports one",()=>{
+ const render=worker=>{const h=harness();h.context.job={worker,phase_costs:{}};h.run('renderPhaseCosts($("detail-summary"),job);');return JSON.stringify(h.elements.get("detail-summary").children);};
+ assert.match(render({benchmark_search_seconds:900,search_budget_seconds:600,search_budget_max_seconds:1800}),/Budget per file: 600 s, extended to at most 1800 s while samples keep finishing/);
+ assert.doesNotMatch(render({benchmark_search_seconds:4,search_budget_seconds:600}),/extended/);
+ assert.doesNotMatch(render({benchmark_search_seconds:4,search_budget_seconds:600,search_budget_max_seconds:600}),/extended/);
+});
+
+test("a search that ran out of time on a busy worker says so and suggests trying again, whole",()=>{
+ const h=harness();
+ const busy="Ran out of time while the worker was busy with other jobs; this says nothing about the file. Try again when it is idle. Original preserved";
+ h.context.busy=busy;
+ assert.equal(h.run('shortJobReason(busy)'),busy);
+ const job={id:"child",action_name:"transcode_media",status:"waiting_decision",reason_code:"search_budget_exhausted",waiting_reason:busy,mode:"size"};
+ h.context.job=job;
+ assert.equal(h.run('queuePresentation(job).status'),"Needs attention");
+});
+
 
 test("batch outcome buttons reveal current decisions, readable skips and ready replacements while another file waits", async () => {
   const h = harness();

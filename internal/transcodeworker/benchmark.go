@@ -39,6 +39,8 @@ type BenchmarkRecord struct {
 	SearchSeconds             *float64                              `json:"search_seconds,omitempty"`
 	PhaseCosts                map[string]transcode.PhaseCost        `json:"phase_costs,omitempty"`
 	SearchBudgetSeconds       int                                   `json:"search_budget_seconds,omitempty"`
+	SearchExtension           *transcode.SearchExtension            `json:"search_extension,omitempty"`
+	SearchWorkerBusy          bool                                  `json:"search_worker_busy,omitempty"`
 	SearchStartedAt           time.Time                             `json:"search_started_at,omitzero"`
 	ReasonCode                string                                `json:"reason_code,omitempty"`
 	Mode                      string                                `json:"mode,omitempty"`
@@ -80,6 +82,10 @@ type BenchmarkRecord struct {
 	ExitCode                  int                                   `json:"exit_code,omitempty"`
 	Error                     string                                `json:"error,omitempty"`
 	Evidence                  *BenchmarkExecutionEvidence           `json:"evidence,omitempty"`
+
+	// searchBudget is the live budget of the running search; progress
+	// reporters tell it when a unit of work finishes. It is never persisted.
+	searchBudget *searchBudget
 }
 
 // BenchmarkRunner defines the pluggable executor interface for running benchmarks.
@@ -453,7 +459,7 @@ func (w *Worker) BenchmarkSubmit(ctx context.Context, req transcode.BenchmarkReq
 	}
 
 	record := &BenchmarkRecord{
-		ModePolicyVersion: req.ModePolicyVersion, Automatic: req.Automatic, QualityPruning: req.QualityPruning, MinSavingsPercent: req.MinSavingsPercent, Mode: req.Mode, SearchDeadline: req.SearchDeadline, SearchBudgetSeconds: req.SearchBudgetSeconds,
+		ModePolicyVersion: req.ModePolicyVersion, Automatic: req.Automatic, QualityPruning: req.QualityPruning, MinSavingsPercent: req.MinSavingsPercent, Mode: req.Mode, SearchDeadline: req.SearchDeadline, SearchBudgetSeconds: req.SearchBudgetSeconds, SearchExtension: req.SearchExtension.Clone(),
 		Allow8BitTo10Bit:          req.Allow8BitTo10Bit,
 		Compact:                   req.Compact.Clone(),
 		ProtocolVersion:           transcode.WorkerProtocolVersion,
@@ -723,6 +729,8 @@ func (w *Worker) BenchmarkStatus(ctx context.Context, jobID string) (transcode.B
 	st.ReasonCode = record.ReasonCode
 	st.SearchStartedAt = record.SearchStartedAt
 	st.SearchBudgetSeconds = record.SearchBudgetSeconds
+	st.SearchExtension = record.SearchExtension.Clone()
+	st.SearchWorkerBusy = record.SearchWorkerBusy
 	st.SourcePath = record.Source
 	st.Metric = record.Metric
 	st.SamplesPlanned = len(record.Samples)
@@ -980,6 +988,9 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) 
 		record.PhaseCosts = map[string]transcode.PhaseCost{}
 	}
 	record.PhaseCosts["staging"] = stageCost
+	var budget *searchBudget
+	stopBudget := func() {}
+	defer func() { stopBudget() }()
 	if runErr == nil {
 		_ = w.UpdateBenchmarkProgress(jobID, runToken, 0, "probing_source")
 		record.Source = effectiveSource
@@ -1009,9 +1020,21 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) 
 					return budgetErr
 				}
 			}
+			// The context deadline is the hard stop. An elastic budget also
+			// cancels it earlier with a cause once the base budget has passed
+			// without steady progress.
+			budget = newSearchBudget(record.SearchStartedAt, record.SearchBudgetSeconds, record.SearchExtension)
+			record.searchBudget = budget
+			var causeCancel context.CancelCauseFunc
+			ctx, causeCancel = context.WithCancelCause(ctx)
+			defer causeCancel(nil)
 			var budgetCancel context.CancelFunc
-			ctx, budgetCancel = context.WithDeadline(ctx, record.SearchStartedAt.Add(time.Duration(record.SearchBudgetSeconds)*time.Second))
+			ctx, budgetCancel = context.WithDeadline(ctx, budget.hardDeadline())
 			defer budgetCancel()
+			stopBudget = budget.watch(ctx, causeCancel, func() bool {
+				_, used, _ := w.slotSnapshot(jobID)
+				return used > 1
+			})
 		} else if !record.SearchDeadline.IsZero() {
 			var budgetCancel context.CancelFunc
 			ctx, budgetCancel = context.WithDeadline(ctx, record.SearchDeadline)
@@ -1020,6 +1043,9 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) 
 		searchStart := time.Now()
 		runErr = runner.RunBenchmark(ctx, w, record)
 		searchSeconds := time.Since(searchStart).Seconds()
+		// The search is over; later optional work must not be cut by the
+		// elastic watcher (the hard deadline still applies, as before).
+		stopBudget()
 		if resumedSearchCostUnknown {
 			record.SearchSeconds = nil
 		} else {
@@ -1075,9 +1101,10 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) 
 	if runErr != nil {
 		latest.Status = "failed"
 		latest.Error = runErr.Error()
-		if (record.SearchBudgetSeconds > 0 || !record.SearchDeadline.IsZero()) && errors.Is(runErr, context.DeadlineExceeded) {
+		if (record.SearchBudgetSeconds > 0 || !record.SearchDeadline.IsZero()) && (errors.Is(runErr, context.DeadlineExceeded) || budget.wasStopped()) {
 			latest.ReasonCode = "search_budget_exhausted"
 			latest.Error = "search_budget_exhausted: bounded search stopped; no claim about untested candidates"
+			latest.SearchWorkerBusy = budget.workerBusy()
 		}
 		latest.FinishedAt = time.Now().UTC()
 		latest.HeartbeatAt = time.Now().UTC()
