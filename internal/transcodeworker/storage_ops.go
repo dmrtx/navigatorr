@@ -3,8 +3,11 @@ package transcodeworker
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"io/fs"
 	"os"
@@ -280,6 +283,13 @@ func pathExists(path string) (bool, error) {
 // cancelled context aborts promptly. Generic read failures are reported as
 // ErrStorageIO, never as source corruption.
 func copyWithContext(ctx context.Context, source string, dst *os.File) (int64, error) {
+	return copyWithContextHashed(ctx, source, dst, nil)
+}
+
+// copyWithContextHashed is copyWithContext that also feeds every byte written
+// to dst into h (when non-nil), so a copy can establish a digest without a
+// second read.
+func copyWithContextHashed(ctx context.Context, source string, dst *os.File, h io.Writer) (int64, error) {
 	src, err := os.Open(source)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -299,6 +309,9 @@ func copyWithContext(ctx context.Context, source string, dst *os.File) (int64, e
 		if n > 0 {
 			if _, werr := dst.Write(buf[:n]); werr != nil {
 				return written, fmt.Errorf("%w: writing %s: %v", ErrStorageIO, dst.Name(), werr)
+			}
+			if h != nil {
+				_, _ = h.Write(buf[:n])
 			}
 			written += int64(n)
 		}
@@ -347,13 +360,19 @@ func statWithRetry(path string) (os.FileInfo, error) {
 // (defaulting to 0644 when zero), Syncs and Closes dst, then verifies that the
 // on-disk temp size matches the expected source size.
 func copyRegularFileTo(ctx context.Context, source string, dst *os.File, wantSize int64, perm os.FileMode) error {
+	return copyRegularFileToHashed(ctx, source, dst, wantSize, perm, nil)
+}
+
+// copyRegularFileToHashed is copyRegularFileTo that hashes the copied bytes
+// into h when h is non-nil.
+func copyRegularFileToHashed(ctx context.Context, source string, dst *os.File, wantSize int64, perm os.FileMode, h io.Writer) error {
 	if perm == 0 {
 		perm = 0o644
 	}
 	if err := dst.Chmod(perm); err != nil {
 		return fmt.Errorf("%w: setting mode on %s: %v", ErrStorageIO, dst.Name(), err)
 	}
-	written, err := copyWithContext(ctx, source, dst)
+	written, err := copyWithContextHashed(ctx, source, dst, h)
 	if err != nil {
 		return err
 	}
@@ -514,6 +533,9 @@ func commitNoReplaceWith(ctx context.Context, src, dst string, rename, link func
 	err := commit(rename)
 	switch {
 	case err == nil:
+		if rep := publicationReportFrom(ctx); rep != nil {
+			rep.Method = publishMethodRename
+		}
 		return nil
 	case errors.Is(err, errPodcastPublicationCancelled):
 		return err
@@ -536,8 +558,30 @@ func commitNoReplaceWith(ctx context.Context, src, dst string, rename, link func
 			// Neither an exclusive rename nor hard links are usable on this
 			// filesystem. Fall back to an exclusive-create copy, which still
 			// cannot clobber a concurrent destination; its own failure is
-			// surfaced rather than degrading to a clobbering rename.
-			if cerr := copyNoReplace(ctx, src, dst); cerr != nil {
+			// surfaced rather than degrading to a clobbering rename. The copy
+			// reads the local candidate when the caller supplied it, so the
+			// share is not read back, and it is always logged and reported.
+			rep := publicationReportFrom(ctx)
+			copySrc, h := copyFallbackSource(rep, src)
+			cerr := exclusiveCopy(ctx, copySrc, dst, nil, hashWriter(h))
+			if cerr == nil {
+				cerr = checkCopiedDigest(rep, h, dst)
+			}
+			if cerr == nil {
+				_ = os.Remove(src)
+			}
+			logCopyFallback(publishMethodCopy, dst)
+			if rep != nil {
+				rep.Method = publishMethodCopy
+				rep.CopyFallback = true
+				if size, ok := fileSize(copySrc); ok {
+					rep.WrittenBytes += size
+					if copySrc == src {
+						rep.ReadBytes += size
+					}
+				}
+			}
+			if cerr != nil {
 				if errors.Is(cerr, fs.ErrExist) {
 					return fmt.Errorf("%w: %s", ErrDestinationExists, dst)
 				}
@@ -552,10 +596,29 @@ func commitNoReplaceWith(ctx context.Context, src, dst string, rename, link func
 			}
 			return nil
 		}
+		if rep := publicationReportFrom(ctx); rep != nil {
+			rep.Method = publishMethodLink
+		}
 		return nil
 	default:
 		return fmt.Errorf("%w: publishing %s to %s: %v", ErrStorageIO, src, dst, err)
 	}
+}
+
+// hashWriter returns h as an io.Writer, or nil when there is nothing to hash.
+func hashWriter(h hash.Hash) io.Writer {
+	if h == nil {
+		return nil
+	}
+	return h
+}
+
+func fileSize(path string) (int64, bool) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return 0, false
+	}
+	return fi.Size(), true
 }
 
 // copyNoReplace publishes src at dst with an exclusive create followed by a
@@ -579,44 +642,9 @@ func copyNoReplace(ctx context.Context, src, dst string) error {
 // after the exclusive destination is created but before any bytes are copied.
 // It lets tests inject a mid-copy failure and observe cleanup.
 func copyNoReplaceWith(ctx context.Context, src, dst string, hook func(dstPath string) error) (err error) {
-	info, err := regularFileInfo(src)
-	if err != nil {
+	if err := exclusiveCopy(ctx, src, dst, hook, nil); err != nil {
 		return err
 	}
-
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
-	if err != nil {
-		if os.IsExist(err) {
-			return fs.ErrExist
-		}
-		return fmt.Errorf("%w: creating %s: %v", ErrStorageIO, dst, err)
-	}
-	published := false
-	// preserve keeps a written-and-closed destination when its post-close
-	// visibility could not be established; the bytes may be a complete, valid
-	// copy and must not be destroyed before content-equality reconciliation.
-	preserve := false
-	defer func() {
-		if !published && !preserve {
-			_ = out.Close()
-			_ = os.Remove(dst)
-		}
-	}()
-
-	if hook != nil {
-		if herr := hook(dst); herr != nil {
-			return herr
-		}
-	}
-
-	if err := copyRegularFileTo(ctx, src, out, info.Size(), info.Mode().Perm()); err != nil {
-		if errors.Is(err, errPostCloseUnverified) {
-			preserve = true
-			return fmt.Errorf("%w: %v", ErrAmbiguousPublication, err)
-		}
-		return err
-	}
-	published = true
 	// dst is fully written and verified; dropping src is cleanup. A failure
 	// here leaves a redundant source name but never corrupts dst.
 	_ = os.Remove(src)
@@ -658,6 +686,24 @@ func StageInputAtomic(ctx context.Context, source, stagedFinal string) error {
 // tests observe that stagedFinal is still absent at commit time and inject a
 // race.
 func stageInputAtomic(ctx context.Context, source, stagedFinal string, hook func(tempPath string) error) (err error) {
+	return stageInputAtomicWith(ctx, source, stagedFinal, hook, nil)
+}
+
+// stageInputAtomicHashed stages like StageInputAtomic and returns the SHA-256
+// of the bytes it copied, computed during the copy, plus their count.
+func stageInputAtomicHashed(ctx context.Context, source, stagedFinal string) (string, int64, error) {
+	h := sha256.New()
+	if err := stageInputAtomicWith(ctx, source, stagedFinal, nil, h); err != nil {
+		return "", 0, err
+	}
+	info, err := os.Lstat(stagedFinal)
+	if err != nil {
+		return "", 0, fmt.Errorf("%w: statting staged input %s: %v", ErrStorageIO, stagedFinal, err)
+	}
+	return hex.EncodeToString(h.Sum(nil)), info.Size(), nil
+}
+
+func stageInputAtomicWith(ctx context.Context, source, stagedFinal string, hook func(tempPath string) error, h io.Writer) (err error) {
 	if strings.TrimSpace(source) == "" {
 		return fmt.Errorf("%w: empty source path", ErrSourceInvalid)
 	}
@@ -697,7 +743,7 @@ func stageInputAtomic(ctx context.Context, source, stagedFinal string, hook func
 		}
 	}()
 
-	if err := copyRegularFileTo(ctx, source, tmp, info.Size(), info.Mode().Perm()); err != nil {
+	if err := copyRegularFileToHashed(ctx, source, tmp, info.Size(), info.Mode().Perm(), h); err != nil {
 		return err
 	}
 	if hook != nil {
@@ -742,13 +788,24 @@ func FinalizeOutputAtomic(ctx context.Context, localCandidate, destination, jobI
 // invoked after the partial is written/synced/verified but before the commit.
 // It lets tests observe that destination is still absent and inject a race.
 func finalizeOutputAtomic(ctx context.Context, localCandidate, destination, jobID string, hook func(partialPath string) error) (err error) {
-	return finalizeOutputAtomicWith(ctx, localCandidate, destination, jobID, hook, commitNoReplace)
+	return finalizeOutputAtomicCaps(ctx, localCandidate, destination, jobID, hook, commitNoReplace, sharedCommitCaps)
 }
 
 // finalizeOutputAtomicWith is finalizeOutputAtomic with an injectable
 // publication primitive, so tests can exercise filesystems where the default
-// no-clobber commit has to fall back to the exclusive-copy path.
+// no-clobber commit has to fall back to the exclusive-copy path. It never
+// consults or updates the shared per-share capability cache.
 func finalizeOutputAtomicWith(ctx context.Context, localCandidate, destination, jobID string, hook func(partialPath string) error, commit commitFunc) (err error) {
+	return finalizeOutputAtomicCaps(ctx, localCandidate, destination, jobID, hook, commit, nil)
+}
+
+// finalizeOutputAtomicCaps is the finalizer body. With caps, a share already
+// known to support neither an atomic no-replace rename nor hard links skips
+// the partial and its second transfer: the final name is created exclusively
+// and written straight from the local candidate (M written once instead of a
+// partial upload plus a copy). That path is exactly as non-atomic as the copy
+// fallback it replaces, and it is logged and reported the same way.
+func finalizeOutputAtomicCaps(ctx context.Context, localCandidate, destination, jobID string, hook func(partialPath string) error, commit commitFunc, caps *commitCaps) (err error) {
 	if strings.TrimSpace(localCandidate) == "" {
 		return fmt.Errorf("%w: empty local candidate path", ErrSourceInvalid)
 	}
@@ -778,6 +835,41 @@ func finalizeOutputAtomicWith(ctx context.Context, localCandidate, destination, 
 		return fmt.Errorf("%w: creating destination directory %s: %v", ErrStorageIO, dir, err)
 	}
 
+	rep := publicationReportFrom(ctx)
+	if rep == nil {
+		rep = &publicationReport{}
+		ctx = withPublicationReport(ctx, rep)
+	}
+	if strings.TrimSpace(rep.localSource) == "" {
+		rep.localSource = localCandidate
+	}
+	_, guarded := ctx.Value(podcastPublicationGuardKey{}).(podcastPublicationGuard)
+	if !guarded && caps.atomicUnsupported(dir) {
+		var h hash.Hash
+		if rep.expectSHA != "" {
+			h = sha256.New()
+		}
+		cerr := exclusiveCopy(ctx, localCandidate, destination, nil, hashWriter(h))
+		if cerr == nil {
+			cerr = checkCopiedDigest(rep, h, destination)
+		}
+		logCopyFallback(publishMethodDirect, destination)
+		rep.Method = publishMethodDirect
+		rep.CopyFallback = true
+		rep.WrittenBytes += info.Size()
+		switch {
+		case cerr == nil:
+			syncDir(dir)
+			return nil
+		case errors.Is(cerr, fs.ErrExist):
+			return fmt.Errorf("%w: %s", ErrDestinationExists, destination)
+		case errors.Is(cerr, ErrAmbiguousPublication):
+			return cerr
+		default:
+			return fmt.Errorf("%w: publishing %s to %s: %v", ErrStorageIO, localCandidate, destination, cerr)
+		}
+	}
+
 	partial := destination + ".partial." + jobID
 
 	// Replace only this job's exact partial. Never glob or delete unrelated
@@ -805,6 +897,7 @@ func finalizeOutputAtomicWith(ctx context.Context, localCandidate, destination, 
 	if err := copyRegularFileTo(ctx, localCandidate, dst, info.Size(), info.Mode().Perm()); err != nil {
 		return err
 	}
+	rep.WrittenBytes += info.Size()
 	if hook != nil {
 		if herr := hook(partial); herr != nil {
 			return fmt.Errorf("%w: finalize hook: %w", ErrStorageIO, herr)
@@ -817,7 +910,13 @@ func finalizeOutputAtomicWith(ctx context.Context, localCandidate, destination, 
 	// No-clobber commit: fails with ErrDestinationExists if a destination
 	// appeared after the pre-check, preserving its bytes.
 	if err := commit(ctx, partial, destination); err != nil {
+		if rep.CopyFallback {
+			caps.markAtomicUnsupported(dir)
+		}
 		return err
+	}
+	if rep.CopyFallback {
+		caps.markAtomicUnsupported(dir)
 	}
 	committed = true
 	syncDir(dir)

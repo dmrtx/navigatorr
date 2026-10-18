@@ -137,6 +137,7 @@ func resolveOperationalForExecution(job *JobRecord) (*resolvedOperational, error
 // executeOperational drives a job from (unstaged) input through encode to the
 // EncodeComplete checkpoint, then hands off to finalization.
 func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string, job *JobRecord, r *resolvedOperational) error {
+	ctx = withDigestMemo(ctx, w.localWorkDir())
 	if err := w.ensureExternalHealthy(ctx, job.Source); err != nil {
 		return w.failJobTerminal(jobDir, jobFile, job, fmt.Errorf("staging source storage unhealthy: %w", err))
 	}
@@ -149,8 +150,16 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 	// Cache population is best effort, but the source identity is not. Check
 	// the staged local bytes even when caching is disabled or staging resumed.
 	hashStart := time.Now()
+	readsBefore := digestMemoFrom(ctx).fullReads()
 	hashErr := verifyLocalDigest(ctx, r.effectiveInput, job.SourceSHA256)
-	w.persistPhaseCost(jobDir, jobFile, job, "source_hash", hashStart, transcode.PhaseCost{})
+	hashCost := transcode.PhaseCost{}
+	_, inputOnNAS := externalRootFor(r.effectiveInput, w.cfg.ExternalRoots)
+	if inputOnNAS && digestMemoFrom(ctx).fullReads() > readsBefore {
+		if fi, err := os.Stat(r.effectiveInput); err == nil {
+			hashCost.NASReadBytes = knownCount(fi.Size())
+		}
+	}
+	w.persistPhaseCost(jobDir, jobFile, job, "source_hash", hashStart, hashCost)
 	if err := hashErr; err != nil {
 		return w.failJobTerminal(jobDir, jobFile, job, fmt.Errorf("staged source integrity: %w", err))
 	}
@@ -215,8 +224,13 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 
 	// Encode operational input -> local candidate. Semantic Source/Candidate
 	// remain unchanged in the persisted record.
+	encodeStart := time.Now()
 	ffmpegErr := w.runOperationalFFmpeg(ctx, execPlan, job, r.effectiveInput, r.localCandidate, progressPath, logPath)
 	job.EncodeFinishedAt = time.Now().UTC()
+	if inputOnNAS && ffmpegErr == nil {
+		// An unstaged source is read in place over the network by the encoder.
+		w.persistPhaseCost(jobDir, jobFile, job, "encode", encodeStart, transcode.PhaseCost{NASReadBytes: knownCount(sourceInfo.Size())})
+	}
 	if ffmpegErr != nil {
 		job.FailureClassification = string(resilience.ClassifyError(ffmpegErr))
 		var classified interface{ FailureClass() string }
@@ -265,7 +279,7 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 			}
 			if verr == nil {
 				var currentSHA string
-				currentSHA, verr = hashLocalFileSHA256(ctx, r.localCandidate)
+				currentSHA, verr = verifiedLocalSHA256(ctx, r.localCandidate)
 				if verr == nil && currentSHA != attest.SHA256 {
 					verr = fmt.Errorf("quality_candidate_identity_changed: candidate changed during final validation")
 				}
@@ -396,27 +410,24 @@ func (w *Worker) ensureStaged(ctx context.Context, jobDir, jobFile string, job *
 				stageCost.CacheHits = knownCount(0)
 				stageCost.CacheMisses = knownCount(1)
 			}
-			if w.mediaStore != nil && w.mediaStore.Maps(job.Source) {
-				err = w.mediaStore.DownloadAtomic(ctx, job.Source, r.stagedInput)
-			} else {
-				err = StageInputAtomic(ctx, job.Source, r.stagedInput)
-			}
-			if err != nil {
+			if err = w.stageSourceVerified(ctx, job, r.stagedInput, &stageCost); err != nil {
 				return false, err
 			}
-			if info, statErr := os.Stat(r.stagedInput); statErr == nil {
-				if w.mediaStore != nil && w.mediaStore.Maps(job.Source) {
-					stageCost.NASReadBytes = knownCount(info.Size())
-				}
-			}
 			// Best-effort: share this fresh NAS read with future jobs for the
-			// same immutable source. Local bytes are hashed against the
-			// coordinator digest before the entry is published; failures never
-			// fail the current job.
+			// same immutable source. The entry is a hard link to the staged
+			// bytes whose digest was proved while they streamed; failures
+			// never fail the current job.
 			if w.sourceCacheEnabled() {
 				if fi, serr := w.statSourceForCache(ctx, job.Source); serr == nil {
 					_, _ = populateSourceCacheFromLocal(ctx, w.sourceCacheDir(), filepath.Clean(job.Source), fi, r.stagedInput, job.SourceSHA256)
 				}
+			}
+		}
+		if w.sourceCacheEnabled() {
+			// Keep the entry this job staged from out of the sweep until the
+			// job completes, so a retry of the same source still hits it.
+			if fi, serr := w.statSourceForCache(ctx, job.Source); serr == nil {
+				pinSourceCacheEntry(w.sourceCacheDir(), filepath.Clean(job.Source), fi, job.SourceSHA256, job.ID)
 			}
 		}
 	}
@@ -433,11 +444,73 @@ func (w *Worker) ensureStaged(ctx context.Context, jobDir, jobFile string, job *
 	return cancelled, nil
 }
 
+// stageSourceVerified copies the source to stagedInput once, hashing the bytes
+// as they stream so the staged-source integrity check that follows needs no
+// second read. A direct-SMB transfer interrupted by a reconnect resumes from
+// its last written offset when the coordinator digest can prove the splice;
+// otherwise the retry is recorded in the phase cost.
+func (w *Worker) stageSourceVerified(ctx context.Context, job *JobRecord, stagedInput string, cost *transcode.PhaseCost) error {
+	if w.mediaStore != nil && w.mediaStore.Maps(job.Source) {
+		expected, _ := normalizeExpectedSourceSHA(job.SourceSHA256)
+		if verified, ok := w.mediaStore.(verifiedDownloader); ok {
+			tr, err := verified.DownloadAtomicVerified(ctx, job.Source, stagedInput, expected)
+			cost.NASReadBytes = knownCount(tr.ReadBytes)
+			if tr.Attempts > 1 {
+				cost.Attempts = tr.Attempts
+			}
+			if err != nil {
+				return err
+			}
+			rememberLocalDigest(ctx, stagedInput, tr.SHA256)
+			return nil
+		}
+		if err := w.mediaStore.DownloadAtomic(ctx, job.Source, stagedInput); err != nil {
+			return err
+		}
+		if info, err := os.Stat(stagedInput); err == nil {
+			cost.NASReadBytes = knownCount(info.Size())
+		}
+		return nil
+	}
+	sum, n, err := stageInputAtomicHashed(ctx, job.Source, stagedInput)
+	if err != nil {
+		return err
+	}
+	if _, external := externalRootFor(job.Source, w.cfg.ExternalRoots); external {
+		cost.NASReadBytes = knownCount(n)
+	}
+	rememberLocalDigest(ctx, stagedInput, sum)
+	return nil
+}
+
+// verifiedPublisher is the optional media-store publish that trusts the
+// accepted candidate digest, reads the upload back once and reports transfer
+// counters.
+type verifiedPublisher interface {
+	PublishVerified(ctx context.Context, local, destination, jobID string, expect smbdirect.PublishExpect, guard func(func() error) error) (smbdirect.Transfer, error)
+}
+
+// The production SMB store provides both verified transfers; test fakes may
+// provide only the legacy methods, which keep their old behaviour.
+var (
+	_ verifiedPublisher  = (*smbdirect.Store)(nil)
+	_ verifiedDownloader = (*smbdirect.Store)(nil)
+)
+
+// verifiedDownloader is the optional media-store download that reports the
+// streamed digest and transfer counters.
+type verifiedDownloader interface {
+	DownloadAtomicVerified(ctx context.Context, remote, local, expectedSHA256 string) (smbdirect.Transfer, error)
+}
+
 // finalizeOperational publishes the local candidate to the intended
 // destination when required, then completes the job. A finalization or storage
 // failure after EncodeComplete leaves the job nonterminal/resumable with a
 // distinct classification and never reruns encode.
 func (w *Worker) finalizeOperational(ctx context.Context, jobDir, jobFile string, job *JobRecord, r *resolvedOperational) error {
+	// Reuses the memo of the run that just validated the candidate; a resumed
+	// or retried finalization starts a fresh one and reads the bytes again.
+	ctx = withDigestMemo(ctx, w.localWorkDir())
 	publicationStart := time.Now()
 	publicationCost := transcode.PhaseCost{}
 	defer func() { w.persistPhaseCost(jobDir, jobFile, job, "publication", publicationStart, publicationCost) }()
@@ -556,17 +629,34 @@ func (w *Worker) finalizeOperational(ctx context.Context, jobDir, jobFile string
 	}
 
 	var ferr error
-	publishedNew := false
 	isPodcast := job.Plan != nil && job.Plan.Podcast != nil
 	guard := podcastPublicationGuard(func(publish func() error) error {
 		return w.guardPodcastAdPublication(ctx, jobDir, jobFile, publish)
 	})
+	expect := smbdirect.PublishExpect{SizeBytes: job.CandidateSizeBytes}
+	if norm, nerr := normalizeExpectedSourceSHA(job.CandidateSHA256); nerr == nil {
+		expect.SHA256 = norm
+	}
 	if directSMB {
-		if _, statErr := w.mediaStore.Stat(ctx, r.destination); os.IsNotExist(statErr) {
-			publishedNew = true
-		}
-
-		if isPodcast {
+		verified, canVerify := w.mediaStore.(verifiedPublisher)
+		switch {
+		case canVerify && expect.SHA256 != "" && expect.SizeBytes > 0:
+			// The accepted digest stands in for a fresh local hash: the
+			// upload hashes what it sends and must match it, the partial is
+			// read back once, and the rename is proved by the verified
+			// partial's identity instead of re-reading the final.
+			var g func(func() error) error
+			if isPodcast {
+				g = guard
+			}
+			tr, perr := verified.PublishVerified(ctx, r.localCandidate, r.destination, job.ID, expect, g)
+			publicationCost.NASReadBytes = knownCount(tr.ReadBytes)
+			publicationCost.NASWrittenBytes = knownCount(tr.WrittenBytes)
+			if tr.Attempts > 1 {
+				publicationCost.Attempts = tr.Attempts
+			}
+			ferr = perr
+		case isPodcast:
 			guarded, ok := w.mediaStore.(interface {
 				PublishGuarded(context.Context, string, string, string, func(func() error) error) error
 			})
@@ -575,19 +665,39 @@ func (w *Worker) finalizeOperational(ctx context.Context, jobDir, jobFile string
 			} else {
 				ferr = guarded.PublishGuarded(ctx, r.localCandidate, r.destination, job.ID, guard)
 			}
-		} else {
+		default:
+			publishedNew := false
+			if _, statErr := w.mediaStore.Stat(ctx, r.destination); os.IsNotExist(statErr) {
+				publishedNew = true
+			}
 			ferr = w.mediaStore.Publish(ctx, r.localCandidate, r.destination, job.ID)
+			if ferr == nil && publishedNew {
+				publicationCost.NASWrittenBytes = knownCount(job.CandidateSizeBytes)
+			}
 		}
 	} else {
 		finalize := w.finalizeOutput
 		if finalize == nil {
 			finalize = FinalizeOutputAtomic
 		}
-		publishCtx := ctx
+		rep := &publicationReport{localSource: r.localCandidate, expectSHA: expect.SHA256}
+		publishCtx := withPublicationReport(ctx, rep)
 		if isPodcast {
-			publishCtx = context.WithValue(ctx, podcastPublicationGuardKey{}, guard)
+			publishCtx = context.WithValue(publishCtx, podcastPublicationGuardKey{}, guard)
 		}
+		fallbackStart := time.Now()
 		ferr = finalize(publishCtx, r.localCandidate, r.destination, job.ID)
+		if _, external := externalRootFor(r.destination, w.cfg.ExternalRoots); external && rep.WrittenBytes > 0 {
+			publicationCost.NASWrittenBytes = knownCount(rep.WrittenBytes)
+			publicationCost.NASReadBytes = knownCount(rep.ReadBytes)
+		}
+		if rep.CopyFallback {
+			// Never silent: the worker log already names the share; the job
+			// record carries a dedicated phase so the non-atomic commit and
+			// its bytes are visible per job.
+			fallback := transcode.PhaseCost{Attempts: 1, NASWrittenBytes: knownCount(rep.WrittenBytes), NASReadBytes: knownCount(rep.ReadBytes)}
+			w.persistPhaseCost(jobDir, jobFile, job, "publication_copy_fallback", fallbackStart, fallback)
+		}
 	}
 	if ferr != nil {
 		if errors.Is(ferr, errPodcastPublicationCancelled) {
@@ -631,9 +741,6 @@ func (w *Worker) finalizeOperational(ctx context.Context, jobDir, jobFile string
 	cancelled, err = w.persistOperationalProgress(jobDir, jobFile, job, func(l *JobRecord) {
 		l.FinalizationState = string(FinalizationStateCompleted)
 	})
-	if directSMB && publishedNew {
-		publicationCost.NASWrittenBytes = knownCount(job.CandidateSizeBytes)
-	}
 	if err != nil {
 		return err
 	} else if cancelled {
@@ -655,6 +762,9 @@ func (w *Worker) completeOperationalJob(jobDir, jobFile string, job *JobRecord, 
 		return perr
 	}
 	cleanupStart := time.Now()
+	if w.sourceCacheEnabled() {
+		releaseSourceCachePins(w.sourceCacheDir(), job.ID, true)
+	}
 	w.cleanupOperationalArtifacts(job, r)
 	w.persistPhaseCost(jobDir, jobFile, job, "cleanup", cleanupStart, transcode.PhaseCost{})
 	return nil
@@ -726,7 +836,40 @@ func (w *Worker) failJobTerminal(jobDir, jobFile string, job *JobRecord, cause e
 	if perr := w.persistTerminalJob(jobDir, jobFile, job); perr != nil {
 		return perr
 	}
+	// A failed job never resumes, so its staged copy of the source is dead
+	// weight on the work disk. The shared cache keeps its own link to the same
+	// bytes, which is what a manual retry under a new job ID reads.
+	w.removeOwnStagedInput(job)
+	if w.sourceCacheEnabled() {
+		releaseSourceCachePins(w.sourceCacheDir(), job.ID, false)
+	}
 	return cause
+}
+
+// removeOwnStagedInput deletes a terminal job's staged input, but only the
+// exact deterministic path this worker stages to for that job ID, and never a
+// semantic source, candidate, destination or shared cache entry. Cache entries
+// are separate links, so removing the job's name never breaks the cache or a
+// lease another job holds on the same bytes.
+func (w *Worker) removeOwnStagedInput(job *JobRecord) {
+	if job == nil || validateJobID(job.ID) != nil {
+		return
+	}
+	staged := strings.TrimSpace(job.StagedInputPath)
+	if staged == "" {
+		return
+	}
+	want, err := StagedInputPath(w.localWorkDir(), job.ID, job.Source)
+	if err != nil || filepath.Clean(staged) != filepath.Clean(want) {
+		return
+	}
+	if staged == job.Source || staged == job.Candidate || staged == job.Destination() || w.isCachePath(staged) {
+		return
+	}
+	_ = os.Remove(staged)
+	if dir, err := JobWorkDir(w.localWorkDir(), job.ID); err == nil {
+		_ = os.Remove(dir) // only succeeds when empty
+	}
 }
 
 // persistOperationalProgress reloads the durable record under the per-job lock,

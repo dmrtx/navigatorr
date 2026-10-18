@@ -2090,6 +2090,10 @@ func (w *Worker) cleanupCancelledArtifacts(job *JobRecord) {
 	if job == nil {
 		return
 	}
+	w.removeOwnStagedInput(job)
+	if w.sourceCacheEnabled() {
+		releaseSourceCachePins(w.sourceCacheDir(), job.ID, false)
+	}
 	source := strings.TrimSpace(job.Source)
 	candidate := strings.TrimSpace(job.Candidate)
 	destination := strings.TrimSpace(job.Destination())
