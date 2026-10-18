@@ -732,7 +732,9 @@ func (e *Engine) cancelRemoteActionWork(ctx context.Context, ec *ExecutionContex
 	if benchID == "" {
 		benchID = getString(ec.Outputs, "benchmark_job_id")
 	}
-	if benchID != "" && !getBool(ec.State, "benchmark_done") {
+	// A submit refused as busy created nothing on the worker, which would
+	// answer a cancel for that identity with 404.
+	if benchID != "" && !getBool(ec.State, "benchmark_done") && !awaitingBusySlot(ec, "benchmark_submitted", "benchmark_reconcile") {
 		if err := e.cancelBenchmarkJobConfirmed(ctx, benchID); err != nil {
 			errs = append(errs, fmt.Sprintf("benchmark %s: %v", benchID, err))
 		}
@@ -756,7 +758,7 @@ func (e *Engine) cancelRemoteActionWork(ctx context.Context, ec *ExecutionContex
 			jobID = item.JobID
 		}
 	}
-	if jobID != "" {
+	if jobID != "" && !awaitingBusySlot(ec, "transcode_submitted", "transcode_reconcile") {
 		if err := e.cancelTranscodeJobConfirmed(ctx, jobID); err != nil {
 			errs = append(errs, fmt.Sprintf("transcode %s: %v", jobID, err))
 		}

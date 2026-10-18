@@ -511,7 +511,6 @@ sample checks and approval flow; it does not add a flow editor or another search
 | `is_anime` | bool | No | derived | Explicit anime flag. If omitted, detected automatically from Sonarr series metadata (`seriesType` or genres). |
 | `min_savings_percent` | float | No | `config` | Minimum projected file size savings threshold (default from `config.Transcode.MinSavingsPercent`). |
 | `max_size_increase_percent` | float | No | `0.0` | Allowed candidate size increase percentage (default `0.0`). Any candidate exceeding this triggers `waiting_decision`. |
-| `surface_worker_busy` | bool | No | `true` | When `true`, worker capacity saturation surfaces `waiting_for_slot` without failing or burning retry budgets. |
 | `max_items` | int | No | unlimited | Deterministic bound on episode files prepared, persisted, and scheduled by the batch. |
 | `max_output_items` | int | No | `25` | Bound on returned item summaries in outputs (default 25, capped at max 100). This does not affect scheduling. |
 | `shared_calibration` | bool | No | `true` for intent-based `auto` and `anime-x265-calibrated` | Benchmark up to three representative files once, reuse measured CRFs according to the chosen priority, and validate each completed candidate with sampled VMAF/CAMBI. Automatic batches generate and freeze a temporary x265 recipe internally; custom profiles must support the same quality checks. |
@@ -660,6 +659,7 @@ To prevent unbounded JSON responses when batching entire series or large seasons
 - **Savings precheck**: For profile-based `transcode_media`, workers that advertise `savings_precheck` receive the effective `min_savings_percent`. Once every candidate sample is encoded, the worker estimates each candidate's final size with the same estimator selection uses. If every candidate is below the minimum, pending quality passes are skipped and the decision is `all_candidates_insufficient_savings`. The outcome matches the post-benchmark guardrail; only the wasted metric time is removed.
 - **Worker busy handling**: If the remote transcode worker returns `worker_busy` (or reaches max parallel slots), the current item transitions to `waiting_for_slot`. Normal background transcodes remain in `running`.
 - **Retry budget safety**: Encountering `worker_busy` does **not** increment item `attempts` or consume the transient retry budget. The batch transitions to `waiting_external` with `waiting_condition: "worker_busy"` and resumes cleanly once worker capacity becomes available.
+- **Single files wait too**: A standalone `transcode_media` or `benchmark_transcode` whose benchmark or encode submit is refused as busy waits in `waiting_external` / `worker_busy` ("Waiting for a free worker slot") instead of failing, whatever its retry budget. The next submit is sent no earlier than the worker's `Retry-After` plus one second, with the same job identity and idempotency key; the wait lasts until a slot frees up or the action is cancelled. `surface_worker_busy` is still accepted on child inputs but no longer changes this behaviour.
 
 ## Compact audio without another optimizer
 
