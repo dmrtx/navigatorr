@@ -162,7 +162,7 @@ func toCompactSummary(res *action.ActionResult) ActionCompactSummary {
 		ReconcileLagMs:       res.ReconcileLagMs,
 		Worker: compactOperationalFields(worker, []string{
 			"benchmark_search_seconds", "search_budget_seconds", "operation_search_budget_seconds", "transcode_status", "transcode_phase", "quality_evidence", "benchmark_status", "benchmark_quality", "benchmark_phase", "phase",
-			"progress", "speed", "fps", "last_progress_at", "worker_heartbeat_at",
+			"progress", "speed", "fps", "last_progress_at", "worker_heartbeat_at", "last_worker_poll_at",
 			"progress_is_stale", "last_known_progress", "progress_details", "benchmark_progress_details",
 			"worker_slots_total", "worker_slots_used", "queue_position", "storage_backend",
 			"recovery_required", "error_class", "finalization_retry_count", "next_finalization_at",

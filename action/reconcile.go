@@ -43,8 +43,10 @@ func (e *Engine) StartReconciler(ctx context.Context) <-chan struct{} {
 			defer close(e.reconcilerDone)
 			ticker := time.NewTicker(e.pollInterval())
 			defer ticker.Stop()
+			d := newReconcileDispatcher()
+			defer d.wg.Wait()
 			for {
-				if err := e.ReconcileOnce(ctx); err != nil && ctx.Err() == nil {
+				if err := e.dispatchReconcile(ctx, d); err != nil && ctx.Err() == nil {
 					log.Printf("action reconciler: %v", err)
 				}
 				select {
@@ -59,34 +61,76 @@ func (e *Engine) StartReconciler(ctx context.Context) <-chan struct{} {
 	return e.reconcilerDone
 }
 
-// ReconcileOnce resumes opted-in external waits and interrupted executions.
-// Pagination is stable while actions complete. A slow NAS validation cannot
-// block polling every other job: continuations use a bounded worker pool.
-func (e *Engine) ReconcileOnce(ctx context.Context) error {
-	if e.deps.Store == nil {
-		return nil
+// reconcileConcurrency bounds continuations in flight at once. A continuation
+// can hash a whole source or validate a candidate for minutes, so this leaves
+// room for cheap worker polls beside several of those.
+const reconcileConcurrency = 8
+
+// reconcileDispatcher carries in-flight continuations across reconciler ticks.
+// A slow continuation keeps only its own slot; the next tick still polls every
+// other action instead of waiting for the slowest one of the previous tick.
+type reconcileDispatcher struct {
+	mu       sync.Mutex
+	inflight map[string]struct{}
+	sem      chan struct{}
+	wg       sync.WaitGroup
+}
+
+func newReconcileDispatcher() *reconcileDispatcher {
+	return &reconcileDispatcher{inflight: map[string]struct{}{}, sem: make(chan struct{}, reconcileConcurrency)}
+}
+
+// dispatchReconcile starts a continuation for each reconcilable action that is
+// not already running from an earlier tick, without waiting for any of them to
+// finish.
+func (e *Engine) dispatchReconcile(ctx context.Context, d *reconcileDispatcher) error {
+	ids, err := e.reconcilableIDs(ctx)
+	if err != nil {
+		return err
 	}
-	var ids []string
-	after := ""
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
+	for _, id := range ids {
+		d.mu.Lock()
+		_, busy := d.inflight[id]
+		d.mu.Unlock()
+		if busy {
+			continue
 		}
-		instances, err := e.deps.Store.ListReconcilableActions(after, 100)
-		if err != nil {
-			return err
+		// Wait for a slot rather than skipping: actions are listed in id order,
+		// so skipping would starve the same ids every tick. Cheap polls free a
+		// slot within milliseconds; only eight slow continuations stall here.
+		select {
+		case d.sem <- struct{}{}:
+		case <-ctx.Done():
+			return ctx.Err()
 		}
-		for i := range instances {
-			inst := &instances[i]
-			tmpl, ok := e.GetTemplate(inst.ActionName)
-			if ok && e.shouldReconcile(inst, tmpl, parseExecutionContext(inst, e)) {
-				ids = append(ids, inst.ID)
+		d.mu.Lock()
+		d.inflight[id] = struct{}{}
+		d.mu.Unlock()
+		d.wg.Add(1)
+		go func(id string) {
+			defer d.wg.Done()
+			defer func() {
+				d.mu.Lock()
+				delete(d.inflight, id)
+				d.mu.Unlock()
+				<-d.sem
+			}()
+			if _, err := e.resume(ctx, id, "", nil, true); err != nil && !errors.Is(err, errActionBusy) && ctx.Err() == nil {
+				log.Printf("action reconciler: %s: %v", id, err)
 			}
-			after = inst.ID
-		}
-		if len(instances) < 100 {
-			break
-		}
+		}(id)
+	}
+	return nil
+}
+
+// ReconcileOnce resumes opted-in external waits and interrupted executions and
+// waits for every continuation it started. The service loop uses
+// dispatchReconcile instead, so one slow continuation never delays the next
+// poll of other actions.
+func (e *Engine) ReconcileOnce(ctx context.Context) error {
+	ids, err := e.reconcilableIDs(ctx)
+	if err != nil {
+		return err
 	}
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -113,6 +157,37 @@ func (e *Engine) ReconcileOnce(ctx context.Context) error {
 	}
 	wg.Wait()
 	return errors.Join(errs...)
+}
+
+// reconcilableIDs pages through candidate actions; pagination is stable while
+// actions complete.
+func (e *Engine) reconcilableIDs(ctx context.Context) ([]string, error) {
+	if e.deps.Store == nil {
+		return nil, nil
+	}
+	var ids []string
+	after := ""
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		instances, err := e.deps.Store.ListReconcilableActions(after, 100)
+		if err != nil {
+			return nil, err
+		}
+		for i := range instances {
+			inst := &instances[i]
+			tmpl, ok := e.GetTemplate(inst.ActionName)
+			if ok && e.shouldReconcile(inst, tmpl, parseExecutionContext(inst, e)) {
+				ids = append(ids, inst.ID)
+			}
+			after = inst.ID
+		}
+		if len(instances) < 100 {
+			break
+		}
+	}
+	return ids, nil
 }
 
 func (e *Engine) shouldReconcile(inst *store.ActionInstance, tmpl ActionTemplate, ec *ExecutionContext) bool {
@@ -261,6 +336,24 @@ func optionalDuration(state map[string]any, key string) *int64 {
 	}
 	v := getInt64(state, key)
 	return &v
+}
+
+// mediaHashConcurrency bounds whole-file media hashes running at once.
+const mediaHashConcurrency = 3
+
+// hashMedia copies r into h while holding one of the engine's hash slots.
+// Waiting for a slot honours ctx like the copy itself does.
+func (e *Engine) hashMedia(ctx context.Context, h io.Writer, r io.Reader) (int64, error) {
+	if e.hashSlots == nil {
+		return io.Copy(h, r)
+	}
+	select {
+	case e.hashSlots <- struct{}{}:
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
+	defer func() { <-e.hashSlots }()
+	return io.Copy(h, r)
 }
 
 // contextReader keeps long NAS hashes interruptible on service shutdown or

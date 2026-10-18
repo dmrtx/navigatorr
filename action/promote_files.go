@@ -118,7 +118,7 @@ func (e *Engine) promotionHash(ctx context.Context, path string) (string, int64,
 			return "", 0, err
 		}
 	}
-	n, err := io.Copy(h, &promotionContextReader{ctx: ctx, r: f, path: path, total: opened.Size(), progress: observer})
+	n, err := e.hashMedia(ctx, h, &promotionContextReader{ctx: ctx, r: f, path: path, total: opened.Size(), progress: observer})
 	if err != nil {
 		return "", 0, err
 	}

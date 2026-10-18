@@ -3,10 +3,13 @@ package action
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -584,5 +587,181 @@ func TestPausedControlStateSurvivesFollowingAutomaticPoll(t *testing.T) {
 	r, err = e.Status(context.Background(), r.ID)
 	if err != nil || r.Status != StatusCompleted || !getBool(r.Inputs, "paused") || getBool(r.State, "paused") {
 		t.Fatalf("pause state/input separation was not preserved: %+v %v", r, err)
+	}
+}
+
+// A continuation that blocks for minutes (a source hash or candidate
+// validation) must not stop the service loop from polling other running jobs;
+// otherwise their worker heartbeat goes stale although the worker is alive.
+func TestReconcilerKeepsPollingWhileAnotherContinuationIsSlow(t *testing.T) {
+	st := setupTestStore(t)
+	release := make(chan struct{})
+	var slowEntered atomic.Bool
+	var fastPolls atomic.Int32
+	var started atomic.Bool
+	var slowID atomic.Value
+	mock := &mockTranscodeExecutor{statusFunc: func(ctx context.Context, id string) (transcode.JobStatus, error) {
+		if started.Load() {
+			if id == slowID.Load() {
+				slowEntered.Store(true)
+				select {
+				case <-release:
+				case <-ctx.Done():
+					return transcode.JobStatus{}, ctx.Err()
+				}
+			} else {
+				fastPolls.Add(1)
+			}
+		}
+		return transcode.JobStatus{ID: id, Status: transcode.StatusRunning}, nil
+	}}
+	final := func(context.Context, *ExecutionContext) (StepResult, error) {
+		return StepResult{Status: StepCompleted}, nil
+	}
+	e := NewEngine(EngineDeps{Store: st, Transcode: mock, ReconcileInterval: 5 * time.Millisecond})
+	registerReconcileTestFlow(e, final)
+	slow, err := e.Run(context.Background(), "transcode_media", nil)
+	if err != nil || slow.Status != StatusWaitingExternal {
+		t.Fatalf("slow submit: %+v / %v", slow, err)
+	}
+	fast, err := e.Run(context.Background(), "transcode_media", nil)
+	if err != nil || fast.Status != StatusWaitingExternal {
+		t.Fatalf("fast submit: %+v / %v", fast, err)
+	}
+	slowID.Store("job-" + slow.ID)
+	started.Store(true)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := e.StartReconciler(ctx)
+	defer func() { close(release); cancel(); <-done }()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && !(slowEntered.Load() && fastPolls.Load() >= 5) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !slowEntered.Load() {
+		t.Fatal("slow continuation never started")
+	}
+	if got := fastPolls.Load(); got < 5 {
+		t.Fatalf("other job polled %d times while one continuation was blocked; want repeated polls", got)
+	}
+}
+
+func TestReconcilerPollsEveryJobWhenSlowContinuationsHoldMostSlots(t *testing.T) {
+	st := setupTestStore(t)
+	release := make(chan struct{})
+	var started atomic.Bool
+	var mu sync.Mutex
+	slow := map[string]bool{}
+	polls := map[string]int{}
+	mock := &mockTranscodeExecutor{statusFunc: func(ctx context.Context, id string) (transcode.JobStatus, error) {
+		if started.Load() {
+			mu.Lock()
+			isSlow := slow[id]
+			if !isSlow {
+				polls[id]++
+			}
+			mu.Unlock()
+			if isSlow {
+				select {
+				case <-release:
+				case <-ctx.Done():
+					return transcode.JobStatus{}, ctx.Err()
+				}
+			}
+		}
+		return transcode.JobStatus{ID: id, Status: transcode.StatusRunning}, nil
+	}}
+	final := func(context.Context, *ExecutionContext) (StepResult, error) {
+		return StepResult{Status: StepCompleted}, nil
+	}
+	e := NewEngine(EngineDeps{Store: st, Transcode: mock, ReconcileInterval: 5 * time.Millisecond})
+	registerReconcileTestFlow(e, final)
+	const slowJobs, fastJobs = reconcileConcurrency - 2, 6
+	var fast []string
+	for i := 0; i < slowJobs+fastJobs; i++ {
+		inst, err := e.Run(context.Background(), "transcode_media", nil)
+		if err != nil || inst.Status != StatusWaitingExternal {
+			t.Fatalf("submit %d: %+v / %v", i, inst, err)
+		}
+		if i < slowJobs {
+			slow["job-"+inst.ID] = true
+		} else {
+			fast = append(fast, "job-"+inst.ID)
+		}
+	}
+	started.Store(true)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := e.StartReconciler(ctx)
+	defer func() { close(release); cancel(); <-done }()
+	starved := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		var out []string
+		for _, id := range fast {
+			if polls[id] < 3 {
+				out = append(out, id)
+			}
+		}
+		return out
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && len(starved()) > 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if s := starved(); len(s) > 0 {
+		t.Fatalf("%d of %d jobs were polled fewer than 3 times while slow continuations held most slots", len(s), fastJobs)
+	}
+}
+
+type blockingHashReader struct {
+	active, peak *atomic.Int32
+	release      <-chan struct{}
+	done         bool
+}
+
+func (r *blockingHashReader) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, io.EOF
+	}
+	n := r.active.Add(1)
+	for {
+		peak := r.peak.Load()
+		if n <= peak || r.peak.CompareAndSwap(peak, n) {
+			break
+		}
+	}
+	<-r.release
+	r.active.Add(-1)
+	r.done = true
+	return copy(p, "x"), nil
+}
+
+func TestMediaHashesShareABoundedPool(t *testing.T) {
+	e := NewEngine(EngineDeps{})
+	release := make(chan struct{})
+	var active, peak atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < mediaHashConcurrency+4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = e.hashMedia(context.Background(), io.Discard, &blockingHashReader{active: &active, peak: &peak, release: release})
+		}()
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := active.Load(); got != mediaHashConcurrency {
+		t.Fatalf("%d hashes reading at once, want %d", got, mediaHashConcurrency)
+	}
+	close(release)
+	wg.Wait()
+	if got := peak.Load(); got > mediaHashConcurrency {
+		t.Fatalf("peak %d concurrent hashes, want at most %d", got, mediaHashConcurrency)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for i := 0; i < mediaHashConcurrency; i++ {
+		e.hashSlots <- struct{}{}
+	}
+	if _, err := e.hashMedia(ctx, io.Discard, strings.NewReader("x")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("waiting for a hash slot ignored cancellation: %v", err)
 	}
 }

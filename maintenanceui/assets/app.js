@@ -2008,7 +2008,7 @@ function batchProgress(job) {
     const prior = byFile.get(key);
     const observation = workerProgressObservation({...(child || activity), worker: w, status: "running"});
     const eta = workerStage && !observation.message ? encodeEta(activity.id || key, w, child?.eta_seconds ?? activity.eta_seconds) : "";
-    const measurement = workerStage ? observation.message || (w.progress_is_stale ? observation.heartbeat === "fresh" ? "Worker heartbeat received; last measurement shown" : "Last measurement; stale" : eta) : "";
+    const measurement = workerStage ? observation.message || (w.progress_is_stale ? heartbeatAlive(observation.heartbeat) ? "Worker heartbeat received; last measurement shown" : "Last measurement; stale" : eta) : "";
     if (!prior || progress > prior.progress) byFile.set(key, {progress, eta: eta ? encodeEtas.get(activity.id || key)?.value : null, label: `${key.split("/").pop() || "Active file"}: ${workerStage && phase ? workerPhaseLabel(phase) : stage === "preflight" && activity.work?.phase === "hashing_source" ? `Verifying source SHA-256 (${bytes(activity.work.bytes_read || 0)} / ${bytes(activity.work.total_bytes)})` : stageLabel(stage || "preflight")}${measurement ? ` · ${measurement}` : ""}`});
   }
   const partial = Math.min(count("running"), byFile.size) ? [...byFile.values()].slice(0,count("running")).reduce((sum,a)=>sum+a.progress,0) : 0;
@@ -2124,7 +2124,7 @@ function telemetry(job) {
     );
   if (observation.active) {
     const last = activityElapsed(w.last_progress_at);
-    result.append(node("span", `${observation.heartbeat === "fresh" ? `Worker heartbeat ${activityElapsed(w.worker_heartbeat_at)} ago` : "Worker heartbeat unavailable"}${last ? ` · Last advance ${last} ago` : ""}`, "metadata progress-observation"));
+    result.append(node("span", `${heartbeatAlive(observation.heartbeat) ? `Worker heartbeat ${activityElapsed(w.worker_heartbeat_at)} ago` : "Worker heartbeat unavailable"}${last ? ` · Last advance ${last} ago` : ""}`, "metadata progress-observation"));
     if (phase === "evaluating_metrics")
       result.append(node("span", "Quality measurement can take several minutes. Progress updates when a sample task finishes.", "metadata progress-observation"));
     if (phase === "analysing_video")
@@ -2464,8 +2464,10 @@ function batchCounts(batch, compact = false) {
 function statusClass(status) {
   if (["completed", "Completed", "Replaced", "Candidate ready", "Candidates ready"].includes(status)) return "completed";
   if (["running", "Running", "waiting_external", "In progress", "Encoding", "Encoding samples", "Measuring quality", "Calibrating", "Preparing", "Verifying", "Replacing", "Replacement in progress", "Saving candidate", "Verifying quality"].includes(status)) return "running";
-  if (["failed", "Failed", "Worker offline", "No heartbeat", "No updates"].includes(status)) return "failed";
-  if (["review", "waiting_decision", "Needs review", "Needs decision", "Needs attention", "partial", "Partial", "Cancelling"].includes(status)) return "waiting_decision";
+  if (["failed", "Failed", "Worker offline"].includes(status)) return "failed";
+  // Missing telemetry is worth attention, but nothing has failed: the worker
+  // keeps the job and the original is untouched.
+  if (["review", "waiting_decision", "Needs review", "Needs decision", "Needs attention", "partial", "Partial", "Cancelling", "No heartbeat", "No updates"].includes(status)) return "waiting_decision";
   if (["Preview", "Preview complete", "Eligible"].includes(status)) return "preview";
   return "neutral";
 }
@@ -3012,10 +3014,18 @@ function shortJobReason(reason) {
 function workerUnavailable(job) {
   return job.waiting_condition === "worker_unreachable" || job.activity_waiting_condition === "worker_unreachable";
 }
+// The worker beats every few seconds and Navigatorr polls it about every five,
+// but a busy coordinator or a page resumed from the background can delay the
+// next sample by a minute or two. Only prolonged silence is worth a warning.
+const heartbeatFreshMs = 30000, heartbeatLostMs = 180000, heartbeatSkewMs = 60000;
 function workerHeartbeatState(value, now = Date.now()) {
   const at = Date.parse(value || "");
-  if (!Number.isFinite(at) || at < Date.UTC(2000, 0, 1) || at > now) return "unknown";
-  return now - at <= 30000 ? "fresh" : "stale";
+  if (!Number.isFinite(at) || at < Date.UTC(2000, 0, 1) || at > now + heartbeatSkewMs) return "unknown";
+  const age = Math.max(0, now - at);
+  return age <= heartbeatFreshMs ? "fresh" : age <= heartbeatLostMs ? "delayed" : "stale";
+}
+function heartbeatAlive(state) {
+  return state === "fresh" || state === "delayed";
 }
 function workerProgressObservation(job) {
   const w = job.worker || {};
@@ -3034,12 +3044,20 @@ function workerProgressObservation(job) {
   if (["completed", "failed", "cancelled"].includes(status) || ["completed", "failed", "cancelled"].includes(phase)) return result;
   if (phase === "queued" || status === "queued" || !job.worker) return result;
   result.active = true;
-  if (heartbeat === "stale") return {...result, warning: true, status: "No heartbeat", message: `No recent worker heartbeat.${phase ? ` Last reported phase: ${workerPhaseLabel(phase)}.` : ""}`};
+  if (heartbeat === "stale") {
+    // Say who went quiet: a worker that stopped reporting, or a coordinator
+    // that has not asked it recently. Without a poll time, blame nobody.
+    const poll = workerHeartbeatState(w.last_worker_poll_at);
+    const quiet = activityElapsed(w.worker_heartbeat_at);
+    const span = quiet ? ` for ${quiet}` : " recently";
+    const who = heartbeatAlive(poll) ? `The worker has not reported${span}.` : poll === "stale" ? `Navigatorr has not checked the worker${span}.` : `No worker heartbeat${span}.`;
+    return {...result, warning: true, status: "No heartbeat", message: `${who}${phase ? ` Last reported phase: ${workerPhaseLabel(phase)}.` : ""}`};
+  }
   // These phases report completed units, not a continuous encoder percentage.
   // A heartbeat proves liveness only; preserve the actual last measurement.
   const discreteProgress = ["preparing", "reading_source", "probing_source", "extracting_samples", "encoding_samples", "testing_initial", "testing_alternatives", "verifying_samples", "evaluating_metrics", "estimating_final_size", "selecting_candidate", "capturing_comparison", "validating", "validating_quality", "analysing_video", "publishing"].includes(phase);
-  if (w.progress_is_stale && !(discreteProgress && heartbeat === "fresh"))
-    return {...result, warning: true, status: "No updates", message: `No recent ${phase === "encoding" ? "encoding progress" : "progress from the worker"}. ${heartbeat === "fresh" ? `Worker heartbeat ${activityElapsed(w.worker_heartbeat_at)} ago.` : "Worker heartbeat unavailable."}`};
+  if (w.progress_is_stale && !(discreteProgress && heartbeatAlive(heartbeat)))
+    return {...result, warning: true, status: "No updates", message: `No recent ${phase === "encoding" ? "encoding progress" : "progress from the worker"}. ${heartbeatAlive(heartbeat) ? `Worker heartbeat ${activityElapsed(w.worker_heartbeat_at)} ago.` : "Worker heartbeat unavailable."}`};
   return result;
 }
 function isCandidateRejection(reason) {
@@ -3532,7 +3550,7 @@ function renderWorkerActivity(data) {
       row.append(node("strong",`Slot ${i+1} · ${unknownOccupied ? "Occupied" : "Available"}`));
       row.append(node("p",unknownOccupied ? "File details require the updated video worker." : "Ready for the next job.","metadata"));
     } else {
-      const stale = workerHeartbeatState(job.heartbeat_at) !== "fresh";
+      const stale = !heartbeatAlive(workerHeartbeatState(job.heartbeat_at));
       row.append(node("strong",`Slot ${i+1} · ${job.file}`));
       row.children[0].title = job.file;
       const phase = workerPhaseLabel(job.phase);
@@ -3733,7 +3751,7 @@ function batchFileActivity(item, job) {
   if (phase) {
     const observation = workerProgressObservation({...activity, status: item.status});
     const eta = observation.message ? "" : encodeEta(activity.id, worker, activity.eta_seconds);
-    return workerPhaseLabel(phase) + (observation.message ? ` · ${observation.message}` : worker.progress_is_stale && observation.heartbeat === "fresh" ? " · Worker heartbeat received; last measurement shown" : eta ? ` · ${eta}` : "");
+    return workerPhaseLabel(phase) + (observation.message ? ` · ${observation.message}` : worker.progress_is_stale && heartbeatAlive(observation.heartbeat) ? " · Worker heartbeat received; last measurement shown" : eta ? ` · ${eta}` : "");
   }
   if (activity?.work?.phase === "hashing_source") return `Verifying source${activity.work.total_bytes > 0 ? ` · ${bytes(activity.work.bytes_read || 0)} / ${bytes(activity.work.total_bytes)}` : ""}`;
   if (activity?.work?.phase) return workerPhaseLabel(activity.work.phase);
