@@ -1018,7 +1018,9 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 			return StepResult{Status: StepWaitingExternal, WaitingCondition: "transcode_running", WaitingReason: "Independent mode searches or encodes are still active", Outputs: batchOutputs}, nil
 		}
 		if queued > 0 {
-			return modeAttention(ec, "search_budget_exhausted", "Operation search budget is reserved or exhausted; remaining sources have no measured conclusion. Originals preserved."), nil
+			// Admission only refuses a frozen policy without a per-source
+			// budget, which no further polling can repair.
+			return modeAttention(ec, "search_budget_unavailable", "The frozen goal has no usable search budget for the remaining files; they were not tested. Originals preserved."), nil
 		}
 	}
 	// Check if any item is waiting for decision

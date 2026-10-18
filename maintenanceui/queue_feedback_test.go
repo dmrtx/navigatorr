@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jakenesler/navigatorr/store"
 )
@@ -340,7 +341,8 @@ func TestQueueBatchTelemetryIdentifiesTheActualActiveFile(t *testing.T) {
 	s, h := testUI(t)
 	st := s.engine.Deps().Store
 	seedOperation(t, st, "batch", "transcode_batch", "waiting_external", nil, nil, nil)
-	seedOperation(t, st, "active", "transcode_media", "waiting_external", map[string]any{"parent_action_id": "batch", "path": "/media/active.mkv"}, nil, map[string]any{"transcode_phase": "encoding", "progress": 34})
+	measured := time.Now().UTC().Add(-2 * time.Second).Format(time.RFC3339Nano)
+	seedOperation(t, st, "active", "transcode_media", "waiting_external", map[string]any{"parent_action_id": "batch", "path": "/media/active.mkv"}, nil, map[string]any{"transcode_phase": "encoding", "progress": 34, "speed": 2, "last_progress_at": measured, "original": map[string]any{"duration_sec": 3000}})
 	seedOperation(t, st, "queued", "transcode_media", "pending", map[string]any{"parent_action_id": "batch", "path": "/media/queued.mkv"}, nil, nil)
 	w := request(h, "GET", "/api/maintenance/operations?group=workflow&status=active", "", true)
 	var page operationsPage
@@ -350,6 +352,11 @@ func TestQueueBatchTelemetryIdentifiesTheActualActiveFile(t *testing.T) {
 	worker := page.Jobs[0]["worker"].(map[string]any)
 	if worker["transcode_phase"] != "encoding" || worker["progress"] != float64(34) {
 		t.Fatal("batch progress is not the child's measured progress", worker)
+	}
+	// 66% of 3000 s left at 2x: the active file's encode ETA reaches the row.
+	activity := page.Jobs[0]["activities"].([]any)[0].(map[string]any)
+	if activity["eta_seconds"] != float64(990) {
+		t.Fatal("batch activity lacks the encode ETA", activity)
 	}
 }
 

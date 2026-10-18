@@ -140,9 +140,15 @@ func TestModeBudgetSettlesHistoricalAttemptsAfterRevisionAndRestart(t *testing.T
 			root, _ := st.GetActionInstance(ec.InstanceID)
 			ec = parseExecutionContext(root, e)
 			e.settleModeSearches(ec, []store.TranscodeBatchItem{item})
-			admitted := reserveModeSearch(ec, batchChildKey(ec, item))
-			if admitted == submitted {
-				t.Fatalf("historical cost settlement wrong: submitted=%v admitted=%v entries=%s", submitted, admitted, toJSON(modeBudgetEntries(ec)))
+			// An unsubmitted attempt cost nothing; a submitted one with no
+			// measured cost keeps its full reservation. Either way the new
+			// attempt reserves its own per-source budget.
+			entry := modeBudgetEntries(ec)[key]
+			if released := entry.Consumed != nil && *entry.Consumed == 0; released == submitted {
+				t.Fatalf("historical cost settlement wrong: submitted=%v entries=%s", submitted, toJSON(modeBudgetEntries(ec)))
+			}
+			if !reserveModeSearch(ec, batchChildKey(ec, item)) {
+				t.Fatal("new attempt could not reserve")
 			}
 		})
 	}

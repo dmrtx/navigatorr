@@ -30,7 +30,7 @@ list. Incomplete evidence, encode errors and size rejections never skip anything
 
 All choices and limits are frozen before admission. No profile is created by
 this search, no quality threshold is relaxed, and no new action restarts its
-600-second deadline. The operation's existing 3600-second search allowance and
+600-second deadline. Each file's 600-second search reservation and the
 same-source unsuccessful-search review remain enforced. A negative measured
 outcome preserves the original; it does not imply every possible encode is bad.
 

@@ -541,12 +541,41 @@ test("full encoding still warns about stale progress with a live heartbeat and h
   const stale = progressText(h.run('telemetry(progressJob)'));
   assert.equal(h.run('queuePresentation(progressJob).status'), "No updates");
   assert.match(stale, /No recent encoding progress.*Worker heartbeat 1s ago.*73.3%/);
-  assert.doesNotMatch(stale, /14.70|238|About|sample tasks/);
+  assert.doesNotMatch(stale, /14.70|238|About|left|sample tasks/);
   h.run('progressJob.worker.progress_is_stale=false;');
   const fresh = progressText(h.run('telemetry(progressJob)'));
   assert.equal(h.run('queuePresentation(progressJob).status'), "Encoding");
-  assert.match(fresh, /Encoding full video.*14.70.*238.0 fps.*About 10 min/);
+  assert.match(fresh, /Encoding full video.*14.70.*238.0 fps.*~10 min left/);
   assert.doesNotMatch(fresh, /sample tasks|VMAF/);
+});
+
+test("batch rows show a smoothed encode ETA and the files left, only while speed is known", () => {
+  const h = metricProgressHarness();
+  h.run(`progressJob.status="waiting_external";progressJob.batch={total:8,completed:2,running:1,queued:4,waiting_decision:1};
+    progressJob.worker={transcode_status:"running",transcode_phase:"encoding",progress:40,speed:1.5,fps:36,progress_is_stale:false,
+      last_progress_at:"2026-10-16T12:22:53Z",worker_heartbeat_at:"2026-10-16T12:22:53Z"};
+    progressJob.activities=[{id:"child",file:"/media/episode.mkv",eta_seconds:4200,worker:progressJob.worker,current_step:1,stages:[{name:"wait_benchmark"},{name:"wait_transcode"}]}];`);
+  let text = progressText(h.run('batchProgress(progressJob)'));
+  assert.match(text, /episode.mkv: Encoding full video · ~1 h 10 min left/);
+  assert.match(text, /Current encode ~1 h 10 min left · about 5 files left/);
+  assert.doesNotMatch(text, /Not time remaining/);
+  assert.match(h.run('batchFileActivity({status:"running",child_action_id:"child"},progressJob)'), /Encoding full video · ~1 h 10 min left/);
+  // A noisy new measurement 30 s later moves the estimate only part of the way.
+  h.run('Date.now=()=>Date.parse("2026-10-16T12:23:24Z");progressJob.activities[0].eta_seconds=3000;progressJob.worker.last_progress_at="2026-10-16T12:23:23Z";progressJob.worker.worker_heartbeat_at="2026-10-16T12:23:23Z";');
+  text = progressText(h.run('batchProgress(progressJob)'));
+  assert.match(text, /~1 h 4 min left/);
+  // Unknown speed hides the ETA rather than inventing one.
+  h.run('progressJob.worker.speed=0;');
+  text = progressText(h.run('batchProgress(progressJob)'));
+  assert.doesNotMatch(text, / left/);
+  assert.match(text, /Estimated workflow progress · Not time remaining/);
+  // Files that finished are forgotten; the smoothing map stays bounded.
+  h.run('for(let i=0;i<100;i++)encodeEta("old-"+i,{transcode_phase:"encoding",speed:1},600);');
+  assert.ok(h.run('encodeEtas.size') <= 64);
+  h.run('Date.now=()=>Date.parse("2026-10-16T12:40:00Z");encodeEta("fresh",{transcode_phase:"encoding",speed:1},600);');
+  assert.equal(h.run('encodeEtas.size'), 1);
+  assert.equal(h.run('remainingLabel(45)'), "less than a minute left");
+  assert.equal(h.run('remainingLabel(3600)'), "~1 h left");
 });
 
 test("validation, publication and sample encoding have discrete progress but require a fresh heartbeat", () => {
@@ -557,7 +586,7 @@ test("validation, publication and sample encoding have discrete progress but req
     assert.equal(h.run('queuePresentation(progressJob).status'), status);
     const text = progressText(h.run('telemetry(progressJob)'));
     assert.match(text, /Last measured: 73.3%.*Worker heartbeat/);
-    assert.doesNotMatch(text, /14.70|238|About|No recent/);
+    assert.doesNotMatch(text, /14.70|238|About|left|No recent/);
     h.run('progressJob.worker.worker_heartbeat_at="2026-10-16T12:20:00Z";');
     assert.equal(h.run('queuePresentation(progressJob).status'), "No heartbeat");
   }
@@ -2513,7 +2542,7 @@ test("phase cost detail distinguishes measured wall intervals from unknown bytes
 });
 
 test("phase cost detail shows known cache observations and distinguishes search budget from consumption",()=>{
- const h=harness();h.run('renderPhaseCosts($("detail-summary"),{worker:{benchmark_search_seconds:4,search_budget_seconds:600,operation_search_budget_seconds:3600},phase_costs:{worker_staging:{duration_ms:1,attempts:1,cache_hits:0,cache_misses:1}}});');const rendered=JSON.stringify(h.elements.get("detail-summary").children);assert.match(rendered,/0 \/ 1/);assert.match(rendered,/measured wall: 4 s/);assert.match(rendered,/Source budget: 600 s/);assert.match(rendered,/Operation budget: 3600 s/);assert.match(rendered,/reservations are not measured consumption/);
+ const h=harness();h.run('renderPhaseCosts($("detail-summary"),{worker:{benchmark_search_seconds:4,search_budget_seconds:600,operation_search_budget_seconds:3600},phase_costs:{worker_staging:{duration_ms:1,attempts:1,cache_hits:0,cache_misses:1}}});');const rendered=JSON.stringify(h.elements.get("detail-summary").children);assert.match(rendered,/0 \/ 1/);assert.match(rendered,/measured wall: 4 s/);assert.match(rendered,/Budget per file: 600 s/);assert.doesNotMatch(rendered,/Operation budget/);assert.match(rendered,/reservations are not measured consumption/);
 });
 
 
@@ -2706,6 +2735,29 @@ test("an extra benchmark round runs only after the evidence was shown and confir
     for (let i = 0; i < 12; i++) await Promise.resolve();
     assert.deepEqual(JSON.parse(JSON.stringify(calls)), confirm ? [["review","action_resume",{decision:"run_once_after_review"}]] : []);
   }
+});
+
+test("the search review shows earlier measurements, marks new settings and hides a repeat", () => {
+  const h = harness();
+  const vmaf = {mean:94.87,p5:91.5,min:90.3,worst_window_mean:92.8,worst_window_seconds:5};
+  h.context.job = {id:"review",action_name:"transcode_media",mode:"size",status:"waiting_decision",source_path:"/media/episode.mkv",
+    waiting_reason:"Two earlier test rounds already tried every setting this test would use, with the same or a more lenient quality requirement, and none was acceptable. Running it again would repeat them, so it is not offered. The original is unchanged.",
+    waiting_options:[{decision:"cancel",description:"Stop and keep the original."}],
+    benchmark:{outcome:"search_review_required",message:"Two earlier rounds found no acceptable candidate.",new_candidates:[],
+      previous_rounds:[{action_id:"act-1",mode:"size",floor:{minimum:88,p5_minimum:84,worst_window_minimum:85},candidates:[{id:"crf16",video_codec:"libx265",quality:16,preset:"slow",vmaf}]}],
+      proposed_candidates:[{id:"next-1",video_codec:"libx265",quality:16,preset:"slow"}],
+      measured:[{candidate_id:"crf20",video_codec:"libx265",quality:20,passed:false,vmaf:{mean:90,p5:85.5,min:84,worst_window_mean:85.95,worst_window_seconds:5}}],
+      next_step:"Every proposed candidate was already measured; run_once_after_review is not offered.",
+      user_next_step:"Keep the original. Every setting this test would try already failed in earlier rounds, so testing them again is not offered."}};
+  assert.equal(h.run('jobControls(job).children.find(b=>b.textContent==="Run one more test")'), undefined);
+  const text = progressText(h.run('benchmarkReport(job)'));
+  assert.match(text, /Earlier round 1 · Size goal \(VMAF ≥ 88, p5 ≥ 84, worst window ≥ 85\)/);
+  assert.match(text, /crf16 · x265 CRF 16 · slow · VMAF mean 94.9 · p5 91.5 · worst 5 s 92.8 · lowest frame 90.3/);
+  assert.match(text, /next-1 .* already tried/);
+  assert.match(text, /crf20 .* p5 85.5 .* did not pass/);
+  assert.match(text, /Next step: .*already failed in earlier rounds/);
+  assert.doesNotMatch(text, /run_once|action/);
+  assert.match(h.run('shortJobReason(job.waiting_reason)'), /already tried these settings; another test is not offered/);
 });
 
 test("the process button says how many files it starts", () => {

@@ -22,6 +22,9 @@ const ModePolicyVersion = "transcode-modes-v2"
 // SizeModePolicyVersion freezes new size-mode operations. Older frozen size
 // policies keep their own version and behaviour.
 const SizeModePolicyVersion = optimization.ModePolicyV3
+
+// modeOperationBudgetSeconds stays in frozen snapshots so their digests are
+// unchanged. It no longer caps admission; see reserveModeSearch.
 const modeOperationBudgetSeconds = 3600
 const modeSearchBudgetSeconds = 600
 
@@ -387,10 +390,12 @@ func (e *Engine) bindModeParent(ec *ExecutionContext) error {
 
 // SearchBudgetEntry is persisted before any external admission. Uncertain
 // accepted effects retain the full reservation; authoritative completion settles
-// measured active time and releases unused credit.
+// measured active time and releases unused credit. Provisional entries were
+// settled while their child waited for a decision and reopen if it resumes.
 type SearchBudgetEntry struct {
-	Reserved float64  `json:"reserved_seconds"`
-	Consumed *float64 `json:"consumed_seconds,omitempty"`
+	Reserved    float64  `json:"reserved_seconds"`
+	Consumed    *float64 `json:"consumed_seconds,omitempty"`
+	Provisional bool     `json:"provisional,omitempty"`
 }
 
 func modeBudgetEntries(ec *ExecutionContext) map[string]SearchBudgetEntry {
@@ -403,24 +408,20 @@ func modeBudgetEntries(ec *ExecutionContext) map[string]SearchBudgetEntry {
 	return entries
 }
 
+// reserveModeSearch records one attempt's per-source search budget before it
+// is admitted. Each attempt is bounded by that budget (the worker enforces it
+// as a deadline) and the batch by max_parallel_jobs, so the operation-wide
+// figure is the per-source budget times the attempts admitted. It is never a
+// separate cap: a flat cap admitted only six sources of a season and blocked
+// retries. The frozen operation_budget_seconds is kept for digest
+// compatibility only.
 func reserveModeSearch(ec *ExecutionContext, key string) bool {
 	entries := modeBudgetEntries(ec)
 	if _, ok := entries[key]; ok {
 		return true
 	}
-	used := 0.0
-	for _, entry := range entries {
-		if entry.Consumed != nil {
-			used += *entry.Consumed
-		} else {
-			used += entry.Reserved
-		}
-	}
-	sourceBudget, operationBudget := getInt(ec.State, "search_budget_seconds"), getInt(ec.State, "operation_search_budget_seconds")
-	if sourceBudget <= 0 || operationBudget <= 0 {
-		return false
-	}
-	if used+float64(sourceBudget) > float64(operationBudget) {
+	sourceBudget := getInt(ec.State, "search_budget_seconds")
+	if sourceBudget <= 0 {
 		return false
 	}
 	entries[key] = SearchBudgetEntry{Reserved: float64(sourceBudget)}
@@ -434,7 +435,7 @@ func (e *Engine) settleModeSearches(ec *ExecutionContext, items []store.Transcod
 	// the visible row to a new generation. Settle old attempts as well as current
 	// ones, retaining the full reservation whenever execution cost is uncertain.
 	for key, entry := range entries {
-		if entry.Consumed != nil {
+		if entry.Consumed != nil && !entry.Provisional {
 			continue
 		}
 		child, err := e.deps.Store.FindActionByIdempotencyKey("transcode_media", key)
@@ -451,12 +452,19 @@ func (e *Engine) settleModeSearches(ec *ExecutionContext, items []store.Transcod
 		}
 		var state map[string]any
 		_ = json.Unmarshal([]byte(child.StateJSON), &state)
+		terminal := child.Status == StatusCompleted || child.Status == StatusFailed || child.Status == StatusCancelled
+		waiting := child.Status == StatusWaitingDecision
 		measured, known := state["benchmark_search_seconds"]
 		if !known {
+			// A child waiting for a decision is not searching. When it never
+			// submitted a search it holds no budget until it resumes.
 			definitelyUnsubmitted := !getBool(state, "benchmark_submitted") && !getBool(state, "benchmark_reconcile")
-			if definitelyUnsubmitted && (child.Status == StatusCompleted || child.Status == StatusFailed || child.Status == StatusCancelled || child.Status == StatusWaitingDecision && getString(state, "reason_code") == "quality_policy_unavailable") {
+			if definitelyUnsubmitted && (terminal || waiting) {
 				measured = float64(0)
 			} else {
+				if entry.Provisional {
+					entries[key] = SearchBudgetEntry{Reserved: entry.Reserved}
+				}
 				continue
 			}
 		}
@@ -464,11 +472,10 @@ func (e *Engine) settleModeSearches(ec *ExecutionContext, items []store.Transcod
 		if !valid {
 			continue
 		}
-		if value > entry.Reserved {
-			continue
-		}
-		entry.Consumed = &value
-		entries[key] = entry
+		// The worker stops at its deadline, so a measured cost can overshoot
+		// the reservation by scheduling jitter; that time is fully spent.
+		value = math.Min(value, entry.Reserved)
+		entries[key] = SearchBudgetEntry{Reserved: entry.Reserved, Consumed: &value, Provisional: !terminal && !known}
 	}
 	ec.State["search_budget_entries"] = entries
 }

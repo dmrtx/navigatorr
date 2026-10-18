@@ -211,6 +211,49 @@ type BenchmarkCandidateEvaluation struct {
 	EstimatedMB        float64                  `json:"estimated_mb"`
 	SavingsPercent     float64                  `json:"savings_percent"`
 	Uncertainties      []string                 `json:"uncertainties,omitempty"`
+	// VMAF is the measured distribution behind Score, kept with the decision
+	// so later reviews can compare rounds without the transient worker status.
+	VMAF *BenchmarkVMAFSummary `json:"vmaf,omitempty"`
+}
+
+// BenchmarkVMAFSummary is one candidate's pooled VMAF over its sampled frames.
+type BenchmarkVMAFSummary struct {
+	Model              string  `json:"model,omitempty"`
+	Mean               float64 `json:"mean"`
+	P5                 float64 `json:"p5"`
+	Min                float64 `json:"min"`
+	WorstWindowMean    float64 `json:"worst_window_mean,omitempty"`
+	WorstWindowSeconds float64 `json:"worst_window_seconds,omitempty"`
+	FramesTotal        int     `json:"frames_total,omitempty"`
+	TemporalDecimation int     `json:"temporal_decimation,omitempty"`
+}
+
+// SummarizeVMAF keeps the reviewable part of a candidate's VMAF statistics.
+func SummarizeVMAF(stats *quality.VMAFStats) *BenchmarkVMAFSummary {
+	if stats == nil || stats.FramesTotal <= 0 {
+		return nil
+	}
+	return &BenchmarkVMAFSummary{Model: stats.ModelID, Mean: stats.Mean, P5: stats.P5, Min: stats.Min, WorstWindowMean: stats.WorstWindowMean, WorstWindowSeconds: stats.WorstWindowSeconds, FramesTotal: stats.FramesTotal, TemporalDecimation: stats.TemporalDecimation}
+}
+
+// AttachVMAFEvidence copies each candidate's measured VMAF summary from the
+// quality evidence into its evaluation, without replacing one already set.
+func AttachVMAFEvidence(decision *BenchmarkDecision, evidence []BenchmarkCandidateQualityEvidence) {
+	if decision == nil {
+		return
+	}
+	for i := range decision.Evaluations {
+		ev := &decision.Evaluations[i]
+		if ev.VMAF != nil {
+			continue
+		}
+		for _, q := range evidence {
+			if q.CandidateID == ev.CandidateID && q.VMAF != nil {
+				ev.VMAF = SummarizeVMAF(q.VMAF)
+				break
+			}
+		}
+	}
 }
 
 // BenchmarkDecision records the explainable Phase 6 candidate selection outcome.

@@ -50,32 +50,18 @@ func TestModePolicyFreezeAndDigest(t *testing.T) {
 }
 func TestModeSearchBudgetReservationsAndSettlement(t *testing.T) {
 	ec := &ExecutionContext{State: map[string]any{"search_budget_seconds": 600, "operation_search_budget_seconds": 3600}}
-	for i := 0; i < 6; i++ {
+	// The frozen operation figure is not a cap: every attempt reserves its
+	// own per-source budget, so a season is admitted as slots free up.
+	for i := 0; i < 12; i++ {
 		if !reserveModeSearch(ec, string(rune('a'+i))) {
-			t.Fatal("early exhausted")
+			t.Fatal("per-source admission refused by the retired operation cap")
 		}
 	}
-	if reserveModeSearch(ec, "g") {
-		t.Fatal("operation bound exceeded")
-	}
-	if !reserveModeSearch(ec, "a") {
+	if !reserveModeSearch(ec, "a") || len(modeBudgetEntries(ec)) != 12 {
 		t.Fatal("same admission charged twice")
 	}
-	entries := modeBudgetEntries(ec)
-	used := 2.5
-	e := entries["a"]
-	e.Consumed = &used
-	entries["a"] = e
-	ec.State["search_budget_entries"] = entries
-	if reserveModeSearch(ec, "g") {
-		t.Fatal("fractional unspent allowance cannot fund another 600s job yet")
-	}
-	used = 0
-	e.Consumed = &used
-	entries["a"] = e
-	ec.State["search_budget_entries"] = entries
-	if !reserveModeSearch(ec, "g") {
-		t.Fatal("unused reservation was not released")
+	if entry := modeBudgetEntries(ec)["a"]; entry.Reserved != 600 || entry.Consumed != nil {
+		t.Fatalf("reservation not recorded before admission: %+v", entry)
 	}
 }
 func modeTestCapabilities() transcode.WorkerCapabilities {
