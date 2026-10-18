@@ -19,7 +19,7 @@ Three reviewers examined durability/classification, worker/ASR/audio, and UI/MCP
 - 171 Node UI/hook regressions and 18 Python benchmark tests.
 - Focused race tests for concurrent coordinator admission/reconciliation and filesystem/SMB cancellation guards and recovery.
 - Real coordinator→HTTP worker→FFmpeg→validated publication E2E using a scripted ASR fixture.
-- Native M1 Max smoke: Apple Speech produced 28 timed units over a 10-second Generation Why fixture; a deliberately selected 480-ms test cut produced 9,520 ms of decoded MP3, with the original preserved. The test also verifies durable ASR recovery and byte-identical no-cut MP3 output. Its test label is synthetic, not an ad-detection accuracy measurement.
+- Native M1 Max smoke: Apple Speech produced 28 timed units over a 10-second podcast fixture; a deliberately selected 480-ms test cut produced 9,520 ms of decoded MP3, with the original preserved. The test also verifies durable ASR recovery and byte-identical no-cut MP3 output. Its test label is synthetic, not an ad-detection accuracy measurement.
 
 ## Scope and remaining activation
 

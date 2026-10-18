@@ -202,11 +202,11 @@ func TestValidation_CallAPI_Projections_LargeCollection(t *testing.T) {
 
 func TestValidation_CallAPI_FilteringAndOrder(t *testing.T) {
 	items := []map[string]any{
-		{"id": 1, "title": "Attack on Titan", "size": 1000, "active": true},
-		{"id": 2, "title": "Berserk", "size": 5000, "active": false},
-		{"id": 3, "title": "Cowboy Bebop", "size": 3000, "active": true},
-		{"id": 4, "title": "Death Note", "size": 4000, "active": true},
-		{"id": 5, "title": "Evangelion", "size": 2000, "active": false},
+		{"id": 1, "title": "Atlas of Stone", "size": 1000, "active": true},
+		{"id": 2, "title": "Bellwether", "size": 5000, "active": false},
+		{"id": 3, "title": "Comet Beacon", "size": 3000, "active": true},
+		{"id": 4, "title": "Drift Signal", "size": 4000, "active": true},
+		{"id": 5, "title": "Everglow", "size": 2000, "active": false},
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -230,11 +230,11 @@ func TestValidation_CallAPI_FilteringAndOrder(t *testing.T) {
 	})
 	var outGt []map[string]any
 	_ = json.Unmarshal([]byte(resultText(t, resGt)), &outGt)
-	if len(outGt) != 3 { // Berserk (5000), Cowboy Bebop (3000), Death Note (4000)
+	if len(outGt) != 3 { // Bellwether (5000), Comet Beacon (3000), Drift Signal (4000)
 		t.Errorf("expected 3 items for size > 2500, got %d", len(outGt))
 	}
 
-	// Filter contains: title contains "be" (case-insensitive: Berserk, Cowboy Bebop)
+	// Filter contains: title contains "be" (case-insensitive: Bellwether, Comet Beacon)
 	resContains := callTool(t, s, "call_api", map[string]any{
 		"service": "sonarr", "path": "/series", "filter": "title:contains:be",
 	})
@@ -533,8 +533,8 @@ func TestValidation_HistoricalRealCases(t *testing.T) {
 		{"Ip Man", []string{"chi"}, nil},
 		{"Jiro Dreams of Sushi", []string{"jpn"}, nil},
 		{"Martyrs", []string{"fre"}, nil},
-		{"Oldboy", []string{"kor"}, nil},
-		{"Princess Mononoke", []string{"jpn"}, nil},
+		{"Ironbird", []string{"kor"}, nil},
+		{"Princess Lumen", []string{"jpn"}, nil},
 		{"Riders of Justice", []string{"dan"}, nil},
 		{"The Wailing", []string{"kor"}, nil},
 		{"The Witch: Part 1. The Subversion", []string{"kor"}, nil},
@@ -561,9 +561,9 @@ func TestValidation_HistoricalRealCases(t *testing.T) {
 	}{
 		{"Perfect Blue", []string{"jpn", "eng"}, nil},
 		{"Spirited Away", []string{"jpn", "eng"}, nil},
-		{"Berserk Golden Age I", []string{"jpn", "eng"}, []string{"eng"}},
-		{"Berserk Golden Age II", []string{"jpn", "eng"}, []string{"eng"}},
-		{"Berserk Golden Age III", []string{"jpn", "eng"}, []string{"eng"}},
+		{"Bellwether Saga I", []string{"jpn", "eng"}, []string{"eng"}},
+		{"Bellwether Saga II", []string{"jpn", "eng"}, []string{"eng"}},
+		{"Bellwether Saga III", []string{"jpn", "eng"}, []string{"eng"}},
 		{"Sympathy for Mr. Vengeance", []string{"kor"}, []string{"eng"}},
 		{"Suzume", []string{"jpn"}, []string{"eng"}},
 		{"Rurouni Kenshin: The Beginning", []string{"jpn", "eng"}, []string{"eng", "spa"}},
@@ -603,24 +603,24 @@ func TestValidation_HistoricalRealCases(t *testing.T) {
 }
 
 // ============================================================================
-// 21 & 22. STALE FILE ID & EVANGELION REGRESSION
+// 21 & 22. STALE FILE ID & EVERGLOW REGRESSION
 // ============================================================================
 
-func TestValidation_StaleFileID_And_EvangelionRegression(t *testing.T) {
+func TestValidation_StaleFileID_And_EverglowRegression(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "stale_test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer st.Close()
 
-	// 1. Initial maintenance job opened for Evangelion 1.0 with old non-accessible file (ID 101)
+	// 1. Initial maintenance job opened for Everglow 1.0 with old non-accessible file (ID 101)
 	fileID := "101"
 	size := int64(1500000000)
 	item, err := st.AddItem(store.MaintenanceItem{
 		Service:           "radarr",
 		MediaType:         "movie",
 		MediaID:           "501",
-		Title:             "Evangelion: 1.11 You Are (Not) Alone",
+		Title:             "Everglow: 1.11 We Were (Not) Lost",
 		IssueType:         maint.IssueMissingLanguage,
 		CurrentFileID:     &fileID,
 		CurrentSize:       &size,
@@ -728,17 +728,17 @@ func TestValidation_CentralizedSafety_NoEarlyDeleteAndNoCallAPIBypass(t *testing
 }
 
 // ============================================================================
-// 44 & 45. RANK_RELEASES & AKIRA SCENARIO (SIZE VS ACCESSIBILITY)
+// 44 & 45. RANK_RELEASES & KESTREL SCENARIO (SIZE VS ACCESSIBILITY)
 // ============================================================================
 
-func TestValidation_Ranking_AkiraScenario(t *testing.T) {
+func TestValidation_Ranking_KestrelScenario(t *testing.T) {
 	prefs := maint.DefaultAnimePrefs()
-	prefs.CurrentSizeBytes = 2950000000 // Akira original: 2.95 GB
+	prefs.CurrentSizeBytes = 2950000000 // Kestrel original: 2.95 GB
 
 	// Candidate A: Smaller but no accessible subs/audio
 	candidateSmall := maint.ReleaseCandidate{
 		GUID:       "cand-small",
-		Title:      "Akira.1988.1080p.Compact",
+		Title:      "Kestrel.1988.1080p.Compact",
 		Size:       1800000000, // 1.8 GB (ratio ~0.61 of 2.95GB)
 		Seeders:    50,
 		VideoCodec: "hevc",
@@ -753,7 +753,7 @@ func TestValidation_Ranking_AkiraScenario(t *testing.T) {
 	// Candidate B: Larger (4.05 GB) but has Dual Audio + Multi English/Spanish subs
 	candidateAccessible := maint.ReleaseCandidate{
 		GUID:         "cand-accessible",
-		Title:        "Akira.1988.1080p.Dual.Audio.Multi-Subs.[Judas]",
+		Title:        "Kestrel.1988.1080p.Dual.Audio.Multi-Subs.[Judas]",
 		ReleaseGroup: "Judas",
 		Size:         4050000000, // 4.05 GB (+1.1 GB delta)
 		Seeders:      30,

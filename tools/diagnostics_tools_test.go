@@ -309,22 +309,22 @@ func TestActionHistoryTool(t *testing.T) {
 	defer st.Close()
 
 	// Seed action logs
-	_ = st.LogActionEnriched("safe_replace", "sonarr", "Evangelion", `{"step":"verify"}`, "success", "", "Evangelion-S01", 120)
-	_ = st.LogActionEnriched("scan_library", "radarr", "Akira", `{"dry_run":true}`, "found oversized", "", "Akira-1988", 45)
+	_ = st.LogActionEnriched("safe_replace", "sonarr", "Everglow", `{"step":"verify"}`, "success", "", "Everglow-S01", 120)
+	_ = st.LogActionEnriched("scan_library", "radarr", "Kestrel", `{"dry_run":true}`, "found oversized", "", "Kestrel-1988", 45)
 
 	s := server.NewMCPServer("test", "0.0.0")
 	RegisterDiagnostics(s, &config.Config{}, nil, nil, nil, nil, nil, st)
 
-	// 1. Query by media name "Evangelion"
+	// 1. Query by media name "Everglow"
 	res := callTool(t, s, "action_history", map[string]any{
-		"media": "Evangelion",
+		"media": "Everglow",
 	})
 	txt := resultText(t, res)
-	if !strings.Contains(txt, "Evangelion") {
-		t.Errorf("expected Evangelion in history, got: %s", txt)
+	if !strings.Contains(txt, "Everglow") {
+		t.Errorf("expected Everglow in history, got: %s", txt)
 	}
-	if strings.Contains(txt, "Akira") {
-		t.Errorf("expected Akira to be filtered out, got: %s", txt)
+	if strings.Contains(txt, "Kestrel") {
+		t.Errorf("expected Kestrel to be filtered out, got: %s", txt)
 	}
 
 	// 2. Query by action "scan_library"
@@ -332,8 +332,8 @@ func TestActionHistoryTool(t *testing.T) {
 		"action": "scan_library",
 	})
 	scanTxt := resultText(t, resScan)
-	if !strings.Contains(scanTxt, "Akira") {
-		t.Errorf("expected Akira in scan_library query, got: %s", scanTxt)
+	if !strings.Contains(scanTxt, "Kestrel") {
+		t.Errorf("expected Kestrel in scan_library query, got: %s", scanTxt)
 	}
 }
 

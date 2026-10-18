@@ -342,7 +342,7 @@ test("season choices use the complete available file summary, never declared emp
 test("Sonarr series open a complete season list and seasons open only their episodes", async () => {
   const h=harness(), calls=[];
   h.context.record=path=>calls.push(path);
-  h.run('controls=()=>{};$("service").value="sonarr";state.media={id:7,title:"Top Gear"};api=async(path)=>{record(path);const season=new URLSearchParams(path.split("?")[1]).get("season");return season===null ? {total:194,items:[{id:1,path:"/media/Season 1/one.mkv"}],has_more:true,seasons:[],season_groups:[{seasonNumber:1,fileCount:10,size:200},{seasonNumber:2,fileCount:12,size:300},{seasonNumber:10,fileCount:8,size:100},{seasonNumber:0,fileCount:2,size:50}]} : {total:1,has_more:false,seasons:[],items:[{id:2,path:"/media/Season 2/two.mkv",relativePath:"Season 2/two.mkv",seasonNumber:Number(season)}]};};');
+  h.run('controls=()=>{};$("service").value="sonarr";state.media={id:7,title:"Road Notes"};api=async(path)=>{record(path);const season=new URLSearchParams(path.split("?")[1]).get("season");return season===null ? {total:194,items:[{id:1,path:"/media/Season 1/one.mkv"}],has_more:true,seasons:[],season_groups:[{seasonNumber:1,fileCount:10,size:200},{seasonNumber:2,fileCount:12,size:300},{seasonNumber:10,fileCount:8,size:100},{seasonNumber:0,fileCount:2,size:50}]} : {total:1,has_more:false,seasons:[],items:[{id:2,path:"/media/Season 2/two.mkv",relativePath:"Season 2/two.mkv",seasonNumber:Number(season)}]};};');
   await h.run('loadLibrary()');
   assert.deepEqual(h.elements.get('library-items').children.map(row=>row.children[1].children[0].textContent),['Season 1','Season 2','Season 10','Specials']);
   assert.equal(h.elements.get('library-more').hidden,true);
@@ -351,7 +351,7 @@ test("Sonarr series open a complete season list and seasons open only their epis
   assert.equal(h.elements.get('library-total').textContent,'4 seasons · 194 files');
   await h.run('navigateSeriesSeason(2)');
   assert.equal(new URLSearchParams(calls.at(-1).split('?')[1]).get('season'),'2');
-  assert.equal(h.elements.get('selection-title').textContent,'Top Gear · Season 2');
+  assert.equal(h.elements.get('selection-title').textContent,'Road Notes · Season 2');
   assert.equal(h.elements.get('library-items').children[0].children[1].children[0].textContent,'two.mkv');
   assert.match(h.run('navigationQuery()'),/season=2/);
   h.elements.get('back').listeners.get('click')();
@@ -384,7 +384,7 @@ test("season selection is scoped across pages, preserves other seasons and drops
 test("season routes preserve specials and unknown files and restore the same season on Back",async()=>{
   const h=harness(), calls=[];
   h.context.record=path=>calls.push(path);
-  h.run('controls=()=>{};state.info={roots:[],services:[{name:"sonarr"}]};loadJobs=async()=>{};api=async(path)=>{record(path);return path.includes("title=1") ? {media:{id:7,title:"Top Gear"}} : {total:0,items:[],seasons:[],season_groups:[]};};');
+  h.run('controls=()=>{};state.info={roots:[],services:[{name:"sonarr"}]};loadJobs=async()=>{};api=async(path)=>{record(path);return path.includes("title=1") ? {media:{id:7,title:"Road Notes"}} : {total:0,items:[],seasons:[],season_groups:[]};};');
   for(const season of ['0','2','unknown']) {
     await h.run(`applyNavigation(navigationRoute("?view=files&source=sonarr&media=7&season=${season}"))`);
     assert.equal(new URLSearchParams(calls.at(-1).split('?')[1]).get('season'),season);
@@ -408,7 +408,7 @@ test("maintenance actions never use native browser confirmations", () => {
 
 test("candidate review reads only, shows measured sizes and rechecks before approval", async () => {
   const h = harness(), calls = [];
-  h.context.fixture = {id:"candidate",status:"waiting_decision",waiting_reason:"Candidate file size (1910766036 bytes) exceeds original (1599600732 bytes) by 19.5%, which is greater than max_size_increase_percent (0.0%)",waiting_options:[{decision:"accept_loss"}],source_path:"/media/Uzumaki.mkv"};
+  h.context.fixture = {id:"candidate",status:"waiting_decision",waiting_reason:"Candidate file size (1910766036 bytes) exceeds original (1599600732 bytes) by 19.5%, which is greater than max_size_increase_percent (0.0%)",waiting_options:[{decision:"accept_loss"}],source_path:"/media/Spiralis.mkv"};
   h.context.record = (...args) => calls.push(args);
   h.run('api=async()=>({jobs:[fixture]}); jobControl=async(...args)=>record(...args);');
   const review = h.run('reviewJobDecision("candidate","accept_loss")');

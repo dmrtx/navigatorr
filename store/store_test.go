@@ -53,7 +53,7 @@ func TestPersistenceAcrossReopen(t *testing.T) {
 func TestAddItemIdempotent(t *testing.T) {
 	s := openTest(t)
 	base := MaintenanceItem{MediaType: "series", Service: "sonarr", MediaID: "248",
-		Title: "The Case Study of Vanitas", IssueType: "oversized", Priority: 5}
+		Title: "The Chronicle of Lantern", IssueType: "oversized", Priority: 5}
 	a, err := s.AddItem(base)
 	if err != nil {
 		t.Fatalf("add: %v", err)
@@ -78,7 +78,7 @@ func TestAddItemIdempotent(t *testing.T) {
 func TestAddItemAfterDoneCreatesNew(t *testing.T) {
 	s := openTest(t)
 	base := MaintenanceItem{MediaType: "movie", Service: "radarr", MediaID: "1",
-		Title: "Oldboy", IssueType: "missing_accessible_language"}
+		Title: "Ironbird", IssueType: "missing_accessible_language"}
 	a, err := s.AddItem(base)
 	if err != nil {
 		t.Fatalf("add: %v", err)
@@ -129,7 +129,7 @@ func TestNextItemPriority(t *testing.T) {
 func TestStateMachineRejectsInvalid(t *testing.T) {
 	s := openTest(t)
 	it, err := s.AddItem(MaintenanceItem{MediaType: "series", Service: "sonarr",
-		MediaID: "3", Title: "Vanitas", IssueType: "oversized"})
+		MediaID: "3", Title: "Lantern", IssueType: "oversized"})
 	if err != nil {
 		t.Fatalf("add: %v", err)
 	}
@@ -234,7 +234,7 @@ func TestBlocklist(t *testing.T) {
 func TestDecisionsAppendOnly(t *testing.T) {
 	s := openTest(t)
 	it, _ := s.AddItem(MaintenanceItem{MediaType: "series", Service: "sonarr",
-		MediaID: "9", Title: "Fate/strange Fake", IssueType: "oversized"})
+		MediaID: "9", Title: "Star/bright Tale", IssueType: "oversized"})
 	if _, err := s.RecordDecision(ReleaseDecision{MaintenanceItemID: it.ID,
 		Title: "Judas release", Decision: DecisionSelected, ReasonsJSON: `["multi_subs"]`}); err != nil {
 		t.Fatalf("record selected: %v", err)

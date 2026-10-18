@@ -64,9 +64,9 @@ local_work_dir: %q
 smb_direct:
   enabled: true
   local_root: %q
-  server: 192.168.70.72
+  server: 192.0.2.10
   share: media
-  username: tdarr
+  username: navigatorr-transcode
   password_file: %q
   timeout: 20m
 `, filepath.Join(dir, "state"), root, root, filepath.Join(dir, "work"), root, filepath.Join(dir, "secret"))
@@ -77,7 +77,7 @@ smb_direct:
 	if err != nil {
 		t.Fatalf("LoadWorkerConfig: %v", err)
 	}
-	if !cfg.SMBDirect.Enabled || cfg.SMBDirect.Server != "192.168.70.72:445" || cfg.SMBDirect.Timeout != 20*time.Minute {
+	if !cfg.SMBDirect.Enabled || cfg.SMBDirect.Server != "192.0.2.10:445" || cfg.SMBDirect.Timeout != 20*time.Minute {
 		t.Fatalf("SMB config not normalized: %#v", cfg.SMBDirect)
 	}
 

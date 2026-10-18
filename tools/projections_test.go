@@ -11,13 +11,13 @@ func TestProjectFieldsExactPromptExample(t *testing.T) {
 	// fields: id, title, movieFile.id, movieFile.size, movieFile.mediaInfo.audioLanguages, movieFile.mediaInfo.subtitles
 	rawJSON := `{
 		"id": 1,
-		"title": "Akira",
+		"title": "Kestrel",
 		"year": 1988,
 		"overview": "A secret military project...",
 		"movieFile": {
 			"id": 123,
 			"size": 4053950652,
-			"relativePath": "Akira.1988.mkv",
+			"relativePath": "Kestrel.1988.mkv",
 			"mediaInfo": {
 				"audioLanguages": ["jpn", "eng"],
 				"subtitles": ["eng", "spa"],
@@ -45,7 +45,7 @@ func TestProjectFieldsExactPromptExample(t *testing.T) {
 
 	expectedJSON := `{
 		"id": 1,
-		"title": "Akira",
+		"title": "Kestrel",
 		"movieFile": {
 			"id": 123,
 			"size": 4053950652,

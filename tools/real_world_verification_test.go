@@ -196,7 +196,7 @@ func TestRealWorld_Idempotency_LostResponseAfterSideEffect(t *testing.T) {
 		if r.URL.Path == "/api/v3/movie/42" {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"id":    42,
-				"title": "Evangelion: 3.0+1.0",
+				"title": "Everglow: 3.0+1.0",
 				"movieFile": map[string]any{
 					"id": atomic.LoadInt32(&currentFileID),
 				},
@@ -292,7 +292,7 @@ func TestRealWorld_SafeReplace_ExternalStateAdoption(t *testing.T) {
 		MediaType:     "movies",
 		Service:       "radarr",
 		MediaID:       "501",
-		Title:         "Princess Mononoke",
+		Title:         "Princess Lumen",
 		IssueType:     "missing_accessible_language",
 		Notes:         "Korean audio only, missing eng/spa",
 		CurrentFileID: &curFileID,
@@ -464,7 +464,7 @@ func TestRealWorld_MultiAgent_MaintenanceJobClaimLease(t *testing.T) {
 		MediaType:     "movies",
 		Service:       "radarr",
 		MediaID:       "901",
-		Title:         "Akira",
+		Title:         "Kestrel",
 		IssueType:     "size_optimization",
 		Notes:         "File is 45GB, candidate available at 12GB",
 		CurrentFileID: &curFileID,
@@ -637,7 +637,7 @@ func TestRealWorld_LLMWorkflowErgonomics(t *testing.T) {
 			movies := []map[string]any{
 				{
 					"id":    1,
-					"title": "Akira",
+					"title": "Kestrel",
 					"movieFile": map[string]any{
 						"id":   101,
 						"size": 45000000000,
@@ -649,7 +649,7 @@ func TestRealWorld_LLMWorkflowErgonomics(t *testing.T) {
 				},
 				{
 					"id":    2,
-					"title": "Evangelion: 1.11 You Are (Not) Alone",
+					"title": "Everglow: 1.11 We Were (Not) Lost",
 					"movieFile": map[string]any{
 						"id":   202, // Upgraded file ID
 						"size": 8500000000,
@@ -661,7 +661,7 @@ func TestRealWorld_LLMWorkflowErgonomics(t *testing.T) {
 				},
 				{
 					"id":    3,
-					"title": "Oldboy",
+					"title": "Ironbird",
 					"movieFile": map[string]any{
 						"id":   303,
 						"size": 12000000000,
@@ -700,14 +700,14 @@ func TestRealWorld_LLMWorkflowErgonomics(t *testing.T) {
 		MediaType:     "movies",
 		Service:       "radarr",
 		MediaID:       "1",
-		Title:         "Akira",
+		Title:         "Kestrel",
 		IssueType:     "size_optimization",
 		Notes:         "Original release is 45GB. Ready for compact replacement.",
 		CurrentFileID: &fID,
 		CurrentSize:   &fSize,
 	})
 
-	_ = st.LogActionEnriched("safe_replace", "radarr", "Evangelion: 1.11 You Are (Not) Alone", `{"step":"verify","result":"passed","audio":["jpn","eng"],"subs":["eng","spa"]}`, "success", "", "Evangelion", 150)
+	_ = st.LogActionEnriched("safe_replace", "radarr", "Everglow: 1.11 We Were (Not) Lost", `{"step":"verify","result":"passed","audio":["jpn","eng"],"subs":["eng","spa"]}`, "success", "", "Everglow", 150)
 
 	s := server.NewMCPServer("navigatorr-test", "2.0.0", server.WithToolCapabilities(true))
 	reg := arrservice.NewRegistry(cfg)
@@ -726,20 +726,20 @@ func TestRealWorld_LLMWorkflowErgonomics(t *testing.T) {
 		"fields":  "id,title,movieFile.id,movieFile.mediaInfo.audioLanguages,movieFile.mediaInfo.subtitles",
 	})
 	txt1 := resultText(t, res1)
-	if !strings.Contains(txt1, "Oldboy") || !strings.Contains(txt1, "kor") {
-		t.Errorf("Prompt 1: expected Oldboy in projected results, got: %s", txt1)
+	if !strings.Contains(txt1, "Ironbird") || !strings.Contains(txt1, "kor") {
+		t.Errorf("Prompt 1: expected Ironbird in projected results, got: %s", txt1)
 	}
 	t.Logf("PROMPT 1 RESULT: 1 tool call (`call_api`), payload size %d bytes (clean, no truncating)", len(txt1))
 
-	// PROMPT 2: “Verifica el maintenance job de Akira y dime en qué estado real está.”
+	// PROMPT 2: “Verifica el maintenance job de Kestrel y dime en qué estado real está.”
 	// LLM issues maintenance_list
 	res2 := callTool(t, s, "maintenance_list", map[string]any{
 		"service": "radarr",
-		"query":   "Akira",
+		"query":   "Kestrel",
 	})
 	txt2 := resultText(t, res2)
-	if !strings.Contains(txt2, "Akira") || !strings.Contains(txt2, "size_optimization") {
-		t.Errorf("Prompt 2: expected Akira maintenance job, got: %s", txt2)
+	if !strings.Contains(txt2, "Kestrel") || !strings.Contains(txt2, "size_optimization") {
+		t.Errorf("Prompt 2: expected Kestrel maintenance job, got: %s", txt2)
 	}
 	t.Logf("PROMPT 2 RESULT: 1 tool call (`maintenance_list`), payload size %d bytes", len(txt2))
 
@@ -751,14 +751,14 @@ func TestRealWorld_LLMWorkflowErgonomics(t *testing.T) {
 	txt3 := resultText(t, res3)
 	t.Logf("PROMPT 3 RESULT: 1 tool call (`action_list`), returned %d bytes", len(txt3))
 
-	// PROMPT 4: “Dime qué pasó con Evangelion y si sus problemas de idioma siguen activos.”
+	// PROMPT 4: “Dime qué pasó con Everglow y si sus problemas de idioma siguen activos.”
 	// LLM calls action_history and maintenance_list
 	res4Audit := callTool(t, s, "action_history", map[string]any{
-		"media": "Evangelion",
+		"media": "Everglow",
 	})
 	txt4Audit := resultText(t, res4Audit)
-	if !strings.Contains(txt4Audit, "Evangelion") || !strings.Contains(txt4Audit, "safe_replace") {
-		t.Errorf("Prompt 4: expected Evangelion audit record, got: %s", txt4Audit)
+	if !strings.Contains(txt4Audit, "Everglow") || !strings.Contains(txt4Audit, "safe_replace") {
+		t.Errorf("Prompt 4: expected Everglow audit record, got: %s", txt4Audit)
 	}
 	t.Logf("PROMPT 4 RESULT: 1 tool call (`action_history`), payload size %d bytes. Complete observability achieved without reading log files manually!", len(txt4Audit))
 }
