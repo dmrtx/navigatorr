@@ -272,3 +272,21 @@ func TestSearchOutOfTimeOnAnIdleWorkerKeepsTheGenericMessage(t *testing.T) {
 		t.Fatal("an earlier attempt's busy flag was inherited")
 	}
 }
+
+func TestObservedStatusDropsSearchTelemetryTheNewerAttemptLacks(t *testing.T) {
+	e := NewEngine(EngineDeps{})
+	ec := &ExecutionContext{InstanceID: "bench-stale", ActionName: "transcode_media", Inputs: map[string]any{}, Outputs: map[string]any{}, State: map[string]any{}}
+	e.observeBenchmarkStatus(ec, transcode.BenchmarkStatus{Status: transcode.StatusFailed, SearchBudgetSeconds: 600, SearchWorkerBusy: true, SearchExtension: &transcode.SearchExtension{MaxSeconds: 1800, SteadySeconds: 180}})
+	if getInt(ec.State, "search_budget_max_seconds") != 1800 {
+		t.Fatalf("setup did not record telemetry: %+v", ec.State)
+	}
+	ec.State["search_worker_busy"] = true // as the exhausted wait leaves it
+	// A later attempt on a worker without the extension, that finished in time.
+	e.observeBenchmarkStatus(ec, transcode.BenchmarkStatus{Status: transcode.StatusCompleted, SearchBudgetSeconds: 600})
+	if _, ok := ec.State["search_budget_max_seconds"]; ok {
+		t.Fatalf("the extended cap outlived the attempt that had it: %+v", ec.State)
+	}
+	if _, ok := ec.State["search_worker_busy"]; ok {
+		t.Fatalf("the busy flag outlived the attempt that had it: %+v", ec.State)
+	}
+}

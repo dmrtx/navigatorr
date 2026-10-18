@@ -16,8 +16,8 @@ import (
 // budget before its hard deadline.
 var errSearchBudgetStopped = errors.New("search budget exhausted")
 
-// searchBudgetPollInterval is a variable so tests can watch a budget quickly.
-var searchBudgetPollInterval = 10 * time.Second
+// searchBudgetPollInterval is how often the watcher samples a running search.
+const searchBudgetPollInterval = 10 * time.Second
 
 // searchBudget decides how long one mode search may run. Without an extension
 // it is the fixed wall-clock budget from the persisted search start. With one,
@@ -32,6 +32,7 @@ type searchBudget struct {
 	base    time.Duration
 	hardCap time.Duration
 	steady  time.Duration
+	poll    time.Duration
 	now     func() time.Time
 
 	mu        sync.Mutex
@@ -43,7 +44,7 @@ type searchBudget struct {
 }
 
 func newSearchBudget(start time.Time, baseSeconds int, ext *transcode.SearchExtension) *searchBudget {
-	b := &searchBudget{start: start, base: time.Duration(baseSeconds) * time.Second, now: time.Now}
+	b := &searchBudget{start: start, base: time.Duration(baseSeconds) * time.Second, poll: searchBudgetPollInterval, now: time.Now}
 	b.hardCap = b.base
 	if ext != nil && ext.Validate(baseSeconds) == nil {
 		b.hardCap = time.Duration(ext.MaxSeconds) * time.Second
@@ -151,7 +152,7 @@ func (b *searchBudget) watch(ctx context.Context, cancel context.CancelCauseFunc
 				cancel(errSearchBudgetStopped)
 				return
 			}
-			wait := searchBudgetPollInterval
+			wait := b.poll
 			// Check exactly when the base budget ends rather than a poll late.
 			if untilBase := b.start.Add(b.base).Sub(now); untilBase > 0 && untilBase < wait {
 				wait = untilBase

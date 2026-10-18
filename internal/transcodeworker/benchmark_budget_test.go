@@ -301,6 +301,24 @@ func TestInternalBenchmarkStopsAStalledSearchAtItsBaseAndSaysSo(t *testing.T) {
 	}
 }
 
+func TestInternalBenchmarkKeepsARealFailureThatTheWatcherOutlived(t *testing.T) {
+	w := newBudgetWorker(t)
+	// The run was already failing for its own reason when the watcher stopped
+	// the stalled search: the failure must not be relabelled as a budget stop.
+	result, err := runBudgetBenchmark(t, w, 10, 300*time.Millisecond, &transcode.SearchExtension{MaxSeconds: 60, SteadySeconds: 30}, func(ctx context.Context, record *BenchmarkRecord) error {
+		if err := waitDone(ctx); err != nil && strings.Contains(err.Error(), "never stopped") {
+			return err
+		}
+		return errors.New("source media modified during benchmark (integrity violation, fail closed)")
+	})
+	if err == nil || result.Status != "failed" || result.ReasonCode == "search_budget_exhausted" || !strings.Contains(result.Error, "integrity violation") {
+		t.Fatalf("a real failure was reported as budget exhaustion: err=%v result=%+v", err, result)
+	}
+	if result.SearchWorkerBusy {
+		t.Fatal("busy hint set on a failure that is not an exhaustion")
+	}
+}
+
 func TestInternalBenchmarkNeverRunsPastTheHardCapDespiteProgress(t *testing.T) {
 	w := newBudgetWorker(t)
 	var cause error
@@ -357,7 +375,10 @@ func TestInternalBenchmarkReportsABusyWorkerOnlyForLivePeers(t *testing.T) {
 			if err := SaveJobAtomic(filepath.Join(w.cfg.StateDir, other.ID, "job.json"), other); err != nil {
 				t.Fatal(err)
 			}
-			result, _ := runBudgetBenchmark(t, w, 10, 300*time.Millisecond, &transcode.SearchExtension{MaxSeconds: 60, SteadySeconds: 30}, func(ctx context.Context, record *BenchmarkRecord) error {
+			// The margin leaves the watcher a few samples before the base, even
+			// when setup is slow: a first tick already past the base would
+			// observe nothing and never call the worker busy.
+			result, _ := runBudgetBenchmark(t, w, 10, 1500*time.Millisecond, &transcode.SearchExtension{MaxSeconds: 60, SteadySeconds: 30}, func(ctx context.Context, record *BenchmarkRecord) error {
 				return waitDone(ctx)
 			})
 			if result.ReasonCode != "search_budget_exhausted" || result.SearchWorkerBusy != tc.busy {
@@ -425,14 +446,11 @@ func (c *testClock) Advance(d time.Duration) {
 }
 
 func TestSearchBudgetWatchStopsASearchOnceItsProgressStalls(t *testing.T) {
-	old := searchBudgetPollInterval
-	searchBudgetPollInterval = 5 * time.Millisecond
-	defer func() { searchBudgetPollInterval = old }()
-
 	start := time.Unix(2_000_000, 0)
 	clock := &testClock{t: start.Add(11 * time.Second)} // past the 10 s base
 	b := newSearchBudget(start, 10, &transcode.SearchExtension{MaxSeconds: 3600, SteadySeconds: 30})
 	b.now = clock.Now
+	b.poll = 5 * time.Millisecond
 	b.noteUnit()
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
