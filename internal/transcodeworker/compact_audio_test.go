@@ -243,6 +243,19 @@ func TestConvertedAudioTitle(t *testing.T) {
 		{"Atmos/Commentary", "7.1", 8, "Commentary AAC 7.1", true},
 		{"Spanish/Latin TrueHD 7.1", "7.1", 8, "Spanish/Latin AAC 7.1", true},
 		{"Atmos-Mix 7.1", "7.1", 8, "AAC 7.1", true},
+		// Stand-alone numbers and numbered words are labels, not formats.
+		{"Commentary 1 DTS-HD MA 2.0", "stereo", 2, "Commentary 1 AAC Stereo", true},
+		{"Commentary 2 DTS-HD MA 2.0", "stereo", 2, "Commentary 2 AAC Stereo", true},
+		{"Part 2 FLAC", "stereo", 2, "Part 2 AAC Stereo", true},
+		{"Dub 2019 FLAC", "stereo", 2, "Dub 2019 AAC Stereo", true},
+		{"Track_01 TrueHD", "7.1", 8, "Track_01 AAC 7.1", true},
+		{"Dub v1.5 FLAC", "stereo", 2, "Dub v1.5 AAC Stereo", true},
+		// Matched brackets survive; ones the format words leave open close.
+		{"Español (Latino) TrueHD 7.1", "7.1", 8, "Español (Latino) AAC 7.1", true},
+		{"French (VFF) TrueHD Atmos", "7.1", 8, "French (VFF) AAC 7.1", true},
+		{"Commentary (Director TrueHD)", "stereo", 2, "Commentary (Director) AAC Stereo", true},
+		{"[English] TrueHD Atmos 7.1", "7.1", 8, "[English] AAC 7.1", true},
+		{"English (TrueHD Atmos 7.1)", "7.1", 8, "English AAC 7.1", true},
 	} {
 		got, ok := convertedAudioTitle(tc.title, tc.layout, tc.channels)
 		if got != tc.want || ok != tc.ok {

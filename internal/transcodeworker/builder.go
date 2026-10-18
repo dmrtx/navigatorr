@@ -316,7 +316,37 @@ var (
 	bareNumber   = regexp.MustCompile(`^\d+$`)
 )
 
-const titleTrim = "()[]{},;:|/+-·@"
+const (
+	titleTrim     = "()[]{},;:|/+-·@"
+	titleEdgeTrim = " ,;:|/+-·@"
+)
+
+// balanceBrackets drops closing brackets with no opener and closes brackets
+// left open, so dropping format words never cuts "Español (Latino)" or
+// leaves "Commentary (Director" behind.
+func balanceBrackets(s string) string {
+	pairs := map[rune]rune{')': '(', ']': '[', '}': '{'}
+	closers := map[rune]rune{'(': ')', '[': ']', '{': '}'}
+	var out []rune
+	var open []rune
+	for _, r := range s {
+		if _, ok := closers[r]; ok {
+			open = append(open, r)
+		} else if opener, ok := pairs[r]; ok {
+			if len(open) == 0 || open[len(open)-1] != opener {
+				continue
+			}
+			open = open[:len(open)-1]
+		}
+		out = append(out, r)
+	}
+	res := strings.TrimRight(string(out), titleEdgeTrim)
+	for i := len(open) - 1; i >= 0; i-- {
+		res += string(closers[open[i]])
+	}
+	res = strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(res, "()", ""), "[]", ""), "{}", "")
+	return strings.Trim(strings.Join(strings.Fields(res), " "), titleEdgeTrim)
+}
 
 // convertedAudioTitle retitles a track converted to AAC when its title names
 // the format it no longer has: the format, channel and bitrate words are
@@ -351,9 +381,6 @@ func convertedAudioTitle(title, layout string, channels int) (string, bool) {
 	case "":
 		format = "AAC"
 	}
-	formatPart := func(part string) bool {
-		return part == "" || bareNumber.MatchString(part) || sourceFormatTokens.MatchString(part)
-	}
 	cleaned := sourceFormatPhrases.ReplaceAllString(sourceBitrate.ReplaceAllString(title, " "), " ")
 	var label []string
 	for _, word := range strings.Fields(cleaned) {
@@ -361,20 +388,27 @@ func convertedAudioTitle(title, layout string, channels int) (string, bool) {
 		if core == "" || sourceFormatTokens.MatchString(core) {
 			continue
 		}
+		// A compound word loses its format and channel parts, and the bare
+		// numbers next to them ("TrueHD.Atmos.7.1"); one with no format part
+		// ("Track_01", "v1.5") is kept whole, like a plain word.
 		parts := titleJoiners.Split(core, -1)
 		var kept []string
 		for _, part := range parts {
-			if part = strings.Trim(part, titleTrim); !formatPart(part) {
+			if part = strings.Trim(part, titleTrim); part != "" && !sourceFormatTokens.MatchString(part) {
 				kept = append(kept, part)
 			}
 		}
 		if len(kept) == len(parts) {
 			label = append(label, word)
-		} else {
-			label = append(label, kept...)
+			continue
+		}
+		for _, part := range kept {
+			if !bareNumber.MatchString(part) {
+				label = append(label, part)
+			}
 		}
 	}
-	rest := strings.Trim(strings.Join(label, " "), " "+titleTrim)
+	rest := balanceBrackets(strings.Trim(strings.Join(label, " "), titleEdgeTrim))
 	if rest == "" || namesFormat(rest) {
 		return format, true
 	}
