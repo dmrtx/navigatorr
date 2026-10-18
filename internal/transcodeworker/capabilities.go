@@ -200,6 +200,10 @@ func probeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratch
 	caps.CompactAudio = encErr == nil && caps.Encoders["aac"]
 	caps.X265TwoPass = encErr == nil && caps.Encoders["libx265"]
 	caps.HEAACAudio = encErr == nil && caps.Encoders["aac_at"]
+	// Cover art (attached pictures) is kept out of the video encode and
+	// re-attached byte-identically; the server only admits such sources
+	// against workers that advertise it.
+	caps.CoverArt = true
 	if vtCaps.Available {
 		caps.Encoders[videoToolboxEncoder] = true
 	}

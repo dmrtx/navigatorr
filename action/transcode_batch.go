@@ -340,6 +340,7 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 	}
 
 	var batchItems []store.TranscodeBatchItem
+	coverArtSupported := e.cachedCoverArtSupport(ctx)
 	for _, fID := range fileIDs {
 		itemKey := fmt.Sprintf("epfile-%d", fID)
 		if filesystemBatch {
@@ -434,7 +435,8 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 			batchItems = append(batchItems, item)
 			continue
 		}
-		if batchCalibrationEnabled(ec.Inputs, ec.State) && !sharedCalibrationSourceSupported(&rep) {
+		gateRep := coverArtGateReport(&rep, coverArtSupported)
+		if batchCalibrationEnabled(ec.Inputs, ec.State) && !sharedCalibrationSourceSupported(gateRep) {
 			item := store.TranscodeBatchItem{
 				BatchID: ec.InstanceID, ItemKey: itemKey, FilePath: cleanPath,
 				DisplayLabel: displayLabel, EpisodeInfo: episodeInfo,
@@ -450,7 +452,7 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 		var itemReasons []string
 
 		if mode := getString(ec.Inputs, "mode"); mode != "" {
-			reason := modeSourceReason(mode, &rep)
+			reason := modeSourceReason(mode, gateRep)
 			if reason != "" {
 				itemDecision, itemStatus = "skip", "skip"
 				itemReasons = []string{reason}
@@ -460,7 +462,7 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 			}
 		} else if strings.EqualFold(requestedProfile, "auto") {
 			selInput := selector.Input{
-				Report:            rep,
+				Report:            *gateRep,
 				MediaType:         mediaType,
 				IsAnime:           isAnime,
 				MinSavingsPercent: minSavings,

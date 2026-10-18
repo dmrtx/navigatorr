@@ -57,6 +57,13 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 	if len(outVideo) == 0 {
 		return StepResult{Status: StepFailed, Error: "transcoded candidate contains no video streams"}, nil
 	}
+	// Programme video count is a hard invariant: an encoder that turned cover
+	// art into a second video track must not be publishable via accept_loss.
+	origAllVideo := getStreamsList(origMap, "video")
+	origVideo := mediainspect.MainVideoStreams(origAllVideo)
+	if len(origVideo) > 0 && len(outVideo) != len(origVideo) {
+		return StepResult{Status: StepFailed, Error: fmt.Sprintf("Video stream count mismatch: original=%d output=%d programme video streams (fail closed)", len(origVideo), len(outVideo))}, nil
+	}
 	if plan.ExpectedBitDepth > 0 && outVideo[0].BitDepth != plan.ExpectedBitDepth {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("Video bit depth mismatch: plan requires %d-bit output but candidate is %d-bit (fail closed)", plan.ExpectedBitDepth, outVideo[0].BitDepth)}, nil
 	}
@@ -80,8 +87,6 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 	if expected != "" && !strings.Contains(strings.ToLower(outVideo[0].Codec), expected) {
 		return waitDecision(fmt.Sprintf("Video codec mismatch: expected %s, transcoded output is %s", expected, outVideo[0].Codec)), nil
 	}
-	origAllVideo := getStreamsList(origMap, "video")
-	origVideo := mediainspect.MainVideoStreams(origAllVideo)
 	if len(origVideo) > 0 && origVideo[0].Width > 0 && origVideo[0].Height > 0 {
 		if outVideo[0].Width != origVideo[0].Width || outVideo[0].Height != origVideo[0].Height {
 			return waitDecision(fmt.Sprintf("Video resolution mismatch: original=%dx%d output=%dx%d", origVideo[0].Width, origVideo[0].Height, outVideo[0].Width, outVideo[0].Height)), nil

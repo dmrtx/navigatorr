@@ -182,8 +182,9 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	if profileConfigErr != nil {
 		return StepResult{Status: StepFailed, Error: profileConfigErr.Error()}, nil
 	}
+	gateRep := coverArtGateReport(&rep, func() bool { return e.workerSupportsCoverArt(ctx) })
 	if modeSnapshot != nil {
-		reason := modeSourceReason(modeSnapshot.Mode, &rep)
+		reason := modeSourceReason(modeSnapshot.Mode, gateRep)
 		if reason != "" {
 			ec.State["skip_transcode"] = true
 			ec.State["reason_code"] = reason
@@ -227,7 +228,7 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		}
 
 		selInput := selector.Input{
-			Report:            rep,
+			Report:            *gateRep,
 			MediaType:         mediaType,
 			IsAnime:           isAnime,
 			MinSavingsPercent: minSavings,
@@ -319,7 +320,7 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		optEnabled = true
 	}
 	if _, shared := ec.Inputs["batch_fixed_quality"]; shared {
-		if err := e.applySharedBatchCalibration(ec, plan, &rep, recipeProfile, origSHA, ephemeralDigest, cleanPath); err != nil {
+		if err := e.applySharedBatchCalibration(ec, plan, gateRep, recipeProfile, origSHA, ephemeralDigest, cleanPath); err != nil {
 			return StepResult{Status: StepFailed, Error: fmt.Sprintf("shared batch calibration: %v", err)}, nil
 		}
 		optEnabled = false

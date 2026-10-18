@@ -1223,6 +1223,9 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 	if plan.X265 != nil && !caps.X265TwoPass {
 		return nil, fmt.Errorf("worker does not support two-pass x265; upgrade before benchmarking")
 	}
+	if len(rep.CoverArt()) > 0 && !caps.CoverArt {
+		return nil, fmt.Errorf("%s before benchmarking", errCoverArtWorker)
+	}
 	if plan.AudioMode == "he_aac" {
 		if !caps.HEAACAudio {
 			return nil, fmt.Errorf("worker does not support HE-AAC audio; upgrade before benchmarking")

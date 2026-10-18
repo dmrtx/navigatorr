@@ -2096,6 +2096,10 @@ test("a goal batch skipped for an unsupported source explains it and does not of
   assert.match(h.run('skippedBatchOutcome(job)').children[1].textContent,/You can change the goal/);
   const child=h.run('jobControls({id:"child",action_name:"transcode_media",status:"completed",reason_code:"unsupported_source",mode:"size",parent_action_id:"batch",parent_item_key:"one"}).children.map(b=>b.textContent)');
   assert.ok(!child.includes("Change goal"));
+  // A goal batch's reconfigure dialog only switches goals, so nothing that
+  // picks an explicit profile is lost; a profile batch keeps that path.
+  h.context.job={...h.context.job,mode:undefined,batch_files:{...h.context.job.batch_files,reasons:[{count:2,reason:'unsupported_source'}]}};
+  assert.ok(h.run('jobControls(job).children.map(b=>b.textContent)').includes("Try another profile"));
 });
 
 test("an unsupported-source file row offers no goal change", async () => {
@@ -2486,6 +2490,8 @@ test("file details offer goal changes and keep-original decisions without duplic
   assert.ok(labels.includes("Keep original"));assert.ok(labels.includes("Change goal"));assert.ok(!labels.includes("Cancel"));
   const skipped=h.run('queuePresentation({action_name:"transcode_media",status:"completed",reason_code:"quality_not_met",candidate_ready:false})');
   assert.equal(skipped.status,"Skipped");assert.match(skipped.summary,/quality target; original kept/);
+  const unsupported=h.run('queuePresentation({action_name:"transcode_media",status:"completed",reason_code:"unsupported_source",candidate_ready:false})');
+  assert.equal(unsupported.status,"Skipped");assert.match(unsupported.summary,/does not support this source format yet/);
 });
 
 test("replacement from a batch row rechecks the exact candidate and ignores stale or unrelated files",async()=>{

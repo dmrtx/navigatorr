@@ -3050,7 +3050,7 @@ function queuePresentation(job) {
   const observation = workerProgressObservation(job);
   const replacementComplete = job.savings?.realized_saved_bytes != null ||
     (job.replaced && job.status === "completed");
-  const skippedFile = job.action_name === "transcode_media" && job.status === "completed" && !job.candidate_ready && ["quality_not_met","insufficient_savings","size_growth","size_growth_exceeded","preservation_not_met","already_target_codec","no_suitable_candidate"].includes(job.reason_code);
+  const skippedFile = job.action_name === "transcode_media" && job.status === "completed" && !job.candidate_ready && ["quality_not_met","insufficient_savings","size_growth","size_growth_exceeded","preservation_not_met","already_target_codec","no_suitable_candidate","unsupported_source"].includes(job.reason_code);
   const status = skippedFile ? "Skipped" : job.status === "waiting_decision" && job.reason_code === "search_budget_exhausted" ? "Needs attention" : job.status === "failed" && !rejectedCandidate(job) && !savingsPolicyFailure(job.error) ? "Failed" : job.replaced_files > 0 && job.remaining_candidates > 0 ? "Candidates ready" : replacementComplete
     ? "Replaced"
     : rejectedCandidate(job) ? "Rejected" : savingsPolicyFailure(job.error) ? "Minimum savings not met" : outcomes[batch?.outcome] ||
