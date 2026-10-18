@@ -1538,7 +1538,7 @@ function renderProfileFacts(output, data, name, preserveDepth) {
   add("Process", p.optimization?.enabled ? "Tests quality samples before full conversion" : "Converts full video using this profile");
   add("Output depth", preserveDepth ? "Same as source · Overrides profile depth" : v.profile === "main10" || /10/.test(v.pixel_format || "") ? "10-bit" : v.pixel_format || v.profile ? "8-bit" : "Encoder default");
   if (v.spatial_aq != null) add("Image detail", v.spatial_aq ? "Adaptive allocation across image details" : "Standard allocation");
-  add("Audio", p.audio?.mode === "copy" ? "Keep original audio tracks" : p.audio?.mode === "compact" ? "Compact · Convert lossless tracks to AAC, same layout; E-AC-3/AC-3/AAC copied" : p.audio?.mode === "compact_lossless" ? "Lossless to AAC · TrueHD, DTS-HD MA, PCM and FLAC become AAC, same layout; lossy, Atmos and DTS:X copied" : p.audio?.mode === "he_aac" ? "HE-AAC · 64 kbps mono/stereo, 160 kbps surround (lossy)" : p.audio?.mode || "Profile default");
+  add("Audio", p.audio?.mode === "copy" ? "Keep original audio tracks" : p.audio?.mode === "compact" ? "Compact · Convert lossless tracks to AAC, same layout; E-AC-3/AC-3/AAC copied" : p.audio?.mode === "compact_lossless" ? "Lossless to AAC · TrueHD, DTS-HD MA, PCM and FLAC become AAC, same layout; lossless Atmos/DTS:X lose object and height channels; lossy tracks (E-AC-3 Atmos included) copied" : p.audio?.mode === "he_aac" ? "HE-AAC · 64 kbps mono/stereo, 160 kbps surround (lossy)" : p.audio?.mode || "Profile default");
   add("Output", p.container?.toUpperCase() || "Profile default");
   output.append(facts, node("p", `Profile ID: ${name}`, "metadata"));
 }

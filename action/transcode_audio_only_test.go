@@ -53,10 +53,13 @@ func TestEstimateAudioOnly(t *testing.T) {
 	if n := audioStreamBytes(mediainspect.DetailedStream{BitRate: 4000000}, 6000, 1000); n != 0 {
 		t.Fatalf("absurd bitrate accepted: %d", n)
 	}
-	// Object audio named only in the title is copied, so it saves nothing.
-	atmos := &mediainspect.DetailedReport{DurationSec: 6000, Audio: []mediainspect.DetailedStream{{Codec: "truehd", Title: "TrueHD Atmos 7.1", Channels: 8, ChannelLayout: "7.1", BitRate: 5000000}}}
-	if e := estimateAudioOnly(atmos, source); e.Compacted != 0 {
-		t.Fatalf("Atmos counted for compaction: %+v", e)
+	// Lossless Atmos is compacted on its 7.1 bed; E-AC-3 Atmos is copied.
+	atmos := &mediainspect.DetailedReport{DurationSec: 6000, Audio: []mediainspect.DetailedStream{
+		{Codec: "truehd", Title: "TrueHD Atmos 7.1", Channels: 8, ChannelLayout: "7.1", BitRate: 5000000},
+		{Codec: "eac3", Profile: "Dolby Digital Plus + Dolby Atmos", Channels: 6, ChannelLayout: "5.1", BitRate: 768000},
+	}}
+	if e := estimateAudioOnly(atmos, source); e.Compacted != 1 || e.CandidateBytes != source-(5000000-512000)*6000/8 {
+		t.Fatalf("Atmos estimate %+v", e)
 	}
 	lossy := &mediainspect.DetailedReport{DurationSec: 6000, Audio: rep.Audio[2:]}
 	if e := estimateAudioOnly(lossy, source); e.Compacted != 0 || e.CandidateBytes != source {

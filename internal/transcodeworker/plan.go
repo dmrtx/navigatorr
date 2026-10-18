@@ -196,9 +196,10 @@ type StreamAction struct {
 	Codec       string         `json:"codec"`
 	TargetCodec string         `json:"target_codec"`
 	BitrateKbps int            `json:"bitrate_kbps,omitempty"`
-	// Audio only: the source title, channels and layout, used to retitle a
-	// converted track whose title names its old format.
+	// Audio only: the source title, handler, channels and layout, used to
+	// retitle a converted track whose title or handler names its old format.
 	Title    string `json:"title,omitempty"`
+	Handler  string `json:"handler,omitempty"`
 	Channels int    `json:"channels,omitempty"`
 	Layout   string `json:"channel_layout,omitempty"`
 	// Cover art only: the attachment name and MIME type it is re-attached with.
@@ -308,9 +309,13 @@ func BuildExecutionPlan(plan *transcode.Plan, streams []SourceStream, duration f
 			ep.Streams = append(ep.Streams, StreamAction{Kind: "video", SourceIndex: s.Index, TypeIndex: s.TypeIndex, Codec: s.Codec, TargetCodec: plan.VideoCodec})
 		case "audio":
 			target, bitrate := transcode.AudioTarget(plan.AudioMode, s.AudioTrack())
-			ep.Streams = append(ep.Streams, StreamAction{Kind: "audio", SourceIndex: s.Index, TypeIndex: s.TypeIndex, Codec: s.Codec, TargetCodec: target, BitrateKbps: bitrate, Disposition: s.Disposition, Title: s.Title, Channels: s.Channels, Layout: s.Layout})
+			ep.Streams = append(ep.Streams, StreamAction{Kind: "audio", SourceIndex: s.Index, TypeIndex: s.TypeIndex, Codec: s.Codec, TargetCodec: target, BitrateKbps: bitrate, Disposition: s.Disposition, Title: s.Title, Handler: s.Handler, Channels: s.Channels, Layout: s.Layout})
 			if target != "copy" {
-				ep.Conversions = append(ep.Conversions, transcode.ConversionRecord{StreamType: "audio", StreamIndex: s.TypeIndex, FromCodec: s.Codec, ToCodec: target, Reason: fmt.Sprintf("%s audio requested; AAC at %d kbps, preserving channels and language (lossy)", plan.AudioMode, bitrate)})
+				reason := fmt.Sprintf("%s audio requested; AAC at %d kbps, preserving channels and language (lossy)", plan.AudioMode, bitrate)
+				if transcode.ObjectAudio(s.AudioTrack()) {
+					reason += "; Atmos/DTS:X object and height metadata dropped, channel bed kept"
+				}
+				ep.Conversions = append(ep.Conversions, transcode.ConversionRecord{StreamType: "audio", StreamIndex: s.TypeIndex, FromCodec: s.Codec, ToCodec: target, Reason: reason})
 			}
 		case "subtitle":
 			a, ok := subtitleActions[s.TypeIndex]

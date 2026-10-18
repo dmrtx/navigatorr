@@ -229,6 +229,33 @@ func TestConvertedAudioTitle(t *testing.T) {
 		{"Dolby Digital 5.1 Commentary", "5.1", 6, "Commentary AAC 5.1", true},
 		{"Atmosphere", "stereo", 2, "", false},
 		{"Atmospheric Score", "5.1", 6, "", false},
+		// Compound words, bitrate claims and object-audio spellings.
+		{"Dolby TrueHD/Atmos 7.1", "7.1", 8, "AAC 7.1", true},
+		{"English TrueHD+Atmos 7.1", "7.1", 8, "English AAC 7.1", true},
+		{"TrueHD.Atmos.7.1", "7.1", 8, "AAC 7.1", true},
+		{"English_TrueHD_Atmos", "7.1", 8, "English AAC 7.1", true},
+		{"Dolby TrueHD Atmos 7.1 @ 4000 kbps", "7.1", 8, "AAC 7.1", true},
+		{"DTS-HD MA 5.1 @4.5Mbps", "5.1(side)", 6, "AAC 5.1", true},
+		{"Commentary FLAC 2.0 1536 kb/s", "stereo", 2, "Commentary AAC Stereo", true},
+		{"DTS:X 7.1", "7.1", 8, "AAC 7.1", true},
+		{"English DTS-X", "7.1", 8, "English AAC 7.1", true},
+		{"DTSX 7.1", "7.1", 8, "AAC 7.1", true},
+		{"Atmos/Commentary", "7.1", 8, "Commentary AAC 7.1", true},
+		{"Spanish/Latin TrueHD 7.1", "7.1", 8, "Spanish/Latin AAC 7.1", true},
+		{"Atmos-Mix 7.1", "7.1", 8, "AAC 7.1", true},
+		// Stand-alone numbers and numbered words are labels, not formats.
+		{"Commentary 1 DTS-HD MA 2.0", "stereo", 2, "Commentary 1 AAC Stereo", true},
+		{"Commentary 2 DTS-HD MA 2.0", "stereo", 2, "Commentary 2 AAC Stereo", true},
+		{"Part 2 FLAC", "stereo", 2, "Part 2 AAC Stereo", true},
+		{"Dub 2019 FLAC", "stereo", 2, "Dub 2019 AAC Stereo", true},
+		{"Track_01 TrueHD", "7.1", 8, "Track_01 AAC 7.1", true},
+		{"Dub v1.5 FLAC", "stereo", 2, "Dub v1.5 AAC Stereo", true},
+		// Matched brackets survive; ones the format words leave open close.
+		{"Español (Latino) TrueHD 7.1", "7.1", 8, "Español (Latino) AAC 7.1", true},
+		{"French (VFF) TrueHD Atmos", "7.1", 8, "French (VFF) AAC 7.1", true},
+		{"Commentary (Director TrueHD)", "stereo", 2, "Commentary (Director) AAC Stereo", true},
+		{"[English] TrueHD Atmos 7.1", "7.1", 8, "[English] AAC 7.1", true},
+		{"English (TrueHD Atmos 7.1)", "7.1", 8, "English AAC 7.1", true},
 	} {
 		got, ok := convertedAudioTitle(tc.title, tc.layout, tc.channels)
 		if got != tc.want || ok != tc.ok {
@@ -295,7 +322,8 @@ func TestCompactAudioMultiTrackPairing(t *testing.T) {
 			{Index: 3, Kind: "audio", Codec: "eac3", Channels: 6, Layout: "", Language: "spa"},
 			{Index: 4, Kind: "audio", Codec: "truehd", Channels: 8, Layout: "7.1", Language: "fra"},
 			{Index: 5, Kind: "audio", Codec: "truehd", Profile: "Dolby TrueHD + Dolby Atmos", Channels: 8, Layout: "7.1", Language: "ita"},
-		}, []string{"aac", "copy", "copy", "aac", "copy"}, []int{192, 0, 0, 512, 0}},
+			{Index: 6, Kind: "audio", Codec: "eac3", Profile: "Dolby Digital Plus + Dolby Atmos", Channels: 8, Layout: "7.1", Language: "por"},
+		}, []string{"aac", "copy", "copy", "aac", "aac", "copy"}, []int{192, 0, 0, 512, 512, 0}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			plan := sizeV3TestPlan(true)

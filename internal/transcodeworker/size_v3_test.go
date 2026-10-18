@@ -2,6 +2,7 @@ package transcodeworker
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -162,17 +163,18 @@ func TestSizeV3RealEncodeMain10WithPCM(t *testing.T) {
 	}
 }
 
-// TrueHD Atmos probed as plain TrueHD, or DTS:X as DTS-HD MA, is still
-// object audio when its title or handler names it: the planner copies it,
-// the validator rejects a flattened candidate and the builder refuses to
-// convert it.
-func TestSizeV3KeepsObjectAudioNamedInText(t *testing.T) {
+// Size mode converts lossless object audio to AAC on its channel bed, whether
+// the profile, title or handler names it (TrueHD Atmos 7.1 at 512k, DTS:X
+// 5.1 at 384k), and copies E-AC-3 Atmos. Language, dispositions and every
+// track are kept; the converted titles and handlers no longer name Atmos or
+// DTS:X. The validator agrees with the plan both ways.
+func TestSizeV3ConvertsLosslessObjectAudio(t *testing.T) {
 	plan := sizeV3TestPlan(true)
 	src := []SourceStream{
 		{Index: 0, Kind: "video", Codec: "h264", Width: 1920, Height: 1080, BitDepth: 8},
-		{Index: 1, TypeIndex: 0, Kind: "audio", Codec: "truehd", Title: "TrueHD Atmos 7.1", Channels: 8, Layout: "7.1", Language: "eng"},
-		{Index: 2, TypeIndex: 1, Kind: "audio", Codec: "dts", Profile: "DTS-HD MA", Handler: "DTS:X", Channels: 8, Layout: "7.1", Language: "spa"},
-		{Index: 3, TypeIndex: 2, Kind: "audio", Codec: "truehd", Title: "Atmosphere", Channels: 8, Layout: "7.1", Language: "ita"},
+		{Index: 1, TypeIndex: 0, Kind: "audio", Codec: "truehd", Profile: "Dolby TrueHD + Dolby Atmos", Title: "English - TrueHD Atmos 7.1", Channels: 8, Layout: "7.1", Language: "eng", Disposition: map[string]int{"default": 1}},
+		{Index: 2, TypeIndex: 1, Kind: "audio", Codec: "eac3", Profile: "Dolby Digital Plus + Dolby Atmos", Title: "DD+ Atmos 5.1", Channels: 6, Layout: "5.1(side)", Language: "spa"},
+		{Index: 3, TypeIndex: 2, Kind: "audio", Codec: "dts", Profile: "DTS-HD MA", Title: "Commentary", Handler: "DTS:X", Channels: 6, Layout: "5.1(side)", Language: "ita", Disposition: map[string]int{"comment": 1}},
 	}
 	ep, err := BuildExecutionPlan(plan, src, 600)
 	if err != nil {
@@ -181,24 +183,49 @@ func TestSizeV3KeepsObjectAudioNamedInText(t *testing.T) {
 	var targets []string
 	for _, s := range ep.Streams {
 		if s.Kind == "audio" {
-			targets = append(targets, s.TargetCodec)
+			targets = append(targets, fmt.Sprintf("%s/%d", s.TargetCodec, s.BitrateKbps))
 		}
 	}
-	if strings.Join(targets, ",") != "copy,copy,aac" {
+	if strings.Join(targets, ",") != "aac/512,copy/0,aac/384" {
 		t.Fatalf("audio targets %v", targets)
 	}
-	flattened := append([]SourceStream(nil), src...)
-	flattened[1].Codec, flattened[1].Title = "aac", "AAC 7.1"
-	if err := validateAudioPreservation(plan, src, flattened); err == nil {
-		t.Fatal("flattened Atmos track passed validation")
+	if len(ep.Conversions) != 2 {
+		t.Fatalf("conversions %+v", ep.Conversions)
 	}
-	// Even a plan that asks for it cannot retitle an Atmos track to AAC.
-	for i := range ep.Streams {
-		if ep.Streams[i].Kind == "audio" && ep.Streams[i].TypeIndex == 0 {
-			ep.Streams[i].TargetCodec, ep.Streams[i].BitrateKbps = "aac", 512
+	for _, c := range ep.Conversions {
+		if !strings.Contains(c.Reason, "object and height metadata dropped") {
+			t.Fatalf("conversion reason hides the object audio loss: %q", c.Reason)
 		}
 	}
-	if _, err := BuildFFmpegArgs(ep, "/media/movies/Movie/Movie.mkv", "/tmp/candidate.mkv", "/tmp/progress"); err == nil || !strings.Contains(err.Error(), "object audio") {
-		t.Fatalf("builder converted object audio: %v", err)
+	args, err := BuildFFmpegArgs(ep, "/media/movies/Movie/Movie.mkv", "/tmp/candidate.mkv", "/tmp/progress")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"-c:a:0 aac -b:a:0 512k", "-metadata:s:a:0 title=English AAC 7.1", "-disposition:a:0 default", "-c:a:2 aac -b:a:2 384k", "-metadata:s:a:2 handler_name=", "-disposition:a:2 comment"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("missing %q in %s", want, joined)
+		}
+	}
+	for _, unwanted := range []string{"-c:a:1 ", "-metadata:s:a:1 ", "-metadata:s:a:0 handler_name=", "-metadata:s:a:2 title="} {
+		if strings.Contains(joined, unwanted) {
+			t.Fatalf("unexpected %q in %s", unwanted, joined)
+		}
+	}
+	converted := append([]SourceStream(nil), src...)
+	converted[1].Codec, converted[1].Profile, converted[1].Title = "aac", "LC", "English AAC 7.1"
+	converted[3].Codec, converted[3].Profile, converted[3].Handler = "aac", "LC", ""
+	if err := validateAudioPreservation(plan, src, converted); err != nil {
+		t.Fatalf("converted object audio rejected: %v", err)
+	}
+	copied := append([]SourceStream(nil), converted...)
+	copied[1] = src[1]
+	if err := validateAudioPreservation(plan, src, copied); err == nil {
+		t.Fatal("copied TrueHD Atmos passed a plan that converts it")
+	}
+	flattened := append([]SourceStream(nil), converted...)
+	flattened[2].Codec = "aac"
+	if err := validateAudioPreservation(plan, src, flattened); err == nil {
+		t.Fatal("converted E-AC-3 Atmos passed validation")
 	}
 }
