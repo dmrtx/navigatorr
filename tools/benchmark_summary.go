@@ -67,6 +67,12 @@ func benchmarkField(res *action.ActionResult, key string, dst any) bool {
 	return err == nil && json.Unmarshal(b, dst) == nil
 }
 
+func summaryPlanSource(res *action.ActionResult) string {
+	var source string
+	benchmarkField(res, "plan_source", &source)
+	return source
+}
+
 func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
 	if res.ActionName != "benchmark_transcode" && res.ActionName != "transcode_media" {
 		return nil
@@ -108,6 +114,9 @@ func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
 			s.Outcome, s.Message = reason, "No sample test was started: the worker cannot run the quality checks this goal requires. The original is preserved."
 			s.NextStep = "Cancel to keep the original. To process this file, make the missing quality check available on the worker (the waiting reason names it) and start the goal again; quality requirements are never relaxed automatically."
 		}
+	case decision != nil && decision.Winner == nil && summaryPlanSource(res) == "audio_only":
+		s.Outcome, s.Message = "audio_only", "No video encode met this goal's quality floor and savings gate, so the video is copied unchanged and only the lossless audio is compacted to AAC."
+		s.NextStep = "Monitor this action. The candidate must prove its video bit-identical to the source and still meet the same minimum savings; the original is never changed before that."
 	case decision != nil && decision.Winner == nil:
 		s.Outcome, s.Message = "no_acceptable_candidate", "The benchmark finished, but no candidate met all configured checks. Full encoding did not start."
 		s.NextStep = "Inspect the rejected checks and indicated source fragment before choosing a next step. Keep the original, or explicitly choose direct encoding via a new transcode_media action with a non-optimizing profile/profile_config (optimization.enabled=false). Direct encoding does not claim a perceptual quality pass and never replaces the original. Do not automatically start another CRF ladder or relax thresholds."

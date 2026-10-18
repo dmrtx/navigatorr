@@ -120,6 +120,7 @@ type FinalQualityEvidence struct {
 	SSIMMean               *float64               `json:"ssim_mean,omitempty"`
 	CompactChain           *CompactChainEvidence  `json:"compact_chain,omitempty"`
 	CompactOutput          *CompactOutputEvidence `json:"compact_output,omitempty"`
+	VideoCopy              *VideoCopyEvidence     `json:"video_copy,omitempty"`
 }
 
 // Video encoder identifiers accepted by the worker and recipe engine.

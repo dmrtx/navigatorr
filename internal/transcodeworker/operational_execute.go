@@ -239,7 +239,8 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 	if verr == nil {
 		verr = transcode.ValidateFinalSize(job.SourceSizeBytes, attest.SizeBytes, job.Plan.SizePolicy)
 	}
-	if verr == nil && job.Plan != nil && job.Plan.QualityValidation != nil {
+	audioOnly := transcode.IsSizeAudioOnlyPlan(job.Plan)
+	if verr == nil && job.Plan != nil && (job.Plan.QualityValidation != nil || audioOnly) {
 		if job.SourceSHA256 == "" {
 			verr = fmt.Errorf("quality_final_source_identity_missing: immutable source digest required before final validation")
 		}
@@ -253,7 +254,11 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 				return nil
 			}
 			var qualityEvidence *transcode.FinalQualityEvidence
-			qualityEvidence, verr = w.validateFinalPerceptual(ctx, jobDir, r.effectiveInput, r.localCandidate, job.Plan, attest.SHA256, attest.SizeBytes)
+			if audioOnly {
+				qualityEvidence, verr = w.validateVideoCopy(ctx, r.effectiveInput, r.localCandidate, job.Plan, attest.SHA256, attest.SizeBytes)
+			} else {
+				qualityEvidence, verr = w.validateFinalPerceptual(ctx, jobDir, r.effectiveInput, r.localCandidate, job.Plan, attest.SHA256, attest.SizeBytes)
+			}
 			job.QualityEvidence = qualityEvidence
 			if verr == nil {
 				verr = verifyLocalDigest(ctx, r.effectiveInput, job.SourceSHA256)

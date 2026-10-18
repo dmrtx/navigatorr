@@ -50,6 +50,11 @@ func ValidateEncoderCapabilities(ctx context.Context, ffmpegPath string, plan *t
 		}
 	}
 	switch norm(plan.VideoCodec) {
+	case transcode.VideoCodecCopy:
+		if err := transcode.ValidateSizeAudioOnlyShape(plan); err != nil {
+			return fmt.Errorf("encoder_capability_unsupported: %w", err)
+		}
+		return nil
 	case videoToolboxEncoder:
 		caps, err := ProbeVideoToolboxCapabilities(ctx, ffmpegPath)
 		if err != nil {
@@ -216,6 +221,9 @@ func probeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratch
 	caps.CoverArt = true
 	// Size policy v3 compacts lossless audio with the same AAC encoder.
 	caps.SizeModeV3 = caps.CompactAudio
+	// Audio-only size plans stream-copy the video (keeping leading non-key
+	// packets) and prove it unchanged from ffprobe's per-packet hashes.
+	caps.SizeAudioOnly = caps.SizeModeV3
 	if vtCaps.Available {
 		caps.Encoders[videoToolboxEncoder] = true
 	}

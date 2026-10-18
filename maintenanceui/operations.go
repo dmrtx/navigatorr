@@ -164,11 +164,22 @@ func operationSizeMode(r operationRecord) map[string]any {
 		return nil
 	}
 	out := map[string]any{}
-	if r.savings.EstimatedBytes != nil && r.savings.EstimateKind == "sampled_benchmark" {
+	if r.savings.EstimatedBytes != nil && (r.savings.EstimateKind == "sampled_benchmark" || r.savings.EstimateKind == "audio_only_estimate") {
 		out["expected_bytes"] = *r.savings.EstimatedBytes
 	}
 	if r.state["size_main10"] == true {
 		out["main10"] = true
+	}
+	if r.state["size_audio_only"] == true {
+		// The worker's packet proof decides; until it reports, the copy is
+		// planned, not verified.
+		out["video_copy"] = "pending"
+		switch operationMap(operationMap(operationValue(r, "quality_evidence"))["video_copy"])["verdict"] {
+		case "pass":
+			out["video_copy"] = "verified"
+		case "fail":
+			out["video_copy"] = "failed"
+		}
 	}
 	if vmaf := operationMap(operationMap(operationValue(r, "quality_evidence"))["vmaf"]); vmaf["mean"] != nil {
 		final := map[string]any{"vmaf_mean": operationNumber(vmaf["mean"])}
@@ -232,6 +243,9 @@ func projectOperationSavings(r operationRecord, now time.Time) operationSavings 
 	estimated := int64(operationNumber(winner["estimated_bytes"]))
 	if estimated > 0 && source > 0 {
 		s.EstimateKind = "sampled_benchmark"
+	} else if audio := int64(operationNumber(operationValue(r, "audio_only_estimated_bytes"))); audio > 0 && source > 0 && operationValue(r, "size_audio_only") == true {
+		estimated = audio
+		s.EstimateKind = "audio_only_estimate"
 	} else if percent, ok := operationValue(r, "expected_savings_percent").(float64); ok && source > 0 && percent <= 100 {
 		estimated = int64(float64(source) * (1 - percent/100))
 		s.EstimateKind = "profile_heuristic"

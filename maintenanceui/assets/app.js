@@ -1914,7 +1914,7 @@ function savingsLine(savings, compact = false, replaced = false) {
     parts.push(`Source ${bytes(savings.source_bytes)}`);
   if (!replaced && savings.estimated_saved_bytes != null)
     parts.push(
-      `${savings.estimate_kind === "sampled_benchmark" ? (compact ? "Estimate (samples)" : "Sample estimate") : compact ? "Estimate (profile)" : "Profile estimate"} ${bytes(savings.estimated_saved_bytes)}`,
+      `${savings.estimate_kind === "sampled_benchmark" ? (compact ? "Estimate (samples)" : "Sample estimate") : savings.estimate_kind === "audio_only_estimate" ? (compact ? "Estimate (audio)" : "Audio estimate") : compact ? "Estimate (profile)" : "Profile estimate"} ${bytes(savings.estimated_saved_bytes)}`,
     );
   if (
     !replaced &&
@@ -2938,6 +2938,9 @@ function shortJobReason(reason) {
     already_target_codec: "Already in the target codec; original kept",
     search_budget_exhausted: "Automatic testing reached its limit without finding a reliable result; original kept",
     no_suitable_candidate: "None of the tested settings met this goal; original kept",
+    audio_compaction_insufficient: "No video setting met this goal, and compacting the lossless audio alone would not save enough; original kept",
+    audio_estimate_unavailable: "No video setting met this goal, and the lossless audio size could not be read to estimate audio-only savings; original kept",
+    audio_only_worker_unsupported: "No video setting met this goal; compacting only the audio needs an updated worker. Original kept",
     unsupported_source: "Automatic testing does not support this source format yet; original kept",
     hdr_requires_compact: "HDR or Dolby Vision source; only the Much smaller goal converts it. Original kept",
     hfr_quality_unavailable: "The worker cannot measure quality at this frame rate yet; original kept",
@@ -3053,7 +3056,7 @@ function queuePresentation(job) {
   const observation = workerProgressObservation(job);
   const replacementComplete = job.savings?.realized_saved_bytes != null ||
     (job.replaced && job.status === "completed");
-  const skippedFile = job.action_name === "transcode_media" && job.status === "completed" && !job.candidate_ready && ["quality_not_met","insufficient_savings","size_growth","size_growth_exceeded","preservation_not_met","already_target_codec","no_suitable_candidate","unsupported_source","hdr_requires_compact"].includes(job.reason_code);
+  const skippedFile = job.action_name === "transcode_media" && job.status === "completed" && !job.candidate_ready && ["quality_not_met","insufficient_savings","size_growth","size_growth_exceeded","preservation_not_met","already_target_codec","no_suitable_candidate","audio_compaction_insufficient","audio_estimate_unavailable","audio_only_worker_unsupported","unsupported_source","hdr_requires_compact"].includes(job.reason_code);
   const status = skippedFile ? "Skipped" : job.status === "waiting_decision" && job.reason_code === "search_budget_exhausted" ? "Needs attention" : job.status === "failed" && !rejectedCandidate(job) && !savingsPolicyFailure(job.error) ? "Failed" : job.replaced_files > 0 && job.remaining_candidates > 0 ? "Candidates ready" : replacementComplete
     ? "Replaced"
     : rejectedCandidate(job) ? "Rejected" : savingsPolicyFailure(job.error) ? "Minimum savings not met" : outcomes[batch?.outcome] ||
@@ -3147,6 +3150,7 @@ const benchmarkOutcomes = {
   selected: "Settings found",
   no_acceptable_candidate: "No setting passed",
   no_suitable_candidate: "No setting passed",
+  audio_only: "Audio-only compaction",
   size_rejected: "Size limit not met",
   search_review_required: "Your review is needed",
   quality_policy_unavailable: "Quality checks unavailable",
@@ -3239,6 +3243,7 @@ function sizeModeLines(size) {
   const lines = [];
   if (size.expected_bytes != null) lines.push(`Expected size ${bytes(size.expected_bytes)}${size.main10 ? " · 10-bit HEVC" : ""}`);
   else if (size.main10) lines.push("10-bit HEVC");
+  if (size.video_copy) lines.push({verified: "Video copied unchanged · verified bit-identical", failed: "Video copy check failed · original kept"}[size.video_copy] || "Video will be copied unchanged · not yet verified; only lossless audio is compacted");
   const q = size.final_quality;
   if (q) lines.push(`Final VMAF ${Number(q.vmaf_mean).toFixed(1)} mean · ${q.vmaf_p5 != null ? Number(q.vmaf_p5).toFixed(1) : "n/a"} p5${q.worst_window_mean != null ? ` · ${Number(q.worst_window_mean).toFixed(1)} worst ${Math.round(q.worst_window_seconds || 0)} s window` : ""}`);
   const audio = size.compacted_audio || [];

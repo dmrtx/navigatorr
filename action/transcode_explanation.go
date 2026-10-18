@@ -70,12 +70,24 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 	case reason == "preservation_not_met":
 		e.Outcome = "preservation_rejected"
 		e.Message = "The encoded result did not preserve the required tracks or video properties. Original preserved."
+	case reason == "audio_compaction_insufficient":
+		e.Outcome = "size_rejected"
+		e.Message = "No video encode met this goal, and compacting the lossless audio alone would not save enough. Original preserved."
+	case reason == "audio_estimate_unavailable":
+		e.Outcome = "no_changes"
+		e.Message = "No video encode met this goal, and the size of the lossless audio could not be read, so the savings from compacting it alone could not be estimated. Original preserved."
+	case reason == "audio_only_worker_unsupported":
+		e.Outcome = "no_changes"
+		e.Message = "No video encode met this goal. Compacting the lossless audio needs a worker that can prove the copied video unchanged; upgrade the worker and retry. Original preserved."
 	case reason == "already_target_codec":
 		e.Outcome = "no_changes"
 		e.Message = "The source already uses the target codec. Original preserved."
 	case getBool(res.State, "skip_transcode") || getBool(res.Outputs, "skip_transcode") || getBool(res.State, "skipped") || getBool(res.Outputs, "skipped"):
 		e.Outcome = "no_changes"
 		e.Message = "No candidate was accepted. Inspect the recorded skip reason."
+	case getBool(res.Outputs, "original_intact") && getBool(res.State, "size_audio_only"):
+		e.Outcome = "candidate_ready"
+		e.Message = "Candidate verified; original preserved. The video is copied bit-identically and only the lossless audio was compacted."
 	case getBool(res.Outputs, "original_intact"):
 		e.Outcome = "candidate_ready"
 		e.Message = "Candidate verified; original preserved. Quality was measured on samples."
