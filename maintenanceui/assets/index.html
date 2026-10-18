@@ -876,6 +876,7 @@
         </section>
       </div>
       <div id="notice" role="alert" hidden></div>
+      <p id="command-announcer" class="sr-only" role="status" aria-live="polite"></p>
     </main>
     <dialog id="install-help" aria-labelledby="install-title">
       <div class="dialog-heading">
@@ -1038,9 +1039,14 @@
       <p class="dialog-connection muted" role="status" hidden>
         Server unavailable. Retrying automatically.
       </p>
+      <p id="detail-command-announcer" class="sr-only" role="status" aria-live="polite"></p>
       <div id="detail-summary"></div>
       <ol id="detail-stages" class="stage-list"></ol>
       <div id="detail-related" class="workflow-history"></div>
+      <section id="detail-commands" class="command-history" aria-labelledby="detail-commands-title" hidden>
+        <h3 id="detail-commands-title">What you did to this job</h3>
+        <ol id="detail-command-list"></ol>
+      </section>
       <div id="detail-controls" class="submit-actions"></div>
       <section id="batch-items-panel" hidden>
         <h3>Batch files</h3>

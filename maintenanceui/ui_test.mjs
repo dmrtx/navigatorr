@@ -3064,3 +3064,251 @@ test("every shortened main action label is a prefix of its accessible name", () 
   for (const [full, visible] of pairs) assert.ok(full.startsWith(visible), `${visible} is not a prefix of ${full}`);
   assert.equal(new Set(pairs.filter(([full]) => full.startsWith("Check")).map(([, v]) => v)).size, 2);
 });
+
+function commandHarness(commands) {
+  const h = harness();
+  h.context.fixture = commands;
+  h.run('state.commands=new Map(fixture.map(c=>[c.command_id,c]));');
+  return h;
+}
+const chipOf = (h, id, now) => JSON.parse(h.run(`JSON.stringify((({kind,text,command})=>({kind,text,command:command.command_id}))(commandChip(${JSON.stringify(id)},${now})||{kind:null,text:null,command:{}}))`));
+
+test("command chip prefers a failure, then work in flight, then a fresh Applied", () => {
+  const now = 1_000_000;
+  const h = commandHarness([
+    {command_id:"a1", id:"job-a", kind:"retry", label:"Retrying job", status:"running", started:now - 60_000, seenAt:now - 60_000},
+    {command_id:"a2", id:"job-a", kind:"cancel", label:"Stopping job", status:"failed", error:"Already finished.", started:now - 5_000, seenAt:now - 4_000},
+    {command_id:"b1", id:"job-b", kind:"resume", label:"Applying decision", status:"completed", started:now - 3_000, seenAt:now - 1_000},
+    {command_id:"b2", id:"job-b", kind:"reconfigure", label:"Updating batch settings", status:"pending", started:now - 20_000, seenAt:now - 20_000},
+    {command_id:"c1", id:"job-c", kind:"retry", label:"Retrying job", status:"failed", started:now - 90_000, seenAt:now - 80_000},
+    {command_id:"c2", id:"job-c", kind:"reconfigure", label:"Updating batch settings", status:"running", started:now - 10_000, seenAt:now - 10_000},
+    {command_id:"d1", id:"job-d", kind:"retry", label:"Retrying job", status:"failed", started:now - 10_000, seenAt:now - 9_000},
+    {command_id:"e1", id:"job-e", kind:"resume", label:"Applying decision", status:"waiting_external", started:now - 10_000, seenAt:now - 10_000},
+  ]);
+  assert.deepEqual(chipOf(h, "job-a", now), {kind:"failed", text:"Stop failed", command:"a2"});
+  assert.deepEqual(chipOf(h, "job-b", now), {kind:"active", text:"Updating settings", command:"b2"});
+  // A newer command replaces an older failure.
+  assert.deepEqual(chipOf(h, "job-c", now), {kind:"active", text:"Updating settings", command:"c2"});
+  assert.deepEqual(chipOf(h, "job-d", now), {kind:"failed", text:"Retry failed", command:"d1"});
+  assert.deepEqual(chipOf(h, "job-e", now), {kind:"active", text:"Waiting to apply", command:"e1"});
+  assert.equal(h.run(`commandChip("job-none",${now})`), null);
+  h.run('state.commands.get("d1").dismissed=true;');
+  assert.equal(h.run(`commandChip("job-d",${now})`), null);
+});
+
+test("Applied expires about eight seconds after completion was first seen and cancelled shows nothing", () => {
+  const now = 2_000_000;
+  const h = commandHarness([
+    {command_id:"f1", id:"job-f", kind:"resume", label:"Applying decision", status:"completed", started:now - 60_000, seenAt:now - 7_000},
+    {command_id:"g1", id:"job-g", kind:"resume", label:"Applying decision", status:"completed", started:now - 60_000, seenAt:now - 9_000},
+    {command_id:"h1", id:"job-h", kind:"cancel", label:"Stopping job", status:"cancelled", started:now - 2_000, seenAt:now - 1_000},
+  ]);
+  const fresh = JSON.parse(h.run(`JSON.stringify(commandChip("job-f",${now}))`));
+  assert.equal(fresh.kind, "applied");
+  assert.equal(fresh.text, "Applied");
+  assert.equal(fresh.expires, now + 1_000);
+  assert.equal(h.run(`commandChip("job-g",${now})`), null);
+  assert.equal(h.run(`commandChip("job-h",${now})`), null);
+});
+
+test("tracking keeps the first time a status was seen and announces only changes, together and by job", () => {
+  const h = commandHarness([]);
+  const timers = [];
+  h.context.setTimeout = (fn) => timers.push(fn);
+  h.run('renderCommandIndicators=()=>{};state.operationJobs=new Map([["w12",{id:"job-t",number:12}],["w13",{id:"job-u",number:13}]]);');
+  h.context.receipt = {key:"k", started:1, command_id:"t1", id:"job-t", label:"Retrying job"};
+  h.context.other = {key:"l", started:2, command_id:"u1", id:"job-u", label:"Stopping job"};
+  h.run('trackCommand({kind:"retry"},receipt,{status:"running"});trackCommand({kind:"cancel"},other,{status:"running"})');
+  const firstSeen = h.run('state.commands.get("t1").seenAt');
+  h.run('trackCommand({kind:"retry"},receipt,{status:"running"})');
+  assert.equal(h.run('state.commands.get("t1").seenAt'), firstSeen);
+  assert.equal(timers.length, 0);
+  // Two changes in the same moment are read as one message.
+  h.run('trackCommand({kind:"retry"},receipt,{status:"failed",error:"No worker was free."});trackCommand({kind:"cancel"},other,{status:"completed"})');
+  assert.equal(timers.length, 1);
+  timers.shift()();
+  assert.equal(h.elements.get("command-announcer").textContent, "Job #12: Retrying job, failed. No worker was free. Job #13: Stopping job, applied.");
+  assert.equal(h.elements.get("detail-command-announcer").textContent, "");
+  // The open job detail makes the page inert, so it speaks from inside the dialog.
+  h.context.third = {key:"m", started:3, command_id:"t2", id:"job-t", label:"Retrying job"};
+  h.run('$("job-detail").open=true;trackCommand({kind:"retry"},third,{status:"pending"});trackCommand({kind:"retry"},third,{status:"running"})');
+  timers.shift()();
+  assert.equal(h.elements.get("detail-command-announcer").textContent, "Job #12: Retrying job, applying.");
+  assert.equal(h.elements.get("command-announcer").textContent, "");
+  // After a reload, the first poll of a restored command is not news unless it finished.
+  h.context.restored = {key:"n", started:4, command_id:"u2", id:"job-u", label:"Stopping job"};
+  h.run('trackCommand({kind:"cancel"},restored,{status:"pending"}).restored=true;trackCommand({kind:"cancel"},restored,{status:"running"})');
+  assert.equal(timers.length, 0);
+  h.run('trackCommand({kind:"cancel"},restored,{status:"failed",error:"Already stopped."})');
+  timers.shift()();
+  assert.equal(h.elements.get("detail-command-announcer").textContent, "Job #13: Stopping job, failed. Already stopped.");
+});
+
+// Just enough DOM for the chip renderer: class and data selectors, :scope
+// children, closest, removal and focus.
+class FakeNode {
+  constructor(doc, tag = "div") {
+    Object.assign(this, {doc, tagName: tag.toUpperCase(), children: [], parent: null, dataset: {}, className: "", textContent: "", id: "", listeners: new Map()});
+  }
+  get classList() {
+    const names = () => this.className.split(/\s+/).filter(Boolean);
+    return {
+      add: (c) => { if (!names().includes(c)) this.className = [...names(), c].join(" "); },
+      remove: (c) => { this.className = names().filter((n) => n !== c).join(" "); },
+      toggle: (c, on = !names().includes(c)) => (on ? this.classList.add(c) : this.classList.remove(c)),
+      contains: (c) => names().includes(c),
+    };
+  }
+  setAttribute(name, value) { (this.attrs ||= {})[name] = String(value); }
+  getAttribute(name) { return this.attrs?.[name] ?? null; }
+  removeAttribute(name) { delete this.attrs?.[name]; }
+  addEventListener(name, fn) { this.listeners.set(name, fn); }
+  append(...nodes) { for (const n of nodes) { n.parent?.drop(n); n.parent = this; this.children.push(n); } }
+  before(n) { n.parent?.drop(n); n.parent = this.parent; this.parent.children.splice(this.parent.children.indexOf(this), 0, n); }
+  drop(n) { this.children = this.children.filter((c) => c !== n); n.parent = null; }
+  remove() { if (this.contains(this.doc.activeElement)) this.doc.activeElement = this.doc.body; this.parent?.drop(this); }
+  replaceChildren(...nodes) { for (const c of [...this.children]) c.remove(); this.append(...nodes); }
+  contains(n) { for (let x = n; x; x = x.parent) if (x === this) return true; return false; }
+  focus() { this.doc.activeElement = this; }
+  is(simple) {
+    const data = simple.match(/^\[data-([a-z-]+)\]$/);
+    if (data) return this.dataset[data[1].replace(/-([a-z])/g, (_, c) => c.toUpperCase())] != null;
+    if (/^[a-z]+$/.test(simple)) return this.tagName === simple.toUpperCase();
+    return simple.startsWith(".") && this.classList.contains(simple.slice(1));
+  }
+  // "A B": B inside an A.
+  isWithin(compound, root = null) {
+    const [last, ...outer] = compound.split(/\s+/).reverse();
+    if (!this.is(last)) return false;
+    let x = this.parent;
+    for (const part of outer) {
+      while (x && x !== root && !x.is(part)) x = x.parent;
+      if (!x || x === root) return false;
+      x = x.parent;
+    }
+    return true;
+  }
+  matches(selector) { return selector.split(",").some((s) => this.isWithin(s.trim())); }
+  closest(selector) { for (let x = this; x; x = x.parent) if (x.matches(selector)) return x; return null; }
+  descendants() { return this.children.flatMap((c) => [c, ...c.descendants()]); }
+  querySelectorAll(selector) {
+    return selector.split(",").map((s) => s.trim()).flatMap((s) =>
+      s.startsWith(":scope > ") ? this.children.filter((c) => c.is(s.slice(9))) : this.descendants().filter((c) => c.isWithin(s, this)));
+  }
+  querySelector(selector) { return this.descendants().find((n) => this.querySelectorAll(selector).includes(n)) || null; }
+}
+function commandDom(commands) {
+  const h = commandHarness(commands);
+  const doc = h.document;
+  doc.body = new FakeNode(doc, "body");
+  doc.activeElement = doc.body;
+  doc.createElement = (tag) => new FakeNode(doc, tag);
+  doc.querySelectorAll = (selector) => doc.body.querySelectorAll(selector);
+  const part = (tag, className, parent) => { const n = new FakeNode(doc, tag); n.className = className; parent.append(n); return n; };
+  h.context.card = (id, kind = "job") => {
+    const row = new FakeNode(doc, kind === "job" ? "article" : "div");
+    row.className = `${kind}-row`;
+    row.dataset.operationId = id;
+    if (kind === "job") {
+      part("button", "job-title", part("h3", "job-heading", row));
+      part("div", "job-footer", row);
+    } else {
+      part("div", "backup-heading", row);
+      part("button", "", part("div", "backup-actions", row)).textContent = "View job";
+    }
+    doc.body.append(row);
+    return row;
+  };
+  return h;
+}
+const clickAndSettle = async (button) => { button.listeners.get("click")(); for (let i = 0; i < 5; i++) await Promise.resolve(); };
+
+test("keyboard focus on Dismiss survives redraws and moves to the card when the line goes", async () => {
+  const h = commandDomFixture();
+  const doc = h.document;
+  h.run('card("job-a");card("job-b");renderCommandIndicators();');
+  const firstDismiss = doc.body.querySelector(".command-dismiss");
+  assert.equal(firstDismiss.closest(".command-failure").dataset.commandId, "fa");
+  firstDismiss.focus();
+  // A status tick of another job's command leaves the failure line in place.
+  h.run('state.commands.get("rb").status="pending";renderCommandIndicators();');
+  assert.equal(doc.activeElement, firstDismiss);
+  // A queue refresh rebuilds every card; focus moves to the new Dismiss button.
+  h.run('{const focus=commandFocus();document.body.replaceChildren();card("job-a");card("job-b");renderCommandIndicators();restoreCommandFocus(focus);}');
+  assert.notEqual(doc.activeElement, firstDismiss);
+  assert.equal(doc.activeElement.className, "command-dismiss");
+  assert.equal(doc.activeElement.closest(".command-failure").dataset.commandId, "fa");
+  assert.equal(doc.activeElement.closest("[data-operation-id]").dataset.operationId, "job-a");
+  await clickAndSettle(doc.activeElement);
+  assert.equal(doc.body.querySelector(".command-failure"), null);
+  assert.equal(doc.activeElement.className, "job-title");
+  assert.equal(doc.activeElement.closest("[data-operation-id]").dataset.operationId, "job-a");
+});
+function commandDomFixture() {
+  return commandDom([
+    {command_id:"fa", id:"job-a", kind:"retry", label:"Retrying job", status:"failed", error:"No worker was free.", started:2, seenAt:0},
+    {command_id:"rb", id:"job-b", kind:"reconfigure", label:"Updating batch settings", status:"running", started:1, seenAt:0},
+  ]);
+}
+
+test("dismissing a failure on a recovery copy keeps focus on that row", async () => {
+  const h = commandDom([{command_id:"fc", id:"copy-a", kind:"clean", label:"Verifying recovery data", status:"failed", error:"The sizes differ.", started:1, seenAt:0}]);
+  const doc = h.document;
+  h.run('card("copy-a","backup");renderCommandIndicators();');
+  const row = doc.body.querySelector("[data-operation-id]");
+  const chip = row.querySelector(".command-chip");
+  assert.equal(chip.parent.className, "backup-heading");
+  assert.equal(chip.children.at(-1).textContent, "Check failed");
+  const dismiss = row.querySelector(".command-dismiss");
+  dismiss.focus();
+  await clickAndSettle(dismiss);
+  assert.equal(row.querySelector(".command-failure"), null);
+  assert.equal(doc.activeElement.textContent, "View job");
+});
+
+test("the cleanup notice on a recovery copy replaces its in-flight chip", () => {
+  const h = commandDom([{command_id:"cc", id:"copy-b", kind:"clean", label:"Verifying recovery data", status:"running", started:1, seenAt:0}]);
+  h.run('card("copy-b","backup");renderCommandIndicators();');
+  assert.ok(h.document.body.querySelector(".command-chip"));
+  h.run('{const row=document.querySelectorAll("[data-operation-id]")[0];const notice=document.createElement("p");notice.className="job-command";row.append(notice);renderCommandIndicators();}');
+  assert.equal(h.document.body.querySelector(".command-chip"), null);
+});
+
+test("redraws keep a single Applied expiry timer", () => {
+  const h = commandDom([{command_id:"ac", id:"job-c", kind:"resume", label:"Applying decision", status:"completed", started:1, seenAt:0}]);
+  const pending = new Map();
+  let next = 0;
+  h.context.setTimeout = (fn) => { pending.set(++next, fn); return next; };
+  h.context.clearTimeout = (id) => pending.delete(id);
+  h.run('state.commands.get("ac").seenAt=commandClock();card("job-c");');
+  for (let i = 0; i < 4; i++) h.run('renderCommandIndicators()');
+  assert.equal(pending.size, 1);
+  assert.equal(h.document.body.querySelector(".command-chip").className, "command-chip applied");
+  h.run('state.commands.get("ac").seenAt=commandClock()-9000;');
+  [...pending.values()][0]();
+  assert.equal(h.document.body.querySelector(".command-chip"), null);
+  assert.equal(pending.size, 0);
+});
+
+test("job detail lists this session's commands newest first and hides when there are none", () => {
+  const now = 3_000_000;
+  const h = commandHarness([
+    {command_id:"m1", id:"job-m", kind:"resume", label:"Applying decision", status:"completed", started:now - 300_000},
+    {command_id:"m3", id:"job-m", kind:"reconfigure", label:"Updating batch settings", status:"waiting_external", waiting_reason:"Waiting for a free worker", started:now - 5_000},
+    {command_id:"m2", id:"job-m", kind:"retry", label:"Retrying job", status:"failed", error:"The worker went offline.", started:now - 120_000},
+    {command_id:"x1", id:"job-other", kind:"retry", label:"Retrying job", status:"running", started:now - 1_000},
+  ]);
+  h.run(`state.detail="job-m";renderCommandHistory(${now});`);
+  assert.equal(h.elements.get("detail-commands").hidden, false);
+  const items = h.elements.get("detail-command-list").children;
+  assert.deepEqual(items.map((li) => li.className), ["command-history-item active", "command-history-item failed", "command-history-item applied"]);
+  const text = (el) => [el.textContent, ...el.children.map(text)].join("");
+  assert.deepEqual(items.map(text), [
+    "Updating batch settings · Waiting to applyWaiting for a free workerJust now",
+    "Retrying job · FailedThe worker went offline.2 min ago",
+    "Applying decision · Applied5 min ago",
+  ]);
+  h.run(`state.detail="job-empty";renderCommandHistory(${now});`);
+  assert.equal(h.elements.get("detail-commands").hidden, true);
+  assert.equal(h.elements.get("detail-command-list").children.length, 0);
+});
