@@ -629,9 +629,135 @@ func TestCancelRemovesRemotePartial(t *testing.T) {
 	w := NewWorker(&WorkerConfig{StateDir: filepath.Join(dir, "state"), AllowedRoots: []string{root}, ExternalRoots: []string{root}, LocalWorkDir: filepath.Join(dir, "work")})
 	w.mediaStore = store
 	dest := filepath.Join(root, "Show", "episode.mkv")
-	w.cleanupCancelledArtifacts(&JobRecord{ID: "job-early", Candidate: dest, IntendedDestination: dest})
-	w.cleanupCancelledArtifacts(&JobRecord{ID: "job-late", Candidate: dest, IntendedDestination: dest, EncodeComplete: true, FinalizationState: string(FinalizationStateFinalizing)})
-	if len(store.removed) != 1 || store.removed[0] != dest+"|job-late" {
-		t.Fatalf("removed=%v, want only the post-encode job's partial", store.removed)
+	w.removeOwnRemotePartial(&JobRecord{ID: "job-early", Candidate: dest, IntendedDestination: dest})
+	w.removeOwnRemotePartial(&JobRecord{ID: "job-late", Candidate: dest, IntendedDestination: dest, EncodeComplete: true, FinalizationState: string(FinalizationStateFinalizing)})
+	w.removeOwnRemotePartialBackground(&JobRecord{ID: "job-bg", Candidate: dest, IntendedDestination: dest, EncodeComplete: true})
+	w.partialCleanup.Wait()
+	if len(store.removed) != 2 || store.removed[0] != dest+"|job-late" || store.removed[1] != dest+"|job-bg" {
+		t.Fatalf("removed=%v, want only the post-encode jobs' partials", store.removed)
+	}
+}
+
+// slowPartialStore blocks RemovePartial until released, like an unreachable
+// share retrying its session.
+type slowPartialStore struct {
+	fakeDirectStore
+	started chan struct{}
+	release chan struct{}
+	mu      sync.Mutex
+	removed []string
+}
+
+func (s *slowPartialStore) RemovePartial(ctx context.Context, destination, jobID string) error {
+	close(s.started)
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	s.mu.Lock()
+	s.removed = append(s.removed, destination+"|"+jobID)
+	s.mu.Unlock()
+	return nil
+}
+
+// Cancel must answer promptly, and release the per-job lock, even while the
+// share is too slow to remove the job's partial; the removal still happens,
+// for this job's own partial only.
+func TestCancelDoesNotWaitForSlowRemotePartial(t *testing.T) {
+	stub := newStubSpawn()
+	w, tempDir, sourceFile := newPR3Worker(t, 4, stub)
+	root := filepath.Join(tempDir, "unmounted-media")
+	store := &slowPartialStore{fakeDirectStore: fakeDirectStore{root: root}, started: make(chan struct{}), release: make(chan struct{})}
+	w.mediaStore = store
+	dest := filepath.Join(root, "Show", "episode.mkv")
+	const id = "job-cancel-slow"
+	pr5SeedJob(t, tempDir, &JobRecord{
+		ID: id, Status: "queued", Source: sourceFile, Candidate: dest, IntendedDestination: dest,
+		ExecutionSpecDigest: pr5Digest, EncodeComplete: true,
+		CreatedAt: time.Now().UTC().Add(-time.Hour),
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Cancel(context.Background(), id)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("cancel: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancel blocked on the slow store")
+	}
+	select {
+	case <-store.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("background partial removal never started")
+	}
+	// The per-job lock was released: a second cancel is an idempotent no-op.
+	if resp, err := w.Cancel(context.Background(), id); err != nil || resp.Status != "cancelled" {
+		t.Fatalf("second cancel = %+v, %v", resp, err)
+	}
+	close(store.release)
+	w.partialCleanup.Wait()
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.removed) != 1 || store.removed[0] != dest+"|"+id {
+		t.Fatalf("removed=%v, want only this job's partial", store.removed)
+	}
+}
+
+// Evicting a hard-linked entry (an active job's link, a lease) releases no
+// blocks, so it must not count toward the free-space floor: the sweep has to
+// keep evicting until real space is reclaimed.
+func TestSourceCacheDiskFloorIgnoresHardLinkedEntries(t *testing.T) {
+	dir := t.TempDir()
+	w := NewWorker(pr6b2Config(dir, func(c *WorkerConfig) { c.SourceCacheMaxBytes = 1 << 40 }))
+	cacheDir := w.sourceCacheDir()
+	linked := writeCacheEntry(t, cacheDir, "aaaa", 10, 3*time.Hour) // oldest, evicted first
+	single := writeCacheEntry(t, cacheDir, "bbbb", 10, 2*time.Hour)
+	if err := os.Link(linked, filepath.Join(dir, "job-link.mkv")); err != nil {
+		t.Skipf("hard links unsupported: %v", err)
+	}
+	orig := diskSpaceFn
+	t.Cleanup(func() { diskSpaceFn = orig })
+	// 95 free of 1000 against a 10% floor (100): one 10-byte eviction that
+	// really frees space is enough, but only the unlinked entry does.
+	diskSpaceFn = func(string) (uint64, uint64, bool) { return 95, 1000, true }
+	_ = w.sweepSourceCache()
+	if _, err := os.Stat(single); !os.IsNotExist(err) {
+		t.Fatal("sweep stopped after evicting a hard-linked entry that freed nothing", err)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "job-link.mkv")); err != nil || len(b) != 10 {
+		t.Fatal("the job's own link must survive the sweep", err)
+	}
+}
+
+// A work dir that is itself a symlink must still be recognised as private:
+// its files resolve to the real directory, so the root has to as well.
+func TestDigestMemoResolvesSymlinkedRoot(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real-work")
+	link := filepath.Join(base, "linked-work")
+	if err := os.MkdirAll(filepath.Join(real, "job"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	path := filepath.Join(link, "job", "candidate.mkv")
+	if err := os.WriteFile(path, []byte("validated candidate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := withDigestMemo(context.Background(), link)
+	for i := 0; i < 3; i++ {
+		if _, err := verifiedLocalSHA256(ctx, path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := digestMemoFrom(ctx).fullReads(); got != 1 {
+		t.Fatalf("reads=%d, want the memo to stay on under a symlinked work dir", got)
 	}
 }

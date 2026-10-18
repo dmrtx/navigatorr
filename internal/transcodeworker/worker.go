@@ -199,6 +199,10 @@ func cleanRootPaths(roots []string) []string {
 
 // Worker manages the local transcode execution on the node.
 type Worker struct {
+	// partialCleanup tracks best-effort background SMB partial removals so
+	// tests can wait for them; production never waits.
+	partialCleanup sync.WaitGroup
+
 	schedulerMu        sync.Mutex
 	schedulerHealth    transcode.SchedulerObservation
 	schedulerInterval  time.Duration
@@ -2054,6 +2058,11 @@ func (w *Worker) Cancel(ctx context.Context, jobID string) (JobStatusResponse, e
 	}
 
 	w.cleanupCancelledArtifacts(job)
+	// The share round trip can retry the SMB session for minutes, so it runs
+	// in the background instead of stalling this response while the per-job
+	// lock is held. The job is already terminal, so nothing else can publish
+	// under its ID.
+	w.removeOwnRemotePartialBackground(job)
 
 	return JobStatusResponse{
 		ID:            job.ID,
@@ -2079,8 +2088,8 @@ func (w *Worker) ensureCancelledTerminalMarker(jobDir string, job *JobRecord) er
 	return nil
 }
 
-// cleanupCancelledArtifacts removes only worker-owned incomplete artifacts of a
-// newly-cancelled job. It never removes the semantic source. For Phase 6
+// cleanupCancelledArtifacts removes only worker-owned incomplete local artifacts of a
+// newly-cancelled job (the SMB partial is removed separately, off the lock). It never removes the semantic source. For Phase 6
 // external destinations the encoder output is the operational local candidate
 // and finalization stages through the job's exact own partial path; both are
 // removed, while the atomically published destination is left untouched. For
@@ -2091,7 +2100,6 @@ func (w *Worker) cleanupCancelledArtifacts(job *JobRecord) {
 		return
 	}
 	w.removeOwnStagedInput(job)
-	w.removeOwnRemotePartial(job)
 	if w.sourceCacheEnabled() {
 		releaseSourceCachePins(w.sourceCacheDir(), job.ID, false)
 	}

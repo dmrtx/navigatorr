@@ -860,6 +860,33 @@ var _ partialRemover = (*smbdirect.Store)(nil)
 // cancellation). A partial is kept after a transport failure so a retry can
 // reuse it; without this it would stay on the NAS. Best effort, bounded.
 func (w *Worker) removeOwnRemotePartial(job *JobRecord) {
+	w.removeOwnRemotePartialWithin(job, remotePartialTimeout)
+}
+
+// remotePartialTimeout bounds a terminal-failure partial removal;
+// cancelPartialTimeout bounds the background removal after a cancel, which
+// nobody waits on.
+const (
+	remotePartialTimeout = 2 * time.Minute
+	cancelPartialTimeout = 20 * time.Second
+)
+
+// removeOwnRemotePartialBackground removes the job's own SMB partial without
+// blocking the caller (the cancel handler, which must not stall on an
+// unreachable NAS). Same ownership rules as removeOwnRemotePartial.
+func (w *Worker) removeOwnRemotePartialBackground(job *JobRecord) {
+	if job == nil {
+		return
+	}
+	snapshot := *job
+	w.partialCleanup.Add(1)
+	go func() {
+		defer w.partialCleanup.Done()
+		w.removeOwnRemotePartialWithin(&snapshot, cancelPartialTimeout)
+	}()
+}
+
+func (w *Worker) removeOwnRemotePartialWithin(job *JobRecord, timeout time.Duration) {
 	// A partial only exists once publication started, which needs the encode
 	// checkpoint; earlier failures never pay for a share round trip.
 	if job == nil || !job.EncodeComplete || w.mediaStore == nil || validateJobID(job.ID) != nil {
@@ -873,7 +900,7 @@ func (w *Worker) removeOwnRemotePartial(job *JobRecord) {
 	if !ok {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	if err := remover.RemovePartial(ctx, destination, job.ID); err != nil {
 		log.Printf("transcode job %s: leaving SMB partial for later cleanup: %v", job.ID, err)
