@@ -71,6 +71,8 @@ type promotionState struct {
 	DeleteSentAt                      string                       `json:"delete_sent_at,omitempty"`
 	OldRemoved                        bool                         `json:"old_removed"`
 	RecoveryCleanupStarted            bool                         `json:"recovery_cleanup_started,omitempty"`
+	// How the recovery copy was made; see promotionCopyData.
+	RecoveryCopy *promotionCopyResult `json:"recovery_copy,omitempty"`
 	// Set for compact candidates only: the re-grab warning and a read-only
 	// snapshot of how Sonarr/Radarr tracks the item.
 	RegrabWarning string `json:"regrab_warning,omitempty"`

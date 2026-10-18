@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -119,6 +120,9 @@ func (e *Engine) promotionHash(ctx context.Context, path string) (string, int64,
 		}
 	}
 	n, err := e.hashMedia(ctx, h, &promotionContextReader{ctx: ctx, r: f, path: path, total: opened.Size(), progress: observer})
+	if hook := e.promotionReadHook; hook != nil {
+		hook(path, n)
+	}
 	if err != nil {
 		return "", 0, err
 	}
@@ -136,7 +140,9 @@ func (e *Engine) promotionHash(ctx context.Context, path string) (string, int64,
 	if !os.SameFile(opened, after) || !os.SameFile(opened, finished) || opened.Size() != n || finished.Size() != n || !opened.ModTime().Equal(finished.ModTime()) {
 		return "", 0, fmt.Errorf("file changed while hashing: %s", path)
 	}
-	return hex.EncodeToString(h.Sum(nil)), n, nil
+	sum := hex.EncodeToString(h.Sum(nil))
+	promotionRememberHash(ctx, path, sum, opened, finished)
+	return sum, n, nil
 }
 
 type promotionContextReader struct {
@@ -161,7 +167,13 @@ func (r *promotionContextReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// verifyPromotionHash and verifyPromotionHashStable read the whole file
+// unless this same continuous execution already did and the file's strict
+// fingerprint proves it unchanged since.
 func (e *Engine) verifyPromotionHash(ctx context.Context, path, expected string) error {
+	if e.promotionStillVerified(ctx, path, expected) {
+		return nil
+	}
 	actual, _, err := e.promotionHash(ctx, path)
 	if err != nil {
 		return err
@@ -211,6 +223,9 @@ func transientPromotionHashError(err error) bool {
 }
 
 func (e *Engine) verifyPromotionHashStable(ctx context.Context, path, expected string) error {
+	if e.promotionStillVerified(ctx, path, expected) {
+		return nil
+	}
 	actual, _, err := e.promotionHashStable(ctx, path)
 	if err != nil {
 		return err
@@ -398,11 +413,70 @@ func (e *Engine) stepPromotePlan(ctx context.Context, ec *ExecutionContext) (Ste
 	return StepResult{Status: StepCompleted, Outputs: map[string]any{"promotion": p, "candidate_path": p.CandidatePath, "original_path": p.OriginalPath, "affected_episode_ids": p.EpisodeIDs, "estimated_bytes_saved": p.OriginalBytes - p.CandidateBytes}}, nil
 }
 
+// promotionPreserveProgress persists the preserve step's whole-file reads as
+// coordinator work. On a large original the two re-hashes, the recovery copy
+// and its verification are many minutes of NAS IO; without it the step looks
+// frozen. Observations are display only and never replace a SHA-256 check.
+type promotionPreserveProgress struct {
+	e     *Engine
+	ec    *ExecutionContext
+	p     *promotionState
+	phase string
+	last  time.Time
+}
+
+func (w *promotionPreserveProgress) report(ctx context.Context, phase string, read, total int64) error {
+	if phase == w.phase && read != 0 && read != total && time.Since(w.last) < time.Second {
+		return nil
+	}
+	w.phase, w.last = phase, time.Now()
+	progress := map[string]any{"phase": phase, "total_bytes": total, "updated_at": time.Now().UTC().Format(time.RFC3339Nano)}
+	if phase != "waiting_for_hash_slot" {
+		progress["bytes_read"] = read
+	}
+	w.ec.State["work_progress"] = progress
+	return w.e.persistExecutionState(ctx, w.ec)
+}
+
+// hashes observes promotionHash, which reports zero bytes before it queues
+// for a hash slot. Only the step's own files are named; any other read is
+// left unreported rather than mislabelled.
+func (w *promotionPreserveProgress) hashes(ctx context.Context) promotionHashProgress {
+	return func(path string, read, total int64) error {
+		if read == 0 {
+			return w.report(ctx, "waiting_for_hash_slot", 0, total)
+		}
+		switch path {
+		case w.p.OriginalPath:
+			return w.report(ctx, "verifying_original", read, total)
+		case w.p.CandidatePath:
+			return w.report(ctx, "verifying_candidate", read, total)
+		case w.p.BackupPath, w.p.BackupPath + ".partial":
+			return w.report(ctx, "verifying_recovery", read, total)
+		}
+		return nil
+	}
+}
+
+func (w *promotionPreserveProgress) copies(ctx context.Context) promotionHashProgress {
+	return func(_ string, read, total int64) error {
+		if read == 0 {
+			return w.report(ctx, "waiting_for_hash_slot", 0, total)
+		}
+		return w.report(ctx, "copying_recovery", read, total)
+	}
+}
+
 func (e *Engine) stepPromotePreserve(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
 	p, svc, err := e.promotionMutation(ec)
 	if err != nil {
 		return promoteFailed(err)
 	}
+	progress := &promotionPreserveProgress{e: e, ec: ec, p: p}
+	ctx = context.WithValue(ctx, promotionHashProgressKey{}, progress.hashes(ctx))
+	// The step's own result replaces this progress; never leave a finished or
+	// abandoned read looking current.
+	defer delete(ec.State, "work_progress")
 	if err := e.verifyPromotionHash(ctx, p.OriginalPath, p.OriginalSHA); err != nil {
 		return promoteFailed(err)
 	}
@@ -490,12 +564,18 @@ func (e *Engine) stepPromotePreserve(ctx context.Context, ec *ExecutionContext) 
 		} else if !os.IsNotExist(err) {
 			return promoteFailed(err)
 		}
-		if err := e.promotionCopyToPartial(ctx, p.OriginalPath, partial); err != nil {
+		started := time.Now()
+		copied, err := e.promotionCopyToPartial(ctx, p.OriginalPath, partial, progress.copies(ctx))
+		if err != nil {
 			return promoteFailed(err)
 		}
+		copied.DurationMs = time.Since(started).Milliseconds()
+		p.RecoveryCopy = &copied
+		log.Printf("promotion %s: recovery copy made by %s in %dms (clone: %s)", ec.InstanceID, copied.Method, copied.DurationMs, promotionOr(copied.CloneError, "used"))
 		// promotionCopyToPartial returns only after the destination writer is
 		// flushed and closed, so this hashes a finished file, never an active
 		// writer. Stable hashing absorbs transient post-close metadata races.
+		// However the copy was made, this full read-back is what proves it.
 		if err := e.verifyPromotionHashStable(ctx, partial, p.OriginalSHA); err != nil {
 			return promoteFailed(err)
 		}
@@ -507,31 +587,63 @@ func (e *Engine) stepPromotePreserve(ctx context.Context, ec *ExecutionContext) 
 		}
 	}
 preserved:
+	delete(ec.State, "work_progress")
 	p.BackupVerified = true
 	p.RecoveryVerifiedBeforeReplacement = true
 	if err := e.savePromotion(ctx, ec, p); err != nil {
 		return promoteFailed(err)
 	}
-	return StepResult{Status: StepCompleted, Outputs: map[string]any{"recovery_path": p.BackupPath, "recovery_retained": true}}, nil
+	out := map[string]any{"recovery_path": p.BackupPath, "recovery_retained": true}
+	if p.RecoveryCopy != nil {
+		out["recovery_copy"] = p.RecoveryCopy
+	}
+	return StepResult{Status: StepCompleted, Outputs: out}, nil
+}
+
+func promotionOr(value, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+	return value
 }
 
 // promotionCopyToPartial copies the original into the private recovery
 // partial. It returns only after the destination has been synced and closed,
 // so callers must not hash or publish the partial before it returns.
-func (e *Engine) promotionCopyToPartial(ctx context.Context, srcPath, partial string) error {
+// progress, when set, observes the bytes copied, starting with zero before the
+// copy queues for a hash slot. The copy is a clone, a kernel copy or a stream,
+// whichever the filesystem accepts first; the result says which.
+func (e *Engine) promotionCopyToPartial(ctx context.Context, srcPath, partial string, progress promotionHashProgress) (promotionCopyResult, error) {
+	var result promotionCopyResult
 	if _, err := e.promotionPath(partial, true); err != nil {
-		return err
+		return result, err
 	}
+	// The partial gets new bytes: whatever this execution knew of that path no
+	// longer applies, and the read-back must be a full one.
+	promotionForget(ctx, partial)
 	src, err := os.Open(srcPath)
 	if err != nil {
-		return err
+		return result, err
+	}
+	var total int64
+	if info, err := src.Stat(); err == nil {
+		total = info.Size()
+	}
+	if progress != nil {
+		if err := progress(partial, 0, total); err != nil {
+			_ = src.Close()
+			return result, err
+		}
 	}
 	dst, err := os.OpenFile(partial, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		_ = src.Close()
-		return err
+		return result, err
 	}
-	_, copyErr := e.hashMedia(ctx, dst, &promotionContextReader{ctx: ctx, r: src})
+	result, copyErr := e.promotionCopyData(ctx, dst, src, partial, total, progress)
+	if hook := e.promotionReadHook; hook != nil && result.Streamed > 0 {
+		hook(srcPath, result.Streamed)
+	}
 	_ = src.Close()
 	if copyErr == nil {
 		copyErr = dst.Sync()
@@ -541,12 +653,12 @@ func (e *Engine) promotionCopyToPartial(ctx context.Context, srcPath, partial st
 		copyErr = closeErr
 	}
 	if copyErr != nil {
-		return copyErr
+		return result, copyErr
 	}
 	if hook := e.promotionCopyBoundaryHook; hook != nil {
 		hook(partial)
 	}
-	return nil
+	return result, nil
 }
 
 func (e *Engine) promotionPublishPartial(ctx context.Context, ec *ExecutionContext, p *promotionState, partial string) error {
@@ -580,6 +692,7 @@ func (e *Engine) promotionPublishPartial(ctx context.Context, ec *ExecutionConte
 		_ = d.Sync()
 		_ = d.Close()
 	}
+	e.promotionCarryRenamed(ctx, partial, p.BackupPath)
 	return nil
 }
 
