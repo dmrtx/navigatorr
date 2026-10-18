@@ -51,6 +51,8 @@
   /* Job actions share one visible box; --control-size stays the touch target. */
   --action-height: 32px;
   --action-min-width: 88px;
+  /* Narrow screens: two equal columns on a phone, more as the card widens. */
+  --action-column: 128px;
 }
 /* Dark palette: once for the system preference, once for an explicit choice. */
 @media (prefers-color-scheme: dark) {
@@ -250,18 +252,6 @@ button.primary {
 .action-control svg {
   width: 18px;
   height: 18px;
-}
-.action-control.recovery {
-  color: var(--accent);
-}
-.action-control.recovery::before {
-  background: var(--recovery-wash);
-}
-.action-control.dismissive {
-  color: var(--muted);
-}
-.action-control.dismissive::before {
-  background: transparent;
 }
 input,
 select,
@@ -867,10 +857,11 @@ main {
 }
 .job-footer {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  height: 32px;
+  min-height: var(--action-height);
   min-width: 0;
 }
 .job-row.terminal-job .job-footer {
@@ -882,20 +873,25 @@ main {
 }
 .job-footer > .job-progress, .job-footer > .job-outcome {
   min-width: 0;
-  flex: 1;
+  flex: 1 1 240px;
   max-height: var(--control-size);
   overflow: hidden;
 }
 .job-footer > .job-outcome {
   color: var(--muted);
 }
+/* Actions stay beside the outcome while they fit; otherwise they wrap below it,
+   right-aligned, and then onto further rows. The 12px row gap keeps the touch
+   targets of wrapped rows from overlapping. */
 .job-row .job-footer > .job-actions {
   align-self: center;
   justify-content: flex-end;
-  max-width: none;
-  gap: 6px;
-  flex-wrap: nowrap;
-  flex: 0 0 auto;
+  max-width: 100%;
+  min-width: 0;
+  margin-left: auto;
+  gap: 12px 6px;
+  flex-wrap: wrap;
+  flex: 0 1 auto;
 }
 .job-number {
   color: var(--muted);
@@ -932,6 +928,11 @@ main {
   text-align: center;
   white-space: nowrap;
 }
+.job-row .job-footer > .job-actions button {
+  flex: 0 0 auto;
+  max-width: 100%;
+  white-space: normal;
+}
 .job-row .job-actions button::after,
 #detail-controls .job-actions button::after {
   content: "";
@@ -948,6 +949,19 @@ main {
   height: 14px;
   flex-shrink: 0;
 }
+/* While a request is pending the spinner takes the icon's place and size, so
+   the button keeps its width and its neighbours do not move. */
+.job-row .job-actions button.button-pending svg,
+#detail-controls .job-actions button.button-pending svg {
+  display: none;
+}
+.job-row .job-actions button.button-pending::before,
+#detail-controls .job-actions button.button-pending::before {
+  box-sizing: border-box;
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+}
 .job-row .job-actions button.primary,
 #detail-controls .job-actions button.primary {
   border-color: var(--forest);
@@ -958,36 +972,6 @@ main {
   border-color: transparent;
   background: var(--forest-wash);
   color: var(--forest);
-}
-/* Unlabelled icon actions keep their square shape at the same height. */
-.job-row .job-actions button.action-control {
-  isolation: isolate;
-  flex: 0 0 auto;
-  width: auto;
-  min-width: var(--action-height);
-  padding: 4px;
-  border-color: transparent;
-  background: var(--forest-wash);
-  color: var(--forest);
-}
-.job-row .job-actions button.action-control::before {
-  display: none;
-}
-.job-row .job-actions button.action-control svg {
-  width: 16px;
-  height: 16px;
-}
-.job-row .job-actions button.action-control.primary {
-  background: var(--forest);
-  color: var(--on-forest);
-}
-.job-row .job-actions button.action-control.recovery {
-  background: var(--recovery-wash);
-  color: var(--accent);
-}
-.job-row .job-actions button.action-control.dismissive {
-  background: transparent;
-  color: var(--muted);
 }
 .workflow-progress {
   display: flex;
@@ -1473,6 +1457,10 @@ dialog .submit-actions {
   justify-content: flex-end;
   margin: 8px 0 0;
 }
+#detail-controls .job-actions {
+  justify-content: flex-end;
+  gap: 12px 6px;
+}
 dialog .submit-actions button {
   width: auto;
   min-height: var(--control-size);
@@ -1641,9 +1629,12 @@ pre {
     padding: 10px 0;
   }
   /* Size titles and summaries to their text so every card keeps the same gaps. */
+  /* Symmetric padding keeps a one-line title a 24px target without leaving
+     extra space under it. */
   .job-row .job-title {
     height: auto;
-    min-height: 0;
+    min-height: 24px;
+    padding: 3px 0;
     -webkit-line-clamp: 2;
   }
   .job-meta,
@@ -1760,12 +1751,6 @@ pre {
   .action-control.primary:hover::before {
     background: var(--forest-strong);
   }
-  .action-control.recovery:hover::before {
-    background: var(--recovery-hover);
-  }
-  .action-control.dismissive:hover::before {
-    background: var(--forest-wash);
-  }
   .icon-button:hover,
   .quiet:hover {
     border-color: transparent;
@@ -1785,8 +1770,7 @@ pre {
     border-color: var(--forest-strong);
     background: var(--forest-strong);
   }
-  .job-row .job-actions button.queue-secondary:hover,
-  .job-row .job-actions button.action-control:not(.primary, .recovery):hover {
+  .job-row .job-actions button.queue-secondary:hover {
     border-color: transparent;
     background: var(--forest-wash-strong);
   }
@@ -1988,10 +1972,11 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
   .brand { white-space: nowrap; }
   #worker-status { font-size: 11px; text-align: right; }
   #install-app { white-space: nowrap; }
+}
+@media (max-width: 700px) {
   .job-row .job-footer {
     height: auto;
     min-height: var(--control-size);
-    flex-wrap: wrap;
     align-items: flex-start;
   }
   .job-row .job-footer > .job-outcome,
@@ -1999,12 +1984,15 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
   /* The count only shares a line with buttons on wide screens. */
   .batch-progress:has(.batch-progress-phase) .batch-progress-count,
   .batch-progress:has(.batch-progress-phase) .batch-progress-percent { line-height: 1.4; }
-  /* Equal columns: buttons line up across cards and wrap into full rows. */
+  /* Equal columns: buttons line up across cards and wrap into full rows that
+     share one height. The 12px row gap keeps 44px touch targets apart. */
   .job-row .job-footer > .job-actions {
     display: grid;
     flex: 1 1 100%;
-    grid-template-columns: repeat(auto-fill, minmax(var(--action-min-width), 1fr));
-    gap: 8px 6px;
+    grid-template-columns: repeat(auto-fill, minmax(var(--action-column), 1fr));
+    align-items: stretch;
+    gap: 12px 6px;
+    margin-left: 0;
   }
   .job-row .job-footer > .job-actions button {
     width: auto;
@@ -2013,7 +2001,6 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
     gap: 4px;
     padding-inline: 4px;
     font-size: 11px;
-    white-space: normal;
   }
 }
 

@@ -92,7 +92,19 @@ function actionIcon(label) {
     "Review candidates": "M5 4h14v16H5ZM8 8h8M8 12h8",
     "Review candidate": "M5 4h14v16H5ZM8 8h8M8 12h8",
     "Set up benchmark": "M8 5h12v15H8ZM4 16V2h12",
-    "Keep originals": "M4 4h16v4H4ZM6 8v12h12V8M10 12h4",
+    // Keeping originals is a decision, not filing the job away: a shield, not a box.
+    "Keep original": "M12 3l7 3v6c0 4-3 7-7 9-4-2-7-5-7-9V6ZM9 12l2 2 4-4",
+    "Keep originals": "M12 3l7 3v6c0 4-3 7-7 9-4-2-7-5-7-9V6ZM9 12l2 2 4-4",
+    "Stop batch · keep originals": "M6 6h12v12H6Z",
+    "Compare frames": "M4 5h16v14H4ZM12 5v14",
+    "Run one more test": "M9 3h6M10 3v6l-5 9a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-9V3",
+    "Check worker again": "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14ZM20 20l-4-4",
+    "Check library again": "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14ZM20 20l-4-4",
+    "Ad library": "M4 6h16M4 12h16M4 18h10",
+    "Review cuts": "M9 7a3 3 0 1 1-6 0 3 3 0 0 1 6 0ZM9 17a3 3 0 1 1-6 0 3 3 0 0 1 6 0ZM8.5 8.5 20 19M8.5 15.5 20 5",
+    "Revise labels": "M4 20h4L19 9l-4-4L4 16Z",
+    "View transcript": "M5 4h14v16H5ZM8 8h8M8 12h8M8 16h5",
+    "Validate classifications": "M5 12l5 5 9-10",
     Archive: "M4 4h16v4H4ZM6 8v12h12V8M10 12h4",
     Restore: "M12 19V9M8 13l4-4 4 4M4 4h16v4H4Z",
     "View replacement": "M5 4h14v16H5ZM8 8h8M8 12h8",
@@ -105,6 +117,8 @@ function actionIcon(label) {
     "Delete custom profile":
       "M3 6h18M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7",
     Folder: "M3 6h7l2 2h9v12H3Z",
+    // Fallback for job actions without their own icon (new server decisions).
+    Action: "M5 12h14M13 6l6 6-6 6",
   };
   if (!paths[label]) return null;
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -2728,7 +2742,8 @@ function jobControls(job, detail = false) {
   const add = (label, fn) => {
     const b = button(label, fn);
     if (label === "Start batch") b.className = "primary";
-    const icon = actionIcon(label);
+    // Every job action carries an icon, so rows and the detail dialog match.
+    const icon = actionIcon(label) || actionIcon("Action");
     if (icon) b.append(icon);
     b.dataset.jobControl = job.id;
     b.dataset.requiresWorker = String(
@@ -3157,36 +3172,23 @@ function queuePresentation(job) {
   };
 }
 function compactQueueActions(actions) {
+  // Every queue action shows its icon and a short label. Fill sets the
+  // hierarchy: primary decisions are filled, labelled icon actions tinted, and
+  // the remaining decisions outlined. The full label stays in aria-label/title.
+  const primary = ["Set up benchmark", "Review candidates", "Review candidate", "Review replacement", "Review replacements", "Replace file", "Start batch", "Try another profile", "Resume batch", "Review"];
+  const secondary = ["Review preview", "View batch", "View preview", "View replacement", "Archive", "Restore", "Reconfigure", "Change settings", "Change goal"];
+  const short = {"Pause batch":"Pause","Replace file":"Replace","Set up benchmark":"Set up","Review candidates":"Review","Review candidate":"Review","Review replacement":"Review","Review replacements":"Review","Stop batch · keep originals":"Stop batch"};
   for (const b of actions.children) {
-    const icon = b.querySelector?.("svg");
-    if (!icon) continue;
     const label = b.textContent.trim();
-    // Stopping work is never an unlabeled icon: × reads as "dismiss this row".
-    if (["Cancel", "Pause batch", "Retry"].includes(label)) {
-      b.replaceChildren(icon, node("span", label === "Pause batch" ? "Pause" : label));
-      b.className += label === "Retry" ? " queue-secondary recovery" : " queue-secondary dismissive";
-      b.setAttribute("aria-label", label);
-      b.title ||= label;
-      continue;
-    }
-    if (["Set up benchmark", "Review candidates", "Review candidate", "Review replacement", "Review replacements", "Replace file", "Start batch", "Review preview", "View batch", "View preview", "Archive", "Restore", "Reconfigure", "Change settings", "Try another profile", "Change goal"].includes(label)) {
-      b.replaceChildren(icon, node("span", label === "Replace file" ? "Replace" : label === "Set up benchmark" ? "Set up" : ["Start batch", "View batch", "View preview", "Archive", "Restore", "Reconfigure", "Change settings", "Try another profile", "Change goal"].includes(label) ? label : "Review"));
-      b.className += ["Review preview", "View batch", "View preview", "Archive", "Restore", "Reconfigure", "Change settings", "Change goal"].includes(label) ? " queue-secondary" : " primary queue-primary";
-      b.setAttribute("aria-label", label);
-      b.title ||= label;
-      continue;
-    }
+    const icon = b.querySelector?.("svg");
+    if (icon) b.replaceChildren(icon, node("span", short[label] || label));
     b.setAttribute("aria-label", label);
     b.title ||= label;
-    b.replaceChildren(node("span", label, "sr-only"), icon);
-    b.className += " action-control";
-    if (
-      ["Replace file", "Review replacements", "Resume batch"].includes(label)
-    ) {
-      b.className += " primary";
-    } else if (label === "Retry") b.className += " recovery";
-    else if (["Cancel", "Pause batch"].includes(label))
-      b.className += " dismissive";
+    // Stopping work is never an unlabeled icon: × reads as "dismiss this row".
+    if (["Cancel", "Pause batch"].includes(label)) b.className += " queue-secondary dismissive";
+    else if (label === "Retry") b.className += " queue-secondary recovery";
+    else if (secondary.includes(label)) b.className += " queue-secondary";
+    else if (primary.includes(label)) b.className += " primary queue-primary";
   }
 }
 const benchmarkOutcomes = {
