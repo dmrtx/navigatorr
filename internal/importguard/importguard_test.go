@@ -1,6 +1,7 @@
 package importguard
 
 import (
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
@@ -33,10 +34,13 @@ var workerOnly = map[string]bool{
 }
 
 // moduleImports returns each module package's non-test imports within the
-// module, keyed and valued by path relative to the module root.
-func moduleImports(t *testing.T) map[string][]string {
+// module, keyed and valued by path relative to the module root, as resolved
+// for goos/goarch (build-tagged files change the import set).
+func moduleImports(t *testing.T, goos, goarch string) map[string][]string {
 	t.Helper()
-	out, err := exec.Command("go", "list", "-f", "{{.ImportPath}}{{range .Imports}} {{.}}{{end}}", module+"/...").Output()
+	cmd := exec.Command("go", "list", "-f", "{{.ImportPath}}{{range .Imports}} {{.}}{{end}}", module+"/...")
+	cmd.Env = append(os.Environ(), "GOOS="+goos, "GOARCH="+goarch, "CGO_ENABLED=0")
+	out, err := cmd.Output()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
 			t.Fatalf("go list: %v\n%s", err, ee.Stderr)
@@ -67,10 +71,19 @@ func rel(path string) string {
 	return strings.TrimPrefix(path, module+"/")
 }
 
+// platforms are the targets both checks resolve imports for: the worker
+// ships on Apple Silicon, the server in a Linux container.
+var platforms = [][2]string{{"darwin", "arm64"}, {"linux", "amd64"}}
+
 // TestWorkerLinksOnlySharedPackages fails when the worker binary gains a
 // dependency on a server package, directly or transitively.
 func TestWorkerLinksOnlySharedPackages(t *testing.T) {
-	graph := moduleImports(t)
+	for _, p := range platforms {
+		t.Run(p[0]+"/"+p[1], func(t *testing.T) { checkWorkerLinks(t, moduleImports(t, p[0], p[1])) })
+	}
+}
+
+func checkWorkerLinks(t *testing.T, graph map[string][]string) {
 	root := "cmd/navigatorr-transcode"
 	if _, ok := graph[root]; !ok {
 		t.Fatalf("%s not found in go list output", root)
@@ -102,7 +115,12 @@ func TestWorkerLinksOnlySharedPackages(t *testing.T) {
 // TestServerDoesNotImportWorkerInternals fails when any package other than
 // the worker binary imports the worker's internal packages.
 func TestServerDoesNotImportWorkerInternals(t *testing.T) {
-	graph := moduleImports(t)
+	for _, p := range platforms {
+		t.Run(p[0]+"/"+p[1], func(t *testing.T) { checkWorkerInternals(t, moduleImports(t, p[0], p[1])) })
+	}
+}
+
+func checkWorkerInternals(t *testing.T, graph map[string][]string) {
 	for pkg, imports := range graph {
 		if pkg == "cmd/navigatorr-transcode" || workerOnly[pkg] {
 			continue
