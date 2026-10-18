@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/httpclient"
 )
 
 type stubSpawn struct {
@@ -1024,7 +1025,7 @@ func TestPR3_HTTPExecutorSendsIdempotencyAnd409Definitive(t *testing.T) {
 	srv := newHTTPTestServer(t, &mu, &got)
 	defer srv.Close()
 
-	exec, err := transcode.NewHTTPExecutor(transcode.HTTPConfig{
+	exec, err := httpclient.NewHTTPExecutor(httpclient.HTTPConfig{
 		BaseURL: srv.URL, RequestTimeout: 5000000000, SubmitTimeout: 5000000000,
 		PathMappings: []transcode.PathMapping{{Local: "/local/media", Remote: "/Volumes/media"}},
 	})
@@ -1061,18 +1062,18 @@ func TestPR3_HTTPExecutorSendsIdempotencyAnd409Definitive(t *testing.T) {
 	// 409 conflict is definitive: typed HTTPError, never UncertainError.
 	conflictSrv := newHTTPConflictServer(t)
 	defer conflictSrv.Close()
-	exec2, _ := transcode.NewHTTPExecutor(transcode.HTTPConfig{
+	exec2, _ := httpclient.NewHTTPExecutor(httpclient.HTTPConfig{
 		BaseURL: conflictSrv.URL, RequestTimeout: 5000000000, SubmitTimeout: 5000000000,
 		PathMappings: []transcode.PathMapping{{Local: "/local/media", Remote: "/Volumes/media"}},
 	})
 	_, err = exec2.Submit(context.Background(), transcode.Request{
 		ID: "job-http-2", SourcePath: "/local/media/a.mkv", CandidatePath: "/local/media/other.mkv",
 	})
-	var herr *transcode.HTTPError
+	var herr *httpclient.HTTPError
 	if err == nil || !asHTTPError(err, &herr) || herr.StatusCode != http.StatusConflict {
 		t.Fatalf("conflict must be typed 409, got %v", err)
 	}
-	if transcode.IsTransportUncertain(err) {
+	if httpclient.IsTransportUncertain(err) {
 		t.Fatalf("complete 409 must never be UncertainError: %v", err)
 	}
 	if !strings.Contains(err.Error(), "idempotency_conflict") {
@@ -1190,9 +1191,9 @@ func newHTTPConflictServer(t *testing.T) *httptest.Server {
 	}))
 }
 
-func asHTTPError(err error, target **transcode.HTTPError) bool {
+func asHTTPError(err error, target **httpclient.HTTPError) bool {
 	for err != nil {
-		if h, ok := err.(*transcode.HTTPError); ok {
+		if h, ok := err.(*httpclient.HTTPError); ok {
 			*target = h
 			return true
 		}

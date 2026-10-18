@@ -13,6 +13,7 @@ import (
 
 	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/httpclient"
 	"github.com/jakenesler/navigatorr/transcode/recipe"
 )
 
@@ -43,7 +44,7 @@ func TestReconcilerRecoversAcceptedSubmitAfterRestartWithoutClient(t *testing.T)
 		if getString(ec.State, "job_id") != req.ID || !getBool(ec.State, "transcode_reconcile") {
 			t.Fatalf("remote submission preceded durable identity: %+v", ec.State)
 		}
-		return transcode.Job{}, &transcode.UncertainError{Op: "submit", Err: context.DeadlineExceeded}
+		return transcode.Job{}, &httpclient.UncertainError{Op: "submit", Err: context.DeadlineExceeded}
 	}
 	mock.statusFunc = func(ctx context.Context, id string) (transcode.JobStatus, error) {
 		return transcode.JobStatus{ID: id, Status: transcode.StatusCompleted, JobTelemetry: transcode.JobTelemetry{FinishedAt: now.Add(-time.Minute), EncodeDurationMs: &encodeMs}}, nil
@@ -207,7 +208,7 @@ func TestRetryCreatesNewWorkerIdentityOnlyAfterConfirmedFailure(t *testing.T) {
 					return transcode.JobStatus{ID: id, Status: transcode.StatusRunning}, nil
 				}
 				if remote == "unreachable" {
-					return transcode.JobStatus{}, &transcode.UncertainError{Op: "status", Err: context.DeadlineExceeded}
+					return transcode.JobStatus{}, &httpclient.UncertainError{Op: "status", Err: context.DeadlineExceeded}
 				}
 				return transcode.JobStatus{ID: id, Status: remote, FailureClassification: "smb_signing_required", Error: "SMB signing required"}, nil
 			}}
@@ -244,15 +245,15 @@ func TestRetryAfterRejectedTranscodeAdmissionRetainsAnalysisAndIdentity(t *testi
 		t.Run(kind, func(t *testing.T) {
 			st := setupTestStore(t)
 			accepted := false
-			statusErr := error(&transcode.HTTPError{StatusCode: 404})
+			statusErr := error(&httpclient.HTTPError{StatusCode: 404})
 			if kind == "wrapped_missing" {
 				statusErr = fmt.Errorf("status: %w", statusErr)
 			}
 			if kind == "uncertain_missing" {
-				statusErr = &transcode.UncertainError{Op: "status", Err: statusErr}
+				statusErr = &httpclient.UncertainError{Op: "status", Err: statusErr}
 			}
 			if kind == "forbidden" {
-				statusErr = &transcode.HTTPError{StatusCode: 403}
+				statusErr = &httpclient.HTTPError{StatusCode: 403}
 			}
 			mock := &mockTranscodeExecutor{
 				statusFunc: func(_ context.Context, id string) (transcode.JobStatus, error) {
@@ -305,7 +306,7 @@ func TestRejectedBenchmarkAdmissionRetryKeepsRequestAndBudget(t *testing.T) {
 	for _, code := range []int{404, 403} {
 		t.Run(fmt.Sprint(code), func(t *testing.T) {
 			mock := &mockTranscodeExecutor{benchmarkStatusFunc: func(context.Context, string) (transcode.BenchmarkStatus, error) {
-				return transcode.BenchmarkStatus{}, fmt.Errorf("worker read: %w", &transcode.HTTPError{StatusCode: code})
+				return transcode.BenchmarkStatus{}, fmt.Errorf("worker read: %w", &httpclient.HTTPError{StatusCode: code})
 			}}
 			e := NewEngine(EngineDeps{Transcode: mock})
 			ec := testReconcileEC("")
@@ -386,10 +387,10 @@ func TestStatusHTTPFailuresRemainReconciliableWithoutResubmission(t *testing.T) 
 		t.Run(fmt.Sprint(code), func(t *testing.T) {
 			mock := &mockTranscodeExecutor{
 				statusFunc: func(context.Context, string) (transcode.JobStatus, error) {
-					return transcode.JobStatus{}, &transcode.HTTPError{StatusCode: code, Message: "status unavailable"}
+					return transcode.JobStatus{}, &httpclient.HTTPError{StatusCode: code, Message: "status unavailable"}
 				},
 				benchmarkStatusFunc: func(context.Context, string) (transcode.BenchmarkStatus, error) {
-					return transcode.BenchmarkStatus{}, &transcode.HTTPError{StatusCode: code, Message: "status unavailable"}
+					return transcode.BenchmarkStatus{}, &httpclient.HTTPError{StatusCode: code, Message: "status unavailable"}
 				},
 			}
 			e := NewEngine(EngineDeps{Transcode: mock})
@@ -531,7 +532,7 @@ func TestBenchmarkUncertainSubmitPersistsIdentityAndResumesAutomatically(t *test
 		if getString(ec.State, "benchmark_job_id") != req.ID || !getBool(ec.State, "benchmark_reconcile") || ec.State["benchmark_request"] == nil {
 			t.Fatal("benchmark request not durable before submit")
 		}
-		return transcode.BenchmarkJob{}, &transcode.UncertainError{Op: "benchmark_submit", Err: context.DeadlineExceeded}
+		return transcode.BenchmarkJob{}, &httpclient.UncertainError{Op: "benchmark_submit", Err: context.DeadlineExceeded}
 	}, benchmarkStatusFunc: func(ctx context.Context, id string) (transcode.BenchmarkStatus, error) {
 		return transcode.BenchmarkStatus{ID: id, Status: transcode.StatusCompleted, FinishedAt: time.Now().Add(-time.Second), Decision: &transcode.BenchmarkDecision{DecisionReason: "test report complete"}}, nil
 	}}

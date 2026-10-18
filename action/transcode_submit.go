@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/httpclient"
 	"github.com/jakenesler/navigatorr/transcode/resilience"
 )
 
@@ -201,8 +202,8 @@ func clearTranscodeReconcileFlags(ec *ExecutionContext) {
 	delete(ec.State, "transcode_reconcile")
 }
 
-func transcodeHTTPError(err error) (*transcode.HTTPError, bool) {
-	var he *transcode.HTTPError
+func transcodeHTTPError(err error) (*httpclient.HTTPError, bool) {
+	var he *httpclient.HTTPError
 	if errors.As(err, &he) {
 		return he, true
 	}
@@ -213,7 +214,7 @@ func transcodeHTTPError(err error) (*transcode.HTTPError, bool) {
 // the same identity and poll with backoff; only a remote terminal status can
 // authorize creating a fresh attempt.
 func isRetryableWorkerPollError(err error) bool {
-	if transcode.IsTransportUncertain(err) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if httpclient.IsTransportUncertain(err) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
 	if he, ok := transcodeHTTPError(err); ok {

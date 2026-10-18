@@ -13,6 +13,7 @@ import (
 	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/podcast"
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/httpclient"
 )
 
 type adTestExecutor struct {
@@ -56,13 +57,13 @@ func TestKnownAdFirstPassCachedASRRestartAndMixedCoverage(t *testing.T) {
 		if s, ok := statuses[id]; ok {
 			return s, nil
 		}
-		return transcode.JobStatus{}, &transcode.HTTPError{StatusCode: 404}
+		return transcode.JobStatus{}, &httpclient.HTTPError{StatusCode: 404}
 	}, submitFunc: func(_ context.Context, r transcode.Request) (transcode.Job, error) {
 		requests[r.ID] = r
 		statuses[r.ID] = transcode.JobStatus{ID: r.ID, Status: transcode.StatusQueued}
 		if lostAck {
 			lostAck = false
-			return transcode.Job{}, &transcode.UncertainError{Op: "submit", Err: fmt.Errorf("lost ACK")}
+			return transcode.Job{}, &httpclient.UncertainError{Op: "submit", Err: fmt.Errorf("lost ACK")}
 		}
 		return transcode.Job{ID: r.ID}, nil
 	}}
@@ -174,7 +175,7 @@ func TestKnownAdEmptyFirstPassDurableClassification(t *testing.T) {
 		if s, ok := statuses[id]; ok {
 			return s, nil
 		}
-		return transcode.JobStatus{}, &transcode.HTTPError{StatusCode: 404}
+		return transcode.JobStatus{}, &httpclient.HTTPError{StatusCode: 404}
 	}, submitFunc: func(_ context.Context, r transcode.Request) (transcode.Job, error) {
 		requests[r.ID] = r
 		statuses[r.ID] = transcode.JobStatus{ID: r.ID, Status: transcode.StatusQueued}

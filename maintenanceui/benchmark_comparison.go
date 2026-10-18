@@ -1,9 +1,11 @@
 package maintenanceui
 
 import (
-	"github.com/jakenesler/navigatorr/transcode"
 	"net/http"
 	"strconv"
+
+	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/httpclient"
 )
 
 // Resolve a known action first. The authenticated browser cannot supply a
@@ -20,7 +22,7 @@ func (s *Server) benchmarkComparison(w http.ResponseWriter, r *http.Request) {
 		fail(w, 404, "this benchmark has no saved comparison")
 		return
 	}
-	executor, ok := s.engine.Deps().Transcode.(*transcode.HTTPExecutor)
+	executor, ok := s.engine.Deps().Transcode.(*httpclient.HTTPExecutor)
 	if !ok {
 		fail(w, 404, "visual comparisons require the HTTP video worker")
 		return

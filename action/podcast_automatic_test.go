@@ -12,6 +12,7 @@ import (
 	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/podcast"
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/httpclient"
 )
 
 func TestAutomaticPodcastPublishesWithoutLLMAndKeepsReviewPending(t *testing.T) {
@@ -43,12 +44,12 @@ func TestAutomaticPodcastPublishesWithoutLLMAndKeepsReviewPending(t *testing.T) 
 				if st, ok := statuses[id]; ok {
 					return st, nil
 				}
-				return transcode.JobStatus{}, &transcode.HTTPError{StatusCode: 404}
+				return transcode.JobStatus{}, &httpclient.HTTPError{StatusCode: 404}
 			}, submitFunc: func(_ context.Context, r transcode.Request) (transcode.Job, error) {
 				requests[r.ID] = r
 				statuses[r.ID] = transcode.JobStatus{ID: r.ID, Status: transcode.StatusQueued}
 				submits++
-				return transcode.Job{}, &transcode.UncertainError{Op: "submit", Err: fmt.Errorf("lost ACK")}
+				return transcode.Job{}, &httpclient.UncertainError{Op: "submit", Err: fmt.Errorf("lost ACK")}
 			}}
 			e, st := setupTranscodeEngine(t, tc, "", []string{dir}, []string{dir}, false)
 			defer st.Close()

@@ -9,6 +9,7 @@ import (
 
 	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/httpclient"
 )
 
 func TestLateCancelPreservesCompletedOutcome(t *testing.T) {
@@ -94,7 +95,7 @@ func TestCancelUncertainReconcilesBeforeRetry(t *testing.T) {
 	mock := &mockTranscodeExecutor{}
 	mock.cancelFunc = func(ctx context.Context, jobID string) error {
 		if atomic.LoadInt32(&mock.cancelCalls) == 1 {
-			return &transcode.UncertainError{Op: "cancel", JobID: jobID, Err: errors.New("timeout")}
+			return &httpclient.UncertainError{Op: "cancel", JobID: jobID, Err: errors.New("timeout")}
 		}
 		return nil
 	}

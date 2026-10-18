@@ -9,6 +9,7 @@ import (
 
 	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/httpclient"
 )
 
 func seedActionInstance(t *testing.T, st *store.Store, id, name, status string, step int, idemKey string, inputs, state map[string]any) {
@@ -84,7 +85,7 @@ func TestChildUncertain404BlockedByCancelledParent(t *testing.T) {
 	seedBatchParent(t, st, "parent-cancel", StatusCancelled, map[string]any{})
 	mock := &mockTranscodeExecutor{
 		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
-			return transcode.JobStatus{}, &transcode.HTTPError{Method: "GET", URL: "/v1/jobs/" + jobID, StatusCode: 404, Message: "not found"}
+			return transcode.JobStatus{}, &httpclient.HTTPError{Method: "GET", URL: "/v1/jobs/" + jobID, StatusCode: 404, Message: "not found"}
 		},
 	}
 	state := submitStepState()
@@ -247,7 +248,7 @@ func TestLegacyChildKeyRelationBlocksUncertain404AfterCancelAndRestart(t *testin
 	}
 	mock := &mockTranscodeExecutor{
 		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
-			return transcode.JobStatus{}, &transcode.HTTPError{Method: "GET", URL: "/v1/jobs/" + jobID, StatusCode: 404, Message: "not found"}
+			return transcode.JobStatus{}, &httpclient.HTTPError{Method: "GET", URL: "/v1/jobs/" + jobID, StatusCode: 404, Message: "not found"}
 		},
 	}
 	state := submitStepState()
@@ -371,10 +372,10 @@ func TestSubmitVsCancelRaceNoNewSubmitAfterCancel(t *testing.T) {
 		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
 			enterOnce.Do(func() { close(submitEntered) })
 			<-submitRelease
-			return transcode.Job{}, &transcode.UncertainError{Op: "submit", JobID: req.ID, Err: errors.New("timeout")}
+			return transcode.Job{}, &httpclient.UncertainError{Op: "submit", JobID: req.ID, Err: errors.New("timeout")}
 		},
 		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
-			return transcode.JobStatus{}, &transcode.HTTPError{Method: "GET", URL: "/v1/jobs/" + jobID, StatusCode: 404, Message: "not found"}
+			return transcode.JobStatus{}, &httpclient.HTTPError{Method: "GET", URL: "/v1/jobs/" + jobID, StatusCode: 404, Message: "not found"}
 		},
 	}
 	eA := NewEngine(EngineDeps{Store: st, Transcode: mock})
@@ -665,7 +666,7 @@ func TestUncertain404AfterConcurrentCancelNoResubmit(t *testing.T) {
 	mock := &mockTranscodeExecutor{
 		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
 			cancelOnce.Do(func() { _, _ = eB.Cancel(context.Background(), "edge-parent", "edge cancel") })
-			return transcode.JobStatus{}, &transcode.HTTPError{Method: "GET", URL: "/v1/jobs/" + jobID, StatusCode: 404, Message: "not found"}
+			return transcode.JobStatus{}, &httpclient.HTTPError{Method: "GET", URL: "/v1/jobs/" + jobID, StatusCode: 404, Message: "not found"}
 		},
 	}
 	eA.deps.Transcode = mock
