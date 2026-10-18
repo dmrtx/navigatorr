@@ -119,6 +119,9 @@ function actionIcon(label) {
     "Delete custom profile":
       "M3 6h18M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7",
     Folder: "M3 6h7l2 2h9v12H3Z",
+    // Command status: applied and failed.
+    Applied: "M5 12l5 5 9-10",
+    Failed: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18ZM12 7.5v5.5M12 16.5v.5",
     "More actions": "M5 11a1 1 0 1 1 0 2 1 1 0 0 1 0-2ZM12 11a1 1 0 1 1 0 2 1 1 0 0 1 0-2ZM19 11a1 1 0 1 1 0 2 1 1 0 0 1 0-2Z",
     // Fallback for job actions without their own icon (new server decisions).
     Action: "M5 12h14M13 6l6 6-6 6",
@@ -353,26 +356,142 @@ function readCommandReceipts() {
 function commandTarget(body) { return body.id || body.arguments?.id || body.arguments?.action_id; }
 function trackCommand(request, receipt, result) {
   state.commands ||= new Map();
+  const previous = state.commands.get(receipt.command_id);
   const info = {request,...receipt,...result,id:result.id || receipt.id,status:result.status || "pending"};
+  // When this page first saw the current status: Applied shows for a while
+  // after completion, measured from here rather than with a timer per job.
+  info.seenAt = previous?.status === info.status ? previous.seenAt : Date.now();
+  if (previous?.dismissed) info.dismissed = true;
   state.commands.set(receipt.command_id, info);
+  if (previous && previous.status !== info.status) announceCommand(info);
   renderCommandIndicators();
   document.querySelectorAll("[data-job-control]").forEach(button => {
     if (button.dataset.jobControl === info.id) button.disabled = !serverReachable || jobIsBusy(info.id) || (button.dataset.requiresWorker === "true" && !state.workerInfo?.ready);
   });
   return info;
 }
-function renderCommandIndicators() {
-  document.querySelectorAll(".job-command").forEach(el=>el.remove());
-  for (const command of state.commands?.values() || []) {
-    const status = {pending:"Request accepted · Waiting to apply",running:"Applying",waiting_external:"Waiting to apply",completed:"Applied",failed:"Could not apply",cancelled:"Cancelled"}[command.status] || "Applying";
-    const label = commandLabels[command.kind] || command.label || "Update";
-    const text = `${label} · ${status}${command.error ? ` · ${shortJobReason(command.error)}` : command.waiting_reason ? ` · ${command.waiting_reason}` : ""}`;
-    const targets = [...document.querySelectorAll("[data-operation-id]")].filter(el=>el.dataset.operationId === command.id);
-    for (const target of targets) {
-      const line = node("p", text, `job-command${command.status === "failed" ? " failed" : ""}`);
-      line.setAttribute("role","status"); target.append(line);
-    }
+// Command status on a job card: one compact chip under the status badge.
+const commandActiveStatuses = ["pending", "running", "waiting_external"];
+const appliedChipMs = 8000;
+const commandVerbs = {"Preparing replacement review":"Preparing review","Applying replacement decision":"Applying decision","Applying decision":"Applying decision","Retrying job":"Retrying","Stopping job":"Stopping","Applying candidate decision":"Applying decision","Verifying recovery data":"Verifying","Verifying duplicate":"Verifying","Removing recovery copy":"Removing copy","Updating batch settings":"Updating settings"};
+const commandFailures = {"Preparing replacement review":"Review failed","Applying replacement decision":"Decision failed","Applying decision":"Decision failed","Retrying job":"Retry failed","Stopping job":"Stop failed","Applying candidate decision":"Decision failed","Verifying recovery data":"Check failed","Verifying duplicate":"Check failed","Removing recovery copy":"Removal failed","Updating batch settings":"Update failed"};
+const commandStatusText = {pending:"Waiting to apply",running:"Applying",waiting_external:"Waiting to apply",completed:"Applied",failed:"Failed",cancelled:"Cancelled"};
+function commandLabel(command) { return commandLabels[command.kind] || command.label || "Update"; }
+function jobCommands(id) {
+  return [...(state.commands?.values() || [])].filter((c) => c.id === id).sort((a, b) => (b.started || 0) - (a.started || 0));
+}
+// A failed command wins (until the job's next command or a dismissal), then
+// one still in flight, then one completed within the last few seconds.
+// Cancelled commands show no chip.
+function commandChip(id, now = Date.now()) {
+  const commands = jobCommands(id);
+  const newest = commands[0];
+  if (!newest) return null;
+  const label = commandLabel(newest);
+  if (newest.status === "failed" && !newest.dismissed)
+    return {kind:"failed", command:newest, text:commandFailures[label] || "Action failed", title:`${label} · Failed`};
+  const active = commands.find((c) => !c.status || commandActiveStatuses.includes(c.status));
+  if (active) {
+    const activeLabel = commandLabel(active);
+    const text = active.status === "waiting_external" ? "Waiting to apply" : commandVerbs[activeLabel] || "Applying";
+    return {kind:"active", command:active, text, title:`${activeLabel} · ${commandStatusText[active.status] || "Applying"}${active.waiting_reason ? ` · ${active.waiting_reason}` : ""}`};
   }
+  const done = commands.find((c) => c.status === "completed");
+  if (done && now - (done.seenAt || 0) < appliedChipMs)
+    return {kind:"applied", command:done, text:"Applied", title:`${commandLabel(done)} · Applied`, expires:(done.seenAt || 0) + appliedChipMs};
+  return null;
+}
+function commandSymbol(kind) {
+  if (kind === "active") {
+    const spinner = node("span", "", "command-spinner");
+    spinner.setAttribute("aria-hidden", "true");
+    return spinner;
+  }
+  return actionIcon({applied:"Applied", failed:"Failed", cancelled:"Cancel"}[kind]);
+}
+function commandChipNode(chip) {
+  const el = node("span", "", `command-chip ${chip.kind}`);
+  el.title = chip.title;
+  const symbol = commandSymbol(chip.kind);
+  if (symbol) el.append(symbol);
+  el.append(node("span", chip.text));
+  return el;
+}
+function commandFailureLine(command) {
+  const line = node("p", "", "command-failure");
+  const reason = shortJobReason(command.error) || "The action could not be applied.";
+  const text = node("span", reason);
+  text.title = reason;
+  const dismiss = button("", () => {
+    command.dismissed = true;
+    // The line goes away; keep keyboard focus on the same card.
+    line.closest?.("[data-operation-id]")?.querySelector?.(".job-title")?.focus({ preventScroll: true });
+    renderCommandIndicators();
+  }, "command-dismiss");
+  dismiss.setAttribute("aria-label", "Dismiss");
+  dismiss.title = "Dismiss";
+  const icon = actionIcon("Cancel");
+  if (icon) dismiss.append(icon);
+  line.append(text, dismiss);
+  return line;
+}
+// Screen readers hear a status change once, through one polite live region,
+// not every time the queue redraws its cards.
+function announceCommand(command) {
+  const status = commandStatusText[command.status] || "Applying";
+  const reason = command.status === "failed" ? shortJobReason(command.error) : command.waiting_reason;
+  $("command-announcer").textContent = `${commandLabel(command)}: ${status}${reason ? `. ${reason}` : ""}`;
+}
+let commandChipTimer = null;
+function renderCommandIndicators() {
+  document.querySelectorAll(".command-chip, .command-failure").forEach((el) => el.remove());
+  const now = Date.now();
+  let expires = Infinity;
+  for (const target of document.querySelectorAll("[data-operation-id]")) {
+    if (target.id === "detail-summary") continue;
+    const chip = commandChip(target.dataset.operationId, now);
+    if (!chip) continue;
+    if (chip.expires) expires = Math.min(expires, chip.expires);
+    (target.querySelector(".job-heading, .backup-heading") || target).append(commandChipNode(chip));
+    if (chip.kind !== "failed") continue;
+    const line = commandFailureLine(chip.command);
+    const footer = target.querySelector(":scope > .job-footer, :scope > .backup-actions");
+    if (footer) footer.before(line); else target.append(line);
+  }
+  renderCommandHistory(now);
+  // One redraw when the next Applied chip expires, in case nothing else redraws.
+  clearTimeout(commandChipTimer);
+  commandChipTimer = expires < Infinity ? setTimeout(renderCommandIndicators, expires - now + 50) : null;
+}
+function commandAge(started, now = Date.now()) {
+  if (!started) return "";
+  const seconds = Math.max(0, Math.round((now - started) / 1000));
+  if (seconds < 10) return "Just now";
+  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`;
+  return `${Math.floor(seconds / 3600)} h ago`;
+}
+// Job detail: every command sent for this job in this session, newest first.
+function commandHistoryItem(command, now) {
+  const kind = command.status === "completed" ? "applied" : command.status === "failed" ? "failed" : command.status === "cancelled" ? "cancelled" : "active";
+  const item = node("li", "", `command-history-item ${kind}`);
+  const symbol = commandSymbol(kind);
+  if (symbol) item.append(symbol);
+  const body = node("div", "", "command-history-body");
+  const head = node("p", "", "command-history-label");
+  head.append(node("span", commandLabel(command)), node("span", ` · ${commandStatusText[command.status] || "Applying"}`, "command-history-status"));
+  body.append(head);
+  const detail = command.status === "failed" ? shortJobReason(command.error) : command.waiting_reason;
+  if (detail) body.append(node("p", detail, "metadata"));
+  item.append(body);
+  const age = commandAge(command.started, now);
+  if (age) item.append(node("span", age, "metadata command-history-age"));
+  return item;
+}
+function renderCommandHistory(now = Date.now()) {
+  const commands = state.detail ? jobCommands(state.detail) : [];
+  $("detail-commands").hidden = !commands.length;
+  $("detail-command-list").replaceChildren(...commands.map((command) => commandHistoryItem(command, now)));
 }
 const commandPolls = new Map();
 function waitCommand(request, receipt) {
@@ -435,7 +554,7 @@ async function commandRequest(path, body, onAccepted) {
   sessionStorage.setItem("navigatorr_commands",JSON.stringify(latest));
   trackCommand(request,receipt,{status:"pending"});
   onAccepted?.();
-  notify("Request accepted. You can keep browsing; its status is shown with the job.");
+  notify("Request accepted. Its status shows on the job.");
   return waitCommand(request,receipt);
 }
 

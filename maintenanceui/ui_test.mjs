@@ -3064,3 +3064,87 @@ test("every shortened main action label is a prefix of its accessible name", () 
   for (const [full, visible] of pairs) assert.ok(full.startsWith(visible), `${visible} is not a prefix of ${full}`);
   assert.equal(new Set(pairs.filter(([full]) => full.startsWith("Check")).map(([, v]) => v)).size, 2);
 });
+
+function commandHarness(commands) {
+  const h = harness();
+  h.context.fixture = commands;
+  h.run('state.commands=new Map(fixture.map(c=>[c.command_id,c]));');
+  return h;
+}
+const chipOf = (h, id, now) => JSON.parse(h.run(`JSON.stringify((({kind,text,command})=>({kind,text,command:command.command_id}))(commandChip(${JSON.stringify(id)},${now})||{kind:null,text:null,command:{}}))`));
+
+test("command chip prefers a failure, then work in flight, then a fresh Applied", () => {
+  const now = 1_000_000;
+  const h = commandHarness([
+    {command_id:"a1", id:"job-a", kind:"retry", label:"Retrying job", status:"running", started:now - 60_000, seenAt:now - 60_000},
+    {command_id:"a2", id:"job-a", kind:"cancel", label:"Stopping job", status:"failed", error:"Already finished.", started:now - 5_000, seenAt:now - 4_000},
+    {command_id:"b1", id:"job-b", kind:"resume", label:"Applying decision", status:"completed", started:now - 3_000, seenAt:now - 1_000},
+    {command_id:"b2", id:"job-b", kind:"reconfigure", label:"Updating batch settings", status:"pending", started:now - 20_000, seenAt:now - 20_000},
+    {command_id:"c1", id:"job-c", kind:"retry", label:"Retrying job", status:"failed", started:now - 90_000, seenAt:now - 80_000},
+    {command_id:"c2", id:"job-c", kind:"reconfigure", label:"Updating batch settings", status:"running", started:now - 10_000, seenAt:now - 10_000},
+    {command_id:"d1", id:"job-d", kind:"retry", label:"Retrying job", status:"failed", started:now - 10_000, seenAt:now - 9_000},
+    {command_id:"e1", id:"job-e", kind:"resume", label:"Applying decision", status:"waiting_external", started:now - 10_000, seenAt:now - 10_000},
+  ]);
+  assert.deepEqual(chipOf(h, "job-a", now), {kind:"failed", text:"Stop failed", command:"a2"});
+  assert.deepEqual(chipOf(h, "job-b", now), {kind:"active", text:"Updating settings", command:"b2"});
+  // A newer command replaces an older failure.
+  assert.deepEqual(chipOf(h, "job-c", now), {kind:"active", text:"Updating settings", command:"c2"});
+  assert.deepEqual(chipOf(h, "job-d", now), {kind:"failed", text:"Retry failed", command:"d1"});
+  assert.deepEqual(chipOf(h, "job-e", now), {kind:"active", text:"Waiting to apply", command:"e1"});
+  assert.equal(h.run(`commandChip("job-none",${now})`), null);
+  h.run('state.commands.get("d1").dismissed=true;');
+  assert.equal(h.run(`commandChip("job-d",${now})`), null);
+});
+
+test("Applied expires about eight seconds after completion was first seen and cancelled shows nothing", () => {
+  const now = 2_000_000;
+  const h = commandHarness([
+    {command_id:"f1", id:"job-f", kind:"resume", label:"Applying decision", status:"completed", started:now - 60_000, seenAt:now - 7_000},
+    {command_id:"g1", id:"job-g", kind:"resume", label:"Applying decision", status:"completed", started:now - 60_000, seenAt:now - 9_000},
+    {command_id:"h1", id:"job-h", kind:"cancel", label:"Stopping job", status:"cancelled", started:now - 2_000, seenAt:now - 1_000},
+  ]);
+  const fresh = JSON.parse(h.run(`JSON.stringify(commandChip("job-f",${now}))`));
+  assert.equal(fresh.kind, "applied");
+  assert.equal(fresh.text, "Applied");
+  assert.equal(fresh.expires, now + 1_000);
+  assert.equal(h.run(`commandChip("job-g",${now})`), null);
+  assert.equal(h.run(`commandChip("job-h",${now})`), null);
+});
+
+test("tracking keeps the first time a status was seen and announces only changes", () => {
+  const h = commandHarness([]);
+  h.run('renderCommandIndicators=()=>{};');
+  const receipt = {key:"k", started:1, command_id:"t1", id:"job-t", label:"Retrying job"};
+  h.context.receipt = receipt;
+  h.run('trackCommand({kind:"retry"},receipt,{status:"running"})');
+  const firstSeen = h.run('state.commands.get("t1").seenAt');
+  assert.equal(h.elements.get("command-announcer")?.textContent || "", "");
+  h.run('trackCommand({kind:"retry"},receipt,{status:"running"})');
+  assert.equal(h.run('state.commands.get("t1").seenAt'), firstSeen);
+  assert.equal(h.elements.get("command-announcer")?.textContent || "", "");
+  h.run('trackCommand({kind:"retry"},receipt,{status:"failed",error:"No worker was free."})');
+  assert.equal(h.elements.get("command-announcer").textContent, "Retrying job: Failed. No worker was free.");
+});
+
+test("job detail lists this session's commands newest first and hides when there are none", () => {
+  const now = 3_000_000;
+  const h = commandHarness([
+    {command_id:"m1", id:"job-m", kind:"resume", label:"Applying decision", status:"completed", started:now - 300_000},
+    {command_id:"m3", id:"job-m", kind:"reconfigure", label:"Updating batch settings", status:"waiting_external", waiting_reason:"Waiting for a free worker", started:now - 5_000},
+    {command_id:"m2", id:"job-m", kind:"retry", label:"Retrying job", status:"failed", error:"The worker went offline.", started:now - 120_000},
+    {command_id:"x1", id:"job-other", kind:"retry", label:"Retrying job", status:"running", started:now - 1_000},
+  ]);
+  h.run(`state.detail="job-m";renderCommandHistory(${now});`);
+  assert.equal(h.elements.get("detail-commands").hidden, false);
+  const items = h.elements.get("detail-command-list").children;
+  assert.deepEqual(items.map((li) => li.className), ["command-history-item active", "command-history-item failed", "command-history-item applied"]);
+  const text = (el) => [el.textContent, ...el.children.map(text)].join("");
+  assert.deepEqual(items.map(text), [
+    "Updating batch settings · Waiting to applyWaiting for a free workerJust now",
+    "Retrying job · FailedThe worker went offline.2 min ago",
+    "Applying decision · Applied5 min ago",
+  ]);
+  h.run(`state.detail="job-empty";renderCommandHistory(${now});`);
+  assert.equal(h.elements.get("detail-commands").hidden, true);
+  assert.equal(h.elements.get("detail-command-list").children.length, 0);
+});

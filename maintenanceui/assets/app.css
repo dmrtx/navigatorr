@@ -1903,7 +1903,7 @@ pre {
 .button-pending { cursor: progress; opacity: .75; }
 .button-pending::before { content: ""; width: 10px; height: 10px; border: 1px solid currentColor; border-right-color: transparent; border-radius: 50%; display: inline-block; animation: pending-spin .8s linear infinite; }
 @keyframes pending-spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .button-pending::before, .more-actions > summary::before { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .button-pending::before, .more-actions > summary::before, .command-spinner { animation: none; } }
 .batch-attempt-history { grid-column: 1 / -1; font-size: 12px; }
 .batch-attempt-history summary { cursor: pointer; }
 
@@ -1919,9 +1919,7 @@ pre {
 .profile-info { margin: 8px 0 12px; padding: 12px; background: var(--subtle); border-left: 2px solid var(--forest); }
 .profile-info > p:first-child { margin-top: 0; }
 .batch-progress-explanation { order: 3; flex-basis: 100%; font-size: 11px; line-height: 1.4; }
-/* Command status banners span their container, never just their text. In a
-   job row the grid gap separates stacked banners; the first one also clears
-   the action row by the same 8px the footer uses inside itself. */
+/* The backup cleanup notice spans its row. */
 .job-command {
   display: block;
   justify-self: stretch;
@@ -1936,16 +1934,103 @@ pre {
   font-size: 12px;
   line-height: 1.4;
 }
-.job-command + .job-command {
-  margin-top: 4px;
+/* Command status on a job card: one chip under the status badge, right-
+   aligned like it. In flight is quiet with a spinner, Applied is green for a
+   few seconds, a failure is red and adds one reason line to the card. */
+.command-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  height: 20px;
+  box-sizing: border-box;
+  padding: 0 6px;
+  border-radius: 3px;
+  color: var(--neutral);
+  background: var(--neutral-wash);
+  font: 500 11px/1 var(--body);
+  white-space: nowrap;
 }
-.job-row > .job-command {
-  margin: 0 0 0 var(--job-content-indent);
+.command-chip > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.command-chip.applied { color: var(--forest); background: var(--success-wash); }
+.command-chip.failed { color: var(--danger); background: var(--danger-wash); }
+.command-chip svg,
+.command-history-item > svg { flex: 0 0 auto; width: 12px; height: 12px; }
+.job-heading > .command-chip {
+  grid-column: 2 / -1;
+  grid-row: 2;
+  justify-self: end;
+  /* The status badge keeps a 5px right margin; line up with its edge. */
+  margin: 4px 5px 0 0;
 }
-.job-row > .job-footer + .job-command {
-  margin-top: 4px;
+.backup-heading > .command-chip { flex: 0 0 auto; }
+.command-spinner {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  box-sizing: border-box;
+  border: 1.5px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: pending-spin .8s linear infinite;
 }
-.job-command.failed { border-color: var(--danger); background: var(--danger-wash); }
+.command-failure {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin: 0 0 4px;
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.job-row > .command-failure { margin-left: var(--job-content-indent); }
+.command-failure > span {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.command-failure .command-dismiss {
+  display: inline-flex;
+  flex: 0 0 24px;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+}
+.command-failure .command-dismiss svg { width: 12px; height: 12px; }
+/* Job detail: what this session asked of the job, newest first. */
+.command-history { margin: 12px 0; }
+.command-history h3 { margin: 0 0 6px; font-size: 13px; }
+.command-history ol { margin: 0; padding: 0; list-style: none; }
+.command-history-item {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 2px 8px;
+  padding: 6px 0;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.command-history-item > .command-spinner,
+.command-history-item > svg { margin-top: 3px; }
+.command-history-item.applied > svg { color: var(--forest); }
+.command-history-item.failed > svg { color: var(--danger); }
+.command-history-item.cancelled > svg,
+.command-history-item.active > .command-spinner { color: var(--muted); }
+.command-history-body p { margin: 0; overflow-wrap: anywhere; }
+.command-history-status { color: var(--muted); }
+.command-history-age { white-space: nowrap; }
 .candidate-review-row { padding: 10px 0; border-bottom: 1px solid var(--line); }
 
 /* Contextual processing keeps the existing two-step mobile layout. */
