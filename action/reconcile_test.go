@@ -586,3 +586,58 @@ func TestPausedControlStateSurvivesFollowingAutomaticPoll(t *testing.T) {
 		t.Fatalf("pause state/input separation was not preserved: %+v %v", r, err)
 	}
 }
+
+// A continuation that blocks for minutes (a source hash or candidate
+// validation) must not stop the service loop from polling other running jobs;
+// otherwise their worker heartbeat goes stale although the worker is alive.
+func TestReconcilerKeepsPollingWhileAnotherContinuationIsSlow(t *testing.T) {
+	st := setupTestStore(t)
+	release := make(chan struct{})
+	var slowEntered atomic.Bool
+	var fastPolls atomic.Int32
+	var started atomic.Bool
+	var slowID atomic.Value
+	mock := &mockTranscodeExecutor{statusFunc: func(ctx context.Context, id string) (transcode.JobStatus, error) {
+		if started.Load() {
+			if id == slowID.Load() {
+				slowEntered.Store(true)
+				select {
+				case <-release:
+				case <-ctx.Done():
+					return transcode.JobStatus{}, ctx.Err()
+				}
+			} else {
+				fastPolls.Add(1)
+			}
+		}
+		return transcode.JobStatus{ID: id, Status: transcode.StatusRunning}, nil
+	}}
+	final := func(context.Context, *ExecutionContext) (StepResult, error) {
+		return StepResult{Status: StepCompleted}, nil
+	}
+	e := NewEngine(EngineDeps{Store: st, Transcode: mock, ReconcileInterval: 5 * time.Millisecond})
+	registerReconcileTestFlow(e, final)
+	slow, err := e.Run(context.Background(), "transcode_media", nil)
+	if err != nil || slow.Status != StatusWaitingExternal {
+		t.Fatalf("slow submit: %+v / %v", slow, err)
+	}
+	fast, err := e.Run(context.Background(), "transcode_media", nil)
+	if err != nil || fast.Status != StatusWaitingExternal {
+		t.Fatalf("fast submit: %+v / %v", fast, err)
+	}
+	slowID.Store("job-" + slow.ID)
+	started.Store(true)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := e.StartReconciler(ctx)
+	defer func() { close(release); cancel(); <-done }()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && !(slowEntered.Load() && fastPolls.Load() >= 5) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !slowEntered.Load() {
+		t.Fatal("slow continuation never started")
+	}
+	if got := fastPolls.Load(); got < 5 {
+		t.Fatalf("other job polled %d times while one continuation was blocked; want repeated polls", got)
+	}
+}
