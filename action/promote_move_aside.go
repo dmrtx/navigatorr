@@ -321,9 +321,9 @@ func (e *Engine) promotionFinishMoveBack(ctx context.Context, ec *ExecutionConte
 }
 
 // promotionRecoveryIsOnlyOriginal refuses to discard, or list as removable,
-// a recovery that is the moved-aside original while nothing replaced it:
-// nothing at its library path, nor at the replacement's path when that is a
-// different name. Removing it would remove the only copy.
+// a recovery that is the moved-aside original while nothing replaced it: no
+// file the candidate's size at its library path, nor at the replacement's
+// path when that is a different name. Removing it would remove the only copy.
 func promotionRecoveryIsOnlyOriginal(p *promotionState) error {
 	if !p.MovedAside && p.MoveAsideStartedAt == "" && p.MoveBackStartedAt == "" {
 		return nil
@@ -332,11 +332,11 @@ func promotionRecoveryIsOnlyOriginal(p *promotionState) error {
 		if path == "" {
 			continue
 		}
-		if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() {
+		if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() && (p.CandidateBytes <= 0 || info.Size() == p.CandidateBytes) {
 			return nil
 		}
 	}
-	return fmt.Errorf("this recovery is the moved-aside original and nothing replaced it at its library path; it cannot be discarded")
+	return fmt.Errorf("this recovery is the moved-aside original and the candidate did not replace it at its library path; it cannot be discarded")
 }
 
 // promotionConfirmAdopted re-proves after a wait that path is the candidate

@@ -287,3 +287,57 @@ func TestPromotionHashesFullyAfterApprovalAndRestart(t *testing.T) {
 		t.Fatalf("after approval read original %d of %d, candidate %d of %d", reads.of(h.original), p.OriginalBytes, reads.of(h.candidate), p.CandidateBytes)
 	}
 }
+
+// The strict check that re-proves an adopted candidate trusts only an
+// unchanged fingerprint, ctime included: a changed ctime reads the file in
+// full even though the inode, size and mtime still match.
+func TestPromotionStrictIdentityRereadsAChangedCtime(t *testing.T) {
+	e, path, sum := fingerprintEngine(t)
+	reads := countReads(e)
+	known, err := e.promotionCurrentFingerprint(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verify := func(strict bool) int64 {
+		t.Helper()
+		before := reads.of(path)
+		ctx := withPromotionVerifiedFiles(context.Background(), &ExecutionContext{State: map[string]any{}})
+		if _, err := e.promotionVerifyByIdentity(ctx, path, sum, known.persisted(), strict); err != nil {
+			t.Fatal(err)
+		}
+		return reads.of(path) - before
+	}
+	if n := verify(true); n != 0 {
+		t.Fatalf("an unchanged file was read: %d bytes", n)
+	}
+	for i := 0; ; i++ {
+		if err := os.Chmod(path, os.FileMode(0600-i%2*0200)); err != nil {
+			t.Fatal(err)
+		}
+		fp, err := e.promotionCurrentFingerprint(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fp.CtimeNs != known.CtimeNs {
+			if !fp.sameInode(known) {
+				t.Fatalf("chmod changed more than ctime: %+v %+v", fp, known)
+			}
+			break
+		}
+		if i == 150 {
+			t.Skip("ctime does not change on this filesystem")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := verify(false); n != 0 {
+		t.Fatalf("the non-strict check read a file with the same inode, size and mtime: %d bytes", n)
+	}
+	if n := verify(true); n == 0 {
+		t.Fatal("the strict check trusted a changed ctime without reading the file")
+	}
+	// A full read still proves the bytes, so a wrong digest fails.
+	ctx := withPromotionVerifiedFiles(context.Background(), &ExecutionContext{State: map[string]any{}})
+	if _, err := e.promotionVerifyByIdentity(ctx, path, strings.Repeat("0", 64), known.persisted(), true); err == nil {
+		t.Fatal("the strict check accepted a wrong digest after a ctime change")
+	}
+}

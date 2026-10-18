@@ -419,6 +419,76 @@ func TestFilesystemSameNamePublishFailureMovesTheOriginalBack(t *testing.T) {
 	}
 }
 
+// A crash after the move aside is saved and before the candidate takes the
+// name leaves the original at its recovery path and the library path empty.
+// A retry that stops before the mutation, here because the candidate is
+// gone, still moves the original back, and every later retry finds it there.
+func TestFilesystemSameNameRetryMovesTheOriginalBackAfterACrash(t *testing.T) {
+	h := newPromotionHarness(t)
+	sameNameFixture(t, h)
+	stash := filepath.Join(h.root, "stash.mkv")
+	h.engine.promotionMoveAsideHook = func(from, to string) error {
+		if err := renamePromotionNoReplace(from, to); err != nil {
+			return err
+		}
+		return os.Rename(h.candidate, stash)
+	}
+	r := runLocalPromotion(t, h)
+	if r = h.resume(r.ID, "approve"); r.Status != StatusFailed {
+		t.Fatalf("failed publish: %s %s", r.Status, r.Error)
+	}
+	p := movedAsideState(t, h, r.ID)
+	// The state the crash left: moved aside and saved, candidate not renamed.
+	if err := os.Rename(h.original, p.BackupPath); err != nil {
+		t.Fatal(err)
+	}
+	rewritePromotion(t, h, r.ID, func(q *promotionState) {
+		q.MovedAside, q.BackupVerified, q.BackupFingerprint = true, true, q.OriginalFingerprint
+		q.MoveAsideStartedAt = "2026-01-01T00:00:00Z"
+	})
+	for attempt := 1; attempt <= 2; attempt++ {
+		h.restart()
+		h.engine.deps.Registry = nil
+		var err error
+		if r, err = h.engine.Retry(context.Background(), r.ID); err != nil {
+			t.Fatal(err)
+		}
+		if r.Status != StatusFailed {
+			t.Fatalf("retry %d without a candidate: %s %s", attempt, r.Status, r.Error)
+		}
+		if attempt == 1 && !strings.Contains(r.Error, "moved back to its library path") {
+			t.Fatalf("retry %d error: %s", attempt, r.Error)
+		}
+		p = movedAsideState(t, h, r.ID)
+		if err := testFileSHA(h.original, p.OriginalSHA); err != nil {
+			t.Fatalf("retry %d left the library path without the original: %v", attempt, err)
+		}
+		if _, err := os.Lstat(p.BackupPath); !os.IsNotExist(err) {
+			t.Fatalf("retry %d: original still at its recovery path", attempt)
+		}
+		if p.MovedAside || p.MoveAsideStartedAt != "" || p.MoveBackStartedAt != "" || p.BackupVerified {
+			t.Fatalf("retry %d state: %+v", attempt, p)
+		}
+	}
+	// With the candidate back, the promotion completes.
+	if err := os.Rename(stash, h.candidate); err != nil {
+		t.Fatal(err)
+	}
+	h.restart()
+	h.engine.deps.Registry = nil
+	r, err := h.engine.Retry(context.Background(), r.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Status != StatusCompleted {
+		t.Fatalf("retry with the candidate: %s %s", r.Status, r.Error)
+	}
+	p = movedAsideState(t, h, r.ID)
+	if err := testFileSHA(h.original, p.CandidateSHA); err != nil {
+		t.Fatalf("candidate not published at the original name: %v", err)
+	}
+}
+
 // A moved-aside original with nothing at its library path is the only copy:
 // the inventory does not offer to delete it and discard refuses.
 func TestMovedAsideOriginalWithEmptyLibraryPathCannotBeDiscarded(t *testing.T) {
@@ -456,7 +526,17 @@ func TestMovedAsideOriginalWithEmptyLibraryPathCannotBeDiscarded(t *testing.T) {
 	if err := testFileSHA(p.BackupPath, p.OriginalSHA); err != nil {
 		t.Fatalf("only copy changed: %v", err)
 	}
-	// Once something is at the library path again, discard is a choice.
+	// A file that is not the candidate's size does not count as its replacement.
+	if err := os.WriteFile(h.original, []byte("not the candidate"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.engine.DiscardTranscodeBackup(context.Background(), r.ID); err == nil || !strings.Contains(err.Error(), "cannot be discarded") {
+		t.Fatalf("discard accepted with a stray file at the library path: %v", err)
+	}
+	if err := os.Remove(h.original); err != nil {
+		t.Fatal(err)
+	}
+	// Once the candidate is at the library path again, discard is a choice.
 	if err := os.Rename(stash, h.original); err != nil {
 		t.Fatal(err)
 	}
