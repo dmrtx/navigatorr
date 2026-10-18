@@ -346,7 +346,7 @@ func (w *Worker) validateModeSourceQuality(ctx context.Context, source string, p
 	if v.BitDepth == 10 && !caps.SupportsNative10BitQuality() {
 		return fmt.Errorf("quality_native_main10_unverified: executable native depth path is unavailable")
 	}
-	if !caps.SupportsQualityFPS(v.FPS) {
+	if !caps.SupportsQualityFPS(v.FPS, v.FieldOrder) {
 		return fmt.Errorf("quality_source_class_unsupported: no proven decimated VMAF path for %.3f FPS source", v.FPS)
 	}
 	return nil

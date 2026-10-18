@@ -38,14 +38,21 @@ func TestSupportsQualityFPSRequiresProvenHFRDecimation(t *testing.T) {
 		fps       float64
 		old, want bool
 	}{{0, false, false}, {25, true, true}, {29.97, true, true}, {30, true, true}, {50, false, true}, {59.94, false, true}, {60, false, true}, {120, false, false}} {
-		if got := old.SupportsQualityFPS(tc.fps); got != tc.old {
+		if got := old.SupportsQualityFPS(tc.fps, "progressive"); got != tc.old {
 			t.Fatalf("old worker %.3f fps: %v", tc.fps, got)
 		}
-		if got := hfr.SupportsQualityFPS(tc.fps); got != tc.want {
+		if got := hfr.SupportsQualityFPS(tc.fps, ""); got != tc.want {
 			t.Fatalf("HFR worker %.3f fps: %v", tc.fps, got)
 		}
-		if tc.fps >= 45 && (broken.SupportsQualityFPS(tc.fps) || wrongFactor.SupportsQualityFPS(tc.fps)) {
+		if tc.fps >= 45 && (broken.SupportsQualityFPS(tc.fps, "") || wrongFactor.SupportsQualityFPS(tc.fps, "")) {
 			t.Fatalf("unproven worker admitted %.3f fps", tc.fps)
+		}
+		// Interlaced HFR-class streams may report their field rate.
+		for _, order := range []string{"tt", "bb", "tb", "bt"} {
+			want := tc.want && tc.fps < 45
+			if got := hfr.SupportsQualityFPS(tc.fps, order); got != want {
+				t.Fatalf("HFR worker %.3f fps field order %s: %v", tc.fps, order, got)
+			}
 		}
 	}
 	if (WorkerCapabilities{}).SupportsHFRQuality() {

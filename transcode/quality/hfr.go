@@ -85,8 +85,19 @@ func MetricPairInputs(decimation int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	chain := "format=yuv420p10le" + decimate + ",settb=AVTB,setpts=N"
-	return "[0:v]" + chain + "[d];[1:v]" + chain + "[r];[d][r]", nil
+	return pairInputs("format=yuv420p10le" + decimate + ","), nil
+}
+
+// IndexPairInputs is MetricPairInputs without the 10-bit conversion or
+// decimation, for metrics that measure at the inputs' own precision (SSIM):
+// it only restamps both inputs by frame index.
+func IndexPairInputs() string {
+	return pairInputs("")
+}
+
+func pairInputs(prefix string) string {
+	chain := prefix + "settb=AVTB,setpts=N"
+	return "[0:v]" + chain + "[d];[1:v]" + chain + "[r];[d][r]"
 }
 
 // DecimatedFrameCount is the number of frames DecimationFilter keeps from n.

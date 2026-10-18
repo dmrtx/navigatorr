@@ -51,8 +51,9 @@ unverified native 10-bit or HFR on a worker without the decimation capability.
 
 ### Frame pairing
 
-Every VMAF and CAMBI graph restamps both inputs by frame index
-(`settb=AVTB,setpts=N`) before libvmaf. libvmaf pairs frames by timestamp, and
+Every VMAF, CAMBI and SSIM graph restamps both inputs by frame index
+(`settb=AVTB,setpts=N`) before the metric (SSIM keeps the inputs' own pixel
+format; VMAF/CAMBI convert to 10-bit first). The metrics pair frames by timestamp, and
 lossless sample extraction rounds both samples to a 1 ms timebase; at 59.94 FPS
 a source and candidate frame can land 1 ms apart and would otherwise be paired
 with a neighbour. The final check still requires equal frame counts and
@@ -80,9 +81,11 @@ the production decimated model graph (including `cambi.enc_bitdepth`) on a
 synthetic, temporally varying 48 FPS pair: the aligned pair must score near
 the top and a candidate one source frame late must score clearly lower, so the
 probe proves index alignment and not only the frame count. The probe has its
-own timeout; a slow probe withholds HFR only, never native-rate VMAF/CAMBI.
-Without the capability the worker reports `quality.hfr_probe_reason`, and a
-timed-out probe is retried on the next capability lookup.
+own 5 s budget, well under the coordinator's 15 s capabilities request
+timeout, and normally takes well under a second; a slow probe withholds HFR
+only, never native-rate VMAF/CAMBI. Without the capability the worker reports
+`quality.hfr_probe_reason`. A timed-out probe is remembered for one minute and
+then retried on its own, on top of the cached native-rate results.
 
 Coordinators treat HFR as unavailable on workers without the capability, so a
 coordinator never dispatches HFR work a worker would reject. Automatic modes

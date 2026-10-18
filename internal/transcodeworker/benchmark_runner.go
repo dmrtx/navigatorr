@@ -1139,9 +1139,10 @@ func (w *Worker) metricThreads(concurrent int) int {
 // for calculating SSIM between a candidate sample (distorted, 0:v)
 // and an FFV1 reference sample (reference, 1:v).
 func BuildSSIMArgs(candPath, refPath, statsPath string) []string {
-	filter := "[0:v][1:v]ssim"
+	// Paired by frame index like VMAF/CAMBI, at the inputs' own precision.
+	filter := quality.IndexPairInputs() + "ssim"
 	if statsPath != "" {
-		filter = fmt.Sprintf("[0:v][1:v]ssim=stats_file=%s", escapeFFmpegFilterPath(statsPath))
+		filter += "=stats_file=" + escapeFFmpegFilterPath(statsPath)
 	}
 	return []string{
 		"-nostats",

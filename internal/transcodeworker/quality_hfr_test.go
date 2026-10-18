@@ -2,6 +2,7 @@ package transcodeworker
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/httpclient"
 	"github.com/jakenesler/navigatorr/transcode/optimization"
 	"github.com/jakenesler/navigatorr/transcode/quality"
 )
@@ -206,6 +208,9 @@ func TestMetricGraphPairsNTSCHFRByFrameIndex(t *testing.T) {
 	if err := verifySampleAlignment(refPTS, candPTS, 60000.0/1001); err != nil {
 		t.Fatalf("samples must pass the production alignment check: %v", err)
 	}
+	if len(refPTS) != len(candPTS) {
+		t.Fatalf("sample frame counts differ: %d vs %d", len(refPTS), len(candPTS))
+	}
 	offset := 0
 	for i := range refPTS {
 		if refPTS[i]-refPTS[0] != candPTS[i]-candPTS[0] {
@@ -236,6 +241,34 @@ func TestMetricGraphPairsNTSCHFRByFrameIndex(t *testing.T) {
 			t.Fatalf("decimation %d: a frame was paired with its neighbour (min %.2f, mean %.2f; %d samples with 1 ms timestamp offsets)", decimation, stats.Min, stats.Mean, offset)
 		}
 		t.Logf("decimation=%d frames=%d min=%.2f mean=%.2f timestamp_offsets=%d", decimation, stats.FramesTotal, stats.Min, stats.Mean, offset)
+	}
+	// SSIM pairs by index too: every frame of the crf 20 copy scores ~0.995;
+	// a frame paired with its neighbour drops to ~0.93.
+	ssimLog := filepath.Join(dir, "ssim.log")
+	runFFmpeg(t, ctx, ffmpeg, append([]string{"-v", "error"}, BuildSSIMArgs(candSample, refSample, ssimLog)...)...)
+	ssimData, err := os.ReadFile(ssimLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssimFrames, ssimMin := 0, 1.0
+	for _, line := range strings.Split(strings.TrimSpace(string(ssimData)), "\n") {
+		var all float64
+		if i := strings.Index(line, "All:"); i < 0 {
+			t.Fatalf("unexpected SSIM stats line %q", line)
+		} else if _, err := fmt.Sscanf(line[i:], "All:%f", &all); err != nil {
+			t.Fatalf("SSIM stats line %q: %v", line, err)
+		}
+		ssimFrames++
+		ssimMin = min(ssimMin, all)
+	}
+	if ssimFrames != len(refPTS) || ssimMin < 0.98 {
+		t.Fatalf("SSIM paired a frame with its neighbour: %d of %d frames, min %.4f", ssimFrames, len(refPTS), ssimMin)
+	}
+	t.Logf("ssim frames=%d min=%.4f", ssimFrames, ssimMin)
+	// Without an offset, timestamp pairing would have scored the same, so the
+	// regression was not exercised (a different ffmpeg muxes differently).
+	if offset == 0 {
+		t.Skip("this ffmpeg produced no 1 ms timestamp offsets; index pairing regression not exercised")
 	}
 }
 
@@ -375,19 +408,21 @@ func TestHFRWorkerGatesEndToEnd(t *testing.T) {
 // A slow HFR probe times out on its own budget: native-rate VMAF/CAMBI stay
 // available, the reason says why HFR is withheld, and the result is not
 // cached so the next lookup probes again.
-func TestHFRProbeTimeoutKeepsNativeQualityAndIsNotCached(t *testing.T) {
+func TestHFRProbeTimeoutKeepsNativeQualityAndRetriesOnlyHFR(t *testing.T) {
 	dir := t.TempDir()
 	ffmpeg := filepath.Join(dir, "fake-ffmpeg")
-	calls := filepath.Join(dir, "hfr-calls")
+	hfrCalls := filepath.Join(dir, "hfr-calls")
+	nativeCalls := filepath.Join(dir, "native-calls")
 	script := `#!/bin/sh
 filter=""
 for arg in "$@"; do case "$arg" in *libvmaf*) filter="$arg";; esac; done
 log=$(printf '%s' "$filter" | sed -n 's/.*log_path=\([^:]*\).*/\1/p')
 case "$*" in
-  *rate=48:*) echo x >> "` + calls + `"; exec sleep 5;;
+  *rate=48:*) echo x >> "` + hfrCalls + `"; exec sleep 5;;
   *cambi=*|*name=cambi*)
     echo '{"version":"3.2.0","frames":[{"frameNum":0,"metrics":{"cambi_full_reference":0}}]}' > "$log"; exit 0;;
   *vmaf_v1.0.16_3d0h*)
+    echo x >> "` + nativeCalls + `"
     echo '{"version":"3.2.0","frames":[{"frameNum":0,"metrics":{"vmaf":99}},{"frameNum":1,"metrics":{"vmaf":99}}]}' > "$log"; exit 0;;
 esac
 exit 1
@@ -395,10 +430,26 @@ exit 1
 	if err := os.WriteFile(ffmpeg, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	info, err := os.Stat(ffmpeg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := fmt.Sprintf("%s:%d:%d", ffmpeg, info.Size(), info.ModTime().UnixNano())
+	t.Cleanup(func() {
+		qualityProbeCache.Lock()
+		delete(qualityProbeCache.results, key)
+		delete(qualityProbeCache.hfrTimedOut, key)
+		qualityProbeCache.Unlock()
+	})
 	old := hfrProbeTimeoutDuration
 	hfrProbeTimeoutDuration = 200 * time.Millisecond
 	defer func() { hfrProbeTimeoutDuration = old }()
-	for i := 1; i <= 2; i++ {
+	count := func(path string) int {
+		data, _ := os.ReadFile(path)
+		return strings.Count(string(data), "x")
+	}
+	lookup := func(wantHFR, wantNative int) {
+		t.Helper()
 		caps := cachedQualityCapabilities(context.Background(), ffmpeg, dir)
 		if caps.ProbeError != "" || !caps.Models["v1_1080p_3h"].Available || !caps.CAMBIFullRef {
 			t.Fatalf("slow HFR probe disabled native quality: %+v", caps)
@@ -406,9 +457,27 @@ exit 1
 		if caps.HFRTemporalDecimation != 0 || caps.HFRProbeReason != hfrProbeTimeout {
 			t.Fatalf("timed-out HFR probe: %+v", caps)
 		}
-		data, _ := os.ReadFile(calls)
-		if got := strings.Count(string(data), "x"); got != i {
-			t.Fatalf("timed-out HFR probe was cached: %d probes after %d lookups", got, i)
+		if got := count(hfrCalls); got != wantHFR {
+			t.Fatalf("HFR probes = %d, want %d", got, wantHFR)
 		}
+		if got := count(nativeCalls); got != wantNative {
+			t.Fatalf("native probes = %d, want %d", got, wantNative)
+		}
+	}
+	lookup(1, 1)
+	// Within the retry window the timeout is served from cache.
+	lookup(1, 1)
+	qualityProbeCache.Lock()
+	qualityProbeCache.hfrTimedOut[key] = time.Now().Add(-hfrProbeRetryAfter)
+	qualityProbeCache.Unlock()
+	// After it, only the HFR probe runs again; native results stay cached.
+	lookup(2, 1)
+	lookup(2, 1)
+}
+
+func TestHFRProbeBudgetFitsCoordinatorRequestTimeout(t *testing.T) {
+	// The native probes share the same request; leave them most of it.
+	if hfrProbeTimeoutDuration > httpclient.DefaultHTTPRequestTimeout/2 {
+		t.Fatalf("HFR probe budget %v is not well under the coordinator timeout %v", hfrProbeTimeoutDuration, httpclient.DefaultHTTPRequestTimeout)
 	}
 }

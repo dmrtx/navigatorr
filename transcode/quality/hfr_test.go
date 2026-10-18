@@ -47,6 +47,9 @@ func TestDecimationFilterConstruction(t *testing.T) {
 	if got, err := MetricPairInputs(2); err != nil || got != `[0:v]format=yuv420p10le,select=not(mod(n\,2)),settb=AVTB,setpts=N[d];[1:v]format=yuv420p10le,select=not(mod(n\,2)),settb=AVTB,setpts=N[r];[d][r]` {
 		t.Fatalf("decimated pair inputs %q %v", got, err)
 	}
+	if got := IndexPairInputs(); got != "[0:v]settb=AVTB,setpts=N[d];[1:v]settb=AVTB,setpts=N[r];[d][r]" {
+		t.Fatalf("index pair inputs %q", got)
+	}
 	if _, err := MetricPairInputs(3); err == nil {
 		t.Fatal("factor 3 pair inputs accepted")
 	}

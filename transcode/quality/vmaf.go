@@ -20,6 +20,11 @@ type VMAFModel struct {
 	HFR                 bool    `json:"hfr"`
 }
 
+// ProbeModelID is the model the worker's quality capability probes execute,
+// including the decimated HFR probe; capabilities derived from those probes
+// hold for this model.
+const ProbeModelID = "v1_1080p_3h"
+
 var models = map[string]VMAFModel{
 	"v1_1080p_3h": {ID: "v1_1080p_3h", LibvmafModel: "vmaf_v1.0.16_3d0h", MinScore: 0, MaxScore: 100, MeasurementBitDepth: 10, Width: 1920, Height: 1080, ViewingDistance: "3H"},
 }
