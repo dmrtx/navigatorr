@@ -3312,3 +3312,80 @@ test("job detail lists this session's commands newest first and hides when there
   assert.equal(h.elements.get("detail-commands").hidden, true);
   assert.equal(h.elements.get("detail-command-list").children.length, 0);
 });
+
+test("a queue refresh keeps keyboard focus on a job title, also after Dismiss moved it there", async () => {
+  const h = commandDom([{command_id:"ft", id:"job-a", kind:"retry", label:"Retrying job", status:"failed", error:"No worker was free.", started:1, seenAt:0}]);
+  const doc = h.document;
+  const list = new FakeNode(doc);
+  doc.body.append(list);
+  h.elements.set("jobs-list", list);
+  h.context.request = (path) => path === "worker-activity" ? {available:false} : {
+    jobs:[{id:"job-a", number:1, action_name:"transcode_media", status:"failed"}, {id:"job-b", number:2, action_name:"transcode_media", status:"completed"}],
+    total:2, has_more:false,
+  };
+  h.run('api=async(path)=>request(path);renderSavings=()=>{};state.tab="jobs";');
+  await h.run("loadJobs()");
+  const titleOf = (id) => list.querySelectorAll("[data-operation-id]").find((r) => r.dataset.operationId === id).querySelector(".job-title");
+  const before = titleOf("job-b");
+  before.focus();
+  await h.run("loadJobs()");
+  assert.notEqual(titleOf("job-b"), before);
+  assert.equal(doc.activeElement, titleOf("job-b"));
+  // Dismiss on a failure hands focus to the title; the next refresh keeps it there.
+  list.querySelector(".command-dismiss").focus();
+  await clickAndSettle(doc.activeElement);
+  assert.equal(doc.activeElement, titleOf("job-a"));
+  await h.run("loadJobs()");
+  assert.equal(doc.activeElement, titleOf("job-a"));
+});
+
+test("a recovery copy redraw keeps focus on its button, or the first enabled one while it verifies", () => {
+  const h = commandDom([]);
+  const doc = h.document;
+  const list = new FakeNode(doc);
+  doc.body.append(list);
+  h.elements.set("backup-list", list);
+  h.run('state.backups=[{action_id:"copy-a",bytes:1,delete_available:true,cleanup_available:true},{action_id:"copy-b",bytes:1,delete_available:true}];renderBackups();');
+  const buttonsOf = (id) => list.querySelectorAll("[data-operation-id]").find((r) => r.dataset.operationId === id).querySelectorAll(".backup-actions button");
+  const remove = buttonsOf("copy-b").find((b) => b.textContent === "Remove copy");
+  remove.focus();
+  h.run("renderBackups()");
+  assert.notEqual(doc.activeElement, remove);
+  assert.equal(doc.activeElement, buttonsOf("copy-b").find((b) => b.textContent === "Remove copy"));
+  // A button that appears ahead of the focused one does not take its focus.
+  h.run('state.backups[1].cleanup_available=true;renderBackups();');
+  assert.equal(buttonsOf("copy-b").length, 3);
+  assert.equal(doc.activeElement, buttonsOf("copy-b").find((b) => b.textContent === "Remove copy"));
+  buttonsOf("copy-a").find((b) => b.textContent === "Verify & clean up").focus();
+  h.run('state.backupCleaning={id:"copy-a"};renderBackups();');
+  assert.equal(doc.activeElement, buttonsOf("copy-a")[0]);
+  assert.equal(doc.activeElement.textContent, "View job");
+});
+
+test("only a command that is still waiting shows its waiting reason", () => {
+  const h = commandDom([]);
+  const timers = [];
+  h.context.setTimeout = (fn) => timers.push(fn);
+  h.run('state.operationJobs=new Map([["w",{id:"job-w",number:7}]]);card("job-w");');
+  h.context.receipt = {key:"k", started:1, command_id:"w1", id:"job-w", label:"Retrying job"};
+  h.run('trackCommand({kind:"retry"},receipt,{status:"waiting_external",waiting_reason:"Waiting for a free worker slot"})');
+  const chip = () => h.document.body.querySelector(".command-chip");
+  assert.equal(chip().title, "Retrying job · Waiting to apply · Waiting for a free worker slot");
+  // A new reason for the same status replaces the stale tooltip.
+  h.run('trackCommand({kind:"retry"},receipt,{status:"waiting_external",waiting_reason:"Waiting for the worker to come back"})');
+  assert.equal(chip().title, "Retrying job · Waiting to apply · Waiting for the worker to come back");
+  timers.length = 0;
+  // A reason that outlives the wait is not read out.
+  h.run('trackCommand({kind:"retry"},receipt,{status:"completed",waiting_reason:"Waiting for the worker to come back"})');
+  timers.shift()();
+  assert.equal(h.elements.get("command-announcer").textContent, "Job #7: Retrying job, applied.");
+  h.run('state.detail="job-w";renderCommandHistory();');
+  const text = (el) => [el.textContent, ...el.children.map(text)].join("");
+  assert.doesNotMatch(text(h.elements.get("detail-command-list")), /Waiting for/);
+  // Nor while it runs or is pending after the wait.
+  for (const status of ["running", "pending"]) {
+    h.context.status = status;
+    h.run('state.commands.get("w1").status=status;');
+    assert.doesNotMatch(h.run('commandChip("job-w").title'), /Waiting for/);
+  }
+});

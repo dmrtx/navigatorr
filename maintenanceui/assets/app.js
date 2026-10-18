@@ -381,6 +381,9 @@ const commandVerbs = {"Preparing replacement review":"Preparing review","Applyin
 const commandFailures = {"Preparing replacement review":"Review failed","Applying replacement decision":"Decision failed","Applying decision":"Decision failed","Retrying job":"Retry failed","Stopping job":"Stop failed","Applying candidate decision":"Decision failed","Verifying recovery data":"Check failed","Verifying duplicate":"Check failed","Removing recovery copy":"Removal failed","Updating batch settings":"Update failed"};
 const commandStatusText = {pending:"Waiting to apply",running:"Applying",waiting_external:"Waiting to apply",completed:"Applied",failed:"Failed",cancelled:"Cancelled"};
 function commandLabel(command) { return commandLabels[command.kind] || command.label || "Update"; }
+// The engine keeps waiting_reason when a command runs again after a wait, and
+// a cancelled one stores its cancel reason there. Only a waiting one says why.
+function commandWaitingReason(command) { return command.status === "waiting_external" ? command.waiting_reason || "" : ""; }
 function jobCommands(id) {
   return [...(state.commands?.values() || [])].filter((c) => c.id === id).sort((a, b) => (b.started || 0) - (a.started || 0));
 }
@@ -398,7 +401,8 @@ function commandChip(id, now = commandClock()) {
   if (active) {
     const activeLabel = commandLabel(active);
     const text = active.status === "waiting_external" ? "Waiting to apply" : commandVerbs[activeLabel] || "Applying";
-    return {kind:"active", command:active, text, title:`${activeLabel} · ${commandStatusText[active.status] || "Applying"}${active.waiting_reason ? ` · ${active.waiting_reason}` : ""}`};
+    const reason = commandWaitingReason(active);
+    return {kind:"active", command:active, text, title:`${activeLabel} · ${commandStatusText[active.status] || "Applying"}${reason ? ` · ${reason}` : ""}`};
   }
   const done = commands.find((c) => c.status === "completed");
   if (done && now - (done.seenAt || 0) < appliedChipMs)
@@ -449,7 +453,7 @@ function commandJobName(id) {
 const commandAnnouncements = [];
 function announceCommand(command) {
   const status = (commandStatusText[command.status] || "Applying").toLowerCase();
-  const reason = command.status === "failed" ? shortJobReason(command.error) : command.waiting_reason;
+  const reason = command.status === "failed" ? shortJobReason(command.error) : commandWaitingReason(command);
   const detail = reason ? ` ${/[.!?]$/.test(reason) ? reason : `${reason}.`}` : "";
   commandAnnouncements.push(`${commandJobName(command.id)}: ${commandLabel(command)}, ${status}.${detail}`);
   if (commandAnnouncements.length === 1) setTimeout(flushCommandAnnouncements, 250);
@@ -490,7 +494,7 @@ function renderCommandIndicators() {
     if (chip?.kind === "active" && target.querySelector(".job-command")) chip = null;
     if (chip?.expires) expires = Math.min(expires, chip.expires);
     // Leave an unchanged chip or failure line in place so focus stays put.
-    const key = chip ? `${chip.kind}:${chip.command.command_id}:${chip.command.status}:${chip.text}` : "";
+    const key = chip ? JSON.stringify([chip.kind, chip.command.command_id, chip.command.status, chip.text, chip.title]) : "";
     const current = target.querySelector(".command-chip");
     if ((current?.dataset.key || "") !== key) {
       current?.remove();
@@ -535,7 +539,7 @@ function commandHistoryItem(command, now) {
   const head = node("p", "", "command-history-label");
   head.append(node("span", commandLabel(command)), node("span", ` · ${commandStatusText[command.status] || "Applying"}`, "command-history-status"));
   body.append(head);
-  const detail = command.status === "failed" ? shortJobReason(command.error) : command.waiting_reason;
+  const detail = command.status === "failed" ? shortJobReason(command.error) : commandWaitingReason(command);
   if (detail) body.append(node("p", detail, "metadata"));
   item.append(body);
   const age = commandAge(command.started, now);
@@ -2085,12 +2089,28 @@ $("benchmark").addEventListener("click", () =>
 
 function focusedControl(container) {
   const active = document.activeElement;
-  return container.contains(active) && active.dataset.jobControl
-    ? { id: active.dataset.jobControl, label: active.textContent, itemKey: active.dataset.batchItemKey }
-    : null;
+  if (!active || !container.contains(active)) return null;
+  if (active.dataset.jobControl)
+    return { id: active.dataset.jobControl, label: active.textContent, itemKey: active.dataset.batchItemKey };
+  // Job titles and recovery copy buttons carry no data-job-control: find
+  // them again by their row.
+  const row = active.closest?.("[data-operation-id]");
+  if (!row || !active.matches?.(".job-title, .backup-actions button")) return null;
+  const buttons = [...row.querySelectorAll(".backup-actions button")];
+  return { row: row.dataset.operationId, title: active.matches(".job-title"), label: active.textContent, index: buttons.indexOf(active) };
 }
 function restoreControl(container, focus) {
   if (!focus) return;
+  if (focus.row != null) {
+    const row = [...container.querySelectorAll("[data-operation-id]")].find((r) => r.dataset.operationId === focus.row);
+    if (!row) return;
+    const buttons = [...row.querySelectorAll(".backup-actions button")];
+    // A button that is gone or now disabled (Verifying…) hands focus to the row's first enabled one.
+    let next = focus.title ? row.querySelector(".job-title") : buttons.find((b) => b.textContent === focus.label) || buttons[focus.index];
+    if (!focus.title && (!next || next.disabled)) next = buttons.find((b) => !b.disabled);
+    if (next && document.activeElement !== next) next.focus({ preventScroll: true });
+    return;
+  }
   [...container.querySelectorAll("[data-job-control]")]
     .find(
       (b) => b.dataset.jobControl === focus.id && b.textContent === focus.label && b.dataset.batchItemKey === focus.itemKey,
@@ -5083,6 +5103,7 @@ function cleanupError(value) {
 }
 function renderBackups() {
   const commandFocused = commandFocus();
+  const focus = focusedControl($("backup-list"));
   $("backup-list").replaceChildren();
   for (const copy of state.backups || []) {
     const row = node("div", "", "backup-row");
@@ -5118,6 +5139,7 @@ function renderBackups() {
   // Rebuilt rows get their command chips back now, not on the next poll.
   renderCommandIndicators();
   restoreCommandFocus(commandFocused);
+  restoreControl($("backup-list"), focus);
 }
 async function loadBackups() {
   if (state.backupsLoading) return;
