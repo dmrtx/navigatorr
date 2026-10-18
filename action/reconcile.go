@@ -69,15 +69,34 @@ const reconcileConcurrency = 8
 // reconcileDispatcher carries in-flight continuations across reconciler ticks.
 // A slow continuation keeps only its own slot; the next tick still polls every
 // other action instead of waiting for the slowest one of the previous tick.
+//
+// A continuation gives its slot back as soon as it waits for a media hash
+// (see acquireHashSlot): hashing is bounded by the engine's hash pool, so
+// slots only ever measure work that is not queued behind a hash.
 type reconcileDispatcher struct {
 	mu       sync.Mutex
 	inflight map[string]struct{}
-	// admissions counts in-flight background admissions. Each starts with a
-	// whole-source hash, so they are capped at the hash pool size and never
-	// fill the slots that keep live jobs polled.
-	admissions int
-	sem        chan struct{}
-	wg         sync.WaitGroup
+	sem      chan struct{}
+	wg       sync.WaitGroup
+}
+
+// reconcileSlotKey carries the dispatcher slot of the running continuation.
+type reconcileSlotKey struct{}
+
+// reconcileSlot releases a dispatcher slot exactly once, whether the
+// continuation yields it for a hash or finishes.
+type reconcileSlot struct {
+	once    sync.Once
+	release func()
+}
+
+func (s *reconcileSlot) yield() { s.once.Do(s.release) }
+
+// yieldReconcileSlot frees the caller's dispatcher slot, if it holds one.
+func yieldReconcileSlot(ctx context.Context) {
+	if s, ok := ctx.Value(reconcileSlotKey{}).(*reconcileSlot); ok {
+		s.yield()
+	}
 }
 
 func newReconcileDispatcher() *reconcileDispatcher {
@@ -88,22 +107,21 @@ func newReconcileDispatcher() *reconcileDispatcher {
 // not already running from an earlier tick, without waiting for any of them to
 // finish.
 func (e *Engine) dispatchReconcile(ctx context.Context, d *reconcileDispatcher) error {
-	targets, err := e.reconcileTargets(ctx)
+	ids, err := e.reconcilableIDs(ctx)
 	if err != nil {
 		return err
 	}
-	for _, target := range targets {
-		id, admission := target.id, target.admission
+	for _, id := range ids {
 		d.mu.Lock()
 		_, busy := d.inflight[id]
-		full := admission && d.admissions >= mediaHashConcurrency
 		d.mu.Unlock()
-		if busy || full {
+		if busy {
 			continue
 		}
 		// Wait for a slot rather than skipping: actions are listed in id order,
 		// so skipping would starve the same ids every tick. Cheap polls free a
-		// slot within milliseconds; only eight slow continuations stall here.
+		// slot within milliseconds, and continuations waiting for a hash have
+		// already given theirs back.
 		select {
 		case d.sem <- struct{}{}:
 		case <-ctx.Done():
@@ -111,23 +129,18 @@ func (e *Engine) dispatchReconcile(ctx context.Context, d *reconcileDispatcher) 
 		}
 		d.mu.Lock()
 		d.inflight[id] = struct{}{}
-		if admission {
-			d.admissions++
-		}
 		d.mu.Unlock()
+		slot := &reconcileSlot{release: func() { <-d.sem }}
 		d.wg.Add(1)
 		go func(id string) {
 			defer d.wg.Done()
 			defer func() {
 				d.mu.Lock()
 				delete(d.inflight, id)
-				if admission {
-					d.admissions--
-				}
 				d.mu.Unlock()
-				<-d.sem
+				slot.yield()
 			}()
-			if _, err := e.resume(ctx, id, "", nil, true); err != nil && !errors.Is(err, errActionBusy) && ctx.Err() == nil {
+			if _, err := e.resume(context.WithValue(ctx, reconcileSlotKey{}, slot), id, "", nil, true); err != nil && !errors.Is(err, errActionBusy) && ctx.Err() == nil {
 				log.Printf("action reconciler: %s: %v", id, err)
 			}
 		}(id)
@@ -173,27 +186,11 @@ func (e *Engine) ReconcileOnce(ctx context.Context) error {
 
 // reconcilableIDs pages through candidate actions; pagination is stable while
 // actions complete.
-// reconcileTarget is an action due for a continuation. admission marks a
-// pending background admission, whose first step hashes the whole source.
-type reconcileTarget struct {
-	id        string
-	admission bool
-}
-
 func (e *Engine) reconcilableIDs(ctx context.Context) ([]string, error) {
-	targets, err := e.reconcileTargets(ctx)
-	ids := make([]string, 0, len(targets))
-	for _, t := range targets {
-		ids = append(ids, t.id)
-	}
-	return ids, err
-}
-
-func (e *Engine) reconcileTargets(ctx context.Context) ([]reconcileTarget, error) {
 	if e.deps.Store == nil {
 		return nil, nil
 	}
-	var targets []reconcileTarget
+	var ids []string
 	after := ""
 	for {
 		if err := ctx.Err(); err != nil {
@@ -207,7 +204,7 @@ func (e *Engine) reconcileTargets(ctx context.Context) ([]reconcileTarget, error
 			inst := &instances[i]
 			tmpl, ok := e.GetTemplate(inst.ActionName)
 			if ok && e.shouldReconcile(inst, tmpl, parseExecutionContext(inst, e)) {
-				targets = append(targets, reconcileTarget{id: inst.ID, admission: inst.Status == StatusPending})
+				ids = append(ids, inst.ID)
 			}
 			after = inst.ID
 		}
@@ -215,7 +212,7 @@ func (e *Engine) reconcileTargets(ctx context.Context) ([]reconcileTarget, error
 			break
 		}
 	}
-	return targets, nil
+	return ids, nil
 }
 
 func (e *Engine) shouldReconcile(inst *store.ActionInstance, tmpl ActionTemplate, ec *ExecutionContext) bool {
@@ -370,13 +367,18 @@ func optionalDuration(state map[string]any, key string) *int64 {
 const mediaHashConcurrency = 3
 
 // acquireHashSlot waits for one of the engine's hash slots, honouring ctx.
+// A reconciler continuation first gives back its dispatcher slot, so queued
+// hashes never keep live jobs from being polled. The returned release is
+// safe to call more than once.
 func (e *Engine) acquireHashSlot(ctx context.Context) (func(), error) {
+	yieldReconcileSlot(ctx)
 	if e.hashSlots == nil {
 		return func() {}, nil
 	}
 	select {
 	case e.hashSlots <- struct{}{}:
-		return func() { <-e.hashSlots }, nil
+		var once sync.Once
+		return func() { once.Do(func() { <-e.hashSlots }) }, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}

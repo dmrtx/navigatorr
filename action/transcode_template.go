@@ -101,8 +101,8 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		_ = f.Close()
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to compute hash of original file %s: %v", cleanPath, err)}, nil
 	}
+	defer release()
 	if err := observe(cleanPath, 0, fi.Size()); err != nil {
-		release()
 		_ = f.Close()
 		return StepResult{Status: StepFailed, Error: err.Error()}, nil
 	}

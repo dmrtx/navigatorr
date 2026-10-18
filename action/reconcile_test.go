@@ -769,21 +769,20 @@ func TestMediaHashesShareABoundedPool(t *testing.T) {
 	}
 }
 
-func TestDispatcherKeepsSlotsForLiveJobsDuringAnAdmissionBurst(t *testing.T) {
+func TestDispatcherSlotsAreFreeWhileContinuationsWaitForHashes(t *testing.T) {
 	st := setupTestStore(t)
 	e := NewEngine(EngineDeps{Store: st, ReconcileInterval: time.Hour})
 	release := make(chan struct{})
-	var running, peak atomic.Int32
-	e.RegisterTemplate(ActionTemplate{Name: "admission_burst", AutoReconcile: true, Steps: []StepDefinition{
+	var hashing atomic.Int32
+	e.RegisterTemplate(ActionTemplate{Name: "hash_burst", AutoReconcile: true, Steps: []StepDefinition{
 		{Name: "preflight", Run: func(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
-			n := running.Add(1)
-			defer running.Add(-1)
-			for {
-				p := peak.Load()
-				if n <= p || peak.CompareAndSwap(p, n) {
-					break
-				}
+			done, err := e.acquireHashSlot(ctx)
+			if err != nil {
+				return StepResult{}, err
 			}
+			defer done()
+			hashing.Add(1)
+			defer hashing.Add(-1)
 			select {
 			case <-release:
 			case <-ctx.Done():
@@ -791,14 +790,16 @@ func TestDispatcherKeepsSlotsForLiveJobsDuringAnAdmissionBurst(t *testing.T) {
 			return StepResult{Status: StepCompleted}, nil
 		}},
 	}})
-	for i := 0; i < reconcileConcurrency+4; i++ {
-		inst := store.ActionInstance{ID: fmt.Sprintf("act-admission-%02d", i), ActionName: "admission_burst", Status: StatusPending, InputsJSON: "{}", StateJSON: `{"background_admission":true}`, OutputsJSON: "{}"}
+	const burst = reconcileConcurrency + 4
+	for i := 0; i < burst; i++ {
+		inst := store.ActionInstance{ID: fmt.Sprintf("act-hash-burst-%02d", i), ActionName: "hash_burst", Status: StatusPending, InputsJSON: "{}", StateJSON: `{"background_admission":true}`, OutputsJSON: "{}"}
 		if err := st.CreateActionInstance(inst); err != nil {
 			t.Fatal(err)
 		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	d := newReconcileDispatcher()
+	t.Cleanup(func() { close(release); cancel(); d.wg.Wait() })
 	finished := make(chan error, 1)
 	go func() { finished <- e.dispatchReconcile(ctx, d) }()
 	select {
@@ -807,19 +808,16 @@ func TestDispatcherKeepsSlotsForLiveJobsDuringAnAdmissionBurst(t *testing.T) {
 			t.Fatal(err)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("dispatch blocked behind admissions instead of leaving slots free")
+		t.Fatal("dispatch blocked behind continuations waiting for hashes")
 	}
-	for deadline := time.Now().Add(3 * time.Second); running.Load() < mediaHashConcurrency && time.Now().Before(deadline); {
+	for deadline := time.Now().Add(3 * time.Second); (len(d.sem) > 0 || hashing.Load() < mediaHashConcurrency) && time.Now().Before(deadline); {
 		time.Sleep(time.Millisecond)
 	}
 	time.Sleep(20 * time.Millisecond)
 	d.mu.Lock()
 	inflight := len(d.inflight)
 	d.mu.Unlock()
-	close(release)
-	cancel()
-	d.wg.Wait()
-	if inflight != mediaHashConcurrency || peak.Load() != mediaHashConcurrency {
-		t.Fatalf("admissions in flight %d, peak %d; want %d so the other slots stay free", inflight, peak.Load(), mediaHashConcurrency)
+	if inflight != burst || hashing.Load() != mediaHashConcurrency || len(d.sem) != 0 {
+		t.Fatalf("in flight %d, hashing %d, dispatcher slots held %d; want %d, %d, 0", inflight, hashing.Load(), len(d.sem), burst, mediaHashConcurrency)
 	}
 }
