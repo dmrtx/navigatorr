@@ -3,7 +3,7 @@ package transcode
 import "testing"
 
 func TestVideoCopyEvidenceCheck(t *testing.T) {
-	pass := VideoCopyEvidence{Method: VideoCopyMethod, Verdict: "pass", SourceHash: "sha256:a", CandidateHash: "sha256:a"}
+	pass := VideoCopyEvidence{Method: VideoCopyMethod, Verdict: "pass", SourceHash: "sha256:a", CandidateHash: "sha256:a", SourcePackets: 9, CandidatePackets: 9}
 	if err := pass.Check(); err != nil {
 		t.Fatal(err)
 	}
@@ -16,6 +16,9 @@ func TestVideoCopyEvidenceCheck(t *testing.T) {
 		"failed verdict": func(e *VideoCopyEvidence) { e.Verdict = "fail" },
 		"changed stream": func(e *VideoCopyEvidence) { e.CandidateHash = "sha256:b" },
 		"no hashes":      func(e *VideoCopyEvidence) { e.SourceHash, e.CandidateHash = "", "" },
+		"empty digest":   func(e *VideoCopyEvidence) { e.SourceHash, e.CandidateHash = emptyPacketDigest, emptyPacketDigest },
+		"no packets":     func(e *VideoCopyEvidence) { e.SourcePackets, e.CandidatePackets = 0, 0 },
+		"packet count":   func(e *VideoCopyEvidence) { e.CandidatePackets = 8 },
 	} {
 		e := pass
 		mutate(&e)

@@ -83,8 +83,9 @@ type WorkerCapabilities struct {
 	// final validation windows.
 	SizeModeV3 bool `json:"size_mode_v3,omitempty"`
 	// SizeAudioOnly reports a worker that runs size v3 audio-only plans:
-	// the video stream is copied and proven unchanged with ffmpeg's
-	// streamhash muxer, and lossless audio is compacted to AAC.
+	// the video stream is copied and proven unchanged packet by packet
+	// from ffprobe's demuxed payload hashes, and lossless audio is
+	// compacted to AAC.
 	SizeAudioOnly bool `json:"size_audio_only,omitempty"`
 	// CompactTranscode reports an executable proof of the compact SDR chain
 	// (setparams, swscale, lut3d and sidedata delete) in the worker FFmpeg.

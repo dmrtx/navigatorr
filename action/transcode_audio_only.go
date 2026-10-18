@@ -3,6 +3,7 @@ package action
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -28,12 +29,12 @@ func estimateAudioOnly(rep *mediainspect.DetailedReport, sourceBytes int64) audi
 	}
 	var saved int64
 	for _, a := range rep.Audio {
-		target, kbps := transcode.AudioTarget(transcode.AudioModeCompactLossless, a.Codec, a.Profile, a.Channels, a.ChannelLayout)
+		target, kbps := transcode.AudioTarget(transcode.AudioModeCompactLossless, transcode.DetailedAudioTrack(a.Codec, a.Profile, a.Title, a.Tags, a.Channels, a.ChannelLayout))
 		if target == "copy" {
 			continue
 		}
 		e.Compacted++
-		source := audioStreamBytes(a, rep.DurationSec)
+		source := audioStreamBytes(a, rep.DurationSec, sourceBytes)
 		if source <= 0 {
 			e.Unknown++
 			continue
@@ -46,16 +47,32 @@ func estimateAudioOnly(rep *mediainspect.DetailedReport, sourceBytes int64) audi
 	return e
 }
 
-func audioStreamBytes(a mediainspect.DetailedStream, duration float64) int64 {
-	for key, value := range a.Tags {
-		if k := strings.ToUpper(key); k == "NUMBER_OF_BYTES" || strings.HasPrefix(k, "NUMBER_OF_BYTES-") {
-			if n, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64); err == nil && n > 0 {
-				return n
+// audioStreamBytes is a track's size from its Matroska statistics, else its
+// bitrate. The exact NUMBER_OF_BYTES tag wins over language variants, which
+// are read in a fixed order; a size larger than the whole file is unknown.
+func audioStreamBytes(a mediainspect.DetailedStream, duration float64, fileBytes int64) int64 {
+	var exact, variants []string
+	for key := range a.Tags {
+		if k := strings.ToUpper(key); k == "NUMBER_OF_BYTES" {
+			exact = append(exact, key)
+		} else if strings.HasPrefix(k, "NUMBER_OF_BYTES-") {
+			variants = append(variants, key)
+		}
+	}
+	sort.Strings(exact)
+	sort.Strings(variants)
+	for _, key := range append(exact, variants...) {
+		if n, err := strconv.ParseInt(strings.TrimSpace(a.Tags[key]), 10, 64); err == nil && n > 0 {
+			if n > fileBytes {
+				return 0
 			}
+			return n
 		}
 	}
 	if a.BitRate > 0 {
-		return a.BitRate * int64(duration) / 8
+		if n := a.BitRate * int64(duration) / 8; n <= fileBytes {
+			return n
+		}
 	}
 	return 0
 }
@@ -89,6 +106,9 @@ func (e *Engine) sizeAudioOnlyFallback(ctx context.Context, ec *ExecutionContext
 	outputs["audio_only_estimated_bytes"] = estimate.CandidateBytes
 	ec.State["audio_only_estimated_bytes"] = estimate.CandidateBytes
 	if !optimization.ModeSizeAllowedVersion(snapshot.Mode, original, estimate.CandidateBytes, snapshot.Version) {
+		if estimate.Unknown > 0 {
+			return skip("audio_estimate_unavailable")
+		}
 		return skip("audio_compaction_insufficient")
 	}
 	video := rep.MainVideo()

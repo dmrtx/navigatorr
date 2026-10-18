@@ -31,7 +31,7 @@ func TestEstimateAudioOnly(t *testing.T) {
 	rep := audioOnlyReport()
 	const source = int64(10_700_000_000)
 	e := estimateAudioOnly(rep, source)
-	_, kbps := transcode.AudioTarget(transcode.AudioModeCompactLossless, "dts", "DTS-HD MA", 6, "5.1(side)")
+	_, kbps := transcode.AudioTarget(transcode.AudioModeCompactLossless, transcode.AudioTrack{Codec: "dts", Profile: "DTS-HD MA", Channels: 6, Layout: "5.1(side)"})
 	compacted := int64(kbps) * 1000 * 6000 / 8
 	want := source - (3_000_000_000 - compacted) - (3_000_000_000 - compacted)
 	if e.Compacted != 2 || e.Unknown != 0 || e.CandidateBytes != want {
@@ -41,6 +41,22 @@ func TestEstimateAudioOnly(t *testing.T) {
 	rep.Audio[1].BitRate = 0
 	if e := estimateAudioOnly(rep, source); e.Compacted != 2 || e.Unknown != 1 || e.CandidateBytes != source-(3_000_000_000-compacted) {
 		t.Fatalf("unknown track estimate %+v", e)
+	}
+	// The exact statistics tag wins over a language variant, and a size
+	// larger than the whole file is unknown rather than a huge saving.
+	if n := audioStreamBytes(mediainspect.DetailedStream{Tags: map[string]string{"NUMBER_OF_BYTES-eng": "900", "NUMBER_OF_BYTES": "100"}}, 6000, 1000); n != 100 {
+		t.Fatalf("exact tag ignored: %d", n)
+	}
+	if n := audioStreamBytes(mediainspect.DetailedStream{Tags: map[string]string{"NUMBER_OF_BYTES": "5000"}, BitRate: 1}, 6000, 1000); n != 0 {
+		t.Fatalf("absurd tag accepted: %d", n)
+	}
+	if n := audioStreamBytes(mediainspect.DetailedStream{BitRate: 4000000}, 6000, 1000); n != 0 {
+		t.Fatalf("absurd bitrate accepted: %d", n)
+	}
+	// Object audio named only in the title is copied, so it saves nothing.
+	atmos := &mediainspect.DetailedReport{DurationSec: 6000, Audio: []mediainspect.DetailedStream{{Codec: "truehd", Title: "TrueHD Atmos 7.1", Channels: 8, ChannelLayout: "7.1", BitRate: 5000000}}}
+	if e := estimateAudioOnly(atmos, source); e.Compacted != 0 {
+		t.Fatalf("Atmos counted for compaction: %+v", e)
 	}
 	lossy := &mediainspect.DetailedReport{DurationSec: 6000, Audio: rep.Audio[2:]}
 	if e := estimateAudioOnly(lossy, source); e.Compacted != 0 || e.CandidateBytes != source {
@@ -111,6 +127,11 @@ func TestSizeAudioOnlyFallbackDeclines(t *testing.T) {
 		"small lossless track": {caps: audioOnlyCaps(), handled: true, reason: "audio_compaction_insufficient", status: StepCompleted, mutate: func(c *audioOnlyCase) {
 			c.ec.State["original_size"] = int64(60_000_000_000)
 		}},
+		"lossless audio of unknown size": {caps: audioOnlyCaps(), handled: true, reason: "audio_estimate_unavailable", status: StepCompleted, mutate: func(c *audioOnlyCase) {
+			rep := audioOnlyReport()
+			rep.Audio[0].Tags, rep.Audio[1].BitRate = nil, 0
+			c.ec.State["source_report"] = rep
+		}},
 		"two programme videos": {caps: audioOnlyCaps(), handled: true, reason: "unsupported_source", status: StepCompleted, mutate: func(c *audioOnlyCase) {
 			rep := audioOnlyReport()
 			rep.Video = append(rep.Video, rep.Video[0])
@@ -170,7 +191,7 @@ func TestAudioOnlyCandidateValidation(t *testing.T) {
 	}
 	pass := func() map[string]any {
 		return map[string]any{"verdict": "pass", "candidate_sha256": "candidate", "plan_digest": plan.PlanDigest,
-			"video_copy": map[string]any{"method": transcode.VideoCopyMethod, "verdict": "pass", "source_hash": "sha256:v", "candidate_hash": "sha256:v", "source_codec": "hevc"}}
+			"video_copy": map[string]any{"method": transcode.VideoCopyMethod, "verdict": "pass", "source_hash": "sha256:v", "candidate_hash": "sha256:v", "source_packets": 1200, "candidate_packets": 1200, "source_codec": "hevc"}}
 	}
 	for name, tc := range map[string]struct {
 		evidence func() map[string]any
@@ -181,6 +202,11 @@ func TestAudioOnlyCandidateValidation(t *testing.T) {
 		"video packets changed": {evidence: func() map[string]any {
 			e := pass()
 			e["video_copy"].(map[string]any)["candidate_hash"] = "sha256:w"
+			return e
+		}},
+		"no video packets": {evidence: func() map[string]any {
+			e := pass()
+			e["video_copy"].(map[string]any)["source_packets"], e["video_copy"].(map[string]any)["candidate_packets"] = 0, 0
 			return e
 		}},
 		"other candidate": {evidence: func() map[string]any { e := pass(); e["candidate_sha256"] = "other"; return e }},

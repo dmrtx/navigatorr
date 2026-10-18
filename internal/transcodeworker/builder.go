@@ -27,7 +27,7 @@ func BuildVideoEncoderArgs(plan *transcode.Plan) ([]string, error) {
 		if err := transcode.ValidateSizeAudioOnlyShape(plan); err != nil {
 			return nil, err
 		}
-		return []string{"-c:v", "copy"}, nil
+		return []string{"-c:v", "copy", "-copyinkf:v"}, nil
 	case "hevc_videotoolbox":
 		args, err = buildVideoToolboxArgs(plan)
 	case "libx265":

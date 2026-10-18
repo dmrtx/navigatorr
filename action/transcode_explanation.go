@@ -73,6 +73,9 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 	case reason == "audio_compaction_insufficient":
 		e.Outcome = "size_rejected"
 		e.Message = "No video encode met this goal, and compacting the lossless audio alone would not save enough. Original preserved."
+	case reason == "audio_estimate_unavailable":
+		e.Outcome = "no_changes"
+		e.Message = "No video encode met this goal, and the size of the lossless audio could not be read, so the savings from compacting it alone could not be estimated. Original preserved."
 	case reason == "audio_only_worker_unsupported":
 		e.Outcome = "no_changes"
 		e.Message = "No video encode met this goal. Compacting the lossless audio needs a worker that can prove the copied video unchanged; upgrade the worker and retry. Original preserved."

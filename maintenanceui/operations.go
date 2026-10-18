@@ -171,9 +171,14 @@ func operationSizeMode(r operationRecord) map[string]any {
 		out["main10"] = true
 	}
 	if r.state["size_audio_only"] == true {
-		out["video_copied"] = true
-		if operationMap(operationMap(operationValue(r, "quality_evidence"))["video_copy"])["verdict"] == "pass" {
-			out["video_copy_verified"] = true
+		// The worker's packet proof decides; until it reports, the copy is
+		// planned, not verified.
+		out["video_copy"] = "pending"
+		switch operationMap(operationMap(operationValue(r, "quality_evidence"))["video_copy"])["verdict"] {
+		case "pass":
+			out["video_copy"] = "verified"
+		case "fail":
+			out["video_copy"] = "failed"
 		}
 	}
 	if vmaf := operationMap(operationMap(operationValue(r, "quality_evidence"))["vmaf"]); vmaf["mean"] != nil {

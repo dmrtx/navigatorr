@@ -30,13 +30,6 @@ func ProbeAvailableEncoders(ctx context.Context, ffmpegPath string) (map[string]
 	return ParseAvailableEncoders(string(out)), nil
 }
 
-// probeStreamhashMuxer reports whether FFmpeg has the streamhash muxer that
-// proves a copied video stream bit-identical to its source.
-func probeStreamhashMuxer(ctx context.Context, ffmpegPath string) bool {
-	out, err := exec.CommandContext(ctx, ffmpegPath, "-hide_banner", "-h", "muxer=streamhash").CombinedOutput()
-	return err == nil && strings.Contains(string(out), "Muxer streamhash")
-}
-
 // ValidateEncoderCapabilities validates a resolved plan against the actual
 // FFmpeg binary the worker will execute. It fails closed for any codec that is
 // not proven available, dispatching on the plan's video codec.
@@ -60,9 +53,6 @@ func ValidateEncoderCapabilities(ctx context.Context, ffmpegPath string, plan *t
 	case transcode.VideoCodecCopy:
 		if err := transcode.ValidateSizeAudioOnlyShape(plan); err != nil {
 			return fmt.Errorf("encoder_capability_unsupported: %w", err)
-		}
-		if !probeStreamhashMuxer(ctx, ffmpegPath) {
-			return fmt.Errorf("encoder_capability_unsupported: copied video needs FFmpeg's streamhash muxer to prove the stream unchanged")
 		}
 		return nil
 	case videoToolboxEncoder:
@@ -231,8 +221,9 @@ func probeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratch
 	caps.CoverArt = true
 	// Size policy v3 compacts lossless audio with the same AAC encoder.
 	caps.SizeModeV3 = caps.CompactAudio
-	// Audio-only size plans prove the copied video with the streamhash muxer.
-	caps.SizeAudioOnly = caps.SizeModeV3 && probeStreamhashMuxer(ctx, ffmpegPath)
+	// Audio-only size plans stream-copy the video (keeping leading non-key
+	// packets) and prove it unchanged from ffprobe's per-packet hashes.
+	caps.SizeAudioOnly = caps.SizeModeV3
 	if vtCaps.Available {
 		caps.Encoders[videoToolboxEncoder] = true
 	}

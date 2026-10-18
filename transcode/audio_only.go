@@ -11,20 +11,27 @@ import (
 // programme video is stream-copied and only lossless audio is compacted.
 const VideoCodecCopy = "copy"
 
-// VideoCopyMethod names the bit-identical video proof: ffmpeg's streamhash
-// muxer (SHA-256) over the stream-copied packets of the main video.
-const VideoCopyMethod = "ffmpeg_streamhash_sha256"
+// VideoCopyMethod names the bit-identical video proof: ffprobe's demuxed
+// packet list of the main video, each payload hashed with SHA-256, compared
+// packet by packet (count, order, size, keyframe flag, payload, timing).
+const VideoCopyMethod = "ffprobe_packets_sha256"
+
+// emptyPacketDigest is the digest of an empty packet list, never a proof.
+const emptyPacketDigest = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 // VideoCopyEvidence proves that an audio-only candidate carries the source's
-// main video unchanged. Hashes are of packet payloads, so a remux into a new
-// container still matches while any re-encode, drop or edit does not.
+// main video unchanged. The hashes digest each file's demuxed packet list,
+// so a remux into a new container still matches while any re-encode, drop
+// (leading non-key packets included) or edit does not.
 type VideoCopyEvidence struct {
-	Method        string   `json:"method"`
-	Verdict       string   `json:"verdict"`
-	SourceHash    string   `json:"source_hash"`
-	CandidateHash string   `json:"candidate_hash"`
-	SourceCodec   string   `json:"source_codec"`
-	ReasonCodes   []string `json:"reason_codes,omitempty"`
+	Method           string   `json:"method"`
+	Verdict          string   `json:"verdict"`
+	SourceHash       string   `json:"source_hash"`
+	CandidateHash    string   `json:"candidate_hash"`
+	SourcePackets    int      `json:"source_packets"`
+	CandidatePackets int      `json:"candidate_packets"`
+	SourceCodec      string   `json:"source_codec"`
+	ReasonCodes      []string `json:"reason_codes,omitempty"`
 }
 
 // IsSizeAudioOnlyPlan reports a size v3 plan that copies the video stream.
@@ -94,7 +101,8 @@ func ValidateSizeAudioOnlyShape(p *Plan) error {
 
 // Check reports whether the evidence proves an unchanged video stream.
 func (e *VideoCopyEvidence) Check() error {
-	if e == nil || e.Method != VideoCopyMethod || e.Verdict != "pass" || e.SourceHash == "" || e.SourceHash != e.CandidateHash {
+	if e == nil || e.Method != VideoCopyMethod || e.Verdict != "pass" || e.SourceHash == "" || e.SourceHash == emptyPacketDigest || e.SourceHash != e.CandidateHash ||
+		e.SourcePackets <= 0 || e.SourcePackets != e.CandidatePackets {
 		return fmt.Errorf("video copy evidence is missing or the video stream changed")
 	}
 	return nil
