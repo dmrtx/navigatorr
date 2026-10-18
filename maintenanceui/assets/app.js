@@ -128,6 +128,7 @@ function bytes(n) {
   if (n == null) return "—";
   const v = Number(n);
   if (!Number.isFinite(v)) return "—";
+  if (v < 0) return `−${bytes(-v)}`;
   if (v >= 1e9) return `${(v / 1e9).toFixed(2)} GB`;
   if (v >= 1e6) return `${(v / 1e6).toFixed(1)} MB`;
   if (v >= 1e3) return `${(v / 1e3).toFixed(1)} KB`;
@@ -1574,6 +1575,10 @@ function controls() {
     ? state.folderSelected?.size || 0
     : state.selected.size;
   const folderCount = folder ? new Set([...(state.folderSelected || [])].map(path=>path.slice(0,path.lastIndexOf("/")))).size : 0;
+  if (!technical) {
+    const files = batch ? ($("selected-only").checked ? selectedCount : 0) : $("path").value.trim() ? 1 : 0;
+    $("enqueue").textContent = batch && !files ? "Process folder" : files > 1 ? `Process ${files} files` : "Process file";
+  }
   $("selection-count").textContent = selectedCount ? `${selectedCount} selected${folder ? ` across ${folderCount} ${folderCount === 1 ? "folder" : "folders"}` : ""}` : "";
   $("configure-selection").hidden = !selectedCount && !$("path").value.trim();
   $("configure-selection").disabled = state.libraryLoading;
@@ -1859,12 +1864,13 @@ async function buildAndSubmitJob(mode = "encode") {
         );
       } catch {}
     }
-    $("job-feedback").textContent = `Queued: ${r.id}`;
+    const queued = sourceSummary();
+    $("job-feedback").textContent = `Queued: ${queued}. Follow it in Activity.`;
     state.jobsLoaded = 0;
     finishSubmission(mode);
     selectTab("jobs");
     await loadJobs();
-    notify(`Job queued: ${r.id}.`);
+    notify(`Queued: ${queued}. It is listed first below.`);
   } finally {
     $("preview").disabled = false;
     $("benchmark").disabled = false;
@@ -2659,6 +2665,16 @@ async function archiveJob(job, archived) {
     setConnection(serverReachable);
   }
 }
+function confirmDecision(job, choice, label) {
+  const content = [node("p", queuePresentation(job).title, "review-filename")];
+  if (job.waiting_reason) content.push(node("p", shortJobReason(job.waiting_reason)));
+  if (choice.decision === "run_once_after_review") {
+    const report = benchmarkReport(job);
+    if (report) content.push(report);
+    content.push(node("p", "This authorizes one more bounded sample test with the settings listed above. Quality limits stay the same, and the original is not changed.", "muted"));
+  } else if (choice.description) content.push(node("p", choice.description, "muted"));
+  return reviewAction({title: `${label}?`, content, confirmLabel: label, cancelLabel: "Decide later"});
+}
 function jobControls(job, detail = false) {
   const actionRail = node("div", "", "job-actions");
   const add = (label, fn) => {
@@ -2691,13 +2707,17 @@ function jobControls(job, detail = false) {
     accept_loss: "Review candidate",
     abort: "Cancel",
     cancel: job.batch ? "Stop batch · keep originals" : "Keep original",
+    run_once_after_review: "Run one more test",
+    recheck: "Check worker again",
+    reconcile: "Check library again",
   };
   for (const choice of job.waiting_options || []) {
     // Candidate rejection is offered in the review with its frozen file ID and
     // decision version; the parent queue row must not reject an unseen file.
     if (choice.decision === "reject" && job.waiting_options.some(option=>option.decision === "accept_loss")) continue;
+    const label = decisionLabels[choice.decision] || choice.decision.replace(/_/g, " ").replace(/^./, c => c.toUpperCase());
     add(
-      decisionLabels[choice.decision] || choice.description || choice.decision,
+      label,
       async () => {
         if (choice.decision === "cancel") {
           if (await reviewAction({title:job.batch ? "Stop this batch?" : "Keep this original?",message:job.batch ? "Stop the remaining work. Originals and completed candidates are kept." : "Stop this file’s operation and keep its original.",confirmLabel:decisionLabels.cancel,cancelLabel:"Decide later"}))
@@ -2722,13 +2742,17 @@ function jobControls(job, detail = false) {
           await reviewJobDecision(job.id, choice.decision);
           return;
         }
+        // Pausing, resuming and retrying are reversible; every other decision is
+        // confirmed with the server's own explanation before it is sent.
+        if (!["resume", "pause", "retry"].includes(choice.decision) && !(await confirmDecision(job, choice, label)))
+          return;
         await jobControl(job.id, "action_resume", {
           decision: choice.decision,
         });
       },
     );
     actionRail.children[actionRail.children.length - 1].title =
-      decisionLabels[choice.decision] || choice.description || choice.decision;
+      choice.description || label;
   }
   if (job.podcast) {
  add("Ad library", () => viewPodcastAdLibrary(job.podcast.podcast_id));
@@ -2906,6 +2930,10 @@ function shortJobReason(reason) {
     preservation_not_met: "The encoded result did not preserve the required tracks or video properties; original kept",
     already_target_codec: "Already in the target codec; original kept",
     search_budget_exhausted: "Automatic testing reached its limit without finding a reliable result; original kept",
+    no_suitable_candidate: "None of the tested settings met this goal; original kept",
+    quality_policy_unavailable: "The worker cannot run the quality checks this goal needs; original kept",
+    quality_vmaf_model_unavailable: "The worker cannot measure quality for this video (VMAF model unavailable); original kept",
+    benchmark_search_review: "Earlier test rounds found nothing acceptable; review before testing again",
   };
   if (reasons[text]) return reasons[text];
   if (isCandidateRejection(text)) return "Candidate rejected by you; original kept";
@@ -2917,6 +2945,11 @@ function shortJobReason(reason) {
   if (/smb_transport_error|connecting to SMB server/.test(text)) return "Worker cannot access media storage. Fix the connection before retrying.";
   if (/shared VMAF\/CAMBI calibration supports 8-bit SDR video below 45 fps/.test(text))
     return "Automatic testing does not support this video format";
+  if (/^Two benchmark rounds for these source bytes already found no acceptable candidate/.test(text)) return reasons.benchmark_search_review;
+  if (/^Encoding finished for job .*publication requires intervention/.test(text)) return "Encoding finished, but saving the candidate failed. The candidate is kept; check storage, then ask the worker again";
+  // Engine reasons often start with a machine code ("code: detail").
+  const coded = text.match(/^([a-z0-9]+(?:_[a-z0-9]+)+)(?::\s*(.*))?$/);
+  if (coded) return reasons[coded[1]] || `${coded[1].replace(/_/g, " ").replace(/^./, c => c.toUpperCase())}${coded[2] ? `: ${coded[2]}` : ""}`;
   return text.length > 140 ? `${text.slice(0, 137)}…` : text;
 }
 function workerUnavailable(job) {
@@ -3009,7 +3042,7 @@ function queuePresentation(job) {
   const observation = workerProgressObservation(job);
   const replacementComplete = job.savings?.realized_saved_bytes != null ||
     (job.replaced && job.status === "completed");
-  const skippedFile = job.action_name === "transcode_media" && job.status === "completed" && !job.candidate_ready && ["quality_not_met","insufficient_savings","size_growth","size_growth_exceeded","preservation_not_met","already_target_codec"].includes(job.reason_code);
+  const skippedFile = job.action_name === "transcode_media" && job.status === "completed" && !job.candidate_ready && ["quality_not_met","insufficient_savings","size_growth","size_growth_exceeded","preservation_not_met","already_target_codec","no_suitable_candidate"].includes(job.reason_code);
   const status = skippedFile ? "Skipped" : job.status === "waiting_decision" && job.reason_code === "search_budget_exhausted" ? "Needs attention" : job.status === "failed" && !rejectedCandidate(job) && !savingsPolicyFailure(job.error) ? "Failed" : job.replaced_files > 0 && job.remaining_candidates > 0 ? "Candidates ready" : replacementComplete
     ? "Replaced"
     : rejectedCandidate(job) ? "Rejected" : savingsPolicyFailure(job.error) ? "Minimum savings not met" : outcomes[batch?.outcome] ||
@@ -3036,7 +3069,7 @@ function queuePresentation(job) {
         : `${bytes(s.candidate_saved_bytes)} potential savings`,
     );
   else if (!job.replaced && !rejectedCandidate(job) && batch?.outcome !== "rejected" && s.estimated_saved_bytes != null)
-    metrics.push(`${bytes(s.estimated_saved_bytes)} estimated savings`);
+    metrics.push(s.estimated_saved_bytes < 0 ? `about ${bytes(-s.estimated_saved_bytes)} larger (estimate)` : `${bytes(s.estimated_saved_bytes)} estimated savings`);
   let result;
   if (skippedFile) result = shortJobReason(job.reason_code);
   else if (job.status === "failed")
@@ -3046,7 +3079,7 @@ function queuePresentation(job) {
     result = "Replacement approval required";
   else if (job.batch) result = batchCounts(batch, true);
   else if (job.status === "waiting_decision")
-    result = job.promotion ? "Review replacement before files change" : shortJobReason(job.waiting_reason) || "Review required";
+    result = job.promotion ? "Review replacement before files change" : "Your decision is needed";
   else if (job.status === "cancelled") result = "Stopped";
   if (job.workflow_actions?.length && replacement && job.status !== "failed") {
     result = `Conversion complete · ${job.savings?.realized_saved_bytes != null ? "Replacement verified" : result || "Replacement in progress"}`;
@@ -3071,6 +3104,14 @@ function compactQueueActions(actions) {
     const icon = b.querySelector?.("svg");
     if (!icon) continue;
     const label = b.textContent.trim();
+    // Stopping work is never an unlabeled icon: × reads as "dismiss this row".
+    if (["Cancel", "Pause batch", "Retry"].includes(label)) {
+      b.replaceChildren(icon, node("span", label === "Pause batch" ? "Pause" : label));
+      b.className += label === "Retry" ? " queue-secondary recovery" : " queue-secondary dismissive";
+      b.setAttribute("aria-label", label);
+      b.title ||= label;
+      continue;
+    }
     if (["Set up benchmark", "Review candidates", "Review candidate", "Review replacement", "Review replacements", "Replace file", "Start batch", "Review preview", "View batch", "View preview", "Archive", "Restore", "Reconfigure", "Change settings", "Try another profile", "Change goal"].includes(label)) {
       b.replaceChildren(icon, node("span", label === "Replace file" ? "Replace" : label === "Set up benchmark" ? "Set up" : ["Start batch", "View batch", "View preview", "Archive", "Restore", "Reconfigure", "Change settings", "Try another profile", "Change goal"].includes(label) ? label : "Review"));
       b.className += ["Review preview", "View batch", "View preview", "Archive", "Restore", "Reconfigure", "Change settings", "Change goal"].includes(label) ? " queue-secondary" : " primary queue-primary";
@@ -3091,8 +3132,87 @@ function compactQueueActions(actions) {
       b.className += " dismissive";
   }
 }
+const benchmarkOutcomes = {
+  selected: "Settings found",
+  no_acceptable_candidate: "No setting passed",
+  no_suitable_candidate: "No setting passed",
+  size_rejected: "Size limit not met",
+  search_review_required: "Your review is needed",
+  execution_error: "Test could not finish",
+  cancelled: "Stopped",
+};
+function benchmarkHeadline(job) {
+  const b = job.benchmark;
+  if (!b) return "";
+  if (b.size_warning) return "Selected settings would make the file larger · Keep the original";
+  if (b.outcome === "search_review_required") return "Two earlier test rounds found nothing acceptable · Review before testing again · Original unchanged";
+  if (["no_acceptable_candidate", "no_suitable_candidate"].includes(b.outcome)) return `No tested setting passed${b.rejected?.length ? ` (${b.rejected.length} rejected)` : ""} · Original kept`;
+  return "";
+}
+function benchmarkCandidateLabel(c) {
+  const codec = c.video_codec === "libx265" ? "x265" : c.video_codec || "VideoToolbox";
+  const rate = c.average_bitrate_kbps ? `${c.average_bitrate_kbps} kbps` : c.video_codec === "libx265" ? `CRF ${c.quality}` : `quality ${c.quality}`;
+  return `${c.id} · ${codec} ${rate}${c.preset ? ` · ${c.preset}` : ""}`;
+}
+// Renders the server's benchmark summary (tools/benchmark_summary.go) for people:
+// what happened, why each setting was rejected, and what to do next.
+function benchmarkReport(job) {
+  const b = job.benchmark;
+  if (!b || !b.outcome || b.outcome === "testing") return null;
+  const box = node("section", "", `benchmark-report outcome-${b.outcome}`);
+  box.setAttribute("aria-label", "Sample test result");
+  const head = node("div", "", "benchmark-report-head");
+  head.append(node("h3", "Sample test result"), node("span", benchmarkOutcomes[b.outcome] || b.outcome.replace(/_/g, " "), "benchmark-outcome"));
+  box.append(head);
+  if (b.message) box.append(node("p", b.message));
+  if (b.size_warning) box.append(node("p", b.size_warning, "benchmark-warning"));
+  if (b.selection?.best_score != null)
+    box.append(node("p", `Best sampled score ${Number(b.selection.best_score).toFixed(1)}; settings within ${b.selection.marginal_tolerance} of it (≥ ${Number(b.selection.score_floor).toFixed(1)}) were compared by size.`, "metadata"));
+  if (b.previous_unsuccessful_actions?.length) {
+    const list = node("ul", "", "benchmark-list");
+    for (const id of b.previous_unsuccessful_actions) {
+      const item = node("li");
+      item.append(button(id, () => openJob(id), "quiet link-button"));
+      list.append(item);
+    }
+    box.append(node("p", "Earlier rounds without an acceptable result:", "metadata"), list);
+  }
+  if (b.proposed_candidates?.length) {
+    const list = node("ul", "", "benchmark-list");
+    for (const c of b.proposed_candidates) list.append(node("li", benchmarkCandidateLabel(c)));
+    box.append(node("p", "Settings the next round would test:", "metadata"), list);
+  }
+  if (b.rejected?.length) {
+    const details = node("details", "", "benchmark-rejected");
+    details.open = !["selected"].includes(b.outcome) || !!b.size_warning;
+    details.append(node("summary", `Why ${b.rejected.length === 1 ? "1 setting was" : `${b.rejected.length} settings were`} rejected`));
+    const list = node("ul", "", "benchmark-list");
+    for (const r of b.rejected) {
+      const item = node("li");
+      item.append(node("strong", r.candidate_id));
+      for (const check of r.checks || []) {
+        const line = node("p", check.reason || check.code);
+        if (check.actual != null && check.limit != null) line.append(node("span", ` Measured ${Number(check.actual).toFixed(1)}, limit ${Number(check.limit).toFixed(1)}.`, "muted"));
+        item.append(line);
+      }
+      if (r.failed_samples?.length) item.append(node("p", `${r.failed_samples.length} ${r.failed_samples.length === 1 ? "sample" : "samples"} below the limit.`, "muted"));
+      if (r.review_source_seconds != null) item.append(node("p", `Worst moment to check in the source: ${formatFrameTime(r.review_source_seconds).replace(/\.\d+$/, "")}`, "muted"));
+      list.append(item);
+    }
+    details.append(list);
+    box.append(details);
+  }
+  if (b.next_step && (b.outcome !== "selected" || b.size_warning)) {
+    const next = node("p", "", "benchmark-next");
+    next.append(node("strong", "Next step: "), node("span", b.next_step.replace(/the displayed run_once_after_review decision/g, "“Run one more test”")));
+    box.append(next);
+  }
+  return box;
+}
 function queueOutcome(job) {
   if (job.archived) return "Archived · Restore to return to the queue";
+  const bench = benchmarkHeadline(job);
+  if (bench) return bench;
   const batch = visibleBatch(job);
   if (rejectedCandidate(job) || batch?.outcome === "rejected") return "Candidate rejected · Original preserved";
   if (job.status === "waiting_decision") {
@@ -3401,15 +3521,26 @@ async function refreshDetail() {
     );
     if (job.podcast) { const p=job.podcast; summary.append(node("p",`${p.classified_blocks || 0}/${p.total_blocks || 0} transcript blocks classified · ${((p.removed_ms || 0)/1000).toFixed(1)} seconds removed · ${p.known_ad_units || 0} units verified by known ads`,"metadata")); if (p.output_path && job.status === "completed") summary.append(node("p",`Validated MP3: ${p.output_path}`,"metadata")); }
     if (job.transcode) {
-      summary.append(node("p", job.status === "completed" && !job.candidate_ready && job.reason_code ? shortJobReason(job.reason_code) : job.transcode.message, "job-outcome metadata"));
+      // A waiting decision repeats its reason below, and a sample test result
+      // card explains the outcome itself; show it only once.
+      const hasReport = job.benchmark?.outcome && job.benchmark.outcome !== "testing";
+      if (job.status !== "waiting_decision" && !hasReport) summary.append(node("p", job.status === "completed" && !job.candidate_ready && job.reason_code ? shortJobReason(job.reason_code) : shortJobReason(job.transcode.message), "job-outcome metadata"));
       if (job.transcode.tested_candidates) summary.append(node("p", `${job.transcode.tested_candidates} configurations tested${job.transcode.verified_samples ? ` · ${job.transcode.verified_samples} quality samples verified` : ""}`, "metadata"));
     }
  renderPhaseCosts(summary, job);
+    const report = benchmarkReport(job);
+    if (report) summary.append(report);
     if (queuePresentation(job).showTelemetry) summary.append(telemetry(job));
     else if (batchProgress(job)) summary.append(batchProgress(job));
     else if (!job.batch?.dry_run && job.batch?.outcome !== "no_changes") summary.append(node("p", queueOutcome(job), "job-outcome metadata"));
     if (job.batch?.outcome === "no_changes") summary.append(skippedBatchOutcome(job));
     if (job.batch?.dry_run) summary.append(node("p", queueOutcome(job) + (job.batch.queued > 0 && !job.preview_execution_action_id ? ". Review the eligible files, then choose Start batch to convert them." : "."), "preview-notice"));
+    const raw = job.status === "waiting_decision" ? job.waiting_reason : job.status === "failed" ? job.error : "";
+    if (raw && shortJobReason(raw) !== raw) {
+      const technical = node("details", "", "technical-reason");
+      technical.append(node("summary", "Technical details"), node("p", raw, "metadata"));
+      summary.append(technical);
+    }
     if (job.batch?.total > 1 && !job.batch.dry_run) renderBatchCounts(summary, visibleBatch(job));
     if (visibleBatch(job)?.failed && job.batch_files?.reasons?.length) {
       const reason = job.batch_files.reasons[0];
