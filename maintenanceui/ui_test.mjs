@@ -3105,6 +3105,26 @@ test("a finished encode shows the original's re-check, never Completed", () => {
   assert.equal(h.run('postEncodeWork({status:"running",worker:{benchmark_status:"completed",phase:"completed"}})'), null);
 });
 
+test("the original's re-check keeps a waiting reason and also shows for a skipped conversion", () => {
+  const h = finishedEncodeHarness();
+  h.run('progressJob.activities[0].waiting_condition="worker_reconciling";progressJob.activities[0].waiting_reason="Coordinator request interrupted";');
+  assert.equal(h.run('batchFileActivity({status:"running",child_action_id:"child"},progressJob)'), "Conversion finished · Review converted file · Coordinator request interrupted");
+
+  // A skipped conversion re-checks the original without any worker telemetry.
+  h.run('delete progressJob.worker;progressJob.activities=[{...progressJob,id:"child"}];');
+  h.run('progressJob.work=progressJob.activities[0].work={phase:"waiting_for_hash_slot",total_bytes:34e9};');
+  assert.equal(h.run('batchFileActivity({status:"running",child_action_id:"child"},progressJob)'), "Waiting to verify original");
+  assert.match(progressText(h.run('telemetry(progressJob)')), /Waiting to verify original/);
+  h.run('progressJob.work=progressJob.activities[0].work={phase:"verifying_original",bytes_read:1e9,total_bytes:34e9};');
+  assert.equal(h.run('batchFileActivity({status:"running",child_action_id:"child"},progressJob)'), "Checking the original is unchanged · 1.00 GB / 34.00 GB");
+  const text = progressText(h.run('telemetry(progressJob)'));
+  assert.match(text, /Checking the original is unchanged.*1\.00 GB \/ 34\.00 GB/);
+  assert.doesNotMatch(text, /Encode finished/);
+  // After a calibration only, too: its "Completed" is not the current work.
+  h.run('progressJob.worker={benchmark_status:"completed",phase:"completed"};');
+  assert.match(progressText(h.run('telemetry(progressJob)')), /Checking the original is unchanged/);
+});
+
 test("full-output checks and publication after 100% name the converted file and the encode's end", () => {
   for (const [phase, label] of [["validating", "Verifying converted file"], ["publishing", "Saving converted file"]]) {
     const h = finishedEncodeHarness();

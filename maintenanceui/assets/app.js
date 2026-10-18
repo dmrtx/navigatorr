@@ -2278,16 +2278,6 @@ function telemetry(job) {
     result.append(node("span", observation.message + (observation.warning ? last : ""), "metadata"));
     return result;
   }
-  if (!w) {
-    const stages = job.stages || [];
-    const current = stages[job.current_step];
-    const text = current
-      ? `Step ${job.current_step + 1}/${stages.length} · ${stageLabel(current.name)}`
-      : job.waiting_reason || "Starting job";
-    result.append(node("span", text, "metadata"));
-    return result;
-  }
-  const phase = w.transcode_phase || w.benchmark_phase || w.phase;
   const after = postEncodeWork(job);
   if (after) {
     result.append(node("span", [job.activity_file ? `Current: ${job.activity_file.split("/").pop()}` : null, after.label].filter(Boolean).join(" · "), "metadata"));
@@ -2299,10 +2289,20 @@ function telemetry(job) {
       meter.setAttribute("aria-label", `Original checked ${(after.read / after.total * 100).toFixed(1)}%`);
       result.append(meter, node("span", `${bytes(after.read)} / ${bytes(after.total)}`, "metadata"));
     }
-    if (w.last_progress_at)
+    if (postEncodeWorkerPhases.includes(w?.transcode_phase) && w.last_progress_at)
       result.append(node("span", `Encode finished ${new Date(w.last_progress_at).toLocaleTimeString()}`, "metadata progress-observed-at"));
     return result;
   }
+  if (!w) {
+    const stages = job.stages || [];
+    const current = stages[job.current_step];
+    const text = current
+      ? `Step ${job.current_step + 1}/${stages.length} · ${stageLabel(current.name)}`
+      : job.waiting_reason || "Starting job";
+    result.append(node("span", text, "metadata"));
+    return result;
+  }
+  const phase = w.transcode_phase || w.benchmark_phase || w.phase;
   const phases = {
     queued: "Queued",
     preparing: "Preparing",
@@ -3804,14 +3804,15 @@ async function loadJobs(more = false) {
 
 // The worker's encode ends before its full-output checks and publication;
 // its last progress measurement then marks the encode's end, not liveness.
-const postEncodeWorkerPhases = ["validating", "validating_quality", "publishing", "completed"];
+const postEncodeWorkerPhases = ["validating", "validating_quality", "publishing", "publication_pending", "completed"];
 // A finished worker still leaves the coordinator verifying the candidate and
 // re-hashing the whole original, minutes on a large file. Name that work
-// rather than the finished encode; null while the worker is still working.
+// rather than the finished encode or calibration; null while neither applies.
 function postEncodeWork(job) {
-  const w = job?.worker || {};
+  if (!["running", "waiting_external"].includes(job?.status)) return null;
+  const w = job.worker || {};
   // Only the full conversion: a finished calibration hands back to the worker.
-  if (!["running", "waiting_external"].includes(job?.status) || !(w.transcode_phase === "completed" || w.transcode_status === "completed")) return null;
+  const converted = w.transcode_phase === "completed" || w.transcode_status === "completed";
   const stage = job.stages?.[job.current_step]?.name;
   const work = job.work || {};
   const total = Number(work.total_bytes) > 0 ? Number(work.total_bytes) : 0;
@@ -3820,8 +3821,9 @@ function postEncodeWork(job) {
     return {label: "Checking the original is unchanged", read: total ? Math.min(read, total) : read, total};
   }
   // Preflight queues its own source hash the same way; only a later step's
-  // wait is the original's re-check.
-  if (work.phase === "waiting_for_hash_slot" && stage !== "preflight") return {label: "Waiting to verify original", total};
+  // wait is the original's re-check. A skipped conversion reaches it too.
+  if (work.phase === "waiting_for_hash_slot" && (stage === "accept_result" || converted && stage !== "preflight")) return {label: "Waiting to verify original", total};
+  if (!converted) return null;
   return {label: ["validate_result", "accept_result"].includes(stage) ? `Conversion finished · ${stageLabel(stage)}` : "Conversion finished"};
 }
 function postEncodeWorkLabel(work) {
@@ -4069,7 +4071,10 @@ function batchFileActivity(item, job) {
   const worker = activity?.worker;
   const phase = worker?.transcode_phase || worker?.benchmark_phase || worker?.phase;
   const after = activity && postEncodeWork({...activity, status: item.status});
-  if (after) return postEncodeWorkLabel(after);
+  if (after) {
+    const observation = workerProgressObservation({...activity, status: item.status});
+    return postEncodeWorkLabel(after) + (observation.message ? ` · ${observation.message}` : "");
+  }
   if (phase) {
     const observation = workerProgressObservation({...activity, status: item.status});
     const eta = observation.message ? "" : encodeEta(activity.id, worker, activity.eta_seconds);
