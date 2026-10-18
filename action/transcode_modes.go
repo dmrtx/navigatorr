@@ -37,13 +37,16 @@ const modeSearchBudgetSeconds = 600
 //
 // The numbers come from the timings of a batch of one-hour 1080p episodes of
 // 2-4 GB searched two at a time: the base budget covered roughly 6-9 of 15-17
-// planned sample encodes (each with its quality passes), and a search that also
-// needs the fallback candidates and two verification attempts takes about
-// three times as long. 2400 s covers that with margin; 600 s covers the two
-// holdout windows of a verification attempt under the same load.
+// planned sample encodes (each with its quality passes) of the largest source,
+// and a search that also needs the fallback candidates and two verification
+// attempts takes about three times as long. 2400 s covers that with margin; 600
+// s covers the two holdout windows of a verification attempt under the same
+// load. A single unit took about 10 s (encode) to 60 s (encode on the largest
+// source, or one quality evaluation) there; the slower presets of the fallback
+// family can take a few times that, so the steady window is 300 s.
 const (
 	sizeSearchMaxSeconds    = 2400
-	sizeSearchSteadySeconds = 180
+	sizeSearchSteadySeconds = 300
 	sizeSearchVerifySeconds = 600
 )
 

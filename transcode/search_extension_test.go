@@ -2,6 +2,7 @@ package transcode
 
 import (
 	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 )
@@ -19,6 +20,10 @@ func TestSearchExtensionValidate(t *testing.T) {
 		{"cap and allowance exactly at the ceiling", &SearchExtension{MaxSeconds: 3000, SteadySeconds: 180, VerifySeconds: 600}, 600, true},
 		{"allowance pushes past the ceiling", &SearchExtension{MaxSeconds: 3000, SteadySeconds: 180, VerifySeconds: 601}, 600, false},
 		{"negative allowance", &SearchExtension{MaxSeconds: 1800, SteadySeconds: 180, VerifySeconds: -1}, 600, false},
+		{"cap at the largest integer", &SearchExtension{MaxSeconds: math.MaxInt, SteadySeconds: 180}, 600, false},
+		{"allowance at the largest integer", &SearchExtension{MaxSeconds: 1800, SteadySeconds: 180, VerifySeconds: math.MaxInt}, 600, false},
+		// The sum of these two wraps to a negative number.
+		{"sum that wraps around", &SearchExtension{MaxSeconds: 5_000_000_000, SteadySeconds: 180, VerifySeconds: math.MaxInt - 4_000_000_000}, 600, false},
 		{"ceiling", &SearchExtension{MaxSeconds: MaxSearchBudgetSeconds, SteadySeconds: MaxSearchSteadySeconds}, 600, true},
 		{"smallest window", &SearchExtension{MaxSeconds: 601, SteadySeconds: MinSearchSteadySeconds}, 600, true},
 		{"cap equals base", &SearchExtension{MaxSeconds: 600, SteadySeconds: 180}, 600, false},

@@ -365,7 +365,7 @@ func TestInternalBenchmarkKeepsARealFailureThatTheWatcherOutlived(t *testing.T) 
 func TestInternalBenchmarkNeverRunsPastTheHardCapDespiteProgress(t *testing.T) {
 	w := newBudgetWorker(t)
 	var cause error
-	result, err := runBudgetBenchmark(t, w, 10, 400*time.Millisecond, &transcode.SearchExtension{MaxSeconds: 11, SteadySeconds: 30}, func(ctx context.Context, record *BenchmarkRecord) error {
+	result, err := runBudgetBenchmark(t, w, 10, time.Second, &transcode.SearchExtension{MaxSeconds: 11, SteadySeconds: 30}, func(ctx context.Context, record *BenchmarkRecord) error {
 		for ctx.Err() == nil {
 			record.searchBudget.noteUnit()
 			select {
@@ -398,7 +398,9 @@ func runVerifyingBenchmark(t *testing.T, verifying bool) pastCapRun {
 	w := newBudgetWorker(t)
 	var cause error
 	var pastCap time.Duration
-	result, err := runBudgetBenchmark(t, w, 10, 400*time.Millisecond, &transcode.SearchExtension{MaxSeconds: 11, SteadySeconds: 30, VerifySeconds: 2}, func(ctx context.Context, record *BenchmarkRecord) error {
+	// A wide margin before the base keeps slow setup from landing the watcher's
+	// first tick past it, before the runner has noted any unit.
+	result, err := runBudgetBenchmark(t, w, 10, time.Second, &transcode.SearchExtension{MaxSeconds: 11, SteadySeconds: 30, VerifySeconds: 1}, func(ctx context.Context, record *BenchmarkRecord) error {
 		if verifying {
 			newBenchmarkProgressReporter(nil, record, 1).SetPhase(phaseVerifyingSamples)
 		}
@@ -421,9 +423,9 @@ func TestInternalBenchmarkLetsAVerifyingSearchPastTheCapButNotPastTheAllowance(t
 	if !errors.Is(run.err, context.DeadlineExceeded) || !errors.Is(run.cause, context.DeadlineExceeded) {
 		t.Fatalf("the allowance must end at the context deadline: err=%v cause=%v", run.err, run.cause)
 	}
-	// The cap is 11 s from the start and the allowance 2 s more.
-	if run.pastCap < 1500*time.Millisecond || run.pastCap > 3*time.Second {
-		t.Fatalf("a verifying search ended %s past the cap, want about 2 s", run.pastCap)
+	// The cap is 11 s from the start and the allowance 1 s more.
+	if run.pastCap < 700*time.Millisecond || run.pastCap > 2500*time.Millisecond {
+		t.Fatalf("a verifying search ended %s past the cap, want about 1 s", run.pastCap)
 	}
 	if run.result.ReasonCode != "search_budget_exhausted" {
 		t.Fatalf("the allowance running out is still an exhaustion: %+v", run.result)
@@ -435,7 +437,9 @@ func TestInternalBenchmarkStopsASearchWithoutAWinnerAtTheCapDespiteTheAllowance(
 	if !errors.Is(run.cause, errSearchBudgetStopped) || !errors.Is(run.err, context.Canceled) {
 		t.Fatalf("a search that never verified must be stopped by the watcher at the cap: err=%v cause=%v", run.err, run.cause)
 	}
-	if run.pastCap > 1500*time.Millisecond {
+	// It ran up to the cap (an earlier stop would be well before it) and was
+	// stopped by the watcher there, not by the later context deadline.
+	if run.pastCap < -250*time.Millisecond || run.pastCap > 700*time.Millisecond {
 		t.Fatalf("the watcher stopped the search %s past the cap", run.pastCap)
 	}
 	if run.result.ReasonCode != "search_budget_exhausted" {

@@ -121,8 +121,12 @@ func (e *Engine) observeBenchmarkStatus(ec *ExecutionContext, st transcode.Bench
 	}
 	// Both follow the latest status, so a later attempt on a worker without the
 	// extension, or one that did not run out of time, does not inherit them.
+	delete(ec.State, "search_budget_verify_seconds")
 	if st.SearchExtension != nil {
-		ec.State["search_budget_max_seconds"] = st.SearchExtension.TotalSeconds()
+		ec.State["search_budget_max_seconds"] = st.SearchExtension.MaxSeconds
+		if st.SearchExtension.VerifySeconds > 0 {
+			ec.State["search_budget_verify_seconds"] = st.SearchExtension.VerifySeconds
+		}
 	} else {
 		delete(ec.State, "search_budget_max_seconds")
 	}

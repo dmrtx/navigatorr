@@ -2570,7 +2570,8 @@ test("phase cost detail shows known cache observations and distinguishes search 
 
 test("phase cost detail names the extended search ceiling only when the worker reports one",()=>{
  const render=worker=>{const h=harness();h.context.job={worker,phase_costs:{}};h.run('renderPhaseCosts($("detail-summary"),job);');return JSON.stringify(h.elements.get("detail-summary").children);};
- assert.match(render({benchmark_search_seconds:900,search_budget_seconds:600,search_budget_max_seconds:1800}),/Budget per file: 600 s, extended to at most 1800 s while samples keep finishing/);
+ assert.match(render({benchmark_search_seconds:900,search_budget_seconds:600,search_budget_max_seconds:1800}),/Budget per file: 600 s, extended to at most 1800 s while samples keep finishing\./);
+ assert.match(render({benchmark_search_seconds:900,search_budget_seconds:600,search_budget_max_seconds:2400,search_budget_verify_seconds:600}),/extended to at most 2400 s while samples keep finishing, 3000 s while verifying a winner\./);
  assert.doesNotMatch(render({benchmark_search_seconds:4,search_budget_seconds:600}),/extended/);
  assert.doesNotMatch(render({benchmark_search_seconds:4,search_budget_seconds:600,search_budget_max_seconds:600}),/extended/);
  assert.doesNotMatch(render({benchmark_search_seconds:4,search_budget_max_seconds:1800}),/extended/);

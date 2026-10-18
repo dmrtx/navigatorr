@@ -39,7 +39,7 @@ func TestSizeModePolicyV3FreezesSearchExtension(t *testing.T) {
 		t.Fatal(err)
 	}
 	ext := p.Size.SearchExtension
-	if ext == nil || ext.MaxSeconds != 2400 || ext.SteadySeconds != 180 || ext.VerifySeconds != 600 || p.SearchBudgetSeconds != 600 {
+	if ext == nil || ext.MaxSeconds != 2400 || ext.SteadySeconds != 300 || ext.VerifySeconds != 600 || p.SearchBudgetSeconds != 600 {
 		t.Fatalf("size policy extension %+v base=%d", ext, p.SearchBudgetSeconds)
 	}
 	if got := p.searchExtension(); got == nil || got.TotalSeconds() != 3000 {
@@ -189,7 +189,7 @@ func TestBenchmarkRequestSendsTheSearchExtensionOnlyWhereItIsUnderstood(t *testi
 	legacy := legacySizeSnapshot(t)
 
 	req := extensionRequestFor(t, nil, capable)
-	if req.SearchBudgetSeconds != 600 || req.SearchExtension == nil || req.SearchExtension.MaxSeconds != 2400 || req.SearchExtension.SteadySeconds != 180 || req.SearchExtension.VerifySeconds != 600 {
+	if req.SearchBudgetSeconds != 600 || req.SearchExtension == nil || req.SearchExtension.MaxSeconds != 2400 || req.SearchExtension.SteadySeconds != 300 || req.SearchExtension.VerifySeconds != 600 {
 		t.Fatalf("a new operation on a capable worker: %+v", req.SearchExtension)
 	}
 	if err := req.SearchExtension.Validate(req.SearchBudgetSeconds); err != nil {
@@ -251,7 +251,7 @@ func TestSearchOutOfTimeOnABusyWorkerSaysSoAndKeepsTheSameDecision(t *testing.T)
 	if len(res.WaitingOptions) != 1 || res.WaitingOptions[0].Decision != "cancel" {
 		t.Fatalf("options %+v", res.WaitingOptions)
 	}
-	if !getBool(ec.State, "search_worker_busy") || getInt(ec.State, "search_budget_max_seconds") != 3000 {
+	if !getBool(ec.State, "search_worker_busy") || getInt(ec.State, "search_budget_max_seconds") != 2400 || getInt(ec.State, "search_budget_verify_seconds") != 600 {
 		t.Fatalf("telemetry not recorded: %+v", ec.State)
 	}
 }
@@ -277,12 +277,15 @@ func TestObservedStatusDropsSearchTelemetryTheNewerAttemptLacks(t *testing.T) {
 	e := NewEngine(EngineDeps{})
 	ec := &ExecutionContext{InstanceID: "bench-stale", ActionName: "transcode_media", Inputs: map[string]any{}, Outputs: map[string]any{}, State: map[string]any{}}
 	e.observeBenchmarkStatus(ec, transcode.BenchmarkStatus{Status: transcode.StatusFailed, SearchBudgetSeconds: 600, SearchWorkerBusy: true, SearchExtension: &transcode.SearchExtension{MaxSeconds: 2400, SteadySeconds: 180, VerifySeconds: 600}})
-	if getInt(ec.State, "search_budget_max_seconds") != 3000 {
+	if getInt(ec.State, "search_budget_max_seconds") != 2400 || getInt(ec.State, "search_budget_verify_seconds") != 600 {
 		t.Fatalf("setup did not record telemetry: %+v", ec.State)
 	}
 	ec.State["search_worker_busy"] = true // as the exhausted wait leaves it
 	// A later attempt on a worker without the extension, that finished in time.
 	e.observeBenchmarkStatus(ec, transcode.BenchmarkStatus{Status: transcode.StatusCompleted, SearchBudgetSeconds: 600})
+	if _, ok := ec.State["search_budget_verify_seconds"]; ok {
+		t.Fatalf("the verification allowance outlived the attempt that had it: %+v", ec.State)
+	}
 	if _, ok := ec.State["search_budget_max_seconds"]; ok {
 		t.Fatalf("the extended cap outlived the attempt that had it: %+v", ec.State)
 	}

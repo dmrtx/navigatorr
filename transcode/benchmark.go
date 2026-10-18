@@ -361,7 +361,8 @@ func (e *SearchExtension) Validate(base int) error {
 	if e == nil {
 		return nil
 	}
-	if base <= 0 || e.MaxSeconds <= base || e.VerifySeconds < 0 || e.TotalSeconds() > MaxSearchBudgetSeconds {
+	// Each field is bounded before they are summed, so the sum cannot wrap.
+	if base <= 0 || e.MaxSeconds <= base || e.MaxSeconds > MaxSearchBudgetSeconds || e.VerifySeconds < 0 || e.VerifySeconds > MaxSearchBudgetSeconds || e.TotalSeconds() > MaxSearchBudgetSeconds {
 		return fmt.Errorf("search extension max_seconds must be above the base budget and, with verify_seconds, at most %d", MaxSearchBudgetSeconds)
 	}
 	if e.SteadySeconds < MinSearchSteadySeconds || e.SteadySeconds > MaxSearchSteadySeconds {
