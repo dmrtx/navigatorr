@@ -223,22 +223,39 @@ type qualityFollower struct {
 	leader string
 }
 
-// splitQualityFamilies groups constant-quality candidates that differ only in
-// their quality value. Each family's best setting (lowest x265 CRF, highest
-// VideoToolbox -q:v) leads; bitrate sweeps and singletons are always leaders.
-func splitQualityFamilies(vcs []validatedCandidate) (leaders []validatedCandidate, followers []qualityFollower) {
-	type family struct {
-		members       []validatedCandidate
-		lowerIsBetter bool
+// qualityFamily is a set of constant-quality candidates that differ only in
+// their quality value. Bitrate sweeps and other candidates form singletons.
+type qualityFamily struct {
+	members       []validatedCandidate
+	lowerIsBetter bool // libx265 CRF; VideoToolbox -q:v is higher-is-better
+}
+
+// pick returns the index of the family's highest-quality member (best) or
+// its most-compressed member (!best). Ties keep the first member.
+func (f qualityFamily) pick(best bool) int {
+	out := 0
+	for i, vc := range f.members {
+		q, oq := vc.candidate.Quality, f.members[out].candidate.Quality
+		better := (f.lowerIsBetter && q < oq) || (!f.lowerIsBetter && q > oq)
+		worse := (f.lowerIsBetter && q > oq) || (!f.lowerIsBetter && q < oq)
+		if (best && better) || (!best && worse) {
+			out = i
+		}
 	}
+	return out
+}
+
+// groupQualityFamilies groups constant-quality libx265 and VideoToolbox
+// candidates whose settings match except for ID and quality, in first-seen order.
+func groupQualityFamilies(vcs []validatedCandidate) []qualityFamily {
 	var order []string
-	families := map[string]*family{}
+	families := map[string]*qualityFamily{}
 	for _, vc := range vcs {
 		c := vc.candidate
 		codec := transcode.BenchmarkCandidateVideoCodec(c)
 		if c.Quality <= 0 || c.AverageBitrateKbps != 0 || (codec != "libx265" && codec != "hevc_videotoolbox") {
 			order = append(order, "\x00"+c.ID)
-			families["\x00"+c.ID] = &family{members: []validatedCandidate{vc}}
+			families["\x00"+c.ID] = &qualityFamily{members: []validatedCandidate{vc}}
 			continue
 		}
 		key := c
@@ -247,19 +264,23 @@ func splitQualityFamilies(vcs []validatedCandidate) (leaders []validatedCandidat
 		k := codec + string(b)
 		if families[k] == nil {
 			order = append(order, k)
-			families[k] = &family{lowerIsBetter: codec == "libx265"}
+			families[k] = &qualityFamily{lowerIsBetter: codec == "libx265"}
 		}
 		families[k].members = append(families[k].members, vc)
 	}
+	out := make([]qualityFamily, 0, len(order))
 	for _, k := range order {
-		f := families[k]
-		best := 0
-		for i, vc := range f.members {
-			q, bq := vc.candidate.Quality, f.members[best].candidate.Quality
-			if (f.lowerIsBetter && q < bq) || (!f.lowerIsBetter && q > bq) {
-				best = i
-			}
-		}
+		out = append(out, *families[k])
+	}
+	return out
+}
+
+// splitQualityFamilies groups constant-quality candidates that differ only in
+// their quality value. Each family's best setting (lowest x265 CRF, highest
+// VideoToolbox -q:v) leads; bitrate sweeps and singletons are always leaders.
+func splitQualityFamilies(vcs []validatedCandidate) (leaders []validatedCandidate, followers []qualityFollower) {
+	for _, f := range groupQualityFamilies(vcs) {
+		best := f.pick(true)
 		leaders = append(leaders, f.members[best])
 		for i, vc := range f.members {
 			if i != best {

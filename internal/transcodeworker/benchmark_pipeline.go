@@ -7,10 +7,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -319,22 +319,76 @@ func (r *ProductionBenchmarkRunner) runPipelinedEncodeMetrics(
 		fatal:                fatal,
 	}
 
-	encQ := make(chan int, nUnits)
-	metQ := make(chan int, nUnits)
+	if savings == nil {
+		all := make([]int, nUnits)
+		for i := range all {
+			all[i] = i
+		}
+		sh.runUnits(ctx, units, all, nil, true, encodeN, metricN)
+	} else {
+		// Encode each family's most-compressed setting first and hold every
+		// metric until those encodes decide which families can still save
+		// enough; a doomed family's other settings are never encoded.
+		savings.leaderOf = savingsLeaders(vcs)
+		var decisive, rest []int
+		for idx, u := range units {
+			if savings.leaderOf[u.vcOrd] == u.vcOrd {
+				decisive = append(decisive, idx)
+			} else {
+				rest = append(rest, idx)
+			}
+		}
+		sh.runUnits(ctx, units, decisive, nil, false, encodeN, metricN)
+		if !fatal.failed() && ctx.Err() == nil {
+			sh.decideSavingsFamilies()
+			var alive []int
+			for _, idx := range rest {
+				if _, dominated := savings.dominatedBy(units[idx].vcOrd); dominated {
+					progressReporter.SkipUnits(1 + passesPerSample)
+					continue
+				}
+				alive = append(alive, idx)
+			}
+			sh.runUnits(ctx, units, alive, decisive, true, encodeN, metricN)
+		}
+	}
+
+	if ferr, metric := fatal.get(); ferr != nil {
+		sh.assembleEvidence(units)
+		if metric {
+			return fmt.Errorf("metrics calculation failed: %w", ferr)
+		}
+		return ferr
+	}
+	sh.assembleEvidence(units)
+	return nil
+}
+
+// runUnits encodes encodeIdx with bounded concurrency. When measure is set,
+// each newly encoded unit and every already encoded readyIdx unit is then
+// evaluated on the metric stage while remaining encodes continue.
+func (sh *pipelineShared) runUnits(ctx context.Context, units []pipelineUnit, encodeIdx, readyIdx []int, measure bool, encodeN, metricN int) {
+	encQ := make(chan int, len(encodeIdx))
+	metQ := make(chan int, len(encodeIdx)+len(readyIdx))
+	if measure {
+		for _, idx := range readyIdx {
+			metQ <- idx
+		}
+	}
 
 	// Feeder enqueues units in deterministic order; stops early on caller
 	// cancellation or the first job-fatal error so no new work starts after
 	// the job is already doomed. In-flight units are never interrupted.
 	go func() {
 		defer close(encQ)
-		for i := range units {
-			if fatal.failed() {
+		for _, idx := range encodeIdx {
+			if sh.fatal.failed() {
 				return
 			}
 			select {
 			case <-ctx.Done():
 				return
-			case encQ <- i:
+			case encQ <- idx:
 			}
 		}
 	}()
@@ -355,12 +409,12 @@ func (r *ProductionBenchmarkRunner) runPipelinedEncodeMetrics(
 					if ctx.Err() != nil {
 						return
 					}
-					if fatal.failed() {
+					if sh.fatal.failed() {
 						return
 					}
 					sh.runEncodeUnit(ctx, units[idx], idx)
-					if sh.savings != nil && sh.savings.encoded.Add(1) == int64(nUnits) {
-						sh.checkSavingsGate()
+					if !measure {
+						continue
 					}
 					if ctx.Err() != nil {
 						return
@@ -373,6 +427,10 @@ func (r *ProductionBenchmarkRunner) runPipelinedEncodeMetrics(
 				}
 			}
 		}()
+	}
+	if !measure {
+		encWG.Wait()
+		return
 	}
 
 	// Close the metric queue once every encode worker has exited, so metric
@@ -404,16 +462,6 @@ func (r *ProductionBenchmarkRunner) runPipelinedEncodeMetrics(
 		}()
 	}
 	metWG.Wait()
-
-	if ferr, metric := fatal.get(); ferr != nil {
-		sh.assembleEvidence(units)
-		if metric {
-			return fmt.Errorf("metrics calculation failed: %w", ferr)
-		}
-		return ferr
-	}
-	sh.assembleEvidence(units)
-	return nil
 }
 
 // runEncodeUnit encodes one (candidate, sample) unit. Any error is job-fatal,
@@ -554,9 +602,6 @@ func (sh *pipelineShared) runMetricUnit(ctx context.Context, u pipelineUnit, idx
 	}
 	candPath := filepath.Join(sh.samplesDir, vc.fileKey+"_sample_"+strconv.Itoa(window.Index)+".mkv")
 
-	if sh.savings != nil && sh.savings.doomed.Load() {
-		sh.poisons[u.vcOrd].setFailed(savingsGateReason)
-	}
 	poisoned, reason := sh.poisons[u.vcOrd].isFailed()
 	candStat, statErr := os.Stat(candPath)
 	if statErr != nil || !candStat.Mode().IsRegular() || candStat.Size() == 0 {
@@ -942,8 +987,12 @@ func (sh *pipelineShared) assembleEvidence(units []pipelineUnit) {
 			}
 		}
 	}
-	// Per-candidate aggregates in deterministic candidate order.
+	// Per-candidate aggregates in deterministic candidate order. Candidates
+	// dominated on size were never encoded and are explained by selection.
 	for vcOrd, vc := range sh.vcs {
+		if _, dominated := sh.savings.dominatedBy(vcOrd); dominated {
+			continue
+		}
 		var vmafScores []optimization.SampleScore
 		var ssimScores []optimization.SampleScore
 		for sampOrd := range sh.record.Samples {
@@ -1089,37 +1138,138 @@ func (sh *pipelineShared) evaluateCandidateQuality(vcOrd int, candidateID string
 	return e, reject
 }
 
-const savingsGateReason = "insufficient_savings_before_metrics"
+const (
+	savingsGateReason      = "insufficient_savings_before_metrics"
+	savingsDominatedReason = "skipped_savings_dominated"
+)
 
-// savingsGate stops quality measurement once every encoded candidate is
-// already estimated below the caller's minimum savings. No quality result
-// can then produce an acceptable winner, so the verdict does not change.
+// savingsGate saves quality measurement when the caller sets a minimum
+// savings. Each family's most-compressed setting is encoded first; when its
+// estimate is already below the minimum, no setting of that family that
+// spends more bits can save enough, so those settings are never encoded and
+// the leader's metrics are skipped. When every family is doomed, no quality
+// result can produce an acceptable winner, so the verdict does not change.
 type savingsGate struct {
 	base       optimization.OutputEstimateInput
 	minSavings float64
-	encoded    atomic.Int64
-	doomed     atomic.Bool
+	// leaderOf maps each candidate ordinal to its family's most-compressed
+	// member; familyDoomed is indexed by that leader ordinal.
+	leaderOf     []int
+	familyDoomed []bool
+	// doomed reports that every family's leader is below the minimum.
+	doomed bool
 }
 
-// checkSavingsGate runs once, after the last encode unit. Any failed encode
-// or unusable estimate keeps measuring so the normal selection decides.
-func (sh *pipelineShared) checkSavingsGate() {
-	n := len(sh.record.Samples)
-	for vcOrd := range sh.vcs {
-		var sampleBytes int64
-		for sampOrd := 0; sampOrd < n; sampOrd++ {
-			out := sh.encodeOut[vcOrd*n+sampOrd]
-			if out.err != nil || out.entry.Error != "" || out.entry.SizeBytes <= 0 {
-				return
-			}
-			sampleBytes += out.entry.SizeBytes
-		}
-		in := sh.savings.base
-		in.SampleVideoBytes = sampleBytes
-		est, err := optimization.EstimateOutput(in)
-		if err != nil || !est.SuitableForSelection || est.SavingsPercent >= sh.savings.minSavings {
-			return
+// savingsLeaders maps each candidate to its family's most-compressed member
+// (highest x265 CRF, lowest VideoToolbox -q:v); singletons lead themselves.
+func savingsLeaders(vcs []validatedCandidate) []int {
+	ord := make(map[string]int, len(vcs))
+	for i, vc := range vcs {
+		ord[vc.candidate.ID] = i
+	}
+	leaderOf := make([]int, len(vcs))
+	for _, f := range groupQualityFamilies(vcs) {
+		leader := ord[f.members[f.pick(false)].candidate.ID]
+		for _, vc := range f.members {
+			leaderOf[ord[vc.candidate.ID]] = leader
 		}
 	}
-	sh.savings.doomed.Store(true)
+	return leaderOf
+}
+
+// dominatedBy reports the doomed leader of a candidate that was skipped.
+// Leaders themselves are encoded and are never dominated.
+func (g *savingsGate) dominatedBy(vcOrd int) (int, bool) {
+	if g == nil || g.familyDoomed == nil || vcOrd >= len(g.leaderOf) {
+		return 0, false
+	}
+	leader := g.leaderOf[vcOrd]
+	return leader, leader != vcOrd && g.familyDoomed[leader]
+}
+
+// decideSavingsFamilies runs once, after every leader encode. A failed encode
+// or unusable estimate keeps the family alive so the normal selection decides.
+// Doomed leaders are poisoned so their queued metric units do not run.
+func (sh *pipelineShared) decideSavingsFamilies() {
+	g := sh.savings
+	n := len(sh.record.Samples)
+	g.familyDoomed = make([]bool, len(sh.vcs))
+	g.doomed = true
+	for vcOrd := range sh.vcs {
+		if g.leaderOf[vcOrd] != vcOrd {
+			continue
+		}
+		if !sh.leaderBelowMinimum(vcOrd, n) {
+			g.doomed = false
+			continue
+		}
+		g.familyDoomed[vcOrd] = true
+		sh.poisons[vcOrd].setFailed(savingsGateReason)
+	}
+}
+
+func (sh *pipelineShared) leaderBelowMinimum(vcOrd, n int) bool {
+	var sampleBytes int64
+	for sampOrd := 0; sampOrd < n; sampOrd++ {
+		out := sh.encodeOut[vcOrd*n+sampOrd]
+		if out.err != nil || out.entry.Error != "" || out.entry.SizeBytes <= 0 {
+			return false
+		}
+		sampleBytes += out.entry.SizeBytes
+	}
+	in := sh.savings.base
+	in.SampleVideoBytes = sampleBytes
+	est, err := optimization.EstimateOutput(in)
+	return err == nil && est.SuitableForSelection && est.SavingsPercent < sh.savings.minSavings
+}
+
+// selectable drops the candidates that were dominated on size and never encoded.
+func (g *savingsGate) selectable(vcs []validatedCandidate) []validatedCandidate {
+	if g == nil || g.familyDoomed == nil {
+		return vcs
+	}
+	out := make([]validatedCandidate, 0, len(vcs))
+	for vcOrd, vc := range vcs {
+		if _, dominated := g.dominatedBy(vcOrd); !dominated {
+			out = append(out, vc)
+		}
+	}
+	return out
+}
+
+// explain records the gate's verdict on a decision built from selectable(vcs):
+// doomed leaders fail on savings and dominated settings are listed as skipped,
+// in candidate order.
+func (g *savingsGate) explain(d *transcode.BenchmarkDecision, vcs []validatedCandidate) {
+	if g == nil || d == nil || g.familyDoomed == nil {
+		return
+	}
+	if g.doomed {
+		markInsufficientSavings(d)
+	}
+	ord := make(map[string]int, len(vcs))
+	for i, vc := range vcs {
+		ord[vc.candidate.ID] = i
+	}
+	for i := range d.Evaluations {
+		if vcOrd, ok := ord[d.Evaluations[i].CandidateID]; ok && g.familyDoomed[vcOrd] {
+			d.Evaluations[i].Eligible = false
+			d.Evaluations[i].EvaluationReason = "insufficient_savings"
+		}
+	}
+	for vcOrd, vc := range vcs {
+		leader, dominated := g.dominatedBy(vcOrd)
+		if !dominated {
+			continue
+		}
+		d.Evaluations = append(d.Evaluations, transcode.BenchmarkCandidateEvaluation{
+			CandidateID: vc.candidate.ID, CandidateIndex: vc.index, VideoCodec: transcode.BenchmarkCandidateVideoCodec(vc.candidate),
+			Quality: vc.candidate.Quality, Preset: norm(vc.candidate.Preset), Tune: norm(vc.candidate.Tune), VideoProfile: vc.profile, PixelFormat: vc.pixelFormat,
+			ExpectedBitDepth: vc.bitDepth, EvaluationReason: savingsDominatedReason,
+			Uncertainties: []string{"not measured: " + vcs[leader].candidate.ID + " is below minimum savings"},
+		})
+	}
+	sort.SliceStable(d.Evaluations, func(i, j int) bool {
+		return d.Evaluations[i].CandidateIndex < d.Evaluations[j].CandidateIndex
+	})
 }
