@@ -160,10 +160,18 @@ func (e *Engine) ReconfigureBatch(ctx context.Context, id, scope, selectionID, v
 	}
 
 	if mode := getString(settings, "mode"); mode != "" {
-		if getString(ec.Inputs, "mode") == "" || len(settings) != 1 {
+		allowed := 1
+		if _, ok := settings["max_height"]; ok {
+			allowed = 2
+		}
+		if getString(ec.Inputs, "mode") == "" || len(settings) != allowed {
 			return nil, fmt.Errorf("goal changes cannot include technical settings")
 		}
-		policy, err := modePolicy(mode, getBool(ec.State, "is_anime"))
+		maxHeight, err := modeMaxHeightInput(settings)
+		if err != nil {
+			return nil, err
+		}
+		policy, err := modePolicyFor(mode, getBool(ec.State, "is_anime"), maxHeight)
 		if err != nil {
 			return nil, err
 		}

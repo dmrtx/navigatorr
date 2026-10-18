@@ -17,14 +17,24 @@ func BuildVideoEncoderArgs(plan *transcode.Plan) ([]string, error) {
 	if err := plan.X265.Validate(plan.VideoCodec, plan.Quality); err != nil {
 		return nil, err
 	}
+	var args []string
+	var err error
 	switch norm(plan.VideoCodec) {
 	case "hevc_videotoolbox":
-		return buildVideoToolboxArgs(plan)
+		args, err = buildVideoToolboxArgs(plan)
 	case "libx265":
-		return buildLibX265Args(plan)
+		args, err = buildLibX265Args(plan)
 	default:
 		return nil, fmt.Errorf("unsupported video codec %q (fail closed)", plan.VideoCodec)
 	}
+	if err != nil || plan.Compact == nil {
+		return args, err
+	}
+	compact, err := compactEncoderArgs(plan.Compact)
+	if err != nil {
+		return nil, err
+	}
+	return append(args, compact...), nil
 }
 
 // buildVideoToolboxArgs builds hevc_videotoolbox args. Rate control occupies a

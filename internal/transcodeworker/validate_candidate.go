@@ -135,8 +135,13 @@ func (w *Worker) validateEncodedCandidateFull(ctx context.Context, localCandidat
 	if err := pixelFormatCompatible(execPlan.Plan.PixelFormat, candVideo.PixelFormat, execPlan.Plan.ExpectedBitDepth); err != nil {
 		return attest, err
 	}
-	// Resolution preservation when both sides are known.
-	if srcVideo != nil && srcVideo.Width > 0 && srcVideo.Height > 0 && candVideo.Width > 0 && candVideo.Height > 0 {
+	// Compact plans resize to their frozen target; everything else preserves
+	// the source resolution.
+	if c := execPlan.Plan.Compact; c != nil {
+		if candVideo.Width != c.TargetWidth || candVideo.Height != c.TargetHeight || srcVideo == nil || srcVideo.Width != c.SourceWidth || srcVideo.Height != c.SourceHeight {
+			return attest, fmt.Errorf("%w: local candidate resolution %dx%d != compact target %dx%d (fail closed, never publish)", ErrSourceInvalid, candVideo.Width, candVideo.Height, c.TargetWidth, c.TargetHeight)
+		}
+	} else if srcVideo != nil && srcVideo.Width > 0 && srcVideo.Height > 0 && candVideo.Width > 0 && candVideo.Height > 0 {
 		if srcVideo.Width != candVideo.Width || srcVideo.Height != candVideo.Height {
 			return attest, fmt.Errorf("%w: local candidate resolution %dx%d != source %dx%d (fail closed, never publish)", ErrSourceInvalid, candVideo.Width, candVideo.Height, srcVideo.Width, srcVideo.Height)
 		}

@@ -72,7 +72,38 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 	if err != nil || len(candidateVideoStreams) != 1 {
 		return fail("quality_final_candidate_probe_failed", fmt.Errorf("candidate video probe: %v", err))
 	}
-	if plan.Mode != "" {
+	var compactChain string
+	if plan.Compact != nil {
+		// Compact converts HDR/DV to SDR, so the source may be HDR, but only
+		// exactly as frozen; the candidate must be clean SDR at the target size
+		// and is measured against the source through the identical chain.
+		sourceVideo, candidateVideo := sourceVideoStreams[0], candidateVideoStreams[0]
+		dr, err := classifySourceDynamicRange(ctx, w.ffprobePath, source, &sourceRep)
+		if err != nil {
+			return fail("quality_source_class_unsupported", err)
+		}
+		if err := plan.Compact.MatchSource(dr, sourceVideo); err != nil {
+			return fail("quality_source_class_unsupported", err)
+		}
+		if (sourceVideo.BitDepth != 8 && sourceVideo.BitDepth != 10) || (candidateVideo.BitDepth != 8 && candidateVideo.BitDepth != 10) || !isSupportedSourceChroma(sourceVideo.PixelFormat, sourceVideo.BitDepth) || !isSupportedSourceChroma(candidateVideo.PixelFormat, candidateVideo.BitDepth) {
+			return fail("quality_source_class_unsupported", fmt.Errorf("source/candidate measurement class is unsupported"))
+		}
+		e.CompactOutput = validateCompactOutput(ctx, w.ffprobePath, candidate, &candidateRep, plan.Compact)
+		if e.CompactOutput.Verdict != "pass" {
+			e.ReasonCodes = append(e.ReasonCodes, e.CompactOutput.ReasonCodes...)
+			return e, compactOutputError(e.CompactOutput)
+		}
+		digest, err := ensureCompactLUT(plan.Compact)
+		if err != nil {
+			return fail("quality_compact_chain_unavailable", err)
+		}
+		if e.CompactChain, err = compactChainEvidence(plan.Compact, digest); err != nil {
+			return fail("quality_compact_chain_unavailable", err)
+		}
+		if compactChain, err = compactFilterForRun(plan.Compact); err != nil {
+			return fail("quality_compact_chain_unavailable", err)
+		}
+	} else if plan.Mode != "" {
 		sourceVideo, candidateVideo := sourceVideoStreams[0], candidateVideoStreams[0]
 		if mediainspect.IsHDRorDolbyVisionReport(&sourceRep) || mediainspect.IsHDRorDolbyVisionReport(&candidateRep) || (sourceVideo.BitDepth != 8 && sourceVideo.BitDepth != 10) || candidateVideo.BitDepth != sourceVideo.BitDepth || !isSupportedSourceChroma(sourceVideo.PixelFormat, sourceVideo.BitDepth) || !isSupportedSourceChroma(candidateVideo.PixelFormat, candidateVideo.BitDepth) {
 			return fail("quality_source_class_unsupported", fmt.Errorf("source/candidate measurement class is unsupported or changed"))
@@ -124,7 +155,11 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 			source, out string
 			videoIndex  int
 		}{{source, refPath, sourceVideoStreams[0].Index}, {candidate, candPath, candidateVideoStreams[0].Index}} {
-			if _, err := runQualityCommand(ctx, w.ffmpegPath, BuildReferenceExtractionArgs(item.source, item.out, item.videoIndex, window.StartSeconds, window.DurationSeconds)); err != nil {
+			args := BuildReferenceExtractionArgs(item.source, item.out, item.videoIndex, window.StartSeconds, window.DurationSeconds)
+			if compactChain != "" && item.out == refPath {
+				args = withReferenceChain(args, compactChain)
+			}
+			if _, err := runQualityCommand(ctx, w.ffmpegPath, args); err != nil {
 				return fail("quality_final_sample_extract_failed", err)
 			}
 		}
@@ -329,7 +364,19 @@ func (w *Worker) validateModeSourceQuality(ctx context.Context, source string, p
 	if plan.Mode == "x265_preserve" && (norm(v.Codec) == "hevc" || norm(v.Codec) == "h265") {
 		return &transcode.PolicyRejectionError{ReasonCode: "already_hevc", Message: "source is already HEVC; no conversion required"}
 	}
-	if _, err := quality.TemporalDecimationForStream(v.FPS, v.FieldOrder); err != nil || mediainspect.IsHDRorDolbyVisionReport(&rep) || (v.BitDepth != 8 && v.BitDepth != 10) || !isSupportedSourceChroma(v.PixelFormat, v.BitDepth) {
+	if plan.Compact != nil {
+		dr, err := classifySourceDynamicRange(ctx, w.ffprobePath, source, &rep)
+		if err != nil {
+			return fmt.Errorf("quality_source_evidence_missing: %v", err)
+		}
+		if err := plan.Compact.MatchSource(dr, v); err != nil {
+			return &transcode.PolicyRejectionError{ReasonCode: "compact_source_changed", Message: err.Error()}
+		}
+		if _, err := ensureCompactLUT(plan.Compact); err != nil {
+			return err
+		}
+	}
+	if _, err := quality.TemporalDecimationForStream(v.FPS, v.FieldOrder); err != nil || (plan.Compact == nil && mediainspect.IsHDRorDolbyVisionReport(&rep)) || (v.BitDepth != 8 && v.BitDepth != 10) || !isSupportedSourceChroma(v.PixelFormat, v.BitDepth) {
 		return fmt.Errorf("quality_source_class_unsupported: native SDR 8/10-bit 4:2:0 evidence at a measurable frame rate (up to %.0f FPS) required", quality.HFRMaxFPS)
 	}
 	q := plan.QualityValidation

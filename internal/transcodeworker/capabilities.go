@@ -218,6 +218,16 @@ func probeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratch
 		})
 	}
 	caps.Filters = ParseAvailableFilters(string(filtOut))
+	// Filters missing from -filters are a confirmed absence; only a build that
+	// lists them all is asked to execute the chain.
+	compactFilters := caps.Filters["setparams"] && caps.Filters["scale"] && caps.Filters["format"] && caps.Filters["lut3d"] && caps.Filters["sidedata"]
+	if filtErr == nil && encErr == nil && compactFilters && (caps.Encoders[libX265Encoder] || caps.Encoders[videoToolboxEncoder]) {
+		if err := probeCompactChain(ctx, ffmpegPath); err != nil {
+			caps.ProbeErrors = append(caps.ProbeErrors, transcode.ProbeError{Component: "compact_transcode", Message: boundedErrorMessage(err, nil, 256)})
+		} else {
+			caps.CompactTranscode = true
+		}
+	}
 	if probeQuality && caps.Filters["libvmaf"] {
 		qualityCaps := cachedQualityCapabilities(ctx, ffmpegPath, scratchRoot)
 		caps.Quality = &qualityCaps

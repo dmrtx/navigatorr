@@ -170,6 +170,7 @@ type DetailedStream struct {
 	Index             int                        `json:"index"`
 	Kind              string                     `json:"kind"` // video, audio, subtitle, attachment
 	Codec             string                     `json:"codec"`
+	CodecTag          string                     `json:"codec_tag,omitempty"`
 	Profile           string                     `json:"profile,omitempty"`
 	PixelFormat       string                     `json:"pixel_format,omitempty"`
 	Language          string                     `json:"language,omitempty"`
@@ -178,6 +179,7 @@ type DetailedStream struct {
 	ChannelLayout     string                     `json:"channel_layout,omitempty"`
 	Width             int                        `json:"width,omitempty"`
 	Height            int                        `json:"height,omitempty"`
+	SampleAspect      string                     `json:"sample_aspect_ratio,omitempty"`
 	BitDepth          int                        `json:"bit_depth,omitempty"`
 	RFrameRate        string                     `json:"r_frame_rate,omitempty"`
 	AvgFrameRate      string                     `json:"avg_frame_rate,omitempty"`
@@ -211,6 +213,16 @@ type DetailedReport struct {
 	Chapters    int              `json:"chapters"`
 	Probed      bool             `json:"probed"`
 	HDR         *HDRReport       `json:"hdr,omitempty"`
+}
+
+// codecTag keeps the container fourcc, dropping ffprobe's "[0][0][0][0]"
+// placeholder for an unset tag.
+func codecTag(raw string) string {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	if raw == "" || strings.HasPrefix(raw, "[") || len(raw) > 8 {
+		return ""
+	}
+	return raw
 }
 
 // IsAttachedPicture reports whether s is embedded cover art. ffprobe exposes
@@ -295,6 +307,7 @@ func InspectDetailed(ctx context.Context, ffprobePath, path string) (DetailedRep
 			Index            int               `json:"index"`
 			CodecType        string            `json:"codec_type"`
 			CodecName        string            `json:"codec_name"`
+			CodecTagString   string            `json:"codec_tag_string"`
 			Profile          string            `json:"profile"`
 			PixFmt           string            `json:"pix_fmt"`
 			RFrameRate       string            `json:"r_frame_rate"`
@@ -302,6 +315,7 @@ func InspectDetailed(ctx context.Context, ffprobePath, path string) (DetailedRep
 			FieldOrder       string            `json:"field_order"`
 			Width            int               `json:"width"`
 			Height           int               `json:"height"`
+			SampleAspect     string            `json:"sample_aspect_ratio"`
 			Channels         int               `json:"channels"`
 			ChannelLayout    string            `json:"channel_layout"`
 			BitsPerRawSample any               `json:"bits_per_raw_sample"`
@@ -356,6 +370,7 @@ func InspectDetailed(ctx context.Context, ffprobePath, path string) (DetailedRep
 			Index:          st.Index,
 			Kind:           st.CodecType,
 			Codec:          strings.ToLower(st.CodecName),
+			CodecTag:       codecTag(st.CodecTagString),
 			Profile:        st.Profile,
 			PixelFormat:    st.PixFmt,
 			Language:       lang,
@@ -364,6 +379,7 @@ func InspectDetailed(ctx context.Context, ffprobePath, path string) (DetailedRep
 			ChannelLayout:  st.ChannelLayout,
 			Width:          st.Width,
 			Height:         st.Height,
+			SampleAspect:   st.SampleAspect,
 			RFrameRate:     st.RFrameRate,
 			AvgFrameRate:   st.AvgFrameRate,
 			FrameRate:      frameRate,
@@ -761,7 +777,7 @@ func IsHDRorDolbyVisionStream(st DetailedStream) bool {
 	profile := strings.ToLower(strings.TrimSpace(st.Profile))
 	if strings.Contains(codec, "dovi") || strings.Contains(codec, "dvh1") ||
 		strings.Contains(codec, "dvhe") || strings.Contains(codec, "dva1") ||
-		strings.Contains(codec, "dav1") {
+		strings.Contains(codec, "dav1") || isDolbyVisionCodecTag(st.CodecTag) {
 		return true
 	}
 	if strings.Contains(profile, "dolby vision") || strings.Contains(profile, "dovi") ||
@@ -811,7 +827,19 @@ func IsHDRorDolbyVisionStream(st DetailedStream) bool {
 		}
 	}
 
-	// 7. Stream tags
+	return hasDolbyVisionTag(st)
+}
+
+// HasStructuralHDRSignalling is IsHDRorDolbyVisionStream without the
+// free-text tag heuristics: only codec, colour and side-data signalling
+// count, so a title such as "HEVC Dolby Vision" never trips it.
+func HasStructuralHDRSignalling(st DetailedStream) bool {
+	st.Tags = nil // st is a copy
+	return IsHDRorDolbyVisionStream(st)
+}
+
+// hasDolbyVisionTag is the fail-closed free-text check on stream tags.
+func hasDolbyVisionTag(st DetailedStream) bool {
 	for k, v := range st.Tags {
 		kl := strings.ToLower(k)
 		vl := strings.ToLower(v)

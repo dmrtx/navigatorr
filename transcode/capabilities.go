@@ -69,26 +69,29 @@ type QualityCapabilities struct {
 
 // WorkerCapabilities represents the versioned capability report of a transcode worker node.
 type WorkerCapabilities struct {
-	X265TwoPass              bool                           `json:"x265_two_pass,omitempty"`
-	HEAACAudio               bool                           `json:"he_aac_audio,omitempty"`
-	AutomaticModesV2         bool                           `json:"automatic_modes_v2,omitempty"`
-	AutomaticQualityPruning  bool                           `json:"automatic_quality_pruning,omitempty"`
-	SavingsPrecheck          bool                           `json:"savings_precheck,omitempty"`
-	Podcast                  *PodcastCapabilities           `json:"podcast,omitempty"`
-	ExplicitMain10Benchmarks bool                           `json:"explicit_main10_benchmarks,omitempty"`
-	CompactAudio             bool                           `json:"compact_audio,omitempty"`
-	CoverArt                 bool                           `json:"cover_art,omitempty"`
-	ProtocolVersion          int                            `json:"protocol_version"`
-	WorkerVersion            string                         `json:"worker_version,omitempty"`
-	BuildGitCommit           string                         `json:"build_git_commit,omitempty"`
-	FFmpegVersion            string                         `json:"ffmpeg_version"`
-	FFmpegPath               string                         `json:"ffmpeg_path,omitempty"`
-	Encoders                 map[string]bool                `json:"encoders"`
-	EncoderDetails           map[string]EncoderCapabilities `json:"encoder_details,omitempty"`
-	Filters                  map[string]bool                `json:"filters"`
-	Quality                  *QualityCapabilities           `json:"quality,omitempty"`
-	ProbeErrors              []ProbeError                   `json:"probe_errors,omitempty"`
-	CapabilityFingerprint    string                         `json:"capability_fingerprint,omitempty"`
+	X265TwoPass              bool                 `json:"x265_two_pass,omitempty"`
+	HEAACAudio               bool                 `json:"he_aac_audio,omitempty"`
+	AutomaticModesV2         bool                 `json:"automatic_modes_v2,omitempty"`
+	AutomaticQualityPruning  bool                 `json:"automatic_quality_pruning,omitempty"`
+	SavingsPrecheck          bool                 `json:"savings_precheck,omitempty"`
+	Podcast                  *PodcastCapabilities `json:"podcast,omitempty"`
+	ExplicitMain10Benchmarks bool                 `json:"explicit_main10_benchmarks,omitempty"`
+	CompactAudio             bool                 `json:"compact_audio,omitempty"`
+	CoverArt                 bool                 `json:"cover_art,omitempty"`
+	// CompactTranscode reports an executable proof of the compact SDR chain
+	// (setparams, swscale, lut3d and sidedata delete) in the worker FFmpeg.
+	CompactTranscode      bool                           `json:"compact_transcode,omitempty"`
+	ProtocolVersion       int                            `json:"protocol_version"`
+	WorkerVersion         string                         `json:"worker_version,omitempty"`
+	BuildGitCommit        string                         `json:"build_git_commit,omitempty"`
+	FFmpegVersion         string                         `json:"ffmpeg_version"`
+	FFmpegPath            string                         `json:"ffmpeg_path,omitempty"`
+	Encoders              map[string]bool                `json:"encoders"`
+	EncoderDetails        map[string]EncoderCapabilities `json:"encoder_details,omitempty"`
+	Filters               map[string]bool                `json:"filters"`
+	Quality               *QualityCapabilities           `json:"quality,omitempty"`
+	ProbeErrors           []ProbeError                   `json:"probe_errors,omitempty"`
+	CapabilityFingerprint string                         `json:"capability_fingerprint,omitempty"`
 }
 
 // Fingerprint returns the canonical capability fingerprint.
@@ -125,6 +128,7 @@ type fingerprintPayload struct {
 	ExplicitMain10Benchmarks bool                           `json:"explicit_main10_benchmarks,omitempty"`
 	CompactAudio             bool                           `json:"compact_audio,omitempty"`
 	CoverArt                 bool                           `json:"cover_art,omitempty"`
+	CompactTranscode         bool                           `json:"compact_transcode,omitempty"`
 	ProtocolVersion          int                            `json:"protocol_version"`
 	WorkerVersion            string                         `json:"worker_version,omitempty"`
 	BuildGitCommit           string                         `json:"build_git_commit,omitempty"`
@@ -168,6 +172,7 @@ func ComputeCapabilityFingerprint(caps WorkerCapabilities) (string, error) {
 		ExplicitMain10Benchmarks: caps.ExplicitMain10Benchmarks,
 		CompactAudio:             caps.CompactAudio,
 		CoverArt:                 caps.CoverArt,
+		CompactTranscode:         caps.CompactTranscode,
 		ProtocolVersion:          caps.ProtocolVersion,
 		WorkerVersion:            caps.WorkerVersion,
 		BuildGitCommit:           caps.BuildGitCommit,
@@ -228,6 +233,12 @@ func (c WorkerCapabilities) SupportsHFRQuality() bool {
 func (c WorkerCapabilities) SupportsQualityFPS(fps float64, fieldOrder string) bool {
 	factor, err := quality.TemporalDecimationForStream(fps, fieldOrder)
 	return err == nil && (factor == 1 || c.SupportsHFRQuality())
+}
+
+// SupportsCompactTranscode reports a worker that can run compact mode: the
+// proven SDR chain plus compact audio.
+func (c WorkerCapabilities) SupportsCompactTranscode() bool {
+	return c.CompactTranscode && c.CompactAudio
 }
 
 // Both metrics must have executed on native 10-bit synthetic inputs without

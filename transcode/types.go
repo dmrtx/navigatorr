@@ -38,6 +38,7 @@ type ResiliencePlan struct {
 
 type Plan struct {
 	X265              *X265Settings `json:"x265,omitempty" yaml:"x265,omitempty"`
+	Compact           *CompactPlan  `json:"compact,omitempty" yaml:"compact,omitempty"`
 	ModePolicyVersion string        `json:"mode_policy_version,omitempty" yaml:"mode_policy_version,omitempty"`
 	Podcast           *podcast.Task `json:"podcast,omitempty" yaml:"podcast,omitempty"`
 	Mode              string        `json:"mode,omitempty" yaml:"mode,omitempty"`
@@ -104,19 +105,21 @@ type QualityValidationPlan struct {
 }
 
 type FinalQualityEvidence struct {
-	Verdict                string              `json:"verdict"`
-	ReasonCodes            []string            `json:"reason_codes,omitempty"`
-	CandidateSHA256        string              `json:"candidate_sha256"`
-	CandidateSizeBytes     int64               `json:"candidate_size_bytes"`
-	PlanDigest             string              `json:"plan_digest"`
-	BenchmarkRequestDigest string              `json:"benchmark_request_digest"`
-	ModelID                string              `json:"model_id,omitempty"`
-	SourceBitDepth         int                 `json:"source_bit_depth,omitempty"`
-	CandidateBitDepth      int                 `json:"candidate_bit_depth,omitempty"`
-	CapabilityFingerprint  string              `json:"capability_fingerprint,omitempty"`
-	VMAF                   *quality.VMAFStats  `json:"vmaf,omitempty"`
-	CAMBI                  *quality.CAMBIStats `json:"cambi,omitempty"`
-	SSIMMean               *float64            `json:"ssim_mean,omitempty"`
+	Verdict                string                 `json:"verdict"`
+	ReasonCodes            []string               `json:"reason_codes,omitempty"`
+	CandidateSHA256        string                 `json:"candidate_sha256"`
+	CandidateSizeBytes     int64                  `json:"candidate_size_bytes"`
+	PlanDigest             string                 `json:"plan_digest"`
+	BenchmarkRequestDigest string                 `json:"benchmark_request_digest"`
+	ModelID                string                 `json:"model_id,omitempty"`
+	SourceBitDepth         int                    `json:"source_bit_depth,omitempty"`
+	CandidateBitDepth      int                    `json:"candidate_bit_depth,omitempty"`
+	CapabilityFingerprint  string                 `json:"capability_fingerprint,omitempty"`
+	VMAF                   *quality.VMAFStats     `json:"vmaf,omitempty"`
+	CAMBI                  *quality.CAMBIStats    `json:"cambi,omitempty"`
+	SSIMMean               *float64               `json:"ssim_mean,omitempty"`
+	CompactChain           *CompactChainEvidence  `json:"compact_chain,omitempty"`
+	CompactOutput          *CompactOutputEvidence `json:"compact_output,omitempty"`
 }
 
 // Video encoder identifiers accepted by the worker and recipe engine.

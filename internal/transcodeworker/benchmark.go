@@ -45,6 +45,7 @@ type BenchmarkRecord struct {
 	SearchDeadline            time.Time                             `json:"search_deadline,omitzero"`
 	Comparison                *transcode.BenchmarkComparison        `json:"comparison,omitempty"`
 	Allow8BitTo10Bit          bool                                  `json:"allow_8bit_to_10bit,omitempty"`
+	Compact                   *transcode.CompactPlan                `json:"compact,omitempty"`
 	AudioMode                 string                                `json:"audio_mode,omitempty"`
 	ProtocolVersion           int                                   `json:"protocol_version"`
 	ID                        string                                `json:"id"`
@@ -454,6 +455,7 @@ func (w *Worker) BenchmarkSubmit(ctx context.Context, req transcode.BenchmarkReq
 	record := &BenchmarkRecord{
 		ModePolicyVersion: req.ModePolicyVersion, Automatic: req.Automatic, QualityPruning: req.QualityPruning, MinSavingsPercent: req.MinSavingsPercent, Mode: req.Mode, SearchDeadline: req.SearchDeadline, SearchBudgetSeconds: req.SearchBudgetSeconds,
 		Allow8BitTo10Bit:          req.Allow8BitTo10Bit,
+		Compact:                   req.Compact.Clone(),
 		ProtocolVersion:           transcode.WorkerProtocolVersion,
 		ID:                        req.ID,
 		Status:                    "queued",

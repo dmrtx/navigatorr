@@ -2367,8 +2367,8 @@ test("partial replacement does not claim that all originals were replaced",()=>{
  assert.equal(h.run('queuePresentation({status:"failed",savings:{realized_saved_bytes:100},batch:{total:2,completed:1,failed:1,outcome:"partial"}}).status'),'Failed');
 });
 
-test("three processing modes omit stale tuning and keep anime library context", async () => {
-  for (const mode of ["size","quality","x265_preserve"]) {
+test("processing modes omit stale tuning and keep anime library context", async () => {
+  for (const mode of ["size","quality","x265_preserve","compact"]) {
     const {h}=submissionHarness();let sent;
     h.context.capture=(_tool,args)=>{sent=JSON.parse(args.inputs);return {id:"submitted"};};
     h.run(`processingMode=()=>${JSON.stringify(mode)};$("custom").checked=true;$("min-savings").value="2";$("max-growth").value="40";$("priority").value="savings";$("preserve-depth").checked=false;state.fileMedia={id:7,seriesType:"anime"};state.fileService="sonarr";tool=async(...args)=>capture(...args);`);
@@ -2714,4 +2714,14 @@ test("clean podcast opens, lists podcasts and closes after starting", async () =
   assert.deepEqual(JSON.parse(run[1].inputs), { podcast_id: "genwhy", path: "/media/p/e.mp3", output_path: "/media/p/e.clean.mp3" });
   assert.equal(h.elements.get("podcast-dialog").open, false);
   assert.deepEqual(calls.at(-1), ["open", "podcast-job"]);
+});
+
+test("compact goal says in plain language what it drops and still needs approval", () => {
+  const radio = markup.match(/<label><input type="radio" name="processing-mode" value="compact" \/>[\s\S]*?<\/label>/)?.[0] || "";
+  assert.match(radio, /Make it much smaller · SDR 1080p/);
+  assert.match(radio, /HDR, Dolby Vision and Atmos are dropped/);
+  assert.match(radio, /keeping every language and subtitle/);
+  assert.match(radio, /replacing the original still needs your approval/);
+  assert.match(markup, /<option value="compact">Make it much smaller · SDR 1080p/);
+  assert.match(source, /compact:"Much smaller · SDR 1080p"/);
 });

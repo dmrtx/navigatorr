@@ -455,7 +455,7 @@ function navigationRoute(search = "") {
     status:routeStatuses.includes(q.get("status")) ? q.get("status") : "all",
     job:(q.get("job") || "").slice(0,200), profile:(q.get("profile") || "").slice(0,128),
     copies:q.get("copies") === "1", configure:q.get("configure") === "1",
-    mode:["size","quality","x265_preserve"].includes(q.get("mode")) ? q.get("mode") : "quality", technical:q.get("technical") === "1",
+    mode:["size","quality","x265_preserve","compact"].includes(q.get("mode")) ? q.get("mode") : "quality", technical:q.get("technical") === "1",
   };
 }
 function navigationQuery() {
@@ -3686,7 +3686,7 @@ async function loadBatchItems(id, revision) {
     if (actions.children.length) row.append(actions);
     const activity = batchFileActivity(item, state.detailJob);
     if (activity) row.append(node("span", activity, "batch-file-activity"));
-    if (item.mode) row.append(node("span", `Goal: ${{size:"Reduce size",quality:"Preserve quality",x265_preserve:"Convert to x265"}[item.mode] || item.mode}`, "metadata batch-file-profile"));
+    if (item.mode) row.append(node("span", `Goal: ${{size:"Reduce size",quality:"Preserve quality",x265_preserve:"Convert to x265",compact:"Much smaller · SDR 1080p"}[item.mode] || item.mode}`, "metadata batch-file-profile"));
     else if (item.requested_profile || item.profile) row.append(node("span", `${item.retry_pending ? "Next attempt" : "Profile"}: ${profileOptionLabel(item.requested_profile || item.profile)}`, "metadata batch-file-profile"));
     if (item.previous_attempts?.length) {
       const history=node("details","","batch-attempt-history");
