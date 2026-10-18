@@ -48,6 +48,9 @@
   --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   --body: "Avenir Next", "Segoe UI", sans-serif;
   --control-size: 36px;
+  /* Job actions share one visible box; --control-size stays the touch target. */
+  --action-height: 32px;
+  --action-min-width: 88px;
 }
 /* Dark palette: once for the system preference, once for an explicit choice. */
 @media (prefers-color-scheme: dark) {
@@ -812,8 +815,8 @@ main {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   align-items: start;
-  gap: 2px 8px;
-  padding: 5px 0;
+  gap: 4px 8px;
+  padding: 6px 0;
   border-bottom: 1px solid var(--line);
 }
 .job-meta {
@@ -890,17 +893,9 @@ main {
   align-self: center;
   justify-content: flex-end;
   max-width: none;
-  gap: 4px;
+  gap: 6px;
   flex-wrap: nowrap;
   flex: 0 0 auto;
-}
-.job-row .job-actions .action-control {
-  display: inline-grid;
-  padding: 0;
-}
-.job-row .job-actions .action-control svg {
-  width: 18px;
-  height: 18px;
 }
 .job-number {
   color: var(--muted);
@@ -914,41 +909,85 @@ main {
 .batch-file-preview {
   color: var(--ink);
 }
-.job-row .job-actions .queue-primary {
+/* Job actions: one compact box for every kind of button, in the queue rows and
+   the job detail dialog. Hierarchy comes from fill, never from size: primary is
+   filled, a plain button is outlined, a labelled icon action is tinted.
+   ::after keeps the shared touch target without making the visible box taller. */
+.job-row .job-actions button,
+#detail-controls .job-actions button {
   position: relative;
-  isolation: isolate;
-  min-height: var(--control-size);
-  padding: 0 10px;
-  gap: 5px;
-  font-size: 12px;
-  border: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: auto;
+  min-width: var(--action-min-width);
+  min-height: var(--action-height);
+  padding: 4px 12px;
+  border: 1px solid var(--control-line);
+  border-radius: 3px;
   background: transparent;
+  color: var(--ink);
+  font: 500 12px/1.2 var(--body);
+  text-align: center;
+  white-space: nowrap;
 }
-.job-row .job-actions .queue-secondary {
-  padding: 0 6px;
-  gap: 4px;
-  font-size: 12px;
-  color: var(--forest);
-  border: 0;
-  background: transparent;
-}
-.job-row .job-actions .queue-primary::before {
+.job-row .job-actions button::after,
+#detail-controls .job-actions button::after {
   content: "";
   position: absolute;
-  z-index: -1;
   top: 50%;
   left: 0;
   right: 0;
-  height: 32px;
+  height: max(100%, var(--control-size));
   transform: translateY(-50%);
-  border-radius: 3px;
+}
+.job-row .job-actions button svg,
+#detail-controls .job-actions button svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+.job-row .job-actions button.primary,
+#detail-controls .job-actions button.primary {
+  border-color: var(--forest);
   background: var(--forest);
+  color: var(--on-forest);
 }
-.job-row .job-actions .queue-primary:hover {
+.job-row .job-actions button.queue-secondary {
+  border-color: transparent;
+  background: var(--forest-wash);
+  color: var(--forest);
+}
+/* Unlabelled icon actions keep their square shape at the same height. */
+.job-row .job-actions button.action-control {
+  isolation: isolate;
+  flex: 0 0 auto;
+  width: auto;
+  min-width: var(--action-height);
+  padding: 4px;
+  border-color: transparent;
+  background: var(--forest-wash);
+  color: var(--forest);
+}
+.job-row .job-actions button.action-control::before {
+  display: none;
+}
+.job-row .job-actions button.action-control svg {
+  width: 16px;
+  height: 16px;
+}
+.job-row .job-actions button.action-control.primary {
+  background: var(--forest);
+  color: var(--on-forest);
+}
+.job-row .job-actions button.action-control.recovery {
+  background: var(--recovery-wash);
+  color: var(--accent);
+}
+.job-row .job-actions button.action-control.dismissive {
   background: transparent;
-}
-.job-row .job-actions .queue-primary:hover::before {
-  background: var(--forest-strong);
+  color: var(--muted);
 }
 .workflow-progress {
   display: flex;
@@ -1598,26 +1637,24 @@ pre {
   .job-row {
     --job-content-indent: 40px;
     grid-template-columns: minmax(0, 1fr);
-    gap: 2px 6px;
-    padding: 7px 0;
+    gap: 4px 6px;
+    padding: 10px 0;
   }
+  /* Size titles and summaries to their text so every card keeps the same gaps. */
   .job-row .job-title {
-    height: 36px;
+    height: auto;
+    min-height: 0;
     -webkit-line-clamp: 2;
   }
-  .job-meta { height: 32px; }
-  .batch-job .job-meta { height: 36px; }
-  .job-footer { height: var(--control-size); }
+  .job-meta,
+  .batch-job .job-meta { height: auto; }
+  .job-footer { height: auto; }
   .preview-job .preview-note { display: block; margin: 3px 0 0; }
   .preview-job .job-footer > .job-outcome { display: none; }
   .preview-job .job-footer > .job-actions { margin-left: auto; }
   .job-heading {
     grid-template-columns: 34px minmax(0, 1fr) 88px;
     gap: 0 6px;
-  }
-  .job-row .job-actions button {
-    font-size: 11px;
-    padding: 4px 7px;
   }
   .job-row .savings-line,
   .job-progress .metadata {
@@ -1738,6 +1775,21 @@ pre {
     color: var(--forest);
     text-decoration: underline;
   }
+  .job-row .job-actions button:hover,
+  #detail-controls .job-actions button:hover {
+    border-color: var(--muted);
+    background: var(--hover);
+  }
+  .job-row .job-actions button.primary:hover,
+  #detail-controls .job-actions button.primary:hover {
+    border-color: var(--forest-strong);
+    background: var(--forest-strong);
+  }
+  .job-row .job-actions button.queue-secondary:hover,
+  .job-row .job-actions button.action-control:not(.primary, .recovery):hover {
+    border-color: transparent;
+    background: var(--forest-wash-strong);
+  }
 }
 @media (prefers-reduced-motion: reduce) {
   * {
@@ -1751,9 +1803,8 @@ pre {
 .reconfigure-selection summary, .reconfigure-limits summary { cursor: pointer; color: var(--forest); font-size: 12px; }
 .reconfigure-selection[open] #reconfigure-files, .reconfigure-limits[open] .form-grid { margin-top: 10px; }
 .profile-guidance { color: var(--warning); font-size: 12px; margin: 5px 0 12px; }
-.skipped-job { padding: 10px 0; }
 .skipped-job .job-meta { height: auto; }
-.skipped-job .job-footer { height: auto; min-height: 36px; margin-top: 6px; align-items: center; }
+.skipped-job .job-footer { height: auto; min-height: var(--action-height); align-items: center; }
 .skipped-outcome { min-width: 0; }
 .skipped-outcome p { margin: 0; }
 .skipped-reason { font-size: 12px; color: var(--warning); }
@@ -1788,20 +1839,31 @@ pre {
 .profile-info { margin: 8px 0 12px; padding: 12px; background: var(--subtle); border-left: 2px solid var(--forest); }
 .profile-info > p:first-child { margin-top: 0; }
 .batch-progress-explanation { order: 3; flex-basis: 100%; font-size: 11px; line-height: 1.4; }
+/* Command status banners span their container, never just their text. In a
+   job row the grid gap separates stacked banners; the first one also clears
+   the action row by the same 8px the footer uses inside itself. */
 .job-command {
-  justify-self: start;
-  width: fit-content;
-  max-width: min(100%, 36rem);
-  margin: 4px 0 0;
-  padding: 4px 8px;
-  border-left: 2px solid var(--forest);
+  display: block;
+  justify-self: stretch;
+  width: auto;
+  max-width: none;
+  margin: 8px 0 0;
+  padding: 6px 10px;
+  border-left: 3px solid var(--forest);
+  border-radius: 3px;
   background: var(--success-wash);
   overflow-wrap: anywhere;
   font-size: 12px;
+  line-height: 1.4;
+}
+.job-command + .job-command {
+  margin-top: 4px;
 }
 .job-row > .job-command {
-  margin-left: var(--job-content-indent);
-  max-width: min(calc(100% - var(--job-content-indent)), 36rem);
+  margin: 0 0 0 var(--job-content-indent);
+}
+.job-row > .job-footer + .job-command {
+  margin-top: 4px;
 }
 .job-command.failed { border-color: var(--danger); background: var(--danger-wash); }
 .candidate-review-row { padding: 10px 0; border-bottom: 1px solid var(--line); }
@@ -1934,12 +1996,25 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
   }
   .job-row .job-footer > .job-outcome,
   .job-row .job-footer > .job-progress { flex: 1 1 100%; max-height: none; }
+  /* The count only shares a line with buttons on wide screens. */
+  .batch-progress:has(.batch-progress-phase) .batch-progress-count,
+  .batch-progress:has(.batch-progress-phase) .batch-progress-percent { line-height: 1.4; }
+  /* Equal columns: buttons line up across cards and wrap into full rows. */
   .job-row .job-footer > .job-actions {
+    display: grid;
     flex: 1 1 100%;
-    flex-wrap: wrap;
-    justify-content: flex-start;
+    grid-template-columns: repeat(auto-fill, minmax(var(--action-min-width), 1fr));
+    gap: 8px 6px;
   }
-  .job-row .job-footer > .job-actions button { max-width: 100%; white-space: normal; }
+  .job-row .job-footer > .job-actions button {
+    width: auto;
+    min-width: 0;
+    max-width: none;
+    gap: 4px;
+    padding-inline: 4px;
+    font-size: 11px;
+    white-space: normal;
+  }
 }
 
 /* Appearance: a three-way switch in Settings, stored per browser by /theme.js. */
