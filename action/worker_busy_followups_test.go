@@ -116,7 +116,7 @@ func TestEncodePhaseCancelSkipsOnlyRefusedSubmit(t *testing.T) {
 	ec := testReconcileEC("job-test-inst")
 	ec.Outputs = map[string]any{}
 	runSubmitStep(t, e, ec)
-	if getString(ec.State, "job_id") == "" || !awaitingBusySlot(ec, "transcode_submitted", "transcode_reconcile") {
+	if getString(ec.State, "job_id") == "" || !noRemoteJob(ec, "transcode_submitted", "transcode_reconcile", transcodeRejectedKey) {
 		t.Fatalf("refused encode should be awaiting a slot: %v", ec.State)
 	}
 	if err := e.cancelRemoteActionWork(context.Background(), ec); err != nil {
@@ -127,12 +127,93 @@ func TestEncodePhaseCancelSkipsOnlyRefusedSubmit(t *testing.T) {
 	}
 
 	runSubmitStep(t, e, ec)
-	if !getBool(ec.State, "transcode_reconcile") || awaitingBusySlot(ec, "transcode_submitted", "transcode_reconcile") {
+	if !getBool(ec.State, "transcode_reconcile") || noRemoteJob(ec, "transcode_submitted", "transcode_reconcile", transcodeRejectedKey) {
 		t.Fatalf("uncertain resend should be reconciling: %v", ec.State)
 	}
 	_ = e.cancelRemoteActionWork(context.Background(), ec)
 	if mock.cancelCalls != 1 {
 		t.Fatalf("cancel calls = %d, want 1 for a possibly created encode", mock.cancelCalls)
+	}
+}
+
+// A counted retry after a slot wait clears worker_busy, but the worker still
+// holds no job: cancelling must not send a cancel it would answer with 404.
+func TestCancelAfterBusyThenCountedRetrySkipsRemote(t *testing.T) {
+	calls := 0
+	mock := &mockTranscodeExecutor{
+		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
+			calls++
+			if calls == 1 {
+				return transcode.Job{}, workerBusyError(0)
+			}
+			return transcode.Job{}, errors.New("ssh: broken pipe")
+		},
+		cancelFunc: func(ctx context.Context, jobID string) error {
+			return &httpclient.HTTPError{StatusCode: 404, Message: "job not found", Code: transcode.WorkerErrorNotFound}
+		},
+	}
+	e := NewEngine(EngineDeps{Transcode: mock})
+	ec := testReconcileEC("job-test-inst")
+	ec.Outputs = map[string]any{}
+	runSubmitStep(t, e, ec)
+	if res := runSubmitStep(t, e, ec); res.WaitingCondition != "transcode_retry" || getBool(ec.State, "worker_busy") {
+		t.Fatalf("second submit: %s/%s busy=%v", res.Status, res.WaitingCondition, ec.State["worker_busy"])
+	}
+	if err := e.cancelRemoteActionWork(context.Background(), ec); err != nil {
+		t.Fatalf("cancel reported %v", err)
+	}
+	if mock.cancelCalls != 0 {
+		t.Fatalf("cancel sent for an encode the worker never created (%d calls)", mock.cancelCalls)
+	}
+}
+
+func TestBenchmarkCancelAfterBusyThenCountedRetrySkipsRemote(t *testing.T) {
+	calls := 0
+	mock := &mockTranscodeExecutor{
+		benchmarkSubmitFunc: func(ctx context.Context, req transcode.BenchmarkRequest) (transcode.BenchmarkJob, error) {
+			calls++
+			if calls == 1 {
+				return transcode.BenchmarkJob{}, workerBusyError(0)
+			}
+			return transcode.BenchmarkJob{}, errors.New("ssh: broken pipe")
+		},
+		benchmarkCancelFunc: func(ctx context.Context, jobID string) error {
+			return &httpclient.HTTPError{StatusCode: 404, Message: "benchmark not found", Code: transcode.WorkerErrorNotFound}
+		},
+		cancelFunc: func(ctx context.Context, jobID string) error {
+			return &httpclient.HTTPError{StatusCode: 404, Message: "job not found", Code: transcode.WorkerErrorNotFound}
+		},
+	}
+	engine, _, mediaFile, _ := setupBenchmarkTestEnv(t, mock, standard8BitProbeJSON, &recipe.OptimizationPolicy{Enabled: true})
+	res, err := engine.Run(context.Background(), "benchmark_transcode", map[string]any{"path": mediaFile, "profile": "opt-vt"})
+	if err != nil || res.WaitingCondition != "worker_busy" {
+		t.Fatalf("got %v %+v", err, res)
+	}
+	// Give the job a retry budget so the next refusal is a counted retry.
+	inst, err := engine.deps.Store.GetActionInstance(res.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ec := parseExecutionContext(inst, engine)
+	plan := getPlan(ec.State["plan"])
+	plan.Resilience.TransientRetries, plan.Resilience.MaxAttempts, plan.Resilience.RetryOn = 2, 3, []string{"ssh_transient"}
+	ec.State["plan"] = plan
+	inst.StateJSON = toJSON(ec.State)
+	if err := engine.deps.Store.UpdateActionInstance(*inst); err != nil {
+		t.Fatal(err)
+	}
+	got, err := engine.Resume(context.Background(), res.ID, "", nil)
+	if err != nil || got.WaitingCondition != "benchmark_retry" || getBool(got.State, "worker_busy") {
+		t.Fatalf("counted retry: %v %+v", err, got)
+	}
+	if _, err := engine.Cancel(context.Background(), res.ID, "user stopped"); err != nil {
+		t.Fatalf("cancel reported %v", err)
+	}
+	if got, _ = engine.Status(context.Background(), res.ID); got.Status != StatusCancelled {
+		t.Fatalf("status = %s", got.Status)
+	}
+	if mock.benchmarkCancelCalls != 0 || mock.cancelCalls != 0 {
+		t.Fatalf("cancelled a job the worker never created: benchmark=%d transcode=%d", mock.benchmarkCancelCalls, mock.cancelCalls)
 	}
 }
 

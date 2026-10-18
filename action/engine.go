@@ -719,9 +719,9 @@ func (e *Engine) cancelRemoteActionWork(ctx context.Context, ec *ExecutionContex
 	if benchID == "" {
 		benchID = getString(ec.Outputs, "benchmark_job_id")
 	}
-	// A submit refused as busy created nothing on the worker, which would
-	// answer a cancel for that identity with 404.
-	if benchID != "" && !getBool(ec.State, "benchmark_done") && !awaitingBusySlot(ec, "benchmark_submitted", "benchmark_reconcile") {
+	// A submit refused outright (busy or otherwise) created nothing on the
+	// worker, which would answer a cancel for that identity with 404.
+	if benchID != "" && !getBool(ec.State, "benchmark_done") && !noRemoteJob(ec, "benchmark_submitted", "benchmark_reconcile", benchmarkRejectedKey) {
 		if err := e.cancelBenchmarkJobConfirmed(ctx, benchID); err != nil {
 			errs = append(errs, fmt.Sprintf("benchmark %s: %v", benchID, err))
 		}
@@ -745,7 +745,7 @@ func (e *Engine) cancelRemoteActionWork(ctx context.Context, ec *ExecutionContex
 			jobID = item.JobID
 		}
 	}
-	if jobID != "" && !awaitingBusySlot(ec, "transcode_submitted", "transcode_reconcile") {
+	if jobID != "" && !noRemoteJob(ec, "transcode_submitted", "transcode_reconcile", transcodeRejectedKey) {
 		if err := e.cancelTranscodeJobConfirmed(ctx, jobID); err != nil {
 			errs = append(errs, fmt.Sprintf("transcode %s: %v", jobID, err))
 		}
@@ -870,6 +870,12 @@ func (e *Engine) execute(ctx context.Context, inst *store.ActionInstance, ec *Ex
 			res.Status = StepWaitingExternal
 			res.WaitingCondition = "worker_reconciling"
 			res.WaitingReason = "Coordinator request interrupted; workflow will reconcile automatically"
+		}
+
+		// Only back-to-back identical slot waits share one step-log row.
+		if err != nil || res.Status != StepWaitingExternal {
+			delete(ec.State, slotWaitLogKey)
+			delete(ec.Outputs, slotWaitLogKey)
 		}
 
 		// Handle step failure

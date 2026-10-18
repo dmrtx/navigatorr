@@ -44,8 +44,8 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 	}
 	// A worker that refused a submit as busy asked for a pause. Checking here
 	// skips capability probes inside the window; reconciling an uncertain
-	// submit is a read and never waits. The check before admission below is
-	// the one that guards the write.
+	// submit is a read and never waits. A second check just before admission
+	// covers the path where reconciliation falls through to a new submit.
 	if !getBool(ec.State, "transcode_reconcile") {
 		if res, waiting := e.workerBusyBackoff(ec, transcodeSlotWaitReason); waiting {
 			return res, nil
@@ -151,6 +151,7 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 				ec.State["candidate_path"] = candidatePath
 				ec.State["output_path"] = candidatePath
 				ec.State["transcode_submitted"] = true
+				delete(ec.State, transcodeRejectedKey)
 				clearTranscodeReconcileFlags(ec)
 				clearWorkerBusy(ec)
 				e.observeTranscodeStatus(ec, st)
@@ -190,6 +191,7 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 	ec.State["output_path"] = candidatePath
 	ec.State["idempotency_key"] = jobID
 	ec.State["transcode_reconcile"] = true
+	delete(ec.State, transcodeRejectedKey)
 	if err := e.persistExecutionState(actx, ec); err != nil {
 		return StepResult{}, err
 	}
@@ -211,6 +213,7 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 			return res, nil
 		}
 		clearTranscodeReconcileFlags(ec) // A definitive rejection did not accept the job.
+		ec.State[transcodeRejectedKey] = true
 		var res StepResult
 		if isTranscodeIdempotencyConflict(err) {
 			clearWorkerBusy(ec)
@@ -233,6 +236,7 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 		return res, nil
 	}
 	ec.State["transcode_submitted"] = true
+	delete(ec.State, transcodeRejectedKey)
 	clearWorkerBusy(ec)
 	ec.State["job_id"] = job.ID
 	ec.State["external_reference"] = job.ID
@@ -391,8 +395,8 @@ func (e *Engine) workerBusyBackoff(ec *ExecutionContext, reason string) (StepRes
 
 // clearWorkerBusy drops slot-wait markers once a submit had any outcome other
 // than a busy refusal, so the refusal is not reported as the job's state or
-// failure class afterwards. awaitingBusySlot relies on this: worker_busy is
-// set only while the last send of the current identity was refused as busy.
+// failure class afterwards. Whether the worker holds a job is tracked apart,
+// by the rejected markers that noRemoteJob reads.
 func clearWorkerBusy(ec *ExecutionContext) {
 	for _, key := range []string{workerBusyNotBeforeKey, "worker_busy", slotWaitLogKey} {
 		delete(ec.State, key)
@@ -426,10 +430,19 @@ func repeatedSlotWait(ec *ExecutionContext, stepIdx int, res StepResult) bool {
 	return false
 }
 
-// awaitingBusySlot reports that the pending submit was refused as busy and
-// not sent again yet: the worker holds no job under that identity.
-func awaitingBusySlot(ec *ExecutionContext, submittedKey, reconcileKey string) bool {
-	return getBool(ec.State, "worker_busy") && !getBool(ec.State, submittedKey) && !getBool(ec.State, reconcileKey)
+// The rejected markers record that the last send of the current identity was
+// refused outright (busy, conflict or another definite error). They are set
+// on each such refusal and cleared at the identity checkpoint before a send.
+const (
+	transcodeRejectedKey = "transcode_submit_rejected"
+	benchmarkRejectedKey = "benchmark_submit_rejected"
+)
+
+// noRemoteJob reports that the last send was refused outright and nothing was
+// sent since: the worker holds no job under that identity and would answer a
+// cancel with 404.
+func noRemoteJob(ec *ExecutionContext, submittedKey, reconcileKey, rejectedKey string) bool {
+	return getBool(ec.State, rejectedKey) && !getBool(ec.State, submittedKey) && !getBool(ec.State, reconcileKey)
 }
 
 // recordWorkerBusyHistory keeps one history entry per run of busy refusals in
