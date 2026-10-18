@@ -81,8 +81,8 @@ func newReconcileDispatcher() *reconcileDispatcher {
 }
 
 // dispatchReconcile starts a continuation for each reconcilable action that is
-// not already running from an earlier tick, without waiting for any of them.
-// When every slot is busy the remaining actions are retried on the next tick.
+// not already running from an earlier tick, without waiting for any of them to
+// finish.
 func (e *Engine) dispatchReconcile(ctx context.Context, d *reconcileDispatcher) error {
 	ids, err := e.reconcilableIDs(ctx)
 	if err != nil {
@@ -95,10 +95,13 @@ func (e *Engine) dispatchReconcile(ctx context.Context, d *reconcileDispatcher) 
 		if busy {
 			continue
 		}
+		// Wait for a slot rather than skipping: actions are listed in id order,
+		// so skipping would starve the same ids every tick. Cheap polls free a
+		// slot within milliseconds; only eight slow continuations stall here.
 		select {
 		case d.sem <- struct{}{}:
-		default:
-			return nil
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 		d.mu.Lock()
 		d.inflight[id] = struct{}{}
@@ -333,6 +336,24 @@ func optionalDuration(state map[string]any, key string) *int64 {
 	}
 	v := getInt64(state, key)
 	return &v
+}
+
+// mediaHashConcurrency bounds whole-file media hashes running at once.
+const mediaHashConcurrency = 3
+
+// hashMedia copies r into h while holding one of the engine's hash slots.
+// Waiting for a slot honours ctx like the copy itself does.
+func (e *Engine) hashMedia(ctx context.Context, h io.Writer, r io.Reader) (int64, error) {
+	if e.hashSlots == nil {
+		return io.Copy(h, r)
+	}
+	select {
+	case e.hashSlots <- struct{}{}:
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
+	defer func() { <-e.hashSlots }()
+	return io.Copy(h, r)
 }
 
 // contextReader keeps long NAS hashes interruptible on service shutdown or

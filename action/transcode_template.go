@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 	"time"
@@ -94,7 +93,7 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		return StepResult{Status: StepFailed, Error: err.Error()}, nil
 	}
 	hashStarted := e.now()
-	_, hashErr := io.Copy(h, &promotionContextReader{ctx: ctx, r: f, path: cleanPath, total: fi.Size(), progress: observe})
+	_, hashErr := e.hashMedia(ctx, h, &promotionContextReader{ctx: ctx, r: f, path: cleanPath, total: fi.Size(), progress: observe})
 	_ = f.Close()
 	e.recordCoordinatorPhase(ec, "coordinator_source_hash", hashStarted, e.now())
 	if hashErr != nil {

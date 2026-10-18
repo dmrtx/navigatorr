@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 
@@ -30,7 +29,7 @@ func (e *Engine) stepTranscodeAccept(ctx context.Context, ec *ExecutionContext) 
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("integrity violation: original media %s is no longer accessible: %v", origPath, err)}, nil
 	}
 	h := sha256.New()
-	_, err = io.Copy(h, contextReader{ctx: ctx, reader: f})
+	_, err = e.hashMedia(ctx, h, contextReader{ctx: ctx, reader: f})
 	_ = f.Close()
 	if err != nil {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("integrity violation: unable to hash original media %s: %v", origPath, err)}, nil

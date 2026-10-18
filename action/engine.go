@@ -30,6 +30,9 @@ type Engine struct {
 	reconcilerOnce sync.Once
 	reconcilerDone chan struct{}
 	reconcileWake  chan struct{}
+	// hashSlots bounds whole-file hashes of NAS media across every caller, so
+	// parallel continuations never saturate the share the worker reads from.
+	hashSlots chan struct{}
 
 	// promotionCopyBoundaryHook, when set by tests, runs after a private
 	// recovery copy has been flushed and closed and before it is verified or
@@ -48,6 +51,7 @@ func NewEngine(deps EngineDeps) *Engine {
 		templates:      make(map[string]ActionTemplate),
 		reconcilerDone: make(chan struct{}),
 		reconcileWake:  make(chan struct{}, 1),
+		hashSlots:      make(chan struct{}, mediaHashConcurrency),
 	}
 	e.registerBuiltinTemplates()
 	e.registerMaintenanceCommand()

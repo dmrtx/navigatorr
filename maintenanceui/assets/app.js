@@ -3046,10 +3046,11 @@ function workerProgressObservation(job) {
   result.active = true;
   if (heartbeat === "stale") {
     // Say who went quiet: a worker that stopped reporting, or a coordinator
-    // that has not asked it recently.
-    const polled = heartbeatAlive(workerHeartbeatState(w.last_worker_poll_at));
+    // that has not asked it recently. Without a poll time, blame nobody.
+    const poll = workerHeartbeatState(w.last_worker_poll_at);
     const quiet = activityElapsed(w.worker_heartbeat_at);
-    const who = polled ? `The worker has not reported${quiet ? ` for ${quiet}` : " recently"}.` : `Navigatorr has not checked the worker${quiet ? ` for ${quiet}` : " recently"}.`;
+    const span = quiet ? ` for ${quiet}` : " recently";
+    const who = heartbeatAlive(poll) ? `The worker has not reported${span}.` : poll === "stale" ? `Navigatorr has not checked the worker${span}.` : `No worker heartbeat${span}.`;
     return {...result, warning: true, status: "No heartbeat", message: `${who}${phase ? ` Last reported phase: ${workerPhaseLabel(phase)}.` : ""}`};
   }
   // These phases report completed units, not a continuous encoder percentage.

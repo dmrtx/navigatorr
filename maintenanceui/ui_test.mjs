@@ -522,7 +522,8 @@ test("a missing, invalid or expired heartbeat cannot make a long metric look liv
     const text = progressText(h.run('telemetry(progressJob)'));
     const stale = heartbeat === "2026-10-16T12:18:00Z";
     assert.equal(h.run('queuePresentation(progressJob).status'), stale ? "No heartbeat" : "No updates");
-    assert.match(text, stale ? /Navigatorr has not checked the worker for 4m 54s.*Measuring sample quality/ : /Worker heartbeat unavailable/);
+    assert.match(text, stale ? /No worker heartbeat for 4m 54s.*Measuring sample quality/ : /Worker heartbeat unavailable/);
+    assert.doesNotMatch(text, /Navigatorr has not checked|The worker has not reported/);
     assert.match(text, /Last reported: 73.3%/);
     assert.equal(h.run('telemetry(progressJob).children.length'), 1);
   }
@@ -649,8 +650,11 @@ test("batch file detail and worker slots agree about a long metric and lost hear
   assert.doesNotMatch(label, /stale|No updates/);
   assert.match(progressText(h.run('batchProgress(progressJob)')), /Measuring sample quality.*Worker heartbeat received/);
   h.run('progressJob.worker.worker_heartbeat_at="2026-10-16T12:15:00Z";');
-  assert.match(h.run('batchFileActivity({status:"running",child_action_id:"child"},progressJob)'), /has not checked the worker for 7m 54s/);
-  assert.match(progressText(h.run('batchProgress(progressJob)')), /has not checked the worker for 7m 54s/);
+  assert.match(h.run('batchFileActivity({status:"running",child_action_id:"child"},progressJob)'), /No worker heartbeat for 7m 54s/);
+  assert.match(progressText(h.run('batchProgress(progressJob)')), /No worker heartbeat for 7m 54s/);
+  h.run('progressJob.worker.last_worker_poll_at="2026-10-16T12:15:00Z";');
+  assert.match(h.run('batchFileActivity({status:"running",child_action_id:"child"},progressJob)'), /Navigatorr has not checked the worker for 7m 54s/);
+  assert.match(progressText(h.run('batchProgress(progressJob)')), /Navigatorr has not checked the worker for 7m 54s/);
   h.run('renderWorkerActivity({available:true,activity:{details_available:true,worker_slots_total:1,worker_slots_used:1,jobs:[{id:"child",kind:"benchmark",file:"episode.mkv",phase:"evaluating_metrics",heartbeat_at:progressJob.worker.worker_heartbeat_at}]}});');
   assert.match(progressText(h.elements.get("worker-slots")), /No recent worker heartbeat/);
 });
