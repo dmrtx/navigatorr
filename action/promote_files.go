@@ -255,6 +255,9 @@ func (e *Engine) stepPromotePlan(ctx context.Context, ec *ExecutionContext) (Ste
 	}
 	p := &promotionState{SourceActionID: id, Service: getString(ec.Inputs, "service"), SeriesID: seriesID, OriginalPath: getString(source.State, "resolved_path"), CandidatePath: getString(source.State, "candidate_path"), OriginalSHA: getString(source.State, "original_sha256"), Commands: map[string]*promotionCommand{}}
 	p.MovieID = movieID
+	if getString(source.State, "mode") == "compact" {
+		p.RegrabWarning = CompactRegrabWarning
+	}
 	if p.Service == "" {
 		p.Service = "sonarr"
 	}
@@ -379,6 +382,18 @@ func (e *Engine) stepPromotePlan(ctx context.Context, ec *ExecutionContext) (Ste
 	}
 	if len(p.Languages) == 0 || string(p.Languages) == "null" {
 		p.Languages = json.RawMessage("[]")
+	}
+	if p.RegrabWarning != "" {
+		p.arrTracking = readArrTracking(ctx, svc, p.mediaEndpoint())
+		if p.Monitored != nil && *p.Monitored && p.MovieID == 0 {
+			// Sonarr searches per episode: an unmonitored episode in a
+			// monitored series is not grabbed again.
+			monitored := false
+			for _, ep := range snap.Episodes {
+				monitored = monitored || ep.EpisodeFileID == p.OriginalFileID && ep.Monitored
+			}
+			p.Monitored = &monitored
+		}
 	}
 	return StepResult{Status: StepCompleted, Outputs: map[string]any{"promotion": p, "candidate_path": p.CandidatePath, "original_path": p.OriginalPath, "affected_episode_ids": p.EpisodeIDs, "estimated_bytes_saved": p.OriginalBytes - p.CandidateBytes}}, nil
 }

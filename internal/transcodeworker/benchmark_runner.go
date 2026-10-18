@@ -97,6 +97,9 @@ type BenchmarkExecutionEvidence struct {
 	MetricSamples          []BenchmarkMetricSampleResult       `json:"metric_samples,omitempty"`
 	CandidateMetrics       []BenchmarkCandidateMetricAggregate `json:"candidate_metrics,omitempty"`
 	Decision               *transcode.BenchmarkDecision        `json:"decision,omitempty"`
+	// Compact records the chain every reference sample went through. Candidate
+	// samples are encoded from those references, so they share it exactly.
+	Compact *transcode.CompactChainEvidence `json:"compact,omitempty"`
 }
 
 type CandidateQualityEvidence = transcode.BenchmarkCandidateQualityEvidence
@@ -366,8 +369,25 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		}
 	}
 
-	// HDR / Dolby Vision rejection: automatic benchmark optimization is strictly SDR-only
-	if (rep.HDR != nil && rep.HDR.Present) || isHDRStreamDetailed(sourceVideo) {
+	// HDR / Dolby Vision rejection: automatic benchmark optimization is
+	// strictly SDR-only, except compact mode, which converts to SDR through
+	// a frozen chain that must match what the source derives today.
+	var compactLUTDigest string
+	if record.Compact != nil {
+		if record.Mode != "compact" {
+			return errors.New("compact benchmark requires compact mode (fail closed)")
+		}
+		dr, err := classifySourceDynamicRange(ctx, w.ffprobePath, record.Source, &rep)
+		if err != nil {
+			return err
+		}
+		if err := record.Compact.MatchSource(dr, sourceVideo); err != nil {
+			return fmt.Errorf("compact source check failed: %w (fail closed)", err)
+		}
+		if compactLUTDigest, err = ensureCompactLUT(record.Compact); err != nil {
+			return err
+		}
+	} else if (rep.HDR != nil && rep.HDR.Present) || isHDRStreamDetailed(sourceVideo) {
 		return errors.New("HDR/Dolby Vision source not eligible for automatic benchmark optimization (fail closed)")
 	}
 
@@ -449,6 +469,15 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		ReferenceSamples:  make([]BenchmarkSampleRef, 0, len(record.Samples)),
 		CandidateSamples:  make([]BenchmarkCandidateSampleResult, 0, len(record.Candidates)*len(record.Samples)),
 	}
+	var compactChain string
+	if record.Compact != nil {
+		if evidence.Compact, err = compactChainEvidence(record.Compact, compactLUTDigest); err != nil {
+			return err
+		}
+		if compactChain, err = compactFilterForRun(record.Compact); err != nil {
+			return err
+		}
+	}
 	record.Evidence = evidence
 
 	// Resolve total work units for deterministic progress
@@ -499,6 +528,9 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		}
 
 		refArgs := BuildReferenceExtractionArgs(record.Source, refPath, sourceVideo.Index, window.StartSeconds, window.DurationSeconds)
+		if compactChain != "" {
+			refArgs = withReferenceChain(refArgs, compactChain)
+		}
 
 		cmd := exec.CommandContext(ctx, w.ffmpegPath, refArgs...)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -1475,19 +1507,7 @@ func (r *ProductionBenchmarkRunner) runSelection(
 		selectorPolicy = vmafPolicy
 	}
 
-	// Assemble ColorInfo
-	colorInfo := optimization.ColorInfo{
-		BitDepth: evidence.SourceBitDepth,
-	}
-	if video := rep.MainVideo(); len(video) > 0 {
-		colorInfo.ColorPrimaries = video[0].ColorPrimaries
-		colorInfo.ColorTransfer = video[0].ColorTransfer
-		colorInfo.ColorSpace = video[0].ColorSpace
-		colorInfo.PixelFormat = video[0].PixelFormat
-		if colorInfo.BitDepth == 0 {
-			colorInfo.BitDepth = video[0].BitDepth
-		}
-	}
+	colorInfo := benchmarkMeasurementColorInfo(record, evidence, &rep)
 
 	base, err := benchmarkEstimateBase(record, evidence, rep, sourceInitialSize)
 	if err != nil {
@@ -1728,7 +1748,7 @@ func benchmarkEstimateBase(record *BenchmarkRecord, evidence *BenchmarkExecution
 		if ae.BitrateBps == 0 && ae.SizeBytes == 0 && record.FallbackAudioBitrateBps > 0 {
 			ae.FallbackBitrateBps = record.FallbackAudioBitrateBps
 		}
-		if target, kbps := transcode.AudioTarget(record.AudioMode, a.Codec, a.Channels); target != "copy" {
+		if target, kbps := transcode.AudioTarget(record.AudioMode, a.Codec, a.Channels, a.ChannelLayout); target != "copy" {
 			ae.Codec, ae.Copied, ae.BitrateBps, ae.SizeBytes, ae.FallbackBitrateBps = target, false, int64(kbps)*1000, 0, 0
 		}
 		audioEstimates = append(audioEstimates, ae)
@@ -1794,4 +1814,47 @@ func markInsufficientSavings(d *transcode.BenchmarkDecision) {
 		d.Evaluations[i].Eligible = false
 		d.Evaluations[i].EvaluationReason = "insufficient_savings"
 	}
+}
+
+// benchmarkMeasurementColorInfo describes the colour space the metrics were
+// computed in. A compact benchmark scores SDR BT.709 references made by the
+// recorded chain; anything else scores the source as-is, so an HDR source
+// without that evidence stays ineligible for SDR scoring (fail closed).
+func benchmarkMeasurementColorInfo(record *BenchmarkRecord, evidence *BenchmarkExecutionEvidence, rep *mediainspect.DetailedReport) optimization.ColorInfo {
+	if record != nil && record.Compact != nil && evidence != nil && evidence.Compact != nil && evidence.Compact.ChainVersion == record.Compact.ChainVersion && evidence.Compact.TargetWidth == record.Compact.TargetWidth && evidence.Compact.TargetHeight == record.Compact.TargetHeight {
+		bd := evidence.SourceBitDepth
+		pix := "yuv420p"
+		if record.Compact.ToneMap != nil {
+			bd, pix = 10, "yuv420p10le"
+		} else if bd == 10 {
+			pix = "yuv420p10le"
+		}
+		return optimization.ColorInfo{ColorPrimaries: "bt709", ColorTransfer: "bt709", ColorSpace: "bt709", PixelFormat: pix, BitDepth: bd}
+	}
+	colorInfo := optimization.ColorInfo{BitDepth: evidence.SourceBitDepth}
+	if video := rep.MainVideo(); len(video) > 0 {
+		colorInfo.ColorPrimaries = video[0].ColorPrimaries
+		colorInfo.ColorTransfer = video[0].ColorTransfer
+		colorInfo.ColorSpace = video[0].ColorSpace
+		colorInfo.PixelFormat = video[0].PixelFormat
+		if colorInfo.BitDepth == 0 {
+			colorInfo.BitDepth = video[0].BitDepth
+		}
+	}
+	return colorInfo
+}
+
+// withReferenceChain inserts the compact picture chain into reference
+// extraction args, ahead of the lossless FFV1 encode.
+func withReferenceChain(args []string, chain string) []string {
+	out := make([]string, 0, len(args)+2)
+	inserted := false
+	for _, a := range args {
+		if a == "-c:v" && !inserted {
+			out = append(out, "-filter:v:0", chain)
+			inserted = true
+		}
+		out = append(out, a)
+	}
+	return out
 }

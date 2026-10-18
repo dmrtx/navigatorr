@@ -49,6 +49,9 @@ class Element {
   append(...children) {
     this.children.push(...children);
   }
+  prepend(...children) {
+    this.children.unshift(...children);
+  }
   replaceChildren(...children) {
     this.children = children;
   }
@@ -1212,7 +1215,7 @@ test("batch approval first shows the concrete plan without resuming", async () =
     'jobControls({id:"batch-a",status:"waiting_decision",action_name:"transcode_batch",batch:{promotion_plan_ready:true},waiting_options:[{decision:"approve",description:"Aprobar"}]})',
   );
   await controls.children[0].listeners.get("click")();
-  assert.deepEqual(calls, ["action_detail"]);
+  assert.deepEqual(calls, ["action_detail", "action_detail"]);
   assert.equal(h.elements.get("batch-review").open, true);
   assert.match(JSON.stringify(h.elements.get("batch-review-data").children), /\/source.mkv/);
   assert.match(
@@ -2140,6 +2143,43 @@ test("an unsupported-source file row offers no goal change", async () => {
   assert.match(text(rows[1]),/Change goal/);
 });
 
+test("an HDR file skipped by a size goal can change to the compact goal", async () => {
+  const h=harness();
+  h.context.items=[
+    {item_key:"hdr",display_label:"HDR",status:"skip",can_reconfigure:true,mode:"size",reasons:["hdr_requires_compact"]},
+    {item_key:"small",display_label:"Small",status:"skip",can_reconfigure:true,mode:"compact",max_height:720,reasons:["compact_not_needed"]}
+  ];
+  h.run('state.info={};state.detail="batch";state.detailRevision=2;$("job-detail").open=true;state.detailJob={status:"completed",batch:{}};api=async()=>({items,total:2});');
+  await h.run('loadBatchItems("batch",2)');
+  const rows=h.elements.get("batch-items-list").children;
+  const all = row=>[row,...row.children.flatMap(all)];
+  const text = row=>all(row).map(el=>el.textContent).filter(Boolean).join(" ");
+  assert.match(text(rows[0]),/only the Much smaller goal converts it/);
+  assert.match(text(rows[0]),/Change goal/);
+  assert.match(text(rows[1]),/Much smaller · SDR 720p/);
+});
+
+test("compact replacement reviews warn about re-grabs and show read-only tracking", async () => {
+  const h = harness();
+  h.context.current = {id:"replace",status:"waiting_decision",waiting_options:[{decision:"approve"}],promotion:{original_path:"/media/one.mkv",candidate_path:"/media/.candidates/one.mkv",original_sha256:"original",candidate_sha256:"candidate",original_bytes:1000,candidate_bytes:400,regrab_warning:"May download the original again.",arr_monitored:true,arr_quality_profile:"Any"}};
+  h.run('api = async () => ({jobs:[current]});');
+  await h.run('reviewFilePromotion("replace")');
+  const all = el=>[el,...el.children.flatMap(all)];
+  const text = el=>all(el).map(e=>e.textContent).filter(Boolean).join(" ");
+  const first = h.elements.get("file-review-data").children[0];
+  assert.match(text(first), /download the original again/);
+  assert.match(text(first), /Monitored · Quality profile: Any/);
+  h.context.notice = {regrab_warning:"May download the original again.",arr_monitored:false};
+  h.context.plan = {batch_id:"batch-a",digest:"sha256:plan",members:[{item_key:"e1",original_path:"/source.mkv",candidate_path:"/candidate.mkv"}]};
+  h.run('tool = async (name, args) => ({data: args.key === "batch_promotion_notice" ? notice : plan});');
+  await h.run('reviewBatchPromotion("batch-a")');
+  const batch = h.elements.get("batch-review-data").children[0];
+  assert.match(text(batch), /Not monitored/);
+  h.context.notice = null;
+  await h.run('reviewBatchPromotion("batch-a")');
+  assert.doesNotMatch(text(h.elements.get("batch-review-data")), /download the original again/);
+});
+
 test("an all-skipped retry selects the saved files and requires another profile without sending work",async()=>{
   const h=harness(), reads=[], writes=[];
   h.context.reads=reads;h.context.writes=writes;
@@ -2367,8 +2407,8 @@ test("partial replacement does not claim that all originals were replaced",()=>{
  assert.equal(h.run('queuePresentation({status:"failed",savings:{realized_saved_bytes:100},batch:{total:2,completed:1,failed:1,outcome:"partial"}}).status'),'Failed');
 });
 
-test("three processing modes omit stale tuning and keep anime library context", async () => {
-  for (const mode of ["size","quality","x265_preserve"]) {
+test("processing modes omit stale tuning and keep anime library context", async () => {
+  for (const mode of ["size","quality","x265_preserve","compact"]) {
     const {h}=submissionHarness();let sent;
     h.context.capture=(_tool,args)=>{sent=JSON.parse(args.inputs);return {id:"submitted"};};
     h.run(`processingMode=()=>${JSON.stringify(mode)};$("custom").checked=true;$("min-savings").value="2";$("max-growth").value="40";$("priority").value="savings";$("preserve-depth").checked=false;state.fileMedia={id:7,seriesType:"anime"};state.fileService="sonarr";tool=async(...args)=>capture(...args);`);
@@ -2714,4 +2754,16 @@ test("clean podcast opens, lists podcasts and closes after starting", async () =
   assert.deepEqual(JSON.parse(run[1].inputs), { podcast_id: "genwhy", path: "/media/p/e.mp3", output_path: "/media/p/e.clean.mp3" });
   assert.equal(h.elements.get("podcast-dialog").open, false);
   assert.deepEqual(calls.at(-1), ["open", "podcast-job"]);
+});
+
+test("compact goal says in plain language what it drops and still needs approval", () => {
+  const radio = markup.match(/<label><input type="radio" name="processing-mode" value="compact" \/>[\s\S]*?<\/label>/)?.[0] || "";
+  assert.match(radio, /Make it much smaller · SDR 1080p/);
+  assert.match(radio, /HDR and Dolby Vision are removed/);
+  assert.match(radio, /Atmos on E-AC-3 is kept/);
+  assert.doesNotMatch(radio, /Atmos are dropped/);
+  assert.match(radio, /keeping every language and subtitle/);
+  assert.match(radio, /replacing the original still needs your approval/);
+  assert.match(markup, /<option value="compact">Make it much smaller · SDR 1080p/);
+  assert.match(source, /compact:`Much smaller · SDR \$\{item\.max_height \|\| 1080\}p`/);
 });

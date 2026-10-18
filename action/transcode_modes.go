@@ -12,6 +12,7 @@ import (
 	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/optimization"
 	"github.com/jakenesler/navigatorr/transcode/quality"
 	"github.com/jakenesler/navigatorr/transcode/recipe"
 )
@@ -30,16 +31,47 @@ type ModePolicySnapshot struct {
 	SearchBudgetSeconds    int            `json:"search_budget_seconds"`
 	OperationBudgetSeconds int            `json:"operation_budget_seconds"`
 	Profile                recipe.Profile `json:"profile"`
-	Digest                 string         `json:"digest"`
+	// Compact is set only for mode=compact, so other snapshots and their
+	// digests are unchanged.
+	Compact *ModeCompactPolicy `json:"compact,omitempty"`
+	Digest  string             `json:"digest"`
+}
+
+// ModeCompactPolicy freezes the output shape of compact mode: SDR BT.709 no
+// taller than MaxHeight, through the named worker chain.
+type ModeCompactPolicy struct {
+	MaxHeight    int    `json:"max_height"`
+	ChainVersion string `json:"chain_version"`
 }
 
 func modePolicy(mode string, anime bool) (ModePolicySnapshot, error) {
-	if mode != "size" && mode != "quality" && mode != "x265_preserve" {
-		return ModePolicySnapshot{}, fmt.Errorf("mode must be size, quality, or x265_preserve")
+	return modePolicyFor(mode, anime, 0)
+}
+
+// modePolicyFor freezes a mode. maxHeight applies only to compact mode, where
+// zero selects the 1080p default.
+func modePolicyFor(mode string, anime bool, maxHeight int) (ModePolicySnapshot, error) {
+	if mode != "size" && mode != "quality" && mode != "x265_preserve" && mode != "compact" {
+		return ModePolicySnapshot{}, fmt.Errorf("mode must be size, quality, x265_preserve, or compact")
+	}
+	if mode != "compact" && maxHeight != 0 {
+		return ModePolicySnapshot{}, fmt.Errorf("max_height is only supported with mode=compact")
+	}
+	if mode == "compact" {
+		if maxHeight == 0 {
+			maxHeight = transcode.CompactDefaultMaxHeight
+		}
+		if !transcode.ValidCompactMaxHeight(maxHeight) {
+			return ModePolicySnapshot{}, fmt.Errorf("max_height must be one of %v", transcode.CompactMaxHeights)
+		}
 	}
 	p := automaticBatchSearchProfile(anime)
 	p.Optimization.Search.MaxCandidates = 12
-	if mode != "size" {
+	if mode == "compact" {
+		// Compact keeps the size-mode quality floor: the visible change is
+		// the intended SDR/resolution conversion, measured separately.
+		p.Audio.Mode = "compact"
+	} else if mode != "size" {
 		p.Optimization.Quality.VMAF.Target = 96
 		p.Optimization.Quality.VMAF.Minimum = 95
 		p5, worst := 93.0, 92.0
@@ -49,6 +81,10 @@ func modePolicy(mode string, anime bool) (ModePolicySnapshot, error) {
 	snapshot := ModePolicySnapshot{Version: ModePolicyVersion, Mode: mode, MinSavingsPercent: 15, SearchBudgetSeconds: modeSearchBudgetSeconds, OperationBudgetSeconds: modeOperationBudgetSeconds, Profile: p}
 	if mode == "x265_preserve" || mode == "quality" {
 		snapshot.MinSavingsPercent = 0
+	}
+	if mode == "compact" {
+		snapshot.MinSavingsPercent = optimization.CompactMinimumSavingsPercent
+		snapshot.Compact = &ModeCompactPolicy{MaxHeight: maxHeight, ChainVersion: transcode.CompactChainVersion}
 	}
 	b, err := json.Marshal(snapshot)
 	if err != nil {
@@ -62,13 +98,20 @@ func modePolicy(mode string, anime bool) (ModePolicySnapshot, error) {
 func validateModeInputs(inputs map[string]any) error {
 	raw, present := inputs["mode"]
 	if !present {
+		if _, has := inputs["max_height"]; has {
+			return fmt.Errorf("max_height is only supported with mode=compact")
+		}
 		return nil
 	}
 	mode, ok := raw.(string)
 	if !ok {
 		return fmt.Errorf("mode must be a string")
 	}
-	if _, err := modePolicy(mode, getBool(inputs, "is_anime") || getString(inputs, "media_type") == "anime"); err != nil {
+	maxHeight, err := modeMaxHeightInput(inputs)
+	if err != nil {
+		return err
+	}
+	if _, err := modePolicyFor(mode, getBool(inputs, "is_anime") || getString(inputs, "media_type") == "anime", maxHeight); err != nil {
 		return err
 	}
 	for _, key := range []string{"profile", "profile_config", "priority", "metric", "min_savings_percent", "max_size_increase_percent", "preserve_source_bit_depth", "expected_video_codec", "shared_calibration", "calibration_items", "batch_fixed_quality", "batch_calibration_digest"} {
@@ -77,6 +120,29 @@ func validateModeInputs(inputs map[string]any) error {
 		}
 	}
 	return nil
+}
+
+// modeMaxHeightInput reads the optional compact max_height input.
+func modeMaxHeightInput(inputs map[string]any) (int, error) {
+	raw, present := inputs["max_height"]
+	if !present || raw == nil {
+		return 0, nil
+	}
+	var v float64
+	switch n := raw.(type) {
+	case float64:
+		v = n
+	case int:
+		v = float64(n)
+	case int64:
+		v = float64(n)
+	default:
+		return 0, fmt.Errorf("max_height must be a number")
+	}
+	if v != math.Trunc(v) || !transcode.ValidCompactMaxHeight(int(v)) {
+		return 0, fmt.Errorf("max_height must be one of %v", transcode.CompactMaxHeights)
+	}
+	return int(v), nil
 }
 
 func freezeModePolicy(ec *ExecutionContext) (*ModePolicySnapshot, error) {
@@ -107,7 +173,11 @@ func freezeModePolicy(ec *ExecutionContext) (*ModePolicySnapshot, error) {
 		ec.State["operation_search_budget_seconds"] = p.OperationBudgetSeconds
 		return &p, nil
 	}
-	p, err := modePolicy(mode, getBool(ec.State, "resolved_is_anime") || getBool(ec.Inputs, "is_anime") || getString(ec.Inputs, "media_type") == "anime")
+	maxHeight, err := modeMaxHeightInput(ec.Inputs)
+	if err != nil {
+		return nil, err
+	}
+	p, err := modePolicyFor(mode, getBool(ec.State, "resolved_is_anime") || getBool(ec.Inputs, "is_anime") || getString(ec.Inputs, "media_type") == "anime", maxHeight)
 	if err != nil {
 		return nil, err
 	}
@@ -123,11 +193,18 @@ func freezeModePolicy(ec *ExecutionContext) (*ModePolicySnapshot, error) {
 // must come from the worker's proven decimated-VMAF capability; without it
 // progressive 45-61 FPS sources are skipped as hfr_quality_unavailable (a new
 // goal will not help; a capable worker will), and interlaced HFR-class
-// sources and rates above that class stay unsupported.
+// sources and rates above that class stay unsupported. Compact mode accepts
+// HDR and Dolby Vision; compactSourcePlan decides them from stream and frame
+// evidence.
 func modeSourceReason(mode string, rep *mediainspect.DetailedReport, hfrSupported bool) string {
 	video := rep.MainVideo()
-	if len(video) != 1 || video[0].BitDepth != 8 && video[0].BitDepth != 10 || isSourceHDRorDV(rep) {
+	if len(video) != 1 || video[0].BitDepth != 8 && video[0].BitDepth != 10 {
 		return "unsupported_source"
+	}
+	// Only the compact goal converts HDR and Dolby Vision; a goal change can
+	// pick these files up, unlike unsupported_source.
+	if mode != "compact" && isSourceHDRorDV(rep) {
+		return "hdr_requires_compact"
 	}
 	factor, err := quality.TemporalDecimationForStream(video[0].FPS, video[0].FieldOrder)
 	if err != nil {
@@ -343,6 +420,9 @@ func verifyModeBenchmarkWinner(ec *ExecutionContext, winner *transcode.Benchmark
 	if err != nil || digest != getString(ec.State, "benchmark_request_digest") || request.Mode != getString(ec.Inputs, "mode") || request.SourceSHA256 != getString(ec.State, "original_sha256") {
 		return fmt.Errorf("mode benchmark evidence request identity mismatch")
 	}
+	if plan := getPlan(ec.State["plan"]); plan == nil || !request.Compact.Equal(plan.Compact) {
+		return fmt.Errorf("mode benchmark compact plan does not match the frozen plan")
+	}
 	for _, candidate := range request.Candidates {
 		if candidate.ID != winner.CandidateID {
 			continue
@@ -362,6 +442,29 @@ func verifyModeBenchmarkWinner(ec *ExecutionContext, winner *transcode.Benchmark
 	return fmt.Errorf("mode benchmark winner was not part of frozen request")
 }
 
+// compactSourcePlan classifies the source from stream and decoded-frame
+// evidence and derives its frozen compact plan. A non-empty reason is a
+// user-facing skip, never a hard failure: a source whose frames cannot be
+// probed is skipped so one bad file does not fail a whole batch.
+func compactSourcePlan(ctx context.Context, ffprobe, path string, rep *mediainspect.DetailedReport, p *ModePolicySnapshot) (*transcode.CompactPlan, string) {
+	if p == nil || p.Compact == nil || p.Compact.ChainVersion != transcode.CompactChainVersion {
+		return nil, "compact_policy_unavailable"
+	}
+	video := rep.MainVideo()
+	if len(video) != 1 {
+		return nil, "hdr_single_video_stream_required"
+	}
+	d, err := mediainspect.ClassifySource(ctx, ffprobe, path, rep)
+	if err != nil {
+		return nil, "compact_frame_evidence_unavailable"
+	}
+	plan, err := transcode.NewCompactPlan(d, video[0], p.Compact.MaxHeight)
+	if err != nil {
+		return nil, err.Error()
+	}
+	return plan, ""
+}
+
 func measuredSearchSeconds(raw any) (float64, bool) {
 	var seconds float64
 	switch value := raw.(type) {
@@ -375,4 +478,26 @@ func measuredSearchSeconds(raw any) (float64, bool) {
 		return 0, false
 	}
 	return seconds, seconds >= 0 && !math.IsNaN(seconds) && !math.IsInf(seconds, 0)
+}
+
+// compactInventoryReason screens a batch source from stream evidence alone.
+// SDR sources are decided now (for example compact_not_needed); HDR and Dolby
+// Vision need decoded-frame evidence, which each child preflight collects.
+func compactInventoryReason(ec *ExecutionContext, rep *mediainspect.DetailedReport) string {
+	p, err := freezeModePolicy(ec)
+	if err != nil || p == nil || p.Compact == nil {
+		return "compact_policy_unavailable"
+	}
+	video := rep.MainVideo()
+	if len(video) != 1 {
+		return "hdr_single_video_stream_required"
+	}
+	d := mediainspect.ClassifyDynamicRange(rep, nil)
+	if d.IsHDR() {
+		return ""
+	}
+	if _, err := transcode.NewCompactPlan(d, video[0], p.Compact.MaxHeight); err != nil {
+		return err.Error()
+	}
+	return ""
 }

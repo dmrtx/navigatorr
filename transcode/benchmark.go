@@ -321,6 +321,10 @@ type BenchmarkRequest struct {
 	// to content identity so a same path/size/mtime source with changed content
 	// can never be reused.
 	SourceSHA256 string `json:"source_sha256,omitempty"`
+	// Compact applies the frozen compact transform to every candidate and to
+	// the metric reference. Workers without the compact_transcode capability
+	// reject the field as unknown.
+	Compact *CompactPlan `json:"compact,omitempty"`
 }
 
 // BenchmarkJob is the receipt returned upon successful submission of a benchmark request.
@@ -430,6 +434,16 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 	if req.QualityPruning && !req.Automatic {
 		return errors.New("quality pruning requires automatic search")
 	}
+	if req.Compact != nil {
+		if err := req.Compact.Validate(); err != nil {
+			return err
+		}
+		if req.Mode != "compact" || req.Metric != "vmaf" || req.Quality == nil || req.Quality.VMAF == nil || req.Quality.VMAF.Model == "" {
+			return errors.New("compact benchmark requires compact mode with an explicit VMAF model")
+		}
+	} else if req.Mode == "compact" {
+		return errors.New("compact mode benchmark requires a compact plan")
+	}
 	if math.IsNaN(req.MinSavingsPercent) || req.MinSavingsPercent < 0 || req.MinSavingsPercent >= 100 || (req.MinSavingsPercent > 0 && (req.Automatic || req.Mode != "")) {
 		return errors.New("min_savings_percent must be in [0,100) and only for profile benchmarks")
 	}
@@ -446,7 +460,7 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 		}
 	}
 	if req.Mode != "" {
-		if req.Mode != "size" && req.Mode != "quality" && req.Mode != "x265_preserve" {
+		if req.Mode != "size" && req.Mode != "quality" && req.Mode != "x265_preserve" && req.Mode != "compact" {
 			return errors.New("unsupported processing mode")
 		}
 		if req.SearchBudgetSeconds <= 0 || req.SearchBudgetSeconds > 3600 {

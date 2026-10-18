@@ -55,6 +55,12 @@ func ValidatePlan(p *transcode.Plan) error {
 		}
 		return nil
 	}
+	if err := p.Compact.Validate(); err != nil {
+		return err
+	}
+	if p.Compact != nil && p.Mode != "compact" {
+		return fmt.Errorf("compact plan requires compact mode")
+	}
 	if p.Mode != "" {
 		minimum, valid := optimization.ModeMinimumSavings(p.Mode, p.ModePolicyVersion)
 		if !valid {
@@ -63,6 +69,10 @@ func ValidatePlan(p *transcode.Plan) error {
 		min := float64(minimum)
 		switch p.Mode {
 		case "size", "quality":
+		case "compact":
+			if p.Compact == nil {
+				return fmt.Errorf("compact mode requires a compact plan")
+			}
 		case "x265_preserve":
 			if p.VideoCodec != transcode.VideoCodecLibX265 {
 				return fmt.Errorf("x265_preserve requires libx265")
@@ -70,7 +80,7 @@ func ValidatePlan(p *transcode.Plan) error {
 		default:
 			return fmt.Errorf("unsupported processing mode")
 		}
-		if p.SizePolicy == nil || p.SizePolicy.MinSavingsPercent != min || p.SizePolicy.MaxSizeIncreasePercent != 0 || p.PolicyDigest == "" || p.QualityValidation == nil || p.AudioMode != "copy" {
+		if p.SizePolicy == nil || p.SizePolicy.MinSavingsPercent != min || p.SizePolicy.MaxSizeIncreasePercent != 0 || p.PolicyDigest == "" || p.QualityValidation == nil || p.AudioMode != modeAudioMode(p.Mode) {
 			return fmt.Errorf("mode plan requires frozen size/quality policy and audio preservation")
 		}
 	}
@@ -239,4 +249,13 @@ func normalizeContainer(s string) string {
 		return "mkv"
 	}
 	return s
+}
+
+// modeAudioMode is the only audio policy a mode plan may carry: compact mode
+// converts lossless and high-bitrate tracks to AAC, every other mode copies.
+func modeAudioMode(mode string) string {
+	if mode == "compact" {
+		return "compact"
+	}
+	return "copy"
 }

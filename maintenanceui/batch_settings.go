@@ -237,5 +237,5 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func containsMode(mode string) bool {
-	return mode == "size" || mode == "quality" || mode == "x265_preserve"
+	return mode == "size" || mode == "quality" || mode == "x265_preserve" || mode == "compact"
 }

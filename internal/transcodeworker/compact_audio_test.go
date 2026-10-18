@@ -161,3 +161,58 @@ func TestCompactAudioDispositionValidation(t *testing.T) {
 		t.Fatal("invented commentary flag accepted")
 	}
 }
+
+func TestConvertedAudioTitle(t *testing.T) {
+	for _, tc := range []struct {
+		title, layout string
+		channels      int
+		want          string
+		ok            bool
+	}{
+		{"TrueHD Atmos 7.1", "7.1", 8, "AAC 7.1", true},
+		{"DTS-HD MA 5.1", "5.1(side)", 6, "AAC 5.1", true},
+		{"LPCM 5.1", "", 6, "AAC 5.1", true},
+		{"FLAC 2.0", "stereo", 2, "AAC Stereo", true},
+		{"Dolby TrueHD", "", 3, "AAC", true},
+		{"Commentary", "stereo", 2, "", false},
+		{"", "7.1", 8, "", false},
+	} {
+		got, ok := convertedAudioTitle(tc.title, tc.layout, tc.channels)
+		if got != tc.want || ok != tc.ok {
+			t.Errorf("convertedAudioTitle(%q, %q, %d) = %q, %v", tc.title, tc.layout, tc.channels, got, ok)
+		}
+	}
+}
+
+func TestCompactEncodeArgsClearTitlesAndDisableDolbyVision(t *testing.T) {
+	useTempCompactLUTDir(t)
+	plan := &transcode.Plan{VideoCodec: "libx265", Quality: 23, VideoProfile: "main10", PixelFormat: "p010le", ExpectedBitDepth: 10, AudioMode: "compact", Compact: compactPQPlan()}
+	ep := &ExecutionPlan{Plan: plan, Streams: []StreamAction{
+		{Kind: "audio", TypeIndex: 0, TargetCodec: "aac", BitrateKbps: 512, Title: "TrueHD Atmos 7.1", Channels: 8, Layout: "7.1"},
+		{Kind: "audio", TypeIndex: 1, TargetCodec: "copy", Title: "E-AC-3 Atmos 5.1"},
+	}}
+	args, err := BuildFFmpegArgs(ep, "source.mkv", "candidate.mkv", "progress")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"-dolbyvision:v:0 0", "-metadata:s:v:0 title=", "-metadata:s:v:0 BPS=", "-metadata:s:a:0 title=AAC 7.1", "-metadata:s:a:0 NUMBER_OF_BYTES=", "-b:a:0 512k"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("missing %q: %s", want, joined)
+		}
+	}
+	// A copied track (E-AC-3 JOC keeps Atmos) keeps its title and tags.
+	if strings.Contains(joined, "-metadata:s:a:1") {
+		t.Fatalf("copied track rewritten: %s", joined)
+	}
+	vt := *plan
+	vt.VideoCodec, vt.Quality = "hevc_videotoolbox", 65
+	if args, err := BuildVideoEncoderArgs(&vt); err != nil || strings.Contains(strings.Join(args, " "), "dolbyvision") {
+		t.Fatalf("VideoToolbox has no -dolbyvision option: %v %v", args, err)
+	}
+	plain := *plan
+	plain.Compact = nil
+	if args, _ := BuildVideoEncoderArgs(&plain); strings.Contains(strings.Join(args, " "), "dolbyvision") {
+		t.Fatal("non-compact encodes keep the encoder default")
+	}
+}

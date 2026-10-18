@@ -135,8 +135,13 @@ func (w *Worker) validateEncodedCandidateFull(ctx context.Context, localCandidat
 	if err := pixelFormatCompatible(execPlan.Plan.PixelFormat, candVideo.PixelFormat, execPlan.Plan.ExpectedBitDepth); err != nil {
 		return attest, err
 	}
-	// Resolution preservation when both sides are known.
-	if srcVideo != nil && srcVideo.Width > 0 && srcVideo.Height > 0 && candVideo.Width > 0 && candVideo.Height > 0 {
+	// Compact plans resize to their frozen target; everything else preserves
+	// the source resolution.
+	if c := execPlan.Plan.Compact; c != nil {
+		if candVideo.Width != c.TargetWidth || candVideo.Height != c.TargetHeight || srcVideo == nil || srcVideo.Width != c.SourceWidth || srcVideo.Height != c.SourceHeight {
+			return attest, fmt.Errorf("%w: local candidate resolution %dx%d != compact target %dx%d (fail closed, never publish)", ErrSourceInvalid, candVideo.Width, candVideo.Height, c.TargetWidth, c.TargetHeight)
+		}
+	} else if srcVideo != nil && srcVideo.Width > 0 && srcVideo.Height > 0 && candVideo.Width > 0 && candVideo.Height > 0 {
 		if srcVideo.Width != candVideo.Width || srcVideo.Height != candVideo.Height {
 			return attest, fmt.Errorf("%w: local candidate resolution %dx%d != source %dx%d (fail closed, never publish)", ErrSourceInvalid, candVideo.Width, candVideo.Height, srcVideo.Width, srcVideo.Height)
 		}
@@ -291,7 +296,7 @@ func validateAudioPreservation(plan *transcode.Plan, src, cand []SourceStream) e
 	}
 	for i := range srcAudio {
 		a, b := srcAudio[i], candAudio[i]
-		target, _ := transcode.AudioTarget(plan.AudioMode, a.Codec, a.Channels)
+		target, _ := transcode.AudioTarget(plan.AudioMode, a.Codec, a.Channels, a.Layout)
 		if plan.AudioMode == "he_aac" && target != "copy" && !strings.EqualFold(b.Profile, "HE-AAC") {
 			return fmt.Errorf("HE-AAC audio profile not present in candidate stream %d", i)
 		}
@@ -306,6 +311,9 @@ func validateAudioPreservation(plan *transcode.Plan, src, cand []SourceStream) e
 		}
 		if a.Channels > 0 && a.Channels != b.Channels {
 			return fmt.Errorf("%w: local candidate audio channels %d at stream %d != source %d (fail closed, never publish)", ErrSourceInvalid, b.Channels, i, a.Channels)
+		}
+		if !transcode.SameAudioLayout(a.Layout, b.Layout) {
+			return fmt.Errorf("%w: local candidate audio layout %q at stream %d != source %q (fail closed, never publish)", ErrSourceInvalid, b.Layout, i, a.Layout)
 		}
 		for disposition, value := range a.Disposition {
 			if b.Disposition[disposition] != value {

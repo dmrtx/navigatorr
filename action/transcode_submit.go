@@ -88,6 +88,15 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 	if origMap, _ := ec.State["original"].(map[string]any); len(mediainspect.CoverArtStreams(getStreamsList(origMap, "video"))) > 0 && !getBool(ec.State, "transcode_reconcile") && !e.workerSupportsCoverArt(ctx) {
 		return StepResult{Status: StepFailed, Error: errCoverArtWorker + " before encoding"}, nil
 	}
+	if plan.Compact != nil && !getBool(ec.State, "transcode_reconcile") {
+		caps, err := e.deps.Transcode.Capabilities(ctx)
+		if err != nil {
+			return StepResult{Status: StepFailed, Error: fmt.Sprintf("checking compact capability: %v", err)}, nil
+		}
+		if !caps.SupportsCompactTranscode() {
+			return StepResult{Status: StepFailed, Error: "worker does not support compact SDR conversion; upgrade the worker before encoding"}, nil
+		}
+	}
 	req := transcode.Request{ID: jobID, SourcePath: cleanPath, CandidatePath: candidatePath, Profile: profile, Plan: plan, IdempotencyKey: jobID, SourceSHA256: getString(ec.State, "original_sha256")}
 
 	// Transport-uncertainty reconciliation before reuse. This is a read-only

@@ -1244,6 +1244,12 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 		}
 		req.AudioMode = "compact"
 	}
+	if plan.Compact != nil {
+		if !caps.SupportsCompactTranscode() {
+			return nil, fmt.Errorf("worker does not support compact SDR conversion; upgrade the worker before benchmarking")
+		}
+		req.Compact = plan.Compact.Clone()
+	}
 	if req.Allow8BitTo10Bit && !caps.ExplicitMain10Benchmarks {
 		return nil, fmt.Errorf("worker does not support explicit 8-bit to Main10 benchmarks; upgrade the worker before benchmarking")
 	}

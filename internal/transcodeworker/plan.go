@@ -20,6 +20,7 @@ type SourceStream struct {
 	Language    string         `json:"language,omitempty"`
 	Title       string         `json:"title,omitempty"`
 	Channels    int            `json:"channels,omitempty"`
+	Layout      string         `json:"channel_layout,omitempty"`
 	Disposition map[string]int `json:"disposition,omitempty"`
 	StartTime   *float64       `json:"start_time,omitempty"`
 	// Detailed video fields (zero/empty when the probe could not determine
@@ -84,6 +85,7 @@ func ProbeSourceDetails(ctx context.Context, ffprobePath, filePath string) (Sour
 			BitsPerRawSample any               `json:"bits_per_raw_sample"`
 			BitsPerSample    any               `json:"bits_per_sample"`
 			Channels         int               `json:"channels"`
+			ChannelLayout    string            `json:"channel_layout"`
 			Tags             map[string]string `json:"tags"`
 			Disposition      map[string]int    `json:"disposition"`
 			StartTime        string            `json:"start_time"`
@@ -130,7 +132,7 @@ func ProbeSourceDetails(ctx context.Context, ffprobePath, filePath string) (Sour
 		}
 		out = append(out, SourceStream{
 			Index: st.Index, TypeIndex: typeIdx, Kind: kind, Codec: norm(st.CodecName),
-			Language: lang, Title: title, Channels: st.Channels, Disposition: st.Disposition,
+			Language: lang, Title: title, Channels: st.Channels, Layout: st.ChannelLayout, Disposition: st.Disposition,
 			StartTime: startTime,
 			Width:     st.Width, Height: st.Height, BitDepth: bitDepth, PixelFormat: norm(st.PixFmt), Profile: strings.TrimSpace(st.Profile),
 			Filename: filename, MimeType: mimeType,
@@ -188,6 +190,11 @@ type StreamAction struct {
 	Codec       string         `json:"codec"`
 	TargetCodec string         `json:"target_codec"`
 	BitrateKbps int            `json:"bitrate_kbps,omitempty"`
+	// Audio only: the source title, channels and layout, used to retitle a
+	// converted track whose title names its old format.
+	Title    string `json:"title,omitempty"`
+	Channels int    `json:"channels,omitempty"`
+	Layout   string `json:"channel_layout,omitempty"`
 	// Cover art only: the attachment name and MIME type it is re-attached with.
 	Filename string `json:"filename,omitempty"`
 	MimeType string `json:"mime_type,omitempty"`
@@ -294,8 +301,8 @@ func BuildExecutionPlan(plan *transcode.Plan, streams []SourceStream, duration f
 		case "video":
 			ep.Streams = append(ep.Streams, StreamAction{Kind: "video", SourceIndex: s.Index, TypeIndex: s.TypeIndex, Codec: s.Codec, TargetCodec: plan.VideoCodec})
 		case "audio":
-			target, bitrate := transcode.AudioTarget(plan.AudioMode, s.Codec, s.Channels)
-			ep.Streams = append(ep.Streams, StreamAction{Kind: "audio", SourceIndex: s.Index, TypeIndex: s.TypeIndex, Codec: s.Codec, TargetCodec: target, BitrateKbps: bitrate, Disposition: s.Disposition})
+			target, bitrate := transcode.AudioTarget(plan.AudioMode, s.Codec, s.Channels, s.Layout)
+			ep.Streams = append(ep.Streams, StreamAction{Kind: "audio", SourceIndex: s.Index, TypeIndex: s.TypeIndex, Codec: s.Codec, TargetCodec: target, BitrateKbps: bitrate, Disposition: s.Disposition, Title: s.Title, Channels: s.Channels, Layout: s.Layout})
 			if target != "copy" {
 				ep.Conversions = append(ep.Conversions, transcode.ConversionRecord{StreamType: "audio", StreamIndex: s.TypeIndex, FromCodec: s.Codec, ToCodec: target, Reason: fmt.Sprintf("%s audio requested; AAC at %d kbps, preserving channels and language (lossy)", plan.AudioMode, bitrate)})
 			}

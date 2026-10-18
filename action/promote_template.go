@@ -71,6 +71,10 @@ type promotionState struct {
 	DeleteSentAt                      string                       `json:"delete_sent_at,omitempty"`
 	OldRemoved                        bool                         `json:"old_removed"`
 	RecoveryCleanupStarted            bool                         `json:"recovery_cleanup_started,omitempty"`
+	// Set for compact candidates only: the re-grab warning and a read-only
+	// snapshot of how Sonarr/Radarr tracks the item.
+	RegrabWarning string `json:"regrab_warning,omitempty"`
+	arrTracking
 }
 
 func loadPromotion(ec *ExecutionContext) (*promotionState, error) {
@@ -212,7 +216,11 @@ func (e *Engine) stepPromoteApprove(ctx context.Context, ec *ExecutionContext) (
 		case "reject", "cancel":
 			return promoteFailed(fmt.Errorf("candidate promotion rejected; original and candidate remain untouched"))
 		default:
-			return StepResult{Status: StepWaitingDecision, WaitingReason: "Approve the verified candidate and affected library items before replacement", WaitingOptions: []WaitingOption{{Decision: "approve", Description: "Promote this candidate, preserve recovery copy until verified, and remove the old library file"}, {Decision: "reject", Description: "Keep original and candidate unchanged"}}, Outputs: map[string]any{"promotion": p}}, nil
+			reason := "Approve the verified candidate and affected library items before replacement"
+			if p.RegrabWarning != "" {
+				reason += ". " + p.RegrabWarning
+			}
+			return StepResult{Status: StepWaitingDecision, WaitingReason: reason, WaitingOptions: []WaitingOption{{Decision: "approve", Description: "Promote this candidate, preserve recovery copy until verified, and remove the old library file"}, {Decision: "reject", Description: "Keep original and candidate unchanged"}}, Outputs: map[string]any{"promotion": p}}, nil
 		}
 	}
 	if err := e.savePromotion(ctx, ec, p); err != nil {

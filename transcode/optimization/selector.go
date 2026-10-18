@@ -244,7 +244,7 @@ func SelectMeasuredCandidates(candidates []EvaluatedCandidate, mode string, tole
 
 func SelectMeasuredCandidatesVersion(candidates []EvaluatedCandidate, mode string, tolerance float64, sourceBytes int64, version string) SelectionResult {
 	r := SelectionResult{AllEvaluated: append([]EvaluatedCandidate(nil), candidates...), DecisionReason: ReasonAllCandidatesInvalid}
-	if mode != "size" && mode != "quality" && mode != "x265_preserve" {
+	if mode != "size" && mode != "quality" && mode != "x265_preserve" && mode != "compact" {
 		r.DecisionReason = "invalid_mode"
 		return r
 	}
@@ -280,7 +280,9 @@ func SelectMeasuredCandidatesVersion(candidates []EvaluatedCandidate, mode strin
 	if len(eligible) == 0 {
 		return r
 	}
-	if mode != "size" {
+	// size and compact take the smallest qualifying estimate; quality modes
+	// first keep only candidates within tolerance of the best score.
+	if mode != "size" && mode != "compact" {
 		best := eligible[0].Score
 		for _, c := range eligible {
 			if c.Score > best {
@@ -330,6 +332,11 @@ func SelectMeasuredCandidatesVersion(candidates []EvaluatedCandidate, mode strin
 
 const ModePolicyV2 = "transcode-modes-v2"
 
+// CompactMinimumSavingsPercent is the measured savings compact mode requires.
+// Converting 4K HDR to SDR 1080p normally saves far more; a smaller saving
+// means the source was already efficient and the original is kept.
+const CompactMinimumSavingsPercent = 30
+
 // ModeSizeAllowed compares fixed mode policies with exact integer bytes. Splitting
 // the quotient and remainder avoids overflow even at MaxInt64.
 func ModeSizeAllowed(mode string, source, candidate int64) bool {
@@ -344,7 +351,8 @@ func ModeSizeAllowedVersion(mode string, source, candidate int64, version string
 	if minimum == 0 {
 		return candidate <= source
 	}
-	maximum := (source/100)*85 + ((source%100)*85)/100
+	keep := int64(100 - minimum)
+	maximum := (source/100)*keep + ((source%100)*keep)/100
 	return candidate <= maximum
 }
 
@@ -364,6 +372,13 @@ func ModeMinimumSavings(mode, version string) (int, bool) {
 		return 15, true
 	case "size":
 		return 15, true
+	case "compact":
+		// Compact mode was introduced with policy v2; it never ran under v1
+		// or the unversioned legacy policy, so only v2 is accepted.
+		if version != ModePolicyV2 {
+			return 0, false
+		}
+		return CompactMinimumSavingsPercent, true
 	default:
 		return 0, false
 	}

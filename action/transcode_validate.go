@@ -68,10 +68,21 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 			CandidateSHA256        string `json:"candidate_sha256"`
 			PlanDigest             string `json:"plan_digest"`
 			BenchmarkRequestDigest string `json:"benchmark_request_digest"`
+			CompactChain           *struct {
+				ChainVersion string `json:"chain_version"`
+				TargetWidth  int    `json:"target_width"`
+				TargetHeight int    `json:"target_height"`
+			} `json:"compact_chain"`
+			CompactOutput *struct {
+				Verdict string `json:"verdict"`
+			} `json:"compact_output"`
 		}
 		encoded, err := json.Marshal(ec.State["quality_evidence"])
 		if err != nil || json.Unmarshal(encoded, &evidence) != nil || evidence.Verdict != "pass" || evidence.CandidateSHA256 == "" || evidence.CandidateSHA256 != getString(ec.State, "candidate_sha256") || evidence.PlanDigest != plan.PlanDigest || evidence.BenchmarkRequestDigest != plan.QualityValidation.BenchmarkRequestDigest {
 			return StepResult{Status: StepFailed, Error: "final quality validation evidence is missing or does not match the candidate and plan; original preserved"}, nil
+		}
+		if c := plan.Compact; c != nil && (evidence.CompactChain == nil || evidence.CompactChain.ChainVersion != c.ChainVersion || evidence.CompactChain.TargetWidth != c.TargetWidth || evidence.CompactChain.TargetHeight != c.TargetHeight || evidence.CompactOutput == nil || evidence.CompactOutput.Verdict != "pass") {
+			return StepResult{Status: StepFailed, Error: "compact conversion evidence (reference chain and SDR output check) is missing; original preserved"}, nil
 		}
 	}
 	observedSize, err := e.verifyPublishedCandidateLight(ctx, ec, outputPath)
@@ -135,6 +146,9 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 	// attributes rather than re-probing over NAS.
 	videoCodec := expectedVideoCodec(plan.VideoCodec)
 	resolution := getString(origMap, "resolution")
+	if c := plan.Compact; c != nil {
+		resolution = fmt.Sprintf("%dx%d", c.TargetWidth, c.TargetHeight)
+	}
 	bitDepth := plan.ExpectedBitDepth
 	if bitDepth == 0 {
 		bitDepth = getInt(origMap, "bit_depth")

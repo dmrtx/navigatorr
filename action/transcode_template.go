@@ -22,8 +22,8 @@ func (e *Engine) registerTranscodeTemplate() {
 		AutoReconcile:   true,
 		ImmutableInputs: true,
 		Name:            "transcode_media", Version: 2,
-		Description:    "Set mode=size|quality|x265_preserve for immutable sampled quality and final size policies without profile/priority/tuning; quality is the UI default. x265_preserve requires libx265, skips existing HEVC and permits 0% minimum savings; size requires 15%; quality and x265_preserve reject growth. Unsupported sources or unavailable quality capabilities preserve the original. Omit mode for legacy technical behavior. Coordinates safe candidate-only media transcoding using an immutable recipe-resolved plan, bounded transient retries, worker revalidation, post-transcode stream validation, and original SHA-256 verification.",
-		RequiredInputs: []string{"path"}, OptionalInputs: []string{"mode", "profile", "profile_config", "preserve_source_bit_depth", "replace_original", "expected_video_codec", "max_size_increase_percent", "media_type", "is_anime", "min_savings_percent", "surface_worker_busy", "metric", "parent_action_id", "batch_fixed_quality", "batch_calibration_digest", "batch_item_key", "library_context"}, Destructive: false,
+		Description:    "Set mode=size|quality|x265_preserve|compact for immutable sampled quality and final size policies without profile/priority/tuning; quality is the UI default. x265_preserve requires libx265, skips existing HEVC and permits 0% minimum savings; size requires 15%; quality and x265_preserve reject growth. compact makes HDR10, HLG, Dolby Vision 7/8 (base layer) and over-1080p SDR sources much smaller: deterministic tone map to SDR BT.709, downscale to max_height (720, 1080 default, 1440 or 2160), HEVC, lossless/DTS/PCM audio to AAC with every track kept, 30% minimum savings; HDR, Dolby Vision and Atmos are dropped and Dolby Vision profile 5 is rejected. Unsupported sources or unavailable quality capabilities preserve the original. Omit mode for legacy technical behavior. Coordinates safe candidate-only media transcoding using an immutable recipe-resolved plan, bounded transient retries, worker revalidation, post-transcode stream validation, and original SHA-256 verification.",
+		RequiredInputs: []string{"path"}, OptionalInputs: []string{"mode", "max_height", "profile", "profile_config", "preserve_source_bit_depth", "replace_original", "expected_video_codec", "max_size_increase_percent", "media_type", "is_anime", "min_savings_percent", "surface_worker_busy", "metric", "parent_action_id", "batch_fixed_quality", "batch_calibration_digest", "batch_item_key", "library_context"}, Destructive: false,
 		Steps: []StepDefinition{
 			{Name: "preflight", Description: "Inspect source, hash original, resolve profile/recipe and per-stream compatibility plan", Run: e.measureCoordinatorPhase("coordinator_preflight", e.stepTranscodePreflight)},
 			{Name: "submit_benchmark", Description: "Submit benchmark request if profile optimization is enabled", Run: e.stepBenchmarkSubmit},
@@ -183,12 +183,16 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		return StepResult{Status: StepFailed, Error: profileConfigErr.Error()}, nil
 	}
 	gateRep := coverArtGateReport(&rep, func() bool { return e.workerSupportsCoverArt(ctx) })
+	var compactPlan *transcode.CompactPlan
 	if modeSnapshot != nil {
 		hfrSupported, err := (&hfrQualitySupport{e: e}).forSource(ctx, gateRep)
 		if err != nil {
 			return hfrCapabilityLookupResult(err), nil
 		}
 		reason := modeSourceReason(modeSnapshot.Mode, gateRep, hfrSupported)
+		if reason == "" && modeSnapshot.Mode == "compact" {
+			compactPlan, reason = compactSourcePlan(ctx, e.deps.Ffprobe, cleanPath, gateRep, modeSnapshot)
+		}
 		if reason != "" {
 			ec.State["skip_transcode"] = true
 			ec.State["reason_code"] = reason
@@ -298,6 +302,18 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		}
 	}
 	if modeSnapshot != nil {
+		if modeSnapshot.Mode == "compact" {
+			c := compactPlan
+			if c == nil {
+				return StepResult{Status: StepFailed, Error: "compact plan missing after source classification (fail closed)"}, nil
+			}
+			plan.Compact = c.Clone()
+			// HDR and DV sources become SDR; the encode keeps 10-bit output
+			// (the tone-mapped picture is 10-bit), SDR keeps the source depth.
+			if c.ToneMap != nil && plan.ExpectedBitDepth != 10 {
+				return StepResult{Status: StepFailed, Error: "compact HDR conversion requires 10-bit output (fail closed)"}, nil
+			}
+		}
 		if err := applyModePlan(plan, modeSnapshot); err != nil {
 			return StepResult{Status: StepFailed, Error: err.Error()}, nil
 		}
@@ -332,7 +348,7 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	}
 
 	if optEnabled && optPolicy != nil {
-		if isSourceHDRorDV(&rep) {
+		if isSourceHDRorDV(&rep) && plan.Compact == nil {
 			return StepResult{Status: StepFailed, Error: "source media contains HDR/Dolby Vision: automatic optimization is only supported for SDR content (fail closed)"}, nil
 		}
 		if video := rep.MainVideo(); len(video) > 0 {

@@ -244,6 +244,7 @@ func compactPromotion(res *action.ActionResult) map[string]any {
 		"original_sha256", "candidate_sha256", "approved", "new_episode_file_id", "new_path",
 		"recovery_path", "recovery_verified",
 		"recovery_verified_before_replacement", "recovery_cleanup_started", "recovery_cleanup_completed", "recovery_note",
+		"regrab_warning", "arr_monitored", "arr_quality_profile",
 	})
 }
 

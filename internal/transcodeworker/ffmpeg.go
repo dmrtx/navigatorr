@@ -194,6 +194,9 @@ func RunFFmpegPaths(ctx context.Context, ffmpegPath string, execPlan *ExecutionP
 		return err
 	}
 
+	if _, err := ensureCompactLUT(execPlan.Plan.Compact); err != nil {
+		return err
+	}
 	var coverPaths map[int]string
 	if covers := execPlan.CoverArt(); len(covers) > 0 {
 		coverDir, err := os.MkdirTemp(filepath.Dir(outputPath), ".cover-art-")

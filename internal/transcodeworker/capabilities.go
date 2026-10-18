@@ -67,6 +67,11 @@ func ValidateEncoderCapabilities(ctx context.Context, ffmpegPath string, plan *t
 		if preset := norm(plan.Preset); preset != "" && !transcode.IsValidLibX265Preset(preset) {
 			return fmt.Errorf("encoder_capability_unsupported: unsupported libx265 preset %q", plan.Preset)
 		}
+		if plan.Compact != nil {
+			if ok, err := libX265HasDolbyVisionOption(ctx, ffmpegPath); err != nil || !ok {
+				return fmt.Errorf("encoder_capability_unsupported: compact libx265 encodes need FFmpeg's -dolbyvision option (FFmpeg 7.1 or later) to switch Dolby Vision RPU coding off: %v", err)
+			}
+		}
 		return nil
 	default:
 		return fmt.Errorf("encoder_capability_unsupported: unsupported video codec %q", plan.VideoCodec)
@@ -218,6 +223,20 @@ func probeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratch
 		})
 	}
 	caps.Filters = ParseAvailableFilters(string(filtOut))
+	// Filters missing from -filters are a confirmed absence; only a build that
+	// lists them all is asked to execute the chain.
+	compactFilters := caps.Filters["setparams"] && caps.Filters["scale"] && caps.Filters["format"] && caps.Filters["lut3d"] && caps.Filters["sidedata"]
+	compactEncoder := caps.Encoders[videoToolboxEncoder]
+	if !compactEncoder && caps.Encoders[libX265Encoder] {
+		compactEncoder, _ = libX265HasDolbyVisionOption(ctx, ffmpegPath)
+	}
+	if filtErr == nil && encErr == nil && compactFilters && compactEncoder {
+		if err := probeCompactChain(ctx, ffmpegPath); err != nil {
+			caps.ProbeErrors = append(caps.ProbeErrors, transcode.ProbeError{Component: "compact_transcode", Message: boundedErrorMessage(err, nil, 256)})
+		} else {
+			caps.CompactTranscode = true
+		}
+	}
 	if probeQuality && caps.Filters["libvmaf"] {
 		qualityCaps := cachedQualityCapabilities(ctx, ffmpegPath, scratchRoot)
 		caps.Quality = &qualityCaps
@@ -315,6 +334,31 @@ func isCleanAbsence(encoderName, output string) bool {
 		strings.Contains(lower, fmt.Sprintf("unknown encoder '%s'", enc)) ||
 		strings.Contains(lower, fmt.Sprintf("cannot find encoder '%s'", enc)) ||
 		(strings.Contains(lower, "is not recognized by ffmpeg") && strings.Contains(lower, enc))
+}
+
+// libX265HasDolbyVisionOption reports whether FFmpeg's libx265 wrapper has
+// the -dolbyvision option. Its default ("auto") enables RPU coding whenever
+// the input carries a Dolby Vision configuration record, which is stream
+// side data the compact chain's sidedata filter cannot remove, so compact
+// encodes always pass "-dolbyvision 0". Builds without the option (before
+// FFmpeg 7.1) cannot code RPUs at all, but are refused rather than trusted.
+func libX265HasDolbyVisionOption(ctx context.Context, ffmpegPath string) (bool, error) {
+	out, err := exec.CommandContext(ctx, ffmpegPath, "-hide_banner", "-h", "encoder="+libX265Encoder).CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("probing %s options: %w", libX265Encoder, err)
+	}
+	return parseEncoderHasOption(string(out), "dolbyvision"), nil
+}
+
+// parseEncoderHasOption finds an AVOption line ("-name <type> ...") in
+// `ffmpeg -h encoder=...` output.
+func parseEncoderHasOption(raw, name string) bool {
+	for _, line := range strings.Split(raw, "\n") {
+		if fields := strings.Fields(line); len(fields) > 0 && strings.EqualFold(fields[0], "-"+name) {
+			return true
+		}
+	}
+	return false
 }
 
 func ProbeVideoToolboxCapabilities(ctx context.Context, ffmpegPath string) (VideoToolboxCapabilities, error) {
