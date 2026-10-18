@@ -221,10 +221,13 @@ func busyExhaustedExecutor(busy bool) *mockTranscodeExecutor {
 	}}
 }
 
-func exhaustedSearch(t *testing.T, busy bool) (StepResult, *ExecutionContext) {
+func exhaustedSearch(t *testing.T, busy bool, earlierBusy ...bool) (StepResult, *ExecutionContext) {
 	t.Helper()
 	e := NewEngine(EngineDeps{Transcode: busyExhaustedExecutor(busy)})
 	ec := &ExecutionContext{InstanceID: "bench-exhausted", ActionName: "transcode_media", Inputs: map[string]any{"mode": "size"}, Outputs: map[string]any{}, State: map[string]any{"optimization_enabled": true, "benchmark_job_id": "bench-exhausted", "search_budget_seconds": 600, "policy_digest": "sha256:test"}}
+	if len(earlierBusy) > 0 && earlierBusy[0] {
+		ec.State["search_worker_busy"] = true
+	}
 	res, err := e.stepBenchmarkWait(context.Background(), ec)
 	if err != nil {
 		t.Fatal(err)
@@ -263,5 +266,9 @@ func TestSearchOutOfTimeOnAnIdleWorkerKeepsTheGenericMessage(t *testing.T) {
 	}
 	if getBool(ec.State, "search_worker_busy") {
 		t.Fatal("busy flag set without evidence")
+	}
+	// A busy flag left by an earlier attempt must not outlive a calm one.
+	if _, ec := exhaustedSearch(t, false, true); getBool(ec.State, "search_worker_busy") {
+		t.Fatal("an earlier attempt's busy flag was inherited")
 	}
 }

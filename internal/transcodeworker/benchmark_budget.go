@@ -3,6 +3,9 @@ package transcodeworker
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,7 +16,8 @@ import (
 // budget before its hard deadline.
 var errSearchBudgetStopped = errors.New("search budget exhausted")
 
-const searchBudgetPollInterval = 10 * time.Second
+// searchBudgetPollInterval is a variable so tests can watch a budget quickly.
+var searchBudgetPollInterval = 10 * time.Second
 
 // searchBudget decides how long one mode search may run. Without an extension
 // it is the fixed wall-clock budget from the persisted search start. With one,
@@ -63,7 +67,9 @@ func (b *searchBudget) noteUnit() {
 	b.mu.Unlock()
 }
 
-// continues reports whether the search may keep running at now.
+// continues reports whether the search may keep running at now. Progress is
+// remembered in memory only, so a search that re-enters past its base budget
+// has shown none and stops at once; that is as conservative as the fixed budget.
 func (b *searchBudget) continues(now time.Time) bool {
 	elapsed := now.Sub(b.start)
 	if elapsed >= b.hardCap {
@@ -158,4 +164,31 @@ func (b *searchBudget) watch(ctx context.Context, cancel context.CancelCauseFunc
 		once.Do(func() { close(stop) })
 		<-done
 	}
+}
+
+// otherWorkLive reports whether another job or benchmark has a live runner on
+// this worker. A stale running record left by a crash or reboot is not work, so
+// it must not make a slow search look contended. Unlike countActiveJobs it
+// reads only: reconciling stale records stays with the capacity scan.
+func (w *Worker) otherWorkLive(excludeID string) bool {
+	entries, err := os.ReadDir(w.cfg.StateDir)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() || name == excludeID || strings.HasPrefix(name, ".") {
+			continue
+		}
+		dir := filepath.Join(w.cfg.StateDir, name)
+		if job, err := LoadJob(filepath.Join(dir, "job.json")); err == nil && job.ID == name &&
+			(job.Status == "running" || job.Status == "queued") && job.PID > 0 && w.jobAlive(job) {
+			return true
+		}
+		if bench, err := LoadBenchmark(filepath.Join(dir, "benchmark.json")); err == nil && bench.ID == name &&
+			(bench.Status == "running" || bench.Status == "queued") && IsBenchmarkExecutionAlive(bench) {
+			return true
+		}
+	}
+	return false
 }

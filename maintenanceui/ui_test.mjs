@@ -2573,6 +2573,7 @@ test("phase cost detail names the extended search ceiling only when the worker r
  assert.match(render({benchmark_search_seconds:900,search_budget_seconds:600,search_budget_max_seconds:1800}),/Budget per file: 600 s, extended to at most 1800 s while samples keep finishing/);
  assert.doesNotMatch(render({benchmark_search_seconds:4,search_budget_seconds:600}),/extended/);
  assert.doesNotMatch(render({benchmark_search_seconds:4,search_budget_seconds:600,search_budget_max_seconds:600}),/extended/);
+ assert.doesNotMatch(render({benchmark_search_seconds:4,search_budget_max_seconds:1800}),/extended/);
 });
 
 test("a search that ran out of time on a busy worker says so and suggests trying again, whole",()=>{

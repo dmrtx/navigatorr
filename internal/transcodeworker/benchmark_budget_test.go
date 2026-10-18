@@ -5,8 +5,11 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/jakenesler/navigatorr/transcode/optimization"
 
 	"github.com/jakenesler/navigatorr/transcode"
 )
@@ -337,28 +340,183 @@ func TestInternalBenchmarkWithoutExtensionKeepsTheFixedDeadline(t *testing.T) {
 	}
 }
 
-func TestInternalBenchmarkReportsABusyWorkerWhenAnotherJobSharedIt(t *testing.T) {
+func TestInternalBenchmarkReportsABusyWorkerOnlyForLivePeers(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		alive bool
+		busy  bool
+	}{
+		{"another job is running", true, true},
+		// A running record left behind by a crash is not work.
+		{"stale record of a dead runner", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newBudgetWorker(t)
+			w.SetAliveFunc(func(*JobRecord) bool { return tc.alive })
+			other := &JobRecord{ID: "other-job", Status: "running", PID: 4242}
+			if err := SaveJobAtomic(filepath.Join(w.cfg.StateDir, other.ID, "job.json"), other); err != nil {
+				t.Fatal(err)
+			}
+			result, _ := runBudgetBenchmark(t, w, 10, 300*time.Millisecond, &transcode.SearchExtension{MaxSeconds: 60, SteadySeconds: 30}, func(ctx context.Context, record *BenchmarkRecord) error {
+				return waitDone(ctx)
+			})
+			if result.ReasonCode != "search_budget_exhausted" || result.SearchWorkerBusy != tc.busy {
+				t.Fatalf("busy=%v want %v: %+v", result.SearchWorkerBusy, tc.busy, result)
+			}
+			st, err := w.BenchmarkStatus(context.Background(), result.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st.SearchWorkerBusy != tc.busy || st.SearchExtension == nil || st.SearchExtension.MaxSeconds != 60 || st.ReasonCode != "search_budget_exhausted" {
+				t.Fatalf("status does not carry the busy hint and the extension: %+v", st)
+			}
+			st.SearchExtension.MaxSeconds = 1
+			if again, _ := w.BenchmarkStatus(context.Background(), result.ID); again.SearchExtension.MaxSeconds != 60 {
+				t.Fatal("status exposed the stored extension for mutation")
+			}
+		})
+	}
+}
+
+func TestOtherWorkLiveIgnoresItselfAndIdleRecords(t *testing.T) {
 	w := newBudgetWorker(t)
-	other := &JobRecord{ID: "other-job", Status: "running", PID: 4242}
-	if err := SaveJobAtomic(filepath.Join(w.cfg.StateDir, other.ID, "job.json"), other); err != nil {
-		t.Fatal(err)
+	alive := true
+	w.SetAliveFunc(func(*JobRecord) bool { return alive })
+	save := func(id, status string, pid int) {
+		t.Helper()
+		if err := SaveJobAtomic(filepath.Join(w.cfg.StateDir, id, "job.json"), &JobRecord{ID: id, Status: status, PID: pid}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	result, _ := runBudgetBenchmark(t, w, 10, 300*time.Millisecond, &transcode.SearchExtension{MaxSeconds: 60, SteadySeconds: 30}, func(ctx context.Context, record *BenchmarkRecord) error {
-		return waitDone(ctx)
+	if w.otherWorkLive("self") {
+		t.Fatal("an empty worker is not contended")
+	}
+	save("self", "running", 4242)
+	save("finished", "completed", 4243)
+	save("queued-unspawned", "queued", 0)
+	if w.otherWorkLive("self") {
+		t.Fatal("itself, finished and unspawned jobs are not contention")
+	}
+	save("peer", "running", 4244)
+	if !w.otherWorkLive("self") {
+		t.Fatal("a live running peer is contention")
+	}
+	alive = false
+	if w.otherWorkLive("self") {
+		t.Fatal("a dead runner's record is not contention")
+	}
+}
+
+type testClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *testClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *testClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	c.t = c.t.Add(d)
+	c.mu.Unlock()
+}
+
+func TestSearchBudgetWatchStopsASearchOnceItsProgressStalls(t *testing.T) {
+	old := searchBudgetPollInterval
+	searchBudgetPollInterval = 5 * time.Millisecond
+	defer func() { searchBudgetPollInterval = old }()
+
+	start := time.Unix(2_000_000, 0)
+	clock := &testClock{t: start.Add(11 * time.Second)} // past the 10 s base
+	b := newSearchBudget(start, 10, &transcode.SearchExtension{MaxSeconds: 3600, SteadySeconds: 30})
+	b.now = clock.Now
+	b.noteUnit()
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	stop := b.watch(ctx, cancel, nil)
+	defer stop()
+
+	settle := func() { time.Sleep(60 * time.Millisecond) }
+	settle()
+	if ctx.Err() != nil {
+		t.Fatal("stopped while progress was fresh")
+	}
+	clock.Advance(20 * time.Second) // 20 s since the last unit
+	settle()
+	if ctx.Err() != nil {
+		t.Fatal("stopped inside the steady window")
+	}
+	b.noteUnit() // new work restarts the window
+	clock.Advance(20 * time.Second)
+	settle()
+	if ctx.Err() != nil {
+		t.Fatal("a newer unit did not extend the search")
+	}
+	clock.Advance(20 * time.Second) // 40 s since the last unit
+	deadline := time.After(3 * time.Second)
+	for ctx.Err() == nil {
+		select {
+		case <-deadline:
+			t.Fatal("a stalled search was not stopped")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	if !errors.Is(context.Cause(ctx), errSearchBudgetStopped) || !b.wasStopped() {
+		t.Fatalf("cause=%v", context.Cause(ctx))
+	}
+	if b.now().Sub(start) >= b.hardCap {
+		t.Fatal("test stopped at the cap, not on the stall")
+	}
+}
+
+// budgetWiringRunner runs the production runner and keeps what the budget saw.
+type budgetWiringRunner struct {
+	inner    BenchmarkRunner
+	lastUnit time.Time
+	elastic  bool
+}
+
+func (r *budgetWiringRunner) RunBenchmark(ctx context.Context, w *Worker, record *BenchmarkRecord) error {
+	err := r.inner.RunBenchmark(ctx, w, record)
+	r.lastUnit, r.elastic = record.searchBudget.lastUnitTime(), record.searchBudget.elastic()
+	return err
+}
+
+// The production runner reports each finished unit through its own progress
+// reporter; the budget must hear about it from there.
+func TestProductionRunnerFinishedUnitsReachTheSearchBudget(t *testing.T) {
+	dir := t.TempDir()
+	source := ioOptWriteFile(t, filepath.Join(dir, "source.mkv"), string(make([]byte, 100)))
+	probe := strings.ReplaceAll(sdr8BitProbeJSON, `"50000000"`, `"100"`)
+	mockFFmpeg, mockProbe, _ := setupMockToolsWithQualitySizes(t, dir, probe)
+	w := NewWorker(&WorkerConfig{StateDir: filepath.Join(dir, "state"), AllowedRoots: []string{dir}, FFmpeg: mockFFmpeg, FFprobe: mockProbe, MaxParallelJobs: 2})
+	production := &ProductionBenchmarkRunner{}
+	production.SetMetricsHook(func(ctx context.Context, w *Worker, record *BenchmarkRecord, evidence *BenchmarkExecutionEvidence) error {
+		for i, c := range record.Candidates {
+			evidence.CandidateMetrics = append(evidence.CandidateMetrics, BenchmarkCandidateMetricAggregate{CandidateID: c.ID, CandidateIndex: i, MetricType: optimization.MetricTypeVMAF, Aggregate: optimization.MetricAggregate{MetricType: optimization.MetricTypeVMAF, Valid: true, MeanScore: 96.5, MinScore: 96.5, MaxScore: 96.5, SampleScores: []optimization.SampleScore{{SampleIndex: 0, Score: 96.5, Valid: true}}}})
+		}
+		return nil
 	})
-	if result.ReasonCode != "search_budget_exhausted" || !result.SearchWorkerBusy {
-		t.Fatalf("shared worker not reported: %+v", result)
-	}
-	st, err := w.BenchmarkStatus(context.Background(), result.ID)
-	if err != nil {
+	runner := &budgetWiringRunner{inner: production}
+	w.benchmarkRunner = runner
+	record := &BenchmarkRecord{ProtocolVersion: transcode.WorkerProtocolVersion, ID: "bench-wiring", Status: "queued", Source: source, Metric: "vmaf", Mode: "size", SearchBudgetSeconds: 2, SearchExtension: &transcode.SearchExtension{MaxSeconds: 60, SteadySeconds: 30}, RunToken: "wiring-token", CreatedAt: time.Now().UTC(), Samples: []transcode.BenchmarkSampleWindow{{Index: 0, StartSeconds: 5, DurationSeconds: 10}}, Candidates: []transcode.BenchmarkCandidate{{ID: "large", Quality: 70}}}
+	if err := SaveBenchmarkAtomic(filepath.Join(w.cfg.StateDir, record.ID, "benchmark.json"), record); err != nil {
 		t.Fatal(err)
 	}
-	if !st.SearchWorkerBusy || st.SearchExtension == nil || st.SearchExtension.MaxSeconds != 60 || st.ReasonCode != "search_budget_exhausted" {
-		t.Fatalf("status does not carry the busy hint and the extension: %+v", st)
+	if err := w.InternalBenchmark(context.Background(), record.ID, record.RunToken); err != nil {
+		t.Fatal(err)
 	}
-	st.SearchExtension.MaxSeconds = 1
-	again, _ := w.BenchmarkStatus(context.Background(), result.ID)
-	if again.SearchExtension.MaxSeconds != 60 {
-		t.Fatal("status exposed the stored extension for mutation")
+	if !runner.elastic {
+		t.Fatal("the stored extension did not reach the live budget")
+	}
+	if runner.lastUnit.IsZero() {
+		t.Fatal("finished units never reached the search budget")
+	}
+	result, err := LoadBenchmark(filepath.Join(w.cfg.StateDir, record.ID, "benchmark.json"))
+	if err != nil || result.Status != "completed" || result.SearchWorkerBusy {
+		t.Fatalf("search did not complete cleanly: %+v %v", result, err)
 	}
 }

@@ -1031,10 +1031,7 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) 
 			var budgetCancel context.CancelFunc
 			ctx, budgetCancel = context.WithDeadline(ctx, budget.hardDeadline())
 			defer budgetCancel()
-			stopBudget = budget.watch(ctx, causeCancel, func() bool {
-				_, used, _ := w.slotSnapshot(jobID)
-				return used > 1
-			})
+			stopBudget = budget.watch(ctx, causeCancel, func() bool { return w.otherWorkLive(jobID) })
 		} else if !record.SearchDeadline.IsZero() {
 			var budgetCancel context.CancelFunc
 			ctx, budgetCancel = context.WithDeadline(ctx, record.SearchDeadline)
@@ -1101,6 +1098,8 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) 
 	if runErr != nil {
 		latest.Status = "failed"
 		latest.Error = runErr.Error()
+		// The watcher's own cancellation can surface as context.Canceled or as a
+		// wrapped kill error, so its flag counts as well as the deadline.
 		if (record.SearchBudgetSeconds > 0 || !record.SearchDeadline.IsZero()) && (errors.Is(runErr, context.DeadlineExceeded) || budget.wasStopped()) {
 			latest.ReasonCode = "search_budget_exhausted"
 			latest.Error = "search_budget_exhausted: bounded search stopped; no claim about untested candidates"

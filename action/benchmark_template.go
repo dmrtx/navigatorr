@@ -305,6 +305,7 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 			ec.State["search_worker_busy"] = true
 			return modeAttention(ec, "search_budget_exhausted", busySearchBudgetReason), nil
 		}
+		delete(ec.State, "search_worker_busy") // a later attempt must not inherit it
 		return modeAttention(ec, "search_budget_exhausted", "Finite search budget exhausted without a reliable conclusion; original preserved"), nil
 	}
 
