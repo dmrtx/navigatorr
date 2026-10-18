@@ -240,7 +240,7 @@ func benchmarkFailureText(code string) string {
 	case "skipped_quality_dominated":
 		return dominatedText(nil)
 	case "insufficient_savings":
-		return "Quality passed, but the estimated file does not save enough space compared with the original."
+		return "The estimated file does not reach the minimum savings compared with the original, so it cannot be selected whatever its quality."
 	case "insufficient_savings_before_metrics":
 		return "Not measured: every encoded sample was already estimated below the minimum savings, so no quality result could produce an acceptable winner."
 	case "verification_not_passed":
