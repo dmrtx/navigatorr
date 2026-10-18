@@ -3193,6 +3193,9 @@ function queuePresentation(job) {
   };
 }
 // The next step a card offers, most important first. Only one is labelled.
+// Shortened visible labels for main actions. Each is a prefix of the full
+// label, which stays the accessible name (WCAG 2.5.3 Label in Name).
+const shortActionLabels = {"Replace file":"Replace","Set up benchmark":"Set up","Review candidates":"Review","Review candidate":"Review","Review replacement":"Review","Review replacements":"Review","Review preview":"Review","Validate classifications":"Validate","Check worker again":"Check worker","Check library again":"Check library","Resume batch":"Resume","Start batch":"Start","Try another profile":"Try another"};
 const mainQueueActions = ["Replace file", "Review replacements", "Review replacement", "Review candidates", "Review candidate", "Review cuts", "Validate classifications", "Review", "Resume batch", "Start batch", "Set up benchmark", "Retry", "Check worker again", "Check library again", "Review preview", "Try another profile"];
 const visibleQueueIcons = 3;
 function compactQueueActions(actions) {
@@ -3201,7 +3204,6 @@ function compactQueueActions(actions) {
   // five or more, three stay and the rest move, as the same elements with
   // their handlers and state, into a More actions menu that lists them with
   // icon and label.
-  const short = {"Replace file":"Replace","Set up benchmark":"Set up","Review candidates":"Review","Review candidate":"Review","Review replacement":"Review","Review replacements":"Review","Review preview":"Review","Validate classifications":"Validate","Check worker again":"Check again","Check library again":"Check again","Resume batch":"Resume","Start batch":"Start","Try another profile":"Try another"};
   const buttons = [...actions.children];
   const labelOf = (b) => b.textContent.trim();
   const main = mainQueueActions.map((label) => buttons.find((b) => labelOf(b) === label)).find(Boolean);
@@ -3212,7 +3214,7 @@ function compactQueueActions(actions) {
     b.setAttribute("aria-label", label);
     b.title ||= label;
     if (b === main) {
-      b.replaceChildren(...[icon, node("span", short[label] || label, "action-label")].filter(Boolean));
+      b.replaceChildren(...[icon, node("span", shortActionLabels[label] || label, "action-label")].filter(Boolean));
       b.className = "action-main primary";
       continue;
     }
@@ -3271,7 +3273,7 @@ if (typeof document.addEventListener === "function") {
 // restoreControl cannot find them.
 function openActionMenu(container) {
   const active = document.activeElement;
-  const menu = container.querySelector?.(".more-actions[open]") || active?.closest?.(".more-actions");
+  const menu = active?.closest?.(".more-actions") || container.querySelector?.(".more-actions[open]");
   if (!menu || !container.contains(menu)) return null;
   const toggle = menu.querySelector("summary") === active;
   const item = !toggle && active?.closest?.(".more-actions") === menu ? active.getAttribute("aria-label") : null;

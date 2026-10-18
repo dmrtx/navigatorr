@@ -3047,3 +3047,11 @@ test("compact goal says in plain language what it drops and still needs approval
   assert.match(markup, /<option value="compact">Make it much smaller · SDR 1080p/);
   assert.match(source, /compact:`Much smaller · SDR \$\{item\.max_height \|\| 1080\}p`/);
 });
+
+test("every shortened main action label is a prefix of its accessible name", () => {
+  const h = harness();
+  const pairs = JSON.parse(h.run("JSON.stringify(Object.entries(shortActionLabels))"));
+  assert.ok(pairs.length > 0);
+  for (const [full, visible] of pairs) assert.ok(full.startsWith(visible), `${visible} is not a prefix of ${full}`);
+  assert.equal(new Set(pairs.filter(([full]) => full.startsWith("Check")).map(([, v]) => v)).size, 2);
+});
