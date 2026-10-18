@@ -2577,3 +2577,81 @@ test("the process button says how many files it starts", () => {
   h.run('$("path").value="/media/one.mkv"; controls();');
   assert.equal(h.elements.get("enqueue").textContent, "Process file");
 });
+
+test("technical profiles live in a labelled Advanced section that keeps the goal visible", () => {
+  const form = markup.slice(markup.indexOf('<form id="job-form"'), markup.indexOf("</form>", markup.indexOf('<form id="job-form"')));
+  const advanced = form.slice(form.indexOf('<details id="advanced-profiles"'), form.indexOf("</details>", form.indexOf('<details id="advanced-profiles"')));
+  assert.match(advanced, /<summary>.*Advanced: technical profiles/);
+  assert.match(advanced, /id="technical"/);
+  assert.match(advanced, /id="legacy-controls"/);
+  assert.match(advanced, /goal above is not used/);
+  assert.ok(form.indexOf('id="processing-goal"') < form.indexOf('id="advanced-profiles"'));
+  assert.doesNotMatch(markup, /Technical tools and legacy profiles/);
+});
+
+test("turning technical profiles on marks the goal as not used instead of hiding it", () => {
+  const h = harness();
+  h.run('$("path").value="/media/one.mkv"; $("technical").checked=true; controls();');
+  const el = (id) => h.elements.get(id);
+  assert.equal(el("processing-goal").hidden, false);
+  assert.equal(el("processing-goal").disabled, true);
+  assert.equal(el("goal-overridden").hidden, false);
+  assert.equal(el("advanced-profiles").open, true);
+  assert.equal(el("legacy-controls").hidden, false);
+  assert.equal(el("advanced-state").textContent, "On · goal not used");
+  assert.equal(el("enqueue").textContent, "Create candidate");
+  // Collapsing the section is respected; the summary and goal note still say it is on.
+  h.run('$("advanced-profiles").open=false; controls();');
+  assert.equal(el("advanced-profiles").open, false);
+  assert.equal(el("goal-overridden").hidden, false);
+  h.run('$("technical").checked=false; controls();');
+  assert.equal(el("processing-goal").disabled, false);
+  assert.equal(el("goal-overridden").hidden, true);
+  assert.equal(el("legacy-controls").hidden, true);
+  assert.equal(el("advanced-state").textContent, "Off");
+  assert.equal(el("enqueue").textContent, "Process file");
+});
+
+test("the goal is sent only while technical profiles are off", async () => {
+  const { h } = submissionHarness();
+  const sent = [];
+  h.context.capture = (_tool, args) => { sent.push(JSON.parse(args.inputs)); return { id: "submitted" }; };
+  h.run('processingMode=()=>"size"; tool=async(...args)=>capture(...args); $("technical").checked=false;');
+  await h.run('buildAndSubmitJob("encode")');
+  h.run('$("technical").checked=true; $("path").value="/media/one.mp4"; $("scope").value="file";');
+  await h.run('buildAndSubmitJob("encode")');
+  assert.equal(sent[0].mode, "size");
+  assert.equal(sent[0].profile, undefined);
+  assert.equal(sent[1].mode, undefined);
+  assert.equal(sent[1].profile, "general-hevc");
+});
+
+test("the queue comes before podcast cleaning, which opens in its own dialog", () => {
+  const jobs = markup.slice(markup.indexOf('<section id="jobs"'), markup.indexOf('<section id="stats"'));
+  assert.ok(jobs.indexOf('class="queue-toolbar"') < jobs.indexOf('id="podcast-new"'));
+  assert.ok(jobs.indexOf('id="podcast-new"') < jobs.indexOf('id="jobs-list"'));
+  assert.doesNotMatch(jobs, /id="podcast-form"|<details id="podcast-new"/);
+  const dialog = markup.slice(markup.indexOf('<dialog id="podcast-dialog"'), markup.indexOf("</dialog>", markup.indexOf('<dialog id="podcast-dialog"')));
+  assert.match(dialog, /id="podcast-form"/);
+  assert.match(dialog, /id="close-podcast"/);
+});
+
+test("clean podcast opens, lists podcasts and closes after starting", async () => {
+  const h = harness();
+  const calls = [];
+  h.context.record = (name, args) => calls.push([name, args]);
+  h.run('api=async(path)=>{record("api",path);return {enabled:true,podcasts:["genwhy"]}}; tool=async(name,args)=>{record(name,args);return {id:"podcast-job"}}; loadJobs=async()=>{}; openJob=async(id)=>record("open",id);');
+  h.elements.get("podcast-new").listeners.get("click")();
+  for (let i = 0; i < 6; i++) await Promise.resolve();
+  assert.equal(h.elements.get("podcast-dialog").open, true);
+  assert.deepEqual(calls[0], ["api", "podcasts"]);
+  assert.equal(h.elements.get("podcast-id").children.length, 1);
+  h.run('$("podcast-id").value="genwhy"; $("podcast-source").value="/media/p/e.mp3"; $("podcast-output").value="/media/p/e.clean.mp3";');
+  h.elements.get("podcast-form").listeners.get("submit")({ preventDefault() {} });
+  for (let i = 0; i < 12; i++) await Promise.resolve();
+  const run = calls.find(([name]) => name === "action_run");
+  assert.equal(run[1].action, "clean_podcast_ads");
+  assert.deepEqual(JSON.parse(run[1].inputs), { podcast_id: "genwhy", path: "/media/p/e.mp3", output_path: "/media/p/e.clean.mp3" });
+  assert.equal(h.elements.get("podcast-dialog").open, false);
+  assert.deepEqual(calls.at(-1), ["open", "podcast-job"]);
+});
