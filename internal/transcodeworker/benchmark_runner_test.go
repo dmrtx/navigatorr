@@ -2291,6 +2291,8 @@ func TestBuildVMAFArgs_ArgvExactness(t *testing.T) {
 }
 
 func TestBuildSSIMArgs_ArgvExactness(t *testing.T) {
+	// Index pairing without a format conversion keeps SSIM at native precision.
+	const ssimPairInputs = "[0:v]settb=AVTB,setpts=N[d];[1:v]settb=AVTB,setpts=N[r];[d][r]"
 	candPath := "/tmp/test_workspace/cand_sample_0.mkv"
 	refPath := "/tmp/test_workspace/ref_sample_0.mkv"
 	statsPath := "/tmp/test_workspace/ssim.log"
@@ -2300,7 +2302,7 @@ func TestBuildSSIMArgs_ArgvExactness(t *testing.T) {
 		"-nostats",
 		"-i", candPath,
 		"-i", refPath,
-		"-filter_complex", "[0:v][1:v]ssim=stats_file=" + statsPath,
+		"-filter_complex", ssimPairInputs + "ssim=stats_file=" + statsPath,
 		"-f", "null",
 		"-",
 	}
@@ -2316,14 +2318,14 @@ func TestBuildSSIMArgs_ArgvExactness(t *testing.T) {
 
 	// Without stats path
 	argsNoStats := BuildSSIMArgs(candPath, refPath, "")
-	if argsNoStats[6] != "[0:v][1:v]ssim" {
-		t.Errorf("expected filter string '[0:v][1:v]ssim', got %q", argsNoStats[6])
+	if argsNoStats[6] != ssimPairInputs+"ssim" {
+		t.Errorf("expected filter string %q, got %q", ssimPairInputs+"ssim", argsNoStats[6])
 	}
 
 	// With special characters in stats path
 	statsPathSpecial := "/tmp/with:colon/and'quote/and\\backslash/stats.log"
 	argsSpecial := BuildSSIMArgs(candPath, refPath, statsPathSpecial)
-	expectedFilterSpecial := "[0:v][1:v]ssim=stats_file=/tmp/with\\\\:colon/and\\\\\\'quote/and\\\\\\\\backslash/stats.log"
+	expectedFilterSpecial := ssimPairInputs + "ssim=stats_file=/tmp/with\\\\:colon/and\\\\\\'quote/and\\\\\\\\backslash/stats.log"
 	if argsSpecial[6] != expectedFilterSpecial {
 		t.Errorf("expected filter string %q, got %q", expectedFilterSpecial, argsSpecial[6])
 	}

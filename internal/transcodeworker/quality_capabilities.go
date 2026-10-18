@@ -21,10 +21,20 @@ var qualityProbeCache = struct {
 		caps transcode.QualityCapabilities
 		at   time.Time
 	}
+	// hfrTimedOut records when a cached entry's HFR probe last timed out, so
+	// only that part is retried, and at most once per hfrProbeRetryAfter.
+	hfrTimedOut map[string]time.Time
 }{results: make(map[string]struct {
 	caps transcode.QualityCapabilities
 	at   time.Time
-})}
+}), hfrTimedOut: make(map[string]time.Time)}
+
+const (
+	qualityProbeTTL = 5 * time.Minute
+	// A timed-out HFR probe proves nothing either way. It is retried, but not
+	// on every capabilities request, and never by re-running the native probes.
+	hfrProbeRetryAfter = time.Minute
+)
 
 func cachedQualityCapabilities(ctx context.Context, ffmpegPath, scratchRoot string) transcode.QualityCapabilities {
 	info, err := os.Stat(ffmpegPath)
@@ -33,22 +43,52 @@ func cachedQualityCapabilities(ctx context.Context, ffmpegPath, scratchRoot stri
 	}
 	key := fmt.Sprintf("%s:%d:%d", ffmpegPath, info.Size(), info.ModTime().UnixNano())
 	qualityProbeCache.Lock()
-	if cached, ok := qualityProbeCache.results[key]; ok && time.Since(cached.at) < 5*time.Minute {
+	if cached, ok := qualityProbeCache.results[key]; ok && time.Since(cached.at) < qualityProbeTTL {
+		timedOutAt, timedOut := qualityProbeCache.hfrTimedOut[key]
 		qualityProbeCache.Unlock()
-		return cloneQualityCapabilities(cached.caps)
+		if !timedOut || time.Since(timedOutAt) < hfrProbeRetryAfter {
+			return cloneQualityCapabilities(cached.caps)
+		}
+		result := cloneQualityCapabilities(cached.caps)
+		retryHFRCapability(ctx, ffmpegPath, scratchRoot, &result)
+		storeQualityCapabilities(ctx, key, result, cached.at)
+		return result
 	}
 	qualityProbeCache.Unlock()
 	result := probeQualityCapabilities(ctx, ffmpegPath, scratchRoot)
-	// A timed-out HFR probe proves nothing either way; retry it next time.
-	if result.ProbeError == "" && result.HFRProbeReason != hfrProbeTimeout && ctx.Err() == nil {
-		qualityProbeCache.Lock()
-		qualityProbeCache.results[key] = struct {
-			caps transcode.QualityCapabilities
-			at   time.Time
-		}{cloneQualityCapabilities(result), time.Now()}
-		qualityProbeCache.Unlock()
-	}
+	storeQualityCapabilities(ctx, key, result, time.Now())
 	return result
+}
+
+func storeQualityCapabilities(ctx context.Context, key string, result transcode.QualityCapabilities, at time.Time) {
+	if result.ProbeError != "" || ctx.Err() != nil {
+		return
+	}
+	qualityProbeCache.Lock()
+	defer qualityProbeCache.Unlock()
+	qualityProbeCache.results[key] = struct {
+		caps transcode.QualityCapabilities
+		at   time.Time
+	}{cloneQualityCapabilities(result), at}
+	if result.HFRProbeReason == hfrProbeTimeout {
+		qualityProbeCache.hfrTimedOut[key] = time.Now()
+	} else {
+		delete(qualityProbeCache.hfrTimedOut, key)
+	}
+}
+
+// retryHFRCapability re-runs only the HFR probe on top of cached native
+// results.
+func retryHFRCapability(ctx context.Context, ffmpegPath, scratchRoot string, caps *transcode.QualityCapabilities) {
+	model, _ := quality.Model(quality.ProbeModelID)
+	dir, err := os.MkdirTemp(scratchRoot, "quality-hfr-probe-")
+	if err != nil {
+		// Unproven either way, so it is retried like a timeout.
+		caps.HFRTemporalDecimation, caps.HFRProbeReason = 0, hfrProbeTimeout
+		return
+	}
+	defer os.RemoveAll(dir)
+	probeHFRCapability(ctx, ffmpegPath, dir, model, caps)
 }
 
 func cloneQualityCapabilities(c transcode.QualityCapabilities) transcode.QualityCapabilities {
@@ -67,7 +107,7 @@ func cloneQualityCapabilities(c transcode.QualityCapabilities) transcode.Quality
 // malformed probe is retained separately and must never be treated as support.
 func probeQualityCapabilities(ctx context.Context, ffmpegPath, scratchRoot string) transcode.QualityCapabilities {
 	out := transcode.QualityCapabilities{Models: map[string]transcode.QualityModelCapability{}}
-	model, _ := quality.Model("v1_1080p_3h")
+	model, _ := quality.Model(quality.ProbeModelID)
 	entry := transcode.QualityModelCapability{MeasurementBitDepth: model.MeasurementBitDepth, ScoreMin: model.MinScore, ScoreMax: model.MaxScore}
 	out.Models[model.ID] = entry
 	probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -141,11 +181,18 @@ func probeQualityCapabilities(ctx context.Context, ffmpegPath, scratchRoot strin
 		}
 	}
 	out.Native10Bit = out.ProbeError == "" && out.Models[model.ID].Available && out.CAMBIFullRef
+	probeHFRCapability(ctx, ffmpegPath, dir, model, &out)
+	return out
+}
+
+// probeHFRCapability sets the HFR fields from the native results already in
+// out, running the decimated probe only when those allow it.
+func probeHFRCapability(ctx context.Context, ffmpegPath, dir string, model quality.VMAFModel, out *transcode.QualityCapabilities) {
 	switch {
 	case out.ProbeError != "":
-		out.HFRProbeReason = "quality_probe_failed"
+		out.HFRTemporalDecimation, out.HFRProbeReason = 0, "quality_probe_failed"
 	case !out.Models[model.ID].Available:
-		out.HFRProbeReason = "vmaf_model_unavailable"
+		out.HFRTemporalDecimation, out.HFRProbeReason = 0, "vmaf_model_unavailable"
 	default:
 		// A separate budget: a slow HFR probe must not mark the whole quality
 		// probe as timed out and disable native-rate VMAF/CAMBI with it.
@@ -153,7 +200,6 @@ func probeQualityCapabilities(ctx context.Context, ffmpegPath, scratchRoot strin
 		out.HFRTemporalDecimation, out.HFRProbeReason = probeHFRDecimation(hfrCtx, ffmpegPath, dir, model)
 		hfrCancel()
 	}
-	return out
 }
 
 // probeHFRDecimation executes the production decimated model graph on a
@@ -216,8 +262,11 @@ const (
 )
 
 // hfrProbeTimeoutDuration bounds the HFR probe separately from the quality
-// probe's own budget.
-var hfrProbeTimeoutDuration = 20 * time.Second
+// probe's own budget. It runs inside a /v1/capabilities request, so together
+// with the native probes it must stay well under the coordinator's request
+// timeout (httpclient.DefaultHTTPRequestTimeout, 15 s). The probe normally
+// takes well under a second.
+var hfrProbeTimeoutDuration = 5 * time.Second
 
 func runSyntheticQualityProbe(ctx context.Context, ffmpegPath, filter string) ([]byte, error) {
 	// The low two bits carry actual signal. Disabling automatic conversion

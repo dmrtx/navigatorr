@@ -121,8 +121,9 @@ func freezeModePolicy(ec *ExecutionContext) (*ModePolicySnapshot, error) {
 
 // modeSourceReason classifies a source for an automatic mode. hfrSupported
 // must come from the worker's proven decimated-VMAF capability; without it
-// 45-61 FPS sources wait for a capable worker (hfr_quality_unavailable), and
-// rates above that class stay unsupported.
+// progressive 45-61 FPS sources are skipped as hfr_quality_unavailable (a new
+// goal will not help; a capable worker will), and interlaced HFR-class
+// sources and rates above that class stay unsupported.
 func modeSourceReason(mode string, rep *mediainspect.DetailedReport, hfrSupported bool) string {
 	video := rep.MainVideo()
 	if len(video) != 1 || video[0].BitDepth != 8 && video[0].BitDepth != 10 || isSourceHDRorDV(rep) {

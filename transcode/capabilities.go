@@ -213,21 +213,25 @@ func VerifyCapabilityFingerprint(caps WorkerCapabilities) error {
 }
 
 // SupportsHFRQuality reports a proven decimated VMAF measurement path for
-// sources between quality.HFRMinFPS and quality.HFRMaxFPS.
+// progressive sources between quality.HFRMinFPS and quality.HFRMaxFPS. The
+// proof was run with quality.ProbeModelID.
 func (c WorkerCapabilities) SupportsHFRQuality() bool {
-	return c.Quality != nil && c.Quality.ProbeError == "" && c.Quality.Models["v1_1080p_3h"].Available && c.Quality.HFRTemporalDecimation == quality.HFRDecimationFactor
+	return c.Quality != nil && c.Quality.ProbeError == "" && c.Quality.Models[quality.ProbeModelID].Available && c.Quality.HFRTemporalDecimation == quality.HFRDecimationFactor
 }
 
 // SupportsQualityFPS is the single coordinator/worker frame-rate gate for
-// modeled VMAF measurement: native rates below quality.HFRMinFPS always,
-// the HFR class only on a worker that proved decimation, nothing else.
-func (c WorkerCapabilities) SupportsQualityFPS(fps float64) bool {
-	factor, err := quality.TemporalDecimation(fps)
+// modeled VMAF measurement of one video stream: native rates below
+// quality.HFRMinFPS always, the progressive HFR class only on a worker that
+// proved decimation, nothing else. fieldOrder is the stream's ffprobe
+// field_order; an interlaced stream in the HFR class may report its field
+// rate and is never admitted.
+func (c WorkerCapabilities) SupportsQualityFPS(fps float64, fieldOrder string) bool {
+	factor, err := quality.TemporalDecimationForStream(fps, fieldOrder)
 	return err == nil && (factor == 1 || c.SupportsHFRQuality())
 }
 
 // Both metrics must have executed on native 10-bit synthetic inputs without
 // automatic pixel conversion. Older workers cannot claim this capability.
 func (c WorkerCapabilities) SupportsNative10BitQuality() bool {
-	return c.Quality != nil && c.Quality.Native10Bit && c.Quality.ProbeError == "" && c.Quality.Models["v1_1080p_3h"].Available && c.Quality.CAMBIFullRef
+	return c.Quality != nil && c.Quality.Native10Bit && c.Quality.ProbeError == "" && c.Quality.Models[quality.ProbeModelID].Available && c.Quality.CAMBIFullRef
 }
