@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -193,7 +194,19 @@ func RunFFmpegPaths(ctx context.Context, ffmpegPath string, execPlan *ExecutionP
 		return err
 	}
 
-	args, err := BuildFFmpegArgs(execPlan, inputPath, outputPath, progressPath)
+	var coverPaths map[int]string
+	if covers := execPlan.CoverArt(); len(covers) > 0 {
+		coverDir, err := os.MkdirTemp(filepath.Dir(outputPath), ".cover-art-")
+		if err != nil {
+			return fmt.Errorf("creating cover art scratch: %w", err)
+		}
+		defer os.RemoveAll(coverDir)
+		if coverPaths, err = ExtractCoverArt(ctx, ffmpegPath, inputPath, coverDir, covers); err != nil {
+			return err
+		}
+	}
+
+	args, err := BuildFFmpegArgsWithCoverArt(execPlan, inputPath, outputPath, progressPath, coverPaths)
 	if err != nil {
 		return fmt.Errorf("building ffmpeg arguments: %w", err)
 	}
@@ -243,4 +256,37 @@ func RunFFmpegPaths(ctx context.Context, ffmpegPath string, execPlan *ExecutionP
 		}
 	}
 	return nil
+}
+
+// ExtractCoverArt stream-copies each attached picture's single packet to an
+// image file in dir, byte-identical to the embedded cover, so the encode can
+// re-attach it. It returns the absolute path per source stream index.
+func ExtractCoverArt(ctx context.Context, ffmpegPath, inputPath, dir string, covers []StreamAction) (map[int]string, error) {
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, err
+	}
+	paths := make(map[int]string, len(covers))
+	for _, c := range covers {
+		ext := coverArtExtensions[c.MimeType]
+		if c.Kind != "cover" || ext == "" {
+			return nil, fmt.Errorf("cover art stream %d has unsupported type %q (fail closed)", c.SourceIndex, c.MimeType)
+		}
+		path := filepath.Join(absDir, fmt.Sprintf("cover-%d%s", c.SourceIndex, ext))
+		args := []string{"-nostdin", "-v", "error", "-y", "-i", inputPath, "-map", fmt.Sprintf("0:%d", c.SourceIndex), "-c", "copy", "-frames:v", "1", "-f", "image2", "-update", "1", path}
+		var stderr bytes.Buffer
+		cmd := exec.CommandContext(ctx, ffmpegPath, args...)
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, fmt.Errorf("extracting cover art stream %d: %w (%s)", c.SourceIndex, err, strings.TrimSpace(stderr.String()))
+		}
+		if fi, err := os.Lstat(path); err != nil || !fi.Mode().IsRegular() || fi.Size() == 0 {
+			return nil, fmt.Errorf("extracting cover art stream %d produced no image (fail closed)", c.SourceIndex)
+		}
+		paths[c.SourceIndex] = path
+	}
+	return paths, nil
 }

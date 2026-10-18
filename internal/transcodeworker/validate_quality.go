@@ -63,32 +63,34 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 		return fail("quality_cambi_full_ref_unavailable", fmt.Errorf("worker cannot execute full-reference CAMBI"))
 	}
 	sourceRep, err := mediainspect.InspectDetailed(ctx, w.ffprobePath, source)
-	if err != nil || len(sourceRep.Video) != 1 {
+	sourceVideoStreams := sourceRep.MainVideo()
+	if err != nil || len(sourceVideoStreams) != 1 {
 		return fail("quality_final_source_probe_failed", fmt.Errorf("source video probe: %v", err))
 	}
 	candidateRep, err := mediainspect.InspectDetailed(ctx, w.ffprobePath, candidate)
-	if err != nil || len(candidateRep.Video) != 1 {
+	candidateVideoStreams := candidateRep.MainVideo()
+	if err != nil || len(candidateVideoStreams) != 1 {
 		return fail("quality_final_candidate_probe_failed", fmt.Errorf("candidate video probe: %v", err))
 	}
 	if plan.Mode != "" {
-		sourceVideo, candidateVideo := sourceRep.Video[0], candidateRep.Video[0]
+		sourceVideo, candidateVideo := sourceVideoStreams[0], candidateVideoStreams[0]
 		if mediainspect.IsHDRorDolbyVisionReport(&sourceRep) || mediainspect.IsHDRorDolbyVisionReport(&candidateRep) || (sourceVideo.BitDepth != 8 && sourceVideo.BitDepth != 10) || candidateVideo.BitDepth != sourceVideo.BitDepth || !isSupportedSourceChroma(sourceVideo.PixelFormat, sourceVideo.BitDepth) || !isSupportedSourceChroma(candidateVideo.PixelFormat, candidateVideo.BitDepth) {
 			return fail("quality_source_class_unsupported", fmt.Errorf("source/candidate measurement class is unsupported or changed"))
 		}
 	}
-	e.SourceBitDepth = sourceRep.Video[0].BitDepth
-	e.CandidateBitDepth = candidateRep.Video[0].BitDepth
-	if sourceRep.Video[0].FPS <= 0 || !isFiniteQuality(sourceRep.Video[0].FPS) {
+	e.SourceBitDepth = sourceVideoStreams[0].BitDepth
+	e.CandidateBitDepth = candidateVideoStreams[0].BitDepth
+	if sourceVideoStreams[0].FPS <= 0 || !isFiniteQuality(sourceVideoStreams[0].FPS) {
 		return fail("quality_final_source_timing_unavailable", fmt.Errorf("source FPS unavailable"))
 	}
-	if sourceRep.Video[0].BitDepth > 8 && runVMAF && !caps.SupportsNative10BitQuality() {
-		return fail("quality_vmaf_native_main10_unverified", fmt.Errorf("native %d-bit source not eligible for VMAF", sourceRep.Video[0].BitDepth))
+	if sourceVideoStreams[0].BitDepth > 8 && runVMAF && !caps.SupportsNative10BitQuality() {
+		return fail("quality_vmaf_native_main10_unverified", fmt.Errorf("native %d-bit source not eligible for VMAF", sourceVideoStreams[0].BitDepth))
 	}
-	if sourceRep.Video[0].BitDepth > 8 && runCAMBI && !caps.SupportsNative10BitQuality() {
-		return fail("quality_cambi_native_main10_unverified", fmt.Errorf("native %d-bit source not eligible for CAMBI", sourceRep.Video[0].BitDepth))
+	if sourceVideoStreams[0].BitDepth > 8 && runCAMBI && !caps.SupportsNative10BitQuality() {
+		return fail("quality_cambi_native_main10_unverified", fmt.Errorf("native %d-bit source not eligible for CAMBI", sourceVideoStreams[0].BitDepth))
 	}
-	if sourceRep.Video[0].FPS >= 45 && runVMAF {
-		return fail("quality_vmaf_hfr_model_unavailable", fmt.Errorf("non-HFR model requested for %.3f FPS source", sourceRep.Video[0].FPS))
+	if sourceVideoStreams[0].FPS >= 45 && runVMAF {
+		return fail("quality_vmaf_hfr_model_unavailable", fmt.Errorf("non-HFR model requested for %.3f FPS source", sourceVideoStreams[0].FPS))
 	}
 	if sourceRep.DurationSec <= 0 || candidateRep.DurationSec <= 0 {
 		return fail("quality_final_duration_unavailable", fmt.Errorf("source or candidate duration missing"))
@@ -113,7 +115,7 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 		for _, item := range []struct {
 			source, out string
 			videoIndex  int
-		}{{source, refPath, sourceRep.Video[0].Index}, {candidate, candPath, candidateRep.Video[0].Index}} {
+		}{{source, refPath, sourceVideoStreams[0].Index}, {candidate, candPath, candidateVideoStreams[0].Index}} {
 			if _, err := runQualityCommand(ctx, w.ffmpegPath, BuildReferenceExtractionArgs(item.source, item.out, item.videoIndex, window.StartSeconds, window.DurationSeconds)); err != nil {
 				return fail("quality_final_sample_extract_failed", err)
 			}
@@ -126,12 +128,12 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 		if err != nil {
 			return fail("quality_final_sample_misaligned", err)
 		}
-		if err := verifySampleAlignment(refPTS, candPTS, sourceRep.Video[0].FPS); err != nil {
+		if err := verifySampleAlignment(refPTS, candPTS, sourceVideoStreams[0].FPS); err != nil {
 			return fail("quality_final_sample_misaligned", err)
 		}
 		if runVMAF {
 			logPath := filepath.Join(scratch, fmt.Sprintf("vmaf_%d.json", window.Index))
-			args, err := BuildVMAFModelArgs(candPath, refPath, logPath, *model, candidateRep.Video[0].BitDepth, w.metricThreads(1))
+			args, err := BuildVMAFModelArgs(candPath, refPath, logPath, *model, candidateVideoStreams[0].BitDepth, w.metricThreads(1))
 			if err != nil {
 				return fail("quality_vmaf_measurement_path_unavailable", err)
 			}
@@ -142,14 +144,14 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 			if err != nil {
 				return fail("quality_vmaf_evidence_incomplete", err)
 			}
-			stats, err := quality.ParseVMAF(data, MaxMetricLogSizeBytes, *model, window.Index, window.StartSeconds, sourceRep.Video[0].FPS, q.Quality.VMAF.WorstWindowSeconds, q.Quality.VMAF.FrameThreshold)
+			stats, err := quality.ParseVMAF(data, MaxMetricLogSizeBytes, *model, window.Index, window.StartSeconds, sourceVideoStreams[0].FPS, q.Quality.VMAF.WorstWindowSeconds, q.Quality.VMAF.FrameThreshold)
 			if err != nil || stats.FramesTotal != len(refPTS) {
 				return fail("quality_vmaf_evidence_incomplete", fmt.Errorf("sample %d: %v", window.Index, err))
 			}
 			vmafSamples = append(vmafSamples, stats)
 		}
 		if runCAMBI {
-			stats, err := runCAMBIMetricSample(ctx, w.ffmpegPath, scratch, candPath, refPath, 0, "final", window.Index, window.StartSeconds, sourceRep.Video[0].FPS, candidateRep.Video[0].BitDepth, caps.Quality.CAMBIOutput, w.metricThreads(1))
+			stats, err := runCAMBIMetricSample(ctx, w.ffmpegPath, scratch, candPath, refPath, 0, "final", window.Index, window.StartSeconds, sourceVideoStreams[0].FPS, candidateVideoStreams[0].BitDepth, caps.Quality.CAMBIOutput, w.metricThreads(1))
 			if err != nil || stats.FramesTotal != len(refPTS) {
 				return fail("quality_cambi_evidence_incomplete", fmt.Errorf("sample %d: %v", window.Index, err))
 			}
@@ -311,10 +313,11 @@ func (w *Worker) validateModeSourceQuality(ctx context.Context, source string, p
 		return nil
 	}
 	rep, err := mediainspect.InspectDetailed(ctx, w.ffprobePath, source)
-	if err != nil || len(rep.Video) != 1 {
+	video := rep.MainVideo()
+	if err != nil || len(video) != 1 {
 		return fmt.Errorf("quality_source_evidence_missing: source class unavailable: %v", err)
 	}
-	v := rep.Video[0]
+	v := video[0]
 	if plan.Mode == "x265_preserve" && (norm(v.Codec) == "hevc" || norm(v.Codec) == "h265") {
 		return &transcode.PolicyRejectionError{ReasonCode: "already_hevc", Message: "source is already HEVC; no conversion required"}
 	}

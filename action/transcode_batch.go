@@ -415,7 +415,7 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 		}
 
 		rep, err := mediainspect.InspectDetailed(ctx, e.deps.Ffprobe, cleanPath)
-		if err != nil || !rep.Probed || len(rep.Video) == 0 {
+		if err != nil || !rep.Probed || len(rep.MainVideo()) == 0 {
 			reason := "ffprobe did not produce a trustworthy video inspection"
 			if err != nil {
 				reason = fmt.Sprintf("mediainspect failed: %v", err)
@@ -434,7 +434,7 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 			batchItems = append(batchItems, item)
 			continue
 		}
-		if batchCalibrationEnabled(ec.Inputs, ec.State) && (len(rep.Video) != 1 || rep.Video[0].BitDepth != 8 || rep.Video[0].FPS <= 0 || rep.Video[0].FPS >= 45 || isSourceHDRorDV(&rep)) {
+		if batchCalibrationEnabled(ec.Inputs, ec.State) && !sharedCalibrationSourceSupported(&rep) {
 			item := store.TranscodeBatchItem{
 				BatchID: ec.InstanceID, ItemKey: itemKey, FilePath: cleanPath,
 				DisplayLabel: displayLabel, EpisodeInfo: episodeInfo,

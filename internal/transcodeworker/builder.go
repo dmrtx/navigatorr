@@ -2,6 +2,7 @@ package transcodeworker
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -269,12 +270,36 @@ func boolFFmpeg(v bool) string {
 // BuildFFmpegArgs generates the exact, safe FFmpeg argument slice from an ExecutionPlan.
 // It explicitly specifies codec mapping per stream type and subtitle stream index,
 // avoiding dangerous global defaults that could corrupt stylized subtitles or mux incompatible codecs.
+// A plan with cover art needs the extracted cover files: use
+// BuildFFmpegArgsWithCoverArt.
 func BuildFFmpegArgs(execPlan *ExecutionPlan, sourcePath, candidatePath, progressPath string) ([]string, error) {
+	return BuildFFmpegArgsWithCoverArt(execPlan, sourcePath, candidatePath, progressPath, nil)
+}
+
+// BuildFFmpegArgsWithCoverArt is BuildFFmpegArgs for sources with attached
+// pictures. coverPaths maps each cover's source stream index to the absolute
+// path of its extracted, byte-identical image (see ExtractCoverArt). Only the
+// programme video is mapped and encoded (`0:V` excludes attached pictures);
+// each cover is re-attached untouched as a Matroska image attachment.
+func BuildFFmpegArgsWithCoverArt(execPlan *ExecutionPlan, sourcePath, candidatePath, progressPath string, coverPaths map[int]string) ([]string, error) {
 	if execPlan == nil || execPlan.Plan == nil {
 		return nil, fmt.Errorf("execution plan cannot be nil (fail closed)")
 	}
 	if strings.TrimSpace(sourcePath) == "" || strings.TrimSpace(candidatePath) == "" {
 		return nil, fmt.Errorf("source and candidate paths are required (fail closed)")
+	}
+	covers := execPlan.CoverArt()
+	videoMap := "0:v?"
+	if len(covers) > 0 {
+		videoMap = "0:V?"
+	}
+	for _, c := range covers {
+		if path := coverPaths[c.SourceIndex]; !filepath.IsAbs(path) {
+			return nil, fmt.Errorf("cover art stream %d has no extracted image (fail closed)", c.SourceIndex)
+		}
+		if c.MimeType == "" || !safeAttachmentFilename(c.Filename) {
+			return nil, fmt.Errorf("cover art stream %d has no attachment name or type (fail closed)", c.SourceIndex)
+		}
 	}
 
 	args := []string{
@@ -282,7 +307,7 @@ func BuildFFmpegArgs(execPlan *ExecutionPlan, sourcePath, candidatePath, progres
 		"-progress", progressPath,
 		"-nostats",
 		"-i", sourcePath,
-		"-map", "0:v?",
+		"-map", videoMap,
 		"-map", "0:a?",
 		"-map", "0:s?",
 		"-map", "0:t?",
@@ -346,6 +371,14 @@ func BuildFFmpegArgs(execPlan *ExecutionPlan, sourcePath, candidatePath, progres
 	// Attachments: copy
 	if execPlan.Plan.PreserveAttachments {
 		args = append(args, "-c:t", "copy")
+	}
+
+	// Cover art: re-attached after the mapped source attachments.
+	for i, c := range covers {
+		idx := execPlan.SourceAttachments + i
+		args = append(args, "-attach", coverPaths[c.SourceIndex],
+			fmt.Sprintf("-metadata:s:t:%d", idx), "mimetype="+c.MimeType,
+			fmt.Sprintf("-metadata:s:t:%d", idx), "filename="+c.Filename)
 	}
 
 	args = append(args, candidatePath)

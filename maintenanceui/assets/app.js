@@ -2778,9 +2778,9 @@ function jobControls(job, detail = false) {
   if (job.action_name === "transcode_batch" && !job.batch?.dry_run && !job.batch?.promotion_plan_ready && ["completed","failed"].includes(job.status) && (job.remaining_candidates != null ? job.remaining_candidates > 0 : job.batch?.completed > 0 && !job.batch?.promotion?.promoted))
     add("Review candidates", () => reviewBatchCandidates(job.id));
   const reconfigurable = job.action_name === "transcode_batch" && !job.batch?.dry_run && !job.batch?.promotion_plan_ready;
-  if (job.parent_item_key && job.parent_action_id && !job.candidate_ready && !job.replacement_action_id && ["completed","failed","cancelled","waiting_decision"].includes(job.status))
+  if (job.parent_item_key && job.parent_action_id && !job.candidate_ready && !job.replacement_action_id && ["completed","failed","cancelled","waiting_decision"].includes(job.status) && !(job.mode && job.reason_code === "unsupported_source"))
     add(job.mode ? "Change goal" : "Change settings", () => reconfigureBatch(job.parent_action_id, false, {item_key:job.parent_item_key}));
-  if (reconfigurable) add(job.mode ? "Change goal" : job.batch?.outcome === "no_changes" ? "Try another profile" : "Change settings", () => reconfigureBatch(job.id));
+  if (reconfigurable && !(job.mode && onlyUnsupportedSources(job))) add(job.mode ? "Change goal" : job.batch?.outcome === "no_changes" ? "Try another profile" : "Change settings", () => reconfigureBatch(job.id));
   if (job.status === "failed" && !reconfigurable && !job.parent_item_key) {
     if (rejectedCandidate(job)) {
       if (job.parent_action_id) add("Change settings", () => reconfigureBatch(job.parent_action_id, true, {candidate_id:job.id}));
@@ -2938,6 +2938,7 @@ function shortJobReason(reason) {
     already_target_codec: "Already in the target codec; original kept",
     search_budget_exhausted: "Automatic testing reached its limit without finding a reliable result; original kept",
     no_suitable_candidate: "None of the tested settings met this goal; original kept",
+    unsupported_source: "Automatic testing does not support this source format yet; original kept",
     quality_policy_unavailable: "The worker cannot run the quality checks this goal needs; original kept",
     quality_vmaf_model_unavailable: "The worker cannot measure quality for this video (VMAF model unavailable); original kept",
     benchmark_search_review: "Earlier test rounds found nothing acceptable; review before testing again",
@@ -3254,6 +3255,11 @@ function queueOutcome(job) {
   if (job.action_name === "benchmark_transcode") return "Sample test complete · Original preserved";
   return "Finished · Open job for details";
 }
+// Every goal applies the same source gate, so a new goal cannot help these files.
+function onlyUnsupportedSources(job) {
+  const reasons = job.batch_files?.reasons || [];
+  return job.batch?.outcome === "no_changes" && reasons.length > 0 && reasons.every(reason => reason.reason === "unsupported_source");
+}
 function skippedBatchOutcome(job) {
   const result = node("div", "", "skipped-outcome");
   const reasons = job.batch_files?.reasons || [];
@@ -3261,7 +3267,7 @@ function skippedBatchOutcome(job) {
   const total = job.batch?.total || 0;
   const text = reason ? shortJobReason(reason.reason) : "No conversion was started";
   result.append(node("p", `${reason && reason.count < total ? `${reason.count} of ${total} files: ` : ""}${text}`, "skipped-reason"));
-  result.append(node("p", job.mode ? "None of the tested settings met this goal. You can change the goal; your originals are unchanged." : "Choose another profile to try again. Your originals are unchanged.", "metadata"));
+  result.append(node("p", job.mode && onlyUnsupportedSources(job) ? "Automatic testing does not support this source format yet, so changing the goal will not help. Your originals are unchanged." : job.mode ? "None of the tested settings met this goal. You can change the goal; your originals are unchanged." : "Choose another profile to try again. Your originals are unchanged.", "metadata"));
   return result;
 }
 async function loadJobs(more = false) {
@@ -3669,7 +3675,8 @@ async function loadBatchItems(id, revision) {
     };
     if (item.candidate_ready && state.info.allow_destructive) add("Replace file", () => replaceBatchFile(id, item.child_action_id));
     if (item.replacement_action_id) add("View replacement", () => openJob(item.replacement_action_id));
-    if (item.can_reconfigure && ["skip","review","failed","cancelled","waiting_decision"].includes(item.status)) add(item.mode ? "Change goal" : "Change settings", () => reconfigureBatch(id, false, {item_key:item.item_key}));
+    const unsupportedSource = item.mode && (item.reason_code === "unsupported_source" || item.reasons?.includes("unsupported_source"));
+    if (item.can_reconfigure && !unsupportedSource && ["skip","review","failed","cancelled","waiting_decision"].includes(item.status)) add(item.mode ? "Change goal" : "Change settings", () => reconfigureBatch(id, false, {item_key:item.item_key}));
     if (actions.children.length) row.append(actions);
     const activity = batchFileActivity(item, state.detailJob);
     if (activity) row.append(node("span", activity, "batch-file-activity"));

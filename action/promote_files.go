@@ -655,7 +655,7 @@ func (e *Engine) promotionInspectAdopted(ctx context.Context, p *promotionState,
 		if err != nil {
 			return err
 		}
-		if !rep.Probed || len(rep.Video) == 0 || !promotionHEVC(rep.Video[0].Codec) {
+		if video := rep.MainVideo(); !rep.Probed || len(video) == 0 || !promotionHEVC(video[0].Codec) {
 			return fmt.Errorf("Sonarr's physical file is not a verified HEVC candidate")
 		}
 	}

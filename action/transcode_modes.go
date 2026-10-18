@@ -118,10 +118,11 @@ func freezeModePolicy(ec *ExecutionContext) (*ModePolicySnapshot, error) {
 }
 
 func modeSourceReason(mode string, rep *mediainspect.DetailedReport) string {
-	if rep == nil || len(rep.Video) != 1 || rep.Video[0].BitDepth != 8 && rep.Video[0].BitDepth != 10 || rep.Video[0].FPS <= 0 || rep.Video[0].FPS >= 45 || isSourceHDRorDV(rep) {
+	video := rep.MainVideo()
+	if len(video) != 1 || video[0].BitDepth != 8 && video[0].BitDepth != 10 || video[0].FPS <= 0 || video[0].FPS >= 45 || isSourceHDRorDV(rep) {
 		return "unsupported_source"
 	}
-	if mode == "x265_preserve" && strings.EqualFold(rep.Video[0].Codec, "hevc") {
+	if mode == "x265_preserve" && strings.EqualFold(video[0].Codec, "hevc") {
 		return "already_target_codec"
 	}
 	return ""

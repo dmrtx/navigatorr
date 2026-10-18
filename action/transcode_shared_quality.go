@@ -51,7 +51,7 @@ func (e *Engine) applySharedBatchCalibration(ec *ExecutionContext, plan *transco
 			break
 		}
 	}
-	if !allowed || source == nil || len(source.Video) != 1 || source.Video[0].BitDepth != 8 || isSourceHDRorDV(source) || source.Video[0].FPS <= 0 || source.Video[0].FPS >= 45 {
+	if !allowed || !sharedCalibrationSourceSupported(source) {
 		return fmt.Errorf("source is outside the calibrated 8-bit SDR video class")
 	}
 	policy := profile.Optimization.Quality
@@ -98,4 +98,12 @@ func (e *Engine) applySharedBatchCalibration(ec *ExecutionContext, plan *transco
 	ec.State["batch_calibration_digest"] = calibration.Digest
 	ec.State["batch_fixed_quality"] = calibration.qualityFor(itemKey)
 	return nil
+}
+
+// sharedCalibrationSourceSupported reports whether a source is in the class
+// the shared VMAF/CAMBI calibration measures: one programme video stream
+// (cover art does not count), 8-bit SDR, below 45 fps.
+func sharedCalibrationSourceSupported(rep *mediainspect.DetailedReport) bool {
+	video := rep.MainVideo()
+	return len(video) == 1 && video[0].BitDepth == 8 && video[0].FPS > 0 && video[0].FPS < 45 && !isSourceHDRorDV(rep)
 }

@@ -118,8 +118,8 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	if rep.BitRate > 0 {
 		origMap["bit_rate"] = rep.BitRate
 	}
-	if len(rep.Video) > 0 {
-		v0 := rep.Video[0]
+	if video := rep.MainVideo(); len(video) > 0 {
+		v0 := video[0]
 		origMap["video_codec"] = v0.Codec
 		origMap["resolution"] = fmt.Sprintf("%dx%d", v0.Width, v0.Height)
 		origMap["bit_depth"] = v0.BitDepth
@@ -284,11 +284,11 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	if err != nil {
 		return StepResult{Status: StepFailed, Error: err.Error()}, nil
 	}
-	if len(rep.Video) > 0 {
-		if modeSnapshot == nil && hasProfileConfig && (ephemeralProfile.Video.Profile != "" || ephemeralProfile.Video.PixelFormat != "") && preserveBitDepth && plan.ExpectedBitDepth > 0 && (rep.Video[0].BitDepth == 8 || rep.Video[0].BitDepth == 10) && plan.ExpectedBitDepth != rep.Video[0].BitDepth {
-			return StepResult{Status: StepFailed, Error: fmt.Sprintf("profile_config requests %d-bit output for a %d-bit source; set preserve_source_bit_depth=false to use the requested conversion", plan.ExpectedBitDepth, rep.Video[0].BitDepth)}, nil
+	if video := rep.MainVideo(); len(video) > 0 {
+		if modeSnapshot == nil && hasProfileConfig && (ephemeralProfile.Video.Profile != "" || ephemeralProfile.Video.PixelFormat != "") && preserveBitDepth && plan.ExpectedBitDepth > 0 && (video[0].BitDepth == 8 || video[0].BitDepth == 10) && plan.ExpectedBitDepth != video[0].BitDepth {
+			return StepResult{Status: StepFailed, Error: fmt.Sprintf("profile_config requests %d-bit output for a %d-bit source; set preserve_source_bit_depth=false to use the requested conversion", plan.ExpectedBitDepth, video[0].BitDepth)}, nil
 		}
-		if err := preserveSourceBitDepth(plan, rep.Video[0].BitDepth, preserveBitDepth); err != nil {
+		if err := preserveSourceBitDepth(plan, video[0].BitDepth, preserveBitDepth); err != nil {
 			return StepResult{Status: StepFailed, Error: fmt.Sprintf("resolving transcode profile %q: %v", profile, err)}, nil
 		}
 	}
@@ -330,8 +330,8 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		if isSourceHDRorDV(&rep) {
 			return StepResult{Status: StepFailed, Error: "source media contains HDR/Dolby Vision: automatic optimization is only supported for SDR content (fail closed)"}, nil
 		}
-		if len(rep.Video) > 0 {
-			bd := rep.Video[0].BitDepth
+		if video := rep.MainVideo(); len(video) > 0 {
+			bd := video[0].BitDepth
 			if bd != 8 && bd != 10 {
 				return StepResult{Status: StepFailed, Error: fmt.Sprintf("unsupported source bit depth %d: automatic optimization only supports 8-bit and 10-bit SDR content (fail closed)", bd)}, nil
 			}

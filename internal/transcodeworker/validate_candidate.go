@@ -106,7 +106,7 @@ func (w *Worker) validateEncodedCandidateFull(ctx context.Context, localCandidat
 	if candidateDurHint > 0 {
 		candProbe.DurationSec = candidateDurHint
 	}
-	srcVideo, candVideo := firstStreamOfKind(srcProbe.Streams, "video"), firstStreamOfKind(candProbe.Streams, "video")
+	srcVideo, candVideo := firstMainVideo(srcProbe.Streams), firstMainVideo(candProbe.Streams)
 	if candVideo == nil {
 		return attest, fmt.Errorf("%w: local candidate contains no video streams (fail closed, never publish)", ErrSourceInvalid)
 	}
@@ -114,8 +114,13 @@ func (w *Worker) validateEncodedCandidateFull(ctx context.Context, localCandidat
 		return attest, fmt.Errorf("%w: local candidate video stream has empty codec (fail closed, never publish)", ErrSourceInvalid)
 	}
 	// Video count must be preserved (exactly one video stream in practice).
-	if sv, cv := countStreams(srcProbe.Streams, "video"), countStreams(candProbe.Streams, "video"); sv > 0 && cv != sv {
+	// Cover art (attached pictures) is counted separately so a cover cannot
+	// stand in for programme video or vanish unnoticed.
+	if sv, cv := countMainVideo(srcProbe.Streams), countMainVideo(candProbe.Streams); sv > 0 && cv != sv {
 		return attest, fmt.Errorf("%w: local candidate video count %d != source %d (fail closed, never publish)", ErrSourceInvalid, cv, sv)
+	}
+	if sc, cc := countCoverArt(srcProbe.Streams), countCoverArt(candProbe.Streams); cc != sc {
+		return attest, fmt.Errorf("%w: local candidate cover art count %d != source %d (fail closed, never publish)", ErrSourceInvalid, cc, sc)
 	}
 	// Codec: the candidate must actually be the requested target codec.
 	if expected := expectedWorkerVideoCodec(execPlan.Plan.VideoCodec); expected != "" {
@@ -193,6 +198,30 @@ func firstStreamOfKind(streams []SourceStream, kind string) *SourceStream {
 		}
 	}
 	return nil
+}
+
+// firstMainVideo returns the first programme video stream, skipping cover art.
+func firstMainVideo(streams []SourceStream) *SourceStream {
+	for i := range streams {
+		if strings.EqualFold(strings.TrimSpace(streams[i].Kind), "video") && !streams[i].IsAttachedPicture() {
+			return &streams[i]
+		}
+	}
+	return nil
+}
+
+func countMainVideo(streams []SourceStream) int {
+	return countStreams(streams, "video") - countCoverArt(streams)
+}
+
+func countCoverArt(streams []SourceStream) int {
+	n := 0
+	for _, s := range streams {
+		if s.IsAttachedPicture() {
+			n++
+		}
+	}
+	return n
 }
 
 func countStreams(streams []SourceStream, kind string) int {
