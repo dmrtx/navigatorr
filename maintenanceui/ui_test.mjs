@@ -3048,6 +3048,15 @@ test("compact goal says in plain language what it drops and still needs approval
   assert.match(source, /compact:`Much smaller · SDR \$\{item\.max_height \|\| 1080\}p`/);
 });
 
+test("a source hash queued behind others reads as waiting, not stuck at zero bytes", () => {
+  const h = metricProgressHarness();
+  h.run('progressJob.activities=[{id:"child",work:{phase:"waiting_for_hash_slot",total_bytes:1000}}];');
+  const waiting = h.run('batchFileActivity({status:"running",child_action_id:"child"},progressJob)');
+  assert.equal(waiting, "Waiting to verify source");
+  h.run('progressJob.activities[0].work={phase:"hashing_source",bytes_read:0,total_bytes:1000};');
+  assert.match(h.run('batchFileActivity({status:"running",child_action_id:"child"},progressJob)'), /^Verifying source · /);
+});
+
 test("every shortened main action label is a prefix of its accessible name", () => {
   const h = harness();
   const pairs = JSON.parse(h.run("JSON.stringify(Object.entries(shortActionLabels))"));

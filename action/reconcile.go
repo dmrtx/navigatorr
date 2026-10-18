@@ -69,11 +69,35 @@ const reconcileConcurrency = 8
 // reconcileDispatcher carries in-flight continuations across reconciler ticks.
 // A slow continuation keeps only its own slot; the next tick still polls every
 // other action instead of waiting for the slowest one of the previous tick.
+//
+// A continuation that has to wait for a media hash slot gives its dispatcher
+// slot back first (see acquireHashSlot): whole-file reads are bounded by the
+// engine's hash pool, so continuations queued behind them never keep live jobs
+// from being polled.
 type reconcileDispatcher struct {
 	mu       sync.Mutex
 	inflight map[string]struct{}
 	sem      chan struct{}
 	wg       sync.WaitGroup
+}
+
+// reconcileSlotKey carries the dispatcher slot of the running continuation.
+type reconcileSlotKey struct{}
+
+// reconcileSlot releases a dispatcher slot exactly once, whether the
+// continuation yields it for a hash or finishes.
+type reconcileSlot struct {
+	once    sync.Once
+	release func()
+}
+
+func (s *reconcileSlot) yield() { s.once.Do(s.release) }
+
+// yieldReconcileSlot frees the caller's dispatcher slot, if it holds one.
+func yieldReconcileSlot(ctx context.Context) {
+	if s, ok := ctx.Value(reconcileSlotKey{}).(*reconcileSlot); ok {
+		s.yield()
+	}
 }
 
 func newReconcileDispatcher() *reconcileDispatcher {
@@ -97,7 +121,8 @@ func (e *Engine) dispatchReconcile(ctx context.Context, d *reconcileDispatcher) 
 		}
 		// Wait for a slot rather than skipping: actions are listed in id order,
 		// so skipping would starve the same ids every tick. Cheap polls free a
-		// slot within milliseconds; only eight slow continuations stall here.
+		// slot within milliseconds, and continuations waiting for a hash have
+		// already given theirs back.
 		select {
 		case d.sem <- struct{}{}:
 		case <-ctx.Done():
@@ -106,6 +131,7 @@ func (e *Engine) dispatchReconcile(ctx context.Context, d *reconcileDispatcher) 
 		d.mu.Lock()
 		d.inflight[id] = struct{}{}
 		d.mu.Unlock()
+		slot := &reconcileSlot{release: func() { <-d.sem }}
 		d.wg.Add(1)
 		go func(id string) {
 			defer d.wg.Done()
@@ -113,9 +139,9 @@ func (e *Engine) dispatchReconcile(ctx context.Context, d *reconcileDispatcher) 
 				d.mu.Lock()
 				delete(d.inflight, id)
 				d.mu.Unlock()
-				<-d.sem
+				slot.yield()
 			}()
-			if _, err := e.resume(ctx, id, "", nil, true); err != nil && !errors.Is(err, errActionBusy) && ctx.Err() == nil {
+			if _, err := e.resume(context.WithValue(ctx, reconcileSlotKey{}, slot), id, "", nil, true); err != nil && !errors.Is(err, errActionBusy) && ctx.Err() == nil {
 				log.Printf("action reconciler: %s: %v", id, err)
 			}
 		}(id)
@@ -338,21 +364,42 @@ func optionalDuration(state map[string]any, key string) *int64 {
 	return &v
 }
 
-// mediaHashConcurrency bounds whole-file media hashes running at once.
+// mediaHashConcurrency bounds whole-file media reads (hashes and promotion
+// backup copies) running at once.
 const mediaHashConcurrency = 3
 
-// hashMedia copies r into h while holding one of the engine's hash slots.
-// Waiting for a slot honours ctx like the copy itself does.
-func (e *Engine) hashMedia(ctx context.Context, h io.Writer, r io.Reader) (int64, error) {
+// acquireHashSlot takes one of the engine's hash slots, honouring ctx. When
+// it has to wait, a reconciler continuation first gives back its dispatcher
+// slot, so queued hashes never keep live jobs from being polled. The returned
+// release is safe to call more than once.
+func (e *Engine) acquireHashSlot(ctx context.Context) (func(), error) {
 	if e.hashSlots == nil {
-		return io.Copy(h, r)
+		return func() {}, nil
 	}
+	var once sync.Once
+	release := func() { once.Do(func() { <-e.hashSlots }) }
 	select {
 	case e.hashSlots <- struct{}{}:
-	case <-ctx.Done():
-		return 0, ctx.Err()
+		return release, nil
+	default:
 	}
-	defer func() { <-e.hashSlots }()
+	yieldReconcileSlot(ctx)
+	select {
+	case e.hashSlots <- struct{}{}:
+		return release, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// hashMedia copies a whole media file from r into h (a hash or a backup
+// partial) while holding one of the engine's hash slots.
+func (e *Engine) hashMedia(ctx context.Context, h io.Writer, r io.Reader) (int64, error) {
+	release, err := e.acquireHashSlot(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer release()
 	return io.Copy(h, r)
 }
 

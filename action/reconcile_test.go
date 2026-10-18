@@ -747,7 +747,10 @@ func TestMediaHashesShareABoundedPool(t *testing.T) {
 			_, _ = e.hashMedia(context.Background(), io.Discard, &blockingHashReader{active: &active, peak: &peak, release: release})
 		}()
 	}
-	time.Sleep(50 * time.Millisecond)
+	for deadline := time.Now().Add(3 * time.Second); active.Load() < mediaHashConcurrency && time.Now().Before(deadline); {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(20 * time.Millisecond)
 	if got := active.Load(); got != mediaHashConcurrency {
 		t.Fatalf("%d hashes reading at once, want %d", got, mediaHashConcurrency)
 	}
@@ -764,4 +767,75 @@ func TestMediaHashesShareABoundedPool(t *testing.T) {
 	if _, err := e.hashMedia(ctx, io.Discard, strings.NewReader("x")); !errors.Is(err, context.Canceled) {
 		t.Fatalf("waiting for a hash slot ignored cancellation: %v", err)
 	}
+}
+
+func TestDispatcherSlotsAreFreeWhileContinuationsWaitForHashes(t *testing.T) {
+	st := setupTestStore(t)
+	e := NewEngine(EngineDeps{Store: st, ReconcileInterval: time.Hour})
+	release := make(chan struct{})
+	var hashing atomic.Int32
+	e.RegisterTemplate(ActionTemplate{Name: "hash_burst", AutoReconcile: true, Steps: []StepDefinition{
+		{Name: "preflight", Run: func(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+			done, err := e.acquireHashSlot(ctx)
+			if err != nil {
+				return StepResult{}, err
+			}
+			defer done()
+			hashing.Add(1)
+			defer hashing.Add(-1)
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return StepResult{Status: StepCompleted}, nil
+		}},
+	}})
+	const burst = reconcileConcurrency + 4
+	for i := 0; i < burst; i++ {
+		inst := store.ActionInstance{ID: fmt.Sprintf("act-hash-burst-%02d", i), ActionName: "hash_burst", Status: StatusPending, InputsJSON: "{}", StateJSON: `{"background_admission":true}`, OutputsJSON: "{}"}
+		if err := st.CreateActionInstance(inst); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	d := newReconcileDispatcher()
+	t.Cleanup(func() { close(release); cancel(); d.wg.Wait() })
+	finished := make(chan error, 1)
+	go func() { finished <- e.dispatchReconcile(ctx, d) }()
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("dispatch blocked behind continuations waiting for hashes")
+	}
+	for deadline := time.Now().Add(3 * time.Second); (len(d.sem) > mediaHashConcurrency || hashing.Load() < mediaHashConcurrency) && time.Now().Before(deadline); {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(20 * time.Millisecond)
+	d.mu.Lock()
+	inflight := len(d.inflight)
+	d.mu.Unlock()
+	// Only the continuations that got a hash slot at once keep their
+	// dispatcher slot; every one queued behind them gave it back.
+	if inflight != burst || hashing.Load() != mediaHashConcurrency || len(d.sem) != mediaHashConcurrency {
+		t.Fatalf("in flight %d, hashing %d, dispatcher slots held %d; want %d, %d, %d", inflight, hashing.Load(), len(d.sem), burst, mediaHashConcurrency, mediaHashConcurrency)
+	}
+}
+
+func TestReconcileSlotYieldsOnce(t *testing.T) {
+	sem := make(chan struct{}, 1)
+	sem <- struct{}{}
+	slot := &reconcileSlot{release: func() { <-sem }}
+	ctx := context.WithValue(context.Background(), reconcileSlotKey{}, slot)
+	yieldReconcileSlot(ctx)
+	done := make(chan struct{})
+	go func() { yieldReconcileSlot(ctx); slot.yield(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("a second yield blocked instead of doing nothing")
+	}
+	yieldReconcileSlot(context.Background())
 }

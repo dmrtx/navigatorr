@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -88,12 +89,26 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		ec.State["work_progress"] = map[string]any{"phase": "hashing_source", "bytes_read": read, "total_bytes": total, "updated_at": time.Now().UTC().Format(time.RFC3339Nano)}
 		return e.persistExecutionState(ctx, ec)
 	})
+	// Show a queued hash as waiting, not as a hash stuck at zero bytes, and
+	// time only the hash itself.
+	ec.State["work_progress"] = map[string]any{"phase": "waiting_for_hash_slot", "total_bytes": fi.Size(), "updated_at": time.Now().UTC().Format(time.RFC3339Nano)}
+	if err := e.persistExecutionState(ctx, ec); err != nil {
+		_ = f.Close()
+		return StepResult{Status: StepFailed, Error: err.Error()}, nil
+	}
+	release, err := e.acquireHashSlot(ctx)
+	if err != nil {
+		_ = f.Close()
+		return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to compute hash of original file %s: %v", cleanPath, err)}, nil
+	}
+	defer release()
 	if err := observe(cleanPath, 0, fi.Size()); err != nil {
 		_ = f.Close()
 		return StepResult{Status: StepFailed, Error: err.Error()}, nil
 	}
 	hashStarted := e.now()
-	_, hashErr := e.hashMedia(ctx, h, &promotionContextReader{ctx: ctx, r: f, path: cleanPath, total: fi.Size(), progress: observe})
+	_, hashErr := io.Copy(h, &promotionContextReader{ctx: ctx, r: f, path: cleanPath, total: fi.Size(), progress: observe})
+	release()
 	_ = f.Close()
 	e.recordCoordinatorPhase(ec, "coordinator_source_hash", hashStarted, e.now())
 	if hashErr != nil {
