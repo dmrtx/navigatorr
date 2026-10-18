@@ -209,12 +209,15 @@ const (
 	hfrProbeFPS    = 48
 	hfrProbeFrames = 24 // 0.5 s at hfrProbeFPS
 	// Every frame moves the pattern, so a one-frame shift is a real mismatch.
-	hfrProbeSource          = "nullsrc=size=640x360:rate=48:duration=0.5,format=yuv420p10le,geq=lum='64+mod(X+3*Y+29*N,877)':cb=512:cr=512"
-	hfrProbeAlignedMin      = 90.0
-	hfrProbeShiftMargin     = 10.0
-	hfrProbeTimeout         = "hfr_probe_timeout"
-	hfrProbeTimeoutDuration = 20 * time.Second
+	hfrProbeSource      = "nullsrc=size=640x360:rate=48:duration=0.5,format=yuv420p10le,geq=lum='64+mod(X+3*Y+29*N,877)':cb=512:cr=512"
+	hfrProbeAlignedMin  = 90.0
+	hfrProbeShiftMargin = 10.0
+	hfrProbeTimeout     = "hfr_probe_timeout"
 )
+
+// hfrProbeTimeoutDuration bounds the HFR probe separately from the quality
+// probe's own budget.
+var hfrProbeTimeoutDuration = 20 * time.Second
 
 func runSyntheticQualityProbe(ctx context.Context, ffmpegPath, filter string) ([]byte, error) {
 	// The low two bits carry actual signal. Disabling automatic conversion

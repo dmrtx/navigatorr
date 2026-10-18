@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/optimization"
 	"github.com/jakenesler/navigatorr/transcode/quality"
 )
 
@@ -234,5 +236,179 @@ func TestMetricGraphPairsNTSCHFRByFrameIndex(t *testing.T) {
 			t.Fatalf("decimation %d: a frame was paired with its neighbour (min %.2f, mean %.2f; %d samples with 1 ms timestamp offsets)", decimation, stats.Min, stats.Mean, offset)
 		}
 		t.Logf("decimation=%d frames=%d min=%.2f mean=%.2f timestamp_offsets=%d", decimation, stats.FramesTotal, stats.Min, stats.Mean, offset)
+	}
+}
+
+// max_frames_below_threshold keeps its source-frame meaning on HFR: three
+// measured frames below threshold at 2:1 stand for six source frames.
+func TestEvaluateCandidateQualityComparesSourceEquivalentFrames(t *testing.T) {
+	model, _ := quality.Model("v1_1080p_3h")
+	threshold := 90.0
+	limit := 5
+	scores := []byte(`{"frames":[{"frameNum":0,"metrics":{"vmaf":80}},{"frameNum":1,"metrics":{"vmaf":80}},{"frameNum":2,"metrics":{"vmaf":80}},{"frameNum":3,"metrics":{"vmaf":99}}]}`)
+	for _, tc := range []struct {
+		fps        float64
+		decimation int
+		exceeded   bool
+	}{{25, 1, false}, {50, 2, true}} {
+		stats, err := quality.ParseVMAF(scores, 4096, model, 0, 10, tc.fps, tc.decimation, 0.08, &threshold)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record := &BenchmarkRecord{Samples: []transcode.BenchmarkSampleWindow{{Index: 0, StartSeconds: 10, DurationSeconds: 1}}, Quality: &transcode.BenchmarkQualityConfig{VMAF: &transcode.BenchmarkQualityThresholds{Model: model.ID, Target: 80, Minimum: 70, GuardrailEnforcement: "reject", FrameThreshold: &threshold, MaxFramesBelowThreshold: &limit, WorstWindowSeconds: 0.08}}}
+		sh := &pipelineShared{record: record, evidence: &BenchmarkExecutionEvidence{}, vcs: []validatedCandidate{{index: 0, candidate: transcode.BenchmarkCandidate{ID: "c1"}}}, runVMAF: true, vmafModel: &model, vmafDecimation: tc.decimation, metricOut: []pipelineMetricOutcome{{executed: true, vmafStats: &stats, vmafScores: []optimization.SampleScore{{SampleIndex: 0, Score: stats.Mean, Valid: true}}, entry: &BenchmarkMetricSampleResult{CandidateID: "c1", SampleIndex: 0}}}, encodeOut: []pipelineEncodeOutcome{{entry: BenchmarkCandidateSampleResult{CandidateID: "c1", SampleIndex: 0, SizeBytes: 100}}}}
+		sh.assembleEvidence([]pipelineUnit{{vcOrd: 0, sampOrd: 0}})
+		if len(sh.evidence.Quality) != 1 {
+			t.Fatalf("decimation %d: no quality evidence", tc.decimation)
+		}
+		got := false
+		for _, code := range sh.evidence.Quality[0].ReasonCodes {
+			got = got || code == "quality_vmaf_frames_below_limit_exceeded"
+		}
+		if got != tc.exceeded {
+			t.Fatalf("decimation %d: frame limit exceeded=%v want %v (%+v)", tc.decimation, got, tc.exceeded, sh.evidence.Quality[0])
+		}
+	}
+}
+
+// qualityShim forwards to the real ffmpeg but measures with vmaf_v0.6.1 when
+// this libvmaf cannot run the v1 model, so the production gates, graphs and
+// evidence run end to end. noHFR makes the 48 fps HFR probe fail, as on a
+// worker that cannot prove decimation.
+func qualityShim(t *testing.T, ffmpeg string, model quality.VMAFModel, noHFR bool) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "ffmpeg")
+	rewrite := ""
+	if model.LibvmafModel != "vmaf_v1.0.16_3d0h" {
+		rewrite = `a=$(printf '%s' "$a" | sed 's/vmaf_v1\.0\.16_3d0h/vmaf_v0.6.1/g'); `
+	}
+	refuse := ""
+	if noHFR {
+		refuse = `case "$*" in *rate=48:*) echo "simulated HFR probe failure" >&2; exit 1;; esac` + "\n"
+	}
+	script := "#!/bin/sh\n" + refuse + "for a do shift; " + rewrite + "set -- \"$@\" \"$a\"; done\nexec \"" + ffmpeg + "\" \"$@\"\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestHFRWorkerGatesEndToEnd(t *testing.T) {
+	ffmpeg := requireLibvmaf(t)
+	ffprobe, err := exec.LookPath("ffprobe")
+	if err != nil {
+		t.Skip("ffprobe unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+	model := hfrTestModel(t, ctx, ffmpeg)
+	capable, older := qualityShim(t, ffmpeg, model, false), qualityShim(t, ffmpeg, model, true)
+	dir := t.TempDir()
+	if caps, err := ProbeWorkerCapabilitiesWithScratch(ctx, capable, dir); err != nil || !caps.SupportsHFRQuality() || !caps.Encoders["libx265"] {
+		t.Skip("decimated VMAF or libx265 unavailable through the shim")
+	}
+	if caps, err := ProbeWorkerCapabilitiesWithScratch(ctx, older, dir); err != nil || caps.SupportsHFRQuality() || caps.Quality.HFRProbeReason != "hfr_probe_execution_failed" || !caps.Quality.Models["v1_1080p_3h"].Available || caps.Quality.ProbeError != "" {
+		t.Fatalf("a failed HFR probe must only withhold HFR: %+v %v", caps.Quality, err)
+	}
+	source := filepath.Join(dir, "source.mkv")
+	candidate := filepath.Join(dir, "candidate.mkv")
+	runFFmpeg(t, ctx, ffmpeg, "-nostdin", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=50:duration=2", "-c:v", "ffv1", "-pix_fmt", "yuv420p", source)
+	runFFmpeg(t, ctx, ffmpeg, "-nostdin", "-v", "error", "-i", source, "-c:v", "libx265", "-crf", "18", "-x265-params", "log-level=error", "-pix_fmt", "yuv420p", candidate)
+	worker := func(ffmpegPath, name string) *Worker {
+		return NewWorker(&WorkerConfig{StateDir: filepath.Join(dir, name), AllowedRoots: []string{dir}, FFmpeg: ffmpegPath, FFprobe: ffprobe, MaxParallelJobs: 1})
+	}
+	threshold, limit := 50.0, 100
+	policy := transcode.BenchmarkQualityConfig{VMAF: &transcode.BenchmarkQualityThresholds{Model: "v1_1080p_3h", Minimum: 60, Target: 70, WorstWindowSeconds: 0.5, FrameThreshold: &threshold, MaxFramesBelowThreshold: &limit, GuardrailEnforcement: "reject"}, FinalValidation: &transcode.BenchmarkFinalValidationConfig{Mode: "sampled"}}
+	samples := []transcode.BenchmarkSampleWindow{{Index: 0, StartSeconds: 0.5, DurationSeconds: 1}}
+	plan := &transcode.Plan{Mode: "size", PlanDigest: "sha256:" + strings.Repeat("2", 64), QualityValidation: &transcode.QualityValidationPlan{Metric: "vmaf", Samples: samples, Quality: policy, BenchmarkRequestDigest: "sha256:" + strings.Repeat("1", 64)}}
+
+	t.Run("mode preflight", func(t *testing.T) {
+		if err := worker(capable, "pre-capable").validateModeSourceQuality(ctx, source, plan); err != nil {
+			t.Fatalf("capable worker refused a 50 fps source: %v", err)
+		}
+		if err := worker(older, "pre-older").validateModeSourceQuality(ctx, source, plan); err == nil || !strings.Contains(err.Error(), "quality_source_class_unsupported") {
+			t.Fatalf("worker without the capability admitted a 50 fps source: %v", err)
+		}
+	})
+
+	t.Run("final validation", func(t *testing.T) {
+		for _, name := range []string{"final-capable", "final-older"} {
+			if err := os.MkdirAll(filepath.Join(dir, name), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		evidence, err := worker(capable, "final-capable").validateFinalPerceptual(ctx, filepath.Join(dir, "final-capable"), source, candidate, plan, "sha256:candidate", 1)
+		if err != nil || evidence == nil || evidence.Verdict != "pass" || evidence.VMAF == nil {
+			t.Fatalf("final HFR validation: %+v %v", evidence, err)
+		}
+		if evidence.VMAF.TemporalDecimation != 2 || evidence.VMAF.MeasuredFPS != 25 || evidence.VMAF.FramesTotal != 25 {
+			t.Fatalf("final evidence lacks the 2:1 decimation of 50 source frames: %+v", evidence.VMAF)
+		}
+		evidence, err = worker(older, "final-older").validateFinalPerceptual(ctx, filepath.Join(dir, "final-older"), source, candidate, plan, "sha256:candidate", 1)
+		if err == nil || evidence == nil || evidence.Verdict != "fail" || len(evidence.ReasonCodes) == 0 || evidence.ReasonCodes[0] != "quality_vmaf_hfr_model_unavailable" {
+			t.Fatalf("final validation without the capability: %+v %v", evidence, err)
+		}
+	})
+
+	t.Run("benchmark", func(t *testing.T) {
+		record := func(id string) *BenchmarkRecord {
+			return &BenchmarkRecord{ProtocolVersion: transcode.WorkerProtocolVersion, ID: id, Status: "running", Source: source, SourceSHA256: ioOptSHA(t, source), Metric: "vmaf", Samples: samples, Candidates: []transcode.BenchmarkCandidate{{ID: "software", VideoCodec: "libx265", Quality: 18, Preset: "ultrafast"}}, Quality: &policy, Attempt: 1}
+		}
+		rec := record("bench-hfr")
+		if err := (&ProductionBenchmarkRunner{}).RunBenchmark(ctx, worker(capable, "bench-capable"), rec); err != nil {
+			t.Fatalf("benchmark on a capable worker: %v", err)
+		}
+		if rec.Evidence == nil || rec.Evidence.VMAFTemporalDecimation != 2 || len(rec.Evidence.Quality) != 1 || rec.Evidence.Quality[0].VMAF == nil || rec.Evidence.Quality[0].VMAF.TemporalDecimation != 2 {
+			t.Fatalf("benchmark evidence lacks the decimation: %+v", rec.Evidence)
+		}
+		rejected := record("bench-hfr-older")
+		err := (&ProductionBenchmarkRunner{}).RunBenchmark(ctx, worker(older, "bench-older"), rejected)
+		if err == nil || !strings.Contains(err.Error(), "quality_vmaf_hfr_model_unavailable") {
+			t.Fatalf("benchmark without the capability: %v", err)
+		}
+		if rejected.Evidence != nil {
+			t.Fatalf("HFR gate ran after sample extraction: %+v", rejected.Evidence)
+		}
+	})
+}
+
+// A slow HFR probe times out on its own budget: native-rate VMAF/CAMBI stay
+// available, the reason says why HFR is withheld, and the result is not
+// cached so the next lookup probes again.
+func TestHFRProbeTimeoutKeepsNativeQualityAndIsNotCached(t *testing.T) {
+	dir := t.TempDir()
+	ffmpeg := filepath.Join(dir, "fake-ffmpeg")
+	calls := filepath.Join(dir, "hfr-calls")
+	script := `#!/bin/sh
+filter=""
+for arg in "$@"; do case "$arg" in *libvmaf*) filter="$arg";; esac; done
+log=$(printf '%s' "$filter" | sed -n 's/.*log_path=\([^:]*\).*/\1/p')
+case "$*" in
+  *rate=48:*) echo x >> "` + calls + `"; exec sleep 5;;
+  *cambi=*|*name=cambi*)
+    echo '{"version":"3.2.0","frames":[{"frameNum":0,"metrics":{"cambi_full_reference":0}}]}' > "$log"; exit 0;;
+  *vmaf_v1.0.16_3d0h*)
+    echo '{"version":"3.2.0","frames":[{"frameNum":0,"metrics":{"vmaf":99}},{"frameNum":1,"metrics":{"vmaf":99}}]}' > "$log"; exit 0;;
+esac
+exit 1
+`
+	if err := os.WriteFile(ffmpeg, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := hfrProbeTimeoutDuration
+	hfrProbeTimeoutDuration = 200 * time.Millisecond
+	defer func() { hfrProbeTimeoutDuration = old }()
+	for i := 1; i <= 2; i++ {
+		caps := cachedQualityCapabilities(context.Background(), ffmpeg, dir)
+		if caps.ProbeError != "" || !caps.Models["v1_1080p_3h"].Available || !caps.CAMBIFullRef {
+			t.Fatalf("slow HFR probe disabled native quality: %+v", caps)
+		}
+		if caps.HFRTemporalDecimation != 0 || caps.HFRProbeReason != hfrProbeTimeout {
+			t.Fatalf("timed-out HFR probe: %+v", caps)
+		}
+		data, _ := os.ReadFile(calls)
+		if got := strings.Count(string(data), "x"); got != i {
+			t.Fatalf("timed-out HFR probe was cached: %d probes after %d lookups", got, i)
+		}
 	}
 }
