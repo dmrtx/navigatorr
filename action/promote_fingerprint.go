@@ -79,6 +79,12 @@ func withPromotionVerifiedFiles(ctx context.Context, ec *ExecutionContext) conte
 	return context.WithValue(ctx, promotionVerifiedKey{}, &promotionVerifiedFiles{ec: ec, files: map[string]promotionVerifiedFile{}})
 }
 
+// withoutPromotionVerifiedFiles makes every hash under ctx a full read. The
+// checks that remove recovery data always read the final file in full.
+func withoutPromotionVerifiedFiles(ctx context.Context) context.Context {
+	return context.WithValue(ctx, promotionVerifiedKey{}, (*promotionVerifiedFiles)(nil))
+}
+
 func promotionForget(ctx context.Context, path string) {
 	if v := promotionVerified(ctx); v != nil {
 		delete(v.files, path)

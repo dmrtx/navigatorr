@@ -546,12 +546,13 @@ func (e *Engine) stepPromotePreserve(ctx context.Context, ec *ExecutionContext) 
 		}
 	}
 	if p.movesAside() {
+		// No recovery exists yet: it is the original once moved aside, and
+		// promotionMoveAside records it as verified then.
 		delete(ec.State, "work_progress")
-		p.RecoveryVerifiedBeforeReplacement = true
 		if err := e.savePromotion(ctx, ec, p); err != nil {
 			return promoteFailed(err)
 		}
-		return StepResult{Status: StepCompleted, Outputs: map[string]any{"recovery_path": p.BackupPath, "recovery_mode": p.RecoveryMode, "recovery_retained": true}}, nil
+		return StepResult{Status: StepCompleted, Outputs: map[string]any{"recovery_path": p.BackupPath, "recovery_mode": p.RecoveryMode}}, nil
 	}
 	if err := e.promotionMakeRecoveryCopy(ctx, ec, p, progress); err != nil {
 		return promoteFailed(err)
@@ -579,6 +580,10 @@ func (e *Engine) promotionChooseRecovery(ctx context.Context, p *promotionState)
 		if _, err := os.Lstat(path); !os.IsNotExist(err) {
 			return promotionRecoveryCopy
 		}
+	}
+	if err := e.promotionProbeMount(filepath.Dir(p.BackupPath)); err != nil {
+		log.Printf("promotion: the recovery directory's mount does not keep file identity (%v); making a recovery copy instead of moving the original aside", err)
+		return promotionRecoveryCopy
 	}
 	return promotionRecoveryMoveAside
 }
@@ -799,11 +804,6 @@ func (e *Engine) promotionVerifyRecovered(ctx context.Context, p *promotionState
 		return err
 	}
 	if p.movesAside() && !p.MovedAside {
-		if p.OriginalRemovedByLibrary && p.OldRemoved {
-			// The library removed the original itself after adopting the
-			// verified candidate; there is nothing left to recover.
-			return nil
-		}
 		if p.BackupPath == "" || p.OriginalFingerprint == nil {
 			return fmt.Errorf("verified original is required before library mutations")
 		}

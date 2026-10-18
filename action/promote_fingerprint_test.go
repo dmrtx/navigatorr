@@ -162,9 +162,10 @@ const (
 // promotionPasses runs a whole approved promotion and returns how many times
 // this process read each file in full (copy streaming included). The harness
 // verifies recovery itself outside this accounting.
-func promotionPasses(t *testing.T, mode passMode, local bool) (original, candidate float64, p *promotionState) {
+func promotionPasses(t *testing.T, mode passMode, local, queued bool) (original, candidate float64, p *promotionState) {
 	t.Helper()
 	h := newPromotionHarness(t)
+	h.queueImport = queued
 	reads := countReads(h.engine)
 	h.engine.promotionAlwaysCopy = mode != passMoveAside
 	if mode == passCopyClone {
@@ -214,29 +215,33 @@ func promotionPasses(t *testing.T, mode passMode, local bool) (original, candida
 func TestPromotionReadsEachFileFewerTimes(t *testing.T) {
 	// Before fingerprints and move-aside, a promotion read the original ten
 	// times and the candidate nine, and wrote a full copy of the original.
-	// Plan stats the original only. Approval is a wait, so preserve reads the
-	// original and candidate in full; the original then moves aside by
-	// rename, proved by its fingerprint. Finalization reads the final file.
+	// Plan stats the original and hashes the candidate. Approval is a wait,
+	// so preserve reads the original and candidate in full; the original then
+	// moves aside by rename, proved by its fingerprint. Finalization always
+	// reads the final file in full before recovery is removed.
 	// Sonarr and Radarr add one candidate read before the old record is
 	// deleted, after the import wait.
 	for _, tc := range []struct {
 		name                string
 		mode                passMode
-		local               bool
+		local, queued       bool
 		original, candidate float64
 		method              string
 	}{
-		{"library/move-aside", passMoveAside, false, 1, 3, ""},
-		{"filesystem/move-aside", passMoveAside, true, 1, 2, ""},
+		{"library/move-aside", passMoveAside, false, false, 1, 4, ""},
+		// A queued import is one more wait, so the import step reads the
+		// adopted candidate in full again when it confirms adoption.
+		{"library/move-aside/queued-import", passMoveAside, false, true, 1, 5, ""},
+		{"filesystem/move-aside", passMoveAside, true, false, 1, 3, ""},
 		// The copy fallback adds the copy's read-back, plus the streamed
 		// copy itself when the filesystem cannot clone and the kernel does
 		// not copy it (Linux copy_file_range is not read by this process).
-		{"library/copy-clone", passCopyClone, false, 2, 3, promotionCopyClone},
-		{"library/copy-no-clone", passCopyStream, false, 3, 3, ""},
-		{"filesystem/copy-no-clone", passCopyStream, true, 3, 2, ""},
+		{"library/copy-clone", passCopyClone, false, false, 2, 4, promotionCopyClone},
+		{"library/copy-no-clone", passCopyStream, false, false, 3, 4, ""},
+		{"filesystem/copy-no-clone", passCopyStream, true, false, 3, 3, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			original, candidate, p := promotionPasses(t, tc.mode, tc.local)
+			original, candidate, p := promotionPasses(t, tc.mode, tc.local, tc.queued)
 			t.Logf("full passes: original-sized %.0f, candidate-sized %.0f, copy %+v", original, candidate, p.RecoveryCopy)
 			if tc.mode == passCopyStream && p.RecoveryCopy != nil && p.RecoveryCopy.Method == promotionCopyKernel {
 				tc.original--

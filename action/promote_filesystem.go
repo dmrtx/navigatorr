@@ -61,6 +61,12 @@ func (e *Engine) localPromotionPublish(ctx context.Context, ec *ExecutionContext
 	if err != nil {
 		return promoteFailed(err)
 	}
+	if err := e.promotionResumeFallbackCopy(ctx, ec, p); err != nil {
+		return promoteFailed(err)
+	}
+	if err := e.promotionResumeMoveBack(ctx, ec, p); err != nil {
+		return promoteFailed(err)
+	}
 	if err := e.promotionVerifyRecovered(ctx, p); err != nil {
 		return promoteFailed(err)
 	}
@@ -103,21 +109,32 @@ func (e *Engine) localPromotionPublish(ctx context.Context, ec *ExecutionContext
 	if err := e.verifyPromotionHashStable(ctx, p.CandidatePath, p.CandidateSHA); err != nil {
 		return promoteFailed(err)
 	}
-	if p.NewPath == p.OriginalPath && p.movesAside() {
-		// The candidate takes the original's name: move the original aside
-		// first. Its name is empty for one rename; a refused move copies the
-		// original instead and replaces it atomically as in copy mode.
-		if err := e.withBatchPromotionMutation(ctx, ec, p, func() error { return e.promotionPreserveForRemoval(ctx, ec, p) }); err != nil {
-			return promoteFailed(err)
-		}
-	}
+	// When the candidate takes the original's name in move-aside mode, the
+	// original moves aside and the candidate takes the empty name in one
+	// approved mutation; if the candidate cannot take it, the original moves
+	// back. A refused move copies the original instead and replaces it
+	// atomically as in copy mode.
+	sameName := p.NewPath == p.OriginalPath
 	err = e.withBatchPromotionMutation(ctx, ec, p, func() error {
-		if p.NewPath == p.OriginalPath && !p.movesAside() {
+		if sameName && p.movesAside() {
+			if err := e.promotionPreserveForRemoval(ctx, ec, p); err != nil {
+				return err
+			}
+		}
+		if sameName && !p.movesAside() {
 			return os.Rename(p.CandidatePath, p.NewPath)
 		}
 		return renamePromotionNoReplace(p.CandidatePath, p.NewPath)
 	})
 	if err != nil {
+		if sameName && p.movesAside() && (p.MovedAside || p.MoveAsideStartedAt != "") {
+			if _, statErr := os.Lstat(p.OriginalPath); os.IsNotExist(statErr) {
+				if backErr := e.promotionMoveBack(ctx, ec, p); backErr != nil {
+					return promoteFailed(fmt.Errorf("publish filesystem candidate: %v; moving the original back failed: %w; the original is kept at its recovery path and its library path is empty", err, backErr))
+				}
+				return promoteFailed(fmt.Errorf("publish filesystem candidate: %w; the original was moved back to its library path", err))
+			}
+		}
 		return promoteFailed(fmt.Errorf("publish filesystem candidate: %w; recovery retained", err))
 	}
 	if d, err := os.Open(filepath.Dir(p.NewPath)); err == nil {
@@ -138,6 +155,9 @@ func (e *Engine) localPromotionPublish(ctx context.Context, ec *ExecutionContext
 func (e *Engine) localPromotionRemoveOriginal(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
 	p, err := e.localPromotionState(ec)
 	if err != nil {
+		return promoteFailed(err)
+	}
+	if err := e.promotionResumeFallbackCopy(ctx, ec, p); err != nil {
 		return promoteFailed(err)
 	}
 	if !getBool(ec.State, "filesystem_published") {

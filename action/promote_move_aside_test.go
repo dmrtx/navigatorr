@@ -2,6 +2,7 @@ package action
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -22,6 +23,46 @@ func movedAsideState(t *testing.T, h *promotionHarness, id string) *promotionSta
 		t.Fatal(err)
 	}
 	return p
+}
+
+// sameNameFixture renames the harness original so the candidate takes its
+// exact name.
+func sameNameFixture(t *testing.T, h *promotionHarness) {
+	t.Helper()
+	sameName := filepath.Join(filepath.Dir(h.original), "Series S01E01-E02.mkv")
+	if err := os.Rename(h.original, sameName); err != nil {
+		t.Fatal(err)
+	}
+	h.original = sameName
+	inst, _ := h.st.GetActionInstance("source-transcode")
+	inst.StateJSON = strings.ReplaceAll(inst.StateJSON, "Series S01E01-E02.mp4", "Series S01E01-E02.mkv")
+	if err := h.st.UpdateActionInstance(*inst); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// rewritePromotion changes a stopped promotion's durable state, as a crash at
+// a given point would have left it.
+func rewritePromotion(t *testing.T, h *promotionHarness, id string, mutate func(p *promotionState)) {
+	t.Helper()
+	inst, err := h.st.GetActionInstance(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := loadPromotion(parseExecutionContext(inst, h.engine))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutate(p)
+	state := map[string]any{}
+	if err := json.Unmarshal([]byte(inst.StateJSON), &state); err != nil {
+		t.Fatal(err)
+	}
+	state["promotion"] = p
+	inst.StateJSON = toJSON(state)
+	if err := h.st.UpdateActionInstance(*inst); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestPromotionMovesOriginalAsideWithoutCopying(t *testing.T) {
@@ -223,22 +264,66 @@ func TestPromotionMoveAsideFallsBackToCopy(t *testing.T) {
 	}
 }
 
+// A fallback copy that fails partway (here the kernel copy reports EIO) left
+// the original in place and the copy unverified. A retry after a restart
+// finishes that copy instead of failing on the missing recovery.
+func TestPromotionResumesAnInterruptedFallbackCopy(t *testing.T) {
+	for _, flow := range []string{"library", "filesystem", "filesystem_same_name"} {
+		t.Run(flow, func(t *testing.T) {
+			h := newPromotionHarness(t)
+			if flow == "filesystem_same_name" {
+				sameNameFixture(t, h)
+			}
+			h.engine.promotionMoveAsideHook = func(from, to string) error {
+				return &os.LinkError{Op: "rename", Old: from, New: to, Err: syscall.EXDEV}
+			}
+			h.engine.promotionCloneHook = func(d, s *os.File) error { return errors.ErrUnsupported }
+			h.engine.promotionCopyRangeHook = func(d, s *os.File, n int) (int, error) { return 0, syscall.EIO }
+			var r *ActionResult
+			if flow == "library" {
+				r = h.run()
+			} else {
+				r = runLocalPromotion(t, h)
+			}
+			if r = h.finish(h.resume(r.ID, "approve")); r.Status != StatusFailed || !strings.Contains(r.Error, "input/output error") {
+				t.Fatalf("interrupted copy: %s %s", r.Status, r.Error)
+			}
+			p := movedAsideState(t, h, r.ID)
+			if p.RecoveryMode != promotionRecoveryCopy || p.MoveAsideRefused == "" || p.BackupVerified || p.DeleteSentAt != "" || h.deletes != 0 {
+				t.Fatalf("state after the failed copy: %+v deletes=%d", p, h.deletes)
+			}
+			if err := testFileSHA(h.original, p.OriginalSHA); err != nil {
+				t.Fatalf("original not kept in place: %v", err)
+			}
+			h.restart()
+			if flow != "library" {
+				h.engine.deps.Registry = nil
+			}
+			r, err := h.engine.Retry(context.Background(), r.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r = h.finish(r); r.Status != StatusCompleted {
+				t.Fatalf("retry: %s %s", r.Status, r.Error)
+			}
+			p = movedAsideState(t, h, r.ID)
+			if p.RecoveryCopy == nil || !p.RecoveryCleanupCompleted || p.MovedAside {
+				t.Fatalf("resumed copy evidence: %+v", p)
+			}
+			if flow == "library" && (h.deletes != 1 || !h.backupSeen) {
+				t.Fatalf("DELETE without a verified copy: deletes=%d", h.deletes)
+			}
+		})
+	}
+}
+
 // When the candidate takes the original's exact name, the original moves
 // aside first and the candidate is renamed into the empty name.
 func TestFilesystemPromotionMovesAsideBeforeTakingTheSameName(t *testing.T) {
 	for _, refused := range []bool{false, true} {
 		t.Run(map[bool]string{false: "move_aside", true: "copy_fallback"}[refused], func(t *testing.T) {
 			h := newPromotionHarness(t)
-			sameName := filepath.Join(filepath.Dir(h.original), "Series S01E01-E02.mkv")
-			if err := os.Rename(h.original, sameName); err != nil {
-				t.Fatal(err)
-			}
-			h.original = sameName
-			inst, _ := h.st.GetActionInstance("source-transcode")
-			inst.StateJSON = strings.ReplaceAll(inst.StateJSON, "Series S01E01-E02.mp4", "Series S01E01-E02.mkv")
-			if err := h.st.UpdateActionInstance(*inst); err != nil {
-				t.Fatal(err)
-			}
+			sameNameFixture(t, h)
 			if refused {
 				h.engine.promotionMoveAsideHook = func(from, to string) error {
 					return &os.LinkError{Op: "rename", Old: from, New: to, Err: syscall.EXDEV}
@@ -263,6 +348,120 @@ func TestFilesystemPromotionMovesAsideBeforeTakingTheSameName(t *testing.T) {
 				t.Fatal("recovery retained after verified success")
 			}
 		})
+	}
+}
+
+// The original moves aside and the candidate takes its name in one approved
+// mutation. When the candidate cannot take it, the original moves back, so
+// the library path is never left empty; a crash during the move back
+// resumes it.
+func TestFilesystemSameNamePublishFailureMovesTheOriginalBack(t *testing.T) {
+	for _, scenario := range []string{"retry", "rename_before_checkpoint", "crash_after_move_back"} {
+		t.Run(scenario, func(t *testing.T) {
+			h := newPromotionHarness(t)
+			sameNameFixture(t, h)
+			stash := filepath.Join(h.root, "stash.mkv")
+			h.engine.promotionMoveAsideHook = func(from, to string) error {
+				if err := renamePromotionNoReplace(from, to); err != nil {
+					return err
+				}
+				if scenario == "rename_before_checkpoint" {
+					// The rename happened, but its result was lost.
+					return syscall.EIO
+				}
+				// The candidate disappears before it takes the free name.
+				return os.Rename(h.candidate, stash)
+			}
+			r := runLocalPromotion(t, h)
+			r = h.resume(r.ID, "approve")
+			if r.Status != StatusFailed || !strings.Contains(r.Error, "moved back to its library path") {
+				t.Fatalf("failed publish: %s %s", r.Status, r.Error)
+			}
+			p := movedAsideState(t, h, r.ID)
+			if err := testFileSHA(h.original, p.OriginalSHA); err != nil {
+				t.Fatalf("original not back at its library path: %v", err)
+			}
+			if _, err := os.Lstat(p.BackupPath); !os.IsNotExist(err) {
+				t.Fatal("original still at its recovery path")
+			}
+			if p.MovedAside || p.MoveAsideStartedAt != "" || p.MoveBackStartedAt != "" || p.BackupVerified || p.RecoveryMode != promotionRecoveryMoveAside {
+				t.Fatalf("state after moving back: %+v", p)
+			}
+			if _, err := os.Lstat(h.candidate); os.IsNotExist(err) {
+				if err := os.Rename(stash, h.candidate); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario == "crash_after_move_back" {
+				// The rename back finished; its checkpoint did not.
+				rewritePromotion(t, h, r.ID, func(q *promotionState) {
+					q.MovedAside, q.BackupVerified, q.BackupFingerprint = true, true, q.OriginalFingerprint
+					q.MoveAsideStartedAt, q.MoveBackStartedAt = "2026-01-01T00:00:00Z", "2026-01-01T00:00:01Z"
+				})
+			}
+			h.restart()
+			h.engine.deps.Registry = nil
+			r, err := h.engine.Retry(context.Background(), r.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r.Status != StatusCompleted {
+				t.Fatalf("retry: %s %s", r.Status, r.Error)
+			}
+			p = movedAsideState(t, h, r.ID)
+			if !p.MovedAside || !p.RecoveryCleanupCompleted {
+				t.Fatalf("retry evidence: %+v", p)
+			}
+			if err := testFileSHA(h.original, p.CandidateSHA); err != nil {
+				t.Fatalf("candidate not published at the original name: %v", err)
+			}
+		})
+	}
+}
+
+// A moved-aside original with nothing at its library path is the only copy:
+// the inventory does not offer to delete it and discard refuses.
+func TestMovedAsideOriginalWithEmptyLibraryPathCannotBeDiscarded(t *testing.T) {
+	h := newPromotionHarness(t)
+	sameNameFixture(t, h)
+	stash := filepath.Join(h.root, "stash.mkv")
+	h.engine.promotionMoveAsideHook = func(from, to string) error {
+		if err := renamePromotionNoReplace(from, to); err != nil {
+			return err
+		}
+		return os.Rename(h.candidate, stash)
+	}
+	r := runLocalPromotion(t, h)
+	if r = h.resume(r.ID, "approve"); r.Status != StatusFailed {
+		t.Fatalf("failed publish: %s %s", r.Status, r.Error)
+	}
+	p := movedAsideState(t, h, r.ID)
+	// As if moving back had failed too.
+	if err := os.Rename(h.original, p.BackupPath); err != nil {
+		t.Fatal(err)
+	}
+	rewritePromotion(t, h, r.ID, func(q *promotionState) {
+		q.MovedAside, q.BackupVerified = true, true
+	})
+	page, err := h.engine.ListTranscodeBackups(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 || page.Items[0].DeleteAvailable || !strings.Contains(page.Items[0].Reason, "cannot be discarded") {
+		t.Fatalf("inventory offers to delete the only copy: %+v", page.Items)
+	}
+	if _, err := h.engine.DiscardTranscodeBackup(context.Background(), r.ID); err == nil || !strings.Contains(err.Error(), "cannot be discarded") {
+		t.Fatalf("discard accepted: %v", err)
+	}
+	if err := testFileSHA(p.BackupPath, p.OriginalSHA); err != nil {
+		t.Fatalf("only copy changed: %v", err)
+	}
+	// Once something is at the library path again, discard is a choice.
+	if err := os.Rename(stash, h.original); err != nil {
+		t.Fatal(err)
+	}
+	if page, err = h.engine.ListTranscodeBackups(context.Background(), 0); err != nil || len(page.Items) != 1 || !page.Items[0].DeleteAvailable {
+		t.Fatalf("inventory after replacement: %+v %v", page.Items, err)
 	}
 }
 
@@ -344,5 +543,64 @@ func TestPromotionRereadsChangedRecoveryAfterWait(t *testing.T) {
 				t.Fatalf("rewritten recovery accepted: %s %s renames=%d", r.Status, r.Error, h.renames)
 			}
 		})
+	}
+}
+
+// The mount probe passes where file identity is real, is asked once per
+// process and recovery directory, and a failed probe copies instead.
+func TestPromotionMountProbeChoosesCopyWhenIdentityIsUnreliable(t *testing.T) {
+	dir := t.TempDir()
+	if err := probePromotionMount(dir); err != nil {
+		t.Fatalf("probe failed on a local filesystem: %v", err)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Fatalf("probe left files behind: %v", entries)
+	}
+	for _, local := range []bool{false, true} {
+		t.Run(map[bool]string{false: "library", true: "filesystem"}[local], func(t *testing.T) {
+			h := newPromotionHarness(t)
+			probes := 0
+			h.engine.promotionMountProbeHook = func(string) error {
+				probes++
+				return errors.New("no stable inode numbers")
+			}
+			h.engine.promotionMoveAsideHook = func(from, to string) error {
+				t.Fatal("moved aside on a mount that failed the probe")
+				return nil
+			}
+			var r *ActionResult
+			if local {
+				r = runLocalPromotion(t, h)
+			} else {
+				r = h.run()
+			}
+			if r = h.finish(h.resume(r.ID, "approve")); r.Status != StatusCompleted {
+				t.Fatalf("promotion: %s %s", r.Status, r.Error)
+			}
+			p := movedAsideState(t, h, r.ID)
+			if probes != 1 || p.RecoveryMode != promotionRecoveryCopy || p.RecoveryCopy == nil {
+				t.Fatalf("probe %d times, recovery %+v", probes, p)
+			}
+		})
+	}
+}
+
+// DELETE also removes whatever is at the old path from disk, so a file that
+// appears there after the move aside stops the promotion before DELETE.
+func TestPromotionSendsNoDeleteWhenAFileReappearsAtTheOriginalPath(t *testing.T) {
+	h := newPromotionHarness(t)
+	h.engine.promotionMoveAsideHook = func(from, to string) error {
+		if err := renamePromotionNoReplace(from, to); err != nil {
+			return err
+		}
+		return os.WriteFile(from, []byte("someone else's file"), 0600)
+	}
+	r := h.finish(h.resume(h.run().ID, "approve"))
+	if r.Status != StatusFailed || !strings.Contains(r.Error, "DELETE not sent") || h.deletes != 0 {
+		t.Fatalf("DELETE over a reappeared file: %s %s deletes=%d", r.Status, r.Error, h.deletes)
+	}
+	p := movedAsideState(t, h, r.ID)
+	if err := testFileSHA(p.BackupPath, p.OriginalSHA); err != nil || !p.MovedAside {
+		t.Fatalf("moved-aside original not kept: %v %+v", err, p)
 	}
 }

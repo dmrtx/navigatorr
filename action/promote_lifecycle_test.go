@@ -70,11 +70,16 @@ func TestPromotionRemoveOldToleratesOriginalDisappearingBeforeHash(t *testing.T)
 				h.mu.Unlock()
 				r = h.finish(h.resume(r.ID, ""))
 			}
+			if !tc.copy {
+				// Nothing of the original is left to recover: stop for a
+				// person instead of reporting success.
+				if !disappeared || r.Status != StatusFailed || !strings.Contains(r.Error, "no recovery of the original exists") || h.deletes != 0 || h.renames != 0 {
+					t.Fatalf("missing original reported as success: %s %s deletes=%d", r.Status, r.Error, h.deletes)
+				}
+				return
+			}
 			if !disappeared || r.Status != StatusCompleted {
 				t.Fatalf("original disappearance blocked promotion: %s %s", r.Status, r.Error)
-			}
-			if !tc.copy && r.Outputs["original_removed_by_library"] != true {
-				t.Fatalf("library removal not reported: %+v", r.Outputs)
 			}
 			if h.imports != 1 || h.deletes != wantDeletes || h.renames != 1 || h.rescans != 1 {
 				t.Fatalf("unexpected mutations: import=%d delete=%d rename=%d rescan=%d", h.imports, h.deletes, h.renames, h.rescans)

@@ -3847,7 +3847,7 @@ function preserveWork(job) {
   const stages = job?.stages || [];
   const stage = stages[job?.current_step]?.name;
   const work = job?.work || {};
-  const fallbackCopy = stage === "remove_old_file" && ["copying_recovery", "verifying_recovery"].includes(work.phase);
+  const fallbackCopy = stage === "remove_old_file" && ["waiting_for_hash_slot", "copying_recovery", "verifying_recovery"].includes(work.phase);
   if (stage !== "preserve_original" && !fallbackCopy) return null;
   const label = preserveWorkLabels[work.phase];
   if (!label) return null;

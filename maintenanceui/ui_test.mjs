@@ -3165,6 +3165,8 @@ test("preparing recovery names and measures each stage instead of a frozen step"
   // An original that cannot be moved aside is copied while it is removed.
   h.run('promotionJob.current_step=4;promotionJob.work={phase:"copying_recovery",bytes_read:5e9,total_bytes:20e9};');
   assert.match(progressText(h.run('telemetry(promotionJob)')), /Step 5\/8 · Remove original library file · Copying the recovery copy · 25%.*5\.00 GB \/ 20\.00 GB/);
+  h.run('promotionJob.work={phase:"waiting_for_hash_slot",total_bytes:20e9};');
+  assert.match(progressText(h.run('telemetry(promotionJob)')), /Step 5\/8 · Remove original library file · Waiting for a hash slot/);
   h.run('promotionJob.work={phase:"verifying_original",bytes_read:5e9,total_bytes:20e9};');
   assert.equal(h.run('preserveWork(promotionJob)'), null);
   // A stopped promotion shows no current work.

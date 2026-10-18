@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -193,6 +194,7 @@ func (e *Engine) promotionMoveAside(ctx context.Context, ec *ExecutionContext, p
 		e.promotionCarryRenamed(ctx, p.OriginalPath, p.BackupPath)
 	}
 	p.MovedAside, p.BackupVerified, p.BackupFingerprint = true, true, fp.persisted()
+	p.RecoveryVerifiedBeforeReplacement = true
 	return e.savePromotion(ctx, ec, p)
 }
 
@@ -212,26 +214,143 @@ func (e *Engine) promotionPreserveForRemoval(ctx context.Context, ec *ExecutionC
 	if !errors.Is(err, errPromotionMoveAsideUnsupported) {
 		return err
 	}
-	p.RecoveryMode, p.MoveAsideStartedAt = promotionRecoveryCopy, ""
+	p.RecoveryMode, p.MoveAsideStartedAt, p.MoveAsideRefused = promotionRecoveryCopy, "", err.Error()
 	if err := e.savePromotion(ctx, ec, p); err != nil {
 		return err
 	}
+	return e.promotionResumeFallbackCopy(ctx, ec, p)
+}
+
+// promotionResumeFallbackCopy makes, or finishes after an error or a crash,
+// the recovery copy a refused move aside switched to. Until that copy is
+// verified nothing has left the library path, so the original is read in
+// full and copied (an exact finished partial is reused). Any other state is
+// left to promotionVerifyRecovered, which fails closed.
+func (e *Engine) promotionResumeFallbackCopy(ctx context.Context, ec *ExecutionContext, p *promotionState) error {
+	if p.RecoveryMode != promotionRecoveryCopy || p.MoveAsideRefused == "" || p.BackupVerified || p.MovedAside || p.MoveAsideStartedAt != "" || p.DeleteSentAt != "" || p.OldRemoved {
+		return nil
+	}
 	progress := &promotionPreserveProgress{e: e, ec: ec, p: p}
 	defer delete(ec.State, "work_progress")
-	return e.promotionMakeRecoveryCopy(context.WithValue(ctx, promotionHashProgressKey{}, progress.hashes(ctx)), ec, p, progress)
+	ctx = context.WithValue(ctx, promotionHashProgressKey{}, progress.hashes(ctx))
+	if err := e.verifyPromotionHashStable(ctx, p.OriginalPath, p.OriginalSHA); err != nil {
+		return err
+	}
+	return e.promotionMakeRecoveryCopy(ctx, ec, p, progress)
+}
+
+// promotionMoveBack renames a moved-aside original back to its empty library
+// path when the candidate could not take that name, so a failed same-name
+// publish never leaves the library path empty. It is a restoring mutation and
+// runs even when the batch no longer approves the promotion. The intent is
+// durable; promotionResumeMoveBack finishes it after a crash.
+func (e *Engine) promotionMoveBack(ctx context.Context, ec *ExecutionContext, p *promotionState) error {
+	ctx = context.WithoutCancel(ctx)
+	if err := promotionBackupPathMatches(p); err != nil {
+		return err
+	}
+	for _, path := range []string{p.OriginalPath, p.BackupPath} {
+		if _, err := e.promotionPath(path, true); err != nil {
+			return err
+		}
+	}
+	if _, err := os.Lstat(p.OriginalPath); !os.IsNotExist(err) {
+		return fmt.Errorf("the library path is no longer empty; the original stays at its recovery path")
+	}
+	if p.MovedAside {
+		if err := e.promotionVerifyRecovered(ctx, p); err != nil {
+			return err
+		}
+	} else if err := e.verifyPromotionHashStable(ctx, p.BackupPath, p.OriginalSHA); err != nil {
+		// The rename finished before its checkpoint.
+		return err
+	}
+	p.MoveBackStartedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	if err := e.savePromotion(ctx, ec, p); err != nil {
+		return err
+	}
+	if err := renamePromotionNoReplace(p.BackupPath, p.OriginalPath); err != nil {
+		return fmt.Errorf("move the original back: %w", err)
+	}
+	for _, dir := range []string{filepath.Dir(p.BackupPath), filepath.Dir(p.OriginalPath)} {
+		if d, err := os.Open(dir); err == nil {
+			_ = d.Sync()
+			_ = d.Close()
+		}
+	}
+	e.promotionCarryRenamed(ctx, p.BackupPath, p.OriginalPath)
+	return e.promotionFinishMoveBack(ctx, ec, p)
+}
+
+// promotionResumeMoveBack finishes a move back a crash interrupted: the
+// original is back at its library path (read in full, since only a restart
+// gets here), or still at its recovery path, as before the intent.
+func (e *Engine) promotionResumeMoveBack(ctx context.Context, ec *ExecutionContext, p *promotionState) error {
+	if p.MoveBackStartedAt == "" {
+		return nil
+	}
+	_, originalErr := os.Lstat(p.OriginalPath)
+	_, backupErr := os.Lstat(p.BackupPath)
+	switch {
+	case originalErr == nil && os.IsNotExist(backupErr):
+		if err := e.verifyPromotionHashStable(ctx, p.OriginalPath, p.OriginalSHA); err != nil {
+			return err
+		}
+		return e.promotionFinishMoveBack(ctx, ec, p)
+	case os.IsNotExist(originalErr) && backupErr == nil:
+		p.MoveBackStartedAt = ""
+		return e.savePromotion(ctx, ec, p)
+	default:
+		return fmt.Errorf("original and recovery locations are in an unexpected state after moving the original back (original present: %t, recovery present: %t); nothing moved", originalErr == nil, backupErr == nil)
+	}
+}
+
+func (e *Engine) promotionFinishMoveBack(ctx context.Context, ec *ExecutionContext, p *promotionState) error {
+	fp, err := e.promotionCurrentFingerprint(p.OriginalPath)
+	known := p.BackupFingerprint
+	if known == nil {
+		known = p.OriginalFingerprint
+	}
+	if err != nil || known == nil || !fp.sameInode(*known) {
+		return fmt.Errorf("the library path does not hold the moved-back original; nothing else moved")
+	}
+	p.OriginalFingerprint = fp.persisted()
+	p.MovedAside, p.BackupVerified, p.BackupFingerprint = false, false, nil
+	p.MoveAsideStartedAt, p.MoveBackStartedAt, p.RecoveryVerifiedBeforeReplacement = "", "", false
+	return e.savePromotion(ctx, ec, p)
+}
+
+// promotionRecoveryIsOnlyOriginal refuses to discard, or list as removable,
+// a recovery that is the moved-aside original while nothing replaced it:
+// nothing at its library path, nor at the replacement's path when that is a
+// different name. Removing it would remove the only copy.
+func promotionRecoveryIsOnlyOriginal(p *promotionState) error {
+	if !p.MovedAside && p.MoveAsideStartedAt == "" && p.MoveBackStartedAt == "" {
+		return nil
+	}
+	for _, path := range []string{p.OriginalPath, p.NewPath} {
+		if path == "" {
+			continue
+		}
+		if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() {
+			return nil
+		}
+	}
+	return fmt.Errorf("this recovery is the moved-aside original and nothing replaced it at its library path; it cannot be discarded")
 }
 
 // promotionConfirmAdopted re-proves after a wait that path is the candidate
-// this promotion fully verified, for steps that cannot lose data: the
-// library renaming it keeps its inode and mtime. Anything else, or a
-// fingerprint from an earlier process, is read in full, and finalization
-// always reads it before recovery is removed.
+// this promotion fully verified, for steps that cannot lose data, by its
+// strict fingerprint, ctime included. A rename by the library usually
+// changes ctime, and then, like any other change or a fingerprint from an
+// earlier process, it is read in full. Finalization always reads it before
+// recovery is removed.
 func (e *Engine) promotionConfirmAdopted(ctx context.Context, p *promotionState, path string) error {
 	if k, ok := p.CandidateFingerprint.fromThisProcess(); ok && p.CandidateMediaVerified {
 		if _, err := e.promotionPath(path, false); err != nil {
 			return err
 		}
-		if fp, err := e.promotionCurrentFingerprint(path); err == nil && fp.sameInode(k) {
+		if fp, err := e.promotionCurrentFingerprint(path); err == nil && fp == k {
 			if v := promotionVerified(ctx); v != nil {
 				v.record(path, promotionCheckIdentity, p.CandidateSHA, fp)
 			}
@@ -239,4 +358,100 @@ func (e *Engine) promotionConfirmAdopted(ctx context.Context, p *promotionState,
 		}
 	}
 	return e.promotionInspectAdopted(ctx, p, path)
+}
+
+// promotionMountProbes caches, per process and recovery directory, whether
+// the mount there keeps the identity move-aside relies on.
+var promotionMountProbes sync.Map
+
+// promotionProbeMount checks once per process, in the recovery directory,
+// that a file there keeps what move-aside trusts across waits: a real inode
+// and change time, stable while nothing changes; the same inode after a
+// no-replace rename; and a change time that moves when the bytes are
+// rewritten in place with size and mtime restored. Mounts that synthesize
+// inode numbers or lack change times fail it, and then the promotion copies.
+func (e *Engine) promotionProbeMount(dir string) error {
+	if e.promotionMountProbeHook != nil {
+		return e.promotionMountProbeHook(dir)
+	}
+	key := filepath.Clean(filepath.Dir(dir))
+	if cached, ok := promotionMountProbes.Load(key); ok {
+		err, _ := cached.(error)
+		return err
+	}
+	err := probePromotionMount(dir)
+	promotionMountProbes.Store(key, err)
+	return err
+}
+
+func probePromotionMount(dir string) error {
+	f, err := os.CreateTemp(dir, ".mount-probe-")
+	if err != nil {
+		return err
+	}
+	from, to := f.Name(), f.Name()+".moved"
+	defer os.Remove(from)
+	defer os.Remove(to)
+	content := []byte("navigatorr move-aside probe 0")
+	_, err = f.Write(content)
+	if err == nil {
+		err = f.Sync()
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	stat := func(path string) (promotionFingerprint, error) {
+		info, err := os.Lstat(path)
+		if err != nil {
+			return promotionFingerprint{}, err
+		}
+		fp, ok := promotionFileFingerprint(info)
+		if !ok {
+			return promotionFingerprint{}, fmt.Errorf("no inode number or change time")
+		}
+		return fp, nil
+	}
+	created, err := stat(from)
+	if err != nil {
+		return err
+	}
+	if again, err := stat(from); err != nil || again != created {
+		return fmt.Errorf("file identity is not stable while unchanged")
+	}
+	if err := renamePromotionNoReplace(from, to); err != nil {
+		return err
+	}
+	moved, err := stat(to)
+	if err != nil {
+		return err
+	}
+	if !moved.sameInode(created) {
+		return fmt.Errorf("a rename does not keep the file identity")
+	}
+	mtime := time.Unix(0, moved.MtimeNs)
+	// Coarse clocks may need a moment before a change time can differ.
+	for i := 0; i < 150; i++ {
+		content[len(content)-1] = byte('1' + i%9)
+		if err := os.WriteFile(to, content, 0600); err != nil {
+			return err
+		}
+		if err := os.Chtimes(to, mtime, mtime); err != nil {
+			return err
+		}
+		rewritten, err := stat(to)
+		if err != nil {
+			return err
+		}
+		if rewritten.Ino != moved.Ino || rewritten.Dev != moved.Dev {
+			return fmt.Errorf("a rewrite changed the file identity")
+		}
+		if rewritten.CtimeNs != moved.CtimeNs {
+			return nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return fmt.Errorf("a rewrite with size and mtime restored does not change the change time")
 }

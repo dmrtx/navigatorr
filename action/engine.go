@@ -52,7 +52,9 @@ type Engine struct {
 	// Test seams for recovery: moving the original aside (a test can refuse
 	// it like a cross-device rename), and choosing a copy from the start.
 	promotionMoveAsideHook func(from, to string) error
-	promotionAlwaysCopy    bool
+	// promotionMountProbeHook replaces the recovery directory mount probe.
+	promotionMountProbeHook func(dir string) error
+	promotionAlwaysCopy     bool
 }
 
 // NewEngine creates a new Action Engine.

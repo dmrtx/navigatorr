@@ -40,6 +40,8 @@ type promotionHarness struct {
 	dropImportResponse                 bool
 	acceptDroppedImport                bool
 	importDeletesOriginal              bool
+	queueImport                        bool // ManualImport answers queued; it runs when polled
+	queuedImports                      map[int]func()
 	renameFailures                     int
 	poisonOldPath                      bool
 	poisonOldMovie                     bool
@@ -200,6 +202,10 @@ func (h *promotionHarness) serve(w http.ResponseWriter, r *http.Request) {
 		write(commands)
 	case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/api/v3/command/"):
 		id, _ := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/api/v3/command/"))
+		if run := h.queuedImports[id]; run != nil {
+			delete(h.queuedImports, id)
+			run()
+		}
 		c, ok := h.commands[id]
 		if !ok {
 			w.WriteHeader(404)
@@ -258,7 +264,7 @@ func (h *promotionHarness) serve(w http.ResponseWriter, r *http.Request) {
 					h.t.Errorf("multi-episode import lost IDs: %v", f)
 				}
 			}
-			if !h.dropImportResponse || h.acceptDroppedImport {
+			adopt := func() {
 				candidate, err := os.Stat(h.candidate)
 				if err != nil {
 					h.t.Error(err)
@@ -280,7 +286,21 @@ func (h *promotionHarness) serve(w http.ResponseWriter, r *http.Request) {
 				if h.poisonCandidateOnImport {
 					_ = os.WriteFile(h.candidate, []byte("damaged"), 0600)
 				}
+				cmd.Status = "completed"
 				h.commands[cmd.ID] = cmd
+			}
+			if h.queueImport {
+				cmd.Status = "queued"
+				h.commands[cmd.ID] = cmd
+				if h.queuedImports == nil {
+					h.queuedImports = map[int]func(){}
+				}
+				h.queuedImports[cmd.ID] = adopt
+				write(cmd)
+				return
+			}
+			if !h.dropImportResponse || h.acceptDroppedImport {
+				adopt()
 			}
 			if h.dropImportResponse {
 				conn, _, err := w.(http.Hijacker).Hijack()
@@ -657,18 +677,38 @@ func TestPromotionRetainsRecoveryAndRetriesConfirmedRenameFailure(t *testing.T) 
 	}
 }
 
-func TestPromotionRecoversWhenSonarrDeletesOriginalDuringImport(t *testing.T) {
+func TestPromotionStopsWhenLibraryDeletesOriginalDuringImport(t *testing.T) {
+	t.Run("copy", func(t *testing.T) {
+		// A verified copy existed before the import; the promotion completes.
+		h := newPromotionHarness(t)
+		h.engine.promotionAlwaysCopy = true
+		h.importDeletesOriginal = true
+		r := h.finish(h.resume(h.run().ID, "approve"))
+		if r.Status != StatusCompleted || !h.backupSeen || h.deletes != 0 {
+			t.Fatalf("Sonarr internal deletion with a copy: %s %s", r.Status, r.Error)
+		}
+	})
 	h := newPromotionHarness(t)
 	h.importDeletesOriginal = true
 	r := h.run()
 	r = h.finish(h.resume(r.ID, "approve"))
-	if r.Status != StatusCompleted || !h.backupSeen || h.deletes != 0 {
-		t.Fatalf("Sonarr internal deletion: %s %s", r.Status, r.Error)
-	}
 	// The original was still in place, verified, when the library removed
-	// it during import; the adopted candidate is the approved end state.
-	if r.Outputs["original_removed_by_library"] != true {
-		t.Fatalf("library removal not reported: %+v", r.Outputs)
+	// it during import. Nothing of it is left to recover, so this is not a
+	// success: it stops for a person, saying so, and sends no DELETE.
+	if r.Status != StatusFailed || !strings.Contains(r.Error, "no recovery of the original exists") || h.deletes != 0 || h.renames != 0 {
+		t.Fatalf("Sonarr internal deletion: %s %s deletes=%d renames=%d", r.Status, r.Error, h.deletes, h.renames)
+	}
+	if r.Outputs["promoted"] == true || r.Outputs["recovery_retained"] != nil {
+		t.Fatalf("library removal reported as a success: %+v", r.Outputs)
+	}
+	p, err := loadPromotion(&ExecutionContext{State: r.State})
+	if err != nil || !p.OriginalRemovedByLibrary || p.MovedAside {
+		t.Fatalf("library removal not recorded: %+v %v", p, err)
+	}
+	// A retry stops the same way.
+	r, err = h.engine.Retry(context.Background(), r.ID)
+	if err != nil || r.Status != StatusFailed || h.deletes != 0 {
+		t.Fatalf("retry after library removal: %+v %v", r, err)
 	}
 }
 

@@ -84,6 +84,12 @@ type promotionState struct {
 	CandidateFingerprint *promotionFingerprint `json:"candidate_fingerprint,omitempty"`
 	MoveAsideStartedAt   string                `json:"move_aside_started_at,omitempty"`
 	MovedAside           bool                  `json:"moved_aside,omitempty"`
+	// MoveAsideRefused keeps why the rename was refused and the promotion
+	// switched to a recovery copy.
+	MoveAsideRefused string `json:"move_aside_refused,omitempty"`
+	// MoveBackStartedAt is the durable intent to rename a moved-aside
+	// original back to its library path after a same-name publish failed.
+	MoveBackStartedAt string `json:"move_back_started_at,omitempty"`
 	// The library removed the original itself before it could be moved aside,
 	// so there was never anything to recover.
 	OriginalRemovedByLibrary bool `json:"original_removed_by_library,omitempty"`

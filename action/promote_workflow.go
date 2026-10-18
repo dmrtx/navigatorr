@@ -75,10 +75,10 @@ func (e *Engine) stepPromoteImport(ctx context.Context, ec *ExecutionContext) (S
 	}
 	_, adopted, err := e.promotionAdopted(ctx, svc, p)
 	if err != nil {
-		return promoteFailed(fmt.Errorf("Sonarr import completed but candidate adoption could not be verified: %w; recovery retained", err))
+		return promoteFailed(fmt.Errorf("Sonarr import completed but candidate adoption could not be verified: %w; %s", err, promotionRecoveryNote(p)))
 	}
 	if !adopted {
-		return promoteFailed(fmt.Errorf("Sonarr import completed without adopting the candidate for every approved episode; recovery retained"))
+		return promoteFailed(fmt.Errorf("Sonarr import completed without adopting the candidate for every approved episode; %s", promotionRecoveryNote(p)))
 	}
 	delete(ec.State, "promotion_reimport_pending")
 	if err := e.savePromotion(ctx, ec, p); err != nil {
@@ -87,12 +87,43 @@ func (e *Engine) stepPromoteImport(ctx context.Context, ec *ExecutionContext) (S
 	return StepResult{Status: StepCompleted, Outputs: map[string]any{"candidate_adopted": true, "new_episode_file_id": p.NewFileID}}, nil
 }
 
+// promotionOriginalRemovedByLibrary stops a move-aside promotion whose
+// original the library removed itself, together with its record, before it
+// could be moved aside. No recovery of the original exists, so this is never
+// reported as a success: it needs a person to check the library.
+func (e *Engine) promotionOriginalRemovedByLibrary(ctx context.Context, ec *ExecutionContext, p *promotionState) (StepResult, error) {
+	p.OriginalRemovedByLibrary = true
+	if err := e.savePromotion(ctx, ec, p); err != nil {
+		return promoteFailed(err)
+	}
+	log.Printf("promotion %s: the library removed the original itself before it was moved aside; no recovery exists", ec.InstanceID)
+	return promoteFailed(fmt.Errorf("the library removed the original file and its record itself before it could be moved aside, so no recovery of the original exists; the approved episodes use the verified candidate, which has not been renamed or finalized. Check the library before dismissing this promotion"))
+}
+
+// promotionRecoveryNote says truthfully where the original is when a library
+// step stops.
+func promotionRecoveryNote(p *promotionState) string {
+	switch {
+	case !p.movesAside():
+		return "recovery retained"
+	case p.MovedAside:
+		return "the original is kept at its recovery path"
+	}
+	if _, err := os.Lstat(p.OriginalPath); err == nil {
+		return "the original is still at its library path"
+	}
+	return "the original is no longer at its library path and no recovery of it exists"
+}
+
 func (e *Engine) stepPromoteRemoveOld(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
 	if getString(ec.Inputs, "service") == "filesystem" {
 		return e.localPromotionRemoveOriginal(ctx, ec)
 	}
 	p, svc, err := e.promotionMutation(ec)
 	if err != nil {
+		return promoteFailed(err)
+	}
+	if err := e.promotionResumeFallbackCopy(ctx, ec, p); err != nil {
 		return promoteFailed(err)
 	}
 	adopted, ok, err := e.promotionAdoptedFile(ctx, svc, p)
@@ -186,6 +217,13 @@ func (e *Engine) stepPromoteRemoveOld(ctx context.Context, ec *ExecutionContext)
 			} else if err != nil {
 				return promoteFailed(err)
 			}
+			// DELETE also removes the file at the old path from disk. It is
+			// sent only when nothing is there any more.
+			if p.movesAside() {
+				if _, err := os.Lstat(p.OriginalPath); !os.IsNotExist(err) {
+					return promoteFailed(fmt.Errorf("a file is at the original's library path after it was moved aside; DELETE not sent, %s", promotionRecoveryNote(p)))
+				}
+			}
 		}
 		p.DeleteSentAt = time.Now().UTC().Format(time.RFC3339Nano)
 		if err := e.savePromotion(ctx, ec, p); err != nil {
@@ -217,25 +255,18 @@ func (e *Engine) stepPromoteRemoveOld(ctx context.Context, ec *ExecutionContext)
 					return promoteFailed(err)
 				}
 				if err := e.promotionPreserveForRemoval(ctx, ec, p); errors.Is(err, errPromotionOriginalGone) {
-					p.OriginalRemovedByLibrary = true
+					return e.promotionOriginalRemovedByLibrary(ctx, ec, p)
 				} else if err != nil {
 					return promoteFailed(err)
 				}
 			} else if os.IsNotExist(err) {
-				p.OriginalRemovedByLibrary = true
+				return e.promotionOriginalRemovedByLibrary(ctx, ec, p)
 			} else {
 				return promoteFailed(err)
 			}
 		}
-		if p.OriginalRemovedByLibrary {
-			// The library removed the old file itself before it could be
-			// moved aside, and dropped its record. Every episode uses the
-			// verified candidate, which is the approved end state; there is
-			// nothing left to recover.
-			log.Printf("promotion %s: the library removed the original itself; no recovery to keep", ec.InstanceID)
-		}
 		if p.movesAside() {
-			// Moved aside, or already removed by the library.
+			// Moved aside above.
 		} else if _, err := os.Lstat(p.OriginalPath); err == nil {
 			if err := e.promotionVerifyRecovered(ctx, p); err != nil {
 				return promoteFailed(err)
@@ -545,7 +576,7 @@ func (e *Engine) stepPromoteFinalize(ctx context.Context, ec *ExecutionContext) 
 		if err := os.Remove(p.BackupPath); err != nil {
 			return promoteFailed(err)
 		}
-	} else if !os.IsNotExist(err) || !p.RecoveryCleanupStarted && !p.OriginalRemovedByLibrary {
+	} else if !os.IsNotExist(err) || !p.RecoveryCleanupStarted {
 		return promoteFailed(fmt.Errorf("recovery copy disappeared before verified cleanup"))
 	}
 	// Cleanup is confined to the expected per-promotion key directory and its
@@ -581,9 +612,6 @@ func (e *Engine) stepPromoteFinalize(ctx context.Context, ec *ExecutionContext) 
 		outputs["movie_id"] = p.MovieID
 		outputs["new_movie_file_id"] = p.NewFileID
 		outputs["one_active_file_per_movie"] = true
-	}
-	if p.OriginalRemovedByLibrary {
-		outputs["original_removed_by_library"] = true
 	}
 	return StepResult{Status: StepCompleted, Outputs: outputs}, nil
 }
