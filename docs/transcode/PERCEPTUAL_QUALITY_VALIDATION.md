@@ -157,7 +157,15 @@ transparency. Full-reference CAMBI measures additional banding relative to the
 source, so existing source banding alone does not explain a rejection.
 
 Two completed no-winner rounds for the same source SHA-256 trigger a review
-before any further new benchmark admission. This uses durable action history
+before any further new benchmark admission. Only rounds whose VMAF/SSIM
+minimum, p5 and worst-window floors, CAMBI limits and savings gate were no
+stricter than the new proposal count, so a lenient goal (size) is not blocked
+by rounds that failed a stricter one (quality). If every proposed setting
+(encoder, rate, preset, tune, profile and pixel format; IDs are ignored) was
+already measured by those rounds, only `cancel` is offered and
+`run_once_after_review` is refused; otherwise the waiting reason names the
+settings that are new. The summary lists each earlier round's floor and each
+setting's measured VMAF mean, p5, worst window and lowest frame. This uses durable action history
 across recipes, paths, restarts and new action IDs. Technical execution failures
 and unfinished jobs do not count; already accepted jobs continue to reconcile.
 The limit does not retroactively cancel concurrently admitted jobs. History is
@@ -179,3 +187,43 @@ benchmark size estimates are not achieved savings.
 
 `action_list` keeps its small listing shape; use `action_status` for the
 benchmark explanation, planned audio and concrete review proposal.
+
+## Low VMAF p5 on dark, grainy sources
+
+Benchmark evaluations keep each candidate's VMAF summary (`vmaf`: model, mean,
+p5, lowest frame, worst-window mean, frame count, temporal decimation) in
+`benchmark_decision`, so later reviews do not depend on the transient worker
+status.
+
+A production case where every encoder kept a 3.4–4.5 point gap between VMAF
+mean and p5 on a dark, grainy 1920×960 source was investigated. The candidate
+is encoded from the FFV1 reference cut, both inputs are re-timed by frame index
+(`setpts=N`) and converted to the same pixel format without scaling, and p5 is
+pooled over all sampled frames. A local reproduction with synthetic temporal
+grain showed:
+
+- a start off a keyframe scores the same as one on a keyframe;
+- a one-frame shift drops the score to about 54 (lowest frame about 45), far
+  below anything observed, so misalignment is ruled out;
+- 8-bit versus main10 output differs by about 0.2 points, and no scaling or
+  range conversion is involved;
+- grain alone costs 1.5 (CRF 16) to 2.7 (CRF 20) points of mean and pulls the
+  lowest frames down; the finest VIF scale collapses because x265 smooths
+  frame-random grain in dark, flat areas.
+
+This is content behaviour, not a measurement bug. The quality goal's p5 floor
+(93) is strict for such sources; the size goal's floor (84) is met by the same
+settings. Policy options, none enabled here:
+
+1. Keep the floors: under the quality goal a grainy source keeps its original or
+   needs a lower CRF.
+2. Add grain-preserving x265 candidates (`tune=grain`, or no SAO with stronger
+   psy-rd/psy-rdoq) for such sources. In the reproduction `tune=grain` raised
+   CRF 20's p5 by about 2 points but nearly doubled the sample size, so it
+   should be judged on size per quality, not quality alone.
+3. Detect grain from the source and add option 2's candidates automatically.
+
+Hardening follow-up: the benchmark metric path does not yet compare VMAF's
+`frames_total` with the reference sample's frame count, as final validation
+does; `shortest=1` would silently score only the overlap of a truncated
+candidate.
