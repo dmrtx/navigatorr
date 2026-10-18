@@ -1564,8 +1564,14 @@ function controls() {
   saveLibraryDraft();
   const batch = $("scope").value === "batch";
   const technical = $("technical").checked;
+  // The goal stays visible but inert: a technical profile replaces it on submit.
+  if (technical && !state.technicalShown) $("advanced-profiles").open = true;
+  state.technicalShown = technical;
   $("legacy-controls").hidden = !technical;
-  $("processing-goal").hidden = technical;
+  $("processing-goal").disabled = technical;
+  $("goal-overridden").hidden = !technical;
+  $("advanced-state").textContent = technical ? "On · goal not used" : "Off";
+  $("advanced-state").dataset.on = technical ? "true" : "false";
   $("processing-policy").hidden = technical;
   $("processing-policy").textContent = "Automatic tests suitable settings, checks additional samples, then converts and verifies the result. Originals stay in place; replacing them requires separate approval." + (!state.fileMedia && !state.media ? " Content type is unclassified; a conservative general-video policy applies." : "");
   $("enqueue").textContent = technical ? (batch ? "Create candidates" : "Create candidate") : "Process";
@@ -4846,8 +4852,9 @@ setInterval(async () => {
 }, 5000);
 if (typeof window !== "undefined") setConnection(serverReachable);
 
-$("podcast-new").addEventListener("toggle", () => { if (!$("podcast-new").open) return; safe(async () => { const data=await api("podcasts"); const select=$("podcast-id"); select.replaceChildren(); for (const id of data.podcasts || []) option(select,id,id); $("podcast-create-status").textContent=data.enabled && data.podcasts?.length ? "" : "Enable a podcast in the server configuration first."; }); });
-$("podcast-form").addEventListener("submit", event => { event.preventDefault(); safe(async () => { const result=await tool("action_run",{action:"clean_podcast_ads",inputs:JSON.stringify({podcast_id:$("podcast-id").value,path:$("podcast-source").value,output_path:$("podcast-output").value})}); $("podcast-new").open=false; await loadJobs(); await openJob(result.id || result.action?.id); }); });
+$("close-podcast").addEventListener("click", () => $("podcast-dialog").close());
+$("podcast-new").addEventListener("click", () => { $("podcast-dialog").showModal(); safe(async () => { const data=await api("podcasts"); const select=$("podcast-id"); select.replaceChildren(); for (const id of data.podcasts || []) option(select,id,id); $("podcast-create-status").textContent=data.enabled && data.podcasts?.length ? "" : "Enable a podcast in the server configuration first."; }); });
+$("podcast-form").addEventListener("submit", event => { event.preventDefault(); safe(async () => { const result=await tool("action_run",{action:"clean_podcast_ads",inputs:JSON.stringify({podcast_id:$("podcast-id").value,path:$("podcast-source").value,output_path:$("podcast-output").value})}); $("podcast-dialog").close(); await loadJobs(); await openJob(result.id || result.action?.id); }); });
 async function reviewPodcastCuts(id) {
  const content=[]; let offset=0,review;
  do { review=await tool("podcast_review",{id,offset}); if (!review.digest) throw new Error("Could not read cut review."); for (const b of review.boundaries || []) content.push(node("p",`${(b.cut.start_ms/1000).toFixed(2)}–${(b.cut.end_ms/1000).toFixed(2)} s · ${b.cut.first_id}–${b.cut.last_id}: ${b.first.text} … ${b.last.text}. Before: ${b.before.map(u=>u.text).join(" ")} · After: ${b.after.map(u=>u.text).join(" ")}`,"metadata")); offset=review.next_offset; } while(review.has_more);

@@ -302,8 +302,12 @@
                 <label><input type="radio" name="processing-mode" value="quality" checked /><span><strong>Prioritize quality</strong><small>Strict quality checks, no file growth.</small></span></label>
                 <label><input type="radio" name="processing-mode" value="x265_preserve" /><span><strong>Convert to HEVC · Strict quality</strong><small>Strict quality checks, no file growth. Existing HEVC stays unchanged.</small></span></label>
               </fieldset>
+              <p id="goal-overridden" class="goal-overridden" role="status" hidden>Goal not used: a technical profile is on in Advanced below. Turn it off to process with this goal.</p>
               <p id="processing-policy" class="metadata">Automatic: samples determine the effective plan. Savings and quality must pass validation; a result is not guaranteed.</p>
-              <label class="check technical-toggle"><input id="technical" type="checkbox" />Technical tools and legacy profiles</label>
+              <details id="advanced-profiles" class="advanced-profiles">
+              <summary><span>Advanced: technical profiles</span><span id="advanced-state" class="advanced-state">Off</span></summary>
+              <p class="metadata advanced-explain">Pick a specific profile, custom encoder settings, sample-only tests or batch limits. While this is on, the goal above is not used: the profile chosen here decides the settings, and each file becomes a candidate you review before any original is replaced.</p>
+              <label class="check technical-toggle"><input id="technical" type="checkbox" />Use a technical profile instead of the goal</label>
               <div id="legacy-controls" hidden>
               <label
                 >Content<select id="media-kind">
@@ -541,6 +545,7 @@
                 </p>
               </div>
               </div>
+              </details>
               <div class="submit-actions">
                 <button id="preview" type="button">Preview selection</button
                 ><button id="benchmark" type="button">Test samples</button
@@ -552,16 +557,6 @@
           </div>
         </section>
         <section id="jobs" class="panel tab-content operations-panel" hidden>
-          <details id="podcast-new"><summary>Clean podcast</summary>
-              <form id="podcast-form">
-                <p class="muted">Create a separate MP3. The original is kept. Your connected LLM classifies the transcript before cuts are reviewed.</p>
-                <label>Podcast<select id="podcast-id" required></select></label>
-                <label>Original audio path<input id="podcast-source" required placeholder="/media/podcasts/episode.mp3" /></label>
-                <label>Cleaned MP3 path<input id="podcast-output" required placeholder="/media/podcasts/episode.cleaned.mp3" /></label>
-                <button class="primary" type="submit">Start transcription</button>
-                <p id="podcast-create-status" class="muted" role="status"></p>
-              </form>
-            </details>
           <div class="queue-toolbar">
             <h2>Queue</h2>
 
@@ -596,7 +591,10 @@
               </button>
             </div>
           </div>
-          <p id="jobs-updated" class="metadata" role="status"></p>
+          <div class="queue-meta">
+            <p id="jobs-updated" class="metadata" role="status"></p>
+            <button id="podcast-new" class="quiet podcast-new" type="button" aria-haspopup="dialog">Clean podcast…</button>
+          </div>
           <section id="worker-activity" class="worker-activity" aria-label="Video worker activity">
             <p id="activity-scheduler" class="metadata" role="status"></p>
             <div class="activity-heading"><strong id="worker-capacity">Checking worker slots…</strong><span id="activity-checked" class="metadata"></span></div>
@@ -873,6 +871,20 @@
         Use your browser’s menu to add Navigatorr to your home screen.
       </p>
       <p id="install-status">Use HTTPS to install the app.</p>
+    </dialog>
+    <dialog id="podcast-dialog" aria-labelledby="podcast-title">
+      <div class="dialog-heading">
+        <h2 id="podcast-title">Clean podcast</h2>
+        <button id="close-podcast" class="icon-button" type="button" aria-label="Close clean podcast">×</button>
+      </div>
+      <form id="podcast-form">
+        <p class="muted">Create a separate MP3. The original is kept. Your connected LLM classifies the transcript before cuts are reviewed.</p>
+        <label>Podcast<select id="podcast-id" required></select></label>
+        <label>Original audio path<input id="podcast-source" required placeholder="/media/podcasts/episode.mp3" /></label>
+        <label>Cleaned MP3 path<input id="podcast-output" required placeholder="/media/podcasts/episode.cleaned.mp3" /></label>
+        <button class="primary" type="submit">Start transcription</button>
+        <p id="podcast-create-status" class="muted" role="status"></p>
+      </form>
     </dialog>
     <dialog id="path-dialog" aria-labelledby="path-title">
       <div class="dialog-heading">
