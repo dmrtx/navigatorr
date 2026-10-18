@@ -118,7 +118,7 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 	}
 	for i, a := range origAudio {
 		b := outRep.Audio[i]
-		target, _ := transcode.AudioTarget(plan.AudioMode, a.Codec, a.Profile, a.Channels, a.ChannelLayout)
+		target, _ := transcode.AudioTarget(plan.AudioMode, transcode.DetailedAudioTrack(a.Codec, a.Profile, a.Title, a.Tags, a.Channels, a.ChannelLayout))
 		// Only an AAC conversion can remap the layout; a copied track (PCM in
 		// Matroska reports none) is checked by codec and channels.
 		checkLayout := target != "copy"

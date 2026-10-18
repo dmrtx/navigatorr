@@ -296,7 +296,7 @@ func validateAudioPreservation(plan *transcode.Plan, src, cand []SourceStream) e
 	}
 	for i := range srcAudio {
 		a, b := srcAudio[i], candAudio[i]
-		target, _ := transcode.AudioTarget(plan.AudioMode, a.Codec, a.Profile, a.Channels, a.Layout)
+		target, _ := transcode.AudioTarget(plan.AudioMode, a.AudioTrack())
 		if plan.AudioMode == "he_aac" && target != "copy" && !strings.EqualFold(b.Profile, "HE-AAC") {
 			return fmt.Errorf("HE-AAC audio profile not present in candidate stream %d", i)
 		}

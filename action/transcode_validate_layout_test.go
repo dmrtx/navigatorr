@@ -71,12 +71,17 @@ func TestDetailedValidationMultiTrackAudio(t *testing.T) {
 		src, out   []track
 		want       StepStatus
 		reason     string
+		titles     []string
 	}{
-		{"compact mixed", "compact", compactSrc, []track{{"aac", "", "5.1", "eng", 6}, {"eac3", "", "", "spa", 6}, {"aac", "", "7.1", "ita", 8}}, StepCompleted, ""},
-		{"compact remapped third track", "compact", compactSrc, []track{{"aac", "", "5.1", "eng", 6}, {"eac3", "", "", "spa", 6}, {"aac", "", "7.1(wide)", "ita", 8}}, StepWaitingDecision, "Audio layout mismatch at stream 2"},
-		{"size two DTS-HD MA and core", transcode.AudioModeCompactLossless, sizeSrc, []track{{"aac", "", "5.1", "jpn", 6}, {"aac", "", "5.1", "eng", 6}, {"dts", "", "5.1(side)", "kor", 6}}, StepCompleted, ""},
-		{"size swapped languages", transcode.AudioModeCompactLossless, sizeSrc, []track{{"aac", "", "5.1", "eng", 6}, {"aac", "", "5.1", "jpn", 6}, {"dts", "", "5.1(side)", "kor", 6}}, StepWaitingDecision, "Audio language mismatch at stream 0"},
-		{"size converted DTS core", transcode.AudioModeCompactLossless, sizeSrc, []track{{"aac", "", "5.1", "jpn", 6}, {"aac", "", "5.1", "eng", 6}, {"aac", "", "5.1", "kor", 6}}, StepWaitingDecision, "Audio codec mismatch at stream 2"},
+		{"compact mixed", "compact", compactSrc, []track{{"aac", "", "5.1", "eng", 6}, {"eac3", "", "", "spa", 6}, {"aac", "", "7.1", "ita", 8}}, StepCompleted, "", nil},
+		{"compact remapped third track", "compact", compactSrc, []track{{"aac", "", "5.1", "eng", 6}, {"eac3", "", "", "spa", 6}, {"aac", "", "7.1(wide)", "ita", 8}}, StepWaitingDecision, "Audio layout mismatch at stream 2", nil},
+		{"size two DTS-HD MA and core", transcode.AudioModeCompactLossless, sizeSrc, []track{{"aac", "", "5.1", "jpn", 6}, {"aac", "", "5.1", "eng", 6}, {"dts", "", "5.1(side)", "kor", 6}}, StepCompleted, "", nil},
+		{"size swapped languages", transcode.AudioModeCompactLossless, sizeSrc, []track{{"aac", "", "5.1", "eng", 6}, {"aac", "", "5.1", "jpn", 6}, {"dts", "", "5.1(side)", "kor", 6}}, StepWaitingDecision, "Audio language mismatch at stream 0", nil},
+		{"size converted DTS core", transcode.AudioModeCompactLossless, sizeSrc, []track{{"aac", "", "5.1", "jpn", 6}, {"aac", "", "5.1", "eng", 6}, {"aac", "", "5.1", "kor", 6}}, StepWaitingDecision, "Audio codec mismatch at stream 2", nil},
+		// A TrueHD Atmos track probed as plain TrueHD is still object audio
+		// when its title says so: flattening it to AAC is rejected.
+		{"size flattened Atmos named in title", transcode.AudioModeCompactLossless, []track{{"truehd", "", "7.1", "eng", 8}}, []track{{"aac", "", "7.1", "eng", 8}}, StepWaitingDecision, "Audio codec mismatch at stream 0", []string{"TrueHD Atmos 7.1"}},
+		{"size copied Atmos named in title", transcode.AudioModeCompactLossless, []track{{"truehd", "", "7.1", "eng", 8}}, []track{{"truehd", "", "7.1", "eng", 8}}, StepCompleted, "", []string{"TrueHD Atmos 7.1"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -96,6 +101,9 @@ func TestDetailedValidationMultiTrackAudio(t *testing.T) {
 			var audio []mediainspect.DetailedStream
 			for i, a := range tc.src {
 				audio = append(audio, mediainspect.DetailedStream{Index: i + 1, Kind: "audio", Codec: a.codec, Profile: a.profile, Channels: a.channels, ChannelLayout: a.layout, Language: a.lang})
+				if i < len(tc.titles) {
+					audio[i].Title = tc.titles[i]
+				}
 			}
 			e := NewEngine(EngineDeps{Ffprobe: ffprobe})
 			ec := &ExecutionContext{Inputs: map[string]any{}, State: map[string]any{

@@ -161,3 +161,44 @@ func TestSizeV3RealEncodeMain10WithPCM(t *testing.T) {
 		t.Fatalf("v2 accepted an 8-bit to Main10 candidate: %+v %v", e, err)
 	}
 }
+
+// TrueHD Atmos probed as plain TrueHD, or DTS:X as DTS-HD MA, is still
+// object audio when its title or handler names it: the planner copies it,
+// the validator rejects a flattened candidate and the builder refuses to
+// convert it.
+func TestSizeV3KeepsObjectAudioNamedInText(t *testing.T) {
+	plan := sizeV3TestPlan(true)
+	src := []SourceStream{
+		{Index: 0, Kind: "video", Codec: "h264", Width: 1920, Height: 1080, BitDepth: 8},
+		{Index: 1, TypeIndex: 0, Kind: "audio", Codec: "truehd", Title: "TrueHD Atmos 7.1", Channels: 8, Layout: "7.1", Language: "eng"},
+		{Index: 2, TypeIndex: 1, Kind: "audio", Codec: "dts", Profile: "DTS-HD MA", Handler: "DTS:X", Channels: 8, Layout: "7.1", Language: "spa"},
+		{Index: 3, TypeIndex: 2, Kind: "audio", Codec: "truehd", Title: "Atmosphere", Channels: 8, Layout: "7.1", Language: "ita"},
+	}
+	ep, err := BuildExecutionPlan(plan, src, 600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var targets []string
+	for _, s := range ep.Streams {
+		if s.Kind == "audio" {
+			targets = append(targets, s.TargetCodec)
+		}
+	}
+	if strings.Join(targets, ",") != "copy,copy,aac" {
+		t.Fatalf("audio targets %v", targets)
+	}
+	flattened := append([]SourceStream(nil), src...)
+	flattened[1].Codec, flattened[1].Title = "aac", "AAC 7.1"
+	if err := validateAudioPreservation(plan, src, flattened); err == nil {
+		t.Fatal("flattened Atmos track passed validation")
+	}
+	// Even a plan that asks for it cannot retitle an Atmos track to AAC.
+	for i := range ep.Streams {
+		if ep.Streams[i].Kind == "audio" && ep.Streams[i].TypeIndex == 0 {
+			ep.Streams[i].TargetCodec, ep.Streams[i].BitrateKbps = "aac", 512
+		}
+	}
+	if _, err := BuildFFmpegArgs(ep, "/media/movies/Movie/Movie.mkv", "/tmp/candidate.mkv", "/tmp/progress"); err == nil || !strings.Contains(err.Error(), "object audio") {
+		t.Fatalf("builder converted object audio: %v", err)
+	}
+}

@@ -1538,7 +1538,7 @@ function renderProfileFacts(output, data, name, preserveDepth) {
   add("Process", p.optimization?.enabled ? "Tests quality samples before full conversion" : "Converts full video using this profile");
   add("Output depth", preserveDepth ? "Same as source · Overrides profile depth" : v.profile === "main10" || /10/.test(v.pixel_format || "") ? "10-bit" : v.pixel_format || v.profile ? "8-bit" : "Encoder default");
   if (v.spatial_aq != null) add("Image detail", v.spatial_aq ? "Adaptive allocation across image details" : "Standard allocation");
-  add("Audio", p.audio?.mode === "copy" ? "Keep original audio tracks" : p.audio?.mode === "compact" ? "Compact · Convert lossless tracks to AAC, same layout; E-AC-3/AC-3/AAC copied" : p.audio?.mode === "he_aac" ? "HE-AAC · 64 kbps mono/stereo, 160 kbps surround (lossy)" : p.audio?.mode || "Profile default");
+  add("Audio", p.audio?.mode === "copy" ? "Keep original audio tracks" : p.audio?.mode === "compact" ? "Compact · Convert lossless tracks to AAC, same layout; E-AC-3/AC-3/AAC copied" : p.audio?.mode === "compact_lossless" ? "Lossless to AAC · TrueHD, DTS-HD MA, PCM and FLAC become AAC, same layout; lossy, Atmos and DTS:X copied" : p.audio?.mode === "he_aac" ? "HE-AAC · 64 kbps mono/stereo, 160 kbps surround (lossy)" : p.audio?.mode || "Profile default");
   add("Output", p.container?.toUpperCase() || "Profile default");
   output.append(facts, node("p", `Profile ID: ${name}`, "metadata"));
 }
@@ -3240,13 +3240,14 @@ function sizeModeLines(size) {
   if (size.expected_bytes != null) lines.push(`Expected size ${bytes(size.expected_bytes)}${size.main10 ? " · 10-bit HEVC" : ""}`);
   else if (size.main10) lines.push("10-bit HEVC");
   const q = size.final_quality;
-  if (q) lines.push(`Final VMAF ${Number(q.vmaf_mean).toFixed(1)} mean · ${Number(q.vmaf_p5).toFixed(1)} p5${q.worst_window_mean != null ? ` · ${Number(q.worst_window_mean).toFixed(1)} worst ${Math.round(q.worst_window_seconds || 0)} s window` : ""}`);
+  if (q) lines.push(`Final VMAF ${Number(q.vmaf_mean).toFixed(1)} mean · ${q.vmaf_p5 != null ? Number(q.vmaf_p5).toFixed(1) : "n/a"} p5${q.worst_window_mean != null ? ` · ${Number(q.worst_window_mean).toFixed(1)} worst ${Math.round(q.worst_window_seconds || 0)} s window` : ""}`);
   const audio = size.compacted_audio || [];
-  if (audio.length) lines.push(`Audio compacted: ${audio.map(a => `track ${a.stream_index + 1} ${codecLabel(a.from_codec)} → ${codecLabel(a.to_codec)}`).join(", ")}`);
+  // Size mode converts DTS only when the profile is DTS-HD MA.
+  if (audio.length) lines.push(`Audio compacted: ${audio.map(a => `track ${a.stream_index + 1} ${a.from_codec === "dts" ? "DTS-HD MA" : codecLabel(a.from_codec)} → ${codecLabel(a.to_codec)}`).join(", ")}`);
   return lines;
 }
 function codecLabel(codec) {
-  return {truehd:"TrueHD",dts:"DTS-HD MA",flac:"FLAC",alac:"ALAC",mlp:"MLP",aac:"AAC"}[codec] || (String(codec || "").startsWith("pcm_") ? "PCM" : String(codec || "").toUpperCase());
+  return {truehd:"TrueHD",dts:"DTS",flac:"FLAC",alac:"ALAC",mlp:"MLP",aac:"AAC"}[codec] || (String(codec || "").startsWith("pcm_") ? "PCM" : String(codec || "").toUpperCase());
 }
 function sizeModeNote(job) {
   const lines = sizeModeLines(job.size_mode);

@@ -1748,7 +1748,7 @@ func benchmarkEstimateBase(record *BenchmarkRecord, evidence *BenchmarkExecution
 		if ae.BitrateBps == 0 && ae.SizeBytes == 0 && record.FallbackAudioBitrateBps > 0 {
 			ae.FallbackBitrateBps = record.FallbackAudioBitrateBps
 		}
-		if target, kbps := transcode.AudioTarget(record.AudioMode, a.Codec, a.Profile, a.Channels, a.ChannelLayout); target != "copy" {
+		if target, kbps := transcode.AudioTarget(record.AudioMode, transcode.DetailedAudioTrack(a.Codec, a.Profile, a.Title, a.Tags, a.Channels, a.ChannelLayout)); target != "copy" {
 			ae.Codec, ae.Copied, ae.BitrateBps, ae.SizeBytes, ae.FallbackBitrateBps = target, false, int64(kbps)*1000, 0, 0
 		}
 		audioEstimates = append(audioEstimates, ae)

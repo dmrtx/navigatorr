@@ -24,7 +24,7 @@ func TestCompactAudioPolicy(t *testing.T) {
 		{"compact", "dts", 7, "6.1", "copy", 0}, {"compact", "truehd", 8, "7.1(wide-side)", "copy", 0},
 		{"compact", "flac", 6, "7.1", "copy", 0}, {"compact", "pcm_s24le", 6, "", "aac", 384},
 	} {
-		target, kbps := AudioTarget(tc.mode, tc.codec, "", tc.channels, tc.layout)
+		target, kbps := AudioTarget(tc.mode, AudioTrack{Codec: tc.codec, Channels: tc.channels, Layout: tc.layout})
 		if target != tc.target || kbps != tc.kbps {
 			t.Errorf("%+v -> %s %d", tc, target, kbps)
 		}
@@ -53,7 +53,7 @@ func TestCompactLosslessAudioPolicy(t *testing.T) {
 		{"truehd", "Dolby TrueHD + Dolby Atmos", 8, "7.1", "copy", 0}, {"dts", "DTS-HD MA + DTS:X", 8, "7.1", "copy", 0},
 		{"dts", "DTS-HD MA", 7, "6.1", "copy", 0}, {"truehd", "", 16, "", "copy", 0},
 	} {
-		target, kbps := AudioTarget(AudioModeCompactLossless, tc.codec, tc.profile, tc.channels, tc.layout)
+		target, kbps := AudioTarget(AudioModeCompactLossless, AudioTrack{Codec: tc.codec, Profile: tc.profile, Channels: tc.channels, Layout: tc.layout})
 		if target != tc.target || kbps != tc.kbps {
 			t.Errorf("%+v -> %s %d", tc, target, kbps)
 		}
@@ -84,5 +84,30 @@ func TestNative10BitRequiresExecutableQualityProof(t *testing.T) {
 	caps.Quality.ProbeError = "timeout"
 	if caps.SupportsNative10BitQuality() {
 		t.Fatal("failed probe implicitly trusted")
+	}
+}
+
+// A mux or an older ffprobe may report TrueHD Atmos as plain TrueHD or DTS:X
+// as DTS-HD MA; a title or handler naming object audio keeps it copied.
+func TestCompactLosslessKeepsObjectAudioNamedInText(t *testing.T) {
+	for _, tc := range []struct {
+		track  AudioTrack
+		target string
+	}{
+		{AudioTrack{Codec: "truehd", Title: "TrueHD Atmos 7.1"}, "copy"},
+		{AudioTrack{Codec: "truehd", Handler: "Dolby Atmos"}, "copy"},
+		{AudioTrack{Codec: "dts", Profile: "DTS-HD MA", Title: "DTS:X 7.1"}, "copy"},
+		{AudioTrack{Codec: "dts", Profile: "DTS-HD MA", Title: "English DTS-X"}, "copy"},
+		{AudioTrack{Codec: "dts", Profile: "DTS-HD MA", Handler: "DTS X"}, "copy"},
+		{AudioTrack{Codec: "truehd", Title: "Atmosphere (TrueHD 7.1)"}, "aac"},
+		{AudioTrack{Codec: "dts", Profile: "DTS-HD MA", Title: "DTS-HD MA 7.1", Handler: "SoundHandler"}, "aac"},
+	} {
+		tc.track.Channels, tc.track.Layout = 8, "7.1"
+		if target, _ := AudioTarget(AudioModeCompactLossless, tc.track); target != tc.target {
+			t.Errorf("%+v -> %s, want %s", tc.track, target, tc.target)
+		}
+	}
+	if got := AudioHandler(map[string]string{"HANDLER_NAME": " Dolby Atmos "}); got != "Dolby Atmos" {
+		t.Fatalf("handler %q", got)
 	}
 }

@@ -2626,6 +2626,8 @@ test("size mode details show the expected size, final VMAF and compacted audio",
   assert.match(text, /Final VMAF 93\.4 mean · 89\.1 p5 · 88\.0 worst 10 s window/);
   assert.match(text, /Audio compacted: track 1 DTS-HD MA → AAC, track 3 PCM → AAC/);
   assert.doesNotMatch(allText(h.run('sizeModeNote({size_mode:{final_quality:{vmaf_mean:91,vmaf_p5:86}}})')), /worst|Audio/);
+  assert.match(allText(h.run('sizeModeNote({size_mode:{final_quality:{vmaf_mean:91}}})')), /91\.0 mean · n\/a p5/);
+  assert.equal(h.run('codecLabel("dts")'), "DTS");
   assert.equal(h.run("sizeModeNote({})"), null);
   assert.equal(h.run("sizeModeNote({size_mode:{}})"), null);
 });

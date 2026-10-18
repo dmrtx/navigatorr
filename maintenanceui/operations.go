@@ -171,7 +171,10 @@ func operationSizeMode(r operationRecord) map[string]any {
 		out["main10"] = true
 	}
 	if vmaf := operationMap(operationMap(operationValue(r, "quality_evidence"))["vmaf"]); vmaf["mean"] != nil {
-		final := map[string]any{"vmaf_mean": operationNumber(vmaf["mean"]), "vmaf_p5": operationNumber(vmaf["p5"])}
+		final := map[string]any{"vmaf_mean": operationNumber(vmaf["mean"])}
+		if vmaf["p5"] != nil {
+			final["vmaf_p5"] = operationNumber(vmaf["p5"])
+		}
 		if worst, ok := vmaf["worst_window_mean"].(float64); ok {
 			final["worst_window_mean"] = worst
 			final["worst_window_seconds"] = operationNumber(vmaf["worst_window_seconds"])

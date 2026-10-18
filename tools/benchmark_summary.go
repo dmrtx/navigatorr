@@ -240,7 +240,7 @@ func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
 			if len(s.Audio) >= 8 {
 				break
 			}
-			target, kbps := transcode.AudioTarget(plan.AudioMode, a.Codec, a.Profile, a.Channels, a.ChannelLayout)
+			target, kbps := transcode.AudioTarget(plan.AudioMode, transcode.DetailedAudioTrack(a.Codec, a.Profile, a.Title, a.Tags, a.Channels, a.ChannelLayout))
 			entry := benchmarkAudio{Stream: a.Index, Language: a.Language, Channels: a.Channels, SourceCodec: a.Codec, Operation: "copy", OutputCodec: a.Codec}
 			if target != "copy" {
 				entry.Operation, entry.OutputCodec, entry.TargetKbps = "convert_lossy", target, kbps

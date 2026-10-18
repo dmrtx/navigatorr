@@ -431,6 +431,11 @@ func BuildFFmpegArgsWithCoverArt(execPlan *ExecutionPlan, sourcePath, candidateP
 			if stream.TargetCodec != "aac" || stream.BitrateKbps < 1 {
 				return nil, fmt.Errorf("invalid compact audio action")
 			}
+			// Size mode never flattens object audio, so it never retitles an
+			// Atmos or DTS:X track to AAC either (fail closed).
+			if execPlan.Plan.AudioMode == transcode.AudioModeCompactLossless && transcode.ObjectAudioText(stream.Title) {
+				return nil, fmt.Errorf("compact_lossless would convert object audio track %d (fail closed)", stream.TypeIndex)
+			}
 			encoder := "aac"
 			if execPlan.Plan.AudioMode == "he_aac" {
 				encoder = "aac_at"
