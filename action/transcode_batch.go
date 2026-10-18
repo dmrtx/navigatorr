@@ -33,7 +33,7 @@ func (e *Engine) registerTranscodeBatchTemplate() {
 		},
 		RequiredInputs: []string{},
 		OptionalInputs: []string{
-			"mode", "paths", "service", "series_id",
+			"mode", "hdr_policy", "paths", "service", "series_id",
 			"episode_file_ids",
 			"season",
 			"profile",
@@ -450,13 +450,30 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 		var itemReasons []string
 
 		if mode := getString(ec.Inputs, "mode"); mode != "" {
-			reason := modeSourceReason(mode, &rep)
+			var admitHDR *mediainspect.DynamicRange
+			var dynamicRange mediainspect.DynamicRange
+			if hdrPolicy, _ := modeHDRPolicy(ec.Inputs); hdrPolicy == HDRPolicyPreserveHDR10 && isSourceHDRorDV(&rep) {
+				dynamicRange = e.classifySourceDynamicRange(ctx, cleanPath, &rep)
+				admitHDR = &dynamicRange
+			}
+			reason := modeSourceReasonHDR(mode, &rep, admitHDR)
 			if reason != "" {
 				itemDecision, itemStatus = "skip", "skip"
 				itemReasons = []string{reason}
+				if admitHDR != nil && dynamicRange.Reason != "" {
+					itemReasons = append(itemReasons, dynamicRange.Label+": "+dynamicRange.Reason)
+				} else if isSourceHDRorDV(&rep) {
+					itemReasons = append(itemReasons, "HDR/Dolby Vision source; hdr_policy is reject")
+				}
 			} else {
 				itemDecision, itemStatus, itemProfile = "transcode", "queued", "mode-"+mode
 				itemReasons = []string{"per-source bounded samples required before full encode"}
+				if admitHDR != nil {
+					itemReasons = append(itemReasons, dynamicRange.Label+": HDR10 is preserved")
+					if dynamicRange.RequiresDolbyVisionRemoval() {
+						itemReasons = append(itemReasons, "Dolby Vision removal needs your approval for this file before encoding")
+					}
+				}
 			}
 		} else if strings.EqualFold(requestedProfile, "auto") {
 			selInput := selector.Input{
@@ -1149,6 +1166,9 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 	if mode := getString(ec.Inputs, "mode"); mode != "" {
 		childInputs["mode"] = mode
 		childInputs["batch_item_key"] = item.ItemKey
+		if hdrPolicy, _ := modeHDRPolicy(ec.Inputs); hdrPolicy != "" {
+			childInputs["hdr_policy"] = hdrPolicy
+		}
 		delete(childInputs, "min_savings_percent")
 		delete(childInputs, "max_size_increase_percent")
 	} else if batchCalibrationEnabled(ec.Inputs, ec.State) {

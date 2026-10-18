@@ -1098,6 +1098,17 @@ main {
   color: var(--danger);
   background: var(--danger-tint);
 }
+.badge.dynamic-range {
+  color: var(--warning-strong);
+  background: var(--warning-wash);
+}
+.review-warning {
+  color: var(--warning-strong);
+  background: var(--warning-wash);
+  border-left: 3px solid var(--warning-line);
+  padding: 6px 8px;
+  font-weight: 600;
+}
 .badge.waiting_decision {
   color: var(--decision);
   background: var(--decision-wash);

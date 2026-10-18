@@ -2672,6 +2672,23 @@ async function archiveJob(job, archived) {
     setConnection(serverReachable);
   }
 }
+// HDR sources show their class; SDR stays unlabeled.
+function dynamicRangeChip(job) {
+  const range = job.dynamic_range;
+  if (!range?.class || range.class === "sdr") return null;
+  const chip = node("span", range.label || range.class.toUpperCase(), `badge dynamic-range dynamic-range-${range.class}`);
+  if (range.reason) chip.title = `Not convertible: ${range.reason.replace(/_/g, " ")}`;
+  return chip;
+}
+// Dolby Vision removal is irreversible for the new file, so it gets its own
+// explicit confirmation for exactly this file and is never sent without it.
+function confirmDolbyVisionRemoval(job, label) {
+  const content = [node("p", queuePresentation(job).title, "review-filename")];
+  if (job.dynamic_range?.label) content.push(node("p", `Source: ${job.dynamic_range.label}`, "metadata"));
+  content.push(node("p", "Dolby Vision will be removed, HDR10 kept.", "review-warning"));
+  content.push(node("p", "The new file keeps the HDR10 picture with its mastering-display and light-level metadata. Dolby Vision dynamic metadata (and any enhancement layer) will not be in it, so Dolby Vision displays fall back to HDR10. The original file is not changed.", "muted"));
+  return reviewAction({title: "Remove Dolby Vision from this file?", content, confirmLabel: label, cancelLabel: "Decide later"});
+}
 function confirmDecision(job, choice, label) {
   const content = [node("p", queuePresentation(job).title, "review-filename")];
   if (job.waiting_reason) content.push(node("p", shortJobReason(job.waiting_reason)));
@@ -2715,6 +2732,7 @@ function jobControls(job, detail = false) {
     abort: "Cancel",
     cancel: job.batch ? "Stop batch · keep originals" : "Keep original",
     run_once_after_review: "Run one more test",
+    approve_dolby_vision_removal: "Remove Dolby Vision · keep HDR10",
     recheck: "Check worker again",
     reconcile: "Check library again",
   };
@@ -2735,6 +2753,11 @@ function jobControls(job, detail = false) {
           const plan = await readBatchPromotionPlan(job.id);
           if (!plan?.digest) throw new Error("Reopen the replacement review before deciding.");
           await commandRequest("batch-candidates",{id:job.id,digest:plan.digest,decision:"reject"});
+          return;
+        }
+        if (choice.decision === "approve_dolby_vision_removal") {
+          if (await confirmDolbyVisionRemoval(job, label))
+            await jobControl(job.id, "action_resume", {decision: choice.decision});
           return;
         }
         if (choice.decision === "approve" && job.batch?.promotion_plan_ready) {
@@ -3316,6 +3339,8 @@ async function loadJobs(more = false) {
         button(singleFile?.display_label || presentation.title, () => openJob(job.id), "job-title"),
       );
       heading.append(statusBadge(presentation.status, presentation.status, job.status === "waiting_decision" || job.batch?.outcome === "no_changes" ? () => openJob(job.id) : null));
+      const rangeChip = dynamicRangeChip(job);
+      if (rangeChip) heading.append(rangeChip);
       const summaryText = skipped ? [singleFile ? presentation.context : `${job.batch.total} files`, job.batch.total === 1 ? "Original kept" : "Originals kept"].filter(Boolean).join(" · ") : presentation.summary;
       const summary = node("p", summaryText, "metadata job-summary");
       summary.title = summaryText;
@@ -3538,6 +3563,8 @@ async function refreshDetail() {
       statusBadge(queuePresentation(job).status),
       node("p", queuePresentation(job).summary, "muted"),
     );
+    const detailRange = dynamicRangeChip(job);
+    if (detailRange) summary.append(detailRange);
     if (job.podcast) { const p=job.podcast; summary.append(node("p",`${p.classified_blocks || 0}/${p.total_blocks || 0} transcript blocks classified · ${((p.removed_ms || 0)/1000).toFixed(1)} seconds removed · ${p.known_ad_units || 0} units verified by known ads`,"metadata")); if (p.output_path && job.status === "completed") summary.append(node("p",`Validated MP3: ${p.output_path}`,"metadata")); }
     if (job.transcode) {
       // A waiting decision repeats its reason below, and a sample test result

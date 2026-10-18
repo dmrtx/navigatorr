@@ -205,16 +205,7 @@ func (r *ProductionBenchmarkRunner) runAdaptiveCandidates(
 	planner := optimization.NewAdaptivePlanner(qualities, initialQuality, target, tolerance)
 
 	// Color info identical to runSelection so policy evaluation matches selection.
-	colorInfo := optimization.ColorInfo{BitDepth: evidence.SourceBitDepth}
-	if len(rep.Video) > 0 {
-		colorInfo.ColorPrimaries = rep.Video[0].ColorPrimaries
-		colorInfo.ColorTransfer = rep.Video[0].ColorTransfer
-		colorInfo.ColorSpace = rep.Video[0].ColorSpace
-		colorInfo.PixelFormat = rep.Video[0].PixelFormat
-		if colorInfo.BitDepth == 0 {
-			colorInfo.BitDepth = rep.Video[0].BitDepth
-		}
-	}
+	colorInfo := benchmarkMeasurementColorInfo(record, evidence, &rep)
 	var planningPolicy optimization.QualityPolicy
 	switch planningMetric {
 	case optimization.MetricTypeSSIM:

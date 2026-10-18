@@ -163,7 +163,11 @@ func (e *Engine) ReconfigureBatch(ctx context.Context, id, scope, selectionID, v
 		if getString(ec.Inputs, "mode") == "" || len(settings) != 1 {
 			return nil, fmt.Errorf("goal changes cannot include technical settings")
 		}
-		policy, err := modePolicy(mode, getBool(ec.State, "is_anime"))
+		hdrPolicy, err := modeHDRPolicy(ec.Inputs)
+		if err != nil {
+			return nil, err
+		}
+		policy, err := modePolicyWithHDR(mode, getBool(ec.State, "is_anime"), hdrPolicy)
 		if err != nil {
 			return nil, err
 		}

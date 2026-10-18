@@ -239,6 +239,10 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 	if verr == nil {
 		verr = transcode.ValidateFinalSize(job.SourceSizeBytes, attest.SizeBytes, job.Plan.SizePolicy)
 	}
+	if verr == nil && job.Plan != nil && job.Plan.HDR10 != nil && job.Plan.QualityValidation == nil {
+		// HDR10 metadata preservation is proven inside final validation.
+		verr = fmt.Errorf("hdr10_final_validation_required: HDR10 plan has no final validation")
+	}
 	if verr == nil && job.Plan != nil && job.Plan.QualityValidation != nil {
 		if job.SourceSHA256 == "" {
 			verr = fmt.Errorf("quality_final_source_identity_missing: immutable source digest required before final validation")

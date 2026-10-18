@@ -16,6 +16,9 @@ func BuildVideoEncoderArgs(plan *transcode.Plan) ([]string, error) {
 	if err := plan.X265.Validate(plan.VideoCodec, plan.Quality); err != nil {
 		return nil, err
 	}
+	if err := plan.HDR10.Validate(); err != nil {
+		return nil, fmt.Errorf("%v (fail closed)", err)
+	}
 	switch norm(plan.VideoCodec) {
 	case "hevc_videotoolbox":
 		return buildVideoToolboxArgs(plan)
@@ -35,6 +38,10 @@ func buildVideoToolboxArgs(plan *transcode.Plan) ([]string, error) {
 	}
 	if norm(plan.Tune) != "" {
 		return nil, fmt.Errorf("tune is only supported for libx265, got %q for hevc_videotoolbox", plan.Tune)
+	}
+	if plan.HDR10 != nil {
+		// VideoToolbox HDR10 static metadata preservation is unverified.
+		return nil, fmt.Errorf("HDR10 encodes require libx265 (fail closed)")
 	}
 	profile, pixelFormat, err := validateHEVCVideoShape(plan)
 	if err != nil {
@@ -205,15 +212,24 @@ func buildLibX265Args(plan *transcode.Plan) ([]string, error) {
 	if tune != "" && !transcode.IsValidLibX265Tune(tune) {
 		return nil, fmt.Errorf("unsupported libx265 tune %q (allowed: %v)", plan.Tune, transcode.ValidLibX265Tunes())
 	}
+	if plan.HDR10 != nil && (profile != "main10" || pixelFormat != "p010le" || plan.ExpectedBitDepth != 10) {
+		return nil, fmt.Errorf("HDR10 encodes require main10 + p010le 10-bit output (fail closed)")
+	}
 	if pixelFormat == "p010le" {
 		pixelFormat = "yuv420p10le"
 	}
 	args := []string{"-c:v", "libx265", "-preset", preset}
 	if plan.X265 == nil {
 		args = []string{"-c:v", "libx265", "-crf", strconv.Itoa(crf), "-preset", preset}
+		if plan.HDR10 != nil {
+			args = append(args, "-x265-params", plan.HDR10.X265Params())
+		}
 	} else {
 		x := plan.X265
 		params := fmt.Sprintf("rc-lookahead=%d:bframes=%d:ref=%d:aq-mode=%d:aq-strength=%g:psy-rd=%g:psy-rdoq=%g:ssim-rd=%s:rdoq-level=2", x.Lookahead, x.BFrames, x.RefFrames, x.AQMode, x.AQStrength, x.PsyRD, x.PsyRDOQ, boolFFmpeg(x.SSIMRD))
+		if plan.HDR10 != nil {
+			params += ":" + plan.HDR10.X265Params()
+		}
 		args = append(args, "-b:v", strconv.Itoa(x.BitrateKbps)+"k", "-x265-params", params)
 	}
 	if tune != "" {
@@ -224,6 +240,17 @@ func buildLibX265Args(plan *transcode.Plan) ([]string, error) {
 	}
 	if pixelFormat != "" {
 		args = append(args, "-pix_fmt", pixelFormat)
+	}
+	if plan.HDR10 != nil {
+		// Container/codec-parameter colour tags match the VUI written by x265.
+		// Dolby Vision RPU passthrough is disabled explicitly: an approved
+		// conversion keeps HDR10 only, and HDR10 sources never gain DV.
+		args = append(args,
+			"-color_primaries", transcode.HDR10ColorPrimaries,
+			"-color_trc", transcode.HDR10ColorTransfer,
+			"-colorspace", transcode.HDR10ColorMatrix,
+			"-color_range", transcode.HDR10ColorRange,
+			"-dolbyvision", "0")
 	}
 	return args, nil
 }

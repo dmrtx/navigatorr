@@ -70,9 +70,26 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 	if err != nil || len(candidateRep.Video) != 1 {
 		return fail("quality_final_candidate_probe_failed", fmt.Errorf("candidate video probe: %v", err))
 	}
+	var toneMap *hdrToneMap
+	if plan.HDR10 != nil {
+		// HDR10 is measured only through the frozen tone map, after the
+		// source re-derives the plan and the candidate proves HDR10 survived.
+		if plan.Mode == "" || !runVMAF || runSSIM || !caps.SupportsHDR10Transcode() {
+			return fail("quality_hdr10_measurement_unavailable", fmt.Errorf("HDR10 requires a mode plan, model VMAF without SSIM and an HDR10-capable worker"))
+		}
+		if _, err := verifySourceHDR10(ctx, w.ffprobePath, source, &sourceRep, plan.HDR10); err != nil {
+			return fail("quality_hdr10_source_mismatch", err)
+		}
+		out, err := validateHDR10Output(ctx, w.ffprobePath, candidate, &candidateRep, plan.HDR10)
+		e.HDR10Output = out
+		if err != nil {
+			return fail("quality_hdr10_metadata_not_preserved", err)
+		}
+	}
 	if plan.Mode != "" {
 		sourceVideo, candidateVideo := sourceRep.Video[0], candidateRep.Video[0]
-		if mediainspect.IsHDRorDolbyVisionReport(&sourceRep) || mediainspect.IsHDRorDolbyVisionReport(&candidateRep) || (sourceVideo.BitDepth != 8 && sourceVideo.BitDepth != 10) || candidateVideo.BitDepth != sourceVideo.BitDepth || !isSupportedSourceChroma(sourceVideo.PixelFormat, sourceVideo.BitDepth) || !isSupportedSourceChroma(candidateVideo.PixelFormat, candidateVideo.BitDepth) {
+		hdrMismatch := plan.HDR10 == nil && (mediainspect.IsHDRorDolbyVisionReport(&sourceRep) || mediainspect.IsHDRorDolbyVisionReport(&candidateRep))
+		if hdrMismatch || (sourceVideo.BitDepth != 8 && sourceVideo.BitDepth != 10) || candidateVideo.BitDepth != sourceVideo.BitDepth || !isSupportedSourceChroma(sourceVideo.PixelFormat, sourceVideo.BitDepth) || !isSupportedSourceChroma(candidateVideo.PixelFormat, candidateVideo.BitDepth) {
 			return fail("quality_source_class_unsupported", fmt.Errorf("source/candidate measurement class is unsupported or changed"))
 		}
 	}
@@ -98,6 +115,12 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 		return fail("quality_final_scratch_unavailable", err)
 	}
 	defer os.RemoveAll(scratch)
+	if plan.HDR10 != nil {
+		if toneMap, err = prepareHDRToneMap(scratch, plan.HDR10); err != nil {
+			return fail("quality_hdr10_measurement_unavailable", err)
+		}
+		e.ToneMap = toneMap.evidenceCopy()
+	}
 	var vmafSamples []quality.VMAFStats
 	var cambiSamples []quality.CAMBIStats
 	var ssimScores []float64
@@ -131,7 +154,7 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 		}
 		if runVMAF {
 			logPath := filepath.Join(scratch, fmt.Sprintf("vmaf_%d.json", window.Index))
-			args, err := BuildVMAFModelArgs(candPath, refPath, logPath, *model, candidateRep.Video[0].BitDepth, w.metricThreads(1))
+			args, err := buildVMAFModelArgs(candPath, refPath, logPath, *model, candidateRep.Video[0].BitDepth, w.metricThreads(1), toneMap)
 			if err != nil {
 				return fail("quality_vmaf_measurement_path_unavailable", err)
 			}
@@ -149,7 +172,7 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 			vmafSamples = append(vmafSamples, stats)
 		}
 		if runCAMBI {
-			stats, err := runCAMBIMetricSample(ctx, w.ffmpegPath, scratch, candPath, refPath, 0, "final", window.Index, window.StartSeconds, sourceRep.Video[0].FPS, candidateRep.Video[0].BitDepth, caps.Quality.CAMBIOutput, w.metricThreads(1))
+			stats, err := runCAMBIMetricSample(ctx, w.ffmpegPath, scratch, candPath, refPath, 0, "final", window.Index, window.StartSeconds, sourceRep.Video[0].FPS, candidateRep.Video[0].BitDepth, caps.Quality.CAMBIOutput, w.metricThreads(1), toneMap)
 			if err != nil || stats.FramesTotal != len(refPTS) {
 				return fail("quality_cambi_evidence_incomplete", fmt.Errorf("sample %d: %v", window.Index, err))
 			}
@@ -318,8 +341,11 @@ func (w *Worker) validateModeSourceQuality(ctx context.Context, source string, p
 	if plan.Mode == "x265_preserve" && (norm(v.Codec) == "hevc" || norm(v.Codec) == "h265") {
 		return &transcode.PolicyRejectionError{ReasonCode: "already_hevc", Message: "source is already HEVC; no conversion required"}
 	}
-	if mediainspect.IsHDRorDolbyVisionReport(&rep) || (v.BitDepth != 8 && v.BitDepth != 10) || !isSupportedSourceChroma(v.PixelFormat, v.BitDepth) || v.FPS <= 0 || v.FPS >= 45 {
-		return fmt.Errorf("quality_source_class_unsupported: native SDR 8/10-bit 4:2:0 non-HFR evidence required")
+	if (plan.HDR10 == nil && mediainspect.IsHDRorDolbyVisionReport(&rep)) || (v.BitDepth != 8 && v.BitDepth != 10) || !isSupportedSourceChroma(v.PixelFormat, v.BitDepth) || v.FPS <= 0 || v.FPS >= 45 {
+		return fmt.Errorf("quality_source_class_unsupported: native SDR (or planned HDR10) 8/10-bit 4:2:0 non-HFR evidence required")
+	}
+	if _, err := verifySourceHDR10(ctx, w.ffprobePath, source, &rep, plan.HDR10); err != nil {
+		return fmt.Errorf("quality_source_class_unsupported: %v", err)
 	}
 	q := plan.QualityValidation
 	if q == nil || q.Quality.VMAF == nil || q.Quality.VMAF.Model == "" || (q.Metric != "vmaf" && q.Metric != "both" && q.Metric != "vmaf+ssim") {
@@ -334,6 +360,9 @@ func (w *Worker) validateModeSourceQuality(ctx context.Context, source string, p
 	}
 	if v.BitDepth == 10 && !caps.SupportsNative10BitQuality() {
 		return fmt.Errorf("quality_native_main10_unverified: executable native depth path is unavailable")
+	}
+	if plan.HDR10 != nil && !caps.SupportsHDR10Transcode() {
+		return fmt.Errorf("hdr10_worker_capability_unavailable: worker cannot encode and measure HDR10")
 	}
 	return nil
 }

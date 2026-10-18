@@ -62,6 +62,7 @@ type BenchmarkRecord struct {
 	Samples                   []transcode.BenchmarkSampleWindow     `json:"samples"`
 	Candidates                []transcode.BenchmarkCandidate        `json:"candidates"`
 	Quality                   *transcode.BenchmarkQualityConfig     `json:"quality,omitempty"`
+	HDR10                     *transcode.HDR10Plan                  `json:"hdr10,omitempty"`
 	Adaptive                  *transcode.BenchmarkAdaptiveConfig    `json:"adaptive,omitempty"`
 	Concurrency               *transcode.BenchmarkConcurrencyConfig `json:"concurrency,omitempty"`
 	FallbackAudioBitrateBps   int64                                 `json:"fallback_audio_bitrate_bps,omitempty"`
@@ -465,6 +466,7 @@ func (w *Worker) BenchmarkSubmit(ctx context.Context, req transcode.BenchmarkReq
 		Samples:                   req.Samples,
 		Candidates:                req.Candidates,
 		Quality:                   req.Quality,
+		HDR10:                     req.HDR10.Clone(),
 		Adaptive:                  req.Adaptive,
 		Concurrency:               req.Concurrency,
 		FallbackAudioBitrateBps:   req.FallbackAudioBitrateBps,

@@ -93,6 +93,7 @@ type BenchmarkExecutionEvidence struct {
 	MetricSamples     []BenchmarkMetricSampleResult         `json:"metric_samples,omitempty"`
 	CandidateMetrics  []BenchmarkCandidateMetricAggregate   `json:"candidate_metrics,omitempty"`
 	Decision          *transcode.BenchmarkDecision          `json:"decision,omitempty"`
+	ToneMap           *transcode.HDRToneMapEvidence         `json:"tone_map,omitempty"`
 }
 
 type CandidateQualityEvidence = transcode.BenchmarkCandidateQualityEvidence
@@ -346,9 +347,14 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		return fmt.Errorf("VMAF model %q is non-HFR and source FPS %.3f requires an HFR model (fail closed)", record.Quality.VMAF.Model, sourceVideo.FPS)
 	}
 
-	// HDR / Dolby Vision rejection: automatic benchmark optimization is strictly SDR-only
-	if (rep.HDR != nil && rep.HDR.Present) || isHDRStreamDetailed(sourceVideo) {
+	// HDR / Dolby Vision gate: SDR unless the request carries an HDR10 plan
+	// that the source, re-classified here from stream and frame evidence,
+	// derives exactly (including any Dolby Vision removal approval).
+	if record.HDR10 == nil && ((rep.HDR != nil && rep.HDR.Present) || isHDRStreamDetailed(sourceVideo)) {
 		return errors.New("HDR/Dolby Vision source not eligible for automatic benchmark optimization (fail closed)")
+	}
+	if _, err := verifySourceHDR10(ctx, w.ffprobePath, record.Source, &rep, record.HDR10); err != nil {
+		return fmt.Errorf("HDR/Dolby Vision source not eligible for benchmark: %v (fail closed)", err)
 	}
 
 	// Source bit-depth validation
@@ -378,6 +384,7 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		codec := transcode.BenchmarkCandidateVideoCodec(c)
 		plan := &transcode.Plan{
 			X265:               c.X265.Clone(),
+			HDR10:              record.HDR10.Clone(),
 			VideoCodec:         codec,
 			Quality:            c.Quality,
 			Preset:             norm(c.Preset),
@@ -1059,10 +1066,16 @@ func BuildVMAFArgs(candPath, refPath, logPath string) []string {
 // framesync must end at the shorter input without repeats.
 // threads > 0 sets libvmaf n_threads; zero keeps the libvmaf default.
 func BuildVMAFModelArgs(candPath, refPath, logPath string, model quality.VMAFModel, encodedBitDepth, threads int) ([]string, error) {
+	return buildVMAFModelArgs(candPath, refPath, logPath, model, encodedBitDepth, threads, nil)
+}
+
+// buildVMAFModelArgs applies tm, when set, identically to both inputs.
+func buildVMAFModelArgs(candPath, refPath, logPath string, model quality.VMAFModel, encodedBitDepth, threads int, tm *hdrToneMap) ([]string, error) {
 	if model.ID == "" || model.LibvmafModel == "" || model.MeasurementBitDepth != 10 || (encodedBitDepth != 8 && encodedBitDepth != 10) {
 		return nil, fmt.Errorf("unsupported VMAF model measurement contract")
 	}
-	filter := fmt.Sprintf("[0:v]format=yuv420p10le,setpts=PTS-STARTPTS[d];[1:v]format=yuv420p10le,setpts=PTS-STARTPTS[r];[d][r]libvmaf=model='version=%s\\:cambi.enc_bitdepth=%d':log_fmt=json:log_path=%s:shortest=1:repeatlast=0%s", model.LibvmafModel, encodedBitDepth, escapeFFmpegFilterPath(logPath), libvmafThreadsOption(threads))
+	chain := tm.metricInputChain()
+	filter := fmt.Sprintf("[0:v]%s,setpts=PTS-STARTPTS[d];[1:v]%s,setpts=PTS-STARTPTS[r];[d][r]libvmaf=model='version=%s\\:cambi.enc_bitdepth=%d':log_fmt=json:log_path=%s:shortest=1:repeatlast=0%s", chain, chain, model.LibvmafModel, encodedBitDepth, escapeFFmpegFilterPath(logPath), libvmafThreadsOption(threads))
 	return []string{"-nostdin", "-nostats", "-i", candPath, "-i", refPath, "-filter_complex", filter, "-f", "null", "-"}, nil
 }
 
@@ -1070,7 +1083,13 @@ func BuildVMAFModelArgs(candPath, refPath, logPath string, model quality.VMAFMod
 // internal CAMBI feature, so adding another to that invocation is unsafe on
 // several libvmaf builds.
 func BuildCAMBIArgs(candPath, refPath, logPath string, encodedBitDepth, threads int) []string {
-	filter := fmt.Sprintf("[0:v]format=yuv420p10le,setpts=PTS-STARTPTS[d];[1:v]format=yuv420p10le,setpts=PTS-STARTPTS[r];[d][r]libvmaf=model=version=vmaf_v0.6.1:feature='name=cambi\\:full_ref=true\\:enc_bitdepth=%d':log_fmt=json:log_path=%s:shortest=1:repeatlast=0%s", encodedBitDepth, escapeFFmpegFilterPath(logPath), libvmafThreadsOption(threads))
+	return buildCAMBIArgs(candPath, refPath, logPath, encodedBitDepth, threads, nil)
+}
+
+// buildCAMBIArgs applies tm, when set, identically to both inputs.
+func buildCAMBIArgs(candPath, refPath, logPath string, encodedBitDepth, threads int, tm *hdrToneMap) []string {
+	chain := tm.metricInputChain()
+	filter := fmt.Sprintf("[0:v]%s,setpts=PTS-STARTPTS[d];[1:v]%s,setpts=PTS-STARTPTS[r];[d][r]libvmaf=model=version=vmaf_v0.6.1:feature='name=cambi\\:full_ref=true\\:enc_bitdepth=%d':log_fmt=json:log_path=%s:shortest=1:repeatlast=0%s", chain, chain, encodedBitDepth, escapeFFmpegFilterPath(logPath), libvmafThreadsOption(threads))
 	return []string{"-nostdin", "-nostats", "-i", candPath, "-i", refPath, "-filter_complex", filter, "-f", "null", "-"}
 }
 
@@ -1440,19 +1459,7 @@ func (r *ProductionBenchmarkRunner) runSelection(
 		selectorPolicy = vmafPolicy
 	}
 
-	// Assemble ColorInfo
-	colorInfo := optimization.ColorInfo{
-		BitDepth: evidence.SourceBitDepth,
-	}
-	if len(rep.Video) > 0 {
-		colorInfo.ColorPrimaries = rep.Video[0].ColorPrimaries
-		colorInfo.ColorTransfer = rep.Video[0].ColorTransfer
-		colorInfo.ColorSpace = rep.Video[0].ColorSpace
-		colorInfo.PixelFormat = rep.Video[0].PixelFormat
-		if colorInfo.BitDepth == 0 {
-			colorInfo.BitDepth = rep.Video[0].BitDepth
-		}
-	}
+	colorInfo := benchmarkMeasurementColorInfo(record, evidence, &rep)
 
 	base, err := benchmarkEstimateBase(record, evidence, rep, sourceInitialSize)
 	if err != nil {
@@ -1759,4 +1766,26 @@ func markInsufficientSavings(d *transcode.BenchmarkDecision) {
 		d.Evaluations[i].Eligible = false
 		d.Evaluations[i].EvaluationReason = "insufficient_savings"
 	}
+}
+
+// benchmarkMeasurementColorInfo describes the colour space the metrics were
+// computed in. SDR scores the source as-is. An HDR10 benchmark scores both
+// sides after the identical tone map to BT.709, so the selector sees that
+// measurement space; any HDR source without recorded tone map evidence keeps
+// its HDR colour and stays ineligible for scoring (fail closed).
+func benchmarkMeasurementColorInfo(record *BenchmarkRecord, evidence *BenchmarkExecutionEvidence, rep *mediainspect.DetailedReport) optimization.ColorInfo {
+	if record != nil && record.HDR10 != nil && evidence != nil && evidence.ToneMap != nil && evidence.ToneMap.Method == record.HDR10.ToneMap.Method && evidence.ToneMap.AppliedTo == "reference_and_candidate" {
+		return optimization.ColorInfo{ColorPrimaries: "bt709", ColorTransfer: "bt709", ColorSpace: "bt709", PixelFormat: "yuv420p10le", BitDepth: 10}
+	}
+	colorInfo := optimization.ColorInfo{BitDepth: evidence.SourceBitDepth}
+	if len(rep.Video) > 0 {
+		colorInfo.ColorPrimaries = rep.Video[0].ColorPrimaries
+		colorInfo.ColorTransfer = rep.Video[0].ColorTransfer
+		colorInfo.ColorSpace = rep.Video[0].ColorSpace
+		colorInfo.PixelFormat = rep.Video[0].PixelFormat
+		if colorInfo.BitDepth == 0 {
+			colorInfo.BitDepth = rep.Video[0].BitDepth
+		}
+	}
+	return colorInfo
 }

@@ -23,7 +23,7 @@ func (e *Engine) registerTranscodeTemplate() {
 		ImmutableInputs: true,
 		Name:            "transcode_media", Version: 2,
 		Description:    "Set mode=size|quality|x265_preserve for immutable sampled quality and final size policies without profile/priority/tuning; quality is the UI default. x265_preserve requires libx265, skips existing HEVC and permits 0% minimum savings; size requires 15%; quality and x265_preserve reject growth. Unsupported sources or unavailable quality capabilities preserve the original. Omit mode for legacy technical behavior. Coordinates safe candidate-only media transcoding using an immutable recipe-resolved plan, bounded transient retries, worker revalidation, post-transcode stream validation, and original SHA-256 verification.",
-		RequiredInputs: []string{"path"}, OptionalInputs: []string{"mode", "profile", "profile_config", "preserve_source_bit_depth", "replace_original", "expected_video_codec", "max_size_increase_percent", "media_type", "is_anime", "min_savings_percent", "surface_worker_busy", "metric", "parent_action_id", "batch_fixed_quality", "batch_calibration_digest", "batch_item_key", "library_context"}, Destructive: false,
+		RequiredInputs: []string{"path"}, OptionalInputs: []string{"mode", "hdr_policy", "profile", "profile_config", "preserve_source_bit_depth", "replace_original", "expected_video_codec", "max_size_increase_percent", "media_type", "is_anime", "min_savings_percent", "surface_worker_busy", "metric", "parent_action_id", "batch_fixed_quality", "batch_calibration_digest", "batch_item_key", "library_context"}, Destructive: false,
 		Steps: []StepDefinition{
 			{Name: "preflight", Description: "Inspect source, hash original, resolve profile/recipe and per-stream compatibility plan", Run: e.measureCoordinatorPhase("coordinator_preflight", e.stepTranscodePreflight)},
 			{Name: "submit_benchmark", Description: "Submit benchmark request if profile optimization is enabled", Run: e.stepBenchmarkSubmit},
@@ -182,17 +182,46 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	if profileConfigErr != nil {
 		return StepResult{Status: StepFailed, Error: profileConfigErr.Error()}, nil
 	}
+	var hdr10Plan *transcode.HDR10Plan
 	if modeSnapshot != nil {
-		reason := modeSourceReason(modeSnapshot.Mode, &rep)
+		dynamicRange := e.classifySourceDynamicRange(ctx, cleanPath, &rep)
+		origMap["dynamic_range"] = dynamicRange
+		ec.State["source_dynamic_range"] = dynamicRange
+		var admitHDR *mediainspect.DynamicRange
+		if modeSnapshot.HDRPolicy == HDRPolicyPreserveHDR10 {
+			admitHDR = &dynamicRange
+		}
+		modeOutputs := map[string]any{"mode": modeSnapshot.Mode, "policy_digest": modeSnapshot.Digest, "dynamic_range": dynamicRange}
+		reason := modeSourceReasonHDR(modeSnapshot.Mode, &rep, admitHDR)
 		if reason != "" {
 			ec.State["skip_transcode"] = true
 			ec.State["reason_code"] = reason
 			ec.State["resolved_path"] = cleanPath
 			ec.State["original_sha256"] = origSHA
 			ec.State["original"] = origMap
-			return StepResult{Status: StepCompleted, Outputs: map[string]any{"skipped": true, "reason_code": reason, "mode": modeSnapshot.Mode, "policy_digest": modeSnapshot.Digest}}, nil
+			out := map[string]any{"skipped": true, "reason_code": reason}
+			for k, v := range modeOutputs {
+				out[k] = v
+			}
+			if dynamicRange.IsHDR() && dynamicRange.Reason != "" {
+				out["hdr_reason"] = dynamicRange.Reason
+			}
+			return StepResult{Status: StepCompleted, Outputs: out}, nil
 		}
 		ephemeralProfile = modeSnapshot.Profile
+		if dynamicRange.IsHDR() {
+			ec.State["resolved_path"] = cleanPath
+			ec.State["original_sha256"] = origSHA
+			ec.State["original"] = origMap
+			var stop *StepResult
+			hdr10Plan, stop = e.resolveHDR10Plan(ec, dynamicRange, origSHA, cleanPath, modeOutputs)
+			if stop != nil {
+				return *stop, nil
+			}
+			if err := applyHDR10ModeQuality(&ephemeralProfile, modeSnapshot.HDR10Quality); err != nil {
+				return StepResult{Status: StepFailed, Error: err.Error()}, nil
+			}
+		}
 		hasProfileConfig = true
 		profile = "mode-" + modeSnapshot.Mode
 	} else if hasProfileConfig {
@@ -292,6 +321,15 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 			return StepResult{Status: StepFailed, Error: fmt.Sprintf("resolving transcode profile %q: %v", profile, err)}, nil
 		}
 	}
+	if hdr10Plan != nil {
+		// The frozen HDR10 plan is part of the plan digest; only libx265
+		// Main10 can carry it (VideoToolbox HDR metadata is unverified).
+		if plan.VideoCodec != transcode.VideoCodecLibX265 || plan.ExpectedBitDepth != 10 || plan.VideoProfile != "main10" {
+			return StepResult{Status: StepFailed, Error: "HDR10 requires a libx265 Main10 plan (fail closed)"}, nil
+		}
+		plan.HDR10 = hdr10Plan
+		ec.State["hdr10_plan"] = hdr10Plan
+	}
 	if modeSnapshot != nil {
 		if err := applyModePlan(plan, modeSnapshot); err != nil {
 			return StepResult{Status: StepFailed, Error: err.Error()}, nil
@@ -327,7 +365,7 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	}
 
 	if optEnabled && optPolicy != nil {
-		if isSourceHDRorDV(&rep) {
+		if isSourceHDRorDV(&rep) && plan.HDR10 == nil {
 			return StepResult{Status: StepFailed, Error: "source media contains HDR/Dolby Vision: automatic optimization is only supported for SDR content (fail closed)"}, nil
 		}
 		if len(rep.Video) > 0 {

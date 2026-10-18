@@ -156,6 +156,9 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 		if err != nil {
 			if getString(ec.Inputs, "mode") != "" {
 				reason := "quality_policy_unavailable"
+				if strings.HasPrefix(err.Error(), "hdr10_worker_capability_unavailable") {
+					reason = "hdr10_worker_capability_unavailable"
+				}
 				return modeAttention(ec, reason, err.Error()+"; original preserved"), nil
 			}
 			return StepResult{Status: StepFailed, Error: err.Error()}, nil
@@ -1089,7 +1092,17 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 	}
 	planCodec := plan.VideoCodec
 	candidateSearch := opt.Search
-	if mode := getString(ec.Inputs, "mode"); mode != "" && mode != "x265_preserve" && !caps.Encoders[transcode.VideoCodecLibX265] && caps.Encoders[transcode.VideoCodecHEVCVideoToolbox] {
+	if plan.HDR10 != nil {
+		// Checked before any candidate is built: an old or incapable worker
+		// never receives HDR, and VideoToolbox is never a fallback for it.
+		if !caps.SupportsHDR10Transcode() {
+			return nil, fmt.Errorf("hdr10_worker_capability_unavailable: worker cannot encode HDR10 with libx265 and measure it through the tone map; upgrade the worker first")
+		}
+		if planCodec != transcode.VideoCodecLibX265 {
+			return nil, fmt.Errorf("hdr10_encoder_unsupported: HDR10 requires libx265 (fail closed)")
+		}
+	}
+	if mode := getString(ec.Inputs, "mode"); mode != "" && mode != "x265_preserve" && plan.HDR10 == nil && !caps.Encoders[transcode.VideoCodecLibX265] && caps.Encoders[transcode.VideoCodecHEVCVideoToolbox] {
 		clone := *plan
 		clone.VideoCodec = transcode.VideoCodecHEVCVideoToolbox
 		clone.Preset = ""
@@ -1120,7 +1133,7 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 		}
 		modelAvailable := caps.Quality != nil && caps.Quality.Models[modelID].Available
 		if (metric == "vmaf" || metric == "both") && (!modelAvailable || v0.FPS >= 45) {
-			if strings.EqualFold(strings.TrimSpace(getString(ec.Inputs, "metric")), "auto") && caps.Filters["ssim"] {
+			if strings.EqualFold(strings.TrimSpace(getString(ec.Inputs, "metric")), "auto") && caps.Filters["ssim"] && plan.HDR10 == nil {
 				metric = "ssim"
 			} else {
 				return nil, fmt.Errorf("quality_vmaf_model_unavailable: %s cannot execute for %.3f FPS source", modelID, v0.FPS)
@@ -1176,6 +1189,7 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 		DeclaredVideoBitrateBps: declaredVideoBitrate,
 		AttachmentBytes:         attachmentBytes,
 		SourceSHA256:            getString(ec.State, "original_sha256"),
+		HDR10:                   plan.HDR10.Clone(),
 	}
 
 	if mode := getString(ec.Inputs, "mode"); mode != "" {
@@ -1186,7 +1200,7 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 		}
 		req.ModePolicyVersion = policy.Version
 		req.SearchBudgetSeconds = getInt(ec.State, "search_budget_seconds")
-		if mode != "x265_preserve" && planCodec != transcode.VideoCodecHEVCVideoToolbox && caps.Encoders[transcode.VideoCodecHEVCVideoToolbox] {
+		if mode != "x265_preserve" && plan.HDR10 == nil && planCodec != transcode.VideoCodecHEVCVideoToolbox && caps.Encoders[transcode.VideoCodecHEVCVideoToolbox] {
 			vt := *plan
 			vt.VideoCodec = transcode.VideoCodecHEVCVideoToolbox
 			vt.Preset = ""

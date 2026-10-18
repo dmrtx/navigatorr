@@ -28,10 +28,18 @@ type ModePolicySnapshot struct {
 	SearchBudgetSeconds    int            `json:"search_budget_seconds"`
 	OperationBudgetSeconds int            `json:"operation_budget_seconds"`
 	Profile                recipe.Profile `json:"profile"`
-	Digest                 string         `json:"digest"`
+	// HDRPolicy and HDR10Quality are omitted for the default HDR rejection,
+	// so snapshots (and digests) of SDR-only operations are unchanged.
+	HDRPolicy    string            `json:"hdr_policy,omitempty"`
+	HDR10Quality *ModeHDR10Quality `json:"hdr10_quality,omitempty"`
+	Digest       string            `json:"digest"`
 }
 
 func modePolicy(mode string, anime bool) (ModePolicySnapshot, error) {
+	return modePolicyWithHDR(mode, anime, "")
+}
+
+func modePolicyWithHDR(mode string, anime bool, hdrPolicy string) (ModePolicySnapshot, error) {
 	if mode != "size" && mode != "quality" && mode != "x265_preserve" {
 		return ModePolicySnapshot{}, fmt.Errorf("mode must be size, quality, or x265_preserve")
 	}
@@ -48,6 +56,10 @@ func modePolicy(mode string, anime bool) (ModePolicySnapshot, error) {
 	if mode == "x265_preserve" || mode == "quality" {
 		snapshot.MinSavingsPercent = 0
 	}
+	if hdrPolicy == HDRPolicyPreserveHDR10 {
+		snapshot.HDRPolicy = hdrPolicy
+		snapshot.HDR10Quality = hdr10ModeQuality(mode)
+	}
 	b, err := json.Marshal(snapshot)
 	if err != nil {
 		return snapshot, err
@@ -58,15 +70,22 @@ func modePolicy(mode string, anime bool) (ModePolicySnapshot, error) {
 }
 
 func validateModeInputs(inputs map[string]any) error {
+	hdrPolicy, err := modeHDRPolicy(inputs)
+	if err != nil {
+		return err
+	}
 	raw, present := inputs["mode"]
 	if !present {
+		if _, set := inputs["hdr_policy"]; set {
+			return fmt.Errorf("hdr_policy requires mode")
+		}
 		return nil
 	}
 	mode, ok := raw.(string)
 	if !ok {
 		return fmt.Errorf("mode must be a string")
 	}
-	if _, err := modePolicy(mode, getBool(inputs, "is_anime") || getString(inputs, "media_type") == "anime"); err != nil {
+	if _, err := modePolicyWithHDR(mode, getBool(inputs, "is_anime") || getString(inputs, "media_type") == "anime", hdrPolicy); err != nil {
 		return err
 	}
 	for _, key := range []string{"profile", "profile_config", "priority", "metric", "min_savings_percent", "max_size_increase_percent", "preserve_source_bit_depth", "expected_video_codec", "shared_calibration", "calibration_items", "batch_fixed_quality", "batch_calibration_digest"} {
@@ -82,10 +101,14 @@ func freezeModePolicy(ec *ExecutionContext) (*ModePolicySnapshot, error) {
 	if mode == "" {
 		return nil, nil
 	}
+	hdrPolicy, err := modeHDRPolicy(ec.Inputs)
+	if err != nil {
+		return nil, err
+	}
 	if raw := ec.State["mode_policy"]; raw != nil {
 		b, err := json.Marshal(raw)
 		var p ModePolicySnapshot
-		if err != nil || json.Unmarshal(b, &p) != nil || p.Mode != mode || p.Digest == "" {
+		if err != nil || json.Unmarshal(b, &p) != nil || p.Mode != mode || p.HDRPolicy != hdrPolicy || p.Digest == "" {
 			return nil, fmt.Errorf("frozen mode policy is unreadable or mismatched")
 		}
 		digest := p.Digest
@@ -105,7 +128,7 @@ func freezeModePolicy(ec *ExecutionContext) (*ModePolicySnapshot, error) {
 		ec.State["operation_search_budget_seconds"] = p.OperationBudgetSeconds
 		return &p, nil
 	}
-	p, err := modePolicy(mode, getBool(ec.State, "resolved_is_anime") || getBool(ec.Inputs, "is_anime") || getString(ec.Inputs, "media_type") == "anime")
+	p, err := modePolicyWithHDR(mode, getBool(ec.State, "resolved_is_anime") || getBool(ec.Inputs, "is_anime") || getString(ec.Inputs, "media_type") == "anime", hdrPolicy)
 	if err != nil {
 		return nil, err
 	}
@@ -118,8 +141,20 @@ func freezeModePolicy(ec *ExecutionContext) (*ModePolicySnapshot, error) {
 }
 
 func modeSourceReason(mode string, rep *mediainspect.DetailedReport) string {
-	if rep == nil || len(rep.Video) != 1 || rep.Video[0].BitDepth != 8 && rep.Video[0].BitDepth != 10 || rep.Video[0].FPS <= 0 || rep.Video[0].FPS >= 45 || isSourceHDRorDV(rep) {
+	return modeSourceReasonHDR(mode, rep, nil)
+}
+
+// modeSourceReasonHDR admits an HDR source only when hdr is its frame-backed
+// classification (passed solely under preserve_hdr10) and HDR10 conversion is
+// eligible. Without it every HDR or Dolby Vision source stays unsupported.
+func modeSourceReasonHDR(mode string, rep *mediainspect.DetailedReport, hdr *mediainspect.DynamicRange) string {
+	if rep == nil || len(rep.Video) != 1 || rep.Video[0].BitDepth != 8 && rep.Video[0].BitDepth != 10 || rep.Video[0].FPS <= 0 || rep.Video[0].FPS >= 45 {
 		return "unsupported_source"
+	}
+	if isSourceHDRorDV(rep) || hdr != nil && hdr.IsHDR() {
+		if hdr == nil || !hdr.HDR10Convertible() {
+			return "unsupported_source"
+		}
 	}
 	if mode == "x265_preserve" && strings.EqualFold(rep.Video[0].Codec, "hevc") {
 		return "already_target_codec"
@@ -294,7 +329,17 @@ func verifyModeBenchmarkWinner(ec *ExecutionContext, winner *transcode.Benchmark
 		if err != nil {
 			return err
 		}
-		if !winner.MinimumMet || winner.MetricType != "vmaf" || winner.Score < snapshot.Profile.Optimization.Quality.VMAF.Minimum {
+		minimum := snapshot.Profile.Optimization.Quality.VMAF.Minimum
+		if request.HDR10 != nil {
+			plan := getPlan(ec.State["plan"])
+			if snapshot.HDR10Quality == nil || plan == nil || plan.HDR10 == nil || *plan.HDR10 != *request.HDR10 || winner.VideoCodec != transcode.VideoCodecLibX265 {
+				return fmt.Errorf("mode benchmark HDR10 evidence does not match the frozen plan")
+			}
+			minimum = math.Max(minimum, snapshot.HDR10Quality.VMAFMinimum)
+		} else if plan := getPlan(ec.State["plan"]); plan != nil && plan.HDR10 != nil {
+			return fmt.Errorf("mode benchmark HDR10 evidence does not match the frozen plan")
+		}
+		if !winner.MinimumMet || winner.MetricType != "vmaf" || winner.Score < minimum {
 			return fmt.Errorf("mode benchmark winner does not meet frozen quality policy")
 		}
 		return nil

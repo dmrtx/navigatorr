@@ -84,6 +84,20 @@ func operationValue(r operationRecord, key string) any {
 	}
 	return r.state[key]
 }
+
+// operationDynamicRange projects the frozen source classification to the
+// fields the queue shows: class, display label and any ineligibility reason.
+func operationDynamicRange(raw any) map[string]any {
+	m, ok := raw.(map[string]any)
+	if !ok || operationString(m["class"]) == "" {
+		return nil
+	}
+	out := map[string]any{"class": operationString(m["class"]), "label": operationString(m["label"])}
+	if reason := operationString(m["reason"]); reason != "" {
+		out["reason"] = reason
+	}
+	return out
+}
 func operationActive(status string) bool {
 	return status != store.ActionStatusCompleted && status != store.ActionStatusFailed && status != store.ActionStatusCancelled
 }
@@ -534,6 +548,9 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 			}
 			job["number"] = numbers[root]
 			job["stages"] = s.queueStages(r)
+			if dr := operationDynamicRange(operationValue(r, "source_dynamic_range")); dr != nil {
+				job["dynamic_range"] = dr
+			}
 			// Planning can hash large files before a promotion checkpoint exists.
 			// Its durable source link already identifies the file during that stage.
 			if r.inst.ActionName == "promote_transcode_candidate" {

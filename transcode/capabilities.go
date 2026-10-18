@@ -61,6 +61,7 @@ type QualityCapabilities struct {
 // WorkerCapabilities represents the versioned capability report of a transcode worker node.
 type WorkerCapabilities struct {
 	X265TwoPass              bool                           `json:"x265_two_pass,omitempty"`
+	HDR10Transcode           bool                           `json:"hdr10_transcode,omitempty"`
 	HEAACAudio               bool                           `json:"he_aac_audio,omitempty"`
 	AutomaticModesV2         bool                           `json:"automatic_modes_v2,omitempty"`
 	AutomaticQualityPruning  bool                           `json:"automatic_quality_pruning,omitempty"`
@@ -107,6 +108,7 @@ func (c WorkerCapabilities) HasComponentError(component string) bool {
 // across different worker nodes with identical capability sets.
 type fingerprintPayload struct {
 	X265TwoPass              bool                           `json:"x265_two_pass,omitempty"`
+	HDR10Transcode           bool                           `json:"hdr10_transcode,omitempty"`
 	HEAACAudio               bool                           `json:"he_aac_audio,omitempty"`
 	AutomaticModesV2         bool                           `json:"automatic_modes_v2,omitempty"`
 	AutomaticQualityPruning  bool                           `json:"automatic_quality_pruning,omitempty"`
@@ -150,6 +152,7 @@ func ComputeCapabilityFingerprint(caps WorkerCapabilities) (string, error) {
 
 	payload := fingerprintPayload{
 		X265TwoPass: caps.X265TwoPass, HEAACAudio: caps.HEAACAudio,
+		HDR10Transcode:           caps.HDR10Transcode,
 		AutomaticModesV2:         caps.AutomaticModesV2,
 		AutomaticQualityPruning:  caps.AutomaticQualityPruning,
 		SavingsPrecheck:          caps.SavingsPrecheck,
@@ -204,4 +207,11 @@ func VerifyCapabilityFingerprint(caps WorkerCapabilities) error {
 // automatic pixel conversion. Older workers cannot claim this capability.
 func (c WorkerCapabilities) SupportsNative10BitQuality() bool {
 	return c.Quality != nil && c.Quality.Native10Bit && c.Quality.ProbeError == "" && c.Quality.Models["v1_1080p_3h"].Available && c.Quality.CAMBIFullRef
+}
+
+// SupportsHDR10Transcode reports a worker that encodes HDR10 with libx265,
+// measures through the deterministic tone map and validates HDR10 output.
+// Older workers never claim it, so HDR sources are never dispatched to them.
+func (c WorkerCapabilities) SupportsHDR10Transcode() bool {
+	return c.HDR10Transcode && c.SupportsNative10BitQuality() && c.Encoders["libx265"] && c.Filters["lut3d"]
 }

@@ -156,6 +156,7 @@ type pipelineShared struct {
 	runSSIM              bool
 	runCAMBI             bool
 	vmafModel            *quality.VMAFModel
+	toneMap              *hdrToneMap
 	qualityCaps          *transcode.QualityCapabilities
 	capFingerprint       string
 	passesPerSample      int
@@ -256,6 +257,22 @@ func (r *ProductionBenchmarkRunner) runPipelinedEncodeMetrics(
 	if runCAMBI && (caps.Quality == nil || caps.Quality.ProbeError != "" || !caps.Quality.CAMBIFullRef) {
 		return fmt.Errorf("quality_cambi_full_ref_unavailable: CAMBI full-reference is not executable on worker (fail closed)")
 	}
+	var toneMap *hdrToneMap
+	if record.HDR10 != nil {
+		// PQ is only measured through the frozen tone map; SSIM and
+		// model-less VMAF have no HDR calibration and fail closed.
+		if !caps.SupportsHDR10Transcode() {
+			return errors.New("hdr10_worker_capability_unavailable: worker cannot encode and measure HDR10 (fail closed)")
+		}
+		if runSSIM || vmafModel == nil {
+			return errors.New("hdr10_metric_unsupported: HDR10 benchmark requires model VMAF without SSIM (fail closed)")
+		}
+		toneMap, err = prepareHDRToneMap(samplesDir, record.HDR10)
+		if err != nil {
+			return fmt.Errorf("preparing HDR measurement tone map: %w (fail closed)", err)
+		}
+		evidence.ToneMap = toneMap.evidenceCopy()
+	}
 	passesPerSample := 0
 	if runVMAF {
 		passesPerSample++
@@ -308,6 +325,7 @@ func (r *ProductionBenchmarkRunner) runPipelinedEncodeMetrics(
 		runSSIM:              runSSIM,
 		runCAMBI:             runCAMBI,
 		vmafModel:            vmafModel,
+		toneMap:              toneMap,
 		qualityCaps:          caps.Quality,
 		capFingerprint:       caps.CapabilityFingerprint,
 		passesPerSample:      passesPerSample,
@@ -639,7 +657,7 @@ func (sh *pipelineShared) runMetricUnit(ctx context.Context, u pipelineUnit, idx
 		sh.progressReporter.StartSampleUnit("evaluating_metrics", u.sampOrd+1, vc.index+1, vc.candidate.ID, "vmaf")
 		args := BuildVMAFArgs(candPath, refPath, logPath)
 		if sh.vmafModel != nil {
-			args, err = BuildVMAFModelArgs(candPath, refPath, logPath, *sh.vmafModel, vc.bitDepth, sh.metricThreads)
+			args, err = buildVMAFModelArgs(candPath, refPath, logPath, *sh.vmafModel, vc.bitDepth, sh.metricThreads, sh.toneMap)
 			if err != nil {
 				fail(err)
 				return
@@ -842,7 +860,7 @@ func (sh *pipelineShared) runMetricUnit(ctx context.Context, u pipelineUnit, idx
 	if sh.runCAMBI {
 		sh.progressReporter.StartSampleUnit("evaluating_metrics", u.sampOrd+1, vc.index+1, vc.candidate.ID, "cambi_full_ref")
 		start := time.Now()
-		stats, err := runCAMBIMetricSample(ctx, sh.w.ffmpegPath, sh.samplesDir, candPath, refPath, candIdx, vc.candidate.ID, window.Index, window.StartSeconds, sh.evidence.SourceFPS, vc.bitDepth, sh.qualityCaps.CAMBIOutput, sh.metricThreads)
+		stats, err := runCAMBIMetricSample(ctx, sh.w.ffmpegPath, sh.samplesDir, candPath, refPath, candIdx, vc.candidate.ID, window.Index, window.StartSeconds, sh.evidence.SourceFPS, vc.bitDepth, sh.qualityCaps.CAMBIOutput, sh.metricThreads, sh.toneMap)
 		out.cambiDurSec = time.Since(start).Seconds()
 		sh.progressReporter.ResolveUnit()
 		if ctx.Err() != nil {
@@ -907,7 +925,7 @@ func invalidMetricOutcome(candidateID string, candIdx, sampleIdx int, reason str
 	return out
 }
 
-func runCAMBIMetricSample(ctx context.Context, ffmpegPath, samplesDir, candPath, refPath string, candIdx int, candidateID string, sampleIdx int, sourceStartSec, fps float64, encodedBitDepth int, outputMetric string, threads int) (quality.CAMBIStats, error) {
+func runCAMBIMetricSample(ctx context.Context, ffmpegPath, samplesDir, candPath, refPath string, candIdx int, candidateID string, sampleIdx int, sourceStartSec, fps float64, encodedBitDepth int, outputMetric string, threads int, tm *hdrToneMap) (quality.CAMBIStats, error) {
 	logPath, err := derivedMetricLogPath(samplesDir, "cambi", candIdx, candidateID, sampleIdx)
 	if err != nil {
 		return quality.CAMBIStats{}, err
@@ -918,7 +936,7 @@ func runCAMBIMetricSample(ctx context.Context, ffmpegPath, samplesDir, candPath,
 	if encodedBitDepth != 8 && encodedBitDepth != 10 {
 		return quality.CAMBIStats{}, fmt.Errorf("unsupported CAMBI encoded bit depth %d", encodedBitDepth)
 	}
-	args := BuildCAMBIArgs(candPath, refPath, logPath, encodedBitDepth, threads)
+	args := buildCAMBIArgs(candPath, refPath, logPath, encodedBitDepth, threads, tm)
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {

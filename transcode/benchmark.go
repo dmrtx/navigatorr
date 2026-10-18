@@ -321,6 +321,10 @@ type BenchmarkRequest struct {
 	// to content identity so a same path/size/mtime source with changed content
 	// can never be reused.
 	SourceSHA256 string `json:"source_sha256,omitempty"`
+	// HDR10 opts an HDR10 (or approved Dolby Vision) source into HDR10
+	// candidates and tone-mapped measurement. Workers without the
+	// hdr10_transcode capability reject the field as unknown.
+	HDR10 *HDR10Plan `json:"hdr10,omitempty"`
 }
 
 // BenchmarkJob is the receipt returned upon successful submission of a benchmark request.
@@ -429,6 +433,19 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 	}
 	if req.QualityPruning && !req.Automatic {
 		return errors.New("quality pruning requires automatic search")
+	}
+	if req.HDR10 != nil {
+		if err := req.HDR10.Validate(); err != nil {
+			return err
+		}
+		if req.Mode == "" || req.Metric != "vmaf" || req.Quality == nil || req.Quality.VMAF == nil || req.Quality.VMAF.Model == "" || req.Allow8BitTo10Bit {
+			return errors.New("HDR10 benchmark requires a mode with explicit VMAF quality policy")
+		}
+		for _, c := range req.Candidates {
+			if BenchmarkCandidateVideoCodec(c) != VideoCodecLibX265 {
+				return errors.New("HDR10 benchmark candidates must use libx265")
+			}
+		}
 	}
 	if math.IsNaN(req.MinSavingsPercent) || req.MinSavingsPercent < 0 || req.MinSavingsPercent >= 100 || (req.MinSavingsPercent > 0 && (req.Automatic || req.Mode != "")) {
 		return errors.New("min_savings_percent must be in [0,100) and only for profile benchmarks")

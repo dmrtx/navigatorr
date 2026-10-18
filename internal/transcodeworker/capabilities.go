@@ -219,6 +219,13 @@ func probeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratch
 		caps.Quality = &qualityCaps
 	}
 
+	// HDR10 requires libx265 that can be told not to emit Dolby Vision RPUs
+	// (-dolbyvision 0) and lut3d for the measurement tone map; the native
+	// 10-bit quality path is checked by SupportsHDR10Transcode.
+	if caps.Encoders["libx265"] && caps.Filters["lut3d"] {
+		caps.HDR10Transcode = probeLibX265DolbyVisionOption(ctx, ffmpegPath)
+	}
+
 	// 5. Generate deterministic capability fingerprint
 	fp, err := transcode.ComputeCapabilityFingerprint(caps)
 	if err != nil {
@@ -444,6 +451,23 @@ func contains(values []string, want string) bool {
 	want = strings.ToLower(strings.TrimSpace(want))
 	for _, v := range values {
 		if strings.ToLower(strings.TrimSpace(v)) == want {
+			return true
+		}
+	}
+	return false
+}
+
+// probeLibX265DolbyVisionOption reports whether libx265 exposes -dolbyvision,
+// so HDR10 encodes can disable RPU pass-through explicitly.
+func probeLibX265DolbyVisionOption(ctx context.Context, ffmpegPath string) bool {
+	out, err := exec.CommandContext(ctx, ffmpegPath, "-hide_banner", "-h", "encoder=libx265").CombinedOutput()
+	return err == nil && hasEncoderOption(string(out), "-dolbyvision")
+}
+
+func hasEncoderOption(help, option string) bool {
+	for _, line := range strings.Split(help, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 0 && fields[0] == option {
 			return true
 		}
 	}

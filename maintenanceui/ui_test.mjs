@@ -2572,6 +2572,41 @@ test("an extra benchmark round runs only after the evidence was shown and confir
   }
 });
 
+test("Dolby Vision removal needs its own per-file confirmation and is never sent unconfirmed", async () => {
+  for (const confirm of [false, true]) {
+    const h = harness(), calls = [];
+    h.context.record = (...args) => calls.push(args);
+    h.context.job = {id:"dv",action_name:"transcode_media",mode:"quality",status:"waiting_decision",source_path:"/media/Example.mkv",
+      dynamic_range:{class:"dolby_vision",label:"Dolby Vision profile 8.1 (HDR10 base layer)"},
+      waiting_reason:"Example.mkv is Dolby Vision profile 8.1 (HDR10 base layer).",
+      waiting_options:[{decision:"approve_dolby_vision_removal",description:"Remove Dolby Vision from this file and keep HDR10"},{decision:"cancel",description:"Keep the original untouched"}]};
+    h.run("jobControl=async(...args)=>record(...args);");
+    const labels = h.run("jobControls(job).children.map(b=>b.textContent)");
+    assert.ok(!labels.includes("Review replacements"), "never presented as a generic approval");
+    const button = h.run("jobControls(job).children.find(b=>b.textContent===\"Remove Dolby Vision · keep HDR10\")");
+    assert.ok(button);
+    button.listeners.get("click")();
+    for (let i = 0; i < 6; i++) await Promise.resolve();
+    assert.equal(h.elements.get("action-review").open, true);
+    assert.equal(calls.length, 0, "nothing is sent before the confirmation");
+    const shown = allText(h.elements.get("action-review-content"));
+    assert.match(shown, /Dolby Vision will be removed, HDR10 kept\./);
+    assert.match(shown, /Example\.mkv/);
+    assert.match(shown, /profile 8\.1/);
+    h.elements.get(confirm ? "confirm-action-review" : "dismiss-action-review").listeners.get("click")();
+    for (let i = 0; i < 12; i++) await Promise.resolve();
+    assert.deepEqual(JSON.parse(JSON.stringify(calls)), confirm ? [["dv","action_resume",{decision:"approve_dolby_vision_removal"}]] : []);
+  }
+});
+
+test("HDR sources show their dynamic range class and SDR stays unlabeled", () => {
+  const h = harness();
+  assert.equal(h.run('dynamicRangeChip({dynamic_range:{class:"sdr",label:"SDR"}})'), null);
+  assert.equal(h.run('dynamicRangeChip({})'), null);
+  assert.equal(h.run('dynamicRangeChip({dynamic_range:{class:"hdr10",label:"HDR10"}}).textContent'), "HDR10");
+  assert.equal(h.run('dynamicRangeChip({dynamic_range:{class:"dolby_vision",label:"Dolby Vision profile 5",reason:"dolby_vision_profile_5_no_compatible_base_layer"}}).title'), "Not convertible: dolby vision profile 5 no compatible base layer");
+});
+
 test("the process button says how many files it starts", () => {
   const h = harness();
   h.run('$("path").value="/media/one.mkv"; controls();');
