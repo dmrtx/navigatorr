@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jakenesler/navigatorr/transcode"
 )
 
 // newHTTPTestSetup never points selfExe at the test executable: an accidental
@@ -88,12 +90,19 @@ func TestHTTP_MalformedJSON(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for malformed JSON, got %d (%s)", rec.Code, rec.Body.String())
 	}
-	var body map[string]string
+	var body struct {
+		Error     string `json:"error"`
+		Code      string `json:"code"`
+		Retryable bool   `json:"retryable"`
+	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("error envelope json: %v", err)
 	}
-	if body["error"] == "" {
-		t.Errorf("expected error field, got %v", body)
+	if body.Error == "" {
+		t.Errorf("expected error field, got %+v", body)
+	}
+	if body.Code != transcode.WorkerErrorBadRequest || body.Retryable {
+		t.Errorf("malformed JSON must be a non-retryable bad_request, got %+v", body)
 	}
 }
 
@@ -258,12 +267,14 @@ func TestHTTP_ErrorMessagesBounded(t *testing.T) {
 	if len(rec.Body.Bytes()) > 4096 {
 		t.Errorf("error response must be bounded, got %d bytes", len(rec.Body.Bytes()))
 	}
-	var envelope map[string]string
+	var envelope struct {
+		Error string `json:"error"`
+	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
 		t.Fatalf("error envelope json: %v", err)
 	}
-	if len(envelope["error"]) > maxHTTPErrorLen {
-		t.Errorf("error field must be capped at %d chars, got %d", maxHTTPErrorLen, len(envelope["error"]))
+	if len(envelope.Error) > maxHTTPErrorLen {
+		t.Errorf("error field must be capped at %d chars, got %d", maxHTTPErrorLen, len(envelope.Error))
 	}
 
 	// Direct unit check: short messages pass through untouched.

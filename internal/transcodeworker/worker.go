@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1867,9 +1868,9 @@ func (w *Worker) Status(ctx context.Context, jobID string) (JobStatusResponse, e
 	jobDir := filepath.Join(w.cfg.StateDir, jobID)
 	jobFile := filepath.Join(jobDir, "job.json")
 
-	job, err := LoadJob(jobFile)
+	job, err := loadJobForAPI(jobFile)
 	if err != nil {
-		return JobStatusResponse{ID: jobID, Status: "failed", Error: "job not found"}, err
+		return JobStatusResponse{ID: jobID, Status: "failed", Error: jobLoadErrorMessage(err)}, err
 	}
 
 	// Re-read under lock before persisting liveness failures: the initial
@@ -1953,6 +1954,16 @@ func (w *Worker) Status(ctx context.Context, jobID string) (JobStatusResponse, e
 	}, nil
 }
 
+// jobLoadErrorMessage keeps the historical "job not found" text for a missing
+// record and names any other load failure, so a corrupt or unreadable
+// job.json never reads as an absent job.
+func jobLoadErrorMessage(err error) string {
+	if errors.Is(err, ErrJobNotFound) {
+		return "job not found"
+	}
+	return fmt.Sprintf("reading job state: %v", err)
+}
+
 // Cancel terminates a running job. Cancel on a durable queued (unspawned)
 // job marks it cancelled under the per-job lock and guarantees the scheduler
 // never spawns it (the scheduler only spawns status==queued under capLock +
@@ -1973,15 +1984,20 @@ func (w *Worker) Cancel(ctx context.Context, jobID string) (JobStatusResponse, e
 	jobDir := filepath.Join(w.cfg.StateDir, jobID)
 	jobFile := filepath.Join(jobDir, "job.json")
 
+	// An unknown ID is answered before taking the lock, which would otherwise
+	// create an empty job directory for it.
+	if _, err := os.Stat(jobFile); errors.Is(err, fs.ErrNotExist) {
+		return JobStatusResponse{ID: jobID, Status: "failed", Error: "job not found"}, fmt.Errorf("%w: %w", ErrJobNotFound, err)
+	}
 	jobLock, err := acquireJobLock(jobDir)
 	if err != nil {
-		return JobStatusResponse{ID: jobID, Status: "failed", Error: "job not found"}, err
+		return JobStatusResponse{ID: jobID, Status: "failed", Error: fmt.Sprintf("acquiring job lock: %v", err)}, err
 	}
 	defer jobLock.Unlock()
 
-	job, err := LoadJob(jobFile)
+	job, err := loadJobForAPI(jobFile)
 	if err != nil {
-		return JobStatusResponse{ID: jobID, Status: "failed", Error: "job not found"}, err
+		return JobStatusResponse{ID: jobID, Status: "failed", Error: jobLoadErrorMessage(err)}, err
 	}
 
 	switch job.Status {

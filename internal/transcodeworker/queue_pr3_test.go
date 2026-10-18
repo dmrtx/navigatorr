@@ -280,9 +280,19 @@ func TestPR3_SameKeyDifferentDigestConflict(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("HTTP conflict must be 409, got %d (%s)", rec.Code, rec.Body.String())
 	}
-	var env map[string]string
-	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil || !strings.Contains(env["error"], "idempotency_conflict") {
+	var env struct {
+		Error     string `json:"error"`
+		Code      string `json:"code"`
+		Retryable bool   `json:"retryable"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil || !strings.Contains(env.Error, "idempotency_conflict") {
 		t.Fatalf("409 must carry structured idempotency_conflict error: %s", rec.Body.String())
+	}
+	if env.Code != transcode.WorkerErrorIdempotencyConflict || env.Retryable {
+		t.Fatalf("409 must carry the non-retryable idempotency_conflict code: %s", rec.Body.String())
+	}
+	if rec.Header().Get("Retry-After") != "" {
+		t.Fatalf("a conflict must never invite a retry: Retry-After=%q", rec.Header().Get("Retry-After"))
 	}
 }
 
@@ -1207,3 +1217,194 @@ func asHTTPError(err error, target **httpclient.HTTPError) bool {
 }
 
 var _ = time.Second
+
+// TestPR3_HTTPExecutorContractAgainstRealHandler drives the real
+// httpclient.HTTPExecutor against the real worker Server.Handler() over a
+// loopback listener with bearer auth, for every endpoint the server side
+// uses. It pins the wire contract both ways: typed errors stay typed (never
+// UncertainError), the envelope codes survive the client, and each request's
+// ID reaches the worker log.
+func TestPR3_HTTPExecutorContractAgainstRealHandler(t *testing.T) {
+	const token = "contract-test-token"
+	stub := newStubSpawn()
+	w, tempDir, _ := newPR3Worker(t, 1, stub)
+	// No ffmpeg: doctor and capabilities fail deterministically and must
+	// still come back as typed, definitive answers.
+	w.ffmpegPath = filepath.Join(tempDir, "missing-ffmpeg")
+	w.ffprobePath = filepath.Join(tempDir, "missing-ffprobe")
+	srv := NewServer(w, "test-exe", "", token)
+	var logMu sync.Mutex
+	var logLines []string
+	srv.logf = func(format string, args ...any) {
+		logMu.Lock()
+		logLines = append(logLines, fmt.Sprintf(format, args...))
+		logMu.Unlock()
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	newExec := func(tok string) *httpclient.HTTPExecutor {
+		e, err := httpclient.NewHTTPExecutor(httpclient.HTTPConfig{
+			BaseURL: ts.URL, Token: tok, RequestTimeout: 5 * time.Second, SubmitTimeout: 5 * time.Second,
+			PathMappings: []transcode.PathMapping{{Local: "/media/library", Remote: tempDir}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return e
+	}
+	exec := newExec(token)
+	ctx := context.Background()
+	wantHTTPError := func(t *testing.T, op string, err error, status int, code string) *httpclient.HTTPError {
+		t.Helper()
+		var he *httpclient.HTTPError
+		if err == nil || !asHTTPError(err, &he) {
+			t.Fatalf("%s: want *HTTPError %d, got %v", op, status, err)
+		}
+		if httpclient.IsTransportUncertain(err) {
+			t.Fatalf("%s: a complete response must never be uncertain: %v", op, err)
+		}
+		if he.StatusCode != status || he.Code != code {
+			t.Fatalf("%s: got %d %q, want %d %q (%v)", op, he.StatusCode, he.Code, status, code, err)
+		}
+		if he.RequestID == "" {
+			t.Fatalf("%s: HTTPError must carry the request ID", op)
+		}
+		return he
+	}
+
+	// Liveness, readiness and activity.
+	if err := exec.Health(ctx); err != nil {
+		t.Fatalf("health: %v", err)
+	}
+	if err := exec.Ready(ctx); err != nil {
+		t.Fatalf("ready: %v", err)
+	}
+	if _, err := exec.Activity(ctx); err != nil {
+		t.Fatalf("activity: %v", err)
+	}
+	wantHTTPError(t, "ready without token", newExec("").Ready(ctx), http.StatusUnauthorized, transcode.WorkerErrorUnauthorized)
+
+	// Doctor and capabilities fail closed without ffmpeg, but definitively.
+	if err := exec.Doctor(ctx); err == nil || httpclient.IsTransportUncertain(err) {
+		t.Fatalf("doctor without ffmpeg must fail definitively, got %v", err)
+	}
+	if _, err := exec.Capabilities(ctx); err != nil {
+		wantHTTPError(t, "capabilities", err, http.StatusInternalServerError, transcode.WorkerErrorInternal)
+	} else {
+		t.Fatal("capabilities without ffmpeg must fail closed")
+	}
+
+	// Submit -> status -> logs -> cancel.
+	job, err := exec.Submit(ctx, transcode.Request{
+		ID: "job-contract-1", SourcePath: "/media/library/source.mkv", CandidatePath: "/media/library/out.mkv",
+		Profile: "hevc-vt", Plan: validExecutorPlan(t),
+	})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if job.ID != "job-contract-1" || stub.n() != 1 {
+		t.Fatalf("submit: job=%+v spawns=%d", job, stub.n())
+	}
+	again, err := exec.Submit(ctx, transcode.Request{
+		ID: "job-contract-1", SourcePath: "/media/library/source.mkv", CandidatePath: "/media/library/out.mkv",
+		Profile: "hevc-vt", Plan: validExecutorPlan(t),
+	})
+	if err != nil || again.ID != "job-contract-1" || stub.n() != 1 {
+		t.Fatalf("idempotent resubmit: job=%+v spawns=%d err=%v", again, stub.n(), err)
+	}
+	_, err = exec.Submit(ctx, transcode.Request{
+		ID: "job-contract-1", SourcePath: "/media/library/source.mkv", CandidatePath: "/media/library/other.mkv",
+		Profile: "hevc-vt", Plan: validExecutorPlan(t),
+	})
+	wantHTTPError(t, "conflicting resubmit", err, http.StatusConflict, transcode.WorkerErrorIdempotencyConflict)
+	if !httpclient.IsIdempotencyConflict(err) || httpclient.IsWorkerBusy(err) {
+		t.Fatalf("conflict misclassified: %v", err)
+	}
+
+	st, err := exec.Status(ctx, "job-contract-1")
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if st.ID != "job-contract-1" || (st.Status != transcode.StatusRunning && st.Status != transcode.StatusQueued) {
+		t.Fatalf("status: %+v", st)
+	}
+	_, err = exec.Status(ctx, "job-contract-missing")
+	wantHTTPError(t, "status missing", err, http.StatusNotFound, transcode.WorkerErrorNotFound)
+
+	_, err = exec.Logs(ctx, "job-contract-1")
+	wantHTTPError(t, "logs before output", err, http.StatusNotFound, transcode.WorkerErrorNotFound)
+	if err := os.WriteFile(filepath.Join(tempDir, "jobs", "job-contract-1", "ffmpeg.log"), []byte("frame=1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if logs, err := exec.Logs(ctx, "job-contract-1"); err != nil || !strings.Contains(fmt.Sprint(logs), "frame=1") {
+		t.Fatalf("logs: %v %v", logs, err)
+	}
+
+	// Busy is 429 worker_busy on the wire and WorkerBusy in the client.
+	_, err = exec.BenchmarkSubmit(ctx, transcode.BenchmarkRequest{
+		ID: "bench-contract-busy", SourcePath: "/media/library/source.mkv", Metric: "vmaf",
+		Samples:    []transcode.BenchmarkSampleWindow{{Index: 0, StartSeconds: 1, DurationSeconds: 5}},
+		Candidates: []transcode.BenchmarkCandidate{{ID: "c1", Quality: 65}},
+	})
+	he := wantHTTPError(t, "benchmark busy", err, http.StatusTooManyRequests, transcode.WorkerErrorBusy)
+	if !he.Retryable || he.RetryAfter != 30*time.Second || !httpclient.IsWorkerBusy(err) {
+		t.Fatalf("busy: retryable=%v retry_after=%s busy=%v", he.Retryable, he.RetryAfter, httpclient.IsWorkerBusy(err))
+	}
+
+	if err := exec.Cancel(ctx, "job-contract-1"); err != nil {
+		t.Fatalf("cancel running: %v", err)
+	}
+	if st, err := exec.Status(ctx, "job-contract-1"); err != nil || st.Status != transcode.StatusCancelled {
+		t.Fatalf("status after cancel: %+v %v", st, err)
+	}
+	wantHTTPError(t, "cancel missing", exec.Cancel(ctx, "job-contract-missing"), http.StatusNotFound, transcode.WorkerErrorNotFound)
+	pr5SeedJob(t, tempDir, &JobRecord{ID: "job-contract-done", Status: "completed", Source: filepath.Join(tempDir, "source.mkv"), Candidate: filepath.Join(tempDir, "done.mkv"), ExecutionSpecDigest: pr5Digest, FinishedAt: time.Now().UTC()})
+	if err := exec.Cancel(ctx, "job-contract-done"); err != nil {
+		t.Fatalf("cancel on a completed job is a definitive no-op, got %v", err)
+	}
+
+	// Benchmark status and cancel against a persisted record.
+	if err := SaveBenchmarkAtomic(filepath.Join(tempDir, "jobs", "bench-contract-1", "benchmark.json"), &BenchmarkRecord{
+		ProtocolVersion: transcode.WorkerProtocolVersion, ID: "bench-contract-1", Status: "completed",
+		Source: filepath.Join(tempDir, "source.mkv"), Metric: "vmaf", Progress: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	bst, err := exec.BenchmarkStatus(ctx, "bench-contract-1")
+	if err != nil || bst.ID != "bench-contract-1" || bst.Status != "completed" {
+		t.Fatalf("benchmark status: %+v %v", bst, err)
+	}
+	_, err = exec.BenchmarkStatus(ctx, "bench-contract-missing")
+	wantHTTPError(t, "benchmark status missing", err, http.StatusNotFound, transcode.WorkerErrorNotFound)
+	if err := exec.BenchmarkCancel(ctx, "bench-contract-1"); err != nil {
+		t.Fatalf("benchmark cancel: %v", err)
+	}
+	wantHTTPError(t, "benchmark cancel missing", exec.BenchmarkCancel(ctx, "bench-contract-missing"), http.StatusNotFound, transcode.WorkerErrorNotFound)
+
+	// Every job-scoped request is correlated in the worker log; the token
+	// never is.
+	logMu.Lock()
+	defer logMu.Unlock()
+	joined := strings.Join(logLines, "\n")
+	if strings.Contains(joined, token) {
+		t.Fatalf("worker log leaked the bearer token:\n%s", joined)
+	}
+	for _, want := range []string{
+		`method=POST path="/v1/jobs" status=201`,
+		`path="/v1/jobs/job-contract-1/cancel" status=200`,
+		`status=429`,
+		`status=401`,
+		`job_id=job-contract-1`,
+		`job_id=bench-contract-busy`,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("worker log missing %q:\n%s", want, joined)
+		}
+	}
+	for _, line := range logLines {
+		if !strings.Contains(line, "request_id=") || strings.Contains(line, "request_id= ") {
+			t.Errorf("log line without request ID: %s", line)
+		}
+	}
+}

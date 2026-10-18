@@ -2,10 +2,13 @@ package transcodeworker
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -140,13 +143,16 @@ type Server struct {
 	token      string
 	selfExe    string
 	configPath string
+	// logf receives one line per request (see withRequestLog). Tests
+	// replace it; production uses the standard logger.
+	logf func(format string, args ...any)
 }
 
 // NewServer builds a versioned API server around an existing Worker.
 // token may be empty only for loopback binds (enforced by ValidateServeAddr
 // at startup; Handler itself simply skips auth when token is empty).
 func NewServer(worker *Worker, selfExe, configPath, token string) *Server {
-	return &Server{worker: worker, selfExe: selfExe, configPath: configPath, token: token}
+	return &Server{worker: worker, selfExe: selfExe, configPath: configPath, token: token, logf: log.Printf}
 }
 
 // StartScheduler starts the daemon-owned autonomous queue drain bound to ctx
@@ -180,7 +186,83 @@ func (s *Server) Handler() http.Handler {
 	// the mux itself, so authenticated traversal fails closed with 400 and
 	// http.ServeMux path cleaning can never 301/307-redirect
 	// (e.g. /v1/jobs/../evil -> /v1/evil) before validation.
-	return s.withAuth(rejectTraversal(mux))
+	//
+	// Request logging wraps everything, so rejected and unauthenticated
+	// requests are logged too.
+	return s.withRequestLog(s.withAuth(rejectTraversal(mux)))
+}
+
+// validCorrelationID bounds the request IDs the worker accepts from callers
+// and echoes into its log.
+var validCorrelationID = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
+// maxLoggedPathLen bounds the request path written to the log.
+const maxLoggedPathLen = 256
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	if r.status == 0 {
+		r.status = code
+	}
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *statusRecorder) Write(b []byte) (int, error) {
+	if r.status == 0 {
+		r.status = http.StatusOK
+	}
+	return r.ResponseWriter.Write(b)
+}
+
+// withRequestLog logs method, path, status, duration, request ID and job ID
+// for each request, and echoes the request ID in the response. A missing or
+// malformed X-Request-ID is replaced by a worker-generated one. Headers and
+// query strings are never logged, so the bearer token cannot leak here.
+// Successful liveness and activity polls are not logged: they arrive every
+// few seconds and would drown out the requests worth reading.
+func (s *Server) withRequestLog(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		requestID := r.Header.Get(transcode.RequestIDHeader)
+		if !validCorrelationID.MatchString(requestID) {
+			requestID = "w-" + newWorkerRequestID()
+		}
+		w.Header().Set(transcode.RequestIDHeader, requestID)
+		rec := &statusRecorder{ResponseWriter: w}
+		next.ServeHTTP(rec, r)
+		status := rec.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		if s.logf == nil {
+			return
+		}
+		if r.Method == http.MethodGet && status < 400 && (r.URL.Path == "/v1/health" || r.URL.Path == "/v1/activity") {
+			return
+		}
+		path := r.URL.Path
+		if len(path) > maxLoggedPathLen {
+			path = path[:maxLoggedPathLen] + "..."
+		}
+		jobID := r.Header.Get(transcode.JobIDHeader)
+		if len(jobID) > MaxTranscodeJobIDLength || !validTranscodeJobIDRegex.MatchString(jobID) {
+			jobID = "-"
+		}
+		s.logf("worker http request_id=%s method=%s path=%q status=%d duration=%s job_id=%s",
+			requestID, r.Method, path, status, time.Since(start).Round(time.Millisecond), jobID)
+	})
+}
+
+func newWorkerRequestID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return hex.EncodeToString(b[:])
 }
 
 // rejectTraversal fails closed on raw "." / ".." / empty segments and on
@@ -253,8 +335,76 @@ func boundHTTPErrorMessage(msg string) string {
 	return msg
 }
 
+// workerBusyRetryAfter is the Retry-After hint sent with worker_busy. It
+// matches the order of magnitude of the scheduler sweep, after which a slot
+// may have freed.
+const workerBusyRetryAfter = 30 * time.Second
+
+// defaultErrorCode derives the envelope code for statuses that have only one
+// meaning in this API. 409 and 429 are always written with an explicit code.
+func defaultErrorCode(status int) string {
+	switch status {
+	case http.StatusBadRequest, http.StatusRequestEntityTooLarge:
+		return transcode.WorkerErrorBadRequest
+	case http.StatusUnauthorized:
+		return transcode.WorkerErrorUnauthorized
+	case http.StatusNotFound:
+		return transcode.WorkerErrorNotFound
+	case http.StatusMethodNotAllowed:
+		return transcode.WorkerErrorMethodNotAllowed
+	case http.StatusConflict:
+		return transcode.WorkerErrorIdempotencyConflict
+	case http.StatusTooManyRequests:
+		return transcode.WorkerErrorBusy
+	case http.StatusServiceUnavailable:
+		return transcode.WorkerErrorUnavailable
+	}
+	if status >= 500 {
+		return transcode.WorkerErrorInternal
+	}
+	return transcode.WorkerErrorBadRequest
+}
+
+// errorCodeRetryable reports whether repeating the same request later may
+// succeed. Every 5xx stays retryable so Navigatorr keeps polling an existing
+// identity exactly as it did when it classified on status alone.
+func errorCodeRetryable(code string) bool {
+	switch code {
+	case transcode.WorkerErrorBusy, transcode.WorkerErrorInternal, transcode.WorkerErrorUnavailable:
+		return true
+	}
+	return false
+}
+
 func writeHTTPError(w http.ResponseWriter, code int, msg string) {
-	writeHTTPJSON(w, code, map[string]string{"error": boundHTTPErrorMessage(msg)})
+	writeHTTPErrorCode(w, code, defaultErrorCode(code), msg)
+}
+
+func writeHTTPErrorCode(w http.ResponseWriter, status int, code, msg string) {
+	writeHTTPCodedJSON(w, status, code, map[string]string{"error": boundHTTPErrorMessage(msg)})
+}
+
+// writeHTTPCodedJSON writes body with the additive "code" and "retryable"
+// envelope fields merged in. body keeps its own shape (submit, status and
+// benchmark error bodies are structured), so older clients that read only
+// "error" or the struct fields see exactly what they saw before.
+func writeHTTPCodedJSON(w http.ResponseWriter, status int, code string, body any) {
+	fields := map[string]json.RawMessage{}
+	if raw, err := json.Marshal(body); err == nil {
+		_ = json.Unmarshal(raw, &fields)
+	}
+	if raw, ok := fields["error"]; ok {
+		var msg string
+		if json.Unmarshal(raw, &msg) == nil {
+			fields["error"], _ = json.Marshal(boundHTTPErrorMessage(msg))
+		}
+	}
+	fields["code"], _ = json.Marshal(code)
+	fields["retryable"], _ = json.Marshal(errorCodeRetryable(code))
+	if code == transcode.WorkerErrorBusy {
+		w.Header().Set("Retry-After", strconv.Itoa(int(workerBusyRetryAfter/time.Second)))
+	}
+	writeHTTPJSON(w, status, fields)
 }
 
 // handleHealth is a liveness probe. It never touches ffmpeg, disks, or jobs.
@@ -291,18 +441,18 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 		maxParallel = s.worker.cfg.MaxParallelJobs
 	}
 	if strings.TrimSpace(stateDir) == "" {
-		writeHTTPJSON(w, http.StatusServiceUnavailable, map[string]any{"ready": false, "error": "state_dir is not configured"})
+		writeHTTPCodedJSON(w, http.StatusServiceUnavailable, transcode.WorkerErrorUnavailable, map[string]any{"ready": false, "error": "state_dir is not configured"})
 		return
 	}
 	if err := os.MkdirAll(stateDir, 0755); err != nil {
-		writeHTTPJSON(w, http.StatusServiceUnavailable, map[string]any{"ready": false, "error": fmt.Sprintf("state_dir not writable: %v", err)})
+		writeHTTPCodedJSON(w, http.StatusServiceUnavailable, transcode.WorkerErrorUnavailable, map[string]any{"ready": false, "error": fmt.Sprintf("state_dir not writable: %v", err)})
 		return
 	}
 	// Bounded writability probe: create, write a few bytes, close, remove.
 	// Any failure means the directory is not genuinely writable.
 	probe, err := os.CreateTemp(stateDir, ".ready-*.tmp")
 	if err != nil {
-		writeHTTPJSON(w, http.StatusServiceUnavailable, map[string]any{"ready": false, "error": fmt.Sprintf("state_dir not writable: %v", err)})
+		writeHTTPCodedJSON(w, http.StatusServiceUnavailable, transcode.WorkerErrorUnavailable, map[string]any{"ready": false, "error": fmt.Sprintf("state_dir not writable: %v", err)})
 		return
 	}
 	probeName := probe.Name()
@@ -318,7 +468,7 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 		if detail == nil {
 			detail = removeErr
 		}
-		writeHTTPJSON(w, http.StatusServiceUnavailable, map[string]any{"ready": false, "error": fmt.Sprintf("state_dir not writable: %v", detail)})
+		writeHTTPCodedJSON(w, http.StatusServiceUnavailable, transcode.WorkerErrorUnavailable, map[string]any{"ready": false, "error": fmt.Sprintf("state_dir not writable: %v", detail)})
 		return
 	}
 	total, used, _ := s.worker.slotSnapshot("")
@@ -359,7 +509,8 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := s.worker.Submit(r.Context(), req, s.selfExe, s.configPath)
 	if err != nil {
-		writeHTTPJSON(w, classifySubmitError(err), resp)
+		status, code := classifySubmitError(err)
+		writeHTTPCodedJSON(w, status, code, resp)
 		return
 	}
 	code := http.StatusCreated
@@ -426,22 +577,30 @@ func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && !isCancel:
 		st, err := s.worker.Status(r.Context(), id)
 		if err != nil {
+			// The ID was validated above, so the only failures left are a
+			// missing record (404) and state the worker cannot read (500).
+			status := http.StatusInternalServerError
 			if isNotFoundError(err) {
-				writeHTTPJSON(w, http.StatusNotFound, st)
-				return
+				status = http.StatusNotFound
 			}
-			writeHTTPJSON(w, http.StatusBadRequest, st)
+			writeHTTPCodedJSON(w, status, defaultErrorCode(status), st)
 			return
 		}
 		writeHTTPJSON(w, http.StatusOK, st)
 	case r.Method == http.MethodPost && isCancel:
 		res, err := s.worker.Cancel(r.Context(), id)
 		if err != nil {
+			status := http.StatusInternalServerError
 			if isNotFoundError(err) {
-				writeHTTPJSON(w, http.StatusNotFound, res)
-				return
+				status = http.StatusNotFound
 			}
-			writeHTTPJSON(w, http.StatusBadRequest, res)
+			writeHTTPCodedJSON(w, status, defaultErrorCode(status), res)
+			return
+		}
+		if res.Status == "completed" || res.Status == "failed" {
+			// Still 200 so older Navigatorr builds keep their reconcile
+			// path; the code tells newer ones the answer is definitive.
+			writeHTTPCodedJSON(w, http.StatusOK, transcode.WorkerErrorAlreadyTerminal, res)
 			return
 		}
 		writeHTTPJSON(w, http.StatusOK, res)
@@ -502,7 +661,7 @@ func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
 	}
 	res := s.worker.Doctor(r.Context())
 	if !res.OK {
-		writeHTTPJSON(w, http.StatusServiceUnavailable, res)
+		writeHTTPCodedJSON(w, http.StatusServiceUnavailable, transcode.WorkerErrorUnavailable, res)
 		return
 	}
 	writeHTTPJSON(w, http.StatusOK, res)
@@ -559,7 +718,8 @@ func (s *Server) handleBenchmarks(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := s.worker.BenchmarkSubmit(r.Context(), req, s.selfExe, s.configPath)
 	if err != nil {
-		writeHTTPJSON(w, classifyBenchmarkSubmitError(err), resp)
+		status, code := classifyBenchmarkSubmitError(err)
+		writeHTTPCodedJSON(w, status, code, resp)
 		return
 	}
 	code := http.StatusCreated
@@ -651,22 +811,22 @@ func (s *Server) handleBenchmarkByID(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && !isCancel:
 		st, err := s.worker.BenchmarkStatus(r.Context(), id)
 		if err != nil {
+			status := http.StatusInternalServerError
 			if isBenchmarkNotFoundError(err) {
-				writeHTTPJSON(w, http.StatusNotFound, st)
-				return
+				status = http.StatusNotFound
 			}
-			writeHTTPJSON(w, http.StatusBadRequest, st)
+			writeHTTPCodedJSON(w, status, defaultErrorCode(status), st)
 			return
 		}
 		writeHTTPJSON(w, http.StatusOK, st)
 	case r.Method == http.MethodPost && isCancel:
 		res, err := s.worker.BenchmarkCancel(r.Context(), id)
 		if err != nil {
+			status := http.StatusInternalServerError
 			if isBenchmarkNotFoundError(err) {
-				writeHTTPJSON(w, http.StatusNotFound, res)
-				return
+				status = http.StatusNotFound
 			}
-			writeHTTPJSON(w, http.StatusBadRequest, res)
+			writeHTTPCodedJSON(w, status, defaultErrorCode(status), res)
 			return
 		}
 		writeHTTPJSON(w, http.StatusOK, res)
@@ -675,24 +835,25 @@ func (s *Server) handleBenchmarkByID(w http.ResponseWriter, r *http.Request) {
 			writeHTTPError(w, http.StatusMethodNotAllowed, "use POST")
 			return
 		}
-		writeHTTPJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "use GET"})
+		writeHTTPError(w, http.StatusMethodNotAllowed, "use GET")
 	}
 }
 
-// classifySubmitError maps Worker.Submit failures to HTTP codes while reusing
-// Submit/Status/Cancel semantics. PR3: durable queue acceptance never returns
-// "worker busy" for transcodes (busy mapping retained only for benchmark
-// compat/legacy workers); strong idempotency conflicts are a definitive 409.
-func classifySubmitError(err error) int {
+// classifySubmitError maps Worker.Submit failures to an HTTP status and
+// envelope code. PR3: durable queue acceptance never returns "worker busy" for
+// transcodes (the busy mapping is kept for parity with benchmarks); strong
+// idempotency conflicts are a definitive 409 and busy is a retryable 429, so
+// the two never share a status.
+func classifySubmitError(err error) (int, string) {
 	if IsIdempotencyConflict(err) {
-		return http.StatusConflict
+		return http.StatusConflict, transcode.WorkerErrorIdempotencyConflict
 	}
 	msg := strings.ToLower(err.Error())
 	switch {
 	case strings.Contains(msg, "idempotency_conflict"):
-		return http.StatusConflict
+		return http.StatusConflict, transcode.WorkerErrorIdempotencyConflict
 	case strings.Contains(msg, "worker busy") || strings.Contains(msg, "max parallel jobs"):
-		return http.StatusConflict
+		return http.StatusTooManyRequests, transcode.WorkerErrorBusy
 	case strings.Contains(msg, "acquiring capacity lock"),
 		strings.Contains(msg, "spawning worker process"),
 		strings.Contains(msg, "persisting transcode process identity"),
@@ -700,17 +861,17 @@ func classifySubmitError(err error) int {
 		strings.Contains(msg, "creating job directory"),
 		strings.Contains(msg, "creating candidate directory"),
 		strings.Contains(msg, "checking active jobs"):
-		return http.StatusInternalServerError
+		return http.StatusInternalServerError, transcode.WorkerErrorInternal
 	default:
-		return http.StatusBadRequest
+		return http.StatusBadRequest, transcode.WorkerErrorBadRequest
 	}
 }
 
+// isNotFoundError is true only for a missing job.json. Matching on message
+// text turned permission and I/O errors into 404s, which Navigatorr treats as
+// "the worker never had this job" and answers by resubmitting.
 func isNotFoundError(err error) bool {
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "job not found") ||
-		strings.Contains(msg, "reading job file") ||
-		strings.Contains(msg, "no such file")
+	return errors.Is(err, ErrJobNotFound)
 }
 
 // validateBenchmarkJobIDHTTP reuses the canonical benchmark namespace
@@ -720,13 +881,13 @@ func validateBenchmarkJobIDHTTP(id string) error {
 }
 
 // classifyBenchmarkSubmitError mirrors classifySubmitError for benchmarks:
-// busy stays a temporary 409 (retryable); spawn/persist/lock failures are
+// busy is a retryable 429 with Retry-After; spawn/persist/lock failures are
 // 500; validation/plan/path/digest collisions are 400.
-func classifyBenchmarkSubmitError(err error) int {
+func classifyBenchmarkSubmitError(err error) (int, string) {
 	msg := strings.ToLower(err.Error())
 	switch {
 	case strings.Contains(msg, "worker busy") || strings.Contains(msg, "max parallel jobs"):
-		return http.StatusConflict
+		return http.StatusTooManyRequests, transcode.WorkerErrorBusy
 	case strings.Contains(msg, "acquiring capacity lock"),
 		strings.Contains(msg, "acquiring job lock"),
 		strings.Contains(msg, "spawning benchmark process"),
@@ -735,17 +896,14 @@ func classifyBenchmarkSubmitError(err error) int {
 		strings.Contains(msg, "creating samples workspace"),
 		strings.Contains(msg, "generating run token"),
 		strings.Contains(msg, "checking active jobs"):
-		return http.StatusInternalServerError
+		return http.StatusInternalServerError, transcode.WorkerErrorInternal
 	default:
-		return http.StatusBadRequest
+		return http.StatusBadRequest, transcode.WorkerErrorBadRequest
 	}
 }
 
 func isBenchmarkNotFoundError(err error) bool {
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "benchmark job not found") ||
-		strings.Contains(msg, "reading benchmark file") ||
-		strings.Contains(msg, "no such file")
+	return errors.Is(err, ErrBenchmarkNotFound)
 }
 
 // ServeConfig carries the resolved daemon startup settings.

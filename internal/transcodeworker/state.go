@@ -3,7 +3,9 @@ package transcodeworker
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"os"
 	"os/exec"
@@ -76,6 +78,21 @@ type JobRecord struct {
 	// encode retry or invalidates the already completed encode checkpoint.
 	FinalizationRetryCount int       `json:"finalization_retry_count,omitempty"`
 	NextFinalizationAt     time.Time `json:"next_finalization_at,omitzero"`
+}
+
+// ErrJobNotFound reports that a job has no job.json. Only fs.ErrNotExist maps
+// to it: a permission, I/O or decode failure stays an ordinary error, so the
+// API answers 500 instead of a 404 that would send Navigatorr's reconciler
+// down its resubmit path while the job may still exist.
+var ErrJobNotFound = errors.New("job not found")
+
+// loadJobForAPI loads job.json and marks a missing file with ErrJobNotFound.
+func loadJobForAPI(path string) (*JobRecord, error) {
+	job, err := LoadJob(path)
+	if err != nil && errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("%w: %w", ErrJobNotFound, err)
+	}
+	return job, err
 }
 
 // LoadJob loads a JobRecord from job.json.
