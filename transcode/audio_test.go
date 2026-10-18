@@ -49,8 +49,11 @@ func TestCompactLosslessAudioPolicy(t *testing.T) {
 		{"dts", "DTS", 6, "5.1(side)", "copy", 0}, {"dts", "DTS-HD HRA", 6, "5.1", "copy", 0},
 		{"dts", "", 6, "5.1", "copy", 0}, {"dts", "DTS-ES", 7, "6.1(back)", "copy", 0},
 		{"ac3", "", 6, "5.1", "copy", 0}, {"eac3", "", 6, "5.1", "copy", 0}, {"aac", "LC", 2, "stereo", "copy", 0},
-		// Object audio keeps its metadata; layouts AAC would remap are copied.
-		{"truehd", "Dolby TrueHD + Dolby Atmos", 8, "7.1", "copy", 0}, {"dts", "DTS-HD MA + DTS:X", 8, "7.1", "copy", 0},
+		// Lossless object audio converts on its channel bed; lossy object
+		// audio (E-AC-3 JOC) and layouts AAC would remap are copied.
+		{"truehd", "Dolby TrueHD + Dolby Atmos", 8, "7.1", "aac", 512}, {"dts", "DTS-HD MA + DTS:X", 8, "7.1", "aac", 512},
+		{"truehd", "Dolby TrueHD + Dolby Atmos", 6, "5.1", "aac", 384}, {"eac3", "Dolby Digital Plus + Dolby Atmos", 8, "7.1", "copy", 0},
+		{"truehd", "Dolby TrueHD + Dolby Atmos", 7, "6.1", "copy", 0},
 		{"dts", "DTS-HD MA", 7, "6.1", "copy", 0}, {"truehd", "", 16, "", "copy", 0},
 	} {
 		target, kbps := AudioTarget(AudioModeCompactLossless, AudioTrack{Codec: tc.codec, Profile: tc.profile, Channels: tc.channels, Layout: tc.layout})
@@ -87,24 +90,34 @@ func TestNative10BitRequiresExecutableQualityProof(t *testing.T) {
 	}
 }
 
-// A mux or an older ffprobe may report TrueHD Atmos as plain TrueHD or DTS:X
-// as DTS-HD MA; a title or handler naming object audio keeps it copied.
-func TestCompactLosslessKeepsObjectAudioNamedInText(t *testing.T) {
+// Size mode converts lossless object audio like any lossless track, whether
+// the profile, title or handler names it; lossy object audio stays copied.
+// Compact mode is unchanged.
+func TestCompactLosslessConvertsLosslessObjectAudio(t *testing.T) {
 	for _, tc := range []struct {
 		track  AudioTrack
 		target string
 	}{
-		{AudioTrack{Codec: "truehd", Title: "TrueHD Atmos 7.1"}, "copy"},
-		{AudioTrack{Codec: "truehd", Handler: "Dolby Atmos"}, "copy"},
-		{AudioTrack{Codec: "dts", Profile: "DTS-HD MA", Title: "DTS:X 7.1"}, "copy"},
-		{AudioTrack{Codec: "dts", Profile: "DTS-HD MA", Title: "English DTS-X"}, "copy"},
-		{AudioTrack{Codec: "dts", Profile: "DTS-HD MA", Handler: "DTS X"}, "copy"},
+		{AudioTrack{Codec: "truehd", Title: "TrueHD Atmos 7.1"}, "aac"},
+		{AudioTrack{Codec: "truehd", Handler: "Dolby Atmos"}, "aac"},
+		{AudioTrack{Codec: "dts", Profile: "DTS-HD MA", Title: "DTS:X 7.1"}, "aac"},
+		{AudioTrack{Codec: "dts", Profile: "DTS-HD MA", Title: "English DTS-X"}, "aac"},
+		{AudioTrack{Codec: "dts", Profile: "DTS-HD MA", Handler: "DTS X"}, "aac"},
 		{AudioTrack{Codec: "truehd", Title: "Atmosphere (TrueHD 7.1)"}, "aac"},
-		{AudioTrack{Codec: "dts", Profile: "DTS-HD MA", Title: "DTS-HD MA 7.1", Handler: "SoundHandler"}, "aac"},
+		{AudioTrack{Codec: "eac3", Title: "DD+ Atmos 7.1"}, "copy"},
+		{AudioTrack{Codec: "eac3", Profile: "Dolby Digital Plus + Dolby Atmos"}, "copy"},
+		{AudioTrack{Codec: "dts", Title: "DTS:X 7.1"}, "copy"},
 	} {
 		tc.track.Channels, tc.track.Layout = 8, "7.1"
 		if target, _ := AudioTarget(AudioModeCompactLossless, tc.track); target != tc.target {
 			t.Errorf("%+v -> %s, want %s", tc.track, target, tc.target)
+		}
+	}
+	for _, tc := range []AudioTrack{{Codec: "truehd", Profile: "Dolby TrueHD + Dolby Atmos"}, {Codec: "eac3", Profile: "Dolby Digital Plus + Dolby Atmos"}} {
+		tc.Channels, tc.Layout = 8, "7.1"
+		want, _ := AudioTarget("compact", AudioTrack{Codec: tc.Codec, Channels: 8, Layout: "7.1"})
+		if got, _ := AudioTarget("compact", tc); got != want {
+			t.Errorf("compact changed for %+v: %s, want %s", tc, got, want)
 		}
 	}
 	if got := AudioHandler(map[string]string{"HANDLER_NAME": " Dolby Atmos "}); got != "Dolby Atmos" {

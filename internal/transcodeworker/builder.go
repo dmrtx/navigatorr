@@ -438,11 +438,6 @@ func BuildFFmpegArgsWithCoverArt(execPlan *ExecutionPlan, sourcePath, candidateP
 			if stream.TargetCodec != "aac" || stream.BitrateKbps < 1 {
 				return nil, fmt.Errorf("invalid compact audio action")
 			}
-			// Size mode never flattens object audio, so it never retitles an
-			// Atmos or DTS:X track to AAC either (fail closed).
-			if execPlan.Plan.AudioMode == transcode.AudioModeCompactLossless && transcode.ObjectAudioText(stream.Title) {
-				return nil, fmt.Errorf("compact_lossless would convert object audio track %d (fail closed)", stream.TypeIndex)
-			}
 			encoder := "aac"
 			if execPlan.Plan.AudioMode == "he_aac" {
 				encoder = "aac_at"
@@ -453,6 +448,11 @@ func BuildFFmpegArgsWithCoverArt(execPlan *ExecutionPlan, sourcePath, candidateP
 			args = append(args, clearStatisticsTags("a", stream.TypeIndex)...)
 			if title, ok := convertedAudioTitle(stream.Title, stream.Layout, stream.Channels); ok {
 				args = append(args, fmt.Sprintf("-metadata:s:a:%d", stream.TypeIndex), "title="+title)
+			}
+			// Size mode flattens lossless Atmos and DTS:X to their bed; a
+			// handler still naming them would describe the old track.
+			if execPlan.Plan.AudioMode == transcode.AudioModeCompactLossless && transcode.ObjectAudioText(stream.Handler) {
+				args = append(args, fmt.Sprintf("-metadata:s:a:%d", stream.TypeIndex), "handler_name=")
 			}
 		}
 	}

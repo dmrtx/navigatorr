@@ -60,12 +60,16 @@ type ModeSizePolicy struct {
 	// floor still compact its lossless audio, with the video stream-copied
 	// and proven bit-identical. The same minimum savings applies.
 	AudioOnlyFallback bool `json:"audio_only_fallback,omitempty"`
+	// LosslessObjectAudioToAAC converts lossless Atmos and DTS:X (TrueHD,
+	// DTS-HD MA) to AAC on their channel bed, like any lossless track; lossy
+	// object audio (E-AC-3 JOC) is still copied.
+	LosslessObjectAudioToAAC bool `json:"lossless_object_audio_to_aac"`
 }
 
 // sizeModeV3Policy is the frozen size v3 addition. The ladder is x265 only:
 // medium CRF 22-30 first, then one slow family chosen from what failed.
 func sizeModeV3Policy() *ModeSizePolicy {
-	return &ModeSizePolicy{EightBitMain10: true, FallbackQualityValues: []int{16, 18, 20}, FallbackSavingsValues: []int{24, 27, 30}, FinalWindowSeconds: 10, FinalWindowEverySeconds: 600, FinalWindowsMinimum: 5, FinalWindowsMaximum: 12, AudioOnlyFallback: true}
+	return &ModeSizePolicy{EightBitMain10: true, FallbackQualityValues: []int{16, 18, 20}, FallbackSavingsValues: []int{24, 27, 30}, FinalWindowSeconds: 10, FinalWindowEverySeconds: 600, FinalWindowsMinimum: 5, FinalWindowsMaximum: 12, AudioOnlyFallback: true, LosslessObjectAudioToAAC: true}
 }
 
 // ModeCompactPolicy freezes the output shape of compact mode: SDR BT.709 no

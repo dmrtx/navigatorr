@@ -2792,6 +2792,14 @@ test("clean podcast opens, lists podcasts and closes after starting", async () =
   assert.deepEqual(calls.at(-1), ["open", "podcast-job"]);
 });
 
+test("size goal discloses that lossless Atmos and DTS:X become AAC", () => {
+  const radio = markup.match(/<label><input type="radio" name="processing-mode" value="size" \/>[\s\S]*?<\/label>/)?.[0] || "";
+  assert.match(radio, /including lossless Atmos and DTS:X, which lose their object and height channels/);
+  assert.match(radio, /Atmos on E-AC-3 included, are copied/);
+  assert.doesNotMatch(radio, /Atmos and DTS:X tracks are copied/);
+  assert.match(source, /lossless Atmos\/DTS:X lose object and height channels; lossy tracks \(E-AC-3 Atmos included\) copied/);
+});
+
 test("compact goal says in plain language what it drops and still needs approval", () => {
   const radio = markup.match(/<label><input type="radio" name="processing-mode" value="compact" \/>[\s\S]*?<\/label>/)?.[0] || "";
   assert.match(radio, /Make it much smaller · SDR 1080p/);

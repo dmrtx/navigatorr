@@ -295,7 +295,8 @@ func TestCompactAudioMultiTrackPairing(t *testing.T) {
 			{Index: 3, Kind: "audio", Codec: "eac3", Channels: 6, Layout: "", Language: "spa"},
 			{Index: 4, Kind: "audio", Codec: "truehd", Channels: 8, Layout: "7.1", Language: "fra"},
 			{Index: 5, Kind: "audio", Codec: "truehd", Profile: "Dolby TrueHD + Dolby Atmos", Channels: 8, Layout: "7.1", Language: "ita"},
-		}, []string{"aac", "copy", "copy", "aac", "copy"}, []int{192, 0, 0, 512, 0}},
+			{Index: 6, Kind: "audio", Codec: "eac3", Profile: "Dolby Digital Plus + Dolby Atmos", Channels: 8, Layout: "7.1", Language: "por"},
+		}, []string{"aac", "copy", "copy", "aac", "aac", "copy"}, []int{192, 0, 0, 512, 512, 0}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			plan := sizeV3TestPlan(true)

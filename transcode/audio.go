@@ -6,7 +6,10 @@ import (
 )
 
 // AudioModeCompactLossless is size mode's audio policy: like compact, but only
-// lossless tracks are converted. Lossy tracks, DTS core included, are copied.
+// lossless tracks are converted. Lossy tracks, DTS core and E-AC-3 JOC
+// (Atmos) included, are copied. Lossless object audio (TrueHD Atmos,
+// DTS-HD MA + DTS:X) is converted too: AAC keeps its channel bed and loses
+// the object and height metadata.
 const AudioModeCompactLossless = "compact_lossless"
 
 // AudioTrack is what the audio policy reads from a source track. Title and
@@ -43,13 +46,12 @@ func DetailedAudioTrack(codec, profile, title string, tags map[string]string, ch
 // reported layout AAC cannot carry unchanged. Efficient lossy codecs (E-AC-3
 // JOC included, so Atmos survives on them), >7.1 tracks and reported layouts
 // AAC cannot carry unchanged are copied. DTS/lossless tracks become AAC (lossy).
-// compact_lossless needs the profile to tell DTS-HD MA from DTS core, and
-// keeps object audio (Atmos, DTS:X) named by the profile, title or handler.
+// compact_lossless needs the profile to tell DTS-HD MA from DTS core.
 func AudioTarget(mode string, t AudioTrack) (string, int) {
 	codec := strings.ToLower(strings.TrimSpace(t.Codec))
 	channels, layout := t.Channels, t.Layout
 	if mode == AudioModeCompactLossless {
-		if !losslessAudio(codec, t.Profile) || ObjectAudio(t) {
+		if !losslessAudio(codec, t.Profile) {
 			return "copy", 0
 		}
 		mode = "compact"
@@ -98,9 +100,8 @@ func losslessAudio(codec, profile string) bool {
 }
 
 // ObjectAudio reports Dolby Atmos or DTS:X object metadata, which AAC cannot
-// carry, so size mode copies those tracks rather than flattening them. A mux
-// or an older ffprobe may report TrueHD Atmos as plain TrueHD, or DTS:X as
-// DTS-HD MA, so a title or handler naming them counts too (fail safe).
+// carry. A mux or an older ffprobe may report TrueHD Atmos as plain TrueHD,
+// or DTS:X as DTS-HD MA, so a title or handler naming them counts too.
 func ObjectAudio(t AudioTrack) bool {
 	return ObjectAudioText(t.Profile) || ObjectAudioText(t.Title) || ObjectAudioText(t.Handler)
 }

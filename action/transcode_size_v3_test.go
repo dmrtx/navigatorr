@@ -30,6 +30,16 @@ func TestSizeModePolicyV3Snapshot(t *testing.T) {
 	if s := p.Size; s.FinalWindowSeconds != 10 || s.FinalWindowEverySeconds != 600 || s.FinalWindowsMinimum != 5 || s.FinalWindowsMaximum != 12 {
 		t.Fatalf("final windows %+v", s)
 	}
+	if !p.Size.LosslessObjectAudioToAAC {
+		t.Fatalf("size v3 must freeze lossless object audio to AAC: %+v", p.Size)
+	}
+	// Pinned: any change to what v3 freezes must change this digest, so an
+	// operation frozen under an earlier v3 snapshot never runs a new rule.
+	// The previous v3 snapshot copied lossless Atmos/DTS:X (digest
+	// sha256:0b92adbc...0177f) and was never deployed.
+	if p.Digest != "sha256:c7a085119dcbdfca077be0f37cb27f7aff8158afc038a32a1b5061af63a26ca3" {
+		t.Fatalf("size v3 snapshot digest changed: %s", p.Digest)
+	}
 	// The quality floor is v2's, unchanged: VMAF mean 88, p5 84, worst 5 s
 	// window 85, full-reference CAMBI mean 6 / peak 16, sampled final check.
 	floor, _ := json.Marshal(automaticBatchSearchProfile(false).Optimization.Quality)

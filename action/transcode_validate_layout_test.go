@@ -78,10 +78,11 @@ func TestDetailedValidationMultiTrackAudio(t *testing.T) {
 		{"size two DTS-HD MA and core", transcode.AudioModeCompactLossless, sizeSrc, []track{{"aac", "", "5.1", "jpn", 6}, {"aac", "", "5.1", "eng", 6}, {"dts", "", "5.1(side)", "kor", 6}}, StepCompleted, "", nil},
 		{"size swapped languages", transcode.AudioModeCompactLossless, sizeSrc, []track{{"aac", "", "5.1", "eng", 6}, {"aac", "", "5.1", "jpn", 6}, {"dts", "", "5.1(side)", "kor", 6}}, StepWaitingDecision, "Audio language mismatch at stream 0", nil},
 		{"size converted DTS core", transcode.AudioModeCompactLossless, sizeSrc, []track{{"aac", "", "5.1", "jpn", 6}, {"aac", "", "5.1", "eng", 6}, {"aac", "", "5.1", "kor", 6}}, StepWaitingDecision, "Audio codec mismatch at stream 2", nil},
-		// A TrueHD Atmos track probed as plain TrueHD is still object audio
-		// when its title says so: flattening it to AAC is rejected.
-		{"size flattened Atmos named in title", transcode.AudioModeCompactLossless, []track{{"truehd", "", "7.1", "eng", 8}}, []track{{"aac", "", "7.1", "eng", 8}}, StepWaitingDecision, "Audio codec mismatch at stream 0", []string{"TrueHD Atmos 7.1"}},
-		{"size copied Atmos named in title", transcode.AudioModeCompactLossless, []track{{"truehd", "", "7.1", "eng", 8}}, []track{{"truehd", "", "7.1", "eng", 8}}, StepCompleted, "", []string{"TrueHD Atmos 7.1"}},
+		// Size mode converts lossless Atmos to AAC on its 7.1 bed; a copied
+		// TrueHD Atmos track is a plan mismatch. E-AC-3 Atmos stays copied.
+		{"size converted TrueHD Atmos", transcode.AudioModeCompactLossless, []track{{"truehd", "", "7.1", "eng", 8}, {"eac3", "", "5.1", "spa", 6}}, []track{{"aac", "", "7.1", "eng", 8}, {"eac3", "", "5.1", "spa", 6}}, StepCompleted, "", []string{"TrueHD Atmos 7.1", "DD+ Atmos 5.1"}},
+		{"size copied TrueHD Atmos", transcode.AudioModeCompactLossless, []track{{"truehd", "", "7.1", "eng", 8}}, []track{{"truehd", "", "7.1", "eng", 8}}, StepWaitingDecision, "Audio codec mismatch at stream 0", []string{"TrueHD Atmos 7.1"}},
+		{"size converted E-AC-3 Atmos", transcode.AudioModeCompactLossless, []track{{"eac3", "", "5.1", "eng", 6}}, []track{{"aac", "", "5.1", "eng", 6}}, StepWaitingDecision, "Audio codec mismatch at stream 0", []string{"DD+ Atmos 5.1"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
