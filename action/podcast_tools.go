@@ -7,6 +7,7 @@ import (
 
 	"github.com/jakenesler/navigatorr/podcast"
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/httpclient"
 )
 
 func decodePodcastValue(raw any, out any) error {
@@ -357,7 +358,7 @@ func (e *Engine) preparePodcastRetry(ctx context.Context, ec *ExecutionContext) 
 		// A rejected submission can leave a durable coordinator identity with
 		// no worker job. A definitive 404 lets the stage resubmit that SAME
 		// identity; uncertain reads never authorize an attempt or submission.
-		if he, ok := transcodeHTTPError(err); ok && he.StatusCode == 404 && !transcode.IsTransportUncertain(err) {
+		if he, ok := transcodeHTTPError(err); ok && he.StatusCode == 404 && !httpclient.IsTransportUncertain(err) {
 			return nil
 		}
 		return err

@@ -16,6 +16,7 @@ import (
 	"github.com/jakenesler/navigatorr/internal/transcodeworker"
 	"github.com/jakenesler/navigatorr/podcast"
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/httpclient"
 )
 
 // Real coordinator -> HTTP -> shared worker queue -> FFmpeg -> publication.
@@ -62,7 +63,7 @@ func TestPodcastHTTPWorkflowEndToEnd(t *testing.T) {
 	})
 	srv := httptest.NewServer(transcodeworker.NewServer(w, "unused", "unused", "").Handler())
 	defer srv.Close()
-	tc, err := transcode.NewHTTPExecutor(transcode.HTTPConfig{BaseURL: srv.URL, PathMappings: []transcode.PathMapping{{Local: dir, Remote: dir}}})
+	tc, err := httpclient.NewHTTPExecutor(httpclient.HTTPConfig{BaseURL: srv.URL, PathMappings: []transcode.PathMapping{{Local: dir, Remote: dir}}})
 	if err != nil {
 		t.Fatal(err)
 	}

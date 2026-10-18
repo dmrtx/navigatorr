@@ -17,6 +17,7 @@ import (
 	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/podcast"
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/httpclient"
 )
 
 func TestPodcastDurableOrchestratorClassification(t *testing.T) {
@@ -34,14 +35,14 @@ func TestPodcastDurableOrchestratorClassification(t *testing.T) {
 		if s, ok := statuses[id]; ok {
 			return s, nil
 		}
-		return transcode.JobStatus{}, &transcode.HTTPError{StatusCode: 404}
+		return transcode.JobStatus{}, &httpclient.HTTPError{StatusCode: 404}
 	}, submitFunc: func(ctx context.Context, r transcode.Request) (transcode.Job, error) {
 		submits++
 		requests[r.ID] = r
 		statuses[r.ID] = transcode.JobStatus{ID: r.ID, Status: transcode.StatusQueued}
 		if failTransport {
 			failTransport = false
-			return transcode.Job{}, &transcode.UncertainError{Op: "submit", JobID: r.ID, Err: fmt.Errorf("connection closed")}
+			return transcode.Job{}, &httpclient.UncertainError{Op: "submit", JobID: r.ID, Err: fmt.Errorf("connection closed")}
 		}
 		return transcode.Job{ID: r.ID}, nil
 	}}
@@ -153,7 +154,7 @@ func TestPodcastTerminalSubmissionIdentity(t *testing.T) {
 			tc := &mockTranscodeExecutor{capabilitiesFunc: func(context.Context) (transcode.WorkerCapabilities, error) {
 				return transcode.WorkerCapabilities{Podcast: &transcode.PodcastCapabilities{Available: true, NativeTimingVerified: true, MP3RenderVerified: true, VerifiedLanguage: "en_US"}}, nil
 			}, statusFunc: func(context.Context, string) (transcode.JobStatus, error) {
-				return transcode.JobStatus{}, &transcode.HTTPError{StatusCode: 404}
+				return transcode.JobStatus{}, &httpclient.HTTPError{StatusCode: 404}
 			}, submitFunc: func(context.Context, transcode.Request) (transcode.Job, error) {
 				submits++
 				return transcode.Job{}, nil
@@ -220,7 +221,7 @@ func TestPodcastExplicitRetryRetainsSubmissionIdentity(t *testing.T) {
 		if st, ok := statuses[id]; ok {
 			return st, nil
 		}
-		return transcode.JobStatus{}, &transcode.HTTPError{StatusCode: 404}
+		return transcode.JobStatus{}, &httpclient.HTTPError{StatusCode: 404}
 	}, submitFunc: func(_ context.Context, req transcode.Request) (transcode.Job, error) {
 		submits++
 		statuses[req.ID] = transcode.JobStatus{ID: req.ID, Status: transcode.StatusQueued}
@@ -280,12 +281,12 @@ func TestPodcastRetryAfterRejectedWorkerAdmission(t *testing.T) {
 				if accepted != nil {
 					return transcode.JobStatus{ID: id, Status: transcode.StatusQueued}, nil
 				}
-				return transcode.JobStatus{}, &transcode.HTTPError{StatusCode: 404}
+				return transcode.JobStatus{}, &httpclient.HTTPError{StatusCode: 404}
 			}, submitFunc: func(_ context.Context, req transcode.Request) (transcode.Job, error) {
 				requests = append(requests, req)
 				if len(requests) == 1 {
 					// The worker rejects before admission: no job or ASR side effect.
-					return transcode.Job{}, &transcode.HTTPError{StatusCode: 400, Message: "source SMB path temporarily unavailable"}
+					return transcode.Job{}, &httpclient.HTTPError{StatusCode: 400, Message: "source SMB path temporarily unavailable"}
 				}
 				accepted, statusErr = &req, nil
 				return transcode.Job{ID: req.ID}, nil
@@ -301,14 +302,14 @@ func TestPodcastRetryAfterRejectedWorkerAdmission(t *testing.T) {
 			jobID := getString(failed.State, "podcast_transcribe_job")
 			switch kind {
 			case "wrapped_missing":
-				statusErr = fmt.Errorf("worker status: %w", &transcode.HTTPError{StatusCode: 404})
+				statusErr = fmt.Errorf("worker status: %w", &httpclient.HTTPError{StatusCode: 404})
 			case "uncertain":
-				statusErr = &transcode.UncertainError{Op: "status", JobID: jobID, Err: fmt.Errorf("connection closed")}
+				statusErr = &httpclient.UncertainError{Op: "status", JobID: jobID, Err: fmt.Errorf("connection closed")}
 			case "uncertain_wrapped_missing":
-				statusErr = &transcode.UncertainError{Op: "status", JobID: jobID, Err: &transcode.HTTPError{StatusCode: 404}}
+				statusErr = &httpclient.UncertainError{Op: "status", JobID: jobID, Err: &httpclient.HTTPError{StatusCode: 404}}
 			}
 			e = NewEngine(e.Deps())
-			if transcode.IsTransportUncertain(statusErr) {
+			if httpclient.IsTransportUncertain(statusErr) {
 				if _, err := e.Retry(ctx, failed.ID); !errors.Is(err, statusErr) {
 					t.Fatalf("uncertain status did not stop retry: %v", err)
 				}
@@ -370,7 +371,7 @@ func TestPodcastConcurrentSubmissionReceipt(t *testing.T) {
 			}
 			return status, nil
 		}
-		return transcode.JobStatus{}, &transcode.HTTPError{StatusCode: 404}
+		return transcode.JobStatus{}, &httpclient.HTTPError{StatusCode: 404}
 	}, submitFunc: func(_ context.Context, req transcode.Request) (transcode.Job, error) {
 		atomic.AddInt32(&submits, 1)
 		workerMu.Lock()

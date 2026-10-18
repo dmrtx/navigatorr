@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/jakenesler/navigatorr/config"
-	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/httpclient"
 )
 
 func TestBuildAutomaticTranscodeExecutorDisabled(t *testing.T) {
@@ -31,8 +31,8 @@ func TestBuildAutomaticTranscodeExecutorValidHTTP(t *testing.T) {
 	if exec == nil {
 		t.Fatal("valid http: expected non-nil executor")
 	}
-	if _, ok := exec.(*transcode.HTTPExecutor); !ok {
-		t.Fatalf("valid http: expected *transcode.HTTPExecutor, got %T", exec)
+	if _, ok := exec.(*httpclient.HTTPExecutor); !ok {
+		t.Fatalf("valid http: expected *httpclient.HTTPExecutor, got %T", exec)
 	}
 }
 

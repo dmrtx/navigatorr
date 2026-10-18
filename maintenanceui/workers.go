@@ -4,11 +4,11 @@ import (
 	"net/http"
 	"net/url"
 
-	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/httpclient"
 )
 
 func (s *Server) workerActivity(w http.ResponseWriter, r *http.Request) {
-	executor, ok := s.engine.Deps().Transcode.(*transcode.HTTPExecutor)
+	executor, ok := s.engine.Deps().Transcode.(*httpclient.HTTPExecutor)
 	if !ok {
 		writeJSON(w, 200, map[string]any{"available": false, "message": "Live worker activity requires the HTTP video worker."})
 		return

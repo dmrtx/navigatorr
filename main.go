@@ -23,6 +23,7 @@ import (
 	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/tools"
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/httpclient"
 	"github.com/jakenesler/navigatorr/transmission"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -275,7 +276,7 @@ func buildAutomaticTranscodeExecutor(tc config.TranscodeConfig) (transcode.Execu
 		if err != nil {
 			return nil, fmt.Errorf("automatic transcode executor: http configuration: %w", err)
 		}
-		exec, err := transcode.NewHTTPExecutor(httpCfg)
+		exec, err := httpclient.NewHTTPExecutor(httpCfg)
 		if err != nil {
 			return nil, fmt.Errorf("automatic transcode executor: http executor: %w", err)
 		}

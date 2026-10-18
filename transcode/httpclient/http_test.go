@@ -1,4 +1,4 @@
-package transcode
+package httpclient
 
 import (
 	"context"
@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/jakenesler/navigatorr/transcode"
 )
 
 func TestHTTPAvailabilityAndSubmitDoNotDependOnDoctor(t *testing.T) {
@@ -30,7 +32,7 @@ func TestHTTPAvailabilityAndSubmitDoNotDependOnDoctor(t *testing.T) {
 		case "/v1/jobs":
 			// Deployed workers reject unknown request fields; telemetry must
 			// remain response-only so rolling upgrades can still submit.
-			var request Request
+			var request transcode.Request
 			decoder := json.NewDecoder(r.Body)
 			decoder.DisallowUnknownFields()
 			if err := decoder.Decode(&request); err != nil {
@@ -60,7 +62,7 @@ func TestHTTPAvailabilityAndSubmitDoNotDependOnDoctor(t *testing.T) {
 	if err := e.Doctor(context.Background()); err == nil {
 		t.Fatal("explicit doctor did not report its failure")
 	}
-	if _, err := e.Submit(context.Background(), Request{ID: "availability", SourcePath: "/local/media/source.mkv", CandidatePath: "/local/media/candidate.mkv"}); err != nil {
+	if _, err := e.Submit(context.Background(), transcode.Request{ID: "availability", SourcePath: "/local/media/source.mkv", CandidatePath: "/local/media/candidate.mkv"}); err != nil {
 		t.Fatalf("deep diagnostic failure blocked a ready worker: %v", err)
 	}
 	if doctorCalls.Load() != 1 {
@@ -98,8 +100,8 @@ func newClosedListener(t *testing.T) (string, error) {
 	return addr, nil
 }
 
-func testHTTPMappings() []PathMapping {
-	return []PathMapping{{Local: "/local/media", Remote: "/Volumes/media"}}
+func testHTTPMappings() []transcode.PathMapping {
+	return []transcode.PathMapping{{Local: "/local/media", Remote: "/Volumes/media"}}
 }
 
 func newTestHTTPExecutor(t *testing.T, srv *httptest.Server) *HTTPExecutor {
@@ -116,20 +118,20 @@ func newTestHTTPExecutor(t *testing.T, srv *httptest.Server) *HTTPExecutor {
 	return exec
 }
 
-func validTestCaps(t *testing.T) WorkerCapabilities {
+func validTestCaps(t *testing.T) transcode.WorkerCapabilities {
 	t.Helper()
-	caps := WorkerCapabilities{
-		ProtocolVersion: WorkerProtocolVersion,
+	caps := transcode.WorkerCapabilities{
+		ProtocolVersion: transcode.WorkerProtocolVersion,
 		WorkerVersion:   "1.0.0",
 		BuildGitCommit:  "abcdef0",
 		FFmpegVersion:   "7.1",
 		Encoders:        map[string]bool{"hevc_videotoolbox": true},
 		Filters:         map[string]bool{"scale": true},
-		EncoderDetails: map[string]EncoderCapabilities{
+		EncoderDetails: map[string]transcode.EncoderCapabilities{
 			"hevc_videotoolbox": {Encoder: "hevc_videotoolbox", Available: true, Profiles: []string{"main"}, PixelFormats: []string{"nv12"}, Options: []string{"profile"}},
 		},
 	}
-	fp, err := ComputeCapabilityFingerprint(caps)
+	fp, err := transcode.ComputeCapabilityFingerprint(caps)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +216,7 @@ func TestHTTPExecutor_CapabilitiesRejectsStaleProtocolBeforeSubmit(t *testing.T)
 	newCapsServer := func(version int, submits *atomic.Int32) *httptest.Server {
 		caps := validTestCaps(t)
 		caps.ProtocolVersion = version
-		fp, err := ComputeCapabilityFingerprint(caps)
+		fp, err := transcode.ComputeCapabilityFingerprint(caps)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -242,7 +244,7 @@ func TestHTTPExecutor_CapabilitiesRejectsStaleProtocolBeforeSubmit(t *testing.T)
 	staleSrv := newCapsServer(1, &staleSubmits)
 	defer staleSrv.Close()
 	staleExec := newTestHTTPExecutor(t, staleSrv)
-	wantErr := fmt.Sprintf("unsupported protocol version 1 (expected %d)", WorkerProtocolVersion)
+	wantErr := fmt.Sprintf("unsupported protocol version 1 (expected %d)", transcode.WorkerProtocolVersion)
 	if _, err := staleExec.Capabilities(context.Background()); err == nil || !strings.Contains(err.Error(), wantErr) {
 		t.Fatalf("expected stale v1 capability rejection %q, got: %v", wantErr, err)
 	}
@@ -252,15 +254,15 @@ func TestHTTPExecutor_CapabilitiesRejectsStaleProtocolBeforeSubmit(t *testing.T)
 
 	// Matching v2 succeeds and reports the current protocol version.
 	var matchSubmits atomic.Int32
-	matchSrv := newCapsServer(WorkerProtocolVersion, &matchSubmits)
+	matchSrv := newCapsServer(transcode.WorkerProtocolVersion, &matchSubmits)
 	defer matchSrv.Close()
 	matchExec := newTestHTTPExecutor(t, matchSrv)
 	caps, err := matchExec.Capabilities(context.Background())
 	if err != nil {
 		t.Fatalf("matching protocol version must succeed: %v", err)
 	}
-	if caps.ProtocolVersion != WorkerProtocolVersion {
-		t.Fatalf("protocol version = %d, want %d", caps.ProtocolVersion, WorkerProtocolVersion)
+	if caps.ProtocolVersion != transcode.WorkerProtocolVersion {
+		t.Fatalf("protocol version = %d, want %d", caps.ProtocolVersion, transcode.WorkerProtocolVersion)
 	}
 }
 
@@ -286,7 +288,7 @@ func TestHTTPExecutor_SubmitStatusCancel(t *testing.T) {
 	exec := newTestHTTPExecutor(t, srv)
 	ctx := context.Background()
 
-	job, err := exec.Submit(ctx, Request{ID: "job-1", SourcePath: "/local/media/a.mkv", CandidatePath: "/local/media/b.mkv", Profile: "hevc-vt"})
+	job, err := exec.Submit(ctx, transcode.Request{ID: "job-1", SourcePath: "/local/media/a.mkv", CandidatePath: "/local/media/b.mkv", Profile: "hevc-vt"})
 	if err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -302,7 +304,7 @@ func TestHTTPExecutor_SubmitStatusCancel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Status: %v", err)
 	}
-	if st.Status != StatusRunning || st.Progress != 42.5 {
+	if st.Status != transcode.StatusRunning || st.Progress != 42.5 {
 		t.Errorf("unexpected status: %+v", st)
 	}
 	// Reverse translation parity: remote -> local.
@@ -378,7 +380,7 @@ func TestHTTPExecutor_Non2xxMapping(t *testing.T) {
 	exec := newTestHTTPExecutor(t, srv)
 	ctx := context.Background()
 
-	_, err := exec.Submit(ctx, Request{ID: "job-busy", SourcePath: "/local/media/a.mkv", CandidatePath: "/local/media/b.mkv"})
+	_, err := exec.Submit(ctx, transcode.Request{ID: "job-busy", SourcePath: "/local/media/a.mkv", CandidatePath: "/local/media/b.mkv"})
 	if err == nil || !strings.Contains(err.Error(), "worker busy") {
 		t.Fatalf("busy must preserve classifier substring, got %v", err)
 	}
@@ -466,7 +468,7 @@ func TestHTTPExecutor_SubmitTimeoutIsUncertainSingleAttempt(t *testing.T) {
 	exec, _ := NewHTTPExecutor(HTTPConfig{
 		BaseURL: srv.URL, RequestTimeout: time.Second, SubmitTimeout: 100 * time.Millisecond, PathMappings: testHTTPMappings(),
 	})
-	_, err := exec.Submit(context.Background(), Request{ID: "job-slow", SourcePath: "/local/media/a.mkv", CandidatePath: "/local/media/b.mkv"})
+	_, err := exec.Submit(context.Background(), transcode.Request{ID: "job-slow", SourcePath: "/local/media/a.mkv", CandidatePath: "/local/media/b.mkv"})
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
@@ -488,7 +490,7 @@ func TestHTTPExecutor_ConnectionFailureIsUncertain(t *testing.T) {
 		t.Skipf("no local port: %v", err)
 	}
 	exec, _ := NewHTTPExecutor(HTTPConfig{BaseURL: "http://" + lis, RequestTimeout: 2 * time.Second, SubmitTimeout: 2 * time.Second, PathMappings: testHTTPMappings()})
-	_, err = exec.Submit(context.Background(), Request{ID: "job-x", SourcePath: "/local/media/a.mkv", CandidatePath: "/local/media/b.mkv"})
+	_, err = exec.Submit(context.Background(), transcode.Request{ID: "job-x", SourcePath: "/local/media/a.mkv", CandidatePath: "/local/media/b.mkv"})
 	if err == nil || !IsTransportUncertain(err) {
 		t.Fatalf("connection failure must be uncertain, got %v", err)
 	}
@@ -515,7 +517,7 @@ func errorAsUncertain(err error, target **UncertainError) bool {
 
 func TestHTTPExecutor_PathMappingParity(t *testing.T) {
 	exec, _ := NewHTTPExecutor(HTTPConfig{
-		BaseURL: "http://127.0.0.1:8097", PathMappings: []PathMapping{
+		BaseURL: "http://127.0.0.1:8097", PathMappings: []transcode.PathMapping{
 			{Local: "/media", Remote: "/Volumes/media"},
 			{Local: "/media/Anime/Special", Remote: "/Volumes/fast-storage/Special"},
 		},
@@ -569,7 +571,7 @@ func TestHTTPExecutor_BenchmarkRoundTrip(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/benchmarks":
-			var req BenchmarkRequest
+			var req transcode.BenchmarkRequest
 			_ = json.NewDecoder(r.Body).Decode(&req)
 			if req.SourcePath != "/Volumes/media/source.mkv" {
 				w.WriteHeader(http.StatusBadRequest)
@@ -591,10 +593,10 @@ func TestHTTPExecutor_BenchmarkRoundTrip(t *testing.T) {
 	exec := newTestHTTPExecutor(t, srv)
 	ctx := context.Background()
 
-	job, err := exec.BenchmarkSubmit(ctx, BenchmarkRequest{
-		ProtocolVersion: WorkerProtocolVersion, ID: "bench-test-123", SourcePath: "/local/media/source.mkv",
-		Metric: "vmaf", Samples: []BenchmarkSampleWindow{{Index: 0, StartSeconds: 1, DurationSeconds: 5}},
-		Candidates: []BenchmarkCandidate{{ID: "c1", Quality: 65}},
+	job, err := exec.BenchmarkSubmit(ctx, transcode.BenchmarkRequest{
+		ProtocolVersion: transcode.WorkerProtocolVersion, ID: "bench-test-123", SourcePath: "/local/media/source.mkv",
+		Metric: "vmaf", Samples: []transcode.BenchmarkSampleWindow{{Index: 0, StartSeconds: 1, DurationSeconds: 5}},
+		Candidates: []transcode.BenchmarkCandidate{{ID: "c1", Quality: 65}},
 	})
 	if err != nil || job.ID != "bench-test-123" {
 		t.Fatalf("BenchmarkSubmit: job=%+v err=%v", job, err)
@@ -627,15 +629,15 @@ func singleShotServer(t *testing.T, attempts *atomic.Int32, code int, body strin
 	}))
 }
 
-func submitTestRequest() Request {
-	return Request{ID: "job-1", SourcePath: "/local/media/a.mkv", CandidatePath: "/local/media/b.mkv", Profile: "hevc-vt"}
+func submitTestRequest() transcode.Request {
+	return transcode.Request{ID: "job-1", SourcePath: "/local/media/a.mkv", CandidatePath: "/local/media/b.mkv", Profile: "hevc-vt"}
 }
 
-func benchmarkTestRequest() BenchmarkRequest {
-	return BenchmarkRequest{
-		ProtocolVersion: WorkerProtocolVersion, ID: "bench-test-123", SourcePath: "/local/media/source.mkv",
-		Metric: "vmaf", Samples: []BenchmarkSampleWindow{{Index: 0, StartSeconds: 1, DurationSeconds: 5}},
-		Candidates: []BenchmarkCandidate{{ID: "c1", Quality: 65}},
+func benchmarkTestRequest() transcode.BenchmarkRequest {
+	return transcode.BenchmarkRequest{
+		ProtocolVersion: transcode.WorkerProtocolVersion, ID: "bench-test-123", SourcePath: "/local/media/source.mkv",
+		Metric: "vmaf", Samples: []transcode.BenchmarkSampleWindow{{Index: 0, StartSeconds: 1, DurationSeconds: 5}},
+		Candidates: []transcode.BenchmarkCandidate{{ID: "c1", Quality: 65}},
 	}
 }
 
@@ -919,10 +921,10 @@ func TestHTTPExecutor_BenchmarkProtocolMismatch(t *testing.T) {
 		fmt.Fprintln(w, `{"protocol_version": 99, "id": "bench-test-123", "status": "queued"}`)
 	}))
 	defer srv.Close()
-	_, err := newTestHTTPExecutor(t, srv).BenchmarkSubmit(context.Background(), BenchmarkRequest{
-		ProtocolVersion: WorkerProtocolVersion, ID: "bench-test-123", SourcePath: "/local/media/source.mkv",
-		Metric: "vmaf", Samples: []BenchmarkSampleWindow{{Index: 0, StartSeconds: 1, DurationSeconds: 5}},
-		Candidates: []BenchmarkCandidate{{ID: "c1", Quality: 65}},
+	_, err := newTestHTTPExecutor(t, srv).BenchmarkSubmit(context.Background(), transcode.BenchmarkRequest{
+		ProtocolVersion: transcode.WorkerProtocolVersion, ID: "bench-test-123", SourcePath: "/local/media/source.mkv",
+		Metric: "vmaf", Samples: []transcode.BenchmarkSampleWindow{{Index: 0, StartSeconds: 1, DurationSeconds: 5}},
+		Candidates: []transcode.BenchmarkCandidate{{ID: "c1", Quality: 65}},
 	})
 	// A 2xx protocol mismatch on a mutating POST is UNKNOWN (the benchmark
 	// may already exist), not a definitive rejection.

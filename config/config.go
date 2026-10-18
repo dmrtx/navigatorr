@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/httpclient"
 	"github.com/jakenesler/navigatorr/transcode/recipe"
 	"gopkg.in/yaml.v3"
 )
@@ -700,18 +701,18 @@ func (h HTTPExecutorConfig) SubmitTimeoutDuration() time.Duration {
 }
 
 // BuildHTTPExecutorConfig maps the effective http/worker_http block onto
-// the transcode.HTTPConfig used by NewHTTPExecutor. It is the single
+// the httpclient.HTTPConfig used by NewHTTPExecutor. It is the single
 // construction site shared by production wiring (main.go) and tests.
-func (t *TranscodeConfig) BuildHTTPExecutorConfig() (transcode.HTTPConfig, error) {
+func (t *TranscodeConfig) BuildHTTPExecutorConfig() (httpclient.HTTPConfig, error) {
 	hc := t.EffectiveHTTPConfig()
 	if err := hc.ValidateHTTPConfig(); err != nil {
-		return transcode.HTTPConfig{}, err
+		return httpclient.HTTPConfig{}, err
 	}
 	mappings := make([]transcode.PathMapping, len(hc.PathMappings))
 	for i, m := range hc.PathMappings {
 		mappings[i] = transcode.PathMapping{Local: m.GetLocal(), Remote: m.GetRemote()}
 	}
-	return transcode.HTTPConfig{
+	return httpclient.HTTPConfig{
 		BaseURL:        strings.TrimSpace(hc.BaseURL),
 		Token:          strings.TrimSpace(hc.Token),
 		TokenFile:      strings.TrimSpace(hc.TokenFile),

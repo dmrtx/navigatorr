@@ -4,13 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/jakenesler/navigatorr/podcast"
-	"github.com/jakenesler/navigatorr/transcode"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jakenesler/navigatorr/podcast"
+	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/httpclient"
 )
 
 func TestReviewedPodcastProofAboveOneMiBAcceptedOverHTTP(t *testing.T) {
@@ -59,7 +61,7 @@ func TestReviewedPodcastProofAboveOneMiBAcceptedOverHTTP(t *testing.T) {
 	w.SetAliveFunc(func(*JobRecord) bool { return true })
 	s := httptest.NewServer(NewServer(w, "", "unused", "unused").Handler())
 	defer s.Close()
-	client, err := transcode.NewHTTPExecutor(transcode.HTTPConfig{BaseURL: s.URL, Token: "unused", PathMappings: []transcode.PathMapping{{Local: dir, Remote: dir}}})
+	client, err := httpclient.NewHTTPExecutor(httpclient.HTTPConfig{BaseURL: s.URL, Token: "unused", PathMappings: []transcode.PathMapping{{Local: dir, Remote: dir}}})
 	if err != nil {
 		t.Fatal(err)
 	}
