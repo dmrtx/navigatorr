@@ -1968,15 +1968,13 @@ pre {
   justify-self: end;
   max-width: 220px;
 }
-/* Phones: the title wraps to two lines, so the chip goes under the badge
-   and the title spans both rows beside it. */
+/* Phones: there is no room beside the badge, so the chip gets its own row
+   under the title. The title stays in row 1 so the chip never covers it. */
 @media (max-width: 600px) {
   .job-heading:has(> .command-chip) {
     grid-template-columns: 34px minmax(0, 1fr) 88px;
   }
   .job-heading:has(> .command-chip) > .badge { grid-column: 3; }
-  .job-heading:has(> .command-chip) > .job-title { grid-column: 2; grid-row: 1 / span 2; align-self: start; }
-  .job-heading:has(> .command-chip) > .job-number { grid-row: 1; }
   .job-heading > .command-chip {
     grid-column: 2 / -1;
     grid-row: 2;
