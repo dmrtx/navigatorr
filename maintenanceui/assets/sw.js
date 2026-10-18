@@ -3,6 +3,7 @@ const SHELL = [
   "/",
   "/app.js",
   "/app.css",
+  "/theme.js",
   "/pwa.js",
   "/manifest.webmanifest",
   "/icon-192.png",
