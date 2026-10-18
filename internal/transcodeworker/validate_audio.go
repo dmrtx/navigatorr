@@ -88,7 +88,7 @@ func (w *Worker) validateAudioPackets(ctx context.Context, plan *transcode.Plan,
 	if err != nil {
 		return fmt.Errorf("candidate audio validation: %w", err)
 	}
-	sv, cv := firstStreamOfKind(src.Streams, "video"), firstStreamOfKind(dst.Streams, "video")
+	sv, cv := firstMainVideo(src.Streams), firstMainVideo(dst.Streams)
 	if sv == nil || cv == nil || sv.StartTime == nil || cv.StartTime == nil {
 		return fmt.Errorf("audio/video start timing unavailable (fail closed, never publish)")
 	}

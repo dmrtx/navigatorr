@@ -256,6 +256,9 @@ esac
 	if caps.ProtocolVersion != transcode.WorkerProtocolVersion {
 		t.Errorf("expected ProtocolVersion=%d, got %d", transcode.WorkerProtocolVersion, caps.ProtocolVersion)
 	}
+	if !caps.CoverArt {
+		t.Error("worker must advertise cover_art so the server admits sources with cover art")
+	}
 	if caps.WorkerVersion != "1.0.0" {
 		t.Errorf("expected WorkerVersion=1.0.0, got %s", caps.WorkerVersion)
 	}

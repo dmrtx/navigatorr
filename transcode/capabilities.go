@@ -68,6 +68,7 @@ type WorkerCapabilities struct {
 	Podcast                  *PodcastCapabilities           `json:"podcast,omitempty"`
 	ExplicitMain10Benchmarks bool                           `json:"explicit_main10_benchmarks,omitempty"`
 	CompactAudio             bool                           `json:"compact_audio,omitempty"`
+	CoverArt                 bool                           `json:"cover_art,omitempty"`
 	ProtocolVersion          int                            `json:"protocol_version"`
 	WorkerVersion            string                         `json:"worker_version,omitempty"`
 	BuildGitCommit           string                         `json:"build_git_commit,omitempty"`
@@ -114,6 +115,7 @@ type fingerprintPayload struct {
 	Podcast                  *PodcastCapabilities           `json:"podcast,omitempty"`
 	ExplicitMain10Benchmarks bool                           `json:"explicit_main10_benchmarks,omitempty"`
 	CompactAudio             bool                           `json:"compact_audio,omitempty"`
+	CoverArt                 bool                           `json:"cover_art,omitempty"`
 	ProtocolVersion          int                            `json:"protocol_version"`
 	WorkerVersion            string                         `json:"worker_version,omitempty"`
 	BuildGitCommit           string                         `json:"build_git_commit,omitempty"`
@@ -156,6 +158,7 @@ func ComputeCapabilityFingerprint(caps WorkerCapabilities) (string, error) {
 		Podcast:                  caps.Podcast,
 		ExplicitMain10Benchmarks: caps.ExplicitMain10Benchmarks,
 		CompactAudio:             caps.CompactAudio,
+		CoverArt:                 caps.CoverArt,
 		ProtocolVersion:          caps.ProtocolVersion,
 		WorkerVersion:            caps.WorkerVersion,
 		BuildGitCommit:           caps.BuildGitCommit,

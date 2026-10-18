@@ -30,6 +30,17 @@ type SourceStream struct {
 	BitDepth    int    `json:"bit_depth,omitempty"`
 	PixelFormat string `json:"pixel_format,omitempty"`
 	Profile     string `json:"profile,omitempty"`
+	// Filename and MimeType come from the stream tags. Matroska cover art
+	// (an image attachment ffprobe exposes as an attached_pic video stream)
+	// carries both; they are reused when the cover is re-attached.
+	Filename string `json:"filename,omitempty"`
+	MimeType string `json:"mime_type,omitempty"`
+}
+
+// IsAttachedPicture reports whether s is embedded cover art (a video stream
+// with disposition attached_pic=1) rather than programme video.
+func (s SourceStream) IsAttachedPicture() bool {
+	return strings.EqualFold(strings.TrimSpace(s.Kind), "video") && s.Disposition["attached_pic"] > 0
 }
 
 // SourceProbe is the full local structural/media probe result used for
@@ -97,13 +108,19 @@ func ProbeSourceDetails(ctx context.Context, ffprobePath, filePath string) (Sour
 		kind := norm(st.CodecType)
 		typeIdx := counts[kind]
 		counts[kind]++
-		lang, title := "", ""
+		lang, title, filename, mimeType := "", "", "", ""
 		for k, v := range st.Tags {
 			if strings.EqualFold(k, "language") {
 				lang = norm(v)
 			}
 			if strings.EqualFold(k, "title") {
 				title = strings.TrimSpace(v)
+			}
+			if strings.EqualFold(k, "filename") {
+				filename = strings.TrimSpace(v)
+			}
+			if strings.EqualFold(k, "mimetype") {
+				mimeType = norm(v)
 			}
 		}
 		bitDepth := parseBitDepth(st.BitsPerRawSample, st.BitsPerSample, st.PixFmt)
@@ -116,6 +133,7 @@ func ProbeSourceDetails(ctx context.Context, ffprobePath, filePath string) (Sour
 			Language: lang, Title: title, Channels: st.Channels, Disposition: st.Disposition,
 			StartTime: startTime,
 			Width:     st.Width, Height: st.Height, BitDepth: bitDepth, PixelFormat: norm(st.PixFmt), Profile: strings.TrimSpace(st.Profile),
+			Filename: filename, MimeType: mimeType,
 		})
 	}
 	return SourceProbe{Path: filePath, Streams: out, DurationSec: duration, Chapters: len(probe.Chapters)}, nil
@@ -170,12 +188,73 @@ type StreamAction struct {
 	Codec       string         `json:"codec"`
 	TargetCodec string         `json:"target_codec"`
 	BitrateKbps int            `json:"bitrate_kbps,omitempty"`
+	// Cover art only: the attachment name and MIME type it is re-attached with.
+	Filename string `json:"filename,omitempty"`
+	MimeType string `json:"mime_type,omitempty"`
 }
 type ExecutionPlan struct {
 	Plan        *transcode.Plan              `json:"plan"`
 	Streams     []StreamAction               `json:"streams"`
 	Conversions []transcode.ConversionRecord `json:"conversions"`
 	DurationSec float64                      `json:"duration_sec"`
+	// SourceAttachments counts the source's attachment streams (fonts etc.,
+	// not cover art). `-map 0:t?` maps all of them ahead of any re-attached
+	// cover, so cover metadata indexes start after them.
+	SourceAttachments int `json:"source_attachments,omitempty"`
+}
+
+// CoverArt returns the plan's cover-art actions in source order.
+func (ep *ExecutionPlan) CoverArt() []StreamAction {
+	if ep == nil {
+		return nil
+	}
+	var out []StreamAction
+	for _, s := range ep.Streams {
+		if s.Kind == "cover" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// coverArtMimeTypes maps attached-picture codecs to the MIME type Matroska
+// needs on the attachment. Other codecs fail closed.
+var coverArtMimeTypes = map[string]string{"mjpeg": "image/jpeg", "png": "image/png", "bmp": "image/bmp", "gif": "image/gif", "webp": "image/webp", "tiff": "image/tiff"}
+
+var coverArtExtensions = map[string]string{"image/jpeg": ".jpg", "image/png": ".png", "image/bmp": ".bmp", "image/gif": ".gif", "image/webp": ".webp", "image/tiff": ".tiff"}
+
+// coverArtAction keeps an attached picture as an untouched cover. The
+// Matroska muxer writes a copied attached_pic stream as an ordinary one-frame
+// video track, so the cover is re-attached as an image attachment instead,
+// which ffprobe reads back as attached_pic=1.
+func coverArtAction(s SourceStream) (StreamAction, error) {
+	mimeType := coverArtMimeTypes[norm(s.Codec)]
+	if mimeType == "" {
+		return StreamAction{}, fmt.Errorf("cover art stream %d has unsupported codec %q (fail closed)", s.Index, s.Codec)
+	}
+	if s.MimeType != "" {
+		if _, ok := coverArtExtensions[s.MimeType]; !ok {
+			return StreamAction{}, fmt.Errorf("cover art stream %d has unsupported mimetype %q (fail closed)", s.Index, s.MimeType)
+		}
+		mimeType = s.MimeType
+	}
+	filename := s.Filename
+	if !safeAttachmentFilename(filename) {
+		filename = fmt.Sprintf("cover_%d%s", s.TypeIndex, coverArtExtensions[mimeType])
+	}
+	return StreamAction{Kind: "cover", SourceIndex: s.Index, TypeIndex: s.TypeIndex, Codec: s.Codec, TargetCodec: "copy", Filename: filename, MimeType: mimeType}, nil
+}
+
+func safeAttachmentFilename(name string) bool {
+	if name == "" || len(name) > 255 || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
+		return false
+	}
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 func BuildExecutionPlan(plan *transcode.Plan, streams []SourceStream, duration float64) (*ExecutionPlan, error) {
@@ -185,7 +264,7 @@ func BuildExecutionPlan(plan *transcode.Plan, streams []SourceStream, duration f
 	if plan.X265 != nil {
 		n := 0
 		for _, s := range streams {
-			if s.Kind == "video" {
+			if s.Kind == "video" && !s.IsAttachedPicture() {
 				n++
 			}
 		}
@@ -200,6 +279,17 @@ func BuildExecutionPlan(plan *transcode.Plan, streams []SourceStream, duration f
 	}
 	seenSubs := map[int]bool{}
 	for _, s := range streams {
+		switch {
+		case s.IsAttachedPicture():
+			a, err := coverArtAction(s)
+			if err != nil {
+				return nil, err
+			}
+			ep.Streams = append(ep.Streams, a)
+			continue
+		case s.Kind == "attachment":
+			ep.SourceAttachments++
+		}
 		switch s.Kind {
 		case "video":
 			ep.Streams = append(ep.Streams, StreamAction{Kind: "video", SourceIndex: s.Index, TypeIndex: s.TypeIndex, Codec: s.Codec, TargetCodec: plan.VideoCodec})

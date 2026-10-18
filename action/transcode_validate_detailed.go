@@ -53,11 +53,19 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 	waitDecision := func(reason string) StepResult {
 		return StepResult{Status: StepWaitingDecision, WaitingReason: reason, WaitingOptions: []WaitingOption{{Decision: "reject", Description: "Reject candidate and keep original"}, {Decision: "accept_loss", Description: "Accept candidate despite validation discrepancy"}}}
 	}
-	if len(outRep.Video) == 0 {
+	outVideo := outRep.MainVideo()
+	if len(outVideo) == 0 {
 		return StepResult{Status: StepFailed, Error: "transcoded candidate contains no video streams"}, nil
 	}
-	if plan.ExpectedBitDepth > 0 && outRep.Video[0].BitDepth != plan.ExpectedBitDepth {
-		return StepResult{Status: StepFailed, Error: fmt.Sprintf("Video bit depth mismatch: plan requires %d-bit output but candidate is %d-bit (fail closed)", plan.ExpectedBitDepth, outRep.Video[0].BitDepth)}, nil
+	// Programme video count is a hard invariant: an encoder that turned cover
+	// art into a second video track must not be publishable via accept_loss.
+	origAllVideo := getStreamsList(origMap, "video")
+	origVideo := mediainspect.MainVideoStreams(origAllVideo)
+	if len(origVideo) > 0 && len(outVideo) != len(origVideo) {
+		return StepResult{Status: StepFailed, Error: fmt.Sprintf("Video stream count mismatch: original=%d output=%d programme video streams (fail closed)", len(origVideo), len(outVideo))}, nil
+	}
+	if plan.ExpectedBitDepth > 0 && outVideo[0].BitDepth != plan.ExpectedBitDepth {
+		return StepResult{Status: StepFailed, Error: fmt.Sprintf("Video bit depth mismatch: plan requires %d-bit output but candidate is %d-bit (fail closed)", plan.ExpectedBitDepth, outVideo[0].BitDepth)}, nil
 	}
 	if acceptValidationLoss {
 		ec.State["validation_decision_applied"] = ec.Decision
@@ -76,14 +84,16 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 	if expected == "" {
 		expected = expectedVideoCodec(plan.VideoCodec)
 	}
-	if expected != "" && !strings.Contains(strings.ToLower(outRep.Video[0].Codec), expected) {
-		return waitDecision(fmt.Sprintf("Video codec mismatch: expected %s, transcoded output is %s", expected, outRep.Video[0].Codec)), nil
+	if expected != "" && !strings.Contains(strings.ToLower(outVideo[0].Codec), expected) {
+		return waitDecision(fmt.Sprintf("Video codec mismatch: expected %s, transcoded output is %s", expected, outVideo[0].Codec)), nil
 	}
-	origVideo := getStreamsList(origMap, "video")
 	if len(origVideo) > 0 && origVideo[0].Width > 0 && origVideo[0].Height > 0 {
-		if outRep.Video[0].Width != origVideo[0].Width || outRep.Video[0].Height != origVideo[0].Height {
-			return waitDecision(fmt.Sprintf("Video resolution mismatch: original=%dx%d output=%dx%d", origVideo[0].Width, origVideo[0].Height, outRep.Video[0].Width, outRep.Video[0].Height)), nil
+		if outVideo[0].Width != origVideo[0].Width || outVideo[0].Height != origVideo[0].Height {
+			return waitDecision(fmt.Sprintf("Video resolution mismatch: original=%dx%d output=%dx%d", origVideo[0].Width, origVideo[0].Height, outVideo[0].Width, outVideo[0].Height)), nil
 		}
+	}
+	if origCovers, outCovers := len(mediainspect.CoverArtStreams(origAllVideo)), len(outRep.CoverArt()); outCovers != origCovers {
+		return waitDecision(fmt.Sprintf("Cover art count mismatch: original=%d output=%d", origCovers, outCovers)), nil
 	}
 	origAudio := getStreamsList(origMap, "audio")
 	if len(outRep.Audio) != len(origAudio) {
@@ -178,7 +188,7 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 	}
 	result := map[string]any{
 		"candidate_path": outputPath, "output_path": outputPath, "size_bytes": fi.Size(), "duration_sec": outRep.DurationSec,
-		"video_codec": outRep.Video[0].Codec, "resolution": fmt.Sprintf("%dx%d", outRep.Video[0].Width, outRep.Video[0].Height), "bit_depth": outRep.Video[0].BitDepth,
+		"video_codec": outVideo[0].Codec, "resolution": fmt.Sprintf("%dx%d", outVideo[0].Width, outVideo[0].Height), "bit_depth": outVideo[0].BitDepth,
 		"profile": getString(ec.State, "profile"), "recipe_version": plan.RecipeVersion, "recipe_digest": plan.RecipeDigest, "plan_digest": plan.PlanDigest,
 		"video_profile": plan.VideoProfile, "pixel_format": plan.PixelFormat, "prioritize_speed": plan.PrioritizeSpeed, "spatial_aq": plan.SpatialAQ, "realtime": plan.Realtime,
 		"average_bitrate_kbps": plan.AverageBitrateKbps, "max_bitrate_kbps": plan.MaxBitrateKbps, "constant_bitrate": plan.ConstantBitrate,

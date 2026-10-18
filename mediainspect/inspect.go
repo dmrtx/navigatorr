@@ -212,6 +212,54 @@ type DetailedReport struct {
 	HDR         *HDRReport       `json:"hdr,omitempty"`
 }
 
+// IsAttachedPicture reports whether s is embedded cover art. ffprobe exposes
+// a Matroska image attachment (or an MP4 covr atom) as a one-frame video
+// stream with disposition attached_pic=1; it is not part of the programme.
+func IsAttachedPicture(s DetailedStream) bool {
+	return (s.Kind == "" || s.Kind == "video") && s.Disposition["attached_pic"] > 0
+}
+
+// MainVideoStreams returns the video streams that carry the programme,
+// dropping attached pictures (cover art).
+func MainVideoStreams(streams []DetailedStream) []DetailedStream {
+	out := make([]DetailedStream, 0, len(streams))
+	for _, s := range streams {
+		if !IsAttachedPicture(s) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// CoverArtStreams returns the attached-picture video streams.
+func CoverArtStreams(streams []DetailedStream) []DetailedStream {
+	var out []DetailedStream
+	for _, s := range streams {
+		if IsAttachedPicture(s) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// MainVideo returns the report's programme video streams. Video still lists
+// every video stream, cover art included; gates that need "exactly one video
+// stream" mean this list.
+func (r *DetailedReport) MainVideo() []DetailedStream {
+	if r == nil {
+		return nil
+	}
+	return MainVideoStreams(r.Video)
+}
+
+// CoverArt returns the report's attached-picture video streams.
+func (r *DetailedReport) CoverArt() []DetailedStream {
+	if r == nil {
+		return nil
+	}
+	return CoverArtStreams(r.Video)
+}
+
 // InspectDetailed runs ffprobe with streams and chapters for rigorous transcode validation.
 func InspectDetailed(ctx context.Context, ffprobePath, path string) (DetailedReport, error) {
 	rep := DetailedReport{Path: path}

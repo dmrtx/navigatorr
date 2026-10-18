@@ -82,13 +82,14 @@ func Select(input Input) Result {
 			Reasons:  []string{ReasonUnprobedMedia},
 		}
 	}
-	if len(input.Report.Video) == 0 {
+	video := input.Report.MainVideo()
+	if len(video) == 0 {
 		return Result{
 			Decision: DecisionReview,
 			Reasons:  []string{ReasonNoVideoStream},
 		}
 	}
-	if len(input.Report.Video) > 1 {
+	if len(video) > 1 {
 		return Result{
 			Decision: DecisionReview,
 			Reasons:  []string{ReasonMultipleVideoStreams},
@@ -106,7 +107,7 @@ func Select(input Input) Result {
 		}
 	}
 
-	v := input.Report.Video[0]
+	v := video[0]
 	codec := strings.ToLower(strings.TrimSpace(v.Codec))
 	if codec == "" {
 		return Result{

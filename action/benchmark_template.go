@@ -1059,10 +1059,11 @@ func validateWorkerCapabilitiesForBenchmark(caps transcode.WorkerCapabilities, m
 }
 
 func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediainspect.DetailedReport, opt *recipe.OptimizationPolicy, caps transcode.WorkerCapabilities) (*transcode.BenchmarkRequest, error) {
-	if rep == nil || len(rep.Video) == 0 {
+	video := rep.MainVideo()
+	if len(video) == 0 {
 		return nil, errors.New("media inspection report has no video streams (fail closed)")
 	}
-	v0 := rep.Video[0]
+	v0 := video[0]
 	bitDepth := v0.BitDepth
 	if bitDepth != 8 && bitDepth != 10 {
 		return nil, fmt.Errorf("unsupported bit depth %d: only 8-bit and 10-bit SDR content supported (fail closed)", bitDepth)
@@ -1221,6 +1222,9 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 	}
 	if plan.X265 != nil && !caps.X265TwoPass {
 		return nil, fmt.Errorf("worker does not support two-pass x265; upgrade before benchmarking")
+	}
+	if len(rep.CoverArt()) > 0 && !caps.CoverArt {
+		return nil, fmt.Errorf("%s before benchmarking", errCoverArtWorker)
 	}
 	if plan.AudioMode == "he_aac" {
 		if !caps.HEAACAudio {

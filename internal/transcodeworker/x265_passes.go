@@ -56,7 +56,8 @@ func runEncoderCommand(ctx context.Context, cmd *exec.Cmd, args []string, plan *
 	if err := reportEncoderPhase(ctx, "analysing_video"); err != nil {
 		return err
 	}
-	first := []string{"-y", "-nostats", "-i", input, "-map", "0:v:0"}
+	// 0:V skips attached pictures, so cover art never becomes the analysed stream.
+	first := []string{"-y", "-nostats", "-i", input, "-map", "0:V:0"}
 	first = append(first, video...)
 	first = append(first, "-an", "-sn", "-dn", "-f", "null", os.DevNull)
 	first = withX265Pass(first, 1)

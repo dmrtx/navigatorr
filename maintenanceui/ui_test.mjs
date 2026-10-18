@@ -2082,6 +2082,42 @@ test("an omitted video shows its reason and another-profile action instead of co
   assert.match(outcome.children[1].textContent,/Choose another profile/);
 });
 
+test("a goal batch skipped for an unsupported source explains it and does not offer a new goal", async () => {
+  const h=harness();
+  h.context.job={id:'cover',number:581,action_name:'transcode_batch',status:'completed',mode:'size',can_archive:true,batch:{title:'Show',total:2,skip:2,outcome:'no_changes'},batch_files:{context:'Show · Season 1',file_count:2,files:[{display_label:'Show - S01E01'},{display_label:'Show - S01E02'}],reasons:[{count:2,reason:'unsupported_source'}]}};
+  const labels=h.run('jobControls(job).children.map(b=>b.textContent)');
+  assert.ok(!labels.includes("Change goal"));
+  const outcome=h.run('skippedBatchOutcome(job)');
+  assert.match(outcome.children[0].textContent,/Automatic testing does not support this source format yet/);
+  assert.match(outcome.children[1].textContent,/changing the goal will not help/);
+  assert.doesNotMatch(outcome.children[1].textContent,/None of the tested settings/);
+  h.context.job.batch_files.reasons=[{count:1,reason:'unsupported_source'},{count:1,reason:'quality_not_met'}];
+  assert.ok(h.run('jobControls(job).children.map(b=>b.textContent)').includes("Change goal"),"other skip reasons still offer a new goal");
+  assert.match(h.run('skippedBatchOutcome(job)').children[1].textContent,/You can change the goal/);
+  const child=h.run('jobControls({id:"child",action_name:"transcode_media",status:"completed",reason_code:"unsupported_source",mode:"size",parent_action_id:"batch",parent_item_key:"one"}).children.map(b=>b.textContent)');
+  assert.ok(!child.includes("Change goal"));
+  // A goal batch's reconfigure dialog only switches goals, so nothing that
+  // picks an explicit profile is lost; a profile batch keeps that path.
+  h.context.job={...h.context.job,mode:undefined,batch_files:{...h.context.job.batch_files,reasons:[{count:2,reason:'unsupported_source'}]}};
+  assert.ok(h.run('jobControls(job).children.map(b=>b.textContent)').includes("Try another profile"));
+});
+
+test("an unsupported-source file row offers no goal change", async () => {
+  const h=harness();
+  h.context.items=[
+    {item_key:"cover",display_label:"Cover",status:"skip",can_reconfigure:true,mode:"size",reasons:["unsupported_source"]},
+    {item_key:"other",display_label:"Other",status:"skip",can_reconfigure:true,mode:"size",reasons:["quality_not_met"]}
+  ];
+  h.run('state.info={};state.detail="batch";state.detailRevision=2;$("job-detail").open=true;state.detailJob={status:"completed",batch:{}};api=async()=>({items,total:2});');
+  await h.run('loadBatchItems("batch",2)');
+  const rows=h.elements.get("batch-items-list").children;
+  const all = row=>[row,...row.children.flatMap(all)];
+  const text = row=>all(row).map(el=>el.textContent).filter(Boolean).join(" ");
+  assert.match(text(rows[0]),/does not support this source format yet/);
+  assert.doesNotMatch(text(rows[0]),/Change goal/);
+  assert.match(text(rows[1]),/Change goal/);
+});
+
 test("an all-skipped retry selects the saved files and requires another profile without sending work",async()=>{
   const h=harness(), reads=[], writes=[];
   h.context.reads=reads;h.context.writes=writes;
@@ -2454,6 +2490,8 @@ test("file details offer goal changes and keep-original decisions without duplic
   assert.ok(labels.includes("Keep original"));assert.ok(labels.includes("Change goal"));assert.ok(!labels.includes("Cancel"));
   const skipped=h.run('queuePresentation({action_name:"transcode_media",status:"completed",reason_code:"quality_not_met",candidate_ready:false})');
   assert.equal(skipped.status,"Skipped");assert.match(skipped.summary,/quality target; original kept/);
+  const unsupported=h.run('queuePresentation({action_name:"transcode_media",status:"completed",reason_code:"unsupported_source",candidate_ready:false})');
+  assert.equal(unsupported.status,"Skipped");assert.match(unsupported.summary,/does not support this source format yet/);
 });
 
 test("replacement from a batch row rechecks the exact candidate and ignores stale or unrelated files",async()=>{

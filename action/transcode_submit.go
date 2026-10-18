@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/httpclient"
 	"github.com/jakenesler/navigatorr/transcode/resilience"
@@ -83,6 +84,9 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 		if !caps.CompactAudio {
 			return StepResult{Status: StepFailed, Error: "worker does not support compact audio; upgrade the worker before encoding"}, nil
 		}
+	}
+	if origMap, _ := ec.State["original"].(map[string]any); len(mediainspect.CoverArtStreams(getStreamsList(origMap, "video"))) > 0 && !getBool(ec.State, "transcode_reconcile") && !e.workerSupportsCoverArt(ctx) {
+		return StepResult{Status: StepFailed, Error: errCoverArtWorker + " before encoding"}, nil
 	}
 	req := transcode.Request{ID: jobID, SourcePath: cleanPath, CandidatePath: candidatePath, Profile: profile, Plan: plan, IdempotencyKey: jobID, SourceSHA256: getString(ec.State, "original_sha256")}
 

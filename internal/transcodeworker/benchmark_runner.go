@@ -335,13 +335,14 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 	if !rep.Probed {
 		return fmt.Errorf("source media %s could not be probed (fail closed)", record.Source)
 	}
-	if len(rep.Video) == 0 {
+	mainVideo := rep.MainVideo()
+	if len(mainVideo) == 0 {
 		return fmt.Errorf("source media %s has no video streams (fail closed)", record.Source)
 	}
-	if len(rep.Video) > 1 {
-		return fmt.Errorf("source media %s has %d video streams; benchmark requires exactly 1 (fail closed)", record.Source, len(rep.Video))
+	if len(mainVideo) > 1 {
+		return fmt.Errorf("source media %s has %d video streams; benchmark requires exactly 1 (fail closed)", record.Source, len(mainVideo))
 	}
-	sourceVideo := rep.Video[0]
+	sourceVideo := mainVideo[0]
 	if record.Quality != nil && record.Quality.VMAF != nil && record.Quality.VMAF.Model != "" && sourceVideo.FPS >= 45 {
 		return fmt.Errorf("VMAF model %q is non-HFR and source FPS %.3f requires an HFR model (fail closed)", record.Quality.VMAF.Model, sourceVideo.FPS)
 	}
@@ -1444,13 +1445,13 @@ func (r *ProductionBenchmarkRunner) runSelection(
 	colorInfo := optimization.ColorInfo{
 		BitDepth: evidence.SourceBitDepth,
 	}
-	if len(rep.Video) > 0 {
-		colorInfo.ColorPrimaries = rep.Video[0].ColorPrimaries
-		colorInfo.ColorTransfer = rep.Video[0].ColorTransfer
-		colorInfo.ColorSpace = rep.Video[0].ColorSpace
-		colorInfo.PixelFormat = rep.Video[0].PixelFormat
+	if video := rep.MainVideo(); len(video) > 0 {
+		colorInfo.ColorPrimaries = video[0].ColorPrimaries
+		colorInfo.ColorTransfer = video[0].ColorTransfer
+		colorInfo.ColorSpace = video[0].ColorSpace
+		colorInfo.PixelFormat = video[0].PixelFormat
 		if colorInfo.BitDepth == 0 {
-			colorInfo.BitDepth = rep.Video[0].BitDepth
+			colorInfo.BitDepth = video[0].BitDepth
 		}
 	}
 
