@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jakenesler/navigatorr/maint"
+	"github.com/jakenesler/navigatorr/mediafile"
 )
 
 // Stream describes one ffprobe stream reduced to what maintenance needs.
@@ -59,7 +59,7 @@ func InspectFile(ctx context.Context, ffprobePath, path string) (Report, error) 
 	}
 	rep.SizeBytes = fi.Size()
 	rep.Container = strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
-	if maint.IsDangerousFilename(path) {
+	if mediafile.IsDangerousFilename(path) {
 		rep.DangerousFiles = []string{filepath.Base(path)}
 	}
 	rep.ExternalSubtitles = FindSidecars(path)
@@ -110,7 +110,7 @@ func InspectFile(ctx context.Context, ffprobePath, path string) (Report, error) 
 		lang := ""
 		for k, v := range st.Tags {
 			if strings.EqualFold(k, "language") {
-				lang = maint.NormalizeLang(v)
+				lang = mediafile.NormalizeLang(v)
 			}
 		}
 		switch st.CodecType {
@@ -292,7 +292,7 @@ func InspectDetailed(ctx context.Context, ffprobePath, path string) (DetailedRep
 		title := ""
 		for k, v := range st.Tags {
 			if strings.EqualFold(k, "language") {
-				lang = maint.NormalizeLang(v)
+				lang = mediafile.NormalizeLang(v)
 			}
 			if strings.EqualFold(k, "title") {
 				title = strings.TrimSpace(v)
@@ -893,7 +893,7 @@ func FindSidecars(mediaPath string) []string {
 		}
 		name := e.Name()
 		ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(name)), ".")
-		if !maint.SidecarSubExtensions[ext] {
+		if !mediafile.SidecarSubExtensions[ext] {
 			continue
 		}
 		base := strings.TrimSuffix(name, filepath.Ext(name))
@@ -920,7 +920,7 @@ func ScanDangerous(root string, maxFiles int) ([]string, error) {
 			return filepath.SkipAll
 		}
 		count++
-		if !d.IsDir() && maint.IsDangerousFilename(d.Name()) {
+		if !d.IsDir() && mediafile.IsDangerousFilename(d.Name()) {
 			out = append(out, p)
 		}
 		return nil
