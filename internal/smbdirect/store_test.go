@@ -14,12 +14,18 @@ import (
 type memoryShare struct {
 	files map[string][]byte
 	dirs  map[string]bool
+	// times, when non-nil, gives every closed write a distinct modification
+	// time that a rename preserves, like a real server.
+	times map[string]time.Time
+	clock int64
+	opens map[string]int
 }
 
 type memoryInfo struct {
 	name string
 	size int64
 	dir  bool
+	mod  time.Time
 }
 
 func (i memoryInfo) Name() string { return i.name }
@@ -30,7 +36,7 @@ func (i memoryInfo) Mode() os.FileMode {
 	}
 	return 0o600
 }
-func (i memoryInfo) ModTime() time.Time { return time.Time{} }
+func (i memoryInfo) ModTime() time.Time { return i.mod }
 func (i memoryInfo) IsDir() bool        { return i.dir }
 func (i memoryInfo) Sys() any           { return nil }
 
@@ -49,12 +55,24 @@ func (w *memoryWriter) Sync() error { return nil }
 func (w *memoryWriter) Close() error {
 	if !w.closed {
 		w.fs.files[w.name] = append([]byte(nil), w.Bytes()...)
+		w.fs.touch(w.name)
 		w.closed = true
 	}
 	return nil
 }
 
+func (m *memoryShare) touch(name string) {
+	if m.times != nil {
+		m.clock++
+		m.times[name] = time.Unix(1_700_000_000, m.clock)
+	}
+}
+
 func (m *memoryShare) Open(name string) (readFile, error) {
+	if m.opens == nil {
+		m.opens = make(map[string]int)
+	}
+	m.opens[name]++
 	b, ok := m.files[name]
 	if !ok {
 		return nil, os.ErrNotExist
@@ -82,7 +100,7 @@ func (m *memoryShare) Stat(name string) (os.FileInfo, error) {
 	if !ok {
 		return nil, os.ErrNotExist
 	}
-	return memoryInfo{name: filepath.Base(name), size: int64(len(b))}, nil
+	return memoryInfo{name: filepath.Base(name), size: int64(len(b)), mod: m.times[name]}, nil
 }
 
 func (m *memoryShare) Mkdir(name string, _ os.FileMode) error {
@@ -106,6 +124,10 @@ func (m *memoryShare) RenameNoReplace(oldName, newName string) error {
 	}
 	m.files[newName] = b
 	delete(m.files, oldName)
+	if m.times != nil {
+		m.times[newName] = m.times[oldName]
+		delete(m.times, oldName)
+	}
 	return nil
 }
 
@@ -114,6 +136,9 @@ func (m *memoryShare) Remove(name string) error {
 		return os.ErrNotExist
 	}
 	delete(m.files, name)
+	if m.times != nil {
+		delete(m.times, name)
+	}
 	return nil
 }
 

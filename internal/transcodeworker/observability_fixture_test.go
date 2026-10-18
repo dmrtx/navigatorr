@@ -64,8 +64,15 @@ func TestFinalSizeRejectionPreservesSourceBeforePublication(t *testing.T) {
 				}
 			}
 			if candidateBytes == 85 {
-				if job.PhaseCosts["publication"].NASWrittenBytes != nil || job.PhaseCosts["cleanup"].Attempts != 1 {
-					t.Fatal("local write claimed NAS bytes or cleanup lost", job.PhaseCosts)
+				// The destination sits under an external (mounted NAS) root, so
+				// the publication reports the M bytes it wrote there and no
+				// read-back; a same-filesystem rename commits it.
+				pub := job.PhaseCosts["publication"]
+				if pub.NASWrittenBytes == nil || *pub.NASWrittenBytes != 85 || pub.NASReadBytes == nil || *pub.NASReadBytes != 0 || job.PhaseCosts["cleanup"].Attempts != 1 {
+					t.Fatal("mounted publication bytes wrong or cleanup lost", job.PhaseCosts)
+				}
+				if _, fallback := job.PhaseCosts["publication_copy_fallback"]; fallback {
+					t.Fatal("atomic rename recorded as a copy fallback", job.PhaseCosts)
 				}
 			}
 		})

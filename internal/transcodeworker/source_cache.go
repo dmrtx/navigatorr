@@ -5,10 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -154,8 +157,14 @@ func (w *Worker) statSourceForCache(ctx context.Context, cleanSource string) (os
 }
 
 // hashLocalFileSHA256 hashes LOCAL bytes only (never a NAS path) and returns
-// the lowercase hex digest. It honors cancellation between chunks.
+// the lowercase hex digest. It honors cancellation between chunks. It always
+// reads the whole file; a job run's digest memo records the result so later
+// checks of the same unchanged file can use verifiedLocalSHA256.
 func hashLocalFileSHA256(ctx context.Context, path string) (string, error) {
+	digestMemoFrom(ctx).countRead()
+	if onLocalHashRead != nil {
+		onLocalHashRead(path)
+	}
 	before, err := os.Lstat(path)
 	if err != nil || !before.Mode().IsRegular() {
 		return "", fmt.Errorf("%w: local file for hashing %s is not a regular file", ErrSourceInvalid, path)
@@ -192,12 +201,16 @@ func hashLocalFileSHA256(ctx context.Context, path string) (string, error) {
 	if err != nil || !os.SameFile(before, after) || total != before.Size() || after.Size() != total || !before.ModTime().Equal(after.ModTime()) {
 		return "", fmt.Errorf("%w: local file changed while hashing %s", ErrSourceInvalid, path)
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	sum := hex.EncodeToString(h.Sum(nil))
+	digestMemoFrom(ctx).remember(path, after, sum)
+	return sum, nil
 }
 
 // verifyLocalDigest enforces the expected source digest against LOCAL bytes.
 // An empty expected digest is a legacy no-op (size identity only); a mismatch
-// fails closed and the caller must never publish the cache entry.
+// fails closed and the caller must never publish the cache entry. Within one
+// job run a digest already established for this exact file version (see
+// digestMemo) is reused instead of reading the file again.
 func verifyLocalDigest(ctx context.Context, path, expectedSHA string) error {
 	norm, err := normalizeExpectedSourceSHA(expectedSHA)
 	if err != nil {
@@ -206,11 +219,17 @@ func verifyLocalDigest(ctx context.Context, path, expectedSHA string) error {
 	if norm == "" {
 		return nil
 	}
-	actual, err := hashLocalFileSHA256(ctx, path)
+	actual, err := verifiedLocalSHA256(ctx, path)
 	if err != nil {
 		return err
 	}
-	if !strings.EqualFold(norm, actual) {
+	return compareSourceDigest(norm, actual)
+}
+
+// compareSourceDigest is the fail-closed comparison every source digest check
+// shares, whether the digest came from a local read or a streaming transfer.
+func compareSourceDigest(expectedNorm, actual string) error {
+	if !strings.EqualFold(expectedNorm, actual) {
 		return fmt.Errorf("%w: local source bytes do not match expected sha256 (fail closed, cache entry never published)", ErrSizeMismatch)
 	}
 	return nil
@@ -300,10 +319,16 @@ func writeSourceCacheMeta(metaPath string, meta sourceIdentity) {
 
 // populateSourceCacheFromLocal atomically publishes an already-local file
 // (a staged input or a verified download) into the shared cache without any
-// NAS read. Before publishing it hashes the LOCAL file and compares it to the
-// expected source digest; a mismatch is never published. Concurrent publishers
-// race safely via no-clobber commit: the loser keeps the winner after
-// revalidation.
+// NAS read. Before publishing it checks the LOCAL file against the expected
+// source digest (within a job run, a digest proved while the bytes streamed is
+// reused by fingerprint); a mismatch is never published. The entry is a hard
+// link to the local file, so populating costs no copy; only a filesystem that
+// refuses the link gets a local copy. Concurrent publishers race safely via
+// no-clobber commit: the loser keeps the winner after revalidation.
+//
+// Sharing the inode with the job's staged input is the same arrangement a
+// cache hit already uses (acquireCachedSourceLease): both names are
+// worker-private and only ever read.
 func populateSourceCacheFromLocal(ctx context.Context, cacheDir, cleanSource string, fi os.FileInfo, localPath, expectedSHA string) (string, error) {
 	if strings.TrimSpace(cacheDir) == "" {
 		return "", fmt.Errorf("%w: empty cache dir", ErrDestinationInvalid)
@@ -325,34 +350,28 @@ func populateSourceCacheFromLocal(ctx context.Context, cacheDir, cleanSource str
 	if err := verifyLocalDigest(ctx, localPath, norm); err != nil {
 		return "", err
 	}
-	// Stage through a unique temp file in the cache dir, then no-clobber
-	// publish. A concurrent winner yields ErrDestinationExists, which is a
-	// successful share, not a failure.
-	tmp, err := os.CreateTemp(cacheDir, ".cache-stage-*")
+	li, err := regularFileInfo(localPath)
 	if err != nil {
-		return "", fmt.Errorf("%w: creating cache temp: %v", ErrStorageIO, err)
-	}
-	tmpName := tmp.Name()
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tmp.Close()
-			_ = os.Remove(tmpName)
-		}
-	}()
-	if err := copyRegularFileTo(ctx, localPath, tmp, fi.Size(), 0o644); err != nil {
 		return "", err
 	}
-	if err := commitNoReplace(ctx, tmpName, dataPath); err != nil {
-		// Another job won the race: revalidate the winner before reuse.
-		if hit, ok := lookupSourceCache(cacheDir, cleanSource, fi, norm); ok {
-			committed = true
-			_ = os.Remove(tmpName)
-			return hit, nil
-		}
-		return "", err
+	if li.Size() != fi.Size() {
+		return "", fmt.Errorf("%w: local copy of %s does not match the source size (fail closed)", ErrSizeMismatch, cleanSource)
 	}
-	committed = true
+	if lerr := os.Link(localPath, dataPath); lerr != nil {
+		if errors.Is(lerr, fs.ErrExist) {
+			// Another job won the race: revalidate the winner before reuse.
+			if hit, ok := lookupSourceCache(cacheDir, cleanSource, fi, norm); ok {
+				return hit, nil
+			}
+			return "", fmt.Errorf("%w: %s", ErrDestinationExists, dataPath)
+		}
+		if err := copySourceCacheEntry(ctx, localPath, dataPath, fi.Size()); err != nil {
+			if hit, ok := lookupSourceCache(cacheDir, cleanSource, fi, norm); ok {
+				return hit, nil
+			}
+			return "", err
+		}
+	}
 	writeSourceCacheMeta(metaPath, sourceIdentity{
 		Source:  cleanSource,
 		Size:    fi.Size(),
@@ -362,6 +381,32 @@ func populateSourceCacheFromLocal(ctx context.Context, cacheDir, cleanSource str
 	})
 	syncDir(cacheDir)
 	return dataPath, nil
+}
+
+// copySourceCacheEntry is the populate fallback for filesystems that refuse a
+// hard link: a local temp copy committed with no-clobber semantics.
+func copySourceCacheEntry(ctx context.Context, localPath, dataPath string, size int64) error {
+	cacheDir := filepath.Dir(dataPath)
+	tmp, err := os.CreateTemp(cacheDir, ".cache-stage-*")
+	if err != nil {
+		return fmt.Errorf("%w: creating cache temp: %v", ErrStorageIO, err)
+	}
+	tmpName := tmp.Name()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tmp.Close()
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if err := copyRegularFileTo(ctx, localPath, tmp, size, 0o644); err != nil {
+		return err
+	}
+	if err := commitNoReplace(ctx, tmpName, dataPath); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 // ensureSourceCached guarantees a local cache entry for an external/SMB source
@@ -386,6 +431,7 @@ func (w *Worker) ensureSourceCached(ctx context.Context, cleanSource, expectedSH
 			cost.CacheMisses = knownCount(0)
 			cost.NASReadBytes = knownCount(0)
 		}
+		pinSourceCacheEntry(cacheDir, cleanSource, fi, norm, benchmarkPinOwner)
 		_ = w.sweepSourceCache()
 		return hit, nil
 	}
@@ -413,21 +459,35 @@ func (w *Worker) ensureSourceCached(ctx context.Context, cleanSource, expectedSH
 			_ = os.Remove(tmpName + ".tmp")
 		}
 	}()
+	// The digest is computed while the bytes stream, so publishing the entry
+	// needs no second local read. A failed copy is returned as is: it is never
+	// repeated here, so one call reads N at most once (plus any reconnect
+	// resume the store reports).
+	var streamedSHA string
 	if w.mediaStore != nil && w.mediaStore.Maps(cleanSource) {
-		if derr := w.mediaStore.DownloadAtomic(ctx, cleanSource, tmpName); derr != nil {
-			return "", derr
-		}
-	} else {
-		if serr := stageInputAtomic(ctx, cleanSource, tmpName, nil); serr != nil {
-			// stageInputAtomic expects the destination to be absent and
-			// publishes via temp+rename internally; it cannot write directly
-			// to tmpName which we already created. Remove it and retry as a
-			// plain staged copy target.
-			_ = os.Remove(tmpName)
-			if serr2 := StageInputAtomic(ctx, cleanSource, tmpName); serr2 != nil {
-				return "", serr2
+		if verified, ok := w.mediaStore.(verifiedDownloader); ok {
+			tr, derr := verified.DownloadAtomicVerified(ctx, cleanSource, tmpName, norm)
+			if cost := sourceCost(ctx); cost != nil {
+				cost.NASReadBytes = knownCount(tr.ReadBytes)
+				if tr.Attempts > 1 {
+					cost.Attempts = tr.Attempts
+				}
+			}
+			if derr != nil {
+				return "", derr
+			}
+			streamedSHA = tr.SHA256
+		} else {
+			if derr := w.mediaStore.DownloadAtomic(ctx, cleanSource, tmpName); derr != nil {
+				return "", derr
 			}
 		}
+	} else {
+		sum, _, serr := stageInputAtomicHashed(ctx, cleanSource, tmpName)
+		if serr != nil {
+			return "", serr
+		}
+		streamedSHA = sum
 	}
 	// Verify the download matches the fingerprinted identity AND the expected
 	// content digest before publish. A source that changed mid-download is
@@ -436,18 +496,26 @@ func (w *Worker) ensureSourceCached(ctx context.Context, cleanSource, expectedSH
 	if err != nil || !di.Mode().IsRegular() || di.Size() != fi.Size() {
 		return "", fmt.Errorf("%w: downloaded source %s size mismatch (fail closed)", ErrSizeMismatch, cleanSource)
 	}
-	if cost := sourceCost(ctx); cost != nil {
-		if w.mediaStore != nil && w.mediaStore.Maps(cleanSource) {
+	if cost := sourceCost(ctx); cost != nil && cost.NASReadBytes == nil {
+		_, external := externalRootFor(cleanSource, w.cfg.ExternalRoots)
+		if external || (w.mediaStore != nil && w.mediaStore.Maps(cleanSource)) {
 			cost.NASReadBytes = knownCount(di.Size())
 		}
 	}
-	if err := verifyLocalDigest(ctx, tmpName, norm); err != nil {
+	if streamedSHA != "" {
+		if norm != "" {
+			if err := compareSourceDigest(norm, streamedSHA); err != nil {
+				return "", err
+			}
+		}
+	} else if err := verifyLocalDigest(ctx, tmpName, norm); err != nil {
 		return "", err
 	}
 	if err := commitNoReplace(ctx, tmpName, dataPath); err != nil {
 		if hit, ok := lookupSourceCache(cacheDir, cleanSource, fi, norm); ok {
 			_ = os.Remove(tmpName)
 			committed = true
+			pinSourceCacheEntry(cacheDir, cleanSource, fi, norm, benchmarkPinOwner)
 			return hit, nil
 		}
 		return "", err
@@ -461,6 +529,7 @@ func (w *Worker) ensureSourceCached(ctx context.Context, cleanSource, expectedSH
 		SHA256:  norm,
 	})
 	syncDir(cacheDir)
+	pinSourceCacheEntry(cacheDir, cleanSource, fi, norm, benchmarkPinOwner)
 	_ = w.sweepSourceCache()
 	return dataPath, nil
 }
@@ -602,11 +671,7 @@ func (w *Worker) sweepSourceCache() error {
 		return nil
 	}
 	cacheDir := w.sourceCacheDir()
-	entries, err := os.ReadDir(cacheDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
+	if _, err := os.Stat(cacheDir); err != nil {
 		return nil // best-effort: never fail a job on sweep I/O
 	}
 	type entry struct {
@@ -614,41 +679,20 @@ func (w *Worker) sweepSourceCache() error {
 		size int64
 		mod  time.Time
 	}
-	var datas []entry
-	var total int64
-	for _, e := range entries {
-		name := e.Name()
-		if strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".meta.json") || strings.HasSuffix(name, ".lock") {
-			continue
-		}
-		full := filepath.Join(cacheDir, name)
-		fi, err := os.Lstat(full)
-		if err != nil || !fi.Mode().IsRegular() {
-			continue
-		}
-		datas = append(datas, entry{path: full, size: fi.Size(), mod: fi.ModTime()})
-		total += fi.Size()
-	}
 	ttl := w.sourceCacheTTL()
 	now := time.Now()
-	// Expire by TTL first (oldest first), then enforce size bound LRU.
-	for _, d := range datas {
-		if ttl > 0 && now.Sub(d.mod) > ttl {
-			_ = os.Remove(d.path)
-			_ = os.Remove(cacheMetaPathForData(cacheDir, filepath.Base(d.path)))
-			// Recompute total lazily below; keep sweeping.
-		}
+	pinned := liveSourceCachePins(cacheDir, ttl, now)
+	isPinned := func(path string) bool {
+		return pinned[sourceCacheKeyOfData(filepath.Base(path))]
 	}
-	// Re-list sizes after TTL expiry for the size bound.
-	if max := w.sourceCacheMaxBytes(); max > 0 {
-		// Re-stat remaining entries oldest-first.
-		entries2, err := os.ReadDir(cacheDir)
+	list := func() ([]entry, int64, int64) {
+		var out []entry
+		var total, largest int64
+		names, err := os.ReadDir(cacheDir)
 		if err != nil {
-			return nil
+			return nil, 0, 0
 		}
-		var remaining []entry
-		var tot int64
-		for _, e := range entries2 {
+		for _, e := range names {
 			name := e.Name()
 			if strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".meta.json") || strings.HasSuffix(name, ".lock") {
 				continue
@@ -658,32 +702,79 @@ func (w *Worker) sweepSourceCache() error {
 			if err != nil || !fi.Mode().IsRegular() {
 				continue
 			}
-			remaining = append(remaining, entry{path: full, size: fi.Size(), mod: fi.ModTime()})
-			tot += fi.Size()
-		}
-		if tot > max {
-			// Oldest first.
-			for i := 0; i < len(remaining); i++ {
-				for j := i + 1; j < len(remaining); j++ {
-					if remaining[j].mod.Before(remaining[i].mod) {
-						remaining[i], remaining[j] = remaining[j], remaining[i]
-					}
-				}
+			out = append(out, entry{path: full, size: fi.Size(), mod: fi.ModTime()})
+			total += fi.Size()
+			if fi.Size() > largest {
+				largest = fi.Size()
 			}
+		}
+		return out, total, largest
+	}
+	datas, _, _ := list()
+	// Expire by TTL first, then enforce the size bound oldest first. A pin
+	// (benchmark or unfinished job) protects an entry from size-pressure
+	// eviction only; the TTL still bounds every entry's lifetime.
+	for _, d := range datas {
+		if ttl > 0 && now.Sub(d.mod) > ttl {
+			_ = os.Remove(d.path)
+			_ = os.Remove(cacheMetaPathForData(cacheDir, filepath.Base(d.path)))
+		}
+	}
+	if configured := w.sourceCacheMaxBytes(); configured > 0 {
+		remaining, tot, largest := list()
+		bound := effectiveSourceCacheMaxBytes(configured, largest)
+		if bound > configured {
+			noteSourceCache(cacheDir, "cap", fmt.Sprintf("source cache: raising the %d-byte cap to %d bytes (1.5x the largest entry) so it can hold that source", configured, bound))
+		}
+		// Never let the cache push the work disk below its free-space floor,
+		// whatever the configured or raised cap says.
+		free, reserve, diskKnown := sourceCacheDiskBudget(cacheDir)
+		if diskKnown {
+			if room := tot + free - reserve; room < bound {
+				if room < 0 {
+					room = 0
+				}
+				bound = room
+				noteSourceCache(cacheDir, "disk", fmt.Sprintf("source cache: limiting the cache to %d bytes to keep %d bytes free on the work disk", bound, reserve))
+			}
+		}
+		sort.SliceStable(remaining, func(i, j int) bool { return remaining[i].mod.Before(remaining[j].mod) })
+		evict := func(d entry) {
+			if err := os.Remove(d.path); err == nil {
+				_ = os.Remove(cacheMetaPathForData(cacheDir, filepath.Base(d.path)))
+				tot -= d.size
+				free += d.size
+			}
+		}
+		gone := map[string]bool{}
+		for _, d := range remaining {
+			if tot <= bound {
+				break
+			}
+			// Never delete a file modified within the last hour: it may
+			// belong to an active job that just populated it.
+			if now.Sub(d.mod) < time.Hour || isPinned(d.path) {
+				continue
+			}
+			evict(d)
+			gone[d.path] = true
+		}
+		// Below the free-space floor pins yield too: an active job reads its
+		// own hard link, so dropping the shared name never breaks it, it only
+		// costs a later retry a fresh download.
+		if diskKnown && free < reserve {
 			for _, d := range remaining {
-				if tot <= max {
+				if free >= reserve {
 					break
 				}
-				// Never delete a file modified within the last hour: it may
-				// belong to an active job that just populated it.
-				if now.Sub(d.mod) < time.Hour {
+				if gone[d.path] || now.Sub(d.mod) < time.Hour {
 					continue
 				}
-				if err := os.Remove(d.path); err == nil {
-					_ = os.Remove(cacheMetaPathForData(cacheDir, filepath.Base(d.path)))
-					tot -= d.size
-				}
+				evict(d)
 			}
+		}
+		if tot > bound {
+			noteSourceCache(cacheDir, "over", fmt.Sprintf("source cache: pinned or just-populated entries keep it at %d bytes, above its %d-byte bound", tot, bound))
 		}
 	}
 	return nil

@@ -73,7 +73,10 @@ func verifyCheckpointCandidate(ctx context.Context, job *JobRecord, path string)
 	if err != nil || !info.Mode().IsRegular() || info.Size() != job.CandidateSizeBytes {
 		return fmt.Errorf("%w: local candidate no longer matches validated size/type; never publish", ErrSourceInvalid)
 	}
-	sha, err := hashLocalFileSHA256(ctx, path)
+	// A fresh runner (restart or scheduled finalization retry) has an empty
+	// digest memo and reads the whole candidate; the runner that just
+	// validated it reuses that digest while the file's fingerprint is intact.
+	sha, err := verifiedLocalSHA256(ctx, path)
 	if err != nil {
 		return err
 	}
@@ -182,7 +185,10 @@ func (w *Worker) validateEncodedCandidateFull(ctx context.Context, localCandidat
 			return attest, fmt.Errorf("%w: local candidate duration %.1fs diverges from source %.1fs (diff %.1fs, fail closed, never publish)", ErrSourceInvalid, candProbe.DurationSec, srcProbe.DurationSec, d)
 		}
 	}
-	verifiedSHA, err := hashLocalFileSHA256(ctx, localCandidate)
+	// Within a job run this is a strict stat-fingerprint check against the
+	// baseline above (same inode, size and modification time), not a second
+	// read; without a job run's digest memo it reads the file again.
+	verifiedSHA, err := verifiedLocalSHA256(ctx, localCandidate)
 	if err != nil {
 		return attest, err
 	}

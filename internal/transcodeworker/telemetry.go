@@ -161,7 +161,10 @@ func telemetryFor(job *JobRecord, now time.Time) transcode.JobTelemetry {
 	}
 	for name, duration := range map[string]*int64{"queue": t.QueueDurationMs, "encode": t.EncodeDurationMs, "validation": t.ValidationDurationMs} {
 		if duration != nil {
-			t.PhaseCosts[name] = transcode.PhaseCost{DurationMs: *duration, Attempts: 1}
+			// Timestamps own the duration; byte counters a phase recorded
+			// (for example an encode reading an unstaged NAS source) survive.
+			cost := t.PhaseCosts[name]
+			t.PhaseCosts[name] = transcode.PhaseCost{DurationMs: *duration, Attempts: 1, NASReadBytes: cost.NASReadBytes, NASWrittenBytes: cost.NASWrittenBytes}
 		}
 	}
 	t.WallDurationMs = durationMilliseconds(job.CreatedAt, end)
@@ -262,7 +265,9 @@ func knownCount(n int64) *int64 { return &n }
 
 func (w *Worker) persistPhaseCost(jobDir, jobFile string, job *JobRecord, phase string, start time.Time, cost transcode.PhaseCost) {
 	cost.DurationMs = time.Since(start).Milliseconds()
-	cost.Attempts = 1
+	if cost.Attempts <= 0 {
+		cost.Attempts = 1 // one phase run; a transfer that reconnected reports more
+	}
 	shadow := *job
 	_, _ = w.persistOperationalProgress(jobDir, jobFile, &shadow, func(latest *JobRecord) {
 		if latest.PhaseCosts == nil {
