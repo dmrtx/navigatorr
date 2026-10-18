@@ -149,7 +149,7 @@ type TranscodeConfig struct {
 	DefaultProfile    string            `yaml:"default_profile"`
 	MinSavingsPercent float64           `yaml:"min_savings_percent"`
 	MaxParallelJobs   int               `yaml:"max_parallel_jobs"`
-	SSH               SSHExecutorConfig `yaml:"ssh"`
+	SSH               SSHExecutorConfig `yaml:"ssh"` // retired; parsed for compatibility only
 	// HTTP configures the dark/non-default persistent-daemon transport.
 	// Canonical key is `http` (consistent with `ssh`); `worker_http` is
 	// accepted as an alias and merged (explicit `http` wins).
@@ -610,6 +610,9 @@ func (t *TranscodeConfig) Validate() error {
 	return nil
 }
 
+// SSHExecutorConfig is the retired SSH executor's settings. The executor
+// itself is gone; the `transcode.ssh` block is still parsed so existing
+// configs keep loading under strict YAML decoding, but nothing reads it.
 type SSHExecutorConfig struct {
 	Host              string                 `yaml:"host"`
 	Port              int                    `yaml:"port"`

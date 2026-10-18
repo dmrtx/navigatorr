@@ -23,7 +23,7 @@ func (s *Server) workerActivity(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) workers(w http.ResponseWriter, r *http.Request) {
 	transport := s.cfg.Transcode.Executor
-	address := s.cfg.Transcode.SSH.Host
+	address := ""
 	if transport == "http" {
 		if endpoint, err := url.Parse(s.cfg.Transcode.EffectiveHTTPConfig().BaseURL); err == nil {
 			address = endpoint.Host

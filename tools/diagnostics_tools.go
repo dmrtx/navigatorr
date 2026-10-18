@@ -237,8 +237,8 @@ func registerDiagnosticsTools(s *server.MCPServer, d DiagnosticsDeps) {
 				}
 			}
 
-			// 6. Transcode executor. Automatic execution is HTTP-only; SSH is
-			// retired/admin-only and is never wired here.
+			// 6. Transcode executor. Execution is HTTP-only; the SSH
+			// executor has been removed.
 			var tcInfo map[string]any
 			if d.Transcode != nil {
 				tcInfo = map[string]any{
