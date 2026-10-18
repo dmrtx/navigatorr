@@ -16,7 +16,7 @@ func TestJoyManagedProfilePersistenceDoesNotChangeExistingProfile(t *testing.T) 
 		t.Fatal(err)
 	}
 	for _, name := range []string{"joy", "joy-1600"} {
-		file := "../../docs/examples/transcode-profile-" + name + ".json"
+		file := "../../docs/transcode/examples/transcode-profile-" + name + ".json"
 		b, err := os.ReadFile(file)
 		if err != nil {
 			t.Fatal(err)

@@ -12,7 +12,7 @@ import (
 )
 
 func TestJoyBenchmarkRequiresUpdatedWorkerAndPreservesABR(t *testing.T) {
-	b, err := os.ReadFile("../docs/examples/transcode-profile-joy.json")
+	b, err := os.ReadFile("../docs/transcode/examples/transcode-profile-joy.json")
 	if err != nil {
 		t.Fatal(err)
 	}

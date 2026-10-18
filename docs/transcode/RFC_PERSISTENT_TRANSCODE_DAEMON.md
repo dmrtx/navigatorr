@@ -93,7 +93,7 @@ Coordinator: Navigatorr `main.go` + `transcode/` + `action/`
   case-insensitive, `subtle.ConstantTimeCompare`, JSON error envelope,
   `MaxBytesReader`, content-type discipline). PR1 follows the same pattern.
 
-Docs: `docs/TRANSCODING.md` (policy-as-data, recipe bundle schema v1/v2,
+Docs: `docs/transcode/TRANSCODING.md` (policy-as-data, recipe bundle schema v1/v2,
 plan resolution + worker boundary, LKG/rollback, candidate-only invariant,
 SHA-256 source integrity, benchmark optimization).
 

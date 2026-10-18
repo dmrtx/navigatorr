@@ -42,7 +42,7 @@ Código: `transcode/optimization/selector.go:140`, con pruebas existentes
 | 5. Encadenamiento de benchmarks | Ya corregido y con regresiones de revisión explícita, nueva acción/reinicio, cancelación y codificación directa. | Mantener esas pruebas; no crear otro mecanismo de búsqueda. |
 | 6. Históricos sin outcome | No requiere backfill para `action_status`: se calcula al leer. Se verificó en el benchmark antiguo de Hikaru. `action_detail` devuelve el estado persistido. | Aclarar qué herramienta consultar y sus contratos; no reescribir acciones históricas para duplicar una vista derivada. |
 | 7. VMAF de 10 bits | Corregido; regresiones permanentes en `benchmark_native10_test.go`. | Conservar la prueba del pipeline y el rechazo sin capacidad. La prueba real depende de FFmpeg/libvmaf disponibles. |
-| 8. Política compact opaca | La política existe en `transcode/audio.go` y está documentada en `docs/TRANSCODING.md`; no es suficientemente descubrible desde el schema MCP. | Añadir descripción/consulta de política, reutilizando la implementación existente. No hace falta añadir knobs ni otro optimizador. |
+| 8. Política compact opaca | La política existe en `transcode/audio.go` y está documentada en `docs/transcode/TRANSCODING.md`; no es suficientemente descubrible desde el schema MCP. | Añadir descripción/consulta de política, reutilizando la implementación existente. No hace falta añadir knobs ni otro optimizador. |
 | 9. Fallback de audio ambiguo | Es un dato de estimación, no una orden de conversión. `planned_audio` ya corrige la lectura operativa. | Describirlo explícitamente como respaldo del estimador; mantener compatibilidad del campo. |
 | 10. Sin validación final de audio | Parcialmente incorrecto: ya se comprueban codec, cantidad de pistas, idioma conocido y canales, antes de publicar el candidato. | Faltan comprobaciones específicas de disposiciones de audio y tiempo por pista. La comprobación actual de duración es del archivo, no de cada audio. Evaluar bitrate con tolerancia, no exigir una igualdad exacta al objetivo AAC. |
 | 11. Overrides ocultando bundle | Confirmado: 15 managed, precedencia managed > static_config > active_bundle y nombres coincidentes. | Mostrar qué perfil base está oculto y avisar de diferencias. No introducir herencia/patches globales sin necesidad. Una actualización del bundle no cambia un override completo. |
@@ -100,7 +100,7 @@ los perfiles activos.
 
 - Selección: se conserva la política y se publican mejor score, tolerancia,
   umbral y candidatos fuera del margen. Regresión con los cuatro resultados
-  citados de Eminence y orden de entrada variable.
+  citados de Ember Court y orden de entrada variable.
 - Muestras rechazadas: decisiones nuevas conservan timestamp, valor y mínimo;
   los históricos solo reconstruyen datos respaldados por su petición persistida.
 - Audio: política visible desde `recipe_get`, disposiciones explícitas y
@@ -111,7 +111,7 @@ los perfiles activos.
   la comprobación de adopción inmediatamente anterior a eliminar el original.
 - Diagnostics: conteos SQL sin límite de página, estados definidos y errores de
   base de datos visibles como degradación, nunca como cero trabajos.
-- Perfil Main10 propuesto y revisable en `docs/examples/`: mantiene 92/88 y
+- Perfil Main10 propuesto y revisable en `docs/transcode/examples/`: mantiene 92/88 y
   tolerancia 0,5, agrega VMAF v1, p5 84, peor ventana 85/5 s, CAMBI 6/16
   full-reference y validación final sampled. No se relajan límites.
 
@@ -125,7 +125,7 @@ Este último usa Sonarr aislado y evidencia determinista del worker: no equivale
 a promover una temporada real en producción. También se conserva la prueba de
 codificación directa sin capacidad VMAF.
 
-Prueba de perfil sobre Eminence S01E05: acción
+Prueba de perfil sobre Ember Court S01E05: acción
 `act-benchmark-transcode-0000000000000000`, fuente
 `42e89feaac584cc848618e830af53292cb6ad98088aad84f71b742bec7996935`.
 Es un benchmark de muestras y no autoriza por sí mismo a sustituir el episodio.

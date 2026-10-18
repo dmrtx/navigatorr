@@ -129,7 +129,7 @@ profiles:
   # Offline-quality example: quality mode plus the bounded typed knobs FFmpeg
   # VideoToolbox actually consumes for file transcoding. Starting-point values
   # only — verify on real hardware via candidate-only encodes with
-  # replace_original=false (see docs/VIDEOTOOLBOX_PROFILES.md). Irrelevant or
+  # replace_original=false (see docs/transcode/VIDEOTOOLBOX_PROFILES.md). Irrelevant or
   # dangerous controls (require_sw/allow_sw, alpha_quality,
   # frames_before/after, low_delay, bufsize, bare bitrate/max_bitrate
   # spellings) are not schema fields and are rejected by strict decoding.

@@ -16,7 +16,7 @@ import (
 
 func joyPlan(t *testing.T) *transcode.Plan {
 	t.Helper()
-	return joyPlanFromFile(t, "../../docs/examples/transcode-profile-joy.json")
+	return joyPlanFromFile(t, "../../docs/transcode/examples/transcode-profile-joy.json")
 }
 
 func joyPlanFromFile(t *testing.T, path string) *transcode.Plan {

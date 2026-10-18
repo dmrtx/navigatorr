@@ -666,7 +666,7 @@ func TestCandidateSelector_NonCopiedAudioCannotWinByUnderestimation(t *testing.T
 	}
 }
 
-func TestCandidateSelectorEminenceExplainsQualityMargin(t *testing.T) {
+func TestCandidateSelectorEmberCourtExplainsQualityMargin(t *testing.T) {
 	scores := []float64{95.6818, 94.8815, 93.8003, 92.5063}
 	sizes := []int64{252026156, 214098884, 186143984, 165337383}
 	ids := []string{"crf20", "crf22", "crf24", "crf26"}
