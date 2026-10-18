@@ -3,6 +3,7 @@ package action
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -357,6 +358,67 @@ func TestAcceptResolvesSHAOnlyAfterActualVerification(t *testing.T) {
 		} else if r.Status != StepCompleted || v["original_sha256_pending"] != nil || v["original_integrity"] != "verified" {
 			t.Fatalf("SHA not finalized: %+v", r)
 		}
+	}
+}
+
+func TestAcceptReportsOriginalVerificationProgress(t *testing.T) {
+	st := setupTestStore(t)
+	e := NewEngine(EngineDeps{Store: st})
+	content := []byte(strings.Repeat("original bytes ", 10000))
+	p := filepath.Join(t.TempDir(), "original.mkv")
+	if err := os.WriteFile(p, content, 0600); err != nil {
+		t.Fatal(err)
+	}
+	ec := testReconcileEC("")
+	ec.InstanceID = "act-accept-progress"
+	ec.State["resolved_path"], ec.State["original_sha256"] = p, fmt.Sprintf("%x", sha256.Sum256(content))
+	// Preflight leaves its last phase behind; accept must not keep showing it.
+	ec.State["work_progress"] = map[string]any{"phase": "probing_source"}
+	if err := st.CreateActionInstance(store.ActionInstance{ID: ec.InstanceID, ActionName: "transcode_media", Status: StatusRunning, InputsJSON: "{}", StateJSON: toJSON(ec.State), OutputsJSON: "{}"}); err != nil {
+		t.Fatal(err)
+	}
+	persisted := func() map[string]any {
+		inst, err := st.GetActionInstance(ec.InstanceID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var state map[string]any
+		if err := json.Unmarshal([]byte(inst.StateJSON), &state); err != nil {
+			t.Fatal(err)
+		}
+		progress, _ := state["work_progress"].(map[string]any)
+		return progress
+	}
+	for i := 0; i < mediaHashConcurrency; i++ {
+		e.hashSlots <- struct{}{}
+	}
+	done := make(chan StepResult, 1)
+	go func() {
+		r, err := e.stepTranscodeAccept(context.Background(), ec)
+		if err != nil {
+			t.Error(err)
+		}
+		done <- r
+	}()
+	for deadline := time.Now().Add(3 * time.Second); persisted()["phase"] != "waiting_for_hash_slot"; {
+		if time.Now().After(deadline) {
+			t.Fatalf("queued hash not reported as waiting: %+v", persisted())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if got := persisted()["total_bytes"]; got != float64(len(content)) {
+		t.Fatalf("waiting phase total %v, want %d", got, len(content))
+	}
+	<-e.hashSlots
+	r := <-done
+	if r.Status != StepCompleted || ec.State["original_integrity"] != "verified" {
+		t.Fatalf("original not verified: %+v", r)
+	}
+	if got := persisted(); got["phase"] != "verifying_original" || got["bytes_read"] != float64(len(content)) || got["total_bytes"] != float64(len(content)) {
+		t.Fatalf("hash progress not persisted through completion: %+v", got)
+	}
+	if _, ok := ec.State["work_progress"]; ok {
+		t.Fatalf("finished hash left current work behind: %+v", ec.State["work_progress"])
 	}
 }
 

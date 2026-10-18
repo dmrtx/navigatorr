@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/jakenesler/navigatorr/transcode/resilience"
 )
@@ -28,9 +29,38 @@ func (e *Engine) stepTranscodeAccept(ctx context.Context, ec *ExecutionContext) 
 	if err != nil {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("integrity violation: original media %s is no longer accessible: %v", origPath, err)}, nil
 	}
+	var total int64
+	if fi, statErr := f.Stat(); statErr == nil {
+		total = fi.Size()
+	}
+	// A whole-file re-hash of a large original takes minutes after the worker
+	// has finished. Persist it as coordinator work, queued and then measured,
+	// so clients do not show the finished encode as the current state.
+	var lastObservation time.Time
+	var progressErr error
+	observe := promotionHashProgress(func(_ string, read, size int64) error {
+		if read != 0 && read != size && time.Since(lastObservation) < time.Second {
+			return nil
+		}
+		lastObservation = time.Now()
+		ec.State["work_progress"] = map[string]any{"phase": "verifying_original", "bytes_read": read, "total_bytes": size, "updated_at": time.Now().UTC().Format(time.RFC3339Nano)}
+		progressErr = e.persistExecutionState(ctx, ec)
+		return progressErr
+	})
+	ec.State["work_progress"] = map[string]any{"phase": "waiting_for_hash_slot", "total_bytes": total, "updated_at": time.Now().UTC().Format(time.RFC3339Nano)}
+	if err := e.persistExecutionState(ctx, ec); err != nil {
+		_ = f.Close()
+		return StepResult{Status: StepFailed, Error: err.Error()}, nil
+	}
 	h := sha256.New()
-	_, err = e.hashMedia(ctx, h, contextReader{ctx: ctx, reader: f})
+	_, err = e.hashMedia(ctx, h, &promotionContextReader{ctx: ctx, r: f, path: origPath, total: total, progress: observe})
 	_ = f.Close()
+	// The step's own result replaces this progress; never leave a finished or
+	// abandoned hash looking current.
+	delete(ec.State, "work_progress")
+	if progressErr != nil {
+		return StepResult{Status: StepFailed, Error: progressErr.Error()}, nil
+	}
 	if err != nil {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("integrity violation: unable to hash original media %s: %v", origPath, err)}, nil
 	}
