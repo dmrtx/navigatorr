@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/httpclient"
 )
 
 func (s *Server) library(w http.ResponseWriter, r *http.Request) {
@@ -274,7 +274,7 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// HTTPExecutor keeps the worker token server-side and bounds the log tail.
-	httpExec, ok := s.engine.Deps().Transcode.(*transcode.HTTPExecutor)
+	httpExec, ok := s.engine.Deps().Transcode.(*httpclient.HTTPExecutor)
 	if !ok {
 		fail(w, 404, "worker logs require the HTTP executor")
 		return

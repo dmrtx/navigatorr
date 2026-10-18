@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/jakenesler/navigatorr/store"
-	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/httpclient"
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -592,7 +592,7 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 					job["replacement_action_id"] = existing
 				}
 			}
-			_, httpWorker := s.engine.Deps().Transcode.(*transcode.HTTPExecutor)
+			_, httpWorker := s.engine.Deps().Transcode.(*httpclient.HTTPExecutor)
 			comparison := r
 			if r.inst.ActionName == "promote_transcode_candidate" {
 				comparison = recordsByID[root]

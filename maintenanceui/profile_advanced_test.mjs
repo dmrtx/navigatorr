@@ -7,7 +7,7 @@ const source = await readFile(
   new URL("./assets/app.js", import.meta.url),
   "utf8",
 );
-const joyProfile = JSON.parse(await readFile(new URL("../docs/examples/transcode-profile-joy.json", import.meta.url), "utf8"));
+const joyProfile = JSON.parse(await readFile(new URL("../docs/transcode/examples/transcode-profile-joy.json", import.meta.url), "utf8"));
 class Element {
   children = [];
   listeners = new Map();

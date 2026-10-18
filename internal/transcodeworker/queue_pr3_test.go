@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/httpclient"
 )
 
 type stubSpawn struct {
@@ -1024,7 +1025,7 @@ func TestPR3_HTTPExecutorSendsIdempotencyAnd409Definitive(t *testing.T) {
 	srv := newHTTPTestServer(t, &mu, &got)
 	defer srv.Close()
 
-	exec, err := transcode.NewHTTPExecutor(transcode.HTTPConfig{
+	exec, err := httpclient.NewHTTPExecutor(httpclient.HTTPConfig{
 		BaseURL: srv.URL, RequestTimeout: 5000000000, SubmitTimeout: 5000000000,
 		PathMappings: []transcode.PathMapping{{Local: "/local/media", Remote: "/Volumes/media"}},
 	})
@@ -1061,83 +1062,22 @@ func TestPR3_HTTPExecutorSendsIdempotencyAnd409Definitive(t *testing.T) {
 	// 409 conflict is definitive: typed HTTPError, never UncertainError.
 	conflictSrv := newHTTPConflictServer(t)
 	defer conflictSrv.Close()
-	exec2, _ := transcode.NewHTTPExecutor(transcode.HTTPConfig{
+	exec2, _ := httpclient.NewHTTPExecutor(httpclient.HTTPConfig{
 		BaseURL: conflictSrv.URL, RequestTimeout: 5000000000, SubmitTimeout: 5000000000,
 		PathMappings: []transcode.PathMapping{{Local: "/local/media", Remote: "/Volumes/media"}},
 	})
 	_, err = exec2.Submit(context.Background(), transcode.Request{
 		ID: "job-http-2", SourcePath: "/local/media/a.mkv", CandidatePath: "/local/media/other.mkv",
 	})
-	var herr *transcode.HTTPError
+	var herr *httpclient.HTTPError
 	if err == nil || !asHTTPError(err, &herr) || herr.StatusCode != http.StatusConflict {
 		t.Fatalf("conflict must be typed 409, got %v", err)
 	}
-	if transcode.IsTransportUncertain(err) {
+	if httpclient.IsTransportUncertain(err) {
 		t.Fatalf("complete 409 must never be UncertainError: %v", err)
 	}
 	if !strings.Contains(err.Error(), "idempotency_conflict") {
 		t.Fatalf("409 must preserve conflict classifier: %v", err)
-	}
-}
-
-func TestPR3_SSHCompatibilitySendsIdempotency(t *testing.T) {
-	dir := t.TempDir()
-	capture := filepath.Join(dir, "stdin.json")
-	script := fmt.Sprintf(`
-input=$(cat)
-echo "$input" > %s
-echo "$input" | grep -q "source_path" || exit 1
-echo '{"id": "job-ssh-1", "status": "queued"}'
-exit 0
-`, capture)
-	fakeSSH := createFakeSSHBinaryForPR3(t, script)
-	cfg := transcode.SSHConfig{
-		Host: "test.host", Command: "/remote/bin/navigatorr-transcode",
-		PathMappings: []transcode.PathMapping{{Local: "/local/media", Remote: "/Volumes/media"}},
-	}
-	exec, err := transcode.NewSSHExecutor(cfg, transcode.WithSSHBinary(fakeSSH))
-	if err != nil {
-		t.Fatal(err)
-	}
-	plan := validExecutorPlan(t)
-	if _, err := exec.Submit(context.Background(), transcode.Request{
-		ID: "job-ssh-1", SourcePath: "/local/media/a.mkv", CandidatePath: "/local/media/b.mkv", Profile: "hevc-vt", Plan: plan,
-	}); err != nil {
-		t.Fatalf("ssh submit: %v", err)
-	}
-	raw, err := os.ReadFile(capture)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var payload map[string]any
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		t.Fatalf("ssh stdin json: %v (%s)", err, raw)
-	}
-	if payload["idempotency_key"] != "job-ssh-1" {
-		t.Errorf("ssh must send default idempotency_key, got %v", payload)
-	}
-	digest, _ := payload["execution_spec_digest"].(string)
-	if !strings.HasPrefix(digest, "sha256:") {
-		t.Errorf("ssh must send canonical digest, got %v", payload)
-	}
-
-	// Legacy caller without plan still works (digest omitted, worker computes).
-	capture2 := filepath.Join(dir, "stdin2.json")
-	script2 := fmt.Sprintf(`
-input=$(cat)
-echo "$input" > %s
-echo '{"id": "job-ssh-legacy", "status": "queued"}'
-exit 0
-`, capture2)
-	fakeSSH2 := createFakeSSHBinaryForPR3(t, script2)
-	exec2, _ := transcode.NewSSHExecutor(transcode.SSHConfig{
-		Host: "test.host", Command: "/remote/bin/navigatorr-transcode",
-		PathMappings: []transcode.PathMapping{{Local: "/local/media", Remote: "/Volumes/media"}},
-	}, transcode.WithSSHBinary(fakeSSH2))
-	if _, err := exec2.Submit(context.Background(), transcode.Request{
-		ID: "job-ssh-legacy", SourcePath: "/local/media/a.mkv", CandidatePath: "/local/media/b.mkv",
-	}); err != nil {
-		t.Fatalf("legacy ssh submit must remain compatible: %v", err)
 	}
 }
 
@@ -1251,9 +1191,9 @@ func newHTTPConflictServer(t *testing.T) *httptest.Server {
 	}))
 }
 
-func asHTTPError(err error, target **transcode.HTTPError) bool {
+func asHTTPError(err error, target **httpclient.HTTPError) bool {
 	for err != nil {
-		if h, ok := err.(*transcode.HTTPError); ok {
+		if h, ok := err.(*httpclient.HTTPError); ok {
 			*target = h
 			return true
 		}
@@ -1264,17 +1204,6 @@ func asHTTPError(err error, target **transcode.HTTPError) bool {
 		err = u.Unwrap()
 	}
 	return false
-}
-
-func createFakeSSHBinaryForPR3(t *testing.T, scriptContent string) string {
-	t.Helper()
-	dir := t.TempDir()
-	binPath := filepath.Join(dir, "ssh")
-	content := "#!/bin/sh\n" + scriptContent + "\n"
-	if err := os.WriteFile(binPath, []byte(content), 0755); err != nil {
-		t.Fatalf("fake ssh: %v", err)
-	}
-	return binPath
 }
 
 var _ = time.Second

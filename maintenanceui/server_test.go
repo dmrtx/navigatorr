@@ -14,7 +14,7 @@ import (
 	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/tools"
-	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/httpclient"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -47,12 +47,12 @@ func testUI(t *testing.T) (*Server, http.Handler) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	workerExecutor, err := transcode.NewHTTPExecutor(workerConfig)
+	workerExecutor, err := httpclient.NewHTTPExecutor(workerConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
 	e := tools.RegisterMaintenance(m, cfg, reg, nil, st, workerExecutor)
-	if _, ok := e.Deps().Transcode.(*transcode.HTTPExecutor); !ok {
+	if _, ok := e.Deps().Transcode.(*httpclient.HTTPExecutor); !ok {
 		t.Fatal("synthetic worker not configured")
 	}
 	s, err := New(cfg, reg, e, m)

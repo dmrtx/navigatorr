@@ -1,4 +1,4 @@
-package transcode
+package httpclient
 
 // HTTPExecutor implements Executor over the versioned worker daemon HTTP API
 // (`navigatorr-transcode serve`, /v1 routes).
@@ -27,9 +27,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/jakenesler/navigatorr/transcode"
 )
 
 const (
@@ -42,6 +45,13 @@ const (
 	// typed errors so a malicious/oversized envelope cannot flood logs.
 	maxHTTPErrorLen = 2048
 )
+
+// validJobIDRegex restricts job IDs placed in daemon URL paths.
+var validJobIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_.-]+$`)
+
+// validBenchmarkJobIDRegex is the benchmark-namespace pattern that
+// transcode.ValidateBenchmarkJobID also enforces.
+var validBenchmarkJobIDRegex = regexp.MustCompile(`^bench-[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 
 // DefaultHTTPRequestTimeout is the default deadline for idempotent reads
 // (Doctor/Capabilities/Status/benchmark status) and for Cancel POSTs.
@@ -148,8 +158,8 @@ type HTTPConfig struct {
 	// DefaultHTTPSubmitTimeout.
 	SubmitTimeout time.Duration
 	// PathMappings translates local<->remote paths with longest-prefix
-	// matching, identical semantics to SSHExecutor (fail closed).
-	PathMappings []PathMapping
+	// matching; translation fails closed when no mapping matches.
+	PathMappings []transcode.PathMapping
 	// HTTPClient, when non-nil, overrides the default client construction
 	// (tests). When set, RequestTimeout/SubmitTimeout still bound each
 	// request via context, but redirect policy/bearer handling comes from
@@ -184,8 +194,7 @@ type HTTPExecutor struct {
 }
 
 // NewHTTPExecutor builds an HTTPExecutor. BaseURL must be an http/https URL;
-// path mappings may be empty (translation then fails closed per call, same
-// as SSHExecutor).
+// path mappings may be empty (translation then fails closed per call).
 func NewHTTPExecutor(cfg HTTPConfig, opts ...HTTPExecutorOption) (*HTTPExecutor, error) {
 	base := strings.TrimSpace(cfg.BaseURL)
 	if base == "" {
@@ -267,13 +276,13 @@ func (e *HTTPExecutor) Logs(ctx context.Context, jobID string) (map[string]any, 
 	return result, nil
 }
 
-// TranslateLocalToRemote mirrors SSHExecutor longest-prefix semantics.
+// TranslateLocalToRemote applies longest-prefix path mapping, failing closed.
 func (e *HTTPExecutor) TranslateLocalToRemote(localPath string) (string, error) {
 	if len(e.cfg.PathMappings) == 0 {
 		return "", fmt.Errorf("no path mappings configured for transcode http executor (fail closed)")
 	}
 	cleanLocal := filepath.Clean(localPath)
-	mappings := make([]PathMapping, len(e.cfg.PathMappings))
+	mappings := make([]transcode.PathMapping, len(e.cfg.PathMappings))
 	copy(mappings, e.cfg.PathMappings)
 	sort.Slice(mappings, func(i, j int) bool {
 		return len(filepath.Clean(mappings[i].Local)) > len(filepath.Clean(mappings[j].Local))
@@ -296,13 +305,13 @@ func (e *HTTPExecutor) TranslateLocalToRemote(localPath string) (string, error) 
 	return "", fmt.Errorf("path %q does not match any configured transcode path mappings (fail closed)", localPath)
 }
 
-// TranslateRemoteToLocal mirrors SSHExecutor longest-prefix semantics.
+// TranslateRemoteToLocal applies longest-prefix path mapping, failing closed.
 func (e *HTTPExecutor) TranslateRemoteToLocal(remotePath string) (string, error) {
 	if len(e.cfg.PathMappings) == 0 {
 		return "", fmt.Errorf("no path mappings configured for transcode http executor (fail closed)")
 	}
 	cleanRemote := filepath.ToSlash(filepath.Clean(remotePath))
-	mappings := make([]PathMapping, len(e.cfg.PathMappings))
+	mappings := make([]transcode.PathMapping, len(e.cfg.PathMappings))
 	copy(mappings, e.cfg.PathMappings)
 	sort.Slice(mappings, func(i, j int) bool {
 		return len(filepath.ToSlash(filepath.Clean(mappings[i].Remote))) > len(filepath.ToSlash(filepath.Clean(mappings[j].Remote)))
@@ -339,7 +348,7 @@ func boundHTTPErrorMessage(msg string) string {
 // UNKNOWN, not as confirmed success.
 func validMutationAckStatus(s string) bool {
 	switch s {
-	case StatusQueued, StatusRunning, StatusCompleted, StatusFailed, StatusCancelled:
+	case transcode.StatusQueued, transcode.StatusRunning, transcode.StatusCompleted, transcode.StatusFailed, transcode.StatusCancelled:
 		return true
 	default:
 		return false
@@ -596,62 +605,62 @@ func (e *HTTPExecutor) Doctor(ctx context.Context) error {
 	return &HTTPError{Method: http.MethodGet, URL: redactURL(e.base + "/v1/doctor"), StatusCode: code, Message: msg}
 }
 
-// Capabilities fetches the versioned capability report and applies the same
-// fail-closed checks as SSHExecutor: protocol version match + fingerprint
+// Capabilities fetches the versioned capability report and applies
+// fail-closed checks: protocol version match + fingerprint
 // verification. Capabilities are NEVER derived from /health.
-func (e *HTTPExecutor) Capabilities(ctx context.Context) (WorkerCapabilities, error) {
+func (e *HTTPExecutor) Capabilities(ctx context.Context) (transcode.WorkerCapabilities, error) {
 	ctx, cancel := context.WithTimeout(ctx, e.reqTO)
 	defer cancel()
 	req, err := e.newRequest(ctx, http.MethodGet, "/v1/capabilities", nil)
 	if err != nil {
-		return WorkerCapabilities{}, fmt.Errorf("building capabilities request: %w", err)
+		return transcode.WorkerCapabilities{}, fmt.Errorf("building capabilities request: %w", err)
 	}
 	data, code, _, err := e.do(req, "capabilities", "", false)
 	if err != nil {
 		if isTransportFailure(err) {
-			return WorkerCapabilities{}, e.failUncertain("capabilities", "", err)
+			return transcode.WorkerCapabilities{}, e.failUncertain("capabilities", "", err)
 		}
-		return WorkerCapabilities{}, fmt.Errorf("transcode http capabilities: %w", err)
+		return transcode.WorkerCapabilities{}, fmt.Errorf("transcode http capabilities: %w", err)
 	}
 	if code != http.StatusOK {
 		msg := parseErrorMessage(data)
 		if msg == "" {
 			msg = http.StatusText(code)
 		}
-		return WorkerCapabilities{}, &HTTPError{Method: http.MethodGet, URL: redactURL(e.base + "/v1/capabilities"), StatusCode: code, Message: msg}
+		return transcode.WorkerCapabilities{}, &HTTPError{Method: http.MethodGet, URL: redactURL(e.base + "/v1/capabilities"), StatusCode: code, Message: msg}
 	}
-	var caps WorkerCapabilities
+	var caps transcode.WorkerCapabilities
 	if err := json.Unmarshal(data, &caps); err != nil {
-		return WorkerCapabilities{}, fmt.Errorf("parsing capabilities response: %w (bounded body %d bytes)", err, len(data))
+		return transcode.WorkerCapabilities{}, fmt.Errorf("parsing capabilities response: %w (bounded body %d bytes)", err, len(data))
 	}
-	if caps.ProtocolVersion != WorkerProtocolVersion {
-		return WorkerCapabilities{}, fmt.Errorf("worker returned unsupported protocol version %d (expected %d) (fail closed)", caps.ProtocolVersion, WorkerProtocolVersion)
+	if caps.ProtocolVersion != transcode.WorkerProtocolVersion {
+		return transcode.WorkerCapabilities{}, fmt.Errorf("worker returned unsupported protocol version %d (expected %d) (fail closed)", caps.ProtocolVersion, transcode.WorkerProtocolVersion)
 	}
-	if err := VerifyCapabilityFingerprint(caps); err != nil {
-		return WorkerCapabilities{}, err
+	if err := transcode.VerifyCapabilityFingerprint(caps); err != nil {
+		return transcode.WorkerCapabilities{}, err
 	}
 	return caps, nil
 }
 
 type httpSubmitPayload struct {
-	ID                  string `json:"id"`
-	SourcePath          string `json:"source_path"`
-	CandidatePath       string `json:"candidate_path"`
-	Profile             string `json:"profile"`
-	Plan                *Plan  `json:"plan,omitempty"`
-	IdempotencyKey      string `json:"idempotency_key,omitempty"`
-	ExecutionSpecDigest string `json:"execution_spec_digest,omitempty"`
-	SourceSHA256        string `json:"source_sha256,omitempty"`
+	ID                  string          `json:"id"`
+	SourcePath          string          `json:"source_path"`
+	CandidatePath       string          `json:"candidate_path"`
+	Profile             string          `json:"profile"`
+	Plan                *transcode.Plan `json:"plan,omitempty"`
+	IdempotencyKey      string          `json:"idempotency_key,omitempty"`
+	ExecutionSpecDigest string          `json:"execution_spec_digest,omitempty"`
+	SourceSHA256        string          `json:"source_sha256,omitempty"`
 }
 
 type httpSubmitResult struct {
-	ID                  string `json:"id"`
-	Status              string `json:"status"`
-	CandidatePath       string `json:"candidate_path,omitempty"`
-	Plan                *Plan  `json:"plan,omitempty"`
-	IdempotencyKey      string `json:"idempotency_key,omitempty"`
-	ExecutionSpecDigest string `json:"execution_spec_digest,omitempty"`
-	Error               string `json:"error,omitempty"`
+	ID                  string          `json:"id"`
+	Status              string          `json:"status"`
+	CandidatePath       string          `json:"candidate_path,omitempty"`
+	Plan                *transcode.Plan `json:"plan,omitempty"`
+	IdempotencyKey      string          `json:"idempotency_key,omitempty"`
+	ExecutionSpecDigest string          `json:"execution_spec_digest,omitempty"`
+	Error               string          `json:"error,omitempty"`
 }
 
 // Submit translates local paths to remote, POSTs exactly once, and maps the
@@ -662,20 +671,20 @@ type httpSubmitResult struct {
 // fallback, no retry budget consumed here. A complete non-2xx rejection
 // stays a definitive typed *HTTPError — including 409 idempotency conflicts
 // (same key + different digest), which are definitive and never uncertain.
-func (e *HTTPExecutor) Submit(ctx context.Context, req Request) (Job, error) {
+func (e *HTTPExecutor) Submit(ctx context.Context, req transcode.Request) (transcode.Job, error) {
 	if strings.TrimSpace(req.ID) == "" {
-		return Job{}, errors.New("request id is required")
+		return transcode.Job{}, errors.New("request id is required")
 	}
 	if !validJobIDRegex.MatchString(req.ID) {
-		return Job{}, fmt.Errorf("invalid request id %q (allowed: alphanumeric, underscore, dash, dot)", req.ID)
+		return transcode.Job{}, fmt.Errorf("invalid request id %q (allowed: alphanumeric, underscore, dash, dot)", req.ID)
 	}
 	remoteSource, err := e.TranslateLocalToRemote(req.SourcePath)
 	if err != nil {
-		return Job{}, fmt.Errorf("translating source path: %w", err)
+		return transcode.Job{}, fmt.Errorf("translating source path: %w", err)
 	}
 	remoteCandidate, err := e.TranslateLocalToRemote(req.CandidatePath)
 	if err != nil {
-		return Job{}, fmt.Errorf("translating candidate path: %w", err)
+		return transcode.Job{}, fmt.Errorf("translating candidate path: %w", err)
 	}
 	profile := req.Profile
 	if strings.TrimSpace(profile) == "" {
@@ -685,25 +694,25 @@ func (e *HTTPExecutor) Submit(ctx context.Context, req Request) (Job, error) {
 	// ID; digest over the immutable execution request when a resolved plan is
 	// present (profile-only callers omit the digest and let the worker compute
 	// it over the resolved plan).
-	effKey := DefaultTranscodeIdempotencyKey(req.ID, req.IdempotencyKey)
+	effKey := transcode.DefaultTranscodeIdempotencyKey(req.ID, req.IdempotencyKey)
 	var specDigest string
 	if req.ExecutionSpecDigest != "" {
 		specDigest = strings.TrimSpace(req.ExecutionSpecDigest)
 	} else if req.Plan != nil {
-		if d, derr := DigestTranscodeExecutionSpecWithSourceSHA(remoteSource, remoteCandidate, profile, req.SourceSHA256, req.Plan); derr == nil {
+		if d, derr := transcode.DigestTranscodeExecutionSpecWithSourceSHA(remoteSource, remoteCandidate, profile, req.SourceSHA256, req.Plan); derr == nil {
 			specDigest = d
 		}
 	}
 	payload := httpSubmitPayload{ID: req.ID, SourcePath: remoteSource, CandidatePath: remoteCandidate, Profile: profile, Plan: req.Plan, IdempotencyKey: effKey, ExecutionSpecDigest: specDigest, SourceSHA256: req.SourceSHA256}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return Job{}, fmt.Errorf("serializing submit payload: %w", err)
+		return transcode.Job{}, fmt.Errorf("serializing submit payload: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(ctx, e.subTO)
 	defer cancel()
 	hreq, err := e.newRequest(ctx, http.MethodPost, "/v1/jobs", body)
 	if err != nil {
-		return Job{}, fmt.Errorf("building submit request: %w", err)
+		return transcode.Job{}, fmt.Errorf("building submit request: %w", err)
 	}
 	data, code, _, err := e.do(hreq, "submit", req.ID, true)
 	if err != nil {
@@ -711,13 +720,13 @@ func (e *HTTPExecutor) Submit(ctx context.Context, req Request) (Job, error) {
 		// failure with no definitive response is UNKNOWN. A definitive
 		// *HTTPError from do() passes through unchanged (see
 		// mutatingDoErr); never retry here.
-		return Job{}, e.mutatingDoErr("submit", req.ID, err)
+		return transcode.Job{}, e.mutatingDoErr("submit", req.ID, err)
 	}
 	switch code {
 	case http.StatusCreated, http.StatusOK:
 		var res httpSubmitResult
 		if err := json.Unmarshal(data, &res); err != nil {
-			return Job{}, e.failUncertain("submit", req.ID, fmt.Errorf("parsing submit acknowledgement (bounded body %d bytes): %w", len(data), err))
+			return transcode.Job{}, e.failUncertain("submit", req.ID, fmt.Errorf("parsing submit acknowledgement (bounded body %d bytes): %w", len(data), err))
 		}
 		// A 2xx carrying res.Error is a contradictory acknowledgement: the
 		// worker accepted the mutation at the HTTP layer yet reports a
@@ -725,67 +734,67 @@ func (e *HTTPExecutor) Submit(ctx context.Context, req Request) (Job, error) {
 		// this is UNKNOWN, not a definitive rejection (definitive
 		// rejections arrive as non-2xx and stay typed *HTTPError below).
 		if res.Error != "" {
-			return Job{}, e.failUncertain("submit", req.ID, fmt.Errorf("contradictory submit acknowledgement (2xx with error): %s (bounded body %d bytes)", boundHTTPErrorMessage(res.Error), len(data)))
+			return transcode.Job{}, e.failUncertain("submit", req.ID, fmt.Errorf("contradictory submit acknowledgement (2xx with error): %s (bounded body %d bytes)", boundHTTPErrorMessage(res.Error), len(data)))
 		}
 		if res.ID != req.ID || !validMutationAckStatus(res.Status) {
-			return Job{}, e.failUncertain("submit", req.ID, fmt.Errorf("ambiguous submit acknowledgement: id=%q status=%q (bounded body %d bytes)", res.ID, res.Status, len(data)))
+			return transcode.Job{}, e.failUncertain("submit", req.ID, fmt.Errorf("ambiguous submit acknowledgement: id=%q status=%q (bounded body %d bytes)", res.ID, res.Status, len(data)))
 		}
-		return Job{ID: res.ID}, nil
+		return transcode.Job{ID: res.ID}, nil
 	default:
 		// Try the structured submit envelope first so "worker busy" (409)
 		// keeps the exact substring the action classifier expects.
 		var res httpSubmitResult
 		if err := json.Unmarshal(data, &res); err == nil && res.Error != "" {
-			return Job{}, &HTTPError{Method: http.MethodPost, URL: redactURL(e.base + "/v1/jobs"), StatusCode: code, Message: boundHTTPErrorMessage(res.Error)}
+			return transcode.Job{}, &HTTPError{Method: http.MethodPost, URL: redactURL(e.base + "/v1/jobs"), StatusCode: code, Message: boundHTTPErrorMessage(res.Error)}
 		}
 		msg := parseErrorMessage(data)
 		if msg == "" {
 			msg = http.StatusText(code)
 		}
-		return Job{}, &HTTPError{Method: http.MethodPost, URL: redactURL(e.base + "/v1/jobs"), StatusCode: code, Message: msg}
+		return transcode.Job{}, &HTTPError{Method: http.MethodPost, URL: redactURL(e.base + "/v1/jobs"), StatusCode: code, Message: msg}
 	}
 }
 
 // Status GETs /v1/jobs/{id} and translates the remote candidate path back
-// to local (best-effort, same as SSHExecutor).
-func (e *HTTPExecutor) Status(ctx context.Context, jobID string) (JobStatus, error) {
+// to local (best-effort).
+func (e *HTTPExecutor) Status(ctx context.Context, jobID string) (transcode.JobStatus, error) {
 	if strings.TrimSpace(jobID) == "" {
-		return JobStatus{}, errors.New("jobID is required")
+		return transcode.JobStatus{}, errors.New("jobID is required")
 	}
 	if !validJobIDRegex.MatchString(jobID) {
-		return JobStatus{}, fmt.Errorf("invalid jobID %q", jobID)
+		return transcode.JobStatus{}, fmt.Errorf("invalid jobID %q", jobID)
 	}
 	path := "/v1/jobs/" + url.PathEscape(jobID)
 	ctx, cancel := context.WithTimeout(ctx, e.reqTO)
 	defer cancel()
 	hreq, err := e.newRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
-		return JobStatus{}, fmt.Errorf("building status request: %w", err)
+		return transcode.JobStatus{}, fmt.Errorf("building status request: %w", err)
 	}
 	data, code, _, err := e.do(hreq, "status", jobID, false)
 	if err != nil {
 		if isTransportFailure(err) {
-			return JobStatus{}, e.failUncertain("status", jobID, err)
+			return transcode.JobStatus{}, e.failUncertain("status", jobID, err)
 		}
-		return JobStatus{}, fmt.Errorf("transcode http status: %w", err)
+		return transcode.JobStatus{}, fmt.Errorf("transcode http status: %w", err)
 	}
 	if code != http.StatusOK {
 		msg := parseErrorMessage(data)
 		if msg == "" {
 			// Status error bodies are JobStatusResponse-shaped; surface
 			// their error field when present.
-			var st JobStatus
+			var st transcode.JobStatus
 			if jerr := json.Unmarshal(data, &st); jerr == nil && st.Error != "" {
 				msg = boundHTTPErrorMessage(st.Error)
 			} else {
 				msg = http.StatusText(code)
 			}
 		}
-		return JobStatus{}, &HTTPError{Method: http.MethodGet, URL: redactURL(e.base + path), StatusCode: code, Message: msg}
+		return transcode.JobStatus{}, &HTTPError{Method: http.MethodGet, URL: redactURL(e.base + path), StatusCode: code, Message: msg}
 	}
-	var st JobStatus
+	var st transcode.JobStatus
 	if err := json.Unmarshal(data, &st); err != nil {
-		return JobStatus{}, fmt.Errorf("parsing status response: %w (bounded body %d bytes)", err, len(data))
+		return transcode.JobStatus{}, fmt.Errorf("parsing status response: %w (bounded body %d bytes)", err, len(data))
 	}
 	if st.CandidatePath != "" {
 		if localCandidate, terr := e.TranslateRemoteToLocal(st.CandidatePath); terr == nil {
@@ -844,7 +853,7 @@ func (e *HTTPExecutor) Cancel(ctx context.Context, jobID string) error {
 	if res.Error != "" {
 		return e.failUncertain("cancel", jobID, fmt.Errorf("contradictory cancel acknowledgement (2xx with error): %s (bounded body %d bytes)", boundHTTPErrorMessage(res.Error), len(data)))
 	}
-	if res.ID != jobID || res.Status != StatusCancelled {
+	if res.ID != jobID || res.Status != transcode.StatusCancelled {
 		return e.failUncertain("cancel", jobID, fmt.Errorf("ambiguous cancel acknowledgement: id=%q status=%q (bounded body %d bytes)", res.ID, res.Status, len(data)))
 	}
 	return nil
@@ -855,115 +864,115 @@ func (e *HTTPExecutor) Cancel(ctx context.Context, jobID string) error {
 // have reached the worker, ANY failure to obtain and validate a definitive
 // 2xx acknowledgement yields *UncertainError; no resubmit at this layer. A
 // complete non-2xx rejection stays a definitive typed *HTTPError.
-func (e *HTTPExecutor) BenchmarkSubmit(ctx context.Context, req BenchmarkRequest) (BenchmarkJob, error) {
+func (e *HTTPExecutor) BenchmarkSubmit(ctx context.Context, req transcode.BenchmarkRequest) (transcode.BenchmarkJob, error) {
 	cp := req
 	if cp.ProtocolVersion == 0 {
-		cp.ProtocolVersion = WorkerProtocolVersion
+		cp.ProtocolVersion = transcode.WorkerProtocolVersion
 	}
-	if err := ValidateBenchmarkRequest(&cp); err != nil {
-		return BenchmarkJob{}, fmt.Errorf("validating benchmark request: %w", err)
+	if err := transcode.ValidateBenchmarkRequest(&cp); err != nil {
+		return transcode.BenchmarkJob{}, fmt.Errorf("validating benchmark request: %w", err)
 	}
 	remoteSource, err := e.TranslateLocalToRemote(cp.SourcePath)
 	if err != nil {
-		return BenchmarkJob{}, fmt.Errorf("translating source path: %w", err)
+		return transcode.BenchmarkJob{}, fmt.Errorf("translating source path: %w", err)
 	}
 	cp.SourcePath = remoteSource
 	body, err := json.Marshal(cp)
 	if err != nil {
-		return BenchmarkJob{}, fmt.Errorf("serializing benchmark submit payload: %w", err)
+		return transcode.BenchmarkJob{}, fmt.Errorf("serializing benchmark submit payload: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(ctx, e.subTO)
 	defer cancel()
 	hreq, err := e.newRequest(ctx, http.MethodPost, "/v1/benchmarks", body)
 	if err != nil {
-		return BenchmarkJob{}, fmt.Errorf("building benchmark submit request: %w", err)
+		return transcode.BenchmarkJob{}, fmt.Errorf("building benchmark submit request: %w", err)
 	}
 	data, code, _, err := e.do(hreq, "benchmark_submit", req.ID, true)
 	if err != nil {
 		// The benchmark may already have been accepted: a transport failure
 		// with no definitive response is UNKNOWN. A definitive *HTTPError
 		// passes through unchanged; never retry here.
-		return BenchmarkJob{}, e.mutatingDoErr("benchmark_submit", req.ID, err)
+		return transcode.BenchmarkJob{}, e.mutatingDoErr("benchmark_submit", req.ID, err)
 	}
 	switch code {
 	case http.StatusCreated, http.StatusOK:
-		var res BenchmarkSubmitResponse
+		var res transcode.BenchmarkSubmitResponse
 		if err := json.Unmarshal(data, &res); err != nil {
-			return BenchmarkJob{}, e.failUncertain("benchmark_submit", req.ID, fmt.Errorf("parsing benchmark submit acknowledgement (bounded body %d bytes): %w", len(data), err))
+			return transcode.BenchmarkJob{}, e.failUncertain("benchmark_submit", req.ID, fmt.Errorf("parsing benchmark submit acknowledgement (bounded body %d bytes): %w", len(data), err))
 		}
 		// Any 2xx that does not validate as a definitive success ack is
 		// UNKNOWN: the benchmark may already exist server-side. That
 		// includes protocol mismatches and error-bearing 2xx bodies, which
 		// are contradictory acknowledgements rather than definitive
 		// rejections (definitive rejections arrive as non-2xx below).
-		if res.ProtocolVersion != WorkerProtocolVersion {
-			return BenchmarkJob{}, e.failUncertain("benchmark_submit", req.ID, fmt.Errorf("benchmark submit acknowledgement with unsupported protocol version %d (expected %d) (fail unknown)", res.ProtocolVersion, WorkerProtocolVersion))
+		if res.ProtocolVersion != transcode.WorkerProtocolVersion {
+			return transcode.BenchmarkJob{}, e.failUncertain("benchmark_submit", req.ID, fmt.Errorf("benchmark submit acknowledgement with unsupported protocol version %d (expected %d) (fail unknown)", res.ProtocolVersion, transcode.WorkerProtocolVersion))
 		}
 		if res.Error != "" {
-			return BenchmarkJob{}, e.failUncertain("benchmark_submit", req.ID, fmt.Errorf("contradictory benchmark submit acknowledgement (2xx with error): %s (bounded body %d bytes)", boundHTTPErrorMessage(res.Error), len(data)))
+			return transcode.BenchmarkJob{}, e.failUncertain("benchmark_submit", req.ID, fmt.Errorf("contradictory benchmark submit acknowledgement (2xx with error): %s (bounded body %d bytes)", boundHTTPErrorMessage(res.Error), len(data)))
 		}
 		if res.ID != req.ID || !validMutationAckStatus(res.Status) {
-			return BenchmarkJob{}, e.failUncertain("benchmark_submit", req.ID, fmt.Errorf("ambiguous benchmark submit acknowledgement: id=%q status=%q (bounded body %d bytes)", res.ID, res.Status, len(data)))
+			return transcode.BenchmarkJob{}, e.failUncertain("benchmark_submit", req.ID, fmt.Errorf("ambiguous benchmark submit acknowledgement: id=%q status=%q (bounded body %d bytes)", res.ID, res.Status, len(data)))
 		}
-		return BenchmarkJob{ID: res.ID}, nil
+		return transcode.BenchmarkJob{ID: res.ID}, nil
 	default:
-		var res BenchmarkSubmitResponse
+		var res transcode.BenchmarkSubmitResponse
 		if err := json.Unmarshal(data, &res); err == nil && res.Error != "" {
-			if res.ProtocolVersion != 0 && res.ProtocolVersion != WorkerProtocolVersion {
-				return BenchmarkJob{}, fmt.Errorf("worker returned unsupported protocol version %d (expected %d) (fail closed)", res.ProtocolVersion, WorkerProtocolVersion)
+			if res.ProtocolVersion != 0 && res.ProtocolVersion != transcode.WorkerProtocolVersion {
+				return transcode.BenchmarkJob{}, fmt.Errorf("worker returned unsupported protocol version %d (expected %d) (fail closed)", res.ProtocolVersion, transcode.WorkerProtocolVersion)
 			}
-			return BenchmarkJob{}, &HTTPError{Method: http.MethodPost, URL: redactURL(e.base + "/v1/benchmarks"), StatusCode: code, Message: boundHTTPErrorMessage(res.Error)}
+			return transcode.BenchmarkJob{}, &HTTPError{Method: http.MethodPost, URL: redactURL(e.base + "/v1/benchmarks"), StatusCode: code, Message: boundHTTPErrorMessage(res.Error)}
 		}
 		msg := parseErrorMessage(data)
 		if msg == "" {
 			msg = http.StatusText(code)
 		}
-		return BenchmarkJob{}, &HTTPError{Method: http.MethodPost, URL: redactURL(e.base + "/v1/benchmarks"), StatusCode: code, Message: msg}
+		return transcode.BenchmarkJob{}, &HTTPError{Method: http.MethodPost, URL: redactURL(e.base + "/v1/benchmarks"), StatusCode: code, Message: msg}
 	}
 }
 
 // BenchmarkStatus GETs /v1/benchmarks/{id}, verifies the protocol version,
 // and translates the remote source path back to local (best-effort).
-func (e *HTTPExecutor) BenchmarkStatus(ctx context.Context, jobID string) (BenchmarkStatus, error) {
+func (e *HTTPExecutor) BenchmarkStatus(ctx context.Context, jobID string) (transcode.BenchmarkStatus, error) {
 	trimmedID := strings.TrimSpace(jobID)
 	if trimmedID == "" {
-		return BenchmarkStatus{}, errors.New("jobID is required")
+		return transcode.BenchmarkStatus{}, errors.New("jobID is required")
 	}
 	if !validBenchmarkJobIDRegex.MatchString(trimmedID) {
-		return BenchmarkStatus{}, fmt.Errorf("invalid benchmark jobID %q", jobID)
+		return transcode.BenchmarkStatus{}, fmt.Errorf("invalid benchmark jobID %q", jobID)
 	}
 	path := "/v1/benchmarks/" + url.PathEscape(trimmedID)
 	ctx, cancel := context.WithTimeout(ctx, e.reqTO)
 	defer cancel()
 	hreq, err := e.newRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
-		return BenchmarkStatus{}, fmt.Errorf("building benchmark status request: %w", err)
+		return transcode.BenchmarkStatus{}, fmt.Errorf("building benchmark status request: %w", err)
 	}
 	data, code, _, err := e.do(hreq, "benchmark_status", trimmedID, false)
 	if err != nil {
 		if isTransportFailure(err) {
-			return BenchmarkStatus{}, e.failUncertain("benchmark_status", trimmedID, err)
+			return transcode.BenchmarkStatus{}, e.failUncertain("benchmark_status", trimmedID, err)
 		}
-		return BenchmarkStatus{}, fmt.Errorf("transcode http benchmark status: %w", err)
+		return transcode.BenchmarkStatus{}, fmt.Errorf("transcode http benchmark status: %w", err)
 	}
 	if code != http.StatusOK {
 		msg := parseErrorMessage(data)
 		if msg == "" {
-			var st BenchmarkStatus
+			var st transcode.BenchmarkStatus
 			if jerr := json.Unmarshal(data, &st); jerr == nil && st.Error != "" {
 				msg = boundHTTPErrorMessage(st.Error)
 			} else {
 				msg = http.StatusText(code)
 			}
 		}
-		return BenchmarkStatus{}, &HTTPError{Method: http.MethodGet, URL: redactURL(e.base + path), StatusCode: code, Message: msg}
+		return transcode.BenchmarkStatus{}, &HTTPError{Method: http.MethodGet, URL: redactURL(e.base + path), StatusCode: code, Message: msg}
 	}
-	var st BenchmarkStatus
+	var st transcode.BenchmarkStatus
 	if err := json.Unmarshal(data, &st); err != nil {
-		return BenchmarkStatus{}, fmt.Errorf("parsing benchmark status response: %w (bounded body %d bytes)", err, len(data))
+		return transcode.BenchmarkStatus{}, fmt.Errorf("parsing benchmark status response: %w (bounded body %d bytes)", err, len(data))
 	}
-	if st.ProtocolVersion != WorkerProtocolVersion {
-		return BenchmarkStatus{}, fmt.Errorf("worker returned unsupported protocol version %d (expected %d) (fail closed)", st.ProtocolVersion, WorkerProtocolVersion)
+	if st.ProtocolVersion != transcode.WorkerProtocolVersion {
+		return transcode.BenchmarkStatus{}, fmt.Errorf("worker returned unsupported protocol version %d (expected %d) (fail closed)", st.ProtocolVersion, transcode.WorkerProtocolVersion)
 	}
 	if st.SourcePath != "" {
 		if localSource, terr := e.TranslateRemoteToLocal(st.SourcePath); terr == nil {
@@ -1007,22 +1016,22 @@ func (e *HTTPExecutor) BenchmarkCancel(ctx context.Context, jobID string) error 
 		}
 		return &HTTPError{Method: http.MethodPost, URL: redactURL(e.base + path), StatusCode: code, Message: msg}
 	}
-	var res BenchmarkCancelResponse
+	var res transcode.BenchmarkCancelResponse
 	if err := json.Unmarshal(data, &res); err != nil {
 		return e.failUncertain("benchmark_cancel", trimmedID, fmt.Errorf("parsing benchmark cancel acknowledgement (bounded body %d bytes): %w", len(data), err))
 	}
 	// Any 2xx that does not validate as a definitive cancelled ack is
 	// UNKNOWN: the cancel may already have applied (reconcile via Status).
-	if res.ProtocolVersion != WorkerProtocolVersion {
-		return e.failUncertain("benchmark_cancel", trimmedID, fmt.Errorf("benchmark cancel acknowledgement with unsupported protocol version %d (expected %d) (fail unknown)", res.ProtocolVersion, WorkerProtocolVersion))
+	if res.ProtocolVersion != transcode.WorkerProtocolVersion {
+		return e.failUncertain("benchmark_cancel", trimmedID, fmt.Errorf("benchmark cancel acknowledgement with unsupported protocol version %d (expected %d) (fail unknown)", res.ProtocolVersion, transcode.WorkerProtocolVersion))
 	}
 	if res.Error != "" {
 		return e.failUncertain("benchmark_cancel", trimmedID, fmt.Errorf("contradictory benchmark cancel acknowledgement (2xx with error): %s (bounded body %d bytes)", boundHTTPErrorMessage(res.Error), len(data)))
 	}
-	if res.ID != trimmedID || res.Status != StatusCancelled {
+	if res.ID != trimmedID || res.Status != transcode.StatusCancelled {
 		return e.failUncertain("benchmark_cancel", trimmedID, fmt.Errorf("ambiguous benchmark cancel acknowledgement: id=%q status=%q (bounded body %d bytes)", res.ID, res.Status, len(data)))
 	}
 	return nil
 }
 
-var _ Executor = (*HTTPExecutor)(nil)
+var _ transcode.Executor = (*HTTPExecutor)(nil)

@@ -315,7 +315,7 @@ JSON
 }
 
 func TestModePolicyAgainstMeasuredCalibrationFixtures(t *testing.T) {
-	data, err := os.ReadFile("../docs/reviews/fixtures/transcode-modes-v1.json")
+	data, err := os.ReadFile("../docs/transcode/reviews/fixtures/transcode-modes-v1.json")
 	if err != nil {
 		t.Fatal(err)
 	}

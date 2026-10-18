@@ -1,6 +1,9 @@
 # RFC: Persistent M1 Transcode Daemon
 
-Status: PR1 proposal (daemon mode + versioned `/v1` API only).
+Status: implemented. The HTTP daemon is the only executor; the SSH executor
+described below as "current" has since been removed. Kept as design history.
+
+Original status: PR1 proposal (daemon mode + versioned `/v1` API only).
 See “Explicit non-goals (NOT part of PR1)” — those futures are described here
 so PR1 does not foreclose them, but they are NOT implemented in PR1.
 
@@ -90,7 +93,7 @@ Coordinator: Navigatorr `main.go` + `transcode/` + `action/`
   case-insensitive, `subtle.ConstantTimeCompare`, JSON error envelope,
   `MaxBytesReader`, content-type discipline). PR1 follows the same pattern.
 
-Docs: `docs/TRANSCODING.md` (policy-as-data, recipe bundle schema v1/v2,
+Docs: `docs/transcode/TRANSCODING.md` (policy-as-data, recipe bundle schema v1/v2,
 plan resolution + worker boundary, LKG/rollback, candidate-only invariant,
 SHA-256 source integrity, benchmark optimization).
 

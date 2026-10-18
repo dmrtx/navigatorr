@@ -14,6 +14,7 @@ import (
 	"github.com/jakenesler/navigatorr/sabnzbd"
 	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/httpclient"
 	"github.com/jakenesler/navigatorr/transmission"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -237,8 +238,8 @@ func registerDiagnosticsTools(s *server.MCPServer, d DiagnosticsDeps) {
 				}
 			}
 
-			// 6. Transcode executor. Automatic execution is HTTP-only; SSH is
-			// retired/admin-only and is never wired here.
+			// 6. Transcode executor. Execution is HTTP-only; the SSH
+			// executor has been removed.
 			var tcInfo map[string]any
 			if d.Transcode != nil {
 				tcInfo = map[string]any{
@@ -349,7 +350,7 @@ func inspectTranscodeAvailability(ctx context.Context, executor transcode.Execut
 				} else if errors.Is(err, context.Canceled) {
 					class = "diagnostic_cancelled"
 				}
-			} else if transcode.IsTransportUncertain(err) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			} else if httpclient.IsTransportUncertain(err) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 				class = "worker_reachability_unknown"
 				status["status"] = "unknown"
 			}

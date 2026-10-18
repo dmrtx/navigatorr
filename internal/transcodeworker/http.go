@@ -511,7 +511,7 @@ func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
 // handleCapabilities serves GET /v1/capabilities. It reuses
 // Worker.Capabilities (ProbeWorkerCapabilities) verbatim, including the
 // versioned protocol_version and capability_fingerprint fields that the
-// Navigatorr side must verify (same checks as SSHExecutor.Capabilities).
+// Navigatorr side must verify (see HTTPExecutor.Capabilities).
 // A probe failure is a 500 with an error envelope so callers fail closed
 // instead of caching a fake/partial capability set.
 func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {

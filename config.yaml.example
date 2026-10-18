@@ -146,7 +146,7 @@ sabnzbd:
 #   - Recipes cannot inject raw FFmpeg arguments, shell commands, or arbitrary binaries.
 #
 # Built-in safe recipes are used by default. To externalize policy, change source to
-# "file", "https", or "github". See docs/TRANSCODING.md for the recipe schema.
+# "file", "https", or "github". See docs/transcode/TRANSCODING.md for the recipe schema.
 transcode:
   enabled: false
   # Automatic execution is HTTP-only. May be omitted (defaults to "http").

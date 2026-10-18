@@ -15,6 +15,7 @@ import (
 
 	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/httpclient"
 )
 
 // Engine manages declarative, persistent, multi-step actions.
@@ -754,7 +755,7 @@ func (e *Engine) cancelTranscodeJobConfirmed(ctx context.Context, jobID string) 
 	if err == nil {
 		return nil
 	}
-	if !transcode.IsTransportUncertain(err) {
+	if !httpclient.IsTransportUncertain(err) {
 		return err
 	}
 
@@ -780,7 +781,7 @@ func (e *Engine) cancelBenchmarkJobConfirmed(ctx context.Context, jobID string) 
 	if err == nil {
 		return nil
 	}
-	if !transcode.IsTransportUncertain(err) {
+	if !httpclient.IsTransportUncertain(err) {
 		return err
 	}
 

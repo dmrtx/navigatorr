@@ -11,6 +11,7 @@ import (
 	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/podcast"
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/httpclient"
 )
 
 func TestPodcastCachedTranscriptReuseAndGuards(t *testing.T) {
@@ -28,7 +29,7 @@ func TestPodcastCachedTranscriptReuseAndGuards(t *testing.T) {
 				return transcode.Job{}, fmt.Errorf("ASR must not be submitted")
 			}, statusFunc: func(context.Context, string) (transcode.JobStatus, error) {
 				if mutation == "missing-worker" {
-					return transcode.JobStatus{}, &transcode.HTTPError{StatusCode: 404}
+					return transcode.JobStatus{}, &httpclient.HTTPError{StatusCode: 404}
 				}
 				digest := podcast.Digest(trusted)
 				if mutation == "wrong-worker-digest" {

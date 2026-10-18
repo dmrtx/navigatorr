@@ -208,7 +208,7 @@ snapping and alternate codecs/ASR adapters are not enabled in this version.
 
 ## MoonStation post-download hook
 
-[`moonstation-hook.mjs`](../scripts/podcast-worker/moonstation-hook.mjs) is a
+[`moonstation-hook.mjs`](../../scripts/podcast-worker/moonstation-hook.mjs) is a
 small reusable adapter to the authenticated maintenance HTTP API. Enable the
 existing web surface and supply its bearer token via runtime configuration.
 After downloading an episode, call `submitDownloadedEpisode` with the existing

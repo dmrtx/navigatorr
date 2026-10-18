@@ -2,12 +2,14 @@ package maintenanceui
 
 import (
 	"encoding/json"
-	"github.com/jakenesler/navigatorr/action"
-	"github.com/jakenesler/navigatorr/transcode"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/jakenesler/navigatorr/action"
+	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/httpclient"
 )
 
 func TestComparisonProxyRequiresKnownActionAndKeepsWorkerTokenServerSide(t *testing.T) {
@@ -30,7 +32,7 @@ func TestComparisonProxyRequiresKnownActionAndKeepsWorkerTokenServerSide(t *test
 	}))
 	defer upstream.Close()
 	deps := s.engine.Deps()
-	executor, err := transcode.NewHTTPExecutor(transcode.HTTPConfig{BaseURL: upstream.URL, Token: "server-only-secret"})
+	executor, err := httpclient.NewHTTPExecutor(httpclient.HTTPConfig{BaseURL: upstream.URL, Token: "server-only-secret"})
 	if err != nil {
 		t.Fatal(err)
 	}

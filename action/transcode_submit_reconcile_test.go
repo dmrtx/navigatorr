@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/httpclient"
 )
 
 func testReconcilePlan() *transcode.Plan {
@@ -45,7 +46,7 @@ func TestSubmitUncertainSetsReconcileNoBudgetBurn(t *testing.T) {
 	mock := &mockTranscodeExecutor{
 		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
 			gotKey = req.IdempotencyKey
-			return transcode.Job{}, &transcode.UncertainError{Op: "submit", JobID: req.ID, Err: errors.New("timeout")}
+			return transcode.Job{}, &httpclient.UncertainError{Op: "submit", JobID: req.ID, Err: errors.New("timeout")}
 		},
 	}
 	e := NewEngine(EngineDeps{Transcode: mock})
@@ -77,7 +78,7 @@ func TestSubmitUncertainSetsReconcileNoBudgetBurn(t *testing.T) {
 func TestReconcileUncertainStatusNoSubmit(t *testing.T) {
 	mock := &mockTranscodeExecutor{
 		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
-			return transcode.JobStatus{}, &transcode.UncertainError{Op: "status", JobID: jobID, Err: errors.New("disconnect")}
+			return transcode.JobStatus{}, &httpclient.UncertainError{Op: "status", JobID: jobID, Err: errors.New("disconnect")}
 		},
 	}
 	e := NewEngine(EngineDeps{Transcode: mock})
@@ -137,7 +138,7 @@ func TestReconcile404ControlledSameRequestResubmit(t *testing.T) {
 	var submitReqs []transcode.Request
 	mock := &mockTranscodeExecutor{
 		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
-			return transcode.JobStatus{}, &transcode.HTTPError{Method: "GET", URL: "/v1/jobs/" + jobID, StatusCode: 404, Message: "not found"}
+			return transcode.JobStatus{}, &httpclient.HTTPError{Method: "GET", URL: "/v1/jobs/" + jobID, StatusCode: 404, Message: "not found"}
 		},
 		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
 			submitReqs = append(submitReqs, req)
@@ -169,7 +170,7 @@ func TestReconcile404ControlledSameRequestResubmit(t *testing.T) {
 func TestReconcileDefinitiveOtherErrorFailsClosed(t *testing.T) {
 	mock := &mockTranscodeExecutor{
 		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
-			return transcode.JobStatus{}, &transcode.HTTPError{Method: "GET", URL: "/v1/jobs/" + jobID, StatusCode: 403, Message: "forbidden"}
+			return transcode.JobStatus{}, &httpclient.HTTPError{Method: "GET", URL: "/v1/jobs/" + jobID, StatusCode: 403, Message: "forbidden"}
 		},
 	}
 	e := NewEngine(EngineDeps{Transcode: mock})
@@ -188,7 +189,7 @@ func TestReconcileDefinitiveOtherErrorFailsClosed(t *testing.T) {
 func TestSubmitConflict409TerminalNoBudgetBurn(t *testing.T) {
 	mock := &mockTranscodeExecutor{
 		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
-			return transcode.Job{}, &transcode.HTTPError{Method: "POST", URL: "/v1/jobs", StatusCode: 409, Message: "idempotency_conflict: key already persists job with different execution_spec_digest"}
+			return transcode.Job{}, &httpclient.HTTPError{Method: "POST", URL: "/v1/jobs", StatusCode: 409, Message: "idempotency_conflict: key already persists job with different execution_spec_digest"}
 		},
 	}
 	e := NewEngine(EngineDeps{Transcode: mock})
@@ -225,7 +226,7 @@ func TestJobIDAloneDoesNotMeanSubmitted(t *testing.T) {
 func TestWaitStatusUncertaintyNoTransientRetry(t *testing.T) {
 	mock := &mockTranscodeExecutor{
 		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
-			return transcode.JobStatus{}, &transcode.UncertainError{Op: "status", JobID: jobID, Err: errors.New("timeout")}
+			return transcode.JobStatus{}, &httpclient.UncertainError{Op: "status", JobID: jobID, Err: errors.New("timeout")}
 		},
 	}
 	e := NewEngine(EngineDeps{Transcode: mock})
@@ -245,7 +246,7 @@ func TestWaitStatusUncertaintyNoTransientRetry(t *testing.T) {
 func TestWait404TerminalNoResubmit(t *testing.T) {
 	mock := &mockTranscodeExecutor{
 		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
-			return transcode.JobStatus{}, &transcode.HTTPError{Method: "GET", URL: "/v1/jobs/" + jobID, StatusCode: 404, Message: "not found"}
+			return transcode.JobStatus{}, &httpclient.HTTPError{Method: "GET", URL: "/v1/jobs/" + jobID, StatusCode: 404, Message: "not found"}
 		},
 	}
 	e := NewEngine(EngineDeps{Transcode: mock})
@@ -319,7 +320,7 @@ func TestReconcileTakesPrecedenceOverSubmittedReuse(t *testing.T) {
 func TestSubmit409UnrelatedMessageNotConflict(t *testing.T) {
 	mock := &mockTranscodeExecutor{
 		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
-			return transcode.Job{}, &transcode.HTTPError{Method: "POST", URL: "/v1/jobs", StatusCode: 409, Message: "slot limit exceeded, try later"}
+			return transcode.Job{}, &httpclient.HTTPError{Method: "POST", URL: "/v1/jobs", StatusCode: 409, Message: "slot limit exceeded, try later"}
 		},
 	}
 	e := NewEngine(EngineDeps{Transcode: mock})
@@ -358,7 +359,7 @@ func TestWaitFailedWorkerBusyIsTerminal(t *testing.T) {
 func TestWaitUnavailable500ReconcilesBudgetUnchanged(t *testing.T) {
 	mock := &mockTranscodeExecutor{
 		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
-			return transcode.JobStatus{}, &transcode.HTTPError{Method: "GET", URL: "/v1/jobs/" + jobID, StatusCode: 500, Message: "connection reset by peer"}
+			return transcode.JobStatus{}, &httpclient.HTTPError{Method: "GET", URL: "/v1/jobs/" + jobID, StatusCode: 500, Message: "connection reset by peer"}
 		},
 	}
 	e := NewEngine(EngineDeps{Transcode: mock})
