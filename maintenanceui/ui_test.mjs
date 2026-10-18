@@ -2648,6 +2648,167 @@ test("polling restores the same file control when multiple rows have identical a
 
 const allText = (el) => [el.textContent, ...(el.children || []).map(allText)].join(" ");
 
+function queueRail(labels) {
+  const h = harness();
+  h.document.createElement = () => {
+    const e = new Element();
+    e.attrs = {};
+    e.setAttribute = (key, value) => (e.attrs[key] = value);
+    return e;
+  };
+  h.context.labels = labels;
+  const rail = h.run(`(() => {
+    const rail = node("div", "", "job-actions");
+    for (const label of labels) {
+      const b = button(label, () => {});
+      b.dataset.jobControl = "job-1";
+      rail.append(b);
+    }
+    compactQueueActions(rail);
+    return rail;
+  })()`);
+  return { h, rail };
+}
+
+test("a queue card labels at most one main action, the most important, first", () => {
+  const { rail } = queueRail(["Keep original", "Retry", "Review candidate", "Change goal"]);
+  const mains = rail.children.filter((b) => /\baction-main\b/.test(b.className));
+  assert.equal(mains.length, 1);
+  assert.equal(mains[0].attrs["aria-label"], "Review candidate");
+  assert.equal(rail.children[0], mains[0]);
+  assert.equal(rail.children.filter((b) => /\baction-icon\b/.test(b.className)).length, 3);
+  const none = queueRail(["Archive", "Compare frames"]).rail;
+  assert.equal(none.children.some((b) => /\baction-main\b/.test(b.className)), false);
+});
+
+test("icon-only queue actions keep their full name in aria-label and title", () => {
+  const { rail } = queueRail(["Resume batch", "Stop batch · keep originals", "Change settings"]);
+  const icons = rail.children.filter((b) => /\baction-icon\b/.test(b.className));
+  assert.deepEqual(icons.map((b) => b.attrs["aria-label"]), ["Stop batch · keep originals", "Change settings"]);
+  assert.deepEqual(icons.map((b) => b.title), ["Stop batch · keep originals", "Change settings"]);
+  assert.match(icons[0].className, /\bdanger\b/);
+  // The row hides the label; it is kept for the More menu, never as a second main action.
+  assert.deepEqual(icons.map((b) => b.children.at(-1).className), ["action-label", "action-label"]);
+  assert.equal(rail.children[0].attrs["aria-label"], "Resume batch");
+});
+
+test("with five or more icon actions, three show and the rest go into a More actions menu", () => {
+  const { rail } = queueRail(["Review candidate", "Run one more test", "Keep original", "Change goal", "Archive", "View batch"]);
+  assert.equal(rail.children.length, 5);
+  const more = rail.children.at(-1);
+  assert.equal(more.className, "more-actions");
+  assert.equal(more.dataset.menuFor, "job-1");
+  const [toggle, menu] = more.children;
+  assert.equal(toggle.attrs["aria-label"], "More actions");
+  assert.equal(toggle.title, "More actions");
+  assert.deepEqual(menu.children.map((b) => b.attrs["aria-label"]), ["Archive", "View batch"]);
+  // The same elements move, so their handlers and job-control state come along.
+  assert.ok(menu.children.every((b) => b.listeners.has("click") && b.dataset.jobControl === "job-1"));
+  more.open = true;
+  more.listeners.get("click")({ target: { closest: () => menu.children[0] } });
+  assert.equal(more.open, false);
+});
+
+function moreMenu(id, open) {
+  const toggle = new Element();
+  const menu = new Element();
+  menu.dataset = { menuFor: id };
+  menu.open = open;
+  menu.querySelector = () => toggle;
+  toggle.closest = () => menu;
+  return { menu, toggle };
+}
+function menuList(menus, open) {
+  const list = new Element();
+  list.querySelector = () => open || null;
+  list.querySelectorAll = () => menus;
+  list.contains = (el) => menus.includes(el);
+  return list;
+}
+
+test("a refresh keeps focus on a closed More toggle and leaves its menu closed", () => {
+  const h = harness();
+  const before = moreMenu("job-1", false), after = moreMenu("job-1", true);
+  let focused = false;
+  after.toggle.focus = () => (focused = true);
+  h.document.activeElement = before.toggle;
+  h.context.oldList = menuList([before.menu]);
+  h.context.newList = menuList([after.menu]);
+  h.run("restoreActionMenu(newList, openActionMenu(oldList))");
+  assert.equal(focused, true);
+  assert.equal(after.menu.open, false);
+});
+
+test("a refresh reopens an open More menu and keeps focus on its item", () => {
+  const h = harness();
+  const before = moreMenu("job-1", true), after = moreMenu("job-1", false);
+  let toggleFocused = false;
+  after.toggle.focus = () => (toggleFocused = true);
+  const item = new Element();
+  item.closest = () => before.menu;
+  item.getAttribute = () => "View batch";
+  // View batch has no data-job-control, so the menu restores it by name.
+  let itemFocused = null;
+  const items = ["Change goal", "View batch"].map((name) => {
+    const b = new Element();
+    b.getAttribute = () => name;
+    b.focus = () => (itemFocused = name);
+    return b;
+  });
+  after.menu.querySelectorAll = () => items;
+  h.document.activeElement = item;
+  h.context.oldList = menuList([before.menu], before.menu);
+  h.context.newList = menuList([after.menu]);
+  h.run("restoreActionMenu(newList, openActionMenu(oldList))");
+  assert.equal(after.menu.open, true);
+  assert.equal(itemFocused, "View batch");
+  assert.equal(toggleFocused, false);
+  // A focus outside every menu records nothing.
+  h.document.activeElement = new Element();
+  h.document.activeElement.closest = () => null;
+  assert.equal(h.run("openActionMenu(newList)"), null);
+});
+
+test("Escape closes open More menus and returns focus to the toggle it was in", () => {
+  const h = harness();
+  const { menu, toggle } = moreMenu("job-1", true);
+  const other = moreMenu("job-2", true);
+  let focused = false;
+  toggle.focus = () => (focused = true);
+  const item = new Element();
+  item.closest = () => menu;
+  h.document.activeElement = item;
+  h.document.querySelectorAll = () => [menu, other.menu];
+  h.run('actionMenuKeydown({ key: "Tab" })');
+  assert.equal(menu.open, true);
+  h.run('actionMenuKeydown({ key: "Escape" })');
+  assert.equal(menu.open, false);
+  assert.equal(other.menu.open, false);
+  assert.equal(focused, true);
+});
+
+test("a podcast review card labels Review cuts instead of leaving it an icon", () => {
+  const cuts = queueRail(["Ad library", "Review cuts", "Revise labels", "Archive"]).rail;
+  assert.equal(cuts.children[0].attrs["aria-label"], "Review cuts");
+  assert.match(cuts.children[0].className, /\baction-main\b/);
+  const classify = queueRail(["Ad library", "View transcript", "Validate classifications"]).rail;
+  assert.equal(classify.children[0].attrs["aria-label"], "Validate classifications");
+});
+
+test("four icon actions all show; a More menu never holds a single item", () => {
+  const four = queueRail(["Review", "Run one more test", "Keep original", "Change goal", "View batch"]).rail;
+  assert.equal(four.children.some((c) => c.className === "more-actions"), false);
+  assert.deepEqual(
+    four.children.filter((b) => /\baction-icon\b/.test(b.className)).map((b) => b.attrs["aria-label"]),
+    ["Run one more test", "Keep original", "Change goal", "View batch"],
+  );
+  const five = queueRail(["Review", "Run one more test", "Keep original", "Cancel", "Change goal", "View batch"]).rail;
+  const more = five.children.at(-1);
+  assert.equal(more.className, "more-actions");
+  assert.equal(five.children.filter((b) => /\baction-icon\b/.test(b.className)).length, 3);
+  assert.equal(more.children[1].children.length, 2);
+});
+
 test("sample test results explain each rejected setting with its measurement and next step", () => {
   const h = harness();
   h.context.job = {id:"j",action_name:"transcode_media",mode:"quality",status:"completed",reason_code:"no_suitable_candidate",candidate_ready:false,source_path:"/media/Demo Film A.mkv",
@@ -2885,4 +3046,12 @@ test("compact goal says in plain language what it drops and still needs approval
   assert.match(radio, /replacing the original still needs your approval/);
   assert.match(markup, /<option value="compact">Make it much smaller · SDR 1080p/);
   assert.match(source, /compact:`Much smaller · SDR \$\{item\.max_height \|\| 1080\}p`/);
+});
+
+test("every shortened main action label is a prefix of its accessible name", () => {
+  const h = harness();
+  const pairs = JSON.parse(h.run("JSON.stringify(Object.entries(shortActionLabels))"));
+  assert.ok(pairs.length > 0);
+  for (const [full, visible] of pairs) assert.ok(full.startsWith(visible), `${visible} is not a prefix of ${full}`);
+  assert.equal(new Set(pairs.filter(([full]) => full.startsWith("Check")).map(([, v]) => v)).size, 2);
 });
