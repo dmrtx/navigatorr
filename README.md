@@ -305,24 +305,23 @@ Edit `~/.config/navigatorr/config.yaml` with your service URLs and API keys. You
 | `concurrency.max_api_simultaneous` | `3` | Maximum simultaneous upstream HTTP calls to protect *arr services from being overwhelmed. |
 | `concurrency.max_inspect_simultaneous` | `2` | Maximum concurrent ffprobe media inspections to protect NAS disk I/O and CPU. |
 
-**SSH Transcode Executor Configuration:**
+**Transcode Worker Configuration:**
 
-Navigatorr acts as the coordinator while a remote Apple Silicon Mac (M1/M2/M3/M4) executes hardware-accelerated FFmpeg (`hevc_videotoolbox`). SSH is the API:
+Navigatorr acts as the coordinator while a remote Apple Silicon Mac (M1/M2/M3/M4) executes hardware-accelerated FFmpeg (`hevc_videotoolbox`). The worker runs `navigatorr-transcode serve`, a persistent daemon with a versioned `/v1` HTTP API:
 
 ```yaml
 transcode:
   enabled: true
-  executor: ssh
-  ssh:
-    host: "192.0.2.10"
-    user: "transcoder"
-    command: "/Users/transcoder/.local/bin/navigatorr-transcode"
-    identity_file: "/run/secrets/navigatorr_transcode_ssh"
-    connect_timeout: "5s"
+  executor: http
+  http:
+    base_url: "http://192.0.2.10:8097"
+    token_file: "/run/secrets/navigatorr_transcode_token"
     path_mappings:
       - local: "/media"
         remote: "/Volumes/media"
 ```
+
+The older SSH executor (`executor: ssh`) is retired and rejected at startup. A leftover `transcode.ssh` block still parses, so old configs keep loading, but it is ignored.
 
 > 🛡️ **Candidate-Only Non-Destructive Protection:**
 > 1. **Path Translation:** Local paths (`/media/...`) are mapped to remote worker paths (`/Volumes/media/...`) using longest-prefix match and fail-closed security.

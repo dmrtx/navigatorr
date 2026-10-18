@@ -74,7 +74,7 @@ Example configuration:
 ```yaml
 transcode:
   enabled: true
-  executor: ssh
+  executor: http
   default_profile: hevc-vt-balanced
 
   recipes:
@@ -82,10 +82,9 @@ transcode:
     path: /config/transcode-recipes.yaml
     cache_dir: /config/cache/transcode-recipes
 
-  ssh:
-    host: 192.0.2.10
-    user: transcoder
-    remote_binary: /opt/homebrew/bin/navigatorr-transcode
+  http:
+    base_url: http://192.0.2.10:8097
+    token_file: /run/secrets/navigatorr_transcode_token
 ```
 
 GitHub channel example:
@@ -296,7 +295,7 @@ Source cache identity and cleanup:
 Source content identity is also part of **strong full-transcode idempotency**:
 the canonical execution-spec digest includes the normalized preflight SHA-256
 when available (the field is omitted when absent, so historical digests are
-byte-for-byte unchanged). The HTTP and SSH executors forward `source_sha256`
+byte-for-byte unchanged). The HTTP executor forwards `source_sha256`
 and compute the same hash-aware digest the worker recomputes from the persisted
 record, so a changed source at the same path with the same candidate/profile/
 plan is a deterministic idempotency conflict rather than a silent reuse.

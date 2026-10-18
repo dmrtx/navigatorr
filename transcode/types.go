@@ -355,14 +355,3 @@ type PathMapping struct {
 	Local  string `json:"local" yaml:"local"`
 	Remote string `json:"remote" yaml:"remote"`
 }
-type SSHConfig struct {
-	Host           string        `json:"host" yaml:"host"`
-	Port           int           `json:"port,omitempty" yaml:"port,omitempty"`
-	User           string        `json:"user" yaml:"user"`
-	Command        string        `json:"command" yaml:"command"`
-	IdentityFile   string        `json:"identity_file" yaml:"identity_file"`
-	KnownHostsFile string        `json:"known_hosts_file,omitempty" yaml:"known_hosts_file,omitempty"`
-	ConnectTimeout time.Duration `json:"connect_timeout" yaml:"connect_timeout"`
-	CommandTimeout time.Duration `json:"command_timeout,omitempty" yaml:"command_timeout,omitempty"`
-	PathMappings   []PathMapping `json:"path_mappings" yaml:"path_mappings"`
-}

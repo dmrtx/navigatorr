@@ -103,7 +103,7 @@ func main() {
 	}
 
 	// Build the automatic transcode executor. Only the HTTP daemon transport
-	// is valid for automatic execution; SSH automatic execution is retired.
+	// is valid; the SSH executor has been removed.
 	// Construction failures are fatal rather than logged-and-ignored.
 	transcodeExecutor, err := buildAutomaticTranscodeExecutor(cfg.Transcode)
 	if err != nil {
@@ -262,7 +262,7 @@ func main() {
 
 // buildAutomaticTranscodeExecutor constructs the executor used for automatic
 // (agent-initiated) transcode execution. Only the HTTP daemon transport is
-// valid; SSH automatic execution is retired and admin-only. It fails closed on
+// valid; the SSH executor has been removed. It fails closed on
 // blank or unknown executor values and never falls back between transports.
 func buildAutomaticTranscodeExecutor(tc config.TranscodeConfig) (transcode.Executor, error) {
 	if !tc.Enabled {
@@ -282,7 +282,7 @@ func buildAutomaticTranscodeExecutor(tc config.TranscodeConfig) (transcode.Execu
 		internal.Logf("automatic transcode executor configured: http base=%s", exec.BaseURL())
 		return exec, nil
 	case "ssh":
-		return nil, fmt.Errorf("automatic transcode execution over ssh is retired and admin-only; configure executor=http")
+		return nil, fmt.Errorf("automatic transcode execution over ssh is retired and the ssh executor was removed; configure executor=http")
 	case "":
 		return nil, fmt.Errorf("automatic transcode executor is not configured; configure executor=http")
 	default:

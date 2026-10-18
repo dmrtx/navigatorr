@@ -27,6 +27,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -42,6 +43,9 @@ const (
 	// typed errors so a malicious/oversized envelope cannot flood logs.
 	maxHTTPErrorLen = 2048
 )
+
+// validJobIDRegex restricts job IDs placed in daemon URL paths.
+var validJobIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_.-]+$`)
 
 // DefaultHTTPRequestTimeout is the default deadline for idempotent reads
 // (Doctor/Capabilities/Status/benchmark status) and for Cancel POSTs.
@@ -148,7 +152,7 @@ type HTTPConfig struct {
 	// DefaultHTTPSubmitTimeout.
 	SubmitTimeout time.Duration
 	// PathMappings translates local<->remote paths with longest-prefix
-	// matching, identical semantics to SSHExecutor (fail closed).
+	// matching; translation fails closed when no mapping matches.
 	PathMappings []PathMapping
 	// HTTPClient, when non-nil, overrides the default client construction
 	// (tests). When set, RequestTimeout/SubmitTimeout still bound each
@@ -184,8 +188,7 @@ type HTTPExecutor struct {
 }
 
 // NewHTTPExecutor builds an HTTPExecutor. BaseURL must be an http/https URL;
-// path mappings may be empty (translation then fails closed per call, same
-// as SSHExecutor).
+// path mappings may be empty (translation then fails closed per call).
 func NewHTTPExecutor(cfg HTTPConfig, opts ...HTTPExecutorOption) (*HTTPExecutor, error) {
 	base := strings.TrimSpace(cfg.BaseURL)
 	if base == "" {
@@ -267,7 +270,7 @@ func (e *HTTPExecutor) Logs(ctx context.Context, jobID string) (map[string]any, 
 	return result, nil
 }
 
-// TranslateLocalToRemote mirrors SSHExecutor longest-prefix semantics.
+// TranslateLocalToRemote applies longest-prefix path mapping, failing closed.
 func (e *HTTPExecutor) TranslateLocalToRemote(localPath string) (string, error) {
 	if len(e.cfg.PathMappings) == 0 {
 		return "", fmt.Errorf("no path mappings configured for transcode http executor (fail closed)")
@@ -296,7 +299,7 @@ func (e *HTTPExecutor) TranslateLocalToRemote(localPath string) (string, error) 
 	return "", fmt.Errorf("path %q does not match any configured transcode path mappings (fail closed)", localPath)
 }
 
-// TranslateRemoteToLocal mirrors SSHExecutor longest-prefix semantics.
+// TranslateRemoteToLocal applies longest-prefix path mapping, failing closed.
 func (e *HTTPExecutor) TranslateRemoteToLocal(remotePath string) (string, error) {
 	if len(e.cfg.PathMappings) == 0 {
 		return "", fmt.Errorf("no path mappings configured for transcode http executor (fail closed)")
@@ -596,8 +599,8 @@ func (e *HTTPExecutor) Doctor(ctx context.Context) error {
 	return &HTTPError{Method: http.MethodGet, URL: redactURL(e.base + "/v1/doctor"), StatusCode: code, Message: msg}
 }
 
-// Capabilities fetches the versioned capability report and applies the same
-// fail-closed checks as SSHExecutor: protocol version match + fingerprint
+// Capabilities fetches the versioned capability report and applies
+// fail-closed checks: protocol version match + fingerprint
 // verification. Capabilities are NEVER derived from /health.
 func (e *HTTPExecutor) Capabilities(ctx context.Context) (WorkerCapabilities, error) {
 	ctx, cancel := context.WithTimeout(ctx, e.reqTO)
@@ -747,7 +750,7 @@ func (e *HTTPExecutor) Submit(ctx context.Context, req Request) (Job, error) {
 }
 
 // Status GETs /v1/jobs/{id} and translates the remote candidate path back
-// to local (best-effort, same as SSHExecutor).
+// to local (best-effort).
 func (e *HTTPExecutor) Status(ctx context.Context, jobID string) (JobStatus, error) {
 	if strings.TrimSpace(jobID) == "" {
 		return JobStatus{}, errors.New("jobID is required")

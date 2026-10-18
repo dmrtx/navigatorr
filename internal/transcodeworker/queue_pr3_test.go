@@ -1080,67 +1080,6 @@ func TestPR3_HTTPExecutorSendsIdempotencyAnd409Definitive(t *testing.T) {
 	}
 }
 
-func TestPR3_SSHCompatibilitySendsIdempotency(t *testing.T) {
-	dir := t.TempDir()
-	capture := filepath.Join(dir, "stdin.json")
-	script := fmt.Sprintf(`
-input=$(cat)
-echo "$input" > %s
-echo "$input" | grep -q "source_path" || exit 1
-echo '{"id": "job-ssh-1", "status": "queued"}'
-exit 0
-`, capture)
-	fakeSSH := createFakeSSHBinaryForPR3(t, script)
-	cfg := transcode.SSHConfig{
-		Host: "test.host", Command: "/remote/bin/navigatorr-transcode",
-		PathMappings: []transcode.PathMapping{{Local: "/local/media", Remote: "/Volumes/media"}},
-	}
-	exec, err := transcode.NewSSHExecutor(cfg, transcode.WithSSHBinary(fakeSSH))
-	if err != nil {
-		t.Fatal(err)
-	}
-	plan := validExecutorPlan(t)
-	if _, err := exec.Submit(context.Background(), transcode.Request{
-		ID: "job-ssh-1", SourcePath: "/local/media/a.mkv", CandidatePath: "/local/media/b.mkv", Profile: "hevc-vt", Plan: plan,
-	}); err != nil {
-		t.Fatalf("ssh submit: %v", err)
-	}
-	raw, err := os.ReadFile(capture)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var payload map[string]any
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		t.Fatalf("ssh stdin json: %v (%s)", err, raw)
-	}
-	if payload["idempotency_key"] != "job-ssh-1" {
-		t.Errorf("ssh must send default idempotency_key, got %v", payload)
-	}
-	digest, _ := payload["execution_spec_digest"].(string)
-	if !strings.HasPrefix(digest, "sha256:") {
-		t.Errorf("ssh must send canonical digest, got %v", payload)
-	}
-
-	// Legacy caller without plan still works (digest omitted, worker computes).
-	capture2 := filepath.Join(dir, "stdin2.json")
-	script2 := fmt.Sprintf(`
-input=$(cat)
-echo "$input" > %s
-echo '{"id": "job-ssh-legacy", "status": "queued"}'
-exit 0
-`, capture2)
-	fakeSSH2 := createFakeSSHBinaryForPR3(t, script2)
-	exec2, _ := transcode.NewSSHExecutor(transcode.SSHConfig{
-		Host: "test.host", Command: "/remote/bin/navigatorr-transcode",
-		PathMappings: []transcode.PathMapping{{Local: "/local/media", Remote: "/Volumes/media"}},
-	}, transcode.WithSSHBinary(fakeSSH2))
-	if _, err := exec2.Submit(context.Background(), transcode.Request{
-		ID: "job-ssh-legacy", SourcePath: "/local/media/a.mkv", CandidatePath: "/local/media/b.mkv",
-	}); err != nil {
-		t.Fatalf("legacy ssh submit must remain compatible: %v", err)
-	}
-}
-
 func TestPR3_HTTPSubmitValidationGuardsIntact(t *testing.T) {
 	w, tempDir, sourceFile := newPR3Worker(t, 8, nil)
 	srv := NewServer(w, "test-exe", "", "")
@@ -1264,17 +1203,6 @@ func asHTTPError(err error, target **transcode.HTTPError) bool {
 		err = u.Unwrap()
 	}
 	return false
-}
-
-func createFakeSSHBinaryForPR3(t *testing.T, scriptContent string) string {
-	t.Helper()
-	dir := t.TempDir()
-	binPath := filepath.Join(dir, "ssh")
-	content := "#!/bin/sh\n" + scriptContent + "\n"
-	if err := os.WriteFile(binPath, []byte(content), 0755); err != nil {
-		t.Fatalf("fake ssh: %v", err)
-	}
-	return binPath
 }
 
 var _ = time.Second
