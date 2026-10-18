@@ -186,9 +186,7 @@ func (h *promotionHarness) serve(w http.ResponseWriter, r *http.Request) {
 				h.t.Errorf("DELETE before episode %d adopted candidate", ep.ID)
 			}
 		}
-		if !h.backupSeen {
-			h.t.Error("DELETE before verified recovery copy")
-		}
+		h.checkRecoveryBeforeDelete()
 		h.deletes++
 		h.mutationOrder = append(h.mutationOrder, "delete")
 		delete(h.files, id)
@@ -237,7 +235,9 @@ func (h *promotionHarness) serve(w http.ResponseWriter, r *http.Request) {
 				if p.Commands["import"] == nil || p.Commands["import"].SentAt == "" {
 					h.t.Error("import sent before durable intent")
 				}
-				if err := h.engine.verifyPromotionHash(context.Background(), p.BackupPath, p.OriginalSHA); err != nil {
+				// Move-aside keeps the original in place until the library
+				// adopted the candidate; copy mode verified a copy first.
+				if err := testFileSHA(recoveryOf(p), p.OriginalSHA); err != nil {
 					h.t.Errorf("import before recovery verification: %v", err)
 				} else {
 					h.backupSeen = true
@@ -332,6 +332,60 @@ func (h *promotionHarness) serve(w http.ResponseWriter, r *http.Request) {
 	default:
 		h.t.Errorf("unexpected Sonarr request %s %s", r.Method, r.URL)
 		w.WriteHeader(404)
+	}
+}
+
+// recoveryOf is where the verified original is recoverable now: in place
+// until a move-aside promotion moves it, else the private recovery file.
+func recoveryOf(p *promotionState) string {
+	if p.movesAside() && !p.MovedAside {
+		return p.OriginalPath
+	}
+	return p.BackupPath
+}
+
+// testFileSHA reads path directly, outside the engine's read accounting.
+func testFileSHA(path, want string) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if sum := sha256.Sum256(b); hex.EncodeToString(sum[:]) != want {
+		return fmt.Errorf("%s: SHA-256 mismatch", filepath.Base(path))
+	}
+	return nil
+}
+
+// checkRecoveryBeforeDelete fails the test unless the original is recoverable
+// when the old library record is deleted: moved aside intact, or copied and
+// verified before import.
+func (h *promotionHarness) checkRecoveryBeforeDelete() {
+	instances, err := h.st.ListActionInstances("", 100)
+	if err != nil {
+		h.t.Error(err)
+		return
+	}
+	for _, inst := range instances {
+		if inst.ActionName != "promote_transcode_candidate" || inst.Status != StatusRunning {
+			continue
+		}
+		p, err := loadPromotion(parseExecutionContext(&inst, h.engine))
+		if err != nil || !p.movesAside() {
+			continue
+		}
+		if !p.MovedAside || p.BackupFingerprint == nil {
+			h.t.Error("DELETE before the original was moved aside")
+		}
+		if err := testFileSHA(p.BackupPath, p.OriginalSHA); err != nil {
+			h.t.Errorf("DELETE without an intact moved original: %v", err)
+		}
+		if _, err := os.Lstat(p.OriginalPath); !os.IsNotExist(err) {
+			h.t.Error("DELETE while the original is still in the library")
+		}
+		h.backupSeen = true
+	}
+	if !h.backupSeen {
+		h.t.Error("DELETE before verified recovery")
 	}
 }
 
@@ -434,7 +488,11 @@ func (h *promotionHarness) finish(r *ActionResult) *ActionResult {
 func (h *promotionHarness) restart() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	alwaysCopy := h.engine.promotionAlwaysCopy
+	// A restart is a new process: no persisted fingerprint proves a file.
+	promotionProcess += "-restarted"
 	h.engine = NewEngine(h.engine.Deps())
+	h.engine.promotionAlwaysCopy = alwaysCopy
 	h.engine.registerPromoteTranscodeTemplate()
 }
 
@@ -569,7 +627,7 @@ func TestPromotionNeverResubmitsAnUncertainUnobservedImport(t *testing.T) {
 	if r.Status != StatusWaitingDecision || h.imports != 1 {
 		t.Fatal("reconcile decision repeated the import")
 	}
-	if err := h.engine.verifyPromotionHash(context.Background(), p.BackupPath, p.OriginalSHA); err != nil {
+	if err := testFileSHA(recoveryOf(p), p.OriginalSHA); err != nil {
 		t.Fatalf("recovery missing: %v", err)
 	}
 }
@@ -586,7 +644,7 @@ func TestPromotionRetainsRecoveryAndRetriesConfirmedRenameFailure(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := h.engine.verifyPromotionHash(context.Background(), p.BackupPath, p.OriginalSHA); err != nil {
+	if err := testFileSHA(recoveryOf(p), p.OriginalSHA); err != nil {
 		t.Fatal(err)
 	}
 	r, err = h.engine.Retry(context.Background(), r.ID)
@@ -607,6 +665,11 @@ func TestPromotionRecoversWhenSonarrDeletesOriginalDuringImport(t *testing.T) {
 	if r.Status != StatusCompleted || !h.backupSeen || h.deletes != 0 {
 		t.Fatalf("Sonarr internal deletion: %s %s", r.Status, r.Error)
 	}
+	// The original was still in place, verified, when the library removed
+	// it during import; the adopted candidate is the approved end state.
+	if r.Outputs["original_removed_by_library"] != true {
+		t.Fatalf("library removal not reported: %+v", r.Outputs)
+	}
 }
 
 func TestPromotionBlocksOldIDPathDriftAndDamagedImport(t *testing.T) {
@@ -624,7 +687,7 @@ func TestPromotionBlocksOldIDPathDriftAndDamagedImport(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := h.engine.verifyPromotionHash(context.Background(), p.BackupPath, p.OriginalSHA); err != nil {
+			if err := testFileSHA(recoveryOf(p), p.OriginalSHA); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -1071,7 +1134,7 @@ func TestPromotionLostAdoptionBeforeRemovalKeepsRecovery(t *testing.T) {
 	if err != nil || step.Status != StepFailed || !strings.Contains(step.Error, "no longer adopted") || h.deletes != 0 {
 		t.Fatalf("unsafe removal: %+v %v", step, err)
 	}
-	if err := h.engine.verifyPromotionHash(context.Background(), p.BackupPath, p.OriginalSHA); err != nil {
+	if err := testFileSHA(recoveryOf(p), p.OriginalSHA); err != nil {
 		t.Fatal(err)
 	}
 	if err := h.engine.verifyPromotionHash(context.Background(), p.OriginalPath, p.OriginalSHA); err != nil {

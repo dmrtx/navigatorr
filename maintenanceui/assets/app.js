@@ -2365,12 +2365,12 @@ function stageLabel(name) {
   const labels = {
     plan_promotion: "Verify original and candidate",
     approve_promotion: "Review replacement",
-    preserve_original: "Save and verify recovery copy",
+    preserve_original: "Verify original and prepare recovery",
     import_candidate: "Import verified candidate",
     remove_old_file: "Remove original library file",
     rename_candidate: "Finalize filename",
     rescan_library: "Refresh library",
-    finalize_promotion: "Verify replacement and clean up recovery copy",
+    finalize_promotion: "Verify replacement and clean up recovery",
     resolve_source: "Inspect source",
     resolve_media: "Inspect source",
     resolve_batch: "Inspect selected files",
@@ -3828,18 +3828,21 @@ function postEncodeWork(job) {
   if (!converted) return null;
   return {label: ["validate_result", "accept_result"].includes(stage) ? `Conversion finished · ${stageLabel(stage)}` : "Conversion finished"};
 }
-// Saving the recovery copy re-checks the original and the converted file,
-// copies the original and verifies that copy: on a large file, well over
-// 100 GB of storage reads. Name and measure each stage; null outside it.
+// Preparing recovery re-checks the original and the converted file: on a
+// large file, many GB of storage reads. When the original cannot be moved
+// aside, removing it first copies the original and verifies that copy. Name
+// and measure each stage; null outside them.
 const preserveWorkLabels = {waiting_for_hash_slot:"Waiting for a hash slot",verifying_original:"Re-checking the original",verifying_candidate:"Re-checking the converted file",copying_recovery:"Copying the recovery copy",verifying_recovery:"Verifying the recovery copy"};
 function preserveWork(job) {
   const stages = job?.stages || [];
-  if (stages[job?.current_step]?.name !== "preserve_original") return null;
-  const work = job.work || {};
+  const stage = stages[job?.current_step]?.name;
+  const work = job?.work || {};
+  const fallbackCopy = stage === "remove_old_file" && ["copying_recovery", "verifying_recovery"].includes(work.phase);
+  if (stage !== "preserve_original" && !fallbackCopy) return null;
   const label = preserveWorkLabels[work.phase];
   if (!label) return null;
   const total = Number(work.total_bytes) > 0 ? Number(work.total_bytes) : 0;
-  const step = `Step ${job.current_step + 1}/${stages.length} · ${stageLabel("preserve_original")}`;
+  const step = `Step ${job.current_step + 1}/${stages.length} · ${stageLabel(stage)}`;
   if (work.phase === "waiting_for_hash_slot") return {label, total, step};
   const read = Math.max(0, Number(work.bytes_read) || 0);
   if (!total) return {label, read, total, step};

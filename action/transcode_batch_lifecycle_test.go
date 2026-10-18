@@ -95,7 +95,8 @@ func testBatchLifecycleTwoCandidatesOneApprovalAndRestart(t *testing.T, dropResc
 						t.Error("delete before adoption")
 					}
 				}
-				if err := os.Remove(f.Path); err != nil {
+				// Like Sonarr, tolerate a file already moved aside.
+				if err := os.Remove(f.Path); err != nil && !os.IsNotExist(err) {
 					t.Error(err)
 				}
 				delete(files, id)

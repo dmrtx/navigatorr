@@ -113,7 +113,6 @@ func TestPromotionFingerprintNeedsTheSameExecution(t *testing.T) {
 	for name, ctx := range map[string]context.Context{
 		"later execution": withPromotionVerifiedFiles(context.Background(), &ExecutionContext{State: map[string]any{}}),
 		"no execution":    context.Background(),
-		"cleanup":         withoutPromotionVerifiedFiles(first),
 	} {
 		before := reads.of(path)
 		if err := e.verifyPromotionHash(ctx, path, sum); err != nil {
@@ -152,21 +151,43 @@ func TestPromotionRenameKeepsOnlyAStrictIdentity(t *testing.T) {
 	}
 }
 
+type passMode int
+
+const (
+	passMoveAside passMode = iota
+	passCopyClone
+	passCopyStream
+)
+
 // promotionPasses runs a whole approved promotion and returns how many times
-// this process read each file in full (copy streaming included).
-func promotionPasses(t *testing.T, clone bool) (original, candidate float64, p *promotionState) {
+// this process read each file in full (copy streaming included). The harness
+// verifies recovery itself outside this accounting.
+func promotionPasses(t *testing.T, mode passMode, local bool) (original, candidate float64, p *promotionState) {
 	t.Helper()
 	h := newPromotionHarness(t)
 	reads := countReads(h.engine)
-	if clone {
+	h.engine.promotionAlwaysCopy = mode != passMoveAside
+	if mode == passCopyClone {
 		h.engine.promotionCloneHook = func(d, s *os.File) error { _, err := io.Copy(d, s); return err }
 	}
-	r := h.run()
+	var r *ActionResult
+	if local {
+		r = runLocalPromotion(t, h)
+	} else {
+		r = h.run()
+	}
 	if r.Status != StatusWaitingDecision {
 		t.Fatalf("plan: %s %s", r.Status, r.Error)
 	}
 	if r = h.finish(h.resume(r.ID, "approve")); r.Status != StatusCompleted {
 		t.Fatalf("promotion: %s %s", r.Status, r.Error)
+	}
+	if testing.Verbose() {
+		reads.mu.Lock()
+		for path, n := range reads.bytes {
+			t.Logf("read %s: %d", filepath.Base(path), n)
+		}
+		reads.mu.Unlock()
 	}
 	inst, err := h.st.GetActionInstance(r.ID)
 	if err != nil {
@@ -191,30 +212,52 @@ func promotionPasses(t *testing.T, clone bool) (original, candidate float64, p *
 }
 
 func TestPromotionReadsEachFileFewerTimes(t *testing.T) {
-	original, candidate, p := promotionPasses(t, true)
-	t.Logf("full passes with a clone: original-sized %.0f, candidate-sized %.0f", original, candidate)
-	// Plan hashes the original; approval is a wait, so preserve hashes it
-	// again and reads the recovery copy back once. The harness checks the copy
-	// itself before it accepts the import (not a production read). The wait for
-	// the DELETE command forces a full hash of the copy before the rename, and
-	// finalization reads it once more before removing it. Before fingerprints
-	// this was ten production passes plus the streamed copy.
-	if original > 6 {
-		t.Fatalf("original-sized files read %.0f times", original)
-	}
-	if p.RecoveryCopy == nil || p.RecoveryCopy.Method != promotionCopyClone {
-		t.Fatalf("recovery copy method: %+v", p.RecoveryCopy)
-	}
-	// Without a clone, Linux copies in the kernel (no read by this process)
-	// and other platforms stream the copy through it (one more read).
-	streamed, _, p := promotionPasses(t, false)
-	t.Logf("full passes without a clone: original-sized %.0f, %+v", streamed, p.RecoveryCopy)
-	want := original + 1
-	if p.RecoveryCopy.Method == promotionCopyKernel {
-		want = original
-	}
-	if streamed != want || p.RecoveryCopy.Method != promotionCopyStream && p.RecoveryCopy.Method != promotionCopyKernel {
-		t.Fatalf("copy without a clone: %.0f passes, want %.0f, %+v", streamed, want, p.RecoveryCopy)
+	// Before fingerprints and move-aside, a promotion read the original ten
+	// times and the candidate nine, and wrote a full copy of the original.
+	// Plan stats the original only. Approval is a wait, so preserve reads the
+	// original and candidate in full; the original then moves aside by
+	// rename, proved by its fingerprint. Finalization reads the final file.
+	// Sonarr and Radarr add one candidate read before the old record is
+	// deleted, after the import wait.
+	for _, tc := range []struct {
+		name                string
+		mode                passMode
+		local               bool
+		original, candidate float64
+		method              string
+	}{
+		{"library/move-aside", passMoveAside, false, 1, 3, ""},
+		{"filesystem/move-aside", passMoveAside, true, 1, 2, ""},
+		// The copy fallback adds the copy's read-back, plus the streamed
+		// copy itself when the filesystem cannot clone and the kernel does
+		// not copy it (Linux copy_file_range is not read by this process).
+		{"library/copy-clone", passCopyClone, false, 2, 3, promotionCopyClone},
+		{"library/copy-no-clone", passCopyStream, false, 3, 3, ""},
+		{"filesystem/copy-no-clone", passCopyStream, true, 3, 2, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			original, candidate, p := promotionPasses(t, tc.mode, tc.local)
+			t.Logf("full passes: original-sized %.0f, candidate-sized %.0f, copy %+v", original, candidate, p.RecoveryCopy)
+			if tc.mode == passCopyStream && p.RecoveryCopy != nil && p.RecoveryCopy.Method == promotionCopyKernel {
+				tc.original--
+			}
+			if original != tc.original || candidate != tc.candidate {
+				t.Fatalf("read original-sized %.2f times, candidate-sized %.2f; want %.0f and %.0f", original, candidate, tc.original, tc.candidate)
+			}
+			switch tc.mode {
+			case passMoveAside:
+				if p.RecoveryMode != promotionRecoveryMoveAside || !p.MovedAside || p.RecoveryCopy != nil {
+					t.Fatalf("not moved aside: %+v", p)
+				}
+			default:
+				if p.RecoveryMode != promotionRecoveryCopy || p.RecoveryCopy == nil || tc.mode == passCopyStream && p.RecoveryCopy.Method != promotionCopyStream && p.RecoveryCopy.Method != promotionCopyKernel {
+					t.Fatalf("no recovery copy: %+v", p)
+				}
+				if tc.method != "" && p.RecoveryCopy.Method != tc.method {
+					t.Fatalf("recovery copy method: %+v", p.RecoveryCopy)
+				}
+			}
+		})
 	}
 }
 
@@ -222,17 +265,20 @@ func TestPromotionHashesFullyAfterApprovalAndRestart(t *testing.T) {
 	h := newPromotionHarness(t)
 	reads := countReads(h.engine)
 	r := h.run()
-	planned := reads.of(h.original)
-	if planned == 0 {
-		t.Fatal("plan did not hash the original")
+	if reads.of(h.original) != 0 || reads.of(h.candidate) == 0 {
+		t.Fatalf("plan read original %d, candidate %d bytes; want a stat and a full hash", reads.of(h.original), reads.of(h.candidate))
 	}
-	// Approval is a wait: preserve must read the whole original again.
+	// Approval is a wait: preserve must read both files in full again.
 	h.restart()
 	reads = countReads(h.engine)
 	if r = h.finish(h.resume(r.ID, "approve")); r.Status != StatusCompleted {
 		t.Fatalf("promotion: %s %s", r.Status, r.Error)
 	}
-	if reads.of(h.original) < planned {
-		t.Fatalf("original read %d bytes after approval, want a full %d", reads.of(h.original), planned)
+	p, err := loadPromotion(&ExecutionContext{State: r.State})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reads.of(h.original) < p.OriginalBytes || reads.of(h.candidate) < p.CandidateBytes {
+		t.Fatalf("after approval read original %d of %d, candidate %d of %d", reads.of(h.original), p.OriginalBytes, reads.of(h.candidate), p.CandidateBytes)
 	}
 }

@@ -82,7 +82,7 @@ func TestRadarrPromotionRejectsIdentityDriftBeforeDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(p.BackupPath); err != nil {
-		t.Fatal("lost recovery copy after identity drift", err)
+	if err := testFileSHA(recoveryOf(p), p.OriginalSHA); err != nil {
+		t.Fatal("lost recovery after identity drift", err)
 	}
 }

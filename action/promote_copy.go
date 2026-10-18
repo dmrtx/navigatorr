@@ -29,7 +29,7 @@ var errPromotionCopyUnsupported = errors.New("copy offload is not supported on t
 // promotionCopyUnsupported reports errors meaning "this filesystem or kernel
 // cannot offload the copy", after which streaming is still safe.
 func promotionCopyUnsupported(err error) bool {
-	for _, target := range []error{errPromotionCopyUnsupported, syscall.ENOSYS, syscall.EXDEV, syscall.EOPNOTSUPP, syscall.ENOTSUP, syscall.EINVAL, syscall.ENOTTY} {
+	for _, target := range []error{errPromotionCopyUnsupported, errors.ErrUnsupported, syscall.ENOSYS, syscall.EXDEV, syscall.EOPNOTSUPP, syscall.ENOTSUP, syscall.EINVAL, syscall.ENOTTY} {
 		if errors.Is(err, target) {
 			return true
 		}

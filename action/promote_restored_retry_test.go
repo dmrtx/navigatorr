@@ -12,7 +12,13 @@ import (
 
 func restoredOriginalFixture(t *testing.T, checkpoint int) (*promotionHarness, string) {
 	t.Helper()
+	return restoredOriginalFixtureMode(t, checkpoint, false)
+}
+
+func restoredOriginalFixtureMode(t *testing.T, checkpoint int, copyMode bool) (*promotionHarness, string) {
+	t.Helper()
 	h := newPromotionHarness(t)
+	h.engine.promotionAlwaysCopy = copyMode
 	tmpl, _ := h.engine.GetTemplate("promote_transcode_candidate")
 	tmpl.Steps[4].Run = func(context.Context, *ExecutionContext) (StepResult, error) {
 		return promoteWait("hold before deletion")
@@ -86,9 +92,10 @@ func TestPromotionRetryReimportsOnlyVerifiedRestoredOriginal(t *testing.T) {
 }
 
 func TestPromotionRestoredOriginalRetryFailsClosed(t *testing.T) {
-	for _, problem := range []string{"original_changed", "candidate_changed", "recovery_changed", "candidate_record_exists", "unapproved_episode", "missing_episode", "different_file_ids", "wrong_path", "import_running", "import_missing", "import_payload_changed", "delete_uncertain", "not_approved"} {
-		t.Run(problem, func(t *testing.T) {
-			h, id := restoredOriginalFixture(t, 4)
+	for _, name := range []string{"original_changed", "candidate_changed", "recovery_changed", "candidate_record_exists", "unapproved_episode", "missing_episode", "different_file_ids", "wrong_path", "import_running", "import_missing", "import_payload_changed", "delete_uncertain", "not_approved", "original_changed/copy", "recovery_changed/copy", "wrong_path/copy"} {
+		problem, copyMode := strings.TrimSuffix(name, "/copy"), strings.HasSuffix(name, "/copy")
+		t.Run(name, func(t *testing.T) {
+			h, id := restoredOriginalFixtureMode(t, 4, copyMode)
 			inst, _ := h.st.GetActionInstance(id)
 			ec := parseExecutionContext(inst, h.engine)
 			p, _ := loadPromotion(ec)
@@ -140,8 +147,20 @@ func TestPromotionRestoredOriginalRetryFailsClosed(t *testing.T) {
 			if h.imports != 1 || h.deletes != 0 || h.renames != 0 || h.rescans != 0 {
 				t.Fatal("unsafe retry changed Sonarr")
 			}
-			if _, err := os.Stat(p.BackupPath); err != nil {
-				t.Fatalf("recovery copy lost: %v", err)
+			switch {
+			case copyMode:
+				if _, err := os.Stat(p.BackupPath); err != nil {
+					t.Fatalf("recovery copy lost: %v", err)
+				}
+			case problem == "original_changed":
+				// Nothing moves an original that changed after approval.
+				if _, err := os.Stat(h.original); err != nil || p.MovedAside {
+					t.Fatalf("changed original moved or lost: %v", err)
+				}
+			default:
+				if err := testFileSHA(recoveryOf(p), p.OriginalSHA); err != nil {
+					t.Fatalf("recovery lost: %v", err)
+				}
 			}
 			stored, _ := h.st.GetActionInstance(id)
 			if getString(parseExecutionContext(stored, h.engine).State, "promotion_reimport_history") != "" {

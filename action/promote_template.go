@@ -19,12 +19,12 @@ func (e *Engine) registerPromoteTranscodeTemplate() {
 		Name: "promote_transcode_candidate", Version: 2, Destructive: true,
 		AutoReconcile:   true,
 		ImmutableInputs: true,
-		Description:     "Replaces a completed, validated transcode locally with service=filesystem (no library IDs), or promotes it into Sonarr/Radarr, after explicit approval, preserving a verified recovery copy until import, old-file cleanup, rename and rescan are verified. Persists external command intents and never blindly resubmits uncertain imports.",
+		Description:     "Replaces a completed, validated transcode locally with service=filesystem (no library IDs), or promotes it into Sonarr/Radarr, after explicit approval, keeping the verified original recoverable (moved into a private recovery directory, or copied when it cannot be moved) until import, old-file cleanup, rename and rescan are verified. Persists external command intents and never blindly resubmits uncertain imports.",
 		RequiredInputs:  []string{"transcode_action_id"}, OptionalInputs: []string{"service", "series_id", "movie_id", "batch_promote_parent_id", "batch_promote_item_key", "batch_promote_digest"},
 		Steps: []StepDefinition{
 			{Name: "plan_promotion", Description: "Verify original and candidate, and resolve the movie or all episodes sharing the original file", Run: e.measureCoordinatorPhase("coordinator_promotion", e.stepPromotePlan)},
 			{Name: "approve_promotion", Description: "Present the exact replacement for an explicit approve decision", Run: e.stepPromoteApprove},
-			{Name: "preserve_original", Description: "Create and verify a recovery copy before any library mutation", Run: e.measureCoordinatorPhase("coordinator_promotion", e.stepPromotePreserve)},
+			{Name: "preserve_original", Description: "Verify the original and prepare its recovery before any library mutation", Run: e.measureCoordinatorPhase("coordinator_promotion", e.stepPromotePreserve)},
 			{Name: "import_candidate", Description: "Import once and reconcile library associations, physical candidate SHA and streams", Run: e.measureCoordinatorPhase("coordinator_promotion", e.stepPromoteImport)},
 			{Name: "remove_old_file", Description: "Reverify adoption and integrity before removing the old library file", Run: e.measureCoordinatorPhase("coordinator_promotion", e.stepPromoteRemoveOld)},
 			{Name: "rename_candidate", Description: "Move the active file out of the temporary candidate directory through the library service", Run: e.measureCoordinatorPhase("coordinator_promotion", e.stepPromoteRename)},
@@ -73,6 +73,20 @@ type promotionState struct {
 	RecoveryCleanupStarted            bool                         `json:"recovery_cleanup_started,omitempty"`
 	// How the recovery copy was made; see promotionCopyData.
 	RecoveryCopy *promotionCopyResult `json:"recovery_copy,omitempty"`
+	// move_aside renames the original into the recovery directory right
+	// before the old library file is removed; copy (and legacy "") copies it
+	// before import. See promotionMoveAside.
+	RecoveryMode string `json:"recovery_mode,omitempty"`
+	// Fingerprints of full hashes, kept for identity checks across waits;
+	// see promotionVerifyByIdentity.
+	OriginalFingerprint  *promotionFingerprint `json:"original_fingerprint,omitempty"`
+	BackupFingerprint    *promotionFingerprint `json:"recovery_fingerprint,omitempty"`
+	CandidateFingerprint *promotionFingerprint `json:"candidate_fingerprint,omitempty"`
+	MoveAsideStartedAt   string                `json:"move_aside_started_at,omitempty"`
+	MovedAside           bool                  `json:"moved_aside,omitempty"`
+	// The library removed the original itself before it could be moved aside,
+	// so there was never anything to recover.
+	OriginalRemovedByLibrary bool `json:"original_removed_by_library,omitempty"`
 	// Set for compact candidates only: the re-grab warning and a read-only
 	// snapshot of how Sonarr/Radarr tracks the item.
 	RegrabWarning string `json:"regrab_warning,omitempty"`

@@ -73,7 +73,7 @@ func TestFilesystemPromotionFailsClosedOnChangedOriginalCandidateOrTarget(t *tes
 			}
 			if changed == "target" {
 				p, err := loadPromotion(&ExecutionContext{State: r.State})
-				if err != nil || h.engine.verifyPromotionHash(context.Background(), p.BackupPath, p.OriginalSHA) != nil {
+				if err != nil || testFileSHA(recoveryOf(p), p.OriginalSHA) != nil {
 					t.Fatal("recovery was not retained")
 				}
 			}
@@ -99,7 +99,7 @@ func TestFilesystemPromotionReconcilesPublishedCandidateAfterRestart(t *testing.
 		t.Fatalf("fixture did not stop after publication: %+v", r)
 	}
 	p, err := loadPromotion(&ExecutionContext{State: r.State})
-	if err != nil || h.engine.verifyPromotionHash(context.Background(), p.BackupPath, p.OriginalSHA) != nil {
+	if err != nil || testFileSHA(recoveryOf(p), p.OriginalSHA) != nil {
 		t.Fatal("missing recovery checkpoint")
 	}
 	if _, err := os.Stat(h.candidate); !os.IsNotExist(err) {
@@ -133,7 +133,7 @@ func TestFilesystemPromotionRetainsRecoveryWhenFinalBytesDrift(t *testing.T) {
 		t.Fatalf("drift accepted: %+v", r)
 	}
 	p, err := loadPromotion(&ExecutionContext{State: r.State})
-	if err != nil || h.engine.verifyPromotionHash(context.Background(), p.BackupPath, p.OriginalSHA) != nil {
+	if err != nil || testFileSHA(recoveryOf(p), p.OriginalSHA) != nil {
 		t.Fatal("recovery disappeared on final drift")
 	}
 	if _, err := os.Stat(h.original); err != nil {

@@ -49,6 +49,10 @@ type Engine struct {
 	// promotionReadHook, when set by tests, sees every byte count this process
 	// reads from a promotion file: full hashes and streamed copies.
 	promotionReadHook func(path string, n int64)
+	// Test seams for recovery: moving the original aside (a test can refuse
+	// it like a cross-device rename), and choosing a copy from the start.
+	promotionMoveAsideHook func(from, to string) error
+	promotionAlwaysCopy    bool
 }
 
 // NewEngine creates a new Action Engine.
@@ -412,6 +416,8 @@ func (e *Engine) retry(ctx context.Context, instanceID string, guard func(*store
 		return nil, fmt.Errorf("invalid retry checkpoint %d", resumeStep)
 	}
 	ec := parseExecutionContext(inst, e)
+	// Retry checks and the execution they lead into are one continuous run.
+	ctx = withPromotionVerifiedFiles(ctx, ec)
 	if inst.ActionName == "clean_podcast_ads" {
 		if err := e.preparePodcastRetry(ctx, ec); err != nil {
 			return nil, err
@@ -823,7 +829,10 @@ func (e *Engine) execute(ctx context.Context, inst *store.ActionInstance, ec *Ex
 	totalSteps := len(tmpl.Steps)
 	// One call is one continuous execution: every wait returns from it, so a
 	// file hashed here may be re-proved by fingerprint only until it returns.
-	ctx = withPromotionVerifiedFiles(ctx, ec)
+	// A retry's own checks, just before, are part of the same run.
+	if v := promotionVerified(ctx); v == nil || v.ec != ec {
+		ctx = withPromotionVerifiedFiles(ctx, ec)
+	}
 
 	// current_step and state are one durable checkpoint; step logs are audit
 	// records, never recovery authority.

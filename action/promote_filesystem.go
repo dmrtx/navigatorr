@@ -70,7 +70,15 @@ func (e *Engine) localPromotionPublish(ctx context.Context, ec *ExecutionContext
 			return StepResult{Status: StepCompleted}, e.savePromotion(ctx, ec, p)
 		}
 	}
-	if err := e.verifyPromotionHashStable(ctx, p.OriginalPath, p.OriginalSHA); err != nil {
+	// Once a move aside started, promotionVerifyRecovered above and the
+	// move itself prove the original wherever it is.
+	verifyOriginal := func() error {
+		if p.MovedAside || p.MoveAsideStartedAt != "" {
+			return nil
+		}
+		return e.verifyPromotionHashStable(ctx, p.OriginalPath, p.OriginalSHA)
+	}
+	if err := verifyOriginal(); err != nil {
 		return promoteFailed(err)
 	}
 	if err := e.verifyPromotionHashStable(ctx, p.CandidatePath, p.CandidateSHA); err != nil {
@@ -89,14 +97,22 @@ func (e *Engine) localPromotionPublish(ctx context.Context, ec *ExecutionContext
 		return promoteFailed(err)
 	}
 	// Recheck immediately before the atomic mutation, after persisting intent.
-	if err := e.verifyPromotionHashStable(ctx, p.OriginalPath, p.OriginalSHA); err != nil {
+	if err := verifyOriginal(); err != nil {
 		return promoteFailed(err)
 	}
 	if err := e.verifyPromotionHashStable(ctx, p.CandidatePath, p.CandidateSHA); err != nil {
 		return promoteFailed(err)
 	}
+	if p.NewPath == p.OriginalPath && p.movesAside() {
+		// The candidate takes the original's name: move the original aside
+		// first. Its name is empty for one rename; a refused move copies the
+		// original instead and replaces it atomically as in copy mode.
+		if err := e.withBatchPromotionMutation(ctx, ec, p, func() error { return e.promotionPreserveForRemoval(ctx, ec, p) }); err != nil {
+			return promoteFailed(err)
+		}
+	}
 	err = e.withBatchPromotionMutation(ctx, ec, p, func() error {
-		if p.NewPath == p.OriginalPath {
+		if p.NewPath == p.OriginalPath && !p.movesAside() {
 			return os.Rename(p.CandidatePath, p.NewPath)
 		}
 		return renamePromotionNoReplace(p.CandidatePath, p.NewPath)
@@ -108,6 +124,7 @@ func (e *Engine) localPromotionPublish(ctx context.Context, ec *ExecutionContext
 		_ = d.Sync()
 		_ = d.Close()
 	}
+	e.promotionCarryRenamed(ctx, p.CandidatePath, p.NewPath)
 	if err := e.promotionInspectAdopted(ctx, p, p.NewPath); err != nil {
 		return promoteFailed(err)
 	}
@@ -132,7 +149,12 @@ func (e *Engine) localPromotionRemoveOriginal(ctx context.Context, ec *Execution
 	if err := e.promotionInspectAdopted(ctx, p, p.NewPath); err != nil {
 		return promoteFailed(err)
 	}
-	if p.NewPath != p.OriginalPath {
+	if p.NewPath != p.OriginalPath && p.movesAside() {
+		if err := e.withBatchPromotionMutation(ctx, ec, p, func() error { return e.promotionPreserveForRemoval(ctx, ec, p) }); err != nil {
+			return promoteFailed(err)
+		}
+	}
+	if p.NewPath != p.OriginalPath && !p.movesAside() {
 		if _, err := os.Lstat(p.OriginalPath); err == nil {
 			if err := e.verifyPromotionHashStable(ctx, p.OriginalPath, p.OriginalSHA); err != nil {
 				return promoteFailed(err)

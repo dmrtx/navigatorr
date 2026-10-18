@@ -33,7 +33,9 @@ func (e *Engine) observeCleanup(ctx context.Context, ec *ExecutionContext) conte
 		}
 		return e.cleanupProgress(ctx, ec, phase, path, read, total)
 	})
-	// Removing recovery data rests on whole-file reads only, never on an
-	// earlier hash's fingerprint.
-	return context.WithValue(withoutPromotionVerifiedFiles(ctx), promotionHashProgressKey{}, observer)
+	// The final file is read in full after any wait; only a file this same
+	// execution just read is re-proved by fingerprint. A recovery copy is
+	// removed on its identity: what keeps the user's media safe is the
+	// verified final file, not the bytes being discarded.
+	return context.WithValue(ctx, promotionHashProgressKey{}, observer)
 }

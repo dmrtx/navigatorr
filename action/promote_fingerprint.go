@@ -2,19 +2,51 @@ package action
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"os"
 	"time"
 )
 
 // promotionFingerprint is a strict stat identity of a file: size, mtime and
 // ctime to the nanosecond, plus device and inode. Any write changes mtime or
-// ctime, and setting mtime back changes ctime again.
+// ctime, and setting mtime back changes ctime again. Durable state is decoded
+// through map[string]any, where a JSON number becomes a float64 and loses
+// nanoseconds and large inode numbers, so every field is persisted as a string.
 type promotionFingerprint struct {
-	Size    int64  `json:"size"`
-	MtimeNs int64  `json:"mtime_ns"`
-	CtimeNs int64  `json:"ctime_ns"`
-	Dev     uint64 `json:"dev"`
-	Ino     uint64 `json:"ino"`
+	Size    int64  `json:"size,string"`
+	MtimeNs int64  `json:"mtime_ns,string"`
+	CtimeNs int64  `json:"ctime_ns,string"`
+	Dev     uint64 `json:"dev,string"`
+	Ino     uint64 `json:"ino,string"`
+	// Process is set on a persisted fingerprint to the process that took
+	// it. A fingerprint from an earlier process never proves a file: after
+	// a restart every file is read in full again.
+	Process string `json:"process,omitempty"`
+}
+
+// promotionProcess identifies this process's lifetime.
+var promotionProcess = func() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}()
+
+// persisted returns fp stamped with this process, for durable state.
+func (fp promotionFingerprint) persisted() *promotionFingerprint {
+	fp.Process = promotionProcess
+	return &fp
+}
+
+// fromThisProcess returns a persisted fingerprint without its stamp when this
+// process took it, so it can be compared with a fresh one.
+func (fp *promotionFingerprint) fromThisProcess() (promotionFingerprint, bool) {
+	if fp == nil || fp.Process != promotionProcess {
+		return promotionFingerprint{}, false
+	}
+	k := *fp
+	k.Process = ""
+	return k, true
 }
 
 // Verification kinds recorded in ec.State["integrity_checks"].
@@ -22,6 +54,7 @@ const (
 	promotionCheckSHA256    = "sha256"      // full read
 	promotionCheckStat      = "fingerprint" // unchanged since this execution's full read
 	promotionCheckRenamed   = "sha256_renamed"
+	promotionCheckIdentity  = "identity" // unchanged since a full read before a wait
 	promotionIntegrityState = "integrity_checks"
 )
 
@@ -33,7 +66,7 @@ type promotionVerifiedKey struct{}
 // ever read back from durable state, so a full hash is always required again
 // after a wait.
 type promotionVerifiedFiles struct {
-	state map[string]any
+	ec    *ExecutionContext
 	files map[string]promotionVerifiedFile
 }
 
@@ -43,13 +76,7 @@ type promotionVerifiedFile struct {
 }
 
 func withPromotionVerifiedFiles(ctx context.Context, ec *ExecutionContext) context.Context {
-	return context.WithValue(ctx, promotionVerifiedKey{}, &promotionVerifiedFiles{state: ec.State, files: map[string]promotionVerifiedFile{}})
-}
-
-// withoutPromotionVerifiedFiles makes every hash under ctx a full read. The
-// checks that remove the last recovery copy always read the whole file.
-func withoutPromotionVerifiedFiles(ctx context.Context) context.Context {
-	return context.WithValue(ctx, promotionVerifiedKey{}, (*promotionVerifiedFiles)(nil))
+	return context.WithValue(ctx, promotionVerifiedKey{}, &promotionVerifiedFiles{ec: ec, files: map[string]promotionVerifiedFile{}})
 }
 
 func promotionForget(ctx context.Context, path string) {
@@ -66,10 +93,10 @@ func promotionVerified(ctx context.Context) *promotionVerifiedFiles {
 // record persists, with the execution's next checkpoint, how path was last
 // verified. It is an audit trail only: nothing trusts it after a wait.
 func (v *promotionVerifiedFiles) record(path, kind, sha string, fp promotionFingerprint) {
-	checks, _ := v.state[promotionIntegrityState].(map[string]any)
+	checks, _ := v.ec.State[promotionIntegrityState].(map[string]any)
 	if checks == nil {
 		checks = map[string]any{}
-		v.state[promotionIntegrityState] = checks
+		v.ec.State[promotionIntegrityState] = checks
 	}
 	checks[path] = map[string]any{"kind": kind, "sha256": sha, "fingerprint": fp, "at": time.Now().UTC().Format(time.RFC3339Nano)}
 }
