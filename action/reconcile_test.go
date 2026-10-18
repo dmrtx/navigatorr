@@ -747,7 +747,10 @@ func TestMediaHashesShareABoundedPool(t *testing.T) {
 			_, _ = e.hashMedia(context.Background(), io.Discard, &blockingHashReader{active: &active, peak: &peak, release: release})
 		}()
 	}
-	time.Sleep(50 * time.Millisecond)
+	for deadline := time.Now().Add(3 * time.Second); active.Load() < mediaHashConcurrency && time.Now().Before(deadline); {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(20 * time.Millisecond)
 	if got := active.Load(); got != mediaHashConcurrency {
 		t.Fatalf("%d hashes reading at once, want %d", got, mediaHashConcurrency)
 	}
@@ -763,5 +766,60 @@ func TestMediaHashesShareABoundedPool(t *testing.T) {
 	}
 	if _, err := e.hashMedia(ctx, io.Discard, strings.NewReader("x")); !errors.Is(err, context.Canceled) {
 		t.Fatalf("waiting for a hash slot ignored cancellation: %v", err)
+	}
+}
+
+func TestDispatcherKeepsSlotsForLiveJobsDuringAnAdmissionBurst(t *testing.T) {
+	st := setupTestStore(t)
+	e := NewEngine(EngineDeps{Store: st, ReconcileInterval: time.Hour})
+	release := make(chan struct{})
+	var running, peak atomic.Int32
+	e.RegisterTemplate(ActionTemplate{Name: "admission_burst", AutoReconcile: true, Steps: []StepDefinition{
+		{Name: "preflight", Run: func(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+			n := running.Add(1)
+			defer running.Add(-1)
+			for {
+				p := peak.Load()
+				if n <= p || peak.CompareAndSwap(p, n) {
+					break
+				}
+			}
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return StepResult{Status: StepCompleted}, nil
+		}},
+	}})
+	for i := 0; i < reconcileConcurrency+4; i++ {
+		inst := store.ActionInstance{ID: fmt.Sprintf("act-admission-%02d", i), ActionName: "admission_burst", Status: StatusPending, InputsJSON: "{}", StateJSON: `{"background_admission":true}`, OutputsJSON: "{}"}
+		if err := st.CreateActionInstance(inst); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	d := newReconcileDispatcher()
+	finished := make(chan error, 1)
+	go func() { finished <- e.dispatchReconcile(ctx, d) }()
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("dispatch blocked behind admissions instead of leaving slots free")
+	}
+	for deadline := time.Now().Add(3 * time.Second); running.Load() < mediaHashConcurrency && time.Now().Before(deadline); {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(20 * time.Millisecond)
+	d.mu.Lock()
+	inflight := len(d.inflight)
+	d.mu.Unlock()
+	close(release)
+	cancel()
+	d.wg.Wait()
+	if inflight != mediaHashConcurrency || peak.Load() != mediaHashConcurrency {
+		t.Fatalf("admissions in flight %d, peak %d; want %d so the other slots stay free", inflight, peak.Load(), mediaHashConcurrency)
 	}
 }

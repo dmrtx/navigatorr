@@ -72,8 +72,12 @@ const reconcileConcurrency = 8
 type reconcileDispatcher struct {
 	mu       sync.Mutex
 	inflight map[string]struct{}
-	sem      chan struct{}
-	wg       sync.WaitGroup
+	// admissions counts in-flight background admissions. Each starts with a
+	// whole-source hash, so they are capped at the hash pool size and never
+	// fill the slots that keep live jobs polled.
+	admissions int
+	sem        chan struct{}
+	wg         sync.WaitGroup
 }
 
 func newReconcileDispatcher() *reconcileDispatcher {
@@ -84,15 +88,17 @@ func newReconcileDispatcher() *reconcileDispatcher {
 // not already running from an earlier tick, without waiting for any of them to
 // finish.
 func (e *Engine) dispatchReconcile(ctx context.Context, d *reconcileDispatcher) error {
-	ids, err := e.reconcilableIDs(ctx)
+	targets, err := e.reconcileTargets(ctx)
 	if err != nil {
 		return err
 	}
-	for _, id := range ids {
+	for _, target := range targets {
+		id, admission := target.id, target.admission
 		d.mu.Lock()
 		_, busy := d.inflight[id]
+		full := admission && d.admissions >= mediaHashConcurrency
 		d.mu.Unlock()
-		if busy {
+		if busy || full {
 			continue
 		}
 		// Wait for a slot rather than skipping: actions are listed in id order,
@@ -105,6 +111,9 @@ func (e *Engine) dispatchReconcile(ctx context.Context, d *reconcileDispatcher) 
 		}
 		d.mu.Lock()
 		d.inflight[id] = struct{}{}
+		if admission {
+			d.admissions++
+		}
 		d.mu.Unlock()
 		d.wg.Add(1)
 		go func(id string) {
@@ -112,6 +121,9 @@ func (e *Engine) dispatchReconcile(ctx context.Context, d *reconcileDispatcher) 
 			defer func() {
 				d.mu.Lock()
 				delete(d.inflight, id)
+				if admission {
+					d.admissions--
+				}
 				d.mu.Unlock()
 				<-d.sem
 			}()
@@ -161,11 +173,27 @@ func (e *Engine) ReconcileOnce(ctx context.Context) error {
 
 // reconcilableIDs pages through candidate actions; pagination is stable while
 // actions complete.
+// reconcileTarget is an action due for a continuation. admission marks a
+// pending background admission, whose first step hashes the whole source.
+type reconcileTarget struct {
+	id        string
+	admission bool
+}
+
 func (e *Engine) reconcilableIDs(ctx context.Context) ([]string, error) {
+	targets, err := e.reconcileTargets(ctx)
+	ids := make([]string, 0, len(targets))
+	for _, t := range targets {
+		ids = append(ids, t.id)
+	}
+	return ids, err
+}
+
+func (e *Engine) reconcileTargets(ctx context.Context) ([]reconcileTarget, error) {
 	if e.deps.Store == nil {
 		return nil, nil
 	}
-	var ids []string
+	var targets []reconcileTarget
 	after := ""
 	for {
 		if err := ctx.Err(); err != nil {
@@ -179,7 +207,7 @@ func (e *Engine) reconcilableIDs(ctx context.Context) ([]string, error) {
 			inst := &instances[i]
 			tmpl, ok := e.GetTemplate(inst.ActionName)
 			if ok && e.shouldReconcile(inst, tmpl, parseExecutionContext(inst, e)) {
-				ids = append(ids, inst.ID)
+				targets = append(targets, reconcileTarget{id: inst.ID, admission: inst.Status == StatusPending})
 			}
 			after = inst.ID
 		}
@@ -187,7 +215,7 @@ func (e *Engine) reconcilableIDs(ctx context.Context) ([]string, error) {
 			break
 		}
 	}
-	return ids, nil
+	return targets, nil
 }
 
 func (e *Engine) shouldReconcile(inst *store.ActionInstance, tmpl ActionTemplate, ec *ExecutionContext) bool {
@@ -341,18 +369,26 @@ func optionalDuration(state map[string]any, key string) *int64 {
 // mediaHashConcurrency bounds whole-file media hashes running at once.
 const mediaHashConcurrency = 3
 
-// hashMedia copies r into h while holding one of the engine's hash slots.
-// Waiting for a slot honours ctx like the copy itself does.
-func (e *Engine) hashMedia(ctx context.Context, h io.Writer, r io.Reader) (int64, error) {
+// acquireHashSlot waits for one of the engine's hash slots, honouring ctx.
+func (e *Engine) acquireHashSlot(ctx context.Context) (func(), error) {
 	if e.hashSlots == nil {
-		return io.Copy(h, r)
+		return func() {}, nil
 	}
 	select {
 	case e.hashSlots <- struct{}{}:
+		return func() { <-e.hashSlots }, nil
 	case <-ctx.Done():
-		return 0, ctx.Err()
+		return nil, ctx.Err()
 	}
-	defer func() { <-e.hashSlots }()
+}
+
+// hashMedia copies r into h while holding one of the engine's hash slots.
+func (e *Engine) hashMedia(ctx context.Context, h io.Writer, r io.Reader) (int64, error) {
+	release, err := e.acquireHashSlot(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer release()
 	return io.Copy(h, r)
 }
 
