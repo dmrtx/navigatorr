@@ -34,7 +34,7 @@ func TestPWAShellAndWorkerHeaders(t *testing.T) {
 	if w.Code != 200 || w.Header().Get("Service-Worker-Allowed") != "/" || w.Header().Get("Cache-Control") != "no-store" || strings.Contains(w.Body.String(), "__ASSET_VERSION__") {
 		t.Fatal("worker version/headers", w.Code, w.Body.String())
 	}
-	for _, path := range []string{"/pwa.js", "/apple-touch-icon.png", "/app.js", "/app.css", "/"} {
+	for _, path := range []string{"/pwa.js", "/theme.js", "/apple-touch-icon.png", "/app.js", "/app.css", "/"} {
 		if w := request(h, "GET", path, "", false); w.Code != 200 {
 			t.Fatal(path, w.Code)
 		}

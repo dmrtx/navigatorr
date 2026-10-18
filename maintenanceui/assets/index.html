@@ -6,7 +6,17 @@
       name="viewport"
       content="width=device-width, initial-scale=1, viewport-fit=cover"
     />
-    <meta name="theme-color" content="#244d40" />
+    <meta name="color-scheme" content="light dark" />
+    <meta
+      name="theme-color"
+      media="(prefers-color-scheme: light)"
+      content="#244d40"
+    />
+    <meta
+      name="theme-color"
+      media="(prefers-color-scheme: dark)"
+      content="#121715"
+    />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-title" content="Navigatorr" />
     <link rel="manifest" href="/manifest.webmanifest" />
@@ -14,6 +24,7 @@
     <link rel="icon" href="/icon-192.png" type="image/png" />
     <script type="module" src="/pwa.js"></script>
     <title>Navigatorr · Maintenance</title>
+    <script src="/theme.js"></script>
     <link rel="stylesheet" href="/app.css" />
     <script type="module" src="/app.js"></script>
   </head>
@@ -828,6 +839,16 @@
         </section>
         <section id="advanced" class="panel tab-content" hidden>
           <h2>Settings</h2>
+          <div class="settings-row">
+            <span id="theme-label"
+              >Appearance<span class="metadata">Saved in this browser</span></span
+            >
+            <div class="theme-switch" role="group" aria-labelledby="theme-label">
+              <button type="button" data-theme-choice="system" aria-pressed="true">System</button
+              ><button type="button" data-theme-choice="light" aria-pressed="false">Light</button
+              ><button type="button" data-theme-choice="dark" aria-pressed="false">Dark</button>
+            </div>
+          </div>
           <section id="settings-worker" aria-label="Worker and scheduler health"></section>
           <div class="settings-row">
             <span

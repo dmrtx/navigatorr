@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-var shellPaths = []string{"/", "/app.js", "/app.css", "/pwa.js", "/manifest.webmanifest", "/icon-192.png", "/icon-512.png", "/apple-touch-icon.png"}
+var shellPaths = []string{"/", "/app.js", "/app.css", "/theme.js", "/pwa.js", "/manifest.webmanifest", "/icon-192.png", "/icon-512.png", "/apple-touch-icon.png"}
 
 func publicShellPath(path string) bool {
 	for _, p := range shellPaths {

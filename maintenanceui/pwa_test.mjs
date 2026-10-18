@@ -56,6 +56,7 @@ test("install caches only public shell and activation preserves other applicatio
     "/",
     "/app.js",
     "/app.css",
+    "/theme.js",
     "/pwa.js",
     "/manifest.webmanifest",
     "/icon-192.png",
