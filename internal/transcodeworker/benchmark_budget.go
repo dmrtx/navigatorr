@@ -178,8 +178,13 @@ func (b *searchBudget) watch(ctx context.Context, cancel context.CancelCauseFunc
 			}
 			wait := b.poll
 			// Check exactly when the base budget and the cap end rather than a
-			// poll late.
-			for _, edge := range []time.Duration{b.base, b.hardCap} {
+			// poll late. Without a verification allowance the cap is the context
+			// deadline itself, which must be the one to end the search.
+			edges := []time.Duration{b.base}
+			if b.verify > 0 {
+				edges = append(edges, b.hardCap)
+			}
+			for _, edge := range edges {
 				if until := b.start.Add(edge).Sub(now); until > 0 && until < wait {
 					wait = until
 				}
