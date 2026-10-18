@@ -2213,13 +2213,15 @@ function batchProgress(job) {
     }
     if (stage === "preflight" && activity.work?.total_bytes > 0) fraction = Math.min(.8, Math.max(0, Number(activity.work.bytes_read || 0)/activity.work.total_bytes*.8));
     else if (stage === "preflight" && activity.work?.phase === "probing_source") fraction = .8;
+    const after = postEncodeWork({...activity, worker: w, status: "running"});
+    if (after?.total > 0 && after.read != null) fraction = after.read / after.total;
     const progress = stages.length && Number.isInteger(step) ? Math.min(.99, (step + fraction)/stages.length) : 0;
     const key = activity.file || activity.id || "Active file";
     const prior = byFile.get(key);
     const observation = workerProgressObservation({...(child || activity), worker: w, status: "running"});
     const eta = workerStage && !observation.message ? encodeEta(activity.id || key, w, child?.eta_seconds ?? activity.eta_seconds) : "";
     const measurement = workerStage ? observation.message || (w.progress_is_stale ? heartbeatAlive(observation.heartbeat) ? "Worker heartbeat received; last measurement shown" : "Last measurement; stale" : eta) : "";
-    if (!prior || progress > prior.progress) byFile.set(key, {progress, eta: eta ? encodeEtas.get(activity.id || key)?.value : null, label: `${key.split("/").pop() || "Active file"}: ${workerStage && phase ? workerPhaseLabel(phase) : stage === "preflight" && activity.work?.phase === "hashing_source" ? `Verifying source SHA-256 (${bytes(activity.work.bytes_read || 0)} / ${bytes(activity.work.total_bytes)})` : stage === "preflight" && activity.work?.phase === "waiting_for_hash_slot" ? "Waiting to verify source" : stageLabel(stage || "preflight")}${measurement ? ` · ${measurement}` : ""}`});
+    if (!prior || progress > prior.progress) byFile.set(key, {progress, eta: eta ? encodeEtas.get(activity.id || key)?.value : null, label: `${key.split("/").pop() || "Active file"}: ${after ? postEncodeWorkLabel(after) : workerStage && phase ? workerPhaseLabel(phase) : stage === "preflight" && activity.work?.phase === "hashing_source" ? `Verifying source SHA-256 (${bytes(activity.work.bytes_read || 0)} / ${bytes(activity.work.total_bytes)})` : stage === "preflight" && activity.work?.phase === "waiting_for_hash_slot" ? "Waiting to verify source" : stageLabel(stage || "preflight")}${measurement ? ` · ${measurement}` : ""}`});
   }
   const partial = Math.min(count("running"), byFile.size) ? [...byFile.values()].slice(0,count("running")).reduce((sum,a)=>sum+a.progress,0) : 0;
   const active = operationIsActive(job.status);
@@ -2276,6 +2278,21 @@ function telemetry(job) {
     result.append(node("span", observation.message + (observation.warning ? last : ""), "metadata"));
     return result;
   }
+  const after = postEncodeWork(job);
+  if (after) {
+    result.append(node("span", [job.activity_file ? `Current: ${job.activity_file.split("/").pop()}` : null, after.label].filter(Boolean).join(" · "), "metadata"));
+    if (after.read != null && after.total > 0) {
+      const meter = document.createElement("meter");
+      meter.min = 0;
+      meter.max = after.total;
+      meter.value = after.read;
+      meter.setAttribute("aria-label", `Original checked ${(after.read / after.total * 100).toFixed(1)}%`);
+      result.append(meter, node("span", `${bytes(after.read)} / ${bytes(after.total)}`, "metadata"));
+    }
+    if (postEncodeWorkerPhases.includes(w?.transcode_phase) && w.last_progress_at)
+      result.append(node("span", `Encode finished ${new Date(w.last_progress_at).toLocaleTimeString()}`, "metadata progress-observed-at"));
+    return result;
+  }
   if (!w) {
     const stages = job.stages || [];
     const current = stages[job.current_step];
@@ -2328,7 +2345,7 @@ function telemetry(job) {
     result.append(
       node(
         "span",
-        `Measured ${new Date(w.last_progress_at).toLocaleTimeString()}`,
+        `${postEncodeWorkerPhases.includes(w.transcode_phase) ? "Encode finished" : "Measured"} ${new Date(w.last_progress_at).toLocaleTimeString()}`,
         "metadata progress-observed-at",
       ),
     );
@@ -3785,12 +3802,39 @@ async function loadJobs(more = false) {
   }
 }
 
+// The worker's encode ends before its full-output checks and publication;
+// its last progress measurement then marks the encode's end, not liveness.
+const postEncodeWorkerPhases = ["validating", "validating_quality", "publishing", "publication_pending", "completed"];
+// A finished worker still leaves the coordinator verifying the candidate and
+// re-hashing the whole original, minutes on a large file. Name that work
+// rather than the finished encode or calibration; null while neither applies.
+function postEncodeWork(job) {
+  if (!["running", "waiting_external"].includes(job?.status)) return null;
+  const w = job.worker || {};
+  // Only the full conversion: a finished calibration hands back to the worker.
+  const converted = w.transcode_phase === "completed" || w.transcode_status === "completed";
+  const stage = job.stages?.[job.current_step]?.name;
+  const work = job.work || {};
+  const total = Number(work.total_bytes) > 0 ? Number(work.total_bytes) : 0;
+  if (work.phase === "verifying_original") {
+    const read = Math.max(0, Number(work.bytes_read) || 0);
+    return {label: "Checking the original is unchanged", read: total ? Math.min(read, total) : read, total};
+  }
+  // Preflight queues its own source hash the same way; only a later step's
+  // wait is the original's re-check. A skipped conversion reaches it too.
+  if (work.phase === "waiting_for_hash_slot" && (stage === "accept_result" || converted && stage !== "preflight")) return {label: "Waiting to verify original", total};
+  if (!converted) return null;
+  return {label: ["validate_result", "accept_result"].includes(stage) ? `Conversion finished · ${stageLabel(stage)}` : "Conversion finished"};
+}
+function postEncodeWorkLabel(work) {
+  return work.read != null && work.total > 0 ? `${work.label} · ${bytes(work.read)} / ${bytes(work.total)}` : work.label;
+}
 function workerPhaseLabel(phase) {
   return {
     queued:"Waiting for a worker slot",preparing:"Preparing source",reading_source:"Reading source from media storage",
     probing_source:"Inspecting source",extracting_samples:"Extracting reference samples",encoding_samples:"Encoding test samples",
     testing_initial:"Testing suitable settings",testing_alternatives:"Trying a measured alternative",verifying_samples:"Checking additional video samples",evaluating_metrics:"Measuring sample quality",estimating_final_size:"Estimating final file size",selecting_candidate:"Selecting the best candidate",
-    analysing_video:"Analyzing video · x265 pass 1 of 2",capturing_comparison:"Saving comparison frames",encoding:"Encoding full video",validating:"Verifying output",validating_quality:"Measuring final quality",publishing:"Saving candidate to media storage",
+    analysing_video:"Analyzing video · x265 pass 1 of 2",capturing_comparison:"Saving comparison frames",encoding:"Encoding full video",validating:"Verifying converted file",validating_quality:"Measuring final quality",publishing:"Saving converted file",
     benchmarking:"Calibrating quality",completed:"Completed",
   }[phase] || (phase ? phase.replaceAll("_"," ") : "Preparing job");
 }
@@ -4027,6 +4071,11 @@ function batchFileActivity(item, job) {
   if (activity?.waiting_condition === "worker_unreachable") return "Worker unreachable · Waiting for connection";
   const worker = activity?.worker;
   const phase = worker?.transcode_phase || worker?.benchmark_phase || worker?.phase;
+  const after = activity && postEncodeWork({...activity, status: item.status});
+  if (after) {
+    const observation = workerProgressObservation({...activity, status: item.status});
+    return postEncodeWorkLabel(after) + (observation.message ? ` · ${observation.message}` : "");
+  }
   if (phase) {
     const observation = workerProgressObservation({...activity, status: item.status});
     const eta = observation.message ? "" : encodeEta(activity.id, worker, activity.eta_seconds);

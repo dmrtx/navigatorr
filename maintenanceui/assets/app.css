@@ -1956,12 +1956,31 @@ pre {
 .command-chip.failed { color: var(--danger); background: var(--danger-wash); }
 .command-chip svg,
 .command-history-item > svg { flex: 0 0 auto; width: 12px; height: 12px; }
+/* Wide screens: the chip sits on the title line, just left of the badge, so
+   it never adds an empty band under a one-line title. */
+.job-heading:has(> .command-chip) {
+  grid-template-columns: 42px minmax(0, 1fr) auto 96px;
+}
+.job-heading:has(> .command-chip) > .badge { grid-column: 4; grid-row: 1; }
 .job-heading > .command-chip {
-  grid-column: 2 / -1;
-  grid-row: 2;
+  grid-column: 3;
+  grid-row: 1;
   justify-self: end;
-  /* The status badge keeps a 5px right margin; line up with its edge. */
-  margin: 4px 5px 0 0;
+  max-width: 220px;
+}
+/* Phones: there is no room beside the badge, so the chip gets its own row
+   under the title. The title stays in row 1 so the chip never covers it. */
+@media (max-width: 600px) {
+  .job-heading:has(> .command-chip) {
+    grid-template-columns: 34px minmax(0, 1fr) 88px;
+  }
+  .job-heading:has(> .command-chip) > .badge { grid-column: 3; }
+  .job-heading > .command-chip {
+    grid-column: 2 / -1;
+    grid-row: 2;
+    /* The status badge keeps a 5px right margin; line up with its edge. */
+    margin: 4px 5px 0 0;
+  }
 }
 .backup-heading > .command-chip { flex: 0 0 auto; }
 .command-spinner {
