@@ -278,6 +278,39 @@ func TestBenchmarkCompactAudioEstimateUsesOutputPolicy(t *testing.T) {
 	}
 }
 
+// Size v3 estimates each lossless track as its AAC target and every lossy
+// track, DTS core included, at its copied bitrate.
+func TestBenchmarkLosslessAudioEstimate(t *testing.T) {
+	candidate := transcode.BenchmarkCandidate{ID: "q24", Quality: 24}
+	for _, tc := range []struct {
+		mode string
+		want int64
+	}{
+		// Two DTS-HD MA 5.1 tracks at ~3.95 Mbps plus a 640 kbps DTS core
+		// track, over 100 s.
+		{"copy", (3950000 + 3950000 + 640000) * 100 / 8},
+		{transcode.AudioModeCompactLossless, (384000 + 384000 + 640000) * 100 / 8},
+	} {
+		record := &BenchmarkRecord{AudioMode: tc.mode, Metric: "vmaf", SourceDuration: 100, Candidates: []transcode.BenchmarkCandidate{candidate}, Samples: []transcode.BenchmarkSampleWindow{{Index: 0, DurationSeconds: 5}}}
+		evidence := &BenchmarkExecutionEvidence{SourceBitDepth: 8,
+			CandidateSamples: []BenchmarkCandidateSampleResult{{CandidateID: "q24", SampleIndex: 0, SizeBytes: 100000}},
+			CandidateMetrics: []BenchmarkCandidateMetricAggregate{{CandidateID: "q24", MetricType: optimization.MetricTypeVMAF, Aggregate: optimization.MetricAggregate{MetricType: optimization.MetricTypeVMAF, Valid: true, MeanScore: 97, SampleScores: []optimization.SampleScore{{SampleIndex: 0, Score: 97, Valid: true}}}}},
+		}
+		rep := mediainspect.DetailedReport{SizeBytes: 1000000000, DurationSec: 100, Audio: []mediainspect.DetailedStream{
+			{Index: 1, Codec: "dts", Profile: "DTS-HD MA", Channels: 6, ChannelLayout: "5.1(side)", Language: "jpn", BitRate: 3950000},
+			{Index: 2, Codec: "dts", Profile: "DTS-HD MA", Channels: 6, ChannelLayout: "5.1(side)", Language: "eng", BitRate: 3950000},
+			{Index: 3, Codec: "dts", Profile: "DTS", Channels: 6, ChannelLayout: "5.1(side)", Language: "deu", BitRate: 640000},
+		}}
+		err := (&ProductionBenchmarkRunner{}).runSelection(context.Background(), record, evidence, []validatedCandidate{{candidate: candidate, bitDepth: 10, profile: "main10", pixelFormat: "p010le"}}, rep, rep.SizeBytes)
+		if err != nil || evidence.Decision == nil || evidence.Decision.Winner == nil {
+			t.Fatalf("selection: %v %+v", err, evidence.Decision)
+		}
+		if got := evidence.Decision.Winner.EstimatedAudioBytes; got != tc.want {
+			t.Fatalf("%s: got %d want %d", tc.mode, got, tc.want)
+		}
+	}
+}
+
 func TestBenchmarkDecisionPersistsFailedSampleEvidence(t *testing.T) {
 	candidate := transcode.BenchmarkCandidate{ID: "q65", Quality: 65}
 	record := &BenchmarkRecord{Metric: "vmaf", SourceDuration: 100, Candidates: []transcode.BenchmarkCandidate{candidate}, Samples: []transcode.BenchmarkSampleWindow{{Index: 3, StartSeconds: 42, DurationSeconds: 5}}}

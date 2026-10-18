@@ -332,6 +332,11 @@ func SelectMeasuredCandidatesVersion(candidates []EvaluatedCandidate, mode strin
 
 const ModePolicyV2 = "transcode-modes-v2"
 
+// ModePolicyV3 is the size-mode policy that compacts lossless audio, encodes
+// 8-bit sources as Main10 on proven workers and validates more windows on
+// long sources. Only mode=size is frozen under it; its quality floor is v2's.
+const ModePolicyV3 = "transcode-modes-v3"
+
 // CompactMinimumSavingsPercent is the measured savings compact mode requires.
 // Converting 4K HDR to SDR 1080p normally saves far more; a smaller saving
 // means the source was already efficient and the original is kept.
@@ -359,6 +364,12 @@ func ModeSizeAllowedVersion(mode string, source, candidate int64, version string
 // ModeMinimumSavings is shared by sample selection and full-plan admission,
 // including historical plans.
 func ModeMinimumSavings(mode, version string) (int, bool) {
+	if version == ModePolicyV3 {
+		if mode != "size" {
+			return 0, false
+		}
+		return 15, true
+	}
 	if version != "" && version != "transcode-modes-v1" && version != ModePolicyV2 {
 		return 0, false
 	}

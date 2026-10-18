@@ -2,6 +2,7 @@ package action
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,6 +51,74 @@ func TestDetailedValidationChecksLayoutOnlyForCompactConversions(t *testing.T) {
 			}
 			if tc.want == StepWaitingDecision && !strings.Contains(result.WaitingReason, "Audio layout mismatch") {
 				t.Fatalf("reason %q", result.WaitingReason)
+			}
+		})
+	}
+}
+
+// Mixed copy and convert tracks pair by index: a remap or swapped language
+// on one track is caught at that track, and copies without a reported
+// layout still publish.
+func TestDetailedValidationMultiTrackAudio(t *testing.T) {
+	type track struct {
+		codec, profile, layout, lang string
+		channels                     int
+	}
+	compactSrc := []track{{"pcm_s24le", "", "5.1", "eng", 6}, {"eac3", "", "5.1", "spa", 6}, {"truehd", "", "7.1", "ita", 8}}
+	sizeSrc := []track{{"dts", "DTS-HD MA", "5.1(side)", "jpn", 6}, {"dts", "DTS-HD MA", "5.1(side)", "eng", 6}, {"dts", "DTS", "5.1(side)", "kor", 6}}
+	for _, tc := range []struct {
+		name, mode string
+		src, out   []track
+		want       StepStatus
+		reason     string
+		titles     []string
+	}{
+		{"compact mixed", "compact", compactSrc, []track{{"aac", "", "5.1", "eng", 6}, {"eac3", "", "", "spa", 6}, {"aac", "", "7.1", "ita", 8}}, StepCompleted, "", nil},
+		{"compact remapped third track", "compact", compactSrc, []track{{"aac", "", "5.1", "eng", 6}, {"eac3", "", "", "spa", 6}, {"aac", "", "7.1(wide)", "ita", 8}}, StepWaitingDecision, "Audio layout mismatch at stream 2", nil},
+		{"size two DTS-HD MA and core", transcode.AudioModeCompactLossless, sizeSrc, []track{{"aac", "", "5.1", "jpn", 6}, {"aac", "", "5.1", "eng", 6}, {"dts", "", "5.1(side)", "kor", 6}}, StepCompleted, "", nil},
+		{"size swapped languages", transcode.AudioModeCompactLossless, sizeSrc, []track{{"aac", "", "5.1", "eng", 6}, {"aac", "", "5.1", "jpn", 6}, {"dts", "", "5.1(side)", "kor", 6}}, StepWaitingDecision, "Audio language mismatch at stream 0", nil},
+		{"size converted DTS core", transcode.AudioModeCompactLossless, sizeSrc, []track{{"aac", "", "5.1", "jpn", 6}, {"aac", "", "5.1", "eng", 6}, {"aac", "", "5.1", "kor", 6}}, StepWaitingDecision, "Audio codec mismatch at stream 2", nil},
+		// A TrueHD Atmos track probed as plain TrueHD is still object audio
+		// when its title says so: flattening it to AAC is rejected.
+		{"size flattened Atmos named in title", transcode.AudioModeCompactLossless, []track{{"truehd", "", "7.1", "eng", 8}}, []track{{"aac", "", "7.1", "eng", 8}}, StepWaitingDecision, "Audio codec mismatch at stream 0", []string{"TrueHD Atmos 7.1"}},
+		{"size copied Atmos named in title", transcode.AudioModeCompactLossless, []track{{"truehd", "", "7.1", "eng", 8}}, []track{{"truehd", "", "7.1", "eng", 8}}, StepCompleted, "", []string{"TrueHD Atmos 7.1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			candidate := filepath.Join(dir, "candidate.mkv")
+			if err := os.WriteFile(candidate, []byte("candidate"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			streams := `{"index": 0, "codec_type": "video", "codec_name": "hevc", "pix_fmt": "yuv420p", "width": 1920, "height": 1080, "bits_per_raw_sample": "8"}`
+			for i, a := range tc.out {
+				streams += fmt.Sprintf(`,{"index": %d, "codec_type": "audio", "codec_name": %q, "channels": %d, "channel_layout": %q, "tags": {"language": %q}}`, i+1, a.codec, a.channels, a.layout, a.lang)
+			}
+			probe := `{"streams": [` + streams + `], "format": {"format_name": "matroska,webm", "duration": "1420"}}`
+			ffprobe := filepath.Join(dir, "ffprobe")
+			if err := os.WriteFile(ffprobe, []byte("#!/bin/sh\ncat <<'JSON'\n"+probe+"\nJSON\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			var audio []mediainspect.DetailedStream
+			for i, a := range tc.src {
+				audio = append(audio, mediainspect.DetailedStream{Index: i + 1, Kind: "audio", Codec: a.codec, Profile: a.profile, Channels: a.channels, ChannelLayout: a.layout, Language: a.lang})
+				if i < len(tc.titles) {
+					audio[i].Title = tc.titles[i]
+				}
+			}
+			e := NewEngine(EngineDeps{Ffprobe: ffprobe})
+			ec := &ExecutionContext{Inputs: map[string]any{}, State: map[string]any{
+				"candidate_path": candidate,
+				"plan":           &transcode.Plan{VideoCodec: "libx265", AudioMode: tc.mode},
+				"original": map[string]any{"size_bytes": int64(1 << 30), "duration_sec": 1420.0,
+					"video": []mediainspect.DetailedStream{{Index: 0, Kind: "video", Codec: "h264", PixelFormat: "yuv420p", Width: 1920, Height: 1080, BitDepth: 8}},
+					"audio": audio},
+			}}
+			result, err := e.validateCandidateDetailed(context.Background(), ec)
+			if err != nil || result.Status != tc.want {
+				t.Fatalf("status %s (%s%s): %v", result.Status, result.Error, result.WaitingReason, err)
+			}
+			if tc.reason != "" && !strings.Contains(result.WaitingReason, tc.reason) {
+				t.Fatalf("reason %q, want %q", result.WaitingReason, tc.reason)
 			}
 		})
 	}

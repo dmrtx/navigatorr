@@ -19,6 +19,7 @@ type SourceStream struct {
 	Codec       string         `json:"codec"`
 	Language    string         `json:"language,omitempty"`
 	Title       string         `json:"title,omitempty"`
+	Handler     string         `json:"handler,omitempty"`
 	Channels    int            `json:"channels,omitempty"`
 	Layout      string         `json:"channel_layout,omitempty"`
 	Disposition map[string]int `json:"disposition,omitempty"`
@@ -36,6 +37,11 @@ type SourceStream struct {
 	// carries both; they are reused when the cover is re-attached.
 	Filename string `json:"filename,omitempty"`
 	MimeType string `json:"mime_type,omitempty"`
+}
+
+// AudioTrack is the stream as the audio policy reads it.
+func (s SourceStream) AudioTrack() transcode.AudioTrack {
+	return transcode.AudioTrack{Codec: s.Codec, Profile: s.Profile, Title: s.Title, Handler: s.Handler, Channels: s.Channels, Layout: s.Layout}
 }
 
 // IsAttachedPicture reports whether s is embedded cover art (a video stream
@@ -132,7 +138,7 @@ func ProbeSourceDetails(ctx context.Context, ffprobePath, filePath string) (Sour
 		}
 		out = append(out, SourceStream{
 			Index: st.Index, TypeIndex: typeIdx, Kind: kind, Codec: norm(st.CodecName),
-			Language: lang, Title: title, Channels: st.Channels, Layout: st.ChannelLayout, Disposition: st.Disposition,
+			Language: lang, Title: title, Handler: transcode.AudioHandler(st.Tags), Channels: st.Channels, Layout: st.ChannelLayout, Disposition: st.Disposition,
 			StartTime: startTime,
 			Width:     st.Width, Height: st.Height, BitDepth: bitDepth, PixelFormat: norm(st.PixFmt), Profile: strings.TrimSpace(st.Profile),
 			Filename: filename, MimeType: mimeType,
@@ -301,7 +307,7 @@ func BuildExecutionPlan(plan *transcode.Plan, streams []SourceStream, duration f
 		case "video":
 			ep.Streams = append(ep.Streams, StreamAction{Kind: "video", SourceIndex: s.Index, TypeIndex: s.TypeIndex, Codec: s.Codec, TargetCodec: plan.VideoCodec})
 		case "audio":
-			target, bitrate := transcode.AudioTarget(plan.AudioMode, s.Codec, s.Channels, s.Layout)
+			target, bitrate := transcode.AudioTarget(plan.AudioMode, s.AudioTrack())
 			ep.Streams = append(ep.Streams, StreamAction{Kind: "audio", SourceIndex: s.Index, TypeIndex: s.TypeIndex, Codec: s.Codec, TargetCodec: target, BitrateKbps: bitrate, Disposition: s.Disposition, Title: s.Title, Channels: s.Channels, Layout: s.Layout})
 			if target != "copy" {
 				ep.Conversions = append(ep.Conversions, transcode.ConversionRecord{StreamType: "audio", StreamIndex: s.TypeIndex, FromCodec: s.Codec, ToCodec: target, Reason: fmt.Sprintf("%s audio requested; AAC at %d kbps, preserving channels and language (lossy)", plan.AudioMode, bitrate)})

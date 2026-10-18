@@ -250,7 +250,7 @@ func TestModeBenchmarkRequestHFRMatchesWorkerCapability(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		plan := &transcode.Plan{VideoCodec: transcode.VideoCodecLibX265, Quality: 23, Preset: "medium", ExpectedBitDepth: 8}
+		plan := &transcode.Plan{VideoCodec: transcode.VideoCodecLibX265, Quality: 23, Preset: "medium", ExpectedBitDepth: 8, AudioMode: policy.Profile.Audio.Mode}
 		if err := preserveSourceBitDepth(plan, 8, true); err != nil {
 			t.Fatal(err)
 		}

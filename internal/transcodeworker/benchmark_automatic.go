@@ -246,7 +246,9 @@ func (f qualityFamily) pick(best bool) int {
 }
 
 // groupQualityFamilies groups constant-quality libx265 and VideoToolbox
-// candidates whose settings match except for ID and quality, in first-seen order.
+// candidates whose settings match except for ID and quality, in first-seen
+// order. The resolved output depth is part of the key: a Main candidate
+// failing banding says nothing about a Main10 one, so it never prunes it.
 func groupQualityFamilies(vcs []validatedCandidate) []qualityFamily {
 	var order []string
 	families := map[string]*qualityFamily{}
@@ -261,7 +263,7 @@ func groupQualityFamilies(vcs []validatedCandidate) []qualityFamily {
 		key := c
 		key.ID, key.Quality = "", 0
 		b, _ := json.Marshal(key)
-		k := codec + string(b)
+		k := fmt.Sprintf("%s|%d|%s|%s|%s", codec, vc.bitDepth, vc.profile, vc.pixelFormat, b)
 		if families[k] == nil {
 			order = append(order, k)
 			families[k] = &qualityFamily{lowerIsBetter: codec == "libx265"}

@@ -43,7 +43,7 @@ func ValidateEncoderCapabilities(ctx context.Context, ffmpegPath string, plan *t
 			return fmt.Errorf("encoder_capability_unsupported: HE-AAC requires AudioToolbox aac_at: %v", err)
 		}
 	}
-	if norm(plan.AudioMode) == "compact" {
+	if norm(plan.AudioMode) == "compact" || norm(plan.AudioMode) == transcode.AudioModeCompactLossless {
 		available, err := ProbeAvailableEncoders(ctx, ffmpegPath)
 		if err != nil || !available["aac"] {
 			return fmt.Errorf("encoder_capability_unsupported: compact audio requires AAC encoder: %v", err)
@@ -214,6 +214,8 @@ func probeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratch
 	// re-attached byte-identically; the server only admits such sources
 	// against workers that advertise it.
 	caps.CoverArt = true
+	// Size policy v3 compacts lossless audio with the same AAC encoder.
+	caps.SizeModeV3 = caps.CompactAudio
 	if vtCaps.Available {
 		caps.Encoders[videoToolboxEncoder] = true
 	}

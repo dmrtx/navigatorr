@@ -1,0 +1,52 @@
+package maintenanceui
+
+import (
+	"encoding/json"
+	"testing"
+)
+
+func TestOperationsProjectSizeModeSummary(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	state := map[string]any{
+		"mode":               "size",
+		"size_main10":        true,
+		"original":           map[string]any{"size_bytes": 9000},
+		"benchmark_decision": map[string]any{"winner": map[string]any{"estimated_bytes": 4000}},
+		"quality_evidence":   map[string]any{"verdict": "pass", "vmaf": map[string]any{"mean": 93.4, "p5": 89.1, "worst_window_mean": 88.2, "worst_window_seconds": 10}},
+		"conversions": []any{
+			map[string]any{"stream_type": "audio", "stream_index": 0, "from_codec": "dts", "to_codec": "aac"},
+			map[string]any{"stream_type": "subtitle", "stream_index": 0, "from_codec": "mov_text", "to_codec": "srt"},
+			map[string]any{"stream_type": "audio", "stream_index": 2, "from_codec": "pcm_s24le", "to_codec": "aac"},
+		},
+	}
+	seedOperation(t, st, "size-job", "transcode_media", "completed", map[string]any{"path": "/media/series/Show/S01E01.mkv", "mode": "size"}, nil, state)
+	seedOperation(t, st, "quality-job", "transcode_media", "completed", map[string]any{"path": "/media/series/Show/S01E02.mkv", "mode": "quality"}, nil, map[string]any{"mode": "quality", "quality_evidence": state["quality_evidence"], "conversions": state["conversions"]})
+
+	read := func(id string) map[string]any {
+		w := request(h, "GET", "/api/maintenance/operations?id="+id, "", true)
+		var page struct {
+			Jobs []map[string]any `json:"jobs"`
+		}
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil || len(page.Jobs) != 1 {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		return page.Jobs[0]
+	}
+	job := read("size-job")
+	size := operationMap(job["size_mode"])
+	if size["expected_bytes"] != float64(4000) || size["main10"] != true {
+		t.Fatalf("expected size and main10 missing: %v", size)
+	}
+	final := operationMap(size["final_quality"])
+	if final["vmaf_mean"] != 93.4 || final["vmaf_p5"] != 89.1 || final["worst_window_mean"] != 88.2 || final["worst_window_seconds"] != float64(10) {
+		t.Fatalf("final quality wrong: %v", final)
+	}
+	audio, _ := size["compacted_audio"].([]any)
+	if len(audio) != 2 || operationMap(audio[0])["from_codec"] != "dts" || operationMap(audio[1])["stream_index"] != float64(2) {
+		t.Fatalf("compacted audio wrong: %v", size["compacted_audio"])
+	}
+	if got, ok := read("quality-job")["size_mode"]; ok {
+		t.Fatalf("other modes carry no size summary: %v", got)
+	}
+}

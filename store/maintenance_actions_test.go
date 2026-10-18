@@ -93,3 +93,27 @@ func TestMaintenanceMemoTracksSameSizeWritesAndFreshMetadata(t *testing.T) {
 		t.Fatal("removed row retained", rows, err)
 	}
 }
+
+func TestMaintenanceSnapshotKeepsSizeModeSummaryOnly(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "ledger.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	state := `{"mode":"size","size_main10":true,` +
+		`"quality_evidence":{"verdict":"pass","plan_digest":"d","vmaf":{"mean":93.4,"p5":89.1,"worst_window_mean":88.2,"worst_window_seconds":10,"model_id":"m","frames_total":9000}},` +
+		`"conversions":[{"stream_type":"audio","stream_index":1,"from_codec":"truehd","to_codec":"aac","reason":"` + strings.Repeat("r", 4096) + `"}]}`
+	if err := s.CreateActionInstance(ActionInstance{ID: "file", ActionName: "transcode_media", Status: ActionStatusCompleted, InputsJSON: `{}`, OutputsJSON: `{"quality_evidence":{"verdict":"fail"}}`, StateJSON: state}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.ListMaintenanceActionSnapshot()
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("%v %v", rows, err)
+	}
+	if want := `{"conversions":[{"from_codec":"truehd","stream_index":1,"stream_type":"audio","to_codec":"aac"}],"mode":"size","quality_evidence":{"vmaf":{"mean":93.4,"p5":89.1,"worst_window_mean":88.2,"worst_window_seconds":10}},"size_main10":true}`; rows[0].StateJSON != want {
+		t.Fatalf("size summary projection:\n got %s\nwant %s", rows[0].StateJSON, want)
+	}
+	if rows[0].OutputsJSON != `{"quality_evidence":{}}` {
+		t.Fatalf("evidence without VMAF must not invent a score: %s", rows[0].OutputsJSON)
+	}
+}

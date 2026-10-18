@@ -425,11 +425,15 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 	if req == nil {
 		return errors.New("benchmark request cannot be nil")
 	}
-	if req.ModePolicyVersion != "" && req.ModePolicyVersion != "transcode-modes-v1" && req.ModePolicyVersion != optimization.ModePolicyV2 {
+	if req.ModePolicyVersion != "" && req.ModePolicyVersion != "transcode-modes-v1" && req.ModePolicyVersion != optimization.ModePolicyV2 && req.ModePolicyVersion != optimization.ModePolicyV3 {
 		return errors.New("unsupported mode policy version")
 	}
-	if req.Automatic && (req.Mode == "" || req.ModePolicyVersion != optimization.ModePolicyV2 || len(req.Samples) != 5 || len(req.Candidates) > 12) {
-		return errors.New("automatic search requires v2 mode, five windows and at most twelve candidates")
+	sizeV3 := req.ModePolicyVersion == optimization.ModePolicyV3
+	if sizeV3 && req.Mode != "size" {
+		return errors.New("mode policy v3 is only defined for size mode")
+	}
+	if req.Automatic && (req.Mode == "" || req.ModePolicyVersion != optimization.ModePolicyV2 && !sizeV3 || len(req.Samples) != 5 || len(req.Candidates) > 12) {
+		return errors.New("automatic search requires v2 or v3 mode, five windows and at most twelve candidates")
 	}
 	if req.QualityPruning && !req.Automatic {
 		return errors.New("quality pruning requires automatic search")
@@ -466,7 +470,8 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 		if req.SearchBudgetSeconds <= 0 || req.SearchBudgetSeconds > 3600 {
 			return errors.New("mode search requires finite search budget (1..3600 seconds)")
 		}
-		if req.Allow8BitTo10Bit {
+		// Size v3 encodes 8-bit sources as Main10; no other mode converts.
+		if req.Allow8BitTo10Bit && !sizeV3 {
 			return errors.New("mode cannot opt into a bit-depth conversion")
 		}
 		if req.Mode == "x265_preserve" {
@@ -507,8 +512,11 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 		return fmt.Errorf("invalid metric %q: must be explicit enum 'vmaf', 'ssim', or 'both'", req.Metric)
 	}
 
-	if req.AudioMode != "" && req.AudioMode != "copy" && req.AudioMode != "compact" && req.AudioMode != "he_aac" {
+	if req.AudioMode != "" && req.AudioMode != "copy" && req.AudioMode != "compact" && req.AudioMode != "he_aac" && req.AudioMode != AudioModeCompactLossless {
 		return fmt.Errorf("invalid audio_mode %q", req.AudioMode)
+	}
+	if (req.AudioMode == AudioModeCompactLossless) != sizeV3 {
+		return errors.New("compact_lossless audio is size mode v3's policy and only that")
 	}
 	if req.FallbackAudioBitrateBps < 0 {
 		return fmt.Errorf("invalid fallback_audio_bitrate_bps %d: cannot be negative", req.FallbackAudioBitrateBps)

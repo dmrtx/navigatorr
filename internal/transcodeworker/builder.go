@@ -290,15 +290,16 @@ func clearStatisticsTags(kind string, typeIndex int) []string {
 	return args
 }
 
-// sourceFormatWords mark a track title that describes the source format.
-var sourceFormatWords = []string{"truehd", "atmos", "dts", "flac", "pcm", "alac", "mlp", "lossless", "master audio", "hd ma", "hd-ma", "dolby", "uncompressed"}
+// sourceFormatWords mark a track title that describes the source format,
+// as whole words ("Atmosphere" names no format).
+var sourceFormatWords = regexp.MustCompile(`(?i)\b(truehd|atmos|dts|flac|l?pcm|alac|mlp|lossless|master\s+audio|hd[\s-]?ma|dolby|uncompressed|hra)\b`)
 
-// sourceFormatPhrases and sourceFormatTokens are the format and channel
-// words removed from a converted track's title; whatever else the title says
-// ("Director's Commentary") is kept.
+// sourceFormatPhrases and sourceFormatTokens are the format, sample and
+// channel words removed from a converted track's title; whatever else the
+// title says ("Director's Commentary") is kept.
 var (
-	sourceFormatPhrases = regexp.MustCompile(`(?i)\bdts[-:\s]?(hd|x)\b([\s-]+(master\s+audio|ma)\b)?|\bmaster\s+audio\b|\bhd[\s-]?ma\b`)
-	sourceFormatTokens  = regexp.MustCompile(`(?i)^(truehd|atmos|dts|flac|l?pcm|alac|mlp|lossless|dolby|uncompressed|stereo|mono|surround|\d+ch|\d(\.\d){1,2}(ch)?)$`)
+	sourceFormatPhrases = regexp.MustCompile(`(?i)\bdts[-:\s]?(hd|x|es)\b([\s-]+(master\s+audio|ma|high\s+resolution(\s+audio)?|hra)\b)?|\bmaster\s+audio\b|\bhd[\s-]?ma\b|\bhigh\s+resolution(\s+audio)?\b|\bdolby\s+digital(\s+plus)?\b`)
+	sourceFormatTokens  = regexp.MustCompile(`(?i)^(truehd|atmos|dts|flac|l?pcm|alac|mlp|lossless|dolby|uncompressed|hra|stereo|mono|surround|\d+ch|\d(\.\d){1,2}(ch)?|\d+-?bits?|\d+(\.\d+)?k?hz|\d+-?bits?/\d+(\.\d+)?(k?hz)?|\d+/\d+(\.\d+)?(k?hz)?)$`)
 )
 
 // convertedAudioTitle retitles a track converted to AAC when its title names
@@ -308,15 +309,7 @@ var (
 // that name no source format ("Commentary") are kept; ok is false then.
 // Without a reported layout (PCM in Matroska) the channel count names it.
 func convertedAudioTitle(title, layout string, channels int) (string, bool) {
-	lower := strings.ToLower(title)
-	named := false
-	for _, w := range sourceFormatWords {
-		if strings.Contains(lower, w) {
-			named = true
-			break
-		}
-	}
-	if !named {
+	if !sourceFormatWords.MatchString(title) {
 		return "", false
 	}
 	l := strings.ToLower(strings.TrimSpace(layout))
@@ -437,6 +430,11 @@ func BuildFFmpegArgsWithCoverArt(execPlan *ExecutionPlan, sourcePath, candidateP
 		if stream.Kind == "audio" && stream.TargetCodec != "copy" {
 			if stream.TargetCodec != "aac" || stream.BitrateKbps < 1 {
 				return nil, fmt.Errorf("invalid compact audio action")
+			}
+			// Size mode never flattens object audio, so it never retitles an
+			// Atmos or DTS:X track to AAC either (fail closed).
+			if execPlan.Plan.AudioMode == transcode.AudioModeCompactLossless && transcode.ObjectAudioText(stream.Title) {
+				return nil, fmt.Errorf("compact_lossless would convert object audio track %d (fail closed)", stream.TypeIndex)
 			}
 			encoder := "aac"
 			if execPlan.Plan.AudioMode == "he_aac" {

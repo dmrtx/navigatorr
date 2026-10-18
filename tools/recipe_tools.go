@@ -37,7 +37,7 @@ const (
 func compactAudioPolicy() map[string]any {
 	targets := map[int]int{}
 	for channels, layout := range map[int]string{1: "mono", 2: "stereo", 3: "3.0", 4: "4.0", 5: "5.0", 6: "5.1", 7: "6.1(back)", 8: "7.1"} {
-		_, targets[channels] = transcode.AudioTarget("compact", "dts", channels, layout)
+		_, targets[channels] = transcode.AudioTarget("compact", transcode.AudioTrack{Codec: "dts", Channels: channels, Layout: layout})
 	}
 	return map[string]any{"convert_to": "aac", "convert_codecs": []string{"dts", "truehd", "mlp", "flac", "alac", "pcm_*"}, "target_kbps_by_channels": targets, "otherwise": "copy (including AAC/AC3/EAC3 with Atmos JOC/Opus, unknown channel count or layout, layouts AAC would remap, and more than 8 channels)", "preserve": "track count, languages, channels, channel layout and dispositions", "lossy": true, "note": "Nominal targets, not measured audio quality. Benchmark estimates audio; fallback_audio_bitrate_bps is an estimation fallback, not the encoding target."}
 }

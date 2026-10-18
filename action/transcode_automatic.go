@@ -6,9 +6,17 @@ import (
 	"github.com/jakenesler/navigatorr/transcode/recipe"
 )
 
+// automaticFallbacks are the slow-preset CRF families the worker may try
+// after discovery: quality when nothing qualified, savings otherwise.
+type automaticFallbacks struct {
+	Quality, Savings []int
+}
+
+var defaultAutomaticFallbacks = automaticFallbacks{Quality: []int{16, 18, 20}, Savings: []int{23, 26, 28}}
+
 // Candidate alternatives are frozen before submission. The worker chooses which
 // family to test from measured rejections, without creating another action.
-func configureAutomaticRequest(req *transcode.BenchmarkRequest, plan *transcode.Plan, bitDepth int) error {
+func configureAutomaticRequest(req *transcode.BenchmarkRequest, plan *transcode.Plan, bitDepth int, families automaticFallbacks) error {
 	if req.SourceDuration < 50 {
 		return nil
 	}
@@ -32,7 +40,7 @@ func configureAutomaticRequest(req *transcode.BenchmarkRequest, plan *transcode.
 	for _, family := range []struct {
 		prefix    string
 		qualities []int
-	}{{"fallback-quality-", []int{16, 18, 20}}, {"fallback-savings-", []int{23, 26, 28}}} {
+	}{{"fallback-quality-", families.Quality}, {"fallback-savings-", families.Savings}} {
 		candidates, err := buildBenchmarkCandidates(&slow, bitDepth, &recipe.SearchPolicy{MaxCandidates: 3, QualityValues: family.qualities})
 		if err != nil {
 			return err
@@ -43,4 +51,19 @@ func configureAutomaticRequest(req *transcode.BenchmarkRequest, plan *transcode.
 		req.Candidates = append(req.Candidates, candidates...)
 	}
 	return nil
+}
+
+// sizeFinalWindows plans size v3's final validation windows from the frozen
+// policy: one per FinalWindowEverySeconds of source, within its bounds. Other
+// policies, and sources too short for them, keep the benchmark windows (nil).
+func sizeFinalWindows(ec *ExecutionContext, duration float64) []transcode.BenchmarkSampleWindow {
+	if getString(ec.Inputs, "mode") != "size" {
+		return nil
+	}
+	p, err := freezeModePolicy(ec)
+	if err != nil || p == nil || p.Size == nil {
+		return nil
+	}
+	s := p.Size
+	return transcode.PlanFinalValidationWindows(duration, float64(s.FinalWindowSeconds), float64(s.FinalWindowEverySeconds), s.FinalWindowsMinimum, s.FinalWindowsMaximum)
 }
