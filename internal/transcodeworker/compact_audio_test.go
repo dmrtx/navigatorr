@@ -162,6 +162,35 @@ func TestCompactAudioDispositionValidation(t *testing.T) {
 	}
 }
 
+// A copied track keeps its bitstream; Matroska reports no layout for PCM, so
+// a copy from MOV/MP4/AVI comes back without one and must still publish.
+// Only compact AAC conversions are held to the source layout.
+func TestAudioLayoutCheckedOnlyForCompactConversions(t *testing.T) {
+	for _, tc := range []struct {
+		mode, codec, srcLayout, outCodec, outLayout string
+		channels                                    int
+		ok                                          bool
+	}{
+		{"copy", "pcm_s16le", "stereo", "pcm_s16le", "", 2, true},
+		{"copy", "pcm_s24le", "5.1", "pcm_s24le", "", 6, true},
+		{"compact", "pcm_s24le", "5.1", "aac", "5.1", 6, true},
+		{"compact", "pcm_s24le", "5.1(side)", "aac", "5.1", 6, true},
+		{"compact", "truehd", "7.1", "aac", "7.1(wide)", 8, false},
+		{"compact", "eac3", "5.1", "eac3", "", 6, true}, // copied under compact
+		{"he_aac", "pcm_s16le", "6.0", "aac", "hexagonal", 6, true},
+	} {
+		plan := &transcode.Plan{AudioMode: tc.mode}
+		src := []SourceStream{{Kind: "audio", Codec: tc.codec, Channels: tc.channels, Layout: tc.srcLayout}}
+		cand := []SourceStream{{Kind: "audio", Codec: tc.outCodec, Channels: tc.channels, Layout: tc.outLayout}}
+		if tc.mode == "he_aac" {
+			cand[0].Profile = "HE-AAC"
+		}
+		if err := validateAudioPreservation(plan, src, cand); (err == nil) != tc.ok {
+			t.Errorf("%+v: %v", tc, err)
+		}
+	}
+}
+
 func TestConvertedAudioTitle(t *testing.T) {
 	for _, tc := range []struct {
 		title, layout string
@@ -175,6 +204,11 @@ func TestConvertedAudioTitle(t *testing.T) {
 		{"FLAC 2.0", "stereo", 2, "AAC Stereo", true},
 		{"Dolby TrueHD", "", 3, "AAC", true},
 		{"Commentary", "stereo", 2, "", false},
+		{"Director's Commentary DTS-HD MA 5.1", "5.1(side)", 6, "Director's Commentary AAC 5.1", true},
+		{"Commentary (DTS-HD Master Audio 2.0)", "stereo", 2, "Commentary AAC Stereo", true},
+		{"English - TrueHD Atmos 7.1", "7.1", 8, "English AAC 7.1", true},
+		{"PCM Stereo", "", 2, "AAC Stereo", true},
+		{"Audio Description FLAC 2.0", "stereo", 2, "Audio Description AAC Stereo", true},
 		{"", "7.1", 8, "", false},
 	} {
 		got, ok := convertedAudioTitle(tc.title, tc.layout, tc.channels)

@@ -3,6 +3,7 @@ package transcodeworker
 import (
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -292,10 +293,20 @@ func clearStatisticsTags(kind string, typeIndex int) []string {
 // sourceFormatWords mark a track title that describes the source format.
 var sourceFormatWords = []string{"truehd", "atmos", "dts", "flac", "pcm", "alac", "mlp", "lossless", "master audio", "hd ma", "hd-ma", "dolby", "uncompressed"}
 
+// sourceFormatPhrases and sourceFormatTokens are the format and channel
+// words removed from a converted track's title; whatever else the title says
+// ("Director's Commentary") is kept.
+var (
+	sourceFormatPhrases = regexp.MustCompile(`(?i)\bdts[-:\s]?(hd|x)\b([\s-]+(master\s+audio|ma)\b)?|\bmaster\s+audio\b|\bhd[\s-]?ma\b`)
+	sourceFormatTokens  = regexp.MustCompile(`(?i)^(truehd|atmos|dts|flac|l?pcm|alac|mlp|lossless|dolby|uncompressed|stereo|mono|surround|\d+ch|\d(\.\d){1,2}(ch)?)$`)
+)
+
 // convertedAudioTitle retitles a track converted to AAC when its title names
-// the format it no longer has ("TrueHD Atmos 7.1" becomes "AAC 7.1"). Other
-// titles ("Commentary") are kept; ok is false when the title stays. Without a
-// reported layout (PCM in Matroska) the channel count names it.
+// the format it no longer has: the format and channel words are replaced by
+// the AAC layout ("TrueHD Atmos 7.1" becomes "AAC 7.1", "Director's
+// Commentary DTS-HD MA 5.1" becomes "Director's Commentary AAC 5.1"). Titles
+// that name no source format ("Commentary") are kept; ok is false then.
+// Without a reported layout (PCM in Matroska) the channel count names it.
 func convertedAudioTitle(title, layout string, channels int) (string, bool) {
 	lower := strings.ToLower(title)
 	named := false
@@ -315,15 +326,28 @@ func convertedAudioTitle(title, layout string, channels int) (string, bool) {
 	if l == "" {
 		l = map[int]string{1: "mono", 2: "stereo", 6: "5.1", 8: "7.1"}[channels]
 	}
+	format := "AAC " + l
 	switch l {
 	case "mono":
-		return "AAC Mono", true
+		format = "AAC Mono"
 	case "stereo":
-		return "AAC Stereo", true
+		format = "AAC Stereo"
 	case "":
-		return "AAC", true
+		format = "AAC"
 	}
-	return "AAC " + l, true
+	var label []string
+	for _, word := range strings.Fields(sourceFormatPhrases.ReplaceAllString(title, " ")) {
+		core := strings.Trim(word, "()[]{},;:|/+-·")
+		if core == "" || sourceFormatTokens.MatchString(core) {
+			continue
+		}
+		label = append(label, word)
+	}
+	rest := strings.Trim(strings.Join(label, " "), " ()[]{},;:|/+-·")
+	if rest == "" {
+		return format, true
+	}
+	return rest + " " + format, true
 }
 
 // BuildFFmpegArgs generates the exact, safe FFmpeg argument slice from an ExecutionPlan.

@@ -545,4 +545,10 @@ esac
 	if err := ValidateEncoderCapabilities(context.Background(), fakeFFmpeg, badPreset); err == nil || !strings.Contains(err.Error(), "preset") {
 		t.Fatalf("invalid preset did not fail closed: %v", err)
 	}
+	// The fake's -h output has no -dolbyvision option: refused with a
+	// reason, not a "<nil>" error.
+	compact := &transcode.Plan{VideoCodec: "libx265", Quality: 24, Preset: "slow", Compact: compactPQPlan()}
+	if err := ValidateEncoderCapabilities(context.Background(), fakeFFmpeg, compact); err == nil || !strings.Contains(err.Error(), "lacks it") || strings.Contains(err.Error(), "<nil>") {
+		t.Fatalf("missing -dolbyvision option: %v", err)
+	}
 }
