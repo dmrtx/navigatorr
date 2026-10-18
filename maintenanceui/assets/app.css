@@ -1712,3 +1712,68 @@ button.status-action:hover { text-decoration: underline; }
 button.status-action:focus-visible { outline: 2px solid var(--forest); outline-offset: 3px; }
 .batch-file-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 6px; flex-basis: 100%; }
 .batch-item-row > button.quiet { margin-left: auto; }
+
+/* Sample test result (job.benchmark from the server summary). */
+.benchmark-report {
+  margin: 10px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--forest);
+  border-radius: 4px;
+  background: var(--paper);
+  font-size: 13px;
+}
+.benchmark-report.outcome-no_acceptable_candidate,
+.benchmark-report.outcome-no_suitable_candidate,
+.benchmark-report.outcome-size_rejected,
+.benchmark-report.outcome-execution_error,
+.benchmark-report.outcome-search_review_required,
+.benchmark-report:has(.benchmark-warning) {
+  border-left-color: #b7791f;
+}
+.benchmark-report p { margin: 4px 0; }
+.benchmark-report-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.benchmark-report-head h3 { margin: 0; font-size: 14px; }
+.benchmark-outcome { font-size: 12px; font-weight: 600; white-space: nowrap; }
+.benchmark-warning {
+  padding: 6px 8px;
+  border-radius: 3px;
+  background: #fbefd5;
+  color: #6b4610;
+}
+.benchmark-list { margin: 4px 0 6px; padding-left: 18px; }
+.benchmark-list li { margin: 4px 0; }
+.benchmark-list li > p { margin: 2px 0; }
+.benchmark-rejected > summary,
+.technical-reason > summary { cursor: pointer; margin-top: 6px; font-weight: 600; }
+.technical-reason { margin: 6px 0; font-size: 12px; }
+.technical-reason p { overflow-wrap: anywhere; }
+.benchmark-next { margin-top: 8px; }
+.link-button { padding: 0; min-height: 0; border: 0; background: none; text-decoration: underline; font: inherit; }
+
+/* Narrow screens: never squeeze the outcome next to the buttons, and never push
+   decision buttons off-screen; stack them under the outcome instead. */
+@media (max-width: 600px) {
+  .brand { white-space: nowrap; }
+  #worker-status { font-size: 11px; text-align: right; }
+  #install-app { white-space: nowrap; }
+  .job-row .job-footer {
+    height: auto;
+    min-height: var(--control-size);
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+  .job-row .job-footer > .job-outcome,
+  .job-row .job-footer > .job-progress { flex: 1 1 100%; max-height: none; }
+  .job-row .job-footer > .job-actions {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+  .job-row .job-footer > .job-actions button { max-width: 100%; white-space: normal; }
+}
