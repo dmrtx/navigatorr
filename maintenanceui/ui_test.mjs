@@ -857,7 +857,9 @@ test("decision rows show the next step instead of stale worker telemetry or cont
     'queuePresentation({status:"waiting_decision",worker:{progress:100,speed:2},waiting_reason:"Review quality result"})',
   );
   assert.equal(waiting.showTelemetry, false);
-  assert.match(waiting.summary, /Review quality result/);
+  assert.match(waiting.summary, /Your decision is needed/);
+  assert.doesNotMatch(waiting.summary, /Review quality result/, "the reason is shown once, on the outcome line");
+  assert.match(h.run('queueOutcome({status:"waiting_decision",waiting_reason:"Review quality result"})'), /Review quality result · Originals unchanged/);
   assert.equal(
     h.run(
       'queuePresentation({status:"running",worker:{progress:30}}).showTelemetry',
@@ -871,7 +873,7 @@ test("decision rows show the next step instead of stale worker telemetry or cont
   assert.doesNotMatch(batch.summary, /0 files/);
   const replacedSource = h.run('queuePresentation({status:"waiting_decision",replaced:true,waiting_reason:"Review quality result"})');
   assert.equal(replacedSource.status, "Needs decision");
-  assert.match(replacedSource.summary, /Review quality result/);
+  assert.match(replacedSource.summary, /Your decision is needed/);
   assert.doesNotMatch(replacedSource.summary, /Original replaced/);
   assert.equal(h.run('shortJobReason("already_hevc")'), "Already HEVC; original kept");
 });
@@ -2475,4 +2477,70 @@ test("polling restores the same file control when multiple rows have identical a
   let focused;first.focus=()=>focused="one";second.focus=()=>focused="two";
   h.run('restoreControl(container,focusedControl(container))');
   assert.equal(focused,"two");
+});
+
+const allText = (el) => [el.textContent, ...(el.children || []).map(allText)].join(" ");
+
+test("sample test results explain each rejected setting with its measurement and next step", () => {
+  const h = harness();
+  h.context.job = {id:"j",action_name:"transcode_media",mode:"quality",status:"completed",reason_code:"no_suitable_candidate",candidate_ready:false,source_path:"/media/Demo Film A.mkv",
+    benchmark:{outcome:"no_suitable_candidate",message:"None of the tested configurations met this goal. Originals preserved.",next_step:"Keep the original, or explicitly choose another processing goal.",
+      rejected:[{candidate_id:"x265-crf20",checks:[{code:"quality_vmaf_p5_below_minimum",reason:"The lower-quality portion is below the VMAF limit.",actual:91.2,limit:93}],failed_samples:[1,2],review_source_seconds:1834.5}]}};
+  const text = allText(h.run("benchmarkReport(job)"));
+  assert.match(text, /No setting passed|None of the tested configurations/);
+  assert.match(text, /x265-crf20/);
+  assert.match(text, /Measured 91\.2, limit 93\.0/);
+  assert.match(text, /2 samples below the limit/);
+  assert.match(text, /Worst moment to check in the source: 30:34/);
+  assert.match(text, /Next step: .*another processing goal/);
+  const row = h.run("queuePresentation(job)");
+  assert.equal(row.status, "Skipped", "a goal that produced no file is not shown as completed");
+  assert.match(h.run("queueOutcome(job)"), /No tested setting passed \(1 rejected\) · Original kept/);
+  assert.equal(h.run('benchmarkReport({benchmark:{outcome:"testing",message:"x"}})'), null);
+  const selected = allText(h.run('benchmarkReport({benchmark:{outcome:"selected",message:"Selected.",next_step:"Monitor the same action."}})'));
+  assert.doesNotMatch(selected, /Next step/, "a normal selection needs no extra instruction");
+  const larger = h.run('({row: queueOutcome({benchmark:{outcome:"selected",size_warning:"Estimated 6.3% larger than the original.",next_step:"Keep the original."}}), report: benchmarkReport({benchmark:{outcome:"selected",size_warning:"Estimated 6.3% larger than the original.",next_step:"Keep the original."}})})');
+  assert.match(larger.row, /would make the file larger/);
+  assert.match(allText(larger.report), /6\.3% larger.*Next step:\s+Keep the original/);
+});
+
+test("negative sizes and machine reason codes are readable", () => {
+  const h = harness();
+  assert.match(h.run("bytes(-408021893)"), /^−\d/);
+  assert.doesNotMatch(h.run('queuePresentation({action_name:"benchmark_transcode",status:"completed",savings:{source_bytes:6000000000,estimated_bytes:6400000000,estimated_saved_bytes:-400000000}}).summary'), /-\d+ B|−.*savings/);
+  for (const raw of ["quality_vmaf_model_unavailable: v1_1080p_3h is missing", "no_suitable_candidate", "some_new_engine_code"]) {
+    assert.doesNotMatch(h.run(`shortJobReason(${JSON.stringify(raw)})`), /[a-z]+_[a-z]+/, raw);
+  }
+});
+
+test("an extra benchmark round runs only after the evidence was shown and confirmed", async () => {
+  for (const confirm of [false, true]) {
+    const h = harness(), calls = [];
+    h.context.record = (...args) => calls.push(args);
+    h.context.job = {id:"review",action_name:"transcode_media",mode:"size",status:"waiting_decision",source_path:"/media/S03E05.mkv",
+      waiting_reason:"Two benchmark rounds for these source bytes already found no acceptable candidate.",
+      waiting_options:[{decision:"cancel",description:"Stop."},{decision:"run_once_after_review",description:"Explicitly authorize one additional bounded benchmark. Do not choose this automatically."}],
+      benchmark:{outcome:"search_review_required",message:"Two earlier rounds found no acceptable candidate.",previous_unsuccessful_actions:["act-1"],proposed_candidates:[{id:"x265-crf23",video_codec:"libx265",quality:23}],
+        next_step:"Use the displayed run_once_after_review decision only on explicit user instruction."}};
+    h.run("jobControl=async(...args)=>record(...args);");
+    const button = h.run("jobControls(job).children.find(b=>b.textContent===\"Run one more test\")");
+    assert.ok(button, "the decision has a short label instead of the engine description");
+    button.listeners.get("click")();
+    for (let i = 0; i < 6; i++) await Promise.resolve();
+    assert.equal(h.elements.get("action-review").open, true);
+    assert.equal(calls.length, 0, "nothing is sent before the confirmation");
+    const shown = allText(h.elements.get("action-review-content"));
+    assert.match(shown, /x265-crf23/);
+    assert.match(shown, /“Run one more test”/);
+    assert.doesNotMatch(shown, /run_once_after_review/);
+    h.elements.get(confirm ? "confirm-action-review" : "dismiss-action-review").listeners.get("click")();
+    for (let i = 0; i < 12; i++) await Promise.resolve();
+    assert.deepEqual(JSON.parse(JSON.stringify(calls)), confirm ? [["review","action_resume",{decision:"run_once_after_review"}]] : []);
+  }
+});
+
+test("the process button says how many files it starts", () => {
+  const h = harness();
+  h.run('$("path").value="/media/one.mkv"; controls();');
+  assert.equal(h.elements.get("enqueue").textContent, "Process file");
 });
