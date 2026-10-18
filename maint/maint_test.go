@@ -12,14 +12,14 @@ func TestJudasBeatsSubsPlease(t *testing.T) {
 	prefs.CurrentSizeBytes = 21 << 30
 
 	judas := ReleaseCandidate{
-		GUID: "judas-guid", Title: "[Judas] Fate/strange Fake - 1080p HEVC x265 10bit Dual Audio Multi-Subs",
+		GUID: "judas-guid", Title: "[Judas] Star/bright Tale - 1080p HEVC x265 10bit Dual Audio Multi-Subs",
 		ReleaseGroup: "Judas", Size: 6 << 30, Seeders: 100,
 		VideoCodec: "hevc", Resolution: "1080p", BitDepth: 10,
 		AudioLangs: []string{"jpn", "eng"}, SubLangs: []string{"eng", "spa", "ara"},
 		DualAudio: true, MultiSubs: true,
 	}
 	subsPlease := ReleaseCandidate{
-		GUID: "sp-guid", Title: "[SubsPlease] Fate/strange Fake - 1080p HEVC",
+		GUID: "sp-guid", Title: "[SubsPlease] Star/bright Tale - 1080p HEVC",
 		ReleaseGroup: "SubsPlease", Size: 35 << 30, Seeders: 200,
 		VideoCodec: "hevc", Resolution: "1080p", BitDepth: 10,
 		AudioLangs: []string{"jpn", "eng"}, SubLangs: []string{"eng"},
@@ -51,7 +51,7 @@ func TestDangerousScoresWorst(t *testing.T) {
 
 func TestDangerousFilenames(t *testing.T) {
 	for _, n := range []string{
-		"Dark.Matter.S02E03.1080p.mkv.exe",
+		"Far.Orbit.S02E03.1080p.mkv.exe",
 		"movie.exe", "setup.scr", "run.bat", "a.cmd", "x.com", "i.msi", "s.ps1",
 		"Season 2/Episode.mkv.EXE",
 	} {
@@ -111,9 +111,9 @@ func TestAccessibleLanguage(t *testing.T) {
 }
 
 func TestOversizedPerEpisode(t *testing.T) {
-	// Vanitas: 40.2GB / 24 episodes ~= 1.68GB per episode -> oversized.
+	// Lantern: 40.2GB / 24 episodes ~= 1.68GB per episode -> oversized.
 	if !IsOversizedEpisode(40200000000, 24, 0) {
-		t.Error("vanitas should be oversized")
+		t.Error("lantern should be oversized")
 	}
 	// A 150-episode series with 100GB total is only ~0.67GB/episode.
 	if IsOversizedEpisode(100000000000, 150, 0) {

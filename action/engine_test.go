@@ -937,11 +937,11 @@ func TestSafeMediaReplacementRadarrMovieResolution(t *testing.T) {
 		if r.URL.Path == "/api/v3/movie/327" {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"id":      327,
-				"title":   "The Big Lebowski",
+				"title":   "The Long Weekend",
 				"hasFile": true,
 				"movieFile": map[string]any{
 					"id":   888,
-					"path": "/srv/media/Movies/The.Big.Lebowski.1080p.mkv",
+					"path": "/srv/media/Movies/The.Long.Weekend.1080p.mkv",
 					"size": 4500000000,
 					"mediaInfo": map[string]any{
 						"audioLanguages": "English/Spanish",
@@ -994,8 +994,8 @@ func TestSafeMediaReplacementRadarrMovieResolution(t *testing.T) {
 	if stepRes.Status != StepCompleted {
 		t.Fatalf("expected stepPlanAndCheckCurrent completed, got %s: %s", stepRes.Status, stepRes.Error)
 	}
-	if stepRes.Outputs["media_title"] != "The Big Lebowski" {
-		t.Errorf("expected media_title 'The Big Lebowski', got %v", stepRes.Outputs["media_title"])
+	if stepRes.Outputs["media_title"] != "The Long Weekend" {
+		t.Errorf("expected media_title 'The Long Weekend', got %v", stepRes.Outputs["media_title"])
 	}
 	if stepRes.Outputs["current_file_id"] != "888" {
 		t.Errorf("expected current_file_id '888', got %v", stepRes.Outputs["current_file_id"])
@@ -1014,8 +1014,8 @@ func TestSafeMediaReplacementSonarrSeriesResolution(t *testing.T) {
 		case r.URL.Path == "/api/v3/series/42":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"id":    42,
-				"title": "Breaking Bad",
-				"path":  "/srv/media/TvSeries/Breaking Bad",
+				"title": "Quiet Harbor",
+				"path":  "/srv/media/TvSeries/Quiet Harbor",
 				"statistics": map[string]any{
 					"sizeOnDisk":       12000000000,
 					"episodeFileCount": 62,
@@ -1025,7 +1025,7 @@ func TestSafeMediaReplacementSonarrSeriesResolution(t *testing.T) {
 			_ = json.NewEncoder(w).Encode([]map[string]any{
 				{
 					"id":   999,
-					"path": "/srv/media/TvSeries/Breaking Bad/S01E01.mkv",
+					"path": "/srv/media/TvSeries/Quiet Harbor/S01E01.mkv",
 					"size": 1500000000,
 					"mediaInfo": map[string]any{
 						"audioLanguages": "English",
@@ -1078,8 +1078,8 @@ func TestSafeMediaReplacementSonarrSeriesResolution(t *testing.T) {
 	if stepRes.Status != StepCompleted {
 		t.Fatalf("expected stepPlanAndCheckCurrent completed, got %s: %s", stepRes.Status, stepRes.Error)
 	}
-	if stepRes.Outputs["media_title"] != "Breaking Bad" {
-		t.Errorf("expected media_title 'Breaking Bad', got %v", stepRes.Outputs["media_title"])
+	if stepRes.Outputs["media_title"] != "Quiet Harbor" {
+		t.Errorf("expected media_title 'Quiet Harbor', got %v", stepRes.Outputs["media_title"])
 	}
 	if stepRes.Outputs["current_file_id"] != "999" {
 		t.Errorf("expected current_file_id '999', got %v", stepRes.Outputs["current_file_id"])
@@ -1094,9 +1094,9 @@ func TestValidateTorrentAccessibleMediaAndInspection(t *testing.T) {
 	tempDir := t.TempDir()
 
 	// 1. Create a media file on disk
-	mediaDir := filepath.Join(tempDir, "downloads", "Fate_strange_Fake")
+	mediaDir := filepath.Join(tempDir, "downloads", "Star_bright_Tale")
 	_ = os.MkdirAll(mediaDir, 0755)
-	mediaFile := filepath.Join(mediaDir, "Fate_strange_Fake_EP01.mkv")
+	mediaFile := filepath.Join(mediaDir, "Star_bright_Tale_EP01.mkv")
 	_ = os.WriteFile(mediaFile, []byte("dummy video stream content"), 0644)
 
 	// 2. Create mock ffprobe script
@@ -1144,7 +1144,7 @@ EOF
 			_ = json.NewEncoder(w).Encode([]qbit.TorrentInfo{
 				{
 					Hash:        torHash,
-					Name:        "Fate_strange_Fake",
+					Name:        "Star_bright_Tale",
 					ContentPath: mediaDir,
 					SavePath:    filepath.Join(tempDir, "downloads"),
 					Size:        1500000000,
@@ -1155,7 +1155,7 @@ EOF
 		case strings.HasPrefix(r.URL.Path, "/api/v2/torrents/files"):
 			_ = json.NewEncoder(w).Encode([]qbit.TorrentFile{
 				{
-					Name: "Fate_strange_Fake/Fate_strange_Fake_EP01.mkv",
+					Name: "Star_bright_Tale/Star_bright_Tale_EP01.mkv",
 					Size: 1500000000,
 				},
 			})
@@ -1226,7 +1226,7 @@ func TestValidateTorrentIncompleteValidationWhenInspectionFails(t *testing.T) {
 	ctx := context.Background()
 	// Torrent safe by file extension screening, but with no local files / inaccessible path
 	runRes, err := engine.Run(ctx, "validate_torrent", map[string]any{
-		"files": []string{"Fate_strange_Fake_EP01.mkv"},
+		"files": []string{"Star_bright_Tale_EP01.mkv"},
 	})
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
@@ -1564,9 +1564,9 @@ func TestValidateTorrentTotalSizeDoesNotDouble(t *testing.T) {
 	tempDir := t.TempDir()
 
 	// 1. Create mock media files
-	mediaDir := filepath.Join(tempDir, "Fate_strange_Fake")
+	mediaDir := filepath.Join(tempDir, "Star_bright_Tale")
 	_ = os.MkdirAll(mediaDir, 0755)
-	mediaFile := filepath.Join(mediaDir, "Fate_strange_Fake_EP01.mkv")
+	mediaFile := filepath.Join(mediaDir, "Star_bright_Tale_EP01.mkv")
 	_ = os.WriteFile(mediaFile, []byte("media-bytes-for-inspection"), 0644)
 
 	// 2. Mock ffprobe
@@ -1604,7 +1604,6 @@ EOF
 	_ = os.WriteFile(mockFfprobe, []byte(ffprobeScript), 0755)
 
 	// 3. Mock qBittorrent server with 14 files totaling exactly 6,120,930,408 bytes
-	// (Real production case Fate/strange Fake)
 	torHash := "f47e574a9ef41e0123456789abcdef0123456789"
 	const expectedLogicalTotal int64 = 6120930408
 	fileSizes := []int64{
@@ -1629,7 +1628,7 @@ EOF
 			_ = json.NewEncoder(w).Encode([]qbit.TorrentInfo{
 				{
 					Hash:        torHash,
-					Name:        "Fate_strange_Fake",
+					Name:        "Star_bright_Tale",
 					ContentPath: mediaDir,
 					SavePath:    tempDir,
 					Size:        expectedLogicalTotal,
@@ -1641,7 +1640,7 @@ EOF
 			var qbFiles []qbit.TorrentFile
 			for i, sz := range fileSizes {
 				qbFiles = append(qbFiles, qbit.TorrentFile{
-					Name: fmt.Sprintf("Fate_strange_Fake/Fate_strange_Fake_EP%02d.mkv", i+1),
+					Name: fmt.Sprintf("Star_bright_Tale/Star_bright_Tale_EP%02d.mkv", i+1),
 					Size: sz,
 				})
 			}
@@ -1783,7 +1782,7 @@ func TestSafeMediaReplacementAutonomousSelection(t *testing.T) {
 		case r.URL.Path == "/api/v3/movie/327":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"id":    327,
-				"title": "Fate/strange Fake",
+				"title": "Star/bright Tale",
 				"movieFile": map[string]any{
 					"id":   100,
 					"size": 10000000000, // 10 GB current
@@ -1793,7 +1792,7 @@ func TestSafeMediaReplacementAutonomousSelection(t *testing.T) {
 			_ = json.NewEncoder(w).Encode([]map[string]any{
 				{
 					"guid":         "bad-release-720p",
-					"title":        "Fate.strange.Fake.720p",
+					"title":        "Star.bright.Tale.720p",
 					"size":         15000000000,
 					"seeders":      1,
 					"downloadUrl":  "magnet:?xt=urn:btih:bad0000000000000000000000000000000000000",
@@ -1801,7 +1800,7 @@ func TestSafeMediaReplacementAutonomousSelection(t *testing.T) {
 				},
 				{
 					"guid":         "judas-1080p-hevc",
-					"title":        "[Judas] Fate/strange Fake 1080p HEVC x265 10bit Dual Audio Multi-Subs",
+					"title":        "[Judas] Star/bright Tale 1080p HEVC x265 10bit Dual Audio Multi-Subs",
 					"size":         6120930408, // size reduction (ratio ~0.61 -> bonus)
 					"seeders":      25,         // healthy seeders -> bonus
 					"downloadUrl":  "magnet:?xt=urn:btih:c001000000000000000000000000000000000001",

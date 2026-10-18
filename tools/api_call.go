@@ -36,7 +36,7 @@ func registerAPICallTool(s *server.MCPServer, registry *arrservice.Registry, spe
 			mcp.WithString("service", mcp.Description("Service name (e.g. sonarr, radarr, bazarr). Required unless cursor is provided.")),
 			mcp.WithString("method", mcp.Description("HTTP method (default: GET)")),
 			mcp.WithString("path", mcp.Description("API path (e.g. /series, /movie, /system/settings). The API version prefix is added automatically. Required unless cursor is provided.")),
-			mcp.WithString("query", mcp.Description("Query parameters as JSON object (e.g. {\"term\": \"breaking bad\"})")),
+			mcp.WithString("query", mcp.Description("Query parameters as JSON object (e.g. {\"term\": \"quiet harbor\"})")),
 			mcp.WithString("body", mcp.Description("JSON request body encoded as a JSON string. Do not use together with form.")),
 			mcp.WithString("content_type", mcp.Description("Request content type. Defaults to application/json when body is supplied. Supported: application/json, application/x-www-form-urlencoded, multipart/form-data.")),
 			mcp.WithString("form", mcp.Description("Form fields for application/x-www-form-urlencoded (or multipart/form-data). Pass as a JSON object string or key-value map. Arrays of primitives are encoded as repeated keys. Do not use together with body.")),

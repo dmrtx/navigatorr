@@ -13,8 +13,8 @@ import (
 
 func TestTranscode_Main10RejectsEightBitCandidate(t *testing.T) {
 	mediaDir := t.TempDir()
-	origFile := filepath.Join(mediaDir, "Kaguya-S01E01.mkv")
-	candidateFile := filepath.Join(mediaDir, "Kaguya-S01E01.navigatorr-candidate.mkv")
+	origFile := filepath.Join(mediaDir, "Moriko-S01E01.mkv")
+	candidateFile := filepath.Join(mediaDir, "Moriko-S01E01.navigatorr-candidate.mkv")
 	originalContent := "original-eight-bit-source"
 	if err := os.WriteFile(origFile, []byte(originalContent), 0644); err != nil {
 		t.Fatal(err)
@@ -96,8 +96,8 @@ func TestTranscode_Main10BitDepthMismatchCannotBeBypassedByAcceptLoss(t *testing
 	for _, bypassDecision := range []string{"accept_loss", "approve"} {
 		t.Run("decision="+bypassDecision, func(t *testing.T) {
 			mediaDir := t.TempDir()
-			origFile := filepath.Join(mediaDir, "Kaguya-S01E02.mkv")
-			candidateFile := filepath.Join(mediaDir, "Kaguya-S01E02.navigatorr-candidate.mkv")
+			origFile := filepath.Join(mediaDir, "Moriko-S01E02.mkv")
+			candidateFile := filepath.Join(mediaDir, "Moriko-S01E02.navigatorr-candidate.mkv")
 			originalContent := "original-source-content-must-survive"
 			if err := os.WriteFile(origFile, []byte(originalContent), 0644); err != nil {
 				t.Fatal(err)

@@ -50,7 +50,7 @@ call_api(
   service="radarr",
   method="POST",
   path="/movie",
-  body="{\"title\": \"Inception\", \"qualityProfileId\": 1, ...}"
+  body="{\"title\": \"Waypoint\", \"qualityProfileId\": 1, ...}"
 )
 
 // Form-urlencoded request (Bazarr settings, language profiles, etc.)
@@ -354,7 +354,7 @@ User: "Transcode this oversized anime episode to HEVC using our Apple Silicon no
 
 LLM approach:
   1. action_run → action: "transcode_media", inputs: {
-       "path": "/media/Anime/Frieren/S01E01.mkv",
+       "path": "/media/Anime/Wayfarer/S01E01.mkv",
        "profile": "hevc-vt"
      }
      → Returns action ID act-transcode-media-..., status: waiting_external,

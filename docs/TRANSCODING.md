@@ -325,7 +325,7 @@ source_cache_ttl_hours: 72
 
 Ansible: the worker binary does not require config changes (the new keys are
 optional with safe defaults), but the cache settings are explicitly managed by
-[dmrtx/mrtx-ansible PR #28](https://github.com/dmrtx/mrtx-ansible/pull/28)
+the deployment's configuration management (for example, an Ansible role)
 rather than left to defaults. To opt out there, set
 `disable_source_cache: true`.
 
@@ -601,7 +601,7 @@ To prevent unbounded JSON responses when batching entire series or large seasons
 ```json
 {
   "batch_id": "act-transcode_batch-123456",
-  "series_title": "Kaguya-sama: Love Is War",
+  "series_title": "Moriko-sama: Tide Is Rising",
   "is_anime": true,
   "dry_run": true,
   "counts": {
@@ -623,8 +623,8 @@ To prevent unbounded JSON responses when batching entire series or large seasons
   "items": [
     {
       "item_key": "epfile-101",
-      "file_path": "/media/tv/Kaguya S01E01.mkv",
-      "display_label": "Kaguya-sama: Love Is War - S01E01",
+      "file_path": "/media/tv/Moriko S01E01.mkv",
+      "display_label": "Moriko-sama: Tide Is Rising - S01E01",
       "episode_info": "S01E01",
       "decision": "transcode",
       "profile": "anime-hevc",

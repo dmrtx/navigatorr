@@ -276,7 +276,7 @@ func registerDiagnosticsTools(s *server.MCPServer, d DiagnosticsDeps) {
 	// action_history — query enriched action audit log
 	s.AddTool(
 		mcp.NewTool("action_history",
-			mcp.WithDescription("Query the enriched action audit log by media name, service, or action (e.g. search what happened to 'Evangelion' or inspect recent scan_library runs)."),
+			mcp.WithDescription("Query the enriched action audit log by media name, service, or action (e.g. search what happened to 'Everglow' or inspect recent scan_library runs)."),
 			mcp.WithString("media", mcp.Description("Optional filter by media title, path, or identifier")),
 			mcp.WithString("service", mcp.Description("Optional filter by service name (e.g. sonarr, radarr)")),
 			mcp.WithString("action", mcp.Description("Optional filter by action type (e.g. scan_library, safe_replace, action_completed)")),

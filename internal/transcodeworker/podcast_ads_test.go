@@ -66,7 +66,7 @@ func TestRealAdLibraryBenchmark(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	task := &podcast.Task{Version: 1, Operation: "render", Language: "en_US", Cuts: &cuts, Learning: &podcast.AdLearning{Scope: "benchmark-generation-why", Policy: p, Classifications: classes, ApprovedDigest: podcast.Digest(cuts)}}
+	task := &podcast.Task{Version: 1, Operation: "render", Language: "en_US", Cuts: &cuts, Learning: &podcast.AdLearning{Scope: "benchmark-example-show", Policy: p, Classifications: classes, ApprovedDigest: podcast.Digest(cuts)}}
 	jobDir := filepath.Join(cfg.StateDir, "seed")
 	jobFile := filepath.Join(jobDir, "job.json")
 	os.MkdirAll(jobDir, 0700)

@@ -17,8 +17,8 @@ func TestFilesystemBatchSelectionWithoutLibrary(t *testing.T) {
 	defer st.Close()
 	defer srv.Close()
 	e.deps.Registry = nil // The filesystem source must not require or query *arr.
-	a := filepath.Join(root, "Kaguya S01E01-E02.mkv")
-	b := filepath.Join(root, "Kaguya S02E02.mkv")
+	a := filepath.Join(root, "Moriko S01E01-E02.mkv")
+	b := filepath.Join(root, "Moriko S02E02.mkv")
 	alias := filepath.Join(root, "alias.mkv")
 	if err := os.Symlink(a, alias); err != nil {
 		t.Fatal(err)
@@ -54,7 +54,7 @@ func TestFilesystemBatchRejectsInvalidSourcesBeforeCreatingItems(t *testing.T) {
 	defer st.Close()
 	defer srv.Close()
 	e.deps.Registry = nil
-	valid := filepath.Join(root, "Kaguya S01E01-E02.mkv")
+	valid := filepath.Join(root, "Moriko S01E01-E02.mkv")
 	outside := filepath.Join(t.TempDir(), "outside.mkv")
 	if err := os.WriteFile(outside, []byte("outside"), 0600); err != nil {
 		t.Fatal(err)
@@ -116,7 +116,7 @@ func TestFilesystemBatchPauseResumeUsesExistingScheduler(t *testing.T) {
 	defer st.Close()
 	defer srv.Close()
 	e.deps.Registry = nil
-	path := filepath.Join(root, "Kaguya S01E01-E02.mkv")
+	path := filepath.Join(root, "Moriko S01E01-E02.mkv")
 	r, err := e.Run(context.Background(), "transcode_batch", map[string]any{
 		"paths": []string{path}, "profile": "general-hevc", "paused": true, "media_type": "movie",
 	})

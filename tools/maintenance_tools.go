@@ -19,7 +19,7 @@ func registerMaintenanceTools(s *server.MCPServer, d *Deps) {
 			mcp.WithString("media_type", mcp.Required(), mcp.Description("series, anime or movie")),
 			mcp.WithString("service", mcp.Required(), mcp.Description("sonarr or radarr")),
 			mcp.WithString("media_id", mcp.Description("Service-side id (e.g. sonarr series id)")),
-			mcp.WithString("title", mcp.Required(), mcp.Description("Human title, e.g. Fate/strange Fake")),
+			mcp.WithString("title", mcp.Required(), mcp.Description("Human title, e.g. Star/bright Tale")),
 			mcp.WithString("issue_type", mcp.Required(), mcp.Description("oversized, missing_accessible_language, dangerous_media, possible_media_mismatch")),
 			mcp.WithString("priority", mcp.Description("Higher runs first (default 0)")),
 			mcp.WithString("current_size", mcp.Description("Current size on disk in bytes")),

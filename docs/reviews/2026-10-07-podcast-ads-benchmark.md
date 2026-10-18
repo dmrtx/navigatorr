@@ -21,8 +21,8 @@ ni publicó nada.
 
 ## Episodio y entorno
 
-- Generation Why #700, **1984 San Ysidro McDonald's Massacre**.
-- [Feed público](https://rss.art19.com/generation-why-podcast), episodio del
+- Episodio #700 de un podcast público en inglés sobre casos reales.
+- Feed RSS público, episodio del
   20 de septiembre de 2026; copia descargada el 7 de octubre.
 - El feed indica 47:55; la copia realmente descargada mide 51:33,708.
   Todos los cálculos usan el archivo medido, no la duración del feed.

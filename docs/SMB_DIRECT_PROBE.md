@@ -27,7 +27,7 @@ Create a root-owned or service-user-owned YAML file and a separate password
 file with mode `0600` (Ansible Vault should provision both):
 
 ```yaml
-server: "192.168.70.72:445"
+server: "nas.example.lan:445"
 share: "media"
 username: "navigatorr-transcode"
 domain: ""

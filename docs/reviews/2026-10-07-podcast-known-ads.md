@@ -8,7 +8,7 @@ this benchmark reused existing native transcripts and did not measure new ASR.
 
 ## Real audio
 
-Five seeds were derived from the approved Generation Why #703 classifications,
+Five seeds were derived from the approved episode #703 classifications,
 separating paid ads and cross promotions even when the final cut merged them.
 The final 5.04-second ad was below the eight-second library minimum and remained
 for the LLM. Original source SHA-256:
@@ -32,7 +32,7 @@ network copies, native ASR, LLM classification and final render.
 | #700 held out | 51:33.708 | 1 | 105 | 45.060 s | 2.358 s | 1.155 s | 3.513 s |
 | #702 held out | 56:24.999 | 1 | 0 | 0 s | 2.568 s | 1.251 s | 3.818 s |
 
-#700 repeats the full 46.620-second Killer Psyche/Lindsay Clancy promotion at
+#700 repeats the full 46.620-second cross-promotion for another podcast at
 18:24.441–19:11.061. Native boundary units remain for the LLM, so accepted speech
 is shorter than the audio reference. ASR wrote “3” in one copy and “three” in
 the other; deterministic normalization treats equivalent small English integers

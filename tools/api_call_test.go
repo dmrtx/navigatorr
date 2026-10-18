@@ -407,14 +407,14 @@ func TestCallAPIJSONLegacyAndExplicit(t *testing.T) {
 		gotBody = string(b)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"id": 101, "title": "Inception"}`))
+		w.Write([]byte(`{"id": 101, "title": "Waypoint"}`))
 	}
 
 	// Legacy call: body supplied, no content_type specified
 	resLegacy := callAPI(t, h, map[string]any{
 		"method": "POST",
 		"path":   "/movie",
-		"body":   `{"title": "Inception"}`,
+		"body":   `{"title": "Waypoint"}`,
 	})
 	if resLegacy.IsError {
 		t.Fatalf("legacy call failed: %s", resultText(t, resLegacy))
@@ -425,7 +425,7 @@ func TestCallAPIJSONLegacyAndExplicit(t *testing.T) {
 	if gotAuth != "k" {
 		t.Errorf("expected auth header 'k', got %q", gotAuth)
 	}
-	if gotBody != `{"title": "Inception"}` {
+	if gotBody != `{"title": "Waypoint"}` {
 		t.Errorf("expected body to be preserved, got %q", gotBody)
 	}
 
@@ -434,7 +434,7 @@ func TestCallAPIJSONLegacyAndExplicit(t *testing.T) {
 		"method":       "POST",
 		"path":         "/movie",
 		"content_type": "application/json",
-		"body":         `{"title": "Inception"}`,
+		"body":         `{"title": "Waypoint"}`,
 	})
 	if resExplicit.IsError {
 		t.Fatalf("explicit call failed: %s", resultText(t, resExplicit))

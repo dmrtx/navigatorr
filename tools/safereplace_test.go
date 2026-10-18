@@ -94,8 +94,8 @@ func addJob(t *testing.T, s *server.MCPServer, title, issue string, extra map[st
 // maintenance_add must not duplicate an active job.
 func TestMaintenanceAddIdempotentViaTool(t *testing.T) {
 	s, _ := maintTestServer(t, false, "")
-	a := addJob(t, s, "Vanitas", "oversized", map[string]any{"media_id": "248"})
-	b := addJob(t, s, "Vanitas", "oversized", map[string]any{"media_id": "248"})
+	a := addJob(t, s, "Lantern", "oversized", map[string]any{"media_id": "248"})
+	b := addJob(t, s, "Lantern", "oversized", map[string]any{"media_id": "248"})
 	if a != b {
 		t.Errorf("duplicated job: %d vs %d", a, b)
 	}
@@ -104,7 +104,7 @@ func TestMaintenanceAddIdempotentViaTool(t *testing.T) {
 // done straight from pending must be refused: only verified replacements finish.
 func TestResolveDoneNeedsReplacing(t *testing.T) {
 	s, _ := maintTestServer(t, false, "")
-	id := addJob(t, s, "Vanitas", "oversized", nil)
+	id := addJob(t, s, "Lantern", "oversized", nil)
 	res := callTool(t, s, "maintenance_resolve", map[string]any{"id": float64(id), "status": "done", "note": "skip"})
 	if !strings.Contains(resultText(t, res), "verified") {
 		t.Errorf("pending->done was not gated on verification: %s", resultText(t, res))
@@ -114,7 +114,7 @@ func TestResolveDoneNeedsReplacing(t *testing.T) {
 // Acceptance: failed verification keeps the original and blocks the job.
 func TestSafeReplaceVerifyFailKeepsOriginal(t *testing.T) {
 	s, st := maintTestServer(t, true, "")
-	id := addJob(t, s, "Fate/strange Fake", "oversized",
+	id := addJob(t, s, "Star/bright Tale", "oversized",
 		map[string]any{"media_id": "100", "requires_subtitles": "true"})
 	fid := float64(id)
 	callTool(t, s, "safe_replace", map[string]any{"id": fid, "step": "plan"})
@@ -146,14 +146,14 @@ func TestSafeReplaceVerifyFailKeepsOriginal(t *testing.T) {
 // Acceptance: a torrent hiding an executable is rejected and blocklisted.
 func TestMaliciousTorrentRejected(t *testing.T) {
 	s, st := maintTestServer(t, true, "")
-	id := addJob(t, s, "Dark Matter", "oversized", map[string]any{"media_id": "55"})
+	id := addJob(t, s, "Far Orbit", "oversized", map[string]any{"media_id": "55"})
 	fid := float64(id)
 	callTool(t, s, "safe_replace", map[string]any{"id": fid, "step": "plan"})
 	callTool(t, s, "safe_replace", map[string]any{"id": fid, "step": "select",
-		"release_guid": "evil-guid", "title": "Dark.Matter.S02E03.1080p"})
+		"release_guid": "evil-guid", "title": "Far.Orbit.S02E03.1080p"})
 	res := callTool(t, s, "safe_replace", map[string]any{"id": fid, "step": "add_torrent",
 		"url":   "magnet:?xt=urn:btih:EVILHASH123",
-		"files": "Dark.Matter.S02E03.1080p.mkv.exe,Dark.Matter.S02E03.1080p.nfo"})
+		"files": "Far.Orbit.S02E03.1080p.mkv.exe,Far.Orbit.S02E03.1080p.nfo"})
 	text := resultText(t, res)
 	if !strings.Contains(text, "REJECTED") && !strings.Contains(text, "dangerous") {
 		t.Fatalf("malicious torrent was not rejected: %s", text)
@@ -195,7 +195,7 @@ func TestRankReleasesToolPrefersJudas(t *testing.T) {
 // jobs cannot, and reopening without a note is refused.
 func TestMaintenanceReopen(t *testing.T) {
 	s, st := maintTestServer(t, false, "")
-	id := addJob(t, s, "Vanitas", "oversized", nil)
+	id := addJob(t, s, "Lantern", "oversized", nil)
 	fid := float64(id)
 	if _, err := st.Transition(id, store.MaintBlocked, "bad candidate"); err != nil {
 		t.Fatal(err)
@@ -222,7 +222,7 @@ func TestMaintenanceReopen(t *testing.T) {
 // fully validated (replacing) job.
 func TestFsSafeDeleteNeedsAllowDestructive(t *testing.T) {
 	s, st := maintTestServer(t, false, "")
-	id := addJob(t, s, "Vanitas", "oversized", nil)
+	id := addJob(t, s, "Lantern", "oversized", nil)
 	for _, next := range []string{store.MaintResearching, store.MaintCandidate, store.MaintDownloading,
 		store.MaintDownloaded, store.MaintVerifying, store.MaintImporting, store.MaintReplacing} {
 		if _, err := st.Transition(id, next, ""); err != nil {
@@ -240,7 +240,7 @@ func TestFsSafeDeleteNeedsAllowDestructive(t *testing.T) {
 // mistyped torrent is not a completed download.
 func TestTorrentCheckMissingHashStaysDownloading(t *testing.T) {
 	s, st := maintTestServerFull(t, false, "", fakeQbit(t))
-	id := addJob(t, s, "Vanitas", "oversized", nil)
+	id := addJob(t, s, "Lantern", "oversized", nil)
 	fid := float64(id)
 	callTool(t, s, "safe_replace", map[string]any{"id": fid, "step": "plan"})
 	callTool(t, s, "safe_replace", map[string]any{"id": fid, "step": "select",
@@ -260,7 +260,7 @@ func TestTorrentCheckMissingHashStaysDownloading(t *testing.T) {
 // importing advances to replacing instead of reporting false success.
 func TestImportConfirmCrashRecovery(t *testing.T) {
 	s, st := maintTestServer(t, false, "")
-	id := addJob(t, s, "Vanitas", "oversized", nil)
+	id := addJob(t, s, "Lantern", "oversized", nil)
 	for _, next := range []string{store.MaintResearching, store.MaintCandidate, store.MaintDownloading,
 		store.MaintDownloaded, store.MaintVerifying, store.MaintImporting} {
 		if _, err := st.Transition(id, next, ""); err != nil {
@@ -287,13 +287,13 @@ func TestScanServiceConcurrent(t *testing.T) {
 		case r.URL.Path == "/api/v3/series":
 			w.Write([]byte(`[
 				{"id":1,"title":"Big Anime","statistics":{"sizeOnDisk":5000000000,"episodeFileCount":2}},
-				{"id":2,"title":"Oldboy Show","statistics":{"sizeOnDisk":100,"episodeFileCount":1}}]`))
+				{"id":2,"title":"Ironbird Show","statistics":{"sizeOnDisk":100,"episodeFileCount":1}}]`))
 		case r.URL.Path == "/api/v3/episodefile":
 			if r.URL.Query().Get("seriesId") == "1" {
 				w.Write([]byte(`[{"relativePath":"Big Anime/Big.Anime.S01E01.mkv",
 					"mediaInfo":{"audioLanguages":["Korean"],"subtitles":[]}}]`))
 			} else {
-				w.Write([]byte(`[{"relativePath":"Oldboy Show/oldboy.show.s01e01.mkv",
+				w.Write([]byte(`[{"relativePath":"Ironbird Show/ironbird.show.s01e01.mkv",
 					"mediaInfo":{"audioLanguages":["English"],"subtitles":[]}}]`))
 			}
 		default:
@@ -345,12 +345,12 @@ func TestSafeReplaceHappyPath(t *testing.T) {
 	defer srv.Close()
 
 	s, st := maintTestServer(t, true, srv.URL)
-	id := addJob(t, s, "Vanitas", "oversized",
+	id := addJob(t, s, "Lantern", "oversized",
 		map[string]any{"media_id": "248", "current_size": "40200000000", "requires_subtitles": "true"})
 	fid := float64(id)
 	steps := []map[string]any{
 		{"step": "plan"},
-		{"step": "select", "release_guid": "ember-g", "title": "[EMBER] Vanitas 1080p HEVC",
+		{"step": "select", "release_guid": "ember-g", "title": "[EMBER] Lantern 1080p HEVC",
 			"size": "12500000000", "seeders": "80", "reasons": "hevc_10bit,healthy_seed_count"},
 		{"step": "add_torrent", "torrent_hash": "ABCDEF1234567890"},
 	}

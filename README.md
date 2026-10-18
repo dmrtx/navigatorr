@@ -241,11 +241,11 @@ Beyond the request queue, Navigatorr keeps a **separate SQLite-backed maintenanc
 
 Jobs move `pending → researching → candidate_found → downloading → downloaded → verifying → importing → replacing → done` (plus `blocked`/`failed`); illegal jumps are rejected, and `done` is only reachable from `replacing` — i.e. after verification **and** a confirmed Sonarr/Radarr import. The original file is never deleted on 100% download alone.
 
-**Safe-replacement example (Fate/strange Fake, 21 GB → Judas 6 GB):**
+**Safe-replacement example (Star/bright Tale, 21 GB → Judas 6 GB):**
 
 ```
 maintenance_add  media_type=series service=sonarr media_id=100
-                 title="Fate/strange Fake" issue_type=oversized
+                 title="Star/bright Tale" issue_type=oversized
 safe_replace     id=1 step=plan
 rank_releases    media_type=anime current_size=21000000000 candidates=[...]
 safe_replace     id=1 step=select release_guid=<judas> title="..." size=6000000000 seeders=100 reasons=[multi_subs,hevc_10bit]
@@ -447,7 +447,7 @@ call_api(
   service="radarr",
   method="POST",
   path="/movie",
-  body="{\"title\": \"Inception\", \"qualityProfileId\": 1, ...}"
+  body="{\"title\": \"Waypoint\", \"qualityProfileId\": 1, ...}"
 )
 
 // Form-urlencoded request (e.g. Bazarr settings and language profiles):

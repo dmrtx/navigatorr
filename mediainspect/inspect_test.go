@@ -139,10 +139,10 @@ func TestParseBitDepth(t *testing.T) {
 
 func TestInspectFileRealWorldBitDepth(t *testing.T) {
 	dir := t.TempDir()
-	mediaFile := filepath.Join(dir, "Fate.Strange.Fake.HEVC.10bit.mkv")
+	mediaFile := filepath.Join(dir, "Star.Bright.Tale.HEVC.10bit.mkv")
 	_ = os.WriteFile(mediaFile, []byte("fake-video-payload"), 0o644)
 
-	// Mock ffprobe returning Fate/Strange Fake HEVC 10-bit JSON
+	// Mock ffprobe returning Star/Bright Tale HEVC 10-bit JSON
 	mockFFprobe10Bit := filepath.Join(dir, "mock_ffprobe_10bit.sh")
 	probe10BitJSON := `{
 		"streams": [

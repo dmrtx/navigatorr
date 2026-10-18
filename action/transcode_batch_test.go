@@ -82,33 +82,33 @@ func setupBatchTestEnv(t *testing.T, tc transcode.Executor, maxParallelJobs int)
 
 	// Create synthetic sparse media files
 	// File 101: S01E01-E02 H264 anime (1.4 GB)
-	file101 := filepath.Join(mediaDir, "Kaguya S01E01-E02.mkv")
+	file101 := filepath.Join(mediaDir, "Moriko S01E01-E02.mkv")
 	f1, err := os.Create(file101)
 	if err != nil {
 		t.Fatalf("creating file 101: %v", err)
 	}
 	_ = f1.Truncate(1400000000)
-	_, _ = f1.WriteAt([]byte("kaguya-s1e1-e2-sample-content"), 0)
+	_, _ = f1.WriteAt([]byte("moriko-s1e1-e2-sample-content"), 0)
 	_ = f1.Close()
 
 	// File 102: S02E01 HEVC 10-bit anime (400 MB)
-	file102 := filepath.Join(mediaDir, "Kaguya S02E01.mkv")
+	file102 := filepath.Join(mediaDir, "Moriko S02E01.mkv")
 	f2, err := os.Create(file102)
 	if err != nil {
 		t.Fatalf("creating file 102: %v", err)
 	}
 	_ = f2.Truncate(400000000)
-	_, _ = f2.WriteAt([]byte("kaguya-s2e1-sample-content"), 0)
+	_, _ = f2.WriteAt([]byte("moriko-s2e1-sample-content"), 0)
 	_ = f2.Close()
 
 	// File 103: S02E02 H264 anime (1.4 GB)
-	file103 := filepath.Join(mediaDir, "Kaguya S02E02.mkv")
+	file103 := filepath.Join(mediaDir, "Moriko S02E02.mkv")
 	f3, err := os.Create(file103)
 	if err != nil {
 		t.Fatalf("creating file 103: %v", err)
 	}
 	_ = f3.Truncate(1400000000)
-	_, _ = f3.WriteAt([]byte("kaguya-s2e2-sample-content"), 0)
+	_, _ = f3.WriteAt([]byte("moriko-s2e2-sample-content"), 0)
 	_ = f3.Close()
 
 	// Mock Sonarr server
@@ -119,7 +119,7 @@ func setupBatchTestEnv(t *testing.T, tc transcode.Executor, maxParallelJobs int)
 		case strings.HasPrefix(path, "/api/v3/series/10"):
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"id":         10,
-				"title":      "Kaguya-sama: Love Is War",
+				"title":      "Moriko-sama: Tide Is Rising",
 				"seriesType": "anime",
 				"genres":     []string{"Animation", "Comedy", "Romance"},
 			})
@@ -131,10 +131,10 @@ func setupBatchTestEnv(t *testing.T, tc transcode.Executor, maxParallelJobs int)
 			})
 		case strings.HasPrefix(path, "/api/v3/episode"):
 			_ = json.NewEncoder(w).Encode([]map[string]any{
-				{"id": 1, "seriesId": 10, "seasonNumber": 1, "episodeNumber": 1, "title": "I Want to Make You Confess", "episodeFileId": 101, "hasFile": true},
-				{"id": 2, "seriesId": 10, "seasonNumber": 1, "episodeNumber": 2, "title": "Kaguya Wants to Be Stopped", "episodeFileId": 101, "hasFile": true},
-				{"id": 3, "seriesId": 10, "seasonNumber": 2, "episodeNumber": 1, "title": "Ai Hayasaka Wants to Prevent It", "episodeFileId": 102, "hasFile": true},
-				{"id": 4, "seriesId": 10, "seasonNumber": 2, "episodeNumber": 2, "title": "Miyuki Shirogane Wants to Mediate", "episodeFileId": 103, "hasFile": true},
+				{"id": 1, "seriesId": 10, "seasonNumber": 1, "episodeNumber": 1, "title": "I Want to Win the Debate", "episodeFileId": 101, "hasFile": true},
+				{"id": 2, "seriesId": 10, "seasonNumber": 1, "episodeNumber": 2, "title": "Moriko Wants to Be Stopped", "episodeFileId": 101, "hasFile": true},
+				{"id": 3, "seriesId": 10, "seasonNumber": 2, "episodeNumber": 1, "title": "Rin Kazemori Wants to Prevent It", "episodeFileId": 102, "hasFile": true},
+				{"id": 4, "seriesId": 10, "seasonNumber": 2, "episodeNumber": 2, "title": "Kenta Shirahama Wants to Mediate", "episodeFileId": 103, "hasFile": true},
 			})
 		default:
 			http.NotFound(w, r)
@@ -253,7 +253,7 @@ func TestTranscodeBatch_SonarrResolutionAndFiltering(t *testing.T) {
 			t.Errorf("expected deduplicated multi-episode info S01E01-E02, got %s", it.EpisodeInfo)
 		}
 		if it.Profile != "anime-hevc" {
-			t.Errorf("expected anime-hevc profile for Kaguya 1080p anime, got %s", it.Profile)
+			t.Errorf("expected anime-hevc profile for Moriko 1080p anime, got %s", it.Profile)
 		}
 		if it.Decision != "transcode" {
 			t.Errorf("expected transcode decision, got %s", it.Decision)

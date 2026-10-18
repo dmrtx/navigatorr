@@ -19,9 +19,9 @@ podcasts:
   enabled: true
   artifact_dir: /var/lib/navigatorr/podcasts
   # Optional private directory shared with MoonStation for local publication locks.
-  local_catalog_dir: /volume1/Media/PodcastServer/podcast/.podupload/ad-catalog
+  local_catalog_dir: /media/podcasts/.podupload/ad-catalog
   podcasts:
-    generation-why:
+    example-show:
       enabled: true
       # Optional: confirmed acoustic + native-text first pass; default false.
       known_ads_first_pass: true
@@ -239,10 +239,10 @@ NAVIGATORR_PODCAST_AUDIO=/absolute/spoken-fixture.mp3 \
 Tests cover coverage/overlap errors, native timing/source binding, durable
 classification across coordinator restart, a lost submit acknowledgement,
 review digests, HTTP workflow execution, real FFmpeg output, unchanged no-ad audio packets with embedded transcripts, worker restart recovery and hook publication identity. The native
-worker smoke test was run separately on the M1 Max with spoken Generation Why
+worker smoke test was run separately on the M1 Max with spoken podcast
 audio; the normal suite deliberately skips that opt-in native test.
 
-The earlier full-episode [Generation Why benchmark](reviews/2026-10-07-podcast-ads-benchmark.md)
+The earlier full-episode [podcast benchmark](reviews/2026-10-07-podcast-ads-benchmark.md)
 records ASR and Luna low/high findings. Neither test establishes ad detection
 precision/recall or human listening acceptance. Model/reasoning provenance,
 ASR wall time/RTF, coverage, removed duration and output validation are retained;
