@@ -70,9 +70,10 @@ const reconcileConcurrency = 8
 // A slow continuation keeps only its own slot; the next tick still polls every
 // other action instead of waiting for the slowest one of the previous tick.
 //
-// A continuation gives its slot back as soon as it waits for a media hash
-// (see acquireHashSlot): hashing is bounded by the engine's hash pool, so
-// slots only ever measure work that is not queued behind a hash.
+// A continuation that has to wait for a media hash slot gives its dispatcher
+// slot back first (see acquireHashSlot): whole-file reads are bounded by the
+// engine's hash pool, so continuations queued behind them never keep live jobs
+// from being polled.
 type reconcileDispatcher struct {
 	mu       sync.Mutex
 	inflight map[string]struct{}
@@ -363,28 +364,36 @@ func optionalDuration(state map[string]any, key string) *int64 {
 	return &v
 }
 
-// mediaHashConcurrency bounds whole-file media hashes running at once.
+// mediaHashConcurrency bounds whole-file media reads (hashes and promotion
+// backup copies) running at once.
 const mediaHashConcurrency = 3
 
-// acquireHashSlot waits for one of the engine's hash slots, honouring ctx.
-// A reconciler continuation first gives back its dispatcher slot, so queued
-// hashes never keep live jobs from being polled. The returned release is
-// safe to call more than once.
+// acquireHashSlot takes one of the engine's hash slots, honouring ctx. When
+// it has to wait, a reconciler continuation first gives back its dispatcher
+// slot, so queued hashes never keep live jobs from being polled. The returned
+// release is safe to call more than once.
 func (e *Engine) acquireHashSlot(ctx context.Context) (func(), error) {
-	yieldReconcileSlot(ctx)
 	if e.hashSlots == nil {
 		return func() {}, nil
 	}
+	var once sync.Once
+	release := func() { once.Do(func() { <-e.hashSlots }) }
 	select {
 	case e.hashSlots <- struct{}{}:
-		var once sync.Once
-		return func() { once.Do(func() { <-e.hashSlots }) }, nil
+		return release, nil
+	default:
+	}
+	yieldReconcileSlot(ctx)
+	select {
+	case e.hashSlots <- struct{}{}:
+		return release, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
 }
 
-// hashMedia copies r into h while holding one of the engine's hash slots.
+// hashMedia copies a whole media file from r into h (a hash or a backup
+// partial) while holding one of the engine's hash slots.
 func (e *Engine) hashMedia(ctx context.Context, h io.Writer, r io.Reader) (int64, error) {
 	release, err := e.acquireHashSlot(ctx)
 	if err != nil {

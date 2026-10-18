@@ -810,14 +810,32 @@ func TestDispatcherSlotsAreFreeWhileContinuationsWaitForHashes(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("dispatch blocked behind continuations waiting for hashes")
 	}
-	for deadline := time.Now().Add(3 * time.Second); (len(d.sem) > 0 || hashing.Load() < mediaHashConcurrency) && time.Now().Before(deadline); {
+	for deadline := time.Now().Add(3 * time.Second); (len(d.sem) > mediaHashConcurrency || hashing.Load() < mediaHashConcurrency) && time.Now().Before(deadline); {
 		time.Sleep(time.Millisecond)
 	}
 	time.Sleep(20 * time.Millisecond)
 	d.mu.Lock()
 	inflight := len(d.inflight)
 	d.mu.Unlock()
-	if inflight != burst || hashing.Load() != mediaHashConcurrency || len(d.sem) != 0 {
-		t.Fatalf("in flight %d, hashing %d, dispatcher slots held %d; want %d, %d, 0", inflight, hashing.Load(), len(d.sem), burst, mediaHashConcurrency)
+	// Only the continuations that got a hash slot at once keep their
+	// dispatcher slot; every one queued behind them gave it back.
+	if inflight != burst || hashing.Load() != mediaHashConcurrency || len(d.sem) != mediaHashConcurrency {
+		t.Fatalf("in flight %d, hashing %d, dispatcher slots held %d; want %d, %d, %d", inflight, hashing.Load(), len(d.sem), burst, mediaHashConcurrency, mediaHashConcurrency)
 	}
+}
+
+func TestReconcileSlotYieldsOnce(t *testing.T) {
+	sem := make(chan struct{}, 1)
+	sem <- struct{}{}
+	slot := &reconcileSlot{release: func() { <-sem }}
+	ctx := context.WithValue(context.Background(), reconcileSlotKey{}, slot)
+	yieldReconcileSlot(ctx)
+	done := make(chan struct{})
+	go func() { yieldReconcileSlot(ctx); slot.yield(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("a second yield blocked instead of doing nothing")
+	}
+	yieldReconcileSlot(context.Background())
 }

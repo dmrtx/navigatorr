@@ -531,7 +531,7 @@ func (e *Engine) promotionCopyToPartial(ctx context.Context, srcPath, partial st
 		_ = src.Close()
 		return err
 	}
-	_, copyErr := io.Copy(dst, &promotionContextReader{ctx: ctx, r: src})
+	_, copyErr := e.hashMedia(ctx, dst, &promotionContextReader{ctx: ctx, r: src})
 	_ = src.Close()
 	if copyErr == nil {
 		copyErr = dst.Sync()
