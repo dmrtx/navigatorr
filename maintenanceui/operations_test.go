@@ -175,3 +175,30 @@ func TestOperationsHistoryIsBoundedButTotalsAreLifetime(t *testing.T) {
 		t.Fatal(w.Code, w.Body.String())
 	}
 }
+
+func TestOperationsProjectPlanNoteAndPausedBenchmarkOutcome(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	note := "No benchmark candidate was selected; the stored plan is the profile's untested starting configuration."
+	seedOperation(t, st, "untested", "benchmark_transcode", "completed", map[string]any{"path": "/media/a.mkv"}, map[string]any{"plan_source": "profile_base", "plan_note": note}, map[string]any{"optimization_enabled": true, "benchmark_decision": map[string]any{"decision_reason": "all_candidates_invalid", "evaluations": []any{}}})
+	seedOperation(t, st, "paused", "transcode_media", "waiting_decision", map[string]any{"path": "/media/b.mkv", "mode": "compact"}, nil, map[string]any{"optimization_enabled": true, "reason_code": "quality_policy_unavailable", "plan_source": "profile_base"})
+	read := func(id string) map[string]any {
+		t.Helper()
+		var page operationsPage
+		w := request(h, "GET", "/api/maintenance/operations?id="+id, "", true)
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil || len(page.Jobs) != 1 {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		benchmark, _ := page.Jobs[0]["benchmark"].(map[string]any)
+		if benchmark == nil {
+			t.Fatal("benchmark summary missing", page.Jobs[0])
+		}
+		return benchmark
+	}
+	if b := read("untested"); b["plan_source"] != "profile_base" || b["plan_note"] != note {
+		t.Fatal("untested plan not projected", b)
+	}
+	if b := read("paused"); b["outcome"] != "quality_policy_unavailable" || b["plan_source"] != nil || b["plan_note"] != nil {
+		t.Fatal("paused job projected as testing or with a provisional plan", b)
+	}
+}

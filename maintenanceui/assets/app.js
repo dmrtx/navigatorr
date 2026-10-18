@@ -635,6 +635,7 @@ function renderWorkerDetails(host, info) {
     const fresh = workerObservationFresh(worker);
     const row = node("div", "", "worker-node");
     row.append(node("strong", worker.name), node("span", !serverReachable ? "Unknown" : worker.ready ? "Reachable · Ready" : worker.reachable || worker.connected ? "Reachable · Blocked" : "Unavailable", "badge"));
+    if (serverReachable && worker.admission_note) row.append(node("p", worker.admission_note, "worker-admission"));
     row.append(node("p", `Scheduler: ${fresh ? worker.scheduler_health || "unknown" : "unknown (outdated observation)"}`, "metadata"));
     row.append(node("p", `Last successful sweep: ${worker.last_success_at ? new Date(worker.last_success_at).toLocaleString() : "Unknown"}`, "metadata"));
     row.append(node("p", `Observation: ${worker.observed_at ? new Date(worker.observed_at).toLocaleString() : "Unknown"}${Number.isFinite(Date.parse(worker.observed_at)) ? ` · ${Math.max(0,Math.floor((Date.now()-Date.parse(worker.observed_at))/1000))}s old` : ""}`, "metadata"));
@@ -3138,6 +3139,8 @@ const benchmarkOutcomes = {
   no_suitable_candidate: "No setting passed",
   size_rejected: "Size limit not met",
   search_review_required: "Your review is needed",
+  quality_policy_unavailable: "Quality checks unavailable",
+  attention: "Needs your decision",
   execution_error: "Test could not finish",
   cancelled: "Stopped",
 };
@@ -3208,6 +3211,16 @@ function benchmarkReport(job) {
     box.append(next);
   }
   return box;
+}
+// plan_source/plan_note arrive only once the search settled which settings the
+// encode uses; a provisional preflight plan is never presented as a result.
+function encodingPlanNote(job) {
+  const b = job.benchmark;
+  if (!b?.plan_source) return null;
+  const text = b.plan_source === "benchmark_winner" ? "The settings selected by the sample test." : b.plan_note || "The profile's untested starting settings; no sample test result backs them.";
+  const line = node("p", "", `encoding-plan plan-${b.plan_source}`);
+  line.append(node("strong", "Encoding plan: "), node("span", text));
+  return line;
 }
 function queueOutcome(job) {
   if (job.archived) return "Archived · Restore to return to the queue";
@@ -3530,6 +3543,8 @@ async function refreshDetail() {
  renderPhaseCosts(summary, job);
     const report = benchmarkReport(job);
     if (report) summary.append(report);
+    const plan = encodingPlanNote(job);
+    if (plan) summary.append(plan);
     if (queuePresentation(job).showTelemetry) summary.append(telemetry(job));
     else if (batchProgress(job)) summary.append(batchProgress(job));
     else if (!job.batch?.dry_run && job.batch?.outcome !== "no_changes") summary.append(node("p", queueOutcome(job), "job-outcome metadata"));

@@ -135,3 +135,35 @@ func TestCompactBenchmarkWarnsWhenSelectedCandidateGrowsFile(t *testing.T) {
 		t.Fatalf("savings flagged as growth: %q", s.SizeWarning)
 	}
 }
+
+func TestCompactBenchmarkExplainsUnavailableQualityPolicyInsteadOfTesting(t *testing.T) {
+	res := &action.ActionResult{ActionName: "transcode_media", Status: action.StatusWaitingDecision, WaitingReason: "quality_vmaf_model_unavailable: v1_1080p_3h; original preserved",
+		Inputs: map[string]any{"mode": "compact"},
+		State:  map[string]any{"optimization_enabled": true, "reason_code": "quality_policy_unavailable", "plan_source": "profile_base"}}
+	s := compactBenchmark(res)
+	if s == nil || s.Outcome != "quality_policy_unavailable" || strings.Contains(s.Message, "Testing") || !strings.Contains(s.NextStep, "Cancel") {
+		t.Fatalf("paused workflow reported as testing: %+v", s)
+	}
+	if s.PlanSource != "" || s.PlanNote != "" {
+		t.Fatalf("provisional preflight plan reported as settled: %+v", s)
+	}
+	res.State["reason_code"] = "search_budget_exhausted"
+	if s = compactBenchmark(res); s.Outcome != "attention" || s.Message != res.WaitingReason {
+		t.Fatalf("other attention reasons reported as testing: %+v", s)
+	}
+}
+
+func TestCompactBenchmarkReportsSettledPlanSource(t *testing.T) {
+	note := "No benchmark candidate was selected; the stored plan is the profile's untested starting configuration."
+	res := &action.ActionResult{ActionName: "benchmark_transcode", Status: action.StatusCompleted,
+		Outputs: map[string]any{"plan_source": "profile_base", "plan_note": note},
+		State:   map[string]any{"optimization_enabled": true, "plan_source": "profile_base", "benchmark_decision": transcode.BenchmarkDecision{DecisionReason: "all_candidates_invalid"}}}
+	if s := compactBenchmark(res); s.PlanSource != "profile_base" || s.PlanNote != note {
+		t.Fatalf("untested plan not explained: %+v", s)
+	}
+	res = &action.ActionResult{ActionName: "transcode_media", Status: action.StatusRunning,
+		State: map[string]any{"optimization_enabled": true, "plan_source": "benchmark_winner", "benchmark_decision": transcode.BenchmarkDecision{Winner: &transcode.BenchmarkWinner{CandidateID: "crf22"}}}}
+	if s := compactBenchmark(res); s.PlanSource != "benchmark_winner" || s.PlanNote != "" {
+		t.Fatalf("selected plan source missing: %+v", s)
+	}
+}

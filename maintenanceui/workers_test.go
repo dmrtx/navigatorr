@@ -36,6 +36,9 @@ func TestConnectedWorkerWithInaccessibleStorageStillBlocksAdmission(t *testing.T
 	if info["ready"] != false || node["connected"] != true || node["status"] != "blocked" {
 		t.Fatal("liveness mistaken for readiness", info)
 	}
+	if node["admission_note"] != transcode.AdmissionNoteDeepChecksFailed {
+		t.Fatal("blocked admission not explained", node)
+	}
 	w = request(h, "POST", "/api/maintenance/tool", `{"name":"action_run","arguments":{"action":"transcode_media","inputs":"{\"path\":\"/blocked.mkv\"}"}}`, true)
 	if w.Code != 409 {
 		t.Fatal("storage failure did not block admission", w.Body.String())
@@ -56,7 +59,7 @@ func TestWorkerAvailabilityAndAdmissionRecheck(t *testing.T) {
 		Ready bool             `json:"ready"`
 		Nodes []map[string]any `json:"nodes"`
 	}
-	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &info) != nil || !info.Ready || len(info.Nodes) != 1 {
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &info) != nil || !info.Ready || len(info.Nodes) != 1 || info.Nodes[0]["admission_note"] != "" {
 		t.Fatal(w.Body.String())
 	}
 	// A ready UI observation cannot authorize a later disconnected admission.

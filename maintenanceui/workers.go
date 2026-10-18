@@ -40,6 +40,6 @@ func (s *Server) workers(w http.ResponseWriter, r *http.Request) {
 			status = "ready"
 		}
 	}
-	node := map[string]any{"name": "Video worker", "address": address, "transport": transport, "configured": observation.Configured, "connected": observation.Reachable, "reachable": observation.Reachable, "ready": observation.Ready, "status": status, "message": observation.Message, "scheduler_health": observation.Health, "observed_at": observation.ObservedAt, "fresh_until": observation.FreshUntil, "last_success_at": observation.LastSuccessAt, "observation_age_seconds": observation.ObservationAgeSeconds, "stale": observation.Stale, "last_error": observation.LastError, "sweeps": observation.Sweeps}
+	node := map[string]any{"name": "Video worker", "address": address, "transport": transport, "configured": observation.Configured, "connected": observation.Reachable, "reachable": observation.Reachable, "ready": observation.Ready, "status": status, "message": observation.Message, "admission_note": observation.AdmissionNote, "scheduler_health": observation.Health, "observed_at": observation.ObservedAt, "fresh_until": observation.FreshUntil, "last_success_at": observation.LastSuccessAt, "observation_age_seconds": observation.ObservationAgeSeconds, "stale": observation.Stale, "last_error": observation.LastError, "sweeps": observation.Sweeps}
 	writeJSON(w, 200, map[string]any{"ready": observation.Ready, "checked_at": observation.CheckedAt, "observation": observation, "nodes": []map[string]any{node}})
 }
