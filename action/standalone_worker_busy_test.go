@@ -345,3 +345,36 @@ func TestStandaloneSlotWaitIsCancellable(t *testing.T) {
 		t.Fatal("a cancelled slot wait must not submit again")
 	}
 }
+
+// An uncertain resubmit after a slot wait may have created the job, so
+// cancelling still reaches the worker even though worker_busy is set.
+func TestCancelAfterUncertainResubmitStillCancelsRemote(t *testing.T) {
+	calls := 0
+	mock := &mockTranscodeExecutor{
+		benchmarkSubmitFunc: func(ctx context.Context, req transcode.BenchmarkRequest) (transcode.BenchmarkJob, error) {
+			calls++
+			if calls == 1 {
+				return transcode.BenchmarkJob{}, workerBusyError(0)
+			}
+			return transcode.BenchmarkJob{}, &httpclient.UncertainError{Op: "benchmark_submit", Err: context.DeadlineExceeded}
+		},
+		benchmarkStatusFunc: func(ctx context.Context, jobID string) (transcode.BenchmarkStatus, error) {
+			return transcode.BenchmarkStatus{}, &httpclient.UncertainError{Op: "benchmark_status", Err: context.DeadlineExceeded}
+		},
+	}
+	engine, _, mediaFile, _ := setupBenchmarkTestEnv(t, mock, standard8BitProbeJSON, &recipe.OptimizationPolicy{Enabled: true})
+	res, err := engine.Run(context.Background(), "benchmark_transcode", map[string]any{"path": mediaFile, "profile": "opt-vt"})
+	if err != nil || res.WaitingCondition != "worker_busy" {
+		t.Fatalf("got %v %+v", err, res)
+	}
+	got, err := engine.Resume(context.Background(), res.ID, "", nil)
+	if err != nil || got.WaitingCondition != "worker_reconciling" || !getBool(got.State, "benchmark_reconcile") {
+		t.Fatalf("uncertain resubmit: %v %+v", err, got)
+	}
+	if _, err := engine.Cancel(context.Background(), res.ID, "user stopped"); err != nil {
+		t.Fatal(err)
+	}
+	if mock.benchmarkCancelCalls != 1 {
+		t.Fatalf("benchmark cancel calls = %d, want 1 for a possibly created job", mock.benchmarkCancelCalls)
+	}
+}
