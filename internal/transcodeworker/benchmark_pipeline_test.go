@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/optimization"
 )
 
 // timedMockSpec configures a mock ffmpeg with per-sample timing and VMAF scores
@@ -23,6 +24,7 @@ type timedMockSpec struct {
 	metSleep    map[int]float64 // sample index -> seconds to sleep during metric
 	vmafScore   map[int]float64 // sample index -> VMAF mean to report
 	encFailQual int             // quality value whose encodes fail (-1 disables)
+	encPad      map[string]int  // output path substring -> extra encoded bytes
 }
 
 func setupTimedMockTools(t *testing.T, dir string, spec timedMockSpec) (string, string, string) {
@@ -58,6 +60,10 @@ EOF
 	for sample := 0; sample < 8; sample++ {
 		fmt.Fprintf(&encCases, "      *sample_%d.mkv)\n        %s\n        ;;\n", sample, sleepFor(spec.encSleep, sample))
 		fmt.Fprintf(&metCases, "      *sample_%d*)\n        score=\"%s\"\n        %s\n        ;;\n", sample, scoreFor(sample), sleepFor(spec.metSleep, sample))
+	}
+	var padCases strings.Builder
+	for match, n := range spec.encPad {
+		fmt.Fprintf(&padCases, "          *%s*)\n            head -c %d /dev/zero >> \"$out\"\n            ;;\n", match, n)
 	}
 	encFail := ""
 	if spec.encFailQual > 0 {
@@ -163,6 +169,10 @@ case "$out" in
         esac
         mkdir -p "$(dirname "$out")"
         echo "fake media data payload for $out" > "$out"
+        case "$out" in
+%s          *)
+            ;;
+        esac
         echo "enc END $(date +%%s%%N) $*" >> %q
         ;;
       *)
@@ -173,7 +183,7 @@ case "$out" in
     ;;
 esac
 exit 0
-`, logFile, tsFile, metCases.String(), tsFile, encFail, tsFile, encCases.String(), tsFile)
+`, logFile, tsFile, metCases.String(), tsFile, encFail, tsFile, encCases.String(), padCases.String(), tsFile)
 
 	if err := os.WriteFile(mockFFmpeg, []byte(ffmpegScript), 0755); err != nil {
 		t.Fatalf("writing mock ffmpeg: %v", err)
@@ -862,17 +872,16 @@ func TestResolvePipelineConcurrency(t *testing.T) {
 }
 
 func TestPipeline_SavingsGateStopsMetricsWhenEveryCandidateIsTooLarge(t *testing.T) {
+	var baseline *transcode.BenchmarkDecision
 	for _, minSavings := range []float64{0, 99.9999} {
 		dir := t.TempDir()
 		sourceFile := filepath.Join(dir, "source.mkv")
 		if err := os.WriteFile(sourceFile, []byte("fake source media"), 0644); err != nil {
 			t.Fatalf("writing source: %v", err)
 		}
-		// Sample 0 metrics are slow, so every encode finishes while the first
-		// metric passes are still running.
 		spec := timedMockSpec{
 			probeJSON: sdr8BitProbeJSON,
-			metSleep:  map[int]float64{0: 0.7},
+			metSleep:  map[int]float64{0: 0.3},
 			vmafScore: map[int]float64{0: 96.5, 1: 96.5},
 		}
 		mockFFmpeg, mockProbe, logFile := setupTimedMockTools(t, dir, spec)
@@ -891,24 +900,192 @@ func TestPipeline_SavingsGateStopsMetricsWhenEveryCandidateIsTooLarge(t *testing
 			Attempt:    1,
 		}
 		runPipelineBenchmarkForTest(t, record, mockFFmpeg, mockProbe, dir)
-		mets := filterIntervals(parseTSIntervals(t, timedTSFile(logFile)), "met")
+		intervals := parseTSIntervals(t, timedTSFile(logFile))
+		encs, mets := filterIntervals(intervals, "enc"), filterIntervals(intervals, "met")
 		dec := record.Evidence.Decision
+		assertProgressResolved(t, record)
 		if minSavings == 0 {
-			if len(mets) != 6 || dec == nil || dec.Winner == nil {
-				t.Fatalf("without a savings minimum every unit is measured: metrics=%d decision=%+v", len(mets), dec)
+			if len(encs) != 6 || len(mets) != 6 || dec == nil || dec.Winner == nil {
+				t.Fatalf("without a savings minimum every unit is measured: encodes=%d metrics=%d decision=%+v", len(encs), len(mets), dec)
+			}
+			baseline = dec
+			continue
+		}
+		// Only the most-compressed setting (lowest -q:v) is encoded, and no
+		// metric runs because the only family is already below the minimum.
+		if len(encs) != 2 || len(mets) != 0 {
+			t.Fatalf("savings gate ran encodes=%d metrics=%d, want 2 and 0", len(encs), len(mets))
+		}
+		for _, cs := range record.Evidence.CandidateSamples {
+			if cs.CandidateID != "cand_q60" {
+				t.Fatalf("dominated candidate encoded: %+v", cs)
+			}
+		}
+		if dec == nil || dec.Winner != nil || dec.DecisionReason != "all_candidates_insufficient_savings" || baseline.Winner == nil {
+			t.Fatalf("decision = %+v", dec)
+		}
+		if len(dec.Evaluations) != 3 {
+			t.Fatalf("evaluations = %+v", dec.Evaluations)
+		}
+		for i, ev := range dec.Evaluations {
+			if ev.CandidateIndex != i || ev.Eligible {
+				t.Fatalf("evaluation %d out of order or eligible: %+v", i, ev)
+			}
+			if ev.CandidateID == "cand_q60" {
+				if ev.EvaluationReason != "insufficient_savings" || ev.SavingsPercent >= minSavings || ev.EstimatedBytes <= 0 {
+					t.Fatalf("leader not explained by size: %+v", ev)
+				}
+				continue
+			}
+			if ev.EvaluationReason != savingsDominatedReason || len(ev.Uncertainties) != 1 || ev.Uncertainties[0] != "not measured: cand_q60 is below minimum savings" {
+				t.Fatalf("follower not explained as dominated: %+v", ev)
+			}
+		}
+		if len(record.Evidence.CandidateMetrics) != 1 || record.Evidence.CandidateMetrics[0].CandidateID != "cand_q60" {
+			t.Fatalf("aggregates for unencoded candidates: %+v", record.Evidence.CandidateMetrics)
+		}
+	}
+}
+
+// One family is already below the minimum after its leader's encode; the
+// other is not. The doomed family's other setting is never encoded, its
+// leader is never measured, and the winner matches a run without pruning.
+func TestPipeline_SavingsGatePrunesOnlyDoomedFamilies(t *testing.T) {
+	yes := true
+	winners := map[float64]string{}
+	for _, minSavings := range []float64{0, 90} {
+		dir := t.TempDir()
+		sourceFile := filepath.Join(dir, "source.mkv")
+		if err := os.WriteFile(sourceFile, make([]byte, 1_000_000), 0644); err != nil {
+			t.Fatalf("writing source: %v", err)
+		}
+		spec := timedMockSpec{
+			probeJSON: sdr8BitProbeJSON,
+			vmafScore: map[int]float64{0: 96.5, 1: 96.5},
+			encPad:    map[string]int{"_lean": 1000, "_fat": 40000},
+		}
+		mockFFmpeg, mockProbe, logFile := setupTimedMockTools(t, dir, spec)
+		record := &BenchmarkRecord{
+			ProtocolVersion:   transcode.WorkerProtocolVersion,
+			ID:                "bench-pipe-savings-families",
+			Status:            "running",
+			Source:            sourceFile,
+			Metric:            "vmaf",
+			MinSavingsPercent: minSavings,
+			Samples: []transcode.BenchmarkSampleWindow{
+				{Index: 0, StartSeconds: 5.0, DurationSeconds: 5.0},
+				{Index: 1, StartSeconds: 20.0, DurationSeconds: 5.0},
+			},
+			Candidates: []transcode.BenchmarkCandidate{
+				{ID: "lean60", Quality: 60}, {ID: "lean55", Quality: 55},
+				{ID: "fat60", Quality: 60, SpatialAQ: &yes}, {ID: "fat55", Quality: 55, SpatialAQ: &yes},
+			},
+			Attempt: 1,
+		}
+		runPipelineBenchmarkForTest(t, record, mockFFmpeg, mockProbe, dir)
+		intervals := parseTSIntervals(t, timedTSFile(logFile))
+		encs, mets := filterIntervals(intervals, "enc"), filterIntervals(intervals, "met")
+		dec := record.Evidence.Decision
+		assertProgressResolved(t, record)
+		if dec == nil || dec.Winner == nil {
+			t.Fatalf("decision = %+v", dec)
+		}
+		winners[minSavings] = dec.Winner.CandidateID
+		if minSavings == 0 {
+			if len(encs) != 8 || len(mets) != 8 {
+				t.Fatalf("without a savings minimum: encodes=%d metrics=%d, want 8 and 8", len(encs), len(mets))
 			}
 			continue
 		}
-		if len(mets) >= 6 {
-			t.Fatalf("savings gate measured every unit (%d metric passes)", len(mets))
+		if len(encs) != 6 || len(mets) != 4 {
+			t.Fatalf("encodes=%d metrics=%d, want 6 (fat60 never encoded) and 4 (only the lean family)", len(encs), len(mets))
 		}
-		if dec == nil || dec.Winner != nil || dec.DecisionReason != "all_candidates_insufficient_savings" {
-			t.Fatalf("decision = %+v", dec)
-		}
-		for _, ev := range dec.Evaluations {
-			if ev.Eligible || ev.EvaluationReason != "insufficient_savings" || ev.SavingsPercent >= minSavings {
-				t.Fatalf("evaluation not explained by size: %+v", ev)
+		for _, cs := range record.Evidence.CandidateSamples {
+			if cs.CandidateID == "fat60" {
+				t.Fatalf("dominated candidate encoded: %+v", cs)
 			}
 		}
+		for _, ms := range record.Evidence.MetricSamples {
+			if strings.HasPrefix(ms.CandidateID, "fat") && ms.Error != savingsGateReason {
+				t.Fatalf("doomed family measured: %+v", ms)
+			}
+		}
+		reasons := map[string]string{}
+		for _, ev := range dec.Evaluations {
+			reasons[ev.CandidateID] = ev.EvaluationReason
+		}
+		if reasons["fat55"] != "insufficient_savings" || reasons["fat60"] != savingsDominatedReason || len(dec.Evaluations) != 4 {
+			t.Fatalf("evaluations = %+v", dec.Evaluations)
+		}
+	}
+	if winners[0] != winners[90] || !strings.HasPrefix(winners[90], "lean") {
+		t.Fatalf("winners = %v, want the same lean candidate", winners)
+	}
+}
+
+func assertProgressResolved(t *testing.T, record *BenchmarkRecord) {
+	t.Helper()
+	if d := record.ProgressDetails; d == nil || d.CompletedUnits != d.TotalUnits {
+		t.Fatalf("progress units not fully resolved: %+v", d)
+	}
+}
+
+func TestSavingsLeadersPickMostCompressedSetting(t *testing.T) {
+	vc := func(id, codec string, q, kbps int) validatedCandidate {
+		return validatedCandidate{candidate: transcode.BenchmarkCandidate{ID: id, VideoCodec: codec, Quality: q, AverageBitrateKbps: kbps}}
+	}
+	vcs := []validatedCandidate{
+		vc("vt70", "", 70, 0), vc("x22", "libx265", 22, 0), vc("vt55", "", 55, 0),
+		vc("x28", "libx265", 28, 0), vc("abr", "", 0, 4000), vc("vt60", "", 60, 0),
+	}
+	got := savingsLeaders(vcs)
+	want := []int{2, 3, 2, 3, 4, 2}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("savingsLeaders = %v, want %v", got, want)
+		}
+	}
+}
+
+// A failed encode or an unusable estimate never dooms a family.
+func TestDecideSavingsFamiliesFailsOpen(t *testing.T) {
+	samples := []transcode.BenchmarkSampleWindow{{Index: 0, DurationSeconds: 5}, {Index: 1, DurationSeconds: 5}}
+	base := optimization.OutputEstimateInput{SourceSizeBytes: 1_000_000, TotalDurationSeconds: 120, SampleDurationSeconds: 10}
+	encoded := func(sizes ...int64) []pipelineEncodeOutcome {
+		out := make([]pipelineEncodeOutcome, len(sizes))
+		for i, size := range sizes {
+			out[i].entry = BenchmarkCandidateSampleResult{CandidateID: "c", SizeBytes: size}
+		}
+		return out
+	}
+	cases := []struct {
+		name       string
+		base       optimization.OutputEstimateInput
+		out        []pipelineEncodeOutcome
+		wantDoomed bool
+	}{
+		{"below minimum", base, encoded(40000, 40000), true},
+		{"above minimum", base, encoded(1000, 1000), false},
+		{"failed encode", base, append(encoded(40000), pipelineEncodeOutcome{err: errors.New("boom"), entry: BenchmarkCandidateSampleResult{Error: "boom"}}), false},
+		{"missing size", base, encoded(40000, 0), false},
+		{"unusable estimate", optimization.OutputEstimateInput{SourceSizeBytes: 1_000_000}, encoded(40000, 40000), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			vcs := []validatedCandidate{{candidate: transcode.BenchmarkCandidate{ID: "q50", Quality: 50}}, {candidate: transcode.BenchmarkCandidate{ID: "q60", Quality: 60}}}
+			g := &savingsGate{base: tc.base, minSavings: 90, leaderOf: savingsLeaders(vcs)}
+			sh := &pipelineShared{record: &BenchmarkRecord{Samples: samples}, vcs: vcs, savings: g,
+				poisons:   []*candidatePoison{{}, {}},
+				encodeOut: append(tc.out, encoded(1, 1)...)}
+			sh.decideSavingsFamilies()
+			_, dominated := g.dominatedBy(1)
+			poisoned, _ := sh.poisons[0].isFailed()
+			if g.doomed != tc.wantDoomed || dominated != tc.wantDoomed || poisoned != tc.wantDoomed {
+				t.Fatalf("doomed=%v dominated=%v poisoned=%v, want %v", g.doomed, dominated, poisoned, tc.wantDoomed)
+			}
+			if len(g.selectable(vcs)) != map[bool]int{true: 1, false: 2}[tc.wantDoomed] {
+				t.Fatalf("selectable = %+v", g.selectable(vcs))
+			}
+		})
 	}
 }

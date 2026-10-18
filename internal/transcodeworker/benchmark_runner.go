@@ -526,7 +526,7 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 	// 5+6. Candidate encode and metric evaluation: adaptive probing with
 	// exhaustive fallback, bounded pipelined execution for real runs, or the
 	// legacy sequential path for test-hook injection.
-	sizeDoomed := false
+	var savings *savingsGate
 	if record.Automatic && r.metricsHook == nil && r.selectionHook == nil {
 		if err := r.runAutomaticCandidates(ctx, w, record, evidence, samplesDir, validatedCandidates, rep, sourceInitialSize, sourceInitialModTime, progressReporter); err != nil {
 			return err
@@ -539,7 +539,6 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		// Exhaustive real path: bounded concurrent encode->metric pipeline across
 		// all candidates. Evidence is assembled deterministically in
 		// (candidate, sample) order, so completion order never affects results.
-		var savings *savingsGate
 		if record.MinSavingsPercent > 0 && r.selectionHook == nil {
 			if base, err := benchmarkEstimateBase(record, evidence, rep, sourceInitialSize); err == nil {
 				savings = &savingsGate{base: base, minSavings: record.MinSavingsPercent}
@@ -548,7 +547,6 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		if err := r.runPipelinedEncodeMetrics(ctx, w, record, evidence, samplesDir, validatedCandidates, sourceInitialSize, sourceInitialModTime, progressReporter, savings); err != nil {
 			return err
 		}
-		sizeDoomed = savings != nil && savings.doomed.Load()
 	} else {
 		// 5. Encode candidate samples sequentially (legacy path for test-hook injection)
 		for _, vc := range validatedCandidates {
@@ -666,12 +664,10 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 			return fmt.Errorf("candidate selection failed: %w", err)
 		}
 	} else if !record.Automatic || r.metricsHook != nil {
-		if err := r.runSelection(ctx, record, evidence, validatedCandidates, rep, sourceInitialSize); err != nil {
+		if err := r.runSelection(ctx, record, evidence, savings.selectable(validatedCandidates), rep, sourceInitialSize); err != nil {
 			return fmt.Errorf("candidate selection failed: %w", err)
 		}
-		if sizeDoomed {
-			markInsufficientSavings(evidence.Decision)
-		}
+		savings.explain(evidence.Decision, validatedCandidates)
 	}
 	progressReporter.SetPhase("selecting_candidate")
 
@@ -1751,7 +1747,7 @@ func benchmarkEstimateBase(record *BenchmarkRecord, evidence *BenchmarkExecution
 }
 
 // markInsufficientSavings explains a run stopped by the savings gate: every
-// candidate's encoded size already failed the caller's minimum savings, using
+// family's most-compressed encode already failed the caller's minimum savings, using
 // the same estimate the caller's guardrail applies, so none can be accepted.
 func markInsufficientSavings(d *transcode.BenchmarkDecision) {
 	if d == nil {
