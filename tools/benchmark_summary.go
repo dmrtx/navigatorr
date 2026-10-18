@@ -199,6 +199,9 @@ func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
 				if ev.EvaluationReason == "skipped_quality_dominated" {
 					reason = dominatedText(ev.Uncertainties)
 				}
+				if ev.EvaluationReason == "skipped_savings_dominated" {
+					reason = savingsDominatedText(ev.Uncertainties)
+				}
 				r.Checks = []benchmarkCheck{{Code: ev.EvaluationReason, Reason: reason}}
 			}
 			s.Rejected = append(s.Rejected, r)
@@ -239,6 +242,8 @@ func benchmarkFailureText(code string) string {
 		return "Sampled video did not meet the configured minimum quality."
 	case "skipped_quality_dominated":
 		return dominatedText(nil)
+	case "skipped_savings_dominated":
+		return savingsDominatedText(nil)
 	case "insufficient_savings":
 		return "The estimated file does not reach the minimum savings compared with the original, so it cannot be selected whatever its quality."
 	case "insufficient_savings_before_metrics":
@@ -261,4 +266,17 @@ func dominatedText(uncertainties []string) string {
 		}
 	}
 	return "Not encoded: a higher-quality setting of the same encoder already failed quality, so this setting cannot pass."
+}
+
+// savingsDominatedText explains a candidate the savings precheck never
+// encoded, naming the more-compressed leader that already missed the minimum.
+func savingsDominatedText(uncertainties []string) string {
+	for _, u := range uncertainties {
+		if leader, ok := strings.CutPrefix(u, "not measured: "); ok {
+			if leader, ok = strings.CutSuffix(leader, " is below minimum savings"); ok && leader != "" {
+				return "Not encoded: " + leader + " is a smaller setting of the same encoder and is already estimated below the minimum savings, so this setting cannot save enough."
+			}
+		}
+	}
+	return "Not encoded: a smaller setting of the same encoder is already estimated below the minimum savings, so this setting cannot save enough."
 }
