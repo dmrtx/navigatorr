@@ -117,6 +117,7 @@ function actionIcon(label) {
     "Delete custom profile":
       "M3 6h18M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7",
     Folder: "M3 6h7l2 2h9v12H3Z",
+    "More actions": "M5 11a1 1 0 1 1 0 2 1 1 0 0 1 0-2ZM12 11a1 1 0 1 1 0 2 1 1 0 0 1 0-2ZM19 11a1 1 0 1 1 0 2 1 1 0 0 1 0-2Z",
     // Fallback for job actions without their own icon (new server decisions).
     Action: "M5 12h14M13 6l6 6-6 6",
   };
@@ -3189,25 +3190,87 @@ function queuePresentation(job) {
       ["running", "waiting_external"].includes(job.status),
   };
 }
+// The next step a card offers, most important first. Only one is labelled.
+const mainQueueActions = ["Replace file", "Review replacements", "Review replacement", "Review candidates", "Review candidate", "Review", "Resume batch", "Start batch", "Set up benchmark", "Retry"];
+const visibleQueueIcons = 3;
 function compactQueueActions(actions) {
-  // Every queue action shows its icon and a short label. Fill sets the
-  // hierarchy: primary decisions are filled, labelled icon actions tinted, and
-  // the remaining decisions outlined. The full label stays in aria-label/title.
-  const primary = ["Set up benchmark", "Review candidates", "Review candidate", "Review replacement", "Review replacements", "Replace file", "Start batch", "Try another profile", "Resume batch", "Review"];
-  const secondary = ["Review preview", "View batch", "View preview", "View replacement", "Archive", "Restore", "Reconfigure", "Change settings", "Change goal"];
-  const short = {"Pause batch":"Pause","Replace file":"Replace","Set up benchmark":"Set up","Review candidates":"Review","Review candidate":"Review","Review replacement":"Review","Review replacements":"Review","Stop batch · keep originals":"Stop batch"};
-  for (const b of actions.children) {
-    const label = b.textContent.trim();
-    const icon = b.querySelector?.("svg");
-    if (icon) b.replaceChildren(icon, node("span", short[label] || label));
+  // A card shows at most one labelled main action, then square icon buttons
+  // whose full name lives in aria-label and title. Past three icons the rest
+  // move, as the same elements with their handlers and state, into a More
+  // actions menu that lists them with icon and label.
+  const short = {"Replace file":"Replace","Set up benchmark":"Set up","Review candidates":"Review","Review candidate":"Review","Review replacement":"Review","Review replacements":"Review","Resume batch":"Resume","Start batch":"Start"};
+  const buttons = [...actions.children];
+  const labelOf = (b) => b.textContent.trim();
+  const main = mainQueueActions.map((label) => buttons.find((b) => labelOf(b) === label)).find(Boolean);
+  const icons = [];
+  for (const b of buttons) {
+    const label = labelOf(b);
+    const icon = b.querySelector?.("svg") || null;
     b.setAttribute("aria-label", label);
     b.title ||= label;
-    // Stopping work is never an unlabeled icon: × reads as "dismiss this row".
-    if (["Cancel", "Pause batch"].includes(label)) b.className += " queue-secondary dismissive";
-    else if (label === "Retry") b.className += " queue-secondary recovery";
-    else if (secondary.includes(label)) b.className += " queue-secondary";
-    else if (primary.includes(label)) b.className += " primary queue-primary";
+    if (b === main) {
+      b.replaceChildren(...[icon, node("span", short[label] || label, "action-label")].filter(Boolean));
+      b.className = "action-main primary";
+      continue;
+    }
+    // The label stays in the DOM for the More menu; the row shows the icon.
+    b.replaceChildren(...[icon, node("span", label, "action-label")].filter(Boolean));
+    b.className = ["Cancel", "Stop batch · keep originals"].includes(label) ? "action-icon danger" : "action-icon";
+    icons.push(b);
   }
+  const overflow = icons.slice(visibleQueueIcons);
+  const rail = [main, ...icons.slice(0, visibleQueueIcons)].filter(Boolean);
+  if (overflow.length) {
+    const more = node("details", "", "more-actions");
+    more.dataset.menuFor = buttons[0]?.dataset.jobControl || "";
+    const toggle = node("summary", "", "action-icon more-toggle");
+    toggle.setAttribute("aria-label", "More actions");
+    toggle.title = "More actions";
+    const dots = actionIcon("More actions");
+    if (dots) toggle.append(dots);
+    const menu = node("div", "", "more-menu");
+    menu.append(...overflow);
+    more.append(toggle, menu);
+    // Capture runs before the item's own handler: the menu closes and focus
+    // returns to its toggle, so a confirmation dialog hands focus back there.
+    more.addEventListener("click", (e) => {
+      if (!e.target?.closest?.(".more-menu button")) return;
+      more.open = false;
+      toggle.focus?.({ preventScroll: true });
+    }, true);
+    more.addEventListener("focusout", (e) => {
+      if (e.relatedTarget && !more.contains(e.relatedTarget)) more.open = false;
+    });
+    rail.push(more);
+  }
+  actions.replaceChildren(...rail);
+}
+// More actions menus close on Escape and on a press anywhere outside them.
+function closeActionMenus(except) {
+  for (const menu of document.querySelectorAll(".more-actions[open]"))
+    if (!except || !menu.contains(except)) menu.open = false;
+}
+if (typeof document.addEventListener === "function") {
+  document.addEventListener("pointerdown", (e) => closeActionMenus(e.target));
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    const menu = document.activeElement?.closest?.(".more-actions[open]");
+    closeActionMenus();
+    if (menu) menu.querySelector("summary")?.focus();
+  });
+}
+// The queue redraws every few seconds; keep an open menu and a focused toggle.
+function openActionMenu(container) {
+  const menu = container.querySelector?.(".more-actions[open]");
+  if (!menu) return null;
+  return { id: menu.dataset.menuFor, toggle: menu.querySelector("summary") === document.activeElement };
+}
+function restoreActionMenu(container, saved) {
+  if (!saved?.id) return;
+  const menu = [...container.querySelectorAll(".more-actions")].find((m) => m.dataset.menuFor === saved.id);
+  if (!menu) return;
+  menu.open = true;
+  if (saved.toggle) menu.querySelector("summary")?.focus({ preventScroll: true });
 }
 const benchmarkOutcomes = {
   selected: "Settings found",
@@ -3430,6 +3493,7 @@ async function loadJobs(more = false) {
     state.jobsLoaded = offset + page.length;
     state.jobsHasMore = data.has_more;
     const focus = focusedControl($("jobs-list"));
+    const menu = openActionMenu($("jobs-list"));
     $("jobs-list").replaceChildren();
     for (const job of state.operationJobs.values()) {
       const row = node("article", "", "job-row"),
@@ -3491,6 +3555,7 @@ async function loadJobs(more = false) {
     if (!state.operationJobs.size)
       $("jobs-list").append(node("p", "No jobs for this filter.", "empty"));
     renderCommandIndicators();
+    restoreActionMenu($("jobs-list"), menu);
     restoreControl($("jobs-list"), focus);
 
     $("jobs-more").hidden = !data.has_more;

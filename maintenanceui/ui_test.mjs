@@ -2648,6 +2648,69 @@ test("polling restores the same file control when multiple rows have identical a
 
 const allText = (el) => [el.textContent, ...(el.children || []).map(allText)].join(" ");
 
+function queueRail(labels) {
+  const h = harness();
+  h.document.createElement = () => {
+    const e = new Element();
+    e.attrs = {};
+    e.setAttribute = (key, value) => (e.attrs[key] = value);
+    return e;
+  };
+  h.context.labels = labels;
+  const rail = h.run(`(() => {
+    const rail = node("div", "", "job-actions");
+    for (const label of labels) {
+      const b = button(label, () => {});
+      b.dataset.jobControl = "job-1";
+      rail.append(b);
+    }
+    compactQueueActions(rail);
+    return rail;
+  })()`);
+  return { h, rail };
+}
+
+test("a queue card labels at most one main action, the most important, first", () => {
+  const { rail } = queueRail(["Keep original", "Retry", "Review candidate", "Change goal"]);
+  const mains = rail.children.filter((b) => /\baction-main\b/.test(b.className));
+  assert.equal(mains.length, 1);
+  assert.equal(mains[0].attrs["aria-label"], "Review candidate");
+  assert.equal(rail.children[0], mains[0]);
+  assert.equal(rail.children.filter((b) => /\baction-icon\b/.test(b.className)).length, 3);
+  const none = queueRail(["Archive", "Compare frames"]).rail;
+  assert.equal(none.children.some((b) => /\baction-main\b/.test(b.className)), false);
+});
+
+test("icon-only queue actions keep their full name in aria-label and title", () => {
+  const { rail } = queueRail(["Resume batch", "Stop batch · keep originals", "Change settings"]);
+  const icons = rail.children.filter((b) => /\baction-icon\b/.test(b.className));
+  assert.deepEqual(icons.map((b) => b.attrs["aria-label"]), ["Stop batch · keep originals", "Change settings"]);
+  assert.deepEqual(icons.map((b) => b.title), ["Stop batch · keep originals", "Change settings"]);
+  assert.match(icons[0].className, /\bdanger\b/);
+  // The row hides the label; it is kept for the More menu, never as a second main action.
+  assert.deepEqual(icons.map((b) => b.children.at(-1).className), ["action-label", "action-label"]);
+  assert.equal(rail.children[0].attrs["aria-label"], "Resume batch");
+});
+
+test("past three icon actions the rest go into a More actions menu with the same buttons", () => {
+  const { rail } = queueRail(["Review candidate", "Run one more test", "Keep original", "Change goal", "Archive", "View batch"]);
+  assert.equal(rail.children.length, 5);
+  const more = rail.children.at(-1);
+  assert.equal(more.className, "more-actions");
+  assert.equal(more.dataset.menuFor, "job-1");
+  const [toggle, menu] = more.children;
+  assert.equal(toggle.attrs["aria-label"], "More actions");
+  assert.equal(toggle.title, "More actions");
+  assert.deepEqual(menu.children.map((b) => b.attrs["aria-label"]), ["Archive", "View batch"]);
+  // The same elements move, so their handlers and job-control state come along.
+  assert.ok(menu.children.every((b) => b.listeners.has("click") && b.dataset.jobControl === "job-1"));
+  more.open = true;
+  more.listeners.get("click")({ target: { closest: () => menu.children[0] } });
+  assert.equal(more.open, false);
+  const three = queueRail(["Review", "Change goal", "Archive", "View batch"]).rail;
+  assert.equal(three.children.some((c) => c.className === "more-actions"), false);
+});
+
 test("sample test results explain each rejected setting with its measurement and next step", () => {
   const h = harness();
   h.context.job = {id:"j",action_name:"transcode_media",mode:"quality",status:"completed",reason_code:"no_suitable_candidate",candidate_ready:false,source_path:"/media/Demo Film A.mkv",
