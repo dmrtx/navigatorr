@@ -2709,6 +2709,92 @@ test("with five or more icon actions, three show and the rest go into a More act
   assert.equal(more.open, false);
 });
 
+function moreMenu(id, open) {
+  const toggle = new Element();
+  const menu = new Element();
+  menu.dataset = { menuFor: id };
+  menu.open = open;
+  menu.querySelector = () => toggle;
+  toggle.closest = () => menu;
+  return { menu, toggle };
+}
+function menuList(menus, open) {
+  const list = new Element();
+  list.querySelector = () => open || null;
+  list.querySelectorAll = () => menus;
+  list.contains = (el) => menus.includes(el);
+  return list;
+}
+
+test("a refresh keeps focus on a closed More toggle and leaves its menu closed", () => {
+  const h = harness();
+  const before = moreMenu("job-1", false), after = moreMenu("job-1", true);
+  let focused = false;
+  after.toggle.focus = () => (focused = true);
+  h.document.activeElement = before.toggle;
+  h.context.oldList = menuList([before.menu]);
+  h.context.newList = menuList([after.menu]);
+  h.run("restoreActionMenu(newList, openActionMenu(oldList))");
+  assert.equal(focused, true);
+  assert.equal(after.menu.open, false);
+});
+
+test("a refresh reopens an open More menu and keeps focus on its item", () => {
+  const h = harness();
+  const before = moreMenu("job-1", true), after = moreMenu("job-1", false);
+  let toggleFocused = false;
+  after.toggle.focus = () => (toggleFocused = true);
+  const item = new Element();
+  item.closest = () => before.menu;
+  item.getAttribute = () => "View batch";
+  // View batch has no data-job-control, so the menu restores it by name.
+  let itemFocused = null;
+  const items = ["Change goal", "View batch"].map((name) => {
+    const b = new Element();
+    b.getAttribute = () => name;
+    b.focus = () => (itemFocused = name);
+    return b;
+  });
+  after.menu.querySelectorAll = () => items;
+  h.document.activeElement = item;
+  h.context.oldList = menuList([before.menu], before.menu);
+  h.context.newList = menuList([after.menu]);
+  h.run("restoreActionMenu(newList, openActionMenu(oldList))");
+  assert.equal(after.menu.open, true);
+  assert.equal(itemFocused, "View batch");
+  assert.equal(toggleFocused, false);
+  // A focus outside every menu records nothing.
+  h.document.activeElement = new Element();
+  h.document.activeElement.closest = () => null;
+  assert.equal(h.run("openActionMenu(newList)"), null);
+});
+
+test("Escape closes open More menus and returns focus to the toggle it was in", () => {
+  const h = harness();
+  const { menu, toggle } = moreMenu("job-1", true);
+  const other = moreMenu("job-2", true);
+  let focused = false;
+  toggle.focus = () => (focused = true);
+  const item = new Element();
+  item.closest = () => menu;
+  h.document.activeElement = item;
+  h.document.querySelectorAll = () => [menu, other.menu];
+  h.run('actionMenuKeydown({ key: "Tab" })');
+  assert.equal(menu.open, true);
+  h.run('actionMenuKeydown({ key: "Escape" })');
+  assert.equal(menu.open, false);
+  assert.equal(other.menu.open, false);
+  assert.equal(focused, true);
+});
+
+test("a podcast review card labels Review cuts instead of leaving it an icon", () => {
+  const cuts = queueRail(["Ad library", "Review cuts", "Revise labels", "Archive"]).rail;
+  assert.equal(cuts.children[0].attrs["aria-label"], "Review cuts");
+  assert.match(cuts.children[0].className, /\baction-main\b/);
+  const classify = queueRail(["Ad library", "View transcript", "Validate classifications"]).rail;
+  assert.equal(classify.children[0].attrs["aria-label"], "Validate classifications");
+});
+
 test("four icon actions all show; a More menu never holds a single item", () => {
   const four = queueRail(["Review", "Run one more test", "Keep original", "Change goal", "View batch"]).rail;
   assert.equal(four.children.some((c) => c.className === "more-actions"), false);

@@ -107,9 +107,11 @@ function actionIcon(label) {
     "Validate classifications": "M5 12l5 5 9-10",
     Archive: "M4 4h16v4H4ZM6 8v12h12V8M10 12h4",
     Restore: "M12 19V9M8 13l4-4 4 4M4 4h16v4H4Z",
-    "View replacement": "M5 4h14v16H5ZM8 8h8M8 12h8",
-    "View batch": "M8 5h12v15H8ZM4 16V2h12",
-    "View preview": "M5 4h14v16H5ZM8 8h8M8 12h8",
+    // Opening another job reads as "look", not "review": an eye, a play frame
+    // and stacked layers keep them apart from Review and Set up benchmark.
+    "View replacement": "M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12ZM12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z",
+    "View batch": "M12 3l9 5-9 5-9-5ZM3 13l9 5 9-5",
+    "View preview": "M4 5h16v14H4ZM10 9l5 3-5 3Z",
     "Accept quality loss": "M12 3 2 21h20ZM12 9v5M12 17v1",
     "Pause batch": "M8 4v16M16 4v16",
     "Resume batch": "M7 4l13 8-13 8Z",
@@ -3191,7 +3193,7 @@ function queuePresentation(job) {
   };
 }
 // The next step a card offers, most important first. Only one is labelled.
-const mainQueueActions = ["Replace file", "Review replacements", "Review replacement", "Review candidates", "Review candidate", "Review", "Resume batch", "Start batch", "Set up benchmark", "Retry"];
+const mainQueueActions = ["Replace file", "Review replacements", "Review replacement", "Review candidates", "Review candidate", "Review cuts", "Validate classifications", "Review", "Resume batch", "Start batch", "Set up benchmark", "Retry", "Check worker again", "Check library again", "Review preview", "Try another profile"];
 const visibleQueueIcons = 3;
 function compactQueueActions(actions) {
   // A card shows at most one labelled main action, then square icon buttons
@@ -3199,7 +3201,7 @@ function compactQueueActions(actions) {
   // five or more, three stay and the rest move, as the same elements with
   // their handlers and state, into a More actions menu that lists them with
   // icon and label.
-  const short = {"Replace file":"Replace","Set up benchmark":"Set up","Review candidates":"Review","Review candidate":"Review","Review replacement":"Review","Review replacements":"Review","Resume batch":"Resume","Start batch":"Start"};
+  const short = {"Replace file":"Replace","Set up benchmark":"Set up","Review candidates":"Review","Review candidate":"Review","Review replacement":"Review","Review replacements":"Review","Review preview":"Review","Validate classifications":"Validate","Check worker again":"Check again","Check library again":"Check again","Resume batch":"Resume","Start batch":"Start","Try another profile":"Try another"};
   const buttons = [...actions.children];
   const labelOf = (b) => b.textContent.trim();
   const main = mainQueueActions.map((label) => buttons.find((b) => labelOf(b) === label)).find(Boolean);
@@ -3253,27 +3255,36 @@ function closeActionMenus(except) {
   for (const menu of document.querySelectorAll(".more-actions[open]"))
     if (!except || !menu.contains(except)) menu.open = false;
 }
+function actionMenuKeydown(e) {
+  if (e.key !== "Escape") return;
+  const menu = document.activeElement?.closest?.(".more-actions[open]");
+  closeActionMenus();
+  if (menu) menu.querySelector("summary")?.focus();
+}
 if (typeof document.addEventListener === "function") {
   document.addEventListener("pointerdown", (e) => closeActionMenus(e.target));
-  document.addEventListener("keydown", (e) => {
-    if (e.key !== "Escape") return;
-    const menu = document.activeElement?.closest?.(".more-actions[open]");
-    closeActionMenus();
-    if (menu) menu.querySelector("summary")?.focus();
-  });
+  document.addEventListener("keydown", actionMenuKeydown);
 }
-// The queue redraws every few seconds; keep an open menu and a focused toggle.
+// The queue redraws every few seconds. Keep an open menu open, and keep focus
+// on a More toggle whether its menu is open or closed, or on a menu item: the
+// toggle and some items (View batch) carry no data-job-control, so
+// restoreControl cannot find them.
 function openActionMenu(container) {
-  const menu = container.querySelector?.(".more-actions[open]");
-  if (!menu) return null;
-  return { id: menu.dataset.menuFor, toggle: menu.querySelector("summary") === document.activeElement };
+  const active = document.activeElement;
+  const menu = container.querySelector?.(".more-actions[open]") || active?.closest?.(".more-actions");
+  if (!menu || !container.contains(menu)) return null;
+  const toggle = menu.querySelector("summary") === active;
+  const item = !toggle && active?.closest?.(".more-actions") === menu ? active.getAttribute("aria-label") : null;
+  return { id: menu.dataset.menuFor, open: menu.open, toggle, item };
 }
 function restoreActionMenu(container, saved) {
   if (!saved?.id) return;
   const menu = [...container.querySelectorAll(".more-actions")].find((m) => m.dataset.menuFor === saved.id);
   if (!menu) return;
-  menu.open = true;
+  menu.open = saved.open;
   if (saved.toggle) menu.querySelector("summary")?.focus({ preventScroll: true });
+  else if (saved.item && saved.open)
+    [...menu.querySelectorAll(".more-menu button")].find((b) => b.getAttribute("aria-label") === saved.item)?.focus({ preventScroll: true });
 }
 const benchmarkOutcomes = {
   selected: "Settings found",
