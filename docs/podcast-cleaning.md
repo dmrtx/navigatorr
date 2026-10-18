@@ -239,10 +239,10 @@ NAVIGATORR_PODCAST_AUDIO=/absolute/spoken-fixture.mp3 \
 Tests cover coverage/overlap errors, native timing/source binding, durable
 classification across coordinator restart, a lost submit acknowledgement,
 review digests, HTTP workflow execution, real FFmpeg output, unchanged no-ad audio packets with embedded transcripts, worker restart recovery and hook publication identity. The native
-worker smoke test was run separately on the M1 Max with spoken Example Show
+worker smoke test was run separately on the M1 Max with spoken podcast
 audio; the normal suite deliberately skips that opt-in native test.
 
-The earlier full-episode [Example Show benchmark](reviews/2026-10-07-podcast-ads-benchmark.md)
+The earlier full-episode [podcast benchmark](reviews/2026-10-07-podcast-ads-benchmark.md)
 records ASR and Luna low/high findings. Neither test establishes ad detection
 precision/recall or human listening acceptance. Model/reasoning provenance,
 ASR wall time/RTF, coverage, removed duration and output validation are retained;

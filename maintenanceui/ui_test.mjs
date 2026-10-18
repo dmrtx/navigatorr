@@ -408,7 +408,7 @@ test("maintenance actions never use native browser confirmations", () => {
 
 test("candidate review reads only, shows measured sizes and rechecks before approval", async () => {
   const h = harness(), calls = [];
-  h.context.fixture = {id:"candidate",status:"waiting_decision",waiting_reason:"Candidate file size (1910766036 bytes) exceeds original (1599600732 bytes) by 19.5%, which is greater than max_size_increase_percent (0.0%)",waiting_options:[{decision:"accept_loss"}],source_path:"/media/Uzumaki.mkv"};
+  h.context.fixture = {id:"candidate",status:"waiting_decision",waiting_reason:"Candidate file size (1910766036 bytes) exceeds original (1599600732 bytes) by 19.5%, which is greater than max_size_increase_percent (0.0%)",waiting_options:[{decision:"accept_loss"}],source_path:"/media/Spiralis.mkv"};
   h.context.record = (...args) => calls.push(args);
   h.run('api=async()=>({jobs:[fixture]}); jobControl=async(...args)=>record(...args);');
   const review = h.run('reviewJobDecision("candidate","accept_loss")');

@@ -1604,7 +1604,6 @@ EOF
 	_ = os.WriteFile(mockFfprobe, []byte(ffprobeScript), 0755)
 
 	// 3. Mock qBittorrent server with 14 files totaling exactly 6,120,930,408 bytes
-	// (Real production case Star/bright Tale)
 	torHash := "f47e574a9ef41e0123456789abcdef0123456789"
 	const expectedLogicalTotal int64 = 6120930408
 	fileSizes := []int64{

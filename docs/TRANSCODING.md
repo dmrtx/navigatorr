@@ -325,7 +325,7 @@ source_cache_ttl_hours: 72
 
 Ansible: the worker binary does not require config changes (the new keys are
 optional with safe defaults), but the cache settings are explicitly managed by
-the deployment's configuration management
+the deployment's configuration management (for example, an Ansible role)
 rather than left to defaults. To opt out there, set
 `disable_source_cache: true`.
 
