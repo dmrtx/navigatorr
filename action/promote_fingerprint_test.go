@@ -205,10 +205,16 @@ func TestPromotionReadsEachFileFewerTimes(t *testing.T) {
 	if p.RecoveryCopy == nil || p.RecoveryCopy.Method != promotionCopyClone {
 		t.Fatalf("recovery copy method: %+v", p.RecoveryCopy)
 	}
+	// Without a clone, Linux copies in the kernel (no read by this process)
+	// and other platforms stream the copy through it (one more read).
 	streamed, _, p := promotionPasses(t, false)
-	t.Logf("full passes with a streamed copy: original-sized %.0f", streamed)
-	if streamed != original+1 || p.RecoveryCopy.Method != promotionCopyStream && p.RecoveryCopy.Method != promotionCopyKernel {
-		t.Fatalf("streamed copy: %.0f passes, %+v", streamed, p.RecoveryCopy)
+	t.Logf("full passes without a clone: original-sized %.0f, %+v", streamed, p.RecoveryCopy)
+	want := original + 1
+	if p.RecoveryCopy.Method == promotionCopyKernel {
+		want = original
+	}
+	if streamed != want || p.RecoveryCopy.Method != promotionCopyStream && p.RecoveryCopy.Method != promotionCopyKernel {
+		t.Fatalf("copy without a clone: %.0f passes, want %.0f, %+v", streamed, want, p.RecoveryCopy)
 	}
 }
 
