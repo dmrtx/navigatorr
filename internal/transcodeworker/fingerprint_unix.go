@@ -38,3 +38,14 @@ func deviceOf(path string) (uint64, bool) {
 	}
 	return uint64(st.Dev), true
 }
+
+// diskSpace returns the bytes available to this user and the total size of
+// the filesystem holding path.
+func diskSpace(path string) (avail, total uint64, ok bool) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(path, &st); err != nil {
+		return 0, 0, false
+	}
+	bsize := uint64(st.Bsize)
+	return uint64(st.Bavail) * bsize, uint64(st.Blocks) * bsize, true
+}

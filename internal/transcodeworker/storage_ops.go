@@ -574,6 +574,11 @@ func commitNoReplaceWith(ctx context.Context, src, dst string, rename, link func
 			if rep != nil {
 				rep.Method = publishMethodCopy
 				rep.CopyFallback = true
+				// Only a definite "not supported" from both primitives, on a
+				// publication that then succeeded, teaches the share's
+				// capabilities. A transient link failure (EIO, ETIMEDOUT) still
+				// falls back for this publication but is never remembered.
+				rep.AtomicUnsupported = cerr == nil && linkDefinitelyUnsupported(lerr)
 				if size, ok := fileSize(copySrc); ok {
 					rep.WrittenBytes += size
 					if copySrc == src {
@@ -592,7 +597,12 @@ func commitNoReplaceWith(ctx context.Context, src, dst string, rename, link func
 				if errors.Is(cerr, ErrAmbiguousPublication) {
 					return cerr
 				}
-				return fmt.Errorf("%w: publishing %s to %s: %v", ErrStorageIO, src, dst, cerr)
+				// A candidate that no longer matches its accepted digest is a
+				// source problem, not a retryable storage error.
+				if errors.Is(cerr, ErrSourceInvalid) {
+					return cerr
+				}
+				return fmt.Errorf("%w: publishing %s to %s: %w", ErrStorageIO, src, dst, cerr)
 			}
 			return nil
 		}
@@ -863,10 +873,10 @@ func finalizeOutputAtomicCaps(ctx context.Context, localCandidate, destination, 
 			return nil
 		case errors.Is(cerr, fs.ErrExist):
 			return fmt.Errorf("%w: %s", ErrDestinationExists, destination)
-		case errors.Is(cerr, ErrAmbiguousPublication):
+		case errors.Is(cerr, ErrAmbiguousPublication), errors.Is(cerr, ErrSourceInvalid):
 			return cerr
 		default:
-			return fmt.Errorf("%w: publishing %s to %s: %v", ErrStorageIO, localCandidate, destination, cerr)
+			return fmt.Errorf("%w: publishing %s to %s: %w", ErrStorageIO, localCandidate, destination, cerr)
 		}
 	}
 
@@ -910,12 +920,9 @@ func finalizeOutputAtomicCaps(ctx context.Context, localCandidate, destination, 
 	// No-clobber commit: fails with ErrDestinationExists if a destination
 	// appeared after the pre-check, preserving its bytes.
 	if err := commit(ctx, partial, destination); err != nil {
-		if rep.CopyFallback {
-			caps.markAtomicUnsupported(dir)
-		}
 		return err
 	}
-	if rep.CopyFallback {
+	if rep.AtomicUnsupported {
 		caps.markAtomicUnsupported(dir)
 	}
 	committed = true

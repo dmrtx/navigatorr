@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -373,7 +374,7 @@ func TestMountedPublishCopyFallbackIsReportedAndLearned(t *testing.T) {
 	dest := filepath.Join(base, "share", "out.mkv")
 	caps := &commitCaps{noAtom: map[uint64]time.Time{}, horizon: time.Hour}
 	fallback := func(ctx context.Context, src, dst string) error {
-		return commitNoReplaceWith(ctx, src, dst, unsupportedRename, unsupportedLink)
+		return commitNoReplaceWith(ctx, src, dst, unsupportedRename, definiteNoLink)
 	}
 
 	rep := &publicationReport{expectSHA: sha256Hex(content)}
@@ -406,8 +407,8 @@ func TestMountedPublishCopyFallbackIsReportedAndLearned(t *testing.T) {
 	// A candidate that no longer matches its accepted digest is withdrawn.
 	dest3 := filepath.Join(base, "share", "out3.mkv")
 	rep3 := &publicationReport{expectSHA: sha256Hex([]byte("accepted something else"))}
-	if err := finalizeOutputAtomicCaps(withPublicationReport(context.Background(), rep3), candidate, dest3, "job-3", nil, fallback, caps); err == nil {
-		t.Fatal("digest mismatch published")
+	if err := finalizeOutputAtomicCaps(withPublicationReport(context.Background(), rep3), candidate, dest3, "job-3", nil, fallback, caps); !errors.Is(err, ErrSourceInvalid) || errors.Is(err, ErrStorageIO) {
+		t.Fatalf("digest mismatch: %v, want ErrSourceInvalid and not a retryable storage error", err)
 	}
 	if exists, _ := pathExists(dest3); exists {
 		t.Fatal("withdrawn publication left its destination")
@@ -494,5 +495,143 @@ func TestSMBFinalizationUsesVerifiedPublishWithAcceptedDigest(t *testing.T) {
 	pub := got.PhaseCosts["publication"]
 	if got.Status != "completed" || pub.NASWrittenBytes == nil || *pub.NASWrittenBytes != int64(len(candidate)) || pub.NASReadBytes == nil || *pub.NASReadBytes != int64(len(candidate)) {
 		t.Fatalf("status=%s publication=%+v", got.Status, pub)
+	}
+}
+
+// Sweeps in tests never see the developer's real disk: a nearly full laptop
+// would otherwise trip the free-space floor. The floor test stubs it itself.
+func init() {
+	diskSpaceFn = func(string) (uint64, uint64, bool) { return 0, 0, false }
+}
+
+func TestDiskSpaceReportsTheVolume(t *testing.T) {
+	avail, total, ok := diskSpace(t.TempDir())
+	if !ok {
+		t.Skip("disk space unavailable on this platform")
+	}
+	if total == 0 || avail > total {
+		t.Fatalf("avail=%d total=%d", avail, total)
+	}
+}
+
+func definiteNoLink(src, dst string) error {
+	return &os.LinkError{Op: "link", Old: src, New: dst, Err: syscall.ENOTSUP}
+}
+
+// A transient link failure still falls back for that one publication but is
+// never remembered, so the next publication tries the atomic primitives again.
+func TestTransientLinkFailureIsNotLearned(t *testing.T) {
+	base := t.TempDir()
+	candidate := filepath.Join(base, "candidate.mkv")
+	content := []byte("encoded bytes")
+	mustWriteFile(t, candidate, content, 0o640)
+	caps := &commitCaps{noAtom: map[uint64]time.Time{}, horizon: time.Hour}
+	for _, tc := range []struct {
+		name  string
+		err   error
+		learn bool
+	}{
+		{"eio", syscall.EIO, false},
+		{"etimedout", syscall.ETIMEDOUT, false},
+		{"opaque", errors.New("operation not supported"), false},
+		{"eperm", syscall.EPERM, true},
+	} {
+		dest := filepath.Join(base, tc.name, "out.mkv")
+		linkErr := tc.err
+		commit := func(ctx context.Context, src, dst string) error {
+			return commitNoReplaceWith(ctx, src, dst, unsupportedRename, func(s, d string) error {
+				return &os.LinkError{Op: "link", Old: s, New: d, Err: linkErr}
+			})
+		}
+		rep := &publicationReport{}
+		if err := finalizeOutputAtomicCaps(withPublicationReport(context.Background(), rep), candidate, dest, "job-1", nil, commit, caps); err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if !rep.CopyFallback || rep.AtomicUnsupported != tc.learn || caps.atomicUnsupported(filepath.Dir(dest)) != tc.learn {
+			t.Fatalf("%s: report=%+v learned=%v, want learn=%v", tc.name, rep, caps.atomicUnsupported(filepath.Dir(dest)), tc.learn)
+		}
+	}
+}
+
+// Fingerprints are never trusted inside an external or direct-SMB root, even
+// when the local work dir was misconfigured to live there.
+func TestDigestMemoRejectsWorkDirOnSharedStorage(t *testing.T) {
+	share := t.TempDir()
+	work := filepath.Join(share, "work")
+	path := filepath.Join(work, "job", "candidate.mkv")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, cfg := range []*WorkerConfig{
+		{StateDir: filepath.Join(t.TempDir(), "state"), LocalWorkDir: work, ExternalRoots: []string{share}},
+		{StateDir: filepath.Join(t.TempDir(), "state"), LocalWorkDir: work, SMBDirect: smbdirect.Config{LocalRoot: share}},
+	} {
+		w := &Worker{cfg: cfg}
+		ctx := w.withJobDigestMemo(context.Background())
+		for i := 0; i < 2; i++ {
+			if _, err := verifiedLocalSHA256(ctx, path); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got := digestMemoFrom(ctx).fullReads(); got != 2 {
+			t.Fatalf("reads=%d, want a full read every time on shared storage", got)
+		}
+	}
+}
+
+// Below the free-space floor the cache gives up even pinned entries.
+func TestSourceCacheDiskFloorOutranksPins(t *testing.T) {
+	dir := t.TempDir()
+	w := NewWorker(pr6b2Config(dir, func(c *WorkerConfig) { c.SourceCacheMaxBytes = 1 << 40 }))
+	cacheDir := w.sourceCacheDir()
+	entry := writeCacheEntry(t, cacheDir, "cccc", 100, 2*time.Hour)
+	if err := os.MkdirAll(sourceCachePinDir(cacheDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceCachePinDir(cacheDir), "cccc."+pinOwnerTag(benchmarkPinOwner)), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	orig := diskSpaceFn
+	t.Cleanup(func() { diskSpaceFn = orig })
+
+	diskSpaceFn = func(string) (uint64, uint64, bool) { return 500, 1000, true } // plenty free
+	_ = w.sweepSourceCache()
+	if _, err := os.Stat(entry); err != nil {
+		t.Fatal("pinned entry evicted with free space to spare", err)
+	}
+
+	diskSpaceFn = func(string) (uint64, uint64, bool) { return 50, 1000, true } // under the 10% floor
+	_ = w.sweepSourceCache()
+	if _, err := os.Stat(entry); !os.IsNotExist(err) {
+		t.Fatal("pinned entry kept while the work disk is below its floor", err)
+	}
+}
+
+type partialRemovingStore struct {
+	fakeDirectStore
+	removed []string
+}
+
+func (s *partialRemovingStore) RemovePartial(_ context.Context, destination, jobID string) error {
+	s.removed = append(s.removed, destination+"|"+jobID)
+	return nil
+}
+
+// A cancelled post-encode job drops its partial on the share; a job that
+// never reached the encode checkpoint costs no share round trip.
+func TestCancelRemovesRemotePartial(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "unmounted-media")
+	store := &partialRemovingStore{fakeDirectStore: fakeDirectStore{root: root}}
+	w := NewWorker(&WorkerConfig{StateDir: filepath.Join(dir, "state"), AllowedRoots: []string{root}, ExternalRoots: []string{root}, LocalWorkDir: filepath.Join(dir, "work")})
+	w.mediaStore = store
+	dest := filepath.Join(root, "Show", "episode.mkv")
+	w.cleanupCancelledArtifacts(&JobRecord{ID: "job-early", Candidate: dest, IntendedDestination: dest})
+	w.cleanupCancelledArtifacts(&JobRecord{ID: "job-late", Candidate: dest, IntendedDestination: dest, EncodeComplete: true, FinalizationState: string(FinalizationStateFinalizing)})
+	if len(store.removed) != 1 || store.removed[0] != dest+"|job-late" {
+		t.Fatalf("removed=%v, want only the post-encode job's partial", store.removed)
 	}
 }

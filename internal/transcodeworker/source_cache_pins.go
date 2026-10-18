@@ -3,9 +3,11 @@ package transcodeworker
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -115,4 +117,32 @@ func effectiveSourceCacheMaxBytes(configured, largest int64) int64 {
 		return floor
 	}
 	return configured
+}
+
+// sourceCacheFreeFraction is the share of the work disk the cache always
+// leaves free.
+const sourceCacheFreeFraction = 10
+
+// sourceCacheDiskBudget reports the free bytes on the cache's filesystem and
+// the floor the cache must leave free (a tenth of the volume).
+func sourceCacheDiskBudget(cacheDir string) (free, reserve int64, ok bool) {
+	avail, total, ok := diskSpaceFn(cacheDir)
+	if !ok || total == 0 {
+		return 0, 0, false
+	}
+	return int64(avail), int64(total / sourceCacheFreeFraction), true
+}
+
+// diskSpaceFn is diskSpace, replaceable by tests.
+var diskSpaceFn = diskSpace
+
+var sourceCacheNotes sync.Map // cacheDir|kind -> last message
+
+// noteSourceCache logs a cache-bound decision once per change, not on every
+// sweep.
+func noteSourceCache(cacheDir, kind, msg string) {
+	if prev, loaded := sourceCacheNotes.Swap(cacheDir+"|"+kind, msg); loaded && prev == msg {
+		return
+	}
+	log.Print(msg)
 }

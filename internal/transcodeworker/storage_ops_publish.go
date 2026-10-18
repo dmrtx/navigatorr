@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -34,10 +35,11 @@ type publicationReport struct {
 	expectSHA   string // accepted candidate digest, checked while copying from localSource
 
 	// Outputs.
-	Method       string
-	CopyFallback bool  // the output was not committed atomically
-	ReadBytes    int64 // bytes read back from the share
-	WrittenBytes int64 // bytes written to the share
+	Method            string
+	CopyFallback      bool  // the output was not committed atomically
+	AtomicUnsupported bool  // both primitives definitely refused; safe to remember
+	ReadBytes         int64 // bytes read back from the share
+	WrittenBytes      int64 // bytes written to the share
 }
 
 type publicationReportKey struct{}
@@ -169,6 +171,17 @@ func checkCopiedDigest(rep *publicationReport, h hash.Hash, dst string) error {
 		return fmt.Errorf("%w: local candidate no longer matches its accepted sha256; publication withdrawn", ErrSourceInvalid)
 	}
 	return nil
+}
+
+// linkDefinitelyUnsupported reports whether a hard-link failure means the
+// filesystem cannot link at all, as opposed to a transient or unrelated
+// failure that must not change how later publications commit.
+func linkDefinitelyUnsupported(err error) bool {
+	if err == nil || errors.Is(err, fs.ErrExist) || errors.Is(err, ErrSourceInvalid) {
+		return false
+	}
+	return errors.Is(err, syscall.ENOTSUP) || errors.Is(err, syscall.EOPNOTSUPP) ||
+		errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EINVAL)
 }
 
 // logCopyFallback makes every non-atomic publication visible in the worker log.

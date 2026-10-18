@@ -2091,6 +2091,7 @@ func (w *Worker) cleanupCancelledArtifacts(job *JobRecord) {
 		return
 	}
 	w.removeOwnStagedInput(job)
+	w.removeOwnRemotePartial(job)
 	if w.sourceCacheEnabled() {
 		releaseSourceCachePins(w.sourceCacheDir(), job.ID, false)
 	}

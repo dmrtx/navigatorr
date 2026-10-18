@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -137,7 +138,7 @@ func resolveOperationalForExecution(job *JobRecord) (*resolvedOperational, error
 // executeOperational drives a job from (unstaged) input through encode to the
 // EncodeComplete checkpoint, then hands off to finalization.
 func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string, job *JobRecord, r *resolvedOperational) error {
-	ctx = withDigestMemo(ctx, w.localWorkDir())
+	ctx = w.withJobDigestMemo(ctx)
 	if err := w.ensureExternalHealthy(ctx, job.Source); err != nil {
 		return w.failJobTerminal(jobDir, jobFile, job, fmt.Errorf("staging source storage unhealthy: %w", err))
 	}
@@ -510,7 +511,7 @@ type verifiedDownloader interface {
 func (w *Worker) finalizeOperational(ctx context.Context, jobDir, jobFile string, job *JobRecord, r *resolvedOperational) error {
 	// Reuses the memo of the run that just validated the candidate; a resumed
 	// or retried finalization starts a fresh one and reads the bytes again.
-	ctx = withDigestMemo(ctx, w.localWorkDir())
+	ctx = w.withJobDigestMemo(ctx)
 	publicationStart := time.Now()
 	publicationCost := transcode.PhaseCost{}
 	defer func() { w.persistPhaseCost(jobDir, jobFile, job, "publication", publicationStart, publicationCost) }()
@@ -840,10 +841,43 @@ func (w *Worker) failJobTerminal(jobDir, jobFile string, job *JobRecord, cause e
 	// weight on the work disk. The shared cache keeps its own link to the same
 	// bytes, which is what a manual retry under a new job ID reads.
 	w.removeOwnStagedInput(job)
+	w.removeOwnRemotePartial(job)
 	if w.sourceCacheEnabled() {
 		releaseSourceCachePins(w.sourceCacheDir(), job.ID, false)
 	}
 	return cause
+}
+
+// partialRemover is the optional media-store cleanup of a job's own partial.
+type partialRemover interface {
+	RemovePartial(ctx context.Context, destination, jobID string) error
+}
+
+var _ partialRemover = (*smbdirect.Store)(nil)
+
+// removeOwnRemotePartial deletes this job's "<destination>.partial.<jobID>"
+// on a direct-SMB share once the job can never publish (terminal failure or
+// cancellation). A partial is kept after a transport failure so a retry can
+// reuse it; without this it would stay on the NAS. Best effort, bounded.
+func (w *Worker) removeOwnRemotePartial(job *JobRecord) {
+	// A partial only exists once publication started, which needs the encode
+	// checkpoint; earlier failures never pay for a share round trip.
+	if job == nil || !job.EncodeComplete || w.mediaStore == nil || validateJobID(job.ID) != nil {
+		return
+	}
+	destination := strings.TrimSpace(job.Destination())
+	if destination == "" || !w.mediaStore.Maps(destination) {
+		return
+	}
+	remover, ok := w.mediaStore.(partialRemover)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if err := remover.RemovePartial(ctx, destination, job.ID); err != nil {
+		log.Printf("transcode job %s: leaving SMB partial for later cleanup: %v", job.ID, err)
+	}
 }
 
 // removeOwnStagedInput deletes a terminal job's staged input, but only the

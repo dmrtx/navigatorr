@@ -280,3 +280,46 @@ func TestDownloadResumeRefusedWhenSourceChanged(t *testing.T) {
 }
 
 var _ io.Seeker = memoryReader{}
+
+// A server that reports no write time gives no identity to prove the rename
+// by, so the final is read back instead of being trusted.
+func TestPublishVerifiedWithoutTimestampsReadsFinalBack(t *testing.T) {
+	root := t.TempDir()
+	fs := &memoryShare{files: map[string][]byte{}}
+	s := testStore(fs, root)
+	payload := []byte("candidate on a server without timestamps")
+	tr, err := s.PublishVerified(context.Background(), writeCandidate(t, payload), filepath.Join(root, "out.mkv"), "job-1", expectFor(payload), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fs.opens["out.mkv"] != 1 || tr.ReadBytes != 2*int64(len(payload)) {
+		t.Fatalf("opens=%v transfer=%+v, want the final read back once", fs.opens, tr)
+	}
+}
+
+// RemovePartial drops only this job's partial and tolerates its absence.
+func TestRemovePartialDropsOnlyOwnPartial(t *testing.T) {
+	root := t.TempDir()
+	fs := timedShare(map[string][]byte{
+		"out.mkv.partial.job-1": []byte("kept for reuse"),
+		"out.mkv.partial.job-2": []byte("another job"),
+		"out.mkv":               []byte("published"),
+	})
+	s := testStore(fs, root)
+	dest := filepath.Join(root, "out.mkv")
+	if err := s.RemovePartial(context.Background(), dest, "job-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fs.files["out.mkv.partial.job-1"]; ok {
+		t.Fatal("own partial left on the share")
+	}
+	if len(fs.files) != 2 {
+		t.Fatalf("files=%v, want the final and the other job's partial untouched", fs.files)
+	}
+	if err := s.RemovePartial(context.Background(), dest, "job-1"); err != nil {
+		t.Fatal("second removal must be a no-op", err)
+	}
+	if err := s.RemovePartial(context.Background(), dest, "../x"); err == nil {
+		t.Fatal("unsafe job id accepted")
+	}
+}

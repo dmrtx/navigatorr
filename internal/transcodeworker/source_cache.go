@@ -722,23 +722,59 @@ func (w *Worker) sweepSourceCache() error {
 	}
 	if configured := w.sourceCacheMaxBytes(); configured > 0 {
 		remaining, tot, largest := list()
-		max := effectiveSourceCacheMaxBytes(configured, largest)
-		if tot > max {
-			sort.SliceStable(remaining, func(i, j int) bool { return remaining[i].mod.Before(remaining[j].mod) })
+		bound := effectiveSourceCacheMaxBytes(configured, largest)
+		if bound > configured {
+			noteSourceCache(cacheDir, "cap", fmt.Sprintf("source cache: raising the %d-byte cap to %d bytes (1.5x the largest entry) so it can hold that source", configured, bound))
+		}
+		// Never let the cache push the work disk below its free-space floor,
+		// whatever the configured or raised cap says.
+		free, reserve, diskKnown := sourceCacheDiskBudget(cacheDir)
+		if diskKnown {
+			if room := tot + free - reserve; room < bound {
+				if room < 0 {
+					room = 0
+				}
+				bound = room
+				noteSourceCache(cacheDir, "disk", fmt.Sprintf("source cache: limiting the cache to %d bytes to keep %d bytes free on the work disk", bound, reserve))
+			}
+		}
+		sort.SliceStable(remaining, func(i, j int) bool { return remaining[i].mod.Before(remaining[j].mod) })
+		evict := func(d entry) {
+			if err := os.Remove(d.path); err == nil {
+				_ = os.Remove(cacheMetaPathForData(cacheDir, filepath.Base(d.path)))
+				tot -= d.size
+				free += d.size
+			}
+		}
+		gone := map[string]bool{}
+		for _, d := range remaining {
+			if tot <= bound {
+				break
+			}
+			// Never delete a file modified within the last hour: it may
+			// belong to an active job that just populated it.
+			if now.Sub(d.mod) < time.Hour || isPinned(d.path) {
+				continue
+			}
+			evict(d)
+			gone[d.path] = true
+		}
+		// Below the free-space floor pins yield too: an active job reads its
+		// own hard link, so dropping the shared name never breaks it, it only
+		// costs a later retry a fresh download.
+		if diskKnown && free < reserve {
 			for _, d := range remaining {
-				if tot <= max {
+				if free >= reserve {
 					break
 				}
-				// Never delete a file modified within the last hour: it may
-				// belong to an active job that just populated it.
-				if now.Sub(d.mod) < time.Hour || isPinned(d.path) {
+				if gone[d.path] || now.Sub(d.mod) < time.Hour {
 					continue
 				}
-				if err := os.Remove(d.path); err == nil {
-					_ = os.Remove(cacheMetaPathForData(cacheDir, filepath.Base(d.path)))
-					tot -= d.size
-				}
+				evict(d)
 			}
+		}
+		if tot > bound {
+			noteSourceCache(cacheDir, "over", fmt.Sprintf("source cache: pinned or just-populated entries keep it at %d bytes, above its %d-byte bound", tot, bound))
 		}
 	}
 	return nil

@@ -457,9 +457,10 @@ func (s *Store) PublishVerified(ctx context.Context, localCandidate, destination
 		if !info.Mode().IsRegular() || info.Size() != expect.SizeBytes {
 			return fmt.Errorf("SMB final verification mismatch: bytes=%d/%d", info.Size(), expect.SizeBytes)
 		}
-		if !verified.mod.IsZero() && !verified.matches(info) {
-			// The server changed a timestamp across the rename. The rename of
-			// verified bytes still succeeded, but prove it rather than assume.
+		if verified == nil || !verified.matches(info) {
+			// No usable identity (a server that reports no write time) or a
+			// timestamp that changed across the rename: the rename of verified
+			// bytes most likely succeeded, but prove it rather than assume.
 			hash, size, err := hashRemote(ctx, fs, remote)
 			if err != nil {
 				return fmt.Errorf("verifying SMB final: %w", err)
@@ -529,4 +530,38 @@ func uploadPartial(ctx context.Context, fs share, localCandidate, partial string
 		return fmt.Errorf("local candidate no longer matches its accepted identity: bytes=%d/%d sha256=%s/%s", sent, expect.SizeBytes, got, expect.SHA256)
 	}
 	return nil
+}
+
+// RemovePartial deletes this job's own "<destination>.partial.<jobID>" on the
+// share, if present. Call it only when the job will never publish again
+// (cancelled or terminally failed): a partial kept after a transport failure
+// for reuse is otherwise M bytes left on the NAS. The final name is never
+// touched, and a missing partial is not an error.
+func (s *Store) RemovePartial(ctx context.Context, destination, jobID string) (retErr error) {
+	defer func() { retErr = wrapError("remove partial", retErr) }()
+	remote, ok := s.RemotePath(destination)
+	if !ok {
+		return fmt.Errorf("path %q is outside smb_direct.local_root", destination)
+	}
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" || strings.ContainsAny(jobID, `/\\`) || jobID == "." || jobID == ".." {
+		return errors.New("invalid job id for SMB partial cleanup")
+	}
+	partial := remote + ".partial." + jobID
+	return s.withSessionRetry(ctx, "remove partial", func(fs share) error {
+		info, err := fs.Stat(partial)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("SMB partial %s is not a regular file; left in place", partial)
+		}
+		if err := fs.Remove(partial); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	})
 }

@@ -27,11 +27,13 @@ type fileFingerprint struct {
 // change across a wait or a restart still does a full read.
 //
 // Only files under the worker's private roots (local work dir, source cache)
-// are remembered. Files on shared or network storage, which other writers can
+// and outside every shared root (external roots, direct-SMB local root) are
+// remembered. Files on shared or network storage, which other writers can
 // touch with coarse timestamps, are always read in full.
 type digestMemo struct {
 	mu     sync.Mutex
 	roots  []string
+	shared []string
 	byFile map[fileFingerprint]string
 	reads  int // full local reads performed for a digest
 	reused int // digests answered from a fingerprint
@@ -45,26 +47,77 @@ var onLocalHashRead func(path string)
 // withDigestMemo attaches a fresh memo scoped to the given private roots
 // unless ctx already carries one.
 func withDigestMemo(ctx context.Context, privateRoots ...string) context.Context {
+	return withDigestMemoScope(ctx, privateRoots, nil)
+}
+
+// withDigestMemoScope attaches a fresh memo that trusts fingerprints only
+// under privateRoots and never under sharedRoots, even when a private root is
+// misconfigured to sit on shared storage.
+func withDigestMemoScope(ctx context.Context, privateRoots, sharedRoots []string) context.Context {
 	if digestMemoFrom(ctx) != nil {
 		return ctx
 	}
 	m := &digestMemo{byFile: map[fileFingerprint]string{}}
 	for _, r := range privateRoots {
 		if r = strings.TrimSpace(r); r != "" {
-			m.roots = append(m.roots, filepath.Clean(r))
+			m.roots = append(m.roots, resolvedPath(r))
+		}
+	}
+	for _, r := range sharedRoots {
+		if r = strings.TrimSpace(r); r != "" {
+			m.shared = append(m.shared, resolvedPath(r))
 		}
 	}
 	return context.WithValue(ctx, digestMemoKey{}, m)
 }
 
-func (m *digestMemo) private(path string) bool {
+// withJobDigestMemo scopes a job run's memo to the local work dir and
+// excludes every external root and the direct-SMB local root.
+func (w *Worker) withJobDigestMemo(ctx context.Context) context.Context {
+	var shared []string
+	if w.cfg != nil {
+		shared = append(shared, w.cfg.ExternalRoots...)
+		shared = append(shared, w.cfg.SMBDirect.LocalRoot)
+	}
+	return withDigestMemoScope(ctx, []string{w.localWorkDir()}, shared)
+}
+
+// resolvedPath cleans path and resolves symlinks in its directory, so a work
+// dir linked onto a share is recognised as the share.
+func resolvedPath(path string) string {
 	clean := filepath.Clean(path)
+	if dir, err := filepath.EvalSymlinks(filepath.Dir(clean)); err == nil {
+		return filepath.Join(dir, filepath.Base(clean))
+	}
+	return clean
+}
+
+func pathWithin(root, path string) bool {
+	if root == path {
+		return true
+	}
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != "." && rel != ".." && !filepath.IsAbs(rel) && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+func (m *digestMemo) private(path string) bool {
+	p := resolvedPath(path)
+	inside := false
 	for _, r := range m.roots {
-		if rel, err := filepath.Rel(r, clean); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != "." {
-			return true
+		if r != p && pathWithin(r, p) {
+			inside = true
+			break
 		}
 	}
-	return false
+	if !inside {
+		return false
+	}
+	for _, s := range m.shared {
+		if pathWithin(s, p) {
+			return false
+		}
+	}
+	return true
 }
 
 func digestMemoFrom(ctx context.Context) *digestMemo {
