@@ -7,7 +7,8 @@ import (
 
 // hardwareCandidatePrefix marks the VideoToolbox candidates of a hardware
 // search. They are measured with the x265 initial candidates, not as a
-// fallback family.
+// fallback family. The higher-quality rungs of a ladder that failed quality
+// are a fallback family of their own (transcode.HardwareFallbackCandidatePrefix).
 const hardwareCandidatePrefix = "vt-"
 
 // addHardwareSearch adds a size search's VideoToolbox candidates when the
@@ -48,6 +49,23 @@ func addHardwareSearch(req *transcode.BenchmarkRequest, policy *ModePolicySnapsh
 		hardware[i].ID = hardwareCandidatePrefix + hardware[i].ID
 	}
 	req.HardwareSearch = rules.Clone()
+	// The higher-quality rungs are a fallback family the worker measures only
+	// when the whole ladder fails quality. A worker that does not know them
+	// would reject the field and the longer candidate list, so it gets the
+	// ladder alone, exactly as before the fallback existed.
+	if len(rules.FallbackQualityValues) > 0 && caps.HardwareFallbackSearch {
+		vt.Quality = rules.FallbackQualityValues[len(rules.FallbackQualityValues)-1]
+		fallback, err := buildBenchmarkCandidates(&vt, bitDepth, &recipe.SearchPolicy{MaxCandidates: len(rules.FallbackQualityValues), QualityValues: rules.FallbackQualityValues})
+		if err != nil {
+			return err
+		}
+		for i := range fallback {
+			fallback[i].ID = transcode.HardwareFallbackCandidatePrefix + fallback[i].ID
+		}
+		hardware = append(hardware, fallback...)
+	} else {
+		req.HardwareSearch.FallbackQualityValues = nil
+	}
 	req.Candidates = append(req.Candidates, hardware...)
 	return nil
 }

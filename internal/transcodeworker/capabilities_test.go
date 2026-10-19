@@ -262,6 +262,9 @@ esac
 	if !caps.HardwareSearch {
 		t.Error("worker must advertise hardware_search so the server may add media engine candidates")
 	}
+	if !caps.HardwareFallbackSearch {
+		t.Error("worker must advertise hardware_fallback_search so the server may add higher-quality media engine fallbacks")
+	}
 	if caps.WorkerVersion != "1.0.0" {
 		t.Errorf("expected WorkerVersion=1.0.0, got %s", caps.WorkerVersion)
 	}

@@ -387,14 +387,22 @@ const (
 	MaxAutomaticCandidates      = 12
 	MaxAutomaticRulesCandidates = 15
 	// MaxAutomaticHardwareCandidates leaves room for the VideoToolbox
-	// quality ladder beside the rules candidates.
-	MaxAutomaticHardwareCandidates = 19
+	// quality ladder and its higher-quality fallback rungs beside the rules
+	// candidates (15 + 4 + 3).
+	MaxAutomaticHardwareCandidates = 22
 	// MaxHardwareMarginPercent bounds how much larger than the x265 winner a
 	// hardware candidate may be and still win.
 	MaxHardwareMarginPercent = 50
 	// MaxHardwareQualityValues bounds the VideoToolbox quality ladder.
 	MaxHardwareQualityValues = 4
-	MaxSelectionMarginVMAF   = 10
+	// MaxHardwareFallbackQualityValues bounds the higher-quality VideoToolbox
+	// rungs tried when the whole ladder fails quality.
+	MaxHardwareFallbackQualityValues = 3
+	// HardwareFallbackCandidatePrefix begins the ID of a higher-quality
+	// VideoToolbox fallback candidate. It starts with "fallback-", so the
+	// worker keeps it out of the initial stage.
+	HardwareFallbackCandidatePrefix = "fallback-hardware-"
+	MaxSelectionMarginVMAF          = 10
 	// HoldoutWindowsFinalGridEdges centres the two holdout windows on the
 	// first and last positions of the final validation grid.
 	HoldoutWindowsFinalGridEdges = "final_grid_edges"
@@ -473,6 +481,13 @@ type HardwareSearchRules struct {
 	GOPSize int `json:"gop_size"`
 	// BFrames is 0 or 1 (the encoder only knows whether B-frames are on).
 	BFrames int `json:"b_frames"`
+	// FallbackQualityValues are higher-quality -q:v rungs (ascending, all above
+	// QualityValues) measured, with the same GOP and B-frames, only when every
+	// ladder rung failed the quality policy. They are tried beside the first
+	// x265 quality fallback stage, so a fast hardware result can win within
+	// the margin before the slow x265 stage runs. Absent means the ladder has
+	// no fallback, which is what snapshots frozen before it carry.
+	FallbackQualityValues []int `json:"fallback_quality_values,omitempty"`
 }
 
 // Validate reports whether the rules are bounded and well formed.
@@ -493,6 +508,16 @@ func (r *HardwareSearchRules) Validate() error {
 		}
 		prev = q
 	}
+	if len(r.FallbackQualityValues) > MaxHardwareFallbackQualityValues {
+		return fmt.Errorf("hardware search needs at most %d fallback quality values", MaxHardwareFallbackQualityValues)
+	}
+	prev = r.QualityValues[len(r.QualityValues)-1]
+	for _, q := range r.FallbackQualityValues {
+		if q > 100 || q <= prev {
+			return errors.New("hardware fallback quality values must be ascending, above the ladder and at most 100")
+		}
+		prev = q
+	}
 	if r.GOPSize < 1 || r.GOPSize > MaxBenchmarkGOPSize {
 		return fmt.Errorf("hardware search gop_size must be in 1..%d", MaxBenchmarkGOPSize)
 	}
@@ -509,6 +534,7 @@ func (r *HardwareSearchRules) Clone() *HardwareSearchRules {
 	}
 	c := *r
 	c.QualityValues = append([]int(nil), r.QualityValues...)
+	c.FallbackQualityValues = append([]int(nil), r.FallbackQualityValues...)
 	return &c
 }
 
@@ -683,6 +709,14 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 		}
 		if err := req.HardwareSearch.Validate(); err != nil {
 			return err
+		}
+	}
+	for _, c := range req.Candidates {
+		if !strings.HasPrefix(c.ID, HardwareFallbackCandidatePrefix) {
+			continue
+		}
+		if req.HardwareSearch == nil || len(req.HardwareSearch.FallbackQualityValues) == 0 || BenchmarkCandidateVideoCodec(c) != VideoCodecHEVCVideoToolbox {
+			return errors.New("hardware fallback candidates require hardware search rules with fallback quality values and a VideoToolbox encoder")
 		}
 	}
 	if req.AutomaticSearch != nil {
