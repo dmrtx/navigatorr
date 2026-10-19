@@ -139,6 +139,9 @@ func main() {
 		}
 		jobID := subcmdArgs[0]
 		res, err := worker.Cancel(ctx, jobID)
+		// This process exits right after the answer; give the job's share
+		// partial removal (started in the background, bounded) time to run.
+		worker.WaitBackgroundCleanup()
 		printJSON(res)
 		if err != nil {
 			os.Exit(1)
@@ -279,6 +282,9 @@ func runServe(cfg *transcodeworker.WorkerConfig, configPath, selfExe string, arg
 	// the autonomous queue drain below.
 	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+
+	// Vets the x265 pool partition in the background; never gates readiness.
+	worker.StartX265PartitionCheck(sigCtx)
 
 	httpSrv := &http.Server{
 		Addr:              serveCfg.Listen,

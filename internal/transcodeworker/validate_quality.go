@@ -338,12 +338,23 @@ const minMetricThreadsPerPass = 2
 // finalValidationConcurrency runs up to maxFinalValidationConcurrency windows
 // at once, but only as many as this job's share of the host CPUs (CPUs ÷
 // max_parallel_jobs) can give minMetricThreadsPerPass libvmaf threads each.
+// An explicit metric_threads fixes the threads of every pass, so windows are
+// limited to what that many threads each fit in the job's share (and, like
+// sizeModeMetricConcurrency, a count below minMetricThreadsPerPass runs the
+// windows one at a time).
 func (w *Worker) finalValidationConcurrency(windows int) int {
 	jobs := 1
 	if w != nil && w.cfg != nil && w.cfg.MaxParallelJobs > 1 {
 		jobs = w.cfg.MaxParallelJobs
 	}
-	return max(1, min(maxFinalValidationConcurrency, windows, hostCPUCount()/jobs/minMetricThreadsPerPass))
+	perPass := minMetricThreadsPerPass
+	if w != nil && w.cfg != nil && w.cfg.MetricThreads > 0 {
+		if w.cfg.MetricThreads < minMetricThreadsPerPass {
+			return 1
+		}
+		perPass = w.cfg.MetricThreads
+	}
+	return max(1, min(maxFinalValidationConcurrency, windows, hostCPUCount()/jobs/perPass))
 }
 
 // runFinalWindows measures windows 0..n-1 with at most concurrency in flight
@@ -419,7 +430,7 @@ func runQualityCommand(ctx context.Context, ffmpegPath string, args []string) ([
 	cmd.WaitDelay = 2 * time.Second
 	tail := newTailBuffer(64 * 1024)
 	cmd.Stderr = tail
-	if err := cmd.Run(); err != nil {
+	if err := runCharged(ctx, cmd); err != nil {
 		return []byte(tail.String()), fmt.Errorf("metric/extraction ffmpeg failed: %v: %s", err, boundedErrorMessage(nil, []byte(tail.String()), 512))
 	}
 	output := []byte(tail.String())
@@ -429,6 +440,7 @@ func runQualityCommand(ctx context.Context, ffmpegPath string, args []string) ([
 func probeSamplePTS(ctx context.Context, ffprobePath, samplePath string) ([]float64, error) {
 	cmd := exec.CommandContext(ctx, ffprobePath, "-v", "error", "-select_streams", "v:0", "-show_entries", "frame=best_effort_timestamp_time", "-of", "json", samplePath)
 	output, err := cmd.Output()
+	chargeCPU(ctx, cmd)
 	if err != nil {
 		return nil, fmt.Errorf("ffprobe sample frame timestamps: %w", err)
 	}

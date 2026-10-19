@@ -79,3 +79,55 @@ func TestTelemetryKeepsMeasuredCPUWhenTimestampsOwnDuration(t *testing.T) {
 		t.Fatalf("an unmeasured phase must omit active_compute_ms: %s", raw)
 	}
 }
+
+func TestMetricPhaseRetargetsChildren(t *testing.T) {
+	encode, metric := &cpuMeter{}, &cpuMeter{}
+	ctx := withMetricCPUMeter(withCPUMeter(context.Background(), encode), metric)
+	if err := runCharged(asMetricPhase(ctx), exec.Command("/bin/sh", "-c", "true")); err != nil {
+		t.Fatal(err)
+	}
+	if metric.activeComputeMs() == nil {
+		t.Fatal("metric child not charged to the metric meter")
+	}
+	if encode.activeComputeMs() != nil {
+		t.Fatal("metric child charged to the encode phase")
+	}
+	// Without a metric meter a metric pass charges nothing, never the encode phase.
+	encodeOnly := withCPUMeter(context.Background(), encode)
+	if err := runCharged(asMetricPhase(encodeOnly), exec.Command("/bin/sh", "-c", "true")); err != nil {
+		t.Fatal(err)
+	}
+	if encode.activeComputeMs() != nil {
+		t.Fatal("unmetered metric pass charged to the encode phase")
+	}
+	// The original context keeps charging the encode meter.
+	if err := runCharged(ctx, exec.Command("/bin/sh", "-c", "true")); err != nil {
+		t.Fatal(err)
+	}
+	if encode.activeComputeMs() == nil {
+		t.Fatal("encode child not charged to the encode meter")
+	}
+}
+
+func TestQualityHelpersChargeTheContextMeter(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "tool")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\necho '{\"frames\":[{\"best_effort_timestamp_time\":\"0.0\"}]}'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	meter := &cpuMeter{}
+	ctx := withCPUMeter(context.Background(), meter)
+	if _, err := runQualityCommand(ctx, fake, nil); err != nil {
+		t.Fatal(err)
+	}
+	if meter.activeComputeMs() == nil {
+		t.Fatal("runQualityCommand child not charged")
+	}
+	probe := &cpuMeter{}
+	if _, err := probeSamplePTS(withCPUMeter(context.Background(), probe), fake, "x.mkv"); err != nil {
+		t.Fatal(err)
+	}
+	if probe.activeComputeMs() == nil {
+		t.Fatal("probeSamplePTS child not charged")
+	}
+}

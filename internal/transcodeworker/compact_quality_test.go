@@ -83,6 +83,11 @@ func TestCompactWorkerQualityEndToEnd(t *testing.T) {
 		if err := (&ProductionBenchmarkRunner{}).RunBenchmark(ctx, worker("bench"), rec); err != nil {
 			t.Fatalf("compact benchmark: %v", err)
 		}
+		for _, phase := range []string{"sample_encode", "sample_validation"} {
+			if c := rec.PhaseCosts[phase]; c.ActiveComputeMs == nil || *c.ActiveComputeMs <= 0 {
+				t.Fatalf("%s CPU not measured: %+v", phase, rec.PhaseCosts)
+			}
+		}
 		ev := rec.Evidence
 		if ev == nil || ev.Compact == nil || ev.Compact.ChainVersion != transcode.CompactChainVersion || ev.Compact.ToneMapMethod != transcode.CompactToneMapPQ || ev.VMAFTemporalDecimation != 2 {
 			t.Fatalf("benchmark evidence lacks the compact chain or decimation: %+v", ev)

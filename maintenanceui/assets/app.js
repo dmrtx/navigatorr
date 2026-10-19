@@ -333,7 +333,7 @@ async function api(path, body) {
   return data;
 }
 async function tool(name, args = {}) {
-  const mutates = ["action_run","action_resume","action_retry","action_cancel"].includes(name) || name === "transcode_backups" && ["clean","discard_duplicate","discard"].includes(args.mode);
+  const mutates = ["action_run","action_resume","action_retry","action_cancel"].includes(name) || name === "transcode_backups" && ["clean","discard_duplicate","discard","restore"].includes(args.mode);
   const result = mutates
     ? await commandRequest("tool", {name,arguments:args,background:true})
     : await api("tool", {name,arguments:args});
@@ -350,7 +350,7 @@ async function tool(name, args = {}) {
   }
 }
 
-const commandLabels = {prepare_batch_promotion:"Preparing replacement review",review_batch_promotion:"Applying replacement decision",resume:"Applying decision",retry:"Retrying job",cancel:"Stopping job",candidate:"Applying candidate decision",clean:"Verifying recovery data",discard_duplicate:"Verifying duplicate",discard:"Removing recovery copy",reconfigure:"Updating batch settings"};
+const commandLabels = {prepare_batch_promotion:"Preparing replacement review",review_batch_promotion:"Applying replacement decision",resume:"Applying decision",retry:"Retrying job",cancel:"Stopping job",candidate:"Applying candidate decision",clean:"Verifying recovery data",discard_duplicate:"Verifying duplicate",discard:"Removing recovery copy",restore:"Moving original back",reconfigure:"Updating batch settings"};
 function readCommandReceipts() {
   try { return JSON.parse(sessionStorage.getItem("navigatorr_commands") || "{}"); } catch { return {}; }
 }
@@ -3880,7 +3880,7 @@ function preserveWork(job) {
   const stages = job?.stages || [];
   const stage = stages[job?.current_step]?.name;
   const work = job?.work || {};
-  const fallbackCopy = stage === "remove_old_file" && ["waiting_for_hash_slot", "copying_recovery", "verifying_recovery"].includes(work.phase);
+  const fallbackCopy = stage === "remove_old_file" && ["waiting_for_hash_slot", "verifying_original", "copying_recovery", "verifying_recovery"].includes(work.phase);
   if (stage !== "preserve_original" && !fallbackCopy) return null;
   const label = preserveWorkLabels[work.phase];
   if (!label) return null;
@@ -5212,6 +5212,7 @@ function backupName(copy) {
   return copy.original_path?.split("/").pop() || copy.path?.split("/").slice(-2,-1)[0] || copy.action_id;
 }
 function backupReason(copy) {
+  if (copy.restore_available) return "This is the original file. The replacement never took its library path, which is empty. Move it back to restore the library file; nothing is deleted.";
   if (copy.duplicate_available) return "Original still present. Verify both SHA-256 hashes to remove only the redundant recovery data; the failed job stays unchanged.";
   if (copy.cleanup_available) return "The replacement will be verified before this recovery copy is removed.";
   if (operationIsActive(copy.status)) return "Job active. This recovery copy is retained until the replacement finishes.";
@@ -5249,6 +5250,11 @@ function renderBackups() {
       const clean = button(state.backupCleaning?.id === copy.action_id ? "Verifying…" : copy.duplicate_available ? "Verify duplicate & remove" : "Verify & clean up", () => cleanBackup(copy));
       clean.disabled = Boolean(state.backupCleaning) || !serverReachable;
       actions.append(clean);
+    }
+    if (copy.restore_available) {
+      const restore = button("Move original back", () => cleanBackup(copy,"restore"));
+      restore.disabled = Boolean(state.backupCleaning) || !serverReachable;
+      actions.append(restore);
     }
     if (copy.delete_available) {
       const remove = button("Remove copy", () => cleanBackup(copy,"discard"));
@@ -5336,13 +5342,13 @@ async function finishBackupCleanup(job) {
   const task = state.backupCleaning;
   if (!task || task.auth !== state.authRevision) return;
   const currentObservation = task.commandCompleted || Date.parse(job.cleanup?.updated_at) >= task.started;
-  if (task.mode === "discard" && !currentObservation && !task.error) { renderBackupCleanup(); return; }
+  if (["discard","restore"].includes(task.mode) && !currentObservation && !task.error) { renderBackupCleanup(); return; }
   if (operationIsActive(job.status) || currentObservation && !["completed","stopped"].includes(job.cleanup?.phase)) { renderBackupCleanup(); return; }
   state.backupCleaning = null;
   $("backup-progress").hidden = !state.backupsVisible;
   $("backup-progress").replaceChildren();
   $("backup-progress").classList.toggle("cleanup-stopped", job.status !== "completed" && job.cleanup?.phase !== "completed");
-  $("backup-progress").textContent = (task.mode === "discard" ? currentObservation && job.cleanup?.phase === "completed" : job.status === "completed" || job.cleanup?.phase === "completed") ? `Removed recovery data for ${task.name}. ${task.mode === "discard" ? "Backup removed by your choice; library files and job history unchanged." : task.mode === "discard_duplicate" ? "Original preserved; failed job unchanged." : "Replacement verified."}` : `Cleanup stopped for ${task.name}. ${cleanupError(job.cleanup?.error || task.error || job.error)} Remaining recovery data is listed below.`;
+  $("backup-progress").textContent = (["discard","restore"].includes(task.mode) ? currentObservation && job.cleanup?.phase === "completed" : job.status === "completed" || job.cleanup?.phase === "completed") ? (task.mode === "restore" ? `Moved the original of ${task.name} back to its library path. Job history unchanged.` : `Removed recovery data for ${task.name}. ${task.mode === "discard" ? "Backup removed by your choice; library files and job history unchanged." : task.mode === "discard_duplicate" ? "Original preserved; failed job unchanged." : "Replacement verified."}`) : `Cleanup stopped for ${task.name}. ${cleanupError(job.cleanup?.error || task.error || job.error)} Remaining recovery data is listed below.`;
   if (state.backupsVisible) await loadBackups();
   await loadJobs();
 }
@@ -5370,9 +5376,9 @@ async function cleanBackup(copy, requestedMode = null) {
   if (state.backupCleaning) return;
   const auth = state.authRevision;
   const mode = requestedMode || (copy.duplicate_available ? "discard_duplicate" : "clean");
-  const content = [node("p", backupName(copy), "cleanup-file"), node("p", `${bytes(Number(copy.bytes || 0)+Number(copy.partial_bytes || 0))} ${mode === "discard" ? "will be permanently removed" : "to remove if verification passes"}`, "cleanup-space"), node("p", mode === "discard" ? "Deletes this backup only, without verifying the replacement or repairing the old job. This cannot be undone. Library files are untouched." : mode === "discard_duplicate" ? "Checks that the original and recovery copy match the recorded SHA-256. Removes only redundant recovery data. The original and failed job stay unchanged." : "Checks the active library file and both SHA-256 hashes. If any check fails, the recovery copy stays.")];
-  const locations = node("details", "", "cleanup-locations"); locations.append(node("summary", "File locations"), node("p", `Library file: ${copy.original_path || "See job details"}`, "backup-path"), node("p", `Copy to remove: ${copy.path || "See job details"}`, "backup-path")); content.push(locations);
-  if (!await reviewAction({title:mode === "discard" ? "Remove recovery copy?" : "Verify and remove extra copy", content, confirmLabel:mode === "discard" ? "Remove copy" : "Verify & remove copy"}) || auth !== state.authRevision) return;
+  const content = [node("p", backupName(copy), "cleanup-file"), node("p", `${bytes(Number(copy.bytes || 0)+Number(copy.partial_bytes || 0))} ${mode === "restore" ? "to move back, verified first" : mode === "discard" ? "will be permanently removed" : "to remove if verification passes"}`, "cleanup-space"), node("p", mode === "restore" ? "Checks the original against its recorded SHA-256 (a full read unless its file identity is unchanged since it was verified), then renames it back to its library path. Only runs while that path is empty; nothing is deleted or overwritten." : mode === "discard" ? "Deletes this backup only, without verifying the replacement or repairing the old job. This cannot be undone. Library files are untouched." : mode === "discard_duplicate" ? "Checks that the original and recovery copy match the recorded SHA-256. Removes only redundant recovery data. The original and failed job stay unchanged." : "Checks the active library file and both SHA-256 hashes. If any check fails, the recovery copy stays.")];
+  const locations = node("details", "", "cleanup-locations"); locations.append(node("summary", "File locations"), node("p", `Library file: ${copy.original_path || "See job details"}`, "backup-path"), node("p", `${mode === "restore" ? "Original to move back" : "Copy to remove"}: ${copy.path || "See job details"}`, "backup-path")); content.push(locations);
+  if (!await reviewAction({title:mode === "restore" ? "Move original back?" : mode === "discard" ? "Remove recovery copy?" : "Verify and remove extra copy", content, confirmLabel:mode === "restore" ? "Move back" : mode === "discard" ? "Remove copy" : "Verify & remove copy"}) || auth !== state.authRevision) return;
   if (state.backupCleaning) return;
   const task = state.backupCleaning = {id:copy.action_id,name:backupName(copy),mode,auth,started:Date.now(),pendingResponse:true};
   renderBackups();

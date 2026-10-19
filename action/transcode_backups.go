@@ -21,6 +21,7 @@ type TranscodeBackup struct {
 	CleanupAvailable   bool   `json:"cleanup_available"`
 	DeleteAvailable    bool   `json:"delete_available"`
 	DuplicateAvailable bool   `json:"duplicate_available"`
+	RestoreAvailable   bool   `json:"restore_available"`
 	Error              string `json:"error,omitempty"`
 	Reason             string `json:"reason"`
 }
@@ -132,6 +133,7 @@ func (e *Engine) ListTranscodeBackups(ctx context.Context, offset int) (*Transco
 		if item.Reason == "" {
 			onlyOriginal := promotionRecoveryIsOnlyOriginal(p)
 			item.DeleteAvailable = onlyOriginal == nil && e.AllowDestructive() && (inst.Status == StatusFailed || inst.Status == StatusCompleted || inst.Status == StatusCancelled)
+			item.RestoreAvailable = (inst.Status == StatusFailed || inst.Status == StatusCancelled) && e.promotionRestorableOriginal(p) == nil
 			if _, err := e.duplicateBackupGuard(&inst, ec); err == nil && e.AllowDestructive() && item.Bytes > 0 {
 				item.DuplicateAvailable = true
 			}
@@ -145,6 +147,9 @@ func (e *Engine) ListTranscodeBackups(ctx context.Context, offset int) (*Transco
 			}
 			if onlyOriginal != nil && !item.CleanupAvailable {
 				item.Reason = onlyOriginal.Error()
+				if item.RestoreAvailable {
+					item.Reason += "; it can be moved back to the empty library path"
+				}
 			}
 		}
 		page.Bytes += item.Bytes + item.PartialBytes

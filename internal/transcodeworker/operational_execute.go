@@ -257,7 +257,12 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 		return nil
 	}
 
-	attest, verr := w.validateEncodedCandidateFull(ctx, r.localCandidate, execPlan, srcProbe, 0)
+	// CPU time of the validation children (probes, window extraction, VMAF,
+	// CAMBI, SSIM). A phase that ran none reports unknown, never 0.
+	validationCPU := &cpuMeter{}
+	validationStart := time.Now()
+	validationCtx := withCPUMeter(ctx, validationCPU)
+	attest, verr := w.validateEncodedCandidateFull(validationCtx, r.localCandidate, execPlan, srcProbe, 0)
 	if verr == nil {
 		verr = transcode.ValidateFinalSize(job.SourceSizeBytes, attest.SizeBytes, job.Plan.SizePolicy)
 	}
@@ -277,9 +282,9 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 			}
 			var qualityEvidence *transcode.FinalQualityEvidence
 			if audioOnly {
-				qualityEvidence, verr = w.validateVideoCopy(ctx, r.effectiveInput, r.localCandidate, job.Plan, attest.SHA256, attest.SizeBytes)
+				qualityEvidence, verr = w.validateVideoCopy(validationCtx, r.effectiveInput, r.localCandidate, job.Plan, attest.SHA256, attest.SizeBytes)
 			} else {
-				qualityEvidence, verr = w.validateFinalPerceptual(ctx, jobDir, r.effectiveInput, r.localCandidate, job.Plan, attest.SHA256, attest.SizeBytes)
+				qualityEvidence, verr = w.validateFinalPerceptual(validationCtx, jobDir, r.effectiveInput, r.localCandidate, job.Plan, attest.SHA256, attest.SizeBytes)
 			}
 			job.QualityEvidence = qualityEvidence
 			if verr == nil {
@@ -293,6 +298,10 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 				}
 			}
 		}
+	}
+	if cpu := validationCPU.activeComputeMs(); cpu != nil {
+		// A rejected candidate still spent its CPU time.
+		w.persistPhaseCost(jobDir, jobFile, job, "validation", validationStart, transcode.PhaseCost{ActiveComputeMs: cpu})
 	}
 	if verr != nil {
 		var rejected *transcode.PolicyRejectionError
@@ -892,6 +901,12 @@ func (w *Worker) removeOwnRemotePartialBackground(job *JobRecord) {
 		w.removeOwnRemotePartialWithin(&snapshot, cancelPartialTimeout)
 	}()
 }
+
+// WaitBackgroundCleanup blocks until the background partial removals started
+// so far have finished. Each is bounded by cancelPartialTimeout, so this
+// returns within that bound even when the share is unreachable. A one-shot
+// process (the CLI cancel) calls it before exiting; the server never does.
+func (w *Worker) WaitBackgroundCleanup() { w.partialCleanup.Wait() }
 
 func (w *Worker) removeOwnRemotePartialWithin(job *JobRecord, timeout time.Duration) {
 	// A partial only exists once publication started, which needs the encode

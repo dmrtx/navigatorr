@@ -80,15 +80,19 @@ func probeVideoPackets(ctx context.Context, ffprobePath, path string) ([]videoPa
 	if err := scanner.Err(); err != nil && parseErr == nil {
 		parseErr = fmt.Errorf("listing video packets: %w", err)
 	}
-	if err := cmd.Wait(); err != nil {
+	err = cmd.Wait()
+	chargeCPU(ctx, cmd)
+	if err != nil {
 		return nil, fmt.Errorf("listing video packets: %w (%s)", err, strings.TrimSpace(stderr.String()))
 	}
 	return packets, parseErr
 }
 
 func probeVideoStreamFacts(ctx context.Context, ffprobePath, path string) (videoStreamFacts, error) {
-	out, err := exec.CommandContext(ctx, ffprobePath, "-hide_banner", "-v", "error", "-select_streams", "V:0", "-show_data_hash", "sha256",
-		"-show_entries", "stream=extradata_hash,sample_aspect_ratio,r_frame_rate,avg_frame_rate", "-of", "compact=p=0", path).Output()
+	cmd := exec.CommandContext(ctx, ffprobePath, "-hide_banner", "-v", "error", "-select_streams", "V:0", "-show_data_hash", "sha256",
+		"-show_entries", "stream=extradata_hash,sample_aspect_ratio,r_frame_rate,avg_frame_rate", "-of", "compact=p=0", path)
+	out, err := cmd.Output()
+	chargeCPU(ctx, cmd)
 	if err != nil {
 		return videoStreamFacts{}, fmt.Errorf("reading video stream fields: %w", err)
 	}
