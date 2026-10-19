@@ -235,3 +235,28 @@ func TestWorkerSlotsUnsupportedWithoutHTTPWorker(t *testing.T) {
 		t.Fatalf("%v", got)
 	}
 }
+
+// A split the worker refuses, on a node nobody had configured, must leave the
+// node unconfigured: a stored "shared" row would make the resync clear a split
+// the worker runs by itself.
+func TestWorkerSlotsRefusalOnUnconfiguredNodeLeavesItUnconfigured(t *testing.T) {
+	worker := &fakeSlotWorker{ceiling: 4, cpus: 10, split: transcode.SlotSplit{VideoSlots: 2, PodcastSlots: 2}}
+	s, h := slotUI(t, worker)
+	worker.putErr = &httpclient.SlotSplitRejectedError{Message: "refused by worker"}
+	if w := request(h, "POST", "/api/maintenance/worker-slots", `{"video_slots":3,"podcast_slots":1}`, true); w.Code != 400 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if row, _ := s.engine.Deps().Store.GetWorkerSlotSettings(videoWorkerNode); row != nil {
+		t.Fatalf("the refused save left a row behind: %+v", row)
+	}
+	worker.putErr = nil
+	s.slotSync.mu.Lock()
+	s.slotSync.last = time.Time{}
+	s.slotSync.mu.Unlock()
+	observed := worker.slots()
+	pushes := worker.puts
+	s.syncWorkerSlots(context.Background(), &observed)
+	if worker.puts != pushes || worker.split.VideoSlots != 2 || worker.split.PodcastSlots != 2 {
+		t.Fatalf("the resync changed a split nobody stored: pushes %d, worker %+v", worker.puts-pushes, worker.split)
+	}
+}

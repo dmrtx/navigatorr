@@ -86,9 +86,11 @@ func (w *Worker) x265ThreadParams() string {
 	}
 	// More video jobs than the pool can briefly run while a lowered pool
 	// drains; size for the pool, the largest count the self-check proved.
-	jobs := min(w.videoJobsSharingCPU(), w.slotLimits().videoPool())
-	params := w.x265ThreadParamsForJobs(jobs)
-	if params == "" || w.x265PartitionDisabled(w.x265PartitionKey()) {
+	// The limits are read once so the size and the proved set agree even if
+	// the split changes meanwhile.
+	pool := w.slotLimits().videoPool()
+	params := w.x265ThreadParamsForJobs(min(w.videoJobsSharingCPU(), pool))
+	if params == "" || w.x265PartitionDisabled(strings.Join(w.x265PartitionCandidatesFor(pool), ",")) {
 		return ""
 	}
 	return params
@@ -125,6 +127,15 @@ func (w *Worker) x265ThreadParamsForJobs(jobs int) string {
 // encode under the current slot limits: one per count of video jobs running
 // together. The self-check proves all of them frame-identical to the default.
 func (w *Worker) x265PartitionCandidates() []string {
+	if w == nil || w.cfg == nil {
+		return nil
+	}
+	return w.x265PartitionCandidatesFor(w.slotLimits().videoPool())
+}
+
+// x265PartitionCandidatesFor is x265PartitionCandidates for a video pool of
+// pool slots.
+func (w *Worker) x265PartitionCandidatesFor(pool int) []string {
 	if w == nil || w.cfg == nil || w.cfg.X265Pools < 0 {
 		return nil
 	}
@@ -137,7 +148,7 @@ func (w *Worker) x265PartitionCandidates() []string {
 	}
 	var out []string
 	seen := map[string]bool{}
-	for jobs := 2; jobs <= w.slotLimits().videoPool(); jobs++ {
+	for jobs := 2; jobs <= pool; jobs++ {
 		if params := w.x265ThreadParamsForJobs(jobs); params != "" && !seen[params] {
 			seen[params] = true
 			out = append(out, params)
