@@ -551,6 +551,33 @@ func TestSlotsEndpointDistinguishesStorageFailureFromInvalidSplit(t *testing.T) 
 	}
 }
 
+// waitForSlotRecheck waits until no background recheck started by a slot
+// change is left running, so the test never ends with one still writing.
+func waitForSlotRecheck(t *testing.T, w *Worker) {
+	t.Helper()
+	deadline := time.After(15 * time.Second)
+	for {
+		w.x265Recheck.Lock()
+		done := w.x265RecheckDone
+		w.x265Recheck.Unlock()
+		if done == nil {
+			return
+		}
+		select {
+		case <-done:
+		case <-deadline:
+			t.Fatal("background recheck never finished")
+		}
+		// A recheck can start another when the split changed meanwhile.
+		w.x265Recheck.Lock()
+		next := w.x265RecheckDone
+		w.x265Recheck.Unlock()
+		if next == done {
+			return
+		}
+	}
+}
+
 // Saving a split proves the pools it can produce in the background, once.
 func TestSavingASplitProvesItsPoolsInTheBackground(t *testing.T) {
 	slotChangeRecheck = true
@@ -560,12 +587,9 @@ func TestSavingASplitProvesItsPoolsInTheBackground(t *testing.T) {
 	if _, err := w.SetSlotSplit(transcode.SlotSplit{VideoSlots: 3, PodcastSlots: 1}); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(10 * time.Second)
-	for w.X265PartitionStatus().Status != x265CheckPassed {
-		if time.Now().After(deadline) {
-			t.Fatalf("pools of the new split never proved: %+v", w.X265PartitionStatus())
-		}
-		time.Sleep(10 * time.Millisecond)
+	waitForSlotRecheck(t, w)
+	if st := w.X265PartitionStatus(); st.Status != x265CheckPassed {
+		t.Fatalf("pools of the new split never proved: %+v", st)
 	}
 	if rec, ok := w.loadX265PartitionCheck(w.x265PartitionKey()); !ok || rec.Status != x265CheckPassed {
 		t.Fatalf("no stored verdict for the new split: %+v", rec)
@@ -577,7 +601,7 @@ func TestSavingASplitProvesItsPoolsInTheBackground(t *testing.T) {
 	if _, err := w.SetSlotSplit(transcode.SlotSplit{VideoSlots: 3, PodcastSlots: 1}); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(100 * time.Millisecond)
+	waitForSlotRecheck(t, w)
 	f.mu.Lock()
 	after := len(f.calls)
 	f.mu.Unlock()

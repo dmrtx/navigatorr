@@ -235,6 +235,7 @@ type Worker struct {
 	// that count in tests.
 	slotSplit       slotSplitCache
 	x265Recheck     sync.Mutex
+	x265RecheckDone <-chan struct{} // the last slot-change recheck, guarded by x265Recheck
 	videoInUse      videoInUseCache
 	videoInUseFn    func() (int, bool)
 	x265CheckRun    func(ctx context.Context, dir string, args []string) ([]byte, error)
