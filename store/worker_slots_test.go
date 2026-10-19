@@ -65,3 +65,23 @@ func TestWorkerSlotSettingsSurviveReopen(t *testing.T) {
 		t.Fatalf("split lost across restart: %+v %v", row, err)
 	}
 }
+
+func TestWorkerSlotSettingsDeleteReturnsToNeverConfigured(t *testing.T) {
+	s := openTest(t)
+	if err := s.DeleteWorkerSlotSettings("node-a"); err != nil {
+		t.Fatal("deleting a node without settings is not an error:", err)
+	}
+	if _, err := s.SetWorkerSlotSettings("node-a", 2, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteWorkerSlotSettings("node-a"); err != nil {
+		t.Fatal(err)
+	}
+	if row, err := s.GetWorkerSlotSettings("node-a"); err != nil || row != nil {
+		t.Fatalf("settings survived a delete: %+v %v", row, err)
+	}
+	first, err := s.SetWorkerSlotSettings("node-a", 1, 1)
+	if err != nil || first.Revision != 1 {
+		t.Fatalf("a deleted node starts over: %+v %v", first, err)
+	}
+}

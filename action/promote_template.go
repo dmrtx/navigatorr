@@ -80,6 +80,9 @@ type promotionState struct {
 	RecoveryMode string `json:"recovery_mode,omitempty"`
 	// Why that mode was chosen (a fixed code, never a path).
 	RecoveryModeReason string `json:"recovery_mode_reason,omitempty"`
+	// What a failed mount probe observed: its step, the filesystem type and
+	// the error, never a path. Empty for every other reason.
+	RecoveryModeDetail string `json:"recovery_mode_detail,omitempty"`
 	// Fingerprints of full hashes, kept for identity checks across waits;
 	// see promotionVerifyByIdentity.
 	OriginalFingerprint  *promotionFingerprint `json:"original_fingerprint,omitempty"`
