@@ -902,6 +902,12 @@ func (w *Worker) removeOwnRemotePartialBackground(job *JobRecord) {
 	}()
 }
 
+// WaitBackgroundCleanup blocks until the background partial removals started
+// so far have finished. Each is bounded by cancelPartialTimeout, so this
+// returns within that bound even when the share is unreachable. A one-shot
+// process (the CLI cancel) calls it before exiting; the server never does.
+func (w *Worker) WaitBackgroundCleanup() { w.partialCleanup.Wait() }
+
 func (w *Worker) removeOwnRemotePartialWithin(job *JobRecord, timeout time.Duration) {
 	// A partial only exists once publication started, which needs the encode
 	// checkpoint; earlier failures never pay for a share round trip.

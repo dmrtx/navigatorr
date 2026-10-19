@@ -353,7 +353,7 @@ func (s *Server) tool(w http.ResponseWriter, r *http.Request) {
 		kind := map[string]string{"action_resume": "resume", "action_retry": "retry", "action_cancel": "cancel"}[body.Name]
 		if body.Name == "transcode_backups" {
 			mode, _ := body.Arguments["mode"].(string)
-			if mode == "clean" || mode == "discard_duplicate" || mode == "discard" {
+			if mode == "clean" || mode == "discard_duplicate" || mode == "discard" || mode == "restore" {
 				kind = mode
 				body.Arguments["id"] = body.Arguments["action_id"]
 			}

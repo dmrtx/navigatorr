@@ -701,11 +701,37 @@ func TestCancelDoesNotWaitForSlowRemotePartial(t *testing.T) {
 		t.Fatalf("second cancel = %+v, %v", resp, err)
 	}
 	close(store.release)
-	w.partialCleanup.Wait()
+	w.WaitBackgroundCleanup()
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if len(store.removed) != 1 || store.removed[0] != dest+"|"+id {
 		t.Fatalf("removed=%v, want only this job's partial", store.removed)
+	}
+}
+
+// A one-shot CLI cancel exits right after it answers, so it waits for the
+// background removal: the partial is gone when WaitBackgroundCleanup returns,
+// and the wait ends within the removal's own bound even if the share never
+// answers.
+func TestCancelWaitBackgroundCleanupRemovesPartialBeforeExit(t *testing.T) {
+	stub := newStubSpawn()
+	w, tempDir, sourceFile := newPR3Worker(t, 4, stub)
+	root := filepath.Join(tempDir, "unmounted-media")
+	store := &partialRemovingStore{fakeDirectStore: fakeDirectStore{root: root}}
+	w.mediaStore = store
+	dest := filepath.Join(root, "Show", "episode.mkv")
+	const id = "job-cli-cancel"
+	pr5SeedJob(t, tempDir, &JobRecord{
+		ID: id, Status: "queued", Source: sourceFile, Candidate: dest, IntendedDestination: dest,
+		ExecutionSpecDigest: pr5Digest, EncodeComplete: true,
+		CreatedAt: time.Now().UTC().Add(-time.Hour),
+	})
+	if _, err := w.Cancel(context.Background(), id); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	w.WaitBackgroundCleanup()
+	if len(store.removed) != 1 || store.removed[0] != dest+"|"+id {
+		t.Fatalf("removed=%v, want this job's partial removed once the wait returns", store.removed)
 	}
 }
 

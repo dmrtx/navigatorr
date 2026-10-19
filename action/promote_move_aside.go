@@ -37,6 +37,23 @@ func (fp promotionFingerprint) sameInode(o promotionFingerprint) bool {
 	return fp.Dev == o.Dev && fp.Ino == o.Ino && fp.Size == o.Size && fp.MtimeNs == o.MtimeNs
 }
 
+// sameFileAfterRead reports whether fp is the file known describes, for a path
+// the caller has just read in full and checked against its digest. A
+// fingerprint from this process also pins the device. One from an earlier
+// process does not: network mounts often get a new device number per mount, so
+// after a restart the device is dropped and the inode, size and mtime still
+// have to match. Only resume decisions use it; nothing is deleted or
+// overwritten on this check.
+func (fp promotionFingerprint) sameFileAfterRead(known *promotionFingerprint) bool {
+	if known == nil {
+		return false
+	}
+	if k, ok := known.fromThisProcess(); ok {
+		return fp.sameInode(k)
+	}
+	return fp.Ino == known.Ino && fp.Size == known.Size && fp.MtimeNs == known.MtimeNs
+}
+
 // promotionKnownFingerprint is the fingerprint this execution's full hash of
 // path to sha recorded, or nil when there was none or it was not stable.
 func promotionKnownFingerprint(ctx context.Context, path, sha string) *promotionFingerprint {
@@ -68,20 +85,18 @@ func (e *Engine) promotionCurrentFingerprint(path string) (promotionFingerprint,
 // data: renaming the original aside (the rename keeps its bytes), a recovery
 // copy in its private 0700 directory, and the library renaming the adopted
 // file (finalization reads it in full before any recovery is removed).
-// strict also compares ctime; otherwise the inode, size and mtime must match.
+// It compares the whole fingerprint, ctime included.
 // A fingerprint from an earlier process, or any doubt, reads the whole file.
 // It returns the fingerprint now proved, or nil when the platform has none.
-func (e *Engine) promotionVerifyByIdentity(ctx context.Context, path, sha string, known *promotionFingerprint, strict bool) (*promotionFingerprint, error) {
+func (e *Engine) promotionVerifyByIdentity(ctx context.Context, path, sha string, known *promotionFingerprint) (*promotionFingerprint, error) {
 	if k, ok := known.fromThisProcess(); ok {
 		fp, err := e.promotionCurrentFingerprint(path)
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, err
 		}
-		if err == nil && (fp == k || !strict && fp.sameInode(k)) {
+		if err == nil && fp == k {
 			if v := promotionVerified(ctx); v != nil {
-				if strict {
-					v.files[path] = promotionVerifiedFile{sha: sha, fp: fp}
-				}
+				v.files[path] = promotionVerifiedFile{sha: sha, fp: fp}
 				v.record(path, promotionCheckIdentity, sha, fp)
 			}
 			return fp.persisted(), nil
@@ -135,7 +150,7 @@ func (e *Engine) promotionMoveAside(ctx context.Context, ec *ExecutionContext, p
 	case backupErr != nil && !os.IsNotExist(backupErr):
 		return backupErr
 	case originalErr == nil && backupErr != nil:
-		proved, err := e.promotionVerifyByIdentity(ctx, p.OriginalPath, p.OriginalSHA, p.OriginalFingerprint, true)
+		proved, err := e.promotionVerifyByIdentity(ctx, p.OriginalPath, p.OriginalSHA, p.OriginalFingerprint)
 		if errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("%w: %v", errPromotionOriginalGone, err)
 		}
@@ -187,7 +202,7 @@ func (e *Engine) promotionMoveAside(ctx context.Context, ec *ExecutionContext, p
 		return fmt.Errorf("original and recovery locations are in an unexpected state (original present: %t, recovery present: %t); nothing moved, recovery retained", originalErr == nil, backupErr == nil)
 	}
 	fp, err := e.promotionCurrentFingerprint(p.BackupPath)
-	if err != nil || !fp.sameInode(*p.OriginalFingerprint) {
+	if err != nil || !fp.sameFileAfterRead(p.OriginalFingerprint) {
 		return fmt.Errorf("recovery location does not hold the verified original; recovery retained")
 	}
 	if renamed {
@@ -270,6 +285,17 @@ func (e *Engine) promotionMoveBack(ctx context.Context, ec *ExecutionContext, p 
 		return err
 	}
 	if err := renamePromotionNoReplace(p.BackupPath, p.OriginalPath); err != nil {
+		// A different file took the library path after the read: the
+		// no-replace rename refused and the original never left its recovery
+		// path. Record that, or the stale intent keeps the library path
+		// looking empty and the move back looking available.
+		if e.promotionMoveBackLostToAnotherFile(p) {
+			p.MoveBackStartedAt = ""
+			if saveErr := e.savePromotion(ctx, ec, p); saveErr != nil {
+				return fmt.Errorf("move the original back: %w; recording that it did not move failed: %v", err, saveErr)
+			}
+			return fmt.Errorf("move the original back: %w; the library path is no longer empty and the original stays at its recovery path", err)
+		}
 		return fmt.Errorf("move the original back: %w", err)
 	}
 	for _, dir := range []string{filepath.Dir(p.BackupPath), filepath.Dir(p.OriginalPath)} {
@@ -280,6 +306,18 @@ func (e *Engine) promotionMoveBack(ctx context.Context, ec *ExecutionContext, p 
 	}
 	e.promotionCarryRenamed(ctx, p.BackupPath, p.OriginalPath)
 	return e.promotionFinishMoveBack(ctx, ec, p)
+}
+
+// promotionMoveBackLostToAnotherFile is true only when both paths hold files
+// and they are not the same file: the original is still at its recovery path
+// and something else is at the library path.
+func (e *Engine) promotionMoveBackLostToAnotherFile(p *promotionState) bool {
+	from, err := os.Lstat(p.BackupPath)
+	if err != nil {
+		return false
+	}
+	to, err := os.Lstat(p.OriginalPath)
+	return err == nil && !os.SameFile(from, to)
 }
 
 // promotionResumeMoveBack finishes a move back a crash interrupted: the
@@ -311,7 +349,7 @@ func (e *Engine) promotionFinishMoveBack(ctx context.Context, ec *ExecutionConte
 	if known == nil {
 		known = p.OriginalFingerprint
 	}
-	if err != nil || known == nil || !fp.sameInode(*known) {
+	if err != nil || !fp.sameFileAfterRead(known) {
 		return fmt.Errorf("the library path does not hold the moved-back original; nothing else moved")
 	}
 	p.OriginalFingerprint = fp.persisted()

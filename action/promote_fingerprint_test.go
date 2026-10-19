@@ -302,16 +302,16 @@ func TestPromotionStrictIdentityRereadsAChangedCtime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	verify := func(strict bool) int64 {
+	verify := func() int64 {
 		t.Helper()
 		before := reads.of(path)
 		ctx := withPromotionVerifiedFiles(context.Background(), &ExecutionContext{State: map[string]any{}})
-		if _, err := e.promotionVerifyByIdentity(ctx, path, sum, known.persisted(), strict); err != nil {
+		if _, err := e.promotionVerifyByIdentity(ctx, path, sum, known.persisted()); err != nil {
 			t.Fatal(err)
 		}
 		return reads.of(path) - before
 	}
-	if n := verify(true); n != 0 {
+	if n := verify(); n != 0 {
 		t.Fatalf("an unchanged file was read: %d bytes", n)
 	}
 	for i := 0; ; i++ {
@@ -333,15 +333,12 @@ func TestPromotionStrictIdentityRereadsAChangedCtime(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if n := verify(false); n != 0 {
-		t.Fatalf("the non-strict check read a file with the same inode, size and mtime: %d bytes", n)
-	}
-	if n := verify(true); n == 0 {
+	if n := verify(); n == 0 {
 		t.Fatal("the strict check trusted a changed ctime without reading the file")
 	}
 	// A full read still proves the bytes, so a wrong digest fails.
 	ctx := withPromotionVerifiedFiles(context.Background(), &ExecutionContext{State: map[string]any{}})
-	if _, err := e.promotionVerifyByIdentity(ctx, path, strings.Repeat("0", 64), known.persisted(), true); err == nil {
+	if _, err := e.promotionVerifyByIdentity(ctx, path, strings.Repeat("0", 64), known.persisted()); err == nil {
 		t.Fatal("the strict check accepted a wrong digest after a ctime change")
 	}
 }

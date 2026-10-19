@@ -823,7 +823,7 @@ func (e *Engine) promotionVerifyRecovered(ctx context.Context, p *promotionState
 	if !p.BackupVerified || p.BackupPath == "" {
 		return fmt.Errorf("verified recovery copy is required before Sonarr mutations")
 	}
-	_, err := e.promotionVerifyByIdentity(ctx, p.BackupPath, p.OriginalSHA, p.BackupFingerprint, true)
+	_, err := e.promotionVerifyByIdentity(ctx, p.BackupPath, p.OriginalSHA, p.BackupFingerprint)
 	return err
 }
 

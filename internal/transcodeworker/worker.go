@@ -215,8 +215,9 @@ func cleanRootPaths(roots []string) []string {
 
 // Worker manages the local transcode execution on the node.
 type Worker struct {
-	// partialCleanup tracks best-effort background SMB partial removals so
-	// tests can wait for them; production never waits.
+	// partialCleanup tracks best-effort background SMB partial removals. The
+	// long-lived server never waits for them; a one-shot CLI process waits
+	// through WaitBackgroundCleanup, or it would exit before they ran.
 	partialCleanup sync.WaitGroup
 
 	schedulerMu        sync.Mutex

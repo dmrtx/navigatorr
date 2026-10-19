@@ -2096,6 +2096,23 @@ test("explicit copy removal offers one confirmation and never resumes or verifie
  assert.doesNotMatch(h.elements.get('backup-progress').textContent,/Replacement verified/);
 });
 
+test("moving a cancelled promotion's original back asks once, then reports it",async()=>{
+ const h=harness(),writes=[];
+ h.context.copy={action_id:'old',restore_available:true,original_path:'/media/episode.mkv',path:'/media/recovery/original.bak',bytes:1000};
+ assert.match(h.run('backupReason(copy)'),/Move it back/);
+ h.context.record=(...args)=>writes.push(args);
+ h.run('tool=async(...args)=>{record(...args);return {status:"cancelled",cleanup:{phase:"completed",updated_at:new Date().toISOString()}}};loadJobs=async()=>{};loadBackups=async()=>{};');
+ const restoring=h.run('cleanBackup(copy,"restore")');
+ for(let i=0;i<5;i++) await Promise.resolve();
+ assert.equal(writes.length,0);
+ assert.equal(h.elements.get('confirm-action-review').textContent,'Move back');
+ assert.match(h.elements.get('action-review-content').children[2].textContent,/nothing is deleted or overwritten/);
+ h.elements.get('confirm-action-review').listeners.get('click')();await restoring;
+ assert.equal(writes.length,1);assert.equal(writes[0][1].mode,'restore');
+ assert.match(h.elements.get('backup-progress').textContent,/back to its library path/);
+ assert.doesNotMatch(h.elements.get('backup-progress').textContent,/Removed|Replacement verified/);
+});
+
  test("a durable command exposes pending work, polls its receipt and preserves it on connection loss",async()=>{
   const h=harness(),saved=new Map(),calls=[];
   h.context.sessionStorage={getItem:k=>saved.get(k)||null,setItem:(k,v)=>saved.set(k,v),removeItem:k=>saved.delete(k)};
@@ -3186,7 +3203,13 @@ test("preparing recovery names and measures each stage instead of a frozen step"
   assert.match(progressText(h.run('telemetry(promotionJob)')), /Step 5\/8 · Remove original library file · Copying the recovery copy · 25%.*5\.00 GB \/ 20\.00 GB/);
   h.run('promotionJob.work={phase:"waiting_for_hash_slot",total_bytes:20e9};');
   assert.match(progressText(h.run('telemetry(promotionJob)')), /Step 5\/8 · Remove original library file · Waiting for a hash slot/);
+  // Its full read of the original is shown too, with a measured bar.
   h.run('promotionJob.work={phase:"verifying_original",bytes_read:5e9,total_bytes:20e9};');
+  const reread = h.run('telemetry(promotionJob)');
+  assert.match(progressText(reread), /Step 5\/8 · Remove original library file · Re-checking the original · 25%.*5\.00 GB \/ 20\.00 GB/);
+  assert.equal(meterOf(reread).max, 20e9);
+  // Any other phase there is still not recovery work.
+  h.run('promotionJob.work={phase:"verifying_candidate",bytes_read:5e9,total_bytes:20e9};');
   assert.equal(h.run('preserveWork(promotionJob)'), null);
   // A stopped promotion shows no current work.
   h.run('promotionJob.current_step=2;promotionJob.status="failed";');
