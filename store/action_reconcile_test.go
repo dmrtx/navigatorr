@@ -171,24 +171,39 @@ func TestPromotionSeriesTakeoverFromTerminalBatch(t *testing.T) {
 		reimport   = `{"promotion":{"approved":true},"promotion_reimport_history":[{"previous_import":{"done":true}}]}`
 	)
 	type child struct{ status, state string }
+	const (
+		rescanSent   = `{"batch_promotion_commands":{"rescan":{"sent_at":"t"}}}`
+		rescanIDOnly = `{"batch_promotion_commands":{"rescan":{"sent_at":"t","id":9}}}`
+		rescanDone   = `{"batch_promotion_commands":{"rescan":{"sent_at":"t","id":9,"done":true}}}`
+		rescanFailed = `{"batch_promotion_commands":{"rescan":{"sent_at":"t","id":9,"failed":true}}}`
+		rescanUnsent = `{"batch_promotion_commands":{"rescan":{}}}`
+	)
 	for _, tc := range []struct {
 		name        string
 		batchStatus string
+		batchState  string
 		children    []child
 		want        bool
 	}{
-		{"cancelled batch, all children completed", ActionStatusCancelled, []child{{ActionStatusCompleted, imported}, {ActionStatusCompleted, deleted}}, true},
-		{"failed batch, all children completed", ActionStatusFailed, []child{{ActionStatusCompleted, imported}}, true},
-		{"completed batch", ActionStatusCompleted, []child{{ActionStatusCompleted, imported}}, true},
-		{"cancelled batch without children", ActionStatusCancelled, nil, true},
-		{"children stopped before any side effect", ActionStatusCancelled, []child{{ActionStatusCompleted, imported}, {ActionStatusCancelled, clean}, {ActionStatusFailed, unapproved}}, true},
-		{"child cancelled after import", ActionStatusCancelled, []child{{ActionStatusCompleted, imported}, {ActionStatusCancelled, imported}}, false},
-		{"child failed after delete", ActionStatusCancelled, []child{{ActionStatusFailed, deleted}}, false},
-		{"child failed with reimport history", ActionStatusFailed, []child{{ActionStatusFailed, reimport}}, false},
-		{"child still waiting", ActionStatusCancelled, []child{{ActionStatusCompleted, imported}, {ActionStatusWaitingExternal, clean}}, false},
-		{"child still running", ActionStatusCancelled, []child{{ActionStatusRunning, clean}}, false},
-		{"batch still running", ActionStatusRunning, []child{{ActionStatusCompleted, imported}}, false},
-		{"batch waiting", ActionStatusWaitingExternal, nil, false},
+		{"rescan sent, outcome unknown", ActionStatusCancelled, rescanSent, []child{{ActionStatusCompleted, imported}}, false},
+		{"rescan accepted, still running", ActionStatusCancelled, rescanIDOnly, []child{{ActionStatusCompleted, imported}}, false},
+		{"rescan sent in failed batch", ActionStatusFailed, rescanSent, []child{{ActionStatusCompleted, imported}}, false},
+		{"rescan done", ActionStatusCancelled, rescanDone, []child{{ActionStatusCompleted, imported}}, true},
+		{"rescan confirmed failed", ActionStatusFailed, rescanFailed, []child{{ActionStatusCompleted, imported}}, true},
+		{"rescan never sent", ActionStatusCancelled, rescanUnsent, []child{{ActionStatusCompleted, imported}}, true},
+		{"batch state unreadable", ActionStatusCancelled, `not json`, []child{{ActionStatusCompleted, imported}}, false},
+		{"cancelled batch, all children completed", ActionStatusCancelled, "", []child{{ActionStatusCompleted, imported}, {ActionStatusCompleted, deleted}}, true},
+		{"failed batch, all children completed", ActionStatusFailed, "", []child{{ActionStatusCompleted, imported}}, true},
+		{"completed batch", ActionStatusCompleted, "", []child{{ActionStatusCompleted, imported}}, true},
+		{"cancelled batch without children", ActionStatusCancelled, "", nil, true},
+		{"children stopped before any side effect", ActionStatusCancelled, "", []child{{ActionStatusCompleted, imported}, {ActionStatusCancelled, clean}, {ActionStatusFailed, unapproved}}, true},
+		{"child cancelled after import", ActionStatusCancelled, "", []child{{ActionStatusCompleted, imported}, {ActionStatusCancelled, imported}}, false},
+		{"child failed after delete", ActionStatusCancelled, "", []child{{ActionStatusFailed, deleted}}, false},
+		{"child failed with reimport history", ActionStatusFailed, "", []child{{ActionStatusFailed, reimport}}, false},
+		{"child still waiting", ActionStatusCancelled, "", []child{{ActionStatusCompleted, imported}, {ActionStatusWaitingExternal, clean}}, false},
+		{"child still running", ActionStatusCancelled, "", []child{{ActionStatusRunning, clean}}, false},
+		{"batch still running", ActionStatusRunning, "", []child{{ActionStatusCompleted, imported}}, false},
+		{"batch waiting", ActionStatusWaitingExternal, "", nil, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, err := Open(filepath.Join(t.TempDir(), "batch.db"))
@@ -215,7 +230,10 @@ func TestPromotionSeriesTakeoverFromTerminalBatch(t *testing.T) {
 				t.Fatalf("batch claim: %v %v", ok, err)
 			}
 			batch, _ := s.GetActionInstance("batch")
-			batch.Status = tc.batchStatus
+			batch.Status, batch.StateJSON = tc.batchStatus, tc.batchState
+			if batch.StateJSON == "" {
+				batch.StateJSON = "{}"
+			}
 			if err := s.UpdateActionInstance(*batch); err != nil {
 				t.Fatal(err)
 			}

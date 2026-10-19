@@ -159,6 +159,8 @@ const promotionSideEffectFreeSQL = `COALESCE(json_extract(%[1]sstate_json, '$.pr
 //     spawned is finished: completed, or failed/cancelled with no side effect
 //     (a child that never reached approval has none either). Any child still
 //     active, or stopped after a side effect that may need recovery, keeps it.
+//     So does the batch's own series-wide RescanSeries while it was sent but is
+//     neither done nor confirmed failed, or when the batch state is unreadable.
 var promotionSeriesTakeoverSQL = fmt.Sprintf(`EXISTS (SELECT 1 FROM action_instances WHERE id=promotion_series_claims.owner_action_id AND (
 	status='completed'
 	OR (status IN ('failed','cancelled') AND action_name='promote_transcode_candidate'
@@ -166,6 +168,11 @@ var promotionSeriesTakeoverSQL = fmt.Sprintf(`EXISTS (SELECT 1 FROM action_insta
 			json_extract(state_json, '$.promotion.approved')=1 AND `+promotionSideEffectFreeSQL+`
 		ELSE 0 END)
 	OR (status IN ('failed','cancelled') AND action_name='transcode_batch'
+		AND CASE WHEN json_valid(state_json) THEN
+			COALESCE(json_extract(state_json, '$.batch_promotion_commands.rescan.sent_at'), '')=''
+			OR COALESCE(json_extract(state_json, '$.batch_promotion_commands.rescan.done'), 0)=1
+			OR COALESCE(json_extract(state_json, '$.batch_promotion_commands.rescan.failed'), 0)=1
+		ELSE 0 END
 		AND NOT EXISTS (SELECT 1 FROM action_instances c
 			WHERE c.action_name='promote_transcode_candidate'
 			AND CASE WHEN json_valid(c.inputs_json) THEN json_extract(c.inputs_json, '$.batch_promote_parent_id')=action_instances.id ELSE 0 END
