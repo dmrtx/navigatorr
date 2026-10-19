@@ -365,7 +365,7 @@ func (s *Server) tool(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			inputs := map[string]any{"kind": kind}
-			for _, key := range []string{"id", "decision", "reason"} {
+			for _, key := range []string{"id", "decision", "reason", "plan_digest"} {
 				if value, ok := body.Arguments[key]; ok {
 					inputs[key] = value
 				}

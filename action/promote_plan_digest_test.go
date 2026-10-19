@@ -75,3 +75,41 @@ func (h *promotionHarness) state(t *testing.T, id string) map[string]any {
 	}
 	return state
 }
+
+// The web UI approves through a durable background command, not a direct
+// Resume: the digest must survive that hop, and a stale one must still stop.
+func TestBackgroundApprovalCarriesTheReviewedPlanDigest(t *testing.T) {
+	h := newPromotionHarness(t)
+	r := h.run()
+	good := PromotionPlanDigest(h.state(t, r.ID)["promotion"])
+	for name, digest := range map[string]string{"missing": "", "stale": "sha256:0000"} {
+		inputs := map[string]any{"kind": "resume", "id": r.ID, "decision": "approve"}
+		if digest != "" {
+			inputs["plan_digest"] = digest
+		}
+		cmd, err := h.engine.QueueMaintenanceCommand(context.Background(), inputs, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := h.engine.ReconcileOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		after, _ := h.st.GetActionInstance(r.ID)
+		done, _ := h.st.GetActionInstance(cmd.ID)
+		if after.Status != StatusWaitingDecision || h.imports != 0 || done.Status == StatusCompleted {
+			t.Fatalf("%s digest: promotion %s, command %s, imports=%d", name, after.Status, done.Status, h.imports)
+		}
+	}
+	cmd, err := h.engine.QueueMaintenanceCommand(context.Background(), map[string]any{"kind": "resume", "id": r.ID, "decision": "approve", "plan_digest": good}, "reviewed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.engine.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := h.st.GetActionInstance(r.ID)
+	done, _ := h.st.GetActionInstance(cmd.ID)
+	if after.Status == StatusWaitingDecision || after.Status == StatusFailed || done.Status != StatusCompleted {
+		t.Fatalf("reviewed digest did not approve: promotion %s, command %s", after.Status, done.Status)
+	}
+}

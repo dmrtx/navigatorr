@@ -578,6 +578,8 @@ const (
 	recoveryReasonNoFingerprint = "no_stable_identity_for_the_original"
 	recoveryReasonLeftover      = "earlier_recovery_file_present"
 	recoveryReasonMountProbe    = "mount_probe_failed"
+	recoveryReasonRenameRefused = "move_aside_refused"
+	recoveryReasonLegacy        = "recorded_before_the_mode_existed"
 )
 
 // promotionChooseRecovery moves the original aside unless something rules it
@@ -682,7 +684,7 @@ func (e *Engine) promotionMakeRecoveryCopy(ctx context.Context, ec *ExecutionCon
 // private directory without reading it again.
 func (e *Engine) promotionRecordBackup(ctx context.Context, ec *ExecutionContext, p *promotionState) error {
 	if p.RecoveryMode == "" {
-		p.RecoveryMode = promotionRecoveryCopy
+		p.RecoveryMode, p.RecoveryModeReason = promotionRecoveryCopy, recoveryReasonLegacy
 	}
 	p.BackupVerified = true
 	p.BackupFingerprint = promotionKnownFingerprint(ctx, p.BackupPath, p.OriginalSHA)

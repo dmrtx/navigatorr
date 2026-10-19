@@ -289,7 +289,7 @@ func TestPromotionResumesAnInterruptedFallbackCopy(t *testing.T) {
 				t.Fatalf("interrupted copy: %s %s", r.Status, r.Error)
 			}
 			p := movedAsideState(t, h, r.ID)
-			if p.RecoveryMode != promotionRecoveryCopy || p.MoveAsideRefused == "" || p.BackupVerified || p.DeleteSentAt != "" || h.deletes != 0 {
+			if p.RecoveryMode != promotionRecoveryCopy || p.RecoveryModeReason != recoveryReasonRenameRefused || p.MoveAsideRefused == "" || p.BackupVerified || p.DeleteSentAt != "" || h.deletes != 0 {
 				t.Fatalf("state after the failed copy: %+v deletes=%d", p, h.deletes)
 			}
 			if err := testFileSHA(h.original, p.OriginalSHA); err != nil {

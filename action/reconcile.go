@@ -445,6 +445,11 @@ func copyReadAhead(ctx context.Context, dst io.Writer, src io.Reader) (int64, er
 		defer close(done)
 		defer close(full)
 		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
 			buf := hashChunks.Get().(*[]byte)
 			var c hashChunk
 			if err := ctx.Err(); err != nil {

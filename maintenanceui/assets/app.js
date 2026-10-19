@@ -3079,11 +3079,12 @@ function jobControls(job, detail = false) {
           return;
         }
         if (choice.decision === "approve" && job.action_name === "transcode_batch") {
-          // A batch is approved only against its replacement plan, never
-          // through a generic dialog that cannot show the files.
-          if (!job.batch?.promotion_plan_ready) throw new Error("The replacement plan is not ready yet. Refresh the queue.");
-          await reviewBatchPromotion(job.id);
-          return;
+          // A batch with a replacement plan is approved only against that
+          // plan. Without one this is a forwarded per-file decision.
+          if (job.batch?.promotion_plan_ready) {
+            await reviewBatchPromotion(job.id);
+            return;
+          }
         }
         if (choice.decision === "approve" && job.promotion) {
           await reviewFilePromotion(job.id);

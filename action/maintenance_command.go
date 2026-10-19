@@ -41,7 +41,7 @@ func (e *Engine) applyMaintenanceCommand(ctx context.Context, ec *ExecutionConte
 	var result *ActionResult
 	switch kind {
 	case "resume":
-		result, err = e.Resume(ctx, id, getString(ec.Inputs, "decision"), nil)
+		result, err = e.Resume(WithPromotionPlanDigest(ctx, getString(ec.Inputs, "plan_digest")), id, getString(ec.Inputs, "decision"), nil)
 	case "retry":
 		if inst.Status != store.ActionStatusFailed {
 			result, err = e.Status(ctx, id)
