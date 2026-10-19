@@ -30,6 +30,26 @@ func withCPUMeter(ctx context.Context, m *cpuMeter) context.Context {
 	return context.WithValue(ctx, cpuMeterKey{}, m)
 }
 
+type metricCPUMeterKey struct{}
+
+// withMetricCPUMeter carries the meter of a benchmark's metric passes on ctx.
+// It charges nothing by itself: metric units opt in with asMetricPhase.
+func withMetricCPUMeter(ctx context.Context, m *cpuMeter) context.Context {
+	if m == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, metricCPUMeterKey{}, m)
+}
+
+// asMetricPhase re-targets the children run under ctx at the metric meter.
+// Encode and metric units share one context, so without this a metric pass
+// would be charged to the encode phase; with no metric meter it charges
+// nothing at all.
+func asMetricPhase(ctx context.Context) context.Context {
+	m, _ := ctx.Value(metricCPUMeterKey{}).(*cpuMeter)
+	return context.WithValue(ctx, cpuMeterKey{}, m)
+}
+
 // chargeCPU charges a finished child to the meter on ctx, if any. Call it
 // after Run/Output returned, whatever the error: a failed or cancelled child
 // still spent its CPU time.

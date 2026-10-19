@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,6 +41,10 @@ type WorkerConfig struct {
 	// host CPUs evenly across max_parallel_jobs (no partition with one job),
 	// -1 disables partitioning. The worker pins x265's own frame-thread
 	// choice for the whole host alongside it, so the bitstream never changes.
+	// A positive value below 4 or not below the host CPU count is ignored
+	// (config load logs a warning). At startup the worker also checks on a
+	// synthetic clip that the partition leaves the encoded frames unchanged
+	// and turns it off if not (see /v1/health x265_partition).
 	X265Pools int `json:"x265_pools" yaml:"x265_pools"`
 	Quality   int `json:"quality" yaml:"quality"`
 	// HTTP daemon (PR1 `serve` mode) settings. Empty tokens mean "no auth",
@@ -115,6 +120,9 @@ func LoadWorkerConfig(configPath string) (*WorkerConfig, error) {
 	}
 	if cfg.X265Pools < -1 {
 		return nil, fmt.Errorf("parsing worker config %s: x265_pools %d must be >= -1", configPath, cfg.X265Pools)
+	}
+	if warning := x265PoolsWarning(cfg.X265Pools, hostCPUCount()); warning != "" {
+		log.Printf("worker config %s: %s", configPath, warning)
 	}
 	if strings.TrimSpace(cfg.HTTPListen) == "" {
 		cfg.HTTPListen = "127.0.0.1:8097"
@@ -216,8 +224,12 @@ type Worker struct {
 	schedulerInterval  time.Duration
 	schedulerSweepHook func(string) error
 
-	cfg             *WorkerConfig
-	ffmpegPath      string
+	cfg        *WorkerConfig
+	ffmpegPath string
+	// x265Partition is the startup self-check's verdict on the x265 pool
+	// partition; x265CheckRun replaces its ffmpeg invocation in tests.
+	x265Partition   x265PartitionState
+	x265CheckRun    func(ctx context.Context, dir string, args []string) ([]byte, error)
 	ffprobePath     string
 	benchmarkRunner BenchmarkRunner
 	afterSpawnHook  func(jobDir string, pid int)

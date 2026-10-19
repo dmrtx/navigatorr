@@ -280,6 +280,9 @@ func runServe(cfg *transcodeworker.WorkerConfig, configPath, selfExe string, arg
 	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
+	// Vets the x265 pool partition in the background; never gates readiness.
+	worker.StartX265PartitionCheck(sigCtx)
+
 	httpSrv := &http.Server{
 		Addr:              serveCfg.Listen,
 		Handler:           srv.Handler(),

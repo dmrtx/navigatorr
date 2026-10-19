@@ -68,9 +68,14 @@ func TestRealFinalValidationParallelMatchesSequential(t *testing.T) {
 			t.Fatal(err)
 		}
 		w := NewWorker(&WorkerConfig{StateDir: filepath.Join(dir, "state-"+name), AllowedRoots: []string{dir}, FFmpeg: ffmpeg, FFprobe: ffprobe, MaxParallelJobs: 1})
-		e, err := w.validateFinalPerceptual(ctx, jobDir, source, candidate, plan, "sha256:candidate", 1)
+		meter := &cpuMeter{}
+		e, err := w.validateFinalPerceptual(withCPUMeter(ctx, meter), jobDir, source, candidate, plan, "sha256:candidate", 1)
 		if err != nil || e == nil || e.Verdict != "pass" || e.VMAF == nil || e.CAMBI == nil {
 			t.Fatalf("%s: %+v %v", name, e, err)
+		}
+		// Extraction, VMAF and CAMBI children are all charged to the phase.
+		if ms := meter.activeComputeMs(); ms == nil || *ms <= 0 {
+			t.Fatalf("%s: final validation CPU not measured: %v", name, ms)
 		}
 		if left, _ := filepath.Glob(filepath.Join(jobDir, "quality-samples-*")); len(left) != 0 {
 			t.Fatalf("%s left scratch behind: %v", name, left)
