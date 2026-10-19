@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/jakenesler/navigatorr/arrservice"
+	"github.com/jakenesler/navigatorr/store"
 )
 
 // Promotion is a separate, explicitly approved action. transcode_media remains
@@ -138,10 +139,23 @@ func promoteFailed(err error) (StepResult, error) {
 	return StepResult{Status: StepFailed, Error: err.Error()}, nil
 }
 
-type promotionBusyError struct{}
+type promotionBusyError struct {
+	blocker store.PromotionSeriesOwnerInfo
+}
 
-func (*promotionBusyError) Error() string {
-	return "Waiting for the other promotion of this Sonarr series to finish or be recovered"
+func (e *promotionBusyError) Error() string {
+	what := "Waiting for the other promotion of this Sonarr series to finish or be recovered"
+	if e.blocker.ActionID == "" {
+		return what
+	}
+	name := e.blocker.ActionName
+	if name == "" {
+		name = "action"
+	}
+	if e.blocker.Status == "" {
+		return fmt.Sprintf("%s: blocked by %s %s", what, name, e.blocker.ActionID)
+	}
+	return fmt.Sprintf("%s: blocked by %s %s (%s)", what, name, e.blocker.ActionID, e.blocker.Status)
 }
 
 func (e *Engine) claimPromotionSeries(ec *ExecutionContext, service string, seriesID int) error {
@@ -149,12 +163,12 @@ func (e *Engine) claimPromotionSeries(ec *ExecutionContext, service string, seri
 	if parent := getString(ec.Inputs, "batch_promote_parent_id"); parent != "" {
 		owner = parent
 	}
-	claimed, err := e.deps.Store.ClaimPromotionSeries(service, seriesID, owner)
+	holder, err := e.deps.Store.ClaimPromotionSeriesOwner(service, seriesID, owner)
 	if err != nil {
 		return err
 	}
-	if !claimed {
-		return &promotionBusyError{}
+	if holder.ActionID != owner {
+		return &promotionBusyError{blocker: holder}
 	}
 	return nil
 }

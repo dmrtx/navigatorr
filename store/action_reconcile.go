@@ -138,37 +138,89 @@ func (s *Store) ClaimPromotionOriginal(service string, episodeFileID int, action
 	return owner == actionID, err
 }
 
+// promotionSideEffectFreeSQL is true for a promotion whose state proves that no
+// Sonarr or filesystem side effect was ever sent. The placeholder is the column
+// prefix ("" or an alias such as "c.").
+const promotionSideEffectFreeSQL = `COALESCE(json_extract(%[1]sstate_json, '$.promotion.commands.import.sent_at'), '')=''
+	AND COALESCE(json_extract(%[1]sstate_json, '$.promotion.new_episode_file_id'), 0)=0
+	AND COALESCE(json_extract(%[1]sstate_json, '$.promotion.delete_sent_at'), '')=''
+	AND COALESCE(json_extract(%[1]sstate_json, '$.promotion.old_removed'), 0)=0
+	AND COALESCE(json_extract(%[1]sstate_json, '$.filesystem_publish_started'), 0)=0
+	AND COALESCE(json_extract(%[1]sstate_json, '$.filesystem_published'), 0)=0
+	AND COALESCE(json_array_length(%[1]sstate_json, '$.promotion_reimport_history'), 0)=0`
+
+// promotionSeriesTakeoverSQL decides, against the current owner row in
+// action_instances, whether a different action may take over the reservation.
+//
+//   - A completed owner never needs the reservation again.
+//   - A failed or cancelled standalone promotion releases it only if it was
+//     approved and never sent a side effect.
+//   - A failed or cancelled transcode_batch releases it once every promotion it
+//     spawned is finished: completed, or failed/cancelled with no side effect
+//     (a child that never reached approval has none either). Any child still
+//     active, or stopped after a side effect that may need recovery, keeps it.
+var promotionSeriesTakeoverSQL = fmt.Sprintf(`EXISTS (SELECT 1 FROM action_instances WHERE id=promotion_series_claims.owner_action_id AND (
+	status='completed'
+	OR (status IN ('failed','cancelled') AND action_name='promote_transcode_candidate'
+		AND CASE WHEN json_valid(state_json) THEN
+			json_extract(state_json, '$.promotion.approved')=1 AND `+promotionSideEffectFreeSQL+`
+		ELSE 0 END)
+	OR (status IN ('failed','cancelled') AND action_name='transcode_batch'
+		AND NOT EXISTS (SELECT 1 FROM action_instances c
+			WHERE c.action_name='promote_transcode_candidate'
+			AND CASE WHEN json_valid(c.inputs_json) THEN json_extract(c.inputs_json, '$.batch_promote_parent_id')=action_instances.id ELSE 0 END
+			AND NOT (c.status='completed' OR (c.status IN ('failed','cancelled')
+				AND CASE WHEN json_valid(c.state_json) THEN `+promotionSideEffectFreeSQL+` ELSE 0 END)))))
+)`, "", "c.")
+
+// PromotionSeriesOwnerInfo describes the action currently holding a series
+// reservation.
+type PromotionSeriesOwnerInfo struct {
+	ActionID   string
+	ActionName string
+	Status     string
+}
+
+// PromotionSeriesOwner reports who holds the reservation, so a waiting
+// promotion can name its blocker.
+func (s *Store) PromotionSeriesOwner(service string, seriesID int) (PromotionSeriesOwnerInfo, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.promotionSeriesOwner(strings.ToLower(strings.TrimSpace(service)), seriesID)
+}
+
+func (s *Store) promotionSeriesOwner(service string, seriesID int) (PromotionSeriesOwnerInfo, error) {
+	var o PromotionSeriesOwnerInfo
+	err := s.db.QueryRow(`SELECT c.owner_action_id, COALESCE(a.action_name, ''), COALESCE(a.status, '')
+		FROM promotion_series_claims c LEFT JOIN action_instances a ON a.id=c.owner_action_id
+		WHERE c.service=? AND c.series_id=?`, service, seriesID).Scan(&o.ActionID, &o.ActionName, &o.Status)
+	return o, err
+}
+
 // ClaimPromotionSeries coordinates the whole promotion, including external
 // waits and the final series-wide rescan. Batch children share their parent's
 // reservation. Failed or cancelled owners retain it when Sonarr side effects
-// may need recovery. A standalone action stopped before its first import can
-// safely release the series; its original-file reservation remains intact.
+// may need recovery; see promotionSeriesTakeoverSQL for when it is released.
 func (s *Store) ClaimPromotionSeries(service string, seriesID int, actionID string) (bool, error) {
+	owner, err := s.ClaimPromotionSeriesOwner(service, seriesID, actionID)
+	return owner.ActionID == actionID, err
+}
+
+// ClaimPromotionSeriesOwner is ClaimPromotionSeries returning the resulting
+// owner, which is actionID on success and the blocking action otherwise.
+func (s *Store) ClaimPromotionSeriesOwner(service string, seriesID int, actionID string) (PromotionSeriesOwnerInfo, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	service = strings.ToLower(strings.TrimSpace(service))
 	if service == "" || seriesID <= 0 || actionID == "" {
-		return false, fmt.Errorf("service, positive series_id, and action_id are required")
+		return PromotionSeriesOwnerInfo{}, fmt.Errorf("service, positive series_id, and action_id are required")
 	}
 	_, err := s.db.Exec(`INSERT INTO promotion_series_claims(service, series_id, owner_action_id)
 		VALUES (?, ?, ?) ON CONFLICT(service, series_id) DO UPDATE SET owner_action_id=excluded.owner_action_id
-		WHERE EXISTS (SELECT 1 FROM action_instances WHERE id=promotion_series_claims.owner_action_id AND (
-			status='completed' OR (status IN ('failed','cancelled') AND action_name='promote_transcode_candidate'
-			AND CASE WHEN json_valid(state_json) THEN
-				json_extract(state_json, '$.promotion.approved')=1
-				AND COALESCE(json_extract(state_json, '$.promotion.commands.import.sent_at'), '')=''
-				AND COALESCE(json_extract(state_json, '$.promotion.new_episode_file_id'), 0)=0
-				AND COALESCE(json_extract(state_json, '$.promotion.delete_sent_at'), '')=''
-				AND COALESCE(json_extract(state_json, '$.promotion.old_removed'), 0)=0
-				AND COALESCE(json_extract(state_json, '$.filesystem_publish_started'), 0)=0
-				AND COALESCE(json_extract(state_json, '$.filesystem_published'), 0)=0
-				AND COALESCE(json_array_length(state_json, '$.promotion_reimport_history'), 0)=0
-			ELSE 0 END)))`,
+		WHERE `+promotionSeriesTakeoverSQL,
 		service, seriesID, actionID)
 	if err != nil {
-		return false, err
+		return PromotionSeriesOwnerInfo{}, err
 	}
-	var owner string
-	err = s.db.QueryRow(`SELECT owner_action_id FROM promotion_series_claims WHERE service=? AND series_id=?`, service, seriesID).Scan(&owner)
-	return owner == actionID, err
+	return s.promotionSeriesOwner(service, seriesID)
 }

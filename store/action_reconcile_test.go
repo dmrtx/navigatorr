@@ -161,3 +161,82 @@ func TestPromotionSeriesReservationReleasesOnlyBeforeFirstImport(t *testing.T) {
 		}
 	}
 }
+
+func TestPromotionSeriesTakeoverFromTerminalBatch(t *testing.T) {
+	const (
+		clean      = `{"promotion":{"approved":true}}`
+		unapproved = `{}`
+		imported   = `{"promotion":{"approved":true,"commands":{"import":{"sent_at":"accepted-or-uncertain"}}}}`
+		deleted    = `{"promotion":{"approved":true,"delete_sent_at":"sent"}}`
+		reimport   = `{"promotion":{"approved":true},"promotion_reimport_history":[{"previous_import":{"done":true}}]}`
+	)
+	type child struct{ status, state string }
+	for _, tc := range []struct {
+		name        string
+		batchStatus string
+		children    []child
+		want        bool
+	}{
+		{"cancelled batch, all children completed", ActionStatusCancelled, []child{{ActionStatusCompleted, imported}, {ActionStatusCompleted, deleted}}, true},
+		{"failed batch, all children completed", ActionStatusFailed, []child{{ActionStatusCompleted, imported}}, true},
+		{"completed batch", ActionStatusCompleted, []child{{ActionStatusCompleted, imported}}, true},
+		{"cancelled batch without children", ActionStatusCancelled, nil, true},
+		{"children stopped before any side effect", ActionStatusCancelled, []child{{ActionStatusCompleted, imported}, {ActionStatusCancelled, clean}, {ActionStatusFailed, unapproved}}, true},
+		{"child cancelled after import", ActionStatusCancelled, []child{{ActionStatusCompleted, imported}, {ActionStatusCancelled, imported}}, false},
+		{"child failed after delete", ActionStatusCancelled, []child{{ActionStatusFailed, deleted}}, false},
+		{"child failed with reimport history", ActionStatusFailed, []child{{ActionStatusFailed, reimport}}, false},
+		{"child still waiting", ActionStatusCancelled, []child{{ActionStatusCompleted, imported}, {ActionStatusWaitingExternal, clean}}, false},
+		{"child still running", ActionStatusCancelled, []child{{ActionStatusRunning, clean}}, false},
+		{"batch still running", ActionStatusRunning, []child{{ActionStatusCompleted, imported}}, false},
+		{"batch waiting", ActionStatusWaitingExternal, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := Open(filepath.Join(t.TempDir(), "batch.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			must := func(inst ActionInstance) {
+				t.Helper()
+				if err := s.CreateActionInstance(inst); err != nil {
+					t.Fatal(err)
+				}
+			}
+			must(ActionInstance{ID: "batch", ActionName: "transcode_batch", Status: ActionStatusWaitingExternal})
+			must(ActionInstance{ID: "standalone", ActionName: "promote_transcode_candidate", Status: ActionStatusWaitingExternal})
+			// Children of another batch never influence this reservation.
+			must(ActionInstance{ID: "unrelated", ActionName: "promote_transcode_candidate", Status: ActionStatusWaitingExternal,
+				InputsJSON: `{"batch_promote_parent_id":"other-batch"}`})
+			for i, c := range tc.children {
+				must(ActionInstance{ID: "child-" + string(rune('a'+i)), ActionName: "promote_transcode_candidate",
+					Status: c.status, StateJSON: c.state, InputsJSON: `{"batch_promote_parent_id":"batch"}`})
+			}
+			if ok, err := s.ClaimPromotionSeries("sonarr", 7, "batch"); err != nil || !ok {
+				t.Fatalf("batch claim: %v %v", ok, err)
+			}
+			batch, _ := s.GetActionInstance("batch")
+			batch.Status = tc.batchStatus
+			if err := s.UpdateActionInstance(*batch); err != nil {
+				t.Fatal(err)
+			}
+			ok, err := s.ClaimPromotionSeries("sonarr", 7, "standalone")
+			if err != nil || ok != tc.want {
+				t.Fatalf("takeover = %v (err %v), want %v", ok, err, tc.want)
+			}
+			owner, err := s.PromotionSeriesOwner("sonarr", 7)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantOwner := "batch"
+			if tc.want {
+				wantOwner = "standalone"
+			}
+			if owner.ActionID != wantOwner {
+				t.Fatalf("owner = %+v, want %s", owner, wantOwner)
+			}
+			if !tc.want && (owner.ActionName != "transcode_batch" || owner.Status != tc.batchStatus) {
+				t.Fatalf("owner details = %+v", owner)
+			}
+		})
+	}
+}
