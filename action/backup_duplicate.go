@@ -72,7 +72,7 @@ func (e *Engine) DiscardDuplicateTranscodeBackup(ctx context.Context, id string)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := e.promotionVerifyByIdentity(ctx, p.BackupPath, p.OriginalSHA, p.BackupFingerprint, true); err != nil {
+	if _, err := e.promotionVerifyByIdentity(ctx, p.BackupPath, p.OriginalSHA, p.BackupFingerprint); err != nil {
 		return nil, err
 	}
 	for _, path := range []string{p.BackupPath, p.BackupPath + ".partial"} {

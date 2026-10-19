@@ -58,6 +58,8 @@ func (e *Engine) applyMaintenanceCommand(ctx context.Context, ec *ExecutionConte
 		result, err = e.DiscardDuplicateTranscodeBackup(ctx, id)
 	case "discard":
 		result, err = e.DiscardTranscodeBackup(ctx, id)
+	case "restore":
+		result, err = e.RestoreTranscodeBackup(ctx, id)
 	case "prepare_batch_promotion":
 		keys := []string{}
 		switch raw := ec.Inputs["item_keys"].(type) {

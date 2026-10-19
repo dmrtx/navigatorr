@@ -30,8 +30,10 @@ inputs on resume, so the approval remains tied to the persisted plan.
 
 After approval, the workflow:
 
-1. Reserves the original Sonarr episodeFile for this promotion and creates a
-   separate recovery copy with a verified original SHA-256.
+1. Reserves the original Sonarr episodeFile for this promotion and verifies its
+   SHA-256. In `copy` recovery mode it also creates a separate recovery copy
+   here; in `move_aside` mode (the default where the filesystem supports it) no
+   copy is made and the original stays in place until step 4.
 2. Rechecks the original, candidate, episode associations and series path, then
    submits one Sonarr `ManualImport` with every affected episode ID.
 3. Confirms all affected episodes use one new file ID, checks Sonarr's HEVC
@@ -39,7 +41,10 @@ After approval, the workflow:
    equal the validated candidate.
 4. Reloads the old file ID and episode associations immediately before any old
    file deletion. An ID whose path changed, an old ID still in use, or a path
-   overlapping the new file stops the workflow with its recovery copy retained.
+   overlapping the new file stops the workflow with its recovery retained. In
+   `move_aside` mode the verified original is renamed (no bytes copied, no
+   replacement of an existing file) into the promotion's private recovery
+   directory at this point, just before the old file is removed.
 5. Runs `RenameFiles` when needed to move the active file outside
    `.navigatorr-candidates`, rescans the series, and verifies the original file
    ID is absent and every approved episode has the verified new file.
@@ -53,6 +58,27 @@ size in additional storage. It is retained on failures or uncertain outcomes,
 and `recovery_path` identifies it. Savings are final only after successful
 cleanup. Recovery paths are confined to write roots and symlink traversal is
 rejected.
+
+In `copy` mode the recovery file is an independent copy, not a link to the
+original, and promotion temporarily needs approximately the original's size in
+additional storage. In `move_aside` mode the recovery file **is** the original,
+moved rather than copied, so there is no second copy of its bytes and no extra
+storage is needed. A same-name filesystem promotion whose publish fails moves
+it back to the empty library path automatically; if a crash or a cancel
+prevents that, `transcode_backups(mode=restore)` (or **Move original back** in
+the recovery list) does it explicitly, only while the library path is empty,
+after a full read against the recorded SHA-256, with a no-replace rename.
+
+Residual risk of `move_aside`: until the move, the original sits at its library
+path, where Sonarr, another tool or a person can still change or remove it. One
+run trusts the recorded file identity (inode, size, mtime, ctime) between its
+full read and the rename; a wait, restart or any doubt reads the whole file
+again, and a mismatch or a missing original stops with nothing moved. If the
+library itself removes the original before it is moved, no recovery exists and
+the promotion stops saying so. After the move, the recovery is the only copy
+of the original until the replacement is finalized, which is why discarding it
+is refused while the candidate has not replaced it. Where the rename is refused
+or the mount cannot keep file identity, the promotion falls back to `copy`.
 
 ## Radarr movies
 
@@ -92,9 +118,11 @@ removes the previous files before copying/moving the replacement, including
 
 Promotion therefore requires the original and candidate to be physically
 accessible inside the selected Sonarr series path, sends no download ID, and
-preserves the recovery copy before calling Sonarr. It does not guess remote path
-aliases. The copy also protects recovery if upstream import behavior differs
-between versions.
+keeps the original recoverable before calling Sonarr: a verified recovery copy
+in `copy` mode, or the verified original itself, moved aside right before the
+old file is removed, in `move_aside` mode (see the residual risk above). It does
+not guess remote path aliases. Either form protects recovery if upstream import
+behavior differs between versions.
 
 ## Timeouts, restarts and retry
 

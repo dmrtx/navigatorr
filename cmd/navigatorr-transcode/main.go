@@ -139,6 +139,9 @@ func main() {
 		}
 		jobID := subcmdArgs[0]
 		res, err := worker.Cancel(ctx, jobID)
+		// This process exits right after the answer; give the job's share
+		// partial removal (started in the background, bounded) time to run.
+		worker.WaitBackgroundCleanup()
 		printJSON(res)
 		if err != nil {
 			os.Exit(1)
