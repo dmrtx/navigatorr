@@ -291,7 +291,7 @@ func (w *Worker) recheckX265PartitionAfterSlotChange() {
 	if running {
 		return
 	}
-	w.StartX265PartitionCheck(context.Background())
+	w.x265RecheckDone = w.StartX265PartitionCheck(context.Background())
 }
 
 // compareX265Partition returns one line per encode whose frames differ with a

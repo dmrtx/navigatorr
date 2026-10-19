@@ -13,6 +13,10 @@ import (
 	"github.com/jakenesler/navigatorr/transcode"
 )
 
+// Workers built in tests find the real ffmpeg on PATH; saving a split must not
+// start real background encodes in their state directories.
+func init() { slotChangeRecheck = false }
+
 func seedSlotJob(t *testing.T, w *Worker, stub *stubSpawn, id, status string, kind slotKind, running bool, age time.Duration) {
 	t.Helper()
 	job := &JobRecord{ID: id, Status: status, Source: "/media/" + id + ".mkv", Candidate: "/media/" + id + ".out.mkv", CreatedAt: time.Now().UTC().Add(-age)}
@@ -544,6 +548,65 @@ func TestSlotsEndpointDistinguishesStorageFailureFromInvalidSplit(t *testing.T) 
 	}
 	if resp := doRequest(t, srv, "PUT", "/v1/slots", `{"video_slots":2,"podcast_slots":2}`, "secret"); resp.Code != 400 {
 		t.Fatalf("an invalid split is a 400: %d", resp.Code)
+	}
+}
+
+// waitForSlotRecheck waits until no background recheck started by a slot
+// change is left running, so the test never ends with one still writing.
+func waitForSlotRecheck(t *testing.T, w *Worker) {
+	t.Helper()
+	deadline := time.After(15 * time.Second)
+	for {
+		w.x265Recheck.Lock()
+		done := w.x265RecheckDone
+		w.x265Recheck.Unlock()
+		if done == nil {
+			return
+		}
+		select {
+		case <-done:
+		case <-deadline:
+			t.Fatal("background recheck never finished")
+		}
+		// A recheck can start another when the split changed meanwhile.
+		w.x265Recheck.Lock()
+		next := w.x265RecheckDone
+		w.x265Recheck.Unlock()
+		if next == done {
+			return
+		}
+	}
+}
+
+// Saving a split proves the pools it can produce in the background, once.
+func TestSavingASplitProvesItsPoolsInTheBackground(t *testing.T) {
+	slotChangeRecheck = true
+	t.Cleanup(func() { slotChangeRecheck = false })
+	f := &fakeX265Check{}
+	w := newSelfCheckWorker(t, WorkerConfig{MaxParallelJobs: 4}, f)
+	if _, err := w.SetSlotSplit(transcode.SlotSplit{VideoSlots: 3, PodcastSlots: 1}); err != nil {
+		t.Fatal(err)
+	}
+	waitForSlotRecheck(t, w)
+	if st := w.X265PartitionStatus(); st.Status != x265CheckPassed {
+		t.Fatalf("pools of the new split never proved: %+v", st)
+	}
+	if rec, ok := w.loadX265PartitionCheck(w.x265PartitionKey()); !ok || rec.Status != x265CheckPassed {
+		t.Fatalf("no stored verdict for the new split: %+v", rec)
+	}
+	// A verdict now covers the key: saving the same split again checks nothing.
+	f.mu.Lock()
+	before := len(f.calls)
+	f.mu.Unlock()
+	if _, err := w.SetSlotSplit(transcode.SlotSplit{VideoSlots: 3, PodcastSlots: 1}); err != nil {
+		t.Fatal(err)
+	}
+	waitForSlotRecheck(t, w)
+	f.mu.Lock()
+	after := len(f.calls)
+	f.mu.Unlock()
+	if after != before {
+		t.Fatalf("an already proved split was checked again: %d new encodes", after-before)
 	}
 }
 
