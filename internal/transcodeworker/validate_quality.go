@@ -337,16 +337,13 @@ const minMetricThreadsPerPass = 2
 
 // finalValidationConcurrency runs up to maxFinalValidationConcurrency windows
 // at once, but only as many as this job's share of the host CPUs (CPUs ÷
-// max_parallel_jobs) can give minMetricThreadsPerPass libvmaf threads each.
+// video jobs running together) can give minMetricThreadsPerPass libvmaf threads each.
 // An explicit metric_threads fixes the threads of every pass, so windows are
 // limited to what that many threads each fit in the job's share (and, like
 // sizeModeMetricConcurrency, a count below minMetricThreadsPerPass runs the
 // windows one at a time).
 func (w *Worker) finalValidationConcurrency(windows int) int {
-	jobs := 1
-	if w != nil && w.cfg != nil && w.cfg.MaxParallelJobs > 1 {
-		jobs = w.cfg.MaxParallelJobs
-	}
+	jobs := w.videoJobsSharingCPU()
 	perPass := minMetricThreadsPerPass
 	if w != nil && w.cfg != nil && w.cfg.MetricThreads > 0 {
 		if w.cfg.MetricThreads < minMetricThreadsPerPass {

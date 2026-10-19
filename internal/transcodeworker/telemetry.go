@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -174,38 +173,35 @@ func telemetryFor(job *JobRecord, now time.Time) transcode.JobTelemetry {
 
 // slotSnapshot is observational only. Runner reservations include staging and
 // publishing; phase=encoding identifies work actually using the encoder.
+//
+// With jobID set and the ceiling split, total and used describe the pool that
+// job draws from and position counts only queued jobs of its kind; otherwise
+// they cover the whole ceiling.
 func (w *Worker) slotSnapshot(jobID string) (total, used, position int) {
-	total = w.cfg.MaxParallelJobs
-	if total < 1 {
-		total = 1
-	}
-	entries, err := os.ReadDir(w.cfg.StateDir)
+	limits := w.slotLimits()
+	total = limits.Ceiling
+	use, err := w.observeSlotUse(false)
 	if err != nil {
 		return total, 0, 0
 	}
-	var queued []*JobRecord
-	for _, entry := range entries {
-		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
-			continue
-		}
-		dir := filepath.Join(w.cfg.StateDir, entry.Name())
-		if job, err := LoadJob(filepath.Join(dir, "job.json")); err == nil && job.ID == entry.Name() {
-			if (job.Status == "running" || job.Status == "queued") && job.PID > 0 {
-				used++
-			} else if job.Status == "queued" {
-				queued = append(queued, job)
-			}
-		}
-		if bench, err := LoadBenchmark(filepath.Join(dir, "benchmark.json")); err == nil && bench.ID == entry.Name() {
-			if (bench.Status == "running" || bench.Status == "queued") && bench.PID > 0 {
-				used++
-			}
+	used = use.Video + use.Podcast
+	kind := use.kinds[jobID] // video unless the job is a podcast job
+	splitView := limits.Split && jobID != ""
+	if splitView {
+		total, used = limits.Video, use.Video
+		if kind == slotKindPodcast {
+			total, used = limits.Podcast, use.Podcast
 		}
 	}
-	sortQueuedJobs(queued)
-	for i, job := range queued {
+	sortQueuedJobs(use.Queued)
+	n := 0
+	for _, job := range use.Queued {
+		if splitView && jobSlotKind(job) != kind {
+			continue
+		}
+		n++
 		if job.ID == jobID {
-			position = i + 1
+			position = n
 			break
 		}
 	}

@@ -610,6 +610,20 @@
           <section id="worker-activity" class="worker-activity" aria-label="Video worker activity">
             <p id="activity-scheduler" class="metadata" role="status"></p>
             <div class="activity-heading"><strong id="worker-capacity">Checking worker slots…</strong><span id="activity-checked" class="metadata"></span></div>
+            <p id="worker-slot-usage" class="metadata" role="status" hidden></p>
+            <details id="worker-slot-split" class="worker-slot-split" hidden>
+              <summary>Assign slots to video and podcast</summary>
+              <form id="worker-slot-form">
+                <div class="form-grid">
+                  <label>Video slots<input id="slot-video" type="number" min="1" step="1" inputmode="numeric" required /></label>
+                  <label>Podcast slots<input id="slot-podcast" type="number" min="1" step="1" inputmode="numeric" required /></label>
+                </div>
+                <p id="worker-slot-ceiling" class="metadata"></p>
+                <p class="muted">Applies when the next job starts. Running jobs are never interrupted, so a pool lowered below its use admits nothing until it drains. A video job running alone uses all CPUs; encodes that run together share them.</p>
+                <div class="submit-actions"><button id="worker-slot-share" type="button" class="quiet">Share all slots</button><button id="worker-slot-apply" type="submit" class="primary">Apply</button></div>
+                <p id="worker-slot-note" class="metadata" role="status"></p>
+              </form>
+            </details>
             <div id="worker-slots" class="worker-slots"></div>
           </section>
           <div id="jobs-list"></div>

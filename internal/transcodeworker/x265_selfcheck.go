@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -22,7 +23,10 @@ import (
 // same frames with and without it. That holds on the x265 builds it was
 // checked against; a different libx265 could break it silently, so the worker
 // re-proves it at startup on a tiny synthetic clip and turns the partition off
-// when the decoded frames differ.
+// when the decoded frames differ. The pool size follows the number of video
+// jobs running together, so every partition the current slot limits can
+// produce (x265PartitionCandidates) is proved, and a slot change that adds one
+// proves it again.
 
 const (
 	x265CheckFile    = "x265-partition-check.json"
@@ -55,7 +59,7 @@ const (
 // Only conclusive verdicts are stored.
 type x265PartitionCheck struct {
 	Status     string    `json:"status"` // passed | failed
-	Params     string    `json:"params"`
+	Params     string    `json:"params"` // the candidate partitions checked, comma-separated
 	CPUs       int       `json:"cpus"`
 	Detail     string    `json:"detail,omitempty"`
 	CheckedAt  time.Time `json:"checked_at"`
@@ -85,7 +89,7 @@ type x265PartitionStatus struct {
 // X265PartitionStatus reports the configured partition, whether encodes use
 // it, and the self-check outcome. It reads memory only, so health stays cheap.
 func (w *Worker) X265PartitionStatus() x265PartitionStatus {
-	params := w.configuredX265ThreadParams()
+	params := w.x265PartitionKey()
 	st := &w.x265Partition
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -189,7 +193,7 @@ func (w *Worker) setX265PartitionState(status, detail string, durationMs int64, 
 // While it runs a previous failed verdict keeps the partition off.
 func (w *Worker) StartX265PartitionCheck(ctx context.Context) <-chan struct{} {
 	done := make(chan struct{})
-	params := w.configuredX265ThreadParams()
+	params := w.x265PartitionKey()
 	switch {
 	case w == nil || w.cfg == nil:
 		close(done)
@@ -199,7 +203,7 @@ func (w *Worker) StartX265PartitionCheck(ctx context.Context) <-chan struct{} {
 		close(done)
 		return done
 	case params == "":
-		w.setX265PartitionState(x265CheckNotNeeded, "no pool partition for this host and max_parallel_jobs", 0, nil)
+		w.setX265PartitionState(x265CheckNotNeeded, "no pool partition for this host and these slot limits", 0, nil)
 		close(done)
 		return done
 	}
@@ -217,6 +221,11 @@ func (w *Worker) StartX265PartitionCheck(ctx context.Context) <-chan struct{} {
 	go func() {
 		defer close(done)
 		w.RunX265PartitionCheck(ctx)
+		// A slot split saved while this check ran changed the pools to prove;
+		// that change could not start a check of its own.
+		if ctx.Err() == nil && w.x265PartitionKey() != params {
+			w.recheckX265PartitionAfterSlotChange()
+		}
 	}()
 	return done
 }
@@ -227,13 +236,14 @@ func (w *Worker) StartX265PartitionCheck(ctx context.Context) <-chan struct{} {
 // stored verdict job processes read. A check that cannot run (no ffmpeg or
 // libx265, cancelled, out of time) is inconclusive and changes nothing.
 func (w *Worker) RunX265PartitionCheck(ctx context.Context) x265PartitionCheck {
-	params := w.configuredX265ThreadParams()
+	candidates := w.x265PartitionCandidates()
+	params := strings.Join(candidates, ",")
 	rec := x265PartitionCheck{Params: params, CPUs: hostCPUCount()}
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, x265CheckTimeout)
 	defer cancel()
 
-	mismatches, err := w.compareX265Partition(ctx, params)
+	mismatches, err := w.compareX265Partition(ctx, candidates)
 	rec.CheckedAt, rec.DurationMs = time.Now().UTC(), time.Since(start).Milliseconds()
 	switch {
 	case err != nil:
@@ -258,10 +268,37 @@ func (w *Worker) RunX265PartitionCheck(ctx context.Context) x265PartitionCheck {
 	return rec
 }
 
-// compareX265Partition returns one line per encode whose frames differ with the
-// partition, or an error when the comparison could not be made. A failing
-// partitioned encode counts as a difference; a failing baseline does not.
-func (w *Worker) compareX265Partition(ctx context.Context, params string) ([]string, error) {
+// recheckX265PartitionAfterSlotChange proves the partitions a new slot split
+// can produce, when that is a set no stored verdict covers. It runs in the
+// background and does nothing without ffmpeg or while a check is running.
+func (w *Worker) recheckX265PartitionAfterSlotChange() {
+	if w == nil || w.cfg == nil || w.ffmpegPath == "" {
+		return
+	}
+	// Serialized so two saves close together cannot both see no check running.
+	w.x265Recheck.Lock()
+	defer w.x265Recheck.Unlock()
+	key := w.x265PartitionKey()
+	if key == "" {
+		return
+	}
+	if _, ok := w.loadX265PartitionCheck(key); ok {
+		return
+	}
+	w.x265Partition.mu.Lock()
+	running := w.x265Partition.status == x265CheckRunning
+	w.x265Partition.mu.Unlock()
+	if running {
+		return
+	}
+	w.StartX265PartitionCheck(context.Background())
+}
+
+// compareX265Partition returns one line per encode whose frames differ with a
+// candidate partition, or an error when the comparison could not be made. A
+// failing partitioned encode counts as a difference; a failing baseline does
+// not.
+func (w *Worker) compareX265Partition(ctx context.Context, candidates []string) ([]string, error) {
 	if w.ffmpegPath == "" {
 		return nil, errors.New("ffmpeg not configured")
 	}
@@ -313,8 +350,16 @@ func (w *Worker) compareX265Partition(ctx context.Context, params string) ([]str
 
 	var mismatches []string
 	for _, c := range cases {
+		variants := []struct{ name, threads string }{{"baseline", ""}}
+		for i, params := range candidates {
+			name := "partitioned"
+			if i > 0 {
+				name += strconv.Itoa(i + 1)
+			}
+			variants = append(variants, struct{ name, threads string }{name, params})
+		}
 		digests := map[string]string{}
-		for _, variant := range []struct{ name, threads string }{{"baseline", ""}, {"partitioned", params}} {
+		for _, variant := range variants {
 			dir := filepath.Join(scratch, c.name+"-"+variant.name)
 			if err := os.Mkdir(dir, 0o700); err != nil {
 				return nil, err
@@ -325,15 +370,15 @@ func (w *Worker) compareX265Partition(ctx context.Context, params string) ([]str
 			}
 			if err != nil {
 				if variant.threads != "" && ctx.Err() == nil && digests["baseline"] != "" {
-					mismatches = append(mismatches, fmt.Sprintf("%s: partitioned encode failed: %v", c.name, err))
-					break
+					mismatches = append(mismatches, fmt.Sprintf("%s: partitioned encode failed (%s): %v", c.name, variant.threads, err))
+					continue
 				}
 				return nil, fmt.Errorf("%s %s: %w", c.name, variant.name, err)
 			}
 			_ = os.RemoveAll(dir)
-		}
-		if p, ok := digests["partitioned"]; ok && p != digests["baseline"] {
-			mismatches = append(mismatches, c.name+": framemd5 differs")
+			if variant.threads != "" && digests[variant.name] != digests["baseline"] {
+				mismatches = append(mismatches, fmt.Sprintf("%s: framemd5 differs with %s", c.name, variant.threads))
+			}
 		}
 	}
 	return mismatches, nil

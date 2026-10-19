@@ -584,6 +584,10 @@ main {
 .comparison-slider input { flex:1; min-width:0; accent-color:var(--forest); }
 .worker-activity { padding:10px 0; border-bottom:1px solid var(--line); }
 .activity-heading { display:flex; justify-content:space-between; gap:8px; font-size:11px; }
+.worker-slot-split { margin-top:8px; font-size:12px; }
+.worker-slot-split[open] form { margin-top:8px; }
+.worker-slot-split .form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; max-width:420px; }
+.worker-slot-split .submit-actions { display:flex; gap:8px; margin-top:8px; }
 .worker-slots { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(270px,100%),1fr)); gap:8px; margin-top:8px; }
 .worker-slot { min-width:0; min-height:82px; padding:8px; border:1px solid var(--line); border-radius:4px; }
 .worker-slot strong { display:block; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }

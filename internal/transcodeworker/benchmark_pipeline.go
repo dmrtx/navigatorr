@@ -60,10 +60,7 @@ func (w *Worker) sizeModeMetricConcurrency(record *BenchmarkRecord, metricN int)
 	if record == nil || record.Mode != "size" || record.Concurrency != nil || metricN >= sizeModeMetricWorkers {
 		return metricN
 	}
-	jobs := 1
-	if w != nil && w.cfg != nil && w.cfg.MaxParallelJobs > 1 {
-		jobs = w.cfg.MaxParallelJobs
-	}
+	jobs := w.videoJobsSharingCPU()
 	threads := w.metricThreads(sizeModeMetricWorkers)
 	if threads < minMetricThreadsPerPass || threads*sizeModeMetricWorkers*jobs > hostCPUCount() {
 		return metricN

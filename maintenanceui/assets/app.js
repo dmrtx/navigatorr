@@ -3968,39 +3968,98 @@ function activityElapsed(value) {
   const seconds = Math.max(0,Math.floor((Date.now()-at)/1000));
   return seconds >= 60 ? `${Math.floor(seconds/60)}m ${seconds%60}s` : `${seconds}s`;
 }
+// Where a job sits in the slot grid. Without a split every kind shares the
+// whole grid; with one, video work (conversions and benchmarks) takes the first
+// video.total slots and podcast work the next podcast.total.
+function slotPools(activity) {
+  const split = activity.slots?.split ? activity.slots : null;
+  const total = activity.worker_slots_total;
+  if (!split) return {split: null, total, range: () => [0, total], label: i => `Slot ${i+1}`};
+  const video = split.video.total, podcast = split.podcast.total;
+  return {
+    split, total: Math.min(total, video + podcast),
+    range: kind => kind === "podcast" ? [video, video + podcast] : [0, video],
+    label: i => i < video ? `Video slot ${i+1}` : `Podcast slot ${i-video+1}`,
+  };
+}
+function renderSlotUsage(activity) {
+  const slots = activity.slots, usage = $("worker-slot-usage");
+  usage.hidden = !slots?.split;
+  if (slots?.split) usage.textContent = `Video ${slots.video.used}/${slots.video.total} · Podcast ${slots.podcast.used}/${slots.podcast.total} · Ceiling ${slots.ceiling}`;
+  $("worker-slot-split").hidden = !slots || slots.ceiling < 2;
+  if (!slots) return;
+  $("worker-slot-ceiling").textContent = `The worker's ceiling is ${slots.ceiling} slots${slots.host_cpus ? ` on ${slots.host_cpus} CPUs` : ""}. Video and podcast slots together cannot exceed it.`;
+  // Never overwrite what is being typed or has been edited and not saved.
+  if (!state.slotFormDirty && !$("worker-slot-form").contains(document.activeElement)) {
+    $("slot-video").value = slots.split ? slots.video.total : Math.max(1, slots.ceiling - 1);
+    $("slot-podcast").value = slots.split ? slots.podcast.total : 1;
+    $("slot-video").max = $("slot-podcast").max = Math.max(1, slots.ceiling - 1);
+  }
+}
+async function saveWorkerSlots(video, podcast) {
+  const note = $("worker-slot-note");
+  note.textContent = "Saving…";
+  try {
+    const result = await api("worker-slots", {video_slots: video, podcast_slots: podcast});
+    state.slotFormDirty = false;
+    const parts = [result.applied ? (video ? "Applied. Takes effect as the next job starts." : "Slots are shared again.") : (result.message || "Saved. The worker has not confirmed yet.")];
+    for (const warning of result.warnings || []) parts.push(warning);
+    note.textContent = parts.join(" ");
+    void refreshWorkerActivity(true);
+  } catch (e) {
+    note.textContent = e.message;
+  }
+}
+$("worker-slot-form").addEventListener("submit", event => {
+  event.preventDefault();
+  void saveWorkerSlots(Number($("slot-video").value), Number($("slot-podcast").value));
+});
+$("worker-slot-share").addEventListener("click", () => void saveWorkerSlots(0, 0));
+for (const id of ["slot-video", "slot-podcast"]) $(id).addEventListener("input", () => { state.slotFormDirty = true; });
 function renderWorkerActivity(data) {
   $("worker-slots").replaceChildren();
   if (!serverReachable || !data?.available) {
     $("worker-capacity").textContent = "Worker slots · Unknown";
     $("activity-checked").textContent = "";
+    $("worker-slot-usage").hidden = true;
+    $("worker-slot-split").hidden = true;
     $("worker-slots").append(node("p",data?.message || "Worker disconnected; slot occupancy is unknown.","metadata"));
     return;
   }
   const activity = data.activity;
   $("worker-capacity").textContent = `Worker slots · ${activity.worker_slots_used}/${activity.worker_slots_total} occupied`;
   $("activity-checked").textContent = "Updated now · Job reservations";
+  renderSlotUsage(activity);
   const jobs = activity.jobs || [];
+  const pools = slotPools(activity);
+  const shown = Math.min(16, pools.total);
   // Keep a live reservation in the same visual slot as other jobs finish.
   // Slot labels describe this node's reservations, not physical CPU cores.
   const assigned = state.activitySlotIDs ||= new Map();
   const live = new Set(jobs.map(job => job.id));
-  for (const [id,slot] of assigned) if (!live.has(id) || slot >= activity.worker_slots_total) assigned.delete(id);
+  for (const [id,slot] of assigned) if (!live.has(id) || slot >= pools.total) assigned.delete(id);
   for (const job of jobs) if (!assigned.has(job.id)) {
     const used = new Set(assigned.values());
-    for (let slot=0;slot<Math.min(16,activity.worker_slots_total);slot++) if (!used.has(slot)) { assigned.set(job.id,slot);break; }
+    const [from, to] = pools.range(job.kind);
+    // A job beyond its pool (the split was lowered under it) takes any free slot.
+    for (const [lo, hi] of [[from, to], [0, pools.total]]) {
+      let found = false;
+      for (let slot=lo;slot<Math.min(16,hi);slot++) if (!used.has(slot)) { assigned.set(job.id,slot); found = true; break; }
+      if (found) break;
+    }
   }
-  for (let i=0;i<Math.min(16,activity.worker_slots_total);i++) {
+  for (let i=0;i<shown;i++) {
     const row = node("div","","worker-slot"), job = jobs.find(job => assigned.get(job.id) === i);
     if (!job) {
       const unknownOccupied = !activity.details_available && i < activity.worker_slots_used;
-      row.append(node("strong",`Slot ${i+1} · ${unknownOccupied ? "Occupied" : "Available"}`));
+      row.append(node("strong",`${pools.label(i)} · ${unknownOccupied ? "Occupied" : "Available"}`));
       row.append(node("p",unknownOccupied ? "File details require the updated video worker." : "Ready for the next job.","metadata"));
     } else {
       const stale = !heartbeatAlive(workerHeartbeatState(job.heartbeat_at));
-      row.append(node("strong",`Slot ${i+1} · ${job.file}`));
+      row.append(node("strong",`${pools.label(i)} · ${job.file}`));
       row.children[0].title = job.file;
       const phase = workerPhaseLabel(job.phase);
-      const parts = [job.kind === "benchmark" ? "Sample benchmark" : "Full conversion",phase,activityElapsed(job.started_at) ? `${activityElapsed(job.started_at)} elapsed` : null];
+      const parts = [job.kind === "benchmark" ? "Sample benchmark" : job.kind === "podcast" ? "Podcast processing" : "Full conversion",phase,activityElapsed(job.started_at) ? `${activityElapsed(job.started_at)} elapsed` : null];
       if (job.progress != null) parts.push(`${Number(job.progress).toFixed(1)}%${job.kind === "benchmark" ? " of sample work" : ""}`);
       row.append(node("p",parts.filter(Boolean).join(" · "),"metadata"));
       const detail = job.details;
@@ -4012,8 +4071,8 @@ function renderWorkerActivity(data) {
     $("worker-slots").append(row);
   }
 }
-async function refreshWorkerActivity() {
-  if (state.activityRequest || $("workspace").hidden) return;
+async function refreshWorkerActivity(force) {
+  if (state.activityRequest || (!force && $("workspace").hidden)) return;
   const auth = state.authRevision;
   state.activityRequest = true;
   try {

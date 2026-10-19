@@ -1570,6 +1570,40 @@ test("worker activity shows occupied slots, sample work, elapsed time and unknow
   assert.doesNotMatch(h.elements.get("worker-capacity").textContent,/0\/2/);
 });
 
+test("worker activity labels video and podcast slots and shows each pool's use", () => {
+  const h=harness();
+  h.context.activity={available:true,activity:{details_available:true,worker_slots_total:3,worker_slots_used:2,
+    slots:{ceiling:3,host_cpus:10,split:true,video:{total:2,used:1},podcast:{total:1,used:1}},
+    jobs:[
+      {id:"pod",file:"episode.mp3",kind:"podcast",phase:"transcribing",heartbeat_at:new Date().toISOString()},
+      {id:"vid",file:"movie.mkv",kind:"transcode",phase:"encoding",heartbeat_at:new Date().toISOString(),progress:10},
+    ]}};
+  h.run('renderWorkerActivity(activity)');
+  assert.match(h.elements.get("worker-slot-usage").textContent,/Video 1\/2 · Podcast 1\/1 · Ceiling 3/);
+  assert.equal(h.elements.get("worker-slot-usage").hidden,false);
+  assert.equal(h.elements.get("worker-slot-split").hidden,false);
+  assert.equal(h.elements.get("slot-video").value,2);
+  assert.equal(h.elements.get("slot-podcast").value,1);
+  const rows=h.elements.get("worker-slots").children;
+  assert.equal(rows.length,3);
+  assert.match(rows[0].children[0].textContent,/Video slot 1 · movie\.mkv/);
+  assert.match(rows[1].children[0].textContent,/Video slot 2 · Available/);
+  assert.match(rows[2].children[0].textContent,/Podcast slot 1 · episode\.mp3/);
+  assert.match(rows[2].children[1].textContent,/Podcast processing/);
+  // An edit that has not been saved survives the next poll.
+  h.elements.get("slot-video").value=1;
+  h.run('state.slotFormDirty=true;renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("slot-video").value,1);
+  h.run('state.slotFormDirty=false;renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("slot-video").value,2);
+  // A worker that predates slots, or one that cannot be split, hides the form.
+  h.run('activity.activity.slots=undefined;renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("worker-slot-usage").hidden,true);
+  assert.match(h.elements.get("worker-slots").children[0].children[0].textContent,/^Slot 1/);
+  h.run('activity.activity.slots={ceiling:1,split:false,video:{total:1,used:0},podcast:{total:1,used:0}};renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("worker-slot-split").hidden,true);
+});
+
 test("a late comparison response cannot reopen a closed dialog or expired session", async () => {
   for (const expired of [false,true]) {
     const h=harness(),pending=deferred();h.context.pending=pending.promise;

@@ -1240,13 +1240,17 @@ func (w *Worker) ResumePostEncode(ctx context.Context, selfExe, configPath strin
 
 	started := 0
 	var errs []error
-	active, err := w.countActiveJobs("")
+	activeVideo, activePodcast, err := w.countActiveJobsByKind("")
 	if err != nil {
 		return 0, fmt.Errorf("counting capacity for post-encode resume: %w", err)
 	}
-	maxParallel := w.cfg.MaxParallelJobs
-	if maxParallel <= 0 {
-		maxParallel = 1
+	limits := w.slotLimits()
+	noteStarted := func(kind slotKind) {
+		if kind == slotKindPodcast {
+			activePodcast++
+		} else {
+			activeVideo++
+		}
 	}
 	for _, entry := range entries {
 		if ctx.Err() != nil {
@@ -1288,7 +1292,7 @@ func (w *Worker) ResumePostEncode(ctx context.Context, selfExe, configPath strin
 			if !isPostEncodeResume(job) {
 				return // not a post-encode candidate: safely skipped
 			}
-			if active >= maxParallel || !automaticFinalizationAllowed(job) || time.Now().UTC().Before(job.NextFinalizationAt) {
+			if !limits.hasRoom(jobSlotKind(job), activeVideo, activePodcast) || !automaticFinalizationAllowed(job) || time.Now().UTC().Before(job.NextFinalizationAt) {
 				return
 			}
 			// Reserve an attempt before spawning so daemon crashes and fast
@@ -1332,7 +1336,7 @@ func (w *Worker) ResumePostEncode(ctx context.Context, selfExe, configPath strin
 			if latest.PID != 0 || !isPostEncodeResume(latest) {
 				// The child already owns/advanced the record; leave it alone.
 				started++
-				active++
+				noteStarted(jobSlotKind(latest))
 				return
 			}
 			latest.PID = pid
@@ -1346,7 +1350,7 @@ func (w *Worker) ResumePostEncode(ctx context.Context, selfExe, configPath strin
 				return
 			}
 			started++
-			active++
+			noteStarted(jobSlotKind(latest))
 		}()
 	}
 	return started, errors.Join(errs...)

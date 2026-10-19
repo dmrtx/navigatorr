@@ -21,4 +21,7 @@ type WorkerActivity struct {
 	Jobs             []WorkerActivityJob `json:"jobs"`
 	CheckedAt        time.Time           `json:"checked_at"`
 	DetailsAvailable bool                `json:"details_available"`
+	// Slots divides the totals above between video and podcast work. Absent
+	// from workers that predate per-kind slots.
+	Slots *WorkerSlots `json:"slots,omitempty"`
 }

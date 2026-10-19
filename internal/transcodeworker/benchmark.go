@@ -435,13 +435,14 @@ func (w *Worker) BenchmarkSubmit(ctx context.Context, req transcode.BenchmarkReq
 	}
 
 	// New benchmark job: verify slot capacity under capacity lock
-	activeJobs, err := w.countActiveJobs(req.ID)
+	limits := w.slotLimits()
+	activeVideo, activePodcast, err := w.countActiveJobsByKind(req.ID)
 	if err != nil {
 		resp.Error = fmt.Sprintf("checking active jobs: %v", err)
 		return resp, err
 	}
-	if activeJobs >= w.cfg.MaxParallelJobs {
-		resp.Error = fmt.Sprintf("worker busy: maximum parallel jobs (%d) reached", w.cfg.MaxParallelJobs)
+	if !limits.hasRoom(slotKindVideo, activeVideo, activePodcast) {
+		resp.Error = slotBusyMessage(limits, slotKindVideo)
 		return resp, fmt.Errorf("worker busy: max parallel jobs reached")
 	}
 
