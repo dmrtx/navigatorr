@@ -308,6 +308,11 @@ func (w *Worker) videoJobsSharingCPU() int {
 	return max(1, w.slotLimits().videoPool())
 }
 
+// slotChangeRecheck lets saving a split start the background self-check of its
+// pools. A variable so tests, whose workers find a real ffmpeg on PATH, do not
+// start real encodes in their state directories.
+var slotChangeRecheck = true
+
 // noteSlotSplitChanged drops caches that depend on the split and re-proves the
 // x265 partitions the new split can produce.
 func (w *Worker) noteSlotSplitChanged() {
@@ -317,7 +322,9 @@ func (w *Worker) noteSlotSplitChanged() {
 	w.slotSplit.mu.Lock()
 	w.slotSplit.modTime = time.Time{}
 	w.slotSplit.mu.Unlock()
-	w.recheckX265PartitionAfterSlotChange()
+	if slotChangeRecheck {
+		w.recheckX265PartitionAfterSlotChange()
+	}
 }
 
 func slotBusyMessage(l slotLimits, kind slotKind) string {
