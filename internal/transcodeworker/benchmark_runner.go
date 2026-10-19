@@ -1173,7 +1173,8 @@ func libvmafThreadsOption(threads int) string {
 
 // metricThreads resolves libvmaf n_threads for one of concurrent simultaneous
 // metric invocations. An explicit worker setting wins; otherwise the host CPUs
-// are shared across the invocations of every parallel job.
+// are shared across the invocations of every video job running now, so one
+// job alone uses them all. Thread counts never change metric values.
 func (w *Worker) metricThreads(concurrent int) int {
 	if w != nil && w.cfg != nil && w.cfg.MetricThreads > 0 {
 		return w.cfg.MetricThreads
@@ -1181,9 +1182,7 @@ func (w *Worker) metricThreads(concurrent int) int {
 	if concurrent < 1 {
 		concurrent = 1
 	}
-	if w != nil && w.cfg != nil && w.cfg.MaxParallelJobs > 1 {
-		concurrent *= w.cfg.MaxParallelJobs
-	}
+	concurrent *= w.videoJobsSharingCPU()
 	threads := hostCPUCount() / concurrent
 	if threads < 1 {
 		threads = 1

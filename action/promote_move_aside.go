@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 )
 
@@ -229,7 +228,7 @@ func (e *Engine) promotionPreserveForRemoval(ctx context.Context, ec *ExecutionC
 	if !errors.Is(err, errPromotionMoveAsideUnsupported) {
 		return err
 	}
-	p.RecoveryMode, p.MoveAsideStartedAt, p.MoveAsideRefused = promotionRecoveryCopy, "", err.Error()
+	p.RecoveryMode, p.RecoveryModeReason, p.MoveAsideStartedAt, p.MoveAsideRefused = promotionRecoveryCopy, recoveryReasonRenameRefused, "", err.Error()
 	if err := e.savePromotion(ctx, ec, p); err != nil {
 		return err
 	}
@@ -396,100 +395,4 @@ func (e *Engine) promotionConfirmAdopted(ctx context.Context, p *promotionState,
 		}
 	}
 	return e.promotionInspectAdopted(ctx, p, path)
-}
-
-// promotionMountProbes caches, per process and recovery directory, whether
-// the mount there keeps the identity move-aside relies on.
-var promotionMountProbes sync.Map
-
-// promotionProbeMount checks once per process, in the recovery directory,
-// that a file there keeps what move-aside trusts across waits: a real inode
-// and change time, stable while nothing changes; the same inode after a
-// no-replace rename; and a change time that moves when the bytes are
-// rewritten in place with size and mtime restored. Mounts that synthesize
-// inode numbers or lack change times fail it, and then the promotion copies.
-func (e *Engine) promotionProbeMount(dir string) error {
-	if e.promotionMountProbeHook != nil {
-		return e.promotionMountProbeHook(dir)
-	}
-	key := filepath.Clean(filepath.Dir(dir))
-	if cached, ok := promotionMountProbes.Load(key); ok {
-		err, _ := cached.(error)
-		return err
-	}
-	err := probePromotionMount(dir)
-	promotionMountProbes.Store(key, err)
-	return err
-}
-
-func probePromotionMount(dir string) error {
-	f, err := os.CreateTemp(dir, ".mount-probe-")
-	if err != nil {
-		return err
-	}
-	from, to := f.Name(), f.Name()+".moved"
-	defer os.Remove(from)
-	defer os.Remove(to)
-	content := []byte("navigatorr move-aside probe 0")
-	_, err = f.Write(content)
-	if err == nil {
-		err = f.Sync()
-	}
-	if closeErr := f.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		return err
-	}
-	stat := func(path string) (promotionFingerprint, error) {
-		info, err := os.Lstat(path)
-		if err != nil {
-			return promotionFingerprint{}, err
-		}
-		fp, ok := promotionFileFingerprint(info)
-		if !ok {
-			return promotionFingerprint{}, fmt.Errorf("no inode number or change time")
-		}
-		return fp, nil
-	}
-	created, err := stat(from)
-	if err != nil {
-		return err
-	}
-	if again, err := stat(from); err != nil || again != created {
-		return fmt.Errorf("file identity is not stable while unchanged")
-	}
-	if err := renamePromotionNoReplace(from, to); err != nil {
-		return err
-	}
-	moved, err := stat(to)
-	if err != nil {
-		return err
-	}
-	if !moved.sameInode(created) {
-		return fmt.Errorf("a rename does not keep the file identity")
-	}
-	mtime := time.Unix(0, moved.MtimeNs)
-	// Coarse clocks may need a moment before a change time can differ.
-	for i := 0; i < 150; i++ {
-		content[len(content)-1] = byte('1' + i%9)
-		if err := os.WriteFile(to, content, 0600); err != nil {
-			return err
-		}
-		if err := os.Chtimes(to, mtime, mtime); err != nil {
-			return err
-		}
-		rewritten, err := stat(to)
-		if err != nil {
-			return err
-		}
-		if rewritten.Ino != moved.Ino || rewritten.Dev != moved.Dev {
-			return fmt.Errorf("a rewrite changed the file identity")
-		}
-		if rewritten.CtimeNs != moved.CtimeNs {
-			return nil
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	return fmt.Errorf("a rewrite with size and mtime restored does not change the change time")
 }

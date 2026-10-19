@@ -229,7 +229,14 @@ type Worker struct {
 	ffmpegPath string
 	// x265Partition is the startup self-check's verdict on the x265 pool
 	// partition; x265CheckRun replaces its ffmpeg invocation in tests.
-	x265Partition   x265PartitionState
+	x265Partition x265PartitionState
+	// slotSplit caches the stored per-kind slot split; videoInUse caches the
+	// running video job count that sizes thread pools; videoInUseFn replaces
+	// that count in tests.
+	slotSplit       slotSplitCache
+	x265Recheck     sync.Mutex
+	videoInUse      videoInUseCache
+	videoInUseFn    func() (int, bool)
 	x265CheckRun    func(ctx context.Context, dir string, args []string) ([]byte, error)
 	ffprobePath     string
 	benchmarkRunner BenchmarkRunner
@@ -1287,27 +1294,26 @@ func (w *Worker) runningCountLocked(excludeID string) (int, error) {
 	return w.countActiveJobs(excludeID)
 }
 
-// scheduleQueuedLocked starts persisted queued jobs FIFO while global slots
-// are free. It never exceeds max_parallel_jobs (transcodes + benchmarks in
-// aggregate) and never double-spawns: each spawn happens under capLock +
-// per-job lock after re-verifying status==queued and slot availability.
-// Cancelled jobs are skipped and never spawn. Returns the number started.
+// scheduleQueuedLocked starts persisted queued jobs FIFO while slots are free.
+// It never exceeds max_parallel_jobs (transcodes, benchmarks and podcast jobs
+// in aggregate) nor, when the ceiling is split, either kind's pool; a queued
+// job whose pool is full is skipped so it never holds back the other kind. It
+// never double-spawns: each spawn happens under capLock + per-job lock after
+// re-verifying status==queued and slot availability. Cancelled jobs are
+// skipped and never spawn. Returns the number started.
 func (w *Worker) scheduleQueuedLocked(ctx context.Context, selfExe, configPath string) (int, error) {
 	var errs []error
-	maxJobs := w.cfg.MaxParallelJobs
-	if maxJobs <= 0 {
-		maxJobs = 1
-	}
 	started := 0
 	for {
 		if err := ctx.Err(); err != nil {
 			return started, errors.Join(append(errs, err)...)
 		}
-		active, err := w.runningCountLocked("")
+		limits := w.slotLimits()
+		video, podcast, err := w.countActiveJobsByKind("")
 		if err != nil {
 			errs = append(errs, err)
 		}
-		if err != nil || active >= maxJobs {
+		if err != nil || (!limits.hasRoom(slotKindVideo, video, podcast) && !limits.hasRoom(slotKindPodcast, video, podcast)) {
 			return started, errors.Join(errs...)
 		}
 		queued, scanErr := w.listQueuedJobsObserved()
@@ -1319,8 +1325,11 @@ func (w *Worker) scheduleQueuedLocked(ctx context.Context, selfExe, configPath s
 		}
 		progressed := false
 		for _, q := range queued {
-			if active >= maxJobs {
+			if !limits.hasRoom(slotKindVideo, video, podcast) && !limits.hasRoom(slotKindPodcast, video, podcast) {
 				return started, errors.Join(errs...)
+			}
+			if !limits.hasRoom(jobSlotKind(q), video, podcast) {
+				continue // its pool is full; the other kind may still start
 			}
 			jobDir := filepath.Join(w.cfg.StateDir, q.ID)
 			jobLock, err := acquireJobLock(jobDir)
@@ -1351,12 +1360,15 @@ func (w *Worker) scheduleQueuedLocked(ctx context.Context, selfExe, configPath s
 					}
 				}
 				// Re-check capacity under both locks before spawning.
-				cur, err := w.runningCountLocked("")
+				kind := jobSlotKind(latest)
+				curVideo, curPodcast, err := w.countActiveJobsByKind("")
 				if err != nil {
 					errs = append(errs, err)
 				}
-				if err != nil || cur >= maxJobs {
-					active = cur
+				if err != nil || !limits.hasRoom(kind, curVideo, curPodcast) {
+					if err == nil {
+						video, podcast = curVideo, curPodcast
+					}
 					return
 				}
 				pid, lstart, err := w.spawnTranscodeProcess(selfExe, configPath, latest.ID)
@@ -1384,7 +1396,12 @@ func (w *Worker) scheduleQueuedLocked(ctx context.Context, selfExe, configPath s
 					_ = SaveJobAtomic(jobFile, latest)
 					return
 				}
-				active = cur + 1
+				video, podcast = curVideo, curPodcast
+				if kind == slotKindPodcast {
+					podcast++
+				} else {
+					video++
+				}
 				started++
 				progressed = true
 			}()
@@ -1410,16 +1427,30 @@ func (w *Worker) ScheduleQueued(ctx context.Context, selfExe, configPath string)
 	return w.scheduleQueuedLocked(ctx, selfExe, configPath)
 }
 
+// countActiveJobs counts every live slot holder, whatever its kind.
 func (w *Worker) countActiveJobs(excludeID string) (int, error) {
+	video, podcast, err := w.countActiveJobsByKind(excludeID)
+	return video + podcast, err
+}
+
+// countActiveJobsByKind counts live transcode and benchmark slot holders,
+// podcast jobs apart from the rest (video).
+func (w *Worker) countActiveJobsByKind(excludeID string) (video, podcast int, err error) {
 	entries, err := os.ReadDir(w.cfg.StateDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return 0, nil
+			return 0, 0, nil
 		}
-		return 0, err
+		return 0, 0, err
 	}
 
-	count := 0
+	add := func(kind slotKind) {
+		if kind == slotKindPodcast {
+			podcast++
+		} else {
+			video++
+		}
+	}
 	for _, entry := range entries {
 		name := entry.Name()
 		if !entry.IsDir() || name == excludeID || strings.HasPrefix(name, ".") {
@@ -1439,16 +1470,16 @@ func (w *Worker) countActiveJobs(excludeID string) (int, error) {
 						continue
 					}
 					if w.jobAlive(job) {
-						count++
+						add(jobSlotKind(job))
 						continue
 					}
 					if job.Status == "running" {
 						latest, err := w.reconcileStoppedRunner(entryDir, jobPath)
 						if err != nil {
-							return 0, err
+							return 0, 0, err
 						}
 						if latest.Status == "running" && latest.PID > 0 {
-							count++ // a runner claimed the job after the initial read
+							add(jobSlotKind(latest)) // a runner claimed the job after the initial read
 						}
 					} else {
 						// Queued with a stale PID: treat as non-active without
@@ -1469,21 +1500,21 @@ func (w *Worker) countActiveJobs(excludeID string) (int, error) {
 			if err == nil && bench != nil && bench.ID == name {
 				if bench.Status == "running" || bench.Status == "queued" {
 					if IsBenchmarkExecutionAlive(bench) {
-						count++
+						add(slotKindVideo)
 					} else if bench.PID > 0 {
 						latest, err := w.reconcileStoppedBenchmark(entryDir, bench)
 						if err != nil {
-							return 0, err
+							return 0, 0, err
 						}
 						if (latest.Status == "running" || latest.Status == "queued") && latest.PID > 0 {
-							count++ // execution changed after the initial read; retain its slot
+							add(slotKindVideo) // execution changed after the initial read; retain its slot
 						}
 					}
 				}
 			}
 		}
 	}
-	return count, nil
+	return video, podcast, nil
 }
 
 // InternalRun is invoked by the background decoupled process.

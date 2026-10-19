@@ -49,6 +49,11 @@ type Server struct {
 	sessions       map[string]time.Time
 	folderSizes    folderSizeCache
 	folderListings folderListingCache
+	slotSync       struct {
+		mu   sync.Mutex
+		last time.Time
+		err  string
+	}
 }
 
 func New(cfg *config.Config, registry *arrservice.Registry, engine *action.Engine, mcpServer *server.MCPServer) (*Server, error) {
@@ -119,6 +124,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/maintenance/podcast-local-library", s.podcastLocalLibrary)
 	mux.HandleFunc("GET /api/maintenance/workers", s.workers)
 	mux.HandleFunc("GET /api/maintenance/worker-activity", s.workerActivity)
+	mux.HandleFunc("GET /api/maintenance/worker-slots", s.workerSlots)
+	mux.HandleFunc("POST /api/maintenance/worker-slots", s.workerSlots)
 	mux.HandleFunc("POST /api/maintenance/tool", s.tool)
 	mux.HandleFunc("GET /api/maintenance/logs", s.logs)
 	mux.HandleFunc("GET /api/maintenance/benchmark-comparison", s.benchmarkComparison)
@@ -365,7 +372,7 @@ func (s *Server) tool(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			inputs := map[string]any{"kind": kind}
-			for _, key := range []string{"id", "decision", "reason"} {
+			for _, key := range []string{"id", "decision", "reason", "plan_digest"} {
 				if value, ok := body.Arguments[key]; ok {
 					inputs[key] = value
 				}

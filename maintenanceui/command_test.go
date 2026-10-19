@@ -301,3 +301,27 @@ func TestBatchCandidateReviewHTTPAdmissionIsAuthenticatedFastAndIdempotent(t *te
 		t.Fatal("disabled replacement admitted")
 	}
 }
+
+// The browser sends a single-file approval's plan digest with the background
+// command; dropping it would make every web approval fail closed.
+func TestBackgroundResumeForwardsThePlanDigest(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	seedOperation(t, st, "promo", "promote_transcode_candidate", "waiting_decision", map[string]any{}, nil, map[string]any{})
+	body := `{"name":"action_resume","background":true,"key":"approve-once","arguments":{"id":"promo","decision":"approve","plan_digest":"sha256:abc"}}`
+	w := request(h, "POST", "/api/maintenance/tool", body, true)
+	if w.Code != 202 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	var receipt map[string]string
+	json.Unmarshal(w.Body.Bytes(), &receipt)
+	command, err := st.GetActionInstance(receipt["command_id"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inputs map[string]any
+	json.Unmarshal([]byte(command.InputsJSON), &inputs)
+	if inputs["plan_digest"] != "sha256:abc" || inputs["decision"] != "approve" || inputs["kind"] != "resume" {
+		t.Fatalf("command inputs %v", inputs)
+	}
+}

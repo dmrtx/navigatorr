@@ -259,7 +259,7 @@ func TestPromotionReadsEachFileFewerTimes(t *testing.T) {
 					t.Fatalf("not moved aside: %+v", p)
 				}
 			default:
-				if p.RecoveryMode != promotionRecoveryCopy || p.RecoveryCopy == nil || tc.mode == passCopyStream && p.RecoveryCopy.Method != promotionCopyStream && p.RecoveryCopy.Method != promotionCopyKernel {
+				if p.RecoveryMode != promotionRecoveryCopy || p.RecoveryModeReason != recoveryReasonAlwaysCopy || p.RecoveryCopy == nil || tc.mode == passCopyStream && p.RecoveryCopy.Method != promotionCopyStream && p.RecoveryCopy.Method != promotionCopyKernel {
 					t.Fatalf("no recovery copy: %+v", p)
 				}
 				if tc.method != "" && p.RecoveryCopy.Method != tc.method {

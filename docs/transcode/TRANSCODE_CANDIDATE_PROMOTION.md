@@ -23,7 +23,7 @@ The action verifies the original SHA-256, revalidates the complete candidate's
 streams with the existing transcode validator, hashes the candidate, and resolves
 every Sonarr episode which shares the original episodeFile. It then returns
 `waiting_decision` with those exact paths and episode IDs. Resume that action with
-`decision: "approve"` to perform the replacement. `reject` preserves both files.
+`decision: "approve"` and the `plan_digest` from `action_status` to perform the replacement (a missing or stale digest is refused and nothing changes). `reject` preserves both files.
 Starting a transcode, enabling destructive operations, or polling a waiting
 action does not grant this approval. Promotion does not accept replacement
 inputs on resume, so the approval remains tied to the persisted plan.

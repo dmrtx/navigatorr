@@ -428,6 +428,22 @@ test("candidate review reads only, shows measured sizes and rechecks before appr
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [["candidate","action_resume",{decision:"accept_loss"}]]);
 });
 
+test("accepting a candidate offers Accept and replace only where replacement is enabled", async () => {
+  for (const allowed of [true, false]) {
+    const h = harness(), calls = [];
+    h.context.fixture = {id:"candidate",status:"waiting_decision",waiting_reason:"Review quality",waiting_options:[{decision:"accept_loss"}],source_path:"/media/one.mkv"};
+    h.context.record = (...args) => calls.push(args);
+    h.run(`state.info.allow_destructive=${allowed}; continueToReplacement=async()=>{}; api=async()=>({jobs:[fixture]}); jobControl=async(...args)=>record(...args);`);
+    const review = h.run('reviewJobDecision("candidate","accept_loss")');
+    for (let i=0;i<6;i++) await Promise.resolve();
+    assert.equal(h.elements.get("confirm-action-review").textContent, allowed ? "Accept and replace" : "Accept candidate");
+    h.elements.get("confirm-action-review").listeners.get("click")();
+    await review;
+    // Accepting is one decision; the replacement itself is approved only in its own review.
+    assert.deepEqual(JSON.parse(JSON.stringify(calls)), [["candidate","action_resume",{decision:"accept_loss"}]]);
+  }
+});
+
 test("changed, expired, dismissed or offline candidate reviews never resume a job", async () => {
   for (const scenario of ["changed","expired","dismissed","offline"]) {
     const h=harness(); let writes=0;
@@ -965,7 +981,7 @@ test("preview eligibility never claims files are queued on the worker", () => {
 
 test("replacement review is read-only and a changed plan blocks approval", async () => {
   const h = harness(), mutations = [];
-  h.context.current = {id:"replace",status:"waiting_decision",waiting_options:[{decision:"approve"}],promotion:{original_path:"/media/one.mkv",candidate_path:"/media/.candidates/one.mkv",original_sha256:"original",candidate_sha256:"candidate",original_bytes:1000,candidate_bytes:400}};
+  h.context.current = {id:"replace",status:"waiting_decision",waiting_options:[{decision:"approve"}],promotion:{original_path:"/media/one.mkv",candidate_path:"/media/.candidates/one.mkv",original_sha256:"original",candidate_sha256:"candidate",original_bytes:1000,candidate_bytes:400,plan_digest:"sha256:plan"}};
   h.context.recordMutation = (...args) => mutations.push(args);
   h.run('api = async () => ({jobs:[current]}); jobControl = async (...args) => recordMutation(...args);');
   await h.run('reviewFilePromotion("replace")');
@@ -1552,6 +1568,40 @@ test("worker activity shows occupied slots, sample work, elapsed time and unknow
   h.run('renderWorkerActivity({available:false})');
   assert.match(h.elements.get("worker-capacity").textContent,/Unknown/);
   assert.doesNotMatch(h.elements.get("worker-capacity").textContent,/0\/2/);
+});
+
+test("worker activity labels video and podcast slots and shows each pool's use", () => {
+  const h=harness();
+  h.context.activity={available:true,activity:{details_available:true,worker_slots_total:3,worker_slots_used:2,
+    slots:{ceiling:3,host_cpus:10,split:true,video:{total:2,used:1},podcast:{total:1,used:1}},
+    jobs:[
+      {id:"pod",file:"episode.mp3",kind:"podcast",phase:"transcribing",heartbeat_at:new Date().toISOString()},
+      {id:"vid",file:"movie.mkv",kind:"transcode",phase:"encoding",heartbeat_at:new Date().toISOString(),progress:10},
+    ]}};
+  h.run('renderWorkerActivity(activity)');
+  assert.match(h.elements.get("worker-slot-usage").textContent,/Video 1\/2 · Podcast 1\/1 · Ceiling 3/);
+  assert.equal(h.elements.get("worker-slot-usage").hidden,false);
+  assert.equal(h.elements.get("worker-slot-split").hidden,false);
+  assert.equal(h.elements.get("slot-video").value,2);
+  assert.equal(h.elements.get("slot-podcast").value,1);
+  const rows=h.elements.get("worker-slots").children;
+  assert.equal(rows.length,3);
+  assert.match(rows[0].children[0].textContent,/Video slot 1 · movie\.mkv/);
+  assert.match(rows[1].children[0].textContent,/Video slot 2 · Available/);
+  assert.match(rows[2].children[0].textContent,/Podcast slot 1 · episode\.mp3/);
+  assert.match(rows[2].children[1].textContent,/Podcast processing/);
+  // An edit that has not been saved survives the next poll.
+  h.elements.get("slot-video").value=1;
+  h.run('state.slotFormDirty=true;renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("slot-video").value,1);
+  h.run('state.slotFormDirty=false;renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("slot-video").value,2);
+  // A worker that predates slots, or one that cannot be split, hides the form.
+  h.run('activity.activity.slots=undefined;renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("worker-slot-usage").hidden,true);
+  assert.match(h.elements.get("worker-slots").children[0].children[0].textContent,/^Slot 1/);
+  h.run('activity.activity.slots={ceiling:1,split:false,video:{total:1,used:0},podcast:{total:1,used:0}};renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("worker-slot-split").hidden,true);
 });
 
 test("a late comparison response cannot reopen a closed dialog or expired session", async () => {
@@ -2245,7 +2295,7 @@ test("an HDR file skipped by a size goal can change to the compact goal", async 
 
 test("compact replacement reviews warn about re-grabs and show read-only tracking", async () => {
   const h = harness();
-  h.context.current = {id:"replace",status:"waiting_decision",waiting_options:[{decision:"approve"}],promotion:{original_path:"/media/one.mkv",candidate_path:"/media/.candidates/one.mkv",original_sha256:"original",candidate_sha256:"candidate",original_bytes:1000,candidate_bytes:400,regrab_warning:"May download the original again.",arr_monitored:true,arr_quality_profile:"Any"}};
+  h.context.current = {id:"replace",status:"waiting_decision",waiting_options:[{decision:"approve"}],promotion:{original_path:"/media/one.mkv",candidate_path:"/media/.candidates/one.mkv",original_sha256:"original",candidate_sha256:"candidate",original_bytes:1000,candidate_bytes:400,plan_digest:"sha256:plan",regrab_warning:"May download the original again.",arr_monitored:true,arr_quality_profile:"Any"}};
   h.run('api = async () => ({jobs:[current]});');
   await h.run('reviewFilePromotion("replace")');
   const all = el=>[el,...el.children.flatMap(all)];
@@ -2726,6 +2776,15 @@ test("icon-only queue actions keep their full name in aria-label and title", () 
   // The row hides the label; it is kept for the More menu, never as a second main action.
   assert.deepEqual(icons.map((b) => b.children.at(-1).className), ["action-label", "action-label"]);
   assert.equal(rail.children[0].attrs["aria-label"], "Resume batch");
+});
+
+test("Run again is an icon with its name as tooltip, not a labelled main action", () => {
+  const { rail } = queueRail(["Run again"]);
+  assert.equal(rail.children.length, 1);
+  const [b] = rail.children;
+  assert.match(b.className, /\baction-icon\b/);
+  assert.equal(b.title, "Run again");
+  assert.equal(b.attrs["aria-label"], "Run again");
 });
 
 test("with five or more icon actions, three show and the rest go into a More actions menu", () => {

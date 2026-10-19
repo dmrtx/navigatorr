@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/jakenesler/navigatorr/arrservice"
+	"github.com/jakenesler/navigatorr/store"
 )
 
 // Promotion is a separate, explicitly approved action. transcode_media remains
@@ -77,6 +78,11 @@ type promotionState struct {
 	// before the old library file is removed; copy (and legacy "") copies it
 	// before import. See promotionMoveAside.
 	RecoveryMode string `json:"recovery_mode,omitempty"`
+	// Why that mode was chosen (a fixed code, never a path).
+	RecoveryModeReason string `json:"recovery_mode_reason,omitempty"`
+	// What a failed mount probe observed: its step, the filesystem type and
+	// the error, never a path. Empty for every other reason.
+	RecoveryModeDetail string `json:"recovery_mode_detail,omitempty"`
 	// Fingerprints of full hashes, kept for identity checks across waits;
 	// see promotionVerifyByIdentity.
 	OriginalFingerprint  *promotionFingerprint `json:"original_fingerprint,omitempty"`
@@ -138,10 +144,23 @@ func promoteFailed(err error) (StepResult, error) {
 	return StepResult{Status: StepFailed, Error: err.Error()}, nil
 }
 
-type promotionBusyError struct{}
+type promotionBusyError struct {
+	blocker store.PromotionSeriesOwnerInfo
+}
 
-func (*promotionBusyError) Error() string {
-	return "Waiting for the other promotion of this Sonarr series to finish or be recovered"
+func (e *promotionBusyError) Error() string {
+	what := "Waiting for the other promotion of this Sonarr series to finish or be recovered"
+	if e.blocker.ActionID == "" {
+		return what
+	}
+	name := e.blocker.ActionName
+	if name == "" {
+		name = "action"
+	}
+	if e.blocker.Status == "" {
+		return fmt.Sprintf("%s: blocked by %s %s", what, name, e.blocker.ActionID)
+	}
+	return fmt.Sprintf("%s: blocked by %s %s (%s)", what, name, e.blocker.ActionID, e.blocker.Status)
 }
 
 func (e *Engine) claimPromotionSeries(ec *ExecutionContext, service string, seriesID int) error {
@@ -149,12 +168,12 @@ func (e *Engine) claimPromotionSeries(ec *ExecutionContext, service string, seri
 	if parent := getString(ec.Inputs, "batch_promote_parent_id"); parent != "" {
 		owner = parent
 	}
-	claimed, err := e.deps.Store.ClaimPromotionSeries(service, seriesID, owner)
+	holder, err := e.deps.Store.ClaimPromotionSeriesOwner(service, seriesID, owner)
 	if err != nil {
 		return err
 	}
-	if !claimed {
-		return &promotionBusyError{}
+	if holder.ActionID != owner {
+		return &promotionBusyError{blocker: holder}
 	}
 	return nil
 }
@@ -225,7 +244,7 @@ func (e *Engine) stepPromoteApprove(ctx context.Context, ec *ExecutionContext) (
 	if !e.AllowDestructive() {
 		return promoteFailed(fmt.Errorf("allow_destructive must be enabled for candidate promotion"))
 	}
-	if getString(ec.Inputs, "batch_promote_parent_id") != "" || getString(ec.Inputs, "batch_promote_item_key") != "" || getString(ec.Inputs, "batch_promote_digest") != "" {
+	if batchLinkedPromotion(ec.Inputs) {
 		if err := e.verifyBatchPromotionApproval(ec, p); err != nil {
 			return promoteFailed(err)
 		}
@@ -234,6 +253,11 @@ func (e *Engine) stepPromoteApprove(ctx context.Context, ec *ExecutionContext) (
 	if !p.Approved {
 		switch strings.ToLower(ec.Decision) {
 		case "approve":
+			// resume rejects a stale digest before the decision is stored; this
+			// keeps the step safe for any other path that supplies one.
+			if err := verifyPromotionPlanDigest(ctx, p); err != nil {
+				return StepResult{Status: StepWaitingDecision, WaitingReason: err.Error(), WaitingOptions: promotionApprovalOptions(), Outputs: map[string]any{"promotion": p}}, nil
+			}
 			p.Approved = true
 		case "reject", "cancel":
 			return promoteFailed(fmt.Errorf("candidate promotion rejected; original and candidate remain untouched"))
@@ -242,11 +266,15 @@ func (e *Engine) stepPromoteApprove(ctx context.Context, ec *ExecutionContext) (
 			if p.RegrabWarning != "" {
 				reason += ". " + p.RegrabWarning
 			}
-			return StepResult{Status: StepWaitingDecision, WaitingReason: reason, WaitingOptions: []WaitingOption{{Decision: "approve", Description: "Promote this candidate, preserve recovery copy until verified, and remove the old library file"}, {Decision: "reject", Description: "Keep original and candidate unchanged"}}, Outputs: map[string]any{"promotion": p}}, nil
+			return StepResult{Status: StepWaitingDecision, WaitingReason: reason, WaitingOptions: promotionApprovalOptions(), Outputs: map[string]any{"promotion": p}}, nil
 		}
 	}
 	if err := e.savePromotion(ctx, ec, p); err != nil {
 		return promoteFailed(err)
 	}
 	return StepResult{Status: StepCompleted}, nil
+}
+
+func promotionApprovalOptions() []WaitingOption {
+	return []WaitingOption{{Decision: "approve", Description: "Promote this candidate, preserve recovery copy until verified, and remove the old library file. Requires plan_digest from the reviewed plan"}, {Decision: "reject", Description: "Keep original and candidate unchanged"}}
 }

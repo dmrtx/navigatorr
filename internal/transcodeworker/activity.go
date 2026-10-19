@@ -13,7 +13,8 @@ import (
 // Reservation slots cover staging, encoding, metrics and publishing; they are
 // not a CPU utilization measurement or the benchmark's inner concurrency.
 func (w *Worker) activitySnapshot() (transcode.WorkerActivity, error) {
-	activity := transcode.WorkerActivity{SlotsTotal: max(1, w.cfg.MaxParallelJobs), CheckedAt: time.Now().UTC(), DetailsAvailable: true, Jobs: []transcode.WorkerActivityJob{}}
+	slots := w.slotsStatus()
+	activity := transcode.WorkerActivity{SlotsTotal: max(1, w.cfg.MaxParallelJobs), Slots: &slots, CheckedAt: time.Now().UTC(), DetailsAvailable: true, Jobs: []transcode.WorkerActivityJob{}}
 	entries, err := os.ReadDir(w.cfg.StateDir)
 	if err != nil {
 		return activity, fmt.Errorf("worker activity unavailable")
@@ -29,7 +30,11 @@ func (w *Worker) activitySnapshot() (transcode.WorkerActivity, error) {
 			if measured.Valid {
 				progress = &measured.Progress
 			}
-			activity.Jobs = append(activity.Jobs, transcode.WorkerActivityJob{ID: job.ID, Kind: "transcode", File: filepath.Base(job.Source), Phase: job.Phase, StartedAt: job.StartedAt, HeartbeatAt: job.WorkerHeartbeatAt, LastProgressAt: measured.UpdatedAt, Progress: progress})
+			kind := "transcode"
+			if jobSlotKind(job) == slotKindPodcast {
+				kind = "podcast"
+			}
+			activity.Jobs = append(activity.Jobs, transcode.WorkerActivityJob{ID: job.ID, Kind: kind, File: filepath.Base(job.Source), Phase: job.Phase, StartedAt: job.StartedAt, HeartbeatAt: job.WorkerHeartbeatAt, LastProgressAt: measured.UpdatedAt, Progress: progress})
 		}
 		if bench, err := LoadBenchmark(filepath.Join(dir, "benchmark.json")); err == nil && bench.ID == entry.Name() && bench.PID > 0 && (bench.Status == "running" || bench.Status == "queued") {
 			progress := bench.Progress
@@ -43,6 +48,14 @@ func (w *Worker) activitySnapshot() (transcode.WorkerActivity, error) {
 		return activity.Jobs[i].ID < activity.Jobs[j].ID
 	})
 	activity.SlotsUsed = len(activity.Jobs)
+	slots.Video.Used, slots.Podcast.Used = 0, 0
+	for _, job := range activity.Jobs {
+		if job.Kind == "podcast" {
+			slots.Podcast.Used++
+		} else {
+			slots.Video.Used++
+		}
+	}
 	if len(activity.Jobs) > 16 {
 		activity.Jobs = activity.Jobs[:16]
 	}

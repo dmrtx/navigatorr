@@ -228,6 +228,9 @@ func compactPromotion(res *action.ActionResult) map[string]any {
 	if res.Status == action.StatusCompleted && res.Outputs["recovery_retained"] == false && plan["recovery_cleanup_started"] == true {
 		plan["recovery_cleanup_completed"] = true
 	}
+	if digest := action.PromotionPlanDigest(value); digest != "" {
+		plan["plan_digest"] = digest
+	}
 	plan["recovery_note"] = "Verification before replacement is historical. Cleanup is a completed workflow step; use transcode_backups for current filesystem presence. recovery_verified is a legacy retained-backup flag."
 	if movieID, ok := plan["movie_id"].(float64); ok && movieID > 0 {
 		plan["original_movie_file_id"] = plan["original_episode_file_id"]
@@ -242,7 +245,7 @@ func compactPromotion(res *action.ActionResult) map[string]any {
 		"transcode_action_id", "service", "series_id", "original_path", "candidate_path",
 		"original_episode_file_id", "episode_ids", "original_bytes", "candidate_bytes",
 		"original_sha256", "candidate_sha256", "approved", "new_episode_file_id", "new_path",
-		"recovery_path", "recovery_verified",
+		"recovery_path", "recovery_verified", "plan_digest", "recovery_mode", "recovery_mode_reason", "recovery_mode_detail",
 		"recovery_verified_before_replacement", "recovery_cleanup_started", "recovery_cleanup_completed", "recovery_note",
 		"regrab_warning", "arr_monitored", "arr_quality_profile",
 	})
@@ -453,6 +456,7 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 			mcp.WithString("id", mcp.Required(), mcp.Description("Action instance ID (e.g. act-transcode_batch-a1b2c3d4)")),
 			mcp.WithString("decision", mcp.Description("Decision choice when resuming from waiting_decision (matches one of the action's waiting_options, e.g. resume, pause, cancel, approve, reject, accept_loss). Omit when resuming waiting_external.")),
 			mcp.WithString("inputs", mcp.Description("Optional JSON object string with additional parameters. Rejected for workflows whose template declares immutable inputs.")),
+			mcp.WithString("plan_digest", mcp.Description("Required to approve a single-file promote_transcode_candidate: the plan_digest shown in its promotion summary (digest of the reviewed paths, hashes and sizes). A stale digest is refused and the action keeps waiting.")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			args := req.GetArguments()
@@ -460,6 +464,7 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 			if id == "" {
 				return toolErr("id is required"), nil
 			}
+			ctx = action.WithPromotionPlanDigest(ctx, argString(args, "plan_digest", ""))
 
 			decision := strings.TrimSpace(argString(args, "decision", ""))
 			var extraInputs map[string]any

@@ -490,11 +490,29 @@ func TestPromotionNormalizesExplicitExpectedEncoder(t *testing.T) {
 
 func (h *promotionHarness) resume(id, decision string) *ActionResult {
 	h.t.Helper()
-	result, err := h.engine.Resume(context.Background(), id, decision, nil)
+	result, err := h.engine.Resume(h.approvalContext(id, decision), id, decision, nil)
 	if err != nil {
 		h.t.Fatal(err)
 	}
 	return result
+}
+
+// approvalContext carries the digest a reviewer would have seen, as the web
+// review does, so approvals in tests model a reviewed plan.
+func (h *promotionHarness) approvalContext(id, decision string) context.Context {
+	ctx := context.Background()
+	if decision != "approve" {
+		return ctx
+	}
+	inst, err := h.st.GetActionInstance(id)
+	if err != nil || inst == nil {
+		return ctx
+	}
+	var state map[string]any
+	if json.Unmarshal([]byte(inst.StateJSON), &state) != nil {
+		return ctx
+	}
+	return WithPromotionPlanDigest(ctx, PromotionPlanDigest(state["promotion"]))
 }
 
 func (h *promotionHarness) finish(r *ActionResult) *ActionResult {
