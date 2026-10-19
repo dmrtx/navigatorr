@@ -349,7 +349,6 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 			return err
 		}
 		tested = remaining
-		measuredBeforeFallback := len(tested)
 		// Only the first failure can still lead to a verified fallback. Under
 		// rules a quality failure goes to a safer measured setting when one
 		// remains, and measures the quality fallback only when none does.
@@ -358,10 +357,10 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 				return err
 			}
 		}
-		// The one retry after a quality failure goes to the safest measured
-		// setting: the smallest remaining one usually fails for the same reason.
-		// Settings measured only after the failure keep selection's choice.
-		preferSafest = rules != nil && holdoutQuality && len(tested) == measuredBeforeFallback
+		// The one retry after a quality failure goes to the safest eligible
+		// setting, fallback stage included: the smallest one usually fails for
+		// the same reason.
+		preferSafest = rules != nil && holdoutQuality
 	}
 	// Discovery winners are not accepted without holdouts, even after the
 	// confirmation allowance or search deadline has been exhausted.

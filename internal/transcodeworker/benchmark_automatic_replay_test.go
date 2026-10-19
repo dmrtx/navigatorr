@@ -84,6 +84,11 @@ func (r replayResult) summary() string {
 
 func runReplay(t *testing.T, settings map[string]replaySetting, sourceBytes int64, rules *transcode.AutomaticSearchRules) replayResult {
 	t.Helper()
+	return runReplayLadder(t, settings, sourceBytes, rules, replayLadder(rules != nil))
+}
+
+func runReplayLadder(t *testing.T, settings map[string]replaySetting, sourceBytes int64, rules *transcode.AutomaticSearchRules, ladder []validatedCandidate) replayResult {
+	t.Helper()
 	p5, worst := 84.0, 85.0
 	record := &BenchmarkRecord{Mode: "size", ModePolicyVersion: optimization.ModePolicyV3, Automatic: true, QualityPruning: true, AutomaticSearch: rules, Metric: "vmaf", SourceDuration: 600,
 		Quality: &transcode.BenchmarkQualityConfig{VMAF: &transcode.BenchmarkQualityThresholds{Model: "v1_1080p_3h", Target: 92, Minimum: 88, P5Minimum: &p5, WorstWindowMinimum: &worst, WorstWindowSeconds: 4, GuardrailEnforcement: "reject"}}}
@@ -155,7 +160,7 @@ func runReplay(t *testing.T, settings map[string]replaySetting, sourceBytes int6
 	evidence := &BenchmarkExecutionEvidence{SourceBitDepth: 8}
 	progress := newBenchmarkProgressReporter(nil, record, 100)
 	rep := mediainspect.DetailedReport{DurationSec: 600, Video: []mediainspect.DetailedStream{{BitDepth: 8, FPS: 25}}}
-	if err := runner.runAutomaticCandidates(context.Background(), nil, record, evidence, "", replayLadder(rules != nil), rep, sourceBytes, time.Time{}, progress); err != nil {
+	if err := runner.runAutomaticCandidates(context.Background(), nil, record, evidence, "", ladder, rep, sourceBytes, time.Time{}, progress); err != nil {
 		t.Fatal(err)
 	}
 	res.decision = evidence.Decision
@@ -348,6 +353,81 @@ func TestReplayRetryGoesToSafestEligibleSetting(t *testing.T) {
 		}
 		if got := res.reason("fallback-quality-medium-cand_crf18"); got != reasonNotVerified {
 			t.Fatalf("skipped CRF 18 labelled %q", got)
+		}
+	})
+	t.Run("fallback measured after the failure", func(t *testing.T) {
+		// CRF 22 fails holdout; the medium quality fallback is measured only
+		// afterwards. Its smallest eligible setting (20) is not the one verified.
+		settings := map[string]replaySetting{
+			replayKey("medium", 22): {bytes: 23500, discovery: replayScore{87.5, 90.0}, holdout: 83},
+			replayKey("medium", 24): {bytes: 21000, discovery: replayScore{83.5, 88.0}, holdout: 83},
+			replayKey("medium", 26): {bytes: 19000, discovery: replayScore{83.0, 88.0}, holdout: 83},
+			replayKey("medium", 28): {bytes: 17000, discovery: replayScore{83.0, 88.0}, holdout: 83},
+			replayKey("medium", 30): {bytes: 15500, discovery: replayScore{82.0, 88.0}, holdout: 82},
+			replayKey("medium", 16): {bytes: 40000, discovery: replayScore{92.0, 94.8}, holdout: 93},
+			replayKey("medium", 18): {bytes: 34000, discovery: replayScore{88.0, 91.0}, holdout: 85},
+			replayKey("medium", 20): {bytes: 28000, discovery: replayScore{86.5, 89.5}, holdout: 83},
+		}
+		res := runReplay(t, settings, 10_000_000, replayRules())
+		t.Logf("with rules: %s", res.summary())
+		if res.winner != "fallback-quality-medium-cand_crf16" || strings.Join(res.verified, ",") != "cand_crf22,fallback-quality-medium-cand_crf16" {
+			t.Fatalf("safest fallback setting not verified: %s", res.summary())
+		}
+		if got := res.reason("fallback-quality-medium-cand_crf20"); got != reasonNotVerified {
+			t.Fatalf("skipped CRF 20 labelled %q", got)
+		}
+	})
+	t.Run("safest setting also fails", func(t *testing.T) {
+		settings := map[string]replaySetting{
+			replayKey("medium", 22): {bytes: 23500, discovery: replayScore{89.5, 91.3}, holdout: 83},
+			replayKey("medium", 24): {bytes: 21000, discovery: replayScore{87.5, 90.0}, holdout: 90},
+			replayKey("medium", 26): {bytes: 19000, discovery: replayScore{86.5, 89.0}, holdout: 83},
+			replayKey("medium", 28): {bytes: 17000, discovery: replayScore{83.5, 88.0}, holdout: 83},
+			replayKey("medium", 30): {bytes: 15500, discovery: replayScore{82.0, 88.0}, holdout: 82},
+			replayKey("medium", 16): {bytes: 40000, discovery: replayScore{92.0, 94.8}, holdout: 93},
+			replayKey("medium", 18): {bytes: 34000, discovery: replayScore{91.0, 93.0}, holdout: 93},
+			replayKey("medium", 20): {bytes: 28000, discovery: replayScore{90.0, 92.0}, holdout: 93},
+		}
+		res := runReplay(t, settings, 10_000_000, replayRules())
+		t.Logf("with rules: %s", res.summary())
+		if res.winner != "" || res.decision.DecisionReason != "no_verified_candidate" {
+			t.Fatalf("both failures still produced a winner: %s", res.summary())
+		}
+		if strings.Join(res.verified, ",") != "cand_crf26,cand_crf22" {
+			t.Fatalf("verification count or order changed: %s", res.summary())
+		}
+		for _, id := range []string{"cand_crf26", "cand_crf22"} {
+			if got := res.reason(id); !qualityRejection(got) {
+				t.Fatalf("%s labelled %q, want a quality failure", id, got)
+			}
+		}
+		if got := res.reason("cand_crf24"); got != reasonNotVerified {
+			t.Fatalf("unverified CRF 24 labelled %q", got)
+		}
+		for _, id := range res.measured {
+			if strings.HasPrefix(id, "fallback-") {
+				t.Fatalf("fallback measured although a safer setting remained: %v", res.measured)
+			}
+		}
+	})
+	t.Run("VideoToolbox higher quality is safer", func(t *testing.T) {
+		var ladder []validatedCandidate
+		for _, q := range []int{60, 65, 70, 75} {
+			ladder = append(ladder, validatedCandidate{index: len(ladder), candidate: transcode.BenchmarkCandidate{ID: fmt.Sprintf("vt%d", q), VideoCodec: "hevc_videotoolbox", Quality: q}, bitDepth: 10, profile: "main10", pixelFormat: "p010le"})
+		}
+		settings := map[string]replaySetting{
+			"-75": {bytes: 23500, discovery: replayScore{89.5, 91.3}, holdout: 90},
+			"-70": {bytes: 21000, discovery: replayScore{87.5, 90.0}, holdout: 89},
+			"-65": {bytes: 19000, discovery: replayScore{86.5, 89.0}, holdout: 83},
+			"-60": {bytes: 17000, discovery: replayScore{83.5, 88.0}, holdout: 83},
+		}
+		res := runReplayLadder(t, settings, 10_000_000, replayRules(), ladder)
+		t.Logf("with rules: %s", res.summary())
+		if res.winner != "vt75" || strings.Join(res.verified, ",") != "vt65,vt75" {
+			t.Fatalf("highest -q:v not verified second: %s", res.summary())
+		}
+		if got := res.reason("vt70"); got != reasonNotVerified {
+			t.Fatalf("skipped vt70 labelled %q", got)
 		}
 	})
 	t.Run("next smallest is the safest", func(t *testing.T) {
