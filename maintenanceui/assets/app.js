@@ -3497,7 +3497,7 @@ function queuePresentation(job) {
 // Shortened visible labels for main actions. Each is a prefix of the full
 // label, which stays the accessible name (WCAG 2.5.3 Label in Name).
 const shortActionLabels = {"Replace file":"Replace","Set up benchmark":"Set up","Review candidates":"Review","Review candidate":"Review","Review replacement":"Review","Review replacements":"Review","Review preview":"Review","Validate classifications":"Validate","Check worker again":"Check worker","Check library again":"Check library","Resume batch":"Resume","Start batch":"Start","Try another profile":"Try another"};
-const mainQueueActions = ["Replace file", "Review replacements", "Review replacement", "Review candidates", "Review candidate", "Review cuts", "Validate classifications", "Review", "Resume batch", "Start batch", "Set up benchmark", "Retry", "Run again", "Check worker again", "Check library again", "Review preview", "Try another profile"];
+const mainQueueActions = ["Replace file", "Review replacements", "Review replacement", "Review candidates", "Review candidate", "Review cuts", "Validate classifications", "Review", "Resume batch", "Start batch", "Set up benchmark", "Retry", "Check worker again", "Check library again", "Review preview", "Try another profile"];
 const visibleQueueIcons = 3;
 function compactQueueActions(actions) {
   // A card shows at most one labelled main action, then square icon buttons

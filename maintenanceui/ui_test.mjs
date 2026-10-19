@@ -2778,6 +2778,15 @@ test("icon-only queue actions keep their full name in aria-label and title", () 
   assert.equal(rail.children[0].attrs["aria-label"], "Resume batch");
 });
 
+test("Run again is an icon with its name as tooltip, not a labelled main action", () => {
+  const { rail } = queueRail(["Run again"]);
+  assert.equal(rail.children.length, 1);
+  const [b] = rail.children;
+  assert.match(b.className, /\baction-icon\b/);
+  assert.equal(b.title, "Run again");
+  assert.equal(b.attrs["aria-label"], "Run again");
+});
+
 test("with five or more icon actions, three show and the rest go into a More actions menu", () => {
   const { rail } = queueRail(["Review candidate", "Run one more test", "Keep original", "Change goal", "Archive", "View batch"]);
   assert.equal(rail.children.length, 5);
