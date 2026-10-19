@@ -592,3 +592,16 @@ func TestCompactActionPhaseCostsRetainEvidenceAndUnknowns(t *testing.T) {
 		t.Fatal("legacy action fabricated phase costs")
 	}
 }
+
+// The web review reads the digest here and sends it back with its approval.
+func TestCompactPromotionExposesThePlanDigestTheEngineChecks(t *testing.T) {
+	plan := map[string]any{"transcode_action_id": "t", "service": "filesystem", "original_path": "/m/o.mkv", "candidate_path": "/m/c.mkv", "original_sha256": "o", "candidate_sha256": "c", "original_bytes": 10, "candidate_bytes": 5}
+	r := &action.ActionResult{ActionName: "promote_transcode_candidate", Status: action.StatusWaitingDecision, State: map[string]any{"promotion": plan}}
+	want := action.PromotionPlanDigest(plan)
+	if want == "" {
+		t.Fatal("no digest for a complete plan")
+	}
+	if got := compactPromotion(r)["plan_digest"]; got != want {
+		t.Fatalf("plan_digest %v, want %v", got, want)
+	}
+}

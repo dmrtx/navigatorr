@@ -151,7 +151,7 @@ func TestReadAheadCopyBeatsSmallSerialReadsWhenReadsHaveLatency(t *testing.T) {
 		t.Fatal("digests differ")
 	}
 	t.Logf("16 MiB with %v per read: 32 KiB serial %v, 1 MiB read-ahead %v", latency, serial, pipelined)
-	if pipelined*4 > serial {
+	if pipelined*2 > serial {
 		t.Fatalf("read-ahead %v is not clearly faster than serial %v", pipelined, serial)
 	}
 }

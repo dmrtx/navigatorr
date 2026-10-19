@@ -82,7 +82,7 @@ func verifyPromotionPlanDigest(ctx context.Context, p *promotionState) error {
 // Reject a stale or missing digest before a resume mutates the instance, so a
 // refused approval leaves the job waiting for a correct one.
 func (e *Engine) checkReviewedPromotion(ctx context.Context, inst *store.ActionInstance, decision string) error {
-	if inst.ActionName != "promote_transcode_candidate" || decision != "approve" || inst.Status != StatusWaitingDecision {
+	if inst.ActionName != "promote_transcode_candidate" || !strings.EqualFold(strings.TrimSpace(decision), "approve") || inst.Status != StatusWaitingDecision {
 		return nil
 	}
 	var inputs, state map[string]any
