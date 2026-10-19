@@ -144,9 +144,10 @@ func selectionMarginNotMet(record *BenchmarkRecord, evidence *BenchmarkExecution
 //
 // Under automatic search rules (record.AutomaticSearch) a holdout that fails
 // on quality rules out that setting and every more-compressed one, the next
-// verification goes to the smallest remaining safer setting, and the quality
-// fallback family is measured only when no such setting remains, preset by
-// preset. A holdout failing on anything else keeps the earlier behaviour.
+// verification goes to the safest remaining eligible setting of the same
+// family (not the next-smallest, which tends to fail for the same reason), and
+// the quality fallback family is measured only when no such setting remains,
+// preset by preset. A holdout failing on anything else keeps the earlier behaviour.
 func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, w *Worker, record *BenchmarkRecord, evidence *BenchmarkExecutionEvidence, dir string, vcs []validatedCandidate, rep mediainspect.DetailedReport, sourceSize int64, sourceMod time.Time, progress *benchmarkProgressReporter) error {
 	if len(record.Samples) != 5 {
 		return fmt.Errorf("automatic search has no independent verification windows")
@@ -288,9 +289,15 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 	// A holdout failure can select the next measured contender, but never expands
 	// the number of attempts or silently reduces the quality/size policy.
 	blocked := map[string]bool{}
+	// preferSafest sends the retry to the highest-quality eligible setting of the
+	// winner's family instead of the next-smallest one.
+	preferSafest := false
 	verificationFailures := []transcode.BenchmarkCandidateEvaluation{}
 	for attempt := 0; attempt < 2 && evidence.Decision.Winner != nil; attempt++ {
 		id := evidence.Decision.Winner.CandidateID
+		if preferSafest {
+			id = safestEligibleID(tested, evidence.Decision, id)
+		}
 		var winner validatedCandidate
 		for _, vc := range tested {
 			if vc.candidate.ID == id {
@@ -350,6 +357,10 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 				return err
 			}
 		}
+		// The one retry after a quality failure goes to the safest eligible
+		// setting, fallback stage included: the smallest one usually fails for
+		// the same reason.
+		preferSafest = rules != nil && holdoutQuality
 	}
 	// Discovery winners are not accepted without holdouts, even after the
 	// confirmation allowance or search deadline has been exhausted.
@@ -357,6 +368,53 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 	appendAutomaticRejections(evidence.Decision, automatic.Discovery)
 	finish()
 	return nil
+}
+
+// safestEligibleID returns the candidate the second holdout verification
+// should check: the highest-quality (lowest x265 CRF, highest VideoToolbox
+// -q:v) setting that is still eligible in the selected candidate's quality
+// family. Selection picks the smallest eligible setting, which after a quality
+// failure tends to fail like the one before it. Eligibility is the decision's,
+// so the quality limits and selection margin are not relaxed. A candidate
+// outside a constant-quality family keeps the selected one.
+func safestEligibleID(tested []validatedCandidate, decision *transcode.BenchmarkDecision, selectedID string) string {
+	if decision == nil {
+		return selectedID
+	}
+	eligible := map[string]bool{}
+	for _, e := range decision.Evaluations {
+		if e.Eligible {
+			eligible[e.CandidateID] = true
+		}
+	}
+	var selected *validatedCandidate
+	for i := range tested {
+		if tested[i].candidate.ID == selectedID {
+			selected = &tested[i]
+		}
+	}
+	if selected == nil {
+		return selectedID
+	}
+	key, lowerIsBetter, ok := qualityFamilyKey(*selected)
+	if !ok {
+		return selectedID
+	}
+	best := *selected
+	for _, vc := range tested {
+		if !eligible[vc.candidate.ID] {
+			continue
+		}
+		k, _, ok := qualityFamilyKey(vc)
+		if !ok || k != key {
+			continue
+		}
+		q, bq := vc.candidate.Quality, best.candidate.Quality
+		if lowerIsBetter && q < bq || !lowerIsBetter && q > bq {
+			best = vc
+		}
+	}
+	return best.candidate.ID
 }
 
 // notVerifiedEvaluation is a candidate's latest discovery evaluation after a
