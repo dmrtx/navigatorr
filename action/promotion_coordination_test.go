@@ -2,6 +2,8 @@ package action
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/jakenesler/navigatorr/store"
@@ -66,5 +68,42 @@ func TestBatchRescanWaitsForIndependentPromotion(t *testing.T) {
 	res, err := h.engine.batchPromotionRescan(context.Background(), ec, 1)
 	if err != nil || res.Status != StepWaitingExternal || h.rescans != 0 {
 		t.Fatalf("batch scanned during independent import: %+v %v", res, err)
+	}
+}
+
+func TestCancelledBatchReleasesSeriesAndBusyTextNamesBlocker(t *testing.T) {
+	h := newPromotionHarness(t)
+	for _, inst := range []store.ActionInstance{
+		{ID: "old-batch", ActionName: "transcode_batch", Status: StatusWaitingExternal},
+		{ID: "old-child", ActionName: "promote_transcode_candidate", Status: StatusCompleted,
+			InputsJSON: `{"batch_promote_parent_id":"old-batch"}`, StateJSON: `{"promotion":{"approved":true,"delete_sent_at":"sent","old_removed":true}}`},
+		{ID: "standalone", ActionName: "promote_transcode_candidate", Status: StatusWaitingExternal},
+	} {
+		if err := h.st.CreateActionInstance(inst); err != nil {
+			t.Fatal(err)
+		}
+	}
+	child := &ExecutionContext{InstanceID: "old-child", Inputs: map[string]any{"batch_promote_parent_id": "old-batch"}, State: map[string]any{}, Outputs: map[string]any{}}
+	if err := h.engine.claimPromotionSeries(child, "sonarr", 5); err != nil {
+		t.Fatalf("batch child claim: %v", err)
+	}
+	alone := &ExecutionContext{InstanceID: "standalone", Inputs: map[string]any{}, State: map[string]any{}, Outputs: map[string]any{}}
+	err := h.engine.claimPromotionSeries(alone, "sonarr", 5)
+	var busy *promotionBusyError
+	if !errors.As(err, &busy) {
+		t.Fatalf("running batch did not block: %v", err)
+	}
+	for _, want := range []string{"transcode_batch", "old-batch", StatusWaitingExternal} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("waiting text %q does not name %q", err.Error(), want)
+		}
+	}
+	batch, _ := h.st.GetActionInstance("old-batch")
+	batch.Status = StatusCancelled
+	if err := h.st.UpdateActionInstance(*batch); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.engine.claimPromotionSeries(alone, "sonarr", 5); err != nil {
+		t.Fatalf("cancelled batch with finished children kept the series: %v", err)
 	}
 }
