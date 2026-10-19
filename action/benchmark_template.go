@@ -1272,6 +1272,9 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 				return nil, err
 			}
 			req.QualityPruning = req.Automatic && caps.AutomaticQualityPruning
+			if err := addHardwareSearch(req, policy, plan, caps, metric, bitDepth, qualityBitDepth); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if plan.X265 != nil && !caps.X265TwoPass {

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jakenesler/navigatorr/store"
+	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/httpclient"
 	"github.com/mark3labs/mcp-go/mcp"
 )
@@ -169,6 +170,14 @@ func operationSizeMode(r operationRecord) map[string]any {
 	}
 	if r.state["size_main10"] == true {
 		out["main10"] = true
+	}
+	// Which encoder produced the winning settings, so a hardware (VideoToolbox)
+	// result is told apart from x265 before anything is replaced.
+	if codec := operationString(operationMap(operationMap(operationValue(r, "benchmark_decision"))["winner"])["video_codec"]); codec != "" {
+		out["encoder"] = codec
+		if codec == transcode.VideoCodecHEVCVideoToolbox {
+			out["hardware"] = true
+		}
 	}
 	if r.state["size_audio_only"] == true {
 		// The worker's packet proof decides; until it reports, the copy is

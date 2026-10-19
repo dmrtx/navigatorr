@@ -1624,6 +1624,10 @@ func (r *ProductionBenchmarkRunner) runSelection(
 		Policy:     selectorPolicy,
 		Candidates: candidateInputs,
 	}
+	if record.HardwareSearch != nil {
+		margin := record.HardwareSearch.MarginPercent
+		selIn.HardwareMarginPercent = &margin
+	}
 	selRes := optimization.SelectCandidate(selIn)
 
 	decision := &transcode.BenchmarkDecision{

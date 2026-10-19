@@ -310,6 +310,10 @@
               <fieldset id="processing-goal" class="processing-goal">
                 <legend>Choose your goal</legend>
                 <label><input type="radio" name="processing-mode" value="size" /><span><strong>Smaller files</strong><small>Acceptable quality, at least 15% measured savings. Lossless audio (TrueHD, DTS-HD MA, PCM, FLAC) becomes AAC with the same channel layout, including lossless Atmos and DTS:X, which lose their object and height channels; lossy tracks, Atmos on E-AC-3 included, are copied, and every track and language is kept. 8-bit video may be encoded as 10-bit HEVC when the worker can verify its quality. If no video setting qualifies, the video may be kept bit-identical and only the lossless audio compacted.</small></span></label>
+                <div id="hardware-option" class="hardware-option" hidden>
+                  <label class="check"><input id="allow-hardware" type="checkbox" checked /><span><strong>Allow the media engine (faster)</strong><small>Also tries Apple hardware encodes through the same quality checks. One is used only when its file is within the margin below of the best software result, or when software finds nothing. Turn it off to keep software (x265) encodes only. Needs an updated Mac worker; otherwise the search stays on software. A hardware result is labeled VideoToolbox before you replace anything.</small></span></label>
+                  <label id="hardware-margin-label">Accept files up to <input id="hardware-margin" type="number" min="0" max="50" step="1" value="15" inputmode="numeric" /> % larger</label>
+                </div>
                 <label><input type="radio" name="processing-mode" value="quality" checked /><span><strong>Prioritize quality</strong><small>Strict quality checks, no file growth.</small></span></label>
                 <label><input type="radio" name="processing-mode" value="x265_preserve" /><span><strong>Convert to HEVC · Strict quality</strong><small>Strict quality checks, no file growth. Existing HEVC stays unchanged.</small></span></label>
                 <label><input type="radio" name="processing-mode" value="compact" /><span><strong>Make it much smaller · SDR 1080p</strong><small>For 4K, HDR and Dolby Vision files: converts to standard dynamic range (SDR) at up to 1080p and turns lossless audio (TrueHD, DTS-HD MA, PCM, FLAC) into AAC with the same channel layout, keeping every language and subtitle. HDR and Dolby Vision are removed. E-AC-3, AC-3 and AAC tracks are copied unchanged, so Atmos on E-AC-3 is kept; TrueHD Atmos becomes AAC. At least 30% measured savings; replacing the original still needs your approval.</small></span></label>
@@ -977,6 +981,10 @@
       <form id="reconfigure-form" hidden>
         <label id="reconfigure-scope-label">Apply to<select id="reconfigure-scope"></select></label>
         <label id="reconfigure-mode-label" hidden>Goal<select id="reconfigure-mode"><option value="size">Smaller files · At least 15% savings</option><option value="quality">Prioritize quality · No file growth</option><option value="x265_preserve">Convert to HEVC · Strict quality</option><option value="compact">Make it much smaller · SDR 1080p (removes HDR and Dolby Vision; lossless audio → AAC)</option></select></label>
+        <div id="reconfigure-hardware-option" class="hardware-option" hidden>
+          <label class="check"><input id="reconfigure-hardware" type="checkbox" checked /><span><strong>Allow the media engine (faster)</strong><small>Also tries Apple hardware encodes through the same quality checks; a result is used only within the margin below of the best software result, or when software finds nothing. Turn it off for software (x265) encodes only.</small></span></label>
+          <label id="reconfigure-hardware-margin-label">Accept files up to <input id="reconfigure-hardware-margin" type="number" min="0" max="50" step="1" value="15" inputmode="numeric" /> % larger</label>
+        </div>
         <label>Profile<select id="reconfigure-profile" required aria-describedby="reconfigure-profile-note"></select></label>
         <p id="reconfigure-profile-note" class="profile-guidance" hidden></p>
         <p id="reconfigure-current-profiles" class="metadata"></p>

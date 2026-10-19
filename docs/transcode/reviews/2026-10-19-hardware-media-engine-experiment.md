@@ -240,14 +240,14 @@ at 73-92 % idle before each.
 - 8-bit sources only, no HDR, no 4:2:2, no two-pass or bitrate-ladder rate control.
 - No assessment of subjective quality beyond VMAF/CAMBI.
 
-## 10. Proposal for phase 2 (not implemented)
+## 10. Proposal for phase 2
 
 1. **Fix the VT candidates, not just add more of them.** Give every VT candidate
    `gop_size: 240` (and optionally `b_frames: 2`). `gop_size` is already a typed
    plan field propagated to candidates (`action/benchmark_template.go`), so no
    worker or schema change is needed. Under the "older policies unchanged" rule
    this belongs in a new policy version; size v3 stays frozen without VT.
-2. **A size-mode option "allow hardware" (prefer speed), default off.** When on,
+2. **A size-mode option "allow hardware" (prefer speed).** When on,
    the search adds VT quality candidates (suggested start ladder q 45/50/55/60:
    the passing values on these clips were 45-57; the repository's current
    65/70/75 are far above the gate and would be wasted). VT qualifies through the
@@ -268,3 +268,15 @@ at 73-92 % idle before each.
    production VMAF model on the actual worker.
 
 Phase 2 changes candidate selection and should get an Opus review, as agreed.
+
+### Outcome
+
+Phase 2 is implemented as proposed items 1 and 2. One decision differs from the
+proposal: the option is **on by default** (with a 15 % margin, always visible
+and switchable off per job or batch), only for the new policy, so batches and
+digests frozen earlier are unchanged and `allow_hardware=false` reproduces the
+earlier snapshot exactly. The winner's encoder is shown as VideoToolbox with a
+Hardware badge before anything is replaced. Items 3 to 5 are left as follow-ups
+(hardware decode behind a self-check, validation on real freely licensed clips
+with the production VMAF model, keeping x265 for final encodes in the size
+mode).

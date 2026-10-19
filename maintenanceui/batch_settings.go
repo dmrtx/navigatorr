@@ -15,6 +15,8 @@ import (
 func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Mode            string   `json:"mode"`
+		AllowHardware   *bool    `json:"allow_hardware"`
+		HardwareMargin  *float64 `json:"hardware_margin_percent"`
 		ID              string   `json:"id"`
 		Scope           string   `json:"scope"`
 		CandidateID     string   `json:"candidate_id"`
@@ -67,12 +69,14 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 		fail(w, 409, "batch file selection is not ready yet")
 		return
 	}
-	plan := map[string]any{"id": body.ID, "scope": body.Scope, "selection_version": action.BatchSelectionVersion(inst, items), "title": operationString(decodeOperationJSON(inst.OutputsJSON)["series_title"]), "settings": map[string]any{"profile_label": "Keep each file's current profile", "min_savings_percent": inputs["min_savings_percent"], "max_size_increase_percent": inputs["max_size_increase_percent"]}}
+	plan := map[string]any{"id": body.ID, "scope": body.Scope, "selection_version": action.BatchSelectionVersion(inst, items), "title": operationString(decodeOperationJSON(inst.OutputsJSON)["series_title"]), "settings": map[string]any{"profile_label": "Keep each file's current profile", "min_savings_percent": inputs["min_savings_percent"], "max_size_increase_percent": inputs["max_size_increase_percent"], "allow_hardware": inputs["allow_hardware"], "hardware_margin_percent": inputs["hardware_margin_percent"]}}
 	files := []string{}
 	selected, active := 0, 0
 	requiresProfile := false
 	limits, mixed := map[string]any{}, map[string]bool{}
 	itemSettings := operationMap(state["batch_item_settings"])
+	var hardwareAllow, hardwareKnown bool
+	var hardwareMargin any
 	profiles := map[string]int{}
 	for _, item := range items {
 		if !action.BatchRevisionSelects(item, body.Scope, selectionID) {
@@ -87,6 +91,10 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		selected++
+		if allow, margin, ok := frozenHardware(itemSettings[item.ItemKey]); ok && !hardwareKnown {
+			hardwareKnown = true
+			hardwareAllow, hardwareMargin = allow, margin
+		}
 		if body.Scope == "file" {
 			plan["item_key"] = item.ItemKey
 		}
@@ -183,6 +191,10 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	settingsView["mixed_limits"] = mixed["min_savings_percent"] || mixed["max_size_increase_percent"]
 	settingsView["preserve_source_bit_depth"] = inputs["preserve_source_bit_depth"]
+	if hardwareKnown {
+		// An earlier goal change froze its own media engine choice; show that one.
+		settingsView["allow_hardware"], settingsView["hardware_margin_percent"] = hardwareAllow, hardwareMargin
+	}
 	if r.Method == http.MethodGet {
 		writeJSON(w, 200, plan)
 		return
@@ -196,7 +208,18 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 			fail(w, 400, "invalid processing goal")
 			return
 		}
-		s.admitCommand(w, r, map[string]any{"kind": "reconfigure", "id": body.ID, "scope": body.Scope, "candidate_id": body.CandidateID, "item_key": body.ItemKey, "selection_version": body.Version, "decision_version": body.DecisionVersion, "settings": map[string]any{"mode": body.Mode}}, body.Key)
+		settings := map[string]any{"mode": body.Mode}
+		if body.AllowHardware != nil {
+			settings["allow_hardware"] = *body.AllowHardware
+		}
+		if body.HardwareMargin != nil {
+			settings["hardware_margin_percent"] = *body.HardwareMargin
+		}
+		if err := action.ValidateHardwareInputs(body.Mode, settings); err != nil {
+			fail(w, 400, err.Error())
+			return
+		}
+		s.admitCommand(w, r, map[string]any{"kind": "reconfigure", "id": body.ID, "scope": body.Scope, "candidate_id": body.CandidateID, "item_key": body.ItemKey, "selection_version": body.Version, "decision_version": body.DecisionVersion, "settings": settings}, body.Key)
 		return
 	}
 	settings := map[string]any{}
@@ -238,4 +261,18 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 
 func containsMode(mode string) bool {
 	return mode == "size" || mode == "quality" || mode == "x265_preserve" || mode == "compact"
+}
+
+// frozenHardware reads the media engine choice an earlier goal change froze
+// into a file's size policy: search rules present means on, absent means off.
+func frozenHardware(raw any) (allow bool, margin any, ok bool) {
+	size := operationMap(operationMap(operationMap(raw)["mode_policy"])["size"])
+	if size == nil {
+		return false, nil, false
+	}
+	rules := operationMap(size["hardware_search"])
+	if rules == nil {
+		return false, nil, true
+	}
+	return true, rules["margin_percent"], true
 }

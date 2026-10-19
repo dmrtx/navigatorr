@@ -1,6 +1,7 @@
 package optimization
 
 import (
+	"fmt"
 	"math"
 	"sort"
 )
@@ -24,6 +25,12 @@ type SelectorInput struct {
 	Policy      QualityPolicy `json:"-"`
 	Mode        string        `json:"mode,omitempty"`
 	SourceBytes int64         `json:"source_bytes,omitempty"`
+	// HardwareMarginPercent, when set for mode=size, lets the smallest
+	// qualifying VideoToolbox candidate win over smaller x265 ones as long as
+	// it is at most this many percent larger than the smallest qualifying x265
+	// candidate (or no x265 candidate qualifies). Unset keeps the
+	// smallest-qualifying rule.
+	HardwareMarginPercent *float64 `json:"hardware_margin_percent,omitempty"`
 	// Candidates is the set of candidate transcode profiles/configurations tested.
 	Candidates []CandidateInput `json:"candidates"`
 }
@@ -174,7 +181,7 @@ func SelectCandidate(in SelectorInput) SelectionResult {
 	}
 
 	if in.Mode != "" {
-		return SelectMeasuredCandidatesVersion(res.AllEvaluated, in.Mode, in.Policy.Tolerance(), in.SourceBytes, in.ModePolicyVersion)
+		return selectMeasuredCandidates(res.AllEvaluated, in.Mode, in.Policy.Tolerance(), in.SourceBytes, in.ModePolicyVersion, in.HardwareMarginPercent)
 	}
 	// Case 1: Target-reaching candidates exist
 	if len(targetReaching) > 0 {
@@ -243,6 +250,41 @@ func SelectMeasuredCandidates(candidates []EvaluatedCandidate, mode string, tole
 }
 
 func SelectMeasuredCandidatesVersion(candidates []EvaluatedCandidate, mode string, tolerance float64, sourceBytes int64, version string) SelectionResult {
+	return selectMeasuredCandidates(candidates, mode, tolerance, sourceBytes, version, nil)
+}
+
+// videoToolboxCodec is the media-engine encoder the hardware margin favours.
+const videoToolboxCodec = "hevc_videotoolbox"
+
+// preferHardware narrows the size contest to the VideoToolbox candidates when
+// the smallest of them is within marginPercent of the smallest other one, or
+// when no other candidate qualifies. Otherwise it returns the set unchanged.
+func preferHardware(eligible []EvaluatedCandidate, marginPercent float64) ([]EvaluatedCandidate, string) {
+	var hardware []EvaluatedCandidate
+	var bestHardware, bestSoftware int64
+	for _, c := range eligible {
+		if c.VideoCodec == videoToolboxCodec {
+			hardware = append(hardware, c)
+			if bestHardware == 0 || c.EstimatedBytes < bestHardware {
+				bestHardware = c.EstimatedBytes
+			}
+		} else if bestSoftware == 0 || c.EstimatedBytes < bestSoftware {
+			bestSoftware = c.EstimatedBytes
+		}
+	}
+	if len(hardware) == 0 {
+		return eligible, ""
+	}
+	if bestSoftware == 0 {
+		return hardware, "hardware candidate selected: no software candidate qualified"
+	}
+	if float64(bestHardware) <= float64(bestSoftware)*(1+marginPercent/100) {
+		return hardware, fmt.Sprintf("hardware candidate selected: %d bytes against %d for the smallest software candidate, within the %.4g%% margin", bestHardware, bestSoftware, marginPercent)
+	}
+	return eligible, ""
+}
+
+func selectMeasuredCandidates(candidates []EvaluatedCandidate, mode string, tolerance float64, sourceBytes int64, version string, hardwareMarginPercent *float64) SelectionResult {
 	r := SelectionResult{AllEvaluated: append([]EvaluatedCandidate(nil), candidates...), DecisionReason: ReasonAllCandidatesInvalid}
 	if mode != "size" && mode != "quality" && mode != "x265_preserve" && mode != "compact" {
 		r.DecisionReason = "invalid_mode"
@@ -300,6 +342,10 @@ func SelectMeasuredCandidatesVersion(candidates []EvaluatedCandidate, mode strin
 		}
 		eligible = filtered
 	}
+	hardwareNote := ""
+	if mode == "size" && hardwareMarginPercent != nil {
+		eligible, hardwareNote = preferHardware(eligible, *hardwareMarginPercent)
+	}
 	smallest := eligible[0].EstimatedBytes
 	for _, c := range eligible {
 		if c.EstimatedBytes < smallest {
@@ -325,6 +371,9 @@ func SelectMeasuredCandidatesVersion(candidates []EvaluatedCandidate, mode strin
 		return a.CandidateID < b.CandidateID
 	})
 	winner := finalists[0]
+	if hardwareNote != "" {
+		winner.Uncertainties = append(append([]string(nil), winner.Uncertainties...), hardwareNote)
+	}
 	r.Winner = &winner
 	r.DecisionReason = "measured_plan_selected"
 	return r

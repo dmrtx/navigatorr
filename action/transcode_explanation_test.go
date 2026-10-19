@@ -98,3 +98,31 @@ func TestTranscodePolicyRejectionPersistsTerminalWorkerObservation(t *testing.T)
 		})
 	}
 }
+
+// A hardware winner is reported as such before anything is replaced; an x265
+// winner and a search without a winner say nothing extra.
+func TestExplainTranscodeNamesTheWinningEncoder(t *testing.T) {
+	for _, tc := range []struct {
+		name, codec, encoder string
+		hardware             bool
+	}{
+		{"media engine", "hevc_videotoolbox", "hevc_videotoolbox", true},
+		{"software", "libx265", "libx265", false},
+		{"no winner", "", "", false},
+	} {
+		decision := map[string]any{"decision_reason": "no_valid_candidate"}
+		if tc.codec != "" {
+			decision = map[string]any{"decision_reason": "measured_plan_selected", "winner": map[string]any{"candidate_id": "c", "video_codec": tc.codec}}
+		}
+		res := &ActionResult{ActionName: "transcode_media", Status: StatusCompleted,
+			Inputs:  map[string]any{"mode": "size"},
+			Outputs: map[string]any{"original_intact": true, "benchmark_decision": decision}}
+		e := ExplainTranscode(res)
+		if e == nil || e.Encoder != tc.encoder || e.Hardware != tc.hardware {
+			t.Fatalf("%s: %+v", tc.name, e)
+		}
+		if got := strings.Contains(e.Message, "media engine"); got != tc.hardware || tc.hardware && e.Outcome != "candidate_ready" {
+			t.Fatalf("%s: message %q", tc.name, e.Message)
+		}
+	}
+}

@@ -1130,7 +1130,7 @@ function libraryFailure(error, more) {
     button("Retry", () => loadLibrary(more), "quiet"),
   );
 }
-const draftFields = ["technical","scope","path","season","recursive","selected-only","promote-batch","profile","priority","custom","encoder","quality","preset","tune","rate-mode","bitrate","max-bitrate","audio","optimize","ladder","metric","vmaf-target","vmaf-min","ssim-target","ssim-min","sample-count","sample-seconds","final-validation","max-items","preserve-depth","min-savings","max-growth","media-kind"];
+const draftFields = ["technical","scope","path","season","recursive","selected-only","promote-batch","profile","priority","custom","encoder","quality","preset","tune","rate-mode","bitrate","max-bitrate","audio","optimize","ladder","metric","vmaf-target","vmaf-min","ssim-target","ssim-min","sample-count","sample-seconds","final-validation","max-items","preserve-depth","min-savings","max-growth","media-kind","allow-hardware","hardware-margin"];
 function libraryDraftKey() {
   const source = $("service").value;
   return source.startsWith("folder:") ? source : `${source}:${state.media?.id || "catalog"}`;
@@ -1764,6 +1764,8 @@ function controls() {
   state.technicalShown = technical;
   $("legacy-controls").hidden = !technical;
   $("processing-goal").disabled = technical;
+  $("hardware-option").hidden = processingMode() !== "size";
+  $("hardware-margin-label").hidden = !$("allow-hardware").checked;
   $("goal-overridden").hidden = !technical;
   $("advanced-state").textContent = technical ? "On · goal not used" : "Off";
   $("advanced-state").dataset.on = technical ? "true" : "false";
@@ -1965,11 +1967,22 @@ async function submitJob(mode = "encode") {
     controls();
   }
 }
+function hardwareMargin(field) {
+  const raw = String(field.value).trim();
+  const margin = Number(raw);
+  if (raw === "" || !Number.isFinite(margin) || margin < 0 || margin > 50) throw new Error("Enter a hardware size margin from 0 to 50 percent.");
+  return margin;
+}
 async function buildAndSubmitJob(mode = "encode") {
   const batch = $("scope").value === "batch";
   let name = batch ? "transcode_batch" : "transcode_media";
   const simple = !$("technical").checked && mode !== "benchmark";
   const inputs = simple ? {mode:processingMode()} : { preserve_source_bit_depth: $("preserve-depth").checked };
+  if (simple && inputs.mode === "size") {
+    // Always explicit, so the choice on screen is the choice that is frozen.
+    inputs.allow_hardware = $("allow-hardware").checked;
+    if (inputs.allow_hardware) inputs.hardware_margin_percent = hardwareMargin($("hardware-margin"));
+  }
   const folderSource = $("service").value.startsWith("folder:");
   const explicitSelection = (folderSource ? state.folderSelected?.size : state.selected.size) > 0 && (simple || $("selected-only").checked);
   if (batch) {
@@ -2804,6 +2817,10 @@ async function reconfigureBatch(id, candidate = false, savedPlan = null) {
     state.reconfigurePlan = plan;
     $("reconfigure-mode-label").hidden = !plan.mode;
     $("reconfigure-mode").value = plan.mode || "quality";
+    // A batch that never said anything about the media engine gets the default: on, 15 %.
+    $("reconfigure-hardware").checked = plan.settings.allow_hardware !== false;
+    $("reconfigure-hardware-margin").value = plan.settings.hardware_margin_percent ?? 15;
+    updateReconfigureHardware();
     $("reconfigure-profile").closest("label").hidden = Boolean(plan.mode);
     $("reconfigure-limits").hidden = Boolean(plan.mode);
 
@@ -2836,6 +2853,12 @@ async function reconfigureBatch(id, candidate = false, savedPlan = null) {
   }
 }
 
+function updateReconfigureHardware() {
+  $("reconfigure-hardware-option").hidden = !(state.reconfigurePlan?.mode && $("reconfigure-mode").value === "size");
+  $("reconfigure-hardware-margin-label").hidden = !$("reconfigure-hardware").checked;
+}
+$("reconfigure-mode").addEventListener("change", updateReconfigureHardware);
+$("reconfigure-hardware").addEventListener("change", updateReconfigureHardware);
 function batchSettingsSummary(plan) {
   const selection = plan.selected === 1 && plan.files?.[0] ? plan.files[0] : `${plan.title || "Saved selection"} · ${plan.selected} files`;
   return `${selection}${plan.active > 0 ? ` · ${plan.active} active ${plan.active === 1 ? "file finishes" : "files finish"} first` : ""}`;
@@ -2932,6 +2955,10 @@ async function submitReconfiguredBatch() {
     return value;
   };
   const body = {id:plan.id,scope:plan.scope,selection_version:plan.selection_version,...(plan.mode ? {mode:$("reconfigure-mode").value} : {profile:$("reconfigure-profile").value,min_savings_percent:limit("reconfigure-savings"),max_size_increase_percent:limit("reconfigure-growth")})};
+  if (plan.mode && body.mode === "size") {
+    body.allow_hardware = $("reconfigure-hardware").checked;
+    if (body.allow_hardware) body.hardware_margin_percent = hardwareMargin($("reconfigure-hardware-margin"));
+  }
   body.preserve_limits = state.reconfigureOriginalLimits === batchSettingsLimits();
   let savedLimits;
   try { savedLimits = JSON.parse(state.reconfigureOriginalLimits); } catch {}
@@ -3619,7 +3646,7 @@ function vmafFloorLabel(floor) {
   return [floor.minimum ? `VMAF ≥ ${floor.minimum}` : "", floor.p5_minimum != null ? `p5 ≥ ${floor.p5_minimum}` : "", floor.worst_window_minimum != null ? `worst window ≥ ${floor.worst_window_minimum}` : ""].filter(Boolean).join(", ");
 }
 function benchmarkCandidateLabel(c) {
-  const codec = c.video_codec === "libx265" ? "x265" : c.video_codec || "VideoToolbox";
+  const codec = c.video_codec === "libx265" ? "x265" : c.video_codec === "hevc_videotoolbox" ? "VideoToolbox (hardware)" : c.video_codec || "VideoToolbox (hardware)";
   const rate = c.average_bitrate_kbps ? `${c.average_bitrate_kbps} kbps` : c.video_codec === "libx265" ? `CRF ${c.quality}` : `quality ${c.quality}`;
   return `${c.id} · ${codec} ${rate}${c.preset ? ` · ${c.preset}` : ""}`;
 }
@@ -3712,6 +3739,8 @@ function sizeModeLines(size) {
   const lines = [];
   if (size.expected_bytes != null) lines.push(`Expected size ${bytes(size.expected_bytes)}${size.main10 ? " · 10-bit HEVC" : ""}`);
   else if (size.main10) lines.push("10-bit HEVC");
+  // The encoder tells a media engine winner apart from x265 before anything is replaced.
+  if (size.encoder) lines.push(`Encoder: ${{libx265: "x265 (software)", hevc_videotoolbox: "VideoToolbox (hardware media engine)"}[size.encoder] || size.encoder}`);
   if (size.video_copy) lines.push({verified: "Video copied unchanged · verified bit-identical", failed: "Video copy check failed · original kept"}[size.video_copy] || "Video will be copied unchanged · not yet verified; only lossless audio is compacted");
   const q = size.final_quality;
   if (q) lines.push(`Final VMAF ${Number(q.vmaf_mean).toFixed(1)} mean · ${q.vmaf_p5 != null ? Number(q.vmaf_p5).toFixed(1) : "n/a"} p5${q.worst_window_mean != null ? ` · ${Number(q.worst_window_mean).toFixed(1)} worst ${Math.round(q.worst_window_seconds || 0)} s window` : ""}`);
@@ -3727,7 +3756,11 @@ function sizeModeNote(job) {
   const lines = sizeModeLines(job.size_mode);
   if (!lines.length) return null;
   const box = node("div", "", "size-mode-summary metadata");
-  for (const line of lines) box.append(node("p", line));
+  for (const line of lines) {
+    const row = node("p", line);
+    if (job.size_mode.hardware && line.startsWith("Encoder: ")) row.append(" ", node("span", "Hardware", "badge hardware-badge"));
+    box.append(row);
+  }
   return box;
 }
 function queueOutcome(job) {
