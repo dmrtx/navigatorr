@@ -3,6 +3,7 @@ package maintenanceui
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
 	"time"
 
@@ -132,10 +133,16 @@ func (s *Server) setWorkerSlots(w http.ResponseWriter, r *http.Request, ctrl wor
 	case errors.As(err, &rejected):
 		// The worker's refusal is final: do not keep a split that the resync
 		// would otherwise push again every few seconds.
+		// A node that was never configured goes back to that state: a stored
+		// "shared" row would make the resync clear a split the worker runs.
+		var revertErr error
 		if previous != nil {
-			_, _ = st.SetWorkerSlotSettings(videoWorkerNode, previous.VideoSlots, previous.PodcastSlots)
+			_, revertErr = st.SetWorkerSlotSettings(videoWorkerNode, previous.VideoSlots, previous.PodcastSlots)
 		} else {
-			_, _ = st.SetWorkerSlotSettings(videoWorkerNode, 0, 0)
+			revertErr = st.DeleteWorkerSlotSettings(videoWorkerNode)
+		}
+		if revertErr != nil {
+			log.Printf("worker slot settings not reverted after the worker refused the split: %v", revertErr)
 		}
 		fail(w, 400, rejected.Message)
 		return

@@ -62,3 +62,12 @@ func (s *Store) SetWorkerSlotSettings(node string, video, podcast int) (WorkerSl
 		Scan(&out.Node, &out.VideoSlots, &out.PodcastSlots, &out.Revision, &out.UpdatedAt)
 	return out, err
 }
+
+// DeleteWorkerSlotSettings forgets a node's settings, returning it to never
+// having been configured. Deleting a node with no row is not an error.
+func (s *Store) DeleteWorkerSlotSettings(node string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`DELETE FROM worker_slot_settings WHERE node=?`, strings.TrimSpace(node))
+	return err
+}

@@ -546,3 +546,20 @@ func TestSlotsEndpointDistinguishesStorageFailureFromInvalidSplit(t *testing.T) 
 		t.Fatalf("an invalid split is a 400: %d", resp.Code)
 	}
 }
+
+func TestPartitionCandidatesForPoolMatchTheCurrentLimits(t *testing.T) {
+	withHostCPUs(t, 16)
+	w := &Worker{cfg: &WorkerConfig{MaxParallelJobs: 4, StateDir: t.TempDir()}}
+	if _, err := w.SetSlotSplit(transcode.SlotSplit{VideoSlots: 3, PodcastSlots: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(w.x265PartitionCandidates(), ","), strings.Join(w.x265PartitionCandidatesFor(3), ","); got != want || got == "" {
+		t.Fatalf("candidates %q, for the pool %q", got, want)
+	}
+	if got := w.x265PartitionCandidatesFor(2); len(got) != 1 || got[0] != "pools=8:frame-threads=4" {
+		t.Fatalf("a pool of two proves one partition: %v", got)
+	}
+	if got := w.x265PartitionCandidatesFor(1); len(got) != 0 {
+		t.Fatalf("a pool of one never partitions: %v", got)
+	}
+}
