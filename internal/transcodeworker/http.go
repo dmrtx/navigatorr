@@ -420,6 +420,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"version":   ver,
 		"commit":    commit,
 		"scheduler": s.worker.SchedulerObservation(time.Now().UTC()),
+		// The x265 pool partition and the startup check that vets it.
+		"x265_partition": s.worker.X265PartitionStatus(),
 	})
 }
 

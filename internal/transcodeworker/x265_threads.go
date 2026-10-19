@@ -56,10 +56,38 @@ func x265ThreadParamsFor(cpus, pools int) string {
 	return fmt.Sprintf("pools=%d:frame-threads=%d", pools, frameThreads)
 }
 
-// x265ThreadParams partitions x265 thread pools between parallel jobs:
-// x265_pools wins when positive, -1 disables partitioning, and 0 splits the
-// host CPUs evenly across max_parallel_jobs.
+// x265PoolsWarning explains why an explicit x265_pools would not partition
+// anything on a cpus-CPU host, or returns "". Such a value is not an error (the
+// encodes are simply unpartitioned), but it silently does not do what it says.
+func x265PoolsWarning(pools, cpus int) string {
+	switch {
+	case pools <= 0:
+		return ""
+	case pools < minX265PoolThreads:
+		return fmt.Sprintf("x265_pools %d is below %d and is ignored: smaller pools change the encoded bitstream, so encodes run unpartitioned", pools, minX265PoolThreads)
+	case pools >= cpus:
+		return fmt.Sprintf("x265_pools %d is not below the %d host CPUs and is ignored: encodes run unpartitioned", pools, cpus)
+	case x265AutoFrameThreads(cpus) == 0:
+		return fmt.Sprintf("x265_pools %d is ignored: partitioning is not applied on hosts with %d CPUs", pools, cpus)
+	}
+	return ""
+}
+
+// x265ThreadParams is the partition the worker's encodes run with: the
+// configured one (configuredX265ThreadParams) unless the startup self-check
+// found it changes the encoded frames, which turns it off.
 func (w *Worker) x265ThreadParams() string {
+	params := w.configuredX265ThreadParams()
+	if params == "" || w.x265PartitionDisabled(params) {
+		return ""
+	}
+	return params
+}
+
+// configuredX265ThreadParams partitions x265 thread pools between parallel
+// jobs: x265_pools wins when positive, -1 disables partitioning, and 0 splits
+// the host CPUs evenly across max_parallel_jobs.
+func (w *Worker) configuredX265ThreadParams() string {
 	if w == nil || w.cfg == nil || w.cfg.X265Pools < 0 {
 		return ""
 	}

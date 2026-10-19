@@ -619,6 +619,7 @@ func (sh *pipelineShared) runEncodeUnit(ctx context.Context, u pipelineUnit, idx
 // abort the job; candidate-level failures poison only that candidate, matching
 // sequential runMetrics fallback/safety behavior.
 func (sh *pipelineShared) runMetricUnit(ctx context.Context, u pipelineUnit, idx int) {
+	ctx = asMetricPhase(ctx)
 	vc := sh.vcs[u.vcOrd]
 	window := sh.record.Samples[u.sampOrd]
 	candIdx := vc.index
@@ -701,7 +702,7 @@ func (sh *pipelineShared) runMetricUnit(ctx context.Context, u pipelineUnit, idx
 		cmd.Stderr = stderrBuf
 		cmd.Stdout = nil
 		start := time.Now()
-		runErr := cmd.Run()
+		runErr := runCharged(ctx, cmd)
 		vmafDurationSec = time.Since(start).Seconds()
 		if ctx.Err() != nil {
 			fail(ctx.Err())
@@ -804,7 +805,7 @@ func (sh *pipelineShared) runMetricUnit(ctx context.Context, u pipelineUnit, idx
 		cmd.Stderr = stderrBuf
 		cmd.Stdout = nil
 		start := time.Now()
-		runErr := cmd.Run()
+		runErr := runCharged(ctx, cmd)
 		ssimDurationSec = time.Since(start).Seconds()
 		if ctx.Err() != nil {
 			fail(ctx.Err())
@@ -970,7 +971,7 @@ func runCAMBIMetricSample(ctx context.Context, ffmpegPath, samplesDir, candPath,
 	cmd.WaitDelay = 2 * time.Second
 	stderrBuf := newTailBuffer(64 * 1024)
 	cmd.Stderr = stderrBuf
-	if err := cmd.Run(); err != nil {
+	if err := runCharged(ctx, cmd); err != nil {
 		return quality.CAMBIStats{}, fmt.Errorf("ffmpeg CAMBI full-reference failed: %v: %s", err, stderrBuf.String())
 	}
 	data, err := readMetricLogFile(logPath)

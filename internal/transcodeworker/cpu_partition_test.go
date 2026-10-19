@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -198,6 +199,78 @@ func TestFinalValidationConcurrency(t *testing.T) {
 	}
 }
 
+func TestFinalValidationConcurrencyHonoursMetricThreads(t *testing.T) {
+	withHostCPUs(t, 10)
+	cases := []struct {
+		name                         string
+		jobs, metricThreads, windows int
+		want                         int
+	}{
+		{"fits three windows", 1, 3, 6, 3},       // 3 x 3 threads <= 10
+		{"two jobs halve the share", 2, 2, 6, 2}, // 5 CPUs per job: 2 x 2 threads
+		{"wide passes run alone", 1, 8, 6, 1},    // 8 x 2 > 10
+		{"all CPUs, one window", 1, 10, 6, 1},
+		{"more threads than CPUs", 1, 16, 6, 1},
+		{"two jobs, three-thread passes", 2, 3, 6, 1}, // 3 x 2 > 5
+		{"below the pass minimum stays sequential", 1, 1, 6, 1},
+		{"fewer windows than slots", 1, 2, 2, 2},
+	}
+	for _, tc := range cases {
+		w := &Worker{cfg: &WorkerConfig{MaxParallelJobs: tc.jobs, MetricThreads: tc.metricThreads}}
+		got := w.finalValidationConcurrency(tc.windows)
+		if got != tc.want {
+			t.Errorf("%s: concurrency %d, want %d", tc.name, got, tc.want)
+		}
+		// The windows together never ask for more threads than the job's share.
+		if got > 1 && w.metricThreads(got)*got*tc.jobs > hostCPUCount() {
+			t.Errorf("%s: %d windows x %d threads x %d jobs oversubscribe %d CPUs", tc.name, got, w.metricThreads(got), tc.jobs, hostCPUCount())
+		}
+	}
+}
+
+func TestX265PoolsWarning(t *testing.T) {
+	cases := []struct {
+		pools, cpus int
+		warn        bool
+	}{
+		{0, 10, false}, {-1, 10, false}, {5, 10, false}, {4, 10, false},
+		{3, 10, true}, {1, 10, true}, {10, 10, true}, {12, 10, true},
+		{16, 64, true}, // 32+ CPUs are never partitioned
+	}
+	for _, tc := range cases {
+		msg := x265PoolsWarning(tc.pools, tc.cpus)
+		if (msg != "") != tc.warn {
+			t.Errorf("pools=%d cpus=%d: warning %q, want warning=%v", tc.pools, tc.cpus, msg, tc.warn)
+		}
+		// A warning exactly when the partition would not apply.
+		if tc.pools > 0 && tc.warn != (x265ThreadParamsFor(tc.cpus, tc.pools) == "") {
+			t.Errorf("pools=%d cpus=%d: warning and partition disagree", tc.pools, tc.cpus)
+		}
+	}
+}
+
+func TestLoadWorkerConfigWarnsAboutIgnoredX265Pools(t *testing.T) {
+	withHostCPUs(t, 10)
+	var buf strings.Builder
+	oldOut, oldFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(oldOut); log.SetFlags(oldFlags) })
+	path := filepath.Join(t.TempDir(), "worker.yml")
+	for pools, warns := range map[string]bool{"2": true, "12": true, "5": false, "0": false} {
+		buf.Reset()
+		if err := os.WriteFile(path, []byte("x265_pools: "+pools+"\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadWorkerConfig(path); err != nil {
+			t.Fatalf("x265_pools %s rejected: %v", pools, err)
+		}
+		if got := strings.Contains(buf.String(), "x265_pools "+pools); got != warns {
+			t.Errorf("x265_pools %s: warned=%v (%q), want %v", pools, got, buf.String(), warns)
+		}
+	}
+}
+
 func TestSizeModeMetricConcurrency(t *testing.T) {
 	withHostCPUs(t, 10)
 	size := &BenchmarkRecord{Mode: "size"}
@@ -285,7 +358,10 @@ func TestRunFinalWindowsLowestFailureWins(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if failed != 1 || results[1].code != "quality_final_sample_misaligned" {
+	if failed != 1 {
+		t.Fatalf("failed=%d, want 1", failed)
+	}
+	if results[failed].code != "quality_final_sample_misaligned" {
 		t.Fatalf("failed=%d %+v", failed, results[failed])
 	}
 	if results[0].ssim == nil {
