@@ -183,6 +183,14 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 	}
 	defer lease.Close()
 	actx := lease.Context(ctx)
+	// A current worker queues encodes itself and never refuses them as busy,
+	// so only an encode already refused (an older worker) waits its turn in
+	// the slot queue; it must not jump ahead of older slot waiters.
+	if hasSlotTicket(ec.State) {
+		if res, waiting := e.workerSlotTurn(ec, transcodeSlotWaitReason); waiting {
+			return res, nil
+		}
+	}
 
 	// Stable identity persisted before Submit so uncertainty can reconcile.
 	ec.State["job_id"] = jobID
@@ -369,6 +377,15 @@ const workerBusyRetryMargin = time.Second
 // Retry-After through workerBusyNotBeforeKey.
 func (e *Engine) workerBusyWait(ec *ExecutionContext, err error, phase, reason string, outputs map[string]any) StepResult {
 	recordWorkerBusyHistory(ec, phase, err.Error())
+	e.ensureSlotTicket(ec)
+	if e.deps.Store != nil && ec.InstanceID != "" {
+		// Observational: the place shown while waiting. Order is enforced by
+		// workerSlotTurn on the next submit, not here.
+		if position, err := e.slotQueuePosition(ec); err == nil {
+			outputs[workerSlotPositionKey] = position
+		}
+	}
+	markWaitingForWorker(ec)
 	if he, ok := transcodeHTTPError(err); ok && he.RetryAfter > 0 {
 		ec.State[workerBusyNotBeforeKey] = e.now().Add(he.RetryAfter + workerBusyRetryMargin).Format(time.RFC3339Nano)
 	} else {
@@ -395,13 +412,15 @@ func (e *Engine) workerBusyBackoff(ec *ExecutionContext, reason string) (StepRes
 
 // clearWorkerBusy drops slot-wait markers once a submit had any outcome other
 // than a busy refusal, so the refusal is not reported as the job's state or
-// failure class afterwards. Whether the worker holds a job is tracked apart,
-// by the rejected markers that noRemoteJob reads.
+// failure class afterwards. It also gives up the action's place in the worker
+// slot queue and its waiting_for_worker phase. Whether the worker holds a job
+// is tracked apart, by the rejected markers that noRemoteJob reads.
 func clearWorkerBusy(ec *ExecutionContext) {
-	for _, key := range []string{workerBusyNotBeforeKey, "worker_busy", slotWaitLogKey} {
+	for _, key := range []string{workerBusyNotBeforeKey, "worker_busy", slotWaitLogKey, workerSlotWaitSinceKey, workerSlotPositionKey, workerSlotPolledAtKey} {
 		delete(ec.State, key)
 		delete(ec.Outputs, key)
 	}
+	clearWaitingForWorker(ec)
 	if getString(ec.State, "failure_classification") == string(resilience.WorkerBusy) {
 		for _, key := range []string{"failure_classification", "error_class"} {
 			delete(ec.State, key)
@@ -416,8 +435,13 @@ const slotWaitLogKey = "slot_wait_logged"
 
 // repeatedSlotWait reports whether a waiting result repeats the worker_busy
 // wait already logged for this step with the same reason, and records a new
-// one. Any other wait ends the run; clearWorkerBusy ends it too.
+// one. A parent_busy deferral inside a slot wait (the batch happened to be
+// executing at that poll) neither logs a row nor ends the run. Any other wait
+// ends the run; clearWorkerBusy ends it too.
 func repeatedSlotWait(ec *ExecutionContext, stepIdx int, res StepResult) bool {
+	if res.WaitingCondition == "parent_busy" && getString(ec.State, slotWaitLogKey) != "" && hasSlotTicket(ec.State) {
+		return true
+	}
 	if res.WaitingCondition != "worker_busy" {
 		delete(ec.State, slotWaitLogKey)
 		return false
@@ -552,6 +576,10 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("transcode status failed (fail closed): %v", err), Outputs: map[string]any{"job_id": jobID, "external_reference": jobID, "attempt": getInt(ec.State, "attempt"), "retry_count": getInt(ec.State, "retry_count")}}, nil
 	}
 	e.observeTranscodeStatus(ec, st)
+	switch st.Status {
+	case transcode.StatusCompleted, transcode.StatusFailed, transcode.StatusCancelled:
+		e.noteWorkerSlotFreed()
+	}
 	if st.RecoveryRequired {
 		out := transcodeWorkerMetadataOutputs(ec, st)
 		out["job_id"], out["external_reference"] = jobID, jobID

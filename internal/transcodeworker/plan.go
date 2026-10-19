@@ -76,7 +76,7 @@ func ProbeSourceDetails(ctx context.Context, ffprobePath, filePath string) (Sour
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	if err := runCharged(ctx, cmd); err != nil {
 		return SourceProbe{}, fmt.Errorf("ffprobe probe failed on %s: %w (stderr: %s)", filePath, err, stderr.String())
 	}
 	var probe struct {

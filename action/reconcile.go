@@ -235,7 +235,8 @@ func (e *Engine) shouldReconcile(inst *store.ActionInstance, tmpl ActionTemplate
 	// Parent cancel/pause control is enforced at each admission point under the
 	// parent's durable lease. Pending children are still reconciled so they can
 	// be driven to a terminal state safely; accepted jobs keep being tracked.
-	if at, err := time.Parse(time.RFC3339Nano, getString(ec.State, "next_poll_at")); err == nil && e.now().Before(at) {
+	// A slot waiter skips the rest of its backoff once a worker job ended.
+	if at, err := time.Parse(time.RFC3339Nano, getString(ec.State, "next_poll_at")); err == nil && e.now().Before(at) && !(inst.WaitingCondition == "worker_busy" && e.slotWakeDue(ec.State)) {
 		return false
 	}
 	// Recover running actions only after durable progress exists. In particular,
@@ -272,6 +273,19 @@ func (e *Engine) scheduleReconcile(ec *ExecutionContext, condition string) {
 		}
 	} else {
 		delete(ec.State, "worker_poll_failures")
+	}
+	if condition == "worker_busy" && hasSlotTicket(ec.State) {
+		// Waiting for a slot. When the worker refused with Retry-After, the
+		// next poll lands on that hint (+1 s, applied below). Otherwise (a
+		// queue-order wait, or no hint) poll every 30-60 s rather than every
+		// few seconds; jitter keeps waiters from polling in lockstep. A job
+		// ending wakes the waiter early either way (slotWakeDue).
+		if at, err := time.Parse(time.RFC3339Nano, getString(ec.State, workerBusyNotBeforeKey)); err != nil || !at.After(e.now()) {
+			if d := slotWaitPollDelay(); d > delay {
+				delay = d
+			}
+		}
+		ec.State[workerSlotPolledAtKey] = e.now().Format(time.RFC3339Nano)
 	}
 	next := e.now().Add(delay)
 	for _, key := range []string{"retry_not_before", "benchmark_retry_not_before", workerBusyNotBeforeKey} {

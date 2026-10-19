@@ -73,6 +73,38 @@ func (s *Store) ListReconcilableActions(afterID string, limit int) ([]ActionInst
 	return out, rows.Err()
 }
 
+// ListWorkerSlotWaiters returns the live transcode and benchmark actions whose
+// state holds a worker slot ticket (worker_slot_wait_since). The caller parses
+// the ticket and decides which of them are still contending; the query only
+// narrows the scan to the few rows that can be.
+func (s *Store) ListWorkerSlotWaiters() ([]ActionInstance, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(`SELECT id, action_name, status, current_step, inputs_json,
+		outputs_json, state_json, waiting_reason, waiting_condition, waiting_options_json,
+		error_json, idempotency_key, created_at, updated_at FROM action_instances
+		WHERE status IN ('pending', 'waiting_external', 'running')
+		AND action_name IN ('transcode_media', 'benchmark_transcode')
+		AND instr(state_json, '"worker_slot_wait_since"') > 0
+		ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ActionInstance
+	for rows.Next() {
+		var inst ActionInstance
+		if err := rows.Scan(&inst.ID, &inst.ActionName, &inst.Status, &inst.CurrentStep,
+			&inst.InputsJSON, &inst.OutputsJSON, &inst.StateJSON, &inst.WaitingReason,
+			&inst.WaitingCondition, &inst.WaitingOptionsJSON, &inst.ErrorJSON,
+			&inst.IdempotencyKey, &inst.CreatedAt, &inst.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, inst)
+	}
+	return out, rows.Err()
+}
+
 // ClaimPromotionOriginal reserves the original file for one approved promotion.
 // Ownership is durable across failures: another candidate cannot take over while
 // an earlier import/delete outcome is still uncertain.

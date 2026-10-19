@@ -122,6 +122,9 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	probeStarted := e.now()
 	rep, err := mediainspect.InspectDetailed(ctx, e.deps.Ffprobe, cleanPath)
 	e.recordCoordinatorPhase(ec, "coordinator_probe", probeStarted, e.now())
+	// Probing is over whatever its outcome; a later wait (for example for a
+	// worker slot) must not be shown as an endless probe.
+	delete(ec.State, "work_progress")
 	if err != nil {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to probe original media %s: %v", cleanPath, err)}, nil
 	}

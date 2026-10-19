@@ -3562,6 +3562,32 @@ test("a single job waiting for a full worker shows a slot wait, never a failure"
   assert.equal(h.run("queuePresentation(job).status"), "Waiting");
 });
 
+test("a file waiting in the coordinator's slot queue shows its place, not the last preflight phase", () => {
+  const h = harness();
+  const job = position => ({activities:[{id:"child",waiting_condition:"worker_busy",work:{phase:"waiting_for_worker",queue_position:position},worker:{benchmark_phase:"completed"}}]});
+  h.context.waitingJob = job;
+  assert.equal(h.run('batchFileActivity({status:"waiting_for_slot",child_action_id:"child"},waitingJob(3))'), "Waiting for a worker slot · 2 ahead in line");
+  assert.equal(h.run('batchFileActivity({status:"waiting_for_slot",child_action_id:"child"},waitingJob(1))'), "Waiting for a worker slot · Next in line");
+  assert.equal(h.run('batchFileActivity({status:"waiting_for_slot",child_action_id:"child"},waitingJob(undefined))'), "Waiting for a worker slot");
+  assert.equal(h.run('workerPhaseLabel("waiting_for_worker")'), "Waiting for a worker slot");
+  // Once the worker accepts the job the phase is gone and worker progress shows.
+  assert.equal(h.run('batchFileActivity({status:"running",child_action_id:"child"},{activities:[{id:"child",worker:{benchmark_phase:"evaluating_metrics"}}]})'), "Measuring sample quality");
+  // A standalone job says how many are ahead of it.
+  h.context.job = {action_name:"benchmark_transcode",status:"waiting_external",waiting_condition:"worker_busy",work:{phase:"waiting_for_worker",queue_position:3}};
+  assert.match(h.run("telemetry(job)").children[0].textContent, /2 jobs are ahead of it in line\./);
+  h.context.job.work.queue_position = 1;
+  assert.match(h.run("telemetry(job)").children[0].textContent, /It is next in line\./);
+});
+
+test("phase cost detail shows measured worker CPU time and keeps an older worker's unknown", () => {
+  const h = harness();
+  h.run('renderPhaseCosts($("detail-summary"),{phase_costs:{worker_encode:{duration_ms:500,attempts:1,active_compute_ms:1800},worker_probe:{duration_ms:40,attempts:1,active_compute_ms:null}}});');
+  const rendered = JSON.stringify(h.elements.get("detail-summary").children);
+  assert.match(rendered, /CPU time/);
+  assert.match(rendered, /1800 ms/);
+  assert.match(rendered, /Unknown/);
+});
+
 test("an old worker-busy failure reads plainly and hides the worker URL", () => {
   const h = harness();
   for (const error of [

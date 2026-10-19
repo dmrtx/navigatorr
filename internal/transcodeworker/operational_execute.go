@@ -184,8 +184,9 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 	// the chapter count and video attributes needed for local pre-publish
 	// policy validation.
 	probeStart := time.Now()
-	srcProbe, probeErr := w.probeSourceDetailsForJob(ctx, r.effectiveInput)
-	w.persistPhaseCost(jobDir, jobFile, job, "probe", probeStart, transcode.PhaseCost{})
+	probeCPU := &cpuMeter{}
+	srcProbe, probeErr := w.probeSourceDetailsForJob(withCPUMeter(ctx, probeCPU), r.effectiveInput)
+	w.persistPhaseCost(jobDir, jobFile, job, "probe", probeStart, transcode.PhaseCost{ActiveComputeMs: probeCPU.activeComputeMs()})
 	if srcProbe.DurationSec > 0 {
 		job.DurationSec = srcProbe.DurationSec
 	}
@@ -226,11 +227,17 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 	// Encode operational input -> local candidate. Semantic Source/Candidate
 	// remain unchanged in the persisted record.
 	encodeStart := time.Now()
-	ffmpegErr := w.runOperationalFFmpeg(ctx, execPlan, job, r.effectiveInput, r.localCandidate, progressPath, logPath)
+	encodeCPU := &cpuMeter{}
+	ffmpegErr := w.runOperationalFFmpeg(withCPUMeter(ctx, encodeCPU), execPlan, job, r.effectiveInput, r.localCandidate, progressPath, logPath)
 	job.EncodeFinishedAt = time.Now().UTC()
+	encodeCost := transcode.PhaseCost{ActiveComputeMs: encodeCPU.activeComputeMs()}
 	if inputOnNAS && ffmpegErr == nil {
 		// An unstaged source is read in place over the network by the encoder.
-		w.persistPhaseCost(jobDir, jobFile, job, "encode", encodeStart, transcode.PhaseCost{NASReadBytes: knownCount(sourceInfo.Size())})
+		encodeCost.NASReadBytes = knownCount(sourceInfo.Size())
+	}
+	if encodeCost.NASReadBytes != nil || encodeCost.ActiveComputeMs != nil {
+		// A failed encode still spent its CPU time, so it is recorded too.
+		w.persistPhaseCost(jobDir, jobFile, job, "encode", encodeStart, encodeCost)
 	}
 	if ffmpegErr != nil {
 		job.FailureClassification = string(resilience.ClassifyError(ffmpegErr))

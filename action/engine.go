@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jakenesler/navigatorr/store"
@@ -33,6 +34,10 @@ type Engine struct {
 	// hashSlots bounds whole-file hashes of NAS media across every caller, so
 	// parallel continuations never saturate the share the worker reads from.
 	hashSlots chan struct{}
+	// slotFreedAt (unix nanoseconds on the engine clock) is when this process
+	// last saw a worker job end. It only shortens slot waiters' backoff; the
+	// durable queue order lives in each waiter's state (worker_slot_wait_since).
+	slotFreedAt atomic.Int64
 
 	// promotionCopyBoundaryHook, when set by tests, runs after a private
 	// recovery copy has been flushed and closed and before it is verified or
@@ -482,6 +487,9 @@ func (e *Engine) resume(ctx context.Context, instanceID string, decision string,
 		return nil, err
 	}
 	defer release()
+	if automatic {
+		ctx = withAutomaticResume(ctx)
+	}
 	inst, err := e.deps.Store.GetActionInstance(instanceID)
 	if err != nil {
 		return nil, fmt.Errorf("getting action instance %s: %w", instanceID, err)

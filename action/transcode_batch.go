@@ -902,6 +902,7 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 				pendingIndices = append(pendingIndices, i)
 			}
 		}
+		pendingIndices = e.slotFairPending(ctx, ec.InstanceID, items, pendingIndices)
 
 		if len(pendingIndices) == 0 {
 			break
