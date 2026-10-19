@@ -36,7 +36,12 @@ type WorkerConfig struct {
 	// divides the host CPUs among concurrent metric invocations. Thread count
 	// never changes metric values, only wall time.
 	MetricThreads int `json:"metric_threads" yaml:"metric_threads"`
-	Quality       int `json:"quality" yaml:"quality"`
+	// X265Pools is the libx265 thread-pool size per encode. Zero splits the
+	// host CPUs evenly across max_parallel_jobs (no partition with one job),
+	// -1 disables partitioning. The worker pins x265's own frame-thread
+	// choice for the whole host alongside it, so the bitstream never changes.
+	X265Pools int `json:"x265_pools" yaml:"x265_pools"`
+	Quality   int `json:"quality" yaml:"quality"`
 	// HTTP daemon (PR1 `serve` mode) settings. Empty tokens mean "no auth",
 	// which is only permitted on loopback binds (enforced in http.go).
 	HTTPListen    string `json:"http_listen" yaml:"http_listen"`
@@ -107,6 +112,9 @@ func LoadWorkerConfig(configPath string) (*WorkerConfig, error) {
 	}
 	if cfg.MetricThreads < 0 {
 		return nil, fmt.Errorf("parsing worker config %s: metric_threads %d must be >= 0", configPath, cfg.MetricThreads)
+	}
+	if cfg.X265Pools < -1 {
+		return nil, fmt.Errorf("parsing worker config %s: x265_pools %d must be >= -1", configPath, cfg.X265Pools)
 	}
 	if strings.TrimSpace(cfg.HTTPListen) == "" {
 		cfg.HTTPListen = "127.0.0.1:8097"

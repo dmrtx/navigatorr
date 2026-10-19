@@ -1377,7 +1377,7 @@ func (w *Worker) runOperationalFFmpeg(ctx context.Context, execPlan *ExecutionPl
 			return err
 		})
 	}
-	return RunFFmpegPaths(ctx, w.ffmpegPath, execPlan, inputPath, outputPath, progressPath, logPath)
+	return runFFmpegPaths(ctx, w.ffmpegPath, execPlan, inputPath, outputPath, progressPath, logPath, w.x265ThreadParams())
 }
 
 // stagedInputReady reports whether the staged input already exists as a
