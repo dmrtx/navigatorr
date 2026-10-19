@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -711,13 +712,24 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 			return err
 		}
 	}
+	fallbackCandidates := 0
 	for _, c := range req.Candidates {
 		if !strings.HasPrefix(c.ID, HardwareFallbackCandidatePrefix) {
 			continue
 		}
+		fallbackCandidates++
 		if req.HardwareSearch == nil || len(req.HardwareSearch.FallbackQualityValues) == 0 || BenchmarkCandidateVideoCodec(c) != VideoCodecHEVCVideoToolbox {
 			return errors.New("hardware fallback candidates require hardware search rules with fallback quality values and a VideoToolbox encoder")
 		}
+		// A fallback candidate is one of the frozen rungs, encoded the way the
+		// rules say; anything else is not the search the policy froze.
+		rules := req.HardwareSearch
+		if !slices.Contains(rules.FallbackQualityValues, c.Quality) || c.GOPSize == nil || *c.GOPSize != rules.GOPSize || c.BFrames == nil || *c.BFrames != rules.BFrames || c.Preset != "" || c.Tune != "" || c.AverageBitrateKbps != 0 {
+			return fmt.Errorf("hardware fallback candidate %q does not match the frozen hardware search rules", c.ID)
+		}
+	}
+	if fallbackCandidates > MaxHardwareFallbackQualityValues {
+		return fmt.Errorf("at most %d hardware fallback candidates", MaxHardwareFallbackQualityValues)
 	}
 	if req.AutomaticSearch != nil {
 		if !req.Automatic || !sizeV3 {

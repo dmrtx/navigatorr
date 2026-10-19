@@ -359,10 +359,57 @@ func TestHardwareFallbackRulesValidation(t *testing.T) {
 	if transcode.ValidateBenchmarkRequest(&wrongEncoder) == nil {
 		t.Fatal("fallback candidate on another encoder accepted")
 	}
-	tooMany := *req
-	tooMany.Candidates = append(append([]transcode.BenchmarkCandidate(nil), req.Candidates...), req.Candidates[0])
-	if transcode.ValidateBenchmarkRequest(&tooMany) == nil {
-		t.Fatalf("%d candidates accepted", len(tooMany.Candidates))
+	// A fallback candidate is one of the frozen rungs, encoded as the rules say.
+	for name, mutate := range map[string]func(*transcode.BenchmarkCandidate){
+		"a quality outside the rungs": func(c *transcode.BenchmarkCandidate) { c.Quality = 10 },
+		"another keyframe interval":   func(c *transcode.BenchmarkCandidate) { g := 12; c.GOPSize = &g },
+		"no keyframe interval":        func(c *transcode.BenchmarkCandidate) { c.GOPSize = nil },
+		"another B-frame setting":     func(c *transcode.BenchmarkCandidate) { b := 0; c.BFrames = &b },
+		"an x265 preset":              func(c *transcode.BenchmarkCandidate) { c.Preset = "slow" },
+	} {
+		mutated := *req
+		mutated.Candidates = append([]transcode.BenchmarkCandidate(nil), req.Candidates...)
+		for i := range mutated.Candidates {
+			if strings.HasPrefix(mutated.Candidates[i].ID, transcode.HardwareFallbackCandidatePrefix) {
+				mutate(&mutated.Candidates[i])
+				break
+			}
+		}
+		if err := transcode.ValidateBenchmarkRequest(&mutated); err == nil || !strings.Contains(err.Error(), "frozen hardware search rules") {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	// The cap is on distinct candidates: 22 pass, 23 do not, and a fourth
+	// fallback candidate is refused by its own bound.
+	room := *req
+	room.Candidates = append([]transcode.BenchmarkCandidate(nil), req.Candidates...)
+	extra := func(n int) transcode.BenchmarkCandidate {
+		c := room.Candidates[0]
+		c.ID, c.Quality = fmt.Sprintf("extra-%d", n), 40+n
+		return c
+	}
+	room.Candidates = append(room.Candidates, extra(1))
+	if len(room.Candidates) != transcode.MaxAutomaticHardwareCandidates {
+		t.Fatalf("%d candidates, want the cap", len(room.Candidates))
+	}
+	if err := transcode.ValidateBenchmarkRequest(&room); err != nil {
+		t.Fatalf("candidates at the cap refused: %v", err)
+	}
+	room.Candidates = append(room.Candidates, extra(2))
+	if err := transcode.ValidateBenchmarkRequest(&room); err == nil || !strings.Contains(err.Error(), "candidates") {
+		t.Fatalf("%d candidates accepted: %v", len(room.Candidates), err)
+	}
+	fourth := *req
+	fourth.Candidates = append([]transcode.BenchmarkCandidate(nil), req.Candidates...)
+	for _, c := range req.Candidates {
+		if strings.HasPrefix(c.ID, transcode.HardwareFallbackCandidatePrefix) {
+			c.ID += "-again"
+			fourth.Candidates = append(fourth.Candidates, c)
+			break
+		}
+	}
+	if err := transcode.ValidateBenchmarkRequest(&fourth); err == nil || !strings.Contains(err.Error(), "at most 3 hardware fallback") {
+		t.Fatalf("a fourth fallback candidate: %v", err)
 	}
 }
 

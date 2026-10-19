@@ -53,6 +53,25 @@ func hardEpisode() map[string]replaySetting {
 	return settings
 }
 
+func stageHas(stage *transcode.BenchmarkAutomaticStage, id string) bool {
+	for _, c := range stage.Candidates {
+		if c == id {
+			return true
+		}
+	}
+	return false
+}
+
+// stageWith returns the first search stage that measured id.
+func stageWith(res replayResult, id string) *transcode.BenchmarkAutomaticStage {
+	for i := range res.stages {
+		if stageHas(&res.stages[i], id) {
+			return &res.stages[i]
+		}
+	}
+	return nil
+}
+
 func measuredHas(res replayResult, id string) bool {
 	for _, m := range res.measured {
 		if m == id {
@@ -91,9 +110,14 @@ func TestReplayHardwareFallbackWinsWithinMargin(t *testing.T) {
 			t.Fatalf("%s measured or labelled %q", id, res.reason(id))
 		}
 	}
-	// The medium rung and the hardware rungs were measured in one stage.
-	if !measuredHas(res, "fallback-quality-medium-cand_crf16") || !measuredHas(res, "fallback-hardware-cand_q75") {
-		t.Fatalf("the first fallback stage did not carry both families: %v", res.measured)
+	// The medium rung and the hardware rungs were measured in one stage, and no
+	// stage measured the slow x265 rungs.
+	first := stageWith(res, "fallback-hardware-cand_q75")
+	if first == nil || !stageHas(first, "fallback-quality-medium-cand_crf16") || first.Stage != "testing_alternatives" {
+		t.Fatalf("the first fallback stage did not carry both families: %+v", res.stages)
+	}
+	if stageWith(res, "fallback-quality-cand_crf16") != nil {
+		t.Fatalf("a stage measured the slow rungs: %+v", res.stages)
 	}
 	noted := false
 	for _, u := range res.decision.Winner.Uncertainties {
@@ -162,9 +186,9 @@ func TestReplayHardwareFallbackWinsWhenMediumFindsNothing(t *testing.T) {
 	}
 }
 
-// A ladder rung that passes quality means the fallback is not needed, whatever
-// x265 does.
-func TestReplayHardwareFallbackNotMeasuredWhenLadderPasses(t *testing.T) {
+// A ladder rung that passes quality wins at discovery: the search never reaches
+// a fallback stage, so the higher rungs are not measured.
+func TestReplayHardwareLadderWinsWithoutFallback(t *testing.T) {
 	settings := hardEpisode()
 	settings[replayKey("", 60)] = replayPasses(26000)
 	settings[replayKey("", 55)] = replayPasses(24000)
@@ -197,6 +221,17 @@ func TestReplayHardwareFallbackAfterLadderHoldoutFailure(t *testing.T) {
 	if strings.Join(res.verified, ",") != "vt-cand_q60,fallback-hardware-cand_q75" || res.winner != "fallback-hardware-cand_q75" {
 		t.Fatalf("the retry did not reach a higher rung: %s", res.summary())
 	}
+	if got := res.reason("vt-cand_q60"); !qualityRejection(got) {
+		t.Fatalf("the failed ladder holdout labelled %q", got)
+	}
+	// The retry chose a setting the selector never compared, and says so.
+	noted := false
+	for _, u := range res.decision.Winner.Uncertainties {
+		noted = noted || strings.HasPrefix(u, optimization.HardwareSelectedNote) && strings.Contains(u, "safer setting")
+	}
+	if !noted {
+		t.Fatalf("the retry's reason is missing: %v", res.decision.Winner.Uncertainties)
+	}
 	if res.slowEncodes != 0 {
 		t.Fatalf("the slow stage ran: %s", res.summary())
 	}
@@ -208,7 +243,10 @@ func TestReplayHardwareWithoutFallbackRungsKeepsX265Fallback(t *testing.T) {
 	settings := hardEpisode()
 	settings[replayKey("medium", 16)] = replayPasses(23500)
 	hw := &transcode.HardwareSearchRules{MarginPercent: 15, QualityValues: []int{45, 50, 55, 60}, GOPSize: 240, BFrames: 1}
-	res := runReplayHardware(t, settings, 10_000_000, replayRules(), hw, hardwareReplayLadder(true))
+	// Even with fallback candidates in the request, rules that name no fallback
+	// rungs measure none (the request validator refuses the combination; the
+	// runner does not rely on it).
+	res := runReplayHardware(t, settings, 10_000_000, replayRules(), hw, hardwareFallbackLadder())
 	if res.winner != "fallback-quality-medium-cand_crf16" {
 		t.Fatalf("unexpected result: %s", res.summary())
 	}
@@ -216,6 +254,35 @@ func TestReplayHardwareWithoutFallbackRungsKeepsX265Fallback(t *testing.T) {
 		if strings.HasPrefix(id, fallbackHardwarePrefix) {
 			t.Fatalf("hardware fallback measured: %v", res.measured)
 		}
+	}
+}
+
+// The medium x265 result beats the fallback rungs on the margin, then fails its
+// holdouts on quality. A failed quality holdout rules out every x265 setting
+// that spends no more bits (CRF 16 and higher, the slow rungs included), so
+// "no software candidate qualified" and the retry verifies the safest fallback
+// rung, whatever the margin said about the first choice. Before the fallback
+// rungs this search ended with no verified candidate.
+func TestReplayHardwareFallbackAfterMediumX265HoldoutFailure(t *testing.T) {
+	settings := hardEpisode()
+	settings[replayKey("medium", 16)] = replaySetting{bytes: 23500, discovery: replayScore{89.4, 91.2}, holdout: 80}
+	settings[replayKey("", 65)] = replayPasses(29000) // 23% above, past a 15% margin
+	settings[replayKey("", 70)] = replayPasses(31000)
+	settings[replayKey("", 75)] = replayPasses(33000)
+	res := runHardwareFallbackReplay(t, settings, 15)
+	t.Logf("medium x265 fails its holdout: %s", res.summary())
+	if strings.Join(res.verified, ",") != "fallback-quality-medium-cand_crf16,fallback-hardware-cand_q75" || res.winner != "fallback-hardware-cand_q75" {
+		t.Fatalf("unexpected result: %s", res.summary())
+	}
+	if res.slowEncodes != 0 {
+		t.Fatalf("the slow stage ran: %s", res.summary())
+	}
+	noted := false
+	for _, u := range res.decision.Winner.Uncertainties {
+		noted = noted || strings.HasPrefix(u, optimization.HardwareSelectedNote) && strings.Contains(u, "no software candidate qualified")
+	}
+	if !noted {
+		t.Fatalf("the reason is missing: %v", res.decision.Winner.Uncertainties)
 	}
 }
 

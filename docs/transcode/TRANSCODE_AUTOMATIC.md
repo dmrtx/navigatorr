@@ -69,8 +69,10 @@ margin wins and the slow stage is never encoded. When no medium x265 setting
 qualifies either, a qualifying rung wins unconditionally, as an initial rung
 would (the savings minimum, quality gates and holdouts still apply). If the new
 rungs fail too (the highest fails, so the others are skipped), the slow stage
-runs as before. They are tried only for this reason; a ladder that passes, or
-fails for another reason such as size, never pays for them.
+runs as before. They are tried only for this reason, and only when the search
+reaches the quality fallback: a ladder that passes, or fails for another reason
+such as size, never pays for them, and neither does a search that still has an
+eligible x265 setting to verify after a ladder holdout failure.
 
 It is on by default for the new policy only, and always visible and switchable:
 the Library and batch setup show an *Allow the media engine (faster)* checkbox
@@ -81,7 +83,9 @@ this option existed is never re-derived, so existing batches and their digests
 stay x265-only; `allow_hardware=false` freezes a snapshot identical to the
 earlier size policy. If the worker lacks the capability or the encoder, the
 search silently stays x265-only. A worker without `hardware_fallback_search`
-gets the ladder alone, without the fallback rungs.
+gets the ladder alone, without the fallback rungs. Upgrade the server before the
+worker: the capability is part of the worker's fingerprint, which an older server
+fails closed on.
 
 The fallback rungs are frozen in the policy (`hardware_search.fallback_quality_values`),
 so new default-on snapshots have a new digest. Snapshots frozen with the media

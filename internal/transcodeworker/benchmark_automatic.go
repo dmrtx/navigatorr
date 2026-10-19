@@ -314,7 +314,7 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 		if fallbackPrefix == "" {
 			fallbackPrefix = automaticFallback(evidence.Decision, rules != nil && len(qualityFailures) > 0)
 			var hardware []validatedCandidate
-			if record.HardwareSearch != nil && fallbackPrefix == fallbackQualityPrefix {
+			if record.HardwareSearch != nil && len(record.HardwareSearch.FallbackQualityValues) > 0 && fallbackPrefix == fallbackQualityPrefix {
 				hardware = hardwareQualityFallback(vcs, initial, discoveryFailed, qualityFailures)
 			}
 			fallbackStages = automaticFallbackStages(vcs, fallbackPrefix, rules, hardware)
