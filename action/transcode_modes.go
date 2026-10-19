@@ -170,6 +170,14 @@ const (
 
 var sizeHardwareQualityValues = []int{45, 50, 55, 60}
 
+// sizeHardwareFallbackQualityValues are the higher-quality rungs tried when
+// every rung above fails quality. On a hard 1080p episode q60 missed the VMAF
+// p5 limit by six points, so the ladder's best rung can be too low; the
+// fallback adds headroom without making the common case pay for it. File
+// sizes grow steeply with q, which the size margin and the savings minimum
+// bound.
+var sizeHardwareFallbackQualityValues = []int{65, 70, 75}
+
 // modeHardwareInput reads allow_hardware and hardware_margin_percent for a
 // mode. Size mode allows the media engine unless allow_hardware is false, so
 // an operation that says nothing gets the default margin; the other modes
@@ -217,7 +225,7 @@ func modeHardwareInput(mode string, inputs map[string]any) (*transcode.HardwareS
 			return nil, fmt.Errorf("hardware_margin_percent must be a number")
 		}
 	}
-	rules := &transcode.HardwareSearchRules{MarginPercent: margin, QualityValues: append([]int(nil), sizeHardwareQualityValues...), GOPSize: sizeHardwareGOPSize, BFrames: sizeHardwareBFrames}
+	rules := &transcode.HardwareSearchRules{MarginPercent: margin, QualityValues: append([]int(nil), sizeHardwareQualityValues...), FallbackQualityValues: append([]int(nil), sizeHardwareFallbackQualityValues...), GOPSize: sizeHardwareGOPSize, BFrames: sizeHardwareBFrames}
 	if err := rules.Validate(); err != nil {
 		return nil, err
 	}

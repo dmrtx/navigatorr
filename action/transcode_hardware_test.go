@@ -15,6 +15,7 @@ import (
 func hardwareTestCapabilities() transcode.WorkerCapabilities {
 	caps := rulesTestCapabilities()
 	caps.HardwareSearch = true
+	caps.HardwareFallbackSearch = true
 	caps.Encoders[transcode.VideoCodecHEVCVideoToolbox] = true
 	return caps
 }
@@ -42,6 +43,9 @@ func TestSizePolicyHardwareDefaultsOnAndFreezes(t *testing.T) {
 	if rules.MarginPercent != 15 || rules.GOPSize != 240 || rules.BFrames != 1 || len(rules.QualityValues) != 4 || rules.QualityValues[0] != 45 || rules.QualityValues[3] != 60 {
 		t.Fatalf("default rules %+v", rules)
 	}
+	if got := fmt.Sprint(rules.FallbackQualityValues); got != "[65 70 75]" {
+		t.Fatalf("default fallback rungs %s", got)
+	}
 	hw, err := modePolicyWithHardware("size", false, 0, rules)
 	if err != nil {
 		t.Fatal(err)
@@ -51,7 +55,11 @@ func TestSizePolicyHardwareDefaultsOnAndFreezes(t *testing.T) {
 	}
 	// The default snapshot is a frozen artifact: changing its rules, their order
 	// or their defaults changes the digest of every new size operation.
-	if hw.Digest != "sha256:bc2e370bf9f26965f7faa121693c299d1fe2e6c2d02b37aee033dc369cb12e03" {
+	// Adding the higher-quality fallback rungs gave new snapshots the digest
+	// below. Snapshots frozen with the media engine before it carry no such
+	// field and still re-hash to sha256:bc2e370b...e03 (see
+	// TestHardwarePolicyWithoutFallbackRungsKeepsItsDigest).
+	if hw.Digest != "sha256:1b73a704427a9c6a89a9ae36079422c842de9cbd799fa48f634d54d1a3b7ead6" {
 		t.Fatalf("size snapshot with the media engine on changed digest: %s", hw.Digest)
 	}
 	// The frozen snapshot round-trips through storage and re-verifies.
@@ -136,6 +144,18 @@ func TestHardwareInputValidation(t *testing.T) {
 func hardwareRequest(t *testing.T, bitDepth int, duration float64, inputs map[string]any, caps transcode.WorkerCapabilities) *transcode.BenchmarkRequest {
 	t.Helper()
 	ec := &ExecutionContext{InstanceID: "hw-request", Inputs: inputs, State: map[string]any{"original_sha256": strings.Repeat("a", 64)}}
+	return hardwareRequestWith(t, ec, bitDepth, duration, caps)
+}
+
+// hardwareRequestFromState builds the request of an 8-bit 45-minute source for
+// an operation whose state may already hold a frozen policy.
+func hardwareRequestFromState(t *testing.T, ec *ExecutionContext, caps transcode.WorkerCapabilities) *transcode.BenchmarkRequest {
+	t.Helper()
+	return hardwareRequestWith(t, ec, 8, 45*60, caps)
+}
+
+func hardwareRequestWith(t *testing.T, ec *ExecutionContext, bitDepth int, duration float64, caps transcode.WorkerCapabilities) *transcode.BenchmarkRequest {
+	t.Helper()
 	policy, err := freezeModePolicy(ec)
 	if err != nil {
 		t.Fatal(err)
@@ -162,7 +182,7 @@ func TestSizeHardwareSearchRequest(t *testing.T) {
 	for _, depth := range []int{8, 10} {
 		// Nothing said is the default: allowed, at the default margin.
 		def := hardwareRequest(t, depth, 45*60, map[string]any{"mode": "size"}, hardwareTestCapabilities())
-		if def.HardwareSearch == nil || def.HardwareSearch.MarginPercent != 15 || len(def.Candidates) != 18 {
+		if def.HardwareSearch == nil || def.HardwareSearch.MarginPercent != 15 || len(def.Candidates) != 21 {
 			t.Fatalf("depth %d: default request %+v with %d candidates", depth, def.HardwareSearch, len(def.Candidates))
 		}
 		req := hardwareRequest(t, depth, 45*60, map[string]any{"mode": "size", "allow_hardware": true, "hardware_margin_percent": 20}, hardwareTestCapabilities())
@@ -172,22 +192,31 @@ func TestSizeHardwareSearchRequest(t *testing.T) {
 		if err := transcode.ValidateBenchmarkRequest(req); err != nil {
 			t.Fatalf("depth %d: %v", depth, err)
 		}
-		var hardware []transcode.BenchmarkCandidate
+		var hardware, fallback []transcode.BenchmarkCandidate
 		x265 := 0
 		for _, c := range req.Candidates {
 			if strings.HasPrefix(c.ID, hardwareCandidatePrefix) {
 				hardware = append(hardware, c)
+			} else if strings.HasPrefix(c.ID, transcode.HardwareFallbackCandidatePrefix) {
+				fallback = append(fallback, c)
 			} else if transcode.BenchmarkCandidateVideoCodec(c) == transcode.VideoCodecLibX265 {
 				x265++
 			}
 		}
 		// The x265 ladder and its fallback families are untouched.
-		if x265 != 14 || len(hardware) != 4 {
-			t.Fatalf("depth %d: %d x265 and %d hardware candidates", depth, x265, len(hardware))
+		if x265 != 14 || len(hardware) != 4 || len(fallback) != 3 {
+			t.Fatalf("depth %d: %d x265, %d hardware and %d hardware fallback candidates", depth, x265, len(hardware), len(fallback))
 		}
-		for i, c := range hardware {
-			wantQuality := []int{45, 50, 55, 60}[i]
-			if c.ID != fmt.Sprintf("vt-cand_q%d", wantQuality) || c.Quality != wantQuality {
+		if len(req.Candidates) > transcode.MaxAutomaticHardwareCandidates {
+			t.Fatalf("depth %d: %d candidates exceed the cap", depth, len(req.Candidates))
+		}
+		for i, c := range append(append([]transcode.BenchmarkCandidate(nil), hardware...), fallback...) {
+			wantQuality := []int{45, 50, 55, 60, 65, 70, 75}[i]
+			wantID := fmt.Sprintf("vt-cand_q%d", wantQuality)
+			if i >= 4 {
+				wantID = fmt.Sprintf("%scand_q%d", transcode.HardwareFallbackCandidatePrefix, wantQuality)
+			}
+			if c.ID != wantID || c.Quality != wantQuality {
 				t.Fatalf("hardware candidate %d: %+v", i, c)
 			}
 			if transcode.BenchmarkCandidateVideoCodec(c) != transcode.VideoCodecHEVCVideoToolbox || c.Preset != "" || c.Tune != "" {
@@ -234,6 +263,153 @@ func TestSizeHardwareSearchFallsBackToSoftware(t *testing.T) {
 		if err := transcode.ValidateBenchmarkRequest(req); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
+	}
+}
+
+// A worker that does not know the fallback rungs gets the ladder alone: the
+// request is what #177 shipped, and validates on an older worker's cap.
+func TestSizeHardwareSearchWithoutFallbackCapability(t *testing.T) {
+	caps := hardwareTestCapabilities()
+	caps.HardwareFallbackSearch = false
+	req := hardwareRequest(t, 8, 45*60, map[string]any{"mode": "size"}, caps)
+	if req.HardwareSearch == nil || len(req.HardwareSearch.FallbackQualityValues) != 0 || len(req.Candidates) != 18 {
+		t.Fatalf("request %+v with %d candidates", req.HardwareSearch, len(req.Candidates))
+	}
+	for _, c := range req.Candidates {
+		if strings.HasPrefix(c.ID, transcode.HardwareFallbackCandidatePrefix) {
+			t.Fatalf("fallback candidate %s sent to a worker without the capability", c.ID)
+		}
+	}
+	if err := transcode.ValidateBenchmarkRequest(req); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(req.HardwareSearch)
+	if strings.Contains(string(b), "fallback") {
+		t.Fatalf("an older worker would see a field it rejects: %s", b)
+	}
+}
+
+// Rules frozen with the media engine before the fallback rungs existed have no
+// such field: they re-hash to the digest they were frozen under and stay on the
+// ladder alone.
+func TestHardwarePolicyWithoutFallbackRungsKeepsItsDigest(t *testing.T) {
+	rules := &transcode.HardwareSearchRules{MarginPercent: 15, QualityValues: []int{45, 50, 55, 60}, GOPSize: 240, BFrames: 1}
+	p, err := modePolicyWithHardware("size", false, 0, rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Digest != "sha256:bc2e370bf9f26965f7faa121693c299d1fe2e6c2d02b37aee033dc369cb12e03" {
+		t.Fatalf("the earlier media engine snapshot changed digest: %s", p.Digest)
+	}
+	stored := map[string]any{}
+	b, _ := json.Marshal(p)
+	if hb, _ := json.Marshal(p.Size.Hardware); strings.Contains(string(hb), "fallback") {
+		t.Fatalf("frozen hardware rules mention the fallback rungs: %s", hb)
+	}
+	_ = json.Unmarshal(b, &stored)
+	ec := &ExecutionContext{InstanceID: "hw-earlier-engine", Inputs: map[string]any{"mode": "size"}, State: map[string]any{"mode_policy": stored}}
+	kept, err := freezeModePolicy(ec)
+	if err != nil || kept.Digest != p.Digest || len(kept.Size.Hardware.FallbackQualityValues) != 0 {
+		t.Fatalf("an earlier snapshot picked up the fallback rungs: %+v %v", kept, err)
+	}
+	caps := hardwareTestCapabilities()
+	ec.State["original_sha256"] = strings.Repeat("a", 64)
+	req := hardwareRequestFromState(t, ec, caps)
+	if len(req.Candidates) != 18 || len(req.HardwareSearch.FallbackQualityValues) != 0 {
+		t.Fatalf("an earlier snapshot sent fallback rungs: %d candidates, %+v", len(req.Candidates), req.HardwareSearch)
+	}
+}
+
+func TestHardwareFallbackRulesValidation(t *testing.T) {
+	good := func() *transcode.HardwareSearchRules {
+		return &transcode.HardwareSearchRules{MarginPercent: 15, QualityValues: []int{45, 50, 55, 60}, FallbackQualityValues: []int{65, 70, 75}, GOPSize: 240, BFrames: 1}
+	}
+	if err := good().Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for name, fallback := range map[string][]int{
+		"too many rungs":          {61, 65, 70, 75},
+		"not above the ladder":    {60, 65},
+		"unordered":               {70, 65},
+		"duplicate":               {65, 65},
+		"above the encoder's max": {65, 101},
+	} {
+		r := good()
+		r.FallbackQualityValues = fallback
+		if r.Validate() == nil {
+			t.Fatalf("%s accepted: %v", name, fallback)
+		}
+	}
+	// The fallback candidates belong to rules that name them, and to the
+	// VideoToolbox encoder.
+	req := hardwareRequest(t, 8, 45*60, map[string]any{"mode": "size"}, hardwareTestCapabilities())
+	noValues := *req
+	noValues.HardwareSearch = good()
+	noValues.HardwareSearch.FallbackQualityValues = nil
+	if transcode.ValidateBenchmarkRequest(&noValues) == nil {
+		t.Fatal("fallback candidates accepted without fallback rules")
+	}
+	wrongEncoder := *req
+	wrongEncoder.Candidates = append([]transcode.BenchmarkCandidate(nil), req.Candidates...)
+	for i := range wrongEncoder.Candidates {
+		if strings.HasPrefix(wrongEncoder.Candidates[i].ID, transcode.HardwareFallbackCandidatePrefix) {
+			wrongEncoder.Candidates[i].VideoCodec = transcode.VideoCodecLibX265
+		}
+	}
+	if transcode.ValidateBenchmarkRequest(&wrongEncoder) == nil {
+		t.Fatal("fallback candidate on another encoder accepted")
+	}
+	// A fallback candidate is one of the frozen rungs, encoded as the rules say.
+	for name, mutate := range map[string]func(*transcode.BenchmarkCandidate){
+		"a quality outside the rungs": func(c *transcode.BenchmarkCandidate) { c.Quality = 10 },
+		"another keyframe interval":   func(c *transcode.BenchmarkCandidate) { g := 12; c.GOPSize = &g },
+		"no keyframe interval":        func(c *transcode.BenchmarkCandidate) { c.GOPSize = nil },
+		"another B-frame setting":     func(c *transcode.BenchmarkCandidate) { b := 0; c.BFrames = &b },
+		"an x265 preset":              func(c *transcode.BenchmarkCandidate) { c.Preset = "slow" },
+	} {
+		mutated := *req
+		mutated.Candidates = append([]transcode.BenchmarkCandidate(nil), req.Candidates...)
+		for i := range mutated.Candidates {
+			if strings.HasPrefix(mutated.Candidates[i].ID, transcode.HardwareFallbackCandidatePrefix) {
+				mutate(&mutated.Candidates[i])
+				break
+			}
+		}
+		if err := transcode.ValidateBenchmarkRequest(&mutated); err == nil || !strings.Contains(err.Error(), "frozen hardware search rules") {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	// The cap is on distinct candidates: 22 pass, 23 do not, and a fourth
+	// fallback candidate is refused by its own bound.
+	room := *req
+	room.Candidates = append([]transcode.BenchmarkCandidate(nil), req.Candidates...)
+	extra := func(n int) transcode.BenchmarkCandidate {
+		c := room.Candidates[0]
+		c.ID, c.Quality = fmt.Sprintf("extra-%d", n), 40+n
+		return c
+	}
+	room.Candidates = append(room.Candidates, extra(1))
+	if len(room.Candidates) != transcode.MaxAutomaticHardwareCandidates {
+		t.Fatalf("%d candidates, want the cap", len(room.Candidates))
+	}
+	if err := transcode.ValidateBenchmarkRequest(&room); err != nil {
+		t.Fatalf("candidates at the cap refused: %v", err)
+	}
+	room.Candidates = append(room.Candidates, extra(2))
+	if err := transcode.ValidateBenchmarkRequest(&room); err == nil || !strings.Contains(err.Error(), "candidates") {
+		t.Fatalf("%d candidates accepted: %v", len(room.Candidates), err)
+	}
+	fourth := *req
+	fourth.Candidates = append([]transcode.BenchmarkCandidate(nil), req.Candidates...)
+	for _, c := range req.Candidates {
+		if strings.HasPrefix(c.ID, transcode.HardwareFallbackCandidatePrefix) {
+			c.ID += "-again"
+			fourth.Candidates = append(fourth.Candidates, c)
+			break
+		}
+	}
+	if err := transcode.ValidateBenchmarkRequest(&fourth); err == nil || !strings.Contains(err.Error(), "at most 3 hardware fallback") {
+		t.Fatalf("a fourth fallback candidate: %v", err)
 	}
 }
 

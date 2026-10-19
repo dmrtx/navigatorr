@@ -14,12 +14,16 @@ import (
 )
 
 const (
-	fallbackQualityPrefix = "fallback-quality-"
-	fallbackSavingsPrefix = "fallback-savings-"
+	fallbackHardwarePrefix = transcode.HardwareFallbackCandidatePrefix
+	fallbackQualityPrefix  = "fallback-quality-"
+	fallbackSavingsPrefix  = "fallback-savings-"
 	// reasonNotVerified marks a candidate that passed discovery but was never
 	// checked on the holdout windows (the attempts went elsewhere, or a
 	// sibling's quality failure ruled it out). It is not a failed check.
 	reasonNotVerified = "not_verified"
+	// reasonSkippedQualityDominated marks a setting not measured because the
+	// highest-quality setting of its family failed quality.
+	reasonSkippedQualityDominated = "skipped_quality_dominated"
 	// reasonSelectionMarginNotMet marks a VMAF result that passes its p5 and
 	// worst-window minimums by less than the size search's selection margin.
 	reasonSelectionMarginNotMet = "quality_vmaf_selection_margin_not_met"
@@ -49,7 +53,24 @@ func automaticFallback(decision *transcode.BenchmarkDecision, holdoutQualityFail
 // one stage. Under rules the quality family follows the frozen preset order
 // (medium before slow): a later stage runs only when the earlier ones found
 // no winner.
-func automaticFallbackStages(vcs []validatedCandidate, prefix string, rules *transcode.AutomaticSearchRules) [][]validatedCandidate {
+//
+// hardware are the higher-quality VideoToolbox candidates of a ladder that
+// failed quality (see hardwareQualityFallback). They join the first stage of
+// the quality family, beside the medium x265 rungs, so a fast hardware result
+// can win within the size margin before the slow x265 stage is paid for.
+func automaticFallbackStages(vcs []validatedCandidate, prefix string, rules *transcode.AutomaticSearchRules, hardware []validatedCandidate) [][]validatedCandidate {
+	stages := automaticX265FallbackStages(vcs, prefix, rules)
+	if prefix != fallbackQualityPrefix || len(hardware) == 0 {
+		return stages
+	}
+	if len(stages) == 0 {
+		return [][]validatedCandidate{hardware}
+	}
+	stages[0] = append(append([]validatedCandidate(nil), stages[0]...), hardware...)
+	return stages
+}
+
+func automaticX265FallbackStages(vcs []validatedCandidate, prefix string, rules *transcode.AutomaticSearchRules) [][]validatedCandidate {
 	var family []validatedCandidate
 	for _, vc := range vcs {
 		if strings.HasPrefix(vc.candidate.ID, prefix) {
@@ -86,6 +107,38 @@ func automaticFallbackStages(vcs []validatedCandidate, prefix string, rules *tra
 		stages = append(stages, rest)
 	}
 	return stages
+}
+
+// hardwareQualityFallback returns the higher-quality VideoToolbox candidates
+// when the hardware ladder has nothing left to offer on quality: every initial
+// VideoToolbox rung either failed the quality policy at discovery (measured, or
+// skipped as dominated by the rung that failed) or is ruled out by a failed
+// holdout. The ladder's best rung is then too low for this content, and the
+// rungs above it are the step toward quality. A ladder with a rung that failed
+// for another reason (too large, an encode error, a non-quality holdout
+// failure) or that was never measured gets none: more quality would not help,
+// or the failure is not a quality verdict.
+func hardwareQualityFallback(vcs, initial []validatedCandidate, discoveryFailed map[string]bool, qualityFailures []validatedCandidate) []validatedCandidate {
+	ladder := 0
+	for _, vc := range initial {
+		if !isVideoToolbox(vc.candidate.VideoCodec) {
+			continue
+		}
+		ladder++
+		if !discoveryFailed[vc.candidate.ID] && !ruledOutByQualityFailure(vc, qualityFailures) {
+			return nil
+		}
+	}
+	if ladder == 0 {
+		return nil
+	}
+	var fallback []validatedCandidate
+	for _, vc := range vcs {
+		if strings.HasPrefix(vc.candidate.ID, fallbackHardwarePrefix) {
+			fallback = append(fallback, vc)
+		}
+	}
+	return fallback
 }
 
 // ruledOutByQualityFailure reports a candidate a failed holdout rules out
@@ -218,7 +271,7 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 			skipped = append(skipped, transcode.BenchmarkCandidateEvaluation{
 				CandidateID: f.vc.candidate.ID, CandidateIndex: f.vc.index, VideoCodec: transcode.BenchmarkCandidateVideoCodec(f.vc.candidate),
 				Quality: f.vc.candidate.Quality, Preset: f.vc.candidate.Preset, Tune: f.vc.candidate.Tune, VideoProfile: f.vc.profile, PixelFormat: f.vc.pixelFormat,
-				ExpectedBitDepth: f.vc.bitDepth, EvaluationReason: "skipped_quality_dominated", Uncertainties: []string{"not measured: " + f.leader + " failed quality"},
+				ExpectedBitDepth: f.vc.bitDepth, EvaluationReason: reasonSkippedQualityDominated, Uncertainties: []string{"not measured: " + f.leader + " failed quality"},
 			})
 		}
 		if len(rest) > 0 {
@@ -241,6 +294,15 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 		return err
 	}
 	automatic.Discovery = evidence.Decision
+	// The initial hardware rungs that failed quality at discovery, whether
+	// measured or skipped as dominated by the rung that did.
+	initial := append([]validatedCandidate(nil), tested...)
+	discoveryFailed := map[string]bool{}
+	for _, e := range append(append([]transcode.BenchmarkCandidateEvaluation(nil), evidence.Decision.Evaluations...), skipped...) {
+		if qualityRejection(e.EvaluationReason) || e.EvaluationReason == reasonSkippedQualityDominated {
+			discoveryFailed[e.CandidateID] = true
+		}
+	}
 	// Settings a failed holdout ruled out (rules only), and why.
 	var qualityFailures []validatedCandidate
 	var ruledOut []transcode.BenchmarkCandidateEvaluation
@@ -251,7 +313,11 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 	runFallback := func() error {
 		if fallbackPrefix == "" {
 			fallbackPrefix = automaticFallback(evidence.Decision, rules != nil && len(qualityFailures) > 0)
-			fallbackStages = automaticFallbackStages(vcs, fallbackPrefix, rules)
+			var hardware []validatedCandidate
+			if record.HardwareSearch != nil && len(record.HardwareSearch.FallbackQualityValues) > 0 && fallbackPrefix == fallbackQualityPrefix {
+				hardware = hardwareQualityFallback(vcs, initial, discoveryFailed, qualityFailures)
+			}
+			fallbackStages = automaticFallbackStages(vcs, fallbackPrefix, rules, hardware)
 		}
 		for len(fallbackStages) > 0 {
 			var alternatives []validatedCandidate

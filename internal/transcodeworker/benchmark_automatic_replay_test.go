@@ -63,6 +63,7 @@ type replayResult struct {
 	slowEncodes int // slow sample encodes: about 4x the wall time of medium ones
 	encodes     int
 	decision    *transcode.BenchmarkDecision
+	stages      []transcode.BenchmarkAutomaticStage
 }
 
 func (r replayResult) reason(id string) string {
@@ -169,6 +170,7 @@ func runReplayHardware(t *testing.T, settings map[string]replaySetting, sourceBy
 		t.Fatal(err)
 	}
 	res.decision = evidence.Decision
+	res.stages = evidence.Automatic.Stages
 	if evidence.Decision.Winner != nil {
 		res.winner = evidence.Decision.Winner.CandidateID
 		if evidence.Automatic.VerifiedSamples != 5 {

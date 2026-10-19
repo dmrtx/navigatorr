@@ -101,6 +101,11 @@ type WorkerCapabilities struct {
 	// benchmarks: VideoToolbox candidates that win within a frozen size margin
 	// of the x265 winner. Older workers reject the field.
 	HardwareSearch bool `json:"hardware_search,omitempty"`
+	// HardwareFallbackSearch reports a worker that accepts fallback_quality_values
+	// in hardware_search and measures those higher-quality VideoToolbox
+	// candidates when the whole ladder fails quality. Older workers reject the
+	// field and the larger candidate list.
+	HardwareFallbackSearch bool `json:"hardware_fallback_search,omitempty"`
 	// CompactTranscode reports an executable proof of the compact SDR chain
 	// (setparams, swscale, lut3d and sidedata delete) in the worker FFmpeg.
 	CompactTranscode      bool                           `json:"compact_transcode,omitempty"`
@@ -156,6 +161,7 @@ type fingerprintPayload struct {
 	SearchBudgetExtension    bool                           `json:"search_budget_extension,omitempty"`
 	AutomaticSearchRules     bool                           `json:"automatic_search_rules,omitempty"`
 	HardwareSearch           bool                           `json:"hardware_search,omitempty"`
+	HardwareFallbackSearch   bool                           `json:"hardware_fallback_search,omitempty"`
 	CompactTranscode         bool                           `json:"compact_transcode,omitempty"`
 	ProtocolVersion          int                            `json:"protocol_version"`
 	WorkerVersion            string                         `json:"worker_version,omitempty"`
@@ -205,6 +211,7 @@ func ComputeCapabilityFingerprint(caps WorkerCapabilities) (string, error) {
 		SearchBudgetExtension:    caps.SearchBudgetExtension,
 		AutomaticSearchRules:     caps.AutomaticSearchRules,
 		HardwareSearch:           caps.HardwareSearch,
+		HardwareFallbackSearch:   caps.HardwareFallbackSearch,
 		CompactTranscode:         caps.CompactTranscode,
 		ProtocolVersion:          caps.ProtocolVersion,
 		WorkerVersion:            caps.WorkerVersion,

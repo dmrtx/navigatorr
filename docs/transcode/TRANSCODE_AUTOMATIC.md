@@ -56,6 +56,24 @@ than the smallest x265 result, or when no x265 candidate qualifies; otherwise
 the smallest result wins as before. VideoToolbox encodes several times faster
 and uses much less CPU, at the price of up to the margin in size.
 
+**Higher-quality fallback.** On hard content the ladder's best rung can fail
+quality (a hard 1080p episode missed the VMAF p5 limit at `-q:v` 60), which used
+to leave VideoToolbox out of the search entirely and send it to the slow x265
+fallback. When every initial VideoToolbox rung fails quality (measured, or
+skipped as dominated by the best rung's failure), or the best rung fails its
+holdout on quality, three more rungs (`-q:v` 65, 70, 75, same GOP and B-frames,
+IDs `fallback-hardware-cand_q…`) are measured. They run in the same stage as the
+first (medium) x265 quality fallback, so the margin has an x265 result to be
+compared with, and before the slow stage: a rung that qualifies within the
+margin wins and the slow stage is never encoded. When no medium x265 setting
+qualifies either, a qualifying rung wins unconditionally, as an initial rung
+would (the savings minimum, quality gates and holdouts still apply). If the new
+rungs fail too (the highest fails, so the others are skipped), the slow stage
+runs as before. They are tried only for this reason, and only when the search
+reaches the quality fallback: a ladder that passes, or fails for another reason
+such as size, never pays for them, and neither does a search that still has an
+eligible x265 setting to verify after a ladder holdout failure.
+
 It is on by default for the new policy only, and always visible and switchable:
 the Library and batch setup show an *Allow the media engine (faster)* checkbox
 under Smaller files (with the margin), *Change goal* shows the same two
@@ -64,7 +82,15 @@ controls, and the MCP inputs `allow_hardware=false` or a different
 this option existed is never re-derived, so existing batches and their digests
 stay x265-only; `allow_hardware=false` freezes a snapshot identical to the
 earlier size policy. If the worker lacks the capability or the encoder, the
-search silently stays x265-only.
+search silently stays x265-only. A worker without `hardware_fallback_search`
+gets the ladder alone, without the fallback rungs. Upgrade the server before the
+worker: the capability is part of the worker's fingerprint, which an older server
+fails closed on.
+
+The fallback rungs are frozen in the policy (`hardware_search.fallback_quality_values`),
+so new default-on snapshots have a new digest. Snapshots frozen with the media
+engine before this change carry no such field, still re-hash to their digest and
+stay on the ladder alone.
 
 A winner from the media engine is labeled before anything is replaced: the job
 shows *Encoder: VideoToolbox (hardware media engine)* with a *Hardware* badge
