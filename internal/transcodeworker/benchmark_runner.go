@@ -1594,6 +1594,12 @@ func (r *ProductionBenchmarkRunner) runSelection(
 				IneligibleReason: optimization.ReasonMetricMissing,
 			}
 		}
+		// A size search under automatic rules selects only results that
+		// clear the VMAF guardrails by its frozen margin.
+		if candAgg.Valid && candAgg.MetricType == optimization.MetricTypeVMAF && selectionMarginNotMet(record, evidence, vc.candidate.ID) {
+			candAgg.Valid = false
+			candAgg.IneligibleReason = reasonSelectionMarginNotMet
+		}
 
 		var measured *float64
 		if measuredTimeKnown && sampleCount > 0 {

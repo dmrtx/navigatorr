@@ -39,8 +39,12 @@ func TestSizeModePolicyV3Snapshot(t *testing.T) {
 	// sha256:0b92adbc...0177f) and was never deployed. Adding the search
 	// extension gave new snapshots the digest below; snapshots frozen before it
 	// have no such field and still re-hash to sha256:c7a08511...26ca3 (see
-	// TestSizeModePolicyV3FreezesSearchExtension).
-	if p.Digest != "sha256:7239d124b7e3d2f00bed145aba8b4d2bf1aab66ad93a6da964a3281a153743ad" {
+	// TestSizeModePolicyV3FreezesSearchExtension). Adding the automatic search
+	// rules (selection margin, quality-first verification, grid-edge holdouts,
+	// medium-first quality fallback) gave new snapshots the digest below;
+	// snapshots frozen before them still re-hash to sha256:7239d124...743ad
+	// (see TestSizeModePolicyV3FreezesAutomaticSearchRules).
+	if p.Digest != "sha256:33812f4b39f3aff6852beb34dc5ceffdaeb3504f71d00cd17555c89fbf4c80ee" {
 		t.Fatalf("size v3 snapshot digest changed: %s", p.Digest)
 	}
 	// The quality floor is v2's, unchanged: VMAF mean 88, p5 84, worst 5 s

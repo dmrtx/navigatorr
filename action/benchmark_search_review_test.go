@@ -197,7 +197,7 @@ func TestSearchReviewOffersNoRepeatOfTheSameLadder(t *testing.T) {
 
 func TestSearchReviewDoesNotCountTechnicalFailuresOrOtherOutputsAsTried(t *testing.T) {
 	ladder := []transcode.BenchmarkCandidate{x265("a", 16, "slow"), x265("b", 20, "medium")}
-	for _, reason := range []string{"candidate_encode_failed", "no_valid_metric", "metric_missing", "incomplete_sample_scores", "invalid_metric", "score_out_of_bounds", "unusable_estimate", "verification_not_passed", "quality_vmaf_evidence_incomplete"} {
+	for _, reason := range []string{"candidate_encode_failed", "no_valid_metric", "metric_missing", "incomplete_sample_scores", "invalid_metric", "score_out_of_bounds", "unusable_estimate", "verification_not_passed", "not_verified", "quality_vmaf_evidence_incomplete"} {
 		st := setupTestStore(t)
 		technical := func(_ *transcode.BenchmarkRequest, d *transcode.BenchmarkDecision) {
 			for i := range d.Evaluations {

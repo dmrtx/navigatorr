@@ -380,6 +380,74 @@ func (e *SearchExtension) Clone() *SearchExtension {
 	return &c
 }
 
+// Automatic search bounds. A size search under AutomaticSearchRules adds a
+// medium-preset quality fallback beside the slow one, so it may carry more
+// candidates; every other automatic search keeps the original twelve.
+const (
+	MaxAutomaticCandidates      = 12
+	MaxAutomaticRulesCandidates = 15
+	MaxSelectionMarginVMAF      = 10
+	// HoldoutWindowsFinalGridEdges centres the two holdout windows on the
+	// first and last positions of the final validation grid.
+	HoldoutWindowsFinalGridEdges = "final_grid_edges"
+)
+
+// AutomaticSearchRules are the size-mode search rules frozen with a policy and
+// sent to workers that advertise automatic_search_rules. A request without
+// them keeps the rules automatic search had before they existed.
+//
+// With rules, a holdout that fails on quality blocks that setting and every
+// more-compressed setting (higher CRF), the next verification goes to a safer
+// (lower CRF) setting, and the fallback family is the quality one.
+type AutomaticSearchRules struct {
+	// SelectionMarginVMAF: a candidate can be selected only when its VMAF p5
+	// and worst-window mean clear their minimums by at least this much. The
+	// minimums are unchanged; a thinner pass is a quality result
+	// (quality_vmaf_selection_margin_not_met), not a pass.
+	SelectionMarginVMAF float64 `json:"selection_margin_vmaf"`
+	// HoldoutWindows places the two holdout windows. HoldoutWindowsFinalGridEdges
+	// covers the start and end of the source that final validation checks;
+	// empty keeps 35% and 65%.
+	HoldoutWindows string `json:"holdout_windows,omitempty"`
+	// QualityFallbackPresets orders the quality fallback family's presets: a
+	// later preset is measured only when the earlier ones found nothing.
+	QualityFallbackPresets []string `json:"quality_fallback_presets,omitempty"`
+}
+
+// Validate reports whether the rules are bounded and well formed.
+func (r *AutomaticSearchRules) Validate() error {
+	if r == nil {
+		return nil
+	}
+	if math.IsNaN(r.SelectionMarginVMAF) || r.SelectionMarginVMAF < 0 || r.SelectionMarginVMAF > MaxSelectionMarginVMAF {
+		return fmt.Errorf("automatic search selection_margin_vmaf must be in [0,%d]", MaxSelectionMarginVMAF)
+	}
+	if r.HoldoutWindows != "" && r.HoldoutWindows != HoldoutWindowsFinalGridEdges {
+		return fmt.Errorf("unsupported automatic search holdout_windows %q", r.HoldoutWindows)
+	}
+	if len(r.QualityFallbackPresets) > 3 {
+		return errors.New("automatic search allows at most three quality fallback presets")
+	}
+	seen := map[string]bool{}
+	for _, preset := range r.QualityFallbackPresets {
+		if preset == "" || preset != strings.ToLower(strings.TrimSpace(preset)) || seen[preset] {
+			return fmt.Errorf("invalid automatic search quality fallback preset %q", preset)
+		}
+		seen[preset] = true
+	}
+	return nil
+}
+
+// Clone returns an independent copy.
+func (r *AutomaticSearchRules) Clone() *AutomaticSearchRules {
+	if r == nil {
+		return nil
+	}
+	c := *r
+	c.QualityFallbackPresets = append([]string(nil), r.QualityFallbackPresets...)
+	return &c
+}
+
 // BenchmarkRequest defines the parameters sent from the coordinator to the worker to execute a benchmark.
 // It is strictly versioned and does NOT accept candidate output paths or replace_original parameters,
 // making original media mutation completely impossible.
@@ -398,6 +466,9 @@ type BenchmarkRequest struct {
 	// SearchExtension lets a mode search run past SearchBudgetSeconds while it
 	// keeps completing work, up to a hard cap. Unset keeps the fixed budget.
 	SearchExtension *SearchExtension `json:"search_extension,omitempty"`
+	// AutomaticSearch carries size-mode search rules to workers that
+	// advertise automatic_search_rules. Unset keeps the earlier rules.
+	AutomaticSearch *AutomaticSearchRules `json:"automatic_search,omitempty"`
 	// Allow8BitTo10Bit is an explicit experiment opt-in, never an automatic
 	// optimization. Quality measurement must use an explicit native-depth model.
 	Allow8BitTo10Bit          bool                        `json:"allow_8bit_to_10bit,omitempty"`
@@ -537,8 +608,18 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 	if sizeV3 && req.Mode != "size" {
 		return errors.New("mode policy v3 is only defined for size mode")
 	}
-	if req.Automatic && (req.Mode == "" || req.ModePolicyVersion != optimization.ModePolicyV2 && !sizeV3 || len(req.Samples) != 5 || len(req.Candidates) > 12) {
-		return errors.New("automatic search requires v2 or v3 mode, five windows and at most twelve candidates")
+	maxAutomatic := MaxAutomaticCandidates
+	if req.AutomaticSearch != nil {
+		if !req.Automatic || !sizeV3 {
+			return errors.New("automatic search rules require an automatic size v3 search")
+		}
+		if err := req.AutomaticSearch.Validate(); err != nil {
+			return err
+		}
+		maxAutomatic = MaxAutomaticRulesCandidates
+	}
+	if req.Automatic && (req.Mode == "" || req.ModePolicyVersion != optimization.ModePolicyV2 && !sizeV3 || len(req.Samples) != 5 || len(req.Candidates) > maxAutomatic) {
+		return fmt.Errorf("automatic search requires v2 or v3 mode, five windows and at most %d candidates", maxAutomatic)
 	}
 	if req.QualityPruning && !req.Automatic {
 		return errors.New("quality pruning requires automatic search")

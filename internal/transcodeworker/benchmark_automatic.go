@@ -13,23 +13,145 @@ import (
 	"github.com/jakenesler/navigatorr/transcode/quality"
 )
 
-func automaticFallback(decision *transcode.BenchmarkDecision) string {
+const (
+	fallbackQualityPrefix = "fallback-quality-"
+	fallbackSavingsPrefix = "fallback-savings-"
+	// reasonNotVerified marks a candidate that passed discovery but was never
+	// checked on the holdout windows (the attempts went elsewhere, or a
+	// sibling's quality failure ruled it out). It is not a failed check.
+	reasonNotVerified = "not_verified"
+	// reasonSelectionMarginNotMet marks a VMAF result that passes its p5 and
+	// worst-window minimums by less than the size search's selection margin.
+	reasonSelectionMarginNotMet = "quality_vmaf_selection_margin_not_met"
+)
+
+// automaticFallback picks the one fallback family a search may try: savings
+// when a setting met quality but not the size minimum (a more efficient
+// preset can help), quality otherwise. Under automatic search rules a holdout
+// that failed on quality always picks quality: the discovery windows
+// overstated quality, so more compression cannot help.
+func automaticFallback(decision *transcode.BenchmarkDecision, holdoutQualityFailed bool) string {
+	if holdoutQualityFailed {
+		return fallbackQualityPrefix
+	}
 	if decision != nil {
 		for _, candidate := range decision.Evaluations {
 			if candidate.MinimumMet || candidate.EvaluationReason == "insufficient_savings" {
-				return "fallback-savings-"
+				return fallbackSavingsPrefix
 			}
 		}
 	}
-	return "fallback-quality-"
+	return fallbackQualityPrefix
+}
+
+// automaticFallbackStages splits the chosen fallback family into the stages
+// measured in order. Without rules, or for the savings family, the family is
+// one stage. Under rules the quality family follows the frozen preset order
+// (medium before slow): a later stage runs only when the earlier ones found
+// no winner.
+func automaticFallbackStages(vcs []validatedCandidate, prefix string, rules *transcode.AutomaticSearchRules) [][]validatedCandidate {
+	var family []validatedCandidate
+	for _, vc := range vcs {
+		if strings.HasPrefix(vc.candidate.ID, prefix) {
+			family = append(family, vc)
+		}
+	}
+	if len(family) == 0 {
+		return nil
+	}
+	if rules == nil || prefix != fallbackQualityPrefix || len(rules.QualityFallbackPresets) == 0 {
+		return [][]validatedCandidate{family}
+	}
+	var stages [][]validatedCandidate
+	used := map[string]bool{}
+	for _, preset := range rules.QualityFallbackPresets {
+		var stage []validatedCandidate
+		for _, vc := range family {
+			if norm(vc.candidate.Preset) == preset {
+				stage = append(stage, vc)
+				used[vc.candidate.ID] = true
+			}
+		}
+		if len(stage) > 0 {
+			stages = append(stages, stage)
+		}
+	}
+	var rest []validatedCandidate
+	for _, vc := range family {
+		if !used[vc.candidate.ID] {
+			rest = append(rest, vc)
+		}
+	}
+	if len(rest) > 0 {
+		stages = append(stages, rest)
+	}
+	return stages
+}
+
+// ruledOutByQualityFailure reports a candidate a failed holdout rules out
+// under automatic search rules: the failed setting itself, every setting of
+// its family that spends no more bits (higher x265 CRF, lower VideoToolbox
+// quality), and any other x265 CRF setting at or above the failed CRF. What
+// remains is a step toward quality.
+func ruledOutByQualityFailure(vc validatedCandidate, failed []validatedCandidate) bool {
+	key, lowerIsBetter, ok := qualityFamilyKey(vc)
+	for _, f := range failed {
+		if vc.candidate.ID == f.candidate.ID {
+			return true
+		}
+		fkey, flower, fok := qualityFamilyKey(f)
+		if !ok || !fok {
+			continue
+		}
+		q, fq := vc.candidate.Quality, f.candidate.Quality
+		if key == fkey {
+			if lowerIsBetter && q >= fq || !lowerIsBetter && q <= fq {
+				return true
+			}
+			continue
+		}
+		if lowerIsBetter && flower && q >= fq {
+			return true
+		}
+	}
+	return false
+}
+
+// selectionMarginNotMet reports a candidate whose VMAF p5 or worst-window mean
+// clears its minimum by less than the frozen selection margin. It reads the
+// candidate's latest quality evidence, so it applies to discovery and to the
+// merged discovery-plus-holdout result alike.
+func selectionMarginNotMet(record *BenchmarkRecord, evidence *BenchmarkExecutionEvidence, candidateID string) bool {
+	rules := record.AutomaticSearch
+	if rules == nil || rules.SelectionMarginVMAF <= 0 || record.Quality == nil || record.Quality.VMAF == nil || record.Quality.VMAF.GuardrailEnforcement != "reject" {
+		return false
+	}
+	v := record.Quality.VMAF
+	for _, q := range evidence.Quality {
+		if q.CandidateID != candidateID || q.VMAF == nil {
+			continue
+		}
+		if v.P5Minimum != nil && q.VMAF.P5 < *v.P5Minimum+rules.SelectionMarginVMAF {
+			return true
+		}
+		return v.WorstWindowMinimum != nil && q.VMAF.WorstWindowMean < *v.WorstWindowMinimum+rules.SelectionMarginVMAF
+	}
+	return false
 }
 
 // One admission, one deadline, fixed thresholds. At most one fallback family
 // and two holdout checks run; rejected samples never start a full-file encode.
+//
+// Under automatic search rules (record.AutomaticSearch) a holdout that fails
+// on quality rules out that setting and every more-compressed one, the next
+// verification goes to the smallest remaining safer setting, and the quality
+// fallback family is measured only when no such setting remains, preset by
+// preset. A holdout failing on anything else keeps the earlier behaviour.
 func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, w *Worker, record *BenchmarkRecord, evidence *BenchmarkExecutionEvidence, dir string, vcs []validatedCandidate, rep mediainspect.DetailedReport, sourceSize int64, sourceMod time.Time, progress *benchmarkProgressReporter) error {
 	if len(record.Samples) != 5 {
 		return fmt.Errorf("automatic search has no independent verification windows")
 	}
+	rules := record.AutomaticSearch
 	automatic := &transcode.BenchmarkAutomaticEvidence{}
 	evidence.Automatic = automatic
 	discovery := *record
@@ -118,20 +240,29 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 		return err
 	}
 	automatic.Discovery = evidence.Decision
-	fallbackUsed := false
+	// Settings a failed holdout ruled out (rules only), and why.
+	var qualityFailures []validatedCandidate
+	var ruledOut []transcode.BenchmarkCandidateEvaluation
+	fallbackPrefix := ""
+	var fallbackStages [][]validatedCandidate
+	// runFallback measures the next stage of the one fallback family (chosen
+	// on first use) until a stage yields a discovery winner or none remain.
 	runFallback := func() error {
-		if fallbackUsed {
-			return nil
+		if fallbackPrefix == "" {
+			fallbackPrefix = automaticFallback(evidence.Decision, rules != nil && len(qualityFailures) > 0)
+			fallbackStages = automaticFallbackStages(vcs, fallbackPrefix, rules)
 		}
-		fallbackUsed = true
-		prefix := automaticFallback(evidence.Decision)
-		var alternatives []validatedCandidate
-		for _, vc := range vcs {
-			if strings.HasPrefix(vc.candidate.ID, prefix) {
-				alternatives = append(alternatives, vc)
+		for len(fallbackStages) > 0 {
+			var alternatives []validatedCandidate
+			for _, vc := range fallbackStages[0] {
+				if !ruledOutByQualityFailure(vc, qualityFailures) {
+					alternatives = append(alternatives, vc)
+				}
 			}
-		}
-		if len(alternatives) > 0 {
+			fallbackStages = fallbackStages[1:]
+			if len(alternatives) == 0 {
+				continue
+			}
 			measured, err := measure("testing_alternatives", &discovery, alternatives)
 			if err != nil {
 				return err
@@ -141,6 +272,11 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 				return err
 			}
 			automatic.Discovery = evidence.Decision
+			// Without rules the family is a single stage. With rules a later
+			// (slower) preset runs only when the earlier ones found nothing.
+			if evidence.Decision.Winner != nil {
+				break
+			}
 		}
 		return nil
 	}
@@ -175,24 +311,41 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 		}
 		if evidence.Decision.Winner != nil {
 			automatic.VerifiedSamples = 5
-			evidence.Decision.Evaluations = append(evidence.Decision.Evaluations, verificationFailures...)
+			evidence.Decision.Evaluations = append(append(evidence.Decision.Evaluations, verificationFailures...), ruledOut...)
 			appendAutomaticRejections(evidence.Decision, automatic.Discovery)
 			finish()
 			return nil
 		}
+		holdoutQuality := false
+		for _, e := range evidence.Decision.Evaluations {
+			if e.CandidateID == id && qualityRejection(e.EvaluationReason) {
+				holdoutQuality = true
+			}
+		}
 		verificationFailures = append(verificationFailures, evidence.Decision.Evaluations...)
 		blocked[id] = true
+		if rules != nil && holdoutQuality {
+			qualityFailures = append(qualityFailures, winner)
+		}
 		var remaining []validatedCandidate
 		for _, vc := range tested {
-			if !blocked[vc.candidate.ID] {
-				remaining = append(remaining, vc)
+			if blocked[vc.candidate.ID] {
+				continue
 			}
+			if rules != nil && ruledOutByQualityFailure(vc, qualityFailures) {
+				ruledOut = append(ruledOut, notVerifiedEvaluation(automatic.Discovery, vc, id))
+				continue
+			}
+			remaining = append(remaining, vc)
 		}
 		if err := r.runSelection(ctx, &discovery, evidence, remaining, rep, sourceSize); err != nil {
 			return err
 		}
 		tested = remaining
-		if !fallbackUsed && attempt == 0 {
+		// Only the first failure can still lead to a verified fallback. Under
+		// rules a quality failure goes to a safer measured setting when one
+		// remains, and measures the quality fallback only when none does.
+		if attempt == 0 && (rules == nil || !holdoutQuality || evidence.Decision.Winner == nil) {
 			if err := runFallback(); err != nil {
 				return err
 			}
@@ -200,10 +353,32 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 	}
 	// Discovery winners are not accepted without holdouts, even after the
 	// confirmation allowance or search deadline has been exhausted.
-	evidence.Decision = &transcode.BenchmarkDecision{DecisionReason: "no_verified_candidate", Evaluations: verificationFailures}
+	evidence.Decision = &transcode.BenchmarkDecision{DecisionReason: "no_verified_candidate", Evaluations: append(verificationFailures, ruledOut...)}
 	appendAutomaticRejections(evidence.Decision, automatic.Discovery)
 	finish()
 	return nil
+}
+
+// notVerifiedEvaluation is a candidate's latest discovery evaluation after a
+// failed holdout ruled it out. A setting that had passed discovery becomes
+// not_verified, naming the setting whose quality failure ruled it out.
+func notVerifiedEvaluation(discovery *transcode.BenchmarkDecision, vc validatedCandidate, failedID string) transcode.BenchmarkCandidateEvaluation {
+	ev := transcode.BenchmarkCandidateEvaluation{CandidateID: vc.candidate.ID, CandidateIndex: vc.index, VideoCodec: transcode.BenchmarkCandidateVideoCodec(vc.candidate),
+		Quality: vc.candidate.Quality, Preset: norm(vc.candidate.Preset), Tune: norm(vc.candidate.Tune), VideoProfile: vc.profile, PixelFormat: vc.pixelFormat, ExpectedBitDepth: vc.bitDepth, EvaluationReason: reasonNotVerified}
+	if discovery != nil {
+		for _, d := range discovery.Evaluations {
+			if d.CandidateID == vc.candidate.ID {
+				ev = d
+				break
+			}
+		}
+	}
+	if ev.Eligible || ev.EvaluationReason == reasonNotVerified {
+		ev.Eligible = false
+		ev.EvaluationReason = reasonNotVerified
+		ev.Uncertainties = append(append([]string(nil), ev.Uncertainties...), "not verified: "+failedID+" failed verification on quality")
+	}
+	return ev
 }
 
 // qualityRejection reports measured quality-policy failures. Incomplete
@@ -212,10 +387,24 @@ func qualityRejection(reason string) bool {
 	switch reason {
 	case optimization.ReasonBelowMinimumQuality, optimization.ReasonSampleBelowMinimum,
 		"quality_vmaf_p5_below_minimum", "quality_vmaf_worst_window_below_minimum", "quality_vmaf_frames_below_limit_exceeded",
-		"quality_cambi_mean_above_maximum", "quality_cambi_peak_above_maximum":
+		"quality_cambi_mean_above_maximum", "quality_cambi_peak_above_maximum", reasonSelectionMarginNotMet:
 		return true
 	}
 	return false
+}
+
+// qualityFamilyKey identifies a constant-quality libx265 or VideoToolbox
+// candidate's family: every setting but its ID and quality value, plus the
+// resolved output depth. ok is false for bitrate sweeps and other candidates.
+func qualityFamilyKey(vc validatedCandidate) (key string, lowerIsBetter, ok bool) {
+	c := vc.candidate
+	codec := transcode.BenchmarkCandidateVideoCodec(c)
+	if c.Quality <= 0 || c.AverageBitrateKbps != 0 || (codec != "libx265" && codec != "hevc_videotoolbox") {
+		return "", false, false
+	}
+	c.ID, c.Quality = "", 0
+	b, _ := json.Marshal(c)
+	return fmt.Sprintf("%s|%d|%s|%s|%s", codec, vc.bitDepth, vc.profile, vc.pixelFormat, b), codec == "libx265", true
 }
 
 type qualityFollower struct {
@@ -253,20 +442,15 @@ func groupQualityFamilies(vcs []validatedCandidate) []qualityFamily {
 	var order []string
 	families := map[string]*qualityFamily{}
 	for _, vc := range vcs {
-		c := vc.candidate
-		codec := transcode.BenchmarkCandidateVideoCodec(c)
-		if c.Quality <= 0 || c.AverageBitrateKbps != 0 || (codec != "libx265" && codec != "hevc_videotoolbox") {
-			order = append(order, "\x00"+c.ID)
-			families["\x00"+c.ID] = &qualityFamily{members: []validatedCandidate{vc}}
+		k, lowerIsBetter, ok := qualityFamilyKey(vc)
+		if !ok {
+			order = append(order, "\x00"+vc.candidate.ID)
+			families["\x00"+vc.candidate.ID] = &qualityFamily{members: []validatedCandidate{vc}}
 			continue
 		}
-		key := c
-		key.ID, key.Quality = "", 0
-		b, _ := json.Marshal(key)
-		k := fmt.Sprintf("%s|%d|%s|%s|%s", codec, vc.bitDepth, vc.profile, vc.pixelFormat, b)
 		if families[k] == nil {
 			order = append(order, k)
-			families[k] = &qualityFamily{lowerIsBetter: codec == "libx265"}
+			families[k] = &qualityFamily{lowerIsBetter: lowerIsBetter}
 		}
 		families[k].members = append(families[k].members, vc)
 	}
@@ -307,7 +491,7 @@ func appendAutomaticRejections(final, discovery *transcode.BenchmarkDecision) {
 		}
 		if c.Eligible {
 			c.Eligible = false
-			c.EvaluationReason = "verification_not_passed"
+			c.EvaluationReason = reasonNotVerified
 		}
 		final.Evaluations = append(final.Evaluations, c)
 	}

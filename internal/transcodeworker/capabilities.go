@@ -226,6 +226,9 @@ func probeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratch
 	caps.SizeAudioOnly = caps.SizeModeV3
 	// Mode searches may stretch their budget while work keeps finishing.
 	caps.SearchBudgetExtension = true
+	// Size searches may carry automatic_search rules (selection margin,
+	// quality-first verification, preset-ordered quality fallback).
+	caps.AutomaticSearchRules = true
 	if vtCaps.Available {
 		caps.Encoders[videoToolboxEncoder] = true
 	}
