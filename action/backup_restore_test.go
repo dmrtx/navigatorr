@@ -150,6 +150,16 @@ func TestRestoreRefusesWhatIsNotAStrandedOriginal(t *testing.T) {
 		t.Fatal("restore accepted for a copy-mode promotion")
 	}
 	rewritePromotion(t, h, id, func(q *promotionState) { q.RecoveryMode = promotionRecoveryMoveAside })
+	// A library-managed (Sonarr/Radarr) promotion never qualifies, whatever else
+	// its state says: the library may rename onto the path and import meanwhile.
+	managed := *movedAsideState(t, h, id)
+	if err := h.engine.promotionRestorableOriginal(&managed); err != nil {
+		t.Fatalf("fixture should qualify: %v", err)
+	}
+	managed.Service = "sonarr"
+	if err := h.engine.promotionRestorableOriginal(&managed); err == nil || !strings.Contains(err.Error(), "filesystem") {
+		t.Fatalf("restore guard accepted a library-managed promotion: %v", err)
+	}
 	rewritePromotion(t, h, id, func(q *promotionState) { q.NewPath = q.OriginalPath + ".other" })
 	if _, err := h.engine.RestoreTranscodeBackup(context.Background(), id); err == nil {
 		t.Fatal("restore accepted for a different-name replacement")
@@ -250,5 +260,56 @@ func TestPromotionMoveAsideResumesWhenTheDeviceChangedAfterRestart(t *testing.T)
 	}
 	if r = h.finish(r); r.Status != StatusCompleted || h.deletes != 1 {
 		t.Fatalf("resume after a device change: %s %s deletes=%d", r.Status, r.Error, h.deletes)
+	}
+}
+
+// A file that takes the library path while the recovery is being read makes
+// the no-replace rename refuse. Nothing moves, the intent is cleared, and the
+// inventory stops offering a move back onto a path that is no longer empty.
+func TestRestoreRecordsWhenAnotherFileTookTheLibraryPath(t *testing.T) {
+	h := newPromotionHarness(t)
+	id, p := strandedOriginal(t, h)
+	if _, err := h.engine.Cancel(context.Background(), id, "stop"); err != nil {
+		t.Fatal(err)
+	}
+	placed := false
+	h.engine.promotionReadHook = func(path string, _ int64) {
+		if path == p.BackupPath && !placed {
+			placed = true
+			if err := os.WriteFile(h.original, []byte("appeared during the read"), 0600); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	// Force a full read: a fingerprint from an earlier process proves nothing.
+	rewritePromotion(t, h, id, func(q *promotionState) {
+		fp := *q.BackupFingerprint
+		fp.Process = "an-earlier-process"
+		q.BackupFingerprint = &fp
+	})
+	if _, err := h.engine.RestoreTranscodeBackup(context.Background(), id); err == nil || !strings.Contains(err.Error(), "no longer empty") {
+		t.Fatalf("restore: %v", err)
+	}
+	if !placed {
+		t.Fatal("the recovery was not read, so the race was not exercised")
+	}
+	if got, _ := os.ReadFile(h.original); string(got) != "appeared during the read" {
+		t.Fatalf("the other file was replaced: %q", got)
+	}
+	if err := testFileSHA(p.BackupPath, p.OriginalSHA); err != nil {
+		t.Fatalf("recovery changed: %v", err)
+	}
+	if q := movedAsideState(t, h, id); q.MoveBackStartedAt != "" || !q.MovedAside {
+		t.Fatalf("state after the lost race: %+v", q)
+	}
+	page, err := h.engine.ListTranscodeBackups(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 || page.Items[0].RestoreAvailable || strings.Contains(page.Items[0].Reason, "moved back") {
+		t.Fatalf("inventory still offers the move back: %+v", page.Items)
+	}
+	if _, err := h.engine.RestoreTranscodeBackup(context.Background(), id); err == nil || !strings.Contains(err.Error(), "not empty") {
+		t.Fatalf("a second restore: %v", err)
 	}
 }

@@ -67,7 +67,9 @@ storage is needed. A same-name filesystem promotion whose publish fails moves
 it back to the empty library path automatically; if a crash or a cancel
 prevents that, `transcode_backups(mode=restore)` (or **Move original back** in
 the recovery list) does it explicitly, only while the library path is empty,
-after a full read against the recorded SHA-256, with a no-replace rename.
+after checking it against the recorded SHA-256 (a full read, unless its file
+identity is unchanged since this process verified it), with a no-replace
+rename.
 
 Residual risk of `move_aside`: until the move, the original sits at its library
 path, where Sonarr, another tool or a person can still change or remove it. One

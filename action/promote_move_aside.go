@@ -285,6 +285,17 @@ func (e *Engine) promotionMoveBack(ctx context.Context, ec *ExecutionContext, p 
 		return err
 	}
 	if err := renamePromotionNoReplace(p.BackupPath, p.OriginalPath); err != nil {
+		// A different file took the library path after the read: the
+		// no-replace rename refused and the original never left its recovery
+		// path. Record that, or the stale intent keeps the library path
+		// looking empty and the move back looking available.
+		if e.promotionMoveBackLostToAnotherFile(p) {
+			p.MoveBackStartedAt = ""
+			if saveErr := e.savePromotion(ctx, ec, p); saveErr != nil {
+				return fmt.Errorf("move the original back: %w; recording that it did not move failed: %v", err, saveErr)
+			}
+			return fmt.Errorf("move the original back: %w; the library path is no longer empty and the original stays at its recovery path", err)
+		}
 		return fmt.Errorf("move the original back: %w", err)
 	}
 	for _, dir := range []string{filepath.Dir(p.BackupPath), filepath.Dir(p.OriginalPath)} {
@@ -295,6 +306,18 @@ func (e *Engine) promotionMoveBack(ctx context.Context, ec *ExecutionContext, p 
 	}
 	e.promotionCarryRenamed(ctx, p.BackupPath, p.OriginalPath)
 	return e.promotionFinishMoveBack(ctx, ec, p)
+}
+
+// promotionMoveBackLostToAnotherFile is true only when both paths hold files
+// and they are not the same file: the original is still at its recovery path
+// and something else is at the library path.
+func (e *Engine) promotionMoveBackLostToAnotherFile(p *promotionState) bool {
+	from, err := os.Lstat(p.BackupPath)
+	if err != nil {
+		return false
+	}
+	to, err := os.Lstat(p.OriginalPath)
+	return err == nil && !os.SameFile(from, to)
 }
 
 // promotionResumeMoveBack finishes a move back a crash interrupted: the

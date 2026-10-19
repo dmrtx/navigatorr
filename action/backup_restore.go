@@ -10,8 +10,10 @@ import (
 // promotion left its original at the recovery path with nothing at the library
 // path, which is the only state RestoreTranscodeBackup acts on.
 func (e *Engine) promotionRestorableOriginal(p *promotionState) error {
-	if !p.movesAside() || p.NewPath != p.OriginalPath || p.BackupPath == "" {
-		return fmt.Errorf("only an original moved aside by a same-name replacement can be moved back")
+	// Sonarr and Radarr can rename the adopted file onto the original's path
+	// and import while this runs; only the filesystem workflow owns the name.
+	if p.Service != "filesystem" || !p.movesAside() || p.NewPath != p.OriginalPath || p.BackupPath == "" {
+		return fmt.Errorf("only an original moved aside by a same-name filesystem replacement can be moved back")
 	}
 	if !p.MovedAside && p.MoveAsideStartedAt == "" && p.MoveBackStartedAt == "" {
 		return fmt.Errorf("the original was never moved aside; nothing to move back")
@@ -21,10 +23,12 @@ func (e *Engine) promotionRestorableOriginal(p *promotionState) error {
 			return err
 		}
 	}
-	if _, err := os.Lstat(p.OriginalPath); !os.IsNotExist(err) {
-		if err == nil && p.MoveBackStartedAt != "" {
-			return nil // A crash interrupted the move back; resuming finishes it.
-		}
+	_, originalErr := os.Lstat(p.OriginalPath)
+	_, backupErr := os.Lstat(p.BackupPath)
+	if originalErr == nil && os.IsNotExist(backupErr) && p.MoveBackStartedAt != "" {
+		return nil // A crash interrupted the move back; resuming finishes it.
+	}
+	if !os.IsNotExist(originalErr) {
 		return fmt.Errorf("the library path is not empty; the original stays at its recovery path")
 	}
 	info, err := os.Lstat(p.BackupPath)
@@ -38,7 +42,8 @@ func (e *Engine) promotionRestorableOriginal(p *promotionState) error {
 // original back at its library path after a same-name promotion ended
 // (cancelled or failed) before the candidate took that name. It never
 // overwrites: it runs only while the library path is empty, reads the file at
-// the recovery path in full against the digest recorded before it was moved,
+// the recovery path against the digest recorded before it was moved (in full,
+// unless its file identity is unchanged since this process verified it),
 // and uses a no-replace rename. Nothing is deleted and no workflow resumes.
 func (e *Engine) RestoreTranscodeBackup(ctx context.Context, id string) (result *ActionResult, resultErr error) {
 	ctx, release, err := e.claimExecution(ctx, id, false)
