@@ -2963,12 +2963,20 @@ async function rerunJob(job) {
   content.push(node("p", goal ? `Goal: ${goal}` : "The same settings as before."));
   content.push(node("p", "This starts a new job with the same settings. The earlier job is not changed.", "muted"));
   if (info.no_winner_rounds >= 2) content.push(node("p", `This file already had ${info.no_winner_rounds} searches without a result. Run it again only if you want another round.`));
-  if (!info.replace_original) content.push(node("p", "Originals stay in place.", "muted"));
-  if (!(await reviewAction({title: "Run this file again?", content, confirmLabel: "Run again", cancelLabel: "Not now"}))) return;
+  content.push(node("p", info.replace_original ? "This job was set to replace the original: if it finds a result, the original is replaced only after you review and approve it." : "Originals stay in place.", "muted"));
+  // One key per open confirmation: after a lost response, clicking again replays
+  // the same key instead of creating a second job. Declining or success ends it.
+  state.rerunKeys ||= new Map();
+  if (!state.rerunKeys.has(job.id)) state.rerunKeys.set(job.id, submissionID());
+  if (!(await reviewAction({title: "Run this file again?", content, confirmLabel: "Run again", cancelLabel: "Not now"}))) {
+    state.rerunKeys.delete(job.id);
+    return;
+  }
   if (jobIsBusy(job.id)) return;
   state.busyJobs.add(job.id);
   try {
-    const result = await api("rerun", {id: job.id, key: submissionID()});
+    const result = await api("rerun", {id: job.id, key: state.rerunKeys.get(job.id)});
+    state.rerunKeys.delete(job.id);
     state.jobsLoaded = 0;
     notify("Queued a new job. It is listed first.");
     await loadJobs();

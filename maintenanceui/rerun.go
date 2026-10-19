@@ -2,6 +2,7 @@ package maintenanceui
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/jakenesler/navigatorr/action"
 	"github.com/jakenesler/navigatorr/store"
@@ -34,6 +35,15 @@ func rerunEligible(r operationRecord) bool {
 		return false
 	}
 	return r.inst.Status == store.ActionStatusCancelled || isNoWinnerRound(r)
+}
+
+// rerunHasResult mirrors the queue's candidate_ready and replacement checks so
+// the server refuses what the UI already hides.
+func rerunHasResult(r operationRecord, replacements map[string]string) bool {
+	if replacements[r.inst.ID] != "" {
+		return true
+	}
+	return r.inst.Status == store.ActionStatusCompleted && operationValue(r, "skip_transcode") != true && operationValue(r, "original_intact") == true && r.savings.CandidateBytes != nil
 }
 
 // noWinnerRounds counts finished searches per source file, batch children
@@ -94,11 +104,45 @@ func (s *Server) rerun(w http.ResponseWriter, r *http.Request) {
 			inputs[k] = v
 		}
 	}
-	if err := s.engine.CheckWorkerAdmission(r.Context()); err != nil {
-		fail(w, http.StatusConflict, err.Error())
+	ctx := action.WithOrigin(r.Context(), "web")
+	// A lost response replays the same key: return that action, never a
+	// second job and never "worker busy" for work that is already admitted.
+	if prior, err := st.FindActionByIdempotencyKey(inst.ActionName, body.Key); err != nil {
+		fail(w, 500, "read earlier attempt")
+		return
+	} else if prior != nil {
+		res, err := s.engine.Enqueue(ctx, inst.ActionName, inputs, body.Key)
+		if err != nil {
+			fail(w, 409, err.Error())
+			return
+		}
+		writeJSON(w, 202, map[string]any{"id": res.ID, "status": res.Status, "action_name": res.ActionName})
 		return
 	}
-	res, err := s.engine.Enqueue(action.WithOrigin(r.Context(), "web"), inst.ActionName, inputs, body.Key)
+	snapshot, err := st.ListMaintenanceActionSnapshot()
+	if err != nil {
+		fail(w, 500, "read maintenance history")
+		return
+	}
+	records := make([]operationRecord, 0, len(snapshot))
+	for _, other := range snapshot {
+		rec := operationRecord{inst: other, inputs: decodeOperationJSON(other.InputsJSON), outputs: decodeOperationJSON(other.OutputsJSON), state: decodeOperationJSON(other.StateJSON)}
+		rec.savings = projectOperationSavings(rec, time.Now().UTC())
+		records = append(records, rec)
+	}
+	old.savings = projectOperationSavings(old, time.Now().UTC())
+	if rerunHasResult(old, queueReplacementLinks(records)) {
+		fail(w, 409, "this job produced a candidate or replacement; review it instead of running it again")
+		return
+	}
+	source := rerunSource(old)
+	for _, other := range records {
+		if other.inst.ID != inst.ID && other.inst.ActionName == inst.ActionName && operationActive(other.inst.Status) && rerunSource(other) == source {
+			fail(w, 409, "this file already has an active job; wait for it to finish or cancel it before running it again")
+			return
+		}
+	}
+	res, err := s.engine.EnqueueWorker(ctx, inst.ActionName, inputs, body.Key)
 	if err != nil {
 		fail(w, 409, err.Error())
 		return

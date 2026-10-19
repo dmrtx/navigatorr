@@ -3664,9 +3664,21 @@ test("a cancelled or no-winner standalone file offers Run again with a confirmat
   await h.run(`rerunJob(${third})`);
   assert.match(text(reviews[2]), /This file already had 2 searches without a result/);
   assert.doesNotMatch(text(reviews[2]), /Originals stay in place/);
+  assert.match(text(reviews[2]), /original is replaced only after you review and approve it/);
+
+  // A lost response followed by another click replays the same key; success starts a new one.
+  const sent = [];
+  h.context.sent = sent;
+  h.run('let lose=true;api=async(path,body)=>{sent.push(body.key);if(lose){lose=false;throw new Error("Lost reply")}return {id:"new"}}');
+  await assert.rejects(h.run(`rerunJob(${base})`), /Lost reply/);
+  await h.run(`rerunJob(${base})`);
+  await h.run(`rerunJob(${base})`);
+  assert.equal(sent[0], sent[1]);
+  assert.notEqual(sent[1], sent[2]);
 
   // Declining the confirmation sends nothing.
   h.run('reviewAction=async()=>false');
   await h.run(`rerunJob(${base})`);
   assert.equal(calls.length, 3);
+  assert.equal(h.run('state.rerunKeys.has("old")'), false);
 });
