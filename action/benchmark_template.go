@@ -1260,11 +1260,7 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 			if !caps.AutomaticModesV2 {
 				return nil, fmt.Errorf("automatic quality search requires an updated worker")
 			}
-			families := defaultAutomaticFallbacks
-			if policy.Size != nil {
-				families = automaticFallbacks{Quality: policy.Size.FallbackQualityValues, Savings: policy.Size.FallbackSavingsValues}
-			}
-			if err := configureAutomaticRequest(req, plan, bitDepth, families); err != nil {
+			if err := configureAutomaticRequest(req, plan, bitDepth, policyAutomaticFallbacks(policy, caps)); err != nil {
 				return nil, err
 			}
 			req.QualityPruning = req.Automatic && caps.AutomaticQualityPruning

@@ -93,12 +93,28 @@ type ModeSizePolicy struct {
 	// work keeps finishing. It is absent from snapshots frozen before it
 	// existed, so their digests and fixed budget are unchanged.
 	SearchExtension *transcode.SearchExtension `json:"search_extension,omitempty"`
+	// AutomaticSearch freezes the search rules that keep a size search from
+	// ending with nothing while safer settings went unverified: a selection
+	// margin over the VMAF p5 and worst-window minimums, quality-first
+	// verification after a holdout fails on quality, holdout windows at the
+	// edges of the final validation grid and a medium-before-slow quality
+	// fallback. It is absent from snapshots frozen before it existed, so
+	// their digests and search rules are unchanged.
+	AutomaticSearch *transcode.AutomaticSearchRules `json:"automatic_search,omitempty"`
 }
 
+// sizeSelectionMarginVMAF is how far a size-mode winner's VMAF p5 and
+// worst-window mean must clear their minimums (84 and 85). A search result
+// that passes by less tends to fail the wider final validation after a long
+// full encode, so a lower CRF that clears it is preferred.
+const sizeSelectionMarginVMAF = 1.5
+
 // sizeModeV3Policy is the frozen size v3 addition. The ladder is x265 only:
-// medium CRF 22-30 first, then one slow family chosen from what failed.
+// medium CRF 22-30 first, then one fallback family chosen from what failed:
+// savings (slow) or quality (medium, then slow only if medium found nothing).
 func sizeModeV3Policy() *ModeSizePolicy {
-	return &ModeSizePolicy{EightBitMain10: true, FallbackQualityValues: []int{16, 18, 20}, FallbackSavingsValues: []int{24, 27, 30}, FinalWindowSeconds: 10, FinalWindowEverySeconds: 600, FinalWindowsMinimum: 5, FinalWindowsMaximum: 12, AudioOnlyFallback: true, LosslessObjectAudioToAAC: true, SearchExtension: &transcode.SearchExtension{MaxSeconds: sizeSearchMaxSeconds, SteadySeconds: sizeSearchSteadySeconds, VerifySeconds: sizeSearchVerifySeconds}}
+	return &ModeSizePolicy{EightBitMain10: true, FallbackQualityValues: []int{16, 18, 20}, FallbackSavingsValues: []int{24, 27, 30}, FinalWindowSeconds: 10, FinalWindowEverySeconds: 600, FinalWindowsMinimum: 5, FinalWindowsMaximum: 12, AudioOnlyFallback: true, LosslessObjectAudioToAAC: true, SearchExtension: &transcode.SearchExtension{MaxSeconds: sizeSearchMaxSeconds, SteadySeconds: sizeSearchSteadySeconds, VerifySeconds: sizeSearchVerifySeconds},
+		AutomaticSearch: &transcode.AutomaticSearchRules{SelectionMarginVMAF: sizeSelectionMarginVMAF, HoldoutWindows: transcode.HoldoutWindowsFinalGridEdges, QualityFallbackPresets: []string{"medium", "slow"}}}
 }
 
 // searchExtension is the frozen rule for running past the base budget, or nil

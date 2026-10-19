@@ -91,6 +91,12 @@ type WorkerCapabilities struct {
 	// mode benchmarks: the search budget stretches while work keeps finishing,
 	// up to a hard cap. Older workers reject the field.
 	SearchBudgetExtension bool `json:"search_budget_extension,omitempty"`
+	// AutomaticSearchRules reports a worker that accepts automatic_search on
+	// size-mode benchmarks: a selection margin over the VMAF p5 and
+	// worst-window minimums, quality-first verification after a holdout
+	// fails on quality, and a quality fallback tried preset by preset.
+	// Older workers reject the field.
+	AutomaticSearchRules bool `json:"automatic_search_rules,omitempty"`
 	// CompactTranscode reports an executable proof of the compact SDR chain
 	// (setparams, swscale, lut3d and sidedata delete) in the worker FFmpeg.
 	CompactTranscode      bool                           `json:"compact_transcode,omitempty"`
@@ -144,6 +150,7 @@ type fingerprintPayload struct {
 	SizeModeV3               bool                           `json:"size_mode_v3,omitempty"`
 	SizeAudioOnly            bool                           `json:"size_audio_only,omitempty"`
 	SearchBudgetExtension    bool                           `json:"search_budget_extension,omitempty"`
+	AutomaticSearchRules     bool                           `json:"automatic_search_rules,omitempty"`
 	CompactTranscode         bool                           `json:"compact_transcode,omitempty"`
 	ProtocolVersion          int                            `json:"protocol_version"`
 	WorkerVersion            string                         `json:"worker_version,omitempty"`
@@ -191,6 +198,7 @@ func ComputeCapabilityFingerprint(caps WorkerCapabilities) (string, error) {
 		SizeModeV3:               caps.SizeModeV3,
 		SizeAudioOnly:            caps.SizeAudioOnly,
 		SearchBudgetExtension:    caps.SearchBudgetExtension,
+		AutomaticSearchRules:     caps.AutomaticSearchRules,
 		CompactTranscode:         caps.CompactTranscode,
 		ProtocolVersion:          caps.ProtocolVersion,
 		WorkerVersion:            caps.WorkerVersion,

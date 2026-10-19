@@ -108,13 +108,16 @@ func TestCompactBenchmarkExplainsSkippedAndSavingsReasons(t *testing.T) {
 			{CandidateID: "crf28", EvaluationReason: "insufficient_savings_before_metrics"},
 			{CandidateID: "crf30", EvaluationReason: "verification_not_passed"},
 			{CandidateID: "crf24", EvaluationReason: "skipped_savings_dominated", Uncertainties: []string{"not measured: crf28 is below minimum savings"}},
+			{CandidateID: "crf32", EvaluationReason: "not_verified", Uncertainties: []string{"not verified: crf30 failed verification on quality"}},
+			{CandidateID: "crf34", EvaluationReason: "not_verified"},
+			{CandidateID: "crf21", EvaluationReason: "quality_vmaf_selection_margin_not_met"},
 		}},
 	}}
 	s := compactBenchmark(r)
-	if s == nil || len(s.Rejected) != 5 {
+	if s == nil || len(s.Rejected) != 8 {
 		t.Fatalf("bad summary: %+v", s)
 	}
-	want := []string{"Not encoded: crf20 is a higher-quality setting", "does not reach the minimum savings", "below the minimum savings", "additional verification", "Not encoded: crf28 is a smaller setting"}
+	want := []string{"Not encoded: crf20 is a higher-quality setting", "does not reach the minimum savings", "below the minimum savings", "additional verification", "Not encoded: crf28 is a smaller setting", "Not verified: crf30, a setting of equal or higher quality", "never encoded", "safety margin"}
 	for i, w := range want {
 		if got := s.Rejected[i].Checks[0].Reason; !strings.Contains(got, w) || strings.Contains(got, "This check did not pass") {
 			t.Fatalf("%s: reason %q lacks %q", s.Rejected[i].CandidateID, got, w)

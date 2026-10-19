@@ -246,6 +246,7 @@ var measuredVerdicts = map[string]bool{
 	"quality_vmaf_p5_below_minimum":            true,
 	"quality_vmaf_worst_window_below_minimum":  true,
 	"quality_vmaf_frames_below_limit_exceeded": true,
+	"quality_vmaf_selection_margin_not_met":    true,
 	"quality_ssim_mean_below_minimum":          true,
 	"quality_cambi_mean_above_maximum":         true,
 	"quality_cambi_peak_above_maximum":         true,

@@ -281,6 +281,9 @@ func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
 				if ev.EvaluationReason == "skipped_savings_dominated" {
 					reason = savingsDominatedText(ev.Uncertainties)
 				}
+				if ev.EvaluationReason == "not_verified" {
+					reason = notVerifiedText(ev.Uncertainties)
+				}
 				r.Checks = []benchmarkCheck{{Code: ev.EvaluationReason, Reason: reason}}
 			}
 			s.Rejected = append(s.Rejected, r)
@@ -329,9 +332,27 @@ func benchmarkFailureText(code string) string {
 		return "Not measured: every encoded sample was already estimated below the minimum savings, so no quality result could produce an acceptable winner."
 	case "verification_not_passed":
 		return "Passed the initial samples but failed the additional verification samples."
+	case "not_verified":
+		return notVerifiedText(nil)
+	case "quality_vmaf_selection_margin_not_met":
+		return "Passed the VMAF limits by too little: a size-mode winner must clear the p5 and worst-window limits by a safety margin, because a thinner result tends to fail the full-file validation."
 	default:
 		return "This check did not pass; inspect its detailed evidence before deciding whether another encode can address it."
 	}
+}
+
+// notVerifiedText explains a candidate that passed the initial samples but
+// whose additional verification samples were never encoded, naming the
+// candidate whose verification failed on quality when the worker recorded it.
+func notVerifiedText(uncertainties []string) string {
+	for _, u := range uncertainties {
+		if failed, ok := strings.CutPrefix(u, "not verified: "); ok {
+			if failed, ok = strings.CutSuffix(failed, " failed verification on quality"); ok && failed != "" {
+				return "Not verified: " + failed + ", a setting of equal or higher quality, already failed verification on quality, so this setting was not tried."
+			}
+		}
+	}
+	return "Passed the initial samples but its additional verification samples were never encoded, so it could not be selected."
 }
 
 // dominatedText explains a candidate that quality pruning never encoded,

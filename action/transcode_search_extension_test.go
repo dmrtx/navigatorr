@@ -26,6 +26,7 @@ func legacySizeSnapshot(t *testing.T) ModePolicySnapshot {
 		t.Fatal(err)
 	}
 	p.Size.SearchExtension = nil
+	p.Size.AutomaticSearch = nil
 	p.Digest = ""
 	b, _ := json.Marshal(p)
 	sum := sha256.Sum256(b)
