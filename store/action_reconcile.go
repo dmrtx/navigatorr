@@ -73,34 +73,48 @@ func (s *Store) ListReconcilableActions(afterID string, limit int) ([]ActionInst
 	return out, rows.Err()
 }
 
+// WorkerSlotWaiterRow is the projection of an action holding a worker slot
+// ticket: only the fields the slot queue orders and filters on.
+type WorkerSlotWaiterRow struct {
+	ID               string
+	Status           string
+	WaitingCondition string
+	UpdatedAt        string
+	ParentID         string
+	WaitSince        string // worker_slot_wait_since
+	PolledAt         string // worker_slot_polled_at
+	Paused           bool
+}
+
 // ListWorkerSlotWaiters returns the live transcode and benchmark actions whose
-// state holds a worker slot ticket (worker_slot_wait_since). The caller parses
-// the ticket and decides which of them are still contending; the query only
-// narrows the scan to the few rows that can be.
-func (s *Store) ListWorkerSlotWaiters() ([]ActionInstance, error) {
+// state holds a worker slot ticket (worker_slot_wait_since). The caller
+// decides which of them are still contending; the query only narrows the scan
+// to the few rows that can be and projects the fields it needs.
+func (s *Store) ListWorkerSlotWaiters() ([]WorkerSlotWaiterRow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rows, err := s.db.Query(`SELECT id, action_name, status, current_step, inputs_json,
-		outputs_json, state_json, waiting_reason, waiting_condition, waiting_options_json,
-		error_json, idempotency_key, created_at, updated_at FROM action_instances
+	rows, err := s.db.Query(`SELECT id, status, waiting_condition, updated_at,
+		COALESCE(json_extract(inputs_json, '$.parent_action_id'), json_extract(state_json, '$.parent_action_id'), ''),
+		json_extract(state_json, '$.worker_slot_wait_since'),
+		COALESCE(json_extract(state_json, '$.worker_slot_polled_at'), ''),
+		CASE WHEN json_extract(state_json, '$.paused') IN (1, 'true') THEN 1 ELSE 0 END
+		FROM action_instances
 		WHERE status IN ('pending', 'waiting_external', 'running')
 		AND action_name IN ('transcode_media', 'benchmark_transcode')
-		AND instr(state_json, '"worker_slot_wait_since"') > 0
+		AND json_type(state_json, '$.worker_slot_wait_since') = 'text'
 		ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []ActionInstance
+	var out []WorkerSlotWaiterRow
 	for rows.Next() {
-		var inst ActionInstance
-		if err := rows.Scan(&inst.ID, &inst.ActionName, &inst.Status, &inst.CurrentStep,
-			&inst.InputsJSON, &inst.OutputsJSON, &inst.StateJSON, &inst.WaitingReason,
-			&inst.WaitingCondition, &inst.WaitingOptionsJSON, &inst.ErrorJSON,
-			&inst.IdempotencyKey, &inst.CreatedAt, &inst.UpdatedAt); err != nil {
+		var w WorkerSlotWaiterRow
+		if err := rows.Scan(&w.ID, &w.Status, &w.WaitingCondition, &w.UpdatedAt,
+			&w.ParentID, &w.WaitSince, &w.PolledAt, &w.Paused); err != nil {
 			return nil, err
 		}
-		out = append(out, inst)
+		out = append(out, w)
 	}
 	return out, rows.Err()
 }

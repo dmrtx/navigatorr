@@ -48,6 +48,12 @@ const (
 // everyone behind it forever.
 const slotWaiterStaleAfter = 15 * time.Minute
 
+// slotParentBusyGrace is how long after its last own slot wait (a submit the
+// worker refused, or a queue-order wait) a waiter deferred by its parent's
+// lease (parent_busy) still holds its place against the others. Longer than
+// one 30-60 s slot poll, short enough that a freed slot does not sit idle.
+const slotParentBusyGrace = 2 * time.Minute
+
 const waitingForWorkerPhase = "waiting_for_worker"
 
 type slotWaiter struct {
@@ -83,16 +89,30 @@ func (w slotWaiter) aheadOf(since time.Time, id string) bool {
 // paused or waiting for a decision, worker unreachable) keeps its place for
 // later but does not block anyone meanwhile.
 func (e *Engine) workerSlotWaiters() ([]slotWaiter, error) {
-	insts, err := e.deps.Store.ListWorkerSlotWaiters()
+	rows, err := e.deps.Store.ListWorkerSlotWaiters()
 	if err != nil {
 		return nil, err
 	}
 	var out []slotWaiter
-	for _, inst := range insts {
-		switch inst.Status {
+	for _, row := range rows {
+		since, err := time.Parse(time.RFC3339Nano, row.WaitSince)
+		if err != nil || row.Paused {
+			continue
+		}
+		switch row.Status {
 		case StatusWaitingExternal:
-			// parent_busy only means the parent was executing at that poll.
-			if inst.WaitingCondition != "worker_busy" && inst.WaitingCondition != "parent_busy" {
+			switch row.WaitingCondition {
+			case "worker_busy":
+			case "parent_busy":
+				// parent_busy only means the parent was executing at that
+				// poll. Each such poll refreshes updated_at, so the stale
+				// cutoff never applies; a waiter that has not reached its own
+				// slot wait for a while must not hold the head of the queue
+				// for as long as its parent's lease runs.
+				if !e.slotWaitRecent(row.PolledAt, since) {
+					continue
+				}
+			default:
 				continue
 			}
 		case StatusRunning, StatusPending:
@@ -100,21 +120,10 @@ func (e *Engine) workerSlotWaiters() ([]slotWaiter, error) {
 		default:
 			continue
 		}
-		if updated, err := time.Parse(time.RFC3339, inst.UpdatedAt); err == nil && time.Since(updated) > slotWaiterStaleAfter {
+		if updated, err := time.Parse(time.RFC3339, row.UpdatedAt); err == nil && time.Since(updated) > slotWaiterStaleAfter {
 			continue
 		}
-		var state, inputs map[string]any
-		_ = json.Unmarshal([]byte(inst.StateJSON), &state)
-		_ = json.Unmarshal([]byte(inst.InputsJSON), &inputs)
-		since, ok := slotTicket(state)
-		if !ok || getBool(state, "paused") {
-			continue
-		}
-		parent := getString(inputs, "parent_action_id")
-		if parent == "" {
-			parent = getString(state, "parent_action_id")
-		}
-		out = append(out, slotWaiter{id: inst.ID, parentID: parent, since: since})
+		out = append(out, slotWaiter{id: row.ID, parentID: row.ParentID, since: since})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].aheadOf(out[j].since, out[j].id) })
 	return out, nil
@@ -148,6 +157,17 @@ func (e *Engine) workerSlotTurn(ec *ExecutionContext, reason string) (StepResult
 		WaitingReason:    reason,
 		Outputs:          map[string]any{"worker_busy": true, workerSlotPositionKey: position},
 	}, true
+}
+
+// slotWaitRecent reports whether the waiter's last own slot wait (polledAt,
+// stamped by scheduleReconcile for each worker_busy outcome; the ticket time
+// when it was never polled) is within slotParentBusyGrace.
+func (e *Engine) slotWaitRecent(polledAt string, since time.Time) bool {
+	last := since
+	if at, err := time.Parse(time.RFC3339Nano, polledAt); err == nil && at.After(last) {
+		last = at
+	}
+	return e.now().Sub(last) <= slotParentBusyGrace
 }
 
 // slotQueuePosition stores and returns this action's place among the live
@@ -229,26 +249,31 @@ func (e *Engine) foreignSlotWaiter(batchID string) bool {
 
 // slotFairPending narrows a batch's dispatch candidates to what it may start
 // without taking a freed worker slot out of turn:
-//   - no new child (a queued item) while an action outside this batch waits
-//     for a slot; the batch's own waiting children still try, in queue order;
+//   - no new child (a queued item) while one of this batch's own children
+//     waits for a slot, due or not: the worker is full, and a new child would
+//     only be probed, hashed and queued behind it, past max_parallel_jobs;
+//   - no new child while an action outside this batch waits for a slot; the
+//     batch's own waiting children still try, in queue order;
 //   - on a reconciler poll, a waiting child is left to its own backoff
 //     instead of being resumed every time the batch polls.
 func (e *Engine) slotFairPending(ctx context.Context, batchID string, items []store.TranscodeBatchItem, pending []int) []int {
 	if len(pending) == 0 {
 		return pending
 	}
-	hasQueued := false
-	for _, idx := range pending {
-		if items[idx].Status == "queued" {
+	hasQueued, ownWaiting := false, false
+	for _, it := range items {
+		switch it.Status {
+		case "queued":
 			hasQueued = true
-			break
+		case "waiting_for_slot":
+			ownWaiting = true
 		}
 	}
-	foreign := hasQueued && e.foreignSlotWaiter(batchID)
+	holdQueued := hasQueued && (ownWaiting || e.foreignSlotWaiter(batchID))
 	out := make([]int, 0, len(pending))
 	for _, idx := range pending {
 		it := items[idx]
-		if foreign && it.Status == "queued" {
+		if holdQueued && it.Status == "queued" {
 			continue
 		}
 		if it.Status == "waiting_for_slot" && e.slotWaitNotDue(ctx, it.ChildActionID) {

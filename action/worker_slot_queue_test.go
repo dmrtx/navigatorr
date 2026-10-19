@@ -206,6 +206,112 @@ func TestWorkerSlotQueueGivesFreedSlotToLongestWaitingBatch(t *testing.T) {
 	}
 }
 
+// Regression: on reconciler polls a batch left its own not-yet-due slot
+// waiters alone and then started another queued file on every poll, so a
+// max_parallel_jobs=1 batch ended up with every file probed, hashed and
+// holding a ticket. While any of its files waits for a slot, a batch starts
+// no new file.
+func TestBatchStartsNoNewFileWhileItsOwnFileWaitsForSlot(t *testing.T) {
+	worker := newSlotWorker(1)
+	e, st, _, srv, root := setupBatchTestEnv(t, worker.executor(), 1)
+	defer st.Close()
+	defer srv.Close()
+	e.deps.Registry = nil
+	clock := &testClock{at: time.Now().UTC()}
+	e.deps.Now = clock.Now
+	ctx := context.Background()
+	inputs := func(paths ...string) map[string]any {
+		return map[string]any{"paths": paths, "profile": "general-hevc", "media_type": "movie", "dry_run": false}
+	}
+	if _, err := e.Run(ctx, "transcode_batch", inputs(writeSparseMedia(t, root, "Batch A One.mkv"))); err != nil {
+		t.Fatal(err)
+	}
+	var paths []string
+	for _, n := range []string{"Batch B One.mkv", "Batch B Two.mkv", "Batch B Three.mkv", "Batch B Four.mkv"} {
+		paths = append(paths, writeSparseMedia(t, root, n))
+	}
+	b, err := e.Run(ctx, "transcode_batch", inputs(paths...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := func() (waiting, queued, children int) {
+		items, _ := st.ListTranscodeBatchItems(b.ID)
+		for _, it := range items {
+			switch it.Status {
+			case "waiting_for_slot":
+				waiting++
+			case "queued":
+				queued++
+			}
+			if it.ChildActionID != "" {
+				children++
+			}
+		}
+		return
+	}
+	if w, q, c := count(); w != 1 || q != 3 || c != 1 {
+		t.Fatalf("after run: waiting=%d queued=%d children=%d, want 1/3/1", w, q, c)
+	}
+	for i := range 3 {
+		clock.Advance(10 * time.Second)
+		if _, err := e.resume(ctx, b.ID, "", nil, true); err != nil {
+			t.Fatal(err)
+		}
+		if w, q, c := count(); w != 1 || q != 3 || c != 1 {
+			t.Fatalf("automatic poll %d started another file: waiting=%d queued=%d children=%d", i+1, w, q, c)
+		}
+	}
+	if got := worker.acceptedSources(); len(got) != 1 {
+		t.Fatalf("worker accepted %v, want only batch A's file", got)
+	}
+}
+
+// A ticket holder deferred by its parent's lease (parent_busy) keeps its
+// place only briefly: after slotParentBusyGrace without an own slot wait it
+// stops blocking the others, and regains its place once it waits again.
+func TestParentBusyWaiterHoldsQueueHeadOnlyForGrace(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "queue.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	clock := &testClock{at: time.Now().UTC()}
+	e := NewEngine(EngineDeps{Store: st, Now: clock.Now})
+	now := clock.Now()
+	seed := func(id, condition, parent string, since, polled time.Time) {
+		if err := st.CreateActionInstance(store.ActionInstance{
+			ID: id, ActionName: "transcode_media", Status: StatusWaitingExternal, WaitingCondition: condition,
+			InputsJSON: toJSON(map[string]any{"parent_action_id": parent}),
+			StateJSON: toJSON(map[string]any{
+				workerSlotWaitSinceKey: since.Format(time.RFC3339Nano),
+				workerSlotPolledAtKey:  polled.Format(time.RFC3339Nano),
+			}),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed("held-by-parent", "parent_busy", "batch-a", now.Add(-10*time.Minute), now.Add(-30*time.Second))
+	seed("other-batch", "worker_busy", "batch-b", now.Add(-time.Minute), now.Add(-10*time.Second))
+	position := func() int {
+		ec := &ExecutionContext{InstanceID: "other-batch", State: actionState(t, st, "other-batch"), Outputs: map[string]any{}}
+		pos, err := e.slotQueuePosition(ec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pos
+	}
+	if got := position(); got != 2 {
+		t.Fatalf("a parent_busy waiter inside its grace keeps its place: position %d, want 2", got)
+	}
+	clock.Advance(slotParentBusyGrace)
+	if got := position(); got != 1 {
+		t.Fatalf("a parent_busy waiter past its grace still blocks the queue: position %d, want 1", got)
+	}
+	if e.foreignSlotWaiter("batch-b") {
+		t.Fatal("a parent_busy waiter past its grace still holds batch B back")
+	}
+}
+
 func mustResolve(t *testing.T, e *Engine, path string) string {
 	t.Helper()
 	resolved, err := e.deps.Fs.ResolveRead(path)
