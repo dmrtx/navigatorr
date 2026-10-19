@@ -75,8 +75,7 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 	requiresProfile := false
 	limits, mixed := map[string]any{}, map[string]bool{}
 	itemSettings := operationMap(state["batch_item_settings"])
-	var hardwareAllow, hardwareKnown, hardwareMixed bool
-	var hardwareMargin any
+	var hardware action.HardwareChoice
 	profiles := map[string]int{}
 	for _, item := range items {
 		if !action.BatchRevisionSelects(item, body.Scope, selectionID) {
@@ -91,18 +90,8 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		selected++
-		// The choice a file runs under is its own frozen policy when a goal change
-		// gave it one, else the batch's.
-		var frozen any = state
-		if row := operationMap(itemSettings[item.ItemKey]); operationMap(row["mode_policy"]) != nil {
-			frozen = row
-		}
-		if allow, margin, ok := frozenHardware(frozen); ok {
-			if !hardwareKnown {
-				hardwareKnown, hardwareAllow, hardwareMargin = true, allow, margin
-			} else if hardwareAllow != allow || !reflect.DeepEqual(hardwareMargin, margin) {
-				hardwareMixed = true
-			}
+		if allow, margin, ok := action.BatchItemFrozenHardware(state, item.ItemKey); ok {
+			hardware.Add(allow, margin)
 		}
 		if body.Scope == "file" {
 			plan["item_key"] = item.ItemKey
@@ -200,10 +189,10 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	settingsView["mixed_limits"] = mixed["min_savings_percent"] || mixed["max_size_increase_percent"]
 	settingsView["preserve_source_bit_depth"] = inputs["preserve_source_bit_depth"]
-	if hardwareKnown {
+	if hardware.Known {
 		// Show the media engine choice the files were frozen with, not today's default.
-		settingsView["allow_hardware"], settingsView["hardware_margin_percent"] = hardwareAllow, hardwareMargin
-		settingsView["hardware_mixed"] = hardwareMixed
+		settingsView["allow_hardware"], settingsView["hardware_margin_percent"] = hardware.Allow, hardware.Margin
+		settingsView["hardware_mixed"] = hardware.Mixed
 	}
 	if r.Method == http.MethodGet {
 		writeJSON(w, 200, plan)
@@ -271,18 +260,4 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 
 func containsMode(mode string) bool {
 	return mode == "size" || mode == "quality" || mode == "x265_preserve" || mode == "compact"
-}
-
-// frozenHardware reads the media engine choice an earlier goal change froze
-// into a file's size policy: search rules present means on, absent means off.
-func frozenHardware(raw any) (allow bool, margin any, ok bool) {
-	size := operationMap(operationMap(operationMap(raw)["mode_policy"])["size"])
-	if size == nil {
-		return false, nil, false
-	}
-	rules := operationMap(size["hardware_search"])
-	if rules == nil {
-		return false, nil, true
-	}
-	return true, rules["margin_percent"], true
 }

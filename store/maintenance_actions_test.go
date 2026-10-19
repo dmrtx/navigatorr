@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jakenesler/navigatorr/transcode/optimization"
 )
 
 func TestMaintenanceSnapshotProjectsWithoutChangingHistory(t *testing.T) {
@@ -115,5 +117,53 @@ func TestMaintenanceSnapshotKeepsSizeModeSummaryOnly(t *testing.T) {
 	}
 	if rows[0].OutputsJSON != `{"quality_evidence":{}}` {
 		t.Fatalf("evidence without VMAF must not invent a score: %s", rows[0].OutputsJSON)
+	}
+}
+
+// The snapshot keeps a benchmark winner's size and encoder, and only the media
+// engine reason out of its uncertainties, so the page can say why a hardware
+// result was chosen without carrying the estimator's whole list.
+func TestMaintenanceSnapshotKeepsOnlyTheMediaEngineReason(t *testing.T) {
+	if maintenanceHardwareNote != optimization.HardwareSelectedNote {
+		t.Fatalf("the snapshot filters on %q but the selector writes %q", maintenanceHardwareNote, optimization.HardwareSelectedNote)
+	}
+	s, err := Open(filepath.Join(t.TempDir(), "ledger.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	note := optimization.HardwareSelectedNote + ": no software candidate qualified"
+	for id, uncertainties := range map[string]string{
+		"with-reason": `["sampled estimate","` + note + `"]`,
+		"without":     `["sampled estimate","another"]`,
+		"none":        `null`,
+	} {
+		state := `{"benchmark_decision":{"winner":{"candidate_id":"w","video_codec":"hevc_videotoolbox","estimated_bytes":4000,"quality":50,"uncertainties":` + uncertainties + `},"evaluations":[{"candidate_id":"w"}]}}`
+		if err := s.CreateActionInstance(ActionInstance{ID: id, ActionName: "transcode_media", Status: ActionStatusCompleted, InputsJSON: `{}`, OutputsJSON: `{}`, StateJSON: state}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := s.ListMaintenanceActionSnapshot()
+	if err != nil || len(rows) != 3 {
+		t.Fatalf("%v %v", rows, err)
+	}
+	for _, row := range rows {
+		var state struct {
+			Decision map[string]map[string]any `json:"benchmark_decision"`
+		}
+		if json.Unmarshal([]byte(row.StateJSON), &state) != nil {
+			t.Fatal(row.StateJSON)
+		}
+		winner := state.Decision["winner"]
+		if winner["estimated_bytes"] != float64(4000) || winner["video_codec"] != "hevc_videotoolbox" || winner["quality"] != nil || winner["candidate_id"] != nil || state.Decision["evaluations"] != nil {
+			t.Fatalf("%s: projection kept or lost the wrong fields: %v", row.ID, state.Decision)
+		}
+		notes, _ := winner["uncertainties"].([]any)
+		if row.ID == "with-reason" && (len(notes) != 1 || notes[0] != note) {
+			t.Fatalf("the media engine reason was lost or padded: %v", winner)
+		}
+		if row.ID != "with-reason" && winner["uncertainties"] != nil {
+			t.Fatalf("%s: uncertainties leaked: %v", row.ID, winner)
+		}
 	}
 }

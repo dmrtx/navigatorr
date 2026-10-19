@@ -3221,6 +3221,21 @@ test("a VideoToolbox winner is told apart from x265 before anything is replaced"
   assert.equal(h.run('benchmarkCandidateLabel({id:"cand_crf22",video_codec:"libx265",quality:22,preset:"slow"})'), "cand_crf22 · x265 CRF 22 · slow");
 });
 
+test("a VideoToolbox winner says why it was chosen next to the encoder line", () => {
+  const h = harness();
+  const reason = "25000 bytes against 23500 for the smallest software candidate, within the 15% margin";
+  const hardware = h.run(`sizeModeNote({size_mode:{expected_bytes:2150000000,encoder:"hevc_videotoolbox",hardware:true,hardware_reason:${JSON.stringify(reason)}}})`);
+  const rows = hardware.children.map((row) => allText(row));
+  const at = rows.findIndex((row) => /^Encoder: VideoToolbox/.test(row));
+  assert.ok(at >= 0, "encoder line present");
+  assert.equal(rows[at + 1], `Chosen because: ${reason}`);
+  // No reason recorded (an older decision), x265, or a reason without the hardware flag: no line.
+  const without = h.run('sizeModeNote({size_mode:{encoder:"hevc_videotoolbox",hardware:true}})');
+  assert.doesNotMatch(allText(without), /Chosen because/);
+  const software = h.run('sizeModeNote({size_mode:{encoder:"libx265",hardware_reason:"stale"}})');
+  assert.doesNotMatch(allText(software), /Chosen because/);
+});
+
 test("the queue comes before podcast cleaning, which opens in its own dialog", () => {
   const jobs = markup.slice(markup.indexOf('<section id="jobs"'), markup.indexOf('<section id="stats"'));
   assert.ok(jobs.indexOf('class="queue-toolbar"') < jobs.indexOf('id="podcast-new"'));
