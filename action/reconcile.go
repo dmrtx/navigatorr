@@ -414,7 +414,95 @@ func (e *Engine) hashMedia(ctx context.Context, h io.Writer, r io.Reader) (int64
 		return 0, err
 	}
 	defer release()
-	return io.Copy(h, r)
+	return copyReadAhead(ctx, h, r)
+}
+
+// A NAS read costs a round trip each, so io.Copy's 32 KiB reads leave the
+// link idle while SHA-256 runs and the CPU idle while the link runs. Reading
+// 1 MiB at a time, a few chunks ahead of the hash, overlaps the two. The
+// bytes written, and so any digest, are exactly those of io.Copy.
+const (
+	hashReadChunk = 1 << 20
+	hashReadAhead = 4
+)
+
+var hashChunks = sync.Pool{New: func() any { b := make([]byte, hashReadChunk); return &b }}
+
+type hashChunk struct {
+	buf *[]byte
+	n   int
+	err error
+}
+
+// copyReadAhead is io.Copy with the reads running ahead of the writes. It
+// returns only after its reader goroutine has stopped, so the caller may
+// close src, and it never writes bytes the source did not return.
+func copyReadAhead(ctx context.Context, dst io.Writer, src io.Reader) (int64, error) {
+	full := make(chan hashChunk, hashReadAhead)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer close(full)
+		for {
+			buf := hashChunks.Get().(*[]byte)
+			var c hashChunk
+			if err := ctx.Err(); err != nil {
+				c = hashChunk{buf: buf, err: err}
+			} else {
+				n, err := src.Read(*buf)
+				c = hashChunk{buf: buf, n: n, err: err}
+			}
+			select {
+			case full <- c:
+			case <-stop:
+				hashChunks.Put(buf)
+				return
+			}
+			if c.err != nil {
+				return
+			}
+		}
+	}()
+	var written int64
+	fail := func(err error) (int64, error) {
+		close(stop)
+		for c := range full {
+			hashChunks.Put(c.buf)
+		}
+		<-done
+		return written, err
+	}
+	for c := range full {
+		if c.n > 0 {
+			w, err := dst.Write((*c.buf)[:c.n])
+			if w < 0 || w > c.n {
+				w = 0
+				if err == nil {
+					err = errors.New("invalid write result")
+				}
+			}
+			written += int64(w)
+			if err == nil && w < c.n {
+				err = io.ErrShortWrite
+			}
+			if err != nil {
+				hashChunks.Put(c.buf)
+				return fail(err)
+			}
+		}
+		err := c.err
+		hashChunks.Put(c.buf)
+		if err == io.EOF {
+			<-done
+			return written, nil
+		}
+		if err != nil {
+			return fail(err)
+		}
+	}
+	<-done
+	return written, nil
 }
 
 // contextReader keeps long NAS hashes interruptible on service shutdown or

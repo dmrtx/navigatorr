@@ -91,7 +91,7 @@ func TestPromotionMovesOriginalAsideWithoutCopying(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.RecoveryMode != promotionRecoveryMoveAside || !p.MovedAside || p.RecoveryCopy != nil || p.BackupFingerprint == nil || !p.RecoveryCleanupCompleted {
+	if p.RecoveryMode != promotionRecoveryMoveAside || p.RecoveryModeReason != recoveryReasonMoveAside || !p.MovedAside || p.RecoveryCopy != nil || p.BackupFingerprint == nil || !p.RecoveryCleanupCompleted {
 		t.Fatalf("move-aside evidence: %+v", p)
 	}
 	for _, path := range []string{h.original, p.BackupPath, filepath.Dir(p.BackupPath)} {
@@ -658,7 +658,7 @@ func TestPromotionMountProbeChoosesCopyWhenIdentityIsUnreliable(t *testing.T) {
 				t.Fatalf("promotion: %s %s", r.Status, r.Error)
 			}
 			p := movedAsideState(t, h, r.ID)
-			if probes != 1 || p.RecoveryMode != promotionRecoveryCopy || p.RecoveryCopy == nil {
+			if probes != 1 || p.RecoveryMode != promotionRecoveryCopy || p.RecoveryModeReason != recoveryReasonMountProbe || p.RecoveryCopy == nil {
 				t.Fatalf("probe %d times, recovery %+v", probes, p)
 			}
 		})

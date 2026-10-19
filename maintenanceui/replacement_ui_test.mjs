@@ -65,10 +65,24 @@ function harness({ integrations = [], latest, legacy = null } = {}) {
     record: (name, args) => calls.push({ name, args }),
     opened: (id) => opened.push(id),
     latest,
+    planned: {
+      id: "planned",
+      status: "waiting_decision",
+      waiting_options: [{ decision: "approve" }],
+      promotion: {
+        original_path: "/media/one.mkv",
+        candidate_path: "/media/.candidates/one.mkv",
+        original_sha256: "original",
+        candidate_sha256: "candidate",
+        original_bytes: 1000,
+        candidate_bytes: 400,
+        plan_digest: "sha256:plan",
+      },
+    },
   });
   vm.runInContext(source.replace(/safe\(initialize\);\s*$/, ""), context);
   vm.runInContext(
-    `state.info={allow_destructive:true,services:configured}; controls=()=>{}; submissionID=()=>"test-receipt"; api=async()=>({jobs:[latest]}); tool=async(name,args)=>{record(name,args);return {id:"planned"};}; openJob=async(id)=>opened(id); loadJobs=async()=>{};`,
+    `state.info={allow_destructive:true,services:configured}; controls=()=>{}; submissionID=()=>"test-receipt"; api=async(path)=>({jobs:[String(path).includes("id=planned")?planned:latest]}); tool=async(name,args)=>{record(name,args);return {id:"planned"};}; openJob=async(id)=>opened(id); loadJobs=async()=>{};`,
     context,
   );
   return {
@@ -99,8 +113,15 @@ test("an agent's durable Sonarr child uses its parent integration without browse
     service: "sonarr",
     series_id: 77,
   });
-  assert.deepEqual(h.opened, ["planned"]);
+  // The plan is ready, so its review opens at once: one approval, no extra click.
+  assert.deepEqual(h.opened, []);
+  assert.equal(h.elements.get("file-review").open, true);
   assert.equal(h.elements.get("replacement-choice").open, false);
+  assert.equal(h.calls.some((call) => call.name === "action_resume"), false);
+  h.context.resumes = [];
+  h.run('jobControl=async(...args)=>resumes.push(args)');
+  await h.elements.get("approve-file-review").listeners.get("click")();
+  assert.deepEqual(JSON.parse(JSON.stringify(h.context.resumes)), [["planned", "action_resume", { decision: "approve", plan_digest: "sha256:plan" }]]);
 });
 
 test("unknown history offers an explicit local or library choice before creating a plan", async () => {
@@ -130,7 +151,7 @@ test("unknown history offers an explicit local or library choice before creating
     service: "radarr",
     movie_id: 42,
   });
-  assert.deepEqual(h.opened, ["planned"]);
+  assert.equal(h.elements.get("file-review").open, true);
   assert.equal(
     h.calls.some((call) => call.name === "action_resume"),
     false,
@@ -165,6 +186,19 @@ test("an existing promotion is opened without changing its route or creating ano
   );
   assert.equal(h.calls.length, 0);
   assert.deepEqual(h.opened, ["prior-review"]);
+});
+
+test("a plan that is still being verified shows a pending review that cannot be approved", async () => {
+  const job = { id: "file", candidate_ready: true };
+  const h = harness({ integrations: [], latest: job });
+  h.run('api=async(path)=>({jobs:[String(path).includes("id=planned")?{id:"planned",status:"running"}:{id:"file",candidate_ready:true}]})');
+  h.context.job = job;
+  await h.run('enqueueReplacement(job,{service:"filesystem"})');
+  assert.equal(h.elements.get("file-review").open, true);
+  h.context.resumes = [];
+  h.run("jobControl=async(...args)=>resumes.push(args)");
+  await h.elements.get("approve-file-review").listeners.get("click")();
+  assert.deepEqual(h.context.resumes, []);
 });
 
 test("a candidate consumed while the selection dialog was open cannot create another plan", async () => {

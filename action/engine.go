@@ -507,6 +507,9 @@ func (e *Engine) resume(ctx context.Context, instanceID string, decision string,
 	if err := e.checkReviewedCandidate(ctx, inst, decision); err != nil {
 		return nil, err
 	}
+	if err := e.checkReviewedPromotion(ctx, inst, decision); err != nil {
+		return nil, err
+	}
 
 	tmpl, ok := e.GetTemplate(inst.ActionName)
 	if !ok {

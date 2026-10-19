@@ -2516,13 +2516,15 @@ async function reviewJobDecision(id, decision) {
         content.push(row);
       }
       content.push(node("p", info.reason));
-      content.push(node("p", "Accept this candidate despite the validation result. Replacing the library file requires a separate review.", "muted"));
+      content.push(node("p", "Accept this candidate despite the validation result. Replacing the library file is then reviewed once more, with the exact paths and sizes, before any file changes.", "muted"));
     } else content.push(node("p", shortJobReason(job.waiting_reason) || "Review this job before continuing."));
     const candidateChoices = decision === "accept_loss" ? [
       ...(job.waiting_options.some(o=>o.decision === "reject") ? [{label:"Reject · keep original",value:"reject"}] : []),
       ...(candidatePlan ? [{label:"Transcode with other settings",value:"reconfigure"}] : []),
+      ...(state.info.allow_destructive ? [{label:"Accept only · decide replacement later",value:"accept_only"}] : []),
     ] : [];
-    const chosen = await reviewAction({title:decision === "accept_loss" ? "Review candidate" : "Review decision", content, choices:candidateChoices, cancelLabel:decision === "accept_loss" ? "Decide later" : "Back", confirmLabel:decision === "accept_loss" ? "Accept candidate" : "Approve"});
+    const replaceNext = decision === "accept_loss" && state.info.allow_destructive;
+    const chosen = await reviewAction({title:decision === "accept_loss" ? "Review candidate" : "Review decision", content, choices:candidateChoices, cancelLabel:decision === "accept_loss" ? "Decide later" : "Back", confirmLabel:decision === "accept_loss" ? (replaceNext ? "Accept and replace" : "Accept candidate") : "Approve"});
     if (!chosen) return;
     if (chosen === "reconfigure") { await reconfigureBatch(id,true,candidatePlan); return; }
     const latest = await read();
@@ -2530,19 +2532,51 @@ async function reviewJobDecision(id, decision) {
     if (decisionStamp(latest || {}, decision) !== stamp)
       throw new Error("The candidate or decision changed. Review the job again.");
     const selected = chosen === "reject" ? "reject" : decision;
+    // Accepting and replacing are two decisions, but one flow: the replacement
+    // review opens by itself once the accepted candidate is ready.
+    const replaceAfter = replaceNext && chosen === true;
     if (candidatePlan) {
       await commandRequest("candidate-decision",{id,candidate_id:candidatePlan.candidate_id,decision_version:candidatePlan.decision_version,decision:selected,background:true});
       await Promise.all([loadJobs(),state.detail === id && $("job-detail").open ? refreshDetail() : Promise.resolve()]);
-      notify(selected === "reject" ? "Candidate rejected. Original preserved; other batch files continue." : "Candidate accepted. Replacement requires separate approval.");
-    } else await jobControl(id, "action_resume", {decision:selected});
+      notify(selected === "reject" ? "Candidate rejected. Original preserved; other batch files continue." : replaceAfter ? "Candidate accepted. Preparing the replacement review…" : "Candidate accepted. Replacement requires separate approval.");
+      if (replaceAfter) safe(() => continueToReplacement(candidatePlan.candidate_id, id));
+    } else {
+      await jobControl(id, "action_resume", {decision:selected});
+      if (replaceAfter) {
+        notify("Candidate accepted. Preparing the replacement review…");
+        safe(() => continueToReplacement(id));
+      }
+    }
   } finally {
     state.reviewingDecision = null;
   }
 }
+// After "Accept and replace" the candidate is finalized and published by the
+// worker; wait for it, then go straight to the one replacement review.
+async function continueToReplacement(candidateId, parentId) {
+  const auth = state.authRevision;
+  for (let attempt = 0; attempt < 150; attempt++) {
+    await pollDelay(2000);
+    if (auth !== state.authRevision || $("workspace").hidden) return;
+    let job;
+    try {
+      job = (await api(`operations?id=${encodeURIComponent(candidateId)}`)).jobs?.[0];
+    } catch {
+      continue;
+    }
+    if (job?.candidate_ready && !job.replacement_action_id) {
+      if (parentId) await replaceBatchFile(parentId, candidateId);
+      else await prepareReplacement(job);
+      return;
+    }
+    if (!job || job.replacement_action_id || ["failed", "cancelled"].includes(job.status)) break;
+  }
+  notify("Candidate accepted. Use Replace file when it is ready.");
+}
 async function prepareReplacement(job) {
   if (jobIsBusy(job.id)) return;
   if (job.replacement_action_id) {
-    await openJob(job.replacement_action_id);
+    await openReplacement(job.replacement_action_id);
     return;
   }
   const durable = job.replacement_context;
@@ -2614,7 +2648,7 @@ async function enqueueReplacement(job, context) {
       .jobs?.[0];
     if (latest?.replacement_action_id) {
       $("replacement-choice").close();
-      await openJob(latest.replacement_action_id);
+      await openReplacement(latest.replacement_action_id);
       return;
     }
     if (!latest?.candidate_ready)
@@ -2636,7 +2670,9 @@ async function enqueueReplacement(job, context) {
     });
     $("replacement-choice").close();
     await loadJobs();
-    await openJob(result.id);
+    // One review follows the plan: it opens now and fills in as soon as the
+    // files are verified, so approving needs no second button.
+    await reviewFilePromotion(result.id, { wait: true });
   } finally {
     state.busyJobs.delete(job.id);
   }
@@ -3042,7 +3078,10 @@ function jobControls(job, detail = false) {
           await commandRequest("batch-candidates",{id:job.id,digest:plan.digest,decision:"reject"});
           return;
         }
-        if (choice.decision === "approve" && job.batch?.promotion_plan_ready) {
+        if (choice.decision === "approve" && job.action_name === "transcode_batch") {
+          // A batch is approved only against its replacement plan, never
+          // through a generic dialog that cannot show the files.
+          if (!job.batch?.promotion_plan_ready) throw new Error("The replacement plan is not ready yet. Refresh the queue.");
           await reviewBatchPromotion(job.id);
           return;
         }
@@ -4346,40 +4385,91 @@ async function readBatchPromotionNotice(id) {
     return null;
   }
 }
-async function reviewFilePromotion(id) {
-  const auth = state.authRevision;
+function replacementReady(job) {
+  const p = job?.promotion;
+  return !!(p?.original_path && p.candidate_path && p.original_sha256 && p.candidate_sha256 && p.plan_digest && job.status === "waiting_decision" && job.waiting_options?.some(option => option.decision === "approve"));
+}
+// An existing replacement that is waiting for approval opens its review;
+// anything else opens the job.
+async function openReplacement(id) {
   const job = (await api(`operations?id=${encodeURIComponent(id)}`)).jobs?.[0];
-  if (auth !== state.authRevision || $("workspace").hidden) return;
-  if (!job?.promotion?.original_path || !job.promotion.candidate_path || !job.promotion.original_sha256 || !job.promotion.candidate_sha256 || job.status !== "waiting_decision" || !job.waiting_options?.some(option => option.decision === "approve"))
-    throw new Error("This replacement is no longer waiting for approval. Refresh the queue.");
-  state.fileApproval = { id, original: job.promotion.original_sha256, candidate: job.promotion.candidate_sha256 };
+  if (replacementReady(job)) await reviewFilePromotion(id);
+  else await openJob(id);
+}
+const replacementMethods = {filesystem: "Replace the file in place", sonarr: "Import through Sonarr", radarr: "Import through Radarr"};
+function showFileReview(job, approval) {
+  const p = job.promotion;
+  Object.assign(approval, { digest: p.plan_digest, original: p.original_sha256, candidate: p.candidate_sha256, pending: false });
   const data = $("file-review-data");
-  data.replaceChildren(node("p", job.promotion.original_path.split("/").pop(), "review-filename"));
-  for (const [label, path, size] of [["Original", job.promotion.original_path, job.promotion.original_bytes], ["Verified candidate", job.promotion.candidate_path, job.promotion.candidate_bytes]]) {
+  data.replaceChildren(node("p", p.original_path.split("/").pop(), "review-filename"));
+  for (const [label, path, size] of [["Original", p.original_path, p.original_bytes], ["Verified candidate", p.candidate_path, p.candidate_bytes]]) {
     const row = node("div", "", "review-file");
     row.append(node("span", label, "muted"), node("strong", bytes(size)), node("span", path, "metadata review-path"));
     data.append(row);
   }
   const savings = savingsLine(job.savings);
   if (savings) data.append(savings);
-  const warning = regrabWarning(job.promotion);
+  data.append(node("p", `Method: ${replacementMethods[p.service] || p.service || "Replace the file in place"}`, "metadata"));
+  const warning = regrabWarning(p);
   if (warning) data.prepend(warning);
   $("approve-file-review").disabled = !serverReachable || state.approvingFile;
+}
+function showFileReviewPending(text) {
+  $("file-review-data").replaceChildren(node("p", text, "muted"));
+  $("approve-file-review").disabled = true;
+}
+function pollDelay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+// Keeps the open review current until the plan is ready or stops being
+// possible; closing the dialog ends it and leaves the job waiting.
+async function awaitFileReview(approval, auth) {
+  const live = () => state.fileApproval === approval && $("file-review").open && auth === state.authRevision;
+  while (live()) {
+    await pollDelay(1500);
+    if (!live()) return;
+    let job;
+    try {
+      job = (await api(`operations?id=${encodeURIComponent(approval.id)}`)).jobs?.[0];
+    } catch {
+      continue;
+    }
+    if (!live()) return;
+    if (replacementReady(job)) return showFileReview(job, approval);
+    if (!job || ["failed", "cancelled", "completed"].includes(job.status)) return showFileReviewPending(shortJobReason(job?.error) || "This replacement can no longer be approved. Nothing was changed.");
+    if (job.status === "waiting_decision") return showFileReviewPending("This replacement is waiting for a decision that is not an approval. Open the job to continue.");
+    showFileReviewPending("Verifying the original and the candidate. Nothing changes until you approve; this can take a few minutes for large files.");
+  }
+}
+async function reviewFilePromotion(id, { wait = false } = {}) {
+  const auth = state.authRevision;
+  const job = (await api(`operations?id=${encodeURIComponent(id)}`)).jobs?.[0];
+  if (auth !== state.authRevision || $("workspace").hidden) return;
+  const ready = replacementReady(job);
+  if (!ready && !(wait && job && ["pending", "running", "waiting_external"].includes(job.status)))
+    throw new Error("This replacement is no longer waiting for approval. Refresh the queue.");
+  const approval = state.fileApproval = { id, digest: "", original: "", candidate: "", pending: !ready };
+  if (ready) showFileReview(job, approval);
+  else {
+    showFileReviewPending("Verifying the original and the candidate. Nothing changes until you approve; this can take a few minutes for large files.");
+    awaitFileReview(approval, auth);
+  }
   $("file-review").showModal();
 }
 $("dismiss-file-review").addEventListener("click", () => $("file-review").close());
 $("file-review").addEventListener("close", () => { state.fileApproval = null; });
 $("approve-file-review").addEventListener("click", () => safe(async () => {
   const approval = state.fileApproval;
-  if (!approval || state.approvingFile || !serverReachable) return;
+  if (!approval || approval.pending || !approval.digest || state.approvingFile || !serverReachable) return;
   state.approvingFile = true;
   $("approve-file-review").disabled = true;
   try {
     const current = (await api(`operations?id=${encodeURIComponent(approval.id)}`)).jobs?.[0];
     if (state.fileApproval !== approval || !$("file-review").open) return;
-    if (current?.status !== "waiting_decision" || !current.waiting_options?.some(option => option.decision === "approve") || current.promotion?.original_sha256 !== approval.original || current.promotion?.candidate_sha256 !== approval.candidate)
+    if (current?.status !== "waiting_decision" || !current.waiting_options?.some(option => option.decision === "approve") || current.promotion?.original_sha256 !== approval.original || current.promotion?.candidate_sha256 !== approval.candidate || current.promotion?.plan_digest !== approval.digest)
       throw new Error("The replacement plan changed. Close this review and open it again.");
-    await jobControl(approval.id, "action_resume", { decision: "approve" });
+    // The server refuses an approval whose digest is not the reviewed plan's.
+    await jobControl(approval.id, "action_resume", { decision: "approve", plan_digest: approval.digest });
     $("file-review").close();
     await openJob(approval.id);
   } finally {
