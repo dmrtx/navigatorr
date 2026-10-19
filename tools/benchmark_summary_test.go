@@ -7,6 +7,7 @@ import (
 
 	"github.com/jakenesler/navigatorr/action"
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/optimization"
 	"github.com/jakenesler/navigatorr/transcode/quality"
 )
 
@@ -231,5 +232,29 @@ func TestCompactBenchmarkListsMeasuredVMAFPerCandidate(t *testing.T) {
 	}
 	if s.UserNextStep == "" || strings.Contains(s.UserNextStep, "optimization.enabled") {
 		t.Fatalf("user next step carries agent guidance: %q", s.UserNextStep)
+	}
+}
+
+// A media engine winner reports why it was chosen next to its encoder; an
+// x265 winner, or one without a recorded reason, reports none.
+func TestCompactBenchmarkReportsWhyTheMediaEngineWon(t *testing.T) {
+	summary := func(codec string, notes ...string) *benchmarkSummary {
+		return compactBenchmark(&action.ActionResult{ActionName: "benchmark_transcode", Status: action.StatusCompleted, State: map[string]any{
+			"benchmark_decision": transcode.BenchmarkDecision{DecisionReason: "measured_plan_selected", Winner: &transcode.BenchmarkWinner{CandidateID: "w", VideoCodec: codec, Uncertainties: notes}, Evaluations: []transcode.BenchmarkCandidateEvaluation{{CandidateID: "w", Eligible: true}}},
+		}})
+	}
+	note := optimization.HardwareSelectedNote + ": 25000 bytes against 23500 for the smallest software candidate, within the 15% margin"
+	if got := summary(transcode.VideoCodecHEVCVideoToolbox, "estimated", note).HardwareReason; got != "25000 bytes against 23500 for the smallest software candidate, within the 15% margin" {
+		t.Fatalf("hardware reason %q", got)
+	}
+	if got := summary(transcode.VideoCodecHEVCVideoToolbox, "estimated").HardwareReason; got != "" {
+		t.Fatalf("reason invented for a winner without one: %q", got)
+	}
+	if got := summary(transcode.VideoCodecLibX265, note).HardwareReason; got != "" {
+		t.Fatalf("reason reported for an x265 winner: %q", got)
+	}
+	body, _ := json.Marshal(summary(transcode.VideoCodecLibX265))
+	if strings.Contains(string(body), "hardware_reason") {
+		t.Fatalf("an empty reason is serialized: %s", body)
 	}
 }

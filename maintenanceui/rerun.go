@@ -108,7 +108,7 @@ func (s *Server) rerun(w http.ResponseWriter, r *http.Request) {
 	// engine would otherwise take today's default instead of the policy it ran
 	// under, so carry the choice its frozen policy made.
 	if _, said := inputs["allow_hardware"]; !said && operationString(inputs["mode"]) == "size" {
-		if allow, margin, ok := frozenHardware(old.state); ok {
+		if allow, margin, ok := action.FrozenHardware(old.state); ok {
 			inputs["allow_hardware"] = allow
 			if allow {
 				inputs["hardware_margin_percent"] = margin

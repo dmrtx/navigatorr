@@ -700,6 +700,69 @@ func TestReplayHardwareRetryKeepsItsReason(t *testing.T) {
 	}
 }
 
+// When the retry after a failed holdout verifies a safer media engine setting
+// than the one the selector chose, the verified winner says so instead of
+// repeating a comparison that was made for a different setting, or saying
+// nothing.
+func TestReplayHardwareSaferRetryHasItsOwnReason(t *testing.T) {
+	settings := x265FindsOnlyCRF22(map[string]replaySetting{
+		replayKey("", 45): {bytes: 20000, discovery: replayScore{82, 87.5}, holdout: 83},
+		replayKey("", 50): {bytes: 25000, discovery: replayScore{89.4, 91.2}, holdout: 84},
+		replayKey("", 55): {bytes: 26500, discovery: replayScore{90.4, 92.2}, holdout: 91},
+		// 27000 is 14.9% above CRF 22's 23500: inside the 15% margin, and inside
+		// the 2% speed band of q55, so the safest-setting retry bumps q55 to it.
+		replayKey("", 60): {bytes: 27000, discovery: replayScore{91.4, 93.2}, holdout: 92},
+	})
+	res := runHardwareReplay(t, settings, 15)
+	t.Logf("safer hardware setting after a failed holdout: %s", res.summary())
+	if res.winner != "vt-cand_q60" || strings.Join(res.verified, ",") != "vt-cand_q50,vt-cand_q60" {
+		t.Fatalf("retry did not go to the safer setting within the margin: %s", res.summary())
+	}
+	var reason string
+	for _, u := range res.decision.Winner.Uncertainties {
+		if r := optimization.HardwareReason([]string{u}); r != "" {
+			reason = r
+		}
+	}
+	if reason != "safer setting within the 15% margin after a failed holdout" {
+		t.Fatalf("safer setting has the wrong reason %q in %v", reason, res.decision.Winner.Uncertainties)
+	}
+	if strings.Contains(strings.Join(res.decision.Winner.Uncertainties, ";"), "bytes against") {
+		t.Fatalf("the comparison made for another setting was repeated: %v", res.decision.Winner.Uncertainties)
+	}
+}
+
+func TestCarryHardwareNote(t *testing.T) {
+	won := func(id, codec string, notes ...string) *transcode.BenchmarkDecision {
+		return &transcode.BenchmarkDecision{Winner: &transcode.BenchmarkWinner{CandidateID: id, VideoCodec: codec, Uncertainties: notes}}
+	}
+	selected := optimization.HardwareSelectedNote + ": 100 bytes against 90 for the smallest software candidate, within the 15% margin"
+	rules := &transcode.HardwareSearchRules{MarginPercent: 15}
+	withSoftware := func(d *transcode.BenchmarkDecision) *transcode.BenchmarkDecision {
+		d.Evaluations = []transcode.BenchmarkCandidateEvaluation{{CandidateID: "x", VideoCodec: "libx265", Eligible: true, EstimatedBytes: 90}}
+		return d
+	}
+	for _, tc := range []struct {
+		name     string
+		final    *transcode.BenchmarkDecision
+		chosen   *transcode.BenchmarkDecision
+		hardware *transcode.HardwareSearchRules
+		want     []string
+	}{
+		{"same candidate keeps the chosen reason", won("v50", "hevc_videotoolbox"), won("v50", "hevc_videotoolbox", selected), rules, []string{selected}},
+		{"safer setting within the margin", won("v55", "hevc_videotoolbox"), withSoftware(won("v50", "hevc_videotoolbox", selected)), rules, []string{optimization.HardwareSelectedNote + ": safer setting within the 15% margin after a failed holdout"}},
+		{"safer setting with no software qualifier", won("v55", "hevc_videotoolbox"), won("v50", "hevc_videotoolbox", optimization.HardwareSelectedNote+": no software candidate qualified"), rules, []string{optimization.HardwareSelectedNote + ": safer setting after a failed holdout; no software candidate qualified"}},
+		{"a software winner gets no hardware reason", won("cand", "libx265"), won("v50", "hevc_videotoolbox", selected), rules, nil},
+		{"a chosen setting without a reason gives none", won("v55", "hevc_videotoolbox"), won("v50", "hevc_videotoolbox"), rules, nil},
+		{"the option off gives none", won("v55", "hevc_videotoolbox"), won("v50", "hevc_videotoolbox", selected), nil, nil},
+	} {
+		carryHardwareNote(tc.final, tc.chosen, tc.hardware)
+		if got := tc.final.Winner.Uncertainties; strings.Join(got, "|") != strings.Join(tc.want, "|") {
+			t.Errorf("%s: uncertainties %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestSafestEligibleIDWithinHardwareMargin(t *testing.T) {
 	vt := func(id string, q int) validatedCandidate {
 		return validatedCandidate{candidate: transcode.BenchmarkCandidate{ID: id, VideoCodec: "hevc_videotoolbox", Quality: q}, bitDepth: 10}

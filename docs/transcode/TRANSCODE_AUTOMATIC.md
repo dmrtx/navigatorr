@@ -70,7 +70,15 @@ A winner from the media engine is labeled before anything is replaced: the job
 shows *Encoder: VideoToolbox (hardware media engine)* with a *Hardware* badge
 (x265 shows *Encoder: x265 (software)*), the candidate lists name
 `VideoToolbox (hardware)`, and the MCP job and action detail carry `encoder` and
-`hardware` on the size result. See
+`hardware` on the size result. The job also says why the media engine result was
+chosen (*Chosen because: ...* under the encoder line, `hardware_reason` in the
+MCP benchmark summary): its size against the smallest x265 result and the
+margin, that no x265 candidate qualified, or, after a failed holdout, that a
+safer setting inside the margin was verified instead. The MCP `transcode_goal_change`
+preview (no `mode`) returns the `allow_hardware` / `hardware_margin_percent` the
+selected smaller-files attempts were frozen with, and `hardware_mixed` when they
+differ; leaving `allow_hardware` out of a change to size still takes the
+default (on, 15), so pass the shown values to keep them. See
 [TRANSCODE_MODES_REVIEW.md](TRANSCODE_MODES_REVIEW.md) and the
 [experiment](reviews/2026-10-19-hardware-media-engine-experiment.md).
 

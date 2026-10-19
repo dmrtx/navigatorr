@@ -33,6 +33,9 @@ type benchmarkSummary struct {
 	AudioNote          string                            `json:"audio_note,omitempty"`
 	PlanSource         string                            `json:"plan_source,omitempty"`
 	PlanNote           string                            `json:"plan_note,omitempty"`
+	// HardwareReason says why a VideoToolbox (media engine) winner was chosen,
+	// next to the encoder the explanation names.
+	HardwareReason string `json:"hardware_reason,omitempty"`
 }
 
 type benchmarkRejection struct {
@@ -202,6 +205,9 @@ func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
 			s.Measured = append(s.Measured, benchmarkMeasured{CandidateID: ev.CandidateID, VideoCodec: ev.VideoCodec, Quality: ev.Quality, Preset: ev.Preset, AverageBitrateKbps: ev.AverageBitrateKbps, Passed: ev.Eligible, Selected: decision.Winner != nil && decision.Winner.CandidateID == ev.CandidateID, VMAF: ev.VMAF})
 		}
 		s.Selection = decision.Selection
+		if decision.Winner != nil && transcode.BenchmarkCandidateVideoCodec(transcode.BenchmarkCandidate{VideoCodec: decision.Winner.VideoCodec}) == transcode.VideoCodecHEVCVideoToolbox {
+			s.HardwareReason = optimization.HardwareReason(decision.Winner.Uncertainties)
+		}
 		// Historical decisions can be explained from their immutable request.
 		if s.Selection == nil && hasRequest && decision.DecisionReason == optimization.ReasonTargetReachedSmallestSize && decision.Winner != nil {
 			tolerance := optimization.DefaultVMAFPolicy().Tolerance()

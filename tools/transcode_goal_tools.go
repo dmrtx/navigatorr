@@ -20,7 +20,7 @@ type goalChangeInput struct {
 }
 
 func registerTranscodeGoalTool(s *server.MCPServer, engine *action.Engine) {
-	s.AddTool(mcp.NewTool("transcode_goal_change", mcp.WithDescription("Preview or change an automatic batch's goal without choosing technical profiles. Omit mode to read the exact selection and version. To change, provide mode, selection_version and idempotency_key; with mode=size, allow_hardware=false keeps the search on x265 only and hardware_margin_percent (0-50, default 15) sets the media engine size margin. Keeps originals, existing attempts and the operation's finite search budget; active attempts finish first. Returns a durable command receipt; monitor its command_id with action_status."), mcp.WithInputSchema[goalChangeInput]()), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	s.AddTool(mcp.NewTool("transcode_goal_change", mcp.WithDescription("Preview or change an automatic batch's goal without choosing technical profiles. Omit mode to read the exact selection and version. To change, provide mode, selection_version and idempotency_key; with mode=size, allow_hardware=false keeps the search on x265 only and hardware_margin_percent (0-50, default 15) sets the media engine size margin; leaving allow_hardware out turns the media engine on at the default margin, so read the preview first: for smaller-files attempts it shows the allow_hardware / hardware_margin_percent each selected file was frozen with (hardware_mixed when they differ) and passing those keeps them. Keeps originals, existing attempts and the operation's finite search budget; active attempts finish first. Returns a durable command receipt; monitor its command_id with action_status."), mcp.WithInputSchema[goalChangeInput]()), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args := req.GetArguments()
 		id := argString(args, "id", "")
 		scope := argString(args, "scope", "all")
@@ -40,8 +40,11 @@ func registerTranscodeGoalTool(s *server.MCPServer, engine *action.Engine) {
 		if err != nil {
 			return toolErr("read saved selection"), nil
 		}
+		var state map[string]any
+		_ = json.Unmarshal([]byte(inst.StateJSON), &state)
 		version := action.BatchSelectionVersion(inst, items)
 		selected := 0
+		var frozen action.HardwareChoice
 		for _, item := range items {
 			if !action.BatchRevisionSelects(item, scope, "") {
 				continue
@@ -52,11 +55,21 @@ func registerTranscodeGoalTool(s *server.MCPServer, engine *action.Engine) {
 			}
 			if !reserved {
 				selected++
+				if allow, margin, ok := action.BatchItemFrozenHardware(state, item.ItemKey); ok {
+					frozen.Add(allow, margin)
+				}
 			}
 		}
 		mode := argString(args, "mode", "")
 		if mode == "" {
-			return toolJSON(map[string]any{"id": id, "scope": scope, "selection_version": version, "selected": selected, "goals": []string{"size", "quality", "x265_preserve", "compact"}}), nil
+			preview := map[string]any{"id": id, "scope": scope, "selection_version": version, "selected": selected, "goals": []string{"size", "quality", "x265_preserve", "compact"}}
+			if frozen.Known {
+				// The media engine choice the selected smaller-files attempts were frozen
+				// with. A change to size that omits allow_hardware takes the default (on,
+				// 15), not this choice, so pass it to keep it.
+				preview["allow_hardware"], preview["hardware_margin_percent"], preview["hardware_mixed"] = frozen.Allow, frozen.Margin, frozen.Mixed
+			}
+			return toolJSON(preview), nil
 		}
 		if mode != "size" && mode != "quality" && mode != "x265_preserve" && mode != "compact" {
 			return toolErr("invalid processing goal"), nil

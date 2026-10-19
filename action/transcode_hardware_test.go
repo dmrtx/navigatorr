@@ -287,32 +287,79 @@ func TestHardwareSearchRulesValidation(t *testing.T) {
 	}
 }
 
-// A goal change replaces the policy of a batch item, so the parent's media
-// engine inputs must not leak into that item's child: they would fail preflight
-// for every goal but smaller files, or contradict a size attempt that turned
-// the engine off.
+// childOf runs one batch item through processBatchItem, as the batch's step
+// does, and returns the child action it created. The test engine has no
+// filesystem resolver, so the child stops right after its preflight has
+// validated its inputs, bound them to the parent's frozen policy and frozen
+// that policy: anything it rejects earlier is a wrong input.
+func childOf(t *testing.T, e *Engine, st *store.Store, parentID string) (inputs, state map[string]any, errorJSON string) {
+	t.Helper()
+	parent, err := st.GetActionInstance(parentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := st.ListTranscodeBatchItems(parentID)
+	if err != nil || len(items) != 1 {
+		t.Fatal("expected one batch item", items, err)
+	}
+	item := items[0]
+	if _, err := e.processBatchItem(context.Background(), &item, parseExecutionContext(parent, e), "Series", false); err != nil {
+		t.Fatal(err)
+	}
+	if item.ChildActionID == "" {
+		t.Fatal("no child action was created", item)
+	}
+	child, err := st.GetActionInstance(item.ChildActionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if json.Unmarshal([]byte(child.InputsJSON), &inputs) != nil || json.Unmarshal([]byte(child.StateJSON), &state) != nil {
+		t.Fatal("unreadable child", child.InputsJSON, child.StateJSON)
+	}
+	return inputs, state, child.ErrorJSON + item.Error
+}
+
+// A batch item's child carries the inputs of the policy it runs under. A goal
+// change gives the item its own policy, so the parent's media engine choice
+// and compact output height must not leak into the child: they would fail its
+// preflight for every goal but the one they belong to, or contradict a size
+// attempt that turned the engine off. This goes through processBatchItem, so
+// dropping the adjustment there fails it.
 func TestGoalChangeChildInputsAgreeWithTheFrozenPolicy(t *testing.T) {
+	type want struct {
+		mode      string
+		allow     any
+		margin    any
+		maxHeight any
+	}
+	sizeParent := map[string]any{"mode": "size", "allow_hardware": true, "hardware_margin_percent": float64(25)}
+	compactParent := map[string]any{"mode": "compact", "max_height": float64(720)}
 	for _, tc := range []struct {
 		name     string
+		parent   map[string]any
 		settings map[string]any
-		allow    any
-		margin   any
+		want     want
 	}{
-		{"quality", map[string]any{"mode": "quality"}, nil, nil},
-		{"x265_preserve", map[string]any{"mode": "x265_preserve"}, nil, nil},
-		{"compact", map[string]any{"mode": "compact"}, nil, nil},
-		{"size, engine off", map[string]any{"mode": "size", "allow_hardware": false}, false, nil},
-		{"size, new margin", map[string]any{"mode": "size", "allow_hardware": true, "hardware_margin_percent": float64(30)}, true, float64(30)},
-		{"size, default", map[string]any{"mode": "size"}, true, float64(15)},
+		{"quality", sizeParent, map[string]any{"mode": "quality"}, want{mode: "quality"}},
+		{"x265_preserve", sizeParent, map[string]any{"mode": "x265_preserve"}, want{mode: "x265_preserve"}},
+		{"compact", sizeParent, map[string]any{"mode": "compact"}, want{mode: "compact", maxHeight: float64(1080)}},
+		{"compact, 1440", sizeParent, map[string]any{"mode": "compact", "max_height": float64(1440)}, want{mode: "compact", maxHeight: float64(1440)}},
+		{"size, engine off", sizeParent, map[string]any{"mode": "size", "allow_hardware": false}, want{mode: "size", allow: false}},
+		{"size, new margin", sizeParent, map[string]any{"mode": "size", "allow_hardware": true, "hardware_margin_percent": float64(30)}, want{mode: "size", allow: true, margin: float64(30)}},
+		{"size, default", sizeParent, map[string]any{"mode": "size"}, want{mode: "size", allow: true, margin: float64(15)}},
+		// The parent's 720p height is its own goal's: another goal does not take it
+		// and compact without a height takes the default, not the parent's.
+		{"compact parent to quality", compactParent, map[string]any{"mode": "quality"}, want{mode: "quality"}},
+		{"compact parent to size", compactParent, map[string]any{"mode": "size"}, want{mode: "size", allow: true, margin: float64(15)}},
+		{"compact parent to compact", compactParent, map[string]any{"mode": "compact"}, want{mode: "compact", maxHeight: float64(1080)}},
+		{"compact parent to compact, 2160", compactParent, map[string]any{"mode": "compact", "max_height": float64(2160)}, want{mode: "compact", maxHeight: float64(2160)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st := setupTestStore(t)
-			defer st.Close()
 			e := NewEngine(EngineDeps{Store: st})
-			parentInputs := map[string]any{"mode": "size", "allow_hardware": true, "hardware_margin_percent": float64(25)}
-			seedActionInstance(t, st, "goal-parent", "transcode_batch", StatusCompleted, 3, "", parentInputs, map[string]any{})
+			seedActionInstance(t, st, "goal-parent", "transcode_batch", StatusCompleted, 3, "", tc.parent, map[string]any{})
 			parent, _ := st.GetActionInstance("goal-parent")
-			item := store.TranscodeBatchItem{BatchID: parent.ID, ItemKey: "file", FilePath: "/media/source.mkv", Decision: "transcode", Status: "failed", Profile: "mode-size"}
+			item := store.TranscodeBatchItem{BatchID: parent.ID, ItemKey: "file", FilePath: "/media/source.mkv", Decision: "transcode", Status: "failed", Profile: "mode-" + getString(tc.parent, "mode")}
 			if err := st.CreateTranscodeBatchItem(item); err != nil {
 				t.Fatal(err)
 			}
@@ -320,29 +367,63 @@ func TestGoalChangeChildInputsAgreeWithTheFrozenPolicy(t *testing.T) {
 			if _, err := e.ReconfigureBatch(context.Background(), parent.ID, "all", "", BatchSelectionVersion(parent, items), "", "goal-change", tc.settings); err != nil {
 				t.Fatal(err)
 			}
-			updated, _ := st.GetActionInstance(parent.ID)
-			ec := parseExecutionContext(updated, e)
-			row, _ := stateObject(ec.State, "batch_item_settings")["file"].(map[string]any)
-			if row == nil {
-				t.Fatal("goal change was not recorded", ec.State)
+			inputs, state, failure := childOf(t, e, st, parent.ID)
+			// What is encoded never depended on the child's inputs: the policy is the
+			// item's own, compact height included.
+			boundPolicy, _ := state["mode_policy"].(map[string]any)
+			if compact, _ := boundPolicy["compact"].(map[string]any); tc.want.maxHeight != nil && compact["max_height"] != tc.want.maxHeight {
+				t.Fatalf("child policy %v does not carry the %v height", state["mode_policy"], tc.want.maxHeight)
 			}
-			// What processBatchItem hands to the child: the parent's inputs, the row's
-			// goal and the hardware inputs that agree with the row's frozen policy.
-			child := map[string]any{"path": item.FilePath, "mode": row["mode"]}
-			for _, key := range []string{"allow_hardware", "hardware_margin_percent"} {
-				child[key] = parentInputs[key]
+			if inputs["mode"] != tc.want.mode || inputs["allow_hardware"] != tc.want.allow || inputs["hardware_margin_percent"] != tc.want.margin || inputs["max_height"] != tc.want.maxHeight {
+				t.Fatalf("child inputs %v do not match the frozen policy, want %+v", inputs, tc.want)
 			}
-			if tc.name != "size, default" && tc.name != "size, new margin" && tc.name != "size, engine off" {
-				if err := validateModeInputs(child); err == nil {
-					t.Fatal("expected the unadjusted parent inputs to be refused for", tc.name)
-				}
+			// The child runs under the item's policy, not the parent's.
+			policy, _ := state["mode_policy"].(map[string]any)
+			if policy["mode"] != tc.want.mode || state["mode"] != tc.want.mode {
+				t.Fatalf("child bound to %v, want the %s policy", state["mode_policy"], tc.want.mode)
 			}
-			applyGoalHardwareInputs(child, row["mode_policy"])
-			if err := validateModeInputs(child); err != nil {
-				t.Fatal("child would fail preflight:", err)
+			if !strings.Contains(failure, "filesystem resolver") {
+				t.Fatalf("child would fail preflight: %q", failure)
 			}
-			if child["allow_hardware"] != tc.allow || child["hardware_margin_percent"] != tc.margin {
-				t.Fatalf("child inputs %v do not match the frozen policy", child)
+		})
+	}
+}
+
+// Without a goal change a child takes the batch's inputs: a compact batch's
+// output height reaches it, and the policy it is bound to is the batch's.
+func TestBatchChildInputsCarryTheBatchGoalInputs(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		inputs    map[string]any
+		maxHeight any
+		hardware  any
+	}{
+		{"compact at 720", map[string]any{"mode": "compact", "max_height": float64(720)}, float64(720), nil},
+		{"compact, default height", map[string]any{"mode": "compact"}, nil, nil},
+		{"size, engine off", map[string]any{"mode": "size", "allow_hardware": false}, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := setupTestStore(t)
+			e := NewEngine(EngineDeps{Store: st})
+			maxHeight, _ := modeMaxHeightInput(tc.inputs)
+			hardware, err := modeHardwareInput(getString(tc.inputs, "mode"), tc.inputs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			policy, err := modePolicyWithHardware(getString(tc.inputs, "mode"), false, maxHeight, hardware)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seedActionInstance(t, st, "plain-parent", "transcode_batch", StatusCompleted, 3, "", tc.inputs, map[string]any{"mode_policy": policy, "policy_digest": policy.Digest})
+			if err := st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: "plain-parent", ItemKey: "file", FilePath: "/media/source.mkv", Decision: "transcode", Status: "queued", Profile: "mode-" + getString(tc.inputs, "mode")}); err != nil {
+				t.Fatal(err)
+			}
+			inputs, state, failure := childOf(t, e, st, "plain-parent")
+			if inputs["max_height"] != tc.maxHeight || inputs["allow_hardware"] != tc.hardware {
+				t.Fatalf("child inputs %v, want max_height %v and allow_hardware %v", inputs, tc.maxHeight, tc.hardware)
+			}
+			if got, _ := state["mode_policy"].(map[string]any); got["digest"] != policy.Digest || !strings.Contains(failure, "filesystem resolver") {
+				t.Fatalf("child not bound to the batch policy or stopped early: %v %q", state["mode_policy"], failure)
 			}
 		})
 	}
