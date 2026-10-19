@@ -47,6 +47,30 @@ func resolvePipelineConcurrency(record *BenchmarkRecord) (encodeN, metricN int) 
 	return encodeN, metricN
 }
 
+// sizeModeMetricWorkers is the metric worker count a size-mode search uses
+// when its request leaves concurrency to the worker.
+const sizeModeMetricWorkers = 3
+
+// sizeModeMetricConcurrency raises a size-mode search to sizeModeMetricWorkers
+// metric workers when the request set no concurrency and the host can give
+// every simultaneous pass of every parallel job minMetricThreadsPerPass
+// libvmaf threads without oversubscribing; narrower passes measured slower
+// than two wider ones. Thread counts never change metric values.
+func (w *Worker) sizeModeMetricConcurrency(record *BenchmarkRecord, metricN int) int {
+	if record == nil || record.Mode != "size" || record.Concurrency != nil || metricN >= sizeModeMetricWorkers {
+		return metricN
+	}
+	jobs := 1
+	if w != nil && w.cfg != nil && w.cfg.MaxParallelJobs > 1 {
+		jobs = w.cfg.MaxParallelJobs
+	}
+	threads := w.metricThreads(sizeModeMetricWorkers)
+	if threads < minMetricThreadsPerPass || threads*sizeModeMetricWorkers*jobs > hostCPUCount() {
+		return metricN
+	}
+	return sizeModeMetricWorkers
+}
+
 // pipelineUnit identifies one (candidate, sample) work item in deterministic order.
 type pipelineUnit struct {
 	vcOrd   int // position in the vcs slice passed to the executor
@@ -289,6 +313,7 @@ func (r *ProductionBenchmarkRunner) runPipelinedEncodeMetrics(
 	}
 
 	encodeN, metricN := resolvePipelineConcurrency(record)
+	metricN = w.sizeModeMetricConcurrency(record, metricN)
 
 	nUnits := len(vcs) * len(record.Samples)
 	units := make([]pipelineUnit, 0, nUnits)
@@ -516,6 +541,7 @@ func (sh *pipelineShared) runEncodeUnit(ctx context.Context, u pipelineUnit, idx
 		fail(fmt.Errorf("building candidate %q args: %w", vc.candidate.ID, err))
 		return
 	}
+	candArgs = withX265ThreadParams(candArgs, sh.w.x265ThreadParams())
 	start := time.Now()
 	cmd := exec.CommandContext(ctx, sh.w.ffmpegPath, candArgs...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

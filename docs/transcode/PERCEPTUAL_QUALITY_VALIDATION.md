@@ -136,6 +136,15 @@ FPS and are marked `nominal_fps`; they are not claimed to be frame-accurate
 timestamps for variable-frame-rate material. Raw per-frame logs remain local
 to worker scratch and are cleaned up after validation.
 
+Windows are measured up to three at a time, as many as the job's share of the
+host CPUs (CPUs ÷ `max_parallel_jobs`) can give two libvmaf threads each, and
+libvmaf threads are split across them (a 10-CPU worker with two parallel jobs
+measures two windows at once with two threads each). Each window's lossless extracts are deleted as soon
+as it is measured, so scratch holds at most that many windows at once. The
+evidence is identical to measuring the windows one by one: statistics are
+combined in window order, and a failure reports the first failing window in
+that order (later windows are cancelled).
+
 The worker benchmark status exposes per-candidate `quality`, and the final job
 status exposes `quality_evidence`. Action results carry these as
 `benchmark_quality` and `quality_evidence`; large candidate sets remain

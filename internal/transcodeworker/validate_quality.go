@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -143,18 +144,26 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 		return fail("quality_final_scratch_unavailable", err)
 	}
 	defer os.RemoveAll(scratch)
-	var vmafSamples []quality.VMAFStats
-	var cambiSamples []quality.CAMBIStats
-	var ssimScores []float64
-	for _, window := range q.Samples {
-		if err := ctx.Err(); err != nil {
-			return e, err
+	timeline := math.Min(sourceRep.DurationSec, candidateRep.DurationSec)
+	concurrency := w.finalValidationConcurrency(len(q.Samples))
+	threads := w.metricThreads(concurrency)
+	measure := func(ctx context.Context, pos int) finalWindowResult {
+		window := q.Samples[pos]
+		bad := func(code string, cause error) finalWindowResult {
+			return finalWindowResult{code: code, err: cause}
 		}
-		if window.StartSeconds < 0 || window.DurationSeconds <= 0 || window.StartSeconds+window.DurationSeconds > math.Min(sourceRep.DurationSec, candidateRep.DurationSec)+0.05 {
-			return fail("quality_final_sample_misaligned", fmt.Errorf("window %d exceeds source/candidate timeline", window.Index))
+		if window.StartSeconds < 0 || window.DurationSeconds <= 0 || window.StartSeconds+window.DurationSeconds > timeline+0.05 {
+			return bad("quality_final_sample_misaligned", fmt.Errorf("window %d exceeds source/candidate timeline", window.Index))
 		}
-		refPath := filepath.Join(scratch, fmt.Sprintf("reference_%d.mkv", window.Index))
-		candPath := filepath.Join(scratch, fmt.Sprintf("candidate_%d.mkv", window.Index))
+		// Each window owns a directory, removed as soon as it is measured,
+		// so at most `concurrency` windows of lossless extracts exist at once.
+		dir := filepath.Join(scratch, fmt.Sprintf("window_%d", pos))
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			return bad("quality_final_scratch_unavailable", err)
+		}
+		defer os.RemoveAll(dir)
+		refPath := filepath.Join(dir, fmt.Sprintf("reference_%d.mkv", window.Index))
+		candPath := filepath.Join(dir, fmt.Sprintf("candidate_%d.mkv", window.Index))
 		for _, item := range []struct {
 			source, out string
 			videoIndex  int
@@ -164,51 +173,52 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 				args = withReferenceChain(args, compactChain)
 			}
 			if _, err := runQualityCommand(ctx, w.ffmpegPath, args); err != nil {
-				return fail("quality_final_sample_extract_failed", err)
+				return bad("quality_final_sample_extract_failed", err)
 			}
 		}
 		refPTS, err := probeSamplePTS(ctx, w.ffprobePath, refPath)
 		if err != nil {
-			return fail("quality_final_sample_misaligned", err)
+			return bad("quality_final_sample_misaligned", err)
 		}
 		candPTS, err := probeSamplePTS(ctx, w.ffprobePath, candPath)
 		if err != nil {
-			return fail("quality_final_sample_misaligned", err)
+			return bad("quality_final_sample_misaligned", err)
 		}
 		if err := verifySampleAlignment(refPTS, candPTS, sourceVideoStreams[0].FPS); err != nil {
-			return fail("quality_final_sample_misaligned", err)
+			return bad("quality_final_sample_misaligned", err)
 		}
+		var r finalWindowResult
 		if runVMAF {
-			logPath := filepath.Join(scratch, fmt.Sprintf("vmaf_%d.json", window.Index))
-			args, err := BuildVMAFModelArgs(candPath, refPath, logPath, *model, candidateVideoStreams[0].BitDepth, vmafDecimation, w.metricThreads(1))
+			logPath := filepath.Join(dir, fmt.Sprintf("vmaf_%d.json", window.Index))
+			args, err := BuildVMAFModelArgs(candPath, refPath, logPath, *model, candidateVideoStreams[0].BitDepth, vmafDecimation, threads)
 			if err != nil {
-				return fail("quality_vmaf_measurement_path_unavailable", err)
+				return bad("quality_vmaf_measurement_path_unavailable", err)
 			}
 			if _, err := runQualityCommand(ctx, w.ffmpegPath, args); err != nil {
-				return fail("quality_vmaf_measurement_path_unavailable", err)
+				return bad("quality_vmaf_measurement_path_unavailable", err)
 			}
 			data, err := readMetricLogFile(logPath)
 			if err != nil {
-				return fail("quality_vmaf_evidence_incomplete", err)
+				return bad("quality_vmaf_evidence_incomplete", err)
 			}
 			stats, err := quality.ParseVMAF(data, MaxMetricLogSizeBytes, *model, window.Index, window.StartSeconds, sourceVideoStreams[0].FPS, vmafDecimation, q.Quality.VMAF.WorstWindowSeconds, q.Quality.VMAF.FrameThreshold)
 			if err != nil || stats.FramesTotal != quality.DecimatedFrameCount(len(refPTS), vmafDecimation) {
-				return fail("quality_vmaf_evidence_incomplete", fmt.Errorf("sample %d: %v", window.Index, err))
+				return bad("quality_vmaf_evidence_incomplete", fmt.Errorf("sample %d: %v", window.Index, err))
 			}
-			vmafSamples = append(vmafSamples, stats)
+			r.vmaf = &stats
 		}
 		if runCAMBI {
-			stats, err := runCAMBIMetricSample(ctx, w.ffmpegPath, scratch, candPath, refPath, 0, "final", window.Index, window.StartSeconds, sourceVideoStreams[0].FPS, candidateVideoStreams[0].BitDepth, caps.Quality.CAMBIOutput, w.metricThreads(1))
+			stats, err := runCAMBIMetricSample(ctx, w.ffmpegPath, dir, candPath, refPath, 0, "final", window.Index, window.StartSeconds, sourceVideoStreams[0].FPS, candidateVideoStreams[0].BitDepth, caps.Quality.CAMBIOutput, threads)
 			if err != nil || stats.FramesTotal != len(refPTS) {
-				return fail("quality_cambi_evidence_incomplete", fmt.Errorf("sample %d: %v", window.Index, err))
+				return bad("quality_cambi_evidence_incomplete", fmt.Errorf("sample %d: %v", window.Index, err))
 			}
-			cambiSamples = append(cambiSamples, stats)
+			r.cambi = &stats
 		}
 		if runSSIM {
-			logPath := filepath.Join(scratch, fmt.Sprintf("ssim_%d.log", window.Index))
+			logPath := filepath.Join(dir, fmt.Sprintf("ssim_%d.log", window.Index))
 			output, err := runQualityCommand(ctx, w.ffmpegPath, BuildSSIMArgs(candPath, refPath, logPath))
 			if err != nil {
-				return fail("quality_ssim_evidence_incomplete", err)
+				return bad("quality_ssim_evidence_incomplete", err)
 			}
 			data, err := readMetricLogFile(logPath)
 			var score float64
@@ -218,9 +228,31 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 				score, err = ParseSSIMStderr(string(output))
 			}
 			if err != nil {
-				return fail("quality_ssim_evidence_incomplete", err)
+				return bad("quality_ssim_evidence_incomplete", err)
 			}
-			ssimScores = append(ssimScores, score)
+			r.ssim = &score
+		}
+		return r
+	}
+	results, failed, err := runFinalWindows(ctx, len(q.Samples), concurrency, measure)
+	if err != nil {
+		return e, err
+	}
+	if failed >= 0 {
+		return fail(results[failed].code, results[failed].err)
+	}
+	var vmafSamples []quality.VMAFStats
+	var cambiSamples []quality.CAMBIStats
+	var ssimScores []float64
+	for _, r := range results {
+		if r.vmaf != nil {
+			vmafSamples = append(vmafSamples, *r.vmaf)
+		}
+		if r.cambi != nil {
+			cambiSamples = append(cambiSamples, *r.cambi)
+		}
+		if r.ssim != nil {
+			ssimScores = append(ssimScores, *r.ssim)
 		}
 	}
 	if runVMAF {
@@ -283,6 +315,96 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 	}
 	e.Verdict = "pass"
 	return e, nil
+}
+
+// maxFinalValidationConcurrency bounds how many final validation windows are
+// extracted and measured at once.
+var maxFinalValidationConcurrency = 3
+
+// finalWindowResult is one window's measurement, or the reason it failed.
+type finalWindowResult struct {
+	vmaf  *quality.VMAFStats
+	cambi *quality.CAMBIStats
+	ssim  *float64
+	code  string
+	err   error
+}
+
+// minMetricThreadsPerPass is the fewest libvmaf threads a concurrent metric
+// pass is given. One thread per pass measured slower than fewer, wider
+// passes: libvmaf feature extraction, not extraction or decode, dominates.
+const minMetricThreadsPerPass = 2
+
+// finalValidationConcurrency runs up to maxFinalValidationConcurrency windows
+// at once, but only as many as this job's share of the host CPUs (CPUs ÷
+// max_parallel_jobs) can give minMetricThreadsPerPass libvmaf threads each.
+func (w *Worker) finalValidationConcurrency(windows int) int {
+	jobs := 1
+	if w != nil && w.cfg != nil && w.cfg.MaxParallelJobs > 1 {
+		jobs = w.cfg.MaxParallelJobs
+	}
+	return max(1, min(maxFinalValidationConcurrency, windows, hostCPUCount()/jobs/minMetricThreadsPerPass))
+}
+
+// runFinalWindows measures windows 0..n-1 with at most concurrency in flight
+// and returns their results in window order. It reproduces the sequential
+// verdict exactly: failed is the lowest failing window (-1 when none), every
+// window before it has completed and passed, and windows after a failure are
+// cancelled or never started. A cancelled ctx returns its error once every
+// started window has stopped.
+func runFinalWindows(ctx context.Context, n, concurrency int, measure func(context.Context, int) finalWindowResult) ([]finalWindowResult, int, error) {
+	results := make([]finalWindowResult, n)
+	var (
+		mu      sync.Mutex
+		next    int
+		failed  = -1
+		cancels = map[int]context.CancelFunc{}
+		wg      sync.WaitGroup
+	)
+	claim := func() (int, context.Context, bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		if ctx.Err() != nil || next >= n || (failed >= 0 && next > failed) {
+			return 0, nil, false
+		}
+		pos := next
+		next++
+		windowCtx, cancel := context.WithCancel(ctx)
+		cancels[pos] = cancel
+		return pos, windowCtx, true
+	}
+	for range max(1, min(concurrency, n)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				pos, windowCtx, ok := claim()
+				if !ok {
+					return
+				}
+				r := measure(windowCtx, pos)
+				mu.Lock()
+				cancels[pos]()
+				delete(cancels, pos)
+				results[pos] = r
+				if r.code != "" && (failed < 0 || pos < failed) {
+					failed = pos
+					// Later windows can no longer change the verdict.
+					for other, cancel := range cancels {
+						if other > pos {
+							cancel()
+						}
+					}
+				}
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return results, -1, err
+	}
+	return results, failed, nil
 }
 
 func runQualityCommand(ctx context.Context, ffmpegPath string, args []string) ([]byte, error) {

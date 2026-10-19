@@ -183,6 +183,12 @@ func RunFFmpeg(ctx context.Context, ffmpegPath string, execPlan *ExecutionPlan, 
 // and write the local candidate while the semantic Source/Candidate remain
 // immutable. Stream behavior is identical to RunFFmpeg.
 func RunFFmpegPaths(ctx context.Context, ffmpegPath string, execPlan *ExecutionPlan, inputPath, outputPath, progressPath, logPath string) error {
+	return runFFmpegPaths(ctx, ffmpegPath, execPlan, inputPath, outputPath, progressPath, logPath, "")
+}
+
+// runFFmpegPaths is RunFFmpegPaths with the worker's x265 thread partition
+// (see x265ThreadParams); "" leaves x265 to size its pool from the host.
+func runFFmpegPaths(ctx context.Context, ffmpegPath string, execPlan *ExecutionPlan, inputPath, outputPath, progressPath, logPath, x265Threads string) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -213,6 +219,7 @@ func RunFFmpegPaths(ctx context.Context, ffmpegPath string, execPlan *ExecutionP
 	if err != nil {
 		return fmt.Errorf("building ffmpeg arguments: %w", err)
 	}
+	args = withX265ThreadParams(args, x265Threads)
 
 	// Per-run truncate, deliberately not O_APPEND. Phase 6B2 invokes ffmpeg at
 	// most once per job: InternalRun routes any EncodeComplete or post-encode

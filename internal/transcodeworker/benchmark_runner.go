@@ -14,7 +14,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -646,6 +645,7 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 				if err != nil {
 					return fmt.Errorf("building candidate %q args: %w", vc.candidate.ID, err)
 				}
+				candArgs = withX265ThreadParams(candArgs, w.x265ThreadParams())
 
 				start := time.Now()
 				cmd := exec.CommandContext(ctx, w.ffmpegPath, candArgs...)
@@ -1173,7 +1173,7 @@ func (w *Worker) metricThreads(concurrent int) int {
 	if w != nil && w.cfg != nil && w.cfg.MaxParallelJobs > 1 {
 		concurrent *= w.cfg.MaxParallelJobs
 	}
-	threads := runtime.NumCPU() / concurrent
+	threads := hostCPUCount() / concurrent
 	if threads < 1 {
 		threads = 1
 	}

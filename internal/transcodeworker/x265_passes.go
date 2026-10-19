@@ -53,6 +53,8 @@ func runEncoderCommand(ctx context.Context, cmd *exec.Cmd, args []string, plan *
 	if err != nil {
 		return err
 	}
+	// The analysis pass runs with the same thread partition as the encode.
+	video = withX265ThreadParams(video, x265ThreadParamsOf(args))
 	if err := reportEncoderPhase(ctx, "analysing_video"); err != nil {
 		return err
 	}
