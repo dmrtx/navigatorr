@@ -18,6 +18,7 @@ func (s *Server) workerActivity(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"available": false, "message": "Worker activity unavailable. Slot occupancy is unknown."})
 		return
 	}
+	s.syncWorkerSlots(r.Context(), activity.Slots)
 	writeJSON(w, 200, map[string]any{"available": true, "activity": activity})
 }
 

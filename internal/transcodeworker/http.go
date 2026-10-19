@@ -180,6 +180,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/benchmarks", s.handleBenchmarks)
 	mux.HandleFunc("/v1/benchmarks/", s.handleBenchmarkByID)
 	mux.HandleFunc("/v1/activity", s.handleActivity)
+	mux.HandleFunc("/v1/slots", s.handleSlots)
 	// Auth applies first so the documented invariant holds: when a token is
 	// configured it protects ALL /v1/* including malformed/traversal paths
 	// (unauthenticated traversal -> 401). rejectTraversal still runs before
@@ -480,6 +481,7 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 		"max_parallel_jobs":  maxParallel,
 		"worker_slots_total": total,
 		"worker_slots_used":  used,
+		"slots":              s.worker.slotsStatus(),
 	})
 }
 
@@ -942,4 +944,42 @@ func ResolveServeConfig(cfg *WorkerConfig, listenFlag, tokenFlag, tokenFileFlag,
 		return ServeConfig{}, err
 	}
 	return ServeConfig{Listen: listen, Token: resolved, SelfExe: selfExe, ConfigPath: configPath}, nil
+}
+
+// maxHTTPSlotsBodyBytes bounds a slot split request: two small integers.
+const maxHTTPSlotsBodyBytes = 1 << 10
+
+// handleSlots serves GET /v1/slots (the split and its use) and PUT /v1/slots
+// (set the split, or clear it with both values zero). The change applies at
+// the next admission and never interrupts a running job.
+func (s *Server) handleSlots(w http.ResponseWriter, r *http.Request) {
+	if s.worker == nil {
+		writeHTTPError(w, http.StatusServiceUnavailable, "worker unavailable")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+	case http.MethodPut:
+		r.Body = http.MaxBytesReader(w, r.Body, maxHTTPSlotsBodyBytes)
+		var split transcode.SlotSplit
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&split); err != nil {
+			writeHTTPError(w, http.StatusBadRequest, "invalid slot split: "+err.Error())
+			return
+		}
+		warnings, err := s.worker.SetSlotSplit(split)
+		if err != nil {
+			writeHTTPError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		writeHTTPJSON(w, http.StatusOK, map[string]any{"slots": s.worker.slotsStatus(), "warnings": warnings})
+		return
+	default:
+		writeHTTPError(w, http.StatusMethodNotAllowed, "use GET or PUT")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeHTTPJSON(w, http.StatusOK, map[string]any{"slots": s.worker.slotsStatus()})
 }

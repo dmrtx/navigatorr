@@ -3,7 +3,9 @@ package httpclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -969,5 +971,56 @@ func TestHTTPLogsBoundedAuthenticatedAndErrors(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("unsafe ID reached worker: calls=%d", calls)
+	}
+}
+
+func TestHTTPExecutor_SlotsRoundTrip(t *testing.T) {
+	var gotMethod, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/slots" {
+			http.NotFound(w, r)
+			return
+		}
+		gotMethod = r.Method
+		data, _ := io.ReadAll(r.Body)
+		gotBody = string(data)
+		if r.Method == http.MethodPut && strings.Contains(gotBody, `"video_slots":5`) {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error":"video slots exceed the ceiling"}`)
+			return
+		}
+		fmt.Fprint(w, `{"slots":{"ceiling":3,"host_cpus":10,"split":true,"video":{"total":2,"used":1},"podcast":{"total":1,"used":0}},"warnings":["tight"]}`)
+	}))
+	defer srv.Close()
+	e := newTestHTTPExecutor(t, srv)
+	slots, err := e.Slots(context.Background())
+	if err != nil || gotMethod != "GET" || !slots.Split || slots.Video.Total != 2 || slots.Video.Used != 1 || slots.Ceiling != 3 {
+		t.Fatalf("Slots: %+v %v (%s)", slots, err, gotMethod)
+	}
+	slots, warnings, err := e.SetSlots(context.Background(), transcode.SlotSplit{VideoSlots: 2, PodcastSlots: 1})
+	if err != nil || gotMethod != "PUT" || !strings.Contains(gotBody, `"video_slots":2`) || !strings.Contains(gotBody, `"podcast_slots":1`) || len(warnings) != 1 || !slots.Split {
+		t.Fatalf("SetSlots: %+v %v %v body=%q", slots, warnings, err, gotBody)
+	}
+	_, _, err = e.SetSlots(context.Background(), transcode.SlotSplit{VideoSlots: 5, PodcastSlots: 1})
+	var rejected *SlotSplitRejectedError
+	if !errors.As(err, &rejected) || rejected.Message != "video slots exceed the ceiling" {
+		t.Fatalf("a 400 is the operator's mistake, not an outage: %v", err)
+	}
+}
+
+func TestHTTPExecutor_SlotsOnAnOlderWorker(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	defer srv.Close()
+	e := newTestHTTPExecutor(t, srv)
+	if _, err := e.Slots(context.Background()); !errors.Is(err, ErrSlotsUnsupported) {
+		t.Fatalf("a worker without /v1/slots must read as unsupported: %v", err)
+	}
+	if _, _, err := e.SetSlots(context.Background(), transcode.SlotSplit{VideoSlots: 1, PodcastSlots: 1}); !errors.Is(err, ErrSlotsUnsupported) {
+		t.Fatalf("set on an older worker: %v", err)
+	}
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) }))
+	defer down.Close()
+	if _, err := newTestHTTPExecutor(t, down).Slots(context.Background()); err == nil || errors.Is(err, ErrSlotsUnsupported) {
+		t.Fatalf("a 500 is an outage, not an old worker: %v", err)
 	}
 }
