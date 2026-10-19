@@ -307,6 +307,102 @@ func TestReplaySavingsOnlyHoldoutFailureKeepsSavingsFallback(t *testing.T) {
 	}
 }
 
+// After a quality failure the retry goes to the safest eligible setting of the
+// family, not the next-smallest. Two settings failed holdout; a safer one that
+// passed discovery with a wide margin was never checked before.
+func TestReplayRetryGoesToSafestEligibleSetting(t *testing.T) {
+	t.Run("initial ladder", func(t *testing.T) {
+		settings := map[string]replaySetting{
+			replayKey("medium", 22): {bytes: 23500, discovery: replayScore{89.5, 91.3}, holdout: 90},
+			replayKey("medium", 24): {bytes: 21000, discovery: replayScore{87.5, 90.0}, holdout: 85},
+			replayKey("medium", 26): {bytes: 19000, discovery: replayScore{86.5, 89.0}, holdout: 83},
+			replayKey("medium", 28): {bytes: 17000, discovery: replayScore{83.5, 88.0}, holdout: 83},
+			replayKey("medium", 30): {bytes: 15500, discovery: replayScore{82.0, 88.0}, holdout: 82},
+		}
+		res := runReplay(t, settings, 10_000_000, replayRules())
+		t.Logf("with rules: %s", res.summary())
+		if res.winner != "cand_crf22" || strings.Join(res.verified, ",") != "cand_crf26,cand_crf22" {
+			t.Fatalf("safest setting not verified second: %s", res.summary())
+		}
+		if got := res.reason("cand_crf26"); !qualityRejection(got) {
+			t.Fatalf("failed holdout labelled %q", got)
+		}
+		if got := res.reason("cand_crf24"); got != reasonNotVerified {
+			t.Fatalf("skipped CRF 24 labelled %q", got)
+		}
+	})
+	t.Run("quality fallback", func(t *testing.T) {
+		settings := map[string]replaySetting{
+			replayKey("medium", 22): {bytes: 23500, discovery: replayScore{82, 88.5}, holdout: 84},
+			replayKey("medium", 16): {bytes: 40000, discovery: replayScore{92.0, 94.8}, holdout: 93},
+			replayKey("medium", 18): {bytes: 34000, discovery: replayScore{88.0, 91.0}, holdout: 85},
+			replayKey("medium", 20): {bytes: 28000, discovery: replayScore{86.5, 89.5}, holdout: 83},
+		}
+		res := runReplay(t, settings, 10_000_000, replayRules())
+		t.Logf("with rules: %s", res.summary())
+		if res.winner != "fallback-quality-medium-cand_crf16" || strings.Join(res.verified, ",") != "fallback-quality-medium-cand_crf20,fallback-quality-medium-cand_crf16" {
+			t.Fatalf("safest fallback setting not verified second: %s", res.summary())
+		}
+		if res.slowEncodes != 0 {
+			t.Fatalf("slow settings encoded: %v", res.measured)
+		}
+		if got := res.reason("fallback-quality-medium-cand_crf18"); got != reasonNotVerified {
+			t.Fatalf("skipped CRF 18 labelled %q", got)
+		}
+	})
+	t.Run("next smallest is the safest", func(t *testing.T) {
+		// CRF 24 failed discovery, so after CRF 26 failed holdout the only
+		// eligible setting left is CRF 22, both next-smallest and safest.
+		settings := map[string]replaySetting{
+			replayKey("medium", 22): {bytes: 23500, discovery: replayScore{89.0, 91.0}, holdout: 90},
+			replayKey("medium", 24): {bytes: 21000, discovery: replayScore{83.5, 88.0}, holdout: 89},
+			replayKey("medium", 26): {bytes: 19000, discovery: replayScore{86.5, 89.0}, holdout: 83},
+			replayKey("medium", 28): {bytes: 17000, discovery: replayScore{83.5, 88.0}, holdout: 83},
+			replayKey("medium", 30): {bytes: 15500, discovery: replayScore{82.0, 88.0}, holdout: 82},
+		}
+		res := runReplay(t, settings, 10_000_000, replayRules())
+		t.Logf("with rules: %s", res.summary())
+		if res.winner != "cand_crf22" || strings.Join(res.verified, ",") != "cand_crf26,cand_crf22" {
+			t.Fatalf("only remaining setting not verified: %s", res.summary())
+		}
+		if got := res.reason("cand_crf24"); got == reasonNotVerified || got == "" {
+			t.Fatalf("CRF 24 discovery failure labelled %q", got)
+		}
+	})
+}
+
+func TestSafestEligibleID(t *testing.T) {
+	vc := func(id, codec string, crf int) validatedCandidate {
+		return validatedCandidate{candidate: transcode.BenchmarkCandidate{ID: id, VideoCodec: codec, Quality: crf, Preset: "medium"}, bitDepth: 8}
+	}
+	decision := func(ids ...string) *transcode.BenchmarkDecision {
+		d := &transcode.BenchmarkDecision{}
+		for _, id := range ids {
+			d.Evaluations = append(d.Evaluations, transcode.BenchmarkCandidateEvaluation{CandidateID: id, Eligible: true})
+		}
+		return d
+	}
+	x265 := []validatedCandidate{vc("m26", "libx265", 26), vc("m24", "libx265", 24), vc("m22", "libx265", 22), vc("m20", "libx265", 20)}
+	vt := []validatedCandidate{vc("vt60", "hevc_videotoolbox", 60), vc("vt70", "hevc_videotoolbox", 70)}
+	for _, tc := range []struct {
+		name     string
+		tested   []validatedCandidate
+		decision *transcode.BenchmarkDecision
+		selected string
+		want     string
+	}{
+		{"lowest eligible CRF", x265, decision("m26", "m24", "m22"), "m26", "m22"},
+		{"ineligible safer setting is skipped", x265, decision("m26", "m24"), "m26", "m24"},
+		{"only the selected one", x265, decision("m26"), "m26", "m26"},
+		{"VideoToolbox higher is safer", vt, decision("vt60", "vt70"), "vt60", "vt70"},
+		{"no decision", x265, nil, "m26", "m26"},
+	} {
+		if got := safestEligibleID(tc.tested, tc.decision, tc.selected); got != tc.want {
+			t.Errorf("%s: got %s, want %s", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestRuledOutByQualityFailure(t *testing.T) {
 	vc := func(id, preset string, crf int) validatedCandidate {
 		return validatedCandidate{candidate: transcode.BenchmarkCandidate{ID: id, VideoCodec: "libx265", Quality: crf, Preset: preset}}
