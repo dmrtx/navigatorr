@@ -27,7 +27,7 @@ var maintenanceOutputKeys = []string{"resolved_path", "original_sha256", "origin
 
 // maintenanceHardwareNote begins the winner uncertainty that says why a media
 // engine result was chosen. It must equal optimization.HardwareSelectedNote;
-// the maintenance UI tests pin that.
+// TestMaintenanceSnapshotKeepsOnlyTheMediaEngineReason pins that.
 const maintenanceHardwareNote = "hardware candidate selected"
 
 // maintenanceWinner keeps the size and encoder of a benchmark winner, plus the

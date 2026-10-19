@@ -370,7 +370,8 @@ func TestGoalChangeChildInputsAgreeWithTheFrozenPolicy(t *testing.T) {
 			inputs, state, failure := childOf(t, e, st, parent.ID)
 			// What is encoded never depended on the child's inputs: the policy is the
 			// item's own, compact height included.
-			if compact, _ := state["mode_policy"].(map[string]any)["compact"].(map[string]any); tc.want.maxHeight != nil && compact["max_height"] != tc.want.maxHeight {
+			boundPolicy, _ := state["mode_policy"].(map[string]any)
+			if compact, _ := boundPolicy["compact"].(map[string]any); tc.want.maxHeight != nil && compact["max_height"] != tc.want.maxHeight {
 				t.Fatalf("child policy %v does not carry the %v height", state["mode_policy"], tc.want.maxHeight)
 			}
 			if inputs["mode"] != tc.want.mode || inputs["allow_hardware"] != tc.want.allow || inputs["hardware_margin_percent"] != tc.want.margin || inputs["max_height"] != tc.want.maxHeight {
