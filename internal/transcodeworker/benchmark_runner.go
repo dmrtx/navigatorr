@@ -275,6 +275,9 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		return errors.New("worker instance cannot be nil (fail closed)")
 	}
 
+	// CPU time of the reference extractions and candidate encodes; see
+	// cpuMeter. Validation (metrics) children are not measured yet.
+	samplesCPU, sampleEncodeCPU := &cpuMeter{}, &cpuMeter{}
 	defer func() {
 		if record.PhaseCosts == nil {
 			record.PhaseCosts = map[string]transcode.PhaseCost{}
@@ -290,9 +293,10 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 			for _, metric := range record.Evidence.MetricSamples {
 				metrics += metric.MetricDurationSec
 			}
+			cpu := map[string]*int64{"samples": samplesCPU.activeComputeMs(), "sample_encode": sampleEncodeCPU.activeComputeMs()}
 			for name, seconds := range map[string]float64{"samples": samples, "sample_encode": encode, "sample_validation": metrics} {
 				if seconds > 0 {
-					record.PhaseCosts[name] = transcode.PhaseCost{DurationMs: int64(seconds * 1000), Attempts: 1}
+					record.PhaseCosts[name] = transcode.PhaseCost{DurationMs: int64(seconds * 1000), Attempts: 1, ActiveComputeMs: cpu[name]}
 				}
 			}
 		}
@@ -560,7 +564,9 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 		cmd.Stdout = nil
 
 		extractionStart := time.Now()
-		if err := cmd.Run(); err != nil {
+		err := cmd.Run()
+		samplesCPU.add(cmd.ProcessState)
+		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -592,6 +598,9 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 	// 5+6. Candidate encode and metric evaluation: adaptive probing with
 	// exhaustive fallback, bounded pipelined execution for real runs, or the
 	// legacy sequential path for test-hook injection.
+	// Candidate encodes (runEncoderCommand) charge their CPU time to
+	// sample_encode; metric children are not measured.
+	ctx = withCPUMeter(ctx, sampleEncodeCPU)
 	var savings *savingsGate
 	if record.Automatic && r.metricsHook == nil && r.selectionHook == nil {
 		if err := r.runAutomaticCandidates(ctx, w, record, evidence, samplesDir, validatedCandidates, rep, sourceInitialSize, sourceInitialModTime, progressReporter); err != nil {

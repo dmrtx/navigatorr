@@ -161,10 +161,11 @@ func telemetryFor(job *JobRecord, now time.Time) transcode.JobTelemetry {
 	}
 	for name, duration := range map[string]*int64{"queue": t.QueueDurationMs, "encode": t.EncodeDurationMs, "validation": t.ValidationDurationMs} {
 		if duration != nil {
-			// Timestamps own the duration; byte counters a phase recorded
-			// (for example an encode reading an unstaged NAS source) survive.
+			// Timestamps own the duration; byte counters and CPU time a phase
+			// recorded (for example an encode reading an unstaged NAS source)
+			// survive.
 			cost := t.PhaseCosts[name]
-			t.PhaseCosts[name] = transcode.PhaseCost{DurationMs: *duration, Attempts: 1, NASReadBytes: cost.NASReadBytes, NASWrittenBytes: cost.NASWrittenBytes}
+			t.PhaseCosts[name] = transcode.PhaseCost{DurationMs: *duration, Attempts: 1, NASReadBytes: cost.NASReadBytes, NASWrittenBytes: cost.NASWrittenBytes, ActiveComputeMs: cost.ActiveComputeMs}
 		}
 	}
 	t.WallDurationMs = durationMilliseconds(job.CreatedAt, end)
@@ -287,6 +288,7 @@ func (w *Worker) persistPhaseCost(jobDir, jobFile string, job *JobRecord, phase 
 			cost.NASWrittenBytes = add(previous.NASWrittenBytes, cost.NASWrittenBytes)
 			cost.CacheHits = add(previous.CacheHits, cost.CacheHits)
 			cost.CacheMisses = add(previous.CacheMisses, cost.CacheMisses)
+			cost.ActiveComputeMs = add(previous.ActiveComputeMs, cost.ActiveComputeMs)
 		}
 		latest.PhaseCosts[phase] = cost
 	})

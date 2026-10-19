@@ -84,7 +84,7 @@ func mirrorWorkerPhaseCosts(ec *ExecutionContext, prefix string, costs map[strin
 		if cost.DurationMs < 0 || cost.Attempts <= 0 {
 			continue
 		}
-		target[prefix+phase] = map[string]any{"duration_ms": cost.DurationMs, "attempts": cost.Attempts, "nas_read_bytes": cost.NASReadBytes, "nas_written_bytes": cost.NASWrittenBytes, "cache_hits": cost.CacheHits, "cache_misses": cost.CacheMisses, "active_compute_ms": nil, "provenance": "worker_measured", "timing_scope": "phase_wall; phases may overlap"}
+		target[prefix+phase] = map[string]any{"duration_ms": cost.DurationMs, "attempts": cost.Attempts, "nas_read_bytes": cost.NASReadBytes, "nas_written_bytes": cost.NASWrittenBytes, "cache_hits": cost.CacheHits, "cache_misses": cost.CacheMisses, "active_compute_ms": cost.ActiveComputeMs, "provenance": "worker_measured", "timing_scope": "phase_wall; phases may overlap"}
 	}
 	if ec.Outputs != nil {
 		ec.Outputs["phase_costs"] = target

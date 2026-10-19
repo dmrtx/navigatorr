@@ -126,6 +126,11 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 	}
 	defer lease.Close()
 	actx := lease.Context(ctx)
+	// A benchmark takes a worker slot and is refused while the worker is full:
+	// the longest-waiting action, from any batch or none, goes first.
+	if res, waiting := e.workerSlotTurn(ec, benchmarkSlotWaitReason); waiting {
+		return res, nil
+	}
 
 	if getBool(ec.State, "benchmark_search_review_required") {
 		if review := e.reviewBenchmarkSearch(ec); review != nil {
@@ -303,8 +308,11 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("benchmark status failed; no resubmit: %v", err)}, nil
 	}
 	e.observeBenchmarkStatus(ec, st)
-	if st.SearchSeconds != nil && (st.Status == transcode.StatusCompleted || st.Status == transcode.StatusFailed || st.Status == transcode.StatusCancelled) {
-		ec.State["benchmark_search_seconds"] = *st.SearchSeconds
+	if st.Status == transcode.StatusCompleted || st.Status == transcode.StatusFailed || st.Status == transcode.StatusCancelled {
+		e.noteWorkerSlotFreed()
+		if st.SearchSeconds != nil {
+			ec.State["benchmark_search_seconds"] = *st.SearchSeconds
+		}
 	}
 	if st.Automatic != nil {
 		ec.State["automatic_search"] = st.Automatic

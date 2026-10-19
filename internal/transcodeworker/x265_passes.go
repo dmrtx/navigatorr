@@ -26,7 +26,7 @@ func reportEncoderPhase(ctx context.Context, phase string) error {
 // stats paths from callers, and never starts pass two after failure/cancellation.
 func runEncoderCommand(ctx context.Context, cmd *exec.Cmd, args []string, plan *transcode.Plan, output string) error {
 	if plan.X265 == nil {
-		return cmd.Run()
+		return runCharged(ctx, cmd)
 	}
 	if err := plan.X265.Validate(plan.VideoCodec, plan.Quality); err != nil {
 		return err
@@ -74,7 +74,7 @@ func runEncoderCommand(ctx context.Context, cmd *exec.Cmd, args []string, plan *
 		return nil
 	}
 	passOne.WaitDelay = 2 * time.Second
-	if err := passOne.Run(); err != nil {
+	if err := runCharged(ctx, passOne); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -88,7 +88,7 @@ func runEncoderCommand(ctx context.Context, cmd *exec.Cmd, args []string, plan *
 	}
 	cmd.Dir = statsDir
 	cmd.Args = append([]string{cmd.Path}, withX265Pass(args, 2)...)
-	return cmd.Run()
+	return runCharged(ctx, cmd)
 }
 
 func withX265Pass(args []string, pass int) []string {

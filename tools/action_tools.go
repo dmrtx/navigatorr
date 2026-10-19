@@ -170,7 +170,7 @@ func toCompactSummary(res *action.ActionResult) ActionCompactSummary {
 		Reconciliation: compactOperationalFields(res, []string{
 			"next_poll_at", "last_worker_poll_at", "worker_completed_at", "reconciled_at",
 		}),
-		Work:      compactOperationalFields(&action.ActionResult{State: actionProgressMap(res.State["work_progress"])}, []string{"phase", "bytes_read", "total_bytes", "updated_at"}),
+		Work:      compactOperationalFields(&action.ActionResult{State: actionProgressMap(res.State["work_progress"])}, []string{"phase", "bytes_read", "total_bytes", "queue_position", "since", "updated_at"}),
 		Cleanup:   compactOperationalFields(&action.ActionResult{State: actionProgressMap(res.State["cleanup_progress"])}, []string{"phase", "path", "bytes_read", "total_bytes", "updated_at", "error"}),
 		Promotion: compactPromotion(res),
 		Batch:     compactBatch(res),

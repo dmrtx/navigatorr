@@ -2221,7 +2221,7 @@ function batchProgress(job) {
     const observation = workerProgressObservation({...(child || activity), worker: w, status: "running"});
     const eta = workerStage && !observation.message ? encodeEta(activity.id || key, w, child?.eta_seconds ?? activity.eta_seconds) : "";
     const measurement = workerStage ? observation.message || (w.progress_is_stale ? heartbeatAlive(observation.heartbeat) ? "Worker heartbeat received; last measurement shown" : "Last measurement; stale" : eta) : "";
-    if (!prior || progress > prior.progress) byFile.set(key, {progress, eta: eta ? encodeEtas.get(activity.id || key)?.value : null, label: `${key.split("/").pop() || "Active file"}: ${after ? postEncodeWorkLabel(after) : workerStage && phase ? workerPhaseLabel(phase) : stage === "preflight" && activity.work?.phase === "hashing_source" ? `Verifying source SHA-256 (${bytes(activity.work.bytes_read || 0)} / ${bytes(activity.work.total_bytes)})` : stage === "preflight" && activity.work?.phase === "waiting_for_hash_slot" ? "Waiting to verify source" : stageLabel(stage || "preflight")}${measurement ? ` · ${measurement}` : ""}`});
+    if (!prior || progress > prior.progress) byFile.set(key, {progress, eta: eta ? encodeEtas.get(activity.id || key)?.value : null, label: `${key.split("/").pop() || "Active file"}: ${after ? postEncodeWorkLabel(after) : activity.work?.phase === "waiting_for_worker" ? workerSlotWaitLabel(activity.work) : workerStage && phase ? workerPhaseLabel(phase) : stage === "preflight" && activity.work?.phase === "hashing_source" ? `Verifying source SHA-256 (${bytes(activity.work.bytes_read || 0)} / ${bytes(activity.work.total_bytes)})` : stage === "preflight" && activity.work?.phase === "waiting_for_hash_slot" ? "Waiting to verify source" : stageLabel(stage || "preflight")}${measurement ? ` · ${measurement}` : ""}`});
   }
   const partial = Math.min(count("running"), byFile.size) ? [...byFile.values()].slice(0,count("running")).reduce((sum,a)=>sum+a.progress,0) : 0;
   const active = operationIsActive(job.status);
@@ -3272,8 +3272,11 @@ function workerProgressObservation(job) {
   if (w.recovery_required) return {...result, warning: true, status: "Needs decision", message: job.waiting_reason || "Candidate preserved; publication requires intervention."};
   const waiting = job.activity_waiting_condition || job.waiting_condition;
   // A batch reports its own slot counts; a single job just waits its turn.
-  if (waiting === "worker_busy" && !job.batch)
-    return {...result, status: "Waiting for a free worker slot", message: "The worker is running as many jobs as it allows. This job continues automatically when a slot is free."};
+  if (waiting === "worker_busy" && !job.batch) {
+    const position = job.work?.phase === "waiting_for_worker" ? Number(job.work.queue_position) : 0;
+    const line = Number.isInteger(position) && position > 1 ? ` ${position - 1} ${position === 2 ? "job is" : "jobs are"} ahead of it in line.` : position === 1 ? " It is next in line." : "";
+    return {...result, status: "Waiting for a free worker slot", message: `The worker is running as many jobs as it allows. This job continues automatically when a slot is free.${line}`};
+  }
   if (["worker_busy", "parent_busy", "queued", "benchmark_retry", "transcode_retry", "worker_reconciling"].includes(waiting))
     return {...result, status: "Waiting", message: job.waiting_reason || "Waiting for worker coordination."};
   // A finished worker can leave telemetry behind while the coordinator validates
@@ -3863,9 +3866,18 @@ function preserveWork(job) {
 function postEncodeWorkLabel(work) {
   return work.read != null && work.total > 0 ? `${work.label} · ${bytes(work.read)} / ${bytes(work.total)}` : work.label;
 }
+// The coordinator's own slot queue (work.phase waiting_for_worker): the file
+// has not been sent to the worker yet. queue_position counts this file, so 1
+// means it gets the next free slot.
+function workerSlotWaitLabel(work) {
+  const position = Number(work?.queue_position);
+  if (!Number.isInteger(position) || position < 1) return "Waiting for a worker slot";
+  if (position === 1) return "Waiting for a worker slot · Next in line";
+  return `Waiting for a worker slot · ${position - 1} ahead in line`;
+}
 function workerPhaseLabel(phase) {
   return {
-    queued:"Waiting for a worker slot",preparing:"Preparing source",reading_source:"Reading source from media storage",
+    queued:"Waiting for a worker slot",waiting_for_worker:"Waiting for a worker slot",preparing:"Preparing source",reading_source:"Reading source from media storage",
     probing_source:"Inspecting source",extracting_samples:"Extracting reference samples",encoding_samples:"Encoding test samples",
     testing_initial:"Testing suitable settings",testing_alternatives:"Trying a measured alternative",verifying_samples:"Checking additional video samples",evaluating_metrics:"Measuring sample quality",estimating_final_size:"Estimating final file size",selecting_candidate:"Selecting the best candidate",
     analysing_video:"Analyzing video · x265 pass 1 of 2",capturing_comparison:"Saving comparison frames",encoding:"Encoding full video",validating:"Verifying converted file",validating_quality:"Measuring final quality",publishing:"Saving converted file",
@@ -3965,17 +3977,17 @@ function renderPhaseCosts(host, job) {
   if (!entries.length && search == null && sourceBudget == null) return;
   const detail = node("details", "", "phase-costs");
   detail.append(node("summary", "Measured phase costs"));
-  detail.append(node("p", "Elapsed wall measurements include synchronous I/O. Coordinator measurements count returned invocations and exclude waits between them. CPU time is unknown; phases may overlap and are not added into a total.", "metadata"));
+  detail.append(node("p", "Elapsed wall measurements include synchronous I/O. Coordinator measurements count returned invocations and exclude waits between them. CPU time is the user + system time of the worker's ffmpeg/ffprobe processes where the worker measured it; otherwise CPU time is unknown; phases may overlap and are not added into a total.", "metadata"));
   if (search != null || sourceBudget != null) detail.append(node("p", `Sample search measured wall: ${search == null ? "Unknown" : search + " s"} · Budget per file: ${sourceBudget == null ? "Unknown" : sourceBudget + " s"}${sourceBudget != null && maxBudget > sourceBudget ? `, extended to at most ${maxBudget} s while samples keep finishing${verifyBudget > 0 ? `, ${maxBudget + verifyBudget} s while verifying a winner` : ""}` : ""}. Pending reservations are not measured consumption.`, "metadata"));
   const table = node("table");
   const header = node("tr");
-  for (const label of ["Phase", "Wall time", "Invocations", "NAS read", "NAS written", "Cache hits / misses"]) header.append(node("th", label));
+  for (const label of ["Phase", "Wall time", "CPU time", "Invocations", "NAS read", "NAS written", "Cache hits / misses"]) header.append(node("th", label));
   table.append(header);
   const labels = {coordinator_inventory:"Coordinator · Inventory",coordinator_preflight:"Coordinator · Preflight",coordinator_source_hash:"Coordinator · Source hash",coordinator_probe:"Coordinator · Probe",coordinator_promotion:"Coordinator · Promotion"};
   for (const [phase, cost] of entries) {
     const row = node("tr");
     const label = labels[phase] || phase.replace(/^worker_benchmark_/, "Worker samples · ").replace(/^worker_/, "Worker · ").replaceAll("_", " ");
-    row.append(node("td", label), node("td", Number.isFinite(cost.duration_ms) ? `${cost.duration_ms} ms` : "Unknown"), node("td", Number.isFinite(cost.attempts) ? String(cost.attempts) : "Unknown"), node("td", cost.nas_read_bytes == null ? "Unknown" : bytes(cost.nas_read_bytes)), node("td", cost.nas_written_bytes == null ? "Unknown" : bytes(cost.nas_written_bytes)), node("td", `${cost.cache_hits == null ? "Unknown" : cost.cache_hits} / ${cost.cache_misses == null ? "Unknown" : cost.cache_misses}`));
+    row.append(node("td", label), node("td", Number.isFinite(cost.duration_ms) ? `${cost.duration_ms} ms` : "Unknown"), node("td", Number.isFinite(cost.active_compute_ms) ? `${cost.active_compute_ms} ms` : "Unknown"), node("td", Number.isFinite(cost.attempts) ? String(cost.attempts) : "Unknown"), node("td", cost.nas_read_bytes == null ? "Unknown" : bytes(cost.nas_read_bytes)), node("td", cost.nas_written_bytes == null ? "Unknown" : bytes(cost.nas_written_bytes)), node("td", `${cost.cache_hits == null ? "Unknown" : cost.cache_hits} / ${cost.cache_misses == null ? "Unknown" : cost.cache_misses}`));
     table.append(row);
   }
   detail.append(table); host.append(detail);
@@ -4106,6 +4118,8 @@ function batchFileActivity(item, job) {
   if (activity?.waiting_condition === "worker_unreachable") return "Worker unreachable · Waiting for connection";
   const worker = activity?.worker;
   const phase = worker?.transcode_phase || worker?.benchmark_phase || worker?.phase;
+  // Cleared once the worker accepts the job, so it never hides worker progress.
+  if (activity?.work?.phase === "waiting_for_worker") return workerSlotWaitLabel(activity.work);
   const after = activity && postEncodeWork({...activity, status: item.status});
   if (after) {
     const observation = workerProgressObservation({...activity, status: item.status});

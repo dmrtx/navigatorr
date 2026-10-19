@@ -268,6 +268,10 @@ type PhaseCost struct {
 	NASWrittenBytes *int64 `json:"nas_written_bytes,omitempty"`
 	CacheHits       *int64 `json:"cache_hits,omitempty"`
 	CacheMisses     *int64 `json:"cache_misses,omitempty"`
+	// ActiveComputeMs is the CPU time (user + system) the phase's
+	// ffmpeg/ffprobe children used, summed. Absent from older workers and for
+	// phases that do not measure it; consumers must treat absent as unknown.
+	ActiveComputeMs *int64 `json:"active_compute_ms,omitempty"`
 }
 
 type JobTelemetry struct {

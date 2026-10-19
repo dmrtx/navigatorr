@@ -134,6 +134,43 @@ func TestWorkerPhaseSnapshotsDoNotDuplicatePollsOrOverwriteCoordinatorCosts(t *t
 	}
 }
 
+// A current worker reports active_compute_ms per phase; an older worker's
+// payload has no such field and must stay null (unknown), never 0.
+func TestWorkerActiveComputeIsMirroredAndOlderWorkerStaysNull(t *testing.T) {
+	var current, older map[string]transcode.PhaseCost
+	if err := json.Unmarshal([]byte(`{"encode":{"duration_ms":30000,"attempts":1,"active_compute_ms":95000}}`), &current); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(`{"encode":{"duration_ms":30000,"attempts":1}}`), &older); err != nil {
+		t.Fatal(err)
+	}
+	project := func(prefix string, costs map[string]transcode.PhaseCost) map[string]any {
+		ec := &ExecutionContext{State: map[string]any{}, Outputs: map[string]any{}}
+		mirrorWorkerPhaseCosts(ec, prefix, costs)
+		raw, _ := json.Marshal(ec.Outputs["phase_costs"])
+		var projected map[string]map[string]any
+		_ = json.Unmarshal(raw, &projected)
+		return projected[prefix+"encode"]
+	}
+	if got := project("worker_", current); got["active_compute_ms"] != float64(95000) {
+		t.Fatalf("measured CPU time not mirrored: %v", got)
+	}
+	got := project("worker_benchmark_", older)
+	if v, ok := got["active_compute_ms"]; !ok || v != nil {
+		t.Fatalf("older worker must project active_compute_ms as null, got %v (present=%v)", v, ok)
+	}
+	// The coordinator's own measurements stay CPU-unknown.
+	ec := &ExecutionContext{State: map[string]any{}, Outputs: map[string]any{}}
+	now := time.Now()
+	NewEngine(EngineDeps{Config: &config.Config{}}).recordCoordinatorPhase(ec, "coordinator_probe", now, now.Add(time.Second))
+	raw, _ := json.Marshal(phaseCostMap(ec)["coordinator_probe"])
+	var coordinator map[string]any
+	_ = json.Unmarshal(raw, &coordinator)
+	if v, ok := coordinator["active_compute_ms"]; !ok || v != nil {
+		t.Fatalf("coordinator cost must keep active_compute_ms null: %s", raw)
+	}
+}
+
 func TestWorkerAndBenchmarkObservationsMirrorPhaseCostsIntoOutputs(t *testing.T) {
 	ec := &ExecutionContext{State: map[string]any{}, Outputs: map[string]any{}}
 	e := NewEngine(EngineDeps{Config: &config.Config{}})
