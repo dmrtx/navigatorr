@@ -3604,3 +3604,46 @@ test("an old worker-busy failure reads plainly and hides the worker URL", () => 
   assert.equal(h.run('workerBusyFailure("ssh: handshake failed")'), false);
   assert.equal(h.run('shortJobReason("benchmark_submit failed (worker_busy): status 429")'), "The worker was full and nothing ran. Retry when a slot is free.");
 });
+
+test("a cancelled or no-winner standalone file offers Run again with a confirmation and a fresh key", async () => {
+  const h = harness();
+  h.run('state.workerInfo={ready:true}');
+  const base = '{id:"old",action_name:"transcode_media",status:"completed",mode:"size",reason_code:"no_suitable_candidate",source_path:"/media/Show/S01E01.mkv",rerun:{source_path:"/media/Show/S01E01.mkv",mode:"size",replace_original:false,no_winner_rounds:1}}';
+  const labels = (job) => h.run(`jobControls(${job}).children.map(b=>b.textContent)`);
+  assert.ok(labels(base).includes("Run again"));
+  assert.ok(labels(`{...${base},status:"cancelled",reason_code:"user_cancelled"}`).includes("Run again"));
+  // Hidden for candidates, decisions, batch children, replacements and unsupported sources.
+  for (const patch of ['candidate_ready:true', 'status:"waiting_decision"', 'parent_item_key:"epfile-1"', 'replacement_action_id:"r"', 'reason_code:"unsupported_source"', 'rerun:undefined'])
+    assert.ok(!labels(`{...${base},${patch}}`).includes("Run again"), patch);
+  // It needs a ready worker, like Retry.
+  const control = h.run(`jobControls(${base}).children.find(b=>b.textContent==="Run again")`);
+  assert.equal(control.dataset.requiresWorker, "true");
+  h.run('state.workerInfo={ready:false}');
+  assert.equal(h.run(`jobControls(${base}).children.find(b=>b.textContent==="Run again")`).disabled, true);
+  h.run('state.workerInfo={ready:true}');
+
+  const calls = [], reviews = [];
+  h.context.calls = calls; h.context.reviews = reviews;
+  h.run('api=async(path,body)=>{calls.push({path,body});return {id:"new"}};loadJobs=async()=>{};openJob=async()=>{};notify=()=>{};let n=0;submissionID=()=>"key-"+(++n);reviewAction=async(r)=>{reviews.push(r);return true};');
+  await h.run(`rerunJob(${base})`);
+  await h.run(`rerunJob(${base})`);
+  assert.equal(calls.length, 2);
+  assert.ok(calls.every(c => c.path === "rerun" && c.body.id === "old"));
+  assert.notEqual(calls[0].body.key, calls[1].body.key);
+  const text = (r) => r.content.map(n => n.textContent).join(" ");
+  assert.match(text(reviews[0]), /S01E01\.mkv/);
+  assert.match(text(reviews[0]), /Smaller files/);
+  assert.match(text(reviews[0]), /Originals stay in place/);
+  assert.doesNotMatch(text(reviews[0]), /already had/);
+
+  // Two earlier no-winner rounds make another one an explicit decision; replacing originals drops the line.
+  const third = base.replace('no_winner_rounds:1', 'no_winner_rounds:2').replace('replace_original:false', 'replace_original:true');
+  await h.run(`rerunJob(${third})`);
+  assert.match(text(reviews[2]), /This file already had 2 searches without a result/);
+  assert.doesNotMatch(text(reviews[2]), /Originals stay in place/);
+
+  // Declining the confirmation sends nothing.
+  h.run('reviewAction=async()=>false');
+  await h.run(`rerunJob(${base})`);
+  assert.equal(calls.length, 3);
+});

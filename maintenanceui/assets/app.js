@@ -82,6 +82,7 @@ function actionIcon(label) {
     "Change goal": "M4 7h16M4 17h16M8 4v6M16 14v6",
     "Try another profile": "M4 7h16M4 17h16M8 4v6M16 14v6",
     Retry: "M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M18 18A8 8 0 0 1 4 12",
+    "Run again": "M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M18 18A8 8 0 0 1 4 12",
     Review: "M5 4h14v16H5ZM8 8h8M8 12h8",
     "Review preview": "M5 4h14v16H5ZM8 8h8M8 12h8",
     "Start batch": "M7 4l13 8-13 8Z",
@@ -2952,6 +2953,30 @@ function confirmDecision(job, choice, label) {
   } else if (choice.description) content.push(node("p", choice.description, "muted"));
   return reviewAction({title: `${label}?`, content, confirmLabel: label, cancelLabel: "Decide later"});
 }
+const rerunGoals = {size: "Smaller files", quality: "Prioritize quality", x265_preserve: "Convert to HEVC · Strict quality", compact: "Make it much smaller · SDR 1080p"};
+// Another round on a file is the user's decision: confirming is that decision,
+// and each confirmed attempt starts a new action under a fresh key.
+async function rerunJob(job) {
+  const info = job.rerun || {};
+  const content = [node("p", queuePresentation(job).title, "review-filename")];
+  const goal = rerunGoals[info.mode];
+  content.push(node("p", goal ? `Goal: ${goal}` : "The same settings as before."));
+  content.push(node("p", "This starts a new job with the same settings. The earlier job is not changed.", "muted"));
+  if (info.no_winner_rounds >= 2) content.push(node("p", `This file already had ${info.no_winner_rounds} searches without a result. Run it again only if you want another round.`));
+  if (!info.replace_original) content.push(node("p", "Originals stay in place.", "muted"));
+  if (!(await reviewAction({title: "Run this file again?", content, confirmLabel: "Run again", cancelLabel: "Not now"}))) return;
+  if (jobIsBusy(job.id)) return;
+  state.busyJobs.add(job.id);
+  try {
+    const result = await api("rerun", {id: job.id, key: submissionID()});
+    state.jobsLoaded = 0;
+    notify("Queued a new job. It is listed first.");
+    await loadJobs();
+    if (result?.id) await openJob(result.id);
+  } finally {
+    state.busyJobs.delete(job.id);
+  }
+}
 function jobControls(job, detail = false) {
   const actionRail = node("div", "", "job-actions");
   const add = (label, fn) => {
@@ -2963,6 +2988,7 @@ function jobControls(job, detail = false) {
     b.dataset.jobControl = job.id;
     b.dataset.requiresWorker = String(
       (label === "Retry" && ["transcode_media", "transcode_batch", "benchmark_transcode"].includes(job.action_name) && !(job.action_name === "transcode_batch" && job.current_step >= 2)) ||
+      label === "Run again" ||
       label === "Resume batch" ||
       label === "Start batch" ||
       (job.action_name === "transcode_batch" && !job.batch?.promotion_plan_ready &&
@@ -3067,6 +3093,10 @@ function jobControls(job, detail = false) {
       });
     else add("Retry", () => jobControl(job.id, "action_retry"));
   }
+  // The server marks only standalone files that were cancelled or ended with no
+  // winner; batch children use Change goal and reviewed candidates are decided.
+  if (job.rerun && !job.parent_item_key && !job.candidate_ready && !job.replacement_action_id && job.status !== "waiting_decision" && !(job.mode && sourceGateReason(job.reason_code)))
+    add("Run again", () => rerunJob(job));
   if (
     job.action_name === "transcode_batch" &&
     ["running", "waiting_external"].includes(job.status)
@@ -3419,7 +3449,7 @@ function queuePresentation(job) {
 // Shortened visible labels for main actions. Each is a prefix of the full
 // label, which stays the accessible name (WCAG 2.5.3 Label in Name).
 const shortActionLabels = {"Replace file":"Replace","Set up benchmark":"Set up","Review candidates":"Review","Review candidate":"Review","Review replacement":"Review","Review replacements":"Review","Review preview":"Review","Validate classifications":"Validate","Check worker again":"Check worker","Check library again":"Check library","Resume batch":"Resume","Start batch":"Start","Try another profile":"Try another"};
-const mainQueueActions = ["Replace file", "Review replacements", "Review replacement", "Review candidates", "Review candidate", "Review cuts", "Validate classifications", "Review", "Resume batch", "Start batch", "Set up benchmark", "Retry", "Check worker again", "Check library again", "Review preview", "Try another profile"];
+const mainQueueActions = ["Replace file", "Review replacements", "Review replacement", "Review candidates", "Review candidate", "Review cuts", "Validate classifications", "Review", "Resume batch", "Start batch", "Set up benchmark", "Retry", "Run again", "Check worker again", "Check library again", "Review preview", "Try another profile"];
 const visibleQueueIcons = 3;
 function compactQueueActions(actions) {
   // A card shows at most one labelled main action, then square icon buttons
