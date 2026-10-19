@@ -13,6 +13,7 @@ import (
 	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/httpclient"
+	"github.com/jakenesler/navigatorr/transcode/optimization"
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -173,10 +174,20 @@ func operationSizeMode(r operationRecord) map[string]any {
 	}
 	// Which encoder produced the winning settings, so a hardware (VideoToolbox)
 	// result is told apart from x265 before anything is replaced.
-	if codec := operationString(operationMap(operationMap(operationValue(r, "benchmark_decision"))["winner"])["video_codec"]); codec != "" {
+	winner := operationMap(operationMap(operationValue(r, "benchmark_decision"))["winner"])
+	if codec := operationString(winner["video_codec"]); codec != "" {
 		out["encoder"] = codec
 		if codec == transcode.VideoCodecHEVCVideoToolbox {
 			out["hardware"] = true
+			// Why the media engine result was chosen, from the verified decision.
+			var notes []string
+			uncertainties, _ := winner["uncertainties"].([]any)
+			for _, u := range uncertainties {
+				notes = append(notes, operationString(u))
+			}
+			if reason := optimization.HardwareReason(notes); reason != "" {
+				out["hardware_reason"] = reason
+			}
 		}
 	}
 	if r.state["size_audio_only"] == true {

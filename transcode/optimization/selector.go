@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 )
 
 // CandidateInput represents one candidate transcode variant evaluated for selection.
@@ -259,6 +260,18 @@ const videoToolboxCodec = "hevc_videotoolbox"
 // HardwareSelectedNote begins the uncertainty the selector adds to a winner
 // chosen by the hardware margin, so callers can carry it into the decision.
 const HardwareSelectedNote = "hardware candidate selected"
+
+// HardwareReason returns why a media-engine winner was chosen, taken from the
+// uncertainty that begins with HardwareSelectedNote and stripped of that
+// prefix, or "" when the winner carries no such note.
+func HardwareReason(uncertainties []string) string {
+	for _, u := range uncertainties {
+		if strings.HasPrefix(u, HardwareSelectedNote) {
+			return strings.TrimPrefix(strings.TrimPrefix(u, HardwareSelectedNote), ": ")
+		}
+	}
+	return ""
+}
 
 // preferHardware narrows the size contest to the VideoToolbox candidates that
 // are within marginPercent of the smallest other candidate, or to all of them

@@ -1,6 +1,9 @@
 package store
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // Memoize only JSON projections, never status/checkpoints or the ledger itself.
 // Every snapshot rereads authoritative rows and compares the complete source
@@ -21,6 +24,41 @@ func (m maintenanceMemo) bytes() int {
 
 var maintenanceInputKeys = []string{"path", "parent_action_id", "batch_promote_parent_id", "transcode_action_id", "library_context", "service", "series_id", "movie_id", "media_id", "paths", "episode_file_ids", "dry_run", "promote_candidates", "mode", "replace_original"}
 var maintenanceOutputKeys = []string{"resolved_path", "original_sha256", "original", "result", "candidate_size_bytes", "promotion", "recovery_retained", "original_integrity", "promoted", "original_intact", "benchmark_decision", "expected_savings_percent", "transcode_phase", "progress_is_stale", "progress", "speed", "last_progress_at", "counts", "batch_promotion", "benchmark_comparison_available", "job_id", "transcode_job_id", "paused", "skip_transcode", "batch_item_generations", "batch_settings_revision", "batch_retry_pending", "post_batch_promotion", "mode", "size_main10", "size_audio_only", "audio_only_estimated_bytes", "quality_evidence", "conversions", "reason_code"}
+
+// maintenanceHardwareNote begins the winner uncertainty that says why a media
+// engine result was chosen. It must equal optimization.HardwareSelectedNote;
+// the maintenance UI tests pin that.
+const maintenanceHardwareNote = "hardware candidate selected"
+
+// maintenanceWinner keeps the size and encoder of a benchmark winner, plus the
+// media engine reason when it has one. The rest of its uncertainties stay in
+// the full action history so the projection stays small.
+func maintenanceWinner(raw json.RawMessage) json.RawMessage {
+	projected := map[string]json.RawMessage{}
+	var winner map[string]json.RawMessage
+	if json.Unmarshal(raw, &winner) != nil {
+		return json.RawMessage("{}")
+	}
+	for _, key := range []string{"estimated_bytes", "video_codec"} {
+		if value, ok := winner[key]; ok {
+			projected[key] = value
+		}
+	}
+	var uncertainties []string
+	if json.Unmarshal(winner["uncertainties"], &uncertainties) == nil {
+		var notes []string
+		for _, u := range uncertainties {
+			if strings.HasPrefix(u, maintenanceHardwareNote) {
+				notes = append(notes, u)
+			}
+		}
+		if len(notes) > 0 {
+			projected["uncertainties"], _ = json.Marshal(notes)
+		}
+	}
+	out, _ := json.Marshal(projected)
+	return out
+}
 
 func maintenanceJSON(raw string, keys []string) string {
 	var source map[string]json.RawMessage
@@ -68,7 +106,7 @@ func maintenanceJSON(raw string, keys []string) string {
 				value, _ = json.Marshal(projected)
 			case "benchmark_decision":
 				if winner, exists := nested["winner"]; exists {
-					nested = map[string]json.RawMessage{"winner": json.RawMessage(maintenanceJSON(string(winner), []string{"estimated_bytes", "video_codec"}))}
+					nested = map[string]json.RawMessage{"winner": maintenanceWinner(winner)}
 				} else {
 					nested = map[string]json.RawMessage{}
 				}

@@ -321,7 +321,7 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 		}
 		if evidence.Decision.Winner != nil {
 			automatic.VerifiedSamples = 5
-			carryHardwareNote(evidence.Decision, chosen)
+			carryHardwareNote(evidence.Decision, chosen, record.HardwareSearch)
 			evidence.Decision.Evaluations = append(append(evidence.Decision.Evaluations, verificationFailures...), ruledOut...)
 			appendAutomaticRejections(evidence.Decision, automatic.Discovery)
 			finish()
@@ -395,17 +395,12 @@ func safestEligibleIDWithin(tested []validatedCandidate, decision *transcode.Ben
 		return selectedID
 	}
 	eligible := map[string]bool{}
-	var smallestSoftware int64
 	for _, e := range decision.Evaluations {
-		if !e.Eligible {
-			continue
-		}
-		eligible[e.CandidateID] = true
-		if !isVideoToolbox(e.VideoCodec) && (smallestSoftware == 0 || e.EstimatedBytes < smallestSoftware) {
-			smallestSoftware = e.EstimatedBytes
+		if e.Eligible {
+			eligible[e.CandidateID] = true
 		}
 	}
-	if hardware != nil && smallestSoftware > 0 {
+	if smallestSoftware := smallestEligibleSoftware(decision); hardware != nil && smallestSoftware > 0 {
 		limit := float64(smallestSoftware) * (1 + hardware.MarginPercent/100)
 		for _, e := range decision.Evaluations {
 			if e.CandidateID != selectedID && e.Eligible && isVideoToolbox(e.VideoCodec) && float64(e.EstimatedBytes) > limit {
@@ -441,6 +436,22 @@ func safestEligibleIDWithin(tested []validatedCandidate, decision *transcode.Ben
 		}
 	}
 	return best.candidate.ID
+}
+
+// smallestEligibleSoftware is the size of the smallest eligible x265 candidate
+// in a decision, zero when none qualified: the figure a media engine result is
+// compared with.
+func smallestEligibleSoftware(decision *transcode.BenchmarkDecision) int64 {
+	var smallest int64
+	if decision == nil {
+		return 0
+	}
+	for _, e := range decision.Evaluations {
+		if e.Eligible && !isVideoToolbox(e.VideoCodec) && (smallest == 0 || e.EstimatedBytes < smallest) {
+			smallest = e.EstimatedBytes
+		}
+	}
+	return smallest
 }
 
 // isVideoToolbox reports the media-engine codec; an empty codec means it too.
@@ -647,18 +658,37 @@ func mergeAutomaticQuality(record *BenchmarkRecord, evidence *BenchmarkExecution
 	return nil
 }
 
-// carryHardwareNote keeps the reason a media-engine candidate won discovery on
-// the verified decision. The holdout selects among a single candidate, so it
-// cannot repeat the comparison; the note stays only while the verified winner
-// is still the candidate it described.
-func carryHardwareNote(final, discovery *transcode.BenchmarkDecision) {
-	if final == nil || final.Winner == nil || discovery == nil || discovery.Winner == nil || discovery.Winner.CandidateID != final.Winner.CandidateID {
+// carryHardwareNote keeps the reason a media-engine candidate was chosen on the
+// verified decision. The holdout selects among a single candidate, so it cannot
+// repeat the comparison; the note stays while the verified winner is still the
+// candidate chosen. When the retry after a failed holdout verified a different,
+// safer media-engine setting, that setting was never compared by the selector,
+// so it gets its own accurate note instead of the chosen candidate's.
+func carryHardwareNote(final, chosen *transcode.BenchmarkDecision, hardware *transcode.HardwareSearchRules) {
+	if final == nil || final.Winner == nil || chosen == nil || chosen.Winner == nil {
 		return
 	}
-	for _, u := range discovery.Winner.Uncertainties {
+	chosenNote := ""
+	for _, u := range chosen.Winner.Uncertainties {
 		if strings.HasPrefix(u, optimization.HardwareSelectedNote) {
-			final.Winner.Uncertainties = append(append([]string(nil), final.Winner.Uncertainties...), u)
-			return
+			chosenNote = u
+			break
 		}
 	}
+	if chosenNote == "" {
+		return
+	}
+	note := ""
+	switch {
+	case chosen.Winner.CandidateID == final.Winner.CandidateID:
+		note = chosenNote
+	case hardware != nil && isVideoToolbox(final.Winner.VideoCodec):
+		note = optimization.HardwareSelectedNote + ": safer setting after a failed holdout; no software candidate qualified"
+		if smallestEligibleSoftware(chosen) > 0 {
+			note = fmt.Sprintf("%s: safer setting within the %.4g%% margin after a failed holdout", optimization.HardwareSelectedNote, hardware.MarginPercent)
+		}
+	default:
+		return
+	}
+	final.Winner.Uncertainties = append(append([]string(nil), final.Winner.Uncertainties...), note)
 }

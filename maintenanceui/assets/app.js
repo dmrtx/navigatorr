@@ -3742,6 +3742,8 @@ function sizeModeLines(size) {
   else if (size.main10) lines.push("10-bit HEVC");
   // The encoder tells a media engine winner apart from x265 before anything is replaced.
   if (size.encoder) lines.push(`Encoder: ${{libx265: "x265 (software)", hevc_videotoolbox: "VideoToolbox (hardware media engine)"}[size.encoder] || size.encoder}`);
+  // Why the media engine result was chosen over x265, as the search recorded it.
+  if (size.hardware && size.hardware_reason) lines.push(`Chosen because: ${size.hardware_reason}`);
   if (size.video_copy) lines.push({verified: "Video copied unchanged · verified bit-identical", failed: "Video copy check failed · original kept"}[size.video_copy] || "Video will be copied unchanged · not yet verified; only lossless audio is compacted");
   const q = size.final_quality;
   if (q) lines.push(`Final VMAF ${Number(q.vmaf_mean).toFixed(1)} mean · ${q.vmaf_p5 != null ? Number(q.vmaf_p5).toFixed(1) : "n/a"} p5${q.worst_window_mean != null ? ` · ${Number(q.worst_window_mean).toFixed(1)} worst ${Math.round(q.worst_window_seconds || 0)} s window` : ""}`);

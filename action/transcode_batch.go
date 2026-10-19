@@ -1083,17 +1083,25 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 	}, nil
 }
 
-// applyGoalHardwareInputs makes the child inputs of a goal-changed item agree
-// with the policy that attempt froze. The parent's media engine inputs belong
-// to the parent's goal: copied as they are, they would make a quality, compact
-// or HEVC child fail preflight, or contradict a size attempt that turned the
-// engine off.
-func applyGoalHardwareInputs(inputs map[string]any, rawPolicy any) {
+// applyGoalPolicyInputs makes the child inputs of a goal-changed item agree
+// with the policy that attempt froze. The parent's goal-specific inputs (the
+// media engine choice and the compact output height) belong to the parent's
+// goal: copied as they are, they would make a quality, compact or HEVC child
+// fail preflight, contradict a size attempt that turned the engine off, or
+// name a height the attempt does not use.
+func applyGoalPolicyInputs(inputs map[string]any, rawPolicy any) {
 	delete(inputs, "allow_hardware")
 	delete(inputs, "hardware_margin_percent")
+	delete(inputs, "max_height")
 	var policy ModePolicySnapshot
 	b, err := json.Marshal(rawPolicy)
-	if err != nil || json.Unmarshal(b, &policy) != nil || policy.Size == nil {
+	if err != nil || json.Unmarshal(b, &policy) != nil {
+		return
+	}
+	if policy.Compact != nil && policy.Compact.MaxHeight > 0 {
+		inputs["max_height"] = float64(policy.Compact.MaxHeight)
+	}
+	if policy.Size == nil {
 		return
 	}
 	if policy.Size.Hardware == nil {
@@ -1131,7 +1139,7 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 			for _, key := range []string{"profile", "profile_config", "priority", "metric", "min_savings_percent", "max_size_increase_percent", "preserve_source_bit_depth", "shared_calibration"} {
 				delete(copy.Inputs, key)
 			}
-			applyGoalHardwareInputs(copy.Inputs, settings["mode_policy"])
+			applyGoalPolicyInputs(copy.Inputs, settings["mode_policy"])
 			item.Profile = "mode-" + mode
 		}
 		if profile := getString(settings, "profile"); profile != "" && profile != "same" {
@@ -1183,7 +1191,7 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 	}
 	if mode := getString(ec.Inputs, "mode"); mode != "" {
 		childInputs["mode"] = mode
-		for _, key := range []string{"allow_hardware", "hardware_margin_percent"} {
+		for _, key := range []string{"allow_hardware", "hardware_margin_percent", "max_height"} {
 			if v, ok := ec.Inputs[key]; ok && v != nil {
 				childInputs[key] = v
 			}
