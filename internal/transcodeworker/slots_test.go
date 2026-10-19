@@ -436,3 +436,113 @@ func TestSelfCheckProvesEveryCandidate(t *testing.T) {
 		t.Fatal("a diverging candidate must switch partitioning off")
 	}
 }
+
+// The ceiling caps both kinds together even when a split is in force: saving a
+// split while the other kind runs, or lowering a pool under running jobs,
+// must not let the worker run more jobs than its ceiling.
+func TestSplitNeverAdmitsPastTheCeiling(t *testing.T) {
+	withHostCPUs(t, 10)
+	stub := newStubSpawn()
+	w, tempDir, _ := newPR3Worker(t, 4, stub)
+	for _, id := range []string{"p1", "p2", "p3"} {
+		seedSlotJob(t, w, stub, id, "running", slotKindPodcast, true, time.Hour)
+	}
+	for i, id := range []string{"v1", "v2", "v3"} {
+		seedSlotJob(t, w, stub, id, "queued", slotKindVideo, false, time.Duration(10-i)*time.Minute)
+	}
+	// Three podcast jobs run under a shared ceiling of 4; a 3/1 split would
+	// give the video pool room for 3 more.
+	if _, err := w.SetSlotSplit(transcode.SlotSplit{VideoSlots: 3, PodcastSlots: 1}); err != nil {
+		t.Fatal(err)
+	}
+	started, err := w.ScheduleQueued(context.Background(), "exe", "")
+	if err != nil || started != 1 {
+		t.Fatalf("started %d (err %v); one slot of the ceiling is free", started, err)
+	}
+	video, podcast, _ := w.countActiveJobsByKind("")
+	if video+podcast > 4 {
+		t.Fatalf("%d video + %d podcast jobs on a 4-slot worker", video, podcast)
+	}
+	// Benchmarks obey the same ceiling.
+	media := filepath.Join(tempDir, "media")
+	_ = os.MkdirAll(media, 0o755)
+	source, _ := createTestMediaSource(t, media, "bench.mkv", "bench-data")
+	w.cfg.AllowedRoots = []string{media}
+	req := validWorkerBenchmarkRequest(source)
+	req.ID = "bench-over-ceiling"
+	if _, err := w.BenchmarkSubmit(context.Background(), req, "exe", ""); err == nil || !strings.Contains(err.Error(), "worker busy") {
+		t.Fatalf("a benchmark was admitted past the ceiling: %v", err)
+	}
+}
+
+func TestSlotLimitsHasRoomHonoursTheCeilingInEveryMode(t *testing.T) {
+	split := slotLimits{Ceiling: 4, Video: 3, Podcast: 1, Split: true}
+	if split.hasRoom(slotKindVideo, 0, 4) || split.hasRoom(slotKindPodcast, 4, 0) || !split.hasRoom(slotKindVideo, 2, 1) {
+		t.Fatal("split mode must stop at the ceiling and at the pool")
+	}
+	if shared := (slotLimits{Ceiling: 2, Video: 2, Podcast: 2}); shared.hasRoom(slotKindVideo, 1, 1) || !shared.hasRoom(slotKindPodcast, 1, 0) {
+		t.Fatal("shared mode")
+	}
+}
+
+// While a lowered video pool drains, more video jobs can run than the pool
+// holds. The encode that starts then must use a partition the self-check
+// proved, so it is sized for the pool, never for the larger live count.
+func TestX265PoolIsCappedAtTheVideoPool(t *testing.T) {
+	withHostCPUs(t, 16)
+	w := &Worker{cfg: &WorkerConfig{MaxParallelJobs: 4, StateDir: t.TempDir()}, videoInUseFn: func() (int, bool) { return 4, true }}
+	if _, err := w.SetSlotSplit(transcode.SlotSplit{VideoSlots: 2, PodcastSlots: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := w.x265ThreadParams(), "pools=8:frame-threads=4"; got != want {
+		t.Fatalf("with 4 video jobs draining into a 2-slot pool: %q, want %q", got, want)
+	}
+	candidates := w.x265PartitionCandidates()
+	if len(candidates) != 1 || candidates[0] != w.x265ThreadParams() {
+		t.Fatalf("the sized pool must be a proved candidate: %v vs %q", candidates, w.x265ThreadParams())
+	}
+}
+
+func TestSlotSplitRewriteWithTheSameSizeIsSeen(t *testing.T) {
+	withHostCPUs(t, 10)
+	w, _, _ := newPR3Worker(t, 4, nil)
+	if _, err := w.SetSlotSplit(transcode.SlotSplit{VideoSlots: 3, PodcastSlots: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if l := w.slotLimits(); l.Video != 3 {
+		t.Fatal(l)
+	}
+	// Another process rewrites the file; same length, same mtime.
+	path := w.slotSplitPath()
+	fi, _ := os.Stat(path)
+	data, _ := os.ReadFile(path)
+	swapped := strings.NewReplacer(`"video_slots": 3`, `"video_slots": 1`, `"podcast_slots": 1`, `"podcast_slots": 3`).Replace(string(data))
+	if err := os.WriteFile(path, []byte(swapped), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chtimes(path, fi.ModTime(), fi.ModTime())
+	w.slotSplit.mu.Lock()
+	w.slotSplit.readAt = time.Now().Add(-time.Minute)
+	w.slotSplit.mu.Unlock()
+	if l := w.slotLimits(); l.Video != 1 || l.Podcast != 3 {
+		t.Fatalf("stale split served after a same-size rewrite: %+v", l)
+	}
+}
+
+func TestSlotsEndpointDistinguishesStorageFailureFromInvalidSplit(t *testing.T) {
+	withHostCPUs(t, 10)
+	worker, srv, _, _ := newHTTPTestSetup(t, "secret")
+	worker.cfg.MaxParallelJobs = 2
+	blocker := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	worker.cfg.StateDir = filepath.Join(blocker, "state")
+	resp := doRequest(t, srv, "PUT", "/v1/slots", `{"video_slots":1,"podcast_slots":1}`, "secret")
+	if resp.Code != 500 || strings.Contains(resp.Body.String(), blocker) {
+		t.Fatalf("a valid split that cannot be stored is a server error without paths: %d %s", resp.Code, resp.Body.String())
+	}
+	if resp := doRequest(t, srv, "PUT", "/v1/slots", `{"video_slots":2,"podcast_slots":2}`, "secret"); resp.Code != 400 {
+		t.Fatalf("an invalid split is a 400: %d", resp.Code)
+	}
+}

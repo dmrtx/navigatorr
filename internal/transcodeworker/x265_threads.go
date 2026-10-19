@@ -84,7 +84,10 @@ func (w *Worker) x265ThreadParams() string {
 	if w == nil || w.cfg == nil {
 		return ""
 	}
-	params := w.x265ThreadParamsForJobs(w.videoJobsSharingCPU())
+	// More video jobs than the pool can briefly run while a lowered pool
+	// drains; size for the pool, the largest count the self-check proved.
+	jobs := min(w.videoJobsSharingCPU(), w.slotLimits().videoPool())
+	params := w.x265ThreadParamsForJobs(jobs)
 	if params == "" || w.x265PartitionDisabled(w.x265PartitionKey()) {
 		return ""
 	}

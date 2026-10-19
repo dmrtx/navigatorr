@@ -119,6 +119,7 @@ func (s *Server) setWorkerSlots(w http.ResponseWriter, r *http.Request, ctrl wor
 		return
 	}
 	st := s.engine.Deps().Store
+	previous, _ := st.GetWorkerSlotSettings(videoWorkerNode)
 	row, err := st.SetWorkerSlotSettings(videoWorkerNode, split.VideoSlots, split.PodcastSlots)
 	if err != nil {
 		fail(w, 500, "worker slot settings not saved")
@@ -129,6 +130,13 @@ func (s *Server) setWorkerSlots(w http.ResponseWriter, r *http.Request, ctrl wor
 	var rejected *httpclient.SlotSplitRejectedError
 	switch {
 	case errors.As(err, &rejected):
+		// The worker's refusal is final: do not keep a split that the resync
+		// would otherwise push again every few seconds.
+		if previous != nil {
+			_, _ = st.SetWorkerSlotSettings(videoWorkerNode, previous.VideoSlots, previous.PodcastSlots)
+		} else {
+			_, _ = st.SetWorkerSlotSettings(videoWorkerNode, 0, 0)
+		}
 		fail(w, 400, rejected.Message)
 		return
 	case err != nil:

@@ -131,6 +131,19 @@ func TestWorkerSlotsRejectInvalidSplitsWithoutStoringThem(t *testing.T) {
 	if w := request(h, "POST", "/api/maintenance/worker-slots", `{"video_slots":1,"podcast_slots":1}`, true); w.Code != 400 {
 		t.Fatal("worker refusal", w.Code, w.Body.String())
 	}
+	if row, _ := s.engine.Deps().Store.GetWorkerSlotSettings(videoWorkerNode); row != nil && !row.Shared() {
+		t.Fatal("a split the worker refused stays stored and would be re-pushed", row)
+	}
+	// A refusal restores the split that was in force, not just clears.
+	worker.putErr = nil
+	if w := request(h, "POST", "/api/maintenance/worker-slots", `{"video_slots":1,"podcast_slots":1}`, true); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	worker.putErr = &httpclient.SlotSplitRejectedError{Message: "refused by worker"}
+	request(h, "POST", "/api/maintenance/worker-slots", `{"video_slots":2,"podcast_slots":1}`, true)
+	if row, _ := s.engine.Deps().Store.GetWorkerSlotSettings(videoWorkerNode); row == nil || row.VideoSlots != 1 || row.PodcastSlots != 1 {
+		t.Fatal("the previous split was not restored", row)
+	}
 }
 
 func TestWorkerSlotsOldOrUnreachableWorker(t *testing.T) {

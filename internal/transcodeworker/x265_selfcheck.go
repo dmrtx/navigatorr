@@ -275,6 +275,9 @@ func (w *Worker) recheckX265PartitionAfterSlotChange() {
 	if w == nil || w.cfg == nil || w.ffmpegPath == "" {
 		return
 	}
+	// Serialized so two saves close together cannot both see no check running.
+	w.x265Recheck.Lock()
+	defer w.x265Recheck.Unlock()
 	key := w.x265PartitionKey()
 	if key == "" {
 		return

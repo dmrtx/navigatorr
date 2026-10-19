@@ -65,10 +65,15 @@ type slotLimits struct {
 }
 
 // hasRoom reports whether one more job of kind may start given the jobs
-// already running. Without a split the two kinds share the ceiling.
+// already running. The ceiling caps both kinds together in every mode: a
+// split saved while jobs of the other kind run (or one that lowers a pool
+// under running jobs) must not let the worker exceed it.
 func (l slotLimits) hasRoom(kind slotKind, video, podcast int) bool {
+	if video+podcast >= l.Ceiling {
+		return false
+	}
 	if !l.Split {
-		return video+podcast < l.Ceiling
+		return true
 	}
 	if kind == slotKindPodcast {
 		return podcast < l.Podcast
@@ -90,9 +95,15 @@ type slotSplitCache struct {
 	mu      sync.Mutex
 	modTime time.Time
 	size    int64
+	readAt  time.Time
 	valid   bool
 	rec     slotSplitRecord
 }
+
+// slotSplitRereadAfter bounds how long a cached split survives a rewrite that
+// leaves the file's mtime and size unchanged (a 3/1 and a 1/3 split are the
+// same length).
+const slotSplitRereadAfter = 2 * time.Second
 
 func (w *Worker) slotCeiling() int {
 	if w == nil || w.cfg == nil {
@@ -124,11 +135,11 @@ func (w *Worker) slotLimits() slotLimits {
 	defer c.mu.Unlock()
 	fi, err := os.Stat(path)
 	if err != nil {
-		c.valid, c.modTime, c.size = false, time.Time{}, 0
+		c.valid, c.modTime, c.size, c.readAt = false, time.Time{}, 0, time.Time{}
 		return shared
 	}
-	if !c.modTime.Equal(fi.ModTime()) || c.size != fi.Size() {
-		c.valid, c.modTime, c.size = false, fi.ModTime(), fi.Size()
+	if !c.modTime.Equal(fi.ModTime()) || c.size != fi.Size() || time.Since(c.readAt) > slotSplitRereadAfter {
+		c.valid, c.modTime, c.size, c.readAt = false, fi.ModTime(), fi.Size(), time.Now()
 		if data, err := os.ReadFile(path); err == nil {
 			var rec slotSplitRecord
 			if json.Unmarshal(data, &rec) == nil {
@@ -145,6 +156,13 @@ func (w *Worker) slotLimits() slotLimits {
 	return slotLimits{Ceiling: ceiling, Video: c.rec.VideoSlots, Podcast: c.rec.PodcastSlots, Split: true}
 }
 
+// slotSplitInvalidError is an operator mistake in a split, as opposed to the
+// worker failing to store a valid one.
+type slotSplitInvalidError struct{ err error }
+
+func (e *slotSplitInvalidError) Error() string { return e.err.Error() }
+func (e *slotSplitInvalidError) Unwrap() error { return e.err }
+
 // SetSlotSplit validates and stores a split, or clears it when both values are
 // zero. It returns warnings about the CPU budget for a split that was applied.
 func (w *Worker) SetSlotSplit(split transcode.SlotSplit) ([]string, error) {
@@ -154,7 +172,7 @@ func (w *Worker) SetSlotSplit(split transcode.SlotSplit) ([]string, error) {
 	}
 	warnings, err := transcode.ValidateSlotSplit(split, w.slotCeiling(), hostCPUCount())
 	if err != nil {
-		return nil, err
+		return nil, &slotSplitInvalidError{err}
 	}
 	if split.Shared() {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {

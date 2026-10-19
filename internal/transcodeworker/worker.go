@@ -234,6 +234,7 @@ type Worker struct {
 	// running video job count that sizes thread pools; videoInUseFn replaces
 	// that count in tests.
 	slotSplit       slotSplitCache
+	x265Recheck     sync.Mutex
 	videoInUse      videoInUseCache
 	videoInUseFn    func() (int, bool)
 	x265CheckRun    func(ctx context.Context, dir string, args []string) ([]byte, error)

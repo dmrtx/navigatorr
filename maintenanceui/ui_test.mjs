@@ -1574,6 +1574,12 @@ test("worker activity labels video and podcast slots and shows each pool's use",
   assert.match(rows[1].children[0].textContent,/Video slot 2 · Available/);
   assert.match(rows[2].children[0].textContent,/Podcast slot 1 · episode\.mp3/);
   assert.match(rows[2].children[1].textContent,/Podcast processing/);
+  // An edit that has not been saved survives the next poll.
+  h.elements.get("slot-video").value=1;
+  h.run('state.slotFormDirty=true;renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("slot-video").value,1);
+  h.run('state.slotFormDirty=false;renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("slot-video").value,2);
   // A worker that predates slots, or one that cannot be split, hides the form.
   h.run('activity.activity.slots=undefined;renderWorkerActivity(activity)');
   assert.equal(h.elements.get("worker-slot-usage").hidden,true);

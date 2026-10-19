@@ -3949,8 +3949,8 @@ function renderSlotUsage(activity) {
   $("worker-slot-split").hidden = !slots || slots.ceiling < 2;
   if (!slots) return;
   $("worker-slot-ceiling").textContent = `The worker's ceiling is ${slots.ceiling} slots${slots.host_cpus ? ` on ${slots.host_cpus} CPUs` : ""}. Video and podcast slots together cannot exceed it.`;
-  // Never overwrite what is being typed.
-  if (!$("worker-slot-form").contains(document.activeElement)) {
+  // Never overwrite what is being typed or has been edited and not saved.
+  if (!state.slotFormDirty && !$("worker-slot-form").contains(document.activeElement)) {
     $("slot-video").value = slots.split ? slots.video.total : Math.max(1, slots.ceiling - 1);
     $("slot-podcast").value = slots.split ? slots.podcast.total : 1;
     $("slot-video").max = $("slot-podcast").max = Math.max(1, slots.ceiling - 1);
@@ -3961,6 +3961,7 @@ async function saveWorkerSlots(video, podcast) {
   note.textContent = "Saving…";
   try {
     const result = await api("worker-slots", {video_slots: video, podcast_slots: podcast});
+    state.slotFormDirty = false;
     const parts = [result.applied ? (video ? "Applied. Takes effect as the next job starts." : "Slots are shared again.") : (result.message || "Saved. The worker has not confirmed yet.")];
     for (const warning of result.warnings || []) parts.push(warning);
     note.textContent = parts.join(" ");
@@ -3974,6 +3975,7 @@ $("worker-slot-form").addEventListener("submit", event => {
   void saveWorkerSlots(Number($("slot-video").value), Number($("slot-podcast").value));
 });
 $("worker-slot-share").addEventListener("click", () => void saveWorkerSlots(0, 0));
+for (const id of ["slot-video", "slot-podcast"]) $(id).addEventListener("input", () => { state.slotFormDirty = true; });
 function renderWorkerActivity(data) {
   $("worker-slots").replaceChildren();
   if (!serverReachable || !data?.available) {

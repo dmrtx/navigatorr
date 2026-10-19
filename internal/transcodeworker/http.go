@@ -969,8 +969,14 @@ func (s *Server) handleSlots(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		warnings, err := s.worker.SetSlotSplit(split)
+		var invalid *slotSplitInvalidError
+		if errors.As(err, &invalid) {
+			writeHTTPError(w, http.StatusBadRequest, invalid.Error())
+			return
+		}
 		if err != nil {
-			writeHTTPError(w, http.StatusBadRequest, err.Error())
+			log.Printf("slot split not stored: %v", err)
+			writeHTTPError(w, http.StatusInternalServerError, "the worker could not store the slot split")
 			return
 		}
 		w.Header().Set("Cache-Control", "no-store")
