@@ -65,11 +65,14 @@ func (e *Engine) DiscardDuplicateTranscodeBackup(ctx context.Context, id string)
 	}()
 	// Both full copies must match the original's recorded digest. A changed
 	// original, missing backup or merely equal file sizes never permits removal.
+	// The original is read in full; the copy in its private recovery directory
+	// is proved by the strict fingerprint recorded after its own full read,
+	// and read in full when there is none or it changed.
 	backupIdentity, err := os.Lstat(p.BackupPath)
 	if err != nil {
 		return nil, err
 	}
-	if err := e.verifyPromotionHashStable(ctx, p.BackupPath, p.OriginalSHA); err != nil {
+	if _, err := e.promotionVerifyByIdentity(ctx, p.BackupPath, p.OriginalSHA, p.BackupFingerprint, true); err != nil {
 		return nil, err
 	}
 	for _, path := range []string{p.BackupPath, p.BackupPath + ".partial"} {

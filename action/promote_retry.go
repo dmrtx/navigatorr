@@ -92,6 +92,9 @@ func (e *Engine) prepareRestoredOriginalRetry(ctx context.Context, ec *Execution
 	if !cmd.Done || cmd.ID <= 0 || cmd.Failed || p.RecoveryCleanupStarted {
 		return first, fmt.Errorf("cannot reimport without a confirmed prior import and retained recovery")
 	}
+	if p.MovedAside || p.MoveAsideStartedAt != "" {
+		return first, fmt.Errorf("the original was moved into recovery; reimport blocked, recovery retained")
+	}
 	if getString(ec.Inputs, "batch_promote_parent_id") != "" {
 		if err := e.verifyBatchPromotionApprovalState(ec, p, true); err != nil {
 			return first, err

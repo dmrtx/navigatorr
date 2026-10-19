@@ -29,6 +29,9 @@ func (e *Engine) DiscardTranscodeBackup(ctx context.Context, id string) (result 
 	if err != nil {
 		return nil, err
 	}
+	if err := promotionRecoveryIsOnlyOriginal(p); err != nil {
+		return nil, err
+	}
 	ctx = e.observeCleanup(ctx, ec)
 	defer func() {
 		if resultErr != nil {
@@ -68,6 +71,9 @@ func (e *Engine) DiscardTranscodeBackup(ctx context.Context, id string) (result 
 			return nil, err
 		}
 		if _, err := e.promotionPath(path, true); err != nil {
+			return nil, err
+		}
+		if err := promotionRecoveryIsOnlyOriginal(p); err != nil {
 			return nil, err
 		}
 		now, err := os.Lstat(path)

@@ -144,6 +144,7 @@ func TestPromotionNeverTrustsMismatchedPartialAtExactSize(t *testing.T) {
 
 func TestPromotionVerifiesRecoveryOnlyAfterCopyIsClosedAndSynced(t *testing.T) {
 	h := newPromotionHarness(t)
+	h.engine.promotionAlwaysCopy = true
 	originalBytes, err := os.ReadFile(h.original)
 	if err != nil {
 		t.Fatal(err)

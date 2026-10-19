@@ -3,7 +3,9 @@ package action
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -73,10 +75,10 @@ func (e *Engine) stepPromoteImport(ctx context.Context, ec *ExecutionContext) (S
 	}
 	_, adopted, err := e.promotionAdopted(ctx, svc, p)
 	if err != nil {
-		return promoteFailed(fmt.Errorf("Sonarr import completed but candidate adoption could not be verified: %w; recovery retained", err))
+		return promoteFailed(fmt.Errorf("Sonarr import completed but candidate adoption could not be verified: %w; %s", err, promotionRecoveryNote(p)))
 	}
 	if !adopted {
-		return promoteFailed(fmt.Errorf("Sonarr import completed without adopting the candidate for every approved episode; recovery retained"))
+		return promoteFailed(fmt.Errorf("Sonarr import completed without adopting the candidate for every approved episode; %s", promotionRecoveryNote(p)))
 	}
 	delete(ec.State, "promotion_reimport_pending")
 	if err := e.savePromotion(ctx, ec, p); err != nil {
@@ -85,12 +87,43 @@ func (e *Engine) stepPromoteImport(ctx context.Context, ec *ExecutionContext) (S
 	return StepResult{Status: StepCompleted, Outputs: map[string]any{"candidate_adopted": true, "new_episode_file_id": p.NewFileID}}, nil
 }
 
+// promotionOriginalRemovedByLibrary stops a move-aside promotion whose
+// original the library removed itself, together with its record, before it
+// could be moved aside. No recovery of the original exists, so this is never
+// reported as a success: it needs a person to check the library.
+func (e *Engine) promotionOriginalRemovedByLibrary(ctx context.Context, ec *ExecutionContext, p *promotionState) (StepResult, error) {
+	p.OriginalRemovedByLibrary = true
+	if err := e.savePromotion(ctx, ec, p); err != nil {
+		return promoteFailed(err)
+	}
+	log.Printf("promotion %s: the library removed the original itself before it was moved aside; no recovery exists", ec.InstanceID)
+	return promoteFailed(fmt.Errorf("the library removed the original file and its record itself before it could be moved aside, so no recovery of the original exists; the approved episodes use the verified candidate, which has not been renamed or finalized. Check the library before dismissing this promotion"))
+}
+
+// promotionRecoveryNote says truthfully where the original is when a library
+// step stops.
+func promotionRecoveryNote(p *promotionState) string {
+	switch {
+	case !p.movesAside():
+		return "recovery retained"
+	case p.MovedAside:
+		return "the original is kept at its recovery path"
+	}
+	if _, err := os.Lstat(p.OriginalPath); err == nil {
+		return "the original is still at its library path"
+	}
+	return "the original is no longer at its library path and no recovery of it exists"
+}
+
 func (e *Engine) stepPromoteRemoveOld(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
 	if getString(ec.Inputs, "service") == "filesystem" {
 		return e.localPromotionRemoveOriginal(ctx, ec)
 	}
 	p, svc, err := e.promotionMutation(ec)
 	if err != nil {
+		return promoteFailed(err)
+	}
+	if err := e.promotionResumeFallbackCopy(ctx, ec, p); err != nil {
 		return promoteFailed(err)
 	}
 	adopted, ok, err := e.promotionAdoptedFile(ctx, svc, p)
@@ -119,8 +152,10 @@ func (e *Engine) stepPromoteRemoveOld(ctx context.Context, ec *ExecutionContext)
 		if p.DeleteSentAt != "" {
 			return promotionUncertain(p.DeleteSentAt, "The old episodeFile delete outcome remains uncertain")
 		}
-		if err := e.promotionVerifyRecovered(ctx, p); err != nil {
-			return promoteFailed(err)
+		if !p.movesAside() {
+			if err := e.promotionVerifyRecovered(ctx, p); err != nil {
+				return promoteFailed(err)
+			}
 		}
 		// Reload the exact object immediately before DELETE. Never trust an
 		// old snapshot: the ID/path could now refer to the imported file.
@@ -150,7 +185,9 @@ func (e *Engine) stepPromoteRemoveOld(ctx context.Context, ec *ExecutionContext)
 		if _, err := e.promotionPath(old.Path, true); err != nil {
 			return promoteFailed(err)
 		}
-		if _, err := os.Lstat(old.Path); err == nil {
+		if p.movesAside() {
+			// The original is moved aside below, after every library check.
+		} else if _, err := os.Lstat(old.Path); err == nil {
 			// NAS metadata can still report the inode after Sonarr has removed
 			// it. A missing original needs only record reconciliation; every
 			// other integrity error must continue to block deletion.
@@ -166,6 +203,27 @@ func (e *Engine) stepPromoteRemoveOld(ctx context.Context, ec *ExecutionContext)
 		}
 		if err := e.promotionInspectAdopted(ctx, p, adopted.Path); err != nil {
 			return promoteFailed(err)
+		}
+		if p.movesAside() {
+			// Every approved episode already uses the verified candidate, so
+			// the library sees nothing go missing; DELETE then finds no file
+			// to remove. A refused rename copies instead, and the original is
+			// still in place for DELETE, exactly as in copy mode.
+			if err := e.promotionPreserveForRemoval(ctx, ec, p); errors.Is(err, errPromotionOriginalGone) {
+				// DELETE also removes the file from disk. Without a recovery,
+				// never send it on a possibly stale "missing": wait until the
+				// library drops the record, then reconcile it as an orphan.
+				return promoteWait("The original disappeared before it was moved aside; waiting for the library to drop its record")
+			} else if err != nil {
+				return promoteFailed(err)
+			}
+			// DELETE also removes the file at the old path from disk. It is
+			// sent only when nothing is there any more.
+			if p.movesAside() {
+				if _, err := os.Lstat(p.OriginalPath); !os.IsNotExist(err) {
+					return promoteFailed(fmt.Errorf("a file is at the original's library path after it was moved aside; DELETE not sent, %s", promotionRecoveryNote(p)))
+				}
+			}
 		}
 		p.DeleteSentAt = time.Now().UTC().Format(time.RFC3339Nano)
 		if err := e.savePromotion(ctx, ec, p); err != nil {
@@ -186,7 +244,30 @@ func (e *Engine) stepPromoteRemoveOld(ctx context.Context, ec *ExecutionContext)
 				return promoteFailed(fmt.Errorf("the original path is now owned by another Sonarr episodeFile"))
 			}
 		}
-		if _, err := os.Lstat(p.OriginalPath); err == nil {
+		if p.movesAside() && p.MovedAside {
+			// Moved aside before this promotion's own DELETE; keep it proved.
+			if err := e.promotionVerifyRecovered(ctx, p); err != nil {
+				return promoteFailed(err)
+			}
+		} else if p.movesAside() {
+			if _, err := os.Lstat(p.OriginalPath); err == nil || p.MoveAsideStartedAt != "" {
+				if err := e.promotionInspectAdopted(ctx, p, adopted.Path); err != nil {
+					return promoteFailed(err)
+				}
+				if err := e.promotionPreserveForRemoval(ctx, ec, p); errors.Is(err, errPromotionOriginalGone) {
+					return e.promotionOriginalRemovedByLibrary(ctx, ec, p)
+				} else if err != nil {
+					return promoteFailed(err)
+				}
+			} else if os.IsNotExist(err) {
+				return e.promotionOriginalRemovedByLibrary(ctx, ec, p)
+			} else {
+				return promoteFailed(err)
+			}
+		}
+		if p.movesAside() {
+			// Moved aside above.
+		} else if _, err := os.Lstat(p.OriginalPath); err == nil {
 			if err := e.promotionVerifyRecovered(ctx, p); err != nil {
 				return promoteFailed(err)
 			}
@@ -260,6 +341,8 @@ func (e *Engine) stepPromoteRename(ctx context.Context, ec *ExecutionContext) (S
 	}
 	// Discovery must not open Sonarr's possibly stale pre-rename path. A
 	// completed command may have moved it before its response was checkpointed.
+	// Renaming the adopted file loses no data, so it is re-proved by identity
+	// here; finalization reads the final file in full before removing recovery.
 	adopted, ok, err := e.promotionAdoptedFile(ctx, svc, p)
 	if err != nil {
 		return promoteFailed(err)
@@ -274,7 +357,7 @@ func (e *Engine) stepPromoteRename(ctx context.Context, ec *ExecutionContext) (S
 		if p.NewPath != "" && !temporaryPromotionPath(p.NewPath) && filepath.Clean(p.NewPath) != filepath.Clean(adopted.Path) {
 			return promoteFailed(fmt.Errorf("adopted library path changed after rename; recovery retained"))
 		}
-		if err := e.promotionInspectAdopted(ctx, p, adopted.Path); err != nil {
+		if err := e.promotionConfirmAdopted(ctx, p, adopted.Path); err != nil {
 			return promoteFailed(err)
 		}
 		p.NewPath = filepath.Clean(adopted.Path)
@@ -290,7 +373,7 @@ func (e *Engine) stepPromoteRename(ctx context.Context, ec *ExecutionContext) (S
 		if !withinPromotionPath(p.SeriesPath, p.NewPath) {
 			return promoteFailed(fmt.Errorf("durable renamed path is outside the series root"))
 		}
-		if err := e.promotionInspectAdopted(ctx, p, p.NewPath); err != nil {
+		if err := e.promotionConfirmAdopted(ctx, p, p.NewPath); err != nil {
 			return promoteFailed(err)
 		}
 		return StepResult{Status: StepCompleted}, nil
@@ -300,7 +383,7 @@ func (e *Engine) stepPromoteRename(ctx context.Context, ec *ExecutionContext) (S
 		if err := e.promotionVerifyRecovered(ctx, p); err != nil {
 			return promoteFailed(err)
 		}
-		if err := e.promotionInspectAdopted(ctx, p, adopted.Path); err != nil {
+		if err := e.promotionConfirmAdopted(ctx, p, adopted.Path); err != nil {
 			return promoteFailed(err)
 		}
 	}
@@ -329,7 +412,7 @@ func (e *Engine) stepPromoteRename(ctx context.Context, ec *ExecutionContext) (S
 		}
 		return promoteWait("Rename completed; waiting for Sonarr to publish the final library path, recovery retained")
 	}
-	if err := e.promotionInspectAdopted(ctx, p, adopted.Path); err != nil {
+	if err := e.promotionConfirmAdopted(ctx, p, adopted.Path); err != nil {
 		return promoteFailed(err)
 	}
 	p.NewPath = filepath.Clean(adopted.Path)

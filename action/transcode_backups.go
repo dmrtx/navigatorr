@@ -130,7 +130,8 @@ func (e *Engine) ListTranscodeBackups(ctx context.Context, offset int) (*Transco
 			continue
 		}
 		if item.Reason == "" {
-			item.DeleteAvailable = e.AllowDestructive() && (inst.Status == StatusFailed || inst.Status == StatusCompleted || inst.Status == StatusCancelled)
+			onlyOriginal := promotionRecoveryIsOnlyOriginal(p)
+			item.DeleteAvailable = onlyOriginal == nil && e.AllowDestructive() && (inst.Status == StatusFailed || inst.Status == StatusCompleted || inst.Status == StatusCancelled)
 			if _, err := e.duplicateBackupGuard(&inst, ec); err == nil && e.AllowDestructive() && item.Bytes > 0 {
 				item.DuplicateAvailable = true
 			}
@@ -141,6 +142,9 @@ func (e *Engine) ListTranscodeBackups(ctx context.Context, offset int) (*Transco
 			} else {
 				item.CleanupAvailable = true
 				item.Reason = "Can retry final verification and cleanup; library identity and hashes will be checked before removal"
+			}
+			if onlyOriginal != nil && !item.CleanupAvailable {
+				item.Reason = onlyOriginal.Error()
 			}
 		}
 		page.Bytes += item.Bytes + item.PartialBytes

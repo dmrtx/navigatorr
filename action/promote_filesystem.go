@@ -56,9 +56,27 @@ func (e *Engine) withBatchPromotionMutation(ctx context.Context, ec *ExecutionCo
 // The durable publish intent precedes the atomic move. After a crash, only the
 // recorded candidate digest at the recorded destination proves publication;
 // unknown destination bytes never trigger another overwrite or cleanup.
-func (e *Engine) localPromotionPublish(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+func (e *Engine) localPromotionPublish(ctx context.Context, ec *ExecutionContext) (res StepResult, resErr error) {
 	p, err := e.localPromotionState(ec)
 	if err != nil {
+		return promoteFailed(err)
+	}
+	// A same-name publish that stops after the original moved aside, and
+	// before the candidate took its name, moves the original back on every
+	// failure, including any later retry that stops early: a crash there
+	// otherwise leaves the library path empty for good.
+	sameName := p.NewPath == p.OriginalPath
+	candidateRenamed := false
+	defer func() {
+		if res.Status != StepFailed || resErr != nil || candidateRenamed || getBool(ec.State, "filesystem_published") {
+			return
+		}
+		res.Error = e.promotionMoveBackAfterFailedPublish(ctx, ec, p, res.Error)
+	}()
+	if err := e.promotionResumeFallbackCopy(ctx, ec, p); err != nil {
+		return promoteFailed(err)
+	}
+	if err := e.promotionResumeMoveBack(ctx, ec, p); err != nil {
 		return promoteFailed(err)
 	}
 	if err := e.promotionVerifyRecovered(ctx, p); err != nil {
@@ -70,7 +88,15 @@ func (e *Engine) localPromotionPublish(ctx context.Context, ec *ExecutionContext
 			return StepResult{Status: StepCompleted}, e.savePromotion(ctx, ec, p)
 		}
 	}
-	if err := e.verifyPromotionHashStable(ctx, p.OriginalPath, p.OriginalSHA); err != nil {
+	// Once a move aside started, promotionVerifyRecovered above and the
+	// move itself prove the original wherever it is.
+	verifyOriginal := func() error {
+		if p.MovedAside || p.MoveAsideStartedAt != "" {
+			return nil
+		}
+		return e.verifyPromotionHashStable(ctx, p.OriginalPath, p.OriginalSHA)
+	}
+	if err := verifyOriginal(); err != nil {
 		return promoteFailed(err)
 	}
 	if err := e.verifyPromotionHashStable(ctx, p.CandidatePath, p.CandidateSHA); err != nil {
@@ -89,25 +115,46 @@ func (e *Engine) localPromotionPublish(ctx context.Context, ec *ExecutionContext
 		return promoteFailed(err)
 	}
 	// Recheck immediately before the atomic mutation, after persisting intent.
-	if err := e.verifyPromotionHashStable(ctx, p.OriginalPath, p.OriginalSHA); err != nil {
+	if err := verifyOriginal(); err != nil {
 		return promoteFailed(err)
 	}
 	if err := e.verifyPromotionHashStable(ctx, p.CandidatePath, p.CandidateSHA); err != nil {
 		return promoteFailed(err)
 	}
+	// When the candidate takes the original's name in move-aside mode, the
+	// original moves aside and the candidate takes the empty name in one
+	// approved mutation; if the candidate cannot take it, the original moves
+	// back. A refused move copies the original instead and replaces it
+	// atomically as in copy mode.
 	err = e.withBatchPromotionMutation(ctx, ec, p, func() error {
-		if p.NewPath == p.OriginalPath {
-			return os.Rename(p.CandidatePath, p.NewPath)
+		if sameName && p.movesAside() {
+			if err := e.promotionPreserveForRemoval(ctx, ec, p); err != nil {
+				return err
+			}
 		}
-		return renamePromotionNoReplace(p.CandidatePath, p.NewPath)
+		var err error
+		if sameName && !p.movesAside() {
+			err = os.Rename(p.CandidatePath, p.NewPath)
+		} else {
+			err = renamePromotionNoReplace(p.CandidatePath, p.NewPath)
+		}
+		candidateRenamed = err == nil
+		return err
 	})
 	if err != nil {
-		return promoteFailed(fmt.Errorf("publish filesystem candidate: %w; recovery retained", err))
+		// The deferred move back reports where the original is when it moved.
+		if sameName && p.movesAside() && (p.MovedAside || p.MoveAsideStartedAt != "") {
+			if _, statErr := os.Lstat(p.OriginalPath); os.IsNotExist(statErr) {
+				return promoteFailed(fmt.Errorf("publish filesystem candidate: %w", err))
+			}
+		}
+		return promoteFailed(fmt.Errorf("publish filesystem candidate: %w; %s", err, promotionRecoveryNote(p)))
 	}
 	if d, err := os.Open(filepath.Dir(p.NewPath)); err == nil {
 		_ = d.Sync()
 		_ = d.Close()
 	}
+	e.promotionCarryRenamed(ctx, p.CandidatePath, p.NewPath)
 	if err := e.promotionInspectAdopted(ctx, p, p.NewPath); err != nil {
 		return promoteFailed(err)
 	}
@@ -123,6 +170,9 @@ func (e *Engine) localPromotionRemoveOriginal(ctx context.Context, ec *Execution
 	if err != nil {
 		return promoteFailed(err)
 	}
+	if err := e.promotionResumeFallbackCopy(ctx, ec, p); err != nil {
+		return promoteFailed(err)
+	}
 	if !getBool(ec.State, "filesystem_published") {
 		return promoteFailed(fmt.Errorf("candidate publication is not confirmed"))
 	}
@@ -132,7 +182,12 @@ func (e *Engine) localPromotionRemoveOriginal(ctx context.Context, ec *Execution
 	if err := e.promotionInspectAdopted(ctx, p, p.NewPath); err != nil {
 		return promoteFailed(err)
 	}
-	if p.NewPath != p.OriginalPath {
+	if p.NewPath != p.OriginalPath && p.movesAside() {
+		if err := e.withBatchPromotionMutation(ctx, ec, p, func() error { return e.promotionPreserveForRemoval(ctx, ec, p) }); err != nil {
+			return promoteFailed(err)
+		}
+	}
+	if p.NewPath != p.OriginalPath && !p.movesAside() {
 		if _, err := os.Lstat(p.OriginalPath); err == nil {
 			if err := e.verifyPromotionHashStable(ctx, p.OriginalPath, p.OriginalSHA); err != nil {
 				return promoteFailed(err)
@@ -226,4 +281,20 @@ func (e *Engine) localPromotionFinalize(ctx context.Context, ec *ExecutionContex
 		percent = float64(saved) / float64(p.OriginalBytes) * 100
 	}
 	return StepResult{Status: StepCompleted, Outputs: map[string]any{"promoted": true, "promotion": p, "final_path": p.NewPath, "original_integrity": "verified_before_replacement", "candidate_sha256": p.CandidateSHA, "recovery_retained": false, "size_saved_bytes": saved, "size_saved_percent": percent, "import_required": false}}, nil
+}
+
+// promotionMoveBackAfterFailedPublish moves a moved-aside original back to its
+// empty library path after a same-name publish failed, and returns the
+// failure message saying where the original is now.
+func (e *Engine) promotionMoveBackAfterFailedPublish(ctx context.Context, ec *ExecutionContext, p *promotionState, msg string) string {
+	if p.NewPath != p.OriginalPath || !p.movesAside() || !p.MovedAside && p.MoveAsideStartedAt == "" {
+		return msg
+	}
+	if _, err := os.Lstat(p.OriginalPath); !os.IsNotExist(err) {
+		return msg
+	}
+	if err := e.promotionMoveBack(ctx, ec, p); err != nil {
+		return fmt.Sprintf("%s; moving the original back failed: %v; the original is kept at its recovery path and its library path is empty", msg, err)
+	}
+	return msg + "; the original was moved back to its library path"
 }

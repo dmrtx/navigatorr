@@ -9,13 +9,20 @@ import (
 )
 
 func TestPromotionRemoveOldToleratesOriginalDisappearingBeforeHash(t *testing.T) {
-	for _, oldRecordRetained := range []bool{true, false} {
+	for _, tc := range []struct {
+		oldRecordRetained, copy bool
+	}{{true, false}, {false, false}, {true, true}, {false, true}} {
 		name := "orphaned_original"
-		if oldRecordRetained {
+		if tc.oldRecordRetained {
 			name = "old_record_retained"
+		}
+		oldRecordRetained := tc.oldRecordRetained
+		if tc.copy {
+			name += "/copy"
 		}
 		t.Run(name, func(t *testing.T) {
 			h := newPromotionHarness(t)
+			h.engine.promotionAlwaysCopy = tc.copy
 			h.dropImportResponse = true // Suspend after adoption, before old-file cleanup.
 			r := h.resume(h.run().ID, "approve")
 			h.mu.Lock() // The dropped response can precede the handler's return.
@@ -47,12 +54,32 @@ func TestPromotionRemoveOldToleratesOriginalDisappearingBeforeHash(t *testing.T)
 				return os.Lstat(path)
 			}
 			r = h.finish(r)
+			wantDeletes := 0
+			if oldRecordRetained && tc.copy {
+				wantDeletes = 1
+			}
+			if oldRecordRetained && !tc.copy {
+				// Without a recovery, DELETE (which also removes the file)
+				// is never sent on a "missing" that may be stale. The
+				// promotion waits until the library drops the record.
+				if !disappeared || r.Status != StatusWaitingExternal || !strings.Contains(r.WaitingReason, "disappeared before it was moved aside") || h.deletes != 0 {
+					t.Fatalf("missing original was not held for the library: %s %s %s deletes=%d", r.Status, r.WaitingReason, r.Error, h.deletes)
+				}
+				h.mu.Lock()
+				delete(h.files, 101)
+				h.mu.Unlock()
+				r = h.finish(h.resume(r.ID, ""))
+			}
+			if !tc.copy {
+				// Nothing of the original is left to recover: stop for a
+				// person instead of reporting success.
+				if !disappeared || r.Status != StatusFailed || !strings.Contains(r.Error, "no recovery of the original exists") || h.deletes != 0 || h.renames != 0 {
+					t.Fatalf("missing original reported as success: %s %s deletes=%d", r.Status, r.Error, h.deletes)
+				}
+				return
+			}
 			if !disappeared || r.Status != StatusCompleted {
 				t.Fatalf("original disappearance blocked promotion: %s %s", r.Status, r.Error)
-			}
-			wantDeletes := 0
-			if oldRecordRetained {
-				wantDeletes = 1
 			}
 			if h.imports != 1 || h.deletes != wantDeletes || h.renames != 1 || h.rescans != 1 {
 				t.Fatalf("unexpected mutations: import=%d delete=%d rename=%d rescan=%d", h.imports, h.deletes, h.renames, h.rescans)
@@ -69,9 +96,11 @@ func TestPromotionRemoveOldToleratesOriginalDisappearingBeforeHash(t *testing.T)
 }
 
 func TestPromotionRemoveOldRejectsChangedOrUnreadableOriginal(t *testing.T) {
-	for _, failure := range []string{"changed", "permission_denied"} {
-		t.Run(failure, func(t *testing.T) {
+	for _, name := range []string{"changed", "permission_denied", "changed/copy", "permission_denied/copy"} {
+		failure, copyMode := strings.TrimSuffix(name, "/copy"), strings.HasSuffix(name, "/copy")
+		t.Run(name, func(t *testing.T) {
 			h := newPromotionHarness(t)
+			h.engine.promotionAlwaysCopy = copyMode
 			h.dropImportResponse = true
 			r := h.resume(h.run().ID, "approve")
 			h.mu.Lock()
@@ -99,8 +128,13 @@ func TestPromotionRemoveOldRejectsChangedOrUnreadableOriginal(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := h.engine.verifyPromotionHash(context.Background(), p.BackupPath, p.OriginalSHA); err != nil {
-				t.Fatalf("recovery lost after blocked cleanup: %v", err)
+			if copyMode {
+				if err := testFileSHA(p.BackupPath, p.OriginalSHA); err != nil {
+					t.Fatalf("recovery lost after blocked cleanup: %v", err)
+				}
+			} else if _, err := os.Lstat(p.BackupPath); !os.IsNotExist(err) || p.MovedAside || p.MoveAsideStartedAt != "" {
+				// An original changed after approval is never moved aside.
+				t.Fatalf("unverified original moved aside: %v %+v", err, p)
 			}
 			if _, err := os.Stat(h.original); err != nil {
 				t.Fatalf("unverified original removed: %v", err)

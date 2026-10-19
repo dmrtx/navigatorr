@@ -205,6 +205,8 @@ func (e *Engine) promotionHashStable(ctx context.Context, path string) (string, 
 			return "", 0, err
 		}
 		lastErr = err
+		// Each retry is another whole read; make them visible.
+		log.Printf("promotion: %v (full read %d of %d); reading it again", err, attempt+1, promotionStableHashAttempts)
 		select {
 		case <-ctx.Done():
 			return "", 0, ctx.Err()
@@ -291,14 +293,17 @@ func (e *Engine) stepPromotePlan(ctx context.Context, ec *ExecutionContext) (Ste
 	if _, err := e.promotionPath(p.CandidatePath, true); err != nil {
 		return promoteFailed(err)
 	}
-	actual, size, err := e.promotionHash(ctx, p.OriginalPath)
+	// The original is hashed once, after approval, by preserve_original: an
+	// approval can wait indefinitely, so a digest taken here would only be
+	// read again. Plan proves it is still the transcoded regular file.
+	original, err := e.promotionStatIdentity(p.OriginalPath)
 	if err != nil {
-		return promoteFailed(err)
+		return promoteFailed(fmt.Errorf("original is not a readable regular file: %w", err))
 	}
-	if actual != p.OriginalSHA {
-		return promoteFailed(fmt.Errorf("integrity violation: original SHA-256 changed since transcoding"))
+	if expected := getInt64(stateObject(source.State, "original"), "size_bytes"); expected > 0 && original.Size() != expected {
+		return promoteFailed(fmt.Errorf("integrity violation: original size changed since transcoding"))
 	}
-	p.OriginalBytes = size
+	p.OriginalBytes = original.Size()
 	p.CandidateSHA, p.CandidateBytes, err = e.promotionHash(ctx, p.CandidatePath)
 	if err != nil {
 		return promoteFailed(err)
@@ -525,23 +530,91 @@ func (e *Engine) stepPromotePreserve(ctx context.Context, ec *ExecutionContext) 
 	if _, err := e.promotionPath(p.BackupPath, true); err != nil {
 		return promoteFailed(err)
 	}
+	if p.RecoveryMode == "" {
+		p.RecoveryMode = e.promotionChooseRecovery(ctx, p)
+	}
+	if p.movesAside() && !p.MovedAside {
+		// The original stays where it is, verified and reserved, until right
+		// before it would be removed; see promotionMoveAside. This step's
+		// full hash is the identity that move must find again.
+		p.OriginalFingerprint = promotionKnownFingerprint(ctx, p.OriginalPath, p.OriginalSHA)
+		if p.OriginalFingerprint == nil {
+			if p.MoveAsideStartedAt != "" {
+				return promoteFailed(fmt.Errorf("the original has no stable file identity after a move aside began; recovery retained"))
+			}
+			p.RecoveryMode = promotionRecoveryCopy
+		}
+	}
+	if p.movesAside() {
+		// No recovery exists yet: it is the original once moved aside, and
+		// promotionMoveAside records it as verified then.
+		delete(ec.State, "work_progress")
+		if err := e.savePromotion(ctx, ec, p); err != nil {
+			return promoteFailed(err)
+		}
+		return StepResult{Status: StepCompleted, Outputs: map[string]any{"recovery_path": p.BackupPath, "recovery_mode": p.RecoveryMode}}, nil
+	}
+	if err := e.promotionMakeRecoveryCopy(ctx, ec, p, progress); err != nil {
+		return promoteFailed(err)
+	}
+	delete(ec.State, "work_progress")
+	p.RecoveryVerifiedBeforeReplacement = true
+	if err := e.savePromotion(ctx, ec, p); err != nil {
+		return promoteFailed(err)
+	}
+	out := map[string]any{"recovery_path": p.BackupPath, "recovery_mode": p.RecoveryMode, "recovery_retained": true}
+	if p.RecoveryCopy != nil {
+		out["recovery_copy"] = p.RecoveryCopy
+	}
+	return StepResult{Status: StepCompleted, Outputs: out}, nil
+}
+
+// promotionChooseRecovery moves the original aside unless something rules it
+// out: a copy left by an earlier attempt or release keeps the copy design, as
+// does a file without a stable identity to follow through the rename.
+func (e *Engine) promotionChooseRecovery(ctx context.Context, p *promotionState) string {
+	if e.promotionAlwaysCopy || promotionKnownFingerprint(ctx, p.OriginalPath, p.OriginalSHA) == nil {
+		return promotionRecoveryCopy
+	}
+	for _, path := range []string{p.BackupPath, p.BackupPath + ".partial"} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			return promotionRecoveryCopy
+		}
+	}
+	if err := e.promotionProbeMount(filepath.Dir(p.BackupPath)); err != nil {
+		log.Printf("promotion: the recovery directory's mount does not keep file identity (%v); making a recovery copy instead of moving the original aside", err)
+		return promotionRecoveryCopy
+	}
+	return promotionRecoveryMoveAside
+}
+
+// promotionMakeRecoveryCopy publishes a verified copy of the original at
+// BackupPath, reusing one an earlier attempt finished. The caller has just
+// verified the original.
+func (e *Engine) promotionMakeRecoveryCopy(ctx context.Context, ec *ExecutionContext, p *promotionState, progress *promotionPreserveProgress) error {
+	if _, err := e.promotionPath(p.BackupPath, true); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(p.BackupPath), 0700); err != nil {
+		return err
+	}
 	if _, err := os.Lstat(p.BackupPath); err == nil {
 		if err := e.verifyPromotionHashStable(ctx, p.BackupPath, p.OriginalSHA); err != nil {
-			return promoteFailed(err)
+			return err
 		}
 		if err := e.promotionRemovePartial(ctx, ec, p); err != nil {
-			return promoteFailed(err)
+			return err
 		}
 	} else if !os.IsNotExist(err) {
-		return promoteFailed(err)
+		return err
 	} else {
 		partial := p.BackupPath + ".partial"
 		if _, err := e.promotionPath(partial, true); err != nil {
-			return promoteFailed(err)
+			return err
 		}
 		if info, err := os.Lstat(partial); err == nil {
 			if !info.Mode().IsRegular() {
-				return promoteFailed(fmt.Errorf("recovery partial is not a regular file"))
+				return fmt.Errorf("recovery partial is not a regular file")
 			}
 			// Retry/re-entry: a previous attempt may have completed the private
 			// copy but crashed before the atomic rename. Reuse a stable, exact
@@ -551,23 +624,23 @@ func (e *Engine) stepPromotePreserve(ctx context.Context, ec *ExecutionContext) 
 				hash, n, hashErr := e.promotionHashStable(ctx, partial)
 				if hashErr == nil && hash == p.OriginalSHA && n == p.OriginalBytes {
 					if err := e.promotionPublishPartial(ctx, ec, p, partial); err != nil {
-						return promoteFailed(err)
+						return err
 					}
-					goto preserved
+					return e.promotionRecordBackup(ctx, ec, p)
 				}
 			}
-			// No Sonarr mutation has started in this step. The original was just
+			// No library mutation removed the original. It was just
 			// reverified, so an interrupted private copy can be rebuilt safely.
 			if err := os.Remove(partial); err != nil {
-				return promoteFailed(err)
+				return err
 			}
 		} else if !os.IsNotExist(err) {
-			return promoteFailed(err)
+			return err
 		}
 		started := time.Now()
 		copied, err := e.promotionCopyToPartial(ctx, p.OriginalPath, partial, progress.copies(ctx))
 		if err != nil {
-			return promoteFailed(err)
+			return err
 		}
 		copied.DurationMs = time.Since(started).Milliseconds()
 		p.RecoveryCopy = &copied
@@ -577,27 +650,28 @@ func (e *Engine) stepPromotePreserve(ctx context.Context, ec *ExecutionContext) 
 		// writer. Stable hashing absorbs transient post-close metadata races.
 		// However the copy was made, this full read-back is what proves it.
 		if err := e.verifyPromotionHashStable(ctx, partial, p.OriginalSHA); err != nil {
-			return promoteFailed(err)
+			return err
 		}
 		// This is an independent copy in the promotion's private directory.
 		// Atomic rename needs no NAS hard-link support. The durable original
 		// reservation prevents another promotion from publishing here.
 		if err := e.promotionPublishPartial(ctx, ec, p, partial); err != nil {
-			return promoteFailed(err)
+			return err
 		}
 	}
-preserved:
-	delete(ec.State, "work_progress")
+	return e.promotionRecordBackup(ctx, ec, p)
+}
+
+// promotionRecordBackup marks the published copy verified and keeps the
+// fingerprint of its full read, so later steps can prove it unchanged in its
+// private directory without reading it again.
+func (e *Engine) promotionRecordBackup(ctx context.Context, ec *ExecutionContext, p *promotionState) error {
+	if p.RecoveryMode == "" {
+		p.RecoveryMode = promotionRecoveryCopy
+	}
 	p.BackupVerified = true
-	p.RecoveryVerifiedBeforeReplacement = true
-	if err := e.savePromotion(ctx, ec, p); err != nil {
-		return promoteFailed(err)
-	}
-	out := map[string]any{"recovery_path": p.BackupPath, "recovery_retained": true}
-	if p.RecoveryCopy != nil {
-		out["recovery_copy"] = p.RecoveryCopy
-	}
-	return StepResult{Status: StepCompleted, Outputs: out}, nil
+	p.BackupFingerprint = promotionKnownFingerprint(ctx, p.BackupPath, p.OriginalSHA)
+	return e.savePromotion(ctx, ec, p)
 }
 
 func promotionOr(value, fallback string) string {
@@ -721,14 +795,36 @@ func (e *Engine) promotionRemovePartial(ctx context.Context, ec *ExecutionContex
 	return os.Remove(partial)
 }
 
+// promotionVerifyRecovered proves the original is still recoverable. Until a
+// move-aside promotion moves it, that is the verified original in place, read
+// in full after any wait. A published recovery sits in its private 0700
+// directory, so its fingerprint proves it unchanged since its full read.
 func (e *Engine) promotionVerifyRecovered(ctx context.Context, p *promotionState) error {
-	if !p.BackupVerified || p.BackupPath == "" {
-		return fmt.Errorf("verified recovery copy is required before Sonarr mutations")
-	}
 	if err := promotionBackupPathMatches(p); err != nil {
 		return err
 	}
-	return e.verifyPromotionHashStable(ctx, p.BackupPath, p.OriginalSHA)
+	if p.movesAside() && !p.MovedAside {
+		if p.BackupPath == "" || p.OriginalFingerprint == nil {
+			return fmt.Errorf("verified original is required before library mutations")
+		}
+		if p.MoveAsideStartedAt == "" {
+			// Anything already there would block the move later; stop
+			// before the library is changed instead.
+			if _, err := os.Lstat(p.BackupPath); !os.IsNotExist(err) {
+				return fmt.Errorf("the recovery path is occupied before the original was moved aside; recovery retained")
+			}
+		} else if _, err := os.Lstat(p.OriginalPath); os.IsNotExist(err) {
+			// The rename may have finished before its checkpoint, which only
+			// a restart reaches: read the moved file in full.
+			return e.verifyPromotionHashStable(ctx, p.BackupPath, p.OriginalSHA)
+		}
+		return e.verifyPromotionHashStable(ctx, p.OriginalPath, p.OriginalSHA)
+	}
+	if !p.BackupVerified || p.BackupPath == "" {
+		return fmt.Errorf("verified recovery copy is required before Sonarr mutations")
+	}
+	_, err := e.promotionVerifyByIdentity(ctx, p.BackupPath, p.OriginalSHA, p.BackupFingerprint, true)
+	return err
 }
 
 // Called only after finalization verifies the final library file and adoption.
@@ -791,6 +887,9 @@ func (e *Engine) promotionInspectAdopted(ctx context.Context, p *promotionState,
 		return err
 	}
 	p.CandidateMediaVerified = true
+	if fp := promotionKnownFingerprint(ctx, path, p.CandidateSHA); fp != nil {
+		p.CandidateFingerprint = fp
+	}
 	return nil
 }
 

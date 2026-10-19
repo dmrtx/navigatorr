@@ -947,7 +947,7 @@ test("loading another page cannot duplicate a conversion whose replacement has s
 test("replacement progress exposes real stages without inventing a byte percentage", () => {
   const h = harness();
   const result = h.run('telemetry({status:"running",current_step:2,stages:[{name:"plan_promotion"},{name:"approve_promotion"},{name:"preserve_original"},{name:"import_candidate"}]})');
-  assert.match(result.children[0].textContent, /Step 3\/4.*Save and verify recovery copy/);
+  assert.match(result.children[0].textContent, /Step 3\/4.*Verify original and prepare recovery/);
   assert.equal(result.children.length, 1, "workflow stages are not measured byte progress");
   assert.equal(h.run('queuePresentation({status:"running",promotion:{}}).showTelemetry'), true);
   assert.equal(h.run('queuePresentation({status:"waiting_external",worker:{transcode_phase:"encoding",progress:34}}).status'), "Encoding");
@@ -3098,27 +3098,27 @@ test("a finished encode shows the original's re-check, never Completed", () => {
   assert.doesNotMatch(text, /Completed|100\.0%|Measured|Inspecting source/);
   assert.equal(h.run('queuePresentation(progressJob).status'), "In progress");
 
-  h.run('progressJob.work={phase:"waiting_for_hash_slot",total_bytes:34e9};progressJob.activities[0].work=progressJob.work;');
+  h.run('progressJob.work={phase:"waiting_for_hash_slot",total_bytes:20e9};progressJob.activities[0].work=progressJob.work;');
   const waiting = h.run('telemetry(progressJob)');
   assert.match(progressText(waiting), /Waiting to verify original/);
   assert.equal(meterOf(waiting), undefined);
   assert.equal(h.run('batchFileActivity({status:"running",child_action_id:"child"},progressJob)'), "Waiting to verify original");
 
-  h.run('progressJob.work={phase:"verifying_original",bytes_read:12e9,total_bytes:34e9};progressJob.activities[0].work=progressJob.work;');
+  h.run('progressJob.work={phase:"verifying_original",bytes_read:12e9,total_bytes:20e9};progressJob.activities[0].work=progressJob.work;');
   const checking = h.run('telemetry(progressJob)');
   text = progressText(checking);
-  assert.match(text, /Checking the original is unchanged.*12\.00 GB \/ 34\.00 GB.*Encode finished /);
+  assert.match(text, /Checking the original is unchanged.*12\.00 GB \/ 20\.00 GB.*Encode finished /);
   assert.doesNotMatch(text, /Completed|100\.0%|Measured/);
-  assert.equal(meterOf(checking).max, 34e9);
+  assert.equal(meterOf(checking).max, 20e9);
   assert.equal(meterOf(checking).value, 12e9);
-  assert.equal(h.run('batchFileActivity({status:"running",child_action_id:"child"},progressJob)'), "Checking the original is unchanged · 12.00 GB / 34.00 GB");
+  assert.equal(h.run('batchFileActivity({status:"running",child_action_id:"child"},progressJob)'), "Checking the original is unchanged · 12.00 GB / 20.00 GB");
 
   // Preflight queues its own source hash; that is not the original's re-check.
-  h.run('progressJob.current_step=0;progressJob.work={phase:"waiting_for_hash_slot",total_bytes:34e9};');
+  h.run('progressJob.current_step=0;progressJob.work={phase:"waiting_for_hash_slot",total_bytes:20e9};');
   assert.doesNotMatch(progressText(h.run('telemetry(progressJob)')), /Waiting to verify original/);
 
   // Once the step hands the candidate over, telemetry is no longer current work.
-  h.run('progressJob.current_step=6;progressJob.status="waiting_decision";progressJob.work={phase:"verifying_original",bytes_read:34e9,total_bytes:34e9};');
+  h.run('progressJob.current_step=6;progressJob.status="waiting_decision";progressJob.work={phase:"verifying_original",bytes_read:20e9,total_bytes:20e9};');
   assert.equal(h.run('postEncodeWork(progressJob)'), null);
   // A finished calibration is not a finished conversion.
   assert.equal(h.run('postEncodeWork({status:"running",worker:{benchmark_status:"completed",phase:"completed"}})'), null);
@@ -3131,29 +3131,29 @@ test("the original's re-check keeps a waiting reason and also shows for a skippe
 
   // A skipped conversion re-checks the original without any worker telemetry.
   h.run('delete progressJob.worker;progressJob.activities=[{...progressJob,id:"child"}];');
-  h.run('progressJob.work=progressJob.activities[0].work={phase:"waiting_for_hash_slot",total_bytes:34e9};');
+  h.run('progressJob.work=progressJob.activities[0].work={phase:"waiting_for_hash_slot",total_bytes:20e9};');
   assert.equal(h.run('batchFileActivity({status:"running",child_action_id:"child"},progressJob)'), "Waiting to verify original");
   assert.match(progressText(h.run('telemetry(progressJob)')), /Waiting to verify original/);
-  h.run('progressJob.work=progressJob.activities[0].work={phase:"verifying_original",bytes_read:1e9,total_bytes:34e9};');
-  assert.equal(h.run('batchFileActivity({status:"running",child_action_id:"child"},progressJob)'), "Checking the original is unchanged · 1.00 GB / 34.00 GB");
+  h.run('progressJob.work=progressJob.activities[0].work={phase:"verifying_original",bytes_read:1e9,total_bytes:20e9};');
+  assert.equal(h.run('batchFileActivity({status:"running",child_action_id:"child"},progressJob)'), "Checking the original is unchanged · 1.00 GB / 20.00 GB");
   const text = progressText(h.run('telemetry(progressJob)'));
-  assert.match(text, /Checking the original is unchanged.*1\.00 GB \/ 34\.00 GB/);
+  assert.match(text, /Checking the original is unchanged.*1\.00 GB \/ 20\.00 GB/);
   assert.doesNotMatch(text, /Encode finished/);
   // After a calibration only, too: its "Completed" is not the current work.
   h.run('progressJob.worker={benchmark_status:"completed",phase:"completed"};');
   assert.match(progressText(h.run('telemetry(progressJob)')), /Checking the original is unchanged/);
 });
 
-test("saving the recovery copy names and measures each stage instead of a frozen step", () => {
+test("preparing recovery names and measures each stage instead of a frozen step", () => {
   const h = harness();
   h.run(`globalThis.promotionJob = {id:"promote",status:"running",current_step:2,
     stages:["plan_promotion","approve_promotion","preserve_original","import_candidate","remove_old_file","rename_candidate","rescan_library","finalize_promotion"].map(name=>({name}))};`);
   // Without coordinator work the step itself is all there is to show.
-  assert.match(progressText(h.run('telemetry(promotionJob)')), /Step 3\/8 · Save and verify recovery copy/);
+  assert.match(progressText(h.run('telemetry(promotionJob)')), /Step 3\/8 · Verify original and prepare recovery/);
 
-  h.run('promotionJob.work={phase:"waiting_for_hash_slot",total_bytes:34e9};');
+  h.run('promotionJob.work={phase:"waiting_for_hash_slot",total_bytes:20e9};');
   const waiting = h.run('telemetry(promotionJob)');
-  assert.match(progressText(waiting), /Step 3\/8 · Save and verify recovery copy · Waiting for a hash slot/);
+  assert.match(progressText(waiting), /Step 3\/8 · Verify original and prepare recovery · Waiting for a hash slot/);
   assert.equal(meterOf(waiting), undefined);
 
   for (const [phase, label] of [
@@ -3162,14 +3162,14 @@ test("saving the recovery copy names and measures each stage instead of a frozen
     ["copying_recovery", "Copying the recovery copy"],
     ["verifying_recovery", "Verifying the recovery copy"],
   ]) {
-    h.run(`promotionJob.work={phase:"${phase}",bytes_read:17e9,total_bytes:34e9};`);
+    h.run(`promotionJob.work={phase:"${phase}",bytes_read:10e9,total_bytes:20e9};`);
     const element = h.run('telemetry(promotionJob)');
-    assert.match(progressText(element), new RegExp(`Step 3/8 · Save and verify recovery copy · ${label} · 50%.*17\\.00 GB / 34\\.00 GB`));
-    assert.equal(meterOf(element).max, 34e9);
-    assert.equal(meterOf(element).value, 17e9);
+    assert.match(progressText(element), new RegExp(`Step 3/8 · Verify original and prepare recovery · ${label} · 50%.*10\\.00 GB / 20\\.00 GB`));
+    assert.equal(meterOf(element).max, 20e9);
+    assert.equal(meterOf(element).value, 10e9);
   }
   // Only the whole file reads as 100%.
-  h.run('promotionJob.work={phase:"copying_recovery",bytes_read:34e9-1,total_bytes:34e9};');
+  h.run('promotionJob.work={phase:"copying_recovery",bytes_read:20e9-1,total_bytes:20e9};');
   assert.match(h.run('postEncodeWork(promotionJob).label'), / · 99%$/);
 
   // The same stage reads correctly as a batch replacement's file activity.
@@ -3181,6 +3181,13 @@ test("saving the recovery copy names and measures each stage instead of a frozen
   h.run('promotionJob.current_step=3;');
   assert.equal(h.run('preserveWork(promotionJob)'), null);
   assert.match(progressText(h.run('telemetry(promotionJob)')), /Step 4\/8 · Import verified candidate/);
+  // An original that cannot be moved aside is copied while it is removed.
+  h.run('promotionJob.current_step=4;promotionJob.work={phase:"copying_recovery",bytes_read:5e9,total_bytes:20e9};');
+  assert.match(progressText(h.run('telemetry(promotionJob)')), /Step 5\/8 · Remove original library file · Copying the recovery copy · 25%.*5\.00 GB \/ 20\.00 GB/);
+  h.run('promotionJob.work={phase:"waiting_for_hash_slot",total_bytes:20e9};');
+  assert.match(progressText(h.run('telemetry(promotionJob)')), /Step 5\/8 · Remove original library file · Waiting for a hash slot/);
+  h.run('promotionJob.work={phase:"verifying_original",bytes_read:5e9,total_bytes:20e9};');
+  assert.equal(h.run('preserveWork(promotionJob)'), null);
   // A stopped promotion shows no current work.
   h.run('promotionJob.current_step=2;promotionJob.status="failed";');
   assert.equal(h.run('postEncodeWork(promotionJob)'), null);
