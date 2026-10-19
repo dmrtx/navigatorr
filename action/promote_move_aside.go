@@ -229,7 +229,7 @@ func (e *Engine) promotionPreserveForRemoval(ctx context.Context, ec *ExecutionC
 	if !errors.Is(err, errPromotionMoveAsideUnsupported) {
 		return err
 	}
-	p.RecoveryMode, p.MoveAsideStartedAt, p.MoveAsideRefused = promotionRecoveryCopy, "", err.Error()
+	p.RecoveryMode, p.RecoveryModeReason, p.MoveAsideStartedAt, p.MoveAsideRefused = promotionRecoveryCopy, recoveryReasonRenameRefused, "", err.Error()
 	if err := e.savePromotion(ctx, ec, p); err != nil {
 		return err
 	}

@@ -77,6 +77,8 @@ type promotionState struct {
 	// before the old library file is removed; copy (and legacy "") copies it
 	// before import. See promotionMoveAside.
 	RecoveryMode string `json:"recovery_mode,omitempty"`
+	// Why that mode was chosen (a fixed code, never a path).
+	RecoveryModeReason string `json:"recovery_mode_reason,omitempty"`
 	// Fingerprints of full hashes, kept for identity checks across waits;
 	// see promotionVerifyByIdentity.
 	OriginalFingerprint  *promotionFingerprint `json:"original_fingerprint,omitempty"`
@@ -225,7 +227,7 @@ func (e *Engine) stepPromoteApprove(ctx context.Context, ec *ExecutionContext) (
 	if !e.AllowDestructive() {
 		return promoteFailed(fmt.Errorf("allow_destructive must be enabled for candidate promotion"))
 	}
-	if getString(ec.Inputs, "batch_promote_parent_id") != "" || getString(ec.Inputs, "batch_promote_item_key") != "" || getString(ec.Inputs, "batch_promote_digest") != "" {
+	if batchLinkedPromotion(ec.Inputs) {
 		if err := e.verifyBatchPromotionApproval(ec, p); err != nil {
 			return promoteFailed(err)
 		}
@@ -234,6 +236,11 @@ func (e *Engine) stepPromoteApprove(ctx context.Context, ec *ExecutionContext) (
 	if !p.Approved {
 		switch strings.ToLower(ec.Decision) {
 		case "approve":
+			// resume rejects a stale digest before the decision is stored; this
+			// keeps the step safe for any other path that supplies one.
+			if err := verifyPromotionPlanDigest(ctx, p); err != nil {
+				return StepResult{Status: StepWaitingDecision, WaitingReason: err.Error(), WaitingOptions: promotionApprovalOptions(), Outputs: map[string]any{"promotion": p}}, nil
+			}
 			p.Approved = true
 		case "reject", "cancel":
 			return promoteFailed(fmt.Errorf("candidate promotion rejected; original and candidate remain untouched"))
@@ -242,11 +249,15 @@ func (e *Engine) stepPromoteApprove(ctx context.Context, ec *ExecutionContext) (
 			if p.RegrabWarning != "" {
 				reason += ". " + p.RegrabWarning
 			}
-			return StepResult{Status: StepWaitingDecision, WaitingReason: reason, WaitingOptions: []WaitingOption{{Decision: "approve", Description: "Promote this candidate, preserve recovery copy until verified, and remove the old library file"}, {Decision: "reject", Description: "Keep original and candidate unchanged"}}, Outputs: map[string]any{"promotion": p}}, nil
+			return StepResult{Status: StepWaitingDecision, WaitingReason: reason, WaitingOptions: promotionApprovalOptions(), Outputs: map[string]any{"promotion": p}}, nil
 		}
 	}
 	if err := e.savePromotion(ctx, ec, p); err != nil {
 		return promoteFailed(err)
 	}
 	return StepResult{Status: StepCompleted}, nil
+}
+
+func promotionApprovalOptions() []WaitingOption {
+	return []WaitingOption{{Decision: "approve", Description: "Promote this candidate, preserve recovery copy until verified, and remove the old library file. Requires plan_digest from the reviewed plan"}, {Decision: "reject", Description: "Keep original and candidate unchanged"}}
 }

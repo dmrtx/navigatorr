@@ -134,7 +134,8 @@ Transcode and benchmark external waits are reconciled by the running server;
 clients do not need to keep calling `action_resume` to finish accepted jobs.
 `promote_transcode_candidate` takes `transcode_action_id` and `series_id`, with
 an optional Sonarr `service` name. It verifies a concrete replacement and waits
-for `action_resume` with `decision="approve"` before importing or deleting.
+for `action_resume` with `decision="approve"` and the `plan_digest` shown in
+`action_status` for the reviewed plan before importing or deleting.
 Ordinary transcoding still creates a candidate only. See
 [transcode operational status](docs/transcode/TRANSCODE_PIPELINE_RELIABILITY.md) for
 progress, timing, diagnostics and recovery behavior.

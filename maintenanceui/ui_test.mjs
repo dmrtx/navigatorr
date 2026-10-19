@@ -428,6 +428,22 @@ test("candidate review reads only, shows measured sizes and rechecks before appr
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [["candidate","action_resume",{decision:"accept_loss"}]]);
 });
 
+test("accepting a candidate offers Accept and replace only where replacement is enabled", async () => {
+  for (const allowed of [true, false]) {
+    const h = harness(), calls = [];
+    h.context.fixture = {id:"candidate",status:"waiting_decision",waiting_reason:"Review quality",waiting_options:[{decision:"accept_loss"}],source_path:"/media/one.mkv"};
+    h.context.record = (...args) => calls.push(args);
+    h.run(`state.info.allow_destructive=${allowed}; continueToReplacement=async()=>{}; api=async()=>({jobs:[fixture]}); jobControl=async(...args)=>record(...args);`);
+    const review = h.run('reviewJobDecision("candidate","accept_loss")');
+    for (let i=0;i<6;i++) await Promise.resolve();
+    assert.equal(h.elements.get("confirm-action-review").textContent, allowed ? "Accept and replace" : "Accept candidate");
+    h.elements.get("confirm-action-review").listeners.get("click")();
+    await review;
+    // Accepting is one decision; the replacement itself is approved only in its own review.
+    assert.deepEqual(JSON.parse(JSON.stringify(calls)), [["candidate","action_resume",{decision:"accept_loss"}]]);
+  }
+});
+
 test("changed, expired, dismissed or offline candidate reviews never resume a job", async () => {
   for (const scenario of ["changed","expired","dismissed","offline"]) {
     const h=harness(); let writes=0;
@@ -965,7 +981,7 @@ test("preview eligibility never claims files are queued on the worker", () => {
 
 test("replacement review is read-only and a changed plan blocks approval", async () => {
   const h = harness(), mutations = [];
-  h.context.current = {id:"replace",status:"waiting_decision",waiting_options:[{decision:"approve"}],promotion:{original_path:"/media/one.mkv",candidate_path:"/media/.candidates/one.mkv",original_sha256:"original",candidate_sha256:"candidate",original_bytes:1000,candidate_bytes:400}};
+  h.context.current = {id:"replace",status:"waiting_decision",waiting_options:[{decision:"approve"}],promotion:{original_path:"/media/one.mkv",candidate_path:"/media/.candidates/one.mkv",original_sha256:"original",candidate_sha256:"candidate",original_bytes:1000,candidate_bytes:400,plan_digest:"sha256:plan"}};
   h.context.recordMutation = (...args) => mutations.push(args);
   h.run('api = async () => ({jobs:[current]}); jobControl = async (...args) => recordMutation(...args);');
   await h.run('reviewFilePromotion("replace")');
@@ -2245,7 +2261,7 @@ test("an HDR file skipped by a size goal can change to the compact goal", async 
 
 test("compact replacement reviews warn about re-grabs and show read-only tracking", async () => {
   const h = harness();
-  h.context.current = {id:"replace",status:"waiting_decision",waiting_options:[{decision:"approve"}],promotion:{original_path:"/media/one.mkv",candidate_path:"/media/.candidates/one.mkv",original_sha256:"original",candidate_sha256:"candidate",original_bytes:1000,candidate_bytes:400,regrab_warning:"May download the original again.",arr_monitored:true,arr_quality_profile:"Any"}};
+  h.context.current = {id:"replace",status:"waiting_decision",waiting_options:[{decision:"approve"}],promotion:{original_path:"/media/one.mkv",candidate_path:"/media/.candidates/one.mkv",original_sha256:"original",candidate_sha256:"candidate",original_bytes:1000,candidate_bytes:400,plan_digest:"sha256:plan",regrab_warning:"May download the original again.",arr_monitored:true,arr_quality_profile:"Any"}};
   h.run('api = async () => ({jobs:[current]});');
   await h.run('reviewFilePromotion("replace")');
   const all = el=>[el,...el.children.flatMap(all)];
