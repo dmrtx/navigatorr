@@ -667,6 +667,39 @@ func TestReplayHardwareHoldoutFailureStaysWithinMargin(t *testing.T) {
 	}
 }
 
+// A media engine result reached through the holdout retry still says why it was
+// chosen: x265 CRF 24 wins discovery because the media engine result is past
+// the margin of it, fails its holdouts, and without it the media engine result
+// is within the margin of the remaining x265 one.
+func TestReplayHardwareRetryKeepsItsReason(t *testing.T) {
+	short := replaySetting{bytes: 26000, discovery: replayScore{82, 87.5}, holdout: 83}
+	settings := map[string]replaySetting{
+		replayKey("medium", 22): {bytes: 23500, discovery: replayScore{89.5, 91.3}, holdout: 90},
+		replayKey("medium", 24): {bytes: 20000, discovery: replayScore{89.5, 91.3}, holdout: 83},
+		replayKey("medium", 26): short,
+		replayKey("medium", 28): short,
+		replayKey("medium", 30): short,
+		replayKey("", 45):       short,
+		// 30% above CRF 24 but 11% above CRF 22, so it is inside a 15% margin only
+		// once CRF 24 has been ruled out.
+		replayKey("", 50): {bytes: 26000, discovery: replayScore{89.4, 91.2}, holdout: 90},
+		replayKey("", 55): {bytes: 28000, discovery: replayScore{90.4, 92.2}, holdout: 91},
+		replayKey("", 60): {bytes: 30000, discovery: replayScore{91.4, 93.2}, holdout: 92},
+	}
+	res := runHardwareReplay(t, settings, 15)
+	t.Logf("hardware reached through the retry: %s measured=%v", res.summary(), res.measured)
+	if res.winner != "vt-cand_q50" || strings.Join(res.verified, ",") != "cand_crf24,vt-cand_q50" {
+		t.Fatalf("retry did not reach the media engine result: %s", res.summary())
+	}
+	noted := false
+	for _, u := range res.decision.Winner.Uncertainties {
+		noted = noted || strings.HasPrefix(u, optimization.HardwareSelectedNote)
+	}
+	if !noted {
+		t.Fatalf("hardware reason lost after the retry: %v", res.decision.Winner.Uncertainties)
+	}
+}
+
 func TestSafestEligibleIDWithinHardwareMargin(t *testing.T) {
 	vt := func(id string, q int) validatedCandidate {
 		return validatedCandidate{candidate: transcode.BenchmarkCandidate{ID: id, VideoCodec: "hevc_videotoolbox", Quality: q}, bitDepth: 10}

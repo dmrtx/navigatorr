@@ -66,10 +66,18 @@ func registerTranscodeGoalTool(s *server.MCPServer, engine *action.Engine) {
 			return toolErr("reviewed selection_version and idempotency_key are required"), nil
 		}
 		settings := map[string]any{"mode": mode}
-		if allow, ok := args["allow_hardware"].(bool); ok {
+		if raw, given := args["allow_hardware"]; given && raw != nil {
+			allow, ok := raw.(bool)
+			if !ok {
+				return toolErr("allow_hardware must be true or false"), nil
+			}
 			settings["allow_hardware"] = allow
 		}
-		if margin, ok := args["hardware_margin_percent"].(float64); ok {
+		if raw, given := args["hardware_margin_percent"]; given && raw != nil {
+			margin, ok := raw.(float64)
+			if !ok {
+				return toolErr("hardware_margin_percent must be a number"), nil
+			}
 			settings["hardware_margin_percent"] = margin
 		}
 		if err := action.ValidateHardwareInputs(mode, settings); err != nil {

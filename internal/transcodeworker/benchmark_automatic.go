@@ -295,6 +295,9 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 	verificationFailures := []transcode.BenchmarkCandidateEvaluation{}
 	for attempt := 0; attempt < 2 && evidence.Decision.Winner != nil; attempt++ {
 		id := evidence.Decision.Winner.CandidateID
+		// The decision that chose this attempt's candidate: its hardware note
+		// describes that choice, whichever stage (discovery, fallback or retry) made it.
+		chosen := evidence.Decision
 		if preferSafest {
 			id = safestEligibleIDWithin(tested, evidence.Decision, id, record.HardwareSearch)
 		}
@@ -318,7 +321,7 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 		}
 		if evidence.Decision.Winner != nil {
 			automatic.VerifiedSamples = 5
-			carryHardwareNote(evidence.Decision, automatic.Discovery)
+			carryHardwareNote(evidence.Decision, chosen)
 			evidence.Decision.Evaluations = append(append(evidence.Decision.Evaluations, verificationFailures...), ruledOut...)
 			appendAutomaticRejections(evidence.Decision, automatic.Discovery)
 			finish()

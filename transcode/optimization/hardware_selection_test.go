@@ -34,6 +34,9 @@ func TestHardwareMarginPrefersMediaEngineWithinMargin(t *testing.T) {
 		// Beyond the selector's 2% equivalence band, which already prefers
 		// the faster of two near-equal results.
 		{"zero margin and a larger hardware file", hardwareMargin(0), []EvaluatedCandidate{x265, vt(52)}, "x265", false},
+		// Inside the 2% band but past the margin: it must not win on speed.
+		{"zero margin and a hardware file inside the band", hardwareMargin(0), []EvaluatedCandidate{modeCandidate("x265", "libx265", 80, 95, &slow), modeCandidate("vt", "hevc_videotoolbox", 81, 95, &fast)}, "x265", false},
+		{"one percent margin and a hardware file inside the band", hardwareMargin(1), []EvaluatedCandidate{modeCandidate("x265", "libx265", 80, 95, &slow), modeCandidate("vt", "hevc_videotoolbox", 81, 95, &fast)}, "x265", false},
 		{"smaller hardware wins at zero margin", hardwareMargin(0), []EvaluatedCandidate{x265, vt(40)}, "vt", true},
 		{"hardware alone wins", hardwareMargin(0), []EvaluatedCandidate{vt(80)}, "vt", true},
 		{"software alone is unchanged", hardwareMargin(50), []EvaluatedCandidate{x265}, "x265", false},

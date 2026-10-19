@@ -44,10 +44,12 @@ func TestGoalChangeToolCarriesTheMediaEngineChoice(t *testing.T) {
 		return callTool(t, s, "transcode_goal_change", args)
 	}
 	for name, extra := range map[string]map[string]any{
-		"quality with the engine": {"mode": "quality", "allow_hardware": true},
-		"quality with a margin":   {"mode": "quality", "hardware_margin_percent": float64(20)},
-		"size, margin too large":  {"mode": "size", "hardware_margin_percent": float64(60)},
-		"size, margin and off":    {"mode": "size", "allow_hardware": false, "hardware_margin_percent": float64(20)},
+		"quality with the engine":   {"mode": "quality", "allow_hardware": true},
+		"quality with a margin":     {"mode": "quality", "hardware_margin_percent": float64(20)},
+		"size, margin too large":    {"mode": "size", "hardware_margin_percent": float64(60)},
+		"size, margin and off":      {"mode": "size", "allow_hardware": false, "hardware_margin_percent": float64(20)},
+		"size, engine not a bool":   {"mode": "size", "allow_hardware": "no"},
+		"size, margin not a number": {"mode": "size", "hardware_margin_percent": "20"},
 	} {
 		if res := call("refused-"+strings.ReplaceAll(name, " ", "-"), extra); !res.IsError {
 			t.Fatalf("%s: accepted", name)

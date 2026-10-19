@@ -268,11 +268,14 @@ const HardwareSelectedNote = "hardware candidate selected"
 // only testing the smallest, keeps the later speed-equivalence band from
 // picking a hardware candidate beyond the margin.
 func preferHardware(eligible []EvaluatedCandidate, marginPercent float64) (contest []EvaluatedCandidate, bestSoftware int64, hardware bool) {
-	var all []EvaluatedCandidate
+	var all, software []EvaluatedCandidate
 	for _, c := range eligible {
 		if c.VideoCodec == videoToolboxCodec {
 			all = append(all, c)
-		} else if bestSoftware == 0 || c.EstimatedBytes < bestSoftware {
+			continue
+		}
+		software = append(software, c)
+		if bestSoftware == 0 || c.EstimatedBytes < bestSoftware {
 			bestSoftware = c.EstimatedBytes
 		}
 	}
@@ -289,7 +292,9 @@ func preferHardware(eligible []EvaluatedCandidate, marginPercent float64) (conte
 		}
 	}
 	if len(contest) == 0 {
-		return eligible, bestSoftware, false
+		// Every hardware candidate is beyond the margin: they leave the contest
+		// instead of reaching the speed band, which could pick one of them.
+		return software, bestSoftware, false
 	}
 	return contest, bestSoftware, true
 }
