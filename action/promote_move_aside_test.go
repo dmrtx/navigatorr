@@ -642,7 +642,7 @@ func TestPromotionMountProbeChoosesCopyWhenIdentityIsUnreliable(t *testing.T) {
 			probes := 0
 			h.engine.promotionMountProbeHook = func(string) error {
 				probes++
-				return errors.New("no stable inode numbers")
+				return &promotionProbeFailure{Step: probeStepCtime, Fs: "cifs", Detail: "after 150 rewrites", Definitive: true}
 			}
 			h.engine.promotionMoveAsideHook = func(from, to string) error {
 				t.Fatal("moved aside on a mount that failed the probe")
@@ -660,6 +660,9 @@ func TestPromotionMountProbeChoosesCopyWhenIdentityIsUnreliable(t *testing.T) {
 			p := movedAsideState(t, h, r.ID)
 			if probes != 1 || p.RecoveryMode != promotionRecoveryCopy || p.RecoveryModeReason != recoveryReasonMountProbe || p.RecoveryCopy == nil {
 				t.Fatalf("probe %d times, recovery %+v", probes, p)
+			}
+			if want := "rewrite_kept_change_time fs=cifs after 150 rewrites"; p.RecoveryModeDetail != want {
+				t.Fatalf("recovery_mode_detail %q, want %q", p.RecoveryModeDetail, want)
 			}
 		})
 	}
@@ -682,5 +685,47 @@ func TestPromotionSendsNoDeleteWhenAFileReappearsAtTheOriginalPath(t *testing.T)
 	p := movedAsideState(t, h, r.ID)
 	if err := testFileSHA(p.BackupPath, p.OriginalSHA); err != nil || !p.MovedAside {
 		t.Fatalf("moved-aside original not kept: %v %+v", err, p)
+	}
+}
+
+// A probe that fails for a reason unrelated to the mount (here, a recovery
+// directory that cannot be written) is explained without its path and is not
+// remembered, so the next promotion asks again.
+func TestPromotionMountProbeInconclusiveFailureIsNotCached(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "private-recovery-dir")
+	e := &Engine{}
+	err := e.promotionProbeMount(missing)
+	var failure *promotionProbeFailure
+	if !errors.As(err, &failure) || failure.Step != probeStepCreate || failure.Definitive {
+		t.Fatalf("probe error %v", err)
+	}
+	if detail := promotionProbeDetail(err); strings.Contains(detail, missing) || !strings.Contains(detail, probeStepCreate) || !strings.Contains(detail, "no such file") {
+		t.Fatalf("detail %q leaks the path or lacks the step and cause", detail)
+	}
+	if _, cached := promotionMountProbes.Load(filepath.Clean(filepath.Dir(missing))); cached {
+		t.Fatal("an error that says nothing about the mount was cached")
+	}
+	dir := t.TempDir()
+	if err := e.promotionProbeMount(dir); err != nil {
+		t.Fatalf("probe on a working directory: %v", err)
+	}
+	if _, cached := promotionMountProbes.Load(filepath.Clean(filepath.Dir(dir))); !cached {
+		t.Fatal("a passing probe was not cached")
+	}
+}
+
+func TestPromotionProbeDetailNamesChangedFieldsNotValues(t *testing.T) {
+	a := promotionFingerprint{Dev: 1, Ino: 2, Size: 3, MtimeNs: 4, CtimeNs: 5}
+	b := a
+	b.Ino, b.CtimeNs = 20, 50
+	if got := promotionFingerprintDiff(a, b); got != "ino,ctime" {
+		t.Fatalf("diff %q", got)
+	}
+	err := &promotionProbeFailure{Step: probeStepUnstable, Fs: "smb2", Detail: "changed: " + promotionFingerprintDiff(a, b), Definitive: true}
+	if got := promotionProbeDetail(err); got != "identity_unstable_while_unchanged fs=smb2 changed: ino,ctime" {
+		t.Fatalf("detail %q", got)
+	}
+	if got := promotionProbeDetail(&os.PathError{Op: "open", Path: "/some/private/path", Err: syscall.EACCES}); strings.Contains(got, "/some") || !strings.Contains(got, "permission denied") {
+		t.Fatalf("detail %q", got)
 	}
 }

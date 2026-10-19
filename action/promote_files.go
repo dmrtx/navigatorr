@@ -531,7 +531,7 @@ func (e *Engine) stepPromotePreserve(ctx context.Context, ec *ExecutionContext) 
 		return promoteFailed(err)
 	}
 	if p.RecoveryMode == "" {
-		p.RecoveryMode, p.RecoveryModeReason = e.promotionChooseRecovery(ctx, p)
+		p.RecoveryMode, p.RecoveryModeReason, p.RecoveryModeDetail = e.promotionChooseRecovery(ctx, p)
 	}
 	if p.movesAside() && !p.MovedAside {
 		// The original stays where it is, verified and reserved, until right
@@ -552,7 +552,7 @@ func (e *Engine) stepPromotePreserve(ctx context.Context, ec *ExecutionContext) 
 		if err := e.savePromotion(ctx, ec, p); err != nil {
 			return promoteFailed(err)
 		}
-		return StepResult{Status: StepCompleted, Outputs: map[string]any{"recovery_path": p.BackupPath, "recovery_mode": p.RecoveryMode, "recovery_mode_reason": p.RecoveryModeReason}}, nil
+		return StepResult{Status: StepCompleted, Outputs: map[string]any{"recovery_path": p.BackupPath, "recovery_mode": p.RecoveryMode, "recovery_mode_reason": p.RecoveryModeReason, "recovery_mode_detail": p.RecoveryModeDetail}}, nil
 	}
 	if err := e.promotionMakeRecoveryCopy(ctx, ec, p, progress); err != nil {
 		return promoteFailed(err)
@@ -562,7 +562,7 @@ func (e *Engine) stepPromotePreserve(ctx context.Context, ec *ExecutionContext) 
 	if err := e.savePromotion(ctx, ec, p); err != nil {
 		return promoteFailed(err)
 	}
-	out := map[string]any{"recovery_path": p.BackupPath, "recovery_mode": p.RecoveryMode, "recovery_mode_reason": p.RecoveryModeReason, "recovery_retained": true}
+	out := map[string]any{"recovery_path": p.BackupPath, "recovery_mode": p.RecoveryMode, "recovery_mode_reason": p.RecoveryModeReason, "recovery_mode_detail": p.RecoveryModeDetail, "recovery_retained": true}
 	if p.RecoveryCopy != nil {
 		out["recovery_copy"] = p.RecoveryCopy
 	}
@@ -585,24 +585,26 @@ const (
 // promotionChooseRecovery moves the original aside unless something rules it
 // out: a copy left by an earlier attempt or release keeps the copy design, as
 // does a file without a stable identity to follow through the rename. The
-// second result says which.
-func (e *Engine) promotionChooseRecovery(ctx context.Context, p *promotionState) (string, string) {
+// second result says which, and the third, for a failed mount probe, what the
+// probe observed (never a path).
+func (e *Engine) promotionChooseRecovery(ctx context.Context, p *promotionState) (string, string, string) {
 	if e.promotionAlwaysCopy {
-		return promotionRecoveryCopy, recoveryReasonAlwaysCopy
+		return promotionRecoveryCopy, recoveryReasonAlwaysCopy, ""
 	}
 	if promotionKnownFingerprint(ctx, p.OriginalPath, p.OriginalSHA) == nil {
-		return promotionRecoveryCopy, recoveryReasonNoFingerprint
+		return promotionRecoveryCopy, recoveryReasonNoFingerprint, ""
 	}
 	for _, path := range []string{p.BackupPath, p.BackupPath + ".partial"} {
 		if _, err := os.Lstat(path); !os.IsNotExist(err) {
-			return promotionRecoveryCopy, recoveryReasonLeftover
+			return promotionRecoveryCopy, recoveryReasonLeftover, ""
 		}
 	}
 	if err := e.promotionProbeMount(filepath.Dir(p.BackupPath)); err != nil {
-		log.Printf("promotion: the recovery directory's mount does not keep file identity (%v); making a recovery copy instead of moving the original aside", err)
-		return promotionRecoveryCopy, recoveryReasonMountProbe
+		detail := promotionProbeDetail(err)
+		log.Printf("promotion %s: the recovery directory's mount does not keep file identity (%s); making a recovery copy instead of moving the original aside", p.Service, detail)
+		return promotionRecoveryCopy, recoveryReasonMountProbe, detail
 	}
-	return promotionRecoveryMoveAside, recoveryReasonMoveAside
+	return promotionRecoveryMoveAside, recoveryReasonMoveAside, ""
 }
 
 // promotionMakeRecoveryCopy publishes a verified copy of the original at
