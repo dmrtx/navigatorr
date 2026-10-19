@@ -259,6 +259,9 @@ esac
 	if !caps.CoverArt {
 		t.Error("worker must advertise cover_art so the server admits sources with cover art")
 	}
+	if !caps.HardwareSearch {
+		t.Error("worker must advertise hardware_search so the server may add media engine candidates")
+	}
 	if caps.WorkerVersion != "1.0.0" {
 		t.Errorf("expected WorkerVersion=1.0.0, got %s", caps.WorkerVersion)
 	}

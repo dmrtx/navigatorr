@@ -15,6 +15,12 @@ type TranscodeExplanation struct {
 	TestedCandidates int                                 `json:"tested_candidates"`
 	VerifiedSamples  int                                 `json:"verified_samples"`
 	Stages           []transcode.BenchmarkAutomaticStage `json:"stages,omitempty"`
+	// Encoder is the winning candidate's encoder (libx265 or
+	// hevc_videotoolbox) once a search selected one. Hardware is true for the
+	// VideoToolbox media engine, so a hardware result is told apart from x265
+	// before anything is replaced.
+	Encoder  string `json:"encoder,omitempty"`
+	Hardware bool   `json:"hardware,omitempty"`
 }
 
 func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
@@ -42,6 +48,12 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 		}
 	}
 	e.TestedCandidates = len(ids)
+	var decision transcode.BenchmarkDecision
+	data, _ = json.Marshal(read("benchmark_decision"))
+	if json.Unmarshal(data, &decision) == nil && decision.Winner != nil {
+		e.Encoder = transcode.BenchmarkCandidateVideoCodec(transcode.BenchmarkCandidate{VideoCodec: decision.Winner.VideoCodec})
+		e.Hardware = e.Encoder == transcode.VideoCodecHEVCVideoToolbox
+	}
 	reason := getString(res.State, "reason_code")
 	if reason == "" {
 		reason = getString(res.Outputs, "reason_code")
@@ -91,6 +103,9 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 	case getBool(res.Outputs, "original_intact"):
 		e.Outcome = "candidate_ready"
 		e.Message = "Candidate verified; original preserved. Quality was measured on samples."
+		if e.Hardware {
+			e.Message += " Encoded with the VideoToolbox media engine (hardware), not x265."
+		}
 	default:
 		e.Outcome = "completed"
 		e.Message = "Workflow finished. Inspect the recorded result before replacing any file."

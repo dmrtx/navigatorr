@@ -64,3 +64,19 @@ func TestSupportsQualityFPSRequiresProvenHFRDecimation(t *testing.T) {
 		t.Fatal("HFR capability did not change fingerprint")
 	}
 }
+
+func TestHardwareSearchCapabilityChangesFingerprint(t *testing.T) {
+	caps := WorkerCapabilities{ProtocolVersion: WorkerProtocolVersion, FFmpegVersion: "9.0.1", Encoders: map[string]bool{}}
+	before, err := ComputeCapabilityFingerprint(caps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caps.HardwareSearch = true
+	after, err := ComputeCapabilityFingerprint(caps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before == after {
+		t.Fatal("hardware_search did not change the fingerprint")
+	}
+}

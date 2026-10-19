@@ -3093,6 +3093,134 @@ test("the goal is sent only while technical profiles are off", async () => {
   assert.equal(sent[1].profile, "general-hevc");
 });
 
+test("the media engine option belongs to the smaller files goal and starts on", () => {
+  const form = markup.slice(markup.indexOf('<form id="job-form"'), markup.indexOf("</form>", markup.indexOf('<form id="job-form"')));
+  const goal = form.slice(form.indexOf('<fieldset id="processing-goal"'), form.indexOf("</fieldset>", form.indexOf('<fieldset id="processing-goal"')));
+  assert.match(goal, /id="allow-hardware" type="checkbox" checked \/>/);
+  assert.match(goal, /id="hardware-margin"[^>]*min="0"[^>]*max="50"[^>]*value="15"/);
+  assert.match(goal, /Turn it off to keep software \(x265\) encodes only/);
+  assert.match(goal, /labeled VideoToolbox before you replace anything/);
+  const h = harness();
+  const el = (id) => h.elements.get(id);
+  h.run('processingMode=()=>"quality"; controls();');
+  assert.equal(el("hardware-option").hidden, true);
+  h.run('processingMode=()=>"size"; $("allow-hardware").checked=true; controls();');
+  assert.equal(el("hardware-option").hidden, false);
+  assert.equal(el("hardware-margin-label").hidden, false);
+  h.run('$("allow-hardware").checked=false; controls();');
+  assert.equal(el("hardware-margin-label").hidden, true);
+  h.run('processingMode=()=>"compact"; controls();');
+  assert.equal(el("hardware-option").hidden, true);
+  // Ticking the box in a browser fires its change event, which must re-run controls().
+  h.run('processingMode=()=>"size"; $("allow-hardware").checked=true; controls();');
+  const onChange = el("allow-hardware").listeners.get("change");
+  assert.equal(typeof onChange, "function", "the checkbox has no change handler");
+  h.run('$("allow-hardware").checked=false;');
+  onChange();
+  assert.equal(el("hardware-margin-label").hidden, true);
+  h.run('$("allow-hardware").checked=true;');
+  onChange();
+  assert.equal(el("hardware-margin-label").hidden, false);
+});
+
+test("the smaller files goal always says whether the media engine is allowed", async () => {
+  const { h } = submissionHarness();
+  const sent = [];
+  h.context.capture = (_tool, args) => { sent.push(JSON.parse(args.inputs)); return { id: "submitted" }; };
+  h.run('processingMode=()=>"size"; tool=async(...args)=>capture(...args); $("technical").checked=false; $("allow-hardware").checked=false; $("path").value="/media/one.mp4"; $("scope").value="file";');
+  await h.run('buildAndSubmitJob("encode")');
+  h.run('$("allow-hardware").checked=true; $("hardware-margin").value="25"; $("path").value="/media/two.mp4";');
+  await h.run('buildAndSubmitJob("encode")');
+  h.run('processingMode=()=>"quality"; $("path").value="/media/three.mp4";');
+  await h.run('buildAndSubmitJob("encode")');
+  assert.equal(sent[0].mode, "size");
+  assert.equal(sent[0].allow_hardware, false);
+  assert.equal(sent[0].hardware_margin_percent, undefined);
+  assert.equal(sent[1].mode, "size");
+  assert.equal(sent[1].allow_hardware, true);
+  assert.equal(sent[1].hardware_margin_percent, 25);
+  assert.equal(sent[2].mode, "quality");
+  assert.equal(sent[2].allow_hardware, undefined);
+  assert.equal(sent[2].hardware_margin_percent, undefined);
+  for (const bad of ["", "-1", "51", "abc"]) {
+    h.run(`processingMode=()=>"size"; $("path").value="/media/four.mp4"; $("hardware-margin").value=${JSON.stringify(bad)};`);
+    await assert.rejects(h.run('buildAndSubmitJob("encode")'), /0 to 50 percent/);
+  }
+  assert.equal(sent.length, 3);
+});
+
+test("changing the goal to smaller files carries the media engine choice", async () => {
+  const markupGoal = markup.slice(markup.indexOf('id="reconfigure-hardware-option"'), markup.indexOf('id="reconfigure-profile"'));
+  assert.match(markupGoal, /id="reconfigure-hardware" type="checkbox" checked/);
+  assert.match(markupGoal, /id="reconfigure-hardware-margin"[^>]*min="0"[^>]*max="50"[^>]*value="15"/);
+  const open = async (plan) => {
+    const h = harness();
+    h.context.savedPlan = plan;
+    h.run('state.info={};state.recipes=[];api=async()=>savedPlan;');
+    await h.run('reconfigureBatch("b")');
+    return h;
+  };
+  const base = { id: "b", mode: "quality", scope: "all", selected: 2, kept: 0, active: 0, files: ["one", "two"], selection_version: "v1" };
+  // A batch that never said anything gets the default: on, 15 %.
+  let h = await open({ ...base, settings: { allow_hardware: null, hardware_margin_percent: null } });
+  const el = (id) => h.elements.get(id);
+  assert.equal(el("reconfigure-hardware-option").hidden, true, "only the smaller files goal shows it");
+  h.run('$("reconfigure-mode").value="size"; updateReconfigureHardware();');
+  assert.equal(el("reconfigure-hardware-option").hidden, false);
+  assert.equal(el("reconfigure-hardware").checked, true);
+  assert.equal(el("reconfigure-hardware-margin").value, 15);
+  assert.equal(el("reconfigure-hardware-margin-label").hidden, false);
+  const calls = [];
+  h.context.record = (path, body) => calls.push([path, body]);
+  h.context.sessionStorage = { getItem: () => null, setItem() {}, removeItem() {} };
+  h.run('submissionID=()=>"goal-1";commandRequest=async(path,body)=>{record(path,body);return {id:"b"}};loadJobs=async()=>{};openJob=async()=>{};notify=()=>{};');
+  await h.run("submitReconfiguredBatch()");
+  assert.equal(calls[0][1].mode, "size");
+  assert.equal(calls[0][1].allow_hardware, true);
+  assert.equal(calls[0][1].hardware_margin_percent, 15);
+  // Turned off: sent as an explicit false, with no margin.
+  h.run('$("reconfigure-hardware").checked=false; updateReconfigureHardware(); submissionID=()=>"goal-2";');
+  assert.equal(el("reconfigure-hardware-margin-label").hidden, true);
+  await h.run("submitReconfiguredBatch()");
+  assert.equal(calls[1][1].allow_hardware, false);
+  assert.equal("hardware_margin_percent" in calls[1][1], false);
+  // Files frozen with different choices say so instead of pretending to agree.
+  h = await open({ ...base, settings: { allow_hardware: true, hardware_margin_percent: 15, hardware_mixed: true } });
+  assert.match(h.elements.get("reconfigure-settings").textContent, /different media engine choices/);
+  h = await open({ ...base, settings: { allow_hardware: true, hardware_margin_percent: 15, hardware_mixed: false } });
+  assert.doesNotMatch(h.elements.get("reconfigure-settings").textContent, /different media engine choices/);
+  // A saved choice is shown as saved, and other goals send nothing about it.
+  h = await open({ ...base, settings: { allow_hardware: false, hardware_margin_percent: 30 } });
+  assert.equal(h.elements.get("reconfigure-hardware").checked, false);
+  assert.equal(h.elements.get("reconfigure-hardware-margin").value, 30);
+  h.context.record = (path, body) => calls.push([path, body]);
+  h.context.sessionStorage = { getItem: () => null, setItem() {}, removeItem() {} };
+  h.run('$("reconfigure-mode").value="compact"; submissionID=()=>"goal-3";commandRequest=async(path,body)=>{record(path,body);return {id:"b"}};loadJobs=async()=>{};openJob=async()=>{};notify=()=>{};');
+  await h.run("submitReconfiguredBatch()");
+  assert.equal(calls[2][1].mode, "compact");
+  assert.equal("allow_hardware" in calls[2][1], false);
+  // A margin outside 0-50 is refused before anything is sent.
+  h = await open({ ...base, settings: {} });
+  h.run('$("reconfigure-mode").value="size"; $("reconfigure-hardware-margin").value="60"; submissionID=()=>"goal-4";commandRequest=async()=>{throw new Error("sent")};');
+  await assert.rejects(h.run("submitReconfiguredBatch()"), /0 to 50 percent/);
+});
+
+test("a VideoToolbox winner is told apart from x265 before anything is replaced", () => {
+  const h = harness();
+  const hardware = h.run('sizeModeNote({size_mode:{expected_bytes:2150000000,encoder:"hevc_videotoolbox",hardware:true}})');
+  const text = allText(hardware);
+  assert.match(text, /Encoder: VideoToolbox \(hardware media engine\)/);
+  assert.match(text, /Hardware/);
+  const badge = hardware.children.flatMap((row) => row.children || []).find((c) => /hardware-badge/.test(c.className || ""));
+  assert.ok(badge, "hardware badge present");
+  const software = h.run('sizeModeNote({size_mode:{expected_bytes:2150000000,encoder:"libx265"}})');
+  assert.match(allText(software), /Encoder: x265 \(software\)/);
+  assert.doesNotMatch(allText(software), /Hardware/);
+  assert.equal(h.run('sizeModeNote({size_mode:{}})'), null);
+  assert.equal(h.run('benchmarkCandidateLabel({id:"vt-cand_q50",video_codec:"hevc_videotoolbox",quality:50})'), "vt-cand_q50 · VideoToolbox (hardware) quality 50");
+  assert.equal(h.run('benchmarkCandidateLabel({id:"cand_crf22",video_codec:"libx265",quality:22,preset:"slow"})'), "cand_crf22 · x265 CRF 22 · slow");
+});
+
 test("the queue comes before podcast cleaning, which opens in its own dialog", () => {
   const jobs = markup.slice(markup.indexOf('<section id="jobs"'), markup.indexOf('<section id="stats"'));
   assert.ok(jobs.indexOf('class="queue-toolbar"') < jobs.indexOf('id="podcast-new"'));

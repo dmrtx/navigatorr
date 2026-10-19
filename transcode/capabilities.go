@@ -97,6 +97,10 @@ type WorkerCapabilities struct {
 	// fails on quality, and a quality fallback tried preset by preset.
 	// Older workers reject the field.
 	AutomaticSearchRules bool `json:"automatic_search_rules,omitempty"`
+	// HardwareSearch reports a worker that accepts hardware_search on size
+	// benchmarks: VideoToolbox candidates that win within a frozen size margin
+	// of the x265 winner. Older workers reject the field.
+	HardwareSearch bool `json:"hardware_search,omitempty"`
 	// CompactTranscode reports an executable proof of the compact SDR chain
 	// (setparams, swscale, lut3d and sidedata delete) in the worker FFmpeg.
 	CompactTranscode      bool                           `json:"compact_transcode,omitempty"`
@@ -151,6 +155,7 @@ type fingerprintPayload struct {
 	SizeAudioOnly            bool                           `json:"size_audio_only,omitempty"`
 	SearchBudgetExtension    bool                           `json:"search_budget_extension,omitempty"`
 	AutomaticSearchRules     bool                           `json:"automatic_search_rules,omitempty"`
+	HardwareSearch           bool                           `json:"hardware_search,omitempty"`
 	CompactTranscode         bool                           `json:"compact_transcode,omitempty"`
 	ProtocolVersion          int                            `json:"protocol_version"`
 	WorkerVersion            string                         `json:"worker_version,omitempty"`
@@ -199,6 +204,7 @@ func ComputeCapabilityFingerprint(caps WorkerCapabilities) (string, error) {
 		SizeAudioOnly:            caps.SizeAudioOnly,
 		SearchBudgetExtension:    caps.SearchBudgetExtension,
 		AutomaticSearchRules:     caps.AutomaticSearchRules,
+		HardwareSearch:           caps.HardwareSearch,
 		CompactTranscode:         caps.CompactTranscode,
 		ProtocolVersion:          caps.ProtocolVersion,
 		WorkerVersion:            caps.WorkerVersion,

@@ -1,8 +1,11 @@
 package maintenanceui
 
 import (
+	"context"
 	"encoding/json"
+	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -191,5 +194,116 @@ func TestRepeatedCancelledAdmissionsKeepFrozenSelection(t *testing.T) {
 			t.Fatal(i, "lost uninspected cancelled files", w.Body.String())
 		}
 		source = inst.ID
+	}
+}
+
+// Changing the goal to smaller files carries the media engine choice with it,
+// and the other goals refuse it.
+func TestGoalChangeCarriesTheHardwareChoice(t *testing.T) {
+	s, h := testUI(t)
+	seedFailedBatch(t, s, false)
+	st := s.engine.Deps().Store
+	batch, _ := st.GetActionInstance("failed-batch")
+	inputs := decodeOperationJSON(batch.InputsJSON)
+	delete(inputs, "profile_config")
+	inputs["mode"] = "quality"
+	batch.InputsJSON = mustJSON(t, inputs)
+	if err := st.UpdateActionInstance(*batch); err != nil {
+		t.Fatal(err)
+	}
+	w := request(h, "GET", "/api/maintenance/batch-settings?id=failed-batch&scope=all", "", true)
+	var plan map[string]any
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &plan) != nil {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	post := func(key string, extra map[string]any) *httptest.ResponseRecorder {
+		body := map[string]any{"id": "failed-batch", "scope": "all", "selection_version": plan["selection_version"], "key": key}
+		for k, v := range extra {
+			body[k] = v
+		}
+		return request(h, "POST", "/api/maintenance/batch-settings", mustJSON(t, body), true)
+	}
+	cases := []struct {
+		name  string
+		extra map[string]any
+		code  int
+	}{
+		{"size, hardware off", map[string]any{"mode": "size", "allow_hardware": false}, 202},
+		{"size, hardware margin", map[string]any{"mode": "size", "allow_hardware": true, "hardware_margin_percent": 25}, 202},
+		{"size, nothing said", map[string]any{"mode": "size"}, 202},
+		{"size, margin too large", map[string]any{"mode": "size", "allow_hardware": true, "hardware_margin_percent": 60}, 400},
+		{"quality with hardware", map[string]any{"mode": "quality", "allow_hardware": true}, 400},
+		{"quality, hardware off", map[string]any{"mode": "quality", "allow_hardware": false}, 202},
+	}
+	var receipt map[string]string
+	for i, tc := range cases {
+		w := post("goal-"+strconv.Itoa(i), tc.extra)
+		if w.Code != tc.code {
+			t.Fatalf("%s: %d %s", tc.name, w.Code, w.Body.String())
+		}
+		if i == 0 {
+			json.Unmarshal(w.Body.Bytes(), &receipt)
+		}
+	}
+	command, _ := st.GetActionInstance(receipt["command_id"])
+	if command == nil || !strings.Contains(command.InputsJSON, `"allow_hardware":false`) {
+		t.Fatalf("hardware choice not carried: %+v", command)
+	}
+	// Once applied, reopening the dialog shows the choice that was frozen,
+	// not the default.
+	if result, err := s.engine.Resume(context.Background(), command.ID, "", nil); err != nil || result.Status != store.ActionStatusCompleted {
+		t.Fatal(result, err)
+	}
+	w = request(h, "GET", "/api/maintenance/batch-settings?id=failed-batch&scope=all", "", true)
+	var reopened struct {
+		Settings map[string]any `json:"settings"`
+	}
+	if json.Unmarshal(w.Body.Bytes(), &reopened) != nil || reopened.Settings["allow_hardware"] != false {
+		t.Fatal("frozen hardware choice not shown", w.Body.String())
+	}
+}
+
+// The Change goal dialog shows the media engine choice the files were frozen
+// with: an earlier batch is x265 only, not today's default, and files frozen
+// differently say so.
+func TestGoalChangeShowsTheFrozenMediaEngineChoice(t *testing.T) {
+	s, h := testUI(t)
+	seedFailedBatch(t, s, false)
+	st := s.engine.Deps().Store
+	batch, _ := st.GetActionInstance("failed-batch")
+	inputs := decodeOperationJSON(batch.InputsJSON)
+	delete(inputs, "profile_config")
+	inputs["mode"] = "size"
+	batch.InputsJSON = mustJSON(t, inputs)
+	read := func(state map[string]any) map[string]any {
+		batch.StateJSON = mustJSON(t, state)
+		if err := st.UpdateActionInstance(*batch); err != nil {
+			t.Fatal(err)
+		}
+		w := request(h, "GET", "/api/maintenance/batch-settings?id=failed-batch&scope=all", "", true)
+		var plan struct {
+			Settings map[string]any `json:"settings"`
+		}
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &plan) != nil {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		return plan.Settings
+	}
+	earlier := map[string]any{"mode": "size", "size": map[string]any{"min_savings_percent": 15}}
+	withEngine := map[string]any{"mode": "size", "size": map[string]any{"hardware_search": map[string]any{"margin_percent": float64(30)}}}
+	if got := read(map[string]any{"mode_policy": earlier}); got["allow_hardware"] != false || got["hardware_mixed"] != false {
+		t.Fatalf("an earlier batch should show the engine off: %v", got)
+	}
+	if got := read(map[string]any{"mode_policy": withEngine}); got["allow_hardware"] != true || got["hardware_margin_percent"] != float64(30) || got["hardware_mixed"] != false {
+		t.Fatalf("a frozen margin was not shown: %v", got)
+	}
+	// One file already changed to a different choice makes the selection mixed.
+	mixed := map[string]any{"mode_policy": earlier, "batch_item_settings": map[string]any{"epfile-101": map[string]any{"mode": "size", "mode_policy": withEngine}}}
+	if got := read(mixed); got["hardware_mixed"] != true {
+		t.Fatalf("different choices were not reported: %v", got)
+	}
+	// Nothing frozen yet: the dialog falls back to the default (no stored choice).
+	if got := read(map[string]any{}); got["allow_hardware"] != nil || got["hardware_mixed"] != nil {
+		t.Fatalf("an unfrozen batch invented a choice: %v", got)
 	}
 }

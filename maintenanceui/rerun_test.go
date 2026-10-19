@@ -180,3 +180,47 @@ func containsRerun(body string) bool {
 	}
 	return json.Unmarshal([]byte(body), &page) == nil && len(page.Jobs) == 1 && page.Jobs[0]["rerun"] != nil
 }
+
+// Run again keeps the media engine choice the earlier policy froze: a size job
+// from before the option existed stays on x265 instead of taking the default.
+func TestRerunCarriesTheFrozenMediaEngineChoice(t *testing.T) {
+	for name, tc := range map[string]struct {
+		policy map[string]any
+		inputs map[string]any
+		allow  any
+		margin any
+	}{
+		"frozen without the engine": {map[string]any{"mode": "size", "size": map[string]any{"min_savings_percent": 15}}, map[string]any{}, false, nil},
+		"frozen with the engine":    {map[string]any{"mode": "size", "size": map[string]any{"hardware_search": map[string]any{"margin_percent": float64(30)}}}, map[string]any{}, true, float64(30)},
+		"said so explicitly":        {map[string]any{"mode": "size", "size": map[string]any{}}, map[string]any{"allow_hardware": true}, true, nil},
+		"nothing frozen yet":        {nil, map[string]any{}, nil, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, h := testUI(t)
+			st := s.engine.Deps().Store
+			inputs := map[string]any{"path": "/media/Show/S01E01.mkv", "mode": "size", "replace_original": false, "profile": "auto"}
+			for k, v := range tc.inputs {
+				inputs[k] = v
+			}
+			state := map[string]any{"reason_code": "no_suitable_candidate"}
+			if tc.policy != nil {
+				state["mode_policy"] = tc.policy
+			}
+			seedOperation(t, st, "earlier", "transcode_media", "completed", inputs, map[string]any{"reason_code": "no_suitable_candidate"}, state)
+			w := request(h, "POST", "/api/maintenance/rerun", `{"id":"earlier","key":"again-one"}`, true)
+			if w.Code != 202 {
+				t.Fatal(w.Code, w.Body.String())
+			}
+			var started struct{ ID string }
+			json.Unmarshal(w.Body.Bytes(), &started)
+			created, _ := st.GetActionInstance(started.ID)
+			copied := decodeOperationJSON(created.InputsJSON)
+			if got, said := copied["allow_hardware"]; got != tc.allow || said != (tc.allow != nil) {
+				t.Fatalf("allow_hardware %v (set %v), want %v", got, said, tc.allow)
+			}
+			if got := copied["hardware_margin_percent"]; got != tc.margin {
+				t.Fatalf("hardware_margin_percent %v, want %v", got, tc.margin)
+			}
+		})
+	}
+}

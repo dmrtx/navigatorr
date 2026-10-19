@@ -68,7 +68,7 @@ func maintenanceJSON(raw string, keys []string) string {
 				value, _ = json.Marshal(projected)
 			case "benchmark_decision":
 				if winner, exists := nested["winner"]; exists {
-					nested = map[string]json.RawMessage{"winner": json.RawMessage(maintenanceJSON(string(winner), []string{"estimated_bytes"}))}
+					nested = map[string]json.RawMessage{"winner": json.RawMessage(maintenanceJSON(string(winner), []string{"estimated_bytes", "video_codec"}))}
 				} else {
 					nested = map[string]json.RawMessage{}
 				}

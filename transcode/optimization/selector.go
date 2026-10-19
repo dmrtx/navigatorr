@@ -1,6 +1,7 @@
 package optimization
 
 import (
+	"fmt"
 	"math"
 	"sort"
 )
@@ -24,6 +25,12 @@ type SelectorInput struct {
 	Policy      QualityPolicy `json:"-"`
 	Mode        string        `json:"mode,omitempty"`
 	SourceBytes int64         `json:"source_bytes,omitempty"`
+	// HardwareMarginPercent, when set for mode=size, lets the smallest
+	// qualifying VideoToolbox candidate win over smaller x265 ones as long as
+	// it is at most this many percent larger than the smallest qualifying x265
+	// candidate (or no x265 candidate qualifies). Unset keeps the
+	// smallest-qualifying rule.
+	HardwareMarginPercent *float64 `json:"hardware_margin_percent,omitempty"`
 	// Candidates is the set of candidate transcode profiles/configurations tested.
 	Candidates []CandidateInput `json:"candidates"`
 }
@@ -174,7 +181,7 @@ func SelectCandidate(in SelectorInput) SelectionResult {
 	}
 
 	if in.Mode != "" {
-		return SelectMeasuredCandidatesVersion(res.AllEvaluated, in.Mode, in.Policy.Tolerance(), in.SourceBytes, in.ModePolicyVersion)
+		return selectMeasuredCandidates(res.AllEvaluated, in.Mode, in.Policy.Tolerance(), in.SourceBytes, in.ModePolicyVersion, in.HardwareMarginPercent)
 	}
 	// Case 1: Target-reaching candidates exist
 	if len(targetReaching) > 0 {
@@ -243,6 +250,56 @@ func SelectMeasuredCandidates(candidates []EvaluatedCandidate, mode string, tole
 }
 
 func SelectMeasuredCandidatesVersion(candidates []EvaluatedCandidate, mode string, tolerance float64, sourceBytes int64, version string) SelectionResult {
+	return selectMeasuredCandidates(candidates, mode, tolerance, sourceBytes, version, nil)
+}
+
+// videoToolboxCodec is the media-engine encoder the hardware margin favours.
+const videoToolboxCodec = "hevc_videotoolbox"
+
+// HardwareSelectedNote begins the uncertainty the selector adds to a winner
+// chosen by the hardware margin, so callers can carry it into the decision.
+const HardwareSelectedNote = "hardware candidate selected"
+
+// preferHardware narrows the size contest to the VideoToolbox candidates that
+// are within marginPercent of the smallest other candidate, or to all of them
+// when no other candidate qualifies. Otherwise it returns the set unchanged.
+// It also returns the smallest software size (zero when none qualified) so the
+// caller can explain the choice once a winner is known. Filtering, rather than
+// only testing the smallest, keeps the later speed-equivalence band from
+// picking a hardware candidate beyond the margin.
+func preferHardware(eligible []EvaluatedCandidate, marginPercent float64) (contest []EvaluatedCandidate, bestSoftware int64, hardware bool) {
+	var all, software []EvaluatedCandidate
+	for _, c := range eligible {
+		if c.VideoCodec == videoToolboxCodec {
+			all = append(all, c)
+			continue
+		}
+		software = append(software, c)
+		if bestSoftware == 0 || c.EstimatedBytes < bestSoftware {
+			bestSoftware = c.EstimatedBytes
+		}
+	}
+	if len(all) == 0 {
+		return eligible, bestSoftware, false
+	}
+	if bestSoftware == 0 {
+		return all, 0, true
+	}
+	limit := float64(bestSoftware) * (1 + marginPercent/100)
+	for _, c := range all {
+		if float64(c.EstimatedBytes) <= limit {
+			contest = append(contest, c)
+		}
+	}
+	if len(contest) == 0 {
+		// Every hardware candidate is beyond the margin: they leave the contest
+		// instead of reaching the speed band, which could pick one of them.
+		return software, bestSoftware, false
+	}
+	return contest, bestSoftware, true
+}
+
+func selectMeasuredCandidates(candidates []EvaluatedCandidate, mode string, tolerance float64, sourceBytes int64, version string, hardwareMarginPercent *float64) SelectionResult {
 	r := SelectionResult{AllEvaluated: append([]EvaluatedCandidate(nil), candidates...), DecisionReason: ReasonAllCandidatesInvalid}
 	if mode != "size" && mode != "quality" && mode != "x265_preserve" && mode != "compact" {
 		r.DecisionReason = "invalid_mode"
@@ -300,6 +357,11 @@ func SelectMeasuredCandidatesVersion(candidates []EvaluatedCandidate, mode strin
 		}
 		eligible = filtered
 	}
+	var bestSoftware int64
+	var preferredHardware bool
+	if mode == "size" && hardwareMarginPercent != nil {
+		eligible, bestSoftware, preferredHardware = preferHardware(eligible, *hardwareMarginPercent)
+	}
 	smallest := eligible[0].EstimatedBytes
 	for _, c := range eligible {
 		if c.EstimatedBytes < smallest {
@@ -325,6 +387,13 @@ func SelectMeasuredCandidatesVersion(candidates []EvaluatedCandidate, mode strin
 		return a.CandidateID < b.CandidateID
 	})
 	winner := finalists[0]
+	if preferredHardware {
+		note := HardwareSelectedNote + ": no software candidate qualified"
+		if bestSoftware > 0 {
+			note = fmt.Sprintf(HardwareSelectedNote+": %d bytes against %d for the smallest software candidate, within the %.4g%% margin", winner.EstimatedBytes, bestSoftware, *hardwareMarginPercent)
+		}
+		winner.Uncertainties = append(append([]string(nil), winner.Uncertainties...), note)
+	}
 	r.Winner = &winner
 	r.DecisionReason = "measured_plan_selected"
 	return r

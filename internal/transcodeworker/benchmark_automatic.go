@@ -295,8 +295,11 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 	verificationFailures := []transcode.BenchmarkCandidateEvaluation{}
 	for attempt := 0; attempt < 2 && evidence.Decision.Winner != nil; attempt++ {
 		id := evidence.Decision.Winner.CandidateID
+		// The decision that chose this attempt's candidate: its hardware note
+		// describes that choice, whichever stage (discovery, fallback or retry) made it.
+		chosen := evidence.Decision
 		if preferSafest {
-			id = safestEligibleID(tested, evidence.Decision, id)
+			id = safestEligibleIDWithin(tested, evidence.Decision, id, record.HardwareSearch)
 		}
 		var winner validatedCandidate
 		for _, vc := range tested {
@@ -318,6 +321,7 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 		}
 		if evidence.Decision.Winner != nil {
 			automatic.VerifiedSamples = 5
+			carryHardwareNote(evidence.Decision, chosen)
 			evidence.Decision.Evaluations = append(append(evidence.Decision.Evaluations, verificationFailures...), ruledOut...)
 			appendAutomaticRejections(evidence.Decision, automatic.Discovery)
 			finish()
@@ -378,13 +382,35 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 // so the quality limits and selection margin are not relaxed. A candidate
 // outside a constant-quality family keeps the selected one.
 func safestEligibleID(tested []validatedCandidate, decision *transcode.BenchmarkDecision, selectedID string) string {
+	return safestEligibleIDWithin(tested, decision, selectedID, nil)
+}
+
+// safestEligibleIDWithin is safestEligibleID for a search that allows
+// hardware: a VideoToolbox winner is only bumped to a safer VideoToolbox
+// setting that is still within the hardware size margin of the smallest
+// eligible x265 setting. The winner was chosen because it was within that
+// margin, and a verified safer setting must not break the same promise.
+func safestEligibleIDWithin(tested []validatedCandidate, decision *transcode.BenchmarkDecision, selectedID string, hardware *transcode.HardwareSearchRules) string {
 	if decision == nil {
 		return selectedID
 	}
 	eligible := map[string]bool{}
+	var smallestSoftware int64
 	for _, e := range decision.Evaluations {
-		if e.Eligible {
-			eligible[e.CandidateID] = true
+		if !e.Eligible {
+			continue
+		}
+		eligible[e.CandidateID] = true
+		if !isVideoToolbox(e.VideoCodec) && (smallestSoftware == 0 || e.EstimatedBytes < smallestSoftware) {
+			smallestSoftware = e.EstimatedBytes
+		}
+	}
+	if hardware != nil && smallestSoftware > 0 {
+		limit := float64(smallestSoftware) * (1 + hardware.MarginPercent/100)
+		for _, e := range decision.Evaluations {
+			if e.CandidateID != selectedID && e.Eligible && isVideoToolbox(e.VideoCodec) && float64(e.EstimatedBytes) > limit {
+				eligible[e.CandidateID] = false
+			}
 		}
 	}
 	var selected *validatedCandidate
@@ -415,6 +441,11 @@ func safestEligibleID(tested []validatedCandidate, decision *transcode.Benchmark
 		}
 	}
 	return best.candidate.ID
+}
+
+// isVideoToolbox reports the media-engine codec; an empty codec means it too.
+func isVideoToolbox(codec string) bool {
+	return transcode.BenchmarkCandidateVideoCodec(transcode.BenchmarkCandidate{VideoCodec: codec}) == transcode.VideoCodecHEVCVideoToolbox
 }
 
 // notVerifiedEvaluation is a candidate's latest discovery evaluation after a
@@ -614,4 +645,20 @@ func mergeAutomaticQuality(record *BenchmarkRecord, evidence *BenchmarkExecution
 	}
 	evidence.CandidateMetrics = append(metrics, BenchmarkCandidateMetricAggregate{CandidateID: vc.candidate.ID, CandidateIndex: vc.index, MetricType: optimization.MetricTypeVMAF, Aggregate: aggregate})
 	return nil
+}
+
+// carryHardwareNote keeps the reason a media-engine candidate won discovery on
+// the verified decision. The holdout selects among a single candidate, so it
+// cannot repeat the comparison; the note stays only while the verified winner
+// is still the candidate it described.
+func carryHardwareNote(final, discovery *transcode.BenchmarkDecision) {
+	if final == nil || final.Winner == nil || discovery == nil || discovery.Winner == nil || discovery.Winner.CandidateID != final.Winner.CandidateID {
+		return
+	}
+	for _, u := range discovery.Winner.Uncertainties {
+		if strings.HasPrefix(u, optimization.HardwareSelectedNote) {
+			final.Winner.Uncertainties = append(append([]string(nil), final.Winner.Uncertainties...), u)
+			return
+		}
+	}
 }

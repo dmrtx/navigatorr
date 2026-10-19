@@ -45,6 +45,35 @@ is separate and is never authorized by processing or changing a goal.
 The metrics describe the actual sampled source class and model, not a universal
 quality percentage. No claim of full-motion human review or lossless video is made.
 
+## Media engine option (size mode)
+
+`mode=size` accepts `allow_hardware` (default **`true`**) and, while it is on,
+`hardware_margin_percent` (0 to 50, default 15). With the option on, the size
+search also tries four VideoToolbox candidates (`-q:v` 45, 50, 55, 60, a
+240-frame GOP) beside the x265 ones. They face the same quality gates and
+holdout windows. A VideoToolbox result wins when it is at most the margin larger
+than the smallest x265 result, or when no x265 candidate qualifies; otherwise
+the smallest result wins as before. VideoToolbox encodes several times faster
+and uses much less CPU, at the price of up to the margin in size.
+
+It is on by default for the new policy only, and always visible and switchable:
+the Library and batch setup show an *Allow the media engine (faster)* checkbox
+under Smaller files (with the margin), *Change goal* shows the same two
+controls, and the MCP inputs `allow_hardware=false` or a different
+`hardware_margin_percent` change it per job or batch. A snapshot frozen before
+this option existed is never re-derived, so existing batches and their digests
+stay x265-only; `allow_hardware=false` freezes a snapshot identical to the
+earlier size policy. If the worker lacks the capability or the encoder, the
+search silently stays x265-only.
+
+A winner from the media engine is labeled before anything is replaced: the job
+shows *Encoder: VideoToolbox (hardware media engine)* with a *Hardware* badge
+(x265 shows *Encoder: x265 (software)*), the candidate lists name
+`VideoToolbox (hardware)`, and the MCP job and action detail carry `encoder` and
+`hardware` on the size result. See
+[TRANSCODE_MODES_REVIEW.md](TRANSCODE_MODES_REVIEW.md) and the
+[experiment](reviews/2026-10-19-hardware-media-engine-experiment.md).
+
 ## Compact mode
 
 `mode=compact` (optional `max_height` 720, 1080 (default), 1440 or 2160) accepts

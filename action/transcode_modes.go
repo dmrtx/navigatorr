@@ -81,6 +81,12 @@ type ModeSizePolicy struct {
 	FinalWindowEverySeconds int   `json:"final_window_every_seconds"`
 	FinalWindowsMinimum     int   `json:"final_windows_minimum"`
 	FinalWindowsMaximum     int   `json:"final_windows_maximum"`
+	// Hardware is set when the operation allows the media engine (the default
+	// for new size operations; allow_hardware=false turns it off):
+	// VideoToolbox candidates measured beside x265 that win within a frozen
+	// size margin. It is absent from snapshots frozen before it existed and
+	// from operations that turn it off, so their size v3 digests are unchanged.
+	Hardware *transcode.HardwareSearchRules `json:"hardware_search,omitempty"`
 	// AudioOnlyFallback lets a source whose video cannot shrink within the
 	// floor still compact its lossless audio, with the video stream-copied
 	// and proven bit-identical. The same minimum savings applies.
@@ -152,9 +158,92 @@ func modePolicy(mode string, anime bool) (ModePolicySnapshot, error) {
 	return modePolicyFor(mode, anime, 0)
 }
 
+// Hardware search (size mode, on unless the operation turns it off). The ladder
+// straddles the quality gates on the measured clips (matched values 45-57 with
+// a 240-frame GOP); the default margin is how much larger than the best x265
+// result a hardware result may be and still win, for the speed it gives.
+const (
+	sizeHardwareDefaultMarginPercent = 15
+	sizeHardwareGOPSize              = 240
+	sizeHardwareBFrames              = 1
+)
+
+var sizeHardwareQualityValues = []int{45, 50, 55, 60}
+
+// modeHardwareInput reads allow_hardware and hardware_margin_percent for a
+// mode. Size mode allows the media engine unless allow_hardware is false, so
+// an operation that says nothing gets the default margin; the other modes
+// accept neither input. It returns nil rules when the media engine is not
+// allowed.
+func modeHardwareInput(mode string, inputs map[string]any) (*transcode.HardwareSearchRules, error) {
+	allowRaw, hasAllow := inputs["allow_hardware"]
+	marginRaw, hasMargin := inputs["hardware_margin_percent"]
+	if hasAllow && allowRaw == nil {
+		hasAllow = false
+	}
+	if hasMargin && marginRaw == nil {
+		hasMargin = false
+	}
+	allow := mode == "size"
+	if hasAllow {
+		b, ok := allowRaw.(bool)
+		if !ok {
+			return nil, fmt.Errorf("allow_hardware must be true or false")
+		}
+		if b && mode != "size" {
+			return nil, fmt.Errorf("allow_hardware is only supported with mode=size")
+		}
+		allow = b
+	}
+	if hasMargin && mode != "size" {
+		return nil, fmt.Errorf("hardware_margin_percent is only supported with mode=size")
+	}
+	if !allow {
+		if hasMargin {
+			return nil, fmt.Errorf("hardware_margin_percent requires allow_hardware=true")
+		}
+		return nil, nil
+	}
+	margin := float64(sizeHardwareDefaultMarginPercent)
+	if hasMargin {
+		switch n := marginRaw.(type) {
+		case float64:
+			margin = n
+		case int:
+			margin = float64(n)
+		case int64:
+			margin = float64(n)
+		default:
+			return nil, fmt.Errorf("hardware_margin_percent must be a number")
+		}
+	}
+	rules := &transcode.HardwareSearchRules{MarginPercent: margin, QualityValues: append([]int(nil), sizeHardwareQualityValues...), GOPSize: sizeHardwareGOPSize, BFrames: sizeHardwareBFrames}
+	if err := rules.Validate(); err != nil {
+		return nil, err
+	}
+	return rules, nil
+}
+
+// ValidateHardwareInputs reports whether allow_hardware and
+// hardware_margin_percent are acceptable for a goal, as the policy freeze
+// reads them. Callers that admit a goal change use it to fail early.
+func ValidateHardwareInputs(mode string, inputs map[string]any) error {
+	_, err := modeHardwareInput(mode, inputs)
+	return err
+}
+
 // modePolicyFor freezes a mode. maxHeight applies only to compact mode, where
 // zero selects the 1080p default.
 func modePolicyFor(mode string, anime bool, maxHeight int) (ModePolicySnapshot, error) {
+	return modePolicyWithHardware(mode, anime, maxHeight, nil)
+}
+
+// modePolicyWithHardware also freezes the size-mode hardware search rules
+// when the operation allows the media engine; they apply to mode=size only.
+func modePolicyWithHardware(mode string, anime bool, maxHeight int, hardware *transcode.HardwareSearchRules) (ModePolicySnapshot, error) {
+	if hardware != nil && mode != "size" {
+		return ModePolicySnapshot{}, fmt.Errorf("allow_hardware is only supported with mode=size")
+	}
 	if mode != "size" && mode != "quality" && mode != "x265_preserve" && mode != "compact" {
 		return ModePolicySnapshot{}, fmt.Errorf("mode must be size, quality, x265_preserve, or compact")
 	}
@@ -193,6 +282,7 @@ func modePolicyFor(mode string, anime bool, maxHeight int) (ModePolicySnapshot, 
 	if mode == "size" {
 		snapshot.Version = SizeModePolicyVersion
 		snapshot.Size = sizeModeV3Policy()
+		snapshot.Size.Hardware = hardware.Clone()
 	}
 	if mode == "compact" {
 		snapshot.MinSavingsPercent = optimization.CompactMinimumSavingsPercent
@@ -213,6 +303,9 @@ func validateModeInputs(inputs map[string]any) error {
 		if _, has := inputs["max_height"]; has {
 			return fmt.Errorf("max_height is only supported with mode=compact")
 		}
+		if _, err := modeHardwareInput("", inputs); err != nil {
+			return err
+		}
 		return nil
 	}
 	mode, ok := raw.(string)
@@ -223,7 +316,11 @@ func validateModeInputs(inputs map[string]any) error {
 	if err != nil {
 		return err
 	}
-	if _, err := modePolicyFor(mode, getBool(inputs, "is_anime") || getString(inputs, "media_type") == "anime", maxHeight); err != nil {
+	hardware, err := modeHardwareInput(mode, inputs)
+	if err != nil {
+		return err
+	}
+	if _, err := modePolicyWithHardware(mode, getBool(inputs, "is_anime") || getString(inputs, "media_type") == "anime", maxHeight, hardware); err != nil {
 		return err
 	}
 	for _, key := range []string{"profile", "profile_config", "priority", "metric", "min_savings_percent", "max_size_increase_percent", "preserve_source_bit_depth", "expected_video_codec", "shared_calibration", "calibration_items", "batch_fixed_quality", "batch_calibration_digest"} {
@@ -289,7 +386,11 @@ func freezeModePolicy(ec *ExecutionContext) (*ModePolicySnapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	p, err := modePolicyFor(mode, getBool(ec.State, "resolved_is_anime") || getBool(ec.Inputs, "is_anime") || getString(ec.Inputs, "media_type") == "anime", maxHeight)
+	hardware, err := modeHardwareInput(mode, ec.Inputs)
+	if err != nil {
+		return nil, err
+	}
+	p, err := modePolicyWithHardware(mode, getBool(ec.State, "resolved_is_anime") || getBool(ec.Inputs, "is_anime") || getString(ec.Inputs, "media_type") == "anime", maxHeight, hardware)
 	if err != nil {
 		return nil, err
 	}
@@ -562,6 +663,11 @@ func (e *Engine) settleModeSearches(ec *ExecutionContext, items []store.Transcod
 	ec.State["search_budget_entries"] = entries
 }
 
+// sameOptionalInt compares two optional settings, unset against unset included.
+func sameOptionalInt(a, b *int) bool {
+	return a == nil && b == nil || a != nil && b != nil && *a == *b
+}
+
 func verifyModeBenchmarkWinner(ec *ExecutionContext, winner *transcode.BenchmarkWinner) error {
 	if getString(ec.Inputs, "mode") == "" {
 		return nil
@@ -582,7 +688,7 @@ func verifyModeBenchmarkWinner(ec *ExecutionContext, winner *transcode.Benchmark
 		if candidate.ID != winner.CandidateID {
 			continue
 		}
-		if transcode.BenchmarkCandidateVideoCodec(candidate) != winner.VideoCodec || candidate.Quality != winner.Quality || candidate.AverageBitrateKbps != winner.AverageBitrateKbps || candidate.Preset != winner.Preset || candidate.Tune != winner.Tune || candidate.VideoProfile != winner.VideoProfile || candidate.PixelFormat != winner.PixelFormat {
+		if transcode.BenchmarkCandidateVideoCodec(candidate) != winner.VideoCodec || candidate.Quality != winner.Quality || candidate.AverageBitrateKbps != winner.AverageBitrateKbps || candidate.Preset != winner.Preset || candidate.Tune != winner.Tune || candidate.VideoProfile != winner.VideoProfile || candidate.PixelFormat != winner.PixelFormat || !sameOptionalInt(candidate.GOPSize, winner.GOPSize) || !sameOptionalInt(candidate.BFrames, winner.BFrames) {
 			return fmt.Errorf("mode benchmark winner does not match measured candidate plan")
 		}
 		snapshot, err := freezeModePolicy(ec)

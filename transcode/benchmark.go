@@ -386,7 +386,15 @@ func (e *SearchExtension) Clone() *SearchExtension {
 const (
 	MaxAutomaticCandidates      = 12
 	MaxAutomaticRulesCandidates = 15
-	MaxSelectionMarginVMAF      = 10
+	// MaxAutomaticHardwareCandidates leaves room for the VideoToolbox
+	// quality ladder beside the rules candidates.
+	MaxAutomaticHardwareCandidates = 19
+	// MaxHardwareMarginPercent bounds how much larger than the x265 winner a
+	// hardware candidate may be and still win.
+	MaxHardwareMarginPercent = 50
+	// MaxHardwareQualityValues bounds the VideoToolbox quality ladder.
+	MaxHardwareQualityValues = 4
+	MaxSelectionMarginVMAF   = 10
 	// HoldoutWindowsFinalGridEdges centres the two holdout windows on the
 	// first and last positions of the final validation grid.
 	HoldoutWindowsFinalGridEdges = "final_grid_edges"
@@ -448,6 +456,62 @@ func (r *AutomaticSearchRules) Clone() *AutomaticSearchRules {
 	return &c
 }
 
+// HardwareSearchRules are the frozen rules of a size search that allows the
+// media engine. VideoToolbox candidates are measured beside the x265 ones and
+// pass the same quality gates and selection margin. The smallest qualifying
+// one wins when it is at most MarginPercent larger than the smallest
+// qualifying x265 candidate, or when no x265 candidate qualifies; otherwise
+// x265 wins as without them. Absent rules mean the search is x265 only.
+type HardwareSearchRules struct {
+	// MarginPercent is how much larger (percent) than the best qualifying x265
+	// candidate a hardware candidate may be and still win.
+	MarginPercent float64 `json:"margin_percent"`
+	// QualityValues are the VideoToolbox -q:v values measured, ascending.
+	QualityValues []int `json:"quality_values"`
+	// GOPSize is the keyframe interval of every hardware candidate. The
+	// encoder's own default (12 frames) makes files about three times larger.
+	GOPSize int `json:"gop_size"`
+	// BFrames is 0 or 1 (the encoder only knows whether B-frames are on).
+	BFrames int `json:"b_frames"`
+}
+
+// Validate reports whether the rules are bounded and well formed.
+func (r *HardwareSearchRules) Validate() error {
+	if r == nil {
+		return nil
+	}
+	if math.IsNaN(r.MarginPercent) || r.MarginPercent < 0 || r.MarginPercent > MaxHardwareMarginPercent {
+		return fmt.Errorf("hardware search margin_percent must be in [0,%d]", MaxHardwareMarginPercent)
+	}
+	if len(r.QualityValues) == 0 || len(r.QualityValues) > MaxHardwareQualityValues {
+		return fmt.Errorf("hardware search needs 1 to %d quality values", MaxHardwareQualityValues)
+	}
+	prev := 0
+	for _, q := range r.QualityValues {
+		if q < 1 || q > 100 || q <= prev {
+			return errors.New("hardware search quality values must be ascending and in 1..100")
+		}
+		prev = q
+	}
+	if r.GOPSize < 1 || r.GOPSize > MaxBenchmarkGOPSize {
+		return fmt.Errorf("hardware search gop_size must be in 1..%d", MaxBenchmarkGOPSize)
+	}
+	if r.BFrames < 0 || r.BFrames > MaxBenchmarkBFrames {
+		return fmt.Errorf("hardware search b_frames must be in 0..%d", MaxBenchmarkBFrames)
+	}
+	return nil
+}
+
+// Clone returns an independent copy.
+func (r *HardwareSearchRules) Clone() *HardwareSearchRules {
+	if r == nil {
+		return nil
+	}
+	c := *r
+	c.QualityValues = append([]int(nil), r.QualityValues...)
+	return &c
+}
+
 // BenchmarkRequest defines the parameters sent from the coordinator to the worker to execute a benchmark.
 // It is strictly versioned and does NOT accept candidate output paths or replace_original parameters,
 // making original media mutation completely impossible.
@@ -469,6 +533,10 @@ type BenchmarkRequest struct {
 	// AutomaticSearch carries size-mode search rules to workers that
 	// advertise automatic_search_rules. Unset keeps the earlier rules.
 	AutomaticSearch *AutomaticSearchRules `json:"automatic_search,omitempty"`
+	// HardwareSearch carries the frozen rules of a size search that allows the
+	// media engine to workers that advertise hardware_search. Unset keeps the
+	// search x265 only.
+	HardwareSearch *HardwareSearchRules `json:"hardware_search,omitempty"`
 	// Allow8BitTo10Bit is an explicit experiment opt-in, never an automatic
 	// optimization. Quality measurement must use an explicit native-depth model.
 	Allow8BitTo10Bit          bool                        `json:"allow_8bit_to_10bit,omitempty"`
@@ -609,6 +677,14 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 		return errors.New("mode policy v3 is only defined for size mode")
 	}
 	maxAutomatic := MaxAutomaticCandidates
+	if req.HardwareSearch != nil {
+		if req.AutomaticSearch == nil || !req.Automatic || !sizeV3 {
+			return errors.New("hardware search requires an automatic size v3 search with automatic search rules")
+		}
+		if err := req.HardwareSearch.Validate(); err != nil {
+			return err
+		}
+	}
 	if req.AutomaticSearch != nil {
 		if !req.Automatic || !sizeV3 {
 			return errors.New("automatic search rules require an automatic size v3 search")
@@ -617,6 +693,9 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 			return err
 		}
 		maxAutomatic = MaxAutomaticRulesCandidates
+		if req.HardwareSearch != nil {
+			maxAutomatic = MaxAutomaticHardwareCandidates
+		}
 	}
 	if req.Automatic && (req.Mode == "" || req.ModePolicyVersion != optimization.ModePolicyV2 && !sizeV3 || len(req.Samples) != 5 || len(req.Candidates) > maxAutomatic) {
 		return fmt.Errorf("automatic search requires v2 or v3 mode, five windows and at most %d candidates", maxAutomatic)

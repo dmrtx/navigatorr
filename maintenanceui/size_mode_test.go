@@ -105,3 +105,33 @@ func TestOperationsProjectSizeAudioOnlyCheckStates(t *testing.T) {
 		}
 	}
 }
+
+// The encoder of the winning settings reaches the page, and a VideoToolbox
+// winner is flagged as hardware so it can be told apart before replacing.
+func TestOperationsProjectWinningEncoder(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	for id, codec := range map[string]string{"vt-job": "hevc_videotoolbox", "x265-job": "libx265"} {
+		seedOperation(t, st, id, "transcode_media", "completed", map[string]any{"path": "/media/series/Show/" + id + ".mkv", "mode": "size"}, nil, map[string]any{
+			"mode":               "size",
+			"original":           map[string]any{"size_bytes": 9000},
+			"benchmark_decision": map[string]any{"winner": map[string]any{"estimated_bytes": 4000, "video_codec": codec, "candidate_id": id}},
+		})
+	}
+	read := func(id string) map[string]any {
+		w := request(h, "GET", "/api/maintenance/operations?id="+id, "", true)
+		var page struct {
+			Jobs []map[string]any `json:"jobs"`
+		}
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil || len(page.Jobs) != 1 {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		return operationMap(page.Jobs[0]["size_mode"])
+	}
+	if vt := read("vt-job"); vt["encoder"] != "hevc_videotoolbox" || vt["hardware"] != true {
+		t.Fatalf("media engine winner not flagged: %v", vt)
+	}
+	if soft := read("x265-job"); soft["encoder"] != "libx265" || soft["hardware"] != nil {
+		t.Fatalf("software winner flagged: %v", soft)
+	}
+}

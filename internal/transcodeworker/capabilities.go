@@ -229,6 +229,9 @@ func probeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratch
 	// Size searches may carry automatic_search rules (selection margin,
 	// quality-first verification, preset-ordered quality fallback).
 	caps.AutomaticSearchRules = true
+	// Size searches may carry hardware_search rules (VideoToolbox candidates
+	// that win within a size margin of the x265 winner).
+	caps.HardwareSearch = true
 	if vtCaps.Available {
 		caps.Encoders[videoToolboxEncoder] = true
 	}
