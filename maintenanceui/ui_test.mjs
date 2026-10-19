@@ -3111,6 +3111,16 @@ test("the media engine option belongs to the smaller files goal and starts on", 
   assert.equal(el("hardware-margin-label").hidden, true);
   h.run('processingMode=()=>"compact"; controls();');
   assert.equal(el("hardware-option").hidden, true);
+  // Ticking the box in a browser fires its change event, which must re-run controls().
+  h.run('processingMode=()=>"size"; $("allow-hardware").checked=true; controls();');
+  const onChange = el("allow-hardware").listeners.get("change");
+  assert.equal(typeof onChange, "function", "the checkbox has no change handler");
+  h.run('$("allow-hardware").checked=false;');
+  onChange();
+  assert.equal(el("hardware-margin-label").hidden, true);
+  h.run('$("allow-hardware").checked=true;');
+  onChange();
+  assert.equal(el("hardware-margin-label").hidden, false);
 });
 
 test("the smaller files goal always says whether the media engine is allowed", async () => {
@@ -3174,6 +3184,11 @@ test("changing the goal to smaller files carries the media engine choice", async
   await h.run("submitReconfiguredBatch()");
   assert.equal(calls[1][1].allow_hardware, false);
   assert.equal("hardware_margin_percent" in calls[1][1], false);
+  // Files frozen with different choices say so instead of pretending to agree.
+  h = await open({ ...base, settings: { allow_hardware: true, hardware_margin_percent: 15, hardware_mixed: true } });
+  assert.match(h.elements.get("reconfigure-settings").textContent, /different media engine choices/);
+  h = await open({ ...base, settings: { allow_hardware: true, hardware_margin_percent: 15, hardware_mixed: false } });
+  assert.doesNotMatch(h.elements.get("reconfigure-settings").textContent, /different media engine choices/);
   // A saved choice is shown as saved, and other goals send nothing about it.
   h = await open({ ...base, settings: { allow_hardware: false, hardware_margin_percent: 30 } });
   assert.equal(h.elements.get("reconfigure-hardware").checked, false);

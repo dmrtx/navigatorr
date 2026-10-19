@@ -1,12 +1,14 @@
 package action
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/jakenesler/navigatorr/mediainspect"
+	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
 )
 
@@ -46,6 +48,11 @@ func TestSizePolicyHardwareDefaultsOnAndFreezes(t *testing.T) {
 	}
 	if hw.Digest == base.Digest || hw.Version != SizeModePolicyVersion || hw.Size.Hardware == nil || hw.Size.Hardware == rules {
 		t.Fatalf("hardware snapshot %+v", hw.Size)
+	}
+	// The default snapshot is a frozen artifact: changing its rules, their order
+	// or their defaults changes the digest of every new size operation.
+	if hw.Digest != "sha256:bc2e370bf9f26965f7faa121693c299d1fe2e6c2d02b37aee033dc369cb12e03" {
+		t.Fatalf("size snapshot with the media engine on changed digest: %s", hw.Digest)
 	}
 	// The frozen snapshot round-trips through storage and re-verifies.
 	stored := map[string]any{}
@@ -277,5 +284,108 @@ func TestHardwareSearchRulesValidation(t *testing.T) {
 	bad.HardwareSearch.MarginPercent = 99
 	if transcode.ValidateBenchmarkRequest(&bad) == nil {
 		t.Fatal("out-of-range margin accepted")
+	}
+}
+
+// A goal change replaces the policy of a batch item, so the parent's media
+// engine inputs must not leak into that item's child: they would fail preflight
+// for every goal but smaller files, or contradict a size attempt that turned
+// the engine off.
+func TestGoalChangeChildInputsAgreeWithTheFrozenPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		settings map[string]any
+		allow    any
+		margin   any
+	}{
+		{"quality", map[string]any{"mode": "quality"}, nil, nil},
+		{"x265_preserve", map[string]any{"mode": "x265_preserve"}, nil, nil},
+		{"compact", map[string]any{"mode": "compact"}, nil, nil},
+		{"size, engine off", map[string]any{"mode": "size", "allow_hardware": false}, false, nil},
+		{"size, new margin", map[string]any{"mode": "size", "allow_hardware": true, "hardware_margin_percent": float64(30)}, true, float64(30)},
+		{"size, default", map[string]any{"mode": "size"}, true, float64(15)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := setupTestStore(t)
+			defer st.Close()
+			e := NewEngine(EngineDeps{Store: st})
+			parentInputs := map[string]any{"mode": "size", "allow_hardware": true, "hardware_margin_percent": float64(25)}
+			seedActionInstance(t, st, "goal-parent", "transcode_batch", StatusCompleted, 3, "", parentInputs, map[string]any{})
+			parent, _ := st.GetActionInstance("goal-parent")
+			item := store.TranscodeBatchItem{BatchID: parent.ID, ItemKey: "file", FilePath: "/media/source.mkv", Decision: "transcode", Status: "failed", Profile: "mode-size"}
+			if err := st.CreateTranscodeBatchItem(item); err != nil {
+				t.Fatal(err)
+			}
+			items, _ := st.ListTranscodeBatchItems(parent.ID)
+			if _, err := e.ReconfigureBatch(context.Background(), parent.ID, "all", "", BatchSelectionVersion(parent, items), "", "goal-change", tc.settings); err != nil {
+				t.Fatal(err)
+			}
+			updated, _ := st.GetActionInstance(parent.ID)
+			ec := parseExecutionContext(updated, e)
+			row, _ := stateObject(ec.State, "batch_item_settings")["file"].(map[string]any)
+			if row == nil {
+				t.Fatal("goal change was not recorded", ec.State)
+			}
+			// What processBatchItem hands to the child: the parent's inputs, the row's
+			// goal and the hardware inputs that agree with the row's frozen policy.
+			child := map[string]any{"path": item.FilePath, "mode": row["mode"]}
+			for _, key := range []string{"allow_hardware", "hardware_margin_percent"} {
+				child[key] = parentInputs[key]
+			}
+			if tc.name != "size, default" && tc.name != "size, new margin" && tc.name != "size, engine off" {
+				if err := validateModeInputs(child); err == nil {
+					t.Fatal("expected the unadjusted parent inputs to be refused for", tc.name)
+				}
+			}
+			applyGoalHardwareInputs(child, row["mode_policy"])
+			if err := validateModeInputs(child); err != nil {
+				t.Fatal("child would fail preflight:", err)
+			}
+			if child["allow_hardware"] != tc.allow || child["hardware_margin_percent"] != tc.margin {
+				t.Fatalf("child inputs %v do not match the frozen policy", child)
+			}
+		})
+	}
+}
+
+// The coordinator accepts a winner only if it repeats the measured candidate,
+// including the GOP and B-frame settings the media engine candidates add.
+func TestWinnerMustRepeatTheCandidateGOPAndBFrames(t *testing.T) {
+	inputs := map[string]any{"mode": "size"}
+	req := hardwareRequest(t, 8, 1800, inputs, hardwareTestCapabilities())
+	var candidate transcode.BenchmarkCandidate
+	for _, c := range req.Candidates {
+		if c.ID == "vt-cand_q50" {
+			candidate = c
+		}
+	}
+	if candidate.ID == "" || candidate.GOPSize == nil || candidate.BFrames == nil {
+		t.Fatalf("media engine candidate missing or incomplete: %+v", candidate)
+	}
+	digest, err := transcode.DigestBenchmarkRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newContext := func() *ExecutionContext {
+		ec := &ExecutionContext{InstanceID: "hw-winner", Inputs: inputs, State: map[string]any{"original_sha256": strings.Repeat("a", 64), "benchmark_request": *req, "benchmark_request_digest": digest, "plan": &transcode.Plan{}}}
+		return ec
+	}
+	winner := func() *transcode.BenchmarkWinner {
+		return &transcode.BenchmarkWinner{CandidateID: candidate.ID, VideoCodec: transcode.VideoCodecHEVCVideoToolbox, Quality: candidate.Quality, VideoProfile: candidate.VideoProfile, PixelFormat: candidate.PixelFormat, GOPSize: candidate.GOPSize, BFrames: candidate.BFrames, MinimumMet: true, MetricType: "vmaf", Score: 99}
+	}
+	if err := verifyModeBenchmarkWinner(newContext(), winner()); err != nil {
+		t.Fatal("a faithful winner was refused:", err)
+	}
+	for name, change := range map[string]func(*transcode.BenchmarkWinner){
+		"different GOP":    func(w *transcode.BenchmarkWinner) { v := 12; w.GOPSize = &v },
+		"GOP dropped":      func(w *transcode.BenchmarkWinner) { w.GOPSize = nil },
+		"B-frames dropped": func(w *transcode.BenchmarkWinner) { w.BFrames = nil },
+		"different B":      func(w *transcode.BenchmarkWinner) { v := 0; w.BFrames = &v },
+	} {
+		w := winner()
+		change(w)
+		if err := verifyModeBenchmarkWinner(newContext(), w); err == nil {
+			t.Fatalf("%s: accepted a winner that differs from the measured candidate", name)
+		}
 	}
 }

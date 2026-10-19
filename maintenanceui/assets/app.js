@@ -1720,6 +1720,7 @@ function setProcessingMode(mode) {
 }
 document.querySelectorAll('input[name="processing-mode"]').forEach(input => input.addEventListener("change", controls));
 $("technical").addEventListener("change", controls);
+$("allow-hardware").addEventListener("change", controls);
 
 function renderProfileFacts(output, data, name, preserveDepth) {
   output.replaceChildren();
@@ -2871,7 +2872,7 @@ function updateBatchSettingsProfile() {
   $("reconfigure-savings").placeholder = $("reconfigure-growth").placeholder = plan.settings?.mixed_limits ? "Different per file" : "Default";
   if (plan.mode) {
     $("reconfigure-profile-note").hidden = $("reconfigure-current-profiles").hidden = $("reconfigure-profile-info").hidden = true;
-    $("reconfigure-settings").textContent = "Automatic will test and verify settings for this goal. Originals stay in place.";
+    $("reconfigure-settings").textContent = `Automatic will test and verify settings for this goal. Originals stay in place.${plan.settings?.hardware_mixed ? " The selected files were frozen with different media engine choices; the choice above applies to all of them." : ""}`;
     $("submit-reconfigure").disabled = !serverReachable || jobIsBusy(plan.id) || plan.selected === 0;
     $("submit-reconfigure").textContent = "Process with this goal";
     return;

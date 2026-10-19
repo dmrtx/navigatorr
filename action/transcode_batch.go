@@ -1083,6 +1083,26 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 	}, nil
 }
 
+// applyGoalHardwareInputs makes the child inputs of a goal-changed item agree
+// with the policy that attempt froze. The parent's media engine inputs belong
+// to the parent's goal: copied as they are, they would make a quality, compact
+// or HEVC child fail preflight, or contradict a size attempt that turned the
+// engine off.
+func applyGoalHardwareInputs(inputs map[string]any, rawPolicy any) {
+	delete(inputs, "allow_hardware")
+	delete(inputs, "hardware_margin_percent")
+	var policy ModePolicySnapshot
+	b, err := json.Marshal(rawPolicy)
+	if err != nil || json.Unmarshal(b, &policy) != nil || policy.Size == nil {
+		return
+	}
+	if policy.Size.Hardware == nil {
+		inputs["allow_hardware"] = false
+		return
+	}
+	inputs["allow_hardware"], inputs["hardware_margin_percent"] = true, policy.Size.Hardware.MarginPercent
+}
+
 func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatchItem, ec *ExecutionContext, seriesTitle string, isAnime bool) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
@@ -1111,6 +1131,7 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 			for _, key := range []string{"profile", "profile_config", "priority", "metric", "min_savings_percent", "max_size_increase_percent", "preserve_source_bit_depth", "shared_calibration"} {
 				delete(copy.Inputs, key)
 			}
+			applyGoalHardwareInputs(copy.Inputs, settings["mode_policy"])
 			item.Profile = "mode-" + mode
 		}
 		if profile := getString(settings, "profile"); profile != "" && profile != "same" {

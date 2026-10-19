@@ -318,6 +318,7 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 		}
 		if evidence.Decision.Winner != nil {
 			automatic.VerifiedSamples = 5
+			carryHardwareNote(evidence.Decision, automatic.Discovery)
 			evidence.Decision.Evaluations = append(append(evidence.Decision.Evaluations, verificationFailures...), ruledOut...)
 			appendAutomaticRejections(evidence.Decision, automatic.Discovery)
 			finish()
@@ -641,4 +642,20 @@ func mergeAutomaticQuality(record *BenchmarkRecord, evidence *BenchmarkExecution
 	}
 	evidence.CandidateMetrics = append(metrics, BenchmarkCandidateMetricAggregate{CandidateID: vc.candidate.ID, CandidateIndex: vc.index, MetricType: optimization.MetricTypeVMAF, Aggregate: aggregate})
 	return nil
+}
+
+// carryHardwareNote keeps the reason a media-engine candidate won discovery on
+// the verified decision. The holdout selects among a single candidate, so it
+// cannot repeat the comparison; the note stays only while the verified winner
+// is still the candidate it described.
+func carryHardwareNote(final, discovery *transcode.BenchmarkDecision) {
+	if final == nil || final.Winner == nil || discovery == nil || discovery.Winner == nil || discovery.Winner.CandidateID != final.Winner.CandidateID {
+		return
+	}
+	for _, u := range discovery.Winner.Uncertainties {
+		if strings.HasPrefix(u, optimization.HardwareSelectedNote) {
+			final.Winner.Uncertainties = append(append([]string(nil), final.Winner.Uncertainties...), u)
+			return
+		}
+	}
 }

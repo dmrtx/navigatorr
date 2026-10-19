@@ -663,6 +663,11 @@ func (e *Engine) settleModeSearches(ec *ExecutionContext, items []store.Transcod
 	ec.State["search_budget_entries"] = entries
 }
 
+// sameOptionalInt compares two optional settings, unset against unset included.
+func sameOptionalInt(a, b *int) bool {
+	return a == nil && b == nil || a != nil && b != nil && *a == *b
+}
+
 func verifyModeBenchmarkWinner(ec *ExecutionContext, winner *transcode.BenchmarkWinner) error {
 	if getString(ec.Inputs, "mode") == "" {
 		return nil
@@ -683,7 +688,7 @@ func verifyModeBenchmarkWinner(ec *ExecutionContext, winner *transcode.Benchmark
 		if candidate.ID != winner.CandidateID {
 			continue
 		}
-		if transcode.BenchmarkCandidateVideoCodec(candidate) != winner.VideoCodec || candidate.Quality != winner.Quality || candidate.AverageBitrateKbps != winner.AverageBitrateKbps || candidate.Preset != winner.Preset || candidate.Tune != winner.Tune || candidate.VideoProfile != winner.VideoProfile || candidate.PixelFormat != winner.PixelFormat {
+		if transcode.BenchmarkCandidateVideoCodec(candidate) != winner.VideoCodec || candidate.Quality != winner.Quality || candidate.AverageBitrateKbps != winner.AverageBitrateKbps || candidate.Preset != winner.Preset || candidate.Tune != winner.Tune || candidate.VideoProfile != winner.VideoProfile || candidate.PixelFormat != winner.PixelFormat || !sameOptionalInt(candidate.GOPSize, winner.GOPSize) || !sameOptionalInt(candidate.BFrames, winner.BFrames) {
 			return fmt.Errorf("mode benchmark winner does not match measured candidate plan")
 		}
 		snapshot, err := freezeModePolicy(ec)

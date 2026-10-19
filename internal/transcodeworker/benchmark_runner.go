@@ -1624,7 +1624,9 @@ func (r *ProductionBenchmarkRunner) runSelection(
 		Policy:     selectorPolicy,
 		Candidates: candidateInputs,
 	}
-	if record.HardwareSearch != nil {
+	// The margin chooses between hardware and software results; a lone
+	// candidate (the holdout verification) has nothing to choose from.
+	if record.HardwareSearch != nil && len(validatedCandidates) > 1 {
 		margin := record.HardwareSearch.MarginPercent
 		selIn.HardwareMarginPercent = &margin
 	}
@@ -1719,7 +1721,7 @@ func (r *ProductionBenchmarkRunner) runSelection(
 					EstimatedTotalMB:          est.EstimatedTotalMB,
 					SavingsBytes:              est.SavingsBytes,
 					SavingsPercent:            est.SavingsPercent,
-					Uncertainties:             est.Uncertainties,
+					Uncertainties:             withHardwareNote(est.Uncertainties, selRes.Winner.Uncertainties),
 				}
 				break
 			}
@@ -1890,4 +1892,15 @@ func withReferenceChain(args []string, chain string) []string {
 		out = append(out, a)
 	}
 	return out
+}
+
+// withHardwareNote adds the selector's reason for choosing a media-engine
+// winner to the estimator's uncertainties, which the decision reports.
+func withHardwareNote(estimate, selected []string) []string {
+	for _, u := range selected {
+		if strings.HasPrefix(u, optimization.HardwareSelectedNote) {
+			return append(append([]string(nil), estimate...), u)
+		}
+	}
+	return estimate
 }

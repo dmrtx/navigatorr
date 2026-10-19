@@ -104,6 +104,17 @@ func (s *Server) rerun(w http.ResponseWriter, r *http.Request) {
 			inputs[k] = v
 		}
 	}
+	// Run again means the same settings. A size job that never named the media
+	// engine would otherwise take today's default instead of the policy it ran
+	// under, so carry the choice its frozen policy made.
+	if _, said := inputs["allow_hardware"]; !said && operationString(inputs["mode"]) == "size" {
+		if allow, margin, ok := frozenHardware(old.state); ok {
+			inputs["allow_hardware"] = allow
+			if allow {
+				inputs["hardware_margin_percent"] = margin
+			}
+		}
+	}
 	ctx := action.WithOrigin(r.Context(), "web")
 	// A lost response replays the same key: return that action, never a
 	// second job and never "worker busy" for work that is already admitted.

@@ -262,3 +262,48 @@ func TestGoalChangeCarriesTheHardwareChoice(t *testing.T) {
 		t.Fatal("frozen hardware choice not shown", w.Body.String())
 	}
 }
+
+// The Change goal dialog shows the media engine choice the files were frozen
+// with: an earlier batch is x265 only, not today's default, and files frozen
+// differently say so.
+func TestGoalChangeShowsTheFrozenMediaEngineChoice(t *testing.T) {
+	s, h := testUI(t)
+	seedFailedBatch(t, s, false)
+	st := s.engine.Deps().Store
+	batch, _ := st.GetActionInstance("failed-batch")
+	inputs := decodeOperationJSON(batch.InputsJSON)
+	delete(inputs, "profile_config")
+	inputs["mode"] = "size"
+	batch.InputsJSON = mustJSON(t, inputs)
+	read := func(state map[string]any) map[string]any {
+		batch.StateJSON = mustJSON(t, state)
+		if err := st.UpdateActionInstance(*batch); err != nil {
+			t.Fatal(err)
+		}
+		w := request(h, "GET", "/api/maintenance/batch-settings?id=failed-batch&scope=all", "", true)
+		var plan struct {
+			Settings map[string]any `json:"settings"`
+		}
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &plan) != nil {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		return plan.Settings
+	}
+	earlier := map[string]any{"mode": "size", "size": map[string]any{"min_savings_percent": 15}}
+	withEngine := map[string]any{"mode": "size", "size": map[string]any{"hardware_search": map[string]any{"margin_percent": float64(30)}}}
+	if got := read(map[string]any{"mode_policy": earlier}); got["allow_hardware"] != false || got["hardware_mixed"] != false {
+		t.Fatalf("an earlier batch should show the engine off: %v", got)
+	}
+	if got := read(map[string]any{"mode_policy": withEngine}); got["allow_hardware"] != true || got["hardware_margin_percent"] != float64(30) || got["hardware_mixed"] != false {
+		t.Fatalf("a frozen margin was not shown: %v", got)
+	}
+	// One file already changed to a different choice makes the selection mixed.
+	mixed := map[string]any{"mode_policy": earlier, "batch_item_settings": map[string]any{"epfile-101": map[string]any{"mode": "size", "mode_policy": withEngine}}}
+	if got := read(mixed); got["hardware_mixed"] != true {
+		t.Fatalf("different choices were not reported: %v", got)
+	}
+	// Nothing frozen yet: the dialog falls back to the default (no stored choice).
+	if got := read(map[string]any{}); got["allow_hardware"] != nil || got["hardware_mixed"] != nil {
+		t.Fatalf("an unfrozen batch invented a choice: %v", got)
+	}
+}

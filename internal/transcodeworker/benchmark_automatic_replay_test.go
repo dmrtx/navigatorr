@@ -568,6 +568,15 @@ func TestReplayHardwareWithinMarginWins(t *testing.T) {
 	if got := res.reason("vt-cand_q45"); !qualityRejection(got) {
 		t.Fatalf("vt-cand_q45 labelled %q", got)
 	}
+	// The verified decision says why the media engine result won, even though the
+	// holdout selects among that one candidate alone.
+	noted := false
+	for _, u := range res.decision.Winner.Uncertainties {
+		noted = noted || strings.HasPrefix(u, optimization.HardwareSelectedNote) && strings.Contains(u, "bytes against") && strings.Contains(u, "within the 15% margin")
+	}
+	if !noted {
+		t.Fatalf("hardware reason lost from the verified winner: %v", res.decision.Winner.Uncertainties)
+	}
 	for _, id := range res.measured {
 		if strings.HasPrefix(id, "fallback-") {
 			t.Fatalf("a fallback was measured although candidates qualified: %v", res.measured)

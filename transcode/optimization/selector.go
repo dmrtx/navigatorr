@@ -256,32 +256,42 @@ func SelectMeasuredCandidatesVersion(candidates []EvaluatedCandidate, mode strin
 // videoToolboxCodec is the media-engine encoder the hardware margin favours.
 const videoToolboxCodec = "hevc_videotoolbox"
 
-// preferHardware narrows the size contest to the VideoToolbox candidates when
-// the smallest of them is within marginPercent of the smallest other one, or
+// HardwareSelectedNote begins the uncertainty the selector adds to a winner
+// chosen by the hardware margin, so callers can carry it into the decision.
+const HardwareSelectedNote = "hardware candidate selected"
+
+// preferHardware narrows the size contest to the VideoToolbox candidates that
+// are within marginPercent of the smallest other candidate, or to all of them
 // when no other candidate qualifies. Otherwise it returns the set unchanged.
-func preferHardware(eligible []EvaluatedCandidate, marginPercent float64) ([]EvaluatedCandidate, string) {
-	var hardware []EvaluatedCandidate
-	var bestHardware, bestSoftware int64
+// It also returns the smallest software size (zero when none qualified) so the
+// caller can explain the choice once a winner is known. Filtering, rather than
+// only testing the smallest, keeps the later speed-equivalence band from
+// picking a hardware candidate beyond the margin.
+func preferHardware(eligible []EvaluatedCandidate, marginPercent float64) (contest []EvaluatedCandidate, bestSoftware int64, hardware bool) {
+	var all []EvaluatedCandidate
 	for _, c := range eligible {
 		if c.VideoCodec == videoToolboxCodec {
-			hardware = append(hardware, c)
-			if bestHardware == 0 || c.EstimatedBytes < bestHardware {
-				bestHardware = c.EstimatedBytes
-			}
+			all = append(all, c)
 		} else if bestSoftware == 0 || c.EstimatedBytes < bestSoftware {
 			bestSoftware = c.EstimatedBytes
 		}
 	}
-	if len(hardware) == 0 {
-		return eligible, ""
+	if len(all) == 0 {
+		return eligible, bestSoftware, false
 	}
 	if bestSoftware == 0 {
-		return hardware, "hardware candidate selected: no software candidate qualified"
+		return all, 0, true
 	}
-	if float64(bestHardware) <= float64(bestSoftware)*(1+marginPercent/100) {
-		return hardware, fmt.Sprintf("hardware candidate selected: %d bytes against %d for the smallest software candidate, within the %.4g%% margin", bestHardware, bestSoftware, marginPercent)
+	limit := float64(bestSoftware) * (1 + marginPercent/100)
+	for _, c := range all {
+		if float64(c.EstimatedBytes) <= limit {
+			contest = append(contest, c)
+		}
 	}
-	return eligible, ""
+	if len(contest) == 0 {
+		return eligible, bestSoftware, false
+	}
+	return contest, bestSoftware, true
 }
 
 func selectMeasuredCandidates(candidates []EvaluatedCandidate, mode string, tolerance float64, sourceBytes int64, version string, hardwareMarginPercent *float64) SelectionResult {
@@ -342,9 +352,10 @@ func selectMeasuredCandidates(candidates []EvaluatedCandidate, mode string, tole
 		}
 		eligible = filtered
 	}
-	hardwareNote := ""
+	var bestSoftware int64
+	var preferredHardware bool
 	if mode == "size" && hardwareMarginPercent != nil {
-		eligible, hardwareNote = preferHardware(eligible, *hardwareMarginPercent)
+		eligible, bestSoftware, preferredHardware = preferHardware(eligible, *hardwareMarginPercent)
 	}
 	smallest := eligible[0].EstimatedBytes
 	for _, c := range eligible {
@@ -371,8 +382,12 @@ func selectMeasuredCandidates(candidates []EvaluatedCandidate, mode string, tole
 		return a.CandidateID < b.CandidateID
 	})
 	winner := finalists[0]
-	if hardwareNote != "" {
-		winner.Uncertainties = append(append([]string(nil), winner.Uncertainties...), hardwareNote)
+	if preferredHardware {
+		note := HardwareSelectedNote + ": no software candidate qualified"
+		if bestSoftware > 0 {
+			note = fmt.Sprintf(HardwareSelectedNote+": %d bytes against %d for the smallest software candidate, within the %.4g%% margin", winner.EstimatedBytes, bestSoftware, *hardwareMarginPercent)
+		}
+		winner.Uncertainties = append(append([]string(nil), winner.Uncertainties...), note)
 	}
 	r.Winner = &winner
 	r.DecisionReason = "measured_plan_selected"
