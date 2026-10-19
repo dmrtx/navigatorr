@@ -425,6 +425,7 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 	aggregateBatchSavings(records)
+	rounds := noWinnerRounds(records)
 	recordsByID := make(map[string]operationRecord, len(records))
 	existingReplacements := queueReplacementLinks(records)
 	previewExecutions := map[string]string{}
@@ -580,6 +581,9 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 				return
 			}
 			job["savings"] = r.savings
+			if rerunEligible(r) && !rerunHasResult(r, existingReplacements) {
+				job["rerun"] = rerunSummary(r, rounds)
+			}
 			if size := operationSizeMode(r); size != nil {
 				job["size_mode"] = size
 			}
