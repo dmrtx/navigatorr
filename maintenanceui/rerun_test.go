@@ -10,7 +10,7 @@ import (
 func TestRerunStartsANewActionWithTheSameInputs(t *testing.T) {
 	s, h := testUI(t)
 	st := s.engine.Deps().Store
-	inputs := map[string]any{"path": "/media/Show/S01E01.mkv", "mode": "size", "replace_original": false, "profile": "auto"}
+	inputs := map[string]any{"path": "/media/Show/S01E01.mkv", "mode": "size", "replace_original": false}
 	noWinner := map[string]any{"reason_code": "no_suitable_candidate"}
 	// An earlier attempt's key must never be accepted for a new one.
 	encode := func(v map[string]any) string { b, _ := json.Marshal(v); return string(b) }
@@ -198,7 +198,7 @@ func TestRerunCarriesTheFrozenMediaEngineChoice(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			s, h := testUI(t)
 			st := s.engine.Deps().Store
-			inputs := map[string]any{"path": "/media/Show/S01E01.mkv", "mode": "size", "replace_original": false, "profile": "auto"}
+			inputs := map[string]any{"path": "/media/Show/S01E01.mkv", "mode": "size", "replace_original": false}
 			for k, v := range tc.inputs {
 				inputs[k] = v
 			}
@@ -242,7 +242,7 @@ func TestRerunCarriesTheSizeBudget(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			s, h := testUI(t)
 			st := s.engine.Deps().Store
-			inputs := map[string]any{"path": "/media/Show/S01E01.mkv", "mode": "size", "replace_original": false, "profile": "auto"}
+			inputs := map[string]any{"path": "/media/Show/S01E01.mkv", "mode": "size", "replace_original": false}
 			for k, v := range tc.inputs {
 				inputs[k] = v
 			}

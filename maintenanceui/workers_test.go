@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/jakenesler/navigatorr/action"
@@ -39,7 +40,7 @@ func TestConnectedWorkerWithInaccessibleStorageStillBlocksAdmission(t *testing.T
 	if node["admission_note"] != transcode.AdmissionNoteDeepChecksFailed {
 		t.Fatal("blocked admission not explained", node)
 	}
-	w = request(h, "POST", "/api/maintenance/tool", `{"name":"action_run","arguments":{"action":"transcode_media","inputs":"{\"path\":\"/blocked.mkv\"}"}}`, true)
+	w = request(h, "POST", "/api/maintenance/tool", `{"name":"action_run","arguments":{"action":"transcode_media","inputs":"{\"path\":\"/media/blocked.mkv\"}"}}`, true)
 	if w.Code != 409 {
 		t.Fatal("storage failure did not block admission", w.Body.String())
 	}
@@ -66,12 +67,17 @@ func TestWorkerAvailabilityAndAdmissionRecheck(t *testing.T) {
 	deps := s.engine.Deps()
 	deps.Transcode = unavailableWorker{}
 	s.engine = action.NewEngine(deps)
-	for _, name := range []string{"transcode_media", "transcode_batch", "benchmark_transcode"} {
-		body := `{"name":"action_run","arguments":{"action":"` + name + `","inputs":"{\"path\":\"/never-submitted.mkv\"}","idempotency_key":"offline"}}`
+	for name, inputs := range map[string]string{"transcode_media": `{\"path\":\"/media/never-submitted.mkv\"}`, "transcode_batch": `{\"paths\":[\"/media/never-submitted.mkv\"]}`, "benchmark_transcode": `{\"path\":\"/media/never-submitted.mkv\"}`} {
+		body := `{"name":"action_run","arguments":{"action":"` + name + `","inputs":"` + inputs + `","idempotency_key":"offline"}}`
 		w = request(h, "POST", "/api/maintenance/tool", body, true)
 		if w.Code != 409 {
 			t.Fatal("offline job admitted", name, w.Code, w.Body.String())
 		}
+	}
+	// A request the caller got wrong is still a 400 while the worker is away.
+	bad := `{"name":"action_run","arguments":{"action":"transcode_media","inputs":"{\"path\":\"/media/never-submitted.mkv\",\"max_height\":720}","idempotency_key":"offline"}}`
+	if w = request(h, "POST", "/api/maintenance/tool", bad, true); w.Code != 400 || !strings.Contains(w.Body.String(), `"field":"max_height"`) {
+		t.Fatal("invalid request reported as a worker problem", w.Code, w.Body.String())
 	}
 	rows, _ := deps.Store.ListActionInstances("", 100)
 	if len(rows) != 0 {

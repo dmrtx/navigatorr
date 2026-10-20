@@ -604,11 +604,8 @@ func TestTranscode_ReplaceOriginal_RejectedBeforeBenchmarkOrFullSubmit(t *testin
 		"profile":          "opt-vt",
 		"replace_original": true,
 	})
-	if err != nil {
-		t.Fatalf("unexpected engine error: %v", err)
-	}
-	if resBench.Status != StatusFailed {
-		t.Errorf("benchmark_transcode with replace_original=true must fail, got %s", resBench.Status)
+	if invalid, ok := AsInvalidParams(err); !ok || resBench != nil || invalid.Field != "replace_original" {
+		t.Fatalf("benchmark_transcode with replace_original=true must be refused before admission, got %+v %v", resBench, err)
 	}
 	if mock.benchmarkSubmitCalls != 0 {
 		t.Errorf("benchmark_submit must not be called when replace_original=true")
@@ -620,11 +617,8 @@ func TestTranscode_ReplaceOriginal_RejectedBeforeBenchmarkOrFullSubmit(t *testin
 		"profile":          "opt-vt",
 		"replace_original": true,
 	})
-	if err != nil {
-		t.Fatalf("unexpected engine error: %v", err)
-	}
-	if resMedia.Status != StatusFailed {
-		t.Errorf("transcode_media with replace_original=true must fail, got %s", resMedia.Status)
+	if invalid, ok := AsInvalidParams(err); !ok || resMedia != nil || invalid.Field != "replace_original" {
+		t.Fatalf("transcode_media with replace_original=true must be refused before admission, got %+v %v", resMedia, err)
 	}
 	if mock.benchmarkSubmitCalls != 0 || mock.submitCalls != 0 {
 		t.Errorf("neither benchmark nor transcode submit may be called when replace_original=true")
@@ -764,6 +758,12 @@ func TestTranscode_MetricRequestMapping(t *testing.T) {
 				"profile": "opt-vt",
 				"metric":  tc.inputMetric,
 			})
+			if !tc.shouldSucceed {
+				if invalid, ok := AsInvalidParams(err); !ok || res != nil || invalid.Field != "metric" {
+					t.Fatalf("invalid metric %s must be refused before admission, got %+v %v", tc.inputMetric, res, err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("unexpected engine error: %v", err)
 			}
@@ -774,10 +774,6 @@ func TestTranscode_MetricRequestMapping(t *testing.T) {
 				}
 				if recordedReq.Metric != tc.expectedReq {
 					t.Errorf("recordedReq.Metric = %s, want %s", recordedReq.Metric, tc.expectedReq)
-				}
-			} else {
-				if res.Status != StatusFailed {
-					t.Fatalf("expected failed for invalid metric %s, got %s", tc.inputMetric, res.Status)
 				}
 			}
 		})

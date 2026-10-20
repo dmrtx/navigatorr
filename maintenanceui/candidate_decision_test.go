@@ -2,6 +2,7 @@ package maintenanceui
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/jakenesler/navigatorr/action"
@@ -75,7 +76,7 @@ func TestCandidateReconfigurationRejectsOnlyReviewedFileAndKeepsReceipt(t *testi
 }
 
 func TestCandidateDecisionStaleReviewAndOfflineRetryDoNotReject(t *testing.T) {
-	for _, scenario := range []string{"changed", "offline", "bad-profile", "auth"} {
+	for _, scenario := range []string{"changed", "offline", "bad-profile", "invalid-inputs", "auth"} {
 		t.Run(scenario, func(t *testing.T) {
 			s, h := testUI(t)
 			plan := seedWaitingCandidate(t, s)
@@ -92,10 +93,22 @@ func TestCandidateDecisionStaleReviewAndOfflineRetryDoNotReject(t *testing.T) {
 				s.engine = action.NewEngine(deps)
 			case "bad-profile":
 				body["profile"] = "missing"
+			case "invalid-inputs":
+				// The settings the new attempt would carry are wrong, which is
+				// only known once they are assembled; the reviewed candidate
+				// must stay waiting for a decision.
+				parent, _ := st.GetActionInstance(plan.ID)
+				inputs := decodeOperationJSON(parent.InputsJSON)
+				inputs["max_height"] = 720
+				parent.InputsJSON = mustJSON(t, inputs)
+				st.UpdateActionInstance(*parent)
 			}
 			w := request(h, "POST", "/api/maintenance/batch-reconfigure", mustJSON(t, body), scenario != "auth")
 			if w.Code < 400 {
 				t.Fatal(w.Code, w.Body.String())
+			}
+			if scenario == "invalid-inputs" && (w.Code != 400 || !strings.Contains(w.Body.String(), `"field":"max_height"`)) {
+				t.Fatal("invalid settings not reported as invalid_params", w.Code, w.Body.String())
 			}
 			child, _ := st.GetActionInstance(plan.CandidateID)
 			if child.Status != store.ActionStatusWaitingDecision {

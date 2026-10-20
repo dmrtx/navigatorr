@@ -22,6 +22,7 @@ func (e *Engine) registerBenchmarkTemplate() {
 		ImmutableInputs: true,
 		Name:            "benchmark_transcode",
 		Version:         1,
+		Validate:        validateBenchmarkTranscode,
 		Description:     "Test bounded video samples without modifying media or creating a final file. Read benchmark.outcome and next_step, not just status/progress. No winner is a search outcome, not proof of an encoder fault. After two no-winner rounds for the same source bytes, another round requires an explicit review decision, even with a different recipe/action ID. Do not automatically chain CRF ladders or lower thresholds. Benchmarks estimate audio size but do not encode audio.",
 		RequiredInputs:  []string{"path"},
 		OptionalInputs:  []string{"profile", "profile_config", "preserve_source_bit_depth", "metric", "replace_original", "surface_worker_busy", "parent_action_id"},
@@ -992,13 +993,7 @@ func buildBenchmarkSamples(rep *mediainspect.DetailedReport, optSampling *recipe
 func resolveBenchmarkMetric(ec *ExecutionContext, optQuality *recipe.QualityPolicy) (string, error) {
 	raw := strings.ToLower(strings.TrimSpace(getString(ec.Inputs, "metric")))
 	if raw != "" {
-		if raw != "auto" && raw != "vmaf" && raw != "ssim" && raw != "both" && raw != "vmaf+ssim" {
-			return "", fmt.Errorf("invalid metric %q: must be 'auto', 'vmaf', 'ssim', or 'both' (fail closed)", raw)
-		}
-		if raw == "vmaf+ssim" {
-			raw = "both"
-		}
-		return raw, nil
+		return validBenchmarkMetric(raw)
 	}
 	if optQuality != nil && optQuality.PreferredMetric != "" {
 		norm := strings.ToLower(strings.TrimSpace(optQuality.PreferredMetric))

@@ -23,6 +23,7 @@ func (e *Engine) registerTranscodeTemplate() {
 		AutoReconcile:   true,
 		ImmutableInputs: true,
 		Name:            "transcode_media", Version: 2,
+		Validate:       validateTranscodeMedia,
 		Description:    "Set mode=size|quality|x265_preserve|compact for immutable sampled quality and final size policies without profile/priority/tuning; quality is the UI default. x265_preserve requires libx265, skips existing HEVC and permits 0% minimum savings; size requires 15%, converts lossless audio (TrueHD, MLP, FLAC, ALAC, PCM, DTS-HD MA) to AAC with the same layout, lossless Atmos and DTS:X included (their object/height channels are lost), while copying lossy tracks (E-AC-3 Atmos included), and may encode 8-bit sources as 10-bit HEVC on a worker that proves native 10-bit quality; quality and x265_preserve reject growth. Size also takes allow_hardware (default true; false keeps x265 only) with an optional hardware_margin_percent (0-50, default 15): the search then also measures Apple VideoToolbox encodes through the same quality gates and selection margin, and one wins when it is at most that percent larger than the best x265 result (or when x265 finds nothing); it needs a worker that advertises hardware_search, otherwise the search stays x265 only, and a hardware winner reports encoder and hardware in the size result. Size also takes allow_slow_preset (default false): true lets the quality fallback also try the x265 slow preset, whose full encode of a long 1080p source can take hours; medium covers CRF 14-21 either way. Size also takes one optional size budget, size_budget_percent (5-85, a percent of the source file), size_budget_bytes (a whole number of bytes, at least 50000000) or size_budget_source=siblings (the median total bitrate of the other video files in the same season folder, else the series folder, needing at least 3 of the same resolution class, times size_budget_sibling_multiplier 1.0-4.0, default 1.5), exactly one of them: when the search finds no setting that meets the quality limits, or the one it finds is larger than the budget, the file is encoded once with two-pass x265 at the bitrate that lands on the budget (or, when allow_hardware is on, with VideoToolbox at that bitrate if a short comparison on the search's windows measures it within 1 VMAF of x265 on both mean and p5; a VideoToolbox encode over the budget is encoded once more at a corrected bitrate), validated on the final windows against a fixed quality floor (VMAF mean 70, p5 60, worst 5 s window 65; banding limits unchanged) and reported as below the quality target but within budget; it still needs the usual approval before it replaces the original. compact makes HDR10, HLG, Dolby Vision 7/8 (base layer) and over-1080p SDR sources much smaller: deterministic tone map to SDR BT.709, downscale to max_height (720, 1080 default, 1440 or 2160), HEVC, lossless/DTS/PCM audio to AAC with every track kept, 30% minimum savings; HDR, Dolby Vision and Atmos are dropped and Dolby Vision profile 5 is rejected. Unsupported sources or unavailable quality capabilities preserve the original. Omit mode for legacy technical behavior. Coordinates safe candidate-only media transcoding using an immutable recipe-resolved plan, bounded transient retries, worker revalidation, post-transcode stream validation, and original SHA-256 verification.",
 		RequiredInputs: []string{"path"}, OptionalInputs: []string{"mode", "max_height", "allow_hardware", "hardware_margin_percent", "allow_slow_preset", "size_budget_percent", "size_budget_bytes", "size_budget_source", "size_budget_sibling_multiplier", "profile", "profile_config", "preserve_source_bit_depth", "replace_original", "expected_video_codec", "max_size_increase_percent", "media_type", "is_anime", "min_savings_percent", "surface_worker_busy", "metric", "parent_action_id", "batch_fixed_quality", "batch_calibration_digest", "batch_item_key", "library_context"}, Destructive: false,
 		Steps: []StepDefinition{
@@ -38,10 +39,12 @@ func (e *Engine) registerTranscodeTemplate() {
 }
 
 func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
-	if err := e.validateTranscodeInputs(ec); err != nil {
-		return StepResult{Status: StepFailed, Error: err.Error()}, nil
-	}
-	if err := validateModeInputs(ec.Inputs); err != nil {
+	// Everything the request decides without reading the source, including
+	// profile_config and its x265 settings, is judged before the hash and the
+	// probe. Admission ran the same checks; this repeats them for requests
+	// stored before they existed.
+	req, err := e.validateTranscodeRequest(ec.ActionName, ec.Inputs)
+	if err != nil {
 		return StepResult{Status: StepFailed, Error: err.Error()}, nil
 	}
 	if err := e.bindModeParent(ec); err != nil {
@@ -50,9 +53,6 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	modeSnapshot, modeErr := freezeModePolicy(ec)
 	if modeErr != nil {
 		return StepResult{Status: StepFailed, Error: modeErr.Error()}, nil
-	}
-	if getBool(ec.Inputs, "replace_original") {
-		return StepResult{Status: StepFailed, Error: "destructive replacement (replace_original: true) is not supported; transcoding is candidate-only and never modifies the original"}, nil
 	}
 	rawPath := strings.TrimSpace(getString(ec.Inputs, "path"))
 	if rawPath == "" {
@@ -174,10 +174,7 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	}
 
 	profile := strings.TrimSpace(getString(ec.Inputs, "profile"))
-	ephemeralProfile, ephemeralDigest, hasProfileConfig, profileConfigErr := decodeEphemeralProfileInput(ec.Inputs)
-	if profileConfigErr != nil {
-		return StepResult{Status: StepFailed, Error: profileConfigErr.Error()}, nil
-	}
+	ephemeralProfile, ephemeralDigest, hasProfileConfig := req.ProfileConfig, req.ProfileDigest, req.HasProfileConfig
 	gateRep := coverArtGateReport(&rep, func() bool { return e.workerSupportsCoverArt(ctx) })
 	var compactPlan *transcode.CompactPlan
 	if modeSnapshot != nil {
@@ -278,13 +275,10 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 			return StepResult{Status: StepFailed, Error: fmt.Sprintf("resolving transcode profile %q: %v", profile, err)}, nil
 		}
 	}
-	preserveBitDepth, err := resolvePreserveSourceBitDepth(ec.Inputs)
-	if err != nil {
-		return StepResult{Status: StepFailed, Error: err.Error()}, nil
-	}
+	preserveBitDepth := req.PreserveBitDepth
 	if video := rep.MainVideo(); len(video) > 0 {
-		if modeSnapshot == nil && hasProfileConfig && (ephemeralProfile.Video.Profile != "" || ephemeralProfile.Video.PixelFormat != "") && preserveBitDepth && plan.ExpectedBitDepth > 0 && (video[0].BitDepth == 8 || video[0].BitDepth == 10) && plan.ExpectedBitDepth != video[0].BitDepth {
-			return StepResult{Status: StepFailed, Error: fmt.Sprintf("profile_config requests %d-bit output for a %d-bit source; set preserve_source_bit_depth=false to use the requested conversion", plan.ExpectedBitDepth, video[0].BitDepth)}, nil
+		if want := req.PinnedBitDepth; want > 0 && (video[0].BitDepth == 8 || video[0].BitDepth == 10) && want != video[0].BitDepth {
+			return StepResult{Status: StepFailed, Error: fmt.Sprintf("profile_config requests %d-bit output for a %d-bit source; set preserve_source_bit_depth=false to use the requested conversion", want, video[0].BitDepth)}, nil
 		}
 		if err := preserveSourceBitDepth(plan, video[0].BitDepth, preserveBitDepth); err != nil {
 			return StepResult{Status: StepFailed, Error: fmt.Sprintf("resolving transcode profile %q: %v", profile, err)}, nil
@@ -488,7 +482,7 @@ func resolvePreserveSourceBitDepth(inputs map[string]any) (bool, error) {
 	}
 	preserve, ok := raw.(bool)
 	if !ok {
-		return false, fmt.Errorf("input 'preserve_source_bit_depth' must be a boolean")
+		return false, inputErr("preserve_source_bit_depth", "input 'preserve_source_bit_depth' must be a boolean")
 	}
 	return preserve, nil
 }
@@ -530,15 +524,15 @@ func decodeEphemeralProfileInput(inputs map[string]any) (recipe.Profile, string,
 		return recipe.Profile{}, "", false, nil
 	}
 	if strings.TrimSpace(getString(inputs, "profile")) != "" {
-		return recipe.Profile{}, "", false, fmt.Errorf("profile and profile_config are mutually exclusive; profile_config is a complete ephemeral profile")
+		return recipe.Profile{}, "", false, inputErr("profile_config", "profile and profile_config are mutually exclusive; profile_config is a complete ephemeral profile")
 	}
 	b, err := json.Marshal(raw)
 	if err != nil {
-		return recipe.Profile{}, "", false, fmt.Errorf("encoding profile_config: %v", err)
+		return recipe.Profile{}, "", false, inputErr("profile_config", "encoding profile_config: %v", err)
 	}
 	profile, digest, err := recipe.DecodeProfileStrict("ephemeral", b)
 	if err != nil {
-		return recipe.Profile{}, "", false, fmt.Errorf("invalid profile_config: %v", err)
+		return recipe.Profile{}, "", false, inputErr("profile_config", "invalid profile_config: %v", err)
 	}
 	return profile, digest, true, nil
 }
@@ -548,17 +542,5 @@ func (e *Engine) validateTranscodeInputs(ec *ExecutionContext) error {
 	if !ok {
 		return fmt.Errorf("unknown action template %q", ec.ActionName)
 	}
-	allowed := map[string]bool{"idempotency_key": true}
-	for _, name := range tmpl.RequiredInputs {
-		allowed[name] = true
-	}
-	for _, name := range tmpl.OptionalInputs {
-		allowed[name] = true
-	}
-	for name := range ec.Inputs {
-		if !allowed[name] {
-			return fmt.Errorf("unsupported input %q for %s; experimental encoder settings must be supplied inside strict profile_config", name, ec.ActionName)
-		}
-	}
-	return nil
+	return unsupportedInput(tmpl, ec.Inputs)
 }

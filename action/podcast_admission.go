@@ -19,21 +19,21 @@ func (e *Engine) freezePodcastInputs(inputs map[string]any) error {
 		}
 	}
 	if cached != 0 && cached != 3 {
-		return fmt.Errorf("cached transcript requires path, digest and ASR job ID together")
+		return inputErr("cached_transcript_path", "cached transcript requires path, digest and ASR job ID together")
 	}
 	if cached == 3 && (!podcast.ValidHash(getString(inputs, "cached_transcript_digest")) || !regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`).MatchString(getString(inputs, "cached_asr_job_id"))) {
-		return fmt.Errorf("invalid cached transcript identity")
+		return inputErr("cached_transcript_digest", "invalid cached transcript identity")
 	}
 	p, err := e.deps.Config.Podcasts.Policy(getString(inputs, "podcast_id"))
 	if err != nil {
-		return err
+		return inputErr("podcast_id", "%v", err)
 	}
 	mode := getString(inputs, "processing_mode")
 	if mode != "" && mode != podcast.AnalysisFull && mode != podcast.AnalysisKnownAdsOnly {
-		return fmt.Errorf("unsupported podcast processing_mode")
+		return inputErr("processing_mode", "unsupported podcast processing_mode")
 	}
 	if mode == podcast.AnalysisKnownAdsOnly && !p.KnownAdsFirstPass {
-		return fmt.Errorf("automatic cleaning requires known_ads_first_pass in the podcast profile")
+		return inputErr("processing_mode", "automatic cleaning requires known_ads_first_pass in the podcast profile")
 	}
 	inputs["podcast_policy_digest"] = podcast.Digest(p)
 	inputs["podcast_pipeline_version"] = podcast.Version

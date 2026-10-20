@@ -224,6 +224,12 @@ func (s *Server) batchReconfigure(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]string{"id": old.ID})
 		return
 	}
+	// Judge the new settings before the old candidate is rejected, so a
+	// request the caller got wrong leaves the candidate exactly as it was.
+	if err := s.engine.ValidateInputs(r.Context(), "transcode_batch", inputs, key); err != nil {
+		failAdmission(w, 409, err)
+		return
+	}
 	if err := s.engine.CheckWorkerAdmission(r.Context()); err != nil {
 		fail(w, 409, err.Error())
 		return
@@ -248,7 +254,7 @@ func (s *Server) batchReconfigure(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := s.engine.Enqueue(action.WithOrigin(r.Context(), "web"), "transcode_batch", inputs, key)
 	if err != nil {
-		fail(w, 409, err.Error())
+		failAdmission(w, 409, err)
 		return
 	}
 	writeJSON(w, 202, map[string]string{"id": result.ID})

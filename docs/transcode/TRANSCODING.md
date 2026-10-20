@@ -221,6 +221,20 @@ The built-in profiles use:
 
 All structural/media/policy validation (duration, video codec, expected bit depth and pixel format, audio stream count/codecs/languages/channels, subtitle count and expected copy/conversion codecs, subtitle languages and `forced`/`default` dispositions, attachments, and chapters) runs worker-local on the candidate BEFORE it is published. A bad candidate fails the job closed and is never published; the original is never deleted or overwritten. Promotion of an already-published candidate intentionally performs a full re-inspection.
 
+### Input validation before anything is persisted
+
+`transcode_media`, `benchmark_transcode`, `transcode_batch` and `clean_podcast_ads` check what the caller sent before an action row is written, before the idempotency key is looked up, and before the worker is asked anything. The checks are the same ones preflight runs (unknown or missing inputs, input combinations such as `profile` with `profile_config` or `max_height` without `mode: "compact"`, a strict `profile_config` decode including the x265 settings, the benchmark metric, a podcast `output_path`, batch path shapes, mode and size-budget rules), so a mistake is reported in milliseconds instead of after a multi-gigabyte source hash.
+
+A rejected request:
+
+- returns an `invalid_params` error from `action_run` (a JSON body with `error`, `field` and `reason`), or HTTP 400 with `code: "invalid_params"` and the same `field` from the maintenance UI;
+- writes no action row, takes no hash slot and makes no worker call, including the admission check;
+- does not reserve the idempotency key, so the corrected request reuses it.
+
+Replays are not judged again: a key that already holds an action with identical inputs returns that stored action even if the configuration has changed since (for example the read roots were narrowed or `allow_destructive` was turned off), so a lost response stays recoverable. Only a submission that would create a new action, or that differs from the stored one, is validated. Batch children already persisted are resumed or returned as they are.
+
+The expected output bit depth is computed during validation and carried into preflight, where checking it against the probed source is a single comparison. Preflight still re-runs the same validators defensively for rows created by older versions. The catalog's required and optional inputs are the single list the unknown-key and required-input checks read, so the two cannot drift.
+
 ### Transcode I/O optimization (worker-local validation + shared source cache)
 
 Old data flow (per optimized `transcode_media`):
