@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/jakenesler/navigatorr/transcode/recipe"
 )
 
 const (
@@ -147,6 +149,10 @@ func TestAcceptSkipsOriginalVerificationOnlyWithoutWork(t *testing.T) {
 		{"skip after a worker job", map[string]any{"skip_transcode": true, "job_id": "job-1"}, sum, true},
 		{"skip after a benchmark job", map[string]any{"skip_transcode": true, "benchmark_job_id": "bench-1"}, sum, true},
 		{"skip with a candidate", map[string]any{"skip_transcode": true, "candidate_path": "/c.mkv"}, sum, true},
+		{"skip with an external reference", map[string]any{"skip_transcode": true, "external_reference": "job-1"}, sum, true},
+		{"skip after a transcode job", map[string]any{"skip_transcode": true, "transcode_job_id": "job-1"}, sum, true},
+		{"skip after a submission", map[string]any{"skip_transcode": true, "transcode_submitted": true}, sum, true},
+		{"skip with an output path", map[string]any{"skip_transcode": true, "output_path": "/c.mkv"}, sum, true},
 		{"produced candidate", map[string]any{"job_id": "job-1", "candidate_path": "/c.mkv"}, sum, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -162,8 +168,9 @@ func TestAcceptSkipsOriginalVerificationOnlyWithoutWork(t *testing.T) {
 				}
 				ec := testReconcileEC("")
 				ec.State["resolved_path"] = p
-				if tc.sha != "" {
-					ec.State["original_sha256"] = tc.sha
+				ec.State["original_sha256"] = tc.sha
+				if tc.sha == "" {
+					delete(ec.State, "original_sha256")
 				}
 				for k, v := range tc.state {
 					ec.State[k] = v
@@ -204,6 +211,7 @@ func TestAcceptMissingBaselineStillFailsClosedWithoutSkip(t *testing.T) {
 	e := NewEngine(EngineDeps{})
 	ec := testReconcileEC("")
 	ec.State["resolved_path"] = p
+	delete(ec.State, "original_sha256")
 	if r, err := e.stepTranscodeAccept(context.Background(), ec); err != nil || r.Status != StepFailed {
 		t.Fatalf("missing baseline accepted: %+v %v", r, err)
 	}
@@ -212,5 +220,21 @@ func TestAcceptMissingBaselineStillFailsClosedWithoutSkip(t *testing.T) {
 	rejected.State["resolved_path"], rejected.State["skip_transcode"] = p, true
 	if r, err := e.stepTranscodeAccept(context.Background(), rejected); err != nil || r.Status != StepFailed {
 		t.Fatalf("rejected decision completed: %+v %v", r, err)
+	}
+}
+
+func TestWorkIsNeverSubmittedWithoutSourceBaseline(t *testing.T) {
+	e := NewEngine(EngineDeps{Transcode: &mockTranscodeExecutor{}})
+	ec := testReconcileEC("")
+	delete(ec.State, "original_sha256")
+	if r, err := e.stepTranscodeSubmit(context.Background(), ec); err != nil || r.Status != StepFailed {
+		t.Fatalf("encode submitted without a baseline: %+v %v", r, err)
+	}
+	bench := &ExecutionContext{InstanceID: "bench", ActionName: "transcode_media", Inputs: map[string]any{}, State: map[string]any{"optimization_enabled": true, "resolved_path": "/media/ep.mkv"}}
+	if r, err := e.stepBenchmarkSubmit(context.Background(), bench); err != nil || r.Status != StepFailed {
+		t.Fatalf("benchmark submitted without a baseline: %+v %v", r, err)
+	}
+	if err := e.applySharedBatchCalibration(&ExecutionContext{ActionName: "transcode_media"}, nil, nil, recipe.Profile{}, "", "digest", "/media/ep.mkv"); err == nil {
+		t.Fatal("shared calibration accepted an empty source hash")
 	}
 }

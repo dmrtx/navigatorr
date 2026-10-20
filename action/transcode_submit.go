@@ -79,6 +79,11 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 	if plan == nil {
 		return StepResult{Status: StepFailed, Error: "resolved transcode plan is missing (fail closed)"}, nil
 	}
+	// The worker treats an empty source hash as a legacy request and skips its
+	// content check, so work is never submitted without the preflight baseline.
+	if getString(ec.State, "original_sha256") == "" {
+		return StepResult{Status: StepFailed, Error: "original integrity baseline missing (fail closed)"}, nil
+	}
 	if (plan.X265 != nil || plan.AudioMode == "he_aac") && !getBool(ec.State, "transcode_reconcile") {
 		caps, err := e.deps.Transcode.Capabilities(ctx)
 		if err != nil || (plan.X265 != nil && !caps.X265TwoPass) || (plan.AudioMode == "he_aac" && !caps.HEAACAudio) {
