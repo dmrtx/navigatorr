@@ -22,6 +22,9 @@ func (e *Engine) stepTranscodeAccept(ctx context.Context, ec *ExecutionContext) 
 		candidate = getString(ec.State, "output_path")
 	}
 	origSHA := getString(ec.State, "original_sha256")
+	if origPath != "" && skippedWithoutWork(ec) {
+		return acceptUntouchedSkip(ec, origPath, origSHA), nil
+	}
 	if origPath == "" || origSHA == "" {
 		return StepResult{Status: StepFailed, Error: "original integrity baseline missing (fail closed)"}, nil
 	}
@@ -81,33 +84,7 @@ func (e *Engine) stepTranscodeAccept(ctx context.Context, ec *ExecutionContext) 
 	ec.State["original_integrity"] = "verified"
 	ec.Outputs["original_integrity"] = "verified"
 	if getBool(ec.State, "skip_transcode") {
-		decision := getString(ec.State, "auto_decision")
-		reasons := ec.State["auto_reasons"]
-		msg := fmt.Sprintf("Transcode not performed: auto decision is %s. Original file preserved and untouched.", decision)
-		out := map[string]any{
-			"skipped":            true,
-			"auto_decision":      decision,
-			"auto_reasons":       reasons,
-			"original_path":      origPath,
-			"original_sha256":    origSHA,
-			"original_intact":    true,
-			"original_integrity": "verified",
-			"validation":         validation,
-			"message":            msg,
-		}
-		if mode := getString(ec.Inputs, "mode"); mode != "" {
-			out["mode"] = mode
-			out["policy_digest"] = getString(ec.State, "policy_digest")
-			out["reason_code"] = getString(ec.State, "reason_code")
-			out["message"] = "Original preserved: " + getString(ec.State, "reason_code")
-		}
-		if p := getString(ec.State, "auto_profile"); p != "" {
-			out["profile"] = p
-		}
-		if s, ok := ec.State["expected_savings_percent"]; ok {
-			out["expected_savings_percent"] = s
-		}
-		return StepResult{Status: StepCompleted, Outputs: out}, nil
+		return StepResult{Status: StepCompleted, Outputs: skipOutputs(ec, origPath, origSHA, "verified", validation)}, nil
 	}
 	out := map[string]any{"original_integrity": "verified", "validation": validation, "candidate_path": candidate, "output_path": candidate, "original_path": origPath, "original_intact": true, "original_sha256": origSHA, "replace_original": false, "profile": getString(ec.State, "profile"), "recipe_version": getString(ec.State, "recipe_version"), "recipe_digest": getString(ec.State, "recipe_digest"), "plan_digest": getString(ec.State, "plan_digest"), "attempt": getInt(ec.State, "attempt"), "retry_count": getInt(ec.State, "retry_count"), "fallback_count": getInt(ec.State, "fallback_count"), "applied_fallbacks": ec.State["applied_fallbacks"], "message": "Transcode completed and verified. Candidate output ready. Original file physically preserved and SHA-256 unchanged."}
 	if c := ec.State["conversions"]; c != nil {
@@ -117,4 +94,66 @@ func (e *Engine) stepTranscodeAccept(ctx context.Context, ec *ExecutionContext) 
 		out["failure_history"] = h
 	}
 	return StepResult{Status: StepCompleted, Outputs: out}, nil
+}
+
+// workStateKeys are the state entries a worker job or its candidate leave
+// behind. Any of them present means the original may have been read by a
+// worker or a candidate may exist, so accept keeps the integrity check.
+var workStateKeys = []string{"job_id", "external_reference", "benchmark_job_id", "transcode_job_id", "transcode_submitted", "candidate_path", "output_path"}
+
+// skippedWithoutWork reports a skip decided before anything was submitted or
+// produced, such as a source rejected by its probe. Nothing ran against the
+// original, so there is nothing to re-verify; every other path keeps the hash.
+func skippedWithoutWork(ec *ExecutionContext) bool {
+	if !getBool(ec.State, "skip_transcode") || strings.EqualFold(ec.Decision, "reject") {
+		return false
+	}
+	for _, key := range workStateKeys {
+		if v, ok := ec.State[key]; ok && v != nil && v != "" && v != false {
+			return false
+		}
+	}
+	return true
+}
+
+// acceptUntouchedSkip finishes a skip that never touched the original. The
+// integrity is reported as not applicable, never as verified: no hash was
+// compared.
+func acceptUntouchedSkip(ec *ExecutionContext, origPath, origSHA string) StepResult {
+	delete(ec.State, "work_progress")
+	ec.State["original_integrity"] = "not_applicable"
+	ec.Outputs["original_integrity"] = "not_applicable"
+	return StepResult{Status: StepCompleted, Outputs: skipOutputs(ec, origPath, origSHA, "not_applicable", nil)}
+}
+
+func skipOutputs(ec *ExecutionContext, origPath, origSHA, integrity string, validation map[string]any) map[string]any {
+	decision := getString(ec.State, "auto_decision")
+	out := map[string]any{
+		"skipped":            true,
+		"auto_decision":      decision,
+		"auto_reasons":       ec.State["auto_reasons"],
+		"original_path":      origPath,
+		"original_intact":    true,
+		"original_integrity": integrity,
+		"message":            fmt.Sprintf("Transcode not performed: auto decision is %s. Original file preserved and untouched.", decision),
+	}
+	if origSHA != "" {
+		out["original_sha256"] = origSHA
+	}
+	if validation != nil {
+		out["validation"] = validation
+	}
+	if mode := getString(ec.Inputs, "mode"); mode != "" {
+		out["mode"] = mode
+		out["policy_digest"] = getString(ec.State, "policy_digest")
+		out["reason_code"] = getString(ec.State, "reason_code")
+		out["message"] = "Original preserved: " + getString(ec.State, "reason_code")
+	}
+	if p := getString(ec.State, "auto_profile"); p != "" {
+		out["profile"] = p
+	}
+	if s, ok := ec.State["expected_savings_percent"]; ok {
+		out["expected_savings_percent"] = s
+	}
+	return out
 }
