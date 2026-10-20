@@ -29,6 +29,15 @@ var allowedFailureClasses = map[string]bool{
 	"validation_stream_loss": true, "validation_codec_mismatch": true, "source_changed": true,
 }
 
+// neverRetriedClasses are real failure classes a fallback cannot name:
+// resilience.Retryable refuses them whatever a recipe says, so the fallback
+// could never fire. ffmpeg_unknown stays allowed above; it now means a real
+// ffmpeg process failed in an unrecognized way, while text nothing recognizes
+// is unclassified.
+var neverRetriedClasses = map[string]bool{
+	"unclassified": true, "benchmark_evidence_incomplete": true, "internal_invariant": true, "media_probe_failed": true,
+}
+
 var allowedFallbackActions = map[string]bool{"retry": true, "apply_container_conversion": true}
 
 func Parse(data []byte) (*Snapshot, error) {
@@ -215,6 +224,9 @@ func ValidateProfile(name string, p Profile) error {
 	}
 	seen := map[string]bool{}
 	for _, f := range r.Fallbacks {
+		if neverRetriedClasses[f.When] {
+			return fmt.Errorf("profile %q: fallback condition %q is never retried automatically, so the fallback could not fire", name, f.When)
+		}
 		if !allowedFailureClasses[f.When] {
 			return fmt.Errorf("profile %q: unknown fallback condition %q", name, f.When)
 		}

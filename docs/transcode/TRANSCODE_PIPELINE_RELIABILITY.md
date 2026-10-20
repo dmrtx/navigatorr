@@ -171,8 +171,32 @@ coordinator uses that class instead of reading the message:
 - `internal_invariant`: a state the worker's own earlier steps should have made
   impossible, such as an extracted reference sample that is gone.
 
-`unclassified`, `benchmark_evidence_incomplete` and `internal_invariant` are not
-retried automatically. A manual retry stays available.
+- `media_probe_failed`: an `ffprobe` inspection gave no usable result (see
+  "Source probe"). The class comes from the typed probe error, never from the
+  message: the message holds the file path and `ffprobe`'s stderr, and a word in
+  a path must not change the class.
+
+`unclassified`, `benchmark_evidence_incomplete`, `internal_invariant` and
+`media_probe_failed` are not retried automatically. A manual retry stays
+available.
+
+`source_changed` is assigned only to the messages the code itself writes when
+the source differs from the one the plan was built on (for example "source
+changed", "source codec changed", "was concurrently modified"), or by the
+accept step that compares hashes. A message that merely mentions "source" and
+"sha", such as a path, no longer matches.
+
+A recipe's `fallbacks[].when` may name `ffmpeg_unknown` but not `unclassified`,
+`benchmark_evidence_incomplete`, `internal_invariant` or `media_probe_failed`.
+Those classes are never retried automatically, so a fallback on them could never
+fire, and validation rejects it with a message saying so.
+
+Audio-only (size mode) video-copy validation probes the source and the candidate
+before it compares packets. A probe that fails there is a terminal job failure of
+class `media_probe_failed`, not a `preservation_not_met` policy rejection: a
+file that could not be inspected has not been shown to differ from the source,
+so it is neither preserved nor rejected as altered. The original is untouched;
+a manual retry re-runs the probe.
 
 A search that is stopped by its time budget is not a failure: windows left
 unmeasured by the stop report the cancellation, so the action parks as

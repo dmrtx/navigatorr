@@ -151,4 +151,55 @@ func TestPreflightRetriesStorageIOErrorFromRealProbe(t *testing.T) {
 	if result.Status != StepFailed || !strings.Contains(result.Error, "tool_exit") || !strings.Contains(result.Error, "Input/output error") {
 		t.Fatalf("status=%s error=%q", result.Status, result.Error)
 	}
+	// The class is the probe's, whatever the stderr says.
+	if got, _ := result.Outputs["failure_classification"].(string); got != "media_probe_failed" {
+		t.Fatalf("failure_classification=%q", got)
+	}
+}
+
+// A caller who gives up while preflight waits to look again ends the wait at
+// once: no second inspection, no sleeping out the backoff, and the probe's
+// typed cause is still what comes back.
+func TestPreflightProbeRetryStopsWhenTheCallerCancels(t *testing.T) {
+	old, oldBackoff := preflightInspect, preflightProbeBackoff
+	preflightProbeBackoff = time.Hour
+	t.Cleanup(func() { preflightInspect, preflightProbeBackoff = old, oldBackoff })
+	transient := func() (mediainspect.DetailedReport, error) {
+		pe := &mediainspect.ProbeError{Kind: mediainspect.ProbeTimeout, Err: errors.New("stalled read")}
+		return mediainspect.DetailedReport{ProbeFailure: pe}, pe
+	}
+	for _, when := range []string{"during the probe", "during the backoff"} {
+		t.Run(when, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var calls int32
+			preflightInspect = func(context.Context, string, string) (mediainspect.DetailedReport, error) {
+				atomic.AddInt32(&calls, 1)
+				if when == "during the probe" {
+					cancel()
+				} else {
+					go func() { time.Sleep(20 * time.Millisecond); cancel() }()
+				}
+				return transient()
+			}
+			e := NewEngine(EngineDeps{})
+			ec := &ExecutionContext{State: map[string]any{}}
+			done := make(chan error, 1)
+			go func() {
+				_, err := e.inspectSourceForPreflight(ctx, ec, "/media/clip.mkv")
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				if _, typed := mediainspect.AsProbeError(err); !typed {
+					t.Fatalf("the probe's cause was lost: %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("preflight slept out its backoff after the caller cancelled")
+			}
+			if got := atomic.LoadInt32(&calls); got != 1 {
+				t.Fatalf("inspections=%d, want 1", got)
+			}
+		})
+	}
 }

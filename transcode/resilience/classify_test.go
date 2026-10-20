@@ -14,7 +14,7 @@ func TestClassifyAndRetryPolicy(t *testing.T) {
 		"subtitle codec mov_text is not supported":   ContainerSubtitleIncompatible,
 		"Invalid data found when processing input":   FFmpegInputCorrupt,
 		"codec mismatch":                             ValidationCodecMismatch,
-		"source sha changed":                         SourceChanged,
+		"source changed":                             SourceChanged,
 		"some new ffmpeg problem":                    Unclassified,
 	}
 	for msg, want := range cases {

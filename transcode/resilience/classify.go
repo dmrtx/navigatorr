@@ -49,6 +49,12 @@ const (
 	// InternalInvariant is a violated internal assumption: a bug, not a
 	// property of the media or the environment.
 	InternalInvariant FailureClass = "internal_invariant"
+	// MediaProbeFailed is an ffprobe inspection that produced no usable result
+	// (it timed out, could not start, exited with a failure or printed output
+	// that is not the expected document). The file was not inspected; the class
+	// comes from the typed probe error and never from the probe's stderr, which
+	// names paths and may say anything.
+	MediaProbeFailed FailureClass = "media_probe_failed"
 )
 
 // ClassifyError preserves a typed boundary failure before considering messages.
@@ -68,7 +74,7 @@ func Classify(message string) FailureClass {
 	s := strings.ToLower(message)
 	// Explicit serialized classes take precedence over generic phrases such
 	// as "connection reset", which formerly labeled SMB failures as SSH.
-	for _, class := range []FailureClass{SMBSigningRequired, SMBSessionInvalid, SMBAuthFailed, SMBTransportError, StoragePermissionDenied, StorageIOError, SourceUnreachable, Cancelled, StorageFull, BenchmarkEvidenceIncomplete, InternalInvariant} {
+	for _, class := range []FailureClass{SMBSigningRequired, SMBSessionInvalid, SMBAuthFailed, SMBTransportError, StoragePermissionDenied, StorageIOError, SourceUnreachable, Cancelled, StorageFull, BenchmarkEvidenceIncomplete, InternalInvariant, MediaProbeFailed} {
 		if s == string(class) || strings.Contains(s, string(class)+":") {
 			return class
 		}
@@ -134,11 +140,37 @@ func Classify(message string) FailureClass {
 		return ValidationStreamLoss
 	case strings.Contains(s, "codec") && strings.Contains(s, "mismatch"):
 		return ValidationCodecMismatch
-	case strings.Contains(s, "source") && (strings.Contains(s, "changed") || strings.Contains(s, "sha")):
+	case sourceChangedMessage(s):
 		return SourceChanged
 	default:
 		return Unclassified
 	}
+}
+
+// sourceChangedMessages are the messages the code itself produces when the
+// source is found different from the one the plan or the evidence was built
+// on. They are matched as whole phrases: a loose pair such as "source" and
+// "sha" also appears in file paths and tool output (a share named for its
+// source, a probe error about a clip in a shared folder), and a false
+// source_changed blocks a manual retry that would have worked.
+var sourceChangedMessages = []string{
+	"source_changed",
+	"source changed",
+	"source index changed",
+	"source codec changed",
+	"was concurrently modified",
+	"source media modified during benchmark",
+	"original changed",
+	"original size changed",
+}
+
+func sourceChangedMessage(s string) bool {
+	for _, phrase := range sourceChangedMessages {
+		if strings.Contains(s, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 func legacySMBBoundary(message string) bool {
@@ -159,7 +191,7 @@ func Retryable(c FailureClass, allowed []string) bool {
 		ValidationDurationMismatch, ValidationStreamLoss, ValidationCodecMismatch, SourceChanged,
 		SMBSigningRequired, SMBSessionInvalid, SMBAuthFailed, SMBTransportError,
 		StoragePermissionDenied, StorageIOError, SourceUnreachable,
-		Unclassified, BenchmarkEvidenceIncomplete, InternalInvariant:
+		Unclassified, BenchmarkEvidenceIncomplete, InternalInvariant, MediaProbeFailed:
 		// SMB operations already recover on a fresh signed session. Replaying
 		// the full encode after exhausted recovery is unsafe and wasteful. A
 		// failure that is not understood, or that is a bug in the benchmark's

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,31 @@ func fakeProbe(t *testing.T, dir, body string) string {
 		t.Fatal(err)
 	}
 	return p
+}
+
+// stuckProbe writes a fake ffprobe that never answers: it sleeps in a child
+// that keeps the output pipe open, the way a probe stuck behind a stalled
+// network read does. With ignoreTerm it also ignores SIGTERM. The sleeping
+// child is not killed with the script (a killed shell leaves it behind), so
+// the test's cleanup kills every child the script recorded.
+func stuckProbe(t *testing.T, dir string, ignoreTerm bool) string {
+	t.Helper()
+	pids := filepath.Join(dir, "stuck_children")
+	body := "sleep 30 &\necho $! >> '" + pids + "'\nwait\n"
+	if ignoreTerm {
+		body = "trap '' TERM\n" + body
+	}
+	t.Cleanup(func() {
+		data, _ := os.ReadFile(pids)
+		for _, field := range strings.Fields(string(data)) {
+			if pid, err := strconv.Atoi(field); err == nil && pid > 1 {
+				if p, err := os.FindProcess(pid); err == nil {
+					_ = p.Kill()
+				}
+			}
+		}
+	})
+	return fakeProbe(t, dir, body)
 }
 
 func probeMedia(t *testing.T, dir string) string {
@@ -56,7 +82,7 @@ func TestInspectDetailedTimeoutIsBoundedByDeadlinePlusWaitDelay(t *testing.T) {
 	dir := t.TempDir()
 	// Ignores SIGTERM and leaves a child holding the output pipe open, the way
 	// a probe stuck behind a stalled network read keeps Output() blocked.
-	script := fakeProbe(t, dir, "trap '' TERM\nsleep 20\n")
+	script := stuckProbe(t, dir, true)
 	media := probeMedia(t, dir)
 
 	start := time.Now()
@@ -140,7 +166,7 @@ func TestInspectDetailedUnavailable(t *testing.T) {
 
 func TestInspectDetailedCallerCancelIsNotAProbeFailure(t *testing.T) {
 	dir := t.TempDir()
-	script := fakeProbe(t, dir, "sleep 20")
+	script := stuckProbe(t, dir, false)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		time.Sleep(50 * time.Millisecond)
@@ -169,7 +195,7 @@ func TestInspectFileFallsBackOnTimeoutWithoutHanging(t *testing.T) {
 	deadline, waitDelay := 100*time.Millisecond, 300*time.Millisecond
 	shrinkProbeLimits(t, deadline, waitDelay)
 	dir := t.TempDir()
-	script := fakeProbe(t, dir, "trap '' TERM\nsleep 20\n")
+	script := stuckProbe(t, dir, true)
 	start := time.Now()
 	rep, err := InspectFile(context.Background(), script, probeMedia(t, dir))
 	if err != nil || rep.Probed {
@@ -186,7 +212,7 @@ func TestProbeFrameSignalsTimeoutAndBadOutput(t *testing.T) {
 	dir := t.TempDir()
 	media := probeMedia(t, dir)
 
-	slow := fakeProbe(t, dir, "trap '' TERM\nsleep 20\n")
+	slow := stuckProbe(t, dir, true)
 	start := time.Now()
 	_, err := ProbeFrameSignals(context.Background(), slow, media, 0, 5)
 	wantProbeError(t, err, ProbeTimeout)

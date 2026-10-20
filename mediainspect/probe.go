@@ -73,6 +73,15 @@ func (e *ProbeError) Error() string {
 
 func (e *ProbeError) Unwrap() error { return e.Err }
 
+// ProbeFailureClass is the failure class every ProbeError carries. It equals
+// resilience.MediaProbeFailed (a test keeps them in step; this package cannot
+// import resilience).
+const ProbeFailureClass = "media_probe_failed"
+
+// FailureClass lets classifiers use the probe's kind instead of reading its
+// message, which holds the file path and ffprobe's stderr.
+func (e *ProbeError) FailureClass() string { return ProbeFailureClass }
+
 // Transient reports whether one more attempt could plausibly succeed: a probe
 // that timed out, or whose stderr shows a storage or transport hiccup. A
 // missing binary, a clean exit with malformed output or an ordinary demuxer

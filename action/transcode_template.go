@@ -11,8 +11,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/recipe"
+	"github.com/jakenesler/navigatorr/transcode/resilience"
 	"github.com/jakenesler/navigatorr/transcode/selector"
 )
 
@@ -125,7 +127,14 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	// worker slot) must not be shown as an endless probe.
 	delete(ec.State, "work_progress")
 	if err != nil {
-		return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to probe original media %s (fail closed): %v", cleanPath, err)}, nil
+		res := StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to probe original media %s (fail closed): %v", cleanPath, err)}
+		if _, typed := mediainspect.AsProbeError(err); typed {
+			// The class comes from the typed probe error, not from reading a
+			// message that holds the path and ffprobe's stderr.
+			ec.State["failure_classification"] = string(resilience.MediaProbeFailed)
+			res.Outputs = map[string]any{"failure_classification": string(resilience.MediaProbeFailed)}
+		}
+		return res, nil
 	}
 	if !rep.Probed {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("ffprobe did not produce a trustworthy detailed inspection for %s (fail closed)", cleanPath)}, nil
