@@ -422,6 +422,17 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 			if err := verifyModeBenchmarkWinner(ec, winner); err != nil {
 				return StepResult{Status: StepFailed, Error: err.Error()}, nil
 			}
+			// A passing setting larger than the operation's size budget is
+			// not the answer it asked for: encode once at the budget instead.
+			if ec.ActionName == "transcode_media" && getString(ec.Inputs, "mode") == "size" {
+				if snapshot, err := freezeModePolicy(ec); err == nil && !sizeBudgetWinnerFits(snapshot, winner, getInt64(ec.State, "original_size"), siblingEvidenceOf(ec.State)) {
+					if result, handled := e.sizeBudgetFallback(ctx, ec, outputs, st.Decision, winner); handled {
+						ec.State["has_winner"] = false
+						outputs["has_winner"] = false
+						return result, nil
+					}
+				}
+			}
 			ec.State["benchmark_winner"] = winner
 
 			basePlan := getPlan(ec.State["plan"])
@@ -573,6 +584,9 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 
 		// If this is transcode_media, require a valid winner before proceeding to full transcode.
 		if ec.ActionName == "transcode_media" && !hasWinner && getString(ec.Inputs, "mode") != "" {
+			if result, handled := e.sizeBudgetFallback(ctx, ec, outputs, st.Decision, nil); handled {
+				return result, nil
+			}
 			if result, handled := e.sizeAudioOnlyFallback(ctx, ec, outputs); handled {
 				return result, nil
 			}

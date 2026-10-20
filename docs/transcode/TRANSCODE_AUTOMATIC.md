@@ -179,6 +179,107 @@ default (on, 15), so pass the shown values to keep them. See
 [TRANSCODE_MODES_REVIEW.md](TRANSCODE_MODES_REVIEW.md) and the
 [experiment](reviews/2026-10-19-hardware-media-engine-experiment.md).
 
+## Size budget (size mode)
+
+`mode=size` accepts one optional size budget, a ceiling for the finished file
+that the quality search may not exceed. It is for a source where the quality
+target cannot be met inside the size you can afford. Without a budget nothing
+changes: the policy, its digest and the search are exactly as before.
+
+**Inputs.** Exactly one of:
+
+* `size_budget_percent`, 5 to 85: the budget as a percentage of the source file.
+  The upper bound exists because size mode's worker-enforced minimum saving is
+  15%, so a budget above 85% of the source could never be what limits the file
+  and is refused up front.
+* `size_budget_bytes`, at least 50,000,000: an absolute ceiling.
+* `size_budget_source=siblings` with an optional `size_budget_sibling_multiplier`
+  (1.0 to 4.0, default 1.5): the budget follows the other episodes. It is the
+  median total bitrate of the other video files in the same folder, times the
+  multiplier, times the source's duration. When that folder has too few and is
+  named like a season (`Season 1`, `S01`, `Specials`, …), the series folder
+  above it is scanned too; a movie's own folder or a flat series never widens
+  to the library. Files are compared within a resolution class (SD, 720p,
+  1080p, 1440p, 2160p, from the width and the height scaled to 16:9, so a
+  letterboxed 1920-wide film is 1080p). At least 3 such files are needed;
+  without them the file runs as if it had no budget, and the job says why. The
+  scan probes at most 60 files and stops after 3 minutes. The multiplier is
+  refused without the source.
+
+The three are mutually exclusive. The effective budget is the smaller of the
+budget and 85% of the source, so the 15% minimum saving that size mode enforces
+always holds. The budget, the inputs and the result are
+frozen into the batch and per-file goal-change policy (`size.size_budget`).
+
+**When it applies.** The normal search runs first. The budget is consulted when
+the best passing candidate is larger than the budget (the estimate, or the
+measured size), or when no candidate qualifies and a budget encode could still
+fit. Audio-only compaction still wins when it alone brings the file inside the
+budget: nothing is re-encoded then. When no budget encode can be planned (the
+source's video stream size is unknown, the other streams already take the
+budget, or the worker cannot encode two-pass x265), the search's own outcome
+stands: a passing winner over the budget is kept, otherwise the usual
+audio-only or no-candidate result follows, and the job says why the budget was
+not applied.
+
+**The budget encode.** A single x265 two-pass average-bitrate encode (preset
+medium, lookahead 40, 4 B-frames, 3 reference frames, aq-mode 3, aq-strength 1,
+psy-rd 2, psy-rdoq 1; main10 when the plan is main10). It aims at 97% of the
+budget. The video bitrate is `(target - non-video bytes) * 8 / duration`, where
+non-video bytes are the source minus its video stream, minus what lossless audio
+compaction saves. A budget roomier than two-pass x265's 50 Mbps ceiling is met at
+the ceiling, and the file comes out smaller. The size is therefore known before
+the encode starts and shown as the estimate (*Budget estimate*), not the
+over-budget winner. Validation rebuilds these settings from the frozen policy
+and the source and accepts only a plan that matches them exactly.
+
+**Validation.** The result is judged against the same final windows as any size
+result, but against a lower, frozen floor: VMAF mean 70, p5 60 and worst
+5-second window 65. A VMAF difference of about 20 spans one ACR category and
+about 6 is one just-noticeable difference, so this floor is roughly four
+just-noticeable differences below the normal 88/84/85 gates. It is a floor for
+a file that is smaller on purpose, not a promise of transparency. The banding
+check (CAMBI) is not lowered, because banding is the typical low-bitrate
+artefact on dark content and the floor would not hide it. The floor is part of
+the frozen policy and is not user-tunable.
+
+**Outcomes.** The result carries an `outcome`:
+
+* `meets_quality_target_within_budget`: the budget encode also met the normal
+  quality target.
+* `below_quality_target_within_budget`: it is within the budget and above the
+  floor but below the normal target. The candidate is labelled *Below quality
+  target — within size budget* in the job, the queue, the batch candidate list
+  and the replacement review, with the failed target checks listed.
+* a quality rejection when the floor itself is not met, and a size rejection
+  when the finished file is still over the budget. Reason codes name the failed
+  metric and its limit.
+
+A budget candidate is never promoted automatically: like every candidate it
+waits for review, and the label travels with it into the replacement review.
+The batch approval itself also says how many of its candidates are below the
+quality target, wherever it is answered.
+
+**Seeing it.** Job detail shows the budget against the result and the trigger,
+an inline rate-quality chart (size across, VMAF mean up, the budget as a
+vertical line, the quality target and floor as horizontal lines, each searched
+setting as a dot and the budget encode highlighted), and a collapsed list with
+the same numbers for browsers without SVG support. `action_status` carries the
+same data as `size_budget`, and the compact benchmark summary reports
+`plan_source=size_budget` with outcome `size_budget`. For a sibling-matched
+budget the job reads "Budget from N sibling episodes (median X Mbps × M)", shows
+how the source's bitrate compares with the median, and lists the files used
+under a collapsed *Sibling episodes* section. *Change goal*, a batch setup and
+*Run again* carry the budget: the UI offers *None*, *Percent of source*,
+*Gigabytes* and *Match sibling episodes*, and shows the budget a file was frozen
+with. The `transcode_goal_change` preview shows it too (`size_budget`,
+`size_budget_mixed`); a change to size without `size_budget_*` inputs drops
+it.
+
+**Not done.** A search that ended because it hit the time cap does not trigger
+the fallback. A CRF winner judged within budget on its estimate is not
+re-checked after the full encode. The floor is frozen, not user-tunable.
+
 ## Compact mode
 
 `mode=compact` (optional `max_height` 720, 1080 (default), 1440 or 2160) accepts

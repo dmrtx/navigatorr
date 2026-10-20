@@ -234,6 +234,12 @@ func TestGoalChangeCarriesTheHardwareChoice(t *testing.T) {
 		{"size, margin too large", map[string]any{"mode": "size", "allow_hardware": true, "hardware_margin_percent": 60}, 400},
 		{"quality with hardware", map[string]any{"mode": "quality", "allow_hardware": true}, 400},
 		{"quality, hardware off", map[string]any{"mode": "quality", "allow_hardware": false}, 202},
+		{"size, budget percent", map[string]any{"mode": "size", "size_budget_percent": 33}, 202},
+		{"size, budget bytes", map[string]any{"mode": "size", "size_budget_bytes": 2000000000}, 202},
+		{"size, budget both", map[string]any{"mode": "size", "size_budget_percent": 33, "size_budget_bytes": 2000000000}, 400},
+		{"size, budget percent too large", map[string]any{"mode": "size", "size_budget_percent": 90}, 400},
+		{"size, budget bytes too small", map[string]any{"mode": "size", "size_budget_bytes": 1000}, 400},
+		{"quality with a budget", map[string]any{"mode": "quality", "size_budget_percent": 33}, 400},
 	}
 	var receipt map[string]string
 	for i, tc := range cases {
@@ -260,6 +266,53 @@ func TestGoalChangeCarriesTheHardwareChoice(t *testing.T) {
 	}
 	if json.Unmarshal(w.Body.Bytes(), &reopened) != nil || reopened.Settings["allow_hardware"] != false {
 		t.Fatal("frozen hardware choice not shown", w.Body.String())
+	}
+}
+
+// A size budget given with the goal change is frozen with the policy and shown
+// again when the dialog reopens.
+func TestGoalChangeFreezesAndShowsTheSizeBudget(t *testing.T) {
+	s, h := testUI(t)
+	seedFailedBatch(t, s, false)
+	st := s.engine.Deps().Store
+	batch, _ := st.GetActionInstance("failed-batch")
+	inputs := decodeOperationJSON(batch.InputsJSON)
+	delete(inputs, "profile_config")
+	inputs["mode"] = "quality"
+	batch.InputsJSON = mustJSON(t, inputs)
+	if err := st.UpdateActionInstance(*batch); err != nil {
+		t.Fatal(err)
+	}
+	read := func() (map[string]any, map[string]any) {
+		w := request(h, "GET", "/api/maintenance/batch-settings?id=failed-batch&scope=all", "", true)
+		var plan struct {
+			Settings map[string]any `json:"settings"`
+			Version  string         `json:"selection_version"`
+		}
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &plan) != nil {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		return plan.Settings, map[string]any{"selection_version": plan.Version}
+	}
+	before, version := read()
+	if before["size_budget_percent"] != nil || before["size_budget_bytes"] != nil || before["size_budget_mixed"] != false {
+		t.Fatalf("a budget shown before one was set: %v", before)
+	}
+	body := mustJSON(t, map[string]any{"id": "failed-batch", "scope": "all", "selection_version": version["selection_version"], "key": "goal-budget", "mode": "size", "size_budget_percent": 33})
+	w := request(h, "POST", "/api/maintenance/batch-settings", body, true)
+	var receipt map[string]string
+	if w.Code != 202 || json.Unmarshal(w.Body.Bytes(), &receipt) != nil {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	command, _ := st.GetActionInstance(receipt["command_id"])
+	if command == nil || !strings.Contains(command.InputsJSON, `"size_budget_percent":33`) {
+		t.Fatalf("budget not carried: %+v", command)
+	}
+	if result, err := s.engine.Resume(context.Background(), command.ID, "", nil); err != nil || result.Status != store.ActionStatusCompleted {
+		t.Fatal(result, err)
+	}
+	if after, _ := read(); after["size_budget_percent"] != float64(33) || after["size_budget_mixed"] != false {
+		t.Fatalf("frozen size budget not shown: %v", after)
 	}
 }
 

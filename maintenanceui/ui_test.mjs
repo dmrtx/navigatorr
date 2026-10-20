@@ -3945,3 +3945,239 @@ test("the sample test result shows each measured setting's estimated size agains
   assert.match(text, /crf16 [^\n]*did not pass(?! · est\.)/);
   assert.doesNotMatch(text, /NaN|undefined/);
 });
+
+// ---- Size budget ----
+
+test("the smaller files goal offers an optional size budget in both forms", () => {
+  const form = markup.slice(markup.indexOf('<form id="job-form"'), markup.indexOf("</form>", markup.indexOf('<form id="job-form"')));
+  for (const prefix of ["size-budget", "reconfigure-budget"]) {
+    assert.match(markup, new RegExp(`id="${prefix}-kind"`));
+    assert.match(markup, new RegExp(`id="${prefix}-percent"[^>]*min="5"[^>]*max="85"`));
+    assert.match(markup, new RegExp(`id="${prefix}-gb"[^>]*min="0.05"`));
+    assert.match(markup, new RegExp(`id="${prefix}-multiplier"[^>]*min="1"[^>]*max="4"[^>]*value="1.5"`));
+  }
+  assert.match(form, /id="size-budget-option"/);
+  assert.match(markup, /Match sibling episodes/);
+  const h = harness();
+  const el = (id) => h.elements.get(id);
+  h.run('processingMode=()=>"quality"; controls();');
+  assert.equal(el("size-budget-option").hidden, true);
+  h.run('processingMode=()=>"size"; controls();');
+  assert.equal(el("size-budget-option").hidden, false);
+  assert.equal(el("size-budget-percent-label").hidden, true);
+  h.run('$("size-budget-kind").value="percent"; controls();');
+  assert.equal(el("size-budget-percent-label").hidden, false);
+  assert.equal(el("size-budget-gb-label").hidden, true);
+  h.run('$("size-budget-kind").value="siblings"; controls();');
+  assert.equal(el("size-budget-multiplier-label").hidden, false);
+  assert.equal(typeof el("size-budget-kind").listeners.get("change"), "function");
+});
+
+test("the size budget is sent explicitly, one kind at a time, and checked before sending", async () => {
+  const attempt = async (setup, mode = "size") => {
+    const { h } = submissionHarness();
+    let sent = null;
+    h.context.capture = (_tool, args) => { sent = JSON.parse(args.inputs); return { id: "submitted" }; };
+    h.run(`processingMode=()=>${JSON.stringify(mode)};tool=async(...args)=>capture(...args);${setup}`);
+    await h.run('buildAndSubmitJob("encode")');
+    return sent;
+  };
+  const refused = async (setup, message) => {
+    const { h } = submissionHarness();
+    let sent = null;
+    h.context.capture = (_tool, args) => { sent = args; return { id: "submitted" }; };
+    h.run(`processingMode=()=>"size";tool=async(...args)=>capture(...args);${setup}`);
+    await assert.rejects(h.run('buildAndSubmitJob("encode")'), message);
+    assert.equal(sent, null, "nothing is sent for an invalid budget");
+  };
+  let inputs = await attempt('$("size-budget-kind").value="";');
+  assert.equal(["size_budget_percent", "size_budget_bytes", "size_budget_source", "size_budget_sibling_multiplier"].some((k) => k in inputs), false);
+  inputs = await attempt('$("size-budget-kind").value="percent"; $("size-budget-percent").value="33"; $("size-budget-gb").value="2";');
+  assert.equal(inputs.size_budget_percent, 33);
+  assert.equal("size_budget_bytes" in inputs, false, "the hidden GB field must not leak");
+  inputs = await attempt('$("size-budget-kind").value="gb"; $("size-budget-gb").value="1.5";');
+  assert.equal(inputs.size_budget_bytes, 1500000000);
+  assert.equal("size_budget_percent" in inputs, false);
+  inputs = await attempt('$("size-budget-kind").value="siblings"; $("size-budget-multiplier").value="2";');
+  assert.equal(inputs.size_budget_source, "siblings");
+  assert.equal(inputs.size_budget_sibling_multiplier, 2);
+  inputs = await attempt('$("size-budget-kind").value="siblings"; $("size-budget-multiplier").value="";');
+  assert.equal(inputs.size_budget_sibling_multiplier, 1.5);
+  for (const [setup, message] of [
+    ['$("size-budget-kind").value="percent"; $("size-budget-percent").value="4";', /5 to 85/],
+    ['$("size-budget-kind").value="percent"; $("size-budget-percent").value="90";', /5 to 85/],
+    ['$("size-budget-kind").value="percent"; $("size-budget-percent").value="";', /5 to 85/],
+    ['$("size-budget-kind").value="gb"; $("size-budget-gb").value="0.01";', /0\.05/],
+    ['$("size-budget-kind").value="gb"; $("size-budget-gb").value="abc";', /0\.05/],
+    ['$("size-budget-kind").value="siblings"; $("size-budget-multiplier").value="5";', /1\.0 to 4\.0/],
+    ['$("size-budget-kind").value="siblings"; $("size-budget-multiplier").value="0.5";', /1\.0 to 4\.0/],
+  ]) await refused(setup, message);
+  // Other goals send no budget even if the fields still hold one.
+  inputs = await attempt('$("size-budget-kind").value="percent"; $("size-budget-percent").value="33";', "quality");
+  assert.equal("size_budget_percent" in inputs, false);
+});
+
+test("changing the goal shows the frozen size budget and sends the chosen one", async () => {
+  const open = async (settings) => {
+    const h = harness();
+    h.context.savedPlan = { id: "b", mode: "quality", scope: "all", selected: 2, kept: 0, active: 0, files: ["one", "two"], selection_version: "v1", settings };
+    h.run("state.info={};state.recipes=[];api=async()=>savedPlan;");
+    await h.run('reconfigureBatch("b")');
+    return h;
+  };
+  const el = (h, id) => h.elements.get(id);
+  let h = await open({ size_budget_percent: 33 });
+  assert.equal(el(h, "reconfigure-budget-kind").value, "percent");
+  assert.equal(el(h, "reconfigure-budget-percent").value, 33);
+  h = await open({ size_budget_bytes: 2000000000 });
+  assert.equal(el(h, "reconfigure-budget-kind").value, "gb");
+  assert.equal(el(h, "reconfigure-budget-gb").value, 2);
+  h = await open({ size_budget_source: "siblings", size_budget_sibling_multiplier: 2 });
+  assert.equal(el(h, "reconfigure-budget-kind").value, "siblings");
+  assert.equal(el(h, "reconfigure-budget-multiplier").value, 2);
+  h = await open({ size_budget_mixed: true });
+  assert.equal(el(h, "reconfigure-budget-kind").value, "");
+  h.run('$("reconfigure-mode").value="size"; updateReconfigureHardware();');
+  assert.equal(el(h, "reconfigure-budget-option").hidden, false);
+  assert.match(el(h, "reconfigure-settings").textContent, /different size budgets/);
+  const calls = [];
+  h.context.record = (path, body) => calls.push([path, body]);
+  h.context.sessionStorage = { getItem: () => null, setItem() {}, removeItem() {} };
+  h.run('submissionID=()=>"budget-1";commandRequest=async(path,body)=>{record(path,body);return {id:"b"}};loadJobs=async()=>{};openJob=async()=>{};notify=()=>{};');
+  await h.run("submitReconfiguredBatch()");
+  assert.equal("size_budget_percent" in calls[0][1], false);
+  h.run('$("reconfigure-budget-kind").value="percent"; $("reconfigure-budget-percent").value="40"; submissionID=()=>"budget-2";');
+  await h.run("submitReconfiguredBatch()");
+  assert.equal(calls[1][1].size_budget_percent, 40);
+  h.run('$("reconfigure-budget-kind").value="siblings"; $("reconfigure-budget-multiplier").value="9"; submissionID=()=>"budget-3";');
+  await assert.rejects(h.run("submitReconfiguredBatch()"), /1.0 to 4.0/);
+  h.run('$("reconfigure-mode").value="compact"; submissionID=()=>"budget-4";');
+  await h.run("submitReconfiguredBatch()");
+  assert.equal("size_budget_source" in calls[2][1], false);
+});
+
+const budgetRecord = {
+  trigger: "passing_candidate_over_budget", source_bytes: 9000000000, budget_bytes: 3000000000, budget_percent: 33, target_bytes: 2910000000, video_bitrate_kbps: 2400,
+  over_budget_candidate_id: "cand_crf24", over_budget_estimated_bytes: 4000000000,
+  quality_target: { vmaf_mean_minimum: 88 }, quality_floor: { vmaf_mean_minimum: 70, vmaf_p5_minimum: 60, vmaf_worst_window_minimum: 65 },
+  message: "Below the quality target, within your size budget.",
+  outcome: "below_quality_target_within_budget", candidate_bytes: 2850000000, below_target: ["VMAF mean 79.5 is below the target 88.0"],
+  curve: [
+    { kind: "searched", candidate_id: "cand_crf24", video_codec: "libx265", bytes: 4000000000, passed: true, within_budget: false, vmaf_mean: 90 },
+    { kind: "searched", candidate_id: "cand_crf30", video_codec: "libx265", bytes: 2500000000, passed: false, within_budget: true, vmaf_mean: 76 },
+    { kind: "budget_fallback", bytes: 2850000000, measured: true, within_budget: true, vmaf_mean: 79.5 },
+  ],
+};
+
+test("a size budget result states the outcome, the budget against the result and every point", () => {
+  const h = harness();
+  h.context.sizeMode = { encoder: "libx265", expected_bytes: 2850000000, size_budget: budgetRecord };
+  const lines = h.run("sizeModeLines(sizeMode)");
+  assert.ok(lines.includes("Expected size 2.85 GB"));
+  assert.ok(lines.includes("Encoder: x265 (software)"));
+  assert.ok(lines.includes("Below the quality target, within your size budget."));
+  assert.ok(lines.some((l) => /Size budget 3\.00 GB \(33% of the source\) · aims at 2\.91 GB · video 2400 kbps/.test(l)));
+  assert.ok(lines.some((l) => /Result 2\.85 GB of the 3\.00 GB budget \(95\.0%\)/.test(l)));
+  assert.ok(lines.some((l) => /cand_crf24, about 4\.00 GB\) is larger than the budget/.test(l)));
+  assert.ok(lines.some((l) => /Quality target VMAF mean ≥ 88 · floor 70 mean, 60 p5, 65 worst window/.test(l)));
+  assert.ok(lines.some((l) => l === "Below target: VMAF mean 79.5 is below the target 88.0"));
+  h.context.job = { size_mode: { encoder: "libx265", size_budget: budgetRecord } };
+  const note = h.run("sizeModeNote(job)");
+  const all = (n) => [n, ...(n.children || []).flatMap(all)];
+  const kids = all(note);
+  const badge = kids.find((c) => /size-budget-badge/.test(c.className || ""));
+  assert.equal(badge.textContent, "Below quality target — within size budget");
+  assert.equal(kids.some((c) => c.tagName === "svg"), false, "no chart without SVG support");
+  const points = kids.filter((c) => /size-budget-points/.test(c.className || ""));
+  assert.equal(points.length, 1, "the plain-text point list is the fallback");
+  const items = all(points[0]).filter((c) => c.textContent && /VMAF/.test(c.textContent) && !c.children?.length).map((c) => c.textContent);
+  assert.ok(items.some((t) => /Budget encode · x265 two-pass · 2\.85 GB · VMAF 79\.5 · within budget/.test(t)));
+  assert.ok(items.some((t) => /cand_crf24 · est\. 4\.00 GB · VMAF 90\.0 · met the quality target · over budget/.test(t)));
+  assert.ok(items.some((t) => /cand_crf30 .* missed the quality target · within budget/.test(t)));
+});
+
+test("a size budget draws a compact chart when the browser can", () => {
+  const h = harness();
+  class Svg extends Element {
+    constructor(tagName) { super(); this.tagName = tagName; this.attrs = {}; }
+    setAttribute(name, value) { this.attrs[name] = value; if (name === "class") this.className = value; }
+  }
+  h.document.createElementNS = (_ns, name) => new Svg(name);
+  h.context.record = budgetRecord;
+  const svg = h.run("sizeBudgetChart(record)");
+  const all = (n) => [n, ...(n.children || []).flatMap(all)];
+  const parts = all(svg);
+  assert.equal(svg.tagName, "svg");
+  assert.match(svg.attrs["aria-label"], /3 points, budget 3\.00 GB/);
+  assert.equal(parts.filter((c) => c.className === "point passed").length, 1);
+  assert.equal(parts.filter((c) => c.className === "point").length, 1);
+  assert.equal(parts.filter((c) => c.className === "point fallback").length, 1);
+  assert.equal(parts.filter((c) => c.className === "budget-line").length, 1);
+  assert.equal(parts.filter((c) => c.className === "target-line").length, 1);
+  const budgetX = Number(parts.find((c) => c.className === "budget-line").attrs.x1);
+  const fallbackX = Number(parts.find((c) => c.className === "point fallback").attrs.cx);
+  const targetY = Number(parts.find((c) => c.className === "target-line").attrs.y1);
+  const fallbackY = Number(parts.find((c) => c.className === "point fallback").attrs.cy);
+  assert.ok(fallbackX < budgetX, "the 2.85 GB result sits left of the 3 GB budget line");
+  assert.ok(fallbackY > targetY, "a VMAF of 79.5 is below the 88 target line");
+  assert.equal(h.run("sizeBudgetChart({budget_bytes: 1, curve: []})"), null);
+});
+
+test("a planned budget encode shows its target and an unmeasured point, not the over-budget winner", () => {
+  const h = harness();
+  const planned = { ...budgetRecord, outcome: "", candidate_bytes: 0, below_target: [], curve: [budgetRecord.curve[0], { kind: "budget_fallback", bytes: 2910000000, within_budget: true }] };
+  h.context.job = { size_mode: { encoder: "libx265", expected_bytes: 2910000000, size_budget: planned } };
+  const text = JSON.stringify(h.run("sizeModeLines(job.size_mode)"));
+  assert.match(text, /Expected size 2\.91 GB/);
+  assert.doesNotMatch(text, /VideoToolbox/);
+  assert.doesNotMatch(text, /Result /);
+  const list = JSON.stringify(h.run("job.size_mode.size_budget.curve.map(sizeBudgetPointLabel)"));
+  assert.match(list, /planned 2\.91 GB · VMAF not measured yet · within budget/);
+  assert.equal(h.run('sizeBudgetNote(job).children.some(c => /size-budget-badge/.test(c.className))'), false, "no outcome badge before the result");
+});
+
+test("a budget that was not applied says why", () => {
+  const h = harness();
+  h.context.job = { size_mode: { encoder: "libx265", size_budget_note: "Only 1 sibling." } };
+  assert.ok(h.run("sizeModeLines(job.size_mode)").includes("Only 1 sibling."));
+});
+
+test("sibling-matched budgets name their basis, the file's ratio and the compared files", () => {
+  const h = harness();
+  const siblings = { scope: "season", median_bitrate_kbps: 1600, multiplier: 1.5, count: 5, resolution_class: "1080p", source_bitrate_kbps: 4800, ratio: 3, files: [
+    { name: "E02.mkv", bytes: 700000000, duration_seconds: 2640, bitrate_kbps: 1600, width: 1920, height: 1080 },
+    { name: "E03.mkv", bytes: 690000000, duration_seconds: 2600, bitrate_kbps: 1590, width: 1920, height: 1080 },
+  ] };
+  h.context.job = { size_mode: { encoder: "libx265", size_budget: { ...budgetRecord, siblings } } };
+  const lines = h.run("sizeModeLines(job.size_mode)");
+  assert.ok(lines.includes("Budget from 5 sibling episodes (median 1.60 Mbps × 1.5) in the season folder · 1080p"));
+  assert.ok(lines.includes("This file averages 4.80 Mbps, 3.0× the siblings' median"));
+  const note = h.run("sizeBudgetNote(job)");
+  const all = (n) => [n, ...(n.children || []).flatMap(all)];
+  const details = all(note).find((c) => /size-budget-siblings/.test(c.className || ""));
+  assert.equal(details.open, false, "the file list stays collapsed");
+  const rows = all(details).filter((c) => /E0\d\.mkv/.test(c.textContent || "") && !c.children?.length).map((c) => c.textContent);
+  assert.deepEqual(rows, ["E02.mkv · 700.0 MB · 1.60 Mbps · 1920×1080 · 44 min", "E03.mkv · 690.0 MB · 1.59 Mbps · 1920×1080 · 43 min"]);
+  assert.match(all(details)[1].textContent, /Sibling episodes \(2\)/);
+});
+
+test("the plan note and queue labels say a budget candidate is below the quality target", () => {
+  const h = harness();
+  h.context.job = { benchmark: { plan_source: "size_budget", plan_note: "x" }, size_mode: { size_budget: budgetRecord } };
+  assert.match(allTextOf(h.run("encodingPlanNote(job)")), /Encoded at your size budget \(below the quality target\)\./);
+  h.run('job.size_mode.size_budget = {...job.size_mode.size_budget, outcome:"meets_quality_target_within_budget"}');
+  assert.match(allTextOf(h.run("encodingPlanNote(job)")), /\(within the quality target\)/);
+  assert.equal(h.run('benchmarkOutcomes.size_budget'), "Encoded at your size budget");
+  assert.equal(h.run('belowTargetLabel("below_quality_target_within_budget")'), "Below quality target — within size budget");
+  assert.equal(h.run('belowTargetLabel("meets_quality_target_within_budget")'), "");
+  assert.equal(h.run('belowTargetNotice("")'), null);
+  assert.match(allTextOf(h.run('belowTargetNotice("below_quality_target_within_budget")')), /Compare it with the original before approving/);
+  h.context.ready = { candidate_ready: true, size_budget_outcome: "below_quality_target_within_budget" };
+  assert.equal(h.run("queueOutcome(ready)"), "Original preserved · Candidate available · Below quality target — within size budget");
+  h.run("ready.size_budget_outcome = undefined");
+  assert.equal(h.run("queueOutcome(ready)"), "Original preserved · Candidate available");
+  assert.equal(h.run('savingsLine({source_bytes: 9e9, estimated_saved_bytes: 6e9, estimate_kind: "size_budget"}).textContent').match(/Budget estimate/) !== null, true);
+});
+function allTextOf(n) {
+  return [n.textContent, ...(n.children || []).map(allTextOf)].join(" ");
+}

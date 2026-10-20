@@ -14,22 +14,26 @@ import (
 // Uses the stored item relation, never the current Sonarr/folder catalog.
 func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Mode            string   `json:"mode"`
-		AllowHardware   *bool    `json:"allow_hardware"`
-		HardwareMargin  *float64 `json:"hardware_margin_percent"`
-		ID              string   `json:"id"`
-		Scope           string   `json:"scope"`
-		CandidateID     string   `json:"candidate_id"`
-		ItemKey         string   `json:"item_key"`
-		Version         string   `json:"selection_version"`
-		DecisionVersion string   `json:"decision_version"`
-		Profile         string   `json:"profile"`
-		MinSavings      *float64 `json:"min_savings_percent"`
-		MaxGrowth       *float64 `json:"max_size_increase_percent"`
-		PreserveLimits  bool     `json:"preserve_limits"`
-		PreserveSavings bool     `json:"preserve_savings"`
-		PreserveGrowth  bool     `json:"preserve_growth"`
-		Key             string   `json:"key"`
+		Mode             string   `json:"mode"`
+		AllowHardware    *bool    `json:"allow_hardware"`
+		HardwareMargin   *float64 `json:"hardware_margin_percent"`
+		BudgetPercent    *float64 `json:"size_budget_percent"`
+		BudgetBytes      *float64 `json:"size_budget_bytes"`
+		BudgetSource     *string  `json:"size_budget_source"`
+		BudgetMultiplier *float64 `json:"size_budget_sibling_multiplier"`
+		ID               string   `json:"id"`
+		Scope            string   `json:"scope"`
+		CandidateID      string   `json:"candidate_id"`
+		ItemKey          string   `json:"item_key"`
+		Version          string   `json:"selection_version"`
+		DecisionVersion  string   `json:"decision_version"`
+		Profile          string   `json:"profile"`
+		MinSavings       *float64 `json:"min_savings_percent"`
+		MaxGrowth        *float64 `json:"max_size_increase_percent"`
+		PreserveLimits   bool     `json:"preserve_limits"`
+		PreserveSavings  bool     `json:"preserve_savings"`
+		PreserveGrowth   bool     `json:"preserve_growth"`
+		Key              string   `json:"key"`
 	}
 	if r.Method == http.MethodGet {
 		body.ID, body.Scope, body.CandidateID = r.URL.Query().Get("id"), r.URL.Query().Get("scope"), r.URL.Query().Get("candidate_id")
@@ -76,6 +80,7 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 	limits, mixed := map[string]any{}, map[string]bool{}
 	itemSettings := operationMap(state["batch_item_settings"])
 	var hardware action.HardwareChoice
+	var budgets []frozenBudget
 	profiles := map[string]int{}
 	for _, item := range items {
 		if !action.BatchRevisionSelects(item, body.Scope, selectionID) {
@@ -93,6 +98,7 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 		if allow, margin, ok := action.BatchItemFrozenHardware(state, item.ItemKey); ok {
 			hardware.Add(allow, margin)
 		}
+		budgets = append(budgets, itemFrozenSizeBudget(state, item.ItemKey))
 		if body.Scope == "file" {
 			plan["item_key"] = item.ItemKey
 		}
@@ -194,6 +200,24 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 		settingsView["allow_hardware"], settingsView["hardware_margin_percent"] = hardware.Allow, hardware.Margin
 		settingsView["hardware_mixed"] = hardware.Mixed
 	}
+	// The size budget the files were frozen with, when they agree on one.
+	if len(budgets) > 0 {
+		settingsView["size_budget_mixed"] = false
+		for _, b := range budgets[1:] {
+			if b != budgets[0] {
+				settingsView["size_budget_mixed"] = true
+			}
+		}
+		if settingsView["size_budget_mixed"] == false {
+			if budgets[0].percent > 0 {
+				settingsView["size_budget_percent"] = budgets[0].percent
+			} else if budgets[0].bytes > 0 {
+				settingsView["size_budget_bytes"] = budgets[0].bytes
+			} else if budgets[0].source != "" {
+				settingsView["size_budget_source"], settingsView["size_budget_sibling_multiplier"] = budgets[0].source, budgets[0].multiplier
+			}
+		}
+	}
 	if r.Method == http.MethodGet {
 		writeJSON(w, 200, plan)
 		return
@@ -213,6 +237,18 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.HardwareMargin != nil {
 			settings["hardware_margin_percent"] = *body.HardwareMargin
+		}
+		if body.BudgetPercent != nil {
+			settings["size_budget_percent"] = *body.BudgetPercent
+		}
+		if body.BudgetBytes != nil {
+			settings["size_budget_bytes"] = *body.BudgetBytes
+		}
+		if body.BudgetSource != nil {
+			settings["size_budget_source"] = *body.BudgetSource
+		}
+		if body.BudgetMultiplier != nil {
+			settings["size_budget_sibling_multiplier"] = *body.BudgetMultiplier
 		}
 		if err := action.ValidateHardwareInputs(body.Mode, settings); err != nil {
 			fail(w, 400, err.Error())
@@ -256,6 +292,28 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 		settings[field.key] = *field.value
 	}
 	s.admitCommand(w, r, map[string]any{"kind": "reconfigure", "id": body.ID, "scope": body.Scope, "candidate_id": body.CandidateID, "item_key": body.ItemKey, "selection_version": body.Version, "decision_version": body.DecisionVersion, "settings": settings}, body.Key)
+}
+
+// frozenBudget is the size budget one file's frozen policy carries: zero values
+// mean none.
+type frozenBudget struct {
+	percent, bytes, multiplier float64
+	source                     string
+}
+
+// itemFrozenSizeBudget reads the budget from the item's own goal-change policy
+// when it has one, else the batch's.
+func itemFrozenSizeBudget(state map[string]any, itemKey string) frozenBudget {
+	holder := state
+	if row := operationMap(operationMap(state["batch_item_settings"])[itemKey]); operationMap(row["mode_policy"]) != nil {
+		holder = row
+	}
+	budget := operationMap(operationMap(operationMap(holder["mode_policy"])["size"])["size_budget"])
+	b := frozenBudget{percent: operationNumber(budget["percent"]), bytes: operationNumber(budget["bytes"])}
+	if siblings := operationMap(budget["siblings"]); siblings != nil {
+		b.source, b.multiplier = "siblings", operationNumber(siblings["multiplier"])
+	}
+	return b
 }
 
 func containsMode(mode string) bool {

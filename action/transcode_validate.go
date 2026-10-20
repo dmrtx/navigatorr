@@ -68,7 +68,29 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 				return StepResult{Status: StepFailed, Error: "video copy evidence is missing or does not match the candidate and plan; original preserved"}, nil
 			}
 		} else {
-			expected, _ := json.Marshal(ensureBenchmarkQualityMetric(buildBenchmarkQualityConfig(snapshot.Profile.Optimization.Quality), "vmaf"))
+			expectedQuality := ensureBenchmarkQualityMetric(buildBenchmarkQualityConfig(snapshot.Profile.Optimization.Quality), "vmaf")
+			if getString(ec.State, "plan_source") == sizeBudgetPlanSource {
+				// A budget encode is held to the frozen floor, and only a plan
+				// the budget fallback built at its planned bitrate may be.
+				// The encode is rebuilt from the frozen policy and the source,
+				// not read back from the record, and must match exactly.
+				rec := sizeBudgetOf(ec.State)
+				expectedQuality = sizeBudgetFloorQuality(snapshot)
+				matches := false
+				if policy := snapshot.Size.SizeBudget; rec != nil && expectedQuality != nil && policy != nil && plan.X265 != nil {
+					original := getInt64(ec.State, "original_size")
+					budget := policy.BudgetBytes(original, siblingEvidenceOf(ec.State))
+					enc := planSizeBudgetEncode(policy, getSourceReport(ec.State["source_report"]), original, budget)
+					want, _ := json.Marshal(enc.X265)
+					got, _ := json.Marshal(plan.X265)
+					matches = enc.Reason == "" && string(want) == string(got) && plan.Quality == 0 && plan.Preset == policy.Preset && transcode.NormalizeVideoCodec(plan.VideoCodec) == transcode.VideoCodecLibX265 &&
+						rec.BudgetBytes == budget && rec.TargetBytes == enc.TargetBytes && rec.VideoBitrateKbps == enc.X265.BitrateKbps
+				}
+				if !matches {
+					return StepResult{Status: StepFailed, Error: "size budget plan does not match the frozen budget; original preserved"}, nil
+				}
+			}
+			expected, _ := json.Marshal(expectedQuality)
 			actual, _ := json.Marshal(plan.QualityValidation.Quality)
 			if plan.QualityValidation.Metric != "vmaf" || string(expected) != string(actual) {
 				return StepResult{Status: StepFailed, Error: "final quality validation does not enforce frozen mode policy; original preserved"}, nil
@@ -109,6 +131,7 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 	if candidateSize <= 0 {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("accepted candidate size is unknown for %q (fail closed)", outputPath)}, nil
 	}
+	var budget *SizeBudgetRecord
 	if plan.Mode != "" {
 		original := getInt64(ec.State, "original_size")
 		if original <= 0 {
@@ -117,6 +140,18 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 		minimum, maximum := e.effectiveSizeGuardrails(ec)
 		if original <= 0 || plan.SizePolicy == nil || plan.Mode != getString(ec.Inputs, "mode") || plan.PolicyDigest != getString(ec.State, "policy_digest") || plan.SizePolicy.MinSavingsPercent != minimum || plan.SizePolicy.MaxSizeIncreasePercent != maximum {
 			return StepResult{Status: StepFailed, Error: "mode size policy or source identity missing; original preserved"}, nil
+		}
+		// A budget encode is checked against its budget first: every budget
+		// sits under the 15% minimum saving, so one that misses the saving is
+		// over the budget too, and is reported as that.
+		if sizeBudgetActive(ec.State) {
+			rec, fits := finishSizeBudget(ec, candidateSize)
+			if !fits {
+				ec.State["skip_transcode"] = true
+				ec.State["reason_code"] = SizeBudgetExceeded
+				return StepResult{Status: StepCompleted, Outputs: map[string]any{"skipped": true, "reason_code": SizeBudgetExceeded, "candidate_size_bytes": candidateSize, sizeBudgetKey: rec}}, nil
+			}
+			budget = rec
 		}
 		if !optimization.ModeSizeAllowedVersion(plan.Mode, original, candidateSize, plan.ModePolicyVersion) {
 			ec.State["skip_transcode"] = true
@@ -192,7 +227,12 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 	ec.State["result"] = result
 	ec.State["size_saved_bytes"] = saved
 	ec.State["size_saved_percent"] = pct
-	return StepResult{Status: StepCompleted, Outputs: map[string]any{"result": result, "validation": validation, "candidate_path": outputPath, "output_path": outputPath, "size_saved_bytes": saved, "size_saved_percent": pct, "profile": getString(ec.State, "profile"), "recipe_version": plan.RecipeVersion, "recipe_digest": plan.RecipeDigest}}, nil
+	outputs := map[string]any{"result": result, "validation": validation, "candidate_path": outputPath, "output_path": outputPath, "size_saved_bytes": saved, "size_saved_percent": pct, "profile": getString(ec.State, "profile"), "recipe_version": plan.RecipeVersion, "recipe_digest": plan.RecipeDigest}
+	if budget != nil {
+		result["size_budget_outcome"] = budget.Outcome
+		outputs[sizeBudgetKey] = budget
+	}
+	return StepResult{Status: StepCompleted, Outputs: outputs}, nil
 }
 
 // verifyPublishedCandidateLight performs only stat-level checks. It returns the

@@ -113,6 +113,12 @@ type ModeSizePolicy struct {
 	// every window the final check re-measures. Snapshots frozen with a margin
 	// keep it.
 	AutomaticSearch *transcode.AutomaticSearchRules `json:"automatic_search,omitempty"`
+	// SizeBudget is set when the operation gives a size budget
+	// (size_budget_percent or size_budget_bytes): a search that ends with no
+	// passing setting, or only one larger than the budget, encodes once at the
+	// budget and reports the result as below the quality target. It is absent
+	// otherwise, so every digest without a budget is unchanged.
+	SizeBudget *SizeBudgetPolicy `json:"size_budget,omitempty"`
 }
 
 // sizeEdgeSelectionMarginVMAF is how far a size-mode winner's VMAF p5 and
@@ -285,14 +291,17 @@ func modeHardwareInput(mode string, inputs map[string]any) (*transcode.HardwareS
 }
 
 // ValidateHardwareInputs reports whether allow_hardware,
-// hardware_margin_percent and allow_slow_preset are acceptable for a goal, as
+// hardware_margin_percent, allow_slow_preset and the size budget are acceptable for a goal, as
 // the policy freeze reads them. Callers that admit a goal change use it to fail
 // early.
 func ValidateHardwareInputs(mode string, inputs map[string]any) error {
 	if _, err := modeHardwareInput(mode, inputs); err != nil {
 		return err
 	}
-	_, err := modeSlowPresetInput(mode, inputs)
+	if _, err := modeSlowPresetInput(mode, inputs); err != nil {
+		return err
+	}
+	_, err := modeSizeBudgetInput(mode, inputs)
 	return err
 }
 
@@ -329,6 +338,17 @@ func modePolicyWithHardware(mode string, anime bool, maxHeight int, hardware *tr
 // modePolicyWithOptions also freezes whether a size search may fall back to the
 // slow preset for quality (allowSlow, size mode only).
 func modePolicyWithOptions(mode string, anime bool, maxHeight int, hardware *transcode.HardwareSearchRules, allowSlow bool) (ModePolicySnapshot, error) {
+	return modePolicyWithBudget(mode, anime, maxHeight, hardware, allowSlow, nil)
+}
+
+// modePolicyWithBudget also freezes the size budget (size mode only).
+func modePolicyWithBudget(mode string, anime bool, maxHeight int, hardware *transcode.HardwareSearchRules, allowSlow bool, budget *SizeBudgetPolicy) (ModePolicySnapshot, error) {
+	if budget != nil && mode != "size" {
+		return ModePolicySnapshot{}, fmt.Errorf("size_budget_percent and size_budget_bytes are only supported with mode=size")
+	}
+	if err := budget.Validate(); err != nil {
+		return ModePolicySnapshot{}, err
+	}
 	if hardware != nil && mode != "size" {
 		return ModePolicySnapshot{}, fmt.Errorf("allow_hardware is only supported with mode=size")
 	}
@@ -375,6 +395,7 @@ func modePolicyWithOptions(mode string, anime bool, maxHeight int, hardware *tra
 		snapshot.OperationBudgetSeconds = 0
 		snapshot.Size = sizeModeV3Policy(allowSlow)
 		snapshot.Size.Hardware = hardware.Clone()
+		snapshot.Size.SizeBudget = budget.Clone()
 	}
 	if mode == "compact" {
 		snapshot.MinSavingsPercent = optimization.CompactMinimumSavingsPercent
@@ -401,6 +422,9 @@ func validateModeInputs(inputs map[string]any) error {
 		if _, err := modeSlowPresetInput("", inputs); err != nil {
 			return err
 		}
+		if _, err := modeSizeBudgetInput("", inputs); err != nil {
+			return err
+		}
 		return nil
 	}
 	mode, ok := raw.(string)
@@ -419,7 +443,11 @@ func validateModeInputs(inputs map[string]any) error {
 	if err != nil {
 		return err
 	}
-	if _, err := modePolicyWithOptions(mode, getBool(inputs, "is_anime") || getString(inputs, "media_type") == "anime", maxHeight, hardware, slow); err != nil {
+	budget, err := modeSizeBudgetInput(mode, inputs)
+	if err != nil {
+		return err
+	}
+	if _, err := modePolicyWithBudget(mode, getBool(inputs, "is_anime") || getString(inputs, "media_type") == "anime", maxHeight, hardware, slow, budget); err != nil {
 		return err
 	}
 	for _, key := range []string{"profile", "profile_config", "priority", "metric", "min_savings_percent", "max_size_increase_percent", "preserve_source_bit_depth", "expected_video_codec", "shared_calibration", "calibration_items", "batch_fixed_quality", "batch_calibration_digest"} {
@@ -493,7 +521,11 @@ func freezeModePolicy(ec *ExecutionContext) (*ModePolicySnapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	p, err := modePolicyWithOptions(mode, getBool(ec.State, "resolved_is_anime") || getBool(ec.Inputs, "is_anime") || getString(ec.Inputs, "media_type") == "anime", maxHeight, hardware, slow)
+	budget, err := modeSizeBudgetInput(mode, ec.Inputs)
+	if err != nil {
+		return nil, err
+	}
+	p, err := modePolicyWithBudget(mode, getBool(ec.State, "resolved_is_anime") || getBool(ec.Inputs, "is_anime") || getString(ec.Inputs, "media_type") == "anime", maxHeight, hardware, slow, budget)
 	if err != nil {
 		return nil, err
 	}

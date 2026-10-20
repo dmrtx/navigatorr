@@ -100,3 +100,26 @@ func TestBatchPromotionNoticeForCompactMembers(t *testing.T) {
 		t.Fatalf("notice changed the library: %v", h.mutationOrder)
 	}
 }
+
+// The batch approval counts the candidates a size budget encode left below
+// the quality target, so an approval answered outside the web review says so.
+func TestBatchPromotionCountsBelowTargetMembers(t *testing.T) {
+	h := newPromotionHarness(t)
+	plan := &batchPromotionPlan{BatchID: "batch", SeriesID: 1, Members: []batchPromotionMember{{ItemKey: "one", SourceAction: "source-transcode"}, {ItemKey: "gone", SourceAction: "missing"}}}
+	if n := h.engine.batchPromotionBelowTarget(plan); n != 0 {
+		t.Fatalf("counted %d without a budget encode", n)
+	}
+	inst, err := h.st.GetActionInstance("source-transcode")
+	if err != nil || inst == nil {
+		t.Fatal(err)
+	}
+	ec := parseExecutionContext(inst, h.engine)
+	ec.State[sizeBudgetKey] = &SizeBudgetRecord{BudgetBytes: 1_000_000_000, Outcome: SizeBudgetBelowTarget}
+	inst.StateJSON = toJSON(ec.State)
+	if err := h.st.UpdateActionInstance(*inst); err != nil {
+		t.Fatal(err)
+	}
+	if n := h.engine.batchPromotionBelowTarget(plan); n != 1 {
+		t.Fatalf("counted %d below-target members, want 1", n)
+	}
+}

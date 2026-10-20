@@ -350,3 +350,18 @@ func TestCompactBenchmarkReportsEstimatedSizeAndSavingsPerCandidate(t *testing.T
 		t.Fatalf("an absent estimate is serialized: %s", b)
 	}
 }
+
+func TestCompactBenchmarkReportsTheSizeBudgetFallback(t *testing.T) {
+	budget := &action.SizeBudgetRecord{Trigger: "no_passing_candidate", SourceBytes: 9000, BudgetBytes: 3000, TargetBytes: 2910, VideoBitrateKbps: 2400, Message: "Encoded once at the budget."}
+	res := &action.ActionResult{ActionName: "transcode_media", Status: action.StatusRunning,
+		Inputs:  map[string]any{"mode": "size"},
+		Outputs: map[string]any{"plan_source": "size_budget", "plan_note": budget.Message, "size_budget": budget},
+		State:   map[string]any{"optimization_enabled": true, "plan_source": "size_budget", "benchmark_decision": transcode.BenchmarkDecision{DecisionReason: "all_candidates_invalid"}}}
+	s := compactBenchmark(res)
+	if s == nil || s.Outcome != "size_budget" || s.Message != budget.Message || s.PlanSource != "size_budget" || s.SizeBudget == nil || s.SizeBudget.TargetBytes != 2910 {
+		t.Fatalf("size budget fallback not reported: %+v", s)
+	}
+	if strings.Contains(s.Message, "Full encoding did not start") {
+		t.Fatalf("fallback reported as a failed search: %q", s.Message)
+	}
+}

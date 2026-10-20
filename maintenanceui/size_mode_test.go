@@ -258,3 +258,76 @@ func TestOperationsProjectWindowReport(t *testing.T) {
 		t.Fatalf("fresh pool wrong: %v", final)
 	}
 }
+
+// A size budget replaces the search's outcome: the encoder is x265, the
+// expected size is the budget encode's, never an over-budget winner's, and the
+// budget block carries the curve and the outcome.
+func TestOperationsProjectSizeBudget(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	budget := map[string]any{
+		"trigger": "passing_candidate_over_budget", "source_bytes": 9000, "budget_bytes": 3000, "budget_percent": 33.0, "target_bytes": 2910, "non_video_bytes": 400, "video_bitrate_kbps": 2400,
+		"over_budget_candidate_id": "cand_crf24:medium", "over_budget_estimated_bytes": 4000,
+		"quality_target": map[string]any{"vmaf_mean_minimum": 88.0}, "quality_floor": map[string]any{"vmaf_mean_minimum": 70.0},
+		"curve": []any{
+			map[string]any{"kind": "searched", "candidate_id": "cand_crf24:medium", "bytes": 4000, "passed": true, "within_budget": false, "vmaf_mean": 90.0},
+			map[string]any{"kind": "budget_fallback", "bytes": 2910, "within_budget": true},
+		},
+		"message":  "Encoded once at the budget.",
+		"siblings": map[string]any{"scope": "season", "median_bitrate_kbps": 1600.0, "multiplier": 1.5, "count": 5, "resolution_class": "1080p", "source_bitrate_kbps": 4800.0, "ratio": 3.0, "files": []any{map[string]any{"name": "E02.mkv", "bytes": 700000000, "duration_seconds": 2600.0, "bitrate_kbps": 1600.0, "width": 1920, "height": 1080}}},
+	}
+	state := map[string]any{
+		"mode": "size", "plan_source": "size_budget", "original": map[string]any{"size_bytes": 9000},
+		"benchmark_decision": map[string]any{"winner": map[string]any{"video_codec": "hevc_videotoolbox", "estimated_bytes": 4000}},
+		"size_budget":        budget,
+	}
+	seedOperation(t, st, "budget-job", "transcode_media", "waiting_decision", map[string]any{"path": "/media/series/Show/S01E05.mkv", "mode": "size"}, nil, state)
+	done := map[string]any{}
+	for k, v := range budget {
+		done[k] = v
+	}
+	done["candidate_bytes"], done["outcome"] = 2850, "below_quality_target_within_budget"
+	done["final"] = map[string]any{"verdict": "pass", "measured": map[string]any{"vmaf_mean": 79.5}, "limits": map[string]any{"vmaf_mean_minimum": 70.0}}
+	finished := map[string]any{"mode": "size", "plan_source": "size_budget", "original": map[string]any{"size_bytes": 9000}, "size_budget": done}
+	seedOperation(t, st, "budget-done", "transcode_media", "completed", map[string]any{"path": "/media/series/Show/S01E06.mkv", "mode": "size"}, nil, finished)
+	read := func(id string) map[string]any {
+		w := request(h, "GET", "/api/maintenance/operations?id="+id, "", true)
+		var page struct {
+			Jobs []map[string]any `json:"jobs"`
+		}
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil || len(page.Jobs) != 1 {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		return operationMap(page.Jobs[0]["size_mode"])
+	}
+	planned := read("budget-job")
+	if planned["encoder"] != "libx265" || planned["hardware"] != nil || planned["expected_bytes"] != float64(2910) {
+		t.Fatalf("a planned budget encode must not report the over-budget winner: %v", planned)
+	}
+	block := operationMap(planned["size_budget"])
+	if block["budget_bytes"] != float64(3000) || block["target_bytes"] != float64(2910) || block["video_bitrate_kbps"] != float64(2400) || block["over_budget_candidate_id"] != "cand_crf24:medium" || block["message"] != "Encoded once at the budget." {
+		t.Fatalf("budget block wrong: %v", block)
+	}
+	if sib := operationMap(block["siblings"]); sib["scope"] != "season" || sib["count"] != float64(5) || sib["ratio"] != 3.0 || len(sib["files"].([]any)) != 1 {
+		t.Fatalf("sibling basis missing: %v", block["siblings"])
+	}
+	if curve, _ := block["curve"].([]any); len(curve) != 2 || operationMap(curve[1])["kind"] != "budget_fallback" {
+		t.Fatalf("curve missing: %v", block["curve"])
+	}
+	result := read("budget-done")
+	if block := operationMap(result["size_budget"]); block["outcome"] != "below_quality_target_within_budget" || operationMap(operationMap(block["final"])["measured"])["vmaf_mean"] != 79.5 || result["expected_bytes"] != float64(2850) {
+		t.Fatalf("finished budget encode wrong: %v", result)
+	}
+	// A frozen budget the search's outcome stood without says why.
+	seedOperation(t, st, "budget-declined", "transcode_media", "completed", map[string]any{"path": "/media/series/Show/S01E07.mkv", "mode": "size"}, nil, map[string]any{"mode": "size", "original": map[string]any{"size_bytes": 9000}, "size_budget_skip_message": "Not applied."})
+	seedOperation(t, st, "budget-siblings", "transcode_media", "completed", map[string]any{"path": "/media/series/Show/S01E08.mkv", "mode": "size"}, nil, map[string]any{"mode": "size", "original": map[string]any{"size_bytes": 9000}, "size_budget_siblings": map[string]any{"reason": "too_few_siblings", "message": "Only 1 sibling."}})
+	if got := read("budget-declined"); got["size_budget_note"] != "Not applied." || got["size_budget"] != nil {
+		t.Fatalf("declined budget note: %v", got)
+	}
+	if got := read("budget-siblings"); got["size_budget_note"] != "Only 1 sibling." {
+		t.Fatalf("sibling reason note: %v", got)
+	}
+	if got := read("budget-done"); got["size_budget_note"] != nil {
+		t.Fatalf("note shown beside a budget encode: %v", got)
+	}
+}

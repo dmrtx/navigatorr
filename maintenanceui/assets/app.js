@@ -1130,7 +1130,7 @@ function libraryFailure(error, more) {
     button("Retry", () => loadLibrary(more), "quiet"),
   );
 }
-const draftFields = ["technical","scope","path","season","recursive","selected-only","promote-batch","profile","priority","custom","encoder","quality","preset","tune","rate-mode","bitrate","max-bitrate","audio","optimize","ladder","metric","vmaf-target","vmaf-min","ssim-target","ssim-min","sample-count","sample-seconds","final-validation","max-items","preserve-depth","min-savings","max-growth","media-kind","allow-hardware","hardware-margin"];
+const draftFields = ["technical","scope","path","season","recursive","selected-only","promote-batch","profile","priority","custom","encoder","quality","preset","tune","rate-mode","bitrate","max-bitrate","audio","optimize","ladder","metric","vmaf-target","vmaf-min","ssim-target","ssim-min","sample-count","sample-seconds","final-validation","max-items","preserve-depth","min-savings","max-growth","media-kind","allow-hardware","hardware-margin","size-budget-kind","size-budget-percent","size-budget-gb","size-budget-multiplier"];
 function libraryDraftKey() {
   const source = $("service").value;
   return source.startsWith("folder:") ? source : `${source}:${state.media?.id || "catalog"}`;
@@ -1721,6 +1721,7 @@ function setProcessingMode(mode) {
 document.querySelectorAll('input[name="processing-mode"]').forEach(input => input.addEventListener("change", controls));
 $("technical").addEventListener("change", controls);
 $("allow-hardware").addEventListener("change", controls);
+$("size-budget-kind").addEventListener("change", controls);
 
 function renderProfileFacts(output, data, name, preserveDepth) {
   output.replaceChildren();
@@ -1767,6 +1768,8 @@ function controls() {
   $("processing-goal").disabled = technical;
   $("hardware-option").hidden = processingMode() !== "size";
   $("hardware-margin-label").hidden = !$("allow-hardware").checked;
+  $("size-budget-option").hidden = processingMode() !== "size";
+  updateSizeBudgetFields("size-budget");
   $("goal-overridden").hidden = !technical;
   $("advanced-state").textContent = technical ? "On · goal not used" : "Off";
   $("advanced-state").dataset.on = technical ? "true" : "false";
@@ -1974,6 +1977,45 @@ function hardwareMargin(field) {
   if (raw === "" || !Number.isFinite(margin) || margin < 0 || margin > 50) throw new Error("Enter a hardware size margin from 0 to 50 percent.");
   return margin;
 }
+// Size budget (smaller files only, optional): a percent of the original, an
+// absolute size in GB, or a budget matched to the sibling episodes. One at a
+// time; the dropdown decides which field counts. prefix names the form's ids.
+function sizeBudgetInputs(prefix) {
+  const kind = $(`${prefix}-kind`).value;
+  if (!kind) return {};
+  const raw = name => String($(`${prefix}-${name}`).value).trim();
+  const number = name => (raw(name) === "" ? NaN : Number(raw(name)));
+  if (kind === "percent") {
+    const percent = number("percent");
+    if (!Number.isFinite(percent) || percent < 5 || percent > 85) throw new Error("Enter a size budget from 5 to 85 percent of the original.");
+    return { size_budget_percent: percent };
+  }
+  if (kind === "gb") {
+    const gb = number("gb");
+    const size = Math.round(gb * 1e9);
+    if (!Number.isFinite(gb) || size < 50000000) throw new Error("Enter a size budget of at least 0.05 GB.");
+    return { size_budget_bytes: size };
+  }
+  const multiplier = raw("multiplier") === "" ? 1.5 : number("multiplier");
+  if (!Number.isFinite(multiplier) || multiplier < 1 || multiplier > 4) throw new Error("Enter a sibling bitrate multiplier from 1.0 to 4.0.");
+  return { size_budget_source: "siblings", size_budget_sibling_multiplier: multiplier };
+}
+function updateSizeBudgetFields(prefix) {
+  const kind = $(`${prefix}-kind`).value;
+  $(`${prefix}-percent-label`).hidden = kind !== "percent";
+  $(`${prefix}-gb-label`).hidden = kind !== "gb";
+  $(`${prefix}-multiplier-label`).hidden = kind !== "siblings";
+}
+// Shows the budget a saved goal was frozen with; files frozen with different
+// budgets show none (the goal-change note says so).
+function showSizeBudget(prefix, settings) {
+  const set = (kind, field, value) => { $(`${prefix}-kind`).value = kind; if (field) $(`${prefix}-${field}`).value = value; };
+  if (settings?.size_budget_percent > 0) set("percent", "percent", settings.size_budget_percent);
+  else if (settings?.size_budget_bytes > 0) set("gb", "gb", Number((settings.size_budget_bytes / 1e9).toFixed(3)));
+  else if (settings?.size_budget_source === "siblings") set("siblings", "multiplier", settings.size_budget_sibling_multiplier || 1.5);
+  else set("");
+  updateSizeBudgetFields(prefix);
+}
 async function buildAndSubmitJob(mode = "encode") {
   const batch = $("scope").value === "batch";
   let name = batch ? "transcode_batch" : "transcode_media";
@@ -1983,6 +2025,7 @@ async function buildAndSubmitJob(mode = "encode") {
     // Always explicit, so the choice on screen is the choice that is frozen.
     inputs.allow_hardware = $("allow-hardware").checked;
     if (inputs.allow_hardware) inputs.hardware_margin_percent = hardwareMargin($("hardware-margin"));
+    Object.assign(inputs, sizeBudgetInputs("size-budget"));
   }
   const folderSource = $("service").value.startsWith("folder:");
   const explicitSelection = (folderSource ? state.folderSelected?.size : state.selected.size) > 0 && (simple || $("selected-only").checked);
@@ -2139,7 +2182,7 @@ function savingsLine(savings, compact = false, replaced = false) {
     parts.push(`Source ${bytes(savings.source_bytes)}`);
   if (!replaced && savings.estimated_saved_bytes != null)
     parts.push(
-      `${savings.estimate_kind === "sampled_benchmark" ? (compact ? "Estimate (samples)" : "Sample estimate") : savings.estimate_kind === "audio_only_estimate" ? (compact ? "Estimate (audio)" : "Audio estimate") : compact ? "Estimate (profile)" : "Profile estimate"} ${bytes(savings.estimated_saved_bytes)}`,
+      `${savings.estimate_kind === "sampled_benchmark" ? (compact ? "Estimate (samples)" : "Sample estimate") : savings.estimate_kind === "audio_only_estimate" ? (compact ? "Estimate (audio)" : "Audio estimate") : savings.estimate_kind === "size_budget" ? (compact ? "Estimate (budget)" : "Budget estimate") : compact ? "Estimate (profile)" : "Profile estimate"} ${bytes(savings.estimated_saved_bytes)}`,
     );
   if (
     !replaced &&
@@ -2821,6 +2864,7 @@ async function reconfigureBatch(id, candidate = false, savedPlan = null) {
     // A batch that never said anything about the media engine gets the default: on, 15 %.
     $("reconfigure-hardware").checked = plan.settings.allow_hardware !== false;
     $("reconfigure-hardware-margin").value = plan.settings.hardware_margin_percent ?? 15;
+    showSizeBudget("reconfigure-budget", plan.settings);
     updateReconfigureHardware();
     $("reconfigure-profile").closest("label").hidden = Boolean(plan.mode);
     $("reconfigure-limits").hidden = Boolean(plan.mode);
@@ -2857,9 +2901,12 @@ async function reconfigureBatch(id, candidate = false, savedPlan = null) {
 function updateReconfigureHardware() {
   $("reconfigure-hardware-option").hidden = !(state.reconfigurePlan?.mode && $("reconfigure-mode").value === "size");
   $("reconfigure-hardware-margin-label").hidden = !$("reconfigure-hardware").checked;
+  $("reconfigure-budget-option").hidden = $("reconfigure-hardware-option").hidden;
+  updateSizeBudgetFields("reconfigure-budget");
 }
 $("reconfigure-mode").addEventListener("change", updateReconfigureHardware);
 $("reconfigure-hardware").addEventListener("change", updateReconfigureHardware);
+$("reconfigure-budget-kind").addEventListener("change", updateReconfigureHardware);
 function batchSettingsSummary(plan) {
   const selection = plan.selected === 1 && plan.files?.[0] ? plan.files[0] : `${plan.title || "Saved selection"} · ${plan.selected} files`;
   return `${selection}${plan.active > 0 ? ` · ${plan.active} active ${plan.active === 1 ? "file finishes" : "files finish"} first` : ""}`;
@@ -2872,7 +2919,7 @@ function updateBatchSettingsProfile() {
   $("reconfigure-savings").placeholder = $("reconfigure-growth").placeholder = plan.settings?.mixed_limits ? "Different per file" : "Default";
   if (plan.mode) {
     $("reconfigure-profile-note").hidden = $("reconfigure-current-profiles").hidden = $("reconfigure-profile-info").hidden = true;
-    $("reconfigure-settings").textContent = `Automatic will test and verify settings for this goal. Originals stay in place.${plan.settings?.hardware_mixed ? " The selected files were frozen with different media engine choices; the choice above applies to all of them." : ""}`;
+    $("reconfigure-settings").textContent = `Automatic will test and verify settings for this goal. Originals stay in place.${plan.settings?.hardware_mixed ? " The selected files were frozen with different media engine choices; the choice above applies to all of them." : ""}${plan.settings?.size_budget_mixed ? " They were also frozen with different size budgets; the budget above applies to all of them." : ""}`;
     $("submit-reconfigure").disabled = !serverReachable || jobIsBusy(plan.id) || plan.selected === 0;
     $("submit-reconfigure").textContent = "Process with this goal";
     return;
@@ -2959,6 +3006,7 @@ async function submitReconfiguredBatch() {
   if (plan.mode && body.mode === "size") {
     body.allow_hardware = $("reconfigure-hardware").checked;
     if (body.allow_hardware) body.hardware_margin_percent = hardwareMargin($("reconfigure-hardware-margin"));
+    Object.assign(body, sizeBudgetInputs("reconfigure-budget"));
   }
   body.preserve_limits = state.reconfigureOriginalLimits === batchSettingsLimits();
   let savedLimits;
@@ -3622,6 +3670,7 @@ const benchmarkOutcomes = {
   no_acceptable_candidate: "No setting passed",
   no_suitable_candidate: "No setting passed",
   audio_only: "Audio-only compaction",
+  size_budget: "Encoded at your size budget",
   size_rejected: "Size limit not met",
   search_review_required: "Your review is needed",
   quality_policy_unavailable: "Quality checks unavailable",
@@ -3743,7 +3792,8 @@ function reusedLabel(reuse) {
 function encodingPlanNote(job) {
   const b = job.benchmark;
   if (!b?.plan_source) return null;
-  const text = b.plan_source === "benchmark_winner" ? "The settings selected by the sample test." : b.plan_note || "The profile's untested starting settings; no sample test result backs them.";
+  const budgetMet = job.size_mode?.size_budget?.outcome === "meets_quality_target_within_budget";
+  const text = b.plan_source === "benchmark_winner" ? "The settings selected by the sample test." : b.plan_source === "size_budget" ? `Encoded at your size budget (${budgetMet ? "within" : "below"} the quality target).` : b.plan_note || "The profile's untested starting settings; no sample test result backs them.";
   const line = node("p", "", `encoding-plan plan-${b.plan_source}`);
   line.append(node("strong", "Encoding plan: "), node("span", text));
   return line;
@@ -3759,6 +3809,8 @@ function sizeModeLines(size) {
   if (size.encoder) lines.push(`Encoder: ${{libx265: "x265 (software)", hevc_videotoolbox: "VideoToolbox (hardware media engine)"}[size.encoder] || size.encoder}`);
   // Why the media engine result was chosen over x265, as the search recorded it.
   if (size.hardware && size.hardware_reason) lines.push(`Chosen because: ${size.hardware_reason}`);
+  if (size.size_budget) lines.push(...sizeBudgetLines(size.size_budget));
+  else if (size.size_budget_note) lines.push(size.size_budget_note);
   if (size.video_copy) lines.push({verified: "Video copied unchanged · verified bit-identical", failed: "Video copy check failed · original kept"}[size.video_copy] || "Video will be copied unchanged · not yet verified; only lossless audio is compacted");
   // A media engine result that failed the whole-file check, and what followed;
   // the failed attempt's numbers stay here after the x265 result takes over.
@@ -3811,6 +3863,127 @@ function windowReportLines(windows) {
 function codecLabel(codec) {
   return {truehd:"TrueHD",dts:"DTS",flac:"FLAC",alac:"ALAC",mlp:"MLP",aac:"AAC"}[codec] || (String(codec || "").startsWith("pcm_") ? "PCM" : String(codec || "").toUpperCase());
 }
+// Size budget: the search found nothing that meets the quality limits (or only
+// something over the budget), so the file was encoded once at the budget.
+const sizeBudgetOutcomes = {
+  below_quality_target_within_budget: "Below quality target — within size budget",
+  meets_quality_target_within_budget: "Meets quality target — within size budget",
+  below_quality_floor: "Below the quality floor — no candidate offered",
+  size_budget_exceeded: "Over the size budget — no candidate offered",
+};
+// Shown wherever a candidate is offered, so a file that missed the quality
+// target to fit its budget is never approved unknowingly.
+function belowTargetLabel(outcome) {
+  return outcome === "below_quality_target_within_budget" ? sizeBudgetOutcomes[outcome] : "";
+}
+function belowTargetNotice(outcome) {
+  const label = belowTargetLabel(outcome);
+  if (!label) return null;
+  const n = node("p", "", "size-budget-warning metadata");
+  n.append(node("strong", `${label}. `), node("span", "Compare it with the original before approving the replacement."));
+  return n;
+}
+function mbps(kbps) {
+  return `${(Number(kbps) / 1000).toFixed(2)} Mbps`;
+}
+function sizeBudgetSiblingLines(sib) {
+  if (!sib) return [];
+  const lines = [`Budget from ${sib.count} sibling episodes (median ${mbps(sib.median_bitrate_kbps)} × ${sib.multiplier})${sib.scope ? ` in the ${sib.scope} folder` : ""}${sib.resolution_class ? ` · ${sib.resolution_class}` : ""}`];
+  if (sib.source_bitrate_kbps > 0) lines.push(`This file averages ${mbps(sib.source_bitrate_kbps)}${sib.ratio > 0 ? `, ${Number(sib.ratio).toFixed(1)}× the siblings' median` : ""}`);
+  return lines;
+}
+function sizeBudgetLines(b) {
+  const lines = [];
+  if (b.message) lines.push(b.message);
+  const share = b.budget_percent > 0 ? ` (${Number(b.budget_percent)}% of the source)` : b.source_bytes > 0 ? ` (${Math.round(100 * b.budget_bytes / b.source_bytes)}% of the source)` : "";
+  lines.push(`Size budget ${bytes(b.budget_bytes)}${share} · aims at ${bytes(b.target_bytes)} · video ${b.video_bitrate_kbps} kbps`);
+  if (b.candidate_bytes > 0) lines.push(`Result ${bytes(b.candidate_bytes)} of the ${bytes(b.budget_bytes)} budget (${(100 * b.candidate_bytes / b.budget_bytes).toFixed(1)}%)`);
+  lines.push(...sizeBudgetSiblingLines(b.siblings));
+  if (b.trigger === "passing_candidate_over_budget" && b.over_budget_candidate_id) lines.push(`The setting that met the quality target (${b.over_budget_candidate_id}${b.over_budget_estimated_bytes > 0 ? `, about ${bytes(b.over_budget_estimated_bytes)}` : ""}) is larger than the budget`);
+  const target = b.quality_target?.vmaf_mean_minimum, floor = b.quality_floor;
+  if (target != null || floor?.vmaf_mean_minimum != null) lines.push(`Quality target VMAF mean ≥ ${target ?? "—"} · floor ${floor?.vmaf_mean_minimum ?? "—"} mean, ${floor?.vmaf_p5_minimum ?? "—"} p5, ${floor?.vmaf_worst_window_minimum ?? "—"} worst window`);
+  for (const miss of b.below_target || []) lines.push(`Below target: ${miss}`);
+  return lines;
+}
+function sizeBudgetPointLabel(p) {
+  const bits = [];
+  if (p.kind === "budget_fallback") bits.push(`Budget encode · x265 two-pass${p.bitrate_kbps ? ` ${p.bitrate_kbps} kbps` : ""}`);
+  else bits.push(`${p.candidate_id || "Setting"}${p.video_codec === "hevc_videotoolbox" ? " · VideoToolbox" : ""}`);
+  bits.push(`${p.measured ? "" : p.kind === "budget_fallback" ? "planned " : "est. "}${bytes(p.bytes)}`);
+  bits.push(p.vmaf_mean != null ? `VMAF ${Number(p.vmaf_mean).toFixed(1)}` : "VMAF not measured yet");
+  if (p.kind === "searched") bits.push(p.passed ? "met the quality target" : "missed the quality target");
+  bits.push(p.within_budget ? "within budget" : "over budget");
+  return bits.join(" · ");
+}
+// A compact inline rate-quality chart: size across, VMAF mean up; searched
+// settings as dots, the budget encode highlighted, a vertical line at the
+// budget and horizontal lines at the quality target and floor. The point list
+// beside it carries the same numbers, so the chart is optional.
+function sizeBudgetChart(b) {
+  if (typeof document.createElementNS !== "function") return null;
+  const points = (b.curve || []).filter(p => p.bytes > 0);
+  if (!points.length) return null;
+  const NS = "http://www.w3.org/2000/svg";
+  const el = (name, attrs = {}, text = "") => {
+    const n = document.createElementNS(NS, name);
+    for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, String(v));
+    if (text) n.textContent = text;
+    return n;
+  };
+  const W = 320, H = 150, L = 34, R = 8, T = 12, B = 26;
+  const xs = [...points.map(p => p.bytes), b.budget_bytes], xMin = Math.min(...xs), xMax = Math.max(...xs);
+  const target = b.quality_target?.vmaf_mean_minimum, floor = b.quality_floor?.vmaf_mean_minimum;
+  const ys = [...points.filter(p => p.vmaf_mean != null).map(p => p.vmaf_mean), ...[target, floor].filter(v => v != null)];
+  const yMin = Math.floor(Math.min(...ys, 100) - 4), yMax = Math.ceil(Math.max(...ys, 0) + 2);
+  const x = v => L + (xMax === xMin ? (W - L - R) / 2 : (v - xMin) / (xMax - xMin) * (W - L - R));
+  const y = v => T + (yMax - v) / Math.max(1, yMax - yMin) * (H - T - B);
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, class: "size-budget-chart", role: "img", "aria-label": `Size against quality: ${points.length} points, budget ${bytes(b.budget_bytes)}` });
+  svg.append(el("path", { class: "axis", d: `M${L} ${T}V${H - B}H${W - R}` }));
+  svg.append(el("line", { class: "budget-line", x1: x(b.budget_bytes), x2: x(b.budget_bytes), y1: T, y2: H - B }), el("text", { x: x(b.budget_bytes), y: H - B + 20, "text-anchor": "middle" }, `budget ${bytes(b.budget_bytes)}`));
+  if (target != null) svg.append(el("line", { class: "target-line", x1: L, x2: W - R, y1: y(target), y2: y(target) }), el("text", { x: L + 2, y: y(target) - 2 }, `target ${target}`));
+  if (floor != null) svg.append(el("line", { class: "floor-line", x1: L, x2: W - R, y1: y(floor), y2: y(floor) }), el("text", { x: L + 2, y: y(floor) - 2 }, `floor ${floor}`));
+  svg.append(el("text", { x: 2, y: T + 4 }, "VMAF"), el("text", { x: L, y: H - B + 10 }, bytes(xMin)), el("text", { x: W - R, y: H - B + 10, "text-anchor": "end" }, bytes(xMax)));
+  for (const p of points) {
+    const measuredY = p.vmaf_mean != null;
+    const cls = p.kind === "budget_fallback" ? (measuredY ? "point fallback" : "point planned") : `point${p.passed ? " passed" : ""}`;
+    const dot = el("circle", { class: cls, cx: x(p.bytes), cy: measuredY ? y(p.vmaf_mean) : H - B, r: p.kind === "budget_fallback" ? 5 : 3 });
+    dot.append(el("title", {}, sizeBudgetPointLabel(p)));
+    svg.append(dot);
+  }
+  return svg;
+}
+function sizeBudgetNote(job) {
+  const b = job.size_mode?.size_budget;
+  if (!b) return null;
+  const box = node("section", "", "size-budget");
+  box.setAttribute("aria-label", "Size budget");
+  const outcome = sizeBudgetOutcomes[b.outcome];
+  if (outcome) {
+    const badge = node("span", outcome, "badge size-budget-badge");
+    badge.dataset.outcome = b.outcome;
+    box.append(badge);
+  }
+  const chart = sizeBudgetChart(b);
+  if (chart) box.append(chart);
+  if (b.curve?.length) {
+    const details = node("details", "", "size-budget-points");
+    details.append(node("summary", `Size and quality points (${b.curve.length})`));
+    const list = node("ul", "", "benchmark-list");
+    for (const p of b.curve) list.append(node("li", sizeBudgetPointLabel(p)));
+    details.append(list);
+    box.append(details);
+  }
+  const files = b.siblings?.files || [];
+  if (files.length) {
+    const details = node("details", "", "size-budget-siblings");
+    details.append(node("summary", `Sibling episodes (${files.length})`));
+    const list = node("ul", "", "benchmark-list");
+    for (const f of files) list.append(node("li", `${f.name} · ${bytes(f.bytes)} · ${mbps(f.bitrate_kbps)}${f.width && f.height ? ` · ${f.width}×${f.height}` : ""}${f.duration_seconds > 0 ? ` · ${Math.round(f.duration_seconds / 60)} min` : ""}`));
+    details.append(list);
+    box.append(details);
+  }
+  return box;
+}
 function sizeModeNote(job) {
   const lines = sizeModeLines(job.size_mode);
   if (!lines.length) return null;
@@ -3820,6 +3993,8 @@ function sizeModeNote(job) {
     if (job.size_mode.hardware && line.startsWith("Encoder: ")) row.append(" ", node("span", "Hardware", "badge hardware-badge"));
     box.append(row);
   }
+  const budget = sizeBudgetNote(job);
+  if (budget) box.append(budget);
   return box;
 }
 function queueOutcome(job) {
@@ -3843,7 +4018,7 @@ function queueOutcome(job) {
   if (job.batch?.outcome === "no_changes") return "Originals preserved";
   if (batch?.outcome === "failed") return "No candidates created · Change settings to try again";
   if (batch?.completed > 0) return `${batch.completed} ${batch.completed === 1 ? "candidate ready" : "candidates ready"} · Originals unchanged`;
-  if (job.candidate_ready) return "Original preserved · Candidate available";
+  if (job.candidate_ready) return `Original preserved · Candidate available${belowTargetLabel(job.size_budget_outcome) ? ` · ${belowTargetLabel(job.size_budget_outcome)}` : ""}`;
   if (job.action_name === "transcode_media" && job.reason_code && job.status === "completed") return shortJobReason(job.reason_code);
   if (job.action_name === "benchmark_transcode") return "Sample test complete · Original preserved";
   return "Finished · Open job for details";
@@ -4425,6 +4600,7 @@ async function loadBatchItems(id, revision) {
     const visibleReasons = [...new Set(reasons.filter(reason => reason && !/^(explicit profile requested|eligible for transcode|per-source bounded samples required before full encode|New settings requested; previous attempt retained in history)$/i.test(reason)).map(shortJobReason))];
     if (!visibleReasons.length && item.status === "skip") visibleReasons.push("This file was omitted by the processing plan; original kept. View the file details or change settings to try again.");
     for (const reason of visibleReasons) row.append(node("span", reason, "muted"));
+    if (item.candidate_ready && belowTargetLabel(item.size_budget_outcome)) row.append(node("span", belowTargetLabel(item.size_budget_outcome), "badge size-budget-badge"));
     if (item.candidate_ready) row.append(node("span", state.info.allow_destructive ? "Candidate verified · Original kept until replacement is approved" : "Candidate verified · Replacement is disabled in server settings", "muted"));
     for (const control of row.querySelectorAll("button")) {
       control.dataset.batchItemKey = item.item_key;
@@ -4564,6 +4740,8 @@ function showFileReview(job, approval) {
   data.append(node("p", `Method: ${replacementMethods[p.service] || p.service || "Replace the file in place"}`, "metadata"));
   const warning = regrabWarning(p);
   if (warning) data.prepend(warning);
+  const below = belowTargetNotice(job.size_budget_outcome);
+  if (below) data.prepend(below);
   $("approve-file-review").disabled = !serverReachable || state.approvingFile;
 }
 function showFileReviewPending(text) {
@@ -4646,6 +4824,7 @@ async function reviewBatchCandidates(id) {
     label.append(check,node("span",name));
     check.addEventListener("change",()=>{check.checked?selected.add(member.item_key):selected.delete(member.item_key);all.checked=selected.size===review.members.length;all.indeterminate=selected.size>0&&!all.checked;$("confirm-action-review").disabled=!selected.size || !state.info.allow_destructive;});
     row.append(label,node("p",`${member.original_path} → ${member.candidate_path}`,"metadata backup-path"));
+    const belowTarget=belowTargetNotice(review.size_budget_outcomes?.[member.transcode_action_id]);if(belowTarget)row.append(belowTarget);
     row.append(button("View file",async()=>{finishActionReview(false);await openJob(member.transcode_action_id);},"text-button"));content.push(row);
   }
   all.addEventListener("change",()=>{selected.clear();checks.forEach((check,i)=>{check.checked=all.checked;if(all.checked)selected.add(review.members[i].item_key);});all.indeterminate=false;$("confirm-action-review").disabled=!selected.size || !state.info.allow_destructive;});
@@ -4697,6 +4876,12 @@ async function reviewBatchPromotion(id) {
       const line=node("p","","metadata backup-path");line.append(node("span",`${label}: `),node("span",path));row.append(line);
     }
     host.append(row);
+    // The plan does not carry how a candidate was made; look up the few that
+    // came from a size budget and label them without delaying the review.
+    if (member.transcode_action_id && plan.members.length <= 50) api(`operations?id=${encodeURIComponent(member.transcode_action_id)}`).then(found => {
+      const notice = belowTargetNotice(found.jobs?.[0]?.size_budget_outcome);
+      if (notice) row.append(notice);
+    }).catch(() => {});
   }
   $("batch-review").showModal();
 }
