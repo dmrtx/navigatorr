@@ -380,6 +380,45 @@ func (s *Store) AutoResolveStale(service, mediaType, mediaID, issueType, notes s
 	return &it, true, nil
 }
 
+// AutoResolvePendingExcept marks done the pending items of one issue type whose
+// media_id starts with prefix, except those in keep: a scan closing the issues
+// it no longer finds. Items already being worked on are left alone.
+func (s *Store) AutoResolvePendingExcept(service, mediaType, issueType, prefix string, keep map[string]bool, notes string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(`SELECT id, media_id FROM maintenance_items
+		WHERE service=? AND media_type=? AND issue_type=? AND status=? AND substr(media_id, 1, ?)=?`,
+		service, mediaType, issueType, MaintPending, len(prefix), prefix)
+	if err != nil {
+		return 0, err
+	}
+	var stale []int64
+	for rows.Next() {
+		var id int64
+		var mediaID string
+		if err := rows.Scan(&id, &mediaID); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		if !keep[mediaID] {
+			stale = append(stale, id)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	now := nowStr()
+	for _, id := range stale {
+		if _, err := s.db.Exec(`UPDATE maintenance_items SET status='done',
+			notes = CASE WHEN notes != '' THEN notes || '; ' || ? ELSE ? END,
+			updated_at=? WHERE id=? AND status=?`, notes, notes, now, id, MaintPending); err != nil {
+			return 0, err
+		}
+	}
+	return len(stale), nil
+}
+
 // AutoResolveByMedia marks any active maintenance items for the media as done.
 func (s *Store) AutoResolveByMedia(service, mediaID, notes string) (int, error) {
 	s.mu.Lock()

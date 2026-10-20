@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -34,12 +35,12 @@ func TestSiblingOversizedFindings(t *testing.T) {
 		episodeFile(8, 2, "Season 02/e02.mkv", 300_000_000, "25:00", "1920x1080"),
 		episodeFile(9, 2, "Season 02/e03.mkv", 300_000_000, "25:00", "1920x1080"),
 	}
-	findings, within := siblingOversizedFindings("Example Show", files, 2)
+	findings := siblingOversizedFindings("7", "Example Show", files, 2)
 	if len(findings) != 1 {
 		t.Fatalf("findings %+v", findings)
 	}
 	f := findings[0]
-	if f.MediaType != "episode" || f.MediaID != "1" || f.FileID != "1" || f.FileSize != 2_000_000_000 || f.Issue != "oversized" || f.Title != "Example Show" {
+	if f.MediaType != "episode" || f.MediaID != "7:1" || f.FileID != "1" || f.FileSize != 2_000_000_000 || f.Issue != "oversized" || f.Title != "Example Show" {
 		t.Fatalf("finding %+v", f)
 	}
 	// Median of 300, 400 and 500 MB over 1500 s is 2.1 Mbps.
@@ -48,16 +49,13 @@ func TestSiblingOversizedFindings(t *testing.T) {
 			t.Errorf("detail %q lacks %q", f.Detail, want)
 		}
 	}
-	if fmt.Sprint(within) != "[2 3 4]" {
-		t.Fatalf("within %v", within)
-	}
-	if findings, _ := siblingOversizedFindings("Example Show", files, 6); len(findings) != 0 {
+	if findings := siblingOversizedFindings("7", "Example Show", files, 6); len(findings) != 0 {
 		t.Fatalf("ratio 6 flagged %+v", findings)
 	}
 }
 
 func TestParseRunTimeAndResolution(t *testing.T) {
-	for in, want := range map[any]float64{"1:02:31": 3751, "42:31": 2551, "95": 95, "": 0, "1:x": 0, "1:2:3:4": 0, nil: 0, 120.0: 120} {
+	for in, want := range map[any]float64{"1:02:31": 3751, "42:31": 2551, "95": 95, "": 0, "1:x": 0, "1:2:3:4": 0, nil: 0, 120.0: 120, "NaN": 0, math.NaN(): 0} {
 		if got := parseRunTime(in); got != want {
 			t.Errorf("parseRunTime(%v) = %v, want %v", in, got, want)
 		}
@@ -71,18 +69,20 @@ func TestParseRunTimeAndResolution(t *testing.T) {
 }
 
 // A dry run reports per-episode issues and writes nothing; a real run opens
-// one maintenance issue per episode file.
+// one maintenance issue per episode file and closes the series' pending ones
+// it no longer finds.
 func TestScanServiceSiblingOversized(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ep := func(id int, size int64) string {
+			return fmt.Sprintf(`{"id":%d,"seasonNumber":1,"relativePath":"Season 01/e%02d.mkv","size":%d,"mediaInfo":{"runTime":"25:00","resolution":"1920x1080","audioLanguages":["English"]}}`, id, id-10, size)
+		}
 		switch r.URL.Path {
 		case "/api/v3/series":
-			w.Write([]byte(`[{"id":1,"title":"Example Show","statistics":{"sizeOnDisk":3200000000,"episodeFileCount":4}}]`))
+			w.Write([]byte(`[{"id":1,"title":"Example Show","statistics":{"sizeOnDisk":4000000000,"episodeFileCount":6}}]`))
 		case "/api/v3/episodefile":
-			w.Write([]byte(`[
-				{"id":11,"seasonNumber":1,"relativePath":"Season 01/e01.mkv","size":2000000000,"mediaInfo":{"runTime":"25:00","resolution":"1920x1080","audioLanguages":["English"]}},
-				{"id":12,"seasonNumber":1,"relativePath":"Season 01/e02.mkv","size":300000000,"mediaInfo":{"runTime":"25:00","resolution":"1920x1080","audioLanguages":["English"]}},
-				{"id":13,"seasonNumber":1,"relativePath":"Season 01/e03.mkv","size":400000000,"mediaInfo":{"runTime":"25:00","resolution":"1920x1080","audioLanguages":["English"]}},
-				{"id":14,"seasonNumber":1,"relativePath":"Season 01/e04.mkv","size":500000000,"mediaInfo":{"runTime":"25:00","resolution":"1920x1080","audioLanguages":["English"]}}]`))
+			// The outlier is the sixth file, past the language sample.
+			w.Write([]byte("[" + strings.Join([]string{ep(11, 300_000_000), ep(12, 400_000_000), ep(13, 500_000_000),
+				ep(14, 400_000_000), ep(15, 300_000_000), ep(16, 2_000_000_000)}, ",") + "]"))
 		default:
 			w.WriteHeader(404)
 		}
@@ -103,18 +103,72 @@ func TestScanServiceSiblingOversized(t *testing.T) {
 		}
 		return n
 	}
+	seed := func(mediaID, status string) int64 {
+		it, err := st.AddItem(store.MaintenanceItem{Service: "sonarr", MediaType: "episode", MediaID: mediaID, Title: "Example Show", IssueType: "oversized"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status != "" {
+			if _, err := st.Transition(it.ID, status, ""); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return it.ID
+	}
+	statusOf := func(id int64) string {
+		it, err := st.GetItem(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return it.Status
+	}
+	// Open issues for a file that is gone, one a worker is researching, and one
+	// in another series whose id shares the prefix digit.
+	gone := seed("1:99", "")
+	busy := seed("1:98", store.MaintResearching)
+	other := seed("10:5", "")
+
 	stat, err := scanService(context.Background(), arrservice.NewRegistry(cfg), d, "sonarr", 0, 900<<20, 2, false)
 	if err != nil || count(stat.Issues) != 1 {
 		t.Fatalf("dry run %+v %v", stat.Issues, err)
 	}
-	if items, _ := st.ListItems(store.ItemFilter{Limit: 50}); len(items) != 0 {
+	if items, _ := st.ListItems(store.ItemFilter{Limit: 50}); len(items) != 3 || statusOf(gone) != store.MaintPending {
 		t.Fatalf("dry run wrote %+v", items)
 	}
 	if stat, _ := scanService(context.Background(), arrservice.NewRegistry(cfg), d, "sonarr", 0, 900<<20, 0, false); count(stat.Issues) != 0 {
 		t.Fatal("sibling_ratio=0 still flagged")
 	}
 	stat, err = scanService(context.Background(), arrservice.NewRegistry(cfg), d, "sonarr", 0, 900<<20, 2, true)
-	if err != nil || count(stat.Issues) != 1 || stat.Issues[len(stat.Issues)-1].JobID == nil {
+	if err != nil || count(stat.Issues) != 1 {
 		t.Fatalf("real run %+v %v", stat.Issues, err)
+	}
+	var job *int64
+	for _, x := range stat.Issues {
+		if x.MediaType == "episode" {
+			job = x.JobID
+		}
+	}
+	if job == nil {
+		t.Fatalf("real run opened no job: %+v", stat.Issues)
+	}
+	it, err := st.GetItem(*job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if it.Service != "sonarr" || it.MediaType != "episode" || it.MediaID != "1:16" || it.IssueType != "oversized" ||
+		it.CurrentFileID == nil || *it.CurrentFileID != "16" || it.CurrentSize == nil || *it.CurrentSize != 2_000_000_000 {
+		t.Fatalf("stored item %+v", it)
+	}
+	if statusOf(gone) != store.MaintDone || statusOf(busy) != store.MaintResearching || statusOf(other) != store.MaintPending {
+		t.Fatalf("stale handling: gone=%s busy=%s other=%s", statusOf(gone), statusOf(busy), statusOf(other))
+	}
+	// A second real run keeps the flagged issue open.
+	if _, err := scanService(context.Background(), arrservice.NewRegistry(cfg), d, "sonarr", 0, 900<<20, 2, true); err != nil || statusOf(*job) != store.MaintPending {
+		t.Fatalf("rescan closed the flagged issue: %v %s", err, statusOf(*job))
+	}
+	// Resolving a series by media id leaves its episode issues alone, even
+	// when an episode file id equals the series id.
+	if _, err := st.AutoResolveByMedia("sonarr", "16", "series done"); err != nil || statusOf(*job) != store.MaintPending {
+		t.Fatalf("series resolve closed an episode issue: %v %s", err, statusOf(*job))
 	}
 }
