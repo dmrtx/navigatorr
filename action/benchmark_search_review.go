@@ -227,9 +227,9 @@ type searchVerificationRegime struct {
 	margin, hardwareMargin float64
 }
 
-// verificationRegime is how a round verified and selected its winner. Requests without
-// automatic search rules, and rules that predate grid verification, all share
-// the zero regime.
+// verificationRegime is how a round verified and selected its winner: where it
+// verified, how long, and with which selection margins. Requests without
+// automatic search rules share the zero regime with empty rules.
 func verificationRegime(r *transcode.BenchmarkRequest) searchVerificationRegime {
 	if r.AutomaticSearch == nil {
 		return searchVerificationRegime{}

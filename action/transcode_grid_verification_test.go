@@ -246,7 +246,6 @@ func TestFinalValidationFreshWindows(t *testing.T) {
 // new snapshots drop them.
 func TestMarginEraSnapshotsKeepTheirDigestAndMargin(t *testing.T) {
 	earlier := &transcode.HardwareSearchRules{MarginPercent: 15, QualityValues: []int{45, 50, 55, 60}, GOPSize: 240, BFrames: 1}
-	beforeMargin := &transcode.HardwareSearchRules{MarginPercent: 15, QualityValues: []int{45, 50, 55, 60}, GOPSize: 240, BFrames: 1, FallbackQualityValues: []int{65, 70, 75}}
 	current, err := modeHardwareInput("size", map[string]any{"mode": "size"})
 	if err != nil {
 		t.Fatal(err)
@@ -259,7 +258,6 @@ func TestMarginEraSnapshotsKeepTheirDigestAndMargin(t *testing.T) {
 	}{
 		"no media engine":           {nil, "sha256:6e519947ac9039f9dbfe36a8beee2ebdd891f0a02d28b5e5b776ddc7f8928ba8", 0, false},
 		"media engine":              {withExtraMargin(current), "sha256:206ca220dda73866a0f7b9721a8a2bb93769b447cf7cb6f53347b2d3208d03e7", 2, true},
-		"media engine, no margin":   {beforeMargin, "sha256:8613e1dd656b5181907007220b154265614a2418db98601de08bd591bc24e09a", 0, true},
 		"media engine, earlier set": {earlier, "sha256:ab4a33d9aa290b79b3eeaef9a6b3c17afda00376e9defade7d71e9ce65cb6128", 0, true},
 	} {
 		legacy := marginEraPolicy(t, tc.hardware)

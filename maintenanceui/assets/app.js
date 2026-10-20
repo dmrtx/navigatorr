@@ -3652,7 +3652,8 @@ function estimatedSizeLabel(m) {
   if (m.savings_percent == null || !(m.estimated_mb > 0)) return "";
   const size = m.estimated_mb >= 1024 ? `${(m.estimated_mb / 1024).toFixed(2)} GB` : `${Math.round(m.estimated_mb)} MB`;
   const pct = Number(m.savings_percent);
-  return ` · est. ${size}, ${pct < 0 ? `${Math.abs(pct).toFixed(1)}% larger than the original` : `${pct.toFixed(1)}% smaller than the original`}`;
+  const rounded = Math.abs(pct).toFixed(1);
+  return ` · est. ${size}, ${rounded === "0.0" ? "no smaller than the original" : pct < 0 ? `${rounded}% larger than the original` : `${rounded}% smaller than the original`}`;
 }
 function benchmarkCandidateLabel(c) {
   const codec = c.video_codec === "libx265" ? "x265" : c.video_codec === "hevc_videotoolbox" ? "VideoToolbox (hardware)" : c.video_codec || "VideoToolbox (hardware)";

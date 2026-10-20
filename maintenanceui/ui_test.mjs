@@ -3936,8 +3936,10 @@ test("the sample test result shows each measured setting's estimated size agains
       measured:[
         {candidate_id:"crf20",video_codec:"libx265",quality:20,passed:true,selected:true,vmaf,estimated_bytes:1000000000,estimated_mb:953.7,savings_percent:75},
         {candidate_id:"vt75",video_codec:"hevc_videotoolbox",quality:75,passed:true,vmaf,estimated_bytes:4400000000,estimated_mb:4196.2,savings_percent:-10,larger_than_source:true},
+        {candidate_id:"same",video_codec:"libx265",quality:18,passed:true,vmaf,estimated_bytes:4001000000,estimated_mb:3815.7,savings_percent:-0.02},
         {candidate_id:"crf16",video_codec:"libx265",quality:16,passed:false,vmaf}]}};
   const text = progressText(h.run('benchmarkReport(job)'));
+  assert.match(text, /same .* passed · est\. 3\.73 GB, no smaller than the original/);
   assert.match(text, /crf20 .* selected · est\. 954 MB, 75\.0% smaller than the original/);
   assert.match(text, /vt75 .* passed · est\. 4\.10 GB, 10\.0% larger than the original/);
   assert.match(text, /crf16 [^\n]*did not pass(?! · est\.)/);
