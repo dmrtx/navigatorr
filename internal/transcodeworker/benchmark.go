@@ -46,6 +46,7 @@ type BenchmarkRecord struct {
 	AutomaticSearch           *transcode.AutomaticSearchRules       `json:"automatic_search,omitempty"`
 	HardwareSearch            *transcode.HardwareSearchRules        `json:"hardware_search,omitempty"`
 	ContinuesBenchmark        *transcode.BenchmarkContinuation      `json:"continues_benchmark,omitempty"`
+	WarmStart                 *transcode.WarmStart                  `json:"warm_start,omitempty"`
 	SearchWorkerBusy          bool                                  `json:"search_worker_busy,omitempty"`
 	SearchStartedAt           time.Time                             `json:"search_started_at,omitzero"`
 	ReasonCode                string                                `json:"reason_code,omitempty"`
@@ -471,7 +472,7 @@ func (w *Worker) BenchmarkSubmit(ctx context.Context, req transcode.BenchmarkReq
 	}
 
 	record := &BenchmarkRecord{
-		ModePolicyVersion: req.ModePolicyVersion, Automatic: req.Automatic, QualityPruning: req.QualityPruning, MinSavingsPercent: req.MinSavingsPercent, Mode: req.Mode, SearchDeadline: req.SearchDeadline, SearchBudgetSeconds: req.SearchBudgetSeconds, SearchExtension: req.SearchExtension.Clone(), AutomaticSearch: req.AutomaticSearch.Clone(), HardwareSearch: req.HardwareSearch.Clone(), ContinuesBenchmark: cloneContinuation(req.ContinuesBenchmark),
+		ModePolicyVersion: req.ModePolicyVersion, Automatic: req.Automatic, QualityPruning: req.QualityPruning, MinSavingsPercent: req.MinSavingsPercent, Mode: req.Mode, SearchDeadline: req.SearchDeadline, SearchBudgetSeconds: req.SearchBudgetSeconds, SearchExtension: req.SearchExtension.Clone(), AutomaticSearch: req.AutomaticSearch.Clone(), HardwareSearch: req.HardwareSearch.Clone(), ContinuesBenchmark: cloneContinuation(req.ContinuesBenchmark), WarmStart: req.WarmStart.Clone(),
 		Allow8BitTo10Bit:          req.Allow8BitTo10Bit,
 		Compact:                   req.Compact.Clone(),
 		ProtocolVersion:           transcode.WorkerProtocolVersion,

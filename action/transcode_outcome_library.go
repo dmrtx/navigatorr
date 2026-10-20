@@ -427,6 +427,9 @@ func (e *Engine) applyLibraryReuse(ctx context.Context, ec *ExecutionContext, re
 		return StepResult{}, false, nil
 	}
 	ec.State[libraryReuseKey] = reuse
+	// No search runs, so no prior orders one. The request keeps the field: it
+	// was digested with it.
+	delete(ec.State, warmStartKey)
 	// No search ran: a batch's search budget settles at what earlier rounds
 	// of this action measured (none, since reuse never follows a continuation).
 	ec.State["benchmark_search_seconds"] = getFloat(ec.State, continuationPriorSecondsKey)

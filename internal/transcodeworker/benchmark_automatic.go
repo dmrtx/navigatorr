@@ -1,6 +1,7 @@
 package transcodeworker
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -227,6 +228,9 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 	verification := &transcode.BenchmarkVerificationEvidence{Attempts: []transcode.BenchmarkVerificationAttempt{}}
 	automatic.Verification = verification
 	evidence.Automatic = automatic
+	if record.WarmStart != nil {
+		automatic.WarmStart = &transcode.BenchmarkWarmStartEvidence{QualityValue: record.WarmStart.QualityValue}
+	}
 	discovery := *record
 	discovery.Samples = record.Samples[:3]
 	if rules != nil && rules.DeferBanding {
@@ -275,21 +279,31 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 		return nil
 	}
 	var skipped []transcode.BenchmarkCandidateEvaluation
-	// chainRest are the quality-walk rungs left unmeasured when the walk stopped
-	// at walkPassing: the rungs below it spend more bits, so none can be the
-	// smaller file. A verification that then fails on quality measures them.
+	// chainRest are the quality-walk rungs left unmeasured when a walk stopped
+	// at a passing rung (chainPassing, by ID): the rungs below it spend more
+	// bits, so none can be the smaller file. A verification that then fails on
+	// quality measures them.
 	var chainRest []validatedCandidate
-	var walkPassing string
+	chainPassing := map[string]string{}
 	var walkRungs func(stage string, stageRecord *BenchmarkRecord, base, rungs []validatedCandidate) (measured, left []validatedCandidate, passing string, err error)
+	var bracketRungs func(stage string, stageRecord *BenchmarkRecord, base, rungs []validatedCandidate, prior int) (measured, below, above []validatedCandidate, passing, failed string, err error)
 	// measure runs one stage. With quality pruning, each rate-control family's
 	// highest-quality setting runs first; when it fails the quality policy the
 	// family's remaining settings, which only spend fewer bits, are not measured.
 	// With walk (the quality fallback under the quality-walk rules) the libx265
 	// settings that remain are then measured one at a time from the most
-	// compressed, stopping at the first that is not a quality failure.
-	measure := func(stage string, stageRecord *BenchmarkRecord, candidates []validatedCandidate, walk bool) ([]validatedCandidate, error) {
+	// compressed, stopping at the first that is not a quality failure. With a
+	// warm start (the initial stage) they are measured from the prior's rung
+	// instead, until a passing rung sits below one that failed quality.
+	measure := func(stage string, stageRecord *BenchmarkRecord, candidates []validatedCandidate, walk bool, warm *transcode.WarmStart) ([]validatedCandidate, error) {
 		leaders, followers := splitQualityFamilies(candidates)
 		if !record.QualityPruning || len(followers) == 0 {
+			if warm != nil {
+				automatic.WarmStart.NotUsed = transcode.WarmStartNoRungs
+				if !record.QualityPruning {
+					automatic.WarmStart.NotUsed = transcode.WarmStartNoPruning
+				}
+			}
 			return candidates, run(stage, stageRecord, candidates)
 		}
 		if err := run(stage, stageRecord, leaders); err != nil {
@@ -313,15 +327,21 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 				continue
 			}
 			skippedIDs = append(skippedIDs, f.vc.candidate.ID)
-			skipped = append(skipped, transcode.BenchmarkCandidateEvaluation{
-				CandidateID: f.vc.candidate.ID, CandidateIndex: f.vc.index, VideoCodec: transcode.BenchmarkCandidateVideoCodec(f.vc.candidate),
-				Quality: f.vc.candidate.Quality, Preset: f.vc.candidate.Preset, Tune: f.vc.candidate.Tune, VideoProfile: f.vc.profile, PixelFormat: f.vc.pixelFormat,
-				ExpectedBitDepth: f.vc.bitDepth, EvaluationReason: reasonSkippedQualityDominated, Uncertainties: []string{"not measured: " + f.leader + " failed quality"},
-			})
+			skipped = append(skipped, skippedEvaluation(f.vc, reasonSkippedQualityDominated, "not measured: "+f.leader+" failed quality"))
 		}
 		var rungs []validatedCandidate
-		if walk {
+		if walk || warm != nil {
 			rest, rungs = splitWalkRungs(rest)
+		}
+		if warm != nil {
+			// The prior is a CRF of one family; several x265 families are measured
+			// as before.
+			if !oneQualityFamily(rungs) {
+				rest, rungs = append(rest, rungs...), nil
+				automatic.WarmStart.NotUsed = transcode.WarmStartSeveralFamilies
+			} else if len(rungs) == 0 {
+				automatic.WarmStart.NotUsed = transcode.WarmStartNoRungs
+			}
 		}
 		if len(rest) > 0 {
 			if err := run(stage, stageRecord, rest); err != nil {
@@ -329,14 +349,32 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 			}
 			measured = append(append([]validatedCandidate{}, leaders...), rest...)
 		}
-		if len(rungs) > 0 {
+		if len(rungs) > 0 && warm != nil {
+			walked, below, above, passing, failed, err := bracketRungs(stage, stageRecord, measured, rungs, warm.QualityValue)
+			if err != nil {
+				return nil, err
+			}
+			measured = append(measured, walked...)
+			for _, vc := range below {
+				chainRest = append(chainRest, vc)
+				chainPassing[vc.candidate.ID] = passing
+				automatic.WarmStart.Skipped = append(automatic.WarmStart.Skipped, vc.candidate.ID)
+			}
+			for _, vc := range above {
+				skippedIDs = append(skippedIDs, vc.candidate.ID)
+				skipped = append(skipped, skippedEvaluation(vc, reasonSkippedQualityDominated, "not measured: "+failed+" failed quality"))
+				automatic.WarmStart.Skipped = append(automatic.WarmStart.Skipped, vc.candidate.ID)
+			}
+		} else if len(rungs) > 0 {
 			walked, left, passing, err := walkRungs(stage, stageRecord, measured, rungs)
 			if err != nil {
 				return nil, err
 			}
 			measured = append(measured, walked...)
-			chainRest = append(chainRest, left...)
-			walkPassing = passing
+			for _, vc := range left {
+				chainRest = append(chainRest, vc)
+				chainPassing[vc.candidate.ID] = passing
+			}
 		}
 		automatic.Stages[len(automatic.Stages)-1].Skipped = skippedIDs
 		return measured, nil
@@ -368,17 +406,113 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 		automatic.Stages = automatic.Stages[:first+1]
 		return measured, left, passing, nil
 	}
+	// bracketRungs measures one libx265 family's rungs from a warm start: the
+	// rung at (or just below) the prior CRF and the next more compressed one
+	// together, then one at a time upward from the most compressed rung that
+	// passed, or downward from the least compressed one that failed quality when
+	// none passed. It stops once every rung between a passing rung and the
+	// failure above it is measured. It returns the measured rungs, the unmeasured
+	// ones below the passing rung (passing) and above that failure (failed). A
+	// rung that neither passes nor fails quality (an encode error) is no verdict:
+	// when the walk has no verdict at all it measures every rung, as before.
+	bracketRungs = func(stage string, stageRecord *BenchmarkRecord, base, rungs []validatedCandidate, prior int) (measured, below, above []validatedCandidate, passing, failed string, err error) {
+		asc := slices.Clone(rungs)
+		slices.SortStableFunc(asc, func(a, b validatedCandidate) int { return cmp.Compare(a.candidate.Quality, b.candidate.Quality) })
+		start := 0
+		for i, vc := range asc {
+			if vc.candidate.Quality <= prior {
+				start = i
+			}
+		}
+		automatic.WarmStart.Start = asc[start].candidate.ID
+		first := len(automatic.Stages)
+		done := make([]bool, len(asc))
+		batch := []int{start}
+		if start+1 < len(asc) {
+			batch = append(batch, start+1)
+		}
+		pass, fail := -1, -1
+		for len(batch) > 0 {
+			var next []validatedCandidate
+			for _, i := range batch {
+				next = append(next, asc[i])
+				done[i] = true
+			}
+			if err = run(stage, stageRecord, next); err != nil {
+				return nil, nil, nil, "", "", err
+			}
+			measured = append(measured, next...)
+			if err = r.runSelection(ctx, stageRecord, evidence, append(slices.Clone(base), measured...), rep, sourceSize); err != nil {
+				return nil, nil, nil, "", "", err
+			}
+			// pass is the most compressed measured rung that met quality; fail
+			// the least compressed measured rung above it that failed quality.
+			pass, fail = -1, -1
+			for i, vc := range asc {
+				if done[i] && walkStops(evidence.Decision, vc.candidate.ID) {
+					pass = i
+				}
+			}
+			for i := len(asc) - 1; i > pass; i-- {
+				if done[i] && rungFailedQuality(evidence.Decision, asc[i].candidate.ID) {
+					fail = i
+				}
+			}
+			batch = nil
+			switch {
+			case pass >= 0:
+				for i := pass + 1; i < len(asc) && (fail < 0 || i < fail); i++ {
+					if !done[i] {
+						batch = []int{i}
+						break
+					}
+				}
+			case fail >= 0:
+				for i := fail - 1; i >= 0; i-- {
+					if !done[i] {
+						batch = []int{i}
+						break
+					}
+				}
+			default:
+				for i := range asc {
+					if !done[i] {
+						batch = append(batch, i)
+					}
+				}
+			}
+		}
+		for i, vc := range asc {
+			switch {
+			case done[i]:
+			case pass >= 0 && i < pass:
+				below = append(below, vc)
+			case fail >= 0 && i > fail:
+				above = append(above, vc)
+			}
+		}
+		if pass >= 0 {
+			passing = asc[pass].candidate.ID
+		}
+		if fail >= 0 {
+			failed = asc[fail].candidate.ID
+		}
+		// One stage record for the walk, not one per step.
+		for _, extra := range automatic.Stages[first+1:] {
+			automatic.Stages[first].Candidates = append(automatic.Stages[first].Candidates, extra.Candidates...)
+			automatic.Stages[first].Reused = append(automatic.Stages[first].Reused, extra.Reused...)
+			automatic.Stages[first].Outcome = extra.Outcome
+		}
+		automatic.Stages = automatic.Stages[:first+1]
+		return measured, below, above, passing, failed, nil
+	}
 	finish := func() {
 		evidence.Decision.Evaluations = append(evidence.Decision.Evaluations, skipped...)
 		for _, vc := range chainRest {
-			evidence.Decision.Evaluations = append(evidence.Decision.Evaluations, transcode.BenchmarkCandidateEvaluation{
-				CandidateID: vc.candidate.ID, CandidateIndex: vc.index, VideoCodec: transcode.BenchmarkCandidateVideoCodec(vc.candidate),
-				Quality: vc.candidate.Quality, Preset: vc.candidate.Preset, Tune: vc.candidate.Tune, VideoProfile: vc.profile, PixelFormat: vc.pixelFormat,
-				ExpectedBitDepth: vc.bitDepth, EvaluationReason: reasonSkippedLargerThanPassing, Uncertainties: []string{"not measured: " + walkPassing + " already met quality, and a lower CRF only spends more bits"},
-			})
+			evidence.Decision.Evaluations = append(evidence.Decision.Evaluations, skippedEvaluation(vc, reasonSkippedLargerThanPassing, "not measured: "+chainPassing[vc.candidate.ID]+" already met quality, and a lower CRF only spends more bits"))
 		}
 	}
-	tested, err := measure("testing_initial", &discovery, tested, false)
+	tested, err := measure("testing_initial", &discovery, tested, false, record.WarmStart)
 	if err != nil {
 		return err
 	}
@@ -411,7 +545,7 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 			return nil
 		}
 		refineTried = append(refineTried, extra...)
-		measured, err := measure("testing_refinement", &discovery, extra, false)
+		measured, err := measure("testing_refinement", &discovery, extra, false, nil)
 		if err != nil {
 			return err
 		}
@@ -466,7 +600,7 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 			if len(alternatives) == 0 {
 				continue
 			}
-			measured, err := measure("testing_alternatives", &discovery, alternatives, fallbackPrefix == fallbackQualityPrefix && rules != nil && rules.QualityWalk && record.QualityPruning)
+			measured, err := measure("testing_alternatives", &discovery, alternatives, fallbackPrefix == fallbackQualityPrefix && rules != nil && rules.QualityWalk && record.QualityPruning, nil)
 			if err != nil {
 				return err
 			}
@@ -646,7 +780,7 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 			})
 			chainRest = nil
 			if len(todo) > 0 {
-				measured, err := measure("testing_alternatives", &discovery, todo, false)
+				measured, err := measure("testing_alternatives", &discovery, todo, false, nil)
 				if err != nil {
 					if untilExhausted && searchTimeLimitReached(ctx, err) {
 						automatic.Stages[len(automatic.Stages)-1].Outcome = "stopped"
@@ -1182,6 +1316,33 @@ func splitWalkRungs(candidates []validatedCandidate) (rest, rungs []validatedCan
 	}
 	sort.SliceStable(rungs, func(i, j int) bool { return rungs[i].candidate.Quality > rungs[j].candidate.Quality })
 	return rest, rungs
+}
+
+// oneQualityFamily reports whether the rungs share one quality family.
+func oneQualityFamily(rungs []validatedCandidate) bool {
+	return len(groupQualityFamilies(rungs)) <= 1
+}
+
+// rungFailedQuality reports whether a measured rung failed the quality policy.
+func rungFailedQuality(decision *transcode.BenchmarkDecision, id string) bool {
+	if decision == nil {
+		return false
+	}
+	for _, e := range decision.Evaluations {
+		if e.CandidateID == id {
+			return qualityRejection(e.EvaluationReason)
+		}
+	}
+	return false
+}
+
+// skippedEvaluation describes a setting the search did not measure.
+func skippedEvaluation(vc validatedCandidate, reason, note string) transcode.BenchmarkCandidateEvaluation {
+	return transcode.BenchmarkCandidateEvaluation{
+		CandidateID: vc.candidate.ID, CandidateIndex: vc.index, VideoCodec: transcode.BenchmarkCandidateVideoCodec(vc.candidate),
+		Quality: vc.candidate.Quality, Preset: vc.candidate.Preset, Tune: vc.candidate.Tune, VideoProfile: vc.profile, PixelFormat: vc.pixelFormat,
+		ExpectedBitDepth: vc.bitDepth, EvaluationReason: reason, Uncertainties: []string{note},
+	}
 }
 
 // walkStops reports whether a quality walk ends at a rung: it met the quality

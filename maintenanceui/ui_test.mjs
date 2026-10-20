@@ -3272,6 +3272,10 @@ test("size mode shows what the outcome library knew and whether the search was s
   const failed = allText(h.run('sizeModeNote({size_mode:{library:{note:"This exact source already failed with policy v3 (sha256:abc) in action a1.",not_reused:"no recorded winner"}}})'));
   assert.match(failed, /already failed with policy/);
   assert.doesNotMatch(failed, /Search skipped/);
+  const warm = allText(h.run('sizeModeNote({size_mode:{encoder:"libx265",warm_start:{note:"Search starts near CRF 26, the median of 3 validated same-season winner(s); limits are unchanged.",start:"cand_crf26",skipped:["cand_crf24","cand_crf30"]}}})'));
+  assert.match(warm, /Search starts near CRF 26.*2 settings not measured/);
+  const unused = allText(h.run('sizeModeNote({size_mode:{warm_start:{note:"Search starts near CRF 26.",not_used:"no_x265_rungs"}}})'));
+  assert.match(unused, /not used: no x265 setting was left to order/);
 });
 
 test("a VideoToolbox winner says why it was chosen next to the encoder line", () => {

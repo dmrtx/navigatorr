@@ -133,6 +133,11 @@ type WorkerCapabilities struct {
 	// earlier search's measured x265 samples instead of encoding them again.
 	// Older workers reject the field.
 	SearchContinuation bool `json:"search_continuation,omitempty"`
+	// AutomaticWarmStart reports a worker that accepts warm_start on a size
+	// search: it measures the initial x265 ladder from the siblings' winning
+	// CRF and stops once a passing rung sits below one that fails quality.
+	// Older workers reject the field.
+	AutomaticWarmStart bool `json:"automatic_warm_start,omitempty"`
 	// CompactTranscode reports an executable proof of the compact SDR chain
 	// (setparams, swscale, lut3d and sidedata delete) in the worker FFmpeg.
 	CompactTranscode      bool                           `json:"compact_transcode,omitempty"`
@@ -193,6 +198,7 @@ type fingerprintPayload struct {
 	HardwareFallbackSearch    bool                           `json:"hardware_fallback_search,omitempty"`
 	HardwareSelectionMargin   bool                           `json:"hardware_selection_margin,omitempty"`
 	SearchContinuation        bool                           `json:"search_continuation,omitempty"`
+	AutomaticWarmStart        bool                           `json:"automatic_warm_start,omitempty"`
 	CompactTranscode          bool                           `json:"compact_transcode,omitempty"`
 	ProtocolVersion           int                            `json:"protocol_version"`
 	WorkerVersion             string                         `json:"worker_version,omitempty"`
@@ -247,6 +253,7 @@ func ComputeCapabilityFingerprint(caps WorkerCapabilities) (string, error) {
 		HardwareFallbackSearch:    caps.HardwareFallbackSearch,
 		HardwareSelectionMargin:   caps.HardwareSelectionMargin,
 		SearchContinuation:        caps.SearchContinuation,
+		AutomaticWarmStart:        caps.AutomaticWarmStart,
 		CompactTranscode:          caps.CompactTranscode,
 		ProtocolVersion:           caps.ProtocolVersion,
 		WorkerVersion:             caps.WorkerVersion,

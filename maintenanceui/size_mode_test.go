@@ -57,6 +57,13 @@ func TestOperationsProjectSizeModeSummary(t *testing.T) {
 	if library["note"] == nil || library["reused_from"] != "earlier" || library["matches"] != nil {
 		t.Fatalf("library summary: %v", library)
 	}
+	state["warm_start"] = map[string]any{"quality_value": 26, "basis": "series_season", "siblings": 3, "from_actions": []any{"a1"}, "note": "Search starts near CRF 26."}
+	state["automatic_search"] = map[string]any{"warm_start": map[string]any{"quality_value": 26, "start": "cand_crf26", "skipped": []any{"cand_crf24", "cand_crf30"}}}
+	seedOperation(t, st, "warm-job", "transcode_media", "completed", map[string]any{"path": "/media/series/Show/S01E04.mkv", "mode": "size"}, nil, state)
+	warm := operationMap(operationMap(read("warm-job")["size_mode"])["warm_start"])
+	if warm["quality_value"] != float64(26) || warm["start"] != "cand_crf26" || len(warm["skipped"].([]any)) != 2 || warm["from_actions"] != nil {
+		t.Fatalf("warm start summary: %v", warm)
+	}
 }
 
 func TestOperationsProjectSizeHardwareContinuation(t *testing.T) {

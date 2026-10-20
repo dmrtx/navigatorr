@@ -70,16 +70,44 @@ is checked before reuse, and a reviewed round always searches.
 
 A reused action's own row names the action it reused (`reused_from`).
 
-## Sibling warm start (separate PR)
+## Sibling warm start
 
-For a source whose series and season (else series, else folder) have validated
-x265 winners, the coordinator sends the worker a prior: the siblings' winning
-CRF. The worker starts its quality walk on the medium x265 ladder (CRF 14 to 30)
-at that rung and its neighbour instead of the most compressed rung, and stops
-as soon as the walk brackets the boundary between passing and failing. Rungs it
-skips are reported as skipped. The prior changes only the order and the early
-stop, never the limits, and it is shown in status. The field is sent only to a
-worker that advertises it, so the server must be deployed first.
+When a fresh size v3 search is built, the coordinator looks for validated
+winners of siblings: the same series and season, else the same series, else the
+same folder (`folder_key`). It keeps winners whose full encode passed final
+validation and that are libx265 constant quality at the preset of the
+request's initial ladder, one per source (the newest), up to 20, and excludes
+the source itself. The prior is the median of their CRFs, rounded to the lower,
+higher-quality side. It is sent as the request's `warm_start` and shown in
+status (`warm_start`: CRF, basis, sibling count and the actions it came from).
+
+The worker uses it only in the initial x265 ladder, and only when the search
+prunes by quality. The ladder's highest-quality rung (the leader) is measured
+first as before; when it passes, the remaining rungs are measured from the rung
+at or just below the prior, two at a time, instead of all at once:
+
+* while the highest measured passing rung has an unmeasured rung above it and
+  below the lowest failing one, that rung is measured next;
+* when nothing above the leader has passed yet, the walk goes down from the
+  lowest failing rung;
+* the walk ends once the boundary between passing and failing is bracketed.
+
+Rungs it leaves unmeasured are reported with a reason: larger than a rung that
+passed, or dominated by a rung that failed quality. If the rung the walk ends
+on later fails verification on quality, the rungs it left below are measured
+then, as the full ladder would have done. Refinement, the quality fallback,
+hardware search, verification and final validation are unchanged, and so are
+all limits: the prior changes only which rungs are measured and in what order.
+The search evidence reports where the walk started, which rungs it skipped, or
+why the prior was not used (`no_quality_pruning`, `no_x265_rungs`,
+`several_x265_families`).
+
+The coordinator sends the field only to a worker that advertises
+`automatic_warm_start`, so the server must be deployed before the worker; an
+older worker searches as before. No prior is sent with a hardware continuation,
+or when `reuse_library_outcome` is false, which turns off both reuse and the
+prior. An exactly reused search keeps the request it was digested with but
+reports no prior, since nothing is measured.
 
 ## Content fingerprint (design only, not built)
 

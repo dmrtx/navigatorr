@@ -3763,6 +3763,13 @@ function sizeModeLines(size) {
   // winner replaces the search, never the final check of the new encode.
   if (size.library?.note) lines.push(size.library.note);
   if (size.library?.reused_from) lines.push("Search skipped: reused that validated setting · the full encode is still checked");
+  // The siblings' winning CRF only orders the search; the limits are unchanged.
+  const warm = size.warm_start;
+  if (warm?.note) {
+    const unused = {no_quality_pruning: "the search measures every setting at once", no_x265_rungs: "no x265 setting was left to order", several_x265_families: "the ladder has more than one x265 family"}[warm.not_used];
+    const skipped = Array.isArray(warm.skipped) ? warm.skipped.length : 0;
+    lines.push(warm.not_used ? `${warm.note} · not used: ${unused || warm.not_used}` : skipped ? `${warm.note} · ${skipped} setting${skipped === 1 ? "" : "s"} not measured` : warm.note);
+  }
   if (size.video_copy) lines.push({verified: "Video copied unchanged · verified bit-identical", failed: "Video copy check failed · original kept"}[size.video_copy] || "Video will be copied unchanged · not yet verified; only lossless audio is compacted");
   // A media engine result that failed the whole-file check, and what followed;
   // the failed attempt's numbers stay here after the x265 result takes over.

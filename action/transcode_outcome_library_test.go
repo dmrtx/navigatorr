@@ -32,11 +32,13 @@ type outcomeLibraryEnv struct {
 	candidateBytes int
 	// badEvidence returns final evidence for another plan.
 	badEvidence bool
+	caps        transcode.WorkerCapabilities
+	requests    map[string]transcode.BenchmarkRequest
 }
 
 func newOutcomeLibraryEnv(t *testing.T) *outcomeLibraryEnv {
 	t.Helper()
-	env := &outcomeLibraryEnv{verdict: "pass", candidateBytes: 500}
+	env := &outcomeLibraryEnv{verdict: "pass", candidateBytes: 500, caps: modeTestCapabilities(), requests: map[string]transcode.BenchmarkRequest{}}
 	dir := t.TempDir()
 	probe := dir + "/ffprobe"
 	env.source = dir + "/source.mkv"
@@ -46,9 +48,9 @@ cat <<'JSON'
 {"streams":[{"index":0,"codec_type":"video","codec_name":"h264","pix_fmt":"yuv420p","width":1920,"height":1080,"avg_frame_rate":"24/1","r_frame_rate":"24/1","bits_per_raw_sample":"8"}],"format":{"format_name":"matroska","duration":"100","size":"1000"},"chapters":[]}
 JSON
 `), 0700)
-	requests := map[string]transcode.BenchmarkRequest{}
+	requests := env.requests
 	env.mock = &mockTranscodeExecutor{
-		capabilitiesFunc: func(context.Context) (transcode.WorkerCapabilities, error) { return modeTestCapabilities(), nil },
+		capabilitiesFunc: func(context.Context) (transcode.WorkerCapabilities, error) { return env.caps, nil },
 		benchmarkSubmitFunc: func(_ context.Context, req transcode.BenchmarkRequest) (transcode.BenchmarkJob, error) {
 			requests[req.ID] = req
 			return transcode.BenchmarkJob{ID: req.ID}, nil

@@ -110,7 +110,7 @@ func (e *Engine) prepareRemoteRetry(ctx context.Context, inst *store.ActionInsta
 			return resume, lerr
 		}
 		retry := getInt(ec.State, "benchmark_manual_retry_count") + 1
-		for _, key := range []string{"benchmark_submitted", "benchmark_reconcile", "benchmark_done", "benchmark_status", "benchmark_decision", "benchmark_request", "benchmark_request_digest", "benchmark_retry_not_before", libraryReuseKey, outcomeLibraryKey, workerBusyNotBeforeKey, "worker_busy", slotWaitLogKey, workerSlotWaitSinceKey, workerSlotPositionKey, workerSlotPolledAtKey, benchmarkRejectedKey, "next_poll_at", "failure_classification"} {
+		for _, key := range []string{"benchmark_submitted", "benchmark_reconcile", "benchmark_done", "benchmark_status", "benchmark_decision", "benchmark_request", "benchmark_request_digest", "benchmark_retry_not_before", libraryReuseKey, outcomeLibraryKey, warmStartKey, workerBusyNotBeforeKey, "worker_busy", slotWaitLogKey, workerSlotWaitSinceKey, workerSlotPositionKey, workerSlotPolledAtKey, benchmarkRejectedKey, "next_poll_at", "failure_classification"} {
 			delete(ec.State, key)
 			delete(ec.Outputs, key)
 		}

@@ -540,6 +540,59 @@ func (r *AutomaticSearchRules) Clone() *AutomaticSearchRules {
 	return &c
 }
 
+// WarmStart is a size search's prior: the libx265 CRF that validated winners
+// of the source's siblings (same series and season, else the series, else the
+// folder) settled on. The worker starts measuring the initial ladder's x265
+// rungs at that rung and the next more compressed one, and stops as soon as a
+// passing rung sits below a rung that fails quality. It changes only the order
+// of measurement and that early stop, never a limit, a verification or the
+// final validation. It is sent only to workers that advertise
+// automatic_warm_start.
+type WarmStart struct {
+	// QualityValue is the siblings' winning libx265 CRF.
+	QualityValue int `json:"quality_value"`
+	// Basis names the siblings: WarmStartSeriesSeason, WarmStartSeries or
+	// WarmStartFolder.
+	Basis string `json:"basis"`
+	// Siblings is how many validated winners the prior was taken from.
+	Siblings int `json:"siblings"`
+}
+
+// Warm start bases, closest evidence first.
+const (
+	WarmStartSeriesSeason = "series_season"
+	WarmStartSeries       = "series"
+	WarmStartFolder       = "folder"
+	// MaxWarmStartSiblings bounds the winners a prior is taken from.
+	MaxWarmStartSiblings = 20
+)
+
+// Validate reports whether the prior is a CRF from a known basis.
+func (w *WarmStart) Validate() error {
+	if w == nil {
+		return nil
+	}
+	if w.QualityValue < 1 || w.QualityValue > 51 {
+		return errors.New("warm start quality_value must be a CRF in 1-51")
+	}
+	if w.Basis != WarmStartSeriesSeason && w.Basis != WarmStartSeries && w.Basis != WarmStartFolder {
+		return fmt.Errorf("unsupported warm start basis %q", w.Basis)
+	}
+	if w.Siblings < 1 || w.Siblings > MaxWarmStartSiblings {
+		return fmt.Errorf("warm start siblings must be in 1-%d", MaxWarmStartSiblings)
+	}
+	return nil
+}
+
+// Clone returns a copy of the prior.
+func (w *WarmStart) Clone() *WarmStart {
+	if w == nil {
+		return nil
+	}
+	c := *w
+	return &c
+}
+
 // HardwareSearchRules are the frozen rules of a size search that allows the
 // media engine. VideoToolbox candidates are measured beside the x265 ones and
 // pass the same quality gates and selection margin. The smallest qualifying
@@ -677,6 +730,9 @@ type BenchmarkRequest struct {
 	// reuse that search's measured x265 samples. Workers without the
 	// search_continuation capability reject the field as unknown.
 	ContinuesBenchmark *BenchmarkContinuation `json:"continues_benchmark,omitempty"`
+	// WarmStart orders the initial x265 ladder from the siblings' winning CRF.
+	// Workers without automatic_warm_start reject the field as unknown.
+	WarmStart *WarmStart `json:"warm_start,omitempty"`
 	// Allow8BitTo10Bit is an explicit experiment opt-in, never an automatic
 	// optimization. Quality measurement must use an explicit native-depth model.
 	Allow8BitTo10Bit          bool                        `json:"allow_8bit_to_10bit,omitempty"`
@@ -765,7 +821,39 @@ type BenchmarkAutomaticEvidence struct {
 	// WinnerWindows are the winner's per-window sample scores, the numbers the
 	// final validation windows are compared with.
 	WinnerWindows []BenchmarkWindowScore `json:"winner_windows,omitempty"`
+	// WarmStart reports how the request's warm start ordered the initial x265
+	// ladder, when the request had one.
+	WarmStart *BenchmarkWarmStartEvidence `json:"warm_start,omitempty"`
 }
+
+// BenchmarkWarmStartEvidence reports a warm start: the rung the walk began at
+// and the rungs it left unmeasured, or why the prior was not used.
+type BenchmarkWarmStartEvidence struct {
+	QualityValue int `json:"quality_value"`
+	// Start is the initial ladder rung measured first after the family's
+	// highest-quality rung.
+	Start string `json:"start,omitempty"`
+	// Skipped are the rungs the walk did not measure: more compressed than a
+	// rung that failed quality, or less compressed than one that passed (those
+	// are measured if that rung later fails verification on quality).
+	Skipped []string `json:"skipped,omitempty"`
+	// NotUsed is why the prior did not change the order: WarmStartNoPruning,
+	// WarmStartNoRungs or WarmStartSeveralFamilies.
+	NotUsed string `json:"not_used,omitempty"`
+}
+
+// Reasons a worker did not use a warm start.
+const (
+	// WarmStartNoPruning: the search does not prune by quality, so it measures
+	// every rung at once.
+	WarmStartNoPruning = "no_quality_pruning"
+	// WarmStartNoRungs: no x265 rung was left to order (the ladder's
+	// highest-quality rung failed quality, or there was no x265 ladder).
+	WarmStartNoRungs = "no_x265_rungs"
+	// WarmStartSeveralFamilies: the initial ladder had more than one x265
+	// family, and the prior names a CRF, not a family.
+	WarmStartSeveralFamilies = "several_x265_families"
+)
 
 // Verification attempt roles and outcomes.
 const (
@@ -892,6 +980,14 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 			return errors.New("hardware search requires an automatic size v3 search with automatic search rules")
 		}
 		if err := req.HardwareSearch.Validate(); err != nil {
+			return err
+		}
+	}
+	if req.WarmStart != nil {
+		if req.AutomaticSearch == nil || !req.Automatic || !sizeV3 {
+			return errors.New("a warm start requires an automatic size v3 search with automatic search rules")
+		}
+		if err := req.WarmStart.Validate(); err != nil {
 			return err
 		}
 	}

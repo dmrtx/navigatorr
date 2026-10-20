@@ -203,6 +203,25 @@ func operationSizeMode(r operationRecord) map[string]any {
 			out["library"] = entry
 		}
 	}
+	// The siblings' winning CRF the search started from, and what the worker
+	// did with it: the rung it began at, the rungs it left unmeasured, or why
+	// it did not use it.
+	if warm := operationMap(r.state["warm_start"]); warm != nil {
+		entry := map[string]any{}
+		for _, key := range []string{"quality_value", "basis", "siblings", "note"} {
+			if v, ok := warm[key]; ok && v != nil {
+				entry[key] = v
+			}
+		}
+		if ws := operationMap(operationMap(operationValue(r, "automatic_search"))["warm_start"]); ws != nil {
+			for _, key := range []string{"start", "skipped", "not_used"} {
+				if v, ok := ws[key]; ok && v != nil {
+					entry[key] = v
+				}
+			}
+		}
+		out["warm_start"] = entry
+	}
 	if r.state["size_audio_only"] == true {
 		// The worker's packet proof decides; until it reports, the copy is
 		// planned, not verified.

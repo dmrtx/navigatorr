@@ -247,6 +247,8 @@ func probeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratch
 	// A size search that follows a failed VideoToolbox result may reuse the
 	// earlier search's measured x265 samples.
 	caps.SearchContinuation = true
+	// Size searches may order the initial x265 ladder from a warm start.
+	caps.AutomaticWarmStart = true
 	if vtCaps.Available {
 		caps.Encoders[videoToolboxEncoder] = true
 	}

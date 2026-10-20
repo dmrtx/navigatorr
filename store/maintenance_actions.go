@@ -23,7 +23,7 @@ func (m maintenanceMemo) bytes() int {
 }
 
 var maintenanceInputKeys = []string{"path", "parent_action_id", "batch_promote_parent_id", "transcode_action_id", "library_context", "service", "series_id", "movie_id", "media_id", "paths", "episode_file_ids", "dry_run", "promote_candidates", "mode", "replace_original"}
-var maintenanceOutputKeys = []string{"resolved_path", "original_sha256", "original", "result", "candidate_size_bytes", "promotion", "recovery_retained", "original_integrity", "promoted", "original_intact", "benchmark_decision", "expected_savings_percent", "transcode_phase", "progress_is_stale", "progress", "speed", "last_progress_at", "counts", "batch_promotion", "benchmark_comparison_available", "job_id", "transcode_job_id", "paused", "skip_transcode", "batch_item_generations", "batch_settings_revision", "batch_retry_pending", "post_batch_promotion", "mode", "size_main10", "size_audio_only", "audio_only_estimated_bytes", "quality_evidence", "automatic_search", "conversions", "reason_code", "hardware_continuation", "outcome_library"}
+var maintenanceOutputKeys = []string{"resolved_path", "original_sha256", "original", "result", "candidate_size_bytes", "promotion", "recovery_retained", "original_integrity", "promoted", "original_intact", "benchmark_decision", "expected_savings_percent", "transcode_phase", "progress_is_stale", "progress", "speed", "last_progress_at", "counts", "batch_promotion", "benchmark_comparison_available", "job_id", "transcode_job_id", "paused", "skip_transcode", "batch_item_generations", "batch_settings_revision", "batch_retry_pending", "post_batch_promotion", "mode", "size_main10", "size_audio_only", "audio_only_estimated_bytes", "quality_evidence", "automatic_search", "conversions", "reason_code", "hardware_continuation", "outcome_library", "warm_start"}
 
 // maintenanceHardwareNote begins the winner uncertainty that says why a media
 // engine result was chosen. It must equal optimization.HardwareSelectedNote;
@@ -118,7 +118,7 @@ func maintenanceJSON(raw string, keys []string) string {
 			case "automatic_search":
 				// The stages and candidate lists stay in the action history;
 				// the list view needs only how the winner was verified.
-				value = json.RawMessage(maintenanceJSON(string(value), []string{"verification_windows", "verification", "winner_windows"}))
+				value = json.RawMessage(maintenanceJSON(string(value), []string{"verification_windows", "verification", "winner_windows", "warm_start"}))
 			case "hardware_continuation":
 				// Only what the page shows: the outcome and the failed
 				// attempt's numbers, not its job ids or digests.

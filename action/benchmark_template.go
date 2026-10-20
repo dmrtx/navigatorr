@@ -181,6 +181,7 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 				req.MinSavingsPercent = minSavings
 			}
 		}
+		e.applySiblingWarmStart(ec, req, caps)
 	}
 	// Keep the proposed parameters inspectable while waiting for a search
 	// review, but do not mark the request accepted or uncertain yet.
@@ -260,6 +261,7 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 			"benchmark_job_id":         job.ID,
 			"benchmark_request_digest": digest,
 			"capability_fingerprint":   ec.State["capability_fingerprint"],
+			warmStartKey:               ec.State[warmStartKey],
 		},
 	}, nil
 }
