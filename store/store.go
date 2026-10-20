@@ -20,7 +20,7 @@ import (
 )
 
 // SchemaVersion is the current schema revision. Migrations run in order.
-const SchemaVersion = 11
+const SchemaVersion = 12
 
 // MaxPreferenceValueLen bounds a stored preference value. Values ride into
 // memory_get/memory_list/get_context verbatim, so one huge blob would tax
@@ -352,6 +352,41 @@ var migrations = []migration{
 	}},
 	{version: 11, statements: []string{
 		`CREATE TABLE worker_slot_settings (node TEXT PRIMARY KEY, video_slots INTEGER NOT NULL, podcast_slots INTEGER NOT NULL, revision INTEGER NOT NULL, updated_at TEXT NOT NULL)`,
+	}},
+	// The outcome library: one row per finished size-mode search. No foreign
+	// key to action_instances, so an archived or purged action keeps its row.
+	{version: 12, statements: []string{
+		`CREATE TABLE transcode_outcomes (
+			action_id TEXT NOT NULL,
+			benchmark_job_id TEXT NOT NULL,
+			source_sha256 TEXT NOT NULL,
+			source_size INTEGER NOT NULL DEFAULT 0,
+			duration_sec REAL NOT NULL DEFAULT 0,
+			video_codec TEXT NOT NULL DEFAULT '',
+			bit_depth INTEGER NOT NULL DEFAULT 0,
+			width INTEGER NOT NULL DEFAULT 0,
+			height INTEGER NOT NULL DEFAULT 0,
+			fps REAL NOT NULL DEFAULT 0,
+			library_service TEXT NOT NULL DEFAULT '',
+			library_id INTEGER NOT NULL DEFAULT 0,
+			season INTEGER NOT NULL DEFAULT -1,
+			episode INTEGER NOT NULL DEFAULT -1,
+			folder_key TEXT NOT NULL DEFAULT '',
+			mode TEXT NOT NULL DEFAULT '',
+			policy_version TEXT NOT NULL DEFAULT '',
+			policy_digest TEXT NOT NULL,
+			outcome TEXT NOT NULL,
+			reused_from TEXT NOT NULL DEFAULT '',
+			winner_json TEXT NOT NULL DEFAULT '',
+			points_json TEXT NOT NULL DEFAULT '',
+			final_verdict TEXT NOT NULL DEFAULT '',
+			final_json TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (action_id, benchmark_job_id))`,
+		`CREATE INDEX idx_transcode_outcomes_source ON transcode_outcomes (source_sha256, policy_digest)`,
+		`CREATE INDEX idx_transcode_outcomes_library ON transcode_outcomes (library_service, library_id, season)`,
+		`CREATE INDEX idx_transcode_outcomes_folder ON transcode_outcomes (folder_key)`,
 	}},
 }
 

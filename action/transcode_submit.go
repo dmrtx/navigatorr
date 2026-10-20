@@ -579,6 +579,7 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 	switch st.Status {
 	case transcode.StatusCompleted, transcode.StatusFailed, transcode.StatusCancelled:
 		e.noteWorkerSlotFreed()
+		e.recordOutcomeFinal(ec, st.QualityEvidence)
 	}
 	if st.RecoveryRequired {
 		out := transcodeWorkerMetadataOutputs(ec, st)

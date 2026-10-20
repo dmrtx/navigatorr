@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jakenesler/navigatorr/mediainspect"
+	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/optimization"
 	"github.com/jakenesler/navigatorr/transcode/quality"
@@ -184,12 +185,16 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 	// Keep the proposed parameters inspectable while waiting for a search
 	// review, but do not mark the request accepted or uncertain yet.
 	ec.State["benchmark_request"] = req
+	recorded := e.reportOutcomeLibrary(ec)
 	if review := e.reviewBenchmarkSearch(ec); review != nil {
 		return *review, nil
 	}
 	digest, err := transcode.DigestBenchmarkRequest(req)
 	if err != nil {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("computing benchmark request digest: %v", err)}, nil
+	}
+	if res, reused, err := e.applyLibraryReuse(actx, ec, req, digest, recorded); reused || err != nil {
+		return res, err
 	}
 
 	ec.State["benchmark_job_id"] = req.ID
@@ -259,6 +264,66 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 	}, nil
 }
 
+// pollBenchmark reads the worker's benchmark status. done is set when the
+// step must return res instead of judging the status.
+func (e *Engine) pollBenchmark(ctx context.Context, ec *ExecutionContext, benchJobID string) (transcode.BenchmarkStatus, StepResult, bool) {
+	if wait := getString(ec.State, "benchmark_retry_not_before"); wait != "" {
+		if at, err := time.Parse(time.RFC3339Nano, wait); err == nil && time.Now().Before(at) {
+			return transcode.BenchmarkStatus{}, StepResult{
+				Status:           StepWaitingExternal,
+				WaitingCondition: "benchmark_retry",
+				WaitingReason:    fmt.Sprintf("Benchmark retry is backed off until %s", at.UTC().Format(time.RFC3339)),
+			}, true
+		}
+		delete(ec.State, "benchmark_retry_not_before")
+	}
+
+	if ctx.Err() != nil {
+		return transcode.BenchmarkStatus{}, StepResult{Status: StepWaitingExternal, WaitingCondition: "worker_reconciling", WaitingReason: "Coordinator request interrupted; benchmark continues on worker"}, true
+	}
+	if ec.Decision == "cancel" {
+		_ = e.deps.Transcode.BenchmarkCancel(ctx, benchJobID)
+		return transcode.BenchmarkStatus{}, StepResult{Status: StepFailed, Error: "benchmark job was cancelled by decision"}, true
+	}
+
+	e.recordWorkerPoll(ec)
+	st, err := e.deps.Transcode.BenchmarkStatus(ctx, benchJobID)
+	if err != nil {
+		if isRetryableWorkerPollError(err) {
+			ec.State["progress_is_stale"] = true
+			return transcode.BenchmarkStatus{}, StepResult{Status: StepWaitingExternal, WaitingCondition: "worker_unreachable", WaitingReason: "Benchmark status temporarily unavailable; existing remote job will be reconciled"}, true
+		}
+		return transcode.BenchmarkStatus{}, StepResult{Status: StepFailed, Error: fmt.Sprintf("benchmark status failed; no resubmit: %v", err)}, true
+	}
+	e.observeBenchmarkStatus(ec, st)
+	if st.Status == transcode.StatusCompleted || st.Status == transcode.StatusFailed || st.Status == transcode.StatusCancelled {
+		e.noteWorkerSlotFreed()
+		if st.SearchSeconds != nil {
+			// A continued search spends what the first one left of the same
+			// ceiling, so the action's search time is both added.
+			ec.State["benchmark_search_seconds"] = *st.SearchSeconds + getFloat(ec.State, continuationPriorSecondsKey)
+		}
+	}
+	if st.Automatic != nil {
+		ec.State["automatic_search"] = st.Automatic
+		ec.Outputs["automatic_search"] = st.Automatic
+	}
+	if getString(ec.Inputs, "mode") != "" && st.ReasonCode == "search_budget_exhausted" {
+		if st.SearchWorkerBusy {
+			// The worker shared its slots for most of the search, so the time
+			// ran out on contention, not on this source.
+			ec.State["search_worker_busy"] = true
+			return st, modeAttention(ec, "search_budget_exhausted", busySearchBudgetReason), true
+		}
+		delete(ec.State, "search_worker_busy") // a later attempt must not inherit it
+		// A busy worker's shortfall above says nothing about the source, so
+		// only this one is recorded.
+		e.recordSearchOutcome(ec, benchJobID, store.OutcomeBudgetExhausted, &st)
+		return st, modeAttention(ec, "search_budget_exhausted", "Finite search budget exhausted without a reliable conclusion; original preserved"), true
+	}
+	return st, StepResult{}, false
+}
+
 // busySearchBudgetReason stays under the UI's 140-character reason limit so the
 // hint is shown whole.
 const busySearchBudgetReason = "Ran out of time while the worker was busy with other jobs; this says nothing about the file. Try again when it is idle. Original preserved"
@@ -279,56 +344,17 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 		return StepResult{Status: StepFailed, Error: "transcode executor is not available to monitor benchmark"}, nil
 	}
 
-	if wait := getString(ec.State, "benchmark_retry_not_before"); wait != "" {
-		if at, err := time.Parse(time.RFC3339Nano, wait); err == nil && time.Now().Before(at) {
-			return StepResult{
-				Status:           StepWaitingExternal,
-				WaitingCondition: "benchmark_retry",
-				WaitingReason:    fmt.Sprintf("Benchmark retry is backed off until %s", at.UTC().Format(time.RFC3339)),
-			}, nil
+	var st transcode.BenchmarkStatus
+	reuse := libraryReuseOf(ec.State)
+	if reuse != nil {
+		// The search was skipped for a recorded winner; no worker job exists.
+		st = reuse.completedStatus(benchJobID)
+	} else {
+		polled, res, done := e.pollBenchmark(ctx, ec, benchJobID)
+		if done {
+			return res, nil
 		}
-		delete(ec.State, "benchmark_retry_not_before")
-	}
-
-	if ctx.Err() != nil {
-		return StepResult{Status: StepWaitingExternal, WaitingCondition: "worker_reconciling", WaitingReason: "Coordinator request interrupted; benchmark continues on worker"}, nil
-	}
-	if ec.Decision == "cancel" {
-		_ = e.deps.Transcode.BenchmarkCancel(ctx, benchJobID)
-		return StepResult{Status: StepFailed, Error: "benchmark job was cancelled by decision"}, nil
-	}
-
-	e.recordWorkerPoll(ec)
-	st, err := e.deps.Transcode.BenchmarkStatus(ctx, benchJobID)
-	if err != nil {
-		if isRetryableWorkerPollError(err) {
-			ec.State["progress_is_stale"] = true
-			return StepResult{Status: StepWaitingExternal, WaitingCondition: "worker_unreachable", WaitingReason: "Benchmark status temporarily unavailable; existing remote job will be reconciled"}, nil
-		}
-		return StepResult{Status: StepFailed, Error: fmt.Sprintf("benchmark status failed; no resubmit: %v", err)}, nil
-	}
-	e.observeBenchmarkStatus(ec, st)
-	if st.Status == transcode.StatusCompleted || st.Status == transcode.StatusFailed || st.Status == transcode.StatusCancelled {
-		e.noteWorkerSlotFreed()
-		if st.SearchSeconds != nil {
-			// A continued search spends what the first one left of the same
-			// ceiling, so the action's search time is both added.
-			ec.State["benchmark_search_seconds"] = *st.SearchSeconds + getFloat(ec.State, continuationPriorSecondsKey)
-		}
-	}
-	if st.Automatic != nil {
-		ec.State["automatic_search"] = st.Automatic
-		ec.Outputs["automatic_search"] = st.Automatic
-	}
-	if getString(ec.Inputs, "mode") != "" && st.ReasonCode == "search_budget_exhausted" {
-		if st.SearchWorkerBusy {
-			// The worker shared its slots for most of the search, so the time
-			// ran out on contention, not on this source.
-			ec.State["search_worker_busy"] = true
-			return modeAttention(ec, "search_budget_exhausted", busySearchBudgetReason), nil
-		}
-		delete(ec.State, "search_worker_busy") // a later attempt must not inherit it
-		return modeAttention(ec, "search_budget_exhausted", "Finite search budget exhausted without a reliable conclusion; original preserved"), nil
+		st = polled
 	}
 
 	switch st.Status {
@@ -394,11 +420,20 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 		var request transcode.BenchmarkRequest
 		raw, _ := json.Marshal(ec.State["benchmark_request"])
 		_ = json.Unmarshal(raw, &request)
-		if hasWinner && request.Automatic && (st.Automatic == nil || st.Automatic.VerifiedSamples != len(request.Samples)) {
+		// A reused winner was verified by the search that found it, and its
+		// full encode passed final validation; the new encode is validated too.
+		if hasWinner && request.Automatic && reuse == nil && (st.Automatic == nil || st.Automatic.VerifiedSamples != len(request.Samples)) {
 			return StepResult{Status: StepFailed, Error: "automatic winner has no complete independent sample verification"}, nil
 		}
 
 		transcode.AttachVMAFEvidence(st.Decision, st.Quality)
+		if !getBool(ec.State, "benchmark_done") {
+			outcome := store.OutcomeNoWinner
+			if hasWinner {
+				outcome = store.OutcomeWinner
+			}
+			e.recordSearchOutcome(ec, benchJobID, outcome, &st)
+		}
 		ec.State["benchmark_done"] = true
 		ec.State["benchmark_decision"] = st.Decision
 		ec.State["decision_reason"] = st.Decision.DecisionReason
@@ -414,6 +449,9 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 		}
 		if len(st.Quality) > 0 {
 			outputs["benchmark_quality"] = st.Quality
+		}
+		if reuse != nil {
+			outputs[libraryReuseKey] = reuse
 		}
 
 		var winningPlan *transcode.Plan

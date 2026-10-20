@@ -3264,6 +3264,16 @@ test("a VideoToolbox winner is told apart from x265 before anything is replaced"
   assert.equal(h.run('benchmarkCandidateLabel({id:"cand_crf22",video_codec:"libx265",quality:22,preset:"slow"})'), "cand_crf22 · x265 CRF 22 · slow");
 });
 
+test("size mode shows what the outcome library knew and whether the search was skipped", () => {
+  const h = harness();
+  const reused = allText(h.run('sizeModeNote({size_mode:{encoder:"libx265",library:{note:"This exact source already passed final validation with policy v3 (sha256:abc) in action a1.",reused_from:"a1"}}})'));
+  assert.match(reused, /already passed final validation/);
+  assert.match(reused, /Search skipped: reused that validated setting · the full encode is still checked/);
+  const failed = allText(h.run('sizeModeNote({size_mode:{library:{note:"This exact source already failed with policy v3 (sha256:abc) in action a1.",not_reused:"no recorded winner"}}})'));
+  assert.match(failed, /already failed with policy/);
+  assert.doesNotMatch(failed, /Search skipped/);
+});
+
 test("a VideoToolbox winner says why it was chosen next to the encoder line", () => {
   const h = harness();
   const reason = "25000 bytes against 23500 for the smallest software candidate, within the 15% margin";

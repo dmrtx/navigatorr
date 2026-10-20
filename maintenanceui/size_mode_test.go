@@ -51,6 +51,12 @@ func TestOperationsProjectSizeModeSummary(t *testing.T) {
 	if got, ok := read("quality-job")["size_mode"]; ok {
 		t.Fatalf("other modes carry no size summary: %v", got)
 	}
+	state["outcome_library"] = map[string]any{"note": "This exact source already passed final validation.", "reused_from": "earlier", "matches": []any{map[string]any{"action_id": "earlier"}}}
+	seedOperation(t, st, "reused-job", "transcode_media", "completed", map[string]any{"path": "/media/series/Show/S01E03.mkv", "mode": "size"}, nil, state)
+	library := operationMap(operationMap(read("reused-job")["size_mode"])["library"])
+	if library["note"] == nil || library["reused_from"] != "earlier" || library["matches"] != nil {
+		t.Fatalf("library summary: %v", library)
+	}
 }
 
 func TestOperationsProjectSizeHardwareContinuation(t *testing.T) {

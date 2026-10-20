@@ -747,7 +747,8 @@ func (e *Engine) cancelRemoteActionWork(ctx context.Context, ec *ExecutionContex
 	}
 	// A submit refused outright (busy or otherwise) created nothing on the
 	// worker, which would answer a cancel for that identity with 404.
-	if benchID != "" && !getBool(ec.State, "benchmark_done") && !noRemoteJob(ec, "benchmark_submitted", "benchmark_reconcile", benchmarkRejectedKey) {
+	// A search skipped for a recorded winner has no worker job either.
+	if benchID != "" && !getBool(ec.State, "benchmark_done") && !noRemoteJob(ec, "benchmark_submitted", "benchmark_reconcile", benchmarkRejectedKey) && libraryReuseOf(ec.State) == nil {
 		if err := e.cancelBenchmarkJobConfirmed(ctx, benchID); err != nil {
 			errs = append(errs, fmt.Sprintf("benchmark %s: %v", benchID, err))
 		}

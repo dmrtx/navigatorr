@@ -190,6 +190,19 @@ func operationSizeMode(r operationRecord) map[string]any {
 			}
 		}
 	}
+	// What the outcome library knew about these exact source bytes, and
+	// whether a validated earlier result replaced the search.
+	if library := operationMap(r.state["outcome_library"]); library != nil {
+		entry := map[string]any{}
+		for _, key := range []string{"note", "reused_from", "not_reused"} {
+			if v := operationString(library[key]); v != "" {
+				entry[key] = v
+			}
+		}
+		if len(entry) > 0 {
+			out["library"] = entry
+		}
+	}
 	if r.state["size_audio_only"] == true {
 		// The worker's packet proof decides; until it reports, the copy is
 		// planned, not verified.

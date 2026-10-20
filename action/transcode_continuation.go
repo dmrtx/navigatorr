@@ -387,7 +387,7 @@ var continuationClearedKeys = []string{
 	"benchmark_submitted", "benchmark_reconcile", "benchmark_done", "benchmark_status", "benchmark_decision", "benchmark_request", "benchmark_request_digest",
 	"benchmark_retry_not_before", benchmarkRejectedKey, "benchmark_quality", "benchmark_winner", "benchmark_search_seconds", "benchmark_phase", "benchmark_progress_details",
 	"benchmark_comparison_available", "benchmark_reconciled_at", "benchmark_worker_completed_at", "benchmark_reconcile_lag_ms", "benchmark_search_reviewed", "benchmark_search_review_required",
-	"benchmark_search_review", "automatic_search", "has_winner", "decision_reason", "search_worker_busy",
+	"benchmark_search_review", "automatic_search", "has_winner", "decision_reason", "search_worker_busy", libraryReuseKey, outcomeLibraryKey,
 	"winner", "winner_candidate_id", "winner_video_codec", "winner_preset", "winner_quality", "winner_average_bitrate_kbps", "winner_video_profile", "winner_pixel_format",
 	"winner_bit_depth", "winner_score", "winner_metric", "estimated_total_mb", "estimated_savings_percent", "predicted_savings_percent", "effective_min_savings_percent",
 	"effective_max_size_increase_percent", "skip_transcode", "skipped", "reason_code",

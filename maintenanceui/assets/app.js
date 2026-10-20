@@ -3759,6 +3759,10 @@ function sizeModeLines(size) {
   if (size.encoder) lines.push(`Encoder: ${{libx265: "x265 (software)", hevc_videotoolbox: "VideoToolbox (hardware media engine)"}[size.encoder] || size.encoder}`);
   // Why the media engine result was chosen over x265, as the search recorded it.
   if (size.hardware && size.hardware_reason) lines.push(`Chosen because: ${size.hardware_reason}`);
+  // An earlier search of these exact bytes under the same policy; a validated
+  // winner replaces the search, never the final check of the new encode.
+  if (size.library?.note) lines.push(size.library.note);
+  if (size.library?.reused_from) lines.push("Search skipped: reused that validated setting · the full encode is still checked");
   if (size.video_copy) lines.push({verified: "Video copied unchanged · verified bit-identical", failed: "Video copy check failed · original kept"}[size.video_copy] || "Video will be copied unchanged · not yet verified; only lossless audio is compacted");
   // A media engine result that failed the whole-file check, and what followed;
   // the failed attempt's numbers stay here after the x265 result takes over.
