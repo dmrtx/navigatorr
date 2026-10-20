@@ -90,6 +90,14 @@ type ActionTemplate struct {
 	// Decision waits are always excluded.
 	AutoReconcile bool
 	Steps         []StepDefinition
+	// Validate, when set, judges a request before anything is persisted. Every
+	// path that creates an action (Enqueue, EnqueueWorker, Run) calls it before
+	// it looks up or reserves an idempotency key, checks worker admission or
+	// writes a row, so a bad request leaves no trace and binds no key. It
+	// returns the inputs to store (nil means inputs unchanged) or an
+	// *InvalidParamsError naming the input to fix. It must not read media or
+	// contact a worker. Preflight repeats the same checks defensively.
+	Validate func(ctx context.Context, e *Engine, inputs map[string]any) (map[string]any, error)
 }
 
 // Inputs uses the same JSON string format accepted by action_run.

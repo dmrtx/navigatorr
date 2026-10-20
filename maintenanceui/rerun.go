@@ -142,7 +142,7 @@ func (s *Server) rerun(w http.ResponseWriter, r *http.Request) {
 	} else if prior != nil {
 		res, err := s.engine.Enqueue(ctx, inst.ActionName, inputs, body.Key)
 		if err != nil {
-			fail(w, 409, err.Error())
+			failAdmission(w, 409, err)
 			return
 		}
 		writeJSON(w, 202, map[string]any{"id": res.ID, "status": res.Status, "action_name": res.ActionName})
@@ -173,7 +173,7 @@ func (s *Server) rerun(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := s.engine.EnqueueWorker(ctx, inst.ActionName, inputs, body.Key)
 	if err != nil {
-		fail(w, 409, err.Error())
+		failAdmission(w, 409, err)
 		return
 	}
 	writeJSON(w, 202, map[string]any{"id": res.ID, "status": res.Status, "action_name": res.ActionName})

@@ -182,6 +182,22 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 func fail(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
 }
+
+// failAdmission answers a refused submission. A request the caller can fix by
+// changing one input is a 400 that names the input; nothing was written, so
+// the same submission key can be used again. Anything else keeps the given
+// status.
+func failAdmission(w http.ResponseWriter, code int, err error) {
+	if invalid, ok := action.AsInvalidParams(err); ok {
+		body := map[string]string{"error": invalid.Reason, "code": "invalid_params"}
+		if invalid.Field != "" {
+			body["field"] = invalid.Field
+		}
+		writeJSON(w, http.StatusBadRequest, body)
+		return
+	}
+	fail(w, code, err.Error())
+}
 func decode(w http.ResponseWriter, r *http.Request, v any) error {
 	r.Body = http.MaxBytesReader(w, r.Body, 256<<10)
 	d := json.NewDecoder(r.Body)
@@ -335,6 +351,12 @@ func (s *Server) tool(w http.ResponseWriter, r *http.Request) {
 			}
 			key = hex.EncodeToString(b)
 		}
+		// A request the caller got wrong is reported before anything is asked
+		// of the worker.
+		if err := s.engine.ValidateInputs(r.Context(), name, inputs); err != nil {
+			failAdmission(w, 409, err)
+			return
+		}
 		if action.RequiresWorker(name) && !body.Background {
 			if err := s.engine.CheckWorkerAdmission(r.Context()); err != nil {
 				fail(w, http.StatusConflict, err.Error())
@@ -343,7 +365,7 @@ func (s *Server) tool(w http.ResponseWriter, r *http.Request) {
 		}
 		res, err := s.engine.Enqueue(action.WithOrigin(r.Context(), "web"), name, inputs, key)
 		if err != nil {
-			fail(w, 409, err.Error())
+			failAdmission(w, 409, err)
 			return
 		}
 		writeJSON(w, 202, map[string]any{"id": res.ID, "status": res.Status, "action_name": res.ActionName})

@@ -326,6 +326,18 @@ func toolBoundedJSON(v any, maxBytes int, onExceeded func(actualBytes int) any) 
 	return mcp.NewToolResultText(string(fallbackData))
 }
 
+// invalidParamsResult reports a request the caller can fix by changing one
+// input. Nothing was written: no action exists and the idempotency key is
+// still free, so the corrected request can reuse it.
+func invalidParamsResult(invalid *action.InvalidParamsError) *mcp.CallToolResult {
+	payload := map[string]any{"error": "invalid_params", "reason": invalid.Reason}
+	if invalid.Field != "" {
+		payload["field"] = invalid.Field
+	}
+	data, _ := json.Marshal(payload)
+	return mcp.NewToolResultError(string(data))
+}
+
 func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 	registerTranscodeGoalTool(s, engine)
 	if engine == nil {
@@ -336,7 +348,7 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 	// action_run — start a declarative multi-step action workflow
 	s.AddTool(
 		mcp.NewTool("action_run",
-			mcp.WithDescription("Run a declarative multi-step action workflow (e.g. transcode_batch, transcode_media, promote_transcode_candidate, validate_torrent, safe_media_replacement). Worker workflows return a persisted action ID before preflight; the service reconciler executes them independently of this request. Use action_status to monitor progress or errors. Reuse idempotency_key after a lost response to recover the same action, including terminal results. State is persistently tracked in SQLite and tolerates disconnects and reboots. Transcode and benchmark external waits reconcile automatically; candidate promotion requires explicit approval. Note: 'inputs' must be provided as a JSON object string, and 'idempotency_key' is a top-level string argument. Discover input examples with action_catalog. Returns a compact operational summary."),
+			mcp.WithDescription("Run a declarative multi-step action workflow (e.g. transcode_batch, transcode_media, promote_transcode_candidate, validate_torrent, safe_media_replacement). Inputs are validated before anything is persisted: a request the caller got wrong returns an invalid_params error naming the field and reserves no idempotency key, so the corrected request can reuse it. Worker workflows then return a persisted action ID before preflight; the service reconciler executes them independently of this request. Use action_status to monitor progress or errors. Reuse idempotency_key after a lost response to recover the same action, including terminal results. State is persistently tracked in SQLite and tolerates disconnects and reboots. Transcode and benchmark external waits reconcile automatically; candidate promotion requires explicit approval. Note: 'inputs' must be provided as a JSON object string, and 'idempotency_key' is a top-level string argument. Discover input examples with action_catalog. Returns a compact operational summary."),
 			mcp.WithString("action", mcp.Required(), mcp.Description("Workflow name: transcode_batch, transcode_media, benchmark_transcode, promote_transcode_candidate, validate_torrent, safe_media_replacement")),
 			mcp.WithString("inputs", mcp.Description("JSON object string with action parameters (e.g. \"{\\\"service\\\":\\\"sonarr\\\",\\\"series_id\\\":\\\"10\\\"}\" or \"{\\\"path\\\":\\\"/media/...\\\"}\"). Must be a JSON-encoded string, not a raw object.")),
 			mcp.WithString("service", mcp.Description("Shortcut: *arr service name (sonarr, radarr)")),
@@ -384,6 +396,9 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 				res, err = engine.EnqueueWorker(ctx, actionName, inputs, idempotencyKey)
 			} else {
 				res, err = engine.Run(ctx, actionName, inputs, idempotencyKey)
+			}
+			if invalid, ok := action.AsInvalidParams(err); ok {
+				return invalidParamsResult(invalid), nil
 			}
 			if err != nil {
 				return toolErr("action_run failed: %v", err), nil

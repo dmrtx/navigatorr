@@ -26,6 +26,13 @@ func (e *Engine) EnqueueWorker(ctx context.Context, name string, inputs map[stri
 	if e.deps.Store == nil {
 		return nil, fmt.Errorf("action store is required")
 	}
+	// A bad request is refused before the key is looked up or reserved and
+	// before the worker is asked anything.
+	if tmpl, ok := e.GetTemplate(name); ok {
+		if _, err := e.validateActionInputs(ctx, tmpl, inputs); err != nil {
+			return nil, err
+		}
+	}
 	key = strings.TrimSpace(key)
 	if key == "" {
 		key = generateActionID("submission")
@@ -65,10 +72,10 @@ func (e *Engine) Enqueue(ctx context.Context, name string, inputs map[string]any
 	if err := json.Unmarshal(b, &copy); err != nil || copy == nil {
 		return nil, fmt.Errorf("inputs must be an object")
 	}
-	if name == "clean_podcast_ads" {
-		if err := e.freezePodcastInputs(copy); err != nil {
-			return nil, err
-		}
+	// Judge the request before any lookup or write: an invalid one must not
+	// bind its idempotency key to inputs that can never run.
+	if copy, err = e.validateActionInputs(ctx, tmpl, copy); err != nil {
+		return nil, err
 	}
 	if name == "promote_transcode_candidate" {
 		key, err = promotionIdempotency(copy)

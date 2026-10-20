@@ -176,10 +176,11 @@ func (e *Engine) Run(ctx context.Context, actionName string, inputs map[string]a
 		inputCopy[key] = value
 	}
 	inputs = inputCopy
-	if actionName == "clean_podcast_ads" {
-		if err := e.freezePodcastInputs(inputs); err != nil {
-			return nil, err
-		}
+	// Judge the request before any lookup or write; this also freezes the
+	// podcast policy identity into the stored inputs.
+	inputs, err := e.validateActionInputs(ctx, tmpl, inputs)
+	if err != nil {
+		return nil, err
 	}
 
 	var idempotencyKey string

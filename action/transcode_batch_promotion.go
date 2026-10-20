@@ -52,22 +52,22 @@ func getBatchPromotionPlan(raw any) *batchPromotionPlan {
 func (e *Engine) validateBatchPromotionInputs(inputs map[string]any) error {
 	if raw, present := inputs["promote_candidates"]; present {
 		if _, ok := raw.(bool); !ok {
-			return fmt.Errorf("promote_candidates must be a boolean")
+			return inputErr("promote_candidates", "promote_candidates must be a boolean")
 		}
 	}
 	if raw, present := inputs["promotion_parallelism"]; present {
 		v, ok := strictBatchInteger(raw)
 		if !ok || v < 1 || v > 2 {
-			return fmt.Errorf("promotion_parallelism must be 1 or 2")
+			return inputErr("promotion_parallelism", "promotion_parallelism must be 1 or 2")
 		}
 	}
 	if getBool(inputs, "promote_candidates") && !getBool(inputs, "dry_run") {
 		if !e.AllowDestructive() {
-			return fmt.Errorf("allow_destructive must be enabled for batch promotion")
+			return inputErr("promote_candidates", "allow_destructive must be enabled for batch promotion")
 		}
 		v, err := strconv.Atoi(strings.TrimSpace(fmt.Sprint(inputs["series_id"])))
 		if err != nil || v <= 0 {
-			return fmt.Errorf("batch promotion requires a numeric Sonarr series_id")
+			return inputErr("series_id", "batch promotion requires a numeric Sonarr series_id")
 		}
 	}
 	return nil

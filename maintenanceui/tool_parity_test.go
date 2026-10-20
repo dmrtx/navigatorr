@@ -10,8 +10,8 @@ import (
 func TestWebAdmissionShortcutsAndRestrictedMutation(t *testing.T) {
 	s, h := testUI(t)
 	for _, body := range []string{
-		`{"name":"action_run","arguments":{"action":"transcode_media","path":"/shortcut"}}`,
-		`{"name":"action_run","arguments":{"action":"transcode_media","path":"/ignored","inputs":"{\"path\":\"/preferred\",\"idempotency_key\":\"nested-receipt\"}"}}`,
+		`{"name":"action_run","arguments":{"action":"transcode_media","path":"/media/shortcut.mkv"}}`,
+		`{"name":"action_run","arguments":{"action":"transcode_media","path":"/media/ignored.mkv","inputs":"{\"path\":\"/media/preferred.mkv\",\"idempotency_key\":\"nested-receipt\"}"}}`,
 	} {
 		w := request(h, "POST", "/api/maintenance/tool", body, true)
 		var result struct {
@@ -26,10 +26,10 @@ func TestWebAdmissionShortcutsAndRestrictedMutation(t *testing.T) {
 		}
 		var inputs map[string]any
 		json.Unmarshal([]byte(inst.InputsJSON), &inputs)
-		if inputs["path"] != "/shortcut" && inputs["path"] != "/preferred" {
+		if inputs["path"] != "/media/shortcut.mkv" && inputs["path"] != "/media/preferred.mkv" {
 			t.Fatal("shortcut input lost", inputs)
 		}
-		if inputs["path"] == "/preferred" && inst.IdempotencyKey != "nested-receipt" {
+		if inputs["path"] == "/media/preferred.mkv" && inst.IdempotencyKey != "nested-receipt" {
 			t.Fatal("receipt lost", inst.IdempotencyKey)
 		}
 	}

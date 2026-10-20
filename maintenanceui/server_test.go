@@ -40,7 +40,7 @@ func testUI(t *testing.T) (*Server, http.Handler) {
 		http.NotFound(w, r)
 	}))
 	t.Cleanup(worker.Close)
-	cfg := &config.Config{Web: config.WebConfig{Enabled: true, Token: testToken}, Transcode: config.TranscodeConfig{Enabled: true, Executor: "http", HTTP: config.HTTPExecutorConfig{BaseURL: worker.URL, Token: "synthetic-worker-token"}}}
+	cfg := &config.Config{Web: config.WebConfig{Enabled: true, Token: testToken}, Media: config.MediaConfig{AllowedReadRoots: []string{"/media"}}, Transcode: config.TranscodeConfig{Enabled: true, Executor: "http", HTTP: config.HTTPExecutorConfig{BaseURL: worker.URL, Token: "synthetic-worker-token"}}}
 	m := server.NewMCPServer("test", "1")
 	reg := arrservice.NewRegistry(cfg)
 	workerConfig, err := cfg.Transcode.BuildHTTPExecutorConfig()
@@ -110,7 +110,7 @@ func TestUIAuthenticationAndOrigin(t *testing.T) {
 
 func TestUIQueueAndMCPShareHistory(t *testing.T) {
 	s, h := testUI(t)
-	body := `{"name":"action_run","arguments":{"action":"transcode_media","inputs":"{\"path\":\"/missing\"}","idempotency_key":"browser-receipt"}}`
+	body := `{"name":"action_run","arguments":{"action":"transcode_media","inputs":"{\"path\":\"/media/missing.mkv\"}","idempotency_key":"browser-receipt"}}`
 	w := request(h, "POST", "/api/maintenance/tool", body, true)
 	if w.Code != 202 {
 		t.Fatal(w.Body.String())
@@ -146,7 +146,7 @@ func TestUIQueueAndMCPShareHistory(t *testing.T) {
 		t.Fatal(result.Content[0].Text)
 	}
 	// An agent calling MCP writes to the same ledger with independent provenance.
-	_, err := s.mcp.GetTool("action_run").Handler(context.Background(), mcp.CallToolRequest{Params: mcp.CallToolParams{Name: "action_run", Arguments: map[string]any{"action": "transcode_media", "inputs": `{"path":"/mcp-missing"}`}}})
+	_, err := s.mcp.GetTool("action_run").Handler(context.Background(), mcp.CallToolRequest{Params: mcp.CallToolParams{Name: "action_run", Arguments: map[string]any{"action": "transcode_media", "inputs": `{"path":"/media/mcp-missing.mkv"}`}}})
 	if err != nil {
 		t.Fatal(err)
 	}
