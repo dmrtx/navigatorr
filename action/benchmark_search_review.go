@@ -189,7 +189,9 @@ func roundComparable(prior, proposal *transcode.BenchmarkRequest) bool {
 	}
 	// Rounds verified on the edge windows with a two-attempt cap and rounds
 	// verified on the final grid until exhausted reject for different reasons;
-	// a failure under one regime says nothing about the other.
+	// a failure under one regime says nothing about the other. The same holds
+	// for the selection margin: a candidate a margin rejected passed the plain
+	// limits, so that verdict says nothing about a search without the margin.
 	if verificationRegime(prior) != verificationRegime(proposal) {
 		return false
 	}
@@ -220,16 +222,23 @@ type searchVerificationRegime struct {
 	holdout        string
 	untilExhausted bool
 	fresh          int
+	// margin and hardwareMargin are the VMAF selection margin of x265 results
+	// and the extra one of hardware results.
+	margin, hardwareMargin float64
 }
 
-// verificationRegime is how a round verified its winner. Requests without
-// automatic search rules, and rules that predate grid verification, all share
-// the zero regime.
+// verificationRegime is how a round verified and selected its winner: where it
+// verified, how long, and with which selection margins. Requests without
+// automatic search rules share the zero regime with empty rules.
 func verificationRegime(r *transcode.BenchmarkRequest) searchVerificationRegime {
 	if r.AutomaticSearch == nil {
 		return searchVerificationRegime{}
 	}
-	return searchVerificationRegime{holdout: r.AutomaticSearch.HoldoutWindows, untilExhausted: r.AutomaticSearch.VerifyUntilExhausted, fresh: r.AutomaticSearch.FinalFreshWindows}
+	regime := searchVerificationRegime{holdout: r.AutomaticSearch.HoldoutWindows, untilExhausted: r.AutomaticSearch.VerifyUntilExhausted, fresh: r.AutomaticSearch.FinalFreshWindows, margin: r.AutomaticSearch.SelectionMarginVMAF}
+	if r.HardwareSearch != nil {
+		regime.hardwareMargin = r.HardwareSearch.ExtraSelectionMarginVMAF
+	}
+	return regime
 }
 
 // floorValue treats an observe-only guardrail as no limit.

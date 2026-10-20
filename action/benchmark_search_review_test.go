@@ -259,3 +259,30 @@ func TestRoundComparableSeparatesVerificationRegimes(t *testing.T) {
 		t.Fatal("no rules and empty rules are the same regime")
 	}
 }
+
+// A candidate a selection margin rejected passed the plain limits, so rounds
+// that selected with a margin say nothing about a search without one (and the
+// other way round), for x265 and for the media engine's extra margin.
+func TestRoundComparableSeparatesSelectionMargins(t *testing.T) {
+	ladder := []transcode.BenchmarkCandidate{x265("a", 16, "slow")}
+	req := func(margin, extra float64) *transcode.BenchmarkRequest {
+		r := &transcode.BenchmarkRequest{Candidates: ladder, AutomaticSearch: &transcode.AutomaticSearchRules{HoldoutWindows: transcode.HoldoutWindowsFinalGrid, VerifyUntilExhausted: true, FinalFreshWindows: 2, SelectionMarginVMAF: margin}}
+		if extra > 0 {
+			r.HardwareSearch = &transcode.HardwareSearchRules{ExtraSelectionMarginVMAF: extra}
+		}
+		return r
+	}
+	if !roundComparable(req(1.5, 2), req(1.5, 2)) || !roundComparable(req(0, 0), req(0, 0)) {
+		t.Fatal("rounds under the same margins stay comparable")
+	}
+	for name, pair := range map[string][2]*transcode.BenchmarkRequest{
+		"margin then none":          {req(1.5, 0), req(0, 0)},
+		"none then margin":          {req(0, 0), req(1.5, 0)},
+		"hardware margin then none": {req(0, 2), req(0, 0)},
+		"extra margin dropped":      {req(1.5, 2), req(1.5, 0)},
+	} {
+		if roundComparable(pair[0], pair[1]) {
+			t.Fatalf("%s: rounds under different selection margins must not count against each other", name)
+		}
+	}
+}

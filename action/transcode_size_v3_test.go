@@ -47,8 +47,11 @@ func TestSizeModePolicyV3Snapshot(t *testing.T) {
 	// whole final validation grid until a setting passes (with fresh final
 	// windows) gave new snapshots the digest below; snapshots frozen with the
 	// grid-edge holdouts still re-hash to sha256:33812f4b...80ee (see
-	// TestGridEraSnapshotsKeepTheirDigestAndSearch).
-	if p.Digest != "sha256:6e519947ac9039f9dbfe36a8beee2ebdd891f0a02d28b5e5b776ddc7f8928ba8" {
+	// TestGridEraSnapshotsKeepTheirDigestAndSearch). Dropping the 1.5 selection
+	// margin for the searches that verify on the grid gave the digest below;
+	// snapshots frozen with the margin still re-hash to sha256:6e519947...8ba8
+	// (see TestMarginEraSnapshotsKeepTheirDigestAndMargin).
+	if p.Digest != "sha256:5ca0b1d812f8e814a839209ad6cc4ab55169bba5af9e58d4fb15aaff96c30976" {
 		t.Fatalf("size v3 snapshot digest changed: %s", p.Digest)
 	}
 	// The quality floor is v2's, unchanged: VMAF mean 88, p5 84, worst 5 s

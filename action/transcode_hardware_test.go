@@ -42,7 +42,10 @@ func TestSizePolicyHardwareDefaultsOnAndFreezes(t *testing.T) {
 	if err != nil || rules == nil {
 		t.Fatalf("rules %+v %v", rules, err)
 	}
-	if rules.ExtraSelectionMarginVMAF != sizeHardwareExtraMarginVMAF || sizeHardwareExtraMarginVMAF != 2 {
+	// New snapshots verify on the final grid, so a hardware result needs no
+	// more than the plain limits; the extra 2 is kept only for the edge
+	// holdouts (sizeEdgeHardwareExtraMarginVMAF).
+	if rules.ExtraSelectionMarginVMAF != 0 || sizeEdgeHardwareExtraMarginVMAF != 2 {
 		t.Fatalf("default hardware selection margin %+v", rules)
 	}
 	if rules.MarginPercent != 15 || rules.GOPSize != 240 || rules.BFrames != 1 || len(rules.QualityValues) != 4 || rules.QualityValues[0] != 45 || rules.QualityValues[3] != 60 {
@@ -68,10 +71,13 @@ func TestSizePolicyHardwareDefaultsOnAndFreezes(t *testing.T) {
 	// frozen with the rungs but without it still re-hash to sha256:1b73a704...ad6
 	// and keep selecting with the margin they were frozen with (see
 	// TestHardwarePolicyWithoutExtraMarginKeepsItsDigest). Verifying on the
-	// final grid gave the digest below; snapshots frozen with the margin but
+	// final grid gave a new digest; snapshots frozen with the margin but
 	// before it re-hash to sha256:e5ec773d...4264 (see
-	// TestGridEraSnapshotsKeepTheirDigestAndSearch).
-	if hw.Digest != "sha256:206ca220dda73866a0f7b9721a8a2bb93769b447cf7cb6f53347b2d3208d03e7" {
+	// TestGridEraSnapshotsKeepTheirDigestAndSearch). Removing the selection
+	// margins for grid verification gave the digest below; the snapshots that
+	// carried them still re-hash to sha256:206ca220...03e7 (see
+	// TestMarginEraSnapshotsKeepTheirDigestAndMargin).
+	if hw.Digest != "sha256:1f903e4291fdce6d0257446dcc809a87ad819a9d36bd3f16ff6d74c28f881903" {
 		t.Fatalf("size snapshot with the media engine on changed digest: %s", hw.Digest)
 	}
 	// The frozen snapshot round-trips through storage and re-verifies.
@@ -335,13 +341,11 @@ func TestHardwarePolicyWithoutExtraMarginKeepsItsDigest(t *testing.T) {
 	}
 }
 
-// A new snapshot carries the extra margin, which a worker that cannot apply it
-// must never be sent: the search is x265 only instead.
+// A snapshot frozen with the extra margin (#181, before grid verification
+// dropped it) carries it, which a worker that cannot apply it must never be
+// sent: the search is x265 only instead.
 func TestHardwareExtraMarginNeedsWorkerSupport(t *testing.T) {
-	policy, err := modePolicyWithHardware("size", false, 0, mustHardwareRules(t))
-	if err != nil {
-		t.Fatal(err)
-	}
+	policy := marginEraPolicy(t, withExtraMargin(mustHardwareRules(t)))
 	stored := map[string]any{}
 	b, _ := json.Marshal(policy)
 	_ = json.Unmarshal(b, &stored)
@@ -374,10 +378,7 @@ func mustHardwareRules(t *testing.T) *transcode.HardwareSearchRules {
 
 func TestHardwarePolicyWithoutFallbackRungsKeepsItsDigest(t *testing.T) {
 	rules := &transcode.HardwareSearchRules{MarginPercent: 15, QualityValues: []int{45, 50, 55, 60}, GOPSize: 240, BFrames: 1}
-	p, err := modePolicyWithHardware("size", false, 0, rules)
-	if err != nil {
-		t.Fatal(err)
-	}
+	p := marginEraPolicy(t, rules)
 	if p.Digest != "sha256:ab4a33d9aa290b79b3eeaef9a6b3c17afda00376e9defade7d71e9ce65cb6128" {
 		t.Fatalf("the earlier media engine snapshot changed digest: %s", p.Digest)
 	}
