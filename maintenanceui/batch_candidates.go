@@ -1,6 +1,17 @@
 package maintenanceui
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/jakenesler/navigatorr/action"
+)
+
+// candidateReview is the review plus how each candidate's size budget encode
+// ended, keyed by its transcode action, for those that came from one.
+type candidateReview struct {
+	*action.BatchCandidateReview
+	SizeBudgetOutcomes map[string]string `json:"size_budget_outcomes,omitempty"`
+}
 
 func (s *Server) batchCandidates(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
@@ -9,7 +20,23 @@ func (s *Server) batchCandidates(w http.ResponseWriter, r *http.Request) {
 			fail(w, 409, err.Error())
 			return
 		}
-		writeJSON(w, 200, review)
+		out := candidateReview{BatchCandidateReview: review}
+		if st := s.engine.Deps().Store; st != nil {
+			for _, member := range review.Members {
+				child, err := st.GetActionInstanceIfExists(member.SourceAction)
+				if err != nil || child == nil {
+					continue
+				}
+				r := operationRecord{inst: *child, outputs: decodeOperationJSON(child.OutputsJSON), state: decodeOperationJSON(child.StateJSON)}
+				if outcome := operationSizeBudgetOutcome(r); outcome != "" {
+					if out.SizeBudgetOutcomes == nil {
+						out.SizeBudgetOutcomes = map[string]string{}
+					}
+					out.SizeBudgetOutcomes[member.SourceAction] = outcome
+				}
+			}
+		}
+		writeJSON(w, 200, out)
 		return
 	}
 	var body struct {

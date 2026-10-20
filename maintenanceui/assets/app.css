@@ -2283,5 +2283,24 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
 }
 .hardware-option { margin: -.15rem 0 .45rem 1.6rem; }
 .hardware-option > label { margin: .3rem 0; }
+.size-budget-option select { margin-left: .35rem; }
+.size-budget-option input[type="number"] { width: 5rem; margin: 0 .35rem; }
+.size-budget-help { margin: .2rem 0; font-size: .85em; }
 #hardware-margin-label { align-items: center; }
 #hardware-margin { width: 4.5rem; margin: 0 .35rem; }
+/* Size budget: the outcome badge, the rate-quality chart and its point lists. */
+.size-budget { margin: 6px 0; display: grid; gap: 6px; }
+.badge.size-budget-badge { color: var(--warning-strong); background: var(--warning-wash); border-color: var(--warning-line); justify-self: start; }
+.badge.size-budget-badge[data-outcome="meets_quality_target_within_budget"] { color: var(--forest-strong); background: var(--success-wash); border-color: var(--forest); }
+.size-budget-chart { width: 100%; max-width: 26rem; height: auto; }
+.size-budget-chart .axis { stroke: var(--control-line); stroke-width: 1; fill: none; }
+.size-budget-chart .budget-line { stroke: var(--accent); stroke-width: 1; stroke-dasharray: 4 3; }
+.size-budget-chart .target-line { stroke: var(--forest); stroke-width: 1; stroke-dasharray: 4 3; }
+.size-budget-chart .floor-line { stroke: var(--warning-line); stroke-width: 1; stroke-dasharray: 2 3; }
+.size-budget-chart .point { fill: var(--muted); }
+.size-budget-chart .point.passed { fill: var(--forest); }
+.size-budget-chart .point.fallback { fill: var(--accent); stroke: var(--ink); stroke-width: 1.5; }
+.size-budget-chart .point.planned { fill: var(--surface); stroke: var(--accent); stroke-width: 1.5; }
+.size-budget-chart text { fill: var(--muted); font-size: 9px; font-family: inherit; }
+.size-budget-points, .size-budget-siblings ul { margin: 4px 0 0; padding-left: 1.2rem; }
+.size-budget-warning { color: var(--warning-strong); background: var(--warning-wash); border: 1px solid var(--warning-line); border-radius: 6px; padding: 6px 8px; }

@@ -619,6 +619,9 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 				}
 				out := transcodeWorkerMetadataOutputs(ec, st)
 				out["skipped"], out["reason_code"] = true, getString(ec.State, "reason_code")
+				if st.ReasonCode == reasonQualityNotMet && st.QualityEvidence != nil && sizeBudgetActive(ec.State) {
+					out[sizeBudgetKey] = failSizeBudget(ec, st.QualityEvidence)
+				}
 				return StepResult{Status: StepCompleted, Outputs: out}, nil
 			}
 		}

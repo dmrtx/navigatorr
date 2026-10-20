@@ -68,7 +68,17 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 				return StepResult{Status: StepFailed, Error: "video copy evidence is missing or does not match the candidate and plan; original preserved"}, nil
 			}
 		} else {
-			expected, _ := json.Marshal(ensureBenchmarkQualityMetric(buildBenchmarkQualityConfig(snapshot.Profile.Optimization.Quality), "vmaf"))
+			expectedQuality := ensureBenchmarkQualityMetric(buildBenchmarkQualityConfig(snapshot.Profile.Optimization.Quality), "vmaf")
+			if getString(ec.State, "plan_source") == sizeBudgetPlanSource {
+				// A budget encode is held to the frozen floor, and only a plan
+				// the budget fallback built at its planned bitrate may be.
+				rec := sizeBudgetOf(ec.State)
+				expectedQuality = sizeBudgetFloorQuality(snapshot)
+				if rec == nil || expectedQuality == nil || plan.X265 == nil || plan.X265.BitrateKbps != rec.VideoBitrateKbps || transcode.NormalizeVideoCodec(plan.VideoCodec) != transcode.VideoCodecLibX265 || rec.BudgetBytes != snapshot.Size.SizeBudget.BudgetBytes(getInt64(ec.State, "original_size"), siblingEvidenceOf(ec.State)) {
+					return StepResult{Status: StepFailed, Error: "size budget plan does not match the frozen budget; original preserved"}, nil
+				}
+			}
+			expected, _ := json.Marshal(expectedQuality)
 			actual, _ := json.Marshal(plan.QualityValidation.Quality)
 			if plan.QualityValidation.Metric != "vmaf" || string(expected) != string(actual) {
 				return StepResult{Status: StepFailed, Error: "final quality validation does not enforce frozen mode policy; original preserved"}, nil
@@ -123,6 +133,16 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 			ec.State["reason_code"] = "insufficient_savings"
 			return StepResult{Status: StepCompleted, Outputs: map[string]any{"skipped": true, "reason_code": "insufficient_savings", "candidate_size_bytes": candidateSize}}, nil
 		}
+	}
+	var budget *SizeBudgetRecord
+	if sizeBudgetActive(ec.State) {
+		rec, fits := finishSizeBudget(ec, candidateSize)
+		if !fits {
+			ec.State["skip_transcode"] = true
+			ec.State["reason_code"] = SizeBudgetExceeded
+			return StepResult{Status: StepCompleted, Outputs: map[string]any{"skipped": true, "reason_code": SizeBudgetExceeded, "candidate_size_bytes": candidateSize, sizeBudgetKey: rec}}, nil
+		}
+		budget = rec
 	}
 	if ec.Decision != "" {
 		ec.State["validation_decision_applied"] = ec.Decision
@@ -192,7 +212,12 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 	ec.State["result"] = result
 	ec.State["size_saved_bytes"] = saved
 	ec.State["size_saved_percent"] = pct
-	return StepResult{Status: StepCompleted, Outputs: map[string]any{"result": result, "validation": validation, "candidate_path": outputPath, "output_path": outputPath, "size_saved_bytes": saved, "size_saved_percent": pct, "profile": getString(ec.State, "profile"), "recipe_version": plan.RecipeVersion, "recipe_digest": plan.RecipeDigest}}, nil
+	outputs := map[string]any{"result": result, "validation": validation, "candidate_path": outputPath, "output_path": outputPath, "size_saved_bytes": saved, "size_saved_percent": pct, "profile": getString(ec.State, "profile"), "recipe_version": plan.RecipeVersion, "recipe_digest": plan.RecipeDigest}
+	if budget != nil {
+		result["size_budget_outcome"] = budget.Outcome
+		outputs[sizeBudgetKey] = budget
+	}
+	return StepResult{Status: StepCompleted, Outputs: outputs}, nil
 }
 
 // verifyPublishedCandidateLight performs only stat-level checks. It returns the

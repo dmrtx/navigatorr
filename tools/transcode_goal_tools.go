@@ -17,11 +17,15 @@ type goalChangeInput struct {
 	IdempotencyKey   string   `json:"idempotency_key,omitempty" jsonschema:"description=Unique command receipt; required to change a goal"`
 	AllowHardware    *bool    `json:"allow_hardware,omitempty" jsonschema:"description=Only with mode=size: false keeps the search on x265 only, true (the default) also tries Apple VideoToolbox encodes through the same quality gates"`
 	AllowSlowPreset  *bool    `json:"allow_slow_preset,omitempty" jsonschema:"description=Only with mode=size: true also lets the quality fallback try the x265 slow preset, whose full encodes can take hours; default false"`
+	SizeBudgetPct    *float64 `json:"size_budget_percent,omitempty" jsonschema:"description=Only with mode=size, not with size_budget_bytes: 5 to 85, a percent of each source file. When no setting meets the quality limits, or the one that does is larger than this, the file is encoded once at the budget with two-pass x265 and reported as below the quality target, within budget"`
+	SizeBudgetBytes  *float64 `json:"size_budget_bytes,omitempty" jsonschema:"description=Only with mode=size, not with size_budget_percent: a whole number of bytes, at least 50000000, used the same way; never more than 85% of the source"`
+	SizeBudgetSource *string  `json:"size_budget_source,omitempty" jsonschema:"description=Only with mode=size, not with size_budget_percent or size_budget_bytes: siblings sets each file's budget from the median total bitrate of the other video files in its season folder (else its series folder; at least 3 of the same resolution class) times size_budget_sibling_multiplier"`
+	SizeBudgetMult   *float64 `json:"size_budget_sibling_multiplier,omitempty" jsonschema:"description=Only with size_budget_source=siblings: 1.0 to 4.0, default 1.5"`
 	HardwareMargin   *float64 `json:"hardware_margin_percent,omitempty" jsonschema:"description=Only with mode=size and allow_hardware not false: how much larger than the best x265 result a VideoToolbox result may be and still win; 0 to 50, default 15"`
 }
 
 func registerTranscodeGoalTool(s *server.MCPServer, engine *action.Engine) {
-	s.AddTool(mcp.NewTool("transcode_goal_change", mcp.WithDescription("Preview or change an automatic batch's goal without choosing technical profiles. Omit mode to read the exact selection and version. To change, provide mode, selection_version and idempotency_key; with mode=size, allow_hardware=false keeps the search on x265 only and hardware_margin_percent (0-50, default 15) sets the media engine size margin; allow_slow_preset=true also lets the quality fallback try the slow x265 preset (hours per full encode; default false); leaving allow_hardware out turns the media engine on at the default margin, so read the preview first: for smaller-files attempts it shows the allow_hardware / hardware_margin_percent each selected file was frozen with (hardware_mixed when they differ) and passing those keeps them. Keeps originals, existing attempts and the operation's finite search budget; active attempts finish first. Returns a durable command receipt; monitor its command_id with action_status."), mcp.WithInputSchema[goalChangeInput]()), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	s.AddTool(mcp.NewTool("transcode_goal_change", mcp.WithDescription("Preview or change an automatic batch's goal without choosing technical profiles. Omit mode to read the exact selection and version. To change, provide mode, selection_version and idempotency_key; with mode=size, allow_hardware=false keeps the search on x265 only and hardware_margin_percent (0-50, default 15) sets the media engine size margin; allow_slow_preset=true also lets the quality fallback try the slow x265 preset (hours per full encode; default false); size_budget_percent (5-85, of the source), size_budget_bytes (at least 50000000) or size_budget_source=siblings (the median bitrate of the other episodes in its season or series folder times size_budget_sibling_multiplier 1.0-4.0, default 1.5; at least 3 of the same resolution class), exactly one of them, encodes a file whose search finds no passing setting, or only one larger than the budget, once at the budget (two-pass x265, floor VMAF 70/60/65, reported as below the quality target and never replaced without approval); leaving allow_hardware out turns the media engine on at the default margin, so read the preview first: for smaller-files attempts it shows the allow_hardware / hardware_margin_percent each selected file was frozen with (hardware_mixed when they differ) and passing those keeps them. Keeps originals, existing attempts and the operation's finite search budget; active attempts finish first. Returns a durable command receipt; monitor its command_id with action_status."), mcp.WithInputSchema[goalChangeInput]()), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args := req.GetArguments()
 		id := argString(args, "id", "")
 		scope := argString(args, "scope", "all")
@@ -100,6 +104,22 @@ func registerTranscodeGoalTool(s *server.MCPServer, engine *action.Engine) {
 				return toolErr("allow_slow_preset must be true or false"), nil
 			}
 			settings["allow_slow_preset"] = allow
+		}
+		if raw, given := args["size_budget_source"]; given && raw != nil {
+			source, ok := raw.(string)
+			if !ok {
+				return toolErr("size_budget_source must be a string"), nil
+			}
+			settings["size_budget_source"] = source
+		}
+		for _, key := range []string{"size_budget_percent", "size_budget_bytes", "size_budget_sibling_multiplier"} {
+			if raw, given := args[key]; given && raw != nil {
+				n, ok := raw.(float64)
+				if !ok {
+					return toolErr("%s must be a number", key), nil
+				}
+				settings[key] = n
+			}
 		}
 		if err := action.ValidateHardwareInputs(mode, settings); err != nil {
 			return toolErr("%v", err), nil

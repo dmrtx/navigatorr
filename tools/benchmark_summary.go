@@ -33,6 +33,10 @@ type benchmarkSummary struct {
 	AudioNote          string                            `json:"audio_note,omitempty"`
 	PlanSource         string                            `json:"plan_source,omitempty"`
 	PlanNote           string                            `json:"plan_note,omitempty"`
+	// SizeBudget is the operation's size budget fallback: what it planned, the
+	// rate-quality points and, once measured, how the result compares with the
+	// quality target.
+	SizeBudget *action.SizeBudgetRecord `json:"size_budget,omitempty"`
 	// HardwareReason says why a VideoToolbox (media engine) winner was chosen,
 	// next to the encoder the explanation names.
 	HardwareReason string `json:"hardware_reason,omitempty"`
@@ -164,6 +168,12 @@ func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
 			s.NextStep = "Cancel to keep the original. To process this file, make the missing quality check available on the worker (the waiting reason names it) and start the goal again; quality requirements are never relaxed automatically."
 			s.UserNextStep = "Keep the original. The worker cannot run a quality check this goal needs; once it can, start the goal again."
 		}
+	case decision != nil && summaryPlanSource(res) == "size_budget":
+		var budget action.SizeBudgetRecord
+		benchmarkField(res, "size_budget", &budget)
+		s.Outcome, s.Message = "size_budget", budget.Message
+		s.NextStep = "Monitor this action. The result is reported as below the quality target unless it measures within the goal's limits, and it is held to a fixed quality floor; the original is never replaced without the usual approval."
+		s.UserNextStep = "Nothing to do yet. The file is encoded once at your size budget; if it comes out below the quality target you will be told before you approve any replacement."
 	case decision != nil && decision.Winner == nil && summaryPlanSource(res) == "audio_only":
 		s.Outcome, s.Message = "audio_only", "No video encode met this goal's quality floor and savings gate, so the video is copied unchanged and only the lossless audio is compacted to AAC."
 		s.NextStep = "Monitor this action. The candidate must prove its video bit-identical to the source and still meet the same minimum savings; the original is never changed before that."
@@ -206,6 +216,12 @@ func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
 	benchmarkField(res, "plan_source", &planSource)
 	if planSource == "benchmark_winner" || s.PlanNote != "" {
 		s.PlanSource = planSource
+	}
+	if planSource == "size_budget" {
+		var budget action.SizeBudgetRecord
+		if benchmarkField(res, "size_budget", &budget) && budget.BudgetBytes > 0 {
+			s.SizeBudget = &budget
+		}
 	}
 	var evidence []transcode.BenchmarkCandidateQualityEvidence
 	var request transcode.BenchmarkRequest

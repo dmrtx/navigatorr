@@ -1,0 +1,693 @@
+package action
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"math"
+	"sort"
+
+	"github.com/jakenesler/navigatorr/mediainspect"
+	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/optimization"
+)
+
+// A size budget is the inverse of the size search. The search keeps quality
+// fixed (VMAF mean 88, p5 84, worst 5 s window 85, CAMBI 6/16) and looks for
+// the smallest file that meets it; a hard source (dark, grainy) can end with
+// nothing that meets it, or with a passing file larger than the user accepts.
+// With a budget the action then encodes the file once at the bitrate that
+// lands on the budget (x265 two-pass ABR, which at an equal average bitrate
+// matches CRF quality and, unlike CRF, hits a size), measures it on the same
+// final validation windows, and reports it as below the quality target. A
+// frozen floor refuses an outright bad result; the normal approval is still
+// needed before anything replaces the original.
+
+const (
+	// sizeBudgetKey holds the SizeBudgetRecord of a fallback that started.
+	sizeBudgetKey = "size_budget"
+	// sizeBudgetPlanSource marks the encode plan as the budget fallback's.
+	sizeBudgetPlanSource = "size_budget"
+
+	sizeBudgetMinPercent = 5
+	sizeBudgetMaxPercent = 85 // the size mode's 15% minimum savings
+	// sizeBudgetMinBytes keeps an absolute budget from being a typo for MB.
+	sizeBudgetMinBytes = 50_000_000
+
+	// sizeBudgetFillPercent is the share of the budget the encode aims at.
+	// Two-pass x265 lands within a few percent of its average bitrate over a
+	// long file; the rest is headroom so the result stays inside the budget.
+	sizeBudgetFillPercent = 97
+
+	// The fallback's trigger, as recorded.
+	sizeBudgetTriggerNoWinner   = "no_passing_candidate"
+	sizeBudgetTriggerOverBudget = "passing_candidate_over_budget"
+
+	// Outcomes after final validation.
+	SizeBudgetBelowTarget = "below_quality_target_within_budget"
+	SizeBudgetMeetsTarget = "meets_quality_target_within_budget"
+	SizeBudgetBelowFloor  = "below_quality_floor"
+	SizeBudgetExceeded    = "size_budget_exceeded"
+)
+
+// sizeBudgetFloor is the quality floor of a budget fallback, in VMAF
+// (v1_1080p_3h). VMAF maps roughly linearly onto the five-point ACR scale, about
+// 20 points per category (80 good, 60 fair, 40 poor). The floor refuses a result
+// worse than "fair": every 10 s window and the pooled mean at least 70 (between
+// fair and good), no 5 s stretch below 65 and the worst 5% of frames no lower
+// than 60. That is about four just-noticeable differences (about 6 VMAF each)
+// under the size mode's limits of 88/84/85, low enough that a dark, grainy
+// source whose VMAF is harsh on grain can still meet a budget of a third of its
+// size, and high enough to refuse a broken encode. Banding is the artefact a
+// low bitrate produces on dark content, so the CAMBI limits are not lowered.
+var sizeBudgetFloor = SizeBudgetFloor{VMAFMean: 70, VMAFP5: 60, VMAFWorstWindow: 65}
+
+// sizeBudgetX265 are the bounded two-pass settings of the fallback encode:
+// x265 medium's reference and B-frame counts with a longer lookahead for the
+// rate control, aq-mode 3 (variance AQ biased to dark scenes, which the default
+// mode starves of bits) and psy-rdoq 1 to keep grain from being smoothed away.
+var sizeBudgetX265 = transcode.X265Settings{TwoPass: true, Lookahead: 40, BFrames: 4, RefFrames: 3, AQMode: 3, AQStrength: 1, PsyRD: 2, PsyRDOQ: 1}
+
+const sizeBudgetPreset = "medium"
+
+// SizeBudgetFloor is the minimum a budget fallback must measure on the final
+// validation windows to be offered at all.
+type SizeBudgetFloor struct {
+	VMAFMean        float64 `json:"vmaf_mean_minimum"`
+	VMAFP5          float64 `json:"vmaf_p5_minimum"`
+	VMAFWorstWindow float64 `json:"vmaf_worst_window_minimum"`
+}
+
+// SizeBudgetPolicy is frozen in a size snapshot when the operation sets a
+// budget. Exactly one of Percent (of the source file), Bytes and Siblings (the
+// rules that derive it from the files beside the source) is set.
+type SizeBudgetPolicy struct {
+	Percent     float64                `json:"percent,omitempty"`
+	Bytes       int64                  `json:"bytes,omitempty"`
+	Siblings    *SiblingBudgetRules    `json:"siblings,omitempty"`
+	FillPercent float64                `json:"fill_percent"`
+	Preset      string                 `json:"preset"`
+	X265        transcode.X265Settings `json:"x265"`
+	Floor       SizeBudgetFloor        `json:"quality_floor"`
+}
+
+func (b *SizeBudgetPolicy) Clone() *SizeBudgetPolicy {
+	if b == nil {
+		return nil
+	}
+	cp := *b
+	if b.Siblings != nil {
+		s := *b.Siblings
+		cp.Siblings = &s
+	}
+	return &cp
+}
+
+// Validate checks a frozen budget, which comes back from stored state.
+func (b *SizeBudgetPolicy) Validate() error {
+	if b == nil {
+		return nil
+	}
+	set := 0
+	for _, on := range []bool{b.Percent > 0, b.Bytes > 0, b.Siblings != nil} {
+		if on {
+			set++
+		}
+	}
+	if set != 1 || b.Percent < 0 || b.Bytes < 0 {
+		return fmt.Errorf("size budget needs exactly one of a percent, a byte count and the sibling files")
+	}
+	if err := b.Siblings.validate(); err != nil {
+		return err
+	}
+	if b.Percent > 0 && (b.Percent < sizeBudgetMinPercent || b.Percent > sizeBudgetMaxPercent || math.IsNaN(b.Percent)) {
+		return fmt.Errorf("size_budget_percent must be between %d and %d", sizeBudgetMinPercent, sizeBudgetMaxPercent)
+	}
+	if b.Bytes > 0 && b.Bytes < sizeBudgetMinBytes {
+		return fmt.Errorf("size_budget_bytes must be at least %d", sizeBudgetMinBytes)
+	}
+	if b.FillPercent <= 50 || b.FillPercent > 100 || !transcode.IsValidLibX265Preset(b.Preset) {
+		return fmt.Errorf("invalid size budget encode settings")
+	}
+	x := b.X265
+	x.BitrateKbps = 64
+	if err := x.Validate(transcode.VideoCodecLibX265, 0); err != nil {
+		return err
+	}
+	f := b.Floor
+	for _, v := range []float64{f.VMAFMean, f.VMAFP5, f.VMAFWorstWindow} {
+		if math.IsNaN(v) || v <= 0 || v > 100 {
+			return fmt.Errorf("invalid size budget quality floor")
+		}
+	}
+	return nil
+}
+
+// BudgetBytes is the budget for a source of sourceBytes: the absolute budget,
+// the percent of the source or what the siblings allow, never more than the
+// size mode's minimum saving allows (the worker enforces that minimum on every
+// size plan). It is zero, no budget, when the siblings gave none.
+func (b *SizeBudgetPolicy) BudgetBytes(sourceBytes int64, siblings *SiblingBudgetEvidence) int64 {
+	if b == nil || sourceBytes <= 0 {
+		return 0
+	}
+	ceiling := (sourceBytes/100)*sizeBudgetMaxPercent + ((sourceBytes%100)*sizeBudgetMaxPercent)/100
+	budget := b.Bytes
+	switch {
+	case b.Percent > 0:
+		budget = int64(math.Floor(float64(sourceBytes) * b.Percent / 100))
+	case b.Siblings != nil:
+		if siblings == nil || siblings.Reason != "" || siblings.BudgetBytes <= 0 || siblings.Multiplier != b.Siblings.Multiplier {
+			return 0
+		}
+		budget = siblings.BudgetBytes
+	}
+	return min(budget, ceiling)
+}
+
+// modeSizeBudgetInput reads size_budget_percent or size_budget_bytes for a
+// mode: size mode only, off unless one is set.
+func modeSizeBudgetInput(mode string, inputs map[string]any) (*SizeBudgetPolicy, error) {
+	number := func(key string) (float64, bool, error) {
+		raw, has := inputs[key]
+		if !has || raw == nil {
+			return 0, false, nil
+		}
+		switch n := raw.(type) {
+		case float64:
+			return n, true, nil
+		case int:
+			return float64(n), true, nil
+		case int64:
+			return float64(n), true, nil
+		case json.Number:
+			f, err := n.Float64()
+			return f, err == nil, err
+		}
+		return 0, false, fmt.Errorf("%s must be a number", key)
+	}
+	percent, hasPercent, err := number("size_budget_percent")
+	if err != nil {
+		return nil, err
+	}
+	bytes, hasBytes, err := number("size_budget_bytes")
+	if err != nil {
+		return nil, err
+	}
+	multiplier, hasMultiplier, err := number("size_budget_sibling_multiplier")
+	if err != nil {
+		return nil, err
+	}
+	source, hasSource := inputs["size_budget_source"]
+	if source == nil {
+		hasSource = false
+	}
+	if !hasPercent && !hasBytes && !hasSource {
+		if hasMultiplier {
+			return nil, fmt.Errorf("size_budget_sibling_multiplier requires size_budget_source=siblings")
+		}
+		return nil, nil
+	}
+	if mode != "size" {
+		return nil, fmt.Errorf("size_budget_percent, size_budget_bytes and size_budget_source are only supported with mode=size")
+	}
+	if (hasPercent && hasBytes) || (hasSource && (hasPercent || hasBytes)) {
+		return nil, fmt.Errorf("set only one of size_budget_percent, size_budget_bytes and size_budget_source")
+	}
+	if hasMultiplier && !hasSource {
+		return nil, fmt.Errorf("size_budget_sibling_multiplier requires size_budget_source=siblings")
+	}
+	b := &SizeBudgetPolicy{FillPercent: sizeBudgetFillPercent, Preset: sizeBudgetPreset, X265: sizeBudgetX265, Floor: sizeBudgetFloor}
+	if hasSource {
+		if source != "siblings" {
+			return nil, fmt.Errorf(`size_budget_source must be "siblings"`)
+		}
+		if !hasMultiplier {
+			multiplier = siblingBudgetDefaultMultiplier
+		}
+		b.Siblings = &SiblingBudgetRules{Multiplier: multiplier, MinimumSiblings: siblingBudgetMinimum, MaxProbed: siblingBudgetMaxProbed}
+	} else if hasPercent {
+		if math.IsNaN(percent) || math.IsInf(percent, 0) || percent < sizeBudgetMinPercent || percent > sizeBudgetMaxPercent {
+			return nil, fmt.Errorf("size_budget_percent must be between %d and %d (size mode saves at least 15%%)", sizeBudgetMinPercent, sizeBudgetMaxPercent)
+		}
+		b.Percent = percent
+	} else {
+		if math.IsNaN(bytes) || math.IsInf(bytes, 0) || bytes != math.Trunc(bytes) || bytes < sizeBudgetMinBytes || bytes > math.MaxInt64/2 {
+			return nil, fmt.Errorf("size_budget_bytes must be a whole number of bytes, at least %d", sizeBudgetMinBytes)
+		}
+		b.Bytes = int64(bytes)
+	}
+	return b, b.Validate()
+}
+
+// SizeBudgetPoint is one point of the rate-quality curve a budget fallback
+// shows: a setting the search measured (its sampled size estimate and VMAF) or
+// the fallback itself (its planned or actual size and its final VMAF).
+type SizeBudgetPoint struct {
+	Kind         string   `json:"kind"` // "searched" or "budget_fallback"
+	CandidateID  string   `json:"candidate_id,omitempty"`
+	VideoCodec   string   `json:"video_codec,omitempty"`
+	Quality      int      `json:"quality,omitempty"`
+	Preset       string   `json:"preset,omitempty"`
+	BitrateKbps  int      `json:"bitrate_kbps,omitempty"`
+	Bytes        int64    `json:"bytes"`
+	Measured     bool     `json:"measured"` // actual bytes and final windows, not an estimate
+	Passed       bool     `json:"passed"`   // met the size mode's quality limits
+	WithinBudget bool     `json:"within_budget"`
+	VMAFMean     *float64 `json:"vmaf_mean,omitempty"`
+	VMAFP5       *float64 `json:"vmaf_p5,omitempty"`
+	VMAFWorst    *float64 `json:"vmaf_worst_window,omitempty"`
+}
+
+// SizeBudgetRecord is what a budget fallback planned and, after the encode,
+// what it measured.
+type SizeBudgetRecord struct {
+	Trigger       string  `json:"trigger"`
+	SourceBytes   int64   `json:"source_bytes"`
+	BudgetBytes   int64   `json:"budget_bytes"`
+	BudgetPercent float64 `json:"budget_percent,omitempty"`
+	// Siblings is the evidence a sibling budget came from.
+	Siblings *SiblingBudgetEvidence `json:"siblings,omitempty"`
+	// TargetBytes is what the encode aims at (FillPercent of the budget) and
+	// NonVideoBytes what the audio, subtitles, attachments and container take.
+	TargetBytes      int64   `json:"target_bytes"`
+	NonVideoBytes    int64   `json:"non_video_bytes"`
+	VideoBitrateKbps int     `json:"video_bitrate_kbps"`
+	DurationSeconds  float64 `json:"duration_seconds"`
+	// OverBudgetCandidateID is the passing setting the budget ruled out.
+	OverBudgetCandidateID    string `json:"over_budget_candidate_id,omitempty"`
+	OverBudgetEstimatedBytes int64  `json:"over_budget_estimated_bytes,omitempty"`
+
+	Target QualityLimits     `json:"quality_target"`
+	Floor  QualityLimits     `json:"quality_floor"`
+	Curve  []SizeBudgetPoint `json:"curve,omitempty"`
+
+	// Set after the encode.
+	Outcome        string               `json:"outcome,omitempty"`
+	CandidateBytes int64                `json:"candidate_bytes,omitempty"`
+	Final          *FinalQualitySummary `json:"final,omitempty"`
+	// BelowTarget lists the size mode's limits the result misses, in words.
+	BelowTarget []string `json:"below_target,omitempty"`
+	Message     string   `json:"message"`
+}
+
+func sizeBudgetOf(state map[string]any) *SizeBudgetRecord {
+	if state[sizeBudgetKey] == nil {
+		return nil
+	}
+	var r SizeBudgetRecord
+	if !reencode(state[sizeBudgetKey], &r) || r.BudgetBytes <= 0 {
+		return nil
+	}
+	return &r
+}
+
+// sizeBudgetActive reports a plan built by the budget fallback.
+func sizeBudgetActive(state map[string]any) bool {
+	return getString(state, "plan_source") == sizeBudgetPlanSource && sizeBudgetOf(state) != nil
+}
+
+// sizeBudgetNonVideoBytes is what everything but the main video takes in the
+// output: the source minus its video stream, minus what compacting the
+// lossless audio saves. A converted track whose source size is unknown saves
+// nothing here, which errs towards a smaller file. It is unknown (false) when
+// the video stream's own size cannot be read.
+func sizeBudgetNonVideoBytes(rep *mediainspect.DetailedReport, sourceBytes int64) (int64, bool) {
+	if rep == nil || sourceBytes <= 0 || rep.DurationSec <= 0 {
+		return 0, false
+	}
+	video := rep.MainVideo()
+	if len(video) != 1 {
+		return 0, false
+	}
+	videoBytes := audioStreamBytes(video[0], rep.DurationSec, sourceBytes)
+	if videoBytes <= 0 || videoBytes >= sourceBytes {
+		return 0, false
+	}
+	return estimateAudioOnly(rep, sourceBytes).CandidateBytes - videoBytes, true
+}
+
+// sizeBudgetVideoKbps is the average video bitrate that lands the whole file
+// on target bytes.
+func sizeBudgetVideoKbps(targetBytes, nonVideoBytes int64, duration float64) int {
+	if targetBytes <= nonVideoBytes || duration <= 0 {
+		return 0
+	}
+	return int(math.Floor(float64(targetBytes-nonVideoBytes) * 8 / duration / 1000))
+}
+
+// sizeBudgetFloorQuality is the final validation config of a budget fallback:
+// the frozen size config with the VMAF minimums lowered to the floor. Banding,
+// the model and the window rules are unchanged.
+func sizeBudgetFloorQuality(snapshot *ModePolicySnapshot) *transcode.BenchmarkQualityConfig {
+	if snapshot == nil || snapshot.Size == nil || snapshot.Size.SizeBudget == nil {
+		return nil
+	}
+	qc := ensureBenchmarkQualityMetric(buildBenchmarkQualityConfig(snapshot.Profile.Optimization.Quality), "vmaf")
+	if qc.VMAF == nil {
+		return nil
+	}
+	v := *qc.VMAF
+	f := snapshot.Size.SizeBudget.Floor
+	p5, worst := f.VMAFP5, f.VMAFWorstWindow
+	v.Minimum, v.P5Minimum, v.WorstWindowMinimum = f.VMAFMean, &p5, &worst
+	qc.VMAF = &v
+	return qc
+}
+
+// sizeBudgetCurve lists the settings the search measured far enough to
+// estimate, smallest first, as points of the rate-quality curve.
+func sizeBudgetCurve(decision *transcode.BenchmarkDecision, budget int64) []SizeBudgetPoint {
+	if decision == nil {
+		return nil
+	}
+	var points []SizeBudgetPoint
+	for _, ev := range decision.Evaluations {
+		if ev.EstimatedBytes <= 0 || ev.VMAF == nil {
+			continue
+		}
+		v := ev.VMAF
+		mean, p5 := v.Mean, v.P5
+		p := SizeBudgetPoint{Kind: "searched", CandidateID: ev.CandidateID, VideoCodec: transcode.BenchmarkCandidateVideoCodec(transcode.BenchmarkCandidate{VideoCodec: ev.VideoCodec}), Quality: ev.Quality, Preset: ev.Preset, BitrateKbps: ev.AverageBitrateKbps, Bytes: ev.EstimatedBytes, Passed: ev.Eligible, WithinBudget: ev.EstimatedBytes <= budget, VMAFMean: &mean, VMAFP5: &p5}
+		if v.WorstWindowMean > 0 {
+			worst := v.WorstWindowMean
+			p.VMAFWorst = &worst
+		}
+		points = append(points, p)
+	}
+	sort.SliceStable(points, func(i, j int) bool { return points[i].Bytes < points[j].Bytes })
+	return points
+}
+
+// sizeBudgetWinnerFits reports whether a passing winner's sampled estimate is
+// within the frozen budget. Without a budget every winner fits.
+func sizeBudgetWinnerFits(snapshot *ModePolicySnapshot, winner *transcode.BenchmarkWinner, sourceBytes int64, siblings *SiblingBudgetEvidence) bool {
+	if snapshot == nil || snapshot.Size == nil || snapshot.Size.SizeBudget == nil || winner == nil {
+		return true
+	}
+	budget := snapshot.Size.SizeBudget.BudgetBytes(sourceBytes, siblings)
+	if budget <= 0 {
+		return true // the siblings gave no budget
+	}
+	estimated := winner.EstimatedTotalBytes
+	if estimated <= 0 {
+		estimated = int64(math.Ceil(winner.EstimatedTotalMB * 1e6))
+	}
+	return estimated > 0 && estimated <= budget
+}
+
+// sizeBudgetFallback replaces a size search's outcome with one encode at the
+// budget when the search found no passing setting (winner nil) or only one
+// larger than the budget. handled is false when the frozen policy has no
+// budget, so the caller goes on as it would without one. A source the budget
+// cannot be planned for ends here with a reason instead.
+func (e *Engine) sizeBudgetFallback(ctx context.Context, ec *ExecutionContext, outputs map[string]any, decision *transcode.BenchmarkDecision, winner *transcode.BenchmarkWinner) (StepResult, bool) {
+	if ec.ActionName != "transcode_media" || getString(ec.Inputs, "mode") != "size" {
+		return StepResult{}, false
+	}
+	snapshot, err := freezeModePolicy(ec)
+	if err != nil || snapshot == nil || snapshot.Version != optimization.ModePolicyV3 || snapshot.Size == nil || snapshot.Size.SizeBudget == nil {
+		return StepResult{}, false
+	}
+	policy := snapshot.Size.SizeBudget
+	if policy.Validate() != nil {
+		return StepResult{Status: StepFailed, Error: "frozen size budget is invalid (fail closed)"}, true
+	}
+	skip := func(reason, message string) (StepResult, bool) {
+		ec.State["skip_transcode"] = true
+		ec.State["reason_code"] = reason
+		ec.State["size_budget_skip_message"] = message
+		outputs["skipped"] = true
+		outputs["reason_code"] = reason
+		outputs["size_budget_skip_message"] = message
+		return StepResult{Status: StepCompleted, Outputs: outputs}, true
+	}
+	rep := getSourceReport(ec.State["source_report"])
+	original := getInt64(ec.State, "original_size")
+	siblings := siblingEvidenceOf(ec.State)
+	budget := policy.BudgetBytes(original, siblings)
+	if policy.Siblings != nil && budget <= 0 {
+		// The siblings gave no budget: go on as without one. The evidence
+		// says why.
+		return StepResult{}, false
+	}
+	if rep == nil || budget <= 0 {
+		return skip("size_budget_estimate_unavailable", "The source's size or duration could not be read, so no bitrate for the size budget could be planned. Original preserved.")
+	}
+	if e.deps.Transcode == nil {
+		return StepResult{Status: StepFailed, Error: "transcode executor is disabled or not configured in navigatorr"}, true
+	}
+	caps, err := e.deps.Transcode.Capabilities(ctx)
+	if err != nil {
+		return workerCapabilityLookupResult(err, "size budget two-pass x265"), true
+	}
+	// Copying the video and compacting only lossless audio loses no picture
+	// quality; when a worker can do that and it alone fits the budget, it is
+	// the better answer.
+	if winner == nil && snapshot.Size.AudioOnlyFallback && caps.SizeAudioOnly {
+		if est := estimateAudioOnly(rep, original); est.Compacted > 0 && est.CandidateBytes <= budget {
+			return StepResult{}, false
+		}
+	}
+	if policy.Siblings == nil {
+		siblings = nil
+	}
+	rec := &SizeBudgetRecord{Trigger: sizeBudgetTriggerNoWinner, SourceBytes: original, BudgetBytes: budget, BudgetPercent: policy.Percent, Siblings: siblings, DurationSeconds: rep.DurationSec,
+		Floor: QualityLimits{VMAFMean: &policy.Floor.VMAFMean, VMAFP5: &policy.Floor.VMAFP5, VMAFWorstWindow: &policy.Floor.VMAFWorstWindow}}
+	if limits := qualityLimitsOf(ensureBenchmarkQualityMetric(buildBenchmarkQualityConfig(snapshot.Profile.Optimization.Quality), "vmaf")); limits != nil {
+		rec.Target = *limits
+		rec.Floor.WorstWindowSeconds, rec.Floor.CAMBIMean, rec.Floor.CAMBIPeak = limits.WorstWindowSeconds, limits.CAMBIMean, limits.CAMBIPeak
+	}
+	if winner != nil {
+		rec.Trigger = sizeBudgetTriggerOverBudget
+		rec.OverBudgetCandidateID = winner.CandidateID
+		rec.OverBudgetEstimatedBytes = winner.EstimatedTotalBytes
+	}
+	rec.Curve = sizeBudgetCurve(decision, budget)
+	nonVideo, known := sizeBudgetNonVideoBytes(rep, original)
+	if !known {
+		return skip("size_budget_estimate_unavailable", "The size of the source's video stream could not be read, so no bitrate for the size budget could be planned. Original preserved.")
+	}
+	rec.NonVideoBytes = nonVideo
+	rec.TargetBytes = int64(math.Floor(float64(budget) * policy.FillPercent / 100))
+	rec.VideoBitrateKbps = sizeBudgetVideoKbps(rec.TargetBytes, nonVideo, rep.DurationSec)
+	x := policy.X265
+	x.BitrateKbps = rec.VideoBitrateKbps
+	if x.Validate(transcode.VideoCodecLibX265, 0) != nil {
+		return skip("size_budget_unreachable", fmt.Sprintf("The audio, subtitles and other streams already take %s of the %s budget, which leaves no usable video bitrate (%d kbps). Original preserved.", formatBudgetBytes(nonVideo), formatBudgetBytes(budget), rec.VideoBitrateKbps))
+	}
+	if !caps.X265TwoPass || !caps.Encoders[transcode.VideoCodecLibX265] {
+		return skip("size_budget_worker_unsupported", "The size budget needs a worker that can encode two-pass x265; upgrade the worker and retry. Original preserved.")
+	}
+	plan, err := e.sizeBudgetPlan(ec, snapshot, &x)
+	if err != nil {
+		return StepResult{Status: StepFailed, Error: fmt.Sprintf("building the size budget plan: %v", err)}, true
+	}
+	planned := SizeBudgetPoint{Kind: "budget_fallback", VideoCodec: transcode.VideoCodecLibX265, Preset: plan.Preset, BitrateKbps: x.BitrateKbps, Bytes: rec.TargetBytes, WithinBudget: true}
+	rec.Curve = append(rec.Curve, planned)
+	rec.Message = sizeBudgetPlannedMessage(rec)
+	ec.State[sizeBudgetKey] = rec
+	outputs[sizeBudgetKey] = rec
+	ec.State["plan"] = plan
+	ec.State["plan_source"] = sizeBudgetPlanSource
+	ec.State["plan_digest"] = plan.PlanDigest
+	outputs["plan"] = plan
+	outputs["plan_source"] = sizeBudgetPlanSource
+	outputs["plan_digest"] = plan.PlanDigest
+	outputs["plan_note"] = rec.Message
+	return StepResult{Status: StepCompleted, Outputs: outputs}, true
+}
+
+// sizeBudgetPlan is the search's starting plan encoded as two-pass x265 at the
+// budget's bitrate, with final validation on the size mode's windows held to
+// the floor.
+func (e *Engine) sizeBudgetPlan(ec *ExecutionContext, snapshot *ModePolicySnapshot, x *transcode.X265Settings) (*transcode.Plan, error) {
+	base := getPlan(ec.State["plan"])
+	if base == nil || base.Mode != "size" || base.PolicyDigest != snapshot.Digest {
+		return nil, fmt.Errorf("the frozen size plan is missing")
+	}
+	var request transcode.BenchmarkRequest
+	if !reencode(ec.State["benchmark_request"], &request) || request.Quality == nil || request.Quality.FinalValidation == nil || request.Quality.FinalValidation.Mode != "sampled" {
+		return nil, fmt.Errorf("the search's final validation plan is missing")
+	}
+	digest, err := transcode.DigestBenchmarkRequest(&request)
+	if err != nil || digest != getString(ec.State, "benchmark_request_digest") {
+		return nil, fmt.Errorf("the search request changed before the size budget fallback")
+	}
+	fresh := 0
+	if r := request.AutomaticSearch; r != nil && r.HoldoutWindows == transcode.HoldoutWindowsFinalGrid {
+		fresh = r.FinalFreshWindows
+	}
+	samples := append([]transcode.BenchmarkSampleWindow(nil), request.Samples...)
+	windows, freshWindows := sizeFinalWindowsWithFresh(ec, request.SourceDuration, fresh)
+	if windows != nil {
+		samples = windows
+	}
+	floor := sizeBudgetFloorQuality(snapshot)
+	if floor == nil {
+		return nil, fmt.Errorf("the size budget quality floor is missing")
+	}
+	p := *base
+	// The base plan's tune (animation for anime) and Main10 choice carry over.
+	p.VideoCodec, p.Quality, p.Preset = transcode.VideoCodecLibX265, 0, snapshot.Size.SizeBudget.Preset
+	p.X265 = x.Clone()
+	p.PrioritizeSpeed, p.SpatialAQ, p.Realtime = nil, nil, nil
+	p.AverageBitrateKbps, p.MaxBitrateKbps, p.ConstantBitrate = 0, 0, nil
+	p.QMin, p.QMax, p.GOPSize, p.BFrames, p.ClosedGOP, p.PowerEfficient, p.MaxRefFrames = nil, nil, nil, nil, nil, nil, nil
+	p.QualityValidation = &transcode.QualityValidationPlan{Metric: request.Metric, Samples: samples, FreshSamples: freshWindows, Quality: *floor, BenchmarkRequestDigest: digest}
+	p.PlanDigest = ""
+	d, err := transcode.DigestPlan(&p)
+	if err != nil {
+		return nil, err
+	}
+	p.PlanDigest = d
+	return &p, nil
+}
+
+// finishSizeBudget records a validated budget candidate: its size against the
+// budget and its final numbers against the size mode's limits. It reports
+// false when the candidate is larger than the budget, which ends the action
+// with the original kept.
+func finishSizeBudget(ec *ExecutionContext, candidateBytes int64) (*SizeBudgetRecord, bool) {
+	rec := sizeBudgetOf(ec.State)
+	if rec == nil {
+		return nil, true
+	}
+	rec.CandidateBytes = candidateBytes
+	var evidence transcode.FinalQualityEvidence
+	if reencode(ec.State["quality_evidence"], &evidence) && evidence.Verdict != "" {
+		rec.Final = summarizeFinalQuality(&evidence, &rec.Target)
+		rec.BelowTarget = sizeBudgetMissedTarget(rec.Final.Measured, rec.Target)
+	}
+	point := SizeBudgetPoint{Kind: "budget_fallback", VideoCodec: transcode.VideoCodecLibX265, BitrateKbps: rec.VideoBitrateKbps, Bytes: candidateBytes, Measured: true, WithinBudget: candidateBytes <= rec.BudgetBytes}
+	if plan := getPlan(ec.State["plan"]); plan != nil {
+		point.Preset = plan.Preset
+	}
+	if rec.Final != nil {
+		point.VMAFMean, point.VMAFP5, point.VMAFWorst = rec.Final.Measured.VMAFMean, rec.Final.Measured.VMAFP5, rec.Final.Measured.VMAFWorstWindow
+		point.Passed = len(rec.BelowTarget) == 0
+	}
+	curve := rec.Curve[:0:0]
+	for _, p := range rec.Curve {
+		if p.Kind != "budget_fallback" {
+			curve = append(curve, p)
+		}
+	}
+	rec.Curve = append(curve, point)
+	fits := candidateBytes > 0 && candidateBytes <= rec.BudgetBytes
+	switch {
+	case !fits:
+		rec.Outcome = SizeBudgetExceeded
+		rec.Message = fmt.Sprintf("The budget encode came out at %s, over the %s budget. Original preserved.", formatBudgetBytes(candidateBytes), formatBudgetBytes(rec.BudgetBytes))
+	case rec.Final != nil && len(rec.BelowTarget) == 0:
+		rec.Outcome = SizeBudgetMeetsTarget
+		rec.Message = fmt.Sprintf("Within your size budget: %s of %s, and it measured within this goal's quality limits after all. Replacing the original still needs your approval.", formatBudgetBytes(candidateBytes), formatBudgetBytes(rec.BudgetBytes))
+	default:
+		rec.Outcome = SizeBudgetBelowTarget
+		missed := "the quality target"
+		if len(rec.BelowTarget) > 0 {
+			missed = joinWords(rec.BelowTarget)
+		}
+		rec.Message = fmt.Sprintf("Below the quality target, within your size budget: %s of %s. %s. It met the floor. Compare it with the original before approving the replacement.", formatBudgetBytes(candidateBytes), formatBudgetBytes(rec.BudgetBytes), capitalize(missed))
+	}
+	ec.State[sizeBudgetKey] = rec
+	return rec, fits
+}
+
+// failSizeBudget records a budget encode that missed the floor on final
+// validation.
+func failSizeBudget(ec *ExecutionContext, evidence *transcode.FinalQualityEvidence) *SizeBudgetRecord {
+	rec := sizeBudgetOf(ec.State)
+	if rec == nil {
+		return nil
+	}
+	rec.Outcome = SizeBudgetBelowFloor
+	rec.Final = summarizeFinalQuality(evidence, &rec.Floor)
+	rec.BelowTarget = nil
+	if rec.Final != nil {
+		rec.BelowTarget = sizeBudgetMissedTarget(rec.Final.Measured, rec.Target)
+		point := SizeBudgetPoint{Kind: "budget_fallback", VideoCodec: transcode.VideoCodecLibX265, BitrateKbps: rec.VideoBitrateKbps, Bytes: evidence.CandidateSizeBytes, Measured: evidence.CandidateSizeBytes > 0, WithinBudget: evidence.CandidateSizeBytes > 0 && evidence.CandidateSizeBytes <= rec.BudgetBytes,
+			VMAFMean: rec.Final.Measured.VMAFMean, VMAFP5: rec.Final.Measured.VMAFP5, VMAFWorst: rec.Final.Measured.VMAFWorstWindow}
+		if point.Bytes <= 0 {
+			point.Bytes = rec.TargetBytes
+		}
+		curve := rec.Curve[:0:0]
+		for _, p := range rec.Curve {
+			if p.Kind != "budget_fallback" {
+				curve = append(curve, p)
+			}
+		}
+		rec.Curve = append(curve, point)
+	}
+	rec.Message = "The encode at the size budget measured below the quality floor"
+	if rec.Final != nil && len(rec.Final.Failures) > 0 {
+		rec.Message += ": " + joinWords(rec.Final.Failures)
+	}
+	rec.Message += ". No candidate is offered; original preserved. A larger budget would give it more bits."
+	ec.State[sizeBudgetKey] = rec
+	return rec
+}
+
+// sizeBudgetMissedTarget names each size-mode limit the measured numbers miss.
+func sizeBudgetMissedTarget(m QualityNumbers, l QualityLimits) []string {
+	var missed []string
+	below := func(name string, v, limit *float64) {
+		if v != nil && limit != nil && *v < *limit {
+			missed = append(missed, fmt.Sprintf("%s %.1f is below the target %.1f", name, *v, *limit))
+		}
+	}
+	above := func(name string, v, limit *float64) {
+		if v != nil && limit != nil && *v > *limit {
+			missed = append(missed, fmt.Sprintf("%s %.1f is above the target %.1f", name, *v, *limit))
+		}
+	}
+	below("VMAF mean", m.VMAFMean, l.VMAFMean)
+	below("VMAF p5", m.VMAFP5, l.VMAFP5)
+	below(fmt.Sprintf("VMAF worst %.0f-second window", l.WorstWindowSeconds), m.VMAFWorstWindow, l.VMAFWorstWindow)
+	above("CAMBI mean", m.CAMBIMean, l.CAMBIMean)
+	above("CAMBI peak", m.CAMBIPeak, l.CAMBIPeak)
+	return missed
+}
+
+func sizeBudgetPlannedMessage(r *SizeBudgetRecord) string {
+	why := "No tested setting met this goal's quality limits"
+	if r.Trigger == sizeBudgetTriggerOverBudget {
+		why = fmt.Sprintf("The setting that met this goal's quality limits (%s, about %s) is larger than your size budget", r.OverBudgetCandidateID, formatBudgetBytes(r.OverBudgetEstimatedBytes))
+	}
+	from := ""
+	if r.Siblings != nil {
+		from = " " + r.Siblings.Message
+	}
+	return fmt.Sprintf("%s, so the file is encoded once at the budget instead: two-pass x265 at %d kbps of video for about %s of %s. Its quality is measured on the final validation windows and held only to the floor; it will be reported as below the quality target.%s", why, r.VideoBitrateKbps, formatBudgetBytes(r.TargetBytes), formatBudgetBytes(r.BudgetBytes), from)
+}
+
+func formatBudgetBytes(n int64) string {
+	if n >= 1e9 {
+		return fmt.Sprintf("%.2f GB", float64(n)/1e9)
+	}
+	return fmt.Sprintf("%.0f MB", float64(n)/1e6)
+}
+
+func joinWords(parts []string) string {
+	switch len(parts) {
+	case 0:
+		return ""
+	case 1:
+		return parts[0]
+	}
+	out := parts[0]
+	for _, p := range parts[1 : len(parts)-1] {
+		out += ", " + p
+	}
+	return out + " and " + parts[len(parts)-1]
+}
+
+func capitalize(s string) string {
+	if s == "" {
+		return s
+	}
+	if s[0] >= 'a' && s[0] <= 'z' {
+		return string(s[0]-'a'+'A') + s[1:]
+	}
+	return s
+}

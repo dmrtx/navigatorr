@@ -115,6 +115,24 @@ func (s *Server) rerun(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// The same goes for a size budget a goal change froze without naming it in
+	// the job's own inputs.
+	_, hasPercent := inputs["size_budget_percent"]
+	_, hasBytes := inputs["size_budget_bytes"]
+	_, hasSource := inputs["size_budget_source"]
+	if !hasPercent && !hasBytes && !hasSource && operationString(inputs["mode"]) == "size" {
+		budget := operationMap(operationMap(operationMap(old.state["mode_policy"])["size"])["size_budget"])
+		if percent, ok := budget["percent"].(float64); ok && percent > 0 {
+			inputs["size_budget_percent"] = percent
+		} else if bytes, ok := budget["bytes"].(float64); ok && bytes > 0 {
+			inputs["size_budget_bytes"] = bytes
+		} else if siblings := operationMap(budget["siblings"]); siblings != nil {
+			inputs["size_budget_source"] = "siblings"
+			if multiplier, ok := siblings["multiplier"].(float64); ok && multiplier > 0 {
+				inputs["size_budget_sibling_multiplier"] = multiplier
+			}
+		}
+	}
 	ctx := action.WithOrigin(r.Context(), "web")
 	// A lost response replays the same key: return that action, never a
 	// second job and never "worker busy" for work that is already admitted.

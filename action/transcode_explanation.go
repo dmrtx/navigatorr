@@ -35,6 +35,13 @@ type TranscodeExplanation struct {
 	// and the action went on (or could not go on) with x265 alone. It keeps the
 	// failed attempt's numbers after the x265 job replaces it.
 	HardwareContinuation *HardwareContinuation `json:"hardware_continuation,omitempty"`
+	// SizeBudget is set when the operation's size budget replaced the search's
+	// outcome with one encode at the budget: what it planned, the measured
+	// rate-quality points, and how the result compares with the target.
+	SizeBudget *SizeBudgetRecord `json:"size_budget,omitempty"`
+	// SizeBudgetSiblings is what a sibling budget measured beside the source,
+	// including why it gave no budget.
+	SizeBudgetSiblings *SiblingBudgetEvidence `json:"size_budget_siblings,omitempty"`
 }
 
 func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
@@ -65,7 +72,13 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 	e.TestedCandidates = len(ids)
 	var decision transcode.BenchmarkDecision
 	data, _ = json.Marshal(read("benchmark_decision"))
-	if json.Unmarshal(data, &decision) == nil && decision.Winner != nil {
+	var budget SizeBudgetRecord
+	if data, _ := json.Marshal(read(sizeBudgetKey)); json.Unmarshal(data, &budget) == nil && budget.BudgetBytes > 0 {
+		e.SizeBudget = &budget
+		e.Encoder = transcode.VideoCodecLibX265
+	}
+	e.SizeBudgetSiblings = siblingEvidenceOf(res.State)
+	if json.Unmarshal(data, &decision) == nil && decision.Winner != nil && e.SizeBudget == nil {
 		e.Encoder = transcode.BenchmarkCandidateVideoCodec(transcode.BenchmarkCandidate{VideoCodec: decision.Winner.VideoCodec})
 		e.Hardware = e.Encoder == transcode.VideoCodecHEVCVideoToolbox
 	}
@@ -85,6 +98,9 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 	finish := func() *TranscodeExplanation {
 		if e.HardwareContinuation != nil {
 			e.Message = strings.TrimSpace(continuationNote(e.HardwareContinuation) + " " + e.Message)
+		}
+		if b := e.SizeBudgetSiblings; b != nil && b.Reason != "" && res.Status == StatusCompleted {
+			e.Message = strings.TrimSpace(e.Message + " " + b.Message)
 		}
 		return e
 	}
@@ -109,6 +125,19 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 	case reason == "insufficient_savings" || reason == "size_growth" || reason == "size_growth_exceeded":
 		e.Outcome = "size_rejected"
 		e.Message = "The full conversion did not meet this goal's size limit. Original preserved."
+	case reason == "quality_not_met" && e.SizeBudget != nil:
+		e.Outcome = "quality_rejected"
+		e.FinalQuality = e.SizeBudget.Final
+		e.Message = e.SizeBudget.Message
+	case reason == SizeBudgetExceeded && e.SizeBudget != nil:
+		e.Outcome = "size_rejected"
+		e.Message = e.SizeBudget.Message
+	case reason == "size_budget_unreachable" || reason == "size_budget_estimate_unavailable" || reason == "size_budget_worker_unsupported":
+		e.Outcome = "no_changes"
+		e.Message = getString(res.State, "size_budget_skip_message")
+		if e.Message == "" {
+			e.Message = "No encode at the size budget could be planned. Original preserved."
+		}
 	case reason == "quality_not_met":
 		e.Outcome = "quality_rejected"
 		e.Message = "The encoded result did not meet the quality requirements. Original preserved."
@@ -147,6 +176,9 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 	case getBool(res.Outputs, "original_intact") && getBool(res.State, "size_audio_only"):
 		e.Outcome = "candidate_ready"
 		e.Message = "Candidate verified; original preserved. The video is copied bit-identically and only the lossless audio was compacted."
+	case getBool(res.Outputs, "original_intact") && e.SizeBudget != nil && e.SizeBudget.Outcome != "":
+		e.Outcome = "candidate_ready"
+		e.Message = e.SizeBudget.Message
 	case getBool(res.Outputs, "original_intact"):
 		e.Outcome = "candidate_ready"
 		e.Message = "Candidate verified; original preserved. Quality was measured on samples."

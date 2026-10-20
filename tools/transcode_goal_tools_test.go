@@ -50,6 +50,15 @@ func TestGoalChangeToolCarriesTheMediaEngineChoice(t *testing.T) {
 		"size, margin and off":      {"mode": "size", "allow_hardware": false, "hardware_margin_percent": float64(20)},
 		"size, engine not a bool":   {"mode": "size", "allow_hardware": "no"},
 		"size, margin not a number": {"mode": "size", "hardware_margin_percent": "20"},
+		"budget with quality":       {"mode": "quality", "size_budget_percent": float64(30)},
+		"budget percent too small":  {"mode": "size", "size_budget_percent": float64(4)},
+		"budget percent too large":  {"mode": "size", "size_budget_percent": float64(86)},
+		"budget percent not number": {"mode": "size", "size_budget_percent": "30"},
+		"budget bytes too small":    {"mode": "size", "size_budget_bytes": float64(1000)},
+		"budget bytes fractional":   {"mode": "size", "size_budget_bytes": 60000000.5},
+		"siblings not a string":     {"mode": "size", "size_budget_source": float64(1)},
+		"multiplier not a number":   {"mode": "size", "size_budget_source": "siblings", "size_budget_sibling_multiplier": "1.5"},
+		"budget percent and bytes":  {"mode": "size", "size_budget_percent": float64(30), "size_budget_bytes": float64(60000000)},
 	} {
 		if res := call("refused-"+strings.ReplaceAll(name, " ", "-"), extra); !res.IsError {
 			t.Fatalf("%s: accepted", name)
@@ -65,6 +74,20 @@ func TestGoalChangeToolCarriesTheMediaEngineChoice(t *testing.T) {
 	command, _ := st.GetActionInstance(receipt.CommandID)
 	if command == nil || !strings.Contains(command.InputsJSON, `"allow_hardware":false`) {
 		t.Fatalf("engine choice not carried: %+v", command)
+	}
+	res = call("budget-percent", map[string]any{"mode": "size", "size_budget_percent": float64(33)})
+	if res.IsError || json.Unmarshal([]byte(resultText(t, res)), &receipt) != nil || receipt.CommandID == "" {
+		t.Fatal("goal change with a size budget refused", resultText(t, res))
+	}
+	if command, _ = st.GetActionInstance(receipt.CommandID); command == nil || !strings.Contains(command.InputsJSON, `"size_budget_percent":33`) {
+		t.Fatalf("size budget not carried: %+v", command)
+	}
+	res = call("budget-bytes", map[string]any{"mode": "size", "size_budget_bytes": float64(2000000000)})
+	if res.IsError || json.Unmarshal([]byte(resultText(t, res)), &receipt) != nil || receipt.CommandID == "" {
+		t.Fatal("goal change with a byte budget refused", resultText(t, res))
+	}
+	if command, _ = st.GetActionInstance(receipt.CommandID); command == nil || !strings.Contains(command.InputsJSON, `"size_budget_bytes":2000000000`) {
+		t.Fatalf("byte budget not carried: %+v", command)
 	}
 	// Leaving the choice out is the documented default, not the frozen one: the
 	// command names no engine choice and the policy freeze applies its default.

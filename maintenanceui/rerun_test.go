@@ -224,3 +224,47 @@ func TestRerunCarriesTheFrozenMediaEngineChoice(t *testing.T) {
 		})
 	}
 }
+
+// Run again keeps a size budget a goal change froze, and one the job named.
+func TestRerunCarriesTheSizeBudget(t *testing.T) {
+	for name, tc := range map[string]struct {
+		policy  map[string]any
+		inputs  map[string]any
+		percent any
+		bytes   any
+	}{
+		"frozen percent":  {map[string]any{"mode": "size", "size": map[string]any{"size_budget": map[string]any{"percent": float64(33)}}}, map[string]any{}, float64(33), nil},
+		"frozen bytes":    {map[string]any{"mode": "size", "size": map[string]any{"size_budget": map[string]any{"bytes": float64(2e9)}}}, map[string]any{}, nil, float64(2e9)},
+		"frozen siblings": {map[string]any{"mode": "size", "size": map[string]any{"size_budget": map[string]any{"siblings": map[string]any{"multiplier": float64(2), "minimum_siblings": float64(3), "max_probed": float64(60)}}}}, map[string]any{}, nil, nil},
+		"named in input":  {map[string]any{"mode": "size", "size": map[string]any{}}, map[string]any{"size_budget_percent": float64(40)}, float64(40), nil},
+		"no budget":       {map[string]any{"mode": "size", "size": map[string]any{}}, map[string]any{}, nil, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, h := testUI(t)
+			st := s.engine.Deps().Store
+			inputs := map[string]any{"path": "/media/Show/S01E01.mkv", "mode": "size", "replace_original": false, "profile": "auto"}
+			for k, v := range tc.inputs {
+				inputs[k] = v
+			}
+			state := map[string]any{"reason_code": "no_suitable_candidate", "mode_policy": tc.policy}
+			seedOperation(t, st, "earlier", "transcode_media", "completed", inputs, map[string]any{"reason_code": "no_suitable_candidate"}, state)
+			w := request(h, "POST", "/api/maintenance/rerun", `{"id":"earlier","key":"again-one"}`, true)
+			if w.Code != 202 {
+				t.Fatal(w.Code, w.Body.String())
+			}
+			var started struct{ ID string }
+			json.Unmarshal(w.Body.Bytes(), &started)
+			created, _ := st.GetActionInstance(started.ID)
+			copied := decodeOperationJSON(created.InputsJSON)
+			if name == "frozen siblings" {
+				if copied["size_budget_source"] != "siblings" || copied["size_budget_sibling_multiplier"] != float64(2) {
+					t.Fatalf("sibling budget not carried: %v", copied)
+				}
+				return
+			}
+			if copied["size_budget_percent"] != tc.percent || copied["size_budget_bytes"] != tc.bytes {
+				t.Fatalf("budget %v / %v, want %v / %v", copied["size_budget_percent"], copied["size_budget_bytes"], tc.percent, tc.bytes)
+			}
+		})
+	}
+}

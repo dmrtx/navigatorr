@@ -166,7 +166,7 @@ func operationSizeMode(r operationRecord) map[string]any {
 		return nil
 	}
 	out := map[string]any{}
-	if r.savings.EstimatedBytes != nil && (r.savings.EstimateKind == "sampled_benchmark" || r.savings.EstimateKind == "audio_only_estimate") {
+	if r.savings.EstimatedBytes != nil && (r.savings.EstimateKind == "sampled_benchmark" || r.savings.EstimateKind == "audio_only_estimate" || r.savings.EstimateKind == "size_budget") {
 		out["expected_bytes"] = *r.savings.EstimatedBytes
 	}
 	if r.state["size_main10"] == true {
@@ -175,7 +175,13 @@ func operationSizeMode(r operationRecord) map[string]any {
 	// Which encoder produced the winning settings, so a hardware (VideoToolbox)
 	// result is told apart from x265 before anything is replaced.
 	winner := operationMap(operationMap(operationValue(r, "benchmark_decision"))["winner"])
-	if codec := operationString(winner["video_codec"]); codec != "" {
+	budget := operationMap(operationValue(r, "size_budget"))
+	if operationNumber(budget["budget_bytes"]) > 0 {
+		// The search's winner (if any) was over the budget: the file is
+		// encoded as x265 at the budget instead.
+		out["encoder"] = transcode.VideoCodecLibX265
+		out["size_budget"] = operationSizeBudget(budget)
+	} else if codec := operationString(winner["video_codec"]); codec != "" {
 		out["encoder"] = codec
 		if codec == transcode.VideoCodecHEVCVideoToolbox {
 			out["hardware"] = true
@@ -298,6 +304,34 @@ func operationSizeMode(r operationRecord) map[string]any {
 	return out
 }
 
+// operationSizeBudget is the budget block of a size projection: the budget, what
+// the encode aimed at, how it ended and the rate-quality points to draw.
+func operationSizeBudget(budget map[string]any) map[string]any {
+	out := map[string]any{}
+	for _, key := range []string{"trigger", "source_bytes", "budget_bytes", "budget_percent", "target_bytes", "video_bitrate_kbps", "over_budget_candidate_id", "over_budget_estimated_bytes", "quality_target", "quality_floor", "siblings", "outcome", "candidate_bytes", "below_target", "message"} {
+		if v, ok := budget[key]; ok && v != nil {
+			out[key] = v
+		}
+	}
+	if final := operationMap(budget["final"]); final != nil {
+		out["final"] = map[string]any{"verdict": final["verdict"], "failures": final["failures"], "measured": final["measured"]}
+	}
+	if curve, _ := budget["curve"].([]any); len(curve) > 0 {
+		out["curve"] = curve
+	}
+	return out
+}
+
+// operationSizeBudgetOutcome is how a size budget encode ended ("" without one),
+// so a candidate that is below the quality target is labelled wherever it is
+// offered.
+func operationSizeBudgetOutcome(r operationRecord) string {
+	if r.inst.ActionName != "transcode_media" {
+		return ""
+	}
+	return operationString(operationMap(operationValue(r, "size_budget"))["outcome"])
+}
+
 func projectOperationSavings(r operationRecord, now time.Time) operationSavings {
 	var s operationSavings
 	original := operationMap(operationValue(r, "original"))
@@ -330,7 +364,17 @@ func projectOperationSavings(r operationRecord, now time.Time) operationSavings 
 	}
 	winner := operationMap(operationMap(operationValue(r, "benchmark_decision"))["winner"])
 	estimated := int64(operationNumber(winner["estimated_bytes"]))
-	if estimated > 0 && source > 0 {
+	if budget := operationMap(operationValue(r, "size_budget")); operationNumber(budget["budget_bytes"]) > 0 && source > 0 {
+		// The budget encode replaced the search's outcome: its planned size, or
+		// its measured size once there is one, not an over-budget winner's.
+		estimated = int64(operationNumber(budget["candidate_bytes"]))
+		if estimated <= 0 {
+			estimated = int64(operationNumber(budget["target_bytes"]))
+		}
+		if estimated > 0 {
+			s.EstimateKind = "size_budget"
+		}
+	} else if estimated > 0 && source > 0 {
 		s.EstimateKind = "sampled_benchmark"
 	} else if audio := int64(operationNumber(operationValue(r, "audio_only_estimated_bytes"))); audio > 0 && source > 0 && operationValue(r, "size_audio_only") == true {
 		estimated = audio
@@ -676,6 +720,9 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 			if size := operationSizeMode(r); size != nil {
 				job["size_mode"] = size
 			}
+			if outcome := operationSizeBudgetOutcome(r); outcome != "" {
+				job["size_budget_outcome"] = outcome
+			}
 			root := roots[r.inst.ID]
 			job["workflow_id"] = root
 			job["archive_id"] = root
@@ -695,6 +742,9 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 						path = resolved
 					}
 					job["source_path"] = path
+					if outcome := operationSizeBudgetOutcome(original); outcome != "" {
+						job["size_budget_outcome"] = outcome
+					}
 					if r.savings.SourceBytes == nil {
 						job["savings"] = original.savings
 					}

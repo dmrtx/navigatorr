@@ -23,7 +23,7 @@ func (m maintenanceMemo) bytes() int {
 }
 
 var maintenanceInputKeys = []string{"path", "parent_action_id", "batch_promote_parent_id", "transcode_action_id", "library_context", "service", "series_id", "movie_id", "media_id", "paths", "episode_file_ids", "dry_run", "promote_candidates", "mode", "replace_original"}
-var maintenanceOutputKeys = []string{"resolved_path", "original_sha256", "original", "result", "candidate_size_bytes", "promotion", "recovery_retained", "original_integrity", "promoted", "original_intact", "benchmark_decision", "expected_savings_percent", "transcode_phase", "progress_is_stale", "progress", "speed", "last_progress_at", "counts", "batch_promotion", "benchmark_comparison_available", "job_id", "transcode_job_id", "paused", "skip_transcode", "batch_item_generations", "batch_settings_revision", "batch_retry_pending", "post_batch_promotion", "mode", "size_main10", "size_audio_only", "audio_only_estimated_bytes", "quality_evidence", "automatic_search", "conversions", "reason_code", "hardware_continuation"}
+var maintenanceOutputKeys = []string{"resolved_path", "original_sha256", "original", "result", "candidate_size_bytes", "promotion", "recovery_retained", "original_integrity", "promoted", "original_intact", "benchmark_decision", "expected_savings_percent", "transcode_phase", "progress_is_stale", "progress", "speed", "last_progress_at", "counts", "batch_promotion", "benchmark_comparison_available", "job_id", "transcode_job_id", "paused", "skip_transcode", "batch_item_generations", "batch_settings_revision", "batch_retry_pending", "post_batch_promotion", "mode", "size_main10", "size_audio_only", "audio_only_estimated_bytes", "quality_evidence", "automatic_search", "conversions", "reason_code", "hardware_continuation", "size_budget"}
 
 // maintenanceHardwareNote begins the winner uncertainty that says why a media
 // engine result was chosen. It must equal optimization.HardwareSelectedNote;
@@ -142,6 +142,16 @@ func maintenanceJSON(raw string, keys []string) string {
 				}
 				if windows, exists := nested["windows"]; exists {
 					kept["windows"] = windows
+				}
+				value, _ = json.Marshal(kept)
+			case "size_budget":
+				// The budget, how the encode ended and the curve to draw; the
+				// per-window evidence stays in the action history.
+				projected := json.RawMessage(maintenanceJSON(string(value), []string{"trigger", "source_bytes", "budget_bytes", "budget_percent", "target_bytes", "video_bitrate_kbps", "over_budget_candidate_id", "over_budget_estimated_bytes", "quality_target", "quality_floor", "siblings", "curve", "outcome", "candidate_bytes", "below_target", "message"}))
+				var kept map[string]json.RawMessage
+				_ = json.Unmarshal(projected, &kept)
+				if final, exists := nested["final"]; exists {
+					kept["final"] = json.RawMessage(maintenanceJSON(string(final), []string{"verdict", "failures", "measured"}))
 				}
 				value, _ = json.Marshal(kept)
 			case "benchmark_decision":
