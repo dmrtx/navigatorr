@@ -28,6 +28,10 @@ const (
 	// sizeBudgetRoundKey holds the comparison round while it runs: the record
 	// the fallback planned and the search's results set aside.
 	sizeBudgetRoundKey = "size_budget_round"
+	// sizeBudgetCorrectedFromKey names the encode a bitrate correction
+	// replaced. Only the correction writes it, so a manual retry of the
+	// corrected encode, which moves previous_job_id on, keeps it.
+	sizeBudgetCorrectedFromKey = "size_budget_corrected_from"
 
 	sizeBudgetVTCandidateID   = "budget-vt"
 	sizeBudgetX265CandidateID = "budget-x265"
@@ -574,6 +578,7 @@ func (e *Engine) retrySizeBudgetBitrate(ec *ExecutionContext, plan *transcode.Pl
 	ec.State[sizeBudgetKey] = rec
 	ec.State["plan"], ec.State["plan_digest"] = &p, digest
 	ec.State["previous_job_id"], ec.State["job_id"], ec.State["external_reference"] = first, jobID, jobID
+	ec.State[sizeBudgetCorrectedFromKey] = first
 	ec.State["attempt"], ec.State["retry_count"], ec.State["fallback_count"] = 1, 0, 0
 	mergeMap(ec.Outputs, map[string]any{"plan": &p, "plan_digest": digest, "job_id": jobID, "external_reference": jobID, "previous_job_id": first})
 	return StepResult{Status: StepCompleted, RewindTo: "submit_transcode", Outputs: map[string]any{sizeBudgetKey: rec, "plan_note": rec.Message}}, true
@@ -592,7 +597,7 @@ func sizeBudgetSearchDepth(state map[string]any, plan *transcode.Plan) (int, boo
 	depth := 0
 	for _, c := range req.Candidates {
 		d := 8
-		if c.PixelFormat == "p010le" {
+		if c.PixelFormat == "p010le" || c.PixelFormat == "yuv420p10le" {
 			d = 10
 		}
 		if depth != 0 && d != depth {
@@ -638,7 +643,7 @@ func sizeBudgetPlanMatches(snapshot *ModePolicySnapshot, instanceID string, stat
 		kbps := enc.X265.BitrateKbps
 		if c := rec.Correction; c != nil {
 			kbps = sizeBudgetCorrectedKbps(kbps, c.FirstCandidateBytes, enc, budget)
-			if policy.Comparison.MaxBitrateCorrections < 1 || c.FirstBitrateKbps != enc.X265.BitrateKbps || kbps == 0 || c.BitrateKbps != kbps || c.FirstJobID == "" || c.FirstJobID != getString(state, "previous_job_id") {
+			if policy.Comparison.MaxBitrateCorrections < 1 || c.FirstBitrateKbps != enc.X265.BitrateKbps || kbps == 0 || c.BitrateKbps != kbps || c.FirstJobID == "" || c.FirstJobID != getString(state, sizeBudgetCorrectedFromKey) {
 				return false
 			}
 		}

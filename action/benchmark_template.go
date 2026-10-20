@@ -86,6 +86,7 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 			}
 			if he, ok := transcodeHTTPError(err); !ok || he.StatusCode != 404 {
 				if failSizeBudgetRound(ec, fmt.Sprintf("reconciliation failed: %v", err)) {
+					delete(ec.State, "benchmark_reconcile")
 					return StepResult{Status: StepCompleted, Outputs: map[string]any{"benchmark_job_id": id}}, nil
 				}
 				return StepResult{Status: StepFailed, Error: fmt.Sprintf("benchmark reconciliation failed: %v", err)}, nil

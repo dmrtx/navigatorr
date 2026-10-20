@@ -405,11 +405,17 @@ func TestSizeBudgetVideoToolboxCorrection(t *testing.T) {
 		t.Fatalf("curve kinds %s", got)
 	}
 	// The correction must name the encode it replaced.
-	c.ec.State["previous_job_id"] = "job-other"
+	c.ec.State[sizeBudgetCorrectedFromKey] = "job-other"
 	if sizeBudgetPlanMatches(c.snapshot, c.ec.InstanceID, c.ec.State, next, rec) {
 		t.Fatal("correction accepted for another encode")
 	}
-	c.ec.State["previous_job_id"] = "job-size-budget"
+	c.ec.State[sizeBudgetCorrectedFromKey] = "job-size-budget"
+	// A manual retry of the corrected encode moves previous_job_id on; the
+	// retried encode still validates.
+	c.ec.State["previous_job_id"], c.ec.State["job_id"] = "job-size-budget-budget-rate", "job-size-budget-retry-1"
+	if !sizeBudgetPlanMatches(c.snapshot, c.ec.InstanceID, c.ec.State, next, rec) {
+		t.Fatal("corrected plan rejected after a manual retry")
+	}
 	// Only once.
 	if _, handled := c.engine.retrySizeBudgetBitrate(c.ec, next, 4_100_000_000, nil); handled {
 		t.Fatal("corrected twice")
