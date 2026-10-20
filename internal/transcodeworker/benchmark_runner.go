@@ -884,8 +884,8 @@ func verifySourceUnchanged(sourcePath string, expectedSize int64, expectedModTim
 		return fmt.Errorf("re-stating source file %s failed: %w (fail closed)", sourcePath, err)
 	}
 	if fi.Size() != expectedSize || !fi.ModTime().Equal(expectedModTime) {
-		return fmt.Errorf("source file %s was concurrently modified (size %d->%d, mtime %v->%v): failing closed",
-			sourcePath, expectedSize, fi.Size(), expectedModTime, fi.ModTime())
+		return sourceChanged(fmt.Errorf("source file %s was concurrently modified (size %d->%d, mtime %v->%v): failing closed",
+			sourcePath, expectedSize, fi.Size(), expectedModTime, fi.ModTime()))
 	}
 	return nil
 }

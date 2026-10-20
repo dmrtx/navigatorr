@@ -62,6 +62,9 @@ func TestSourceChangedIsOnlyTheExplicitMessages(t *testing.T) {
 		"source media modified during benchmark (integrity violation, fail closed): size changed",
 		"original changed; output cannot be accepted for the feed",
 		"source_changed: the file differs",
+		// The worker's own detections, which used to rely on an accident of
+		// wording.
+		"sizemismatch: local source bytes do not match expected sha256 (fail closed, cache entry never published)",
 	}
 	for _, msg := range changed {
 		if got := Classify(msg); got != SourceChanged {
@@ -72,3 +75,30 @@ func TestSourceChangedIsOnlyTheExplicitMessages(t *testing.T) {
 		t.Errorf("SMB source change: %s", got)
 	}
 }
+
+// candidate_invalid is a candidate that failed its own integrity check. It is
+// serialized in the message, never retried automatically, and is not a claim
+// about the source.
+func TestCandidateInvalidClass(t *testing.T) {
+	typed := &classedForTest{class: CandidateInvalid, msg: "transcode source file invalid: digest mismatch for /work/source/sha/shared_clip.mkv"}
+	if got := ClassifyError(fmt.Errorf("validating: %w", typed)); got != CandidateInvalid {
+		t.Errorf("typed candidate failure class %s", got)
+	}
+	if got := Classify("candidate_invalid: the encoder output is empty"); got != CandidateInvalid {
+		t.Errorf("serialized prefix class %s", got)
+	}
+	if got := Classify("transcode source file invalid: local candidate no longer matches its accepted sha256"); got == SourceChanged {
+		t.Errorf("a candidate failure was read as source_changed")
+	}
+	if Retryable(CandidateInvalid, []string{"candidate_invalid"}) {
+		t.Error("candidate_invalid must never be retried automatically, even when listed")
+	}
+}
+
+type classedForTest struct {
+	class FailureClass
+	msg   string
+}
+
+func (e *classedForTest) Error() string        { return e.msg }
+func (e *classedForTest) FailureClass() string { return string(e.class) }

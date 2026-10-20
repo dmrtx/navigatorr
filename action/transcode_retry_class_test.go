@@ -26,6 +26,15 @@ func TestManualRetryPrefersTheWorkersFailureClass(t *testing.T) {
 		{"worker class unclassified", "unclassified", "storage_full: no space left on device", true},
 		{"no worker class: message decides (legacy record)", "", "no space left on device", false},
 		{"no worker class, benign message", "", "inspecting source media /media/source/shared_clip.mkv: End of file", true},
+		// The worker's own detections of a changed source: re-copying and
+		// re-hashing the same source cannot succeed, so an unchanged manual
+		// retry is rejected, with or without the recorded class.
+		{"source digest mismatch, typed", "source_changed", "staging input: sizemismatch: local source bytes do not match expected sha256 (fail closed, cache entry never published)", false},
+		{"source digest mismatch, legacy record", "", "staging input: local source bytes do not match expected sha256 (fail closed, cache entry never published)", false},
+		{"source changed while hashing, typed", "source_changed", "transcode source file invalid: local file changed while hashing /work/source/shared_clip.mkv", false},
+		// A candidate that failed its integrity check is not a source
+		// problem: the retry re-encodes it, and stays allowed.
+		{"candidate invalid, typed", "candidate_invalid", "transcode source file invalid: local candidate no longer matches its accepted sha256", true},
 	}
 	for _, kind := range []string{"benchmark", "transcode"} {
 		for _, tc := range cases {

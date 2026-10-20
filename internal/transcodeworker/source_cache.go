@@ -200,7 +200,7 @@ func hashLocalFileSHA256(ctx context.Context, path string) (string, error) {
 	}
 	after, err := os.Lstat(path)
 	if err != nil || !os.SameFile(before, after) || total != before.Size() || after.Size() != total || !before.ModTime().Equal(after.ModTime()) {
-		return "", fmt.Errorf("%w: local file changed while hashing %s", ErrSourceInvalid, path)
+		return "", &localFileChangedError{path: path}
 	}
 	sum := hex.EncodeToString(h.Sum(nil))
 	digestMemoFrom(ctx).remember(path, after, sum)
@@ -222,7 +222,7 @@ func verifyLocalDigest(ctx context.Context, path, expectedSHA string) error {
 	}
 	actual, err := verifiedLocalSHA256(ctx, path)
 	if err != nil {
-		return err
+		return sourceDigestFailure(err)
 	}
 	return compareSourceDigest(norm, actual)
 }
@@ -231,7 +231,7 @@ func verifyLocalDigest(ctx context.Context, path, expectedSHA string) error {
 // shares, whether the digest came from a local read or a streaming transfer.
 func compareSourceDigest(expectedNorm, actual string) error {
 	if !strings.EqualFold(expectedNorm, actual) {
-		return fmt.Errorf("%w: local source bytes do not match expected sha256 (fail closed, cache entry never published)", ErrSizeMismatch)
+		return sourceChanged(fmt.Errorf("%w: local source bytes do not match expected sha256 (fail closed, cache entry never published)", ErrSizeMismatch))
 	}
 	return nil
 }
@@ -356,7 +356,7 @@ func populateSourceCacheFromLocal(ctx context.Context, cacheDir, cleanSource str
 		return "", err
 	}
 	if li.Size() != fi.Size() {
-		return "", fmt.Errorf("%w: local copy of %s does not match the source size (fail closed)", ErrSizeMismatch, cleanSource)
+		return "", sourceChanged(fmt.Errorf("%w: local copy of %s does not match the source size (fail closed)", ErrSizeMismatch, cleanSource))
 	}
 	if lerr := os.Link(localPath, dataPath); lerr != nil {
 		if errors.Is(lerr, fs.ErrExist) {
@@ -494,8 +494,12 @@ func (w *Worker) ensureSourceCached(ctx context.Context, cleanSource, expectedSH
 	// content digest before publish. A source that changed mid-download is
 	// never cached. Only LOCAL bytes are hashed here; no NAS read is added.
 	di, err := os.Lstat(tmpName)
-	if err != nil || !di.Mode().IsRegular() || di.Size() != fi.Size() {
+	if err != nil || !di.Mode().IsRegular() {
 		return "", fmt.Errorf("%w: downloaded source %s size mismatch (fail closed)", ErrSizeMismatch, cleanSource)
+	}
+	if di.Size() != fi.Size() {
+		// The download is not the file that was fingerprinted: it changed.
+		return "", sourceChanged(fmt.Errorf("%w: downloaded source %s size mismatch (fail closed)", ErrSizeMismatch, cleanSource))
 	}
 	if cost := sourceCost(ctx); cost != nil && cost.NASReadBytes == nil {
 		_, external := externalRootFor(cleanSource, w.cfg.ExternalRoots)

@@ -190,7 +190,7 @@ func (w *Worker) executePodcast(ctx context.Context, dir, file string, job *JobR
 	}
 	hash, err := hashLocalFileSHA256(ctx, r.localCandidate)
 	if err != nil {
-		return fail(err)
+		return fail(candidateHashFailure(err))
 	}
 	fi, err := os.Stat(r.localCandidate)
 	if err != nil {

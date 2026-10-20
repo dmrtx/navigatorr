@@ -176,18 +176,39 @@ coordinator uses that class instead of reading the message:
   message: the message holds the file path and `ffprobe`'s stderr, and a word in
   a path must not change the class.
 
-`unclassified`, `benchmark_evidence_incomplete`, `internal_invariant` and
-`media_probe_failed` are not retried automatically. A manual retry stays
-available.
+- `candidate_invalid`: the encoded candidate failed an integrity check of its
+  own (missing, empty, not a regular file, size or digest not what was accepted,
+  changed while it was hashed). These errors still wrap `ErrSourceInvalid`, so
+  callers that test for it keep working, but they say nothing about the source.
 
-`source_changed` is assigned only to the messages the code itself writes when
-the source differs from the one the plan was built on (for example "source
-changed", "source codec changed", "was concurrently modified"), or by the
-accept step that compares hashes. A message that merely mentions "source" and
-"sha", such as a path, no longer matches.
+`unclassified`, `benchmark_evidence_incomplete`, `internal_invariant`,
+`media_probe_failed` and `candidate_invalid` are not retried automatically. A
+manual retry stays available.
+
+`source_changed` is assigned only where the code detects that the source differs
+from the one the plan was built on, and each of those sites is a typed error
+(`FailureClass()`), so the class reaches the job record and the coordinator
+whatever the message says:
+
+- the staged source's digest does not match the plan's (`compareSourceDigest`,
+  including the streamed digest) or the file changed while it was hashed for the
+  source check;
+- the SMB download's size moved while it was copied;
+- the source was modified during a benchmark (`verifySourceUnchanged`);
+- the resolved plan no longer matches the source's streams (subtitle index,
+  codec or a missing stream);
+- the accept step that compares hashes.
+
+An unchanged manual retry after any of these is refused, because it would copy
+and hash the same source again. The generic file hasher is role-neutral: it
+reports "changed while hashing" without a class, and the caller assigns
+`source_changed` when it was hashing the source and `candidate_invalid` when it
+was hashing the candidate. A message that merely mentions "source" and "sha",
+such as a path, does not match.
 
 A recipe's `fallbacks[].when` may name `ffmpeg_unknown` but not `unclassified`,
-`benchmark_evidence_incomplete`, `internal_invariant` or `media_probe_failed`.
+`benchmark_evidence_incomplete`, `internal_invariant`, `media_probe_failed` or
+`candidate_invalid`.
 Those classes are never retried automatically, so a fallback on them could never
 fire, and validation rejects it with a message saying so.
 

@@ -21,6 +21,9 @@ const (
 	StoragePermissionDenied = "storage_permission_denied"
 	StorageIOError          = "storage_io_error"
 	SourceUnreachable       = "source_unreachable"
+	// SourceChanged is a source that was not the file it was fingerprinted as
+	// by the time it was read: its size moved during the download.
+	SourceChanged = "source_changed"
 )
 
 // Error identifies the failing storage boundary while retaining its cause for

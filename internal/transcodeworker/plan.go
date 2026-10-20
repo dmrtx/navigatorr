@@ -329,10 +329,10 @@ func BuildExecutionPlan(plan *transcode.Plan, streams []SourceStream, duration f
 				return nil, fmt.Errorf("resolved plan has no action for subtitle stream %d (subtitle #%d); fail closed", s.Index, s.TypeIndex)
 			}
 			if a.SourceStreamIndex != s.Index {
-				return nil, fmt.Errorf("subtitle #%d source index changed: plan=%d actual=%d (fail closed)", s.TypeIndex, a.SourceStreamIndex, s.Index)
+				return nil, sourceChanged(fmt.Errorf("subtitle #%d source index changed: plan=%d actual=%d (fail closed)", s.TypeIndex, a.SourceStreamIndex, s.Index))
 			}
 			if norm(a.SourceCodec) != norm(s.Codec) {
-				return nil, fmt.Errorf("subtitle #%d source codec changed: plan=%s actual=%s (fail closed)", s.TypeIndex, a.SourceCodec, s.Codec)
+				return nil, sourceChanged(fmt.Errorf("subtitle #%d source codec changed: plan=%s actual=%s (fail closed)", s.TypeIndex, a.SourceCodec, s.Codec))
 			}
 			target := norm(a.Codec)
 			if norm(a.Operation) == "copy" {
@@ -351,7 +351,7 @@ func BuildExecutionPlan(plan *transcode.Plan, streams []SourceStream, duration f
 	}
 	for idx := range subtitleActions {
 		if !seenSubs[idx] {
-			return nil, fmt.Errorf("resolved plan references missing subtitle #%d (source changed; fail closed)", idx)
+			return nil, sourceChanged(fmt.Errorf("resolved plan references missing subtitle #%d (source changed; fail closed)", idx))
 		}
 	}
 	return ep, nil

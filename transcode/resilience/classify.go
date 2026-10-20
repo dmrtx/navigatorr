@@ -55,6 +55,12 @@ const (
 	// comes from the typed probe error and never from the probe's stderr, which
 	// names paths and may say anything.
 	MediaProbeFailed FailureClass = "media_probe_failed"
+	// CandidateInvalid is the worker-local candidate failing its integrity or
+	// preservation checks (a changed digest, a lost stream, a diverging
+	// duration). The class is typed at the point of detection; the message is
+	// never read for it. It is not retried automatically; a manual retry
+	// re-encodes.
+	CandidateInvalid FailureClass = "candidate_invalid"
 )
 
 // ClassifyError preserves a typed boundary failure before considering messages.
@@ -74,7 +80,7 @@ func Classify(message string) FailureClass {
 	s := strings.ToLower(message)
 	// Explicit serialized classes take precedence over generic phrases such
 	// as "connection reset", which formerly labeled SMB failures as SSH.
-	for _, class := range []FailureClass{SMBSigningRequired, SMBSessionInvalid, SMBAuthFailed, SMBTransportError, StoragePermissionDenied, StorageIOError, SourceUnreachable, Cancelled, StorageFull, BenchmarkEvidenceIncomplete, InternalInvariant, MediaProbeFailed} {
+	for _, class := range []FailureClass{SMBSigningRequired, SMBSessionInvalid, SMBAuthFailed, SMBTransportError, StoragePermissionDenied, StorageIOError, SourceUnreachable, Cancelled, StorageFull, BenchmarkEvidenceIncomplete, InternalInvariant, MediaProbeFailed, CandidateInvalid} {
 		if s == string(class) || strings.Contains(s, string(class)+":") {
 			return class
 		}
@@ -159,6 +165,7 @@ var sourceChangedMessages = []string{
 	"source index changed",
 	"source codec changed",
 	"was concurrently modified",
+	"local source bytes do not match expected sha256",
 	"source media modified during benchmark",
 	"original changed",
 	"original size changed",
@@ -191,7 +198,7 @@ func Retryable(c FailureClass, allowed []string) bool {
 		ValidationDurationMismatch, ValidationStreamLoss, ValidationCodecMismatch, SourceChanged,
 		SMBSigningRequired, SMBSessionInvalid, SMBAuthFailed, SMBTransportError,
 		StoragePermissionDenied, StorageIOError, SourceUnreachable,
-		Unclassified, BenchmarkEvidenceIncomplete, InternalInvariant, MediaProbeFailed:
+		Unclassified, BenchmarkEvidenceIncomplete, InternalInvariant, MediaProbeFailed, CandidateInvalid:
 		// SMB operations already recover on a fresh signed session. Replaying
 		// the full encode after exhausted recovery is unsafe and wasteful. A
 		// failure that is not understood, or that is a bug in the benchmark's

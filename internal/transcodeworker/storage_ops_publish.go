@@ -168,7 +168,7 @@ func checkCopiedDigest(rep *publicationReport, h hash.Hash, dst string) error {
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); !strings.EqualFold(got, rep.expectSHA) {
 		_ = os.Remove(dst)
-		return fmt.Errorf("%w: local candidate no longer matches its accepted sha256; publication withdrawn", ErrSourceInvalid)
+		return candidateInvalid(fmt.Errorf("%w: local candidate no longer matches its accepted sha256; publication withdrawn", ErrSourceInvalid))
 	}
 	return nil
 }

@@ -35,7 +35,7 @@ var allowedFailureClasses = map[string]bool{
 // ffmpeg process failed in an unrecognized way, while text nothing recognizes
 // is unclassified.
 var neverRetriedClasses = map[string]bool{
-	"unclassified": true, "benchmark_evidence_incomplete": true, "internal_invariant": true, "media_probe_failed": true,
+	"unclassified": true, "benchmark_evidence_incomplete": true, "internal_invariant": true, "media_probe_failed": true, "candidate_invalid": true,
 }
 
 var allowedFallbackActions = map[string]bool{"retry": true, "apply_container_conversion": true}

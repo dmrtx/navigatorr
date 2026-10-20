@@ -21,7 +21,7 @@ func TestFallbackConditionsMatchWhatTheEngineRetries(t *testing.T) {
 			t.Errorf("fallback on %q rejected: %v", when, err)
 		}
 	}
-	for _, when := range []string{"unclassified", "benchmark_evidence_incomplete", "internal_invariant", "media_probe_failed"} {
+	for _, when := range []string{"unclassified", "benchmark_evidence_incomplete", "internal_invariant", "media_probe_failed", "candidate_invalid"} {
 		err := ValidateProfile("p", with(when))
 		if err == nil || !strings.Contains(err.Error(), "never retried") {
 			t.Errorf("fallback on %q: want a never-retried rejection, got %v", when, err)

@@ -293,8 +293,9 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 			if verr == nil {
 				var currentSHA string
 				currentSHA, verr = verifiedLocalSHA256(ctx, r.localCandidate)
+				verr = candidateHashFailure(verr)
 				if verr == nil && currentSHA != attest.SHA256 {
-					verr = fmt.Errorf("quality_candidate_identity_changed: candidate changed during final validation")
+					verr = candidateInvalid(fmt.Errorf("quality_candidate_identity_changed: candidate changed during final validation"))
 				}
 			}
 		}
@@ -1425,17 +1426,17 @@ func stagedInputReady(path string) (bool, error) {
 // output path before the EncodeComplete checkpoint is persisted.
 func validateEncodedCandidate(path string) error {
 	if strings.TrimSpace(path) == "" {
-		return fmt.Errorf("%w: empty encoder output path", ErrSourceInvalid)
+		return candidateInvalid(fmt.Errorf("%w: empty encoder output path", ErrSourceInvalid))
 	}
 	fi, err := os.Lstat(path)
 	if err != nil {
 		return fmt.Errorf("%w: encoder output %s is unavailable: %v", ErrStorageIO, path, err)
 	}
 	if !fi.Mode().IsRegular() {
-		return fmt.Errorf("%w: encoder output %s is not a regular file", ErrSourceInvalid, path)
+		return candidateInvalid(fmt.Errorf("%w: encoder output %s is not a regular file", ErrSourceInvalid, path))
 	}
 	if fi.Size() == 0 {
-		return fmt.Errorf("%w: encoder output %s is empty", ErrSourceInvalid, path)
+		return candidateInvalid(fmt.Errorf("%w: encoder output %s is empty", ErrSourceInvalid, path))
 	}
 	return nil
 }
