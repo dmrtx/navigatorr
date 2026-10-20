@@ -107,11 +107,11 @@ func siblingEvidenceOf(state map[string]any) *SiblingBudgetEvidence {
 	return &ev
 }
 
-// resolutionClass buckets a picture by its larger extent with the height
+// ResolutionClass buckets a picture by its larger extent with the height
 // scaled to 16:9, so a letterboxed 1920x800 film and a pillarboxed 1440x1080
 // one are both 1080p; a label from the height alone would call the first 720p.
 // DCI 2K (2048 wide) is 1080p; 2560x1440 is its own class.
-func resolutionClass(width, height int) string {
+func ResolutionClass(width, height int) string {
 	if width <= 0 || height <= 0 {
 		return ""
 	}
@@ -179,7 +179,7 @@ func (e *Engine) sizeBudgetSiblings(ctx context.Context, sourcePath string, rep 
 	if len(video) != 1 || rep.DurationSec <= 0 || sourceBytes <= 0 {
 		return unavailable("source_unreadable", "The source's duration or picture size could not be read, so it cannot be compared with its siblings.")
 	}
-	ev.ResolutionClass = resolutionClass(video[0].Width, video[0].Height)
+	ev.ResolutionClass = ResolutionClass(video[0].Width, video[0].Height)
 	ev.SourceBitrateKbps = int(float64(sourceBytes) * 8 / rep.DurationSec / 1000)
 	source, err := os.Stat(sourcePath)
 	if err != nil || ev.ResolutionClass == "" {
@@ -213,7 +213,7 @@ func (e *Engine) sizeBudgetSiblings(ctx context.Context, sourcePath string, rep 
 			r, err := mediainspect.InspectDetailed(pctx, e.deps.Ffprobe, clean)
 			cancel()
 			v := r.MainVideo()
-			if err != nil || len(v) != 1 || r.DurationSec < siblingBudgetMinSeconds || r.SizeBytes <= 0 || resolutionClass(v[0].Width, v[0].Height) != ev.ResolutionClass {
+			if err != nil || len(v) != 1 || r.DurationSec < siblingBudgetMinSeconds || r.SizeBytes <= 0 || ResolutionClass(v[0].Width, v[0].Height) != ev.ResolutionClass {
 				continue
 			}
 			f := SiblingFile{Name: filepath.Base(clean), Bytes: r.SizeBytes, DurationSeconds: r.DurationSec, BitrateKbps: int(float64(r.SizeBytes) * 8 / r.DurationSec / 1000), Width: v[0].Width, Height: v[0].Height}

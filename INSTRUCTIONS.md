@@ -411,7 +411,7 @@ Separate from the request queue, Navigatorr persists maintenance state in SQLite
 4. Every step is idempotent — after a restart, re-issue the current step.
 5. `torrent_check`/`add_torrent` blocklist malicious releases automatically (`block_release`/`block_list` for manual entries).
 
-**Scanning:** `scan_library_issues` is dry-run by default; pass `dry_run=false` to open jobs. Oversized-anime uses per-episode size (`sizeOnDisk/episodeFileCount`), never total size. Language issues need real stream data, not `originalLanguage`.
+**Scanning:** `scan_library_issues` is dry-run by default; pass `dry_run=false` to open jobs. Oversized-anime uses per-episode size (`sizeOnDisk/episodeFileCount`), never total size. Episodes are also flagged one by one (`media_type=episode`, `media_id=<series id>:<episode file id>`; a real run closes the pending ones it no longer finds) when their total bitrate (size over Sonarr's mediaInfo runtime) is at least `sibling_ratio` (default 2, `0` off) times the median of at least 3 other episodes of their season in the same resolution class; nothing is probed. Language issues need real stream data, not `originalLanguage`.
 
 **Cleanup:** `cleanup_imported_downloads` defaults to `list`. Removal needs explicit `hashes` + `confirmed_imported=true` (+ `confirm=true` for data, + `allow_destructive`); 100% progress alone never deletes.
 

@@ -4,10 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/jakenesler/navigatorr/action"
 	"github.com/jakenesler/navigatorr/arrservice"
 	"github.com/jakenesler/navigatorr/maint"
 	"github.com/jakenesler/navigatorr/mediainspect"
@@ -24,6 +28,17 @@ const scanTimeout = 4 * time.Minute
 // scanWorkers caps concurrent per-series fetches so a 30-series scan does
 // not open 30 simultaneous connections against Sonarr/Radarr.
 const scanWorkers = 4
+
+const (
+	// siblingOversizedRatio flags an episode at this multiple of its siblings'
+	// median total bitrate; siblingOversizedMinimum siblings make a median.
+	siblingOversizedRatio   = 2.0
+	siblingOversizedMinimum = 3
+	// episodeFileCap bounds the episode files read for one series; the
+	// language check samples only the first languageSampleFiles of them.
+	episodeFileCap      = 2000
+	languageSampleFiles = 5
+)
 
 // scanFinding is one library issue found by a scan.
 type scanFinding struct {
@@ -53,11 +68,12 @@ func registerScanTools(s *server.MCPServer, d *Deps, registry *arrservice.Regist
 	// scan_library_issues — dry run by default; creates jobs only when asked.
 	s.AddTool(
 		mcp.NewTool("scan_library_issues",
-			mcp.WithDescription("Scan Sonarr/Radarr libraries for maintenance issues: oversized anime (per-episode size), movies lacking accessible audio/subs, dangerous filenames, possible title/file mismatches. Rebuilt with snapshots, bounded concurrency, language policy (EN/ES), und inspection, and auto-reconciliation. dry_run=true (default) only reports; dry_run=false creates maintenance jobs idempotently."),
+			mcp.WithDescription("Scan Sonarr/Radarr libraries for maintenance issues: oversized anime (per-episode size), episodes whose total bitrate is sibling_ratio times or more the median of the other episodes of their season in the same resolution class (at least 3; from Sonarr's mediaInfo runtime and resolution, nothing probed; one issue per episode file, media_type=episode, media_id=<series id>:<episode file id>; a real run closes the pending ones no longer found), movies lacking accessible audio/subs, dangerous filenames, possible title/file mismatches. Rebuilt with snapshots, bounded concurrency, language policy (EN/ES), und inspection, and auto-reconciliation. dry_run=true (default) only reports; dry_run=false creates maintenance jobs idempotently."),
 			mcp.WithString("service", mcp.Description("sonarr, radarr or all (default all)")),
 			mcp.WithString("dry_run", mcp.Description("true (default) to report only, false to create jobs")),
 			mcp.WithString("limit", mcp.Description("Max entries to scan per service (default: 0 = scan entire library)")),
 			mcp.WithString("per_episode_mb", mcp.Description("Oversized threshold per episode in MB (default from config)")),
+			mcp.WithString("sibling_ratio", mcp.Description("Flag an episode at this multiple of its season siblings' median total bitrate: 1.1 to 20, default 2; 0 turns the rule off")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			args := req.GetArguments()
@@ -66,6 +82,10 @@ func registerScanTools(s *server.MCPServer, d *Deps, registry *arrservice.Regist
 			limit := int(argInt64(args, "limit", 0))
 			thresholdMB := argInt64(args, "per_episode_mb", d.Config.Maintenance.OversizedPerEpisodeMB)
 			threshold := thresholdMB << 20
+			siblingRatio := argFloat(args, "sibling_ratio", siblingOversizedRatio)
+			if math.IsNaN(siblingRatio) || siblingRatio != 0 && (siblingRatio < 1.1 || siblingRatio > 20) {
+				return toolErr("sibling_ratio must be 0 (off) or between 1.1 and 20"), nil
+			}
 
 			var cancel context.CancelFunc
 			ctx, cancel = context.WithTimeout(ctx, scanTimeout)
@@ -92,7 +112,7 @@ func registerScanTools(s *server.MCPServer, d *Deps, registry *arrservice.Regist
 			truncated := false
 
 			for _, svcName := range services {
-				stat, err := scanService(ctx, registry, d, svcName, limit, threshold, !dry)
+				stat, err := scanService(ctx, registry, d, svcName, limit, threshold, siblingRatio, !dry)
 				if err != nil {
 					allIssues = append(allIssues, scanFinding{Service: svcName, Issue: "scan_error", Detail: err.Error()})
 					continue
@@ -335,7 +355,7 @@ func registerFsTools(s *server.MCPServer, d *Deps) {
 }
 
 // scanService inspects one *arr library with bounded, field-selected calls.
-func scanService(ctx context.Context, registry *arrservice.Registry, d *Deps, svcName string, limit int, threshold int64, create bool) (scanStats, error) {
+func scanService(ctx context.Context, registry *arrservice.Registry, d *Deps, svcName string, limit int, threshold int64, siblingRatio float64, create bool) (scanStats, error) {
 	stat := scanStats{Service: svcName, Complete: true}
 	svc, err := registry.Get(svcName)
 	if err != nil {
@@ -380,13 +400,28 @@ func scanService(ctx context.Context, registry *arrservice.Registry, d *Deps, sv
 					_, _, _ = d.Store.AutoResolveStale("sonarr", "series", idStr, maint.IssueOversized, "per-episode size within threshold")
 				}
 
-				files, _, ferr := arrCollection(ctx, svc, "/episodefile?seriesId="+idStr, 5)
+				files, truncated, ferr := arrCollection(ctx, svc, "/episodefile?seriesId="+idStr, episodeFileCap)
 				if ferr != nil {
 					perSeries[i] = f
 					return
 				}
-				findings := fileLevelFindings("sonarr", "series", idStr, title, files)
+				findings := fileLevelFindings("sonarr", "series", idStr, title, files[:min(len(files), languageSampleFiles)])
 				f = append(f, findings...)
+				if siblingRatio > 0 {
+					outliers := siblingOversizedFindings(idStr, title, files, siblingRatio)
+					f = append(f, outliers...)
+					// A real run closes the series' pending episode issues it no
+					// longer finds: back under the ratio, replaced, or out of the
+					// comparison. A dry run writes nothing, and a truncated file
+					// list proves nothing about the files it left out.
+					if create && !truncated {
+						keep := map[string]bool{}
+						for _, o := range outliers {
+							keep[o.MediaID] = true
+						}
+						_, _ = d.Store.AutoResolvePendingExcept("sonarr", "episode", maint.IssueOversized, idStr+":", keep, "no longer above the sibling ratio")
+					}
+				}
 				perSeries[i] = f
 			}(i, m)
 		}
@@ -674,6 +709,104 @@ func fileLevelFindings(service, mediaType, mediaID, title string, files []map[st
 		}
 	}
 	return out
+}
+
+// siblingOversizedFindings flags the episode files whose total bitrate (size
+// over mediaInfo runTime) is at least ratio times the median of the other
+// files of their season in the same resolution class, the comparison a
+// sibling size budget makes. Files without a runtime or resolution are left
+// out. An issue's media_id is "<series id>:<episode file id>", so it never
+// matches a series' own id.
+func siblingOversizedFindings(seriesID, title string, files []map[string]any, ratio float64) (findings []scanFinding) {
+	type episode struct {
+		id, path   string
+		size       int64
+		bitsPerSec float64
+	}
+	groups := map[string][]episode{}
+	var keys []string
+	for _, f := range files {
+		mi, _ := f["mediaInfo"].(map[string]any)
+		size := int64(numVal(f["size"]))
+		seconds := parseRunTime(mi["runTime"])
+		w, h := parseResolution(mi["resolution"])
+		class := action.ResolutionClass(w, h)
+		if size <= 0 || seconds <= 0 || class == "" {
+			continue
+		}
+		path, _ := f["relativePath"].(string)
+		key := fmt.Sprintf("season %d · %s", int(numVal(f["seasonNumber"])), class)
+		if groups[key] == nil {
+			keys = append(keys, key)
+		}
+		groups[key] = append(groups[key], episode{id: numStr(f["id"]), path: path, size: size, bitsPerSec: float64(size) * 8 / seconds})
+	}
+	for _, key := range keys {
+		group := groups[key]
+		if len(group) <= siblingOversizedMinimum {
+			continue
+		}
+		for i, ep := range group {
+			rates := make([]float64, 0, len(group)-1)
+			for j, other := range group {
+				if j != i {
+					rates = append(rates, other.bitsPerSec)
+				}
+			}
+			sort.Float64s(rates)
+			median := rates[len(rates)/2]
+			if len(rates)%2 == 0 {
+				median = (rates[len(rates)/2-1] + rates[len(rates)/2]) / 2
+			}
+			r := ep.bitsPerSec / median
+			if r < ratio {
+				continue
+			}
+			findings = append(findings, scanFinding{
+				Service: "sonarr", MediaType: "episode", MediaID: seriesID + ":" + ep.id, Title: title, Issue: maint.IssueOversized,
+				Detail: fmt.Sprintf("%s: %s runs at %.1f Mbps, %.1f× the %.1f Mbps median of %d sibling episodes", key, ep.path, ep.bitsPerSec/1e6, r, median/1e6, len(rates)),
+				FileID: ep.id, FileSize: ep.size,
+			})
+		}
+	}
+	return findings
+}
+
+// parseRunTime reads an *arr mediaInfo runTime ("1:02:31", "42:31" or
+// seconds) as seconds; zero when it is missing or unreadable.
+func parseRunTime(v any) float64 {
+	if n, ok := v.(float64); ok {
+		if n < 0 || math.IsInf(n, 0) || math.IsNaN(n) {
+			return 0
+		}
+		return n
+	}
+	s, _ := v.(string)
+	parts := strings.Split(strings.TrimSpace(s), ":")
+	if s == "" || len(parts) > 3 {
+		return 0
+	}
+	total := 0.0
+	for _, part := range parts {
+		n, err := strconv.ParseFloat(part, 64)
+		if err != nil || n < 0 || math.IsInf(n, 0) || math.IsNaN(n) {
+			return 0
+		}
+		total = total*60 + n
+	}
+	return total
+}
+
+// parseResolution reads an *arr mediaInfo resolution such as "1920x1080".
+func parseResolution(v any) (width, height int) {
+	s, _ := v.(string)
+	w, h, ok := strings.Cut(strings.ToLower(strings.TrimSpace(s)), "x")
+	if !ok {
+		return 0, 0
+	}
+	width, _ = strconv.Atoi(strings.TrimSpace(w))
+	height, _ = strconv.Atoi(strings.TrimSpace(h))
+	return width, height
 }
 
 // arrCollection GETs an *arr collection endpoint with hard size caps.

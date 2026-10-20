@@ -312,7 +312,7 @@ func TestScanServiceConcurrent(t *testing.T) {
 	}
 	defer st.Close()
 	d := &Deps{Store: st, Config: cfg}
-	stat, err := scanService(context.Background(), arrservice.NewRegistry(cfg), d, "sonarr", 30, 900<<20, false)
+	stat, err := scanService(context.Background(), arrservice.NewRegistry(cfg), d, "sonarr", 30, 900<<20, 2, false)
 	if err != nil {
 		t.Fatal(err)
 	}
