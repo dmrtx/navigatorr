@@ -249,6 +249,18 @@ measured apart (about half a point on the mean, a point on the p5), so
 VideoToolbox is taken only when nobody could see what it costs. It encodes a
 film in minutes where two-pass x265 medium takes hours.
 
+Both encodes get the same bitrate because that is what each budget encode
+would get, so the comparison is between the files the budget would actually
+produce. Their sample size estimates can still differ. VideoToolbox's rate
+control often lands under its average on short windows of hard material and
+still holds it over a whole film. In one such case the samples estimated about
+four-fifths of x265's size, and the full VideoToolbox encode then came out at
+x265's size. VideoToolbox's sampled numbers are then a lower bound, so the
+difference only counts against it. Raising its bitrate from the sample estimate
+would overshoot the full file, so the comparison does not do that. The
+worker's own ranking of the two encodes (it may name the smaller one a
+"winner") plays no part; only the tolerance rule picks.
+
 The comparison is optional. With `allow_hardware=false` no comparison is
 frozen and the budget encode is x265, as it is for a budget frozen before the
 comparison existed (its digest is unchanged). A worker without VideoToolbox, a

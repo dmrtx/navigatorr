@@ -482,3 +482,71 @@ func TestBatchApprovedReplacementsKeepOneQueueRow(t *testing.T) {
 		t.Fatal("independent replacement hidden", w.Body.String())
 	}
 }
+
+func TestCompletedEarlyExitShowsSkippedStagesAndKeptOriginal(t *testing.T) {
+	s, _ := testUI(t)
+	st := s.engine.Deps().Store
+	tmpl, ok := s.engine.GetTemplate("transcode_media")
+	if !ok {
+		t.Fatal("transcode_media template missing")
+	}
+	logSteps := func(id string, statuses map[string]string) {
+		for i, step := range tmpl.Steps {
+			status := statuses[step.Name]
+			if status == "" {
+				status = "skipped"
+			}
+			if err := st.LogActionStep(store.ActionStepLog{InstanceID: id, StepIndex: i, StepName: step.Name, Primitive: step.Name, InputsJSON: "{}", OutputsJSON: "{}", Status: status}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	record := func(id string) operationRecord {
+		inst, err := st.GetActionInstance(id)
+		if err != nil || inst == nil {
+			t.Fatal(id, err)
+		}
+		return operationRecord{inst: *inst, inputs: map[string]any{}, outputs: decodeOperationJSON(inst.OutputsJSON), state: decodeOperationJSON(inst.StateJSON)}
+	}
+
+	seedOperation(t, st, "early-exit", "transcode_media", "completed", nil, map[string]any{"skip_transcode": true, "reason_code": "hdr_requires_compact"}, nil)
+	logSteps("early-exit", map[string]string{"preflight": "completed", "accept_result": "completed"})
+	stages := s.queueStages(record("early-exit"))
+	if len(stages) != len(tmpl.Steps) {
+		t.Fatalf("stage count %d", len(stages))
+	}
+	for i, stage := range stages {
+		switch tmpl.Steps[i].Name {
+		case "preflight":
+			if stage["status"] != "completed" || stage["note"] != nil {
+				t.Fatalf("preflight %+v", stage)
+			}
+		case "accept_result":
+			if stage["status"] != "completed" || stage["note"] != "Original kept." {
+				t.Fatalf("accept_result %+v", stage)
+			}
+		default:
+			if stage["status"] != "skip" || stage["note"] != "Not needed; original kept." {
+				t.Fatalf("stage %s %+v", tmpl.Steps[i].Name, stage)
+			}
+		}
+	}
+
+	// A job that produced a candidate shows every stage as run, whatever its
+	// step rows say.
+	seedOperation(t, st, "with-candidate", "transcode_media", "completed", nil, map[string]any{"original_intact": true}, nil)
+	logSteps("with-candidate", map[string]string{"submit_benchmark": "skipped", "wait_benchmark": "skipped"})
+	for _, stage := range s.queueStages(record("with-candidate")) {
+		if stage["status"] != "completed" || stage["note"] != nil {
+			t.Fatalf("candidate stage %+v", stage)
+		}
+	}
+
+	// Without stored rows the derived status is unchanged.
+	seedOperation(t, st, "no-rows", "transcode_media", "completed", nil, map[string]any{"skip_transcode": true}, nil)
+	for _, stage := range s.queueStages(record("no-rows")) {
+		if stage["status"] != "completed" {
+			t.Fatalf("stage without a stored row %+v", stage)
+		}
+	}
+}

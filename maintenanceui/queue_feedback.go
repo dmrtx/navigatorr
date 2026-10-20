@@ -104,6 +104,7 @@ func (s *Server) queueStages(r operationRecord) []map[string]any {
 		return nil
 	}
 	stages := make([]map[string]any, 0, len(tmpl.Steps))
+	skippedSteps := s.skippedStoredSteps(r)
 	for i, step := range tmpl.Steps {
 		status := "pending"
 		if i < r.inst.CurrentStep || r.inst.Status == store.ActionStatusCompleted {
@@ -112,6 +113,11 @@ func (s *Server) queueStages(r operationRecord) []map[string]any {
 			status = r.inst.Status
 		}
 		stage := map[string]any{"name": step.Name, "status": status}
+		if status == "completed" && skippedSteps[i] {
+			stage["status"], stage["note"] = "skip", "Not needed; original kept."
+		} else if status == "completed" && r.inst.ActionName == "transcode_media" && step.Name == "accept_result" && operationValue(r, "skip_transcode") == true {
+			stage["note"] = "Original kept."
+		}
 		if (r.inst.Status == store.ActionStatusFailed || r.inst.Status == store.ActionStatusCancelled) && i > r.inst.CurrentStep {
 			stage["status"], stage["note"] = "skip", "Not run."
 		}
@@ -144,6 +150,38 @@ func (s *Server) queueStages(r operationRecord) []map[string]any {
 		stages = append(stages, stage)
 	}
 	return stages
+}
+
+// skippedStoredSteps returns the step indexes whose stored row says the step
+// was skipped. A completed action otherwise paints every stage completed, even
+// the ones that never ran because the job ended early. Only a completed
+// transcode that ended without a candidate can have such steps, so the step
+// log is read for those alone.
+func (s *Server) skippedStoredSteps(r operationRecord) map[int]bool {
+	if r.inst.ActionName != "transcode_media" || r.inst.Status != store.ActionStatusCompleted || operationValue(r, "skip_transcode") != true || s.engine == nil {
+		return nil
+	}
+	st := s.engine.Deps().Store
+	if st == nil {
+		return nil
+	}
+	steps, err := st.GetActionSteps(r.inst.ID)
+	if err != nil {
+		return nil
+	}
+	// Rows are ordered by step and then by insertion: the last row for a step
+	// is its final outcome.
+	final := map[int]string{}
+	for _, step := range steps {
+		final[step.StepIndex] = step.Status
+	}
+	skipped := map[int]bool{}
+	for index, status := range final {
+		if status == "skipped" {
+			skipped[index] = true
+		}
+	}
+	return skipped
 }
 
 var savingsFailurePattern = regexp.MustCompile(`benchmark winner predicts only (-?\d+(?:\.\d+)?)% savings, below required minimum (\d+(?:\.\d+)?)%`)

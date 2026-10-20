@@ -42,6 +42,9 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 	if getBool(ec.State, "skip_transcode") {
 		return StepResult{Status: StepSkipped}, nil
 	}
+	if sizeBudgetRoundLost(ec.State) {
+		return StepResult{Status: StepFailed, Error: sizeBudgetRoundLostError}, nil
+	}
 	if round := sizeBudgetRoundOf(ec.State); round != nil && round.Failure != "" {
 		// The comparison round is given up; the wait step plans x265.
 		return StepResult{Status: StepCompleted}, nil
@@ -58,6 +61,9 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 	}
 	if e.deps.Transcode == nil {
 		return StepResult{Status: StepFailed, Error: "transcode executor is disabled or not configured in navigatorr"}, nil
+	}
+	if ec.ActionName == "transcode_media" && getString(ec.State, "original_sha256") == "" {
+		return StepResult{Status: StepFailed, Error: "original integrity baseline missing (fail closed)"}, nil
 	}
 	if wait := getString(ec.State, "benchmark_retry_not_before"); wait != "" {
 		if at, err := time.Parse(time.RFC3339Nano, wait); err == nil && time.Now().Before(at) {
@@ -287,6 +293,11 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 		return StepResult{Status: StepSkipped}, nil
 	}
 
+	if sizeBudgetRoundLost(ec.State) {
+		// Read as an ordinary benchmark, the round's results would pick the
+		// budget encode by the worker's ranking instead of the budget's rule.
+		return StepResult{Status: StepFailed, Error: sizeBudgetRoundLostError}, nil
+	}
 	if round := sizeBudgetRoundOf(ec.State); round != nil && round.Failure != "" {
 		return e.finishSizeBudgetComparison(ec, round, nil)
 	}
