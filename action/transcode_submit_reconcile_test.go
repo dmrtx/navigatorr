@@ -30,6 +30,7 @@ func testReconcileEC(jobID string) *ExecutionContext {
 		Inputs:     map[string]any{"path": "/Volumes/media/ep.mkv"},
 		State: map[string]any{
 			"resolved_path":       "/Volumes/media/ep.mkv",
+			"original_sha256":     "source-baseline",
 			"candidate_extension": ".mkv",
 			"profile":             "hevc-vt",
 			"plan":                testReconcilePlan(),

@@ -61,6 +61,9 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 	if e.deps.Transcode == nil {
 		return StepResult{Status: StepFailed, Error: "transcode executor is disabled or not configured in navigatorr"}, nil
 	}
+	if ec.ActionName == "transcode_media" && getString(ec.State, "original_sha256") == "" {
+		return StepResult{Status: StepFailed, Error: "original integrity baseline missing (fail closed)"}, nil
+	}
 	if wait := getString(ec.State, "benchmark_retry_not_before"); wait != "" {
 		if at, err := time.Parse(time.RFC3339Nano, wait); err == nil && time.Now().Before(at) {
 			return StepResult{

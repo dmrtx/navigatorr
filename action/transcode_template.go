@@ -14,6 +14,7 @@ import (
 	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/recipe"
+	"github.com/jakenesler/navigatorr/transcode/resilience"
 	"github.com/jakenesler/navigatorr/transcode/selector"
 )
 
@@ -25,13 +26,13 @@ func (e *Engine) registerTranscodeTemplate() {
 		Description:    "Set mode=size|quality|x265_preserve|compact for immutable sampled quality and final size policies without profile/priority/tuning; quality is the UI default. x265_preserve requires libx265, skips existing HEVC and permits 0% minimum savings; size requires 15%, converts lossless audio (TrueHD, MLP, FLAC, ALAC, PCM, DTS-HD MA) to AAC with the same layout, lossless Atmos and DTS:X included (their object/height channels are lost), while copying lossy tracks (E-AC-3 Atmos included), and may encode 8-bit sources as 10-bit HEVC on a worker that proves native 10-bit quality; quality and x265_preserve reject growth. Size also takes allow_hardware (default true; false keeps x265 only) with an optional hardware_margin_percent (0-50, default 15): the search then also measures Apple VideoToolbox encodes through the same quality gates and selection margin, and one wins when it is at most that percent larger than the best x265 result (or when x265 finds nothing); it needs a worker that advertises hardware_search, otherwise the search stays x265 only, and a hardware winner reports encoder and hardware in the size result. Size also takes allow_slow_preset (default false): true lets the quality fallback also try the x265 slow preset, whose full encode of a long 1080p source can take hours; medium covers CRF 14-21 either way. Size also takes one optional size budget, size_budget_percent (5-85, a percent of the source file), size_budget_bytes (a whole number of bytes, at least 50000000) or size_budget_source=siblings (the median total bitrate of the other video files in the same season folder, else the series folder, needing at least 3 of the same resolution class, times size_budget_sibling_multiplier 1.0-4.0, default 1.5), exactly one of them: when the search finds no setting that meets the quality limits, or the one it finds is larger than the budget, the file is encoded once with two-pass x265 at the bitrate that lands on the budget (or, when allow_hardware is on, with VideoToolbox at that bitrate if a short comparison on the search's windows measures it within 1 VMAF of x265 on both mean and p5; a VideoToolbox encode over the budget is encoded once more at a corrected bitrate), validated on the final windows against a fixed quality floor (VMAF mean 70, p5 60, worst 5 s window 65; banding limits unchanged) and reported as below the quality target but within budget; it still needs the usual approval before it replaces the original. compact makes HDR10, HLG, Dolby Vision 7/8 (base layer) and over-1080p SDR sources much smaller: deterministic tone map to SDR BT.709, downscale to max_height (720, 1080 default, 1440 or 2160), HEVC, lossless/DTS/PCM audio to AAC with every track kept, 30% minimum savings; HDR, Dolby Vision and Atmos are dropped and Dolby Vision profile 5 is rejected. Unsupported sources or unavailable quality capabilities preserve the original. Omit mode for legacy technical behavior. Coordinates safe candidate-only media transcoding using an immutable recipe-resolved plan, bounded transient retries, worker revalidation, post-transcode stream validation, and original SHA-256 verification.",
 		RequiredInputs: []string{"path"}, OptionalInputs: []string{"mode", "max_height", "allow_hardware", "hardware_margin_percent", "allow_slow_preset", "size_budget_percent", "size_budget_bytes", "size_budget_source", "size_budget_sibling_multiplier", "profile", "profile_config", "preserve_source_bit_depth", "replace_original", "expected_video_codec", "max_size_increase_percent", "media_type", "is_anime", "min_savings_percent", "surface_worker_busy", "metric", "parent_action_id", "batch_fixed_quality", "batch_calibration_digest", "batch_item_key", "library_context"}, Destructive: false,
 		Steps: []StepDefinition{
-			{Name: "preflight", Description: "Inspect source, hash original, resolve profile/recipe and per-stream compatibility plan", Run: e.measureCoordinatorPhase("coordinator_preflight", e.stepTranscodePreflight)},
+			{Name: "preflight", Description: "Inspect source, hash original once it needs worker work, resolve profile/recipe and per-stream compatibility plan", Run: e.measureCoordinatorPhase("coordinator_preflight", e.stepTranscodePreflight)},
 			{Name: "submit_benchmark", Description: "Submit benchmark request if profile optimization is enabled", Run: e.stepBenchmarkSubmit},
 			{Name: "wait_benchmark", Description: "Wait for benchmark completion and materialize winning plan if optimization is enabled", Run: e.stepBenchmarkWait},
 			{Name: "submit_transcode", Description: "Submit the immutable structured plan to the remote worker with bounded transient retries", Run: e.stepTranscodeSubmit},
 			{Name: "wait_transcode", Description: "Monitor transcode progress and classify transient transport failures", Run: e.stepTranscodeWait},
 			{Name: "validate_result", Description: "Validate duration, codecs, streams, dispositions, attachments, chapters and candidate integrity", Run: e.stepTranscodeValidate},
-			{Name: "accept_result", Description: "Finalize candidate report and verify original SHA-256 is unchanged", Run: e.stepTranscodeAccept},
+			{Name: "accept_result", Description: "Finalize candidate report and verify original SHA-256 is unchanged (not applicable when nothing ran against the original)", Run: e.stepTranscodeAccept},
 		},
 	})
 }
@@ -75,46 +76,6 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		return StepResult{Status: StepFailed, Error: "transcode executor is disabled or not configured in navigatorr"}, nil
 	}
 
-	f, err := os.Open(cleanPath)
-	if err != nil {
-		return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to open original file %s: %v", cleanPath, err)}, nil
-	}
-	h := sha256.New()
-	var lastObservation time.Time
-	observe := promotionHashProgress(func(_ string, read, total int64) error {
-		if read != 0 && read != total && time.Since(lastObservation) < time.Second {
-			return nil
-		}
-		lastObservation = time.Now()
-		ec.State["work_progress"] = map[string]any{"phase": "hashing_source", "bytes_read": read, "total_bytes": total, "updated_at": time.Now().UTC().Format(time.RFC3339Nano)}
-		return e.persistExecutionState(ctx, ec)
-	})
-	// Show a queued hash as waiting, not as a hash stuck at zero bytes, and
-	// time only the hash itself.
-	ec.State["work_progress"] = map[string]any{"phase": "waiting_for_hash_slot", "total_bytes": fi.Size(), "updated_at": time.Now().UTC().Format(time.RFC3339Nano)}
-	if err := e.persistExecutionState(ctx, ec); err != nil {
-		_ = f.Close()
-		return StepResult{Status: StepFailed, Error: err.Error()}, nil
-	}
-	release, err := e.acquireHashSlot(ctx)
-	if err != nil {
-		_ = f.Close()
-		return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to compute hash of original file %s: %v", cleanPath, err)}, nil
-	}
-	defer release()
-	if err := observe(cleanPath, 0, fi.Size()); err != nil {
-		_ = f.Close()
-		return StepResult{Status: StepFailed, Error: err.Error()}, nil
-	}
-	hashStarted := e.now()
-	_, hashErr := io.Copy(h, &promotionContextReader{ctx: ctx, r: f, path: cleanPath, total: fi.Size(), progress: observe})
-	release()
-	_ = f.Close()
-	e.recordCoordinatorPhase(ec, "coordinator_source_hash", hashStarted, e.now())
-	if hashErr != nil {
-		return StepResult{Status: StepFailed, Error: fmt.Sprintf("failed to compute hash of original file %s: %v", cleanPath, hashErr)}, nil
-	}
-	origSHA := hex.EncodeToString(h.Sum(nil))
 	ec.State["work_progress"] = map[string]any{"phase": "probing_source", "updated_at": time.Now().UTC().Format(time.RFC3339Nano)}
 	if err := e.persistExecutionState(ctx, ec); err != nil {
 		return StepResult{Status: StepFailed, Error: err.Error()}, nil
@@ -131,7 +92,7 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	if !rep.Probed {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("ffprobe did not produce a trustworthy detailed inspection for %s (fail closed)", cleanPath)}, nil
 	}
-	origMap := map[string]any{"path": cleanPath, "size_bytes": fi.Size(), "sha256": origSHA, "duration_sec": rep.DurationSec, "container": rep.Container, "video": rep.Video, "audio": rep.Audio, "subtitles": rep.Subtitles, "attachments": rep.Attachments, "chapters": rep.Chapters, "probed": rep.Probed}
+	origMap := map[string]any{"path": cleanPath, "size_bytes": fi.Size(), "duration_sec": rep.DurationSec, "container": rep.Container, "video": rep.Video, "audio": rep.Audio, "subtitles": rep.Subtitles, "attachments": rep.Attachments, "chapters": rep.Chapters, "probed": rep.Probed}
 	if rep.BitRate > 0 {
 		origMap["bit_rate"] = rep.BitRate
 	}
@@ -194,6 +155,24 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	}
 	origMap["subtitle_languages"] = subLangs
 
+	// The full source hash is the baseline accept_result re-verifies before a
+	// candidate may be kept. It is taken only once the source is known to need
+	// worker work: probe-only exits below end without it, since a source that
+	// is never encoded or promoted needs no integrity baseline.
+	origSHA := ""
+	hashSource := func() *StepResult {
+		if origSHA != "" {
+			return nil
+		}
+		sha, res := e.hashPreflightSource(ctx, ec, cleanPath, fi)
+		if res != nil {
+			return res
+		}
+		origSHA = sha
+		origMap["sha256"] = sha
+		return nil
+	}
+
 	profile := strings.TrimSpace(getString(ec.Inputs, "profile"))
 	ephemeralProfile, ephemeralDigest, hasProfileConfig, profileConfigErr := decodeEphemeralProfileInput(ec.Inputs)
 	if profileConfigErr != nil {
@@ -214,7 +193,6 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 			ec.State["skip_transcode"] = true
 			ec.State["reason_code"] = reason
 			ec.State["resolved_path"] = cleanPath
-			ec.State["original_sha256"] = origSHA
 			ec.State["original"] = origMap
 			return StepResult{Status: StepCompleted, Outputs: map[string]any{"skipped": true, "reason_code": reason, "mode": modeSnapshot.Mode, "policy_digest": modeSnapshot.Digest}}, nil
 		}
@@ -265,13 +243,11 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		if res.Decision == selector.DecisionSkip || res.Decision == selector.DecisionReview {
 			ec.State["skip_transcode"] = true
 			ec.State["resolved_path"] = cleanPath
-			ec.State["original_sha256"] = origSHA
 			ec.State["original_size"] = fi.Size()
 			ec.State["original"] = origMap
 			ec.State["profile"] = "auto"
 			out := map[string]any{
 				"original":                 origMap,
-				"original_sha256":          origSHA,
 				"resolved_path":            cleanPath,
 				"profile":                  "auto",
 				"auto_decision":            res.Decision,
@@ -365,6 +341,9 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		optEnabled = true
 	}
 	if _, shared := ec.Inputs["batch_fixed_quality"]; shared {
+		if res := hashSource(); res != nil {
+			return *res, nil
+		}
 		if err := e.applySharedBatchCalibration(ec, plan, gateRep, recipeProfile, origSHA, ephemeralDigest, cleanPath); err != nil {
 			return StepResult{Status: StepFailed, Error: fmt.Sprintf("shared batch calibration: %v", err)}, nil
 		}
@@ -388,6 +367,10 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		ec.State["optimization_enabled"] = false
 	}
 
+	// Every path from here submits worker work, so it needs the baseline.
+	if res := hashSource(); res != nil {
+		return *res, nil
+	}
 	ec.State["resolved_path"] = cleanPath
 	ec.State["original_sha256"] = origSHA
 	ec.State["original_size"] = fi.Size()
@@ -437,6 +420,65 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		outputs["expected_savings_percent"] = autoResult.ExpectedSavingsPercent
 	}
 	return StepResult{Status: StepCompleted, Outputs: outputs}, nil
+}
+
+// hashPreflightSource reads the whole source once for the integrity baseline
+// accept_result later re-verifies. The probe ran before this read, so the file
+// is also stat'd afterwards: a source replaced in between would otherwise get
+// a hash that matches the replacement, not the media the plan was built from.
+func (e *Engine) hashPreflightSource(ctx context.Context, ec *ExecutionContext, cleanPath string, fi os.FileInfo) (string, *StepResult) {
+	fail := func(format string, args ...any) (string, *StepResult) {
+		return "", &StepResult{Status: StepFailed, Error: fmt.Sprintf(format, args...)}
+	}
+	f, err := os.Open(cleanPath)
+	if err != nil {
+		return fail("failed to open original file %s: %v", cleanPath, err)
+	}
+	h := sha256.New()
+	var lastObservation time.Time
+	observe := promotionHashProgress(func(_ string, read, total int64) error {
+		if read != 0 && read != total && time.Since(lastObservation) < time.Second {
+			return nil
+		}
+		lastObservation = time.Now()
+		ec.State["work_progress"] = map[string]any{"phase": "hashing_source", "bytes_read": read, "total_bytes": total, "updated_at": time.Now().UTC().Format(time.RFC3339Nano)}
+		return e.persistExecutionState(ctx, ec)
+	})
+	// Show a queued hash as waiting, not as a hash stuck at zero bytes, and
+	// time only the hash itself.
+	ec.State["work_progress"] = map[string]any{"phase": "waiting_for_hash_slot", "total_bytes": fi.Size(), "updated_at": time.Now().UTC().Format(time.RFC3339Nano)}
+	if err := e.persistExecutionState(ctx, ec); err != nil {
+		_ = f.Close()
+		return fail("%v", err)
+	}
+	release, err := e.acquireHashSlot(ctx)
+	if err != nil {
+		_ = f.Close()
+		return fail("failed to compute hash of original file %s: %v", cleanPath, err)
+	}
+	defer release()
+	if err := observe(cleanPath, 0, fi.Size()); err != nil {
+		_ = f.Close()
+		return fail("%v", err)
+	}
+	hashStarted := e.now()
+	_, hashErr := io.Copy(h, &promotionContextReader{ctx: ctx, r: f, path: cleanPath, total: fi.Size(), progress: observe})
+	release()
+	_ = f.Close()
+	e.recordCoordinatorPhase(ec, "coordinator_source_hash", hashStarted, e.now())
+	delete(ec.State, "work_progress")
+	if hashErr != nil {
+		return fail("failed to compute hash of original file %s: %v", cleanPath, hashErr)
+	}
+	after, err := os.Stat(cleanPath)
+	if err != nil {
+		return fail("original file %s is no longer accessible after hashing: %v", cleanPath, err)
+	}
+	if after.Size() != fi.Size() || !after.ModTime().Equal(fi.ModTime()) {
+		ec.State["failure_classification"] = string(resilience.SourceChanged)
+		return fail("original file %s changed while it was being inspected (fail closed)", cleanPath)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func resolvePreserveSourceBitDepth(inputs map[string]any) (bool, error) {
