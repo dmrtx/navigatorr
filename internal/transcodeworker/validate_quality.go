@@ -333,25 +333,22 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 // splitFinalWindowResults separates the grid's results, which decide the
 // verdict, from the fresh windows' (measured after the grid and reported
 // beside it). A fresh window that could not be measured is dropped, never a
-// failure: failed is the lowest failing window, already known to lie beyond
-// the grid. It returns the grid results, every measured window's scores in
+// failure, and the fresh windows that were measured stay: failed is the lowest
+// failing window, already known to lie beyond the grid. It returns the grid results, every measured window's scores in
 // time order and the fresh windows' VMAF statistics.
 func splitFinalWindowResults(q *transcode.QualityValidationPlan, results []finalWindowResult, failed int) ([]finalWindowResult, []transcode.FinalWindowScore, []quality.VMAFStats) {
 	grid := len(q.Samples)
 	fresh := results[grid:]
-	if failed >= 0 {
-		fresh = nil
-	}
 	var windows []transcode.FinalWindowScore
 	var freshVMAF []quality.VMAFStats
 	for i, r := range fresh {
-		if r.vmaf != nil {
+		if r.vmaf != nil && r.code == "" {
 			freshVMAF = append(freshVMAF, *r.vmaf)
 			windows = append(windows, finalWindowScore(q.FreshSamples[i], "fresh", r.vmaf))
 		}
 	}
 	for i, r := range results[:grid] {
-		if r.vmaf != nil {
+		if r.vmaf != nil && r.code == "" {
 			windows = append(windows, finalWindowScore(q.Samples[i], "grid", r.vmaf))
 		}
 	}

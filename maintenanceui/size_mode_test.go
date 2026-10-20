@@ -67,6 +67,8 @@ func TestOperationsProjectSizeHardwareContinuation(t *testing.T) {
 			"measured":      map[string]any{"vmaf_mean": 93.0, "vmaf_p5": 80.2, "vmaf_worst_window": 88.1},
 			"limits":        map[string]any{"worst_window_seconds": 10},
 		},
+		"windows": []any{map[string]any{"start_seconds": 600.0, "duration_seconds": 10.0, "role": "discovery",
+			"search": map[string]any{"vmaf_mean": 93.0}, "final": map[string]any{"vmaf_mean": 84.0}}},
 	}
 	state := map[string]any{
 		"mode":                  "size",
@@ -94,6 +96,10 @@ func TestOperationsProjectSizeHardwareContinuation(t *testing.T) {
 	failed := operationMap(note["failed_quality"])
 	if note["outcome"] != "continued" || failed["vmaf_p5"] != 80.2 || failed["worst_window_mean"] != 88.1 || failed["worst_window_seconds"] != float64(10) || len(failed["failures"].([]any)) != 1 {
 		t.Fatalf("failed hardware attempt not kept: %v / %v", note, size)
+	}
+	windows, _ := note["windows"].([]any)
+	if len(windows) != 1 || operationMap(operationMap(windows[0])["search"])["vmaf_mean"] != 93.0 || operationMap(operationMap(windows[0])["final"])["vmaf_mean"] != 84.0 {
+		t.Fatalf("the failed attempt's window scores were not kept: %v", note)
 	}
 	if size["encoder"] != "libx265" || operationMap(size["final_quality"])["vmaf_p5"] != 88.0 {
 		t.Fatalf("x265 result must show beside the failed attempt: %v", size)

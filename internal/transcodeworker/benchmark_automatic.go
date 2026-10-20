@@ -397,7 +397,11 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 	succeed := func(p *verifiedWinner) {
 		evidence.Decision = p.decision
 		automatic.VerifiedSamples = len(record.Samples)
-		carryHardwareNote(evidence.Decision, p.chosen, record.HardwareSearch)
+		if p.role == transcode.VerificationRoleBisect {
+			carryBisectedHardwareNote(evidence.Decision, p.chosen, record.HardwareSearch)
+		} else {
+			carryHardwareNote(evidence.Decision, p.chosen, record.HardwareSearch)
+		}
 		evidence.Decision.Evaluations = append(append(evidence.Decision.Evaluations, verificationFailures...), ruledOut...)
 		appendAutomaticRejections(evidence.Decision, automatic.Discovery)
 		automatic.WinnerWindows = winnerWindowScores(record, evidence, p.vc.candidate.ID)
@@ -461,7 +465,7 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 		}
 		if evidence.Decision.Winner != nil {
 			verification.Attempts = append(verification.Attempts, verificationAttempt(record, evidence, id, role, transcode.VerificationPassed, ""))
-			p := &verifiedWinner{vc: winner, decision: evidence.Decision, chosen: chosen}
+			p := &verifiedWinner{vc: winner, decision: evidence.Decision, chosen: chosen, role: role}
 			if !untilExhausted {
 				succeed(p)
 				return nil
@@ -554,6 +558,7 @@ type verifiedWinner struct {
 	vc       validatedCandidate
 	decision *transcode.BenchmarkDecision
 	chosen   *transcode.BenchmarkDecision
+	role     string
 }
 
 // verificationWindowsKind names where the rules put the verification windows.
@@ -580,7 +585,8 @@ func verificationHasTime(b *searchBudget, longest time.Duration) bool {
 // for any other reason (the user's, a shutdown) is not.
 func searchTimeLimitReached(ctx context.Context, err error) bool {
 	if errors.Is(context.Cause(ctx), errSearchBudgetStopped) {
-		return true
+		// A real failure that was under way when the watcher fired stays one.
+		return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 	}
 	return errors.Is(err, context.DeadlineExceeded) && errors.Is(ctx.Err(), context.DeadlineExceeded)
 }
@@ -995,6 +1001,21 @@ func carryHardwareNote(final, chosen *transcode.BenchmarkDecision, hardware *tra
 		}
 	default:
 		return
+	}
+	final.Winner.Uncertainties = append(append([]string(nil), final.Winner.Uncertainties...), note)
+}
+
+// carryBisectedHardwareNote explains a media-engine setting that won by
+// bisection: it sits between a setting that passed verification and one that
+// failed, so the selector never compared it and the chosen decision's note
+// (or its absence, when a software candidate led) does not describe it.
+func carryBisectedHardwareNote(final, chosen *transcode.BenchmarkDecision, hardware *transcode.HardwareSearchRules) {
+	if final == nil || final.Winner == nil || hardware == nil || !isVideoToolbox(final.Winner.VideoCodec) {
+		return
+	}
+	note := optimization.HardwareSelectedNote + ": smaller setting found between a verified and a failed one; no software candidate qualified"
+	if smallestEligibleSoftware(chosen) > 0 {
+		note = fmt.Sprintf("%s: smaller setting found between a verified and a failed one, within the %.4g%% margin", optimization.HardwareSelectedNote, hardware.MarginPercent)
 	}
 	final.Winner.Uncertainties = append(append([]string(nil), final.Winner.Uncertainties...), note)
 }

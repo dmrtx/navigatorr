@@ -41,6 +41,12 @@ func TestSplitFinalWindowResultsKeepsFreshWindowsOutOfTheVerdict(t *testing.T) {
 	if len(grid) != 2 || len(fresh) != 0 || len(scores) != 2 {
 		t.Fatalf("dropped fresh windows: grid %d fresh %d scores %d", len(grid), len(fresh), len(scores))
 	}
+	// A fresh window measured before another one failed keeps its scores.
+	results = []finalWindowResult{{vmaf: stats(92)}, {vmaf: stats(89)}, {vmaf: stats(70)}, {code: "quality_final_sample_misaligned"}}
+	grid, scores, fresh = splitFinalWindowResults(q, results, 3)
+	if len(grid) != 2 || len(fresh) != 1 || len(scores) != 3 || fresh[0].Mean != 70 {
+		t.Fatalf("lost the fresh window measured before the failure: grid %d fresh %v scores %d", len(grid), fresh, len(scores))
+	}
 	// Without fresh windows the report is the grid alone.
 	q.FreshSamples = nil
 	grid, scores, fresh = splitFinalWindowResults(q, results[:2], -1)

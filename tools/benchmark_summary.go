@@ -357,7 +357,7 @@ func benchmarkFailureText(code string) string {
 func notVerifiedText(uncertainties []string) string {
 	for _, u := range uncertainties {
 		if u == transcode.NotVerifiedTimeLimit {
-			return "Passed the initial samples, but the search time limit was reached before it could be checked on the verification windows. It was not proven unsuitable; a retry can continue from here."
+			return "Passed the initial samples, but the search time limit was reached before it could be checked on the verification windows. It was not proven unsuitable; a retry starts a new search."
 		}
 		if failed, ok := strings.CutPrefix(u, "not verified: "); ok {
 			if failed, ok = strings.CutSuffix(failed, " failed verification on quality"); ok && failed != "" {

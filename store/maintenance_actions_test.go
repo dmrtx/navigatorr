@@ -196,3 +196,32 @@ func TestMaintenanceSnapshotKeepsWindowReport(t *testing.T) {
 		t.Fatalf("projection kept bulk: %s", got)
 	}
 }
+
+// A failed media engine result keeps the search and final score of each window
+// next to the x265 result, through the list projection.
+func TestMaintenanceSnapshotKeepsTheFailedHardwareResultsWindows(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "ledger.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	state := `{"mode":"size","hardware_continuation":{"outcome":"continued","message":"continued with x265","failed_candidate_id":"fallback-hardware-cand_q70",` +
+		`"final":{"verdict":"fail","failures":["VMAF p5 80.2 is below the minimum 84.0"]},` +
+		`"windows":[{"start_seconds":600,"duration_seconds":10,"role":"discovery","search":{"vmaf_mean":93,"vmaf_p5":90,"vmaf_min":88},"final":{"vmaf_mean":84,"vmaf_p5":80,"vmaf_min":78}}],"bulk":"x"}}`
+	if err := s.CreateActionInstance(ActionInstance{ID: "file", ActionName: "transcode_media", Status: ActionStatusCompleted, InputsJSON: `{}`, OutputsJSON: `{}`, StateJSON: state}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.ListMaintenanceActionSnapshot()
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("%v %v", rows, err)
+	}
+	got := rows[0].StateJSON
+	for _, want := range []string{`"hardware_continuation"`, `"windows":[{`, `"role":"discovery"`, `"search":{"vmaf_mean":93`, `"final":{"vmaf_mean":84`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("projection lacks %s:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, `"bulk"`) {
+		t.Fatalf("projection kept bulk: %s", got)
+	}
+}

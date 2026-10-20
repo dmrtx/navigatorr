@@ -3,6 +3,7 @@ package transcodeworker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -861,6 +862,50 @@ func TestCarryHardwareNote(t *testing.T) {
 		if got := tc.final.Winner.Uncertainties; strings.Join(got, "|") != strings.Join(tc.want, "|") {
 			t.Errorf("%s: uncertainties %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+func TestBisectedHardwareSettingGetsItsOwnNote(t *testing.T) {
+	won := func(id, codec string) *transcode.BenchmarkDecision {
+		return &transcode.BenchmarkDecision{Winner: &transcode.BenchmarkWinner{CandidateID: id, VideoCodec: codec}}
+	}
+	rules := &transcode.HardwareSearchRules{MarginPercent: 15}
+	software := &transcode.BenchmarkDecision{Evaluations: []transcode.BenchmarkCandidateEvaluation{{CandidateID: "x", VideoCodec: "libx265", Eligible: true, EstimatedBytes: 90}}}
+	for _, tc := range []struct {
+		name     string
+		final    *transcode.BenchmarkDecision
+		chosen   *transcode.BenchmarkDecision
+		hardware *transcode.HardwareSearchRules
+		want     string
+	}{
+		{"within the margin, whatever led the discovery", won("v55", "hevc_videotoolbox"), software, rules, optimization.HardwareSelectedNote + ": smaller setting found between a verified and a failed one, within the 15% margin"},
+		{"no software qualifier", won("v55", "hevc_videotoolbox"), won("v50", "hevc_videotoolbox"), rules, optimization.HardwareSelectedNote + ": smaller setting found between a verified and a failed one; no software candidate qualified"},
+		{"a software winner gets none", won("cand", "libx265"), software, rules, ""},
+		{"the option off gives none", won("v55", "hevc_videotoolbox"), software, nil, ""},
+	} {
+		carryBisectedHardwareNote(tc.final, tc.chosen, tc.hardware)
+		got := strings.Join(tc.final.Winner.Uncertainties, "|")
+		if got != tc.want {
+			t.Errorf("%s: uncertainties %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// Only a cancellation the budget caused is the time limit: a real failure
+// that was under way when the watcher fired stays a failure.
+func TestSearchTimeLimitReachedNeedsACancellation(t *testing.T) {
+	stopped, cancel := context.WithCancelCause(context.Background())
+	cancel(errSearchBudgetStopped)
+	if !searchTimeLimitReached(stopped, context.Canceled) {
+		t.Fatal("the watcher's stop was not the time limit")
+	}
+	if searchTimeLimitReached(stopped, errors.New("integrity violation")) {
+		t.Fatal("a real failure was taken for the time limit")
+	}
+	user, cancelUser := context.WithCancelCause(context.Background())
+	cancelUser(errors.New("shutdown"))
+	if searchTimeLimitReached(user, context.Canceled) {
+		t.Fatal("a cancellation for another reason was taken for the time limit")
 	}
 }
 

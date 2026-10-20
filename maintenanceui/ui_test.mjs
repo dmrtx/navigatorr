@@ -2955,6 +2955,13 @@ test("size mode details keep the failed media engine attempt beside the x265 res
   assert.match(allText(h.run('sizeModeNote({size_mode:{final_quality:{vmaf_mean:91,vmaf_p5:82,failed_checks:["quality_vmaf_p5_below_minimum"]}}})')), /Failed checks: vmaf p5 below minimum/);
 });
 
+test("size mode details show the failed media engine attempt's windows beside the x265 ones", () => {
+  const h = harness();
+  const text = allText(h.run('sizeModeNote({size_mode:{encoder:"libx265",final_quality:{vmaf_mean:94,vmaf_p5:88},windows:[{start_seconds:600,role:"discovery",search:{vmaf_mean:94},final:{vmaf_mean:93}}],hardware_continuation:{outcome:"continued",message:"continued with x265.",windows:[{start_seconds:600,role:"discovery",search:{vmaf_mean:93},final:{vmaf_mean:84}}]}}})'));
+  assert.match(text, /VideoToolbox window 10:00 · discovery · search 93\.0 → final 84\.0 mean \(−9\.0\)/);
+  assert.match(text, /(^|[^g] )Window 10:00 · discovery · search 94\.0 → final 93\.0 mean \(−1\.0\)/);
+});
+
 test("size mode details show the expected size, final VMAF and compacted audio", () => {
   const h = harness();
   const text = allText(h.run('sizeModeNote({size_mode:{expected_bytes:2150000000,main10:true,final_quality:{vmaf_mean:93.44,vmaf_p5:89.12,worst_window_mean:88.04,worst_window_seconds:10},compacted_audio:[{stream_index:0,from_codec:"dts",to_codec:"aac"},{stream_index:2,from_codec:"pcm_s24le",to_codec:"aac"}]}})'));
