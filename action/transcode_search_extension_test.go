@@ -294,3 +294,34 @@ func TestObservedStatusDropsSearchTelemetryTheNewerAttemptLacks(t *testing.T) {
 		t.Fatalf("the busy flag outlived the attempt that had it: %+v", ec.State)
 	}
 }
+
+// A search whose verification the time limit cut short completes on the
+// worker with its evidence and no winner. The action waits for a decision, as
+// for any search out of time: it neither falls back to audio only nor ends as
+// "no suitable candidate", and a busy worker is still named.
+func TestVerificationCutShortByTheTimeLimitWaitsForADecision(t *testing.T) {
+	for _, busy := range []bool{true, false} {
+		exec := &mockTranscodeExecutor{benchmarkStatusFunc: func(_ context.Context, jobID string) (transcode.BenchmarkStatus, error) {
+			return transcode.BenchmarkStatus{
+				ProtocolVersion: transcode.WorkerProtocolVersion, ID: jobID, Status: transcode.StatusCompleted,
+				ReasonCode: "search_budget_exhausted", SearchWorkerBusy: busy,
+				Automatic: &transcode.BenchmarkAutomaticEvidence{Verification: &transcode.BenchmarkVerificationEvidence{StoppedBy: transcode.VerificationStoppedTimeCap}},
+			}, nil
+		}}
+		e := NewEngine(EngineDeps{Transcode: exec})
+		ec := &ExecutionContext{InstanceID: "bench-cut-short", ActionName: "transcode_media", Inputs: map[string]any{"mode": "size"}, Outputs: map[string]any{}, State: map[string]any{"optimization_enabled": true, "benchmark_job_id": "bench-cut-short", "search_budget_seconds": 600, "policy_digest": "sha256:test"}}
+		res, err := e.stepBenchmarkWait(context.Background(), ec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Status != StepWaitingDecision || res.WaitingCondition != "search_budget_exhausted" || ec.State["skip_transcode"] != nil {
+			t.Fatalf("busy=%v: %+v", busy, res)
+		}
+		if busy != getBool(ec.State, "search_worker_busy") {
+			t.Fatalf("busy=%v but the action recorded %v", busy, ec.State["search_worker_busy"])
+		}
+		if ec.State["automatic_search"] == nil {
+			t.Fatal("the search evidence was not kept")
+		}
+	}
+}

@@ -3,6 +3,7 @@ package transcodeworker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -32,6 +33,9 @@ type replaySetting struct {
 	// holdout is the constant per-frame VMAF on the holdout windows.
 	holdout      float64
 	holdoutBytes int64 // per holdout window; zero means bytes
+	// holdoutAt overrides holdout for the verification windows it returns true
+	// for, keyed by the window's centre in seconds.
+	holdoutAt func(center float64) (float64, bool)
 }
 
 // replayKey names a setting by preset and CRF, independent of its family ID.
@@ -64,6 +68,17 @@ type replayResult struct {
 	encodes     int
 	decision    *transcode.BenchmarkDecision
 	stages      []transcode.BenchmarkAutomaticStage
+	evidence    *BenchmarkExecutionEvidence
+	record      *BenchmarkRecord
+}
+
+// stageName tells the hook's two kinds of stage apart: discovery runs on the
+// first three windows, verification on the rest.
+func stageName(stage *BenchmarkRecord) string {
+	if len(stage.Samples) > 0 && stage.Samples[0].Index >= 3 {
+		return phaseVerifyingSamples
+	}
+	return "discovery"
 }
 
 func (r replayResult) reason(id string) string {
@@ -93,10 +108,38 @@ func runReplayLadder(t *testing.T, settings map[string]replaySetting, sourceByte
 	return runReplayHardware(t, settings, sourceBytes, rules, nil, ladder)
 }
 
+func runReplayHardware(t *testing.T, settings map[string]replaySetting, sourceBytes int64, rules *transcode.AutomaticSearchRules, hardware *transcode.HardwareSearchRules, ladder []validatedCandidate) replayResult {
+	t.Helper()
+	return runReplayConfigured(t, replayConfig{settings: settings, sourceBytes: sourceBytes, rules: rules, hardware: hardware, ladder: ladder})
+}
+
+// replayConfig is a replay with every knob: the source length decides the
+// final validation grid under grid verification, and the context and record
+// hooks let a test end the search at its time limit.
+type replayConfig struct {
+	settings    map[string]replaySetting
+	sourceBytes int64
+	rules       *transcode.AutomaticSearchRules
+	hardware    *transcode.HardwareSearchRules
+	ladder      []validatedCandidate
+	duration    float64 // zero is 600 s
+	ctx         func() (context.Context, context.CancelCauseFunc)
+	// before runs ahead of every stage; it may end the search through cancel.
+	before func(stage string, candidates []validatedCandidate, cancel context.CancelCauseFunc)
+	setup  func(record *BenchmarkRecord)
+}
+
 // replayBenchmarkRecord is the search record the replay runs under.
 func replayBenchmarkRecord(rules *transcode.AutomaticSearchRules, hardware *transcode.HardwareSearchRules) *BenchmarkRecord {
+	return replayBenchmarkRecordFor(rules, hardware, 600)
+}
+
+// replayBenchmarkRecordFor places the windows for a source of the given length.
+// Under grid verification the grid is the sample plan, and Samples is nil when
+// the source is too short for one.
+func replayBenchmarkRecordFor(rules *transcode.AutomaticSearchRules, hardware *transcode.HardwareSearchRules, duration float64) *BenchmarkRecord {
 	p5, worst := 84.0, 85.0
-	record := &BenchmarkRecord{Mode: "size", ModePolicyVersion: optimization.ModePolicyV3, Automatic: true, QualityPruning: true, AutomaticSearch: rules, HardwareSearch: hardware, Metric: "vmaf", SourceDuration: 600,
+	record := &BenchmarkRecord{Mode: "size", ModePolicyVersion: optimization.ModePolicyV3, Automatic: true, QualityPruning: true, AutomaticSearch: rules, HardwareSearch: hardware, Metric: "vmaf", SourceDuration: duration,
 		Quality: &transcode.BenchmarkQualityConfig{VMAF: &transcode.BenchmarkQualityThresholds{Model: "v1_1080p_3h", Target: 92, Minimum: 88, P5Minimum: &p5, WorstWindowMinimum: &worst, WorstWindowSeconds: 4, GuardrailEnforcement: "reject"}}}
 	// Discovery at 20/50/80%; holdouts on the final grid's edges (rules) or
 	// at 35/65%.
@@ -107,6 +150,9 @@ func replayBenchmarkRecord(rules *transcode.AutomaticSearchRules, hardware *tran
 	for i, c := range centers {
 		record.Samples = append(record.Samples, transcode.BenchmarkSampleWindow{Index: i, StartSeconds: c - 5, DurationSeconds: 10, CenterSeconds: c})
 	}
+	if rules != nil && rules.HoldoutWindows == transcode.HoldoutWindowsFinalGrid {
+		record.Samples = transcode.GridVerificationWindows(duration, 10, 600, 5, 12)
+	}
 	return record
 }
 
@@ -114,11 +160,23 @@ func replayBenchmarkRecord(rules *transcode.AutomaticSearchRules, hardware *tran
 // noting what it measures and verifies in res.
 func replayAutomaticHook(t *testing.T, settings map[string]replaySetting, res *replayResult) func(context.Context, *BenchmarkRecord, *BenchmarkExecutionEvidence, []validatedCandidate) error {
 	t.Helper()
+	return replayAutomaticHookWith(t, settings, res, nil)
+}
+
+// replayAutomaticHookWith runs before ahead of every stage; an error from it
+// ends the search.
+func replayAutomaticHookWith(t *testing.T, settings map[string]replaySetting, res *replayResult, before func(stage *BenchmarkRecord, candidates []validatedCandidate) error) func(context.Context, *BenchmarkRecord, *BenchmarkExecutionEvidence, []validatedCandidate) error {
+	t.Helper()
 	model, err := quality.Model("v1_1080p_3h")
 	if err != nil {
 		t.Fatal(err)
 	}
 	return func(_ context.Context, stage *BenchmarkRecord, e *BenchmarkExecutionEvidence, candidates []validatedCandidate) error {
+		if before != nil {
+			if err := before(stage, candidates); err != nil {
+				return err
+			}
+		}
 		for _, vc := range candidates {
 			key := replayKey(vc.candidate.Preset, vc.candidate.Quality)
 			s, ok := settings[key]
@@ -143,6 +201,11 @@ func replayAutomaticHook(t *testing.T, settings map[string]replaySetting, res *r
 				}
 				for i := range frames {
 					score := s.holdout
+					if holdoutStage && s.holdoutAt != nil {
+						if v, found := s.holdoutAt(window.CenterSeconds); found {
+							score = v
+						}
+					}
 					if !holdoutStage {
 						score = (s.discovery.mean - 0.1*s.discovery.p5) / 0.9
 						if i < 10 {
@@ -171,22 +234,46 @@ func replayAutomaticHook(t *testing.T, settings map[string]replaySetting, res *r
 	}
 }
 
-func runReplayHardware(t *testing.T, settings map[string]replaySetting, sourceBytes int64, rules *transcode.AutomaticSearchRules, hardware *transcode.HardwareSearchRules, ladder []validatedCandidate) replayResult {
+func runReplayConfigured(t *testing.T, cfg replayConfig) replayResult {
 	t.Helper()
-	record := replayBenchmarkRecord(rules, hardware)
+	duration := cfg.duration
+	if duration == 0 {
+		duration = 600
+	}
+	ctx, cancel := context.WithCancelCause(context.Background())
+	if cfg.ctx != nil {
+		ctx, cancel = cfg.ctx()
+	}
+	defer cancel(nil)
+	record := replayBenchmarkRecordFor(cfg.rules, cfg.hardware, duration)
+	if len(record.Samples) == 0 {
+		t.Fatalf("no grid for a %.0f s source", duration)
+	}
+	if cfg.setup != nil {
+		cfg.setup(record)
+	}
 	var res replayResult
-	runner := &ProductionBenchmarkRunner{automaticHook: replayAutomaticHook(t, settings, &res)}
+	var before func(*BenchmarkRecord, []validatedCandidate) error
+	if cfg.before != nil {
+		before = func(stage *BenchmarkRecord, candidates []validatedCandidate) error {
+			cfg.before(stageName(stage), candidates, cancel)
+			return ctx.Err()
+		}
+	}
+	runner := &ProductionBenchmarkRunner{automaticHook: replayAutomaticHookWith(t, cfg.settings, &res, before)}
 	evidence := &BenchmarkExecutionEvidence{SourceBitDepth: 8}
 	progress := newBenchmarkProgressReporter(nil, record, 100)
-	rep := mediainspect.DetailedReport{DurationSec: 600, Video: []mediainspect.DetailedStream{{BitDepth: 8, FPS: 25}}}
-	if err := runner.runAutomaticCandidates(context.Background(), nil, record, evidence, "", ladder, rep, sourceBytes, time.Time{}, progress); err != nil {
+	rep := mediainspect.DetailedReport{DurationSec: duration, Video: []mediainspect.DetailedStream{{BitDepth: 8, FPS: 25}}}
+	if err := runner.runAutomaticCandidates(ctx, nil, record, evidence, "", cfg.ladder, rep, cfg.sourceBytes, time.Time{}, progress); err != nil {
 		t.Fatal(err)
 	}
 	res.decision = evidence.Decision
 	res.stages = evidence.Automatic.Stages
+	res.evidence = evidence
+	res.record = record
 	if evidence.Decision.Winner != nil {
 		res.winner = evidence.Decision.Winner.CandidateID
-		if evidence.Automatic.VerifiedSamples != 5 {
+		if evidence.Automatic.VerifiedSamples != len(record.Samples) {
 			t.Fatal("winner without holdout verification")
 		}
 	}
@@ -775,6 +862,50 @@ func TestCarryHardwareNote(t *testing.T) {
 		if got := tc.final.Winner.Uncertainties; strings.Join(got, "|") != strings.Join(tc.want, "|") {
 			t.Errorf("%s: uncertainties %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+func TestBisectedHardwareSettingGetsItsOwnNote(t *testing.T) {
+	won := func(id, codec string) *transcode.BenchmarkDecision {
+		return &transcode.BenchmarkDecision{Winner: &transcode.BenchmarkWinner{CandidateID: id, VideoCodec: codec}}
+	}
+	rules := &transcode.HardwareSearchRules{MarginPercent: 15}
+	software := &transcode.BenchmarkDecision{Evaluations: []transcode.BenchmarkCandidateEvaluation{{CandidateID: "x", VideoCodec: "libx265", Eligible: true, EstimatedBytes: 90}}}
+	for _, tc := range []struct {
+		name     string
+		final    *transcode.BenchmarkDecision
+		chosen   *transcode.BenchmarkDecision
+		hardware *transcode.HardwareSearchRules
+		want     string
+	}{
+		{"within the margin, whatever led the discovery", won("v55", "hevc_videotoolbox"), software, rules, optimization.HardwareSelectedNote + ": smaller setting found between a verified and a failed one, within the 15% margin"},
+		{"no software qualifier", won("v55", "hevc_videotoolbox"), won("v50", "hevc_videotoolbox"), rules, optimization.HardwareSelectedNote + ": smaller setting found between a verified and a failed one; no software candidate qualified"},
+		{"a software winner gets none", won("cand", "libx265"), software, rules, ""},
+		{"the option off gives none", won("v55", "hevc_videotoolbox"), software, nil, ""},
+	} {
+		carryBisectedHardwareNote(tc.final, tc.chosen, tc.hardware)
+		got := strings.Join(tc.final.Winner.Uncertainties, "|")
+		if got != tc.want {
+			t.Errorf("%s: uncertainties %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// Only a cancellation the budget caused is the time limit: a real failure
+// that was under way when the watcher fired stays a failure.
+func TestSearchTimeLimitReachedNeedsACancellation(t *testing.T) {
+	stopped, cancel := context.WithCancelCause(context.Background())
+	cancel(errSearchBudgetStopped)
+	if !searchTimeLimitReached(stopped, context.Canceled) {
+		t.Fatal("the watcher's stop was not the time limit")
+	}
+	if searchTimeLimitReached(stopped, errors.New("integrity violation")) {
+		t.Fatal("a real failure was taken for the time limit")
+	}
+	user, cancelUser := context.WithCancelCause(context.Background())
+	cancelUser(errors.New("shutdown"))
+	if searchTimeLimitReached(user, context.Canceled) {
+		t.Fatal("a cancellation for another reason was taken for the time limit")
 	}
 }
 

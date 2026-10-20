@@ -97,30 +97,52 @@ type SizePolicy struct {
 	MaxSizeIncreasePercent float64 `json:"max_size_increase_percent" yaml:"max_size_increase_percent"`
 }
 
+// FinalWindowScore is one final validation window's VMAF measurement. Role is
+// "grid" for the windows that decide the verdict and "fresh" for the others.
+type FinalWindowScore struct {
+	StartSeconds    float64 `json:"start_seconds"`
+	DurationSeconds float64 `json:"duration_seconds"`
+	Role            string  `json:"role"`
+	VMAFMean        float64 `json:"vmaf_mean"`
+	VMAFP5          float64 `json:"vmaf_p5"`
+	VMAFMin         float64 `json:"vmaf_min"`
+}
+
 type QualityValidationPlan struct {
-	Metric                 string                  `json:"metric" yaml:"metric"`
-	Samples                []BenchmarkSampleWindow `json:"samples" yaml:"samples"`
+	Metric  string                  `json:"metric" yaml:"metric"`
+	Samples []BenchmarkSampleWindow `json:"samples" yaml:"samples"`
+	// FreshSamples are windows no search window covered. They are measured
+	// after the grid and reported apart; they never decide the verdict. Workers
+	// without the automatic_grid_verification capability reject the field.
+	FreshSamples           []BenchmarkSampleWindow `json:"fresh_samples,omitempty" yaml:"fresh_samples,omitempty"`
 	Quality                BenchmarkQualityConfig  `json:"quality" yaml:"quality"`
 	BenchmarkRequestDigest string                  `json:"benchmark_request_digest" yaml:"benchmark_request_digest"`
 }
 
 type FinalQualityEvidence struct {
-	Verdict                string                 `json:"verdict"`
-	ReasonCodes            []string               `json:"reason_codes,omitempty"`
-	CandidateSHA256        string                 `json:"candidate_sha256"`
-	CandidateSizeBytes     int64                  `json:"candidate_size_bytes"`
-	PlanDigest             string                 `json:"plan_digest"`
-	BenchmarkRequestDigest string                 `json:"benchmark_request_digest"`
-	ModelID                string                 `json:"model_id,omitempty"`
-	SourceBitDepth         int                    `json:"source_bit_depth,omitempty"`
-	CandidateBitDepth      int                    `json:"candidate_bit_depth,omitempty"`
-	CapabilityFingerprint  string                 `json:"capability_fingerprint,omitempty"`
-	VMAF                   *quality.VMAFStats     `json:"vmaf,omitempty"`
-	CAMBI                  *quality.CAMBIStats    `json:"cambi,omitempty"`
-	SSIMMean               *float64               `json:"ssim_mean,omitempty"`
-	CompactChain           *CompactChainEvidence  `json:"compact_chain,omitempty"`
-	CompactOutput          *CompactOutputEvidence `json:"compact_output,omitempty"`
-	VideoCopy              *VideoCopyEvidence     `json:"video_copy,omitempty"`
+	Verdict                string             `json:"verdict"`
+	ReasonCodes            []string           `json:"reason_codes,omitempty"`
+	CandidateSHA256        string             `json:"candidate_sha256"`
+	CandidateSizeBytes     int64              `json:"candidate_size_bytes"`
+	PlanDigest             string             `json:"plan_digest"`
+	BenchmarkRequestDigest string             `json:"benchmark_request_digest"`
+	ModelID                string             `json:"model_id,omitempty"`
+	SourceBitDepth         int                `json:"source_bit_depth,omitempty"`
+	CandidateBitDepth      int                `json:"candidate_bit_depth,omitempty"`
+	CapabilityFingerprint  string             `json:"capability_fingerprint,omitempty"`
+	VMAF                   *quality.VMAFStats `json:"vmaf,omitempty"`
+	// Windows are the per-window VMAF scores of the final windows measured, in
+	// time order, so a result can be compared window by window with the search
+	// samples that predicted it. A failed run lists the windows it measured.
+	Windows []FinalWindowScore `json:"windows,omitempty"`
+	// FreshVMAF pools the fresh windows (see QualityValidationPlan.FreshSamples),
+	// which only report: they never decide the verdict.
+	FreshVMAF     *quality.VMAFStats     `json:"fresh_vmaf,omitempty"`
+	CAMBI         *quality.CAMBIStats    `json:"cambi,omitempty"`
+	SSIMMean      *float64               `json:"ssim_mean,omitempty"`
+	CompactChain  *CompactChainEvidence  `json:"compact_chain,omitempty"`
+	CompactOutput *CompactOutputEvidence `json:"compact_output,omitempty"`
+	VideoCopy     *VideoCopyEvidence     `json:"video_copy,omitempty"`
 }
 
 // Video encoder identifiers accepted by the worker and recipe engine.

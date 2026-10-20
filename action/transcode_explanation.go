@@ -2,6 +2,7 @@ package action
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/jakenesler/navigatorr/transcode"
@@ -22,6 +23,11 @@ type TranscodeExplanation struct {
 	// before anything is replaced.
 	Encoder  string `json:"encoder,omitempty"`
 	Hardware bool   `json:"hardware,omitempty"`
+	// Verification lists each candidate the search checked on the verification
+	// windows and says whether the time limit ended it. Windows puts the
+	// winner's sample score and its final score side by side per window.
+	Verification *transcode.BenchmarkVerificationEvidence `json:"verification,omitempty"`
+	Windows      []transcode.WindowComparison             `json:"windows,omitempty"`
 	// FinalQuality is the full-file quality check of a result that failed it:
 	// which checks failed, by how much, and the numbers behind them.
 	FinalQuality *FinalQualitySummary `json:"final_quality,omitempty"`
@@ -49,6 +55,7 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 	_ = json.Unmarshal(data, &automatic)
 	e.Stages = automatic.Stages
 	e.VerifiedSamples = automatic.VerifiedSamples
+	e.Verification = automatic.Verification
 	ids := map[string]bool{}
 	for _, stage := range e.Stages {
 		for _, id := range stage.Candidates {
@@ -61,6 +68,11 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 	if json.Unmarshal(data, &decision) == nil && decision.Winner != nil {
 		e.Encoder = transcode.BenchmarkCandidateVideoCodec(transcode.BenchmarkCandidate{VideoCodec: decision.Winner.VideoCodec})
 		e.Hardware = e.Encoder == transcode.VideoCodecHEVCVideoToolbox
+	}
+	var evidence transcode.FinalQualityEvidence
+	data, _ = json.Marshal(read("quality_evidence"))
+	if json.Unmarshal(data, &evidence) == nil {
+		e.Windows = transcode.CompareWindows(automatic.WinnerWindows, evidence.Windows)
 	}
 	reason := getString(res.State, "reason_code")
 	if reason == "" {
@@ -91,6 +103,9 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 	case reason == "no_suitable_candidate":
 		e.Outcome = "no_suitable_candidate"
 		e.Message = "None of the tested configurations met this goal. Originals preserved."
+		if e.Verification != nil && e.Verification.StoppedBy == transcode.VerificationStoppedTimeCap {
+			e.Message = fmt.Sprintf("The search ran out of time before every promising configuration was checked (%d never verified). Nothing was proven unsuitable; retry to continue. Originals preserved.", len(e.Verification.Unverified))
+		}
 	case reason == "insufficient_savings" || reason == "size_growth" || reason == "size_growth_exceeded":
 		e.Outcome = "size_rejected"
 		e.Message = "The full conversion did not meet this goal's size limit. Original preserved."

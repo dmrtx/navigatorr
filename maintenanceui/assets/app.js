@@ -3761,14 +3761,43 @@ function sizeModeLines(size) {
       if (f.vmaf_mean != null) lines.push(`VideoToolbox final VMAF ${Number(f.vmaf_mean).toFixed(1)} mean · ${f.vmaf_p5 != null ? Number(f.vmaf_p5).toFixed(1) : "n/a"} p5${f.worst_window_mean != null ? ` · ${Number(f.worst_window_mean).toFixed(1)} worst ${Math.round(f.worst_window_seconds || 0)} s window` : ""}`);
       for (const failure of f.failures || []) lines.push(`Failed: ${failure}`);
     }
+    // The failed result's windows, search against final, before the x265 result's.
+    lines.push(...windowReportLines(hc.windows).map(line => `VideoToolbox ${line.charAt(0).toLowerCase()}${line.slice(1)}`));
   }
   const q = size.final_quality;
   if (q) lines.push(`Final VMAF ${Number(q.vmaf_mean).toFixed(1)} mean · ${q.vmaf_p5 != null ? Number(q.vmaf_p5).toFixed(1) : "n/a"} p5${q.worst_window_mean != null ? ` · ${Number(q.worst_window_mean).toFixed(1)} worst ${Math.round(q.worst_window_seconds || 0)} s window` : ""}`);
   if (q?.failed_checks?.length) lines.push(`Failed checks: ${q.failed_checks.map(code => String(code).replace(/^quality_/, "").replace(/_/g, " ")).join(", ")}`);
+  if (q?.fresh_vmaf_mean != null) lines.push(`Fresh windows VMAF ${Number(q.fresh_vmaf_mean).toFixed(1)} mean · ${q.fresh_vmaf_p5 != null ? Number(q.fresh_vmaf_p5).toFixed(1) : "n/a"} p5 · reported only; they never decide the result`);
+  lines.push(...verificationLines(size.verification), ...windowReportLines(size.windows));
   const audio = size.compacted_audio || [];
   // Size mode converts DTS only when the profile is DTS-HD MA.
   if (audio.length) lines.push(`Audio compacted: ${audio.map(a => `track ${a.stream_index + 1} ${a.from_codec === "dts" ? "DTS-HD MA" : codecLabel(a.from_codec)} → ${codecLabel(a.to_codec)}`).join(", ")}`);
   return lines;
+}
+// How the search checked its winner before the full encode: each attempt in
+// order, and whether the search time limit ended the checking early.
+function verificationLines(v) {
+  if (!v) return [];
+  const roles = {smallest: "smallest", next: "next", safest: "safest", bisect: "between"};
+  const outcomes = {passed: "passed", quality_failed: "failed quality", rejected: "rejected"};
+  const lines = [];
+  const attempts = v.attempts || [];
+  if (attempts.length) lines.push(`Verified on ${v.windows === "final_grid" ? "the final validation windows" : "edge windows"}: ${attempts.map(a => `${roles[a.role] || a.role} ${outcomes[a.outcome] || a.outcome}`).join(" → ")}`);
+  if (v.stopped_by === "time_cap") lines.push(`Verification stopped at the search time limit${v.unverified ? `; ${v.unverified} ${v.unverified === 1 ? "setting was" : "settings were"} never checked` : ""}`);
+  return lines;
+}
+function windowClock(seconds) {
+  const total = Math.round(Number(seconds) || 0);
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
+// One line per window: what the search measured for the winner there, and
+// what final validation measured on the encoded file.
+function windowReportLines(windows) {
+  const score = side => side ? Number(side.vmaf_mean).toFixed(1) : "—";
+  return (windows || []).map(w => {
+    const delta = w.search && w.final ? ` (${w.final.vmaf_mean - w.search.vmaf_mean >= 0 ? "+" : "−"}${Math.abs(w.final.vmaf_mean - w.search.vmaf_mean).toFixed(1)})` : "";
+    return `Window ${windowClock(w.start_seconds)} · ${w.role} · search ${score(w.search)} → final ${score(w.final)} mean${delta}`;
+  });
 }
 function codecLabel(codec) {
   return {truehd:"TrueHD",dts:"DTS",flac:"FLAC",alac:"ALAC",mlp:"MLP",aac:"AAC"}[codec] || (String(codec || "").startsWith("pcm_") ? "PCM" : String(codec || "").toUpperCase());

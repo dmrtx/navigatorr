@@ -238,3 +238,24 @@ func TestSearchReviewDoesNotCountTechnicalFailuresOrOtherOutputsAsTried(t *testi
 		t.Fatalf("same-policy savings verdicts ignored: %+v", res)
 	}
 }
+
+// A round verified on the edge windows with a two-attempt cap is not evidence
+// about a search that verifies on the final grid until exhausted, and the
+// other way round.
+func TestRoundComparableSeparatesVerificationRegimes(t *testing.T) {
+	ladder := []transcode.BenchmarkCandidate{x265("a", 16, "slow")}
+	req := func(rules *transcode.AutomaticSearchRules) *transcode.BenchmarkRequest {
+		return &transcode.BenchmarkRequest{Candidates: ladder, AutomaticSearch: rules}
+	}
+	edges := req(&transcode.AutomaticSearchRules{HoldoutWindows: transcode.HoldoutWindowsFinalGridEdges})
+	grid := req(&transcode.AutomaticSearchRules{HoldoutWindows: transcode.HoldoutWindowsFinalGrid, VerifyUntilExhausted: true, FinalFreshWindows: 2})
+	if !roundComparable(edges, req(&transcode.AutomaticSearchRules{HoldoutWindows: transcode.HoldoutWindowsFinalGridEdges})) || !roundComparable(grid, req(&transcode.AutomaticSearchRules{HoldoutWindows: transcode.HoldoutWindowsFinalGrid, VerifyUntilExhausted: true, FinalFreshWindows: 2})) {
+		t.Fatal("rounds under the same regime stay comparable")
+	}
+	if roundComparable(edges, grid) || roundComparable(grid, edges) || roundComparable(req(nil), grid) {
+		t.Fatal("rounds under different verification regimes must not count against each other")
+	}
+	if !roundComparable(req(nil), req(&transcode.AutomaticSearchRules{})) {
+		t.Fatal("no rules and empty rules are the same regime")
+	}
+}

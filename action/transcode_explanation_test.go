@@ -126,3 +126,51 @@ func TestExplainTranscodeNamesTheWinningEncoder(t *testing.T) {
 		}
 	}
 }
+
+// The explanation carries the verification attempts and puts the winner's
+// sample scores next to its final scores, window by window.
+func TestExplainTranscodeReportsVerificationAndWindows(t *testing.T) {
+	res := &ActionResult{ActionName: "transcode_media", Status: StatusCompleted,
+		Inputs: map[string]any{"mode": "size"},
+		Outputs: map[string]any{
+			"original_intact": true,
+			"automatic_search": transcode.BenchmarkAutomaticEvidence{
+				Verification: &transcode.BenchmarkVerificationEvidence{Attempts: []transcode.BenchmarkVerificationAttempt{
+					{CandidateID: "a", Role: transcode.VerificationRoleSmallest, Windows: 5, Outcome: transcode.VerificationQualityFailed},
+					{CandidateID: "b", Role: transcode.VerificationRoleSafest, Windows: 5, Outcome: transcode.VerificationPassed},
+				}},
+				WinnerWindows: []transcode.BenchmarkWindowScore{{StartSeconds: 600, DurationSeconds: 10, Role: transcode.WindowRoleDiscovery, VMAFMean: 93, VMAFP5: 90, VMAFMin: 88}},
+			},
+			"quality_evidence": transcode.FinalQualityEvidence{Verdict: "pass", Windows: []transcode.FinalWindowScore{
+				{StartSeconds: 600, DurationSeconds: 10, Role: "grid", VMAFMean: 91, VMAFP5: 88, VMAFMin: 85},
+				{StartSeconds: 1200, DurationSeconds: 10, Role: "fresh", VMAFMean: 89, VMAFP5: 86, VMAFMin: 83},
+			}},
+		}}
+	e := ExplainTranscode(res)
+	if e == nil || e.Verification == nil || len(e.Verification.Attempts) != 2 || len(e.Windows) != 2 {
+		t.Fatalf("explanation %+v", e)
+	}
+	if w := e.Windows[0]; w.Search == nil || w.Final == nil || w.Search.VMAFMean != 93 || w.Final.VMAFMean != 91 {
+		t.Fatalf("first window %+v", w)
+	}
+	if w := e.Windows[1]; w.Role != transcode.WindowRoleFresh || w.Search != nil || w.Final.VMAFMean != 89 {
+		t.Fatalf("fresh window %+v", w)
+	}
+}
+
+// A search that ran out of time says so, instead of reporting that every
+// configuration failed.
+func TestExplainTranscodeNamesTheSearchTimeLimit(t *testing.T) {
+	res := &ActionResult{ActionName: "transcode_media", Status: StatusCompleted,
+		Inputs:  map[string]any{"mode": "size"},
+		State:   map[string]any{"reason_code": "no_suitable_candidate"},
+		Outputs: map[string]any{"automatic_search": transcode.BenchmarkAutomaticEvidence{Verification: &transcode.BenchmarkVerificationEvidence{StoppedBy: transcode.VerificationStoppedTimeCap, Unverified: []string{"a", "b"}}}}}
+	e := ExplainTranscode(res)
+	if e == nil || e.Outcome != "no_suitable_candidate" || !strings.Contains(e.Message, "ran out of time") || !strings.Contains(e.Message, "2 never verified") {
+		t.Fatalf("explanation %+v", e)
+	}
+	res.Outputs["automatic_search"] = transcode.BenchmarkAutomaticEvidence{}
+	if e := ExplainTranscode(res); strings.Contains(e.Message, "out of time") {
+		t.Fatalf("no time-limit claim without evidence: %q", e.Message)
+	}
+}

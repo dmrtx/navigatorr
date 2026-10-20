@@ -61,16 +61,37 @@ func priorSearch(t *testing.T, stateDir string) (*BenchmarkRecord, *BenchmarkExe
 // must end with the named hardware winner.
 func priorSearchOn(t *testing.T, stateDir string, settings map[string]replaySetting, wantWinner string) (*BenchmarkRecord, *BenchmarkExecutionEvidence) {
 	t.Helper()
+	return priorSearchIn(t, stateDir, edgeContinuationBasis(), settings, wantWinner)
+}
+
+// continuationBasis is what both searches of a continuation share: the rules,
+// the length of the source and so the windows it is measured on.
+type continuationBasis struct {
+	rules       *transcode.AutomaticSearchRules
+	duration    float64
+	sourceBytes int64
+}
+
+func edgeContinuationBasis() continuationBasis {
+	return continuationBasis{rules: replayRules(), duration: 600, sourceBytes: 10_000_000}
+}
+
+func gridContinuationBasis() continuationBasis {
+	return continuationBasis{rules: gridReplayRules(), duration: gridReplayDuration, sourceBytes: gridSourceBytes}
+}
+
+func priorSearchIn(t *testing.T, stateDir string, basis continuationBasis, settings map[string]replaySetting, wantWinner string) (*BenchmarkRecord, *BenchmarkExecutionEvidence) {
+	t.Helper()
 	hw := &transcode.HardwareSearchRules{MarginPercent: 15, QualityValues: []int{45, 50, 55, 60}, FallbackQualityValues: []int{65, 70, 75}, GOPSize: 240, BFrames: 1}
-	record := replayBenchmarkRecord(replayRules(), hw)
+	record := replayBenchmarkRecordFor(basis.rules, hw, basis.duration)
 	ladder := hardwareFallbackLadder()
 	record.ID, record.Source, record.SourceSHA256, record.RequestDigest, record.Status = continuationPriorID, "/media/show.mkv", strings.Repeat("a", 64), continuationPriorDigest, "completed"
 	record.Candidates = recordCandidates(ladder)
 	var res replayResult
 	runner := &ProductionBenchmarkRunner{automaticHook: replayAutomaticHook(t, settings, &res)}
 	evidence := &BenchmarkExecutionEvidence{SourceBitDepth: 8}
-	rep := mediainspect.DetailedReport{DurationSec: 600, Video: []mediainspect.DetailedStream{{BitDepth: 8, FPS: 25}}}
-	if err := runner.runAutomaticCandidates(context.Background(), nil, record, evidence, "", ladder, rep, 10_000_000, time.Time{}, newBenchmarkProgressReporter(nil, record, 100)); err != nil {
+	rep := mediainspect.DetailedReport{DurationSec: basis.duration, Video: []mediainspect.DetailedStream{{BitDepth: 8, FPS: 25}}}
+	if err := runner.runAutomaticCandidates(context.Background(), nil, record, evidence, "", ladder, rep, basis.sourceBytes, time.Time{}, newBenchmarkProgressReporter(nil, record, 100)); err != nil {
 		t.Fatal(err)
 	}
 	if evidence.Decision.Winner == nil || evidence.Decision.Winner.CandidateID != wantWinner {
@@ -104,7 +125,12 @@ func runContinuedSearch(t *testing.T, stateDir string, mutate func(*BenchmarkRec
 
 func runContinuedSearchOn(t *testing.T, stateDir string, settings map[string]replaySetting, mutate func(*BenchmarkRecord, []validatedCandidate), fingerprint string) continuedRun {
 	t.Helper()
-	record := replayBenchmarkRecord(replayRules(), nil)
+	return runContinuedSearchIn(t, stateDir, edgeContinuationBasis(), settings, mutate, fingerprint)
+}
+
+func runContinuedSearchIn(t *testing.T, stateDir string, basis continuationBasis, settings map[string]replaySetting, mutate func(*BenchmarkRecord, []validatedCandidate), fingerprint string) continuedRun {
+	t.Helper()
+	record := replayBenchmarkRecordFor(basis.rules, nil, basis.duration)
 	ladder := continuationX265Ladder(hardwareFallbackLadder())
 	record.ID, record.Source, record.SourceSHA256, record.Status = "bench-prior-x265", "/media/show.mkv", strings.Repeat("a", 64), "running"
 	record.Candidates = recordCandidates(ladder)
@@ -119,8 +145,8 @@ func runContinuedSearchOn(t *testing.T, stateDir string, settings map[string]rep
 	}
 	w := &Worker{cfg: &WorkerConfig{StateDir: stateDir}}
 	run.evidence = &BenchmarkExecutionEvidence{SourceBitDepth: 8}
-	rep := mediainspect.DetailedReport{DurationSec: 600, Video: []mediainspect.DetailedStream{{BitDepth: 8, FPS: 25}}}
-	if err := runner.runAutomaticCandidates(context.Background(), w, record, run.evidence, "", ladder, rep, 10_000_000, time.Time{}, newBenchmarkProgressReporter(nil, record, 100)); err != nil {
+	rep := mediainspect.DetailedReport{DurationSec: basis.duration, Video: []mediainspect.DetailedStream{{BitDepth: 8, FPS: 25}}}
+	if err := runner.runAutomaticCandidates(context.Background(), w, record, run.evidence, "", ladder, rep, basis.sourceBytes, time.Time{}, newBenchmarkProgressReporter(nil, record, 100)); err != nil {
 		t.Fatal(err)
 	}
 	run.res.decision = run.evidence.Decision
@@ -312,5 +338,57 @@ func TestContinuedSearchMeasuresAgainACandidateThatPassedDiscovery(t *testing.T)
 	}
 	if fresh.res.winner == "" || continued.res.winner != fresh.res.winner || !reflect.DeepEqual(reasons(continued.res), reasons(fresh.res)) {
 		t.Fatalf("reuse changed the outcome:\ncontinued %s %v\nfresh     %s %v", continued.res.winner, reasons(continued.res), fresh.res.winner, reasons(fresh.res))
+	}
+}
+
+// Under grid verification the continued search still reuses what the earlier
+// one measured at discovery, verifies on every grid window like a fresh
+// search would, and ends where a fresh search ends.
+func TestContinuedSearchOnTheGridReusesDiscoveryAndVerifiesTheWholeGrid(t *testing.T) {
+	basis := gridContinuationBasis()
+	dir := t.TempDir()
+	prior, _ := priorSearchIn(t, dir, basis, continuationHardEpisode(), "fallback-hardware-cand_q75")
+	if len(prior.Samples) < 5 {
+		t.Fatalf("the grid has %d windows", len(prior.Samples))
+	}
+
+	fresh := runContinuedSearchIn(t, dir, basis, continuationHardEpisode(), func(r *BenchmarkRecord, _ []validatedCandidate) { r.ContinuesBenchmark = nil }, continuationFingerprint)
+	continued := runContinuedSearchIn(t, dir, basis, continuationHardEpisode(), nil, continuationFingerprint)
+	t.Logf("fresh: %s measured=%v", fresh.res.summary(), fresh.res.measured)
+	t.Logf("continued: %s measured=%v reused=%v", continued.res.summary(), continued.res.measured, reusedIDs(continued))
+
+	wantReused := []string{"cand_crf22", "fallback-quality-medium-cand_crf16"}
+	if !reflect.DeepEqual(reusedIDs(continued), wantReused) {
+		t.Fatalf("reused %v, want %v", reusedIDs(continued), wantReused)
+	}
+	if len(reusedIDs(fresh)) != 0 || len(continued.res.measured) >= len(fresh.res.measured) {
+		t.Fatalf("reuse saved nothing: %v against %v", continued.res.measured, fresh.res.measured)
+	}
+	if continued.res.winner == "" || continued.res.winner != fresh.res.winner || !reflect.DeepEqual(reasons(continued.res), reasons(fresh.res)) {
+		t.Fatalf("reuse changed the outcome:\ncontinued %s %v\nfresh     %s %v", continued.res.winner, reasons(continued.res), fresh.res.winner, reasons(fresh.res))
+	}
+	// Verification covers the same windows either way, whatever was reused.
+	for name, run := range map[string]continuedRun{"fresh": fresh, "continued": continued} {
+		if got := run.evidence.Automatic.VerifiedSamples; got != len(prior.Samples) {
+			t.Fatalf("%s search verified %d windows, the grid has %d", name, got, len(prior.Samples))
+		}
+	}
+	if !reflect.DeepEqual(continued.evidence.Automatic.WinnerWindows, fresh.evidence.Automatic.WinnerWindows) {
+		t.Fatalf("the winner's windows differ:\ncontinued %+v\nfresh     %+v", continued.evidence.Automatic.WinnerWindows, fresh.evidence.Automatic.WinnerWindows)
+	}
+}
+
+// A continued search over a different window plan measures again: reuse is
+// only for the same measurement basis.
+func TestContinuedSearchMeasuresAgainWhenTheGridDiffers(t *testing.T) {
+	basis := gridContinuationBasis()
+	dir := t.TempDir()
+	priorSearchIn(t, dir, basis, continuationHardEpisode(), "fallback-hardware-cand_q75")
+	edge := basis
+	edge.rules, edge.duration, edge.sourceBytes = replayRules(), 600, 10_000_000
+	// Same earlier search on file, but this one is planned on other windows.
+	continued := runContinuedSearchIn(t, dir, edge, continuationHardEpisode(), nil, continuationFingerprint)
+	if ids := reusedIDs(continued); len(ids) != 0 {
+		t.Fatalf("reused %v from a search on other windows", ids)
 	}
 }

@@ -644,3 +644,35 @@ func TestProductionRunnerFinishedUnitsReachTheSearchBudget(t *testing.T) {
 		t.Fatalf("search did not complete cleanly: %+v %v", result, err)
 	}
 }
+
+// A verification the time limit cut short, with nothing verified, completes
+// with its evidence but ends inconclusive, like any other search cut off at
+// its budget; a verified winner is a plain completion.
+func TestInternalBenchmarkReportsAVerificationCutShortAtTheTimeLimitAsExhausted(t *testing.T) {
+	for name, tc := range map[string]struct {
+		winner     *transcode.BenchmarkWinner
+		stoppedBy  string
+		wantReason string
+	}{
+		"time limit, nothing verified": {stoppedBy: transcode.VerificationStoppedTimeCap, wantReason: "search_budget_exhausted"},
+		"time limit, a setting passed": {winner: &transcode.BenchmarkWinner{CandidateID: "cand_crf22"}, stoppedBy: transcode.VerificationStoppedTimeCap},
+		"nothing eligible":             {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := newBudgetWorker(t)
+			result, err := runBudgetBenchmark(t, w, 10, time.Second, nil, func(ctx context.Context, record *BenchmarkRecord) error {
+				record.Evidence = &BenchmarkExecutionEvidence{
+					Decision:  &transcode.BenchmarkDecision{Winner: tc.winner},
+					Automatic: &transcode.BenchmarkAutomaticEvidence{Verification: &transcode.BenchmarkVerificationEvidence{StoppedBy: tc.stoppedBy}},
+				}
+				return nil
+			})
+			if err != nil || result.Status != "completed" || result.ReasonCode != tc.wantReason {
+				t.Fatalf("err=%v status=%s reason=%q, want completed with %q", err, result.Status, result.ReasonCode, tc.wantReason)
+			}
+			if result.Evidence == nil || result.Evidence.Automatic == nil || result.Evidence.Automatic.Verification.StoppedBy != tc.stoppedBy {
+				t.Fatalf("the evidence was lost: %+v", result.Evidence)
+			}
+		})
+	}
+}

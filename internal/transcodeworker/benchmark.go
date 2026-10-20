@@ -1140,6 +1140,14 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) 
 	latest.Error = ""
 	latest.Evidence = record.Evidence
 	latest.Comparison = record.Comparison
+	if verificationEndedAtTimeLimit(record.Evidence) {
+		// The search ran out of time before any setting was verified. That is
+		// the same inconclusive end a search cut off elsewhere has, not a
+		// finding about the source, so the evidence stays and the action waits
+		// for a decision instead of falling back to audio only.
+		latest.ReasonCode = "search_budget_exhausted"
+		latest.SearchWorkerBusy = budget.workerBusy()
+	}
 	if err := SaveBenchmarkAtomic(benchFile, latest); err != nil {
 		return fmt.Errorf("updating benchmark to completed: %w", err)
 	}
@@ -1153,4 +1161,13 @@ func cloneContinuation(c *transcode.BenchmarkContinuation) *transcode.BenchmarkC
 	}
 	clone := *c
 	return &clone
+}
+
+// verificationEndedAtTimeLimit reports a search whose verification was cut
+// short by the time limit with no setting verified.
+func verificationEndedAtTimeLimit(e *BenchmarkExecutionEvidence) bool {
+	if e == nil || e.Automatic == nil || e.Automatic.Verification == nil || e.Decision == nil {
+		return false
+	}
+	return e.Decision.Winner == nil && e.Automatic.Verification.StoppedBy == transcode.VerificationStoppedTimeCap
 }

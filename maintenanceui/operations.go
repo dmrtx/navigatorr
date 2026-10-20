@@ -217,6 +217,38 @@ func operationSizeMode(r operationRecord) map[string]any {
 		}
 		out["final_quality"] = final
 	}
+	if fresh := operationMap(operationMap(operationValue(r, "quality_evidence"))["fresh_vmaf"]); fresh["mean"] != nil {
+		if final, ok := out["final_quality"].(map[string]any); ok {
+			final["fresh_vmaf_mean"] = operationNumber(fresh["mean"])
+			if fresh["p5"] != nil {
+				final["fresh_vmaf_p5"] = operationNumber(fresh["p5"])
+			}
+		}
+	}
+	// How the winner was verified, and the search and final scores of every
+	// window side by side.
+	var search transcode.BenchmarkAutomaticEvidence
+	var final transcode.FinalQualityEvidence
+	if raw, err := json.Marshal(operationValue(r, "automatic_search")); err == nil {
+		_ = json.Unmarshal(raw, &search)
+	}
+	if raw, err := json.Marshal(operationValue(r, "quality_evidence")); err == nil {
+		_ = json.Unmarshal(raw, &final)
+	}
+	if v := search.Verification; v != nil && len(v.Attempts) > 0 || search.VerificationWindows != "" {
+		verification := map[string]any{"windows": search.VerificationWindows}
+		if v := search.Verification; v != nil {
+			verification["attempts"] = v.Attempts
+			if v.StoppedBy != "" {
+				verification["stopped_by"] = v.StoppedBy
+				verification["unverified"] = len(v.Unverified)
+			}
+		}
+		out["verification"] = verification
+	}
+	if windows := transcode.CompareWindows(search.WinnerWindows, final.Windows); len(windows) > 0 {
+		out["windows"] = windows
+	}
 	// A VideoToolbox result that failed the full-file check and the x265
 	// search that followed: the failed attempt's numbers stay visible after
 	// the x265 result replaces its evidence.
@@ -243,6 +275,9 @@ func operationSizeMode(r operationRecord) map[string]any {
 				failed["failures"] = failures
 			}
 			note["failed_quality"] = failed
+		}
+		if windows, _ := hc["windows"].([]any); len(windows) > 0 {
+			note["windows"] = windows
 		}
 		out["hardware_continuation"] = note
 	}

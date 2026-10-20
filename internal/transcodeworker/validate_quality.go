@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"sync"
 	"syscall"
@@ -145,10 +146,15 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 	}
 	defer os.RemoveAll(scratch)
 	timeline := math.Min(sourceRep.DurationSec, candidateRep.DurationSec)
-	concurrency := w.finalValidationConcurrency(len(q.Samples))
+	// The grid windows decide the verdict. Fresh windows (rules from the
+	// benchmark's own verification) were never seen by the search; they are
+	// measured after the grid, reported separately, and never gate the result.
+	grid := len(q.Samples)
+	windows := append(append([]transcode.BenchmarkSampleWindow(nil), q.Samples...), q.FreshSamples...)
+	concurrency := w.finalValidationConcurrency(len(windows))
 	threads := w.metricThreads(concurrency)
 	measure := func(ctx context.Context, pos int) finalWindowResult {
-		window := q.Samples[pos]
+		window := windows[pos]
 		bad := func(code string, cause error) finalWindowResult {
 			return finalWindowResult{code: code, err: cause}
 		}
@@ -234,12 +240,19 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 		}
 		return r
 	}
-	results, failed, err := runFinalWindows(ctx, len(q.Samples), concurrency, measure)
+	results, failed, err := runFinalWindows(ctx, len(windows), concurrency, measure)
 	if err != nil {
 		return e, err
 	}
-	if failed >= 0 {
+	if failed >= 0 && failed < grid {
 		return fail(results[failed].code, results[failed].err)
+	}
+	results, scores, freshVMAF := splitFinalWindowResults(q, results, failed)
+	e.Windows = scores
+	if len(freshVMAF) > 0 {
+		if combined, err := quality.CombineVMAF(freshVMAF); err == nil {
+			e.FreshVMAF = &combined
+		}
 	}
 	var vmafSamples []quality.VMAFStats
 	var cambiSamples []quality.CAMBIStats
@@ -315,6 +328,37 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 	}
 	e.Verdict = "pass"
 	return e, nil
+}
+
+// splitFinalWindowResults separates the grid's results, which decide the
+// verdict, from the fresh windows' (measured after the grid and reported
+// beside it). A fresh window that could not be measured is dropped, never a
+// failure, and the fresh windows that were measured stay: failed is the lowest
+// failing window, already known to lie beyond the grid. It returns the grid results, every measured window's scores in
+// time order and the fresh windows' VMAF statistics.
+func splitFinalWindowResults(q *transcode.QualityValidationPlan, results []finalWindowResult, failed int) ([]finalWindowResult, []transcode.FinalWindowScore, []quality.VMAFStats) {
+	grid := len(q.Samples)
+	fresh := results[grid:]
+	var windows []transcode.FinalWindowScore
+	var freshVMAF []quality.VMAFStats
+	for i, r := range fresh {
+		if r.vmaf != nil && r.code == "" {
+			freshVMAF = append(freshVMAF, *r.vmaf)
+			windows = append(windows, finalWindowScore(q.FreshSamples[i], "fresh", r.vmaf))
+		}
+	}
+	for i, r := range results[:grid] {
+		if r.vmaf != nil && r.code == "" {
+			windows = append(windows, finalWindowScore(q.Samples[i], "grid", r.vmaf))
+		}
+	}
+	sort.SliceStable(windows, func(i, j int) bool { return windows[i].StartSeconds < windows[j].StartSeconds })
+	return results[:grid], windows, freshVMAF
+}
+
+// finalWindowScore is one measured window's VMAF scores for the report.
+func finalWindowScore(window transcode.BenchmarkSampleWindow, role string, v *quality.VMAFStats) transcode.FinalWindowScore {
+	return transcode.FinalWindowScore{StartSeconds: window.StartSeconds, DurationSeconds: window.DurationSeconds, Role: role, VMAFMean: v.Mean, VMAFP5: v.P5, VMAFMin: v.Min}
 }
 
 // maxFinalValidationConcurrency bounds how many final validation windows are

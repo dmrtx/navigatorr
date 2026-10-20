@@ -63,6 +63,9 @@ type HardwareContinuation struct {
 	// and Final what it scored on the whole file.
 	Sampled *QualityNumbers      `json:"sampled,omitempty"`
 	Final   *FinalQualitySummary `json:"final,omitempty"`
+	// Windows are the failed result's search and final scores window by
+	// window; the x265 continuation replaces the evidence they come from.
+	Windows []transcode.WindowComparison `json:"windows,omitempty"`
 }
 
 // QualityNumbers are the bounded VMAF and CAMBI figures of one measurement.
@@ -300,6 +303,10 @@ func (e *Engine) continueWithoutHardware(ctx context.Context, ec *ExecutionConte
 		FailedBenchmarkJobID:  getString(ec.State, "benchmark_job_id"),
 		FailedBenchmarkDigest: getString(ec.State, "benchmark_request_digest"),
 		Final:                 summarizeFinalQuality(st.QualityEvidence, stateQualityLimits(ec.State)),
+	}
+	var searched transcode.BenchmarkAutomaticEvidence
+	if ec.State["automatic_search"] != nil && reencode(ec.State["automatic_search"], &searched) {
+		rec.Windows = transcode.CompareWindows(searched.WinnerWindows, st.QualityEvidence.Windows)
 	}
 	var sampled []transcode.BenchmarkCandidateQualityEvidence
 	if reencode(ec.State["benchmark_quality"], &sampled) {

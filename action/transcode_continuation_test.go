@@ -3,6 +3,7 @@ package action
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -33,6 +34,8 @@ type continuationFlow struct {
 	// firstSearchSeconds is the time the VideoToolbox search is reported to
 	// have used.
 	firstSearchSeconds float64
+	// beforeSearch lets a test record the first search's evidence.
+	beforeSearch func(ec *ExecutionContext)
 }
 
 func newContinuationFlow(t *testing.T, firstSearchSeconds float64) *continuationFlow {
@@ -74,6 +77,9 @@ func newContinuationFlow(t *testing.T, firstSearchSeconds float64) *continuation
 				return StepResult{Status: StepCompleted, Outputs: map[string]any{"benchmark_done": true}}, nil
 			}
 			winner := &transcode.BenchmarkWinner{CandidateID: "fallback-hardware-cand_q70", VideoCodec: transcode.VideoCodecHEVCVideoToolbox}
+			if f.beforeSearch != nil {
+				f.beforeSearch(ec)
+			}
 			rememberContinuationBase(ec, getPlan(ec.State["plan"]), winner)
 			won := *base
 			won.VideoCodec, won.PlanDigest = transcode.VideoCodecHEVCVideoToolbox, "sha256:"+strings.Repeat("d", 64)
@@ -520,5 +526,68 @@ func TestBenchmarkWaitSumsContinuedSearchTime(t *testing.T) {
 		if got := getFloat(ec.State, "benchmark_search_seconds"); got != tc.want {
 			t.Fatalf("%s: recorded search time %v, want %v", name, got, tc.want)
 		}
+	}
+}
+
+// A continued search under grid verification measures what the first search
+// measured: the same windows and the same search rules, so the worker may reuse
+// the first search's discovery measurements, and it still verifies on the grid.
+func TestContinuedSearchKeepsTheGridMeasurementBasis(t *testing.T) {
+	policy, err := modePolicyWithHardware("size", false, 0, mustHardwareRules(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := map[string]any{}
+	b, _ := json.Marshal(policy)
+	_ = json.Unmarshal(b, &stored)
+	newEC := func() *ExecutionContext {
+		return &ExecutionContext{InstanceID: "act-grid", ActionName: "transcode_media", Inputs: map[string]any{"mode": "size"}, Outputs: map[string]any{},
+			State: map[string]any{"mode_policy": stored, "original_sha256": strings.Repeat("a", 64), "search_budget_seconds": 600}}
+	}
+	caps := hardwareTestCapabilities()
+	caps.AutomaticGridVerification = true
+	// A 105 minute source has an 11 window final grid.
+	first := hardwareRequestWith(t, newEC(), 8, 105*60, caps)
+	ec := newEC()
+	ec.State[hardwareContinuationKey] = &HardwareContinuation{Outcome: continuationContinued, FailedBenchmarkJobID: "bench-act-grid", FailedBenchmarkDigest: "sha256:" + strings.Repeat("e", 64), RemainingSearchSeconds: 2300}
+	ec.State["benchmark_job_id"] = "bench-act-grid-x265"
+	cont := hardwareRequestWith(t, ec, 8, 105*60, caps)
+	if first.AutomaticSearch == nil || first.AutomaticSearch.HoldoutWindows != transcode.HoldoutWindowsFinalGrid || len(first.Samples) != 11 {
+		t.Fatalf("first search %+v with %d samples", first.AutomaticSearch, len(first.Samples))
+	}
+	if cont.ContinuesBenchmark == nil || cont.HardwareSearch != nil {
+		t.Fatalf("not a continued x265 search: %+v", cont)
+	}
+	if !reflect.DeepEqual(first.Samples, cont.Samples) || !reflect.DeepEqual(first.AutomaticSearch, cont.AutomaticSearch) || !reflect.DeepEqual(first.Quality, cont.Quality) {
+		t.Fatalf("the continued search measures differently from the first:\n%+v\n%+v", first.AutomaticSearch, cont.AutomaticSearch)
+	}
+	if cont.AutomaticSearch.FinalFreshWindows != 2 || !cont.AutomaticSearch.VerifyUntilExhausted {
+		t.Fatalf("continued search dropped the grid rules: %+v", cont.AutomaticSearch)
+	}
+	if err := transcode.ValidateBenchmarkRequest(cont); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The failed VideoToolbox result's search and final scores stay beside the x265
+// result's after the continuation clears the evidence they come from.
+func TestContinuationKeepsTheFailedResultsWindows(t *testing.T) {
+	f := newContinuationFlow(t, 700)
+	mock := f.engine.deps.Transcode.(*mockTranscodeExecutor)
+	mock.statusFunc = func(_ context.Context, id string) (transcode.JobStatus, error) {
+		if strings.HasSuffix(id, "-x265") {
+			return transcode.JobStatus{ID: id, Status: transcode.StatusCompleted, Progress: 100}, nil
+		}
+		ev := failedFinalQuality(82.4, 83.9)
+		ev.Windows = []transcode.FinalWindowScore{{StartSeconds: 600, DurationSeconds: 10, Role: "grid", VMAFMean: 84, VMAFP5: 80, VMAFMin: 70}}
+		return transcode.JobStatus{ID: id, Status: transcode.StatusFailed, ReasonCode: "quality_not_met", QualityEvidence: &ev}, nil
+	}
+	f.beforeSearch = func(ec *ExecutionContext) {
+		ec.State["automatic_search"] = transcode.BenchmarkAutomaticEvidence{WinnerWindows: []transcode.BenchmarkWindowScore{{StartSeconds: 600, DurationSeconds: 10, Role: transcode.WindowRoleDiscovery, VMAFMean: 92, VMAFP5: 89, VMAFMin: 85}}}
+	}
+	res := f.run(t)
+	rec := continuationOf(res.State)
+	if rec == nil || len(rec.Windows) != 1 || rec.Windows[0].Search == nil || rec.Windows[0].Search.VMAFMean != 92 || rec.Windows[0].Final == nil || rec.Windows[0].Final.VMAFMean != 84 {
+		t.Fatalf("failed result's windows not kept: %+v", rec)
 	}
 }

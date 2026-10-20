@@ -143,8 +143,11 @@ func ValidatePlan(p *transcode.Plan) error {
 		if !regexp.MustCompile(`^sha256:[a-f0-9]{64}$`).MatchString(q.BenchmarkRequestDigest) {
 			return fmt.Errorf("final quality benchmark request digest is missing")
 		}
+		if len(q.FreshSamples) > transcode.MaxFinalFreshWindows {
+			return fmt.Errorf("invalid final quality fresh sample count")
+		}
 		seenSample := map[int]bool{}
-		for _, sample := range q.Samples {
+		for _, sample := range append(append([]transcode.BenchmarkSampleWindow(nil), q.Samples...), q.FreshSamples...) {
 			if sample.Index < 0 || seenSample[sample.Index] || math.IsNaN(sample.StartSeconds) || math.IsInf(sample.StartSeconds, 0) || sample.StartSeconds < 0 || math.IsNaN(sample.DurationSeconds) || math.IsInf(sample.DurationSeconds, 0) || sample.DurationSeconds <= 0 || sample.DurationSeconds > 120 {
 				return fmt.Errorf("invalid final quality sample")
 			}

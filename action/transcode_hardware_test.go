@@ -67,8 +67,11 @@ func TestSizePolicyHardwareDefaultsOnAndFreezes(t *testing.T) {
 	// hardware selection margin gave new snapshots the digest below; those
 	// frozen with the rungs but without it still re-hash to sha256:1b73a704...ad6
 	// and keep selecting with the margin they were frozen with (see
-	// TestHardwarePolicyWithoutExtraMarginKeepsItsDigest).
-	if hw.Digest != "sha256:e5ec773de13a1eab8d1b3e9bc087f0583316221625cc310d463fca137ecd4264" {
+	// TestHardwarePolicyWithoutExtraMarginKeepsItsDigest). Verifying on the
+	// final grid gave the digest below; snapshots frozen with the margin but
+	// before it re-hash to sha256:e5ec773d...4264 (see
+	// TestGridEraSnapshotsKeepTheirDigestAndSearch).
+	if hw.Digest != "sha256:206ca220dda73866a0f7b9721a8a2bb93769b447cf7cb6f53347b2d3208d03e7" {
 		t.Fatalf("size snapshot with the media engine on changed digest: %s", hw.Digest)
 	}
 	// The frozen snapshot round-trips through storage and re-verifies.
@@ -306,10 +309,8 @@ func TestSizeHardwareSearchWithoutFallbackCapability(t *testing.T) {
 // hardware results with the extra margin.
 func TestHardwarePolicyWithoutExtraMarginKeepsItsDigest(t *testing.T) {
 	rules := &transcode.HardwareSearchRules{MarginPercent: 15, QualityValues: []int{45, 50, 55, 60}, GOPSize: 240, BFrames: 1, FallbackQualityValues: []int{65, 70, 75}}
-	p, err := modePolicyWithHardware("size", false, 0, rules)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// Frozen before the grid rules too, so it is the grid-era snapshot.
+	p := gridEraPolicy(t, rules)
 	if p.Digest != "sha256:1b73a704427a9c6a89a9ae36079422c842de9cbd799fa48f634d54d1a3b7ead6" {
 		t.Fatalf("the earlier media engine snapshot changed digest: %s", p.Digest)
 	}
@@ -377,7 +378,7 @@ func TestHardwarePolicyWithoutFallbackRungsKeepsItsDigest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Digest != "sha256:bc2e370bf9f26965f7faa121693c299d1fe2e6c2d02b37aee033dc369cb12e03" {
+	if p.Digest != "sha256:ab4a33d9aa290b79b3eeaef9a6b3c17afda00376e9defade7d71e9ce65cb6128" {
 		t.Fatalf("the earlier media engine snapshot changed digest: %s", p.Digest)
 	}
 	stored := map[string]any{}
