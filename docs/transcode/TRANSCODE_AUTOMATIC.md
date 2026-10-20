@@ -84,7 +84,7 @@ reaches the quality fallback: a ladder that passes, or fails for another reason
 such as size, never pays for them, and neither does a search that still has an
 eligible x265 setting to verify after a ladder holdout failure.
 
-**Stricter hardware selection.** A VideoToolbox candidate must clear the quality
+**Stricter hardware selection.** *(Applies to snapshots frozen with the extra margin, and to a search that cannot verify on the final grid. New grid snapshots freeze no selection margin at all: they verify the candidate on every final-validation window instead; see "No selection margin when the search verifies on the grid" in TRANSCODE_MODES_REVIEW.md.)* A VideoToolbox candidate must clear the quality
 gates by a wider margin than an x265 one: its VMAF p5 and worst-window means need
 2 VMAF more than the 1.5 every candidate needs, 3.5 in total (p5 at least 87.5
 and worst window at least 88.5 against the 84/85 limits). The sample search sees
@@ -132,7 +132,8 @@ promoted before the x265 result is validated.
   the action continued with x265, and keep the failed attempt's whole-file VMAF
   mean, p5, worst window and the failed checks next to the final result. A
   quality rejection names the failed metric and its limit.
-- *Compatibility.* The continuation reference and the extra margin are sent only
+- *Compatibility.* The continuation reference and the extra margin (when the
+  snapshot or the search needs one) are sent only
   to a worker that advertises `search_continuation` / `hardware_selection_margin`;
   a worker without `hardware_selection_margin` gets no hardware candidates (x265
   only), and one without `search_continuation` simply measures everything again

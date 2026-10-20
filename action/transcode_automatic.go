@@ -54,9 +54,27 @@ func policyAutomaticFallbacks(policy *ModePolicySnapshot, caps transcode.WorkerC
 			if families.Rules.HoldoutWindows == transcode.HoldoutWindowsFinalGrid {
 				families.Rules.HoldoutWindows = transcode.HoldoutWindowsFinalGridEdges
 			}
+			restoreEdgeSelectionMargin(families.Rules)
 		}
 	}
 	return families
+}
+
+// restoreEdgeSelectionMargin gives a search that cannot verify on the final
+// grid the selection margin the edge holdouts need. A grid-verifying snapshot
+// freezes none, because grid verification measures every final window; two
+// edge windows do not, so a thin pass there is a risk the margin was added for.
+// A margin the snapshot froze is kept.
+func restoreEdgeSelectionMargin(rules *transcode.AutomaticSearchRules) {
+	if rules.SelectionMarginVMAF <= 0 {
+		rules.SelectionMarginVMAF = sizeEdgeSelectionMarginVMAF
+	}
+}
+
+// edgeMarginRestored reports a request whose margin was restored over a
+// snapshot that froze none.
+func edgeMarginRestored(req *transcode.BenchmarkRequest, policy *ModePolicySnapshot) bool {
+	return req.AutomaticSearch != nil && req.AutomaticSearch.SelectionMarginVMAF > 0 && policy.Size != nil && policy.Size.AutomaticSearch != nil && policy.Size.AutomaticSearch.SelectionMarginVMAF <= 0
 }
 
 // Candidate alternatives are frozen before submission. The worker chooses which
@@ -96,6 +114,7 @@ func configureAutomaticRequest(req *transcode.BenchmarkRequest, plan *transcode.
 			// and no fresh windows (there is no room for them).
 			if req.AutomaticSearch.HoldoutWindows == transcode.HoldoutWindowsFinalGrid {
 				req.AutomaticSearch.HoldoutWindows = ""
+				restoreEdgeSelectionMargin(req.AutomaticSearch)
 			}
 			req.AutomaticSearch.FinalFreshWindows = 0
 		}

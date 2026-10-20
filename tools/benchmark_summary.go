@@ -36,6 +36,9 @@ type benchmarkSummary struct {
 	// HardwareReason says why a VideoToolbox (media engine) winner was chosen,
 	// next to the encoder the explanation names.
 	HardwareReason string `json:"hardware_reason,omitempty"`
+	// SourceBytes is the original's size, the base of every measured setting's
+	// estimated size and savings.
+	SourceBytes int64 `json:"source_bytes,omitempty"`
 }
 
 type benchmarkRejection struct {
@@ -59,6 +62,14 @@ type benchmarkMeasured struct {
 	// replayed from an earlier run on the same source bytes. They count toward
 	// selection exactly like fresh ones.
 	Reused *transcode.BenchmarkSampleReuse `json:"reused,omitempty"`
+	// EstimatedBytes, EstimatedMB and SavingsPercent are the estimated output
+	// size and saving against the original, from the sampled windows, whether
+	// or not the setting passed. Absent when no size could be estimated.
+	// LargerThanSource says the estimate is bigger than the original.
+	EstimatedBytes   int64    `json:"estimated_bytes,omitempty"`
+	EstimatedMB      float64  `json:"estimated_mb,omitempty"`
+	SavingsPercent   *float64 `json:"savings_percent,omitempty"`
+	LargerThanSource bool     `json:"larger_than_source,omitempty"`
 }
 
 type benchmarkCheck struct {
@@ -206,7 +217,12 @@ func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
 			if ev.VMAF == nil || len(s.Measured) >= transcode.MaxBenchmarkCandidates {
 				continue
 			}
-			s.Measured = append(s.Measured, benchmarkMeasured{CandidateID: ev.CandidateID, VideoCodec: ev.VideoCodec, Quality: ev.Quality, Preset: ev.Preset, AverageBitrateKbps: ev.AverageBitrateKbps, Passed: ev.Eligible, Selected: decision.Winner != nil && decision.Winner.CandidateID == ev.CandidateID, VMAF: ev.VMAF, Reused: ev.Reuse})
+			m := benchmarkMeasured{CandidateID: ev.CandidateID, VideoCodec: ev.VideoCodec, Quality: ev.Quality, Preset: ev.Preset, AverageBitrateKbps: ev.AverageBitrateKbps, Passed: ev.Eligible, Selected: decision.Winner != nil && decision.Winner.CandidateID == ev.CandidateID, VMAF: ev.VMAF, Reused: ev.Reuse}
+			if ev.EstimatedBytes > 0 {
+				savings := ev.SavingsPercent
+				m.EstimatedBytes, m.EstimatedMB, m.SavingsPercent, m.LargerThanSource = ev.EstimatedBytes, ev.EstimatedMB, &savings, savings < 0
+			}
+			s.Measured = append(s.Measured, m)
 		}
 		s.Selection = decision.Selection
 		if decision.Winner != nil && transcode.BenchmarkCandidateVideoCodec(transcode.BenchmarkCandidate{VideoCodec: decision.Winner.VideoCodec}) == transcode.VideoCodecHEVCVideoToolbox {
@@ -305,6 +321,12 @@ func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
 	var plan transcode.Plan
 	var source struct {
 		Audio []mediainspect.DetailedStream `json:"audio"`
+	}
+	var original struct {
+		SizeBytes int64 `json:"size_bytes"`
+	}
+	if len(s.Measured) > 0 && benchmarkField(res, "original", &original) {
+		s.SourceBytes = original.SizeBytes
 	}
 	if benchmarkField(res, "plan", &plan) && benchmarkField(res, "original", &source) {
 		for _, a := range source.Audio {

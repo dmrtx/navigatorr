@@ -42,7 +42,10 @@ func TestSizePolicyHardwareDefaultsOnAndFreezes(t *testing.T) {
 	if err != nil || rules == nil {
 		t.Fatalf("rules %+v %v", rules, err)
 	}
-	if rules.ExtraSelectionMarginVMAF != sizeHardwareExtraMarginVMAF || sizeHardwareExtraMarginVMAF != 2 {
+	// New snapshots verify on the final grid, so a hardware result needs no
+	// more than the plain limits; the extra 2 is kept only for the edge
+	// holdouts (sizeEdgeHardwareExtraMarginVMAF).
+	if rules.ExtraSelectionMarginVMAF != 0 || sizeEdgeHardwareExtraMarginVMAF != 2 {
 		t.Fatalf("default hardware selection margin %+v", rules)
 	}
 	if rules.MarginPercent != 15 || rules.GOPSize != 240 || rules.BFrames != 1 || len(rules.QualityValues) != 4 || rules.QualityValues[0] != 45 || rules.QualityValues[3] != 60 {
@@ -68,13 +71,16 @@ func TestSizePolicyHardwareDefaultsOnAndFreezes(t *testing.T) {
 	// frozen with the rungs but without it still re-hash to sha256:1b73a704...ad6
 	// and keep selecting with the margin they were frozen with (see
 	// TestHardwarePolicyWithoutExtraMarginKeepsItsDigest). Verifying on the
-	// final grid gave the digest below; snapshots frozen with the margin but
+	// final grid gave a new digest; snapshots frozen with the margin but
 	// before it re-hash to sha256:e5ec773d...4264 (see
-	// TestGridEraSnapshotsKeepTheirDigestAndSearch). The x265 quality walk gave
-	// the digest below; snapshots frozen with the grid rules but before it
-	// re-hash to sha256:206ca220...03e7 (see
+	// TestGridEraSnapshotsKeepTheirDigestAndSearch). Removing the selection
+	// margins for grid verification gave the digest sha256:1f903e42...1903; the
+	// snapshots that carried them still re-hash to sha256:206ca220...03e7 (see
+	// TestMarginEraSnapshotsKeepTheirDigestAndMargin). The x265 quality walk
+	// gave the digest below; snapshots frozen without the margins but before
+	// it re-hash to sha256:1f903e42...1903 (see
 	// TestPreWalkSnapshotsKeepTheirDigestAndSearch).
-	if hw.Digest != "sha256:3d2f9478dc4c790728bab730cb53a3601dfb4726289f82a361bb39ce99a36bef" {
+	if hw.Digest != "sha256:ac41a174311afba39ec13ba20d9df6cfab95555097805812a4e4e571159180b4" {
 		t.Fatalf("size snapshot with the media engine on changed digest: %s", hw.Digest)
 	}
 	// The frozen snapshot round-trips through storage and re-verifies.
@@ -339,13 +345,11 @@ func TestHardwarePolicyWithoutExtraMarginKeepsItsDigest(t *testing.T) {
 	}
 }
 
-// A new snapshot carries the extra margin, which a worker that cannot apply it
-// must never be sent: the search is x265 only instead.
+// A snapshot frozen with the extra margin (#181, before grid verification
+// dropped it) carries it, which a worker that cannot apply it must never be
+// sent: the search is x265 only instead.
 func TestHardwareExtraMarginNeedsWorkerSupport(t *testing.T) {
-	policy, err := modePolicyWithHardware("size", false, 0, mustHardwareRules(t))
-	if err != nil {
-		t.Fatal(err)
-	}
+	policy := marginEraPolicy(t, withExtraMargin(mustHardwareRules(t)))
 	stored := map[string]any{}
 	b, _ := json.Marshal(policy)
 	_ = json.Unmarshal(b, &stored)
@@ -378,11 +382,8 @@ func mustHardwareRules(t *testing.T) *transcode.HardwareSearchRules {
 
 func TestHardwarePolicyWithoutFallbackRungsKeepsItsDigest(t *testing.T) {
 	rules := &transcode.HardwareSearchRules{MarginPercent: 15, QualityValues: []int{45, 50, 55, 60}, GOPSize: 240, BFrames: 1}
-	p, err := modePolicyWithHardware("size", false, 0, rules)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p.Digest != "sha256:9e40925b22bfc04cbb85ffe022ab4351c3186b3648592a20f976ebb562e24fd1" {
+	p := marginEraPolicy(t, rules)
+	if p.Digest != "sha256:ab4a33d9aa290b79b3eeaef9a6b3c17afda00376e9defade7d71e9ce65cb6128" {
 		t.Fatalf("the earlier media engine snapshot changed digest: %s", p.Digest)
 	}
 	stored := map[string]any{}
@@ -399,7 +400,7 @@ func TestHardwarePolicyWithoutFallbackRungsKeepsItsDigest(t *testing.T) {
 	caps := hardwareTestCapabilities()
 	ec.State["original_sha256"] = strings.Repeat("a", 64)
 	req := hardwareRequestFromState(t, ec, caps)
-	if len(req.Candidates) != 15 || len(req.HardwareSearch.FallbackQualityValues) != 0 {
+	if len(req.Candidates) != 18 || len(req.HardwareSearch.FallbackQualityValues) != 0 {
 		t.Fatalf("an earlier snapshot sent fallback rungs: %d candidates, %+v", len(req.Candidates), req.HardwareSearch)
 	}
 }

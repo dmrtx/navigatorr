@@ -33,7 +33,14 @@ func addHardwareSearch(req *transcode.BenchmarkRequest, policy *ModePolicySnapsh
 	// A worker that cannot hold hardware results to the frozen larger margin
 	// would apply the x265 one, which is the choice that failed; the search
 	// stays x265 only rather than weaken the rule.
-	if rules.ExtraSelectionMarginVMAF > 0 && !caps.HardwareSelectionMargin {
+	// A search whose snapshot froze no margin but that cannot verify on the
+	// final grid gets the edge margin back (see restoreEdgeSelectionMargin),
+	// and its hardware results the extra that goes with it.
+	extra := rules.ExtraSelectionMarginVMAF
+	if edgeMarginRestored(req, policy) {
+		extra = max(extra, sizeEdgeHardwareExtraMarginVMAF)
+	}
+	if extra > 0 && !caps.HardwareSelectionMargin {
 		return nil
 	}
 	if validateWorkerCapabilitiesForBenchmark(caps, metric, qualityBitDepth, transcode.VideoCodecHEVCVideoToolbox) != nil {
@@ -57,6 +64,7 @@ func addHardwareSearch(req *transcode.BenchmarkRequest, policy *ModePolicySnapsh
 		hardware[i].ID = hardwareCandidatePrefix + hardware[i].ID
 	}
 	req.HardwareSearch = rules.Clone()
+	req.HardwareSearch.ExtraSelectionMarginVMAF = extra
 	// The higher-quality rungs are a fallback family the worker measures only
 	// when the whole ladder fails quality. A worker that does not know them
 	// would reject the field and the longer candidate list, so it gets the

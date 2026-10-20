@@ -190,7 +190,7 @@ func TestAllowSlowPresetInput(t *testing.T) {
 		t.Fatalf("slow opt-in presets %q digest %s (default %s)", got, slow.Digest, def.Digest)
 	}
 	// Pinned: the opt-in is its own frozen snapshot.
-	if slow.Digest != "sha256:64b8fb9d092d138740e6371326a9637ec92cf4de8b03fa6981b15579dc216e6a" {
+	if slow.Digest != "sha256:f681e347c8db8a8d8a7823f8d0260bdf322c0b6b60461ee3f8fa43f046b12d70" {
 		t.Fatalf("slow opt-in digest %s", slow.Digest)
 	}
 	// A stored snapshot keeps the choice it was frozen with, whatever the inputs say now.
@@ -251,16 +251,22 @@ func TestPreWalkSnapshotsKeepTheirDigestAndSearch(t *testing.T) {
 	}
 	for name, tc := range map[string]struct {
 		hardware *transcode.HardwareSearchRules
+		margin   bool
 		digest   string
 	}{
-		"no media engine": {nil, "sha256:6e519947ac9039f9dbfe36a8beee2ebdd891f0a02d28b5e5b776ddc7f8928ba8"},
-		"media engine":    {media, "sha256:206ca220dda73866a0f7b9721a8a2bb93769b447cf7cb6f53347b2d3208d03e7"},
+		"margin, no media engine": {nil, true, "sha256:6e519947ac9039f9dbfe36a8beee2ebdd891f0a02d28b5e5b776ddc7f8928ba8"},
+		"margin, media engine":    {withExtraMargin(media), true, "sha256:206ca220dda73866a0f7b9721a8a2bb93769b447cf7cb6f53347b2d3208d03e7"},
+		"no media engine":         {nil, false, "sha256:5ca0b1d812f8e814a839209ad6cc4ab55169bba5af9e58d4fb15aaff96c30976"},
+		"media engine":            {media, false, "sha256:1f903e4291fdce6d0257446dcc809a87ad819a9d36bd3f16ff6d74c28f881903"},
 	} {
 		p, err := modePolicyWithHardware("size", false, 0, tc.hardware)
 		if err != nil {
 			t.Fatal(err)
 		}
 		legacy := preWalkPolicy(p)
+		if tc.margin {
+			legacy = marginEraPolicy(t, tc.hardware)
+		}
 		if legacy.Digest != tc.digest {
 			t.Fatalf("%s: pre-walk digest %s, want %s", name, legacy.Digest, tc.digest)
 		}

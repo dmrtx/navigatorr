@@ -302,3 +302,51 @@ func TestNotVerifiedTextNamesTheSearchTimeLimit(t *testing.T) {
 		t.Fatalf("no time-limit claim without evidence: %q", other)
 	}
 }
+
+// Every measured setting reports its estimated size and saving against the
+// original, whether it passed, failed quality or would grow the file, so a
+// limit-passing setting that was not even smaller than the original shows.
+func TestCompactBenchmarkReportsEstimatedSizeAndSavingsPerCandidate(t *testing.T) {
+	res := &action.ActionResult{ActionName: "transcode_media", Status: action.StatusCompleted, State: map[string]any{
+		"optimization_enabled": true,
+		"original":             map[string]any{"size_bytes": 4_000_000_000},
+		"benchmark_decision": transcode.BenchmarkDecision{DecisionReason: "no_candidate_met_minimum", Evaluations: []transcode.BenchmarkCandidateEvaluation{
+			{CandidateID: "crf20", VideoCodec: "libx265", Quality: 20, Eligible: true, EvaluationReason: "selected", EstimatedBytes: 1_000_000_000, EstimatedMB: 953.7, SavingsPercent: 75},
+			{CandidateID: "vt75", VideoCodec: "hevc_videotoolbox", Quality: 75, EvaluationReason: "verification_not_passed", EstimatedBytes: 4_400_000_000, EstimatedMB: 4196.2, SavingsPercent: -10},
+			{CandidateID: "crf16", VideoCodec: "libx265", Quality: 16, EvaluationReason: "sample_below_minimum_quality"},
+		}},
+		"benchmark_quality": []transcode.BenchmarkCandidateQualityEvidence{
+			{CandidateID: "crf20", VMAF: &quality.VMAFStats{Mean: 94, P5: 90, Min: 85, WorstWindowMean: 91, FramesTotal: 700}},
+			{CandidateID: "vt75", VMAF: &quality.VMAFStats{Mean: 94.3, P5: 85.9, Min: 80, WorstWindowMean: 87.3, FramesTotal: 700}},
+			{CandidateID: "crf16", VMAF: &quality.VMAFStats{Mean: 80, P5: 70, Min: 60, WorstWindowMean: 75, FramesTotal: 700}},
+		},
+	}}
+	// The persisted JSON shape, not only live values.
+	data, _ := json.Marshal(res)
+	var persisted action.ActionResult
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	s := compactBenchmark(&persisted)
+	if s == nil || len(s.Measured) != 3 || s.SourceBytes != 4_000_000_000 {
+		t.Fatalf("summary %+v", s)
+	}
+	by := map[string]benchmarkMeasured{}
+	for _, m := range s.Measured {
+		by[m.CandidateID] = m
+	}
+	if m := by["crf20"]; m.EstimatedBytes != 1_000_000_000 || m.SavingsPercent == nil || *m.SavingsPercent != 75 || m.LargerThanSource {
+		t.Fatalf("passing setting %+v", m)
+	}
+	if m := by["vt75"]; m.SavingsPercent == nil || *m.SavingsPercent != -10 || !m.LargerThanSource || m.EstimatedMB != 4196.2 {
+		t.Fatalf("larger setting %+v", m)
+	}
+	// A setting with no size estimate says nothing about size.
+	if m := by["crf16"]; m.EstimatedBytes != 0 || m.SavingsPercent != nil || m.LargerThanSource {
+		t.Fatalf("setting without an estimate %+v", m)
+	}
+	b, _ := json.Marshal(by["crf16"])
+	if strings.Contains(string(b), "savings") || strings.Contains(string(b), "estimated") {
+		t.Fatalf("an absent estimate is serialized: %s", b)
+	}
+}

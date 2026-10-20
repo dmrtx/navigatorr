@@ -107,15 +107,23 @@ type ModeSizePolicy struct {
 	// verification after a holdout fails on quality, verification on the whole
 	// final validation grid until a setting passes or none is eligible, and a
 	// medium-before-slow quality fallback. It is absent from snapshots frozen before it existed, so
-	// their digests and search rules are unchanged.
+	// their digests and search rules are unchanged. A snapshot frozen with
+	// verification on the final grid carries no selection margin: a candidate
+	// that passes the plain limits goes to grid verification, which measures
+	// every window the final check re-measures. Snapshots frozen with a margin
+	// keep it.
 	AutomaticSearch *transcode.AutomaticSearchRules `json:"automatic_search,omitempty"`
 }
 
-// sizeSelectionMarginVMAF is how far a size-mode winner's VMAF p5 and
-// worst-window mean must clear their minimums (84 and 85). A search result
-// that passes by less tends to fail the wider final validation after a long
-// full encode, so a lower CRF that clears it is preferred.
-const sizeSelectionMarginVMAF = 1.5
+// sizeEdgeSelectionMarginVMAF is how far a size-mode winner's VMAF p5 and
+// worst-window mean must clear their minimums (84 and 85) when its search does
+// not verify on the final validation grid. Snapshots frozen with that margin
+// keep it (the old edge holdouts measured two windows of the dozen the final
+// check re-measures, so a thin pass tended to fail it), and a search that
+// cannot verify on the grid (a worker without grid verification, a source too
+// short for the grid) falls back to it. A grid-verifying snapshot freezes none:
+// the margin did not predict final validation, and the grid does.
+const sizeEdgeSelectionMarginVMAF = 1.5
 
 // sizeFinalFreshWindows is how many windows final validation adds that the
 // search never measured. They are reported beside the grid and do not gate it.
@@ -150,7 +158,7 @@ func sizeModeV3Policy(allowSlow bool) *ModeSizePolicy {
 		presets = append(presets, "slow")
 	}
 	return &ModeSizePolicy{EightBitMain10: true, FallbackQualityValues: slices.Clone(sizeFallbackQualityValues), FallbackSavingsValues: slices.Clone(sizeSavingsFallbackValues), FinalWindowSeconds: 10, FinalWindowEverySeconds: 600, FinalWindowsMinimum: 5, FinalWindowsMaximum: 12, AudioOnlyFallback: true, LosslessObjectAudioToAAC: true, SearchExtension: &transcode.SearchExtension{MaxSeconds: sizeSearchMaxSeconds, SteadySeconds: sizeSearchSteadySeconds, VerifySeconds: sizeSearchVerifySeconds},
-		AutomaticSearch: &transcode.AutomaticSearchRules{SelectionMarginVMAF: sizeSelectionMarginVMAF, HoldoutWindows: transcode.HoldoutWindowsFinalGrid, VerifyUntilExhausted: true, FinalFreshWindows: sizeFinalFreshWindows, QualityFallbackPresets: presets, QualityWalk: true, RefinementQualityValues: slices.Clone(sizeRefinementQualityValues), DeferBanding: true}}
+		AutomaticSearch: &transcode.AutomaticSearchRules{HoldoutWindows: transcode.HoldoutWindowsFinalGrid, VerifyUntilExhausted: true, FinalFreshWindows: sizeFinalFreshWindows, QualityFallbackPresets: presets, QualityWalk: true, RefinementQualityValues: slices.Clone(sizeRefinementQualityValues), DeferBanding: true}}
 }
 
 // searchExtension is the frozen rule for running past the base budget, or nil
@@ -198,16 +206,19 @@ const (
 	sizeHardwareBFrames              = 1
 )
 
-// sizeHardwareExtraMarginVMAF is how much more than the x265 selection margin
-// (sizeSelectionMarginVMAF) a VideoToolbox result must clear the VMAF p5 and
-// worst-window minimums by: 3.5 in all. On a hard 1080p episode a hardware
+// sizeEdgeHardwareExtraMarginVMAF is how much more than the x265 selection
+// margin (sizeEdgeSelectionMarginVMAF) a VideoToolbox result must clear the
+// VMAF p5 and worst-window minimums by: 3.5 in all. It applies to snapshots
+// frozen with it and to a search that cannot verify on the final grid; a
+// grid-verifying snapshot freezes none, since every final window is measured
+// before the full encode. On a hard 1080p episode a hardware
 // result won its sample search at p5 87.1 and worst window 89.2 against limits
 // of 84 and 85, then failed the full-file check. The experiment that justified
 // the ladder (docs/transcode/reviews/2026-10-19-hardware-media-engine-experiment.md)
 // used synthetic clips and 1.5 of margin, and says the margin must be checked
 // on real content; 2 more points rejects that result on p5 and still lets a
 // hardware result with real headroom win.
-const sizeHardwareExtraMarginVMAF = 2
+const sizeEdgeHardwareExtraMarginVMAF = 2
 
 var sizeHardwareQualityValues = []int{45, 50, 55, 60}
 
@@ -266,7 +277,7 @@ func modeHardwareInput(mode string, inputs map[string]any) (*transcode.HardwareS
 			return nil, fmt.Errorf("hardware_margin_percent must be a number")
 		}
 	}
-	rules := &transcode.HardwareSearchRules{MarginPercent: margin, QualityValues: append([]int(nil), sizeHardwareQualityValues...), FallbackQualityValues: append([]int(nil), sizeHardwareFallbackQualityValues...), GOPSize: sizeHardwareGOPSize, BFrames: sizeHardwareBFrames, ExtraSelectionMarginVMAF: sizeHardwareExtraMarginVMAF}
+	rules := &transcode.HardwareSearchRules{MarginPercent: margin, QualityValues: append([]int(nil), sizeHardwareQualityValues...), FallbackQualityValues: append([]int(nil), sizeHardwareFallbackQualityValues...), GOPSize: sizeHardwareGOPSize, BFrames: sizeHardwareBFrames}
 	if err := rules.Validate(); err != nil {
 		return nil, err
 	}

@@ -3927,3 +3927,21 @@ test("a cancelled or no-winner standalone file offers Run again with a confirmat
   assert.equal(calls.length, 3);
   assert.equal(h.run('state.rerunKeys.has("old")'), false);
 });
+
+test("the sample test result shows each measured setting's estimated size against the original", () => {
+  const h = harness();
+  const vmaf = {mean:94.3,p5:85.9,min:80,worst_window_mean:87.3,worst_window_seconds:5};
+  h.context.job = {id:"sizes",action_name:"transcode_media",mode:"size",status:"completed",source_path:"/media/episode.mkv",
+    benchmark:{outcome:"selected",message:"A candidate met the configured checks on sampled video.",source_bytes:4000000000,
+      measured:[
+        {candidate_id:"crf20",video_codec:"libx265",quality:20,passed:true,selected:true,vmaf,estimated_bytes:1000000000,estimated_mb:953.7,savings_percent:75},
+        {candidate_id:"vt75",video_codec:"hevc_videotoolbox",quality:75,passed:true,vmaf,estimated_bytes:4400000000,estimated_mb:4196.2,savings_percent:-10,larger_than_source:true},
+        {candidate_id:"same",video_codec:"libx265",quality:18,passed:true,vmaf,estimated_bytes:4001000000,estimated_mb:3815.7,savings_percent:-0.02},
+        {candidate_id:"crf16",video_codec:"libx265",quality:16,passed:false,vmaf}]}};
+  const text = progressText(h.run('benchmarkReport(job)'));
+  assert.match(text, /same .* passed · est\. 3\.73 GB, no smaller than the original/);
+  assert.match(text, /crf20 .* selected · est\. 954 MB, 75\.0% smaller than the original/);
+  assert.match(text, /vt75 .* passed · est\. 4\.10 GB, 10\.0% larger than the original/);
+  assert.match(text, /crf16 [^\n]*did not pass(?! · est\.)/);
+  assert.doesNotMatch(text, /NaN|undefined/);
+});
