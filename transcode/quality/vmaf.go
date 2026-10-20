@@ -174,6 +174,48 @@ func ParseVMAF(data []byte, maxBytes int, model VMAFModel, sampleIndex int, sour
 	return out, nil
 }
 
+// FrameScores returns a copy of the raw per-frame scores a fresh measurement
+// kept worker-local (nil for stats that were combined or persisted). A durable
+// sample cache needs them: pooled mean and p5 over several samples are
+// computed from the frames, never from per-sample summaries.
+func (s VMAFStats) FrameScores() []float64 {
+	if len(s.frameScores) == 0 {
+		return nil
+	}
+	return append([]float64(nil), s.frameScores...)
+}
+
+// WithFrameScores returns s carrying the given raw frame scores. It accepts
+// only scores that agree with the summary they travel with (count, range and
+// finiteness), so evidence restored from storage can never feed CombineVMAF
+// something a measurement could not have produced.
+func (s VMAFStats) WithFrameScores(scores []float64) (VMAFStats, error) {
+	if len(scores) == 0 || len(scores) != s.FramesTotal {
+		return VMAFStats{}, fmt.Errorf("VMAF frame scores do not match frames_total")
+	}
+	sum, below := 0.0, 0
+	for _, score := range scores {
+		if !finite(score) || score < s.ScoreMin || score > s.ScoreMax {
+			return VMAFStats{}, fmt.Errorf("VMAF frame score out of range")
+		}
+		sum += score
+		if s.FrameThreshold != nil && score < *s.FrameThreshold {
+			below++
+		}
+	}
+	sorted := append([]float64(nil), scores...)
+	sort.Float64s(sorted)
+	p5Index := int(math.Ceil(0.05*float64(len(sorted)))) - 1
+	if p5Index < 0 {
+		p5Index = 0
+	}
+	if math.Abs(sum/float64(len(scores))-s.Mean) > 1e-9 || sorted[p5Index] != s.P5 || sorted[0] != s.Min || sorted[len(sorted)-1] != s.Max || below != s.FramesBelowThreshold {
+		return VMAFStats{}, fmt.Errorf("VMAF frame scores disagree with their summary")
+	}
+	s.frameScores = append([]float64(nil), scores...)
+	return s, nil
+}
+
 // CombineVMAF combines sample-local evidence without ever rolling a window
 // across two unrelated source locations. It must run before JSON persistence,
 // because raw frames intentionally stay worker-local and unexported.

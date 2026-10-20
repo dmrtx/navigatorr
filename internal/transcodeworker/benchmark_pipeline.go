@@ -187,6 +187,10 @@ type pipelineShared struct {
 	encodeOut            []pipelineEncodeOutcome
 	metricOut            []pipelineMetricOutcome
 	fatal                *pipelineFatal
+	// cache and cacheKeys hold the sample cache for this call and each unit's
+	// key; both are nil when the cache is off (see newSampleCacheRun).
+	cache     *sampleCacheRun
+	cacheKeys []string
 }
 
 // runPipelinedEncodeMetrics executes encode and metric work for the given candidate
@@ -356,11 +360,10 @@ func (r *ProductionBenchmarkRunner) runPipelinedEncodeMetrics(
 	}
 
 	if savings == nil {
-		all := make([]int, nUnits)
-		for i := range all {
-			all[i] = i
-		}
-		sh.runUnits(ctx, units, all, nil, true, encodeN, metricN)
+		// Units already measured on the same source bytes are replayed from
+		// the sample cache; only the rest are encoded and measured.
+		pending := sh.replayCachedUnits(ctx, units)
+		sh.runUnits(ctx, units, pending, nil, true, encodeN, metricN)
 	} else {
 		// Encode each family's most-compressed setting first and hold every
 		// metric until those encodes decide which families can still save
@@ -916,6 +919,7 @@ func (sh *pipelineShared) runMetricUnit(ctx context.Context, u pipelineUnit, idx
 		MetricDurationSec: vmafDurationSec + ssimDurationSec + out.cambiDurSec,
 	}
 	sh.metricOut[idx] = out
+	sh.storeCachedUnit(idx)
 }
 
 // invalidMetricOutcome builds the poisoned-window outcome: invalid sample scores

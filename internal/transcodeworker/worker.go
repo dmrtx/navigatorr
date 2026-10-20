@@ -72,6 +72,16 @@ type WorkerConfig struct {
 	DisableSourceCache  bool  `json:"disable_source_cache" yaml:"disable_source_cache"`
 	SourceCacheMaxBytes int64 `json:"source_cache_max_bytes" yaml:"source_cache_max_bytes"`
 	SourceCacheTTLHours int   `json:"source_cache_ttl_hours" yaml:"source_cache_ttl_hours"`
+
+	// Sample-evaluation cache settings. A size-mode search stores each finished
+	// (candidate, sample window) measurement under <LocalWorkDir>/_sample-cache
+	// so a later run on the same source bytes replays it instead of
+	// re-encoding and re-measuring. Defaults: enabled, 64 MiB, 720h (30 days)
+	// since last use. Setting DisableSampleCache restores the uncached search
+	// exactly. None of these affect transcode.Plan or the execution-spec digest.
+	DisableSampleCache  bool  `json:"disable_sample_cache" yaml:"disable_sample_cache"`
+	SampleCacheMaxBytes int64 `json:"sample_cache_max_bytes" yaml:"sample_cache_max_bytes"`
+	SampleCacheTTLHours int   `json:"sample_cache_ttl_hours" yaml:"sample_cache_ttl_hours"`
 }
 
 // DefaultWorkerConfig returns sane defaults for an Apple Silicon Mac.
@@ -186,6 +196,12 @@ func (cfg *WorkerConfig) normalizeOperational() error {
 	if cfg.SourceCacheMaxBytes < 0 {
 		return fmt.Errorf("source_cache_max_bytes must not be negative (fail closed)")
 	}
+	if cfg.SampleCacheMaxBytes < 0 {
+		return fmt.Errorf("sample_cache_max_bytes must not be negative (fail closed)")
+	}
+	if cfg.SampleCacheTTLHours < 0 {
+		return fmt.Errorf("sample_cache_ttl_hours must not be negative (fail closed)")
+	}
 	if cfg.SourceCacheTTLHours < 0 {
 		return fmt.Errorf("source_cache_ttl_hours must not be negative (fail closed)")
 	}
@@ -240,8 +256,12 @@ type Worker struct {
 	videoInUseFn    func() (int, bool)
 	x265CheckRun    func(ctx context.Context, dir string, args []string) ([]byte, error)
 	ffprobePath     string
-	benchmarkRunner BenchmarkRunner
-	afterSpawnHook  func(jobDir string, pid int)
+	// buildIdentity memoizes the ffmpeg/libx265 build probes that key the
+	// sample cache; sampleCacheBuildFn replaces them in tests.
+	buildIdentity      buildIdentityMemo
+	sampleCacheBuildFn func(ctx context.Context, ffmpegPath string) (sampleCacheBuildIdentity, error)
+	benchmarkRunner    BenchmarkRunner
+	afterSpawnHook     func(jobDir string, pid int)
 	// spawnTranscode spawns the detached runner for a queued job. Nil selects
 	// the production exec.Command path. Tests inject a stub that records the
 	// spawn without forking so queue/idempotency behavior is deterministic

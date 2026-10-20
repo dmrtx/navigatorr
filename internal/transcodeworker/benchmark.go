@@ -88,6 +88,11 @@ type BenchmarkRecord struct {
 	// searchBudget is the live budget of the running search; progress
 	// reporters tell it when a unit of work finishes. It is never persisted.
 	searchBudget *searchBudget
+	// sourceDigestVerified is set once this run's source bytes were checked
+	// against SourceSHA256 (the shared source cache stores only bytes whose
+	// hash matched). The sample cache is keyed by that hash, so it stays off
+	// when the digest is merely the coordinator's claim. Never persisted.
+	sourceDigestVerified bool
 }
 
 // BenchmarkRunner defines the pluggable executor interface for running benchmarks.
@@ -967,6 +972,10 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) 
 		} else {
 			effectiveSource = lease
 			leaseOwned = true
+			// The shared cache only holds bytes whose content hash matched the
+			// requested digest when they were stored, so this run's source
+			// identity is verified, not just claimed (the sample cache needs it).
+			record.sourceDigestVerified = strings.TrimSpace(record.SourceSHA256) != ""
 			// Drop any legacy per-job download path that Submit may have
 			// reserved; it is never used when the shared cache serves the
 			// source. Removal is best-effort and never touches the cache.

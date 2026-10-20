@@ -51,6 +51,10 @@ type BenchmarkCandidateSampleResult struct {
 	SSIM               *float64 `json:"ssim,omitempty"`
 	MetricDurationSec  float64  `json:"metric_duration_sec,omitempty"`
 	Error              string   `json:"error,omitempty"`
+	// Reused marks a sample replayed from the sample cache: nothing was
+	// encoded here, so File is empty and the durations are those of the
+	// measurement that populated the cache (excluded from this run's costs).
+	Reused bool `json:"reused,omitempty"`
 }
 
 // BenchmarkMetricSampleResult records perceptual quality metric measurements for one candidate sample.
@@ -68,6 +72,8 @@ type BenchmarkMetricSampleResult struct {
 	SSIMDurationSec   float64             `json:"ssim_duration_sec,omitempty"`
 	MetricDurationSec float64             `json:"metric_duration_sec"`
 	Error             string              `json:"error,omitempty"`
+	// Reused marks a measurement replayed from the sample cache.
+	Reused bool `json:"reused,omitempty"`
 }
 
 // BenchmarkCandidateMetricAggregate records the aggregated metric result for one candidate.
@@ -181,6 +187,13 @@ func (p *benchmarkProgressReporter) SkipUnits(n int) {
 	p.ResolveUnits(n)
 }
 
+// ReuseUnits resolves units whose result was replayed from the sample cache.
+// Like skipped units they take no measurable time and are not work, so they
+// never feed the search budget's steady-progress check.
+func (p *benchmarkProgressReporter) ReuseUnits(n int) {
+	p.ResolveUnits(n)
+}
+
 func (p *benchmarkProgressReporter) ResolveUnits(n int) {
 	if p == nil || n <= 0 {
 		return
@@ -287,11 +300,17 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 			for _, ref := range record.Evidence.ReferenceSamples {
 				samples += ref.ExtractionDurationSec
 			}
+			// Replayed samples cost this run nothing; their durations belong to
+			// the run that measured them.
 			for _, candidate := range record.Evidence.CandidateSamples {
-				encode += candidate.EncodeDurationSec
+				if !candidate.Reused {
+					encode += candidate.EncodeDurationSec
+				}
 			}
 			for _, metric := range record.Evidence.MetricSamples {
-				metrics += metric.MetricDurationSec
+				if !metric.Reused {
+					metrics += metric.MetricDurationSec
+				}
 			}
 			cpu := map[string]*int64{"samples": samplesCPU.activeComputeMs(), "sample_encode": sampleEncodeCPU.activeComputeMs(), "sample_validation": sampleValidationCPU.activeComputeMs()}
 			for name, seconds := range map[string]float64{"samples": samples, "sample_encode": encode, "sample_validation": metrics} {
@@ -1654,7 +1673,21 @@ func (r *ProductionBenchmarkRunner) runSelection(
 				}
 			}
 		}
+		var reuse *transcode.BenchmarkSampleReuse
+		reused, total := 0, 0
+		for _, cs := range evidence.CandidateSamples {
+			if cs.CandidateID == vc.candidate.ID && cs.Error == "" {
+				total++
+				if cs.Reused {
+					reused++
+				}
+			}
+		}
+		if reused > 0 {
+			reuse = &transcode.BenchmarkSampleReuse{Reused: reused, Total: total}
+		}
 		decision.Evaluations = append(decision.Evaluations, transcode.BenchmarkCandidateEvaluation{
+			Reuse:              reuse,
 			FailedSamples:      failedSamples,
 			MeasuredSeconds:    ec.MeasuredSeconds,
 			CandidateID:        vc.candidate.ID,

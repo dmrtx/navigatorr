@@ -2959,6 +2959,14 @@ test("the encoding plan line says whether a sample test backs the settings", () 
   assert.equal(h.run("encodingPlanNote({})"), null);
 });
 
+test("a sample measurement replayed from an earlier run is labelled as reused", () => {
+  const h = harness();
+  assert.equal(h.run("reusedLabel(undefined)"), "");
+  assert.equal(h.run("reusedLabel({reused:0,total:3})"), "", "nothing reused, nothing to say");
+  assert.match(h.run("reusedLabel({reused:3,total:3})"), /reused from an earlier run/);
+  assert.match(h.run("reusedLabel({reused:1,total:3})"), /1 of 3 samples reused from an earlier run/);
+});
+
 test("a job paused because quality checks are unavailable is not shown as still testing", () => {
   const h = harness();
   h.context.job = {id:"p",action_name:"transcode_media",mode:"compact",status:"waiting_decision",waiting_reason:"quality_vmaf_model_unavailable: v1_1080p_3h; original preserved",
