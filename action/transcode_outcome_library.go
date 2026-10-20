@@ -239,16 +239,37 @@ func outcomePoints(st *transcode.BenchmarkStatus) []outcomePoint {
 func floatPtr(v float64) *float64 { return &v }
 
 // recordOutcomeFinal attaches final validation to the search whose winner was
-// encoded. Only a benchmark winner's encode is judged against its search.
+// encoded. Only a benchmark winner's encode is judged against its search. A
+// worker's fail is recorded when the encode ends; a pass only once the
+// coordinator has matched the evidence to the candidate and plan and the size
+// is within the policy (see recordAcceptedOutcomeFinal), so a pass the
+// coordinator refuses is never reused.
 func (e *Engine) recordOutcomeFinal(ec *ExecutionContext, ev *transcode.FinalQualityEvidence) {
+	if ev != nil && strings.EqualFold(strings.TrimSpace(ev.Verdict), "fail") {
+		e.writeOutcomeFinal(ec, ev, "fail", nil)
+	}
+}
+
+// recordAcceptedOutcomeFinal records the final verdict at validation: pass
+// when the size is within the policy, fail (insufficient_savings) otherwise.
+func (e *Engine) recordAcceptedOutcomeFinal(ec *ExecutionContext, sizeAllowed bool) {
+	var ev transcode.FinalQualityEvidence
+	b, err := json.Marshal(ec.State["quality_evidence"])
+	if err != nil || json.Unmarshal(b, &ev) != nil || !strings.EqualFold(ev.Verdict, "pass") {
+		return
+	}
+	if sizeAllowed {
+		e.writeOutcomeFinal(ec, &ev, "pass", nil)
+	} else {
+		e.writeOutcomeFinal(ec, &ev, "fail", []string{"insufficient_savings"})
+	}
+}
+
+func (e *Engine) writeOutcomeFinal(ec *ExecutionContext, ev *transcode.FinalQualityEvidence, verdict string, extraReasons []string) {
 	if ev == nil || !e.outcomeLibraryApplies(ec) || getString(ec.State, "plan_source") != "benchmark_winner" {
 		return
 	}
-	verdict := strings.ToLower(strings.TrimSpace(ev.Verdict))
-	if verdict != "pass" && verdict != "fail" {
-		return
-	}
-	final := outcomeFinal{Verdict: verdict, ReasonCodes: ev.ReasonCodes, CandidateSizeBytes: ev.CandidateSizeBytes, Windows: len(ev.Windows)}
+	final := outcomeFinal{Verdict: verdict, ReasonCodes: append(append([]string(nil), ev.ReasonCodes...), extraReasons...), CandidateSizeBytes: ev.CandidateSizeBytes, Windows: len(ev.Windows)}
 	if ev.VMAF != nil {
 		final.VMAFMean, final.VMAFP5 = floatPtr(ev.VMAF.Mean), floatPtr(ev.VMAF.P5)
 		if ev.VMAF.WorstWindowMean > 0 {

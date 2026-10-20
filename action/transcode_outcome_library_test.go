@@ -2,8 +2,11 @@ package action
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -24,11 +27,16 @@ type outcomeLibraryEnv struct {
 	noWinner bool
 	verdict  string
 	encoded  []transcode.Request
+	// candidateBytes is the size of each encoded candidate (the source is
+	// 1000 bytes).
+	candidateBytes int
+	// badEvidence returns final evidence for another plan.
+	badEvidence bool
 }
 
 func newOutcomeLibraryEnv(t *testing.T) *outcomeLibraryEnv {
 	t.Helper()
-	env := &outcomeLibraryEnv{verdict: "pass"}
+	env := &outcomeLibraryEnv{verdict: "pass", candidateBytes: 500}
 	dir := t.TempDir()
 	probe := dir + "/ffprobe"
 	env.source = dir + "/source.mkv"
@@ -65,14 +73,37 @@ JSON
 		},
 		submitFunc: func(_ context.Context, req transcode.Request) (transcode.Job, error) {
 			env.encoded = append(env.encoded, req)
+			_ = os.MkdirAll(filepath.Dir(req.CandidatePath), 0755)
+			if err := os.WriteFile(req.CandidatePath, make([]byte, env.candidateBytes), 0600); err != nil {
+				t.Fatal(err)
+			}
 			return transcode.Job{ID: req.ID}, nil
 		},
 		statusFunc: func(_ context.Context, id string) (transcode.JobStatus, error) {
-			ev := &transcode.FinalQualityEvidence{Verdict: env.verdict, CandidateSizeBytes: 500, VMAF: &quality.VMAFStats{Mean: 93, P5: 89, WorstWindowMean: 90, FramesTotal: 2400}, CAMBI: &quality.CAMBIStats{Mean: 1.5, Max: 4}}
+			var r transcode.Request
+			for _, e := range env.encoded {
+				if e.ID == id {
+					r = e
+				}
+			}
+			if r.Plan == nil || r.Plan.QualityValidation == nil {
+				t.Fatal("encode without final quality validation")
+			}
+			data, err := os.ReadFile(r.CandidatePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sum := sha256.Sum256(data)
+			hash, size := hex.EncodeToString(sum[:]), int64(len(data))
+			ev := &transcode.FinalQualityEvidence{Verdict: env.verdict, CandidateSHA256: hash, CandidateSizeBytes: size, PlanDigest: r.Plan.PlanDigest, BenchmarkRequestDigest: r.Plan.QualityValidation.BenchmarkRequestDigest,
+				VMAF: &quality.VMAFStats{Mean: 93, P5: 89, WorstWindowMean: 90, FramesTotal: 2400}, CAMBI: &quality.CAMBIStats{Mean: 1.5, Max: 4}}
+			if env.badEvidence {
+				ev.PlanDigest = "sha256:another-plan"
+			}
 			if env.verdict == "fail" {
 				return transcode.JobStatus{ID: id, Status: transcode.StatusFailed, ReasonCode: "quality_not_met", QualityEvidence: ev}, nil
 			}
-			return transcode.JobStatus{ID: id, Status: transcode.StatusCompleted, Progress: 100, QualityEvidence: ev}, nil
+			return transcode.JobStatus{ID: id, Status: transcode.StatusCompleted, Progress: 100, CandidatePath: r.CandidatePath, CandidateSHA256: hash, CandidateSizeBytes: size, QualityEvidence: ev}, nil
 		},
 	}
 	env.engine, env.store = setupTranscodeEngine(t, env.mock, probe, []string{dir}, []string{dir}, true)
@@ -210,6 +241,33 @@ func TestOutcomeLibraryDoesNotReuseAFailedFinalValidation(t *testing.T) {
 	report := libraryReport(t, second)
 	if !strings.Contains(report.Note, "failed final validation") || report.NotReused == "" {
 		t.Fatalf("report: %+v", report)
+	}
+}
+
+// A worker's pass counts only once the coordinator accepts it: an encode too
+// large for the policy is a recorded failure, and evidence that does not match
+// the plan records nothing. Neither stands in for a later search.
+func TestOutcomeLibraryRecordsPassOnlyWhenTheCoordinatorAccepts(t *testing.T) {
+	env := newOutcomeLibraryEnv(t)
+	env.candidateBytes = 900
+	first := env.run(t, nil)
+	rows := env.rows(t, first)
+	if len(rows) != 1 || rows[0].FinalVerdict != "fail" || !strings.Contains(rows[0].FinalJSON, "insufficient_savings") {
+		t.Fatalf("an encode over the size limit is a failed final validation: %+v", rows)
+	}
+	env.candidateBytes = 500
+	env.badEvidence = true
+	second := env.run(t, nil)
+	if second.Status != StatusFailed {
+		t.Fatalf("mismatched evidence must fail the action: %s", second.Status)
+	}
+	if rows := env.rows(t, second); len(rows) != 2 || rows[0].ActionID != second.ID || rows[0].FinalVerdict != "" {
+		t.Fatalf("refused evidence records no verdict: %+v", rows)
+	}
+	env.badEvidence = false
+	third := env.run(t, nil)
+	if atomic.LoadInt32(&env.mock.benchmarkSubmitCalls) != 3 || libraryReuseOf(third.State) != nil {
+		t.Fatalf("no accepted pass yet, so the third action searches: %d searches", env.mock.benchmarkSubmitCalls)
 	}
 }
 

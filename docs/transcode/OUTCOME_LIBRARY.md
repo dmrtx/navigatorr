@@ -29,9 +29,14 @@ action keeps its outcome.
 
 Recording never fails an action. A search that ran out of time while the worker
 was busy with other jobs is not recorded, because it says nothing about the
-source. Final validation is attached in the encode wait step when the plan came
-from a benchmark winner; the coordinator's own size and stream checks still run
-after it.
+source. Final validation is attached only when the plan came from a benchmark
+winner. A worker's fail is recorded when the encode ends. A pass is recorded
+only at the coordinator's validation step, once the evidence matches the
+candidate and plan and the encoded size is within the policy; an encode over
+the size limit is recorded as a fail (`insufficient_savings`), and evidence the
+coordinator refuses records no verdict. A candidate the user later rejects at
+promotion keeps its pass: reuse still validates the new encode and still asks
+for promotion approval.
 
 ## Exact-match reuse (search step)
 
