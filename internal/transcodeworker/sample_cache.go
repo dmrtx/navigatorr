@@ -47,9 +47,12 @@ import (
 //     fingerprint, frozen policy snapshots and digests are unchanged, and a
 //     server can never inject measurements into selection.
 //   - The key is the SHA-256 of every input that can change the result (see
-//     sampleCacheKeyMaterial). Fields that are proven not to change the result
-//     (encoder pool/frame threads, libvmaf n_threads, candidate labels, job
-//     paths) are deliberately excluded.
+//     sampleCacheKeyMaterial). Fields that do not change the result (the pool
+//     and frame-thread arguments the worker adds, which keep the bitstream equal
+//     to the host's unpartitioned encode; libvmaf n_threads; candidate labels;
+//     job paths) are excluded. The host CPU count, which does set x265's
+//     default frame threads, is in the key of software encoders. The source
+//     hash is used only when the worker verified it against the bytes.
 //   - An entry is a checksummed JSON document written atomically. Reading
 //     verifies the checksum, the schema, the key echo and every value against
 //     the current request before use; anything else is ignored (and removed).
@@ -76,6 +79,12 @@ const (
 	sampleCacheSweepEvery = 64
 	// sampleCacheTempMaxAge is how long an orphaned temp file survives.
 	sampleCacheTempMaxAge = time.Hour
+	// sampleCacheFutureSlack is how far ahead of the clock an entry may be
+	// stamped before it counts as expired.
+	sampleCacheFutureSlack = time.Hour
+	// sampleCacheMaxTTLHours caps the configured TTL (about 100 years) so the
+	// duration cannot overflow.
+	sampleCacheMaxTTLHours = 24 * 365 * 100
 	// sampleCacheKeyThreads is the libvmaf thread count used when building
 	// the metric argument lists that enter the key. Thread counts never change
 	// per-frame scores, so a constant keeps keys independent of host load.
@@ -114,7 +123,11 @@ func (w *Worker) sampleCacheTTL() time.Duration {
 	if w == nil || w.cfg == nil || w.cfg.SampleCacheTTLHours <= 0 {
 		return DefaultSampleCacheTTL
 	}
-	return time.Duration(w.cfg.SampleCacheTTLHours) * time.Hour
+	hours := w.cfg.SampleCacheTTLHours
+	if hours > sampleCacheMaxTTLHours {
+		hours = sampleCacheMaxTTLHours
+	}
+	return time.Duration(hours) * time.Hour
 }
 
 // sampleCache is a handle on the on-disk cache. It holds no state besides its
@@ -125,6 +138,9 @@ type sampleCache struct {
 	maxEntries int
 	ttl        time.Duration
 	now        func() time.Time
+	// noAutoSweep stops store from sweeping on its own; tests that drive the
+	// sweep by hand set it so the process-wide store counter cannot interfere.
+	noAutoSweep bool
 }
 
 func (w *Worker) newSampleCache() *sampleCache {
@@ -275,12 +291,15 @@ func (c *sampleCache) lookup(key string, want sampleCacheExpect) (body *sampleCa
 		return nil, nil, false
 	}
 	drop := func() { _ = os.Remove(path) }
-	if fi.Size() <= 0 || fi.Size() > sampleCacheMaxEntryBytes || c.now().Sub(fi.ModTime()) > c.ttl {
+	if fi.Size() <= 0 || fi.Size() > sampleCacheMaxEntryBytes || c.expired(fi.ModTime()) {
 		drop()
 		return nil, nil, false
 	}
-	data, err := os.ReadFile(path)
+	data, err := readBounded(path, sampleCacheMaxEntryBytes)
 	if err != nil {
+		if errors.Is(err, errSampleCacheTooLarge) {
+			drop()
+		}
 		return nil, nil, false
 	}
 	var file sampleCacheFile
@@ -309,6 +328,34 @@ func (c *sampleCache) lookup(key string, want sampleCacheExpect) (body *sampleCa
 	now := c.now()
 	_ = os.Chtimes(path, now, now)
 	return &b, stats, true
+}
+
+// expired reports whether an entry last used at modTime is past its TTL. An
+// entry stamped well in the future (the clock stepped back) cannot be trusted
+// to age and counts as expired too.
+func (c *sampleCache) expired(modTime time.Time) bool {
+	age := c.now().Sub(modTime)
+	return age > c.ttl || age < -sampleCacheFutureSlack
+}
+
+var errSampleCacheTooLarge = errors.New("sample cache entry too large")
+
+// readBounded reads at most max bytes of path and fails when there are more,
+// whatever the file grew to after it was inspected.
+func readBounded(path string, max int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > max {
+		return nil, errSampleCacheTooLarge
+	}
+	return data, nil
 }
 
 // store writes an entry atomically. Failure is silent: the cache is an
@@ -348,7 +395,7 @@ func (c *sampleCache) store(key string, body sampleCacheBody) {
 		_ = os.Remove(tmpName)
 		return
 	}
-	if n := sampleCacheStores.Add(1); n%sampleCacheSweepEvery == 1 {
+	if n := sampleCacheStores.Add(1); !c.noAutoSweep && n%sampleCacheSweepEvery == 1 {
 		c.sweep()
 	}
 }
@@ -389,7 +436,7 @@ func (c *sampleCache) sweep() {
 			}
 		case !info.Mode().IsRegular() || !strings.HasSuffix(name, ".json") || !validSampleCacheKey(strings.TrimSuffix(name, ".json")):
 			_ = os.Remove(path)
-		case now.Sub(info.ModTime()) > c.ttl:
+		case c.expired(info.ModTime()):
 			_ = os.Remove(path)
 		default:
 			entries = append(entries, sampleCacheFileInfo{path: path, size: info.Size(), modTime: info.ModTime()})
@@ -426,6 +473,12 @@ type sampleCacheBuildIdentity struct {
 	FFmpeg   string `json:"ffmpeg"`
 	X265     string `json:"x265"`
 	Hardware string `json:"hardware,omitempty"` // VideoToolbox only
+	// CPUs is the host's logical CPU count, set for software encoders only.
+	// x265 derives its frame-thread count (which changes the bitstream) from
+	// it, and partitioned pools pin the count the whole host would get, so the
+	// same worker settings on a host with a different CPU count can encode a
+	// different bitstream.
+	CPUs int `json:"cpus,omitempty"`
 }
 
 // buildIdentityMemo memoizes the probes for the life of a worker process. The
@@ -488,10 +541,9 @@ func probeSampleCacheBuild(ctx context.Context, ffmpegPath string) (sampleCacheB
 	}
 	id.FFmpeg = hex.EncodeToString(sum.Sum(nil))
 	// libx265 may be linked dynamically, so neither the binary hash nor the
-	// build configuration pins it. Its version banner does. A failure to
-	// probe is not an error here: a worker without libx265 simply cannot
-	// produce an x265 entry, and the probe result is part of the key.
-	out, _ := runProbe(ctx, ffmpegPath, "-hide_banner", "-loglevel", "info", "-f", "lavfi", "-i", "color=c=black:s=64x64:r=25:d=0.04",
+	// build configuration pins it. Its version banner does, and it is part of
+	// the key.
+	out, probeErr := runProbe(ctx, ffmpegPath, "-hide_banner", "-loglevel", "info", "-f", "lavfi", "-i", "color=c=black:s=64x64:r=25:d=0.04",
 		"-frames:v", "1", "-c:v", "libx265", "-x265-params", "log-level=info", "-f", "null", "-")
 	var x265 []string
 	for _, line := range strings.Split(string(out), "\n") {
@@ -501,6 +553,13 @@ func probeSampleCacheBuild(ctx context.Context, ffmpegPath string) (sampleCacheB
 	}
 	id.X265 = strings.Join(x265, "\n")
 	if id.X265 == "" {
+		// A build with libx265 that yields no banner could be any x265, so the
+		// identity is unknown and the cache stays off (and the probe is retried
+		// next time) instead of recording "unavailable" for an encoder that is
+		// there. Only a build without libx265 can honestly say so.
+		if bytes.Contains(conf, []byte("libx265")) || bytes.Contains(version, []byte("libx265")) {
+			return id, fmt.Errorf("libx265 version could not be read: %v", probeErr)
+		}
 		id.X265 = "unavailable"
 	}
 	return id, nil
@@ -604,7 +663,9 @@ type sampleCacheCand struct {
 	PixelFormat string                       `json:"pixel_format"`
 	BitDepth    int                          `json:"bit_depth"`
 	// EncodeArgs is the exact encoder argument list with placeholder paths and
-	// before encoder thread parameters, which are bitstream-neutral by design.
+	// before the pool and frame-thread parameters the worker adds. Those keep the
+	// bitstream equal to the host's unpartitioned encode, which is why the host
+	// CPU count is part of the key (Build.CPUs) instead of the parameters.
 	EncodeArgs []string `json:"encode_args"`
 }
 
@@ -642,6 +703,11 @@ func (sh *pipelineShared) newSampleCacheRun(ctx context.Context, sourceSize int6
 		return nil
 	}
 	if sh.runCAMBI && (sh.qualityCaps == nil || sh.qualityCaps.CAMBIOutput == "") {
+		return nil
+	}
+	// The key is built on the source hash, so it must be a hash the worker
+	// checked against the bytes, not only one the coordinator sent.
+	if !sh.record.sourceDigestVerified {
 		return nil
 	}
 	sha, err := transcode.NormalizeSourceSHA256(sh.record.SourceSHA256)
@@ -730,6 +796,8 @@ func (r *sampleCacheRun) key(sh *pipelineShared, u pipelineUnit) (key string, wa
 	build := r.build
 	if BenchmarkCandidateVideoCodecIsHardware(vc.candidate) {
 		build.Hardware = r.hardware
+	} else {
+		build.CPUs = hostCPUCount()
 	}
 	material := sampleCacheKeyMaterial{
 		Schema: sampleCacheSchema,

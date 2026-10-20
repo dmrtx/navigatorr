@@ -208,8 +208,10 @@ func (e *sampleCacheEnv) record() *BenchmarkRecord {
 		Status:          "running",
 		Source:          e.source,
 		SourceSHA256:    e.sha,
-		Metric:          "vmaf",
-		Attempt:         1,
+		// Staging through the source cache verifies the digest.
+		sourceDigestVerified: true,
+		Metric:               "vmaf",
+		Attempt:              1,
 		Samples: []transcode.BenchmarkSampleWindow{
 			{Index: 0, StartSeconds: 5, DurationSeconds: 5},
 			{Index: 1, StartSeconds: 20, DurationSeconds: 5},
@@ -644,7 +646,7 @@ func TestSampleCacheHoldoutWindowsAreReused(t *testing.T) {
 func TestSampleCacheEvictionAndExpiry(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Now()
-	c := &sampleCache{dir: dir, maxBytes: 1 << 20, maxEntries: 10, ttl: 24 * time.Hour, now: func() time.Time { return now }}
+	c := &sampleCache{dir: dir, maxBytes: 1 << 20, maxEntries: 10, ttl: 24 * time.Hour, now: func() time.Time { return now }, noAutoSweep: true}
 	keyN := func(n int) string { return fmt.Sprintf("%064x", n+1) }
 	age := func(key string, d time.Duration) {
 		when := now.Add(-d)
@@ -688,7 +690,7 @@ func TestSampleCacheEvictionAndExpiry(t *testing.T) {
 
 	t.Run("byte bound", func(t *testing.T) {
 		dir := t.TempDir()
-		c := &sampleCache{dir: dir, maxBytes: 1500, maxEntries: 100, ttl: 24 * time.Hour, now: func() time.Time { return now }}
+		c := &sampleCache{dir: dir, maxBytes: 1500, maxEntries: 100, ttl: 24 * time.Hour, now: func() time.Time { return now }, noAutoSweep: true}
 		for i := 0; i < 8; i++ {
 			key := keyN(100 + i)
 			c.store(key, sampleCacheBody{SizeBytes: 1, EncodeDurationSec: 1})
@@ -874,5 +876,190 @@ func TestSampleCacheKeyCoversCompactChain(t *testing.T) {
 	// The label of a candidate names its result, not its encode.
 	if keyFor(func(sh *pipelineShared) { sh.vcs[0].candidate.ID = "other" }) != plain {
 		t.Fatal("a candidate label changed the key")
+	}
+}
+
+// x265KeyFixture is the pipeline state key() reads for a software x265
+// candidate, which the end-to-end mock (VideoToolbox only) cannot encode.
+type x265KeyFixture struct {
+	sh  *pipelineShared
+	run *sampleCacheRun
+}
+
+func newX265KeyFixture(t *testing.T, e *sampleCacheEnv) *x265KeyFixture {
+	t.Helper()
+	model, err := quality.Model("v1_1080p_3h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := e.record()
+	c := transcode.BenchmarkCandidate{ID: "x265_crf22", VideoCodec: transcode.VideoCodecLibX265, Quality: 22, Preset: "medium"}
+	plan := &transcode.Plan{VideoCodec: transcode.VideoCodecLibX265, Quality: 22, Preset: "medium", VideoProfile: "main", PixelFormat: "yuv420p", ExpectedBitDepth: 8}
+	return &x265KeyFixture{
+		sh: &pipelineShared{
+			record:         record,
+			evidence:       &BenchmarkExecutionEvidence{SourceBitDepth: 8, SourcePixelFormat: "yuv420p", SourceResolution: "1920x1080", SourceFPS: 24, SourceFieldOrder: "progressive"},
+			vcs:            []validatedCandidate{{index: 0, candidate: c, plan: plan, profile: "main", pixelFormat: "yuv420p", bitDepth: 8}},
+			vmafModel:      &model,
+			vmafDecimation: 1,
+			capFingerprint: "fp",
+			qualityCaps:    &transcode.QualityCapabilities{CAMBIOutput: "cambi"},
+		},
+		run: &sampleCacheRun{build: sampleCacheBuildIdentity{FFmpeg: "b", X265: "x265 4.1"}, hardware: "hw-a", source: sampleCacheSource{SHA256: e.sha, Size: 100, BitDepth: 8, PixFmt: "yuv420p", Resolution: "1920x1080", FPS: 24, FieldOrder: "progressive"}},
+	}
+}
+
+func (f *x265KeyFixture) key(t *testing.T) string {
+	t.Helper()
+	key, _, ok := f.run.key(f.sh, pipelineUnit{})
+	if !ok {
+		t.Fatal("unit could not be keyed")
+	}
+	return key
+}
+
+// Every input that can change a software x265 sample must change its key; the
+// label, which only names the result, must not.
+func TestSampleCacheKeyCoversX265Inputs(t *testing.T) {
+	e := newSampleCacheEnv(t)
+	prevCPU := hostCPUCount
+	t.Cleanup(func() { hostCPUCount = prevCPU })
+	hostCPUCount = func() int { return 10 }
+	base := newX265KeyFixture(t, e).key(t)
+	if again := newX265KeyFixture(t, e).key(t); again != base {
+		t.Fatal("the key is not deterministic")
+	}
+	vc := func(f *x265KeyFixture) *validatedCandidate { return &f.sh.vcs[0] }
+	changes := map[string]func(f *x265KeyFixture){
+		"crf":    func(f *x265KeyFixture) { vc(f).candidate.Quality, vc(f).plan.Quality = 23, 23 },
+		"preset": func(f *x265KeyFixture) { vc(f).candidate.Preset, vc(f).plan.Preset = "slow", "slow" },
+		"tune":   func(f *x265KeyFixture) { vc(f).candidate.Tune, vc(f).plan.Tune = "grain", "grain" },
+		"8 to 10 bit": func(f *x265KeyFixture) {
+			v := vc(f)
+			v.profile, v.pixelFormat, v.bitDepth = "main10", "yuv420p10le", 10
+			v.plan.VideoProfile, v.plan.PixelFormat, v.plan.ExpectedBitDepth = "main10", "p010le", 10
+		},
+		"x265 abr settings": func(f *x265KeyFixture) {
+			x := &transcode.X265Settings{BitrateKbps: 2000, TwoPass: true, Lookahead: 20, BFrames: 4, RefFrames: 3, AQMode: 2, AQStrength: 1, PsyRD: 1, PsyRDOQ: 1}
+			vc(f).candidate.Quality, vc(f).plan.Quality, vc(f).candidate.X265, vc(f).plan.X265 = 0, 0, x, x
+		},
+		"libx265 build":        func(f *x265KeyFixture) { f.run.build.X265 = "x265 4.2" },
+		"ffmpeg binary":        func(f *x265KeyFixture) { f.run.build.FFmpeg = "c" },
+		"host cpu count":       func(*x265KeyFixture) { hostCPUCount = func() int { return 16 } },
+		"source fps":           func(f *x265KeyFixture) { f.run.source.FPS = 59.94 },
+		"source resolution":    func(f *x265KeyFixture) { f.run.source.Resolution = "3840x2160" },
+		"source pixel format":  func(f *x265KeyFixture) { f.run.source.PixFmt = "yuv420p10le" },
+		"source bit depth":     func(f *x265KeyFixture) { f.run.source.BitDepth = 10 },
+		"source stream index":  func(f *x265KeyFixture) { f.run.source.VideoIndex = 1 },
+		"source field order":   func(f *x265KeyFixture) { f.run.source.FieldOrder = "tt" },
+		"temporal decimation":  func(f *x265KeyFixture) { f.sh.vmafDecimation = 2 },
+		"cambi measured":       func(f *x265KeyFixture) { f.sh.runCAMBI = true },
+		"cambi output name":    func(f *x265KeyFixture) { f.sh.runCAMBI = true; f.sh.qualityCaps.CAMBIOutput = "cambi_score" },
+		"high bit depth probe": func(f *x265KeyFixture) { f.sh.evidence.SourceBitDepth = 10 },
+	}
+	seen := map[string]string{}
+	for name, change := range changes {
+		t.Run(name, func(t *testing.T) {
+			hostCPUCount = func() int { return 10 }
+			f := newX265KeyFixture(t, e)
+			change(f)
+			key := f.key(t)
+			if key == base {
+				t.Fatalf("changing %s did not change the key", name)
+			}
+			_ = seen
+		})
+	}
+	hostCPUCount = func() int { return 10 }
+	abr := func(lookahead int) string {
+		f := newX265KeyFixture(t, e)
+		x := &transcode.X265Settings{BitrateKbps: 2000, TwoPass: true, Lookahead: lookahead, BFrames: 4, RefFrames: 3, AQMode: 2, AQStrength: 1, PsyRD: 1, PsyRDOQ: 1}
+		vc(f).candidate.Quality, vc(f).plan.Quality, vc(f).candidate.X265, vc(f).plan.X265 = 0, 0, x, x
+		return f.key(t)
+	}
+	if abr(20) == abr(30) || abr(20) != abr(20) {
+		t.Fatal("x265 ABR settings do not key the sample")
+	}
+	f := newX265KeyFixture(t, e)
+	vc(f).candidate.ID = "renamed"
+	if f.key(t) != base {
+		t.Fatal("a candidate label changed the key")
+	}
+}
+
+// Moving the cache between two hosts with the same hardware encoder must keep
+// its VideoToolbox entries valid: they depend on the machine identity, not on
+// a CPU count the hardware encoder never reads.
+func TestSampleCacheHardwareKeyIgnoresCPUCount(t *testing.T) {
+	e := newSampleCacheEnv(t)
+	prevCPU := hostCPUCount
+	t.Cleanup(func() { hostCPUCount = prevCPU })
+	keyWith := func(cpus int) string {
+		hostCPUCount = func() int { return cpus }
+		f := newX265KeyFixture(t, e)
+		v := &f.sh.vcs[0]
+		v.candidate = transcode.BenchmarkCandidate{ID: "hw", VideoCodec: transcode.VideoCodecHEVCVideoToolbox, Quality: 70}
+		v.plan = &transcode.Plan{VideoCodec: transcode.VideoCodecHEVCVideoToolbox, Quality: 70, VideoProfile: "main", PixelFormat: "yuv420p", ExpectedBitDepth: 8}
+		return f.key(t)
+	}
+	if keyWith(8) != keyWith(16) {
+		t.Fatal("a hardware encoder key depends on the host CPU count")
+	}
+}
+
+// The coordinator's digest is only a claim until the worker has checked it
+// against the bytes; an unverified digest must not key the cache.
+func TestSampleCacheRequiresVerifiedSourceDigest(t *testing.T) {
+	e := newSampleCacheEnv(t)
+	unverified := func(r *BenchmarkRecord) { r.sourceDigestVerified = false }
+	e.search(unverified)
+	if len(e.entries()) != 0 {
+		t.Fatal("an unverified source digest populated the cache")
+	}
+	e.search(nil)
+	if _, calls := e.search(unverified); calls.enc != 8 {
+		t.Fatalf("an unverified source digest replayed entries: %+v", calls)
+	}
+}
+
+// A libx265 build whose version cannot be read has an unknown identity, so
+// the build probe fails (cache off) instead of recording "unavailable".
+func TestSampleCacheBuildProbeFailsClosedWithoutX265Banner(t *testing.T) {
+	dir := t.TempDir()
+	script := func(name, conf string) string {
+		path := filepath.Join(dir, name)
+		body := "#!/bin/sh\ncase \"$*\" in\n *-version*) echo 'ffmpeg version 7.1';;\n *-buildconf*) echo '" + conf + "';;\n *) exit 1;;\nesac\n"
+		if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	if _, err := probeSampleCacheBuild(context.Background(), script("with_x265.sh", "--enable-libx265")); err == nil {
+		t.Fatal("a libx265 build without a readable version was accepted")
+	}
+	id, err := probeSampleCacheBuild(context.Background(), script("without_x265.sh", "--enable-libvmaf"))
+	if err != nil || id.X265 != "unavailable" {
+		t.Fatalf("a build without libx265 should say so: %+v %v", id, err)
+	}
+}
+
+// Oversized and future-dated entries are not served.
+func TestSampleCacheRejectsOversizedAndFutureEntries(t *testing.T) {
+	now := time.Now()
+	c := &sampleCache{dir: t.TempDir(), maxBytes: 1 << 20, maxEntries: 10, ttl: 24 * time.Hour, now: func() time.Time { return now }, noAutoSweep: true}
+	key := fmt.Sprintf("%064x", 7)
+	c.store(key, sampleCacheBody{SizeBytes: 1, EncodeDurationSec: 1})
+	future := now.Add(48 * time.Hour)
+	if err := os.Chtimes(c.path(key), future, future); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := c.lookup(key, sampleCacheExpect{}); ok {
+		t.Fatal("an entry stamped in the future was served")
+	}
+	if _, err := os.Stat(c.path(key)); err == nil {
+		t.Fatal("a future-dated entry was kept")
+	}
+	if got := (&Worker{cfg: &WorkerConfig{SampleCacheTTLHours: 1 << 40}}).sampleCacheTTL(); got <= 0 {
+		t.Fatalf("a huge TTL overflowed to %v", got)
 	}
 }

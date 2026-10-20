@@ -330,7 +330,7 @@ rather than left to defaults. To opt out there, set
 
 ## Sample evaluation cache
 
-A size-mode search measures each candidate on a few short sample windows
+A search (size, compact or adaptive) measures each candidate on a few short sample windows
 (encode, then VMAF and optionally CAMBI against the reference). The same
 source, window and candidate always give bit-identical scores, so repeating
 that work after a cancel, a failed final check, a goal change or a retry only
@@ -361,13 +361,23 @@ before.
 | Window | index, start, duration, the reference-extraction arguments and the compact chain (including the tone-map table digest) |
 | Candidate | every encode parameter (codec, quality, preset, GOP, B-frames, profile, pixel format, bit depth, filters), with the candidate label cleared |
 | Metrics | VMAF model, temporal decimation, worst-window and frame-threshold policy, the VMAF and CAMBI filter arguments, CAMBI output |
-| Environment | worker capability fingerprint, FFmpeg build identity (binary hash, version, build configuration, libx265 version), and for `hevc_videotoolbox` the machine identity |
+| Environment | worker capability fingerprint, FFmpeg build identity (binary hash, version, build configuration, libx265 version); for `hevc_videotoolbox` the machine identity, for software encoders the host CPU count |
 
-Labels, job paths and thread counts are left out on purpose: x265 output is
-bit-identical across pool and frame threads and libvmaf scores do not depend
-on its thread count. A missing or invalid source hash, an unknown build or an
-unknown hardware identity disables caching for that unit; it is measured as
-before.
+Labels and job paths are left out on purpose, and so are the x265 pool and
+frame-thread arguments the worker adds: partitioning pins the frame-thread
+count the whole host would pick, so a partitioned encode is bit-identical to
+the host's unpartitioned one. That default depends on the host CPU count
+(frame threads change the bitstream), which is why the CPU count is in the key
+of every software encoder. libvmaf scores do not depend on its thread count.
+
+The source hash is only used once the worker has checked it against the bytes:
+the shared source cache stores a source only when its content hash matched the
+requested digest, so a run staged through it is verified. A source read in
+place, with the source cache off, or with no digest is not verified and does
+not use the sample cache. A missing source hash, an unknown FFmpeg or libx265
+build (a libx265 build whose version banner cannot be read counts as unknown)
+or an unknown hardware identity also disables caching for that unit; it is
+measured as before.
 
 **Value.** Sample size, encode seconds, the full VMAF statistics including the
 per-frame scores (pooled p5 and means are computed over frames, so they are
@@ -393,7 +403,12 @@ evaluation carries `reuse: {reused, total}`. The compact benchmark summary
 (MCP `action_status`) lists it as `reused` on the measured candidate and the UI
 appends "reused from an earlier run" (or "N of M samples reused from an earlier
 run") to the candidate's line. A reused measurement counts toward selection
-exactly like a fresh one. Fields are `omitempty`, so results without reuse
+exactly like a fresh one, with one input that is wall-clock by nature: the
+encode seconds of a replayed sample are those recorded when it was measured.
+Selection only reads them to break ties between candidates within 2% of the
+smallest size, and a fresh search's seconds depend on machine load and are not
+reproducible either, so a replay returns the recorded timing instead of a new
+one. Fields are `omitempty`, so results without reuse
 serialise exactly as before.
 
 **Search budget.** Reused units cost no search-budget time: they are resolved
@@ -416,7 +431,8 @@ capability fingerprint and so starts a cold cache.
 
 **Limitations.** A change in a dynamically linked library that alters neither
 the FFmpeg binary hash, the libx265 banner nor the libvmaf version is not
-detected; the TTL and clearing the directory bound that exposure. Comparison
+detected (a libvmaf upgrade is noticed once the worker's quality-capability
+probe refreshes); the TTL and clearing the directory bound that exposure. Comparison
 images need the winner's sample files, so they are unavailable when the winner
 was reused. Reference samples are still extracted on a hit (lazy extraction is
 a possible follow-up).
