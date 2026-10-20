@@ -25,6 +25,7 @@ func legacySizeSnapshot(t *testing.T) ModePolicySnapshot {
 	if err != nil {
 		t.Fatal(err)
 	}
+	p = preWalkPolicy(p)
 	p.Size.SearchExtension = nil
 	p.Size.AutomaticSearch = nil
 	p.Digest = ""

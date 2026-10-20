@@ -265,6 +265,7 @@ var measuredVerdicts = map[string]bool{
 	"insufficient_savings_before_metrics":      true,
 	"skipped_quality_dominated":                true,
 	"skipped_savings_dominated":                true,
+	"skipped_larger_than_passing":              true,
 	"quality_vmaf_mean_below_minimum":          true,
 	"quality_vmaf_sample_below_minimum":        true,
 	"quality_vmaf_p5_below_minimum":            true,

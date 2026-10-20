@@ -70,8 +70,11 @@ func TestSizePolicyHardwareDefaultsOnAndFreezes(t *testing.T) {
 	// TestHardwarePolicyWithoutExtraMarginKeepsItsDigest). Verifying on the
 	// final grid gave the digest below; snapshots frozen with the margin but
 	// before it re-hash to sha256:e5ec773d...4264 (see
-	// TestGridEraSnapshotsKeepTheirDigestAndSearch).
-	if hw.Digest != "sha256:206ca220dda73866a0f7b9721a8a2bb93769b447cf7cb6f53347b2d3208d03e7" {
+	// TestGridEraSnapshotsKeepTheirDigestAndSearch). The x265 quality walk gave
+	// the digest below; snapshots frozen with the grid rules but before it
+	// re-hash to sha256:206ca220...03e7 (see
+	// TestPreWalkSnapshotsKeepTheirDigestAndSearch).
+	if hw.Digest != "sha256:3d2f9478dc4c790728bab730cb53a3601dfb4726289f82a361bb39ce99a36bef" {
 		t.Fatalf("size snapshot with the media engine on changed digest: %s", hw.Digest)
 	}
 	// The frozen snapshot round-trips through storage and re-verifies.
@@ -194,7 +197,7 @@ func TestSizeHardwareSearchRequest(t *testing.T) {
 	for _, depth := range []int{8, 10} {
 		// Nothing said is the default: allowed, at the default margin.
 		def := hardwareRequest(t, depth, 45*60, map[string]any{"mode": "size"}, hardwareTestCapabilities())
-		if def.HardwareSearch == nil || def.HardwareSearch.MarginPercent != 15 || len(def.Candidates) != 21 {
+		if def.HardwareSearch == nil || def.HardwareSearch.MarginPercent != 15 || len(def.Candidates) != 18 {
 			t.Fatalf("depth %d: default request %+v with %d candidates", depth, def.HardwareSearch, len(def.Candidates))
 		}
 		req := hardwareRequest(t, depth, 45*60, map[string]any{"mode": "size", "allow_hardware": true, "hardware_margin_percent": 20}, hardwareTestCapabilities())
@@ -215,8 +218,9 @@ func TestSizeHardwareSearchRequest(t *testing.T) {
 				x265++
 			}
 		}
-		// The x265 ladder and its fallback families are untouched.
-		if x265 != 14 || len(hardware) != 4 || len(fallback) != 3 {
+		// The x265 ladder and its fallback families are untouched (this worker
+		// does not take the quality walk; see TestQualityWalkRequest).
+		if x265 != 11 || len(hardware) != 4 || len(fallback) != 3 {
 			t.Fatalf("depth %d: %d x265, %d hardware and %d hardware fallback candidates", depth, x265, len(hardware), len(fallback))
 		}
 		if len(req.Candidates) > transcode.MaxAutomaticHardwareCandidates {
@@ -284,7 +288,7 @@ func TestSizeHardwareSearchWithoutFallbackCapability(t *testing.T) {
 	caps := hardwareTestCapabilities()
 	caps.HardwareFallbackSearch = false
 	req := hardwareRequest(t, 8, 45*60, map[string]any{"mode": "size"}, caps)
-	if req.HardwareSearch == nil || len(req.HardwareSearch.FallbackQualityValues) != 0 || len(req.Candidates) != 18 {
+	if req.HardwareSearch == nil || len(req.HardwareSearch.FallbackQualityValues) != 0 || len(req.Candidates) != 15 {
 		t.Fatalf("request %+v with %d candidates", req.HardwareSearch, len(req.Candidates))
 	}
 	for _, c := range req.Candidates {
@@ -378,7 +382,7 @@ func TestHardwarePolicyWithoutFallbackRungsKeepsItsDigest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Digest != "sha256:ab4a33d9aa290b79b3eeaef9a6b3c17afda00376e9defade7d71e9ce65cb6128" {
+	if p.Digest != "sha256:9e40925b22bfc04cbb85ffe022ab4351c3186b3648592a20f976ebb562e24fd1" {
 		t.Fatalf("the earlier media engine snapshot changed digest: %s", p.Digest)
 	}
 	stored := map[string]any{}
@@ -395,7 +399,7 @@ func TestHardwarePolicyWithoutFallbackRungsKeepsItsDigest(t *testing.T) {
 	caps := hardwareTestCapabilities()
 	ec.State["original_sha256"] = strings.Repeat("a", 64)
 	req := hardwareRequestFromState(t, ec, caps)
-	if len(req.Candidates) != 18 || len(req.HardwareSearch.FallbackQualityValues) != 0 {
+	if len(req.Candidates) != 15 || len(req.HardwareSearch.FallbackQualityValues) != 0 {
 		t.Fatalf("an earlier snapshot sent fallback rungs: %d candidates, %+v", len(req.Candidates), req.HardwareSearch)
 	}
 }
@@ -468,14 +472,16 @@ func TestHardwareFallbackRulesValidation(t *testing.T) {
 		c.ID, c.Quality = fmt.Sprintf("extra-%d", n), 40+n
 		return c
 	}
-	room.Candidates = append(room.Candidates, extra(1))
+	for n := 1; len(room.Candidates) < transcode.MaxAutomaticHardwareCandidates; n++ {
+		room.Candidates = append(room.Candidates, extra(n))
+	}
 	if len(room.Candidates) != transcode.MaxAutomaticHardwareCandidates {
 		t.Fatalf("%d candidates, want the cap", len(room.Candidates))
 	}
 	if err := transcode.ValidateBenchmarkRequest(&room); err != nil {
 		t.Fatalf("candidates at the cap refused: %v", err)
 	}
-	room.Candidates = append(room.Candidates, extra(2))
+	room.Candidates = append(room.Candidates, extra(99))
 	if err := transcode.ValidateBenchmarkRequest(&room); err == nil || !strings.Contains(err.Error(), "candidates") {
 		t.Fatalf("%d candidates accepted: %v", len(room.Candidates), err)
 	}

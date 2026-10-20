@@ -74,6 +74,9 @@ type BenchmarkMetricSampleResult struct {
 	Error             string              `json:"error,omitempty"`
 	// Reused marks a measurement replayed from the sample cache.
 	Reused bool `json:"reused,omitempty"`
+	// CAMBISkipped marks a window whose CAMBI was not measured because a VMAF
+	// limit had already rejected the candidate (see AutomaticSearchRules.DeferBanding).
+	CAMBISkipped bool `json:"cambi_skipped,omitempty"`
 }
 
 // BenchmarkCandidateMetricAggregate records the aggregated metric result for one candidate.

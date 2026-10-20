@@ -88,12 +88,17 @@ type pipelineMetricOutcome struct {
 	cambi       *quality.CAMBIStats
 	cambiErr    string
 	cambiDurSec float64
-	ssim        *float64
-	vmafDurSec  float64
-	ssimDurSec  float64
-	vmafScores  []optimization.SampleScore
-	ssimScores  []optimization.SampleScore
-	entry       *BenchmarkMetricSampleResult
+	// cambiDeferred marks a unit whose CAMBI waits for the candidate's VMAF
+	// verdict (see runDeferredCAMBI); cambiSkipped one that verdict made
+	// unnecessary.
+	cambiDeferred bool
+	cambiSkipped  bool
+	ssim          *float64
+	vmafDurSec    float64
+	ssimDurSec    float64
+	vmafScores    []optimization.SampleScore
+	ssimScores    []optimization.SampleScore
+	entry         *BenchmarkMetricSampleResult
 }
 
 // candidatePoison tracks candidate-level metric failure across concurrent units.
@@ -176,17 +181,20 @@ type pipelineShared struct {
 	runVMAF              bool
 	runSSIM              bool
 	runCAMBI             bool
-	vmafModel            *quality.VMAFModel
-	vmafDecimation       int
-	qualityCaps          *transcode.QualityCapabilities
-	capFingerprint       string
-	passesPerSample      int
-	metricThreads        int
-	savings              *savingsGate
-	poisons              []*candidatePoison
-	encodeOut            []pipelineEncodeOutcome
-	metricOut            []pipelineMetricOutcome
-	fatal                *pipelineFatal
+	// deferCAMBI measures CAMBI after every VMAF unit, and only for a candidate
+	// no VMAF limit rejects (see bandingGate).
+	deferCAMBI      bool
+	vmafModel       *quality.VMAFModel
+	vmafDecimation  int
+	qualityCaps     *transcode.QualityCapabilities
+	capFingerprint  string
+	passesPerSample int
+	metricThreads   int
+	savings         *savingsGate
+	poisons         []*candidatePoison
+	encodeOut       []pipelineEncodeOutcome
+	metricOut       []pipelineMetricOutcome
+	fatal           *pipelineFatal
 	// cache and cacheKeys hold the sample cache for this call and each unit's
 	// key; both are nil when the cache is off (see newSampleCacheRun).
 	cache     *sampleCacheRun
@@ -346,6 +354,7 @@ func (r *ProductionBenchmarkRunner) runPipelinedEncodeMetrics(
 		runVMAF:              runVMAF,
 		runSSIM:              runSSIM,
 		runCAMBI:             runCAMBI,
+		deferCAMBI:           runCAMBI && !runSSIM && vmafModel != nil && record.bandingGate != bandingGateOff,
 		vmafModel:            vmafModel,
 		vmafDecimation:       vmafDecimation,
 		qualityCaps:          caps.Quality,
@@ -392,6 +401,9 @@ func (r *ProductionBenchmarkRunner) runPipelinedEncodeMetrics(
 		}
 	}
 
+	if sh.deferCAMBI && !fatal.failed() && ctx.Err() == nil {
+		sh.runDeferredCAMBI(ctx, metricN)
+	}
 	if ferr, metric := fatal.get(); ferr != nil {
 		sh.assembleEvidence(units)
 		if metric {
@@ -880,7 +892,9 @@ func (sh *pipelineShared) runMetricUnit(ctx context.Context, u pipelineUnit, idx
 	}
 
 	out := sh.metricOut[idx]
-	if sh.runCAMBI {
+	if sh.deferCAMBI {
+		out.cambiDeferred = true
+	} else if sh.runCAMBI {
 		sh.progressReporter.StartSampleUnit("evaluating_metrics", u.sampOrd+1, vc.index+1, vc.candidate.ID, "cambi_full_ref")
 		start := time.Now()
 		stats, err := runCAMBIMetricSample(ctx, sh.w.ffmpegPath, sh.samplesDir, candPath, refPath, candIdx, vc.candidate.ID, window.Index, window.StartSeconds, sh.evidence.SourceFPS, vc.bitDepth, sh.qualityCaps.CAMBIOutput, sh.metricThreads)
@@ -1109,12 +1123,14 @@ func (sh *pipelineShared) evaluateCandidateQuality(vcOrd int, candidateID string
 	e := &CandidateQualityEvidence{CandidateID: candidateID, CapabilityFingerprint: sh.capFingerprint, Verdict: "pass"}
 	var vmafSamples []quality.VMAFStats
 	var cambiSamples []quality.CAMBIStats
+	cambiSkipped := false
 	for sampOrd := range sh.record.Samples {
 		idx := vcOrd*len(sh.record.Samples) + sampOrd
 		if idx >= len(sh.metricOut) {
 			continue
 		}
 		met := sh.metricOut[idx]
+		cambiSkipped = cambiSkipped || met.cambiSkipped
 		if met.vmafStats != nil {
 			vmafSamples = append(vmafSamples, *met.vmafStats)
 		}
@@ -1149,7 +1165,11 @@ func (sh *pipelineShared) evaluateCandidateQuality(vcOrd int, candidateID string
 			reject = e.ReasonCodes[0]
 		}
 	}
-	if sh.runCAMBI {
+	if sh.runCAMBI && cambiSkipped {
+		// A VMAF limit rejected the candidate, whatever CAMBI says: its banding
+		// was not measured, which is not incomplete evidence.
+		e.ReasonCodes = append(e.ReasonCodes, reasonCAMBINotMeasured)
+	} else if sh.runCAMBI {
 		cambiReasonStart := len(e.ReasonCodes)
 		if len(cambiSamples) != len(sh.record.Samples) {
 			e.ReasonCodes = append(e.ReasonCodes, "quality_cambi_evidence_incomplete")
@@ -1314,4 +1334,163 @@ func (g *savingsGate) explain(d *transcode.BenchmarkDecision, vcs []validatedCan
 	sort.SliceStable(d.Evaluations, func(i, j int) bool {
 		return d.Evaluations[i].CandidateIndex < d.Evaluations[j].CandidateIndex
 	})
+}
+
+// reasonCAMBINotMeasured is the quality reason code of a candidate whose
+// banding was not measured because a VMAF limit had already rejected it.
+const reasonCAMBINotMeasured = "quality_cambi_not_measured_vmaf_rejected"
+
+// bandingGate says how far a stage's VMAF result settles a candidate, and so
+// when its CAMBI can be skipped (see AutomaticSearchRules.DeferBanding).
+type bandingGate int
+
+const (
+	// bandingGateOff measures CAMBI with VMAF, the unit by unit pipeline.
+	bandingGateOff bandingGate = iota
+	// bandingGateComplete is a stage whose windows are all the candidate will be
+	// judged on: any VMAF limit that rejects it ends its search for good.
+	bandingGateComplete
+	// bandingGateMonotone is a stage whose windows another stage will join, as
+	// the verification windows join the discovery ones. Only a limit that more
+	// windows cannot undo counts: a window below the minimum, or the worst window
+	// (a minimum over windows). A mean or a percentile can recover.
+	bandingGateMonotone
+)
+
+// vmafRejects reports whether a candidate's VMAF result alone rejects it under
+// the stage's gate, so its CAMBI cannot change the verdict. The checks are the
+// ones selection applies: a sample below the minimum, the pooled mean below it,
+// and, when the policy rejects on its guardrails, the 5th percentile, the worst
+// window and the frames below the threshold.
+func (sh *pipelineShared) vmafRejects(vcOrd int) bool {
+	n := len(sh.record.Samples)
+	stats := make([]quality.VMAFStats, 0, n)
+	scores := make([]optimization.SampleScore, 0, n)
+	for sampOrd := 0; sampOrd < n; sampOrd++ {
+		met := sh.metricOut[vcOrd*n+sampOrd]
+		if met.vmaf == nil || met.vmafStats == nil {
+			return false
+		}
+		stats = append(stats, *met.vmafStats)
+		scores = append(scores, optimization.SampleScore{SampleIndex: sh.record.Samples[sampOrd].Index, Score: *met.vmaf, Valid: true})
+	}
+	policy := sh.record.Quality.VMAF
+	for _, s := range scores {
+		if s.Score < policy.Minimum {
+			return true
+		}
+	}
+	complete := sh.record.bandingGate == bandingGateComplete
+	if complete && optimization.AggregateSampleScores(optimization.MetricTypeVMAF, scores).MeanScore < policy.Minimum {
+		return true
+	}
+	if policy.GuardrailEnforcement != "reject" {
+		return false
+	}
+	combined, err := quality.CombineVMAF(stats)
+	if err != nil {
+		return false
+	}
+	if policy.WorstWindowMinimum != nil && combined.WorstWindowMean < *policy.WorstWindowMinimum {
+		return true
+	}
+	if !complete {
+		return false
+	}
+	return policy.P5Minimum != nil && combined.P5 < *policy.P5Minimum ||
+		policy.MaxFramesBelowThreshold != nil && combined.SourceEquivalentFramesBelowThreshold() > *policy.MaxFramesBelowThreshold
+}
+
+// runDeferredCAMBI measures the banding of every candidate whose VMAF results are
+// all in and that no VMAF limit rejects; the others are marked skipped. It runs
+// after every encode and VMAF unit of the call, on the metric workers.
+func (sh *pipelineShared) runDeferredCAMBI(ctx context.Context, metricN int) {
+	sh.runDeferredCAMBIUnits(ctx, metricN, sh.planDeferredCAMBI())
+}
+
+// planDeferredCAMBI marks the deferred units of the candidates a VMAF limit
+// rejects as skipped and returns the units whose banding is still to measure.
+func (sh *pipelineShared) planDeferredCAMBI() []int {
+	n := len(sh.record.Samples)
+	var todo []int
+	for vcOrd := range sh.vcs {
+		var deferred []int
+		for sampOrd := 0; sampOrd < n; sampOrd++ {
+			if idx := vcOrd*n + sampOrd; sh.metricOut[idx].cambiDeferred {
+				deferred = append(deferred, idx)
+			}
+		}
+		if len(deferred) == 0 {
+			continue
+		}
+		if !sh.vmafRejects(vcOrd) {
+			todo = append(todo, deferred...)
+			continue
+		}
+		for _, idx := range deferred {
+			sh.metricOut[idx].cambiSkipped = true
+			sh.metricOut[idx].entry.CAMBISkipped = true
+			sh.progressReporter.SkipUnits(1)
+		}
+	}
+	return todo
+}
+
+// runDeferredCAMBIUnits runs the banding units on the metric workers.
+func (sh *pipelineShared) runDeferredCAMBIUnits(ctx context.Context, metricN int, todo []int) {
+	queue := make(chan int, len(todo))
+	for _, idx := range todo {
+		queue <- idx
+	}
+	close(queue)
+	var wg sync.WaitGroup
+	for i := 0; i < max(1, min(metricN, len(todo))); i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range queue {
+				if ctx.Err() != nil || sh.fatal.failed() {
+					return
+				}
+				sh.runCAMBIUnit(ctx, idx)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// runCAMBIUnit measures the banding of one unit whose VMAF is already in.
+func (sh *pipelineShared) runCAMBIUnit(ctx context.Context, idx int) {
+	ctx = asMetricPhase(ctx)
+	n := len(sh.record.Samples)
+	vc := sh.vcs[idx/n]
+	sampOrd := idx % n
+	window := sh.record.Samples[sampOrd]
+	if err := verifySourceUnchanged(sh.record.Source, sh.sourceInitialSize, sh.sourceInitialModTime); err != nil {
+		sh.fatal.set(fmt.Errorf("source media modified during benchmark (integrity violation, fail closed): %w", err), true)
+		return
+	}
+	refPath := filepath.Join(sh.samplesDir, "ref_sample_"+strconv.Itoa(window.Index)+".mkv")
+	candPath := filepath.Join(sh.samplesDir, vc.fileKey+"_sample_"+strconv.Itoa(window.Index)+".mkv")
+	sh.progressReporter.StartSampleUnit("evaluating_metrics", sampOrd+1, vc.index+1, vc.candidate.ID, "cambi_full_ref")
+	start := time.Now()
+	stats, err := runCAMBIMetricSample(ctx, sh.w.ffmpegPath, sh.samplesDir, candPath, refPath, vc.index, vc.candidate.ID, window.Index, window.StartSeconds, sh.evidence.SourceFPS, vc.bitDepth, sh.qualityCaps.CAMBIOutput, sh.metricThreads)
+	elapsed := time.Since(start).Seconds()
+	sh.progressReporter.ResolveUnit()
+	if ctx.Err() != nil {
+		sh.fatal.set(ctx.Err(), true)
+		return
+	}
+	out := sh.metricOut[idx]
+	out.cambiDeferred = false
+	out.cambiDurSec = elapsed
+	if err != nil {
+		out.cambiErr = err.Error()
+	} else {
+		out.cambi = &stats
+	}
+	out.entry.CAMBI, out.entry.CAMBIError, out.entry.CAMBIDurationSec = out.cambi, out.cambiErr, elapsed
+	out.entry.MetricDurationSec += elapsed
+	sh.metricOut[idx] = out
+	sh.storeCachedUnit(idx)
 }

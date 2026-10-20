@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 
 	"github.com/jakenesler/navigatorr/mediainspect"
@@ -23,8 +24,9 @@ const ModePolicyVersion = "transcode-modes-v2"
 // policies keep their own version and behaviour.
 const SizeModePolicyVersion = optimization.ModePolicyV3
 
-// modeOperationBudgetSeconds stays in frozen snapshots so their digests are
-// unchanged. It no longer caps admission; see reserveModeSearch.
+// modeOperationBudgetSeconds stays in the snapshots of the other modes and in
+// every snapshot already frozen, so their digests are unchanged. It caps
+// nothing (see reserveModeSearch): a new size snapshot omits it.
 const modeOperationBudgetSeconds = 3600
 const modeSearchBudgetSeconds = 600
 
@@ -58,7 +60,7 @@ type ModePolicySnapshot struct {
 	MinSavingsPercent      float64        `json:"min_savings_percent"`
 	MaxSizeIncreasePercent float64        `json:"max_size_increase_percent"`
 	SearchBudgetSeconds    int            `json:"search_budget_seconds"`
-	OperationBudgetSeconds int            `json:"operation_budget_seconds"`
+	OperationBudgetSeconds int            `json:"operation_budget_seconds,omitempty"`
 	Profile                recipe.Profile `json:"profile"`
 	// Compact is set only for mode=compact, so other snapshots and their
 	// digests are unchanged.
@@ -119,12 +121,36 @@ const sizeSelectionMarginVMAF = 1.5
 // search never measured. They are reported beside the grid and do not gate it.
 const sizeFinalFreshWindows = 2
 
+// sizeFallbackQualityValues are the quality fallback rungs, tried most
+// compressed first (a rung that passes ends the walk). They reach CRF 14 for a
+// hard source on which every CRF 16 setting still failed the grid windows, and
+// every step between 14 and the ladder's 22 so a source that misses CRF 22 by
+// a little does not pay a whole step of 2.
+var sizeFallbackQualityValues = []int{14, 15, 16, 17, 18, 19, 20, 21}
+
+// sizeSavingsFallbackValues are the slow CRFs tried when quality passed but
+// savings did not. Slow stays automatic here: it is how a source that passes
+// quality at medium but does not save enough gets there.
+var sizeSavingsFallbackValues = []int{24, 27, 30}
+
+// sizeRefinementQualityValues are the x265 CRF rungs between the ladder's
+// (22-30 in steps of 2), measured only between a rung that passed and the next,
+// more compressed, one that did not.
+var sizeRefinementQualityValues = []int{23, 25, 27, 29}
+
 // sizeModeV3Policy is the frozen size v3 addition. The ladder is x265 only:
-// medium CRF 22-30 first, then one fallback family chosen from what failed:
-// savings (slow) or quality (medium, then slow only if medium found nothing).
-func sizeModeV3Policy() *ModeSizePolicy {
-	return &ModeSizePolicy{EightBitMain10: true, FallbackQualityValues: []int{16, 18, 20}, FallbackSavingsValues: []int{24, 27, 30}, FinalWindowSeconds: 10, FinalWindowEverySeconds: 600, FinalWindowsMinimum: 5, FinalWindowsMaximum: 12, AudioOnlyFallback: true, LosslessObjectAudioToAAC: true, SearchExtension: &transcode.SearchExtension{MaxSeconds: sizeSearchMaxSeconds, SteadySeconds: sizeSearchSteadySeconds, VerifySeconds: sizeSearchVerifySeconds},
-		AutomaticSearch: &transcode.AutomaticSearchRules{SelectionMarginVMAF: sizeSelectionMarginVMAF, HoldoutWindows: transcode.HoldoutWindowsFinalGrid, VerifyUntilExhausted: true, FinalFreshWindows: sizeFinalFreshWindows, QualityFallbackPresets: []string{"medium", "slow"}}}
+// medium CRF 22-30 first (with the in-between CRF measured next to the first
+// failure), then one fallback family chosen from what failed: savings (slow) or
+// quality (medium, walking up from CRF 21 to 14). The slow quality fallback is
+// part of the policy only when the operation opts in: a slow full encode of an
+// hour of 1080p video took 3.6-6.9 h.
+func sizeModeV3Policy(allowSlow bool) *ModeSizePolicy {
+	presets := []string{"medium"}
+	if allowSlow {
+		presets = append(presets, "slow")
+	}
+	return &ModeSizePolicy{EightBitMain10: true, FallbackQualityValues: slices.Clone(sizeFallbackQualityValues), FallbackSavingsValues: slices.Clone(sizeSavingsFallbackValues), FinalWindowSeconds: 10, FinalWindowEverySeconds: 600, FinalWindowsMinimum: 5, FinalWindowsMaximum: 12, AudioOnlyFallback: true, LosslessObjectAudioToAAC: true, SearchExtension: &transcode.SearchExtension{MaxSeconds: sizeSearchMaxSeconds, SteadySeconds: sizeSearchSteadySeconds, VerifySeconds: sizeSearchVerifySeconds},
+		AutomaticSearch: &transcode.AutomaticSearchRules{SelectionMarginVMAF: sizeSelectionMarginVMAF, HoldoutWindows: transcode.HoldoutWindowsFinalGrid, VerifyUntilExhausted: true, FinalFreshWindows: sizeFinalFreshWindows, QualityFallbackPresets: presets, QualityWalk: true, RefinementQualityValues: slices.Clone(sizeRefinementQualityValues), DeferBanding: true}}
 }
 
 // searchExtension is the frozen rule for running past the base budget, or nil
@@ -247,11 +273,15 @@ func modeHardwareInput(mode string, inputs map[string]any) (*transcode.HardwareS
 	return rules, nil
 }
 
-// ValidateHardwareInputs reports whether allow_hardware and
-// hardware_margin_percent are acceptable for a goal, as the policy freeze
-// reads them. Callers that admit a goal change use it to fail early.
+// ValidateHardwareInputs reports whether allow_hardware,
+// hardware_margin_percent and allow_slow_preset are acceptable for a goal, as
+// the policy freeze reads them. Callers that admit a goal change use it to fail
+// early.
 func ValidateHardwareInputs(mode string, inputs map[string]any) error {
-	_, err := modeHardwareInput(mode, inputs)
+	if _, err := modeHardwareInput(mode, inputs); err != nil {
+		return err
+	}
+	_, err := modeSlowPresetInput(mode, inputs)
 	return err
 }
 
@@ -261,11 +291,38 @@ func modePolicyFor(mode string, anime bool, maxHeight int) (ModePolicySnapshot, 
 	return modePolicyWithHardware(mode, anime, maxHeight, nil)
 }
 
+// modeSlowPresetInput reads allow_slow_preset for a mode: size mode only, off
+// unless the operation says true. It is the opt-in for the slow preset in the
+// quality fallback, whose full encodes took hours on a hard 1080p source.
+func modeSlowPresetInput(mode string, inputs map[string]any) (bool, error) {
+	raw, has := inputs["allow_slow_preset"]
+	if !has || raw == nil {
+		return false, nil
+	}
+	b, ok := raw.(bool)
+	if !ok {
+		return false, fmt.Errorf("allow_slow_preset must be true or false")
+	}
+	if b && mode != "size" {
+		return false, fmt.Errorf("allow_slow_preset is only supported with mode=size")
+	}
+	return b, nil
+}
+
 // modePolicyWithHardware also freezes the size-mode hardware search rules
 // when the operation allows the media engine; they apply to mode=size only.
 func modePolicyWithHardware(mode string, anime bool, maxHeight int, hardware *transcode.HardwareSearchRules) (ModePolicySnapshot, error) {
+	return modePolicyWithOptions(mode, anime, maxHeight, hardware, false)
+}
+
+// modePolicyWithOptions also freezes whether a size search may fall back to the
+// slow preset for quality (allowSlow, size mode only).
+func modePolicyWithOptions(mode string, anime bool, maxHeight int, hardware *transcode.HardwareSearchRules, allowSlow bool) (ModePolicySnapshot, error) {
 	if hardware != nil && mode != "size" {
 		return ModePolicySnapshot{}, fmt.Errorf("allow_hardware is only supported with mode=size")
+	}
+	if allowSlow && mode != "size" {
+		return ModePolicySnapshot{}, fmt.Errorf("allow_slow_preset is only supported with mode=size")
 	}
 	if mode != "size" && mode != "quality" && mode != "x265_preserve" && mode != "compact" {
 		return ModePolicySnapshot{}, fmt.Errorf("mode must be size, quality, x265_preserve, or compact")
@@ -304,7 +361,8 @@ func modePolicyWithHardware(mode string, anime bool, maxHeight int, hardware *tr
 	}
 	if mode == "size" {
 		snapshot.Version = SizeModePolicyVersion
-		snapshot.Size = sizeModeV3Policy()
+		snapshot.OperationBudgetSeconds = 0
+		snapshot.Size = sizeModeV3Policy(allowSlow)
 		snapshot.Size.Hardware = hardware.Clone()
 	}
 	if mode == "compact" {
@@ -329,6 +387,9 @@ func validateModeInputs(inputs map[string]any) error {
 		if _, err := modeHardwareInput("", inputs); err != nil {
 			return err
 		}
+		if _, err := modeSlowPresetInput("", inputs); err != nil {
+			return err
+		}
 		return nil
 	}
 	mode, ok := raw.(string)
@@ -343,7 +404,11 @@ func validateModeInputs(inputs map[string]any) error {
 	if err != nil {
 		return err
 	}
-	if _, err := modePolicyWithHardware(mode, getBool(inputs, "is_anime") || getString(inputs, "media_type") == "anime", maxHeight, hardware); err != nil {
+	slow, err := modeSlowPresetInput(mode, inputs)
+	if err != nil {
+		return err
+	}
+	if _, err := modePolicyWithOptions(mode, getBool(inputs, "is_anime") || getString(inputs, "media_type") == "anime", maxHeight, hardware, slow); err != nil {
 		return err
 	}
 	for _, key := range []string{"profile", "profile_config", "priority", "metric", "min_savings_percent", "max_size_increase_percent", "preserve_source_bit_depth", "expected_video_codec", "shared_calibration", "calibration_items", "batch_fixed_quality", "batch_calibration_digest"} {
@@ -413,7 +478,11 @@ func freezeModePolicy(ec *ExecutionContext) (*ModePolicySnapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	p, err := modePolicyWithHardware(mode, getBool(ec.State, "resolved_is_anime") || getBool(ec.Inputs, "is_anime") || getString(ec.Inputs, "media_type") == "anime", maxHeight, hardware)
+	slow, err := modeSlowPresetInput(mode, ec.Inputs)
+	if err != nil {
+		return nil, err
+	}
+	p, err := modePolicyWithOptions(mode, getBool(ec.State, "resolved_is_anime") || getBool(ec.Inputs, "is_anime") || getString(ec.Inputs, "media_type") == "anime", maxHeight, hardware, slow)
 	if err != nil {
 		return nil, err
 	}
@@ -603,8 +672,8 @@ func modeBudgetEntries(ec *ExecutionContext) map[string]SearchBudgetEntry {
 // as a deadline) and the batch by max_parallel_jobs, so the operation-wide
 // figure is the per-source budget times the attempts admitted. It is never a
 // separate cap: a flat cap admitted only six sources of a season and blocked
-// retries. The frozen operation_budget_seconds is kept for digest
-// compatibility only.
+// retries. The frozen operation_budget_seconds is kept in earlier snapshots for
+// digest compatibility only; new size snapshots carry none.
 //
 // The reservation is the longest the search can run: the hard cap of a frozen
 // search extension, else the base budget.

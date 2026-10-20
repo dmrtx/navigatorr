@@ -29,7 +29,7 @@ func TestSizeModePolicyV3FreezesAutomaticSearchRules(t *testing.T) {
 		t.Fatal(err)
 	}
 	rules := p.Size.AutomaticSearch
-	if rules == nil || rules.SelectionMarginVMAF != 1.5 || rules.HoldoutWindows != transcode.HoldoutWindowsFinalGrid || !rules.VerifyUntilExhausted || rules.FinalFreshWindows != 2 || strings.Join(rules.QualityFallbackPresets, ",") != "medium,slow" || rules.Validate() != nil {
+	if rules == nil || rules.SelectionMarginVMAF != 1.5 || rules.HoldoutWindows != transcode.HoldoutWindowsFinalGrid || !rules.VerifyUntilExhausted || rules.FinalFreshWindows != 2 || strings.Join(rules.QualityFallbackPresets, ",") != "medium" || !rules.QualityWalk || !rules.DeferBanding || rules.Validate() != nil {
 		t.Fatalf("size policy rules %+v", rules)
 	}
 	// The thresholds themselves are unchanged.
@@ -39,8 +39,8 @@ func TestSizeModePolicyV3FreezesAutomaticSearchRules(t *testing.T) {
 	}
 
 	// A snapshot frozen before the rules keeps its digest and gets no rules.
-	legacy := p
-	size := *p.Size
+	legacy := preWalkPolicy(p)
+	size := *legacy.Size
 	size.AutomaticSearch = nil
 	legacy.Size = &size
 	legacy.Digest = ""
@@ -95,9 +95,11 @@ func sizeRulesRequest(t *testing.T, duration float64, caps transcode.WorkerCapab
 	return req
 }
 
-// A worker with the rules gets a medium quality fallback ahead of the slow
-// one and holdout windows on the edges of the final validation grid, so the
-// start and end of the source are checked before a full encode is spent.
+// A worker with the rules gets a medium quality fallback (CRF 14-21, no slow
+// unless the operation asks for it), the in-between refinement rungs, and
+// holdout windows on the edges of the final validation grid, so the start and
+// end of the source are checked before a full encode is spent. A worker without
+// the quality walk gets the earlier three rungs (see TestQualityWalkRequest).
 func TestSizeV3RulesRequest(t *testing.T) {
 	for _, tc := range []struct {
 		duration      float64
@@ -105,7 +107,7 @@ func TestSizeV3RulesRequest(t *testing.T) {
 		gridPositions int
 	}{{45 * 60, 270, 2430, 5}, {105 * 60, 6300.0 / 22, 6300 - 6300.0/22, 11}, {180 * 60, 450, 10350, 12}} {
 		req := sizeRulesRequest(t, tc.duration, rulesTestCapabilities())
-		if req.AutomaticSearch == nil || req.AutomaticSearch.SelectionMarginVMAF != 1.5 {
+		if req.AutomaticSearch == nil || req.AutomaticSearch.SelectionMarginVMAF != 1.5 || req.AutomaticSearch.QualityWalk {
 			t.Fatalf("rules not sent: %+v", req.AutomaticSearch)
 		}
 		if err := transcode.ValidateBenchmarkRequest(req); err != nil {
@@ -117,7 +119,6 @@ func TestSizeV3RulesRequest(t *testing.T) {
 		}
 		want := "cand_crf22:medium,cand_crf24:medium,cand_crf26:medium,cand_crf28:medium,cand_crf30:medium," +
 			"fallback-quality-medium-cand_crf16:medium,fallback-quality-medium-cand_crf18:medium,fallback-quality-medium-cand_crf20:medium," +
-			"fallback-quality-cand_crf16:slow,fallback-quality-cand_crf18:slow,fallback-quality-cand_crf20:slow," +
 			"fallback-savings-cand_crf24:slow,fallback-savings-cand_crf27:slow,fallback-savings-cand_crf30:slow"
 		if got := strings.Join(ladder, ","); got != want {
 			t.Fatalf("ladder\n got %s\nwant %s", got, want)
@@ -144,7 +145,8 @@ func TestSizeV3RulesRequest(t *testing.T) {
 }
 
 // Older workers, and sources too short for the final grid, keep the earlier
-// request: eleven candidates and holdouts at 35% and 65%.
+// request: eleven candidates and holdouts at 35% and 65%. A short source on a
+// worker with the walk still gets the walk's ladder, on the earlier holdouts.
 func TestSizeV3RulesFallBackToEarlierRequest(t *testing.T) {
 	for name, tc := range map[string]struct {
 		duration float64
@@ -158,7 +160,7 @@ func TestSizeV3RulesFallBackToEarlierRequest(t *testing.T) {
 		if err := transcode.ValidateBenchmarkRequest(req); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		if want := map[bool]int{false: 11, true: 14}[tc.rules]; len(req.Candidates) != want {
+		if want := 11; len(req.Candidates) != want {
 			t.Fatalf("%s: %d candidates, want %d", name, len(req.Candidates), want)
 		}
 		if math.Abs(req.Samples[3].CenterSeconds-tc.duration*0.35) > 1e-9 || math.Abs(req.Samples[4].CenterSeconds-tc.duration*0.65) > 1e-9 {
@@ -168,7 +170,7 @@ func TestSizeV3RulesFallBackToEarlierRequest(t *testing.T) {
 }
 
 func TestAutomaticSearchRulesValidation(t *testing.T) {
-	req := sizeRulesRequest(t, 45*60, rulesTestCapabilities())
+	req := sizeRulesRequest(t, 45*60, walkTestCapabilities())
 	for name, mutate := range map[string]func(*transcode.BenchmarkRequest){
 		"negative margin":  func(r *transcode.BenchmarkRequest) { r.AutomaticSearch.SelectionMarginVMAF = -1 },
 		"huge margin":      func(r *transcode.BenchmarkRequest) { r.AutomaticSearch.SelectionMarginVMAF = 11 },

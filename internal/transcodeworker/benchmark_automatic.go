@@ -20,6 +20,7 @@ const (
 	fallbackHardwarePrefix = transcode.HardwareFallbackCandidatePrefix
 	fallbackQualityPrefix  = "fallback-quality-"
 	fallbackSavingsPrefix  = "fallback-savings-"
+	fallbackRefinePrefix   = transcode.RefineCandidatePrefix
 	// reasonNotVerified marks a candidate that passed discovery but was never
 	// checked on the holdout windows (the attempts went elsewhere, or a
 	// sibling's quality failure ruled it out). It is not a failed check.
@@ -27,6 +28,10 @@ const (
 	// reasonSkippedQualityDominated marks a setting not measured because the
 	// highest-quality setting of its family failed quality.
 	reasonSkippedQualityDominated = "skipped_quality_dominated"
+	// reasonSkippedLargerThanPassing marks a quality-walk rung not measured
+	// because a more compressed rung of the same family already met quality: a
+	// lower CRF only spends more bits, so it cannot be the smaller file.
+	reasonSkippedLargerThanPassing = "skipped_larger_than_passing"
 	// reasonSelectionMarginNotMet marks a VMAF result that passes its p5 and
 	// worst-window minimums by less than the size search's selection margin.
 	reasonSelectionMarginNotMet = "quality_vmaf_selection_margin_not_met"
@@ -224,6 +229,9 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 	evidence.Automatic = automatic
 	discovery := *record
 	discovery.Samples = record.Samples[:3]
+	if rules != nil && rules.DeferBanding {
+		discovery.bandingGate = bandingGateComplete
+	}
 	var tested []validatedCandidate
 	for _, vc := range vcs {
 		if !strings.HasPrefix(vc.candidate.ID, "fallback-") {
@@ -267,10 +275,19 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 		return nil
 	}
 	var skipped []transcode.BenchmarkCandidateEvaluation
+	// chainRest are the quality-walk rungs left unmeasured when the walk stopped
+	// at walkPassing: the rungs below it spend more bits, so none can be the
+	// smaller file. A verification that then fails on quality measures them.
+	var chainRest []validatedCandidate
+	var walkPassing string
+	var walkRungs func(stage string, stageRecord *BenchmarkRecord, base, rungs []validatedCandidate) (measured, left []validatedCandidate, passing string, err error)
 	// measure runs one stage. With quality pruning, each rate-control family's
 	// highest-quality setting runs first; when it fails the quality policy the
 	// family's remaining settings, which only spend fewer bits, are not measured.
-	measure := func(stage string, stageRecord *BenchmarkRecord, candidates []validatedCandidate) ([]validatedCandidate, error) {
+	// With walk (the quality fallback under the quality-walk rules) the libx265
+	// settings that remain are then measured one at a time from the most
+	// compressed, stopping at the first that is not a quality failure.
+	measure := func(stage string, stageRecord *BenchmarkRecord, candidates []validatedCandidate, walk bool) ([]validatedCandidate, error) {
 		leaders, followers := splitQualityFamilies(candidates)
 		if !record.QualityPruning || len(followers) == 0 {
 			return candidates, run(stage, stageRecord, candidates)
@@ -302,24 +319,115 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 				ExpectedBitDepth: f.vc.bitDepth, EvaluationReason: reasonSkippedQualityDominated, Uncertainties: []string{"not measured: " + f.leader + " failed quality"},
 			})
 		}
+		var rungs []validatedCandidate
+		if walk {
+			rest, rungs = splitWalkRungs(rest)
+		}
 		if len(rest) > 0 {
 			if err := run(stage, stageRecord, rest); err != nil {
 				return nil, err
 			}
 			measured = append(append([]validatedCandidate{}, leaders...), rest...)
 		}
+		if len(rungs) > 0 {
+			walked, left, passing, err := walkRungs(stage, stageRecord, measured, rungs)
+			if err != nil {
+				return nil, err
+			}
+			measured = append(measured, walked...)
+			chainRest = append(chainRest, left...)
+			walkPassing = passing
+		}
 		automatic.Stages[len(automatic.Stages)-1].Skipped = skippedIDs
 		return measured, nil
 	}
+	// walkRungs measures rungs (most compressed first) until one is not a quality
+	// failure, selecting over base plus what it has measured after each. It returns
+	// the measured rungs, the unmeasured ones left, and the rung that stopped it.
+	walkRungs = func(stage string, stageRecord *BenchmarkRecord, base, rungs []validatedCandidate) (measured, left []validatedCandidate, passing string, err error) {
+		first := len(automatic.Stages)
+		for i, vc := range rungs {
+			if err = run(stage, stageRecord, []validatedCandidate{vc}); err != nil {
+				return nil, nil, "", err
+			}
+			measured = append(measured, vc)
+			if err = r.runSelection(ctx, stageRecord, evidence, append(append([]validatedCandidate{}, base...), measured...), rep, sourceSize); err != nil {
+				return nil, nil, "", err
+			}
+			if walkStops(evidence.Decision, vc.candidate.ID) {
+				left, passing = rungs[i+1:], vc.candidate.ID
+				break
+			}
+		}
+		// One stage record for the walk, not one per rung.
+		for _, extra := range automatic.Stages[first+1:] {
+			automatic.Stages[first].Candidates = append(automatic.Stages[first].Candidates, extra.Candidates...)
+			automatic.Stages[first].Reused = append(automatic.Stages[first].Reused, extra.Reused...)
+			automatic.Stages[first].Outcome = extra.Outcome
+		}
+		automatic.Stages = automatic.Stages[:first+1]
+		return measured, left, passing, nil
+	}
 	finish := func() {
 		evidence.Decision.Evaluations = append(evidence.Decision.Evaluations, skipped...)
+		for _, vc := range chainRest {
+			evidence.Decision.Evaluations = append(evidence.Decision.Evaluations, transcode.BenchmarkCandidateEvaluation{
+				CandidateID: vc.candidate.ID, CandidateIndex: vc.index, VideoCodec: transcode.BenchmarkCandidateVideoCodec(vc.candidate),
+				Quality: vc.candidate.Quality, Preset: vc.candidate.Preset, Tune: vc.candidate.Tune, VideoProfile: vc.profile, PixelFormat: vc.pixelFormat,
+				ExpectedBitDepth: vc.bitDepth, EvaluationReason: reasonSkippedLargerThanPassing, Uncertainties: []string{"not measured: " + walkPassing + " already met quality, and a lower CRF only spends more bits"},
+			})
+		}
 	}
-	tested, err := measure("testing_initial", &discovery, tested)
+	tested, err := measure("testing_initial", &discovery, tested, false)
 	if err != nil {
 		return err
 	}
 	if err := r.runSelection(ctx, &discovery, evidence, tested, rep, sourceSize); err != nil {
 		return err
+	}
+	// qualityFailed are the settings that failed the quality policy at discovery
+	// (measured, or skipped as dominated by one that did) or on verification.
+	var qualityFailed []validatedCandidate
+	noteQualityFailures := func() {
+		for _, e := range append(append([]transcode.BenchmarkCandidateEvaluation(nil), evidence.Decision.Evaluations...), skipped...) {
+			if !qualityRejection(e.EvaluationReason) && e.EvaluationReason != reasonSkippedQualityDominated {
+				continue
+			}
+			for _, vc := range vcs {
+				if vc.candidate.ID == e.CandidateID && !slices.ContainsFunc(qualityFailed, func(f validatedCandidate) bool { return f.candidate.ID == e.CandidateID }) {
+					qualityFailed = append(qualityFailed, vc)
+				}
+			}
+		}
+	}
+	noteQualityFailures()
+	// refine measures the in-between libx265 settings (the refinement candidates)
+	// that lie between the most compressed one to pass and the next, more
+	// compressed, one known to fail quality: the only place a smaller file can be.
+	var refineTried []validatedCandidate
+	refine := func(passed validatedCandidate) error {
+		extra := refinementBetween(vcs, refineTried, passed, qualityFailed)
+		if len(extra) == 0 {
+			return nil
+		}
+		refineTried = append(refineTried, extra...)
+		measured, err := measure("testing_refinement", &discovery, extra, false)
+		if err != nil {
+			return err
+		}
+		tested = append(tested, measured...)
+		if err := r.runSelection(ctx, &discovery, evidence, tested, rep, sourceSize); err != nil {
+			return err
+		}
+		noteQualityFailures()
+		return nil
+	}
+	if rules != nil && len(rules.RefinementQualityValues) > 0 {
+		if best, ok := mostCompressedEligible(tested, evidence.Decision); ok {
+			if err := refine(best); err != nil {
+				return err
+			}
+		}
 	}
 	automatic.Discovery = evidence.Decision
 	// The initial hardware rungs that failed quality at discovery, whether
@@ -358,7 +466,7 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 			if len(alternatives) == 0 {
 				continue
 			}
-			measured, err := measure("testing_alternatives", &discovery, alternatives)
+			measured, err := measure("testing_alternatives", &discovery, alternatives, fallbackPrefix == fallbackQualityPrefix && rules != nil && rules.QualityWalk && record.QualityPruning)
 			if err != nil {
 				return err
 			}
@@ -366,6 +474,7 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 			if err := r.runSelection(ctx, &discovery, evidence, tested, rep, sourceSize); err != nil {
 				return err
 			}
+			noteQualityFailures()
 			automatic.Discovery = evidence.Decision
 			// Without rules the family is a single stage. With rules a later
 			// (slower) preset runs only when the earlier ones found nothing.
@@ -409,12 +518,25 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 	}
 	for attempt := 0; untilExhausted || attempt < 2; attempt++ {
 		var id, role string
+		qualityFailedNow := false
 		// The decision that chose this attempt's candidate: its hardware note
 		// describes that choice, whichever stage (discovery, fallback or retry) made it.
 		chosen := evidence.Decision
 		if passed != nil {
 			// A setting passed: look for a smaller one between it and the failures.
-			if id = bisectCandidateID(tested, evidence.Decision, passed.vc, qualityFailures, record.HardwareSearch); id == "" {
+			id = bisectCandidateID(tested, evidence.Decision, passed.vc, qualityFailures, record.HardwareSearch)
+			if id == "" && len(qualityFailures) > 0 && rules != nil && len(rules.RefinementQualityValues) > 0 && verificationHasTime(record.searchBudget, longest) {
+				// Nothing measured lies in the gap: measure the in-between setting, if any.
+				if err := refine(passed.vc); err != nil {
+					if searchTimeLimitReached(ctx, err) {
+						verification.StoppedBy = transcode.VerificationStoppedTimeCap
+						break
+					}
+					return err
+				}
+				id = bisectCandidateID(tested, evidence.Decision, passed.vc, qualityFailures, record.HardwareSearch)
+			}
+			if id == "" {
 				break
 			}
 			role = transcode.VerificationRoleBisect
@@ -444,6 +566,9 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 		attemptStart := time.Now()
 		holdout := *record
 		holdout.Samples = record.Samples[3:]
+		if rules != nil && rules.DeferBanding {
+			holdout.bandingGate = bandingGateMonotone
+		}
 		if err := run(phaseVerifyingSamples, &holdout, []validatedCandidate{winner}); err != nil {
 			if untilExhausted && searchTimeLimitReached(ctx, err) {
 				// The limit fell inside this attempt: it measured part of the
@@ -492,6 +617,10 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 			blocked[id] = true
 			if rules != nil && holdoutQuality {
 				qualityFailures = append(qualityFailures, winner)
+				if !slices.ContainsFunc(qualityFailed, func(f validatedCandidate) bool { return f.candidate.ID == winner.candidate.ID }) {
+					qualityFailed = append(qualityFailed, winner)
+				}
+				qualityFailedNow = true
 			}
 			// The one retry after a quality failure goes to the safest eligible
 			// setting, fallback stage included: the smallest one usually fails for
@@ -508,6 +637,26 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 				continue
 			}
 			remaining = append(remaining, vc)
+		}
+		if qualityFailedNow && len(chainRest) > 0 {
+			// The walk stopped at a setting that has just failed on quality: the
+			// rungs below it are the way toward quality, so measure them now.
+			todo := slices.DeleteFunc(slices.Clone(chainRest), func(vc validatedCandidate) bool {
+				return blocked[vc.candidate.ID] || ruledOutByQualityFailure(vc, qualityFailures)
+			})
+			chainRest = nil
+			if len(todo) > 0 {
+				measured, err := measure("testing_alternatives", &discovery, todo, false)
+				if err != nil {
+					if untilExhausted && searchTimeLimitReached(ctx, err) {
+						automatic.Stages[len(automatic.Stages)-1].Outcome = "stopped"
+						verification.StoppedBy = transcode.VerificationStoppedTimeCap
+						break
+					}
+					return err
+				}
+				remaining = append(remaining, measured...)
+			}
 		}
 		if err := r.runSelection(ctx, &discovery, evidence, remaining, rep, sourceSize); err != nil {
 			return err
@@ -928,7 +1077,7 @@ func mergeAutomaticQuality(record *BenchmarkRecord, evidence *BenchmarkExecution
 				return fmt.Errorf("duplicate automatic sample evidence")
 			}
 			found = true
-			sh.metricOut[i] = pipelineMetricOutcome{executed: true, vmafStats: ms.VMAFStats, cambi: ms.CAMBI}
+			sh.metricOut[i] = pipelineMetricOutcome{executed: true, vmafStats: ms.VMAFStats, cambi: ms.CAMBI, cambiSkipped: ms.CAMBISkipped}
 			if ms.VMAF == nil || ms.Error != "" {
 				return fmt.Errorf("incomplete automatic metric evidence")
 			}
@@ -1018,4 +1167,95 @@ func carryBisectedHardwareNote(final, chosen *transcode.BenchmarkDecision, hardw
 		note = fmt.Sprintf("%s: smaller setting found between a verified and a failed one, within the %.4g%% margin", optimization.HardwareSelectedNote, hardware.MarginPercent)
 	}
 	final.Winner.Uncertainties = append(append([]string(nil), final.Winner.Uncertainties...), note)
+}
+
+// splitWalkRungs separates the libx265 constant-quality candidates a quality
+// walk measures one at a time, most compressed (highest CRF) first, from the
+// rest, which are measured as one batch.
+func splitWalkRungs(candidates []validatedCandidate) (rest, rungs []validatedCandidate) {
+	for _, vc := range candidates {
+		if _, lowerIsBetter, ok := qualityFamilyKey(vc); ok && lowerIsBetter {
+			rungs = append(rungs, vc)
+		} else {
+			rest = append(rest, vc)
+		}
+	}
+	sort.SliceStable(rungs, func(i, j int) bool { return rungs[i].candidate.Quality > rungs[j].candidate.Quality })
+	return rest, rungs
+}
+
+// walkStops reports whether a quality walk ends at a rung: it met the quality
+// policy (eligible, or rejected only for its size), so a lower CRF, which
+// spends more bits, cannot be the smaller file. A quality failure, an encode
+// failure or incomplete evidence keeps the walk going.
+func walkStops(decision *transcode.BenchmarkDecision, id string) bool {
+	if decision == nil {
+		return false
+	}
+	for _, e := range decision.Evaluations {
+		if e.CandidateID == id {
+			return e.Eligible || e.EvaluationReason == "insufficient_savings"
+		}
+	}
+	return false
+}
+
+// mostCompressedEligible is the eligible libx265 constant-quality candidate with
+// the highest CRF, the one a refinement starts from.
+func mostCompressedEligible(tested []validatedCandidate, decision *transcode.BenchmarkDecision) (best validatedCandidate, ok bool) {
+	if decision == nil {
+		return best, false
+	}
+	eligible := map[string]bool{}
+	for _, e := range decision.Evaluations {
+		if e.Eligible {
+			eligible[e.CandidateID] = true
+		}
+	}
+	for _, vc := range tested {
+		if _, lowerIsBetter, fam := qualityFamilyKey(vc); !fam || !lowerIsBetter || !eligible[vc.candidate.ID] {
+			continue
+		}
+		if !ok || vc.candidate.Quality > best.candidate.Quality {
+			best, ok = vc, true
+		}
+	}
+	return best, ok
+}
+
+// refinementBetween returns the refinement candidates (fallback-refine-) not yet
+// tried that sit in passed's quality family between its CRF and the lowest CRF
+// above it already known to fail quality. With no such failure above, nothing is
+// returned: a setting that passed at the top of the ladder has nothing to refine.
+func refinementBetween(vcs, tried []validatedCandidate, passed validatedCandidate, failed []validatedCandidate) []validatedCandidate {
+	key, _, ok := qualityFamilyKey(passed)
+	if !ok {
+		return nil
+	}
+	upper := 0
+	for _, f := range failed {
+		if fk, _, ok := qualityFamilyKey(f); ok && fk == key && f.candidate.Quality > passed.candidate.Quality && (upper == 0 || f.candidate.Quality < upper) {
+			upper = f.candidate.Quality
+		}
+	}
+	if upper == 0 {
+		return nil
+	}
+	var out []validatedCandidate
+	for _, vc := range vcs {
+		if !strings.HasPrefix(vc.candidate.ID, fallbackRefinePrefix) {
+			continue
+		}
+		if k, _, ok := qualityFamilyKey(vc); !ok || k != key {
+			continue
+		}
+		if q := vc.candidate.Quality; q <= passed.candidate.Quality || q >= upper {
+			continue
+		}
+		if slices.ContainsFunc(tried, func(t validatedCandidate) bool { return t.candidate.ID == vc.candidate.ID }) {
+			continue
+		}
+		out = append(out, vc)
+	}
+	return out
 }

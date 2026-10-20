@@ -16,9 +16,15 @@ snapshots place all of them on the final validation grid (see Grid verification
 in [TRANSCODE_MODES_REVIEW.md](TRANSCODE_MODES_REVIEW.md)); other goals keep two
 verification windows. The worker first
 tests the existing x265 medium 20/23/26 and supported VideoToolbox 65/70/75
-settings. If measurements fail, it tests one appropriate x265 slow family:
-16/18/20 for quality rejection, or 23/26/28 when measured quality can pass but
-size cannot. The alternative also applies after an initial verification failure.
+settings. If measurements fail, it tests one appropriate fallback family: for
+quality rejection, x265 medium CRF 14 to 21 (the highest quality first, then from
+CRF 21 down until one meets quality; the slow preset only when the operation sets
+`allow_slow_preset=true`), or the slow savings family 24/27/30 when measured
+quality can pass but size cannot. Rungs between the initial ladder's steps
+(CRF 23/25/27/29) are measured only next to a quality failure, and banding is
+measured only for candidates VMAF has not already rejected (see "Quality walk and
+refinement" in [TRANSCODE_MODES_REVIEW.md](TRANSCODE_MODES_REVIEW.md)). Operations frozen
+before that change keep the earlier 16/18/20 medium-then-slow search. The alternative also applies after an initial verification failure.
 Goals other than size verify at most two candidates; size mode's new snapshots
 keep verifying until a candidate passes or the search time limit ends. Only a
 candidate passing every window can start a full conversion. Actual final bytes, sampled final quality,

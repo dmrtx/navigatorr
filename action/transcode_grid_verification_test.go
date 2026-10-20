@@ -25,6 +25,7 @@ func gridEraPolicy(t *testing.T, hardware *transcode.HardwareSearchRules) ModePo
 	if err != nil {
 		t.Fatal(err)
 	}
+	p = preWalkPolicy(p)
 	size := *p.Size
 	rules := *size.AutomaticSearch
 	rules.HoldoutWindows = transcode.HoldoutWindowsFinalGridEdges
