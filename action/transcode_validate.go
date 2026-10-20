@@ -72,9 +72,21 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 			if getString(ec.State, "plan_source") == sizeBudgetPlanSource {
 				// A budget encode is held to the frozen floor, and only a plan
 				// the budget fallback built at its planned bitrate may be.
+				// The encode is rebuilt from the frozen policy and the source,
+				// not read back from the record, and must match exactly.
 				rec := sizeBudgetOf(ec.State)
 				expectedQuality = sizeBudgetFloorQuality(snapshot)
-				if rec == nil || expectedQuality == nil || plan.X265 == nil || plan.X265.BitrateKbps != rec.VideoBitrateKbps || transcode.NormalizeVideoCodec(plan.VideoCodec) != transcode.VideoCodecLibX265 || rec.BudgetBytes != snapshot.Size.SizeBudget.BudgetBytes(getInt64(ec.State, "original_size"), siblingEvidenceOf(ec.State)) {
+				matches := false
+				if policy := snapshot.Size.SizeBudget; rec != nil && expectedQuality != nil && policy != nil && plan.X265 != nil {
+					original := getInt64(ec.State, "original_size")
+					budget := policy.BudgetBytes(original, siblingEvidenceOf(ec.State))
+					enc := planSizeBudgetEncode(policy, getSourceReport(ec.State["source_report"]), original, budget)
+					want, _ := json.Marshal(enc.X265)
+					got, _ := json.Marshal(plan.X265)
+					matches = enc.Reason == "" && string(want) == string(got) && plan.Quality == 0 && plan.Preset == policy.Preset && transcode.NormalizeVideoCodec(plan.VideoCodec) == transcode.VideoCodecLibX265 &&
+						rec.BudgetBytes == budget && rec.TargetBytes == enc.TargetBytes && rec.VideoBitrateKbps == enc.X265.BitrateKbps
+				}
+				if !matches {
 					return StepResult{Status: StepFailed, Error: "size budget plan does not match the frozen budget; original preserved"}, nil
 				}
 			}
@@ -119,6 +131,7 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 	if candidateSize <= 0 {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("accepted candidate size is unknown for %q (fail closed)", outputPath)}, nil
 	}
+	var budget *SizeBudgetRecord
 	if plan.Mode != "" {
 		original := getInt64(ec.State, "original_size")
 		if original <= 0 {
@@ -128,21 +141,23 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 		if original <= 0 || plan.SizePolicy == nil || plan.Mode != getString(ec.Inputs, "mode") || plan.PolicyDigest != getString(ec.State, "policy_digest") || plan.SizePolicy.MinSavingsPercent != minimum || plan.SizePolicy.MaxSizeIncreasePercent != maximum {
 			return StepResult{Status: StepFailed, Error: "mode size policy or source identity missing; original preserved"}, nil
 		}
+		// A budget encode is checked against its budget first: every budget
+		// sits under the 15% minimum saving, so one that misses the saving is
+		// over the budget too, and is reported as that.
+		if sizeBudgetActive(ec.State) {
+			rec, fits := finishSizeBudget(ec, candidateSize)
+			if !fits {
+				ec.State["skip_transcode"] = true
+				ec.State["reason_code"] = SizeBudgetExceeded
+				return StepResult{Status: StepCompleted, Outputs: map[string]any{"skipped": true, "reason_code": SizeBudgetExceeded, "candidate_size_bytes": candidateSize, sizeBudgetKey: rec}}, nil
+			}
+			budget = rec
+		}
 		if !optimization.ModeSizeAllowedVersion(plan.Mode, original, candidateSize, plan.ModePolicyVersion) {
 			ec.State["skip_transcode"] = true
 			ec.State["reason_code"] = "insufficient_savings"
 			return StepResult{Status: StepCompleted, Outputs: map[string]any{"skipped": true, "reason_code": "insufficient_savings", "candidate_size_bytes": candidateSize}}, nil
 		}
-	}
-	var budget *SizeBudgetRecord
-	if sizeBudgetActive(ec.State) {
-		rec, fits := finishSizeBudget(ec, candidateSize)
-		if !fits {
-			ec.State["skip_transcode"] = true
-			ec.State["reason_code"] = SizeBudgetExceeded
-			return StepResult{Status: StepCompleted, Outputs: map[string]any{"skipped": true, "reason_code": SizeBudgetExceeded, "candidate_size_bytes": candidateSize, sizeBudgetKey: rec}}, nil
-		}
-		budget = rec
 	}
 	if ec.Decision != "" {
 		ec.State["validation_decision_applied"] = ec.Decision

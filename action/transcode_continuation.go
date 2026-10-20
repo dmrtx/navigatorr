@@ -390,7 +390,7 @@ var continuationClearedKeys = []string{
 	"benchmark_search_review", "automatic_search", "has_winner", "decision_reason", "search_worker_busy",
 	"winner", "winner_candidate_id", "winner_video_codec", "winner_preset", "winner_quality", "winner_average_bitrate_kbps", "winner_video_profile", "winner_pixel_format",
 	"winner_bit_depth", "winner_score", "winner_metric", "estimated_total_mb", "estimated_savings_percent", "predicted_savings_percent", "effective_min_savings_percent",
-	"effective_max_size_increase_percent", "skip_transcode", "skipped", "reason_code", sizeBudgetKey, "size_budget_skip_message",
+	"effective_max_size_increase_percent", "skip_transcode", "skipped", "reason_code", sizeBudgetKey, sizeBudgetSkipReasonKey, sizeBudgetSkipMessageKey,
 	// The encode and its validation.
 	"recovery_required", "worker_error", "finalization_retry_count", "next_finalization_at", "transcode_submitted", "transcode_reconcile", "transcode_done", "transcode_status",
 	"transcode_phase", "candidate_path", "output_path", "candidate_sha256", "candidate_size_bytes", "idempotency_key", "worker_completed_at", "reconciled_at", "reconcile_lag_ms",

@@ -622,6 +622,12 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 				if st.ReasonCode == reasonQualityNotMet && st.QualityEvidence != nil && sizeBudgetActive(ec.State) {
 					out[sizeBudgetKey] = failSizeBudget(ec, st.QualityEvidence)
 				}
+				if (st.ReasonCode == "insufficient_savings" || st.ReasonCode == "size_growth" || st.ReasonCode == "size_growth_exceeded") && sizeBudgetActive(ec.State) {
+					// The two-pass encode overshot past the worker's minimum
+					// saving, which is past the budget too.
+					out[sizeBudgetKey] = overshotSizeBudget(ec, st.CandidateSizeBytes)
+					ec.State["reason_code"], out["reason_code"] = SizeBudgetExceeded, SizeBudgetExceeded
+				}
 				return StepResult{Status: StepCompleted, Outputs: out}, nil
 			}
 		}

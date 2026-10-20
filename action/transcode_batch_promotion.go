@@ -184,6 +184,9 @@ func (e *Engine) stepTranscodeBatchPromote(ctx context.Context, ec *ExecutionCon
 			return StepResult{Status: StepCompleted, Outputs: map[string]any{"batch_promotion": map[string]any{"eligible": len(plan.Members), "promoted": 0, "approved": false}}}, nil
 		default:
 			reason := fmt.Sprintf("Approve promotion of %d verified candidates in one batch", len(plan.Members))
+			if below := e.batchPromotionBelowTarget(plan); below > 0 {
+				reason += fmt.Sprintf(". %d of them were encoded to fit a size budget and measured below the quality target", below)
+			}
 			if notice := e.batchPromotionNotice(ctx, plan); notice != nil {
 				ec.State["batch_promotion_notice"] = notice
 				reason += ". " + CompactRegrabWarning

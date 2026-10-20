@@ -102,6 +102,10 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 		if b := e.SizeBudgetSiblings; b != nil && b.Reason != "" && res.Status == StatusCompleted {
 			e.Message = strings.TrimSpace(e.Message + " " + b.Message)
 		}
+		// A frozen budget the search's outcome stood without says why.
+		if note := getString(res.State, sizeBudgetSkipMessageKey); note != "" && e.SizeBudget == nil && res.Status == StatusCompleted {
+			e.Message = strings.TrimSpace(e.Message + " " + note)
+		}
 		return e
 	}
 	switch {
@@ -132,12 +136,6 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 	case reason == SizeBudgetExceeded && e.SizeBudget != nil:
 		e.Outcome = "size_rejected"
 		e.Message = e.SizeBudget.Message
-	case reason == "size_budget_unreachable" || reason == "size_budget_estimate_unavailable" || reason == "size_budget_worker_unsupported":
-		e.Outcome = "no_changes"
-		e.Message = getString(res.State, "size_budget_skip_message")
-		if e.Message == "" {
-			e.Message = "No encode at the size budget could be planned. Original preserved."
-		}
 	case reason == "quality_not_met":
 		e.Outcome = "quality_rejected"
 		e.Message = "The encoded result did not meet the quality requirements. Original preserved."

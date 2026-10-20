@@ -26,6 +26,9 @@ import (
 const (
 	// sizeBudgetKey holds the SizeBudgetRecord of a fallback that started.
 	sizeBudgetKey = "size_budget"
+	// Why a frozen budget was not applied, when the search's outcome stood.
+	sizeBudgetSkipReasonKey  = "size_budget_skip_reason"
+	sizeBudgetSkipMessageKey = "size_budget_skip_message"
 	// sizeBudgetPlanSource marks the encode plan as the budget fallback's.
 	sizeBudgetPlanSource = "size_budget"
 
@@ -393,14 +396,54 @@ func sizeBudgetWinnerFits(snapshot *ModePolicySnapshot, winner *transcode.Benchm
 	if estimated <= 0 {
 		estimated = int64(math.Ceil(winner.EstimatedTotalMB * 1e6))
 	}
-	return estimated > 0 && estimated <= budget
+	if estimated <= 0 {
+		return true // no estimate to hold against the budget
+	}
+	return estimated <= budget
+}
+
+// sizeBudgetEncode is the encode the frozen budget gives a source: the size it
+// aims at, what the other streams take, and the x265 settings at the bitrate
+// that leaves. Reason is set when none can be planned. Validation rebuilds it
+// to check the plan it accepts.
+type sizeBudgetEncode struct {
+	TargetBytes   int64
+	NonVideoBytes int64
+	X265          transcode.X265Settings
+	Reason        string
+	Message       string
+}
+
+func planSizeBudgetEncode(policy *SizeBudgetPolicy, rep *mediainspect.DetailedReport, sourceBytes, budget int64) sizeBudgetEncode {
+	var enc sizeBudgetEncode
+	if policy == nil || rep == nil || budget <= 0 || rep.DurationSec <= 0 {
+		enc.Reason, enc.Message = "size_budget_estimate_unavailable", "The source's size or duration could not be read, so no bitrate for the size budget could be planned."
+		return enc
+	}
+	nonVideo, known := sizeBudgetNonVideoBytes(rep, sourceBytes)
+	if !known {
+		enc.Reason, enc.Message = "size_budget_estimate_unavailable", "The size of the source's video stream could not be read, so no bitrate for the size budget could be planned."
+		return enc
+	}
+	enc.NonVideoBytes = nonVideo
+	enc.TargetBytes = int64(math.Floor(float64(budget) * policy.FillPercent / 100))
+	enc.X265 = policy.X265
+	// A budget roomier than two-pass x265 can use is met at its ceiling; the
+	// file then simply comes out smaller than the budget.
+	enc.X265.BitrateKbps = min(sizeBudgetVideoKbps(enc.TargetBytes, nonVideo, rep.DurationSec), transcode.X265MaxBitrateKbps)
+	if enc.X265.Validate(transcode.VideoCodecLibX265, 0) != nil {
+		enc.Reason, enc.Message = "size_budget_unreachable", fmt.Sprintf("The audio, subtitles and other streams already take %s of the %s budget, which leaves no usable video bitrate (%d kbps).", formatBudgetBytes(nonVideo), formatBudgetBytes(budget), enc.X265.BitrateKbps)
+	}
+	return enc
 }
 
 // sizeBudgetFallback replaces a size search's outcome with one encode at the
 // budget when the search found no passing setting (winner nil) or only one
 // larger than the budget. handled is false when the frozen policy has no
-// budget, so the caller goes on as it would without one. A source the budget
-// cannot be planned for ends here with a reason instead.
+// budget, so the caller goes on as it would without one. It is false too when
+// no encode at the budget can be planned (the video stream's size is unknown,
+// the budget leaves no usable bitrate, the worker cannot encode two-pass
+// x265): the search's own outcome stands, with the reason recorded beside it.
 func (e *Engine) sizeBudgetFallback(ctx context.Context, ec *ExecutionContext, outputs map[string]any, decision *transcode.BenchmarkDecision, winner *transcode.BenchmarkWinner) (StepResult, bool) {
 	if ec.ActionName != "transcode_media" || getString(ec.Inputs, "mode") != "size" {
 		return StepResult{}, false
@@ -413,14 +456,15 @@ func (e *Engine) sizeBudgetFallback(ctx context.Context, ec *ExecutionContext, o
 	if policy.Validate() != nil {
 		return StepResult{Status: StepFailed, Error: "frozen size budget is invalid (fail closed)"}, true
 	}
-	skip := func(reason, message string) (StepResult, bool) {
-		ec.State["skip_transcode"] = true
-		ec.State["reason_code"] = reason
-		ec.State["size_budget_skip_message"] = message
-		outputs["skipped"] = true
-		outputs["reason_code"] = reason
-		outputs["size_budget_skip_message"] = message
-		return StepResult{Status: StepCompleted, Outputs: outputs}, true
+	decline := func(reason, message string) (StepResult, bool) {
+		if winner != nil {
+			message += " The best passing setting is kept, although its estimate is over the budget."
+		} else {
+			message += " The size budget was not applied."
+		}
+		ec.State[sizeBudgetSkipReasonKey], ec.State[sizeBudgetSkipMessageKey] = reason, message
+		outputs[sizeBudgetSkipReasonKey], outputs[sizeBudgetSkipMessageKey] = reason, message
+		return StepResult{}, false
 	}
 	rep := getSourceReport(ec.State["source_report"])
 	original := getInt64(ec.State, "original_size")
@@ -431,9 +475,7 @@ func (e *Engine) sizeBudgetFallback(ctx context.Context, ec *ExecutionContext, o
 		// says why.
 		return StepResult{}, false
 	}
-	if rep == nil || budget <= 0 {
-		return skip("size_budget_estimate_unavailable", "The source's size or duration could not be read, so no bitrate for the size budget could be planned. Original preserved.")
-	}
+	enc := planSizeBudgetEncode(policy, rep, original, budget)
 	if e.deps.Transcode == nil {
 		return StepResult{Status: StepFailed, Error: "transcode executor is disabled or not configured in navigatorr"}, true
 	}
@@ -444,10 +486,16 @@ func (e *Engine) sizeBudgetFallback(ctx context.Context, ec *ExecutionContext, o
 	// Copying the video and compacting only lossless audio loses no picture
 	// quality; when a worker can do that and it alone fits the budget, it is
 	// the better answer.
-	if winner == nil && snapshot.Size.AudioOnlyFallback && caps.SizeAudioOnly {
+	if winner == nil && rep != nil && snapshot.Size.AudioOnlyFallback && caps.SizeAudioOnly {
 		if est := estimateAudioOnly(rep, original); est.Compacted > 0 && est.CandidateBytes <= budget {
 			return StepResult{}, false
 		}
+	}
+	if enc.Reason != "" {
+		return decline(enc.Reason, enc.Message)
+	}
+	if !caps.X265TwoPass || !caps.Encoders[transcode.VideoCodecLibX265] {
+		return decline("size_budget_worker_unsupported", "The size budget needs a worker that can encode two-pass x265; upgrade the worker to use it.")
 	}
 	if policy.Siblings == nil {
 		siblings = nil
@@ -464,21 +512,8 @@ func (e *Engine) sizeBudgetFallback(ctx context.Context, ec *ExecutionContext, o
 		rec.OverBudgetEstimatedBytes = winner.EstimatedTotalBytes
 	}
 	rec.Curve = sizeBudgetCurve(decision, budget)
-	nonVideo, known := sizeBudgetNonVideoBytes(rep, original)
-	if !known {
-		return skip("size_budget_estimate_unavailable", "The size of the source's video stream could not be read, so no bitrate for the size budget could be planned. Original preserved.")
-	}
-	rec.NonVideoBytes = nonVideo
-	rec.TargetBytes = int64(math.Floor(float64(budget) * policy.FillPercent / 100))
-	rec.VideoBitrateKbps = sizeBudgetVideoKbps(rec.TargetBytes, nonVideo, rep.DurationSec)
-	x := policy.X265
-	x.BitrateKbps = rec.VideoBitrateKbps
-	if x.Validate(transcode.VideoCodecLibX265, 0) != nil {
-		return skip("size_budget_unreachable", fmt.Sprintf("The audio, subtitles and other streams already take %s of the %s budget, which leaves no usable video bitrate (%d kbps). Original preserved.", formatBudgetBytes(nonVideo), formatBudgetBytes(budget), rec.VideoBitrateKbps))
-	}
-	if !caps.X265TwoPass || !caps.Encoders[transcode.VideoCodecLibX265] {
-		return skip("size_budget_worker_unsupported", "The size budget needs a worker that can encode two-pass x265; upgrade the worker and retry. Original preserved.")
-	}
+	rec.NonVideoBytes, rec.TargetBytes, rec.VideoBitrateKbps = enc.NonVideoBytes, enc.TargetBytes, enc.X265.BitrateKbps
+	x := enc.X265
 	plan, err := e.sizeBudgetPlan(ec, snapshot, &x)
 	if err != nil {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("building the size budget plan: %v", err)}, true
@@ -594,6 +629,24 @@ func finishSizeBudget(ec *ExecutionContext, candidateBytes int64) (*SizeBudgetRe
 	return rec, fits
 }
 
+// overshotSizeBudget records a budget encode refused for its size before the
+// budget itself was checked: the 15% minimum saving, which every budget sits
+// under, so it is over the budget too.
+func overshotSizeBudget(ec *ExecutionContext, candidateBytes int64) *SizeBudgetRecord {
+	if candidateBytes > 0 {
+		rec, _ := finishSizeBudget(ec, candidateBytes)
+		return rec
+	}
+	rec := sizeBudgetOf(ec.State)
+	if rec == nil {
+		return nil
+	}
+	rec.Outcome = SizeBudgetExceeded
+	rec.Message = fmt.Sprintf("The budget encode came out above 85%% of the source, over the %s budget. Original preserved.", formatBudgetBytes(rec.BudgetBytes))
+	ec.State[sizeBudgetKey] = rec
+	return rec
+}
+
 // failSizeBudget records a budget encode that missed the floor on final
 // validation.
 func failSizeBudget(ec *ExecutionContext, evidence *transcode.FinalQualityEvidence) *SizeBudgetRecord {
@@ -690,4 +743,32 @@ func capitalize(s string) string {
 		return string(s[0]-'a'+'A') + s[1:]
 	}
 	return s
+}
+
+// batchPromotionBelowTarget counts the batch's candidates that a size budget
+// encode produced below the quality target, so the approval says so wherever
+// it is answered, not only in the web review.
+func (e *Engine) batchPromotionBelowTarget(plan *batchPromotionPlan) int {
+	n := 0
+	for _, m := range plan.Members {
+		child, err := e.deps.Store.GetActionInstance(m.SourceAction)
+		if err != nil || child == nil {
+			continue
+		}
+		if rec := sizeBudgetOf(parseExecutionContext(child, e).State); rec != nil && rec.Outcome == SizeBudgetBelowTarget {
+			n++
+		}
+	}
+	return n
+}
+
+// BatchItemFrozenSizeBudget is the size budget one batch item runs under, as
+// frozen (nil without one): its own goal-change policy when it has one, else
+// the batch's. state is the batch's decoded state.
+func BatchItemFrozenSizeBudget(state map[string]any, itemKey string) map[string]any {
+	holder := state
+	if row := objectMap(objectMap(state["batch_item_settings"])[itemKey]); objectMap(row["mode_policy"]) != nil {
+		holder = row
+	}
+	return objectMap(objectMap(objectMap(holder["mode_policy"])["size"])["size_budget"])
 }

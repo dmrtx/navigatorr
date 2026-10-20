@@ -4136,6 +4136,12 @@ test("a planned budget encode shows its target and an unmeasured point, not the 
   assert.equal(h.run('sizeBudgetNote(job).children.some(c => /size-budget-badge/.test(c.className))'), false, "no outcome badge before the result");
 });
 
+test("a budget that was not applied says why", () => {
+  const h = harness();
+  h.context.job = { size_mode: { encoder: "libx265", size_budget_note: "Only 1 sibling." } };
+  assert.ok(h.run("sizeModeLines(job.size_mode)").includes("Only 1 sibling."));
+});
+
 test("sibling-matched budgets name their basis, the file's ratio and the compared files", () => {
   const h = harness();
   const siblings = { scope: "season", median_bitrate_kbps: 1600, multiplier: 1.5, count: 5, resolution_class: "1080p", source_bitrate_kbps: 4800, ratio: 3, files: [

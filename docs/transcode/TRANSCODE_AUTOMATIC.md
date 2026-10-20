@@ -195,11 +195,16 @@ changes: the policy, its digest and the search are exactly as before.
 * `size_budget_bytes`, at least 50,000,000: an absolute ceiling.
 * `size_budget_source=siblings` with an optional `size_budget_sibling_multiplier`
   (1.0 to 4.0, default 1.5): the budget follows the other episodes. It is the
-  median total bitrate of the other video files in the same season folder (the
-  series folder when the season has too few), times the multiplier, times the
-  source's duration. At least 3 files of the same resolution class are needed;
-  without them the job fails with a clear reason instead of guessing. The
-  multiplier is refused without the source.
+  median total bitrate of the other video files in the same folder, times the
+  multiplier, times the source's duration. When that folder has too few and is
+  named like a season (`Season 1`, `S01`, `Specials`, …), the series folder
+  above it is scanned too; a movie's own folder or a flat series never widens
+  to the library. Files are compared within a resolution class (SD, 720p,
+  1080p, 1440p, 2160p, from the width and the height scaled to 16:9, so a
+  letterboxed 1920-wide film is 1080p). At least 3 such files are needed;
+  without them the file runs as if it had no budget, and the job says why. The
+  scan probes at most 60 files and stops after 3 minutes. The multiplier is
+  refused without the source.
 
 The three are mutually exclusive. The effective budget is the smaller of the
 budget and 85% of the source, so the 15% minimum saving that size mode enforces
@@ -210,15 +215,23 @@ frozen into the batch and per-file goal-change policy (`size.size_budget`).
 the best passing candidate is larger than the budget (the estimate, or the
 measured size), or when no candidate qualifies and a budget encode could still
 fit. Audio-only compaction still wins when it alone brings the file inside the
-budget: nothing is re-encoded then.
+budget: nothing is re-encoded then. When no budget encode can be planned (the
+source's video stream size is unknown, the other streams already take the
+budget, or the worker cannot encode two-pass x265), the search's own outcome
+stands: a passing winner over the budget is kept, otherwise the usual
+audio-only or no-candidate result follows, and the job says why the budget was
+not applied.
 
 **The budget encode.** A single x265 two-pass average-bitrate encode (preset
 medium, lookahead 40, 4 B-frames, 3 reference frames, aq-mode 3, aq-strength 1,
 psy-rd 2, psy-rdoq 1; main10 when the plan is main10). It aims at 97% of the
 budget. The video bitrate is `(target - non-video bytes) * 8 / duration`, where
 non-video bytes are the source minus its video stream, minus what lossless audio
-compaction saves. The size is therefore known before the encode starts and shown
-as the estimate (*Budget estimate*), not the over-budget winner.
+compaction saves. A budget roomier than two-pass x265's 50 Mbps ceiling is met at
+the ceiling, and the file comes out smaller. The size is therefore known before
+the encode starts and shown as the estimate (*Budget estimate*), not the
+over-budget winner. Validation rebuilds these settings from the frozen policy
+and the source and accepts only a plan that matches them exactly.
 
 **Validation.** The result is judged against the same final windows as any size
 result, but against a lower, frozen floor: VMAF mean 70, p5 60 and worst
@@ -244,6 +257,8 @@ the frozen policy and is not user-tunable.
 
 A budget candidate is never promoted automatically: like every candidate it
 waits for review, and the label travels with it into the replacement review.
+The batch approval itself also says how many of its candidates are below the
+quality target, wherever it is answered.
 
 **Seeing it.** Job detail shows the budget against the result and the trigger,
 an inline rate-quality chart (size across, VMAF mean up, the budget as a
@@ -257,7 +272,9 @@ how the source's bitrate compares with the median, and lists the files used
 under a collapsed *Sibling episodes* section. *Change goal*, a batch setup and
 *Run again* carry the budget: the UI offers *None*, *Percent of source*,
 *Gigabytes* and *Match sibling episodes*, and shows the budget a file was frozen
-with.
+with. The `transcode_goal_change` preview shows it too (`size_budget`,
+`size_budget_mixed`); a change to size without `size_budget_*` inputs drops
+it.
 
 **Not done.** A search that ended because it hit the time cap does not trigger
 the fallback. A CRF winner judged within budget on its estimate is not

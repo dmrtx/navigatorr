@@ -160,6 +160,21 @@ func TestGoalChangePreviewShowsTheFrozenMediaEngineChoice(t *testing.T) {
 			t.Fatalf("the file's own policy was not read: %v", got)
 		}
 	})
+	t.Run("the frozen size budget", func(t *testing.T) {
+		budget := policy(`"size_budget":{"percent":40}`)
+		state := `{"mode_policy":` + budget + `}`
+		got := preview(t, `{"mode":"size"}`, state, "a", "b")
+		if b, _ := got["size_budget"].(map[string]any); b["percent"] != float64(40) || got["size_budget_mixed"] != false {
+			t.Fatalf("frozen budget not shown: %v", got)
+		}
+		state = `{"mode_policy":` + budget + `,"batch_item_settings":{"b":{"mode":"size","mode_policy":` + engineOn + `}}}`
+		if got := preview(t, `{"mode":"size"}`, state, "a", "b"); got["size_budget_mixed"] != true {
+			t.Fatalf("a file without the budget not reported as mixed: %v", got)
+		}
+		if got := preview(t, `{"mode":"size"}`, `{"mode_policy":`+engineOn+`}`, "a"); got["size_budget"] != nil || got["size_budget_mixed"] != nil {
+			t.Fatalf("budget shown for a batch without one: %v", got)
+		}
+	})
 	t.Run("other goals and unfrozen batches show nothing", func(t *testing.T) {
 		for name, state := range map[string]string{
 			"quality":  `{"mode_policy":{"mode":"quality"}}`,

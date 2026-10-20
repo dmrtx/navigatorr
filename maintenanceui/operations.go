@@ -169,6 +169,15 @@ func operationSizeMode(r operationRecord) map[string]any {
 	if r.savings.EstimatedBytes != nil && (r.savings.EstimateKind == "sampled_benchmark" || r.savings.EstimateKind == "audio_only_estimate" || r.savings.EstimateKind == "size_budget") {
 		out["expected_bytes"] = *r.savings.EstimatedBytes
 	}
+	// A frozen budget that was not applied says why: the siblings gave none,
+	// or no encode at it could be planned.
+	if operationNumber(operationMap(operationValue(r, "size_budget"))["budget_bytes"]) <= 0 {
+		if note := operationString(operationValue(r, "size_budget_skip_message")); note != "" {
+			out["size_budget_note"] = note
+		} else if siblings := operationMap(operationValue(r, "size_budget_siblings")); operationString(siblings["reason"]) != "" {
+			out["size_budget_note"] = operationString(siblings["message"])
+		}
+	}
 	if r.state["size_main10"] == true {
 		out["main10"] = true
 	}

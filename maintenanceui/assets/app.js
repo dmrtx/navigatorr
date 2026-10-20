@@ -3810,6 +3810,7 @@ function sizeModeLines(size) {
   // Why the media engine result was chosen over x265, as the search recorded it.
   if (size.hardware && size.hardware_reason) lines.push(`Chosen because: ${size.hardware_reason}`);
   if (size.size_budget) lines.push(...sizeBudgetLines(size.size_budget));
+  else if (size.size_budget_note) lines.push(size.size_budget_note);
   if (size.video_copy) lines.push({verified: "Video copied unchanged · verified bit-identical", failed: "Video copy check failed · original kept"}[size.video_copy] || "Video will be copied unchanged · not yet verified; only lossless audio is compacted");
   // A media engine result that failed the whole-file check, and what followed;
   // the failed attempt's numbers stay here after the x265 result takes over.

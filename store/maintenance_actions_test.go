@@ -232,7 +232,7 @@ func TestMaintenanceSnapshotKeepsTheSizeBudgetSummary(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	state := `{"size_budget":{"budget_bytes":3000,"target_bytes":2910,"video_bitrate_kbps":2400,"outcome":"below_quality_target_within_budget","curve":[{"kind":"budget_fallback","bytes":2910}],"non_video_bytes":400,"siblings":{"scope":"series","count":4,"files":[{"name":"a.mkv"}]},"final":{"verdict":"pass","measured":{"vmaf_mean":79.5},"windows":[{"start_seconds":1}],"limits":{"vmaf_mean_minimum":70}}}}`
+	state := `{"size_budget":{"budget_bytes":3000,"target_bytes":2910,"video_bitrate_kbps":2400,"outcome":"below_quality_target_within_budget","curve":[{"kind":"budget_fallback","bytes":2910}],"non_video_bytes":400,"siblings":{"scope":"series","count":4,"files":[{"name":"a.mkv"}]},"final":{"verdict":"pass","measured":{"vmaf_mean":79.5},"windows":[{"start_seconds":1}],"limits":{"vmaf_mean_minimum":70}}},"size_budget_siblings":{"scope":"season","count":1,"reason":"too_few_siblings","message":"Only 1","files":[{"name":"a.mkv"}]},"size_budget_skip_message":"not applied"}`
 	if err := s.CreateActionInstance(ActionInstance{ID: "budget", ActionName: "transcode_media", Status: ActionStatusCompleted, InputsJSON: `{}`, OutputsJSON: `{}`, StateJSON: state}); err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +241,9 @@ func TestMaintenanceSnapshotKeepsTheSizeBudgetSummary(t *testing.T) {
 		t.Fatalf("%v %v", rows, err)
 	}
 	var got struct {
-		Budget map[string]any `json:"size_budget"`
+		Budget   map[string]any `json:"size_budget"`
+		Siblings map[string]any `json:"size_budget_siblings"`
+		Note     string         `json:"size_budget_skip_message"`
 	}
 	if json.Unmarshal([]byte(rows[0].StateJSON), &got) != nil {
 		t.Fatal(rows[0].StateJSON)
@@ -249,5 +251,8 @@ func TestMaintenanceSnapshotKeepsTheSizeBudgetSummary(t *testing.T) {
 	final, _ := got.Budget["final"].(map[string]any)
 	if got.Budget["budget_bytes"] != float64(3000) || got.Budget["outcome"] != "below_quality_target_within_budget" || got.Budget["non_video_bytes"] != nil || len(got.Budget["curve"].([]any)) != 1 || got.Budget["siblings"] == nil || final["verdict"] != "pass" || final["windows"] != nil || final["limits"] != nil {
 		t.Fatalf("projection kept or lost the wrong fields: %v", got.Budget)
+	}
+	if got.Siblings["reason"] != "too_few_siblings" || got.Siblings["message"] != "Only 1" || got.Siblings["files"] != nil || got.Note != "not applied" {
+		t.Fatalf("sibling evidence projection %v %q", got.Siblings, got.Note)
 	}
 }

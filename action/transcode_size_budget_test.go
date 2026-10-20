@@ -247,20 +247,19 @@ func withoutDigest(p *transcode.Plan) *transcode.Plan {
 func TestSizeBudgetFallbackDeclines(t *testing.T) {
 	old := modeTestCapabilities()
 	for name, tc := range map[string]struct {
-		inputs  map[string]any
-		caps    transcode.WorkerCapabilities
-		mutate  func(*budgetCase)
-		handled bool
-		reason  string
+		inputs map[string]any
+		caps   transcode.WorkerCapabilities
+		mutate func(*budgetCase)
+		reason string // recorded beside the search's outcome
 	}{
 		"no budget":  {caps: budgetCaps()},
-		"old worker": {inputs: map[string]any{"size_budget_percent": 40.0}, caps: old, handled: true, reason: "size_budget_worker_unsupported"},
-		"no video bytes": {inputs: map[string]any{"size_budget_percent": 40.0}, caps: budgetCaps(), handled: true, reason: "size_budget_estimate_unavailable", mutate: func(c *budgetCase) {
+		"old worker": {inputs: map[string]any{"size_budget_percent": 40.0}, caps: old, reason: "size_budget_worker_unsupported"},
+		"no video bytes": {inputs: map[string]any{"size_budget_percent": 40.0}, caps: budgetCaps(), reason: "size_budget_estimate_unavailable", mutate: func(c *budgetCase) {
 			rep := budgetReport()
 			rep.Video[0].Tags = nil
 			c.ec.State["source_report"] = rep
 		}},
-		"audio alone takes the budget": {inputs: map[string]any{"size_budget_bytes": 300_000_000.0}, caps: budgetCaps(), handled: true, reason: "size_budget_unreachable"},
+		"audio alone takes the budget": {inputs: map[string]any{"size_budget_bytes": 300_000_000.0}, caps: budgetCaps(), reason: "size_budget_unreachable"},
 		"audio-only compaction fits": {inputs: map[string]any{"size_budget_percent": 60.0}, caps: budgetCaps(), mutate: func(c *budgetCase) {
 			rep := audioOnlyReport()
 			rep.Video[0].BitRate, rep.Video[0].Tags = 0, map[string]string{"NUMBER_OF_BYTES": "4500000000"}
@@ -274,14 +273,16 @@ func TestSizeBudgetFallbackDeclines(t *testing.T) {
 				tc.mutate(c)
 			}
 			result, handled := c.engine.sizeBudgetFallback(context.Background(), c.ec, map[string]any{}, budgetDecision(nil), nil)
-			if handled != tc.handled {
-				t.Fatalf("handled=%v want %v (%+v)", handled, tc.handled, result)
+			// A budget that cannot be planned never ends the action: the
+			// search's outcome (winner, audio-only, no candidate) stands.
+			if handled {
+				t.Fatalf("handled (%+v)", result)
 			}
-			if getPlan(c.ec.State["plan"]) != c.base || c.ec.State[sizeBudgetKey] != nil {
-				t.Fatal("declined fallback replaced the plan")
+			if getPlan(c.ec.State["plan"]) != c.base || c.ec.State[sizeBudgetKey] != nil || c.ec.State["skip_transcode"] != nil || c.ec.State["reason_code"] != nil {
+				t.Fatal("declined fallback changed the outcome")
 			}
-			if handled && (result.Status != StepCompleted || getString(c.ec.State, "reason_code") != tc.reason || !getBool(c.ec.State, "skip_transcode") || getString(c.ec.State, "size_budget_skip_message") == "") {
-				t.Fatalf("result %+v state %+v", result, c.ec.State)
+			if getString(c.ec.State, sizeBudgetSkipReasonKey) != tc.reason || (tc.reason != "") != (getString(c.ec.State, sizeBudgetSkipMessageKey) != "") {
+				t.Fatalf("recorded reason %q want %q", getString(c.ec.State, sizeBudgetSkipReasonKey), tc.reason)
 			}
 		})
 	}
@@ -339,6 +340,35 @@ func TestSizeBudgetBenchmarkWait(t *testing.T) {
 		c, result := run(t, map[string]any{"size_budget_percent": 40.0}, nil)
 		if result.Status != StepCompleted || getBool(c.ec.State, "skip_transcode") || c.ec.State["plan_source"] != sizeBudgetPlanSource {
 			t.Fatalf("no-winner fallback %+v %+v", result, c.ec.State)
+		}
+	})
+	t.Run("over budget and no budget encode can be planned keeps the winner", func(t *testing.T) {
+		c := newBudgetCase(t, map[string]any{"size_budget_percent": 40.0}, budgetCaps())
+		rep := budgetReport()
+		rep.Video[0].Tags = nil
+		c.ec.State["source_report"] = rep
+		c.executor.benchmarkStatusFunc = func(_ context.Context, id string) (transcode.BenchmarkStatus, error) {
+			return transcode.BenchmarkStatus{ProtocolVersion: transcode.WorkerProtocolVersion, ID: id, Status: transcode.StatusCompleted, Decision: budgetDecision(budgetWinner())}, nil
+		}
+		result, err := c.engine.stepBenchmarkWait(context.Background(), c.ec)
+		if err != nil || result.Status != StepCompleted || c.ec.State["plan_source"] != "benchmark_winner" || getPlan(c.ec.State["plan"]).Quality != 22 || getBool(c.ec.State, "skip_transcode") {
+			t.Fatalf("passing winner dropped: %+v %+v", result, c.ec.State)
+		}
+		if getString(c.ec.State, sizeBudgetSkipReasonKey) != "size_budget_estimate_unavailable" || !strings.Contains(getString(c.ec.State, sizeBudgetSkipMessageKey), "best passing setting is kept") {
+			t.Fatalf("why the budget was not applied is not recorded: %+v", c.ec.State)
+		}
+		c.ec.Outputs["original_intact"] = true
+		explanation := ExplainTranscode(&ActionResult{ActionName: "transcode_media", Status: StatusCompleted, Inputs: c.ec.Inputs, State: c.ec.State, Outputs: c.ec.Outputs})
+		if explanation.Outcome != "candidate_ready" || !strings.Contains(explanation.Message, "best passing setting is kept") {
+			t.Fatalf("explanation %+v", explanation)
+		}
+	})
+	t.Run("a winner without an estimate is kept", func(t *testing.T) {
+		w := budgetWinner()
+		w.EstimatedTotalBytes, w.EstimatedTotalMB = 0, 0
+		c, _ := run(t, map[string]any{"size_budget_percent": 40.0}, w)
+		if c.ec.State[sizeBudgetKey] != nil || c.ec.State["plan_source"] != "benchmark_winner" {
+			t.Fatalf("winner without an estimate replaced: %+v", c.ec.State)
 		}
 	})
 	t.Run("no passing setting without a budget", func(t *testing.T) {
@@ -403,9 +433,40 @@ func TestSizeBudgetValidation(t *testing.T) {
 		}
 	})
 	t.Run("over budget", func(t *testing.T) {
-		result, state := validate(t, 4_100_000_000, evidence(84.2, 74.0, 76.5), nil)
-		if result.Status != StepCompleted || !getBool(state, "skip_transcode") || state["reason_code"] != SizeBudgetExceeded || sizeBudgetOf(state).Outcome != SizeBudgetExceeded {
-			t.Fatalf("over-budget candidate %+v %+v", result, state)
+		// Over the budget, and also past the 15% minimum saving: both are
+		// reported as over the budget, with the measured size.
+		for _, size := range []int64{4_100_000_000, 9_000_000_000} {
+			result, state := validate(t, size, evidence(84.2, 74.0, 76.5), nil)
+			if result.Status != StepCompleted || !getBool(state, "skip_transcode") || state["reason_code"] != SizeBudgetExceeded || sizeBudgetOf(state).Outcome != SizeBudgetExceeded || sizeBudgetOf(state).CandidateBytes != size {
+				t.Fatalf("%d byte candidate %+v %+v", size, result, state)
+			}
+		}
+	})
+	t.Run("encode settings changed after planning", func(t *testing.T) {
+		for name, change := range map[string]func(*transcode.Plan){
+			"aq mode":   func(p *transcode.Plan) { p.X265.AQMode = 1 },
+			"lookahead": func(p *transcode.Plan) { p.X265.Lookahead = 10 },
+			"preset":    func(p *transcode.Plan) { p.Preset = "ultrafast" },
+		} {
+			result, _ := validate(t, 3_850_000_000, evidence(84.2, 74.0, 76.5), func(state map[string]any) {
+				p := *plan
+				p.X265 = plan.X265.Clone()
+				change(&p)
+				state["plan"] = &p
+			})
+			if result.Status != StepFailed {
+				t.Fatalf("%s: changed plan accepted: %+v", name, result)
+			}
+		}
+	})
+	t.Run("record changed after planning", func(t *testing.T) {
+		result, _ := validate(t, 3_850_000_000, evidence(84.2, 74.0, 76.5), func(state map[string]any) {
+			rec := *sizeBudgetOf(state)
+			rec.TargetBytes += 1_000_000
+			state[sizeBudgetKey] = &rec
+		})
+		if result.Status != StepFailed {
+			t.Fatalf("changed record accepted: %+v", result)
 		}
 	})
 	t.Run("policy limits on a budget plan", func(t *testing.T) {
@@ -439,6 +500,34 @@ func TestSizeBudgetValidation(t *testing.T) {
 	})
 }
 
+// A budget roomier than two-pass x265 can use is met at its bitrate ceiling
+// instead of being refused.
+func TestSizeBudgetBitrateCeiling(t *testing.T) {
+	c := newBudgetCase(t, map[string]any{"size_budget_percent": 85.0}, budgetCaps())
+	rep := budgetReport()
+	rep.Video[0].Tags = map[string]string{"NUMBER_OF_BYTES": "59000000000"}
+	enc := planSizeBudgetEncode(c.snapshot.Size.SizeBudget, rep, 60_000_000_000, 51_000_000_000)
+	if enc.Reason != "" || enc.X265.BitrateKbps != transcode.X265MaxBitrateKbps {
+		t.Fatalf("encode %+v", enc)
+	}
+	if enc := planSizeBudgetEncode(c.snapshot.Size.SizeBudget, rep, 60_000_000_000, 1_000_000_000); enc.Reason != "size_budget_unreachable" {
+		t.Fatalf("budget under the other streams planned: %+v", enc)
+	}
+}
+
+func TestOvershotSizeBudget(t *testing.T) {
+	c := newBudgetCase(t, map[string]any{"size_budget_percent": 40.0}, budgetCaps())
+	if _, handled := c.engine.sizeBudgetFallback(context.Background(), c.ec, map[string]any{}, budgetDecision(nil), nil); !handled {
+		t.Fatal("fallback not taken")
+	}
+	if rec := overshotSizeBudget(c.ec, 0); rec == nil || rec.Outcome != SizeBudgetExceeded || !strings.Contains(rec.Message, "over the") {
+		t.Fatalf("record without a size %+v", rec)
+	}
+	if rec := overshotSizeBudget(c.ec, 9_000_000_000); rec.Outcome != SizeBudgetExceeded || rec.CandidateBytes != 9_000_000_000 {
+		t.Fatalf("record with a size %+v", rec)
+	}
+}
+
 func TestSizeBudgetBelowFloorAndExplanation(t *testing.T) {
 	c := newBudgetCase(t, map[string]any{"size_budget_percent": 40.0}, budgetCaps())
 	if _, handled := c.engine.sizeBudgetFallback(context.Background(), c.ec, map[string]any{}, budgetDecision(nil), nil); !handled {
@@ -460,7 +549,7 @@ func TestResolutionClass(t *testing.T) {
 	for _, tc := range []struct {
 		w, h int
 		want string
-	}{{1920, 800, "1080p"}, {1920, 1080, "1080p"}, {1440, 1080, "1080p"}, {1280, 720, "720p"}, {1280, 536, "720p"}, {720, 480, "sd"}, {3840, 1600, "2160p"}, {0, 0, ""}} {
+	}{{1920, 800, "1080p"}, {1920, 1080, "1080p"}, {1440, 1080, "1080p"}, {1280, 720, "720p"}, {1280, 536, "720p"}, {720, 480, "sd"}, {3840, 1600, "2160p"}, {2560, 1440, "1440p"}, {2560, 1080, "1440p"}, {2048, 858, "1080p"}, {0, 0, ""}} {
 		if got := resolutionClass(tc.w, tc.h); got != tc.want {
 			t.Errorf("%dx%d = %q, want %q", tc.w, tc.h, got, tc.want)
 		}
@@ -550,6 +639,20 @@ func TestSizeBudgetSiblings(t *testing.T) {
 		// The series median takes the season sibling too: 200, 250, 300, 900 MB.
 		if ev.Reason != "" || ev.Scope != "series" || ev.Count != 4 || ev.BudgetBytes != 412_500_000 {
 			t.Fatalf("series evidence %+v", ev)
+		}
+	})
+	t.Run("a folder that is not a season does not widen", func(t *testing.T) {
+		// A movie in its own folder: the folder above is the whole library.
+		root := t.TempDir()
+		src := root + "/Movies/Film A/Film A.mkv"
+		_, rep := source(root)
+		sparse(t, src, 2_000_000_000)
+		for _, name := range []string{"Film B/Film B.mkv", "Film C/Film C.mkv", "Film D/Film D.mkv"} {
+			sparse(t, root+"/Movies/"+name, 300_000_000)
+		}
+		ev := engine(t, root).sizeBudgetSiblings(context.Background(), src, rep, 2_000_000_000, rules)
+		if ev.Reason != "too_few_siblings" || ev.Scope != "season" || ev.Count != 0 {
+			t.Fatalf("movie evidence %+v", ev)
 		}
 	})
 	t.Run("too few", func(t *testing.T) {

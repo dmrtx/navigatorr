@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -16,8 +17,9 @@ import (
 // A sibling budget sizes a file like the other episodes beside it: most of a
 // series is often already small, and the one large episode is the one to bring
 // in line. The budget is the median total bitrate of the other video files of
-// the same resolution class in the season folder (or, with too few there, the
-// series folder one level up), times a multiplier, over the source's duration.
+// the same resolution class in the season folder (or, with too few there and a
+// folder named like a season, the series folder one level up), times a
+// multiplier, over the source's duration.
 
 const (
 	// sizeBudgetSiblingsKey holds the SiblingBudgetEvidence the preflight found.
@@ -35,7 +37,15 @@ const (
 	// Files shorter than this (extras, samples) do not describe an episode.
 	siblingBudgetMinSeconds = 300
 	siblingProbeTimeout     = 30 * time.Second
+	// siblingScanTimeout bounds the whole scan, both folders together, so a
+	// slow share cannot hold the preflight for long.
+	siblingScanTimeout = 3 * time.Minute
 )
+
+// seasonFolder matches the folder names a series keeps its seasons in. Only
+// those fall back to the folder above: above a movie's own folder, or a series
+// kept flat, is the whole library.
+var seasonFolder = regexp.MustCompile(`(?i)^(season|series|staffel|saison|temporada|stagione)[ ._-]*\d{1,4}$|^s\d{1,4}$|^specials$`)
 
 // SiblingBudgetRules are frozen in the size budget when it comes from the
 // sibling files rather than a percent or a byte count.
@@ -100,6 +110,7 @@ func siblingEvidenceOf(state map[string]any) *SiblingBudgetEvidence {
 // resolutionClass buckets a picture by its larger extent with the height
 // scaled to 16:9, so a letterboxed 1920x800 film and a pillarboxed 1440x1080
 // one are both 1080p; a label from the height alone would call the first 720p.
+// DCI 2K (2048 wide) is 1080p; 2560x1440 is its own class.
 func resolutionClass(width, height int) string {
 	if width <= 0 || height <= 0 {
 		return ""
@@ -110,8 +121,10 @@ func resolutionClass(width, height int) string {
 		return "sd"
 	case extent <= 1500:
 		return "720p"
-	case extent <= 2600:
+	case extent <= 2200:
 		return "1080p"
+	case extent <= 2900:
+		return "1440p"
 	}
 	return "2160p"
 }
@@ -172,13 +185,25 @@ func (e *Engine) sizeBudgetSiblings(ctx context.Context, sourcePath string, rep 
 	if err != nil || ev.ResolutionClass == "" {
 		return unavailable("source_unreadable", "The source's picture size could not be read, so it cannot be compared with its siblings.")
 	}
+	// One deadline and one probe count cover both folders, and a file the
+	// season scan probed is not probed again for the series.
+	ctx, cancel := context.WithTimeout(ctx, siblingScanTimeout)
+	defer cancel()
 	probed := 0
+	seen := map[string]*SiblingFile{}
 	measure := func(paths []string) []SiblingFile {
 		var files []SiblingFile
 		for _, path := range paths {
+			if f, done := seen[path]; done {
+				if f != nil {
+					files = append(files, *f)
+				}
+				continue
+			}
 			if probed >= rules.MaxProbed || ctx.Err() != nil {
 				break
 			}
+			seen[path] = nil
 			clean, err := e.deps.Fs.ResolveRead(path)
 			if err != nil {
 				continue
@@ -191,18 +216,19 @@ func (e *Engine) sizeBudgetSiblings(ctx context.Context, sourcePath string, rep 
 			if err != nil || len(v) != 1 || r.DurationSec < siblingBudgetMinSeconds || r.SizeBytes <= 0 || resolutionClass(v[0].Width, v[0].Height) != ev.ResolutionClass {
 				continue
 			}
-			files = append(files, SiblingFile{Name: filepath.Base(clean), Bytes: r.SizeBytes, DurationSeconds: r.DurationSec, BitrateKbps: int(float64(r.SizeBytes) * 8 / r.DurationSec / 1000), Width: v[0].Width, Height: v[0].Height})
+			f := SiblingFile{Name: filepath.Base(clean), Bytes: r.SizeBytes, DurationSeconds: r.DurationSec, BitrateKbps: int(float64(r.SizeBytes) * 8 / r.DurationSec / 1000), Width: v[0].Width, Height: v[0].Height}
+			seen[path] = &f
+			files = append(files, f)
 		}
 		return files
 	}
 	season := filepath.Dir(sourcePath)
 	ev.Scope = "season"
 	files := measure(siblingVideoFiles(season, source, false))
-	if len(files) < rules.MinimumSiblings {
+	if len(files) < rules.MinimumSiblings && seasonFolder.MatchString(filepath.Base(season)) {
 		if series := filepath.Dir(season); series != season {
 			if _, err := e.deps.Fs.ResolveRead(series); err == nil {
 				ev.Scope = "series"
-				probed = 0
 				files = measure(siblingVideoFiles(series, source, true))
 			}
 		}

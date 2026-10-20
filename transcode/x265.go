@@ -29,6 +29,12 @@ func (x *X265Settings) Clone() *X265Settings {
 	return &cp
 }
 
+// The bounds of a two-pass x265 average bitrate.
+const (
+	X265MinBitrateKbps = 64
+	X265MaxBitrateKbps = 50000
+)
+
 func (x *X265Settings) Validate(codec string, quality int) error {
 	if x == nil {
 		return nil
@@ -36,7 +42,7 @@ func (x *X265Settings) Validate(codec string, quality int) error {
 	if NormalizeVideoCodec(codec) != VideoCodecLibX265 || quality != 0 {
 		return fmt.Errorf("x265 ABR settings require libx265 with quality=0")
 	}
-	if !x.TwoPass || x.BitrateKbps < 64 || x.BitrateKbps > 50000 || x.Lookahead < 5 || x.Lookahead > 250 || x.BFrames < 0 || x.BFrames > 16 || x.RefFrames < 1 || x.RefFrames > 16 || x.AQMode < 0 || x.AQMode > 4 {
+	if !x.TwoPass || x.BitrateKbps < X265MinBitrateKbps || x.BitrateKbps > X265MaxBitrateKbps || x.Lookahead < 5 || x.Lookahead > 250 || x.BFrames < 0 || x.BFrames > 16 || x.RefFrames < 1 || x.RefFrames > 16 || x.AQMode < 0 || x.AQMode > 4 {
 		return fmt.Errorf("invalid bounded two-pass x265 settings")
 	}
 	for name, v := range map[string]float64{"aq_strength": x.AQStrength, "psy_rd": x.PsyRD, "psy_rdoq": x.PsyRDOQ} {

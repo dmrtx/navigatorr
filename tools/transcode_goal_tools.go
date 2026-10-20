@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
+
 	"github.com/jakenesler/navigatorr/action"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -25,7 +27,7 @@ type goalChangeInput struct {
 }
 
 func registerTranscodeGoalTool(s *server.MCPServer, engine *action.Engine) {
-	s.AddTool(mcp.NewTool("transcode_goal_change", mcp.WithDescription("Preview or change an automatic batch's goal without choosing technical profiles. Omit mode to read the exact selection and version. To change, provide mode, selection_version and idempotency_key; with mode=size, allow_hardware=false keeps the search on x265 only and hardware_margin_percent (0-50, default 15) sets the media engine size margin; allow_slow_preset=true also lets the quality fallback try the slow x265 preset (hours per full encode; default false); size_budget_percent (5-85, of the source), size_budget_bytes (at least 50000000) or size_budget_source=siblings (the median bitrate of the other episodes in its season or series folder times size_budget_sibling_multiplier 1.0-4.0, default 1.5; at least 3 of the same resolution class), exactly one of them, encodes a file whose search finds no passing setting, or only one larger than the budget, once at the budget (two-pass x265, floor VMAF 70/60/65, reported as below the quality target and never replaced without approval); leaving allow_hardware out turns the media engine on at the default margin, so read the preview first: for smaller-files attempts it shows the allow_hardware / hardware_margin_percent each selected file was frozen with (hardware_mixed when they differ) and passing those keeps them. Keeps originals, existing attempts and the operation's finite search budget; active attempts finish first. Returns a durable command receipt; monitor its command_id with action_status."), mcp.WithInputSchema[goalChangeInput]()), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	s.AddTool(mcp.NewTool("transcode_goal_change", mcp.WithDescription("Preview or change an automatic batch's goal without choosing technical profiles. Omit mode to read the exact selection and version. To change, provide mode, selection_version and idempotency_key; with mode=size, allow_hardware=false keeps the search on x265 only and hardware_margin_percent (0-50, default 15) sets the media engine size margin; allow_slow_preset=true also lets the quality fallback try the slow x265 preset (hours per full encode; default false); size_budget_percent (5-85, of the source), size_budget_bytes (at least 50000000) or size_budget_source=siblings (the median bitrate of the other episodes in its season or series folder times size_budget_sibling_multiplier 1.0-4.0, default 1.5; at least 3 of the same resolution class), exactly one of them, encodes a file whose search finds no passing setting, or only one larger than the budget, once at the budget (two-pass x265, floor VMAF 70/60/65, reported as below the quality target and never replaced without approval); leaving allow_hardware out turns the media engine on at the default margin, so read the preview first: for smaller-files attempts it shows the allow_hardware / hardware_margin_percent each selected file was frozen with (hardware_mixed when they differ) and the size_budget they were frozen with (size_budget_mixed when they differ); passing those again keeps them, and a size change without size_budget_* inputs drops the budget. Keeps originals, existing attempts and the operation's finite search budget; active attempts finish first. Returns a durable command receipt; monitor its command_id with action_status."), mcp.WithInputSchema[goalChangeInput]()), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args := req.GetArguments()
 		id := argString(args, "id", "")
 		scope := argString(args, "scope", "all")
@@ -50,6 +52,8 @@ func registerTranscodeGoalTool(s *server.MCPServer, engine *action.Engine) {
 		version := action.BatchSelectionVersion(inst, items)
 		selected := 0
 		var frozen action.HardwareChoice
+		var budget map[string]any
+		budgetKnown, budgetMixed := false, false
 		for _, item := range items {
 			if !action.BatchRevisionSelects(item, scope, "") {
 				continue
@@ -63,6 +67,12 @@ func registerTranscodeGoalTool(s *server.MCPServer, engine *action.Engine) {
 				if allow, margin, ok := action.BatchItemFrozenHardware(state, item.ItemKey); ok {
 					frozen.Add(allow, margin)
 				}
+				b := action.BatchItemFrozenSizeBudget(state, item.ItemKey)
+				if !budgetKnown {
+					budget, budgetKnown = b, true
+				} else if !reflect.DeepEqual(budget, b) {
+					budgetMixed = true
+				}
 			}
 		}
 		mode := argString(args, "mode", "")
@@ -73,6 +83,12 @@ func registerTranscodeGoalTool(s *server.MCPServer, engine *action.Engine) {
 				// with. A change to size that omits allow_hardware takes the default (on,
 				// 15), not this choice, so pass it to keep it.
 				preview["allow_hardware"], preview["hardware_margin_percent"], preview["hardware_mixed"] = frozen.Allow, frozen.Margin, frozen.Mixed
+			}
+			if budget != nil || budgetMixed {
+				// The size budget the selected attempts were frozen with. A
+				// change to size freezes only the size_budget_* inputs it is
+				// given, so pass them again to keep it.
+				preview["size_budget"], preview["size_budget_mixed"] = budget, budgetMixed
 			}
 			return toolJSON(preview), nil
 		}

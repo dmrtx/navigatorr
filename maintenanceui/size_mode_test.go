@@ -318,4 +318,16 @@ func TestOperationsProjectSizeBudget(t *testing.T) {
 	if block := operationMap(result["size_budget"]); block["outcome"] != "below_quality_target_within_budget" || operationMap(operationMap(block["final"])["measured"])["vmaf_mean"] != 79.5 || result["expected_bytes"] != float64(2850) {
 		t.Fatalf("finished budget encode wrong: %v", result)
 	}
+	// A frozen budget the search's outcome stood without says why.
+	seedOperation(t, st, "budget-declined", "transcode_media", "completed", map[string]any{"path": "/media/series/Show/S01E07.mkv", "mode": "size"}, nil, map[string]any{"mode": "size", "original": map[string]any{"size_bytes": 9000}, "size_budget_skip_message": "Not applied."})
+	seedOperation(t, st, "budget-siblings", "transcode_media", "completed", map[string]any{"path": "/media/series/Show/S01E08.mkv", "mode": "size"}, nil, map[string]any{"mode": "size", "original": map[string]any{"size_bytes": 9000}, "size_budget_siblings": map[string]any{"reason": "too_few_siblings", "message": "Only 1 sibling."}})
+	if got := read("budget-declined"); got["size_budget_note"] != "Not applied." || got["size_budget"] != nil {
+		t.Fatalf("declined budget note: %v", got)
+	}
+	if got := read("budget-siblings"); got["size_budget_note"] != "Only 1 sibling." {
+		t.Fatalf("sibling reason note: %v", got)
+	}
+	if got := read("budget-done"); got["size_budget_note"] != nil {
+		t.Fatalf("note shown beside a budget encode: %v", got)
+	}
 }
