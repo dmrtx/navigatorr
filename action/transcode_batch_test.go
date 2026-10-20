@@ -647,14 +647,12 @@ func TestTranscodeBatch_ReplaceOriginalRejected(t *testing.T) {
 		"series_id":        10,
 		"replace_original": true,
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	invalid, ok := AsInvalidParams(err)
+	if !ok || res != nil || invalid.Field != "replace_original" {
+		t.Fatalf("expected an invalid replace_original parameter before admission, got %+v %v", res, err)
 	}
-	if res.Status != StatusFailed {
-		t.Fatalf("expected validation failure with replace_original: true, got %s", res.Status)
-	}
-	if !strings.Contains(res.Error, "destructive replacement (replace_original: true) is not supported") {
-		t.Errorf("expected destructive replacement error message, got: %s", res.Error)
+	if !strings.Contains(invalid.Reason, "destructive replacement (replace_original: true) is not supported") {
+		t.Errorf("expected destructive replacement error message, got: %s", invalid.Reason)
 	}
 	if mockExecutor.submitCalls != 0 {
 		t.Errorf("expected 0 submit calls on rejection, got %d", mockExecutor.submitCalls)

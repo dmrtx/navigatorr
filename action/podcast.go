@@ -29,6 +29,7 @@ type podcastSession struct {
 func (e *Engine) registerPodcastTemplate() {
 	e.RegisterTemplate(ActionTemplate{Name: "clean_podcast_ads", Version: podcast.Version, AutoReconcile: true, ImmutableInputs: true,
 		Description:    "Durable podcast cleaning. Original preserved. ASR runs on the existing worker queue. Default processing_mode=full: the orchestrating LLM reads EVERY podcast_block page, submits ID-based labels with podcast_classify, resumes decision=plan, and reviews exact cuts when required. processing_mode=known_ads_only automatically renders only verified acoustic/native-text matches without LLM, leaves unknown audio intact and publishes with llm_reviewed=false. Use a full revision from the preserved original and cached transcript for later review. Output is a validated, separate MP3 for the existing feed/download integration.",
+		Validate:       validatePodcast,
 		RequiredInputs: []string{"path", "podcast_id", "output_path"}, OptionalInputs: []string{"episode_id", "feed_id", "idempotency_key", "source_sha256", "cached_transcript_path", "cached_transcript_digest", "cached_asr_job_id", "processing_mode"},
 		Steps: []StepDefinition{
 			{Name: "podcast_preflight", Run: e.podcastPreflight},
@@ -59,19 +60,13 @@ func (e *Engine) podcastPreflight(ctx context.Context, ec *ExecutionContext) (St
 	if frozen := getString(ec.Inputs, "podcast_policy_digest"); frozen != "" && frozen != podcast.Digest(policy) {
 		return StepResult{}, fmt.Errorf("podcast policy changed after admission; submit a new action")
 	}
-	source, err := e.deps.Fs.ResolveRead(getString(ec.Inputs, "path"))
-	if err != nil {
+	tmpl, _ := e.GetTemplate("clean_podcast_ads")
+	if err := checkPodcastFields(tmpl, ec.Inputs); err != nil {
 		return StepResult{}, err
 	}
-	output, err := e.deps.Fs.ResolveWrite(getString(ec.Inputs, "output_path"))
+	source, output, err := e.resolvePodcastPaths(ec.Inputs)
 	if err != nil {
 		return StepResult{}, err
-	}
-	if _, err := e.deps.Fs.ResolveRead(output); err != nil {
-		return StepResult{}, fmt.Errorf("output must also be in allowed_read_roots: %w", err)
-	}
-	if source == output || strings.ToLower(filepath.Ext(output)) != ".mp3" {
-		return StepResult{}, fmt.Errorf("output must be a separate MP3 path")
 	}
 	if _, err := os.Lstat(output); !os.IsNotExist(err) {
 		return StepResult{}, fmt.Errorf("output already exists or cannot be inspected")

@@ -18,6 +18,9 @@ import (
 // parent's immutable selection. The worker still measures the completed file
 // against this source before publishing the candidate.
 func (e *Engine) applySharedBatchCalibration(ec *ExecutionContext, plan *transcode.Plan, source *mediainspect.DetailedReport, profile recipe.Profile, sourceSHA, profileDigest, cleanPath string) error {
+	if sourceSHA == "" {
+		return fmt.Errorf("source hash is required for fixed quality")
+	}
 	if ec.ActionName != "transcode_media" || e.deps.Store == nil {
 		return fmt.Errorf("fixed quality is only supported for a persisted batch child")
 	}

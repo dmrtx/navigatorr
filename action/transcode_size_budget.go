@@ -199,7 +199,7 @@ func modeSizeBudgetInput(mode string, inputs map[string]any) (*SizeBudgetPolicy,
 			f, err := n.Float64()
 			return f, err == nil, err
 		}
-		return 0, false, fmt.Errorf("%s must be a number", key)
+		return 0, false, inputErr(key, "%s must be a number", key)
 	}
 	percent, hasPercent, err := number("size_budget_percent")
 	if err != nil {
@@ -219,23 +219,23 @@ func modeSizeBudgetInput(mode string, inputs map[string]any) (*SizeBudgetPolicy,
 	}
 	if !hasPercent && !hasBytes && !hasSource {
 		if hasMultiplier {
-			return nil, fmt.Errorf("size_budget_sibling_multiplier requires size_budget_source=siblings")
+			return nil, inputErr("size_budget_sibling_multiplier", "size_budget_sibling_multiplier requires size_budget_source=siblings")
 		}
 		return nil, nil
 	}
 	if mode != "size" {
-		return nil, fmt.Errorf("size_budget_percent, size_budget_bytes and size_budget_source are only supported with mode=size")
+		return nil, inputErr(firstPresent(inputs, "size_budget_percent", "size_budget_bytes", "size_budget_source"), "size_budget_percent, size_budget_bytes and size_budget_source are only supported with mode=size")
 	}
 	if (hasPercent && hasBytes) || (hasSource && (hasPercent || hasBytes)) {
-		return nil, fmt.Errorf("set only one of size_budget_percent, size_budget_bytes and size_budget_source")
+		return nil, inputErr(firstPresent(inputs, "size_budget_bytes", "size_budget_source"), "set only one of size_budget_percent, size_budget_bytes and size_budget_source")
 	}
 	if hasMultiplier && !hasSource {
-		return nil, fmt.Errorf("size_budget_sibling_multiplier requires size_budget_source=siblings")
+		return nil, inputErr("size_budget_sibling_multiplier", "size_budget_sibling_multiplier requires size_budget_source=siblings")
 	}
 	b := &SizeBudgetPolicy{FillPercent: sizeBudgetFillPercent, Preset: sizeBudgetPreset, X265: sizeBudgetX265, Floor: sizeBudgetFloor}
 	if hasSource {
 		if source != "siblings" {
-			return nil, fmt.Errorf(`size_budget_source must be "siblings"`)
+			return nil, inputErr("size_budget_source", `size_budget_source must be "siblings"`)
 		}
 		if !hasMultiplier {
 			multiplier = siblingBudgetDefaultMultiplier
@@ -243,16 +243,19 @@ func modeSizeBudgetInput(mode string, inputs map[string]any) (*SizeBudgetPolicy,
 		b.Siblings = &SiblingBudgetRules{Multiplier: multiplier, MinimumSiblings: siblingBudgetMinimum, MaxProbed: siblingBudgetMaxProbed}
 	} else if hasPercent {
 		if math.IsNaN(percent) || math.IsInf(percent, 0) || percent < sizeBudgetMinPercent || percent > sizeBudgetMaxPercent {
-			return nil, fmt.Errorf("size_budget_percent must be between %d and %d (size mode saves at least 15%%)", sizeBudgetMinPercent, sizeBudgetMaxPercent)
+			return nil, inputErr("size_budget_percent", "size_budget_percent must be between %d and %d (size mode saves at least 15%%)", sizeBudgetMinPercent, sizeBudgetMaxPercent)
 		}
 		b.Percent = percent
 	} else {
 		if math.IsNaN(bytes) || math.IsInf(bytes, 0) || bytes != math.Trunc(bytes) || bytes < sizeBudgetMinBytes || bytes > math.MaxInt64/2 {
-			return nil, fmt.Errorf("size_budget_bytes must be a whole number of bytes, at least %d", sizeBudgetMinBytes)
+			return nil, inputErr("size_budget_bytes", "size_budget_bytes must be a whole number of bytes, at least %d", sizeBudgetMinBytes)
 		}
 		b.Bytes = int64(bytes)
 	}
-	return b, b.Validate()
+	if err := b.Validate(); err != nil {
+		return nil, attributeInput(b.field(), err)
+	}
+	return b, nil
 }
 
 // SizeBudgetPoint is one point of the rate-quality curve a budget fallback

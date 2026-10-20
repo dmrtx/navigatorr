@@ -74,12 +74,7 @@ func Resolve(s *Snapshot, profileName string, overrides map[string]Profile, subt
 	}
 	videoProfile := normalizeCodec(p.Video.Profile)
 	pixelFormat := normalizeCodec(p.Video.PixelFormat)
-	expectedBitDepth := 0
-	if videoProfile == "main10" {
-		expectedBitDepth = 10
-	} else if videoProfile == "main" || pixelFormat == "yuv420p" {
-		expectedBitDepth = 8
-	}
+	expectedBitDepth := ExpectedBitDepth(p)
 	plan := &transcode.Plan{
 		X265:      p.Video.X265.Clone(),
 		Container: container, VideoCodec: normalizeCodec(p.Video.Codec), Quality: p.Video.Quality,
@@ -118,4 +113,20 @@ func cloneInt(v *int) *int {
 	}
 	out := *v
 	return &out
+}
+
+// ExpectedBitDepth is the output bit depth a profile pins through its HEVC
+// profile or pixel format: 10 for main10, 8 for main or yuv420p, 0 when it
+// pins neither. Plan resolution and request validation share it so a request
+// can be judged before any source is read.
+func ExpectedBitDepth(p Profile) int {
+	videoProfile := normalizeCodec(p.Video.Profile)
+	pixelFormat := normalizeCodec(p.Video.PixelFormat)
+	if videoProfile == "main10" {
+		return 10
+	}
+	if videoProfile == "main" || pixelFormat == "yuv420p" {
+		return 8
+	}
+	return 0
 }

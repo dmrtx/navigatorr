@@ -244,14 +244,12 @@ func TestTranscode_PathOutsideAllowlistRejected(t *testing.T) {
 	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{
 		"path": outsideFile,
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	invalid, ok := AsInvalidParams(err)
+	if !ok || res != nil || invalid.Field != "path" {
+		t.Fatalf("expected an invalid path parameter for a path outside the allowlist, got %+v %v", res, err)
 	}
-	if res.Status != StatusFailed {
-		t.Fatalf("expected failed status for path outside allowlist, got %s", res.Status)
-	}
-	if !strings.Contains(res.Error, "outside allowed read roots") {
-		t.Errorf("expected allowlist error message, got: %s", res.Error)
+	if !strings.Contains(invalid.Reason, "outside allowed read roots") {
+		t.Errorf("expected allowlist error message, got: %s", invalid.Reason)
 	}
 	if atomic.LoadInt32(&mockExecutor.submitCalls) != 0 {
 		t.Error("should not have called executor submit when path was rejected")
@@ -853,14 +851,12 @@ func TestTranscode_ReplaceOriginal_DestructiveGate(t *testing.T) {
 		"path":             origFile,
 		"replace_original": true,
 	})
-	if err != nil {
-		t.Fatalf("run error: %v", err)
+	invalid, ok := AsInvalidParams(err)
+	if !ok || res != nil || invalid.Field != "replace_original" {
+		t.Fatalf("expected an invalid replace_original parameter, got %+v %v", res, err)
 	}
-	if res.Status != StatusFailed {
-		t.Fatalf("expected failed status when replace_original is true, got %s", res.Status)
-	}
-	if !strings.Contains(res.Error, "destructive replacement (replace_original: true) is not supported") {
-		t.Errorf("expected destructive replacement error, got: %s", res.Error)
+	if !strings.Contains(invalid.Reason, "destructive replacement (replace_original: true) is not supported") {
+		t.Errorf("expected destructive replacement error, got: %s", invalid.Reason)
 	}
 
 	// Original still intact!

@@ -22,6 +22,7 @@ func (e *Engine) registerBenchmarkTemplate() {
 		ImmutableInputs: true,
 		Name:            "benchmark_transcode",
 		Version:         1,
+		Validate:        validateBenchmarkTranscode,
 		Description:     "Test bounded video samples without modifying media or creating a final file. Read benchmark.outcome and next_step, not just status/progress. No winner is a search outcome, not proof of an encoder fault. After two no-winner rounds for the same source bytes, another round requires an explicit review decision, even with a different recipe/action ID. Do not automatically chain CRF ladders or lower thresholds. Benchmarks estimate audio size but do not encode audio.",
 		RequiredInputs:  []string{"path"},
 		OptionalInputs:  []string{"profile", "profile_config", "preserve_source_bit_depth", "metric", "replace_original", "surface_worker_busy", "parent_action_id"},
@@ -41,6 +42,9 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 	if getBool(ec.State, "skip_transcode") {
 		return StepResult{Status: StepSkipped}, nil
 	}
+	if sizeBudgetRoundLost(ec.State) {
+		return StepResult{Status: StepFailed, Error: sizeBudgetRoundLostError}, nil
+	}
 	if round := sizeBudgetRoundOf(ec.State); round != nil && round.Failure != "" {
 		// The comparison round is given up; the wait step plans x265.
 		return StepResult{Status: StepCompleted}, nil
@@ -57,6 +61,9 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 	}
 	if e.deps.Transcode == nil {
 		return StepResult{Status: StepFailed, Error: "transcode executor is disabled or not configured in navigatorr"}, nil
+	}
+	if ec.ActionName == "transcode_media" && getString(ec.State, "original_sha256") == "" {
+		return StepResult{Status: StepFailed, Error: "original integrity baseline missing (fail closed)"}, nil
 	}
 	if wait := getString(ec.State, "benchmark_retry_not_before"); wait != "" {
 		if at, err := time.Parse(time.RFC3339Nano, wait); err == nil && time.Now().Before(at) {
@@ -286,6 +293,11 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 		return StepResult{Status: StepSkipped}, nil
 	}
 
+	if sizeBudgetRoundLost(ec.State) {
+		// Read as an ordinary benchmark, the round's results would pick the
+		// budget encode by the worker's ranking instead of the budget's rule.
+		return StepResult{Status: StepFailed, Error: sizeBudgetRoundLostError}, nil
+	}
 	if round := sizeBudgetRoundOf(ec.State); round != nil && round.Failure != "" {
 		return e.finishSizeBudgetComparison(ec, round, nil)
 	}
@@ -986,13 +998,7 @@ func buildBenchmarkSamples(rep *mediainspect.DetailedReport, optSampling *recipe
 func resolveBenchmarkMetric(ec *ExecutionContext, optQuality *recipe.QualityPolicy) (string, error) {
 	raw := strings.ToLower(strings.TrimSpace(getString(ec.Inputs, "metric")))
 	if raw != "" {
-		if raw != "auto" && raw != "vmaf" && raw != "ssim" && raw != "both" && raw != "vmaf+ssim" {
-			return "", fmt.Errorf("invalid metric %q: must be 'auto', 'vmaf', 'ssim', or 'both' (fail closed)", raw)
-		}
-		if raw == "vmaf+ssim" {
-			raw = "both"
-		}
-		return raw, nil
+		return validBenchmarkMetric(raw)
 	}
 	if optQuality != nil && optQuality.PreferredMetric != "" {
 		norm := strings.ToLower(strings.TrimSpace(optQuality.PreferredMetric))

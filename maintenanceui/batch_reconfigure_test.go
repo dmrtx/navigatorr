@@ -15,10 +15,11 @@ import (
 
 func seedFailedBatch(t *testing.T, s *Server, sonarr bool) map[string]any {
 	t.Helper()
-	inputs := map[string]any{"profile_config": map[string]any{"container": "mkv", "video": map[string]any{"codec": "hevc_videotoolbox", "quality": 80}}, "min_savings_percent": 15, "max_size_increase_percent": 0, "preserve_source_bit_depth": true, "metric": "vmaf"}
+	inputs := map[string]any{"profile_config": testProfileConfig(), "min_savings_percent": 15, "max_size_increase_percent": 0, "preserve_source_bit_depth": true, "metric": "vmaf"}
 	if sonarr {
 		inputs["service"], inputs["series_id"], inputs["season"], inputs["promote_candidates"] = "sonarr", 10, 1, true
 		inputs["episode_file_ids"] = []int{101, 102, 103, 999}
+		s.cfg.AllowDestructive = true
 	} else {
 		inputs["paths"] = []string{"/media/one.mkv", "/media/two.mkv", "/media/three.mkv", "/media/new.mkv"}
 	}

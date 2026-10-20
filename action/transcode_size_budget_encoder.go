@@ -28,6 +28,9 @@ const (
 	// sizeBudgetRoundKey holds the comparison round while it runs: the record
 	// the fallback planned and the search's results set aside.
 	sizeBudgetRoundKey = "size_budget_round"
+	// sizeBudgetComparisonOutputKey is the round's summary in the step's
+	// outputs. It is not sizeBudgetRoundKey: outputs are merged into state.
+	sizeBudgetComparisonOutputKey = "size_budget_comparison"
 	// sizeBudgetCorrectedFromKey names the encode a bitrate correction
 	// replaced. Only the correction writes it, so a manual retry of the
 	// corrected encode, which moves previous_job_id on, keeps it.
@@ -125,6 +128,13 @@ var sizeBudgetSearchKeys = []string{
 }
 
 func sizeBudgetRoundActive(state map[string]any) bool { return state[sizeBudgetRoundKey] != nil }
+
+// sizeBudgetRoundLost reports a round in state whose record cannot be read.
+func sizeBudgetRoundLost(state map[string]any) bool {
+	return sizeBudgetRoundActive(state) && sizeBudgetRoundOf(state) == nil
+}
+
+const sizeBudgetRoundLostError = "size budget encoder comparison state is unreadable (fail closed); original preserved"
 
 func sizeBudgetRoundID(instanceID string) string { return fmt.Sprintf("bench-%s-budget", instanceID) }
 
@@ -317,7 +327,18 @@ func (e *Engine) startSizeBudgetComparison(ec *ExecutionContext, snapshot *ModeP
 	}
 	ec.State["benchmark_job_id"], ec.State["benchmark_request"], ec.State["benchmark_request_digest"] = req.ID, req, digest
 	ec.State["benchmark_attempt"], ec.State["benchmark_retry_count"] = 1, 0
-	outputs[sizeBudgetRoundKey] = map[string]any{"benchmark_job_id": req.ID, "message": rec.Choice.Message}
+	// The engine merges a step's outputs into state after it returns, so
+	// none may undo the round's state: the search's outputs (its job,
+	// benchmark_done) take the round's values, or are dropped where the
+	// round cleared them.
+	for key := range outputs {
+		if v, ok := ec.State[key]; ok {
+			outputs[key] = v
+		} else {
+			delete(outputs, key)
+		}
+	}
+	outputs[sizeBudgetComparisonOutputKey] = map[string]any{"benchmark_job_id": req.ID, "message": rec.Choice.Message}
 	outputs["plan_note"] = rec.Choice.Message
 	return StepResult{Status: StepCompleted, RewindTo: "submit_benchmark", Outputs: outputs}, true
 }

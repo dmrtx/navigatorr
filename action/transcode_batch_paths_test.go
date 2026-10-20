@@ -96,6 +96,15 @@ func TestFilesystemBatchRejectsInvalidSourcesBeforeCreatingItems(t *testing.T) {
 				inputs[key] = value
 			}
 			r, err := e.Run(context.Background(), "transcode_batch", inputs)
+			// Shape and root violations are refused before an action exists;
+			// only what needs a stat (directories, extensions) fails later.
+			if tc.name != "directory" && tc.name != "audio" {
+				invalid, ok := AsInvalidParams(err)
+				if !ok || invalid.Field != "paths" || r != nil {
+					t.Fatalf("invalid source admitted: %+v %v", r, err)
+				}
+				return
+			}
 			if err != nil || r.Status != StatusFailed {
 				t.Fatalf("invalid source admitted: %+v %v", r, err)
 			}

@@ -31,11 +31,12 @@ func TestPreviewStartFreezesEligibilityAndPreservesSettings(t *testing.T) {
 	for _, sonarr := range []bool{false, true} {
 		t.Run(map[bool]string{true: "sonarr", false: "folder"}[sonarr], func(t *testing.T) {
 			s, h := testUI(t)
-			inputs := map[string]any{"profile_config": map[string]any{"container": "mkv", "video": map[string]any{"codec": "hevc_videotoolbox", "quality": 80}}, "metric": "vmaf", "max_items": 3, "preserve_source_bit_depth": true, "min_savings_percent": 20, "max_size_increase_percent": 0}
+			inputs := map[string]any{"profile_config": testProfileConfig(), "metric": "vmaf", "max_items": 3, "preserve_source_bit_depth": true, "min_savings_percent": 20, "max_size_increase_percent": 0}
 			if sonarr {
 				inputs["service"], inputs["series_id"], inputs["season"] = "sonarr", 10, 1
 				inputs["episode_file_ids"] = []int{101, 102, 103, 999}
 				inputs["promote_candidates"] = true
+				s.cfg.AllowDestructive = true
 			} else {
 				inputs["paths"] = []string{"/media/one.mkv", "/media/two.mkv", "/media/three.mkv", "/media/uninspected.mkv"}
 				inputs["media_type"] = "movie"

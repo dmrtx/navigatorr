@@ -172,7 +172,7 @@ func (s *Server) batchPreview(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := s.engine.Enqueue(action.WithOrigin(r.Context(), "web"), "transcode_batch", inputs, previewExecutionPrefix+id)
 	if err != nil {
-		fail(w, 409, err.Error())
+		failAdmission(w, 409, err)
 		return
 	}
 	writeJSON(w, 202, map[string]string{"id": result.ID})

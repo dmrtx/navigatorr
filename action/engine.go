@@ -176,11 +176,6 @@ func (e *Engine) Run(ctx context.Context, actionName string, inputs map[string]a
 		inputCopy[key] = value
 	}
 	inputs = inputCopy
-	if actionName == "clean_podcast_ads" {
-		if err := e.freezePodcastInputs(inputs); err != nil {
-			return nil, err
-		}
-	}
 
 	var idempotencyKey string
 	if len(idempotencyKeys) > 0 {
@@ -190,6 +185,24 @@ func (e *Engine) Run(ctx context.Context, actionName string, inputs map[string]a
 		if k, ok := inputs["idempotency_key"].(string); ok {
 			idempotencyKey = strings.TrimSpace(k)
 		}
+	}
+
+	// A replay whose inputs are identical to an active stored action's returns
+	// that action without being judged again, so it survives configuration
+	// changes made since (a lost response must stay recoverable).
+	if idempotencyKey != "" && tmpl.Validate != nil && tmpl.ImmutableInputs {
+		if existing, err := e.deps.Store.FindActiveActionByIdempotencyKey(actionName, idempotencyKey); err == nil && existing != nil {
+			if matches, err := immutableActionInputsMatch(existing.InputsJSON, inputs); err == nil && matches {
+				return buildActionResult(existing, len(tmpl.Steps), parseExecutionContext(existing, e)), nil
+			}
+		}
+	}
+
+	// Judge the request before any write; this also freezes the podcast
+	// policy identity into the stored inputs.
+	inputs, err := e.validateActionInputs(ctx, tmpl, inputs)
+	if err != nil {
+		return nil, err
 	}
 
 	if actionName == "promote_transcode_candidate" {

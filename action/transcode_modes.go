@@ -254,19 +254,19 @@ func modeHardwareInput(mode string, inputs map[string]any) (*transcode.HardwareS
 	if hasAllow {
 		b, ok := allowRaw.(bool)
 		if !ok {
-			return nil, fmt.Errorf("allow_hardware must be true or false")
+			return nil, inputErr("allow_hardware", "allow_hardware must be true or false")
 		}
 		if b && mode != "size" {
-			return nil, fmt.Errorf("allow_hardware is only supported with mode=size")
+			return nil, inputErr("allow_hardware", "allow_hardware is only supported with mode=size")
 		}
 		allow = b
 	}
 	if hasMargin && mode != "size" {
-		return nil, fmt.Errorf("hardware_margin_percent is only supported with mode=size")
+		return nil, inputErr("hardware_margin_percent", "hardware_margin_percent is only supported with mode=size")
 	}
 	if !allow {
 		if hasMargin {
-			return nil, fmt.Errorf("hardware_margin_percent requires allow_hardware=true")
+			return nil, inputErr("hardware_margin_percent", "hardware_margin_percent requires allow_hardware=true")
 		}
 		return nil, nil
 	}
@@ -280,12 +280,12 @@ func modeHardwareInput(mode string, inputs map[string]any) (*transcode.HardwareS
 		case int64:
 			margin = float64(n)
 		default:
-			return nil, fmt.Errorf("hardware_margin_percent must be a number")
+			return nil, inputErr("hardware_margin_percent", "hardware_margin_percent must be a number")
 		}
 	}
 	rules := &transcode.HardwareSearchRules{MarginPercent: margin, QualityValues: append([]int(nil), sizeHardwareQualityValues...), FallbackQualityValues: append([]int(nil), sizeHardwareFallbackQualityValues...), GOPSize: sizeHardwareGOPSize, BFrames: sizeHardwareBFrames}
 	if err := rules.Validate(); err != nil {
-		return nil, err
+		return nil, attributeInput("hardware_margin_percent", err)
 	}
 	return rules, nil
 }
@@ -321,10 +321,10 @@ func modeSlowPresetInput(mode string, inputs map[string]any) (bool, error) {
 	}
 	b, ok := raw.(bool)
 	if !ok {
-		return false, fmt.Errorf("allow_slow_preset must be true or false")
+		return false, inputErr("allow_slow_preset", "allow_slow_preset must be true or false")
 	}
 	if b && mode != "size" {
-		return false, fmt.Errorf("allow_slow_preset is only supported with mode=size")
+		return false, inputErr("allow_slow_preset", "allow_slow_preset is only supported with mode=size")
 	}
 	return b, nil
 }
@@ -344,29 +344,29 @@ func modePolicyWithOptions(mode string, anime bool, maxHeight int, hardware *tra
 // modePolicyWithBudget also freezes the size budget (size mode only).
 func modePolicyWithBudget(mode string, anime bool, maxHeight int, hardware *transcode.HardwareSearchRules, allowSlow bool, budget *SizeBudgetPolicy) (ModePolicySnapshot, error) {
 	if budget != nil && mode != "size" {
-		return ModePolicySnapshot{}, fmt.Errorf("size_budget_percent and size_budget_bytes are only supported with mode=size")
+		return ModePolicySnapshot{}, inputErr(budget.field(), "size_budget_percent and size_budget_bytes are only supported with mode=size")
 	}
 	if err := budget.Validate(); err != nil {
-		return ModePolicySnapshot{}, err
+		return ModePolicySnapshot{}, attributeInput(budget.field(), err)
 	}
 	if hardware != nil && mode != "size" {
-		return ModePolicySnapshot{}, fmt.Errorf("allow_hardware is only supported with mode=size")
+		return ModePolicySnapshot{}, inputErr("allow_hardware", "allow_hardware is only supported with mode=size")
 	}
 	if allowSlow && mode != "size" {
-		return ModePolicySnapshot{}, fmt.Errorf("allow_slow_preset is only supported with mode=size")
+		return ModePolicySnapshot{}, inputErr("allow_slow_preset", "allow_slow_preset is only supported with mode=size")
 	}
 	if mode != "size" && mode != "quality" && mode != "x265_preserve" && mode != "compact" {
-		return ModePolicySnapshot{}, fmt.Errorf("mode must be size, quality, x265_preserve, or compact")
+		return ModePolicySnapshot{}, inputErr("mode", "mode must be size, quality, x265_preserve, or compact")
 	}
 	if mode != "compact" && maxHeight != 0 {
-		return ModePolicySnapshot{}, fmt.Errorf("max_height is only supported with mode=compact")
+		return ModePolicySnapshot{}, inputErr("max_height", "max_height is only supported with mode=compact")
 	}
 	if mode == "compact" {
 		if maxHeight == 0 {
 			maxHeight = transcode.CompactDefaultMaxHeight
 		}
 		if !transcode.ValidCompactMaxHeight(maxHeight) {
-			return ModePolicySnapshot{}, fmt.Errorf("max_height must be one of %v", transcode.CompactMaxHeights)
+			return ModePolicySnapshot{}, inputErr("max_height", "max_height must be one of %v", transcode.CompactMaxHeights)
 		}
 	}
 	p := automaticBatchSearchProfile(anime)
@@ -420,7 +420,7 @@ func validateModeInputs(inputs map[string]any) error {
 	raw, present := inputs["mode"]
 	if !present {
 		if _, has := inputs["max_height"]; has {
-			return fmt.Errorf("max_height is only supported with mode=compact")
+			return inputErr("max_height", "max_height is only supported with mode=compact")
 		}
 		if _, err := modeHardwareInput("", inputs); err != nil {
 			return err
@@ -435,7 +435,7 @@ func validateModeInputs(inputs map[string]any) error {
 	}
 	mode, ok := raw.(string)
 	if !ok {
-		return fmt.Errorf("mode must be a string")
+		return inputErr("mode", "mode must be a string")
 	}
 	maxHeight, err := modeMaxHeightInput(inputs)
 	if err != nil {
@@ -454,11 +454,11 @@ func validateModeInputs(inputs map[string]any) error {
 		return err
 	}
 	if _, err := modePolicyWithBudget(mode, getBool(inputs, "is_anime") || getString(inputs, "media_type") == "anime", maxHeight, hardware, slow, budget); err != nil {
-		return err
+		return attributeInput("mode", err)
 	}
 	for _, key := range []string{"profile", "profile_config", "priority", "metric", "min_savings_percent", "max_size_increase_percent", "preserve_source_bit_depth", "expected_video_codec", "shared_calibration", "calibration_items", "batch_fixed_quality", "batch_calibration_digest"} {
 		if _, present := inputs[key]; present {
-			return fmt.Errorf("mode cannot be combined with %s; its quality, preservation and size policy is immutable", key)
+			return inputErr(key, "mode cannot be combined with %s; its quality, preservation and size policy is immutable", key)
 		}
 	}
 	return nil
@@ -479,10 +479,10 @@ func modeMaxHeightInput(inputs map[string]any) (int, error) {
 	case int64:
 		v = float64(n)
 	default:
-		return 0, fmt.Errorf("max_height must be a number")
+		return 0, inputErr("max_height", "max_height must be a number")
 	}
 	if v != math.Trunc(v) || !transcode.ValidCompactMaxHeight(int(v)) {
-		return 0, fmt.Errorf("max_height must be one of %v", transcode.CompactMaxHeights)
+		return 0, inputErr("max_height", "max_height must be one of %v", transcode.CompactMaxHeights)
 	}
 	return int(v), nil
 }

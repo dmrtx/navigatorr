@@ -31,6 +31,7 @@ func seedActionInstance(t *testing.T, st *store.Store, id, name, status string, 
 func submitStepState() map[string]any {
 	return map[string]any{
 		"resolved_path":       "/Volumes/media/ep.mkv",
+		"original_sha256":     "source-baseline",
 		"candidate_extension": ".mkv",
 		"profile":             "hevc-vt",
 		"plan":                testReconcilePlan(),
