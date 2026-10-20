@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // Dynamic range classes. Compact mode converts every class whose decodable
@@ -121,23 +120,21 @@ func ProbeFrameSignals(ctx context.Context, ffprobePath, path string, streamInde
 	if ffprobePath == "" {
 		ffprobePath, _ = exec.LookPath("ffprobe")
 	}
-	if ffprobePath == "" {
-		return FrameSignals{}, fmt.Errorf("ffprobe unavailable")
-	}
-	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
-	defer cancel()
 	if streamIndex < 0 || streamIndex > 1<<16 {
 		return FrameSignals{}, fmt.Errorf("invalid video stream index %d", streamIndex)
 	}
-	cmd := exec.CommandContext(ctx, ffprobePath, "-v", "error", "-select_streams", strconv.Itoa(streamIndex),
+	res, err := runFFprobe(ctx, ffprobePath, frameProbeTimeout, "-v", "error", "-select_streams", strconv.Itoa(streamIndex),
 		"-read_intervals", fmt.Sprintf("%%+#%d", frames), "-show_frames",
 		"-show_entries", "frame=color_transfer,color_primaries,color_space,color_range:frame_side_data_list",
 		"-of", "json", path)
-	out, err := cmd.Output()
 	if err != nil {
 		return FrameSignals{}, fmt.Errorf("ffprobe frame signals: %w", err)
 	}
-	return ParseFrameSignals(out)
+	signals, err := ParseFrameSignals(res.stdout)
+	if err != nil {
+		return FrameSignals{}, res.badOutput(err)
+	}
+	return signals, nil
 }
 
 // ClassifySource classifies the single programme video stream of rep.

@@ -265,6 +265,11 @@ type ProductionBenchmarkRunner struct {
 	// capabilityFingerprint replaces the capability probe a continued search
 	// uses to decide whether the earlier search's measurements still apply.
 	capabilityFingerprint func(context.Context, *Worker) (string, error)
+	// pipelineStageHook, when set, is told when the pipelined encode/metric
+	// workers have drained ("measured"), before deferred banding starts. Tests
+	// use it to end the context at the one point where no worker has recorded
+	// a failure yet.
+	pipelineStageHook func(stage string)
 }
 
 // SetMetricsHook sets an optional metrics callback for Phase 5 integration before scratch cleanup.
@@ -595,8 +600,15 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			return fmt.Errorf("extracting reference sample %d failed: %w: %s",
+			failure := fmt.Errorf("extracting reference sample %d failed: %w: %s",
 				window.Index, err, boundedStderr(stderrBuf, 1024))
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				// ffmpeg ran and exited with failure: the one case that may
+				// carry the ffmpeg failure classes.
+				return &ffmpegExecutionError{cause: failure}
+			}
+			return failure
 		}
 
 		if err := verifySourceUnchanged(record.Source, sourceInitialSize, sourceInitialModTime); err != nil {
@@ -714,7 +726,7 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 						PixelFormat:        vc.pixelFormat,
 						Error:              errStr,
 					})
-					return errors.New(errStr)
+					return &ffmpegExecutionError{cause: errors.New(errStr)}
 				}
 				elapsed := time.Since(start).Seconds()
 
@@ -731,7 +743,7 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 						PixelFormat:        vc.pixelFormat,
 						Error:              errStr,
 					})
-					return errors.New(errStr)
+					return &ffmpegExecutionError{cause: errors.New(errStr)}
 				}
 
 				evidence.CandidateSamples = append(evidence.CandidateSamples, BenchmarkCandidateSampleResult{
@@ -872,8 +884,8 @@ func verifySourceUnchanged(sourcePath string, expectedSize int64, expectedModTim
 		return fmt.Errorf("re-stating source file %s failed: %w (fail closed)", sourcePath, err)
 	}
 	if fi.Size() != expectedSize || !fi.ModTime().Equal(expectedModTime) {
-		return fmt.Errorf("source file %s was concurrently modified (size %d->%d, mtime %v->%v): failing closed",
-			sourcePath, expectedSize, fi.Size(), expectedModTime, fi.ModTime())
+		return sourceChanged(fmt.Errorf("source file %s was concurrently modified (size %d->%d, mtime %v->%v): failing closed",
+			sourcePath, expectedSize, fi.Size(), expectedModTime, fi.ModTime()))
 	}
 	return nil
 }
@@ -1481,7 +1493,7 @@ func (r *ProductionBenchmarkRunner) runSelection(
 	sourceInitialSize int64,
 ) error {
 	if ctx.Err() != nil {
-		return ctx.Err()
+		return contextStop(ctx)
 	}
 
 	normMetric := strings.ToLower(strings.TrimSpace(record.Metric))

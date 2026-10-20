@@ -157,6 +157,87 @@ indicator, not an exclusive slot assignment. Heartbeats are saved every five
 seconds independently of polling, and progress becomes stale after thirty
 seconds without a new stage or unit. A heartbeat does not invent progress.
 
+### Benchmark failure classes
+
+`ffmpeg_unknown` means a real ffmpeg process ran and failed in a way no more
+specific class recognizes. Failure text that nothing recognizes is
+`unclassified`, never `ffmpeg_unknown`. A failed benchmark also carries the
+worker's own `failure_classification` when the worker knows the cause, and the
+coordinator uses that class instead of reading the message:
+
+- `benchmark_evidence_incomplete`: the pipeline finished without a result for a
+  candidate window and nothing else explains it. The message names the
+  candidate and the window.
+- `internal_invariant`: a state the worker's own earlier steps should have made
+  impossible, such as an extracted reference sample that is gone.
+
+- `media_probe_failed`: an `ffprobe` inspection gave no usable result (see
+  "Source probe"). The class comes from the typed probe error, never from the
+  message: the message holds the file path and `ffprobe`'s stderr, and a word in
+  a path must not change the class.
+
+- `candidate_invalid`: the encoded candidate failed an integrity check of its
+  own (missing, empty, not a regular file, size or digest not what was accepted,
+  changed while it was hashed). These errors still wrap `ErrSourceInvalid`, so
+  callers that test for it keep working, but they say nothing about the source.
+
+`unclassified`, `benchmark_evidence_incomplete`, `internal_invariant`,
+`media_probe_failed` and `candidate_invalid` are not retried automatically. A
+manual retry stays available.
+
+`source_changed` is assigned only where the code detects that the source differs
+from the one the plan was built on, and each of those sites is a typed error
+(`FailureClass()`), so the class reaches the job record and the coordinator
+whatever the message says:
+
+- the staged source's digest does not match the plan's (`compareSourceDigest`,
+  including the streamed digest) or the file changed while it was hashed for the
+  source check;
+- the SMB download's size moved while it was copied;
+- the source was modified during a benchmark (`verifySourceUnchanged`);
+- the resolved plan no longer matches the source's streams (subtitle index,
+  codec or a missing stream);
+- the accept step that compares hashes.
+
+An unchanged manual retry after any of these is refused, because it would copy
+and hash the same source again. The generic file hasher is role-neutral: it
+reports "changed while hashing" without a class, and the caller assigns
+`source_changed` when it was hashing the source and `candidate_invalid` when it
+was hashing the candidate. A message that merely mentions "source" and "sha",
+such as a path, does not match.
+
+A recipe's `fallbacks[].when` may name `ffmpeg_unknown` but not `unclassified`,
+`benchmark_evidence_incomplete`, `internal_invariant`, `media_probe_failed` or
+`candidate_invalid`.
+Those classes are never retried automatically, so a fallback on them could never
+fire, and validation rejects it with a message saying so.
+
+Audio-only (size mode) video-copy validation probes the source and the candidate
+before it compares packets. A probe that fails there is a terminal job failure of
+class `media_probe_failed`, not a `preservation_not_met` policy rejection: a
+file that could not be inspected has not been shown to differ from the source,
+so it is neither preserved nor rejected as altered. The original is untouched;
+a manual retry re-runs the probe.
+
+A search that is stopped by its time budget is not a failure: windows left
+unmeasured by the stop report the cancellation, so the action parks as
+`search_budget_exhausted` and is not failed for "missing evidence".
+
+## Source probe
+
+Preflight inspects the source with `ffprobe` before it plans the encode. A
+probe that fails returns a typed error with its kind: `timeout`, `unavailable`,
+`tool_exit` (the exit status and up to 2 KB of `ffprobe` stderr), or
+`bad_output`. `ffprobe` runs with `-v error` and a bounded wait, so a probe
+stuck on a stalled read is abandoned instead of hanging the action.
+
+Preflight tries again once, after a short backoff, when the failure is a
+timeout or `ffprobe` reported an I/O-looking error such as a stale handle or a
+reset connection. Deterministic failures (a corrupt container, a missing
+binary, unparsable output) are not retried. When the retry fails too, the
+action fails closed and the message carries the kind and the cause. A source
+that cannot be inspected is never treated as probed.
+
 ## Promotion
 
 `promote_transcode_candidate` is a separate, explicitly approved action.

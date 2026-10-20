@@ -110,7 +110,10 @@ func (e *Engine) prepareRemoteRetry(ctx context.Context, inst *store.ActionInsta
 			}
 			return submit, nil
 		}
-		class := string(resilience.Classify(st.Error))
+		class := st.FailureClassification
+		if class == "" {
+			class = string(resilience.Classify(st.Error))
+		}
 		if err := rejectUnchangedPermanentRetry(class); err != nil {
 			return resume, err
 		}

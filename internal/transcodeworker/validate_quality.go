@@ -68,12 +68,12 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 	sourceRep, err := mediainspect.InspectDetailed(ctx, w.ffprobePath, source)
 	sourceVideoStreams := sourceRep.MainVideo()
 	if err != nil || len(sourceVideoStreams) != 1 {
-		return fail("quality_final_source_probe_failed", fmt.Errorf("source video probe: %v", err))
+		return fail("quality_final_source_probe_failed", probeFailure("source video probe", err, len(sourceVideoStreams)))
 	}
 	candidateRep, err := mediainspect.InspectDetailed(ctx, w.ffprobePath, candidate)
 	candidateVideoStreams := candidateRep.MainVideo()
 	if err != nil || len(candidateVideoStreams) != 1 {
-		return fail("quality_final_candidate_probe_failed", fmt.Errorf("candidate video probe: %v", err))
+		return fail("quality_final_candidate_probe_failed", probeFailure("candidate video probe", err, len(candidateVideoStreams)))
 	}
 	var compactChain string
 	if plan.Compact != nil {
@@ -526,6 +526,17 @@ func verifySampleAlignment(ref, cand []float64, fps float64) error {
 	return nil
 }
 
+// probeFailure describes a probe that gave no usable video. The probe's own
+// error is wrapped, not formatted, so its typed class survives for the
+// classifier: the message carries file paths and ffprobe's stderr, and a
+// classifier that reads it can match a word in a path.
+func probeFailure(what string, err error, videoStreams int) error {
+	if err != nil {
+		return fmt.Errorf("%s: %w", what, err)
+	}
+	return fmt.Errorf("%s: %d main video streams, want exactly 1", what, videoStreams)
+}
+
 func isFiniteQuality(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
 
 // Mode preflight rejects unsupported measurement classes on the staged local
@@ -537,7 +548,7 @@ func (w *Worker) validateModeSourceQuality(ctx context.Context, source string, p
 	rep, err := mediainspect.InspectDetailed(ctx, w.ffprobePath, source)
 	video := rep.MainVideo()
 	if err != nil || len(video) != 1 {
-		return fmt.Errorf("quality_source_evidence_missing: source class unavailable: %v", err)
+		return fmt.Errorf("quality_source_evidence_missing: %w", probeFailure("source class unavailable", err, len(video)))
 	}
 	v := video[0]
 	if plan.Mode == "x265_preserve" && (norm(v.Codec) == "hevc" || norm(v.Codec) == "h265") {
@@ -546,7 +557,7 @@ func (w *Worker) validateModeSourceQuality(ctx context.Context, source string, p
 	if plan.Compact != nil {
 		dr, err := classifySourceDynamicRange(ctx, w.ffprobePath, source, &rep)
 		if err != nil {
-			return fmt.Errorf("quality_source_evidence_missing: %v", err)
+			return fmt.Errorf("quality_source_evidence_missing: %w", err)
 		}
 		if err := plan.Compact.MatchSource(dr, v); err != nil {
 			return &transcode.PolicyRejectionError{ReasonCode: "compact_source_changed", Message: err.Error()}

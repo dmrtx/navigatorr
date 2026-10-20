@@ -829,35 +829,39 @@ type BenchmarkWindowScore struct {
 // held a worker slot for most of it, so the shortfall says nothing about the
 // source.
 type BenchmarkStatus struct {
-	Automatic           *BenchmarkAutomaticEvidence         `json:"automatic,omitempty"`
-	SearchSeconds       *float64                            `json:"search_seconds,omitempty"`
-	PhaseCosts          map[string]PhaseCost                `json:"phase_costs,omitempty"`
-	ReasonCode          string                              `json:"reason_code,omitempty"`
-	SearchStartedAt     time.Time                           `json:"search_started_at,omitzero"`
-	SearchBudgetSeconds int                                 `json:"search_budget_seconds,omitempty"`
-	SearchExtension     *SearchExtension                    `json:"search_extension,omitempty"`
-	SearchWorkerBusy    bool                                `json:"search_worker_busy,omitempty"`
-	ComparisonAvailable bool                                `json:"comparison_available,omitempty"`
-	ProtocolVersion     int                                 `json:"protocol_version"`
-	ID                  string                              `json:"id"`
-	Status              string                              `json:"status"` // queued, running, completed, failed, cancelled
-	SourcePath          string                              `json:"source_path"`
-	Metric              string                              `json:"metric,omitempty"`
-	Progress            float64                             `json:"progress"`
-	Phase               string                              `json:"phase,omitempty"`
-	HeartbeatAt         time.Time                           `json:"heartbeat_at,omitempty"`
-	LastProgressAt      time.Time                           `json:"last_progress_at,omitempty"`
-	ProgressIsStale     bool                                `json:"progress_is_stale"`
-	ProgressDetails     *BenchmarkProgressDetails           `json:"progress_details,omitempty"`
-	Error               string                              `json:"error,omitempty"`
-	SamplesPlanned      int                                 `json:"samples_planned"`
-	CandidatesCount     int                                 `json:"candidates_count"`
-	Attempt             int                                 `json:"attempt,omitempty"`
-	CreatedAt           time.Time                           `json:"created_at"`
-	StartedAt           time.Time                           `json:"started_at,omitempty"`
-	FinishedAt          time.Time                           `json:"finished_at,omitempty"`
-	Decision            *BenchmarkDecision                  `json:"decision,omitempty"`
-	Quality             []BenchmarkCandidateQualityEvidence `json:"quality,omitempty"`
+	Automatic     *BenchmarkAutomaticEvidence `json:"automatic,omitempty"`
+	SearchSeconds *float64                    `json:"search_seconds,omitempty"`
+	PhaseCosts    map[string]PhaseCost        `json:"phase_costs,omitempty"`
+	ReasonCode    string                      `json:"reason_code,omitempty"`
+	// FailureClassification is the worker's own class for a failed benchmark
+	// whose cause it understands (see resilience.FailureClass). When set, the
+	// coordinator uses it instead of reading the class from the error text.
+	FailureClassification string                              `json:"failure_classification,omitempty"`
+	SearchStartedAt       time.Time                           `json:"search_started_at,omitzero"`
+	SearchBudgetSeconds   int                                 `json:"search_budget_seconds,omitempty"`
+	SearchExtension       *SearchExtension                    `json:"search_extension,omitempty"`
+	SearchWorkerBusy      bool                                `json:"search_worker_busy,omitempty"`
+	ComparisonAvailable   bool                                `json:"comparison_available,omitempty"`
+	ProtocolVersion       int                                 `json:"protocol_version"`
+	ID                    string                              `json:"id"`
+	Status                string                              `json:"status"` // queued, running, completed, failed, cancelled
+	SourcePath            string                              `json:"source_path"`
+	Metric                string                              `json:"metric,omitempty"`
+	Progress              float64                             `json:"progress"`
+	Phase                 string                              `json:"phase,omitempty"`
+	HeartbeatAt           time.Time                           `json:"heartbeat_at,omitempty"`
+	LastProgressAt        time.Time                           `json:"last_progress_at,omitempty"`
+	ProgressIsStale       bool                                `json:"progress_is_stale"`
+	ProgressDetails       *BenchmarkProgressDetails           `json:"progress_details,omitempty"`
+	Error                 string                              `json:"error,omitempty"`
+	SamplesPlanned        int                                 `json:"samples_planned"`
+	CandidatesCount       int                                 `json:"candidates_count"`
+	Attempt               int                                 `json:"attempt,omitempty"`
+	CreatedAt             time.Time                           `json:"created_at"`
+	StartedAt             time.Time                           `json:"started_at,omitempty"`
+	FinishedAt            time.Time                           `json:"finished_at,omitempty"`
+	Decision              *BenchmarkDecision                  `json:"decision,omitempty"`
+	Quality               []BenchmarkCandidateQualityEvidence `json:"quality,omitempty"`
 }
 
 // DigestBenchmarkRequest computes a deterministic sha256 digest of the benchmark request payload.

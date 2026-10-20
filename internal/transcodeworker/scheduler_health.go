@@ -30,7 +30,7 @@ func schedulerDiagnostic(err error) *transcode.WorkerDiagnostic {
 		class = "storage_missing"
 		message = "Scheduler state storage is missing."
 	}
-	if class == "" || class == string(resilience.FFmpegUnknown) {
+	if isUnrecognizedClass(class) {
 		class = "scheduler_sweep_failed"
 	}
 	return &transcode.WorkerDiagnostic{Class: class, Message: message}

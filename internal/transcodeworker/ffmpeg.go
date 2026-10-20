@@ -23,7 +23,23 @@ type ffmpegExecutionError struct{ cause error }
 func (e *ffmpegExecutionError) Error() string { return e.cause.Error() }
 func (e *ffmpegExecutionError) Unwrap() error { return e.cause }
 func (e *ffmpegExecutionError) FailureClass() string {
-	return string(resilience.Classify(e.cause.Error()))
+	// The process really ran and failed, so text no class recognizes is an
+	// unknown ffmpeg failure here, and only here.
+	if class := resilience.Classify(e.cause.Error()); class != resilience.Unclassified {
+		return string(class)
+	}
+	return string(resilience.FFmpegUnknown)
+}
+
+// isUnrecognizedClass reports a classification that names no cause: empty,
+// unclassified, or the ffmpeg default that an error from outside an ffmpeg
+// process must not keep.
+func isUnrecognizedClass(class string) bool {
+	switch class {
+	case "", string(resilience.Unclassified), string(resilience.FFmpegUnknown):
+		return true
+	}
+	return false
 }
 
 // ResolveToolPath finds the tool at specified path or falls back to PATH.

@@ -52,13 +52,13 @@ func verifyCheckpointCandidate(ctx context.Context, job *JobRecord, path string)
 	if transcode.IsSizeAudioOnlyPlan(job.Plan) {
 		e := job.QualityEvidence
 		if e == nil || e.Verdict != "pass" || e.CandidateSHA256 != job.CandidateSHA256 || e.CandidateSizeBytes != job.CandidateSizeBytes || e.PlanDigest != job.Plan.PlanDigest || e.VideoCopy.Check() != nil {
-			return fmt.Errorf("%w: video copy attestation missing or mismatched; never publish", ErrSourceInvalid)
+			return candidateInvalid(fmt.Errorf("%w: video copy attestation missing or mismatched; never publish", ErrSourceInvalid))
 		}
 	}
 	if job.Plan != nil && job.Plan.QualityValidation != nil {
 		e := job.QualityEvidence
 		if e == nil || e.Verdict != "pass" || e.CandidateSHA256 != job.CandidateSHA256 || e.CandidateSizeBytes != job.CandidateSizeBytes || e.PlanDigest != job.Plan.PlanDigest || e.BenchmarkRequestDigest != job.Plan.QualityValidation.BenchmarkRequestDigest {
-			return fmt.Errorf("%w: final perceptual quality attestation missing or mismatched; never publish", ErrSourceInvalid)
+			return candidateInvalid(fmt.Errorf("%w: final perceptual quality attestation missing or mismatched; never publish", ErrSourceInvalid))
 		}
 	}
 	// Pre-attestation worker records remain readable. A partial or missing
@@ -67,21 +67,21 @@ func verifyCheckpointCandidate(ctx context.Context, job *JobRecord, path string)
 		return nil
 	}
 	if job.CandidateSHA256 == "" || job.CandidateSizeBytes <= 0 {
-		return fmt.Errorf("%w: validated candidate checkpoint has no complete integrity baseline", ErrSourceInvalid)
+		return candidateInvalid(fmt.Errorf("%w: validated candidate checkpoint has no complete integrity baseline", ErrSourceInvalid))
 	}
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() != job.CandidateSizeBytes {
-		return fmt.Errorf("%w: local candidate no longer matches validated size/type; never publish", ErrSourceInvalid)
+		return candidateInvalid(fmt.Errorf("%w: local candidate no longer matches validated size/type; never publish", ErrSourceInvalid))
 	}
 	// A fresh runner (restart or scheduled finalization retry) has an empty
 	// digest memo and reads the whole candidate; the runner that just
 	// validated it reuses that digest while the file's fingerprint is intact.
 	sha, err := verifiedLocalSHA256(ctx, path)
 	if err != nil {
-		return err
+		return candidateHashFailure(err)
 	}
 	if sha != job.CandidateSHA256 {
-		return fmt.Errorf("%w: local candidate SHA-256 changed after validation; never publish", ErrSourceInvalid)
+		return candidateInvalid(fmt.Errorf("%w: local candidate SHA-256 changed after validation; never publish", ErrSourceInvalid))
 	}
 	return nil
 }
@@ -96,17 +96,17 @@ func (w *Worker) validateEncodedCandidateFull(ctx context.Context, localCandidat
 		return attest, err
 	}
 	if execPlan == nil || execPlan.Plan == nil {
-		return attest, fmt.Errorf("%w: nil execution plan for candidate validation (fail closed)", ErrSourceInvalid)
+		return attest, candidateInvalid(fmt.Errorf("%w: nil execution plan for candidate validation (fail closed)", ErrSourceInvalid))
 	}
 	info, err := os.Lstat(localCandidate)
 	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
-		return attest, fmt.Errorf("%w: local candidate %s is not a non-empty regular file", ErrSourceInvalid, localCandidate)
+		return attest, candidateInvalid(fmt.Errorf("%w: local candidate %s is not a non-empty regular file", ErrSourceInvalid, localCandidate))
 	}
 	// Bind the probe to an immutable byte baseline. Hashing only after the
 	// probe could bless a replacement written while ffprobe was running.
 	sha, err := hashLocalFileSHA256(ctx, localCandidate)
 	if err != nil {
-		return attest, err
+		return attest, candidateHashFailure(err)
 	}
 	candProbe, err := w.probeSourceDetailsForJob(ctx, localCandidate)
 	if err != nil {
@@ -117,29 +117,29 @@ func (w *Worker) validateEncodedCandidateFull(ctx context.Context, localCandidat
 	}
 	srcVideo, candVideo := firstMainVideo(srcProbe.Streams), firstMainVideo(candProbe.Streams)
 	if candVideo == nil {
-		return attest, fmt.Errorf("%w: local candidate contains no video streams (fail closed, never publish)", ErrSourceInvalid)
+		return attest, candidateInvalid(fmt.Errorf("%w: local candidate contains no video streams (fail closed, never publish)", ErrSourceInvalid))
 	}
 	if strings.TrimSpace(candVideo.Codec) == "" {
-		return attest, fmt.Errorf("%w: local candidate video stream has empty codec (fail closed, never publish)", ErrSourceInvalid)
+		return attest, candidateInvalid(fmt.Errorf("%w: local candidate video stream has empty codec (fail closed, never publish)", ErrSourceInvalid))
 	}
 	// Video count must be preserved (exactly one video stream in practice).
 	// Cover art (attached pictures) is counted separately so a cover cannot
 	// stand in for programme video or vanish unnoticed.
 	if sv, cv := countMainVideo(srcProbe.Streams), countMainVideo(candProbe.Streams); sv > 0 && cv != sv {
-		return attest, fmt.Errorf("%w: local candidate video count %d != source %d (fail closed, never publish)", ErrSourceInvalid, cv, sv)
+		return attest, candidateInvalid(fmt.Errorf("%w: local candidate video count %d != source %d (fail closed, never publish)", ErrSourceInvalid, cv, sv))
 	}
 	if sc, cc := countCoverArt(srcProbe.Streams), countCoverArt(candProbe.Streams); cc != sc {
-		return attest, fmt.Errorf("%w: local candidate cover art count %d != source %d (fail closed, never publish)", ErrSourceInvalid, cc, sc)
+		return attest, candidateInvalid(fmt.Errorf("%w: local candidate cover art count %d != source %d (fail closed, never publish)", ErrSourceInvalid, cc, sc))
 	}
 	// Codec: the candidate must actually be the requested target codec.
 	if expected := expectedWorkerVideoCodec(execPlan.Plan.VideoCodec); expected != "" {
 		if got := norm(candVideo.Codec); !codecMatches(expected, got) {
-			return attest, fmt.Errorf("%w: local candidate video codec %q does not match expected %q (fail closed, never publish)", ErrSourceInvalid, candVideo.Codec, expected)
+			return attest, candidateInvalid(fmt.Errorf("%w: local candidate video codec %q does not match expected %q (fail closed, never publish)", ErrSourceInvalid, candVideo.Codec, expected))
 		}
 	}
 	// Expected bit depth is a hard invariant.
 	if execPlan.Plan.ExpectedBitDepth > 0 && candVideo.BitDepth > 0 && candVideo.BitDepth != execPlan.Plan.ExpectedBitDepth {
-		return attest, fmt.Errorf("%w: local candidate bit depth %d != expected %d (fail closed, never publish)", ErrSourceInvalid, candVideo.BitDepth, execPlan.Plan.ExpectedBitDepth)
+		return attest, candidateInvalid(fmt.Errorf("%w: local candidate bit depth %d != expected %d (fail closed, never publish)", ErrSourceInvalid, candVideo.BitDepth, execPlan.Plan.ExpectedBitDepth))
 	}
 	if err := pixelFormatCompatible(execPlan.Plan.PixelFormat, candVideo.PixelFormat, execPlan.Plan.ExpectedBitDepth); err != nil {
 		return attest, err
@@ -148,11 +148,11 @@ func (w *Worker) validateEncodedCandidateFull(ctx context.Context, localCandidat
 	// the source resolution.
 	if c := execPlan.Plan.Compact; c != nil {
 		if candVideo.Width != c.TargetWidth || candVideo.Height != c.TargetHeight || srcVideo == nil || srcVideo.Width != c.SourceWidth || srcVideo.Height != c.SourceHeight {
-			return attest, fmt.Errorf("%w: local candidate resolution %dx%d != compact target %dx%d (fail closed, never publish)", ErrSourceInvalid, candVideo.Width, candVideo.Height, c.TargetWidth, c.TargetHeight)
+			return attest, candidateInvalid(fmt.Errorf("%w: local candidate resolution %dx%d != compact target %dx%d (fail closed, never publish)", ErrSourceInvalid, candVideo.Width, candVideo.Height, c.TargetWidth, c.TargetHeight))
 		}
 	} else if srcVideo != nil && srcVideo.Width > 0 && srcVideo.Height > 0 && candVideo.Width > 0 && candVideo.Height > 0 {
 		if srcVideo.Width != candVideo.Width || srcVideo.Height != candVideo.Height {
-			return attest, fmt.Errorf("%w: local candidate resolution %dx%d != source %dx%d (fail closed, never publish)", ErrSourceInvalid, candVideo.Width, candVideo.Height, srcVideo.Width, srcVideo.Height)
+			return attest, candidateInvalid(fmt.Errorf("%w: local candidate resolution %dx%d != source %dx%d (fail closed, never publish)", ErrSourceInvalid, candVideo.Width, candVideo.Height, srcVideo.Width, srcVideo.Height))
 		}
 	}
 	if err := validateAudioPreservation(execPlan.Plan, srcProbe.Streams, candProbe.Streams); err != nil {
@@ -170,19 +170,19 @@ func (w *Worker) validateEncodedCandidateFull(ctx context.Context, localCandidat
 	if execPlan.Plan.PreserveAttachments {
 		sa, ca := countStreams(srcProbe.Streams, "attachment"), countStreams(candProbe.Streams, "attachment")
 		if sa > 0 && ca != sa {
-			return attest, fmt.Errorf("%w: local candidate attachment count %d != source %d (fail closed, never publish)", ErrSourceInvalid, ca, sa)
+			return attest, candidateInvalid(fmt.Errorf("%w: local candidate attachment count %d != source %d (fail closed, never publish)", ErrSourceInvalid, ca, sa))
 		}
 	}
 	// Chapter preservation policy (only when the probe could count chapters).
 	if execPlan.Plan.PreserveChapters && srcProbe.Chapters > 0 && candProbe.Chapters != srcProbe.Chapters {
-		return attest, fmt.Errorf("%w: local candidate chapter count %d != source %d (fail closed, never publish)", ErrSourceInvalid, candProbe.Chapters, srcProbe.Chapters)
+		return attest, candidateInvalid(fmt.Errorf("%w: local candidate chapter count %d != source %d (fail closed, never publish)", ErrSourceInvalid, candProbe.Chapters, srcProbe.Chapters))
 	}
 	// Duration sanity mirrors the historical coordinator tolerance (3s absolute
 	// and 2% relative). A diverged duration is never published.
 	if srcProbe.DurationSec > 0 && candProbe.DurationSec > 0 {
 		d := math.Abs(candProbe.DurationSec - srcProbe.DurationSec)
 		if d > 3 && (d/srcProbe.DurationSec) > 0.02 {
-			return attest, fmt.Errorf("%w: local candidate duration %.1fs diverges from source %.1fs (diff %.1fs, fail closed, never publish)", ErrSourceInvalid, candProbe.DurationSec, srcProbe.DurationSec, d)
+			return attest, candidateInvalid(fmt.Errorf("%w: local candidate duration %.1fs diverges from source %.1fs (diff %.1fs, fail closed, never publish)", ErrSourceInvalid, candProbe.DurationSec, srcProbe.DurationSec, d))
 		}
 	}
 	// Within a job run this is a strict stat-fingerprint check against the
@@ -190,10 +190,10 @@ func (w *Worker) validateEncodedCandidateFull(ctx context.Context, localCandidat
 	// read; without a job run's digest memo it reads the file again.
 	verifiedSHA, err := verifiedLocalSHA256(ctx, localCandidate)
 	if err != nil {
-		return attest, err
+		return attest, candidateHashFailure(err)
 	}
 	if verifiedSHA != sha {
-		return attest, fmt.Errorf("%w: local candidate changed during validation; never publish", ErrSourceInvalid)
+		return attest, candidateInvalid(fmt.Errorf("%w: local candidate changed during validation; never publish", ErrSourceInvalid))
 	}
 	attest = CandidateAttestation{
 		SizeBytes:   info.Size(),
@@ -298,13 +298,13 @@ func pixelFormatCompatible(expected, actual string, expectedBitDepth int) error 
 	if eok && aok && fe == fa {
 		return nil
 	}
-	return fmt.Errorf("%w: local candidate pixel format %q is incompatible with requested %q (fail closed, never publish)", ErrSourceInvalid, actual, expected)
+	return candidateInvalid(fmt.Errorf("%w: local candidate pixel format %q is incompatible with requested %q (fail closed, never publish)", ErrSourceInvalid, actual, expected))
 }
 
 func validateAudioPreservation(plan *transcode.Plan, src, cand []SourceStream) error {
 	srcAudio, candAudio := streamsOfKind(src, "audio"), streamsOfKind(cand, "audio")
 	if len(candAudio) != len(srcAudio) {
-		return fmt.Errorf("%w: local candidate audio count %d != source %d (fail closed, never publish)", ErrSourceInvalid, len(candAudio), len(srcAudio))
+		return candidateInvalid(fmt.Errorf("%w: local candidate audio count %d != source %d (fail closed, never publish)", ErrSourceInvalid, len(candAudio), len(srcAudio)))
 	}
 	for i := range srcAudio {
 		a, b := srcAudio[i], candAudio[i]
@@ -320,20 +320,20 @@ func validateAudioPreservation(plan *transcode.Plan, src, cand []SourceStream) e
 			target = norm(a.Codec)
 		}
 		if !codecMatches(target, norm(b.Codec)) {
-			return fmt.Errorf("%w: local candidate audio codec %q at stream %d != expected %q (fail closed, never publish)", ErrSourceInvalid, b.Codec, i, target)
+			return candidateInvalid(fmt.Errorf("%w: local candidate audio codec %q at stream %d != expected %q (fail closed, never publish)", ErrSourceInvalid, b.Codec, i, target))
 		}
 		if a.Language != "" && !(norm(a.Language) == "und" && b.Language == "") && norm(a.Language) != norm(b.Language) {
-			return fmt.Errorf("%w: local candidate audio language %q at stream %d != source %q (fail closed, never publish)", ErrSourceInvalid, b.Language, i, a.Language)
+			return candidateInvalid(fmt.Errorf("%w: local candidate audio language %q at stream %d != source %q (fail closed, never publish)", ErrSourceInvalid, b.Language, i, a.Language))
 		}
 		if a.Channels > 0 && a.Channels != b.Channels {
-			return fmt.Errorf("%w: local candidate audio channels %d at stream %d != source %d (fail closed, never publish)", ErrSourceInvalid, b.Channels, i, a.Channels)
+			return candidateInvalid(fmt.Errorf("%w: local candidate audio channels %d at stream %d != source %d (fail closed, never publish)", ErrSourceInvalid, b.Channels, i, a.Channels))
 		}
 		if checkLayout && !transcode.SameAudioLayout(a.Layout, b.Layout) {
-			return fmt.Errorf("%w: local candidate audio layout %q at stream %d != source %q (fail closed, never publish)", ErrSourceInvalid, b.Layout, i, a.Layout)
+			return candidateInvalid(fmt.Errorf("%w: local candidate audio layout %q at stream %d != source %q (fail closed, never publish)", ErrSourceInvalid, b.Layout, i, a.Layout))
 		}
 		for disposition, value := range a.Disposition {
 			if b.Disposition[disposition] != value {
-				return fmt.Errorf("%w: audio disposition %s changed at stream %d (fail closed, never publish)", ErrSourceInvalid, disposition, i)
+				return candidateInvalid(fmt.Errorf("%w: audio disposition %s changed at stream %d (fail closed, never publish)", ErrSourceInvalid, disposition, i))
 			}
 		}
 	}
@@ -343,7 +343,7 @@ func validateAudioPreservation(plan *transcode.Plan, src, cand []SourceStream) e
 func validateSubtitlePreservation(plan *transcode.Plan, src, cand []SourceStream) error {
 	srcSubs, candSubs := streamsOfKind(src, "subtitle"), streamsOfKind(cand, "subtitle")
 	if len(candSubs) != len(srcSubs) {
-		return fmt.Errorf("%w: local candidate subtitle count %d != source %d (fail closed, never publish)", ErrSourceInvalid, len(candSubs), len(srcSubs))
+		return candidateInvalid(fmt.Errorf("%w: local candidate subtitle count %d != source %d (fail closed, never publish)", ErrSourceInvalid, len(candSubs), len(srcSubs)))
 	}
 	actions := map[int]transcode.SubtitleAction{}
 	for _, a := range plan.SubtitleActions {
@@ -360,19 +360,19 @@ func validateSubtitlePreservation(plan *transcode.Plan, src, cand []SourceStream
 		switch norm(act.Operation) {
 		case "copy":
 			if !codecMatches(norm(a.Codec), norm(b.Codec)) {
-				return fmt.Errorf("%w: copied subtitle codec changed at stream %d: source=%s candidate=%s (fail closed, never publish)", ErrSourceInvalid, i, a.Codec, b.Codec)
+				return candidateInvalid(fmt.Errorf("%w: copied subtitle codec changed at stream %d: source=%s candidate=%s (fail closed, never publish)", ErrSourceInvalid, i, a.Codec, b.Codec))
 			}
 		case "transcode":
 			if !codecMatches(norm(act.Codec), norm(b.Codec)) {
-				return fmt.Errorf("%w: converted subtitle codec mismatch at stream %d: expected=%s candidate=%s (fail closed, never publish)", ErrSourceInvalid, i, act.Codec, b.Codec)
+				return candidateInvalid(fmt.Errorf("%w: converted subtitle codec mismatch at stream %d: expected=%s candidate=%s (fail closed, never publish)", ErrSourceInvalid, i, act.Codec, b.Codec))
 			}
 		}
 		if a.Language != "" && b.Language != "" && norm(a.Language) != norm(b.Language) {
-			return fmt.Errorf("%w: subtitle language mismatch at stream %d (fail closed, never publish)", ErrSourceInvalid, i)
+			return candidateInvalid(fmt.Errorf("%w: subtitle language mismatch at stream %d (fail closed, never publish)", ErrSourceInvalid, i))
 		}
 		for _, d := range []string{"forced", "default"} {
 			if a.Disposition[d] > 0 && b.Disposition[d] == 0 {
-				return fmt.Errorf("%w: %s subtitle disposition lost at stream %d (fail closed, never publish)", ErrSourceInvalid, d, i)
+				return candidateInvalid(fmt.Errorf("%w: %s subtitle disposition lost at stream %d (fail closed, never publish)", ErrSourceInvalid, d, i))
 			}
 		}
 	}
@@ -406,7 +406,7 @@ func verifyPublishedCandidate(ctx context.Context, localCandidate, destination s
 		return fmt.Errorf("%w: statting local candidate %s: %v", ErrStorageIO, localCandidate, err)
 	}
 	if !localInfo.Mode().IsRegular() || localInfo.Size() == 0 {
-		return fmt.Errorf("%w: local candidate %s is not a non-empty regular file", ErrSourceInvalid, localCandidate)
+		return candidateInvalid(fmt.Errorf("%w: local candidate %s is not a non-empty regular file", ErrSourceInvalid, localCandidate))
 	}
 	destInfo, err := os.Lstat(destination)
 	if err != nil {

@@ -36,6 +36,33 @@ const (
 	SourceUnreachable               FailureClass = "source_unreachable"
 )
 
+// Classes for failures that are not an ffmpeg process failing.
+const (
+	// Unclassified is a failure whose text matches no known class. It says the
+	// cause is not understood, not that ffmpeg is to blame, and is never
+	// retried automatically. FFmpegUnknown is reserved for a failure of a real
+	// ffmpeg process.
+	Unclassified FailureClass = "unclassified"
+	// BenchmarkEvidenceIncomplete is a benchmark that ended without the
+	// measurements its own bookkeeping required.
+	BenchmarkEvidenceIncomplete FailureClass = "benchmark_evidence_incomplete"
+	// InternalInvariant is a violated internal assumption: a bug, not a
+	// property of the media or the environment.
+	InternalInvariant FailureClass = "internal_invariant"
+	// MediaProbeFailed is an ffprobe inspection that produced no usable result
+	// (it timed out, could not start, exited with a failure or printed output
+	// that is not the expected document). The file was not inspected; the class
+	// comes from the typed probe error and never from the probe's stderr, which
+	// names paths and may say anything.
+	MediaProbeFailed FailureClass = "media_probe_failed"
+	// CandidateInvalid is the worker-local candidate failing its integrity or
+	// preservation checks (a changed digest, a lost stream, a diverging
+	// duration). The class is typed at the point of detection; the message is
+	// never read for it. It is not retried automatically; a manual retry
+	// re-encodes.
+	CandidateInvalid FailureClass = "candidate_invalid"
+)
+
 // ClassifyError preserves a typed boundary failure before considering messages.
 // Use Classify for errors restored from older persisted jobs or HTTP strings.
 func ClassifyError(err error) FailureClass {
@@ -53,7 +80,7 @@ func Classify(message string) FailureClass {
 	s := strings.ToLower(message)
 	// Explicit serialized classes take precedence over generic phrases such
 	// as "connection reset", which formerly labeled SMB failures as SSH.
-	for _, class := range []FailureClass{SMBSigningRequired, SMBSessionInvalid, SMBAuthFailed, SMBTransportError, StoragePermissionDenied, StorageIOError, SourceUnreachable, Cancelled, StorageFull} {
+	for _, class := range []FailureClass{SMBSigningRequired, SMBSessionInvalid, SMBAuthFailed, SMBTransportError, StoragePermissionDenied, StorageIOError, SourceUnreachable, Cancelled, StorageFull, BenchmarkEvidenceIncomplete, InternalInvariant, MediaProbeFailed, CandidateInvalid} {
 		if s == string(class) || strings.Contains(s, string(class)+":") {
 			return class
 		}
@@ -119,11 +146,38 @@ func Classify(message string) FailureClass {
 		return ValidationStreamLoss
 	case strings.Contains(s, "codec") && strings.Contains(s, "mismatch"):
 		return ValidationCodecMismatch
-	case strings.Contains(s, "source") && (strings.Contains(s, "changed") || strings.Contains(s, "sha")):
+	case sourceChangedMessage(s):
 		return SourceChanged
 	default:
-		return FFmpegUnknown
+		return Unclassified
 	}
+}
+
+// sourceChangedMessages are the messages the code itself produces when the
+// source is found different from the one the plan or the evidence was built
+// on. They are matched as whole phrases: a loose pair such as "source" and
+// "sha" also appears in file paths and tool output (a share named for its
+// source, a probe error about a clip in a shared folder), and a false
+// source_changed blocks a manual retry that would have worked.
+var sourceChangedMessages = []string{
+	"source_changed",
+	"source changed",
+	"source index changed",
+	"source codec changed",
+	"was concurrently modified",
+	"local source bytes do not match expected sha256",
+	"source media modified during benchmark",
+	"original changed",
+	"original size changed",
+}
+
+func sourceChangedMessage(s string) bool {
+	for _, phrase := range sourceChangedMessages {
+		if strings.Contains(s, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 func legacySMBBoundary(message string) bool {
@@ -143,9 +197,12 @@ func Retryable(c FailureClass, allowed []string) bool {
 	case RunnerKilled, FFmpegInputCorrupt, StorageFull, Cancelled, IdempotencyConflict,
 		ValidationDurationMismatch, ValidationStreamLoss, ValidationCodecMismatch, SourceChanged,
 		SMBSigningRequired, SMBSessionInvalid, SMBAuthFailed, SMBTransportError,
-		StoragePermissionDenied, StorageIOError, SourceUnreachable:
+		StoragePermissionDenied, StorageIOError, SourceUnreachable,
+		Unclassified, BenchmarkEvidenceIncomplete, InternalInvariant, MediaProbeFailed, CandidateInvalid:
 		// SMB operations already recover on a fresh signed session. Replaying
-		// the full encode after exhausted recovery is unsafe and wasteful.
+		// the full encode after exhausted recovery is unsafe and wasteful. A
+		// failure that is not understood, or that is a bug in the benchmark's
+		// own bookkeeping, repeats the same way and is never replayed blindly.
 		return false
 	}
 	for _, v := range allowed {

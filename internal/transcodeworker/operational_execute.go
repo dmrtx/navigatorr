@@ -242,7 +242,7 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 	if ffmpegErr != nil {
 		job.FailureClassification = string(resilience.ClassifyError(ffmpegErr))
 		var classified interface{ FailureClass() string }
-		if job.FailureClassification == string(resilience.FFmpegUnknown) && !errors.As(ffmpegErr, &classified) {
+		if isUnrecognizedClass(job.FailureClassification) && !errors.As(ffmpegErr, &classified) {
 			job.FailureClassification = "worker_setup_failed"
 		}
 		return w.failJobTerminal(jobDir, jobFile, job, ffmpegErr)
@@ -293,8 +293,9 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 			if verr == nil {
 				var currentSHA string
 				currentSHA, verr = verifiedLocalSHA256(ctx, r.localCandidate)
+				verr = candidateHashFailure(verr)
 				if verr == nil && currentSHA != attest.SHA256 {
-					verr = fmt.Errorf("quality_candidate_identity_changed: candidate changed during final validation")
+					verr = candidateInvalid(fmt.Errorf("quality_candidate_identity_changed: candidate changed during final validation"))
 				}
 			}
 		}
@@ -794,7 +795,7 @@ func (w *Worker) completeOperationalJob(jobDir, jobFile string, job *JobRecord, 
 // recovery. Permanent failures remain resumable without automatic respawns.
 func (w *Worker) recordFinalizationFailure(jobDir, jobFile string, job *JobRecord, cause error) error {
 	classification := FailureStorageFinalization
-	if class := resilience.ClassifyError(cause); class != resilience.FFmpegUnknown && class != "" {
+	if class := resilience.ClassifyError(cause); !isUnrecognizedClass(string(class)) {
 		classification = string(class)
 	}
 	switch {
@@ -839,7 +840,7 @@ func (w *Worker) recordFinalizationFailure(jobDir, jobFile string, job *JobRecor
 func (w *Worker) failJobTerminal(jobDir, jobFile string, job *JobRecord, cause error) error {
 	if job.FailureClassification == "" {
 		job.FailureClassification = string(resilience.ClassifyError(cause))
-		if job.FailureClassification == string(resilience.FFmpegUnknown) {
+		if isUnrecognizedClass(job.FailureClassification) {
 			// The encoder path sets its own classification; an unrecognized
 			// staging/probe/setup failure is never an FFmpeg execution failure.
 			job.FailureClassification = "worker_setup_failed"
@@ -1425,17 +1426,17 @@ func stagedInputReady(path string) (bool, error) {
 // output path before the EncodeComplete checkpoint is persisted.
 func validateEncodedCandidate(path string) error {
 	if strings.TrimSpace(path) == "" {
-		return fmt.Errorf("%w: empty encoder output path", ErrSourceInvalid)
+		return candidateInvalid(fmt.Errorf("%w: empty encoder output path", ErrSourceInvalid))
 	}
 	fi, err := os.Lstat(path)
 	if err != nil {
 		return fmt.Errorf("%w: encoder output %s is unavailable: %v", ErrStorageIO, path, err)
 	}
 	if !fi.Mode().IsRegular() {
-		return fmt.Errorf("%w: encoder output %s is not a regular file", ErrSourceInvalid, path)
+		return candidateInvalid(fmt.Errorf("%w: encoder output %s is not a regular file", ErrSourceInvalid, path))
 	}
 	if fi.Size() == 0 {
-		return fmt.Errorf("%w: encoder output %s is empty", ErrSourceInvalid, path)
+		return candidateInvalid(fmt.Errorf("%w: encoder output %s is empty", ErrSourceInvalid, path))
 	}
 	return nil
 }

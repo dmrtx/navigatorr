@@ -110,7 +110,7 @@ func (e *Engine) promotionHash(ctx context.Context, path string) (string, int64,
 		return "", 0, err
 	}
 	if !os.SameFile(before, opened) {
-		return "", 0, fmt.Errorf("file changed while opening: %s", path)
+		return "", 0, &promotionFileChangedError{path: path, phase: "opening"}
 	}
 	h := sha256.New()
 	observer, _ := ctx.Value(promotionHashProgressKey{}).(promotionHashProgress)
@@ -138,7 +138,7 @@ func (e *Engine) promotionHash(ctx context.Context, path string) (string, int64,
 	// may still describe the pre-close NAS copy even though the descriptor sees
 	// the complete file. Path stats prove identity, never completion metadata.
 	if !os.SameFile(opened, after) || !os.SameFile(opened, finished) || opened.Size() != n || finished.Size() != n || !opened.ModTime().Equal(finished.ModTime()) {
-		return "", 0, fmt.Errorf("file changed while hashing: %s", path)
+		return "", 0, &promotionFileChangedError{path: path, phase: "hashing"}
 	}
 	sum := hex.EncodeToString(h.Sum(nil))
 	promotionRememberHash(ctx, path, sum, opened, finished)
@@ -216,12 +216,20 @@ func (e *Engine) promotionHashStable(ctx context.Context, path string) (string, 
 	return "", 0, lastErr
 }
 
+// promotionFileChangedError is a file whose identity or size moved while it
+// was opened or hashed. The hasher serves the original, the candidate and the
+// recovery copies alike and does not know which it holds, so the error carries
+// no failure class: it is a statement about a path, not about the source. It
+// is matched by type, never by reading its text.
+type promotionFileChangedError struct{ path, phase string }
+
+func (e *promotionFileChangedError) Error() string {
+	return fmt.Sprintf("file changed while %s: %s", e.phase, e.path)
+}
+
 func transientPromotionHashError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "file changed while opening") || strings.Contains(msg, "file changed while hashing")
+	var changed *promotionFileChangedError
+	return errors.As(err, &changed)
 }
 
 func (e *Engine) verifyPromotionHashStable(ctx context.Context, path, expected string) error {

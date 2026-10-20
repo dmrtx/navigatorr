@@ -219,7 +219,7 @@ func (s *Store) DownloadAtomicVerified(ctx context.Context, remoteLocalPath, loc
 			return fmt.Errorf("closing SMB source: %w", closeErr)
 		}
 		if written != info.Size() {
-			return fmt.Errorf("SMB source changed while downloading: copied=%d stat=%d", written, info.Size())
+			return &Error{Class: SourceChanged, Op: "download", Err: fmt.Errorf("SMB source changed while downloading: copied=%d stat=%d", written, info.Size())}
 		}
 		return nil
 	})
