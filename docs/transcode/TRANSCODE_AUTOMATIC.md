@@ -100,8 +100,11 @@ promoted before the x265 result is validated.
 
 - *Reuse.* The worker keeps the earlier search's measurements. The continued
   request names the earlier search (`continues_benchmark`, id and request
-  digest); the worker reuses an x265 candidate's discovery-window measurements
-  only when its own saved record matches exactly (same source hash, quality
+  digest); the worker reuses an x265 candidate's discovery-window measurements,
+  and only for candidates the earlier search rejected on a quality gate at
+  discovery (a candidate that passed is measured again, because its holdout check
+  needs per-frame scores the saved record does not keep), and only when its own
+  saved record matches exactly (same source hash, quality
   policy, windows, rules and capability fingerprint, identical candidate
   settings, one clean row per discovery window). Anything else is measured again,
   never an error.
@@ -128,9 +131,6 @@ promoted before the x265 result is validated.
   the flags. Rolling the server back while an action is mid-continuation is
   unsafe: an older server ignores `hardware_continuation` and may repeat a
   VideoToolbox attempt, so wait for such actions to finish first.
-- *Reused rows.* A reused candidate keeps the sample file names of the earlier
-  search, whose sample directory is already gone; the frame comparison then uses
-  the holdout frames only.
 
 It is on by default for the new policy only, and always visible and switchable:
 the Library and batch setup show an *Allow the media engine (faster)* checkbox

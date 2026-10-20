@@ -54,19 +54,26 @@ func continuationHardEpisode() map[string]replaySetting {
 // priorSearch runs the VideoToolbox search and persists it as the worker does.
 func priorSearch(t *testing.T, stateDir string) (*BenchmarkRecord, *BenchmarkExecutionEvidence) {
 	t.Helper()
+	return priorSearchOn(t, stateDir, continuationHardEpisode(), "fallback-hardware-cand_q75")
+}
+
+// priorSearchOn persists an earlier search over the given measurements, which
+// must end with the named hardware winner.
+func priorSearchOn(t *testing.T, stateDir string, settings map[string]replaySetting, wantWinner string) (*BenchmarkRecord, *BenchmarkExecutionEvidence) {
+	t.Helper()
 	hw := &transcode.HardwareSearchRules{MarginPercent: 15, QualityValues: []int{45, 50, 55, 60}, FallbackQualityValues: []int{65, 70, 75}, GOPSize: 240, BFrames: 1}
 	record := replayBenchmarkRecord(replayRules(), hw)
 	ladder := hardwareFallbackLadder()
 	record.ID, record.Source, record.SourceSHA256, record.RequestDigest, record.Status = continuationPriorID, "/media/show.mkv", strings.Repeat("a", 64), continuationPriorDigest, "completed"
 	record.Candidates = recordCandidates(ladder)
 	var res replayResult
-	runner := &ProductionBenchmarkRunner{automaticHook: replayAutomaticHook(t, continuationHardEpisode(), &res)}
+	runner := &ProductionBenchmarkRunner{automaticHook: replayAutomaticHook(t, settings, &res)}
 	evidence := &BenchmarkExecutionEvidence{SourceBitDepth: 8}
 	rep := mediainspect.DetailedReport{DurationSec: 600, Video: []mediainspect.DetailedStream{{BitDepth: 8, FPS: 25}}}
 	if err := runner.runAutomaticCandidates(context.Background(), nil, record, evidence, "", ladder, rep, 10_000_000, time.Time{}, newBenchmarkProgressReporter(nil, record, 100)); err != nil {
 		t.Fatal(err)
 	}
-	if evidence.Decision.Winner == nil || evidence.Decision.Winner.CandidateID != "fallback-hardware-cand_q75" {
+	if evidence.Decision.Winner == nil || evidence.Decision.Winner.CandidateID != wantWinner {
 		t.Fatalf("the earlier search did not pick the hardware result: %+v", evidence.Decision)
 	}
 	for i := range evidence.Quality {
@@ -92,6 +99,11 @@ type continuedRun struct {
 
 func runContinuedSearch(t *testing.T, stateDir string, mutate func(*BenchmarkRecord, []validatedCandidate), fingerprint string) continuedRun {
 	t.Helper()
+	return runContinuedSearchOn(t, stateDir, continuationHardEpisode(), mutate, fingerprint)
+}
+
+func runContinuedSearchOn(t *testing.T, stateDir string, settings map[string]replaySetting, mutate func(*BenchmarkRecord, []validatedCandidate), fingerprint string) continuedRun {
+	t.Helper()
 	record := replayBenchmarkRecord(replayRules(), nil)
 	ladder := continuationX265Ladder(hardwareFallbackLadder())
 	record.ID, record.Source, record.SourceSHA256, record.Status = "bench-prior-x265", "/media/show.mkv", strings.Repeat("a", 64), "running"
@@ -102,7 +114,7 @@ func runContinuedSearch(t *testing.T, stateDir string, mutate func(*BenchmarkRec
 	}
 	var run continuedRun
 	runner := &ProductionBenchmarkRunner{
-		automaticHook:         replayAutomaticHook(t, continuationHardEpisode(), &run.res),
+		automaticHook:         replayAutomaticHook(t, settings, &run.res),
 		capabilityFingerprint: func(context.Context, *Worker) (string, error) { return fingerprint, nil },
 	}
 	w := &Worker{cfg: &WorkerConfig{StateDir: stateDir}}
@@ -267,5 +279,38 @@ func TestContinuedSearchNeverReusesAHoldoutVerifiedCandidate(t *testing.T) {
 	}
 	if !measuredHas(run.res, "cand_crf22") {
 		t.Fatalf("cand_crf22 was neither reused nor measured: %v", run.res.measured)
+	}
+}
+
+// A candidate that passed the earlier search's discovery windows is measured
+// again: its holdout check needs per-frame scores the saved record does not
+// hold. The continued search ends where one measuring everything would have.
+func TestContinuedSearchMeasuresAgainACandidateThatPassedDiscovery(t *testing.T) {
+	dir := t.TempDir()
+	// x265 CRF 22 qualifies; the media engine wins within the margin of it.
+	settings := x265FindsOnlyCRF22(map[string]replaySetting{
+		replayKey("", 45): {bytes: 20000, discovery: replayScore{82, 87.5}, holdout: 83},
+		replayKey("", 50): {bytes: 26000, discovery: replayScore{89.4, 91.2}, holdout: 90},
+		replayKey("", 55): {bytes: 28500, discovery: replayScore{90.4, 92.2}, holdout: 91},
+		replayKey("", 60): {bytes: 31000, discovery: replayScore{91.4, 93.2}, holdout: 92},
+		replayKey("", 65): {bytes: 33000, discovery: replayScore{92.4, 94.2}, holdout: 93},
+		replayKey("", 70): {bytes: 35000, discovery: replayScore{93.4, 95.2}, holdout: 94},
+		replayKey("", 75): {bytes: 20000, discovery: replayScore{91.4, 93.2}, holdout: 92},
+	})
+	prior, _ := priorSearchOn(t, dir, settings, "vt-cand_q50")
+	if prior.Evidence.Decision.Winner == nil {
+		t.Fatal("no earlier winner")
+	}
+	fresh := runContinuedSearchOn(t, dir, settings, func(r *BenchmarkRecord, _ []validatedCandidate) { r.ContinuesBenchmark = nil }, continuationFingerprint)
+	continued := runContinuedSearchOn(t, dir, settings, nil, continuationFingerprint)
+	t.Logf("fresh: %s", fresh.res.summary())
+	t.Logf("continued: %s reused=%v", continued.res.summary(), reusedIDs(continued))
+	for _, id := range reusedIDs(continued) {
+		if !failedQualityGate(fresh.res.reason(id)) {
+			t.Fatalf("%s passed discovery in a fresh search and was reused", id)
+		}
+	}
+	if fresh.res.winner == "" || continued.res.winner != fresh.res.winner || !reflect.DeepEqual(reasons(continued.res), reasons(fresh.res)) {
+		t.Fatalf("reuse changed the outcome:\ncontinued %s %v\nfresh     %s %v", continued.res.winner, reasons(continued.res), fresh.res.winner, reasons(fresh.res))
 	}
 }

@@ -16,6 +16,12 @@ import (
 // policy and capabilities, with the same encoder settings. Anything else is
 // simply measured again: reuse is an optimisation and never an error.
 //
+// Only candidates the earlier search rejected on a quality gate at discovery are
+// reused. A candidate that passed would be verified on its holdout windows, which
+// needs the per-frame scores of every window; those are not saved with the
+// record, so a reused passing candidate could never be verified and would be
+// dropped for a reason that says nothing about its quality.
+//
 // It returns the IDs of the reused candidates, whose rows now sit in evidence
 // under their index in this search.
 func (r *ProductionBenchmarkRunner) seedContinuation(ctx context.Context, w *Worker, record *BenchmarkRecord, evidence *BenchmarkExecutionEvidence, vcs []validatedCandidate) map[string]bool {
@@ -44,8 +50,19 @@ func (r *ProductionBenchmarkRunner) seedContinuation(ctx context.Context, w *Wor
 		priorCandidates[c.ID] = c
 	}
 	old := prior.Evidence
+	rejected := map[string]bool{}
+	if old.Automatic != nil && old.Automatic.Discovery != nil {
+		for _, e := range old.Automatic.Discovery.Evaluations {
+			if failedQualityGate(e.EvaluationReason) {
+				rejected[e.CandidateID] = true
+			}
+		}
+	}
 	for _, vc := range vcs {
 		id := vc.candidate.ID
+		if !rejected[id] {
+			continue
+		}
 		if before, ok := priorCandidates[id]; !ok || !sameJSON(before, vc.candidate) || isVideoToolbox(vc.candidate.VideoCodec) {
 			continue
 		}
@@ -169,4 +186,10 @@ func discoveryMetricSamples(rows []BenchmarkMetricSampleResult, id string, disco
 		out = append(out, row)
 	}
 	return out, len(out) == len(discovery)
+}
+
+// failedQualityGate reports whether a discovery verdict is a quality gate
+// failure, as opposed to a candidate that passed but lost on the selection margin.
+func failedQualityGate(reason string) bool {
+	return qualityRejection(reason) && reason != reasonSelectionMarginNotMet
 }
