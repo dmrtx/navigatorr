@@ -114,6 +114,15 @@ type WorkerCapabilities struct {
 	// candidates when the whole ladder fails quality. Older workers reject the
 	// field and the larger candidate list.
 	HardwareFallbackSearch bool `json:"hardware_fallback_search,omitempty"`
+	// HardwareSelectionMargin reports a worker that accepts
+	// extra_selection_margin_vmaf in hardware_search and holds VideoToolbox
+	// candidates to that larger VMAF margin. Older workers reject the field.
+	HardwareSelectionMargin bool `json:"hardware_selection_margin,omitempty"`
+	// SearchContinuation reports a worker that accepts continues_benchmark on
+	// a size search that follows a failed VideoToolbox result: it reuses the
+	// earlier search's measured x265 samples instead of encoding them again.
+	// Older workers reject the field.
+	SearchContinuation bool `json:"search_continuation,omitempty"`
 	// CompactTranscode reports an executable proof of the compact SDR chain
 	// (setparams, swscale, lut3d and sidedata delete) in the worker FFmpeg.
 	CompactTranscode      bool                           `json:"compact_transcode,omitempty"`
@@ -171,6 +180,8 @@ type fingerprintPayload struct {
 	AutomaticGridVerification bool                           `json:"automatic_grid_verification,omitempty"`
 	HardwareSearch            bool                           `json:"hardware_search,omitempty"`
 	HardwareFallbackSearch    bool                           `json:"hardware_fallback_search,omitempty"`
+	HardwareSelectionMargin   bool                           `json:"hardware_selection_margin,omitempty"`
+	SearchContinuation        bool                           `json:"search_continuation,omitempty"`
 	CompactTranscode          bool                           `json:"compact_transcode,omitempty"`
 	ProtocolVersion           int                            `json:"protocol_version"`
 	WorkerVersion             string                         `json:"worker_version,omitempty"`
@@ -222,6 +233,8 @@ func ComputeCapabilityFingerprint(caps WorkerCapabilities) (string, error) {
 		AutomaticGridVerification: caps.AutomaticGridVerification,
 		HardwareSearch:            caps.HardwareSearch,
 		HardwareFallbackSearch:    caps.HardwareFallbackSearch,
+		HardwareSelectionMargin:   caps.HardwareSelectionMargin,
+		SearchContinuation:        caps.SearchContinuation,
 		CompactTranscode:          caps.CompactTranscode,
 		ProtocolVersion:           caps.ProtocolVersion,
 		WorkerVersion:             caps.WorkerVersion,

@@ -3751,8 +3751,22 @@ function sizeModeLines(size) {
   // Why the media engine result was chosen over x265, as the search recorded it.
   if (size.hardware && size.hardware_reason) lines.push(`Chosen because: ${size.hardware_reason}`);
   if (size.video_copy) lines.push({verified: "Video copied unchanged · verified bit-identical", failed: "Video copy check failed · original kept"}[size.video_copy] || "Video will be copied unchanged · not yet verified; only lossless audio is compacted");
+  // A media engine result that failed the whole-file check, and what followed;
+  // the failed attempt's numbers stay here after the x265 result takes over.
+  const hc = size.hardware_continuation;
+  if (hc) {
+    if (hc.message) lines.push(hc.message);
+    const f = hc.failed_quality;
+    if (f) {
+      if (f.vmaf_mean != null) lines.push(`VideoToolbox final VMAF ${Number(f.vmaf_mean).toFixed(1)} mean · ${f.vmaf_p5 != null ? Number(f.vmaf_p5).toFixed(1) : "n/a"} p5${f.worst_window_mean != null ? ` · ${Number(f.worst_window_mean).toFixed(1)} worst ${Math.round(f.worst_window_seconds || 0)} s window` : ""}`);
+      for (const failure of f.failures || []) lines.push(`Failed: ${failure}`);
+    }
+    // The failed result's windows, search against final, before the x265 result's.
+    lines.push(...windowReportLines(hc.windows).map(line => `VideoToolbox ${line.charAt(0).toLowerCase()}${line.slice(1)}`));
+  }
   const q = size.final_quality;
   if (q) lines.push(`Final VMAF ${Number(q.vmaf_mean).toFixed(1)} mean · ${q.vmaf_p5 != null ? Number(q.vmaf_p5).toFixed(1) : "n/a"} p5${q.worst_window_mean != null ? ` · ${Number(q.worst_window_mean).toFixed(1)} worst ${Math.round(q.worst_window_seconds || 0)} s window` : ""}`);
+  if (q?.failed_checks?.length) lines.push(`Failed checks: ${q.failed_checks.map(code => String(code).replace(/^quality_/, "").replace(/_/g, " ")).join(", ")}`);
   if (q?.fresh_vmaf_mean != null) lines.push(`Fresh windows VMAF ${Number(q.fresh_vmaf_mean).toFixed(1)} mean · ${q.fresh_vmaf_p5 != null ? Number(q.fresh_vmaf_p5).toFixed(1) : "n/a"} p5 · reported only; they never decide the result`);
   lines.push(...verificationLines(size.verification), ...windowReportLines(size.windows));
   const audio = size.compacted_audio || [];

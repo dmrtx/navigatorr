@@ -60,6 +60,7 @@ func TestSizePolicyFreezesGridVerification(t *testing.T) {
 // snapshots verify on the grid.
 func TestGridEraSnapshotsKeepTheirDigestAndSearch(t *testing.T) {
 	earlier := &transcode.HardwareSearchRules{MarginPercent: 15, QualityValues: []int{45, 50, 55, 60}, GOPSize: 240, BFrames: 1}
+	beforeMargin := &transcode.HardwareSearchRules{MarginPercent: 15, QualityValues: []int{45, 50, 55, 60}, GOPSize: 240, BFrames: 1, FallbackQualityValues: []int{65, 70, 75}}
 	current, err := modeHardwareInput("size", map[string]any{"mode": "size"})
 	if err != nil {
 		t.Fatal(err)
@@ -69,7 +70,8 @@ func TestGridEraSnapshotsKeepTheirDigestAndSearch(t *testing.T) {
 		digest   string
 	}{
 		"no media engine":           {nil, "sha256:33812f4b39f3aff6852beb34dc5ceffdaeb3504f71d00cd17555c89fbf4c80ee"},
-		"media engine":              {current, "sha256:1b73a704427a9c6a89a9ae36079422c842de9cbd799fa48f634d54d1a3b7ead6"},
+		"media engine":              {current, "sha256:e5ec773de13a1eab8d1b3e9bc087f0583316221625cc310d463fca137ecd4264"},
+		"media engine, no margin":   {beforeMargin, "sha256:1b73a704427a9c6a89a9ae36079422c842de9cbd799fa48f634d54d1a3b7ead6"},
 		"media engine, earlier set": {earlier, "sha256:bc2e370bf9f26965f7faa121693c299d1fe2e6c2d02b37aee033dc369cb12e03"},
 	} {
 		legacy := gridEraPolicy(t, tc.hardware)

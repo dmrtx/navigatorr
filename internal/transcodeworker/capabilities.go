@@ -238,6 +238,11 @@ func probeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratch
 	// ...and a higher-quality VideoToolbox fallback when the whole ladder
 	// fails quality.
 	caps.HardwareFallbackSearch = true
+	// ...held to the frozen larger VMAF selection margin.
+	caps.HardwareSelectionMargin = true
+	// A size search that follows a failed VideoToolbox result may reuse the
+	// earlier search's measured x265 samples.
+	caps.SearchContinuation = true
 	if vtCaps.Available {
 		caps.Encoders[videoToolboxEncoder] = true
 	}

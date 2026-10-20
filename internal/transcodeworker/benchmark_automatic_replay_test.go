@@ -128,18 +128,15 @@ type replayConfig struct {
 	setup  func(record *BenchmarkRecord)
 }
 
-func runReplayConfigured(t *testing.T, cfg replayConfig) replayResult {
-	t.Helper()
-	settings, sourceBytes, rules, hardware, ladder := cfg.settings, cfg.sourceBytes, cfg.rules, cfg.hardware, cfg.ladder
-	duration := cfg.duration
-	if duration == 0 {
-		duration = 600
-	}
-	ctx, cancel := context.WithCancelCause(context.Background())
-	if cfg.ctx != nil {
-		ctx, cancel = cfg.ctx()
-	}
-	defer cancel(nil)
+// replayBenchmarkRecord is the search record the replay runs under.
+func replayBenchmarkRecord(rules *transcode.AutomaticSearchRules, hardware *transcode.HardwareSearchRules) *BenchmarkRecord {
+	return replayBenchmarkRecordFor(rules, hardware, 600)
+}
+
+// replayBenchmarkRecordFor places the windows for a source of the given length.
+// Under grid verification the grid is the sample plan, and Samples is nil when
+// the source is too short for one.
+func replayBenchmarkRecordFor(rules *transcode.AutomaticSearchRules, hardware *transcode.HardwareSearchRules, duration float64) *BenchmarkRecord {
 	p5, worst := 84.0, 85.0
 	record := &BenchmarkRecord{Mode: "size", ModePolicyVersion: optimization.ModePolicyV3, Automatic: true, QualityPruning: true, AutomaticSearch: rules, HardwareSearch: hardware, Metric: "vmaf", SourceDuration: duration,
 		Quality: &transcode.BenchmarkQualityConfig{VMAF: &transcode.BenchmarkQualityThresholds{Model: "v1_1080p_3h", Target: 92, Minimum: 88, P5Minimum: &p5, WorstWindowMinimum: &worst, WorstWindowSeconds: 4, GuardrailEnforcement: "reject"}}}
@@ -153,25 +150,30 @@ func runReplayConfigured(t *testing.T, cfg replayConfig) replayResult {
 		record.Samples = append(record.Samples, transcode.BenchmarkSampleWindow{Index: i, StartSeconds: c - 5, DurationSeconds: 10, CenterSeconds: c})
 	}
 	if rules != nil && rules.HoldoutWindows == transcode.HoldoutWindowsFinalGrid {
-		// Verification on the final grid: the grid is the sample plan.
 		record.Samples = transcode.GridVerificationWindows(duration, 10, 600, 5, 12)
-		if record.Samples == nil {
-			t.Fatalf("no grid for a %.0f s source", duration)
-		}
 	}
-	if cfg.setup != nil {
-		cfg.setup(record)
-	}
+	return record
+}
+
+// replayAutomaticHook replays the recorded settings in place of the encoders,
+// noting what it measures and verifies in res.
+func replayAutomaticHook(t *testing.T, settings map[string]replaySetting, res *replayResult) func(context.Context, *BenchmarkRecord, *BenchmarkExecutionEvidence, []validatedCandidate) error {
+	t.Helper()
+	return replayAutomaticHookWith(t, settings, res, nil)
+}
+
+// replayAutomaticHookWith runs before ahead of every stage; an error from it
+// ends the search.
+func replayAutomaticHookWith(t *testing.T, settings map[string]replaySetting, res *replayResult, before func(stage *BenchmarkRecord, candidates []validatedCandidate) error) func(context.Context, *BenchmarkRecord, *BenchmarkExecutionEvidence, []validatedCandidate) error {
+	t.Helper()
 	model, err := quality.Model("v1_1080p_3h")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var res replayResult
-	runner := &ProductionBenchmarkRunner{automaticHook: func(_ context.Context, stage *BenchmarkRecord, e *BenchmarkExecutionEvidence, candidates []validatedCandidate) error {
-		if cfg.before != nil {
-			cfg.before(stageName(stage), candidates, cancel)
-			if ctx.Err() != nil {
-				return ctx.Err()
+	return func(_ context.Context, stage *BenchmarkRecord, e *BenchmarkExecutionEvidence, candidates []validatedCandidate) error {
+		if before != nil {
+			if err := before(stage, candidates); err != nil {
+				return err
 			}
 		}
 		for _, vc := range candidates {
@@ -228,11 +230,40 @@ func runReplayConfigured(t *testing.T, cfg replayConfig) replayResult {
 			}
 		}
 		return nil
-	}}
+	}
+}
+
+func runReplayConfigured(t *testing.T, cfg replayConfig) replayResult {
+	t.Helper()
+	duration := cfg.duration
+	if duration == 0 {
+		duration = 600
+	}
+	ctx, cancel := context.WithCancelCause(context.Background())
+	if cfg.ctx != nil {
+		ctx, cancel = cfg.ctx()
+	}
+	defer cancel(nil)
+	record := replayBenchmarkRecordFor(cfg.rules, cfg.hardware, duration)
+	if len(record.Samples) == 0 {
+		t.Fatalf("no grid for a %.0f s source", duration)
+	}
+	if cfg.setup != nil {
+		cfg.setup(record)
+	}
+	var res replayResult
+	var before func(*BenchmarkRecord, []validatedCandidate) error
+	if cfg.before != nil {
+		before = func(stage *BenchmarkRecord, candidates []validatedCandidate) error {
+			cfg.before(stageName(stage), candidates, cancel)
+			return ctx.Err()
+		}
+	}
+	runner := &ProductionBenchmarkRunner{automaticHook: replayAutomaticHookWith(t, cfg.settings, &res, before)}
 	evidence := &BenchmarkExecutionEvidence{SourceBitDepth: 8}
 	progress := newBenchmarkProgressReporter(nil, record, 100)
-	rep := mediainspect.DetailedReport{DurationSec: 600, Video: []mediainspect.DetailedStream{{BitDepth: 8, FPS: 25}}}
-	if err := runner.runAutomaticCandidates(ctx, nil, record, evidence, "", ladder, rep, sourceBytes, time.Time{}, progress); err != nil {
+	rep := mediainspect.DetailedReport{DurationSec: duration, Video: []mediainspect.DetailedStream{{BitDepth: 8, FPS: 25}}}
+	if err := runner.runAutomaticCandidates(ctx, nil, record, evidence, "", cfg.ladder, rep, cfg.sourceBytes, time.Time{}, progress); err != nil {
 		t.Fatal(err)
 	}
 	res.decision = evidence.Decision

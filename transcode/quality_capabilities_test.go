@@ -1,6 +1,11 @@
 package transcode
 
-import "testing"
+import (
+	"encoding/json"
+	"math"
+	"strings"
+	"testing"
+)
 
 func TestQualityCapabilityChangesFingerprint(t *testing.T) {
 	caps := WorkerCapabilities{ProtocolVersion: WorkerProtocolVersion, FFmpegVersion: "9.0.1", Encoders: map[string]bool{}, Filters: map[string]bool{"libvmaf": true}, Quality: &QualityCapabilities{Models: map[string]QualityModelCapability{"v1_1080p_3h": {Available: false, MeasurementBitDepth: 10, ScoreMin: 0, ScoreMax: 100}}}}
@@ -94,5 +99,68 @@ func TestHardwareFallbackSearchCapabilityChangesFingerprint(t *testing.T) {
 	}
 	if before == after {
 		t.Fatal("hardware_fallback_search did not change the fingerprint")
+	}
+}
+
+func TestHardwareSelectionMarginAndSearchContinuationChangeTheFingerprint(t *testing.T) {
+	base := WorkerCapabilities{ProtocolVersion: WorkerProtocolVersion, FFmpegVersion: "9.0.1", Encoders: map[string]bool{}, HardwareSearch: true, HardwareFallbackSearch: true}
+	before, err := ComputeCapabilityFingerprint(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]string{before: "neither"}
+	for name, change := range map[string]func(*WorkerCapabilities){
+		"hardware_selection_margin": func(c *WorkerCapabilities) { c.HardwareSelectionMargin = true },
+		"search_continuation":       func(c *WorkerCapabilities) { c.SearchContinuation = true },
+	} {
+		caps := base
+		change(&caps)
+		after, err := ComputeCapabilityFingerprint(caps)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if other, dup := seen[after]; dup {
+			t.Fatalf("%s did not change the fingerprint (same as %s)", name, other)
+		}
+		seen[after] = name
+	}
+}
+
+func TestHardwareSearchRulesExtraSelectionMarginIsBounded(t *testing.T) {
+	rules := func(extra float64) *HardwareSearchRules {
+		return &HardwareSearchRules{MarginPercent: 15, QualityValues: []int{45, 50, 55, 60}, GOPSize: 240, BFrames: 1, ExtraSelectionMarginVMAF: extra}
+	}
+	for _, ok := range []float64{0, 2, MaxSelectionMarginVMAF} {
+		if err := rules(ok).Validate(); err != nil {
+			t.Errorf("extra margin %v rejected: %v", ok, err)
+		}
+	}
+	for _, bad := range []float64{-0.5, MaxSelectionMarginVMAF + 1, math.NaN(), math.Inf(1)} {
+		if err := rules(bad).Validate(); err == nil {
+			t.Errorf("extra margin %v accepted", bad)
+		}
+	}
+	// Absent from the wire when unset, so earlier requests are byte-identical.
+	if raw, _ := json.Marshal(rules(0)); strings.Contains(string(raw), "extra_selection_margin") {
+		t.Fatalf("an unset extra margin is serialised: %s", raw)
+	}
+}
+
+func TestBenchmarkContinuationReferenceValidation(t *testing.T) {
+	good := &BenchmarkContinuation{ID: "bench-act-1", RequestDigest: "sha256:" + strings.Repeat("a", 64)}
+	if err := good.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for name, ref := range map[string]*BenchmarkContinuation{
+		"empty id":       {RequestDigest: good.RequestDigest},
+		"path id":        {ID: "../bench", RequestDigest: good.RequestDigest},
+		"no digest":      {ID: good.ID},
+		"short digest":   {ID: good.ID, RequestDigest: "sha256:abc"},
+		"wrong prefix":   {ID: good.ID, RequestDigest: "md5:" + strings.Repeat("a", 64)},
+		"non-hex digest": {ID: good.ID, RequestDigest: "sha256:" + strings.Repeat("z", 64)},
+	} {
+		if err := ref.Validate(); err == nil {
+			t.Errorf("%s accepted", name)
+		}
 	}
 }

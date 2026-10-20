@@ -53,6 +53,57 @@ func TestOperationsProjectSizeModeSummary(t *testing.T) {
 	}
 }
 
+func TestOperationsProjectSizeHardwareContinuation(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	continuation := map[string]any{
+		"outcome":             "continued",
+		"message":             "The VideoToolbox result failed the final quality check; continued with x265.",
+		"failed_candidate_id": "fallback-hardware-cand_q70",
+		"final": map[string]any{
+			"verdict":       "fail",
+			"failed_checks": []any{"quality_vmaf_p5_below_minimum"},
+			"failures":      []any{"VMAF p5 80.2 is below the minimum 84.0"},
+			"measured":      map[string]any{"vmaf_mean": 93.0, "vmaf_p5": 80.2, "vmaf_worst_window": 88.1},
+			"limits":        map[string]any{"worst_window_seconds": 10},
+		},
+	}
+	state := map[string]any{
+		"mode":                  "size",
+		"original":              map[string]any{"size_bytes": 9000},
+		"benchmark_decision":    map[string]any{"winner": map[string]any{"video_codec": "libx265", "estimated_bytes": 4000}},
+		"hardware_continuation": continuation,
+		"quality_evidence":      map[string]any{"verdict": "pass", "vmaf": map[string]any{"mean": 94.0, "p5": 88.0}},
+	}
+	seedOperation(t, st, "continued-job", "transcode_media", "completed", map[string]any{"path": "/media/series/Show/S01E03.mkv", "mode": "size"}, nil, state)
+	rejected := map[string]any{"mode": "size", "original": state["original"], "hardware_continuation": continuation,
+		"quality_evidence": map[string]any{"verdict": "fail", "reason_codes": []any{"quality_vmaf_p5_below_minimum"}, "vmaf": map[string]any{"mean": 91.0, "p5": 82.0}}}
+	seedOperation(t, st, "rejected-job", "transcode_media", "completed", map[string]any{"path": "/media/series/Show/S01E04.mkv", "mode": "size"}, nil, rejected)
+	read := func(id string) map[string]any {
+		w := request(h, "GET", "/api/maintenance/operations?id="+id, "", true)
+		var page struct {
+			Jobs []map[string]any `json:"jobs"`
+		}
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil || len(page.Jobs) != 1 {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		return operationMap(page.Jobs[0]["size_mode"])
+	}
+	size := read("continued-job")
+	note := operationMap(size["hardware_continuation"])
+	failed := operationMap(note["failed_quality"])
+	if note["outcome"] != "continued" || failed["vmaf_p5"] != 80.2 || failed["worst_window_mean"] != 88.1 || failed["worst_window_seconds"] != float64(10) || len(failed["failures"].([]any)) != 1 {
+		t.Fatalf("failed hardware attempt not kept: %v / %v", note, size)
+	}
+	if size["encoder"] != "libx265" || operationMap(size["final_quality"])["vmaf_p5"] != 88.0 {
+		t.Fatalf("x265 result must show beside the failed attempt: %v", size)
+	}
+	checks, _ := operationMap(read("rejected-job")["final_quality"])["failed_checks"].([]any)
+	if len(checks) != 1 || checks[0] != "quality_vmaf_p5_below_minimum" {
+		t.Fatalf("rejected result must name the failed metric: %v", checks)
+	}
+}
+
 func TestOperationsProjectSizeAudioOnly(t *testing.T) {
 	s, h := testUI(t)
 	st := s.engine.Deps().Store

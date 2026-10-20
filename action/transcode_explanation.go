@@ -3,6 +3,7 @@ package action
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/jakenesler/navigatorr/transcode"
 )
@@ -27,6 +28,13 @@ type TranscodeExplanation struct {
 	// winner's sample score and its final score side by side per window.
 	Verification *transcode.BenchmarkVerificationEvidence `json:"verification,omitempty"`
 	Windows      []transcode.WindowComparison             `json:"windows,omitempty"`
+	// FinalQuality is the full-file quality check of a result that failed it:
+	// which checks failed, by how much, and the numbers behind them.
+	FinalQuality *FinalQualitySummary `json:"final_quality,omitempty"`
+	// HardwareContinuation is set when a VideoToolbox result failed that check
+	// and the action went on (or could not go on) with x265 alone. It keeps the
+	// failed attempt's numbers after the x265 job replaces it.
+	HardwareContinuation *HardwareContinuation `json:"hardware_continuation,omitempty"`
 }
 
 func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
@@ -70,6 +78,16 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 	if reason == "" {
 		reason = getString(res.Outputs, "reason_code")
 	}
+	var continuation HardwareContinuation
+	if data, _ := json.Marshal(read(hardwareContinuationKey)); json.Unmarshal(data, &continuation) == nil && continuation.Outcome != "" {
+		e.HardwareContinuation = &continuation
+	}
+	finish := func() *TranscodeExplanation {
+		if e.HardwareContinuation != nil {
+			e.Message = strings.TrimSpace(continuationNote(e.HardwareContinuation) + " " + e.Message)
+		}
+		return e
+	}
 	switch {
 	case res.Status == StatusCancelled:
 		e.Outcome = "cancelled"
@@ -81,7 +99,7 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 		e.Outcome = "attention"
 		e.Message = res.WaitingReason
 	case res.Status != StatusCompleted:
-		return e
+		return finish()
 	case reason == "no_suitable_candidate":
 		e.Outcome = "no_suitable_candidate"
 		e.Message = "None of the tested configurations met this goal. Originals preserved."
@@ -94,6 +112,20 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 	case reason == "quality_not_met":
 		e.Outcome = "quality_rejected"
 		e.Message = "The encoded result did not meet the quality requirements. Original preserved."
+		var evidence transcode.FinalQualityEvidence
+		if data, _ := json.Marshal(read("quality_evidence")); json.Unmarshal(data, &evidence) == nil && evidence.Verdict != "" {
+			var request struct {
+				Quality *transcode.BenchmarkQualityConfig `json:"quality"`
+			}
+			if data, _ := json.Marshal(read("benchmark_request")); json.Unmarshal(data, &request) == nil {
+				e.FinalQuality = summarizeFinalQuality(&evidence, qualityLimitsOf(request.Quality))
+			} else {
+				e.FinalQuality = summarizeFinalQuality(&evidence, nil)
+			}
+			if len(e.FinalQuality.Failures) > 0 {
+				e.Message = "The encoded result did not meet the quality requirements on the whole file: " + strings.Join(e.FinalQuality.Failures, "; ") + ". Original preserved."
+			}
+		}
 	case reason == "preservation_not_met":
 		e.Outcome = "preservation_rejected"
 		e.Message = "The encoded result did not preserve the required tracks or video properties. Original preserved."
@@ -125,5 +157,5 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 		e.Outcome = "completed"
 		e.Message = "Workflow finished. Inspect the recorded result before replacing any file."
 	}
-	return e
+	return finish()
 }

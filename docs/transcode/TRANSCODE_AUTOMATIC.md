@@ -78,6 +78,66 @@ reaches the quality fallback: a ladder that passes, or fails for another reason
 such as size, never pays for them, and neither does a search that still has an
 eligible x265 setting to verify after a ladder holdout failure.
 
+**Stricter hardware selection.** A VideoToolbox candidate must clear the quality
+gates by a wider margin than an x265 one: its VMAF p5 and worst-window means need
+2 VMAF more than the 1.5 every candidate needs, 3.5 in total (p5 at least 87.5
+and worst window at least 88.5 against the 84/85 limits). The sample search sees
+five short windows while the final check sees every frame, and VideoToolbox's
+quality swings more between windows than x265's, so a hardware result that only
+just clears the gates on the sample is the one most likely to fail the whole
+file. A hard 1080p episode picked `-q:v` 70 on a p5 of 87.1 and a worst window
+of 89.2 and then failed the whole-file check; under the new margin that result is
+rejected in the sample search (p5 87.1 is below 87.5) and the search moves on to
+the next setting, or to x265. x265 candidates keep the 1.5 margin. There is no
+worst-frame floor: the single worst frame (78.7 there) is already covered by the
+frame-count and p5 checks of the whole-file validation, and a floor tuned on one
+episode would reject results that validate fine on others.
+
+**Same-action x265 continuation.** When a VideoToolbox winner fails the final
+whole-file quality check, the action no longer ends there. It goes back to the
+size search in the same action and round, with hardware excluded, so the x265
+families that were never measured (including the slow quality fallback) get their
+turn; it then encodes and validates as usual. This happens at most once per
+action: if the x265 result fails validation too, the action ends as a quality
+rejection, as it always did. The original is never touched and nothing is
+promoted before the x265 result is validated.
+
+- *Reuse.* The worker keeps the earlier search's measurements. The continued
+  request names the earlier search (`continues_benchmark`, id and request
+  digest); the worker reuses an x265 candidate's discovery-window measurements,
+  and only for candidates the earlier search rejected on a quality gate at
+  discovery (a candidate that passed is measured again, because its holdout check
+  needs per-frame scores the saved record does not keep), and only when its own
+  saved record matches exactly (same source hash, quality
+  policy, windows, rules and capability fingerprint, identical candidate
+  settings, one clean row per discovery window). Anything else is measured again,
+  never an error. Under grid verification both searches are planned on the same
+  final-grid windows, so the rule holds; reuse covers the discovery stage only and
+  the continued search still verifies on every grid window.
+- *Budget.* The frozen search ceiling (base budget + extension + verification)
+  covers both searches together. The continuation starts only if the ceiling
+  leaves at least the base search budget after the hardware search's active time;
+  its extension is cut to fit what is left. If there is not enough left, the
+  action ends as a quality rejection and says why. The batch's reservation stays
+  held while a hardware result awaits its final check, and the recorded search
+  time is the sum of both searches.
+- *Visibility.* The result, the MCP `action_status` `transcode` block and the web
+  job detail say that the VideoToolbox result failed the final quality check and
+  the action continued with x265, and keep the failed attempt's whole-file VMAF
+  mean, p5, worst window and the failed checks next to the final result. A
+  quality rejection names the failed metric and its limit.
+- *Compatibility.* The continuation reference and the extra margin are sent only
+  to a worker that advertises `search_continuation` / `hardware_selection_margin`;
+  a worker without `hardware_selection_margin` gets no hardware candidates (x265
+  only), and one without `search_continuation` simply measures everything again
+  if it ever sees a continued search. Both flags are in the capability
+  fingerprint, so **upgrade the server first**, then the worker (an older server
+  fails closed on a newer worker's fingerprint). Workers reject unknown request
+  fields, so a new server sends the new fields only after the worker advertises
+  the flags. Rolling the server back while an action is mid-continuation is
+  unsafe: an older server ignores `hardware_continuation` and may repeat a
+  VideoToolbox attempt, so wait for such actions to finish first.
+
 It is on by default for the new policy only, and always visible and switchable:
 the Library and batch setup show an *Allow the media engine (faster)* checkbox
 under Smaller files (with the margin), *Change goal* shows the same two

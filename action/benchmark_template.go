@@ -311,7 +311,9 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 	if st.Status == transcode.StatusCompleted || st.Status == transcode.StatusFailed || st.Status == transcode.StatusCancelled {
 		e.noteWorkerSlotFreed()
 		if st.SearchSeconds != nil {
-			ec.State["benchmark_search_seconds"] = *st.SearchSeconds
+			// A continued search spends what the first one left of the same
+			// ceiling, so the action's search time is both added.
+			ec.State["benchmark_search_seconds"] = *st.SearchSeconds + getFloat(ec.State, continuationPriorSecondsKey)
 		}
 	}
 	if st.Automatic != nil {
@@ -533,6 +535,7 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 				wp.PlanDigest = digest
 				winningPlan = &wp
 
+				rememberContinuationBase(ec, basePlan, winner)
 				ec.State["plan"] = winningPlan
 				ec.State["plan_source"] = "benchmark_winner"
 				ec.State["plan_digest"] = digest
@@ -1240,12 +1243,18 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 		req.ModePolicyVersion = policy.Version
 		req.SearchBudgetSeconds = getInt(ec.State, "search_budget_seconds")
 		// An older worker rejects the field, so it keeps the fixed budget.
+		continued := continuationActive(ec.State)
 		if ext := policy.searchExtension(); ext != nil && caps.SearchBudgetExtension && ext.Validate(req.SearchBudgetSeconds) == nil {
 			req.SearchExtension = ext.Clone()
+			if continued {
+				// The first search used part of the ceiling; the continuation
+				// may only spend what it left.
+				req.SearchExtension = continuationExtension(ext, req.SearchBudgetSeconds, continuationOf(ec.State).RemainingSearchSeconds)
+			}
 		}
 		// Size v3 spends the search budget on x265 only: VideoToolbox
 		// candidates rarely won its smallest-qualifying selection.
-		vtCandidates := policy.Size == nil || policy.Size.VideoToolboxCandidates
+		vtCandidates := (policy.Size == nil || policy.Size.VideoToolboxCandidates) && !continued
 		if mode != "x265_preserve" && vtCandidates && planCodec != transcode.VideoCodecHEVCVideoToolbox && caps.Encoders[transcode.VideoCodecHEVCVideoToolbox] {
 			vt := *plan
 			vt.VideoCodec = transcode.VideoCodecHEVCVideoToolbox
@@ -1280,7 +1289,12 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 				return nil, err
 			}
 			req.QualityPruning = req.Automatic && caps.AutomaticQualityPruning
-			if err := addHardwareSearch(req, policy, plan, caps, metric, bitDepth, qualityBitDepth); err != nil {
+			// A continuation after a failed VideoToolbox result is x265 only.
+			if continued {
+				if c := continuationOf(ec.State); caps.SearchContinuation && c.FailedBenchmarkJobID != "" && c.FailedBenchmarkDigest != "" {
+					req.ContinuesBenchmark = &transcode.BenchmarkContinuation{ID: c.FailedBenchmarkJobID, RequestDigest: c.FailedBenchmarkDigest}
+				}
+			} else if err := addHardwareSearch(req, policy, plan, caps, metric, bitDepth, qualityBitDepth); err != nil {
 				return nil, err
 			}
 		}

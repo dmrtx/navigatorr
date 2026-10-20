@@ -57,7 +57,9 @@ type SearchReview struct {
 // one. When every proposed setting was already measured, another round would
 // repeat that evidence, so only stopping is offered.
 func (e *Engine) reviewBenchmarkSearch(ec *ExecutionContext) *StepResult {
-	if getBool(ec.State, "benchmark_search_reviewed") || e.deps.Store == nil {
+	// A search that continues a failed hardware result is part of the action
+	// the user already started, not a repeat of an earlier unsuccessful round.
+	if getBool(ec.State, "benchmark_search_reviewed") || continuationActive(ec.State) || e.deps.Store == nil {
 		return nil
 	}
 	var proposal transcode.BenchmarkRequest

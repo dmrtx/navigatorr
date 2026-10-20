@@ -30,6 +30,12 @@ func addHardwareSearch(req *transcode.BenchmarkRequest, policy *ModePolicySnapsh
 	if !req.Automatic || req.AutomaticSearch == nil || !caps.HardwareSearch || plan.VideoCodec != transcode.VideoCodecLibX265 {
 		return nil
 	}
+	// A worker that cannot hold hardware results to the frozen larger margin
+	// would apply the x265 one, which is the choice that failed; the search
+	// stays x265 only rather than weaken the rule.
+	if rules.ExtraSelectionMarginVMAF > 0 && !caps.HardwareSelectionMargin {
+		return nil
+	}
 	if validateWorkerCapabilitiesForBenchmark(caps, metric, qualityBitDepth, transcode.VideoCodecHEVCVideoToolbox) != nil {
 		return nil
 	}

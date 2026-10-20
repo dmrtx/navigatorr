@@ -23,7 +23,7 @@ func (m maintenanceMemo) bytes() int {
 }
 
 var maintenanceInputKeys = []string{"path", "parent_action_id", "batch_promote_parent_id", "transcode_action_id", "library_context", "service", "series_id", "movie_id", "media_id", "paths", "episode_file_ids", "dry_run", "promote_candidates", "mode", "replace_original"}
-var maintenanceOutputKeys = []string{"resolved_path", "original_sha256", "original", "result", "candidate_size_bytes", "promotion", "recovery_retained", "original_integrity", "promoted", "original_intact", "benchmark_decision", "expected_savings_percent", "transcode_phase", "progress_is_stale", "progress", "speed", "last_progress_at", "counts", "batch_promotion", "benchmark_comparison_available", "job_id", "transcode_job_id", "paused", "skip_transcode", "batch_item_generations", "batch_settings_revision", "batch_retry_pending", "post_batch_promotion", "mode", "size_main10", "size_audio_only", "audio_only_estimated_bytes", "quality_evidence", "automatic_search", "conversions", "reason_code"}
+var maintenanceOutputKeys = []string{"resolved_path", "original_sha256", "original", "result", "candidate_size_bytes", "promotion", "recovery_retained", "original_integrity", "promoted", "original_intact", "benchmark_decision", "expected_savings_percent", "transcode_phase", "progress_is_stale", "progress", "speed", "last_progress_at", "counts", "batch_promotion", "benchmark_comparison_available", "job_id", "transcode_job_id", "paused", "skip_transcode", "batch_item_generations", "batch_settings_revision", "batch_retry_pending", "post_batch_promotion", "mode", "size_main10", "size_audio_only", "audio_only_estimated_bytes", "quality_evidence", "automatic_search", "conversions", "reason_code", "hardware_continuation"}
 
 // maintenanceHardwareNote begins the winner uncertainty that says why a media
 // engine result was chosen. It must equal optimization.HardwareSelectedNote;
@@ -100,6 +100,9 @@ func maintenanceJSON(raw string, keys []string) string {
 				if vmaf, exists := nested["vmaf"]; exists {
 					projected["vmaf"] = json.RawMessage(maintenanceJSON(string(vmaf), []string{"mean", "p5", "worst_window_mean", "worst_window_seconds"}))
 				}
+				if codes, exists := nested["reason_codes"]; exists {
+					projected["reason_codes"] = codes
+				}
 				if copied, exists := nested["video_copy"]; exists {
 					projected["video_copy"] = json.RawMessage(maintenanceJSON(string(copied), []string{"verdict"}))
 				}
@@ -116,6 +119,31 @@ func maintenanceJSON(raw string, keys []string) string {
 				// The stages and candidate lists stay in the action history;
 				// the list view needs only how the winner was verified.
 				value = json.RawMessage(maintenanceJSON(string(value), []string{"verification_windows", "verification", "winner_windows"}))
+			case "hardware_continuation":
+				// Only what the page shows: the outcome and the failed
+				// attempt's numbers, not its job ids or digests.
+				projected := json.RawMessage(maintenanceJSON(string(value), []string{"outcome", "message", "failed_candidate_id"}))
+				var kept map[string]json.RawMessage
+				_ = json.Unmarshal(projected, &kept)
+				if final, exists := nested["final"]; exists {
+					var f map[string]json.RawMessage
+					if json.Unmarshal(final, &f) == nil {
+						out := map[string]json.RawMessage{}
+						for _, k := range []string{"failed_checks", "failures", "measured"} {
+							if v, ok := f[k]; ok {
+								out[k] = v
+							}
+						}
+						if limits, ok := f["limits"]; ok {
+							out["limits"] = json.RawMessage(maintenanceJSON(string(limits), []string{"worst_window_seconds"}))
+						}
+						kept["final"], _ = json.Marshal(out)
+					}
+				}
+				if windows, exists := nested["windows"]; exists {
+					kept["windows"] = windows
+				}
+				value, _ = json.Marshal(kept)
 			case "benchmark_decision":
 				if winner, exists := nested["winner"]; exists {
 					nested = map[string]json.RawMessage{"winner": maintenanceWinner(winner)}
