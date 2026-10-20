@@ -72,6 +72,9 @@ func priorSearch(t *testing.T, stateDir string) (*BenchmarkRecord, *BenchmarkExe
 	for i := range evidence.Quality {
 		evidence.Quality[i].CapabilityFingerprint = continuationFingerprint
 	}
+	// The metric step of a real search records the decimation it measured
+	// with; the continued search has not run it yet when it looks for reuse.
+	evidence.VMAFTemporalDecimation = 1
 	record.Evidence = evidence
 	if err := os.MkdirAll(filepath.Join(stateDir, continuationPriorID), 0o755); err != nil {
 		t.Fatal(err)

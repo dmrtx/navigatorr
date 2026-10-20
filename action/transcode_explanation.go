@@ -72,7 +72,7 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 	}
 	finish := func() *TranscodeExplanation {
 		if e.HardwareContinuation != nil {
-			e.Message = continuationNote(e.HardwareContinuation) + " " + e.Message
+			e.Message = strings.TrimSpace(continuationNote(e.HardwareContinuation) + " " + e.Message)
 		}
 		return e
 	}

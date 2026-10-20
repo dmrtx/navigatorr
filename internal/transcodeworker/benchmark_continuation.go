@@ -122,10 +122,12 @@ func sameMeasurementBasis(a, b *BenchmarkRecord) bool {
 }
 
 // sameSourceEvidence reports whether both searches saw the source the same way.
+// The VMAF temporal decimation is not compared: it is derived from the frame
+// rate and field order, which are, and a search records it only once its
+// metric step has run, so a search still starting out always reads zero.
 func sameSourceEvidence(a, b *BenchmarkExecutionEvidence) bool {
 	return a.SourceVideoIndex == b.SourceVideoIndex && a.SourceBitDepth == b.SourceBitDepth && a.SourcePixelFormat == b.SourcePixelFormat &&
-		a.SourceResolution == b.SourceResolution && a.SourceFPS == b.SourceFPS && a.SourceFieldOrder == b.SourceFieldOrder &&
-		a.VMAFTemporalDecimation == b.VMAFTemporalDecimation
+		a.SourceResolution == b.SourceResolution && a.SourceFPS == b.SourceFPS && a.SourceFieldOrder == b.SourceFieldOrder
 }
 
 func sameJSON(a, b any) bool {

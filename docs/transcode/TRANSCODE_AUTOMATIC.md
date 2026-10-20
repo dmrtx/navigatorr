@@ -125,7 +125,12 @@ promoted before the x265 result is validated.
   fingerprint, so **upgrade the server first**, then the worker (an older server
   fails closed on a newer worker's fingerprint). Workers reject unknown request
   fields, so a new server sends the new fields only after the worker advertises
-  the flags.
+  the flags. Rolling the server back while an action is mid-continuation is
+  unsafe: an older server ignores `hardware_continuation` and may repeat a
+  VideoToolbox attempt, so wait for such actions to finish first.
+- *Reused rows.* A reused candidate keeps the sample file names of the earlier
+  search, whose sample directory is already gone; the frame comparison then uses
+  the holdout frames only.
 
 It is on by default for the new policy only, and always visible and switchable:
 the Library and batch setup show an *Allow the media engine (faster)* checkbox

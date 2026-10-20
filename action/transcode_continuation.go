@@ -317,14 +317,14 @@ func (e *Engine) continueWithoutHardware(ctx context.Context, ec *ExecutionConte
 		ec.State[hardwareContinuationKey] = rec
 		ec.Outputs[hardwareContinuationKey] = rec
 	}
-	workerHasX265 := true
+	workerHasX265, capabilitiesUnknown := true, false
 	if e.deps.Transcode != nil {
 		caps, err := e.deps.Transcode.Capabilities(ctx)
 		if err != nil {
 			if isRetryableWorkerPollError(err) {
 				return StepResult{Status: StepWaitingExternal, WaitingCondition: "worker_unreachable", WaitingReason: fmt.Sprintf("Worker capabilities temporarily unavailable; the VideoToolbox result's quality failure will be handled when they return: %v", err)}, true, nil
 			}
-			workerHasX265 = false
+			workerHasX265, capabilitiesUnknown = false, true
 		} else {
 			workerHasX265 = caps.Encoders[transcode.VideoCodecLibX265]
 		}
@@ -337,6 +337,9 @@ func (e *Engine) continueWithoutHardware(ctx context.Context, ec *ExecutionConte
 	case remaining < minContinuationSeconds(ec):
 		rec.RemainingSearchSeconds = max(remaining, 0)
 		finish(continuationNotStarted, "search_budget_exhausted", "The VideoToolbox result failed the final quality check. The x265 continuation did not start because the search time allowed for this file was used up.")
+		return StepResult{}, false, nil
+	case capabilitiesUnknown:
+		finish(continuationNotStarted, "worker_capabilities_unavailable", "The VideoToolbox result failed the final quality check. The x265 continuation did not start because the worker's capabilities could not be read.")
 		return StepResult{}, false, nil
 	case !workerHasX265:
 		finish(continuationNotStarted, "x265_unavailable", "The VideoToolbox result failed the final quality check. The x265 continuation did not start because the worker cannot encode with x265.")

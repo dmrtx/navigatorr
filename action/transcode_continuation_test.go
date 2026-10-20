@@ -14,7 +14,7 @@ import (
 func failedFinalQuality(p5, window float64) transcode.FinalQualityEvidence {
 	threshold := 80.0
 	return transcode.FinalQualityEvidence{
-		Verdict:     "rejected",
+		Verdict:     "fail",
 		ReasonCodes: []string{"quality_vmaf_p5_below_minimum", "quality_vmaf_worst_window_below_minimum"},
 		VMAF:        &quality.VMAFStats{Mean: 93.4, P5: p5, Min: 61.2, WorstWindowSeconds: 10, WorstWindowMean: window, FrameThreshold: &threshold, FramesBelowThreshold: 30, FramesTotal: 1000},
 	}
@@ -146,7 +146,7 @@ func TestHardwareWinnerFailingFinalValidationContinuesWithX265(t *testing.T) {
 		t.Fatalf("message %q", rec.Message)
 	}
 	// The failed attempt's validation numbers stay visible.
-	if rec.Final == nil || rec.Final.Verdict != "rejected" || len(rec.Final.FailedChecks) != 2 || *rec.Final.Measured.VMAFP5 != 82.4 || *rec.Final.Measured.VMAFWorstWindow != 83.9 {
+	if rec.Final == nil || rec.Final.Verdict != "fail" || len(rec.Final.FailedChecks) != 2 || *rec.Final.Measured.VMAFP5 != 82.4 || *rec.Final.Measured.VMAFWorstWindow != 83.9 {
 		t.Fatalf("failed final validation not kept: %+v", rec.Final)
 	}
 	// The search ran from the plan it started with, and its total time is both searches.
@@ -490,6 +490,35 @@ func TestContinuedSearchRequestValidation(t *testing.T) {
 		mutate(r)
 		if err := transcode.ValidateBenchmarkRequest(r); err == nil {
 			t.Errorf("%s accepted", name)
+		}
+	}
+}
+
+// The production wait step adds the time of the search before a continued
+// search, however that search ends.
+func TestBenchmarkWaitSumsContinuedSearchTime(t *testing.T) {
+	seconds := 420.0
+	mock := &mockTranscodeExecutor{benchmarkStatusFunc: func(_ context.Context, id string) (transcode.BenchmarkStatus, error) {
+		return transcode.BenchmarkStatus{ProtocolVersion: transcode.WorkerProtocolVersion, ID: id, Status: transcode.StatusFailed, ReasonCode: "no_suitable_candidate", Error: "no candidate qualified", SearchSeconds: &seconds}, nil
+	}}
+	e := NewEngine(EngineDeps{Transcode: mock})
+	state := func() map[string]any {
+		return map[string]any{"optimization_enabled": true, "benchmark_job_id": "bench-wait-test", "search_budget_seconds": 600}
+	}
+	for name, tc := range map[string]struct {
+		prior any
+		want  float64
+	}{"first search": {nil, 420}, "continued search": {700.0, 1120}} {
+		ec := &ExecutionContext{InstanceID: "wait-test", ActionName: "transcode_media", Inputs: map[string]any{"mode": "size"}, Outputs: map[string]any{}, State: state()}
+		if tc.prior != nil {
+			ec.State[hardwareContinuationKey] = &HardwareContinuation{Outcome: continuationContinued}
+			ec.State[continuationPriorSecondsKey] = tc.prior
+		}
+		if _, err := e.stepBenchmarkWait(context.Background(), ec); err != nil {
+			t.Fatal(err)
+		}
+		if got := getFloat(ec.State, "benchmark_search_seconds"); got != tc.want {
+			t.Fatalf("%s: recorded search time %v, want %v", name, got, tc.want)
 		}
 	}
 }
