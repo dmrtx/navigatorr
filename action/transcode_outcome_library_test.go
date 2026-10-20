@@ -169,6 +169,9 @@ func TestOutcomeLibraryReusesValidatedWinnerAndStillValidates(t *testing.T) {
 	if reuse == nil || reuse.FromActionID != first.ID {
 		t.Fatalf("reuse state: %+v", second.State[libraryReuseKey])
 	}
+	if v, ok := second.State["benchmark_search_seconds"]; !ok || getFloat(second.State, "benchmark_search_seconds") != 0 {
+		t.Fatalf("a reused search measured nothing, so its budget settles at zero: %v", v)
+	}
 	report := libraryReport(t, second)
 	if report.Reused != first.ID || len(report.Matches) != 1 || report.Matches[0].FinalVerdict != "pass" || !strings.Contains(report.Note, "passed final validation") {
 		t.Fatalf("report: %+v", report)
@@ -185,6 +188,13 @@ func TestOutcomeLibraryReusesValidatedWinnerAndStillValidates(t *testing.T) {
 	}
 	if libraryReport(t, third).NotReused == "" {
 		t.Fatal("the report must say why nothing was reused")
+	}
+	// A string "false" turns it off too; "true" allows it.
+	if fourth := env.run(t, map[string]any{reuseLibraryOutcomeInput: "false"}); libraryReuseOf(fourth.State) != nil {
+		t.Fatal(`reuse_library_outcome="false" must search`)
+	}
+	if fifth := env.run(t, map[string]any{reuseLibraryOutcomeInput: "true"}); libraryReuseOf(fifth.State) == nil {
+		t.Fatal(`reuse_library_outcome="true" must reuse`)
 	}
 }
 

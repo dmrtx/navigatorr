@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 
 	"github.com/jakenesler/navigatorr/store"
@@ -341,7 +342,7 @@ func (e *Engine) libraryReuseFor(ec *ExecutionContext, req *transcode.BenchmarkR
 	if len(rows) == 0 || req == nil {
 		return nil, ""
 	}
-	if v, ok := ec.Inputs[reuseLibraryOutcomeInput]; ok && v != true {
+	if !libraryUseAllowed(ec) {
 		return nil, "reuse is turned off for this action"
 	}
 	if getBool(ec.State, "benchmark_search_reviewed") || getBool(ec.State, "benchmark_search_review_required") || continuationActive(ec.State) {
@@ -405,6 +406,9 @@ func (e *Engine) applyLibraryReuse(ctx context.Context, ec *ExecutionContext, re
 		return StepResult{}, false, nil
 	}
 	ec.State[libraryReuseKey] = reuse
+	// No search ran: a batch's search budget settles at what earlier rounds
+	// of this action measured (none, since reuse never follows a continuation).
+	ec.State["benchmark_search_seconds"] = getFloat(ec.State, continuationPriorSecondsKey)
 	ec.State["benchmark_job_id"] = req.ID
 	ec.State["benchmark_request"] = req
 	ec.State["benchmark_request_digest"] = digest
@@ -421,4 +425,22 @@ func (e *Engine) applyLibraryReuse(ctx context.Context, ec *ExecutionContext, re
 		libraryReuseKey:            reuse,
 		outcomeLibraryKey:          ec.State[outcomeLibraryKey],
 	}}, true, nil
+}
+
+// libraryUseAllowed reads reuse_library_outcome: absent or true (a JSON
+// boolean, or the string "true") allows the library's results to be used;
+// anything else turns them off.
+func libraryUseAllowed(ec *ExecutionContext) bool {
+	v, ok := ec.Inputs[reuseLibraryOutcomeInput]
+	if !ok || v == nil {
+		return true
+	}
+	switch t := v.(type) {
+	case bool:
+		return t
+	case string:
+		b, err := strconv.ParseBool(strings.TrimSpace(t))
+		return err == nil && b
+	}
+	return false
 }
