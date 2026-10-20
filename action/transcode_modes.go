@@ -396,6 +396,12 @@ func modePolicyWithBudget(mode string, anime bool, maxHeight int, hardware *tran
 		snapshot.Size = sizeModeV3Policy(allowSlow)
 		snapshot.Size.Hardware = hardware.Clone()
 		snapshot.Size.SizeBudget = budget.Clone()
+		if snapshot.Size.SizeBudget != nil && snapshot.Size.Hardware != nil {
+			// The media engine is allowed, so the budget encode may use it
+			// when it measures as well as x265 at the budget.
+			rules := sizeBudgetComparisonRules
+			snapshot.Size.SizeBudget.Comparison = &rules
+		}
 	}
 	if mode == "compact" {
 		snapshot.MinSavingsPercent = optimization.CompactMinimumSavingsPercent

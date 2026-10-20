@@ -41,6 +41,10 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 	if getBool(ec.State, "skip_transcode") {
 		return StepResult{Status: StepSkipped}, nil
 	}
+	if round := sizeBudgetRoundOf(ec.State); round != nil && round.Failure != "" {
+		// The comparison round is given up; the wait step plans x265.
+		return StepResult{Status: StepCompleted}, nil
+	}
 	if getBool(ec.State, "benchmark_submitted") && !getBool(ec.State, "benchmark_reconcile") {
 		benchID := getString(ec.State, "benchmark_job_id")
 		return StepResult{
@@ -81,6 +85,10 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 				return StepResult{Status: StepWaitingExternal, WaitingCondition: "worker_reconciling", WaitingReason: "Benchmark submit uncertain; reconciling the existing remote identity"}, nil
 			}
 			if he, ok := transcodeHTTPError(err); !ok || he.StatusCode != 404 {
+				if failSizeBudgetRound(ec, fmt.Sprintf("reconciliation failed: %v", err)) {
+					delete(ec.State, "benchmark_reconcile")
+					return StepResult{Status: StepCompleted, Outputs: map[string]any{"benchmark_job_id": id}}, nil
+				}
 				return StepResult{Status: StepFailed, Error: fmt.Sprintf("benchmark reconciliation failed: %v", err)}, nil
 			}
 			if raw, ok := ec.State["benchmark_request"]; ok {
@@ -137,9 +145,10 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 			return *review, nil
 		}
 	}
-	if req == nil && getBool(ec.State, "benchmark_search_reviewed") {
+	if req == nil && (getBool(ec.State, "benchmark_search_reviewed") || sizeBudgetRoundActive(ec.State)) {
 		// Submit exactly the proposal displayed at the review boundary, even
 		// if capability auto-selection would now choose a different metric.
+		// The size budget's encoder comparison was built by the fallback.
 		b, err := json.Marshal(ec.State["benchmark_request"])
 		if err != nil || json.Unmarshal(b, &req) != nil || req == nil {
 			return StepResult{Status: StepFailed, Error: "Reviewed benchmark proposal is missing or unreadable."}, nil
@@ -227,6 +236,12 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 		if herr != nil {
 			return StepResult{}, herr
 		}
+		if res.Status == StepFailed && failSizeBudgetRound(ec, res.Error) {
+			// The comparison is optional: a refused round leaves the budget
+			// encode x265, which the wait step plans.
+			ec.State["benchmark_submitted"] = true
+			res = StepResult{Status: StepCompleted, Outputs: map[string]any{"benchmark_job_id": req.ID}}
+		}
 		// Persist the definitive outcome under the child owner before releasing
 		// the parent admission lease.
 		if perr := e.persistExecutionState(actx, ec); perr != nil {
@@ -271,6 +286,9 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 		return StepResult{Status: StepSkipped}, nil
 	}
 
+	if round := sizeBudgetRoundOf(ec.State); round != nil && round.Failure != "" {
+		return e.finishSizeBudgetComparison(ec, round, nil)
+	}
 	benchJobID := getString(ec.State, "benchmark_job_id")
 	if benchJobID == "" {
 		return StepResult{Status: StepFailed, Error: "no active benchmark job ID to monitor"}, nil
@@ -305,6 +323,10 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 			ec.State["progress_is_stale"] = true
 			return StepResult{Status: StepWaitingExternal, WaitingCondition: "worker_unreachable", WaitingReason: "Benchmark status temporarily unavailable; existing remote job will be reconciled"}, nil
 		}
+		if failSizeBudgetRound(ec, fmt.Sprintf("status failed: %v", err)) {
+			// The search's result stands; only the comparison is lost.
+			return e.finishSizeBudgetComparison(ec, sizeBudgetRoundOf(ec.State), nil)
+		}
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("benchmark status failed; no resubmit: %v", err)}, nil
 	}
 	e.observeBenchmarkStatus(ec, st)
@@ -319,6 +341,11 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 	if st.Automatic != nil {
 		ec.State["automatic_search"] = st.Automatic
 		ec.Outputs["automatic_search"] = st.Automatic
+	}
+	if round := sizeBudgetRoundOf(ec.State); round != nil && (st.Status == transcode.StatusCompleted || st.Status == transcode.StatusFailed || st.Status == transcode.StatusCancelled) {
+		// The size budget's encoder comparison ended: its outcome, whatever
+		// it is, picks the budget encode's encoder.
+		return e.finishSizeBudgetComparison(ec, round, &st)
 	}
 	if getString(ec.Inputs, "mode") != "" && st.ReasonCode == "search_budget_exhausted" {
 		if st.SearchWorkerBusy {

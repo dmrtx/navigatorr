@@ -92,6 +92,11 @@ type SizeBudgetPolicy struct {
 	Preset      string                 `json:"preset"`
 	X265        transcode.X265Settings `json:"x265"`
 	Floor       SizeBudgetFloor        `json:"quality_floor"`
+	// Comparison is set when the operation allows the media engine: the
+	// fallback then measures VideoToolbox beside two-pass x265 at the budget
+	// and encodes with the one it picks. Absent, the fallback is x265 only,
+	// which is what snapshots frozen before the comparison carry.
+	Comparison *SizeBudgetComparison `json:"encoder_comparison,omitempty"`
 }
 
 func (b *SizeBudgetPolicy) Clone() *SizeBudgetPolicy {
@@ -102,6 +107,10 @@ func (b *SizeBudgetPolicy) Clone() *SizeBudgetPolicy {
 	if b.Siblings != nil {
 		s := *b.Siblings
 		cp.Siblings = &s
+	}
+	if b.Comparison != nil {
+		c := *b.Comparison
+		cp.Comparison = &c
 	}
 	return &cp
 }
@@ -121,6 +130,9 @@ func (b *SizeBudgetPolicy) Validate() error {
 		return fmt.Errorf("size budget needs exactly one of a percent, a byte count and the sibling files")
 	}
 	if err := b.Siblings.validate(); err != nil {
+		return err
+	}
+	if err := b.Comparison.validate(); err != nil {
 		return err
 	}
 	if b.Percent > 0 && (b.Percent < sizeBudgetMinPercent || b.Percent > sizeBudgetMaxPercent || math.IsNaN(b.Percent)) {
@@ -247,7 +259,11 @@ func modeSizeBudgetInput(mode string, inputs map[string]any) (*SizeBudgetPolicy,
 // shows: a setting the search measured (its sampled size estimate and VMAF) or
 // the fallback itself (its planned or actual size and its final VMAF).
 type SizeBudgetPoint struct {
-	Kind         string   `json:"kind"` // "searched" or "budget_fallback"
+	// Kind is "searched", "budget_measured" (an encoder the fallback measured
+	// at the budget on the search's windows), "budget_overshoot" (a
+	// VideoToolbox encode over the budget, re-encoded at a lower bitrate) or
+	// "budget_fallback".
+	Kind         string   `json:"kind"`
 	CandidateID  string   `json:"candidate_id,omitempty"`
 	VideoCodec   string   `json:"video_codec,omitempty"`
 	Quality      int      `json:"quality,omitempty"`
@@ -260,6 +276,8 @@ type SizeBudgetPoint struct {
 	VMAFMean     *float64 `json:"vmaf_mean,omitempty"`
 	VMAFP5       *float64 `json:"vmaf_p5,omitempty"`
 	VMAFWorst    *float64 `json:"vmaf_worst_window,omitempty"`
+	// Chosen marks the measured encoder the fallback encodes with.
+	Chosen bool `json:"chosen,omitempty"`
 }
 
 // SizeBudgetRecord is what a budget fallback planned and, after the encode,
@@ -284,6 +302,11 @@ type SizeBudgetRecord struct {
 	Target QualityLimits     `json:"quality_target"`
 	Floor  QualityLimits     `json:"quality_floor"`
 	Curve  []SizeBudgetPoint `json:"curve,omitempty"`
+	// Choice is the encoder the fallback uses and why; Correction a
+	// VideoToolbox encode that came out over the budget and was encoded again
+	// at a lower bitrate.
+	Choice     *SizeBudgetChoice     `json:"encoder_choice,omitempty"`
+	Correction *SizeBudgetCorrection `json:"bitrate_correction,omitempty"`
 
 	// Set after the encode.
 	Outcome        string               `json:"outcome,omitempty"`
@@ -513,12 +536,27 @@ func (e *Engine) sizeBudgetFallback(ctx context.Context, ec *ExecutionContext, o
 	}
 	rec.Curve = sizeBudgetCurve(decision, budget)
 	rec.NonVideoBytes, rec.TargetBytes, rec.VideoBitrateKbps = enc.NonVideoBytes, enc.TargetBytes, enc.X265.BitrateKbps
-	x := enc.X265
-	plan, err := e.sizeBudgetPlan(ec, snapshot, &x)
+	// With the media engine allowed, VideoToolbox and x265 are first measured
+	// at the budget on the search's windows; the round's result picks the
+	// encoder (see transcode_size_budget_encoder.go).
+	if result, started := e.startSizeBudgetComparison(ec, snapshot, caps, rep, enc, rec, outputs); started {
+		return result, true
+	}
+	return e.commitSizeBudgetPlan(ec, snapshot, enc, rec, outputs)
+}
+
+// commitSizeBudgetPlan builds the budget encode with the encoder rec.Choice
+// names (x265 without one) and makes it the action's plan.
+func (e *Engine) commitSizeBudgetPlan(ec *ExecutionContext, snapshot *ModePolicySnapshot, enc sizeBudgetEncode, rec *SizeBudgetRecord, outputs map[string]any) (StepResult, bool) {
+	video, err := sizeBudgetVideo(snapshot, getSourceReport(ec.State["source_report"]), getPlan(ec.State["plan"]), enc, rec)
 	if err != nil {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("building the size budget plan: %v", err)}, true
 	}
-	planned := SizeBudgetPoint{Kind: "budget_fallback", VideoCodec: transcode.VideoCodecLibX265, Preset: plan.Preset, BitrateKbps: x.BitrateKbps, Bytes: rec.TargetBytes, WithinBudget: true}
+	plan, err := e.sizeBudgetPlan(ec, snapshot, video)
+	if err != nil {
+		return StepResult{Status: StepFailed, Error: fmt.Sprintf("building the size budget plan: %v", err)}, true
+	}
+	planned := SizeBudgetPoint{Kind: "budget_fallback", VideoCodec: transcode.NormalizeVideoCodec(plan.VideoCodec), Preset: plan.Preset, BitrateKbps: sizeBudgetPlanKbps(plan), Bytes: rec.TargetBytes, WithinBudget: true}
 	rec.Curve = append(rec.Curve, planned)
 	rec.Message = sizeBudgetPlannedMessage(rec)
 	ec.State[sizeBudgetKey] = rec
@@ -533,10 +571,10 @@ func (e *Engine) sizeBudgetFallback(ctx context.Context, ec *ExecutionContext, o
 	return StepResult{Status: StepCompleted, Outputs: outputs}, true
 }
 
-// sizeBudgetPlan is the search's starting plan encoded as two-pass x265 at the
-// budget's bitrate, with final validation on the size mode's windows held to
-// the floor.
-func (e *Engine) sizeBudgetPlan(ec *ExecutionContext, snapshot *ModePolicySnapshot, x *transcode.X265Settings) (*transcode.Plan, error) {
+// sizeBudgetPlan is the search's starting plan encoded with the budget's video
+// settings (two-pass x265, or VideoToolbox at an average bitrate), with final
+// validation on the size mode's windows held to the floor.
+func (e *Engine) sizeBudgetPlan(ec *ExecutionContext, snapshot *ModePolicySnapshot, video sizeBudgetVideoSettings) (*transcode.Plan, error) {
 	base := getPlan(ec.State["plan"])
 	if base == nil || base.Mode != "size" || base.PolicyDigest != snapshot.Digest {
 		return nil, fmt.Errorf("the frozen size plan is missing")
@@ -563,12 +601,7 @@ func (e *Engine) sizeBudgetPlan(ec *ExecutionContext, snapshot *ModePolicySnapsh
 		return nil, fmt.Errorf("the size budget quality floor is missing")
 	}
 	p := *base
-	// The base plan's tune (animation for anime) and Main10 choice carry over.
-	p.VideoCodec, p.Quality, p.Preset = transcode.VideoCodecLibX265, 0, snapshot.Size.SizeBudget.Preset
-	p.X265 = x.Clone()
-	p.PrioritizeSpeed, p.SpatialAQ, p.Realtime = nil, nil, nil
-	p.AverageBitrateKbps, p.MaxBitrateKbps, p.ConstantBitrate = 0, 0, nil
-	p.QMin, p.QMax, p.GOPSize, p.BFrames, p.ClosedGOP, p.PowerEfficient, p.MaxRefFrames = nil, nil, nil, nil, nil, nil, nil
+	video.apply(&p)
 	p.QualityValidation = &transcode.QualityValidationPlan{Metric: request.Metric, Samples: samples, FreshSamples: freshWindows, Quality: *floor, BenchmarkRequestDigest: digest}
 	p.PlanDigest = ""
 	d, err := transcode.DigestPlan(&p)
@@ -594,10 +627,8 @@ func finishSizeBudget(ec *ExecutionContext, candidateBytes int64) (*SizeBudgetRe
 		rec.Final = summarizeFinalQuality(&evidence, &rec.Target)
 		rec.BelowTarget = sizeBudgetMissedTarget(rec.Final.Measured, rec.Target)
 	}
-	point := SizeBudgetPoint{Kind: "budget_fallback", VideoCodec: transcode.VideoCodecLibX265, BitrateKbps: rec.VideoBitrateKbps, Bytes: candidateBytes, Measured: true, WithinBudget: candidateBytes <= rec.BudgetBytes}
-	if plan := getPlan(ec.State["plan"]); plan != nil {
-		point.Preset = plan.Preset
-	}
+	point := sizeBudgetEncodedPoint(ec, rec)
+	point.Bytes, point.Measured, point.WithinBudget = candidateBytes, true, candidateBytes <= rec.BudgetBytes
 	if rec.Final != nil {
 		point.VMAFMean, point.VMAFP5, point.VMAFWorst = rec.Final.Measured.VMAFMean, rec.Final.Measured.VMAFP5, rec.Final.Measured.VMAFWorstWindow
 		point.Passed = len(rec.BelowTarget) == 0
@@ -627,6 +658,16 @@ func finishSizeBudget(ec *ExecutionContext, candidateBytes int64) (*SizeBudgetRe
 	}
 	ec.State[sizeBudgetKey] = rec
 	return rec, fits
+}
+
+// sizeBudgetEncodedPoint is the budget encode's point before its size and
+// numbers are filled in: the encoder and bitrate its plan ran.
+func sizeBudgetEncodedPoint(ec *ExecutionContext, rec *SizeBudgetRecord) SizeBudgetPoint {
+	point := SizeBudgetPoint{Kind: "budget_fallback", VideoCodec: sizeBudgetChosenCodec(rec), BitrateKbps: rec.VideoBitrateKbps}
+	if plan := getPlan(ec.State["plan"]); plan != nil {
+		point.VideoCodec, point.Preset, point.BitrateKbps = transcode.NormalizeVideoCodec(plan.VideoCodec), plan.Preset, sizeBudgetPlanKbps(plan)
+	}
+	return point
 }
 
 // overshotSizeBudget records a budget encode refused for its size before the
@@ -659,8 +700,9 @@ func failSizeBudget(ec *ExecutionContext, evidence *transcode.FinalQualityEviden
 	rec.BelowTarget = nil
 	if rec.Final != nil {
 		rec.BelowTarget = sizeBudgetMissedTarget(rec.Final.Measured, rec.Target)
-		point := SizeBudgetPoint{Kind: "budget_fallback", VideoCodec: transcode.VideoCodecLibX265, BitrateKbps: rec.VideoBitrateKbps, Bytes: evidence.CandidateSizeBytes, Measured: evidence.CandidateSizeBytes > 0, WithinBudget: evidence.CandidateSizeBytes > 0 && evidence.CandidateSizeBytes <= rec.BudgetBytes,
-			VMAFMean: rec.Final.Measured.VMAFMean, VMAFP5: rec.Final.Measured.VMAFP5, VMAFWorst: rec.Final.Measured.VMAFWorstWindow}
+		point := sizeBudgetEncodedPoint(ec, rec)
+		point.Bytes, point.Measured, point.WithinBudget = evidence.CandidateSizeBytes, evidence.CandidateSizeBytes > 0, evidence.CandidateSizeBytes > 0 && evidence.CandidateSizeBytes <= rec.BudgetBytes
+		point.VMAFMean, point.VMAFP5, point.VMAFWorst = rec.Final.Measured.VMAFMean, rec.Final.Measured.VMAFP5, rec.Final.Measured.VMAFWorstWindow
 		if point.Bytes <= 0 {
 			point.Bytes = rec.TargetBytes
 		}
@@ -711,7 +753,15 @@ func sizeBudgetPlannedMessage(r *SizeBudgetRecord) string {
 	if r.Siblings != nil {
 		from = " " + r.Siblings.Message
 	}
-	return fmt.Sprintf("%s, so the file is encoded once at the budget instead: two-pass x265 at %d kbps of video for about %s of %s. Its quality is measured on the final validation windows and held only to the floor; it will be reported as below the quality target.%s", why, r.VideoBitrateKbps, formatBudgetBytes(r.TargetBytes), formatBudgetBytes(r.BudgetBytes), from)
+	encoder := "two-pass x265"
+	if sizeBudgetChosenCodec(r) == transcode.VideoCodecHEVCVideoToolbox {
+		encoder = "VideoToolbox"
+	}
+	choice := ""
+	if r.Choice != nil && r.Choice.Message != "" {
+		choice = " " + r.Choice.Message
+	}
+	return fmt.Sprintf("%s, so the file is encoded once at the budget instead: %s at %d kbps of video for about %s of %s. Its quality is measured on the final validation windows and held only to the floor; it will be reported as below the quality target.%s%s", why, encoder, r.VideoBitrateKbps, formatBudgetBytes(r.TargetBytes), formatBudgetBytes(r.BudgetBytes), choice, from)
 }
 
 func formatBudgetBytes(n int64) string {
@@ -764,11 +814,23 @@ func (e *Engine) batchPromotionBelowTarget(plan *batchPromotionPlan) int {
 
 // BatchItemFrozenSizeBudget is the size budget one batch item runs under, as
 // frozen (nil without one): its own goal-change policy when it has one, else
-// the batch's. state is the batch's decoded state.
+// the batch's. state is the batch's decoded state. The encoder comparison is
+// left out: it follows allow_hardware and the version the budget was frozen
+// with, not a budget setting the user chose.
 func BatchItemFrozenSizeBudget(state map[string]any, itemKey string) map[string]any {
 	holder := state
 	if row := objectMap(objectMap(state["batch_item_settings"])[itemKey]); objectMap(row["mode_policy"]) != nil {
 		holder = row
 	}
-	return objectMap(objectMap(objectMap(holder["mode_policy"])["size"])["size_budget"])
+	frozen := objectMap(objectMap(objectMap(holder["mode_policy"])["size"])["size_budget"])
+	if frozen == nil {
+		return nil
+	}
+	budget := make(map[string]any, len(frozen))
+	for k, v := range frozen {
+		if k != "encoder_comparison" {
+			budget[k] = v
+		}
+	}
+	return budget
 }

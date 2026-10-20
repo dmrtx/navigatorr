@@ -101,6 +101,15 @@ func (e *Engine) prepareRemoteRetry(ctx context.Context, inst *store.ActionInsta
 			ec.State["benchmark_reconcile"] = true
 			return submit, nil
 		}
+		if failSizeBudgetRound(ec, "the comparison round was retried by hand") {
+			// A retried comparison is not run again: the retry continues
+			// with the x265 budget encode, from the search's own results,
+			// and allocates no remote identity.
+			if perr := e.persistExecutionState(ctx, ec); perr != nil {
+				return resume, perr
+			}
+			return submit, nil
+		}
 		class := string(resilience.Classify(st.Error))
 		if err := rejectUnchangedPermanentRetry(class); err != nil {
 			return resume, err

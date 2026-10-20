@@ -4123,6 +4123,42 @@ test("a size budget draws a compact chart when the browser can", () => {
   assert.equal(h.run("sizeBudgetChart({budget_bytes: 1, curve: []})"), null);
 });
 
+test("a VideoToolbox budget encode shows the encoder comparison, the choice and the bitrate correction", () => {
+  const h = harness();
+  const vt = {
+    ...budgetRecord,
+    encoder_choice: { video_codec: "hevc_videotoolbox", reason: "videotoolbox_within_tolerance", message: "Within 1.0 VMAF of x265." },
+    bitrate_correction: { first_job_id: "job-1", first_candidate_bytes: 3200000000, first_bitrate_kbps: 2400, bitrate_kbps: 2190 },
+    curve: [
+      budgetRecord.curve[0],
+      { kind: "budget_measured", candidate_id: "budget-vt", video_codec: "hevc_videotoolbox", bitrate_kbps: 2400, bytes: 2950000000, within_budget: true, vmaf_mean: 80.1, vmaf_p5: 71.2, chosen: true },
+      { kind: "budget_measured", candidate_id: "budget-x265", video_codec: "libx265", bitrate_kbps: 2400, bytes: 2900000000, within_budget: true, vmaf_mean: 80.6, vmaf_p5: 71.9 },
+      { kind: "budget_overshoot", video_codec: "hevc_videotoolbox", bitrate_kbps: 2400, bytes: 3200000000, measured: true, within_budget: false, vmaf_mean: 80.4 },
+      { kind: "budget_fallback", video_codec: "hevc_videotoolbox", bitrate_kbps: 2190, bytes: 2850000000, measured: true, within_budget: true, vmaf_mean: 79.5 },
+    ],
+  };
+  const lines = h.run(`sizeBudgetLines(${JSON.stringify(vt)})`);
+  assert.ok(lines.includes("Encoder at the budget: VideoToolbox — Within 1.0 VMAF of x265."));
+  assert.ok(lines.includes("VideoToolbox overshot at 2400 kbps (3.20 GB); encoded again at 2190 kbps"));
+  const labels = vt.curve.map((p) => h.run(`sizeBudgetPointLabel(${JSON.stringify(p)})`));
+  assert.match(labels[1], /^Compared at the budget · VideoToolbox 2400 kbps · chosen · est\. 2\.95 GB · VMAF 80\.1 \(p5 71\.2\) · within budget$/);
+  assert.match(labels[2], /^Compared at the budget · x265 two-pass 2400 kbps · est\. /);
+  assert.match(labels[3], /^First budget encode · VideoToolbox 2400 kbps · 3\.20 GB · VMAF 80\.4 · over budget$/);
+  assert.match(labels[4], /^Budget encode · VideoToolbox 2190 kbps · 2\.85 GB/);
+  class Svg extends Element {
+    constructor(tagName) { super(); this.tagName = tagName; this.attrs = {}; }
+    setAttribute(name, value) { this.attrs[name] = value; if (name === "class") this.className = value; }
+  }
+  h.document.createElementNS = (_ns, name) => new Svg(name);
+  h.context.record = vt;
+  const all = (n) => [n, ...(n.children || []).flatMap(all)];
+  const parts = all(h.run("sizeBudgetChart(record)"));
+  assert.equal(parts.filter((c) => c.className === "point compared chosen").length, 1);
+  assert.equal(parts.filter((c) => c.className === "point compared").length, 1);
+  assert.equal(parts.filter((c) => c.className === "point overshoot").length, 1);
+  assert.equal(parts.filter((c) => c.className === "point fallback").length, 1);
+});
+
 test("a planned budget encode shows its target and an unmeasured point, not the over-budget winner", () => {
   const h = harness();
   const planned = { ...budgetRecord, outcome: "", candidate_bytes: 0, below_target: [], curve: [budgetRecord.curve[0], { kind: "budget_fallback", bytes: 2910000000, within_budget: true }] };

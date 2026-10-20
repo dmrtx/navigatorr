@@ -233,6 +233,40 @@ the encode starts and shown as the estimate (*Budget estimate*), not the
 over-budget winner. Validation rebuilds these settings from the frozen policy
 and the source and accepts only a plan that matches them exactly.
 
+**VideoToolbox at the budget.** When the goal allows the media engine
+(`allow_hardware`, on by default), the budget is frozen with an encoder
+comparison (`size.size_budget.encoder_comparison`) and the fallback measures
+before it encodes. At the budget the bitrate is fixed, so the encoders can be
+compared on quality alone: one bounded benchmark round (20 minutes) encodes the
+search's own sample windows twice at the budget's video bitrate, once with
+VideoToolbox in average-bitrate mode (the frozen hardware search's keyframe
+interval and B-frames, Main10 for a 10-bit output) and once with the two-pass
+x265 settings above, and measures both against the floor. VideoToolbox is used
+when its sampled VMAF mean and p5 are each no more than 1 point below x265's;
+otherwise x265 is. One point is a sixth of a just-noticeable difference (about
+6 VMAF) and about what two encodes of the same windows differ by when they are
+measured apart (about half a point on the mean, a point on the p5), so
+VideoToolbox is taken only when nobody could see what it costs. It encodes a
+film in minutes where two-pass x265 medium takes hours.
+
+The comparison is optional. With `allow_hardware=false` no comparison is
+frozen and the budget encode is x265, as it is for a budget frozen before the
+comparison existed (its digest is unchanged). A worker without VideoToolbox, a
+round the worker refuses, fails, cancels or runs out of time, and a round
+missing either measurement all leave the budget encode x265, and the job says
+which. The round runs on the worker's existing explicit benchmark path, so it
+needs no new worker capability.
+
+VideoToolbox has no second pass, so it can miss its average over a whole file.
+A VideoToolbox budget encode that comes out over the budget is encoded once
+more, at its bitrate scaled by how far the video overshot
+(`floor(kbps * (target - non-video) / (result - non-video))`), under a new job
+identity. A second overshoot is reported over the budget like any other.
+Validation rebuilds the VideoToolbox plan from the frozen policy, the source and
+the comparison's recorded numbers (recomputing the choice) and, after a
+correction, the bitrate the recorded first size gives; it accepts only an exact
+match.
+
 **Validation.** The result is judged against the same final windows as any size
 result, but against a lower, frozen floor: VMAF mean 70, p5 60 and worst
 5-second window 65. A VMAF difference of about 20 spans one ACR category and
@@ -263,8 +297,10 @@ quality target, wherever it is answered.
 **Seeing it.** Job detail shows the budget against the result and the trigger,
 an inline rate-quality chart (size across, VMAF mean up, the budget as a
 vertical line, the quality target and floor as horizontal lines, each searched
-setting as a dot and the budget encode highlighted), and a collapsed list with
-the same numbers for browsers without SVG support. `action_status` carries the
+setting as a dot, the two encodes compared at the budget as rings, the chosen
+one filled, a VideoToolbox encode that overshot as a dashed ring, and the budget
+encode highlighted), the encoder the budget used and why, and a collapsed list
+with the same numbers for browsers without SVG support. `action_status` carries the
 same data as `size_budget`, and the compact benchmark summary reports
 `plan_source=size_budget` with outcome `size_budget`. For a sibling-matched
 budget the job reads "Budget from N sibling episodes (median X Mbps × M)", shows
@@ -278,7 +314,13 @@ it.
 
 **Not done.** A search that ended because it hit the time cap does not trigger
 the fallback. A CRF winner judged within budget on its estimate is not
-re-checked after the full encode. The floor is frozen, not user-tunable.
+re-checked after the full encode. The floor is frozen, not user-tunable. The
+first, over-budget VideoToolbox candidate stays in the candidates folder beside
+the corrected one until it is cleaned up. A VideoToolbox budget encode that
+misses the floor is reported below the floor; it is not re-encoded with x265.
+The comparison measures sample windows, which may not show how VideoToolbox's
+rate control spends bits across a whole film; the correction covers the size
+side of that, the final validation the quality side.
 
 ## Compact mode
 

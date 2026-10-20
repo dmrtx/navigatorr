@@ -75,7 +75,8 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 	var budget SizeBudgetRecord
 	if data, _ := json.Marshal(read(sizeBudgetKey)); json.Unmarshal(data, &budget) == nil && budget.BudgetBytes > 0 {
 		e.SizeBudget = &budget
-		e.Encoder = transcode.VideoCodecLibX265
+		e.Encoder = sizeBudgetChosenCodec(&budget)
+		e.Hardware = e.Encoder == transcode.VideoCodecHEVCVideoToolbox
 	}
 	e.SizeBudgetSiblings = siblingEvidenceOf(res.State)
 	if json.Unmarshal(data, &decision) == nil && decision.Winner != nil && e.SizeBudget == nil {

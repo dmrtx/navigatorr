@@ -3903,17 +3903,36 @@ function sizeBudgetLines(b) {
   const target = b.quality_target?.vmaf_mean_minimum, floor = b.quality_floor;
   if (target != null || floor?.vmaf_mean_minimum != null) lines.push(`Quality target VMAF mean ≥ ${target ?? "—"} · floor ${floor?.vmaf_mean_minimum ?? "—"} mean, ${floor?.vmaf_p5_minimum ?? "—"} p5, ${floor?.vmaf_worst_window_minimum ?? "—"} worst window`);
   for (const miss of b.below_target || []) lines.push(`Below target: ${miss}`);
+  const choice = b.encoder_choice;
+  if (choice?.video_codec) lines.push(`Encoder at the budget: ${budgetEncoderName(choice.video_codec)}${choice.message ? ` — ${choice.message}` : ""}`);
+  const fix = b.bitrate_correction;
+  if (fix?.bitrate_kbps > 0) lines.push(`VideoToolbox overshot at ${fix.first_bitrate_kbps} kbps (${bytes(fix.first_candidate_bytes)}); encoded again at ${fix.bitrate_kbps} kbps`);
   return lines;
 }
+function budgetEncoderName(codec) {
+  return codec === "hevc_videotoolbox" ? "VideoToolbox" : "x265 two-pass";
+}
+// Point kinds: "searched" settings, the two "budget_measured" encodes of the
+// encoder comparison at the budget, a "budget_overshoot" VideoToolbox encode
+// re-encoded at a lower bitrate, and the "budget_fallback" encode itself.
 function sizeBudgetPointLabel(p) {
   const bits = [];
-  if (p.kind === "budget_fallback") bits.push(`Budget encode · x265 two-pass${p.bitrate_kbps ? ` ${p.bitrate_kbps} kbps` : ""}`);
+  const kbps = p.bitrate_kbps ? ` ${p.bitrate_kbps} kbps` : "";
+  if (p.kind === "budget_fallback") bits.push(`Budget encode · ${budgetEncoderName(p.video_codec)}${kbps}`);
+  else if (p.kind === "budget_measured") bits.push(`Compared at the budget · ${budgetEncoderName(p.video_codec)}${kbps}${p.chosen ? " · chosen" : ""}`);
+  else if (p.kind === "budget_overshoot") bits.push(`First budget encode · ${budgetEncoderName(p.video_codec)}${kbps}`);
   else bits.push(`${p.candidate_id || "Setting"}${p.video_codec === "hevc_videotoolbox" ? " · VideoToolbox" : ""}`);
   bits.push(`${p.measured ? "" : p.kind === "budget_fallback" ? "planned " : "est. "}${bytes(p.bytes)}`);
-  bits.push(p.vmaf_mean != null ? `VMAF ${Number(p.vmaf_mean).toFixed(1)}` : "VMAF not measured yet");
+  bits.push(p.vmaf_mean != null ? `VMAF ${Number(p.vmaf_mean).toFixed(1)}${p.kind === "budget_measured" && p.vmaf_p5 != null ? ` (p5 ${Number(p.vmaf_p5).toFixed(1)})` : ""}` : "VMAF not measured yet");
   if (p.kind === "searched") bits.push(p.passed ? "met the quality target" : "missed the quality target");
   bits.push(p.within_budget ? "within budget" : "over budget");
   return bits.join(" · ");
+}
+function sizeBudgetPointClass(p, measuredY) {
+  if (p.kind === "budget_fallback") return measuredY ? "point fallback" : "point planned";
+  if (p.kind === "budget_measured") return `point compared${p.chosen ? " chosen" : ""}`;
+  if (p.kind === "budget_overshoot") return "point overshoot";
+  return `point${p.passed ? " passed" : ""}`;
 }
 // A compact inline rate-quality chart: size across, VMAF mean up; searched
 // settings as dots, the budget encode highlighted, a vertical line at the
@@ -3945,8 +3964,8 @@ function sizeBudgetChart(b) {
   svg.append(el("text", { x: 2, y: T + 4 }, "VMAF"), el("text", { x: L, y: H - B + 10 }, bytes(xMin)), el("text", { x: W - R, y: H - B + 10, "text-anchor": "end" }, bytes(xMax)));
   for (const p of points) {
     const measuredY = p.vmaf_mean != null;
-    const cls = p.kind === "budget_fallback" ? (measuredY ? "point fallback" : "point planned") : `point${p.passed ? " passed" : ""}`;
-    const dot = el("circle", { class: cls, cx: x(p.bytes), cy: measuredY ? y(p.vmaf_mean) : H - B, r: p.kind === "budget_fallback" ? 5 : 3 });
+    const cls = sizeBudgetPointClass(p, measuredY);
+    const dot = el("circle", { class: cls, cx: x(p.bytes), cy: measuredY ? y(p.vmaf_mean) : H - B, r: p.kind === "budget_fallback" ? 5 : p.kind === "searched" ? 3 : 4 });
     dot.append(el("title", {}, sizeBudgetPointLabel(p)));
     svg.append(dot);
   }
