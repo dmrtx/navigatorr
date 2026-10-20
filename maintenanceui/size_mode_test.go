@@ -147,3 +147,57 @@ func TestOperationsProjectWinningEncoder(t *testing.T) {
 		t.Fatalf("software winner flagged: %v", soft)
 	}
 }
+
+// The job detail carries how the winner was verified and each window's search
+// and final scores side by side, including the out-of-sample pool.
+func TestOperationsProjectWindowReport(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	seedOperation(t, st, "grid-job", "transcode_media", "completed", map[string]any{"path": "/media/series/Show/S01E01.mkv", "mode": "size"}, nil, map[string]any{
+		"mode":     "size",
+		"original": map[string]any{"size_bytes": 9000},
+		"automatic_search": map[string]any{
+			"verification_windows": "final_grid",
+			"verification": map[string]any{"attempts": []any{
+				map[string]any{"candidate_id": "a", "role": "smallest", "windows": 5, "outcome": "quality_failed"},
+				map[string]any{"candidate_id": "b", "role": "safest", "windows": 5, "outcome": "passed"},
+			}},
+			"winner_windows": []any{map[string]any{"start_seconds": 600, "duration_seconds": 10, "role": "discovery", "vmaf_mean": 93, "vmaf_p5": 90, "vmaf_min": 88}},
+		},
+		"quality_evidence": map[string]any{
+			"verdict":    "pass",
+			"vmaf":       map[string]any{"mean": 91.0, "p5": 88.0},
+			"fresh_vmaf": map[string]any{"mean": 89.5, "p5": 86.0},
+			"windows": []any{
+				map[string]any{"start_seconds": 600, "duration_seconds": 10, "role": "grid", "vmaf_mean": 91, "vmaf_p5": 88, "vmaf_min": 85},
+				map[string]any{"start_seconds": 1200, "duration_seconds": 10, "role": "fresh", "vmaf_mean": 89, "vmaf_p5": 86, "vmaf_min": 83},
+			},
+		},
+	})
+	w := request(h, "GET", "/api/maintenance/operations?id=grid-job", "", true)
+	var page struct {
+		Jobs []map[string]any `json:"jobs"`
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil || len(page.Jobs) != 1 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	size := operationMap(page.Jobs[0]["size_mode"])
+	verification := operationMap(size["verification"])
+	if attempts, _ := verification["attempts"].([]any); verification["windows"] != "final_grid" || len(attempts) != 2 || verification["stopped_by"] != nil {
+		t.Fatalf("verification wrong: %v", verification)
+	}
+	windows, _ := size["windows"].([]any)
+	if len(windows) != 2 {
+		t.Fatalf("windows wrong: %v", size["windows"])
+	}
+	first, second := operationMap(windows[0]), operationMap(windows[1])
+	if operationMap(first["search"])["vmaf_mean"] != float64(93) || operationMap(first["final"])["vmaf_mean"] != float64(91) || first["role"] != "discovery" {
+		t.Fatalf("first window wrong: %v", first)
+	}
+	if second["role"] != "fresh" || second["search"] != nil || operationMap(second["final"])["vmaf_mean"] != float64(89) {
+		t.Fatalf("fresh window wrong: %v", second)
+	}
+	if final := operationMap(size["final_quality"]); final["fresh_vmaf_mean"] != 89.5 || final["fresh_vmaf_p5"] != float64(86) {
+		t.Fatalf("fresh pool wrong: %v", final)
+	}
+}

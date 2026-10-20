@@ -2927,6 +2927,24 @@ test("sample test results explain each rejected setting with its measurement and
   assert.match(allText(larger.report), /6\.3% larger.*Next step:\s+Keep the original/);
 });
 
+test("size mode details report the verification attempts and each window's search and final score", () => {
+  const h = harness();
+  const text = allText(h.run(`sizeModeNote({size_mode:{final_quality:{vmaf_mean:91,vmaf_p5:88,fresh_vmaf_mean:89.5,fresh_vmaf_p5:86},verification:{windows:"final_grid",attempts:[{role:"smallest",outcome:"quality_failed"},{role:"safest",outcome:"passed"},{role:"bisect",outcome:"passed"}]},windows:[{start_seconds:600,role:"discovery",search:{vmaf_mean:93},final:{vmaf_mean:91}},{start_seconds:1275,role:"unsearched",final:{vmaf_mean:84}},{start_seconds:1500,role:"fresh",final:{vmaf_mean:89}}]}})`));
+  assert.match(text, /Verified on the final validation windows: smallest failed quality → safest passed → between passed/);
+  assert.match(text, /Window 10:00 · discovery · search 93\.0 → final 91\.0 mean \(−2\.0\)/);
+  assert.match(text, /Window 21:15 · unsearched · search — → final 84\.0 mean(?! \()/);
+  assert.match(text, /Window 25:00 · fresh · search — → final 89\.0 mean/);
+  assert.match(text, /Fresh windows VMAF 89\.5 mean · 86\.0 p5 · reported only/);
+  assert.doesNotMatch(allText(h.run('sizeModeNote({size_mode:{final_quality:{vmaf_mean:91,vmaf_p5:86}}})')), /Window|Verified|Fresh/);
+});
+
+test("size mode details say when the search time limit ended verification", () => {
+  const h = harness();
+  const text = allText(h.run('sizeModeNote({size_mode:{verification:{windows:"final_grid",attempts:[{role:"smallest",outcome:"quality_failed"}],stopped_by:"time_cap",unverified:2}}})'));
+  assert.match(text, /Verification stopped at the search time limit; 2 settings were never checked/);
+  assert.match(allText(h.run('sizeModeNote({size_mode:{verification:{windows:"final_grid",attempts:[],stopped_by:"time_cap",unverified:1}}})')), /1 setting was never checked/);
+});
+
 test("size mode details show the expected size, final VMAF and compacted audio", () => {
   const h = harness();
   const text = allText(h.run('sizeModeNote({size_mode:{expected_bytes:2150000000,main10:true,final_quality:{vmaf_mean:93.44,vmaf_p5:89.12,worst_window_mean:88.04,worst_window_seconds:10},compacted_audio:[{stream_index:0,from_codec:"dts",to_codec:"aac"},{stream_index:2,from_codec:"pcm_s24le",to_codec:"aac"}]}})'));

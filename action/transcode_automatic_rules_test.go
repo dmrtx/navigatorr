@@ -29,7 +29,7 @@ func TestSizeModePolicyV3FreezesAutomaticSearchRules(t *testing.T) {
 		t.Fatal(err)
 	}
 	rules := p.Size.AutomaticSearch
-	if rules == nil || rules.SelectionMarginVMAF != 1.5 || rules.HoldoutWindows != transcode.HoldoutWindowsFinalGridEdges || strings.Join(rules.QualityFallbackPresets, ",") != "medium,slow" || rules.Validate() != nil {
+	if rules == nil || rules.SelectionMarginVMAF != 1.5 || rules.HoldoutWindows != transcode.HoldoutWindowsFinalGrid || !rules.VerifyUntilExhausted || rules.FinalFreshWindows != 2 || strings.Join(rules.QualityFallbackPresets, ",") != "medium,slow" || rules.Validate() != nil {
 		t.Fatalf("size policy rules %+v", rules)
 	}
 	// The thresholds themselves are unchanged.

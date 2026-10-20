@@ -167,3 +167,32 @@ func TestMaintenanceSnapshotKeepsOnlyTheMediaEngineReason(t *testing.T) {
 		}
 	}
 }
+
+// The list keeps the per-window scores, the out-of-sample pool and how the
+// winner was verified, but not the search's stages or candidate lists.
+func TestMaintenanceSnapshotKeepsWindowReport(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "ledger.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	state := `{"mode":"size",` +
+		`"automatic_search":{"stages":[{"name":"discovery","candidates":["a","b"]}],"verified_samples":5,"verification_windows":"final_grid","winner_windows":[{"start_seconds":600,"duration_seconds":10,"role":"discovery","vmaf_mean":93,"vmaf_p5":90,"vmaf_min":88}],"verification":{"attempts":[{"candidate_id":"a","role":"smallest","windows":5,"outcome":"passed"}]}},` +
+		`"quality_evidence":{"verdict":"pass","vmaf":{"mean":93.4,"p5":89.1},"windows":[{"start_seconds":600,"duration_seconds":10,"role":"grid","vmaf_mean":91,"vmaf_p5":88,"vmaf_min":85}],"fresh_vmaf":{"mean":90.2,"p5":86,"frames_total":300}}}`
+	if err := s.CreateActionInstance(ActionInstance{ID: "file", ActionName: "transcode_media", Status: ActionStatusCompleted, InputsJSON: `{}`, OutputsJSON: `{}`, StateJSON: state}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.ListMaintenanceActionSnapshot()
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("%v %v", rows, err)
+	}
+	got := rows[0].StateJSON
+	for _, want := range []string{`"verification_windows":"final_grid"`, `"winner_windows":[{"start_seconds":600,"duration_seconds":10,"role":"discovery"`, `"verification":{"attempts":[{"candidate_id":"a"`, `"windows":[{"start_seconds":600,"duration_seconds":10,"role":"grid"`, `"fresh_vmaf":{"mean":90.2,"p5":86}`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("projection lacks %s:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, `"stages"`) || strings.Contains(got, "frames_total") {
+		t.Fatalf("projection kept bulk: %s", got)
+	}
+}

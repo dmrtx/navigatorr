@@ -510,10 +510,18 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 							return StepResult{Status: StepFailed, Error: "immutable benchmark request digest changed before final-validation handoff"}, nil
 						}
 						samples := append([]transcode.BenchmarkSampleWindow(nil), benchmarkRequest.Samples...)
-						if windows := sizeFinalWindows(ec, benchmarkRequest.SourceDuration); windows != nil {
+						// Fresh windows exist only when the search ran under rules that ask
+						// for them (a worker that verified on the grid): final validation
+						// measures them beside the grid, outside its verdict.
+						fresh := 0
+						if r := benchmarkRequest.AutomaticSearch; r != nil && r.HoldoutWindows == transcode.HoldoutWindowsFinalGrid {
+							fresh = r.FinalFreshWindows
+						}
+						windows, freshWindows := sizeFinalWindowsWithFresh(ec, benchmarkRequest.SourceDuration, fresh)
+						if windows != nil {
 							samples = windows
 						}
-						wp.QualityValidation = &transcode.QualityValidationPlan{Metric: benchmarkRequest.Metric, Samples: samples, Quality: *benchmarkRequest.Quality, BenchmarkRequestDigest: getString(ec.State, "benchmark_request_digest")}
+						wp.QualityValidation = &transcode.QualityValidationPlan{Metric: benchmarkRequest.Metric, Samples: samples, FreshSamples: freshWindows, Quality: *benchmarkRequest.Quality, BenchmarkRequestDigest: getString(ec.State, "benchmark_request_digest")}
 					}
 				} else if ec.State["benchmark_request_digest"] != nil {
 					return StepResult{Status: StepFailed, Error: "immutable benchmark request missing at final-validation handoff"}, nil

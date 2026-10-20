@@ -28,6 +28,15 @@ func policyAutomaticFallbacks(policy *ModePolicySnapshot, caps transcode.WorkerC
 	families := automaticFallbacks{Quality: policy.Size.FallbackQualityValues, Savings: policy.Size.FallbackSavingsValues, Size: policy.Size}
 	if caps.AutomaticSearchRules && policy.Size.AutomaticSearch.Validate() == nil {
 		families.Rules = policy.Size.AutomaticSearch.Clone()
+		if families.Rules != nil && !caps.AutomaticGridVerification {
+			// A worker without grid verification rejects its rule fields and its
+			// holdout value: it verifies on the two edge windows, twice at most.
+			families.Rules.VerifyUntilExhausted = false
+			families.Rules.FinalFreshWindows = 0
+			if families.Rules.HoldoutWindows == transcode.HoldoutWindowsFinalGrid {
+				families.Rules.HoldoutWindows = transcode.HoldoutWindowsFinalGridEdges
+			}
+		}
 	}
 	return families
 }
@@ -42,13 +51,21 @@ func configureAutomaticRequest(req *transcode.BenchmarkRequest, plan *transcode.
 		return fmt.Errorf("automatic search requires three discovery windows")
 	}
 	req.Automatic = true
-	seconds := min(10.0, req.SourceDuration/12)
-	for i := range req.Samples {
-		req.Samples[i].DurationSeconds = seconds
-		req.Samples[i].StartSeconds = req.Samples[i].CenterSeconds - seconds/2
-	}
-	for _, center := range holdoutCenters(req, seconds, families) {
-		req.Samples = append(req.Samples, transcode.BenchmarkSampleWindow{Index: len(req.Samples), StartSeconds: center - seconds/2, DurationSeconds: seconds, CenterSeconds: center})
+	// Verification on the final validation grid replaces the discovery and
+	// holdout windows with the grid itself: a candidate is then verified on the
+	// windows final validation re-measures on its full encode.
+	grid := gridVerificationWindows(req, plan, families)
+	if grid != nil {
+		req.Samples = grid
+	} else {
+		seconds := min(10.0, req.SourceDuration/12)
+		for i := range req.Samples {
+			req.Samples[i].DurationSeconds = seconds
+			req.Samples[i].StartSeconds = req.Samples[i].CenterSeconds - seconds/2
+		}
+		for _, center := range holdoutCenters(req, seconds, families) {
+			req.Samples = append(req.Samples, transcode.BenchmarkSampleWindow{Index: len(req.Samples), StartSeconds: center - seconds/2, DurationSeconds: seconds, CenterSeconds: center})
+		}
 	}
 	if plan.VideoCodec != transcode.VideoCodecLibX265 {
 		return nil
@@ -56,6 +73,14 @@ func configureAutomaticRequest(req *transcode.BenchmarkRequest, plan *transcode.
 	rules := families.Rules
 	if rules != nil {
 		req.AutomaticSearch = rules.Clone()
+		if grid == nil {
+			// A source too short for the grid keeps the earlier 35%/65% holdouts
+			// and no fresh windows (there is no room for them).
+			if req.AutomaticSearch.HoldoutWindows == transcode.HoldoutWindowsFinalGrid {
+				req.AutomaticSearch.HoldoutWindows = ""
+			}
+			req.AutomaticSearch.FinalFreshWindows = 0
+		}
 	}
 	// Without rules the quality family is slow only. With rules it is tried
 	// preset by preset in the frozen order; slow keeps its earlier IDs.
@@ -89,6 +114,18 @@ func configureAutomaticRequest(req *transcode.BenchmarkRequest, plan *transcode.
 		req.Candidates = append(req.Candidates, candidates...)
 	}
 	return nil
+}
+
+// gridVerificationWindows lays out the sample windows of a search whose rules
+// verify on the final validation grid: three of its interior windows for
+// discovery, the rest for verification. It is nil for any other search and for
+// a source too short for the grid.
+func gridVerificationWindows(req *transcode.BenchmarkRequest, plan *transcode.Plan, families automaticFallbacks) []transcode.BenchmarkSampleWindow {
+	if families.Rules == nil || families.Rules.HoldoutWindows != transcode.HoldoutWindowsFinalGrid || families.Size == nil || plan.VideoCodec != transcode.VideoCodecLibX265 {
+		return nil
+	}
+	s := families.Size
+	return transcode.GridVerificationWindows(req.SourceDuration, float64(s.FinalWindowSeconds), float64(s.FinalWindowEverySeconds), s.FinalWindowsMinimum, s.FinalWindowsMaximum)
 }
 
 // holdoutCenters places the two holdout windows. Under rules that ask for it
@@ -125,13 +162,24 @@ func holdoutCenters(req *transcode.BenchmarkRequest, seconds float64, families a
 // policy: one per FinalWindowEverySeconds of source, within its bounds. Other
 // policies, and sources too short for them, keep the benchmark windows (nil).
 func sizeFinalWindows(ec *ExecutionContext, duration float64) []transcode.BenchmarkSampleWindow {
+	windows, _ := sizeFinalWindowsWithFresh(ec, duration, 0)
+	return windows
+}
+
+// sizeFinalWindowsWithFresh also places up to fresh windows that the search
+// never measured (see transcode.FreshValidationWindows).
+func sizeFinalWindowsWithFresh(ec *ExecutionContext, duration float64, fresh int) (grid, extra []transcode.BenchmarkSampleWindow) {
 	if getString(ec.Inputs, "mode") != "size" {
-		return nil
+		return nil, nil
 	}
 	p, err := freezeModePolicy(ec)
 	if err != nil || p == nil || p.Size == nil {
-		return nil
+		return nil, nil
 	}
 	s := p.Size
-	return transcode.PlanFinalValidationWindows(duration, float64(s.FinalWindowSeconds), float64(s.FinalWindowEverySeconds), s.FinalWindowsMinimum, s.FinalWindowsMaximum)
+	grid = transcode.PlanFinalValidationWindows(duration, float64(s.FinalWindowSeconds), float64(s.FinalWindowEverySeconds), s.FinalWindowsMinimum, s.FinalWindowsMaximum)
+	if grid != nil && fresh > 0 {
+		extra = transcode.FreshValidationWindows(grid, duration, float64(s.FinalWindowSeconds), fresh)
+	}
+	return grid, extra
 }

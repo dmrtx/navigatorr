@@ -55,11 +55,12 @@ func TestSizePolicyHardwareDefaultsOnAndFreezes(t *testing.T) {
 	}
 	// The default snapshot is a frozen artifact: changing its rules, their order
 	// or their defaults changes the digest of every new size operation.
-	// Adding the higher-quality fallback rungs gave new snapshots the digest
-	// below. Snapshots frozen with the media engine before it carry no such
-	// field and still re-hash to sha256:bc2e370b...e03 (see
-	// TestHardwarePolicyWithoutFallbackRungsKeepsItsDigest).
-	if hw.Digest != "sha256:1b73a704427a9c6a89a9ae36079422c842de9cbd799fa48f634d54d1a3b7ead6" {
+	// Adding the higher-quality fallback rungs gave new snapshots a new digest;
+	// verifying on the final grid gave the one below (snapshots frozen before
+	// it re-hash to sha256:1b73a704...ad6, see
+	// TestGridEraSnapshotsKeepTheirDigestAndSearch). Snapshots frozen with the
+	// media engine before the rungs carry no such field.
+	if hw.Digest != "sha256:8613e1dd656b5181907007220b154265614a2418db98601de08bd591bc24e09a" {
 		t.Fatalf("size snapshot with the media engine on changed digest: %s", hw.Digest)
 	}
 	// The frozen snapshot round-trips through storage and re-verifies.
@@ -298,7 +299,7 @@ func TestHardwarePolicyWithoutFallbackRungsKeepsItsDigest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Digest != "sha256:bc2e370bf9f26965f7faa121693c299d1fe2e6c2d02b37aee033dc369cb12e03" {
+	if p.Digest != "sha256:ab4a33d9aa290b79b3eeaef9a6b3c17afda00376e9defade7d71e9ce65cb6128" {
 		t.Fatalf("the earlier media engine snapshot changed digest: %s", p.Digest)
 	}
 	stored := map[string]any{}

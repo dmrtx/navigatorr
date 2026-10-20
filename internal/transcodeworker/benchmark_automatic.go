@@ -3,7 +3,10 @@ package transcodeworker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -202,11 +205,17 @@ func selectionMarginNotMet(record *BenchmarkRecord, evidence *BenchmarkExecution
 // the quality fallback family is measured only when no such setting remains,
 // preset by preset. A holdout failing on anything else keeps the earlier behaviour.
 func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, w *Worker, record *BenchmarkRecord, evidence *BenchmarkExecutionEvidence, dir string, vcs []validatedCandidate, rep mediainspect.DetailedReport, sourceSize int64, sourceMod time.Time, progress *benchmarkProgressReporter) error {
-	if len(record.Samples) != 5 {
+	rules := record.AutomaticSearch
+	// Verification on the final grid takes the grid's window count; every other
+	// search has exactly two verification windows after its three discovery ones.
+	grid := rules != nil && rules.HoldoutWindows == transcode.HoldoutWindowsFinalGrid
+	if n := len(record.Samples); n < 5 || n > 5 && (!grid || n > transcode.MaxAutomaticGridWindows) {
 		return fmt.Errorf("automatic search has no independent verification windows")
 	}
-	rules := record.AutomaticSearch
-	automatic := &transcode.BenchmarkAutomaticEvidence{}
+	untilExhausted := rules != nil && rules.VerifyUntilExhausted
+	automatic := &transcode.BenchmarkAutomaticEvidence{VerificationWindows: verificationWindowsKind(rules)}
+	verification := &transcode.BenchmarkVerificationEvidence{Attempts: []transcode.BenchmarkVerificationAttempt{}}
+	automatic.Verification = verification
 	evidence.Automatic = automatic
 	discovery := *record
 	discovery.Samples = record.Samples[:3]
@@ -359,13 +368,48 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 	// winner's family instead of the next-smallest one.
 	preferSafest := false
 	verificationFailures := []transcode.BenchmarkCandidateEvaluation{}
-	for attempt := 0; attempt < 2 && evidence.Decision.Winner != nil; attempt++ {
-		id := evidence.Decision.Winner.CandidateID
+	// passed is the smallest setting verified so far (only under
+	// verify_until_exhausted, which keeps looking for a smaller one between it
+	// and the failures); longest is the longest attempt, the time the next one
+	// is expected to need.
+	var passed *verifiedWinner
+	var longest time.Duration
+	// succeed ends the search with a verified winner.
+	succeed := func(p *verifiedWinner) {
+		evidence.Decision = p.decision
+		automatic.VerifiedSamples = len(record.Samples)
+		carryHardwareNote(evidence.Decision, p.chosen, record.HardwareSearch)
+		evidence.Decision.Evaluations = append(append(evidence.Decision.Evaluations, verificationFailures...), ruledOut...)
+		appendAutomaticRejections(evidence.Decision, automatic.Discovery)
+		automatic.WinnerWindows = winnerWindowScores(record, evidence, p.vc.candidate.ID)
+		finish()
+	}
+	for attempt := 0; untilExhausted || attempt < 2; attempt++ {
+		var id, role string
 		// The decision that chose this attempt's candidate: its hardware note
 		// describes that choice, whichever stage (discovery, fallback or retry) made it.
 		chosen := evidence.Decision
-		if preferSafest {
-			id = safestEligibleIDWithin(tested, evidence.Decision, id, record.HardwareSearch)
+		if passed != nil {
+			// A setting passed: look for a smaller one between it and the failures.
+			if id = bisectCandidateID(tested, evidence.Decision, passed.vc, qualityFailures, record.HardwareSearch); id == "" {
+				break
+			}
+			role = transcode.VerificationRoleBisect
+		} else {
+			if evidence.Decision.Winner == nil {
+				break
+			}
+			id, role = evidence.Decision.Winner.CandidateID, transcode.VerificationRoleSmallest
+			if attempt > 0 {
+				role = transcode.VerificationRoleNext
+			}
+			if preferSafest {
+				id, role = safestEligibleIDWithin(tested, evidence.Decision, id, record.HardwareSearch), transcode.VerificationRoleSafest
+			}
+		}
+		if untilExhausted && attempt > 0 && !verificationHasTime(record.searchBudget, longest) {
+			verification.StoppedBy = transcode.VerificationStoppedTimeCap
+			break
 		}
 		var winner validatedCandidate
 		for _, vc := range tested {
@@ -374,10 +418,21 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 				break
 			}
 		}
+		attemptStart := time.Now()
 		holdout := *record
 		holdout.Samples = record.Samples[3:]
 		if err := run(phaseVerifyingSamples, &holdout, []validatedCandidate{winner}); err != nil {
+			if untilExhausted && searchTimeLimitReached(ctx, err) {
+				// The limit fell inside this attempt: it measured part of the
+				// windows, so the setting stays unverified.
+				automatic.Stages[len(automatic.Stages)-1].Outcome = "stopped"
+				verification.StoppedBy = transcode.VerificationStoppedTimeCap
+				break
+			}
 			return err
+		}
+		if d := time.Since(attemptStart); d > longest {
+			longest = d
 		}
 		if err := mergeAutomaticQuality(record, evidence, winner); err != nil {
 			return err
@@ -386,23 +441,39 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 			return err
 		}
 		if evidence.Decision.Winner != nil {
-			automatic.VerifiedSamples = 5
-			carryHardwareNote(evidence.Decision, chosen, record.HardwareSearch)
-			evidence.Decision.Evaluations = append(append(evidence.Decision.Evaluations, verificationFailures...), ruledOut...)
-			appendAutomaticRejections(evidence.Decision, automatic.Discovery)
-			finish()
-			return nil
-		}
-		holdoutQuality := false
-		for _, e := range evidence.Decision.Evaluations {
-			if e.CandidateID == id && qualityRejection(e.EvaluationReason) {
-				holdoutQuality = true
+			verification.Attempts = append(verification.Attempts, verificationAttempt(record, evidence, id, role, transcode.VerificationPassed, ""))
+			p := &verifiedWinner{vc: winner, decision: evidence.Decision, chosen: chosen}
+			if !untilExhausted {
+				succeed(p)
+				return nil
 			}
-		}
-		verificationFailures = append(verificationFailures, evidence.Decision.Evaluations...)
-		blocked[id] = true
-		if rules != nil && holdoutQuality {
-			qualityFailures = append(qualityFailures, winner)
+			passed, preferSafest = p, false
+			blocked[id] = true
+		} else {
+			holdoutQuality := false
+			reason := ""
+			for _, e := range evidence.Decision.Evaluations {
+				if e.CandidateID == id {
+					reason = e.EvaluationReason
+					if qualityRejection(e.EvaluationReason) {
+						holdoutQuality = true
+					}
+				}
+			}
+			outcome := transcode.VerificationRejected
+			if holdoutQuality {
+				outcome = transcode.VerificationQualityFailed
+			}
+			verification.Attempts = append(verification.Attempts, verificationAttempt(record, evidence, id, role, outcome, reason))
+			verificationFailures = append(verificationFailures, evidence.Decision.Evaluations...)
+			blocked[id] = true
+			if rules != nil && holdoutQuality {
+				qualityFailures = append(qualityFailures, winner)
+			}
+			// The one retry after a quality failure goes to the safest eligible
+			// setting, fallback stage included: the smallest one usually fails for
+			// the same reason.
+			preferSafest = rules != nil && holdoutQuality
 		}
 		var remaining []validatedCandidate
 		for _, vc := range tested {
@@ -419,25 +490,164 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 			return err
 		}
 		tested = remaining
-		// Only the first failure can still lead to a verified fallback. Under
+		// Only the first failure can still lead to a verified fallback, unless
+		// verification goes on: then whenever nothing eligible remains. Under
 		// rules a quality failure goes to a safer measured setting when one
-		// remains, and measures the quality fallback only when none does.
-		if attempt == 0 && (rules == nil || !holdoutQuality || evidence.Decision.Winner == nil) {
+		// remains, and measures the quality fallback only when none does. A
+		// search that already verified a setting has no use for a fallback.
+		if passed == nil && (attempt == 0 || untilExhausted) && (evidence.Decision.Winner == nil || attempt == 0 && (rules == nil || !preferSafest)) {
 			if err := runFallback(); err != nil {
 				return err
 			}
 		}
-		// The one retry after a quality failure goes to the safest eligible
-		// setting, fallback stage included: the smallest one usually fails for
-		// the same reason.
-		preferSafest = rules != nil && holdoutQuality
+	}
+	if passed != nil {
+		succeed(passed)
+		return nil
 	}
 	// Discovery winners are not accepted without holdouts, even after the
 	// confirmation allowance or search deadline has been exhausted.
+	if verification.StoppedBy != "" {
+		// Name the settings the time limit left unchecked: they passed
+		// discovery, and are not failures.
+		for _, vc := range tested {
+			if blocked[vc.candidate.ID] || (rules != nil && ruledOutByQualityFailure(vc, qualityFailures)) {
+				continue
+			}
+			ev := notVerifiedEvaluation(automatic.Discovery, vc, "")
+			if ev.EvaluationReason == reasonNotVerified {
+				ev.Uncertainties = append(append([]string(nil), ev.Uncertainties...), transcode.NotVerifiedTimeLimit)
+				ev.Uncertainties = slices.DeleteFunc(ev.Uncertainties, func(u string) bool { return strings.HasSuffix(u, "failed verification on quality") })
+				verification.Unverified = append(verification.Unverified, vc.candidate.ID)
+				ruledOut = append(ruledOut, ev)
+			}
+		}
+	}
 	evidence.Decision = &transcode.BenchmarkDecision{DecisionReason: "no_verified_candidate", Evaluations: append(verificationFailures, ruledOut...)}
 	appendAutomaticRejections(evidence.Decision, automatic.Discovery)
 	finish()
 	return nil
+}
+
+// verifiedWinner is a setting that passed verification: its decision, and the
+// decision that chose it.
+type verifiedWinner struct {
+	vc       validatedCandidate
+	decision *transcode.BenchmarkDecision
+	chosen   *transcode.BenchmarkDecision
+}
+
+// verificationWindowsKind names where the rules put the verification windows.
+func verificationWindowsKind(rules *transcode.AutomaticSearchRules) string {
+	if rules == nil {
+		return ""
+	}
+	return rules.HoldoutWindows
+}
+
+// verificationHasTime reports whether another verification attempt, expected
+// to take as long as the longest so far, fits before the search's hard
+// deadline. Without a budget (an unbounded run) it always does.
+func verificationHasTime(b *searchBudget, longest time.Duration) bool {
+	if b == nil {
+		return true
+	}
+	now := b.now()
+	return b.continues(now) && now.Add(longest).Before(b.hardDeadline())
+}
+
+// searchTimeLimitReached reports an attempt cut short by the search's budget:
+// the elastic watcher stopped it, or the hard deadline passed. A cancellation
+// for any other reason (the user's, a shutdown) is not.
+func searchTimeLimitReached(ctx context.Context, err error) bool {
+	if errors.Is(context.Cause(ctx), errSearchBudgetStopped) {
+		return true
+	}
+	return errors.Is(err, context.DeadlineExceeded) && errors.Is(ctx.Err(), context.DeadlineExceeded)
+}
+
+// verificationAttempt summarises a verification attempt for the result,
+// from the candidate's merged quality evidence.
+func verificationAttempt(record *BenchmarkRecord, evidence *BenchmarkExecutionEvidence, id, role, outcome, reason string) transcode.BenchmarkVerificationAttempt {
+	a := transcode.BenchmarkVerificationAttempt{CandidateID: id, Role: role, Windows: len(record.Samples) - 3, Outcome: outcome, Reason: reason}
+	for _, q := range evidence.Quality {
+		if q.CandidateID == id && q.VMAF != nil {
+			mean, p5, worst := q.VMAF.Mean, q.VMAF.P5, q.VMAF.WorstWindowMean
+			a.VMAFMean, a.VMAFP5, a.WorstWindowMean = &mean, &p5, &worst
+			break
+		}
+	}
+	return a
+}
+
+// winnerWindowScores lists the winner's per-window sample VMAF scores in time
+// order: the discovery windows it was selected on and the verification windows.
+func winnerWindowScores(record *BenchmarkRecord, evidence *BenchmarkExecutionEvidence, id string) []transcode.BenchmarkWindowScore {
+	var out []transcode.BenchmarkWindowScore
+	for _, window := range record.Samples {
+		for _, ms := range evidence.MetricSamples {
+			if ms.CandidateID != id || ms.SampleIndex != window.Index || ms.VMAFStats == nil {
+				continue
+			}
+			role := "verification"
+			if window.Index < 3 {
+				role = "discovery"
+			}
+			out = append(out, transcode.BenchmarkWindowScore{StartSeconds: window.StartSeconds, DurationSeconds: window.DurationSeconds, Role: role, VMAFMean: ms.VMAFStats.Mean, VMAFP5: ms.VMAFStats.P5, VMAFMin: ms.VMAFStats.Min})
+			break
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].StartSeconds < out[j].StartSeconds })
+	return out
+}
+
+// bisectCandidateID returns the next setting to verify once one has passed
+// after others failed on quality: of the eligible settings of the passed one's
+// family strictly between the safest failure and the passed setting, the
+// middle one, leaning to the more compressed. A pass verifies it as the new
+// upper bound (a smaller file), a failure as the new lower one. It returns ""
+// when nothing lies between, or when nothing failed (the first, smallest
+// attempt passed, so nothing smaller is eligible).
+func bisectCandidateID(tested []validatedCandidate, decision *transcode.BenchmarkDecision, passed validatedCandidate, failures []validatedCandidate, hardware *transcode.HardwareSearchRules) string {
+	key, lowerIsBetter, ok := qualityFamilyKey(passed)
+	if !ok {
+		return ""
+	}
+	bound, found := 0, false
+	for _, f := range failures {
+		if fk, _, ok := qualityFamilyKey(f); !ok || fk != key {
+			continue
+		}
+		if q := f.candidate.Quality; !found || lowerIsBetter && q < bound || !lowerIsBetter && q > bound {
+			bound, found = q, true
+		}
+	}
+	if !found {
+		return ""
+	}
+	eligible := eligibleVerificationIDs(decision, passed.candidate.ID, hardware)
+	var between []validatedCandidate
+	for _, vc := range tested {
+		if k, _, ok := qualityFamilyKey(vc); !ok || k != key || !eligible[vc.candidate.ID] {
+			continue
+		}
+		q, pq := vc.candidate.Quality, passed.candidate.Quality
+		if lowerIsBetter && q > pq && q < bound || !lowerIsBetter && q < pq && q > bound {
+			between = append(between, vc)
+		}
+	}
+	if len(between) == 0 {
+		return ""
+	}
+	// Safest first: from the passed setting outward to the failure.
+	sort.SliceStable(between, func(i, j int) bool {
+		qi, qj := between[i].candidate.Quality, between[j].candidate.Quality
+		if lowerIsBetter {
+			return qi < qj
+		}
+		return qi > qj
+	})
+	return between[len(between)/2].candidate.ID
 }
 
 // safestEligibleID returns the candidate the second holdout verification
@@ -460,20 +670,7 @@ func safestEligibleIDWithin(tested []validatedCandidate, decision *transcode.Ben
 	if decision == nil {
 		return selectedID
 	}
-	eligible := map[string]bool{}
-	for _, e := range decision.Evaluations {
-		if e.Eligible {
-			eligible[e.CandidateID] = true
-		}
-	}
-	if smallestSoftware := smallestEligibleSoftware(decision); hardware != nil && smallestSoftware > 0 {
-		limit := float64(smallestSoftware) * (1 + hardware.MarginPercent/100)
-		for _, e := range decision.Evaluations {
-			if e.CandidateID != selectedID && e.Eligible && isVideoToolbox(e.VideoCodec) && float64(e.EstimatedBytes) > limit {
-				eligible[e.CandidateID] = false
-			}
-		}
-	}
+	eligible := eligibleVerificationIDs(decision, selectedID, hardware)
 	var selected *validatedCandidate
 	for i := range tested {
 		if tested[i].candidate.ID == selectedID {
@@ -502,6 +699,30 @@ func safestEligibleIDWithin(tested []validatedCandidate, decision *transcode.Ben
 		}
 	}
 	return best.candidate.ID
+}
+
+// eligibleVerificationIDs are the candidates a verification may still choose:
+// those the decision found eligible, except a VideoToolbox setting (other than
+// selectedID) beyond the hardware size margin of the smallest eligible x265 one.
+func eligibleVerificationIDs(decision *transcode.BenchmarkDecision, selectedID string, hardware *transcode.HardwareSearchRules) map[string]bool {
+	eligible := map[string]bool{}
+	if decision == nil {
+		return eligible
+	}
+	for _, e := range decision.Evaluations {
+		if e.Eligible {
+			eligible[e.CandidateID] = true
+		}
+	}
+	if smallestSoftware := smallestEligibleSoftware(decision); hardware != nil && smallestSoftware > 0 {
+		limit := float64(smallestSoftware) * (1 + hardware.MarginPercent/100)
+		for _, e := range decision.Evaluations {
+			if e.CandidateID != selectedID && e.Eligible && isVideoToolbox(e.VideoCodec) && float64(e.EstimatedBytes) > limit {
+				eligible[e.CandidateID] = false
+			}
+		}
+	}
+	return eligible
 }
 
 // smallestEligibleSoftware is the size of the smallest eligible x265 candidate

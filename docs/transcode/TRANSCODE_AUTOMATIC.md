@@ -11,13 +11,17 @@ existing v1 snapshots retain their original thresholds and 15% quality saving ga
   least 30% actual savings.
 
 For sources at least 50 seconds long, one immutable benchmark contains three
-discovery windows and two nonoverlapping verification windows. The worker first
+discovery windows and nonoverlapping verification windows. Size mode's new
+snapshots place all of them on the final validation grid (see Grid verification
+in [TRANSCODE_MODES_REVIEW.md](TRANSCODE_MODES_REVIEW.md)); other goals keep two
+verification windows. The worker first
 tests the existing x265 medium 20/23/26 and supported VideoToolbox 65/70/75
 settings. If measurements fail, it tests one appropriate x265 slow family:
 16/18/20 for quality rejection, or 23/26/28 when measured quality can pass but
 size cannot. The alternative also applies after an initial verification failure.
-At most two candidates receive verification. Only a candidate passing all five
-windows can start a full conversion. Actual final bytes, sampled final quality,
+Goals other than size verify at most two candidates; size mode's new snapshots
+keep verifying until a candidate passes or the search time limit ends. Only a
+candidate passing every window can start a full conversion. Actual final bytes, sampled final quality,
 streams and source/candidate integrity still must pass before publication.
 
 Workers that advertise `automatic_quality_pruning` receive `quality_pruning`

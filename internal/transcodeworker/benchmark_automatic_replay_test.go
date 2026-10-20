@@ -32,6 +32,9 @@ type replaySetting struct {
 	// holdout is the constant per-frame VMAF on the holdout windows.
 	holdout      float64
 	holdoutBytes int64 // per holdout window; zero means bytes
+	// holdoutAt overrides holdout for the verification windows it returns true
+	// for, keyed by the window's centre in seconds.
+	holdoutAt func(center float64) (float64, bool)
 }
 
 // replayKey names a setting by preset and CRF, independent of its family ID.
@@ -64,6 +67,17 @@ type replayResult struct {
 	encodes     int
 	decision    *transcode.BenchmarkDecision
 	stages      []transcode.BenchmarkAutomaticStage
+	evidence    *BenchmarkExecutionEvidence
+	record      *BenchmarkRecord
+}
+
+// stageName tells the hook's two kinds of stage apart: discovery runs on the
+// first three windows, verification on the rest.
+func stageName(stage *BenchmarkRecord) string {
+	if len(stage.Samples) > 0 && stage.Samples[0].Index >= 3 {
+		return phaseVerifyingSamples
+	}
+	return "discovery"
 }
 
 func (r replayResult) reason(id string) string {
@@ -95,8 +109,39 @@ func runReplayLadder(t *testing.T, settings map[string]replaySetting, sourceByte
 
 func runReplayHardware(t *testing.T, settings map[string]replaySetting, sourceBytes int64, rules *transcode.AutomaticSearchRules, hardware *transcode.HardwareSearchRules, ladder []validatedCandidate) replayResult {
 	t.Helper()
+	return runReplayConfigured(t, replayConfig{settings: settings, sourceBytes: sourceBytes, rules: rules, hardware: hardware, ladder: ladder})
+}
+
+// replayConfig is a replay with every knob: the source length decides the
+// final validation grid under grid verification, and the context and record
+// hooks let a test end the search at its time limit.
+type replayConfig struct {
+	settings    map[string]replaySetting
+	sourceBytes int64
+	rules       *transcode.AutomaticSearchRules
+	hardware    *transcode.HardwareSearchRules
+	ladder      []validatedCandidate
+	duration    float64 // zero is 600 s
+	ctx         func() (context.Context, context.CancelCauseFunc)
+	// before runs ahead of every stage; it may end the search through cancel.
+	before func(stage string, candidates []validatedCandidate, cancel context.CancelCauseFunc)
+	setup  func(record *BenchmarkRecord)
+}
+
+func runReplayConfigured(t *testing.T, cfg replayConfig) replayResult {
+	t.Helper()
+	settings, sourceBytes, rules, hardware, ladder := cfg.settings, cfg.sourceBytes, cfg.rules, cfg.hardware, cfg.ladder
+	duration := cfg.duration
+	if duration == 0 {
+		duration = 600
+	}
+	ctx, cancel := context.WithCancelCause(context.Background())
+	if cfg.ctx != nil {
+		ctx, cancel = cfg.ctx()
+	}
+	defer cancel(nil)
 	p5, worst := 84.0, 85.0
-	record := &BenchmarkRecord{Mode: "size", ModePolicyVersion: optimization.ModePolicyV3, Automatic: true, QualityPruning: true, AutomaticSearch: rules, HardwareSearch: hardware, Metric: "vmaf", SourceDuration: 600,
+	record := &BenchmarkRecord{Mode: "size", ModePolicyVersion: optimization.ModePolicyV3, Automatic: true, QualityPruning: true, AutomaticSearch: rules, HardwareSearch: hardware, Metric: "vmaf", SourceDuration: duration,
 		Quality: &transcode.BenchmarkQualityConfig{VMAF: &transcode.BenchmarkQualityThresholds{Model: "v1_1080p_3h", Target: 92, Minimum: 88, P5Minimum: &p5, WorstWindowMinimum: &worst, WorstWindowSeconds: 4, GuardrailEnforcement: "reject"}}}
 	// Discovery at 20/50/80%; holdouts on the final grid's edges (rules) or
 	// at 35/65%.
@@ -107,12 +152,28 @@ func runReplayHardware(t *testing.T, settings map[string]replaySetting, sourceBy
 	for i, c := range centers {
 		record.Samples = append(record.Samples, transcode.BenchmarkSampleWindow{Index: i, StartSeconds: c - 5, DurationSeconds: 10, CenterSeconds: c})
 	}
+	if rules != nil && rules.HoldoutWindows == transcode.HoldoutWindowsFinalGrid {
+		// Verification on the final grid: the grid is the sample plan.
+		record.Samples = transcode.GridVerificationWindows(duration, 10, 600, 5, 12)
+		if record.Samples == nil {
+			t.Fatalf("no grid for a %.0f s source", duration)
+		}
+	}
+	if cfg.setup != nil {
+		cfg.setup(record)
+	}
 	model, err := quality.Model("v1_1080p_3h")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var res replayResult
 	runner := &ProductionBenchmarkRunner{automaticHook: func(_ context.Context, stage *BenchmarkRecord, e *BenchmarkExecutionEvidence, candidates []validatedCandidate) error {
+		if cfg.before != nil {
+			cfg.before(stageName(stage), candidates, cancel)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+		}
 		for _, vc := range candidates {
 			key := replayKey(vc.candidate.Preset, vc.candidate.Quality)
 			s, ok := settings[key]
@@ -137,6 +198,11 @@ func runReplayHardware(t *testing.T, settings map[string]replaySetting, sourceBy
 				}
 				for i := range frames {
 					score := s.holdout
+					if holdoutStage && s.holdoutAt != nil {
+						if v, found := s.holdoutAt(window.CenterSeconds); found {
+							score = v
+						}
+					}
 					if !holdoutStage {
 						score = (s.discovery.mean - 0.1*s.discovery.p5) / 0.9
 						if i < 10 {
@@ -166,14 +232,16 @@ func runReplayHardware(t *testing.T, settings map[string]replaySetting, sourceBy
 	evidence := &BenchmarkExecutionEvidence{SourceBitDepth: 8}
 	progress := newBenchmarkProgressReporter(nil, record, 100)
 	rep := mediainspect.DetailedReport{DurationSec: 600, Video: []mediainspect.DetailedStream{{BitDepth: 8, FPS: 25}}}
-	if err := runner.runAutomaticCandidates(context.Background(), nil, record, evidence, "", ladder, rep, sourceBytes, time.Time{}, progress); err != nil {
+	if err := runner.runAutomaticCandidates(ctx, nil, record, evidence, "", ladder, rep, sourceBytes, time.Time{}, progress); err != nil {
 		t.Fatal(err)
 	}
 	res.decision = evidence.Decision
 	res.stages = evidence.Automatic.Stages
+	res.evidence = evidence
+	res.record = record
 	if evidence.Decision.Winner != nil {
 		res.winner = evidence.Decision.Winner.CandidateID
-		if evidence.Automatic.VerifiedSamples != 5 {
+		if evidence.Automatic.VerifiedSamples != len(record.Samples) {
 			t.Fatal("winner without holdout verification")
 		}
 	}

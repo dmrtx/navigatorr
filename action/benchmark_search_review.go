@@ -185,6 +185,12 @@ func roundComparable(prior, proposal *transcode.BenchmarkRequest) bool {
 	if prior.AudioMode != proposal.AudioMode || prior.Metric != proposal.Metric || prior.ModePolicyVersion != proposal.ModePolicyVersion || !sameJSON(prior.Compact, proposal.Compact) || (len(prior.Samples) > 0 || len(proposal.Samples) > 0) && !sameJSON(prior.Samples, proposal.Samples) {
 		return false
 	}
+	// Rounds verified on the edge windows with a two-attempt cap and rounds
+	// verified on the final grid until exhausted reject for different reasons;
+	// a failure under one regime says nothing about the other.
+	if verificationRegime(prior) != verificationRegime(proposal) {
+		return false
+	}
 	pq, nq := prior.Quality, proposal.Quality
 	if pq == nil {
 		return true
@@ -206,6 +212,22 @@ func roundComparable(prior, proposal *transcode.BenchmarkRequest) bool {
 	}
 	return bandingLimit(pq.Banding, func(b *transcode.BenchmarkBandingConfig) *float64 { return b.MaxMean }) >= bandingLimit(nq.Banding, func(b *transcode.BenchmarkBandingConfig) *float64 { return b.MaxMean }) &&
 		bandingLimit(pq.Banding, func(b *transcode.BenchmarkBandingConfig) *float64 { return b.MaxPeak }) >= bandingLimit(nq.Banding, func(b *transcode.BenchmarkBandingConfig) *float64 { return b.MaxPeak })
+}
+
+type searchVerificationRegime struct {
+	holdout        string
+	untilExhausted bool
+	fresh          int
+}
+
+// verificationRegime is how a round verified its winner. Requests without
+// automatic search rules, and rules that predate grid verification, all share
+// the zero regime.
+func verificationRegime(r *transcode.BenchmarkRequest) searchVerificationRegime {
+	if r.AutomaticSearch == nil {
+		return searchVerificationRegime{}
+	}
+	return searchVerificationRegime{holdout: r.AutomaticSearch.HoldoutWindows, untilExhausted: r.AutomaticSearch.VerifyUntilExhausted, fresh: r.AutomaticSearch.FinalFreshWindows}
 }
 
 // floorValue treats an observe-only guardrail as no limit.

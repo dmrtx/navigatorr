@@ -97,6 +97,14 @@ type WorkerCapabilities struct {
 	// fails on quality, and a quality fallback tried preset by preset.
 	// Older workers reject the field.
 	AutomaticSearchRules bool `json:"automatic_search_rules,omitempty"`
+	// AutomaticGridVerification reports a worker that verifies a size search's
+	// candidates on every window of the final validation grid (five to twelve
+	// sample windows, holdout_windows "final_grid"), keeps verifying until one
+	// passes or none is eligible (verify_until_exhausted), and measures the
+	// fresh final validation windows apart from the verdict. Older workers
+	// reject those fields, so the server sends them only to workers that
+	// advertise this.
+	AutomaticGridVerification bool `json:"automatic_grid_verification,omitempty"`
 	// HardwareSearch reports a worker that accepts hardware_search on size
 	// benchmarks: VideoToolbox candidates that win within a frozen size margin
 	// of the x265 winner. Older workers reject the field.
@@ -147,31 +155,32 @@ func (c WorkerCapabilities) HasComponentError(component string) bool {
 // Machine-specific paths like FFmpegPath are excluded to ensure capability equivalence
 // across different worker nodes with identical capability sets.
 type fingerprintPayload struct {
-	X265TwoPass              bool                           `json:"x265_two_pass,omitempty"`
-	HEAACAudio               bool                           `json:"he_aac_audio,omitempty"`
-	AutomaticModesV2         bool                           `json:"automatic_modes_v2,omitempty"`
-	AutomaticQualityPruning  bool                           `json:"automatic_quality_pruning,omitempty"`
-	SavingsPrecheck          bool                           `json:"savings_precheck,omitempty"`
-	Podcast                  *PodcastCapabilities           `json:"podcast,omitempty"`
-	ExplicitMain10Benchmarks bool                           `json:"explicit_main10_benchmarks,omitempty"`
-	CompactAudio             bool                           `json:"compact_audio,omitempty"`
-	CoverArt                 bool                           `json:"cover_art,omitempty"`
-	SizeModeV3               bool                           `json:"size_mode_v3,omitempty"`
-	SizeAudioOnly            bool                           `json:"size_audio_only,omitempty"`
-	SearchBudgetExtension    bool                           `json:"search_budget_extension,omitempty"`
-	AutomaticSearchRules     bool                           `json:"automatic_search_rules,omitempty"`
-	HardwareSearch           bool                           `json:"hardware_search,omitempty"`
-	HardwareFallbackSearch   bool                           `json:"hardware_fallback_search,omitempty"`
-	CompactTranscode         bool                           `json:"compact_transcode,omitempty"`
-	ProtocolVersion          int                            `json:"protocol_version"`
-	WorkerVersion            string                         `json:"worker_version,omitempty"`
-	BuildGitCommit           string                         `json:"build_git_commit,omitempty"`
-	FFmpegVersion            string                         `json:"ffmpeg_version"`
-	Encoders                 map[string]bool                `json:"encoders"`
-	EncoderDetails           map[string]EncoderCapabilities `json:"encoder_details,omitempty"`
-	Filters                  map[string]bool                `json:"filters"`
-	Quality                  *QualityCapabilities           `json:"quality,omitempty"`
-	ProbeErrors              []ProbeError                   `json:"probe_errors,omitempty"`
+	X265TwoPass               bool                           `json:"x265_two_pass,omitempty"`
+	HEAACAudio                bool                           `json:"he_aac_audio,omitempty"`
+	AutomaticModesV2          bool                           `json:"automatic_modes_v2,omitempty"`
+	AutomaticQualityPruning   bool                           `json:"automatic_quality_pruning,omitempty"`
+	SavingsPrecheck           bool                           `json:"savings_precheck,omitempty"`
+	Podcast                   *PodcastCapabilities           `json:"podcast,omitempty"`
+	ExplicitMain10Benchmarks  bool                           `json:"explicit_main10_benchmarks,omitempty"`
+	CompactAudio              bool                           `json:"compact_audio,omitempty"`
+	CoverArt                  bool                           `json:"cover_art,omitempty"`
+	SizeModeV3                bool                           `json:"size_mode_v3,omitempty"`
+	SizeAudioOnly             bool                           `json:"size_audio_only,omitempty"`
+	SearchBudgetExtension     bool                           `json:"search_budget_extension,omitempty"`
+	AutomaticSearchRules      bool                           `json:"automatic_search_rules,omitempty"`
+	AutomaticGridVerification bool                           `json:"automatic_grid_verification,omitempty"`
+	HardwareSearch            bool                           `json:"hardware_search,omitempty"`
+	HardwareFallbackSearch    bool                           `json:"hardware_fallback_search,omitempty"`
+	CompactTranscode          bool                           `json:"compact_transcode,omitempty"`
+	ProtocolVersion           int                            `json:"protocol_version"`
+	WorkerVersion             string                         `json:"worker_version,omitempty"`
+	BuildGitCommit            string                         `json:"build_git_commit,omitempty"`
+	FFmpegVersion             string                         `json:"ffmpeg_version"`
+	Encoders                  map[string]bool                `json:"encoders"`
+	EncoderDetails            map[string]EncoderCapabilities `json:"encoder_details,omitempty"`
+	Filters                   map[string]bool                `json:"filters"`
+	Quality                   *QualityCapabilities           `json:"quality,omitempty"`
+	ProbeErrors               []ProbeError                   `json:"probe_errors,omitempty"`
 }
 
 // ComputeCapabilityFingerprint returns a deterministic sha256 digest of WorkerCapabilities
@@ -199,29 +208,30 @@ func ComputeCapabilityFingerprint(caps WorkerCapabilities) (string, error) {
 
 	payload := fingerprintPayload{
 		X265TwoPass: caps.X265TwoPass, HEAACAudio: caps.HEAACAudio,
-		AutomaticModesV2:         caps.AutomaticModesV2,
-		AutomaticQualityPruning:  caps.AutomaticQualityPruning,
-		SavingsPrecheck:          caps.SavingsPrecheck,
-		Podcast:                  caps.Podcast,
-		ExplicitMain10Benchmarks: caps.ExplicitMain10Benchmarks,
-		CompactAudio:             caps.CompactAudio,
-		CoverArt:                 caps.CoverArt,
-		SizeModeV3:               caps.SizeModeV3,
-		SizeAudioOnly:            caps.SizeAudioOnly,
-		SearchBudgetExtension:    caps.SearchBudgetExtension,
-		AutomaticSearchRules:     caps.AutomaticSearchRules,
-		HardwareSearch:           caps.HardwareSearch,
-		HardwareFallbackSearch:   caps.HardwareFallbackSearch,
-		CompactTranscode:         caps.CompactTranscode,
-		ProtocolVersion:          caps.ProtocolVersion,
-		WorkerVersion:            caps.WorkerVersion,
-		BuildGitCommit:           caps.BuildGitCommit,
-		FFmpegVersion:            caps.FFmpegVersion,
-		Encoders:                 caps.Encoders,
-		EncoderDetails:           detCopy,
-		Filters:                  caps.Filters,
-		Quality:                  caps.Quality,
-		ProbeErrors:              caps.ProbeErrors,
+		AutomaticModesV2:          caps.AutomaticModesV2,
+		AutomaticQualityPruning:   caps.AutomaticQualityPruning,
+		SavingsPrecheck:           caps.SavingsPrecheck,
+		Podcast:                   caps.Podcast,
+		ExplicitMain10Benchmarks:  caps.ExplicitMain10Benchmarks,
+		CompactAudio:              caps.CompactAudio,
+		CoverArt:                  caps.CoverArt,
+		SizeModeV3:                caps.SizeModeV3,
+		SizeAudioOnly:             caps.SizeAudioOnly,
+		SearchBudgetExtension:     caps.SearchBudgetExtension,
+		AutomaticSearchRules:      caps.AutomaticSearchRules,
+		AutomaticGridVerification: caps.AutomaticGridVerification,
+		HardwareSearch:            caps.HardwareSearch,
+		HardwareFallbackSearch:    caps.HardwareFallbackSearch,
+		CompactTranscode:          caps.CompactTranscode,
+		ProtocolVersion:           caps.ProtocolVersion,
+		WorkerVersion:             caps.WorkerVersion,
+		BuildGitCommit:            caps.BuildGitCommit,
+		FFmpegVersion:             caps.FFmpegVersion,
+		Encoders:                  caps.Encoders,
+		EncoderDetails:            detCopy,
+		Filters:                   caps.Filters,
+		Quality:                   caps.Quality,
+		ProbeErrors:               caps.ProbeErrors,
 	}
 
 	if len(payload.ProbeErrors) > 1 {

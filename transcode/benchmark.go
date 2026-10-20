@@ -418,6 +418,16 @@ const (
 	// HoldoutWindowsFinalGridEdges centres the two holdout windows on the
 	// first and last positions of the final validation grid.
 	HoldoutWindowsFinalGridEdges = "final_grid_edges"
+	// HoldoutWindowsFinalGrid verifies a candidate on every window of the final
+	// validation grid (GridVerificationWindows), so verification measures the
+	// windows the final check re-measures on the full encode.
+	HoldoutWindowsFinalGrid = "final_grid"
+	// MaxAutomaticGridWindows bounds the sample windows of a search that
+	// verifies on the final validation grid.
+	MaxAutomaticGridWindows = 12
+	// MaxFinalFreshWindows bounds the out-of-sample windows added to final
+	// validation.
+	MaxFinalFreshWindows = 2
 )
 
 // AutomaticSearchRules are the size-mode search rules frozen with a policy and
@@ -433,13 +443,23 @@ type AutomaticSearchRules struct {
 	// minimums are unchanged; a thinner pass is a quality result
 	// (quality_vmaf_selection_margin_not_met), not a pass.
 	SelectionMarginVMAF float64 `json:"selection_margin_vmaf"`
-	// HoldoutWindows places the two holdout windows. HoldoutWindowsFinalGridEdges
-	// covers the start and end of the source that final validation checks;
-	// empty keeps 35% and 65%.
+	// HoldoutWindows places the verification windows.
+	// HoldoutWindowsFinalGridEdges puts two on the start and end of the source
+	// that final validation checks; HoldoutWindowsFinalGrid verifies on the whole
+	// final validation grid; empty keeps 35% and 65%.
 	HoldoutWindows string `json:"holdout_windows,omitempty"`
 	// QualityFallbackPresets orders the quality fallback family's presets: a
 	// later preset is measured only when the earlier ones found nothing.
 	QualityFallbackPresets []string `json:"quality_fallback_presets,omitempty"`
+	// VerifyUntilExhausted keeps verifying (smallest eligible setting, then the
+	// safest, then a bisection between them) until one passes or none is
+	// eligible, instead of stopping after two attempts. Only the search's time
+	// limit ends it earlier, and the result says so. Absent keeps two attempts.
+	VerifyUntilExhausted bool `json:"verify_until_exhausted,omitempty"`
+	// FinalFreshWindows is how many windows no search window covers final
+	// validation also measures, reported apart and never deciding its verdict.
+	// It is read by the server when it plans final validation.
+	FinalFreshWindows int `json:"final_fresh_windows,omitempty"`
 }
 
 // Validate reports whether the rules are bounded and well formed.
@@ -450,8 +470,11 @@ func (r *AutomaticSearchRules) Validate() error {
 	if math.IsNaN(r.SelectionMarginVMAF) || r.SelectionMarginVMAF < 0 || r.SelectionMarginVMAF > MaxSelectionMarginVMAF {
 		return fmt.Errorf("automatic search selection_margin_vmaf must be in [0,%d]", MaxSelectionMarginVMAF)
 	}
-	if r.HoldoutWindows != "" && r.HoldoutWindows != HoldoutWindowsFinalGridEdges {
+	if r.HoldoutWindows != "" && r.HoldoutWindows != HoldoutWindowsFinalGridEdges && r.HoldoutWindows != HoldoutWindowsFinalGrid {
 		return fmt.Errorf("unsupported automatic search holdout_windows %q", r.HoldoutWindows)
+	}
+	if r.FinalFreshWindows < 0 || r.FinalFreshWindows > MaxFinalFreshWindows {
+		return fmt.Errorf("automatic search final_fresh_windows must be in [0,%d]", MaxFinalFreshWindows)
 	}
 	if len(r.QualityFallbackPresets) > 3 {
 		return errors.New("automatic search allows at most three quality fallback presets")
@@ -650,6 +673,73 @@ type BenchmarkAutomaticEvidence struct {
 	Stages          []BenchmarkAutomaticStage `json:"stages"`
 	Discovery       *BenchmarkDecision        `json:"discovery,omitempty"`
 	VerifiedSamples int                       `json:"verified_samples"`
+	// VerificationWindows names where the verification windows were placed:
+	// HoldoutWindowsFinalGrid (every window final validation re-measures),
+	// HoldoutWindowsFinalGridEdges, or empty for the earlier 35%/65% holdouts.
+	VerificationWindows string `json:"verification_windows,omitempty"`
+	// Verification lists the verification attempts in order and how the
+	// verification phase ended.
+	Verification *BenchmarkVerificationEvidence `json:"verification,omitempty"`
+	// WinnerWindows are the winner's per-window sample scores, the numbers the
+	// final validation windows are compared with.
+	WinnerWindows []BenchmarkWindowScore `json:"winner_windows,omitempty"`
+}
+
+// Verification attempt roles and outcomes.
+const (
+	VerificationRoleSmallest = "smallest"
+	VerificationRoleSafest   = "safest"
+	VerificationRoleBisect   = "bisect"
+	VerificationRoleNext     = "next"
+
+	VerificationPassed        = "passed"
+	VerificationQualityFailed = "quality_failed"
+	VerificationRejected      = "rejected"
+
+	// VerificationStoppedTimeCap marks a verification phase that ended because
+	// the search's time limit left no room for another attempt.
+	VerificationStoppedTimeCap = "time_cap"
+
+	// NotVerifiedTimeLimit is the uncertainty on a candidate that passed
+	// discovery and that the search's time limit left unverified.
+	NotVerifiedTimeLimit = "not verified: the search time limit was reached before it could be verified"
+)
+
+// BenchmarkVerificationAttempt is one candidate checked on the verification
+// windows.
+type BenchmarkVerificationAttempt struct {
+	CandidateID string `json:"candidate_id"`
+	// Role says why this candidate was chosen: the smallest eligible setting,
+	// the safest after a quality failure, a bisection between a failed and a
+	// passed setting, or the next eligible after a non-quality rejection.
+	Role    string `json:"role"`
+	Windows int    `json:"windows"`
+	Outcome string `json:"outcome"`
+	// Reason is the evaluation reason of a failed attempt.
+	Reason          string   `json:"reason,omitempty"`
+	VMAFMean        *float64 `json:"vmaf_mean,omitempty"`
+	VMAFP5          *float64 `json:"vmaf_p5,omitempty"`
+	WorstWindowMean *float64 `json:"worst_window_mean,omitempty"`
+}
+
+// BenchmarkVerificationEvidence records the verification phase. When the time
+// limit ends it, StoppedBy says so and Unverified lists the candidates that
+// passed discovery and were never checked.
+type BenchmarkVerificationEvidence struct {
+	Attempts   []BenchmarkVerificationAttempt `json:"attempts"`
+	StoppedBy  string                         `json:"stopped_by,omitempty"`
+	Unverified []string                       `json:"unverified,omitempty"`
+}
+
+// BenchmarkWindowScore is one window's VMAF measurement. Role is "discovery"
+// for the windows the search selected on and "verification" for the rest.
+type BenchmarkWindowScore struct {
+	StartSeconds    float64 `json:"start_seconds"`
+	DurationSeconds float64 `json:"duration_seconds"`
+	Role            string  `json:"role,omitempty"`
+	VMAFMean        float64 `json:"vmaf_mean"`
+	VMAFP5          float64 `json:"vmaf_p5"`
+	VMAFMin         float64 `json:"vmaf_min"`
 }
 
 // BenchmarkStatus captures the current execution status and metadata of a benchmark job.
@@ -754,8 +844,14 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 			maxAutomatic = MaxAutomaticHardwareCandidates
 		}
 	}
-	if req.Automatic && (req.Mode == "" || req.ModePolicyVersion != optimization.ModePolicyV2 && !sizeV3 || len(req.Samples) != 5 || len(req.Candidates) > maxAutomatic) {
-		return fmt.Errorf("automatic search requires v2 or v3 mode, five windows and at most %d candidates", maxAutomatic)
+	// Verification on the final grid takes the grid's own count (five to
+	// twelve windows, the first three of which are discovery windows).
+	minWindows, maxWindows := 5, 5
+	if req.AutomaticSearch != nil && req.AutomaticSearch.HoldoutWindows == HoldoutWindowsFinalGrid {
+		maxWindows = MaxAutomaticGridWindows
+	}
+	if req.Automatic && (req.Mode == "" || req.ModePolicyVersion != optimization.ModePolicyV2 && !sizeV3 || len(req.Samples) < minWindows || len(req.Samples) > maxWindows || len(req.Candidates) > maxAutomatic) {
+		return fmt.Errorf("automatic search requires v2 or v3 mode, five windows (five to %d on the final grid) and at most %d candidates", MaxAutomaticGridWindows, maxAutomatic)
 	}
 	if req.QualityPruning && !req.Automatic {
 		return errors.New("quality pruning requires automatic search")

@@ -292,3 +292,13 @@ func TestCompactBenchmarkReportsWhyTheMediaEngineWon(t *testing.T) {
 		t.Fatalf("an empty reason is serialized: %s", body)
 	}
 }
+
+func TestNotVerifiedTextNamesTheSearchTimeLimit(t *testing.T) {
+	got := notVerifiedText([]string{transcode.NotVerifiedTimeLimit})
+	if !strings.Contains(got, "search time limit") || !strings.Contains(got, "not proven unsuitable") {
+		t.Fatalf("time limit not named: %q", got)
+	}
+	if other := notVerifiedText(nil); strings.Contains(other, "time limit") {
+		t.Fatalf("no time-limit claim without evidence: %q", other)
+	}
+}
