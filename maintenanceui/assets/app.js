@@ -3646,6 +3646,14 @@ function vmafFloorLabel(floor) {
   if (!floor) return "";
   return [floor.minimum ? `VMAF ≥ ${floor.minimum}` : "", floor.p5_minimum != null ? `p5 ≥ ${floor.p5_minimum}` : "", floor.worst_window_minimum != null ? `worst window ≥ ${floor.worst_window_minimum}` : ""].filter(Boolean).join(", ");
 }
+// The estimated file size and saving against the original, from the sampled
+// windows. A setting that would be larger than the original says so.
+function estimatedSizeLabel(m) {
+  if (m.savings_percent == null || !(m.estimated_mb > 0)) return "";
+  const size = m.estimated_mb >= 1024 ? `${(m.estimated_mb / 1024).toFixed(2)} GB` : `${Math.round(m.estimated_mb)} MB`;
+  const pct = Number(m.savings_percent);
+  return ` · est. ${size}, ${pct < 0 ? `${Math.abs(pct).toFixed(1)}% larger than the original` : `${pct.toFixed(1)}% smaller than the original`}`;
+}
 function benchmarkCandidateLabel(c) {
   const codec = c.video_codec === "libx265" ? "x265" : c.video_codec === "hevc_videotoolbox" ? "VideoToolbox (hardware)" : c.video_codec || "VideoToolbox (hardware)";
   const rate = c.average_bitrate_kbps ? `${c.average_bitrate_kbps} kbps` : c.video_codec === "libx265" ? `CRF ${c.quality}` : `quality ${c.quality}`;
@@ -3692,8 +3700,8 @@ function benchmarkReport(job) {
   }
   if (b.measured?.length) {
     const list = node("ul", "", "benchmark-list");
-    for (const m of b.measured) list.append(node("li", `${benchmarkCandidateLabel({...m, id: m.candidate_id})} · ${vmafSummaryLabel(m.vmaf)} · ${m.selected ? "selected" : m.passed ? "passed" : "did not pass"}${reusedLabel(m.reused)}`));
-    box.append(node("p", "Measured quality per setting:", "metadata"), list);
+    for (const m of b.measured) list.append(node("li", `${benchmarkCandidateLabel({...m, id: m.candidate_id})} · ${vmafSummaryLabel(m.vmaf)} · ${m.selected ? "selected" : m.passed ? "passed" : "did not pass"}${estimatedSizeLabel(m)}${reusedLabel(m.reused)}`));
+    box.append(node("p", "Measured quality and estimated size per setting:", "metadata"), list);
   }
   if (b.rejected?.length) {
     const details = node("details", "", "benchmark-rejected");

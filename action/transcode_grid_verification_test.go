@@ -21,10 +21,7 @@ func gridTestCapabilities() transcode.WorkerCapabilities {
 // on the grid edges: the same policy without the grid verification rules.
 func gridEraPolicy(t *testing.T, hardware *transcode.HardwareSearchRules) ModePolicySnapshot {
 	t.Helper()
-	p, err := modePolicyWithHardware("size", false, 0, hardware)
-	if err != nil {
-		t.Fatal(err)
-	}
+	p := marginEraPolicy(t, hardware)
 	size := *p.Size
 	rules := *size.AutomaticSearch
 	rules.HoldoutWindows = transcode.HoldoutWindowsFinalGridEdges
@@ -39,13 +36,42 @@ func gridEraPolicy(t *testing.T, hardware *transcode.HardwareSearchRules) ModePo
 	return p
 }
 
+// marginEraPolicy is a size v3 snapshot as #182 froze it: verification on the
+// final grid, with the 1.5 selection margin. hardware is frozen as given, so a
+// caller that wants the extra hardware margin passes it.
+func marginEraPolicy(t *testing.T, hardware *transcode.HardwareSearchRules) ModePolicySnapshot {
+	t.Helper()
+	p, err := modePolicyWithHardware("size", false, 0, hardware)
+	if err != nil {
+		t.Fatal(err)
+	}
+	size := *p.Size
+	rules := *size.AutomaticSearch
+	rules.SelectionMarginVMAF = sizeEdgeSelectionMarginVMAF
+	size.AutomaticSearch = &rules
+	p.Size = &size
+	p.Digest = ""
+	b, _ := json.Marshal(p)
+	sum := sha256.Sum256(b)
+	p.Digest = "sha256:" + hex.EncodeToString(sum[:])
+	return p
+}
+
+// withExtraMargin is the hardware rules as #181 froze them: the extra VMAF
+// selection margin of a VideoToolbox result.
+func withExtraMargin(rules *transcode.HardwareSearchRules) *transcode.HardwareSearchRules {
+	c := rules.Clone()
+	c.ExtraSelectionMarginVMAF = sizeEdgeHardwareExtraMarginVMAF
+	return c
+}
+
 func TestSizePolicyFreezesGridVerification(t *testing.T) {
 	p, err := modePolicy("size", false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	r := p.Size.AutomaticSearch
-	if r.HoldoutWindows != transcode.HoldoutWindowsFinalGrid || !r.VerifyUntilExhausted || r.FinalFreshWindows != 2 || r.SelectionMarginVMAF != 1.5 || r.Validate() != nil {
+	if r.HoldoutWindows != transcode.HoldoutWindowsFinalGrid || !r.VerifyUntilExhausted || r.FinalFreshWindows != 2 || r.SelectionMarginVMAF != 0 || r.Validate() != nil {
 		t.Fatalf("rules %+v", r)
 	}
 	// The quality limits and the ladder are untouched.
@@ -70,7 +96,7 @@ func TestGridEraSnapshotsKeepTheirDigestAndSearch(t *testing.T) {
 		digest   string
 	}{
 		"no media engine":           {nil, "sha256:33812f4b39f3aff6852beb34dc5ceffdaeb3504f71d00cd17555c89fbf4c80ee"},
-		"media engine":              {current, "sha256:e5ec773de13a1eab8d1b3e9bc087f0583316221625cc310d463fca137ecd4264"},
+		"media engine":              {withExtraMargin(current), "sha256:e5ec773de13a1eab8d1b3e9bc087f0583316221625cc310d463fca137ecd4264"},
 		"media engine, no margin":   {beforeMargin, "sha256:1b73a704427a9c6a89a9ae36079422c842de9cbd799fa48f634d54d1a3b7ead6"},
 		"media engine, earlier set": {earlier, "sha256:bc2e370bf9f26965f7faa121693c299d1fe2e6c2d02b37aee033dc369cb12e03"},
 	} {
@@ -211,5 +237,121 @@ func TestFinalValidationFreshWindows(t *testing.T) {
 	}
 	if _, none := sizeFinalWindowsWithFresh(ec, 3700, 0); none != nil {
 		t.Fatalf("fresh windows without the rule: %+v", none)
+	}
+}
+
+// Snapshots frozen with verification on the final grid and the 1.5 selection
+// margin (and, for the media engine, the extra 2) re-hash to the digests they
+// were frozen under and keep selecting with those margins, on any worker. Only
+// new snapshots drop them.
+func TestMarginEraSnapshotsKeepTheirDigestAndMargin(t *testing.T) {
+	earlier := &transcode.HardwareSearchRules{MarginPercent: 15, QualityValues: []int{45, 50, 55, 60}, GOPSize: 240, BFrames: 1}
+	beforeMargin := &transcode.HardwareSearchRules{MarginPercent: 15, QualityValues: []int{45, 50, 55, 60}, GOPSize: 240, BFrames: 1, FallbackQualityValues: []int{65, 70, 75}}
+	current, err := modeHardwareInput("size", map[string]any{"mode": "size"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range map[string]struct {
+		hardware   *transcode.HardwareSearchRules
+		digest     string
+		extra      float64
+		hardwareOn bool
+	}{
+		"no media engine":           {nil, "sha256:6e519947ac9039f9dbfe36a8beee2ebdd891f0a02d28b5e5b776ddc7f8928ba8", 0, false},
+		"media engine":              {withExtraMargin(current), "sha256:206ca220dda73866a0f7b9721a8a2bb93769b447cf7cb6f53347b2d3208d03e7", 2, true},
+		"media engine, no margin":   {beforeMargin, "sha256:8613e1dd656b5181907007220b154265614a2418db98601de08bd591bc24e09a", 0, true},
+		"media engine, earlier set": {earlier, "sha256:ab4a33d9aa290b79b3eeaef9a6b3c17afda00376e9defade7d71e9ce65cb6128", 0, true},
+	} {
+		legacy := marginEraPolicy(t, tc.hardware)
+		if legacy.Digest != tc.digest {
+			t.Fatalf("%s: margin-era digest %s, want %s", name, legacy.Digest, tc.digest)
+		}
+		fresh, _ := modePolicyWithHardware("size", false, 0, current)
+		if tc.hardware == nil {
+			fresh, _ = modePolicyWithHardware("size", false, 0, nil)
+		}
+		if fresh.Digest == legacy.Digest || fresh.Size.AutomaticSearch.SelectionMarginVMAF != 0 {
+			t.Fatalf("%s: new snapshots share the margin-era digest or carry a margin: %+v", name, fresh.Size.AutomaticSearch)
+		}
+		stored := map[string]any{}
+		raw, _ := json.Marshal(legacy)
+		_ = json.Unmarshal(raw, &stored)
+		ec := &ExecutionContext{InstanceID: "margin-era", Inputs: map[string]any{"mode": "size"}, State: map[string]any{"mode_policy": stored, "original_sha256": strings.Repeat("a", 64)}}
+		frozen, err := freezeModePolicy(ec)
+		if err != nil || frozen.Digest != tc.digest {
+			t.Fatalf("%s: stored snapshot %+v %v", name, frozen, err)
+		}
+		// A worker that verifies on the grid runs the frozen margin as well.
+		caps := hardwareTestCapabilities()
+		caps.AutomaticGridVerification = true
+		req := hardwareRequestWith(t, ec, 8, 45*60, caps)
+		if req.AutomaticSearch == nil || req.AutomaticSearch.SelectionMarginVMAF != 1.5 || req.AutomaticSearch.HoldoutWindows != transcode.HoldoutWindowsFinalGrid {
+			t.Fatalf("%s: rules %+v", name, req.AutomaticSearch)
+		}
+		if tc.hardwareOn != (req.HardwareSearch != nil) || tc.hardwareOn && req.HardwareSearch.ExtraSelectionMarginVMAF != tc.extra {
+			t.Fatalf("%s: hardware search %+v", name, req.HardwareSearch)
+		}
+		if err := transcode.ValidateBenchmarkRequest(req); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A search whose snapshot freezes no margin sends none to a worker that verifies
+// on the grid, and no extra one for the media engine, so a worker that cannot
+// apply the extra margin still gets hardware candidates.
+func TestGridSnapshotSendsNoSelectionMargin(t *testing.T) {
+	caps := hardwareTestCapabilities()
+	caps.AutomaticGridVerification = true
+	caps.HardwareSelectionMargin = false
+	req := hardwareRequest(t, 8, 45*60, map[string]any{"mode": "size"}, caps)
+	if req.AutomaticSearch == nil || req.AutomaticSearch.SelectionMarginVMAF != 0 || req.AutomaticSearch.HoldoutWindows != transcode.HoldoutWindowsFinalGrid {
+		t.Fatalf("rules %+v", req.AutomaticSearch)
+	}
+	if req.HardwareSearch == nil || req.HardwareSearch.ExtraSelectionMarginVMAF != 0 {
+		t.Fatalf("hardware search %+v", req.HardwareSearch)
+	}
+	if err := transcode.ValidateBenchmarkRequest(req); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(req.HardwareSearch)
+	if strings.Contains(string(raw), "extra_selection_margin") {
+		t.Fatalf("an older worker would see a field it rejects: %s", raw)
+	}
+}
+
+// Where a search cannot verify on the final grid, the two edge windows are all
+// that guard against a thin pass, so the margin comes back: for a worker
+// without grid verification, and for a source too short for the grid.
+func TestGridSnapshotRestoresMarginWithoutGridVerification(t *testing.T) {
+	grid := hardwareTestCapabilities()
+	grid.AutomaticGridVerification = true
+	noGrid := hardwareTestCapabilities()
+	for name, tc := range map[string]struct {
+		caps     transcode.WorkerCapabilities
+		duration float64
+		holdout  string
+	}{
+		"worker without grid verification": {noGrid, 45 * 60, transcode.HoldoutWindowsFinalGridEdges},
+		"source too short for the grid":    {grid, 60, ""},
+	} {
+		ec := &ExecutionContext{InstanceID: "restore", Inputs: map[string]any{"mode": "size"}, State: map[string]any{"original_sha256": strings.Repeat("a", 64)}}
+		req := hardwareRequestWith(t, ec, 8, tc.duration, tc.caps)
+		if req.AutomaticSearch == nil || req.AutomaticSearch.SelectionMarginVMAF != 1.5 || req.AutomaticSearch.HoldoutWindows != tc.holdout {
+			t.Fatalf("%s: rules %+v", name, req.AutomaticSearch)
+		}
+		if req.HardwareSearch == nil || req.HardwareSearch.ExtraSelectionMarginVMAF != 2 {
+			t.Fatalf("%s: hardware search %+v", name, req.HardwareSearch)
+		}
+		if err := transcode.ValidateBenchmarkRequest(req); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	// A worker that cannot apply the extra margin is not sent hardware candidates.
+	noMargin := hardwareTestCapabilities()
+	noMargin.HardwareSelectionMargin = false
+	ec := &ExecutionContext{InstanceID: "restore-nocap", Inputs: map[string]any{"mode": "size"}, State: map[string]any{"original_sha256": strings.Repeat("a", 64)}}
+	if req := hardwareRequestWith(t, ec, 8, 45*60, noMargin); req.HardwareSearch != nil || req.AutomaticSearch == nil || req.AutomaticSearch.SelectionMarginVMAF != 1.5 {
+		t.Fatalf("restored margin with an unable worker: %+v %+v", req.AutomaticSearch, req.HardwareSearch)
 	}
 }
