@@ -814,11 +814,23 @@ func (e *Engine) batchPromotionBelowTarget(plan *batchPromotionPlan) int {
 
 // BatchItemFrozenSizeBudget is the size budget one batch item runs under, as
 // frozen (nil without one): its own goal-change policy when it has one, else
-// the batch's. state is the batch's decoded state.
+// the batch's. state is the batch's decoded state. The encoder comparison is
+// left out: it follows allow_hardware and the version the budget was frozen
+// with, not a budget setting the user chose.
 func BatchItemFrozenSizeBudget(state map[string]any, itemKey string) map[string]any {
 	holder := state
 	if row := objectMap(objectMap(state["batch_item_settings"])[itemKey]); objectMap(row["mode_policy"]) != nil {
 		holder = row
 	}
-	return objectMap(objectMap(objectMap(holder["mode_policy"])["size"])["size_budget"])
+	frozen := objectMap(objectMap(objectMap(holder["mode_policy"])["size"])["size_budget"])
+	if frozen == nil {
+		return nil
+	}
+	budget := make(map[string]any, len(frozen))
+	for k, v := range frozen {
+		if k != "encoder_comparison" {
+			budget[k] = v
+		}
+	}
+	return budget
 }

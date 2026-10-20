@@ -3,11 +3,14 @@ package action
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
 
+	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/httpclient"
 	"github.com/jakenesler/navigatorr/transcode/optimization"
 )
 
@@ -72,6 +75,12 @@ func TestSizeBudgetComparisonFreeze(t *testing.T) {
 		if bad.validate() == nil {
 			t.Fatalf("accepted %+v", bad)
 		}
+	}
+	// The preview compares budgets the user chose, not the comparison rules.
+	withRules := map[string]any{"mode_policy": map[string]any{"size": map[string]any{"size_budget": map[string]any{"percent": 40.0, "encoder_comparison": map[string]any{"vmaf_mean_tolerance": 1.0}}}}}
+	without := map[string]any{"mode_policy": map[string]any{"size": map[string]any{"size_budget": map[string]any{"percent": 40.0}}}}
+	if a, b := BatchItemFrozenSizeBudget(withRules, "x"), BatchItemFrozenSizeBudget(without, "x"); fmt.Sprint(a) != fmt.Sprint(b) {
+		t.Fatalf("frozen budgets differ only by the comparison: %v %v", a, b)
 	}
 	if sizeBudgetComparisonRules.validate() != nil {
 		t.Fatal("default rules rejected")
@@ -162,9 +171,19 @@ func TestSizeBudgetComparisonRound(t *testing.T) {
 		}
 	}
 	t.Run("VideoToolbox within tolerance", func(t *testing.T) {
-		c := start(t, nil)
-		result := finish(t, c, roundStatus("", [2]float64{83.6, 74.4}, [2]float64{84.1, 75.0}), nil)
+		c := newComparisonCase(t, nil)
+		c.ec.State["benchmark_search_seconds"] = 900.0
+		if r, _ := c.engine.sizeBudgetFallback(context.Background(), c.ec, map[string]any{}, budgetDecision(nil), nil); r.RewindTo != "submit_benchmark" {
+			t.Fatal("round not started")
+		}
+		st := roundStatus("", [2]float64{83.6, 74.4}, [2]float64{84.1, 75.0})
+		seconds := 240.0
+		st.SearchSeconds = &seconds
+		result := finish(t, c, st, nil)
 		restored(t, c)
+		if got := getFloat(c.ec.State, "benchmark_search_seconds"); got != 1140 {
+			t.Fatalf("the round's time is not charged to the search: %v", got)
+		}
 		plan, rec := getPlan(c.ec.State["plan"]), sizeBudgetOf(c.ec.State)
 		if result.Status != StepCompleted || plan.VideoCodec != transcode.VideoCodecHEVCVideoToolbox || plan.AverageBitrateKbps != 4773 || plan.X265 != nil || plan.Preset != "" || plan.Quality != 0 || plan.VideoProfile != "main10" || *plan.GOPSize != 240 {
 			t.Fatalf("plan %+v", plan)
@@ -174,10 +193,10 @@ func TestSizeBudgetComparisonRound(t *testing.T) {
 		}
 		vt, x := sizeBudgetMeasured(rec)
 		last := rec.Curve[len(rec.Curve)-1]
-		if vt == nil || x == nil || !vt.Chosen || x.Chosen || *vt.VMAFMean != 83.6 || last.Kind != "budget_fallback" || last.VideoCodec != transcode.VideoCodecHEVCVideoToolbox || last.BitrateKbps != 4773 {
+		if vt == nil || x == nil || !vt.Chosen || x.Chosen || *vt.VMAFMean != 83.6 || x.BitrateKbps != 4773 || last.Kind != "budget_fallback" || last.VideoCodec != transcode.VideoCodecHEVCVideoToolbox || last.BitrateKbps != 4773 {
 			t.Fatalf("curve %+v", rec.Curve)
 		}
-		if !sizeBudgetPlanMatches(c.snapshot, c.ec.State, plan, rec) {
+		if !sizeBudgetPlanMatches(c.snapshot, c.ec.InstanceID, c.ec.State, plan, rec) {
 			t.Fatal("validation does not rebuild the VideoToolbox plan")
 		}
 	})
@@ -192,7 +211,7 @@ func TestSizeBudgetComparisonRound(t *testing.T) {
 		if vt, x := sizeBudgetMeasured(rec); vt.Chosen || !x.Chosen {
 			t.Fatalf("chosen flags %+v %+v", vt, x)
 		}
-		if !sizeBudgetPlanMatches(c.snapshot, c.ec.State, plan, rec) {
+		if !sizeBudgetPlanMatches(c.snapshot, c.ec.InstanceID, c.ec.State, plan, rec) {
 			t.Fatal("validation does not rebuild the x265 plan")
 		}
 	})
@@ -227,6 +246,50 @@ func TestSizeBudgetComparisonRound(t *testing.T) {
 		restored(t, c)
 		if rec := sizeBudgetOf(c.ec.State); getPlan(c.ec.State["plan"]).VideoCodec != transcode.VideoCodecLibX265 || rec.Choice.Reason != SizeBudgetChoiceRoundFailed {
 			t.Fatalf("choice %+v", rec.Choice)
+		}
+	})
+	t.Run("status errors fail open", func(t *testing.T) {
+		// Non-retryable reads; a retryable one waits and reconciles.
+		for _, code := range []int{404, 403} {
+			c := start(t, nil)
+			result := finish(t, c, transcode.BenchmarkStatus{}, fmt.Errorf("worker read: %w", &httpclient.HTTPError{StatusCode: code}))
+			restored(t, c)
+			if rec := sizeBudgetOf(c.ec.State); result.Status != StepCompleted || getPlan(c.ec.State["plan"]).VideoCodec != transcode.VideoCodecLibX265 || rec.Choice.Reason != SizeBudgetChoiceRoundFailed {
+				t.Fatalf("%d: %+v", code, result)
+			}
+		}
+	})
+	t.Run("a manual retry of a cancelled round continues with x265", func(t *testing.T) {
+		c := start(t, nil)
+		c.ec.State["benchmark_submitted"] = true
+		c.executor.benchmarkStatusFunc = func(_ context.Context, id string) (transcode.BenchmarkStatus, error) {
+			return transcode.BenchmarkStatus{ProtocolVersion: transcode.WorkerProtocolVersion, ID: id, Status: transcode.StatusCancelled}, nil
+		}
+		tmpl := ActionTemplate{Steps: []StepDefinition{{Name: "preflight"}, {Name: "submit_benchmark"}, {Name: "wait_benchmark"}}}
+		resume, err := c.engine.prepareRemoteRetry(context.Background(), &store.ActionInstance{ActionName: "transcode_media"}, c.ec, tmpl, 2)
+		if err != nil || resume != 1 || sizeBudgetRoundOf(c.ec.State).Failure == "" {
+			t.Fatalf("retry %d %v", resume, err)
+		}
+		if result, err := c.engine.stepBenchmarkSubmit(context.Background(), c.ec); err != nil || result.Status != StepCompleted || c.executor.benchmarkSubmitCalls != 0 {
+			t.Fatalf("submit %+v %v", result, err)
+		}
+		if result, err := c.engine.stepBenchmarkWait(context.Background(), c.ec); err != nil || result.Status != StepCompleted {
+			t.Fatalf("wait %+v %v", result, err)
+		}
+		restored(t, c)
+		if getPlan(c.ec.State["plan"]).VideoCodec != transcode.VideoCodecLibX265 {
+			t.Fatal("not x265")
+		}
+	})
+	t.Run("no round after VideoToolbox failed the full file", func(t *testing.T) {
+		c := newComparisonCase(t, nil)
+		c.ec.State[hardwareContinuationKey] = &HardwareContinuation{Outcome: continuationContinued, Message: "continued with x265"}
+		if !continuationActive(c.ec.State) {
+			t.Fatal("continuation not active")
+		}
+		result, _ := c.engine.sizeBudgetFallback(context.Background(), c.ec, map[string]any{}, budgetDecision(nil), nil)
+		if rec := sizeBudgetOf(c.ec.State); result.RewindTo != "" || rec.Choice.Reason != SizeBudgetChoiceAfterContinuation || getPlan(c.ec.State["plan"]).VideoCodec != transcode.VideoCodecLibX265 {
+			t.Fatalf("result %+v choice %+v", result, rec.Choice)
 		}
 	})
 	t.Run("no round without the media engine", func(t *testing.T) {
@@ -270,7 +333,7 @@ func vtBudgetCase(t *testing.T) *budgetCase {
 func TestSizeBudgetVideoToolboxValidation(t *testing.T) {
 	c := vtBudgetCase(t)
 	plan, rec := getPlan(c.ec.State["plan"]), sizeBudgetOf(c.ec.State)
-	if !sizeBudgetPlanMatches(c.snapshot, c.ec.State, plan, rec) {
+	if !sizeBudgetPlanMatches(c.snapshot, c.ec.InstanceID, c.ec.State, plan, rec) {
 		t.Fatal("VideoToolbox plan rejected")
 	}
 	tamper := map[string]func(p *transcode.Plan, r *SizeBudgetRecord){
@@ -284,6 +347,11 @@ func TestSizeBudgetVideoToolboxValidation(t *testing.T) {
 			vt.VMAFMean = &m
 		},
 		"no measurements": func(_ *transcode.Plan, r *SizeBudgetRecord) { r.Curve = nil },
+		"other round":     func(_ *transcode.Plan, r *SizeBudgetRecord) { r.Choice.BenchmarkJobID = "bench-other-budget" },
+		"other bitrate":   func(_ *transcode.Plan, r *SizeBudgetRecord) { vt, _ := sizeBudgetMeasured(r); vt.BitrateKbps = 6000 },
+		"8-bit output": func(p *transcode.Plan, _ *SizeBudgetRecord) {
+			p.ExpectedBitDepth, p.VideoProfile, p.PixelFormat = 8, "main", "yuv420p"
+		},
 		"correction": func(_ *transcode.Plan, r *SizeBudgetRecord) {
 			r.Correction = &SizeBudgetCorrection{FirstCandidateBytes: 4_100_000_000, FirstBitrateKbps: 4773, BitrateKbps: 4773}
 		},
@@ -291,7 +359,7 @@ func TestSizeBudgetVideoToolboxValidation(t *testing.T) {
 	for name, mutate := range tamper {
 		p, r := *plan, sizeBudgetOf(c.ec.State)
 		mutate(&p, r)
-		if sizeBudgetPlanMatches(c.snapshot, c.ec.State, &p, r) {
+		if sizeBudgetPlanMatches(c.snapshot, c.ec.InstanceID, c.ec.State, &p, r) {
 			t.Errorf("%s: tampered plan accepted", name)
 		}
 	}
@@ -302,12 +370,12 @@ func TestSizeBudgetVideoToolboxValidation(t *testing.T) {
 	budget := *size.SizeBudget
 	budget.Comparison = nil
 	size.SizeBudget, frozen.Size = &budget, &size
-	if sizeBudgetPlanMatches(&frozen, c.ec.State, plan, rec) {
+	if sizeBudgetPlanMatches(&frozen, c.ec.InstanceID, c.ec.State, plan, rec) {
 		t.Fatal("VideoToolbox plan accepted without the frozen comparison")
 	}
 	size.Hardware = nil
 	budget.Comparison = c.snapshot.Size.SizeBudget.Comparison
-	if sizeBudgetPlanMatches(&frozen, c.ec.State, plan, rec) {
+	if sizeBudgetPlanMatches(&frozen, c.ec.InstanceID, c.ec.State, plan, rec) {
 		t.Fatal("VideoToolbox plan accepted with allow_hardware=false")
 	}
 }
@@ -326,7 +394,7 @@ func TestSizeBudgetVideoToolboxCorrection(t *testing.T) {
 	if d, err := transcode.DigestPlan(withoutDigest(next)); err != nil || d != next.PlanDigest || c.ec.State["plan_digest"] != d {
 		t.Fatal("corrected plan digest")
 	}
-	if !sizeBudgetPlanMatches(c.snapshot, c.ec.State, next, rec) || sizeBudgetPlanMatches(c.snapshot, c.ec.State, plan, rec) {
+	if !sizeBudgetPlanMatches(c.snapshot, c.ec.InstanceID, c.ec.State, next, rec) || sizeBudgetPlanMatches(c.snapshot, c.ec.InstanceID, c.ec.State, plan, rec) {
 		t.Fatal("validation does not rebuild exactly the corrected plan")
 	}
 	kinds := []string{}
@@ -336,6 +404,12 @@ func TestSizeBudgetVideoToolboxCorrection(t *testing.T) {
 	if got := strings.Join(kinds, ","); !strings.HasSuffix(got, "budget_measured,budget_measured,budget_overshoot,budget_fallback") {
 		t.Fatalf("curve kinds %s", got)
 	}
+	// The correction must name the encode it replaced.
+	c.ec.State["previous_job_id"] = "job-other"
+	if sizeBudgetPlanMatches(c.snapshot, c.ec.InstanceID, c.ec.State, next, rec) {
+		t.Fatal("correction accepted for another encode")
+	}
+	c.ec.State["previous_job_id"] = "job-size-budget"
 	// Only once.
 	if _, handled := c.engine.retrySizeBudgetBitrate(c.ec, next, 4_100_000_000, nil); handled {
 		t.Fatal("corrected twice")

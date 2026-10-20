@@ -76,7 +76,7 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 				// the recorded encoder comparison, not read back from the
 				// plan, and must match exactly.
 				expectedQuality = sizeBudgetFloorQuality(snapshot)
-				if expectedQuality == nil || !sizeBudgetPlanMatches(snapshot, ec.State, plan, sizeBudgetOf(ec.State)) {
+				if expectedQuality == nil || !sizeBudgetPlanMatches(snapshot, ec.InstanceID, ec.State, plan, sizeBudgetOf(ec.State)) {
 					return StepResult{Status: StepFailed, Error: "size budget plan does not match the frozen budget; original preserved"}, nil
 				}
 			}

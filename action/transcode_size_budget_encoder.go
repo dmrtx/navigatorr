@@ -37,6 +37,7 @@ const (
 	SizeBudgetChoiceX265Better        = "x265_better"
 	SizeBudgetChoiceNotCompared       = "not_compared"
 	SizeBudgetChoiceHardwareOff       = "hardware_not_allowed"
+	SizeBudgetChoiceAfterContinuation = "videotoolbox_failed_full_file"
 	SizeBudgetChoiceWorkerUnsupported = "worker_cannot_compare"
 	SizeBudgetChoiceRoundFailed       = "comparison_failed"
 	SizeBudgetChoiceIncomplete        = "comparison_incomplete"
@@ -116,10 +117,25 @@ var sizeBudgetSearchKeys = []string{
 	"benchmark_job_id", "benchmark_request", "benchmark_request_digest", "benchmark_decision", "benchmark_quality", "benchmark_status", "benchmark_search_seconds",
 	"benchmark_comparison_available", "benchmark_worker_completed_at", "benchmark_reconciled_at", "benchmark_reconcile_lag_ms", "benchmark_attempt", "benchmark_retry_count",
 	"automatic_search", "decision_reason", "capability_fingerprint", "search_budget_seconds", "search_budget_max_seconds", "search_budget_verify_seconds",
-	"samples_planned", "candidates_count", "progress_details", "phase_costs",
+	"samples_planned", "candidates_count", "progress_details", "phase_costs", benchmarkRejectedKey, "failure_classification", "previous_benchmark_job_id",
 }
 
 func sizeBudgetRoundActive(state map[string]any) bool { return state[sizeBudgetRoundKey] != nil }
+
+func sizeBudgetRoundID(instanceID string) string { return fmt.Sprintf("bench-%s-budget", instanceID) }
+
+// failSizeBudgetRound records why the comparison round cannot finish. The
+// wait step then plans x265, as for a round the worker reported failed. It
+// reports false without a round.
+func failSizeBudgetRound(ec *ExecutionContext, why string) bool {
+	round := sizeBudgetRoundOf(ec.State)
+	if round == nil {
+		return false
+	}
+	round.Failure = why
+	ec.State[sizeBudgetRoundKey] = *round
+	return true
+}
 
 func sizeBudgetRoundOf(state map[string]any) *sizeBudgetRound {
 	if state[sizeBudgetRoundKey] == nil {
@@ -254,6 +270,9 @@ func (e *Engine) startSizeBudgetComparison(ec *ExecutionContext, snapshot *ModeP
 		return x265Only(SizeBudgetChoiceHardwareOff, "This goal does not allow the media engine (allow_hardware=false), so the budget encode is two-pass x265.")
 	case policy.Comparison == nil:
 		return x265Only(SizeBudgetChoiceNotCompared, "This goal's budget was frozen before VideoToolbox could be compared at the budget, so the budget encode is two-pass x265.")
+	case continuationActive(ec.State):
+		// The sample windows already overrated VideoToolbox on this source.
+		return x265Only(SizeBudgetChoiceAfterContinuation, "A VideoToolbox encode of this file already missed the quality limits on the full file, so the budget encode is two-pass x265.")
 	}
 	var search transcode.BenchmarkRequest
 	if !reencode(ec.State["benchmark_request"], &search) || len(search.Samples) == 0 {
@@ -323,7 +342,7 @@ func sizeBudgetRoundRequest(ec *ExecutionContext, snapshot *ModePolicySnapshot, 
 	vt := transcode.BenchmarkCandidate{ID: sizeBudgetVTCandidateID, VideoCodec: v.VideoCodec, AverageBitrateKbps: v.AverageBitrateKbps, GOPSize: v.GOPSize, BFrames: v.BFrames, VideoProfile: v.VideoProfile, PixelFormat: v.PixelFormat}
 	quality := *floor
 	req := &transcode.BenchmarkRequest{
-		ProtocolVersion: search.ProtocolVersion, ID: fmt.Sprintf("bench-%s-budget", ec.InstanceID), Mode: search.Mode, ModePolicyVersion: search.ModePolicyVersion,
+		ProtocolVersion: search.ProtocolVersion, ID: sizeBudgetRoundID(ec.InstanceID), Mode: search.Mode, ModePolicyVersion: search.ModePolicyVersion,
 		SearchBudgetSeconds: policy.Comparison.SearchSeconds, Allow8BitTo10Bit: search.Allow8BitTo10Bit, AudioMode: search.AudioMode,
 		SourcePath: search.SourcePath, SourceDuration: search.SourceDuration, SourceSHA256: search.SourceSHA256, Metric: "vmaf",
 		Samples: append([]transcode.BenchmarkSampleWindow(nil), search.Samples...), Candidates: []transcode.BenchmarkCandidate{vt, x265[0]},
@@ -360,6 +379,11 @@ func (e *Engine) finishSizeBudgetComparison(ec *ExecutionContext, round *sizeBud
 	}
 	delete(ec.State, sizeBudgetRoundKey)
 	ec.State["benchmark_done"], ec.State["benchmark_submitted"], ec.State["has_winner"] = true, true, false
+	if st != nil && st.SearchSeconds != nil && *st.SearchSeconds > 0 {
+		// The round's worker time is the action's search time too, so the
+		// operation's finite search budget is charged for it.
+		ec.State["benchmark_search_seconds"] = getFloat(ec.State, "benchmark_search_seconds") + *st.SearchSeconds
+	}
 	snapshot, err := freezeModePolicy(ec)
 	if err != nil || snapshot == nil || snapshot.Size == nil || snapshot.Size.SizeBudget == nil {
 		return StepResult{Status: StepFailed, Error: "frozen size budget is missing after the encoder comparison (fail closed)"}, nil
@@ -377,7 +401,7 @@ func (e *Engine) finishSizeBudgetComparison(ec *ExecutionContext, round *sizeBud
 	}
 	switch {
 	case st == nil:
-		x265(SizeBudgetChoiceRoundFailed, fmt.Sprintf("The worker refused the VideoToolbox comparison (%s), so the budget encode is two-pass x265.", round.Failure))
+		x265(SizeBudgetChoiceRoundFailed, fmt.Sprintf("The VideoToolbox comparison could not run (%s), so the budget encode is two-pass x265.", round.Failure))
 	case st.Status != transcode.StatusCompleted || st.Decision == nil:
 		why := st.Error
 		if st.ReasonCode == "search_budget_exhausted" {
@@ -389,7 +413,7 @@ func (e *Engine) finishSizeBudgetComparison(ec *ExecutionContext, round *sizeBud
 		x265(SizeBudgetChoiceRoundFailed, fmt.Sprintf("The VideoToolbox comparison did not finish (%s), so the budget encode is two-pass x265.", why))
 	default:
 		transcode.AttachVMAFEvidence(st.Decision, st.Quality)
-		vt, x := sizeBudgetMeasuredPoints(st.Decision, rec.BudgetBytes)
+		vt, x := sizeBudgetMeasuredPoints(st.Decision, rec.BudgetBytes, rec.VideoBitrateKbps)
 		codec, reason := sizeBudgetPick(policy.Comparison, vt, x)
 		rec.Choice = &SizeBudgetChoice{VideoCodec: codec, Reason: reason, BenchmarkJobID: jobID, Message: sizeBudgetChoiceMessage(reason, vt, x, policy.Comparison)}
 		if policy.Comparison != nil {
@@ -414,14 +438,15 @@ func (e *Engine) finishSizeBudgetComparison(ec *ExecutionContext, round *sizeBud
 
 // sizeBudgetMeasuredPoints reads the round's two encodes from its decision.
 // A point without VMAF is nil.
-func sizeBudgetMeasuredPoints(d *transcode.BenchmarkDecision, budget int64) (vt, x *SizeBudgetPoint) {
+// Both were encoded at kbps; x265's evaluation does not report it.
+func sizeBudgetMeasuredPoints(d *transcode.BenchmarkDecision, budget int64, kbps int) (vt, x *SizeBudgetPoint) {
 	for _, ev := range d.Evaluations {
 		if ev.VMAF == nil || (ev.CandidateID != sizeBudgetVTCandidateID && ev.CandidateID != sizeBudgetX265CandidateID) {
 			continue
 		}
 		mean, p5 := ev.VMAF.Mean, ev.VMAF.P5
 		p := &SizeBudgetPoint{Kind: "budget_measured", CandidateID: ev.CandidateID, VideoCodec: transcode.BenchmarkCandidateVideoCodec(transcode.BenchmarkCandidate{VideoCodec: ev.VideoCodec}), Preset: ev.Preset,
-			BitrateKbps: ev.AverageBitrateKbps, Bytes: ev.EstimatedBytes, WithinBudget: ev.EstimatedBytes > 0 && ev.EstimatedBytes <= budget, VMAFMean: &mean, VMAFP5: &p5}
+			BitrateKbps: kbps, Bytes: ev.EstimatedBytes, WithinBudget: ev.EstimatedBytes > 0 && ev.EstimatedBytes <= budget, VMAFMean: &mean, VMAFP5: &p5}
 		if ev.VMAF.WorstWindowMean > 0 {
 			worst := ev.VMAF.WorstWindowMean
 			p.VMAFWorst = &worst
@@ -554,12 +579,36 @@ func (e *Engine) retrySizeBudgetBitrate(ec *ExecutionContext, plan *transcode.Pl
 	return StepResult{Status: StepCompleted, RewindTo: "submit_transcode", Outputs: map[string]any{sizeBudgetKey: rec, "plan_note": rec.Message}}, true
 }
 
+// sizeBudgetSearchDepth is the output bit depth the search's candidates were
+// encoded at. The request must be the one the plan's final validation names.
+func sizeBudgetSearchDepth(state map[string]any, plan *transcode.Plan) (int, bool) {
+	var req transcode.BenchmarkRequest
+	if plan.QualityValidation == nil || !reencode(state["benchmark_request"], &req) || len(req.Candidates) == 0 {
+		return 0, false
+	}
+	if digest, err := transcode.DigestBenchmarkRequest(&req); err != nil || digest != plan.QualityValidation.BenchmarkRequestDigest {
+		return 0, false
+	}
+	depth := 0
+	for _, c := range req.Candidates {
+		d := 8
+		if c.PixelFormat == "p010le" {
+			d = 10
+		}
+		if depth != 0 && d != depth {
+			return 0, false
+		}
+		depth = d
+	}
+	return depth, true
+}
+
 // sizeBudgetPlanMatches rebuilds a budget plan's video from the frozen policy,
 // the source and the record's choice, and reports whether the plan carries
 // exactly that. A VideoToolbox plan also needs a policy that allows it, a
 // comparison whose recorded numbers pick it, and, after a correction, the
 // bitrate that correction gives.
-func sizeBudgetPlanMatches(snapshot *ModePolicySnapshot, state map[string]any, plan *transcode.Plan, rec *SizeBudgetRecord) bool {
+func sizeBudgetPlanMatches(snapshot *ModePolicySnapshot, instanceID string, state map[string]any, plan *transcode.Plan, rec *SizeBudgetRecord) bool {
 	policy := snapshot.Size.SizeBudget
 	if policy == nil || rec == nil || plan == nil {
 		return false
@@ -576,18 +625,30 @@ func sizeBudgetPlanMatches(snapshot *ModePolicySnapshot, state map[string]any, p
 		if policy.Comparison == nil || snapshot.Size.Hardware == nil {
 			return false
 		}
+		// The choice must come from this action's own round, both encodes
+		// measured at the budget's bitrate, and its numbers must pick
+		// VideoToolbox under the frozen tolerance.
 		vt, x := sizeBudgetMeasured(rec)
+		if rec.Choice.BenchmarkJobID != sizeBudgetRoundID(instanceID) || vt == nil || x == nil || vt.BitrateKbps != enc.X265.BitrateKbps || x.BitrateKbps != enc.X265.BitrateKbps {
+			return false
+		}
 		if codec, _ := sizeBudgetPick(policy.Comparison, vt, x); codec != transcode.VideoCodecHEVCVideoToolbox {
 			return false
 		}
 		kbps := enc.X265.BitrateKbps
 		if c := rec.Correction; c != nil {
 			kbps = sizeBudgetCorrectedKbps(kbps, c.FirstCandidateBytes, enc, budget)
-			if policy.Comparison.MaxBitrateCorrections < 1 || c.FirstBitrateKbps != enc.X265.BitrateKbps || kbps == 0 || c.BitrateKbps != kbps {
+			if policy.Comparison.MaxBitrateCorrections < 1 || c.FirstBitrateKbps != enc.X265.BitrateKbps || kbps == 0 || c.BitrateKbps != kbps || c.FirstJobID == "" || c.FirstJobID != getString(state, "previous_job_id") {
 				return false
 			}
 		}
-		want = sizeBudgetVTVideo(snapshot.Size.Hardware, max(sourceVideoBitDepth(rep), plan.ExpectedBitDepth), kbps)
+		// The output depth is the one the search encoded at, read from the
+		// search request the plan's final validation is pinned to.
+		depth, ok := sizeBudgetSearchDepth(state, plan)
+		if !ok || plan.ExpectedBitDepth != depth || depth < sourceVideoBitDepth(rep) {
+			return false
+		}
+		want = sizeBudgetVTVideo(snapshot.Size.Hardware, depth, kbps)
 	} else {
 		if rec.Correction != nil {
 			return false

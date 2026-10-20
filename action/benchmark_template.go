@@ -41,6 +41,10 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 	if getBool(ec.State, "skip_transcode") {
 		return StepResult{Status: StepSkipped}, nil
 	}
+	if round := sizeBudgetRoundOf(ec.State); round != nil && round.Failure != "" {
+		// The comparison round is given up; the wait step plans x265.
+		return StepResult{Status: StepCompleted}, nil
+	}
 	if getBool(ec.State, "benchmark_submitted") && !getBool(ec.State, "benchmark_reconcile") {
 		benchID := getString(ec.State, "benchmark_job_id")
 		return StepResult{
@@ -81,6 +85,9 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 				return StepResult{Status: StepWaitingExternal, WaitingCondition: "worker_reconciling", WaitingReason: "Benchmark submit uncertain; reconciling the existing remote identity"}, nil
 			}
 			if he, ok := transcodeHTTPError(err); !ok || he.StatusCode != 404 {
+				if failSizeBudgetRound(ec, fmt.Sprintf("reconciliation failed: %v", err)) {
+					return StepResult{Status: StepCompleted, Outputs: map[string]any{"benchmark_job_id": id}}, nil
+				}
 				return StepResult{Status: StepFailed, Error: fmt.Sprintf("benchmark reconciliation failed: %v", err)}, nil
 			}
 			if raw, ok := ec.State["benchmark_request"]; ok {
@@ -228,11 +235,9 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 		if herr != nil {
 			return StepResult{}, herr
 		}
-		if round := sizeBudgetRoundOf(ec.State); round != nil && res.Status == StepFailed {
+		if res.Status == StepFailed && failSizeBudgetRound(ec, res.Error) {
 			// The comparison is optional: a refused round leaves the budget
 			// encode x265, which the wait step plans.
-			round.Failure = res.Error
-			ec.State[sizeBudgetRoundKey] = *round
 			ec.State["benchmark_submitted"] = true
 			res = StepResult{Status: StepCompleted, Outputs: map[string]any{"benchmark_job_id": req.ID}}
 		}
@@ -316,6 +321,10 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 		if isRetryableWorkerPollError(err) {
 			ec.State["progress_is_stale"] = true
 			return StepResult{Status: StepWaitingExternal, WaitingCondition: "worker_unreachable", WaitingReason: "Benchmark status temporarily unavailable; existing remote job will be reconciled"}, nil
+		}
+		if failSizeBudgetRound(ec, fmt.Sprintf("status failed: %v", err)) {
+			// The search's result stands; only the comparison is lost.
+			return e.finishSizeBudgetComparison(ec, sizeBudgetRoundOf(ec.State), nil)
 		}
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("benchmark status failed; no resubmit: %v", err)}, nil
 	}
