@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -227,14 +228,14 @@ func TestWorkIsNeverSubmittedWithoutSourceBaseline(t *testing.T) {
 	e := NewEngine(EngineDeps{Transcode: &mockTranscodeExecutor{}})
 	ec := testReconcileEC("")
 	delete(ec.State, "original_sha256")
-	if r, err := e.stepTranscodeSubmit(context.Background(), ec); err != nil || r.Status != StepFailed {
+	if r, err := e.stepTranscodeSubmit(context.Background(), ec); err != nil || r.Status != StepFailed || !strings.Contains(r.Error, "baseline missing") {
 		t.Fatalf("encode submitted without a baseline: %+v %v", r, err)
 	}
 	bench := &ExecutionContext{InstanceID: "bench", ActionName: "transcode_media", Inputs: map[string]any{}, State: map[string]any{"optimization_enabled": true, "resolved_path": "/media/ep.mkv"}}
-	if r, err := e.stepBenchmarkSubmit(context.Background(), bench); err != nil || r.Status != StepFailed {
+	if r, err := e.stepBenchmarkSubmit(context.Background(), bench); err != nil || r.Status != StepFailed || !strings.Contains(r.Error, "baseline missing") {
 		t.Fatalf("benchmark submitted without a baseline: %+v %v", r, err)
 	}
-	if err := e.applySharedBatchCalibration(&ExecutionContext{ActionName: "transcode_media"}, nil, nil, recipe.Profile{}, "", "digest", "/media/ep.mkv"); err == nil {
-		t.Fatal("shared calibration accepted an empty source hash")
+	if err := e.applySharedBatchCalibration(&ExecutionContext{ActionName: "transcode_media"}, nil, nil, recipe.Profile{}, "", "digest", "/media/ep.mkv"); err == nil || !strings.Contains(err.Error(), "source hash is required") {
+		t.Fatalf("shared calibration accepted an empty source hash: %v", err)
 	}
 }
