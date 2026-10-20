@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,7 +25,7 @@ func (e *Engine) registerTranscodeBatchTemplate() {
 		ImmutableInputs: true,
 		Name:            "transcode_batch",
 		Version:         6,
-		Description:     "Simple goals: set mode=quality (strict sampled quality), size (acceptable sampled quality), x265_preserve (strict libx265 conversion, already HEVC omitted), or compact (much smaller SDR copy of HDR/Dolby Vision/4K sources at max_height, default 1080; HDR and Dolby Vision are dropped, lossless audio becomes AAC, every audio and subtitle track kept). Modes forbid profiles/priority/manual tuning, keep every audio and subtitle track (size and compact convert lossless audio to AAC; size also converts lossless Atmos/DTS:X to AAC on their channel bed, copies lossy Atmos (E-AC-3) and may encode 8-bit sources as 10-bit HEVC on a proven worker, and with allow_hardware (default true for size; false keeps x265 only; optional hardware_margin_percent 0-50, default 15) also measures Apple VideoToolbox encodes through the same quality gates and keeps one when it is within that percent of the best x265 result; quality and x265_preserve keep the source depth) and require final byte/quality validation; 45-61fps sources are measured on frame-exact 2:1 decimated VMAF and only on workers that advertise it; policy snapshots and finite per-source/operation search budgets are durable. Omit mode for legacy technical behavior. Video batch from explicit paths (1–1000 files inside allowed read roots), or a Sonarr series using service and series_id. paths cannot be combined with service, series_id, season, episode_file_ids, or promote_candidates=true; filesystem batches produce candidates only. Direct encoding: choose a non-optimizing profile or profile_config and omit priority; inspect recipe_get if unsure. Bounded tuning: omit profile and set priority=balanced, quality, savings, or preserve_quality (perceptual target, not lossless). Tuning tests three settings on short samples, creates a batch-only recipe and continues; currently oversized H264 1080p 8-bit SDR below 45fps. Bare auto without priority keeps legacy selection. dry_run=true is a completed preview, not a paused encode: start a new action with dry_run=false to encode. promote_candidates=true offers one approval before replacement; otherwise originals remain unchanged. Monitor with action_status.",
+		Description:     "Simple goals: set mode=quality (strict sampled quality), size (acceptable sampled quality), x265_preserve (strict libx265 conversion, already HEVC omitted), or compact (much smaller SDR copy of HDR/Dolby Vision/4K sources at max_height, default 1080; HDR and Dolby Vision are dropped, lossless audio becomes AAC, every audio and subtitle track kept). Modes forbid profiles/priority/manual tuning, keep every audio and subtitle track (size and compact convert lossless audio to AAC; size also converts lossless Atmos/DTS:X to AAC on their channel bed, copies lossy Atmos (E-AC-3) and may encode 8-bit sources as 10-bit HEVC on a proven worker, and with allow_hardware (default true for size; false keeps x265 only; optional hardware_margin_percent 0-50, default 15) also measures Apple VideoToolbox encodes through the same quality gates and keeps one when it is within that percent of the best x265 result; allow_slow_preset (default false, size only) also lets the quality fallback try the slow x265 preset, whose full encodes can take hours; quality and x265_preserve keep the source depth) and require final byte/quality validation; 45-61fps sources are measured on frame-exact 2:1 decimated VMAF and only on workers that advertise it; policy snapshots and finite per-source/operation search budgets are durable. Omit mode for legacy technical behavior. Video batch from explicit paths (1–1000 files inside allowed read roots), or a Sonarr series using service and series_id. paths cannot be combined with service, series_id, season, episode_file_ids, or promote_candidates=true; filesystem batches produce candidates only. Direct encoding: choose a non-optimizing profile or profile_config and omit priority; inspect recipe_get if unsure. Bounded tuning: omit profile and set priority=balanced, quality, savings, or preserve_quality (perceptual target, not lossless). Tuning tests three settings on short samples, creates a batch-only recipe and continues; currently oversized H264 1080p 8-bit SDR below 45fps. Bare auto without priority keeps legacy selection. dry_run=true is a completed preview, not a paused encode: start a new action with dry_run=false to encode. promote_candidates=true offers one approval before replacement; otherwise originals remain unchanged. Monitor with action_status.",
 		Examples: []ActionExample{
 			{Description: "Encode a frozen filesystem selection, without a library service or replacing originals.", Inputs: `{"paths":["/media/movies/Film.mkv","/media/series/Season 1/Episode 1.mp4"],"profile":"general-hevc","media_type":"movie"}`},
 			{Description: "Direct candidates using a non-optimizing profile; substitute the actual series ID and chosen profile.", Inputs: `{"service":"sonarr","series_id":10,"profile":"general-hevc"}`},
@@ -33,7 +34,7 @@ func (e *Engine) registerTranscodeBatchTemplate() {
 		},
 		RequiredInputs: []string{},
 		OptionalInputs: []string{
-			"mode", "max_height", "allow_hardware", "hardware_margin_percent", "paths", "service", "series_id",
+			"mode", "max_height", "allow_hardware", "hardware_margin_percent", "allow_slow_preset", "paths", "service", "series_id",
 			"episode_file_ids",
 			"season",
 			"profile",
@@ -1092,6 +1093,7 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 func applyGoalPolicyInputs(inputs map[string]any, rawPolicy any) {
 	delete(inputs, "allow_hardware")
 	delete(inputs, "hardware_margin_percent")
+	delete(inputs, "allow_slow_preset")
 	delete(inputs, "max_height")
 	var policy ModePolicySnapshot
 	b, err := json.Marshal(rawPolicy)
@@ -1103,6 +1105,9 @@ func applyGoalPolicyInputs(inputs map[string]any, rawPolicy any) {
 	}
 	if policy.Size == nil {
 		return
+	}
+	if rules := policy.Size.AutomaticSearch; rules != nil && slices.Contains(rules.QualityFallbackPresets, "slow") {
+		inputs["allow_slow_preset"] = true
 	}
 	if policy.Size.Hardware == nil {
 		inputs["allow_hardware"] = false
@@ -1191,7 +1196,7 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 	}
 	if mode := getString(ec.Inputs, "mode"); mode != "" {
 		childInputs["mode"] = mode
-		for _, key := range []string{"allow_hardware", "hardware_margin_percent", "max_height"} {
+		for _, key := range []string{"allow_hardware", "hardware_margin_percent", "allow_slow_preset", "max_height"} {
 			if v, ok := ec.Inputs[key]; ok && v != nil {
 				childInputs[key] = v
 			}

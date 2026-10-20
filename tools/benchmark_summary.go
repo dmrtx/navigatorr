@@ -307,6 +307,9 @@ func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
 				if ev.EvaluationReason == "skipped_savings_dominated" {
 					reason = savingsDominatedText(ev.Uncertainties)
 				}
+				if ev.EvaluationReason == "skipped_larger_than_passing" {
+					reason = largerThanPassingText(ev.Uncertainties)
+				}
 				if ev.EvaluationReason == "not_verified" {
 					reason = notVerifiedText(ev.Uncertainties)
 				}
@@ -358,6 +361,10 @@ func benchmarkFailureText(code string) string {
 		return dominatedText(nil)
 	case "skipped_savings_dominated":
 		return savingsDominatedText(nil)
+	case "skipped_larger_than_passing":
+		return largerThanPassingText(nil)
+	case "quality_cambi_not_measured_vmaf_rejected":
+		return "Banding (CAMBI) was not measured: the candidate already failed a VMAF limit, so its banding could not make it acceptable."
 	case "insufficient_savings":
 		return "The estimated file does not reach the minimum savings compared with the original, so it cannot be selected whatever its quality."
 	case "insufficient_savings_before_metrics":
@@ -401,6 +408,19 @@ func dominatedText(uncertainties []string) string {
 		}
 	}
 	return "Not encoded: a higher-quality setting of the same encoder already failed quality, so this setting cannot pass."
+}
+
+// largerThanPassingText explains a quality rung the walk never measured because
+// a more compressed rung of the same encoder already met quality.
+func largerThanPassingText(uncertainties []string) string {
+	for _, u := range uncertainties {
+		if passing, ok := strings.CutPrefix(u, "not measured: "); ok {
+			if passing, ok = strings.CutSuffix(passing, " already met quality, and a lower CRF only spends more bits"); ok && passing != "" {
+				return "Not encoded: " + passing + " is a more compressed setting of the same encoder and already met quality, so this higher-quality setting could only be larger."
+			}
+		}
+	}
+	return "Not encoded: a more compressed setting of the same encoder already met quality, so this higher-quality setting could only be larger."
 }
 
 // savingsDominatedText explains a candidate the savings precheck never

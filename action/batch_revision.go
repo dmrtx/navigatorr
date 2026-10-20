@@ -161,7 +161,7 @@ func (e *Engine) ReconfigureBatch(ctx context.Context, id, scope, selectionID, v
 
 	if mode := getString(settings, "mode"); mode != "" {
 		allowed := 1
-		for _, key := range []string{"max_height", "allow_hardware", "hardware_margin_percent"} {
+		for _, key := range []string{"max_height", "allow_hardware", "hardware_margin_percent", "allow_slow_preset"} {
 			if _, ok := settings[key]; ok {
 				allowed++
 			}
@@ -177,7 +177,11 @@ func (e *Engine) ReconfigureBatch(ctx context.Context, id, scope, selectionID, v
 		if err != nil {
 			return nil, err
 		}
-		policy, err := modePolicyWithHardware(mode, getBool(ec.State, "is_anime"), maxHeight, hardware)
+		allowSlow, err := modeSlowPresetInput(mode, settings)
+		if err != nil {
+			return nil, err
+		}
+		policy, err := modePolicyWithOptions(mode, getBool(ec.State, "is_anime"), maxHeight, hardware, allowSlow)
 		if err != nil {
 			return nil, err
 		}

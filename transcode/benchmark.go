@@ -26,7 +26,8 @@ var (
 
 const (
 	// MaxBenchmarkCandidates defines the conservative upper limit for candidates in a single benchmark.
-	MaxBenchmarkCandidates = 32
+	// It sits above MaxAutomaticWalkHardwareCandidates, the largest automatic search.
+	MaxBenchmarkCandidates = 36
 	// MaxBenchmarkSamples defines the conservative upper limit for sample windows in a single benchmark.
 	MaxBenchmarkSamples = 32
 	// MaxBenchmarkIDLength bounds the length of benchmark job and candidate IDs.
@@ -402,6 +403,21 @@ const (
 	// quality ladder and its higher-quality fallback rungs beside the rules
 	// candidates (15 + 4 + 3).
 	MaxAutomaticHardwareCandidates = 22
+	// MaxAutomaticWalkCandidates and MaxAutomaticWalkHardwareCandidates are the
+	// limits of a search whose rules walk the quality fallback or refine the
+	// ladder. Its x265 candidates are the five ladder rungs, four refinement
+	// rungs between them, eight quality fallback rungs for each of the two
+	// presets (medium, and slow when the operation opts in) and three savings
+	// rungs: 28, and 35 beside the seven VideoToolbox rungs.
+	MaxAutomaticWalkCandidates         = 28
+	MaxAutomaticWalkHardwareCandidates = 35
+	// RefineCandidatePrefix begins the ID of a refinement candidate: a ladder
+	// rung between two others, measured only when the rungs around it differ in
+	// verdict. It starts with "fallback-", so the worker keeps it out of the
+	// initial stage.
+	RefineCandidatePrefix = "fallback-refine-"
+	// MaxRefinementQualityValues bounds the refinement rungs of a search.
+	MaxRefinementQualityValues = 6
 	// MaxHardwareMarginPercent bounds how much larger than the x265 winner a
 	// hardware candidate may be and still win.
 	MaxHardwareMarginPercent = 50
@@ -460,6 +476,22 @@ type AutomaticSearchRules struct {
 	// validation also measures, reported apart and never deciding its verdict.
 	// It is read by the server when it plans final validation.
 	FinalFreshWindows int `json:"final_fresh_windows,omitempty"`
+	// QualityWalk measures the libx265 rungs of the quality fallback after the
+	// family's highest-quality rung, one at a time, most compressed first. The
+	// walk stops at the first rung that is not a quality failure (a lower CRF
+	// can only be larger); the rungs below it are measured only if a verification
+	// of that rung fails on quality. Absent measures each fallback stage at once.
+	QualityWalk bool `json:"quality_walk,omitempty"`
+	// RefinementQualityValues are x265 CRF rungs between the ladder's, measured
+	// only after the ladder, and only the one that lies between the most
+	// compressed rung that passed and the next, more compressed, rung that did
+	// not. They narrow the result by one CRF step without measuring every
+	// in-between rung of an easy source.
+	RefinementQualityValues []int `json:"refinement_quality_values,omitempty"`
+	// DeferBanding measures banding (CAMBI) only for a candidate whose VMAF
+	// result has not already been rejected by a VMAF limit. A candidate that
+	// failed VMAF is rejected whatever CAMBI says, so its CAMBI is not measured.
+	DeferBanding bool `json:"defer_banding,omitempty"`
 }
 
 // Validate reports whether the rules are bounded and well formed.
@@ -479,6 +511,14 @@ func (r *AutomaticSearchRules) Validate() error {
 	if len(r.QualityFallbackPresets) > 3 {
 		return errors.New("automatic search allows at most three quality fallback presets")
 	}
+	if len(r.RefinementQualityValues) > MaxRefinementQualityValues {
+		return fmt.Errorf("automatic search allows at most %d refinement rungs", MaxRefinementQualityValues)
+	}
+	for i, q := range r.RefinementQualityValues {
+		if q < 1 || q > 51 || i > 0 && q <= r.RefinementQualityValues[i-1] {
+			return errors.New("automatic search refinement_quality_values must be CRF values in 1-51, ascending and distinct")
+		}
+	}
 	seen := map[string]bool{}
 	for _, preset := range r.QualityFallbackPresets {
 		if preset == "" || preset != strings.ToLower(strings.TrimSpace(preset)) || seen[preset] {
@@ -496,6 +536,7 @@ func (r *AutomaticSearchRules) Clone() *AutomaticSearchRules {
 	}
 	c := *r
 	c.QualityFallbackPresets = append([]string(nil), r.QualityFallbackPresets...)
+	c.RefinementQualityValues = append([]int(nil), r.RefinementQualityValues...)
 	return &c
 }
 
@@ -886,6 +927,16 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 	if fallbackCandidates > MaxHardwareFallbackQualityValues {
 		return fmt.Errorf("at most %d hardware fallback candidates", MaxHardwareFallbackQualityValues)
 	}
+	for _, c := range req.Candidates {
+		if !strings.HasPrefix(c.ID, RefineCandidatePrefix) {
+			continue
+		}
+		// A refinement candidate is one of the frozen rungs, a libx265 constant
+		// quality setting.
+		if req.AutomaticSearch == nil || !slices.Contains(req.AutomaticSearch.RefinementQualityValues, c.Quality) || BenchmarkCandidateVideoCodec(c) != VideoCodecLibX265 || c.AverageBitrateKbps != 0 {
+			return fmt.Errorf("refinement candidate %q does not match the frozen refinement rungs", c.ID)
+		}
+	}
 	if req.AutomaticSearch != nil {
 		if !req.Automatic || !sizeV3 {
 			return errors.New("automatic search rules require an automatic size v3 search")
@@ -896,6 +947,12 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 		maxAutomatic = MaxAutomaticRulesCandidates
 		if req.HardwareSearch != nil {
 			maxAutomatic = MaxAutomaticHardwareCandidates
+		}
+		if req.AutomaticSearch.QualityWalk || len(req.AutomaticSearch.RefinementQualityValues) > 0 {
+			maxAutomatic = MaxAutomaticWalkCandidates
+			if req.HardwareSearch != nil {
+				maxAutomatic = MaxAutomaticWalkHardwareCandidates
+			}
 		}
 	}
 	// Verification on the final grid takes the grid's own count (five to

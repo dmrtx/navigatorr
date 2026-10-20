@@ -2,6 +2,8 @@ package action
 
 import (
 	"fmt"
+	"slices"
+
 	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/recipe"
 )
@@ -18,6 +20,11 @@ type automaticFallbacks struct {
 
 var defaultAutomaticFallbacks = automaticFallbacks{Quality: []int{16, 18, 20}, Savings: []int{23, 26, 28}}
 
+// legacyQualityFallbackValues are the quality rungs a worker without
+// automatic_quality_walk can take: it caps a request at the earlier candidate
+// count, so a frozen ladder of eight rungs is thinned to these.
+var legacyQualityFallbackValues = []int{16, 18, 20}
+
 // policyAutomaticFallbacks reads a frozen policy's fallback families. Its
 // search rules are sent only to a worker that advertises them (older workers
 // reject the field); otherwise the search keeps the earlier rules.
@@ -26,8 +33,19 @@ func policyAutomaticFallbacks(policy *ModePolicySnapshot, caps transcode.WorkerC
 		return defaultAutomaticFallbacks
 	}
 	families := automaticFallbacks{Quality: policy.Size.FallbackQualityValues, Savings: policy.Size.FallbackSavingsValues, Size: policy.Size}
+	if !caps.AutomaticQualityWalk {
+		// A worker without the quality walk takes the earlier candidate count and
+		// rejects the walk and refinement fields: it measures the earlier rungs
+		// of the same ladder, all of them, the way it always did.
+		families.Quality = slices.DeleteFunc(slices.Clone(families.Quality), func(q int) bool { return !slices.Contains(legacyQualityFallbackValues, q) })
+	}
 	if caps.AutomaticSearchRules && policy.Size.AutomaticSearch.Validate() == nil {
 		families.Rules = policy.Size.AutomaticSearch.Clone()
+		if families.Rules != nil && !caps.AutomaticQualityWalk {
+			families.Rules.QualityWalk = false
+			families.Rules.RefinementQualityValues = nil
+			families.Rules.DeferBanding = false
+		}
 		if families.Rules != nil && !caps.AutomaticGridVerification {
 			// A worker without grid verification rejects its rule fields and its
 			// holdout value: it verifies on the two edge windows, twice at most.
@@ -120,10 +138,15 @@ func configureAutomaticRequest(req *transcode.BenchmarkRequest, plan *transcode.
 		ordered = append(ordered, family{prefix, preset, families.Quality})
 	}
 	ordered = append(ordered, family{"fallback-savings-", "slow", families.Savings})
+	if rules != nil && len(rules.RefinementQualityValues) > 0 {
+		// The in-between CRFs share the initial ladder's preset: they refine its
+		// result and are measured only between a rung that passed and one that did not.
+		ordered = append(ordered, family{transcode.RefineCandidatePrefix, plan.Preset, rules.RefinementQualityValues})
+	}
 	for _, f := range ordered {
 		alt := *plan
 		alt.Preset = f.preset
-		candidates, err := buildBenchmarkCandidates(&alt, bitDepth, &recipe.SearchPolicy{MaxCandidates: 3, QualityValues: f.qualities})
+		candidates, err := buildBenchmarkCandidates(&alt, bitDepth, &recipe.SearchPolicy{MaxCandidates: max(3, len(f.qualities)), QualityValues: f.qualities})
 		if err != nil {
 			return err
 		}

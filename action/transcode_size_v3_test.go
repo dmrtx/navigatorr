@@ -48,10 +48,15 @@ func TestSizeModePolicyV3Snapshot(t *testing.T) {
 	// windows) gave new snapshots the digest below; snapshots frozen with the
 	// grid-edge holdouts still re-hash to sha256:33812f4b...80ee (see
 	// TestGridEraSnapshotsKeepTheirDigestAndSearch). Dropping the 1.5 selection
-	// margin for the searches that verify on the grid gave the digest below;
-	// snapshots frozen with the margin still re-hash to sha256:6e519947...8ba8
-	// (see TestMarginEraSnapshotsKeepTheirDigestAndMargin).
-	if p.Digest != "sha256:5ca0b1d812f8e814a839209ad6cc4ab55169bba5af9e58d4fb15aaff96c30976" {
+	// margin for the searches that verify on the grid gave the digest
+	// sha256:5ca0b1d8...0976; snapshots frozen with the margin still re-hash to
+	// sha256:6e519947...8ba8 (see TestMarginEraSnapshotsKeepTheirDigestAndMargin).
+	// The x265 quality walk (CRF 14-21 at medium, slow only on request,
+	// refinement rungs, banding measured after VMAF, no operation budget) gave
+	// the digest below; snapshots frozen without the margin but before it
+	// re-hash to sha256:5ca0b1d8...0976 (see
+	// TestPreWalkSnapshotsKeepTheirDigestAndSearch).
+	if p.Digest != "sha256:cb53779c2cbdfe1d2f3ef41b16a2c986ddac436f8b19f4801cb4cd4e830b825c" {
 		t.Fatalf("size v3 snapshot digest changed: %s", p.Digest)
 	}
 	// The quality floor is v2's, unchanged: VMAF mean 88, p5 84, worst 5 s

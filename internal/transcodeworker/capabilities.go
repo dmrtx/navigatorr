@@ -232,6 +232,10 @@ func probeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratch
 	// ...verified on the whole final validation grid, until a candidate passes
 	// or none is eligible, with fresh windows reported apart in final validation.
 	caps.AutomaticGridVerification = true
+	// ...walking the quality fallback one rung at a time per encoder, refining
+	// between a passing and a failing ladder rung, within the longer candidate
+	// list.
+	caps.AutomaticQualityWalk = true
 	// Size searches may carry hardware_search rules (VideoToolbox candidates
 	// that win within a size margin of the x265 winner).
 	caps.HardwareSearch = true

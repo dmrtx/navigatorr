@@ -37,7 +37,8 @@ func gridEraPolicy(t *testing.T, hardware *transcode.HardwareSearchRules) ModePo
 }
 
 // marginEraPolicy is a size v3 snapshot as #182 froze it: verification on the
-// final grid, with the 1.5 selection margin. hardware is frozen as given, so a
+// final grid, with the 1.5 selection margin, and from before the quality walk
+// (see preWalkPolicy). hardware is frozen as given, so a
 // caller that wants the extra hardware margin passes it.
 func marginEraPolicy(t *testing.T, hardware *transcode.HardwareSearchRules) ModePolicySnapshot {
 	t.Helper()
@@ -45,6 +46,7 @@ func marginEraPolicy(t *testing.T, hardware *transcode.HardwareSearchRules) Mode
 	if err != nil {
 		t.Fatal(err)
 	}
+	p = preWalkPolicy(p)
 	size := *p.Size
 	rules := *size.AutomaticSearch
 	rules.SelectionMarginVMAF = sizeEdgeSelectionMarginVMAF

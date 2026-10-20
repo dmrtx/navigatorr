@@ -32,6 +32,9 @@ const (
 
 // BenchmarkRecord represents the persistent state stored in benchmark.json on the worker.
 type BenchmarkRecord struct {
+	// bandingGate is set on the stage records of a search that defers banding
+	// (see AutomaticSearchRules.DeferBanding); it is never persisted.
+	bandingGate               bandingGate
 	Automatic                 bool                                  `json:"automatic,omitempty"`
 	QualityPruning            bool                                  `json:"quality_pruning,omitempty"`
 	MinSavingsPercent         float64                               `json:"min_savings_percent,omitempty"`

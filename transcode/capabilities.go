@@ -105,6 +105,16 @@ type WorkerCapabilities struct {
 	// reject those fields, so the server sends them only to workers that
 	// advertise this.
 	AutomaticGridVerification bool `json:"automatic_grid_verification,omitempty"`
+	// AutomaticQualityWalk reports a worker that accepts quality_walk and
+	// refinement_quality_values in automatic_search: the quality fallback is
+	// measured one rung at a time, most compressed first, per encoder, and each
+	// encoder stops at its first rung that passes; a rung between a passing and a
+	// failing ladder rung is measured to tighten the result; and up to
+	// MaxAutomaticWalkCandidates candidates (MaxAutomaticWalkHardwareCandidates
+	// beside the hardware ladder) are accepted. Older workers reject those fields
+	// and the longer candidate list, so the server sends them only to workers that
+	// advertise this.
+	AutomaticQualityWalk bool `json:"automatic_quality_walk,omitempty"`
 	// HardwareSearch reports a worker that accepts hardware_search on size
 	// benchmarks: VideoToolbox candidates that win within a frozen size margin
 	// of the x265 winner. Older workers reject the field.
@@ -178,6 +188,7 @@ type fingerprintPayload struct {
 	SearchBudgetExtension     bool                           `json:"search_budget_extension,omitempty"`
 	AutomaticSearchRules      bool                           `json:"automatic_search_rules,omitempty"`
 	AutomaticGridVerification bool                           `json:"automatic_grid_verification,omitempty"`
+	AutomaticQualityWalk      bool                           `json:"automatic_quality_walk,omitempty"`
 	HardwareSearch            bool                           `json:"hardware_search,omitempty"`
 	HardwareFallbackSearch    bool                           `json:"hardware_fallback_search,omitempty"`
 	HardwareSelectionMargin   bool                           `json:"hardware_selection_margin,omitempty"`
@@ -231,6 +242,7 @@ func ComputeCapabilityFingerprint(caps WorkerCapabilities) (string, error) {
 		SearchBudgetExtension:     caps.SearchBudgetExtension,
 		AutomaticSearchRules:      caps.AutomaticSearchRules,
 		AutomaticGridVerification: caps.AutomaticGridVerification,
+		AutomaticQualityWalk:      caps.AutomaticQualityWalk,
 		HardwareSearch:            caps.HardwareSearch,
 		HardwareFallbackSearch:    caps.HardwareFallbackSearch,
 		HardwareSelectionMargin:   caps.HardwareSelectionMargin,

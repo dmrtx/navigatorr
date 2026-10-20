@@ -74,10 +74,13 @@ func TestSizePolicyHardwareDefaultsOnAndFreezes(t *testing.T) {
 	// final grid gave a new digest; snapshots frozen with the margin but
 	// before it re-hash to sha256:e5ec773d...4264 (see
 	// TestGridEraSnapshotsKeepTheirDigestAndSearch). Removing the selection
-	// margins for grid verification gave the digest below; the snapshots that
-	// carried them still re-hash to sha256:206ca220...03e7 (see
-	// TestMarginEraSnapshotsKeepTheirDigestAndMargin).
-	if hw.Digest != "sha256:1f903e4291fdce6d0257446dcc809a87ad819a9d36bd3f16ff6d74c28f881903" {
+	// margins for grid verification gave the digest sha256:1f903e42...1903; the
+	// snapshots that carried them still re-hash to sha256:206ca220...03e7 (see
+	// TestMarginEraSnapshotsKeepTheirDigestAndMargin). The x265 quality walk
+	// gave the digest below; snapshots frozen without the margins but before
+	// it re-hash to sha256:1f903e42...1903 (see
+	// TestPreWalkSnapshotsKeepTheirDigestAndSearch).
+	if hw.Digest != "sha256:ac41a174311afba39ec13ba20d9df6cfab95555097805812a4e4e571159180b4" {
 		t.Fatalf("size snapshot with the media engine on changed digest: %s", hw.Digest)
 	}
 	// The frozen snapshot round-trips through storage and re-verifies.
@@ -200,7 +203,7 @@ func TestSizeHardwareSearchRequest(t *testing.T) {
 	for _, depth := range []int{8, 10} {
 		// Nothing said is the default: allowed, at the default margin.
 		def := hardwareRequest(t, depth, 45*60, map[string]any{"mode": "size"}, hardwareTestCapabilities())
-		if def.HardwareSearch == nil || def.HardwareSearch.MarginPercent != 15 || len(def.Candidates) != 21 {
+		if def.HardwareSearch == nil || def.HardwareSearch.MarginPercent != 15 || len(def.Candidates) != 18 {
 			t.Fatalf("depth %d: default request %+v with %d candidates", depth, def.HardwareSearch, len(def.Candidates))
 		}
 		req := hardwareRequest(t, depth, 45*60, map[string]any{"mode": "size", "allow_hardware": true, "hardware_margin_percent": 20}, hardwareTestCapabilities())
@@ -221,8 +224,9 @@ func TestSizeHardwareSearchRequest(t *testing.T) {
 				x265++
 			}
 		}
-		// The x265 ladder and its fallback families are untouched.
-		if x265 != 14 || len(hardware) != 4 || len(fallback) != 3 {
+		// The x265 ladder and its fallback families are untouched (this worker
+		// does not take the quality walk; see TestQualityWalkRequest).
+		if x265 != 11 || len(hardware) != 4 || len(fallback) != 3 {
 			t.Fatalf("depth %d: %d x265, %d hardware and %d hardware fallback candidates", depth, x265, len(hardware), len(fallback))
 		}
 		if len(req.Candidates) > transcode.MaxAutomaticHardwareCandidates {
@@ -290,7 +294,7 @@ func TestSizeHardwareSearchWithoutFallbackCapability(t *testing.T) {
 	caps := hardwareTestCapabilities()
 	caps.HardwareFallbackSearch = false
 	req := hardwareRequest(t, 8, 45*60, map[string]any{"mode": "size"}, caps)
-	if req.HardwareSearch == nil || len(req.HardwareSearch.FallbackQualityValues) != 0 || len(req.Candidates) != 18 {
+	if req.HardwareSearch == nil || len(req.HardwareSearch.FallbackQualityValues) != 0 || len(req.Candidates) != 15 {
 		t.Fatalf("request %+v with %d candidates", req.HardwareSearch, len(req.Candidates))
 	}
 	for _, c := range req.Candidates {
@@ -469,14 +473,16 @@ func TestHardwareFallbackRulesValidation(t *testing.T) {
 		c.ID, c.Quality = fmt.Sprintf("extra-%d", n), 40+n
 		return c
 	}
-	room.Candidates = append(room.Candidates, extra(1))
+	for n := 1; len(room.Candidates) < transcode.MaxAutomaticHardwareCandidates; n++ {
+		room.Candidates = append(room.Candidates, extra(n))
+	}
 	if len(room.Candidates) != transcode.MaxAutomaticHardwareCandidates {
 		t.Fatalf("%d candidates, want the cap", len(room.Candidates))
 	}
 	if err := transcode.ValidateBenchmarkRequest(&room); err != nil {
 		t.Fatalf("candidates at the cap refused: %v", err)
 	}
-	room.Candidates = append(room.Candidates, extra(2))
+	room.Candidates = append(room.Candidates, extra(99))
 	if err := transcode.ValidateBenchmarkRequest(&room); err == nil || !strings.Contains(err.Error(), "candidates") {
 		t.Fatalf("%d candidates accepted: %v", len(room.Candidates), err)
 	}
