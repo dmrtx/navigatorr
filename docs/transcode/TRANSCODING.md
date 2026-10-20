@@ -328,6 +328,99 @@ the deployment's configuration management (for example, an Ansible role)
 rather than left to defaults. To opt out there, set
 `disable_source_cache: true`.
 
+## Sample evaluation cache
+
+A size-mode search measures each candidate on a few short sample windows
+(encode, then VMAF and optionally CAMBI against the reference). The same
+source, window and candidate always give bit-identical scores, so repeating
+that work after a cancel, a failed final check, a goal change or a retry only
+burns CPU. The worker therefore keeps a durable, bounded cache of those
+per-(candidate, window) evaluations and replays them in later runs.
+
+**Where.** On the worker, under `<local_work_dir>/_sample-cache/<key[:2]>/<key>.json`.
+The worker is the only place that knows the encoder and FFmpeg build, and
+VideoToolbox output is specific to the machine, so a key that is correct can
+only be formed there. A server-side store would have to trust measurements
+pushed back as selection input, which nothing could verify. Because the cache
+is worker-local there is no request field, no capability and no wire change:
+frozen snapshots and digests are untouched.
+
+**Granularity.** One entry per (candidate, window) unit, written the moment the
+unit finishes. The key does not mention the job, so entries are reused across
+stages of one search, across the jobs of one action (for example an x265
+continuation after a hardware winner failed) and across actions on the same
+source bytes. Only the modelled-VMAF measurement (optionally with CAMBI) is
+cached; SSIM paths and the legacy savings-pruned exhaustive path measure as
+before.
+
+**Key.** Hashed with SHA-256 and never stored or logged in clear:
+
+| Part | What goes in |
+| --- | --- |
+| Source | SHA-256 and size of the bytes; video stream index, bit depth, pixel format, resolution, frame rate, field order |
+| Window | index, start, duration, the reference-extraction arguments and the compact chain (including the tone-map table digest) |
+| Candidate | every encode parameter (codec, quality, preset, GOP, B-frames, profile, pixel format, bit depth, filters), with the candidate label cleared |
+| Metrics | VMAF model, temporal decimation, worst-window and frame-threshold policy, the VMAF and CAMBI filter arguments, CAMBI output |
+| Environment | worker capability fingerprint, FFmpeg build identity (binary hash, version, build configuration, libx265 version), and for `hevc_videotoolbox` the machine identity |
+
+Labels, job paths and thread counts are left out on purpose: x265 output is
+bit-identical across pool and frame threads and libvmaf scores do not depend
+on its thread count. A missing or invalid source hash, an unknown build or an
+unknown hardware identity disables caching for that unit; it is measured as
+before.
+
+**Value.** Sample size, encode seconds, the full VMAF statistics including the
+per-frame scores (pooled p5 and means are computed over frames, so they are
+required for an exact replay), and the CAMBI result. Each file is
+`{"body": ..., "sha256": ...}`. On load the checksum, schema, key echo, field
+ranges and the consistency of the frame scores with the statistics are all
+verified; any failure is a miss and the file is removed. Partial writes cannot
+be observed (temp file and rename), and CAMBI errors are never cached.
+
+**Bounds.** Defaults: 64 MiB, 20000 entries and 30 days since last use. A hit
+touches the file, so eviction is least-recently-used. A sweep (first store of a
+process, then every 64th) removes stale temp files, foreign files and expired
+entries and evicts the oldest down to 90% of both limits. Config:
+
+```yaml
+disable_sample_cache: false
+sample_cache_max_bytes: 67108864
+sample_cache_ttl_hours: 720
+```
+
+**Visibility.** Rows served from the cache carry `reused: true`; each candidate
+evaluation carries `reuse: {reused, total}`. The compact benchmark summary
+(MCP `action_status`) lists it as `reused` on the measured candidate and the UI
+appends "reused from an earlier run" (or "N of M samples reused from an earlier
+run") to the candidate's line. A reused measurement counts toward selection
+exactly like a fresh one. Fields are `omitempty`, so results without reuse
+serialise exactly as before.
+
+**Search budget.** Reused units cost no search-budget time: they are resolved
+without being counted as work, so they neither advance the elastic budget
+extension nor consume wall-clock beyond the few milliseconds of reading a file.
+Reference extraction still runs and still counts. Their original encode seconds
+are kept for estimates but excluded from phase-cost learning.
+
+**Holdout and verification.** The holdout windows of the verifying stage are
+ordinary deterministic per-(candidate, window) units; their independence comes
+from which windows are chosen, not from being fresh, so they are reused like any
+other. The post-encode checks (full-file validation and final-sample validation)
+are not cached: they validate the artifact produced in this run.
+
+**Compatibility and rollout.** Additive `omitempty` result fields and
+worker-local config only. The server decodes worker status leniently and the
+worker request is unchanged, so old and new are compatible in either order;
+deploy the worker and the server in any order. Any worker upgrade changes the
+capability fingerprint and so starts a cold cache.
+
+**Limitations.** A change in a dynamically linked library that alters neither
+the FFmpeg binary hash, the libx265 banner nor the libvmaf version is not
+detected; the TTL and clearing the directory bound that exposure. Comparison
+images need the winner's sample files, so they are unavailable when the winner
+was reused. Reference samples are still extracted on a hit (lazy extraction is
+a possible follow-up).
+
 ## Benchmark-driven optimization (recipes v2)
 
 Profiles without `optimization` follow the legacy flow with no observable change. A profile with `optimization.enabled: true` (schema_version 2) instead probes a small set of encoder configurations over deterministic source samples, scores them objectively, and transcodes the full file only with the concrete winning parameters.

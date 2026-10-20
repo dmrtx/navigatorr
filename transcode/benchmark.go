@@ -215,6 +215,17 @@ type BenchmarkCandidateEvaluation struct {
 	// VMAF is the measured distribution behind Score, kept with the decision
 	// so later reviews can compare rounds without the transient worker status.
 	VMAF *BenchmarkVMAFSummary `json:"vmaf,omitempty"`
+	// Reuse is set only when some of this candidate's sample measurements were
+	// replayed from the worker's sample cache instead of measured in this run.
+	// Replayed samples count toward selection exactly like measured ones.
+	Reuse *BenchmarkSampleReuse `json:"reuse,omitempty"`
+}
+
+// BenchmarkSampleReuse counts a candidate's sample windows replayed from an
+// earlier measurement of the same source bytes, out of all its sample windows.
+type BenchmarkSampleReuse struct {
+	Reused int `json:"reused"`
+	Total  int `json:"total"`
 }
 
 // BenchmarkVMAFSummary is one candidate's pooled VMAF over its sampled frames.

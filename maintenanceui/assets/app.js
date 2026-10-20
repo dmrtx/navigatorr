@@ -3692,7 +3692,7 @@ function benchmarkReport(job) {
   }
   if (b.measured?.length) {
     const list = node("ul", "", "benchmark-list");
-    for (const m of b.measured) list.append(node("li", `${benchmarkCandidateLabel({...m, id: m.candidate_id})} · ${vmafSummaryLabel(m.vmaf)} · ${m.selected ? "selected" : m.passed ? "passed" : "did not pass"}`));
+    for (const m of b.measured) list.append(node("li", `${benchmarkCandidateLabel({...m, id: m.candidate_id})} · ${vmafSummaryLabel(m.vmaf)} · ${m.selected ? "selected" : m.passed ? "passed" : "did not pass"}${reusedLabel(m.reused)}`));
     box.append(node("p", "Measured quality per setting:", "metadata"), list);
   }
   if (b.rejected?.length) {
@@ -3722,6 +3722,12 @@ function benchmarkReport(job) {
     box.append(next);
   }
   return box;
+}
+// Samples replayed from an earlier run on the same source still count toward
+// the result; the label only says they were not measured again.
+function reusedLabel(reuse) {
+  if (!reuse?.reused) return "";
+  return reuse.reused >= reuse.total ? " · reused from an earlier run" : ` · ${reuse.reused} of ${reuse.total} samples reused from an earlier run`;
 }
 // plan_source/plan_note arrive only once the search settled which settings the
 // encode uses; a provisional preflight plan is never presented as a result.

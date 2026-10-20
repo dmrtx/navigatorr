@@ -235,6 +235,40 @@ func TestCompactBenchmarkListsMeasuredVMAFPerCandidate(t *testing.T) {
 	}
 }
 
+// A candidate measured from the worker's sample cache is marked as reused so
+// the person and the agent can tell it was not measured in this run.
+func TestCompactBenchmarkMarksReusedMeasurements(t *testing.T) {
+	vmaf := &quality.VMAFStats{Mean: 94.8, P5: 91.5, Min: 90.3, WorstWindowMean: 92.8, FramesTotal: 716}
+	res := &action.ActionResult{ActionName: "transcode_media", Status: action.StatusCompleted, State: map[string]any{
+		"optimization_enabled": true,
+		"benchmark_decision": transcode.BenchmarkDecision{DecisionReason: "no_candidate_met_minimum", Evaluations: []transcode.BenchmarkCandidateEvaluation{
+			{CandidateID: "crf16", VideoCodec: "libx265", Quality: 16, Reuse: &transcode.BenchmarkSampleReuse{Reused: 3, Total: 3}},
+			{CandidateID: "crf18", VideoCodec: "libx265", Quality: 18, Reuse: &transcode.BenchmarkSampleReuse{Reused: 1, Total: 3}},
+			{CandidateID: "crf20", VideoCodec: "libx265", Quality: 20},
+		}},
+		"benchmark_quality": []transcode.BenchmarkCandidateQualityEvidence{
+			{CandidateID: "crf16", VMAF: vmaf}, {CandidateID: "crf18", VMAF: vmaf}, {CandidateID: "crf20", VMAF: vmaf},
+		},
+	}}
+	s := compactBenchmark(res)
+	if s == nil || len(s.Measured) != 3 {
+		t.Fatalf("measured candidates missing: %+v", s)
+	}
+	if r := s.Measured[0].Reused; r == nil || r.Reused != 3 || r.Total != 3 {
+		t.Fatalf("fully reused candidate not marked: %+v", s.Measured[0])
+	}
+	if r := s.Measured[1].Reused; r == nil || r.Reused != 1 || r.Total != 3 {
+		t.Fatalf("partly reused candidate not marked: %+v", s.Measured[1])
+	}
+	if s.Measured[2].Reused != nil {
+		t.Fatalf("freshly measured candidate marked as reused: %+v", s.Measured[2])
+	}
+	raw, err := json.Marshal(s.Measured[2])
+	if err != nil || strings.Contains(string(raw), "reused") {
+		t.Fatalf("a fresh measurement must serialise exactly as before: %s %v", raw, err)
+	}
+}
+
 // A media engine winner reports why it was chosen next to its encoder; an
 // x265 winner, or one without a recorded reason, reports none.
 func TestCompactBenchmarkReportsWhyTheMediaEngineWon(t *testing.T) {

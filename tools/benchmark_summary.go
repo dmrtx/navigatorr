@@ -55,6 +55,10 @@ type benchmarkMeasured struct {
 	Passed             bool                            `json:"passed"`
 	Selected           bool                            `json:"selected,omitempty"`
 	VMAF               *transcode.BenchmarkVMAFSummary `json:"vmaf"`
+	// Reused is set when some of this setting's sample measurements were
+	// replayed from an earlier run on the same source bytes. They count toward
+	// selection exactly like fresh ones.
+	Reused *transcode.BenchmarkSampleReuse `json:"reused,omitempty"`
 }
 
 type benchmarkCheck struct {
@@ -202,7 +206,7 @@ func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
 			if ev.VMAF == nil || len(s.Measured) >= transcode.MaxBenchmarkCandidates {
 				continue
 			}
-			s.Measured = append(s.Measured, benchmarkMeasured{CandidateID: ev.CandidateID, VideoCodec: ev.VideoCodec, Quality: ev.Quality, Preset: ev.Preset, AverageBitrateKbps: ev.AverageBitrateKbps, Passed: ev.Eligible, Selected: decision.Winner != nil && decision.Winner.CandidateID == ev.CandidateID, VMAF: ev.VMAF})
+			s.Measured = append(s.Measured, benchmarkMeasured{CandidateID: ev.CandidateID, VideoCodec: ev.VideoCodec, Quality: ev.Quality, Preset: ev.Preset, AverageBitrateKbps: ev.AverageBitrateKbps, Passed: ev.Eligible, Selected: decision.Winner != nil && decision.Winner.CandidateID == ev.CandidateID, VMAF: ev.VMAF, Reused: ev.Reuse})
 		}
 		s.Selection = decision.Selection
 		if decision.Winner != nil && transcode.BenchmarkCandidateVideoCodec(transcode.BenchmarkCandidate{VideoCodec: decision.Winner.VideoCodec}) == transcode.VideoCodecHEVCVideoToolbox {
