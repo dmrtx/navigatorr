@@ -265,6 +265,11 @@ type ProductionBenchmarkRunner struct {
 	// capabilityFingerprint replaces the capability probe a continued search
 	// uses to decide whether the earlier search's measurements still apply.
 	capabilityFingerprint func(context.Context, *Worker) (string, error)
+	// pipelineStageHook, when set, is told when the pipelined encode/metric
+	// workers have drained ("measured"), before deferred banding starts. Tests
+	// use it to end the context at the one point where no worker has recorded
+	// a failure yet.
+	pipelineStageHook func(stage string)
 }
 
 // SetMetricsHook sets an optional metrics callback for Phase 5 integration before scratch cleanup.

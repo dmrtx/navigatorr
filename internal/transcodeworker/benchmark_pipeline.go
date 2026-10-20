@@ -402,6 +402,9 @@ func (r *ProductionBenchmarkRunner) runPipelinedEncodeMetrics(
 		}
 	}
 
+	if r.pipelineStageHook != nil {
+		r.pipelineStageHook("measured")
+	}
 	if sh.deferCAMBI && !fatal.failed() && ctx.Err() == nil {
 		sh.runDeferredCAMBI(ctx, metricN)
 	}

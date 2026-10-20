@@ -516,6 +516,21 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 		automatic.WinnerWindows = winnerWindowScores(record, evidence, p.vc.candidate.ID)
 		finish()
 	}
+	// stoppedByTimeLimit turns the search budget's stop into an orderly end of
+	// a verify-until-exhausted search: whatever was already verified is kept,
+	// the stage that was cut short is marked, and the time cap is recorded. Any
+	// other error (and any stop of a search that does not verify until
+	// exhausted) is left to the caller to return.
+	stoppedByTimeLimit := func(err error) bool {
+		if !untilExhausted || !searchTimeLimitReached(ctx, err) {
+			return false
+		}
+		if n := len(automatic.Stages); n > 0 && automatic.Stages[n-1].Outcome == "running" {
+			automatic.Stages[n-1].Outcome = "stopped"
+		}
+		verification.StoppedBy = transcode.VerificationStoppedTimeCap
+		return true
+	}
 	for attempt := 0; untilExhausted || attempt < 2; attempt++ {
 		var id, role string
 		qualityFailedNow := false
@@ -570,11 +585,7 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 			holdout.bandingGate = bandingGateMonotone
 		}
 		if err := run(phaseVerifyingSamples, &holdout, []validatedCandidate{winner}); err != nil {
-			if untilExhausted && searchTimeLimitReached(ctx, err) {
-				// The limit fell inside this attempt: it measured part of the
-				// windows, so the setting stays unverified.
-				automatic.Stages[len(automatic.Stages)-1].Outcome = "stopped"
-				verification.StoppedBy = transcode.VerificationStoppedTimeCap
+			if stoppedByTimeLimit(err) {
 				break
 			}
 			return err
@@ -583,17 +594,13 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 			longest = d
 		}
 		if err := mergeAutomaticQuality(ctx, record, evidence, winner); err != nil {
-			if untilExhausted && searchTimeLimitReached(ctx, err) {
-				automatic.Stages[len(automatic.Stages)-1].Outcome = "stopped"
-				verification.StoppedBy = transcode.VerificationStoppedTimeCap
+			if stoppedByTimeLimit(err) {
 				break
 			}
 			return err
 		}
 		if err := r.runSelection(ctx, record, evidence, []validatedCandidate{winner}, rep, sourceSize); err != nil {
-			if untilExhausted && searchTimeLimitReached(ctx, err) {
-				automatic.Stages[len(automatic.Stages)-1].Outcome = "stopped"
-				verification.StoppedBy = transcode.VerificationStoppedTimeCap
+			if stoppedByTimeLimit(err) {
 				break
 			}
 			return err
@@ -658,9 +665,7 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 			if len(todo) > 0 {
 				measured, err := measure("testing_alternatives", &discovery, todo, false)
 				if err != nil {
-					if untilExhausted && searchTimeLimitReached(ctx, err) {
-						automatic.Stages[len(automatic.Stages)-1].Outcome = "stopped"
-						verification.StoppedBy = transcode.VerificationStoppedTimeCap
+					if stoppedByTimeLimit(err) {
 						break
 					}
 					return err
@@ -669,6 +674,9 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 			}
 		}
 		if err := r.runSelection(ctx, &discovery, evidence, remaining, rep, sourceSize); err != nil {
+			if stoppedByTimeLimit(err) {
+				break
+			}
 			return err
 		}
 		tested = remaining
@@ -679,6 +687,9 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 		// search that already verified a setting has no use for a fallback.
 		if passed == nil && (attempt == 0 || untilExhausted) && (evidence.Decision.Winner == nil || attempt == 0 && (rules == nil || !preferSafest)) {
 			if err := runFallback(); err != nil {
+				if stoppedByTimeLimit(err) {
+					break
+				}
 				return err
 			}
 		}

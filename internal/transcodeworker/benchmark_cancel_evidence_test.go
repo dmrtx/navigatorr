@@ -178,9 +178,18 @@ func TestAutomaticVerificationCancelledByBudgetIsNotMissingSample(t *testing.T) 
 				t.Fatalf("a budget stop was reported as missing evidence: %v", err)
 			}
 			if untilExhausted {
-				// A graceful stop may return a result with the time cap recorded.
-				if err == nil && (evidence.Automatic == nil || evidence.Automatic.Verification == nil || evidence.Automatic.Verification.StoppedBy != transcode.VerificationStoppedTimeCap) {
+				// Verifying until exhausted ends in an orderly result, never an
+				// error: the time cap is recorded, and with nothing verified yet
+				// the result says so instead of claiming a winner. (A winner that
+				// was already verified is kept: see TestVerifyUntilExhaustedKeepsAVerifiedWinnerWhereverTheStopFalls.)
+				if err != nil {
+					t.Fatalf("a time-limited search must end in a result, got %v", err)
+				}
+				if evidence.Automatic == nil || evidence.Automatic.Verification == nil || evidence.Automatic.Verification.StoppedBy != transcode.VerificationStoppedTimeCap {
 					t.Fatalf("stopped search did not record the time cap: %+v", evidence.Automatic)
+				}
+				if evidence.Decision == nil || evidence.Decision.Winner != nil || evidence.Decision.DecisionReason != "no_verified_candidate" {
+					t.Fatalf("nothing was verified, yet the result claims %+v", evidence.Decision)
 				}
 				return
 			}
