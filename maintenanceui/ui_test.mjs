@@ -2927,6 +2927,16 @@ test("sample test results explain each rejected setting with its measurement and
   assert.match(allText(larger.report), /6\.3% larger.*Next step:\s+Keep the original/);
 });
 
+test("size mode details keep the failed media engine attempt beside the x265 result", () => {
+  const h = harness();
+  const text = allText(h.run('sizeModeNote({size_mode:{encoder:"libx265",final_quality:{vmaf_mean:94,vmaf_p5:88},hardware_continuation:{outcome:"continued",message:"The VideoToolbox result failed the final quality check; continued with x265.",failed_quality:{vmaf_mean:93,vmaf_p5:80.2,worst_window_mean:88.1,worst_window_seconds:10,failures:["VMAF p5 80.2 is below the minimum 84.0"]}}}})'));
+  assert.match(text, /failed the final quality check; continued with x265/);
+  assert.match(text, /VideoToolbox final VMAF 93\.0 mean · 80\.2 p5 · 88\.1 worst 10 s window/);
+  assert.match(text, /Failed: VMAF p5 80\.2 is below the minimum 84\.0/);
+  assert.match(text, /Final VMAF 94\.0 mean · 88\.0 p5/);
+  assert.match(allText(h.run('sizeModeNote({size_mode:{final_quality:{vmaf_mean:91,vmaf_p5:82,failed_checks:["quality_vmaf_p5_below_minimum"]}}})')), /Failed checks: vmaf p5 below minimum/);
+});
+
 test("size mode details show the expected size, final VMAF and compacted audio", () => {
   const h = harness();
   const text = allText(h.run('sizeModeNote({size_mode:{expected_bytes:2150000000,main10:true,final_quality:{vmaf_mean:93.44,vmaf_p5:89.12,worst_window_mean:88.04,worst_window_seconds:10},compacted_audio:[{stream_index:0,from_codec:"dts",to_codec:"aac"},{stream_index:2,from_codec:"pcm_s24le",to_codec:"aac"}]}})'));

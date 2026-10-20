@@ -3745,8 +3745,20 @@ function sizeModeLines(size) {
   // Why the media engine result was chosen over x265, as the search recorded it.
   if (size.hardware && size.hardware_reason) lines.push(`Chosen because: ${size.hardware_reason}`);
   if (size.video_copy) lines.push({verified: "Video copied unchanged · verified bit-identical", failed: "Video copy check failed · original kept"}[size.video_copy] || "Video will be copied unchanged · not yet verified; only lossless audio is compacted");
+  // A media engine result that failed the whole-file check, and what followed;
+  // the failed attempt's numbers stay here after the x265 result takes over.
+  const hc = size.hardware_continuation;
+  if (hc) {
+    if (hc.message) lines.push(hc.message);
+    const f = hc.failed_quality;
+    if (f) {
+      if (f.vmaf_mean != null) lines.push(`VideoToolbox final VMAF ${Number(f.vmaf_mean).toFixed(1)} mean · ${f.vmaf_p5 != null ? Number(f.vmaf_p5).toFixed(1) : "n/a"} p5${f.worst_window_mean != null ? ` · ${Number(f.worst_window_mean).toFixed(1)} worst ${Math.round(f.worst_window_seconds || 0)} s window` : ""}`);
+      for (const failure of f.failures || []) lines.push(`Failed: ${failure}`);
+    }
+  }
   const q = size.final_quality;
   if (q) lines.push(`Final VMAF ${Number(q.vmaf_mean).toFixed(1)} mean · ${q.vmaf_p5 != null ? Number(q.vmaf_p5).toFixed(1) : "n/a"} p5${q.worst_window_mean != null ? ` · ${Number(q.worst_window_mean).toFixed(1)} worst ${Math.round(q.worst_window_seconds || 0)} s window` : ""}`);
+  if (q?.failed_checks?.length) lines.push(`Failed checks: ${q.failed_checks.map(code => String(code).replace(/^quality_/, "").replace(/_/g, " ")).join(", ")}`);
   const audio = size.compacted_audio || [];
   // Size mode converts DTS only when the profile is DTS-HD MA.
   if (audio.length) lines.push(`Audio compacted: ${audio.map(a => `track ${a.stream_index + 1} ${a.from_codec === "dts" ? "DTS-HD MA" : codecLabel(a.from_codec)} → ${codecLabel(a.to_codec)}`).join(", ")}`);

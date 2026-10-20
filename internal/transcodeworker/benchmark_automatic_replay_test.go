@@ -93,8 +93,8 @@ func runReplayLadder(t *testing.T, settings map[string]replaySetting, sourceByte
 	return runReplayHardware(t, settings, sourceBytes, rules, nil, ladder)
 }
 
-func runReplayHardware(t *testing.T, settings map[string]replaySetting, sourceBytes int64, rules *transcode.AutomaticSearchRules, hardware *transcode.HardwareSearchRules, ladder []validatedCandidate) replayResult {
-	t.Helper()
+// replayBenchmarkRecord is the search record the replay runs under.
+func replayBenchmarkRecord(rules *transcode.AutomaticSearchRules, hardware *transcode.HardwareSearchRules) *BenchmarkRecord {
 	p5, worst := 84.0, 85.0
 	record := &BenchmarkRecord{Mode: "size", ModePolicyVersion: optimization.ModePolicyV3, Automatic: true, QualityPruning: true, AutomaticSearch: rules, HardwareSearch: hardware, Metric: "vmaf", SourceDuration: 600,
 		Quality: &transcode.BenchmarkQualityConfig{VMAF: &transcode.BenchmarkQualityThresholds{Model: "v1_1080p_3h", Target: 92, Minimum: 88, P5Minimum: &p5, WorstWindowMinimum: &worst, WorstWindowSeconds: 4, GuardrailEnforcement: "reject"}}}
@@ -107,12 +107,18 @@ func runReplayHardware(t *testing.T, settings map[string]replaySetting, sourceBy
 	for i, c := range centers {
 		record.Samples = append(record.Samples, transcode.BenchmarkSampleWindow{Index: i, StartSeconds: c - 5, DurationSeconds: 10, CenterSeconds: c})
 	}
+	return record
+}
+
+// replayAutomaticHook replays the recorded settings in place of the encoders,
+// noting what it measures and verifies in res.
+func replayAutomaticHook(t *testing.T, settings map[string]replaySetting, res *replayResult) func(context.Context, *BenchmarkRecord, *BenchmarkExecutionEvidence, []validatedCandidate) error {
+	t.Helper()
 	model, err := quality.Model("v1_1080p_3h")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var res replayResult
-	runner := &ProductionBenchmarkRunner{automaticHook: func(_ context.Context, stage *BenchmarkRecord, e *BenchmarkExecutionEvidence, candidates []validatedCandidate) error {
+	return func(_ context.Context, stage *BenchmarkRecord, e *BenchmarkExecutionEvidence, candidates []validatedCandidate) error {
 		for _, vc := range candidates {
 			key := replayKey(vc.candidate.Preset, vc.candidate.Quality)
 			s, ok := settings[key]
@@ -162,7 +168,14 @@ func runReplayHardware(t *testing.T, settings map[string]replaySetting, sourceBy
 			}
 		}
 		return nil
-	}}
+	}
+}
+
+func runReplayHardware(t *testing.T, settings map[string]replaySetting, sourceBytes int64, rules *transcode.AutomaticSearchRules, hardware *transcode.HardwareSearchRules, ladder []validatedCandidate) replayResult {
+	t.Helper()
+	record := replayBenchmarkRecord(rules, hardware)
+	var res replayResult
+	runner := &ProductionBenchmarkRunner{automaticHook: replayAutomaticHook(t, settings, &res)}
 	evidence := &BenchmarkExecutionEvidence{SourceBitDepth: 8}
 	progress := newBenchmarkProgressReporter(nil, record, 100)
 	rep := mediainspect.DetailedReport{DurationSec: 600, Video: []mediainspect.DetailedStream{{BitDepth: 8, FPS: 25}}}

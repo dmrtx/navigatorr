@@ -16,6 +16,8 @@ func hardwareTestCapabilities() transcode.WorkerCapabilities {
 	caps := rulesTestCapabilities()
 	caps.HardwareSearch = true
 	caps.HardwareFallbackSearch = true
+	caps.HardwareSelectionMargin = true
+	caps.SearchContinuation = true
 	caps.Encoders[transcode.VideoCodecHEVCVideoToolbox] = true
 	return caps
 }
@@ -40,6 +42,9 @@ func TestSizePolicyHardwareDefaultsOnAndFreezes(t *testing.T) {
 	if err != nil || rules == nil {
 		t.Fatalf("rules %+v %v", rules, err)
 	}
+	if rules.ExtraSelectionMarginVMAF != sizeHardwareExtraMarginVMAF || sizeHardwareExtraMarginVMAF != 2 {
+		t.Fatalf("default hardware selection margin %+v", rules)
+	}
 	if rules.MarginPercent != 15 || rules.GOPSize != 240 || rules.BFrames != 1 || len(rules.QualityValues) != 4 || rules.QualityValues[0] != 45 || rules.QualityValues[3] != 60 {
 		t.Fatalf("default rules %+v", rules)
 	}
@@ -55,11 +60,15 @@ func TestSizePolicyHardwareDefaultsOnAndFreezes(t *testing.T) {
 	}
 	// The default snapshot is a frozen artifact: changing its rules, their order
 	// or their defaults changes the digest of every new size operation.
-	// Adding the higher-quality fallback rungs gave new snapshots the digest
-	// below. Snapshots frozen with the media engine before it carry no such
-	// field and still re-hash to sha256:bc2e370b...e03 (see
-	// TestHardwarePolicyWithoutFallbackRungsKeepsItsDigest).
-	if hw.Digest != "sha256:1b73a704427a9c6a89a9ae36079422c842de9cbd799fa48f634d54d1a3b7ead6" {
+	// Adding the higher-quality fallback rungs gave new snapshots a digest;
+	// snapshots frozen with the media engine before it carry no such field and
+	// still re-hash to sha256:bc2e370b...e03 (see
+	// TestHardwarePolicyWithoutFallbackRungsKeepsItsDigest). The stricter
+	// hardware selection margin gave new snapshots the digest below; those
+	// frozen with the rungs but without it still re-hash to sha256:1b73a704...ad6
+	// and keep selecting with the margin they were frozen with (see
+	// TestHardwarePolicyWithoutExtraMarginKeepsItsDigest).
+	if hw.Digest != "sha256:e5ec773de13a1eab8d1b3e9bc087f0583316221625cc310d463fca137ecd4264" {
 		t.Fatalf("size snapshot with the media engine on changed digest: %s", hw.Digest)
 	}
 	// The frozen snapshot round-trips through storage and re-verifies.
@@ -292,6 +301,76 @@ func TestSizeHardwareSearchWithoutFallbackCapability(t *testing.T) {
 // Rules frozen with the media engine before the fallback rungs existed have no
 // such field: they re-hash to the digest they were frozen under and stay on the
 // ladder alone.
+// A snapshot frozen with the fallback rungs but before the stricter hardware
+// selection margin keeps its digest and its margin: only new operations select
+// hardware results with the extra margin.
+func TestHardwarePolicyWithoutExtraMarginKeepsItsDigest(t *testing.T) {
+	rules := &transcode.HardwareSearchRules{MarginPercent: 15, QualityValues: []int{45, 50, 55, 60}, GOPSize: 240, BFrames: 1, FallbackQualityValues: []int{65, 70, 75}}
+	p, err := modePolicyWithHardware("size", false, 0, rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Digest != "sha256:1b73a704427a9c6a89a9ae36079422c842de9cbd799fa48f634d54d1a3b7ead6" {
+		t.Fatalf("the earlier media engine snapshot changed digest: %s", p.Digest)
+	}
+	if hb, _ := json.Marshal(p.Size.Hardware); strings.Contains(string(hb), "extra_selection_margin") {
+		t.Fatalf("frozen hardware rules mention the extra margin: %s", hb)
+	}
+	stored := map[string]any{}
+	b, _ := json.Marshal(p)
+	_ = json.Unmarshal(b, &stored)
+	ec := &ExecutionContext{InstanceID: "hw-earlier-margin", Inputs: map[string]any{"mode": "size"}, State: map[string]any{"mode_policy": stored}}
+	kept, err := freezeModePolicy(ec)
+	if err != nil || kept.Digest != p.Digest || kept.Size.Hardware.ExtraSelectionMarginVMAF != 0 {
+		t.Fatalf("an earlier snapshot picked up the extra margin: %+v %v", kept, err)
+	}
+	// It is sent without the field, so any worker accepts it.
+	ec.State["original_sha256"] = strings.Repeat("a", 64)
+	caps := hardwareTestCapabilities()
+	caps.HardwareSelectionMargin = false
+	req := hardwareRequestFromState(t, ec, caps)
+	if req.HardwareSearch == nil || req.HardwareSearch.ExtraSelectionMarginVMAF != 0 {
+		t.Fatalf("an earlier snapshot sent the extra margin: %+v", req.HardwareSearch)
+	}
+}
+
+// A new snapshot carries the extra margin, which a worker that cannot apply it
+// must never be sent: the search is x265 only instead.
+func TestHardwareExtraMarginNeedsWorkerSupport(t *testing.T) {
+	policy, err := modePolicyWithHardware("size", false, 0, mustHardwareRules(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := map[string]any{}
+	b, _ := json.Marshal(policy)
+	_ = json.Unmarshal(b, &stored)
+	ec := &ExecutionContext{InstanceID: "hw-margin-caps", Inputs: map[string]any{"mode": "size"}, State: map[string]any{"mode_policy": stored, "original_sha256": strings.Repeat("a", 64)}}
+	caps := hardwareTestCapabilities()
+	req := hardwareRequestFromState(t, ec, caps)
+	if req.HardwareSearch == nil || req.HardwareSearch.ExtraSelectionMarginVMAF != 2 {
+		t.Fatalf("a new snapshot did not send the extra margin: %+v", req.HardwareSearch)
+	}
+	caps.HardwareSelectionMargin = false
+	req = hardwareRequestFromState(t, ec, caps)
+	if req.HardwareSearch != nil {
+		t.Fatalf("a worker without the margin was sent hardware candidates: %+v", req.HardwareSearch)
+	}
+	for _, c := range req.Candidates {
+		if c.VideoCodec == transcode.VideoCodecHEVCVideoToolbox {
+			t.Fatalf("a worker without the margin was sent %s", c.ID)
+		}
+	}
+}
+
+func mustHardwareRules(t *testing.T) *transcode.HardwareSearchRules {
+	t.Helper()
+	rules, err := modeHardwareInput("size", map[string]any{})
+	if err != nil || rules == nil {
+		t.Fatalf("rules %+v %v", rules, err)
+	}
+	return rules
+}
+
 func TestHardwarePolicyWithoutFallbackRungsKeepsItsDigest(t *testing.T) {
 	rules := &transcode.HardwareSearchRules{MarginPercent: 15, QualityValues: []int{45, 50, 55, 60}, GOPSize: 240, BFrames: 1}
 	p, err := modePolicyWithHardware("size", false, 0, rules)

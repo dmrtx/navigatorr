@@ -42,6 +42,7 @@ type BenchmarkRecord struct {
 	SearchExtension           *transcode.SearchExtension            `json:"search_extension,omitempty"`
 	AutomaticSearch           *transcode.AutomaticSearchRules       `json:"automatic_search,omitempty"`
 	HardwareSearch            *transcode.HardwareSearchRules        `json:"hardware_search,omitempty"`
+	ContinuesBenchmark        *transcode.BenchmarkContinuation      `json:"continues_benchmark,omitempty"`
 	SearchWorkerBusy          bool                                  `json:"search_worker_busy,omitempty"`
 	SearchStartedAt           time.Time                             `json:"search_started_at,omitzero"`
 	ReasonCode                string                                `json:"reason_code,omitempty"`
@@ -462,7 +463,7 @@ func (w *Worker) BenchmarkSubmit(ctx context.Context, req transcode.BenchmarkReq
 	}
 
 	record := &BenchmarkRecord{
-		ModePolicyVersion: req.ModePolicyVersion, Automatic: req.Automatic, QualityPruning: req.QualityPruning, MinSavingsPercent: req.MinSavingsPercent, Mode: req.Mode, SearchDeadline: req.SearchDeadline, SearchBudgetSeconds: req.SearchBudgetSeconds, SearchExtension: req.SearchExtension.Clone(), AutomaticSearch: req.AutomaticSearch.Clone(), HardwareSearch: req.HardwareSearch.Clone(),
+		ModePolicyVersion: req.ModePolicyVersion, Automatic: req.Automatic, QualityPruning: req.QualityPruning, MinSavingsPercent: req.MinSavingsPercent, Mode: req.Mode, SearchDeadline: req.SearchDeadline, SearchBudgetSeconds: req.SearchBudgetSeconds, SearchExtension: req.SearchExtension.Clone(), AutomaticSearch: req.AutomaticSearch.Clone(), HardwareSearch: req.HardwareSearch.Clone(), ContinuesBenchmark: cloneContinuation(req.ContinuesBenchmark),
 		Allow8BitTo10Bit:          req.Allow8BitTo10Bit,
 		Compact:                   req.Compact.Clone(),
 		ProtocolVersion:           transcode.WorkerProtocolVersion,
@@ -1135,4 +1136,12 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) 
 	}
 
 	return nil
+}
+
+func cloneContinuation(c *transcode.BenchmarkContinuation) *transcode.BenchmarkContinuation {
+	if c == nil {
+		return nil
+	}
+	clone := *c
+	return &clone
 }

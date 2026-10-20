@@ -49,6 +49,10 @@ type StepResult struct {
 	WaitingCondition string          `json:"waiting_condition,omitempty"`
 	WaitingOptions   []WaitingOption `json:"waiting_options,omitempty"`
 	Error            string          `json:"error,omitempty"`
+	// RewindTo names a step of the template the action continues from after
+	// this completed step, instead of the next one. It is how an action repeats
+	// its search; the step that sets it has already reset the state it repeats.
+	RewindTo string `json:"rewind_to,omitempty"`
 }
 
 // ExecutionContext carries live state, inputs, outputs, and dependencies across steps

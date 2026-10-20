@@ -1062,7 +1062,17 @@ func (e *Engine) execute(ctx context.Context, inst *store.ActionInstance, ec *Ex
 			stepStatus = StepSkipped
 		}
 
-		inst.CurrentStep = stepIdx + 1
+		next := stepIdx + 1
+		if res.RewindTo != "" {
+			// Only a step that precedes this one can be repeated, so a rewind
+			// cannot skip ahead.
+			target := actionStepIndex(tmpl, res.RewindTo)
+			if target < 0 || target > stepIdx {
+				return nil, fmt.Errorf("step %s cannot rewind to %q", step.Name, res.RewindTo)
+			}
+			next = target
+		}
+		inst.CurrentStep = next
 		inst.StateJSON = toJSON(ec.State)
 		inst.OutputsJSON = toJSON(ec.Outputs)
 		if saveErr := e.updateInstance(ctx, inst); saveErr != nil {
@@ -1078,6 +1088,8 @@ func (e *Engine) execute(ctx context.Context, inst *store.ActionInstance, ec *Ex
 			Status:      string(stepStatus),
 			DurationMs:  durationMs,
 		})
+		// The loop advances after this iteration.
+		stepIdx = next - 1
 	}
 
 	// All steps finished

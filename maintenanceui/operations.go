@@ -210,7 +210,41 @@ func operationSizeMode(r operationRecord) map[string]any {
 			final["worst_window_mean"] = worst
 			final["worst_window_seconds"] = operationNumber(vmaf["worst_window_seconds"])
 		}
+		// Which full-file checks the result failed, so a rejected result names
+		// the metric and not only the verdict.
+		if codes, _ := operationMap(operationValue(r, "quality_evidence"))["reason_codes"].([]any); len(codes) > 0 {
+			final["failed_checks"] = codes
+		}
 		out["final_quality"] = final
+	}
+	// A VideoToolbox result that failed the full-file check and the x265
+	// search that followed: the failed attempt's numbers stay visible after
+	// the x265 result replaces its evidence.
+	if hc := operationMap(r.state["hardware_continuation"]); operationString(hc["outcome"]) != "" {
+		note := map[string]any{"outcome": hc["outcome"], "message": operationString(hc["message"])}
+		if id := operationString(hc["failed_candidate_id"]); id != "" {
+			note["failed_candidate_id"] = id
+		}
+		if final := operationMap(hc["final"]); final != nil {
+			failed := map[string]any{}
+			measured := operationMap(final["measured"])
+			for from, to := range map[string]string{"vmaf_mean": "vmaf_mean", "vmaf_p5": "vmaf_p5", "vmaf_worst_window": "worst_window_mean"} {
+				if measured[from] != nil {
+					failed[to] = operationNumber(measured[from])
+				}
+			}
+			if limits := operationMap(final["limits"]); limits != nil && limits["worst_window_seconds"] != nil {
+				failed["worst_window_seconds"] = operationNumber(limits["worst_window_seconds"])
+			}
+			if checks, _ := final["failed_checks"].([]any); len(checks) > 0 {
+				failed["failed_checks"] = checks
+			}
+			if failures, _ := final["failures"].([]any); len(failures) > 0 {
+				failed["failures"] = failures
+			}
+			note["failed_quality"] = failed
+		}
+		out["hardware_continuation"] = note
 	}
 	audio := []map[string]any{}
 	conversions, _ := operationValue(r, "conversions").([]any)

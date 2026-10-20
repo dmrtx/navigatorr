@@ -246,6 +246,9 @@ type ProductionBenchmarkRunner struct {
 	automaticHook func(context.Context, *BenchmarkRecord, *BenchmarkExecutionEvidence, []validatedCandidate) error
 	metricsHook   func(ctx context.Context, w *Worker, record *BenchmarkRecord, evidence *BenchmarkExecutionEvidence) error
 	selectionHook func(ctx context.Context, w *Worker, record *BenchmarkRecord, evidence *BenchmarkExecutionEvidence) error
+	// capabilityFingerprint replaces the capability probe a continued search
+	// uses to decide whether the earlier search's measurements still apply.
+	capabilityFingerprint func(context.Context, *Worker) (string, error)
 }
 
 // SetMetricsHook sets an optional metrics callback for Phase 5 integration before scratch cleanup.
@@ -1597,7 +1600,7 @@ func (r *ProductionBenchmarkRunner) runSelection(
 		}
 		// A size search under automatic rules selects only results that
 		// clear the VMAF guardrails by its frozen margin.
-		if candAgg.Valid && candAgg.MetricType == optimization.MetricTypeVMAF && selectionMarginNotMet(record, evidence, vc.candidate.ID) {
+		if candAgg.Valid && candAgg.MetricType == optimization.MetricTypeVMAF && selectionMarginNotMet(record, evidence, vc.candidate.ID, vc.candidate.VideoCodec) {
 			candAgg.Valid = false
 			candAgg.IneligibleReason = reasonSelectionMarginNotMet
 		}
