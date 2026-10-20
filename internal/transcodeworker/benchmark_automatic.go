@@ -171,23 +171,28 @@ func ruledOutByQualityFailure(vc validatedCandidate, failed []validatedCandidate
 }
 
 // selectionMarginNotMet reports a candidate whose VMAF p5 or worst-window mean
-// clears its minimum by less than the frozen selection margin. It reads the
+// clears its minimum by less than the frozen selection margin (a hardware
+// candidate's margin is larger by the frozen extra). It reads the
 // candidate's latest quality evidence, so it applies to discovery and to the
 // merged discovery-plus-holdout result alike.
-func selectionMarginNotMet(record *BenchmarkRecord, evidence *BenchmarkExecutionEvidence, candidateID string) bool {
+func selectionMarginNotMet(record *BenchmarkRecord, evidence *BenchmarkExecutionEvidence, candidateID, videoCodec string) bool {
 	rules := record.AutomaticSearch
 	if rules == nil || rules.SelectionMarginVMAF <= 0 || record.Quality == nil || record.Quality.VMAF == nil || record.Quality.VMAF.GuardrailEnforcement != "reject" {
 		return false
 	}
 	v := record.Quality.VMAF
+	margin := rules.SelectionMarginVMAF
+	if record.HardwareSearch != nil && isVideoToolbox(videoCodec) {
+		margin += record.HardwareSearch.ExtraSelectionMarginVMAF
+	}
 	for _, q := range evidence.Quality {
 		if q.CandidateID != candidateID || q.VMAF == nil {
 			continue
 		}
-		if v.P5Minimum != nil && q.VMAF.P5 < *v.P5Minimum+rules.SelectionMarginVMAF {
+		if v.P5Minimum != nil && q.VMAF.P5 < *v.P5Minimum+margin {
 			return true
 		}
-		return v.WorstWindowMinimum != nil && q.VMAF.WorstWindowMean < *v.WorstWindowMinimum+rules.SelectionMarginVMAF
+		return v.WorstWindowMinimum != nil && q.VMAF.WorstWindowMean < *v.WorstWindowMinimum+margin
 	}
 	return false
 }
@@ -219,18 +224,32 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 	if len(tested) == 0 {
 		return fmt.Errorf("automatic search has no initial candidates")
 	}
+	// A continued search starts from the earlier search's x265 measurements.
+	reused := r.seedContinuation(ctx, w, record, evidence, vcs)
 	run := func(stage string, stageRecord *BenchmarkRecord, candidates []validatedCandidate) error {
 		ids := []string{}
+		var reusedIDs []string
+		var fresh []validatedCandidate
 		for _, vc := range candidates {
 			ids = append(ids, vc.candidate.ID)
+			// Only the discovery windows are reused, never a holdout check.
+			if reused[vc.candidate.ID] && len(stageRecord.Samples) == 3 {
+				reusedIDs = append(reusedIDs, vc.candidate.ID)
+				continue
+			}
+			fresh = append(fresh, vc)
 		}
-		automatic.Stages = append(automatic.Stages, transcode.BenchmarkAutomaticStage{Stage: stage, Candidates: ids, Outcome: "running"})
+		automatic.Stages = append(automatic.Stages, transcode.BenchmarkAutomaticStage{Stage: stage, Candidates: ids, Reused: reusedIDs, Outcome: "running"})
+		if len(fresh) == 0 {
+			automatic.Stages[len(automatic.Stages)-1].Outcome = "completed"
+			return nil
+		}
 		progress.SetPhase(stage)
 		var err error
 		if r.automaticHook != nil {
-			err = r.automaticHook(ctx, stageRecord, evidence, candidates)
+			err = r.automaticHook(ctx, stageRecord, evidence, fresh)
 		} else {
-			err = r.runPipelinedEncodeMetrics(ctx, w, stageRecord, evidence, dir, candidates, sourceSize, sourceMod, progress, nil)
+			err = r.runPipelinedEncodeMetrics(ctx, w, stageRecord, evidence, dir, fresh, sourceSize, sourceMod, progress, nil)
 		}
 		if err != nil {
 			return err

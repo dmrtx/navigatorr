@@ -500,6 +500,13 @@ type HardwareSearchRules struct {
 	// the margin before the slow x265 stage runs. Absent means the ladder has
 	// no fallback, which is what snapshots frozen before it carry.
 	FallbackQualityValues []int `json:"fallback_quality_values,omitempty"`
+	// ExtraSelectionMarginVMAF is added to the automatic search's selection
+	// margin for hardware candidates only: a hardware result must clear the VMAF
+	// p5 and worst-window minimums by that much more than an x265 one. A fast
+	// encoder that only just passes on three sampled windows has failed the
+	// full-file check, so its samples must show headroom. Absent means no extra
+	// margin, which is what snapshots frozen before it carry.
+	ExtraSelectionMarginVMAF float64 `json:"extra_selection_margin_vmaf,omitempty"`
 }
 
 // Validate reports whether the rules are bounded and well formed.
@@ -530,6 +537,9 @@ func (r *HardwareSearchRules) Validate() error {
 		}
 		prev = q
 	}
+	if math.IsNaN(r.ExtraSelectionMarginVMAF) || r.ExtraSelectionMarginVMAF < 0 || r.ExtraSelectionMarginVMAF > MaxSelectionMarginVMAF {
+		return fmt.Errorf("hardware search extra_selection_margin_vmaf must be in [0,%d]", MaxSelectionMarginVMAF)
+	}
 	if r.GOPSize < 1 || r.GOPSize > MaxBenchmarkGOPSize {
 		return fmt.Errorf("hardware search gop_size must be in 1..%d", MaxBenchmarkGOPSize)
 	}
@@ -548,6 +558,29 @@ func (r *HardwareSearchRules) Clone() *HardwareSearchRules {
 	c.QualityValues = append([]int(nil), r.QualityValues...)
 	c.FallbackQualityValues = append([]int(nil), r.FallbackQualityValues...)
 	return &c
+}
+
+// BenchmarkContinuation names the earlier search a continuation follows and
+// the digest of the request that search ran under. The worker reuses its
+// measured samples only when its own record of that search still matches.
+type BenchmarkContinuation struct {
+	ID            string `json:"id"`
+	RequestDigest string `json:"request_digest"`
+}
+
+// Validate reports whether the reference is well formed.
+func (c *BenchmarkContinuation) Validate() error {
+	if c == nil {
+		return nil
+	}
+	if err := ValidateBenchmarkJobID(c.ID); err != nil {
+		return fmt.Errorf("continued benchmark: %w", err)
+	}
+	digest, ok := strings.CutPrefix(c.RequestDigest, "sha256:")
+	if _, err := hex.DecodeString(digest); !ok || len(digest) != 64 || err != nil {
+		return errors.New("continued benchmark request digest must be sha256:<64 hex digits>")
+	}
+	return nil
 }
 
 // BenchmarkRequest defines the parameters sent from the coordinator to the worker to execute a benchmark.
@@ -575,6 +608,11 @@ type BenchmarkRequest struct {
 	// media engine to workers that advertise hardware_search. Unset keeps the
 	// search x265 only.
 	HardwareSearch *HardwareSearchRules `json:"hardware_search,omitempty"`
+	// ContinuesBenchmark marks an x265-only size search that follows a
+	// VideoToolbox search whose winner failed final validation. The worker may
+	// reuse that search's measured x265 samples. Workers without the
+	// search_continuation capability reject the field as unknown.
+	ContinuesBenchmark *BenchmarkContinuation `json:"continues_benchmark,omitempty"`
 	// Allow8BitTo10Bit is an explicit experiment opt-in, never an automatic
 	// optimization. Quality measurement must use an explicit native-depth model.
 	Allow8BitTo10Bit          bool                        `json:"allow_8bit_to_10bit,omitempty"`
@@ -644,6 +682,9 @@ type BenchmarkAutomaticStage struct {
 	// Skipped lists candidates not measured because a higher-quality setting
 	// of the same family already failed the quality policy.
 	Skipped []string `json:"skipped,omitempty"`
+	// Reused lists candidates whose sample measurements came from the earlier
+	// search a continuation follows instead of being encoded again.
+	Reused  []string `json:"reused,omitempty"`
 	Outcome string   `json:"outcome"`
 }
 type BenchmarkAutomaticEvidence struct {
@@ -721,6 +762,19 @@ func ValidateBenchmarkRequest(req *BenchmarkRequest) error {
 		}
 		if err := req.HardwareSearch.Validate(); err != nil {
 			return err
+		}
+	}
+	if req.ContinuesBenchmark != nil {
+		if err := req.ContinuesBenchmark.Validate(); err != nil {
+			return err
+		}
+		if req.ContinuesBenchmark.ID == req.ID || req.HardwareSearch != nil || req.AutomaticSearch == nil || !req.Automatic || !sizeV3 {
+			return errors.New("a continued search must be an automatic size v3 search with automatic search rules, no hardware search and its own identity")
+		}
+		for _, c := range req.Candidates {
+			if BenchmarkCandidateVideoCodec(c) == VideoCodecHEVCVideoToolbox {
+				return errors.New("a continued search is x265 only")
+			}
 		}
 	}
 	fallbackCandidates := 0

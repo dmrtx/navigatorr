@@ -280,3 +280,30 @@ Hardware badge before anything is replaced. Items 3 to 5 are left as follow-ups
 (hardware decode behind a self-check, validation on real freely licensed clips
 with the production VMAF model, keeping x265 for final encodes in the size
 mode).
+
+### Addendum: first real-content result
+
+The experiment above used synthetic clips, and its own caveat was that the margin
+had to be validated on real content with the production VMAF model before being
+frozen. The first supervised run on a hard 1080p episode showed why. The
+higher-quality fallback rung `-q:v` 70 won the sample search (VMAF p5 87.1, worst
+window 89.2 against limits of 84 and 85, so it cleared the gates by the 1.5
+selection margin on the window but only barely on p5) and then failed the
+whole-file check; its worst frame was 78.7. The sample search sees five short
+windows, the final check every frame, and VideoToolbox quality moves in roughly
+two-step increments and varies more between scenes than x265 CRF does.
+
+Two changes follow, both conservative:
+
+1. **Wider selection margin for hardware candidates**: +2 VMAF on p5 and worst
+   window on top of 1.5, so p5 must reach 87.5 and the worst window 88.5. The
+   observed p5 of 87.1 is rejected; a result with a comfortable margin still
+   wins. Two points is a single-episode calibration and the smallest step that
+   rejects the observed failure, not a fitted value: it should be revisited when
+   more real results exist. A worst-frame floor was considered and not added: one
+   observation cannot set it, and the whole-file frame-count and p5 checks already
+   cover the tail.
+2. **The size action continues with x265 when a hardware result still fails the
+   whole-file check**, instead of ending with the original kept and the slow x265
+   family unmeasured. See `TRANSCODE_AUTOMATIC.md` (*Same-action x265
+   continuation*) for the budget, reuse and rollout rules.

@@ -168,6 +168,17 @@ const (
 	sizeHardwareBFrames              = 1
 )
 
+// sizeHardwareExtraMarginVMAF is how much more than the x265 selection margin
+// (sizeSelectionMarginVMAF) a VideoToolbox result must clear the VMAF p5 and
+// worst-window minimums by: 3.5 in all. On a hard 1080p episode a hardware
+// result won its sample search at p5 87.1 and worst window 89.2 against limits
+// of 84 and 85, then failed the full-file check. The experiment that justified
+// the ladder (docs/transcode/reviews/2026-10-19-hardware-media-engine-experiment.md)
+// used synthetic clips and 1.5 of margin, and says the margin must be checked
+// on real content; 2 more points rejects that result on p5 and still lets a
+// hardware result with real headroom win.
+const sizeHardwareExtraMarginVMAF = 2
+
 var sizeHardwareQualityValues = []int{45, 50, 55, 60}
 
 // sizeHardwareFallbackQualityValues are the higher-quality rungs tried when
@@ -225,7 +236,7 @@ func modeHardwareInput(mode string, inputs map[string]any) (*transcode.HardwareS
 			return nil, fmt.Errorf("hardware_margin_percent must be a number")
 		}
 	}
-	rules := &transcode.HardwareSearchRules{MarginPercent: margin, QualityValues: append([]int(nil), sizeHardwareQualityValues...), FallbackQualityValues: append([]int(nil), sizeHardwareFallbackQualityValues...), GOPSize: sizeHardwareGOPSize, BFrames: sizeHardwareBFrames}
+	rules := &transcode.HardwareSearchRules{MarginPercent: margin, QualityValues: append([]int(nil), sizeHardwareQualityValues...), FallbackQualityValues: append([]int(nil), sizeHardwareFallbackQualityValues...), GOPSize: sizeHardwareGOPSize, BFrames: sizeHardwareBFrames, ExtraSelectionMarginVMAF: sizeHardwareExtraMarginVMAF}
 	if err := rules.Validate(); err != nil {
 		return nil, err
 	}
@@ -666,6 +677,13 @@ func (e *Engine) settleModeSearches(ec *ExecutionContext, items []store.Transcod
 		// The worker stops at its deadline, so a measured cost can overshoot
 		// the reservation by scheduling jitter; that time is fully spent.
 		value = math.Min(value, entry.Reserved)
+		// A hardware result still awaiting its final quality check may be followed
+		// by a second search under the same ceiling, so the first search's time is
+		// not final: the whole reservation stays held until the action settles.
+		if !terminal && state[continuationBasePlanKey] != nil && state[hardwareContinuationKey] == nil {
+			entries[key] = SearchBudgetEntry{Reserved: entry.Reserved, Provisional: true}
+			continue
+		}
 		entries[key] = SearchBudgetEntry{Reserved: entry.Reserved, Consumed: &value, Provisional: !terminal && !known}
 	}
 	ec.State["search_budget_entries"] = entries

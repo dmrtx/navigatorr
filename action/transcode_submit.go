@@ -609,6 +609,9 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 		if getString(ec.Inputs, "mode") != "" {
 			switch st.ReasonCode {
 			case "insufficient_savings", "size_growth", "size_growth_exceeded", "quality_not_met", "preservation_not_met", "already_target_codec":
+				if res, handled, err := e.continueWithoutHardware(ctx, ec, st); err != nil || handled {
+					return res, err
+				}
 				ec.State["skip_transcode"] = true
 				ec.State["reason_code"] = st.ReasonCode
 				if st.ReasonCode == "size_growth_exceeded" {
