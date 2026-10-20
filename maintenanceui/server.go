@@ -353,7 +353,7 @@ func (s *Server) tool(w http.ResponseWriter, r *http.Request) {
 		}
 		// A request the caller got wrong is reported before anything is asked
 		// of the worker.
-		if err := s.engine.ValidateInputs(r.Context(), name, inputs); err != nil {
+		if err := s.engine.ValidateInputs(r.Context(), name, inputs, key); err != nil {
 			failAdmission(w, 409, err)
 			return
 		}

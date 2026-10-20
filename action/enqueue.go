@@ -26,23 +26,29 @@ func (e *Engine) EnqueueWorker(ctx context.Context, name string, inputs map[stri
 	if e.deps.Store == nil {
 		return nil, fmt.Errorf("action store is required")
 	}
-	// A bad request is refused before the key is looked up or reserved and
-	// before the worker is asked anything.
+	key = strings.TrimSpace(key)
+	if key == "" {
+		key = generateActionID("submission")
+	}
+	old, err := e.deps.Store.FindActionByIdempotencyKey(name, key)
+	if err != nil {
+		return nil, err
+	}
+	if old != nil {
+		// A key that already exists is a replay (or a conflict): Enqueue
+		// answers from the stored action and judges the inputs only when
+		// they differ from it.
+		return e.Enqueue(ctx, name, inputs, key)
+	}
+	// A new submission: a bad request is refused before the worker is asked
+	// anything and before the key is reserved.
 	if tmpl, ok := e.GetTemplate(name); ok {
 		if _, err := e.validateActionInputs(ctx, tmpl, inputs); err != nil {
 			return nil, err
 		}
 	}
-	key = strings.TrimSpace(key)
-	if key == "" {
-		key = generateActionID("submission")
-	}
-	if old, err := e.deps.Store.FindActionByIdempotencyKey(name, key); err != nil {
+	if err := e.CheckWorkerAdmission(ctx); err != nil {
 		return nil, err
-	} else if old == nil {
-		if err := e.CheckWorkerAdmission(ctx); err != nil {
-			return nil, err
-		}
 	}
 	return e.Enqueue(ctx, name, inputs, key)
 }
@@ -72,16 +78,27 @@ func (e *Engine) Enqueue(ctx context.Context, name string, inputs map[string]any
 	if err := json.Unmarshal(b, &copy); err != nil || copy == nil {
 		return nil, fmt.Errorf("inputs must be an object")
 	}
-	// Judge the request before any lookup or write: an invalid one must not
-	// bind its idempotency key to inputs that can never run.
-	if copy, err = e.validateActionInputs(ctx, tmpl, copy); err != nil {
-		return nil, err
-	}
 	if name == "promote_transcode_candidate" {
 		key, err = promotionIdempotency(copy)
 		if err != nil {
 			return nil, err
 		}
+	}
+	// A replay whose inputs are identical to the stored action's answers from
+	// the stored action, even if the configuration has changed since (a lost
+	// response must stay recoverable). Only a submission that would create a
+	// new action, or that differs from the stored one, is judged.
+	if old, err := e.deps.Store.FindActionByIdempotencyKey(name, key); err != nil {
+		return nil, err
+	} else if old != nil {
+		if matches, err := immutableActionInputsMatch(old.InputsJSON, copy); err == nil && matches {
+			return e.Status(ctx, old.ID)
+		}
+	}
+	// Judge the request before any write: an invalid one must not bind its
+	// idempotency key to inputs that can never run.
+	if copy, err = e.validateActionInputs(ctx, tmpl, copy); err != nil {
+		return nil, err
 	}
 	// Recover synchronous admissions from earlier versions too, including
 	// terminal actions that predate durable submission receipts.

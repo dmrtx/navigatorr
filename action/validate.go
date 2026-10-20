@@ -101,11 +101,20 @@ func (e *Engine) validateActionInputs(ctx context.Context, tmpl ActionTemplate, 
 // admitting anything. A caller that has to do something before admission, such
 // as check that the worker is ready, calls it first so a request the caller
 // got wrong is reported as that and never as a worker problem. Names that are
-// not templates are left for admission to refuse.
-func (e *Engine) ValidateInputs(ctx context.Context, name string, inputs map[string]any) error {
+// not templates are left for admission to refuse. A key that already holds an
+// action with identical inputs is a replay and is not judged again, exactly as
+// in admission.
+func (e *Engine) ValidateInputs(ctx context.Context, name string, inputs map[string]any, key string) error {
 	tmpl, ok := e.GetTemplate(name)
 	if !ok {
 		return nil
+	}
+	if key = strings.TrimSpace(key); key != "" && e.deps.Store != nil {
+		if old, err := e.deps.Store.FindActionByIdempotencyKey(name, key); err == nil && old != nil {
+			if matches, err := immutableActionInputsMatch(old.InputsJSON, inputs); err == nil && matches {
+				return nil
+			}
+		}
 	}
 	_, err := e.validateActionInputs(ctx, tmpl, inputs)
 	return err

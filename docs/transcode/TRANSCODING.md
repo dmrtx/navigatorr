@@ -231,6 +231,8 @@ A rejected request:
 - writes no action row, takes no hash slot and makes no worker call, including the admission check;
 - does not reserve the idempotency key, so the corrected request reuses it.
 
+Replays are not judged again: a key that already holds an action with identical inputs returns that stored action even if the configuration has changed since (for example the read roots were narrowed or `allow_destructive` was turned off), so a lost response stays recoverable. Only a submission that would create a new action, or that differs from the stored one, is validated. Batch children already persisted are resumed or returned as they are.
+
 The expected output bit depth is computed during validation and carried into preflight, where checking it against the probed source is a single comparison. Preflight still re-runs the same validators defensively for rows created by older versions. The catalog's required and optional inputs are the single list the unknown-key and required-input checks read, so the two cannot drift.
 
 ### Transcode I/O optimization (worker-local validation + shared source cache)
