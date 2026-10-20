@@ -157,6 +157,42 @@ indicator, not an exclusive slot assignment. Heartbeats are saved every five
 seconds independently of polling, and progress becomes stale after thirty
 seconds without a new stage or unit. A heartbeat does not invent progress.
 
+### Benchmark failure classes
+
+`ffmpeg_unknown` means a real ffmpeg process ran and failed in a way no more
+specific class recognizes. Failure text that nothing recognizes is
+`unclassified`, never `ffmpeg_unknown`. A failed benchmark also carries the
+worker's own `failure_classification` when the worker knows the cause, and the
+coordinator uses that class instead of reading the message:
+
+- `benchmark_evidence_incomplete`: the pipeline finished without a result for a
+  candidate window and nothing else explains it. The message names the
+  candidate and the window.
+- `internal_invariant`: a state the worker's own earlier steps should have made
+  impossible, such as an extracted reference sample that is gone.
+
+`unclassified`, `benchmark_evidence_incomplete` and `internal_invariant` are not
+retried automatically. A manual retry stays available.
+
+A search that is stopped by its time budget is not a failure: windows left
+unmeasured by the stop report the cancellation, so the action parks as
+`search_budget_exhausted` and is not failed for "missing evidence".
+
+## Source probe
+
+Preflight inspects the source with `ffprobe` before it plans the encode. A
+probe that fails returns a typed error with its kind: `timeout`, `unavailable`,
+`tool_exit` (the exit status and up to 2 KB of `ffprobe` stderr), or
+`bad_output`. `ffprobe` runs with `-v error` and a bounded wait, so a probe
+stuck on a stalled read is abandoned instead of hanging the action.
+
+Preflight tries again once, after a short backoff, when the failure is a
+timeout or `ffprobe` reported an I/O-looking error such as a stale handle or a
+reset connection. Deterministic failures (a corrupt container, a missing
+binary, unparsable output) are not retried. When the retry fails too, the
+action fails closed and the message carries the kind and the cause. A source
+that cannot be inspected is never treated as probed.
+
 ## Promotion
 
 `promote_transcode_candidate` is a separate, explicitly approved action.

@@ -242,7 +242,7 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 	if ffmpegErr != nil {
 		job.FailureClassification = string(resilience.ClassifyError(ffmpegErr))
 		var classified interface{ FailureClass() string }
-		if job.FailureClassification == string(resilience.FFmpegUnknown) && !errors.As(ffmpegErr, &classified) {
+		if isUnrecognizedClass(job.FailureClassification) && !errors.As(ffmpegErr, &classified) {
 			job.FailureClassification = "worker_setup_failed"
 		}
 		return w.failJobTerminal(jobDir, jobFile, job, ffmpegErr)
@@ -794,7 +794,7 @@ func (w *Worker) completeOperationalJob(jobDir, jobFile string, job *JobRecord, 
 // recovery. Permanent failures remain resumable without automatic respawns.
 func (w *Worker) recordFinalizationFailure(jobDir, jobFile string, job *JobRecord, cause error) error {
 	classification := FailureStorageFinalization
-	if class := resilience.ClassifyError(cause); class != resilience.FFmpegUnknown && class != "" {
+	if class := resilience.ClassifyError(cause); !isUnrecognizedClass(string(class)) {
 		classification = string(class)
 	}
 	switch {
@@ -839,7 +839,7 @@ func (w *Worker) recordFinalizationFailure(jobDir, jobFile string, job *JobRecor
 func (w *Worker) failJobTerminal(jobDir, jobFile string, job *JobRecord, cause error) error {
 	if job.FailureClassification == "" {
 		job.FailureClassification = string(resilience.ClassifyError(cause))
-		if job.FailureClassification == string(resilience.FFmpegUnknown) {
+		if isUnrecognizedClass(job.FailureClassification) {
 			// The encoder path sets its own classification; an unrecognized
 			// staging/probe/setup failure is never an FFmpeg execution failure.
 			job.FailureClassification = "worker_setup_failed"

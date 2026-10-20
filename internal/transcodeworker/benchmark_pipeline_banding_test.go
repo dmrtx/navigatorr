@@ -1,6 +1,7 @@
 package transcodeworker
 
 import (
+	"context"
 	"encoding/json"
 	"slices"
 	"testing"
@@ -200,7 +201,7 @@ func TestDeferredBandingMarkerSurvivesTheEvidenceMerge(t *testing.T) {
 		out := sh.metricOut[i]
 		evidence.MetricSamples = append(evidence.MetricSamples, BenchmarkMetricSampleResult{CandidateID: "cand0", SampleIndex: i, VMAF: out.vmaf, VMAFStats: out.vmafStats, CAMBISkipped: out.entry.CAMBISkipped})
 	}
-	if err := mergeAutomaticQuality(sh.record, evidence, sh.vcs[0]); err != nil {
+	if err := mergeAutomaticQuality(context.Background(), sh.record, evidence, sh.vcs[0]); err != nil {
 		t.Fatal(err)
 	}
 	if len(evidence.Quality) != 1 || !slices.Contains(evidence.Quality[0].ReasonCodes, reasonCAMBINotMeasured) || slices.Contains(evidence.Quality[0].ReasonCodes, "quality_cambi_evidence_incomplete") {

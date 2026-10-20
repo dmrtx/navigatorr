@@ -595,8 +595,15 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			return fmt.Errorf("extracting reference sample %d failed: %w: %s",
+			failure := fmt.Errorf("extracting reference sample %d failed: %w: %s",
 				window.Index, err, boundedStderr(stderrBuf, 1024))
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				// ffmpeg ran and exited with failure: the one case that may
+				// carry the ffmpeg failure classes.
+				return &ffmpegExecutionError{cause: failure}
+			}
+			return failure
 		}
 
 		if err := verifySourceUnchanged(record.Source, sourceInitialSize, sourceInitialModTime); err != nil {
@@ -714,7 +721,7 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 						PixelFormat:        vc.pixelFormat,
 						Error:              errStr,
 					})
-					return errors.New(errStr)
+					return &ffmpegExecutionError{cause: errors.New(errStr)}
 				}
 				elapsed := time.Since(start).Seconds()
 
@@ -731,7 +738,7 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 						PixelFormat:        vc.pixelFormat,
 						Error:              errStr,
 					})
-					return errors.New(errStr)
+					return &ffmpegExecutionError{cause: errors.New(errStr)}
 				}
 
 				evidence.CandidateSamples = append(evidence.CandidateSamples, BenchmarkCandidateSampleResult{
@@ -1481,7 +1488,7 @@ func (r *ProductionBenchmarkRunner) runSelection(
 	sourceInitialSize int64,
 ) error {
 	if ctx.Err() != nil {
-		return ctx.Err()
+		return contextStop(ctx)
 	}
 
 	normMetric := strings.ToLower(strings.TrimSpace(record.Metric))

@@ -226,7 +226,7 @@ func replayAutomaticHookWith(t *testing.T, settings map[string]replaySetting, re
 				e.MetricSamples = append(e.MetricSamples, BenchmarkMetricSampleResult{CandidateID: vc.candidate.ID, SampleIndex: window.Index, VMAF: &stats.Mean, VMAFStats: &stats})
 			}
 			// The same quality evaluation the pipeline runs per stage.
-			if err := mergeAutomaticQuality(stage, e, vc); err != nil {
+			if err := mergeAutomaticQuality(context.Background(), stage, e, vc); err != nil {
 				return err
 			}
 		}

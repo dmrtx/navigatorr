@@ -15,7 +15,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/jakenesler/navigatorr/mediafile"
 )
@@ -70,16 +69,14 @@ func InspectFile(ctx context.Context, ffprobePath, path string) (Report, error) 
 	if ffprobePath == "" {
 		return rep, nil
 	}
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
 	// Fixed argv: the only variable element is the file path, passed as a
 	// single argument with no shell in between.
-	cmd := exec.CommandContext(ctx, ffprobePath,
-		"-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", path)
-	out, err := cmd.Output()
+	res, err := runFFprobe(ctx, ffprobePath, detailedProbeTimeout,
+		"-v", "error", "-print_format", "json", "-show_format", "-show_streams", path)
 	if err != nil {
 		return rep, nil // unreadable file: heuristics above still stand
 	}
+	out := res.stdout
 	var probe struct {
 		Streams []struct {
 			CodecType        string            `json:"codec_type"`
@@ -213,6 +210,9 @@ type DetailedReport struct {
 	Chapters    int              `json:"chapters"`
 	Probed      bool             `json:"probed"`
 	HDR         *HDRReport       `json:"hdr,omitempty"`
+	// ProbeFailure is why the file was not inspected (Probed is false). It is
+	// the same *ProbeError InspectDetailed returns and is never serialized.
+	ProbeFailure *ProbeError `json:"-"`
 }
 
 // codecTag keeps the container fourcc, dropping ffprobe's "[0][0][0][0]"
@@ -289,18 +289,15 @@ func InspectDetailed(ctx context.Context, ffprobePath, path string) (DetailedRep
 	if ffprobePath == "" {
 		ffprobePath, _ = exec.LookPath("ffprobe")
 	}
-	if ffprobePath == "" {
-		return rep, nil
-	}
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, ffprobePath,
-		"-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", "-show_chapters", path)
-	out, err := cmd.Output()
+	// Every failure below is a *ProbeError: the report stays unprobed and the
+	// caller learns why, so a stalled read is never reported as a bad file.
+	res, err := runFFprobe(ctx, ffprobePath, detailedProbeTimeout,
+		"-v", "error", "-print_format", "json", "-show_format", "-show_streams", "-show_chapters", path)
 	if err != nil {
-		return rep, nil
+		rep.ProbeFailure, _ = AsProbeError(err)
+		return rep, err
 	}
+	out := res.stdout
 
 	var probe struct {
 		Streams []struct {
@@ -340,7 +337,9 @@ func InspectDetailed(ctx context.Context, ffprobePath, path string) (DetailedRep
 	}
 
 	if err := json.Unmarshal(out, &probe); err != nil {
-		return rep, nil
+		pe := res.badOutput(err)
+		rep.ProbeFailure = pe
+		return rep, pe
 	}
 
 	rep.Probed = true

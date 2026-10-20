@@ -390,7 +390,12 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 		if msg == "" {
 			msg = "benchmark executor reported job failure"
 		}
-		class := resilience.Classify(msg)
+		// The worker's own class wins; the message is only read for records
+		// that predate it.
+		class := resilience.FailureClass(st.FailureClassification)
+		if class == "" {
+			class = resilience.Classify(msg)
+		}
 		ec.State["failure_classification"] = string(class)
 		appendFailureHistory(ec, "worker_benchmark", string(class), msg)
 

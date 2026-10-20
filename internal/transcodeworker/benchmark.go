@@ -49,6 +49,7 @@ type BenchmarkRecord struct {
 	SearchWorkerBusy          bool                                  `json:"search_worker_busy,omitempty"`
 	SearchStartedAt           time.Time                             `json:"search_started_at,omitzero"`
 	ReasonCode                string                                `json:"reason_code,omitempty"`
+	FailureClassification     string                                `json:"failure_classification,omitempty"`
 	Mode                      string                                `json:"mode,omitempty"`
 	SearchDeadline            time.Time                             `json:"search_deadline,omitzero"`
 	Comparison                *transcode.BenchmarkComparison        `json:"comparison,omitempty"`
@@ -739,6 +740,7 @@ func (w *Worker) BenchmarkStatus(ctx context.Context, jobID string) (transcode.B
 	st.SearchSeconds = record.SearchSeconds
 	st.PhaseCosts = record.PhaseCosts
 	st.ReasonCode = record.ReasonCode
+	st.FailureClassification = record.FailureClassification
 	st.SearchStartedAt = record.SearchStartedAt
 	st.SearchBudgetSeconds = record.SearchBudgetSeconds
 	st.SearchExtension = record.SearchExtension.Clone()
@@ -1121,6 +1123,10 @@ func (w *Worker) InternalBenchmark(ctx context.Context, jobID, runToken string) 
 			latest.ReasonCode = "search_budget_exhausted"
 			latest.Error = "search_budget_exhausted: bounded search stopped; no claim about untested candidates"
 			latest.SearchWorkerBusy = budget.workerBusy()
+		} else if class := benchmarkFailureClass(runErr); class != "" {
+			// The worker knows what kind of failure this is; the coordinator
+			// takes its word over guessing from the message.
+			latest.FailureClassification = class
 		}
 		latest.FinishedAt = time.Now().UTC()
 		latest.HeartbeatAt = time.Now().UTC()

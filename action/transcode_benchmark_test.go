@@ -378,6 +378,46 @@ func TestBenchmarkTranscode_WorkerFailure(t *testing.T) {
 	}
 }
 
+// The class the worker names wins over a guess from the message, and a message
+// nothing recognizes is unclassified rather than blamed on ffmpeg.
+func TestBenchmarkTranscode_FailureClassComesFromTheWorker(t *testing.T) {
+	for _, tc := range []struct {
+		name, class, message, want string
+	}{
+		{"worker class wins over text", "benchmark_evidence_incomplete", "ffmpeg: invalid data found when processing input", "benchmark_evidence_incomplete"},
+		{"unrecognized text is unclassified", "", "missing automatic verification sample", "unclassified"},
+		{"older record still classified by text", "", "ffmpeg: invalid data found when processing input", "ffmpeg_input_corrupt"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mock := &mockTranscodeExecutor{
+				benchmarkStatusFunc: func(ctx context.Context, jobID string) (transcode.BenchmarkStatus, error) {
+					return transcode.BenchmarkStatus{
+						ProtocolVersion:       transcode.WorkerProtocolVersion,
+						ID:                    jobID,
+						Status:                transcode.StatusFailed,
+						Error:                 tc.message,
+						FailureClassification: tc.class,
+					}, nil
+				},
+			}
+			engine, _, mediaFile, _ := setupBenchmarkTestEnv(t, mock, standard8BitProbeJSON, &recipe.OptimizationPolicy{Enabled: true})
+			res, err := engine.Run(context.Background(), "benchmark_transcode", map[string]any{"path": mediaFile, "profile": "opt-vt"})
+			if err != nil {
+				t.Fatalf("unexpected engine error: %v", err)
+			}
+			if res.Status != StatusFailed {
+				t.Fatalf("status %s", res.Status)
+			}
+			if got := getString(res.Outputs, "failure_classification"); got != tc.want {
+				t.Fatalf("class %q, want %q (error %q)", got, tc.want, res.Error)
+			}
+			if !strings.Contains(res.Error, "("+tc.want+")") {
+				t.Fatalf("error does not carry the class: %q", res.Error)
+			}
+		})
+	}
+}
+
 // 4. cancellation propagation
 func TestBenchmarkTranscode_CancellationPropagation(t *testing.T) {
 	var cancelCalled int32

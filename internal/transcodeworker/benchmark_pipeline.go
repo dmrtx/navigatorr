@@ -17,6 +17,7 @@ import (
 	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/optimization"
 	"github.com/jakenesler/navigatorr/transcode/quality"
+	"github.com/jakenesler/navigatorr/transcode/resilience"
 )
 
 // resolvePipelineConcurrency resolves bounded encode/metric worker counts.
@@ -412,6 +413,82 @@ func (r *ProductionBenchmarkRunner) runPipelinedEncodeMetrics(
 		return ferr
 	}
 	sh.assembleEvidence(units)
+	return sh.checkComplete(ctx, units)
+}
+
+// contextStop is the error of a context that ended. It satisfies errors.Is for
+// the context's error (context.Canceled or context.DeadlineExceeded, which the
+// budget handling keys on) and, when the cancellation carried a cause such as
+// errSearchBudgetStopped, for that cause too.
+func contextStop(ctx context.Context) error {
+	err := ctx.Err()
+	if err == nil {
+		return nil
+	}
+	cause := context.Cause(ctx)
+	if cause == nil || errors.Is(err, cause) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", err, cause)
+}
+
+// errPipelineIncomplete reports a pipeline that returned with a unit that was
+// neither run nor replayed from the cache, with no failure and no cancellation
+// to explain it. Reporting success then would hand incomplete evidence to the
+// selection, which can only fail later with a message that names none of this.
+type errPipelineIncomplete struct {
+	candidate string
+	window    int
+}
+
+func (e errPipelineIncomplete) Error() string {
+	return fmt.Sprintf("benchmark pipeline ended without a result for candidate %q window %d: evidence incomplete (internal invariant violated)", e.candidate, e.window)
+}
+
+// FailureClass lets the failure keep its own class instead of being read as an
+// ffmpeg failure by its text.
+func (e errPipelineIncomplete) FailureClass() string { return failureClassEvidenceIncomplete }
+
+// unitComplete reports whether a unit has its encode and metric outcome:
+// measured here, replayed from the sample cache, or recorded as a failure of
+// the candidate. A deferred banding measurement that has neither run nor been
+// skipped leaves its unit incomplete.
+func (sh *pipelineShared) unitComplete(idx int) bool {
+	if idx < 0 || idx >= len(sh.encodeOut) || idx >= len(sh.metricOut) {
+		return false
+	}
+	if sh.encodeOut[idx].entry.CandidateID == "" {
+		return false
+	}
+	met := sh.metricOut[idx]
+	if !met.executed {
+		return false
+	}
+	return !met.cambiDeferred || met.cambiSkipped
+}
+
+// checkComplete returns nil when every unit that had to run did, or when a
+// job-fatal error was recorded (the caller reports that one). Otherwise the
+// work was cut off without a recorded cause: the context's cause when it ended,
+// else errPipelineIncomplete naming the first unit that is missing. It never
+// returns nil with gaps. Candidates dominated on size are skipped on purpose.
+func (sh *pipelineShared) checkComplete(ctx context.Context, units []pipelineUnit) error {
+	if sh.fatal.failed() {
+		return nil
+	}
+	n := len(sh.record.Samples)
+	for _, u := range units {
+		if _, dominated := sh.savings.dominatedBy(u.vcOrd); dominated {
+			continue
+		}
+		if sh.unitComplete(u.vcOrd*n + u.sampOrd) {
+			continue
+		}
+		if ctx.Err() != nil {
+			return contextStop(ctx)
+		}
+		return errPipelineIncomplete{candidate: sh.vcs[u.vcOrd].candidate.ID, window: sh.record.Samples[u.sampOrd].Index}
+	}
 	return nil
 }
 
@@ -438,6 +515,8 @@ func (sh *pipelineShared) runUnits(ctx context.Context, units []pipelineUnit, en
 			}
 			select {
 			case <-ctx.Done():
+				// A unit that was never queued is a unit that never runs.
+				sh.fatal.set(contextStop(ctx), false)
 				return
 			case encQ <- idx:
 			}
@@ -458,6 +537,8 @@ func (sh *pipelineShared) runUnits(ctx context.Context, units []pipelineUnit, en
 						return
 					}
 					if ctx.Err() != nil {
+						// The unit was taken off the queue and will not run.
+						sh.fatal.set(contextStop(ctx), false)
 						return
 					}
 					if sh.fatal.failed() {
@@ -467,11 +548,15 @@ func (sh *pipelineShared) runUnits(ctx context.Context, units []pipelineUnit, en
 					if !measure {
 						continue
 					}
+					// A successful encode must not lose its metric silently: when
+					// the context ends first, the dropped measurement is recorded.
 					if ctx.Err() != nil {
+						sh.fatal.set(contextStop(ctx), true)
 						return
 					}
 					select {
 					case <-ctx.Done():
+						sh.fatal.set(contextStop(ctx), true)
 						return
 					case metQ <- idx:
 					}
@@ -505,6 +590,7 @@ func (sh *pipelineShared) runUnits(ctx context.Context, units []pipelineUnit, en
 						return
 					}
 					if ctx.Err() != nil {
+						sh.fatal.set(contextStop(ctx), true)
 						return
 					}
 					sh.runMetricUnit(ctx, units[idx], idx)
@@ -525,7 +611,7 @@ func (sh *pipelineShared) runEncodeUnit(ctx context.Context, u pipelineUnit, idx
 	}
 
 	if ctx.Err() != nil {
-		fail(ctx.Err())
+		fail(contextStop(ctx))
 		return
 	}
 	sh.progressReporter.StartSampleUnit("encoding_candidates", u.sampOrd+1, vc.index+1, vc.candidate.ID, "")
@@ -569,7 +655,7 @@ func (sh *pipelineShared) runEncodeUnit(ctx context.Context, u pipelineUnit, idx
 	cmd.Stdout = nil
 	if err := runEncoderCommand(ctx, cmd, candArgs, vc.plan, candPath); err != nil {
 		if ctx.Err() != nil {
-			fail(ctx.Err())
+			fail(contextStop(ctx))
 			return
 		}
 		errStr := fmt.Sprintf("encoding candidate %q for sample %d failed: %v: %s",
@@ -585,7 +671,7 @@ func (sh *pipelineShared) runEncodeUnit(ctx context.Context, u pipelineUnit, idx
 				PixelFormat:        vc.pixelFormat,
 				Error:              errStr,
 			},
-			err: errors.New(errStr),
+			err: &ffmpegExecutionError{cause: errors.New(errStr)},
 		}
 		fail(sh.encodeOut[idx].err)
 		return
@@ -605,7 +691,7 @@ func (sh *pipelineShared) runEncodeUnit(ctx context.Context, u pipelineUnit, idx
 				PixelFormat:        vc.pixelFormat,
 				Error:              errStr,
 			},
-			err: errors.New(errStr),
+			err: &ffmpegExecutionError{cause: errors.New(errStr)},
 		}
 		fail(sh.encodeOut[idx].err)
 		return
@@ -640,7 +726,7 @@ func (sh *pipelineShared) runMetricUnit(ctx context.Context, u pipelineUnit, idx
 	}
 
 	if ctx.Err() != nil {
-		fail(ctx.Err())
+		fail(contextStop(ctx))
 		return
 	}
 	if err := verifySourceUnchanged(sh.record.Source, sh.sourceInitialSize, sh.sourceInitialModTime); err != nil {
@@ -650,7 +736,7 @@ func (sh *pipelineShared) runMetricUnit(ctx context.Context, u pipelineUnit, idx
 	refPath := filepath.Join(sh.samplesDir, "ref_sample_"+strconv.Itoa(window.Index)+".mkv")
 	refStat, err := os.Stat(refPath)
 	if err != nil || !refStat.Mode().IsRegular() || refStat.Size() == 0 {
-		fail(fmt.Errorf("lossless reference sample %s missing or invalid (job-fatal integrity violation, fail closed)", refPath))
+		fail(internalInvariantError{fmt.Sprintf("lossless reference sample %s missing or invalid (job-fatal integrity violation, fail closed)", refPath)})
 		return
 	}
 	candPath := filepath.Join(sh.samplesDir, vc.fileKey+"_sample_"+strconv.Itoa(window.Index)+".mkv")
@@ -717,7 +803,7 @@ func (sh *pipelineShared) runMetricUnit(ctx context.Context, u pipelineUnit, idx
 		runErr := runCharged(ctx, cmd)
 		vmafDurationSec = time.Since(start).Seconds()
 		if ctx.Err() != nil {
-			fail(ctx.Err())
+			fail(contextStop(ctx))
 			return
 		}
 		if runErr != nil {
@@ -820,7 +906,7 @@ func (sh *pipelineShared) runMetricUnit(ctx context.Context, u pipelineUnit, idx
 		runErr := runCharged(ctx, cmd)
 		ssimDurationSec = time.Since(start).Seconds()
 		if ctx.Err() != nil {
-			fail(ctx.Err())
+			fail(contextStop(ctx))
 			return
 		}
 		if runErr != nil {
@@ -901,7 +987,7 @@ func (sh *pipelineShared) runMetricUnit(ctx context.Context, u pipelineUnit, idx
 		out.cambiDurSec = time.Since(start).Seconds()
 		sh.progressReporter.ResolveUnit()
 		if ctx.Err() != nil {
-			fail(ctx.Err())
+			fail(contextStop(ctx))
 			return
 		}
 		if err != nil {
@@ -1478,7 +1564,7 @@ func (sh *pipelineShared) runCAMBIUnit(ctx context.Context, idx int) {
 	elapsed := time.Since(start).Seconds()
 	sh.progressReporter.ResolveUnit()
 	if ctx.Err() != nil {
-		sh.fatal.set(ctx.Err(), true)
+		sh.fatal.set(contextStop(ctx), true)
 		return
 	}
 	out := sh.metricOut[idx]
@@ -1494,3 +1580,37 @@ func (sh *pipelineShared) runCAMBIUnit(ctx context.Context, idx int) {
 	sh.metricOut[idx] = out
 	sh.storeCachedUnit(idx)
 }
+
+// Failure classes the worker assigns itself, for failures that are not an
+// ffmpeg process failure and must not be read as one.
+const (
+	failureClassEvidenceIncomplete = string(resilience.BenchmarkEvidenceIncomplete)
+	failureClassInternalInvariant  = string(resilience.InternalInvariant)
+)
+
+// benchmarkFailureClass returns the class a failed benchmark carries to the
+// coordinator, or "" when the error does not declare one. Only typed errors
+// count: guessing from the message is what mislabeled non-ffmpeg failures as
+// ffmpeg_unknown, so the coordinator keeps its own text fallback for the rest.
+func benchmarkFailureClass(err error) string {
+	var classified interface{ FailureClass() string }
+	if errors.As(err, &classified) {
+		return classified.FailureClass()
+	}
+	return ""
+}
+
+// evidenceIncompleteError is a benchmark whose evidence has a gap that nothing
+// else (a failure, a cancellation) explains. It is the worker's own invariant
+// speaking, not an ffmpeg failure.
+type evidenceIncompleteError struct{ msg string }
+
+func (e evidenceIncompleteError) Error() string        { return e.msg }
+func (e evidenceIncompleteError) FailureClass() string { return failureClassEvidenceIncomplete }
+
+// internalInvariantError is a state the worker's own earlier steps should have
+// made impossible (a reference it extracted is gone), not a tool failure.
+type internalInvariantError struct{ msg string }
+
+func (e internalInvariantError) Error() string        { return e.msg }
+func (e internalInvariantError) FailureClass() string { return failureClassInternalInvariant }

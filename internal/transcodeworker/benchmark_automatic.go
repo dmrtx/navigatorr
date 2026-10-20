@@ -582,10 +582,20 @@ func (r *ProductionBenchmarkRunner) runAutomaticCandidates(ctx context.Context, 
 		if d := time.Since(attemptStart); d > longest {
 			longest = d
 		}
-		if err := mergeAutomaticQuality(record, evidence, winner); err != nil {
+		if err := mergeAutomaticQuality(ctx, record, evidence, winner); err != nil {
+			if untilExhausted && searchTimeLimitReached(ctx, err) {
+				automatic.Stages[len(automatic.Stages)-1].Outcome = "stopped"
+				verification.StoppedBy = transcode.VerificationStoppedTimeCap
+				break
+			}
 			return err
 		}
 		if err := r.runSelection(ctx, record, evidence, []validatedCandidate{winner}, rep, sourceSize); err != nil {
+			if untilExhausted && searchTimeLimitReached(ctx, err) {
+				automatic.Stages[len(automatic.Stages)-1].Outcome = "stopped"
+				verification.StoppedBy = transcode.VerificationStoppedTimeCap
+				break
+			}
 			return err
 		}
 		if evidence.Decision.Winner != nil {
@@ -1060,7 +1070,14 @@ func appendAutomaticRejections(final, discovery *transcode.BenchmarkDecision) {
 
 // Recombine the original per-window measurements; no encode or metric is
 // repeated. Native frame scores remain in memory throughout this invocation.
-func mergeAutomaticQuality(record *BenchmarkRecord, evidence *BenchmarkExecutionEvidence, vc validatedCandidate) error {
+//
+// A context that ended is reported before anything else: a pipeline cut off by
+// the search budget leaves windows unmeasured, and reading those gaps as
+// "missing evidence" turned a bounded stop into a terminal failure.
+func mergeAutomaticQuality(ctx context.Context, record *BenchmarkRecord, evidence *BenchmarkExecutionEvidence, vc validatedCandidate) error {
+	if ctx.Err() != nil {
+		return contextStop(ctx)
+	}
 	model, err := quality.Model(record.Quality.VMAF.Model)
 	if err != nil {
 		return err
@@ -1074,17 +1091,17 @@ func mergeAutomaticQuality(record *BenchmarkRecord, evidence *BenchmarkExecution
 				continue
 			}
 			if found {
-				return fmt.Errorf("duplicate automatic sample evidence")
+				return evidenceIncompleteError{fmt.Sprintf("duplicate automatic sample evidence for candidate %q window %d", vc.candidate.ID, window.Index)}
 			}
 			found = true
 			sh.metricOut[i] = pipelineMetricOutcome{executed: true, vmafStats: ms.VMAFStats, cambi: ms.CAMBI, cambiSkipped: ms.CAMBISkipped}
 			if ms.VMAF == nil || ms.Error != "" {
-				return fmt.Errorf("incomplete automatic metric evidence")
+				return evidenceIncompleteError{fmt.Sprintf("incomplete automatic metric evidence for candidate %q window %d", vc.candidate.ID, window.Index)}
 			}
 			scores = append(scores, optimization.SampleScore{SampleIndex: window.Index, Score: *ms.VMAF, Valid: true})
 		}
 		if !found {
-			return fmt.Errorf("missing automatic verification sample")
+			return evidenceIncompleteError{fmt.Sprintf("missing automatic verification sample for candidate %q window %d", vc.candidate.ID, window.Index)}
 		}
 	}
 	for _, qe := range evidence.Quality {
@@ -1095,7 +1112,7 @@ func mergeAutomaticQuality(record *BenchmarkRecord, evidence *BenchmarkExecution
 	}
 	qe, reject := sh.evaluateCandidateQuality(0, vc.candidate.ID)
 	if qe == nil {
-		return fmt.Errorf("missing automatic quality evidence")
+		return evidenceIncompleteError{fmt.Sprintf("missing automatic quality evidence for candidate %q", vc.candidate.ID)}
 	}
 	qualityRows := evidence.Quality[:0]
 	for _, old := range evidence.Quality {

@@ -29,7 +29,7 @@ func TestStorageErrorClassificationSurvivesWorkerBoundary(t *testing.T) {
 		"uploading SMB partial: no space left on device":               StorageFull,
 		"SMB source changed while downloading: copied=5 stat=10":       SourceChanged,
 		"ffmpeg /media/smb-story.mkv: Invalid data found":              FFmpegInputCorrupt,
-		"ffmpeg /media/smb_transport_error.mkv: unknown codec option":  FFmpegUnknown,
+		"ffmpeg /media/smb_transport_error.mkv: unknown codec option":  Unclassified,
 	}
 	for message, want := range cases {
 		if got := Classify(message); got != want {

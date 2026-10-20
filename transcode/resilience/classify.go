@@ -36,6 +36,21 @@ const (
 	SourceUnreachable               FailureClass = "source_unreachable"
 )
 
+// Classes for failures that are not an ffmpeg process failing.
+const (
+	// Unclassified is a failure whose text matches no known class. It says the
+	// cause is not understood, not that ffmpeg is to blame, and is never
+	// retried automatically. FFmpegUnknown is reserved for a failure of a real
+	// ffmpeg process.
+	Unclassified FailureClass = "unclassified"
+	// BenchmarkEvidenceIncomplete is a benchmark that ended without the
+	// measurements its own bookkeeping required.
+	BenchmarkEvidenceIncomplete FailureClass = "benchmark_evidence_incomplete"
+	// InternalInvariant is a violated internal assumption: a bug, not a
+	// property of the media or the environment.
+	InternalInvariant FailureClass = "internal_invariant"
+)
+
 // ClassifyError preserves a typed boundary failure before considering messages.
 // Use Classify for errors restored from older persisted jobs or HTTP strings.
 func ClassifyError(err error) FailureClass {
@@ -53,7 +68,7 @@ func Classify(message string) FailureClass {
 	s := strings.ToLower(message)
 	// Explicit serialized classes take precedence over generic phrases such
 	// as "connection reset", which formerly labeled SMB failures as SSH.
-	for _, class := range []FailureClass{SMBSigningRequired, SMBSessionInvalid, SMBAuthFailed, SMBTransportError, StoragePermissionDenied, StorageIOError, SourceUnreachable, Cancelled, StorageFull} {
+	for _, class := range []FailureClass{SMBSigningRequired, SMBSessionInvalid, SMBAuthFailed, SMBTransportError, StoragePermissionDenied, StorageIOError, SourceUnreachable, Cancelled, StorageFull, BenchmarkEvidenceIncomplete, InternalInvariant} {
 		if s == string(class) || strings.Contains(s, string(class)+":") {
 			return class
 		}
@@ -122,7 +137,7 @@ func Classify(message string) FailureClass {
 	case strings.Contains(s, "source") && (strings.Contains(s, "changed") || strings.Contains(s, "sha")):
 		return SourceChanged
 	default:
-		return FFmpegUnknown
+		return Unclassified
 	}
 }
 
@@ -143,9 +158,12 @@ func Retryable(c FailureClass, allowed []string) bool {
 	case RunnerKilled, FFmpegInputCorrupt, StorageFull, Cancelled, IdempotencyConflict,
 		ValidationDurationMismatch, ValidationStreamLoss, ValidationCodecMismatch, SourceChanged,
 		SMBSigningRequired, SMBSessionInvalid, SMBAuthFailed, SMBTransportError,
-		StoragePermissionDenied, StorageIOError, SourceUnreachable:
+		StoragePermissionDenied, StorageIOError, SourceUnreachable,
+		Unclassified, BenchmarkEvidenceIncomplete, InternalInvariant:
 		// SMB operations already recover on a fresh signed session. Replaying
-		// the full encode after exhausted recovery is unsafe and wasteful.
+		// the full encode after exhausted recovery is unsafe and wasteful. A
+		// failure that is not understood, or that is a bug in the benchmark's
+		// own bookkeeping, repeats the same way and is never replayed blindly.
 		return false
 	}
 	for _, v := range allowed {
