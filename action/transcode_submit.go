@@ -612,6 +612,13 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 				if res, handled, err := e.continueWithoutHardware(ctx, ec, st); err != nil || handled {
 					return res, err
 				}
+				if st.ReasonCode != reasonQualityNotMet && st.ReasonCode != "preservation_not_met" && st.ReasonCode != "already_target_codec" && sizeBudgetActive(ec.State) {
+					// A VideoToolbox budget encode that missed its average
+					// is encoded once more at a corrected bitrate.
+					if res, handled := e.retrySizeBudgetBitrate(ec, getPlan(ec.State["plan"]), st.CandidateSizeBytes, st.QualityEvidence); handled {
+						return res, nil
+					}
+				}
 				ec.State["skip_transcode"] = true
 				ec.State["reason_code"] = st.ReasonCode
 				if st.ReasonCode == "size_growth_exceeded" {

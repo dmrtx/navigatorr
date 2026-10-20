@@ -2301,6 +2301,9 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
 .size-budget-chart .point.passed { fill: var(--forest); }
 .size-budget-chart .point.fallback { fill: var(--accent); stroke: var(--ink); stroke-width: 1.5; }
 .size-budget-chart .point.planned { fill: var(--surface); stroke: var(--accent); stroke-width: 1.5; }
+.size-budget-chart .point.compared { fill: var(--surface); stroke: var(--info); stroke-width: 1.5; }
+.size-budget-chart .point.compared.chosen { fill: var(--info); }
+.size-budget-chart .point.overshoot { fill: var(--surface); stroke: var(--warning-line); stroke-width: 1.5; stroke-dasharray: 2 2; }
 .size-budget-chart text { fill: var(--muted); font-size: 9px; font-family: inherit; }
 .size-budget-points, .size-budget-siblings ul { margin: 4px 0 0; padding-left: 1.2rem; }
 .size-budget-warning { color: var(--warning-strong); background: var(--warning-wash); border: 1px solid var(--warning-line); border-radius: 6px; padding: 6px 8px; }

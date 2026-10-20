@@ -72,21 +72,11 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 			if getString(ec.State, "plan_source") == sizeBudgetPlanSource {
 				// A budget encode is held to the frozen floor, and only a plan
 				// the budget fallback built at its planned bitrate may be.
-				// The encode is rebuilt from the frozen policy and the source,
-				// not read back from the record, and must match exactly.
-				rec := sizeBudgetOf(ec.State)
+				// The encode is rebuilt from the frozen policy, the source and
+				// the recorded encoder comparison, not read back from the
+				// plan, and must match exactly.
 				expectedQuality = sizeBudgetFloorQuality(snapshot)
-				matches := false
-				if policy := snapshot.Size.SizeBudget; rec != nil && expectedQuality != nil && policy != nil && plan.X265 != nil {
-					original := getInt64(ec.State, "original_size")
-					budget := policy.BudgetBytes(original, siblingEvidenceOf(ec.State))
-					enc := planSizeBudgetEncode(policy, getSourceReport(ec.State["source_report"]), original, budget)
-					want, _ := json.Marshal(enc.X265)
-					got, _ := json.Marshal(plan.X265)
-					matches = enc.Reason == "" && string(want) == string(got) && plan.Quality == 0 && plan.Preset == policy.Preset && transcode.NormalizeVideoCodec(plan.VideoCodec) == transcode.VideoCodecLibX265 &&
-						rec.BudgetBytes == budget && rec.TargetBytes == enc.TargetBytes && rec.VideoBitrateKbps == enc.X265.BitrateKbps
-				}
-				if !matches {
+				if expectedQuality == nil || !sizeBudgetPlanMatches(snapshot, ec.State, plan, sizeBudgetOf(ec.State)) {
 					return StepResult{Status: StepFailed, Error: "size budget plan does not match the frozen budget; original preserved"}, nil
 				}
 			}
@@ -145,6 +135,17 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 		// sits under the 15% minimum saving, so one that misses the saving is
 		// over the budget too, and is reported as that.
 		if sizeBudgetActive(ec.State) {
+			// VideoToolbox has no second pass to land on its average: one
+			// that overshot is encoded once more at a corrected bitrate.
+			if rec := sizeBudgetOf(ec.State); rec != nil && candidateSize > rec.BudgetBytes {
+				var evidence transcode.FinalQualityEvidence
+				if !reencode(ec.State["quality_evidence"], &evidence) {
+					evidence = transcode.FinalQualityEvidence{}
+				}
+				if res, handled := e.retrySizeBudgetBitrate(ec, plan, candidateSize, &evidence); handled {
+					return res, nil
+				}
+			}
 			rec, fits := finishSizeBudget(ec, candidateSize)
 			if !fits {
 				ec.State["skip_transcode"] = true
