@@ -550,7 +550,7 @@ func TestResolutionClass(t *testing.T) {
 		w, h int
 		want string
 	}{{1920, 800, "1080p"}, {1920, 1080, "1080p"}, {1440, 1080, "1080p"}, {1280, 720, "720p"}, {1280, 536, "720p"}, {720, 480, "sd"}, {3840, 1600, "2160p"}, {2560, 1440, "1440p"}, {2560, 1080, "1440p"}, {2048, 858, "1080p"}, {0, 0, ""}} {
-		if got := resolutionClass(tc.w, tc.h); got != tc.want {
+		if got := ResolutionClass(tc.w, tc.h); got != tc.want {
 			t.Errorf("%dx%d = %q, want %q", tc.w, tc.h, got, tc.want)
 		}
 	}
