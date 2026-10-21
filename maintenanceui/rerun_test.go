@@ -2,6 +2,8 @@ package maintenanceui
 
 import (
 	"encoding/json"
+	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/jakenesler/navigatorr/store"
@@ -323,5 +325,111 @@ func TestRerunWithoutHardwareAfterABelowFloorBudgetEncode(t *testing.T) {
 	// The earlier action is untouched and a plain run again still keeps the engine on.
 	if before, _ := st.GetActionInstance("below-floor"); decodeOperationJSON(before.InputsJSON)["allow_hardware"] != true {
 		t.Fatal("the earlier action was changed")
+	}
+}
+
+func rerunJobView(t *testing.T, h http.Handler, id string) map[string]any {
+	t.Helper()
+	w := request(h, "GET", "/api/maintenance/operations?id="+id, "", true)
+	var page struct {
+		Jobs []map[string]any `json:"jobs"`
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil || len(page.Jobs) != 1 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	return page.Jobs[0]
+}
+
+// A standalone file skipped because the goal is wrong for its source offers the
+// goal that handles it, and starts a NEW job under that goal from the
+// goal-neutral inputs alone.
+func TestRerunRemedyStartsTheRightGoalWithoutTheOldGoalsSettings(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	sizeInputs := map[string]any{"path": "/media/movie.mkv", "mode": "size", "replace_original": false, "is_anime": true, "media_type": "movie", "allow_hardware": true, "hardware_margin_percent": float64(30), "size_budget_percent": float64(40), "allow_slow_preset": true}
+	seedOperation(t, st, "hdr", "transcode_media", "completed", sizeInputs, map[string]any{"skip_transcode": true, "reason_code": "hdr_requires_compact"}, map[string]any{"mode": "size", "mode_policy": map[string]any{"mode": "size", "size": map[string]any{"hardware_search": map[string]any{"margin_percent": float64(30)}, "size_budget": map[string]any{"percent": float64(33)}}}})
+	seedOperation(t, st, "sdr", "transcode_media", "completed", map[string]any{"path": "/media/clip.mkv", "mode": "compact", "max_height": float64(1080)}, map[string]any{"skip_transcode": true, "reason_code": "compact_not_needed"}, nil)
+
+	if got := operationMap(rerunJobView(t, h, "hdr")["rerun"])["remedy_mode"]; got != "compact" {
+		t.Fatalf("hdr remedy %v", got)
+	}
+	if got := operationMap(rerunJobView(t, h, "sdr")["rerun"])["remedy_mode"]; got != "size" {
+		t.Fatalf("sdr remedy %v", got)
+	}
+
+	w := request(h, "POST", "/api/maintenance/rerun", `{"id":"hdr","key":"remedy-one","mode":"compact"}`, true)
+	if w.Code != 202 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	var started struct{ ID string }
+	json.Unmarshal(w.Body.Bytes(), &started)
+	created, _ := st.GetActionInstance(started.ID)
+	if created == nil || started.ID == "hdr" || created.IdempotencyKey != "remedy-one" {
+		t.Fatalf("new action %+v", created)
+	}
+	copied := decodeOperationJSON(created.InputsJSON)
+	want := map[string]any{"path": "/media/movie.mkv", "mode": "compact", "replace_original": false, "is_anime": true, "media_type": "movie"}
+	if len(copied) != len(want) {
+		t.Fatalf("inputs carried goal-specific keys: %v", copied)
+	}
+	for k, v := range want {
+		if copied[k] != v {
+			t.Fatalf("input %s = %v, want %v (%v)", k, copied[k], v, copied)
+		}
+	}
+	// A lost response replays the same key and returns the same job.
+	if w := request(h, "POST", "/api/maintenance/rerun", `{"id":"hdr","key":"remedy-one","mode":"compact"}`, true); w.Code != 202 || !strings.Contains(w.Body.String(), started.ID) {
+		t.Fatal("replay", w.Code, w.Body.String())
+	}
+	// The file now has an active job: a different key is refused.
+	if w := request(h, "POST", "/api/maintenance/rerun", `{"id":"hdr","key":"remedy-two","mode":"compact"}`, true); w.Code != 409 {
+		t.Fatal("active job ignored", w.Code, w.Body.String())
+	}
+	// The remedy ran: the old skip no longer offers it.
+	if got := rerunJobView(t, h, "hdr")["rerun"]; got != nil {
+		t.Fatalf("remedy offered again after it ran: %v", got)
+	}
+	if before, _ := st.GetActionInstance("hdr"); decodeOperationJSON(before.InputsJSON)["allow_hardware"] != true {
+		t.Fatal("the earlier action was changed")
+	}
+
+	w = request(h, "POST", "/api/maintenance/rerun", `{"id":"sdr","key":"remedy-three","mode":"size"}`, true)
+	if w.Code != 202 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	json.Unmarshal(w.Body.Bytes(), &started)
+	created, _ = st.GetActionInstance(started.ID)
+	if copied := decodeOperationJSON(created.InputsJSON); copied["mode"] != "size" || copied["path"] != "/media/clip.mkv" || copied["max_height"] != nil || len(copied) != 2 {
+		t.Fatalf("size inputs %v", copied)
+	}
+}
+
+func TestRerunRemedyRefusesTheWrongGoalAndTheSameGoal(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	seedOperation(t, st, "hdr", "transcode_media", "completed", map[string]any{"path": "/media/movie.mkv", "mode": "size"}, map[string]any{"skip_transcode": true, "reason_code": "hdr_requires_compact"}, nil)
+	seedOperation(t, st, "plain", "transcode_media", "cancelled", map[string]any{"path": "/media/other.mkv", "mode": "size"}, nil, nil)
+	seedOperation(t, st, "child", "transcode_media", "completed", map[string]any{"path": "/media/child.mkv", "mode": "size", "parent_action_id": "batch"}, map[string]any{"reason_code": "hdr_requires_compact"}, nil)
+	seedOperation(t, st, "gate", "transcode_media", "completed", map[string]any{"path": "/media/gate.mkv", "mode": "size"}, map[string]any{"reason_code": "unsupported_source"}, nil)
+	for name, tc := range map[string]struct{ body string }{
+		"another goal":              {`{"id":"hdr","key":"k-1","mode":"quality"}`},
+		"the goal it already ran":   {`{"id":"hdr","key":"k-2","mode":"size"}`},
+		"same goal without a mode":  {`{"id":"hdr","key":"k-3"}`},
+		"a mode for a normal job":   {`{"id":"plain","key":"k-4","mode":"compact"}`},
+		"a batch child":             {`{"id":"child","key":"k-5","mode":"compact"}`},
+		"a source no goal can fix":  {`{"id":"gate","key":"k-6","mode":"compact"}`},
+		"x265 combined with a goal": {`{"id":"hdr","key":"k-7","mode":"compact","without_hardware":true}`},
+	} {
+		if w := request(h, "POST", "/api/maintenance/rerun", tc.body, true); w.Code != 409 {
+			t.Fatalf("%s: %d %s", name, w.Code, w.Body.String())
+		}
+	}
+	for _, id := range []string{"child", "gate"} {
+		if rerunJobView(t, h, id)["rerun"] != nil {
+			t.Fatalf("%s advertises a remedy", id)
+		}
+	}
+	if rerunJobView(t, h, "plain")["rerun"] == nil || operationMap(rerunJobView(t, h, "plain")["rerun"])["remedy_mode"] != nil {
+		t.Fatal("a cancelled job must offer a plain rerun only")
 	}
 }

@@ -84,6 +84,8 @@ function actionIcon(label) {
     Retry: "M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M18 18A8 8 0 0 1 4 12",
     "Run again": "M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M18 18A8 8 0 0 1 4 12",
     "Try with x265": "M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M18 18A8 8 0 0 1 4 12",
+    "Convert to SDR 1080p": "M4 7h16M4 17h16M8 4v6M16 14v6",
+    "Make it smaller": "M4 7h16M4 17h16M8 4v6M16 14v6",
     Review: "M5 4h14v16H5ZM8 8h8M8 12h8",
     "Review preview": "M5 4h14v16H5ZM8 8h8M8 12h8",
     "Start batch": "M7 4l13 8-13 8Z",
@@ -338,10 +340,10 @@ async function api(path, body) {
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
 }
-async function tool(name, args = {}) {
+async function tool(name, args = {}, onAccepted) {
   const mutates = ["action_run","action_resume","action_retry","action_cancel"].includes(name) || name === "transcode_backups" && ["clean","discard_duplicate","discard","restore"].includes(args.mode);
   const result = mutates
-    ? await commandRequest("tool", {name,arguments:args,background:true})
+    ? await commandRequest("tool", {name,arguments:args,background:true}, onAccepted)
     : await api("tool", {name,arguments:args});
   if (!result.content) return result;
   const text = result.content
@@ -2491,14 +2493,14 @@ function renderSavings(data) {
       node("p", "No verified replacements yet.", "muted"),
     );
 }
-async function jobControl(id, name, args = {}) {
+async function jobControl(id, name, args = {}, {onAccepted} = {}) {
   if (jobIsBusy(id)) return;
   state.busyJobs.add(id);
   document.querySelectorAll("[data-job-control]").forEach((b) => {
     if (b.dataset.jobControl === id) b.disabled = true;
   });
   try {
-    await tool(name, { id, ...args });
+    await tool(name, { id, ...args }, onAccepted);
     await Promise.all([state.detail === id && $("job-detail").open ? refreshDetail() : Promise.resolve(), loadJobs()]);
   } finally {
     state.busyJobs.delete(id);
@@ -3077,21 +3079,30 @@ function confirmDecision(job, choice, label) {
 const rerunGoals = {size: "Smaller files", quality: "Prioritize quality", x265_preserve: "Convert to HEVC · Strict quality", compact: "Make it much smaller · SDR 1080p"};
 // Another round on a file is the user's decision: confirming is that decision,
 // and each confirmed attempt starts a new action under a fresh key.
-async function rerunJob(job, {withoutHardware = false} = {}) {
+// A skipped file whose goal cannot handle its source starts a NEW job under the
+// goal the server named. The server refuses any other goal.
+const remedyActions = {
+  compact: {label: "Convert to SDR 1080p", title: "Convert this file to SDR 1080p?", line: "Converts to 1080p SDR and removes HDR. At least 30% smaller."},
+  size: {label: "Make it smaller", title: "Make this file smaller?", line: "Keeps the look, at least 15% smaller."},
+};
+async function rerunJob(job, {withoutHardware = false, mode = ""} = {}) {
   const info = job.rerun || {};
   const content = [node("p", queuePresentation(job).title, "review-filename")];
+  const remedy = mode ? remedyActions[mode] : null;
   const goal = rerunGoals[info.mode];
-  content.push(node("p", goal ? `Goal: ${goal}` : "The same settings as before."));
+  if (remedy) content.push(node("p", remedy.line));
+  else content.push(node("p", goal ? `Goal: ${goal}` : "The same settings as before."));
   if (withoutHardware) content.push(node("p", "The media engine is turned off for this job, so it encodes with x265: slower, but it usually keeps more quality at the same size."));
-  content.push(node("p", withoutHardware ? "This starts a new job with the same settings otherwise. The earlier job is not changed." : "This starts a new job with the same settings. The earlier job is not changed.", "muted"));
-  if (info.no_winner_rounds >= 2) content.push(node("p", `This file already had ${info.no_winner_rounds} searches without a result. Run it again only if you want another round.`));
-  content.push(node("p", info.replace_original ? "This job was set to replace the original: if it finds a result, the original is replaced only after you review and approve it." : "Originals stay in place.", "muted"));
+  if (!remedy) content.push(node("p", withoutHardware ? "This starts a new job with the same settings otherwise. The earlier job is not changed." : "This starts a new job with the same settings. The earlier job is not changed.", "muted"));
+  if (!remedy && info.no_winner_rounds >= 2) content.push(node("p", `This file already had ${info.no_winner_rounds} searches without a result. Run it again only if you want another round.`));
+  if (remedy) content.push(node("p", info.replace_original ? "The original is replaced only after you approve the result." : "Originals stay in place.", "muted"));
+  else content.push(node("p", info.replace_original ? "This job was set to replace the original: if it finds a result, the original is replaced only after you review and approve it." : "Originals stay in place.", "muted"));
   // One key per open confirmation: after a lost response, clicking again replays
   // the same key instead of creating a second job. Declining or success ends it.
   state.rerunKeys ||= new Map();
-  const keyID = withoutHardware ? `${job.id}:x265` : job.id;
+  const keyID = withoutHardware ? `${job.id}:x265` : mode ? `${job.id}:${mode}` : job.id;
   if (!state.rerunKeys.has(keyID)) state.rerunKeys.set(keyID, submissionID());
-  if (!(await reviewAction({title: withoutHardware ? "Try this file with x265?" : "Run this file again?", content, confirmLabel: withoutHardware ? "Try with x265" : "Run again", cancelLabel: "Not now"}))) {
+  if (!(await reviewAction({title: remedy ? remedy.title : withoutHardware ? "Try this file with x265?" : "Run this file again?", content, confirmLabel: remedy ? remedy.label : withoutHardware ? "Try with x265" : "Run again", cancelLabel: "Not now"}))) {
     state.rerunKeys.delete(keyID);
     return;
   }
@@ -3100,6 +3111,7 @@ async function rerunJob(job, {withoutHardware = false} = {}) {
   try {
     const body = {id: job.id, key: state.rerunKeys.get(keyID)};
     if (withoutHardware) body.without_hardware = true;
+    if (mode) body.mode = mode;
     const result = await api("rerun", body);
     state.rerunKeys.delete(keyID);
     state.jobsLoaded = 0;
@@ -3114,7 +3126,7 @@ function jobControls(job, detail = false) {
   const actionRail = node("div", "", "job-actions");
   const add = (label, fn) => {
     const b = button(label, fn);
-    if (label === "Start batch") b.className = "primary";
+    if (label === "Start batch" || Object.values(remedyActions).some(r => r.label === label)) b.className = "primary";
     // Every job action carries an icon, so rows and the detail dialog match.
     const icon = actionIcon(label) || actionIcon("Action");
     if (icon) b.append(icon);
@@ -3123,6 +3135,7 @@ function jobControls(job, detail = false) {
       (label === "Retry" && ["transcode_media", "transcode_batch", "benchmark_transcode"].includes(job.action_name) && !(job.action_name === "transcode_batch" && job.current_step >= 2)) ||
       label === "Run again" ||
       label === "Try with x265" ||
+      Object.values(remedyActions).some(r => r.label === label) ||
       label === "Resume batch" ||
       label === "Start batch" ||
       (job.action_name === "transcode_batch" && !job.batch?.promotion_plan_ready &&
@@ -3233,8 +3246,12 @@ function jobControls(job, detail = false) {
   }
   // The server marks only standalone files that were cancelled or ended with no
   // winner; batch children use Change goal and reviewed candidates are decided.
-  if (job.rerun && !job.parent_item_key && !job.candidate_ready && !job.replacement_action_id && job.status !== "waiting_decision" && !(job.mode && sourceGateReason(job.reason_code)))
+  if (job.rerun && !job.rerun.remedy_mode && !job.parent_item_key && !job.candidate_ready && !job.replacement_action_id && job.status !== "waiting_decision" && !(job.mode && sourceGateReason(job.reason_code)))
     add("Run again", () => rerunJob(job));
+  // A file skipped because its goal is wrong for it: one button starts a new job
+  // under the goal the server named. Running it again would skip it again.
+  if (job.rerun?.remedy_mode && remedyActions[job.rerun.remedy_mode] && !job.parent_item_key && !job.candidate_ready && !job.replacement_action_id && job.status !== "waiting_decision")
+    add(remedyActions[job.rerun.remedy_mode].label, () => rerunJob(job, {mode: job.rerun.remedy_mode}));
   // A media engine budget encode that fit but missed the quality floor offers no
   // candidate; x265 is slower and usually keeps more quality at the same size.
   if (job.rerun && job.size_mode?.size_budget?.retry_without_hardware && !job.parent_item_key && !job.candidate_ready && !job.replacement_action_id && job.status !== "waiting_decision")
@@ -3386,6 +3403,7 @@ function shortJobReason(reason) {
     audio_only_worker_unsupported: "No video setting met this goal; compacting only the audio needs an updated worker. Original kept",
     unsupported_source: "Automatic testing does not support this source format yet; original kept",
     hdr_requires_compact: "HDR or Dolby Vision source; only the Much smaller goal converts it. Original kept",
+    compact_not_needed: "Already SDR at or below the Much smaller target; the Smaller files goal can shrink it. Original kept",
     hfr_quality_unavailable: "The worker cannot measure quality at this frame rate yet; original kept",
     compact_frame_evidence_unavailable: "Could not read this video's frames to plan the conversion (it may have timed out); original kept. Use Change goal to try again",
     quality_policy_unavailable: "The worker cannot run the quality checks this goal needs; original kept",
@@ -3530,7 +3548,7 @@ function queuePresentation(job) {
   const observation = workerProgressObservation(job);
   const replacementComplete = job.savings?.realized_saved_bytes != null ||
     (job.replaced && job.status === "completed");
-  const skippedFile = job.action_name === "transcode_media" && job.status === "completed" && !job.candidate_ready && ["quality_not_met","insufficient_savings","size_growth","size_growth_exceeded","preservation_not_met","already_target_codec","no_suitable_candidate","audio_compaction_insufficient","audio_estimate_unavailable","audio_only_worker_unsupported","unsupported_source","hdr_requires_compact"].includes(job.reason_code);
+  const skippedFile = job.action_name === "transcode_media" && job.status === "completed" && !job.candidate_ready && ["quality_not_met","insufficient_savings","size_growth","size_growth_exceeded","preservation_not_met","already_target_codec","no_suitable_candidate","audio_compaction_insufficient","audio_estimate_unavailable","audio_only_worker_unsupported","unsupported_source","hdr_requires_compact","compact_not_needed"].includes(job.reason_code);
   const status = skippedFile ? "Skipped" : job.status === "waiting_decision" && job.reason_code === "search_budget_exhausted" ? "Needs attention" : job.status === "failed" && !rejectedCandidate(job) && !savingsPolicyFailure(job.error) ? "Failed" : job.replaced_files > 0 && job.remaining_candidates > 0 ? "Candidates ready" : replacementComplete
     ? "Replaced"
     : rejectedCandidate(job) ? "Rejected" : savingsPolicyFailure(job.error) ? "Minimum savings not met" : outcomes[batch?.outcome] ||
@@ -3590,8 +3608,8 @@ function queuePresentation(job) {
 // The next step a card offers, most important first. Only one is labelled.
 // Shortened visible labels for main actions. Each is a prefix of the full
 // label, which stays the accessible name (WCAG 2.5.3 Label in Name).
-const shortActionLabels = {"Replace file":"Replace","Set up benchmark":"Set up","Review candidates":"Review","Review candidate":"Review","Review replacement":"Review","Review replacements":"Review","Review preview":"Review","Validate classifications":"Validate","Check worker again":"Check worker","Check library again":"Check library","Resume batch":"Resume","Start batch":"Start","Try another profile":"Try another"};
-const mainQueueActions = ["Replace file", "Review replacements", "Review replacement", "Review candidates", "Review candidate", "Review cuts", "Validate classifications", "Review", "Resume batch", "Start batch", "Set up benchmark", "Retry", "Check worker again", "Check library again", "Review preview", "Try another profile"];
+const shortActionLabels = {"Replace file":"Replace","Set up benchmark":"Set up","Review candidates":"Review","Review candidate":"Review","Review replacement":"Review","Review replacements":"Review","Review preview":"Review","Validate classifications":"Validate","Check worker again":"Check worker","Check library again":"Check library","Resume batch":"Resume","Start batch":"Start","Try another profile":"Try another","Convert to SDR 1080p":"Convert to SDR"};
+const mainQueueActions = ["Replace file", "Review replacements", "Review replacement", "Review candidates", "Review candidate", "Review cuts", "Validate classifications", "Review", "Resume batch", "Start batch", "Set up benchmark", "Retry", "Convert to SDR 1080p", "Make it smaller", "Check worker again", "Check library again", "Review preview", "Try another profile"];
 const visibleQueueIcons = 3;
 function compactQueueActions(actions) {
   // A card shows at most one labelled main action, then square icon buttons
@@ -4489,12 +4507,20 @@ async function refreshDetail() {
       statusBadge(queuePresentation(job).status),
       node("p", queuePresentation(job).summary, "muted"),
     );
+    // The summary line already says why a file was skipped. An outcome line that
+    // only repeats text already shown is left out, so the reason appears once.
+    const shownOutcomes = [queuePresentation(job).summary];
+    const addOutcome = (text) => {
+      if (!text || shownOutcomes.some(shown => shown.includes(text))) return;
+      shownOutcomes.push(text);
+      summary.append(node("p", text, "job-outcome metadata"));
+    };
     if (job.podcast) { const p=job.podcast; summary.append(node("p",`${p.classified_blocks || 0}/${p.total_blocks || 0} transcript blocks classified · ${((p.removed_ms || 0)/1000).toFixed(1)} seconds removed · ${p.known_ad_units || 0} units verified by known ads`,"metadata")); if (p.output_path && job.status === "completed") summary.append(node("p",`Validated MP3: ${p.output_path}`,"metadata")); }
     if (job.transcode) {
       // A waiting decision repeats its reason below, and a sample test result
       // card explains the outcome itself; show it only once.
       const hasReport = job.benchmark?.outcome && !["testing", "size_budget_ladder"].includes(job.benchmark.outcome);
-      if (job.status !== "waiting_decision" && !hasReport) summary.append(node("p", jobOutcomeText(job), "job-outcome metadata"));
+      if (job.status !== "waiting_decision" && !hasReport) addOutcome(jobOutcomeText(job));
       if (job.transcode.tested_candidates) summary.append(node("p", `${job.transcode.tested_candidates} configurations tested${job.transcode.verified_samples ? ` · ${job.transcode.verified_samples} quality samples verified` : ""}`, "metadata"));
     }
  renderPhaseCosts(summary, job);
@@ -4506,7 +4532,7 @@ async function refreshDetail() {
     if (size) summary.append(size);
     if (queuePresentation(job).showTelemetry) summary.append(telemetry(job));
     else if (batchProgress(job)) summary.append(batchProgress(job));
-    else if (!job.batch?.dry_run && job.batch?.outcome !== "no_changes") summary.append(node("p", queueOutcome(job), "job-outcome metadata"));
+    else if (!job.batch?.dry_run && job.batch?.outcome !== "no_changes") addOutcome(queueOutcome(job));
     if (job.batch?.outcome === "no_changes") summary.append(skippedBatchOutcome(job));
     if (job.batch?.dry_run) summary.append(node("p", queueOutcome(job) + (job.batch.queued > 0 && !job.preview_execution_action_id ? ". Review the eligible files, then choose Start batch to convert them." : "."), "preview-notice"));
     const raw = job.status === "waiting_decision" ? job.waiting_reason : job.status === "failed" ? job.error : "";
@@ -4847,9 +4873,8 @@ $("approve-file-review").addEventListener("click", () => safe(async () => {
     if (current?.status !== "waiting_decision" || !current.waiting_options?.some(option => option.decision === "approve") || current.promotion?.original_sha256 !== approval.original || current.promotion?.candidate_sha256 !== approval.candidate || current.promotion?.plan_digest !== approval.digest)
       throw new Error("The replacement plan changed. Close this review and open it again.");
     // The server refuses an approval whose digest is not the reviewed plan's.
-    await jobControl(approval.id, "action_resume", { decision: "approve", plan_digest: approval.digest });
-    $("file-review").close();
-    await openJob(approval.id);
+    // Once it accepts, the review is done: progress shows on the job's row.
+    await jobControl(approval.id, "action_resume", { decision: "approve", plan_digest: approval.digest }, {onAccepted: () => $("file-review").close()});
   } finally {
     state.approvingFile = false;
     $("approve-file-review").disabled = !serverReachable;

@@ -309,21 +309,21 @@
 
               <fieldset id="processing-goal" class="processing-goal">
                 <legend>Choose your goal</legend>
-                <label><input type="radio" name="processing-mode" value="size" /><span><strong>Smaller files</strong><small>Acceptable quality, at least 15% measured savings. Lossless audio (TrueHD, DTS-HD MA, PCM, FLAC) becomes AAC with the same channel layout, including lossless Atmos and DTS:X, which lose their object and height channels; lossy tracks, Atmos on E-AC-3 included, are copied, and every track and language is kept. 8-bit video may be encoded as 10-bit HEVC when the worker can verify its quality. If no video setting qualifies, the video may be kept bit-identical and only the lossless audio compacted.</small></span></label>
-                <div id="hardware-option" class="hardware-option" hidden>
-                  <label class="check"><input id="allow-hardware" type="checkbox" checked /><span><strong>Allow the media engine (faster)</strong><small>Also tries Apple hardware encodes through the same quality checks. One is used only when its file is within the margin below of the best software result, or when software finds nothing. Turn it off to keep software (x265) encodes only. Needs an updated Mac worker; otherwise the search stays on software. A hardware result is labeled VideoToolbox before you replace anything.</small></span></label>
-                  <label id="hardware-margin-label">Accept files up to <input id="hardware-margin" type="number" min="0" max="50" step="1" value="15" inputmode="numeric" /> % larger</label>
+                <label><input type="radio" name="processing-mode" value="size" /><span><strong>Smaller files</strong><small>Same look, at least 15% smaller. Lossless audio becomes AAC.</small></span></label>
+                <div id="hardware-option" class="goal-options" hidden>
+                  <label class="check"><input id="allow-hardware" type="checkbox" checked /><span>Use the media engine (faster)</span></label>
+                  <label id="hardware-margin-label" class="goal-inline">Within <input id="hardware-margin" type="number" min="0" max="50" step="1" value="15" inputmode="numeric" /> % of x265's size</label>
                 </div>
-                <div id="size-budget-option" class="hardware-option size-budget-option" hidden>
-          <label>Size budget (optional)<select id="size-budget-kind"><option value="">None</option><option value="percent">A percent of the original</option><option value="gb">A size in GB</option><option value="siblings">Match sibling episodes</option></select></label>
-          <p class="muted size-budget-help">If no setting meets the quality limits, or the one that does is larger than the budget, the file is encoded once at the budget instead. Its quality is measured and reported as below the quality target; a fixed quality floor still applies, and replacing the original still needs your approval.</p>
-          <label id="size-budget-percent-label" hidden>At most <input id="size-budget-percent" type="number" min="5" max="85" step="1" inputmode="decimal" placeholder="33" /> % of the original (5 to 85)</label>
-          <label id="size-budget-gb-label" hidden>At most <input id="size-budget-gb" type="number" min="0.05" step="0.05" inputmode="decimal" placeholder="1.5" /> GB (at least 0.05)</label>
-          <label id="size-budget-multiplier-label" hidden>Up to <input id="size-budget-multiplier" type="number" min="1" max="4" step="0.1" value="1.5" inputmode="decimal" /> × the median bitrate of the other episodes in the same season, else the series (at least 3 of the same resolution)</label>
+                <div id="size-budget-option" class="goal-options" hidden>
+                  <label class="goal-field">Size limit <select id="size-budget-kind"><option value="">None</option><option value="percent">% of original</option><option value="gb">GB</option><option value="siblings">Match other episodes</option></select></label>
+                  <label id="size-budget-percent-label" class="goal-inline" hidden>At most <input id="size-budget-percent" type="number" min="5" max="85" step="1" inputmode="decimal" placeholder="33" /> % of the original</label>
+                  <label id="size-budget-gb-label" class="goal-inline" hidden>At most <input id="size-budget-gb" type="number" min="0.05" step="0.05" inputmode="decimal" placeholder="1.5" /> GB</label>
+                  <label id="size-budget-multiplier-label" class="goal-inline" hidden>Up to <input id="size-budget-multiplier" type="number" min="1" max="4" step="0.1" value="1.5" inputmode="decimal" /> × other episodes' bitrate</label>
+                  <p class="muted size-budget-help">If nothing fits, it encodes once at the limit and shows the measured quality.</p>
                 </div>
-                <label><input type="radio" name="processing-mode" value="quality" checked /><span><strong>Prioritize quality</strong><small>Strict quality checks, no file growth.</small></span></label>
-                <label><input type="radio" name="processing-mode" value="x265_preserve" /><span><strong>Convert to HEVC · Strict quality</strong><small>Strict quality checks, no file growth. Existing HEVC stays unchanged.</small></span></label>
-                <label><input type="radio" name="processing-mode" value="compact" /><span><strong>Make it much smaller · SDR 1080p</strong><small>For 4K, HDR and Dolby Vision files: converts to standard dynamic range (SDR) at up to 1080p and turns lossless audio (TrueHD, DTS-HD MA, PCM, FLAC) into AAC with the same channel layout, keeping every language and subtitle. HDR and Dolby Vision are removed. E-AC-3, AC-3 and AAC tracks are copied unchanged, so Atmos on E-AC-3 is kept; TrueHD Atmos becomes AAC. At least 30% measured savings; replacing the original still needs your approval.</small></span></label>
+                <label><input type="radio" name="processing-mode" value="quality" checked /><span><strong>Prioritize quality</strong><small>Strict quality checks, never larger.</small></span></label>
+                <label><input type="radio" name="processing-mode" value="x265_preserve" /><span><strong>Convert to HEVC</strong><small>Strict quality; files already in HEVC are left alone.</small></span></label>
+                <label><input type="radio" name="processing-mode" value="compact" /><span><strong>Make it much smaller · SDR 1080p</strong><small>4K/HDR → 1080p SDR, at least 30% smaller. HDR is removed.</small></span></label>
               </fieldset>
               <p id="goal-overridden" class="goal-overridden" role="status" hidden>Goal not used: a technical profile is on in Advanced below. Turn it off to process with this goal.</p>
               <p id="processing-policy" class="metadata">Automatic: samples determine the effective plan. Savings and quality must pass validation; a result is not guaranteed.</p>
@@ -987,17 +987,17 @@
       <details id="reconfigure-selection" class="reconfigure-selection"><summary>Selected files</summary><div id="reconfigure-files" class="metadata"></div></details>
       <form id="reconfigure-form" hidden>
         <label id="reconfigure-scope-label">Apply to<select id="reconfigure-scope"></select></label>
-        <label id="reconfigure-mode-label" hidden>Goal<select id="reconfigure-mode"><option value="size">Smaller files · At least 15% savings</option><option value="quality">Prioritize quality · No file growth</option><option value="x265_preserve">Convert to HEVC · Strict quality</option><option value="compact">Make it much smaller · SDR 1080p (removes HDR and Dolby Vision; lossless audio → AAC)</option></select></label>
-        <div id="reconfigure-hardware-option" class="hardware-option" hidden>
-          <label class="check"><input id="reconfigure-hardware" type="checkbox" checked /><span><strong>Allow the media engine (faster)</strong><small>Also tries Apple hardware encodes through the same quality checks; a result is used only within the margin below of the best software result, or when software finds nothing. Turn it off for software (x265) encodes only.</small></span></label>
-          <label id="reconfigure-hardware-margin-label">Accept files up to <input id="reconfigure-hardware-margin" type="number" min="0" max="50" step="1" value="15" inputmode="numeric" /> % larger</label>
+        <label id="reconfigure-mode-label" hidden>Goal<select id="reconfigure-mode"><option value="size">Smaller files · At least 15% smaller</option><option value="quality">Prioritize quality · Never larger</option><option value="x265_preserve">Convert to HEVC · Strict quality</option><option value="compact">Make it much smaller · SDR 1080p (HDR removed)</option></select></label>
+        <div id="reconfigure-hardware-option" class="goal-options" hidden>
+          <label class="check"><input id="reconfigure-hardware" type="checkbox" checked /><span>Use the media engine (faster)</span></label>
+          <label id="reconfigure-hardware-margin-label" class="goal-inline">Within <input id="reconfigure-hardware-margin" type="number" min="0" max="50" step="1" value="15" inputmode="numeric" /> % of x265's size</label>
         </div>
-        <div id="reconfigure-budget-option" class="hardware-option size-budget-option" hidden>
-          <label>Size budget (optional)<select id="reconfigure-budget-kind"><option value="">None</option><option value="percent">A percent of the original</option><option value="gb">A size in GB</option><option value="siblings">Match sibling episodes</option></select></label>
-          <p class="muted size-budget-help">If no setting meets the quality limits, or the one that does is larger than the budget, the file is encoded once at the budget instead. Its quality is measured and reported as below the quality target; a fixed quality floor still applies, and replacing the original still needs your approval.</p>
-          <label id="reconfigure-budget-percent-label" hidden>At most <input id="reconfigure-budget-percent" type="number" min="5" max="85" step="1" inputmode="decimal" placeholder="33" /> % of the original (5 to 85)</label>
-          <label id="reconfigure-budget-gb-label" hidden>At most <input id="reconfigure-budget-gb" type="number" min="0.05" step="0.05" inputmode="decimal" placeholder="1.5" /> GB (at least 0.05)</label>
-          <label id="reconfigure-budget-multiplier-label" hidden>Up to <input id="reconfigure-budget-multiplier" type="number" min="1" max="4" step="0.1" value="1.5" inputmode="decimal" /> × the median bitrate of the other episodes in the same season, else the series (at least 3 of the same resolution)</label>
+        <div id="reconfigure-budget-option" class="goal-options" hidden>
+          <label class="goal-field">Size limit <select id="reconfigure-budget-kind"><option value="">None</option><option value="percent">% of original</option><option value="gb">GB</option><option value="siblings">Match other episodes</option></select></label>
+          <label id="reconfigure-budget-percent-label" class="goal-inline" hidden>At most <input id="reconfigure-budget-percent" type="number" min="5" max="85" step="1" inputmode="decimal" placeholder="33" /> % of the original</label>
+          <label id="reconfigure-budget-gb-label" class="goal-inline" hidden>At most <input id="reconfigure-budget-gb" type="number" min="0.05" step="0.05" inputmode="decimal" placeholder="1.5" /> GB</label>
+          <label id="reconfigure-budget-multiplier-label" class="goal-inline" hidden>Up to <input id="reconfigure-budget-multiplier" type="number" min="1" max="4" step="0.1" value="1.5" inputmode="decimal" /> × other episodes' bitrate</label>
+          <p class="muted size-budget-help">If nothing fits, it encodes once at the limit and shows the measured quality.</p>
         </div>
         <label>Profile<select id="reconfigure-profile" required aria-describedby="reconfigure-profile-note"></select></label>
         <p id="reconfigure-profile-note" class="profile-guidance" hidden></p>
