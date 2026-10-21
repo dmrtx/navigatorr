@@ -2,6 +2,7 @@ package action
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 
@@ -294,5 +295,80 @@ func TestSizeBudgetLadderFittingRungIsValidated(t *testing.T) {
 				t.Fatalf("outcome %q fits %v record %+v", got.Outcome, fits, got)
 			}
 		})
+	}
+}
+
+// A v4 budget whose lossless audio alone fits is encoded audio-only, held to
+// the budget as its byte ceiling, as every ladder rung is: the worker refuses
+// a larger file, and validation refuses a plan without the ceiling or a file
+// over it.
+func TestSizeBudgetAudioOnlyCarriesTheBudget(t *testing.T) {
+	c := newRecipeCase(t, map[string]any{"size_budget_percent": 60.0}, nil)
+	rep := audioOnlyReport()
+	rep.Video[0].BitRate, rep.Video[0].Tags = 0, map[string]string{"NUMBER_OF_BYTES": "4500000000"}
+	c.ec.State["source_report"], c.ec.State["original_size"] = rep, int64(10_700_000_000)
+	res, err := c.engine.stepBenchmarkSubmit(context.Background(), c.ec)
+	if err != nil || res.Status != StepCompleted {
+		t.Fatalf("submit %+v %v", res, err)
+	}
+	mergeMap(c.ec.State, res.Outputs)
+	plan := getPlan(c.ec.State["plan"])
+	budget, ok := sizeAudioOnlyBudget(c.snapshot, c.ec.State)
+	if !ok || budget <= 0 || budget >= 10_700_000_000 || c.ec.State["plan_source"] != "audio_only" || !transcode.IsSizeAudioOnlyPlan(plan) || transcode.ValidateSizeAudioOnlyShape(plan) != nil {
+		t.Fatalf("budget %d plan %+v source %v", budget, plan, c.ec.State["plan_source"])
+	}
+	if plan.SizePolicy.MaxCandidateBytes != budget || c.ec.State["plan_digest"] != plan.PlanDigest || res.Outputs["plan_digest"] != plan.PlanDigest || c.executor.benchmarkSubmitCalls != 0 {
+		t.Fatalf("ceiling %d want %d", plan.SizePolicy.MaxCandidateBytes, budget)
+	}
+
+	// validate runs the validate step on an audio-only candidate of n bytes
+	// for a source of original bytes.
+	validate := func(p *transcode.Plan, original int64, n int) StepResult {
+		t.Helper()
+		candidate := t.TempDir() + "/candidate.mkv"
+		if err := os.WriteFile(candidate, make([]byte, n), 0600); err != nil {
+			t.Fatal(err)
+		}
+		state := map[string]any{}
+		for k, v := range c.ec.State {
+			state[k] = v
+		}
+		state["plan"], state["plan_digest"] = p, p.PlanDigest
+		state["candidate_path"], state["candidate_sha256"] = candidate, "candidate"
+		state["original_size"], state["original"] = original, map[string]any{"size_bytes": original, "video_codec": "hevc"}
+		state["quality_evidence"] = map[string]any{"verdict": "pass", "candidate_sha256": "candidate", "plan_digest": p.PlanDigest,
+			"video_copy": map[string]any{"method": transcode.VideoCopyMethod, "verdict": "pass", "source_hash": "sha256:v", "candidate_hash": "sha256:v", "source_packets": 1200, "candidate_packets": 1200, "source_codec": "hevc"}}
+		ec := &ExecutionContext{ActionName: "transcode_media", InstanceID: c.ec.InstanceID, Inputs: c.ec.Inputs, State: state}
+		res, err := (&Engine{}).stepTranscodeValidate(context.Background(), ec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+	if res := validate(plan, 10_700_000_000, 80); res.Status != StepCompleted || res.Outputs["skipped"] == true {
+		t.Fatalf("a candidate within the budget: %+v", res)
+	}
+	unbounded, err := sizeAudioOnlyBudgetPlan(plan, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp := *unbounded.SizePolicy
+	sp.MaxCandidateBytes = 0
+	unbounded.SizePolicy = &sp
+	unbounded.PlanDigest = ""
+	unbounded.PlanDigest, _ = transcode.DigestPlan(unbounded)
+	if res := validate(unbounded, 10_700_000_000, 80); res.Status != StepFailed || !strings.Contains(res.Error, "frozen size budget") {
+		t.Fatalf("an audio-only plan without the budget: %+v", res)
+	}
+	// A file over the ceiling is never offered.
+	const small = int64(1000)
+	smallState := map[string]any{"original_size": small}
+	smallBudget, _ := sizeAudioOnlyBudget(c.snapshot, smallState)
+	held, err := sizeAudioOnlyBudgetPlan(plan, smallBudget)
+	if err != nil || smallBudget <= 0 || smallBudget >= small {
+		t.Fatalf("budget %d: %v", smallBudget, err)
+	}
+	if res := validate(held, small, int(smallBudget)+1); res.Status != StepCompleted || res.Outputs["reason_code"] != SizeBudgetExceeded {
+		t.Fatalf("a candidate over the budget: %+v", res)
 	}
 }

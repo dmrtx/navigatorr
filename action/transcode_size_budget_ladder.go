@@ -184,7 +184,7 @@ func (e *Engine) startSizeBudgetLadder(ctx context.Context, ec *ExecutionContext
 	if recipe && audioFits {
 		// Copying the video loses no picture quality, and also answers a
 		// budget too small for any video bitrate.
-		return e.startSizeBudgetAudioOnly(ctx, ec)
+		return e.startSizeBudgetAudioOnly(ctx, ec, budget)
 	}
 	enc := planSizeBudgetEncode(policy, rep, original, budget)
 	if enc.Reason != "" {
@@ -232,8 +232,10 @@ func (e *Engine) startSizeBudgetLadder(ctx context.Context, ec *ExecutionContext
 }
 
 // startSizeBudgetAudioOnly plans a v4 budget whose lossless audio alone fits:
-// the video is copied and only the audio is compacted.
-func (e *Engine) startSizeBudgetAudioOnly(ctx context.Context, ec *ExecutionContext) (StepResult, bool) {
+// the video is copied and only the audio is compacted. The fit is an
+// estimate, so the plan carries the budget as its byte ceiling, as a ladder
+// rung does, and the worker refuses a larger file.
+func (e *Engine) startSizeBudgetAudioOnly(ctx context.Context, ec *ExecutionContext, budget int64) (StepResult, bool) {
 	outputs := map[string]any{"benchmark_done": true, "has_winner": false}
 	ec.State["benchmark_done"], ec.State["has_winner"] = true, false
 	res, handled := e.sizeAudioOnlyFallback(ctx, ec, outputs)
@@ -241,9 +243,44 @@ func (e *Engine) startSizeBudgetAudioOnly(ctx context.Context, ec *ExecutionCont
 		return StepResult{Status: StepFailed, Error: "audio-only encode could not be planned for the size budget (fail closed)"}, true
 	}
 	if res.Status == StepCompleted && getString(ec.State, "plan_source") == "audio_only" {
+		plan, err := sizeAudioOnlyBudgetPlan(getPlan(ec.State["plan"]), budget)
+		if err != nil {
+			return StepResult{Status: StepFailed, Error: fmt.Sprintf("audio-only encode for the size budget: %v", err)}, true
+		}
+		ec.State["plan"], ec.State["plan_digest"] = plan, plan.PlanDigest
+		res.Outputs["plan"], res.Outputs["plan_digest"] = plan, plan.PlanDigest
 		res.Outputs["plan_note"] = "Copying the video and compacting the lossless audio alone fits the budget, so the video is copied unchanged and only the lossless audio is compacted."
 	}
 	return res, true
+}
+
+// sizeAudioOnlyBudgetPlan is an audio-only plan held to a size budget.
+func sizeAudioOnlyBudgetPlan(base *transcode.Plan, budget int64) (*transcode.Plan, error) {
+	if base == nil || base.SizePolicy == nil || budget <= 0 {
+		return nil, fmt.Errorf("the audio-only plan or the budget is missing (fail closed)")
+	}
+	p := *base
+	sp := *base.SizePolicy
+	sp.MaxCandidateBytes = budget
+	p.SizePolicy = &sp
+	p.PlanDigest = ""
+	d, err := transcode.DigestPlan(&p)
+	if err != nil {
+		return nil, err
+	}
+	p.PlanDigest = d
+	return &p, transcode.ValidateSizeAudioOnlyShape(&p)
+}
+
+// sizeAudioOnlyBudget is the byte ceiling a v4 audio-only encode must carry:
+// the frozen budget for a size budget goal, none otherwise. ok is false when
+// the budget cannot be worked out again.
+func sizeAudioOnlyBudget(snapshot *ModePolicySnapshot, state map[string]any) (int64, bool) {
+	if snapshot.Recipe == nil || snapshot.Recipe.Kind != RecipeSizeBudget || snapshot.Size == nil || snapshot.Size.SizeBudget == nil {
+		return 0, true
+	}
+	budget := snapshot.Size.SizeBudget.BudgetBytes(getInt64(state, "original_size"), siblingEvidenceOf(state))
+	return budget, budget > 0
 }
 
 func joinLadder(values []int) string {
