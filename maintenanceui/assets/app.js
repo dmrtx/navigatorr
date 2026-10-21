@@ -1140,7 +1140,7 @@ function libraryFailure(error, more) {
     button("Retry", () => loadLibrary(more), "quiet"),
   );
 }
-const draftFields = ["technical","scope","path","season","recursive","selected-only","promote-batch","profile","custom","encoder","quality","preset","tune","rate-mode","bitrate","max-bitrate","audio","max-items","preserve-depth","min-savings","max-growth","media-kind","allow-hardware","hardware-margin","size-budget-kind","size-budget-percent","size-budget-gb","size-budget-multiplier"];
+const draftFields = ["technical","scope","path","season","recursive","selected-only","promote-batch","profile","custom","encoder","quality","preset","tune","rate-mode","bitrate","max-bitrate","audio","max-items","preserve-depth","min-savings","max-growth","media-kind","allow-hardware","size-budget-kind","size-budget-percent","size-budget-gb","size-budget-multiplier"];
 function libraryDraftKey() {
   const source = $("service").value;
   return source.startsWith("folder:") ? source : `${source}:${state.media?.id || "catalog"}`;
@@ -1896,7 +1896,6 @@ function controls() {
   $("legacy-controls").hidden = !technical;
   $("processing-goal").disabled = technical;
   $("hardware-option").hidden = processingMode() !== "size";
-  $("hardware-margin-label").hidden = !$("allow-hardware").checked;
   $("size-budget-option").hidden = processingMode() !== "size";
   updateSizeBudgetFields("size-budget");
   refreshGoalProfile();
@@ -2053,12 +2052,6 @@ async function submitJob(mode = "encode") {
     controls();
   }
 }
-function hardwareMargin(field) {
-  const raw = String(field.value).trim();
-  const margin = Number(raw);
-  if (raw === "" || !Number.isFinite(margin) || margin < 0 || margin > 50) throw new Error("Enter a hardware size margin from 0 to 50 percent.");
-  return margin;
-}
 // Size budget (smaller files only, optional): a percent of the original, an
 // absolute size in GB, or a budget matched to the sibling episodes. One at a
 // time; the dropdown decides which field counts. prefix names the form's ids.
@@ -2106,7 +2099,6 @@ async function buildAndSubmitJob(mode = "encode") {
   if (simple && inputs.mode === "size") {
     // Always explicit, so the choice on screen is the choice that is frozen.
     inputs.allow_hardware = $("allow-hardware").checked;
-    if (inputs.allow_hardware) inputs.hardware_margin_percent = hardwareMargin($("hardware-margin"));
     Object.assign(inputs, sizeBudgetInputs("size-budget"));
   }
   const folderSource = $("service").value.startsWith("folder:");
@@ -2921,7 +2913,6 @@ async function reconfigureBatch(id, candidate = false, savedPlan = null) {
     $("reconfigure-mode").value = plan.mode || "quality";
     // A batch that never said anything about the media engine gets the default: on, 15 %.
     $("reconfigure-hardware").checked = plan.settings.allow_hardware !== false;
-    $("reconfigure-hardware-margin").value = plan.settings.hardware_margin_percent ?? 15;
     showSizeBudget("reconfigure-budget", plan.settings);
     updateReconfigureHardware();
     $("reconfigure-profile").closest("label").hidden = Boolean(plan.mode);
@@ -2958,7 +2949,6 @@ async function reconfigureBatch(id, candidate = false, savedPlan = null) {
 
 function updateReconfigureHardware() {
   $("reconfigure-hardware-option").hidden = !(state.reconfigurePlan?.mode && $("reconfigure-mode").value === "size");
-  $("reconfigure-hardware-margin-label").hidden = !$("reconfigure-hardware").checked;
   $("reconfigure-budget-option").hidden = $("reconfigure-hardware-option").hidden;
   updateSizeBudgetFields("reconfigure-budget");
 }
@@ -3063,7 +3053,6 @@ async function submitReconfiguredBatch() {
   const body = {id:plan.id,scope:plan.scope,selection_version:plan.selection_version,...(plan.mode ? {mode:$("reconfigure-mode").value} : {profile:$("reconfigure-profile").value,min_savings_percent:limit("reconfigure-savings"),max_size_increase_percent:limit("reconfigure-growth")})};
   if (plan.mode && body.mode === "size") {
     body.allow_hardware = $("reconfigure-hardware").checked;
-    if (body.allow_hardware) body.hardware_margin_percent = hardwareMargin($("reconfigure-hardware-margin"));
     Object.assign(body, sizeBudgetInputs("reconfigure-budget"));
   }
   body.preserve_limits = state.reconfigureOriginalLimits === batchSettingsLimits();

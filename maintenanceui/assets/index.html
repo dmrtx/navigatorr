@@ -316,14 +316,13 @@
                 <label><input type="radio" name="processing-mode" value="size" checked /><span><strong>Save space</strong><small>Use it for most files. Same look, at least 15% smaller; lossless audio becomes AAC.</small><em id="goal-note-size" class="goal-note" hidden></em></span></label>
                 <div id="hardware-option" class="goal-options" hidden>
                   <label class="check"><input id="allow-hardware" type="checkbox" checked /><span>Use the media engine (faster)</span></label>
-                  <label id="hardware-margin-label" class="goal-inline">Within <input id="hardware-margin" type="number" min="0" max="50" step="1" value="15" inputmode="numeric" /> % of x265's size</label>
                 </div>
                 <div id="size-budget-option" class="goal-options" hidden>
                   <label class="goal-field">Size limit <select id="size-budget-kind"><option value="">None</option><option value="percent">% of original</option><option value="gb">GB</option><option value="siblings">Match other episodes</option></select></label>
                   <label id="size-budget-percent-label" class="goal-inline" hidden>At most <input id="size-budget-percent" type="number" min="5" max="85" step="1" inputmode="decimal" placeholder="33" /> % of the original</label>
                   <label id="size-budget-gb-label" class="goal-inline" hidden>At most <input id="size-budget-gb" type="number" min="0.05" step="0.05" inputmode="decimal" placeholder="1.5" /> GB</label>
                   <label id="size-budget-multiplier-label" class="goal-inline" hidden>Up to <input id="size-budget-multiplier" type="number" min="1" max="4" step="0.1" value="1.5" inputmode="decimal" /> × other episodes' bitrate</label>
-                  <p class="muted size-budget-help">If nothing fits, it encodes once at the limit and shows the measured quality.</p>
+                  <p class="muted size-budget-help">The whole file is encoded to fit the limit, and the measured quality is shown.</p>
                 </div>
                 <label><input type="radio" name="processing-mode" value="compact" /><span><strong>Shrink to 1080p SDR</strong><small>Use it for 4K or HDR you don't need in 4K. At least 30% smaller; HDR is removed.</small><em id="goal-note-compact" class="goal-note" hidden></em></span></label>
                 <details id="more-goals" class="more-goals">
@@ -912,14 +911,13 @@
         <label id="reconfigure-mode-label" hidden>Goal<select id="reconfigure-mode"><option value="size">Save space · At least 15% smaller</option><option value="compact">Shrink to 1080p SDR · At least 30% smaller, HDR removed</option><optgroup label="More goals"><option value="quality">Strict quality · May save little</option><option value="x265_preserve">Convert to HEVC · HEVC files are left alone</option></optgroup></select></label>
         <div id="reconfigure-hardware-option" class="goal-options" hidden>
           <label class="check"><input id="reconfigure-hardware" type="checkbox" checked /><span>Use the media engine (faster)</span></label>
-          <label id="reconfigure-hardware-margin-label" class="goal-inline">Within <input id="reconfigure-hardware-margin" type="number" min="0" max="50" step="1" value="15" inputmode="numeric" /> % of x265's size</label>
         </div>
         <div id="reconfigure-budget-option" class="goal-options" hidden>
           <label class="goal-field">Size limit <select id="reconfigure-budget-kind"><option value="">None</option><option value="percent">% of original</option><option value="gb">GB</option><option value="siblings">Match other episodes</option></select></label>
           <label id="reconfigure-budget-percent-label" class="goal-inline" hidden>At most <input id="reconfigure-budget-percent" type="number" min="5" max="85" step="1" inputmode="decimal" placeholder="33" /> % of the original</label>
           <label id="reconfigure-budget-gb-label" class="goal-inline" hidden>At most <input id="reconfigure-budget-gb" type="number" min="0.05" step="0.05" inputmode="decimal" placeholder="1.5" /> GB</label>
           <label id="reconfigure-budget-multiplier-label" class="goal-inline" hidden>Up to <input id="reconfigure-budget-multiplier" type="number" min="1" max="4" step="0.1" value="1.5" inputmode="decimal" /> × other episodes' bitrate</label>
-          <p class="muted size-budget-help">If nothing fits, it encodes once at the limit and shows the measured quality.</p>
+          <p class="muted size-budget-help">The whole file is encoded to fit the limit, and the measured quality is shown.</p>
         </div>
         <label>Profile<select id="reconfigure-profile" required aria-describedby="reconfigure-profile-note"></select></label>
         <p id="reconfigure-profile-note" class="profile-guidance" hidden></p>
