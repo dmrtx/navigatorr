@@ -136,7 +136,7 @@ func compactBatch(res *action.ActionResult) *BatchSummary {
 	case "partial", "needs_review", "failed":
 		result.NextStep = "Inspect the error and action_detail(section=outputs,key=items) for affected files before retrying; completed candidates may already exist."
 	case "no_changes":
-		result.NextStep = "Originals are unchanged. Inspect selection and action_detail(section=outputs,key=items) for skip reasons; no automatic search retry is scheduled."
+		result.NextStep = "Originals are unchanged. Inspect selection and action_detail(section=outputs,key=items) for skip reasons; no automatic retry is scheduled."
 	}
 	return &result
 }

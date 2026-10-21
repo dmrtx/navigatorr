@@ -161,9 +161,9 @@ func toCompactSummary(res *action.ActionResult) ActionCompactSummary {
 		ValidationDurationMs: res.ValidationDurationMs,
 		ReconcileLagMs:       res.ReconcileLagMs,
 		Worker: compactOperationalFields(worker, []string{
-			"benchmark_search_seconds", "search_budget_seconds", "search_budget_max_seconds", "search_budget_verify_seconds", "search_worker_busy", "operation_search_budget_seconds", "transcode_status", "transcode_phase", "quality_evidence", "benchmark_status", "benchmark_quality", "benchmark_phase", "phase",
+			"transcode_status", "transcode_phase", "quality_evidence", "phase",
 			"progress", "speed", "fps", "last_progress_at", "worker_heartbeat_at", "last_worker_poll_at",
-			"progress_is_stale", "last_known_progress", "progress_details", "benchmark_progress_details",
+			"progress_is_stale", "last_known_progress", "progress_details",
 			"worker_slots_total", "worker_slots_used", "queue_position", "storage_backend",
 			"recovery_required", "error_class", "finalization_retry_count", "next_finalization_at",
 		}),
@@ -348,8 +348,8 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 	// action_run — start a declarative multi-step action workflow
 	s.AddTool(
 		mcp.NewTool("action_run",
-			mcp.WithDescription("Run a declarative multi-step action workflow (e.g. transcode_batch, transcode_media, promote_transcode_candidate, validate_torrent, safe_media_replacement). Inputs are validated before anything is persisted: a new request the caller got wrong returns an invalid_params error naming the field and reserves no idempotency key, so the corrected request can reuse it. A replay of an existing key with identical inputs returns the stored action without being validated again. Worker workflows then return a persisted action ID before preflight; the service reconciler executes them independently of this request. Use action_status to monitor progress or errors. Reuse idempotency_key after a lost response to recover the same action, including terminal results. State is persistently tracked in SQLite and tolerates disconnects and reboots. Transcode and benchmark external waits reconcile automatically; candidate promotion requires explicit approval. Note: 'inputs' must be provided as a JSON object string, and 'idempotency_key' is a top-level string argument. Discover input examples with action_catalog. Returns a compact operational summary."),
-			mcp.WithString("action", mcp.Required(), mcp.Description("Workflow name: transcode_batch, transcode_media, benchmark_transcode, promote_transcode_candidate, validate_torrent, safe_media_replacement")),
+			mcp.WithDescription("Run a declarative multi-step action workflow (e.g. transcode_batch, transcode_media, promote_transcode_candidate, validate_torrent, safe_media_replacement). Inputs are validated before anything is persisted: a new request the caller got wrong returns an invalid_params error naming the field and reserves no idempotency key, so the corrected request can reuse it. A replay of an existing key with identical inputs returns the stored action without being validated again. Worker workflows then return a persisted action ID before preflight; the service reconciler executes them independently of this request. Use action_status to monitor progress or errors. Reuse idempotency_key after a lost response to recover the same action, including terminal results. State is persistently tracked in SQLite and tolerates disconnects and reboots. Transcode external waits reconcile automatically; candidate promotion requires explicit approval. Note: 'inputs' must be provided as a JSON object string, and 'idempotency_key' is a top-level string argument. Discover input examples with action_catalog. Returns a compact operational summary."),
+			mcp.WithString("action", mcp.Required(), mcp.Description("Workflow name: transcode_batch, transcode_media, promote_transcode_candidate, validate_torrent, safe_media_replacement")),
 			mcp.WithString("inputs", mcp.Description("JSON object string with action parameters (e.g. \"{\\\"service\\\":\\\"sonarr\\\",\\\"series_id\\\":\\\"10\\\"}\" or \"{\\\"path\\\":\\\"/media/...\\\"}\"). Must be a JSON-encoded string, not a raw object.")),
 			mcp.WithString("service", mcp.Description("Shortcut: *arr service name (sonarr, radarr)")),
 			mcp.WithString("media_id", mcp.Description("Shortcut: media ID in *arr service; for transcode_batch use series_id inside inputs instead")),
@@ -467,7 +467,7 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 	// action_resume — resume an action from waiting_external or waiting_decision
 	s.AddTool(
 		mcp.NewTool("action_resume",
-			mcp.WithDescription("Resume an active or paused action workflow using its action ID. Prefer action_status for read-only monitoring: transcode and benchmark external waits advance automatically. Calling resume with id only can actively advance a waiting_external action. A completed dry_run preview cannot become an encode through resume; start a new action_run. For actions in waiting_decision, provide 'decision' matching one of waiting_options (e.g. approve, reject, accept_loss, resume, pause, cancel). Workflows advertised by action_catalog with immutable_inputs=true reject additional inputs after creation. Cancelling a transcode batch propagates cancellation to admitted child actions so active remote transcode jobs are stopped when supported. Returns a compact operational summary."),
+			mcp.WithDescription("Resume an active or paused action workflow using its action ID. Prefer action_status for read-only monitoring: transcode external waits advance automatically. Calling resume with id only can actively advance a waiting_external action. A completed dry_run preview cannot become an encode through resume; start a new action_run. For actions in waiting_decision, provide 'decision' matching one of waiting_options (e.g. approve, reject, accept_loss, resume, pause, cancel). Workflows advertised by action_catalog with immutable_inputs=true reject additional inputs after creation. Cancelling a transcode batch propagates cancellation to admitted child actions so active remote transcode jobs are stopped when supported. Returns a compact operational summary."),
 			mcp.WithString("id", mcp.Required(), mcp.Description("Action instance ID (e.g. act-transcode_batch-a1b2c3d4)")),
 			mcp.WithString("decision", mcp.Description("Decision choice when resuming from waiting_decision (matches one of the action's waiting_options, e.g. resume, pause, cancel, approve, reject, accept_loss). Omit when resuming waiting_external.")),
 			mcp.WithString("inputs", mcp.Description("Optional JSON object string with additional parameters. Rejected for workflows whose template declares immutable inputs.")),
@@ -508,7 +508,7 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 	// action_status — query the status, current step, and step log of an action
 	s.AddTool(
 		mcp.NewTool("action_status",
-			mcp.WithDescription("Read current status without advancing the action. For benchmarks, lead with benchmark.outcome, message and next_step; progress measures sample testing, not quality or full encoding. planned_audio is intent, not proof of conversion. Do not automatically start another search or select run_once_after_review. For batches, inspect batch.outcome and batch.next_step: completed does not mean promoted. Set verbose=true for full logs (bounded to 64 KiB)."),
+			mcp.WithDescription("Read current status without advancing the action. For a goal, lead with benchmark.outcome, message and next_step; progress measures the encode in flight, not quality. planned_audio is intent, not proof of conversion. For batches, inspect batch.outcome and batch.next_step: completed does not mean promoted. Set verbose=true for full logs (bounded to 64 KiB)."),
 			mcp.WithString("id", mcp.Required(), mcp.Description("Action instance ID")),
 			mcp.WithBoolean("verbose", mcp.Description("Optional: when true, attempts to return full inputs, outputs, state, and step payloads. Subject to a 64 KiB size guard. Defaults to false.")),
 		),
