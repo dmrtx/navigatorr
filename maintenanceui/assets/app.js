@@ -261,14 +261,19 @@ function invalidateAuthentication() {
   $("path-dialog").close();
   $("recipe-settings").close();
   $("replacement-choice").close();
-  $("login").hidden = state.authMode !== "token";
-  $("access-expired").hidden = state.authMode !== "cloudflare_access";
+  $("login").hidden = accessAuthenticated() || state.authMode !== "token";
+  $("access-expired").hidden = !accessAuthenticated();
   $("workspace").hidden = true;
   $("logout").hidden = true;
   $("local-session").hidden = true;
 }
+// Access-only mode, or token mode whose browser arrived signed in through Access:
+// either way an expired Access login is renewed by reloading, not by the token form.
+function accessAuthenticated() {
+  return state.authMode === "cloudflare_access" || state.accessSession === true;
+}
 function authenticationMessage() {
-  return state.authMode === "cloudflare_access"
+  return accessAuthenticated()
     ? "Cloudflare Access sign-in required. Reload to sign in."
     : "sign in to Navigatorr";
 }
@@ -304,8 +309,8 @@ async function api(path, body) {
   if (redirected) {
     // Access can intercept auth-info before the console knows its auth mode.
     // Never follow its login chain inside an API request or parse login HTML.
-    if (state.authMode === "cloudflare_access" || path === "auth-info") {
-      state.authMode = "cloudflare_access";
+    if (accessAuthenticated() || path === "auth-info") {
+      if (!accessAuthenticated()) state.authMode = "cloudflare_access";
       invalidateAuthentication();
       throw new Error(authenticationMessage());
     }
@@ -313,7 +318,7 @@ async function api(path, body) {
   }
   const contentType = res.headers?.get("Content-Type") || "";
   if (
-    state.authMode === "cloudflare_access" &&
+    accessAuthenticated() &&
     res.status === 403 &&
     /text\/html/i.test(contentType)
   ) {
@@ -889,15 +894,18 @@ async function initialize() {
   state.routeReady=false;
   const auth = await api("auth-info");
   state.authMode = auth.auth_mode;
-  $("logout").hidden = state.authMode !== "token";
-  $("local-session").hidden = state.authMode !== "token";
+  // A browser that arrived through Access has no local session to sign out of.
+  state.accessSession = auth.session === "cloudflare_access";
+  state.localSession = state.authMode === "token" && !state.accessSession;
+  $("logout").hidden = !state.localSession;
+  $("local-session").hidden = !state.localSession;
   const info = await api("bootstrap");
   state.info = info;
   $("login").hidden = true;
   $("workspace").hidden = false;
   $("worker-status").hidden = false;
   void refreshWorkers();
-  $("logout").hidden = state.authMode !== "token";
+  $("logout").hidden = !state.localSession;
   $("access-expired").hidden = true;
   $("service").replaceChildren();
   info.roots.forEach(

@@ -239,3 +239,89 @@ func TestTokenModeAuthInfoPreservesLocalAuthentication(t *testing.T) {
 		t.Fatal("local logout changed", logout.Body.String())
 	}
 }
+
+func TestTokenModeAlsoAcceptsVerifiedAccessAssertion(t *testing.T) {
+	original, _ := testUI(t)
+	original.cfg.Web.CloudflareAccess = config.CloudflareAccessConfig{TeamDomain: "example.cloudflareaccess.com", Audience: "application-audience"}
+	s, err := New(original.cfg, original.registry, original.engine, original.mcp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.access == nil || s.accessOnly {
+		t.Fatal("token mode did not add the Access verifier")
+	}
+	verifier, key, _ := accessFixture(t)
+	s.access = verifier
+	h := s.Handler()
+	withAssertion := func(method, path, assertion string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, path, nil)
+		r.Header.Set("Cf-Access-Jwt-Assertion", assertion)
+		r.Header.Set("X-Navigatorr-Request", "1")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	valid := accessJWT(t, key, map[string]any{"alg": "RS256", "kid": "key-1"}, accessClaims(verifier))
+	if w := withAssertion("GET", "/api/maintenance/bootstrap", valid); w.Code != 200 {
+		t.Fatalf("verified assertion refused: %d %s", w.Code, w.Body.String())
+	}
+	if w := withAssertion("GET", "/api/maintenance/auth-info", valid); strings.TrimSpace(w.Body.String()) != `{"auth_mode":"token","session":"cloudflare_access"}` {
+		t.Fatal("auth-info did not report the Access session", w.Body.String())
+	}
+	wrongAudience := accessClaims(verifier)
+	wrongAudience["aud"] = []string{"another-application"}
+	for name, assertion := range map[string]string{
+		"forged":         "forged",
+		"wrong audience": accessJWT(t, key, map[string]any{"alg": "RS256", "kid": "key-1"}, wrongAudience),
+	} {
+		if w := withAssertion("GET", "/api/maintenance/bootstrap", assertion); w.Code != 401 {
+			t.Fatalf("%s assertion accepted", name)
+		}
+		if w := withAssertion("GET", "/api/maintenance/auth-info", assertion); strings.TrimSpace(w.Body.String()) != `{"auth_mode":"token"}` {
+			t.Fatalf("%s assertion reported as a session: %s", name, w.Body.String())
+		}
+	}
+	duplicate := httptest.NewRequest("GET", "/api/maintenance/bootstrap", nil)
+	duplicate.Header.Add("Cf-Access-Jwt-Assertion", valid)
+	duplicate.Header.Add("Cf-Access-Jwt-Assertion", valid)
+	if w := httptest.NewRecorder(); func() int { h.ServeHTTP(w, duplicate); return w.Code }() != 401 {
+		t.Fatal("duplicate assertions accepted")
+	}
+	for name, mutate := range map[string]func(*http.Request){
+		"missing request header": func(r *http.Request) { r.Header.Del("X-Navigatorr-Request") },
+		"foreign origin":         func(r *http.Request) { r.Header.Set("Origin", "https://elsewhere.example") },
+	} {
+		r := httptest.NewRequest("POST", "/api/maintenance/archive", strings.NewReader(`{}`))
+		r.Header.Set("Cf-Access-Jwt-Assertion", valid)
+		r.Header.Set("X-Navigatorr-Request", "1")
+		mutate(r)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != 403 {
+			t.Fatalf("%s: Access-authorized mutation got %d", name, w.Code)
+		}
+	}
+	if request(h, "GET", "/api/maintenance/bootstrap", "", false).Code != 401 {
+		t.Fatal("anonymous request accepted")
+	}
+	if request(h, "GET", "/api/maintenance/bootstrap", "", true).Code != 200 {
+		t.Fatal("local token stopped working")
+	}
+	login := request(h, "POST", "/api/maintenance/login", `{"token":"`+testToken+`"}`, false)
+	if login.Code != 200 || len(login.Result().Cookies()) != 1 {
+		t.Fatal("local login stopped working")
+	}
+}
+
+func TestCloudflareKeyFetchSurvivesCallerCancellation(t *testing.T) {
+	v, key, calls := accessFixture(t)
+	token := accessJWT(t, key, map[string]any{"alg": "RS256", "kid": "key-1"}, accessClaims(v))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := v.verify(ctx, token); err != nil {
+		t.Fatalf("aborted caller failed the shared key fetch: %v", err)
+	}
+	if v.verify(context.Background(), token) != nil || *calls != 1 {
+		t.Fatal("key set not cached after a fetch for an aborted caller")
+	}
+}

@@ -44,6 +44,7 @@ type Server struct {
 	engine         *action.Engine
 	mcp            *server.MCPServer
 	access         *cloudflareAccessVerifier
+	accessOnly     bool
 	tokenHash      [32]byte
 	mu             sync.Mutex
 	sessions       map[string]time.Time
@@ -63,9 +64,13 @@ func New(cfg *config.Config, registry *arrservice.Registry, engine *action.Engin
 	if err := cfg.Web.ValidateAuth(); err != nil {
 		return nil, err
 	}
-	if cfg.Web.AuthModeValue() == "cloudflare_access" {
+	var access *cloudflareAccessVerifier
+	if cfg.Web.AuthModeValue() == "cloudflare_access" || cfg.Web.CloudflareAccessConfigured() {
 		issuer, _ := cfg.Web.CloudflareIssuer()
-		return &Server{cfg: cfg, registry: registry, engine: engine, mcp: mcpServer, access: newCloudflareVerifier(issuer, strings.TrimSpace(cfg.Web.CloudflareAccess.Audience))}, nil
+		access = newCloudflareVerifier(issuer, strings.TrimSpace(cfg.Web.CloudflareAccess.Audience))
+	}
+	if cfg.Web.AuthModeValue() == "cloudflare_access" {
+		return &Server{cfg: cfg, registry: registry, engine: engine, mcp: mcpServer, access: access, accessOnly: true}, nil
 	}
 	token := strings.TrimSpace(cfg.Web.Token)
 	if cfg.Web.TokenFile != "" {
@@ -81,17 +86,22 @@ func New(cfg *config.Config, registry *arrservice.Registry, engine *action.Engin
 	if len(token) < 24 {
 		return nil, fmt.Errorf("web token must contain at least 24 characters")
 	}
-	return &Server{cfg: cfg, registry: registry, engine: engine, mcp: mcpServer, tokenHash: sha256.Sum256([]byte(token)), sessions: map[string]time.Time{}}, nil
+	return &Server{cfg: cfg, registry: registry, engine: engine, mcp: mcpServer, access: access, tokenHash: sha256.Sum256([]byte(token)), sessions: map[string]time.Time{}}, nil
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/maintenance/auth-info", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]string{"auth_mode": s.cfg.Web.AuthModeValue()})
+		info := map[string]string{"auth_mode": s.cfg.Web.AuthModeValue()}
+		if !s.accessOnly && s.accessAuthorized(r) {
+			// The browser arrived through Access; it has no local session to sign out of.
+			info["session"] = "cloudflare_access"
+		}
+		writeJSON(w, 200, info)
 	})
 	mux.HandleFunc("POST /api/maintenance/login", s.login)
 	mux.HandleFunc("POST /api/maintenance/logout", func(w http.ResponseWriter, r *http.Request) {
-		if s.access != nil {
+		if s.accessOnly {
 			fail(w, 405, "sign out through Cloudflare Access")
 			return
 		}
@@ -210,10 +220,23 @@ func decode(w http.ResponseWriter, r *http.Request, v any) error {
 	}
 	return nil
 }
+
+// accessAuthorized accepts only an assertion whose signature, issuer, audience
+// and lifetime verify; the header's presence alone proves nothing.
+func (s *Server) accessAuthorized(r *http.Request) bool {
+	if s.access == nil {
+		return false
+	}
+	values := r.Header.Values("Cf-Access-Jwt-Assertion")
+	return len(values) == 1 && s.access.verify(r.Context(), values[0]) == nil
+}
+
 func (s *Server) authorized(r *http.Request) bool {
-	if s.access != nil {
-		values := r.Header.Values("Cf-Access-Jwt-Assertion")
-		return len(values) == 1 && s.access.verify(r.Context(), values[0]) == nil
+	if s.accessAuthorized(r) {
+		return true
+	}
+	if s.accessOnly {
+		return false
 	}
 	if strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
 		h := sha256.Sum256([]byte(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")))
@@ -233,7 +256,7 @@ func (s *Server) authorized(r *http.Request) bool {
 	return false
 }
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
-	if s.access != nil {
+	if s.accessOnly {
 		fail(w, 405, "sign in through Cloudflare Access")
 		return
 	}
