@@ -855,6 +855,14 @@ func verifyModeBenchmarkWinner(ec *ExecutionContext, winner *transcode.Benchmark
 // user-facing skip, never a hard failure: a source whose frames cannot be
 // probed is skipped so one bad file does not fail a whole batch.
 func compactSourcePlan(ctx context.Context, ffprobe, path string, rep *mediainspect.DetailedReport, p *ModePolicySnapshot) (*transcode.CompactPlan, string) {
+	return compactSourcePlanWith(ctx, rep, p, func(ctx context.Context, rep *mediainspect.DetailedReport) (mediainspect.DynamicRange, error) {
+		return mediainspect.ClassifySource(ctx, ffprobe, path, rep)
+	})
+}
+
+// compactSourcePlanWith is compactSourcePlan with the source classifier
+// supplied, so a read-only preview can use the exact gate the job uses.
+func compactSourcePlanWith(ctx context.Context, rep *mediainspect.DetailedReport, p *ModePolicySnapshot, classify func(context.Context, *mediainspect.DetailedReport) (mediainspect.DynamicRange, error)) (*transcode.CompactPlan, string) {
 	if p == nil || p.Compact == nil || p.Compact.ChainVersion != transcode.CompactChainVersion {
 		return nil, "compact_policy_unavailable"
 	}
@@ -862,7 +870,7 @@ func compactSourcePlan(ctx context.Context, ffprobe, path string, rep *mediainsp
 	if len(video) != 1 {
 		return nil, "hdr_single_video_stream_required"
 	}
-	d, err := mediainspect.ClassifySource(ctx, ffprobe, path, rep)
+	d, err := classify(ctx, rep)
 	if err != nil {
 		return nil, "compact_frame_evidence_unavailable"
 	}

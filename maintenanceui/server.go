@@ -3,6 +3,7 @@
 package maintenanceui
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -23,6 +24,7 @@ import (
 	"github.com/jakenesler/navigatorr/action"
 	"github.com/jakenesler/navigatorr/arrservice"
 	"github.com/jakenesler/navigatorr/config"
+	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -50,7 +52,10 @@ type Server struct {
 	sessions       map[string]time.Time
 	folderSizes    folderSizeCache
 	folderListings folderListingCache
-	slotSync       struct {
+	// probe and classify replace ffprobe in tests; nil uses the real ones.
+	probe    func(ctx context.Context, ffprobe, path string) (mediainspect.DetailedReport, error)
+	classify action.SourceClassifier
+	slotSync struct {
 		mu   sync.Mutex
 		last time.Time
 		err  string
@@ -130,6 +135,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/maintenance/candidate-decision", s.candidateDecision)
 	mux.HandleFunc("POST /api/maintenance/rerun", s.rerun)
 	mux.HandleFunc("GET /api/maintenance/folder", s.folder)
+	mux.HandleFunc("GET /api/maintenance/source-profile", s.sourceProfile)
 	mux.HandleFunc("GET /api/maintenance/podcasts", s.podcasts)
 	mux.HandleFunc("GET /api/maintenance/podcast-local-library", s.podcastLocalLibrary)
 	mux.HandleFunc("GET /api/maintenance/workers", s.workers)
