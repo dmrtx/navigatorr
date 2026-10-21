@@ -9,7 +9,7 @@ import (
 
 // cpuMeter sums the CPU time (user + system) of the ffmpeg/ffprobe children
 // one phase ran. It is carried on that phase's context, never on Worker, so
-// concurrent jobs and benchmark units cannot charge each other's phases.
+// concurrent jobs cannot charge each other's phases.
 //
 // The figure comes from each child's own rusage, so it covers every encoder
 // thread but not grandchildren; ffmpeg and ffprobe do not fork. A phase that
@@ -27,26 +27,6 @@ func withCPUMeter(ctx context.Context, m *cpuMeter) context.Context {
 	if m == nil {
 		return ctx
 	}
-	return context.WithValue(ctx, cpuMeterKey{}, m)
-}
-
-type metricCPUMeterKey struct{}
-
-// withMetricCPUMeter carries the meter of a benchmark's metric passes on ctx.
-// It charges nothing by itself: metric units opt in with asMetricPhase.
-func withMetricCPUMeter(ctx context.Context, m *cpuMeter) context.Context {
-	if m == nil {
-		return ctx
-	}
-	return context.WithValue(ctx, metricCPUMeterKey{}, m)
-}
-
-// asMetricPhase re-targets the children run under ctx at the metric meter.
-// Encode and metric units share one context, so without this a metric pass
-// would be charged to the encode phase; with no metric meter it charges
-// nothing at all.
-func asMetricPhase(ctx context.Context) context.Context {
-	m, _ := ctx.Value(metricCPUMeterKey{}).(*cpuMeter)
 	return context.WithValue(ctx, cpuMeterKey{}, m)
 }
 

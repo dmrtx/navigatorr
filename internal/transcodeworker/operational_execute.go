@@ -378,10 +378,10 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 // a verified entry for the same immutable source identity, the per-job staged
 // input is fulfilled with a purely local cache->staged copy (no NAS read).
 // Otherwise the source is staged once from the NAS and the shared cache is
-// populated best-effort from the staged copy, so a benchmark that ran first (or
-// a later transcode of the same source) reuses it without a second full
-// transfer. Cache misses, disabled caches, and local sources fall back to the
-// legacy direct staging path exactly.
+// populated best-effort from the staged copy, so a later transcode of the same
+// source reuses it without a second full transfer. Every staging also runs the
+// bounded size/TTL sweep. Cache misses, disabled caches, and local sources
+// fall back to the legacy direct staging path exactly.
 func (w *Worker) ensureStaged(ctx context.Context, jobDir, jobFile string, job *JobRecord, r *resolvedOperational) (bool, error) {
 	stageStart := time.Now()
 	stageCost := transcode.PhaseCost{}
@@ -453,6 +453,9 @@ func (w *Worker) ensureStaged(ctx context.Context, jobDir, jobFile string, job *
 			if fi, serr := w.statSourceForCache(ctx, job.Source); serr == nil {
 				pinSourceCacheEntry(w.sourceCacheDir(), filepath.Clean(job.Source), fi, job.SourceSHA256, job.ID)
 			}
+			// The sweep used to run after each sample test fetched a source;
+			// without those, staging is the only thing that grows the cache.
+			_ = w.sweepSourceCache()
 		}
 	}
 
@@ -787,7 +790,7 @@ func (w *Worker) completeOperationalJob(jobDir, jobFile string, job *JobRecord, 
 	}
 	cleanupStart := time.Now()
 	if w.sourceCacheEnabled() {
-		releaseSourceCachePins(w.sourceCacheDir(), job.ID, true)
+		releaseSourceCachePins(w.sourceCacheDir(), job.ID)
 	}
 	w.cleanupOperationalArtifacts(job, r)
 	w.persistPhaseCost(jobDir, jobFile, job, "cleanup", cleanupStart, transcode.PhaseCost{})
@@ -866,7 +869,7 @@ func (w *Worker) failJobTerminal(jobDir, jobFile string, job *JobRecord, cause e
 	w.removeOwnStagedInput(job)
 	w.removeOwnRemotePartial(job)
 	if w.sourceCacheEnabled() {
-		releaseSourceCachePins(w.sourceCacheDir(), job.ID, false)
+		releaseSourceCachePins(w.sourceCacheDir(), job.ID)
 	}
 	return cause
 }
@@ -1218,7 +1221,7 @@ func isPostEncodeResume(job *JobRecord) bool {
 // Meaningful failures for candidate job records (lock/load/ID mismatch/spawn/
 // save) are surfaced as a contextual joined error while the scan continues so
 // one bad record cannot strand the others. Directories without job.json
-// (benchmark-only/empty) and jobs that are not post-encode candidates are
+// (empty) and jobs that are not post-encode candidates are
 // skipped safely.
 //
 // A spawned runner's identity is stamped only when the record is still
@@ -1271,7 +1274,7 @@ func (w *Worker) ResumePostEncode(ctx context.Context, selfExe, configPath strin
 		jobFile := filepath.Join(jobDir, "job.json")
 		if _, serr := os.Stat(jobFile); serr != nil {
 			if os.IsNotExist(serr) {
-				continue // benchmark-only / empty / non-job dir
+				continue // empty / non-job dir
 			}
 			errs = append(errs, fmt.Errorf("statting job file %s for post-encode resume: %w", jobFile, serr))
 			continue

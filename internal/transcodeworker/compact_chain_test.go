@@ -301,48 +301,22 @@ func containsString(list []string, s string) bool {
 	return false
 }
 
-func TestBenchmarkMeasurementColorInfoCompact(t *testing.T) {
-	rep := &mediainspect.DetailedReport{Video: []mediainspect.DetailedStream{{ColorPrimaries: "bt2020", ColorTransfer: "smpte2084", ColorSpace: "bt2020nc", PixelFormat: "yuv420p10le", BitDepth: 10}}}
-	p := compactPQPlan()
-	record := &BenchmarkRecord{Compact: p}
-	ev := &BenchmarkExecutionEvidence{SourceBitDepth: 10, Compact: &transcode.CompactChainEvidence{ChainVersion: p.ChainVersion, TargetWidth: 1920, TargetHeight: 1080}}
-	ci := benchmarkMeasurementColorInfo(record, ev, rep)
-	if ci.ColorTransfer != "bt709" || ci.ColorPrimaries != "bt709" || ci.PixelFormat != "yuv420p10le" || ci.BitDepth != 10 {
-		t.Fatalf("tone mapped reference measured as %+v", ci)
-	}
-	// 8-bit SDR 4K source keeps its depth.
-	record.Compact = compactSDRPlan()
-	ev.SourceBitDepth = 8
-	if ci := benchmarkMeasurementColorInfo(record, ev, rep); ci.PixelFormat != "yuv420p" || ci.BitDepth != 8 || ci.ColorTransfer != "bt709" {
-		t.Fatalf("sdr reference measured as %+v", ci)
-	}
-	// Without matching chain evidence the source colour is used, so an HDR
-	// source still fails closed in the SDR metric gates.
-	ev.Compact.TargetWidth = 1280
-	if ci := benchmarkMeasurementColorInfo(record, ev, rep); ci.ColorTransfer != "smpte2084" {
-		t.Fatalf("mismatched evidence trusted: %+v", ci)
-	}
-	if ci := benchmarkMeasurementColorInfo(&BenchmarkRecord{}, ev, rep); ci.ColorTransfer != "smpte2084" || ci.BitDepth != 8 {
-		t.Fatalf("normal benchmark colour: %+v", ci)
-	}
-}
-
 // compactModePlan is a resolved compact-mode plan as the server freezes it.
 func compactModePlan(t *testing.T, c *transcode.CompactPlan) *transcode.Plan {
 	t.Helper()
 	return compactModePlanFor(t, c, 10)
 }
 
-// compactModePlanFor derives the output shape exactly as a benchmark does:
-// the compact chain keeps the source bit depth (HDR sources are 10-bit), and
-// resolveCandidateBitDepth turns that into the HEVC profile and pixel format.
+// compactModePlanFor derives the output shape from the source bit depth: the
+// compact chain keeps it (HDR sources are 10-bit), which fixes the HEVC
+// profile and pixel format.
 func compactModePlanFor(t *testing.T, c *transcode.CompactPlan, sourceBitDepth int) *transcode.Plan {
 	t.Helper()
 	p := signedPlan(t, nil)
 	p.VideoCodec, p.Quality, p.Preset = transcode.VideoCodecLibX265, 24, "ultrafast"
-	prof, pix, bd, err := resolveCandidateBitDepth(&transcode.BenchmarkCandidate{ID: "compact", VideoCodec: transcode.VideoCodecLibX265}, sourceBitDepth)
-	if err != nil {
-		t.Fatal(err)
+	prof, pix, bd := "main", "yuv420p", 8
+	if sourceBitDepth == 10 {
+		prof, pix, bd = "main10", "p010le", 10
 	}
 	p.VideoProfile, p.PixelFormat, p.ExpectedBitDepth = prof, pix, bd
 	p.AudioMode = "compact"

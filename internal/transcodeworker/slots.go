@@ -3,7 +3,6 @@ package transcodeworker
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,12 +16,12 @@ import (
 //
 // max_parallel_jobs stays the hard ceiling and the boot default: with nothing
 // else configured every kind draws on one shared pool of that size, as before.
-// An operator can divide the ceiling between video work (full conversions and
-// benchmarks) and podcast work (transcription, ad detection and rendering); the
-// server pushes the split to /v1/slots and the worker stores it in the state
-// directory, where the daemon and every spawned job process read it. A change
-// applies at the next admission: a running job is never interrupted, so a
-// pool lowered below its current use simply admits nothing until it drains.
+// An operator can divide the ceiling between video work (full conversions) and
+// podcast work (transcription, ad detection and rendering); the server pushes
+// the split to /v1/slots and the worker stores it in the state directory,
+// where the daemon and every spawned job process read it. A change applies at
+// the next admission: a running job is never interrupted, so a pool lowered
+// below its current use simply admits nothing until it drains.
 
 const slotSplitFile = "worker-slots.json"
 
@@ -41,7 +40,7 @@ func (k slotKind) String() string {
 	return "video"
 }
 
-// jobSlotKind classifies a transcode-record job. Benchmarks are always video.
+// jobSlotKind classifies a transcode-record job.
 func jobSlotKind(job *JobRecord) slotKind {
 	if job != nil && job.Plan != nil && job.Plan.Podcast != nil {
 		return slotKindPodcast
@@ -216,8 +215,8 @@ type slotUse struct {
 	kinds          map[string]slotKind
 }
 
-// observeSlotUse scans the state directory. A job or benchmark counts when its
-// record says running or queued with a runner PID; with checkAlive a runner
+// observeSlotUse scans the state directory. A job counts when its record
+// says running or queued with a runner PID; with checkAlive a runner
 // that is no longer alive does not.
 func (w *Worker) observeSlotUse(checkAlive bool) (slotUse, error) {
 	use := slotUse{kinds: map[string]slotKind{}}
@@ -247,13 +246,6 @@ func (w *Worker) observeSlotUse(checkAlive bool) (slotUse, error) {
 				use.Queued = append(use.Queued, job)
 			}
 		}
-		if bench, err := LoadBenchmark(filepath.Join(dir, "benchmark.json")); err == nil && bench.ID == entry.Name() {
-			if (bench.Status == "running" || bench.Status == "queued") && bench.PID > 0 {
-				if !checkAlive || IsBenchmarkExecutionAlive(bench) {
-					add(slotKindVideo)
-				}
-			}
-		}
 	}
 	return use, nil
 }
@@ -281,7 +273,7 @@ type videoInUseCache struct {
 }
 
 // videoJobsSharingCPU is how many video jobs the host CPUs are shared between
-// right now: the video jobs and benchmarks running, which include the caller
+// right now: the video jobs running, which include the caller
 // when it is one. With none counted (or the count unavailable) it assumes the
 // video pool is full, which never gives a job more threads than its share.
 func (w *Worker) videoJobsSharingCPU() int {
@@ -325,11 +317,4 @@ func (w *Worker) noteSlotSplitChanged() {
 	if slotChangeRecheck {
 		w.recheckX265PartitionAfterSlotChange()
 	}
-}
-
-func slotBusyMessage(l slotLimits, kind slotKind) string {
-	if !l.Split {
-		return fmt.Sprintf("worker busy: maximum parallel jobs (%d) reached", l.Ceiling)
-	}
-	return fmt.Sprintf("worker busy: all %d %s slots are in use", map[slotKind]int{slotKindVideo: l.Video, slotKindPodcast: l.Podcast}[kind], kind)
 }

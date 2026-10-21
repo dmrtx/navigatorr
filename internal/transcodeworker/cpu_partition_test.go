@@ -14,8 +14,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/jakenesler/navigatorr/transcode"
 )
 
 func withHostCPUs(t *testing.T, n int) {
@@ -137,7 +135,7 @@ func TestTwoPassAnalysisKeepsThreadPartition(t *testing.T) {
 	}
 	p := joyPlan(t)
 	out := filepath.Join(d, "output.mkv")
-	args, err := BuildCandidateEncodeArgs(filepath.Join(d, "reference.mkv"), out, p)
+	args, err := joyEncodeArgs(filepath.Join(d, "reference.mkv"), out, p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,38 +266,6 @@ func TestLoadWorkerConfigWarnsAboutIgnoredX265Pools(t *testing.T) {
 		if got := strings.Contains(buf.String(), "x265_pools "+pools); got != warns {
 			t.Errorf("x265_pools %s: warned=%v (%q), want %v", pools, got, buf.String(), warns)
 		}
-	}
-}
-
-func TestSizeModeMetricConcurrency(t *testing.T) {
-	withHostCPUs(t, 10)
-	size := &BenchmarkRecord{Mode: "size"}
-	cases := []struct {
-		name   string
-		cfg    WorkerConfig
-		record *BenchmarkRecord
-		want   int
-	}{
-		{"size mode one job: three passes of three threads", WorkerConfig{MaxParallelJobs: 1}, size, 3},
-		{"size mode two jobs: one thread per pass is too narrow", WorkerConfig{MaxParallelJobs: 2}, size, 2},
-		{"size mode too many jobs", WorkerConfig{MaxParallelJobs: 4}, size, 2},
-		{"explicit threads oversubscribe", WorkerConfig{MaxParallelJobs: 2, MetricThreads: 2}, size, 2},
-		{"explicit threads fit", WorkerConfig{MaxParallelJobs: 1, MetricThreads: 3}, size, 3},
-		{"explicit single thread too narrow", WorkerConfig{MaxParallelJobs: 1, MetricThreads: 1}, size, 2},
-		{"request concurrency wins", WorkerConfig{MaxParallelJobs: 2}, &BenchmarkRecord{Mode: "size", Concurrency: &transcode.BenchmarkConcurrencyConfig{MetricConcurrency: 2}}, 2},
-		{"other modes unchanged", WorkerConfig{MaxParallelJobs: 2}, &BenchmarkRecord{Mode: "quality"}, 2},
-		{"profiles unchanged", WorkerConfig{MaxParallelJobs: 2}, &BenchmarkRecord{}, 2},
-	}
-	for _, tc := range cases {
-		w := &Worker{cfg: &tc.cfg}
-		_, metricN := resolvePipelineConcurrency(tc.record)
-		if got := w.sizeModeMetricConcurrency(tc.record, metricN); got != tc.want {
-			t.Errorf("%s: metric workers %d, want %d", tc.name, got, tc.want)
-		}
-	}
-	w := &Worker{cfg: &WorkerConfig{MaxParallelJobs: 1}}
-	if got := w.metricThreads(3); got != 3 {
-		t.Errorf("metric threads for 3 workers on one job = %d, want 3", got)
 	}
 }
 

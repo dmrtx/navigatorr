@@ -11,7 +11,7 @@ import (
 )
 
 // Reservation slots cover staging, encoding, metrics and publishing; they are
-// not a CPU utilization measurement or the benchmark's inner concurrency.
+// not a CPU utilization measurement.
 func (w *Worker) activitySnapshot() (transcode.WorkerActivity, error) {
 	slots := w.slotsStatus()
 	activity := transcode.WorkerActivity{SlotsTotal: max(1, w.cfg.MaxParallelJobs), Slots: &slots, CheckedAt: time.Now().UTC(), DetailsAvailable: true, Jobs: []transcode.WorkerActivityJob{}}
@@ -35,10 +35,6 @@ func (w *Worker) activitySnapshot() (transcode.WorkerActivity, error) {
 				kind = "podcast"
 			}
 			activity.Jobs = append(activity.Jobs, transcode.WorkerActivityJob{ID: job.ID, Kind: kind, File: filepath.Base(job.Source), Phase: job.Phase, StartedAt: job.StartedAt, HeartbeatAt: job.WorkerHeartbeatAt, LastProgressAt: measured.UpdatedAt, Progress: progress})
-		}
-		if bench, err := LoadBenchmark(filepath.Join(dir, "benchmark.json")); err == nil && bench.ID == entry.Name() && bench.PID > 0 && (bench.Status == "running" || bench.Status == "queued") {
-			progress := bench.Progress
-			activity.Jobs = append(activity.Jobs, transcode.WorkerActivityJob{ID: bench.ID, Kind: "benchmark", File: filepath.Base(bench.Source), Phase: bench.Phase, StartedAt: bench.StartedAt, HeartbeatAt: bench.HeartbeatAt, LastProgressAt: bench.LastProgressAt, Progress: &progress, Details: bench.ProgressDetails})
 		}
 	}
 	sort.Slice(activity.Jobs, func(i, j int) bool {

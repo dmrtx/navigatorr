@@ -4,7 +4,6 @@ package transcodeworker
 // (code/retryable/Retry-After), cancel on finished jobs, and request logging.
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -110,45 +109,6 @@ func TestProtocol_NotFoundIsTypedNotTextual(t *testing.T) {
 	if !isNotFoundError(fmt.Errorf("status: %w", ErrJobNotFound)) {
 		t.Fatal("a wrapped ErrJobNotFound must classify as not found")
 	}
-	if isBenchmarkNotFoundError(errors.New("reading benchmark file x: input/output error")) {
-		t.Fatal("a textual benchmark read failure must not classify as not found")
-	}
-}
-
-func TestProtocol_BenchmarkNotFoundVersusUnreadable(t *testing.T) {
-	w, tempDir, _ := newPR3Worker(t, 1, newStubSpawn())
-	srv := NewServer(w, "test-exe", "", "")
-
-	assertEnvelope(t, doRequest(t, srv, http.MethodGet, "/v1/benchmarks/bench-missing-1", "", ""), http.StatusNotFound, transcode.WorkerErrorNotFound, false)
-	assertEnvelope(t, doRequest(t, srv, http.MethodPost, "/v1/benchmarks/bench-missing-1/cancel", "", ""), http.StatusNotFound, transcode.WorkerErrorNotFound, false)
-	if _, err := os.Stat(filepath.Join(tempDir, "jobs", "bench-missing-1")); !os.IsNotExist(err) {
-		t.Fatalf("cancel of an unknown benchmark must not create its directory: %v", err)
-	}
-
-	cancelWriteFile(t, filepath.Join(tempDir, "jobs", "bench-corrupt-1", "benchmark.json"), "{not json")
-	assertEnvelope(t, doRequest(t, srv, http.MethodGet, "/v1/benchmarks/bench-corrupt-1", "", ""), http.StatusInternalServerError, transcode.WorkerErrorInternal, true)
-	assertEnvelope(t, doRequest(t, srv, http.MethodPost, "/v1/benchmarks/bench-corrupt-1/cancel", "", ""), http.StatusInternalServerError, transcode.WorkerErrorInternal, true)
-}
-
-func TestProtocol_BusyIs429WithRetryAfter(t *testing.T) {
-	stub := newStubSpawn()
-	w, tempDir, sourceFile := newPR3Worker(t, 1, stub)
-	if _, err := w.Submit(context.Background(), SubmitRequest{ID: "job-occupant-1", SourcePath: sourceFile, CandidatePath: filepath.Join(tempDir, "occ.mkv")}, "test-exe", ""); err != nil {
-		t.Fatal(err)
-	}
-	if stub.n() != 1 {
-		t.Fatalf("occupant must be running, spawns=%d", stub.n())
-	}
-	srv := NewServer(w, "test-exe", "", "")
-	rec := doRequest(t, srv, http.MethodPost, "/v1/benchmarks", benchmarkRequestFor(t, "bench-busy-1", sourceFile), "")
-	env := assertEnvelope(t, rec, http.StatusTooManyRequests, transcode.WorkerErrorBusy, true)
-	if got := rec.Header().Get("Retry-After"); got != "30" {
-		t.Fatalf("Retry-After=%q want 30", got)
-	}
-	// Older Navigatorr builds classify busy by this text.
-	if !strings.Contains(env.Error, "worker busy") {
-		t.Fatalf("busy must keep the worker busy text, got %q", env.Error)
-	}
 }
 
 func TestProtocol_SubmitErrorClassification(t *testing.T) {
@@ -167,9 +127,6 @@ func TestProtocol_SubmitErrorClassification(t *testing.T) {
 		if status != tc.status || code != tc.code {
 			t.Errorf("classifySubmitError(%q) = %d %q, want %d %q", tc.err, status, code, tc.status, tc.code)
 		}
-	}
-	if status, code := classifyBenchmarkSubmitError(errors.New("worker busy: max parallel jobs reached")); status != http.StatusTooManyRequests || code != transcode.WorkerErrorBusy {
-		t.Errorf("benchmark busy = %d %q, want 429 worker_busy", status, code)
 	}
 }
 

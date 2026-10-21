@@ -3,12 +3,10 @@ package transcodeworker
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/resilience"
 )
@@ -81,17 +79,5 @@ func TestVideoCopyProbeFailureIsATerminalFailureNotAPolicyRejection(t *testing.T
 	}
 	if got := resilience.ClassifyError(err); got != resilience.MediaProbeFailed {
 		t.Fatalf("probe failure class %s, want media_probe_failed: %v", got, err)
-	}
-}
-
-// The benchmark's own probe of the source wraps the typed error, so the class
-// the record carries to the coordinator is the probe's, not a reading of the
-// message that names the path.
-func TestBenchmarkProbeFailureCarriesTheProbeClass(t *testing.T) {
-	clip := "/media/source/shared_clip.mkv"
-	probe := &mediainspect.ProbeError{Kind: mediainspect.ProbeToolExit, Err: errors.New("exit status 1"), Stderr: clip + ": End of file"}
-	err := fmt.Errorf("inspecting source media %s: %w", clip, probe)
-	if got := benchmarkFailureClass(err); got != string(resilience.MediaProbeFailed) {
-		t.Fatalf("benchmark failure class %q", got)
 	}
 }

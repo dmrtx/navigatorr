@@ -15,7 +15,7 @@ import (
 
 // This is an opt-in executable model test, not a claim of production encoder
 // availability. A worker lacking the exact model reports a clear skip.
-func TestRealModeBenchmarkWinnerFinalValidationAndSize(t *testing.T) {
+func TestRealModeFinalValidationAndSize(t *testing.T) {
 	for _, depth := range []int{8, 10} {
 		t.Run(fmt.Sprintf("%dbit", depth), func(t *testing.T) { realModePipelineFixture(t, depth) })
 	}
@@ -69,23 +69,9 @@ func realModePipelineFixture(t *testing.T, depth int) {
 			}
 			mean, peak := 6., 16.
 			policy := transcode.BenchmarkQualityConfig{VMAF: &transcode.BenchmarkQualityThresholds{Model: "v1_1080p_3h", Minimum: minimum, Target: target, P5Minimum: &p5, WorstWindowMinimum: &worst, WorstWindowSeconds: 0.5, GuardrailEnforcement: "reject"}, Banding: &transcode.BenchmarkBandingConfig{Enabled: true, Metric: "cambi", Mode: "full_ref", Enforcement: "reject", MaxMean: &mean, MaxPeak: &peak}, FinalValidation: &transcode.BenchmarkFinalValidationConfig{Mode: "sampled"}}
-			candidates := []transcode.BenchmarkCandidate{{ID: "software", VideoCodec: "libx265", Quality: 10, Preset: "medium"}}
-			if mode != "x265_preserve" && caps.Encoders["hevc_videotoolbox"] {
-				candidates = append(candidates, transcode.BenchmarkCandidate{ID: "hardware", VideoCodec: "hevc_videotoolbox", Quality: 90})
-			}
-			record := &BenchmarkRecord{ProtocolVersion: transcode.WorkerProtocolVersion, ID: "bench-real-" + mode, Status: "running", Source: source, SourceSHA256: sourceSHA, Metric: "vmaf", Mode: mode, SearchBudgetSeconds: 120, Samples: []transcode.BenchmarkSampleWindow{{Index: 0, StartSeconds: 0.5, DurationSeconds: 0.5}}, Candidates: candidates, Quality: &policy}
+			samples := []transcode.BenchmarkSampleWindow{{Index: 0, StartSeconds: 0.5, DurationSeconds: 0.5}}
 			start := time.Now()
-			if err := (&ProductionBenchmarkRunner{}).RunBenchmark(ctx, w, record); err != nil {
-				t.Fatal(err)
-			}
-			if record.Evidence == nil || record.Evidence.Decision == nil || record.Evidence.Decision.Winner == nil {
-				t.Fatalf("no measured qualifying fixture winner: %+v", record.Evidence)
-			}
-			winner := record.Evidence.Decision.Winner
-			if mode == "x265_preserve" && winner.VideoCodec != "libx265" {
-				t.Fatal("preserve selected hardware")
-			}
-			plan := &transcode.Plan{Mode: mode, PolicyDigest: "sha256:" + strings.Repeat("0", 64), SizePolicy: &transcode.SizePolicy{MinSavingsPercent: saving}, Container: "mkv", VideoCodec: winner.VideoCodec, Quality: winner.Quality, Preset: winner.Preset, VideoProfile: winner.VideoProfile, PixelFormat: winner.PixelFormat, ExpectedBitDepth: depth, AudioMode: "copy", SubtitleMode: "preserve", PreserveMetadata: true, PreserveChapters: true, PreserveAttachments: true, RecipeVersion: "synthetic-mode-policy-v1", RecipeDigest: "sha256:" + strings.Repeat("0", 64), Resilience: transcode.ResiliencePlan{MaxAttempts: 1}, QualityValidation: &transcode.QualityValidationPlan{Metric: "vmaf", Samples: record.Samples, Quality: policy, BenchmarkRequestDigest: "sha256:" + strings.Repeat("1", 64)}}
+			plan := &transcode.Plan{Mode: mode, PolicyDigest: "sha256:" + strings.Repeat("0", 64), SizePolicy: &transcode.SizePolicy{MinSavingsPercent: saving}, Container: "mkv", VideoCodec: "libx265", Quality: 10, Preset: "medium", ExpectedBitDepth: depth, AudioMode: "copy", SubtitleMode: "preserve", PreserveMetadata: true, PreserveChapters: true, PreserveAttachments: true, RecipeVersion: "synthetic-mode-policy-v1", RecipeDigest: "sha256:" + strings.Repeat("0", 64), Resilience: transcode.ResiliencePlan{MaxAttempts: 1}, QualityValidation: &transcode.QualityValidationPlan{Metric: "vmaf", Samples: samples, Quality: policy, BenchmarkRequestDigest: "sha256:" + strings.Repeat("1", 64)}}
 			plan.PlanDigest, _ = transcode.DigestPlan(plan)
 			candidate := filepath.Join(dir, mode, "candidate.mkv")
 			job := &JobRecord{ID: "real-" + mode, Status: "running", Source: source, SourceSHA256: sourceSHA, Candidate: candidate, Plan: plan, CreatedAt: time.Now().UTC(), StartedAt: time.Now().UTC(), ExecutionSpecDigest: pr5Digest, StagingState: string(StagingStateNotRequired), FinalizationState: string(FinalizationStateNotRequired), LocalCandidatePath: candidate, EffectiveInputPath: source}
@@ -114,7 +100,7 @@ func realModePipelineFixture(t *testing.T, depth int) {
 			if ioOptSHA(t, source) != sourceSHA {
 				t.Fatal("synthetic original changed")
 			}
-			t.Logf("mode=%s candidates=%d winner=%s source_bytes=%d final_candidate_bytes=%d sampled_final_vmaf=%.3f final_cambi=%.3f wall=%s", mode, len(candidates), winner.VideoCodec, sourceInfo.Size(), accepted.CandidateSizeBytes, accepted.QualityEvidence.VMAF.Mean, accepted.QualityEvidence.CAMBI.Mean, time.Since(start))
+			t.Logf("mode=%s source_bytes=%d final_candidate_bytes=%d sampled_final_vmaf=%.3f final_cambi=%.3f wall=%s", mode, sourceInfo.Size(), accepted.CandidateSizeBytes, accepted.QualityEvidence.VMAF.Mean, accepted.QualityEvidence.CAMBI.Mean, time.Since(start))
 		})
 	}
 }

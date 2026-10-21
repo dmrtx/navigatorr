@@ -214,7 +214,7 @@ func TestSourceCacheCapCoversLargestSourceAndPins(t *testing.T) {
 	if err := os.MkdirAll(sourceCachePinDir(cacheDir), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(sourceCachePinDir(cacheDir), "bbbb."+pinOwnerTag(benchmarkPinOwner)), nil, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(sourceCachePinDir(cacheDir), "bbbb."+pinOwnerTag("job-done")), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	_ = w.sweepSourceCache()
@@ -225,11 +225,8 @@ func TestSourceCacheCapCoversLargestSourceAndPins(t *testing.T) {
 		t.Fatal("unpinned entry should have been evicted to honour the cap", err)
 	}
 
-	// Completing the job that held the entry releases the benchmark pin too.
-	if err := os.WriteFile(filepath.Join(sourceCachePinDir(cacheDir), "bbbb."+pinOwnerTag("job-done")), nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	releaseSourceCachePins(cacheDir, "job-done", true)
+	// Completing the job that held the entry releases its pin.
+	releaseSourceCachePins(cacheDir, "job-done")
 	if live := liveSourceCachePins(cacheDir, time.Hour, time.Now()); live["bbbb"] {
 		t.Fatal("pins survived the completed job")
 	}
@@ -591,7 +588,7 @@ func TestSourceCacheDiskFloorOutranksPins(t *testing.T) {
 	if err := os.MkdirAll(sourceCachePinDir(cacheDir), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(sourceCachePinDir(cacheDir), "cccc."+pinOwnerTag(benchmarkPinOwner)), nil, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(sourceCachePinDir(cacheDir), "cccc."+pinOwnerTag("job-held")), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	orig := diskSpaceFn

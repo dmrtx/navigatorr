@@ -12,7 +12,6 @@ import (
 
 	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/httpclient"
-	"github.com/jakenesler/navigatorr/transcode/optimization"
 	"github.com/jakenesler/navigatorr/transcode/quality"
 )
 
@@ -272,38 +271,6 @@ func TestMetricGraphPairsNTSCHFRByFrameIndex(t *testing.T) {
 	}
 }
 
-// max_frames_below_threshold keeps its source-frame meaning on HFR: three
-// measured frames below threshold at 2:1 stand for six source frames.
-func TestEvaluateCandidateQualityComparesSourceEquivalentFrames(t *testing.T) {
-	model, _ := quality.Model("v1_1080p_3h")
-	threshold := 90.0
-	limit := 5
-	scores := []byte(`{"frames":[{"frameNum":0,"metrics":{"vmaf":80}},{"frameNum":1,"metrics":{"vmaf":80}},{"frameNum":2,"metrics":{"vmaf":80}},{"frameNum":3,"metrics":{"vmaf":99}}]}`)
-	for _, tc := range []struct {
-		fps        float64
-		decimation int
-		exceeded   bool
-	}{{25, 1, false}, {50, 2, true}} {
-		stats, err := quality.ParseVMAF(scores, 4096, model, 0, 10, tc.fps, tc.decimation, 0.08, &threshold)
-		if err != nil {
-			t.Fatal(err)
-		}
-		record := &BenchmarkRecord{Samples: []transcode.BenchmarkSampleWindow{{Index: 0, StartSeconds: 10, DurationSeconds: 1}}, Quality: &transcode.BenchmarkQualityConfig{VMAF: &transcode.BenchmarkQualityThresholds{Model: model.ID, Target: 80, Minimum: 70, GuardrailEnforcement: "reject", FrameThreshold: &threshold, MaxFramesBelowThreshold: &limit, WorstWindowSeconds: 0.08}}}
-		sh := &pipelineShared{record: record, evidence: &BenchmarkExecutionEvidence{}, vcs: []validatedCandidate{{index: 0, candidate: transcode.BenchmarkCandidate{ID: "c1"}}}, runVMAF: true, vmafModel: &model, vmafDecimation: tc.decimation, metricOut: []pipelineMetricOutcome{{executed: true, vmafStats: &stats, vmafScores: []optimization.SampleScore{{SampleIndex: 0, Score: stats.Mean, Valid: true}}, entry: &BenchmarkMetricSampleResult{CandidateID: "c1", SampleIndex: 0}}}, encodeOut: []pipelineEncodeOutcome{{entry: BenchmarkCandidateSampleResult{CandidateID: "c1", SampleIndex: 0, SizeBytes: 100}}}}
-		sh.assembleEvidence([]pipelineUnit{{vcOrd: 0, sampOrd: 0}})
-		if len(sh.evidence.Quality) != 1 {
-			t.Fatalf("decimation %d: no quality evidence", tc.decimation)
-		}
-		got := false
-		for _, code := range sh.evidence.Quality[0].ReasonCodes {
-			got = got || code == "quality_vmaf_frames_below_limit_exceeded"
-		}
-		if got != tc.exceeded {
-			t.Fatalf("decimation %d: frame limit exceeded=%v want %v (%+v)", tc.decimation, got, tc.exceeded, sh.evidence.Quality[0])
-		}
-	}
-}
-
 // qualityShim forwards to the real ffmpeg but measures with vmaf_v0.6.1 when
 // this libvmaf cannot run the v1 model, so the production gates, graphs and
 // evidence run end to end. noHFR makes the 48 fps HFR probe fail, as on a
@@ -380,27 +347,6 @@ func TestHFRWorkerGatesEndToEnd(t *testing.T) {
 		evidence, err = worker(older, "final-older").validateFinalPerceptual(ctx, filepath.Join(dir, "final-older"), source, candidate, plan, "sha256:candidate", 1)
 		if err == nil || evidence == nil || evidence.Verdict != "fail" || len(evidence.ReasonCodes) == 0 || evidence.ReasonCodes[0] != "quality_vmaf_hfr_model_unavailable" {
 			t.Fatalf("final validation without the capability: %+v %v", evidence, err)
-		}
-	})
-
-	t.Run("benchmark", func(t *testing.T) {
-		record := func(id string) *BenchmarkRecord {
-			return &BenchmarkRecord{ProtocolVersion: transcode.WorkerProtocolVersion, ID: id, Status: "running", Source: source, SourceSHA256: ioOptSHA(t, source), Metric: "vmaf", Samples: samples, Candidates: []transcode.BenchmarkCandidate{{ID: "software", VideoCodec: "libx265", Quality: 18, Preset: "ultrafast"}}, Quality: &policy, Attempt: 1}
-		}
-		rec := record("bench-hfr")
-		if err := (&ProductionBenchmarkRunner{}).RunBenchmark(ctx, worker(capable, "bench-capable"), rec); err != nil {
-			t.Fatalf("benchmark on a capable worker: %v", err)
-		}
-		if rec.Evidence == nil || rec.Evidence.VMAFTemporalDecimation != 2 || len(rec.Evidence.Quality) != 1 || rec.Evidence.Quality[0].VMAF == nil || rec.Evidence.Quality[0].VMAF.TemporalDecimation != 2 {
-			t.Fatalf("benchmark evidence lacks the decimation: %+v", rec.Evidence)
-		}
-		rejected := record("bench-hfr-older")
-		err := (&ProductionBenchmarkRunner{}).RunBenchmark(ctx, worker(older, "bench-older"), rejected)
-		if err == nil || !strings.Contains(err.Error(), "quality_vmaf_hfr_model_unavailable") {
-			t.Fatalf("benchmark without the capability: %v", err)
-		}
-		if rejected.Evidence != nil {
-			t.Fatalf("HFR gate ran after sample extraction: %+v", rejected.Evidence)
 		}
 	})
 }

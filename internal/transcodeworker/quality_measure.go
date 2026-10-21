@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -245,104 +244,6 @@ func BuildSSIMArgs(candPath, refPath, statsPath string) []string {
 		"-f", "null",
 		"-",
 	}
-}
-
-type vmafJSONLog struct {
-	Version       string                      `json:"version"`
-	PooledMetrics map[string]vmafPooledMetric `json:"pooled_metrics"`
-	Frames        []vmafFrame                 `json:"frames"`
-}
-
-type vmafPooledMetric struct {
-	Min          *float64 `json:"min"`
-	Max          *float64 `json:"max"`
-	Mean         *float64 `json:"mean"`
-	HarmonicMean *float64 `json:"harmonic_mean"`
-}
-
-type vmafFrame struct {
-	FrameNum *int               `json:"frameNum"`
-	Metrics  map[string]float64 `json:"metrics"`
-}
-
-// ParseVMAFJSON parses libvmaf JSON log data, validating bounds and finite float.
-func ParseVMAFJSON(data []byte) (float64, error) {
-	if len(data) == 0 {
-		return 0, errors.New("empty vmaf log data (fail closed)")
-	}
-	if len(data) > MaxMetricLogSizeBytes {
-		return 0, fmt.Errorf("oversized vmaf log data (%d bytes exceeds %d max) (fail closed)", len(data), MaxMetricLogSizeBytes)
-	}
-
-	var log vmafJSONLog
-	if err := json.Unmarshal(data, &log); err != nil {
-		return 0, fmt.Errorf("malformed vmaf json log: %w (fail closed)", err)
-	}
-
-	var score float64
-	found := false
-
-	if log.PooledMetrics != nil {
-		if pm, ok := log.PooledMetrics["vmaf"]; ok && pm.Mean != nil {
-			score = *pm.Mean
-			found = true
-		}
-	}
-
-	if len(log.Frames) > 0 {
-		var sum float64
-		for i, f := range log.Frames {
-			if f.FrameNum == nil {
-				return 0, fmt.Errorf("missing vmaf frame number at index %d (fail closed)", i)
-			}
-			frameNum := *f.FrameNum
-			// Verify frame numbers are strictly increasing and contiguous
-			if i == 0 {
-				if frameNum != 0 {
-					return 0, fmt.Errorf("invalid initial vmaf frame number %d (fail closed)", frameNum)
-				}
-			} else {
-				expectedFrame := i
-				if frameNum != expectedFrame {
-					return 0, fmt.Errorf("vmaf frame numbers not contiguous: frame at index %d has frameNum %d, expected %d (missing, duplicate, or gapped frames; fail closed)", i, frameNum, expectedFrame)
-				}
-			}
-
-			s, ok := f.Metrics["vmaf"]
-			if !ok {
-				return 0, fmt.Errorf("missing vmaf metric in frame %d (fail closed)", frameNum)
-			}
-			if math.IsNaN(s) || math.IsInf(s, 0) {
-				return 0, fmt.Errorf("vmaf frame %d score is NaN or Inf (fail closed)", frameNum)
-			}
-			if s < 0.0 || s > 100.0 {
-				return 0, fmt.Errorf("vmaf frame %d score %v out of range [0, 100] (fail closed)", frameNum, s)
-			}
-			sum += s
-		}
-		frameMean := sum / float64(len(log.Frames))
-		if found {
-			if math.Abs(score-frameMean) > 0.01 {
-				return 0, fmt.Errorf("pooled vmaf mean %v inconsistent with frame mean %v (fail closed)", score, frameMean)
-			}
-		} else {
-			score = frameMean
-			found = true
-		}
-	}
-
-	if !found {
-		return 0, errors.New("vmaf score not found in pooled_metrics or frames (fail closed)")
-	}
-
-	if math.IsNaN(score) || math.IsInf(score, 0) {
-		return 0, errors.New("vmaf score is NaN or Inf (fail closed)")
-	}
-	if score < 0.0 || score > 100.0 {
-		return 0, fmt.Errorf("vmaf score %v out of range [0, 100] (fail closed)", score)
-	}
-
-	return score, nil
 }
 
 // ParseSSIMStatsFile parses an FFmpeg ssim stats_file output, averaging the per-frame All scores.

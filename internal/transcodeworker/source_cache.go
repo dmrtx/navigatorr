@@ -17,15 +17,13 @@ import (
 	"time"
 )
 
-// This file implements a narrowly-scoped worker-local source cache that lets a
-// benchmark and a subsequent full transcode for the SAME immutable source share
-// a single NAS read.
+// This file implements a narrowly-scoped worker-local source cache that lets
+// repeated transcodes of the SAME immutable source share a single NAS read.
 //
 // Design intent (correctness-first):
 //   - The desired heavy-I/O path is: NAS source -> one local staged/cache copy
-//     -> benchmark samples/metrics locally -> full encode locally -> full
-//     validation locally -> one publish of the accepted candidate -> lightweight
-//     post-publish verification -> cleanup.
+//     -> full encode locally -> full validation locally -> one publish of the
+//     accepted candidate -> lightweight post-publish verification -> cleanup.
 //   - Cache entries are content-addressed by stable source identity: cleaned
 //     absolute source path + size + modtime + the coordinator preflight SHA-256
 //     of the source bytes. Any change in size, modtime, or CONTENT is a miss, so
@@ -37,7 +35,7 @@ import (
 //   - Cache files are shared and immutable once published. Active jobs never
 //     read the shared filename directly: they acquire a JOB-LOCAL immutable
 //     hard link (falling back to a safe local copy) so eviction may unlink the
-//     shared name without breaking an in-flight benchmark or transcode. Per-job
+//     shared name without breaking an in-flight transcode. Per-job
 //     cleanup removes only the job-owned link/copy; only bounded TTL/size sweeps
 //     delete shared entries.
 //   - StagingPolicy semantics are preserved: the cache is consulted only when
@@ -410,135 +408,6 @@ func copySourceCacheEntry(ctx context.Context, localPath, dataPath string, size 
 	return nil
 }
 
-// ensureSourceCached guarantees a local cache entry for an external/SMB source
-// with at most one NAS read. On a hit it returns the shared path without any
-// network I/O. On a miss it downloads once (through the mediaStore seam when
-// mapped, else a filesystem copy) into a temp file, hashes the LOCAL bytes
-// against the expected digest, and publishes atomically. The returned path is
-// shared and must never be removed by per-job cleanup.
-func (w *Worker) ensureSourceCached(ctx context.Context, cleanSource, expectedSHA string) (string, error) {
-	norm, err := normalizeExpectedSourceSHA(expectedSHA)
-	if err != nil {
-		return "", err
-	}
-	cacheDir := w.sourceCacheDir()
-	fi, err := w.statSourceForCache(ctx, cleanSource)
-	if err != nil {
-		return "", err
-	}
-	if hit, ok := lookupSourceCache(cacheDir, cleanSource, fi, norm); ok {
-		if cost := sourceCost(ctx); cost != nil {
-			cost.CacheHits = knownCount(1)
-			cost.CacheMisses = knownCount(0)
-			cost.NASReadBytes = knownCount(0)
-		}
-		pinSourceCacheEntry(cacheDir, cleanSource, fi, norm, benchmarkPinOwner)
-		_ = w.sweepSourceCache()
-		return hit, nil
-	}
-	if cost := sourceCost(ctx); cost != nil {
-		cost.CacheHits = knownCount(0)
-		cost.CacheMisses = knownCount(1)
-	}
-	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
-		return "", fmt.Errorf("%w: creating cache dir: %v", ErrStorageIO, err)
-	}
-	key := sourceCacheKey(cleanSource, fi, norm)
-	dataPath, metaPath := sourceCachePaths(cacheDir, key, cleanSource)
-	tmp, err := os.CreateTemp(cacheDir, ".cache-dl-*")
-	if err != nil {
-		return "", fmt.Errorf("%w: creating cache temp: %v", ErrStorageIO, err)
-	}
-	tmpName := tmp.Name()
-	// Close the empty handle; download seams open their own destination.
-	_ = tmp.Close()
-	_ = os.Remove(tmpName)
-	committed := false
-	defer func() {
-		if !committed {
-			_ = os.Remove(tmpName)
-			_ = os.Remove(tmpName + ".tmp")
-		}
-	}()
-	// The digest is computed while the bytes stream, so publishing the entry
-	// needs no second local read. A failed copy is returned as is: it is never
-	// repeated here, so one call reads N at most once (plus any reconnect
-	// resume the store reports).
-	var streamedSHA string
-	if w.mediaStore != nil && w.mediaStore.Maps(cleanSource) {
-		if verified, ok := w.mediaStore.(verifiedDownloader); ok {
-			tr, derr := verified.DownloadAtomicVerified(ctx, cleanSource, tmpName, norm)
-			if cost := sourceCost(ctx); cost != nil {
-				cost.NASReadBytes = knownCount(tr.ReadBytes)
-				if tr.Attempts > 1 {
-					cost.Attempts = tr.Attempts
-				}
-			}
-			if derr != nil {
-				return "", derr
-			}
-			streamedSHA = tr.SHA256
-		} else {
-			if derr := w.mediaStore.DownloadAtomic(ctx, cleanSource, tmpName); derr != nil {
-				return "", derr
-			}
-		}
-	} else {
-		sum, _, serr := stageInputAtomicHashed(ctx, cleanSource, tmpName)
-		if serr != nil {
-			return "", serr
-		}
-		streamedSHA = sum
-	}
-	// Verify the download matches the fingerprinted identity AND the expected
-	// content digest before publish. A source that changed mid-download is
-	// never cached. Only LOCAL bytes are hashed here; no NAS read is added.
-	di, err := os.Lstat(tmpName)
-	if err != nil || !di.Mode().IsRegular() {
-		return "", fmt.Errorf("%w: downloaded source %s size mismatch (fail closed)", ErrSizeMismatch, cleanSource)
-	}
-	if di.Size() != fi.Size() {
-		// The download is not the file that was fingerprinted: it changed.
-		return "", sourceChanged(fmt.Errorf("%w: downloaded source %s size mismatch (fail closed)", ErrSizeMismatch, cleanSource))
-	}
-	if cost := sourceCost(ctx); cost != nil && cost.NASReadBytes == nil {
-		_, external := externalRootFor(cleanSource, w.cfg.ExternalRoots)
-		if external || (w.mediaStore != nil && w.mediaStore.Maps(cleanSource)) {
-			cost.NASReadBytes = knownCount(di.Size())
-		}
-	}
-	if streamedSHA != "" {
-		if norm != "" {
-			if err := compareSourceDigest(norm, streamedSHA); err != nil {
-				return "", err
-			}
-		}
-	} else if err := verifyLocalDigest(ctx, tmpName, norm); err != nil {
-		return "", err
-	}
-	if err := commitNoReplace(ctx, tmpName, dataPath); err != nil {
-		if hit, ok := lookupSourceCache(cacheDir, cleanSource, fi, norm); ok {
-			_ = os.Remove(tmpName)
-			committed = true
-			pinSourceCacheEntry(cacheDir, cleanSource, fi, norm, benchmarkPinOwner)
-			return hit, nil
-		}
-		return "", err
-	}
-	committed = true
-	writeSourceCacheMeta(metaPath, sourceIdentity{
-		Source:  cleanSource,
-		Size:    fi.Size(),
-		ModTime: fi.ModTime().UTC().UnixNano(),
-		Mode:    uint32(fi.Mode().Perm()),
-		SHA256:  norm,
-	})
-	syncDir(cacheDir)
-	pinSourceCacheEntry(cacheDir, cleanSource, fi, norm, benchmarkPinOwner)
-	_ = w.sweepSourceCache()
-	return dataPath, nil
-}
-
 // acquireCachedSourceLease gives the calling job a JOB-LOCAL immutable name for
 // a shared cache entry without a second NAS read and without depending on the
 // evictable shared filename. It first tries a hard link (same filesystem), so
@@ -643,29 +512,6 @@ func copyCacheToStaged(ctx context.Context, cachePath, stagedFinal string) error
 	return nil
 }
 
-// shouldCacheSourceForBenchmark reports whether a benchmark source should be
-// served from the shared source cache. It mirrors the staging decision so
-// staging_policy semantics are preserved: local sources are read in place,
-// while external (NAS) and SMB-direct sources share one local copy between
-// benchmark and full transcode.
-func (w *Worker) shouldCacheSourceForBenchmark(cleanSource string) bool {
-	if w == nil || w.cfg == nil || strings.TrimSpace(cleanSource) == "" {
-		return false
-	}
-	if w.mediaStore != nil && w.mediaStore.Maps(cleanSource) {
-		return true
-	}
-	policy := w.cfg.StagingPolicy
-	if strings.TrimSpace(string(policy)) == "" {
-		policy = DefaultStagingPolicy()
-	}
-	stage, err := ShouldStageInput(policy, cleanSource, w.cfg.ExternalRoots)
-	if err != nil {
-		return false
-	}
-	return stage
-}
-
 // unlinkFreesBlocks reports whether removing path releases its disk blocks,
 // i.e. it is the file's only link. Hard-linked entries (the populate link,
 // active leases) keep the bytes alive until the other names go. Unknown link
@@ -684,7 +530,7 @@ func unlinkFreesBlocks(path string) bool {
 // It never touches temp files, meta sidecars without data, per-job work dirs,
 // or entries that fail to stat. Deletion is best-effort. Active jobs hold their
 // own job-local hard links, so unlinking a shared name here never breaks an
-// in-flight benchmark or transcode.
+// in-flight transcode.
 func (w *Worker) sweepSourceCache() error {
 	if !w.sourceCacheEnabled() {
 		return nil
@@ -731,7 +577,7 @@ func (w *Worker) sweepSourceCache() error {
 	}
 	datas, _, _ := list()
 	// Expire by TTL first, then enforce the size bound oldest first. A pin
-	// (benchmark or unfinished job) protects an entry from size-pressure
+	// (an unfinished job) protects an entry from size-pressure
 	// eviction only; the TTL still bounds every entry's lifetime.
 	for _, d := range datas {
 		if ttl > 0 && now.Sub(d.mod) > ttl {

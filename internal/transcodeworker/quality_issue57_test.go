@@ -10,45 +10,7 @@ import (
 	"time"
 
 	"github.com/jakenesler/navigatorr/transcode"
-	"github.com/jakenesler/navigatorr/transcode/optimization"
-	"github.com/jakenesler/navigatorr/transcode/quality"
 )
-
-func TestPooledVMAFStillValidatesFrames(t *testing.T) {
-	for _, data := range []string{
-		`{"pooled_metrics":{"vmaf":{"mean":95}},"frames":[{"metrics":{"vmaf":95}}]}`,
-		`{"pooled_metrics":{"vmaf":{"mean":95}},"frames":[{"frameNum":0,"metrics":{"vmaf":95}},{"frameNum":2,"metrics":{"vmaf":95}}]}`,
-		`{"pooled_metrics":{"vmaf":{"mean":95}},"frames":[{"frameNum":0,"metrics":{"vmaf":90}}]}`,
-		`{"pooled_metrics":{"vmaf":{"mean":95}},"frames":[{"frameNum":0,"metrics":{}}]}`,
-	} {
-		if _, err := ParseVMAFJSON([]byte(data)); err == nil {
-			t.Errorf("accepted corrupt pooled/frame evidence %s", data)
-		}
-	}
-}
-
-func TestQualityGuardrailRejectsCandidateAndObserveDoesNot(t *testing.T) {
-	model, _ := quality.Model("v1_1080p_3h")
-	stats, err := quality.ParseVMAF([]byte(`{"frames":[{"frameNum":0,"metrics":{"vmaf":90}},{"frameNum":1,"metrics":{"vmaf":100}}]}`), 4096, model, 0, 10, 1, 1, 2, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct {
-		enforcement string
-		rejected    bool
-	}{{"observe", false}, {"reject", true}} {
-		minimum := 95.0
-		record := &BenchmarkRecord{Samples: []transcode.BenchmarkSampleWindow{{Index: 0, StartSeconds: 10, DurationSeconds: 2}}, Quality: &transcode.BenchmarkQualityConfig{VMAF: &transcode.BenchmarkQualityThresholds{Model: model.ID, Target: 96, Minimum: 90, GuardrailEnforcement: tc.enforcement, P5Minimum: &minimum, WorstWindowSeconds: 2}}}
-		sh := &pipelineShared{record: record, evidence: &BenchmarkExecutionEvidence{}, vcs: []validatedCandidate{{index: 0, candidate: transcode.BenchmarkCandidate{ID: "c1"}}}, runVMAF: true, vmafModel: &model, metricOut: []pipelineMetricOutcome{{executed: true, vmafStats: &stats, vmafScores: []optimization.SampleScore{{SampleIndex: 0, Score: 95, Valid: true}}, entry: &BenchmarkMetricSampleResult{CandidateID: "c1", SampleIndex: 0}}}, encodeOut: []pipelineEncodeOutcome{{entry: BenchmarkCandidateSampleResult{CandidateID: "c1", SampleIndex: 0, SizeBytes: 100}}}}
-		sh.assembleEvidence([]pipelineUnit{{vcOrd: 0, sampOrd: 0}})
-		if got := !sh.evidence.CandidateMetrics[0].Aggregate.Valid; got != tc.rejected {
-			t.Errorf("enforcement=%s rejected=%t want %t", tc.enforcement, got, tc.rejected)
-		}
-		if len(sh.evidence.Quality) != 1 || sh.evidence.Quality[0].ReasonCodes[0] != "quality_vmaf_p5_below_minimum" {
-			t.Fatalf("missing reason: %+v", sh.evidence.Quality)
-		}
-	}
-}
 
 func TestFinalSampleAlignmentRequiresFrameAndTimestampCorrespondence(t *testing.T) {
 	if err := verifySampleAlignment([]float64{0, 0.04, 0.08}, []float64{1, 1.04, 1.08}, 25); err != nil {

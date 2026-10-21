@@ -1,18 +1,15 @@
 package transcodeworker
 
 // PR2 worker-endpoint tests: the new versioned routes the Navigatorr
-// HTTPExecutor depends on (doctor, capabilities, benchmarks). Transcode
+// HTTPExecutor depends on (doctor, capabilities). Transcode
 // job routes remain covered by http_test.go.
 
 import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/jakenesler/navigatorr/transcode"
 )
@@ -75,136 +72,27 @@ func TestHTTP_CapabilitiesShape(t *testing.T) {
 	}
 }
 
-func benchmarkRequestFor(t *testing.T, id, source string) string {
-	t.Helper()
-	b, err := json.Marshal(transcode.BenchmarkRequest{
-		ProtocolVersion: transcode.WorkerProtocolVersion,
-		ID:              id,
-		SourcePath:      source,
-		Metric:          "vmaf",
-		Samples:         []transcode.BenchmarkSampleWindow{{Index: 0, StartSeconds: 1, DurationSeconds: 5}},
-		Candidates:      []transcode.BenchmarkCandidate{{ID: "c1", Quality: 65}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(b)
-}
-
-func TestHTTP_BenchmarkSubmitStatusCancelWiring(t *testing.T) {
-	// Capacity 0 would reject everything; use a wide-open worker and a
-	// selfExe that can never spawn (submit then fails 500 without hanging).
-	tempDir := t.TempDir()
-	sourceFile := filepath.Join(tempDir, "source.mkv")
-	if err := os.WriteFile(sourceFile, []byte("dummy"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	cfg := &WorkerConfig{StateDir: filepath.Join(tempDir, "jobs"), AllowedRoots: []string{tempDir}, MaxParallelJobs: 8, Quality: 65}
-	worker := NewWorker(cfg)
-	srv := NewServer(worker, filepath.Join(tempDir, "nonexistent-transcode-binary"), "", "")
-
-	// Unknown fields rejected (no raw-arg smuggling surface).
-	badUnknown := `{"protocol_version": 2, "id": "bench-unknown-fields", "source_path": "` + sourceFile + `", "metric": "vmaf", "samples": [{"index": 0, "start_seconds": 1, "duration_seconds": 5}], "candidates": [{"id": "c1", "quality": 65}], "ffmpeg_args": ["-crf", "20"]}`
-	rec := doRequest(t, srv, http.MethodPost, "/v1/benchmarks", badUnknown, "")
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("unknown fields: want 400, got %d (%s)", rec.Code, rec.Body.String())
-	}
-
-	// Malformed JSON -> 400 envelope.
-	rec = doRequest(t, srv, http.MethodPost, "/v1/benchmarks", `{"protocol_version": `, "")
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("malformed: want 400, got %d", rec.Code)
-	}
-
-	// Invalid benchmark id (transcode-shaped) fails closed.
-	rec = doRequest(t, srv, http.MethodPost, "/v1/benchmarks", benchmarkRequestFor(t, "job-not-bench", sourceFile), "")
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("non-bench id: want 400, got %d (%s)", rec.Code, rec.Body.String())
-	}
-
-	// Unknown benchmark GET/cancel -> 404.
-	rec = doRequest(t, srv, http.MethodGet, "/v1/benchmarks/bench-does-not-exist", "", "")
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("unknown bench GET: want 404, got %d (%s)", rec.Code, rec.Body.String())
-	}
-	rec = doRequest(t, srv, http.MethodPost, "/v1/benchmarks/bench-does-not-exist/cancel", "", "")
-	// Cancel is reconciling: unknown id -> 404 (worker has no record).
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("unknown bench cancel: want 404, got %d (%s)", rec.Code, rec.Body.String())
-	}
-
-	// Seed a terminal benchmark record directly and verify idempotent
-	// re-submit returns 200 terminal (no spawn) plus GET wiring.
-	seedDir := filepath.Join(tempDir, "jobs", "bench-seeded-1")
-	req := transcode.BenchmarkRequest{
-		ProtocolVersion: transcode.WorkerProtocolVersion, ID: "bench-seeded-1", SourcePath: sourceFile,
-		Metric: "vmaf", Samples: []transcode.BenchmarkSampleWindow{{Index: 0, StartSeconds: 1, DurationSeconds: 5}},
-		Candidates: []transcode.BenchmarkCandidate{{ID: "c1", Quality: 65}},
-	}
-	digest, err := transcode.DigestBenchmarkRequest(&req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	seed := &BenchmarkRecord{
-		ProtocolVersion: transcode.WorkerProtocolVersion, ID: "bench-seeded-1", Status: "completed",
-		Source: sourceFile, Metric: "vmaf", Samples: req.Samples, Candidates: req.Candidates,
-		RequestDigest: digest, Attempt: 1, RunToken: "run-seed",
-		CreatedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(),
-	}
-	if err := SaveBenchmarkAtomic(filepath.Join(seedDir, "benchmark.json"), seed); err != nil {
-		t.Fatal(err)
-	}
-	rec = doRequest(t, srv, http.MethodPost, "/v1/benchmarks", benchmarkRequestFor(t, "bench-seeded-1", sourceFile), "")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("idempotent terminal resubmit: want 200, got %d (%s)", rec.Code, rec.Body.String())
-	}
-	var resubmit transcode.BenchmarkSubmitResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resubmit); err != nil {
-		t.Fatalf("resubmit json: %v", err)
-	}
-	if resubmit.Status != "completed" || resubmit.ProtocolVersion != transcode.WorkerProtocolVersion {
-		t.Errorf("unexpected resubmit: %+v", resubmit)
-	}
-	rec = doRequest(t, srv, http.MethodGet, "/v1/benchmarks/bench-seeded-1", "", "")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("seeded GET: want 200, got %d (%s)", rec.Code, rec.Body.String())
-	}
-	var bst transcode.BenchmarkStatus
-	if err := json.Unmarshal(rec.Body.Bytes(), &bst); err != nil {
-		t.Fatalf("bench status json: %v", err)
-	}
-	if bst.ProtocolVersion != transcode.WorkerProtocolVersion || bst.ID != "bench-seeded-1" || bst.Status != "completed" {
-		t.Errorf("unexpected bench status: %+v", bst)
-	}
-}
-
-func TestHTTP_BenchmarkTraversalNeverRedirects(t *testing.T) {
+// The deployed server no longer calls the sample-test routes; an old caller
+// gets a clear 410 for every method, never a panic.
+func TestHTTP_RemovedBenchmarkRoutesAnswerGone(t *testing.T) {
 	_, srv, _, _ := newHTTPTestSetup(t, "")
-	for _, tc := range []struct{ method, path string }{
-		{http.MethodGet, "/v1/benchmarks/../evil"},
-		{http.MethodPost, "/v1/benchmarks/../evil/cancel"},
-		{http.MethodGet, "/v1/benchmarks/a%2Fb"},
-		{http.MethodGet, "/v1/benchmarks/%2e%2e"},
-		{http.MethodGet, "/v1/benchmarks/job-plain"},
+	for _, tc := range []struct{ method, path, body string }{
+		{http.MethodPost, "/v1/benchmarks", `{"protocol_version": 2, "id": "bench-old"}`},
+		{http.MethodPost, "/v1/benchmarks", `{"protocol_version": `},
+		{http.MethodGet, "/v1/benchmarks/bench-old", ""},
+		{http.MethodPost, "/v1/benchmarks/bench-old/cancel", ""},
+		{http.MethodGet, "/v1/benchmarks/bench-a/b", ""},
 	} {
-		rec := doRequest(t, srv, tc.method, tc.path, "", "")
-		if rec.Code >= 300 && rec.Code < 400 {
-			t.Errorf("%s %s: must never redirect, got %d", tc.method, tc.path, rec.Code)
+		rec := doRequest(t, srv, tc.method, tc.path, tc.body, "")
+		if rec.Code != http.StatusGone {
+			t.Errorf("%s %s: want 410, got %d (%s)", tc.method, tc.path, rec.Code, rec.Body.String())
 		}
 		if loc := rec.Header().Get("Location"); loc != "" {
 			t.Errorf("%s %s: must not set Location, got %q", tc.method, tc.path, loc)
 		}
-		if rec.Code != http.StatusBadRequest {
-			t.Errorf("%s %s: want 400, got %d (%s)", tc.method, tc.path, rec.Code, rec.Body.String())
+		if !strings.Contains(rec.Body.String(), "sample tests were removed") {
+			t.Errorf("%s %s: body should say why, got %q", tc.method, tc.path, rec.Body.String())
 		}
-	}
-	// Deep non-dot path 404s safely without redirect.
-	rec := doRequest(t, srv, http.MethodGet, "/v1/benchmarks/bench-a/b", "", "")
-	if rec.Code >= 300 && rec.Code < 400 {
-		t.Errorf("deep bench path must never redirect, got %d", rec.Code)
-	}
-	if loc := rec.Header().Get("Location"); loc != "" {
-		t.Errorf("deep bench path must not set Location, got %q", loc)
 	}
 }
 

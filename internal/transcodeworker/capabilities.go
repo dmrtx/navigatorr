@@ -159,11 +159,12 @@ func ProbeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratch
 	return probeWorkerCapabilitiesWithScratch(ctx, ffmpegPath, scratchRoot, true)
 }
 
-// Legacy 8-bit benchmarks need only the encoder/filter inventory. Native
-// 10-bit VMAF also needs executable proof, even without an explicit model.
+// The encoder/filter inventory is always probed. Native 10-bit VMAF also needs
+// executable proof, even without an explicit model.
 func probeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratchRoot string, probeQuality bool) (transcode.WorkerCapabilities, error) {
 	ver, commit := GetBuildMetadata()
 	caps := transcode.WorkerCapabilities{
+		// The search-only flags here and below stay for fingerprint stability and go when the fingerprint is versioned.
 		ExplicitMain10Benchmarks: true,
 		AutomaticModesV2:         true,
 		AutomaticQualityPruning:  true,
@@ -224,6 +225,8 @@ func probeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratch
 	// Audio-only size plans stream-copy the video (keeping leading non-key
 	// packets) and prove it unchanged from ffprobe's per-packet hashes.
 	caps.SizeAudioOnly = caps.SizeModeV3
+	// Search-only flags, kept for fingerprint stability; they go when the
+	// fingerprint is versioned.
 	// Mode searches may stretch their budget while work keeps finishing.
 	caps.SearchBudgetExtension = true
 	// Size searches may carry automatic_search rules (selection margin,

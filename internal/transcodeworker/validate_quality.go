@@ -148,7 +148,7 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 	defer os.RemoveAll(scratch)
 	timeline := math.Min(sourceRep.DurationSec, candidateRep.DurationSec)
 	// The grid windows decide the verdict. Fresh windows (rules from the
-	// benchmark's own verification) were never seen by the search; they are
+	// plan's own verification) were never part of the grid; they are
 	// measured after the grid, reported separately, and never gate the result.
 	grid := len(q.Samples)
 	windows := append(append([]transcode.BenchmarkSampleWindow(nil), q.Samples...), q.FreshSamples...)

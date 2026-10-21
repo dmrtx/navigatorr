@@ -40,8 +40,8 @@ const MaxTranscodeJobIDLength = 128
 
 // ValidateTranscodeJobID fail-closes on empty, oversized, traversal, encoded
 // traversal, illegal characters, and reserved filesystem identifiers. It also
-// rejects the reserved benchmark namespace so transcode and benchmark IDs can
-// never collide.
+// rejects the reserved "bench-" prefix, the namespace of the removed sample
+// tests, so a stored sample-test directory can never be taken for a job.
 func ValidateTranscodeJobID(id string) error {
 	trimmed := strings.TrimSpace(id)
 	if trimmed == "" {
@@ -177,8 +177,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/podcast-ad-library", s.handleAdLibrary)
 	mux.HandleFunc("/v1/jobs", s.handleJobs)
 	mux.HandleFunc("/v1/jobs/", s.handleJobByID)
-	mux.HandleFunc("/v1/benchmarks", s.handleBenchmarks)
-	mux.HandleFunc("/v1/benchmarks/", s.handleBenchmarkByID)
+	mux.HandleFunc("/v1/benchmarks", s.handleRemovedBenchmarks)
+	mux.HandleFunc("/v1/benchmarks/", s.handleRemovedBenchmarks)
 	mux.HandleFunc("/v1/activity", s.handleActivity)
 	mux.HandleFunc("/v1/slots", s.handleSlots)
 	// Auth applies first so the documented invariant holds: when a token is
@@ -267,28 +267,25 @@ func newWorkerRequestID() string {
 }
 
 // rejectTraversal fails closed on raw "." / ".." / empty segments and on
-// encoded separators/dots anywhere under /v1/jobs/ or /v1/benchmarks/
-// before ServeMux path cleaning can redirect. Legitimate IDs match
-// ^[a-zA-Z0-9_.-]+$ (transcode) or ^bench-... (benchmark) and never
+// encoded separators/dots anywhere under /v1/jobs/ before ServeMux path
+// cleaning can redirect. Legitimate IDs match ^[a-zA-Z0-9_.-]+$ and never
 // contain "/" or "%", so rejecting "%2f/%5c/%2e" here is safe; IDs that
 // merely contain dots (e.g. "a.b") pass through to job-ID validation.
 func rejectTraversal(next http.Handler) http.Handler {
+	const prefix = "/v1/jobs/"
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		escaped := r.URL.EscapedPath()
-		for _, prefix := range []string{"/v1/jobs/", "/v1/benchmarks/"} {
-			if strings.HasPrefix(escaped, prefix) {
-				rest := strings.TrimPrefix(escaped, prefix)
-				lower := strings.ToLower(rest)
-				if strings.Contains(lower, "%2f") || strings.Contains(lower, "%5c") || strings.Contains(lower, "%2e") {
-					writeHTTPError(w, http.StatusBadRequest, "invalid job id: encoded path traversal detected")
-					return
-				}
-				if trimmed := strings.Trim(rest, "/"); trimmed != "" {
-					for _, seg := range strings.Split(trimmed, "/") {
-						if seg == "." || seg == ".." || seg == "" {
-							writeHTTPError(w, http.StatusBadRequest, fmt.Sprintf("invalid job id %q", seg))
-							return
-						}
+		if escaped := r.URL.EscapedPath(); strings.HasPrefix(escaped, prefix) {
+			rest := strings.TrimPrefix(escaped, prefix)
+			lower := strings.ToLower(rest)
+			if strings.Contains(lower, "%2f") || strings.Contains(lower, "%5c") || strings.Contains(lower, "%2e") {
+				writeHTTPError(w, http.StatusBadRequest, "invalid job id: encoded path traversal detected")
+				return
+			}
+			if trimmed := strings.Trim(rest, "/"); trimmed != "" {
+				for _, seg := range strings.Split(trimmed, "/") {
+					if seg == "." || seg == ".." || seg == "" {
+						writeHTTPError(w, http.StatusBadRequest, fmt.Sprintf("invalid job id %q", seg))
+						return
 					}
 				}
 			}
@@ -386,8 +383,8 @@ func writeHTTPErrorCode(w http.ResponseWriter, status int, code, msg string) {
 }
 
 // writeHTTPCodedJSON writes body with the additive "code" and "retryable"
-// envelope fields merged in. body keeps its own shape (submit, status and
-// benchmark error bodies are structured), so older clients that read only
+// envelope fields merged in. body keeps its own shape (submit and status
+// error bodies are structured), so older clients that read only
 // "error" or the struct fields see exactly what they saw before.
 func writeHTTPCodedJSON(w http.ResponseWriter, status int, code string, body any) {
 	fields := map[string]json.RawMessage{}
@@ -694,159 +691,16 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	writeHTTPJSON(w, http.StatusOK, caps)
 }
 
-// handleBenchmarks serves POST /v1/benchmarks. Structured JSON only; the
-// body is transcode.BenchmarkRequest with DisallowUnknownFields and a 1 MiB
-// cap, mirroring POST /v1/jobs. Delegates to Worker.BenchmarkSubmit so
-// validation, digest idempotency, capacity accounting, and detached spawn
-// semantics are reused verbatim.
-func (s *Server) handleBenchmarks(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/v1/benchmarks" {
-		writeHTTPError(w, http.StatusNotFound, "not found")
-		return
-	}
-	if r.Method != http.MethodPost {
-		writeHTTPError(w, http.StatusMethodNotAllowed, "use POST")
-		return
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxHTTPBodyBytes)
-	var req transcode.BenchmarkRequest
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
-		writeHTTPError(w, http.StatusBadRequest, fmt.Sprintf("invalid json: %v", err))
-		return
-	}
-	if s.worker == nil {
-		writeHTTPError(w, http.StatusInternalServerError, "worker is not configured")
-		return
-	}
-	resp, err := s.worker.BenchmarkSubmit(r.Context(), req, s.selfExe, s.configPath)
-	if err != nil {
-		status, code := classifyBenchmarkSubmitError(err)
-		writeHTTPCodedJSON(w, status, code, resp)
-		return
-	}
-	code := http.StatusCreated
-	if resp.Status == "running" || resp.Status == "completed" || resp.Status == "failed" || resp.Status == "cancelled" {
-		// Idempotent re-submit of an existing benchmark (all terminal and
-		// live states are strictly idempotent by id+digest in the worker).
-		code = http.StatusOK
-	}
-	writeHTTPJSON(w, code, resp)
-}
-
-// handleBenchmarkByID serves GET /v1/benchmarks/{id} and
-// POST /v1/benchmarks/{id}/cancel.
-func (s *Server) handleBenchmarkByID(w http.ResponseWriter, r *http.Request) {
-	escaped := r.URL.EscapedPath()
-	rest := strings.TrimPrefix(escaped, "/v1/benchmarks/")
-	lowerRest := strings.ToLower(rest)
-	if strings.Contains(lowerRest, "%2f") || strings.Contains(lowerRest, "%5c") || strings.Contains(lowerRest, "%2e") {
-		writeHTTPError(w, http.StatusBadRequest, "invalid job id: encoded path traversal detected")
-		return
-	}
-	trimmed := strings.Trim(rest, "/")
-	parts := strings.Split(trimmed, "/")
-	var id string
-	var isCancel bool
-	var isComparison bool
-	switch {
-	case len(parts) == 1:
-		id = parts[0]
-	case len(parts) == 2 && parts[1] == "cancel":
-		id = parts[0]
-		isCancel = true
-	case len(parts) == 2 && parts[1] == "comparison":
-		id = parts[0]
-		isComparison = true
-	default:
-		writeHTTPError(w, http.StatusNotFound, "not found")
-		return
-	}
-	if decoded, err := url.PathUnescape(id); err != nil {
-		writeHTTPError(w, http.StatusBadRequest, fmt.Sprintf("invalid job id %q", id))
-		return
-	} else {
-		id = decoded
-	}
-	if strings.TrimSpace(id) == "" || strings.Contains(id, "/") || strings.Contains(id, "\\") {
-		writeHTTPError(w, http.StatusBadRequest, fmt.Sprintf("invalid job id %q", id))
-		return
-	}
-	if err := validateBenchmarkJobIDHTTP(id); err != nil {
-		writeHTTPError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if s.worker == nil {
-		writeHTTPError(w, http.StatusInternalServerError, "worker is not configured")
-		return
-	}
-	if isComparison {
-		if r.Method != http.MethodGet {
-			writeHTTPError(w, 405, "use GET")
-			return
-		}
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		if raw := r.URL.Query().Get("image"); raw != "" {
-			index, err := strconv.Atoi(raw)
-			if err != nil || index < 0 || index > 100 {
-				writeHTTPError(w, 400, "invalid comparison sample")
-				return
-			}
-			data, err := s.worker.BenchmarkComparisonImage(id, index, r.URL.Query().Get("side"))
-			if err != nil {
-				writeHTTPError(w, 404, "comparison image unavailable")
-				return
-			}
-			w.Header().Set("Content-Type", "image/png")
-			_, _ = w.Write(data)
-			return
-		}
-		manifest, err := s.worker.BenchmarkComparison(id)
-		if err != nil {
-			writeHTTPError(w, 404, "comparison unavailable; images were not saved or have expired")
-			return
-		}
-		writeHTTPJSON(w, 200, manifest)
-		return
-	}
-	switch {
-	case r.Method == http.MethodGet && !isCancel:
-		st, err := s.worker.BenchmarkStatus(r.Context(), id)
-		if err != nil {
-			status := http.StatusInternalServerError
-			if isBenchmarkNotFoundError(err) {
-				status = http.StatusNotFound
-			}
-			writeHTTPCodedJSON(w, status, defaultErrorCode(status), st)
-			return
-		}
-		writeHTTPJSON(w, http.StatusOK, st)
-	case r.Method == http.MethodPost && isCancel:
-		res, err := s.worker.BenchmarkCancel(r.Context(), id)
-		if err != nil {
-			status := http.StatusInternalServerError
-			if isBenchmarkNotFoundError(err) {
-				status = http.StatusNotFound
-			}
-			writeHTTPCodedJSON(w, status, defaultErrorCode(status), res)
-			return
-		}
-		writeHTTPJSON(w, http.StatusOK, res)
-	default:
-		if isCancel {
-			writeHTTPError(w, http.StatusMethodNotAllowed, "use POST")
-			return
-		}
-		writeHTTPError(w, http.StatusMethodNotAllowed, "use GET")
-	}
+// handleRemovedBenchmarks answers every request to the removed /v1/benchmarks
+// routes. The CRF sample search no longer runs on the worker, so a caller that
+// still sends one gets a definitive 410 instead of a panic or a retry loop.
+func (s *Server) handleRemovedBenchmarks(w http.ResponseWriter, r *http.Request) {
+	writeHTTPError(w, http.StatusGone, "sample tests were removed from the worker; submit a transcode job instead")
 }
 
 // classifySubmitError maps Worker.Submit failures to an HTTP status and
 // envelope code. PR3: durable queue acceptance never returns "worker busy" for
-// transcodes (the busy mapping is kept for parity with benchmarks); strong
-// idempotency conflicts are a definitive 409 and busy is a retryable 429, so
+// transcodes; strong idempotency conflicts are a definitive 409 and busy is a retryable 429, so
 // the two never share a status.
 func classifySubmitError(err error) (int, string) {
 	if IsIdempotencyConflict(err) {
@@ -876,38 +730,6 @@ func classifySubmitError(err error) (int, string) {
 // "the worker never had this job" and answers by resubmitting.
 func isNotFoundError(err error) bool {
 	return errors.Is(err, ErrJobNotFound)
-}
-
-// validateBenchmarkJobIDHTTP reuses the canonical benchmark namespace
-// validation so HTTP and SSH transports share one fail-closed definition.
-func validateBenchmarkJobIDHTTP(id string) error {
-	return transcode.ValidateBenchmarkJobID(id)
-}
-
-// classifyBenchmarkSubmitError mirrors classifySubmitError for benchmarks:
-// busy is a retryable 429 with Retry-After; spawn/persist/lock failures are
-// 500; validation/plan/path/digest collisions are 400.
-func classifyBenchmarkSubmitError(err error) (int, string) {
-	msg := strings.ToLower(err.Error())
-	switch {
-	case strings.Contains(msg, "worker busy") || strings.Contains(msg, "max parallel jobs"):
-		return http.StatusTooManyRequests, transcode.WorkerErrorBusy
-	case strings.Contains(msg, "acquiring capacity lock"),
-		strings.Contains(msg, "acquiring job lock"),
-		strings.Contains(msg, "spawning benchmark process"),
-		strings.Contains(msg, "persisting benchmark process identity"),
-		strings.Contains(msg, "saving initial benchmark state"),
-		strings.Contains(msg, "creating samples workspace"),
-		strings.Contains(msg, "generating run token"),
-		strings.Contains(msg, "checking active jobs"):
-		return http.StatusInternalServerError, transcode.WorkerErrorInternal
-	default:
-		return http.StatusBadRequest, transcode.WorkerErrorBadRequest
-	}
-}
-
-func isBenchmarkNotFoundError(err error) bool {
-	return errors.Is(err, ErrBenchmarkNotFound)
 }
 
 // ServeConfig carries the resolved daemon startup settings.
