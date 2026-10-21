@@ -147,26 +147,15 @@
         <section id="library" class="panel tab-content">
           <div class="library-layout">
             <div class="library-browser">
-              <div class="section-label">
-                <span>Files</span
-                ><span class="selection-totals"
-                  ><span id="selection-count" class="metadata"></span
-                  ><span id="library-total"></span
-                ></span>
-              </div>
-              <div class="toolbar">
-                <label>Source<select id="service"></select></label
-                ><label id="library-search-label" class="grow" hidden
-                  >Search<input
-                    id="search"
-                    type="search"
-                    placeholder="Title or filename" /></label
+              <div class="toolbar" id="library-tools">
+                <select id="service" aria-label="Source"></select
                 ><button
-                  id="search-button"
+                  id="toggle-library-search"
                   class="icon-button"
-                  aria-label="Search files"
+                  aria-label="Show search"
                   title="Search"
-                  hidden
+                  aria-expanded="false"
+                  aria-controls="library-search-label"
                 >
                   <svg
                     viewBox="0 0 24 24"
@@ -179,35 +168,6 @@
                     <path d="m15 15 5 5" />
                   </svg></button
                 ><button
-                  id="toggle-library-search"
-                  class="icon-button"
-                  aria-label="Show search"
-                  title="Search"
-                  aria-expanded="false"
-                >
-                  <svg
-                    class="search-icon"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="1.7"
-                    aria-hidden="true"
-                  >
-                    <circle cx="10" cy="10" r="6" />
-                    <path d="m15 15 5 5" />
-                  </svg>
-                  <svg
-                    class="close-search-icon"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="1.7"
-                    aria-hidden="true"
-                  >
-                    <path d="m6 6 12 12M6 18 18 6" />
-                  </svg>
-                </button>
-                <button
                   id="open-path"
                   class="icon-button"
                   aria-label="Open a path"
@@ -224,6 +184,48 @@
                   >
                     <path d="M3 6h7l2 2h9v12H3Z" />
                     <path d="M12 11v6m-3-3h6" />
+                  </svg></button
+                ><button id="reload-library" class="icon-button" aria-label="Reload files and sizes" title="Reload sizes and order">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M18 18A8 8 0 0 1 4 12" /></svg>
+                </button>
+              </div>
+              <div id="library-search-label" class="toolbar search-row" role="search" hidden>
+                <input
+                  id="search"
+                  type="search"
+                  enterkeyhint="search"
+                  aria-label="Search files"
+                  placeholder="Title or filename"
+                /><button
+                  id="search-button"
+                  class="icon-button"
+                  aria-label="Search files"
+                  title="Search"
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.7"
+                    aria-hidden="true"
+                  >
+                    <circle cx="10" cy="10" r="6" />
+                    <path d="m15 15 5 5" />
+                  </svg></button
+                ><button
+                  id="close-library-search"
+                  class="icon-button"
+                  aria-label="Close search"
+                  title="Close search"
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.7"
+                    aria-hidden="true"
+                  >
+                    <path d="m6 6 12 12M6 18 18 6" />
                   </svg>
                 </button>
               </div>
@@ -251,15 +253,14 @@
                   >
                     <path d="m13 6-6 6 6 6M7 12h13" />
                   </svg></button
-                ><span id="selection-title">Choose a folder or title</span>
-                <nav
-                  id="folder-breadcrumbs"
-                  aria-label="Folder path"
-                  hidden
-                ></nav>
-                <button id="reload-library" class="icon-button quiet" aria-label="Reload files and sizes" title="Reload sizes and order">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M18 18A8 8 0 0 1 4 12" /></svg>
-                </button>
+                ><span class="location"
+                  ><span id="selection-title">Choose a folder or title</span>
+                  <nav
+                    id="folder-breadcrumbs"
+                    aria-label="Folder path"
+                    hidden
+                  ></nav></span
+                ><span id="library-total" class="metadata"></span>
               </div>
               <div id="selection-toolbar" class="file-selection-actions" aria-label="File selection">
                 <button id="clear-selected-files" class="quiet" hidden>Clear selection</button>
@@ -268,6 +269,7 @@
               <div class="library-columns" aria-label="Library columns">
                 <label class="media-check"><input id="select-all-files" type="checkbox" aria-label="Select all videos" /></label>
                 <button id="sort-name" class="quiet column-sort" aria-label="Sort by name">Name <span id="sort-name-direction" aria-hidden="true">↑</span></button>
+                <span id="selection-count" class="metadata"></span>
                 <button id="sort-size" class="quiet column-sort" aria-label="Sort by size">Size <span id="sort-size-direction" aria-hidden="true"></span></button>
               </div>
               <div id="library-items" class="library-items"></div>
@@ -282,31 +284,32 @@
               </div>
             </div>
             <form id="job-form" class="target-editor">
-              <div class="mobile-step-heading">
-                <button
-                  id="back-to-files"
-                  type="button"
-                  class="quiet"
-                  aria-label="Back to files"
-                >
-                  <svg
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="1.7"
-                    aria-hidden="true"
-                  >
-                    <path d="m13 6-6 6 6 6M7 12h13" />
-                  </svg>
-                  Files
-                </button>
-                <span class="metadata">2 of 2</span>
-              </div>
               <h2>Process videos</h2>
-              <p id="source-summary" class="metadata">
-                Choose a file or folder.
-              </p>
-
+              <div class="step-line">
+                <div class="mobile-step-heading">
+                  <button
+                    id="back-to-files"
+                    type="button"
+                    class="quiet"
+                    aria-label="Back to files"
+                  >
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.7"
+                      aria-hidden="true"
+                    >
+                      <path d="m13 6-6 6 6 6M7 12h13" />
+                    </svg>
+                    Files
+                  </button>
+                  <span class="metadata">2 of 2</span>
+                </div>
+                <p id="source-summary" class="metadata">
+                  Choose a file or folder.
+                </p>
+              </div>
               <fieldset id="processing-goal" class="processing-goal">
                 <legend>Choose your goal</legend>
                 <label><input type="radio" name="processing-mode" value="size" /><span><strong>Smaller files</strong><small>Same look, at least 15% smaller. Lossless audio becomes AAC.</small></span></label>

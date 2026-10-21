@@ -714,11 +714,7 @@ async function applyNavigation(route) {
     renderLibrarySort();
     $("job-filter").value = route.status;
     $("search").value = route.search;
-    $("library-search-label").hidden = !route.search;
-    $("search-button").hidden = !route.search;
-    $("toggle-library-search").setAttribute("aria-expanded",String(Boolean(route.search)));
-    $("toggle-library-search").setAttribute("aria-label",route.search ? "Close search" : "Show search");
-    $("toggle-library-search").classList?.toggle("search-open",Boolean(route.search));
+    setLibrarySearchMode(Boolean(route.search));
     if ($("service").value.startsWith("folder:")) state.folder = route.folder || $("service").value.slice(7);
     else if (route.media && $("service").value) {
       try {
@@ -1254,26 +1250,36 @@ $("search-button").addEventListener("click", () => {
   state.libraryOffset = 0;
   safe(loadLibrary);
 });
-$("toggle-library-search").addEventListener("click", () => {
-  const open = $("library-search-label").hidden;
+// Search is a mode: the source toolbar is swapped for [input][search][close].
+// Closing is one tap or Escape; it clears the filter and restores the browse view.
+function setLibrarySearchMode(open, { focus = false } = {}) {
   $("library-search-label").hidden = !open;
-  $("search-button").hidden = !open;
-  $("toggle-library-search").setAttribute("aria-expanded", String(open));
-  $("toggle-library-search").setAttribute(
-    "aria-label",
-    open ? "Close search" : "Show search",
-  );
-  $("toggle-library-search").title = open ? "Close search" : "Search";
-  $("toggle-library-search").classList?.toggle("search-open", open);
+  $("library-tools").hidden = open;
+  const toggle = $("toggle-library-search");
+  toggle.setAttribute("aria-expanded", String(open));
+  toggle.setAttribute("aria-label", open ? "Close search" : "Show search");
+  toggle.title = open ? "Close search" : "Search";
+  toggle.classList?.toggle("search-open", open);
+  if (!focus) return;
   if (open) $("search").focus();
-  else {
-    $("search").value = "";
-    state.libraryOffset = 0;
-    safe(loadLibrary);
-  }
+  else toggle.focus?.();
+}
+function closeLibrarySearch() {
+  setLibrarySearchMode(false, { focus: true });
+  $("search").value = "";
+  state.libraryOffset = 0;
+  safe(loadLibrary);
+}
+$("toggle-library-search").addEventListener("click", () => {
+  if ($("library-search-label").hidden) setLibrarySearchMode(true, { focus: true });
+  else closeLibrarySearch();
 });
+$("close-library-search").addEventListener("click", closeLibrarySearch);
 $("search").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") {
+  if (e.key === "Escape") {
+    e.preventDefault();
+    closeLibrarySearch();
+  } else if (e.key === "Enter") {
     e.preventDefault();
     state.libraryOffset = 0;
     safe(loadLibrary);

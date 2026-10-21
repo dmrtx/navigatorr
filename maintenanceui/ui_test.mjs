@@ -1019,14 +1019,93 @@ test("search can close, clear its filter and restore the browse view", () => {
   toggle.listeners.get("click")();
   assert.equal(attrs["aria-expanded"], "true");
   assert.equal(attrs["aria-label"], "Close search");
+  // Search is a mode: the source toolbar gives way to the search row.
+  assert.equal(h.elements.get("library-search-label").hidden, false);
+  assert.equal(h.elements.get("library-tools").hidden, true);
   h.elements.get("search").value = "no matching file";
   toggle.listeners.get("click")();
   assert.equal(h.elements.get("library-search-label").hidden, true);
-  assert.equal(h.elements.get("search-button").hidden, true);
+  assert.equal(h.elements.get("library-tools").hidden, false);
   assert.equal(h.elements.get("search").value, "");
   assert.equal(attrs["aria-expanded"], "false");
   assert.equal(attrs["aria-label"], "Show search");
   assert.equal(h.run("state.restoredSearch"), "");
+});
+
+const reloadCounter =
+  'loadLibrary = async () => { state.restoredSearch = $("search").value; state.libraryReloads = (state.libraryReloads || 0) + 1; };';
+
+test("one tap on the search row's close button clears the filter and restores the toolbar", () => {
+  const h = harness();
+  h.run(reloadCounter);
+  h.document.getElementById("library-search-label").hidden = true;
+  h.elements.get("toggle-library-search").listeners.get("click")();
+  h.elements.get("search").value = "episode";
+  h.run("state.libraryOffset = 40");
+  h.elements.get("close-library-search").listeners.get("click")();
+  assert.equal(h.elements.get("library-search-label").hidden, true);
+  assert.equal(h.elements.get("library-tools").hidden, false);
+  assert.equal(h.elements.get("search").value, "");
+  assert.equal(h.run("state.libraryOffset"), 0);
+  assert.equal(h.run("state.restoredSearch"), "");
+  assert.equal(h.run("state.libraryReloads"), 1);
+});
+
+test("Escape in the search box closes search, while Enter still searches", () => {
+  const h = harness();
+  h.run(reloadCounter);
+  h.document.getElementById("library-search-label").hidden = true;
+  h.elements.get("toggle-library-search").listeners.get("click")();
+  const key = h.elements.get("search").listeners.get("keydown");
+  h.elements.get("search").value = "episode";
+  let prevented = 0;
+  key({ key: "Enter", preventDefault: () => prevented++ });
+  assert.equal(h.run("state.restoredSearch"), "episode");
+  assert.equal(h.elements.get("library-search-label").hidden, false);
+  key({ key: "a", preventDefault: () => prevented++ });
+  assert.equal(h.elements.get("library-search-label").hidden, false);
+  key({ key: "Escape", preventDefault: () => prevented++ });
+  assert.equal(h.elements.get("library-search-label").hidden, true);
+  assert.equal(h.elements.get("library-tools").hidden, false);
+  assert.equal(h.elements.get("search").value, "");
+  assert.equal(h.run("state.restoredSearch"), "");
+  assert.equal(h.run("state.libraryReloads"), 2);
+  assert.equal(prevented, 2);
+});
+
+test("the Files header stays compact: one toolbar, one location row, and a one-line step 2", async () => {
+  const css = await readFile(new URL("./assets/app.css", import.meta.url), "utf8");
+  const browser = markup.slice(
+    markup.indexOf('class="library-browser"'),
+    markup.indexOf('id="library-items"'),
+  );
+  // The source select is labelled for assistive tech, not with visible text.
+  assert.match(browser, /<select id="service" aria-label="Source">/);
+  assert.doesNotMatch(browser, /<label>Source/);
+  assert.doesNotMatch(browser, /section-label/);
+  // Reload lives in the toolbar; the totals share the location row.
+  const tools = browser.slice(
+    browser.indexOf('id="library-tools"'),
+    browser.indexOf('id="library-search-label"'),
+  );
+  assert.match(tools, /id="reload-library"/);
+  assert.match(tools, /id="open-path"/);
+  const location = browser.slice(
+    browser.indexOf('class="breadcrumbs"'),
+    browser.indexOf('id="selection-toolbar"'),
+  );
+  assert.match(location, /id="library-total"/);
+  // On a phone, step 2 hides the browser and shows one back/summary line.
+  assert.match(css, /#library\[data-file-step="configure"\] \.library-browser\s*\{\s*display: none;/);
+  assert.match(css, /\.step-line\s*\{\s*display: grid;/);
+  assert.match(css, /#job-form > h2\s*\{\s*position: absolute;/);
+  const step = markup.slice(
+    markup.indexOf('class="step-line"'),
+    markup.indexOf('id="processing-goal"'),
+  );
+  assert.match(step, /id="back-to-files"/);
+  assert.match(step, /id="source-summary"/);
+  assert.match(step, /2 of 2/);
 });
 
 test("a slow folder change removes old actionable rows before it returns", async () => {

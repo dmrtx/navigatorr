@@ -540,10 +540,8 @@ main {
 .mobile-step-heading {
   display: none;
 }
-.selection-totals {
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
+.step-line {
+  display: contents;
 }
 .file-selection-actions {
   display: flex;
@@ -556,9 +554,13 @@ main {
 .file-selection-actions button {
   font-size: 11px;
 }
-#reload-library { margin-left: auto; flex: 0 0 var(--control-size); }
-.library-columns { display: grid; grid-template-columns: 24px minmax(0,1fr) auto; gap: 8px; align-items: center; padding: 3px 0; border-bottom: 1px solid var(--line); }
-.library-columns .column-sort { display: flex; gap: 5px; font-size: 11px; padding: 3px 6px; min-height: 28px; color: var(--muted); }
+/* One slim header row: select-all, Name, the selection count, Size. */
+.library-columns { display: grid; grid-template-columns: var(--control-size) auto minmax(0,1fr) auto; gap: 0 8px; align-items: center; border-bottom: 1px solid var(--line); }
+.library-columns .media-check { min-height: 32px; grid-column: 1; }
+.library-columns #sort-name { grid-column: 2; }
+.library-columns #selection-count { grid-column: 3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.library-columns #sort-size { grid-column: 4; }
+.library-columns .column-sort { display: flex; align-items: center; gap: 5px; font-size: 11px; padding: 0 6px; min-height: 32px; color: var(--muted); }
 .library-columns #sort-size { justify-content: flex-end; padding-right: 0; min-width: 70px; }
 .library-columns .column-sort[aria-pressed="true"] { color: var(--forest); }
 .backup-row { padding: 9px 0; border-bottom: 1px solid var(--line); }
@@ -622,61 +624,49 @@ main {
   flex: 1;
 }
 .library-browser > .toolbar {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) repeat(2, var(--control-size));
-  align-items: center;
-  gap: 4px 6px;
+  gap: 2px;
+  margin-bottom: 4px;
 }
-.library-browser > .toolbar > label:first-child {
-  display: grid;
-  grid-template-columns: 46px minmax(0, 1fr);
-  grid-column: 1;
-  grid-row: 1;
-  align-items: center;
-  gap: 6px;
-  margin: 0;
+.library-browser > .toolbar > .icon-button {
+  flex: 0 0 var(--control-size);
 }
-.library-browser > .toolbar select {
+/* The source select takes the width the icon buttons leave; search swaps this
+   row for the search row, which gives the input the same room. */
+.library-browser > .toolbar select,
+.library-browser > .toolbar input {
+  flex: 1 1 auto;
   height: var(--control-size);
   margin: 0;
 }
-#open-path {
-  grid-column: 2;
-  grid-row: 1;
+.library-browser > .toolbar select {
+  margin-right: 4px;
 }
-#toggle-library-search {
-  grid-column: 3;
-  grid-row: 1;
+.library-browser > .search-row input {
+  margin-right: 4px;
 }
-#toggle-library-search svg {
-  width: 17px;
-  height: 17px;
-}
-#toggle-library-search .close-search-icon,
-#toggle-library-search.search-open .search-icon {
-  display: none;
-}
-#toggle-library-search.search-open .close-search-icon {
-  display: block;
-}
-#library-search-label {
-  grid-column: 1 / 3;
-  grid-row: 2;
-  margin: 0;
-}
-#search-button {
-  grid-column: 3;
-  grid-row: 2;
-  align-self: end;
+.library-browser > .toolbar .icon-button svg {
+  width: 19px;
+  height: 19px;
 }
 .breadcrumbs {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   min-width: 0;
-  padding: 4px 0;
+  min-height: 36px;
+  padding: 2px 0;
   border-top: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
+}
+.breadcrumbs .location {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  min-width: 0;
+}
+#library-total {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 #selection-title {
   min-width: 0;
@@ -692,6 +682,7 @@ main {
 }
 .breadcrumb-button {
   max-width: 100%;
+  min-height: 32px;
   padding: 4px 6px;
   border: 0;
   font-size: 12px;
@@ -1619,9 +1610,35 @@ pre {
     margin-top: 8px;
     justify-content: space-between;
   }
+  /* Step 2 is one line: back, the chosen file or folder, and the step count.
+     The form's heading stays for screen readers. */
+  .step-line {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    margin: 0 0 4px;
+  }
   .mobile-step-heading {
-    justify-content: space-between;
-    margin: 0 0 8px;
+    display: contents;
+  }
+  .step-line #back-to-files { grid-area: 1 / 1; }
+  .step-line #source-summary {
+    grid-area: 1 / 2;
+    margin: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .step-line .mobile-step-heading > .metadata { grid-area: 1 / 3; }
+  .step-line + .processing-goal { margin-top: 4px; }
+  #job-form > h2 {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
   }
   .mobile-step-heading button {
     display: flex;
