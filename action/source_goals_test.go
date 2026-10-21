@@ -48,13 +48,14 @@ func TestSourceGoalsRecommendation(t *testing.T) {
 	if g := e.SourceGoals(context.Background(), "/media/movie.mkv", sdr4k, sdrClassifier); g.Recommended != "compact" || g.Goals["compact"].Status != GoalOK {
 		t.Fatalf("%+v", g)
 	}
-	// Nothing recommended when the only converting goal could not be judged.
+	// An HDR source whose frames could not be read in time still gets the only
+	// goal that converts HDR; the job's preflight re-checks it.
 	hdr := &mediainspect.DetailedReport{Probed: true, Video: []mediainspect.DetailedStream{{Codec: "hevc", BitDepth: 10, FPS: 24, Width: 3840, Height: 2160, ColorTransfer: "smpte2084"}}}
 	failing := func(context.Context, *mediainspect.DetailedReport) (mediainspect.DynamicRange, error) {
 		return mediainspect.DynamicRange{}, errors.New("no frames")
 	}
 	g := e.SourceGoals(context.Background(), "/media/movie.mkv", hdr, failing)
-	if g.Goals["compact"].Status != GoalUnknown || g.Goals["size"].ReasonCode != "hdr_requires_compact" || g.Recommended != "" || g.Dynamic != nil {
+	if g.Goals["compact"].Status != GoalUnknown || g.Goals["size"].ReasonCode != "hdr_requires_compact" || g.Recommended != "compact" || g.Dynamic != nil {
 		t.Fatalf("%+v", g)
 	}
 }

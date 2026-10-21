@@ -116,5 +116,11 @@ func recommendedGoal(rep *mediainspect.DetailedReport, goals map[string]GoalVerd
 	if goals["size"].Status != GoalSkip {
 		return "size"
 	}
+	// Save space would skip an HDR source. When the compact check could not read
+	// its frames in time, compact is still the only goal that converts it; the
+	// job's own preflight re-checks it.
+	if len(video) == 1 && goals["compact"].Status == GoalUnknown && isSourceHDRorDV(rep) {
+		return "compact"
+	}
 	return ""
 }

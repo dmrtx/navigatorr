@@ -660,12 +660,12 @@ function navigationRoute(search = "") {
     status:routeStatuses.includes(q.get("status")) ? q.get("status") : "all",
     job:(q.get("job") || "").slice(0,200), profile:(q.get("profile") || "").slice(0,128),
     copies:q.get("copies") === "1", configure:q.get("configure") === "1",
-    mode:["size","quality","x265_preserve","compact"].includes(q.get("mode")) ? q.get("mode") : "quality", modeExplicit:q.has("mode"), technical:q.get("technical") === "1",
+    mode:["size","quality","x265_preserve","compact"].includes(q.get("mode")) ? q.get("mode") : "size", modeExplicit:q.has("mode"), technical:q.get("technical") === "1",
   };
 }
 function navigationQuery() {
   const q = new URLSearchParams({view:Object.entries(routeTabs).find(([,tab])=>tab===state.tab)?.[0] || "files"});
-  if (processingMode() !== "quality") q.set("mode", processingMode());
+  if (processingMode() !== "size") q.set("mode", processingMode());
   if ($("technical").checked) q.set("technical", "1");
   if ($("service").value) q.set("source",$("service").value);
   if ($("service").value.startsWith("folder:") && state.folder) q.set("folder",state.folder);
@@ -708,7 +708,7 @@ async function applyNavigation(route) {
     }
     if (route.tab === "recipes" && !route.profile) resetRecipeView();
     $("technical").checked = Boolean(route.technical);
-    setProcessingMode(route.mode || "quality");
+    setProcessingMode(route.mode || "size");
     if (route.modeExplicit) state.goalExplicit = true;
     const sources = [...state.info.roots.map(r=>`folder:${r}`), ...state.info.services.map(s=>s.name)];
     $("service").value = sources.includes(route.source) ? route.source : sources[0] || "";
@@ -755,7 +755,7 @@ async function applyNavigation(route) {
       }
     } else if (tab === "library") $("library-items").replaceChildren(node("p", "No media folders configured.", "empty"));
     if (!current()) return;
-    setProcessingMode(route.mode || "quality");
+    setProcessingMode(route.mode || "size");
     $("technical").checked = Boolean(route.technical);
     controls();
     if (tab === "recipes" && route.profile && !(recipeIsDirty() && route.profile === state.recipe?.name)) await readRecipe(route.profile);
@@ -1160,7 +1160,7 @@ function restoreLibraryDraft() {
   let draft;
   try { draft = JSON.parse(sessionStorage.getItem(`navigatorr_draft:${key}`)); } catch {}
   if (!draft) return;
-  setProcessingMode(draft.mode || "quality");
+  setProcessingMode(draft.mode || "size");
   state.goalExplicit = Boolean(draft.goalExplicit);
   const root = $("service").value.slice(7).replace(/\/$/, "");
   state.folderSelected = new Set((draft.folderSelected || []).filter(path=>typeof path === "string" && path.startsWith(root+"/")));
@@ -1735,7 +1735,7 @@ $("use-container").addEventListener("click", () => safe(async () => {
   configureSelection();
 }));
 function processingMode() {
-  return document.querySelector?.('input[name="processing-mode"]:checked')?.value || "quality";
+  return document.querySelector?.('input[name="processing-mode"]:checked')?.value || "size";
 }
 function setProcessingMode(mode) {
   document.querySelectorAll('input[name="processing-mode"]').forEach(input => { input.checked = input.value === mode; });

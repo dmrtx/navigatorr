@@ -3461,7 +3461,7 @@ test("clean podcast opens, lists podcasts and closes after starting", async () =
 });
 
 test("size goal discloses that lossless Atmos and DTS:X become AAC", () => {
-  const radio = markup.match(/<label><input type="radio" name="processing-mode" value="size" \/>[\s\S]*?<\/label>/)?.[0] || "";
+  const radio = markup.match(/<label><input type="radio" name="processing-mode" value="size" checked \/>[\s\S]*?<\/label>/)?.[0] || "";
   assert.match(radio, /Same look, at least 15% smaller; lossless audio becomes AAC\./);
   assert.match(source, /lossless Atmos\/DTS:X lose object and height channels; lossy tracks \(E-AC-3 Atmos included\) copied/);
 });
@@ -4637,10 +4637,11 @@ test("goal names are the same in the form, the reconfigure dialog and job rows",
   const form = markup.slice(markup.indexOf('<fieldset id="processing-goal"'), markup.indexOf("</fieldset>", markup.indexOf('<fieldset id="processing-goal"')));
   const visible = form.slice(0, form.indexOf('<details id="more-goals"'));
   const more = form.slice(form.indexOf('<details id="more-goals"'));
-  assert.match(visible, /value="size"[\s\S]*<strong>Save space<\/strong>[\s\S]*value="compact"[\s\S]*<strong>Shrink to 1080p SDR<\/strong>/);
+  assert.match(visible, /value="size" checked[\s\S]*<strong>Save space<\/strong>[\s\S]*value="compact"[\s\S]*<strong>Shrink to 1080p SDR<\/strong>/);
   assert.doesNotMatch(visible, /value="quality"|value="x265_preserve"/);
   assert.match(more, /<summary>More goals<\/summary>/);
-  assert.match(more, /value="quality"[^>]*checked[\s\S]*<strong>Strict quality<\/strong>[\s\S]*Use it when picture quality matters more than space; may save little\./);
+  assert.doesNotMatch(more, /checked/);
+  assert.match(more, /value="quality"[\s\S]*<strong>Strict quality<\/strong>[\s\S]*Use it when picture quality matters more than space; may save little\./);
   assert.match(more, /value="x265_preserve"[\s\S]*<strong>Convert to HEVC<\/strong>[\s\S]*Use it to make a library HEVC-only; HEVC files are left alone\./);
   const select = markup.match(/<select id="reconfigure-mode">[\s\S]*?<\/select>/)[0];
   for (const name of ["Save space", "Shrink to 1080p SDR", "Strict quality", "Convert to HEVC"]) assert.ok(select.includes(name), name);

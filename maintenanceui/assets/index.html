@@ -313,7 +313,7 @@
               <fieldset id="processing-goal" class="processing-goal">
                 <legend>Choose your goal</legend>
                 <p id="source-profile" class="metadata source-profile" role="status" hidden></p>
-                <label><input type="radio" name="processing-mode" value="size" /><span><strong>Save space</strong><small>Use it for most files. Same look, at least 15% smaller; lossless audio becomes AAC.</small><em id="goal-note-size" class="goal-note" hidden></em></span></label>
+                <label><input type="radio" name="processing-mode" value="size" checked /><span><strong>Save space</strong><small>Use it for most files. Same look, at least 15% smaller; lossless audio becomes AAC.</small><em id="goal-note-size" class="goal-note" hidden></em></span></label>
                 <div id="hardware-option" class="goal-options" hidden>
                   <label class="check"><input id="allow-hardware" type="checkbox" checked /><span>Use the media engine (faster)</span></label>
                   <label id="hardware-margin-label" class="goal-inline">Within <input id="hardware-margin" type="number" min="0" max="50" step="1" value="15" inputmode="numeric" /> % of x265's size</label>
@@ -328,7 +328,7 @@
                 <label><input type="radio" name="processing-mode" value="compact" /><span><strong>Shrink to 1080p SDR</strong><small>Use it for 4K or HDR you don't need in 4K. At least 30% smaller; HDR is removed.</small><em id="goal-note-compact" class="goal-note" hidden></em></span></label>
                 <details id="more-goals" class="more-goals">
                   <summary>More goals</summary>
-                  <label><input type="radio" name="processing-mode" value="quality" checked /><span><strong>Strict quality</strong><small>Use it when picture quality matters more than space; may save little.</small><em id="goal-note-quality" class="goal-note" hidden></em></span></label>
+                  <label><input type="radio" name="processing-mode" value="quality" /><span><strong>Strict quality</strong><small>Use it when picture quality matters more than space; may save little.</small><em id="goal-note-quality" class="goal-note" hidden></em></span></label>
                   <label><input type="radio" name="processing-mode" value="x265_preserve" /><span><strong>Convert to HEVC</strong><small>Use it to make a library HEVC-only; HEVC files are left alone.</small><em id="goal-note-x265_preserve" class="goal-note" hidden></em></span></label>
                 </details>
               </fieldset>

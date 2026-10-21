@@ -129,7 +129,7 @@ func TestSourceProfileHDRWithoutFrameEvidenceLeavesCompactUnknown(t *testing.T) 
 	w := request(h, "GET", "/api/maintenance/source-profile?path="+url.QueryEscape(video), "", true)
 	var out profileResponse
 	json.Unmarshal(w.Body.Bytes(), &out)
-	if w.Code != 200 || out.Goals["compact"].Status != "unknown" || out.Goals["size"].Status != "skip" || out.Recommended != "" {
+	if w.Code != 200 || out.Goals["compact"].Status != "unknown" || out.Goals["size"].Status != "skip" || out.Recommended != "compact" {
 		t.Fatal(w.Code, w.Body.String())
 	}
 }
