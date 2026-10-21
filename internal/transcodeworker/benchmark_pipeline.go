@@ -1052,39 +1052,6 @@ func invalidMetricOutcome(candidateID string, candIdx, sampleIdx int, reason str
 	return out
 }
 
-func runCAMBIMetricSample(ctx context.Context, ffmpegPath, samplesDir, candPath, refPath string, candIdx int, candidateID string, sampleIdx int, sourceStartSec, fps float64, encodedBitDepth int, outputMetric string, threads int) (quality.CAMBIStats, error) {
-	logPath, err := derivedMetricLogPath(samplesDir, "cambi", candIdx, candidateID, sampleIdx)
-	if err != nil {
-		return quality.CAMBIStats{}, err
-	}
-	if err := prepareOutputFile(logPath); err != nil {
-		return quality.CAMBIStats{}, err
-	}
-	if encodedBitDepth != 8 && encodedBitDepth != 10 {
-		return quality.CAMBIStats{}, fmt.Errorf("unsupported CAMBI encoded bit depth %d", encodedBitDepth)
-	}
-	args := BuildCAMBIArgs(candPath, refPath, logPath, encodedBitDepth, threads)
-	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if cmd.Process != nil && cmd.Process.Pid > 0 {
-			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
-		return nil
-	}
-	cmd.WaitDelay = 2 * time.Second
-	stderrBuf := newTailBuffer(64 * 1024)
-	cmd.Stderr = stderrBuf
-	if err := runCharged(ctx, cmd); err != nil {
-		return quality.CAMBIStats{}, fmt.Errorf("ffmpeg CAMBI full-reference failed: %v: %s", err, stderrBuf.String())
-	}
-	data, err := readMetricLogFile(logPath)
-	if err != nil {
-		return quality.CAMBIStats{}, err
-	}
-	return quality.ParseCAMBIFullReference(data, MaxMetricLogSizeBytes, outputMetric, sampleIdx, sourceStartSec, fps)
-}
-
 // assembleEvidence persists per-unit outcomes into evidence in deterministic
 // (candidate, sample) order, backfills metric scores onto candidate samples,
 // and records per-candidate aggregates in deterministic order. It runs once on
