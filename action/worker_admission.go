@@ -22,7 +22,7 @@ type WorkerAdmissionError struct {
 func (e *WorkerAdmissionError) Error() string { return e.Message }
 
 func RequiresWorker(name string) bool {
-	return name == "clean_podcast_ads" || name == "transcode_media" || name == "transcode_batch" || name == "benchmark_transcode"
+	return name == "clean_podcast_ads" || name == "transcode_media" || name == "transcode_batch"
 }
 
 // Replacement retries use already encoded candidates at the final batch step.

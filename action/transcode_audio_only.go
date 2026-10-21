@@ -77,13 +77,12 @@ func audioStreamBytes(a mediainspect.DetailedStream, duration float64, fileBytes
 	return 0
 }
 
-// sizeAudioOnlyFallback is size v3's answer to a benchmark without a winner,
-// and v4's to a ladder that ends without a candidate or a budget the audio
-// alone fits: when no video encode meets the quality floor and the savings
-// gate, the lossless audio may still be compacted with the video
-// stream-copied. It
-// leaves the result to the caller (no_suitable_candidate) when the frozen
-// policy or the source has nothing for it to do.
+// sizeAudioOnlyFallback is the answer to a ladder that ends without a candidate
+// or a budget the audio alone fits: when no video encode meets the quality
+// floor and the savings gate, the lossless audio may still be compacted with
+// the video stream-copied. It leaves the result to the caller
+// (no_suitable_candidate) when the frozen policy or the source has nothing for
+// it to do.
 func (e *Engine) sizeAudioOnlyFallback(ctx context.Context, ec *ExecutionContext, outputs map[string]any) (StepResult, bool) {
 	if ec.ActionName != "transcode_media" || getString(ec.Inputs, "mode") != "size" {
 		return StepResult{}, false

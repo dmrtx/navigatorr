@@ -305,22 +305,9 @@ func (e *Engine) qualityLadderPlan(ec *ExecutionContext, snapshot *ModePolicySna
 	if err != nil {
 		return nil, err
 	}
-	var request transcode.BenchmarkRequest
-	if !reencode(ec.State["benchmark_request"], &request) || request.Quality == nil || request.Quality.FinalValidation == nil || request.Quality.FinalValidation.Mode != "sampled" {
-		return nil, fmt.Errorf("the goal's final validation plan is missing")
-	}
-	digest, err := transcode.DigestBenchmarkRequest(&request)
-	if err != nil || digest != getString(ec.State, "benchmark_request_digest") {
-		return nil, fmt.Errorf("the final validation request changed")
-	}
-	fresh := 0
-	if r := request.AutomaticSearch; r != nil && r.HoldoutWindows == transcode.HoldoutWindowsFinalGrid {
-		fresh = r.FinalFreshWindows
-	}
-	samples := append([]transcode.BenchmarkSampleWindow(nil), request.Samples...)
-	windows, freshWindows := sizeFinalWindowsWithFresh(ec, request.SourceDuration, fresh)
-	if windows != nil {
-		samples = windows
+	request, digest, samples, freshWindows, err := finalValidationInputs(ec)
+	if err != nil {
+		return nil, err
 	}
 	p := *base
 	video.apply(&p)
@@ -347,7 +334,7 @@ func (e *Engine) startQualityLadder(ctx context.Context, ec *ExecutionContext, c
 	if QualityLadderOf(ec.State) != nil {
 		return StepResult{Status: StepCompleted}, true // planned already; this step ran again
 	}
-	if ec.ActionName != "transcode_media" || getString(ec.Inputs, "mode") == "" || getString(ec.State, "benchmark_job_id") != "" {
+	if ec.ActionName != "transcode_media" || getString(ec.Inputs, "mode") == "" {
 		return StepResult{}, false
 	}
 	snapshot, err := freezeModePolicy(ec)
@@ -379,9 +366,8 @@ func (e *Engine) startQualityLadder(ctx context.Context, ec *ExecutionContext, c
 	if rep == nil || opt == nil || !opt.Enabled {
 		return StepResult{Status: StepFailed, Error: "media inspection report or goal policy is missing from state (fail closed)"}, true
 	}
-	// The windows final validation measures come from the request the search
-	// would have made; it is never submitted.
-	req, err := buildBenchmarkRequest(ec, cleanPath, rep, opt, caps)
+	// The windows and limits final validation judges every rung on.
+	req, err := buildFinalValidationRequest(ec, cleanPath, rep, opt, caps, r.VideoCodec)
 	if err != nil {
 		return modeAttention(ec, "quality_policy_unavailable", err.Error()+"; original preserved"), true
 	}
@@ -622,14 +608,4 @@ func stopQualityLadder(ec *ExecutionContext, reason string, candidateBytes int64
 	rec.Message = fmt.Sprintf("%s came out at %s, which does not save enough for this goal. Original preserved.", recipeRungName(rec.VideoCodec, rec.Values[rec.Rung]), formatBudgetBytes(candidateBytes))
 	ec.State[qualityLadderKey] = rec
 	return rec
-}
-
-// QualityLadderStep is the rung a ladder is on and how many it has, for status
-// summaries; ok is false without a ladder.
-func QualityLadderStep(state map[string]any) (rung, rungs int, ok bool) {
-	rec := QualityLadderOf(state)
-	if rec == nil {
-		return 0, 0, false
-	}
-	return rec.Rung + 1, len(rec.Values), true
 }

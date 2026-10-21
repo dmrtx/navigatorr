@@ -13,9 +13,8 @@ import (
 
 // Worker slot queue.
 //
-// A worker runs at most max_parallel_jobs benchmarks and encodes at once and
-// refuses a benchmark (and, on older workers, an encode) submitted while it is
-// full. Admission used to be per batch only, so the batch whose child had just
+// A worker runs at most max_parallel_jobs encodes at once and refuses one
+// submitted while it is full. Admission used to be per batch only, so the batch whose child had just
 // finished dispatched its next child inline and won every freed slot, while
 // children of other batches kept polling a full worker.
 //

@@ -1,12 +1,10 @@
 package action
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"math"
 	"slices"
-	"sort"
 
 	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
@@ -468,7 +466,7 @@ func sizeBudgetFloorQuality(snapshot *ModePolicySnapshot) *transcode.BenchmarkQu
 	if snapshot == nil || snapshot.Size == nil || snapshot.Size.SizeBudget == nil {
 		return nil
 	}
-	qc := ensureBenchmarkQualityMetric(buildBenchmarkQualityConfig(snapshot.Profile.Optimization.Quality), "vmaf")
+	qc := ensureFinalQualityMetric(buildFinalQualityConfig(snapshot.Profile.Optimization.Quality), "vmaf")
 	if qc.VMAF == nil {
 		return nil
 	}
@@ -478,50 +476,6 @@ func sizeBudgetFloorQuality(snapshot *ModePolicySnapshot) *transcode.BenchmarkQu
 	v.Minimum, v.P5Minimum, v.WorstWindowMinimum = f.VMAFMean, &p5, &worst
 	qc.VMAF = &v
 	return qc
-}
-
-// sizeBudgetCurve lists the settings the search measured far enough to
-// estimate, smallest first, as points of the rate-quality curve.
-func sizeBudgetCurve(decision *transcode.BenchmarkDecision, budget int64) []SizeBudgetPoint {
-	if decision == nil {
-		return nil
-	}
-	var points []SizeBudgetPoint
-	for _, ev := range decision.Evaluations {
-		if ev.EstimatedBytes <= 0 || ev.VMAF == nil {
-			continue
-		}
-		v := ev.VMAF
-		mean, p5 := v.Mean, v.P5
-		p := SizeBudgetPoint{Kind: "searched", CandidateID: ev.CandidateID, VideoCodec: transcode.BenchmarkCandidateVideoCodec(transcode.BenchmarkCandidate{VideoCodec: ev.VideoCodec}), Quality: ev.Quality, Preset: ev.Preset, BitrateKbps: ev.AverageBitrateKbps, Bytes: ev.EstimatedBytes, Passed: ev.Eligible, WithinBudget: ev.EstimatedBytes <= budget, VMAFMean: &mean, VMAFP5: &p5}
-		if v.WorstWindowMean > 0 {
-			worst := v.WorstWindowMean
-			p.VMAFWorst = &worst
-		}
-		points = append(points, p)
-	}
-	sort.SliceStable(points, func(i, j int) bool { return points[i].Bytes < points[j].Bytes })
-	return points
-}
-
-// sizeBudgetWinnerFits reports whether a passing winner's sampled estimate is
-// within the frozen budget. Without a budget every winner fits.
-func sizeBudgetWinnerFits(snapshot *ModePolicySnapshot, winner *transcode.BenchmarkWinner, sourceBytes int64, siblings *SiblingBudgetEvidence) bool {
-	if snapshot == nil || snapshot.Size == nil || snapshot.Size.SizeBudget == nil || winner == nil {
-		return true
-	}
-	budget := snapshot.Size.SizeBudget.BudgetBytes(sourceBytes, siblings)
-	if budget <= 0 {
-		return true // the siblings gave no budget
-	}
-	estimated := winner.EstimatedTotalBytes
-	if estimated <= 0 {
-		estimated = int64(math.Ceil(winner.EstimatedTotalMB * 1e6))
-	}
-	if estimated <= 0 {
-		return true // no estimate to hold against the budget
-	}
-	return estimated <= budget
 }
 
 // sizeBudgetEncode is the encode the frozen budget gives a source: the size it
@@ -578,7 +532,7 @@ func sizeBudgetMinimumBudget(policy *SizeBudgetPolicy, nonVideoBytes int64, dura
 // sibling evidence (a sibling budget has none yet and is asked again by the
 // benchmark submit step, which has it).
 func endUnreachableSizeBudget(ec *ExecutionContext, snapshot *ModePolicySnapshot, rep *mediainspect.DetailedReport, original int64, siblings *SiblingBudgetEvidence) (StepResult, bool) {
-	if ec.ActionName != "transcode_media" || getString(ec.Inputs, "mode") != "size" || getString(ec.State, "benchmark_job_id") != "" {
+	if ec.ActionName != "transcode_media" || getString(ec.Inputs, "mode") != "size" {
 		return StepResult{}, false
 	}
 	if snapshot == nil || snapshot.workerVersion() != optimization.ModePolicyV3 || snapshot.Size == nil || snapshot.Size.SizeBudget == nil {
@@ -619,82 +573,6 @@ func endUnreachableSizeBudget(ec *ExecutionContext, snapshot *ModePolicySnapshot
 	return StepResult{Status: StepCompleted, Outputs: map[string]any{"skipped": true, "reason_code": SizeBudgetExceeded, "mode": snapshot.Mode, "policy_digest": snapshot.Digest, sizeBudgetKey: rec}}, true
 }
 
-// sizeBudgetFallback replaces a size search's outcome with one encode at the
-// budget when the search found no passing setting (winner nil) or only one
-// larger than the budget. handled is false when the frozen policy has no
-// budget, so the caller goes on as it would without one. It is false too when
-// no encode at the budget can be planned (the video stream's size is unknown,
-// the budget leaves no usable bitrate, the worker cannot encode two-pass
-// x265): the search's own outcome stands, with the reason recorded beside it.
-func (e *Engine) sizeBudgetFallback(ctx context.Context, ec *ExecutionContext, outputs map[string]any, decision *transcode.BenchmarkDecision, winner *transcode.BenchmarkWinner) (StepResult, bool) {
-	if ec.ActionName != "transcode_media" || getString(ec.Inputs, "mode") != "size" {
-		return StepResult{}, false
-	}
-	snapshot, err := freezeModePolicy(ec)
-	if err != nil || snapshot == nil || snapshot.Version != optimization.ModePolicyV3 || snapshot.Size == nil || snapshot.Size.SizeBudget == nil {
-		return StepResult{}, false
-	}
-	policy := snapshot.Size.SizeBudget
-	if policy.Validate() != nil {
-		return StepResult{Status: StepFailed, Error: "frozen size budget is invalid (fail closed)"}, true
-	}
-	decline := func(reason, message string) (StepResult, bool) {
-		if winner != nil {
-			message += " The best passing setting is kept, although its estimate is over the budget."
-		} else {
-			message += " The size budget was not applied."
-		}
-		ec.State[sizeBudgetSkipReasonKey], ec.State[sizeBudgetSkipMessageKey] = reason, message
-		outputs[sizeBudgetSkipReasonKey], outputs[sizeBudgetSkipMessageKey] = reason, message
-		return StepResult{}, false
-	}
-	rep := getSourceReport(ec.State["source_report"])
-	original := getInt64(ec.State, "original_size")
-	siblings := siblingEvidenceOf(ec.State)
-	budget := policy.BudgetBytes(original, siblings)
-	if policy.Siblings != nil && budget <= 0 {
-		// The siblings gave no budget: go on as without one. The evidence
-		// says why.
-		return StepResult{}, false
-	}
-	enc := planSizeBudgetEncode(policy, rep, original, budget)
-	if e.deps.Transcode == nil {
-		return StepResult{Status: StepFailed, Error: "transcode executor is disabled or not configured in navigatorr"}, true
-	}
-	caps, err := e.deps.Transcode.Capabilities(ctx)
-	if err != nil {
-		return workerCapabilityLookupResult(err, "size budget two-pass x265"), true
-	}
-	// Copying the video and compacting only lossless audio loses no picture
-	// quality; when a worker can do that and it alone fits the budget, it is
-	// the better answer.
-	if winner == nil && rep != nil && snapshot.Size.AudioOnlyFallback && caps.SizeAudioOnly {
-		if est := estimateAudioOnly(rep, original); est.Compacted > 0 && est.CandidateBytes <= budget {
-			return StepResult{}, false
-		}
-	}
-	if enc.Reason != "" {
-		return decline(enc.Reason, enc.Message)
-	}
-	if !caps.X265TwoPass || !caps.Encoders[transcode.VideoCodecLibX265] {
-		return decline("size_budget_worker_unsupported", "The size budget needs a worker that can encode two-pass x265; upgrade the worker to use it.")
-	}
-	rec := newSizeBudgetRecord(snapshot, rep, original, budget, siblings, enc)
-	if winner != nil {
-		rec.Trigger = sizeBudgetTriggerOverBudget
-		rec.OverBudgetCandidateID = winner.CandidateID
-		rec.OverBudgetEstimatedBytes = winner.EstimatedTotalBytes
-	}
-	rec.Curve = sizeBudgetCurve(decision, budget)
-	// With the media engine allowed, VideoToolbox and x265 are first measured
-	// at the budget on the search's windows; the round's result picks the
-	// encoder (see transcode_size_budget_encoder.go).
-	if result, started := e.startSizeBudgetComparison(ec, snapshot, caps, rep, enc, rec, outputs); started {
-		return result, true
-	}
-	return e.commitSizeBudgetPlan(ec, snapshot, enc, rec, outputs)
-}
-
 // commitSizeBudgetPlan builds the budget encode with the encoder rec.Choice
 // names (x265 without one) and makes it the action's plan.
 func (e *Engine) commitSizeBudgetPlan(ec *ExecutionContext, snapshot *ModePolicySnapshot, enc sizeBudgetEncode, rec *SizeBudgetRecord, outputs map[string]any) (StepResult, bool) {
@@ -730,22 +608,9 @@ func (e *Engine) sizeBudgetPlan(ec *ExecutionContext, snapshot *ModePolicySnapsh
 	if base == nil || base.Mode != "size" || base.PolicyDigest != snapshot.Digest {
 		return nil, fmt.Errorf("the frozen size plan is missing")
 	}
-	var request transcode.BenchmarkRequest
-	if !reencode(ec.State["benchmark_request"], &request) || request.Quality == nil || request.Quality.FinalValidation == nil || request.Quality.FinalValidation.Mode != "sampled" {
-		return nil, fmt.Errorf("the search's final validation plan is missing")
-	}
-	digest, err := transcode.DigestBenchmarkRequest(&request)
-	if err != nil || digest != getString(ec.State, "benchmark_request_digest") {
-		return nil, fmt.Errorf("the search request changed before the size budget fallback")
-	}
-	fresh := 0
-	if r := request.AutomaticSearch; r != nil && r.HoldoutWindows == transcode.HoldoutWindowsFinalGrid {
-		fresh = r.FinalFreshWindows
-	}
-	samples := append([]transcode.BenchmarkSampleWindow(nil), request.Samples...)
-	windows, freshWindows := sizeFinalWindowsWithFresh(ec, request.SourceDuration, fresh)
-	if windows != nil {
-		samples = windows
+	request, digest, samples, freshWindows, err := finalValidationInputs(ec)
+	if err != nil {
+		return nil, err
 	}
 	floor := sizeBudgetFloorQuality(snapshot)
 	if floor == nil {

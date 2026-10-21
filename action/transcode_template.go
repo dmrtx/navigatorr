@@ -24,12 +24,12 @@ func (e *Engine) registerTranscodeTemplate() {
 		ImmutableInputs: true,
 		Name:            "transcode_media", Version: 2,
 		Validate:       validateTranscodeMedia,
-		Description:    "Set mode=size|quality|x265_preserve|compact for immutable sampled quality and final size policies without profile/priority/tuning; quality is the UI default. x265_preserve requires libx265, skips existing HEVC and permits 0% minimum savings; size requires 15%, converts lossless audio (TrueHD, MLP, FLAC, ALAC, PCM, DTS-HD MA) to AAC with the same layout, lossless Atmos and DTS:X included (their object/height channels are lost), while copying lossy tracks (E-AC-3 Atmos included), and may encode 8-bit sources as 10-bit HEVC on a worker that proves native 10-bit quality; quality and x265_preserve reject growth. Size also takes allow_hardware (default true; false keeps x265 only) with an optional hardware_margin_percent (0-50, default 15): the search then also measures Apple VideoToolbox encodes through the same quality gates and selection margin, and one wins when it is at most that percent larger than the best x265 result (or when x265 finds nothing); it needs a worker that advertises hardware_search, otherwise the search stays x265 only, and a hardware winner reports encoder and hardware in the size result. Size also takes allow_slow_preset (default false): true lets the quality fallback also try the x265 slow preset, whose full encode of a long 1080p source can take hours; medium covers CRF 14-21 either way. Size also takes one optional size budget, size_budget_percent (5-85, a percent of the source file), size_budget_bytes (a whole number of bytes, at least 50000000) or size_budget_source=siblings (the median total bitrate of the other video files in the same season folder, else the series folder, needing at least 3 of the same resolution class, times size_budget_sibling_multiplier 1.0-4.0, default 1.5), exactly one of them. With allow_hardware on (the default) and a worker that has VideoToolbox, a budget skips the search: the whole file is encoded with VideoToolbox at quality 65, then 58, then 50, then at the average bitrate that lands on the budget; the worker refuses any result over the budget before scoring it, and the first one within it is validated on the final windows against a fixed quality floor (VMAF mean 70, p5 60, worst 5 s window 65; banding limits unchanged). A result below that floor is not offered, and the result says to try again with allow_hardware=false. With allow_hardware=false (or when the ladder cannot be planned) the search runs as usual and, when it finds no setting that meets the quality limits or one larger than the budget, the file is encoded once with two-pass x265 at the bitrate that lands on the budget, held to the same floor. A result within the budget is reported as below the quality target unless it meets it; it still needs the usual approval before it replaces the original. compact makes HDR10, HLG, Dolby Vision 7/8 (base layer) and over-1080p SDR sources much smaller: deterministic tone map to SDR BT.709, downscale to max_height (720, 1080 default, 1440 or 2160), HEVC, lossless/DTS/PCM audio to AAC with every track kept, 30% minimum savings; HDR, Dolby Vision and Atmos are dropped and Dolby Vision profile 5 is rejected. Unsupported sources or unavailable quality capabilities preserve the original. Omit mode for legacy technical behavior. Coordinates safe candidate-only media transcoding using an immutable recipe-resolved plan, bounded transient retries, worker revalidation, post-transcode stream validation, and original SHA-256 verification.",
-		RequiredInputs: []string{"path"}, OptionalInputs: []string{"mode", "max_height", "allow_hardware", "hardware_margin_percent", "allow_slow_preset", "size_budget_percent", "size_budget_bytes", "size_budget_source", "size_budget_sibling_multiplier", "profile", "profile_config", "preserve_source_bit_depth", "replace_original", "expected_video_codec", "max_size_increase_percent", "media_type", "is_anime", "min_savings_percent", "surface_worker_busy", "metric", "parent_action_id", "batch_fixed_quality", "batch_calibration_digest", "batch_item_key", "library_context"}, Destructive: false,
+		Description:    "Set mode=size|quality|x265_preserve|compact for immutable quality and final size policies without profile/priority/tuning; quality is the UI default. Every goal encodes the whole file at a short ladder of fixed settings and the worker's final quality check judges each result: the first rung that passes is kept, a rung that fails on quality is followed by one that compresses less, and a rung refused for its size ends the ladder. x265_preserve requires libx265, skips existing HEVC and permits 0% minimum savings; size requires 15%, converts lossless audio (TrueHD, MLP, FLAC, ALAC, PCM, DTS-HD MA) to AAC with the same layout, lossless Atmos and DTS:X included (their object/height channels are lost), while copying lossy tracks (E-AC-3 Atmos included), and may encode 8-bit sources as 10-bit HEVC on a worker that proves native 10-bit quality; quality and x265_preserve reject growth. Size also takes allow_hardware (default true; false keeps x265 only): with it, a worker that has Apple VideoToolbox encodes the whole file with VideoToolbox first, and a hardware result is reported with its encoder. Size also takes allow_slow_preset (default false): true lets the x265 ladder use the slow preset, whose full encode of a long 1080p source can take hours. Size also takes one optional size budget, size_budget_percent (5-85, a percent of the source file), size_budget_bytes (a whole number of bytes, at least 50000000) or size_budget_source=siblings (the median total bitrate of the other video files in the same season folder, else the series folder, needing at least 3 of the same resolution class, times size_budget_sibling_multiplier 1.0-4.0, default 1.5), exactly one of them. With allow_hardware on (the default) and a worker that has VideoToolbox, a budget encodes the whole file with VideoToolbox at quality 65, then 58, then 50, then at the average bitrate that lands on the budget; the worker refuses any result over the budget before scoring it, and the first one within it is validated on the final windows against a fixed quality floor (VMAF mean 70, p5 60, worst 5 s window 65; banding limits unchanged). A result below that floor is not offered, and the result says to try again with allow_hardware=false. With allow_hardware=false (or a worker without VideoToolbox) the file is encoded once with two-pass x265 at the bitrate that lands on the budget, held to the same floor. A result within the budget is reported as below the quality target unless it meets it; it still needs the usual approval before it replaces the original. compact makes HDR10, HLG, Dolby Vision 7/8 (base layer) and over-1080p SDR sources much smaller: deterministic tone map to SDR BT.709, downscale to max_height (720, 1080 default, 1440 or 2160), HEVC, lossless/DTS/PCM audio to AAC with every track kept, 30% minimum savings; HDR, Dolby Vision and Atmos are dropped and Dolby Vision profile 5 is rejected. Unsupported sources or unavailable quality capabilities preserve the original. Omit mode for a fixed profile. Coordinates safe candidate-only media transcoding using an immutable recipe-resolved plan, bounded transient retries, worker revalidation, post-transcode stream validation, and original SHA-256 verification.",
+		RequiredInputs: []string{"path"}, OptionalInputs: []string{"mode", "max_height", "allow_hardware", "hardware_margin_percent", "allow_slow_preset", "size_budget_percent", "size_budget_bytes", "size_budget_source", "size_budget_sibling_multiplier", "profile", "profile_config", "preserve_source_bit_depth", "replace_original", "expected_video_codec", "max_size_increase_percent", "media_type", "is_anime", "min_savings_percent", "surface_worker_busy", "parent_action_id", "batch_item_key", "library_context"}, Destructive: false,
 		Steps: []StepDefinition{
 			{Name: "preflight", Description: "Inspect source, hash original once it needs worker work, resolve profile/recipe and per-stream compatibility plan", Run: e.measureCoordinatorPhase("coordinator_preflight", e.stepTranscodePreflight)},
-			{Name: "submit_benchmark", Description: "Submit benchmark request if profile optimization is enabled", Run: e.stepBenchmarkSubmit},
-			{Name: "wait_benchmark", Description: "Wait for benchmark completion and materialize winning plan if optimization is enabled", Run: e.stepBenchmarkWait},
+			{Name: "submit_benchmark", Description: "Plan the goal's first encode: a quality ladder rung or the size budget's encode", Run: e.stepPlanEncode},
+			{Name: "wait_benchmark", Description: "Unused since the sample search was removed; kept so the stored step positions of earlier actions still line up", Run: stepRetired},
 			{Name: "submit_transcode", Description: "Submit the immutable structured plan to the remote worker with bounded transient retries", Run: e.stepTranscodeSubmit},
 			{Name: "wait_transcode", Description: "Monitor transcode progress and classify transient transport failures", Run: e.stepTranscodeWait},
 			{Name: "validate_result", Description: "Validate duration, codecs, streams, dispositions, attachments, chapters and candidate integrity", Run: e.stepTranscodeValidate},
@@ -337,47 +337,15 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		return StepResult{Status: StepFailed, Error: err.Error()}, nil
 	}
 
-	metricInput := strings.TrimSpace(getString(ec.Inputs, "metric"))
-	optEnabled := recipeProfile.Optimization != nil && recipeProfile.Optimization.Enabled
-	var optPolicy *recipe.OptimizationPolicy
-	if recipeProfile.Optimization != nil && !recipeProfile.Optimization.Enabled {
-		if ec.ActionName == "benchmark_transcode" {
-			return StepResult{Status: StepFailed, Error: fmt.Sprintf("profile %q has optimization disabled (fail closed)", profile)}, nil
+	// A fixed profile never measures samples. One that still asks for the
+	// removed sample search belongs to an action admitted before it went.
+	if recipeProfile.Optimization != nil && recipeProfile.Optimization.Enabled {
+		if modeSnapshot == nil {
+			return StepResult{Status: StepFailed, Error: removedSearchMessage}, nil
 		}
-		optEnabled = false
-	} else if recipeProfile.Optimization != nil && recipeProfile.Optimization.Enabled {
-		optPolicy = recipeProfile.Optimization
-		optEnabled = true
-	} else if ec.ActionName == "benchmark_transcode" || metricInput != "" {
-		optPolicy = &recipe.OptimizationPolicy{Enabled: true}
-		recipe.NormalizeOptimizationPolicy(optPolicy)
-		optEnabled = true
-	}
-	if _, shared := ec.Inputs["batch_fixed_quality"]; shared {
-		if res := hashSource(); res != nil {
-			return *res, nil
-		}
-		if err := e.applySharedBatchCalibration(ec, plan, gateRep, recipeProfile, origSHA, ephemeralDigest, cleanPath); err != nil {
-			return StepResult{Status: StepFailed, Error: fmt.Sprintf("shared batch calibration: %v", err)}, nil
-		}
-		optEnabled = false
-		optPolicy = nil
-	}
-
-	if optEnabled && optPolicy != nil {
-		if isSourceHDRorDV(&rep) && plan.Compact == nil {
-			return StepResult{Status: StepFailed, Error: "source media contains HDR/Dolby Vision: automatic optimization is only supported for SDR content (fail closed)"}, nil
-		}
-		if video := rep.MainVideo(); len(video) > 0 {
-			bd := video[0].BitDepth
-			if bd != 8 && bd != 10 {
-				return StepResult{Status: StepFailed, Error: fmt.Sprintf("unsupported source bit depth %d: automatic optimization only supports 8-bit and 10-bit SDR content (fail closed)", bd)}, nil
-			}
-		}
-		ec.State["optimization_enabled"] = true
-		ec.State["optimization_policy"] = optPolicy
-	} else {
-		ec.State["optimization_enabled"] = false
+		// The goal's quality limits and sample windows are the ones its final
+		// validation holds every rung to (see transcode_final_validation.go).
+		ec.State["optimization_policy"] = recipeProfile.Optimization
 	}
 
 	// Every path from here submits worker work, so it needs the baseline.
@@ -422,9 +390,6 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	if hasProfileConfig {
 		outputs["ephemeral_profile"] = recipeProfile
 		outputs["ephemeral_recipe_digest"] = ephemeralDigest
-	}
-	if getBool(ec.State, "optimization_enabled") {
-		outputs["optimization_enabled"] = true
 	}
 	if autoResult != nil {
 		outputs["auto_decision"] = autoResult.Decision

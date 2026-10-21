@@ -26,12 +26,12 @@ func (e *Engine) registerTranscodeBatchTemplate() {
 		Name:            "transcode_batch",
 		Version:         6,
 		Validate:        validateTranscodeBatch,
-		Description:     "Simple goals: set mode=quality (strict sampled quality), size (acceptable sampled quality), x265_preserve (strict libx265 conversion, already HEVC omitted), or compact (much smaller SDR copy of HDR/Dolby Vision/4K sources at max_height, default 1080; HDR and Dolby Vision are dropped, lossless audio becomes AAC, every audio and subtitle track kept). Modes forbid profiles/priority/manual tuning, keep every audio and subtitle track (size and compact convert lossless audio to AAC; size also converts lossless Atmos/DTS:X to AAC on their channel bed, copies lossy Atmos (E-AC-3) and may encode 8-bit sources as 10-bit HEVC on a proven worker, and with allow_hardware (default true for size; false keeps x265 only; optional hardware_margin_percent 0-50, default 15) also measures Apple VideoToolbox encodes through the same quality gates and keeps one when it is within that percent of the best x265 result; allow_slow_preset (default false, size only) also lets the quality fallback try the slow x265 preset, whose full encodes can take hours; size_budget_percent (5-85, of the source), size_budget_bytes (at least 50000000) or size_budget_source=siblings (the median bitrate of the other episodes in the same season, else series folder, at least 3 of the same resolution class, times size_budget_sibling_multiplier 1.0-4.0, default 1.5), size only and mutually exclusive, skips the search when allow_hardware is on and encodes the whole file with VideoToolbox at quality 65, then 58, then 50, then at the budget's average bitrate, validating the first result within the budget against a fixed quality floor (below it, no candidate is offered and the result suggests allow_hardware=false); with allow_hardware=false it searches as usual and encodes a source whose search finds no passing setting, or only one larger than the budget, once at the budget as two-pass x265, held to the same floor; a result within the budget is reported as below the quality target unless it meets it; quality and x265_preserve keep the source depth) and require final byte/quality validation; 45-61fps sources are measured on frame-exact 2:1 decimated VMAF and only on workers that advertise it; policy snapshots and finite per-source/operation search budgets are durable. Omit mode for legacy technical behavior. Video batch from explicit paths (1–1000 files inside allowed read roots), or a Sonarr series using service and series_id. paths cannot be combined with service, series_id, season, episode_file_ids, or promote_candidates=true; filesystem batches produce candidates only. Direct encoding: choose a non-optimizing profile or profile_config and omit priority; inspect recipe_get if unsure. Bounded tuning: omit profile and set priority=balanced, quality, savings, or preserve_quality (perceptual target, not lossless). Tuning tests three settings on short samples, creates a batch-only recipe and continues; currently oversized H264 1080p 8-bit SDR below 45fps. Bare auto without priority keeps legacy selection. dry_run=true is a completed preview, not a paused encode: start a new action with dry_run=false to encode. promote_candidates=true offers one approval before replacement; otherwise originals remain unchanged. Monitor with action_status.",
+		Description:     "Simple goals: set mode=quality (strict final quality), size (acceptable final quality), x265_preserve (strict libx265 conversion, already HEVC omitted), or compact (much smaller SDR copy of HDR/Dolby Vision/4K sources at max_height, default 1080; HDR and Dolby Vision are dropped, lossless audio becomes AAC, every audio and subtitle track kept). Every goal encodes each whole file at a short ladder of fixed settings and the worker's final quality check judges each result. Modes forbid profiles/manual tuning, keep every audio and subtitle track (size and compact convert lossless audio to AAC; size also converts lossless Atmos/DTS:X to AAC on their channel bed, copies lossy Atmos (E-AC-3) and may encode 8-bit sources as 10-bit HEVC on a proven worker, and with allow_hardware (default true for size; false keeps x265 only) a worker that has Apple VideoToolbox encodes with it first and reports a hardware result with its encoder; allow_slow_preset (default false, size only) lets the x265 ladder use the slow preset, whose full encodes can take hours; size_budget_percent (5-85, of the source), size_budget_bytes (at least 50000000) or size_budget_source=siblings (the median bitrate of the other episodes in the same season, else series folder, at least 3 of the same resolution class, times size_budget_sibling_multiplier 1.0-4.0, default 1.5), size only and mutually exclusive, encodes the whole file with VideoToolbox at quality 65, then 58, then 50, then at the budget's average bitrate when allow_hardware is on, validating the first result within the budget against a fixed quality floor (below it, no candidate is offered and the result suggests allow_hardware=false); with allow_hardware=false the file is encoded once at the budget as two-pass x265, held to the same floor; a result within the budget is reported as below the quality target unless it meets it; quality and x265_preserve keep the source depth) and require final byte/quality validation; 45-61fps sources are measured on frame-exact 2:1 decimated VMAF and only on workers that advertise it; policy snapshots are durable. Omit mode for a fixed profile. Video batch from explicit paths (1–1000 files inside allowed read roots), or a Sonarr series using service and series_id. paths cannot be combined with service, series_id, season, episode_file_ids, or promote_candidates=true; filesystem batches produce candidates only. Direct encoding: choose a non-optimizing profile or profile_config; inspect recipe_get if unsure. dry_run=true is a completed preview, not a paused encode: start a new action with dry_run=false to encode. promote_candidates=true offers one approval before replacement; otherwise originals remain unchanged. Monitor with action_status.",
 		Examples: []ActionExample{
 			{Description: "Encode a frozen filesystem selection, without a library service or replacing originals.", Inputs: `{"paths":["/media/movies/Film.mkv","/media/series/Season 1/Episode 1.mp4"],"profile":"general-hevc","media_type":"movie"}`},
 			{Description: "Direct candidates using a non-optimizing profile; substitute the actual series ID and chosen profile.", Inputs: `{"service":"sonarr","series_id":10,"profile":"general-hevc"}`},
-			{Description: "Bounded tuning and candidate encoding, without catalog changes or replacement.", Inputs: `{"service":"sonarr","series_id":10,"priority":"balanced"}`},
-			{Description: "Preview that same intent without encoding. To execute later, start a new action with dry_run=false and a new top-level idempotency_key.", Inputs: `{"service":"sonarr","series_id":10,"priority":"balanced","dry_run":true}`},
+			{Description: "Encode a series at a goal, without catalog changes or replacement.", Inputs: `{"service":"sonarr","series_id":10,"mode":"quality"}`},
+			{Description: "Preview that same goal without encoding. To execute later, start a new action with dry_run=false and a new top-level idempotency_key.", Inputs: `{"service":"sonarr","series_id":10,"mode":"quality","dry_run":true}`},
 		},
 		RequiredInputs: []string{},
 		OptionalInputs: []string{
@@ -41,7 +41,6 @@ func (e *Engine) registerTranscodeBatchTemplate() {
 			"profile",
 			"profile_config",
 			"preserve_source_bit_depth",
-			"metric",
 			"replace_original",
 			"dry_run",
 			"media_type",
@@ -51,9 +50,6 @@ func (e *Engine) registerTranscodeBatchTemplate() {
 			"max_size_increase_percent",
 			"max_output_items",
 			"max_items",
-			"shared_calibration",
-			"calibration_items",
-			"priority",
 			"promote_candidates",
 			"promotion_parallelism",
 		},
@@ -313,19 +309,6 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 	} else if requestedProfile == "" {
 		requestedProfile = "auto"
 	}
-	if err := e.prepareAutomaticBatch(ctx, ec, isAnime); err != nil {
-		return StepResult{Status: StepFailed, Error: err.Error()}, nil
-	}
-	if err := validateBatchCalibrationInputs(ec.Inputs, requestedProfile, ec.State); err != nil {
-		return StepResult{Status: StepFailed, Error: err.Error()}, nil
-	}
-	if batchCalibrationEnabled(ec.Inputs, ec.State) {
-		priority := getString(ec.Inputs, "priority")
-		if priority == "" {
-			priority = "balanced"
-		}
-		ec.State["batch_priority"] = priority
-	}
 	mediaType := "tv"
 	if isAnime {
 		mediaType = "anime"
@@ -439,18 +422,6 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 			continue
 		}
 		gateRep := coverArtGateReport(&rep, coverArtSupported)
-		if batchCalibrationEnabled(ec.Inputs, ec.State) && !sharedCalibrationSourceSupported(gateRep) {
-			item := store.TranscodeBatchItem{
-				BatchID: ec.InstanceID, ItemKey: itemKey, FilePath: cleanPath,
-				DisplayLabel: displayLabel, EpisodeInfo: episodeInfo,
-				Decision: "skip", Status: "skip",
-				Reasons: []string{"shared VMAF/CAMBI calibration supports 8-bit SDR video below 45 fps; original preserved"},
-			}
-			_ = e.deps.Store.CreateTranscodeBatchItem(item)
-			batchItems = append(batchItems, item)
-			continue
-		}
-
 		var itemDecision, itemProfile, itemStatus string
 		var itemReasons []string
 
@@ -469,7 +440,7 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 				itemReasons = []string{reason}
 			} else {
 				itemDecision, itemStatus, itemProfile = "transcode", "queued", "mode-"+mode
-				itemReasons = []string{"per-source bounded samples required before full encode"}
+				itemReasons = []string{"the goal's recipe encodes the whole file; the final quality check judges the result"}
 			}
 		} else if strings.EqualFold(requestedProfile, "auto") {
 			selInput := selector.Input{
@@ -478,15 +449,7 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 				IsAnime:           isAnime,
 				MinSavingsPercent: minSavings,
 			}
-			// Savings for calibrated profiles come from samples, not the legacy VT estimate.
-			if getString(ec.State, "batch_auto_profile") != "" {
-				selInput.MinSavingsPercent = 0
-			}
 			res := selector.Select(selInput)
-			if res.Decision == selector.DecisionTranscode && getString(ec.State, "batch_auto_profile") != "" {
-				res.Profile = getString(ec.State, "batch_auto_profile")
-				res.Reasons = append(res.Reasons, "quality and savings will be measured on representative samples before full encoding")
-			}
 			itemDecision = string(res.Decision)
 			itemProfile = res.Profile
 			itemReasons = res.Reasons
@@ -560,9 +523,6 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 	// In dry run, resolution and auto-selection are complete; no jobs are scheduled.
 	if dryRun {
 		outputs := buildBatchOutputs(ec.InstanceID, items, seriesTitle, isAnime, dryRun, getMaxOutputItems(ec.Inputs))
-		if batchCalibrationEnabled(ec.Inputs, ec.State) {
-			outputs["calibration"] = previewBatchCalibration(items, getBatchCalibrationItems(ec.Inputs))
-		}
 		return StepResult{
 			Status:  StepCompleted,
 			Outputs: outputs,
@@ -591,21 +551,6 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 		}
 
 		var cancelErrors []string
-		if batchCalibrationEnabled(ec.Inputs, ec.State) {
-			for _, sample := range representativeBatchItems(items, getBatchCalibrationItems(ec.Inputs)) {
-				key := fmt.Sprintf("batch-calibration-%s-%s", ec.InstanceID, sample.ItemKey)
-				probe, err := e.deps.Store.FindActionByIdempotencyKey("benchmark_transcode", key)
-				if err != nil {
-					cancelErrors = append(cancelErrors, fmt.Sprintf("%s: read calibration action: %v", sample.ItemKey, err))
-					continue
-				}
-				if probe != nil && probe.Status != StatusCompleted && probe.Status != StatusFailed && probe.Status != StatusCancelled {
-					if _, err := e.Cancel(ctx, probe.ID, "cancelled by parent transcode batch "+ec.InstanceID); err != nil {
-						cancelErrors = append(cancelErrors, fmt.Sprintf("%s: cancel calibration: %v", sample.ItemKey, err))
-					}
-				}
-			}
-		}
 		for i := range items {
 			it := &items[i]
 			if it.Status == "completed" || it.Status == "failed" || it.Status == "cancelled" || it.Status == "skip" {
@@ -725,11 +670,6 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 			}
 		}
 	}
-	if batchNeedsCalibration(ec, items) {
-		if result, done := e.ensureSharedBatchCalibration(ctx, ec, items); !done {
-			return result, nil
-		}
-	}
 
 	// Recover existing child actions across all statuses to ensure no duplicate submits
 	for i := range items {
@@ -826,12 +766,6 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 			}
 		}
 	}
-	if batchCalibrationEnabled(ec.Inputs, ec.State) {
-		if err := e.rejectCalibratedBatchDecisions(ctx, items); err != nil {
-			return StepResult{Status: StepFailed, Error: err.Error()}, nil
-		}
-	}
-
 	maxParallel := 1
 	if e.deps.Config != nil && e.deps.Config.Transcode.MaxParallelJobs > 0 {
 		maxParallel = e.deps.Config.Transcode.MaxParallelJobs
@@ -843,9 +777,8 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 	// only (bounding concurrent child-action execution engine-side) and must
 	// not be confused with remote-capacity admission. No remote-capacity probe
 	// is performed here; "worker busy" handling below is retained solely for
-	// backward compatibility (legacy workers) and benchmarks, which keep
-	// busy-409 submission semantics under the same global ceiling. Phase-4
-	// retry semantics are untouched.
+	// backward compatibility (legacy workers). Phase-4 retry semantics are
+	// untouched.
 
 	// First, check/advance any items that are already running
 	for i := range items {
@@ -910,25 +843,6 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 			break
 		}
 
-		if getString(ec.Inputs, "mode") != "" {
-			e.settleModeSearches(ec, items)
-			admitted := make([]int, 0, availableSlots)
-			for _, idx := range pendingIndices {
-				if !batchItemSearches(ec, items[idx]) || reserveModeSearchUpTo(ec, batchChildKey(ec, items[idx]), batchItemSearchCeiling(ec, items[idx])) {
-					admitted = append(admitted, idx)
-				}
-				if len(admitted) == availableSlots {
-					break
-				}
-			}
-			pendingIndices = admitted
-			if err := e.persistExecutionState(ctx, ec); err != nil {
-				return StepResult{Status: StepFailed, Error: err.Error()}, nil
-			}
-			if len(pendingIndices) == 0 {
-				break
-			}
-		}
 		toSchedule := pendingIndices
 		if len(toSchedule) > availableSlots {
 			toSchedule = toSchedule[:availableSlots]
@@ -994,36 +908,19 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 	}
 
 	latest, _ := e.deps.Store.ListTranscodeBatchItems(ec.InstanceID)
-	if batchCalibrationEnabled(ec.Inputs, ec.State) {
-		if err := e.rejectCalibratedBatchDecisions(ctx, latest); err != nil {
-			return StepResult{Status: StepFailed, Error: err.Error()}, nil
-		}
-	}
 	outLimit := getMaxOutputItems(ec.Inputs)
 	batchOutputs := buildBatchOutputs(ec.InstanceID, latest, seriesTitle, isAnime, dryRun, outLimit)
-	if batchCalibrationEnabled(ec.Inputs, ec.State) {
-		batchOutputs["calibration"] = ec.State["shared_calibration_result"]
-	}
 
 	// A mode parent must remain reconciliable while independent work runs.
 	if getString(ec.Inputs, "mode") != "" {
-		e.settleModeSearches(ec, latest)
-		active, queued := 0, 0
+		active := 0
 		for _, it := range latest {
 			if it.Status == "running" || it.Status == "waiting_for_slot" {
 				active++
 			}
-			if it.Status == "queued" && batchItemMode(ec, it) != "" {
-				queued++
-			}
 		}
 		if active > 0 {
-			return StepResult{Status: StepWaitingExternal, WaitingCondition: "transcode_running", WaitingReason: "Independent mode searches or encodes are still active", Outputs: batchOutputs}, nil
-		}
-		if queued > 0 {
-			// Admission only refuses a frozen policy without a per-source
-			// budget, which no further polling can repair.
-			return modeAttention(ec, "search_budget_unavailable", "The frozen goal has no usable search budget for the remaining files; they were not tested. Originals preserved."), nil
+			return StepResult{Status: StepWaitingExternal, WaitingCondition: "transcode_running", WaitingReason: "Independent encodes are still active", Outputs: batchOutputs}, nil
 		}
 	}
 	// Check if any item is waiting for decision
@@ -1162,7 +1059,7 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 				copy.State[key] = value
 			}
 			copy.State["mode_policy"] = settings["mode_policy"]
-			for _, key := range []string{"profile", "profile_config", "priority", "metric", "min_savings_percent", "max_size_increase_percent", "preserve_source_bit_depth", "shared_calibration"} {
+			for _, key := range []string{"profile", "profile_config", "min_savings_percent", "max_size_increase_percent", "preserve_source_bit_depth"} {
 				delete(copy.Inputs, key)
 			}
 			applyGoalPolicyInputs(copy.Inputs, settings["mode_policy"])
@@ -1173,11 +1070,8 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 			for key, value := range ec.State {
 				copy.State[key] = value
 			}
-			delete(copy.State, "batch_auto_profile")
 			delete(copy.Inputs, "mode")
-			copy.Inputs["shared_calibration"] = false
 			delete(copy.Inputs, "profile_config")
-			delete(copy.Inputs, "priority")
 			item.Profile = profile
 		}
 		ec = &copy
@@ -1225,22 +1119,10 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 		childInputs["batch_item_key"] = item.ItemKey
 		delete(childInputs, "min_savings_percent")
 		delete(childInputs, "max_size_increase_percent")
-	} else if batchCalibrationEnabled(ec.Inputs, ec.State) {
-		calibration := getBatchCalibrationResult(ec.State["shared_calibration_result"])
-		if calibration == nil {
-			return false, fmt.Errorf("shared batch calibration result missing before child dispatch")
-		}
-		childInputs["profile_config"] = ec.State["shared_calibration_profile"]
-		childInputs["batch_fixed_quality"] = calibration.qualityFor(item.ItemKey)
-		childInputs["batch_calibration_digest"] = calibration.Digest
-		childInputs["batch_item_key"] = item.ItemKey
 	} else if ephemeralProfile, ok := ec.Inputs["profile_config"]; ok && ephemeralProfile != nil {
 		childInputs["profile_config"] = ephemeralProfile
 	} else {
 		childInputs["profile"] = item.Profile
-	}
-	if metric := strings.TrimSpace(getString(ec.Inputs, "metric")); metric != "" {
-		childInputs["metric"] = metric
 	}
 	if preserve, ok := ec.Inputs["preserve_source_bit_depth"]; ok {
 		childInputs["preserve_source_bit_depth"] = preserve
@@ -1436,7 +1318,7 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 // terminalFailureIsWorkerBusy classifies the terminal failure itself, not stale
 // telemetry accumulated by an earlier step. Action outputs are merged across
 // the workflow, so a child that once surfaced worker_busy may still carry that
-// classification after a later benchmark guardrail (or another terminal
+// classification after a later guardrail (or another terminal
 // failure) becomes authoritative. A non-empty terminal error therefore wins;
 // the historical output classification is only a compatibility fallback for
 // old records that have no terminal error text.

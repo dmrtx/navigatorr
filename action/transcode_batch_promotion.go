@@ -6,12 +6,29 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/jakenesler/navigatorr/store"
 )
+
+// strictBatchInteger reads a whole number input.
+func strictBatchInteger(raw any) (int, bool) {
+	switch value := raw.(type) {
+	case int:
+		return value, true
+	case float64:
+		if !math.IsNaN(value) && !math.IsInf(value, 0) && math.Trunc(value) == value && value >= 0 && value <= 1000000 {
+			return int(value), true
+		}
+	case json.Number:
+		v, err := strconv.Atoi(string(value))
+		return v, err == nil
+	}
+	return 0, false
+}
 
 type batchPromotionMember struct {
 	ItemKey       string `json:"item_key"`

@@ -15,7 +15,7 @@ import (
 // A new identity is allocated only after the worker confirms a terminal failure,
 // otherwise an idempotent Submit would just return the same failed job forever.
 func (e *Engine) prepareRemoteRetry(ctx context.Context, inst *store.ActionInstance, ec *ExecutionContext, tmpl ActionTemplate, resume int) (int, error) {
-	if e.deps.Transcode == nil || (inst.ActionName != "transcode_media" && inst.ActionName != "benchmark_transcode") {
+	if e.deps.Transcode == nil || inst.ActionName != "transcode_media" {
 		return resume, nil
 	}
 	if jobID := getString(ec.State, "job_id"); jobID != "" && !getBool(ec.State, "transcode_done") {
@@ -71,65 +71,6 @@ func (e *Engine) prepareRemoteRetry(ctx context.Context, inst *store.ActionInsta
 		ec.State["job_id"] = fmt.Sprintf("job-%s-retry-%d", ec.InstanceID, retry)
 		ec.State["external_reference"] = ec.State["job_id"]
 		ec.State["attempt"], ec.State["retry_count"], ec.State["fallback_count"] = 1, 0, 0
-		mergeMap(ec.Outputs, ec.State)
-		if perr := e.persistExecutionState(lease.Context(ctx), ec); perr != nil {
-			lease.Close()
-			return resume, perr
-		}
-		lease.Close()
-		return submit, nil
-	}
-	if jobID := getString(ec.State, "benchmark_job_id"); jobID != "" && !getBool(ec.State, "benchmark_done") {
-		submit := actionStepIndex(tmpl, "submit_benchmark")
-		if submit < 0 {
-			return resume, nil
-		}
-		e.recordWorkerPoll(ec)
-		st, err := e.deps.Transcode.BenchmarkStatus(ctx, jobID)
-		if err != nil {
-			if isRetryableWorkerPollError(err) {
-				ec.State["benchmark_reconcile"] = true
-				return submit, nil
-			}
-			if he, ok := transcodeHTTPError(err); ok && he.StatusCode == 404 {
-				ec.State["benchmark_reconcile"] = true
-				return submit, nil
-			}
-			return resume, fmt.Errorf("cannot retry before confirming remote benchmark %s: %w", jobID, err)
-		}
-		if st.Status != transcode.StatusFailed && st.Status != transcode.StatusCancelled {
-			ec.State["benchmark_reconcile"] = true
-			return submit, nil
-		}
-		if failSizeBudgetRound(ec, "the comparison round was retried by hand") {
-			// A retried comparison is not run again: the retry continues
-			// with the x265 budget encode, from the search's own results,
-			// and allocates no remote identity.
-			if perr := e.persistExecutionState(ctx, ec); perr != nil {
-				return resume, perr
-			}
-			return submit, nil
-		}
-		class := st.FailureClassification
-		if class == "" {
-			class = string(resilience.Classify(st.Error))
-		}
-		if err := rejectUnchangedPermanentRetry(class); err != nil {
-			return resume, err
-		}
-		lease, lerr := e.beginRetryAdmission(ctx, ec, "benchmark retry")
-		if lerr != nil {
-			return resume, lerr
-		}
-		retry := getInt(ec.State, "benchmark_manual_retry_count") + 1
-		for _, key := range []string{"benchmark_submitted", "benchmark_reconcile", "benchmark_done", "benchmark_status", "benchmark_decision", "benchmark_request", "benchmark_request_digest", "benchmark_retry_not_before", workerBusyNotBeforeKey, "worker_busy", slotWaitLogKey, workerSlotWaitSinceKey, workerSlotPositionKey, workerSlotPolledAtKey, benchmarkRejectedKey, "next_poll_at", "failure_classification"} {
-			delete(ec.State, key)
-			delete(ec.Outputs, key)
-		}
-		ec.State["previous_benchmark_job_id"] = jobID
-		ec.State["benchmark_manual_retry_count"] = retry
-		ec.State["benchmark_job_id"] = fmt.Sprintf("bench-%s-retry-%d", ec.InstanceID, retry)
-		ec.State["benchmark_attempt"], ec.State["benchmark_retry_count"] = 1, 0
 		mergeMap(ec.Outputs, ec.State)
 		if perr := e.persistExecutionState(lease.Context(ctx), ec); perr != nil {
 			lease.Close()

@@ -99,7 +99,7 @@ func (e *Engine) stepTranscodeAccept(ctx context.Context, ec *ExecutionContext) 
 // workStateKeys are the state entries a worker job or its candidate leave
 // behind. Any of them present means the original may have been read by a
 // worker or a candidate may exist, so accept keeps the integrity check.
-var workStateKeys = []string{"job_id", "external_reference", "benchmark_job_id", "transcode_job_id", "transcode_submitted", "candidate_path", "output_path"}
+var workStateKeys = []string{"job_id", "external_reference", "transcode_job_id", "transcode_submitted", "candidate_path", "output_path"}
 
 // skippedWithoutWork reports a skip decided before anything was submitted or
 // produced, such as a source rejected by its probe. Nothing ran against the

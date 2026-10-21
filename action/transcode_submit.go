@@ -464,7 +464,6 @@ func repeatedSlotWait(ec *ExecutionContext, stepIdx int, res StepResult) bool {
 // on each such refusal and cleared at the identity checkpoint before a send.
 const (
 	transcodeRejectedKey = "transcode_submit_rejected"
-	benchmarkRejectedKey = "benchmark_submit_rejected"
 )
 
 // noRemoteJob reports that the last send was refused outright and nothing was
@@ -619,21 +618,11 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 				if res, handled := e.advanceQualityLadder(ctx, ec, st); handled {
 					return res, nil
 				}
-				if res, handled, err := e.continueWithoutHardware(ctx, ec, st); err != nil || handled {
-					return res, err
-				}
 				if st.ReasonCode != reasonQualityNotMet && st.ReasonCode != "preservation_not_met" && st.ReasonCode != "already_target_codec" {
 					// The worker refused a ladder rung's file for its size;
 					// every budget sits under the minimum saving, so the file
 					// is over the budget and the next rung encodes it again.
 					if res, handled := e.advanceSizeBudgetRung(ec, st.CandidateSizeBytes); handled {
-						return res, nil
-					}
-				}
-				if st.ReasonCode != reasonQualityNotMet && st.ReasonCode != "preservation_not_met" && st.ReasonCode != "already_target_codec" && sizeBudgetActive(ec.State) {
-					// A VideoToolbox budget encode that missed its average
-					// is encoded once more at a corrected bitrate.
-					if res, handled := e.retrySizeBudgetBitrate(ec, getPlan(ec.State["plan"]), st.CandidateSizeBytes, st.QualityEvidence); handled {
 						return res, nil
 					}
 				}
