@@ -365,3 +365,43 @@ func TestCompactBenchmarkReportsTheSizeBudgetFallback(t *testing.T) {
 		t.Fatalf("fallback reported as a failed search: %q", s.Message)
 	}
 }
+
+// A VideoToolbox ladder run submits no benchmark: its summary says which full
+// encode is running, not that samples are being tested.
+func TestCompactBenchmarkDescribesTheSizeBudgetLadder(t *testing.T) {
+	ladder := func(rung int, plan *transcode.Plan, status string) *action.ActionResult {
+		rec := &action.SizeBudgetRecord{Trigger: "budget_first", BudgetBytes: 2_000_000_000, Rung: rung, Message: "Encoding with VideoToolbox at quality 65 (step 1 of 4) to fit the 2.0 GB budget.",
+			Choice: &action.SizeBudgetChoice{VideoCodec: transcode.VideoCodecHEVCVideoToolbox, Reason: action.SizeBudgetChoiceLadder}}
+		state := map[string]any{"optimization_enabled": true, "benchmark_done": true, "has_winner": false, "plan_source": "size_budget", "plan": plan, "size_budget": rec,
+			"mode_policy": map[string]any{"mode": "size", "size": map[string]any{"size_budget": map[string]any{"vt_quality_ladder": []int{65, 58, 50}}}}, "transcode_status": "running"}
+		return &action.ActionResult{ActionName: "transcode_media", Status: status, Inputs: map[string]any{"path": "/media/Show/S01E01.mkv", "mode": "size"}, State: state, Outputs: state}
+	}
+	s := compactBenchmark(ladder(0, &transcode.Plan{VideoCodec: transcode.VideoCodecHEVCVideoToolbox, Quality: 65}, action.StatusWaitingExternal))
+	if s == nil || s.Outcome != "size_budget_ladder" || !strings.HasPrefix(s.Message, "Encoding with VideoToolbox at quality 65") || s.SizeBudget == nil {
+		t.Fatalf("%+v", s)
+	}
+	if s.ProgressScope != "Worker progress is for the full encode with VideoToolbox at quality 65 (step 1 of 4), not a sample test." {
+		t.Fatalf("progress scope %q", s.ProgressScope)
+	}
+	for _, text := range []string{s.Message, s.NextStep, s.UserNextStep} {
+		if strings.Contains(strings.ToLower(text), "samples are being tested") || strings.Contains(text, "Testing short video samples") {
+			t.Fatalf("ladder described as a sample test: %q", text)
+		}
+	}
+	if !strings.Contains(s.UserNextStep, "VideoToolbox at quality 65 (step 1 of 4)") {
+		t.Fatalf("user next step %q", s.UserNextStep)
+	}
+	// The last step encodes at the budget's average bitrate.
+	s = compactBenchmark(ladder(3, &transcode.Plan{VideoCodec: transcode.VideoCodecHEVCVideoToolbox, AverageBitrateKbps: 4100}, action.StatusWaitingExternal))
+	if !strings.Contains(s.ProgressScope, "an average bitrate of 4100 kbps (step 4 of 4)") {
+		t.Fatalf("progress scope %q", s.ProgressScope)
+	}
+	if s = compactBenchmark(ladder(0, &transcode.Plan{Quality: 65}, action.StatusFailed)); s.Outcome != "execution_error" {
+		t.Fatalf("failed ladder %+v", s)
+	}
+	// A search run keeps the sample-test wording.
+	s = compactBenchmark(&action.ActionResult{ActionName: "transcode_media", Status: action.StatusWaitingExternal, Inputs: map[string]any{"mode": "size"}, State: map[string]any{"optimization_enabled": true, "benchmark_status": "running"}})
+	if s.Outcome != "testing" || s.ProgressScope != "Worker progress is for the benchmark only, not the full encode." || !strings.Contains(s.UserNextStep, "Short samples are being tested") {
+		t.Fatalf("search run wording changed: %+v", s)
+	}
+}

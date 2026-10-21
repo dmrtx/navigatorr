@@ -127,6 +127,7 @@ func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
 	if !enabled && status == "" && decision == nil && !review {
 		return nil
 	}
+	ladderStep, ladder := action.SizeBudgetLadderStep(res.State)
 	s := &benchmarkSummary{ProgressScope: "Worker progress is for the benchmark only, not the full encode.", Outcome: "testing", Message: "Testing short video samples; no quality decision yet.", NextStep: "Monitor this action with action_status. A progress percentage does not mean quality passed; do not launch another search.", UserNextStep: "Nothing to do yet. Short samples are being tested; progress does not mean the quality check passed."}
 	switch {
 	case res.Status == action.StatusCancelled:
@@ -167,6 +168,20 @@ func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
 			s.Outcome, s.Message = reason, "No sample test was started: the worker cannot run the quality checks this goal requires. The original is preserved."
 			s.NextStep = "Cancel to keep the original. To process this file, make the missing quality check available on the worker (the waiting reason names it) and start the goal again; quality requirements are never relaxed automatically."
 			s.UserNextStep = "Keep the original. The worker cannot run a quality check this goal needs; once it can, start the goal again."
+		}
+	case ladder:
+		// The VideoToolbox ladder skips the search: no sample is tested, and
+		// the worker's progress is the full encode of the current step.
+		var budget action.SizeBudgetRecord
+		benchmarkField(res, "size_budget", &budget)
+		s.Outcome, s.Message = "size_budget_ladder", budget.Message
+		s.ProgressScope = fmt.Sprintf("Worker progress is for the full encode with %s, not a sample test.", ladderStep)
+		s.NextStep = "Monitor this action. No sample search runs: each step encodes the whole file, a step over the budget moves to the next, and the first one within the budget is checked against the quality floor. The original is never replaced without the usual approval."
+		s.UserNextStep = fmt.Sprintf("Nothing to do yet. The whole file is being encoded with %s; the first result within your size budget is checked against the quality floor before you approve any replacement.", ladderStep)
+		if res.Status == action.StatusFailed {
+			s.Outcome, s.Message = "execution_error", "The size budget encode could not finish."
+			s.NextStep = "Inspect the action error and fix the execution problem before retrying."
+			s.UserNextStep = "The encode could not finish. Check the error in the job details."
 		}
 	case decision != nil && summaryPlanSource(res) == "size_budget":
 		var budget action.SizeBudgetRecord

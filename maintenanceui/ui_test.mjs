@@ -4246,3 +4246,15 @@ test("the plan note and queue labels say a budget candidate is below the quality
 function allTextOf(n) {
   return [n.textContent, ...(n.children || []).map(allTextOf)].join(" ");
 }
+
+test("a size budget ladder run shows the full encode, not a sample test", () => {
+  const h = harness();
+  h.context.job = {id:"j",action_name:"transcode_media",mode:"size",status:"waiting_external",transcode:{message:"Automatic testing and verification; originals are preserved."},
+    benchmark:{outcome:"size_budget_ladder",message:"Encoding with VideoToolbox at quality 65 (step 1 of 4) to fit the 2.0 GB budget.",progress_scope:"Worker progress is for the full encode with VideoToolbox at quality 65 (step 1 of 4), not a sample test."}};
+  assert.equal(h.run("benchmarkReport(job)"), null, "no sample test result card");
+  assert.equal(h.run("jobOutcomeText(job)"), "Encoding with VideoToolbox at quality 65 (step 1 of 4) to fit the 2.0 GB budget.");
+  assert.doesNotMatch(h.run("queueOutcome(job)"), /[Ss]ample/);
+  // Other runs keep their wording.
+  h.context.other = {status:"waiting_external",transcode:{message:"Automatic testing and verification; originals are preserved."},benchmark:{outcome:"testing"}};
+  assert.equal(h.run("jobOutcomeText(other)"), h.run("shortJobReason(other.transcode.message)"));
+});
