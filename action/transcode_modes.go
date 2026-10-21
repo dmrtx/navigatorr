@@ -12,7 +12,6 @@ import (
 
 	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
-	"github.com/jakenesler/navigatorr/transcode/optimization"
 	"github.com/jakenesler/navigatorr/transcode/quality"
 	"github.com/jakenesler/navigatorr/transcode/recipe"
 )
@@ -21,7 +20,7 @@ const ModePolicyVersion = "transcode-modes-v2"
 
 // SizeModePolicyVersion freezes new size-mode operations. Older frozen size
 // policies keep their own version and behaviour.
-const SizeModePolicyVersion = optimization.ModePolicyV3
+const SizeModePolicyVersion = transcode.ModePolicyV3
 
 // modeOperationBudgetSeconds stays in the snapshots of the other modes and in
 // every snapshot already frozen, so their digests are unchanged. It caps
@@ -443,7 +442,7 @@ func modePolicyContent(mode string, anime bool, maxHeight int, hardware *transco
 		}
 	}
 	if mode == "compact" {
-		snapshot.MinSavingsPercent = optimization.CompactMinimumSavingsPercent
+		snapshot.MinSavingsPercent = transcode.CompactMinimumSavingsPercent
 		snapshot.Compact = &ModeCompactPolicy{MaxHeight: maxHeight, ChainVersion: transcode.CompactChainVersion}
 	}
 	return snapshot, nil

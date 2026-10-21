@@ -1,10 +1,30 @@
-package optimization
+package transcode
 
 import (
 	"fmt"
 	"math"
 	"sort"
 )
+
+// maxSamplePlanCount is the conservative upper limit for planned sample
+// windows. It prevents excessive loop iterations and allocations.
+const maxSamplePlanCount = 32
+
+// Reasons PlanSamples gives for rejecting or adjusting a plan.
+const (
+	samplePlanInvalidDuration          = "invalid_duration"
+	samplePlanInvalidSampleConfig      = "invalid_sample_config"
+	samplePlanInvalidPosition          = "invalid_sample_position"
+	samplePlanContradictorySampleCount = "contradictory_sample_count"
+	samplePlanExcessiveSampleCount     = "excessive_sample_count"
+	samplePlanReducedSampleCount       = "reduced_sample_count_to_avoid_overlap"
+	samplePlanFullDurationSample       = "full_duration_used_for_short_video"
+)
+
+// isFinite reports whether f is neither NaN nor an infinity.
+func isFinite(f float64) bool {
+	return !math.IsNaN(f) && !math.IsInf(f, 0)
+}
 
 // SamplePlanConfig specifies the parameters for planning deterministic sample windows.
 type SamplePlanConfig struct {
@@ -49,34 +69,34 @@ type SamplePlan struct {
 // overlap avoidance, short video full-duration fallback, and sample count reduction.
 func PlanSamples(cfg SamplePlanConfig) (SamplePlan, error) {
 	if !isFinite(cfg.Duration) || cfg.Duration <= 0 {
-		return SamplePlan{}, fmt.Errorf("%s: duration must be positive and finite (%f)", ReasonInvalidDuration, cfg.Duration)
+		return SamplePlan{}, fmt.Errorf("%s: duration must be positive and finite (%f)", samplePlanInvalidDuration, cfg.Duration)
 	}
 	if !isFinite(cfg.SampleSeconds) || cfg.SampleSeconds <= 0 {
-		return SamplePlan{}, fmt.Errorf("%s: sample seconds must be positive and finite (%f)", ReasonInvalidSampleConfig, cfg.SampleSeconds)
+		return SamplePlan{}, fmt.Errorf("%s: sample seconds must be positive and finite (%f)", samplePlanInvalidSampleConfig, cfg.SampleSeconds)
 	}
 
-	if cfg.SampleCount > MaxSampleCount {
-		return SamplePlan{}, fmt.Errorf("%s: requested sample_count (%d) exceeds maximum allowed limit of %d", ReasonExcessiveSampleCount, cfg.SampleCount, MaxSampleCount)
+	if cfg.SampleCount > maxSamplePlanCount {
+		return SamplePlan{}, fmt.Errorf("%s: requested sample_count (%d) exceeds maximum allowed limit of %d", samplePlanExcessiveSampleCount, cfg.SampleCount, maxSamplePlanCount)
 	}
-	if len(cfg.Positions) > MaxSampleCount {
-		return SamplePlan{}, fmt.Errorf("%s: positions count (%d) exceeds maximum allowed limit of %d", ReasonExcessiveSampleCount, len(cfg.Positions), MaxSampleCount)
+	if len(cfg.Positions) > maxSamplePlanCount {
+		return SamplePlan{}, fmt.Errorf("%s: positions count (%d) exceeds maximum allowed limit of %d", samplePlanExcessiveSampleCount, len(cfg.Positions), maxSamplePlanCount)
 	}
 
 	if len(cfg.Positions) > 0 {
 		if cfg.SampleCount > 0 && cfg.SampleCount != len(cfg.Positions) {
-			return SamplePlan{}, fmt.Errorf("%s: contradictory sample_count (%d) versus positions count (%d)", ReasonContradictorySampleCount, cfg.SampleCount, len(cfg.Positions))
+			return SamplePlan{}, fmt.Errorf("%s: contradictory sample_count (%d) versus positions count (%d)", samplePlanContradictorySampleCount, cfg.SampleCount, len(cfg.Positions))
 		}
 		for i, p := range cfg.Positions {
 			if !isFinite(p) {
-				return SamplePlan{}, fmt.Errorf("%s: position at index %d must be a finite number", ReasonInvalidPosition, i)
+				return SamplePlan{}, fmt.Errorf("%s: position at index %d must be a finite number", samplePlanInvalidPosition, i)
 			}
 			if cfg.RelativePositions {
 				if p < 0.0 || p > 1.0 {
-					return SamplePlan{}, fmt.Errorf("%s: relative position %f at index %d must be in [0, 1]", ReasonInvalidPosition, p, i)
+					return SamplePlan{}, fmt.Errorf("%s: relative position %f at index %d must be in [0, 1]", samplePlanInvalidPosition, p, i)
 				}
 			} else {
 				if p < 0.0 || p > cfg.Duration {
-					return SamplePlan{}, fmt.Errorf("%s: absolute position %f at index %d must be in [0, duration %f]", ReasonInvalidPosition, p, i, cfg.Duration)
+					return SamplePlan{}, fmt.Errorf("%s: absolute position %f at index %d must be in [0, duration %f]", samplePlanInvalidPosition, p, i, cfg.Duration)
 				}
 			}
 		}
@@ -105,7 +125,7 @@ func PlanSamples(cfg SamplePlanConfig) (SamplePlan, error) {
 		plan.ActualSampleCount = 1
 		plan.TotalSampleDuration = round3(cfg.Duration)
 		plan.CoverageRatio = 1.0
-		plan.Reason = ReasonFullDurationSample
+		plan.Reason = samplePlanFullDurationSample
 
 		plan.Samples = append(plan.Samples, SampleWindow{
 			Index:           0,
@@ -144,7 +164,7 @@ func PlanSamples(cfg SamplePlanConfig) (SamplePlan, error) {
 		if count > maxNonOverlapping {
 			count = maxNonOverlapping
 			plan.ReducedSampleCount = true
-			plan.Reason = ReasonReducedSampleCount
+			plan.Reason = samplePlanReducedSampleCount
 		}
 
 		segmentWidth := cfg.Duration / float64(count)
@@ -183,7 +203,7 @@ func PlanSamples(cfg SamplePlanConfig) (SamplePlan, error) {
 				// Overlaps with previous sample! Avoid overlap by skipping.
 				plan.ReducedSampleCount = true
 				if plan.Reason == "" {
-					plan.Reason = ReasonReducedSampleCount
+					plan.Reason = samplePlanReducedSampleCount
 				}
 				continue
 			}

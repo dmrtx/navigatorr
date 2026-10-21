@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/jakenesler/navigatorr/transcode"
-	"github.com/jakenesler/navigatorr/transcode/optimization"
 )
 
 func sizeAudioOnlyTestPlan(t *testing.T, bitDepth int) *transcode.Plan {
@@ -38,7 +37,7 @@ func TestSizeAudioOnlyPlanShape(t *testing.T) {
 		"preset":            func(p *transcode.Plan) { p.Preset = "medium" },
 		"pixel format":      func(p *transcode.Plan) { p.PixelFormat = "p010le" },
 		"x265 settings":     func(p *transcode.Plan) { p.X265 = &transcode.X265Settings{} },
-		"v2 policy":         func(p *transcode.Plan) { p.ModePolicyVersion = optimization.ModePolicyV2 },
+		"v2 policy":         func(p *transcode.Plan) { p.ModePolicyVersion = transcode.ModePolicyV2 },
 		"lossy audio mode":  func(p *transcode.Plan) { p.AudioMode = "compact" },
 		"quality mode":      func(p *transcode.Plan) { p.Mode = "quality" },
 		"unknown bit depth": func(p *transcode.Plan) { p.ExpectedBitDepth = 0 },

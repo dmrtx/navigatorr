@@ -7,7 +7,6 @@ import (
 
 	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
-	"github.com/jakenesler/navigatorr/transcode/optimization"
 	"github.com/jakenesler/navigatorr/transcode/quality"
 	"github.com/jakenesler/navigatorr/transcode/recipe"
 )
@@ -36,7 +35,7 @@ func buildFinalSamples(rep *mediainspect.DetailedReport, optSampling *recipe.Sam
 	if rep.DurationSec <= 0 {
 		return nil, fmt.Errorf("invalid source duration %.3f: must be positive", rep.DurationSec)
 	}
-	samplePlan, err := optimization.PlanSamples(optimization.SamplePlanConfig{
+	samplePlan, err := transcode.PlanSamples(transcode.SamplePlanConfig{
 		Duration:          rep.DurationSec,
 		SampleSeconds:     optSampling.SampleSeconds,
 		SampleCount:       optSampling.SampleCount,

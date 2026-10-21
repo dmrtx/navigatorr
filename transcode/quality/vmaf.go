@@ -175,9 +175,9 @@ func ParseVMAF(data []byte, maxBytes int, model VMAFModel, sampleIndex int, sour
 }
 
 // FrameScores returns a copy of the raw per-frame scores a fresh measurement
-// kept worker-local (nil for stats that were combined or persisted). A durable
-// sample cache needs them: pooled mean and p5 over several samples are
-// computed from the frames, never from per-sample summaries.
+// kept worker-local (nil for stats that were combined or persisted). Pooled
+// mean and p5 over several windows are computed from the frames, never from
+// per-window summaries.
 func (s VMAFStats) FrameScores() []float64 {
 	if len(s.frameScores) == 0 {
 		return nil

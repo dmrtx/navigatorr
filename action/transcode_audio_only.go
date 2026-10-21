@@ -9,7 +9,6 @@ import (
 
 	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
-	"github.com/jakenesler/navigatorr/transcode/optimization"
 )
 
 // audioOnlyEstimate is the cheap pre-screen for a size v3 audio-only plan:
@@ -88,7 +87,7 @@ func (e *Engine) sizeAudioOnlyFallback(ctx context.Context, ec *ExecutionContext
 		return StepResult{}, false
 	}
 	snapshot, err := freezeModePolicy(ec)
-	if err != nil || snapshot == nil || snapshot.Mode != "size" || snapshot.workerVersion() != optimization.ModePolicyV3 || snapshot.Size == nil || !snapshot.Size.AudioOnlyFallback {
+	if err != nil || snapshot == nil || snapshot.Mode != "size" || snapshot.workerVersion() != transcode.ModePolicyV3 || snapshot.Size == nil || !snapshot.Size.AudioOnlyFallback {
 		return StepResult{}, false
 	}
 	rep := getSourceReport(ec.State["source_report"])
@@ -106,7 +105,7 @@ func (e *Engine) sizeAudioOnlyFallback(ctx context.Context, ec *ExecutionContext
 	}
 	outputs["audio_only_estimated_bytes"] = estimate.CandidateBytes
 	ec.State["audio_only_estimated_bytes"] = estimate.CandidateBytes
-	if !optimization.ModeSizeAllowedVersion(snapshot.Mode, original, estimate.CandidateBytes, snapshot.workerVersion()) {
+	if !transcode.ModeSizeAllowedVersion(snapshot.Mode, original, estimate.CandidateBytes, snapshot.workerVersion()) {
 		if estimate.Unknown > 0 {
 			return skip("audio_estimate_unavailable")
 		}

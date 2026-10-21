@@ -132,3 +132,17 @@ func TestStartupWithoutRetiredStateIsSilent(t *testing.T) {
 	blank := NewWorker(&WorkerConfig{})
 	blank.removeLegacySampleTestState()
 }
+
+// A worker config written while the sample cache existed still loads: the
+// retired keys are ignored, so an upgrade needs no config change.
+func TestLoadWorkerConfigIgnoresRetiredSampleCacheKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "worker.yml")
+	legacyWrite(t, path, "disable_sample_cache: false\nsample_cache_max_bytes: 67108864\nsample_cache_ttl_hours: 720\nmax_parallel_jobs: 2\n")
+	cfg, err := LoadWorkerConfig(path)
+	if err != nil {
+		t.Fatalf("config with retired keys rejected: %v", err)
+	}
+	if cfg.MaxParallelJobs != 2 {
+		t.Fatalf("other keys must still apply: %+v", cfg)
+	}
+}

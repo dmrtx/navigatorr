@@ -13,7 +13,6 @@ import (
 
 	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
-	"github.com/jakenesler/navigatorr/transcode/optimization"
 )
 
 // useTempCompactLUTDir keeps LUTs written by a test inside its temp dir.
@@ -320,9 +319,9 @@ func compactModePlanFor(t *testing.T, c *transcode.CompactPlan, sourceBitDepth i
 	}
 	p.VideoProfile, p.PixelFormat, p.ExpectedBitDepth = prof, pix, bd
 	p.AudioMode = "compact"
-	p.Mode, p.ModePolicyVersion = "compact", optimization.ModePolicyV2
+	p.Mode, p.ModePolicyVersion = "compact", transcode.ModePolicyV2
 	p.PolicyDigest = "sha256:" + strings.Repeat("0", 64)
-	p.SizePolicy = &transcode.SizePolicy{MinSavingsPercent: optimization.CompactMinimumSavingsPercent}
+	p.SizePolicy = &transcode.SizePolicy{MinSavingsPercent: transcode.CompactMinimumSavingsPercent}
 	p.QualityValidation = &transcode.QualityValidationPlan{
 		Metric: "vmaf", BenchmarkRequestDigest: "sha256:" + strings.Repeat("1", 64),
 		Quality: transcode.BenchmarkQualityConfig{

@@ -683,7 +683,7 @@ type HTTPExecutorConfig struct {
 	TokenFile string `yaml:"token_file"`
 	// RequestTimeoutSec bounds Doctor/Capabilities/Status/Cancel (default 15s).
 	RequestTimeoutSec int `yaml:"request_timeout_sec"`
-	// SubmitTimeoutSec bounds Submit/benchmark-submit POSTs (default 60s).
+	// SubmitTimeoutSec bounds Submit POSTs (default 60s).
 	// It bounds transport only, never the encode itself.
 	SubmitTimeoutSec int                    `yaml:"submit_timeout_sec"`
 	PathMappings     []TranscodePathMapping `yaml:"path_mappings"`

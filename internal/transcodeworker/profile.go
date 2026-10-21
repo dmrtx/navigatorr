@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/jakenesler/navigatorr/transcode"
-	"github.com/jakenesler/navigatorr/transcode/optimization"
 	"github.com/jakenesler/navigatorr/transcode/quality"
 )
 
@@ -62,7 +61,7 @@ func ValidatePlan(p *transcode.Plan) error {
 		return fmt.Errorf("compact plan requires compact mode")
 	}
 	if p.Mode != "" {
-		minimum, valid := optimization.ModeMinimumSavings(p.Mode, p.ModePolicyVersion)
+		minimum, valid := transcode.ModeMinimumSavings(p.Mode, p.ModePolicyVersion)
 		if !valid {
 			return fmt.Errorf("unsupported processing mode policy")
 		}
@@ -118,7 +117,7 @@ func ValidatePlan(p *transcode.Plan) error {
 	if norm(p.AudioMode) != "copy" && norm(p.AudioMode) != "compact" && norm(p.AudioMode) != "he_aac" && norm(p.AudioMode) != transcode.AudioModeCompactLossless {
 		return fmt.Errorf("unsupported audio mode %q (fail closed)", p.AudioMode)
 	}
-	if norm(p.AudioMode) == transcode.AudioModeCompactLossless && (p.Mode != "size" || p.ModePolicyVersion != optimization.ModePolicyV3) {
+	if norm(p.AudioMode) == transcode.AudioModeCompactLossless && (p.Mode != "size" || p.ModePolicyVersion != transcode.ModePolicyV3) {
 		return fmt.Errorf("compact_lossless audio requires size mode policy v3 (fail closed)")
 	}
 	if norm(p.SubtitleMode) != "preserve" {
@@ -273,7 +272,7 @@ func modeAudioMode(mode, version string) string {
 	if mode == "compact" {
 		return "compact"
 	}
-	if mode == "size" && version == optimization.ModePolicyV3 {
+	if mode == "size" && version == transcode.ModePolicyV3 {
 		return transcode.AudioModeCompactLossless
 	}
 	return "copy"

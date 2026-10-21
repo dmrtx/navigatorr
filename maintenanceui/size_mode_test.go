@@ -2,9 +2,8 @@ package maintenanceui
 
 import (
 	"encoding/json"
+	"github.com/jakenesler/navigatorr/transcode"
 	"testing"
-
-	"github.com/jakenesler/navigatorr/transcode/optimization"
 )
 
 func TestOperationsProjectSizeModeSummary(t *testing.T) {
@@ -170,7 +169,7 @@ func TestOperationsProjectSizeAudioOnlyCheckStates(t *testing.T) {
 func TestOperationsProjectWinningEncoder(t *testing.T) {
 	s, h := testUI(t)
 	st := s.engine.Deps().Store
-	note := optimization.HardwareSelectedNote + ": 4000 bytes against 3800 for the smallest software candidate, within the 15% margin"
+	note := transcode.HardwareSelectedNote + ": 4000 bytes against 3800 for the smallest software candidate, within the 15% margin"
 	for id, codec := range map[string]string{"vt-job": "hevc_videotoolbox", "vt-plain-job": "hevc_videotoolbox", "x265-job": "libx265"} {
 		uncertainties := []any{"sampled estimate"}
 		if id != "vt-plain-job" {

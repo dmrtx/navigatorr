@@ -12,7 +12,6 @@ import (
 
 	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
-	"github.com/jakenesler/navigatorr/transcode/optimization"
 )
 
 func TestSizeModePolicyV3Snapshot(t *testing.T) {
@@ -20,7 +19,7 @@ func TestSizeModePolicyV3Snapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Version != optimization.ModePolicyV3 || p.Size == nil || p.MinSavingsPercent != 15 || p.Profile.Audio.Mode != transcode.AudioModeCompactLossless {
+	if p.Version != transcode.ModePolicyV3 || p.Size == nil || p.MinSavingsPercent != 15 || p.Profile.Audio.Mode != transcode.AudioModeCompactLossless {
 		t.Fatalf("size v3 snapshot %+v", p)
 	}
 	if !reflect.DeepEqual(p.Profile.Optimization.Search.QualityValues, []int{22, 24, 26, 28, 30}) || !p.Size.EightBitMain10 || p.Size.VideoToolboxCandidates || !p.Size.AudioOnlyFallback {

@@ -3,8 +3,8 @@
 An end-to-end check that every transcode goal produces what the UI promises.
 It drives the real action engine in-process and the real
 `navigatorr-transcode serve` worker binary (built from this tree, started from a
-YAML config on a loopback port, spawning `_internal_run` / `_internal_benchmark`
-children as in production) over synthetic ffmpeg-lavfi sources. Nothing outside
+YAML config on a loopback port, spawning `_internal_run` children
+as in production) over synthetic ffmpeg-lavfi sources. Nothing outside
 a temporary directory is read or written, and no network service is used.
 
 It is test-only: no production code is changed or mocked. Run it on the

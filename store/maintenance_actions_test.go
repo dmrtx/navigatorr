@@ -2,11 +2,10 @@ package store
 
 import (
 	"encoding/json"
+	"github.com/jakenesler/navigatorr/transcode"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/jakenesler/navigatorr/transcode/optimization"
 )
 
 func TestMaintenanceSnapshotProjectsWithoutChangingHistory(t *testing.T) {
@@ -124,15 +123,15 @@ func TestMaintenanceSnapshotKeepsSizeModeSummaryOnly(t *testing.T) {
 // engine reason out of its uncertainties, so the page can say why a hardware
 // result was chosen without carrying the estimator's whole list.
 func TestMaintenanceSnapshotKeepsOnlyTheMediaEngineReason(t *testing.T) {
-	if maintenanceHardwareNote != optimization.HardwareSelectedNote {
-		t.Fatalf("the snapshot filters on %q but the selector writes %q", maintenanceHardwareNote, optimization.HardwareSelectedNote)
+	if maintenanceHardwareNote != transcode.HardwareSelectedNote {
+		t.Fatalf("the snapshot filters on %q but the selector writes %q", maintenanceHardwareNote, transcode.HardwareSelectedNote)
 	}
 	s, err := Open(filepath.Join(t.TempDir(), "ledger.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	note := optimization.HardwareSelectedNote + ": no software candidate qualified"
+	note := transcode.HardwareSelectedNote + ": no software candidate qualified"
 	for id, uncertainties := range map[string]string{
 		"with-reason": `["sampled estimate","` + note + `"]`,
 		"without":     `["sampled estimate","another"]`,

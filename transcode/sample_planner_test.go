@@ -1,4 +1,4 @@
-package optimization
+package transcode
 
 import (
 	"math"
@@ -158,8 +158,8 @@ func TestSamplePlanner_AvoidOverlapsAndReduction(t *testing.T) {
 	if plan.ActualSampleCount != 1 {
 		t.Errorf("expected ActualSampleCount = 1, got %d", plan.ActualSampleCount)
 	}
-	if plan.Reason != ReasonReducedSampleCount {
-		t.Errorf("expected Reason %q, got %q", ReasonReducedSampleCount, plan.Reason)
+	if plan.Reason != samplePlanReducedSampleCount {
+		t.Errorf("expected Reason %q, got %q", samplePlanReducedSampleCount, plan.Reason)
 	}
 
 	s := plan.Samples[0]
@@ -388,18 +388,18 @@ func TestSamplePlanner_InvalidInputs(t *testing.T) {
 		t.Errorf("expected error for NaN position")
 	}
 
-	// Excessive sample_count exceeding MaxSampleCount (32)
+	// Excessive sample_count exceeding maxSamplePlanCount (32)
 	_, err = PlanSamples(SamplePlanConfig{
 		Duration:      3600.0,
 		SampleSeconds: 10.0,
-		SampleCount:   MaxSampleCount + 1,
+		SampleCount:   maxSamplePlanCount + 1,
 	})
 	if err == nil {
-		t.Errorf("expected error for sample_count > MaxSampleCount")
+		t.Errorf("expected error for sample_count > maxSamplePlanCount")
 	}
 
-	// Excessive positions exceeding MaxSampleCount (32)
-	excessivePositions := make([]float64, MaxSampleCount+1)
+	// Excessive positions exceeding maxSamplePlanCount (32)
+	excessivePositions := make([]float64, maxSamplePlanCount+1)
 	for i := range excessivePositions {
 		excessivePositions[i] = float64(i * 10)
 	}
@@ -409,6 +409,6 @@ func TestSamplePlanner_InvalidInputs(t *testing.T) {
 		Positions:     excessivePositions,
 	})
 	if err == nil {
-		t.Errorf("expected error for len(positions) > MaxSampleCount")
+		t.Errorf("expected error for len(positions) > maxSamplePlanCount")
 	}
 }

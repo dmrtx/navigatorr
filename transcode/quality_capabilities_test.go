@@ -146,21 +146,18 @@ func TestHardwareSearchRulesExtraSelectionMarginIsBounded(t *testing.T) {
 	}
 }
 
-func TestBenchmarkContinuationReferenceValidation(t *testing.T) {
-	good := &BenchmarkContinuation{ID: "bench-act-1", RequestDigest: "sha256:" + strings.Repeat("a", 64)}
-	if err := good.Validate(); err != nil {
+func TestSearchBudgetExtensionChangesFingerprint(t *testing.T) {
+	caps := WorkerCapabilities{ProtocolVersion: WorkerProtocolVersion, FFmpegVersion: "9.0.1", Encoders: map[string]bool{}, Filters: map[string]bool{}}
+	before, err := ComputeCapabilityFingerprint(caps)
+	if err != nil {
 		t.Fatal(err)
 	}
-	for name, ref := range map[string]*BenchmarkContinuation{
-		"empty id":       {RequestDigest: good.RequestDigest},
-		"path id":        {ID: "../bench", RequestDigest: good.RequestDigest},
-		"no digest":      {ID: good.ID},
-		"short digest":   {ID: good.ID, RequestDigest: "sha256:abc"},
-		"wrong prefix":   {ID: good.ID, RequestDigest: "md5:" + strings.Repeat("a", 64)},
-		"non-hex digest": {ID: good.ID, RequestDigest: "sha256:" + strings.Repeat("z", 64)},
-	} {
-		if err := ref.Validate(); err == nil {
-			t.Errorf("%s accepted", name)
-		}
+	caps.SearchBudgetExtension = true
+	after, err := ComputeCapabilityFingerprint(caps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before == after {
+		t.Fatal("a worker that accepts search_extension must fingerprint differently from one that does not")
 	}
 }

@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/jakenesler/navigatorr/transcode"
-	"github.com/jakenesler/navigatorr/transcode/optimization"
 )
 
 func coverArtPlan() *transcode.Plan {
@@ -189,7 +188,7 @@ func TestCoverArtRealEncode(t *testing.T) {
 	twoPass.X265 = &transcode.X265Settings{BitrateKbps: 300, TwoPass: true, Lookahead: 10, BFrames: 2, RefFrames: 2, AQMode: 2, AQStrength: 1, PsyRD: 1, PsyRDOQ: 1}
 	for name, plan := range map[string]*transcode.Plan{"crf": coverArtPlan(), "two_pass": twoPass} {
 		t.Run(name, func(t *testing.T) {
-			minimum, _ := optimization.ModeMinimumSavings("size", "")
+			minimum, _ := transcode.ModeMinimumSavings("size", "")
 			plan.Mode, plan.PolicyDigest, plan.SizePolicy = "size", "sha256:"+strings.Repeat("0", 64), &transcode.SizePolicy{MinSavingsPercent: float64(minimum)}
 			plan.QualityValidation = &transcode.QualityValidationPlan{Metric: "ssim", Samples: []transcode.BenchmarkSampleWindow{{Index: 0, StartSeconds: 0.5, DurationSeconds: 1}, {Index: 1, StartSeconds: 2.5, DurationSeconds: 1}}, Quality: transcode.BenchmarkQualityConfig{FinalValidation: &transcode.BenchmarkFinalValidationConfig{Mode: "sampled"}}, BenchmarkRequestDigest: "sha256:" + strings.Repeat("1", 64)}
 			plan.PlanDigest, _ = transcode.DigestPlan(plan)

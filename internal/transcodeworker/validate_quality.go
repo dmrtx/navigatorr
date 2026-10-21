@@ -17,7 +17,6 @@ import (
 
 	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
-	"github.com/jakenesler/navigatorr/transcode/optimization"
 	"github.com/jakenesler/navigatorr/transcode/quality"
 )
 
@@ -663,7 +662,7 @@ func (w *Worker) validateModeSourceQuality(ctx context.Context, source string, p
 // source depth, except that size v3 encodes an 8-bit source as Main10 when
 // its frozen plan says so.
 func modeCandidateBitDepth(plan *transcode.Plan, sourceBitDepth int) int {
-	if sourceBitDepth == 8 && plan.Mode == "size" && plan.ModePolicyVersion == optimization.ModePolicyV3 && plan.ExpectedBitDepth == 10 {
+	if sourceBitDepth == 8 && plan.Mode == "size" && plan.ModePolicyVersion == transcode.ModePolicyV3 && plan.ExpectedBitDepth == 10 {
 		return 10
 	}
 	return sourceBitDepth

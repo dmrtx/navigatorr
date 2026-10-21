@@ -78,7 +78,12 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 		}
 	}
 	e.TestedCandidates = len(ids)
-	var decision transcode.BenchmarkDecision
+	// Only the winner's encoder is read from a sample test's decision.
+	var decision struct {
+		Winner *struct {
+			VideoCodec string `json:"video_codec"`
+		} `json:"winner"`
+	}
 	data, _ = json.Marshal(read("benchmark_decision"))
 	var budget SizeBudgetRecord
 	if data, _ := json.Marshal(read(sizeBudgetKey)); json.Unmarshal(data, &budget) == nil && budget.BudgetBytes > 0 {

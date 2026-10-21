@@ -555,7 +555,7 @@ func TestPR6B1_ReconcileUnknownOperationalStateFailsClosed(t *testing.T) {
 	}
 }
 
-func TestPR6B1_ReconcilePostEncodeLeavesBenchmarkUntouched(t *testing.T) {
+func TestPR6B1_ReconcilePostEncodeRetiresBenchmarkDir(t *testing.T) {
 	stub := newStubSpawn()
 	w, tempDir, _ := newPR3Worker(t, 4, stub)
 	stateDir := filepath.Join(tempDir, "jobs")
@@ -581,15 +581,9 @@ func TestPR6B1_ReconcilePostEncodeLeavesBenchmarkUntouched(t *testing.T) {
 	if err := w.ReconcileStartup(context.Background()); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	raw, err := os.ReadFile(filepath.Join(benchDir, "benchmark.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(raw) != benchJSON {
-		t.Fatalf("benchmark.json must be untouched, got %s", raw)
-	}
-	if _, err := os.Stat(filepath.Join(benchDir, "terminal.json")); !os.IsNotExist(err) {
-		t.Fatalf("benchmark-only dir must get no terminal marker")
+	// The retired sample test is removed, never given a terminal marker.
+	if _, err := os.Stat(benchDir); !os.IsNotExist(err) {
+		t.Fatalf("retired benchmark dir must be removed, stat err=%v", err)
 	}
 }
 

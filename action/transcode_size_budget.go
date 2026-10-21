@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strings"
 
 	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
-	"github.com/jakenesler/navigatorr/transcode/optimization"
 )
 
 // A size budget is the inverse of the size search. The search keeps quality
@@ -436,10 +436,10 @@ func sizeBudgetOtherStreamBytes(rep *mediainspect.DetailedReport, sourceBytes in
 	for _, s := range rep.Subtitles {
 		n := audioStreamBytes(s, rep.DurationSec, sourceBytes)
 		if n <= 0 {
-			if !optimization.IsTextSubtitleCodec(s.Codec) {
+			if !isTextSubtitleCodec(s.Codec) {
 				return 0, false
 			}
-			n = optimization.DefaultTextSubtitleSizeBytes
+			n = defaultTextSubtitleSizeBytes
 		}
 		total += n
 	}
@@ -448,6 +448,23 @@ func sizeBudgetOtherStreamBytes(rep *mediainspect.DetailedReport, sourceBytes in
 	}
 	total += int64(len(rep.CoverArt())) * sizeBudgetCoverArtBound
 	return total, total < sourceBytes
+}
+
+// defaultTextSubtitleSizeBytes is a conservative 2 MiB allowance per text
+// subtitle stream when ffprobe has no byte count. This is an estimate, not a
+// bound. Bitmap subtitles and unknown codecs need a measured size because
+// their payload can be significant.
+const defaultTextSubtitleSizeBytes int64 = 2 * 1024 * 1024
+
+// isTextSubtitleCodec reports a text subtitle codec, whose size is bounded
+// by defaultTextSubtitleSizeBytes when the file does not state it.
+func isTextSubtitleCodec(codec string) bool {
+	switch strings.ToLower(strings.TrimSpace(codec)) {
+	case "srt", "subrip", "mov_text", "ass", "ssa", "webvtt":
+		return true
+	default:
+		return false
+	}
 }
 
 // sizeBudgetVideoKbps is the average video bitrate that lands the whole file
@@ -535,7 +552,7 @@ func endUnreachableSizeBudget(ec *ExecutionContext, snapshot *ModePolicySnapshot
 	if ec.ActionName != "transcode_media" || getString(ec.Inputs, "mode") != "size" {
 		return StepResult{}, false
 	}
-	if snapshot == nil || snapshot.workerVersion() != optimization.ModePolicyV3 || snapshot.Size == nil || snapshot.Size.SizeBudget == nil {
+	if snapshot == nil || snapshot.workerVersion() != transcode.ModePolicyV3 || snapshot.Size == nil || snapshot.Size.SizeBudget == nil {
 		return StepResult{}, false
 	}
 	policy := snapshot.Size.SizeBudget
