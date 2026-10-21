@@ -603,7 +603,7 @@ func TestBenchmarkUncertainSubmitPersistsIdentityAndResumesAutomatically(t *test
 	}}
 	e, st, source, _ := setupBenchmarkTestEnv(t, mock, standard8BitProbeJSON, &recipe.OptimizationPolicy{Enabled: true})
 	persistedStore = st
-	r, err := e.Run(context.Background(), "benchmark_transcode", map[string]any{"path": source, "profile": "opt-vt"})
+	r, err := legacySearch(e).Run(context.Background(), "benchmark_transcode", map[string]any{"path": source, "profile": "opt-vt"})
 	if err != nil || r.Status != StatusWaitingExternal {
 		t.Fatalf("uncertain benchmark submit: %+v %v", r, err)
 	}

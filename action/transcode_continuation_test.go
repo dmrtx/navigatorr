@@ -46,7 +46,7 @@ func newContinuationFlow(t *testing.T, firstSearchSeconds float64) *continuation
 		return hardwareTestCapabilities(), nil
 	}
 	e := NewEngine(EngineDeps{Store: setupTestStore(t), Transcode: mock})
-	policy, err := modePolicyWithHardware("size", false, 0, mustHardwareRules(t))
+	policy, err := legacyModePolicyWithHardware("size", false, 0, mustHardwareRules(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +299,7 @@ func TestContinuationNeedsAnX265Worker(t *testing.T) {
 // The continued search asks the worker for x265 only, reuses nothing it cannot
 // name, and fits its extension inside what the ceiling left.
 func TestContinuedSearchRequestIsX265OnlyWithinTheCeiling(t *testing.T) {
-	policy, err := modePolicyWithHardware("size", false, 0, mustHardwareRules(t))
+	policy, err := legacyModePolicyWithHardware("size", false, 0, mustHardwareRules(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -464,7 +464,7 @@ func TestBatchBudgetHoldsTheReservationForAPossibleContinuation(t *testing.T) {
 // The request type itself refuses a continuation that could bring hardware
 // back or would reuse an unrelated search.
 func TestContinuedSearchRequestValidation(t *testing.T) {
-	policy, err := modePolicyWithHardware("size", false, 0, mustHardwareRules(t))
+	policy, err := legacyModePolicyWithHardware("size", false, 0, mustHardwareRules(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -533,7 +533,7 @@ func TestBenchmarkWaitSumsContinuedSearchTime(t *testing.T) {
 // measured: the same windows and the same search rules, so the worker may reuse
 // the first search's discovery measurements, and it still verifies on the grid.
 func TestContinuedSearchKeepsTheGridMeasurementBasis(t *testing.T) {
-	policy, err := modePolicyWithHardware("size", false, 0, mustHardwareRules(t))
+	policy, err := legacyModePolicyWithHardware("size", false, 0, mustHardwareRules(t))
 	if err != nil {
 		t.Fatal(err)
 	}

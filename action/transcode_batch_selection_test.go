@@ -21,6 +21,7 @@ func TestAutomaticBatchDryRunByIntent(t *testing.T) {
 		t.Run("priority="+priority, func(t *testing.T) {
 			mock := &mockTranscodeExecutor{}
 			e, st, _, srv, _ := setupBatchTestEnv(t, mock, 1)
+			legacySearch(e)
 			defer st.Close()
 			defer srv.Close()
 			probe := strings.ReplaceAll(fakeMultiProbeJSON, `"pix_fmt": "yuv420p"`, `"pix_fmt": "yuv420p", "r_frame_rate": "24/1", "avg_frame_rate": "24/1"`)
@@ -149,6 +150,7 @@ func TestAutomaticBatchCalibratesBeforeEncodingAndCancelsBenchmark(t *testing.T)
 		},
 	}
 	e, st, _, srv, _ := setupBatchTestEnv(t, mock, 1)
+	legacySearch(e)
 	defer st.Close()
 	defer srv.Close()
 	probe := strings.ReplaceAll(fakeMultiProbeJSON, `"pix_fmt": "yuv420p"`, `"pix_fmt": "yuv420p", "r_frame_rate": "24/1", "avg_frame_rate": "24/1"`)
@@ -163,7 +165,7 @@ func TestAutomaticBatchCalibratesBeforeEncodingAndCancelsBenchmark(t *testing.T)
 		t.Fatalf("wrong dispatch order: %+v", benchmark)
 	}
 	// Same persisted action is resumed by a fresh engine; no duplicate sample.
-	e = NewEngine(e.deps)
+	e = legacySearch(NewEngine(e.deps))
 	r, err = e.Resume(context.Background(), r.ID, "", nil)
 	if err != nil || r.Status != StatusWaitingExternal || atomic.LoadInt32(&mock.benchmarkSubmitCalls) != 1 {
 		t.Fatalf("restart duplicated sampling: %+v %v", r, err)
@@ -315,6 +317,7 @@ func TestIntentBatchSampleToCandidate(t *testing.T) {
 		},
 	}
 	e, st, _, srv, _ := setupBatchTestEnv(t, mock, 1)
+	legacySearch(e)
 	defer st.Close()
 	defer srv.Close()
 	probe := strings.ReplaceAll(fakeMultiProbeJSON, `"pix_fmt": "yuv420p"`, `"pix_fmt": "yuv420p", "r_frame_rate": "24/1", "avg_frame_rate": "24/1"`)

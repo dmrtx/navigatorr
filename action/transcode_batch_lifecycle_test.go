@@ -227,7 +227,7 @@ func testBatchLifecycleTwoCandidatesOneApprovalAndRestart(t *testing.T, dropResc
 	deps := h.engine.deps
 	deps.Registry = arrservice.NewRegistry(cfg)
 	deps.Transcode = mock
-	h.engine = NewEngine(deps)
+	h.engine = legacySearch(NewEngine(deps))
 	r, err := h.engine.Run(context.Background(), "transcode_batch", map[string]any{"service": "sonarr", "series_id": 1, "profile_config": calibratedTestProfileConfig(), "shared_calibration": true, "calibration_items": 1, "max_items": 2, "promote_candidates": true})
 	if err != nil {
 		t.Fatal(err)

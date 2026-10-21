@@ -261,7 +261,7 @@ func TestStandaloneBenchmarkWaitsForSlotAndReconcilerResubmits(t *testing.T) {
 	}
 	engine, _, mediaFile, _ := setupBenchmarkTestEnv(t, mock, standard8BitProbeJSON, &recipe.OptimizationPolicy{Enabled: true})
 	engine.deps.Now = clock.Now
-	res, err := engine.Run(context.Background(), "benchmark_transcode", map[string]any{"path": mediaFile, "profile": "opt-vt"})
+	res, err := legacySearch(engine).Run(context.Background(), "benchmark_transcode", map[string]any{"path": mediaFile, "profile": "opt-vt"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +323,7 @@ func TestStandaloneSlotWaitIsCancellable(t *testing.T) {
 		},
 	}
 	engine, _, mediaFile, _ := setupBenchmarkTestEnv(t, mock, standard8BitProbeJSON, &recipe.OptimizationPolicy{Enabled: true})
-	res, err := engine.Run(context.Background(), "benchmark_transcode", map[string]any{"path": mediaFile, "profile": "opt-vt"})
+	res, err := legacySearch(engine).Run(context.Background(), "benchmark_transcode", map[string]any{"path": mediaFile, "profile": "opt-vt"})
 	if err != nil || res.WaitingCondition != "worker_busy" {
 		t.Fatalf("got %v %+v", err, res)
 	}
@@ -363,7 +363,7 @@ func TestCancelAfterUncertainResubmitStillCancelsRemote(t *testing.T) {
 		},
 	}
 	engine, _, mediaFile, _ := setupBenchmarkTestEnv(t, mock, standard8BitProbeJSON, &recipe.OptimizationPolicy{Enabled: true})
-	res, err := engine.Run(context.Background(), "benchmark_transcode", map[string]any{"path": mediaFile, "profile": "opt-vt"})
+	res, err := legacySearch(engine).Run(context.Background(), "benchmark_transcode", map[string]any{"path": mediaFile, "profile": "opt-vt"})
 	if err != nil || res.WaitingCondition != "worker_busy" {
 		t.Fatalf("got %v %+v", err, res)
 	}

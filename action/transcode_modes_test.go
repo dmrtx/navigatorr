@@ -126,7 +126,7 @@ func TestModeFinalUnroundedSizeGate(t *testing.T) {
 		if err := os.WriteFile(candidate, make([]byte, tc.bytes), 0600); err != nil {
 			t.Fatal(err)
 		}
-		ec := &ExecutionContext{Inputs: map[string]any{"mode": tc.mode}, State: map[string]any{"candidate_path": candidate, "original_size": int64(100), "original": map[string]any{"size_bytes": int64(100)}}}
+		ec := &ExecutionContext{Inputs: map[string]any{"mode": tc.mode}, State: map[string]any{"candidate_path": candidate, "original_size": int64(100), "original": map[string]any{"size_bytes": int64(100)}}, Engine: legacySearch(&Engine{})}
 		policy, _ := freezeModePolicy(ec)
 		plan := &transcode.Plan{VideoCodec: transcode.VideoCodecLibX265}
 		plan.QualityValidation = &transcode.QualityValidationPlan{Metric: "vmaf", Quality: *ensureBenchmarkQualityMetric(buildBenchmarkQualityConfig(policy.Profile.Optimization.Quality), "vmaf"), BenchmarkRequestDigest: "request"}
@@ -221,6 +221,7 @@ JSON
 		return transcode.BenchmarkStatus{Automatic: &transcode.BenchmarkAutomaticEvidence{VerifiedSamples: 5}, ID: id, Status: transcode.StatusCompleted, SearchSeconds: &seconds, Decision: &transcode.BenchmarkDecision{DecisionReason: "no_suitable_candidate"}}, nil
 	}}
 	e, st := setupTranscodeEngine(t, executor, probe, []string{dir}, []string{dir}, true)
+	legacySearch(e)
 	defer st.Close()
 	e.deps.Config.Transcode.MaxParallelJobs = 3
 	result, err := e.Run(context.Background(), "transcode_batch", map[string]any{"paths": paths, "mode": "quality"})

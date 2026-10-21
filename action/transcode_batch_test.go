@@ -702,6 +702,7 @@ func TestTranscodeBatch_PauseAndResume(t *testing.T) {
 	}
 
 	engine, st, _, srv, _ := setupBatchTestEnv(t, mockExecutor, 1)
+	legacySearch(engine)
 	defer srv.Close()
 	defer st.Close()
 

@@ -24,7 +24,7 @@ func rulesTestCapabilities() transcode.WorkerCapabilities {
 }
 
 func TestSizeModePolicyV3FreezesAutomaticSearchRules(t *testing.T) {
-	p, err := modePolicy("size", false)
+	p, err := legacyModePolicy("size", false)
 	if err != nil {
 		t.Fatal(err)
 	}

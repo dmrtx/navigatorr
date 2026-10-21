@@ -17,7 +17,7 @@ import (
 )
 
 func TestSizeModePolicyV3Snapshot(t *testing.T) {
-	p, err := modePolicy("size", false)
+	p, err := legacyModePolicy("size", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func TestSizeModePolicyV3Snapshot(t *testing.T) {
 		t.Fatalf("floor %+v %+v", v, b)
 	}
 	for _, mode := range []string{"quality", "x265_preserve", "compact"} {
-		other, err := modePolicy(mode, false)
+		other, err := legacyModePolicy(mode, false)
 		if err != nil || other.Version != ModePolicyVersion || other.Size != nil {
 			t.Fatalf("%s policy changed: %+v %v", mode, other, err)
 		}
@@ -246,6 +246,7 @@ JSON
 				return transcode.BenchmarkJob{ID: req.ID}, nil
 			}}
 			e, st := setupTranscodeEngine(t, executor, probe, []string{dir}, []string{dir}, true)
+			legacySearch(e)
 			defer st.Close()
 			if _, err := e.Run(context.Background(), "transcode_media", map[string]any{"path": source, "mode": "size"}); err != nil {
 				t.Fatal(err)
