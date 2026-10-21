@@ -86,6 +86,12 @@ func TestModePolicyV4FreezesOneRecipePerGoal(t *testing.T) {
 			if p.workerVersion() != tc.workerV {
 				t.Fatalf("worker sees %s", p.workerVersion())
 			}
+			// Only the VideoToolbox ladder carries a fallback: the x265 size
+			// ladder a worker without VideoToolbox runs instead.
+			if f := r.Fallback; (r.Kind == RecipeQualityLadder && r.VideoCodec == transcode.VideoCodecHEVCVideoToolbox) != (f != nil) ||
+				f != nil && (f.Kind != RecipeQualityLadder || f.VideoCodec != transcode.VideoCodecLibX265 || f.Preset != "medium" || !slices.Equal(f.QualityValues, []int{22, 19, 16}) || f.Fallback != nil) {
+				t.Fatalf("fallback %+v", r.Fallback)
+			}
 			// A stored (JSON round-tripped) snapshot verifies with its recipe.
 			stored := map[string]any{}
 			raw, _ := json.Marshal(p)
@@ -273,6 +279,10 @@ func TestQualityLadderRecipes(t *testing.T) {
 			}
 			if !strings.Contains(rec.Message, "VMAF p5 79.0") || !strings.Contains(rec.Message, "original preserved") {
 				t.Fatalf("message %q", rec.Message)
+			}
+			// Only a VideoToolbox ladder that missed offers x265 next.
+			if rec.RetryWithoutHardware != (tc.codec == transcode.VideoCodecHEVCVideoToolbox) || QualityLadderOf(res.Outputs).RetryWithoutHardware != rec.RetryWithoutHardware {
+				t.Fatalf("retry without hardware %v for %s", rec.RetryWithoutHardware, tc.codec)
 			}
 		})
 	}
@@ -650,5 +660,120 @@ func TestModeBatchV4AdmitsWithoutReservations(t *testing.T) {
 	}
 	if entries := modeBudgetEntries(parseExecutionContext(root, e)); len(entries) != 0 || children != 2 {
 		t.Fatalf("reservations %+v children %d", entries, children)
+	}
+}
+
+// A VideoToolbox ladder's fallback is one x265 ladder, and only it has one.
+func TestRecipeFallbackIsValidated(t *testing.T) {
+	size := freezeFresh(t, map[string]any{"mode": "size"})
+	x265 := freezeFresh(t, map[string]any{"mode": "size", "allow_hardware": false})
+	budget := freezeFresh(t, map[string]any{"mode": "size", "size_budget_percent": 40.0})
+	if err := size.Recipe.validate(size); err != nil {
+		t.Fatal(err)
+	}
+	ladder := func(codec string, values ...int) *ModeRecipe {
+		preset := "medium"
+		if codec == transcode.VideoCodecHEVCVideoToolbox {
+			preset = ""
+		}
+		return &ModeRecipe{Kind: RecipeQualityLadder, VideoCodec: codec, Preset: preset, QualityValues: values}
+	}
+	with := func(r *ModeRecipe, f *ModeRecipe) *ModeRecipe { c := *r; c.Fallback = f; return &c }
+	nested := with(ladder(transcode.VideoCodecLibX265, 22, 19, 16), ladder(transcode.VideoCodecLibX265, 22, 19, 16))
+	for name, tc := range map[string]struct {
+		p *ModePolicySnapshot
+		r *ModeRecipe
+	}{
+		"VideoToolbox falling back to VideoToolbox": {size, with(size.Recipe, ladder(transcode.VideoCodecHEVCVideoToolbox, 60, 65))},
+		"a fallback with its own fallback":          {size, with(size.Recipe, nested)},
+		"a fallback that is not a ladder":           {size, with(size.Recipe, &ModeRecipe{Kind: RecipeSizeBudget, VideoCodec: transcode.VideoCodecLibX265})},
+		"a fallback with rising CRF":                {size, with(size.Recipe, ladder(transcode.VideoCodecLibX265, 16, 19, 22))},
+		"an x265 ladder with a fallback":            {x265, with(x265.Recipe, ladder(transcode.VideoCodecLibX265, 20, 18))},
+		"a size budget with a fallback":             {budget, with(budget.Recipe, ladder(transcode.VideoCodecLibX265, 22, 19, 16))},
+	} {
+		if err := tc.r.validate(tc.p); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+}
+
+// A worker without VideoToolbox runs the size goal's x265 ladder, recorded
+// as a choice with its reason, as a VideoToolbox budget falls back to x265.
+func TestVideoToolboxLadderFallsBackToX265(t *testing.T) {
+	noVT := func(caps *transcode.WorkerCapabilities) {
+		encoders := map[string]bool{}
+		for k, v := range caps.Encoders {
+			encoders[k] = v
+		}
+		encoders[transcode.VideoCodecHEVCVideoToolbox] = false
+		caps.Encoders = encoders
+	}
+	c := newRecipeCase(t, nil, noVT)
+	if c.snapshot.Recipe.VideoCodec != transcode.VideoCodecHEVCVideoToolbox {
+		t.Fatalf("recipe %+v", c.snapshot.Recipe)
+	}
+	planRecipe(t, c)
+	rec := QualityLadderOf(c.ec.State)
+	plan := getPlan(c.ec.State["plan"])
+	if rec == nil || rec.VideoCodec != transcode.VideoCodecLibX265 || rec.Preset != "medium" || !slices.Equal(rec.Values, []int{22, 19, 16}) || rec.Choice == nil || rec.Choice.Reason != SizeBudgetChoiceWorkerUnsupported || rec.Choice.VideoCodec != transcode.VideoCodecLibX265 {
+		t.Fatalf("record %+v", rec)
+	}
+	if !strings.HasPrefix(rec.Message, rec.Choice.Message) || !strings.Contains(rec.Choice.Message, "cannot encode with VideoToolbox") {
+		t.Fatalf("message %q", rec.Message)
+	}
+	if plan.VideoCodec != transcode.VideoCodecLibX265 || plan.Quality != 22 || plan.Preset != "medium" || !qualityLadderPlanMatches(c.snapshot, c.ec.State, plan, rec) {
+		t.Fatalf("first rung %+v", plan)
+	}
+	// The record's choice is what makes the x265 plan the frozen one.
+	unchosen := *rec
+	unchosen.Choice = nil
+	if qualityLadderPlanMatches(c.snapshot, c.ec.State, plan, &unchosen) {
+		t.Fatal("an x265 rung matched the VideoToolbox recipe without the recorded choice")
+	}
+	for rung, q := range []int{19, 16} {
+		advanceRung(t, c, failedRung(85, 80))
+		rec = QualityLadderOf(c.ec.State)
+		if next := getPlan(c.ec.State["plan"]); rec.Rung != rung+1 || next.Quality != q || next.VideoCodec != transcode.VideoCodecLibX265 || !qualityLadderPlanMatches(c.snapshot, c.ec.State, next, rec) {
+			t.Fatalf("rung %d: %+v %+v", rung+1, rec, next)
+		}
+	}
+	// It was x265 already, so a miss offers nothing more.
+	advanceRung(t, c, failedRung(84, 79))
+	if rec = QualityLadderOf(c.ec.State); rec.Outcome != reasonQualityNotMet || rec.RetryWithoutHardware {
+		t.Fatalf("last rung %+v", rec)
+	}
+
+	// A worker with neither encoder still waits on the recipe's own.
+	c = newRecipeCase(t, nil, func(caps *transcode.WorkerCapabilities) {
+		noVT(caps)
+		caps.Encoders[transcode.VideoCodecLibX265] = false
+	})
+	res, err := c.engine.stepBenchmarkSubmit(context.Background(), c.ec)
+	if err != nil || res.Status != StepWaitingDecision || res.WaitingCondition != "recipe_encoder_unavailable" || QualityLadderOf(c.ec.State) != nil {
+		t.Fatalf("no encoder: %+v %v", res, err)
+	}
+}
+
+// When the ladder's end hands over to the audio-only fallback and that does
+// not complete, the ladder's outcome is still recorded: the UI never shows
+// the last rung as encoding.
+func TestQualityLadderOutcomeSurvivesAnUnfinishedAudioOnlyFallback(t *testing.T) {
+	c := newRecipeCase(t, nil, nil)
+	planRecipe(t, c)
+	advanceRung(t, c, failedRung(85, 80))
+	advanceRung(t, c, failedRung(85, 80))
+	// Lossless audio could be compacted, but the worker cannot be asked.
+	c.ec.State["source_report"], c.ec.State["original_size"] = audioOnlyReport(), int64(10_700_000_000)
+	c.executor.capabilitiesFunc = func(context.Context) (transcode.WorkerCapabilities, error) {
+		return transcode.WorkerCapabilities{}, fmt.Errorf("worker unreachable")
+	}
+	res, handled := c.engine.advanceQualityLadder(context.Background(), c.ec, failedRung(84, 79))
+	if !handled || res.Status == StepCompleted {
+		t.Fatalf("fallback result %+v", res)
+	}
+	for where, rec := range map[string]*QualityLadderRecord{"state": QualityLadderOf(c.ec.State), "outputs": QualityLadderOf(res.Outputs)} {
+		if rec == nil || rec.Outcome != reasonQualityNotMet || len(rec.Tried) != 3 || !rec.RetryWithoutHardware {
+			t.Fatalf("%s record %+v", where, rec)
+		}
 	}
 }

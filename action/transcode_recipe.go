@@ -70,6 +70,10 @@ type ModeRecipe struct {
 	// encodes are frozen in the size policy's SizeBudget.
 	Preset        string `json:"preset,omitempty"`
 	QualityValues []int  `json:"quality_values,omitempty"`
+	// Fallback is the x265 ladder a VideoToolbox ladder runs instead on a
+	// worker that cannot encode with VideoToolbox, as a VideoToolbox size
+	// budget falls back to its x265 encode.
+	Fallback *ModeRecipe `json:"fallback,omitempty"`
 }
 
 // modeRecipeFor is the recipe a v4 snapshot of this content freezes.
@@ -94,7 +98,7 @@ func modeRecipeFor(p *ModePolicySnapshot, allowSlow bool) *ModeRecipe {
 			return &ModeRecipe{Kind: RecipeSizeBudget, VideoCodec: codec}
 		}
 		if p.Size.Hardware != nil {
-			return &ModeRecipe{Kind: RecipeQualityLadder, VideoCodec: transcode.VideoCodecHEVCVideoToolbox, QualityValues: slices.Clone(recipeSizeVTValues)}
+			return &ModeRecipe{Kind: RecipeQualityLadder, VideoCodec: transcode.VideoCodecHEVCVideoToolbox, QualityValues: slices.Clone(recipeSizeVTValues), Fallback: x265(recipeSizeX265Values)}
 		}
 		return x265(recipeSizeX265Values)
 	case "quality":
@@ -118,7 +122,7 @@ func (r *ModeRecipe) validate(p *ModePolicySnapshot) error {
 	}
 	switch r.Kind {
 	case RecipeSizeBudget:
-		if p.Mode != "size" || p.Size == nil || p.Size.SizeBudget == nil || r.Preset != "" || len(r.QualityValues) != 0 {
+		if p.Mode != "size" || p.Size == nil || p.Size.SizeBudget == nil || r.Preset != "" || len(r.QualityValues) != 0 || r.Fallback != nil {
 			return fmt.Errorf("a size budget recipe needs a size budget and nothing else")
 		}
 		hardware := len(p.Size.SizeBudget.VTLadder) > 0 && p.Size.Hardware != nil
@@ -143,7 +147,18 @@ func (r *ModeRecipe) validate(p *ModePolicySnapshot) error {
 				return fmt.Errorf("VideoToolbox ladder values must rise within 1..100")
 			}
 		}
+		if f := r.Fallback; f != nil {
+			if f.Kind != RecipeQualityLadder || f.VideoCodec != transcode.VideoCodecLibX265 || f.Fallback != nil {
+				return fmt.Errorf("a VideoToolbox ladder falls back only to one x265 ladder")
+			}
+			if err := f.validate(p); err != nil {
+				return fmt.Errorf("fallback: %w", err)
+			}
+		}
 	case transcode.VideoCodecLibX265:
+		if r.Fallback != nil {
+			return fmt.Errorf("an x265 ladder has no fallback")
+		}
 		if !transcode.IsValidLibX265Preset(r.Preset) || r.Preset == recipeX265SlowPreset && p.Mode != "size" {
 			return fmt.Errorf("invalid x265 ladder preset %q", r.Preset)
 		}
@@ -198,6 +213,22 @@ type QualityLadderRecord struct {
 	Message string `json:"message"`
 	// Final is the passing rung's full-file result.
 	Final *FinalQualitySummary `json:"final,omitempty"`
+	// Choice is set when the ladder runs the recipe's fallback encoder
+	// instead of the one it froze, and says why.
+	Choice *SizeBudgetChoice `json:"encoder_choice,omitempty"`
+	// RetryWithoutHardware is set when every VideoToolbox rung missed the
+	// quality limits: the file may be run again with the media engine off.
+	RetryWithoutHardware bool `json:"retry_without_hardware,omitempty"`
+}
+
+// ladderRecipe is the ladder the record runs: the frozen recipe, or its
+// fallback when the record chose it.
+func ladderRecipe(snapshot *ModePolicySnapshot, rec *QualityLadderRecord) *ModeRecipe {
+	r := snapshot.Recipe
+	if r != nil && r.Fallback != nil && rec != nil && rec.Choice != nil && rec.VideoCodec == r.Fallback.VideoCodec && rec.VideoCodec != r.VideoCodec {
+		return r.Fallback
+	}
+	return r
 }
 
 // QualityLadderRung is one rung's encode and why it did not pass.
@@ -265,12 +296,12 @@ func snapshotHardware(p *ModePolicySnapshot) *transcode.HardwareSearchRules {
 // qualityLadderPlan is the action's current plan encoded with a rung's video,
 // with final validation on the goal's windows held to its quality limits, as a
 // search winner's would be.
-func (e *Engine) qualityLadderPlan(ec *ExecutionContext, snapshot *ModePolicySnapshot, rung int) (*transcode.Plan, error) {
+func (e *Engine) qualityLadderPlan(ec *ExecutionContext, snapshot *ModePolicySnapshot, r *ModeRecipe, rung int) (*transcode.Plan, error) {
 	base := getPlan(ec.State["plan"])
 	if base == nil || base.Mode != snapshot.Mode || base.PolicyDigest != snapshot.Digest {
 		return nil, fmt.Errorf("the frozen goal plan is missing")
 	}
-	video, err := qualityLadderVideo(snapshot.Recipe, snapshotHardware(snapshot), max(sourceVideoBitDepth(getSourceReport(ec.State["source_report"])), base.ExpectedBitDepth), rung)
+	video, err := qualityLadderVideo(r, snapshotHardware(snapshot), max(sourceVideoBitDepth(getSourceReport(ec.State["source_report"])), base.ExpectedBitDepth), rung)
 	if err != nil {
 		return nil, err
 	}
@@ -328,6 +359,18 @@ func (e *Engine) startQualityLadder(ctx context.Context, ec *ExecutionContext, c
 	if err != nil {
 		return workerCapabilityLookupResult(err, "goal encoder"), true
 	}
+	var choice *SizeBudgetChoice
+	if !caps.Encoders[r.VideoCodec] && r.Fallback != nil && caps.Encoders[r.Fallback.VideoCodec] {
+		// As a VideoToolbox size budget does, a worker without VideoToolbox
+		// runs the recipe's x265 ladder instead.
+		f := r.Fallback
+		later := make([]string, len(f.QualityValues))
+		for i, q := range f.QualityValues {
+			later[i] = fmt.Sprint(q)
+		}
+		choice = &SizeBudgetChoice{VideoCodec: f.VideoCodec, Reason: SizeBudgetChoiceWorkerUnsupported, Message: fmt.Sprintf("The worker cannot encode with %s, so this goal's %s ladder (CRF %s) runs instead.", recipeEncoderName(r.VideoCodec), recipeEncoderName(f.VideoCodec), joinWords(later))}
+		r = f
+	}
 	if !caps.Encoders[r.VideoCodec] {
 		return modeAttention(ec, "recipe_encoder_unavailable", fmt.Sprintf("This goal encodes with %s, which the worker cannot run; original preserved", recipeEncoderName(r.VideoCodec))), true
 	}
@@ -347,12 +390,15 @@ func (e *Engine) startQualityLadder(ctx context.Context, ec *ExecutionContext, c
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("computing final validation request digest: %v", err)}, true
 	}
 	ec.State["benchmark_request"], ec.State["benchmark_request_digest"] = req, digest
-	plan, err := e.qualityLadderPlan(ec, snapshot, 0)
+	plan, err := e.qualityLadderPlan(ec, snapshot, r, 0)
 	if err != nil {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("building the first encode of the goal: %v", err)}, true
 	}
-	rec := &QualityLadderRecord{VideoCodec: r.VideoCodec, Preset: r.Preset, Values: slices.Clone(r.QualityValues), Outcome: QualityLadderEncoding}
+	rec := &QualityLadderRecord{VideoCodec: r.VideoCodec, Preset: r.Preset, Values: slices.Clone(r.QualityValues), Outcome: QualityLadderEncoding, Choice: choice}
 	rec.Message = qualityLadderStartMessage(rec)
+	if choice != nil {
+		rec.Message = choice.Message + " " + rec.Message
+	}
 	ec.State[qualityLadderKey] = rec
 	ec.State["benchmark_done"], ec.State["has_winner"] = true, false
 	ec.State["plan"], ec.State["plan_source"], ec.State["plan_digest"] = plan, qualityLadderPlanSource, plan.PlanDigest
@@ -415,7 +461,11 @@ func (e *Engine) advanceQualityLadder(ctx context.Context, ec *ExecutionContext,
 		return StepResult{}, false
 	}
 	snapshot, err := freezeModePolicy(ec)
-	if err != nil || snapshot == nil || snapshot.Recipe == nil || snapshot.Recipe.Kind != RecipeQualityLadder || rec.Rung >= len(snapshot.Recipe.QualityValues) {
+	if err != nil || snapshot == nil || snapshot.Recipe == nil || snapshot.Recipe.Kind != RecipeQualityLadder {
+		return StepResult{Status: StepFailed, Error: "frozen goal recipe is missing or does not match the encode (fail closed)"}, true
+	}
+	r := ladderRecipe(snapshot, rec)
+	if rec.VideoCodec != r.VideoCodec || !slices.Equal(rec.Values, r.QualityValues) || rec.Rung >= len(r.QualityValues) {
 		return StepResult{Status: StepFailed, Error: "frozen goal recipe is missing or does not match the encode (fail closed)"}, true
 	}
 	reason := st.ReasonCode
@@ -449,7 +499,7 @@ func (e *Engine) advanceQualityLadder(ctx context.Context, ec *ExecutionContext,
 		return e.endQualityLadder(ctx, ec, snapshot, st, rec, reasonQualityNotMet, msg), true
 	}
 	rec.Rung++
-	next, err := e.qualityLadderPlan(ec, snapshot, rec.Rung)
+	next, err := e.qualityLadderPlan(ec, snapshot, r, rec.Rung)
 	if err != nil {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("building the next encode of the goal: %v", err)}, true
 	}
@@ -481,6 +531,12 @@ func (e *Engine) rewindQualityLadder(ec *ExecutionContext, rec *QualityLadderRec
 // copied, as it did after a search without a winner.
 func (e *Engine) endQualityLadder(ctx context.Context, ec *ExecutionContext, snapshot *ModePolicySnapshot, st transcode.JobStatus, rec *QualityLadderRecord, reason, message string) StepResult {
 	rec.Outcome, rec.Message = reason, message
+	// Every VideoToolbox rung missed: x265 at the same goal usually keeps
+	// more quality, so the file may be tried again with the media engine off.
+	rec.RetryWithoutHardware = reason == reasonQualityNotMet && rec.VideoCodec == transcode.VideoCodecHEVCVideoToolbox
+	// The ladder has ended however the rest goes: the record says so before
+	// anything else can stop this step.
+	ec.State[qualityLadderKey] = rec
 	if snapshot.Mode == "size" && snapshot.Size != nil && snapshot.Size.AudioOnlyFallback && !getBool(ec.State, "size_audio_only") {
 		scratch := map[string]any{}
 		state := map[string]any{"skip_transcode": ec.State["skip_transcode"], "reason_code": ec.State["reason_code"]}
@@ -494,6 +550,10 @@ func (e *Engine) endQualityLadder(ctx context.Context, ec *ExecutionContext, sna
 				return out
 			}
 			if res.Status != StepCompleted {
+				if res.Outputs == nil {
+					res.Outputs = map[string]any{}
+				}
+				res.Outputs[qualityLadderKey] = rec
 				return res
 			}
 		}
@@ -518,7 +578,7 @@ func (e *Engine) endQualityLadder(ctx context.Context, ec *ExecutionContext, sna
 // names, rebuilt from the frozen recipe and the source, with no byte ceiling
 // and final validation pinned to the stored request.
 func qualityLadderPlanMatches(snapshot *ModePolicySnapshot, state map[string]any, plan *transcode.Plan, rec *QualityLadderRecord) bool {
-	r := snapshot.Recipe
+	r := ladderRecipe(snapshot, rec)
 	if r == nil || r.Kind != RecipeQualityLadder || rec == nil || plan == nil || rec.VideoCodec != r.VideoCodec || rec.Preset != r.Preset || !slices.Equal(rec.Values, r.QualityValues) {
 		return false
 	}
