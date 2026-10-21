@@ -175,6 +175,9 @@ func (k *kase) fill(src string, r *result) {
 	if r.goal != nil {
 		k.row.Encoder = r.goal.Encoder
 	}
+	if r.ladder != nil {
+		k.row.LadderStep = r.ladder.Rung + 1
+	}
 	if r.budget != nil {
 		k.row.Rung = r.budget.Rung
 		if r.budget.Choice != nil && k.row.Encoder == "" {

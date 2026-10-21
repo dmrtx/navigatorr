@@ -83,13 +83,45 @@ func caseSizeHardware(k *kase) {
 }
 
 // expectLadder asserts a hardware size goal was met on the VideoToolbox ladder:
-// a planned budget with a rung, not the search or x265 fallback that a budget
-// which could not be planned falls back to.
+// a planned budget with a rung, not the x265 encode a worker without the media
+// engine falls back to.
 func (k *kase) expectLadder(r *result) {
 	k.T.Helper()
 	k.require(r.skipReason() == "", "the size budget was not used: %s (%s)", r.skipReason(), pickStr(r.res, "size_budget_skip_message"))
 	k.require(r.budget != nil, "the result has no size budget record: %s", r.describe())
 	k.require(r.goal.Hardware && r.budget.Rung > 0, "the budget did not use a VideoToolbox rung (encoder %q, rung %d)", r.goal.Encoder, r.budget.Rung)
+	k.expectNoSampleTest(r)
+}
+
+// expectNoSampleTest asserts the goal ran its frozen recipe: no sample test
+// was submitted to plan it.
+func (k *kase) expectNoSampleTest(r *result) {
+	k.T.Helper()
+	k.require(pickStr(r.res, "benchmark_job_id") == "", "a sample test ran: %s", r.describe())
+}
+
+// expectBudgetX265 asserts a size goal with the media engine off was met by
+// its one two-pass x265 encode at the budget.
+func (k *kase) expectBudgetX265(r *result) {
+	k.T.Helper()
+	k.require(r.skipReason() == "", "the size budget was not used: %s (%s)", r.skipReason(), pickStr(r.res, "size_budget_skip_message"))
+	k.require(r.budget != nil, "the result has no size budget record: %s", r.describe())
+	k.require(r.budget.Trigger == "budget_first", "the budget was planned by %q, want budget_first", r.budget.Trigger)
+	k.require(r.budget.Choice != nil && r.budget.Choice.VideoCodec == "libx265" && r.budget.Choice.Reason == action.SizeBudgetChoiceHardwareOff,
+		"the budget encoder choice is %+v, want libx265 because the media engine is off", r.budget.Choice)
+	k.require(r.budget.Rung == 0, "an x265 budget used VideoToolbox rung %d", r.budget.Rung)
+	k.expectNoSampleTest(r)
+}
+
+// expectQualityLadder asserts a quality goal was met on its x265 CRF ladder:
+// a rung passed the goal's limits on the whole file.
+func (k *kase) expectQualityLadder(r *result) {
+	k.T.Helper()
+	k.require(r.ladder != nil, "the result has no quality ladder record: %s", r.describe())
+	k.require(r.ladder.Outcome == action.QualityLadderPassed, "the quality ladder ended %q: %s", r.ladder.Outcome, r.ladder.Message)
+	k.require(r.ladder.VideoCodec == "libx265" && r.goal.Encoder == "libx265", "the quality ladder encoded with %q/%q, want libx265", r.ladder.VideoCodec, r.goal.Encoder)
+	k.require(pickStr(r.res, "plan_source") == "quality_ladder", "the encode plan came from %q, want the quality ladder", pickStr(r.res, "plan_source"))
+	k.expectNoSampleTest(r)
 }
 
 func caseSizeX265(k *kase) {
@@ -101,6 +133,7 @@ func caseSizeX265(k *kase) {
 	r := k.s.transcode(k.T, src, map[string]any{"mode": "size", "allow_hardware": false, "size_budget_percent": budgetPercent}, caseTimeout)
 	k.expectCandidate(src, sha, r, candidateWant{minSaved: 15, audio: "aac", maxBytes: budgetBytes(fileSize(k.T, src))})
 	k.require(!r.goal.Hardware && r.goal.Encoder == "libx265", "allow_hardware=false encoded with %q, want libx265", r.goal.Encoder)
+	k.expectBudgetX265(r)
 }
 
 func caseCompact(k *kase) {
@@ -111,6 +144,7 @@ func caseCompact(k *kase) {
 	k.promisedOK(src, "compact")
 	r := k.s.transcode(k.T, src, map[string]any{"mode": "compact"}, caseTimeout)
 	k.expectCandidate(src, sha, r, candidateWant{minSaved: 30, audio: "aac", sdr: true, maxHeight: 1080})
+	k.expectQualityLadder(r)
 }
 
 func caseQuality(k *kase) {
@@ -121,6 +155,7 @@ func caseQuality(k *kase) {
 	k.promisedOK(src, "quality")
 	r := k.s.transcode(k.T, src, map[string]any{"mode": "quality"}, caseTimeout)
 	k.expectCandidate(src, sha, r, candidateWant{})
+	k.expectQualityLadder(r)
 }
 
 func caseX265Preserve(k *kase) {
@@ -131,6 +166,7 @@ func caseX265Preserve(k *kase) {
 	k.promisedOK(src, "x265_preserve")
 	r := k.s.transcode(k.T, src, map[string]any{"mode": "x265_preserve"}, caseTimeout)
 	k.expectCandidate(src, sha, r, candidateWant{})
+	k.expectQualityLadder(r)
 }
 
 // expectSkip runs a goal that must end without a candidate and checks the

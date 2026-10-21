@@ -20,6 +20,7 @@ type result struct {
 	goal     *action.TranscodeExplanation
 	evidence *transcode.FinalQualityEvidence
 	budget   *action.SizeBudgetRecord
+	ladder   *action.QualityLadderRecord
 	wall     time.Duration
 }
 
@@ -116,6 +117,7 @@ func (s *suite) transcode(t *testing.T, path string, inputs map[string]any, time
 	if decode(pick(res, "size_budget"), &b) && b.BudgetBytes > 0 {
 		out.budget = &b
 	}
+	out.ladder = action.QualityLadderOf(res.State)
 	return out
 }
 
@@ -151,6 +153,9 @@ func (r *result) describe() string {
 	}
 	if r.budget != nil {
 		msg += fmt.Sprintf(" size_budget.message=%q", r.budget.Message)
+	}
+	if r.ladder != nil {
+		msg += fmt.Sprintf(" quality_ladder.message=%q", r.ladder.Message)
 	}
 	return msg
 }

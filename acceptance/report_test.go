@@ -25,6 +25,7 @@ type caseReport struct {
 	VMAFWorst    float64 `json:"vmaf_worst_window,omitempty"`
 	Encoder      string  `json:"encoder,omitempty"`
 	Rung         int     `json:"vt_rung,omitempty"`
+	LadderStep   int     `json:"ladder_step,omitempty"`
 	WallSeconds  float64 `json:"wall_seconds"`
 	Passed       bool    `json:"passed"`
 	Skipped      bool    `json:"skipped,omitempty"`
@@ -78,6 +79,9 @@ func (r *reporter) finish(t *testing.T) {
 			enc = row.Encoder
 			if row.Rung > 0 {
 				enc += fmt.Sprintf(" rung %d", row.Rung)
+			}
+			if row.LadderStep > 0 {
+				enc += fmt.Sprintf(" step %d", row.LadderStep)
 			}
 		}
 		src := "-"
