@@ -147,7 +147,7 @@ promoted before the x265 result is validated.
 
 It is on by default for the new policy only, and always visible and switchable:
 the Library and batch setup show an *Allow the media engine (faster)* checkbox
-under Smaller files (with the margin), *Change goal* shows the same two
+under Save space (with the margin), *Change goal* shows the same two
 controls, and the MCP inputs `allow_hardware=false` or a different
 `hardware_margin_percent` change it per job or batch. A snapshot frozen before
 this option existed is never re-derived, so existing batches and their digests

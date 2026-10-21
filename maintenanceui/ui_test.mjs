@@ -71,9 +71,13 @@ class Element {
   }
   focus() {}
 }
-function harness() {
+function harness({ radios: withRadios = false } = {}) {
   const elements = new Map();
   let interval;
+  // Real goal radios, so the change listener that marks a choice as explicit runs.
+  const radios = withRadios
+    ? ["size", "compact", "quality", "x265_preserve"].map((value) => Object.assign(new Element(), { value, checked: value === "size" }))
+    : [];
   const document = {
     hidden: false,
     activeElement: null,
@@ -82,12 +86,14 @@ function harness() {
       return elements.get(id);
     },
     createElement: () => new Element(),
-    querySelectorAll: () => [],
+    querySelectorAll: (selector) => (selector.includes("processing-mode") ? radios : []),
+    querySelector: (selector) => (selector.includes("processing-mode") ? radios.find((r) => r.checked) || null : null),
   };
   const context = vm.createContext({
     document,
     console,
     URLSearchParams,
+    AbortController,
     confirm: () => true,
     setTimeout: () => 0,
     clearTimeout() {},
@@ -102,6 +108,7 @@ function harness() {
     elements,
     document,
     interval,
+    radios,
     run: (code) => vm.runInContext(code, context),
   };
 }
@@ -2433,9 +2440,9 @@ test("an HDR file skipped by a size goal can change to the compact goal", async 
   const rows=h.elements.get("batch-items-list").children;
   const all = row=>[row,...row.children.flatMap(all)];
   const text = row=>all(row).map(el=>el.textContent).filter(Boolean).join(" ");
-  assert.match(text(rows[0]),/only the Much smaller goal converts it/);
+  assert.match(text(rows[0]),/only the Shrink to 1080p SDR goal converts it/);
   assert.match(text(rows[0]),/Change goal/);
-  assert.match(text(rows[1]),/Much smaller · SDR 720p/);
+  assert.match(text(rows[1]),/Goal: Shrink to 720p SDR/);
 });
 
 test("compact replacement reviews warn about re-grabs and show read-only tracking", async () => {
@@ -3455,17 +3462,17 @@ test("clean podcast opens, lists podcasts and closes after starting", async () =
 });
 
 test("size goal discloses that lossless Atmos and DTS:X become AAC", () => {
-  const radio = markup.match(/<label><input type="radio" name="processing-mode" value="size" \/>[\s\S]*?<\/label>/)?.[0] || "";
-  assert.match(radio, /Same look, at least 15% smaller\. Lossless audio becomes AAC\./);
+  const radio = markup.match(/<label><input type="radio" name="processing-mode" value="size" checked \/>[\s\S]*?<\/label>/)?.[0] || "";
+  assert.match(radio, /Same look, at least 15% smaller; lossless audio becomes AAC\./);
   assert.match(source, /lossless Atmos\/DTS:X lose object and height channels; lossy tracks \(E-AC-3 Atmos included\) copied/);
 });
 
 test("compact goal says in plain language what it drops and still needs approval", () => {
   const radio = markup.match(/<label><input type="radio" name="processing-mode" value="compact" \/>[\s\S]*?<\/label>/)?.[0] || "";
-  assert.match(radio, /Make it much smaller · SDR 1080p/);
-  assert.match(radio, /4K\/HDR → 1080p SDR, at least 30% smaller\. HDR is removed\./);
-  assert.match(markup, /<option value="compact">Make it much smaller · SDR 1080p/);
-  assert.match(source, /compact:`Much smaller · SDR \$\{item\.max_height \|\| 1080\}p`/);
+  assert.match(radio, /<strong>Shrink to 1080p SDR<\/strong>/);
+  assert.match(radio, /Use it for 4K or HDR you don't need in 4K\. At least 30% smaller; HDR is removed\./);
+  assert.match(markup, /<option value="compact">Shrink to 1080p SDR · At least 30% smaller, HDR removed/);
+  assert.match(source, /`Shrink to \$\{item\.max_height \|\| 1080\}p SDR`/);
 });
 
 test("a source hash queued behind others reads as waiting, not stuck at zero bytes", () => {
@@ -4039,7 +4046,7 @@ test("a cancelled or no-winner standalone file offers Run again with a confirmat
   assert.notEqual(calls[0].body.key, calls[1].body.key);
   const text = (r) => r.content.map(n => n.textContent).join(" ");
   assert.match(text(reviews[0]), /S01E01\.mkv/);
-  assert.match(text(reviews[0]), /Smaller files/);
+  assert.match(text(reviews[0]), /Goal: Save space/);
   assert.match(text(reviews[0]), /Originals stay in place/);
   assert.doesNotMatch(text(reviews[0]), /already had/);
 
@@ -4457,4 +4464,242 @@ test("a skipped file's reason appears once in its job details", async () => {
     assert.equal(rendered.split(text).length - 1, 1, `${reason} repeated in ${rendered}`);
     assert.match(rendered, /63\.00 GB source/);
   }
+});
+
+// Goal step: the server reads the first chosen file and recommends a goal.
+function goalProfileFixture(overrides = {}) {
+  const skip = { status: "skip", reason_code: "hdr_requires_compact" };
+  return {
+    profile: { resolution: "4K", dynamic_range: "HDR10", video_codec: "HEVC", bit_depth: 10, size_bytes: 63e9 },
+    goals: { size: skip, compact: { status: "ok" }, quality: skip, x265_preserve: skip },
+    recommended: "compact",
+    ...overrides,
+  };
+}
+function goalHarness() {
+  const h = harness({ radios: true });
+  h.run('$("scope").value = "file"; $("service").value = "folder:/media"; $("path").value = "/media/movie.mkv";');
+  const click = (value) => {
+    h.radios.forEach((r) => (r.checked = r.value === value));
+    h.radios.find((r) => r.value === value).listeners.get("change")();
+  };
+  const note = (mode) => h.elements.get(`goal-note-${mode}`);
+  return { h, click, note, line: () => h.elements.get("source-profile"), mode: () => h.run("processingMode()"), more: () => h.run('$("more-goals")') };
+}
+
+test("the goal step preselects the recommended goal, labels it, and names why the others skip", async () => {
+  const { h, note, line, mode, more } = goalHarness();
+  h.context.profile = goalProfileFixture();
+  h.run("var calls = []; api = async (path) => { calls.push(path); return profile; };");
+  h.run("controls()");
+  // While the file is read, the form's own default stays out of sight.
+  assert.equal(h.run("state.goalProfile.status"), "loading");
+  assert.equal(more().open, false);
+  assert.equal(line().hidden, true);
+  await h.run('loadGoalProfile("/media/movie.mkv")');
+  assert.equal(h.run("calls.join()"), "source-profile?path=%2Fmedia%2Fmovie.mkv");
+  assert.equal(mode(), "compact");
+  assert.equal(line().hidden, false);
+  assert.equal(line().textContent, "4K · HDR10 · HEVC · 10-bit · 63.00 GB");
+  assert.equal(note("compact").textContent, "Recommended for this file");
+  assert.equal(note("compact").hidden, false);
+  assert.equal(note("size").textContent, "Skips this file: HDR source");
+  assert.equal(note("quality").textContent, "Skips this file: HDR source");
+  assert.equal(note("x265_preserve").hidden, false);
+  assert.equal(h.radios.find((r) => r.checked).value, "compact");
+});
+
+test("the recommendation keeps More goals closed when it is outside it", async () => {
+  const { h, mode, more, note } = goalHarness();
+  h.context.profile = goalProfileFixture({
+    profile: { resolution: "1080p", dynamic_range: "SDR", video_codec: "H.264", bit_depth: 8, size_bytes: 4e9 },
+    goals: { size: { status: "ok" }, compact: { status: "skip", reason_code: "compact_not_needed" }, quality: { status: "ok" }, x265_preserve: { status: "ok" } },
+    recommended: "size",
+  });
+  h.run("api = async () => profile; controls()");
+  await h.run('loadGoalProfile("/media/movie.mkv")');
+  assert.equal(mode(), "size");
+  assert.equal(more().open, false);
+  assert.equal(note("size").textContent, "Recommended for this file");
+  assert.equal(note("compact").textContent, "Skips this file: already SDR at 1080p or smaller");
+  assert.equal(note("quality").hidden, true);
+});
+
+test("More goals opens for a selected goal inside it", async () => {
+  const { h, click, more } = goalHarness();
+  h.run("api = async () => profile; controls()");
+  h.context.profile = goalProfileFixture();
+  await h.run('loadGoalProfile("/media/movie.mkv")');
+  assert.equal(more().open, false);
+  click("x265_preserve");
+  assert.equal(more().open, true);
+});
+
+test("a goal the user chose before the profile arrives is never overridden", async () => {
+  const { h, click, mode, more, note } = goalHarness();
+  const pending = deferred();
+  h.context.pending = pending.promise;
+  h.run("api = async () => pending; controls()");
+  const load = h.run('loadGoalProfile("/media/movie.mkv")');
+  click("x265_preserve");
+  assert.equal(more().open, true, "an explicit pick inside More goals opens it");
+  pending.resolve(goalProfileFixture());
+  await load;
+  assert.equal(mode(), "x265_preserve");
+  assert.equal(note("compact").textContent, "Recommended for this file", "the advice is still shown");
+  assert.equal(h.radios.find((r) => r.checked).value, "x265_preserve");
+});
+
+test("a response for a file the user has since left is ignored", async () => {
+  const { h, mode, line } = goalHarness();
+  const first = deferred(), second = deferred();
+  h.context.waits = { "/media/a.mkv": first.promise, "/media/b.mkv": second.promise };
+  h.run('api = async (path) => waits[decodeURIComponent(path.split("=")[1])]; $("path").value = "/media/a.mkv"; controls();');
+  const late = h.run('loadGoalProfile("/media/a.mkv")');
+  h.run('$("path").value = "/media/b.mkv"; controls();');
+  const current = h.run('loadGoalProfile("/media/b.mkv")');
+  first.resolve(goalProfileFixture({ profile: { resolution: "720p", dynamic_range: "SDR", video_codec: "H.264", bit_depth: 8, size_bytes: 1e9 }, recommended: "x265_preserve" }));
+  await late;
+  assert.equal(h.run("state.goalProfile.key"), "/media/b.mkv");
+  assert.equal(h.run("state.goalProfile.status"), "loading");
+  assert.equal(line().hidden, true);
+  assert.equal(mode(), "size");
+  second.resolve(goalProfileFixture());
+  await current;
+  assert.equal(mode(), "compact");
+  assert.match(line().textContent, /^4K · HDR10/);
+});
+
+test("changing the file starts a new visit, so the new recommendation applies again", async () => {
+  const { h, click, mode } = goalHarness();
+  h.context.profile = goalProfileFixture();
+  h.run("api = async () => profile; controls()");
+  await h.run('loadGoalProfile("/media/movie.mkv")');
+  click("quality");
+  assert.equal(h.run("state.goalExplicit"), true);
+  h.run('$("path").value = "/media/other.mkv"; controls()');
+  assert.equal(h.run("state.goalExplicit"), false);
+  await h.run('loadGoalProfile("/media/other.mkv")');
+  assert.equal(mode(), "compact");
+});
+
+test("a failed read leaves the goals usable with only a muted note", async () => {
+  const { h, mode, line, more, note } = goalHarness();
+  h.run('api = async () => { throw new Error("could not read this file"); }; controls();');
+  await h.run('loadGoalProfile("/media/movie.mkv")');
+  assert.equal(line().hidden, false);
+  assert.equal(line().textContent, "Could not read this file");
+  assert.equal(h.run("state.goalProfile.status"), "error");
+  assert.equal(mode(), "size");
+  assert.equal(more().open, false, "the default goal is already in view");
+  for (const goal of ["size", "compact", "quality", "x265_preserve"]) assert.equal(note(goal).hidden, true);
+  assert.equal(h.run("goalSkipWarning()"), "");
+  // A malformed answer is treated the same way.
+  h.run('api = async () => ({}); $("path").value = "/media/next.mkv"; controls();');
+  await h.run('loadGoalProfile("/media/next.mkv")');
+  assert.equal(h.run("state.goalProfile.status"), "error");
+});
+
+test("unticking the first file of a batch keeps the goal the user chose", async () => {
+  const { h, click, mode } = goalHarness();
+  h.context.profile = goalProfileFixture({ goals: { size: { status: "ok" }, compact: { status: "ok" }, quality: { status: "ok" }, x265_preserve: { status: "ok" } }, recommended: "size" });
+  h.run('$("scope").value = "batch"; state.folderSelected = new Set(["/media/Show/a.mkv", "/media/Show/b.mkv", "/media/Show/c.mkv"]); api = async () => profile; controls();');
+  await h.run('loadGoalProfile("/media/Show/a.mkv")');
+  click("quality");
+  h.run('state.folderSelected.delete("/media/Show/a.mkv"); controls();');
+  assert.equal(h.run("state.goalProfile.key"), "/media/Show/b.mkv");
+  assert.equal(h.run("state.goalExplicit"), true);
+  await h.run('loadGoalProfile("/media/Show/b.mkv")');
+  assert.equal(mode(), "quality");
+  // Down to one file it is still the same visit.
+  h.run('state.folderSelected.delete("/media/Show/b.mkv"); controls();');
+  assert.equal(h.run("state.goalExplicit"), true);
+  await h.run('loadGoalProfile("/media/Show/c.mkv")');
+  assert.equal(mode(), "quality");
+});
+
+test("leaving a file cancels its read, and a busy server is asked once more", async () => {
+  const { h, mode, line } = goalHarness();
+  const signals = [];
+  h.context.signals = signals;
+  h.context.setTimeout = (fn) => { fn(); return 0; };
+  h.context.answers = [Object.assign(new Error("busy reading another file; try again"), { status: 429 }), goalProfileFixture()];
+  h.run('api = async (path, body, opts) => { signals.push(opts.signal); const a = answers.shift(); if (a instanceof Error) throw a; return a; }; $("path").value = "/media/a.mkv"; controls();');
+  await h.run('loadGoalProfile("/media/a.mkv")');
+  assert.equal(signals.length, 2, "one retry after 429");
+  assert.equal(mode(), "compact");
+  assert.match(line().textContent, /^4K · HDR10/);
+  // A read still running when the user moves on is aborted.
+  const pending = deferred();
+  h.context.pending = pending.promise;
+  h.run('api = async (path, body, opts) => { signals.push(opts.signal); return pending; }; $("path").value = "/media/b.mkv"; controls();');
+  const load = h.run('loadGoalProfile("/media/b.mkv")');
+  const signal = signals.at(-1);
+  h.run('$("path").value = "/media/c.mkv"; controls();');
+  assert.equal(signal.aborted, true);
+  pending.resolve(goalProfileFixture());
+  await load;
+  assert.equal(h.run("state.goalProfile.key"), "/media/c.mkv");
+});
+
+test("a cancelled request does not mark the server unreachable", async () => {
+  const h = harness();
+  h.run('var offline = 0; setConnection = (up) => { if (!up) offline++; };');
+  h.context.fetch = (url, opts) => Promise.reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+  const controller = new AbortController();
+  controller.abort();
+  h.context.signal = controller.signal;
+  await assert.rejects(h.run('api("source-profile?path=x", undefined, {signal})'));
+  assert.equal(h.run("offline"), 0);
+});
+
+test("a folder or batch reads the first video and says so", async () => {
+  const { h, line, note } = goalHarness();
+  h.context.profile = goalProfileFixture();
+  h.run('$("scope").value = "batch"; $("service").value = "folder:/media"; state.folderSelected = new Set(["/media/Show/first.mkv", "/media/Show/second.mkv"]); api = async () => profile; controls();');
+  assert.equal(h.run("state.goalProfile.key"), "/media/Show/first.mkv");
+  await h.run('loadGoalProfile("/media/Show/first.mkv")');
+  assert.equal(line().textContent, "4K · HDR10 · HEVC · 10-bit · 63.00 GB · based on the first file");
+  assert.equal(note("size").textContent, "Skips the first file: HDR source");
+});
+
+test("submitting a goal the server says will skip asks first, and says so plainly", async () => {
+  const { h, click } = goalHarness();
+  h.context.profile = goalProfileFixture();
+  h.run("api = async () => profile; controls()");
+  await h.run('loadGoalProfile("/media/movie.mkv")');
+  click("size");
+  const reviews = [];
+  h.context.reviews = reviews;
+  h.context.answer = false;
+  h.run("reviewAction = async (review) => { reviews.push(review); return answer; }; buildAndSubmitJob = async () => { reviews.push('submitted'); };");
+  await h.run("submitJob()");
+  assert.equal(reviews.length, 1);
+  assert.equal(reviews[0].content[0].textContent, "Save space will skip this file: HDR source. The original is kept and nothing is converted.");
+  assert.equal(reviews[0].confirmLabel, "Process anyway");
+  h.context.answer = true;
+  await h.run("submitJob()");
+  assert.equal(reviews.at(-1), "submitted");
+  // The advised goal submits without a question.
+  click("compact");
+  reviews.length = 0;
+  await h.run("submitJob()");
+  assert.deepEqual(reviews, ["submitted"]);
+});
+
+test("goal names are the same in the form, the reconfigure dialog and job rows", () => {
+  const form = markup.slice(markup.indexOf('<fieldset id="processing-goal"'), markup.indexOf("</fieldset>", markup.indexOf('<fieldset id="processing-goal"')));
+  const visible = form.slice(0, form.indexOf('<details id="more-goals"'));
+  const more = form.slice(form.indexOf('<details id="more-goals"'));
+  assert.match(visible, /value="size" checked[\s\S]*<strong>Save space<\/strong>[\s\S]*value="compact"[\s\S]*<strong>Shrink to 1080p SDR<\/strong>/);
+  assert.doesNotMatch(visible, /value="quality"|value="x265_preserve"/);
+  assert.match(more, /<summary>More goals<\/summary>/);
+  assert.doesNotMatch(more, /checked/);
+  assert.match(more, /value="quality"[\s\S]*<strong>Strict quality<\/strong>[\s\S]*Use it when picture quality matters more than space; may save little\./);
+  assert.match(more, /value="x265_preserve"[\s\S]*<strong>Convert to HEVC<\/strong>[\s\S]*Use it to make a library HEVC-only; HEVC files are left alone\./);
+  const select = markup.match(/<select id="reconfigure-mode">[\s\S]*?<\/select>/)[0];
+  for (const name of ["Save space", "Shrink to 1080p SDR", "Strict quality", "Convert to HEVC"]) assert.ok(select.includes(name), name);
+  assert.doesNotMatch(markup + source, /Prioritize quality|Make it much smaller|Reduce size|Convert to x265/);
+  const h = harness();
+  assert.equal(h.run("JSON.stringify(rerunGoals)"), JSON.stringify({ size: "Save space", compact: "Shrink to 1080p SDR", quality: "Strict quality", x265_preserve: "Convert to HEVC" }));
 });

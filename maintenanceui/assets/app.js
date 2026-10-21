@@ -1,4 +1,6 @@
 const $ = (id) => document.getElementById(id);
+const goalNames = {size: "Save space", compact: "Shrink to 1080p SDR", quality: "Strict quality", x265_preserve: "Convert to HEVC"};
+const moreGoals = ["quality", "x265_preserve"];
 const state = {
   tab: "library",
   media: null,
@@ -279,7 +281,7 @@ function authenticationMessage() {
     ? "Cloudflare Access sign-in required. Reload to sign in."
     : "sign in to Navigatorr";
 }
-async function api(path, body) {
+async function api(path, body, { signal } = {}) {
   if (body !== undefined && !serverReachable)
     throw new Error(
       "Offline. Changes are unavailable until the server responds.",
@@ -294,8 +296,11 @@ async function api(path, body) {
         "X-Navigatorr-Request": "1",
       },
       body: body === undefined ? undefined : JSON.stringify(body),
+      signal,
     });
-  } catch {
+  } catch (err) {
+    // A request the console cancelled says nothing about the server.
+    if (signal?.aborted) throw err;
     setConnection(false);
     throw new Error("Cannot connect to Navigatorr. Retrying automatically.");
   }
@@ -337,7 +342,7 @@ async function api(path, body) {
     throw new Error(denial?.error || authenticationMessage());
   }
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  if (!res.ok) throw Object.assign(new Error(data.error || `HTTP ${res.status}`), { status: res.status });
   return data;
 }
 async function tool(name, args = {}, onAccepted) {
@@ -658,12 +663,12 @@ function navigationRoute(search = "") {
     status:routeStatuses.includes(q.get("status")) ? q.get("status") : "all",
     job:(q.get("job") || "").slice(0,200), profile:(q.get("profile") || "").slice(0,128),
     copies:q.get("copies") === "1", configure:q.get("configure") === "1",
-    mode:["size","quality","x265_preserve","compact"].includes(q.get("mode")) ? q.get("mode") : "quality", technical:q.get("technical") === "1",
+    mode:["size","quality","x265_preserve","compact"].includes(q.get("mode")) ? q.get("mode") : "size", modeExplicit:q.has("mode"), technical:q.get("technical") === "1",
   };
 }
 function navigationQuery() {
   const q = new URLSearchParams({view:Object.entries(routeTabs).find(([,tab])=>tab===state.tab)?.[0] || "files"});
-  if (processingMode() !== "quality") q.set("mode", processingMode());
+  if (processingMode() !== "size") q.set("mode", processingMode());
   if ($("technical").checked) q.set("technical", "1");
   if ($("service").value) q.set("source",$("service").value);
   if ($("service").value.startsWith("folder:") && state.folder) q.set("folder",state.folder);
@@ -706,7 +711,8 @@ async function applyNavigation(route) {
     }
     if (route.tab === "recipes" && !route.profile) resetRecipeView();
     $("technical").checked = Boolean(route.technical);
-    setProcessingMode(route.mode || "quality");
+    setProcessingMode(route.mode || "size");
+    if (route.modeExplicit) state.goalExplicit = true;
     const sources = [...state.info.roots.map(r=>`folder:${r}`), ...state.info.services.map(s=>s.name)];
     $("service").value = sources.includes(route.source) ? route.source : sources[0] || "";
     resetLibrary();
@@ -752,7 +758,7 @@ async function applyNavigation(route) {
       }
     } else if (tab === "library") $("library-items").replaceChildren(node("p", "No media folders configured.", "empty"));
     if (!current()) return;
-    setProcessingMode(route.mode || "quality");
+    setProcessingMode(route.mode || "size");
     $("technical").checked = Boolean(route.technical);
     controls();
     if (tab === "recipes" && route.profile && !(recipeIsDirty() && route.profile === state.recipe?.name)) await readRecipe(route.profile);
@@ -1146,7 +1152,7 @@ function saveLibraryDraft() {
   if (!state.draftKey || typeof sessionStorage === "undefined" || $("workspace").hidden) return;
   const fields = {};
   for (const id of draftFields) if ($(id)) fields[id] = {value:id === "season" ? state.draftSeason ?? $(id).value : $(id).value,checked:$(id).checked};
-  const draft = {fields,mode:processingMode(),folderSelected:[...(state.folderSelected || [])],selected:[...state.selected],files:[...state.files].filter(([id])=>state.selected.has(id))};
+  const draft = {fields,mode:processingMode(),goalExplicit:Boolean(state.goalExplicit),folderSelected:[...(state.folderSelected || [])],selected:[...state.selected],files:[...state.files].filter(([id])=>state.selected.has(id))};
   try { sessionStorage.setItem(`navigatorr_draft:${state.draftKey}`,JSON.stringify(draft)); } catch {}
 }
 function restoreLibraryDraft() {
@@ -1157,7 +1163,8 @@ function restoreLibraryDraft() {
   let draft;
   try { draft = JSON.parse(sessionStorage.getItem(`navigatorr_draft:${key}`)); } catch {}
   if (!draft) return;
-  setProcessingMode(draft.mode || "quality");
+  setProcessingMode(draft.mode || "size");
+  state.goalExplicit = Boolean(draft.goalExplicit);
   const root = $("service").value.slice(7).replace(/\/$/, "");
   state.folderSelected = new Set((draft.folderSelected || []).filter(path=>typeof path === "string" && path.startsWith(root+"/")));
   state.selected = new Set(draft.selected || []);
@@ -1707,6 +1714,7 @@ function sourceSummary() {
 }
 function finishSubmission(mode) {
   if (mode === "encode") {
+    state.goalExplicit = false;
     state.selected.clear();
     state.folderSelected?.clear();
     $("library-items")
@@ -1730,12 +1738,119 @@ $("use-container").addEventListener("click", () => safe(async () => {
   configureSelection();
 }));
 function processingMode() {
-  return document.querySelector?.('input[name="processing-mode"]:checked')?.value || "quality";
+  return document.querySelector?.('input[name="processing-mode"]:checked')?.value || "size";
 }
 function setProcessingMode(mode) {
   document.querySelectorAll('input[name="processing-mode"]').forEach(input => { input.checked = input.value === mode; });
 }
-document.querySelectorAll('input[name="processing-mode"]').forEach(input => input.addEventListener("change", controls));
+// Only a click counts as the user's choice; the form never overrides it.
+document.querySelectorAll('input[name="processing-mode"]').forEach(input => input.addEventListener("change", () => { state.goalExplicit = true; controls(); }));
+
+// The goals are not peers: a goal can skip a file outright (HDR with Save
+// space, 1080p SDR with Shrink). When step 2 opens, the server reads the first
+// chosen file and says what each goal would do, using the job's own gates.
+const goalSkipReasons = {
+  hdr_requires_compact: "HDR source",
+  compact_not_needed: "already SDR at 1080p or smaller",
+  already_target_codec: "already HEVC",
+  unsupported_source: "unsupported video format",
+  hfr_quality_unavailable: "high frame rate",
+  compact_sdr_requires_bt709: "wide-gamut SDR",
+  compact_requires_square_pixels: "non-square pixels",
+  hdr_single_video_stream_required: "more than one video stream",
+  dolby_vision_profile_5_no_compatible_base_layer: "Dolby Vision profile 5",
+};
+function goalSkipText(code) {
+  return goalSkipReasons[code] || "not supported for this video";
+}
+function goalProbeTarget() {
+  if ($("scope").value !== "batch") {
+    const path = $("path").value.trim();
+    return path ? {path, batch: false} : null;
+  }
+  if ($("service").value.startsWith("folder:")) {
+    const first = [...(state.folderSelected || [])][0];
+    return first ? {path: first, batch: state.folderSelected.size > 1} : null;
+  }
+  const file = state.files.get([...state.selected][0]);
+  return file?.path ? {path: file.path, batch: state.selected.size > 1} : null;
+}
+function refreshGoalProfile() {
+  const target = goalProbeTarget(), current = state.goalProfile;
+  const key = target?.path || "";
+  if (target && current?.key === key) { current.batch = target.batch; return; }
+  if (!target && !current) return;
+  // A new file, or none, makes every older response stale, and cancelling it
+  // frees the server's read slot for the file now chosen.
+  state.goalProfileSeq = (state.goalProfileSeq || 0) + 1;
+  state.goalProfileAbort?.abort();
+  state.goalProfileAbort = null;
+  if (!target) {
+    state.goalProfile = null;
+    if (!state.applyingNavigation) state.goalExplicit = false;
+    return;
+  }
+  // Moving from one file to another is a new visit. In a batch the key is just
+  // the first selected file, so unticking it keeps the goal the user chose.
+  if (current?.key && current.key !== key && !current.batch && !target.batch) state.goalExplicit = false;
+  state.goalProfile = {key, status: "loading", batch: target.batch};
+  clearTimeout(state.goalProfileTimer);
+  state.goalProfileTimer = setTimeout(() => { if (state.goalProfile?.key === key) loadGoalProfile(key); }, 150);
+}
+async function loadGoalProfile(key) {
+  const seq = state.goalProfileSeq, controller = new AbortController();
+  state.goalProfileAbort = controller;
+  const current = () => seq === state.goalProfileSeq && state.goalProfile?.key === key;
+  const read = () => api(`source-profile?${new URLSearchParams({path: key})}`, undefined, {signal: controller.signal});
+  let data = null;
+  try {
+    data = await read();
+  } catch (err) {
+    // Both read slots can still be held by files just left; ask once more.
+    if (err?.status === 429 && current()) {
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      if (current()) try { data = await read(); } catch {}
+    }
+  }
+  if (!current()) return;
+  state.goalProfileAbort = null;
+  state.goalProfile = data?.profile && data.goals ? {...state.goalProfile, status: "ready", data} : {...state.goalProfile, status: "error"};
+  const recommended = state.goalProfile.data?.recommended;
+  // The recommendation fills in an unchosen goal; it never replaces a choice.
+  if (recommended && goalNames[recommended] && !state.goalExplicit) setProcessingMode(recommended);
+  controls();
+}
+function sourceProfileText(profile) {
+  return [profile.resolution, profile.dynamic_range, profile.video_codec, profile.bit_depth ? `${profile.bit_depth}-bit` : "", profile.size_bytes ? bytes(profile.size_bytes) : ""].filter(Boolean).join(" · ");
+}
+function renderGoalProfile() {
+  const p = state.goalProfile, ready = p?.status === "ready" ? p.data : null;
+  const line = $("source-profile");
+  line.hidden = !ready && p?.status !== "error";
+  line.textContent = ready ? `${sourceProfileText(ready.profile)}${p.batch ? " · based on the first file" : ""}` : p?.status === "error" ? "Could not read this file" : "";
+  for (const mode of Object.keys(goalNames)) {
+    const note = $(`goal-note-${mode}`), verdict = ready?.goals?.[mode];
+    const text = ready?.recommended === mode ? "Recommended for this file" : verdict?.status === "skip" ? `Skips ${p.batch ? "the first file" : "this file"}: ${goalSkipText(verdict.reason_code)}` : "";
+    note.hidden = !text;
+    note.textContent = text;
+    note.dataset.kind = ready?.recommended === mode ? "recommended" : "skip";
+  }
+}
+// More goals opens for a selected or recommended goal inside it. A goal
+// picked only by the form's own default stays hidden while the file is read.
+function syncMoreGoals() {
+  const p = state.goalProfile;
+  if ((!p || p.status === "loading") && !state.goalExplicit) return;
+  const wanted = [processingMode(), p?.status === "ready" ? p.data.recommended : ""];
+  if (wanted.some(mode => moreGoals.includes(mode))) $("more-goals").open = true;
+}
+// What the server says the chosen goal will do to the first chosen file.
+function goalSkipWarning() {
+  const p = state.goalProfile, mode = processingMode();
+  const verdict = p?.status === "ready" ? p.data.goals?.[mode] : null;
+  if (verdict?.status !== "skip") return "";
+  return `${goalNames[mode]} will skip ${p.batch ? "the first file" : "this file"}: ${goalSkipText(verdict.reason_code)}. The original is kept and nothing is converted.${p.batch ? " The other files are checked one by one." : ""}`;
+}
 $("technical").addEventListener("change", controls);
 $("allow-hardware").addEventListener("change", controls);
 $("size-budget-kind").addEventListener("change", controls);
@@ -1787,6 +1902,9 @@ function controls() {
   $("hardware-margin-label").hidden = !$("allow-hardware").checked;
   $("size-budget-option").hidden = processingMode() !== "size";
   updateSizeBudgetFields("size-budget");
+  refreshGoalProfile();
+  renderGoalProfile();
+  syncMoreGoals();
   $("goal-overridden").hidden = !technical;
   $("advanced-state").textContent = technical ? "On · goal not used" : "Off";
   $("advanced-state").dataset.on = technical ? "true" : "false";
@@ -1981,6 +2099,10 @@ async function submitJob(mode = "encode") {
   state.submitting = true;
   controls();
   try {
+    // The goal is still the user's call, but a skip the server already knows
+    // about is said plainly before anything is queued.
+    const warning = mode === "encode" && !$("technical").checked ? goalSkipWarning() : "";
+    if (warning && !(await reviewAction({title: "This goal will skip the file", content: [node("p", warning)], confirmLabel: "Process anyway", cancelLabel: "Choose another goal"}))) return;
     notify("Submitting job…");
     return await buildAndSubmitJob(mode);
   } finally {
@@ -3082,7 +3204,7 @@ function confirmDecision(job, choice, label) {
   } else if (choice.description) content.push(node("p", choice.description, "muted"));
   return reviewAction({title: `${label}?`, content, confirmLabel: label, cancelLabel: "Decide later"});
 }
-const rerunGoals = {size: "Smaller files", quality: "Prioritize quality", x265_preserve: "Convert to HEVC · Strict quality", compact: "Make it much smaller · SDR 1080p"};
+const rerunGoals = goalNames;
 // Another round on a file is the user's decision: confirming is that decision,
 // and each confirmed attempt starts a new action under a fresh key.
 // A skipped file whose goal cannot handle its source starts a NEW job under the
@@ -3408,8 +3530,8 @@ function shortJobReason(reason) {
     audio_estimate_unavailable: "No video setting met this goal, and the lossless audio size could not be read to estimate audio-only savings; original kept",
     audio_only_worker_unsupported: "No video setting met this goal; compacting only the audio needs an updated worker. Original kept",
     unsupported_source: "Automatic testing does not support this source format yet; original kept",
-    hdr_requires_compact: "HDR or Dolby Vision source; only the Much smaller goal converts it. Original kept",
-    compact_not_needed: "Already SDR at or below the Much smaller target; the Smaller files goal can shrink it. Original kept",
+    hdr_requires_compact: "HDR or Dolby Vision source; only the Shrink to 1080p SDR goal converts it. Original kept",
+    compact_not_needed: "Already SDR at or below the Shrink to 1080p SDR target; the Save space goal can shrink it. Original kept",
     hfr_quality_unavailable: "The worker cannot measure quality at this frame rate yet; original kept",
     compact_frame_evidence_unavailable: "Could not read this video's frames to plan the conversion (it may have timed out); original kept. Use Change goal to try again",
     quality_policy_unavailable: "The worker cannot run the quality checks this goal needs; original kept",
@@ -4668,7 +4790,7 @@ async function loadBatchItems(id, revision) {
     if (actions.children.length) row.append(actions);
     const activity = batchFileActivity(item, state.detailJob);
     if (activity) row.append(node("span", activity, "batch-file-activity"));
-    if (item.mode) row.append(node("span", `Goal: ${{size:"Reduce size",quality:"Preserve quality",x265_preserve:"Convert to x265",compact:`Much smaller · SDR ${item.max_height || 1080}p`}[item.mode] || item.mode}`, "metadata batch-file-profile"));
+    if (item.mode) row.append(node("span", `Goal: ${item.mode === "compact" ? `Shrink to ${item.max_height || 1080}p SDR` : goalNames[item.mode] || item.mode}`, "metadata batch-file-profile"));
     else if (item.requested_profile || item.profile) row.append(node("span", `${item.retry_pending ? "Next attempt" : "Profile"}: ${profileOptionLabel(item.requested_profile || item.profile)}`, "metadata batch-file-profile"));
     if (item.previous_attempts?.length) {
       const history=node("details","","batch-attempt-history");
