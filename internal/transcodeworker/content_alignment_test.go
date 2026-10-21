@@ -50,10 +50,10 @@ func TestVerifyContentAlignmentDetectsOneFrameShift(t *testing.T) {
 	if err := verifySampleAlignment(refPTS, shiftedPTS, 25); err != nil {
 		t.Fatalf("the shift must be invisible to the timestamp check, got %v", err)
 	}
-	if err := verifyContentAlignment(ctx, ffmpeg, alignedCand, ref); err != nil {
+	if err := verifyContentAlignment(ctx, ffmpeg, alignedCand, ref, 2); err != nil {
 		t.Fatalf("aligned encode rejected: %v", err)
 	}
-	err = verifyContentAlignment(ctx, ffmpeg, shiftedCand, ref)
+	err = verifyContentAlignment(ctx, ffmpeg, shiftedCand, ref, 2)
 	if err == nil || !strings.Contains(err.Error(), "shifted -1 frame") {
 		t.Fatalf("shifted encode = %v, want the candidate one frame ahead (-1)", err)
 	}

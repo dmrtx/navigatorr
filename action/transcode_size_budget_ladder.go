@@ -126,10 +126,8 @@ func (e *Engine) startSizeBudgetLadder(ctx context.Context, ec *ExecutionContext
 	if !caps.Encoders[transcode.VideoCodecHEVCVideoToolbox] {
 		return StepResult{}, false
 	}
+	// Planning, advancing and validating a rung all read source_report.
 	rep := getSourceReport(ec.State["source_report"])
-	if rep == nil {
-		rep = getSourceReport(ec.State["original"])
-	}
 	opt := getOptimizationPolicy(ec.State["optimization_policy"])
 	if rep == nil || opt == nil || !opt.Enabled {
 		return StepResult{}, false

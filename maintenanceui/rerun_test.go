@@ -310,6 +310,11 @@ func TestRerunWithoutHardwareAfterABelowFloorBudgetEncode(t *testing.T) {
 	if copied["allow_hardware"] != false || copied["hardware_margin_percent"] != nil || copied["mode"] != "size" || copied["size_budget_percent"] != float64(40) || copied["path"] != "/media/Show/S01E01.mkv" {
 		t.Fatalf("inputs %v", copied)
 	}
+	// A ladder whose every step overshot the budget offers x265 too.
+	seedOperation(t, st, "over-budget", "transcode_media", "completed", map[string]any{"path": "/media/Show/S01E03.mkv", "mode": "size", "size_budget_percent": float64(40)}, map[string]any{"reason_code": "size_budget_exceeded"}, map[string]any{"mode": "size", "reason_code": "size_budget_exceeded", "size_budget": map[string]any{"budget_bytes": float64(4e9), "outcome": "size_budget_exceeded", "retry_without_hardware": true}})
+	if w := request(h, "POST", "/api/maintenance/rerun", `{"id":"over-budget","key":"x265-two","without_hardware":true}`, true); w.Code != 202 {
+		t.Fatal("over-budget ladder refused the x265 retry", w.Code, w.Body.String())
+	}
 	// The earlier action is untouched and a plain run again still keeps the engine on.
 	if before, _ := st.GetActionInstance("below-floor"); decodeOperationJSON(before.InputsJSON)["allow_hardware"] != true {
 		t.Fatal("the earlier action was changed")

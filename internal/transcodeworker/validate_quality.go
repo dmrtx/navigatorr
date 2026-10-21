@@ -194,7 +194,7 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 		if err := verifySampleAlignment(refPTS, candPTS, sourceVideoStreams[0].FPS); err != nil {
 			return bad("quality_final_sample_misaligned", err)
 		}
-		if err := verifyContentAlignment(ctx, w.ffmpegPath, candPath, refPath); err != nil {
+		if err := verifyContentAlignment(ctx, w.ffmpegPath, candPath, refPath, threads); err != nil {
 			return bad("quality_final_sample_misaligned", fmt.Errorf("sample %d: %w", window.Index, err))
 		}
 		var r finalWindowResult
@@ -546,13 +546,13 @@ var psnrAverage = regexp.MustCompile(`PSNR .*average:(inf|[0-9]+(?:\.[0-9]+)?)`)
 // perfectly regular spacing, and every metric then reads it as damage. The
 // first frames are compared at offsets -1, 0 and +1; a neighbour that matches
 // clearly better than the aligned pair means the window is shifted.
-func verifyContentAlignment(ctx context.Context, ffmpegPath, candPath, refPath string) error {
-	aligned, err := leadingFramesPSNR(ctx, ffmpegPath, candPath, refPath, 0)
+func verifyContentAlignment(ctx context.Context, ffmpegPath, candPath, refPath string, threads int) error {
+	aligned, err := leadingFramesPSNR(ctx, ffmpegPath, candPath, refPath, 0, threads)
 	if err != nil {
 		return err
 	}
 	for _, offset := range []int{-1, 1} {
-		shifted, err := leadingFramesPSNR(ctx, ffmpegPath, candPath, refPath, offset)
+		shifted, err := leadingFramesPSNR(ctx, ffmpegPath, candPath, refPath, offset, threads)
 		if err != nil {
 			return err
 		}
@@ -566,13 +566,15 @@ func verifyContentAlignment(ctx context.Context, ffmpegPath, candPath, refPath s
 // leadingFramesPSNR is the mean PSNR of candidate frame i+offset against
 // reference frame i over the first contentAlignmentFrames pairs. Frames are
 // paired by index, not timestamp, so irregular spacing cannot re-pair them.
-func leadingFramesPSNR(ctx context.Context, ffmpegPath, candPath, refPath string, offset int) (float64, error) {
+// threads is the window's share of the metric threads, as for VMAF.
+func leadingFramesPSNR(ctx context.Context, ffmpegPath, candPath, refPath string, offset, threads int) (float64, error) {
 	pick := func(skip int) string {
 		return fmt.Sprintf("trim=start_frame=%d:end_frame=%d,setpts=N/(10*TB)", skip, skip+contentAlignmentFrames)
 	}
 	candSkip, refSkip := max(offset, 0), max(-offset, 0)
 	graph := fmt.Sprintf("[0:v:0]%s[c];[1:v:0]%s[r];[c][r]psnr", pick(candSkip), pick(refSkip))
-	output, err := runQualityCommand(ctx, ffmpegPath, []string{"-nostdin", "-nostats", "-i", candPath, "-i", refPath, "-filter_complex", graph, "-f", "null", "-"})
+	t := strconv.Itoa(max(threads, 1))
+	output, err := runQualityCommand(ctx, ffmpegPath, []string{"-nostdin", "-nostats", "-threads", t, "-i", candPath, "-threads", t, "-i", refPath, "-filter_threads", t, "-filter_complex", graph, "-f", "null", "-"})
 	if err != nil {
 		return 0, err
 	}

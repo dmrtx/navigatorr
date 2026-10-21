@@ -227,10 +227,10 @@ func TestSizeBudgetLadderWorkerRefusals(t *testing.T) {
 		t.Fatalf("last refusal: %+v %v", step, err)
 	}
 	rec := sizeBudgetOf(c.ec.State)
-	if rec.Outcome != SizeBudgetExceeded || rec.CandidateBytes != budget+123 || !getBool(c.ec.State, "skip_transcode") || c.ec.State["reason_code"] != SizeBudgetExceeded || rec.RetryWithoutHardware {
+	if rec.Outcome != SizeBudgetExceeded || rec.CandidateBytes != budget+123 || !getBool(c.ec.State, "skip_transcode") || c.ec.State["reason_code"] != SizeBudgetExceeded || !rec.RetryWithoutHardware {
 		t.Fatalf("record %+v state %+v", rec, c.ec.State)
 	}
-	if !strings.Contains(rec.Message, "All 4 VideoToolbox steps") || !strings.HasSuffix(rec.Message, "Original preserved.") {
+	if !strings.Contains(rec.Message, "All 4 VideoToolbox steps") || !strings.HasSuffix(rec.Message, "Try again with x265 (allow_hardware off): its two passes land on the budget.") {
 		t.Fatalf("message %q", rec.Message)
 	}
 	if len(asked) != 4 || c.executor.benchmarkSubmitCalls != 0 {

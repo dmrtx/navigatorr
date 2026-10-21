@@ -10,7 +10,7 @@ import (
 
 // A size-mode search that ends without a usable setting is a finished result,
 // not a failure. Only these outcomes, or a cancellation, offer "Run again".
-var noWinnerReasons = map[string]bool{"no_suitable_candidate": true, "quality_not_met": true, "search_budget_exhausted": true}
+var noWinnerReasons = map[string]bool{"no_suitable_candidate": true, "quality_not_met": true, "search_budget_exhausted": true, "size_budget_exceeded": true}
 
 func rerunSource(r operationRecord) string {
 	if path := operationString(r.state["resolved_path"]); path != "" {

@@ -730,7 +730,10 @@ func finishSizeBudget(ec *ExecutionContext, candidateBytes int64) (*SizeBudgetRe
 		rec.Outcome = SizeBudgetExceeded
 		rec.Message = fmt.Sprintf("The budget encode came out at %s, over the %s budget. Original preserved.", formatBudgetBytes(candidateBytes), formatBudgetBytes(rec.BudgetBytes))
 		if sizeBudgetIsLadder(rec) {
-			rec.Message = fmt.Sprintf("All %d VideoToolbox steps came out over the %s budget (the last, %s, at %s). Original preserved.", rec.Rung+1, formatBudgetBytes(rec.BudgetBytes), sizeBudgetRungDescription(getPlan(ec.State["plan"])), formatBudgetBytes(candidateBytes))
+			// Two-pass x265 lands on its average bitrate where VideoToolbox,
+			// with one pass, can miss it.
+			rec.RetryWithoutHardware = true
+			rec.Message = fmt.Sprintf("All %d VideoToolbox steps came out over the %s budget (the last, %s, at %s). Original preserved. Try again with x265 (allow_hardware off): its two passes land on the budget.", rec.Rung+1, formatBudgetBytes(rec.BudgetBytes), sizeBudgetRungDescription(getPlan(ec.State["plan"])), formatBudgetBytes(candidateBytes))
 		}
 	case rec.Final != nil && len(rec.BelowTarget) == 0:
 		rec.Outcome = SizeBudgetMeetsTarget
