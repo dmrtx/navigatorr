@@ -728,7 +728,22 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 			}
 			job["savings"] = r.savings
 			if rerunEligible(r) && !rerunHasResult(r, existingReplacements) && !remedyTaken(r, records) {
-				job["rerun"] = rerunSummary(r, rounds)
+				// The snapshot keeps only the keys the queue lists, so whether
+				// running it again would be refused, and what its ladder offers,
+				// is read from the job's full record, as the rerun itself does.
+				inst, err := s.engine.Deps().Store.GetActionInstanceIfExists(r.inst.ID)
+				if err != nil || inst == nil {
+					fail(w, 500, "read job")
+					return
+				}
+				full := operationRecord{inst: *inst, inputs: decodeOperationJSON(inst.InputsJSON), outputs: decodeOperationJSON(inst.OutputsJSON), state: decodeOperationJSON(inst.StateJSON)}
+				if why := s.rerunRefusal(full); why != "" {
+					// Running it again would be refused; the goal form is
+					// offered instead, with the reason.
+					job["rerun_refused"] = why
+				} else {
+					job["rerun"] = rerunSummary(full, rounds)
+				}
 			}
 			if size := operationSizeMode(r); size != nil {
 				job["size_mode"] = size

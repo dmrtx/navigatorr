@@ -41,9 +41,10 @@ func isNoWinnerRound(r operationRecord) bool {
 
 // A standalone single-file job may be run again once it was cancelled or ended
 // without a winner. Batch children keep "Change goal", and jobs with a
-// candidate or a pending decision are reviewed instead.
+// candidate or a pending decision are reviewed instead. Sample tests were
+// removed, so a benchmark_transcode is never started again.
 func rerunEligible(r operationRecord) bool {
-	if r.inst.ActionName != "transcode_media" && r.inst.ActionName != "benchmark_transcode" {
+	if r.inst.ActionName != "transcode_media" {
 		return false
 	}
 	if operationString(r.inputs["parent_action_id"]) != "" || operationString(r.inputs["path"]) == "" {
@@ -111,6 +112,39 @@ func noWinnerRounds(records []operationRecord) map[string]int {
 	return rounds
 }
 
+// rerunInputs are the inputs "Run again" starts the job with: its own.
+func rerunInputs(r operationRecord) map[string]any {
+	inputs := map[string]any{}
+	for k, v := range r.inputs {
+		if k != "idempotency_key" {
+			inputs[k] = v
+		}
+	}
+	return inputs
+}
+
+// rerunRefusal is why running a job again with its own inputs would now be
+// refused (it drove the removed sample search), "" when it would not be. A
+// job whose goal is wrong for its source starts under another goal instead,
+// from neutral inputs, so nothing of its own is refused.
+func (s *Server) rerunRefusal(r operationRecord) string {
+	if remedyMode(r) != "" || s.engine == nil {
+		return ""
+	}
+	if err := s.engine.RefusedSearchInputs(r.inst.ActionName, rerunInputs(r)); err != nil {
+		return "This job's settings ran the sample search, which was removed, so it cannot run again as it was. Choose a goal for the file instead."
+	}
+	return ""
+}
+
+// offersWithoutHardware reports a job whose media engine encodes all missed
+// the quality limits: a size budget below its floor, or a VideoToolbox ladder
+// whose every rung missed.
+func offersWithoutHardware(r operationRecord) bool {
+	return operationMap(operationValue(r, "size_budget"))["retry_without_hardware"] == true ||
+		operationMap(operationValue(r, "quality_ladder"))["retry_without_hardware"] == true
+}
+
 func rerunSummary(r operationRecord, rounds map[string]int) map[string]any {
 	summary := map[string]any{
 		"source_path":      rerunSource(r),
@@ -120,6 +154,9 @@ func rerunSummary(r operationRecord, rounds map[string]int) map[string]any {
 	}
 	if remedy := remedyMode(r); remedy != "" {
 		summary["remedy_mode"] = remedy
+	}
+	if offersWithoutHardware(r) {
+		summary["without_hardware"] = true
 	}
 	return summary
 }
@@ -170,6 +207,10 @@ func (s *Server) rerun(w http.ResponseWriter, r *http.Request) {
 		fail(w, 409, "this file was skipped because of its goal; choose the goal that handles it instead of running it again")
 		return
 	}
+	if why := s.rerunRefusal(old); body.Mode == "" && why != "" {
+		fail(w, 409, why)
+		return
+	}
 	inputs := map[string]any{}
 	if body.Mode != "" {
 		for _, k := range remedyInputKeys {
@@ -179,14 +220,10 @@ func (s *Server) rerun(w http.ResponseWriter, r *http.Request) {
 		}
 		inputs["mode"] = body.Mode
 	} else {
-		for k, v := range old.inputs {
-			if k != "idempotency_key" {
-				inputs[k] = v
-			}
-		}
+		inputs = rerunInputs(old)
 	}
 	if body.WithoutHardware {
-		if operationMap(operationValue(old, "size_budget"))["retry_without_hardware"] != true {
+		if !offersWithoutHardware(old) {
 			fail(w, 409, "this job did not offer a retry without the media engine")
 			return
 		}

@@ -433,3 +433,59 @@ func TestRerunRemedyRefusesTheWrongGoalAndTheSameGoal(t *testing.T) {
 		t.Fatal("a cancelled job must offer a plain rerun only")
 	}
 }
+
+// Sample tests were removed, and a job whose own settings drove the sample
+// search would be refused if started again: neither offers "Run again". The
+// latter names why, so the goal form can be offered in its place.
+func TestRerunIsNotOfferedForTheRemovedSearch(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	seedOperation(t, st, "sample-test", "benchmark_transcode", "cancelled", map[string]any{"path": "/media/Show/S03E01.mkv"}, nil, nil)
+	seedOperation(t, st, "searched", "transcode_media", "completed", map[string]any{"path": "/media/Show/S03E02.mkv", "profile": "general-hevc", "metric": "vmaf"}, nil, map[string]any{"reason_code": "no_suitable_candidate"})
+	if view := rerunJobView(t, h, "sample-test"); view["rerun"] != nil || view["rerun_refused"] != nil {
+		t.Fatalf("a sample test offers a rerun: %v", view)
+	}
+	if w := request(h, "POST", "/api/maintenance/rerun", `{"id":"sample-test","key":"sample-again"}`, true); w.Code != 409 {
+		t.Fatal("a sample test was started again", w.Code, w.Body.String())
+	}
+	view := rerunJobView(t, h, "searched")
+	if view["rerun"] != nil || !strings.Contains(operationString(view["rerun_refused"]), "sample search") {
+		t.Fatalf("a searched job offers Run again: %v", view)
+	}
+	if w := request(h, "POST", "/api/maintenance/rerun", `{"id":"searched","key":"searched-again"}`, true); w.Code != 409 || !strings.Contains(w.Body.String(), "sample search") {
+		t.Fatal("a searched job was started again", w.Code, w.Body.String())
+	}
+}
+
+// A size goal whose every VideoToolbox quality step missed the limits offers
+// the same x265 retry a below-floor budget encode does.
+func TestRerunWithoutHardwareAfterAVideoToolboxLadderMissed(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	inputs := map[string]any{"path": "/media/Show/S04E01.mkv", "mode": "size", "allow_hardware": true, "hardware_margin_percent": float64(30)}
+	ladder := map[string]any{"video_codec": "hevc_videotoolbox", "quality_values": []any{60, 65, 70}, "rung": 2, "outcome": "quality_not_met", "retry_without_hardware": true}
+	seedOperation(t, st, "ladder-missed", "transcode_media", "completed", inputs, map[string]any{"reason_code": "quality_not_met"}, map[string]any{"mode": "size", "reason_code": "quality_not_met", "quality_ladder": ladder})
+	rerun := operationMap(rerunJobView(t, h, "ladder-missed")["rerun"])
+	if rerun["without_hardware"] != true {
+		t.Fatalf("rerun summary %v", rerun)
+	}
+	w := request(h, "POST", "/api/maintenance/rerun", `{"id":"ladder-missed","key":"ladder-x265","without_hardware":true}`, true)
+	if w.Code != 202 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	var started struct{ ID string }
+	json.Unmarshal(w.Body.Bytes(), &started)
+	created, _ := st.GetActionInstance(started.ID)
+	if copied := decodeOperationJSON(created.InputsJSON); copied["allow_hardware"] != false || copied["hardware_margin_percent"] != nil || copied["mode"] != "size" {
+		t.Fatalf("inputs %v", copied)
+	}
+	// An x265 ladder that missed offers nothing more.
+	ladder["video_codec"], ladder["retry_without_hardware"] = "libx265", false
+	seedOperation(t, st, "x265-missed", "transcode_media", "completed", map[string]any{"path": "/media/Show/S04E02.mkv", "mode": "size", "allow_hardware": false}, map[string]any{"reason_code": "quality_not_met"}, map[string]any{"mode": "size", "reason_code": "quality_not_met", "quality_ladder": ladder})
+	if operationMap(rerunJobView(t, h, "x265-missed")["rerun"])["without_hardware"] != nil {
+		t.Fatal("an x265 ladder offers x265")
+	}
+	if w := request(h, "POST", "/api/maintenance/rerun", `{"id":"x265-missed","key":"x265-again","without_hardware":true}`, true); w.Code != 409 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+}

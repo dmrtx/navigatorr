@@ -97,7 +97,7 @@ function actionIcon(label) {
     "Review replacement": "M9 12l2 2 4-4M5 4h14v16H5Z",
     "Review candidates": "M5 4h14v16H5ZM8 8h8M8 12h8",
     "Review candidate": "M5 4h14v16H5ZM8 8h8M8 12h8",
-    "Set up benchmark": "M8 5h12v15H8ZM4 16V2h12",
+    "Choose a goal": "M8 5h12v15H8ZM4 16V2h12",
     // Keeping originals is a decision, not filing the job away: a shield, not a box.
     "Keep original": "M12 3l7 3v6c0 4-3 7-7 9-4-2-7-5-7-9V6ZM9 12l2 2 4-4",
     "Keep originals": "M12 3l7 3v6c0 4-3 7-7 9-4-2-7-5-7-9V6ZM9 12l2 2 4-4",
@@ -114,7 +114,7 @@ function actionIcon(label) {
     Archive: "M4 4h16v4H4ZM6 8v12h12V8M10 12h4",
     Restore: "M12 19V9M8 13l4-4 4 4M4 4h16v4H4Z",
     // Opening another job reads as "look", not "review": an eye, a play frame
-    // and stacked layers keep them apart from Review and Set up benchmark.
+    // and stacked layers keep them apart from Review and Choose a goal.
     "View replacement": "M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12ZM12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z",
     "View batch": "M12 3l9 5-9 5-9-5ZM3 13l9 5 9-5",
     "View preview": "M4 5h16v14H4ZM10 9l5 3-5 3Z",
@@ -3242,6 +3242,16 @@ async function rerunJob(job, {withoutHardware = false, mode = ""} = {}) {
     state.busyJobs.delete(job.id);
   }
 }
+// openGoalForm opens the library's goal form for one file.
+function openGoalForm(path) {
+  $("path").value = path || "";
+  $("scope").value = "file";
+  state.fileMedia = null;
+  state.fileService = null;
+  selectTab("library");
+  setFileStep("configure");
+  controls();
+}
 function jobControls(job, detail = false) {
   const actionRail = node("div", "", "job-actions");
   const add = (label, fn) => {
@@ -3353,28 +3363,27 @@ function jobControls(job, detail = false) {
     if (rejectedCandidate(job)) {
       if (job.parent_action_id) add("Change settings", () => reconfigureBatch(job.parent_action_id, true, {candidate_id:job.id}));
     } else if (job.action_name === "benchmark_transcode" && /unsupported input/.test(job.error || ""))
-      add("Set up benchmark", () => {
-        $("path").value = job.source_path || "";
-        $("scope").value = "file";
-        state.fileMedia = null;
-        state.fileService = null;
-        selectTab("library");
-        setFileStep("configure");
-        controls();
-      });
+      add("Choose a goal", () => openGoalForm(job.source_path));
     else add("Retry", () => jobControl(job.id, "action_retry"));
   }
   // The server marks only standalone files that were cancelled or ended with no
   // winner; batch children use Change goal and reviewed candidates are decided.
   if (job.rerun && !job.rerun.remedy_mode && !job.parent_item_key && !job.candidate_ready && !job.replacement_action_id && job.status !== "waiting_decision" && !(job.mode && sourceGateReason(job.reason_code)))
     add("Run again", () => rerunJob(job));
+  // A job whose settings ran the removed sample search cannot run again as it
+  // was; the server says why, and the file's goal form is offered instead.
+  if (job.rerun_refused && !job.parent_item_key && !job.candidate_ready && !job.replacement_action_id && job.status !== "waiting_decision") {
+    add("Choose a goal", () => openGoalForm(job.source_path));
+    const choose = [...actionRail.children].at(-1);
+    if (choose) choose.title = job.rerun_refused;
+  }
   // A file skipped because its goal is wrong for it: one button starts a new job
   // under the goal the server named. Running it again would skip it again.
   if (job.rerun?.remedy_mode && remedyActions[job.rerun.remedy_mode] && !job.parent_item_key && !job.candidate_ready && !job.replacement_action_id && job.status !== "waiting_decision")
     add(remedyActions[job.rerun.remedy_mode].label, () => rerunJob(job, {mode: job.rerun.remedy_mode}));
   // A media engine budget encode that fit but missed the quality floor offers no
   // candidate; x265 is slower and usually keeps more quality at the same size.
-  if (job.rerun && job.size_mode?.size_budget?.retry_without_hardware && !job.parent_item_key && !job.candidate_ready && !job.replacement_action_id && job.status !== "waiting_decision")
+  if (job.rerun && (job.rerun.without_hardware || job.size_mode?.size_budget?.retry_without_hardware) && !job.parent_item_key && !job.candidate_ready && !job.replacement_action_id && job.status !== "waiting_decision")
     add("Try with x265", () => rerunJob(job, {withoutHardware: true}));
   if (
     job.action_name === "transcode_batch" &&
@@ -3728,8 +3737,8 @@ function queuePresentation(job) {
 // The next step a card offers, most important first. Only one is labelled.
 // Shortened visible labels for main actions. Each is a prefix of the full
 // label, which stays the accessible name (WCAG 2.5.3 Label in Name).
-const shortActionLabels = {"Replace file":"Replace","Set up benchmark":"Set up","Review candidates":"Review","Review candidate":"Review","Review replacement":"Review","Review replacements":"Review","Review preview":"Review","Validate classifications":"Validate","Check worker again":"Check worker","Check library again":"Check library","Resume batch":"Resume","Start batch":"Start","Try another profile":"Try another","Convert to SDR 1080p":"Convert to SDR"};
-const mainQueueActions = ["Replace file", "Review replacements", "Review replacement", "Review candidates", "Review candidate", "Review cuts", "Validate classifications", "Review", "Resume batch", "Start batch", "Set up benchmark", "Retry", "Convert to SDR 1080p", "Make it smaller", "Check worker again", "Check library again", "Review preview", "Try another profile"];
+const shortActionLabels = {"Replace file":"Replace","Choose a goal":"Choose","Review candidates":"Review","Review candidate":"Review","Review replacement":"Review","Review replacements":"Review","Review preview":"Review","Validate classifications":"Validate","Check worker again":"Check worker","Check library again":"Check library","Resume batch":"Resume","Start batch":"Start","Try another profile":"Try another","Convert to SDR 1080p":"Convert to SDR"};
+const mainQueueActions = ["Replace file", "Review replacements", "Review replacement", "Review candidates", "Review candidate", "Review cuts", "Validate classifications", "Review", "Resume batch", "Start batch", "Choose a goal", "Retry", "Convert to SDR 1080p", "Make it smaller", "Check worker again", "Check library again", "Review preview", "Try another profile"];
 const visibleQueueIcons = 3;
 function compactQueueActions(actions) {
   // A card shows at most one labelled main action, then square icon buttons
