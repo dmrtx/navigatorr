@@ -46,6 +46,9 @@ const (
 	// The fallback's trigger, as recorded.
 	sizeBudgetTriggerNoWinner   = "no_passing_candidate"
 	sizeBudgetTriggerOverBudget = "passing_candidate_over_budget"
+	// sizeBudgetTriggerUnreachable marks a budget the other streams alone
+	// use up, ended before any encode or search.
+	sizeBudgetTriggerUnreachable = "budget_unreachable"
 
 	// Outcomes after final validation.
 	SizeBudgetBelowTarget = "below_quality_target_within_budget"
@@ -545,6 +548,53 @@ func planSizeBudgetEncode(policy *SizeBudgetPolicy, rep *mediainspect.DetailedRe
 		enc.Reason, enc.Message = "size_budget_unreachable", fmt.Sprintf("The audio, subtitles and other streams already take %s of the %s budget, which leaves no usable video bitrate (%d kbps).", formatBudgetBytes(nonVideo), formatBudgetBytes(budget), enc.X265.BitrateKbps)
 	}
 	return enc
+}
+
+// sizeBudgetMinimumBudget is the smallest budget the encoder can plan a video
+// bitrate for: the other streams plus the encoder's lowest bitrate over the
+// duration, scaled up by the share of the budget the encode aims at.
+func sizeBudgetMinimumBudget(policy *SizeBudgetPolicy, nonVideoBytes int64, duration float64) int64 {
+	video := math.Ceil(float64(transcode.X265MinBitrateKbps) * 1000 / 8 * duration)
+	return int64(math.Ceil((float64(nonVideoBytes) + video) * 100 / policy.FillPercent))
+}
+
+// endUnreachableSizeBudget ends a size goal whose budget cannot hold the file's
+// audio, subtitles and other streams plus a usable video bitrate. No encode at
+// that budget exists, so neither the ladder nor the search (which can only
+// find a larger file) could meet it: the action ends here with no candidate
+// and nothing submitted, reported as a size rejection. Any other reason a
+// budget cannot be planned leaves the search's own outcome standing.
+//
+// Preflight asks before the source is hashed, with the budgets that need no
+// sibling evidence (a sibling budget has none yet and is asked again by the
+// benchmark submit step, which has it).
+func endUnreachableSizeBudget(ec *ExecutionContext, snapshot *ModePolicySnapshot, rep *mediainspect.DetailedReport, original int64, siblings *SiblingBudgetEvidence) (StepResult, bool) {
+	if ec.ActionName != "transcode_media" || getString(ec.Inputs, "mode") != "size" || getString(ec.State, "benchmark_job_id") != "" {
+		return StepResult{}, false
+	}
+	if snapshot == nil || snapshot.Version != optimization.ModePolicyV3 || snapshot.Size == nil || snapshot.Size.SizeBudget == nil {
+		return StepResult{}, false
+	}
+	policy := snapshot.Size.SizeBudget
+	if policy.Validate() != nil {
+		return StepResult{Status: StepFailed, Error: "frozen size budget is invalid (fail closed)"}, true
+	}
+	budget := policy.BudgetBytes(original, siblings)
+	if rep == nil || budget <= 0 {
+		return StepResult{}, false
+	}
+	enc := planSizeBudgetEncode(policy, rep, original, budget)
+	if enc.Reason != "size_budget_unreachable" {
+		return StepResult{}, false
+	}
+	rec := newSizeBudgetRecord(snapshot, rep, original, budget, siblings, enc)
+	rec.Trigger, rec.Outcome = sizeBudgetTriggerUnreachable, SizeBudgetExceeded
+	rec.Message = fmt.Sprintf("The audio, subtitles and other streams alone take %s, which leaves no usable video bitrate within the %s budget. At least %s would be needed for this file; raise the budget, or remove audio or subtitle tracks first. Original preserved.",
+		formatBudgetBytes(enc.NonVideoBytes), formatBudgetBytes(budget), formatBudgetBytes(sizeBudgetMinimumBudget(policy, enc.NonVideoBytes, rep.DurationSec)))
+	ec.State[sizeBudgetKey] = rec
+	ec.State["skip_transcode"] = true
+	ec.State["reason_code"] = SizeBudgetExceeded
+	return StepResult{Status: StepCompleted, Outputs: map[string]any{"skipped": true, "reason_code": SizeBudgetExceeded, "mode": snapshot.Mode, "policy_digest": snapshot.Digest, sizeBudgetKey: rec}}, true
 }
 
 // sizeBudgetFallback replaces a size search's outcome with one encode at the
