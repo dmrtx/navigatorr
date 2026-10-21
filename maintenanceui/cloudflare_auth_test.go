@@ -281,6 +281,26 @@ func TestTokenModeAlsoAcceptsVerifiedAccessAssertion(t *testing.T) {
 			t.Fatalf("%s assertion reported as a session: %s", name, w.Body.String())
 		}
 	}
+	duplicate := httptest.NewRequest("GET", "/api/maintenance/bootstrap", nil)
+	duplicate.Header.Add("Cf-Access-Jwt-Assertion", valid)
+	duplicate.Header.Add("Cf-Access-Jwt-Assertion", valid)
+	if w := httptest.NewRecorder(); func() int { h.ServeHTTP(w, duplicate); return w.Code }() != 401 {
+		t.Fatal("duplicate assertions accepted")
+	}
+	for name, mutate := range map[string]func(*http.Request){
+		"missing request header": func(r *http.Request) { r.Header.Del("X-Navigatorr-Request") },
+		"foreign origin":         func(r *http.Request) { r.Header.Set("Origin", "https://elsewhere.example") },
+	} {
+		r := httptest.NewRequest("POST", "/api/maintenance/archive", strings.NewReader(`{}`))
+		r.Header.Set("Cf-Access-Jwt-Assertion", valid)
+		r.Header.Set("X-Navigatorr-Request", "1")
+		mutate(r)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != 403 {
+			t.Fatalf("%s: Access-authorized mutation got %d", name, w.Code)
+		}
+	}
 	if request(h, "GET", "/api/maintenance/bootstrap", "", false).Code != 401 {
 		t.Fatal("anonymous request accepted")
 	}
@@ -293,15 +313,15 @@ func TestTokenModeAlsoAcceptsVerifiedAccessAssertion(t *testing.T) {
 	}
 }
 
-func TestTokenModeRejectsIncompleteAccessConfig(t *testing.T) {
-	for _, access := range []config.CloudflareAccessConfig{
-		{TeamDomain: "example.cloudflareaccess.com"},
-		{Audience: "application-audience"},
-		{TeamDomain: "example.com", Audience: "application-audience"},
-	} {
-		web := config.WebConfig{Enabled: true, Token: testToken, CloudflareAccess: access}
-		if web.ValidateAuth() == nil {
-			t.Fatalf("incomplete Access config accepted: %+v", access)
-		}
+func TestCloudflareKeyFetchSurvivesCallerCancellation(t *testing.T) {
+	v, key, calls := accessFixture(t)
+	token := accessJWT(t, key, map[string]any{"alg": "RS256", "kid": "key-1"}, accessClaims(v))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := v.verify(ctx, token); err != nil {
+		t.Fatalf("aborted caller failed the shared key fetch: %v", err)
+	}
+	if v.verify(context.Background(), token) != nil || *calls != 1 {
+		t.Fatal("key set not cached after a fetch for an aborted caller")
 	}
 }

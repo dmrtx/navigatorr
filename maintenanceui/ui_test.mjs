@@ -1719,6 +1719,36 @@ test("token mode reached through Access opens without the token form or a local 
   assert.equal(h.elements.get("local-session").hidden, true);
 });
 
+test("expired Access login in token mode closes the workspace and asks for a reload, not the token", async () => {
+  for (const response of [
+    { type: "opaqueredirect", status: 0 },
+    { status: 403, headers: { get: () => "text/html; charset=utf-8" } },
+  ]) {
+    const h = harness();
+    h.run('state.authMode = "token"; state.accessSession = true; controls = () => {};');
+    h.document.getElementById("workspace").hidden = false;
+    h.document.getElementById("batch-review").showModal();
+    h.context.fetch = async () => ({
+      ...response,
+      json: () => assert.fail("Access HTML parsed as API JSON"),
+    });
+    await assert.rejects(h.run('api("bootstrap")'), /Cloudflare Access/);
+    assert.equal(h.elements.get("workspace").hidden, true);
+    assert.equal(h.elements.get("batch-review").open, false);
+    assert.equal(h.elements.get("access-expired").hidden, false);
+    assert.equal(h.elements.get("login").hidden, true);
+    assert.equal(h.run("state.authRevision"), 1);
+  }
+});
+
+test("token mode without an Access session still treats redirects as unexpected", async () => {
+  const h = harness();
+  h.run('state.authMode = "token"; state.accessSession = false; controls = () => {};');
+  h.context.fetch = async () => ({ type: "opaqueredirect", status: 0 });
+  await assert.rejects(h.run('api("bootstrap")'), /Unexpected API redirect/);
+  assert.equal(h.run("state.authMode"), "token");
+});
+
 test("token mode with a local session keeps its sign-out", async () => {
   const h = harness();
   h.document.querySelector = () => new Element();

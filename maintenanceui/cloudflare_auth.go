@@ -112,6 +112,10 @@ func (v *cloudflareAccessVerifier) key(ctx context.Context, kid string) (*rsa.Pu
 		return nil, fmt.Errorf("Access signing key unavailable")
 	}
 	v.nextFetch = now.Add(30 * time.Second)
+	// The fetch outlives the caller: an aborted request must not fail the fetch
+	// and hold every Access sign-in behind the backoff.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, v.issuer+"/cdn-cgi/access/certs", nil)
 	if err != nil {
 		return nil, err
