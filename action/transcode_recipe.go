@@ -459,7 +459,11 @@ func (e *Engine) advanceQualityLadder(ctx context.Context, ec *ExecutionContext,
 		reason = "size_growth"
 	}
 	tried := QualityLadderRung{Quality: rec.Values[rec.Rung], JobID: getString(ec.State, "job_id"), ReasonCode: reason, CandidateBytes: st.CandidateSizeBytes, Final: summarizeFinalQuality(st.QualityEvidence, stateQualityLimits(ec.State))}
-	rec.Tried = append(rec.Tried, tried)
+	// The audio-only fallback may wait and ask again about the same refusal:
+	// that rung is already on the record.
+	if n := len(rec.Tried); n == 0 || tried.JobID == "" || rec.Tried[n-1].JobID != tried.JobID {
+		rec.Tried = append(rec.Tried, tried)
+	}
 	was := recipeRungName(rec.VideoCodec, tried.Quality)
 	if reason != reasonQualityNotMet {
 		size := ""

@@ -174,3 +174,36 @@ func TestExplainTranscodeNamesTheSearchTimeLimit(t *testing.T) {
 		t.Fatalf("no time-limit claim without evidence: %q", e.Message)
 	}
 }
+
+// An audio-only encode that landed over the budget is explained with the
+// budget, the size it came out at and the gap, as the x265 encode's is.
+func TestExplainTranscodeAudioOnlyOvershoot(t *testing.T) {
+	plan := &transcode.Plan{SizePolicy: &transcode.SizePolicy{MaxCandidateBytes: 5_000_000_000}}
+	for _, reason := range []string{SizeBudgetExceeded, "insufficient_savings"} {
+		res := &ActionResult{ActionName: "transcode_media", Status: StatusCompleted,
+			Inputs:  map[string]any{"mode": "size"},
+			State:   map[string]any{"reason_code": reason, "skip_transcode": true, "plan_source": "audio_only", "plan": plan},
+			Outputs: map[string]any{"original_intact": true, "candidate_size_bytes": int64(5_500_000_000)}}
+		e := ExplainTranscode(res)
+		if e == nil || e.Outcome != "size_rejected" {
+			t.Fatalf("%s: %+v", reason, e)
+		}
+		for _, want := range []string{"5.50 GB", "5.00 GB budget", "500 MB", "10.0%", "Original preserved"} {
+			if !strings.Contains(e.Message, want) {
+				t.Fatalf("%s: message %q lacks %q", reason, e.Message, want)
+			}
+		}
+	}
+	// The worker may refuse the file without reporting its size.
+	res := &ActionResult{ActionName: "transcode_media", Status: StatusCompleted, Inputs: map[string]any{"mode": "size"},
+		State:   map[string]any{"reason_code": SizeBudgetExceeded, "skip_transcode": true, "plan_source": "audio_only", "plan": plan},
+		Outputs: map[string]any{"original_intact": true}}
+	if e := ExplainTranscode(res); e == nil || e.Outcome != "size_rejected" || !strings.Contains(e.Message, "5.00 GB budget") {
+		t.Fatalf("no size: %+v", e)
+	}
+	// Any other plan is not described as an audio-only overshoot.
+	res.State["plan_source"] = ""
+	if e := ExplainTranscode(res); e == nil || strings.Contains(e.Message, "lossless audio") {
+		t.Fatalf("other plan: %+v", e)
+	}
+}

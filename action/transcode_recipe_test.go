@@ -742,6 +742,32 @@ func TestQualityLadderOutcomeSurvivesAnUnfinishedAudioOnlyFallback(t *testing.T)
 			t.Fatalf("%s record %+v", where, rec)
 		}
 	}
+	// The worker is asked again about the same refusal, still unreachable and
+	// then back: the rung is on the record once, and the message names each
+	// rung once.
+	if res, handled = c.engine.advanceQualityLadder(context.Background(), c.ec, failedRung(84, 79)); !handled || res.Status == StepCompleted {
+		t.Fatalf("second ask %+v", res)
+	}
+	if rec := QualityLadderOf(c.ec.State); len(rec.Tried) != 3 {
+		t.Fatalf("the rung was recorded again: %+v", rec.Tried)
+	}
+	c.executor.capabilitiesFunc = func(context.Context) (transcode.WorkerCapabilities, error) {
+		caps := modeTestCapabilities()
+		caps.SizeAudioOnly = true
+		return caps, nil
+	}
+	c.snapshot.Size.AudioOnlyFallback = true
+	c.ec.State["mode_policy"] = c.snapshot
+	res, handled = c.engine.advanceQualityLadder(context.Background(), c.ec, failedRung(84, 79))
+	rec := QualityLadderOf(c.ec.State)
+	if !handled || len(rec.Tried) != 3 {
+		t.Fatalf("after the worker came back: %+v %+v", res, rec)
+	}
+	for _, name := range []string{recipeRungName(rec.VideoCodec, rec.Values[0]), recipeRungName(rec.VideoCodec, rec.Values[2])} {
+		if n := strings.Count(rec.Message, name); n > 1 {
+			t.Fatalf("%q appears %d times in %q", name, n, rec.Message)
+		}
+	}
 }
 
 // optimizingProfileConfig is an inline profile that asks for the removed
