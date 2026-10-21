@@ -178,10 +178,10 @@ func Select(input Input) Result {
 		}
 	}
 
-	targetProfile := "general-hevc"
+	targetProfile := GeneralProfile
 	reasons := []string{ReasonH2641080p, ReasonOversized}
 	if input.IsAnime {
-		targetProfile = "anime-hevc"
+		targetProfile = AnimeProfile
 		reasons = append(reasons, ReasonAnime)
 	}
 
@@ -192,6 +192,15 @@ func Select(input Input) Result {
 		ExpectedSavingsPercent: expectedSavings,
 	}
 }
+
+// The catalog profiles Select picks for live action and for anime.
+const (
+	GeneralProfile = "general-hevc"
+	AnimeProfile   = "anime-hevc"
+)
+
+// Profiles are every catalog profile Select can pick.
+func Profiles() []string { return []string{GeneralProfile, AnimeProfile} }
 
 func isHEVC(codec string) bool {
 	switch codec {

@@ -15,6 +15,7 @@ import (
 	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/optimization"
 	"github.com/jakenesler/navigatorr/transcode/quality"
+	"github.com/jakenesler/navigatorr/transcode/selector"
 )
 
 // legacySearch lets a test drive an action the way it was admitted before
@@ -494,15 +495,107 @@ func TestSearchInputsAreRefusedForNewRequests(t *testing.T) {
 	// A batch admitted before the change creates its children and samples
 	// from its stored inputs; they run as admitted.
 	seedActionInstance(t, st, "admitted-batch", "transcode_batch", StatusWaitingExternal, 1, "", map[string]any{"paths": []string{source}, "metric": "vmaf"}, map[string]any{})
+	if err := st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: "admitted-batch", ItemKey: "ep01", FilePath: source, Decision: "transcode", Status: "queued"}); err != nil {
+		t.Fatal(err)
+	}
 	for i, name := range []string{"transcode_media", "benchmark_transcode"} {
 		if _, err := e.Enqueue(context.Background(), name, map[string]any{"path": source, "profile": "general-hevc", "metric": "vmaf", "parent_action_id": "admitted-batch"}, fmt.Sprintf("child-%d", i)); err != nil {
 			t.Fatalf("batch child %s refused: %v", name, err)
 		}
 	}
-	// A parent that is not a batch exempts nothing.
+	if _, err := e.Enqueue(context.Background(), "transcode_media", map[string]any{"path": source, "profile": "general-hevc", "metric": "vmaf", "parent_action_id": "admitted-batch", "batch_item_key": "ep01"}, "child-keyed"); err != nil {
+		t.Fatalf("batch child naming its item refused: %v", err)
+	}
+	// Naming a batch is not enough: the parent must be a batch that has not
+	// ended and lists this file (as the item the request names, if any).
+	other := mediaDir + "/ep02.mkv"
+	if err := os.WriteFile(other, []byte("synthetic source bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	seedActionInstance(t, st, "ended-batch", "transcode_batch", StatusCompleted, 1, "", map[string]any{"paths": []string{source}}, map[string]any{})
+	if err := st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: "ended-batch", ItemKey: "ep01", FilePath: source, Decision: "transcode", Status: "completed"}); err != nil {
+		t.Fatal(err)
+	}
 	seedActionInstance(t, st, "not-a-batch", "transcode_media", StatusWaitingExternal, 1, "", map[string]any{"path": source}, map[string]any{})
-	_, err := e.Enqueue(context.Background(), "transcode_media", map[string]any{"path": source, "metric": "vmaf", "parent_action_id": "not-a-batch"}, "orphan")
-	requireInvalid(t, err, "metric")
+	for name, inputs := range map[string]map[string]any{
+		"a file the batch does not list": {"path": other, "metric": "vmaf", "parent_action_id": "admitted-batch"},
+		"another item's key":             {"path": other, "metric": "vmaf", "parent_action_id": "admitted-batch", "batch_item_key": "ep01"},
+		"an unknown item key":            {"path": source, "metric": "vmaf", "parent_action_id": "admitted-batch", "batch_item_key": "ep09"},
+		"a batch that ended":             {"path": source, "metric": "vmaf", "parent_action_id": "ended-batch"},
+		"a parent that is not a batch":   {"path": source, "metric": "vmaf", "parent_action_id": "not-a-batch"},
+		"a parent that does not exist":   {"path": source, "metric": "vmaf", "parent_action_id": "no-such-batch"},
+	} {
+		_, err := e.Enqueue(context.Background(), "transcode_media", inputs, "orphan-"+strings.ReplaceAll(name, " ", "-"))
+		if invalid := requireInvalid(t, err, "metric"); invalid == nil {
+			t.Fatalf("%s exempted the request", name)
+		}
+	}
+}
+
+// A request with no goal and no profile encodes with the configured
+// default_profile, so a default that searches is refused like a named one; a
+// batch with neither runs auto, which stands for every profile the selector
+// picks.
+func TestSearchingDefaultProfileIsRefused(t *testing.T) {
+	mediaDir := t.TempDir()
+	source := mediaDir + "/ep01.mkv"
+	if err := os.WriteFile(source, []byte("synthetic source bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e, st := setupTranscodeEngine(t, &mockTranscodeExecutor{}, createFakeFFprobeScript(t, defaultValidFFprobeJSON), []string{mediaDir}, []string{mediaDir}, false)
+	defer st.Close()
+	tc := &e.deps.Config.Transcode
+	// The shipped catalog's live-action profiles search.
+	tc.DefaultProfile = "live-action-hevc"
+	_, err := e.Enqueue(context.Background(), "transcode_media", map[string]any{"path": source}, "default-search")
+	if invalid := requireInvalid(t, err, "profile"); !strings.Contains(invalid.Reason, "default_profile") || !strings.Contains(invalid.Reason, "live-action-hevc") {
+		t.Fatalf("reason %q", invalid.Reason)
+	}
+	// A goal, a fixed profile or an inline fixed profile does not use it.
+	for i, inputs := range []map[string]any{
+		{"path": source, "mode": "quality"},
+		{"path": source, "profile": "general-hevc"},
+		{"path": source, "profile_config": testEphemeralBatchProfileConfig()},
+	} {
+		if _, err := e.Enqueue(context.Background(), "transcode_media", inputs, fmt.Sprintf("default-bypass-%d", i)); err != nil {
+			t.Fatalf("%v refused: %v", inputs, err)
+		}
+	}
+	// A fixed default, or none (hevc-vt), is admitted.
+	for i, name := range []string{"hevc-vt-balanced", ""} {
+		tc.DefaultProfile = name
+		if _, err := e.Enqueue(context.Background(), "transcode_media", map[string]any{"path": source}, fmt.Sprintf("default-fixed-%d", i)); err != nil {
+			t.Fatalf("default %q refused: %v", name, err)
+		}
+	}
+	// auto, named or as the default, is refused once a profile the selector
+	// picks searches.
+	live, err := tc.ResolveProfile("live-action-hevc")
+	if err != nil || live.Optimization == nil || !live.Optimization.Enabled {
+		t.Fatalf("the catalog's live-action profile no longer searches: %v", err)
+	}
+	tc.Profiles = map[string]config.TranscodeProfileConfig{selector.AnimeProfile: {
+		Container:    "mkv",
+		Video:        config.VideoProfileConfig{Codec: "libx265", Quality: 22, Preset: "medium"},
+		Audio:        config.AudioProfileConfig{Mode: "copy"},
+		Subtitles:    config.SubtitleProfileConfig{Mode: "preserve", ConvertIncompatible: true},
+		Preserve:     config.PreserveProfileConfig{Metadata: true, Chapters: true, Attachments: true},
+		Optimization: live.Optimization,
+	}}
+	tc.DefaultProfile = "auto"
+	for i, req := range []struct {
+		action string
+		inputs map[string]any
+	}{
+		{"transcode_media", map[string]any{"path": source}},
+		{"transcode_media", map[string]any{"path": source, "profile": "auto"}},
+		{"transcode_batch", map[string]any{"paths": []string{source}, "dry_run": true}},
+	} {
+		_, err := e.Enqueue(context.Background(), req.action, req.inputs, fmt.Sprintf("auto-search-%d", i))
+		if invalid := requireInvalid(t, err, "profile"); !strings.Contains(invalid.Reason, selector.AnimeProfile) {
+			t.Fatalf("%s %v: reason %q", req.action, req.inputs, invalid.Reason)
+		}
+	}
 }
 
 // A v4 goal batch item reserves no search budget; a v3 one does, so a batch
