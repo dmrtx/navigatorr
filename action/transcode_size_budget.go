@@ -46,6 +46,9 @@ const (
 	// The fallback's trigger, as recorded.
 	sizeBudgetTriggerNoWinner   = "no_passing_candidate"
 	sizeBudgetTriggerOverBudget = "passing_candidate_over_budget"
+	// sizeBudgetTriggerUnreachable marks a budget the other streams alone
+	// use up, ended before any encode or search.
+	sizeBudgetTriggerUnreachable = "budget_unreachable"
 
 	// Outcomes after final validation.
 	SizeBudgetBelowTarget = "below_quality_target_within_budget"
@@ -191,7 +194,7 @@ func (b *SizeBudgetPolicy) BudgetBytes(sourceBytes int64, siblings *SiblingBudge
 	if b == nil || sourceBytes <= 0 {
 		return 0
 	}
-	ceiling := (sourceBytes/100)*sizeBudgetMaxPercent + ((sourceBytes%100)*sizeBudgetMaxPercent)/100
+	ceiling := sizeBudgetCeiling(sourceBytes)
 	budget := b.Bytes
 	switch {
 	case b.Percent > 0:
@@ -203,6 +206,12 @@ func (b *SizeBudgetPolicy) BudgetBytes(sourceBytes int64, siblings *SiblingBudge
 		budget = siblings.BudgetBytes
 	}
 	return min(budget, ceiling)
+}
+
+// sizeBudgetCeiling is the largest budget a source can have: the size mode
+// must save at least 15%.
+func sizeBudgetCeiling(sourceBytes int64) int64 {
+	return (sourceBytes/100)*sizeBudgetMaxPercent + ((sourceBytes%100)*sizeBudgetMaxPercent)/100
 }
 
 // modeSizeBudgetInput reads size_budget_percent or size_budget_bytes for a
@@ -547,6 +556,66 @@ func planSizeBudgetEncode(policy *SizeBudgetPolicy, rep *mediainspect.DetailedRe
 	return enc
 }
 
+// sizeBudgetMinimumBudget is the smallest budget the encoder can plan a video
+// bitrate for: the other streams plus the encoder's lowest bitrate over the
+// duration, scaled up by the share of the budget the encode aims at.
+func sizeBudgetMinimumBudget(policy *SizeBudgetPolicy, nonVideoBytes int64, duration float64) int64 {
+	video := math.Ceil(float64(transcode.X265MinBitrateKbps) * 1000 / 8 * duration)
+	return int64(math.Ceil((float64(nonVideoBytes) + video) * 100 / policy.FillPercent))
+}
+
+// endUnreachableSizeBudget ends a size goal whose budget cannot hold the file's
+// audio, subtitles and other streams plus a usable video bitrate. No encode at
+// that budget exists, so neither the ladder nor the search (which can only
+// find a larger file) could meet it: the action ends here with no candidate
+// and nothing submitted, reported as a size rejection. Any other reason a
+// budget cannot be planned leaves the search's own outcome standing.
+//
+// Preflight asks before the source is hashed, with the budgets that need no
+// sibling evidence (a sibling budget has none yet and is asked again by the
+// benchmark submit step, which has it).
+func endUnreachableSizeBudget(ec *ExecutionContext, snapshot *ModePolicySnapshot, rep *mediainspect.DetailedReport, original int64, siblings *SiblingBudgetEvidence) (StepResult, bool) {
+	if ec.ActionName != "transcode_media" || getString(ec.Inputs, "mode") != "size" || getString(ec.State, "benchmark_job_id") != "" {
+		return StepResult{}, false
+	}
+	if snapshot == nil || snapshot.Version != optimization.ModePolicyV3 || snapshot.Size == nil || snapshot.Size.SizeBudget == nil {
+		return StepResult{}, false
+	}
+	policy := snapshot.Size.SizeBudget
+	if policy.Validate() != nil {
+		return StepResult{Status: StepFailed, Error: "frozen size budget is invalid (fail closed)"}, true
+	}
+	budget := policy.BudgetBytes(original, siblings)
+	if rep == nil || budget <= 0 {
+		return StepResult{}, false
+	}
+	enc := planSizeBudgetEncode(policy, rep, original, budget)
+	if enc.Reason != "size_budget_unreachable" {
+		return StepResult{}, false
+	}
+	// No video bitrate fits, but copying the video and compacting the lossless
+	// audio may: that answer is still the search's to give.
+	if snapshot.Size.AudioOnlyFallback {
+		if est := estimateAudioOnly(rep, original); est.Compacted > 0 && est.CandidateBytes <= budget {
+			return StepResult{}, false
+		}
+	}
+	rec := newSizeBudgetRecord(snapshot, rep, original, budget, siblings, enc)
+	rec.Trigger, rec.Outcome = sizeBudgetTriggerUnreachable, SizeBudgetExceeded
+	rec.Message = fmt.Sprintf("The audio, subtitles and other streams alone take %s, which leaves no usable video bitrate within the %s budget. ", formatBudgetBytes(enc.NonVideoBytes), formatBudgetBytes(budget))
+	// BudgetBytes never exceeds the size mode's ceiling, so a larger minimum
+	// cannot be fixed by raising the budget.
+	if minimum := sizeBudgetMinimumBudget(policy, enc.NonVideoBytes, rep.DurationSec); minimum > sizeBudgetCeiling(original) {
+		rec.Message += "No budget can work for this file in size mode; remove audio or subtitle tracks first. Original preserved."
+	} else {
+		rec.Message += fmt.Sprintf("At least %s would be needed for this file; raise the budget, or remove audio or subtitle tracks first. Original preserved.", formatBudgetBytesUp(minimum))
+	}
+	ec.State[sizeBudgetKey] = rec
+	ec.State["skip_transcode"] = true
+	ec.State["reason_code"] = SizeBudgetExceeded
+	return StepResult{Status: StepCompleted, Outputs: map[string]any{"skipped": true, "reason_code": SizeBudgetExceeded, "mode": snapshot.Mode, "policy_digest": snapshot.Digest, sizeBudgetKey: rec}}, true
+}
+
 // sizeBudgetFallback replaces a size search's outcome with one encode at the
 // budget when the search found no passing setting (winner nil) or only one
 // larger than the budget. handled is false when the frozen policy has no
@@ -869,6 +938,14 @@ func sizeBudgetPlannedMessage(r *SizeBudgetRecord, policy *SizeBudgetPolicy, pla
 		choice = " " + r.Choice.Message
 	}
 	return fmt.Sprintf("%s, so the file is encoded once at the budget instead: %s at %d kbps of video for about %s of %s. Its quality is measured on the final validation windows and held only to the floor; it will be reported as below the quality target.%s%s", why, encoder, r.VideoBitrateKbps, formatBudgetBytes(r.TargetBytes), formatBudgetBytes(r.BudgetBytes), choice, from)
+}
+
+// formatBudgetBytesUp rounds up, so a floor shown to the user is itself enough.
+func formatBudgetBytesUp(n int64) string {
+	if n >= 1e9 {
+		return fmt.Sprintf("%.2f GB", math.Ceil(float64(n)/1e7)/100)
+	}
+	return fmt.Sprintf("%.0f MB", math.Ceil(float64(n)/1e6))
 }
 
 func formatBudgetBytes(n int64) string {

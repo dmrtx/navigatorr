@@ -193,6 +193,18 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		if reason == "" && modeSnapshot.Mode == "compact" {
 			compactPlan, reason = compactSourcePlan(ctx, e.deps.Ffprobe, cleanPath, gateRep, modeSnapshot)
 		}
+		if reason == "" {
+			// A budget the other streams use up cannot be met by any encode or
+			// search, so it ends before the source is hashed.
+			if result, ended := endUnreachableSizeBudget(ec, modeSnapshot, &rep, fi.Size(), nil); ended {
+				if result.Status == StepCompleted {
+					ec.State["resolved_path"] = cleanPath
+					ec.State["original_size"] = fi.Size()
+					ec.State["original"] = origMap
+				}
+				return result, nil
+			}
+		}
 		if reason != "" {
 			ec.State["skip_transcode"] = true
 			ec.State["reason_code"] = reason

@@ -69,6 +69,11 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 	if cleanPath == "" {
 		cleanPath = getString(ec.Inputs, "path")
 	}
+	if snapshot, err := freezeModePolicy(ec); err == nil {
+		if result, ended := endUnreachableSizeBudget(ec, snapshot, getSourceReport(ec.State["source_report"]), getInt64(ec.State, "original_size"), siblingEvidenceOf(ec.State)); ended {
+			return result, nil
+		}
+	}
 	// A size budget that allows the media engine skips the search: its ladder
 	// of full-file VideoToolbox encodes is planned here, and the wait step has
 	// no benchmark to wait for.
