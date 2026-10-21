@@ -42,9 +42,6 @@
   --neutral-wash: #f0f0eb;
   --shadow: #00000022;
   --backdrop: #14201b88;
-  /* The sample comparison viewer stays dark in both themes. */
-  --media-bg: #14221d;
-  --media-divider: #ffffff;
   --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   --body: "Avenir Next", "Segoe UI", sans-serif;
   --control-size: 36px;
@@ -572,18 +569,6 @@ main {
 .backup-row .backup-reason { margin: 4px 0; color: var(--muted); font-size: 11px; }
 .backup-row .waiting { color: var(--warning); }
 #backup-progress:not([hidden]) { color: var(--forest); padding: 6px 0; }
-#benchmark-comparison { width: min(1100px, calc(100vw - 32px)); max-width:1100px; }
-.comparison-toolbar { display:flex; align-items:center; gap:8px; }
-.comparison-toolbar select { flex:1; min-width:0; }
-.comparison-labels { display:flex; justify-content:space-between; padding:6px 0; font-size:11px; }
-.comparison-viewport { overflow:auto; background:var(--media-bg); max-height:clamp(120px, calc(100dvh - 300px), 60vh); }
-.comparison-frame { position:relative; width:100%; }
-.comparison-frame.native-size { width:var(--frame-width); }
-.comparison-frame img { display:block; width:100%; height:auto; }
-.comparison-frame .comparison-candidate { position:absolute; inset:0; height:100%; clip-path:inset(0 50% 0 0); }
-.comparison-divider { position:absolute; top:0; bottom:0; left:50%; width:2px; background:var(--media-divider); box-shadow:0 0 2px var(--media-bg); pointer-events:none; }
-.comparison-slider { display:flex; align-items:center; gap:12px; padding-top:12px; font-size:11px; }
-.comparison-slider input { flex:1; min-width:0; accent-color:var(--forest); }
 .worker-activity { padding:10px 0; border-bottom:1px solid var(--line); }
 .activity-heading { display:flex; justify-content:space-between; gap:8px; font-size:11px; }
 .worker-slot-split { margin-top:8px; font-size:12px; }
@@ -2152,8 +2137,8 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
 .batch-file-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 6px; flex-basis: 100%; }
 .batch-item-row > button.quiet { margin-left: auto; }
 
-/* Sample test result (job.benchmark from the server summary). */
-.benchmark-report {
+/* Encode result (job.benchmark from the server summary). */
+.result-report {
   margin: 10px 0;
   padding: 10px 12px;
   border: 1px solid var(--line);
@@ -2162,31 +2147,22 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
   background: var(--paper);
   font-size: 13px;
 }
-.benchmark-report.outcome-no_acceptable_candidate,
-.benchmark-report.outcome-no_suitable_candidate,
-.benchmark-report.outcome-size_rejected,
-.benchmark-report.outcome-execution_error,
-.benchmark-report.outcome-search_review_required,
-.benchmark-report.outcome-quality_policy_unavailable,
-.benchmark-report.outcome-attention,
-.benchmark-report:has(.benchmark-warning) {
+.result-report.outcome-no_suitable_candidate,
+.result-report.outcome-size_rejected,
+.result-report.outcome-execution_error,
+.result-report.outcome-quality_policy_unavailable,
+.result-report.outcome-attention {
   border-left-color: var(--warning-line);
 }
-.benchmark-report p { margin: 4px 0; }
-.benchmark-report-head {
+.result-report p { margin: 4px 0; }
+.result-report-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: 8px;
 }
-.benchmark-report-head h3 { margin: 0; font-size: 14px; }
-.benchmark-outcome { font-size: 12px; font-weight: 600; white-space: nowrap; }
-.benchmark-warning {
-  padding: 6px 8px;
-  border-radius: 3px;
-  background: var(--warning-wash);
-  color: var(--warning-strong);
-}
+.result-report-head h3 { margin: 0; font-size: 14px; }
+.result-outcome { font-size: 12px; font-weight: 600; white-space: nowrap; }
 .regrab-warning {
   margin: 8px 0;
   padding: 8px 10px;
@@ -2196,14 +2172,13 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
   color: var(--warning-strong);
 }
 .regrab-warning p { margin: 4px 0 0; }
-.benchmark-list { margin: 4px 0 6px; padding-left: 18px; }
-.benchmark-list li { margin: 4px 0; }
-.benchmark-list li > p { margin: 2px 0; }
-.benchmark-rejected > summary,
+.result-list { margin: 4px 0 6px; padding-left: 18px; }
+.result-list li { margin: 4px 0; }
+.result-list li > p { margin: 2px 0; }
 .technical-reason > summary { cursor: pointer; margin-top: 6px; font-weight: 600; }
 .technical-reason { margin: 6px 0; font-size: 12px; }
 .technical-reason p { overflow-wrap: anywhere; }
-.benchmark-next { margin-top: 8px; }
+.result-next { margin-top: 8px; }
 .encoding-plan { margin: 6px 0; font-size: 13px; }
 .encoding-plan.plan-profile_base { color: var(--warning-strong); }
 .worker-admission {

@@ -500,10 +500,9 @@ test("stale or disconnected workers do not display a live progress meter or old 
 function metricProgressHarness() {
   const h = harness();
   h.run(`Date.now = () => Date.parse("2026-10-16T12:22:54Z");
-    globalThis.progressJob = {status:"waiting_external",waiting_condition:"benchmark_complete",worker:{
-      benchmark_status:"running",phase:"evaluating_metrics",progress:73.3,progress_is_stale:true,
-      last_progress_at:"2026-10-16T12:22:18.667341Z",worker_heartbeat_at:"2026-10-16T12:22:53Z",
-      progress_details:{completed_units:22,total_units:30,candidate_number:2,sample_number:3,metric:"vmaf"}
+    globalThis.progressJob = {status:"waiting_external",worker:{
+      transcode_status:"running",transcode_phase:"validating_quality",progress:73.3,progress_is_stale:true,
+      last_progress_at:"2026-10-16T12:22:18.667341Z",worker_heartbeat_at:"2026-10-16T12:22:53Z"
     }};`);
   return h;
 }
@@ -511,29 +510,25 @@ function progressText(element) {
   return [element.textContent, ...element.children.map(progressText)].join(" ");
 }
 
-test("long VMAF and CAMBI measurements show real units and heartbeat without declaring a stall", () => {
-  for (const metric of ["vmaf", "cambi"]) {
-    for (const progress of [70, 73.3]) {
-      const h = metricProgressHarness();
-      h.context.metric = metric;
-      h.context.measuredProgress = progress;
-      h.run('progressJob.worker.progress_details.metric=metric;progressJob.worker.progress=measuredProgress;');
-      // Also cover a single metric lasting ten minutes, with only heartbeats.
-      h.run('progressJob.worker.last_progress_at="2026-10-16T12:12:54Z";');
-      const before = h.run('JSON.stringify(progressJob)');
-      const rendered = h.run('telemetry(progressJob)');
-      const text = progressText(rendered);
-      assert.equal(h.run('queuePresentation(progressJob).status'), "Measuring quality");
-      assert.equal(h.run('statusClass(queuePresentation(progressJob).status)'), "running");
-      assert.match(text, /Measuring sample quality.*22\/30 sample tasks resolved.*Latest sample 3.*Candidate 2/);
-      assert.ok(text.includes(metric.toUpperCase()));
-      assert.match(text, /Worker heartbeat 1s ago.*Last advance 10m 0s ago/);
-      assert.match(text, /Progress updates when a sample task finishes/);
-      assert.ok(text.includes(`Last measured: ${progress.toFixed(1)}%`));
-      assert.equal(rendered.children[1].value, progress);
-      assert.doesNotMatch(text, /No updates|No recent progress|stale|About .* min/);
-      assert.equal(h.run('JSON.stringify(progressJob)'), before);
-    }
+test("a long final quality measurement shows its phase and heartbeat without declaring a stall", () => {
+  for (const progress of [70, 73.3]) {
+    const h = metricProgressHarness();
+    h.context.measuredProgress = progress;
+    h.run('progressJob.worker.progress=measuredProgress;');
+    // A single measurement can last ten minutes, with only heartbeats.
+    h.run('progressJob.worker.last_progress_at="2026-10-16T12:12:54Z";');
+    const before = h.run('JSON.stringify(progressJob)');
+    const rendered = h.run('telemetry(progressJob)');
+    const text = progressText(rendered);
+    assert.equal(h.run('queuePresentation(progressJob).status'), "Verifying quality");
+    assert.equal(h.run('statusClass(queuePresentation(progressJob).status)'), "running");
+    assert.match(text, /Measuring final quality/);
+    assert.match(text, /Worker heartbeat 1s ago.*Last advance 10m 0s ago/);
+    assert.match(text, /Final quality validation can take several minutes/);
+    assert.ok(text.includes(`Last measured: ${progress.toFixed(1)}%`));
+    assert.equal(rendered.children[1].value, progress);
+    assert.doesNotMatch(text, /No updates|No recent progress|stale|About .* min/);
+    assert.equal(h.run('JSON.stringify(progressJob)'), before);
   }
 });
 
@@ -545,7 +540,7 @@ test("a missing, invalid or expired heartbeat cannot make a long metric look liv
     const text = progressText(h.run('telemetry(progressJob)'));
     const stale = heartbeat === "2026-10-16T12:18:00Z";
     assert.equal(h.run('queuePresentation(progressJob).status'), stale ? "No heartbeat" : "No updates");
-    assert.match(text, stale ? /No worker heartbeat for 4m 54s.*Measuring sample quality/ : /Worker heartbeat unavailable/);
+    assert.match(text, stale ? /No worker heartbeat for 4m 54s.*Measuring final quality/ : /Worker heartbeat unavailable/);
     assert.doesNotMatch(text, /Navigatorr has not checked|The worker has not reported/);
     assert.match(text, /Last reported: 73.3%/);
     assert.equal(h.run('telemetry(progressJob).children.length'), 1);
@@ -554,16 +549,16 @@ test("a missing, invalid or expired heartbeat cannot make a long metric look liv
   h.run('progressJob.worker.worker_heartbeat_at="2026-10-16T12:18:00Z";progressJob.worker.progress_is_stale=false;');
   assert.equal(h.run('queuePresentation(progressJob).status'), "No heartbeat", "fresh percentage must not hide a lost heartbeat");
   h.run('progressJob.worker.worker_heartbeat_at="2026-10-16T12:22:24Z";');
-  assert.equal(h.run('queuePresentation(progressJob).status'), "Measuring quality");
+  assert.equal(h.run('queuePresentation(progressJob).status'), "Verifying quality");
   h.run('Date.now=()=>Date.parse("2026-10-16T12:26:00Z");');
   assert.equal(h.run('queuePresentation(progressJob).status'), "No heartbeat", "heartbeat must expire without new API data");
 });
 
 test("a heartbeat delayed by a busy coordinator is shown calmly, and silence is a warning, not a failure", () => {
   const h = metricProgressHarness();
-  // Ninety seconds without a sample: the coordinator was busy hashing another source.
+  // Ninety seconds without an update: the coordinator was busy hashing another source.
   h.run('progressJob.worker.worker_heartbeat_at="2026-10-16T12:21:24Z";progressJob.worker.last_worker_poll_at="2026-10-16T12:21:24Z";');
-  assert.equal(h.run('queuePresentation(progressJob).status'), "Measuring quality");
+  assert.equal(h.run('queuePresentation(progressJob).status'), "Verifying quality");
   const delayed = progressText(h.run('telemetry(progressJob)'));
   assert.match(delayed, /Worker heartbeat 1m 30s ago/);
   assert.doesNotMatch(delayed, /No recent|has not/);
@@ -621,11 +616,11 @@ test("batch rows show a smoothed encode ETA and the files left, only while speed
   assert.equal(h.run('remainingLabel(3600)'), "~1 h left");
 });
 
-test("validation, publication and sample encoding have discrete progress but require a fresh heartbeat", () => {
-  for (const [phase, status] of [["analysing_video", "Analyzing video"], ["validating", "Verifying"], ["validating_quality", "Verifying quality"], ["publishing", "Saving candidate"], ["encoding_samples", "Encoding samples"]]) {
+test("validation and publication have discrete progress but require a fresh heartbeat", () => {
+  for (const [phase, status] of [["analysing_video", "Analyzing video"], ["validating", "Verifying"], ["validating_quality", "Verifying quality"], ["publishing", "Saving candidate"]]) {
     const h = metricProgressHarness();
     h.context.phase = phase;
-    h.run('progressJob.worker.phase=phase;if(phase!=="encoding_samples"){progressJob.worker.transcode_phase=phase;progressJob.worker.transcode_status="running";}progressJob.worker.speed=14.7;progressJob.worker.fps=238;progressJob.savings={eta_seconds:600};');
+    h.run('progressJob.worker.phase=phase;progressJob.worker.transcode_phase=phase;progressJob.worker.transcode_status="running";progressJob.worker.speed=14.7;progressJob.worker.fps=238;progressJob.savings={eta_seconds:600};');
     assert.equal(h.run('queuePresentation(progressJob).status'), status);
     const text = progressText(h.run('telemetry(progressJob)'));
     assert.match(text, /Last measured: 73.3%.*Worker heartbeat/);
@@ -637,11 +632,11 @@ test("validation, publication and sample encoding have discrete progress but req
 
 test("external waits and confirmed recovery take precedence over a recent heartbeat", () => {
   const h = metricProgressHarness();
-  for (const condition of ["worker_unreachable", "benchmark_retry", "transcode_retry", "worker_reconciling", "worker_busy"]) {
+  for (const condition of ["worker_unreachable", "transcode_retry", "worker_reconciling", "worker_busy"]) {
     h.context.condition = condition;
     h.run('progressJob.waiting_condition=condition;progressJob.waiting_reason="Waiting for coordination";');
     assert.equal(h.run('queuePresentation(progressJob).status'), condition === "worker_unreachable" ? "Worker offline" : condition === "worker_busy" ? "Waiting for a free worker slot" : "Waiting");
-    assert.doesNotMatch(progressText(h.run('telemetry(progressJob)')), /Measuring sample quality|Worker heartbeat/);
+    assert.doesNotMatch(progressText(h.run('telemetry(progressJob)')), /Measuring final quality|Worker heartbeat/);
   }
   h.run('progressJob.waiting_condition="transcode_complete";progressJob.worker.recovery_required=true;progressJob.waiting_reason="Publication requires intervention";');
   assert.equal(h.run('queuePresentation(progressJob).status'), "Needs decision");
@@ -655,30 +650,30 @@ test("terminal actions and decision waits cannot be replaced by telemetry warnin
     h.context.status = status;
     h.run('progressJob.status=status;');
     assert.equal(h.run('queuePresentation(progressJob).showTelemetry'), false);
-    assert.doesNotMatch(h.run('queuePresentation(progressJob).status'), /No heartbeat|No updates|Measuring quality/);
+    assert.doesNotMatch(h.run('queuePresentation(progressJob).status'), /No heartbeat|No updates|Verifying quality/);
     assert.doesNotMatch(progressText(h.run('telemetry(progressJob)')), /No recent|Worker heartbeat/);
   }
   for (const status of ["completed", "failed", "cancelled", "queued"]) {
     h.context.status = status;
-    h.run('progressJob.status="running";progressJob.worker.benchmark_status=status;progressJob.worker.phase=status;');
+    h.run('progressJob.status="running";progressJob.worker.transcode_status=status;progressJob.worker.phase=status;');
     assert.doesNotMatch(progressText(h.run('telemetry(progressJob)')), /No recent|Worker heartbeat/);
   }
 });
 
-test("batch file detail and worker slots agree about a long metric and lost heartbeat", () => {
+test("batch file detail and worker slots agree about a long measurement and lost heartbeat", () => {
   const h = metricProgressHarness();
-  h.run('progressJob.batch={total:2,running:1};progressJob.activities=[{id:"child",worker:progressJob.worker,waiting_condition:"benchmark_complete",current_step:0,stages:[{name:"wait_benchmark"},{name:"wait_transcode"}]}];');
+  h.run('progressJob.batch={total:2,running:1};progressJob.activities=[{id:"child",worker:progressJob.worker,current_step:0,stages:[{name:"wait_transcode"}]}];');
   const label = h.run('batchFileActivity({status:"running",child_action_id:"child"},progressJob)');
-  assert.match(label, /Measuring sample quality.*Worker heartbeat received/);
+  assert.match(label, /Measuring final quality.*Worker heartbeat received/);
   assert.doesNotMatch(label, /stale|No updates/);
-  assert.match(progressText(h.run('batchProgress(progressJob)')), /Measuring sample quality.*Worker heartbeat received/);
+  assert.match(progressText(h.run('batchProgress(progressJob)')), /Measuring final quality.*Worker heartbeat received/);
   h.run('progressJob.worker.worker_heartbeat_at="2026-10-16T12:15:00Z";');
   assert.match(h.run('batchFileActivity({status:"running",child_action_id:"child"},progressJob)'), /No worker heartbeat for 7m 54s/);
   assert.match(progressText(h.run('batchProgress(progressJob)')), /No worker heartbeat for 7m 54s/);
   h.run('progressJob.worker.last_worker_poll_at="2026-10-16T12:15:00Z";');
   assert.match(h.run('batchFileActivity({status:"running",child_action_id:"child"},progressJob)'), /Navigatorr has not checked the worker for 7m 54s/);
   assert.match(progressText(h.run('batchProgress(progressJob)')), /Navigatorr has not checked the worker for 7m 54s/);
-  h.run('renderWorkerActivity({available:true,activity:{details_available:true,worker_slots_total:1,worker_slots_used:1,jobs:[{id:"child",kind:"benchmark",file:"episode.mkv",phase:"evaluating_metrics",heartbeat_at:progressJob.worker.worker_heartbeat_at}]}});');
+  h.run('renderWorkerActivity({available:true,activity:{details_available:true,worker_slots_total:1,worker_slots_used:1,jobs:[{id:"child",kind:"transcode",file:"episode.mkv",phase:"validating_quality",heartbeat_at:progressJob.worker.worker_heartbeat_at}]}});');
   assert.match(progressText(h.elements.get("worker-slots")), /No recent worker heartbeat/);
 });
 
@@ -890,17 +885,6 @@ test("benchmark retains its source for encoding while failed submissions retain 
   assert.equal(failed.h.run("state.fileStep"), "configure");
   assert.equal(failed.h.elements.get("path").value, "/media/one.mp4");
   assert.equal(failed.receipts.size, 1);
-});
-
-test("benchmark submission obeys its strict input schema even for an anime library selection", async () => {
-  for(const library of [false,true]) {
-    const {h}=submissionHarness(); let submission;
-    h.context.capture=(_name,args)=>{submission=JSON.parse(args.inputs); return {id:"submitted"};};
-    if(library) h.run('state.fileMedia={id:12,seriesType:"anime"}; state.fileService="sonarr";');
-    h.run('$("media-kind").value="tv"; $("preserve-depth").checked=true; tool=async(...args)=>capture(...args);');
-    await h.run('buildAndSubmitJob("benchmark")');
-    assert.deepEqual(Object.keys(submission).sort(),["path","preserve_source_bit_depth","profile"]);
-  }
 });
 
 test("queue results distinguish candidates, replacements and failures without inventing measurements", () => {
@@ -1575,7 +1559,7 @@ test("saving an unchanged bitrate profile preserves rate control and advanced fi
   assert.equal(h.elements.get("recipe-quality").disabled, true);
 });
 
-test("encoder change clears incompatible knobs and re-calibrates sample search", () => {
+test("encoder change clears incompatible knobs", () => {
   const h = harness();
   h.run(
     'renderAdvancedProfile = () => {}; setRecipeControls({container:"mkv",video:{codec:"hevc_videotoolbox",quality:0,average_bitrate_kbps:3500,spatial_aq:true,realtime:false,qmin:5,gop_size:60,power_efficient:true,profile:"main",pixel_format:"yuv420p"},audio:{mode:"copy"},preserve:{metadata:true,chapters:true,attachments:true},optimization:{enabled:true,search:{bitrate_values:[3000,4000],max_candidates:2}}});',
@@ -1595,10 +1579,8 @@ test("encoder change clears incompatible knobs and re-calibrates sample search",
   ])
     assert.equal(p.video[key], undefined);
   assert.equal(p.video.profile, "main");
-  assert.deepEqual(p.optimization.search, {
-    quality_values: [20, 23, 26],
-    max_candidates: 3,
-  });
+  // A stored optimization block is carried through untouched, not edited.
+  assert.deepEqual(p.optimization.search, {bitrate_values: [3000, 4000], max_candidates: 2});
   assert.match(h.elements.get("notice").textContent, /reset/);
   h.elements.get("recipe-encoder").value = "hevc_videotoolbox";
   h.elements.get("recipe-encoder").listeners.get("change")();
@@ -1606,10 +1588,7 @@ test("encoder change clears incompatible knobs and re-calibrates sample search",
   assert.equal(vt.video.quality, 65);
   assert.equal(vt.video.preset, undefined);
   assert.equal(vt.video.tune, undefined);
-  assert.deepEqual(vt.optimization.search, {
-    quality_values: [55, 65, 75],
-    max_candidates: 3,
-  });
+  assert.deepEqual(vt.optimization.search, {bitrate_values: [3000, 4000], max_candidates: 2});
 });
 
 test("continuous jobs loading appends a page and refreshes the entire loaded window", async () => {
@@ -1647,18 +1626,18 @@ test("continuous jobs loading appends a page and refreshes the entire loaded win
   assert.equal(h.elements.get("jobs-more").hidden, true);
 });
 
-test("worker activity shows occupied slots, sample work, elapsed time and unknown connection honestly", () => {
+test("worker activity shows occupied slots, final measurement, elapsed time and unknown connection honestly", () => {
   const h=harness();
   h.context.activity={available:true,activity:{details_available:true,worker_slots_total:2,worker_slots_used:2,jobs:[
-    {id:"first",file:"sample-one.mkv",kind:"benchmark",phase:"evaluating_metrics",started_at:new Date(Date.now()-120000).toISOString(),heartbeat_at:new Date().toISOString(),last_progress_at:new Date(Date.now()-10000).toISOString(),progress:84.4,details:{total_units:20,completed_units:17,sample_number:2,candidate_number:3,metric:"vmaf"}},
+    {id:"first",file:"sample-one.mkv",kind:"transcode",phase:"validating_quality",started_at:new Date(Date.now()-120000).toISOString(),heartbeat_at:new Date().toISOString(),last_progress_at:new Date(Date.now()-10000).toISOString(),progress:84.4,},
     {id:"second",file:"sample-two.mkv",kind:"transcode",phase:"encoding",heartbeat_at:new Date().toISOString(),progress:30},
   ]}};
   h.run('renderWorkerActivity(activity)');
   assert.match(h.elements.get("worker-capacity").textContent,/2\/2 occupied/);
   const first=h.elements.get("worker-slots").children[0];
   assert.match(first.children[0].textContent,/sample-one/);
-  assert.match(first.children[1].textContent,/Measuring sample quality.*elapsed.*of sample work/);
-  assert.match(first.children[2].textContent,/17\/20.*VMAF/);
+  assert.match(first.children[1].textContent,/Measuring final quality.*elapsed/);
+  assert.match(first.children[2].textContent,/Last advance 10s ago/);
   h.run('activity.activity.jobs.shift(); activity.activity.worker_slots_used=1;renderWorkerActivity(activity)');
   assert.match(h.elements.get("worker-slots").children[0].children[0].textContent,/Slot 1 · Available/);
   assert.match(h.elements.get("worker-slots").children[1].children[0].textContent,/Slot 2 · sample-two/);
@@ -1701,34 +1680,6 @@ test("worker activity labels video and podcast slots and shows each pool's use",
   assert.equal(h.elements.get("worker-slot-split").hidden,true);
 });
 
-test("a late comparison response cannot reopen a closed dialog or expired session", async () => {
-  for (const expired of [false,true]) {
-    const h=harness(),pending=deferred();h.context.pending=pending.promise;
-    h.run('api=async()=>pending;');
-    const open=h.run('openComparison({id:"action",comparison_action_id:"action",action_name:"benchmark_transcode",status:"completed",source_path:"/media/sample.mkv"})');
-    if (expired) h.run('invalidateAuthentication()');
-    else { h.elements.get("benchmark-comparison").close();h.elements.get("benchmark-comparison").listeners.get("close")(); }
-    pending.resolve({frames:[{sample_index:0,width:128,height:72,frame_index:5,source_seconds:5}]});
-    await open;
-    assert.equal(h.elements.get("comparison-frame").children.length,0);
-    assert.equal(h.elements.get("benchmark-comparison").open,false);
-  }
-});
-
-test("comparison waits for both paired images and never shows one as a successful comparison", async () => {
-  const h=harness();
-  h.run('api=async()=>({frames:[{sample_index:0,width:128,height:72,frame_index:5,source_seconds:5}]});');
-  await h.run('openComparison({id:"action",comparison_action_id:"action",action_name:"benchmark_transcode",status:"completed",source_path:"/media/sample.mkv"})');
-  const imgs=h.elements.get("comparison-frame").children;
-  assert.match(imgs[0].src,/side=original/);assert.match(imgs[1].src,/side=candidate/);
-  imgs[0].listeners.get("load")();
-  assert.equal(h.elements.get("comparison-view").hidden,true);
-  imgs[1].listeners.get("load")();
-  assert.equal(h.elements.get("comparison-view").hidden,false);
-  imgs[1].listeners.get("error")();
-  assert.equal(h.elements.get("comparison-view").hidden,true);
-  assert.match(h.elements.get("comparison-note").textContent,/Could not load both/);
-});
 test("changing a root blocks old continuation controls until the new first page loads", async () => {
   const h = harness(),
     pending = deferred();
@@ -2196,26 +2147,16 @@ test("reconfiguration keeps the same batch and a stable receipt across lost resp
   assert.equal(h.run('state.reconfigurePlan'),null);
 });
 
-test("overall batch progress includes sample work, conversion and validation while retaining true finished counts", () => {
+test("overall batch progress includes conversion and validation while retaining true finished counts", () => {
  const h=harness();
  const stages=["preflight","submit_benchmark","wait_benchmark","submit_transcode","wait_transcode","validate_result","accept_result"].map(name=>({name}));
  h.context.stages=stages;
- const progress=h.run('batchProgress({status:"waiting_external",batch:{total:2,running:2,completed:0},activities:[{id:"one",file:"one.mkv",current_step:2,stages,worker:{benchmark_phase:"evaluating_metrics",benchmark_progress_details:{completed_units:20,total_units:40}}},{id:"two",file:"two.mkv",current_step:5,stages}]})');
+ const progress=h.run('batchProgress({status:"waiting_external",batch:{total:2,running:2,completed:0},activities:[{id:"one",file:"one.mkv",current_step:4,stages,worker:{transcode_phase:"validating_quality"}},{id:"two",file:"two.mkv",current_step:5,stages}]})');
  assert.equal(progress.children[0].textContent,"0 / 2 files finished");
- assert.equal(progress.children[1].textContent,"~54%");
- assert.match(progress.children[3].textContent,/Measuring sample quality.*Verify/);
+ assert.equal(progress.children[1].textContent,"~64%");
+ assert.match(progress.children[3].textContent,/Measuring final quality.*Verify/);
  const finish=h.run('batchProgress({status:"waiting_external",batch:{total:2,completed:2}})');
  assert.equal(finish.children[1].textContent,"~99%");assert.match(finish.children[3].textContent,/Finishing/);
-});
-
-test("full conversion progress does not show counters from completed sample testing", () => {
- const h=harness();
- const encoding=h.run('telemetry({worker:{transcode_status:"running",transcode_phase:"encoding",progress:64,progress_details:{completed_units:65,total_units:185}}})');
- assert.match(encoding.children[0].textContent,/Encoding full video/);
- assert.doesNotMatch(encoding.children[0].textContent,/sample tasks/);
- assert.equal(encoding.children[1].value,64);
- const testing=h.run('telemetry({worker:{benchmark_status:"running",benchmark_phase:"evaluating_metrics",progress:35,progress_details:{completed_units:65,total_units:185}}})');
- assert.match(testing.children[0].textContent,/65\/185 sample tasks/);
 });
 
 test("pending cleanup polls measured bytes without interpreting an old failed checkpoint as its result", async () => {
@@ -2237,10 +2178,8 @@ test("duplicate cleanup reports removal separately from a failed conversion and 
  assert.equal(args.mode,"discard_duplicate");assert.match(h.elements.get("backup-progress").textContent,/Original preserved; failed job unchanged/);
 });
 
-test("a nested benchmark contributes to its parent workflow once and replacement checks retain their share",()=>{
- const h=harness();h.context.stages=["preflight","submit_benchmark","wait_benchmark","submit_transcode","wait_transcode","validate_result","accept_result"].map(name=>({name}));
- const progress=h.run('batchProgress({status:"waiting_external",batch:{total:1,running:1},activities:[{id:"parent",file:"a.mkv",current_step:2,stages},{id:"benchmark",parent_action_id:"parent",file:"a.mkv",current_step:2,stages:stages.slice(0,3),worker:{benchmark_phase:"encoding_samples",progress:50}}]})');
- assert.equal(progress.children[1].textContent,"~36%");assert.equal(progress.children[3].textContent.split("a.mkv").length,2);
+test("replacement checks retain their share of batch progress",()=>{
+ const h=harness();
  const replacing=h.run('batchProgress({status:"waiting_external",replacement_requested:true,batch:{total:2,completed:2,promotion:{eligible:2,promoted:1}}})');assert.equal(replacing.children[1].textContent,"~93%");
 });
 
@@ -2562,7 +2501,7 @@ test("profile details describe the encoder and ignore an obsolete selection",asy
  assert.match(JSON.stringify(h.elements.get('reconfigure-profile-info').children),/Hardware HEVC.*4000 kbps.*Keep original audio tracks.*MKV/);
  h.run('state.recipeDetails={};tool=async()=>({profile:{video:{codec:"libx265",quality:24,preset:"slow"},optimization:{enabled:true}}})');
  await h.run('showReconfigureProfile()');
- assert.match(JSON.stringify(h.elements.get('reconfigure-profile-info').children),/Tests quality samples before full conversion/);
+ assert.match(JSON.stringify(h.elements.get('reconfigure-profile-info').children),/Not available.*samples.*removed/);
 });
 
 test("changing only the profile preserves current limits, including mixed per-file settings",async()=>{
@@ -2606,7 +2545,7 @@ test("cached selection details show meaningful settings without another profile 
   const facts = JSON.stringify(h.elements.get('reconfigure-profile-info').children);
   assert.match(facts, /Software HEVC.*CPU/);
   assert.match(facts, /Lower means higher quality.*slow preset/);
-  assert.match(facts, /Tests quality samples before full conversion/);
+  assert.match(facts, /Not available.*samples.*removed/);
   assert.match(facts, /Profile ID: live-action-hevc/);
 });
 
@@ -2615,7 +2554,7 @@ test("batch file context distinguishes scheduling, paused work and actual worker
   assert.match(h.run('batchFileActivity({status:"queued"},{status:"running"})'), /Not sent to the worker yet/);
   assert.match(h.run('batchFileActivity({status:"queued"},{paused:true})'), /Resume the batch/);
   assert.match(h.run('batchFileActivity({status:"queued",child_action_id:"child"},{})'), /File task created/);
-  assert.equal(h.run('batchFileActivity({status:"running",child_action_id:"child"},{activities:[{id:"child",worker:{benchmark_phase:"evaluating_metrics"}}]})'), 'Measuring sample quality');
+  assert.equal(h.run('batchFileActivity({status:"running",child_action_id:"child"},{activities:[{id:"child",worker:{transcode_phase:"validating_quality"}}]})'), 'Measuring final quality');
   assert.match(h.run('batchFileActivity({retry_pending:true},{})'), /Current attempt finishes/);
 });
 
@@ -2784,19 +2723,6 @@ test("simple series processing requires a frozen selection before admission",()=
 test("phase cost detail distinguishes measured wall intervals from unknown bytes and CPU",()=>{
  const h=harness();h.run('renderPhaseCosts($("detail-summary"),{phase_costs:{coordinator_inventory:{duration_ms:20,attempts:1,active_compute_ms:null},worker_encode:{duration_ms:500,attempts:2,nas_read_bytes:null,nas_written_bytes:400}}});');
  const rendered=JSON.stringify(h.elements.get("detail-summary").children);assert.match(rendered,/Coordinator · Inventory/);assert.match(rendered,/20 ms/);assert.match(rendered,/Unknown/);assert.match(rendered,/CPU time is unknown/);assert.match(rendered,/phases may overlap/);assert.doesNotMatch(rendered,/Total.*520/);
-});
-
-test("phase cost detail shows known cache observations and distinguishes search budget from consumption",()=>{
- const h=harness();h.run('renderPhaseCosts($("detail-summary"),{worker:{benchmark_search_seconds:4,search_budget_seconds:600,operation_search_budget_seconds:3600},phase_costs:{worker_staging:{duration_ms:1,attempts:1,cache_hits:0,cache_misses:1}}});');const rendered=JSON.stringify(h.elements.get("detail-summary").children);assert.match(rendered,/0 \/ 1/);assert.match(rendered,/measured wall: 4 s/);assert.match(rendered,/Budget per file: 600 s/);assert.doesNotMatch(rendered,/Operation budget/);assert.match(rendered,/reservations are not measured consumption/);
-});
-
-test("phase cost detail names the extended search ceiling only when the worker reports one",()=>{
- const render=worker=>{const h=harness();h.context.job={worker,phase_costs:{}};h.run('renderPhaseCosts($("detail-summary"),job);');return JSON.stringify(h.elements.get("detail-summary").children);};
- assert.match(render({benchmark_search_seconds:900,search_budget_seconds:600,search_budget_max_seconds:1800}),/Budget per file: 600 s, extended to at most 1800 s while samples keep finishing\./);
- assert.match(render({benchmark_search_seconds:900,search_budget_seconds:600,search_budget_max_seconds:2400,search_budget_verify_seconds:600}),/extended to at most 2400 s while samples keep finishing, 3000 s while verifying a winner\./);
- assert.doesNotMatch(render({benchmark_search_seconds:4,search_budget_seconds:600}),/extended/);
- assert.doesNotMatch(render({benchmark_search_seconds:4,search_budget_seconds:600,search_budget_max_seconds:600}),/extended/);
- assert.doesNotMatch(render({benchmark_search_seconds:4,search_budget_max_seconds:1800}),/extended/);
 });
 
 test("a search that ran out of time on a busy worker says so and suggests trying again, whole",()=>{
@@ -3059,29 +2985,6 @@ test("four icon actions all show; a More menu never holds a single item", () => 
   assert.equal(more.children[1].children.length, 2);
 });
 
-test("sample test results explain each rejected setting with its measurement and next step", () => {
-  const h = harness();
-  h.context.job = {id:"j",action_name:"transcode_media",mode:"quality",status:"completed",reason_code:"no_suitable_candidate",candidate_ready:false,source_path:"/media/Demo Film A.mkv",
-    benchmark:{outcome:"no_suitable_candidate",message:"None of the tested configurations met this goal. Originals preserved.",next_step:"Keep the original, or explicitly choose another processing goal.",
-      rejected:[{candidate_id:"x265-crf20",checks:[{code:"quality_vmaf_p5_below_minimum",reason:"The lower-quality portion is below the VMAF limit.",actual:91.2,limit:93}],failed_samples:[1,2],review_source_seconds:1834.5}]}};
-  const text = allText(h.run("benchmarkReport(job)"));
-  assert.match(text, /No setting passed|None of the tested configurations/);
-  assert.match(text, /x265-crf20/);
-  assert.match(text, /Measured 91\.2, limit 93\.0/);
-  assert.match(text, /2 samples below the limit/);
-  assert.match(text, /Worst moment to check in the source: 30:34/);
-  assert.match(text, /Next step: .*another processing goal/);
-  const row = h.run("queuePresentation(job)");
-  assert.equal(row.status, "Skipped", "a goal that produced no file is not shown as completed");
-  assert.match(h.run("queueOutcome(job)"), /No tested setting passed \(1 rejected\) · Original kept/);
-  assert.equal(h.run('benchmarkReport({benchmark:{outcome:"testing",message:"x"}})'), null);
-  const selected = allText(h.run('benchmarkReport({benchmark:{outcome:"selected",message:"Selected.",next_step:"Monitor the same action."}})'));
-  assert.doesNotMatch(selected, /Next step/, "a normal selection needs no extra instruction");
-  const larger = h.run('({row: queueOutcome({benchmark:{outcome:"selected",size_warning:"Estimated 6.3% larger than the original.",next_step:"Keep the original."}}), report: benchmarkReport({benchmark:{outcome:"selected",size_warning:"Estimated 6.3% larger than the original.",next_step:"Keep the original."}})})');
-  assert.match(larger.row, /would make the file larger/);
-  assert.match(allText(larger.report), /6\.3% larger.*Next step:\s+Keep the original/);
-});
-
 test("size mode details report the verification attempts and each window's search and final score", () => {
   const h = harness();
   const text = allText(h.run(`sizeModeNote({size_mode:{final_quality:{vmaf_mean:91,vmaf_p5:88,fresh_vmaf_mean:89.5,fresh_vmaf_p5:86},verification:{windows:"final_grid",attempts:[{role:"smallest",outcome:"quality_failed"},{role:"safest",outcome:"passed"},{role:"bisect",outcome:"passed"}]},windows:[{start_seconds:600,role:"discovery",search:{vmaf_mean:93},final:{vmaf_mean:91}},{start_seconds:1275,role:"unsearched",final:{vmaf_mean:84}},{start_seconds:1500,role:"fresh",final:{vmaf_mean:89}}]}})`));
@@ -3138,35 +3041,16 @@ test("size mode details show the expected size, final VMAF and compacted audio",
   assert.match(h.run('shortJobReason("audio_compaction_insufficient")'), /lossless audio alone would not save enough/);
 });
 
-test("the encoding plan line says whether a sample test backs the settings", () => {
-  const h = harness();
-  const note = "No benchmark candidate was selected; the stored plan is the profile's untested starting configuration.";
-  const untested = h.run(`encodingPlanNote({benchmark:{outcome:"no_acceptable_candidate",plan_source:"profile_base",plan_note:${JSON.stringify(note)}}})`);
-  assert.match(allText(untested), /Encoding plan:.*untested starting configuration/);
-  assert.match(untested.className, /plan-profile_base/);
-  assert.match(allText(h.run('encodingPlanNote({benchmark:{outcome:"selected",plan_source:"benchmark_winner"}})')), /selected by the sample test/);
-  assert.equal(h.run('encodingPlanNote({benchmark:{outcome:"testing"}})'), null, "a provisional preflight plan is not shown");
-  assert.equal(h.run("encodingPlanNote({})"), null);
-});
-
-test("a sample measurement replayed from an earlier run is labelled as reused", () => {
-  const h = harness();
-  assert.equal(h.run("reusedLabel(undefined)"), "");
-  assert.equal(h.run("reusedLabel({reused:0,total:3})"), "", "nothing reused, nothing to say");
-  assert.match(h.run("reusedLabel({reused:3,total:3})"), /reused from an earlier run/);
-  assert.match(h.run("reusedLabel({reused:1,total:3})"), /1 of 3 samples reused from an earlier run/);
-});
-
 test("a job paused because quality checks are unavailable is not shown as still testing", () => {
   const h = harness();
   h.context.job = {id:"p",action_name:"transcode_media",mode:"compact",status:"waiting_decision",waiting_reason:"quality_vmaf_model_unavailable: v1_1080p_3h; original preserved",
-    benchmark:{outcome:"quality_policy_unavailable",message:"No sample test was started: the worker cannot run the quality checks this goal requires. The original is preserved.",next_step:"Cancel to keep the original."}};
-  const text = allText(h.run("benchmarkReport(job)"));
+    benchmark:{outcome:"quality_policy_unavailable",message:"No encode was started: the worker cannot run the quality checks this goal requires. The original is preserved.",next_step:"Cancel to keep the original."}};
+  const text = allText(h.run("resultReport(job)"));
   assert.match(text, /Quality checks unavailable/);
-  assert.match(text, /No sample test was started/);
+  assert.match(text, /No encode was started/);
   assert.match(text, /Next step: .*Cancel to keep the original/);
   assert.doesNotMatch(text, /quality_policy_unavailable/);
-  assert.match(allText(h.run('benchmarkReport({benchmark:{outcome:"attention",message:"Search budget exhausted.",next_step:"Review."}})')), /Needs your decision/);
+  assert.match(allText(h.run('resultReport({benchmark:{outcome:"attention",message:"The worker needs a decision.",next_step:"Review."}})')), /Needs your decision/);
 });
 
 test("the worker details explain why a connected worker still refuses jobs", () => {
@@ -3188,78 +3072,10 @@ test("negative sizes and machine reason codes are readable", () => {
   }
 });
 
-test("an extra benchmark round runs only after the evidence was shown and confirmed", async () => {
-  for (const confirm of [false, true]) {
-    const h = harness(), calls = [];
-    h.context.record = (...args) => calls.push(args);
-    h.context.job = {id:"review",action_name:"transcode_media",mode:"size",status:"waiting_decision",source_path:"/media/S03E05.mkv",
-      waiting_reason:"Two benchmark rounds for these source bytes already found no acceptable candidate.",
-      waiting_options:[{decision:"cancel",description:"Stop."},{decision:"run_once_after_review",description:"Explicitly authorize one additional bounded benchmark. Do not choose this automatically."}],
-      benchmark:{outcome:"search_review_required",message:"Two earlier rounds found no acceptable candidate.",previous_unsuccessful_actions:["act-1"],proposed_candidates:[{id:"x265-crf23",video_codec:"libx265",quality:23}],
-        next_step:"Use the displayed run_once_after_review decision only on explicit user instruction."}};
-    h.run("jobControl=async(...args)=>record(...args);");
-    const button = h.run("jobControls(job).children.find(b=>b.textContent===\"Run one more test\")");
-    assert.ok(button, "the decision has a short label instead of the engine description");
-    button.listeners.get("click")();
-    for (let i = 0; i < 6; i++) await Promise.resolve();
-    assert.equal(h.elements.get("action-review").open, true);
-    assert.equal(calls.length, 0, "nothing is sent before the confirmation");
-    const shown = allText(h.elements.get("action-review-content"));
-    assert.match(shown, /x265-crf23/);
-    assert.match(shown, /“Run one more test”/);
-    assert.doesNotMatch(shown, /run_once_after_review/);
-    h.elements.get(confirm ? "confirm-action-review" : "dismiss-action-review").listeners.get("click")();
-    for (let i = 0; i < 12; i++) await Promise.resolve();
-    assert.deepEqual(JSON.parse(JSON.stringify(calls)), confirm ? [["review","action_resume",{decision:"run_once_after_review"}]] : []);
-  }
-});
-
-test("the search review shows earlier measurements, marks new settings and hides a repeat", () => {
-  const h = harness();
-  const vmaf = {mean:94.87,p5:91.5,min:90.3,worst_window_mean:92.8,worst_window_seconds:5};
-  h.context.job = {id:"review",action_name:"transcode_media",mode:"size",status:"waiting_decision",source_path:"/media/episode.mkv",
-    waiting_reason:"Two earlier test rounds already tried every setting this test would use, with the same or a more lenient quality requirement, and none was acceptable. Running it again would repeat them, so it is not offered. The original is unchanged.",
-    waiting_options:[{decision:"cancel",description:"Stop and keep the original."}],
-    benchmark:{outcome:"search_review_required",message:"Two earlier rounds found no acceptable candidate.",new_candidates:[],
-      previous_rounds:[{action_id:"act-1",mode:"size",floor:{minimum:88,p5_minimum:84,worst_window_minimum:85},candidates:[{id:"crf16",video_codec:"libx265",quality:16,preset:"slow",vmaf}]}],
-      proposed_candidates:[{id:"next-1",video_codec:"libx265",quality:16,preset:"slow"}],
-      measured:[{candidate_id:"crf20",video_codec:"libx265",quality:20,passed:false,vmaf:{mean:90,p5:85.5,min:84,worst_window_mean:85.95,worst_window_seconds:5}}],
-      next_step:"Every proposed candidate was already measured; run_once_after_review is not offered.",
-      user_next_step:"Keep the original. Every setting this test would try already failed in earlier rounds, so testing them again is not offered."}};
-  assert.equal(h.run('jobControls(job).children.find(b=>b.textContent==="Run one more test")'), undefined);
-  const text = progressText(h.run('benchmarkReport(job)'));
-  assert.match(text, /Earlier round 1 · Size goal \(VMAF ≥ 88, p5 ≥ 84, worst window ≥ 85\)/);
-  assert.match(text, /crf16 · x265 CRF 16 · slow · VMAF mean 94.9 · p5 91.5 · worst 5 s 92.8 · lowest frame 90.3/);
-  assert.match(text, /next-1 .* already tried/);
-  assert.match(text, /crf20 .* p5 85.5 .* did not pass/);
-  assert.match(text, /Next step: .*already failed in earlier rounds/);
-  assert.doesNotMatch(text, /run_once|action/);
-  assert.match(h.run('shortJobReason(job.waiting_reason)'), /already tried these settings; another test is not offered/);
-});
-
 test("the process button says how many files it starts", () => {
   const h = harness();
   h.run('$("path").value="/media/one.mkv"; controls();');
   assert.equal(h.elements.get("enqueue").textContent, "Process file");
-});
-
-test("sample tests, the sample search and its batch priority are not offered", async () => {
-  const h = harness();
-  h.run('state.info={transcode_enabled:true};state.workerInfo={ready:true};$("path").value="/media/one.mkv"; $("technical").checked=true; $("custom").checked=true; $("optimize").checked=true; controls();');
-  const el = (id) => h.elements.get(id);
-  assert.equal(el("benchmark").hidden, true);
-  assert.equal(el("benchmark").disabled, true);
-  assert.equal(el("priority-label").hidden, true);
-  assert.equal(el("optimize").checked, false);
-  assert.equal(el("optimization-fields").hidden, true);
-  assert.equal(h.run('profileFromControls().optimization.enabled'), false);
-  const {h: batch} = submissionHarness(); let sent;
-  batch.context.capture = (_tool, args) => { sent = JSON.parse(args.inputs); return {id: "submitted"}; };
-  batch.run('$("technical").checked=true;$("custom").checked=false;$("scope").value="batch";$("selected-only").checked=true;state.folderSelected=new Set(["/media/a.mkv","/media/b.mkv"]);$("profile").value="auto";$("priority").value="savings";tool=async(...args)=>capture(...args);');
-  await batch.run('buildAndSubmitJob("encode")');
-  assert.equal(sent.profile, "auto");
-  assert.equal(sent.priority, undefined);
-  assert.equal(sent.metric, undefined);
 });
 
 test("technical profiles live in a labelled Advanced section that keeps the goal visible", () => {
@@ -3420,22 +3236,6 @@ test("changing the goal to smaller files carries the media engine choice", async
   h = await open({ ...base, settings: {} });
   h.run('$("reconfigure-mode").value="size"; $("reconfigure-hardware-margin").value="60"; submissionID=()=>"goal-4";commandRequest=async()=>{throw new Error("sent")};');
   await assert.rejects(h.run("submitReconfiguredBatch()"), /0 to 50 percent/);
-});
-
-test("a VideoToolbox winner is told apart from x265 before anything is replaced", () => {
-  const h = harness();
-  const hardware = h.run('sizeModeNote({size_mode:{expected_bytes:2150000000,encoder:"hevc_videotoolbox",hardware:true}})');
-  const text = allText(hardware);
-  assert.match(text, /Encoder: VideoToolbox \(hardware media engine\)/);
-  assert.match(text, /Hardware/);
-  const badge = hardware.children.flatMap((row) => row.children || []).find((c) => /hardware-badge/.test(c.className || ""));
-  assert.ok(badge, "hardware badge present");
-  const software = h.run('sizeModeNote({size_mode:{expected_bytes:2150000000,encoder:"libx265"}})');
-  assert.match(allText(software), /Encoder: x265 \(software\)/);
-  assert.doesNotMatch(allText(software), /Hardware/);
-  assert.equal(h.run('sizeModeNote({size_mode:{}})'), null);
-  assert.equal(h.run('benchmarkCandidateLabel({id:"vt-cand_q50",video_codec:"hevc_videotoolbox",quality:50})'), "vt-cand_q50 · VideoToolbox (hardware) quality 50");
-  assert.equal(h.run('benchmarkCandidateLabel({id:"cand_crf22",video_codec:"libx265",quality:22,preset:"slow"})'), "cand_crf22 · x265 CRF 22 · slow");
 });
 
 test("a VideoToolbox winner says why it was chosen next to the encoder line", () => {
@@ -4000,16 +3800,16 @@ test("a single job waiting for a full worker shows a slot wait, never a failure"
 
 test("a file waiting in the coordinator's slot queue shows its place, not the last preflight phase", () => {
   const h = harness();
-  const job = position => ({activities:[{id:"child",waiting_condition:"worker_busy",work:{phase:"waiting_for_worker",queue_position:position},worker:{benchmark_phase:"completed"}}]});
+  const job = position => ({activities:[{id:"child",waiting_condition:"worker_busy",work:{phase:"waiting_for_worker",queue_position:position},worker:{transcode_phase:"completed"}}]});
   h.context.waitingJob = job;
   assert.equal(h.run('batchFileActivity({status:"waiting_for_slot",child_action_id:"child"},waitingJob(3))'), "Waiting for a worker slot · 2 ahead in line");
   assert.equal(h.run('batchFileActivity({status:"waiting_for_slot",child_action_id:"child"},waitingJob(1))'), "Waiting for a worker slot · Next in line");
   assert.equal(h.run('batchFileActivity({status:"waiting_for_slot",child_action_id:"child"},waitingJob(undefined))'), "Waiting for a worker slot");
   assert.equal(h.run('workerPhaseLabel("waiting_for_worker")'), "Waiting for a worker slot");
   // Once the worker accepts the job the phase is gone and worker progress shows.
-  assert.equal(h.run('batchFileActivity({status:"running",child_action_id:"child"},{activities:[{id:"child",worker:{benchmark_phase:"evaluating_metrics"}}]})'), "Measuring sample quality");
+  assert.equal(h.run('batchFileActivity({status:"running",child_action_id:"child"},{activities:[{id:"child",worker:{transcode_phase:"validating_quality"}}]})'), "Measuring final quality");
   // A standalone job says how many are ahead of it.
-  h.context.job = {action_name:"benchmark_transcode",status:"waiting_external",waiting_condition:"worker_busy",work:{phase:"waiting_for_worker",queue_position:3}};
+  h.context.job = {action_name:"transcode_media",status:"waiting_external",waiting_condition:"worker_busy",work:{phase:"waiting_for_worker",queue_position:3}};
   assert.match(h.run("telemetry(job)").children[0].textContent, /2 jobs are ahead of it in line\./);
   h.context.job.work.queue_position = 1;
   assert.match(h.run("telemetry(job)").children[0].textContent, /It is next in line\./);
@@ -4075,7 +3875,7 @@ test("a cancelled or no-winner standalone file offers Run again with a confirmat
   // Two earlier no-winner rounds make another one an explicit decision; replacing originals drops the line.
   const third = base.replace('no_winner_rounds:1', 'no_winner_rounds:2').replace('replace_original:false', 'replace_original:true');
   await h.run(`rerunJob(${third})`);
-  assert.match(text(reviews[2]), /This file already had 2 searches without a result/);
+  assert.match(text(reviews[2]), /This file already had 2 rounds without a result/);
   assert.doesNotMatch(text(reviews[2]), /Originals stay in place/);
   assert.match(text(reviews[2]), /original is replaced only after you review and approve it/);
 
@@ -4154,24 +3954,6 @@ test("a media engine budget encode below the quality floor offers Try with x265,
   // The ladder's over-budget steps read as steps, not as searched settings.
   assert.match(h.run('sizeBudgetPointLabel({kind:"budget_rung_over",video_codec:"hevc_videotoolbox",quality:65,bytes:4100000000,measured:true,within_budget:false})'), /^VideoToolbox quality 65 · 4\.10 GB · VMAF not measured yet · over budget$/);
   assert.match(h.run('sizeBudgetPointLabel({kind:"budget_rung_over",video_codec:"hevc_videotoolbox",bitrate_kbps:4700,bytes:4100000000,measured:true,within_budget:false})'), /^VideoToolbox average bitrate 4700 kbps · /);
-});
-
-test("the sample test result shows each measured setting's estimated size against the original", () => {
-  const h = harness();
-  const vmaf = {mean:94.3,p5:85.9,min:80,worst_window_mean:87.3,worst_window_seconds:5};
-  h.context.job = {id:"sizes",action_name:"transcode_media",mode:"size",status:"completed",source_path:"/media/episode.mkv",
-    benchmark:{outcome:"selected",message:"A candidate met the configured checks on sampled video.",source_bytes:4000000000,
-      measured:[
-        {candidate_id:"crf20",video_codec:"libx265",quality:20,passed:true,selected:true,vmaf,estimated_bytes:1000000000,estimated_mb:953.7,savings_percent:75},
-        {candidate_id:"vt75",video_codec:"hevc_videotoolbox",quality:75,passed:true,vmaf,estimated_bytes:4400000000,estimated_mb:4196.2,savings_percent:-10,larger_than_source:true},
-        {candidate_id:"same",video_codec:"libx265",quality:18,passed:true,vmaf,estimated_bytes:4001000000,estimated_mb:3815.7,savings_percent:-0.02},
-        {candidate_id:"crf16",video_codec:"libx265",quality:16,passed:false,vmaf}]}};
-  const text = progressText(h.run('benchmarkReport(job)'));
-  assert.match(text, /same .* passed · est\. 3\.73 GB, no smaller than the original/);
-  assert.match(text, /crf20 .* selected · est\. 954 MB, 75\.0% smaller than the original/);
-  assert.match(text, /vt75 .* passed · est\. 4\.10 GB, 10\.0% larger than the original/);
-  assert.match(text, /crf16 [^\n]*did not pass(?! · est\.)/);
-  assert.doesNotMatch(text, /NaN|undefined/);
 });
 
 // ---- Size budget ----
@@ -4431,7 +4213,7 @@ test("the plan note and queue labels say a budget candidate is below the quality
   assert.match(allTextOf(h.run("encodingPlanNote(job)")), /Encoded at your size budget \(below the quality target\)\./);
   h.run('job.size_mode.size_budget = {...job.size_mode.size_budget, outcome:"meets_quality_target_within_budget"}');
   assert.match(allTextOf(h.run("encodingPlanNote(job)")), /\(within the quality target\)/);
-  assert.equal(h.run('benchmarkOutcomes.size_budget'), "Encoded at your size budget");
+  assert.equal(h.run('resultOutcomes.size_budget'), "Encoded at your size budget");
   assert.equal(h.run('belowTargetLabel("below_quality_target_within_budget")'), "Below quality target — within size budget");
   assert.equal(h.run('belowTargetLabel("meets_quality_target_within_budget")'), "");
   assert.equal(h.run('belowTargetNotice("")'), null);
@@ -4446,11 +4228,11 @@ function allTextOf(n) {
   return [n.textContent, ...(n.children || []).map(allTextOf)].join(" ");
 }
 
-test("a size budget ladder run shows the full encode, not a sample test", () => {
+test("a size budget ladder run shows the full encode, not a result card", () => {
   const h = harness();
   h.context.job = {id:"j",action_name:"transcode_media",mode:"size",status:"waiting_external",transcode:{message:"Automatic testing and verification; originals are preserved."},
     benchmark:{outcome:"size_budget_ladder",message:"Encoding with VideoToolbox at quality 65 (step 1 of 4) to fit the 2.0 GB budget.",progress_scope:"Worker progress is for the full encode with VideoToolbox at quality 65 (step 1 of 4), not a sample test."}};
-  assert.equal(h.run("benchmarkReport(job)"), null, "no sample test result card");
+  assert.equal(h.run("resultReport(job)"), null, "no result card while encoding");
   assert.equal(h.run("jobOutcomeText(job)"), "Encoding with VideoToolbox at quality 65 (step 1 of 4) to fit the 2.0 GB budget.");
   assert.doesNotMatch(h.run("queueOutcome(job)"), /[Ss]ample/);
   // Other runs keep their wording.

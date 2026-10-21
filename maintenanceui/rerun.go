@@ -8,8 +8,10 @@ import (
 	"github.com/jakenesler/navigatorr/store"
 )
 
-// A size-mode search that ends without a usable setting is a finished result,
-// not a failure. Only these outcomes, or a cancellation, offer "Run again".
+// A goal that ends without a usable setting is a finished result, not a
+// failure. Only these outcomes, or a cancellation, offer "Run again".
+// search_budget_exhausted is what operations that used the removed search ended
+// with.
 var noWinnerReasons = map[string]bool{"no_suitable_candidate": true, "quality_not_met": true, "search_budget_exhausted": true, "size_budget_exceeded": true}
 
 // A standalone file the goal could not handle ends with a reason that names the
@@ -100,7 +102,7 @@ func rerunHasResult(r operationRecord, replacements map[string]string) bool {
 	return r.inst.Status == store.ActionStatusCompleted && operationValue(r, "skip_transcode") != true && operationValue(r, "original_intact") == true && r.savings.CandidateBytes != nil
 }
 
-// noWinnerRounds counts finished searches per source file, batch children
+// noWinnerRounds counts finished goals without a result per source file, batch children
 // included, so the confirmation can say how many rounds a file already had.
 func noWinnerRounds(records []operationRecord) map[string]int {
 	rounds := map[string]int{}

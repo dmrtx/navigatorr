@@ -731,18 +731,17 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 				// The snapshot keeps only the keys the queue lists, so whether
 				// running it again would be refused, and what its ladder offers,
 				// is read from the job's full record, as the rerun itself does.
-				inst, err := s.engine.Deps().Store.GetActionInstanceIfExists(r.inst.ID)
-				if err != nil || inst == nil {
-					fail(w, 500, "read job")
-					return
-				}
-				full := operationRecord{inst: *inst, inputs: decodeOperationJSON(inst.InputsJSON), outputs: decodeOperationJSON(inst.OutputsJSON), state: decodeOperationJSON(inst.StateJSON)}
-				if why := s.rerunRefusal(full); why != "" {
-					// Running it again would be refused; the goal form is
-					// offered instead, with the reason.
-					job["rerun_refused"] = why
-				} else {
-					job["rerun"] = rerunSummary(full, rounds)
+				// A row whose record cannot be read is listed without an offer:
+				// one bad row never fails the page.
+				if inst, err := s.engine.Deps().Store.GetActionInstanceIfExists(r.inst.ID); err == nil && inst != nil {
+					full := operationRecord{inst: *inst, inputs: decodeOperationJSON(inst.InputsJSON), outputs: decodeOperationJSON(inst.OutputsJSON), state: decodeOperationJSON(inst.StateJSON)}
+					if why := s.rerunRefusal(full); why != "" {
+						// Running it again would be refused; the goal form is
+						// offered instead, with the reason.
+						job["rerun_refused"] = why
+					} else {
+						job["rerun"] = rerunSummary(full, rounds)
+					}
 				}
 			}
 			if size := operationSizeMode(r); size != nil {
@@ -823,13 +822,6 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 				}
 			}
 			_, httpWorker := s.engine.Deps().Transcode.(*httpclient.HTTPExecutor)
-			comparison := r
-			if r.inst.ActionName == "promote_transcode_candidate" {
-				comparison = recordsByID[root]
-			}
-			if httpWorker && operationValue(comparison, "benchmark_comparison_available") == true {
-				job["comparison_action_id"] = comparison.inst.ID
-			}
 			job["logs_available"] = httpWorker && (operationString(r.state["job_id"]) != "" || operationString(r.state["transcode_job_id"]) != "")
 			if r.inst.ActionName == "transcode_batch" {
 				if r.inputs["dry_run"] == true && r.inst.Status == store.ActionStatusCompleted {

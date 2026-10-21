@@ -245,9 +245,6 @@ function invalidateAuthentication() {
   state.workerCheckedAt = 0;
   $("worker-status").hidden = true;
   $("workers-dialog").close();
-  $("benchmark-comparison").close();
-  state.comparisonRevision = (state.comparisonRevision || 0) + 1;
-  $("comparison-frame").replaceChildren();
   clearTimeout(state.folderSizesTimer);
   state.libraryRevision++;
   state.jobsRevision++;
@@ -1143,7 +1140,7 @@ function libraryFailure(error, more) {
     button("Retry", () => loadLibrary(more), "quiet"),
   );
 }
-const draftFields = ["technical","scope","path","season","recursive","selected-only","promote-batch","profile","priority","custom","encoder","quality","preset","tune","rate-mode","bitrate","max-bitrate","audio","optimize","ladder","metric","vmaf-target","vmaf-min","ssim-target","ssim-min","sample-count","sample-seconds","final-validation","max-items","preserve-depth","min-savings","max-growth","media-kind","allow-hardware","hardware-margin","size-budget-kind","size-budget-percent","size-budget-gb","size-budget-multiplier"];
+const draftFields = ["technical","scope","path","season","recursive","selected-only","promote-batch","profile","custom","encoder","quality","preset","tune","rate-mode","bitrate","max-bitrate","audio","max-items","preserve-depth","min-savings","max-growth","media-kind","allow-hardware","hardware-margin","size-budget-kind","size-budget-percent","size-budget-gb","size-budget-multiplier"];
 function libraryDraftKey() {
   const source = $("service").value;
   return source.startsWith("folder:") ? source : `${source}:${state.media?.id || "catalog"}`;
@@ -1864,7 +1861,7 @@ function renderProfileFacts(output, data, name, preserveDepth) {
   const add = (label, value) => facts.append(node("dt", label), node("dd", value));
   add("Encoder", profileEncoder(p));
   add("Quality", profileRate(p));
-  add("Process", p.optimization?.enabled ? "Tests quality samples before full conversion" : "Converts full video using this profile");
+  add("Process", p.optimization?.enabled ? "Not available: it calibrates with samples, which was removed" : "Converts full video using this profile");
   add("Output depth", preserveDepth ? "Same as source · Overrides profile depth" : v.profile === "main10" || /10/.test(v.pixel_format || "") ? "10-bit" : v.pixel_format || v.profile ? "8-bit" : "Encoder default");
   if (v.spatial_aq != null) add("Image detail", v.spatial_aq ? "Adaptive allocation across image details" : "Standard allocation");
   add("Audio", p.audio?.mode === "copy" ? "Keep original audio tracks" : p.audio?.mode === "compact" ? "Compact · Convert lossless tracks to AAC, same layout; E-AC-3/AC-3/AAC copied" : p.audio?.mode === "compact_lossless" ? "Lossless to AAC · TrueHD, DTS-HD MA, PCM and FLAC become AAC, same layout; lossless Atmos/DTS:X lose object and height channels; lossy tracks (E-AC-3 Atmos included) copied" : p.audio?.mode === "he_aac" ? "HE-AAC · 64 kbps mono/stereo, 160 kbps surround (lossy)" : p.audio?.mode || "Profile default");
@@ -1909,7 +1906,7 @@ function controls() {
   $("advanced-state").textContent = technical ? "On · goal not used" : "Off";
   $("advanced-state").dataset.on = technical ? "true" : "false";
   $("processing-policy").hidden = technical;
-  $("processing-policy").textContent = "Automatic tests suitable settings, checks additional samples, then converts and verifies the result. Originals stay in place; replacing them requires separate approval." + (!state.fileMedia && !state.media ? " Content type is unclassified; a conservative general-video policy applies." : "");
+  $("processing-policy").textContent = "Automatic encodes the whole file with fixed settings, then verifies the result. Originals stay in place; replacing them requires separate approval." + (!state.fileMedia && !state.media ? " Content type is unclassified; a conservative general-video policy applies." : "");
   $("enqueue").textContent = technical ? (batch ? "Create candidates" : "Create candidate") : "Process";
   $("source-summary").textContent = sourceSummary();
   $("batch-options").hidden = !batch;
@@ -1959,15 +1956,9 @@ function controls() {
   $("recursive").closest("label").hidden = !folder || explicitSelection;
   $("promote-batch").closest("label").hidden =
     folder || $("service").value !== "sonarr";
-  // Goals encode with fixed recipes; the sample search, its batch priority
-  // and sample tests are no longer accepted by the server.
-  $("priority-label").hidden = true;
   $("profile-mode-note").hidden = $("profile").value !== "auto" || $("custom").checked;
   $("profile-mode-note").textContent = "Automatic encodes the whole file with fixed settings for the objective and checks the result; originals are preserved until you approve.";
   $("custom-fields").hidden = !technical || !$("custom").checked;
-  $("optimize").checked = false;
-  $("optimize").closest("label").hidden = true;
-  $("optimization-fields").hidden = true;
   const vt = $("encoder").value === "hevc_videotoolbox";
   $("vt-fields").hidden = !vt;
   $("x265-fields").hidden = vt;
@@ -1979,7 +1970,6 @@ function controls() {
   $("bitrate").disabled = $("rate-mode").value !== "bitrate";
   $("max-bitrate").disabled = $("rate-mode").value !== "bitrate";
   $("preview").hidden = !technical || !batch;
-  $("benchmark").hidden = true;
   $("audio-note").hidden = !["compact", "he_aac"].includes($("audio").value);
   const hasSource = batch
     ? Boolean(folder ? state.folder : state.media) &&
@@ -1993,7 +1983,6 @@ function controls() {
     state.libraryLoading ||
     !serverReachable ||
     !hasSource;
-  $("benchmark").disabled = true;
   $("preview").disabled =
     !state.info?.transcode_enabled ||
     !state.workerInfo?.ready ||
@@ -2006,7 +1995,6 @@ function controls() {
 for (const id of [
   "scope",
   "custom",
-  "optimize",
   "profile",
   "audio",
   "rate-mode",
@@ -2014,8 +2002,6 @@ for (const id of [
   $(id).addEventListener("change", controls);
 $("encoder").addEventListener("change", () => {
   $("quality").value = $("encoder").value === "libx265" ? "23" : "65";
-  $("ladder").value =
-    $("encoder").value === "libx265" ? "20,23,26" : "55,65,75";
   controls();
 });
 function numeric(id) {
@@ -2035,7 +2021,7 @@ function profileFromControls() {
     video.preset = $("preset").value;
     if ($("tune").value) video.tune = $("tune").value;
   }
-  const p = {
+  return {
     container: "mkv",
     video,
     audio: { mode: $("audio").value },
@@ -2048,46 +2034,7 @@ function profileFromControls() {
       max_fallbacks: 0,
       fallbacks: [],
     },
-    optimization: { enabled: false },
   };
-  if ($("optimize").checked) {
-    const values = $("ladder")
-      .value.split(",")
-      .map((v) => Number(v.trim()));
-    if (!values.length || values.some((v) => !Number.isInteger(v) || v <= 0))
-      throw new Error("Search values must be positive integers.");
-    const quality = {
-      preferred_metric: $("metric").value === "ssim" ? "ssim" : "vmaf",
-      vmaf: {
-        target: numeric("vmaf-target"),
-        minimum: numeric("vmaf-min"),
-        marginal_tolerance: 0.5,
-      },
-      ssim: {
-        target: numeric("ssim-target"),
-        minimum: numeric("ssim-min"),
-        marginal_tolerance: 0.005,
-      },
-    };
-    if ($("final-validation").value)
-      quality.final_validation = { mode: $("final-validation").value };
-    p.optimization = {
-      enabled: true,
-      sampling: {
-        strategy: "distributed",
-        sample_count: numeric("sample-count"),
-        sample_seconds: numeric("sample-seconds"),
-      },
-      quality,
-      search: {
-        max_candidates: values.length,
-        [vt && $("rate-mode").value === "bitrate"
-          ? "bitrate_values"
-          : "quality_values"]: values,
-      },
-    };
-  }
-  return p;
 }
 
 async function submitJob(mode = "encode") {
@@ -2153,8 +2100,8 @@ function showSizeBudget(prefix, settings) {
 }
 async function buildAndSubmitJob(mode = "encode") {
   const batch = $("scope").value === "batch";
-  let name = batch ? "transcode_batch" : "transcode_media";
-  const simple = !$("technical").checked && mode !== "benchmark";
+  const name = batch ? "transcode_batch" : "transcode_media";
+  const simple = !$("technical").checked;
   const inputs = simple ? {mode:processingMode()} : { preserve_source_bit_depth: $("preserve-depth").checked };
   if (simple && inputs.mode === "size") {
     // Always explicit, so the choice on screen is the choice that is frozen.
@@ -2196,26 +2143,24 @@ async function buildAndSubmitJob(mode = "encode") {
     if (!$("path").value.trim())
       throw new Error("Choose a file or enter its path.");
     inputs.path = $("path").value.trim();
-    if (!simple && mode !== "benchmark") inputs.media_type = $("media-kind").value;
-    if (state.fileMedia && mode !== "benchmark") {
+    if (!simple) inputs.media_type = $("media-kind").value;
+    if (state.fileMedia) {
       inputs.media_type = state.fileService === "radarr" ? "movie" : "tv";
       inputs.is_anime =
         state.fileMedia.seriesType === "anime" ||
         (state.fileMedia.genres || []).some((g) => g.toLowerCase() === "anime");
-    }
-    if (mode === "benchmark") name = "benchmark_transcode";
-    else if (state.fileMedia)
       inputs.library_context = {
         service: state.fileService,
         id: state.fileMedia.id,
       };
+    }
   }
   if (!simple && $("custom").checked) {
     inputs.profile_config = profileFromControls();
   } else if (!simple) {
     inputs.profile = $("profile").value;
   }
-  if (!simple && $("custom").checked && name !== "benchmark_transcode") {
+  if (!simple && $("custom").checked) {
     if ($("min-savings").value)
       inputs.min_savings_percent = numeric("min-savings");
     inputs.max_size_increase_percent = numeric("max-growth");
@@ -2233,7 +2178,6 @@ async function buildAndSubmitJob(mode = "encode") {
   }
   $("enqueue").disabled = true;
   $("preview").disabled = true;
-  $("benchmark").disabled = true;
   try {
     const r = await tool("action_run", {
       action: name,
@@ -2263,7 +2207,6 @@ async function buildAndSubmitJob(mode = "encode") {
     notify(`Queued: ${queued}. It is listed first below.`);
   } finally {
     $("preview").disabled = false;
-    $("benchmark").disabled = false;
     controls();
   }
 }
@@ -2272,9 +2215,6 @@ $("job-form").addEventListener("submit", (e) => {
   safe(() => submitJob());
 });
 $("preview").addEventListener("click", () => safe(() => submitJob("preview")));
-$("benchmark").addEventListener("click", () =>
-  safe(() => submitJob("benchmark")),
-);
 
 function focusedControl(container) {
   const active = document.activeElement;
@@ -2341,7 +2281,7 @@ function batchReasonLabel(job, reason) {
 // more than half the projection (restart, second pass) starts over.
 const encodeEtas = new Map();
 function encodeEta(key, worker, seconds) {
-  const phase = worker?.transcode_phase || worker?.benchmark_phase || worker?.phase;
+  const phase = worker?.transcode_phase || worker?.phase;
   const raw = Number(seconds);
   if (!key || phase !== "encoding" || worker.progress_is_stale || !(Number(worker.speed) > 0) || seconds == null || !Number.isFinite(raw) || raw <= 0) {
     if (key) encodeEtas.delete(key);
@@ -2391,14 +2331,12 @@ function batchProgress(job) {
     const step = Number(activity.current_step);
     const child = activities.find(a => a.parent_action_id === activity.id);
     const w = child?.worker || activity.worker || {};
-    const phase = w.transcode_phase || w.benchmark_phase || w.phase;
-    const details = w.progress_details || w.benchmark_progress_details;
+    const phase = w.transcode_phase || w.phase;
     let fraction = 0;
     const stage = stages[step]?.name;
-    const workerStage = ["wait_benchmark","wait_transcode"].includes(stage);
+    const workerStage = stage === "wait_transcode";
     if (workerStage && !w.progress_is_stale) {
-      if (details?.total_units > 0) fraction = Math.max(0, Math.min(1, Number(details.completed_units || 0) / details.total_units));
-      else if (Number.isFinite(Number(w.progress)) && w.progress != null && !["queued","preparing"].includes(phase)) fraction = Math.max(0, Math.min(1, Number(w.progress)/100));
+      if (Number.isFinite(Number(w.progress)) && w.progress != null && !["queued","preparing"].includes(phase)) fraction = Math.max(0, Math.min(1, Number(w.progress)/100));
     }
     if (stage === "preflight" && activity.work?.total_bytes > 0) fraction = Math.min(.8, Math.max(0, Number(activity.work.bytes_read || 0)/activity.work.total_bytes*.8));
     else if (stage === "preflight" && activity.work?.phase === "probing_source") fraction = .8;
@@ -2491,7 +2429,7 @@ function telemetry(job) {
     result.append(node("span", text, "metadata"));
     return result;
   }
-  const phase = w.transcode_phase || w.benchmark_phase || w.phase;
+  const phase = w.transcode_phase || w.phase;
   const phases = {
     queued: "Queued",
     preparing: "Preparing",
@@ -2499,7 +2437,6 @@ function telemetry(job) {
     validating: "Validating",
     publishing: "Publishing",
     completed: "Completed",
-    benchmarking: "Calibrating",
   };
   const parts = [
     job.activity_file ? `Current: ${job.activity_file.split("/").pop()}` : null,
@@ -2509,13 +2446,6 @@ function telemetry(job) {
     phase === "encoding" && !w.progress_is_stale && w.fps > 0 ? `${Number(w.fps).toFixed(1)} fps` : null,
   ];
   const eta = job.savings?.eta_seconds;
-  const details = w.progress_details || w.benchmark_progress_details;
-  if (!w.transcode_status && !w.transcode_phase && details?.total_units > 0) {
-    parts.push(`${details.completed_units}/${details.total_units} sample tasks resolved`);
-    if (details.sample_number) parts.push(`Latest sample ${details.sample_number}`);
-    if (details.candidate_number) parts.push(`Candidate ${details.candidate_number}`);
-    if (details.metric) parts.push(String(details.metric).toUpperCase());
-  }
   parts.push(encodeEta(job.id || "job", w, eta));
   result.append(
     node("span", parts.filter(Boolean).join(" · ") || job.progress, "metadata"),
@@ -2541,8 +2471,6 @@ function telemetry(job) {
   if (observation.active) {
     const last = activityElapsed(w.last_progress_at);
     result.append(node("span", `${heartbeatAlive(observation.heartbeat) ? `Worker heartbeat ${activityElapsed(w.worker_heartbeat_at)} ago` : "Worker heartbeat unavailable"}${last ? ` · Last advance ${last} ago` : ""}`, "metadata progress-observation"));
-    if (phase === "evaluating_metrics")
-      result.append(node("span", "Quality measurement can take several minutes. Progress updates when a sample task finishes.", "metadata progress-observation"));
     if (phase === "analysing_video")
       result.append(node("span", "The first x265 pass analyzes the video. Encoding progress starts during the second pass.", "metadata progress-observation"));
     if (phase === "validating_quality")
@@ -2571,7 +2499,6 @@ function stageLabel(name) {
     wait_transcode: "Convert file",
     schedule_batch: "Process selected files",
     promote_batch: "Replace approved files",
-    benchmark: "Calibrate quality",
     benchmark_transcode: "Calibrate quality",
     build_plan: "Prepare conversion",
     execute_transcode: "Convert file",
@@ -2915,7 +2842,7 @@ function batchCounts(batch, compact = false) {
 }
 function statusClass(status) {
   if (["completed", "Completed", "Replaced", "Candidate ready", "Candidates ready"].includes(status)) return "completed";
-  if (["running", "Running", "waiting_external", "In progress", "Encoding", "Encoding samples", "Measuring quality", "Calibrating", "Preparing", "Verifying", "Replacing", "Replacement in progress", "Saving candidate", "Verifying quality"].includes(status)) return "running";
+  if (["running", "Running", "waiting_external", "In progress", "Encoding", "Measuring quality", "Preparing", "Verifying", "Replacing", "Replacement in progress", "Saving candidate", "Verifying quality"].includes(status)) return "running";
   if (["failed", "Failed", "Worker offline"].includes(status)) return "failed";
   // Missing telemetry is worth attention, but nothing has failed: the worker
   // keeps the job and the original is untouched.
@@ -3189,11 +3116,7 @@ async function archiveJob(job, archived) {
 function confirmDecision(job, choice, label) {
   const content = [node("p", queuePresentation(job).title, "review-filename")];
   if (job.waiting_reason) content.push(node("p", shortJobReason(job.waiting_reason)));
-  if (choice.decision === "run_once_after_review") {
-    const report = benchmarkReport(job);
-    if (report) content.push(report);
-    content.push(node("p", "This authorizes one more bounded sample test of the new settings listed above. Quality limits stay the same, and the original is not changed.", "muted"));
-  } else if (choice.description) content.push(node("p", choice.description, "muted"));
+  if (choice.description) content.push(node("p", choice.description, "muted"));
   return reviewAction({title: `${label}?`, content, confirmLabel: label, cancelLabel: "Decide later"});
 }
 const rerunGoals = goalNames;
@@ -3214,7 +3137,7 @@ async function rerunJob(job, {withoutHardware = false, mode = ""} = {}) {
   else content.push(node("p", goal ? `Goal: ${goal}` : "The same settings as before."));
   if (withoutHardware) content.push(node("p", "The media engine is turned off for this job, so it encodes with x265: slower, but it usually keeps more quality at the same size."));
   if (!remedy) content.push(node("p", withoutHardware ? "This starts a new job with the same settings otherwise. The earlier job is not changed." : "This starts a new job with the same settings. The earlier job is not changed.", "muted"));
-  if (!remedy && info.no_winner_rounds >= 2) content.push(node("p", `This file already had ${info.no_winner_rounds} searches without a result. Run it again only if you want another round.`));
+  if (!remedy && info.no_winner_rounds >= 2) content.push(node("p", `This file already had ${info.no_winner_rounds} rounds without a result. Run it again only if you want another round.`));
   if (remedy) content.push(node("p", info.replace_original ? "The original is replaced only after you approve the result." : "Originals stay in place.", "muted"));
   else content.push(node("p", info.replace_original ? "This job was set to replace the original: if it finds a result, the original is replaced only after you review and approve it." : "Originals stay in place.", "muted"));
   // One key per open confirmation: after a lost response, clicking again replays
@@ -3288,7 +3211,6 @@ function jobControls(job, detail = false) {
     accept_loss: "Review candidate",
     abort: "Cancel",
     cancel: job.batch ? "Stop batch · keep originals" : "Keep original",
-    run_once_after_review: "Run one more test",
     recheck: "Check worker again",
     reconcile: "Check library again",
   };
@@ -3362,7 +3284,7 @@ function jobControls(job, detail = false) {
   if (job.status === "failed" && !reconfigurable && !job.parent_item_key) {
     if (rejectedCandidate(job)) {
       if (job.parent_action_id) add("Change settings", () => reconfigureBatch(job.parent_action_id, true, {candidate_id:job.id}));
-    } else if (job.action_name === "benchmark_transcode" && /unsupported input/.test(job.error || ""))
+    } else if (job.action_name === "benchmark_transcode")
       add("Choose a goal", () => openGoalForm(job.source_path));
     else add("Retry", () => jobControl(job.id, "action_retry"));
   }
@@ -3413,8 +3335,6 @@ function jobControls(job, detail = false) {
     add("Replace file", () => prepareReplacement(job));
   if (job.replacement_action_id)
     add("View replacement", () => openJob(job.replacement_action_id));
-  if (job.comparison_action_id)
-    add("Compare frames", () => openComparison(job));
   if (job.preview_action_id && detail)
     add("View preview", () => openJob(job.preview_action_id));
   if (job.can_archive && ["completed", "failed", "cancelled"].includes(job.status))
@@ -3422,93 +3342,6 @@ function jobControls(job, detail = false) {
   return actionRail;
 }
 
-async function openComparison(job) {
-  const revision = state.comparisonRevision = (state.comparisonRevision || 0) + 1;
-  const auth = state.authRevision;
-  state.comparison = null;
-  state.comparisonAction = job.comparison_action_id;
-  $("comparison-file").textContent = queuePresentation(job).title;
-  $("comparison-note").textContent = "Loading saved sample frames…";
-  $("comparison-controls").hidden = true;
-  $("comparison-view").hidden = true;
-  $("comparison-metrics").textContent = "";
-  $("comparison-frame").replaceChildren();
-  $("benchmark-comparison").showModal();
-  try {
-    const comparison = await api(`benchmark-comparison?id=${encodeURIComponent(job.comparison_action_id)}`);
-    if (auth !== state.authRevision || revision !== state.comparisonRevision || !$("benchmark-comparison").open) return;
-    if (!Array.isArray(comparison.frames) || !comparison.frames.length) throw new Error("No saved frames for this benchmark.");
-    state.comparison = comparison;
-    $("comparison-sample").replaceChildren();
-    comparison.frames.forEach((frame,index) => option($("comparison-sample"),index,`Sample ${index+1} · ${formatFrameTime(frame.source_seconds)}`));
-    $("comparison-sample").value = "0";
-    $("comparison-controls").hidden = false;
-    showComparisonFrame();
-  } catch (error) {
-    if (revision === state.comparisonRevision && auth === state.authRevision)
-      $("comparison-note").textContent = error.message || "Could not load the comparison. Check the worker connection and reopen it.";
-  }
-}
-function formatFrameTime(seconds) {
-  const s = Math.max(0,Number(seconds)||0);
-  return `${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,"0")}.${String(Math.floor((s%1)*1000)).padStart(3,"0")}`;
-}
-function showComparisonFrame() {
-  const frame = state.comparison?.frames[Number($("comparison-sample").value)];
-  if (!frame) return;
-  const revision = state.comparisonRevision = (state.comparisonRevision || 0) + 1;
-  const host = $("comparison-frame");
-  host.replaceChildren();
-  host.className = "comparison-frame";
-  host.style?.setProperty("--frame-width",`${frame.width}px`);
-  $("comparison-zoom").textContent = "View at 100%";
-  $("comparison-zoom").setAttribute("aria-pressed","false");
-  $("comparison-slider").value = "50";
-  $("comparison-note").textContent = "Loading both images…";
-  $("comparison-view").hidden = true;
-  $("comparison-metrics").textContent = [
-    `${frame.width} × ${frame.height} · Frame ${frame.frame_index} · ${formatFrameTime(frame.source_seconds)}`,
-    frame.vmaf != null ? `VMAF ${Number(frame.vmaf).toFixed(2)}` : null,
-    frame.ssim != null ? `SSIM ${Number(frame.ssim).toFixed(4)}` : null,
-  ].filter(Boolean).join(" · ");
-  let loaded = 0, failed = false;
-  for (const side of ["original","candidate"]) {
-    const img = document.createElement("img");
-    img.alt = `${side === "original" ? "Original reference" : "Selected candidate"} at ${formatFrameTime(frame.source_seconds)}`;
-    if (side === "candidate") img.className = "comparison-candidate";
-    img.addEventListener("load", () => {
-      if (revision !== state.comparisonRevision || failed) return;
-      if (++loaded === 2) { $("comparison-view").hidden = false; $("comparison-note").textContent = "Drag the slider or use its arrow keys to compare the same frame."; }
-    });
-    img.addEventListener("error", () => {
-      if (revision !== state.comparisonRevision) return;
-      failed = true;
-      $("comparison-view").hidden = true;
-      $("comparison-note").textContent = "Could not load both images. They may have expired, or the worker is disconnected. Reopen the comparison to retry.";
-    });
-    img.src = `/api/maintenance/benchmark-comparison?${new URLSearchParams({id:state.comparisonAction,image:frame.sample_index,side})}`;
-    host.append(img);
-  }
-  host.append(node("span","","comparison-divider"));
-}
-$("close-comparison").addEventListener("click", () => $("benchmark-comparison").close());
-$("benchmark-comparison").addEventListener("close", () => {
-  state.comparisonRevision = (state.comparisonRevision || 0) + 1;
-  state.comparison = null;
-  $("comparison-frame").replaceChildren();
-});
-$("comparison-sample").addEventListener("change", showComparisonFrame);
-$("comparison-slider").addEventListener("input", () => {
-  const value = Math.max(0,Math.min(100,Number($("comparison-slider").value)||0));
-  const host = $("comparison-frame");
-  host.querySelector(".comparison-candidate").style.clipPath = `inset(0 ${100-value}% 0 0)`;
-  host.querySelector(".comparison-divider").style.left = `${value}%`;
-});
-$("comparison-zoom").addEventListener("click", () => {
-  const native = $("comparison-frame").classList.toggle("native-size");
-  $("comparison-zoom").textContent = native ? "Fit to view" : "View at 100%";
-  $("comparison-zoom").setAttribute("aria-pressed",String(native));
-});
 function shortJobReason(reason) {
   const text = String(reason || "")
     .replace(/\s+/g, " ")
@@ -3537,7 +3370,6 @@ function shortJobReason(reason) {
     compact_frame_evidence_unavailable: "Could not read this video's frames to plan the conversion (it may have timed out); original kept. Use Change goal to try again",
     quality_policy_unavailable: "The worker cannot run the quality checks this goal needs; original kept",
     quality_vmaf_model_unavailable: "The worker cannot measure quality for this video (VMAF model unavailable); original kept",
-    benchmark_search_review: "Earlier test rounds found nothing acceptable; review before testing again",
   };
   if (reasons[text]) return reasons[text];
   if (isCandidateRejection(text)) return "Candidate rejected by you; original kept";
@@ -3546,13 +3378,9 @@ function shortJobReason(reason) {
   if (growth) return `Candidate is ${growth[1]}% larger; allowed growth is ${growth[2]}%`;
   if (/no such file or directory/i.test(text)) return "File not found";
   if (/permission denied/i.test(text)) return "Permission denied";
-  if (/unsupported input.*benchmark_transcode/.test(text)) return "Unsupported benchmark settings. Set up a new benchmark.";
   if (/smb_transport_error|connecting to SMB server/.test(text)) return "Worker cannot access media storage. Fix the connection before retrying.";
   if (/shared VMAF\/CAMBI calibration supports 8-bit SDR video below 45 fps/.test(text))
     return "Automatic testing does not support this video format";
-  if (/^Two benchmark rounds for these source bytes already found no acceptable candidate/.test(text)) return reasons.benchmark_search_review;
-  if (/^Two earlier test rounds already tried every setting/.test(text)) return "Earlier test rounds already tried these settings; another test is not offered. Original kept";
-  if (/^Two earlier test rounds found no acceptable setting/.test(text)) return reasons.benchmark_search_review;
   if (/^Encoding finished for job .*publication requires intervention/.test(text)) return "Encoding finished, but saving the candidate failed. The candidate is kept; check storage, then ask the worker again";
   // Engine reasons often start with a machine code ("code: detail").
   const coded = text.match(/^([a-z0-9]+(?:_[a-z0-9]+)+)(?::\s*(.*))?$/);
@@ -3570,7 +3398,7 @@ function workerUnavailable(job) {
 }
 // The worker beats every few seconds and Navigatorr polls it about every five,
 // but a busy coordinator or a page resumed from the background can delay the
-// next sample by a minute or two. Only prolonged silence is worth a warning.
+// next update by a minute or two. Only prolonged silence is worth a warning.
 const heartbeatFreshMs = 30000, heartbeatLostMs = 180000, heartbeatSkewMs = 60000;
 function workerHeartbeatState(value, now = Date.now()) {
   const at = Date.parse(value || "");
@@ -3583,7 +3411,7 @@ function heartbeatAlive(state) {
 }
 function workerProgressObservation(job) {
   const w = job.worker || {};
-  const phase = w.transcode_phase || w.benchmark_phase || w.phase;
+  const phase = w.transcode_phase || w.phase;
   const heartbeat = workerHeartbeatState(w.worker_heartbeat_at);
   const result = {active: false, heartbeat, status: "", message: "", warning: false};
   if (!["running", "waiting_external"].includes(job.status)) return result;
@@ -3596,11 +3424,11 @@ function workerProgressObservation(job) {
     const line = Number.isInteger(position) && position > 1 ? ` ${position - 1} ${position === 2 ? "job is" : "jobs are"} ahead of it in line.` : position === 1 ? " It is next in line." : "";
     return {...result, status: "Waiting for a free worker slot", message: `The worker is running as many jobs as it allows. This job continues automatically when a slot is free.${line}`};
   }
-  if (["worker_busy", "parent_busy", "queued", "benchmark_retry", "transcode_retry", "worker_reconciling"].includes(waiting))
+  if (["worker_busy", "parent_busy", "queued", "transcode_retry", "worker_reconciling"].includes(waiting))
     return {...result, status: "Waiting", message: job.waiting_reason || "Waiting for worker coordination."};
   // A finished worker can leave telemetry behind while the coordinator validates
   // or requests a decision. Its old heartbeat is not evidence of a live failure.
-  const status = w.transcode_status || w.benchmark_status;
+  const status = w.transcode_status;
   if (["completed", "failed", "cancelled"].includes(status) || ["completed", "failed", "cancelled"].includes(phase)) return result;
   if (phase === "queued" || status === "queued" || !job.worker) return result;
   result.active = true;
@@ -3615,7 +3443,7 @@ function workerProgressObservation(job) {
   }
   // These phases report completed units, not a continuous encoder percentage.
   // A heartbeat proves liveness only; preserve the actual last measurement.
-  const discreteProgress = ["preparing", "reading_source", "probing_source", "extracting_samples", "encoding_samples", "testing_initial", "testing_alternatives", "verifying_samples", "evaluating_metrics", "estimating_final_size", "selecting_candidate", "capturing_comparison", "validating", "validating_quality", "analysing_video", "publishing"].includes(phase);
+  const discreteProgress = ["preparing", "reading_source", "probing_source", "validating", "validating_quality", "analysing_video", "publishing"].includes(phase);
   if (w.progress_is_stale && !(discreteProgress && heartbeatAlive(heartbeat)))
     return {...result, warning: true, status: "No updates", message: `No recent ${phase === "encoding" ? "encoding progress" : "progress from the worker"}. ${heartbeatAlive(heartbeat) ? `Worker heartbeat ${activityElapsed(w.worker_heartbeat_at)} ago.` : "Worker heartbeat unavailable."}`};
   return result;
@@ -3669,7 +3497,7 @@ function queuePresentation(job) {
     promoted: "Replaced",
     cancelling: "Cancelling",
   };
-  const phase = job.worker?.transcode_phase || job.worker?.benchmark_phase || job.worker?.phase;
+  const phase = job.worker?.transcode_phase || job.worker?.phase;
   const multipleActive = job.activities?.length > 1;
   const offline = multipleActive
     ? job.activities.every(activity => activity.waiting_condition === "worker_unreachable")
@@ -3684,7 +3512,7 @@ function queuePresentation(job) {
       (job.candidate_ready && !job.replacement_action_id
         ? "Candidate ready"
         : ["running", "waiting_external"].includes(job.status)
-          ? (offline ? "Worker offline" : multipleActive ? "In progress" : observation.status || {encoding:"Encoding",encoding_samples:"Encoding samples",evaluating_metrics:"Measuring quality",validating:"Verifying",validating_quality:"Verifying quality",analysing_video:"Analyzing video",publishing:"Saving candidate",benchmarking:"Calibrating",queued:"Queued on worker",preparing:"Preparing"}[phase] || (replacement || job.promotion ? "Replacing" : "In progress"))
+          ? (offline ? "Worker offline" : multipleActive ? "In progress" : observation.status || {encoding:"Encoding",validating:"Verifying",validating_quality:"Verifying quality",analysing_video:"Analyzing video",publishing:"Saving candidate",queued:"Queued on worker",preparing:"Preparing"}[phase] || (replacement || job.promotion ? "Replacing" : "In progress"))
           : names[job.status] || job.status);
   const s = job.savings || {},
     metrics = [];
@@ -3830,147 +3658,63 @@ function restoreActionMenu(container, saved) {
   else if (saved.item && saved.open)
     [...menu.querySelectorAll(".more-menu button")].find((b) => b.getAttribute("aria-label") === saved.item)?.focus({ preventScroll: true });
 }
-const benchmarkOutcomes = {
-  selected: "Settings found",
-  no_acceptable_candidate: "No setting passed",
+// Outcome labels of the encode summary the server gives under "benchmark"
+// (tools/benchmark_summary.go); the key keeps the name sample tests gave it.
+const resultOutcomes = {
   no_suitable_candidate: "No setting passed",
   audio_only: "Audio-only compaction",
   size_budget: "Encoded at your size budget",
   size_budget_ladder: "Encoding at your size budget",
   recipe: "Encoding with this goal's settings",
   size_rejected: "Size limit not met",
-  search_review_required: "Your review is needed",
   quality_policy_unavailable: "Quality checks unavailable",
   attention: "Needs your decision",
-  execution_error: "Test could not finish",
+  execution_error: "Encode could not finish",
   cancelled: "Stopped",
 };
-function benchmarkHeadline(job) {
+function resultHeadline(job) {
   const b = job.benchmark;
-  if (!b) return "";
-  if (b.size_warning) return "Selected settings would make the file larger · Keep the original";
-  if (b.outcome === "search_review_required") return "Two earlier test rounds found nothing acceptable · Review before testing again · Original unchanged";
-  if (["no_acceptable_candidate", "no_suitable_candidate"].includes(b.outcome)) return `No tested setting passed${b.rejected?.length ? ` (${b.rejected.length} rejected)` : ""} · Original kept`;
+  if (b && b.outcome === "no_suitable_candidate") return "No setting passed · Original kept";
   return "";
 }
-function vmafSummaryLabel(v) {
-  if (!v) return "VMAF not measured";
-  const f = x => Number(x).toFixed(1);
-  return `VMAF mean ${f(v.mean)} · p5 ${f(v.p5)}${v.worst_window_mean ? ` · worst ${v.worst_window_seconds || 5} s ${f(v.worst_window_mean)}` : ""} · lowest frame ${f(v.min)}`;
-}
-function vmafFloorLabel(floor) {
-  if (!floor) return "";
-  return [floor.minimum ? `VMAF ≥ ${floor.minimum}` : "", floor.p5_minimum != null ? `p5 ≥ ${floor.p5_minimum}` : "", floor.worst_window_minimum != null ? `worst window ≥ ${floor.worst_window_minimum}` : ""].filter(Boolean).join(", ");
-}
-// The estimated file size and saving against the original, from the sampled
-// windows. A setting that would be larger than the original says so.
-function estimatedSizeLabel(m) {
-  if (m.savings_percent == null || !(m.estimated_mb > 0)) return "";
-  const size = m.estimated_mb >= 1024 ? `${(m.estimated_mb / 1024).toFixed(2)} GB` : `${Math.round(m.estimated_mb)} MB`;
-  const pct = Number(m.savings_percent);
-  const rounded = Math.abs(pct).toFixed(1);
-  return ` · est. ${size}, ${rounded === "0.0" ? "no smaller than the original" : pct < 0 ? `${rounded}% larger than the original` : `${rounded}% smaller than the original`}`;
-}
-function benchmarkCandidateLabel(c) {
-  const codec = c.video_codec === "libx265" ? "x265" : c.video_codec === "hevc_videotoolbox" ? "VideoToolbox (hardware)" : c.video_codec || "VideoToolbox (hardware)";
-  const rate = c.average_bitrate_kbps ? `${c.average_bitrate_kbps} kbps` : c.video_codec === "libx265" ? `CRF ${c.quality}` : `quality ${c.quality}`;
-  return `${c.id} · ${codec} ${rate}${c.preset ? ` · ${c.preset}` : ""}`;
-}
-// The job's one-line outcome when no sample test result card explains it.
+// The job's one-line outcome when no result card explains it.
 function jobOutcomeText(job) {
   if (job.status === "completed" && !job.candidate_ready && job.reason_code) return shortJobReason(job.reason_code);
-  // A size budget ladder or a goal's recipe tests no samples: it says which
-  // full encode runs.
+  // A size budget ladder or a goal's recipe says which full encode runs.
   if (["size_budget_ladder", "recipe"].includes(job.benchmark?.outcome) && job.benchmark.message) return job.benchmark.message;
   return shortJobReason(job.transcode?.message);
 }
-// Renders the server's benchmark summary (tools/benchmark_summary.go) for people:
-// what happened, why each setting was rejected, and what to do next.
-function benchmarkReport(job) {
+// Whether the encode summary has a result card: a ladder or recipe that is
+// still encoding, or one not yet planned, has nothing to report.
+function hasResultReport(b) {
+  return Boolean(b?.outcome) && !["preparing", "size_budget_ladder", "recipe"].includes(b.outcome);
+}
+// Renders the server's encode summary (tools/benchmark_summary.go) for people:
+// what happened and what to do next.
+function resultReport(job) {
   const b = job.benchmark;
-  // A size budget ladder or a goal's recipe tests no samples, so there is no
-  // sample result.
-  if (!b || !b.outcome || ["testing", "size_budget_ladder", "recipe"].includes(b.outcome)) return null;
-  const box = node("section", "", `benchmark-report outcome-${b.outcome}`);
-  box.setAttribute("aria-label", "Sample test result");
-  const head = node("div", "", "benchmark-report-head");
-  head.append(node("h3", "Sample test result"), node("span", benchmarkOutcomes[b.outcome] || b.outcome.replace(/_/g, " "), "benchmark-outcome"));
+  if (!hasResultReport(b)) return null;
+  const box = node("section", "", `result-report outcome-${b.outcome}`);
+  box.setAttribute("aria-label", "Result");
+  const head = node("div", "", "result-report-head");
+  head.append(node("h3", "Result"), node("span", resultOutcomes[b.outcome] || b.outcome.replace(/_/g, " "), "result-outcome"));
   box.append(head);
   if (b.message) box.append(node("p", b.message));
-  if (b.size_warning) box.append(node("p", b.size_warning, "benchmark-warning"));
-  if (b.selection?.best_score != null)
-    box.append(node("p", `Best sampled score ${Number(b.selection.best_score).toFixed(1)}; settings within ${b.selection.marginal_tolerance} of it (≥ ${Number(b.selection.score_floor).toFixed(1)}) were compared by size.`, "metadata"));
-  if (b.previous_rounds?.length) {
-    for (const [i, round] of b.previous_rounds.entries()) {
-      const head = node("p", "", "metadata");
-      const goal = round.mode ? `${round.mode[0].toUpperCase()}${round.mode.slice(1)} goal` : "Earlier round";
-      const floor = vmafFloorLabel(round.floor);
-      head.append(node("span", `Earlier round ${i + 1} · ${goal}${floor ? ` (${floor})` : ""} · `), button("Open", () => openJob(round.action_id), "quiet link-button"));
-      const list = node("ul", "", "benchmark-list");
-      for (const c of round.candidates || []) list.append(node("li", `${benchmarkCandidateLabel(c)} · ${vmafSummaryLabel(c.vmaf)}`));
-      box.append(head, list);
-    }
-  } else if (b.previous_unsuccessful_actions?.length) {
-    const list = node("ul", "", "benchmark-list");
-    for (const id of b.previous_unsuccessful_actions) {
-      const item = node("li");
-      item.append(button(id, () => openJob(id), "quiet link-button"));
-      list.append(item);
-    }
-    box.append(node("p", "Earlier rounds without an acceptable result:", "metadata"), list);
-  }
-  if (b.proposed_candidates?.length) {
-    const list = node("ul", "", "benchmark-list");
-    const known = Array.isArray(b.new_candidates);
-    for (const c of b.proposed_candidates) list.append(node("li", `${benchmarkCandidateLabel(c)}${known ? b.new_candidates.includes(c.id) ? " · new" : " · already tried" : ""}`));
-    box.append(node("p", "Settings the next round would test:", "metadata"), list);
-  }
-  if (b.measured?.length) {
-    const list = node("ul", "", "benchmark-list");
-    for (const m of b.measured) list.append(node("li", `${benchmarkCandidateLabel({...m, id: m.candidate_id})} · ${vmafSummaryLabel(m.vmaf)} · ${m.selected ? "selected" : m.passed ? "passed" : "did not pass"}${estimatedSizeLabel(m)}${reusedLabel(m.reused)}`));
-    box.append(node("p", "Measured quality and estimated size per setting:", "metadata"), list);
-  }
-  if (b.rejected?.length) {
-    const details = node("details", "", "benchmark-rejected");
-    details.open = !["selected"].includes(b.outcome) || !!b.size_warning;
-    details.append(node("summary", `Why ${b.rejected.length === 1 ? "1 setting was" : `${b.rejected.length} settings were`} rejected`));
-    const list = node("ul", "", "benchmark-list");
-    for (const r of b.rejected) {
-      const item = node("li");
-      item.append(node("strong", r.candidate_id));
-      for (const check of r.checks || []) {
-        const line = node("p", check.reason || check.code);
-        if (check.actual != null && check.limit != null) line.append(node("span", ` Measured ${Number(check.actual).toFixed(1)}, limit ${Number(check.limit).toFixed(1)}.`, "muted"));
-        item.append(line);
-      }
-      if (r.failed_samples?.length) item.append(node("p", `${r.failed_samples.length} ${r.failed_samples.length === 1 ? "sample" : "samples"} below the limit.`, "muted"));
-      if (r.review_source_seconds != null) item.append(node("p", `Worst moment to check in the source: ${formatFrameTime(r.review_source_seconds).replace(/\.\d+$/, "")}`, "muted"));
-      list.append(item);
-    }
-    details.append(list);
-    box.append(details);
-  }
-  const nextStep = b.user_next_step || b.next_step?.replace(/the displayed run_once_after_review decision/g, "“Run one more test”");
-  if (nextStep && (b.outcome !== "selected" || b.size_warning)) {
-    const next = node("p", "", "benchmark-next");
+  const nextStep = b.user_next_step || b.next_step;
+  if (nextStep) {
+    const next = node("p", "", "result-next");
     next.append(node("strong", "Next step: "), node("span", nextStep));
     box.append(next);
   }
   return box;
 }
-// Samples replayed from an earlier run on the same source still count toward
-// the result; the label only says they were not measured again.
-function reusedLabel(reuse) {
-  if (!reuse?.reused) return "";
-  return reuse.reused >= reuse.total ? " · reused from an earlier run" : ` · ${reuse.reused} of ${reuse.total} samples reused from an earlier run`;
-}
-// plan_source/plan_note arrive only once the search settled which settings the
-// encode uses; a provisional preflight plan is never presented as a result.
+// plan_source/plan_note arrive only once the encode's settings are settled; a
+// provisional preflight plan is never presented as a result.
 function encodingPlanNote(job) {
   const b = job.benchmark;
   if (!b?.plan_source) return null;
   const budgetMet = job.size_mode?.size_budget?.outcome === "meets_quality_target_within_budget";
-  const text = b.plan_source === "benchmark_winner" ? "The settings selected by the sample test." : b.plan_source === "size_budget" ? `Encoded at your size budget (${budgetMet ? "within" : "below"} the quality target).` : b.plan_note || "The profile's untested starting settings; no sample test result backs them.";
+  const text = b.plan_source === "size_budget" ? `Encoded at your size budget (${budgetMet ? "within" : "below"} the quality target).` : b.plan_note || "The profile's fixed settings.";
   const line = node("p", "", `encoding-plan plan-${b.plan_source}`);
   line.append(node("strong", "Encoding plan: "), node("span", text));
   return line;
@@ -4166,7 +3910,7 @@ function sizeBudgetNote(job) {
   if (b.curve?.length) {
     const details = node("details", "", "size-budget-points");
     details.append(node("summary", `Size and quality points (${b.curve.length})`));
-    const list = node("ul", "", "benchmark-list");
+    const list = node("ul", "", "result-list");
     for (const p of b.curve) list.append(node("li", sizeBudgetPointLabel(p)));
     details.append(list);
     box.append(details);
@@ -4175,7 +3919,7 @@ function sizeBudgetNote(job) {
   if (files.length) {
     const details = node("details", "", "size-budget-siblings");
     details.append(node("summary", `Sibling episodes (${files.length})`));
-    const list = node("ul", "", "benchmark-list");
+    const list = node("ul", "", "result-list");
     for (const f of files) list.append(node("li", `${f.name} · ${bytes(f.bytes)} · ${mbps(f.bitrate_kbps)}${f.width && f.height ? ` · ${f.width}×${f.height}` : ""}${f.duration_seconds > 0 ? ` · ${Math.round(f.duration_seconds / 60)} min` : ""}`));
     details.append(list);
     box.append(details);
@@ -4197,7 +3941,7 @@ function sizeModeNote(job) {
 }
 function queueOutcome(job) {
   if (job.archived) return "Archived · Restore to return to the queue";
-  const bench = benchmarkHeadline(job);
+  const bench = resultHeadline(job);
   if (bench) return bench;
   const batch = visibleBatch(job);
   if (rejectedCandidate(job) || batch?.outcome === "rejected") return "Candidate rejected · Original preserved";
@@ -4421,10 +4165,9 @@ function workerSlotWaitLabel(work) {
 function workerPhaseLabel(phase) {
   return {
     queued:"Waiting for a worker slot",waiting_for_worker:"Waiting for a worker slot",preparing:"Preparing source",reading_source:"Reading source from media storage",
-    probing_source:"Inspecting source",extracting_samples:"Extracting reference samples",encoding_samples:"Encoding test samples",
-    testing_initial:"Testing suitable settings",testing_alternatives:"Trying a measured alternative",verifying_samples:"Checking additional video samples",evaluating_metrics:"Measuring sample quality",estimating_final_size:"Estimating final file size",selecting_candidate:"Selecting the best candidate",
-    analysing_video:"Analyzing video · x265 pass 1 of 2",capturing_comparison:"Saving comparison frames",encoding:"Encoding full video",validating:"Verifying converted file",validating_quality:"Measuring final quality",publishing:"Saving converted file",
-    benchmarking:"Calibrating quality",completed:"Completed",
+    probing_source:"Inspecting source",
+    analysing_video:"Analyzing video · x265 pass 1 of 2",encoding:"Encoding full video",validating:"Verifying converted file",validating_quality:"Measuring final quality",publishing:"Saving converted file",
+    completed:"Completed",
   }[phase] || (phase ? phase.replaceAll("_"," ") : "Preparing job");
 }
 function activityElapsed(value) {
@@ -4524,14 +4267,11 @@ function renderWorkerActivity(data) {
       row.append(node("strong",`${pools.label(i)} · ${job.file}`));
       row.children[0].title = job.file;
       const phase = workerPhaseLabel(job.phase);
-      const parts = [job.kind === "benchmark" ? "Sample benchmark" : job.kind === "podcast" ? "Podcast processing" : "Full conversion",phase,activityElapsed(job.started_at) ? `${activityElapsed(job.started_at)} elapsed` : null];
-      if (job.progress != null) parts.push(`${Number(job.progress).toFixed(1)}%${job.kind === "benchmark" ? " of sample work" : ""}`);
+      const parts = [job.kind === "podcast" ? "Podcast processing" : "Full conversion",phase,activityElapsed(job.started_at) ? `${activityElapsed(job.started_at)} elapsed` : null];
+      if (job.progress != null) parts.push(`${Number(job.progress).toFixed(1)}%`);
       row.append(node("p",parts.filter(Boolean).join(" · "),"metadata"));
-      const detail = job.details;
-      if (detail?.total_units>0) row.append(node("p",`${detail.completed_units}/${detail.total_units} sample tasks resolved${detail.sample_number ? ` · Latest sample ${detail.sample_number}` : ""}${detail.candidate_number ? ` · Candidate ${detail.candidate_number}` : ""}${detail.metric ? ` · ${detail.metric.toUpperCase()}` : ""}`,"metadata"));
       const last = activityElapsed(job.last_progress_at);
       row.append(node("p",stale ? "No recent worker heartbeat. Last reported state." : last ? `Last advance ${last} ago` : "Worker connected · Waiting for the next measurement", "metadata"));
-      if (job.phase === "evaluating_metrics") row.append(node("p","Quality measurement compares the sample frames and can take longer than encoding them.","metadata"));
     }
     $("worker-slots").append(row);
   }
@@ -4572,15 +4312,10 @@ if (typeof IntersectionObserver !== "undefined") {
 }
 function renderPhaseCosts(host, job) {
   const entries = Object.entries(job.phase_costs || {});
-  const search = job.worker?.benchmark_search_seconds;
-  const sourceBudget = job.worker?.search_budget_seconds;
-  const maxBudget = job.worker?.search_budget_max_seconds;
-  const verifyBudget = job.worker?.search_budget_verify_seconds;
-  if (!entries.length && search == null && sourceBudget == null) return;
+  if (!entries.length) return;
   const detail = node("details", "", "phase-costs");
   detail.append(node("summary", "Measured phase costs"));
   detail.append(node("p", "Elapsed wall measurements include synchronous I/O. Coordinator measurements count returned invocations and exclude waits between them. CPU time is the user + system time of the worker's ffmpeg/ffprobe processes where the worker measured it; otherwise CPU time is unknown; phases may overlap and are not added into a total.", "metadata"));
-  if (search != null || sourceBudget != null) detail.append(node("p", `Sample search measured wall: ${search == null ? "Unknown" : search + " s"} · Budget per file: ${sourceBudget == null ? "Unknown" : sourceBudget + " s"}${sourceBudget != null && maxBudget > sourceBudget ? `, extended to at most ${maxBudget} s while samples keep finishing${verifyBudget > 0 ? `, ${maxBudget + verifyBudget} s while verifying a winner` : ""}` : ""}. Pending reservations are not measured consumption.`, "metadata"));
   const table = node("table");
   const header = node("tr");
   for (const label of ["Phase", "Wall time", "CPU time", "Invocations", "NAS read", "NAS written", "Cache hits / misses"]) header.append(node("th", label));
@@ -4649,14 +4384,14 @@ async function refreshDetail() {
     };
     if (job.podcast) { const p=job.podcast; summary.append(node("p",`${p.classified_blocks || 0}/${p.total_blocks || 0} transcript blocks classified · ${((p.removed_ms || 0)/1000).toFixed(1)} seconds removed · ${p.known_ad_units || 0} units verified by known ads`,"metadata")); if (p.output_path && job.status === "completed") summary.append(node("p",`Validated MP3: ${p.output_path}`,"metadata")); }
     if (job.transcode) {
-      // A waiting decision repeats its reason below, and a sample test result
-      // card explains the outcome itself; show it only once.
-      const hasReport = job.benchmark?.outcome && !["testing", "size_budget_ladder", "recipe"].includes(job.benchmark.outcome);
+      // A waiting decision repeats its reason below, and a result card
+      // explains the outcome itself; show it only once.
+      const hasReport = hasResultReport(job.benchmark);
       if (job.status !== "waiting_decision" && !hasReport) addOutcome(jobOutcomeText(job));
       if (job.transcode.tested_candidates) summary.append(node("p", `${job.transcode.tested_candidates} configurations tested${job.transcode.verified_samples ? ` · ${job.transcode.verified_samples} quality samples verified` : ""}`, "metadata"));
     }
  renderPhaseCosts(summary, job);
-    const report = benchmarkReport(job);
+    const report = resultReport(job);
     if (report) summary.append(report);
     const plan = encodingPlanNote(job);
     if (plan) summary.append(plan);
@@ -4727,7 +4462,7 @@ function batchFileActivity(item, job) {
   const activity = job?.activities?.find(activity => activity.id === item.child_action_id);
   if (activity?.waiting_condition === "worker_unreachable") return "Worker unreachable · Waiting for connection";
   const worker = activity?.worker;
-  const phase = worker?.transcode_phase || worker?.benchmark_phase || worker?.phase;
+  const phase = worker?.transcode_phase || worker?.phase;
   // Cleared once the worker accepts the job, so it never hides worker progress.
   if (activity?.work?.phase === "waiting_for_worker") return workerSlotWaitLabel(activity.work);
   const after = activity && postEncodeWork({...activity, status: item.status});
@@ -5427,7 +5162,7 @@ function recipeControls() {
   $("recipe-quality").max = software ? "51" : "100";
   $("recipe-quality").min = bitrate ? "0" : "1";
   $("recipe-quality-label").textContent = bitrate ? "Quality (bitrate mode)" : software ? "CRF · lower preserves more detail" : "VideoToolbox Q · higher preserves more detail";
-  $("recipe-scale-note").textContent = bitrate ? "Bitrate is measured in kbps; estimated output size requires an applicable sample test." : software ? "x265 CRF: 1–51, lower favors quality. This is not a quality percentage. Estimated size: requires sample test." : "VideoToolbox Q: 1–100, higher favors quality. Q 70 is not 70% quality and cannot be compared to x265 CRF. Estimated size: requires sample test.";
+  $("recipe-scale-note").textContent = bitrate ? "Bitrate is measured in kbps." : software ? "x265 CRF: 1–51, lower favors quality. This is not a quality percentage." : "VideoToolbox Q: 1–100, higher favors quality. Q 70 is not 70% quality and cannot be compared to x265 CRF.";
   if (bitrate) $("recipe-quality").value = "0";
   else if (!software && Number($("recipe-quality").value) === 0)
     $("recipe-quality").value = "65";
@@ -5462,17 +5197,10 @@ $("recipe-encoder").addEventListener("change", () => {
       delete p.video.x265;
       p.video.quality = 65;
     }
-    if (p.optimization?.search) {
-      p.optimization.search.quality_values = software
-        ? [20, 23, 26]
-        : [55, 65, 75];
-      p.optimization.search.max_candidates = 3;
-      delete p.optimization.search.bitrate_values;
-    }
     setRecipeControls(p);
     renderRecipeDirty();
     notify(
-      "Encoder changed. Incompatible settings and sample search values were reset; review before saving.",
+      "Encoder changed. Incompatible settings were reset; review before saving.",
     );
   } else recipeControls();
 });
@@ -5499,7 +5227,6 @@ function recipeFromControls() {
 // insert optional values into an existing profile.
 function advancedProfileDefaults(profile) {
   const vt = profile.video?.codec === "hevc_videotoolbox";
-  const bitrate = (vt && profile.video?.average_bitrate_kbps > 0) || !!profile.video?.x265;
   const video = { profile: "", pixel_format: "" };
   if (vt) {
     Object.assign(video, {
@@ -5521,31 +5248,6 @@ function advancedProfileDefaults(profile) {
   return {
     video,
     preserve: { metadata: true, chapters: true, attachments: true },
-    optimization: {
-      enabled: false,
-      sampling: {
-        strategy: "distributed",
-        sample_count: 3,
-        sample_seconds: 20,
-      },
-      quality: {
-        preferred_metric: "vmaf",
-        vmaf: { target: 96, minimum: 95, marginal_tolerance: 0.5 },
-        ssim: { target: 0.99, minimum: 0.98, marginal_tolerance: 0.005 },
-      },
-      search: {
-        max_candidates: 3,
-        [bitrate ? "bitrate_values" : "quality_values"]: bitrate
-          ? profile.video?.x265 ? [profile.video.x265.bitrate_kbps] : [
-              Math.round(profile.video.average_bitrate_kbps * 0.8),
-              profile.video.average_bitrate_kbps,
-              Math.round(profile.video.average_bitrate_kbps * 1.2),
-            ]
-          : vt
-            ? [55, 65, 75]
-            : [20, 23, 26],
-      },
-    },
   };
 }
 function mergeAdvancedDefaults(defaults, profile) {
@@ -5573,7 +5275,10 @@ function renderAdvancedProfile(profile) {
   host.replaceChildren();
   state.recipeAdvancedErrors = new Map();
   const defaults = advancedProfileDefaults(profile);
-  const view = mergeAdvancedDefaults(defaults, profile);
+  // A stored optimization block (the removed sample search's settings) stays in
+  // the profile as it is; nothing edits it here.
+  const {optimization: _stored, ...shown} = profile;
+  const view = mergeAdvancedDefaults(defaults, shown);
   const represented = new Set([
     "container",
     "video.codec",
@@ -5597,9 +5302,6 @@ function renderAdvancedProfile(profile) {
     gop_size: [1, 100000],
     b_frames: [0, 1],
     max_ref_frames: [1, 16],
-    sample_count: [1, 20],
-    sample_seconds: [0.1, 120],
-    max_candidates: [1, 20],
   };
   const choices = {
     "video.profile": ["", "main", "main10"],
@@ -5613,12 +5315,6 @@ function renderAdvancedProfile(profile) {
       "psnr",
       "ssim",
     ],
-    "optimization.sampling.strategy": [
-      "distributed",
-      "uniform",
-      "relative_positions",
-    ],
-    "optimization.quality.preferred_metric": ["vmaf", "ssim"],
   };
   const setValue = (path, value) => {
     const keys = path.split(".");
@@ -5664,14 +5360,6 @@ function renderAdvancedProfile(profile) {
               delete p.video.constant_bitrate;
               p.video.quality = 65;
               $("recipe-quality").value = "65";
-            }
-            if (p.optimization?.search) {
-              delete p.optimization.search.quality_values;
-              delete p.optimization.search.bitrate_values;
-              Object.assign(
-                p.optimization.search,
-                advancedProfileDefaults(p).optimization.search,
-              );
             }
             renderAdvancedProfile(p);
             recipeControls();
@@ -5728,7 +5416,7 @@ function renderAdvancedProfile(profile) {
             if (value === null) input.placeholder = "Automatic";
             if (input.type === "number") {
               input.step =
-                key === "sample_seconds" || current.includes(".quality.") || (current.startsWith("video.x265.") && ["aq_strength","psy_rd","psy_rdoq"].includes(key))
+                current.includes(".quality.") || (current.startsWith("video.x265.") && ["aq_strength","psy_rd","psy_rdoq"].includes(key))
                   ? "any"
                   : "1";
               if (fieldBounds) [input.min, input.max] = fieldBounds.map(String);
@@ -5803,12 +5491,6 @@ function renderAdvancedProfile(profile) {
             state.recipeAdvancedErrors.delete(current);
             input.setCustomValidity?.("");
             setValue(current, next);
-            if (current === "optimization.enabled" && next) {
-              state.recipeDraft.optimization = mergeAdvancedDefaults(
-                advancedProfileDefaults(state.recipeDraft).optimization,
-                state.recipeDraft.optimization,
-              );
-            }
             recipeControls();
           },
         );
