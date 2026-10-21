@@ -16,6 +16,10 @@ const DefaultContainerOverheadRate = 0.005
 // caller fallback because their payload can be significant.
 const DefaultTextSubtitleSizeBytes int64 = 2 * 1024 * 1024
 
+// IsTextSubtitleCodec reports a text subtitle codec, whose size is bounded
+// by DefaultTextSubtitleSizeBytes when the file does not state it.
+func IsTextSubtitleCodec(codec string) bool { return isTextSubtitleCodec(codec) }
+
 func isTextSubtitleCodec(codec string) bool {
 	switch strings.ToLower(strings.TrimSpace(codec)) {
 	case "srt", "subrip", "mov_text", "ass", "ssa", "webvtt":

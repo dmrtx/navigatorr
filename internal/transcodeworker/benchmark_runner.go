@@ -808,6 +808,8 @@ func (r *ProductionBenchmarkRunner) RunBenchmark(ctx context.Context, w *Worker,
 //     so that the extracted sample starts cleanly at PTS 0.
 //  4. Lossless master: `-c:v ffv1` encodes losslessly, preserving raw decoded pixel format,
 //     bit depth, and frame cadence with zero generational loss.
+//     Source timestamps pass through unchanged (sourceTimestampArgs), so a
+//     window cut from the source and one cut from its encode hold the same frames.
 //  5. Clean elementary stream: `-an -sn -dn` strips audio, subtitles, and data streams.
 //  6. Deterministic candidate alignment: Candidate samples are subsequently encoded from this
 //     FFV1 reference master from frame 0 to end without seeking or trimming. While the source
@@ -824,6 +826,8 @@ func BuildReferenceExtractionArgs(sourcePath, refPath string, videoIndex int, st
 		"-avoid_negative_ts", "make_zero",
 		"-map", fmt.Sprintf("0:%d", videoIndex),
 		"-c:v", "ffv1",
+		sourceTimestampArgs[0], sourceTimestampArgs[1],
+		sourceTimestampArgs[2], sourceTimestampArgs[3],
 		"-an",
 		"-sn",
 		"-dn",
@@ -850,6 +854,9 @@ func BuildCandidateEncodeArgs(refPath, candPath string, plan *transcode.Plan) ([
 		"-map", "0:v:0",
 	}
 	args = append(args, videoArgs...)
+	if norm(plan.VideoCodec) != transcode.VideoCodecCopy {
+		args = append(args, sourceTimestampArgs...)
+	}
 	args = append(args, "-an", "-sn", "-dn", candPath)
 	return args, nil
 }

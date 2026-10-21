@@ -11,6 +11,7 @@ import (
 	"github.com/jakenesler/navigatorr/fsop"
 	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/optimization"
 )
 
 const budgetSourceBytes = int64(10_000_000_000)
@@ -188,7 +189,12 @@ func TestSizeBudgetBytesAndBitrate(t *testing.T) {
 	if !known || lossless >= 10_700_000_000-4_000_000_000 {
 		t.Fatalf("lossless audio savings ignored: %d", lossless)
 	}
+	// Without the video's statistics its size is what the sized audio leaves.
 	rep.Video[0].Tags = nil
+	if derived, known := sizeBudgetNonVideoBytes(rep, 10_700_000_000); !known || derived <= 0 {
+		t.Fatalf("video size not derived from the sized audio: %d %v", derived, known)
+	}
+	rep.Audio[1].BitRate = 0
 	if _, known := sizeBudgetNonVideoBytes(rep, 10_700_000_000); known {
 		t.Fatal("unknown video size treated as known")
 	}
@@ -256,7 +262,7 @@ func TestSizeBudgetFallbackDeclines(t *testing.T) {
 		"old worker": {inputs: map[string]any{"size_budget_percent": 40.0}, caps: old, reason: "size_budget_worker_unsupported"},
 		"no video bytes": {inputs: map[string]any{"size_budget_percent": 40.0}, caps: budgetCaps(), reason: "size_budget_estimate_unavailable", mutate: func(c *budgetCase) {
 			rep := budgetReport()
-			rep.Video[0].Tags = nil
+			rep.Video[0].Tags, rep.Audio[0].BitRate = nil, 0
 			c.ec.State["source_report"] = rep
 		}},
 		"audio alone takes the budget": {inputs: map[string]any{"size_budget_bytes": 300_000_000.0}, caps: budgetCaps(), reason: "size_budget_unreachable"},
@@ -345,7 +351,7 @@ func TestSizeBudgetBenchmarkWait(t *testing.T) {
 	t.Run("over budget and no budget encode can be planned keeps the winner", func(t *testing.T) {
 		c := newBudgetCase(t, map[string]any{"size_budget_percent": 40.0}, budgetCaps())
 		rep := budgetReport()
-		rep.Video[0].Tags = nil
+		rep.Video[0].Tags, rep.Audio[0].BitRate = nil, 0
 		c.ec.State["source_report"] = rep
 		c.executor.benchmarkStatusFunc = func(_ context.Context, id string) (transcode.BenchmarkStatus, error) {
 			return transcode.BenchmarkStatus{ProtocolVersion: transcode.WorkerProtocolVersion, ID: id, Status: transcode.StatusCompleted, Decision: budgetDecision(budgetWinner())}, nil
@@ -709,5 +715,40 @@ func TestSizeBudgetSiblingsInputAndFallback(t *testing.T) {
 	}
 	if rec := sizeBudgetOf(c.ec.State); rec.BudgetBytes != 2_250_000_000 || rec.Siblings == nil || rec.Siblings.Count != 5 || !strings.Contains(rec.Message, "from siblings") {
 		t.Fatalf("record %+v", rec)
+	}
+}
+
+func TestSizeBudgetNonVideoBytesWithoutVideoStatistics(t *testing.T) {
+	// A Bluray remux muxed without Matroska statistics: no stream states a
+	// size, the AC-3 tracks state their bitrates and the subtitles are text.
+	rep := &mediainspect.DetailedReport{DurationSec: 3600,
+		Video:     []mediainspect.DetailedStream{{Index: 0, Codec: "hevc", BitDepth: 10, Width: 1920, Height: 1080, FPS: 25}},
+		Audio:     []mediainspect.DetailedStream{{Index: 1, Codec: "ac3", Channels: 2, BitRate: 192000}, {Index: 2, Codec: "ac3", Channels: 6, BitRate: 384000}},
+		Subtitles: []mediainspect.DetailedStream{{Index: 3, Codec: "subrip"}, {Index: 4, Codec: "subrip"}},
+	}
+	const source = int64(5_000_000_000)
+	got, known := sizeBudgetNonVideoBytes(rep, source)
+	audio := int64(192000+384000) * 3600 / 8
+	want := audio + 2*optimization.DefaultTextSubtitleSizeBytes + source*sizeBudgetOverheadPerMille/1000
+	if !known || got != want {
+		t.Fatalf("non-video bytes = %d, %v; want %d derived from the other streams", got, known, want)
+	}
+	enc := planSizeBudgetEncode(&SizeBudgetPolicy{Percent: 20, FillPercent: sizeBudgetFillPercent, Preset: sizeBudgetPreset, X265: sizeBudgetX265, Floor: sizeBudgetFloor}, rep, source, source/5)
+	if enc.Reason != "" || enc.X265.BitrateKbps <= 0 {
+		t.Fatalf("budget not planned from the derived video size: %+v", enc)
+	}
+
+	for name, mutate := range map[string]func(*mediainspect.DetailedReport){
+		"audio without a size": func(r *mediainspect.DetailedReport) { r.Audio[1].BitRate = 0 },
+		"bitmap subtitles":     func(r *mediainspect.DetailedReport) { r.Subtitles[0].Codec = "hdmv_pgs_subtitle" },
+		"others fill the file": func(r *mediainspect.DetailedReport) { r.Audio[0].BitRate = 20_000_000 },
+	} {
+		r := *rep
+		r.Audio = append([]mediainspect.DetailedStream(nil), rep.Audio...)
+		r.Subtitles = append([]mediainspect.DetailedStream(nil), rep.Subtitles...)
+		mutate(&r)
+		if _, known := sizeBudgetNonVideoBytes(&r, source); known {
+			t.Fatalf("%s: a video size was derived from streams that do not bound it", name)
+		}
 	}
 }

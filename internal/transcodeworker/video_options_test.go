@@ -165,6 +165,7 @@ func TestBuildFFmpegArgsPlacesTypedVideoOptionsDeterministically(t *testing.T) {
 		"-map", "0:v?", "-map", "0:a?", "-map", "0:s?", "-map", "0:t?",
 		"-map_metadata", "0", "-map_chapters", "0",
 		"-c:v", "hevc_videotoolbox", "-q:v", "65", "-profile:v", "main", "-pix_fmt", "yuv420p", "-prio_speed", "0", "-spatial_aq", "0", "-realtime", "0",
+		"-fps_mode:v:0", "passthrough", "-enc_time_base:v:0", "demux",
 		"-c:a", "copy", "-c:t", "copy", "/media/candidate.mkv",
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -263,6 +264,7 @@ func TestBuildFFmpegArgsLibX265PreservesAudioSubtitlesMetadata(t *testing.T) {
 		"-map", "0:v?", "-map", "0:a?", "-map", "0:s?", "-map", "0:t?",
 		"-map_metadata", "0", "-map_chapters", "0",
 		"-c:v", "libx265", "-crf", "24", "-preset", "slow", "-profile:v", "main", "-pix_fmt", "yuv420p",
+		"-fps_mode:v:0", "passthrough", "-enc_time_base:v:0", "demux",
 		"-c:a", "copy", "-c:s:0", "subrip", "-c:s:1", "copy", "-c:t", "copy",
 		"/media/candidate.mkv",
 	}
