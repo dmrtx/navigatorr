@@ -30,8 +30,8 @@ func TestUnreachableSizeBudgetEndsBeforeAnyWork(t *testing.T) {
 			if err != nil || res.Status != StepCompleted {
 				t.Fatalf("submit step %+v %v", res, err)
 			}
-			if c.executor.benchmarkSubmitCalls != 0 || c.executor.submitCalls != 0 {
-				t.Fatalf("work submitted: benchmarks=%d encodes=%d", c.executor.benchmarkSubmitCalls, c.executor.submitCalls)
+			if c.executor.submitCalls != 0 {
+				t.Fatalf("work submitted: encodes=%d", c.executor.submitCalls)
 			}
 			if !getBool(c.ec.State, "skip_transcode") || getString(c.ec.State, "reason_code") != SizeBudgetExceeded {
 				t.Fatalf("not ended: %+v", c.ec.State)

@@ -230,9 +230,6 @@ func TestTranscodeMedia_FixedProfileSubmitsOneEncode(t *testing.T) {
 	if res.Status != StatusCompleted {
 		t.Fatalf("expected StatusCompleted, got %s (error: %s)", res.Status, res.Error)
 	}
-	if mock.benchmarkSubmitCalls != 0 {
-		t.Errorf("a fixed profile must not submit a sample job, got %d", mock.benchmarkSubmitCalls)
-	}
 	if mock.submitCalls != 1 {
 		t.Errorf("expected exactly 1 full transcode Submit call, got %d", mock.submitCalls)
 	}

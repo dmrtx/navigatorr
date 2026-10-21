@@ -315,7 +315,7 @@ func TestWaitingDecisionNotAutoResolved(t *testing.T) {
 	if child.Status != StatusWaitingDecision {
 		t.Fatalf("waiting_decision child changed to %s", child.Status)
 	}
-	if mock.submitCalls != 0 || mock.benchmarkSubmitCalls != 0 {
+	if mock.submitCalls != 0 {
 		t.Fatal("reconciler must not submit for a waiting_decision")
 	}
 }

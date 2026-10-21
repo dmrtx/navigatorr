@@ -298,7 +298,7 @@ func TestRetryAfterRejectedTranscodeAdmissionRetainsAnalysisAndIdentity(t *testi
 			if err != nil || r.Status != StatusWaitingExternal || mock.submitCalls != wantSubmits {
 				t.Fatalf("retry: %+v err=%v submits=%d", r, err, mock.submitCalls)
 			}
-			if getString(r.State, "job_id") != "job-rejected" || getInt(r.State, "manual_retry_count") != 0 || !getBool(r.State, "benchmark_done") || getString(r.State, "benchmark_job_id") != "bench-approved" || getString(r.State, "benchmark_request_digest") != "approved-digest" || r.State["benchmark_search_seconds"] != 83.0 || mock.benchmarkSubmitCalls != 0 {
+			if getString(r.State, "job_id") != "job-rejected" || getInt(r.State, "manual_retry_count") != 0 || !getBool(r.State, "benchmark_done") || getString(r.State, "benchmark_job_id") != "bench-approved" || getString(r.State, "benchmark_request_digest") != "approved-digest" || r.State["benchmark_search_seconds"] != 83.0 {
 				t.Fatalf("retry discarded analysis or changed admission: %+v", r.State)
 			}
 		})

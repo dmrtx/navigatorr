@@ -224,8 +224,8 @@ func TestModeBatchHFRCapabilityWiring(t *testing.T) {
 			t.Fatalf("HFR item on an older worker: %+v", item)
 		}
 	}
-	if lookups != 1 || executor.benchmarkSubmitCalls != 0 {
-		t.Fatalf("capabilities asked %d times, %d benchmarks", lookups, executor.benchmarkSubmitCalls)
+	if lookups != 1 {
+		t.Fatalf("capabilities asked %d times", lookups)
 	}
 }
 

@@ -73,14 +73,6 @@ func newBudgetCase(t *testing.T, inputs map[string]any, caps transcode.WorkerCap
 	return &budgetCase{ec: ec, engine: NewEngine(EngineDeps{Transcode: executor}), executor: executor, snapshot: snapshot, base: base, request: request}
 }
 
-func budgetDecision(winner *transcode.BenchmarkWinner) *transcode.BenchmarkDecision {
-	return &transcode.BenchmarkDecision{Winner: winner, Evaluations: []transcode.BenchmarkCandidateEvaluation{
-		{CandidateID: "x265-q22", VideoCodec: transcode.VideoCodecLibX265, Quality: 22, Preset: "medium", EstimatedBytes: 6_100_000_000, Eligible: winner != nil, VMAF: &transcode.BenchmarkVMAFSummary{Mean: 90.1, P5: 85.2, WorstWindowMean: 86.0}},
-		{CandidateID: "x265-q26", VideoCodec: transcode.VideoCodecLibX265, Quality: 26, Preset: "medium", EstimatedBytes: 3_900_000_000, VMAF: &transcode.BenchmarkVMAFSummary{Mean: 86.4, P5: 79.0, WorstWindowMean: 80.2}},
-		{CandidateID: "x265-q30", VideoCodec: transcode.VideoCodecLibX265, Quality: 30, Preset: "medium"},
-	}}
-}
-
 func TestModeSizeBudgetInput(t *testing.T) {
 	b, err := modeSizeBudgetInput("size", map[string]any{"size_budget_percent": 40.0})
 	if err != nil || b == nil || b.Percent != 40 || b.Bytes != 0 || b.X265.AQMode != 3 || !b.X265.TwoPass || b.Preset != "medium" || b.Floor != sizeBudgetFloor || b.FillPercent != 97 {

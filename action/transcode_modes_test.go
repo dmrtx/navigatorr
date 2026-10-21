@@ -140,15 +140,7 @@ cat <<'JSON'
 JSON
 `), 0700)
 			plans := []*transcode.Plan{}
-			executor := &mockTranscodeExecutor{capabilitiesFunc: func(context.Context) (transcode.WorkerCapabilities, error) { return modeTestCapabilities(), nil }, benchmarkStatusFunc: func(_ context.Context, id string) (transcode.BenchmarkStatus, error) {
-				seconds := 1.0
-				winner := transcode.BenchmarkWinner{CandidateID: "cand_crf20", VideoCodec: transcode.VideoCodecLibX265, Quality: 20, Preset: "medium", VideoProfile: "main", PixelFormat: "yuv420p", ExpectedBitDepth: 8, Score: 99, MetricType: "vmaf", TargetReached: true, MinimumMet: true, EstimatedTotalBytes: 800, SavingsPercent: 20}
-				if mode == "size" {
-					// Size v3 encodes this 8-bit source as Main10 on a proven worker.
-					winner.CandidateID, winner.Quality, winner.VideoProfile, winner.PixelFormat, winner.ExpectedBitDepth = "cand_crf24", 24, "main10", "p010le", 10
-				}
-				return transcode.BenchmarkStatus{Automatic: &transcode.BenchmarkAutomaticEvidence{VerifiedSamples: 5}, ID: id, Status: transcode.StatusCompleted, SearchSeconds: &seconds, Decision: &transcode.BenchmarkDecision{Winner: &winner}}, nil
-			}, submitFunc: func(_ context.Context, req transcode.Request) (transcode.Job, error) {
+			executor := &mockTranscodeExecutor{capabilitiesFunc: func(context.Context) (transcode.WorkerCapabilities, error) { return modeTestCapabilities(), nil }, submitFunc: func(_ context.Context, req transcode.Request) (transcode.Job, error) {
 				plans = append(plans, req.Plan)
 				return transcode.Job{ID: req.ID}, nil
 			}, statusFunc: func(_ context.Context, id string) (transcode.JobStatus, error) {
@@ -204,7 +196,7 @@ func TestModePolicyAgainstMeasuredCalibrationFixtures(t *testing.T) {
 	}
 	for _, row := range rows {
 		for _, mode := range []string{"size", "quality", "x265_preserve"} {
-			policy, _ := modePolicy(mode, false)
+			policy, _ := modePolicyFor(mode, false, 0)
 			quality := policy.Profile.Optimization.Quality
 			vmaf := quality.VMAF
 			passing := row.Mean >= vmaf.Minimum && row.P5 >= *vmaf.P5Minimum && row.CambiMean <= *quality.Banding.MaxMean && row.CambiPeak <= *quality.Banding.MaxPeak

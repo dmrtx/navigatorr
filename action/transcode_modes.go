@@ -177,10 +177,6 @@ type ModeCompactPolicy struct {
 	ChainVersion string `json:"chain_version"`
 }
 
-func modePolicy(mode string, anime bool) (ModePolicySnapshot, error) {
-	return modePolicyFor(mode, anime, 0)
-}
-
 // Hardware search (size mode, on unless the operation turns it off). The ladder
 // straddles the quality gates on the measured clips (matched values 45-57 with
 // a 240-frame GOP); the default margin is how much larger than the best x265

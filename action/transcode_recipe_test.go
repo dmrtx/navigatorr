@@ -33,10 +33,6 @@ func legacyModePolicy(mode string, anime bool) (ModePolicySnapshot, error) {
 	return legacyModePolicyWithBudget(mode, anime, 0, nil, false, nil)
 }
 
-func legacyModePolicyFor(mode string, anime bool, maxHeight int) (ModePolicySnapshot, error) {
-	return legacyModePolicyWithBudget(mode, anime, maxHeight, nil, false, nil)
-}
-
 func legacyModePolicyWithHardware(mode string, anime bool, maxHeight int, hardware *transcode.HardwareSearchRules) (ModePolicySnapshot, error) {
 	return legacyModePolicyWithBudget(mode, anime, maxHeight, hardware, false, nil)
 }
@@ -320,7 +316,7 @@ func TestQualityLadderNeedsItsEncoder(t *testing.T) {
 		caps.Encoders = encoders
 	})
 	res, err := c.engine.stepPlanEncode(context.Background(), c.ec)
-	if err != nil || res.Status != StepWaitingDecision || c.executor.benchmarkSubmitCalls != 0 || QualityLadderOf(c.ec.State) != nil {
+	if err != nil || res.Status != StepWaitingDecision || QualityLadderOf(c.ec.State) != nil {
 		t.Fatalf("missing encoder: %+v %v", res, err)
 	}
 }
@@ -422,7 +418,7 @@ func TestX265SizeBudgetRecipe(t *testing.T) {
 	// not with a search.
 	c = newRecipeCase(t, map[string]any{"size_budget_percent": 40.0, "allow_hardware": false}, func(caps *transcode.WorkerCapabilities) { caps.X265TwoPass = false })
 	res, err := c.engine.stepPlanEncode(context.Background(), c.ec)
-	if err != nil || res.Status != StepCompleted || !getBool(c.ec.State, "skip_transcode") || getString(c.ec.State, "reason_code") != "size_budget_worker_unsupported" || c.executor.benchmarkSubmitCalls != 0 {
+	if err != nil || res.Status != StepCompleted || !getBool(c.ec.State, "skip_transcode") || getString(c.ec.State, "reason_code") != "size_budget_worker_unsupported" {
 		t.Fatalf("no two-pass worker: %+v %v", res, err)
 	}
 

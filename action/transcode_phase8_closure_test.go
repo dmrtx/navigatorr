@@ -11,7 +11,7 @@ package action
 // doubles used throughout this file's suite: a fake ffprobe shell script
 // (createSmartFakeFFprobeScript) and mockTranscodeExecutor. Nothing here
 // exercises real Apple Silicon hardware; live-hardware evidence is recorded
-// separately in docs/transcode/TRANSCODE_OPTIMIZATION_IMPLEMENTATION_PLAN.md.
+// by the acceptance suite.
 
 import (
 	"context"
@@ -150,9 +150,6 @@ func TestPhase8_BuiltinFixedProfile_SubmitsStaticPlan(t *testing.T) {
 
 	if getBool(res.Outputs, "optimization_enabled") {
 		t.Errorf("outputs unexpectedly reported optimization_enabled=true when no metric requested")
-	}
-	if atomic.LoadInt32(&mock.benchmarkSubmitCalls) != 0 {
-		t.Errorf("expected 0 benchmark submit calls, got %d", atomic.LoadInt32(&mock.benchmarkSubmitCalls))
 	}
 	if atomic.LoadInt32(&mock.submitCalls) != 1 {
 		t.Errorf("expected 1 full transcode submit call, got %d", atomic.LoadInt32(&mock.submitCalls))

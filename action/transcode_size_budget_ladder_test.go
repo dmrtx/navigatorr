@@ -70,9 +70,6 @@ func TestSizeBudgetLadderStartsFromTheBudget(t *testing.T) {
 	if err != nil || res.Status != StepCompleted {
 		t.Fatalf("submit %+v %v", res, err)
 	}
-	if c.executor.benchmarkSubmitCalls != 0 {
-		t.Fatalf("a benchmark was submitted %d times", c.executor.benchmarkSubmitCalls)
-	}
 	mergeMap(c.ec.State, res.Outputs)
 	rec := sizeBudgetLadderOf(c.ec.State)
 	plan := getPlan(c.ec.State["plan"])
@@ -82,7 +79,7 @@ func TestSizeBudgetLadderStartsFromTheBudget(t *testing.T) {
 	if plan.VideoCodec != transcode.VideoCodecHEVCVideoToolbox || plan.Quality != 65 || plan.AverageBitrateKbps != 0 || plan.SizePolicy == nil || plan.SizePolicy.MaxCandidateBytes != rec.BudgetBytes || rec.BudgetBytes != 4_000_000_000 {
 		t.Fatalf("first rung plan %+v", plan)
 	}
-	if getString(c.ec.State, "benchmark_job_id") != "" || !getBool(c.ec.State, "benchmark_done") || getBool(c.ec.State, "has_winner") || c.ec.State["plan_source"] != sizeBudgetPlanSource {
+	if getString(c.ec.State, "benchmark_job_id") != "" || c.ec.State["plan_source"] != sizeBudgetPlanSource {
 		t.Fatalf("search state %+v", c.ec.State)
 	}
 	if plan.PolicyDigest != c.snapshot.Digest || plan.QualityValidation == nil || plan.QualityValidation.BenchmarkRequestDigest != c.ec.State["benchmark_request_digest"] {
@@ -209,8 +206,8 @@ func TestSizeBudgetLadderWorkerRefusals(t *testing.T) {
 	if !strings.Contains(rec.Message, "All 4 VideoToolbox steps") || !strings.HasSuffix(rec.Message, "Try again with x265 (allow_hardware off): its two passes land on the budget.") {
 		t.Fatalf("message %q", rec.Message)
 	}
-	if len(asked) != 4 || c.executor.benchmarkSubmitCalls != 0 {
-		t.Fatalf("worker asked %v, %d benchmarks", asked, c.executor.benchmarkSubmitCalls)
+	if len(asked) != 4 {
+		t.Fatalf("worker asked %v", asked)
 	}
 	// A last refusal without a size still offers x265.
 	rec.RetryWithoutHardware, rec.Outcome = false, ""
@@ -289,7 +286,7 @@ func TestSizeBudgetAudioOnlyCarriesTheBudget(t *testing.T) {
 	if !ok || budget <= 0 || budget >= 10_700_000_000 || c.ec.State["plan_source"] != "audio_only" || !transcode.IsSizeAudioOnlyPlan(plan) || transcode.ValidateSizeAudioOnlyShape(plan) != nil {
 		t.Fatalf("budget %d plan %+v source %v", budget, plan, c.ec.State["plan_source"])
 	}
-	if plan.SizePolicy.MaxCandidateBytes != budget || c.ec.State["plan_digest"] != plan.PlanDigest || res.Outputs["plan_digest"] != plan.PlanDigest || c.executor.benchmarkSubmitCalls != 0 {
+	if plan.SizePolicy.MaxCandidateBytes != budget || c.ec.State["plan_digest"] != plan.PlanDigest || res.Outputs["plan_digest"] != plan.PlanDigest {
 		t.Fatalf("ceiling %d want %d", plan.SizePolicy.MaxCandidateBytes, budget)
 	}
 

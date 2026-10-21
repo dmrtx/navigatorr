@@ -190,8 +190,7 @@ func (e *Engine) startSizeBudgetLadder(ctx context.Context, ec *ExecutionContext
 	default:
 		rec.Choice = &SizeBudgetChoice{VideoCodec: transcode.VideoCodecLibX265, Reason: SizeBudgetChoiceWorkerUnsupported, Message: "The worker cannot encode with VideoToolbox, so the whole file is encoded once with two-pass x265 at the budget."}
 	}
-	outputs := map[string]any{"benchmark_done": true, "has_winner": false, "benchmark_request_digest": digest}
-	ec.State["benchmark_done"], ec.State["has_winner"] = true, false
+	outputs := map[string]any{"benchmark_request_digest": digest}
 	return e.commitSizeBudgetPlan(ec, snapshot, enc, rec, outputs)
 }
 
@@ -200,8 +199,7 @@ func (e *Engine) startSizeBudgetLadder(ctx context.Context, ec *ExecutionContext
 // estimate, so the plan carries the budget as its byte ceiling, as a ladder
 // rung does, and the worker refuses a larger file.
 func (e *Engine) startSizeBudgetAudioOnly(ctx context.Context, ec *ExecutionContext, budget int64) (StepResult, bool) {
-	outputs := map[string]any{"benchmark_done": true, "has_winner": false}
-	ec.State["benchmark_done"], ec.State["has_winner"] = true, false
+	outputs := map[string]any{}
 	res, handled := e.sizeAudioOnlyFallback(ctx, ec, outputs)
 	if !handled {
 		return StepResult{Status: StepFailed, Error: "audio-only encode could not be planned for the size budget (fail closed)"}, true

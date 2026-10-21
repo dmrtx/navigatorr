@@ -83,10 +83,10 @@ func TestRemovedSearchActionsAreRetiredNotExecuted(t *testing.T) {
 			if err := json.Unmarshal([]byte(stored.ErrorJSON), &failure); err != nil || failure.Error != removedSearchMessage {
 				t.Fatalf("stored error %q: %v", stored.ErrorJSON, err)
 			}
-			// It ran nothing: no encode and no sample job was submitted, and
+			// It ran nothing: no encode was submitted, and
 			// the media is as it was.
-			if atomic.LoadInt32(&mock.submitCalls) != 0 || atomic.LoadInt32(&mock.benchmarkSubmitCalls) != 0 {
-				t.Fatalf("retired action submitted work: encodes=%d samples=%d", mock.submitCalls, mock.benchmarkSubmitCalls)
+			if atomic.LoadInt32(&mock.submitCalls) != 0 {
+				t.Fatalf("retired action submitted an encode: %d", mock.submitCalls)
 			}
 			after, err := os.ReadFile(media)
 			if err != nil || string(after) != string(before) {

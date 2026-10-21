@@ -386,9 +386,8 @@ func (e *Engine) startQualityLadder(ctx context.Context, ec *ExecutionContext, c
 		rec.Message = choice.Message + " " + rec.Message
 	}
 	ec.State[qualityLadderKey] = rec
-	ec.State["benchmark_done"], ec.State["has_winner"] = true, false
 	ec.State["plan"], ec.State["plan_source"], ec.State["plan_digest"] = plan, qualityLadderPlanSource, plan.PlanDigest
-	return StepResult{Status: StepCompleted, Outputs: map[string]any{"benchmark_done": true, "has_winner": false, "benchmark_request_digest": digest, qualityLadderKey: rec,
+	return StepResult{Status: StepCompleted, Outputs: map[string]any{"benchmark_request_digest": digest, qualityLadderKey: rec,
 		"plan": plan, "plan_source": qualityLadderPlanSource, "plan_digest": plan.PlanDigest, "plan_note": rec.Message}}, true
 }
 

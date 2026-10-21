@@ -152,15 +152,6 @@ func TestHardwarePolicyWithoutExtraMarginKeepsItsDigest(t *testing.T) {
 	}
 }
 
-func mustHardwareRules(t *testing.T) *transcode.HardwareSearchRules {
-	t.Helper()
-	rules, err := modeHardwareInput("size", map[string]any{})
-	if err != nil || rules == nil {
-		t.Fatalf("rules %+v %v", rules, err)
-	}
-	return rules
-}
-
 func TestHardwarePolicyWithoutFallbackRungsKeepsItsDigest(t *testing.T) {
 	rules := &transcode.HardwareSearchRules{MarginPercent: 15, QualityValues: []int{45, 50, 55, 60}, GOPSize: 240, BFrames: 1}
 	p := marginEraPolicy(t, rules)
