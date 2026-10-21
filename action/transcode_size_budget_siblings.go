@@ -92,8 +92,14 @@ type SiblingBudgetEvidence struct {
 	Ratio       float64       `json:"ratio,omitempty"`
 	BudgetBytes int64         `json:"budget_bytes,omitempty"`
 	Files       []SiblingFile `json:"files,omitempty"`
-	Reason      string        `json:"reason,omitempty"`
-	Message     string        `json:"message"`
+	// ProbeFailures counts the candidate files ffprobe could not inspect, and
+	// ProbeFailure is the kind of the first such failure ("unavailable",
+	// "timeout", ...), so a broken probe is not mistaken for a folder with few
+	// siblings. The probe's own message holds file paths and is not kept.
+	ProbeFailures int    `json:"probe_failures,omitempty"`
+	ProbeFailure  string `json:"probe_failure,omitempty"`
+	Reason        string `json:"reason,omitempty"`
+	Message       string `json:"message"`
 }
 
 func siblingEvidenceOf(state map[string]any) *SiblingBudgetEvidence {
@@ -212,8 +218,20 @@ func (e *Engine) sizeBudgetSiblings(ctx context.Context, sourcePath string, rep 
 			pctx, cancel := context.WithTimeout(ctx, siblingProbeTimeout)
 			r, err := mediainspect.InspectDetailed(pctx, e.deps.Ffprobe, clean)
 			cancel()
+			if err != nil {
+				if ctx.Err() == nil {
+					ev.ProbeFailures++
+					if ev.ProbeFailure == "" {
+						ev.ProbeFailure = "failed"
+						if pe, ok := mediainspect.AsProbeError(err); ok {
+							ev.ProbeFailure = string(pe.Kind)
+						}
+					}
+				}
+				continue
+			}
 			v := r.MainVideo()
-			if err != nil || len(v) != 1 || r.DurationSec < siblingBudgetMinSeconds || r.SizeBytes <= 0 || ResolutionClass(v[0].Width, v[0].Height) != ev.ResolutionClass {
+			if len(v) != 1 || r.DurationSec < siblingBudgetMinSeconds || r.SizeBytes <= 0 || ResolutionClass(v[0].Width, v[0].Height) != ev.ResolutionClass {
 				continue
 			}
 			f := SiblingFile{Name: filepath.Base(clean), Bytes: r.SizeBytes, DurationSeconds: r.DurationSec, BitrateKbps: int(float64(r.SizeBytes) * 8 / r.DurationSec / 1000), Width: v[0].Width, Height: v[0].Height}
@@ -236,7 +254,11 @@ func (e *Engine) sizeBudgetSiblings(ctx context.Context, sourcePath string, rep 
 	ev.Count = len(files)
 	if len(files) < rules.MinimumSiblings {
 		ev.Files = files
-		return unavailable("too_few_siblings", fmt.Sprintf("Only %d other %s video file(s) were found beside the source; a sibling budget needs at least %d. The operation runs without a size budget.", len(files), ev.ResolutionClass, rules.MinimumSiblings))
+		message := fmt.Sprintf("Only %d other %s video file(s) were found beside the source; a sibling budget needs at least %d. The operation runs without a size budget.", len(files), ev.ResolutionClass, rules.MinimumSiblings)
+		if ev.ProbeFailures > 0 {
+			message = fmt.Sprintf("Only %d other %s video file(s) were found beside the source, and ffprobe could not read %d candidate file(s) (%s); a sibling budget needs at least %d. The operation runs without a size budget.", len(files), ev.ResolutionClass, ev.ProbeFailures, ev.ProbeFailure, rules.MinimumSiblings)
+		}
+		return unavailable("too_few_siblings", message)
 	}
 	rates := make([]float64, len(files))
 	for i, f := range files {

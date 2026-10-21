@@ -606,13 +606,16 @@ func TestResolutionClass(t *testing.T) {
 	}
 }
 
-// siblingProbe is an ffprobe stand-in: 1500 s files, 1920x800 unless the
-// name says 720 (1280x720) or short (a 60 s extra).
+// siblingProbe is an ffprobe stand-in: 1500 s files, 1920x800 unless the file
+// name says 720 (1280x720) or short (a 60 s extra). Only the file name is
+// matched: the directories above it hold the test's random temp dir name, which
+// contains "720" often enough to turn every sibling into a 720p file.
 func siblingProbe(t *testing.T) string {
 	t.Helper()
 	probe := t.TempDir() + "/ffprobe"
 	script := `#!/bin/sh
 for p; do :; done
+p=${p##*/}
 w=1920; h=800; d=1500
 case "$p" in *720*) w=1280; h=720;; esac
 case "$p" in *short*) d=60;; esac
@@ -703,6 +706,23 @@ func TestSizeBudgetSiblings(t *testing.T) {
 		ev := engine(t, root).sizeBudgetSiblings(context.Background(), src, rep, 2_000_000_000, rules)
 		if ev.Reason != "too_few_siblings" || ev.Scope != "season" || ev.Count != 0 {
 			t.Fatalf("movie evidence %+v", ev)
+		}
+	})
+	t.Run("an ffprobe that cannot run is reported, not counted as no siblings", func(t *testing.T) {
+		root := t.TempDir()
+		src, rep := source(root)
+		sparse(t, src, 2_000_000_000)
+		sparse(t, filepath.Dir(src)+"/e02.mkv", 300_000_000)
+		res, err := fsop.NewResolver([]string{root}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ev := NewEngine(EngineDeps{Fs: res, Ffprobe: root + "/missing-ffprobe"}).sizeBudgetSiblings(context.Background(), src, rep, 2_000_000_000, rules)
+		if ev.Reason != "too_few_siblings" || ev.Count != 0 || ev.ProbeFailures != 1 || ev.ProbeFailure != "unavailable" || !strings.Contains(ev.Message, "ffprobe could not read 1 candidate file(s) (unavailable)") {
+			t.Fatalf("probe failure evidence %+v", ev)
+		}
+		if strings.Contains(ev.Message, root) {
+			t.Fatalf("message leaks a path: %q", ev.Message)
 		}
 	})
 	t.Run("too few", func(t *testing.T) {
