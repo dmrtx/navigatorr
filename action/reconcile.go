@@ -223,6 +223,9 @@ func (e *Engine) shouldReconcile(inst *store.ActionInstance, tmpl ActionTemplate
 	if inst.Status == StatusPending {
 		return getBool(ec.State, "background_admission")
 	}
+	if inst.Status == StatusWaitingDecision {
+		return e.batchDecisionStale(inst, ec)
+	}
 	if inst.Status != StatusWaitingExternal && inst.Status != StatusRunning {
 		return false
 	}

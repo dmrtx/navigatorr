@@ -205,3 +205,55 @@ func TestOperationsProjectPlanNoteAndPausedOutcome(t *testing.T) {
 		t.Fatal("an old sample test was given an encode summary", b)
 	}
 }
+
+// A decision must stay reachable however old it is: it is listed first, found
+// by the Needs decision filter, and counted for the whole history. A goal batch
+// that keeps encoding while one file waits is not itself waiting_decision, so
+// the filter has to follow its children.
+func TestWorkflowsWaitingOnADecisionAreNeverBuriedByAge(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	read := func(query string) operationsPage {
+		t.Helper()
+		w := request(h, "GET", "/api/maintenance/operations?group=workflow"+query, "", true)
+		var page operationsPage
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		return page
+	}
+	ids := func(page operationsPage) []string {
+		out := []string{}
+		for _, job := range page.Jobs {
+			out = append(out, fmt.Sprint(job["id"]))
+		}
+		return out
+	}
+	seedOperation(t, st, "old-batch", "transcode_batch", "waiting_decision", map[string]any{"service": "sonarr"}, nil, nil)
+	seedOperation(t, st, "old-goal-batch", "transcode_batch", "waiting_external", map[string]any{"service": "sonarr", "mode": "size"}, nil, nil)
+	seedOperation(t, st, "old-goal-child", "transcode_media", "waiting_decision", map[string]any{"path": "/media/old.mkv", "parent_action_id": "old-goal-batch"}, nil, nil)
+	for i := 0; i < 40; i++ {
+		seedOperation(t, st, fmt.Sprintf("newer-%02d", i), "transcode_media", "completed", map[string]any{"path": fmt.Sprintf("/media/%d.mkv", i)}, nil, nil)
+	}
+
+	first := read("&limit=2")
+	if first.DecisionCount != 2 || first.Total != 42 || !first.HasMore {
+		t.Fatalf("decision count %d total %d more %v", first.DecisionCount, first.Total, first.HasMore)
+	}
+	got := map[string]bool{}
+	for _, id := range ids(first) {
+		got[id] = true
+	}
+	if !got["old-batch"] || !got["old-goal-batch"] {
+		t.Fatalf("first page %v hides work that waits on a decision", ids(first))
+	}
+	for _, job := range first.Jobs {
+		if job["needs_decision"] != true {
+			t.Fatalf("job %v is not flagged as needing a decision", job["id"])
+		}
+	}
+	filtered := read("&status=waiting_decision")
+	if filtered.Total != 2 || filtered.DecisionCount != 2 {
+		t.Fatalf("filter total %d count %d, want 2 and 2 (%v)", filtered.Total, filtered.DecisionCount, ids(filtered))
+	}
+}

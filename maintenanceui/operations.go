@@ -50,7 +50,10 @@ type operationsPage struct {
 	HasMore     bool             `json:"has_more"`
 	Total       int              `json:"total"`
 	ActiveCount int              `json:"active_count"`
-	Savings     struct {
+	// DecisionCount is every workflow that waits on a person, whatever the
+	// status filter or page, so none can be missed in a long history.
+	DecisionCount int `json:"decision_count"`
+	Savings       struct {
 		RealizedBytes         int64  `json:"realized_bytes"`
 		CompletedReplacements int    `json:"completed_replacements"`
 		CandidateBytes        int64  `json:"candidate_bytes"`
@@ -586,11 +589,19 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 	activeWorkflows := map[string]bool{}
+	// A workflow needs a person when any of its actions waits for a decision,
+	// even if its representative row shows another status: a goal batch keeps
+	// encoding its other files while one of them waits for a decision.
+	decisionWorkflows := map[string]bool{}
 	for _, r := range records {
 		if operationActive(r.inst.Status) {
 			activeWorkflows[roots[r.inst.ID]] = true
 		}
+		if r.inst.Status == store.ActionStatusWaitingDecision {
+			decisionWorkflows[roots[r.inst.ID]] = true
+		}
 	}
+	page.DecisionCount = len(decisionWorkflows)
 	representatives := map[string]string{}
 	for root := range members {
 		representatives[root] = root
@@ -664,6 +675,9 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 			continue
 		}
 		matches := status == "" || status == "all" || status == "archived" || r.inst.Status == status || status == "active" && operationActive(r.inst.Status)
+		if grouped && status == store.ActionStatusWaitingDecision {
+			matches = decisionWorkflows[roots[r.inst.ID]]
+		}
 		if grouped && status == "completed" {
 			matches = r.inst.Status == "completed" || r.inst.Status == "failed" || r.inst.Status == "cancelled"
 		}
@@ -689,8 +703,15 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 	}
 	if grouped {
 		sort.SliceStable(filtered, func(i, j int) bool {
-			// Workflow creation order survives polling, state changes and a
-			// conversion becoming a replacement. New submissions appear first.
+			// Work that waits on a person comes first, however old it is, so a
+			// decision is never buried under newer jobs or behind "Load more".
+			// Within each group, workflow creation order survives polling, state
+			// changes and a conversion becoming a replacement. New submissions
+			// appear first.
+			left, right := decisionWorkflows[roots[filtered[i].inst.ID]], decisionWorkflows[roots[filtered[j].inst.ID]]
+			if left != right {
+				return left
+			}
 			return numbers[roots[filtered[i].inst.ID]] > numbers[roots[filtered[j].inst.ID]]
 		})
 	}
@@ -753,6 +774,7 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 			root := roots[r.inst.ID]
 			job["workflow_id"] = root
 			job["archive_id"] = root
+			job["needs_decision"] = decisionWorkflows[root]
 			job["can_archive"] = !activeWorkflows[root]
 			job["archived"] = archives[root] != "" && !activeWorkflows[root]
 			if r.inst.ID != root && recordsByID[root].inputs["dry_run"] == true {
