@@ -128,6 +128,7 @@ func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
 		return nil
 	}
 	ladderStep, ladder := action.SizeBudgetLadderStep(res.State)
+	recipeStep, recipe := action.RecipeStep(res.State)
 	s := &benchmarkSummary{ProgressScope: "Worker progress is for the benchmark only, not the full encode.", Outcome: "testing", Message: "Testing short video samples; no quality decision yet.", NextStep: "Monitor this action with action_status. A progress percentage does not mean quality passed; do not launch another search.", UserNextStep: "Nothing to do yet. Short samples are being tested; progress does not mean the quality check passed."}
 	switch {
 	case res.Status == action.StatusCancelled:
@@ -166,6 +167,9 @@ func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
 		s.UserNextStep = "Choose one of the options shown. Nothing runs until you decide."
 		if reason == "quality_policy_unavailable" {
 			s.Outcome, s.Message = reason, "No sample test was started: the worker cannot run the quality checks this goal requires. The original is preserved."
+			if recipe {
+				s.Message = "No encode was started: the worker cannot run the quality checks this goal requires. The original is preserved."
+			}
 			s.NextStep = "Cancel to keep the original. To process this file, make the missing quality check available on the worker (the waiting reason names it) and start the goal again; quality requirements are never relaxed automatically."
 			s.UserNextStep = "Keep the original. The worker cannot run a quality check this goal needs; once it can, start the goal again."
 		}
@@ -180,6 +184,27 @@ func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
 		s.UserNextStep = fmt.Sprintf("Nothing to do yet. The whole file is being encoded with %s; the first result within your size budget is checked against the quality floor before you approve any replacement.", ladderStep)
 		if res.Status == action.StatusFailed {
 			s.Outcome, s.Message = "execution_error", "The size budget encode could not finish."
+			s.NextStep = "Inspect the action error and fix the execution problem before retrying."
+			s.UserNextStep = "The encode could not finish. Check the error in the job details."
+		}
+	case recipe:
+		// Policy v4 runs a recipe instead of the search: no sample is
+		// tested, and the worker's progress is the full encode of the current
+		// step.
+		s.Outcome, s.Message = "recipe", "Encoding the whole file with "+recipeStep+"."
+		if ladder := action.QualityLadderOf(res.State); ladder != nil && ladder.Message != "" {
+			s.Message = ladder.Message
+		} else {
+			var budget action.SizeBudgetRecord
+			if benchmarkField(res, "size_budget", &budget) && budget.Message != "" {
+				s.Message = budget.Message
+			}
+		}
+		s.ProgressScope = fmt.Sprintf("Worker progress is for the full encode with %s, not a sample test.", recipeStep)
+		s.NextStep = "Monitor this action. No sample search runs: the whole file is encoded with the goal's fixed settings and checked against its quality limits on the whole file; a quality miss encodes it again one step better. The original is never replaced without the usual approval."
+		s.UserNextStep = fmt.Sprintf("Nothing to do yet. The whole file is being encoded with %s and then checked against this goal's quality limits before you approve any replacement.", recipeStep)
+		if res.Status == action.StatusFailed {
+			s.Outcome, s.Message = "execution_error", "The encode could not finish."
 			s.NextStep = "Inspect the action error and fix the execution problem before retrying."
 			s.UserNextStep = "The encode could not finish. Check the error in the job details."
 		}
