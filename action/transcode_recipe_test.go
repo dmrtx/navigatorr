@@ -663,6 +663,31 @@ func TestModeBatchV4AdmitsWithoutReservations(t *testing.T) {
 	}
 }
 
+// The v2 snapshots operations admitted before recipes still carry verify
+// byte for byte: their digests are pinned to what main computed for them.
+func TestModePolicyV2DigestsArePinned(t *testing.T) {
+	for _, tc := range []struct {
+		mode   string
+		anime  bool
+		digest string
+	}{
+		{"quality", false, "sha256:c9eacad8dde4c6743dfd6ae7a988473ad86949a29944284cc2e6320385c09827"},
+		{"quality", true, "sha256:1556e750fe4682891d9d945f9dbf2d11d9df03a78f5ab2f13d9d73e0657eaf2b"},
+		{"x265_preserve", false, "sha256:3b96cf8757b0d5cad92d5be0fc830144a5dd76437ffce67eed8c58fceafad56d"},
+		{"x265_preserve", true, "sha256:3d9cf9ae99e59e1afd3aade2c76e0fbc06e7cf6c765ff4f4e134078142298895"},
+		{"compact", false, "sha256:4acfc93b9caa4f8706188f6f6e4e7dd8328f451ee3b1cfc9244e184efdef14d5"},
+		{"compact", true, "sha256:8f44edde64eed179bcf69b68101b2c45b7118172e6e4886bfc9cfcb86686ba01"},
+	} {
+		p, err := legacyModePolicy(tc.mode, tc.anime)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.Version != ModePolicyVersion || p.Recipe != nil || p.Digest != tc.digest {
+			t.Errorf("%s anime=%v: %s %s, want %s", tc.mode, tc.anime, p.Version, p.Digest, tc.digest)
+		}
+	}
+}
+
 // A VideoToolbox ladder's fallback is one x265 ladder, and only it has one.
 func TestRecipeFallbackIsValidated(t *testing.T) {
 	size := freezeFresh(t, map[string]any{"mode": "size"})
