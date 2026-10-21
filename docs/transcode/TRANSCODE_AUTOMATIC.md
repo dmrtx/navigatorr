@@ -1,190 +1,132 @@
-# Automatic processing v2
+# Automatic processing (policy v4)
 
 The existing Process button and MCP `action_run` use `mode=size|quality|x265_preserve|compact`.
-There are no new configuration steps. New operations freeze `transcode-modes-v2`;
-existing v1 snapshots retain their original thresholds and 15% quality saving gate.
+There are no new configuration steps. Every new operation freezes `transcode-modes-v4`.
 
-* size: existing sampled quality gates and at least 15% actual savings.
-* quality: existing strict sampled quality gates, with no output growth.
-* x265_preserve: strict sampled quality, libx265 only, no growth; existing HEVC omitted.
-* compact: a much smaller SDR file (see below); size-mode quality gates and at
+Under v4 every goal is a short, fixed ladder of whole-file encodes. Nothing is
+sampled or searched: the file is encoded in full at the goal's first rung and the
+worker's final quality gate judges the result (see "Final validation" below).
+Rungs are ordered most compressed first. The first rung that passes is kept; a
+rung that fails on quality is followed by the next, which compresses less; a
+rung refused for its size (it does not save enough, or grew the file) ends the
+ladder, because a better rung only makes the file larger. When the last rung
+fails too, no candidate is offered and the original is preserved.
+
+* size: x265 ladder (below) or, with the media engine, a VideoToolbox ladder; at
+  least 15% actual savings. Optional size budget.
+* quality: strict quality limits, no output growth.
+* x265_preserve: strict quality limits, libx265 only, no growth; existing HEVC omitted.
+* compact: a much smaller SDR file (see below); size-mode quality limits and at
   least 30% actual savings.
 
-For sources at least 50 seconds long, one immutable benchmark contains three
-discovery windows and nonoverlapping verification windows. Size mode's new
-snapshots place all of them on the final validation grid (see Grid verification
-in [TRANSCODE_MODES_REVIEW.md](TRANSCODE_MODES_REVIEW.md)); other goals keep two
-verification windows. The worker first
-tests the existing x265 medium 20/23/26 and supported VideoToolbox 65/70/75
-settings. If measurements fail, it tests one appropriate fallback family: for
-quality rejection, x265 medium CRF 14 to 21 (the highest quality first, then from
-CRF 21 down until one meets quality; the slow preset only when the operation sets
-`allow_slow_preset=true`), or the slow savings family 24/27/30 when measured
-quality can pass but size cannot. Rungs between the initial ladder's steps
-(CRF 23/25/27/29) are measured only next to a quality failure, and banding is
-measured only for candidates VMAF has not already rejected (see "Quality walk and
-refinement" in [TRANSCODE_MODES_REVIEW.md](TRANSCODE_MODES_REVIEW.md)). Operations frozen
-before that change keep the earlier 16/18/20 medium-then-slow search. The alternative also applies after an initial verification failure.
-Goals other than size verify at most two candidates; size mode's new snapshots
-keep verifying until a candidate passes or the search time limit ends. Only a
-candidate passing every window can start a full conversion. Actual final bytes, sampled final quality,
-streams and source/candidate integrity still must pass before publication.
+| Goal | Encoder | Rungs (most compressed first) | VMAF minimums: mean / p5 / worst 5 s window |
+|---|---|---|---|
+| size | VideoToolbox, then x265 on a worker without it | VideoToolbox `-q:v` 60, 65, 70; x265 CRF 22, 19, 16 | 88 / 84 / 85 |
+| size, `allow_hardware=false` | x265 | CRF 22, 19, 16 | 88 / 84 / 85 |
+| size with a budget | see "Size budget" | VideoToolbox `-q:v` 65, 58, 50, then average bitrate; or one two-pass x265 encode | floor 70 / 60 / 65 |
+| quality | x265 | CRF 20, 17, 14 | 95 / 93 / 92 |
+| x265_preserve | x265 | CRF 24, 21, 18 | 95 / 93 / 92 |
+| compact | x265 | CRF 18, 16, 14 | 88 / 84 / 85 |
 
-Workers that advertise `automatic_quality_pruning` receive `quality_pruning`
-frozen in the request. Each stage then measures every family's best setting first
-(lowest x265 CRF, highest VideoToolbox `-q:v`, all other options equal). When that
-setting fails a quality check (VMAF minimum, p5, worst window, frames below
-threshold, CAMBI mean or peak), the family's lower-quality settings are not
-measured; they appear as `skipped_quality_dominated` and in the stage's `skipped`
-list. Incomplete evidence, encode errors and size rejections never skip anything.
+x265 rungs use the medium preset. `allow_slow_preset=true` (size only) makes the
+size x265 ladder use slow, whose full encode of a long 1080p source can take hours.
+VideoToolbox rungs use constant quality (`-q:v`, higher is better) with a
+240-frame GOP. The rungs are frozen in the policy snapshot (`recipe`) with its
+savings and growth limits, so they cannot change after admission. A rung is a
+function of the frozen policy, the source and the rung number kept in the record
+(`quality_ladder`), so validation rebuilds it and accepts only a plan that matches
+it exactly (a quality ladder's plan carries no byte ceiling; a size budget's does).
 
-All choices and limits are frozen before admission. No profile is created by
-this search, no quality threshold is relaxed, and no new action restarts its
-600-second deadline. Each file's 600-second search reservation and the
-same-source unsuccessful-search review remain enforced. A negative measured
-outcome preserves the original; it does not imply every possible encode is bad.
+Before publication the worker's final check, the actual final bytes, streams and
+source/candidate integrity still must pass. A negative outcome preserves the
+original; it does not imply every possible encode is bad. No profile is created,
+no quality limit is relaxed, and there is no search time limit: a goal costs at
+most one full encode and one final check per rung.
 
-`action_status.transcode` and the web detail use the same explanation, including
-tested candidates, stages and verified sample count. A benchmark winner and an
-accepted full conversion are distinct outcomes. `transcode_goal_change` provides
-a read-only selection preview and a versioned command for the same goal recovery
-available in the web UI. Parent inputs and previous attempts remain immutable;
-active attempts finish before another attempt is admitted. Replacement approval
-is separate and is never authorized by processing or changing a goal.
+`action_status.transcode` and the web detail show the same explanation: the
+ladder (`quality_ladder`: encoder, rungs, the rung encoding or kept, and what
+each earlier rung measured) or the size budget record. An accepted full
+conversion is a candidate, never a replacement: replacement approval is separate
+and is never authorized by processing or changing a goal.
+`transcode_goal_change` provides a read-only selection preview and a versioned
+command for the same goal recovery available in the web UI. Parent inputs and
+previous attempts remain immutable; active attempts finish before another attempt
+is admitted.
 
 The metrics describe the actual sampled source class and model, not a universal
 quality percentage. No claim of full-motion human review or lossless video is made.
 
+## Final validation
+
+Every rung's output is judged by the worker's final gate, not by an estimate:
+VMAF (model `v1_1080p_3h`) mean, p5 and worst 5-second window, and full-reference
+CAMBI banding (mean at most 6, peak at most 16), measured on
+deterministic source windows of at most 10 seconds against the original (see
+[PERCEPTUAL_QUALITY_VALIDATION.md](PERCEPTUAL_QUALITY_VALIDATION.md)). Size
+goals measure one window per 600 s of source (5 to 12 windows) plus up to two
+fresh windows that are reported but do not decide the verdict. Other goals, and
+sources too short for that grid, measure five windows (the 20%, 50% and 80%
+positions plus 35% and 65%); a source under 50 seconds keeps its three planned
+windows. A quality miss moves the ladder to the next rung and a pass keeps the
+file; the verdict names the failed metric and its limit.
+
+When a size goal's ladder ends with no candidate and the policy allows it
+(`audio_only_fallback`, on for size), navigatorr copies the video unchanged and
+compacts only the lossless audio, which is accepted when it still meets the 15%
+minimum saving (and the budget, if any).
+
+If every VideoToolbox rung misses the quality limits the record sets
+`retry_without_hardware`: x265 at the same goal usually keeps more quality, so the
+file may be run again with `allow_hardware=false` (the job says so and the web UI
+offers **Try with x265**).
+
+## Earlier policies
+
+Operations frozen under `transcode-modes-v1`, `-v2` (quality, x265_preserve,
+compact) and `-v3` (size) chose their encode settings with a CRF sample search over
+short windows, and could continue with x265 after a failed VideoToolbox winner.
+That search no longer exists. Their actions and any `benchmark_transcode` action
+stay readable in history, but an old action that is not finished when the engine
+next meets it ends as failed with "This operation used the removed sample search;
+start it again to use the current recipe. Original preserved." New requests for
+`benchmark_transcode`, optimization profiles (a profile with optimization
+enabled, `profile_config.optimization.enabled`) or the inputs `metric`,
+`priority`, `shared_calibration`, `calibration_items` and `batch_fixed_quality`
+are refused with an input error: choose a goal (`mode`) instead.
+
 ## Media engine option (size mode)
 
-`mode=size` accepts `allow_hardware` (default **`true`**) and, while it is on,
-`hardware_margin_percent` (0 to 50, default 15). With the option on, the size
-search also tries four VideoToolbox candidates (`-q:v` 45, 50, 55, 60, a
-240-frame GOP) beside the x265 ones. They face the same quality gates and
-holdout windows. A VideoToolbox result wins when it is at most the margin larger
-than the smallest x265 result, or when no x265 candidate qualifies; otherwise
-the smallest result wins as before. VideoToolbox encodes several times faster
-and uses much less CPU, at the price of up to the margin in size.
+`mode=size` accepts `allow_hardware` (default **`true`**). With it on, a worker
+that lists the `hevc_videotoolbox` encoder runs the VideoToolbox ladder above
+first: it encodes a whole episode in minutes and uses much less CPU than x265,
+and the final gate decides whether the result is good enough. A worker without
+VideoToolbox runs the x265 ladder instead and the job says so. With
+`allow_hardware=false` only x265 is used. `hardware_margin_percent` (0 to 50,
+default 15) is still accepted and frozen, but no longer changes the result:
+nothing compares a VideoToolbox result with an x265 one any more.
 
-**Higher-quality fallback.** On hard content the ladder's best rung can fail
-quality (a hard 1080p episode missed the VMAF p5 limit at `-q:v` 60), which used
-to leave VideoToolbox out of the search entirely and send it to the slow x265
-fallback. When every initial VideoToolbox rung fails quality (measured, or
-skipped as dominated by the best rung's failure), or the best rung fails its
-holdout on quality, three more rungs (`-q:v` 65, 70, 75, same GOP and B-frames,
-IDs `fallback-hardware-cand_q…`) are measured. They run in the same stage as the
-first (medium) x265 quality fallback, so the margin has an x265 result to be
-compared with, and before the slow stage: a rung that qualifies within the
-margin wins and the slow stage is never encoded. When no medium x265 setting
-qualifies either, a qualifying rung wins unconditionally, as an initial rung
-would (the savings minimum, quality gates and holdouts still apply). If the new
-rungs fail too (the highest fails, so the others are skipped), the slow stage
-runs as before. They are tried only for this reason, and only when the search
-reaches the quality fallback: a ladder that passes, or fails for another reason
-such as size, never pays for them, and neither does a search that still has an
-eligible x265 setting to verify after a ladder holdout failure.
+It is on by default for size and always visible and switchable: the Library and
+batch setup show an *Allow the media engine (faster)* checkbox under Save space,
+*Change goal* shows the same control, and the MCP input `allow_hardware=false`
+changes it per job or batch. quality, x265_preserve and compact reject
+`allow_hardware=true`.
 
-**Stricter hardware selection.** *(Applies to snapshots frozen with the extra margin, and to a search that cannot verify on the final grid. New grid snapshots freeze no selection margin at all: they verify the candidate on every final-validation window instead; see "No selection margin when the search verifies on the grid" in TRANSCODE_MODES_REVIEW.md.)* A VideoToolbox candidate must clear the quality
-gates by a wider margin than an x265 one: its VMAF p5 and worst-window means need
-2 VMAF more than the 1.5 every candidate needs, 3.5 in total (p5 at least 87.5
-and worst window at least 88.5 against the 84/85 limits). The sample search sees
-five short windows while the final check sees every frame, and VideoToolbox's
-quality swings more between windows than x265's, so a hardware result that only
-just clears the gates on the sample is the one most likely to fail the whole
-file. A hard 1080p episode picked `-q:v` 70 on a p5 of 87.1 and a worst window
-of 89.2 and then failed the whole-file check; under the new margin that result is
-rejected in the sample search (p5 87.1 is below 87.5) and the search moves on to
-the next setting, or to x265. x265 candidates keep the 1.5 margin. There is no
-worst-frame floor: the single worst frame (78.7 there) is already covered by the
-frame-count and p5 checks of the whole-file validation, and a floor tuned on one
-episode would reject results that validate fine on others.
-
-**Same-action x265 continuation.** When a VideoToolbox winner fails the final
-whole-file quality check, the action no longer ends there. It goes back to the
-size search in the same action and round, with hardware excluded, so the x265
-families that were never measured (including the slow quality fallback) get their
-turn; it then encodes and validates as usual. This happens at most once per
-action: if the x265 result fails validation too, the action ends as a quality
-rejection, as it always did. The original is never touched and nothing is
-promoted before the x265 result is validated.
-
-- *Reuse.* The worker keeps the earlier search's measurements. The continued
-  request names the earlier search (`continues_benchmark`, id and request
-  digest); the worker reuses an x265 candidate's discovery-window measurements,
-  and only for candidates the earlier search rejected on a quality gate at
-  discovery (a candidate that passed is measured again, because its holdout check
-  needs per-frame scores the saved record does not keep), and only when its own
-  saved record matches exactly (same source hash, quality
-  policy, windows, rules and capability fingerprint, identical candidate
-  settings, one clean row per discovery window). Anything else is measured again,
-  never an error. Under grid verification both searches are planned on the same
-  final-grid windows, so the rule holds; reuse covers the discovery stage only and
-  the continued search still verifies on every grid window.
-- *Budget.* The frozen search ceiling (base budget + extension + verification)
-  covers both searches together. The continuation starts only if the ceiling
-  leaves at least the base search budget after the hardware search's active time;
-  its extension is cut to fit what is left. If there is not enough left, the
-  action ends as a quality rejection and says why. The batch's reservation stays
-  held while a hardware result awaits its final check, and the recorded search
-  time is the sum of both searches.
-- *Visibility.* The result, the MCP `action_status` `transcode` block and the web
-  job detail say that the VideoToolbox result failed the final quality check and
-  the action continued with x265, and keep the failed attempt's whole-file VMAF
-  mean, p5, worst window and the failed checks next to the final result. A
-  quality rejection names the failed metric and its limit.
-- *Compatibility.* The continuation reference and the extra margin (when the
-  snapshot or the search needs one) are sent only
-  to a worker that advertises `search_continuation` / `hardware_selection_margin`;
-  a worker without `hardware_selection_margin` gets no hardware candidates (x265
-  only), and one without `search_continuation` simply measures everything again
-  if it ever sees a continued search. Both flags are in the capability
-  fingerprint, so **upgrade the server first**, then the worker (an older server
-  fails closed on a newer worker's fingerprint). Workers reject unknown request
-  fields, so a new server sends the new fields only after the worker advertises
-  the flags. Rolling the server back while an action is mid-continuation is
-  unsafe: an older server ignores `hardware_continuation` and may repeat a
-  VideoToolbox attempt, so wait for such actions to finish first.
-
-It is on by default for the new policy only, and always visible and switchable:
-the Library and batch setup show an *Allow the media engine (faster)* checkbox
-under Save space (with the margin), *Change goal* shows the same two
-controls, and the MCP inputs `allow_hardware=false` or a different
-`hardware_margin_percent` change it per job or batch. A snapshot frozen before
-this option existed is never re-derived, so existing batches and their digests
-stay x265-only; `allow_hardware=false` freezes a snapshot identical to the
-earlier size policy. If the worker lacks the capability or the encoder, the
-search silently stays x265-only. A worker without `hardware_fallback_search`
-gets the ladder alone, without the fallback rungs. Upgrade the server before the
-worker: the capability is part of the worker's fingerprint, which an older server
-fails closed on.
-
-The fallback rungs are frozen in the policy (`hardware_search.fallback_quality_values`),
-so new default-on snapshots have a new digest. Snapshots frozen with the media
-engine before this change carry no such field, still re-hash to their digest and
-stay on the ladder alone.
-
-A winner from the media engine is labeled before anything is replaced: the job
+A result from the media engine is labeled before anything is replaced: the job
 shows *Encoder: VideoToolbox (hardware media engine)* with a *Hardware* badge
 (x265 shows *Encoder: x265 (software)*), the candidate lists name
 `VideoToolbox (hardware)`, and the MCP job and action detail carry `encoder` and
-`hardware` on the size result. The job also says why the media engine result was
-chosen (*Chosen because: ...* under the encoder line, `hardware_reason` in the
-MCP benchmark summary): its size against the smallest x265 result and the
-margin, that no x265 candidate qualified, or, after a failed holdout, that a
-safer setting inside the margin was verified instead. The MCP `transcode_goal_change`
-preview (no `mode`) returns the `allow_hardware` / `hardware_margin_percent` the
-selected smaller-files attempts were frozen with, and `hardware_mixed` when they
-differ; leaving `allow_hardware` out of a change to size still takes the
-default (on, 15), so pass the shown values to keep them. See
-[TRANSCODE_MODES_REVIEW.md](TRANSCODE_MODES_REVIEW.md) and the
-[experiment](reviews/2026-10-19-hardware-media-engine-experiment.md).
+`hardware` on the size result. The MCP `transcode_goal_change` preview (no
+`mode`) returns the `allow_hardware` / `hardware_margin_percent` the selected
+smaller-files attempts were frozen with, and `hardware_mixed` when they differ;
+leaving `allow_hardware` out of a change to size still takes the default (on), so
+pass the shown value to keep it. See [TRANSCODE_MODES_REVIEW.md](TRANSCODE_MODES_REVIEW.md)
+and the [experiment](reviews/2026-10-19-hardware-media-engine-experiment.md).
 
 ## Size budget (size mode)
 
-`mode=size` accepts one optional size budget, a ceiling for the finished file
-that the quality search may not exceed. It is for a source where the quality
-target cannot be met inside the size you can afford. Without a budget nothing
-changes: the policy, its digest and the search are exactly as before.
+`mode=size` accepts one optional size budget, a ceiling for the finished file.
+It is for a source where the quality target cannot be met inside the size you can
+afford. Without a budget nothing changes: the size ladder above runs.
 
 **Inputs.** Exactly one of:
 
@@ -211,35 +153,21 @@ budget and 85% of the source, so the 15% minimum saving that size mode enforces
 always holds. The budget, the inputs and the result are
 frozen into the batch and per-file goal-change policy (`size.size_budget`).
 
-**When it applies.** The normal search runs first. The budget is consulted when
-the best passing candidate is larger than the budget (the estimate, or the
-measured size), or when no candidate qualifies and a budget encode could still
-fit. Audio-only compaction still wins when it alone brings the file inside the
-budget: nothing is re-encoded then. When no budget encode can be planned (the
-source's video stream size is unknown, the other streams already take the
-budget, or the worker cannot encode two-pass x265), the search's own outcome
-stands: a passing winner over the budget is kept, otherwise the usual
-audio-only or no-candidate result follows, and the job says why the budget was
-not applied.
-
-**The budget encode.** A single x265 two-pass average-bitrate encode (preset
-medium, lookahead 40, 4 B-frames, 3 reference frames, aq-mode 3, aq-strength 1,
-psy-rd 2, psy-rdoq 1; main10 when the plan is main10). It aims at 97% of the
-budget. The video bitrate is `(target - non-video bytes) * 8 / duration`, where
-non-video bytes are the source minus its video stream, minus what lossless audio
-compaction saves. A budget roomier than two-pass x265's 50 Mbps ceiling is met at
-the ceiling, and the file comes out smaller. The size is therefore known before
-the encode starts and shown as the estimate (*Budget estimate*), not the
-over-budget winner. Validation rebuilds these settings from the frozen policy
-and the source and accepts only a plan that matches them exactly.
+**What runs.** The budget replaces the size ladder with one of two recipes.
+Audio-only compaction still wins when it alone brings the file inside the
+budget: the video is copied and nothing is re-encoded. When no budget encode can
+be planned (the source's or its video stream's size or duration is unknown, the
+other streams already take the budget, or, without the media engine, the worker
+cannot encode two-pass x265), the action ends with no candidate and the reason
+(`size_budget_estimate_unavailable`, `size_budget_unreachable`,
+`size_budget_worker_unsupported`, or `size_budget_unavailable` for a sibling
+budget with no evidence); the original is preserved.
 
 **VideoToolbox ladder.** When the goal allows the media engine
-(`allow_hardware`, on by default) and the worker lists `hevc_videotoolbox`, a
-size budget does not search at all. VideoToolbox encodes a whole episode in
-minutes and, at a budget, measured above the quality floor every time, so the
+(`allow_hardware`, on by default) and the worker lists `hevc_videotoolbox`, the
 file is encoded in full at a short ladder, best picture first: constant quality
 (`-q:v`) 65, then 58, then 50, then VideoToolbox's average bitrate at the
-budget's video bitrate (the x265 budget bitrate above). The values are frozen
+budget's video bitrate (the x265 budget bitrate below). The values are frozen
 in the policy (`size.size_budget.vt_quality_ladder`). Each step's plan carries
 the budget as an absolute ceiling (`size_policy.max_candidate_bytes`), so the
 worker refuses an over-budget file right after the encode, before it spends
@@ -247,7 +175,7 @@ minutes scoring it, and the next step is encoded. The first step that fits is
 scored by the normal final validation against the floor:
 
 * within the budget and meeting the goal's quality target: `meets_quality_target_within_budget`;
-* within the budget, below the target but above the floor: `below_quality_target_within_budget`, offered for review as before;
+* within the budget, below the target but above the floor: `below_quality_target_within_budget`, offered for review;
 * below the floor: no candidate is offered. The job says *Try again with x265
   (allow_hardware off): slower, but it usually keeps more quality at the same
   size*, and the web UI shows a **Try with x265** button that starts a new
@@ -257,56 +185,18 @@ scored by the normal final validation against the floor:
 The over-budget steps stay in the job's size and quality points. Validation
 rebuilds the step from the frozen policy, the source and the step number kept
 in the record and accepts only a plan that matches it and the ceiling exactly.
-With the media engine off, or on a worker without it, the search and the
-two-pass x265 budget encode run as described above.
 
-**Legacy encoder comparison.** Snapshots frozen before the ladder carry an
-encoder comparison instead (`size.size_budget.encoder_comparison`) and keep
-running it. When the goal allows the media engine (`allow_hardware`, on by
-default), the budget is frozen with an encoder
-comparison (`size.size_budget.encoder_comparison`) and the fallback measures
-before it encodes. At the budget the bitrate is fixed, so the encoders can be
-compared on quality alone: one bounded benchmark round (20 minutes) encodes the
-search's own sample windows twice at the budget's video bitrate, once with
-VideoToolbox in average-bitrate mode (the frozen hardware search's keyframe
-interval and B-frames, Main10 for a 10-bit output) and once with the two-pass
-x265 settings above, and measures both against the floor. VideoToolbox is used
-when its sampled VMAF mean and p5 are each no more than 1 point below x265's;
-otherwise x265 is. One point is a sixth of a just-noticeable difference (about
-6 VMAF) and about what two encodes of the same windows differ by when they are
-measured apart (about half a point on the mean, a point on the p5), so
-VideoToolbox is taken only when nobody could see what it costs. It encodes a
-film in minutes where two-pass x265 medium takes hours.
-
-Both encodes get the same bitrate because that is what each budget encode
-would get, so the comparison is between the files the budget would actually
-produce. Their sample size estimates can still differ. VideoToolbox's rate
-control often lands under its average on short windows of hard material and
-still holds it over a whole film. In one such case the samples estimated about
-four-fifths of x265's size, and the full VideoToolbox encode then came out at
-x265's size. VideoToolbox's sampled numbers are then a lower bound, so the
-difference only counts against it. Raising its bitrate from the sample estimate
-would overshoot the full file, so the comparison does not do that. The
-worker's own ranking of the two encodes (it may name the smaller one a
-"winner") plays no part; only the tolerance rule picks.
-
-The comparison is optional. With `allow_hardware=false` no comparison is
-frozen and the budget encode is x265, as it is for a budget frozen before the
-comparison existed (its digest is unchanged). A worker without VideoToolbox, a
-round the worker refuses, fails, cancels or runs out of time, and a round
-missing either measurement all leave the budget encode x265, and the job says
-which. The round runs on the worker's existing explicit benchmark path, so it
-needs no new worker capability.
-
-VideoToolbox has no second pass, so it can miss its average over a whole file.
-A VideoToolbox budget encode that comes out over the budget is encoded once
-more, at its bitrate scaled by how far the video overshot
-(`floor(kbps * (target - non-video) / (result - non-video))`), under a new job
-identity. A second overshoot is reported over the budget like any other.
-Validation rebuilds the VideoToolbox plan from the frozen policy, the source and
-the comparison's recorded numbers (recomputing the choice) and, after a
-correction, the bitrate the recorded first size gives; it accepts only an exact
-match.
+**The x265 budget encode.** With the media engine off (`allow_hardware=false`),
+or on a worker without it, one two-pass x265 average-bitrate encode (preset
+medium, lookahead 40, 4 B-frames, 3 reference frames, aq-mode 3, aq-strength 1,
+psy-rd 2, psy-rdoq 1; main10 when the plan is main10) aims at 97% of the budget.
+The video bitrate is `(target - non-video bytes) * 8 / duration`, where
+non-video bytes are the source minus its video stream, minus what lossless audio
+compaction saves. A budget roomier than two-pass x265's 50 Mbps ceiling is met at
+the ceiling, and the file comes out smaller. The size is therefore known before
+the encode starts and shown as the estimate (*Budget estimate*). Validation
+rebuilds these settings from the frozen policy and the source and accepts only a
+plan that matches them exactly. It faces the same floor and outcomes as below.
 
 **Validation.** The result is judged against the same final windows as any size
 result, but against a lower, frozen floor: VMAF mean 70, p5 60 and worst
@@ -327,45 +217,38 @@ the frozen policy and is not user-tunable.
   target — within size budget* in the job, the queue, the batch candidate list
   and the replacement review, with the failed target checks listed.
 * a quality rejection when the floor itself is not met, and a size rejection
-  when the finished file is still over the budget. Reason codes name the failed
-  metric and its limit.
+  (`size_budget_exceeded`) when the finished file is still over the budget.
+  Reason codes name the failed metric and its limit.
 
 A budget candidate is never promoted automatically: like every candidate it
 waits for review, and the label travels with it into the replacement review.
 The batch approval itself also says how many of its candidates are below the
 quality target, wherever it is answered.
 
-**Seeing it.** Job detail shows the budget against the result and the trigger,
-an inline rate-quality chart (size across, VMAF mean up, the budget as a
-vertical line, the quality target and floor as horizontal lines, each searched
-setting as a dot, the two encodes compared at the budget as rings, the chosen
-one filled, a VideoToolbox encode that overshot as a dashed ring, and the budget
-encode highlighted), the encoder the budget used and why, and a collapsed list
-with the same numbers for browsers without SVG support. `action_status` carries the
-same data as `size_budget`, and the compact benchmark summary reports
-`plan_source=size_budget` with outcome `size_budget`. For a sibling-matched
-budget the job reads "Budget from N sibling episodes (median X Mbps × M)", shows
-how the source's bitrate compares with the median, and lists the files used
-under a collapsed *Sibling episodes* section. *Change goal*, a batch setup and
-*Run again* carry the budget: the UI offers *None*, *Percent of source*,
-*Gigabytes* and *Match sibling episodes*, and shows the budget a file was frozen
-with. The `transcode_goal_change` preview shows it too (`size_budget`,
-`size_budget_mixed`); a change to size without `size_budget_*` inputs drops
-it.
+**Seeing it.** Job detail shows the budget against the result, the encoder the
+budget used and why, an inline rate-quality chart (size across, VMAF mean up, the
+budget as a vertical line, the quality target and floor as horizontal lines, the
+over-budget steps and the result as points) and a collapsed list with the same
+numbers for browsers without SVG support. `action_status` carries the same data
+as `size_budget`, and the compact summary reports `plan_source=size_budget` with
+outcome `size_budget`. For a sibling-matched budget the job reads "Budget from N
+sibling episodes (median X Mbps × M)", shows how the source's bitrate compares
+with the median, and lists the files used under a collapsed *Sibling episodes*
+section. *Change goal*, a batch setup and *Run again* carry the budget: the UI
+offers *None*, *Percent of source*, *Gigabytes* and *Match sibling episodes*, and
+shows the budget a file was frozen with. The `transcode_goal_change` preview
+shows it too (`size_budget`, `size_budget_mixed`); a change to size without
+`size_budget_*` inputs drops it.
 
-**Not done.** A search that ended because it hit the time cap does not trigger
-the fallback. A CRF winner judged within budget on its estimate is not
-re-checked after the full encode. The floor is frozen, not user-tunable. The
-first, over-budget VideoToolbox candidate stays in the candidates folder beside
-the corrected one until it is cleaned up. A VideoToolbox budget encode that
-misses the floor is reported below the floor; it is not re-encoded with x265.
-The comparison measures sample windows, which may not show how VideoToolbox's
-rate control spends bits across a whole film; the correction covers the size
-side of that, the final validation the quality side.
+**Not done.** The floor is frozen, not user-tunable. A VideoToolbox budget
+encode that misses the floor is reported below the floor; it is not re-encoded
+with x265 unless you run it again with `allow_hardware=false`.
 
 ## Compact mode
 
-`mode=compact` (optional `max_height` 720, 1080 (default), 1440 or 2160) accepts
+`mode=compact` (optional `max_height` 720, 1080 (default), 1440 or 2160) is the
+goal for HDR and Dolby Vision sources, and encodes the converted picture with
+the x265 ladder in the table above (CRF 18, then 16, then 14). It accepts
 HDR10, HDR10+, PQ, HLG, Dolby Vision profile 7/8 and SDR sources taller or wider
 than the limit. It deliberately drops HDR, Dolby Vision and HDR10+ dynamic
 metadata and lossless audio fidelity, so it is a separate goal rather than
@@ -406,8 +289,8 @@ to compact picks them up:
   chapter and attachment is kept.
 * Quality: the metric reference is the source through the identical chain, so
   VMAF/CAMBI measure only encode loss at the target size. The chain, LUT digest
-  and measurement space are recorded in benchmark and final evidence, and the
-  final output must pass an SDR signalling check (stream and decoded frames).
+  and measurement space are recorded in the final evidence, and the final
+  output must pass an SDR signalling check (stream and decoded frames).
 * Workers advertise `compact_transcode` only after executing the chain on a
   synthetic frame; the server refuses compact work without it. Replacement still
   needs normal approval.

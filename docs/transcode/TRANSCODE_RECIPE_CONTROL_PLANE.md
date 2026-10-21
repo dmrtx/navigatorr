@@ -43,7 +43,7 @@ The digest remains an additional content-integrity check.
 
 ## Ephemeral experiments
 
-`benchmark_transcode`, `transcode_media`, and `transcode_batch` accept
+`transcode_media` and `transcode_batch` accept
 `profile_config`, a complete typed `recipe.Profile` object. It is mutually
 exclusive with `profile`. A batch passes the same immutable ephemeral profile
 to every child, so a series-level experiment does not have to be persisted as
@@ -54,29 +54,29 @@ normalizes it, validates encoder-specific constraints, assigns an
 `ephemeral_recipe_digest`, resolves it through the normal compatibility
 resolver, and sends only the resulting immutable plan to the worker.
 
-This unlocks the existing optimization policy without editing a deployed YAML.
-For example, a profile can select `libx265`, `preset: slow`,
-`tune: animation`, a CRF search ladder, and the existing sampling policy.
-Arbitrary FFmpeg/x265 argument strings remain forbidden.
+This lets a fixed-encode experiment run without editing a deployed YAML. For
+example, a profile can select `libx265`, `preset: slow`, `tune: animation` and a
+CRF. A `profile_config` with optimization enabled is refused with an input error
+(the sample search it drove was removed); choose a goal (`mode`) for measured
+quality instead. Arbitrary FFmpeg/x265 argument strings remain forbidden.
 
 Legacy top-level experimental knobs are rejected instead of silently ignored.
 For example, passing `tune` or `crf_candidates` directly to
-`benchmark_transcode` or `transcode_batch` fails and points the caller to
-`profile_config`.
+`transcode_batch` fails and points the caller to `profile_config`.
 
-`metric: auto` selects VMAF for supported 8-bit sources and SSIM when a 10-bit
-source cannot use VMAF without an unsafe down-conversion. If the worker has no
-safe metric for the source, the benchmark fails closed. Recipe plans that omit
+If the worker has no safe quality metric for the source (for example a 10-bit
+source it cannot measure without an unsafe down-conversion), the final check
+fails closed. Recipe plans that omit
 an output bit-depth shape are materialized from the inspected source. Source
 bit depth is preserved by default even when an older recipe resolves a
 different profile/pixel format. A caller must set
 `preserve_source_bit_depth: false` explicitly to opt into that conversion; the
 resolved plan and digest still record the actual profile and pixel format used.
-This option is supported by `benchmark_transcode`, `transcode_media`, and
-`transcode_batch`. For a Main10 experiment on an 8-bit source, set
-`preserve_source_bit_depth: false` and verify that the action's resolved plan
-and benchmark candidates report `main10` and 10 bits before interpreting the
-metrics. The metric's measurement bit depth alone does not prove a 10-bit encode.
+This option is supported by `transcode_media` and `transcode_batch`. For a
+Main10 experiment on an 8-bit source, set `preserve_source_bit_depth: false` and
+verify that the action's resolved plan reports `main10` and 10 bits before
+interpreting any metric. The metric's measurement bit depth alone does not prove
+a 10-bit encode.
 An explicit `profile_config` that conflicts with source preservation is rejected
 with this instruction rather than silently changing the requested experiment.
 
@@ -91,7 +91,7 @@ verified provenance before saving; it is not required for recipe distribution.
 
 ## Immutable action inputs
 
-`transcode_media`, `benchmark_transcode`, `transcode_batch`, and
+`transcode_media`, `transcode_batch`, and
 `promote_transcode_candidate` declare immutable inputs at the workflow
 template. Resume/reconciliation may supply a decision, but cannot inject or
 replace inputs. Batch pause/resume/cancel control lives in durable `State`, so
@@ -133,12 +133,12 @@ and do not require recipe synchronization.
 
 ## MCP action input parsing
 
-Explicit 8-bit to Main10 experiments require `preserve_source_bit_depth: false`,
-an explicit `main10`/`p010le` profile, and an explicit native-depth VMAF model.
-The coordinator sends `allow_8bit_to_10bit: true` only for this resolved shape.
-The worker must advertise `explicit_main10_benchmarks` and prove native 10-bit
-VMAF/CAMBI support. The opt-in is persisted in the worker request identity;
-automatic upconversion and 10-bit to 8-bit downgrades remain prohibited.
+Explicit 8-bit to Main10 experiments require `preserve_source_bit_depth: false`
+and an explicit `main10`/`p010le` profile. The worker's benchmark request still
+carries `allow_8bit_to_10bit` (capability `explicit_main10_benchmarks`, which
+needs native 10-bit VMAF/CAMBI support) for its benchmark endpoint, but the
+server no longer sends it. Automatic upconversion and 10-bit to 8-bit downgrades
+remain prohibited.
 
 `action_run.inputs` and `action_resume.inputs` are JSON object strings and
 fail closed. Malformed JSON, arrays, scalars, and `null` are rejected explicitly

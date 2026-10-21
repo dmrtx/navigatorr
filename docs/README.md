@@ -13,7 +13,6 @@ Start with [Transcoding](transcode/TRANSCODING.md): configuration, recipes and t
 - [VideoToolbox profiles](transcode/VIDEOTOOLBOX_PROFILES.md) and the [Joy profile experiment](transcode/JOY_PROFILE.md)
 - [Perceptual quality validation](transcode/PERCEPTUAL_QUALITY_VALIDATION.md)
 - [Processing modes review](transcode/TRANSCODE_MODES_REVIEW.md)
-- [Optimization implementation plan](transcode/TRANSCODE_OPTIMIZATION_IMPLEMENTATION_PLAN.md)
 - [Direct SMB probe](transcode/SMB_DIRECT_PROBE.md)
 - [Persistent worker daemon RFC](transcode/RFC_PERSISTENT_TRANSCODE_DAEMON.md) — design history
 - [Example profiles and recipes](transcode/examples/)

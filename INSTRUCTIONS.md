@@ -130,7 +130,7 @@ This prevents a single API call from consuming the LLM's entire context window.
 - `action_retry` — Retry a failed action from its last safe step
 - `action_list` — List action workflows filtered by status (`running`, `waiting_external`, `waiting_decision`, `completed`, `failed`)
 
-Transcode and benchmark external waits are reconciled by the running server;
+Transcode external waits are reconciled by the running server;
 clients do not need to keep calling `action_resume` to finish accepted jobs.
 `promote_transcode_candidate` takes `transcode_action_id` and `series_id`, with
 an optional Sonarr `service` name. It verifies a concrete replacement and waits

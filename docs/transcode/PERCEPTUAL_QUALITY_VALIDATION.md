@@ -1,22 +1,26 @@
 # Perceptual quality validation
 
-Navigatorr can measure a selected VMAF v1 model and an independent CAMBI
-full-reference banding metric during benchmarking. The final encoded candidate
-is checked again on the same deterministic source windows before publication.
+Navigatorr measures a selected VMAF v1 model and an independent CAMBI
+full-reference banding metric on the final encoded candidate, on deterministic
+source windows, before publication. Each goal's ladder (see
+[TRANSCODE_AUTOMATIC.md](TRANSCODE_AUTOMATIC.md)) is judged by this check.
 Native SDR Main10 can use VMAF/CAMBI when the worker advertises
 `quality.native_10_bit`: both metrics must execute on a native 10-bit synthetic
 pattern with automatic pixel conversion disabled. Older/unverified workers
 retain the VMAF/CAMBI gate and the existing SSIM fallback for `metric: auto`.
 This applies to both libx265 and VideoToolbox; libx265 receives yuv420p10le.
-Main10 benchmarks also run this capability check when `vmaf.model` is omitted
+Main10 measurements also run this capability check when `vmaf.model` is omitted
 (legacy/default VMAF, including combined VMAF/SSIM). Omitting the model does not
-change the scoring policy or bypass native-depth verification. Main10 benchmark
-VMAF commands disable automatic pixel conversion, so incompatible inputs fail
+change the scoring policy or bypass native-depth verification. Main10 VMAF
+commands disable automatic pixel conversion, so incompatible inputs fail
 instead of silently measuring an 8-bit conversion.
 
-## Opt in
+## The quality policy
 
-Set these fields under an optimization profile's `quality` policy:
+Each goal freezes its quality policy in its policy snapshot, and the final
+check request carries it to the worker. It is not configured per request: the
+`quality` goal freezes this shape (the other goals freeze their own limits; see
+[TRANSCODE_MODES_REVIEW.md](TRANSCODE_MODES_REVIEW.md)):
 
 ```yaml
 quality:
@@ -25,18 +29,18 @@ quality:
     model: v1_1080p_3h
     target: 96
     minimum: 95
-    marginal_tolerance: 0.5
-    guardrail_enforcement: observe
+    marginal_tolerance: 2
+    guardrail_enforcement: reject
     p5_minimum: 93
     worst_window_minimum: 92
     worst_window_seconds: 5
-    frame_threshold: 95
-    max_frames_below_threshold: 50
   banding:
     enabled: true
     metric: cambi
     mode: full_ref
-    enforcement: observe
+    enforcement: reject
+    max_mean: 6
+    max_peak: 16
   final_validation:
     mode: sampled
 ```
@@ -92,41 +96,28 @@ coordinator never dispatches HFR work a worker would reject. Automatic modes
 skip such sources with `hfr_quality_unavailable` (distinct from
 `unsupported_source`: a capable worker clears it, a new goal does not). A
 transient capability lookup failure waits for the worker instead of skipping.
-Explicit benchmarks and recipe searches with a VMAF model follow the same
-capability gate. Deploy the worker before relying on HFR support. Shared
-batch calibration still requires sources below 45 FPS.
+The worker's benchmark endpoints with a VMAF model follow the same
+capability gate. Deploy the worker before relying on HFR support.
 
 Decimation reuses the non-HFR model's calibration; it is not an HFR-trained
 model. Scores for HFR sources are comparable with 25/30 FPS content, not with
 an HFR model, and thresholds were not separately calibrated for HFR libraries.
 
-`guardrail_enforcement: observe` records p5, the worst sample-local window,
-and frame counts without changing candidate selection. `reject` makes a
-candidate ineligible and adaptive search tries the next allowed candidate.
-CAMBI uses a separate bounded pass because VMAF v1 already registers its own
-CAMBI feature. Its full-reference output measures additional banding relative
-to the source; a lower value is better. CAMBI has no default rejection limit.
-Set `max_mean` and/or `max_peak` only after calibrating with real library
-encodes, then set `enforcement: reject` if desired.
+`guardrail_enforcement: observe` records p5, the worst window and frame
+counts without changing the verdict. `reject` makes a missed limit fail the final
+check, which is what the goals use. CAMBI uses a separate bounded pass because
+VMAF v1 already registers its own CAMBI feature. Its full-reference output
+measures additional banding relative to the source; a lower value is better.
+CAMBI has no limit unless the policy sets one; the goals set mean 6 and peak 16.
 
-## Calibrate before enforcing
+## Limits are frozen per goal
 
-1. Run representative 8-bit SDR titles with both guardrails in `observe`.
-   Include flat gradients, dark scenes, animation, grain, and clean live action.
-2. Collect `benchmark_quality` and the final job's `quality_evidence` with
-   the source title, candidate setting, and a human review of the sampled
-   scenes. Retain the model, libvmaf version, worker fingerprint, and window
-   locations alongside every measurement.
-3. Compare p5, worst-window mean, frame counts, CAMBI mean/peak, and the
-   existing mean VMAF decision for accepted and visibly degraded encodes.
-   Choose limits from these measurements; a universal CAMBI cutoff is not
-   assumed.
-4. Enable `reject` on a small canary profile. Inspect rejected candidates and
-   final-validation failures before widening it. A failed final check leaves
-   the original untouched and never publishes the local candidate.
-
-No real-library threshold is embedded in the software. A worker only reports
-the model as available after its executable probe passes.
+The limits are not user-tunable and no goal relaxes them. They were chosen
+from the measurements in [TRANSCODE_MODES_REVIEW.md](TRANSCODE_MODES_REVIEW.md);
+the CAMBI 6/16 limits are inherited guardrails that those fixtures do not
+calibrate exactly. A failed final check leaves the original untouched and never
+publishes the local candidate. A worker only reports the model as available after
+its executable probe passes.
 
 The final check extracts each planned source and candidate window losslessly,
 checks frame counts and relative timestamps, and stores bounded evidence
@@ -145,64 +136,33 @@ evidence is identical to measuring the windows one by one: statistics are
 combined in window order, and a failure reports the first failing window in
 that order (later windows are cancelled).
 
-The worker benchmark status exposes per-candidate `quality`, and the final job
-status exposes `quality_evidence`. Action results carry these as
-`benchmark_quality` and `quality_evidence`; large candidate sets remain
-available through action detail when the compact MCP response omits them.
+The final job status exposes `quality_evidence`, which action results carry
+under the same name; large evidence remains available through action detail when
+the compact MCP response omits it.
 
 The current implementation supports the standard 1080p 3H VMAF v1 model.
 Other VMAF v1 models, including HFR-trained and 4K ones, require registry entries and
 their own executable capability probes. Full-file validation is intentionally
 not offered because per-frame JSON logs are bounded.
 
-## Finish a search instead of chaining rounds
+## Reading the result
 
-`action_status` and `action_run` include a compact `benchmark`
-summary with its outcome, next step, rejected checks, configured limits where
-available, and a source timestamp to review. Progress refers to sample testing;
-`completed` means the benchmark finished, not that a candidate passed. A VMAF
-pass means the configured sampled checks passed, not guaranteed perceptual
-transparency. Full-reference CAMBI measures additional banding relative to the
-source, so existing source banding alone does not explain a rejection.
-
-Two completed no-winner rounds for the same source SHA-256 trigger a review
-before any further new benchmark admission. Only rounds whose VMAF/SSIM
-minimum, p5 and worst-window floors, CAMBI limits and savings gate were no
-stricter than the new proposal count, so a lenient goal (size) is not blocked
-by rounds that failed a stricter one (quality). If every proposed setting
-(encoder, rate, preset, tune, profile and pixel format; IDs are ignored) was
-already measured by those rounds, only `cancel` is offered and
-`run_once_after_review` is refused; otherwise the waiting reason names the
-settings that are new. The summary lists each earlier round's floor and each
-setting's measured VMAF mean, p5, worst window and lowest frame. This uses durable action history
-across recipes, paths, restarts and new action IDs. Technical execution failures
-and unfinished jobs do not count; already accepted jobs continue to reconcile.
-The limit does not retroactively cancel concurrently admitted jobs. History is
-retained until the source bytes change; an explicit review authorizes one action,
-not a reset of future searches. No database migration or tuning setting is added.
-
-The pending action shows the proposed candidates, samples and quality policy.
-Use `action_resume` with `cancel` to stop, or `run_once_after_review` only after
-an explicit user decision to run that displayed round. Agents must not select
-that decision automatically or start successive CRF ladders after no-winner
-results. A user can still choose direct candidate encoding with a non-optimizing
-profile or `profile_config.optimization.enabled=false`; this preserves structural
-checks and the original, but does not claim the failed perceptual checks passed.
+`action_status` and `action_run` include a compact `benchmark` summary (the key
+keeps its historical name) with the outcome, next step, failed checks, configured
+limits where available, and a source timestamp to review. Progress refers to the
+full encode of the current ladder rung. A VMAF pass means the configured sampled
+checks passed, not guaranteed perceptual transparency. Full-reference CAMBI
+measures additional banding relative to the source, so existing source banding
+alone does not explain a rejection.
 
 `planned_audio` describes the future encoding policy, never a completed audio
-conversion: the benchmark measures video and estimates audio size. In compact
-mode, an EAC3 track is copied and has no invented AAC bitrate target. Rejected
-benchmark size estimates are not achieved savings.
+conversion. In compact mode, an EAC3 track is copied and has no invented AAC
+bitrate target. Estimated sizes are not achieved savings.
 
 `action_list` keeps its small listing shape; use `action_status` for the
-benchmark explanation, planned audio and concrete review proposal.
+explanation and planned audio.
 
 ## Low VMAF p5 on dark, grainy sources
-
-Benchmark evaluations keep each candidate's VMAF summary (`vmaf`: model, mean,
-p5, lowest frame, worst-window mean, frame count, temporal decimation) in
-`benchmark_decision`, so later reviews do not depend on the transient worker
-status.
 
 A production case where every encoder kept a 3.4–4.5 point gap between VMAF
 mean and p5 on a dark, grainy 1920×960 source was investigated. The candidate
@@ -224,15 +184,10 @@ This is content behaviour, not a measurement bug. The quality goal's p5 floor
 (93) is strict for such sources; the size goal's floor (84) is met by the same
 settings. Policy options, none enabled here:
 
-1. Keep the floors: under the quality goal a grainy source keeps its original or
-   needs a lower CRF.
-2. Add grain-preserving x265 candidates (`tune=grain`, or no SAO with stronger
+1. Keep the floors: under the quality goal a grainy source goes down the ladder
+   to CRF 14 or keeps its original.
+2. Add grain-preserving x265 rungs (`tune=grain`, or no SAO with stronger
    psy-rd/psy-rdoq) for such sources. In the reproduction `tune=grain` raised
    CRF 20's p5 by about 2 points but nearly doubled the sample size, so it
    should be judged on size per quality, not quality alone.
-3. Detect grain from the source and add option 2's candidates automatically.
-
-Hardening follow-up: the benchmark metric path does not yet compare VMAF's
-`frames_total` with the reference sample's frame count, as final validation
-does; `shortest=1` would silently score only the overlap of a truncated
-candidate.
+3. Detect grain from the source and add option 2's rungs automatically.

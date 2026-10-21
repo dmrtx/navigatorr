@@ -1,6 +1,6 @@
 # Transcode reconciliation and operational status
 
-Navigatorr owns the lifecycle of submitted HTTP transcode and benchmark jobs.
+Navigatorr owns the lifecycle of submitted HTTP transcode jobs.
 The server starts the action reconciler with its maintenance engine and stops
 it before closing the state database. MCP clients can disconnect without
 stopping polling or result acceptance.
@@ -41,7 +41,7 @@ baseline; the resolved `original_sha256_pending` field is removed.
 A `transcode_batch` parent fans out one `transcode_media` child per item and
 links them durably through the batch item (`child_action_id`) and the child's
 exact idempotency key (`batch-<batch_id>-<item_key>`). Every remote admission
-(the child's transcode submit and its benchmark submit) re-reads the parent's
+(the child's transcode submit) re-reads the parent's
 cancel/pause policy under the parent's execution lease before contacting the
 worker, so a confirmed batch cancel cannot interleave a new submit. Ordinary
 status polls and hashes never take that lease, so sibling work is not
@@ -142,7 +142,7 @@ Jobs identify `storage_backend` and distinguish the Navigatorr path, worker
 path, SMB share and relative path. Selecting direct SMB does not enable an
 implicit local mount fallback. Automatic execution remains HTTP-only.
 
-## Benchmarks
+## Size estimates and progress
 
 Unknown sizes for identified text subtitle codecs use a conservative estimate
 of 2 MiB per stream when neither a measured size nor an explicit fallback is
@@ -151,17 +151,18 @@ The estimate adds `subtitle_size_estimated:stream_N` uncertainty without
 disqualifying an otherwise valid candidate. Bitmap subtitles, unknown codecs,
 and malformed byte-count metadata retain their validation requirements.
 
-Benchmark progress includes the last started sample, candidate, metric and
-stage. Concurrent metrics or encodes can overlap; this detail is an activity
-indicator, not an exclusive slot assignment. Heartbeats are saved every five
+Worker progress for a goal is the full encode of the current ladder rung and
+then its final quality check; it includes the last started window, metric and
+stage. Concurrent metrics can overlap; this detail is an activity indicator, not
+an exclusive slot assignment. Heartbeats are saved every five
 seconds independently of polling, and progress becomes stale after thirty
 seconds without a new stage or unit. A heartbeat does not invent progress.
 
-### Benchmark failure classes
+### Failure classes
 
 `ffmpeg_unknown` means a real ffmpeg process ran and failed in a way no more
 specific class recognizes. Failure text that nothing recognizes is
-`unclassified`, never `ffmpeg_unknown`. A failed benchmark also carries the
+`unclassified`, never `ffmpeg_unknown`. A failed job (or worker benchmark) also carries the
 worker's own `failure_classification` when the worker knows the cause, and the
 coordinator uses that class instead of reading the message:
 
@@ -218,10 +219,6 @@ class `media_probe_failed`, not a `preservation_not_met` policy rejection: a
 file that could not be inspected has not been shown to differ from the source,
 so it is neither preserved nor rejected as altered. The original is untouched;
 a manual retry re-runs the probe.
-
-A search that is stopped by its time budget is not a failure: windows left
-unmeasured by the stop report the cancellation, so the action parks as
-`search_budget_exhausted` and is not failed for "missing evidence".
 
 ## Source probe
 

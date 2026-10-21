@@ -2,17 +2,15 @@
 
 Navigatorr treats transcoding policy as data, not as worker code.
 
-## Reading benchmark and recovery results
+## Reading results and recovery
 
 Use `action_status` for the operational outcome and next step, including old
 actions. `action_detail` exposes the persisted record without backfilling newer
-derived summaries. A selected candidate competes on estimated size only within
-the quality margin of the best target-reaching candidate. `benchmark.selection`
-reports that best score, `marginal_tolerance`, `score_floor`, and candidate IDs
-outside the margin. Eligibility alone does not imply participation in the final
-size comparison. Newly recorded sample-minimum rejections include sample index,
-source timestamp, measured value and minimum; absent historical evidence remains
-absent.
+derived summaries. For a goal (`mode`), `transcode.quality_ladder` (or
+`size_budget`) lists the rungs, the one encoding or kept, and what each earlier
+rung measured; see [TRANSCODE_AUTOMATIC.md](TRANSCODE_AUTOMATIC.md). Actions
+that ran the removed sample search stay readable; their records keep their
+original keys (`benchmark`, `benchmark_request`) and are not backfilled.
 
 `recipe_get` exposes `compact_audio_policy` and managed `shadowed_profiles`.
 Managed profiles are complete overrides: updates to a same-named bundle or
@@ -223,7 +221,7 @@ All structural/media/policy validation (duration, video codec, expected bit dept
 
 ### Input validation before anything is persisted
 
-`transcode_media`, `benchmark_transcode`, `transcode_batch` and `clean_podcast_ads` check what the caller sent before an action row is written, before the idempotency key is looked up, and before the worker is asked anything. The checks are the same ones preflight runs (unknown or missing inputs, input combinations such as `profile` with `profile_config` or `max_height` without `mode: "compact"`, a strict `profile_config` decode including the x265 settings, the benchmark metric, a podcast `output_path`, batch path shapes, mode and size-budget rules), so a mistake is reported in milliseconds instead of after a multi-gigabyte source hash.
+`transcode_media`, `transcode_batch` and `clean_podcast_ads` check what the caller sent before an action row is written, before the idempotency key is looked up, and before the worker is asked anything. The checks are the same ones preflight runs (unknown or missing inputs, input combinations such as `profile` with `profile_config` or `max_height` without `mode: "compact"`, a strict `profile_config` decode including the x265 settings, inputs that only tuned the removed sample search (`metric`, `priority`, `shared_calibration`, `calibration_items`, `batch_fixed_quality`, optimization profiles, `benchmark_transcode`), a podcast `output_path`, batch path shapes, mode and size-budget rules), so a mistake is reported in milliseconds instead of after a multi-gigabyte source hash.
 
 A rejected request:
 
@@ -237,20 +235,11 @@ The expected output bit depth is computed during validation and carried into pre
 
 ### Transcode I/O optimization (worker-local validation + shared source cache)
 
-Old data flow (per optimized `transcode_media`):
-
-```text
-NAS source --(benchmark seeks)--> benchmark samples/metrics
-NAS source --(full staging copy)--> full encode --> publish candidate to NAS
-NAS candidate --(full coordinator ffprobe validation)--> accept
-```
-
-New data flow:
+Data flow:
 
 ```text
 NAS source --(one local cache copy, local bytes hashed vs expected SHA-256)--> shared source cache
-shared cache --(job-local hard link / lease)--> benchmark samples/metrics
-shared cache --(job-local hard link / lease)--> full encode locally
+shared cache --(job-local hard link / lease)--> full encode and final quality check locally
 local candidate --(full structural/media/policy validation locally, fail closed)--> publish once to NAS
 published object --(lightweight identity: regular/non-empty + exact size; SMB uses its verified publish)--> accept
 ```
@@ -270,17 +259,13 @@ Safety invariants (unchanged):
   crash/resume (EncodeComplete checkpoint never re-encodes), idempotency
   (execution-spec digest + idempotency key), and promotion separation are
   preserved.
-- `benchmark_transcode` stays non-destructive and never creates a permanent
-  `.navigatorr-candidates` entry. It may populate/read the shared cache but
-  only cleans its own `samples/` workspace, its job-local lease, and legacy
-  per-job downloads, never shared cache entries.
 
 Source cache identity and cleanup:
 
 - Key: `sha256(clean_source_path | size | mtime_nanos | mode | expected_sha256)`
   with a JSON sidecar (`source`, `size`, `mod_time_unix_nano`, `sha256`). The
-  coordinator preflight SHA-256 of the source is forwarded to both the
-  benchmark and the full transcode. A size, mtime, or **content** change is a
+  coordinator preflight SHA-256 of the source is forwarded to the
+  transcode. A size, mtime, or **content** change is a
   miss, so a same path/size/mtime source with changed content can never be
   reused. Before an entry is published the worker hashes only the LOCAL
   copied/downloaded bytes and compares them to the expected digest; a mismatch
@@ -290,12 +275,12 @@ Source cache identity and cleanup:
   `<key>.meta.json` sidecar (not `<key><ext>.meta.json`).
 - Concurrency: atomic temp + no-clobber publish; concurrent populators race
   safely (one wins, losers revalidate the winner).
-- Active-job safety: an in-flight benchmark or full transcode never reads the
+- Active-job safety: an in-flight transcode never reads the
   evictable shared filename directly. It acquires a JOB-LOCAL immutable hard
   link (safe atomic local-copy fallback if linking is unsupported) and runs
   against that. Eviction may unlink the shared name without breaking an active
   job; per-job cleanup removes only its own link/copy. This yields zero second
-  NAS transfer for a benchmark followed by a full transcode of the same source.
+  NAS transfer for an encode and its final quality check of the same source.
 - Bounds/cleanup: `source_cache_max_bytes` (default 20 GiB) and
   `source_cache_ttl_hours` (default 72h). Sweeps are best-effort, never fail a
   job, and skip recently-written entries. Per-job completion/cancel cleanup
@@ -342,69 +327,13 @@ the deployment's configuration management (for example, an Ansible role)
 rather than left to defaults. To opt out there, set
 `disable_source_cache: true`.
 
-## Sample evaluation cache
+## Sample evaluation cache (worker benchmark endpoints only)
 
-A search (size, compact or adaptive) measures each candidate on a few short sample windows
-(encode, then VMAF and optionally CAMBI against the reference). The same
-source, window and candidate always give bit-identical scores, so repeating
-that work after a cancel, a failed final check, a goal change or a retry only
-burns CPU. The worker therefore keeps a durable, bounded cache of those
-per-(candidate, window) evaluations and replays them in later runs.
-
-**Where.** On the worker, under `<local_work_dir>/_sample-cache/<key[:2]>/<key>.json`.
-The worker is the only place that knows the encoder and FFmpeg build, and
-VideoToolbox output is specific to the machine, so a key that is correct can
-only be formed there. A server-side store would have to trust measurements
-pushed back as selection input, which nothing could verify. Because the cache
-is worker-local there is no request field, no capability and no wire change:
-frozen snapshots and digests are untouched.
-
-**Granularity.** One entry per (candidate, window) unit, written the moment the
-unit finishes. The key does not mention the job, so entries are reused across
-stages of one search, across the jobs of one action (for example an x265
-continuation after a hardware winner failed) and across actions on the same
-source bytes. Only the modelled-VMAF measurement (optionally with CAMBI) is
-cached; SSIM paths and the legacy savings-pruned exhaustive path measure as
-before.
-
-**Key.** Hashed with SHA-256 and never stored or logged in clear:
-
-| Part | What goes in |
-| --- | --- |
-| Source | SHA-256 and size of the bytes; video stream index, bit depth, pixel format, resolution, frame rate, field order |
-| Window | index, start, duration, the reference-extraction arguments and the compact chain (including the tone-map table digest) |
-| Candidate | every encode parameter (codec, quality, preset, GOP, B-frames, profile, pixel format, bit depth, filters), with the candidate label cleared |
-| Metrics | VMAF model, temporal decimation, worst-window and frame-threshold policy, the VMAF and CAMBI filter arguments, CAMBI output |
-| Environment | worker capability fingerprint, FFmpeg build identity (binary hash, version, build configuration, libx265 version); for `hevc_videotoolbox` the machine identity, for software encoders the host CPU count |
-
-Labels and job paths are left out on purpose, and so are the x265 pool and
-frame-thread arguments the worker adds: partitioning pins the frame-thread
-count the whole host would pick, so a partitioned encode is bit-identical to
-the host's unpartitioned one. That default depends on the host CPU count
-(frame threads change the bitstream), which is why the CPU count is in the key
-of every software encoder. libvmaf scores do not depend on its thread count.
-
-The source hash is only used once the worker has checked it against the bytes:
-the shared source cache stores a source only when its content hash matched the
-requested digest, so a run staged through it is verified. A source read in
-place, with the source cache off, or with no digest is not verified and does
-not use the sample cache. A missing source hash, an unknown FFmpeg or libx265
-build (a libx265 build whose version banner cannot be read counts as unknown)
-or an unknown hardware identity also disables caching for that unit; it is
-measured as before.
-
-**Value.** Sample size, encode seconds, the full VMAF statistics including the
-per-frame scores (pooled p5 and means are computed over frames, so they are
-required for an exact replay), and the CAMBI result. Each file is
-`{"body": ..., "sha256": ...}`. On load the checksum, schema, key echo, field
-ranges and the consistency of the frame scores with the statistics are all
-verified; any failure is a miss and the file is removed. Partial writes cannot
-be observed (temp file and rename), and CAMBI errors are never cached.
-
-**Bounds.** Defaults: 64 MiB, 20000 entries and 30 days since last use. A hit
-touches the file, so eviction is least-recently-used. A sweep (first store of a
-process, then every 64th) removes stale temp files, foreign files and expired
-entries and evicts the oldest down to 90% of both limits. Config:
+The worker keeps a durable, bounded cache of per-(candidate, window) sample
+evaluations under `<local_work_dir>/_sample-cache/`, for its benchmark HTTP/CLI
+endpoints. No server action runs a sample search any more, so nothing fills it
+through Navigatorr; it goes away with those endpoints. Its worker config keys
+stay accepted:
 
 ```yaml
 disable_sample_cache: false
@@ -412,143 +341,49 @@ sample_cache_max_bytes: 67108864
 sample_cache_ttl_hours: 720
 ```
 
-**Visibility.** Rows served from the cache carry `reused: true`; each candidate
-evaluation carries `reuse: {reused, total}`. The compact benchmark summary
-(MCP `action_status`) lists it as `reused` on the measured candidate and the UI
-appends "reused from an earlier run" (or "N of M samples reused from an earlier
-run") to the candidate's line. A reused measurement counts toward selection
-exactly like a fresh one, with one input that is wall-clock by nature: the
-encode seconds of a replayed sample are those recorded when it was measured.
-Selection only reads them to break ties between candidates within 2% of the
-smallest size, and a fresh search's seconds depend on machine load and are not
-reproducible either, so a replay returns the recorded timing instead of a new
-one. Fields are `omitempty`, so results without reuse
-serialise exactly as before.
+The final quality check is never cached: it validates the artifact produced in
+that run.
 
-**Search budget.** Reused units cost no search-budget time: they are resolved
-without being counted as work, so they neither advance the elastic budget
-extension nor consume wall-clock beyond the few milliseconds of reading a file.
-Reference extraction still runs and still counts. Their original encode seconds
-are kept for estimates but excluded from phase-cost learning.
+## Optimization profiles (removed)
 
-**Holdout and verification.** The holdout windows of the verifying stage are
-ordinary deterministic per-(candidate, window) units; their independence comes
-from which windows are chosen, not from being fresh, so they are reused like any
-other. The post-encode checks (full-file validation and final-sample validation)
-are not cached: they validate the artifact produced in this run.
-
-**Compatibility and rollout.** Additive `omitempty` result fields and
-worker-local config only. The server decodes worker status leniently and the
-worker request is unchanged, so old and new are compatible in either order;
-deploy the worker and the server in any order. Any worker upgrade changes the
-capability fingerprint and so starts a cold cache.
-
-**Limitations.** A change in a dynamically linked library that alters neither
-the FFmpeg binary hash, the libx265 banner nor the libvmaf version is not
-detected (a libvmaf upgrade is noticed once the worker's quality-capability
-probe refreshes); the TTL and clearing the directory bound that exposure. Comparison
-images need the winner's sample files, so they are unavailable when the winner
-was reused. Reference samples are still extracted on a hit (lazy extraction is
-a possible follow-up).
-
-## Benchmark-driven optimization (recipes v2)
-
-Profiles without `optimization` follow the legacy flow with no observable change. A profile with `optimization.enabled: true` (schema_version 2) instead probes a small set of encoder configurations over deterministic source samples, scores them objectively, and transcodes the full file only with the concrete winning parameters.
-
-```text
-preflight + InspectDetailed
-→ capability handshake
-→ resolve optimization policy
-→ SamplePlanner (deterministic windows)
-→ remote sequential benchmark
-→ QualityEvaluator (VMAF and/or SSIM)
-→ OutputEstimator
-→ CandidateSelector (explainable decision)
-→ benchmark-only: finish with report
-→ optimization enabled: materialize immutable winning plan + PlanDigest
-→ normal full transcode → existing validation → candidate-only acceptance
-```
-
-### Actions
-
-- `benchmark_transcode` is candidate-only: it shares preflight and models with `transcode_media`, runs the benchmark, persists the report, and never executes the full file nor creates a permanent candidate.
-- `transcode_media` with an optimized profile adds `submit_benchmark` / `wait_benchmark` steps before the existing `submit_transcode` / `wait_transcode` / `validate_result` / `accept_result` steps. It uses the winner's concrete knobs (encoder, quality or average bitrate, preset, profile, pixel format, bit depth, plus any typed VideoToolbox switches) for the full transcode and refuses to continue when there is no valid winner.
-
-### Optimization policy reference
-
-```yaml
-optimization:
-  enabled: true
-  sampling:
-    strategy: distributed        # distributed | uniform | relative_positions
-    sample_count: 3              # 1-20, must match len(positions)
-    sample_seconds: 20           # (0, 120]
-    positions: [0.2, 0.5, 0.8]   # strictly increasing, in (0, 1)
-  quality:
-    preferred_metric: vmaf       # vmaf | ssim
-    vmaf: {target: 96.0, minimum: 95.0, marginal_tolerance: 0.5}
-    ssim: {target: 0.99, minimum: 0.98, marginal_tolerance: 0.005}
-  search:
-    max_candidates: 5            # 1-20, >= len(quality_values|bitrate_values)
-    quality_values: [55, 60, 65, 70, 75]  # strictly increasing -q:v list (or CRF list for libx265)
-    # bitrate_values: [3200, 3500, 3800]  # alternative: strictly increasing -b:v kbps sweep, hevc_videotoolbox only; mutually exclusive with quality_values
-  size:
-    preferred_total_bitrate_kbps: {min: 2100, max: 3650}
-    soft_max_total_bitrate_kbps: 4250      # soft guidance, not a hard target
-```
-
-Omitted blocks fall back to the defaults above; an explicitly requested metric block must carry its own thresholds. Quality always wins over hitting a size number: size guidance is soft.
-
-Recipes select exactly one encoder family (`hevc_videotoolbox` or `libx265`) plus only typed knobs valid for that family — cross-family knobs (VideoToolbox rate/offline switches on `libx265`, `preset`/CRF semantics on VideoToolbox) fail recipe validation. The profile's rate-control mode must match its search dimension (`quality` with `quality_values`, `average_bitrate_kbps` with `bitrate_values`). All non-swept typed knobs are inherited verbatim into every benchmark candidate, so benchmark encodes exercise the exact configuration the full transcode would run; the winner carries the full knob set back into the materialized plan. Adaptive probing applies to quality-ordered VideoToolbox sweeps only — libx265 CRF sweeps and VideoToolbox bitrate sweeps always run exhaustive, with identical VMAF/SSIM selection and size guardrails.
-
-A complete, loader-validated example lives in `docs/transcode/examples/transcode-recipes-optimization.yaml`. The embedded builtin bundle stays schema_version 1; optimization is adopted via `file`/`https`/`github` sources, never by editing worker code.
-
-### Sampling
-
-Positions mark the desired center of each sample (`start = position * duration - sample_seconds / 2`), clamped to the valid range with overlap avoided when duration allows. Short videos use fewer samples or the whole segment without exceeding duration. Reference and candidate stay frame-aligned (lossless FFV1 reference, PTS normalized) so VMAF/SSIM compare identical frames. Temporary outputs live only under `state_dir/<job-id>/samples/` and only known job files are ever cleaned. For quick debugging, `sample_count: 1` with `sample_seconds: 60` covers the simple single-sample case.
-
-### Metrics
-
-Every candidate is scored against the same original sample. The aggregate must clear the configured minimum and no single sample may fall below the per-sample gate. VMAF (0-100) and SSIM (0-1) have independent thresholds and marginal tolerances; scores are never invented and thresholds are never converted between metrics. If the preferred metric is unavailable but the other has configured thresholds, the other may decide; with no valid metric the benchmark reports without an automatic winner.
-
-### Selection
-
-Invalid, incomplete, or below-minimum candidates are rejected. Among valid candidates the smallest that reaches target wins; if none reaches target but some clear minimum, the highest quality wins with size as tie-break; tiny gains above target do not justify large bitrate increases (metric-specific marginal tolerance). Otherwise there is no automatic winner, and `transcode_media` stops before any full submit. Every outcome carries stable reason codes plus a human-readable explanation, and the full candidate list with exact parameters is persisted in order.
-
-### Bit depth
-
-- 8-bit source: only 8-bit candidates (`main` + `yuv420p`).
-- 10-bit source: only 10-bit candidates (`main10` + `p010le`).
-- There is no "convert 8-bit to 10-bit" optimization; existing Main10 is never marketed as an optimization.
-- If the worker cannot preserve the required depth, the job returns review or an explicit failure, never a silent downgrade; the final candidate is re-validated for bit depth.
-- VMAF on 10-bit sources fails closed unless the worker reports verified 10-bit VMAF capability; SSIM handles 10-bit natively. Prefer `ssim` for 10-bit SDR policies.
-
-### HDR and Dolby Vision
-
-Automatic selection supports SDR only. HDR/Dolby Vision sources (transfer, primaries, color space, tags, or DOVI side data) are preserved in the report but fail closed: review or an explicitly informational benchmark with no automatic winner. No silent SDR thresholds, no implicit tone mapping.
+A profile with `optimization.enabled: true` (schema_version 2) used to probe a
+set of encoder configurations on source samples before the full encode. That
+sample search was removed: new requests with such a profile (including
+`profile_config.optimization.enabled`), `benchmark_transcode` and the inputs that
+only tuned it are refused with an input error, and goals (`mode`) judge each
+whole-file encode with the worker's final quality gate instead (see
+[TRANSCODE_AUTOMATIC.md](TRANSCODE_AUTOMATIC.md)). Profiles without
+`optimization` follow the fixed-profile flow unchanged: the recipe resolves to
+one concrete plan and the full file is encoded with it. Recipes select exactly
+one encoder family (`hevc_videotoolbox` or `libx265`) plus only typed knobs valid
+for that family; cross-family knobs (VideoToolbox rate/offline switches on
+`libx265`, `preset`/CRF semantics on VideoToolbox) fail recipe validation.
 
 ### Speed priority
 
-There is no separate "fast" benchmark mode. Speed is expressed per profile through the typed VideoToolbox switches documented in `docs/transcode/VIDEOTOOLBOX_PROFILES.md` (`prioritize_speed`, `spatial_aq`, `realtime` with pointer-boolean semantics: omitted means "emit nothing", explicit values are required capabilities and fail closed when unsupported).
+Speed is expressed per profile through the typed VideoToolbox switches
+documented in `docs/transcode/VIDEOTOOLBOX_PROFILES.md` (`prioritize_speed`,
+`spatial_aq`, `realtime` with pointer-boolean semantics: omitted means "emit
+nothing", explicit values are required capabilities and fail closed when
+unsupported).
 
 ### Capabilities
 
-Before any benchmark the coordinator fetches versioned `WorkerCapabilities` (protocol version, Navigatorr/worker build, FFmpeg version, encoders, `libvmaf`/`ssim` filters, per-encoder profiles/pixel formats/options, structured probe errors, deterministic `CapabilityFingerprint`). Missing capabilities fail the job with a classifiable error before any encode starts; an old worker safely rejects the explicit benchmark protocol command.
+Before submitting, the coordinator fetches versioned `WorkerCapabilities`
+(protocol version, Navigatorr/worker build, FFmpeg version, encoders,
+`libvmaf`/`ssim` filters, per-encoder profiles/pixel formats/options, structured
+probe errors, deterministic `CapabilityFingerprint`). Missing capabilities fail
+the job with a classifiable error before any encode starts.
 
 ### Troubleshooting
 
 | Symptom | Meaning | Action |
 |---|---|---|
 | `worker_busy` / `waiting_for_slot` | All worker slots occupied; nothing was sent to run | Wait, or cancel; the job resubmits by itself after the worker's `Retry-After` (plus one second), for as long as it waits, without using its retry budget |
-| No winner, reason `no_candidate_met_minimum_quality` | Nothing cleared the quality floor | Loosen thresholds deliberately, or keep the original; the engine will not guess |
-| HDR/DV review | Fail-closed on HDR metadata | Expected; do not force SDR thresholds onto HDR |
+| Goal ended with reason `quality_not_met` | Every rung missed the goal's quality limits | Keep the original, or choose a goal with lower limits; the engine will not guess |
+| `hdr_requires_compact` | HDR/Dolby Vision source under a goal other than compact | Choose compact, or keep the original; do not force SDR limits onto HDR |
 | `encoder_capability_unsupported` | Recipe asks for an option the worker FFmpeg lacks | Change the recipe (typed fields only), bump `bundle_version`, `recipe_reload` |
 | `replace_original: true` rejected | Candidate-only invariant | Keep `false`; originals are hashed before/after and never overwritten |
-| Benchmark retry backed off | `benchmark_retry_not_before` set | Automatic; resume after the reported time |
-
-### Validation status
-
-Automated suites cover the full orchestration matrix with stubbed executors and fixture probes (8-bit/10-bit SDR, HDR/DV fail-closed, vmaf/ssim/both, no-winner, busy/retry/backoff, cancellation on both sides of the benchmark boundary, reload/resume, deterministic digests, candidate-only acceptance, source immutability, no secret/path leakage). Live Apple Silicon evidence (real capability handshake, real inspection, real VMAF/SSIM scoring, real recipe loading) versus blocked items (hardware VideoToolbox encodes unavailable in the validation sandbox) is recorded per item in `docs/transcode/TRANSCODE_OPTIMIZATION_IMPLEMENTATION_PLAN.md` phase 8.
 
 ## Rollout
 
@@ -566,57 +401,40 @@ The `transcode_batch` action coordinates persistent batch transcoding across lib
 
 ### Simple series workflow
 
-Supply `service: "sonarr"`, `series_id`, and `priority: "balanced"` (or `quality` /
-`savings`). Leave the profile unspecified or use `auto`. Navigatorr creates a temporary recipe from a bounded sample search: three x265 quality
-settings, three 10-second windows, two representative files by default. Choosing `shared_calibration: true` with `auto` also enables this path and defaults
-to `balanced`. The encoder and
-preset stay fixed; anime receives animation tuning. This is one pass with no
-refinement rounds or automatic catalog entries.
-
-Navigatorr picks one setting that meets the quality and savings limits on all
-representatives, freezes it for the batch, and validates each final candidate.
-If none passes, it preserves the originals and ends without starting full
-encodes. A restart reuses the persisted search/results. Explicit profiles and
-`profile_config` keep their existing behavior; resolved older batches keep their
-original routing. Bare `auto` without priority/calibration also retains its
-existing routing, so current integrations do not change behavior.
+Supply `service: "sonarr"`, `series_id` and a goal: `mode` is `size`, `quality`,
+`x265_preserve` or `compact` (see [TRANSCODE_AUTOMATIC.md](TRANSCODE_AUTOMATIC.md)).
+The batch freezes one policy and each episode is encoded and judged on its own
+with the goal's fixed ladder of whole-file encodes; there is no calibration pass
+and no quality shared between episodes. A file that passes no rung keeps its
+original and does not block the others. Each final candidate is still validated
+by the worker's quality gate and actual size savings.
 
 `dry_run: true` previews eligibility without encoding. `batch.selection` explains
-whether the recipe is pending, ready, or unsuitable. Its `scope: "batch_only"`
-means the generated label is not a reusable catalog profile name. Inspect
-`action_detail(section="state", key="shared_calibration_profile")` for the typed
-recipe if needed. `batch.next_step` gives status-specific continuation guidance.
-A completed preview requires a new `action_run` with `dry_run: false`; resuming it
-cannot change its immutable inputs. `batch.sample_evidence`
-appears only after passing samples exist: sample VMAF is measured, while savings
-are projections for the sampled files, not a guarantee for the entire series.
+whether each file is eligible, skipped or unsuitable. `batch.next_step` gives
+status-specific continuation guidance. A completed preview requires a new
+`action_run` with `dry_run: false`; resuming it cannot change its immutable
+inputs.
 
-The automatic path currently covers eligible oversized H.264 1080p, 8-bit SDR
-files below 45 fps. Other files retain their originals with a skip/review reason.
-Use `promote_candidates: true` to request one approval after candidates are ready;
-without it, the action only creates candidates. No worker protocol change or
-recipe catalog update is required.
+Sources the goal cannot judge keep their originals with a skip/review reason
+(for example `hdr_requires_compact`, `hfr_quality_unavailable`,
+`already_target_codec`). Use `promote_candidates: true` to request one approval
+after candidates are ready; without it, the action only creates candidates. No
+worker protocol change or recipe catalog update is required.
 
 For direct encoding, choose a non-optimizing profile or supply a `profile_config`
-with optimization disabled, and omit `priority`. This uses ordinary file/stream
-validation without requiring a VMAF/CAMBI calibration. Profiles with optimization
-enabled retain their own behavior. For example:
+with optimization disabled, and omit `mode`. This uses ordinary file/stream
+validation without a VMAF/CAMBI check. A profile with optimization enabled is
+refused. For example:
 
 ```json
 {"action":"transcode_batch","inputs":"{\"service\":\"sonarr\",\"series_id\":10,\"profile\":\"general-hevc\"}"}
 ```
 
-For the bounded sample search:
+For a goal:
 
 ```json
-{"action":"transcode_batch","inputs":"{\"service\":\"sonarr\",\"series_id\":10,\"priority\":\"balanced\"}"}
+{"action":"transcode_batch","inputs":"{\"service\":\"sonarr\",\"series_id\":10,\"mode\":\"size\"}"}
 ```
-
-The scope follows the small-control approach of
-[Tdarr's encoder step](https://docs.tdarr.io/docs/plugins/flow-plugins/index/ffmpegCommand/Set%20Video%20Encoder/)
-and [HandBrake's quality adjustment](https://handbrake.fr/docs/en/latest/workflow/adjust-quality.html):
-fix the encoder/preset, adjust quality, and continue. Navigatorr adds its existing
-sample checks and approval flow; it does not add a flow editor or another search engine.
 
 ### Action inputs & defaults
 
@@ -626,8 +444,8 @@ sample checks and approval flow; it does not add a flow editor or another search
 | `series_id` | string/int | Yes | — | Sonarr series ID to transcode. |
 | `season` | int | No | `nil` (all) | Optional season number filter. Omit to transcode the entire series. |
 | `episode_file_ids` | array of ints | No | all eligible files | Select up to 1000 positive episode-file IDs belonging to this series. Intersects with `season`; duplicate/shared episode files are encoded once. Empty arrays and foreign IDs are rejected. |
-| `profile` | string | No | `auto` | Recipe profile name or `auto` for deterministic selection. With a priority, `auto` generates one temporary x265 recipe from a bounded sample search. If omitted in `transcode_media`, honors configured `DefaultProfile` (including `auto`), else falls back to legacy `hevc-vt`. |
-| `metric` | string | No | profile default | Optimization metric (`vmaf`, `ssim`, or `both`) propagated to every `transcode_media` child. Use `ssim` for 10-bit sources when VMAF is unavailable. |
+| `mode` | string | No | — | Goal: `size`, `quality`, `x265_preserve` or `compact`. With a goal, omit `profile`; each file runs the goal's ladder. Goal-specific inputs (`max_height`, `allow_hardware`, `allow_slow_preset`, `size_budget_*`) are in [TRANSCODE_AUTOMATIC.md](TRANSCODE_AUTOMATIC.md). |
+| `profile` | string | No | `auto` | Recipe profile name for a fixed encode, without `mode`. A profile with optimization enabled (and `auto` when it can pick one) is refused: choose `mode` instead. If omitted in `transcode_media`, honors configured `DefaultProfile`, else falls back to legacy `hevc-vt`. |
 | `replace_original` | bool | No | `false` | Must remain `false`. Setting `true` is rejected fail-closed; original files are never overwritten. |
 | `dry_run` | bool | No | `false` | If `true`, inspects and selects profiles without queuing or running transcode jobs. |
 | `media_type` | string | No | derived | Media type override (e.g. `anime`, `tv`). Defaults to Sonarr metadata classification. |
@@ -636,11 +454,12 @@ sample checks and approval flow; it does not add a flow editor or another search
 | `max_size_increase_percent` | float | No | `0.0` | Allowed candidate size increase percentage (default `0.0`). Any candidate exceeding this triggers `waiting_decision`. |
 | `max_items` | int | No | unlimited | Deterministic bound on episode files prepared, persisted, and scheduled by the batch. |
 | `max_output_items` | int | No | `25` | Bound on returned item summaries in outputs (default 25, capped at max 100). This does not affect scheduling. |
-| `shared_calibration` | bool | No | `true` for intent-based `auto` and `anime-x265-calibrated` | Benchmark up to three representative files once, reuse measured CRFs according to the chosen priority, and validate each completed candidate with sampled VMAF/CAMBI. Automatic batches generate and freeze a temporary x265 recipe internally; custom profiles must support the same quality checks. |
-| `priority` | string | No | `balanced` | Shared calibration: `balanced` maximizes measured savings among candidates reaching the quality target, falling back to the lowest passing CRF. `preserve_quality` selects the lowest CRF reaching the target and enforces that target in final validation; `quality` selects the lowest passing CRF; `savings` selects the highest passing CRF. Known exceptions keep their originals without blocking the batch. |
-| `calibration_items` | int | No | `2` | Number of representative episode files, from 1 to 3. |
 | `promote_candidates` | bool | No | `false` | After the batch finishes, offer one approval for every completed, verified candidate. Promotion uses Sonarr and recovery copies. |
 | `promotion_parallelism` | int | No | `2` | Concurrent Sonarr promotions after batch approval, from 1 to 2. |
+
+The inputs `metric`, `priority`, `shared_calibration`, `calibration_items` and
+`batch_fixed_quality` only tuned the removed sample search and are refused with
+an input error.
 
 > [!IMPORTANT]
 > `idempotency_key` is a **top-level** MCP argument to `action_run`, NOT nested within the `inputs` JSON object.
@@ -652,7 +471,7 @@ sample checks and approval flow; it does not add a flow editor or another search
 
 #### 1. Season dry-run example
 
-Probes all episode files in Season 1, evaluates each stream against deterministic auto-profile rules, and returns aggregate counts and bounded summaries without running transcodes or mutating files:
+Probes all episode files in Season 1, evaluates each stream against deterministic eligibility rules, and returns aggregate counts and bounded summaries without running transcodes or mutating files:
 
 ```json
 {
@@ -669,7 +488,7 @@ Processes Season 2 files, skipping items that are already HEVC or do not meet sa
 ```json
 {
   "action": "transcode_batch",
-  "inputs": "{\"service\":\"sonarr\",\"series_id\":10,\"season\":2,\"priority\":\"balanced\"}",
+  "inputs": "{\"service\":\"sonarr\",\"series_id\":10,\"season\":2,\"mode\":\"size\"}",
   "idempotency_key": "batch-sonarr-10-s2"
 }
 ```
@@ -679,34 +498,27 @@ Processes Season 2 files, skipping items that are already HEVC or do not meet sa
 ```json
 {
   "action": "transcode_media",
-  "inputs": "{\"path\":\"/media/tv/Series/S01E01.mkv\",\"profile\":\"auto\"}",
+  "inputs": "{\"path\":\"/media/tv/Series/S01E01.mkv\",\"mode\":\"size\"}",
   "idempotency_key": "transcode-s01e01"
 }
 ```
-If `profile` is omitted, the engine honors `config.Transcode.DefaultProfile` (which can be set to `auto` or a specific profile), falling back to `hevc-vt` if unset.
+Without `mode`, if `profile` is omitted the engine honors `config.Transcode.DefaultProfile` (a fixed profile; one with optimization enabled is refused), falling back to `hevc-vt` if unset.
 
-#### Calibrated series with one promotion decision
+#### Series with one promotion decision
 
-User-facing priorities, in display order:
-
-| Opción | `priority` | Comportamiento |
-|---|---|---|
-| Calidad con ahorro (predeterminada) | `balanced` | Mayor ahorro entre los candidatos que alcanzan el objetivo; si ninguno llega, el CRF más conservador que cumple los mínimos. |
-| Calidad | `quality` | El CRF más conservador que cumple los controles, aunque el ahorro sea menor. |
-| Misma calidad en x265 (aproximada) | `preserve_quality` | El CRF más conservador que alcanza el objetivo. Ese objetivo también se exige al archivo final; si no cumple, conserva el original. |
-| Ahorro | `savings` | El CRF más alto que cumple los mínimos. |
-
-All four reuse the same bounded sample search. “Same quality” is a perceptual goal, not a lossless guarantee or restoration of missing detail. MP4 is a container; inspect the video codec before deciding whether conversion is useful. These priorities do not expand the calibrated profile's source compatibility.
-
-Use one `transcode_batch` action for the series. Intent-based automatic selection benchmarks CRF 20, 23, and 26 and freezes one passing setting for the whole batch. The advanced explicit `anime-x265-calibrated` profile retains its existing CRF 20/22 search and per-representative selection described below. The default `priority: "balanced"` chooses the greatest measured savings among candidates reaching the quality target; if none reaches it, it uses the lowest CRF passing the minimum limits. This aims for perceptually similar quality, not mathematically lossless output. `priority: "quality"` chooses each representative's lowest passing CRF; `priority: "savings"` chooses its highest passing CRF. With explicit profiles, representatives retain their measured settings. Other episodes reuse the lowest of those settings for balanced, quality, or preservation, or the highest for savings. Balanced, quality, and savings use the same minimum limits. Preservation additionally requires the configured quality target in both the benchmark and final validation.
-
-A representative without a suitable candidate is skipped, keeping its original. It does not block the other episodes. If none of the representatives passes, the batch keeps all originals and completes without full encodes. Each full candidate is still validated by sampled VMAF/CAMBI and actual size savings. A rejected candidate leaves its original intact while other episodes continue. There are no additional candidate sweeps or automatic full-file quality retries. Technical failures remain errors, rather than being reported as quality skips. Previously created batches retain their original selection policy.
+Use one `transcode_batch` action for the series. Each episode runs the goal's
+ladder on its own; an episode that passes no rung keeps its original and does not
+block the other episodes, and if none passes the batch keeps all originals and
+completes without candidates. A rejected candidate leaves its original intact
+while other episodes continue. Technical failures remain errors, rather than
+being reported as quality skips. Previously created batches keep the policy they
+were frozen with.
 
 ```json
 {
   "action": "transcode_batch",
-  "inputs": "{\"service\":\"sonarr\",\"series_id\":10,\"priority\":\"balanced\",\"promote_candidates\":true}",
-  "idempotency_key": "anime-series-10-calibrated"
+  "inputs": "{\"service\":\"sonarr\",\"series_id\":10,\"mode\":\"size\",\"promote_candidates\":true}",
+  "idempotency_key": "series-10-size"
 }
 ```
 
@@ -772,20 +584,18 @@ To prevent unbounded JSON responses when batching entire series or large seasons
 - **Crash and daemon restart resilience**: If the Navigatorr daemon stops or restarts mid-batch, calling `Resume(ctx, instanceID, "", nil)` re-attaches to the batch. Items are recovered via stable child idempotency lookup (`batch-<batch_id>-<item_key>`) across all statuses, preventing duplicate job submissions.
 - **Concurrency & slot occupancy**: Active in-flight items occupy slots up to `config.Transcode.MaxParallelJobs` across resumes.
 - **Decision forwarding**: When a child item requires user decision (e.g. `max_size_increase_percent` exceeded), the batch surfaces `waiting_decision`. Calling `action_resume` with `decision: "accept_loss"` or `"reject"` automatically forwards the decision to the child action.
-- **Safe cancellation semantics**: Calling `action_resume` with `decision: "cancel"` records cancellation before new work can start, cancels active child actions and benchmark jobs, and records any cancellation errors in the batch result.
+- **Safe cancellation semantics**: Calling `action_resume` with `decision: "cancel"` records cancellation before new work can start, cancels active child actions and their worker jobs, and records any cancellation errors in the batch result.
 - **Pause/resume semantics**: Passing `paused: true` or resuming with `decision: "pause"` transitions the batch to `waiting_decision`. Resuming with `decision: "resume"` cleanly continues remaining items.
 
 ### Concurrency and `worker_busy` behavior
 
 - **Parallelism**: Respects `config.Transcode.MaxParallelJobs` (default: 1). When `max_parallel_jobs: 1`, media files are transcoded serially one after another.
 - **Metric threads**: The worker's `metric_threads` sets libvmaf `n_threads` for each VMAF and CAMBI pass. The default `0` divides the host CPUs among simultaneous metric passes (`metric_concurrency` × the video jobs running at that moment; a lone video job gets every CPU, and with a [video/podcast split](#video-and-podcast-slots) a busy podcast slot does not count). With an explicit value, final validation runs as many sample windows at once as fit that many threads each into the job's share of the CPUs (host CPUs ÷ the video jobs running), and one at a time when the value is below 2. Thread count changes wall time only; per-frame scores are identical.
-- **Size-mode metric workers**: A size-mode search whose request sets no `concurrency` runs 3 metric passes at once instead of 2, provided every pass of every parallel job still gets at least two libvmaf threads without oversubscribing (`3 × video jobs running × threads ≤ CPUs`, `threads ≥ 2`); otherwise it keeps 2. Single-thread passes measured slower than two wider ones, so a 10-CPU worker with `max_parallel_jobs: 2` keeps 2. Scores are unchanged.
-- **x265 thread pools**: The worker's `x265_pools` sets the libx265 thread-pool size of each software encode (benchmark samples, both passes of a two-pass encode, and the full encode). The default `0` splits the host CPUs evenly across the video jobs running together, sized when each encode starts (a video job alone keeps x265's default pool and so uses every CPU; a second one that starts later gets half the host while the first keeps the pool it began with); `-1` turns partitioning off; a positive value sets the pool size, but one below 4 or not below the host CPU count is ignored (encodes run unpartitioned) and config load logs a warning saying so. x265 derives its frame-thread count from the pool size, and frame threads change the bitstream, so the worker also pins `frame-threads` to the count x265 picks by itself for the whole host. Pools below 4 threads are never used (they also change the output), nor is partitioning applied on hosts with 32 or more CPUs, where x265's own choice depends on the source height. The encoded frames are identical to an unpartitioned encode; only the informational SEI that records the encoder options differs. The worker proves this on every `serve` start: in the background (readiness never waits) it encodes a two-second synthetic 1080p Main10 clip, CRF and two-pass ABR, with and without every partition the current slot limits can produce (one per count of video jobs running together, so a ceiling of 3 on a 12-CPU host proves pools of 6 and 4) and compares the decoded frames (`-f framemd5`). Saving a new slot split proves its pools in the background when no stored verdict covers them. A difference turns the partition off and logs why; the outcome is reported as `x265_partition` in `/v1/health` (`status`, `active`, `detail`) and stored in the state directory so spawned job processes honour it. A check that cannot run (no libx265, cancelled, out of time) is `inconclusive` and changes nothing; `x265_pools: -1` skips it.
-- **Savings precheck**: For profile-based `transcode_media`, workers that advertise `savings_precheck` receive the effective `min_savings_percent`. Once every candidate sample is encoded, the worker estimates each candidate's final size with the same estimator selection uses. If every candidate is below the minimum, pending quality passes are skipped and the decision is `all_candidates_insufficient_savings`. The outcome matches the post-benchmark guardrail; only the wasted metric time is removed.
-- <a id="video-and-podcast-slots"></a>**Video and podcast slots**: `max_parallel_jobs` is the worker's hard ceiling and its boot default: every job kind shares those slots. From the maintenance UI (Workers, Worker activity, *Slot split*) the operator can divide them into `video_slots` (transcode, benchmark and quality search) and `podcast_slots` so the two stop competing; a lone video job still gets the free CPU because encode and metric threads follow the video jobs actually running, not the ceiling. The split is stored on the server per worker node and pushed to the worker (`PUT /v1/slots`, bearer-authenticated, `{"video_slots":N,"podcast_slots":M}`; `GET /v1/slots` reads it; `0`/`0` clears it). It needs no redeploy or restart: the worker keeps it in its state directory (`worker-slots.json`) and applies it at its next admission, so running jobs are never interrupted and a pool that now exceeds its share simply drains. Rules: both values at least 1, their sum at most the worker's ceiling (so the ceiling stays the cap), video slots at most the host CPU count; the UI warns when `CPUs ÷ video slots` is below 4, because x265 then cannot be partitioned frame-identically and encodes run unpartitioned (oversubscribing the host). Admission is enforced on the worker for each kind against its own pool (queue drain, benchmark submit and post-encode resume); the server's slot queue only ever holds video jobs, because podcast jobs queue on the worker and never take a server ticket. A job refused for a full pool reports the kind ("all N video slots are in use"). The server re-pushes the stored split when it sees a worker report something else (restart with a wiped state directory, or a save made while it was unreachable), so a save is never lost. Ansible/config: `max_parallel_jobs` stays the ceiling; raise it only if the sum of the two pools should exceed it. `/v1/ready`, `/v1/activity` and the Worker activity panel report each pool's total and in-use count.
-- **Worker busy handling**: When every worker slot is in use, the worker refuses a new benchmark or encode with `worker_busy` and creates nothing. The refused job waits in `waiting_external` with `waiting_condition: "worker_busy"`; in a batch, its item shows as `waiting_for_slot` while the files that already have a slot keep `running`.
+- **x265 thread pools**: The worker's `x265_pools` sets the libx265 thread-pool size of each software encode (both passes of a two-pass encode and the full encode). The default `0` splits the host CPUs evenly across the video jobs running together, sized when each encode starts (a video job alone keeps x265's default pool and so uses every CPU; a second one that starts later gets half the host while the first keeps the pool it began with); `-1` turns partitioning off; a positive value sets the pool size, but one below 4 or not below the host CPU count is ignored (encodes run unpartitioned) and config load logs a warning saying so. x265 derives its frame-thread count from the pool size, and frame threads change the bitstream, so the worker also pins `frame-threads` to the count x265 picks by itself for the whole host. Pools below 4 threads are never used (they also change the output), nor is partitioning applied on hosts with 32 or more CPUs, where x265's own choice depends on the source height. The encoded frames are identical to an unpartitioned encode; only the informational SEI that records the encoder options differs. The worker proves this on every `serve` start: in the background (readiness never waits) it encodes a two-second synthetic 1080p Main10 clip, CRF and two-pass ABR, with and without every partition the current slot limits can produce (one per count of video jobs running together, so a ceiling of 3 on a 12-CPU host proves pools of 6 and 4) and compares the decoded frames (`-f framemd5`). Saving a new slot split proves its pools in the background when no stored verdict covers them. A difference turns the partition off and logs why; the outcome is reported as `x265_partition` in `/v1/health` (`status`, `active`, `detail`) and stored in the state directory so spawned job processes honour it. A check that cannot run (no libx265, cancelled, out of time) is `inconclusive` and changes nothing; `x265_pools: -1` skips it.
+- <a id="video-and-podcast-slots"></a>**Video and podcast slots**: `max_parallel_jobs` is the worker's hard ceiling and its boot default: every job kind shares those slots. From the maintenance UI (Workers, Worker activity, *Slot split*) the operator can divide them into `video_slots` (transcode, benchmark and final quality check) and `podcast_slots` so the two stop competing; a lone video job still gets the free CPU because encode and metric threads follow the video jobs actually running, not the ceiling. The split is stored on the server per worker node and pushed to the worker (`PUT /v1/slots`, bearer-authenticated, `{"video_slots":N,"podcast_slots":M}`; `GET /v1/slots` reads it; `0`/`0` clears it). It needs no redeploy or restart: the worker keeps it in its state directory (`worker-slots.json`) and applies it at its next admission, so running jobs are never interrupted and a pool that now exceeds its share simply drains. Rules: both values at least 1, their sum at most the worker's ceiling (so the ceiling stays the cap), video slots at most the host CPU count; the UI warns when `CPUs ÷ video slots` is below 4, because x265 then cannot be partitioned frame-identically and encodes run unpartitioned (oversubscribing the host). Admission is enforced on the worker for each kind against its own pool (queue drain, benchmark submit and post-encode resume); the server's slot queue only ever holds video jobs, because podcast jobs queue on the worker and never take a server ticket. A job refused for a full pool reports the kind ("all N video slots are in use"). The server re-pushes the stored split when it sees a worker report something else (restart with a wiped state directory, or a save made while it was unreachable), so a save is never lost. Ansible/config: `max_parallel_jobs` stays the ceiling; raise it only if the sum of the two pools should exceed it. `/v1/ready`, `/v1/activity` and the Worker activity panel report each pool's total and in-use count.
+- **Worker busy handling**: When every worker slot is in use, the worker refuses a new job with `worker_busy` and creates nothing. The refused job waits in `waiting_external` with `waiting_condition: "worker_busy"`; in a batch, its item shows as `waiting_for_slot` while the files that already have a slot keep `running`.
 - **Retry budget safety**: Waiting for a slot does **not** increment item `attempts` or consume the transient retry budget, and it has no deadline: it lasts until a slot frees up or the action is cancelled. The next submit is sent no earlier than the worker's `Retry-After` plus one second, with the same job identity and idempotency key. A long wait shows as one `waiting_external` row in the step log, not one per poll; each refused resend is counted on the job's single `worker_busy` entry in `failure_history` (`count`, `last_at`) instead.
-- **Single files wait too**: A standalone `transcode_media` or `benchmark_transcode` waits the same way ("Waiting for a free worker slot") instead of failing, whatever its retry budget. `surface_worker_busy` is still accepted on child inputs but no longer changes this behaviour.
+- **Single files wait too**: A standalone `transcode_media` waits the same way ("Waiting for a free worker slot") instead of failing, whatever its retry budget. `surface_worker_busy` is still accepted on child inputs but no longer changes this behaviour.
 - **Recipe settings**: A recipe's `fallbacks` entry `when: worker_busy` and a `worker_busy` entry in `retry_on` no longer change how busy submit refusals are handled: those always wait for a slot. Both are still accepted, so existing recipes keep validating.
 
 ## Compact audio without another optimizer
@@ -793,8 +603,7 @@ To prevent unbounded JSON responses when batching entire series or large seasons
 Existing recipes and direct encoding preserve audio (`audio: {mode: copy}`).
 An opt-in recipe can set `audio: {mode: compact}` while using either existing
 video encoder. This does not expand automatic profile selection to HEVC.
-For a HEVC Main10 source, use an explicit recipe or `profile_config`; video
-benchmarking stays bounded by its existing candidate and sample limits.
+For a HEVC Main10 source, use an explicit recipe or `profile_config`.
 
 Compact mode keeps all tracks, languages and channel counts. DTS, TrueHD/MLP,
 FLAC, ALAC and PCM become AAC: 128 kbps mono, 192 kbps stereo, 384 kbps up to
@@ -803,7 +612,7 @@ tracks with unknown channel count or more than eight channels. This is lossy
 audio conversion; lossless quality and object-audio metadata are not preserved.
 Use copy when those are required. There is no audio parameter search.
 
-Benchmark size estimates include the selected audio policy (AAC estimates are
+Size estimates include the selected audio policy (AAC estimates are
 nominal, not measured guarantees). The final encode checks audio codecs, track
 counts, languages and channels. VMAF/CAMBI validate video, not perceived audio
 quality. The original remains protected by the existing candidate/promotion
