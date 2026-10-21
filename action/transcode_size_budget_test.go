@@ -2,6 +2,8 @@ package action
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -47,11 +49,18 @@ func newBudgetCase(t *testing.T, inputs map[string]any, caps transcode.WorkerCap
 	for k, v := range inputs {
 		in[k] = v
 	}
+	// legacy_comparison freezes the budget the way snapshots made before the
+	// VideoToolbox ladder were: the encoder comparison in place of the ladder.
+	_, legacy := in["legacy_comparison"]
+	delete(in, "legacy_comparison")
 	sha := strings.Repeat("a", 64)
 	ec := &ExecutionContext{ActionName: "transcode_media", InstanceID: "size-budget", Inputs: in, Outputs: map[string]any{}, State: map[string]any{"original_sha256": sha, "original_size": budgetSourceBytes, "source_report": budgetReport(), "size_main10": true, "optimization_enabled": true, "benchmark_job_id": "bench-1"}}
 	snapshot, err := freezeModePolicy(ec)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if legacy {
+		snapshot = legacyComparisonSnapshot(t, ec, snapshot)
 	}
 	qc := ensureBenchmarkQualityMetric(buildBenchmarkQualityConfig(snapshot.Profile.Optimization.Quality), "vmaf")
 	base := &transcode.Plan{VideoCodec: transcode.VideoCodecLibX265, Quality: 24, Preset: "medium", VideoProfile: "main10", PixelFormat: "p010le", ExpectedBitDepth: 10, AudioMode: snapshot.Profile.Audio.Mode}
@@ -71,6 +80,31 @@ func newBudgetCase(t *testing.T, inputs map[string]any, caps transcode.WorkerCap
 	ec.State["benchmark_request_digest"] = digest
 	executor := &mockTranscodeExecutor{capabilitiesFunc: func(context.Context) (transcode.WorkerCapabilities, error) { return caps, nil }}
 	return &budgetCase{ec: ec, engine: NewEngine(EngineDeps{Transcode: executor}), executor: executor, snapshot: snapshot, base: base, request: request}
+}
+
+// legacyComparisonSnapshot rewrites a frozen snapshot into the shape snapshots
+// carried before the ladder: the encoder comparison and no ladder, under its
+// own digest.
+func legacyComparisonSnapshot(t *testing.T, ec *ExecutionContext, snapshot *ModePolicySnapshot) *ModePolicySnapshot {
+	t.Helper()
+	if snapshot.Size == nil || snapshot.Size.SizeBudget == nil || snapshot.Size.Hardware == nil {
+		return snapshot
+	}
+	p := *snapshot
+	size := *p.Size
+	budget := size.SizeBudget.Clone()
+	rules := sizeBudgetComparisonRules
+	budget.VTLadder, budget.Comparison = nil, &rules
+	size.SizeBudget, p.Size = budget, &size
+	p.Digest = ""
+	b, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(b)
+	p.Digest = "sha256:" + hex.EncodeToString(sum[:])
+	ec.State["mode_policy"], ec.State["policy_digest"] = p, p.Digest
+	return &p
 }
 
 func budgetDecision(winner *transcode.BenchmarkWinner) *transcode.BenchmarkDecision {

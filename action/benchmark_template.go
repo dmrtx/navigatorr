@@ -65,6 +65,17 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 	if ec.ActionName == "transcode_media" && getString(ec.State, "original_sha256") == "" {
 		return StepResult{Status: StepFailed, Error: "original integrity baseline missing (fail closed)"}, nil
 	}
+	cleanPath := getString(ec.State, "resolved_path")
+	if cleanPath == "" {
+		cleanPath = getString(ec.Inputs, "path")
+	}
+	// A size budget that allows the media engine skips the search: its ladder
+	// of full-file VideoToolbox encodes is planned here, and the wait step has
+	// no benchmark to wait for.
+	if result, handled := e.startSizeBudgetLadder(ctx, ec, cleanPath); handled {
+		return result, nil
+	}
+
 	if wait := getString(ec.State, "benchmark_retry_not_before"); wait != "" {
 		if at, err := time.Parse(time.RFC3339Nano, wait); err == nil && time.Now().Before(at) {
 			return StepResult{
@@ -74,11 +85,6 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 			}, nil
 		}
 		delete(ec.State, "benchmark_retry_not_before")
-	}
-
-	cleanPath := getString(ec.State, "resolved_path")
-	if cleanPath == "" {
-		cleanPath = getString(ec.Inputs, "path")
 	}
 
 	var req *transcode.BenchmarkRequest
@@ -293,6 +299,11 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 		return StepResult{Status: StepSkipped}, nil
 	}
 
+	if sizeBudgetLadderOf(ec.State) != nil {
+		// The size budget's ladder replaced the search; its first rung was
+		// planned by the submit step and there is no benchmark to wait for.
+		return StepResult{Status: StepCompleted}, nil
+	}
 	if sizeBudgetRoundLost(ec.State) {
 		// Read as an ordinary benchmark, the round's results would pick the
 		// budget encode by the worker's ranking instead of the budget's rule.

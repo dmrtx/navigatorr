@@ -268,3 +268,50 @@ func TestRerunCarriesTheSizeBudget(t *testing.T) {
 		})
 	}
 }
+
+// A media engine size budget encode that fit but missed the quality floor
+// offers one more try with the media engine off: a new action with the same
+// inputs plus allow_hardware=false. Any other job refuses it.
+func TestRerunWithoutHardwareAfterABelowFloorBudgetEncode(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	inputs := map[string]any{"path": "/media/Show/S01E01.mkv", "mode": "size", "size_budget_percent": float64(40), "allow_hardware": true, "hardware_margin_percent": float64(30)}
+	budget := map[string]any{"budget_bytes": float64(4e9), "outcome": "below_quality_floor", "retry_without_hardware": true, "encoder_choice": map[string]any{"video_codec": "hevc_videotoolbox"}}
+	seedOperation(t, st, "below-floor", "transcode_media", "completed", inputs, map[string]any{"reason_code": "quality_not_met"}, map[string]any{"mode": "size", "reason_code": "quality_not_met", "size_budget": budget})
+	seedOperation(t, st, "no-offer", "transcode_media", "completed", map[string]any{"path": "/media/Show/S01E02.mkv", "mode": "size"}, map[string]any{"reason_code": "quality_not_met"}, map[string]any{"mode": "size", "reason_code": "quality_not_met", "size_budget": map[string]any{"budget_bytes": float64(4e9), "outcome": "below_quality_floor"}})
+
+	w := request(h, "GET", "/api/maintenance/operations?id=below-floor", "", true)
+	var page struct {
+		Jobs []map[string]any `json:"jobs"`
+	}
+	if json.Unmarshal(w.Body.Bytes(), &page) != nil || len(page.Jobs) != 1 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	size := operationMap(page.Jobs[0]["size_mode"])
+	shown := operationMap(size["size_budget"])
+	if page.Jobs[0]["rerun"] == nil || shown["retry_without_hardware"] != true || operationMap(shown["encoder_choice"])["video_codec"] != "hevc_videotoolbox" || size["encoder"] != "hevc_videotoolbox" || size["hardware"] != true {
+		t.Fatalf("job view %v", page.Jobs[0])
+	}
+
+	if w := request(h, "POST", "/api/maintenance/rerun", `{"id":"no-offer","key":"x265-refused","without_hardware":true}`, true); w.Code != 409 {
+		t.Fatal("a job that offered no retry accepted it", w.Code, w.Body.String())
+	}
+	w = request(h, "POST", "/api/maintenance/rerun", `{"id":"below-floor","key":"x265-one","without_hardware":true}`, true)
+	if w.Code != 202 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	var started struct{ ID string }
+	json.Unmarshal(w.Body.Bytes(), &started)
+	created, _ := st.GetActionInstance(started.ID)
+	if created == nil || created.ActionName != "transcode_media" || created.IdempotencyKey != "x265-one" {
+		t.Fatalf("new action %+v", created)
+	}
+	copied := decodeOperationJSON(created.InputsJSON)
+	if copied["allow_hardware"] != false || copied["hardware_margin_percent"] != nil || copied["mode"] != "size" || copied["size_budget_percent"] != float64(40) || copied["path"] != "/media/Show/S01E01.mkv" {
+		t.Fatalf("inputs %v", copied)
+	}
+	// The earlier action is untouched and a plain run again still keeps the engine on.
+	if before, _ := st.GetActionInstance("below-floor"); decodeOperationJSON(before.InputsJSON)["allow_hardware"] != true {
+		t.Fatal("the earlier action was changed")
+	}
+}

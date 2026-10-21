@@ -74,6 +74,9 @@ func (s *Server) rerun(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		ID  string `json:"id"`
 		Key string `json:"key"`
+		// WithoutHardware runs the file again with the media engine off. Only a
+		// size budget the media engine encoded below the quality floor offers it.
+		WithoutHardware bool `json:"without_hardware"`
 	}
 	if decode(w, r, &body) != nil || !reconfigureKey.MatchString(body.Key) {
 		fail(w, 400, "a job and a valid submission key are required")
@@ -103,6 +106,14 @@ func (s *Server) rerun(w http.ResponseWriter, r *http.Request) {
 		if k != "idempotency_key" {
 			inputs[k] = v
 		}
+	}
+	if body.WithoutHardware {
+		if operationMap(operationValue(old, "size_budget"))["retry_without_hardware"] != true {
+			fail(w, 409, "this job did not offer a retry without the media engine")
+			return
+		}
+		inputs["allow_hardware"] = false
+		delete(inputs, "hardware_margin_percent")
 	}
 	// Run again means the same settings. A size job that never named the media
 	// engine would otherwise take today's default instead of the policy it ran

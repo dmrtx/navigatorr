@@ -285,6 +285,11 @@ func (e *Engine) continueWithoutHardware(ctx context.Context, ec *ExecutionConte
 	if ec.ActionName != "transcode_media" || getString(ec.Inputs, "mode") != "size" || st.ReasonCode != reasonQualityNotMet || st.QualityEvidence == nil || ec.State[hardwareContinuationKey] != nil {
 		return StepResult{}, false, nil
 	}
+	if sizeBudgetLadderOf(ec.State) != nil {
+		// A ladder has no search to continue; its failure offers x265 to the
+		// user instead (failSizeBudget).
+		return StepResult{}, false, nil
+	}
 	var winner transcode.BenchmarkWinner
 	if ec.State["benchmark_winner"] == nil || !reencode(ec.State["benchmark_winner"], &winner) ||
 		transcode.BenchmarkCandidateVideoCodec(transcode.BenchmarkCandidate{VideoCodec: winner.VideoCodec}) != transcode.VideoCodecHEVCVideoToolbox {

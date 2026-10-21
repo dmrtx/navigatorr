@@ -26,6 +26,15 @@ func ValidateFinalSize(source, candidate int64, policy *SizePolicy) error {
 	if math.IsNaN(policy.MinSavingsPercent) || math.IsInf(policy.MinSavingsPercent, 0) || policy.MinSavingsPercent < 0 || policy.MinSavingsPercent > 100 || math.IsNaN(policy.MaxSizeIncreasePercent) || math.IsInf(policy.MaxSizeIncreasePercent, 0) || policy.MaxSizeIncreasePercent < 0 {
 		return fmt.Errorf("size_policy_invalid: invalid frozen size policy")
 	}
+	if policy.MaxCandidateBytes < 0 {
+		return fmt.Errorf("size_policy_invalid: invalid frozen size policy")
+	}
+	// The absolute ceiling is checked first: a size budget sits under the
+	// minimum saving, so a file over it is reported as over the budget, which is
+	// what the coordinator acts on, not as insufficient savings.
+	if policy.MaxCandidateBytes > 0 && candidate > policy.MaxCandidateBytes {
+		return &PolicyRejectionError{ReasonCode: "size_budget_exceeded", Message: fmt.Sprintf("candidate is %d bytes, over the %d byte size budget", candidate, policy.MaxCandidateBytes)}
+	}
 	percent := func(v float64) *big.Rat {
 		r, _ := new(big.Rat).SetString(strconv.FormatFloat(v, 'f', -1, 64))
 		return r

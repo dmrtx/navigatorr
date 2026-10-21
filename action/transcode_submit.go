@@ -613,9 +613,16 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 		mirrorTranscodeWorkerMetadata(ec, st)
 		if getString(ec.Inputs, "mode") != "" {
 			switch st.ReasonCode {
-			case "insufficient_savings", "size_growth", "size_growth_exceeded", "quality_not_met", "preservation_not_met", "already_target_codec":
+			case "insufficient_savings", "size_growth", "size_growth_exceeded", "quality_not_met", "preservation_not_met", "already_target_codec", sizeBudgetExceededReason:
 				if res, handled, err := e.continueWithoutHardware(ctx, ec, st); err != nil || handled {
 					return res, err
+				}
+				if st.ReasonCode == sizeBudgetExceededReason {
+					// The worker refused a ladder rung's file as over the
+					// budget; the next rung encodes the file again.
+					if res, handled := e.advanceSizeBudgetRung(ec, st.CandidateSizeBytes); handled {
+						return res, nil
+					}
 				}
 				if st.ReasonCode != reasonQualityNotMet && st.ReasonCode != "preservation_not_met" && st.ReasonCode != "already_target_codec" && sizeBudgetActive(ec.State) {
 					// A VideoToolbox budget encode that missed its average
@@ -634,7 +641,7 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 				if st.ReasonCode == reasonQualityNotMet && st.QualityEvidence != nil && sizeBudgetActive(ec.State) {
 					out[sizeBudgetKey] = failSizeBudget(ec, st.QualityEvidence)
 				}
-				if (st.ReasonCode == "insufficient_savings" || st.ReasonCode == "size_growth" || st.ReasonCode == "size_growth_exceeded") && sizeBudgetActive(ec.State) {
+				if (st.ReasonCode == "insufficient_savings" || st.ReasonCode == "size_growth" || st.ReasonCode == "size_growth_exceeded" || st.ReasonCode == sizeBudgetExceededReason) && sizeBudgetActive(ec.State) {
 					// The two-pass encode overshot past the worker's minimum
 					// saving, which is past the budget too.
 					out[sizeBudgetKey] = overshotSizeBudget(ec, st.CandidateSizeBytes)
