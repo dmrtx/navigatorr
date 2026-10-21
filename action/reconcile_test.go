@@ -18,7 +18,6 @@ import (
 	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/httpclient"
-	"github.com/jakenesler/navigatorr/transcode/recipe"
 )
 
 func registerReconcileTestFlow(e *Engine, final func(context.Context, *ExecutionContext) (StepResult, error)) {
@@ -306,30 +305,6 @@ func TestRetryAfterRejectedTranscodeAdmissionRetainsAnalysisAndIdentity(t *testi
 	}
 }
 
-func TestRejectedBenchmarkAdmissionRetryKeepsRequestAndBudget(t *testing.T) {
-	for _, code := range []int{404, 403} {
-		t.Run(fmt.Sprint(code), func(t *testing.T) {
-			mock := &mockTranscodeExecutor{benchmarkStatusFunc: func(context.Context, string) (transcode.BenchmarkStatus, error) {
-				return transcode.BenchmarkStatus{}, fmt.Errorf("worker read: %w", &httpclient.HTTPError{StatusCode: code})
-			}}
-			e := NewEngine(EngineDeps{Transcode: mock})
-			ec := testReconcileEC("")
-			ec.State["benchmark_job_id"], ec.State["benchmark_request_digest"], ec.State["search_budget_seconds"] = "bench-rejected", "frozen-request", 600
-			tmpl := ActionTemplate{Steps: []StepDefinition{{Name: "preflight"}, {Name: "submit_benchmark"}, {Name: "wait_benchmark"}}}
-			resume, err := e.prepareRemoteRetry(context.Background(), &store.ActionInstance{ActionName: "benchmark_transcode"}, ec, tmpl, 2)
-			if code == 404 && (err != nil || resume != 1 || !getBool(ec.State, "benchmark_reconcile")) {
-				t.Fatalf("missing admission cannot reconcile: %d %v %+v", resume, err, ec.State)
-			}
-			if code == 403 && (err == nil || getBool(ec.State, "benchmark_reconcile")) {
-				t.Fatalf("forbidden read admitted retry: %v", err)
-			}
-			if getString(ec.State, "benchmark_job_id") != "bench-rejected" || getString(ec.State, "benchmark_request_digest") != "frozen-request" || getInt(ec.State, "search_budget_seconds") != 600 || getInt(ec.State, "benchmark_manual_retry_count") != 0 || mock.benchmarkSubmitCalls != 0 {
-				t.Fatalf("retry preparation changed request or budget: %+v", ec.State)
-			}
-		})
-	}
-}
-
 func TestAcceptResolvesSHAOnlyAfterActualVerification(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "original.mkv")
 	if err := os.WriteFile(p, []byte("original bytes"), 0600); err != nil {
@@ -436,14 +411,8 @@ func TestCallerCancellationSuspendsWithoutCancellingWorker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Status != StatusWaitingExternal || mock.cancelCalls != 0 || mock.benchmarkCancelCalls != 0 {
+	if r.Status != StatusWaitingExternal || mock.cancelCalls != 0 {
 		t.Fatalf("request cancellation killed workflow: %+v", r)
-	}
-	ec := testReconcileEC("")
-	ec.State["optimization_enabled"], ec.State["benchmark_job_id"] = true, "bench-existing"
-	br, err := e.stepBenchmarkWait(ctx, ec)
-	if err != nil || br.Status != StepWaitingExternal || mock.benchmarkCancelCalls != 0 {
-		t.Fatalf("cancelled benchmark request killed worker: %+v %v", br, err)
 	}
 }
 
@@ -454,9 +423,6 @@ func TestStatusHTTPFailuresRemainReconciliableWithoutResubmission(t *testing.T) 
 				statusFunc: func(context.Context, string) (transcode.JobStatus, error) {
 					return transcode.JobStatus{}, &httpclient.HTTPError{StatusCode: code, Message: "status unavailable"}
 				},
-				benchmarkStatusFunc: func(context.Context, string) (transcode.BenchmarkStatus, error) {
-					return transcode.BenchmarkStatus{}, &httpclient.HTTPError{StatusCode: code, Message: "status unavailable"}
-				},
 			}
 			e := NewEngine(EngineDeps{Transcode: mock})
 			ec := testReconcileEC("")
@@ -464,11 +430,6 @@ func TestStatusHTTPFailuresRemainReconciliableWithoutResubmission(t *testing.T) 
 			r, err := e.stepTranscodeWait(context.Background(), ec)
 			if err != nil || r.Status != StepWaitingExternal || getInt(ec.State, "retry_count") != 2 || mock.submitCalls != 0 {
 				t.Fatalf("HTTP %d became encode failure/retry: %+v %v", code, r, err)
-			}
-			ec.State["optimization_enabled"], ec.State["benchmark_job_id"], ec.State["benchmark_retry_count"] = true, "bench-existing", 2
-			br, err := e.stepBenchmarkWait(context.Background(), ec)
-			if err != nil || br.Status != StepWaitingExternal || getInt(ec.State, "benchmark_retry_count") != 2 || mock.benchmarkSubmitCalls != 0 {
-				t.Fatalf("HTTP %d became benchmark failure/retry: %+v %v", code, br, err)
 			}
 		})
 	}
@@ -583,37 +544,6 @@ func TestAuditLogCannotAdvanceBeyondPersistedCheckpoint(t *testing.T) {
 	r, err := e.Status(context.Background(), inst.ID)
 	if err != nil || r.Status != StatusCompleted || first.Load() != 1 {
 		t.Fatalf("log advanced past checkpoint: %+v %v", r, err)
-	}
-}
-
-func TestBenchmarkUncertainSubmitPersistsIdentityAndResumesAutomatically(t *testing.T) {
-	var persistedStore *store.Store
-	mock := &mockTranscodeExecutor{benchmarkSubmitFunc: func(ctx context.Context, req transcode.BenchmarkRequest) (transcode.BenchmarkJob, error) {
-		inst, err := persistedStore.GetActionInstance(strings.TrimPrefix(req.ID, "bench-"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		ec := parseExecutionContext(inst, nil)
-		if getString(ec.State, "benchmark_job_id") != req.ID || !getBool(ec.State, "benchmark_reconcile") || ec.State["benchmark_request"] == nil {
-			t.Fatal("benchmark request not durable before submit")
-		}
-		return transcode.BenchmarkJob{}, &httpclient.UncertainError{Op: "benchmark_submit", Err: context.DeadlineExceeded}
-	}, benchmarkStatusFunc: func(ctx context.Context, id string) (transcode.BenchmarkStatus, error) {
-		return transcode.BenchmarkStatus{ID: id, Status: transcode.StatusCompleted, FinishedAt: time.Now().Add(-time.Second), Decision: &transcode.BenchmarkDecision{DecisionReason: "test report complete"}}, nil
-	}}
-	e, st, source, _ := setupBenchmarkTestEnv(t, mock, standard8BitProbeJSON, &recipe.OptimizationPolicy{Enabled: true})
-	persistedStore = st
-	r, err := legacySearch(e).Run(context.Background(), "benchmark_transcode", map[string]any{"path": source, "profile": "opt-vt"})
-	if err != nil || r.Status != StatusWaitingExternal {
-		t.Fatalf("uncertain benchmark submit: %+v %v", r, err)
-	}
-	e.deps.Now = func() time.Time { return time.Now().Add(time.Minute) }
-	if err := e.ReconcileOnce(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	r, err = e.Status(context.Background(), r.ID)
-	if err != nil || r.Status != StatusCompleted || mock.benchmarkSubmitCalls != 1 || r.Outputs["benchmark_status"] != "completed" {
-		t.Fatalf("benchmark not reconciled: %+v %v", r, err)
 	}
 }
 

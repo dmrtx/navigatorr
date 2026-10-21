@@ -11,19 +11,19 @@ import (
 	"testing"
 )
 
-func TestAutomaticRequestAndLegacyFrozenPolicy(t *testing.T) {
-	for _, duration := range []float64{50, 100, 3600} {
-		ec := &ExecutionContext{InstanceID: "automatic", Inputs: map[string]any{"mode": "quality"}, State: map[string]any{"plan": &transcode.Plan{VideoCodec: "libx265", Quality: 23, Preset: "medium", ExpectedBitDepth: 8, PixelFormat: "yuv420p", VideoProfile: "main"}}}
+func TestFinalValidationWindowsFollowSourceLengthAndLegacyFrozenPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		duration float64
+		windows  int
+	}{{20, 2}, {50, 5}, {100, 5}, {3600, 5}} {
+		ec := &ExecutionContext{InstanceID: "windows", Inputs: map[string]any{"mode": "quality"}, State: map[string]any{"plan": &transcode.Plan{VideoCodec: "libx265", Quality: 23, Preset: "medium", ExpectedBitDepth: 8, PixelFormat: "yuv420p", VideoProfile: "main"}}}
 		policy, _ := freezeModePolicy(ec)
-		req, err := buildBenchmarkRequest(ec, "/media/source.mkv", &mediainspect.DetailedReport{DurationSec: duration, Video: []mediainspect.DetailedStream{{BitDepth: 8, FPS: 25}}}, policy.Profile.Optimization, modeTestCapabilities())
+		req, err := finalRequestForPlan(ec, "/media/source.mkv", &mediainspect.DetailedReport{DurationSec: tc.duration, Video: []mediainspect.DetailedStream{{BitDepth: 8, FPS: 25}}}, policy.Profile.Optimization, modeTestCapabilities())
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !req.Automatic || len(req.Samples) != 5 || len(req.Candidates) != 12 {
-			t.Fatal("automatic plan incomplete")
-		}
-		if err := transcode.ValidateBenchmarkRequest(req); err != nil {
-			t.Fatal(err)
+		if len(req.Samples) != tc.windows {
+			t.Fatalf("%.0fs source: %d final windows, want %d", tc.duration, len(req.Samples), tc.windows)
 		}
 	}
 	legacy, _ := legacyModePolicy("quality", false)
@@ -37,36 +37,6 @@ func TestAutomaticRequestAndLegacyFrozenPolicy(t *testing.T) {
 	policy, err := freezeModePolicy(ec)
 	if err != nil || policy.MinSavingsPercent != 15 || policy.Version != "transcode-modes-v1" {
 		t.Fatal("existing policy was changed")
-	}
-}
-
-func TestAutomaticQualityPruningFollowsWorkerCapability(t *testing.T) {
-	for _, advertised := range []bool{false, true} {
-		ec := &ExecutionContext{InstanceID: "automatic", Inputs: map[string]any{"mode": "quality"}, State: map[string]any{"plan": &transcode.Plan{VideoCodec: "libx265", Quality: 23, Preset: "medium", ExpectedBitDepth: 8, PixelFormat: "yuv420p", VideoProfile: "main"}}}
-		policy, _ := freezeModePolicy(ec)
-		caps := modeTestCapabilities()
-		caps.AutomaticQualityPruning = advertised
-		req, err := buildBenchmarkRequest(ec, "/media/source.mkv", &mediainspect.DetailedReport{DurationSec: 100, Video: []mediainspect.DetailedStream{{BitDepth: 8, FPS: 25}}}, policy.Profile.Optimization, caps)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if req.QualityPruning != advertised {
-			t.Fatalf("advertised=%v but request pruning=%v", advertised, req.QualityPruning)
-		}
-		if err := transcode.ValidateBenchmarkRequest(req); err != nil {
-			t.Fatal(err)
-		}
-	}
-	short := &ExecutionContext{InstanceID: "short", Inputs: map[string]any{"mode": "quality"}, State: map[string]any{"plan": &transcode.Plan{VideoCodec: "libx265", Quality: 23, Preset: "medium", ExpectedBitDepth: 8, PixelFormat: "yuv420p", VideoProfile: "main"}}}
-	policy, _ := freezeModePolicy(short)
-	caps := modeTestCapabilities()
-	caps.AutomaticQualityPruning = true
-	req, err := buildBenchmarkRequest(short, "/media/source.mkv", &mediainspect.DetailedReport{DurationSec: 20, Video: []mediainspect.DetailedStream{{BitDepth: 8, FPS: 25}}}, policy.Profile.Optimization, caps)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if req.Automatic || req.QualityPruning {
-		t.Fatal("short source must not request automatic pruning")
 	}
 }
 
@@ -87,7 +57,7 @@ func TestGoalRevisionFreezesNewAttemptWithoutChangingParent(t *testing.T) {
 	}
 	updated, _ := st.GetActionInstance(parent.ID)
 	ec := parseExecutionContext(updated, e)
-	if getString(ec.Inputs, "mode") != "quality" || batchItemMode(ec, items[0]) != "size" {
+	if getString(ec.Inputs, "mode") != "quality" || reviewedItemMode(ec, items[0]) != "size" {
 		t.Fatal("original intent or new attempt changed")
 	}
 	child := &ExecutionContext{Inputs: map[string]any{"mode": "size", "parent_action_id": parent.ID, "batch_item_key": "file", "path": item.FilePath}, State: map[string]any{}}

@@ -122,26 +122,21 @@ func TestCompactInventoryReason(t *testing.T) {
 	}
 }
 
-func TestBuildBenchmarkRequestCompactNeedsWorkerCapability(t *testing.T) {
+func TestFinalValidationRequestCompactNeedsWorkerCapability(t *testing.T) {
 	rep := &mediainspect.DetailedReport{DurationSec: 100, Video: []mediainspect.DetailedStream{{BitDepth: 10, BitRate: 40000000, FPS: 24, Width: 3840, Height: 2160}}}
 	opt := &recipe.OptimizationPolicy{
 		Enabled:  true,
 		Sampling: &recipe.SamplingPolicy{SampleSeconds: 5, SampleCount: 3, Positions: []float64{0.2, 0.5, 0.8}},
-		Search:   &recipe.SearchPolicy{MaxCandidates: 3, QualityValues: []int{20, 23, 26}},
 		Quality:  &recipe.QualityPolicy{PreferredMetric: "vmaf", VMAF: &recipe.MetricTarget{Model: "v1_1080p_3h", Target: 92, Minimum: 88}, Banding: &recipe.BandingPolicy{Enabled: true, Metric: "cambi", Mode: "full_ref", Enforcement: "observe"}},
 	}
 	compact := &transcode.CompactPlan{ChainVersion: transcode.CompactChainVersion, SourceClass: mediainspect.DynamicRangeHDR10, SourceSignal: mediainspect.SignalPQ, SourceWidth: 3840, SourceHeight: 2160, MaxHeight: 1080, TargetWidth: 1920, TargetHeight: 1080, ToneMap: &transcode.CompactToneMap{Method: transcode.CompactToneMapPQ, SourcePeakNits: 1000, TargetPeakNits: 100}}
 	caps := transcode.WorkerCapabilities{ProtocolVersion: transcode.WorkerProtocolVersion, CompactAudio: true, CompactTranscode: true, AutomaticModesV2: true, Encoders: map[string]bool{"libx265": true}, Filters: map[string]bool{"libvmaf": true, "ssim": true}, Quality: &transcode.QualityCapabilities{Native10Bit: true, CAMBIFullRef: true, Models: map[string]transcode.QualityModelCapability{"v1_1080p_3h": {Available: true}}}}
 	ec := &ExecutionContext{InstanceID: "bench-compact", Inputs: map[string]any{"mode": "compact"}, State: map[string]any{"search_budget_seconds": 600, "plan": &transcode.Plan{VideoCodec: "libx265", Quality: 23, AudioMode: "compact", ExpectedBitDepth: 10, Compact: compact}}}
-	req, err := buildBenchmarkRequest(ec, "/media/source.mkv", rep, opt, caps)
-	if err != nil {
+	if _, err := finalRequestForPlan(ec, "/media/source.mkv", rep, opt, caps); err != nil {
 		t.Fatal(err)
 	}
-	if !req.Compact.Equal(compact) || req.Compact == compact {
-		t.Fatalf("request compact %+v", req.Compact)
-	}
 	caps.CompactTranscode = false
-	if _, err := buildBenchmarkRequest(ec, "/media/source.mkv", rep, opt, caps); err == nil || !strings.Contains(err.Error(), "compact SDR") {
+	if _, err := finalRequestForPlan(ec, "/media/source.mkv", rep, opt, caps); err == nil || !strings.Contains(err.Error(), "compact SDR") {
 		t.Fatalf("worker without compact_transcode accepted: %v", err)
 	}
 }

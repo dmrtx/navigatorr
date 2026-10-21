@@ -139,15 +139,13 @@ func TestEnqueueRefusesInvalidParamsWithoutPersisting(t *testing.T) {
 		field  string
 		reason string
 	}{
-		{"benchmark with media_type", "benchmark_transcode", map[string]any{"path": source, "media_type": "movie"}, "media_type", "unsupported input"},
 		{"unknown key", "transcode_media", map[string]any{"path": source, "bogus": 1}, "bogus", "unsupported input"},
 		{"batch unknown key", "transcode_batch", map[string]any{"paths": []string{source}, "bogus": 1}, "bogus", "unsupported input"},
 		{"missing path", "transcode_media", map[string]any{}, "path", "path is required"},
-		{"blank path", "benchmark_transcode", map[string]any{"path": "  "}, "path", "path is required"},
+		{"blank path", "transcode_media", map[string]any{"path": "  "}, "path", "path is required"},
 		{"path outside roots", "transcode_media", map[string]any{"path": outside}, "path", "outside allowed read roots"},
-		{"metric psnr", "benchmark_transcode", map[string]any{"path": source, "metric": "psnr"}, "metric", "invalid metric"},
 		{"profile with profile_config", "transcode_media", map[string]any{"path": source, "profile": "general-hevc", "profile_config": twoPassProfileConfig(4000)}, "profile_config", "mutually exclusive"},
-		{"undecodable profile_config", "benchmark_transcode", map[string]any{"path": source, "profile_config": map[string]any{"container": "mkv", "surprise": true}}, "profile_config", "invalid profile_config"},
+		{"undecodable profile_config", "transcode_media", map[string]any{"path": source, "profile_config": map[string]any{"container": "mkv", "surprise": true}}, "profile_config", "invalid profile_config"},
 		{"profile_config for a batch", "transcode_batch", map[string]any{"paths": []string{source}, "profile_config": twoPassProfileConfig(10)}, "profile_config", "two-pass x265"},
 		{"preserve flag type", "transcode_media", map[string]any{"path": source, "preserve_source_bit_depth": "no"}, "preserve_source_bit_depth", "must be a boolean"},
 		{"replace_original", "transcode_media", map[string]any{"path": source, "replace_original": true}, "replace_original", "candidate-only"},
@@ -269,7 +267,7 @@ func TestValidationComputesPinnedBitDepth(t *testing.T) {
 // input is accepted and every required one is enforced.
 func TestCatalogDeclarationsDriveValidation(t *testing.T) {
 	e := NewEngine(EngineDeps{})
-	for _, name := range []string{"transcode_media", "benchmark_transcode", "clean_podcast_ads", "transcode_batch"} {
+	for _, name := range []string{"transcode_media", "clean_podcast_ads", "transcode_batch"} {
 		tmpl, ok := e.GetTemplate(name)
 		if !ok || tmpl.Validate == nil {
 			t.Fatalf("%s has no validation hook", name)

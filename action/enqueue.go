@@ -59,6 +59,9 @@ func (e *Engine) Enqueue(ctx context.Context, name string, inputs map[string]any
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if name == removedBenchmarkAction {
+		return nil, inputErr("", removedBenchmarkMessage)
+	}
 	tmpl, ok := e.GetTemplate(name)
 	if !ok || !tmpl.AutoReconcile || !tmpl.ImmutableInputs {
 		return nil, fmt.Errorf("action %q does not support background admission", name)

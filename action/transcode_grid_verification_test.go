@@ -4,18 +4,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"math"
 	"strings"
 	"testing"
 
 	"github.com/jakenesler/navigatorr/transcode"
 )
-
-func gridTestCapabilities() transcode.WorkerCapabilities {
-	caps := rulesTestCapabilities()
-	caps.AutomaticGridVerification = true
-	return caps
-}
 
 // gridEraPolicy is a size v3 snapshot as it was frozen while the holdouts sat
 // on the grid edges: the same policy without the grid verification rules.
@@ -84,9 +77,8 @@ func TestSizePolicyFreezesGridVerification(t *testing.T) {
 }
 
 // Snapshots frozen while the holdouts sat on the grid edges re-hash to the
-// digests they were frozen under and keep their two-attempt search; only new
-// snapshots verify on the grid.
-func TestGridEraSnapshotsKeepTheirDigestAndSearch(t *testing.T) {
+// digests they were frozen under.
+func TestGridEraSnapshotsKeepTheirDigest(t *testing.T) {
 	earlier := &transcode.HardwareSearchRules{MarginPercent: 15, QualityValues: []int{45, 50, 55, 60}, GOPSize: 240, BFrames: 1}
 	beforeMargin := &transcode.HardwareSearchRules{MarginPercent: 15, QualityValues: []int{45, 50, 55, 60}, GOPSize: 240, BFrames: 1, FallbackQualityValues: []int{65, 70, 75}}
 	current, err := modeHardwareInput("size", map[string]any{"mode": "size"})
@@ -118,106 +110,6 @@ func TestGridEraSnapshotsKeepTheirDigestAndSearch(t *testing.T) {
 		if err != nil || frozen.Digest != tc.digest {
 			t.Fatalf("%s: stored snapshot %+v %v", name, frozen, err)
 		}
-		// Even a worker that verifies on the grid runs the frozen rules.
-		families := policyAutomaticFallbacks(frozen, gridTestCapabilities())
-		if families.Rules == nil || families.Rules.HoldoutWindows != transcode.HoldoutWindowsFinalGridEdges || families.Rules.VerifyUntilExhausted || families.Rules.FinalFreshWindows != 0 {
-			t.Fatalf("%s: grid-era rules changed: %+v", name, families.Rules)
-		}
-		req := hardwareRequestWith(t, ec, 8, 45*60, gridTestCapabilities())
-		if len(req.Samples) != 5 || req.AutomaticSearch.HoldoutWindows != transcode.HoldoutWindowsFinalGridEdges {
-			t.Fatalf("%s: request %+v %+v", name, req.Samples, req.AutomaticSearch)
-		}
-		if err := transcode.ValidateBenchmarkRequest(req); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
-func TestGridVerificationRequest(t *testing.T) {
-	for _, tc := range []struct {
-		duration float64
-		windows  int
-	}{{45 * 60, 5}, {105 * 60, 11}, {180 * 60, 12}, {101, 5}} {
-		req := sizeRulesRequest(t, tc.duration, gridTestCapabilities())
-		r := req.AutomaticSearch
-		if r == nil || r.HoldoutWindows != transcode.HoldoutWindowsFinalGrid || !r.VerifyUntilExhausted || r.FinalFreshWindows != 2 {
-			t.Fatalf("%.0f s: rules %+v", tc.duration, r)
-		}
-		if err := transcode.ValidateBenchmarkRequest(req); err != nil {
-			t.Fatalf("%.0f s: %v", tc.duration, err)
-		}
-		if len(req.Samples) != tc.windows {
-			t.Fatalf("%.0f s: %d windows, want %d", tc.duration, len(req.Samples), tc.windows)
-		}
-		// The verification windows are exactly the windows final validation will
-		// re-measure on the full encode.
-		grid := transcode.PlanFinalValidationWindows(tc.duration, 10, 600, 5, 12)
-		for _, w := range grid {
-			found := false
-			for _, s := range req.Samples {
-				if math.Abs(s.StartSeconds-w.StartSeconds) < 1e-9 && s.DurationSeconds == w.DurationSeconds {
-					found = true
-				}
-			}
-			if !found {
-				t.Fatalf("%.0f s: final window at %.1f s is not a search window", tc.duration, w.StartSeconds)
-			}
-		}
-		// Discovery windows are the interior ones nearest 20/50/80%.
-		for i, position := range []float64{0.2, 0.5, 0.8} {
-			if math.Abs(req.Samples[i].CenterSeconds-tc.duration*position) > tc.duration/float64(len(grid))/2+1e-6 {
-				t.Fatalf("%.0f s: discovery window %d at %.1f", tc.duration, i, req.Samples[i].CenterSeconds)
-			}
-		}
-	}
-}
-
-// Without the capability the worker would reject the new rule fields and the
-// new holdout value, so it gets the grid-edge request it understands.
-func TestGridVerificationNeedsWorkerCapability(t *testing.T) {
-	req := sizeRulesRequest(t, 45*60, rulesTestCapabilities())
-	r := req.AutomaticSearch
-	if r == nil || r.HoldoutWindows != transcode.HoldoutWindowsFinalGridEdges || r.VerifyUntilExhausted || r.FinalFreshWindows != 0 || len(req.Samples) != 5 {
-		t.Fatalf("worker without grid verification: %+v %d windows", r, len(req.Samples))
-	}
-	b, _ := json.Marshal(r)
-	if strings.Contains(string(b), "verify_until_exhausted") || strings.Contains(string(b), "final_fresh") || strings.Contains(string(b), `"final_grid"`) {
-		t.Fatalf("an older worker would see what it rejects: %s", b)
-	}
-	// A source too short for the grid keeps the earliest holdouts.
-	short := sizeRulesRequest(t, 80, gridTestCapabilities())
-	if short.AutomaticSearch == nil || short.AutomaticSearch.HoldoutWindows != "" || short.AutomaticSearch.FinalFreshWindows != 0 || len(short.Samples) != 5 {
-		t.Fatalf("short source: %+v %d windows", short.AutomaticSearch, len(short.Samples))
-	}
-	if err := transcode.ValidateBenchmarkRequest(short); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestGridVerificationRulesValidation(t *testing.T) {
-	req := sizeRulesRequest(t, 105*60, gridTestCapabilities())
-	if len(req.Samples) != 11 {
-		t.Fatalf("%d windows", len(req.Samples))
-	}
-	for name, mutate := range map[string]func(*transcode.BenchmarkRequest){
-		"too many fresh windows": func(r *transcode.BenchmarkRequest) { r.AutomaticSearch.FinalFreshWindows = 3 },
-		"negative fresh windows": func(r *transcode.BenchmarkRequest) { r.AutomaticSearch.FinalFreshWindows = -1 },
-		"four windows":           func(r *transcode.BenchmarkRequest) { r.Samples = r.Samples[:4] },
-		"edges with a grid": func(r *transcode.BenchmarkRequest) {
-			r.AutomaticSearch.HoldoutWindows = transcode.HoldoutWindowsFinalGridEdges
-		},
-		"no rules with a grid": func(r *transcode.BenchmarkRequest) { r.AutomaticSearch = nil },
-		"thirteen windows": func(r *transcode.BenchmarkRequest) {
-			r.Samples = append(r.Samples, transcode.BenchmarkSampleWindow{Index: 11, StartSeconds: 10, DurationSeconds: 5, CenterSeconds: 12.5}, transcode.BenchmarkSampleWindow{Index: 12, StartSeconds: 20, DurationSeconds: 5, CenterSeconds: 22.5})
-		},
-	} {
-		clone := *req
-		clone.AutomaticSearch = req.AutomaticSearch.Clone()
-		clone.Samples = append([]transcode.BenchmarkSampleWindow(nil), req.Samples...)
-		mutate(&clone)
-		if err := transcode.ValidateBenchmarkRequest(&clone); err == nil {
-			t.Errorf("%s accepted", name)
-		}
 	}
 }
 
@@ -244,23 +136,20 @@ func TestFinalValidationFreshWindows(t *testing.T) {
 
 // Snapshots frozen with verification on the final grid and the 1.5 selection
 // margin (and, for the media engine, the extra 2) re-hash to the digests they
-// were frozen under and keep selecting with those margins, on any worker. Only
-// new snapshots drop them.
-func TestMarginEraSnapshotsKeepTheirDigestAndMargin(t *testing.T) {
+// were frozen under.
+func TestMarginEraSnapshotsKeepTheirDigest(t *testing.T) {
 	earlier := &transcode.HardwareSearchRules{MarginPercent: 15, QualityValues: []int{45, 50, 55, 60}, GOPSize: 240, BFrames: 1}
 	current, err := modeHardwareInput("size", map[string]any{"mode": "size"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for name, tc := range map[string]struct {
-		hardware   *transcode.HardwareSearchRules
-		digest     string
-		extra      float64
-		hardwareOn bool
+		hardware *transcode.HardwareSearchRules
+		digest   string
 	}{
-		"no media engine":           {nil, "sha256:6e519947ac9039f9dbfe36a8beee2ebdd891f0a02d28b5e5b776ddc7f8928ba8", 0, false},
-		"media engine":              {withExtraMargin(current), "sha256:206ca220dda73866a0f7b9721a8a2bb93769b447cf7cb6f53347b2d3208d03e7", 2, true},
-		"media engine, earlier set": {earlier, "sha256:ab4a33d9aa290b79b3eeaef9a6b3c17afda00376e9defade7d71e9ce65cb6128", 0, true},
+		"no media engine":           {nil, "sha256:6e519947ac9039f9dbfe36a8beee2ebdd891f0a02d28b5e5b776ddc7f8928ba8"},
+		"media engine":              {withExtraMargin(current), "sha256:206ca220dda73866a0f7b9721a8a2bb93769b447cf7cb6f53347b2d3208d03e7"},
+		"media engine, earlier set": {earlier, "sha256:ab4a33d9aa290b79b3eeaef9a6b3c17afda00376e9defade7d71e9ce65cb6128"},
 	} {
 		legacy := marginEraPolicy(t, tc.hardware)
 		if legacy.Digest != tc.digest {
@@ -281,77 +170,5 @@ func TestMarginEraSnapshotsKeepTheirDigestAndMargin(t *testing.T) {
 		if err != nil || frozen.Digest != tc.digest {
 			t.Fatalf("%s: stored snapshot %+v %v", name, frozen, err)
 		}
-		// A worker that verifies on the grid runs the frozen margin as well.
-		caps := hardwareTestCapabilities()
-		caps.AutomaticGridVerification = true
-		req := hardwareRequestWith(t, ec, 8, 45*60, caps)
-		if req.AutomaticSearch == nil || req.AutomaticSearch.SelectionMarginVMAF != 1.5 || req.AutomaticSearch.HoldoutWindows != transcode.HoldoutWindowsFinalGrid {
-			t.Fatalf("%s: rules %+v", name, req.AutomaticSearch)
-		}
-		if tc.hardwareOn != (req.HardwareSearch != nil) || tc.hardwareOn && req.HardwareSearch.ExtraSelectionMarginVMAF != tc.extra {
-			t.Fatalf("%s: hardware search %+v", name, req.HardwareSearch)
-		}
-		if err := transcode.ValidateBenchmarkRequest(req); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
-// A search whose snapshot freezes no margin sends none to a worker that verifies
-// on the grid, and no extra one for the media engine, so a worker that cannot
-// apply the extra margin still gets hardware candidates.
-func TestGridSnapshotSendsNoSelectionMargin(t *testing.T) {
-	caps := hardwareTestCapabilities()
-	caps.AutomaticGridVerification = true
-	caps.HardwareSelectionMargin = false
-	req := hardwareRequest(t, 8, 45*60, map[string]any{"mode": "size"}, caps)
-	if req.AutomaticSearch == nil || req.AutomaticSearch.SelectionMarginVMAF != 0 || req.AutomaticSearch.HoldoutWindows != transcode.HoldoutWindowsFinalGrid {
-		t.Fatalf("rules %+v", req.AutomaticSearch)
-	}
-	if req.HardwareSearch == nil || req.HardwareSearch.ExtraSelectionMarginVMAF != 0 {
-		t.Fatalf("hardware search %+v", req.HardwareSearch)
-	}
-	if err := transcode.ValidateBenchmarkRequest(req); err != nil {
-		t.Fatal(err)
-	}
-	raw, _ := json.Marshal(req.HardwareSearch)
-	if strings.Contains(string(raw), "extra_selection_margin") {
-		t.Fatalf("an older worker would see a field it rejects: %s", raw)
-	}
-}
-
-// Where a search cannot verify on the final grid, the two edge windows are all
-// that guard against a thin pass, so the margin comes back: for a worker
-// without grid verification, and for a source too short for the grid.
-func TestGridSnapshotRestoresMarginWithoutGridVerification(t *testing.T) {
-	grid := hardwareTestCapabilities()
-	grid.AutomaticGridVerification = true
-	noGrid := hardwareTestCapabilities()
-	for name, tc := range map[string]struct {
-		caps     transcode.WorkerCapabilities
-		duration float64
-		holdout  string
-	}{
-		"worker without grid verification": {noGrid, 45 * 60, transcode.HoldoutWindowsFinalGridEdges},
-		"source too short for the grid":    {grid, 60, ""},
-	} {
-		ec := &ExecutionContext{InstanceID: "restore", Inputs: map[string]any{"mode": "size"}, State: map[string]any{"original_sha256": strings.Repeat("a", 64)}}
-		req := hardwareRequestWith(t, ec, 8, tc.duration, tc.caps)
-		if req.AutomaticSearch == nil || req.AutomaticSearch.SelectionMarginVMAF != 1.5 || req.AutomaticSearch.HoldoutWindows != tc.holdout {
-			t.Fatalf("%s: rules %+v", name, req.AutomaticSearch)
-		}
-		if req.HardwareSearch == nil || req.HardwareSearch.ExtraSelectionMarginVMAF != 2 {
-			t.Fatalf("%s: hardware search %+v", name, req.HardwareSearch)
-		}
-		if err := transcode.ValidateBenchmarkRequest(req); err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
-	}
-	// A worker that cannot apply the extra margin is not sent hardware candidates.
-	noMargin := hardwareTestCapabilities()
-	noMargin.HardwareSelectionMargin = false
-	ec := &ExecutionContext{InstanceID: "restore-nocap", Inputs: map[string]any{"mode": "size"}, State: map[string]any{"original_sha256": strings.Repeat("a", 64)}}
-	if req := hardwareRequestWith(t, ec, 8, 45*60, noMargin); req.HardwareSearch != nil || req.AutomaticSearch == nil || req.AutomaticSearch.SelectionMarginVMAF != 1.5 {
-		t.Fatalf("restored margin with an unable worker: %+v %+v", req.AutomaticSearch, req.HardwareSearch)
 	}
 }

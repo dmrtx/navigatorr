@@ -17,9 +17,12 @@ func newLadderCase(t *testing.T, inputs map[string]any, mutate func(*transcode.W
 	if mutate != nil {
 		mutate(&caps)
 	}
-	in := map[string]any{"size_budget_percent": 40.0}
+	in := map[string]any{}
 	for k, v := range inputs {
 		in[k] = v
+	}
+	if in["size_budget_bytes"] == nil && in["size_budget_source"] == nil {
+		in["size_budget_percent"] = 40.0
 	}
 	c := newBudgetCase(t, in, caps)
 	delete(c.ec.State, "benchmark_job_id")
@@ -42,7 +45,7 @@ func TestSizeBudgetLadderIsFrozenForHardwareBudgets(t *testing.T) {
 		t.Fatal("Clone shares the ladder")
 	}
 	for name, mutate := range map[string]func(*SizeBudgetPolicy){
-		"with a comparison": func(p *SizeBudgetPolicy) { r := sizeBudgetComparisonRules; p.Comparison = &r },
+		"with a comparison": func(p *SizeBudgetPolicy) { p.Comparison = &SizeBudgetComparison{} },
 		"too long":          func(p *SizeBudgetPolicy) { p.VTLadder = []int{90, 80, 70, 60, 50} },
 		"out of range":      func(p *SizeBudgetPolicy) { p.VTLadder = []int{101, 50} },
 		"not descending":    func(p *SizeBudgetPolicy) { p.VTLadder = []int{50, 58} },
@@ -59,11 +62,11 @@ func TestSizeBudgetLadderIsFrozenForHardwareBudgets(t *testing.T) {
 	}
 }
 
-// The search is skipped: the submit step plans the q65 encode itself and never
-// asks the worker for a benchmark, and the wait step has nothing to wait for.
-func TestSizeBudgetLadderStartsWithoutSearch(t *testing.T) {
+// The plan step plans the q65 encode itself and never asks the worker for a
+// benchmark.
+func TestSizeBudgetLadderStartsFromTheBudget(t *testing.T) {
 	c := newLadderCase(t, nil, nil)
-	res, err := c.engine.stepBenchmarkSubmit(context.Background(), c.ec)
+	res, err := c.engine.stepPlanEncode(context.Background(), c.ec)
 	if err != nil || res.Status != StepCompleted {
 		t.Fatalf("submit %+v %v", res, err)
 	}
@@ -85,42 +88,11 @@ func TestSizeBudgetLadderStartsWithoutSearch(t *testing.T) {
 	if plan.PolicyDigest != c.snapshot.Digest || plan.QualityValidation == nil || plan.QualityValidation.BenchmarkRequestDigest != c.ec.State["benchmark_request_digest"] {
 		t.Fatalf("plan is not pinned to the snapshot and request: %+v", plan)
 	}
-	if again, _ := c.engine.stepBenchmarkSubmit(context.Background(), c.ec); again.Status != StepCompleted || getPlan(c.ec.State["plan"]).PlanDigest != plan.PlanDigest {
+	if again, _ := c.engine.stepPlanEncode(context.Background(), c.ec); again.Status != StepCompleted || getPlan(c.ec.State["plan"]).PlanDigest != plan.PlanDigest {
 		t.Fatalf("a second pass replanned: %+v", again)
 	}
-	wait, err := c.engine.stepBenchmarkWait(context.Background(), c.ec)
-	if err != nil || wait.Status != StepCompleted || c.executor.benchmarkSubmitCalls != 0 {
-		t.Fatalf("wait %+v %v", wait, err)
-	}
-	if !sizeBudgetPlanMatches(c.snapshot, c.ec.InstanceID, c.ec.State, plan, rec) {
+	if !sizeBudgetPlanMatches(c.snapshot, c.ec.State, plan, rec) {
 		t.Fatal("the planned rung does not rebuild from the frozen policy")
-	}
-}
-
-// Without the pieces of the ladder the search runs as it always has.
-func TestSizeBudgetLadderDoesNotApply(t *testing.T) {
-	for name, tc := range map[string]struct {
-		inputs map[string]any
-		caps   func(*transcode.WorkerCapabilities)
-		legacy bool
-	}{
-		"no VideoToolbox encoder":        {caps: func(c *transcode.WorkerCapabilities) { c.Encoders[transcode.VideoCodecHEVCVideoToolbox] = false }},
-		"hardware not allowed":           {inputs: map[string]any{"allow_hardware": false}},
-		"snapshot frozen with a compare": {legacy: true},
-	} {
-		t.Run(name, func(t *testing.T) {
-			in := tc.inputs
-			if tc.legacy {
-				in = map[string]any{"legacy_comparison": true}
-			}
-			c := newLadderCase(t, in, tc.caps)
-			if res, handled := c.engine.startSizeBudgetLadder(context.Background(), c.ec, "/media/Show S01E01.mkv"); handled || res.Status != "" {
-				t.Fatalf("handled %+v", res)
-			}
-			if sizeBudgetLadderOf(c.ec.State) != nil || sizeBudgetOf(c.ec.State) != nil {
-				t.Fatal("a ladder record was written")
-			}
-		})
 	}
 }
 
@@ -138,7 +110,7 @@ func refuseRung(t *testing.T, c *budgetCase, bytes int64) StepResult {
 
 func TestSizeBudgetLadderAdvancesRungByRung(t *testing.T) {
 	c := newLadderCase(t, nil, nil)
-	res, err := c.engine.stepBenchmarkSubmit(context.Background(), c.ec)
+	res, err := c.engine.stepPlanEncode(context.Background(), c.ec)
 	if err != nil || res.Status != StepCompleted {
 		t.Fatal(res, err)
 	}
@@ -155,7 +127,7 @@ func TestSizeBudgetLadderAdvancesRungByRung(t *testing.T) {
 		if w.bitrate == 0 && plan.AverageBitrateKbps != 0 || w.quality == 0 && w.bitrate == 0 {
 			t.Fatalf("step %d: rate control %+v", i+1, plan)
 		}
-		if !sizeBudgetPlanMatches(c.snapshot, c.ec.InstanceID, c.ec.State, plan, rec) {
+		if !sizeBudgetPlanMatches(c.snapshot, c.ec.State, plan, rec) {
 			t.Fatalf("step %d: plan does not rebuild from the frozen policy", i+1)
 		}
 		if plan.PlanDigest == "" || c.ec.State["plan_digest"] != plan.PlanDigest || !strings.Contains(rec.Message, "over the") {
@@ -166,7 +138,7 @@ func TestSizeBudgetLadderAdvancesRungByRung(t *testing.T) {
 	rec := sizeBudgetLadderOf(c.ec.State)
 	stale := *getPlan(c.ec.State["plan"])
 	rec.Rung = 1
-	if sizeBudgetPlanMatches(c.snapshot, c.ec.InstanceID, c.ec.State, &stale, rec) {
+	if sizeBudgetPlanMatches(c.snapshot, c.ec.State, &stale, rec) {
 		t.Fatal("a plan matched the wrong rung")
 	}
 	rec.Rung = 3
@@ -178,7 +150,7 @@ func TestSizeBudgetLadderAdvancesRungByRung(t *testing.T) {
 
 func TestSizeBudgetLadderPlanMatchesRejectsTampering(t *testing.T) {
 	c := newLadderCase(t, nil, nil)
-	if res, err := c.engine.stepBenchmarkSubmit(context.Background(), c.ec); err != nil || res.Status != StepCompleted {
+	if res, err := c.engine.stepPlanEncode(context.Background(), c.ec); err != nil || res.Status != StepCompleted {
 		t.Fatal(res, err)
 	}
 	rec := sizeBudgetLadderOf(c.ec.State)
@@ -194,7 +166,7 @@ func TestSizeBudgetLadderPlanMatchesRejectsTampering(t *testing.T) {
 		sp := *plan.SizePolicy
 		plan.SizePolicy = &sp
 		mutate(&plan)
-		if sizeBudgetPlanMatches(c.snapshot, c.ec.InstanceID, c.ec.State, &plan, rec) {
+		if sizeBudgetPlanMatches(c.snapshot, c.ec.State, &plan, rec) {
 			t.Errorf("%s accepted", name)
 		}
 	}
@@ -204,7 +176,7 @@ func TestSizeBudgetLadderPlanMatchesRejectsTampering(t *testing.T) {
 // next, and the last refusal ends the action as exceeded with the original kept.
 func TestSizeBudgetLadderWorkerRefusals(t *testing.T) {
 	c := newLadderCase(t, nil, nil)
-	res, _ := c.engine.stepBenchmarkSubmit(context.Background(), c.ec)
+	res, _ := c.engine.stepPlanEncode(context.Background(), c.ec)
 	mergeMap(c.ec.State, res.Outputs)
 	budget := sizeBudgetLadderOf(c.ec.State).BudgetBytes
 	c.ec.State["job_id"], c.ec.State["transcode_submitted"] = "job-first", true
@@ -251,7 +223,7 @@ func TestSizeBudgetLadderWorkerRefusals(t *testing.T) {
 // A rung that fits but misses the floor offers no candidate and points at x265.
 func TestSizeBudgetLadderBelowFloorOffersX265(t *testing.T) {
 	c := newLadderCase(t, nil, nil)
-	res, _ := c.engine.stepBenchmarkSubmit(context.Background(), c.ec)
+	res, _ := c.engine.stepPlanEncode(context.Background(), c.ec)
 	mergeMap(c.ec.State, res.Outputs)
 	refuseRung(t, c, 4_100_000_000) // rung 0 over the budget; rung 1 is the first to fit
 	c.ec.State["job_id"] = "job-second"
@@ -284,7 +256,7 @@ func TestSizeBudgetLadderFittingRungIsValidated(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newLadderCase(t, nil, nil)
-			res, _ := c.engine.stepBenchmarkSubmit(context.Background(), c.ec)
+			res, _ := c.engine.stepPlanEncode(context.Background(), c.ec)
 			mergeMap(c.ec.State, res.Outputs)
 			rec := sizeBudgetLadderOf(c.ec.State)
 			c.ec.State["quality_evidence"] = map[string]any{"verdict": "pass", "candidate_size_bytes": 3_800_000_000,
@@ -307,7 +279,7 @@ func TestSizeBudgetAudioOnlyCarriesTheBudget(t *testing.T) {
 	rep := audioOnlyReport()
 	rep.Video[0].BitRate, rep.Video[0].Tags = 0, map[string]string{"NUMBER_OF_BYTES": "4500000000"}
 	c.ec.State["source_report"], c.ec.State["original_size"] = rep, int64(10_700_000_000)
-	res, err := c.engine.stepBenchmarkSubmit(context.Background(), c.ec)
+	res, err := c.engine.stepPlanEncode(context.Background(), c.ec)
 	if err != nil || res.Status != StepCompleted {
 		t.Fatalf("submit %+v %v", res, err)
 	}

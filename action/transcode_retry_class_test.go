@@ -9,7 +9,7 @@ import (
 	"github.com/jakenesler/navigatorr/transcode"
 )
 
-// A manual retry of a failed benchmark or encode reads the class the worker
+// A manual retry of a failed encode reads the class the worker
 // recorded, and reads the message only for a record that has none. The message
 // names paths and tool output; "source" and "sha" in a path used to make it
 // source_changed, and a permission phrase in ffmpeg's text used to block a
@@ -36,44 +36,33 @@ func TestManualRetryPrefersTheWorkersFailureClass(t *testing.T) {
 		// problem: the retry re-encodes it, and stays allowed.
 		{"candidate invalid, typed", "candidate_invalid", "transcode source file invalid: local candidate no longer matches its accepted sha256", true},
 	}
-	for _, kind := range []string{"benchmark", "transcode"} {
-		for _, tc := range cases {
-			t.Run(kind+"/"+tc.name, func(t *testing.T) {
-				st := setupTestStore(t)
-				mock := &mockTranscodeExecutor{
-					benchmarkStatusFunc: func(context.Context, string) (transcode.BenchmarkStatus, error) {
-						return transcode.BenchmarkStatus{Status: transcode.StatusFailed, FailureClassification: tc.class, Error: tc.message}, nil
-					},
-					statusFunc: func(_ context.Context, id string) (transcode.JobStatus, error) {
-						return transcode.JobStatus{ID: id, Status: transcode.StatusFailed, FailureClassification: tc.class, Error: tc.message}, nil
-					},
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := setupTestStore(t)
+			mock := &mockTranscodeExecutor{
+				statusFunc: func(_ context.Context, id string) (transcode.JobStatus, error) {
+					return transcode.JobStatus{ID: id, Status: transcode.StatusFailed, FailureClassification: tc.class, Error: tc.message}, nil
+				},
+			}
+			e := NewEngine(EngineDeps{Store: st, Transcode: mock})
+			ec := testReconcileEC("")
+			ec.State["resolved_path"] = "/media/source/shared_clip.mkv"
+			ec.State["job_id"] = "job-old"
+			inst := store.ActionInstance{ID: ec.InstanceID, ActionName: "transcode_media", Status: StatusFailed, CurrentStep: 2, StateJSON: toJSON(ec.State)}
+			if err := st.CreateActionInstance(inst); err != nil {
+				t.Fatal(err)
+			}
+			tmpl := ActionTemplate{Steps: []StepDefinition{{Name: "preflight"}, {Name: "submit_transcode"}, {Name: "wait"}}}
+			resume, err := e.prepareRemoteRetry(context.Background(), &inst, ec, tmpl, 2)
+			if tc.wantRetry {
+				if err != nil || resume != 1 {
+					t.Fatalf("retry refused: resume=%d err=%v", resume, err)
 				}
-				e := NewEngine(EngineDeps{Store: st, Transcode: mock})
-				ec := testReconcileEC("")
-				ec.State["resolved_path"] = "/media/source/shared_clip.mkv"
-				name, submit := "transcode_media", "submit_transcode"
-				if kind == "benchmark" {
-					name, submit = "benchmark_transcode", "submit_benchmark"
-					ec.State["benchmark_job_id"] = "bench-old"
-				} else {
-					ec.State["job_id"] = "job-old"
-				}
-				inst := store.ActionInstance{ID: ec.InstanceID, ActionName: name, Status: StatusFailed, CurrentStep: 2, StateJSON: toJSON(ec.State)}
-				if err := st.CreateActionInstance(inst); err != nil {
-					t.Fatal(err)
-				}
-				tmpl := ActionTemplate{Steps: []StepDefinition{{Name: "preflight"}, {Name: submit}, {Name: "wait"}}}
-				resume, err := e.prepareRemoteRetry(context.Background(), &inst, ec, tmpl, 2)
-				if tc.wantRetry {
-					if err != nil || resume != 1 {
-						t.Fatalf("retry refused: resume=%d err=%v", resume, err)
-					}
-					return
-				}
-				if err == nil || !strings.Contains(err.Error(), "retry blocked") || resume != 2 {
-					t.Fatalf("retry allowed for a permanent class: resume=%d err=%v", resume, err)
-				}
-			})
-		}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "retry blocked") || resume != 2 {
+				t.Fatalf("retry allowed for a permanent class: resume=%d err=%v", resume, err)
+			}
+		})
 	}
 }

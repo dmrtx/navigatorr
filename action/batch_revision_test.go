@@ -52,7 +52,7 @@ func TestBatchRevisionFromUnsubmittedSearchReview(t *testing.T) {
 	}
 }
 
-func TestModeBatchExplicitProfileContinuesWithExhaustedBudget(t *testing.T) {
+func TestModeBatchExplicitProfileKeepsTheOriginalIntent(t *testing.T) {
 	st := setupTestStore(t)
 	e := NewEngine(EngineDeps{Store: st, Config: &config.Config{Transcode: config.TranscodeConfig{MaxParallelJobs: 2}}})
 	e.RegisterTemplate(ActionTemplate{Name: "transcode_media", ImmutableInputs: true, Steps: []StepDefinition{{Name: "encode", Run: func(ctx context.Context, child *ExecutionContext) (StepResult, error) {
@@ -64,9 +64,6 @@ func TestModeBatchExplicitProfileContinuesWithExhaustedBudget(t *testing.T) {
 	ec := &ExecutionContext{InstanceID: "mode-parent", Inputs: map[string]any{"mode": "x265_preserve"}, State: map[string]any{}}
 	if _, err := freezeModePolicy(ec); err != nil {
 		t.Fatal(err)
-	}
-	for i := 0; i < 6; i++ {
-		reserveModeSearch(ec, fmt.Sprintf("old-%d", i))
 	}
 	seedActionInstance(t, st, ec.InstanceID, "transcode_batch", StatusWaitingDecision, 1, "", ec.Inputs, ec.State)
 	for i := 0; i < 10; i++ {
@@ -80,8 +77,8 @@ func TestModeBatchExplicitProfileContinuesWithExhaustedBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, err := e.Resume(context.Background(), ec.InstanceID, "", nil)
-	if err != nil || res.Status != StatusWaitingExternal || res.WaitingCondition == "search_budget_exhausted" {
-		t.Fatalf("explicit profile blocked by old budget: %+v %v", res, err)
+	if err != nil || res.Status != StatusWaitingExternal {
+		t.Fatalf("explicit profile not admitted: %+v %v", res, err)
 	}
 	items, _ = st.ListTranscodeBatchItems(ec.InstanceID)
 	children := 0
@@ -91,66 +88,8 @@ func TestModeBatchExplicitProfileContinuesWithExhaustedBudget(t *testing.T) {
 		}
 	}
 	root, _ = st.GetActionInstance(ec.InstanceID)
-	if children != 2 || root.InputsJSON != toJSON(ec.Inputs) || len(modeBudgetEntries(parseExecutionContext(root, e))) != 6 {
+	if children != 2 || root.InputsJSON != toJSON(ec.Inputs) {
 		t.Fatal("bounded admission or immutable original intent lost", children, root)
-	}
-}
-
-func TestModeBatchReservesOnlyAvailableSlots(t *testing.T) {
-	st := setupTestStore(t)
-	e := NewEngine(EngineDeps{Store: st, Config: &config.Config{Transcode: config.TranscodeConfig{MaxParallelJobs: 2}}})
-	e.RegisterTemplate(ActionTemplate{Name: "transcode_media", ImmutableInputs: true, Steps: []StepDefinition{{Name: "search", Run: func(context.Context, *ExecutionContext) (StepResult, error) {
-		return StepResult{Status: StepWaitingExternal, WaitingCondition: "benchmark_processing"}, nil
-	}}}})
-	ec := &ExecutionContext{InstanceID: "mode-slots", Inputs: map[string]any{"mode": "quality"}, State: map[string]any{}, Engine: legacySearch(&Engine{})}
-	_, _ = freezeModePolicy(ec)
-	seedActionInstance(t, st, ec.InstanceID, "transcode_batch", StatusWaitingExternal, 1, "", ec.Inputs, ec.State)
-	for i := 0; i < 10; i++ {
-		st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: ec.InstanceID, ItemKey: fmt.Sprintf("file-%d", i), FilePath: fmt.Sprintf("/media/%d.mkv", i), Status: "queued", Decision: "transcode"})
-	}
-	if _, err := e.Resume(context.Background(), ec.InstanceID, "", nil); err != nil {
-		t.Fatal(err)
-	}
-	root, _ := st.GetActionInstance(ec.InstanceID)
-	if entries := modeBudgetEntries(parseExecutionContext(root, e)); len(entries) != 2 {
-		t.Fatalf("unscheduled sources consumed budget: %+v", entries)
-	}
-}
-
-func TestModeBudgetSettlesHistoricalAttemptsAfterRevisionAndRestart(t *testing.T) {
-	for _, submitted := range []bool{false, true} {
-		t.Run(fmt.Sprintf("submitted=%v", submitted), func(t *testing.T) {
-			st := setupTestStore(t)
-			e := NewEngine(EngineDeps{Store: st})
-			ec := &ExecutionContext{InstanceID: "parent", Inputs: map[string]any{"mode": "x265_preserve"}, State: map[string]any{}}
-			_, _ = freezeModePolicy(ec)
-			item := store.TranscodeBatchItem{ItemKey: "file-a", ChildActionID: "cancelled-child"}
-			key := batchChildKey(ec, item)
-			seedActionInstance(t, st, item.ChildActionID, "transcode_media", StatusCancelled, 1, "", ec.Inputs, map[string]any{"benchmark_submitted": submitted})
-			child, _ := st.GetActionInstance(item.ChildActionID)
-			child.IdempotencyKey = key
-			st.UpdateActionInstance(*child)
-			reserveModeSearch(ec, key)
-			for i := 0; i < 5; i++ {
-				reserveModeSearch(ec, fmt.Sprintf("other-%d", i))
-			}
-			recordBatchAttempt(ec, &item)
-			// Reload serialized coordinator state, with the previous child only in history.
-			seedActionInstance(t, st, ec.InstanceID, "transcode_batch", StatusWaitingExternal, 1, "", ec.Inputs, ec.State)
-			root, _ := st.GetActionInstance(ec.InstanceID)
-			ec = parseExecutionContext(root, e)
-			e.settleModeSearches(ec, []store.TranscodeBatchItem{item})
-			// An unsubmitted attempt cost nothing; a submitted one with no
-			// measured cost keeps its full reservation. Either way the new
-			// attempt reserves its own per-source budget.
-			entry := modeBudgetEntries(ec)[key]
-			if released := entry.Consumed != nil && *entry.Consumed == 0; released == submitted {
-				t.Fatalf("historical cost settlement wrong: submitted=%v entries=%s", submitted, toJSON(modeBudgetEntries(ec)))
-			}
-			if !reserveModeSearch(ec, batchChildKey(ec, item)) {
-				t.Fatal("new attempt could not reserve")
-			}
-		})
 	}
 }
 
@@ -346,7 +285,17 @@ func TestBatchFileRevisionRetriesFrameEvidenceSkipWithSameGoal(t *testing.T) {
 	}
 	root, _ = st.GetActionInstance("batch")
 	ec := parseExecutionContext(root, e)
-	if batchItemMode(ec, items[0]) != "compact" || batchChildKey(ec, items[0]) == "batch-batch-one" {
-		t.Fatal("retry did not keep the goal under a new attempt key", batchItemMode(ec, items[0]), batchChildKey(ec, items[0]))
+	if reviewedItemMode(ec, items[0]) != "compact" || batchChildKey(ec, items[0]) == "batch-batch-one" {
+		t.Fatal("retry did not keep the goal under a new attempt key", reviewedItemMode(ec, items[0]), batchChildKey(ec, items[0]))
 	}
+}
+
+// reviewedItemMode is the goal a batch item's next attempt runs under: the one
+// its review saved, else the batch's own.
+func reviewedItemMode(ec *ExecutionContext, item store.TranscodeBatchItem) string {
+	settings, _ := stateObject(ec.State, "batch_item_settings")[item.ItemKey].(map[string]any)
+	if mode := getString(settings, "mode"); mode != "" {
+		return mode
+	}
+	return getString(ec.Inputs, "mode")
 }
