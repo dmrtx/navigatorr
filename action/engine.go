@@ -537,7 +537,10 @@ func (e *Engine) resume(ctx context.Context, instanceID string, decision string,
 	}
 
 	tmpl, ok := e.GetTemplate(inst.ActionName)
-	if !ok {
+	finished := inst.Status == StatusCompleted || inst.Status == StatusFailed || inst.Status == StatusCancelled
+	// A finished action of a template that no longer exists (the sample test)
+	// is still read back as it ended.
+	if !ok && !finished {
 		return nil, fmt.Errorf("unknown action template: %s", inst.ActionName)
 	}
 
@@ -546,7 +549,7 @@ func (e *Engine) resume(ctx context.Context, instanceID string, decision string,
 	}
 
 	// If already completed or terminal, return current state
-	if inst.Status == StatusCompleted || inst.Status == StatusFailed || inst.Status == StatusCancelled {
+	if finished {
 		ec := parseExecutionContext(inst, e)
 		return buildActionResult(inst, len(tmpl.Steps), ec), nil
 	}
