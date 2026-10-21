@@ -12,7 +12,6 @@ import (
 
 	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
-	"github.com/jakenesler/navigatorr/transcode/optimization"
 )
 
 // audioOnlyReport is a 100 min 1080p HEVC film whose video is already
@@ -233,7 +232,7 @@ func TestAudioOnlyCandidateValidation(t *testing.T) {
 		})
 	}
 	// The perceptual path is still mandatory for an encode plan.
-	c.ec.State["plan"] = &transcode.Plan{Mode: "size", ModePolicyVersion: optimization.ModePolicyV3, VideoCodec: transcode.VideoCodecLibX265, PolicyDigest: plan.PolicyDigest, SizePolicy: plan.SizePolicy}
+	c.ec.State["plan"] = &transcode.Plan{Mode: "size", ModePolicyVersion: transcode.ModePolicyV3, VideoCodec: transcode.VideoCodecLibX265, PolicyDigest: plan.PolicyDigest, SizePolicy: plan.SizePolicy}
 	c.ec.State["candidate_path"] = candidate
 	if result, _ := (&Engine{}).stepTranscodeValidate(context.Background(), c.ec); result.Status != StepFailed {
 		t.Fatalf("encode plan without perceptual validation passed: %+v", result)

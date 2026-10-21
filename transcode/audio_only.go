@@ -3,8 +3,6 @@ package transcode
 import (
 	"fmt"
 	"strings"
-
-	"github.com/jakenesler/navigatorr/transcode/optimization"
 )
 
 // VideoCodecCopy is the video codec of a size v3 audio-only plan: the
@@ -36,7 +34,7 @@ type VideoCopyEvidence struct {
 
 // IsSizeAudioOnlyPlan reports a size v3 plan that copies the video stream.
 func IsSizeAudioOnlyPlan(p *Plan) bool {
-	return p != nil && p.Mode == "size" && p.ModePolicyVersion == optimization.ModePolicyV3 && strings.EqualFold(strings.TrimSpace(p.VideoCodec), VideoCodecCopy)
+	return p != nil && p.Mode == "size" && p.ModePolicyVersion == ModePolicyV3 && strings.EqualFold(strings.TrimSpace(p.VideoCodec), VideoCodecCopy)
 }
 
 // NewSizeAudioOnlyPlan derives the audio-only plan from a frozen size v3
@@ -44,7 +42,7 @@ func IsSizeAudioOnlyPlan(p *Plan) bool {
 // video encoder setting cleared. No perceptual validation applies because
 // the video is not re-encoded; the final check is VideoCopyEvidence.
 func NewSizeAudioOnlyPlan(base *Plan, sourceBitDepth int) (*Plan, error) {
-	if base == nil || base.Mode != "size" || base.ModePolicyVersion != optimization.ModePolicyV3 || base.AudioMode != AudioModeCompactLossless || base.Compact != nil || base.SizePolicy == nil || base.PolicyDigest == "" {
+	if base == nil || base.Mode != "size" || base.ModePolicyVersion != ModePolicyV3 || base.AudioMode != AudioModeCompactLossless || base.Compact != nil || base.SizePolicy == nil || base.PolicyDigest == "" {
 		return nil, fmt.Errorf("audio-only plan requires a frozen size v3 plan with lossless audio compaction (fail closed)")
 	}
 	if sourceBitDepth != 8 && sourceBitDepth != 10 {

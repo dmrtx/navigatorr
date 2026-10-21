@@ -290,12 +290,3 @@ func (w *Worker) persistPhaseCost(jobDir, jobFile string, job *JobRecord, phase 
 	})
 	job.PhaseCosts = shadow.PhaseCosts
 }
-
-// A measurement collector lives on this one request context, never on Worker:
-// concurrent jobs cannot steal each other's cache/transfer evidence.
-type sourceCostKey struct{}
-
-func sourceCost(ctx context.Context) *transcode.PhaseCost {
-	cost, _ := ctx.Value(sourceCostKey{}).(*transcode.PhaseCost)
-	return cost
-}

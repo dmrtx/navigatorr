@@ -73,6 +73,18 @@ func TestJoyPlanKeepsExactSettingsAndIdentity(t *testing.T) {
 	}
 }
 
+// joyEncodeArgs is the encoder command line for the plan's video stream alone,
+// read from refPath: the argument shape runEncoderCommand rewrites per pass.
+func joyEncodeArgs(refPath, candPath string, plan *transcode.Plan) ([]string, error) {
+	videoArgs, err := BuildVideoEncoderArgs(plan)
+	if err != nil {
+		return nil, err
+	}
+	args := append([]string{"-y", "-nostats", "-i", refPath, "-map", "0:v:0"}, videoArgs...)
+	args = append(args, sourceTimestampArgs...)
+	return append(args, "-an", "-sn", "-dn", candPath), nil
+}
+
 func TestJoyTwoPassFailureNeverStartsSecondPass(t *testing.T) {
 	d := t.TempDir()
 	calls := filepath.Join(d, "calls")
@@ -83,7 +95,7 @@ func TestJoyTwoPassFailureNeverStartsSecondPass(t *testing.T) {
 	}
 	p := joyPlan(t)
 	out := filepath.Join(d, "output.mkv")
-	args, err := BuildCandidateEncodeArgs(filepath.Join(d, "reference.mkv"), out, p)
+	args, err := joyEncodeArgs(filepath.Join(d, "reference.mkv"), out, p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +124,7 @@ func TestJoyCancellationBeforeFinalPassPreservesSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := filepath.Join(d, "candidate.mkv")
-	args, err := BuildCandidateEncodeArgs(source, out, p)
+	args, err := joyEncodeArgs(source, out, p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,41 +172,6 @@ func TestJoyFullEncodeUsesHEAACAndPreservesTracks(t *testing.T) {
 	}
 }
 
-func TestJoyBenchmarkPipelineExecutesBothPasses(t *testing.T) {
-	d := t.TempDir()
-	ffmpeg, probe, calls := setupMockTools(t, d, sdr8BitProbeJSON, "")
-	script, err := os.ReadFile(ffmpeg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	script = []byte(strings.Replace(string(script), " V..... ffv1", " V..... libx265              HEVC\n V..... ffv1", 1))
-	if err := os.WriteFile(ffmpeg, script, 0700); err != nil {
-		t.Fatal(err)
-	}
-	source := filepath.Join(d, "source.mkv")
-	if err := os.WriteFile(source, make([]byte, 100000), 0600); err != nil {
-		t.Fatal(err)
-	}
-	p := joyPlan(t)
-	w := NewWorker(&WorkerConfig{StateDir: filepath.Join(d, "state"), AllowedRoots: []string{d}, FFmpeg: ffmpeg, FFprobe: probe})
-	record := &BenchmarkRecord{ID: "bench-joy-pipeline", Status: "running", Source: source, Metric: "ssim", Samples: []transcode.BenchmarkSampleWindow{{Index: 0, StartSeconds: 10, DurationSeconds: 5}}, Candidates: []transcode.BenchmarkCandidate{{ID: "joy1200", VideoCodec: "libx265", Preset: "slow", X265: p.X265.Clone(), VideoProfile: "main", PixelFormat: "yuv420p"}}}
-	if err := (&ProductionBenchmarkRunner{}).RunBenchmark(context.Background(), w, record); err != nil {
-		t.Fatal(err)
-	}
-	b, err := os.ReadFile(calls)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, pass := range []string{"pass=1:stats=x265.log", "pass=2:stats=x265.log"} {
-		if !strings.Contains(string(b), pass) {
-			t.Fatalf("benchmark lost %s: %s", pass, b)
-		}
-	}
-	if record.Evidence == nil || len(record.Evidence.CandidateSamples) != 1 {
-		t.Fatal("missing measured sample evidence")
-	}
-}
-
 func TestJoyNativeTwoPassAndHEAAC(t *testing.T) {
 	ffmpeg, err := exec.LookPath("ffmpeg")
 	if err != nil {
@@ -213,7 +190,7 @@ func TestJoyNativeTwoPassAndHEAAC(t *testing.T) {
 		t.Fatalf("reference: %v %s", err, b)
 	}
 	p := joyPlan(t)
-	args, err := BuildCandidateEncodeArgs(ref, out, p)
+	args, err := joyEncodeArgs(ref, out, p)
 	if err != nil {
 		t.Fatal(err)
 	}

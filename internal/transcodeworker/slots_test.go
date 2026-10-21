@@ -189,41 +189,6 @@ func TestSharedPoolStillCountsBothKindsAgainstTheCeiling(t *testing.T) {
 	}
 }
 
-func TestBenchmarkAdmissionUsesTheVideoPool(t *testing.T) {
-	withHostCPUs(t, 10)
-	stub := newStubSpawn()
-	w, tempDir, _ := newPR3Worker(t, 2, stub)
-	if _, err := w.SetSlotSplit(transcode.SlotSplit{VideoSlots: 1, PodcastSlots: 1}); err != nil {
-		t.Fatal(err)
-	}
-	media := filepath.Join(tempDir, "media")
-	_ = os.MkdirAll(media, 0o755)
-	source, _ := createTestMediaSource(t, media, "bench.mkv", "bench-data")
-	w.cfg.AllowedRoots = []string{media}
-
-	// A running video job fills the video pool: the benchmark is refused
-	// although a podcast slot is free.
-	seedSlotJob(t, w, stub, "running-video", "running", slotKindVideo, true, time.Hour)
-	req := validWorkerBenchmarkRequest(source)
-	req.ID = "bench-refused"
-	_, err := w.BenchmarkSubmit(context.Background(), req, "exe", "")
-	if err == nil || !strings.Contains(err.Error(), "worker busy") {
-		t.Fatalf("video pool full: %v", err)
-	}
-	// A running podcast job leaves the video pool free for the benchmark.
-	stub.kill("running-video")
-	if err := os.RemoveAll(filepath.Join(w.cfg.StateDir, "running-video")); err != nil {
-		t.Fatal(err)
-	}
-	seedSlotJob(t, w, stub, "running-podcast", "running", slotKindPodcast, true, time.Hour)
-	mockExe := createMockWorkerScript(t, tempDir)
-	req = validWorkerBenchmarkRequest(source)
-	req.ID = "bench-admitted"
-	if resp, err := w.BenchmarkSubmit(context.Background(), req, mockExe, ""); err != nil || resp.Status != "queued" {
-		t.Fatalf("a busy podcast slot must not block a benchmark: %+v %v", resp, err)
-	}
-}
-
 func TestSlotSnapshotReportsTheJobsOwnPool(t *testing.T) {
 	withHostCPUs(t, 10)
 	stub := newStubSpawn()
@@ -447,7 +412,7 @@ func TestSelfCheckProvesEveryCandidate(t *testing.T) {
 func TestSplitNeverAdmitsPastTheCeiling(t *testing.T) {
 	withHostCPUs(t, 10)
 	stub := newStubSpawn()
-	w, tempDir, _ := newPR3Worker(t, 4, stub)
+	w, _, _ := newPR3Worker(t, 4, stub)
 	for _, id := range []string{"p1", "p2", "p3"} {
 		seedSlotJob(t, w, stub, id, "running", slotKindPodcast, true, time.Hour)
 	}
@@ -466,16 +431,6 @@ func TestSplitNeverAdmitsPastTheCeiling(t *testing.T) {
 	video, podcast, _ := w.countActiveJobsByKind("")
 	if video+podcast > 4 {
 		t.Fatalf("%d video + %d podcast jobs on a 4-slot worker", video, podcast)
-	}
-	// Benchmarks obey the same ceiling.
-	media := filepath.Join(tempDir, "media")
-	_ = os.MkdirAll(media, 0o755)
-	source, _ := createTestMediaSource(t, media, "bench.mkv", "bench-data")
-	w.cfg.AllowedRoots = []string{media}
-	req := validWorkerBenchmarkRequest(source)
-	req.ID = "bench-over-ceiling"
-	if _, err := w.BenchmarkSubmit(context.Background(), req, "exe", ""); err == nil || !strings.Contains(err.Error(), "worker busy") {
-		t.Fatalf("a benchmark was admitted past the ceiling: %v", err)
 	}
 }
 

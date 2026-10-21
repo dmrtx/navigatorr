@@ -78,19 +78,13 @@ func TestPhase8_PersistedOutputsLeakNoWorkerInternals(t *testing.T) {
 }
 
 // TestPhase8_BenchmarkAPITypesExposeNoSecrets guards the public coordinator/
-// worker contract against secret leakage at the type level: none of the
-// benchmark status, decision, winner, or per-candidate evaluation structs
-// may carry a token/secret field (name or JSON tag). Worker run tokens must
-// stay inside benchmark.json on the worker and never cross the protocol.
+// worker contract against secret leakage at the type level: neither the
+// final gate's request nor the stored search evidence may carry a
+// token/secret field (name or JSON tag).
 func TestPhase8_BenchmarkAPITypesExposeNoSecrets(t *testing.T) {
 	types := []any{
-		transcode.BenchmarkStatus{},
-		transcode.BenchmarkDecision{},
-		transcode.BenchmarkWinner{},
-		transcode.BenchmarkCandidateEvaluation{},
-		transcode.BenchmarkJob{},
-		transcode.BenchmarkSubmitResponse{},
-		transcode.BenchmarkCancelResponse{},
+		transcode.BenchmarkRequest{},
+		transcode.BenchmarkAutomaticEvidence{},
 	}
 	for _, v := range types {
 		rt := reflect.TypeOf(v)

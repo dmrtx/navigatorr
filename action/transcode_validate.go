@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/jakenesler/navigatorr/transcode"
-	"github.com/jakenesler/navigatorr/transcode/optimization"
 )
 
 // stepTranscodeValidate is the coordinator's LIGHTWEIGHT independent
@@ -162,7 +161,7 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 			}
 			budget = rec
 		}
-		if !optimization.ModeSizeAllowedVersion(plan.Mode, original, candidateSize, plan.ModePolicyVersion) {
+		if !transcode.ModeSizeAllowedVersion(plan.Mode, original, candidateSize, plan.ModePolicyVersion) {
 			ec.State["skip_transcode"] = true
 			ec.State["reason_code"] = "insufficient_savings"
 			out := map[string]any{"skipped": true, "reason_code": "insufficient_savings", "candidate_size_bytes": candidateSize}

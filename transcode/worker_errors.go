@@ -26,6 +26,6 @@ const (
 // worker, which echoes it and logs it with each request.
 const RequestIDHeader = "X-Request-ID"
 
-// JobIDHeader names the job or benchmark a request concerns, so worker logs
+// JobIDHeader names the job a request concerns, so worker logs
 // can be searched by job even for submits, whose ID travels in the body.
 const JobIDHeader = "X-Navigatorr-Job-ID"

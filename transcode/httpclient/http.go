@@ -52,16 +52,11 @@ const (
 // validJobIDRegex restricts job IDs placed in daemon URL paths.
 var validJobIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_.-]+$`)
 
-// validBenchmarkJobIDRegex is the benchmark-namespace pattern that
-// transcode.ValidateBenchmarkJobID also enforces.
-var validBenchmarkJobIDRegex = regexp.MustCompile(`^bench-[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
-
 // DefaultHTTPRequestTimeout is the default deadline for idempotent reads
-// (Doctor/Capabilities/Status/benchmark status) and for Cancel POSTs.
+// (Doctor/Capabilities/Status) and for Cancel POSTs.
 const DefaultHTTPRequestTimeout = 15 * time.Second
 
-// DefaultHTTPSubmitTimeout is the default deadline for Submit POSTs
-// (transcode + benchmark). Submit spawns a detached runner server-side and
+// DefaultHTTPSubmitTimeout is the default deadline for Submit POSTs. Submit spawns a detached runner server-side and
 // normally returns fast; the deadline only bounds transport, never the
 // encode itself.
 const DefaultHTTPSubmitTimeout = 60 * time.Second
@@ -174,7 +169,7 @@ func parseRetryAfter(v string) time.Duration {
 }
 
 // newHTTPError builds the typed error for a complete non-2xx response. Every
-// worker error body, whether the plain envelope or a submit/status/benchmark
+// worker error body, whether the plain envelope or a submit/status
 // struct, carries "error"; newer workers add "code" and "retryable".
 func newHTTPError(req *http.Request, status int, data []byte, header http.Header) *HTTPError {
 	var env httpErrorEnvelope
@@ -204,7 +199,7 @@ func newHTTPError(req *http.Request, status int, data []byte, header http.Header
 // UncertainError reports that the daemon's decision is UNKNOWN and the
 // caller must reconcile (phase 4) instead of retrying blindly. Two shapes:
 //
-//   - Mutating operations (submit/cancel/benchmark_submit/benchmark_cancel):
+//   - Mutating operations (submit/cancel):
 //     once the request may have reached the worker, ANY failure to obtain
 //     and validate a definitive acknowledgement is UNKNOWN: client.Do
 //     transport errors, response-body read/truncation failures, and
@@ -213,14 +208,14 @@ func newHTTPError(req *http.Request, status int, data []byte, header http.Header
 //     failure, MUST NOT trigger an automatic resubmit/SSH fallback, and
 //     MUST NOT burn encode retry budget. Reconcile via idempotent Status
 //     (GET /v1/jobs/{id}) first.
-//   - Read-only operations (doctor/capabilities/status/benchmark_status):
+//   - Read-only operations (doctor/capabilities/status):
 //     a transport failure means reachability is unknown; no worker state
 //     change is implied, so a later retry of the read itself is safe.
 //     These still surface as *UncertainError so callers can distinguish
 //     "unknown" from definitive daemon rejections (typed *HTTPError).
 type UncertainError struct {
-	Op    string // e.g. "submit", "cancel", "status", "doctor", "capabilities", "benchmark_submit"
-	JobID string // job/benchmark id when applicable, else ""
+	Op    string // e.g. "submit", "cancel", "status", "doctor", "capabilities"
+	JobID string // job id when applicable, else ""
 	Err   error  // underlying transport/parse/validation cause
 }
 
@@ -233,7 +228,7 @@ func (e *UncertainError) Error() string {
 		where += " job " + e.JobID
 	}
 	switch e.Op {
-	case "health", "ready", "doctor", "capabilities", "status", "benchmark_status":
+	case "health", "ready", "doctor", "capabilities", "status":
 		return fmt.Sprintf("transcode http %s: transport uncertain (read unavailable; no mutation requested; retry this read): %v", where, e.Err)
 	}
 	return fmt.Sprintf("transcode http %s: transport uncertain (may or may not have been accepted; reconcile via Status before retry; do not burn encode retry budget): %v", where, e.Err)
@@ -266,10 +261,10 @@ type HTTPConfig struct {
 	// TokenFile, when Token is empty, is read once at construction and
 	// trimmed (same precedence as the worker's ResolveHTTPToken).
 	TokenFile string
-	// RequestTimeout bounds Doctor/Capabilities/Status/Cancel/benchmark
-	// status/cancel. Zero selects DefaultHTTPRequestTimeout.
+	// RequestTimeout bounds Doctor/Capabilities/Status/Cancel.
+	// Zero selects DefaultHTTPRequestTimeout.
 	RequestTimeout time.Duration
-	// SubmitTimeout bounds Submit/benchmark-submit POSTs. Zero selects
+	// SubmitTimeout bounds Submit POSTs. Zero selects
 	// DefaultHTTPSubmitTimeout.
 	SubmitTimeout time.Duration
 	// PathMappings translates local<->remote paths with longest-prefix
@@ -458,7 +453,7 @@ func boundHTTPErrorMessage(msg string) string {
 }
 
 // validMutationAckStatus reports whether s is one of the lifecycle statuses
-// the worker emits on job/benchmark records. A mutating acknowledgement
+// the worker emits on job records. A mutating acknowledgement
 // carrying any other (or empty) status is ambiguous and must be treated as
 // UNKNOWN, not as confirmed success.
 func validMutationAckStatus(s string) bool {
@@ -496,7 +491,7 @@ func (e *HTTPExecutor) newRequest(ctx context.Context, method, path string, body
 // *UncertainError for phase-4 reconciliation.
 //
 // op/jobID identify the operation for uncertainty context; mutating must
-// be true for Submit/Cancel/BenchmarkSubmit/BenchmarkCancel (operations
+// be true for Submit/Cancel (operations
 // the worker may already have executed once the request was sent). For
 // mutating operations a response-body read/truncation failure is UNKNOWN
 // (the server may have accepted the operation but the acknowledgement was
@@ -623,8 +618,7 @@ func (e *HTTPExecutor) failUncertain(op, jobID string, err error) error {
 	return &UncertainError{Op: op, JobID: jobID, Err: err}
 }
 
-// mutatingDoErr maps a do() failure for a mutating POST (Submit, Cancel,
-// BenchmarkSubmit, BenchmarkCancel) to the caller-visible contract, with no
+// mutatingDoErr maps a do() failure for a mutating POST (Submit, Cancel) to the caller-visible contract, with no
 // retry or fallback:
 //   - *UncertainError (e.g. body-read/truncation failure once the request
 //     may have reached the worker) passes through unchanged;
@@ -964,163 +958,6 @@ func (e *HTTPExecutor) Cancel(ctx context.Context, jobID string) error {
 	}
 	if res.ID != jobID || res.Status != transcode.StatusCancelled {
 		return e.failUncertain("cancel", jobID, fmt.Errorf("ambiguous cancel acknowledgement: id=%q status=%q (bounded body %d bytes)", res.ID, res.Status, len(data)))
-	}
-	return nil
-}
-
-// BenchmarkSubmit translates the source path, POSTs exactly once to
-// /v1/benchmarks, and verifies the versioned response. Once the request may
-// have reached the worker, ANY failure to obtain and validate a definitive
-// 2xx acknowledgement yields *UncertainError; no resubmit at this layer. A
-// complete non-2xx rejection stays a definitive typed *HTTPError.
-func (e *HTTPExecutor) BenchmarkSubmit(ctx context.Context, req transcode.BenchmarkRequest) (transcode.BenchmarkJob, error) {
-	cp := req
-	if cp.ProtocolVersion == 0 {
-		cp.ProtocolVersion = transcode.WorkerProtocolVersion
-	}
-	if err := transcode.ValidateBenchmarkRequest(&cp); err != nil {
-		return transcode.BenchmarkJob{}, fmt.Errorf("validating benchmark request: %w", err)
-	}
-	remoteSource, err := e.TranslateLocalToRemote(cp.SourcePath)
-	if err != nil {
-		return transcode.BenchmarkJob{}, fmt.Errorf("translating source path: %w", err)
-	}
-	cp.SourcePath = remoteSource
-	body, err := json.Marshal(cp)
-	if err != nil {
-		return transcode.BenchmarkJob{}, fmt.Errorf("serializing benchmark submit payload: %w", err)
-	}
-	ctx, cancel := context.WithTimeout(ctx, e.subTO)
-	defer cancel()
-	hreq, err := e.newRequest(ctx, http.MethodPost, "/v1/benchmarks", body)
-	if err != nil {
-		return transcode.BenchmarkJob{}, fmt.Errorf("building benchmark submit request: %w", err)
-	}
-	data, code, hdr, err := e.do(hreq, "benchmark_submit", req.ID, true)
-	if err != nil {
-		// The benchmark may already have been accepted: a transport failure
-		// with no definitive response is UNKNOWN. A definitive *HTTPError
-		// passes through unchanged; never retry here.
-		return transcode.BenchmarkJob{}, e.mutatingDoErr("benchmark_submit", req.ID, err)
-	}
-	switch code {
-	case http.StatusCreated, http.StatusOK:
-		var res transcode.BenchmarkSubmitResponse
-		if err := json.Unmarshal(data, &res); err != nil {
-			return transcode.BenchmarkJob{}, e.failUncertain("benchmark_submit", req.ID, fmt.Errorf("parsing benchmark submit acknowledgement (bounded body %d bytes): %w", len(data), err))
-		}
-		// Any 2xx that does not validate as a definitive success ack is
-		// UNKNOWN: the benchmark may already exist server-side. That
-		// includes protocol mismatches and error-bearing 2xx bodies, which
-		// are contradictory acknowledgements rather than definitive
-		// rejections (definitive rejections arrive as non-2xx below).
-		if res.ProtocolVersion != transcode.WorkerProtocolVersion {
-			return transcode.BenchmarkJob{}, e.failUncertain("benchmark_submit", req.ID, fmt.Errorf("benchmark submit acknowledgement with unsupported protocol version %d (expected %d) (fail unknown)", res.ProtocolVersion, transcode.WorkerProtocolVersion))
-		}
-		if res.Error != "" {
-			return transcode.BenchmarkJob{}, e.failUncertain("benchmark_submit", req.ID, fmt.Errorf("contradictory benchmark submit acknowledgement (2xx with error): %s (bounded body %d bytes)", boundHTTPErrorMessage(res.Error), len(data)))
-		}
-		if res.ID != req.ID || !validMutationAckStatus(res.Status) {
-			return transcode.BenchmarkJob{}, e.failUncertain("benchmark_submit", req.ID, fmt.Errorf("ambiguous benchmark submit acknowledgement: id=%q status=%q (bounded body %d bytes)", res.ID, res.Status, len(data)))
-		}
-		return transcode.BenchmarkJob{ID: res.ID}, nil
-	default:
-		var res transcode.BenchmarkSubmitResponse
-		if err := json.Unmarshal(data, &res); err == nil && res.Error != "" {
-			if res.ProtocolVersion != 0 && res.ProtocolVersion != transcode.WorkerProtocolVersion {
-				return transcode.BenchmarkJob{}, fmt.Errorf("worker returned unsupported protocol version %d (expected %d) (fail closed)", res.ProtocolVersion, transcode.WorkerProtocolVersion)
-			}
-		}
-		return transcode.BenchmarkJob{}, newHTTPError(hreq, code, data, hdr)
-	}
-}
-
-// BenchmarkStatus GETs /v1/benchmarks/{id}, verifies the protocol version,
-// and translates the remote source path back to local (best-effort).
-func (e *HTTPExecutor) BenchmarkStatus(ctx context.Context, jobID string) (transcode.BenchmarkStatus, error) {
-	trimmedID := strings.TrimSpace(jobID)
-	if trimmedID == "" {
-		return transcode.BenchmarkStatus{}, errors.New("jobID is required")
-	}
-	if !validBenchmarkJobIDRegex.MatchString(trimmedID) {
-		return transcode.BenchmarkStatus{}, fmt.Errorf("invalid benchmark jobID %q", jobID)
-	}
-	path := "/v1/benchmarks/" + url.PathEscape(trimmedID)
-	ctx, cancel := context.WithTimeout(ctx, e.reqTO)
-	defer cancel()
-	hreq, err := e.newRequest(ctx, http.MethodGet, path, nil)
-	if err != nil {
-		return transcode.BenchmarkStatus{}, fmt.Errorf("building benchmark status request: %w", err)
-	}
-	data, code, hdr, err := e.do(hreq, "benchmark_status", trimmedID, false)
-	if err != nil {
-		if isTransportFailure(err) {
-			return transcode.BenchmarkStatus{}, e.failUncertain("benchmark_status", trimmedID, err)
-		}
-		return transcode.BenchmarkStatus{}, fmt.Errorf("transcode http benchmark status: %w", err)
-	}
-	if code != http.StatusOK {
-		return transcode.BenchmarkStatus{}, newHTTPError(hreq, code, data, hdr)
-	}
-	var st transcode.BenchmarkStatus
-	if err := json.Unmarshal(data, &st); err != nil {
-		return transcode.BenchmarkStatus{}, fmt.Errorf("parsing benchmark status response: %w (bounded body %d bytes)", err, len(data))
-	}
-	if st.ProtocolVersion != transcode.WorkerProtocolVersion {
-		return transcode.BenchmarkStatus{}, fmt.Errorf("worker returned unsupported protocol version %d (expected %d) (fail closed)", st.ProtocolVersion, transcode.WorkerProtocolVersion)
-	}
-	if st.SourcePath != "" {
-		if localSource, terr := e.TranslateRemoteToLocal(st.SourcePath); terr == nil {
-			st.SourcePath = localSource
-		}
-	}
-	return st, nil
-}
-
-// BenchmarkCancel POSTs /v1/benchmarks/{id}/cancel exactly once and verifies
-// the versioned response. ANY failure to obtain and validate a definitive
-// 2xx cancelled acknowledgement yields *UncertainError (reconcile via
-// Status); a complete non-2xx response stays a definitive typed *HTTPError.
-func (e *HTTPExecutor) BenchmarkCancel(ctx context.Context, jobID string) error {
-	trimmedID := strings.TrimSpace(jobID)
-	if trimmedID == "" {
-		return errors.New("jobID is required")
-	}
-	if !validBenchmarkJobIDRegex.MatchString(trimmedID) {
-		return fmt.Errorf("invalid benchmark jobID %q", jobID)
-	}
-	path := "/v1/benchmarks/" + url.PathEscape(trimmedID) + "/cancel"
-	ctx, cancel := context.WithTimeout(ctx, e.reqTO)
-	defer cancel()
-	hreq, err := e.newRequest(ctx, http.MethodPost, path, nil)
-	if err != nil {
-		return fmt.Errorf("building benchmark cancel request: %w", err)
-	}
-	data, code, hdr, err := e.do(hreq, "benchmark_cancel", trimmedID, true)
-	if err != nil {
-		// The cancel may already have applied server-side: a transport
-		// failure with no definitive response is UNKNOWN (reconcile via
-		// Status). A definitive *HTTPError passes through unchanged; never
-		// retry here.
-		return e.mutatingDoErr("benchmark_cancel", trimmedID, err)
-	}
-	if code != http.StatusOK {
-		return newHTTPError(hreq, code, data, hdr)
-	}
-	var res transcode.BenchmarkCancelResponse
-	if err := json.Unmarshal(data, &res); err != nil {
-		return e.failUncertain("benchmark_cancel", trimmedID, fmt.Errorf("parsing benchmark cancel acknowledgement (bounded body %d bytes): %w", len(data), err))
-	}
-	// Any 2xx that does not validate as a definitive cancelled ack is
-	// UNKNOWN: the cancel may already have applied (reconcile via Status).
-	if res.ProtocolVersion != transcode.WorkerProtocolVersion {
-		return e.failUncertain("benchmark_cancel", trimmedID, fmt.Errorf("benchmark cancel acknowledgement with unsupported protocol version %d (expected %d) (fail unknown)", res.ProtocolVersion, transcode.WorkerProtocolVersion))
-	}
-	if res.Error != "" {
-		return e.failUncertain("benchmark_cancel", trimmedID, fmt.Errorf("contradictory benchmark cancel acknowledgement (2xx with error): %s (bounded body %d bytes)", boundHTTPErrorMessage(res.Error), len(data)))
-	}
-	if res.ID != trimmedID || res.Status != transcode.StatusCancelled {
-		return e.failUncertain("benchmark_cancel", trimmedID, fmt.Errorf("ambiguous benchmark cancel acknowledgement: id=%q status=%q (bounded body %d bytes)", res.ID, res.Status, len(data)))
 	}
 	return nil
 }

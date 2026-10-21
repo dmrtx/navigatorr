@@ -7,7 +7,6 @@ import (
 
 	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
-	"github.com/jakenesler/navigatorr/transcode/optimization"
 	"github.com/jakenesler/navigatorr/transcode/recipe"
 )
 
@@ -38,11 +37,11 @@ func TestCompactModePolicy(t *testing.T) {
 	if _, err := modePolicyFor("size", false, 1080); err == nil {
 		t.Fatal("max_height accepted for size mode")
 	}
-	if min, ok := optimization.ModeMinimumSavings("compact", optimization.ModePolicyV2); !ok || min != 30 {
+	if min, ok := transcode.ModeMinimumSavings("compact", transcode.ModePolicyV2); !ok || min != 30 {
 		t.Fatalf("selector compact minimum %d %v", min, ok)
 	}
 	for _, version := range []string{"transcode-modes-v1", ""} {
-		if _, ok := optimization.ModeMinimumSavings("compact", version); ok {
+		if _, ok := transcode.ModeMinimumSavings("compact", version); ok {
 			t.Fatalf("compact must not exist under policy %q", version)
 		}
 	}

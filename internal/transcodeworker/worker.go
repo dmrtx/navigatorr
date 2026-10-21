@@ -64,24 +64,14 @@ type WorkerConfig struct {
 	SMBDirect     smbdirect.Config `json:"smb_direct" yaml:"smb_direct"`
 
 	// Shared source-cache settings (transcode I/O optimization). The cache lets
-	// a benchmark and the subsequent full transcode for the SAME immutable
-	// source share one NAS read. Conservative defaults preserve existing
-	// behavior when unset: enabled, 20 GiB bound, 72h TTL. Setting
-	// DisableSourceCache restores legacy per-job staging/downloads exactly.
+	// repeated transcodes of the SAME immutable source share one NAS read.
+	// Conservative defaults preserve existing behavior when unset: enabled,
+	// 20 GiB bound, 72h TTL. Setting DisableSourceCache restores legacy
+	// per-job staging/downloads exactly.
 	// None of these affect transcode.Plan or the execution-spec digest.
 	DisableSourceCache  bool  `json:"disable_source_cache" yaml:"disable_source_cache"`
 	SourceCacheMaxBytes int64 `json:"source_cache_max_bytes" yaml:"source_cache_max_bytes"`
 	SourceCacheTTLHours int   `json:"source_cache_ttl_hours" yaml:"source_cache_ttl_hours"`
-
-	// Sample-evaluation cache settings. A size-mode search stores each finished
-	// (candidate, sample window) measurement under <LocalWorkDir>/_sample-cache
-	// so a later run on the same source bytes replays it instead of
-	// re-encoding and re-measuring. Defaults: enabled, 64 MiB, 720h (30 days)
-	// since last use. Setting DisableSampleCache restores the uncached search
-	// exactly. None of these affect transcode.Plan or the execution-spec digest.
-	DisableSampleCache  bool  `json:"disable_sample_cache" yaml:"disable_sample_cache"`
-	SampleCacheMaxBytes int64 `json:"sample_cache_max_bytes" yaml:"sample_cache_max_bytes"`
-	SampleCacheTTLHours int   `json:"sample_cache_ttl_hours" yaml:"sample_cache_ttl_hours"`
 }
 
 // DefaultWorkerConfig returns sane defaults for an Apple Silicon Mac.
@@ -196,12 +186,6 @@ func (cfg *WorkerConfig) normalizeOperational() error {
 	if cfg.SourceCacheMaxBytes < 0 {
 		return fmt.Errorf("source_cache_max_bytes must not be negative (fail closed)")
 	}
-	if cfg.SampleCacheMaxBytes < 0 {
-		return fmt.Errorf("sample_cache_max_bytes must not be negative (fail closed)")
-	}
-	if cfg.SampleCacheTTLHours < 0 {
-		return fmt.Errorf("sample_cache_ttl_hours must not be negative (fail closed)")
-	}
 	if cfg.SourceCacheTTLHours < 0 {
 		return fmt.Errorf("source_cache_ttl_hours must not be negative (fail closed)")
 	}
@@ -256,12 +240,7 @@ type Worker struct {
 	videoInUseFn    func() (int, bool)
 	x265CheckRun    func(ctx context.Context, dir string, args []string) ([]byte, error)
 	ffprobePath     string
-	// buildIdentity memoizes the ffmpeg/libx265 build probes that key the
-	// sample cache; sampleCacheBuildFn replaces them in tests.
-	buildIdentity      buildIdentityMemo
-	sampleCacheBuildFn func(ctx context.Context, ffmpegPath string) (sampleCacheBuildIdentity, error)
-	benchmarkRunner    BenchmarkRunner
-	afterSpawnHook     func(jobDir string, pid int)
+	afterSpawnHook  func(jobDir string, pid int)
 	// spawnTranscode spawns the detached runner for a queued job. Nil selects
 	// the production exec.Command path. Tests inject a stub that records the
 	// spawn without forking so queue/idempotency behavior is deterministic
@@ -789,7 +768,7 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 	}
 
 	// Shared capacity lock serializes slot accounting, strong-idempotency
-	// scans, and scheduler passes across all benchmark and transcode jobs.
+	// scans, and scheduler passes across all jobs.
 	// Lock order everywhere is capLock -> jobLock.
 	capLock, err := acquireCapacityLock(cleanStateDir)
 	if err != nil {
@@ -942,12 +921,6 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 		}
 	}
 	defer unlockJob()
-
-	benchFile := filepath.Join(jobDir, "benchmark.json")
-	if _, err := os.Stat(benchFile); err == nil {
-		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("job ID collision: %q already exists as a benchmark job (fail closed)", trimmedID)},
-			fmt.Errorf("job ID collision with benchmark job")
-	}
 
 	jobFile := filepath.Join(jobDir, "job.json")
 
@@ -1207,7 +1180,7 @@ func (w *Worker) persistedExecutionDigest(rec *JobRecord) (string, *transcode.Pl
 
 // findJobByIdempotencyKeyLocked scans durable job.json records for a matching
 // idempotency key. Callers must hold the capacity lock. Directories without
-// job.json (benchmark-only or empty dirs) are skipped; a present but
+// job.json (empty dirs) are skipped; a present but
 // unloadable or inconsistent job.json is a definitive error (fail closed) so
 // strong idempotency can never duplicate under corrupted state.
 func (w *Worker) findJobByIdempotencyKeyLocked(key string) (*JobRecord, error) {
@@ -1308,16 +1281,15 @@ func sortQueuedJobs(jobs []*JobRecord) {
 	})
 }
 
-// runningCountLocked counts live transcode running slots plus live benchmark
-// slots (one global ceiling). Queued-but-unspawned jobs (PID 0) do not
-// consume slots. Callers must hold the capacity lock.
+// runningCountLocked counts live running slots (one global ceiling).
+// Queued-but-unspawned jobs (PID 0) do not consume slots. Callers must hold the capacity lock.
 func (w *Worker) runningCountLocked(excludeID string) (int, error) {
 	return w.countActiveJobs(excludeID)
 }
 
 // scheduleQueuedLocked starts persisted queued jobs FIFO while slots are free.
-// It never exceeds max_parallel_jobs (transcodes, benchmarks and podcast jobs
-// in aggregate) nor, when the ceiling is split, either kind's pool; a queued
+// It never exceeds max_parallel_jobs (transcodes and podcast jobs in
+// aggregate) nor, when the ceiling is split, either kind's pool; a queued
 // job whose pool is full is skipped so it never holds back the other kind. It
 // never double-spawns: each spawn happens under capLock + per-job lock after
 // re-verifying status==queued and slot availability. Cancelled jobs are
@@ -1454,8 +1426,8 @@ func (w *Worker) countActiveJobs(excludeID string) (int, error) {
 	return video + podcast, err
 }
 
-// countActiveJobsByKind counts live transcode and benchmark slot holders,
-// podcast jobs apart from the rest (video).
+// countActiveJobsByKind counts live transcode slot holders, podcast jobs apart
+// from the rest (video).
 func (w *Worker) countActiveJobsByKind(excludeID string) (video, podcast int, err error) {
 	entries, err := os.ReadDir(w.cfg.StateDir)
 	if err != nil {
@@ -1509,27 +1481,6 @@ func (w *Worker) countActiveJobsByKind(excludeID string) (video, podcast int, er
 						// capLock + per-job lock. Persisting here (capLock
 						// only) could resurrect a concurrently cancelled job.
 						continue
-					}
-				}
-			}
-		}
-
-		// 2. Check for active benchmark job sharing worker capacity
-		benchPath := filepath.Join(entryDir, "benchmark.json")
-		if fi, err := os.Stat(benchPath); err == nil && !fi.IsDir() {
-			bench, err := LoadBenchmark(benchPath)
-			if err == nil && bench != nil && bench.ID == name {
-				if bench.Status == "running" || bench.Status == "queued" {
-					if IsBenchmarkExecutionAlive(bench) {
-						add(slotKindVideo)
-					} else if bench.PID > 0 {
-						latest, err := w.reconcileStoppedBenchmark(entryDir, bench)
-						if err != nil {
-							return 0, 0, err
-						}
-						if (latest.Status == "running" || latest.Status == "queued") && latest.PID > 0 {
-							add(slotKindVideo) // execution changed after the initial read; retain its slot
-						}
 					}
 				}
 			}
@@ -1762,6 +1713,8 @@ func (w *Worker) ReconcileStartup(ctx context.Context) error {
 		}
 	}
 
+	w.removeLegacySampleTestState()
+
 	stateDir := filepath.Clean(w.cfg.StateDir)
 	entries, err := os.ReadDir(stateDir)
 	if err != nil {
@@ -1784,7 +1737,7 @@ func (w *Worker) ReconcileStartup(ctx context.Context) error {
 		jobFile := filepath.Join(jobDir, "job.json")
 		if _, err := os.Stat(jobFile); err != nil {
 			if os.IsNotExist(err) {
-				continue // benchmark-only or empty dir
+				continue // empty dir
 			}
 			return fmt.Errorf("stat job file %s: %w", jobFile, err)
 		}
@@ -2174,7 +2127,7 @@ func (w *Worker) cleanupCancelledArtifacts(job *JobRecord) {
 	}
 	w.removeOwnStagedInput(job)
 	if w.sourceCacheEnabled() {
-		releaseSourceCachePins(w.sourceCacheDir(), job.ID, false)
+		releaseSourceCachePins(w.sourceCacheDir(), job.ID)
 	}
 	source := strings.TrimSpace(job.Source)
 	candidate := strings.TrimSpace(job.Candidate)

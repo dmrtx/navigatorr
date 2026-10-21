@@ -22,7 +22,7 @@ type fileFingerprint struct {
 // while they streamed to disk (download, staging copy).
 //
 // The memo lives on one job run's context, never on Worker and never on disk.
-// A restart, a resumed finalization runner, a benchmark or another job starts
+// A restart, a resumed finalization runner or another job starts
 // empty and reads the bytes again, so every check whose purpose is to detect a
 // change across a wait or a restart still does a full read.
 //

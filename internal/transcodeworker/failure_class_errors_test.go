@@ -28,7 +28,7 @@ func TestSourceDigestMismatchIsRecordedAsSourceChanged(t *testing.T) {
 
 	// The plan froze the digest of different bytes: the source is no longer
 	// the file the plan was built on.
-	_, err := w.ensureSourceCached(context.Background(), filepath.Clean(src), sha256Hex([]byte("the bytes the plan was built on")))
+	err := verifyLocalDigest(context.Background(), filepath.Clean(src), sha256Hex([]byte("the bytes the plan was built on")))
 	if err == nil {
 		t.Fatal("staging accepted bytes that do not match the expected digest")
 	}
@@ -78,34 +78,6 @@ func TestLocalFileChangedWhileHashingIsClassedByWhatWasHashed(t *testing.T) {
 	other := errors.New("read failed")
 	if sourceDigestFailure(other) != other || candidateHashFailure(other) != other {
 		t.Fatal("an unrelated error was reclassed")
-	}
-}
-
-func TestVerifySourceUnchangedDetectionIsTyped(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "source", "shared_clip.mkv")
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte("12345"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	fi, _ := os.Stat(path)
-	if err := verifySourceUnchanged(path, fi.Size(), fi.ModTime()); err != nil {
-		t.Fatal(err)
-	}
-	err := verifySourceUnchanged(path, fi.Size()+1, fi.ModTime())
-	if got := resilience.ClassifyError(err); got != resilience.SourceChanged {
-		t.Fatalf("modified source class %s: %v", got, err)
-	}
-	wrapped := fmt.Errorf("source media modified during benchmark (integrity violation, fail closed): %w", err)
-	if got := benchmarkFailureClass(wrapped); got != string(resilience.SourceChanged) {
-		t.Fatalf("benchmark record class %q", got)
-	}
-	// A source that cannot be statted is unreachable, not changed.
-	missing := verifySourceUnchanged(filepath.Join(dir, "gone", "source_sha.mkv"), 1, time.Now())
-	if got := resilience.ClassifyError(missing); got == resilience.SourceChanged {
-		t.Fatalf("a missing source was classed source_changed: %v", missing)
 	}
 }
 

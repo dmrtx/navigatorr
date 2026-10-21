@@ -13,7 +13,6 @@ import (
 	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/httpclient"
-	"github.com/jakenesler/navigatorr/transcode/optimization"
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -204,7 +203,7 @@ func operationSizeMode(r operationRecord) map[string]any {
 			for _, u := range uncertainties {
 				notes = append(notes, operationString(u))
 			}
-			if reason := optimization.HardwareReason(notes); reason != "" {
+			if reason := transcode.HardwareReason(notes); reason != "" {
 				out["hardware_reason"] = reason
 			}
 		}

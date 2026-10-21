@@ -11,7 +11,6 @@ import (
 	"github.com/jakenesler/navigatorr/fsop"
 	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
-	"github.com/jakenesler/navigatorr/transcode/optimization"
 )
 
 const budgetSourceBytes = int64(10_000_000_000)
@@ -61,8 +60,7 @@ func newBudgetCase(t *testing.T, inputs map[string]any, caps transcode.WorkerCap
 	}
 	ec.State["plan"] = base
 	request := transcode.BenchmarkRequest{ID: "bench-1", Mode: "size", SourceSHA256: sha, SourceDuration: 6000, Metric: "vmaf", Quality: qc,
-		Samples:    []transcode.BenchmarkSampleWindow{{Index: 0, StartSeconds: 1200, DurationSeconds: 10}, {Index: 1, StartSeconds: 3000, DurationSeconds: 10}},
-		Candidates: []transcode.BenchmarkCandidate{{ID: "x265-q22", VideoCodec: transcode.VideoCodecLibX265, Quality: 22, Preset: "medium", VideoProfile: "main10", PixelFormat: "p010le"}}}
+		Samples: []transcode.BenchmarkSampleWindow{{Index: 0, StartSeconds: 1200, DurationSeconds: 10}, {Index: 1, StartSeconds: 3000, DurationSeconds: 10}}}
 	digest, err := transcode.DigestBenchmarkRequest(&request)
 	if err != nil {
 		t.Fatal(err)
@@ -649,7 +647,7 @@ func TestSizeBudgetNonVideoBytesWithoutVideoStatistics(t *testing.T) {
 	const source = int64(5_000_000_000)
 	got, known := sizeBudgetNonVideoBytes(rep, source)
 	audio := int64(192000+384000) * 3600 / 8
-	want := audio + 2*optimization.DefaultTextSubtitleSizeBytes + source*sizeBudgetOverheadPerMille/1000
+	want := audio + 2*defaultTextSubtitleSizeBytes + source*sizeBudgetOverheadPerMille/1000
 	if !known || got != want {
 		t.Fatalf("non-video bytes = %d, %v; want %d derived from the other streams", got, known, want)
 	}

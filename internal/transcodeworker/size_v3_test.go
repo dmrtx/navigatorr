@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/jakenesler/navigatorr/transcode"
-	"github.com/jakenesler/navigatorr/transcode/optimization"
 )
 
 // sizeV3TestPlan is a complete size v3 mode plan: frozen savings and quality
@@ -19,7 +18,7 @@ import (
 // encoded as Main10.
 func sizeV3TestPlan(main10 bool) *transcode.Plan {
 	p := &transcode.Plan{Container: "mkv", VideoCodec: "libx265", Quality: 24, Preset: "medium", VideoProfile: "main", PixelFormat: "yuv420p", ExpectedBitDepth: 8, AudioMode: transcode.AudioModeCompactLossless, SubtitleMode: "preserve", PreserveMetadata: true, PreserveChapters: true, PreserveAttachments: true, RecipeVersion: "test", RecipeDigest: "sha256:" + strings.Repeat("0", 64), Resilience: transcode.ResiliencePlan{MaxAttempts: 1},
-		Mode: "size", ModePolicyVersion: optimization.ModePolicyV3, PolicyDigest: "sha256:" + strings.Repeat("1", 64), SizePolicy: &transcode.SizePolicy{MinSavingsPercent: 15},
+		Mode: "size", ModePolicyVersion: transcode.ModePolicyV3, PolicyDigest: "sha256:" + strings.Repeat("1", 64), SizePolicy: &transcode.SizePolicy{MinSavingsPercent: 15},
 		QualityValidation: &transcode.QualityValidationPlan{Metric: "vmaf", Samples: []transcode.BenchmarkSampleWindow{{Index: 0, StartSeconds: 5, DurationSeconds: 10}}, Quality: transcode.BenchmarkQualityConfig{VMAF: &transcode.BenchmarkQualityThresholds{Model: "v1_1080p_3h"}, FinalValidation: &transcode.BenchmarkFinalValidationConfig{Mode: "sampled"}}, BenchmarkRequestDigest: "sha256:" + strings.Repeat("2", 64)}}
 	if main10 {
 		p.VideoProfile, p.PixelFormat, p.ExpectedBitDepth = "main10", "p010le", 10
@@ -34,7 +33,7 @@ func TestSizeV3PlanAudioPolicy(t *testing.T) {
 	}
 	for name, mutate := range map[string]func(*transcode.Plan){
 		"v3 size copying audio":    func(p *transcode.Plan) { p.AudioMode = "copy" },
-		"v2 size compacting audio": func(p *transcode.Plan) { p.ModePolicyVersion = optimization.ModePolicyV2 },
+		"v2 size compacting audio": func(p *transcode.Plan) { p.ModePolicyVersion = transcode.ModePolicyV2 },
 		"v3 quality mode":          func(p *transcode.Plan) { p.Mode = "quality" },
 		"profile plan compacting lossless": func(p *transcode.Plan) {
 			p.Mode, p.ModePolicyVersion, p.SizePolicy, p.PolicyDigest, p.QualityValidation = "", "", nil, "", nil
@@ -58,8 +57,8 @@ func TestModeCandidateBitDepth(t *testing.T) {
 		{sizeV3TestPlan(true), 8, 10},
 		{sizeV3TestPlan(false), 8, 8},
 		{sizeV3TestPlan(true), 10, 10},
-		{&transcode.Plan{Mode: "size", ModePolicyVersion: optimization.ModePolicyV2, ExpectedBitDepth: 10}, 8, 8},
-		{&transcode.Plan{Mode: "quality", ModePolicyVersion: optimization.ModePolicyV3, ExpectedBitDepth: 10}, 8, 8},
+		{&transcode.Plan{Mode: "size", ModePolicyVersion: transcode.ModePolicyV2, ExpectedBitDepth: 10}, 8, 8},
+		{&transcode.Plan{Mode: "quality", ModePolicyVersion: transcode.ModePolicyV3, ExpectedBitDepth: 10}, 8, 8},
 	} {
 		if got := modeCandidateBitDepth(tc.plan, tc.source); got != tc.want {
 			t.Errorf("%s/%s depth %d from %d-bit: %d, want %d", tc.plan.Mode, tc.plan.ModePolicyVersion, tc.plan.ExpectedBitDepth, tc.source, got, tc.want)
@@ -157,7 +156,7 @@ func TestSizeV3RealEncodeMain10WithPCM(t *testing.T) {
 	// Outside size v3 a Main10 candidate of an 8-bit source is a changed
 	// measurement class and never publishes.
 	v2 := *plan
-	v2.ModePolicyVersion = optimization.ModePolicyV2
+	v2.ModePolicyVersion = transcode.ModePolicyV2
 	if e, err := w.validateFinalPerceptual(ctx, jobDir, source, candidate, &v2, "sha256:candidate", info.Size()); err == nil || e == nil || e.Verdict == "pass" {
 		t.Fatalf("v2 accepted an 8-bit to Main10 candidate: %+v %v", e, err)
 	}

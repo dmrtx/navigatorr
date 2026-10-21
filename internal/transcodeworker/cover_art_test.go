@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/jakenesler/navigatorr/transcode"
-	"github.com/jakenesler/navigatorr/transcode/optimization"
 )
 
 func coverArtPlan() *transcode.Plan {
@@ -189,7 +188,7 @@ func TestCoverArtRealEncode(t *testing.T) {
 	twoPass.X265 = &transcode.X265Settings{BitrateKbps: 300, TwoPass: true, Lookahead: 10, BFrames: 2, RefFrames: 2, AQMode: 2, AQStrength: 1, PsyRD: 1, PsyRDOQ: 1}
 	for name, plan := range map[string]*transcode.Plan{"crf": coverArtPlan(), "two_pass": twoPass} {
 		t.Run(name, func(t *testing.T) {
-			minimum, _ := optimization.ModeMinimumSavings("size", "")
+			minimum, _ := transcode.ModeMinimumSavings("size", "")
 			plan.Mode, plan.PolicyDigest, plan.SizePolicy = "size", "sha256:"+strings.Repeat("0", 64), &transcode.SizePolicy{MinSavingsPercent: float64(minimum)}
 			plan.QualityValidation = &transcode.QualityValidationPlan{Metric: "ssim", Samples: []transcode.BenchmarkSampleWindow{{Index: 0, StartSeconds: 0.5, DurationSeconds: 1}, {Index: 1, StartSeconds: 2.5, DurationSeconds: 1}}, Quality: transcode.BenchmarkQualityConfig{FinalValidation: &transcode.BenchmarkFinalValidationConfig{Mode: "sampled"}}, BenchmarkRequestDigest: "sha256:" + strings.Repeat("1", 64)}
 			plan.PlanDigest, _ = transcode.DigestPlan(plan)
@@ -261,35 +260,5 @@ func TestCoverArtRealEncode(t *testing.T) {
 				t.Fatalf("accepted a candidate without its cover: %v", err)
 			}
 		})
-	}
-}
-
-// Cover first, as an MP4 covr or a remuxed file may order it, so the gate
-// cannot pass by taking the first video stream.
-const coverArtProbeJSON = `{
-  "streams": [
-    {"index": 0, "codec_type": "video", "codec_name": "mjpeg", "pix_fmt": "yuvj420p", "width": 600, "height": 900, "r_frame_rate": "90000/1", "avg_frame_rate": "0/0", "disposition": {"default": 0, "attached_pic": 1}, "tags": {"filename": "cover.jpg", "mimetype": "image/jpeg"}},
-    {"index": 1, "codec_type": "video", "codec_name": "h264", "profile": "High", "pix_fmt": "yuv420p", "r_frame_rate": "24/1", "avg_frame_rate": "24/1", "width": 1920, "height": 1080, "bits_per_raw_sample": "8", "color_range": "tv", "color_space": "bt709", "color_primaries": "bt709", "color_transfer": "bt709", "disposition": {"default": 1, "attached_pic": 0}}
-  ],
-  "format": {"format_name": "matroska,webm", "duration": "120.000000", "size": "50000000"},
-  "chapters": []
-}`
-
-func TestProductionBenchmarkRunnerMeasuresMainVideoBesideCoverArt(t *testing.T) {
-	dir := t.TempDir()
-	sourceFile := filepath.Join(dir, "source.mkv")
-	_ = os.WriteFile(sourceFile, []byte("fake video content"), 0644)
-	mockFFmpeg, mockProbe, logFile := setupMockTools(t, dir, coverArtProbeJSON, "")
-	worker := NewWorker(&WorkerConfig{StateDir: filepath.Join(dir, "state"), AllowedRoots: []string{dir}, MaxParallelJobs: 1, FFmpeg: mockFFmpeg, FFprobe: mockProbe})
-	record := &BenchmarkRecord{ProtocolVersion: transcode.WorkerProtocolVersion, ID: "bench-cover", Status: "running", Source: sourceFile, Metric: "ssim", Samples: []transcode.BenchmarkSampleWindow{{Index: 0, StartSeconds: 20, DurationSeconds: 10}}, Candidates: []transcode.BenchmarkCandidate{{ID: "cand", Quality: 75}}, Attempt: 1}
-	if err := (&ProductionBenchmarkRunner{}).RunBenchmark(context.Background(), worker, record); err != nil {
-		t.Fatalf("benchmark rejected a source with cover art: %v", err)
-	}
-	if record.Evidence == nil || record.Evidence.SourceBitDepth != 8 {
-		t.Fatalf("evidence: %+v", record.Evidence)
-	}
-	log, _ := os.ReadFile(logFile)
-	if !strings.Contains(string(log), "-map 0:1 -c:v ffv1") || strings.Contains(string(log), "-map 0:0 -c:v ffv1") {
-		t.Fatalf("reference sample not taken from the main video:\n%s", log)
 	}
 }

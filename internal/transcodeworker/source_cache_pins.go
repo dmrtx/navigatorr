@@ -11,11 +11,6 @@ import (
 	"time"
 )
 
-// benchmarkPinOwner pins an entry a benchmark staged or reused, so the full
-// transcode that usually follows finds it even when the cache is under size
-// pressure. The job that completes for the same source releases it.
-const benchmarkPinOwner = "benchmark"
-
 // sourceCachePinDir holds one empty marker file per (entry, owner). The dot
 // prefix keeps the sweep's data listing from ever counting it.
 func sourceCachePinDir(cacheDir string) string { return filepath.Join(cacheDir, ".pins") }
@@ -34,7 +29,7 @@ func sourceCacheKeyOfData(name string) string {
 }
 
 // pinSourceCacheEntry protects one cache entry from the sweep on behalf of
-// owner (a job ID or benchmarkPinOwner). Best effort: a pin that cannot be
+// owner (a job ID). Best effort: a pin that cannot be
 // written only leaves the entry subject to ordinary eviction.
 func pinSourceCacheEntry(cacheDir, cleanSource string, fi os.FileInfo, expectedSHA, owner string) {
 	if strings.TrimSpace(cacheDir) == "" || fi == nil || strings.TrimSpace(owner) == "" {
@@ -56,11 +51,8 @@ func pinSourceCacheEntry(cacheDir, cleanSource string, fi os.FileInfo, expectedS
 	_ = os.Chtimes(pin, now, now)
 }
 
-// releaseSourceCachePins drops every pin owner holds. When the owner's job
-// completed (withBenchmark), it also drops the benchmark pin of each entry it
-// pinned: the source has been benchmarked and transcoded. A failed job keeps
-// the benchmark pin so a manual retry still finds the entry.
-func releaseSourceCachePins(cacheDir, owner string, withBenchmark bool) {
+// releaseSourceCachePins drops every pin owner holds.
+func releaseSourceCachePins(cacheDir, owner string) {
 	if strings.TrimSpace(cacheDir) == "" || strings.TrimSpace(owner) == "" {
 		return
 	}
@@ -70,16 +62,9 @@ func releaseSourceCachePins(cacheDir, owner string, withBenchmark bool) {
 		return
 	}
 	suffix := "." + pinOwnerTag(owner)
-	benchmark := "." + pinOwnerTag(benchmarkPinOwner)
 	for _, e := range names {
-		name := e.Name()
-		if !strings.HasSuffix(name, suffix) {
-			continue
-		}
-		key := strings.TrimSuffix(name, suffix)
-		_ = os.Remove(filepath.Join(dir, name))
-		if withBenchmark {
-			_ = os.Remove(filepath.Join(dir, key+benchmark))
+		if name := e.Name(); strings.HasSuffix(name, suffix) {
+			_ = os.Remove(filepath.Join(dir, name))
 		}
 	}
 }
@@ -111,7 +96,7 @@ func liveSourceCachePins(cacheDir string, ttl time.Duration, now time.Time) map[
 
 // effectiveSourceCacheMaxBytes keeps the configured bound but never lets it
 // fall below 1.5x the largest entry, so one large source cannot be evicted by
-// its own arrival and a benchmark followed by its transcode still shares it.
+// its own arrival.
 func effectiveSourceCacheMaxBytes(configured, largest int64) int64 {
 	if floor := largest + largest/2; floor > configured {
 		return floor

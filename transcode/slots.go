@@ -16,7 +16,7 @@ type SlotPool struct {
 }
 
 // WorkerSlots is how a worker divides its max_parallel_jobs ceiling between
-// video work (full conversions and benchmarks) and podcast work (transcription
+// video work (full conversions and final quality checks) and podcast work (transcription
 // and ad detection). Without a split both kinds draw on one shared pool of
 // Ceiling slots and Video.Total and Podcast.Total both report the ceiling.
 type WorkerSlots struct {

@@ -19,7 +19,6 @@ var workerAllowed = map[string]bool{
 	"internal/transcodeworker": true,
 	"internal/smbdirect":       true,
 	"transcode":                true,
-	"transcode/optimization":   true,
 	"transcode/quality":        true,
 	"transcode/resilience":     true,
 	"podcast":                  true,

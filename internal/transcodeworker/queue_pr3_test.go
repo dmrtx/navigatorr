@@ -166,24 +166,16 @@ func TestPR3_GlobalConcurrencyCeiling(t *testing.T) {
 	stub := newStubSpawn()
 	w, tempDir, sourceFile := newPR3Worker(t, 1, stub)
 	ctx := context.Background()
-	mockExe := createMockWorkerScript(t, tempDir)
 
-	// Occupy the global slot with a live benchmark (mock sleep process).
-	breq := validWorkerBenchmarkRequest(sourceFile)
-	breq.ID = "bench-occupant-1"
-	bresp, err := w.BenchmarkSubmit(ctx, breq, mockExe, "")
-	if err != nil {
-		t.Fatalf("benchmark submit: %v", err)
-	}
-	if bresp.Status != "queued" && bresp.Status != "running" {
-		t.Fatalf("unexpected benchmark status %+v", bresp)
-	}
+	// Occupy the global slot with a live transcode.
+	seed := &JobRecord{ID: "job-occupant-1", Status: "running", PID: stub.occupy("job-occupant-1"), Source: sourceFile, Candidate: filepath.Join(tempDir, "occ.mkv"), CreatedAt: time.Now().UTC()}
+	_ = SaveJobAtomic(filepath.Join(tempDir, "jobs", "job-occupant-1", "job.json"), seed)
 
 	// Transcode submit must queue without spawning and without exceeding the
 	// single global slot.
 	tresp, err := w.Submit(ctx, SubmitRequest{ID: "job-capped-1", SourcePath: sourceFile, CandidatePath: filepath.Join(tempDir, "cap.mkv")}, "test-exe", "")
 	if err != nil {
-		t.Fatalf("transcode submit must queue under benchmark occupancy: %v", err)
+		t.Fatalf("transcode submit must queue under a running transcode: %v", err)
 	}
 	if tresp.Status != "queued" {
 		t.Fatalf("expected queued, got %+v", tresp)
@@ -194,10 +186,6 @@ func TestPR3_GlobalConcurrencyCeiling(t *testing.T) {
 	}
 	if active > 1 {
 		t.Fatalf("aggregate concurrency exceeds max_parallel_jobs: %d > 1", active)
-	}
-	// Cleanup: cancel benchmark (kills mock sleep) then schedule transcode.
-	if _, err := w.BenchmarkCancel(ctx, "bench-occupant-1"); err != nil {
-		t.Fatal(err)
 	}
 }
 
@@ -1341,17 +1329,6 @@ func TestPR3_HTTPExecutorContractAgainstRealHandler(t *testing.T) {
 		t.Fatalf("logs: %v %v", logs, err)
 	}
 
-	// Busy is 429 worker_busy on the wire and WorkerBusy in the client.
-	_, err = exec.BenchmarkSubmit(ctx, transcode.BenchmarkRequest{
-		ID: "bench-contract-busy", SourcePath: "/media/library/source.mkv", Metric: "vmaf",
-		Samples:    []transcode.BenchmarkSampleWindow{{Index: 0, StartSeconds: 1, DurationSeconds: 5}},
-		Candidates: []transcode.BenchmarkCandidate{{ID: "c1", Quality: 65}},
-	})
-	he := wantHTTPError(t, "benchmark busy", err, http.StatusTooManyRequests, transcode.WorkerErrorBusy)
-	if !he.Retryable || he.RetryAfter != 30*time.Second || !httpclient.IsWorkerBusy(err) {
-		t.Fatalf("busy: retryable=%v retry_after=%s busy=%v", he.Retryable, he.RetryAfter, httpclient.IsWorkerBusy(err))
-	}
-
 	if err := exec.Cancel(ctx, "job-contract-1"); err != nil {
 		t.Fatalf("cancel running: %v", err)
 	}
@@ -1364,24 +1341,6 @@ func TestPR3_HTTPExecutorContractAgainstRealHandler(t *testing.T) {
 		t.Fatalf("cancel on a completed job is a definitive no-op, got %v", err)
 	}
 
-	// Benchmark status and cancel against a persisted record.
-	if err := SaveBenchmarkAtomic(filepath.Join(tempDir, "jobs", "bench-contract-1", "benchmark.json"), &BenchmarkRecord{
-		ProtocolVersion: transcode.WorkerProtocolVersion, ID: "bench-contract-1", Status: "completed",
-		Source: filepath.Join(tempDir, "source.mkv"), Metric: "vmaf", Progress: 1,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	bst, err := exec.BenchmarkStatus(ctx, "bench-contract-1")
-	if err != nil || bst.ID != "bench-contract-1" || bst.Status != "completed" {
-		t.Fatalf("benchmark status: %+v %v", bst, err)
-	}
-	_, err = exec.BenchmarkStatus(ctx, "bench-contract-missing")
-	wantHTTPError(t, "benchmark status missing", err, http.StatusNotFound, transcode.WorkerErrorNotFound)
-	if err := exec.BenchmarkCancel(ctx, "bench-contract-1"); err != nil {
-		t.Fatalf("benchmark cancel: %v", err)
-	}
-	wantHTTPError(t, "benchmark cancel missing", exec.BenchmarkCancel(ctx, "bench-contract-missing"), http.StatusNotFound, transcode.WorkerErrorNotFound)
-
 	// Every job-scoped request is correlated in the worker log; the token
 	// never is.
 	logMu.Lock()
@@ -1393,10 +1352,8 @@ func TestPR3_HTTPExecutorContractAgainstRealHandler(t *testing.T) {
 	for _, want := range []string{
 		`method=POST path="/v1/jobs" status=201`,
 		`path="/v1/jobs/job-contract-1/cancel" status=200`,
-		`status=429`,
 		`status=401`,
 		`job_id=job-contract-1`,
-		`job_id=bench-contract-busy`,
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("worker log missing %q:\n%s", want, joined)

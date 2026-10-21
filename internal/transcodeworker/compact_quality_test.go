@@ -77,26 +77,6 @@ func TestCompactWorkerQualityEndToEnd(t *testing.T) {
 		}
 	})
 
-	t.Run("benchmark", func(t *testing.T) {
-		rec := &BenchmarkRecord{ProtocolVersion: transcode.WorkerProtocolVersion, ID: "bench-compact", Status: "running", Source: source, SourceSHA256: ioOptSHA(t, source), Metric: "vmaf", Samples: samples,
-			Candidates: []transcode.BenchmarkCandidate{{ID: "software", VideoCodec: "libx265", Quality: 18, Preset: "ultrafast"}}, Quality: &policy, Mode: "compact", Compact: c.Clone(), Attempt: 1}
-		if err := (&ProductionBenchmarkRunner{}).RunBenchmark(ctx, worker("bench"), rec); err != nil {
-			t.Fatalf("compact benchmark: %v", err)
-		}
-		for _, phase := range []string{"sample_encode", "sample_validation"} {
-			if c := rec.PhaseCosts[phase]; c.ActiveComputeMs == nil || *c.ActiveComputeMs <= 0 {
-				t.Fatalf("%s CPU not measured: %+v", phase, rec.PhaseCosts)
-			}
-		}
-		ev := rec.Evidence
-		if ev == nil || ev.Compact == nil || ev.Compact.ChainVersion != transcode.CompactChainVersion || ev.Compact.ToneMapMethod != transcode.CompactToneMapPQ || ev.VMAFTemporalDecimation != 2 {
-			t.Fatalf("benchmark evidence lacks the compact chain or decimation: %+v", ev)
-		}
-		if len(ev.Quality) != 1 || ev.Quality[0].VMAF == nil || ev.Quality[0].VMAF.TemporalDecimation != 2 || ev.Quality[0].VMAF.Mean < 60 {
-			t.Fatalf("benchmark quality %+v", ev.Quality)
-		}
-	})
-
 	t.Run("final validation", func(t *testing.T) {
 		probe, err := ProbeSourceDetails(ctx, ffprobe, source)
 		if err != nil {

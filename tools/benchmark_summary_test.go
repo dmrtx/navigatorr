@@ -42,7 +42,7 @@ func TestCompactBenchmarkExplainsAStoredNoWinnerAndActualAudioPlan(t *testing.T)
 // Sample tests have no template any more; the ones in history have no summary.
 func TestCompactBenchmarkIsAbsentForSampleTests(t *testing.T) {
 	res := &action.ActionResult{ActionName: "benchmark_transcode", Status: action.StatusCompleted, Inputs: map[string]any{"path": "/media/Show/S01E01.mkv"},
-		State: map[string]any{"optimization_enabled": true, "benchmark_decision": transcode.BenchmarkDecision{DecisionReason: "all_candidates_invalid"}}}
+		State: map[string]any{"optimization_enabled": true, "benchmark_decision": map[string]any{"decision_reason": "all_candidates_invalid"}}}
 	if s := compactBenchmark(res); s != nil {
 		t.Fatalf("a sample test was given an encode summary: %+v", s)
 	}

@@ -329,7 +329,7 @@ func compactEncoderArgs(p *transcode.CompactPlan, videoCodec string) ([]string, 
 	return args, nil
 }
 
-// compactChainEvidence records the transform for final and benchmark
+// compactChainEvidence records the transform for the final validation
 // evidence. lutDigest is the value ensureCompactLUT returned.
 func compactChainEvidence(p *transcode.CompactPlan, lutDigest string) (*transcode.CompactChainEvidence, error) {
 	ref := ""

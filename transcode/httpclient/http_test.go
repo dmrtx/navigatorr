@@ -568,56 +568,6 @@ func TestHTTPExecutor_TokenFileAndValidation(t *testing.T) {
 	}
 }
 
-func TestHTTPExecutor_BenchmarkRoundTrip(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/benchmarks":
-			var req transcode.BenchmarkRequest
-			_ = json.NewDecoder(r.Body).Decode(&req)
-			if req.SourcePath != "/Volumes/media/source.mkv" {
-				w.WriteHeader(http.StatusBadRequest)
-				fmt.Fprintf(w, `{"error": "unexpected source %s"}`, req.SourcePath)
-				return
-			}
-			w.WriteHeader(http.StatusCreated)
-			fmt.Fprintln(w, `{"protocol_version": 2, "id": "bench-test-123", "status": "queued"}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/benchmarks/bench-test-123":
-			fmt.Fprintln(w, `{"protocol_version": 2, "id": "bench-test-123", "status": "running", "source_path": "/Volumes/media/source.mkv", "progress": 50.0}`)
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/benchmarks/bench-test-123/cancel":
-			fmt.Fprintln(w, `{"protocol_version": 2, "id": "bench-test-123", "status": "cancelled"}`)
-		default:
-			w.WriteHeader(http.StatusNotFound)
-			fmt.Fprintln(w, `{"error": "not found"}`)
-		}
-	}))
-	defer srv.Close()
-	exec := newTestHTTPExecutor(t, srv)
-	ctx := context.Background()
-
-	job, err := exec.BenchmarkSubmit(ctx, transcode.BenchmarkRequest{
-		ProtocolVersion: transcode.WorkerProtocolVersion, ID: "bench-test-123", SourcePath: "/local/media/source.mkv",
-		Metric: "vmaf", Samples: []transcode.BenchmarkSampleWindow{{Index: 0, StartSeconds: 1, DurationSeconds: 5}},
-		Candidates: []transcode.BenchmarkCandidate{{ID: "c1", Quality: 65}},
-	})
-	if err != nil || job.ID != "bench-test-123" {
-		t.Fatalf("BenchmarkSubmit: job=%+v err=%v", job, err)
-	}
-	st, err := exec.BenchmarkStatus(ctx, "bench-test-123")
-	if err != nil || st.Status != "running" {
-		t.Fatalf("BenchmarkStatus: %+v err=%v", st, err)
-	}
-	if st.SourcePath != "/local/media/source.mkv" {
-		t.Errorf("benchmark source not translated back: %q", st.SourcePath)
-	}
-	if err := exec.BenchmarkCancel(ctx, "bench-test-123"); err != nil {
-		t.Fatalf("BenchmarkCancel: %v", err)
-	}
-	if _, err := exec.BenchmarkStatus(ctx, "not-a-bench-id"); err == nil {
-		t.Error("invalid benchmark id must fail closed")
-	}
-}
-
 // singleShotServer serves one canned status/body per request while counting
 // attempts. The handler runs before counting so a test can assert the
 // executor performed exactly one transport attempt (no hidden retry).
@@ -633,14 +583,6 @@ func singleShotServer(t *testing.T, attempts *atomic.Int32, code int, body strin
 
 func submitTestRequest() transcode.Request {
 	return transcode.Request{ID: "job-1", SourcePath: "/local/media/a.mkv", CandidatePath: "/local/media/b.mkv", Profile: "hevc-vt"}
-}
-
-func benchmarkTestRequest() transcode.BenchmarkRequest {
-	return transcode.BenchmarkRequest{
-		ProtocolVersion: transcode.WorkerProtocolVersion, ID: "bench-test-123", SourcePath: "/local/media/source.mkv",
-		Metric: "vmaf", Samples: []transcode.BenchmarkSampleWindow{{Index: 0, StartSeconds: 1, DurationSeconds: 5}},
-		Candidates: []transcode.BenchmarkCandidate{{ID: "c1", Quality: 65}},
-	}
 }
 
 func TestHTTPExecutor_SubmitTruncated2xxIsUncertainSingleAttempt(t *testing.T) {
@@ -746,60 +688,6 @@ func TestHTTPExecutor_CancelTruncated2xxIsUncertainSingleAttempt(t *testing.T) {
 	}
 }
 
-func TestHTTPExecutor_BenchmarkSubmitAmbiguous2xxIsUncertain(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		body string
-	}{
-		{"truncated json", `{"protocol_version": 2, "id": "bench-test-123", "status": "que`},
-		{"mismatched id", `{"protocol_version": 2, "id": "bench-other", "status": "queued"}`},
-		{"empty status", `{"protocol_version": 2, "id": "bench-test-123", "status": ""}`},
-		{"protocol mismatch on 2xx", `{"protocol_version": 99, "id": "bench-test-123", "status": "queued"}`},
-		{"error field on 2xx", `{"protocol_version": 2, "id": "bench-test-123", "status": "queued", "error": "worker busy: maximum parallel jobs (1) reached"}`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var attempts atomic.Int32
-			srv := singleShotServer(t, &attempts, http.StatusCreated, tc.body)
-			defer srv.Close()
-
-			_, err := newTestHTTPExecutor(t, srv).BenchmarkSubmit(context.Background(), benchmarkTestRequest())
-			if err == nil || !IsTransportUncertain(err) {
-				t.Fatalf("ambiguous benchmark submit ack %s must be *UncertainError, got %v", tc.body, err)
-			}
-			if got := attempts.Load(); got != 1 {
-				t.Errorf("benchmark submit must attempt exactly once, got %d", got)
-			}
-		})
-	}
-}
-
-func TestHTTPExecutor_BenchmarkCancelAmbiguous2xxIsUncertain(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		body string
-	}{
-		{"truncated json", `{"protocol_version": 2, "id": "bench-test-123", "status": "cancell`},
-		{"mismatched id", `{"protocol_version": 2, "id": "bench-other", "status": "cancelled"}`},
-		{"wrong status", `{"protocol_version": 2, "id": "bench-test-123", "status": "running"}`},
-		{"protocol mismatch on 2xx", `{"protocol_version": 99, "id": "bench-test-123", "status": "cancelled"}`},
-		{"error field on 2xx", `{"protocol_version": 2, "id": "bench-test-123", "status": "cancelled", "error": "boom"}`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var attempts atomic.Int32
-			srv := singleShotServer(t, &attempts, http.StatusOK, tc.body)
-			defer srv.Close()
-
-			err := newTestHTTPExecutor(t, srv).BenchmarkCancel(context.Background(), "bench-test-123")
-			if err == nil || !IsTransportUncertain(err) {
-				t.Fatalf("ambiguous benchmark cancel ack %s must be *UncertainError, got %v", tc.body, err)
-			}
-			if got := attempts.Load(); got != 1 {
-				t.Errorf("benchmark cancel must attempt exactly once, got %d", got)
-			}
-		})
-	}
-}
-
 func TestHTTPExecutor_MutatingNon2xxStaysDefinitive(t *testing.T) {
 	// A complete 4xx/5xx rejection is definitive and must NOT become
 	// UncertainError — even with a malformed body.
@@ -822,15 +710,8 @@ func TestHTTPExecutor_MutatingNon2xxStaysDefinitive(t *testing.T) {
 		t.Fatalf("garbage 409 cancel must stay definitive *HTTPError, got %v", err)
 	}
 
-	_, err = exec.BenchmarkSubmit(ctx, benchmarkTestRequest())
-	if !errorAsHTTP(err, &herr) || IsTransportUncertain(err) {
-		t.Fatalf("garbage 409 benchmark submit must stay definitive *HTTPError, got %v", err)
-	}
-	if err := exec.BenchmarkCancel(ctx, "bench-test-123"); !errorAsHTTP(err, &herr) || IsTransportUncertain(err) {
-		t.Fatalf("garbage 409 benchmark cancel must stay definitive *HTTPError, got %v", err)
-	}
-	if got := attempts.Load(); got != 4 {
-		t.Errorf("expected exactly 4 attempts (one per op), got %d", got)
+	if got := attempts.Load(); got != 2 {
+		t.Errorf("expected exactly 2 attempts (one per op), got %d", got)
 	}
 }
 
@@ -846,8 +727,6 @@ func TestHTTPExecutor_MutatingRedirectStaysDefinitive(t *testing.T) {
 	}
 	mux.HandleFunc("/v1/jobs", redirect)
 	mux.HandleFunc("/v1/jobs/job-1/cancel", redirect)
-	mux.HandleFunc("/v1/benchmarks", redirect)
-	mux.HandleFunc("/v1/benchmarks/bench-test-123/cancel", redirect)
 	mux.HandleFunc("/v1/followed", func(w http.ResponseWriter, r *http.Request) {
 		followed.Add(1)
 		fmt.Fprintln(w, `{"id": "job-1", "status": "queued"}`)
@@ -868,14 +747,8 @@ func TestHTTPExecutor_MutatingRedirectStaysDefinitive(t *testing.T) {
 	if err := exec.Cancel(ctx, "job-1"); !errorAsHTTP(err, &herr) || IsTransportUncertain(err) {
 		t.Fatalf("cancel 301 must stay definitive *HTTPError, got %v", err)
 	}
-	if _, err := exec.BenchmarkSubmit(ctx, benchmarkTestRequest()); !errorAsHTTP(err, &herr) || IsTransportUncertain(err) {
-		t.Fatalf("benchmark submit 301 must stay definitive *HTTPError, got %v", err)
-	}
-	if err := exec.BenchmarkCancel(ctx, "bench-test-123"); !errorAsHTTP(err, &herr) || IsTransportUncertain(err) {
-		t.Fatalf("benchmark cancel 301 must stay definitive *HTTPError, got %v", err)
-	}
-	if got := attempts.Load(); got != 4 {
-		t.Errorf("expected exactly 4 attempts (one per op), got %d", got)
+	if got := attempts.Load(); got != 2 {
+		t.Errorf("expected exactly 2 attempts (one per op), got %d", got)
 	}
 	if got := followed.Load(); got != 0 {
 		t.Errorf("redirect target must never be fetched (followed=%d)", got)
@@ -906,35 +779,8 @@ func TestHTTPExecutor_MutatingOversized4xxStaysDefinitive(t *testing.T) {
 	if err := exec.Cancel(ctx, "job-1"); !errorAsHTTP(err, &herr) || IsTransportUncertain(err) {
 		t.Fatalf("oversized 413 cancel must stay definitive *HTTPError, got %v", err)
 	}
-	if _, err := exec.BenchmarkSubmit(ctx, benchmarkTestRequest()); !errorAsHTTP(err, &herr) || IsTransportUncertain(err) {
-		t.Fatalf("oversized 413 benchmark submit must stay definitive *HTTPError, got %v", err)
-	}
-	if err := exec.BenchmarkCancel(ctx, "bench-test-123"); !errorAsHTTP(err, &herr) || IsTransportUncertain(err) {
-		t.Fatalf("oversized 413 benchmark cancel must stay definitive *HTTPError, got %v", err)
-	}
-	if got := attempts.Load(); got != 4 {
-		t.Errorf("expected exactly 4 attempts (one per op), got %d", got)
-	}
-}
-
-func TestHTTPExecutor_BenchmarkProtocolMismatch(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintln(w, `{"protocol_version": 99, "id": "bench-test-123", "status": "queued"}`)
-	}))
-	defer srv.Close()
-	_, err := newTestHTTPExecutor(t, srv).BenchmarkSubmit(context.Background(), transcode.BenchmarkRequest{
-		ProtocolVersion: transcode.WorkerProtocolVersion, ID: "bench-test-123", SourcePath: "/local/media/source.mkv",
-		Metric: "vmaf", Samples: []transcode.BenchmarkSampleWindow{{Index: 0, StartSeconds: 1, DurationSeconds: 5}},
-		Candidates: []transcode.BenchmarkCandidate{{ID: "c1", Quality: 65}},
-	})
-	// A 2xx protocol mismatch on a mutating POST is UNKNOWN (the benchmark
-	// may already exist), not a definitive rejection.
-	if err == nil || !IsTransportUncertain(err) {
-		t.Fatalf("2xx protocol mismatch must be *UncertainError, got %v", err)
-	}
-	if !strings.Contains(err.Error(), "unsupported protocol version") {
-		t.Fatalf("uncertain error must preserve protocol context, got %v", err)
+	if got := attempts.Load(); got != 2 {
+		t.Errorf("expected exactly 2 attempts (one per op), got %d", got)
 	}
 }
 

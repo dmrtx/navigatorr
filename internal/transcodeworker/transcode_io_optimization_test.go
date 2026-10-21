@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -119,7 +118,7 @@ func TestIOOpt_CacheDigestMismatchNeverPublished(t *testing.T) {
 	w := NewWorker(cfg)
 	ctx := context.Background()
 
-	if _, err := w.ensureSourceCached(ctx, filepath.Clean(src), wrong); err == nil {
+	if _, err := ioOptCacheSource(t, w, src, wrong); err == nil {
 		t.Fatal("expected digest mismatch to fail, cache entry published anyway")
 	}
 	if files := ioOptCacheDataFiles(t, w.sourceCacheDir()); len(files) != 0 {
@@ -138,7 +137,7 @@ func TestIOOpt_CacheDigestMismatchNeverPublished(t *testing.T) {
 		t.Fatalf("mismatched populate published cache data: %v", files)
 	}
 
-	cached, err := w.ensureSourceCached(ctx, filepath.Clean(src), real)
+	cached, err := ioOptCacheSource(t, w, src, real)
 	if err != nil {
 		t.Fatalf("correct digest must publish: %v", err)
 	}
@@ -163,8 +162,7 @@ func TestIOOpt_ChangedContentSameMetadataDifferentSHAMisses(t *testing.T) {
 		c.StagingPolicy = StagingPolicyAlways
 	})
 	w := NewWorker(cfg)
-	ctx := context.Background()
-	cachedA, err := w.ensureSourceCached(ctx, filepath.Clean(src), shaA)
+	cachedA, err := ioOptCacheSource(t, w, src, shaA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,13 +186,28 @@ func TestIOOpt_ChangedContentSameMetadataDifferentSHAMisses(t *testing.T) {
 	if hit, ok := lookupSourceCache(w.sourceCacheDir(), filepath.Clean(src), mustStat(t, src), shaB); ok {
 		t.Fatalf("changed content reused stale cache entry %q", hit)
 	}
-	cachedB, err := w.ensureSourceCached(ctx, filepath.Clean(src), shaB)
+	cachedB, err := ioOptCacheSource(t, w, src, shaB)
 	if err != nil {
 		t.Fatalf("re-populate for changed content: %v", err)
 	}
 	if cachedB == cachedA {
 		t.Fatal("changed content must map to a distinct cache entry")
 	}
+}
+
+// ioOptCacheSource publishes src into the shared cache the way staging does,
+// from a verified local copy, and returns the cache entry.
+func ioOptCacheSource(t *testing.T, w *Worker, src, sha string) (string, error) {
+	t.Helper()
+	b, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := filepath.Join(t.TempDir(), "local-copy.mkv")
+	if err := os.WriteFile(local, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return populateSourceCacheFromLocal(context.Background(), w.sourceCacheDir(), filepath.Clean(src), mustStat(t, src), local, sha)
 }
 
 func mustStat(t *testing.T, path string) os.FileInfo {
@@ -207,7 +220,7 @@ func mustStat(t *testing.T, path string) os.FileInfo {
 }
 
 // TestIOOpt_HardLinkLeaseCausesZeroSecondTransfer proves that once the shared
-// cache is populated, giving a benchmark/transcode a job-local path performs no
+// cache is populated, giving a transcode a job-local path performs no
 // second NAS download and yields a hard link to the cached inode.
 func TestIOOpt_HardLinkLeaseCausesZeroSecondTransfer(t *testing.T) {
 	dir := t.TempDir()
@@ -224,7 +237,15 @@ func TestIOOpt_HardLinkLeaseCausesZeroSecondTransfer(t *testing.T) {
 	w.mediaStore = store
 	ctx := context.Background()
 
-	cached, err := w.ensureSourceCached(ctx, filepath.Clean(src), sha)
+	local := filepath.Join(dir, "download", "movie.mkv")
+	if err := store.DownloadAtomic(ctx, src, local); err != nil {
+		t.Fatal(err)
+	}
+	info, err := store.Stat(ctx, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cached, err := populateSourceCacheFromLocal(ctx, w.sourceCacheDir(), filepath.Clean(src), info, local, sha)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +292,7 @@ func TestIOOpt_ActiveTranscodeSurvivesCacheEviction(t *testing.T) {
 	})
 	w := NewWorker(cfg)
 	ctx := context.Background()
-	cached, err := w.ensureSourceCached(ctx, filepath.Clean(src), sha)
+	cached, err := ioOptCacheSource(t, w, src, sha)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,87 +332,6 @@ func TestIOOpt_ActiveTranscodeSurvivesCacheEviction(t *testing.T) {
 	}
 }
 
-// ioOptEvictRunner deletes shared cache entries mid-run and then reads the
-// benchmark's effective source, proving the benchmark ran against its own lease.
-type ioOptEvictRunner struct {
-	cacheDir  string
-	want      string
-	found     bool
-	usedLease bool
-}
-
-func (r *ioOptEvictRunner) RunBenchmark(ctx context.Context, w *Worker, record *BenchmarkRecord) error {
-	entries, err := os.ReadDir(r.cacheDir)
-	if err != nil {
-		return err
-	}
-	for _, e := range entries {
-		name := e.Name()
-		if strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".meta.json") || strings.HasSuffix(name, ".lock") {
-			continue
-		}
-		r.found = true
-		if err := os.Remove(filepath.Join(r.cacheDir, name)); err != nil {
-			return err
-		}
-	}
-	if !r.found {
-		return fmt.Errorf("no shared cache entry to evict")
-	}
-	if w.isCachePath(record.Source) {
-		return fmt.Errorf("benchmark ran directly against the shared cache path %q", record.Source)
-	}
-	b, err := os.ReadFile(record.Source)
-	if err != nil {
-		return fmt.Errorf("benchmark lease unreadable after eviction: %w", err)
-	}
-	if string(b) != r.want {
-		return fmt.Errorf("benchmark lease content %q != %q", b, r.want)
-	}
-	r.usedLease = true
-	return nil
-}
-
-// TestIOOpt_ActiveBenchmarkSurvivesCacheEviction proves the benchmark acquires a
-// job-local lease and keeps running after the shared cache names are unlinked.
-func TestIOOpt_ActiveBenchmarkSurvivesCacheEviction(t *testing.T) {
-	dir := t.TempDir()
-	ext := filepath.Join(dir, "nas")
-	content := "benchmark-source-bytes"
-	src := ioOptWriteFile(t, filepath.Join(ext, "movie.mkv"), content)
-	sha := ioOptSHA(t, src)
-	cfg := pr6b2Config(dir, func(c *WorkerConfig) {
-		c.ExternalRoots = []string{ext}
-		c.StagingPolicy = StagingPolicyAlways
-		c.LocalWorkDir = filepath.Join(dir, "work")
-	})
-	w := NewWorker(cfg)
-	const id = "bench-evict-1"
-	jobDir := filepath.Join(cfg.StateDir, id)
-	if err := os.MkdirAll(jobDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	rec := &BenchmarkRecord{
-		ProtocolVersion: transcode.WorkerProtocolVersion, ID: id, Status: "queued",
-		Source: src, SourceSHA256: sha, EffectiveSource: filepath.Join(jobDir, "source.mkv"),
-		Metric: "vmaf", RunToken: "run-token-evict",
-		Samples:    []transcode.BenchmarkSampleWindow{{Index: 0, StartSeconds: 0, DurationSeconds: 1}},
-		Candidates: []transcode.BenchmarkCandidate{{ID: "cand-1", VideoProfile: "main", PixelFormat: "yuv420p"}},
-		CreatedAt:  time.Now().UTC(),
-	}
-	if err := SaveBenchmarkAtomic(filepath.Join(jobDir, "benchmark.json"), rec); err != nil {
-		t.Fatal(err)
-	}
-	runner := &ioOptEvictRunner{cacheDir: w.sourceCacheDir(), want: content}
-	w.SetBenchmarkRunner(runner)
-	if err := w.InternalBenchmark(context.Background(), id, "run-token-evict"); err != nil {
-		t.Fatalf("InternalBenchmark: %v", err)
-	}
-	if !runner.usedLease {
-		t.Fatal("benchmark did not run against its job-local lease")
-	}
-}
-
 // TestIOOpt_SweepRemovesCorrectSidecar proves the sweep removes
 // <key>.meta.json (not <key><ext>.meta.json).
 func TestIOOpt_SweepRemovesCorrectSidecar(t *testing.T) {
@@ -405,8 +345,7 @@ func TestIOOpt_SweepRemovesCorrectSidecar(t *testing.T) {
 		c.SourceCacheTTLHours = 1
 	})
 	w := NewWorker(cfg)
-	ctx := context.Background()
-	cached, err := w.ensureSourceCached(ctx, filepath.Clean(src), sha)
+	cached, err := ioOptCacheSource(t, w, src, sha)
 	if err != nil {
 		t.Fatal(err)
 	}

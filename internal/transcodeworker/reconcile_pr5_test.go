@@ -399,7 +399,7 @@ func TestPR5_PersistTerminalNormalWritesMarkerAfterJob(t *testing.T) {
 	}
 }
 
-func TestPR5_BenchmarkOnlyAndEmptyDirsSkipped(t *testing.T) {
+func TestPR5_BenchmarkOnlyDirRetiredAndEmptyDirSkipped(t *testing.T) {
 	stub := newStubSpawn()
 	w, tempDir, _ := newPR3Worker(t, 4, stub)
 	stateDir := pr5StateDir(tempDir)
@@ -420,15 +420,9 @@ func TestPR5_BenchmarkOnlyAndEmptyDirsSkipped(t *testing.T) {
 	if err := w.ReconcileStartup(context.Background()); err != nil {
 		t.Fatalf("benchmark-only/empty dirs must be skipped, got %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(benchDir, "terminal.json")); !os.IsNotExist(err) {
-		t.Fatalf("benchmark-only dir must get no terminal marker")
-	}
-	raw, err := os.ReadFile(filepath.Join(benchDir, "benchmark.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(raw) != benchJSON {
-		t.Fatalf("benchmark.json must be untouched, got %s", raw)
+	// The retired sample test is removed, never given a terminal marker.
+	if _, err := os.Stat(benchDir); !os.IsNotExist(err) {
+		t.Fatalf("retired benchmark dir must be removed, stat err=%v", err)
 	}
 	if _, err := os.Stat(filepath.Join(emptyDir, "terminal.json")); !os.IsNotExist(err) {
 		t.Fatalf("empty dir must get no job or marker mutation")
