@@ -2,9 +2,11 @@ package action
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/jakenesler/navigatorr/transcode"
@@ -254,13 +256,80 @@ func validateTranscodeCommon(inputs map[string]any) (*transcodeRequest, error) {
 }
 
 func validateTranscodeMedia(_ context.Context, e *Engine, inputs map[string]any) (map[string]any, error) {
-	_, err := e.validateTranscodeRequest("transcode_media", inputs)
-	return inputs, err
+	if _, err := e.validateTranscodeRequest("transcode_media", inputs); err != nil {
+		return inputs, err
+	}
+	return inputs, e.rejectSearchInputs("transcode_media", inputs)
 }
 
 func validateBenchmarkTranscode(_ context.Context, e *Engine, inputs map[string]any) (map[string]any, error) {
-	_, err := e.validateTranscodeRequest("benchmark_transcode", inputs)
-	return inputs, err
+	if _, err := e.validateTranscodeRequest("benchmark_transcode", inputs); err != nil {
+		return inputs, err
+	}
+	return inputs, e.rejectSearchInputs("benchmark_transcode", inputs)
+}
+
+// searchOnlyInputs only ever tuned the CRF sample search.
+var searchOnlyInputs = []string{"metric", "priority", "shared_calibration", "calibration_items", "batch_fixed_quality"}
+
+// SearchOnlyInputs are the inputs new requests may no longer set because
+// they only tuned the removed sample search.
+func SearchOnlyInputs() []string { return slices.Clone(searchOnlyInputs) }
+
+// rejectSearchInputs refuses, for a new request, what only drove the CRF
+// sample search: every goal now encodes the whole file at a fixed recipe and
+// lets the final check decide (see transcode_recipe.go). It is an admission
+// rule only: actions already admitted, and the children and calibration
+// samples a batch admitted before creates from its stored inputs, run as they
+// were admitted.
+func (e *Engine) rejectSearchInputs(name string, inputs map[string]any) error {
+	if e.batchChild(inputs) || e.legacySearch {
+		return nil
+	}
+	if name == "benchmark_transcode" {
+		return inputErr("", "sample tests were removed: the sample search no longer picks encode settings. Run transcode_media with a goal (mode) instead")
+	}
+	for _, key := range searchOnlyInputs {
+		if inputSet(inputs[key]) {
+			return inputErr(key, "%s only tuned the sample search, which was removed; choose a goal (mode) instead", key)
+		}
+	}
+	if raw, present := inputs["profile_config"]; present && raw != nil {
+		var profile recipe.Profile
+		if b, err := json.Marshal(raw); err == nil && json.Unmarshal(b, &profile) == nil && profile.Optimization != nil && profile.Optimization.Enabled {
+			return inputErr("profile_config", "profile_config with optimization enabled ran the sample search, which was removed; turn optimization off for a fixed profile, or choose a goal (mode) instead")
+		}
+	}
+	if name := strings.TrimSpace(getString(inputs, "profile")); name != "" && !strings.EqualFold(name, "auto") && e.deps.Config != nil {
+		if profile, err := e.deps.Config.Transcode.ResolveProfile(name); err == nil && profile.Optimization != nil && profile.Optimization.Enabled {
+			return inputErr("profile", "profile %q runs the sample search, which was removed; choose a profile without optimization, or a goal (mode) instead", name)
+		}
+	}
+	return nil
+}
+
+// inputSet reports an input given a value: not absent, null, empty or false.
+func inputSet(v any) bool {
+	switch x := v.(type) {
+	case nil:
+		return false
+	case string:
+		return strings.TrimSpace(x) != ""
+	case bool:
+		return x
+	}
+	return true
+}
+
+// batchChild reports a request a batch admitted earlier creates for one of
+// its items: it names an existing transcode_batch as its parent.
+func (e *Engine) batchChild(inputs map[string]any) bool {
+	id := strings.TrimSpace(getString(inputs, "parent_action_id"))
+	if id == "" || e.deps.Store == nil {
+		return false
+	}
+	parent, err := e.deps.Store.GetActionInstance(id)
+	return err == nil && parent != nil && parent.ActionName == "transcode_batch"
 }
 
 // validateTranscodeBatch checks what a batch passes through to its children
@@ -282,6 +351,9 @@ func validateTranscodeBatch(_ context.Context, e *Engine, inputs map[string]any)
 		return nil, err
 	}
 	if _, err := validateTranscodeCommon(inputs); err != nil {
+		return nil, err
+	}
+	if err := e.rejectSearchInputs("transcode_batch", inputs); err != nil {
 		return nil, err
 	}
 	if paths, present, err := batchPathsInput(inputs); err != nil {
