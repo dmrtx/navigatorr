@@ -38,6 +38,7 @@ Each case is a subtest, run one after another against one engine and one worker.
 | Case | Source | Goal | Must produce |
 | --- | --- | --- | --- |
 | 1_size_hardware | 1080p SDR H.264 + FLAC | size, hardware allowed | candidate within the size budget, at least 15% smaller, AAC audio, HEVC video, passing quality evidence, a VideoToolbox rung in the budget, original hash unchanged |
+| 1b_size_hardware_no_budget | same | size, hardware allowed, no budget | passing candidate at least 15% smaller, AAC audio, from a rung of the VideoToolbox quality ladder (`plan_source` `quality_ladder`, encoder `hevc_videotoolbox`, no x265 fallback), no sample test |
 | 2_size_x265 | same | size, hardware off | passing candidate from the one two-pass x265 encode at the budget (`budget_first`, encoder choice `hardware_not_allowed`), no sample test |
 | 3_compact_hdr | 4K HDR10 HEVC 10-bit, tagged BT.2020 / PQ with mastering display and light level | compact | at most 1080p SDR BT.709, at least 30% smaller, passing quality from a rung of the x265 CRF ladder, no sample test |
 | 4_quality | 1080p SDR | quality | passing candidate against the strict thresholds from a rung of the x265 CRF ladder, no sample test |

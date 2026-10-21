@@ -39,6 +39,7 @@ func TestTranscodeAcceptance(t *testing.T) {
 		run  func(k *kase)
 	}{
 		{"1_size_hardware", caseSizeHardware},
+		{"1b_size_hardware_no_budget", caseSizeHardwareNoBudget},
 		{"2_size_x265", caseSizeX265},
 		{"3_compact_hdr", caseCompact},
 		{"4_quality", caseQuality},
@@ -80,6 +81,27 @@ func caseSizeHardware(k *kase) {
 	r := k.s.transcode(k.T, src, map[string]any{"mode": "size", "allow_hardware": true, "size_budget_percent": budgetPercent}, caseTimeout)
 	k.expectCandidate(src, sha, r, candidateWant{minSaved: 15, maxBytes: budgetBytes(fileSize(k.T, src)), audio: "aac"})
 	k.expectLadder(r)
+}
+
+// caseSizeHardwareNoBudget is the size goal with the media engine and no
+// budget: the VideoToolbox quality ladder, planned without a sample test, whose
+// rung passes the goal's quality gate on the whole file.
+func caseSizeHardwareNoBudget(k *kase) {
+	k.needCaps("libx264", "flac", "aac", "hevc_videotoolbox", "vmaf")
+	k.row.Goal = "size+hardware, no budget"
+	src := k.s.source(k.T, sdrSource)
+	sha := k.sha(src)
+	k.promisedOK(src, "size")
+	r := k.s.transcode(k.T, src, map[string]any{"mode": "size", "allow_hardware": true}, caseTimeout)
+	k.expectCandidate(src, sha, r, candidateWant{minSaved: 15, audio: "aac"})
+	k.require(r.budget == nil, "a goal without a budget recorded one: %s", r.describe())
+	k.require(r.ladder != nil, "the result has no quality ladder record: %s", r.describe())
+	k.require(r.ladder.Outcome == action.QualityLadderPassed, "the quality ladder ended %q: %s", r.ladder.Outcome, r.ladder.Message)
+	k.require(r.ladder.Choice == nil, "the ladder fell back: %s", r.ladder.Message)
+	k.require(r.goal.Hardware && r.ladder.VideoCodec == "hevc_videotoolbox" && r.goal.Encoder == "hevc_videotoolbox",
+		"the quality ladder encoded with %q/%q, want hevc_videotoolbox", r.ladder.VideoCodec, r.goal.Encoder)
+	k.require(pickStr(r.res, "plan_source") == "quality_ladder", "the encode plan came from %q, want the quality ladder", pickStr(r.res, "plan_source"))
+	k.expectNoSampleTest(r)
 }
 
 // expectLadder asserts a hardware size goal was met on the VideoToolbox ladder:
