@@ -3928,6 +3928,35 @@ test("a cancelled or no-winner standalone file offers Run again with a confirmat
   assert.equal(h.run('state.rerunKeys.has("old")'), false);
 });
 
+test("a media engine budget encode below the quality floor offers Try with x265, which reruns with the engine off", async () => {
+  const h = harness();
+  h.run('state.workerInfo={ready:true}');
+  const base = '{id:"old",action_name:"transcode_media",status:"completed",mode:"size",reason_code:"quality_not_met",source_path:"/media/Show/S01E01.mkv",rerun:{source_path:"/media/Show/S01E01.mkv",mode:"size",replace_original:false,no_winner_rounds:1},size_mode:{encoder:"hevc_videotoolbox",hardware:true,size_budget:{budget_bytes:4000000000,outcome:"below_quality_floor",retry_without_hardware:true}}}';
+  const labels = (job) => h.run(`jobControls(${job}).children.map(b=>b.textContent)`);
+  assert.ok(labels(base).includes("Try with x265"));
+  // Only the below-floor record offers it, and never for a reviewed or batch-owned job.
+  assert.ok(!labels(base.replace("retry_without_hardware:true", "retry_without_hardware:false")).includes("Try with x265"));
+  for (const patch of ['candidate_ready:true', 'status:"waiting_decision"', 'parent_item_key:"epfile-1"', 'replacement_action_id:"r"', 'rerun:undefined'])
+    assert.ok(!labels(`{...${base},${patch}}`).includes("Try with x265"), patch);
+  assert.equal(h.run(`jobControls(${base}).children.find(b=>b.textContent==="Try with x265")`).dataset.requiresWorker, "true");
+
+  const calls = [], reviews = [];
+  h.context.calls = calls; h.context.reviews = reviews;
+  h.run('api=async(path,body)=>{calls.push({path,body});return {id:"new"}};loadJobs=async()=>{};openJob=async()=>{};notify=()=>{};let n=0;submissionID=()=>"key-"+(++n);reviewAction=async(r)=>{reviews.push(r);return true};');
+  await h.run(`rerunJob(${base}, {withoutHardware: true})`);
+  await h.run(`rerunJob(${base})`);
+  assert.equal(calls[0].body.id, "old");
+  assert.equal(calls[0].body.key, "key-1");
+  assert.equal(calls[0].body.without_hardware, true);
+  assert.equal(calls[1].body.without_hardware, undefined, "a plain Run again keeps the engine choice");
+  const text = (r) => r.content.map(n => n.textContent).join(" ");
+  assert.match(text(reviews[0]), /encodes with x265: slower, but it usually keeps more quality at the same size/);
+  assert.equal(reviews[0].confirmLabel, "Try with x265");
+  // The ladder's over-budget steps read as steps, not as searched settings.
+  assert.match(h.run('sizeBudgetPointLabel({kind:"budget_rung_over",video_codec:"hevc_videotoolbox",quality:65,bytes:4100000000,measured:true,within_budget:false})'), /^VideoToolbox quality 65 · 4\.10 GB · VMAF not measured yet · over budget$/);
+  assert.match(h.run('sizeBudgetPointLabel({kind:"budget_rung_over",video_codec:"hevc_videotoolbox",bitrate_kbps:4700,bytes:4100000000,measured:true,within_budget:false})'), /^VideoToolbox average bitrate 4700 kbps · /);
+});
+
 test("the sample test result shows each measured setting's estimated size against the original", () => {
   const h = harness();
   const vmaf = {mean:94.3,p5:85.9,min:80,worst_window_mean:87.3,worst_window_seconds:5};

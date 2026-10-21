@@ -187,8 +187,12 @@ func operationSizeMode(r operationRecord) map[string]any {
 	budget := operationMap(operationValue(r, "size_budget"))
 	if operationNumber(budget["budget_bytes"]) > 0 {
 		// The search's winner (if any) was over the budget: the file is
-		// encoded as x265 at the budget instead.
+		// encoded at the budget instead, as x265 unless the budget's own
+		// choice was the media engine.
 		out["encoder"] = transcode.VideoCodecLibX265
+		if operationString(operationMap(budget["encoder_choice"])["video_codec"]) == transcode.VideoCodecHEVCVideoToolbox {
+			out["encoder"], out["hardware"] = transcode.VideoCodecHEVCVideoToolbox, true
+		}
 		out["size_budget"] = operationSizeBudget(budget)
 	} else if codec := operationString(winner["video_codec"]); codec != "" {
 		out["encoder"] = codec
@@ -317,7 +321,7 @@ func operationSizeMode(r operationRecord) map[string]any {
 // the encode aimed at, how it ended and the rate-quality points to draw.
 func operationSizeBudget(budget map[string]any) map[string]any {
 	out := map[string]any{}
-	for _, key := range []string{"trigger", "source_bytes", "budget_bytes", "budget_percent", "target_bytes", "video_bitrate_kbps", "over_budget_candidate_id", "over_budget_estimated_bytes", "quality_target", "quality_floor", "siblings", "outcome", "candidate_bytes", "below_target", "message"} {
+	for _, key := range []string{"trigger", "source_bytes", "budget_bytes", "budget_percent", "target_bytes", "video_bitrate_kbps", "over_budget_candidate_id", "over_budget_estimated_bytes", "quality_target", "quality_floor", "siblings", "outcome", "candidate_bytes", "below_target", "message", "encoder_choice", "retry_without_hardware"} {
 		if v, ok := budget[key]; ok && v != nil {
 			out[key] = v
 		}

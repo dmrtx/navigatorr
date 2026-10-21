@@ -415,6 +415,15 @@ func convertedAudioTitle(title, layout string, channels int) (string, bool) {
 	return rest + " " + format, true
 }
 
+// sourceTimestampArgs make an encoded video stream keep the source's frame
+// timestamps. By default the encoder time base is 1/fps and the Matroska
+// muxer runs in vfr mode, so two source frames closer than one tick collide
+// and one is dropped: every later frame then sits one frame early, and any
+// window cut by time from the source and from the encode compares different
+// pictures. Passthrough with the demuxer time base keeps every frame where
+// the source put it.
+var sourceTimestampArgs = []string{"-fps_mode:v:0", "passthrough", "-enc_time_base:v:0", "demux"}
+
 // BuildFFmpegArgs generates the exact, safe FFmpeg argument slice from an ExecutionPlan.
 // It explicitly specifies codec mapping per stream type and subtitle stream index,
 // avoiding dangerous global defaults that could corrupt stylized subtitles or mux incompatible codecs.
@@ -473,6 +482,9 @@ func BuildFFmpegArgsWithCoverArt(execPlan *ExecutionPlan, sourcePath, candidateP
 		return nil, err
 	}
 	args = append(args, videoArgs...)
+	if norm(execPlan.Plan.VideoCodec) != transcode.VideoCodecCopy {
+		args = append(args, sourceTimestampArgs...)
+	}
 	if execPlan.Plan.Compact != nil {
 		// The source title often names the dropped format ("... Dolby
 		// Vision", "... HDR10"), and its muxer statistics describe the old

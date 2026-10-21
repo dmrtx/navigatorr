@@ -256,6 +256,12 @@ func sizeBudgetChosenCodec(rec *SizeBudgetRecord) string {
 // base is the plan the search started from.
 func sizeBudgetVideo(snapshot *ModePolicySnapshot, rep *mediainspect.DetailedReport, base *transcode.Plan, enc sizeBudgetEncode, rec *SizeBudgetRecord) (sizeBudgetVideoSettings, error) {
 	policy := snapshot.Size.SizeBudget
+	if sizeBudgetIsLadder(rec) {
+		if base == nil {
+			return sizeBudgetVideoSettings{}, fmt.Errorf("the frozen size plan is missing")
+		}
+		return sizeBudgetLadderVideo(policy, snapshot.Size.Hardware, max(sourceVideoBitDepth(rep), base.ExpectedBitDepth), enc, rec.Rung)
+	}
 	if sizeBudgetChosenCodec(rec) != transcode.VideoCodecHEVCVideoToolbox {
 		x := enc.X265
 		return sizeBudgetVideoSettings{VideoCodec: transcode.VideoCodecLibX265, Preset: policy.Preset, X265: &x}, nil
@@ -282,6 +288,9 @@ func (e *Engine) startSizeBudgetComparison(ec *ExecutionContext, snapshot *ModeP
 	switch {
 	case snapshot.Size.Hardware == nil:
 		return x265Only(SizeBudgetChoiceHardwareOff, "This goal does not allow the media engine (allow_hardware=false), so the budget encode is two-pass x265.")
+	case len(policy.VTLadder) > 0:
+		// The ladder was set aside for this file (see startSizeBudgetLadder).
+		return x265Only(SizeBudgetChoiceNotCompared, "The VideoToolbox ladder did not apply to this file, so the budget encode is two-pass x265.")
 	case policy.Comparison == nil:
 		return x265Only(SizeBudgetChoiceNotCompared, "This goal's budget was frozen before VideoToolbox could be compared at the budget, so the budget encode is two-pass x265.")
 	case continuationActive(ec.State):
@@ -553,7 +562,7 @@ func sizeBudgetCorrectedKbps(kbps int, candidateBytes int64, enc sizeBudgetEncod
 // evidence is the overshooting encode's final validation, when it ran.
 func (e *Engine) retrySizeBudgetBitrate(ec *ExecutionContext, plan *transcode.Plan, candidateBytes int64, evidence *transcode.FinalQualityEvidence) (StepResult, bool) {
 	rec := sizeBudgetOf(ec.State)
-	if rec == nil || plan == nil || transcode.NormalizeVideoCodec(plan.VideoCodec) != transcode.VideoCodecHEVCVideoToolbox || rec.Correction != nil || candidateBytes <= rec.BudgetBytes {
+	if rec == nil || plan == nil || sizeBudgetIsLadder(rec) || transcode.NormalizeVideoCodec(plan.VideoCodec) != transcode.VideoCodecHEVCVideoToolbox || rec.Correction != nil || candidateBytes <= rec.BudgetBytes {
 		return StepResult{}, false
 	}
 	snapshot, err := freezeModePolicy(ec)
@@ -645,6 +654,9 @@ func sizeBudgetPlanMatches(snapshot *ModePolicySnapshot, instanceID string, stat
 	enc := planSizeBudgetEncode(policy, rep, original, budget)
 	if enc.Reason != "" || rec.BudgetBytes != budget || rec.TargetBytes != enc.TargetBytes || rec.VideoBitrateKbps != enc.X265.BitrateKbps {
 		return false
+	}
+	if sizeBudgetIsLadder(rec) {
+		return sizeBudgetLadderPlanMatches(snapshot, rep, plan, rec, enc, budget)
 	}
 	var want sizeBudgetVideoSettings
 	if sizeBudgetChosenCodec(rec) == transcode.VideoCodecHEVCVideoToolbox {

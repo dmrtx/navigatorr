@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"sync"
@@ -192,6 +193,9 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 		}
 		if err := verifySampleAlignment(refPTS, candPTS, sourceVideoStreams[0].FPS); err != nil {
 			return bad("quality_final_sample_misaligned", err)
+		}
+		if err := verifyContentAlignment(ctx, w.ffmpegPath, candPath, refPath, threads); err != nil {
+			return bad("quality_final_sample_misaligned", fmt.Errorf("sample %d: %w", window.Index, err))
 		}
 		var r finalWindowResult
 		if runVMAF {
@@ -524,6 +528,64 @@ func verifySampleAlignment(ref, cand []float64, fps float64) error {
 		}
 	}
 	return nil
+}
+
+// contentAlignmentFrames is how many leading frames verifyContentAlignment
+// compares, and contentAlignmentMarginDB how much closer a neighbouring frame
+// must match than the aligned one before the window counts as shifted.
+const (
+	contentAlignmentFrames   = 12
+	contentAlignmentMarginDB = 3.0
+)
+
+var psnrAverage = regexp.MustCompile(`PSNR .*average:(inf|[0-9]+(?:\.[0-9]+)?)`)
+
+// verifyContentAlignment checks that the two extracts start on the same
+// picture. Timestamps cannot show this: both extracts start at zero, so an
+// encode that lost one frame before the window pairs picture N+1 with N at
+// perfectly regular spacing, and every metric then reads it as damage. The
+// first frames are compared at offsets -1, 0 and +1; a neighbour that matches
+// clearly better than the aligned pair means the window is shifted.
+func verifyContentAlignment(ctx context.Context, ffmpegPath, candPath, refPath string, threads int) error {
+	aligned, err := leadingFramesPSNR(ctx, ffmpegPath, candPath, refPath, 0, threads)
+	if err != nil {
+		return err
+	}
+	for _, offset := range []int{-1, 1} {
+		shifted, err := leadingFramesPSNR(ctx, ffmpegPath, candPath, refPath, offset, threads)
+		if err != nil {
+			return err
+		}
+		if shifted > aligned+contentAlignmentMarginDB {
+			return fmt.Errorf("candidate is shifted %+d frame against the source (PSNR %.1f dB shifted, %.1f dB aligned)", offset, shifted, aligned)
+		}
+	}
+	return nil
+}
+
+// leadingFramesPSNR is the mean PSNR of candidate frame i+offset against
+// reference frame i over the first contentAlignmentFrames pairs. Frames are
+// paired by index, not timestamp, so irregular spacing cannot re-pair them.
+// threads is the window's share of the metric threads, as for VMAF.
+func leadingFramesPSNR(ctx context.Context, ffmpegPath, candPath, refPath string, offset, threads int) (float64, error) {
+	pick := func(skip int) string {
+		return fmt.Sprintf("trim=start_frame=%d:end_frame=%d,setpts=N/(10*TB)", skip, skip+contentAlignmentFrames)
+	}
+	candSkip, refSkip := max(offset, 0), max(-offset, 0)
+	graph := fmt.Sprintf("[0:v:0]%s[c];[1:v:0]%s[r];[c][r]psnr", pick(candSkip), pick(refSkip))
+	t := strconv.Itoa(max(threads, 1))
+	output, err := runQualityCommand(ctx, ffmpegPath, []string{"-nostdin", "-nostats", "-threads", t, "-i", candPath, "-threads", t, "-i", refPath, "-filter_complex_threads", t, "-filter_complex", graph, "-f", "null", "-"})
+	if err != nil {
+		return 0, err
+	}
+	m := psnrAverage.FindStringSubmatch(string(output))
+	if m == nil {
+		return 0, fmt.Errorf("alignment PSNR missing from ffmpeg output")
+	}
+	if m[1] == "inf" {
+		return 100, nil
+	}
+	return strconv.ParseFloat(m[1], 64)
 }
 
 // probeFailure describes a probe that gave no usable video. The probe's own

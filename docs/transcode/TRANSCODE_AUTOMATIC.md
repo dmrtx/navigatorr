@@ -233,8 +233,37 @@ the encode starts and shown as the estimate (*Budget estimate*), not the
 over-budget winner. Validation rebuilds these settings from the frozen policy
 and the source and accepts only a plan that matches them exactly.
 
-**VideoToolbox at the budget.** When the goal allows the media engine
-(`allow_hardware`, on by default), the budget is frozen with an encoder
+**VideoToolbox ladder.** When the goal allows the media engine
+(`allow_hardware`, on by default) and the worker lists `hevc_videotoolbox`, a
+size budget does not search at all. VideoToolbox encodes a whole episode in
+minutes and, at a budget, measured above the quality floor every time, so the
+file is encoded in full at a short ladder, best picture first: constant quality
+(`-q:v`) 65, then 58, then 50, then VideoToolbox's average bitrate at the
+budget's video bitrate (the x265 budget bitrate above). The values are frozen
+in the policy (`size.size_budget.vt_quality_ladder`). Each step's plan carries
+the budget as an absolute ceiling (`size_policy.max_candidate_bytes`), so the
+worker refuses an over-budget file right after the encode, before it spends
+minutes scoring it, and the next step is encoded. The first step that fits is
+scored by the normal final validation against the floor:
+
+* within the budget and meeting the goal's quality target: `meets_quality_target_within_budget`;
+* within the budget, below the target but above the floor: `below_quality_target_within_budget`, offered for review as before;
+* below the floor: no candidate is offered. The job says *Try again with x265
+  (allow_hardware off): slower, but it usually keeps more quality at the same
+  size*, and the web UI shows a **Try with x265** button that starts a new
+  `transcode_media` action with the same inputs and `allow_hardware=false`;
+* the last step (the average bitrate) still over the budget: `size_budget_exceeded`, original preserved.
+
+The over-budget steps stay in the job's size and quality points. Validation
+rebuilds the step from the frozen policy, the source and the step number kept
+in the record and accepts only a plan that matches it and the ceiling exactly.
+With the media engine off, or on a worker without it, the search and the
+two-pass x265 budget encode run as described above.
+
+**Legacy encoder comparison.** Snapshots frozen before the ladder carry an
+encoder comparison instead (`size.size_budget.encoder_comparison`) and keep
+running it. When the goal allows the media engine (`allow_hardware`, on by
+default), the budget is frozen with an encoder
 comparison (`size.size_budget.encoder_comparison`) and the fallback measures
 before it encodes. At the budget the bitrate is fixed, so the encoders can be
 compared on quality alone: one bounded benchmark round (20 minutes) encodes the

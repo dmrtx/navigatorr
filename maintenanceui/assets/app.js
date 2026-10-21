@@ -83,6 +83,7 @@ function actionIcon(label) {
     "Try another profile": "M4 7h16M4 17h16M8 4v6M16 14v6",
     Retry: "M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M18 18A8 8 0 0 1 4 12",
     "Run again": "M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M18 18A8 8 0 0 1 4 12",
+    "Try with x265": "M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M18 18A8 8 0 0 1 4 12",
     Review: "M5 4h14v16H5ZM8 8h8M8 12h8",
     "Review preview": "M5 4h14v16H5ZM8 8h8M8 12h8",
     "Start batch": "M7 4l13 8-13 8Z",
@@ -3068,27 +3069,31 @@ function confirmDecision(job, choice, label) {
 const rerunGoals = {size: "Smaller files", quality: "Prioritize quality", x265_preserve: "Convert to HEVC · Strict quality", compact: "Make it much smaller · SDR 1080p"};
 // Another round on a file is the user's decision: confirming is that decision,
 // and each confirmed attempt starts a new action under a fresh key.
-async function rerunJob(job) {
+async function rerunJob(job, {withoutHardware = false} = {}) {
   const info = job.rerun || {};
   const content = [node("p", queuePresentation(job).title, "review-filename")];
   const goal = rerunGoals[info.mode];
   content.push(node("p", goal ? `Goal: ${goal}` : "The same settings as before."));
-  content.push(node("p", "This starts a new job with the same settings. The earlier job is not changed.", "muted"));
+  if (withoutHardware) content.push(node("p", "The media engine is turned off for this job, so it encodes with x265: slower, but it usually keeps more quality at the same size."));
+  content.push(node("p", withoutHardware ? "This starts a new job with the same settings otherwise. The earlier job is not changed." : "This starts a new job with the same settings. The earlier job is not changed.", "muted"));
   if (info.no_winner_rounds >= 2) content.push(node("p", `This file already had ${info.no_winner_rounds} searches without a result. Run it again only if you want another round.`));
   content.push(node("p", info.replace_original ? "This job was set to replace the original: if it finds a result, the original is replaced only after you review and approve it." : "Originals stay in place.", "muted"));
   // One key per open confirmation: after a lost response, clicking again replays
   // the same key instead of creating a second job. Declining or success ends it.
   state.rerunKeys ||= new Map();
-  if (!state.rerunKeys.has(job.id)) state.rerunKeys.set(job.id, submissionID());
-  if (!(await reviewAction({title: "Run this file again?", content, confirmLabel: "Run again", cancelLabel: "Not now"}))) {
-    state.rerunKeys.delete(job.id);
+  const keyID = withoutHardware ? `${job.id}:x265` : job.id;
+  if (!state.rerunKeys.has(keyID)) state.rerunKeys.set(keyID, submissionID());
+  if (!(await reviewAction({title: withoutHardware ? "Try this file with x265?" : "Run this file again?", content, confirmLabel: withoutHardware ? "Try with x265" : "Run again", cancelLabel: "Not now"}))) {
+    state.rerunKeys.delete(keyID);
     return;
   }
   if (jobIsBusy(job.id)) return;
   state.busyJobs.add(job.id);
   try {
-    const result = await api("rerun", {id: job.id, key: state.rerunKeys.get(job.id)});
-    state.rerunKeys.delete(job.id);
+    const body = {id: job.id, key: state.rerunKeys.get(keyID)};
+    if (withoutHardware) body.without_hardware = true;
+    const result = await api("rerun", body);
+    state.rerunKeys.delete(keyID);
     state.jobsLoaded = 0;
     notify("Queued a new job. It is listed first.");
     await loadJobs();
@@ -3109,6 +3114,7 @@ function jobControls(job, detail = false) {
     b.dataset.requiresWorker = String(
       (label === "Retry" && ["transcode_media", "transcode_batch", "benchmark_transcode"].includes(job.action_name) && !(job.action_name === "transcode_batch" && job.current_step >= 2)) ||
       label === "Run again" ||
+      label === "Try with x265" ||
       label === "Resume batch" ||
       label === "Start batch" ||
       (job.action_name === "transcode_batch" && !job.batch?.promotion_plan_ready &&
@@ -3221,6 +3227,10 @@ function jobControls(job, detail = false) {
   // winner; batch children use Change goal and reviewed candidates are decided.
   if (job.rerun && !job.parent_item_key && !job.candidate_ready && !job.replacement_action_id && job.status !== "waiting_decision" && !(job.mode && sourceGateReason(job.reason_code)))
     add("Run again", () => rerunJob(job));
+  // A media engine budget encode that fit but missed the quality floor offers no
+  // candidate; x265 is slower and usually keeps more quality at the same size.
+  if (job.rerun && job.size_mode?.size_budget?.retry_without_hardware && !job.parent_item_key && !job.candidate_ready && !job.replacement_action_id && job.status !== "waiting_decision")
+    add("Try with x265", () => rerunJob(job, {withoutHardware: true}));
   if (
     job.action_name === "transcode_batch" &&
     ["running", "waiting_external"].includes(job.status)
@@ -3914,13 +3924,15 @@ function budgetEncoderName(codec) {
 }
 // Point kinds: "searched" settings, the two "budget_measured" encodes of the
 // encoder comparison at the budget, a "budget_overshoot" VideoToolbox encode
-// re-encoded at a lower bitrate, and the "budget_fallback" encode itself.
+// re-encoded at a lower bitrate, a "budget_rung_over" VideoToolbox step that
+// came out over the budget, and the "budget_fallback" encode itself.
 function sizeBudgetPointLabel(p) {
   const bits = [];
   const kbps = p.bitrate_kbps ? ` ${p.bitrate_kbps} kbps` : "";
-  if (p.kind === "budget_fallback") bits.push(`Budget encode · ${budgetEncoderName(p.video_codec)}${kbps}`);
+  if (p.kind === "budget_fallback") bits.push(`Budget encode · ${budgetEncoderName(p.video_codec)}${p.quality > 0 ? ` quality ${p.quality}` : kbps}`);
   else if (p.kind === "budget_measured") bits.push(`Compared at the budget · ${budgetEncoderName(p.video_codec)}${kbps}${p.chosen ? " · chosen" : ""}`);
   else if (p.kind === "budget_overshoot") bits.push(`First budget encode · ${budgetEncoderName(p.video_codec)}${kbps}`);
+  else if (p.kind === "budget_rung_over") bits.push(`VideoToolbox ${p.quality > 0 ? `quality ${p.quality}` : `average bitrate${kbps}`}`);
   else bits.push(`${p.candidate_id || "Setting"}${p.video_codec === "hevc_videotoolbox" ? " · VideoToolbox" : ""}`);
   bits.push(`${p.measured ? "" : p.kind === "budget_fallback" ? "planned " : "est. "}${bytes(p.bytes)}`);
   bits.push(p.vmaf_mean != null ? `VMAF ${Number(p.vmaf_mean).toFixed(1)}${p.kind === "budget_measured" && p.vmaf_p5 != null ? ` (p5 ${Number(p.vmaf_p5).toFixed(1)})` : ""}` : "VMAF not measured yet");
@@ -3931,7 +3943,7 @@ function sizeBudgetPointLabel(p) {
 function sizeBudgetPointClass(p, measuredY) {
   if (p.kind === "budget_fallback") return measuredY ? "point fallback" : "point planned";
   if (p.kind === "budget_measured") return `point compared${p.chosen ? " chosen" : ""}`;
-  if (p.kind === "budget_overshoot") return "point overshoot";
+  if (p.kind === "budget_overshoot" || p.kind === "budget_rung_over") return "point overshoot";
   return `point${p.passed ? " passed" : ""}`;
 }
 // A compact inline rate-quality chart: size across, VMAF mean up; searched

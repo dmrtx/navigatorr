@@ -397,10 +397,9 @@ func modePolicyWithBudget(mode string, anime bool, maxHeight int, hardware *tran
 		snapshot.Size.Hardware = hardware.Clone()
 		snapshot.Size.SizeBudget = budget.Clone()
 		if snapshot.Size.SizeBudget != nil && snapshot.Size.Hardware != nil {
-			// The media engine is allowed, so the budget encode may use it
-			// when it measures as well as x265 at the budget.
-			rules := sizeBudgetComparisonRules
-			snapshot.Size.SizeBudget.Comparison = &rules
+			// The media engine is allowed, so the budget skips the search and
+			// walks the VideoToolbox ladder (see transcode_size_budget_ladder.go).
+			snapshot.Size.SizeBudget.VTLadder = slices.Clone(sizeBudgetVTLadder)
 		}
 	}
 	if mode == "compact" {

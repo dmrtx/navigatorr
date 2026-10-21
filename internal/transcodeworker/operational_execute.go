@@ -265,6 +265,12 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 	attest, verr := w.validateEncodedCandidateFull(validationCtx, r.localCandidate, execPlan, srcProbe, 0)
 	if verr == nil {
 		verr = transcode.ValidateFinalSize(job.SourceSizeBytes, attest.SizeBytes, job.Plan.SizePolicy)
+		if verr != nil {
+			// A size the policy refuses is a measurement the coordinator acts on
+			// (a size budget moves to its next step by how far it overshot); it
+			// is reported with the failed job, never published.
+			job.CandidateSizeBytes = attest.SizeBytes
+		}
 	}
 	audioOnly := transcode.IsSizeAudioOnlyPlan(job.Plan)
 	if verr == nil && job.Plan != nil && (job.Plan.QualityValidation != nil || audioOnly) {

@@ -95,6 +95,11 @@ type Plan struct {
 type SizePolicy struct {
 	MinSavingsPercent      float64 `json:"min_savings_percent" yaml:"min_savings_percent"`
 	MaxSizeIncreasePercent float64 `json:"max_size_increase_percent" yaml:"max_size_increase_percent"`
+	// MaxCandidateBytes, when positive, is an absolute ceiling on the encoded
+	// file. The worker refuses a larger candidate right after the encode, before
+	// any quality scoring. Zero (the default, omitted from the plan's JSON and
+	// so from its digest) means no ceiling.
+	MaxCandidateBytes int64 `json:"max_candidate_bytes,omitempty" yaml:"max_candidate_bytes,omitempty"`
 }
 
 // FinalWindowScore is one final validation window's VMAF measurement. Role is

@@ -151,7 +151,7 @@ func maintenanceJSON(raw string, keys []string) string {
 			case "size_budget":
 				// The budget, how the encode ended and the curve to draw; the
 				// per-window evidence stays in the action history.
-				projected := json.RawMessage(maintenanceJSON(string(value), []string{"trigger", "source_bytes", "budget_bytes", "budget_percent", "target_bytes", "video_bitrate_kbps", "over_budget_candidate_id", "over_budget_estimated_bytes", "quality_target", "quality_floor", "siblings", "curve", "outcome", "candidate_bytes", "below_target", "message"}))
+				projected := json.RawMessage(maintenanceJSON(string(value), []string{"trigger", "source_bytes", "budget_bytes", "budget_percent", "target_bytes", "video_bitrate_kbps", "over_budget_candidate_id", "over_budget_estimated_bytes", "quality_target", "quality_floor", "siblings", "curve", "outcome", "candidate_bytes", "below_target", "message", "encoder_choice", "retry_without_hardware"}))
 				var kept map[string]json.RawMessage
 				_ = json.Unmarshal(projected, &kept)
 				if final, exists := nested["final"]; exists {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -18,7 +19,7 @@ import (
 // for the encoder comparison round to be built from it.
 func newComparisonCase(t *testing.T, inputs map[string]any) *budgetCase {
 	t.Helper()
-	in := map[string]any{"size_budget_percent": 40.0}
+	in := map[string]any{"size_budget_percent": 40.0, "legacy_comparison": true}
 	for k, v := range inputs {
 		in[k] = v
 	}
@@ -57,11 +58,13 @@ func TestSizeBudgetComparisonFreeze(t *testing.T) {
 		}
 		return snapshot
 	}
-	if got := freeze(map[string]any{"size_budget_percent": 40.0}).Size.SizeBudget.Comparison; got == nil || *got != sizeBudgetComparisonRules {
-		t.Fatalf("comparison with the media engine allowed: %+v", got)
+	// New snapshots freeze the VideoToolbox ladder in place of the comparison;
+	// the comparison is only carried by snapshots frozen before the ladder.
+	if got := freeze(map[string]any{"size_budget_percent": 40.0}).Size.SizeBudget; got.Comparison != nil || !slices.Equal(got.VTLadder, []int{65, 58, 50}) {
+		t.Fatalf("budget with the media engine allowed: %+v", got)
 	}
-	if got := freeze(map[string]any{"size_budget_percent": 40.0, "allow_hardware": false}).Size.SizeBudget.Comparison; got != nil {
-		t.Fatalf("comparison frozen with allow_hardware=false: %+v", got)
+	if got := freeze(map[string]any{"size_budget_percent": 40.0, "allow_hardware": false}).Size.SizeBudget; got.Comparison != nil || got.VTLadder != nil {
+		t.Fatalf("encoder rules frozen with allow_hardware=false: %+v", got)
 	}
 	if freeze(nil).Size.SizeBudget != nil {
 		t.Fatal("a size goal without a budget gained one")
@@ -77,7 +80,7 @@ func TestSizeBudgetComparisonFreeze(t *testing.T) {
 		}
 	}
 	// The preview compares budgets the user chose, not the comparison rules.
-	withRules := map[string]any{"mode_policy": map[string]any{"size": map[string]any{"size_budget": map[string]any{"percent": 40.0, "encoder_comparison": map[string]any{"vmaf_mean_tolerance": 1.0}}}}}
+	withRules := map[string]any{"mode_policy": map[string]any{"size": map[string]any{"size_budget": map[string]any{"percent": 40.0, "encoder_comparison": map[string]any{"vmaf_mean_tolerance": 1.0}, "vt_quality_ladder": []any{65.0, 58.0, 50.0}}}}}
 	without := map[string]any{"mode_policy": map[string]any{"size": map[string]any{"size_budget": map[string]any{"percent": 40.0}}}}
 	if a, b := BatchItemFrozenSizeBudget(withRules, "x"), BatchItemFrozenSizeBudget(without, "x"); fmt.Sprint(a) != fmt.Sprint(b) {
 		t.Fatalf("frozen budgets differ only by the comparison: %v %v", a, b)
@@ -166,7 +169,7 @@ func TestSizeBudgetComparisonRound(t *testing.T) {
 		if !reencode(c.ec.State["benchmark_request"], &req) || req.ID != "bench-1" || c.ec.State["benchmark_job_id"] != "bench-1" || sizeBudgetRoundActive(c.ec.State) || c.ec.State["benchmark_quality"] == nil {
 			t.Fatalf("search state not restored: %+v", c.ec.State)
 		}
-		if _, err := c.engine.sizeBudgetPlan(c.ec, c.snapshot, sizeBudgetVideoOf(getPlan(c.ec.State["plan"]))); err != nil {
+		if _, err := c.engine.sizeBudgetPlan(c.ec, c.snapshot, sizeBudgetVideoOf(getPlan(c.ec.State["plan"])), nil); err != nil {
 			t.Fatalf("the search's request no longer matches its digest: %v", err)
 		}
 	}
