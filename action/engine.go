@@ -494,7 +494,11 @@ func (e *Engine) retry(ctx context.Context, instanceID string, guard func(*store
 
 // Resume re-activates a paused or waiting action instance.
 func (e *Engine) Resume(ctx context.Context, instanceID string, decision string, extraInputs map[string]any) (*ActionResult, error) {
-	return e.resume(ctx, instanceID, decision, extraInputs, false)
+	res, err := e.resume(ctx, instanceID, decision, extraInputs, false)
+	if err == nil {
+		e.refreshBatchParent(ctx, instanceID)
+	}
+	return res, err
 }
 
 func (e *Engine) resume(ctx context.Context, instanceID string, decision string, extraInputs map[string]any, automatic bool) (*ActionResult, error) {
@@ -555,7 +559,9 @@ func (e *Engine) resume(ctx context.Context, instanceID string, decision string,
 	}
 
 	ec := parseExecutionContext(inst, e)
-	if (automatic && !e.shouldReconcile(inst, tmpl, ec)) || (inst.Status == StatusWaitingDecision && decision == "") {
+	// A decision wait is only resumed automatically when shouldReconcile found
+	// the batch's decision stale.
+	if (automatic && !e.shouldReconcile(inst, tmpl, ec)) || (inst.Status == StatusWaitingDecision && decision == "" && !automatic) {
 		return buildActionResult(inst, len(tmpl.Steps), ec), nil
 	}
 	if decision != "" {
@@ -644,6 +650,13 @@ func (e *Engine) ListPaged(ctx context.Context, status string, limit, offset int
 // remote transcode work. A transcode_batch cancellation cascades to every
 // non-terminal child action so already-admitted worker jobs are stopped too.
 func (e *Engine) Cancel(ctx context.Context, instanceID, reason string) (*ActionResult, error) {
+	res, err := e.cancel(ctx, instanceID, reason)
+	e.settleCancelledBatch(ctx, instanceID)
+	e.refreshBatchParent(ctx, instanceID)
+	return res, err
+}
+
+func (e *Engine) cancel(ctx context.Context, instanceID, reason string) (*ActionResult, error) {
 	if e.deps.Store == nil {
 		return nil, fmt.Errorf("maintenance store is required")
 	}

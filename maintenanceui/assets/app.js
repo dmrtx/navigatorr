@@ -3974,6 +3974,9 @@ function skippedBatchOutcome(job) {
   result.append(node("p", job.mode && onlyUnsupportedSources(job) ? frameRateOnly ? "The worker cannot measure quality at this frame rate yet, so changing the goal will not help. Your originals are unchanged." : "Automatic testing does not support this source format yet, so changing the goal will not help. Your originals are unchanged." : job.mode ? "None of the tested settings met this goal. You can change the goal; your originals are unchanged." : "Choose another profile to try again. Your originals are unchanged.", "metadata"));
   return result;
 }
+function renderDecisionCount(data) {
+  $("job-filter-decision").textContent = data.decision_count > 0 ? `Needs decision (${data.decision_count})` : "Needs decision";
+}
 async function loadJobs(more = false) {
   if (
     $("workspace").hidden ||
@@ -4002,6 +4005,7 @@ async function loadJobs(more = false) {
       if (!data.has_more || !data.jobs.length) break;
     }
     renderSavings(data);
+    renderDecisionCount(data);
     if (!more) state.operationJobs = new Map();
     state.operationJobs ||= new Map();
     for (const job of page) state.operationJobs.set(job.workflow_id || job.id, job);
@@ -4028,6 +4032,9 @@ async function loadJobs(more = false) {
         button(singleFile?.display_label || presentation.title, () => openJob(job.id), "job-title"),
       );
       heading.append(statusBadge(presentation.status, presentation.status, job.status === "waiting_decision" || job.batch?.outcome === "no_changes" ? () => openJob(job.id) : null));
+      // A goal batch keeps encoding while one file waits, so its own status says
+      // "In progress"; the decision still needs its own way in.
+      if (job.needs_decision && job.status !== "waiting_decision") heading.append(statusBadge("Needs decision", "waiting_decision", () => openJob(job.id)));
       const summaryText = skipped ? [singleFile ? presentation.context : `${job.batch.total} files`, job.batch.total === 1 ? "Original kept" : "Originals kept"].filter(Boolean).join(" · ") : presentation.summary;
       const summary = node("p", summaryText, "metadata job-summary");
       summary.title = summaryText;

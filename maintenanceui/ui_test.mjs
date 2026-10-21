@@ -3708,6 +3708,31 @@ test("a queue refresh keeps keyboard focus on a job title, also after Dismiss mo
   assert.equal(doc.activeElement, titleOf("job-a"));
 });
 
+test("a goal batch that is still encoding offers its waiting decision, and the filter counts every decision", async () => {
+  const h = commandDom([]);
+  const doc = h.document;
+  const list = new FakeNode(doc);
+  doc.body.append(list);
+  h.elements.set("jobs-list", list);
+  h.context.request = (path) => path === "worker-activity" ? {available:false} : {
+    jobs:[
+      {id:"waiting", number:1, action_name:"transcode_batch", status:"waiting_decision", needs_decision:true},
+      {id:"encoding", number:2, action_name:"transcode_batch", status:"waiting_external", needs_decision:true, batch:{total:3, running:1, waiting_decision:1}},
+      {id:"quiet", number:3, action_name:"transcode_media", status:"completed"},
+    ],
+    total:3, has_more:false, decision_count:2,
+  };
+  h.run('api=async(path)=>request(path);renderSavings=()=>{};state.tab="jobs";');
+  await h.run("loadJobs()");
+  assert.equal(h.elements.get("job-filter-decision").textContent, "Needs decision (2)");
+  const badges = (id) => list.querySelectorAll("[data-operation-id]").find((r) => r.dataset.operationId === id).querySelectorAll(".status-action");
+  assert.equal(badges("encoding").length, 1);
+  assert.equal(badges("quiet").length, 0);
+  h.context.request = () => ({jobs:[], total:0, has_more:false, decision_count:0});
+  await h.run("loadJobs()");
+  assert.equal(h.elements.get("job-filter-decision").textContent, "Needs decision");
+});
+
 test("a recovery copy redraw keeps focus on its button, or the first enabled one while it verifies", () => {
   const h = commandDom([]);
   const doc = h.document;
