@@ -2096,6 +2096,17 @@ pre {
 .processing-goal label:has(input:checked) { border-color: var(--accent); background: var(--surface); }
 .processing-goal input { width: auto; margin-top: .25rem; }
 .processing-goal small { display: block; font-size: .82rem; margin-top: .25rem; line-height: 1.5; }
+.source-profile { margin: 0 0 .5rem; overflow-wrap: anywhere; }
+.goal-note { display: block; margin-top: .3rem; font-size: .8rem; font-style: normal; font-weight: 600; }
+.goal-note[data-kind="recommended"] { color: var(--forest); }
+.goal-note[data-kind="skip"] { color: var(--warning); }
+/* More goals is a quiet disclosure, not a second card around the goal cards. */
+.more-goals { margin: .45rem 0 0; }
+.more-goals > summary { display: flex; align-items: center; gap: 8px; min-height: var(--control-size); cursor: pointer; color: var(--muted); font-size: .9rem; list-style: none; }
+.more-goals > summary::-webkit-details-marker { display: none; }
+.more-goals > summary::before { content: "▸"; }
+.more-goals[open] > summary::before { content: "▾"; }
+.more-goals > summary:focus-visible { outline: 2px solid var(--forest); outline-offset: 2px; }
 .technical-toggle { margin: .75rem 0; }
 .processing-goal:disabled { opacity: .55; }
 .processing-goal:disabled label { cursor: not-allowed; }
