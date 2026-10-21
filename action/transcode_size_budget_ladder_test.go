@@ -208,9 +208,12 @@ func TestSizeBudgetLadderWorkerRefusals(t *testing.T) {
 	budget := sizeBudgetLadderOf(c.ec.State).BudgetBytes
 	c.ec.State["job_id"], c.ec.State["transcode_submitted"] = "job-first", true
 	var asked []string
+	// The cap refuses first, but a minimum-saving or growth refusal is over
+	// the budget too and advances the same way.
+	reasons := []string{"insufficient_savings", "size_growth_exceeded", sizeBudgetExceededReason, sizeBudgetExceededReason}
 	c.executor.statusFunc = func(_ context.Context, id string) (transcode.JobStatus, error) {
 		asked = append(asked, id)
-		return transcode.JobStatus{ID: id, Status: transcode.StatusFailed, ReasonCode: sizeBudgetExceededReason, FailureClassification: "policy_rejected", CandidateSizeBytes: budget + 123}, nil
+		return transcode.JobStatus{ID: id, Status: transcode.StatusFailed, ReasonCode: reasons[min(len(asked), len(reasons))-1], FailureClassification: "policy_rejected", CandidateSizeBytes: budget + 123}, nil
 	}
 	for rung := 1; rung <= 3; rung++ {
 		step, err := c.engine.stepTranscodeWait(context.Background(), c.ec)
@@ -235,6 +238,12 @@ func TestSizeBudgetLadderWorkerRefusals(t *testing.T) {
 	}
 	if len(asked) != 4 || c.executor.benchmarkSubmitCalls != 0 {
 		t.Fatalf("worker asked %v, %d benchmarks", asked, c.executor.benchmarkSubmitCalls)
+	}
+	// A last refusal without a size still offers x265.
+	rec.RetryWithoutHardware, rec.Outcome = false, ""
+	c.ec.State[sizeBudgetKey] = rec
+	if rec = overshotSizeBudget(c.ec, 0); rec.Outcome != SizeBudgetExceeded || !rec.RetryWithoutHardware || !strings.Contains(rec.Message, "Try again with x265") {
+		t.Fatalf("sizeless refusal %+v", rec)
 	}
 }
 

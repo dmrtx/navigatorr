@@ -774,6 +774,10 @@ func overshotSizeBudget(ec *ExecutionContext, candidateBytes int64) *SizeBudgetR
 	}
 	rec.Outcome = SizeBudgetExceeded
 	rec.Message = fmt.Sprintf("The budget encode came out above 85%% of the source, over the %s budget. Original preserved.", formatBudgetBytes(rec.BudgetBytes))
+	if sizeBudgetIsLadder(rec) {
+		rec.RetryWithoutHardware = true
+		rec.Message = fmt.Sprintf("All %d VideoToolbox steps came out over the %s budget. Original preserved. Try again with x265 (allow_hardware off): its two passes land on the budget.", rec.Rung+1, formatBudgetBytes(rec.BudgetBytes))
+	}
 	ec.State[sizeBudgetKey] = rec
 	return rec
 }

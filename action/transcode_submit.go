@@ -617,9 +617,10 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 				if res, handled, err := e.continueWithoutHardware(ctx, ec, st); err != nil || handled {
 					return res, err
 				}
-				if st.ReasonCode == sizeBudgetExceededReason {
-					// The worker refused a ladder rung's file as over the
-					// budget; the next rung encodes the file again.
+				if st.ReasonCode != reasonQualityNotMet && st.ReasonCode != "preservation_not_met" && st.ReasonCode != "already_target_codec" {
+					// The worker refused a ladder rung's file for its size;
+					// every budget sits under the minimum saving, so the file
+					// is over the budget and the next rung encodes it again.
 					if res, handled := e.advanceSizeBudgetRung(ec, st.CandidateSizeBytes); handled {
 						return res, nil
 					}

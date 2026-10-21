@@ -574,7 +574,7 @@ func leadingFramesPSNR(ctx context.Context, ffmpegPath, candPath, refPath string
 	candSkip, refSkip := max(offset, 0), max(-offset, 0)
 	graph := fmt.Sprintf("[0:v:0]%s[c];[1:v:0]%s[r];[c][r]psnr", pick(candSkip), pick(refSkip))
 	t := strconv.Itoa(max(threads, 1))
-	output, err := runQualityCommand(ctx, ffmpegPath, []string{"-nostdin", "-nostats", "-threads", t, "-i", candPath, "-threads", t, "-i", refPath, "-filter_threads", t, "-filter_complex", graph, "-f", "null", "-"})
+	output, err := runQualityCommand(ctx, ffmpegPath, []string{"-nostdin", "-nostats", "-threads", t, "-i", candPath, "-threads", t, "-i", refPath, "-filter_complex_threads", t, "-filter_complex", graph, "-f", "null", "-"})
 	if err != nil {
 		return 0, err
 	}

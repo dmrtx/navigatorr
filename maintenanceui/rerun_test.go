@@ -315,6 +315,11 @@ func TestRerunWithoutHardwareAfterABelowFloorBudgetEncode(t *testing.T) {
 	if w := request(h, "POST", "/api/maintenance/rerun", `{"id":"over-budget","key":"x265-two","without_hardware":true}`, true); w.Code != 202 {
 		t.Fatal("over-budget ladder refused the x265 retry", w.Code, w.Body.String())
 	}
+	// An overshoot the record did not offer x265 for stays refused.
+	seedOperation(t, st, "over-no-offer", "transcode_media", "completed", map[string]any{"path": "/media/Show/S01E04.mkv", "mode": "size", "size_budget_percent": float64(40)}, map[string]any{"reason_code": "size_budget_exceeded"}, map[string]any{"mode": "size", "reason_code": "size_budget_exceeded", "size_budget": map[string]any{"budget_bytes": float64(4e9), "outcome": "size_budget_exceeded"}})
+	if w := request(h, "POST", "/api/maintenance/rerun", `{"id":"over-no-offer","key":"x265-three","without_hardware":true}`, true); w.Code != 409 {
+		t.Fatal("x265 retry accepted without the record's offer", w.Code, w.Body.String())
+	}
 	// The earlier action is untouched and a plain run again still keeps the engine on.
 	if before, _ := st.GetActionInstance("below-floor"); decodeOperationJSON(before.InputsJSON)["allow_hardware"] != true {
 		t.Fatal("the earlier action was changed")
