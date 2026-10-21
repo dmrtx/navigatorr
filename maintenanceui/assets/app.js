@@ -281,7 +281,7 @@ function authenticationMessage() {
     ? "Cloudflare Access sign-in required. Reload to sign in."
     : "sign in to Navigatorr";
 }
-async function api(path, body) {
+async function api(path, body, { signal } = {}) {
   if (body !== undefined && !serverReachable)
     throw new Error(
       "Offline. Changes are unavailable until the server responds.",
@@ -296,8 +296,11 @@ async function api(path, body) {
         "X-Navigatorr-Request": "1",
       },
       body: body === undefined ? undefined : JSON.stringify(body),
+      signal,
     });
-  } catch {
+  } catch (err) {
+    // A request the console cancelled says nothing about the server.
+    if (signal?.aborted) throw err;
     setConnection(false);
     throw new Error("Cannot connect to Navigatorr. Retrying automatically.");
   }
@@ -339,7 +342,7 @@ async function api(path, body) {
     throw new Error(denial?.error || authenticationMessage());
   }
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  if (!res.ok) throw Object.assign(new Error(data.error || `HTTP ${res.status}`), { status: res.status });
   return data;
 }
 async function tool(name, args = {}, onAccepted) {
@@ -1777,23 +1780,40 @@ function refreshGoalProfile() {
   const key = target?.path || "";
   if (target && current?.key === key) { current.batch = target.batch; return; }
   if (!target && !current) return;
-  // A new file, or none, makes every older response stale.
+  // A new file, or none, makes every older response stale, and cancelling it
+  // frees the server's read slot for the file now chosen.
   state.goalProfileSeq = (state.goalProfileSeq || 0) + 1;
+  state.goalProfileAbort?.abort();
+  state.goalProfileAbort = null;
   if (!target) {
     state.goalProfile = null;
     if (!state.applyingNavigation) state.goalExplicit = false;
     return;
   }
-  if (current?.key && current.key !== key) state.goalExplicit = false;
+  // Moving from one file to another is a new visit. In a batch the key is just
+  // the first selected file, so unticking it keeps the goal the user chose.
+  if (current?.key && current.key !== key && !current.batch && !target.batch) state.goalExplicit = false;
   state.goalProfile = {key, status: "loading", batch: target.batch};
   clearTimeout(state.goalProfileTimer);
   state.goalProfileTimer = setTimeout(() => { if (state.goalProfile?.key === key) loadGoalProfile(key); }, 150);
 }
 async function loadGoalProfile(key) {
-  const seq = state.goalProfileSeq;
+  const seq = state.goalProfileSeq, controller = new AbortController();
+  state.goalProfileAbort = controller;
+  const current = () => seq === state.goalProfileSeq && state.goalProfile?.key === key;
+  const read = () => api(`source-profile?${new URLSearchParams({path: key})}`, undefined, {signal: controller.signal});
   let data = null;
-  try { data = await api(`source-profile?${new URLSearchParams({path: key})}`); } catch {}
-  if (seq !== state.goalProfileSeq || state.goalProfile?.key !== key) return;
+  try {
+    data = await read();
+  } catch (err) {
+    // Both read slots can still be held by files just left; ask once more.
+    if (err?.status === 429 && current()) {
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      if (current()) try { data = await read(); } catch {}
+    }
+  }
+  if (!current()) return;
+  state.goalProfileAbort = null;
   state.goalProfile = data?.profile && data.goals ? {...state.goalProfile, status: "ready", data} : {...state.goalProfile, status: "error"};
   const recommended = state.goalProfile.data?.recommended;
   // The recommendation fills in an unchosen goal; it never replaces a choice.

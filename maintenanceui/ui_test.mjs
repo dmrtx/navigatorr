@@ -76,7 +76,7 @@ function harness({ radios: withRadios = false } = {}) {
   let interval;
   // Real goal radios, so the change listener that marks a choice as explicit runs.
   const radios = withRadios
-    ? ["size", "compact", "quality", "x265_preserve"].map((value) => Object.assign(new Element(), { value, checked: value === "quality" }))
+    ? ["size", "compact", "quality", "x265_preserve"].map((value) => Object.assign(new Element(), { value, checked: value === "size" }))
     : [];
   const document = {
     hidden: false,
@@ -93,6 +93,7 @@ function harness({ radios: withRadios = false } = {}) {
     document,
     console,
     URLSearchParams,
+    AbortController,
     confirm: () => true,
     setTimeout: () => 0,
     clearTimeout() {},
@@ -4524,7 +4525,7 @@ test("the recommendation keeps More goals closed when it is outside it", async (
   assert.equal(note("quality").hidden, true);
 });
 
-test("More goals opens for a selected goal inside it, including a failed read's default", async () => {
+test("More goals opens for a selected goal inside it", async () => {
   const { h, click, more } = goalHarness();
   h.run("api = async () => profile; controls()");
   h.context.profile = goalProfileFixture();
@@ -4562,7 +4563,7 @@ test("a response for a file the user has since left is ignored", async () => {
   assert.equal(h.run("state.goalProfile.key"), "/media/b.mkv");
   assert.equal(h.run("state.goalProfile.status"), "loading");
   assert.equal(line().hidden, true);
-  assert.equal(mode(), "quality");
+  assert.equal(mode(), "size");
   second.resolve(goalProfileFixture());
   await current;
   assert.equal(mode(), "compact");
@@ -4589,14 +4590,67 @@ test("a failed read leaves the goals usable with only a muted note", async () =>
   assert.equal(line().hidden, false);
   assert.equal(line().textContent, "Could not read this file");
   assert.equal(h.run("state.goalProfile.status"), "error");
-  assert.equal(mode(), "quality");
-  assert.equal(more().open, true, "the selected goal is in More goals, so it is shown");
+  assert.equal(mode(), "size");
+  assert.equal(more().open, false, "the default goal is already in view");
   for (const goal of ["size", "compact", "quality", "x265_preserve"]) assert.equal(note(goal).hidden, true);
   assert.equal(h.run("goalSkipWarning()"), "");
   // A malformed answer is treated the same way.
   h.run('api = async () => ({}); $("path").value = "/media/next.mkv"; controls();');
   await h.run('loadGoalProfile("/media/next.mkv")');
   assert.equal(h.run("state.goalProfile.status"), "error");
+});
+
+test("unticking the first file of a batch keeps the goal the user chose", async () => {
+  const { h, click, mode } = goalHarness();
+  h.context.profile = goalProfileFixture({ goals: { size: { status: "ok" }, compact: { status: "ok" }, quality: { status: "ok" }, x265_preserve: { status: "ok" } }, recommended: "size" });
+  h.run('$("scope").value = "batch"; state.folderSelected = new Set(["/media/Show/a.mkv", "/media/Show/b.mkv", "/media/Show/c.mkv"]); api = async () => profile; controls();');
+  await h.run('loadGoalProfile("/media/Show/a.mkv")');
+  click("quality");
+  h.run('state.folderSelected.delete("/media/Show/a.mkv"); controls();');
+  assert.equal(h.run("state.goalProfile.key"), "/media/Show/b.mkv");
+  assert.equal(h.run("state.goalExplicit"), true);
+  await h.run('loadGoalProfile("/media/Show/b.mkv")');
+  assert.equal(mode(), "quality");
+  // Down to one file it is still the same visit.
+  h.run('state.folderSelected.delete("/media/Show/b.mkv"); controls();');
+  assert.equal(h.run("state.goalExplicit"), true);
+  await h.run('loadGoalProfile("/media/Show/c.mkv")');
+  assert.equal(mode(), "quality");
+});
+
+test("leaving a file cancels its read, and a busy server is asked once more", async () => {
+  const { h, mode, line } = goalHarness();
+  const signals = [];
+  h.context.signals = signals;
+  h.context.setTimeout = (fn) => { fn(); return 0; };
+  h.context.answers = [Object.assign(new Error("busy reading another file; try again"), { status: 429 }), goalProfileFixture()];
+  h.run('api = async (path, body, opts) => { signals.push(opts.signal); const a = answers.shift(); if (a instanceof Error) throw a; return a; }; $("path").value = "/media/a.mkv"; controls();');
+  await h.run('loadGoalProfile("/media/a.mkv")');
+  assert.equal(signals.length, 2, "one retry after 429");
+  assert.equal(mode(), "compact");
+  assert.match(line().textContent, /^4K · HDR10/);
+  // A read still running when the user moves on is aborted.
+  const pending = deferred();
+  h.context.pending = pending.promise;
+  h.run('api = async (path, body, opts) => { signals.push(opts.signal); return pending; }; $("path").value = "/media/b.mkv"; controls();');
+  const load = h.run('loadGoalProfile("/media/b.mkv")');
+  const signal = signals.at(-1);
+  h.run('$("path").value = "/media/c.mkv"; controls();');
+  assert.equal(signal.aborted, true);
+  pending.resolve(goalProfileFixture());
+  await load;
+  assert.equal(h.run("state.goalProfile.key"), "/media/c.mkv");
+});
+
+test("a cancelled request does not mark the server unreachable", async () => {
+  const h = harness();
+  h.run('var offline = 0; setConnection = (up) => { if (!up) offline++; };');
+  h.context.fetch = (url, opts) => Promise.reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+  const controller = new AbortController();
+  controller.abort();
+  h.context.signal = controller.signal;
+  await assert.rejects(h.run('api("source-profile?path=x", undefined, {signal})'));
+  assert.equal(h.run("offline"), 0);
 });
 
 test("a folder or batch reads the first video and says so", async () => {
