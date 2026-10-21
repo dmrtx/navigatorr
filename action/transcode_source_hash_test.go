@@ -9,8 +9,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/jakenesler/navigatorr/transcode/recipe"
 )
 
 const (
@@ -148,7 +146,6 @@ func TestAcceptSkipsOriginalVerificationOnlyWithoutWork(t *testing.T) {
 		{"probe-only skip", map[string]any{"skip_transcode": true, "reason_code": "hdr_requires_compact"}, "", false},
 		{"probe-only skip that kept a baseline", map[string]any{"skip_transcode": true, "reason_code": "unsupported_source"}, sum, false},
 		{"skip after a worker job", map[string]any{"skip_transcode": true, "job_id": "job-1"}, sum, true},
-		{"skip after a benchmark job", map[string]any{"skip_transcode": true, "benchmark_job_id": "bench-1"}, sum, true},
 		{"skip with a candidate", map[string]any{"skip_transcode": true, "candidate_path": "/c.mkv"}, sum, true},
 		{"skip with an external reference", map[string]any{"skip_transcode": true, "external_reference": "job-1"}, sum, true},
 		{"skip after a transcode job", map[string]any{"skip_transcode": true, "transcode_job_id": "job-1"}, sum, true},
@@ -231,11 +228,8 @@ func TestWorkIsNeverSubmittedWithoutSourceBaseline(t *testing.T) {
 	if r, err := e.stepTranscodeSubmit(context.Background(), ec); err != nil || r.Status != StepFailed || !strings.Contains(r.Error, "baseline missing") {
 		t.Fatalf("encode submitted without a baseline: %+v %v", r, err)
 	}
-	bench := &ExecutionContext{InstanceID: "bench", ActionName: "transcode_media", Inputs: map[string]any{}, State: map[string]any{"optimization_enabled": true, "resolved_path": "/media/ep.mkv"}}
-	if r, err := e.stepBenchmarkSubmit(context.Background(), bench); err != nil || r.Status != StepFailed || !strings.Contains(r.Error, "baseline missing") {
-		t.Fatalf("benchmark submitted without a baseline: %+v %v", r, err)
-	}
-	if err := e.applySharedBatchCalibration(&ExecutionContext{ActionName: "transcode_media"}, nil, nil, recipe.Profile{}, "", "digest", "/media/ep.mkv"); err == nil || !strings.Contains(err.Error(), "source hash is required") {
-		t.Fatalf("shared calibration accepted an empty source hash: %v", err)
+	ladder := &ExecutionContext{InstanceID: "ladder", ActionName: "transcode_media", Inputs: map[string]any{"mode": "quality"}, State: map[string]any{"resolved_path": "/media/ep.mkv"}}
+	if r, err := e.stepPlanEncode(context.Background(), ladder); err != nil || r.Status != StepFailed || !strings.Contains(r.Error, "baseline missing") {
+		t.Fatalf("ladder planned without a baseline: %+v %v", r, err)
 	}
 }

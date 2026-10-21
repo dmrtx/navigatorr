@@ -53,19 +53,6 @@ func batchChildKey(ec *ExecutionContext, item store.TranscodeBatchItem) string {
 	return key
 }
 
-// The parent inputs remain immutable audit evidence. A saved explicit profile
-// changes only future attempts and does not consume the original mode's budget.
-func batchItemMode(ec *ExecutionContext, item store.TranscodeBatchItem) string {
-	settings, _ := stateObject(ec.State, "batch_item_settings")[item.ItemKey].(map[string]any)
-	if mode := getString(settings, "mode"); mode != "" {
-		return mode
-	}
-	if profile := getString(settings, "profile"); profile != "" && profile != "same" {
-		return ""
-	}
-	return getString(ec.Inputs, "mode")
-}
-
 func recordBatchAttempt(ec *ExecutionContext, item *store.TranscodeBatchItem) {
 	history := stateObject(ec.State, "batch_attempt_history")
 	var rows []store.TranscodeBatchItem
@@ -82,7 +69,7 @@ func recordBatchAttempt(ec *ExecutionContext, item *store.TranscodeBatchItem) {
 	item.Reasons = []string{"New settings requested; previous attempt retained in history"}
 }
 
-// A search review has no encoded candidate to reject. Retire its unsubmitted
+// A decision before any candidate exists has no review to reject. Retire its
 // attempt with cancellation; validated candidates retain their versioned review.
 func (e *Engine) retireBatchDecision(ctx context.Context, child *store.ActionInstance) error {
 	var options []WaitingOption
@@ -185,7 +172,7 @@ func (e *Engine) ReconfigureBatch(ctx context.Context, id, scope, selectionID, v
 		if err != nil {
 			return nil, err
 		}
-		policy, err := e.frozenModePolicy(mode, getBool(ec.State, "is_anime"), maxHeight, hardware, allowSlow, budget)
+		policy, err := modePolicyWithBudget(mode, getBool(ec.State, "is_anime"), maxHeight, hardware, allowSlow, budget)
 		if err != nil {
 			return nil, err
 		}
@@ -338,24 +325,6 @@ func (e *Engine) applyPendingBatchAttempts(ctx context.Context, ec *ExecutionCon
 	inst.StateJSON = toJSON(ec.State)
 	owner, _ := ctx.Value(actionLeaseOwnerKey{actionID: ec.InstanceID}).(string)
 	return e.deps.Store.CommitBatchRevision(*inst, owner, changed)
-}
-
-// Existing immutable child plans need no new calibration. An explicitly
-// selected profile must not trigger the original batch's automatic search.
-func batchNeedsCalibration(ec *ExecutionContext, items []store.TranscodeBatchItem) bool {
-	if !batchCalibrationEnabled(ec.Inputs, ec.State) {
-		return false
-	}
-	for _, item := range items {
-		if item.ChildActionID != "" || item.Status != "queued" && item.Status != "waiting_for_slot" {
-			continue
-		}
-		settings, _ := stateObject(ec.State, "batch_item_settings")[item.ItemKey].(map[string]any)
-		if getString(settings, "profile") == "" {
-			return true
-		}
-	}
-	return false
 }
 
 func (e *Engine) BatchItemReplacementReserved(item store.TranscodeBatchItem) (bool, error) {

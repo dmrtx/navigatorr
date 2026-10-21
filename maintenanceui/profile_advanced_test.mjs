@@ -149,29 +149,17 @@ test("bitrate mode activates average/max bitrate and preserves explicit AQ/CBR s
   assert.equal(h.elements.get("recipe-quality").disabled, true);
 });
 
-test("switching rate-control dimensions removes conflicting fields and recalibrates search", () => {
-  const h = harness("hevc_videotoolbox", {
-    optimization: {
-      enabled: true,
-      search: { max_candidates: 3, quality_values: [55, 65, 75] },
-    },
-  });
+test("switching rate-control dimensions removes the conflicting fields", () => {
+  const h = harness("hevc_videotoolbox");
   h.edit("video.rate_control", "bitrate", "change");
   h.edit("video.max_bitrate_kbps", "5000");
   h.edit("video.constant_bitrate", "true", "change");
-  assert.deepEqual(
-    h.result().optimization.search.bitrate_values,
-    [2800, 3500, 4200],
-  );
-  assert.equal(h.result().optimization.search.quality_values, undefined);
   h.edit("video.rate_control", "quality", "change");
   const p = h.result();
   assert.equal(p.video.average_bitrate_kbps, undefined);
   assert.equal(p.video.max_bitrate_kbps, undefined);
   assert.equal(p.video.constant_bitrate, undefined);
   assert.equal(p.video.quality, 65);
-  assert.deepEqual(p.optimization.search.quality_values, [55, 65, 75]);
-  assert.equal(p.optimization.search.bitrate_values, undefined);
 });
 
 test("optional VideoToolbox knobs retain explicit zero and support returning to automatic", () => {
@@ -183,22 +171,6 @@ test("optional VideoToolbox knobs retain explicit zero and support returning to 
   assert.equal(h.result().video.power_efficient, false);
   h.edit("video.qmin", "");
   assert.equal(h.result().video.qmin, undefined);
-});
-
-test("new x265 optimization can enable complete sampling/quality/search policies and edit targets", () => {
-  const h = harness("libx265");
-  h.edit("optimization.quality.vmaf.target", "97");
-  h.edit("optimization.search.quality_values", "20, 24, 28");
-  h.edit("optimization.enabled", true);
-  const p = h.result();
-  assert.equal(p.optimization.enabled, true);
-  assert.equal(p.optimization.sampling.sample_count, 3);
-  assert.equal(p.optimization.sampling.sample_seconds, 20);
-  assert.equal(p.optimization.quality.preferred_metric, "vmaf");
-  assert.equal(p.optimization.quality.vmaf.target, 97);
-  assert.deepEqual(p.optimization.search.quality_values, [20, 24, 28]);
-  assert.equal(p.optimization.search.max_candidates, 3);
-  assert.ok(p.optimization.search.quality_values.every((n) => n <= 51));
 });
 
 test("required preservation stays readonly and legacy false policies can only be corrected", () => {
@@ -241,9 +213,6 @@ test("invalid optional numbers and lists block serialization without poisoning t
   h.edit("video.qmin", "99");
   assert.throws(h.result, /valid range/);
   h.edit("video.qmin", "5");
-  h.edit("optimization.search.quality_values", "55, nope, 75");
-  assert.throws(h.result, /comma-separated/);
-  h.edit("optimization.search.quality_values", "55,65,75");
   assert.equal(h.result().video.qmin, 5);
   h.edit("video.rate_control", "bitrate", "change");
   h.edit("video.average_bitrate_kbps", "");

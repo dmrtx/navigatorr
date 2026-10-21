@@ -316,14 +316,13 @@
                 <label><input type="radio" name="processing-mode" value="size" checked /><span><strong>Save space</strong><small>Use it for most files. Same look, at least 15% smaller; lossless audio becomes AAC.</small><em id="goal-note-size" class="goal-note" hidden></em></span></label>
                 <div id="hardware-option" class="goal-options" hidden>
                   <label class="check"><input id="allow-hardware" type="checkbox" checked /><span>Use the media engine (faster)</span></label>
-                  <label id="hardware-margin-label" class="goal-inline">Within <input id="hardware-margin" type="number" min="0" max="50" step="1" value="15" inputmode="numeric" /> % of x265's size</label>
                 </div>
                 <div id="size-budget-option" class="goal-options" hidden>
                   <label class="goal-field">Size limit <select id="size-budget-kind"><option value="">None</option><option value="percent">% of original</option><option value="gb">GB</option><option value="siblings">Match other episodes</option></select></label>
                   <label id="size-budget-percent-label" class="goal-inline" hidden>At most <input id="size-budget-percent" type="number" min="5" max="85" step="1" inputmode="decimal" placeholder="33" /> % of the original</label>
                   <label id="size-budget-gb-label" class="goal-inline" hidden>At most <input id="size-budget-gb" type="number" min="0.05" step="0.05" inputmode="decimal" placeholder="1.5" /> GB</label>
                   <label id="size-budget-multiplier-label" class="goal-inline" hidden>Up to <input id="size-budget-multiplier" type="number" min="1" max="4" step="0.1" value="1.5" inputmode="decimal" /> × other episodes' bitrate</label>
-                  <p class="muted size-budget-help">If nothing fits, it encodes once at the limit and shows the measured quality.</p>
+                  <p class="muted size-budget-help">The whole file is encoded to fit the limit, and the measured quality is shown.</p>
                 </div>
                 <label><input type="radio" name="processing-mode" value="compact" /><span><strong>Shrink to 1080p SDR</strong><small>Use it for 4K or HDR you don't need in 4K. At least 30% smaller; HDR is removed.</small><em id="goal-note-compact" class="goal-note" hidden></em></span></label>
                 <details id="more-goals" class="more-goals">
@@ -333,10 +332,10 @@
                 </details>
               </fieldset>
               <p id="goal-overridden" class="goal-overridden" role="status" hidden>Goal not used: a technical profile is on in Advanced below. Turn it off to process with this goal.</p>
-              <p id="processing-policy" class="metadata">Automatic: samples determine the effective plan. Savings and quality must pass validation; a result is not guaranteed.</p>
+              <p id="processing-policy" class="metadata">Automatic encodes the whole file with fixed settings and checks the result. Savings and quality must pass validation; a result is not guaranteed.</p>
               <details id="advanced-profiles" class="advanced-profiles">
               <summary><span>Advanced: technical profiles</span><span id="advanced-state" class="advanced-state">Off</span></summary>
-              <p class="metadata advanced-explain">Pick a specific profile, custom encoder settings, sample-only tests or batch limits. While this is on, the goal above is not used: the profile chosen here decides the settings, and each file becomes a candidate you review before any original is replaced.</p>
+              <p class="metadata advanced-explain">Pick a specific profile, custom encoder settings or batch limits. While this is on, the goal above is not used: the profile chosen here decides the settings, and each file becomes a candidate you review before any original is replaced.</p>
               <label class="check technical-toggle"><input id="technical" type="checkbox" />Use a technical profile instead of the goal</label>
               <div id="legacy-controls" hidden>
               <label
@@ -381,14 +380,6 @@
               <label
                 >Profile<select id="profile">
                   <option value="auto">Automatic</option>
-                </select></label
-              >
-              <label id="priority-label"
-                >Batch priority<select id="priority">
-                  <option value="balanced">Balanced</option>
-                  <option value="quality">Quality</option>
-                  <option value="savings">Space savings</option>
-                  <option value="preserve_quality">Meet quality target</option>
                 </select></label
               >
               <label class="check"
@@ -472,82 +463,6 @@
                   AAC is lossy. Keeps tracks, languages and channels; object
                   audio metadata is lost.
                 </p>
-                <label class="check"
-                  ><input id="optimize" type="checkbox" />Calibrate with
-                  samples</label
-                >
-                <div id="optimization-fields" hidden>
-                  <div class="field-grid">
-                    <label
-                      >Metric<select id="metric">
-                        <option value="auto">Automatic</option>
-                        <option value="vmaf">VMAF</option>
-                        <option value="ssim">SSIM</option>
-                        <option value="both">VMAF + SSIM</option>
-                      </select></label
-                    ><label
-                      >Search values<input
-                        id="ladder"
-                        value="20,23,26"
-                        placeholder="CRF, Q or kbps"
-                    /></label>
-                  </div>
-                  <div class="field-grid">
-                    <label
-                      >VMAF target<input
-                        id="vmaf-target"
-                        type="number"
-                        value="96"
-                        min="0"
-                        max="100"
-                        step="0.1" /></label
-                    ><label
-                      >VMAF minimum<input
-                        id="vmaf-min"
-                        type="number"
-                        value="95"
-                        min="0"
-                        max="100"
-                        step="0.1" /></label
-                    ><label
-                      >SSIM target<input
-                        id="ssim-target"
-                        type="number"
-                        value="0.99"
-                        min="0"
-                        max="1"
-                        step="0.001" /></label
-                    ><label
-                      >SSIM minimum<input
-                        id="ssim-min"
-                        type="number"
-                        value="0.98"
-                        min="0"
-                        max="1"
-                        step="0.001" /></label
-                    ><label
-                      >Samples<input
-                        id="sample-count"
-                        type="number"
-                        value="3"
-                        min="1"
-                        max="20" /></label
-                    ><label
-                      >Seconds per sample<input
-                        id="sample-seconds"
-                        type="number"
-                        value="20"
-                        min="1"
-                        max="120"
-                    /></label>
-                  </div>
-                  <label
-                    >Final validation<select id="final-validation">
-                      <option value="sampled">Sampled</option>
-                      <option value="">File structure only</option>
-                    </select></label
-                  >
-                </div>
               </div>
               <div class="size-guardrails">
                 <div class="field-grid">
@@ -571,14 +486,13 @@
                   source bit depth</label
                 >
                 <p class="muted">
-                  Resolution is preserved. Sample sizes are estimates.
+                  Resolution is preserved.
                 </p>
               </div>
               </div>
               </details>
               <div class="submit-actions">
                 <button id="preview" type="button">Preview selection</button
-                ><button id="benchmark" type="button">Test samples</button
                 ><button class="primary" id="enqueue">Create candidate</button>
               </div>
               <p id="worker-submit-status" class="metadata" role="status">Checking video worker…</p>
@@ -667,7 +581,7 @@
             <div>
               <span class="metadata">Estimated savings</span
               ><strong id="estimated-total">—</strong
-              ><span class="metadata">From profiles or samples</span>
+              ><span class="metadata">From profiles and plans</span>
             </div>
           </div>
           <h3>Space freed over time</h3>
@@ -997,14 +911,13 @@
         <label id="reconfigure-mode-label" hidden>Goal<select id="reconfigure-mode"><option value="size">Save space · At least 15% smaller</option><option value="compact">Shrink to 1080p SDR · At least 30% smaller, HDR removed</option><optgroup label="More goals"><option value="quality">Strict quality · May save little</option><option value="x265_preserve">Convert to HEVC · HEVC files are left alone</option></optgroup></select></label>
         <div id="reconfigure-hardware-option" class="goal-options" hidden>
           <label class="check"><input id="reconfigure-hardware" type="checkbox" checked /><span>Use the media engine (faster)</span></label>
-          <label id="reconfigure-hardware-margin-label" class="goal-inline">Within <input id="reconfigure-hardware-margin" type="number" min="0" max="50" step="1" value="15" inputmode="numeric" /> % of x265's size</label>
         </div>
         <div id="reconfigure-budget-option" class="goal-options" hidden>
           <label class="goal-field">Size limit <select id="reconfigure-budget-kind"><option value="">None</option><option value="percent">% of original</option><option value="gb">GB</option><option value="siblings">Match other episodes</option></select></label>
           <label id="reconfigure-budget-percent-label" class="goal-inline" hidden>At most <input id="reconfigure-budget-percent" type="number" min="5" max="85" step="1" inputmode="decimal" placeholder="33" /> % of the original</label>
           <label id="reconfigure-budget-gb-label" class="goal-inline" hidden>At most <input id="reconfigure-budget-gb" type="number" min="0.05" step="0.05" inputmode="decimal" placeholder="1.5" /> GB</label>
           <label id="reconfigure-budget-multiplier-label" class="goal-inline" hidden>Up to <input id="reconfigure-budget-multiplier" type="number" min="1" max="4" step="0.1" value="1.5" inputmode="decimal" /> × other episodes' bitrate</label>
-          <p class="muted size-budget-help">If nothing fits, it encodes once at the limit and shows the measured quality.</p>
+          <p class="muted size-budget-help">The whole file is encoded to fit the limit, and the measured quality is shown.</p>
         </div>
         <label>Profile<select id="reconfigure-profile" required aria-describedby="reconfigure-profile-note"></select></label>
         <p id="reconfigure-profile-note" class="profile-guidance" hidden></p>
@@ -1047,30 +960,6 @@
           Review replacement
         </button>
       </div>
-    </dialog>
-    <dialog id="benchmark-comparison" aria-labelledby="comparison-title">
-      <div class="dialog-heading">
-        <h2 id="comparison-title">Compare sample frames</h2>
-        <button id="close-comparison" class="icon-button" aria-label="Close comparison">×</button>
-      </div>
-      <p id="comparison-file" class="metadata"></p>
-      <p id="comparison-note" class="muted" role="status"></p>
-      <div id="comparison-controls" class="comparison-toolbar" hidden>
-        <label for="comparison-sample">Sample</label>
-        <select id="comparison-sample"></select>
-        <button id="comparison-zoom" class="quiet" aria-pressed="false">View at 100%</button>
-      </div>
-      <p id="comparison-metrics" class="metadata"></p>
-      <div id="comparison-view" hidden>
-        <div class="comparison-labels"><span>Candidate</span><span>Original</span></div>
-        <div class="comparison-viewport">
-          <div id="comparison-frame" class="comparison-frame"></div>
-        </div>
-        <label class="comparison-slider" for="comparison-slider">Reveal candidate
-          <input id="comparison-slider" type="range" min="0" max="100" value="50" />
-        </label>
-      </div>
-      <p class="metadata">Same frame from the original reference and the selected encode. PNG images preserve frame detail; use 100% to inspect compression. These frames are kept for up to 7 days and the latest 16 benchmarks. The original file is preserved.</p>
     </dialog>
     <dialog id="job-detail" aria-labelledby="job-detail-title">
       <div class="dialog-heading">

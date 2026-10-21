@@ -29,7 +29,8 @@ For `codec: hevc_videotoolbox` the schema supports:
 
 Exactly one mode per recipe; `quality` and `average_bitrate_kbps` together
 fail recipe validation, as does a profile whose rate mode disagrees with its
-benchmark search dimension (`quality_values` vs `bitrate_values`):
+optimization dimension (`quality_values` vs `bitrate_values`; profiles with
+optimization enabled are refused for new jobs):
 
 - **Quality mode** (`quality: 65`): constant-quality `-q:v`. This is the
   default and the only mode the legacy profiles use.
@@ -37,8 +38,7 @@ benchmark search dimension (`quality_values` vs `bitrate_values`):
   unset): `-b:v 3500k` (AverageBitRate). Optional `constant_bitrate: true`
   adds `-constant_bit_rate 1` (never the default), and optional
   `max_bitrate_kbps` adds generic `-maxrate` capping at or above the average.
-  Benchmark sweeps use `bitrate_values: [3200, 3500, 3800]` (see
-  `live-action-hevc-vt`).
+  The `live-action-hevc-vt` example lists `bitrate_values: [3200, 3500, 3800]`.
 
 Integer knobs use pointer semantics like the booleans below: omitted means
 "emit nothing", while an explicit value — including `b_frames: 0` — is

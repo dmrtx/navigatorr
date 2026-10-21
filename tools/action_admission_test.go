@@ -140,19 +140,19 @@ func TestMCPAdmissionReportsDurablePreflightFailuresAndImmutableConflicts(t *tes
 	}
 	defer st.Close()
 	e := action.NewEngine(action.EngineDeps{Store: st, Transcode: readyAdmissionWorker{}})
-	e.RegisterTemplate(action.ActionTemplate{Name: "benchmark_transcode", AutoReconcile: true, ImmutableInputs: true, Steps: []action.StepDefinition{{Name: "preflight", Run: func(context.Context, *action.ExecutionContext) (action.StepResult, error) {
+	e.RegisterTemplate(action.ActionTemplate{Name: "transcode_media", AutoReconcile: true, ImmutableInputs: true, Steps: []action.StepDefinition{{Name: "preflight", Run: func(context.Context, *action.ExecutionContext) (action.StepResult, error) {
 		return action.StepResult{}, errors.New("source cannot be read")
 	}}}})
 	s := server.NewMCPServer("test", "1")
 	registerActionTools(s, e)
-	args := map[string]any{"action": "benchmark_transcode", "inputs": `{"path":"/missing.mkv"}`, "idempotency_key": "preflight-failure"}
+	args := map[string]any{"action": "transcode_media", "inputs": `{"path":"/missing.mkv"}`, "idempotency_key": "preflight-failure"}
 	first := admittedAction(t, callTool(t, s, "action_run", args))
 	if err := e.ReconcileOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	again := admittedAction(t, callTool(t, s, "action_run", args))
 	if again.ID != first.ID || again.Status != action.StatusFailed || !strings.Contains(again.Error, "source cannot be read") {
-		t.Fatal("durable failure hidden or resubmitted", again)
+		t.Fatal("durable failure hidden or resubmitted", again, first)
 	}
 	args["inputs"] = `{"path":"/different.mkv"}`
 	if result := callTool(t, s, "action_run", args); !result.IsError {

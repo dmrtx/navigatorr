@@ -344,7 +344,7 @@ func TestWorkerSlotTurnOrdersByFirstWaitAcrossBatchesAndStandalone(t *testing.T)
 	defer st.Close()
 	e := NewEngine(EngineDeps{Store: st})
 	base := time.Now().Add(-time.Minute)
-	seedSlotWaiter(t, st, "standalone-bench", "benchmark_transcode", StatusWaitingExternal, "worker_busy", "", base)
+	seedSlotWaiter(t, st, "standalone-file", "transcode_media", StatusWaitingExternal, "worker_busy", "", base)
 	seedSlotWaiter(t, st, "batch-b-child", "transcode_media", StatusWaitingExternal, "worker_busy", "batch-b", base.Add(time.Second))
 	seedSlotWaiter(t, st, "batch-a-child", "transcode_media", StatusWaitingExternal, "parent_busy", "batch-a", base.Add(2*time.Second))
 	// Not contending: paused parent, finished action.
@@ -358,7 +358,7 @@ func TestWorkerSlotTurnOrdersByFirstWaitAcrossBatchesAndStandalone(t *testing.T)
 	}
 	actionStateOf := func(id string) map[string]any { return actionState(t, st, id) }
 
-	if _, waiting, pos := turn("standalone-bench", actionStateOf("standalone-bench")); waiting || pos != 1 {
+	if _, waiting, pos := turn("standalone-file", actionStateOf("standalone-file")); waiting || pos != 1 {
 		t.Fatalf("oldest waiter must go first: waiting=%v position=%d", waiting, pos)
 	}
 	res, waiting, pos := turn("batch-a-child", actionStateOf("batch-a-child"))

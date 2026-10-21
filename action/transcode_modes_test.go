@@ -3,9 +3,7 @@ package action
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"github.com/jakenesler/navigatorr/mediainspect"
-	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
 	"os"
 	"strings"
@@ -48,26 +46,10 @@ func TestModePolicyFreezeAndDigest(t *testing.T) {
 		t.Fatal("policy tampering not rejected")
 	}
 }
-func TestModeSearchBudgetReservationsAndSettlement(t *testing.T) {
-	ec := &ExecutionContext{State: map[string]any{"search_budget_seconds": 600, "operation_search_budget_seconds": 3600}}
-	// The frozen operation figure is not a cap: every attempt reserves its
-	// own per-source budget, so a season is admitted as slots free up.
-	for i := 0; i < 12; i++ {
-		if !reserveModeSearch(ec, string(rune('a'+i))) {
-			t.Fatal("per-source admission refused by the retired operation cap")
-		}
-	}
-	if !reserveModeSearch(ec, "a") || len(modeBudgetEntries(ec)) != 12 {
-		t.Fatal("same admission charged twice")
-	}
-	if entry := modeBudgetEntries(ec)["a"]; entry.Reserved != 600 || entry.Consumed != nil {
-		t.Fatalf("reservation not recorded before admission: %+v", entry)
-	}
-}
 func modeTestCapabilities() transcode.WorkerCapabilities {
 	return transcode.WorkerCapabilities{AutomaticModesV2: true, SizeModeV3: true, ExplicitMain10Benchmarks: true, ProtocolVersion: transcode.WorkerProtocolVersion, Encoders: map[string]bool{transcode.VideoCodecLibX265: true, transcode.VideoCodecHEVCVideoToolbox: true}, Filters: map[string]bool{"libvmaf": true}, Quality: &transcode.QualityCapabilities{Native10Bit: true, CAMBIFullRef: true, Models: map[string]transcode.QualityModelCapability{"v1_1080p_3h": {Available: true, MeasurementBitDepth: 10}}}}
 }
-func TestModeMixedCandidatesBudgetAndMain10(t *testing.T) {
+func TestModeFinalValidationRequestAcrossBitDepths(t *testing.T) {
 	for _, mode := range []string{"size", "quality", "x265_preserve"} {
 		for _, depth := range []int{8, 10} {
 			ec := &ExecutionContext{InstanceID: "mode-bench", Inputs: map[string]any{"mode": mode}, State: map[string]any{"original_sha256": strings.Repeat("a", 64)}}
@@ -81,27 +63,12 @@ func TestModeMixedCandidatesBudgetAndMain10(t *testing.T) {
 			}
 			ec.State["plan"] = plan
 			rep := &mediainspect.DetailedReport{DurationSec: 100, Video: []mediainspect.DetailedStream{{BitDepth: depth, FPS: 24, BitRate: 5000000}}}
-			req, err := buildBenchmarkRequest(ec, "/media/source.mkv", rep, policy.Profile.Optimization, modeTestCapabilities())
+			req, err := finalRequestForPlan(ec, "/media/source.mkv", rep, policy.Profile.Optimization, modeTestCapabilities())
 			if err != nil {
 				t.Fatal(err)
 			}
-			// Size v3 is x265 only: 5 medium CRFs and two slow families.
-			want := 12
-			if mode == "x265_preserve" {
-				want = 9
-			} else if mode == "size" {
-				want = 11
-			}
-			if len(req.Candidates) != want || req.SearchBudgetSeconds != 600 {
+			if req.Mode != mode || req.ModePolicyVersion == "" || req.Metric != "vmaf" || len(req.Samples) == 0 || req.Quality == nil || req.Quality.FinalValidation == nil {
 				t.Fatalf("%s/%d: %+v", mode, depth, req)
-			}
-			for _, candidate := range req.Candidates {
-				if (mode == "x265_preserve" || mode == "size") && candidate.VideoCodec != transcode.VideoCodecLibX265 {
-					t.Fatal("preserve selected hardware")
-				}
-				if depth == 10 && candidate.VideoProfile != "main10" {
-					t.Fatalf("10bit profile lost %+v", candidate)
-				}
 			}
 		}
 	}
@@ -121,53 +88,16 @@ func TestModeFinalUnroundedSizeGate(t *testing.T) {
 		mode  string
 		bytes int
 		skip  bool
-	}{{"size", 85, false}, {"quality", 95, false}, {"quality", 101, true}, {"x265_preserve", 95, false}, {"x265_preserve", 110, true}} {
-		candidate := t.TempDir() + "/candidate.mkv"
-		if err := os.WriteFile(candidate, make([]byte, tc.bytes), 0600); err != nil {
-			t.Fatal(err)
-		}
-		ec := &ExecutionContext{Inputs: map[string]any{"mode": tc.mode}, State: map[string]any{"candidate_path": candidate, "original_size": int64(100), "original": map[string]any{"size_bytes": int64(100)}}, Engine: legacySearch(&Engine{})}
-		policy, _ := freezeModePolicy(ec)
-		plan := &transcode.Plan{VideoCodec: transcode.VideoCodecLibX265}
-		plan.QualityValidation = &transcode.QualityValidationPlan{Metric: "vmaf", Quality: *ensureBenchmarkQualityMetric(buildBenchmarkQualityConfig(policy.Profile.Optimization.Quality), "vmaf"), BenchmarkRequestDigest: "request"}
-		_ = applyModePlan(plan, policy)
-		ec.State["candidate_sha256"] = "candidate"
-		ec.State["quality_evidence"] = map[string]any{"verdict": "pass", "candidate_sha256": "candidate", "plan_digest": plan.PlanDigest, "benchmark_request_digest": "request"}
-		ec.State["plan"] = plan
-		result, err := (&Engine{}).stepTranscodeValidate(context.Background(), ec)
-		if err != nil || result.Status != StepCompleted || getBool(ec.State, "skip_transcode") != tc.skip {
+	}{{"quality", 95, false}, {"quality", 101, true}, {"x265_preserve", 95, false}, {"x265_preserve", 110, true}} {
+		c := newRecipeCase(t, map[string]any{"mode": tc.mode}, nil)
+		planRecipe(t, c)
+		validateRecipeCase(t, c, tc.bytes)
+		result, err := c.engine.stepTranscodeValidate(context.Background(), c.ec)
+		if err != nil || result.Status != StepCompleted || getBool(c.ec.State, "skip_transcode") != tc.skip {
 			t.Fatalf("%+v -> %+v %v", tc, result, err)
 		}
 	}
 }
-func TestFilesystemCalibrationUsesPersistedMembership(t *testing.T) {
-	st := setupTestStore(t)
-	defer st.Close()
-	e := NewEngine(EngineDeps{Store: st})
-	profile := automaticBatchSearchProfile(false)
-	_, digest, _, err := decodeEphemeralProfileInput(map[string]any{"profile_config": profile})
-	if err != nil {
-		t.Fatal(err)
-	}
-	result := BatchCalibrationResult{ProfileDigest: digest, Quality: 20, Digest: "sha256:calibration"}
-	inputs, _ := json.Marshal(map[string]any{"shared_calibration": true})
-	state, _ := json.Marshal(map[string]any{"shared_calibration_result": result, "shared_calibration_profile_digest": digest})
-	if err := st.CreateActionInstance(store.ActionInstance{ID: "parent", ActionName: "transcode_batch", Status: StatusWaitingExternal, InputsJSON: string(inputs), StateJSON: string(state)}); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: "parent", ItemKey: "file-authorized", FilePath: "/media/file.mkv", Decision: "transcode", Status: "queued"}); err != nil {
-		t.Fatal(err)
-	}
-	ec := &ExecutionContext{ActionName: "transcode_media", Inputs: map[string]any{"parent_action_id": "parent", "batch_item_key": "file-authorized", "batch_fixed_quality": 20, "batch_calibration_digest": result.Digest}, State: map[string]any{}}
-	report := &mediainspect.DetailedReport{DurationSec: 100, Video: []mediainspect.DetailedStream{{BitDepth: 8, FPS: 24}}}
-	if err := e.applySharedBatchCalibration(ec, &transcode.Plan{VideoCodec: transcode.VideoCodecLibX265}, report, profile, "source", digest, "/media/file.mkv"); err != nil {
-		t.Fatal(err)
-	}
-	if err := e.applySharedBatchCalibration(ec, &transcode.Plan{VideoCodec: transcode.VideoCodecLibX265}, report, profile, "source", digest, "/media/other.mkv"); err == nil {
-		t.Fatal("unrelated filesystem source accepted")
-	}
-}
-
 func TestModeNativeMain10Preflight(t *testing.T) {
 	dir := t.TempDir()
 	file := dir + "/native10.mkv"
@@ -197,62 +127,6 @@ JSON
 	}
 }
 
-func TestModeFilesystemBatchEightQuickSearches(t *testing.T) {
-	dir := t.TempDir()
-	probe := dir + "/ffprobe"
-	script := `#!/bin/sh
-cat <<'JSON'
-{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","pix_fmt":"yuv420p","width":1920,"height":1080,"avg_frame_rate":"24/1","r_frame_rate":"24/1","bits_per_raw_sample":"8"}],"format":{"format_name":"matroska","duration":"100","size":"100"},"chapters":[]}
-JSON
-`
-	if err := os.WriteFile(probe, []byte(script), 0700); err != nil {
-		t.Fatal(err)
-	}
-	paths := []string{}
-	for i := 0; i < 8; i++ {
-		path := dir + "/source-" + string(rune('a'+i)) + ".mkv"
-		if err := os.WriteFile(path, []byte("different source "+path), 0600); err != nil {
-			t.Fatal(err)
-		}
-		paths = append(paths, path)
-	}
-	seconds := 2.0
-	executor := &mockTranscodeExecutor{capabilitiesFunc: func(context.Context) (transcode.WorkerCapabilities, error) { return modeTestCapabilities(), nil }, benchmarkStatusFunc: func(_ context.Context, id string) (transcode.BenchmarkStatus, error) {
-		return transcode.BenchmarkStatus{Automatic: &transcode.BenchmarkAutomaticEvidence{VerifiedSamples: 5}, ID: id, Status: transcode.StatusCompleted, SearchSeconds: &seconds, Decision: &transcode.BenchmarkDecision{DecisionReason: "no_suitable_candidate"}}, nil
-	}}
-	e, st := setupTranscodeEngine(t, executor, probe, []string{dir}, []string{dir}, true)
-	legacySearch(e)
-	defer st.Close()
-	e.deps.Config.Transcode.MaxParallelJobs = 3
-	result, err := e.Run(context.Background(), "transcode_batch", map[string]any{"paths": paths, "mode": "quality"})
-	if err != nil || result.Status != StatusCompleted {
-		t.Fatalf("8 quick searches %+v %v", result, err)
-	}
-	items, err := st.ListTranscodeBatchItems(result.ID)
-	if err != nil || len(items) != 8 {
-		t.Fatalf("manifest %d %v", len(items), err)
-	}
-	for _, item := range items {
-		if item.Status != "skip" || item.ChildActionID == "" || item.CandidatePath != "" {
-			t.Fatalf("false successful encode %+v", item)
-		}
-	}
-	inst, _ := st.GetActionInstance(result.ID)
-	reloaded := parseExecutionContext(inst, e)
-	entries := modeBudgetEntries(reloaded)
-	if len(entries) != 8 {
-		t.Fatalf("reservations reset/lost after restart: %+v", entries)
-	}
-	for _, entry := range entries {
-		if entry.Consumed == nil || *entry.Consumed != 2 {
-			t.Fatalf("reservation was not settled: %+v", entry)
-		}
-	}
-	if executor.submitCalls != 0 || executor.benchmarkSubmitCalls != 8 {
-		t.Fatalf("unexpected effects encode=%d benchmarks=%d", executor.submitCalls, executor.benchmarkSubmitCalls)
-	}
-}
-
 func TestModeSingleAndBatchMaterializeEquivalentPlans(t *testing.T) {
 	for _, mode := range []string{"size", "quality", "x265_preserve"} {
 		t.Run(mode, func(t *testing.T) {
@@ -266,15 +140,7 @@ cat <<'JSON'
 JSON
 `), 0700)
 			plans := []*transcode.Plan{}
-			executor := &mockTranscodeExecutor{capabilitiesFunc: func(context.Context) (transcode.WorkerCapabilities, error) { return modeTestCapabilities(), nil }, benchmarkStatusFunc: func(_ context.Context, id string) (transcode.BenchmarkStatus, error) {
-				seconds := 1.0
-				winner := transcode.BenchmarkWinner{CandidateID: "cand_crf20", VideoCodec: transcode.VideoCodecLibX265, Quality: 20, Preset: "medium", VideoProfile: "main", PixelFormat: "yuv420p", ExpectedBitDepth: 8, Score: 99, MetricType: "vmaf", TargetReached: true, MinimumMet: true, EstimatedTotalBytes: 800, SavingsPercent: 20}
-				if mode == "size" {
-					// Size v3 encodes this 8-bit source as Main10 on a proven worker.
-					winner.CandidateID, winner.Quality, winner.VideoProfile, winner.PixelFormat, winner.ExpectedBitDepth = "cand_crf24", 24, "main10", "p010le", 10
-				}
-				return transcode.BenchmarkStatus{Automatic: &transcode.BenchmarkAutomaticEvidence{VerifiedSamples: 5}, ID: id, Status: transcode.StatusCompleted, SearchSeconds: &seconds, Decision: &transcode.BenchmarkDecision{Winner: &winner}}, nil
-			}, submitFunc: func(_ context.Context, req transcode.Request) (transcode.Job, error) {
+			executor := &mockTranscodeExecutor{capabilitiesFunc: func(context.Context) (transcode.WorkerCapabilities, error) { return modeTestCapabilities(), nil }, submitFunc: func(_ context.Context, req transcode.Request) (transcode.Job, error) {
 				plans = append(plans, req.Plan)
 				return transcode.Job{ID: req.ID}, nil
 			}, statusFunc: func(_ context.Context, id string) (transcode.JobStatus, error) {
@@ -330,7 +196,7 @@ func TestModePolicyAgainstMeasuredCalibrationFixtures(t *testing.T) {
 	}
 	for _, row := range rows {
 		for _, mode := range []string{"size", "quality", "x265_preserve"} {
-			policy, _ := modePolicy(mode, false)
+			policy, _ := modePolicyFor(mode, false, 0)
 			quality := policy.Profile.Optimization.Quality
 			vmaf := quality.VMAF
 			passing := row.Mean >= vmaf.Minimum && row.P5 >= *vmaf.P5Minimum && row.CambiMean <= *quality.Banding.MaxMean && row.CambiPeak <= *quality.Banding.MaxPeak
@@ -346,40 +212,5 @@ func TestModePolicyAgainstMeasuredCalibrationFixtures(t *testing.T) {
 				t.Fatalf("high-detail motion fixture rejected by%s", mode)
 			}
 		}
-	}
-}
-
-func TestModeBudgetUnknownRestartCostKeepsFullReservation(t *testing.T) {
-	for _, raw := range []any{nil, "100"} {
-		t.Run(fmt.Sprintf("cost=%v", raw), func(t *testing.T) {
-			st := setupTestStore(t)
-			defer st.Close()
-			e := NewEngine(EngineDeps{Store: st})
-			ec := &ExecutionContext{InstanceID: "parent", Inputs: map[string]any{"mode": "quality"}, State: map[string]any{}}
-			_, _ = freezeModePolicy(ec)
-			item := store.TranscodeBatchItem{ItemKey: "file-a", ChildActionID: "resumed-child"}
-			key := batchChildKey(ec, item)
-			if !reserveModeSearch(ec, key) {
-				t.Fatal("initial reservation failed")
-			}
-			state := map[string]any{"benchmark_submitted": true, "benchmark_done": true}
-			// A restarted worker cannot prove cumulative cost from an interrupted
-			// invocation. Missing/null/malformed cost must never mean zero or100seconds.
-			if raw != nil {
-				state["benchmark_search_seconds"] = raw
-			}
-			seedActionInstance(t, st, item.ChildActionID, "transcode_media", StatusCompleted, 7, "", map[string]any{"mode": "quality"}, state)
-			e.settleModeSearches(ec, []store.TranscodeBatchItem{item})
-			entry := modeBudgetEntries(ec)[key]
-			if entry.Consumed != nil || entry.Reserved != 600 {
-				t.Fatalf("unknown prior runner cost released reservation: %+v", entry)
-			}
-			data, _ := json.Marshal(ec.State)
-			_ = json.Unmarshal(data, &ec.State)
-			e.settleModeSearches(ec, []store.TranscodeBatchItem{item})
-			if modeBudgetEntries(ec)[key].Consumed != nil {
-				t.Fatal("coordinator reload released unknown reservation")
-			}
-		})
 	}
 }

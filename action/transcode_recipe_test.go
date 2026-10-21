@@ -18,27 +18,19 @@ import (
 	"github.com/jakenesler/navigatorr/transcode/selector"
 )
 
-// legacySearch lets a test drive an action the way it was admitted before
-// the sample search was removed: new requests are refused those inputs, but
-// actions already admitted keep running.
-func legacySearch(e *Engine) *Engine {
-	e.legacySearch = true
-	return e
-}
-
 // legacyModePolicy* freeze what policies v2 (quality, x265_preserve, compact)
 // and v3 (size) froze, digest included: the snapshots operations admitted
 // before v4 carry and keep running under.
 func legacyModePolicyWithBudget(mode string, anime bool, maxHeight int, hardware *transcode.HardwareSearchRules, allowSlow bool, budget *SizeBudgetPolicy) (ModePolicySnapshot, error) {
-	return legacySearch(&Engine{}).frozenModePolicy(mode, anime, maxHeight, hardware, allowSlow, budget)
+	snapshot, err := modePolicyContent(mode, anime, maxHeight, hardware, allowSlow, budget)
+	if err != nil {
+		return snapshot, err
+	}
+	return snapshot, digestModePolicy(&snapshot)
 }
 
 func legacyModePolicy(mode string, anime bool) (ModePolicySnapshot, error) {
 	return legacyModePolicyWithBudget(mode, anime, 0, nil, false, nil)
-}
-
-func legacyModePolicyFor(mode string, anime bool, maxHeight int) (ModePolicySnapshot, error) {
-	return legacyModePolicyWithBudget(mode, anime, maxHeight, nil, false, nil)
 }
 
 func legacyModePolicyWithHardware(mode string, anime bool, maxHeight int, hardware *transcode.HardwareSearchRules) (ModePolicySnapshot, error) {
@@ -185,20 +177,16 @@ func newRecipeCase(t *testing.T, inputs map[string]any, mutate func(*transcode.W
 	return c
 }
 
-// planRecipe runs the submit and wait steps and checks no sample test ran.
+// planRecipe runs the plan step for a goal and checks it submitted no job.
 func planRecipe(t *testing.T, c *budgetCase) {
 	t.Helper()
-	res, err := c.engine.stepBenchmarkSubmit(context.Background(), c.ec)
+	res, err := c.engine.stepPlanEncode(context.Background(), c.ec)
 	if err != nil || res.Status != StepCompleted {
-		t.Fatalf("submit %+v %v", res, err)
+		t.Fatalf("plan %+v %v", res, err)
 	}
 	mergeMap(c.ec.State, res.Outputs)
-	wait, err := c.engine.stepBenchmarkWait(context.Background(), c.ec)
-	if err != nil || wait.Status != StepCompleted {
-		t.Fatalf("wait %+v %v", wait, err)
-	}
-	if c.executor.benchmarkSubmitCalls != 0 || getString(c.ec.State, "benchmark_job_id") != "" || !getBool(c.ec.State, "benchmark_done") || getBool(c.ec.State, "has_winner") {
-		t.Fatalf("a sample test ran or was recorded: %d %+v", c.executor.benchmarkSubmitCalls, c.ec.State)
+	if getString(c.ec.State, "benchmark_job_id") != "" {
+		t.Fatalf("a job was recorded: %+v", c.ec.State)
 	}
 }
 
@@ -248,7 +236,7 @@ func TestQualityLadderRecipes(t *testing.T) {
 				t.Fatal("the planned rung does not rebuild from the frozen recipe")
 			}
 			// A second pass of the submit step keeps the plan.
-			if again, _ := c.engine.stepBenchmarkSubmit(context.Background(), c.ec); again.Status != StepCompleted || getPlan(c.ec.State["plan"]).PlanDigest != plan.PlanDigest {
+			if again, _ := c.engine.stepPlanEncode(context.Background(), c.ec); again.Status != StepCompleted || getPlan(c.ec.State["plan"]).PlanDigest != plan.PlanDigest {
 				t.Fatalf("a second pass replanned: %+v", again)
 			}
 			// Each quality miss encodes one rung better, under a new job id.
@@ -327,8 +315,8 @@ func TestQualityLadderNeedsItsEncoder(t *testing.T) {
 		encoders[transcode.VideoCodecLibX265] = false
 		caps.Encoders = encoders
 	})
-	res, err := c.engine.stepBenchmarkSubmit(context.Background(), c.ec)
-	if err != nil || res.Status != StepWaitingDecision || c.executor.benchmarkSubmitCalls != 0 || QualityLadderOf(c.ec.State) != nil {
+	res, err := c.engine.stepPlanEncode(context.Background(), c.ec)
+	if err != nil || res.Status != StepWaitingDecision || QualityLadderOf(c.ec.State) != nil {
 		t.Fatalf("missing encoder: %+v %v", res, err)
 	}
 }
@@ -413,7 +401,7 @@ func TestX265SizeBudgetRecipe(t *testing.T) {
 	if plan.VideoCodec != transcode.VideoCodecLibX265 || plan.X265 == nil || plan.SizePolicy == nil || plan.X265.BitrateKbps <= 0 || !plan.X265.TwoPass || rec.BudgetBytes != 4_000_000_000 {
 		t.Fatalf("budget plan %+v x265 %+v size %+v record budget %d", plan, plan.X265, plan.SizePolicy, rec.BudgetBytes)
 	}
-	if !sizeBudgetPlanMatches(c.snapshot, c.ec.InstanceID, c.ec.State, plan, rec) {
+	if !sizeBudgetPlanMatches(c.snapshot, c.ec.State, plan, rec) {
 		t.Fatal("the budget encode does not rebuild from the frozen policy")
 	}
 	if !strings.Contains(rec.Choice.Message, "allow_hardware=false") {
@@ -429,8 +417,8 @@ func TestX265SizeBudgetRecipe(t *testing.T) {
 	// A worker that cannot run two-pass x265 ends the goal with the reason,
 	// not with a search.
 	c = newRecipeCase(t, map[string]any{"size_budget_percent": 40.0, "allow_hardware": false}, func(caps *transcode.WorkerCapabilities) { caps.X265TwoPass = false })
-	res, err := c.engine.stepBenchmarkSubmit(context.Background(), c.ec)
-	if err != nil || res.Status != StepCompleted || !getBool(c.ec.State, "skip_transcode") || getString(c.ec.State, "reason_code") != "size_budget_worker_unsupported" || c.executor.benchmarkSubmitCalls != 0 {
+	res, err := c.engine.stepPlanEncode(context.Background(), c.ec)
+	if err != nil || res.Status != StepCompleted || !getBool(c.ec.State, "skip_transcode") || getString(c.ec.State, "reason_code") != "size_budget_worker_unsupported" {
 		t.Fatalf("no two-pass worker: %+v %v", res, err)
 	}
 
@@ -460,18 +448,7 @@ func TestVideoToolboxSizeBudgetRecipe(t *testing.T) {
 	}
 }
 
-// The x265 continuation of a VideoToolbox search winner never runs for v4:
-// a recipe's VideoToolbox rung that misses moves up its own ladder.
-func TestRecipeSkipsHardwareContinuation(t *testing.T) {
-	c := newRecipeCase(t, nil, nil)
-	planRecipe(t, c)
-	c.ec.State["benchmark_winner"] = transcode.BenchmarkWinner{VideoCodec: transcode.VideoCodecHEVCVideoToolbox, Quality: 60}
-	if _, handled, err := c.engine.continueWithoutHardware(context.Background(), c.ec, failedRung(85, 80)); handled || err != nil {
-		t.Fatalf("the continuation ran for a v4 goal: %v", err)
-	}
-}
-
-// New requests are refused the sample search; batch children are not.
+// New requests are refused the sample search, a batch's children included.
 func TestSearchInputsAreRefusedForNewRequests(t *testing.T) {
 	mediaDir := t.TempDir()
 	source := mediaDir + "/ep01.mkv"
@@ -480,17 +457,21 @@ func TestSearchInputsAreRefusedForNewRequests(t *testing.T) {
 	}
 	e, st := setupTranscodeEngine(t, &mockTranscodeExecutor{}, createFakeFFprobeScript(t, defaultValidFFprobeJSON), []string{mediaDir}, []string{mediaDir}, false)
 	defer st.Close()
+	seedActionInstance(t, st, "parent-batch", "transcode_batch", StatusWaitingExternal, 1, "", map[string]any{"paths": []string{source}}, map[string]any{})
+	if err := st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: "parent-batch", ItemKey: "ep01", FilePath: source, Decision: "transcode", Status: "queued"}); err != nil {
+		t.Fatal(err)
+	}
 	for i, tc := range []struct {
 		action, field string
 		inputs        map[string]any
 	}{
-		{"benchmark_transcode", "", map[string]any{"path": source}},
 		{"transcode_media", "metric", map[string]any{"path": source, "profile": "general-hevc", "metric": "vmaf"}},
-		{"transcode_media", "profile_config", map[string]any{"path": source, "profile_config": calibratedTestProfileConfig()}},
+		{"transcode_media", "profile_config", map[string]any{"path": source, "profile_config": optimizingProfileConfig()}},
 		{"transcode_batch", "priority", map[string]any{"paths": []string{source}, "priority": "savings"}},
 		{"transcode_batch", "shared_calibration", map[string]any{"paths": []string{source}, "shared_calibration": true}},
 		{"transcode_batch", "calibration_items", map[string]any{"paths": []string{source}, "calibration_items": 2}},
 		{"transcode_media", "batch_fixed_quality", map[string]any{"path": source, "profile": "general-hevc", "batch_fixed_quality": 23}},
+		{"transcode_media", "metric", map[string]any{"path": source, "profile": "general-hevc", "metric": "vmaf", "parent_action_id": "parent-batch", "batch_item_key": "ep01"}},
 	} {
 		_, err := e.Enqueue(context.Background(), tc.action, tc.inputs, fmt.Sprintf("refused-%d", i))
 		invalid := requireInvalid(t, err, tc.field)
@@ -498,47 +479,26 @@ func TestSearchInputsAreRefusedForNewRequests(t *testing.T) {
 			t.Fatalf("%s %v: reason %q", tc.action, tc.inputs, invalid.Reason)
 		}
 	}
+	// The sample test action is gone: it is refused by name, on every surface.
+	for surface, call := range map[string]func() (*ActionResult, error){
+		"Enqueue": func() (*ActionResult, error) {
+			return e.Enqueue(context.Background(), removedBenchmarkAction, map[string]any{"path": source}, "benchmark-enqueue")
+		},
+		"Run": func() (*ActionResult, error) {
+			return e.Run(context.Background(), removedBenchmarkAction, map[string]any{"path": source}, "benchmark-run")
+		},
+	} {
+		res, err := call()
+		if res != nil || err == nil {
+			t.Fatalf("%s admitted %s: %+v %v", surface, removedBenchmarkAction, res, err)
+		}
+		if _, ok := AsInvalidParams(err); !ok || !strings.Contains(err.Error(), "sample tests were removed") {
+			t.Fatalf("%s: want an input error naming the removal, got %v", surface, err)
+		}
+	}
 	// Explicitly off is not a search.
 	if _, err := e.Enqueue(context.Background(), "transcode_batch", map[string]any{"paths": []string{source}, "shared_calibration": false, "dry_run": true}, "off"); err != nil {
 		t.Fatal(err)
-	}
-	// A batch admitted before the change creates its children and samples
-	// from its stored inputs; they run as admitted.
-	seedActionInstance(t, st, "admitted-batch", "transcode_batch", StatusWaitingExternal, 1, "", map[string]any{"paths": []string{source}, "metric": "vmaf"}, map[string]any{})
-	if err := st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: "admitted-batch", ItemKey: "ep01", FilePath: source, Decision: "transcode", Status: "queued"}); err != nil {
-		t.Fatal(err)
-	}
-	for i, name := range []string{"transcode_media", "benchmark_transcode"} {
-		if _, err := e.Enqueue(context.Background(), name, map[string]any{"path": source, "profile": "general-hevc", "metric": "vmaf", "parent_action_id": "admitted-batch"}, fmt.Sprintf("child-%d", i)); err != nil {
-			t.Fatalf("batch child %s refused: %v", name, err)
-		}
-	}
-	if _, err := e.Enqueue(context.Background(), "transcode_media", map[string]any{"path": source, "profile": "general-hevc", "metric": "vmaf", "parent_action_id": "admitted-batch", "batch_item_key": "ep01"}, "child-keyed"); err != nil {
-		t.Fatalf("batch child naming its item refused: %v", err)
-	}
-	// Naming a batch is not enough: the parent must be a batch that has not
-	// ended and lists this file (as the item the request names, if any).
-	other := mediaDir + "/ep02.mkv"
-	if err := os.WriteFile(other, []byte("synthetic source bytes"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	seedActionInstance(t, st, "ended-batch", "transcode_batch", StatusCompleted, 1, "", map[string]any{"paths": []string{source}}, map[string]any{})
-	if err := st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: "ended-batch", ItemKey: "ep01", FilePath: source, Decision: "transcode", Status: "completed"}); err != nil {
-		t.Fatal(err)
-	}
-	seedActionInstance(t, st, "not-a-batch", "transcode_media", StatusWaitingExternal, 1, "", map[string]any{"path": source}, map[string]any{})
-	for name, inputs := range map[string]map[string]any{
-		"a file the batch does not list": {"path": other, "metric": "vmaf", "parent_action_id": "admitted-batch"},
-		"another item's key":             {"path": other, "metric": "vmaf", "parent_action_id": "admitted-batch", "batch_item_key": "ep01"},
-		"an unknown item key":            {"path": source, "metric": "vmaf", "parent_action_id": "admitted-batch", "batch_item_key": "ep09"},
-		"a batch that ended":             {"path": source, "metric": "vmaf", "parent_action_id": "ended-batch"},
-		"a parent that is not a batch":   {"path": source, "metric": "vmaf", "parent_action_id": "not-a-batch"},
-		"a parent that does not exist":   {"path": source, "metric": "vmaf", "parent_action_id": "no-such-batch"},
-	} {
-		_, err := e.Enqueue(context.Background(), "transcode_media", inputs, "orphan-"+strings.ReplaceAll(name, " ", "-"))
-		if invalid := requireInvalid(t, err, "metric"); invalid == nil {
-			t.Fatalf("%s exempted the request", name)
-		}
 	}
 }
 
@@ -608,29 +568,7 @@ func TestSearchingDefaultProfileIsRefused(t *testing.T) {
 	}
 }
 
-// A v4 goal batch item reserves no search budget; a v3 one does, so a batch
-// revised from one to the other tells its items apart.
-func TestModeBatchV4ItemsReserveNoSearchBudget(t *testing.T) {
-	ec := &ExecutionContext{InstanceID: "v4-batch", Inputs: map[string]any{"mode": "quality"}, State: map[string]any{}}
-	if _, err := freezeModePolicy(ec); err != nil {
-		t.Fatal(err)
-	}
-	a, b := store.TranscodeBatchItem{ItemKey: "a"}, store.TranscodeBatchItem{ItemKey: "b"}
-	if batchItemSearches(ec, a) {
-		t.Fatal("a v4 batch item reserves search budget")
-	}
-	legacy, err := legacyModePolicy("quality", false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ec.State["batch_item_settings"] = map[string]any{"b": map[string]any{"mode": "quality", "mode_policy": legacy}}
-	if !batchItemSearches(ec, b) || batchItemSearches(ec, a) {
-		t.Fatal("a mixed batch does not tell its v3 item from its v4 item")
-	}
-}
-
-// A whole v4 season is admitted up to the worker's slots with no search
-// reservation at all.
+// A whole v4 season is admitted up to the worker's slots.
 func TestModeBatchV4AdmitsWithoutReservations(t *testing.T) {
 	st := setupTestStore(t)
 	e := NewEngine(EngineDeps{Store: st, Config: &config.Config{Transcode: config.TranscodeConfig{MaxParallelJobs: 2}}})
@@ -650,7 +588,6 @@ func TestModeBatchV4AdmitsWithoutReservations(t *testing.T) {
 	if _, err := e.Resume(context.Background(), ec.InstanceID, "", nil); err != nil {
 		t.Fatal(err)
 	}
-	root, _ := st.GetActionInstance(ec.InstanceID)
 	children := 0
 	rows, _ := st.ListActionInstances("", 100)
 	for _, row := range rows {
@@ -658,8 +595,8 @@ func TestModeBatchV4AdmitsWithoutReservations(t *testing.T) {
 			children++
 		}
 	}
-	if entries := modeBudgetEntries(parseExecutionContext(root, e)); len(entries) != 0 || children != 2 {
-		t.Fatalf("reservations %+v children %d", entries, children)
+	if children != 2 {
+		t.Fatalf("children %d, want the worker's 2 slots", children)
 	}
 }
 
@@ -773,7 +710,7 @@ func TestVideoToolboxLadderFallsBackToX265(t *testing.T) {
 		noVT(caps)
 		caps.Encoders[transcode.VideoCodecLibX265] = false
 	})
-	res, err := c.engine.stepBenchmarkSubmit(context.Background(), c.ec)
+	res, err := c.engine.stepPlanEncode(context.Background(), c.ec)
 	if err != nil || res.Status != StepWaitingDecision || res.WaitingCondition != "recipe_encoder_unavailable" || QualityLadderOf(c.ec.State) != nil {
 		t.Fatalf("no encoder: %+v %v", res, err)
 	}
@@ -801,4 +738,38 @@ func TestQualityLadderOutcomeSurvivesAnUnfinishedAudioOnlyFallback(t *testing.T)
 			t.Fatalf("%s record %+v", where, rec)
 		}
 	}
+	// The worker is asked again about the same refusal, still unreachable and
+	// then back: the rung is on the record once, and the message names each
+	// rung once.
+	if res, handled = c.engine.advanceQualityLadder(context.Background(), c.ec, failedRung(84, 79)); !handled || res.Status == StepCompleted {
+		t.Fatalf("second ask %+v", res)
+	}
+	if rec := QualityLadderOf(c.ec.State); len(rec.Tried) != 3 {
+		t.Fatalf("the rung was recorded again: %+v", rec.Tried)
+	}
+	c.executor.capabilitiesFunc = func(context.Context) (transcode.WorkerCapabilities, error) {
+		caps := modeTestCapabilities()
+		caps.SizeAudioOnly = true
+		return caps, nil
+	}
+	c.snapshot.Size.AudioOnlyFallback = true
+	c.ec.State["mode_policy"] = c.snapshot
+	res, handled = c.engine.advanceQualityLadder(context.Background(), c.ec, failedRung(84, 79))
+	rec := QualityLadderOf(c.ec.State)
+	if !handled || len(rec.Tried) != 3 {
+		t.Fatalf("after the worker came back: %+v %+v", res, rec)
+	}
+	for _, name := range []string{recipeRungName(rec.VideoCodec, rec.Values[0]), recipeRungName(rec.VideoCodec, rec.Values[2])} {
+		if n := strings.Count(rec.Message, name); n > 1 {
+			t.Fatalf("%q appears %d times in %q", name, n, rec.Message)
+		}
+	}
+}
+
+// optimizingProfileConfig is an inline profile that asks for the removed
+// optimization, which admission refuses.
+func optimizingProfileConfig() map[string]any {
+	profile := testEphemeralBatchProfileConfig()
+	profile["optimization"] = map[string]any{"enabled": true, "search": map[string]any{"quality_values": []int{20, 22}, "max_candidates": 2}}
+	return profile
 }

@@ -224,8 +224,8 @@ func TestModeBatchHFRCapabilityWiring(t *testing.T) {
 			t.Fatalf("HFR item on an older worker: %+v", item)
 		}
 	}
-	if lookups != 1 || executor.benchmarkSubmitCalls != 0 {
-		t.Fatalf("capabilities asked %d times, %d benchmarks", lookups, executor.benchmarkSubmitCalls)
+	if lookups != 1 {
+		t.Fatalf("capabilities asked %d times", lookups)
 	}
 }
 
@@ -256,7 +256,7 @@ func TestModeBenchmarkRequestHFRMatchesWorkerCapability(t *testing.T) {
 		}
 		ec.State["plan"] = plan
 		rep := &mediainspect.DetailedReport{DurationSec: 100, Video: []mediainspect.DetailedStream{{BitDepth: 8, FPS: tc.fps, BitRate: 5000000}}}
-		_, err = buildBenchmarkRequest(ec, "/media/source.mkv", rep, policy.Profile.Optimization, tc.caps)
+		_, err = finalRequestForPlan(ec, "/media/source.mkv", rep, policy.Profile.Optimization, tc.caps)
 		if (err == nil) != tc.ok {
 			t.Fatalf("%.3f fps HFR=%d: err %v", tc.fps, tc.caps.Quality.HFRTemporalDecimation, err)
 		}

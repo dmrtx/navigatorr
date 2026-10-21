@@ -73,7 +73,7 @@ limited to 40 minutes, the whole run needs `-timeout 60m` or more.
 A failing case is a finding about the pipeline, not about the suite: do not
 deploy that commit to the worker. Case 8b, for example, caught size budgets
 that could not be planned for FLAC sources without per-stream statistics, which
-silently traded the VideoToolbox ladder for a much slower x265 search.
+silently traded the VideoToolbox ladder for a much slower x265 encode.
 
 ## Development machines
 

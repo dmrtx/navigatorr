@@ -20,7 +20,6 @@ var magnetHashRegex = regexp.MustCompile(`(?i)btih:([a-f0-9]{40}|[a-z2-7]{32})`)
 func (e *Engine) registerBuiltinTemplates() {
 	e.registerPodcastTemplate()
 	e.registerTranscodeTemplate()
-	e.registerBenchmarkTemplate()
 	e.registerTranscodeBatchTemplate()
 	e.registerPromoteTranscodeTemplate()
 	e.RegisterTemplate(ActionTemplate{

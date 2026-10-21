@@ -171,20 +171,16 @@ func TestWorkerActiveComputeIsMirroredAndOlderWorkerStaysNull(t *testing.T) {
 	}
 }
 
-func TestWorkerAndBenchmarkObservationsMirrorPhaseCostsIntoOutputs(t *testing.T) {
+func TestWorkerObservationsMirrorPhaseCostsIntoOutputs(t *testing.T) {
 	ec := &ExecutionContext{State: map[string]any{}, Outputs: map[string]any{}}
 	e := NewEngine(EngineDeps{Config: &config.Config{}})
 	e.observeTranscodeStatus(ec, transcode.JobStatus{Status: transcode.StatusCompleted, JobTelemetry: transcode.JobTelemetry{PhaseCosts: map[string]transcode.PhaseCost{"encode": {DurationMs: 42, Attempts: 1}}}})
-	e.observeBenchmarkStatus(ec, transcode.BenchmarkStatus{Status: transcode.StatusCompleted, SearchBudgetSeconds: 600, PhaseCosts: map[string]transcode.PhaseCost{"samples": {DurationMs: 12, Attempts: 1}}})
 	costs, ok := ec.Outputs["phase_costs"].(map[string]any)
-	if !ok || len(costs) != 2 {
+	if !ok || len(costs) != 1 {
 		t.Fatalf("worker output evidence missing: %+v", ec.Outputs)
 	}
-	if ec.State["search_budget_seconds"] != 600 {
-		t.Fatal("known search cap omitted")
-	}
 	e.observeTranscodeStatus(ec, transcode.JobStatus{Status: transcode.StatusCompleted})
-	if len(phaseCostMap(ec)) != 2 {
+	if len(phaseCostMap(ec)) != 1 {
 		t.Fatal("older worker fabricated or erased measurement")
 	}
 }

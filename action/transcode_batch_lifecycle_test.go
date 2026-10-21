@@ -201,9 +201,6 @@ func testBatchLifecycleTwoCandidatesOneApprovalAndRestart(t *testing.T, dropResc
 			caps.CapabilityFingerprint, _ = transcode.ComputeCapabilityFingerprint(caps)
 			return caps, nil
 		},
-		benchmarkStatusFunc: func(_ context.Context, id string) (transcode.BenchmarkStatus, error) {
-			return transcode.BenchmarkStatus{ID: id, Status: transcode.StatusCompleted, Decision: &transcode.BenchmarkDecision{Evaluations: []transcode.BenchmarkCandidateEvaluation{{Quality: 20, VideoCodec: "libx265", MetricType: "vmaf", Eligible: true, MinimumMet: true, TargetReached: true, Score: 96, EstimatedBytes: 100, SavingsPercent: 30}}}}, nil
-		},
 		submitFunc: func(_ context.Context, req transcode.Request) (transcode.Job, error) {
 			requests[req.ID] = req
 			writeCandidateOutput(req.CandidatePath)
@@ -227,13 +224,13 @@ func testBatchLifecycleTwoCandidatesOneApprovalAndRestart(t *testing.T, dropResc
 	deps := h.engine.deps
 	deps.Registry = arrservice.NewRegistry(cfg)
 	deps.Transcode = mock
-	h.engine = legacySearch(NewEngine(deps))
-	r, err := h.engine.Run(context.Background(), "transcode_batch", map[string]any{"service": "sonarr", "series_id": 1, "profile_config": calibratedTestProfileConfig(), "shared_calibration": true, "calibration_items": 1, "max_items": 2, "promote_candidates": true})
+	h.engine = NewEngine(deps)
+	r, err := h.engine.Run(context.Background(), "transcode_batch", map[string]any{"service": "sonarr", "series_id": 1, "mode": "quality", "max_items": 2, "promote_candidates": true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	r = h.finish(r)
-	if r.Status != StatusWaitingDecision || imports != 0 || atomic.LoadInt32(&mock.submitCalls) != 2 || atomic.LoadInt32(&mock.benchmarkSubmitCalls) != 1 {
+	if r.Status != StatusWaitingDecision || imports != 0 || atomic.LoadInt32(&mock.submitCalls) != 2 {
 		t.Fatalf("expected two validated candidates and one approval: %+v requests=%d", r, len(requests))
 	}
 	for _, path := range originals {
@@ -272,7 +269,7 @@ func testBatchLifecycleTwoCandidatesOneApprovalAndRestart(t *testing.T, dropResc
 	}
 	h.engine = NewEngine(deps)
 	r = h.resume(r.ID, "")
-	if r.Status != StatusCompleted || imports != 2 || deletes != 2 || rescans != 1 || atomic.LoadInt32(&mock.benchmarkSubmitCalls) != 1 {
+	if r.Status != StatusCompleted || imports != 2 || deletes != 2 || rescans != 1 || atomic.LoadInt32(&mock.submitCalls) != 2 {
 		t.Fatal("restart repeated work")
 	}
 }

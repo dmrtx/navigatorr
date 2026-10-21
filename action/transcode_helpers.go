@@ -2,7 +2,6 @@ package action
 
 import (
 	"encoding/json"
-	"fmt"
 	"strconv"
 	"strings"
 
@@ -58,26 +57,6 @@ func (e *Engine) effectiveSizeGuardrails(ec *ExecutionContext) (float64, float64
 		configMin = e.deps.Config.Transcode.MinSavingsPercent
 	}
 	return resolveTranscodeSizeGuardrails(ec.Inputs, configMin)
-}
-
-// checkBenchmarkSavingsGuardrail reports whether a benchmark winner's
-// predicted savings satisfies the effective size guardrails. Positive
-// savings means the output is predicted smaller; negative savings means it
-// is predicted larger. A nil return means the full encode may proceed.
-//
-// Zero disables the minimum-savings requirement (matching the selector
-// semantics: min_savings_percent=0 means no minimum), while
-// max_size_increase_percent=0 allows exactly zero growth.
-func checkBenchmarkSavingsGuardrail(savingsPercent, minSavingsPercent, maxSizeIncreasePercent float64) error {
-	if minSavingsPercent > 0 && savingsPercent < minSavingsPercent {
-		return fmt.Errorf("benchmark winner predicts only %.1f%% savings, below required minimum %.1f%% (min_savings_percent=%.1f)", savingsPercent, minSavingsPercent, minSavingsPercent)
-	}
-	if savingsPercent < 0 {
-		if growth := -savingsPercent; growth > maxSizeIncreasePercent {
-			return fmt.Errorf("benchmark winner predicts %.1f%% size growth, exceeding allowed maximum size increase %.1f%% (max_size_increase_percent=%.1f)", growth, maxSizeIncreasePercent, maxSizeIncreasePercent)
-		}
-	}
-	return nil
 }
 
 func getPlan(v any) *transcode.Plan {

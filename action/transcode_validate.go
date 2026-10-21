@@ -75,21 +75,20 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 				}
 			}
 		} else {
-			expectedQuality := ensureBenchmarkQualityMetric(buildBenchmarkQualityConfig(snapshot.Profile.Optimization.Quality), "vmaf")
+			expectedQuality := ensureFinalQualityMetric(buildFinalQualityConfig(snapshot.Profile.Optimization.Quality), "vmaf")
 			if getString(ec.State, "plan_source") == sizeBudgetPlanSource {
 				// A budget encode is held to the frozen floor, and only a plan
-				// the budget fallback built at its planned bitrate may be.
-				// The encode is rebuilt from the frozen policy, the source and
-				// the recorded encoder comparison, not read back from the
-				// plan, and must match exactly.
+				// the budget recipe built may be. The encode is rebuilt from
+				// the frozen policy, the source and the record, not read back
+				// from the plan, and must match exactly.
 				expectedQuality = sizeBudgetFloorQuality(snapshot)
-				if expectedQuality == nil || !sizeBudgetPlanMatches(snapshot, ec.InstanceID, ec.State, plan, sizeBudgetOf(ec.State)) {
+				if expectedQuality == nil || !sizeBudgetPlanMatches(snapshot, ec.State, plan, sizeBudgetOf(ec.State)) {
 					return StepResult{Status: StepFailed, Error: "size budget plan does not match the frozen budget; original preserved"}, nil
 				}
-			} else if snapshot.Recipe != nil {
-				// A v4 encode is a rung of the frozen recipe, rebuilt from the
-				// policy and the source, never a searched result.
-				if getString(ec.State, "plan_source") != qualityLadderPlanSource || !qualityLadderPlanMatches(snapshot, ec.State, plan, QualityLadderOf(ec.State)) {
+			} else {
+				// An encode is a rung of the frozen recipe, rebuilt from the
+				// policy and the source.
+				if snapshot.Recipe == nil || getString(ec.State, "plan_source") != qualityLadderPlanSource || !qualityLadderPlanMatches(snapshot, ec.State, plan, QualityLadderOf(ec.State)) {
 					return StepResult{Status: StepFailed, Error: "encode does not match the goal's frozen recipe; original preserved"}, nil
 				}
 			}
@@ -155,17 +154,6 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 		// sits under the 15% minimum saving, so one that misses the saving is
 		// over the budget too, and is reported as that.
 		if sizeBudgetActive(ec.State) {
-			// VideoToolbox has no second pass to land on its average: one
-			// that overshot is encoded once more at a corrected bitrate.
-			if rec := sizeBudgetOf(ec.State); rec != nil && candidateSize > rec.BudgetBytes {
-				var evidence transcode.FinalQualityEvidence
-				if !reencode(ec.State["quality_evidence"], &evidence) {
-					evidence = transcode.FinalQualityEvidence{}
-				}
-				if res, handled := e.retrySizeBudgetBitrate(ec, plan, candidateSize, &evidence); handled {
-					return res, nil
-				}
-			}
 			rec, fits := finishSizeBudget(ec, candidateSize)
 			if !fits {
 				ec.State["skip_transcode"] = true

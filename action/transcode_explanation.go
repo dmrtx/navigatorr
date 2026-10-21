@@ -145,6 +145,9 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 		if e.Verification != nil && e.Verification.StoppedBy == transcode.VerificationStoppedTimeCap {
 			e.Message = fmt.Sprintf("The search ran out of time before every promising configuration was checked (%d never verified). Nothing was proven unsuitable; retry to continue. Originals preserved.", len(e.Verification.Unverified))
 		}
+	case (reason == SizeBudgetExceeded || reason == "insufficient_savings") && audioOnlyBudget(res, read) > 0:
+		e.Outcome = "size_rejected"
+		e.Message = audioOnlyOvershootMessage(audioOnlyBudget(res, read), getInt64(map[string]any{"size": read("candidate_size_bytes")}, "size"))
 	case (reason == "insufficient_savings" || reason == "size_growth" || reason == "size_growth_exceeded" || reason == reasonQualityNotMet) && e.QualityLadder != nil && getString(res.State, "plan_source") == qualityLadderPlanSource && e.QualityLadder.Outcome != QualityLadderEncoding && e.QualityLadder.Outcome != QualityLadderPassed:
 		e.Outcome = "size_rejected"
 		if reason == reasonQualityNotMet {
@@ -224,4 +227,28 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 		e.Message = "Workflow finished. Inspect the recorded result before replacing any file."
 	}
 	return finish()
+}
+
+// audioOnlyBudget is the byte ceiling an audio-only encode of a size budget
+// goal carried, zero for any other plan.
+func audioOnlyBudget(res *ActionResult, read func(string) any) int64 {
+	if getString(res.State, "plan_source") != "audio_only" {
+		return 0
+	}
+	plan := getPlan(read("plan"))
+	if plan == nil || plan.SizePolicy == nil {
+		return 0
+	}
+	return plan.SizePolicy.MaxCandidateBytes
+}
+
+// audioOnlyOvershootMessage says how far a compacted-audio-only file landed
+// over the budget, as the x265 encode's does: the budget, the size it came
+// out at and the gap.
+func audioOnlyOvershootMessage(budget, candidate int64) string {
+	if candidate <= 0 {
+		return fmt.Sprintf("Copying the video and compacting the lossless audio alone came out over the %s budget. Original preserved.", formatBudgetBytes(budget))
+	}
+	gap := candidate - budget
+	return fmt.Sprintf("Copying the video and compacting the lossless audio alone came out at %s, over the %s budget by %s (%.1f%%). The video was copied unchanged, so only a larger budget or fewer tracks can fit. Original preserved.", formatBudgetBytes(candidate), formatBudgetBytes(budget), formatBudgetBytes(gap), float64(gap)/float64(budget)*100)
 }

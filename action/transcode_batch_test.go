@@ -662,33 +662,6 @@ func TestTranscodeBatch_ReplaceOriginalRejected(t *testing.T) {
 // 7. Pause and Resume semantics
 func TestTranscodeBatch_PauseAndResume(t *testing.T) {
 	mockExecutor := &mockTranscodeExecutor{
-		benchmarkStatusFunc: func(ctx context.Context, jobID string) (transcode.BenchmarkStatus, error) {
-			return transcode.BenchmarkStatus{
-				ProtocolVersion: transcode.WorkerProtocolVersion,
-				ID:              jobID,
-				Status:          transcode.StatusCompleted,
-				Progress:        100,
-				Decision: &transcode.BenchmarkDecision{
-					Winner: &transcode.BenchmarkWinner{
-						CandidateID:         "cand-ssim",
-						CandidateIndex:      0,
-						Quality:             55,
-						VideoProfile:        "main",
-						PixelFormat:         "yuv420p",
-						ExpectedBitDepth:    8,
-						MetricType:          "ssim",
-						Score:               0.996,
-						TargetReached:       true,
-						MinimumMet:          true,
-						EstimatedVideoBytes: 500000000,
-						EstimatedTotalBytes: 600000000,
-						EstimatedTotalMB:    600,
-						SavingsPercent:      50,
-					},
-					DecisionReason: "test SSIM winner",
-				},
-			}, nil
-		},
 		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
 			writeCandidateOutput(req.CandidatePath)
 			return transcode.Job{ID: req.ID}, nil
@@ -702,7 +675,6 @@ func TestTranscodeBatch_PauseAndResume(t *testing.T) {
 	}
 
 	engine, st, _, srv, _ := setupBatchTestEnv(t, mockExecutor, 1)
-	legacySearch(engine)
 	defer srv.Close()
 	defer st.Close()
 
@@ -713,7 +685,6 @@ func TestTranscodeBatch_PauseAndResume(t *testing.T) {
 		"service":   "sonarr",
 		"series_id": 10,
 		"paused":    true,
-		"metric":    "ssim",
 	})
 	if err != nil {
 		t.Fatalf("unexpected run error: %v", err)
@@ -745,9 +716,6 @@ func TestTranscodeBatch_PauseAndResume(t *testing.T) {
 	if mockExecutor.submitCalls != 2 {
 		t.Errorf("expected 2 submits after resume, got %d", mockExecutor.submitCalls)
 	}
-	if mockExecutor.benchmarkSubmitCalls != 2 {
-		t.Errorf("expected 2 SSIM benchmark submits after resume, got %d", mockExecutor.benchmarkSubmitCalls)
-	}
 	afterResume, err := st.GetActionInstance(res.ID)
 	if err != nil || afterResume == nil {
 		t.Fatalf("reading resumed batch: inst=%v err=%v", afterResume, err)
@@ -761,27 +729,6 @@ func TestTranscodeBatch_PauseAndResume(t *testing.T) {
 	}
 	if resumedState["paused"] != false {
 		t.Fatalf("resume should clear durable paused state, got %+v", resumedState["paused"])
-	}
-
-	items, err := st.ListTranscodeBatchItems(res.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, item := range items {
-		if item.ChildActionID == "" {
-			continue
-		}
-		child, err := st.GetActionInstance(item.ChildActionID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var inputs map[string]any
-		if err := json.Unmarshal([]byte(child.InputsJSON), &inputs); err != nil {
-			t.Fatal(err)
-		}
-		if inputs["metric"] != "ssim" {
-			t.Fatalf("batch child metric = %v, want ssim", inputs["metric"])
-		}
 	}
 }
 

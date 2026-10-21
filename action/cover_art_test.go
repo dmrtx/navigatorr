@@ -24,45 +24,37 @@ func coverArtReport() *mediainspect.DetailedReport {
 	}}
 }
 
-func TestModeAndCalibrationGatesIgnoreCoverArt(t *testing.T) {
+func TestModeGatesIgnoreCoverArt(t *testing.T) {
 	rep := coverArtReport()
 	for _, mode := range []string{"size", "quality", "x265_preserve"} {
 		if reason := modeSourceReason(mode, rep, false); reason != "" {
 			t.Fatalf("%s: cover art made the source %q", mode, reason)
 		}
 	}
-	if !sharedCalibrationSourceSupported(rep) {
-		t.Fatal("shared calibration rejected a source with cover art")
-	}
 	rep.Video[1].Codec = "hevc"
 	if modeSourceReason("x265_preserve", rep, false) != "already_target_codec" {
 		t.Fatal("codec gate read the cover instead of the main video")
 	}
 	rep.Video = append(rep.Video, rep.Video[1])
-	if modeSourceReason("size", rep, false) != "unsupported_source" || sharedCalibrationSourceSupported(rep) {
+	if modeSourceReason("size", rep, false) != "unsupported_source" {
 		t.Fatal("two programme video streams accepted")
-	}
-	rep = coverArtReport()
-	rep.Video[1].BitDepth = 10
-	if sharedCalibrationSourceSupported(rep) || sharedCalibrationSourceSupported(nil) {
-		t.Fatal("calibration class widened")
 	}
 }
 
-func TestBuildBenchmarkRequestUsesMainVideoBesideCoverArt(t *testing.T) {
+func TestFinalValidationRequestUsesMainVideoBesideCoverArt(t *testing.T) {
 	ec := &ExecutionContext{InstanceID: "cover-art", Inputs: map[string]any{}, State: map[string]any{"plan": &transcode.Plan{VideoCodec: "libx265", Quality: 20, PreserveAttachments: true}}}
-	opt := &recipe.OptimizationPolicy{Sampling: &recipe.SamplingPolicy{SampleCount: 1, SampleSeconds: 5, Positions: []float64{0.5}}, Search: &recipe.SearchPolicy{MaxCandidates: 1, QualityValues: []int{20}}, Quality: &recipe.QualityPolicy{PreferredMetric: "ssim"}}
+	opt := &recipe.OptimizationPolicy{Sampling: &recipe.SamplingPolicy{SampleCount: 3, SampleSeconds: 5, Positions: []float64{0.2, 0.5, 0.8}}, Quality: &recipe.QualityPolicy{PreferredMetric: "ssim"}}
 	caps := transcode.WorkerCapabilities{ProtocolVersion: transcode.WorkerProtocolVersion, CoverArt: true, Encoders: map[string]bool{"libx265": true}, Filters: map[string]bool{"ssim": true}}
-	if _, err := buildBenchmarkRequest(ec, "/media/series/Show/S01E01.mkv", coverArtReport(), opt, caps); err != nil {
-		t.Fatalf("benchmark request read the cover as the source video: %v", err)
+	if _, err := finalRequestForPlan(ec, "/media/series/Show/S01E01.mkv", coverArtReport(), opt, caps); err != nil {
+		t.Fatalf("final validation request read the cover as the source video: %v", err)
 	}
 	caps.CoverArt = false
-	if _, err := buildBenchmarkRequest(ec, "/media/series/Show/S01E01.mkv", coverArtReport(), opt, caps); err == nil || !strings.Contains(err.Error(), "cover art") {
-		t.Fatalf("old worker benchmarked a cover-art source: %v", err)
+	if _, err := finalRequestForPlan(ec, "/media/series/Show/S01E01.mkv", coverArtReport(), opt, caps); err == nil || !strings.Contains(err.Error(), "cover art") {
+		t.Fatalf("old worker was sent a cover-art source: %v", err)
 	}
 	plain := coverArtReport()
 	plain.Video = plain.Video[1:]
-	if _, err := buildBenchmarkRequest(ec, "/media/series/Show/S01E01.mkv", plain, opt, caps); err != nil {
+	if _, err := finalRequestForPlan(ec, "/media/series/Show/S01E01.mkv", plain, opt, caps); err != nil {
 		t.Fatalf("cover-art capability required for a source without cover: %v", err)
 	}
 }
@@ -79,9 +71,6 @@ func TestCoverArtGatesFallBackWithoutWorkerCapability(t *testing.T) {
 		if reason := modeSourceReason(mode, legacy, false); reason != "unsupported_source" {
 			t.Fatalf("%s against an old worker: %q", mode, reason)
 		}
-	}
-	if sharedCalibrationSourceSupported(legacy) {
-		t.Fatal("shared calibration admitted cover art against an old worker")
 	}
 	if res := selector.Select(selector.Input{Report: *legacy, MinSavingsPercent: 15}); res.Decision != selector.DecisionReview {
 		t.Fatalf("selector against an old worker: %s %v", res.Decision, res.Reasons)

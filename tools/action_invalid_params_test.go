@@ -28,8 +28,6 @@ func TestActionRunReportsInvalidParamsWithoutReservingTheKey(t *testing.T) {
 		action, inputs, field string
 	}{
 		"podcast without output_path": {"clean_podcast_ads", `{"path":"/media/show/ep01.mp3","podcast_id":"synthetic-show"}`, "output_path"},
-		"benchmark with media_type":   {"benchmark_transcode", `{"path":"/media/show/ep01.mkv","media_type":"movie"}`, "media_type"},
-		"unknown metric":              {"benchmark_transcode", `{"path":"/media/show/ep01.mkv","metric":"psnr"}`, "metric"},
 		"compact with hardware":       {"transcode_media", `{"path":"/media/show/ep01.mkv","mode":"compact","allow_hardware":true}`, "allow_hardware"},
 		"sample test":                 {"benchmark_transcode", `{"path":"/media/show/ep01.mkv"}`, ""},
 		"search metric":               {"transcode_media", `{"path":"/media/show/ep01.mkv","metric":"vmaf"}`, "metric"},

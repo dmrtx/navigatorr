@@ -10,7 +10,7 @@ import (
 )
 
 func TestTranscodeActionsRejectResumeInputMutation(t *testing.T) {
-	for _, actionName := range []string{"transcode_media", "benchmark_transcode", "transcode_batch"} {
+	for _, actionName := range []string{"transcode_media", "transcode_batch"} {
 		t.Run(actionName, func(t *testing.T) {
 			st, err := store.Open(filepath.Join(t.TempDir(), "resume-inputs.db"))
 			if err != nil {
@@ -89,7 +89,7 @@ func TestTranscodeActionsRejectResumeInputMutation(t *testing.T) {
 
 func TestBuiltinWorkflowImmutableInputPolicy(t *testing.T) {
 	engine := NewEngine(EngineDeps{})
-	for _, name := range []string{"transcode_media", "benchmark_transcode", "transcode_batch", "promote_transcode_candidate"} {
+	for _, name := range []string{"transcode_media", "transcode_batch", "promote_transcode_candidate"} {
 		tmpl, ok := engine.GetTemplate(name)
 		if !ok {
 			t.Fatalf("missing builtin template %q", name)

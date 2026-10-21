@@ -7,19 +7,15 @@ import (
 
 	"github.com/jakenesler/navigatorr/action"
 	"github.com/jakenesler/navigatorr/transcode"
-	"github.com/jakenesler/navigatorr/transcode/optimization"
-	"github.com/jakenesler/navigatorr/transcode/quality"
 )
 
-func TestCompactBenchmarkExplainsNoWinnerAndActualAudioPlan(t *testing.T) {
-	limit := 6.0
-	res := &action.ActionResult{ActionName: "benchmark_transcode", Status: action.StatusCompleted, State: map[string]any{
-		"optimization_enabled": true,
-		"benchmark_request":    transcode.BenchmarkRequest{Quality: &transcode.BenchmarkQualityConfig{Banding: &transcode.BenchmarkBandingConfig{Enforcement: "reject", MaxMean: &limit}}},
-		"benchmark_decision":   transcode.BenchmarkDecision{DecisionReason: "all_candidates_invalid", Evaluations: []transcode.BenchmarkCandidateEvaluation{{CandidateID: "crf16", EvaluationReason: "quality_cambi_mean_above_maximum"}}},
-		"benchmark_quality":    []transcode.BenchmarkCandidateQualityEvidence{{CandidateID: "crf16", ReasonCodes: []string{"quality_cambi_mean_above_maximum"}, CAMBI: &quality.CAMBIStats{Mean: 8.86, Max: 17.64, WorstSourceSec: 1105.8}}},
-		"plan":                 transcode.Plan{AudioMode: "compact"},
-		"original":             map[string]any{"audio": []map[string]any{{"index": 1, "codec": "eac3", "channels": 6, "bit_rate": 640000}, {"index": 2, "codec": "dts", "channels": 2, "language": "jpn"}}, "irrelevant": strings.Repeat("x", 2000)},
+// A goal run from before the sample search was removed explains how it ended
+// from its stored state, with the audio it planned.
+func TestCompactBenchmarkExplainsAStoredNoWinnerAndActualAudioPlan(t *testing.T) {
+	res := &action.ActionResult{ActionName: "transcode_media", Status: action.StatusCompleted, Inputs: map[string]any{"mode": "compact"}, State: map[string]any{
+		"reason_code": "no_suitable_candidate",
+		"plan":        transcode.Plan{AudioMode: "compact"},
+		"original":    map[string]any{"audio": []map[string]any{{"index": 1, "codec": "eac3", "channels": 6, "bit_rate": 640000}, {"index": 2, "codec": "dts", "channels": 2, "language": "jpn"}}, "irrelevant": strings.Repeat("x", 2000)},
 	}}
 	// Exercise the decoded persisted JSON shape, not only typed live values.
 	data, _ := json.Marshal(res)
@@ -28,20 +24,13 @@ func TestCompactBenchmarkExplainsNoWinnerAndActualAudioPlan(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := toCompactSummary(&persisted).Benchmark
-	if s == nil || s.Outcome != "no_acceptable_candidate" || len(s.Rejected) != 1 {
+	if s == nil || s.Outcome != "no_suitable_candidate" {
 		t.Fatalf("bad summary: %+v", s)
-	}
-	check := s.Rejected[0].Checks[0]
-	if check.Actual == nil || *check.Actual != 8.86 || check.Limit == nil || *check.Limit != 6 || !strings.Contains(check.Reason, "additional banding") {
-		t.Fatalf("bad check: %+v", check)
-	}
-	if s.Rejected[0].ReviewSourceSeconds == nil || *s.Rejected[0].ReviewSourceSeconds != 1105.8 {
-		t.Fatal("missing review location")
 	}
 	if len(s.Audio) != 2 || s.Audio[0].Operation != "copy" || s.Audio[0].OutputCodec != "eac3" || s.Audio[0].TargetKbps != 0 || s.Audio[1].TargetKbps != 192 {
 		t.Fatalf("incorrect audio conversion claim: %+v", s.Audio)
 	}
-	if !strings.Contains(s.NextStep, "optimization.enabled=false") || !strings.Contains(s.AudioNote, "does not encode") {
+	if !strings.Contains(s.NextStep, "Keep the original") || !strings.Contains(s.AudioNote, "Planned audio only") {
 		t.Fatalf("missing next step or evidence limits: %+v", s)
 	}
 	b, _ := json.Marshal(s)
@@ -50,135 +39,54 @@ func TestCompactBenchmarkExplainsNoWinnerAndActualAudioPlan(t *testing.T) {
 	}
 }
 
-func TestCompactBenchmarkSeparatesProgressErrorsReviewAndWarnings(t *testing.T) {
-	for _, tc := range []struct {
-		status, worker, want string
-		review               bool
-	}{
-		{action.StatusWaitingExternal, "running", "testing", false},
-		{action.StatusFailed, "failed", "execution_error", false},
-		{action.StatusWaitingDecision, "", "search_review_required", true},
-		{action.StatusCancelled, "", "cancelled", true},
-	} {
-		s := compactBenchmark(&action.ActionResult{ActionName: "benchmark_transcode", Status: tc.status, State: map[string]any{"optimization_enabled": true, "benchmark_status": tc.worker, "benchmark_search_review_required": tc.review}})
-		if s == nil || s.Outcome != tc.want {
-			t.Fatalf("%+v: %+v", tc, s)
-		}
+// Sample tests have no template any more; the ones in history have no summary.
+func TestCompactBenchmarkIsAbsentForSampleTests(t *testing.T) {
+	res := &action.ActionResult{ActionName: "benchmark_transcode", Status: action.StatusCompleted, Inputs: map[string]any{"path": "/media/Show/S01E01.mkv"},
+		State: map[string]any{"optimization_enabled": true, "benchmark_decision": transcode.BenchmarkDecision{DecisionReason: "all_candidates_invalid"}}}
+	if s := compactBenchmark(res); s != nil {
+		t.Fatalf("a sample test was given an encode summary: %+v", s)
 	}
-	if s := compactBenchmark(&action.ActionResult{ActionName: "transcode_media"}); s != nil {
-		t.Fatal("direct encoding falsely described as benchmark")
-	}
-	r := &action.ActionResult{ActionName: "benchmark_transcode", Status: action.StatusCompleted, State: map[string]any{
-		"benchmark_decision": transcode.BenchmarkDecision{Evaluations: []transcode.BenchmarkCandidateEvaluation{{CandidateID: "c", EvaluationReason: "sample_below_minimum_quality"}}},
-		"benchmark_request":  transcode.BenchmarkRequest{Quality: &transcode.BenchmarkQualityConfig{Banding: &transcode.BenchmarkBandingConfig{Enforcement: "observe"}}},
-		"benchmark_quality":  []transcode.BenchmarkCandidateQualityEvidence{{CandidateID: "c", ReasonCodes: []string{"quality_cambi_mean_above_maximum"}}},
-	}}
-	s := compactBenchmark(r)
-	if len(s.Rejected[0].Checks) != 1 || s.Rejected[0].Checks[0].Code != "sample_below_minimum_quality" {
-		t.Fatalf("observe warning reported as rejection: %+v", s.Rejected)
+	if s := toCompactSummary(res).Benchmark; s != nil {
+		t.Fatalf("a sample test was given an encode summary: %+v", s)
 	}
 }
 
-func TestHistoricalSelectionAndFailedSampleExplanation(t *testing.T) {
-	tolerance := 0.5
-	r := &action.ActionResult{ActionName: "benchmark_transcode", Status: action.StatusCompleted, State: map[string]any{
-		"benchmark_request": transcode.BenchmarkRequest{Quality: &transcode.BenchmarkQualityConfig{VMAF: &transcode.BenchmarkQualityThresholds{MarginalTolerance: &tolerance}}},
-		"benchmark_decision": transcode.BenchmarkDecision{DecisionReason: "target_reached_smallest_size", Winner: &transcode.BenchmarkWinner{CandidateID: "crf20", MetricType: "vmaf"}, Evaluations: []transcode.BenchmarkCandidateEvaluation{
-			{CandidateID: "crf20", Eligible: true, TargetReached: true, Score: 95.6818}, {CandidateID: "crf26", Eligible: true, TargetReached: true, Score: 92.5063},
-			{CandidateID: "q65", EvaluationReason: "sample_below_minimum_quality", FailedSamples: []transcode.BenchmarkSampleFailure{{SampleIndex: 2, SourceSeconds: 1127, Metric: "vmaf", Actual: 94.7, Minimum: 95}}},
-		}},
-	}}
-	s := compactBenchmark(r)
-	if s.Selection == nil || s.Selection.BestScore != 95.6818 || len(s.Selection.OutsideMargin) != 1 || !strings.Contains(s.Message, "margin") {
-		t.Fatalf("selection explanation: %+v", s)
-	}
-	if len(s.Rejected) != 1 || len(s.Rejected[0].FailedSamples) != 1 || s.Rejected[0].FailedSamples[0].SourceSeconds != 1127 {
-		t.Fatal("missing sample evidence")
-	}
-	delete(r.State, "benchmark_request")
-	if compactBenchmark(r).Selection != nil {
-		t.Fatal("invented historical tolerance without the request")
-	}
-}
-
-func TestCompactBenchmarkExplainsSkippedAndSavingsReasons(t *testing.T) {
-	r := &action.ActionResult{ActionName: "benchmark_transcode", Status: action.StatusCompleted, State: map[string]any{
-		"benchmark_decision": transcode.BenchmarkDecision{Evaluations: []transcode.BenchmarkCandidateEvaluation{
-			{CandidateID: "crf23", EvaluationReason: "skipped_quality_dominated", Uncertainties: []string{"not measured: crf20 failed quality"}},
-			{CandidateID: "crf26", EvaluationReason: "insufficient_savings"},
-			{CandidateID: "crf28", EvaluationReason: "insufficient_savings_before_metrics"},
-			{CandidateID: "crf30", EvaluationReason: "verification_not_passed"},
-			{CandidateID: "crf24", EvaluationReason: "skipped_savings_dominated", Uncertainties: []string{"not measured: crf28 is below minimum savings"}},
-			{CandidateID: "crf32", EvaluationReason: "not_verified", Uncertainties: []string{"not verified: crf30 failed verification on quality"}},
-			{CandidateID: "crf34", EvaluationReason: "not_verified"},
-			{CandidateID: "crf21", EvaluationReason: "quality_vmaf_selection_margin_not_met"},
-		}},
-	}}
-	s := compactBenchmark(r)
-	if s == nil || len(s.Rejected) != 8 {
-		t.Fatalf("bad summary: %+v", s)
-	}
-	want := []string{"Not encoded: crf20 is a higher-quality setting", "does not reach the minimum savings", "below the minimum savings", "additional verification", "Not encoded: crf28 is a smaller setting", "Not verified: crf30, a setting of equal or higher quality", "never encoded", "safety margin"}
-	for i, w := range want {
-		if got := s.Rejected[i].Checks[0].Reason; !strings.Contains(got, w) || strings.Contains(got, "This check did not pass") {
-			t.Fatalf("%s: reason %q lacks %q", s.Rejected[i].CandidateID, got, w)
-		}
-	}
-}
-
-func TestCompactBenchmarkWarnsWhenSelectedCandidateGrowsFile(t *testing.T) {
-	winner := &transcode.BenchmarkWinner{CandidateID: "crf22", SavingsPercent: -39.57}
-	r := &action.ActionResult{ActionName: "benchmark_transcode", Status: action.StatusCompleted, State: map[string]any{
-		"benchmark_decision": &transcode.BenchmarkDecision{Winner: winner, Evaluations: []transcode.BenchmarkCandidateEvaluation{{CandidateID: "crf22", Eligible: true, SavingsPercent: -39.57}}},
-	}}
-	s := compactBenchmark(r)
-	if s == nil || s.Outcome != "selected" || !strings.Contains(s.SizeWarning, "39.6% larger") || !strings.Contains(s.NextStep, "Keep the original") {
-		t.Fatalf("growth not flagged: %+v", s)
-	}
-	winner.SavingsPercent = 38
-	if s := compactBenchmark(r); s.SizeWarning != "" {
-		t.Fatalf("savings flagged as growth: %q", s.SizeWarning)
-	}
-}
-
-func TestCompactBenchmarkExplainsUnavailableQualityPolicyInsteadOfTesting(t *testing.T) {
+func TestCompactBenchmarkExplainsUnavailableQualityPolicyInsteadOfEncoding(t *testing.T) {
 	res := &action.ActionResult{ActionName: "transcode_media", Status: action.StatusWaitingDecision, WaitingReason: "quality_vmaf_model_unavailable: v1_1080p_3h; original preserved",
 		Inputs: map[string]any{"mode": "compact"},
-		State:  map[string]any{"optimization_enabled": true, "reason_code": "quality_policy_unavailable", "plan_source": "profile_base"}}
+		State:  map[string]any{"reason_code": "quality_policy_unavailable", "plan_source": "profile_base"}}
 	s := compactBenchmark(res)
-	if s == nil || s.Outcome != "quality_policy_unavailable" || strings.Contains(s.Message, "Testing") || !strings.Contains(s.NextStep, "Cancel") {
-		t.Fatalf("paused workflow reported as testing: %+v", s)
+	if s == nil || s.Outcome != "quality_policy_unavailable" || strings.Contains(s.Message, "Encoding") || !strings.Contains(s.NextStep, "Cancel") {
+		t.Fatalf("paused workflow reported as encoding: %+v", s)
 	}
 	if s.PlanSource != "" || s.PlanNote != "" {
 		t.Fatalf("provisional preflight plan reported as settled: %+v", s)
 	}
-	res.State["reason_code"] = "search_budget_exhausted"
+	res.State["reason_code"] = "some_other_reason"
 	if s = compactBenchmark(res); s.Outcome != "attention" || s.Message != res.WaitingReason {
-		t.Fatalf("other attention reasons reported as testing: %+v", s)
+		t.Fatalf("other attention reasons reported as encoding: %+v", s)
 	}
 }
 
 func TestCompactBenchmarkReportsSettledPlanSource(t *testing.T) {
-	note := "No benchmark candidate was selected; the stored plan is the profile's untested starting configuration."
-	res := &action.ActionResult{ActionName: "benchmark_transcode", Status: action.StatusCompleted,
+	note := "The profile's fixed settings."
+	res := &action.ActionResult{ActionName: "transcode_media", Status: action.StatusCompleted, Inputs: map[string]any{"mode": "size"},
 		Outputs: map[string]any{"plan_source": "profile_base", "plan_note": note},
-		State:   map[string]any{"optimization_enabled": true, "plan_source": "profile_base", "benchmark_decision": transcode.BenchmarkDecision{DecisionReason: "all_candidates_invalid"}}}
+		State:   map[string]any{"plan_source": "profile_base"}}
 	if s := compactBenchmark(res); s.PlanSource != "profile_base" || s.PlanNote != note {
-		t.Fatalf("untested plan not explained: %+v", s)
+		t.Fatalf("plan not explained: %+v", s)
 	}
-	res = &action.ActionResult{ActionName: "transcode_media", Status: action.StatusRunning,
-		State: map[string]any{"optimization_enabled": true, "plan_source": "benchmark_winner", "benchmark_decision": transcode.BenchmarkDecision{Winner: &transcode.BenchmarkWinner{CandidateID: "crf22"}}}}
-	if s := compactBenchmark(res); s.PlanSource != "benchmark_winner" || s.PlanNote != "" {
-		t.Fatalf("selected plan source missing: %+v", s)
+	res = &action.ActionResult{ActionName: "transcode_media", Status: action.StatusRunning, Inputs: map[string]any{"mode": "size"},
+		State: map[string]any{"plan_source": "profile_base"}}
+	if s := compactBenchmark(res); s.PlanSource != "" || s.PlanNote != "" {
+		t.Fatalf("a plan with no note was presented as settled: %+v", s)
 	}
 }
 
 func TestCompactBenchmarkExplainsAudioOnlyFallback(t *testing.T) {
-	res := &action.ActionResult{ActionName: "transcode_media", Status: action.StatusRunning, State: map[string]any{
-		"optimization_enabled": true,
-		"plan_source":          "audio_only",
-		"benchmark_decision":   transcode.BenchmarkDecision{DecisionReason: "all_candidates_invalid"},
-		"plan":                 transcode.Plan{Mode: "size", VideoCodec: transcode.VideoCodecCopy, AudioMode: transcode.AudioModeCompactLossless},
+	res := &action.ActionResult{ActionName: "transcode_media", Status: action.StatusRunning, Inputs: map[string]any{"mode": "size"}, State: map[string]any{
+		"plan_source": "audio_only",
+		"plan":        transcode.Plan{Mode: "size", VideoCodec: transcode.VideoCodecCopy, AudioMode: transcode.AudioModeCompactLossless},
 	}}
 	data, _ := json.Marshal(res)
 	var persisted action.ActionResult
@@ -191,188 +99,24 @@ func TestCompactBenchmarkExplainsAudioOnlyFallback(t *testing.T) {
 	}
 }
 
-func TestCompactBenchmarkReviewSaysInPlainLanguageWhenNothingNewCanBeTested(t *testing.T) {
-	vmaf := &transcode.BenchmarkVMAFSummary{Mean: 94.87, P5: 91.5, Min: 90.3, WorstWindowMean: 92.8}
-	history := action.SearchReview{NewCandidates: []string{}, Rounds: []action.SearchReviewRound{
-		{ActionID: "earlier-1", Mode: "size", Candidates: []action.SearchReviewCandidate{{ID: "crf16", VideoCodec: "libx265", Quality: 16, Preset: "slow", Result: "sample_below_minimum_quality", VMAF: vmaf}}},
-		{ActionID: "earlier-2", Mode: "size"},
-	}}
-	res := &action.ActionResult{ActionName: "transcode_media", Status: action.StatusWaitingDecision, State: map[string]any{
-		"optimization_enabled": true, "benchmark_search_review_required": true, "benchmark_search_review": history,
-		"previous_unsuccessful_benchmarks": []string{"earlier-1", "earlier-2"},
-	}}
-	data, _ := json.Marshal(res)
-	var persisted action.ActionResult
-	_ = json.Unmarshal(data, &persisted)
-	s := compactBenchmark(&persisted)
-	if s == nil || len(s.PreviousResults) != 2 || s.PreviousResults[0].Candidates[0].VMAF.P5 != 91.5 {
-		t.Fatalf("earlier measurements missing: %+v", s)
-	}
-	if !strings.Contains(s.NextStep, "not offered") || !strings.Contains(s.UserNextStep, "already failed in earlier rounds") || strings.Contains(s.UserNextStep, "run_once") || strings.Contains(s.UserNextStep, "action") {
-		t.Fatalf("next step not split for people and agents: %+v", s)
-	}
-}
-
-func TestCompactBenchmarkListsMeasuredVMAFPerCandidate(t *testing.T) {
-	res := &action.ActionResult{ActionName: "transcode_media", Status: action.StatusCompleted, State: map[string]any{
-		"optimization_enabled": true,
-		"benchmark_decision": transcode.BenchmarkDecision{DecisionReason: "no_candidate_met_minimum", Evaluations: []transcode.BenchmarkCandidateEvaluation{
-			{CandidateID: "crf16", VideoCodec: "libx265", Quality: 16, EvaluationReason: "sample_below_minimum_quality"},
-			{CandidateID: "crf20", VideoCodec: "libx265", Quality: 20, EvaluationReason: "skipped_quality_dominated"},
-		}},
-		"benchmark_quality": []transcode.BenchmarkCandidateQualityEvidence{{CandidateID: "crf16", VMAF: &quality.VMAFStats{Mean: 94.87, P5: 91.5, Min: 90.3, WorstWindowMean: 92.8, FramesTotal: 716}}},
-	}}
-	s := compactBenchmark(res)
-	if s == nil || len(s.Measured) != 1 || s.Measured[0].CandidateID != "crf16" || s.Measured[0].VMAF.WorstWindowMean != 92.8 || s.Measured[0].Passed {
-		t.Fatalf("measured VMAF not reported per candidate: %+v", s)
-	}
-	testing := compactBenchmark(&action.ActionResult{ActionName: "transcode_media", Status: action.StatusWaitingExternal, State: map[string]any{"optimization_enabled": true, "benchmark_status": "running"}})
-	if testing == nil || testing.Outcome != "testing" || testing.UserNextStep == "" || strings.Contains(testing.UserNextStep, "action_status") {
-		t.Fatalf("testing outcome has no plain next step: %+v", testing)
-	}
-	if s.UserNextStep == "" || strings.Contains(s.UserNextStep, "optimization.enabled") {
-		t.Fatalf("user next step carries agent guidance: %q", s.UserNextStep)
-	}
-}
-
-// A candidate measured from the worker's sample cache is marked as reused so
-// the person and the agent can tell it was not measured in this run.
-func TestCompactBenchmarkMarksReusedMeasurements(t *testing.T) {
-	vmaf := &quality.VMAFStats{Mean: 94.8, P5: 91.5, Min: 90.3, WorstWindowMean: 92.8, FramesTotal: 716}
-	res := &action.ActionResult{ActionName: "transcode_media", Status: action.StatusCompleted, State: map[string]any{
-		"optimization_enabled": true,
-		"benchmark_decision": transcode.BenchmarkDecision{DecisionReason: "no_candidate_met_minimum", Evaluations: []transcode.BenchmarkCandidateEvaluation{
-			{CandidateID: "crf16", VideoCodec: "libx265", Quality: 16, Reuse: &transcode.BenchmarkSampleReuse{Reused: 3, Total: 3}},
-			{CandidateID: "crf18", VideoCodec: "libx265", Quality: 18, Reuse: &transcode.BenchmarkSampleReuse{Reused: 1, Total: 3}},
-			{CandidateID: "crf20", VideoCodec: "libx265", Quality: 20},
-		}},
-		"benchmark_quality": []transcode.BenchmarkCandidateQualityEvidence{
-			{CandidateID: "crf16", VMAF: vmaf}, {CandidateID: "crf18", VMAF: vmaf}, {CandidateID: "crf20", VMAF: vmaf},
-		},
-	}}
-	s := compactBenchmark(res)
-	if s == nil || len(s.Measured) != 3 {
-		t.Fatalf("measured candidates missing: %+v", s)
-	}
-	if r := s.Measured[0].Reused; r == nil || r.Reused != 3 || r.Total != 3 {
-		t.Fatalf("fully reused candidate not marked: %+v", s.Measured[0])
-	}
-	if r := s.Measured[1].Reused; r == nil || r.Reused != 1 || r.Total != 3 {
-		t.Fatalf("partly reused candidate not marked: %+v", s.Measured[1])
-	}
-	if s.Measured[2].Reused != nil {
-		t.Fatalf("freshly measured candidate marked as reused: %+v", s.Measured[2])
-	}
-	raw, err := json.Marshal(s.Measured[2])
-	if err != nil || strings.Contains(string(raw), "reused") {
-		t.Fatalf("a fresh measurement must serialise exactly as before: %s %v", raw, err)
-	}
-}
-
-// A media engine winner reports why it was chosen next to its encoder; an
-// x265 winner, or one without a recorded reason, reports none.
-func TestCompactBenchmarkReportsWhyTheMediaEngineWon(t *testing.T) {
-	summary := func(codec string, notes ...string) *benchmarkSummary {
-		return compactBenchmark(&action.ActionResult{ActionName: "benchmark_transcode", Status: action.StatusCompleted, State: map[string]any{
-			"benchmark_decision": transcode.BenchmarkDecision{DecisionReason: "measured_plan_selected", Winner: &transcode.BenchmarkWinner{CandidateID: "w", VideoCodec: codec, Uncertainties: notes}, Evaluations: []transcode.BenchmarkCandidateEvaluation{{CandidateID: "w", Eligible: true}}},
-		}})
-	}
-	note := optimization.HardwareSelectedNote + ": 25000 bytes against 23500 for the smallest software candidate, within the 15% margin"
-	if got := summary(transcode.VideoCodecHEVCVideoToolbox, "estimated", note).HardwareReason; got != "25000 bytes against 23500 for the smallest software candidate, within the 15% margin" {
-		t.Fatalf("hardware reason %q", got)
-	}
-	if got := summary(transcode.VideoCodecHEVCVideoToolbox, "estimated").HardwareReason; got != "" {
-		t.Fatalf("reason invented for a winner without one: %q", got)
-	}
-	if got := summary(transcode.VideoCodecLibX265, note).HardwareReason; got != "" {
-		t.Fatalf("reason reported for an x265 winner: %q", got)
-	}
-	body, _ := json.Marshal(summary(transcode.VideoCodecLibX265))
-	if strings.Contains(string(body), "hardware_reason") {
-		t.Fatalf("an empty reason is serialized: %s", body)
-	}
-}
-
-func TestNotVerifiedTextNamesTheSearchTimeLimit(t *testing.T) {
-	got := notVerifiedText([]string{transcode.NotVerifiedTimeLimit})
-	if !strings.Contains(got, "search time limit") || !strings.Contains(got, "not proven unsuitable") {
-		t.Fatalf("time limit not named: %q", got)
-	}
-	if other := notVerifiedText(nil); strings.Contains(other, "time limit") {
-		t.Fatalf("no time-limit claim without evidence: %q", other)
-	}
-}
-
-// Every measured setting reports its estimated size and saving against the
-// original, whether it passed, failed quality or would grow the file, so a
-// limit-passing setting that was not even smaller than the original shows.
-func TestCompactBenchmarkReportsEstimatedSizeAndSavingsPerCandidate(t *testing.T) {
-	res := &action.ActionResult{ActionName: "transcode_media", Status: action.StatusCompleted, State: map[string]any{
-		"optimization_enabled": true,
-		"original":             map[string]any{"size_bytes": 4_000_000_000},
-		"benchmark_decision": transcode.BenchmarkDecision{DecisionReason: "no_candidate_met_minimum", Evaluations: []transcode.BenchmarkCandidateEvaluation{
-			{CandidateID: "crf20", VideoCodec: "libx265", Quality: 20, Eligible: true, EvaluationReason: "selected", EstimatedBytes: 1_000_000_000, EstimatedMB: 953.7, SavingsPercent: 75},
-			{CandidateID: "vt75", VideoCodec: "hevc_videotoolbox", Quality: 75, EvaluationReason: "verification_not_passed", EstimatedBytes: 4_400_000_000, EstimatedMB: 4196.2, SavingsPercent: -10},
-			{CandidateID: "crf16", VideoCodec: "libx265", Quality: 16, EvaluationReason: "sample_below_minimum_quality"},
-		}},
-		"benchmark_quality": []transcode.BenchmarkCandidateQualityEvidence{
-			{CandidateID: "crf20", VMAF: &quality.VMAFStats{Mean: 94, P5: 90, Min: 85, WorstWindowMean: 91, FramesTotal: 700}},
-			{CandidateID: "vt75", VMAF: &quality.VMAFStats{Mean: 94.3, P5: 85.9, Min: 80, WorstWindowMean: 87.3, FramesTotal: 700}},
-			{CandidateID: "crf16", VMAF: &quality.VMAFStats{Mean: 80, P5: 70, Min: 60, WorstWindowMean: 75, FramesTotal: 700}},
-		},
-	}}
-	// The persisted JSON shape, not only live values.
-	data, _ := json.Marshal(res)
-	var persisted action.ActionResult
-	if err := json.Unmarshal(data, &persisted); err != nil {
-		t.Fatal(err)
-	}
-	s := compactBenchmark(&persisted)
-	if s == nil || len(s.Measured) != 3 || s.SourceBytes != 4_000_000_000 {
-		t.Fatalf("summary %+v", s)
-	}
-	by := map[string]benchmarkMeasured{}
-	for _, m := range s.Measured {
-		by[m.CandidateID] = m
-	}
-	if m := by["crf20"]; m.EstimatedBytes != 1_000_000_000 || m.SavingsPercent == nil || *m.SavingsPercent != 75 || m.LargerThanSource {
-		t.Fatalf("passing setting %+v", m)
-	}
-	if m := by["vt75"]; m.SavingsPercent == nil || *m.SavingsPercent != -10 || !m.LargerThanSource || m.EstimatedMB != 4196.2 {
-		t.Fatalf("larger setting %+v", m)
-	}
-	// A setting with no size estimate says nothing about size.
-	if m := by["crf16"]; m.EstimatedBytes != 0 || m.SavingsPercent != nil || m.LargerThanSource {
-		t.Fatalf("setting without an estimate %+v", m)
-	}
-	b, _ := json.Marshal(by["crf16"])
-	if strings.Contains(string(b), "savings") || strings.Contains(string(b), "estimated") {
-		t.Fatalf("an absent estimate is serialized: %s", b)
-	}
-}
-
-func TestCompactBenchmarkReportsTheSizeBudgetFallback(t *testing.T) {
-	budget := &action.SizeBudgetRecord{Trigger: "no_passing_candidate", SourceBytes: 9000, BudgetBytes: 3000, TargetBytes: 2910, VideoBitrateKbps: 2400, Message: "Encoded once at the budget."}
+func TestCompactBenchmarkReportsTheSizeBudgetEncode(t *testing.T) {
+	budget := &action.SizeBudgetRecord{Trigger: "budget_first", SourceBytes: 9000, BudgetBytes: 3000, TargetBytes: 2910, VideoBitrateKbps: 2400, Message: "Encoded once at the budget."}
 	res := &action.ActionResult{ActionName: "transcode_media", Status: action.StatusRunning,
 		Inputs:  map[string]any{"mode": "size"},
 		Outputs: map[string]any{"plan_source": "size_budget", "plan_note": budget.Message, "size_budget": budget},
-		State:   map[string]any{"optimization_enabled": true, "plan_source": "size_budget", "benchmark_decision": transcode.BenchmarkDecision{DecisionReason: "all_candidates_invalid"}}}
+		State:   map[string]any{"plan_source": "size_budget"}}
 	s := compactBenchmark(res)
 	if s == nil || s.Outcome != "size_budget" || s.Message != budget.Message || s.PlanSource != "size_budget" || s.SizeBudget == nil || s.SizeBudget.TargetBytes != 2910 {
-		t.Fatalf("size budget fallback not reported: %+v", s)
-	}
-	if strings.Contains(s.Message, "Full encoding did not start") {
-		t.Fatalf("fallback reported as a failed search: %q", s.Message)
+		t.Fatalf("size budget encode not reported: %+v", s)
 	}
 }
 
-// A VideoToolbox ladder run submits no benchmark: its summary says which full
-// encode is running, not that samples are being tested.
+// A VideoToolbox ladder run says which full encode is running.
 func TestCompactBenchmarkDescribesTheSizeBudgetLadder(t *testing.T) {
 	ladder := func(rung int, plan *transcode.Plan, status string) *action.ActionResult {
 		rec := &action.SizeBudgetRecord{Trigger: "budget_first", BudgetBytes: 2_000_000_000, Rung: rung, Message: "Encoding with VideoToolbox at quality 65 (step 1 of 4) to fit the 2.0 GB budget.",
 			Choice: &action.SizeBudgetChoice{VideoCodec: transcode.VideoCodecHEVCVideoToolbox, Reason: action.SizeBudgetChoiceLadder}}
-		state := map[string]any{"optimization_enabled": true, "benchmark_done": true, "has_winner": false, "plan_source": "size_budget", "plan": plan, "size_budget": rec,
+		state := map[string]any{"plan_source": "size_budget", "plan": plan, "size_budget": rec,
 			"mode_policy": map[string]any{"mode": "size", "size": map[string]any{"size_budget": map[string]any{"vt_quality_ladder": []int{65, 58, 50}}}}, "transcode_status": "running"}
 		return &action.ActionResult{ActionName: "transcode_media", Status: status, Inputs: map[string]any{"path": "/media/Show/S01E01.mkv", "mode": "size"}, State: state, Outputs: state}
 	}
@@ -380,13 +124,8 @@ func TestCompactBenchmarkDescribesTheSizeBudgetLadder(t *testing.T) {
 	if s == nil || s.Outcome != "size_budget_ladder" || !strings.HasPrefix(s.Message, "Encoding with VideoToolbox at quality 65") || s.SizeBudget == nil {
 		t.Fatalf("%+v", s)
 	}
-	if s.ProgressScope != "Worker progress is for the full encode with VideoToolbox at quality 65 (step 1 of 4), not a sample test." {
+	if s.ProgressScope != "Worker progress is for the full encode with VideoToolbox at quality 65 (step 1 of 4)." {
 		t.Fatalf("progress scope %q", s.ProgressScope)
-	}
-	for _, text := range []string{s.Message, s.NextStep, s.UserNextStep} {
-		if strings.Contains(strings.ToLower(text), "samples are being tested") || strings.Contains(text, "Testing short video samples") {
-			t.Fatalf("ladder described as a sample test: %q", text)
-		}
 	}
 	if !strings.Contains(s.UserNextStep, "VideoToolbox at quality 65 (step 1 of 4)") {
 		t.Fatalf("user next step %q", s.UserNextStep)
@@ -398,10 +137,5 @@ func TestCompactBenchmarkDescribesTheSizeBudgetLadder(t *testing.T) {
 	}
 	if s = compactBenchmark(ladder(0, &transcode.Plan{Quality: 65}, action.StatusFailed)); s.Outcome != "execution_error" {
 		t.Fatalf("failed ladder %+v", s)
-	}
-	// A search run keeps the sample-test wording.
-	s = compactBenchmark(&action.ActionResult{ActionName: "transcode_media", Status: action.StatusWaitingExternal, Inputs: map[string]any{"mode": "size"}, State: map[string]any{"optimization_enabled": true, "benchmark_status": "running"}})
-	if s.Outcome != "testing" || s.ProgressScope != "Worker progress is for the benchmark only, not the full encode." || !strings.Contains(s.UserNextStep, "Short samples are being tested") {
-		t.Fatalf("search run wording changed: %+v", s)
 	}
 }

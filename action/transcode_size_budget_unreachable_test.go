@@ -26,12 +26,12 @@ func TestUnreachableSizeBudgetEndsBeforeAnyWork(t *testing.T) {
 			delete(c.ec.State, "benchmark_request")
 			c.ec.State["optimization_policy"] = c.snapshot.Profile.Optimization
 			c.ec.State["resolved_path"] = "/media/Show/S01E01.mkv"
-			res, err := c.engine.stepBenchmarkSubmit(context.Background(), c.ec)
+			res, err := c.engine.stepPlanEncode(context.Background(), c.ec)
 			if err != nil || res.Status != StepCompleted {
 				t.Fatalf("submit step %+v %v", res, err)
 			}
-			if c.executor.benchmarkSubmitCalls != 0 || c.executor.submitCalls != 0 {
-				t.Fatalf("work submitted: benchmarks=%d encodes=%d", c.executor.benchmarkSubmitCalls, c.executor.submitCalls)
+			if c.executor.submitCalls != 0 {
+				t.Fatalf("work submitted: encodes=%d", c.executor.submitCalls)
 			}
 			if !getBool(c.ec.State, "skip_transcode") || getString(c.ec.State, "reason_code") != SizeBudgetExceeded {
 				t.Fatalf("not ended: %+v", c.ec.State)
@@ -61,7 +61,7 @@ func TestUnreachableSizeBudgetEndsBeforeAnyWork(t *testing.T) {
 	}
 }
 
-func TestOtherSizeBudgetReasonsLeaveTheSearchToRun(t *testing.T) {
+func TestOtherSizeBudgetReasonsAreNotEndedEarly(t *testing.T) {
 	for name, tc := range map[string]struct {
 		inputs map[string]any
 		mutate func(*budgetCase)
@@ -74,14 +74,10 @@ func TestOtherSizeBudgetReasonsLeaveTheSearchToRun(t *testing.T) {
 			c.ec.State["source_report"] = rep
 		}},
 		"sibling budget without evidence": {inputs: map[string]any{"size_budget_source": "siblings"}},
-		"search already started":          {inputs: map[string]any{"size_budget_bytes": 300_000_000.0}, mutate: func(c *budgetCase) { c.ec.State["benchmark_job_id"] = "bench-1" }},
 		"quality mode":                    {inputs: map[string]any{"size_budget_bytes": 300_000_000.0}, mutate: func(c *budgetCase) { c.ec.Inputs["mode"] = "quality" }},
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := newBudgetCase(t, tc.inputs, budgetCaps())
-			if tc.mutate == nil || name != "search already started" {
-				delete(c.ec.State, "benchmark_job_id")
-			}
 			if tc.mutate != nil {
 				tc.mutate(c)
 			}

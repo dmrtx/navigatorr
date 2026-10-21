@@ -9,7 +9,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/recipe"
 	"github.com/jakenesler/navigatorr/transcode/selector"
@@ -109,6 +108,9 @@ func (e *Engine) validateActionInputs(ctx context.Context, tmpl ActionTemplate, 
 // action with identical inputs is a replay and is not judged again, exactly as
 // in admission.
 func (e *Engine) ValidateInputs(ctx context.Context, name string, inputs map[string]any, key string) error {
+	if name == removedBenchmarkAction {
+		return inputErr("", removedBenchmarkMessage)
+	}
 	tmpl, ok := e.GetTemplate(name)
 	if !ok {
 		return nil
@@ -169,18 +171,6 @@ func requiredInputs(tmpl ActionTemplate, inputs map[string]any) error {
 	return nil
 }
 
-// validBenchmarkMetric normalizes a caller-supplied metric.
-func validBenchmarkMetric(raw string) (string, error) {
-	raw = strings.ToLower(strings.TrimSpace(raw))
-	if raw != "auto" && raw != "vmaf" && raw != "ssim" && raw != "both" && raw != "vmaf+ssim" {
-		return "", inputErr("metric", "invalid metric %q: must be 'auto', 'vmaf', 'ssim', or 'both' (fail closed)", raw)
-	}
-	if raw == "vmaf+ssim" {
-		raw = "both"
-	}
-	return raw, nil
-}
-
 // transcodeRequest is what validating a transcode request teaches preflight,
 // so it can act on the request without deciding anything about it again.
 type transcodeRequest struct {
@@ -206,7 +196,7 @@ func (e *Engine) validateTranscodeRequest(name string, inputs map[string]any) (*
 	if !ok {
 		return nil, fmt.Errorf("unknown action template %q", name)
 	}
-	if err := unsupportedInput(tmpl, inputs); err != nil {
+	if err := unsupportedInput(tmpl, inputs, searchOnlyInputs...); err != nil {
 		return nil, err
 	}
 	if err := requiredInputs(tmpl, inputs); err != nil {
@@ -230,8 +220,7 @@ func (e *Engine) validateTranscodeRequest(name string, inputs map[string]any) (*
 
 // validateTranscodeCommon holds the rules every transcode request shares,
 // single-file or batch: no destructive replacement, a decodable profile_config
-// that does not mix with profile, a boolean preserve_source_bit_depth and a
-// known metric.
+// that does not mix with profile and a boolean preserve_source_bit_depth.
 func validateTranscodeCommon(inputs map[string]any) (*transcodeRequest, error) {
 	if getBool(inputs, "replace_original") {
 		return nil, inputErr("replace_original", "destructive replacement (replace_original: true) is not supported; transcoding is candidate-only and never modifies the original")
@@ -249,11 +238,6 @@ func validateTranscodeCommon(inputs map[string]any) (*transcodeRequest, error) {
 	if req.HasProfileConfig && req.PreserveBitDepth {
 		req.PinnedBitDepth = recipe.ExpectedBitDepth(req.ProfileConfig)
 	}
-	if metric := strings.TrimSpace(getString(inputs, "metric")); metric != "" {
-		if _, err := validBenchmarkMetric(metric); err != nil {
-			return nil, err
-		}
-	}
 	return req, nil
 }
 
@@ -262,13 +246,6 @@ func validateTranscodeMedia(_ context.Context, e *Engine, inputs map[string]any)
 		return inputs, err
 	}
 	return inputs, e.rejectSearchInputs("transcode_media", inputs)
-}
-
-func validateBenchmarkTranscode(_ context.Context, e *Engine, inputs map[string]any) (map[string]any, error) {
-	if _, err := e.validateTranscodeRequest("benchmark_transcode", inputs); err != nil {
-		return inputs, err
-	}
-	return inputs, e.rejectSearchInputs("benchmark_transcode", inputs)
 }
 
 // searchOnlyInputs only ever tuned the CRF sample search.
@@ -281,15 +258,11 @@ func SearchOnlyInputs() []string { return slices.Clone(searchOnlyInputs) }
 // rejectSearchInputs refuses, for a new request, what only drove the CRF
 // sample search: every goal now encodes the whole file at a fixed recipe and
 // lets the final check decide (see transcode_recipe.go). It is an admission
-// rule only: actions already admitted, and the children and calibration
-// samples a batch admitted before creates from its stored inputs, run as they
-// were admitted.
+// rule only: an action already admitted that holds them is ended by the engine
+// (see removed_search.go).
 func (e *Engine) rejectSearchInputs(name string, inputs map[string]any) error {
-	if e.batchChild(inputs) || e.legacySearch {
-		return nil
-	}
-	if name == "benchmark_transcode" {
-		return inputErr("", "sample tests were removed: the sample search no longer picks encode settings. Run transcode_media with a goal (mode) instead")
+	if name == removedBenchmarkAction {
+		return inputErr("", removedBenchmarkMessage)
 	}
 	for _, key := range searchOnlyInputs {
 		if inputSet(inputs[key]) {
@@ -367,35 +340,6 @@ func inputSet(v any) bool {
 	return true
 }
 
-// batchChild reports a request a batch admitted earlier creates for one of
-// its items: its parent is a transcode_batch that has not ended and lists this
-// file among its items (the item it names, when it names one), as the batch's
-// own children and calibration samples do. Naming a batch is not enough.
-func (e *Engine) batchChild(inputs map[string]any) bool {
-	id := strings.TrimSpace(getString(inputs, "parent_action_id"))
-	path := getString(inputs, "path")
-	if id == "" || path == "" || e.deps.Store == nil {
-		return false
-	}
-	parent, err := e.deps.Store.GetActionInstance(id)
-	if err != nil || parent == nil || parent.ActionName != "transcode_batch" {
-		return false
-	}
-	switch parent.Status {
-	case StatusCompleted, StatusFailed, StatusCancelled:
-		return false
-	}
-	if key := getString(inputs, "batch_item_key"); key != "" {
-		item, err := e.deps.Store.GetTranscodeBatchItem(id, key)
-		return err == nil && item != nil && item.FilePath == path
-	}
-	items, err := e.deps.Store.ListTranscodeBatchItems(id)
-	if err != nil {
-		return false
-	}
-	return slices.ContainsFunc(items, func(item store.TranscodeBatchItem) bool { return item.FilePath == path })
-}
-
 // validateTranscodeBatch checks what a batch passes through to its children
 // and what its first step would otherwise reject after admission. The set of
 // files a Sonarr series resolves to is only known later, so only the inputs
@@ -405,7 +349,7 @@ func validateTranscodeBatch(_ context.Context, e *Engine, inputs map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("unknown action template %q", "transcode_batch")
 	}
-	if err := unsupportedInput(tmpl, inputs); err != nil {
+	if err := unsupportedInput(tmpl, inputs, searchOnlyInputs...); err != nil {
 		return nil, err
 	}
 	if err := validateModeInputs(inputs); err != nil {

@@ -20,8 +20,8 @@ func (e *Engine) workerSupportsCoverArt(ctx context.Context) bool {
 	return err == nil && caps.CoverArt
 }
 
-// coverArtGateReport returns the report the source-class gates (modes, shared
-// calibration, the auto selector) should judge. Treating cover art as cover
+// coverArtGateReport returns the report the source-class gates (the modes and the
+// auto selector) should judge. Treating cover art as cover
 // needs a worker with the cover_art capability; against an older worker the
 // cover still counts as a second video stream, so those gates keep their
 // previous reject/review behaviour. supported is consulted only when the

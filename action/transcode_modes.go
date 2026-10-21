@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/jakenesler/navigatorr/mediainspect"
-	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/optimization"
 	"github.com/jakenesler/navigatorr/transcode/quality"
@@ -171,39 +170,11 @@ func sizeModeV3Policy(allowSlow bool) *ModeSizePolicy {
 		AutomaticSearch: &transcode.AutomaticSearchRules{HoldoutWindows: transcode.HoldoutWindowsFinalGrid, VerifyUntilExhausted: true, FinalFreshWindows: sizeFinalFreshWindows, QualityFallbackPresets: presets, QualityWalk: true, RefinementQualityValues: slices.Clone(sizeRefinementQualityValues), DeferBanding: true}}
 }
 
-// searchExtension is the frozen rule for running past the base budget, or nil
-// for a fixed budget.
-func (p *ModePolicySnapshot) searchExtension() *transcode.SearchExtension {
-	if p == nil || p.Size == nil || p.Size.SearchExtension.Validate(p.SearchBudgetSeconds) != nil {
-		return nil
-	}
-	return p.Size.SearchExtension
-}
-
-// searchCeilingSeconds is the most one source's search can run under a frozen
-// policy, read from stored state without verifying its digest: that happens
-// when the policy executes. It falls back to the base budget.
-func searchCeilingSeconds(policy any, base int) int {
-	var snapshot ModePolicySnapshot
-	if b, err := json.Marshal(policy); err != nil || json.Unmarshal(b, &snapshot) != nil {
-		return base
-	}
-	snapshot.SearchBudgetSeconds = base
-	if ext := snapshot.searchExtension(); ext != nil {
-		return ext.TotalSeconds()
-	}
-	return base
-}
-
 // ModeCompactPolicy freezes the output shape of compact mode: SDR BT.709 no
 // taller than MaxHeight, through the named worker chain.
 type ModeCompactPolicy struct {
 	MaxHeight    int    `json:"max_height"`
 	ChainVersion string `json:"chain_version"`
-}
-
-func modePolicy(mode string, anime bool) (ModePolicySnapshot, error) {
-	return modePolicyFor(mode, anime, 0)
 }
 
 // Hardware search (size mode, on unless the operation turns it off). The ladder
@@ -365,20 +336,6 @@ func modePolicyWithBudget(mode string, anime bool, maxHeight int, hardware *tran
 	return snapshot, digestModePolicy(&snapshot)
 }
 
-// frozenModePolicy is the snapshot a new operation freezes: policy v4. Only a
-// test engine (legacySearch) freezes the v2/v3 content, to drive the path
-// operations frozen before v4 still take.
-func (e *Engine) frozenModePolicy(mode string, anime bool, maxHeight int, hardware *transcode.HardwareSearchRules, allowSlow bool, budget *SizeBudgetPolicy) (ModePolicySnapshot, error) {
-	if e == nil || !e.legacySearch {
-		return modePolicyWithBudget(mode, anime, maxHeight, hardware, allowSlow, budget)
-	}
-	snapshot, err := modePolicyContent(mode, anime, maxHeight, hardware, allowSlow, budget)
-	if err != nil {
-		return snapshot, err
-	}
-	return snapshot, digestModePolicy(&snapshot)
-}
-
 // digestModePolicy sets the snapshot's digest over its content.
 func digestModePolicy(snapshot *ModePolicySnapshot) error {
 	snapshot.Digest = ""
@@ -389,6 +346,37 @@ func digestModePolicy(snapshot *ModePolicySnapshot) error {
 	h := sha256.Sum256(b)
 	snapshot.Digest = "sha256:" + hex.EncodeToString(h[:])
 	return nil
+}
+
+// automaticBatchSearchProfile is the base profile policies v2 and v3 froze for
+// a mode. It stays because snapshots frozen under them, and the v4 snapshots
+// that carry the same content, are digested over it: changing a value changes
+// every digest. Nothing searches with it any more.
+func automaticBatchSearchProfile(isAnime bool) recipe.Profile {
+	ptr := func(v float64) *float64 { return &v }
+	p := recipe.Profile{
+		Container:  "mkv",
+		Video:      recipe.VideoProfile{Codec: transcode.VideoCodecLibX265, Quality: 23, Preset: "medium", Profile: "main", PixelFormat: "yuv420p"},
+		Audio:      recipe.AudioProfile{Mode: "copy"},
+		Subtitles:  recipe.SubtitleProfile{Mode: "preserve", ConvertIncompatible: true},
+		Preserve:   recipe.PreserveProfile{Metadata: true, Chapters: true, Attachments: true},
+		Resilience: recipe.ResilienceProfile{MaxAttempts: 1},
+		Optimization: &recipe.OptimizationPolicy{
+			Enabled:  true,
+			Sampling: &recipe.SamplingPolicy{Strategy: "distributed", SampleCount: 3, SampleSeconds: 10, Positions: []float64{0.2, 0.5, 0.8}},
+			Search:   &recipe.SearchPolicy{MaxCandidates: 3, QualityValues: []int{20, 23, 26}},
+			Quality: &recipe.QualityPolicy{
+				PreferredMetric: "vmaf",
+				VMAF:            &recipe.MetricTarget{Model: "v1_1080p_3h", Target: 92, Minimum: 88, MarginalTolerance: ptr(2), GuardrailEnforcement: "reject", P5Minimum: ptr(84), WorstWindowMinimum: ptr(85), WorstWindowSeconds: 5},
+				Banding:         &recipe.BandingPolicy{Enabled: true, Metric: "cambi", Mode: "full_ref", Enforcement: "reject", MaxMean: ptr(6), MaxPeak: ptr(16)},
+				FinalValidation: &recipe.FinalValidationPolicy{Mode: "sampled"},
+			},
+		},
+	}
+	if isAnime {
+		p.Video.Tune = "animation"
+	}
+	return p
 }
 
 // modePolicyContent is what policies v2 (quality, x265_preserve, compact) and
@@ -579,7 +567,7 @@ func freezeModePolicy(ec *ExecutionContext) (*ModePolicySnapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	p, err := ec.Engine.frozenModePolicy(mode, getBool(ec.State, "resolved_is_anime") || getBool(ec.Inputs, "is_anime") || getString(ec.Inputs, "media_type") == "anime", maxHeight, hardware, slow, budget)
+	p, err := modePolicyWithBudget(mode, getBool(ec.State, "resolved_is_anime") || getBool(ec.Inputs, "is_anime") || getString(ec.Inputs, "media_type") == "anime", maxHeight, hardware, slow, budget)
 	if err != nil {
 		return nil, err
 	}
@@ -744,173 +732,6 @@ func (e *Engine) bindModeParent(ec *ExecutionContext) error {
 	return nil
 }
 
-// SearchBudgetEntry is persisted before any external admission. Uncertain
-// accepted effects retain the full reservation; authoritative completion settles
-// measured active time and releases unused credit. Provisional entries were
-// settled while their child waited for a decision and reopen if it resumes.
-type SearchBudgetEntry struct {
-	Reserved    float64  `json:"reserved_seconds"`
-	Consumed    *float64 `json:"consumed_seconds,omitempty"`
-	Provisional bool     `json:"provisional,omitempty"`
-}
-
-func modeBudgetEntries(ec *ExecutionContext) map[string]SearchBudgetEntry {
-	entries := map[string]SearchBudgetEntry{}
-	b, _ := json.Marshal(ec.State["search_budget_entries"])
-	_ = json.Unmarshal(b, &entries)
-	if entries == nil {
-		entries = map[string]SearchBudgetEntry{}
-	}
-	return entries
-}
-
-// reserveModeSearch records one attempt's per-source search budget before it
-// is admitted. Each attempt is bounded by that budget (the worker enforces it
-// as a deadline) and the batch by max_parallel_jobs, so the operation-wide
-// figure is the per-source budget times the attempts admitted. It is never a
-// separate cap: a flat cap admitted only six sources of a season and blocked
-// retries. The frozen operation_budget_seconds is kept in earlier snapshots for
-// digest compatibility only; new size snapshots carry none.
-//
-// The reservation is the longest the search can run: the hard cap of a frozen
-// search extension, else the base budget.
-func reserveModeSearch(ec *ExecutionContext, key string) bool {
-	return reserveModeSearchUpTo(ec, key, searchCeilingSeconds(ec.State["mode_policy"], getInt(ec.State, "search_budget_seconds")))
-}
-
-func reserveModeSearchUpTo(ec *ExecutionContext, key string, ceiling int) bool {
-	entries := modeBudgetEntries(ec)
-	if _, ok := entries[key]; ok {
-		return true
-	}
-	if getInt(ec.State, "search_budget_seconds") <= 0 || ceiling <= 0 {
-		return false
-	}
-	entries[key] = SearchBudgetEntry{Reserved: float64(ceiling)}
-	ec.State["search_budget_entries"] = entries
-	return true
-}
-
-// batchItemSearchCeiling is reserveModeSearch's ceiling for one batch item,
-// whose revised goal carries its own frozen policy.
-func batchItemSearchCeiling(ec *ExecutionContext, item store.TranscodeBatchItem) int {
-	return searchCeilingSeconds(batchItemPolicy(ec, item), getInt(ec.State, "search_budget_seconds"))
-}
-
-// batchItemPolicy is the frozen goal policy one batch item runs under: its
-// revised goal's, else the batch's.
-func batchItemPolicy(ec *ExecutionContext, item store.TranscodeBatchItem) any {
-	if row, ok := stateObject(ec.State, "batch_item_settings")[item.ItemKey].(map[string]any); ok && getString(row, "mode") != "" {
-		return row["mode_policy"]
-	}
-	return ec.State["mode_policy"]
-}
-
-// batchItemSearches reports a batch item whose goal may search: one frozen
-// before policy v4. A v4 item runs a recipe, so it reserves no search budget
-// and is admitted like an item without a goal.
-func batchItemSearches(ec *ExecutionContext, item store.TranscodeBatchItem) bool {
-	return batchItemMode(ec, item) != "" && policyRecipe(batchItemPolicy(ec, item)) == nil
-}
-
-func (e *Engine) settleModeSearches(ec *ExecutionContext, items []store.TranscodeBatchItem) {
-	entries := modeBudgetEntries(ec)
-	// Reservations own stable child keys, even after a settings revision moves
-	// the visible row to a new generation. Settle old attempts as well as current
-	// ones, retaining the full reservation whenever execution cost is uncertain.
-	for key, entry := range entries {
-		if entry.Consumed != nil && !entry.Provisional {
-			continue
-		}
-		child, err := e.deps.Store.FindActionByIdempotencyKey("transcode_media", key)
-		if err == nil && child == nil {
-			for _, item := range items {
-				if item.ChildActionID != "" && batchChildKey(ec, item) == key {
-					child, err = e.deps.Store.GetActionInstance(item.ChildActionID)
-					break
-				}
-			}
-		}
-		if err != nil || child == nil {
-			continue
-		}
-		var state map[string]any
-		_ = json.Unmarshal([]byte(child.StateJSON), &state)
-		terminal := child.Status == StatusCompleted || child.Status == StatusFailed || child.Status == StatusCancelled
-		waiting := child.Status == StatusWaitingDecision
-		measured, known := state["benchmark_search_seconds"]
-		if !known {
-			// A child waiting for a decision is not searching. When it never
-			// submitted a search it holds no budget until it resumes.
-			definitelyUnsubmitted := !getBool(state, "benchmark_submitted") && !getBool(state, "benchmark_reconcile")
-			if definitelyUnsubmitted && (terminal || waiting) {
-				measured = float64(0)
-			} else {
-				if entry.Provisional {
-					entries[key] = SearchBudgetEntry{Reserved: entry.Reserved}
-				}
-				continue
-			}
-		}
-		value, valid := measuredSearchSeconds(measured)
-		if !valid {
-			continue
-		}
-		// The worker stops at its deadline, so a measured cost can overshoot
-		// the reservation by scheduling jitter; that time is fully spent.
-		value = math.Min(value, entry.Reserved)
-		// A hardware result still awaiting its final quality check may be followed
-		// by a second search under the same ceiling, so the first search's time is
-		// not final: the whole reservation stays held until the action settles.
-		if !terminal && state[continuationBasePlanKey] != nil && state[hardwareContinuationKey] == nil {
-			entries[key] = SearchBudgetEntry{Reserved: entry.Reserved, Provisional: true}
-			continue
-		}
-		entries[key] = SearchBudgetEntry{Reserved: entry.Reserved, Consumed: &value, Provisional: !terminal && !known}
-	}
-	ec.State["search_budget_entries"] = entries
-}
-
-// sameOptionalInt compares two optional settings, unset against unset included.
-func sameOptionalInt(a, b *int) bool {
-	return a == nil && b == nil || a != nil && b != nil && *a == *b
-}
-
-func verifyModeBenchmarkWinner(ec *ExecutionContext, winner *transcode.BenchmarkWinner) error {
-	if getString(ec.Inputs, "mode") == "" {
-		return nil
-	}
-	var request transcode.BenchmarkRequest
-	b, err := json.Marshal(ec.State["benchmark_request"])
-	if err != nil || json.Unmarshal(b, &request) != nil {
-		return fmt.Errorf("mode benchmark request missing")
-	}
-	digest, err := transcode.DigestBenchmarkRequest(&request)
-	if err != nil || digest != getString(ec.State, "benchmark_request_digest") || request.Mode != getString(ec.Inputs, "mode") || request.SourceSHA256 != getString(ec.State, "original_sha256") {
-		return fmt.Errorf("mode benchmark evidence request identity mismatch")
-	}
-	if plan := getPlan(ec.State["plan"]); plan == nil || !request.Compact.Equal(plan.Compact) {
-		return fmt.Errorf("mode benchmark compact plan does not match the frozen plan")
-	}
-	for _, candidate := range request.Candidates {
-		if candidate.ID != winner.CandidateID {
-			continue
-		}
-		if transcode.BenchmarkCandidateVideoCodec(candidate) != winner.VideoCodec || candidate.Quality != winner.Quality || candidate.AverageBitrateKbps != winner.AverageBitrateKbps || candidate.Preset != winner.Preset || candidate.Tune != winner.Tune || candidate.VideoProfile != winner.VideoProfile || candidate.PixelFormat != winner.PixelFormat || !sameOptionalInt(candidate.GOPSize, winner.GOPSize) || !sameOptionalInt(candidate.BFrames, winner.BFrames) {
-			return fmt.Errorf("mode benchmark winner does not match measured candidate plan")
-		}
-		snapshot, err := freezeModePolicy(ec)
-		if err != nil {
-			return err
-		}
-		if !winner.MinimumMet || winner.MetricType != "vmaf" || winner.Score < snapshot.Profile.Optimization.Quality.VMAF.Minimum {
-			return fmt.Errorf("mode benchmark winner does not meet frozen quality policy")
-		}
-		return nil
-	}
-	return fmt.Errorf("mode benchmark winner was not part of frozen request")
-}
-
 // compactSourcePlan classifies the source from stream and decoded-frame
 // evidence and derives its frozen compact plan. A non-empty reason is a
 // user-facing skip, never a hard failure: a source whose frames cannot be
@@ -940,21 +761,6 @@ func compactSourcePlanWith(ctx context.Context, rep *mediainspect.DetailedReport
 		return nil, err.Error()
 	}
 	return plan, ""
-}
-
-func measuredSearchSeconds(raw any) (float64, bool) {
-	var seconds float64
-	switch value := raw.(type) {
-	case float64:
-		seconds = value
-	case int:
-		seconds = float64(value)
-	case int64:
-		seconds = float64(value)
-	default:
-		return 0, false
-	}
-	return seconds, seconds >= 0 && !math.IsNaN(seconds) && !math.IsInf(seconds, 0)
 }
 
 // compactInventoryReason screens a batch source from stream evidence alone.

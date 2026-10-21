@@ -73,8 +73,8 @@ func (e *Engine) measureCoordinatorPhase(phase string, run func(context.Context,
 }
 
 // Worker costs are cumulative snapshots. Polling replaces the same source's
-// snapshot rather than adding it again; benchmark and encode namespaces keep
-// independent scopes and preserve coordinator measurements.
+// snapshot rather than adding it again; namespaces keep independent scopes
+// and preserve coordinator measurements.
 func mirrorWorkerPhaseCosts(ec *ExecutionContext, prefix string, costs map[string]transcode.PhaseCost) {
 	if len(costs) == 0 {
 		return

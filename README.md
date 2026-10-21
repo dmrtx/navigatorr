@@ -21,7 +21,7 @@ Navigatorr acts as a bridge between AI coding assistants and your self-hosted me
 - **Transmission** — Torrent client
 - **qBittorrent** — Torrent client
 - **SABnzbd** — Usenet downloader
-- **Transcoding** — Persistent HTTP worker (with an SSH adapter) for FFmpeg transcoding, including VideoToolbox and libx265, calibration, and candidate validation
+- **Transcoding** — Persistent HTTP worker (with an SSH adapter) for FFmpeg transcoding, including VideoToolbox and libx265, goal-based encode ladders, and candidate validation
 - **Podcast cleaning** — Durable native ASR and validated audio cuts, with classification supplied by the orchestrating LLM. See [setup and MCP workflow](docs/podcast/podcast-cleaning.md).
 
 ## Architecture
@@ -91,7 +91,7 @@ Claude Code / MCP Client
 
 ## Browser maintenance interface
 
-An optional web interface provides direct folder navigation, single-file and series/season batches, typed target controls, benchmarks, profiles, a live queue and persistent savings statistics. Candidate replacement requires approval; Sonarr/Radarr catalog and import integrations are optional. It shares the existing HTTP worker and persistent actions with MCP; closing the browser does not stop jobs. Audio-only conversion is deferred, while video audio tracks retain copy/compact support.
+An optional web interface provides direct folder navigation, single-file and series/season batches, typed target controls, profiles, a live queue and persistent savings statistics. Candidate replacement requires approval; Sonarr/Radarr catalog and import integrations are optional. It shares the existing HTTP worker and persistent actions with MCP; closing the browser does not stop jobs. Audio-only conversion is deferred, while video audio tracks retain copy/compact support.
 
 Enable `web.enabled` with persistent `streamable-http` transport and either Cloudflare Access authentication or a standalone token. Cloudflare mode uses its existing Google sign-in without a second app login. See [setup and workflow](docs/MAINTENANCE_UI.md) for configuration, access controls and extension boundaries.
 
@@ -166,19 +166,17 @@ A completed workflow can have unsuccessful items; use these counts before
 reporting success. Cancelling an encoding batch is terminal and never advances
 into promotion. Cancelled items are counted separately from failures.
 
-For simple series tuning, supply `service: "sonarr"`, `series_id`, and
-`priority: "balanced"` (or `"quality"` / `"savings"`), without a profile.
-Navigatorr tests three quality settings on short samples and creates one temporary
-recipe for the batch, ending the search after that pass. Direct encoding with an
-explicit non-optimizing profile remains available. Existing bare `auto` requests
-keep their behavior. Use `dry_run: true` for a preview and `promote_candidates: true`
-to request approval before replacement. `batch.selection` explains the choice;
-`batch.sample_evidence` separates measured sample quality from estimated savings.
-See [the series workflow](docs/transcode/TRANSCODING.md#simple-series-workflow). The MCP
+For a series, supply `service: "sonarr"`, `series_id` and a goal: `mode` is
+`size`, `quality`, `x265_preserve` or `compact`, without a profile. Each episode
+runs the goal's fixed ladder of whole-file encodes, and the worker's final quality
+check judges the result; a file that passes no rung keeps its original. Direct
+encoding with an explicit non-optimizing profile remains available. Use
+`dry_run: true` for a preview and `promote_candidates: true` to request approval
+before replacement. `batch.selection` explains the choice. See
+[the series workflow](docs/transcode/TRANSCODING.md#simple-series-workflow). The MCP
 `action_catalog` includes copyable input examples; `batch.next_step` explains how
 to continue. Preview actions finish without encoding: start a new action to
-execute. Generated recipes have `scope: "batch_only"`; their label is not a name
-accepted by `recipe_get`.
+execute.
 
 The default `action_status` shows the latest observation of each logical step,
 not repeated polling records. `action_detail(section="steps")` retains access

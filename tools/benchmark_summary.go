@@ -3,84 +3,30 @@ package tools
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/jakenesler/navigatorr/action"
 	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
-	"github.com/jakenesler/navigatorr/transcode/optimization"
 )
 
+// benchmarkSummary is the encode summary of a goal under the recipe, under the
+// action_status key "benchmark" that earlier versions gave their sample test.
 type benchmarkSummary struct {
-	Selection *optimization.SelectionExplanation `json:"selection,omitempty"`
-	Outcome   string                             `json:"outcome"`
-	Message   string                             `json:"message"`
-	NextStep  string                             `json:"next_step"`
+	Outcome  string `json:"outcome"`
+	Message  string `json:"message"`
+	NextStep string `json:"next_step"`
 	// UserNextStep says the same for a person in the UI; NextStep keeps the
 	// tool-level guidance for agents.
-	UserNextStep       string                            `json:"user_next_step,omitempty"`
-	ProgressScope      string                            `json:"progress_scope"`
-	PreviousRounds     []string                          `json:"previous_unsuccessful_actions,omitempty"`
-	PreviousResults    []action.SearchReviewRound        `json:"previous_rounds,omitempty"`
-	NewCandidates      []string                          `json:"new_candidates,omitempty"`
-	Measured           []benchmarkMeasured               `json:"measured,omitempty"`
-	ProposedCandidates []transcode.BenchmarkCandidate    `json:"proposed_candidates,omitempty"`
-	ProposedQuality    *transcode.BenchmarkQualityConfig `json:"proposed_quality,omitempty"`
-	ProposedSamples    []transcode.BenchmarkSampleWindow `json:"proposed_samples,omitempty"`
-	SizeWarning        string                            `json:"size_warning,omitempty"`
-	Rejected           []benchmarkRejection              `json:"rejected,omitempty"`
-	Audio              []benchmarkAudio                  `json:"planned_audio,omitempty"`
-	AudioNote          string                            `json:"audio_note,omitempty"`
-	PlanSource         string                            `json:"plan_source,omitempty"`
-	PlanNote           string                            `json:"plan_note,omitempty"`
-	// SizeBudget is the operation's size budget fallback: what it planned, the
+	UserNextStep  string           `json:"user_next_step,omitempty"`
+	ProgressScope string           `json:"progress_scope"`
+	Audio         []benchmarkAudio `json:"planned_audio,omitempty"`
+	AudioNote     string           `json:"audio_note,omitempty"`
+	PlanSource    string           `json:"plan_source,omitempty"`
+	PlanNote      string           `json:"plan_note,omitempty"`
+	// SizeBudget is the operation's size budget: what it planned, the
 	// rate-quality points and, once measured, how the result compares with the
 	// quality target.
 	SizeBudget *action.SizeBudgetRecord `json:"size_budget,omitempty"`
-	// HardwareReason says why a VideoToolbox (media engine) winner was chosen,
-	// next to the encoder the explanation names.
-	HardwareReason string `json:"hardware_reason,omitempty"`
-	// SourceBytes is the original's size, the base of every measured setting's
-	// estimated size and savings.
-	SourceBytes int64 `json:"source_bytes,omitempty"`
-}
-
-type benchmarkRejection struct {
-	FailedSamples       []transcode.BenchmarkSampleFailure `json:"failed_samples,omitempty"`
-	CandidateID         string                             `json:"candidate_id"`
-	Checks              []benchmarkCheck                   `json:"checks"`
-	ReviewSourceSeconds *float64                           `json:"review_source_seconds,omitempty"`
-}
-
-// benchmarkMeasured is one evaluated candidate's measured quality.
-type benchmarkMeasured struct {
-	CandidateID        string                          `json:"candidate_id"`
-	VideoCodec         string                          `json:"video_codec,omitempty"`
-	Quality            int                             `json:"quality"`
-	Preset             string                          `json:"preset,omitempty"`
-	AverageBitrateKbps int                             `json:"average_bitrate_kbps,omitempty"`
-	Passed             bool                            `json:"passed"`
-	Selected           bool                            `json:"selected,omitempty"`
-	VMAF               *transcode.BenchmarkVMAFSummary `json:"vmaf"`
-	// Reused is set when some of this setting's sample measurements were
-	// replayed from an earlier run on the same source bytes. They count toward
-	// selection exactly like fresh ones.
-	Reused *transcode.BenchmarkSampleReuse `json:"reused,omitempty"`
-	// EstimatedBytes, EstimatedMB and SavingsPercent are the estimated output
-	// size and saving against the original, from the sampled windows, whether
-	// or not the setting passed. Absent when no size could be estimated.
-	// LargerThanSource says the estimate is bigger than the original.
-	EstimatedBytes   int64    `json:"estimated_bytes,omitempty"`
-	EstimatedMB      float64  `json:"estimated_mb,omitempty"`
-	SavingsPercent   *float64 `json:"savings_percent,omitempty"`
-	LargerThanSource bool     `json:"larger_than_source,omitempty"`
-}
-
-type benchmarkCheck struct {
-	Code   string   `json:"code"`
-	Reason string   `json:"reason"`
-	Actual *float64 `json:"actual,omitempty"`
-	Limit  *float64 `json:"limit,omitempty"`
 }
 
 type benchmarkAudio struct {
@@ -113,74 +59,43 @@ func summaryPlanSource(res *action.ActionResult) string {
 	return source
 }
 
+// compactBenchmark summarizes the encode of a goal. Actions that ran the
+// removed sample search have no summary: their state is shown as stored.
 func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
-	if res.ActionName != "benchmark_transcode" && res.ActionName != "transcode_media" {
-		return nil
-	}
-	var enabled, review bool
-	var status string
-	var decision *transcode.BenchmarkDecision
-	benchmarkField(res, "optimization_enabled", &enabled)
-	benchmarkField(res, "benchmark_status", &status)
-	benchmarkField(res, "benchmark_decision", &decision)
-	benchmarkField(res, "benchmark_search_review_required", &review)
-	if !enabled && status == "" && decision == nil && !review {
+	if res.ActionName != "transcode_media" || summaryInput(res, "mode") == "" {
 		return nil
 	}
 	ladderStep, ladder := action.SizeBudgetLadderStep(res.State)
 	recipeStep, recipe := action.RecipeStep(res.State)
-	s := &benchmarkSummary{ProgressScope: "Worker progress is for the benchmark only, not the full encode.", Outcome: "testing", Message: "Testing short video samples; no quality decision yet.", NextStep: "Monitor this action with action_status. A progress percentage does not mean quality passed; do not launch another search.", UserNextStep: "Nothing to do yet. Short samples are being tested; progress does not mean the quality check passed."}
+	planSource := summaryPlanSource(res)
+	s := &benchmarkSummary{ProgressScope: "Worker progress is for the full encode, not a sample test.", Outcome: "preparing", Message: "Preparing the goal's first encode; no quality decision yet.", NextStep: "Monitor this action with action_status. A progress percentage does not mean quality passed.", UserNextStep: "Nothing to do yet. The first encode is being prepared."}
 	switch {
 	case res.Status == action.StatusCancelled:
-		s.Outcome, s.Message, s.NextStep = "cancelled", "Search cancelled.", "Keep the original; inspect action details before starting other work."
+		s.Outcome, s.Message, s.NextStep = "cancelled", "Cancelled.", "Keep the original; inspect action details before starting other work."
 		s.UserNextStep = "Nothing else to do: the original is kept."
-	case review:
-		s.Outcome, s.Message = "search_review_required", "Two earlier rounds found no acceptable candidate; this new benchmark has not been submitted."
-		s.NextStep = "Review the previous actions and this proposed recipe. Stop, choose direct encoding, or use the displayed run_once_after_review decision only on explicit user instruction. Do not automatically change CRF or thresholds and start another action."
-		s.UserNextStep = "Keep the original, or choose “Run one more test” to try the new settings listed below with the same quality requirement."
-		benchmarkField(res, "previous_unsuccessful_benchmarks", &s.PreviousRounds)
-		var req transcode.BenchmarkRequest
-		if benchmarkField(res, "benchmark_request", &req) {
-			s.ProposedCandidates = req.Candidates
-			s.ProposedQuality, s.ProposedSamples = req.Quality, req.Samples
-		}
-		var history action.SearchReview
-		if benchmarkField(res, "benchmark_search_review", &history) {
-			s.PreviousResults, s.NewCandidates = history.Rounds, history.NewCandidates
-			if len(history.NewCandidates) == 0 {
-				s.NextStep = "Every proposed candidate was already measured by a comparable earlier round, so run_once_after_review is not offered. Cancel to keep the original, or explicitly choose another goal or direct encoding; do not start a new action with the same ladder."
-				s.UserNextStep = "Keep the original. Every setting this test would try already failed in earlier rounds, so testing them again is not offered. To process this file anyway, choose a different goal."
-			} else {
-				s.NextStep = "Review previous_rounds and this proposal. run_once_after_review tests only on explicit user instruction; new_candidates lists the settings no comparable round measured. Do not automatically change CRF or thresholds and start another action."
-			}
-		}
-	case res.Status == action.StatusWaitingDecision && decision == nil:
-		// A paused workflow is not testing anything. Mode attention stops
-		// before or between searches and waits only for the user.
+	case res.Status == action.StatusWaitingDecision:
+		// A paused workflow is not encoding anything: it waits only for the user.
 		var reason string
 		benchmarkField(res, "reason_code", &reason)
 		s.Outcome, s.Message = "attention", res.WaitingReason
 		if s.Message == "" {
 			s.Message = "Waiting for your decision; no quality result was recorded."
 		}
-		s.NextStep = "Review the waiting reason and choose one of the displayed decisions. Do not start another search automatically."
+		s.NextStep = "Review the waiting reason and choose one of the displayed decisions."
 		s.UserNextStep = "Choose one of the options shown. Nothing runs until you decide."
 		if reason == "quality_policy_unavailable" {
-			s.Outcome, s.Message = reason, "No sample test was started: the worker cannot run the quality checks this goal requires. The original is preserved."
-			if recipe {
-				s.Message = "No encode was started: the worker cannot run the quality checks this goal requires. The original is preserved."
-			}
+			s.Outcome, s.Message = reason, "No encode was started: the worker cannot run the quality checks this goal requires. The original is preserved."
 			s.NextStep = "Cancel to keep the original. To process this file, make the missing quality check available on the worker (the waiting reason names it) and start the goal again; quality requirements are never relaxed automatically."
 			s.UserNextStep = "Keep the original. The worker cannot run a quality check this goal needs; once it can, start the goal again."
 		}
 	case ladder:
-		// The VideoToolbox ladder skips the search: no sample is tested, and
-		// the worker's progress is the full encode of the current step.
+		// The VideoToolbox ladder encodes the whole file, and the worker's
+		// progress is the full encode of the current step.
 		var budget action.SizeBudgetRecord
 		benchmarkField(res, "size_budget", &budget)
 		s.Outcome, s.Message = "size_budget_ladder", budget.Message
-		s.ProgressScope = fmt.Sprintf("Worker progress is for the full encode with %s, not a sample test.", ladderStep)
-		s.NextStep = "Monitor this action. No sample search runs: each step encodes the whole file, a step over the budget moves to the next, and the first one within the budget is checked against the quality floor. The original is never replaced without the usual approval."
+		s.ProgressScope = fmt.Sprintf("Worker progress is for the full encode with %s.", ladderStep)
+		s.NextStep = "Monitor this action. Each step encodes the whole file, a step over the budget moves to the next, and the first one within the budget is checked against the quality floor. The original is never replaced without the usual approval."
 		s.UserNextStep = fmt.Sprintf("Nothing to do yet. The whole file is being encoded with %s; the first result within your size budget is checked against the quality floor before you approve any replacement.", ladderStep)
 		if res.Status == action.StatusFailed {
 			s.Outcome, s.Message = "execution_error", "The size budget encode could not finish."
@@ -188,9 +103,7 @@ func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
 			s.UserNextStep = "The encode could not finish. Check the error in the job details."
 		}
 	case recipe:
-		// Policy v4 runs a recipe instead of the search: no sample is
-		// tested, and the worker's progress is the full encode of the current
-		// step.
+		// The worker's progress is the full encode of the current step.
 		s.Outcome, s.Message = "recipe", "Encoding the whole file with "+recipeStep+"."
 		if ladder := action.QualityLadderOf(res.State); ladder != nil && ladder.Message != "" {
 			s.Message = ladder.Message
@@ -200,61 +113,36 @@ func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
 				s.Message = budget.Message
 			}
 		}
-		s.ProgressScope = fmt.Sprintf("Worker progress is for the full encode with %s, not a sample test.", recipeStep)
-		s.NextStep = "Monitor this action. No sample search runs: the whole file is encoded with the goal's fixed settings and checked against its quality limits on the whole file; a quality miss encodes it again one step better. The original is never replaced without the usual approval."
+		s.ProgressScope = fmt.Sprintf("Worker progress is for the full encode with %s.", recipeStep)
+		s.NextStep = "Monitor this action. The whole file is encoded with the goal's fixed settings and checked against its quality limits on the whole file; a quality miss encodes it again one step better. The original is never replaced without the usual approval."
 		s.UserNextStep = fmt.Sprintf("Nothing to do yet. The whole file is being encoded with %s and then checked against this goal's quality limits before you approve any replacement.", recipeStep)
 		if res.Status == action.StatusFailed {
 			s.Outcome, s.Message = "execution_error", "The encode could not finish."
 			s.NextStep = "Inspect the action error and fix the execution problem before retrying."
 			s.UserNextStep = "The encode could not finish. Check the error in the job details."
 		}
-	case decision != nil && summaryPlanSource(res) == "size_budget":
+	case planSource == "size_budget":
 		var budget action.SizeBudgetRecord
 		benchmarkField(res, "size_budget", &budget)
 		s.Outcome, s.Message = "size_budget", budget.Message
 		s.NextStep = "Monitor this action. The result is reported as below the quality target unless it measures within the goal's limits, and it is held to a fixed quality floor; the original is never replaced without the usual approval."
 		s.UserNextStep = "Nothing to do yet. The file is encoded once at your size budget; if it comes out below the quality target you will be told before you approve any replacement."
-	case decision != nil && decision.Winner == nil && summaryPlanSource(res) == "audio_only":
-		s.Outcome, s.Message = "audio_only", "No video encode met this goal's quality floor and savings gate, so the video is copied unchanged and only the lossless audio is compacted to AAC."
+	case planSource == "audio_only":
+		s.Outcome, s.Message = "audio_only", "The video is copied unchanged and only the lossless audio is compacted to AAC."
 		s.NextStep = "Monitor this action. The candidate must prove its video bit-identical to the source and still meet the same minimum savings; the original is never changed before that."
 		s.UserNextStep = "Nothing to do yet. The new file keeps the video exactly as it is and only makes the audio smaller; the original is not changed before that is checked."
-	case decision != nil && decision.Winner == nil:
-		s.Outcome, s.Message = "no_acceptable_candidate", "The benchmark finished, but no candidate met all configured checks. Full encoding did not start."
-		s.NextStep = "Inspect the rejected checks and indicated source fragment before choosing a next step. Keep the original, or explicitly choose direct encoding via a new transcode_media action with a non-optimizing profile/profile_config (optimization.enabled=false). Direct encoding does not claim a perceptual quality pass and never replaces the original. Do not automatically start another CRF ladder or relax thresholds."
-		s.UserNextStep = "Keep the original. If you still want a smaller file, choose a different goal, or encode it directly without a quality check."
-	case decision != nil:
-		s.Outcome, s.Message = "selected", "A candidate met the configured checks on sampled video; this is not a guarantee of full-file or audio quality."
-		s.NextStep = "For transcode_media, monitor the same action as it continues. A standalone benchmark produces no final file; use its selected settings explicitly for encoding."
-		s.UserNextStep = "Nothing to do: the encode continues with these settings."
-		if res.Status == action.StatusFailed {
-			s.NextStep = "The benchmark selected a candidate, but a later action step failed. Inspect the action error; do not repeat the successful search automatically."
-			s.UserNextStep = "The test found settings, but a later step failed. Check the error in the job details."
-		}
-		// Plain benchmarks rank by size without a savings floor, so the
-		// smallest passing candidate can still be larger than the source.
-		if decision.Winner != nil && decision.Winner.SavingsPercent < 0 {
-			s.SizeWarning = fmt.Sprintf("The selected candidate is estimated %.1f%% larger than the original. Encoding it would not save space, and transcode_media rejects growth beyond its max_size_increase_percent (0%% by default).", -decision.Winner.SavingsPercent)
-			s.NextStep = "Keep the original: this source is already efficiently encoded for these quality limits. Do not encode the selected settings to save space."
-			s.UserNextStep = "Keep the original: it is already efficiently encoded, and these settings would make it larger."
-		}
-	case status == "failed" || res.Status == action.StatusFailed:
-		s.Outcome, s.Message, s.NextStep = "execution_error", "The benchmark could not finish reliably.", "Inspect the action error and fix the execution problem before retrying; changing compression settings is not an established remedy."
-		s.UserNextStep = "The test could not finish. Check the error in the job details and fix it before retrying; different settings will not help."
+	case res.Status == action.StatusFailed:
+		s.Outcome, s.Message, s.NextStep = "execution_error", "The encode could not finish reliably.", "Inspect the action error and fix the execution problem before retrying; changing compression settings is not an established remedy."
+		s.UserNextStep = "The encode could not finish. Check the error in the job details and fix it before retrying."
 	}
-	if getString := summaryInput(res, "mode"); getString != "" {
-		if explanation := action.ExplainTranscode(res); explanation != nil && (explanation.Outcome == "no_suitable_candidate" || explanation.Outcome == "size_rejected") {
-			s.Outcome = explanation.Outcome
-			s.Message = explanation.Message
-			s.NextStep = "Keep the original, or explicitly choose another processing goal. Technical profiles are optional; quality requirements are never relaxed automatically."
-			s.UserNextStep = "Keep the original, or choose another goal. Quality requirements are never lowered automatically."
-		}
+	if explanation := action.ExplainTranscode(res); explanation != nil && (explanation.Outcome == "no_suitable_candidate" || explanation.Outcome == "size_rejected") {
+		s.Outcome = explanation.Outcome
+		s.Message = explanation.Message
+		s.NextStep = "Keep the original, or explicitly choose another processing goal. Technical profiles are optional; quality requirements are never relaxed automatically."
+		s.UserNextStep = "Keep the original, or choose another goal. Quality requirements are never lowered automatically."
 	}
-	// Preflight stores profile_base as a provisional plan before any search,
-	// so the source is reported only once the benchmark settled it.
 	benchmarkField(res, "plan_note", &s.PlanNote)
-	var planSource string
-	benchmarkField(res, "plan_source", &planSource)
-	if planSource == "benchmark_winner" || s.PlanNote != "" {
+	if s.PlanNote != "" {
 		s.PlanSource = planSource
 	}
 	if planSource == "size_budget" {
@@ -263,126 +151,9 @@ func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
 			s.SizeBudget = &budget
 		}
 	}
-	var evidence []transcode.BenchmarkCandidateQualityEvidence
-	var request transcode.BenchmarkRequest
-	benchmarkField(res, "benchmark_quality", &evidence)
-	hasRequest := benchmarkField(res, "benchmark_request", &request)
-	if decision != nil {
-		transcode.AttachVMAFEvidence(decision, evidence)
-		for _, ev := range decision.Evaluations {
-			if ev.VMAF == nil || len(s.Measured) >= transcode.MaxBenchmarkCandidates {
-				continue
-			}
-			m := benchmarkMeasured{CandidateID: ev.CandidateID, VideoCodec: ev.VideoCodec, Quality: ev.Quality, Preset: ev.Preset, AverageBitrateKbps: ev.AverageBitrateKbps, Passed: ev.Eligible, Selected: decision.Winner != nil && decision.Winner.CandidateID == ev.CandidateID, VMAF: ev.VMAF, Reused: ev.Reuse}
-			if ev.EstimatedBytes > 0 {
-				savings := ev.SavingsPercent
-				m.EstimatedBytes, m.EstimatedMB, m.SavingsPercent, m.LargerThanSource = ev.EstimatedBytes, ev.EstimatedMB, &savings, savings < 0
-			}
-			s.Measured = append(s.Measured, m)
-		}
-		s.Selection = decision.Selection
-		if decision.Winner != nil && transcode.BenchmarkCandidateVideoCodec(transcode.BenchmarkCandidate{VideoCodec: decision.Winner.VideoCodec}) == transcode.VideoCodecHEVCVideoToolbox {
-			s.HardwareReason = optimization.HardwareReason(decision.Winner.Uncertainties)
-		}
-		// Historical decisions can be explained from their immutable request.
-		if s.Selection == nil && hasRequest && decision.DecisionReason == optimization.ReasonTargetReachedSmallestSize && decision.Winner != nil {
-			tolerance := optimization.DefaultVMAFPolicy().Tolerance()
-			var thresholds *transcode.BenchmarkQualityThresholds
-			if decision.Winner.MetricType == "ssim" {
-				tolerance = optimization.DefaultSSIMPolicy().Tolerance()
-			}
-			if request.Quality != nil {
-				thresholds = request.Quality.VMAF
-				if decision.Winner.MetricType == "ssim" {
-					thresholds = request.Quality.SSIM
-				}
-			}
-			if thresholds != nil && thresholds.MarginalTolerance != nil {
-				tolerance = *thresholds.MarginalTolerance
-			}
-			var candidates []optimization.EvaluatedCandidate
-			for _, c := range decision.Evaluations {
-				candidates = append(candidates, optimization.EvaluatedCandidate{CandidateID: c.CandidateID, Eligible: c.Eligible, TargetReached: c.TargetReached, Score: c.Score})
-			}
-			s.Selection = optimization.ExplainTargetSelection(candidates, tolerance)
-		}
-		if s.Selection != nil && s.Outcome == "selected" {
-			s.Message = "Selected the smallest estimated file among target-reaching candidates within the configured quality margin of the best score. Sampled video is not a guarantee of full-file or audio quality."
-		}
-		for _, ev := range decision.Evaluations {
-			if ev.Eligible || len(s.Rejected) >= transcode.MaxBenchmarkCandidates {
-				continue
-			}
-			r := benchmarkRejection{CandidateID: ev.CandidateID, FailedSamples: ev.FailedSamples}
-			for _, q := range evidence {
-				if q.CandidateID != ev.CandidateID {
-					continue
-				}
-				for _, code := range q.ReasonCodes {
-					// Observe-only warnings are not rejection reasons.
-					if request.Quality != nil && strings.HasPrefix(code, "quality_cambi_") && request.Quality.Banding != nil && request.Quality.Banding.Enforcement != "reject" {
-						continue
-					}
-					if request.Quality != nil && strings.HasPrefix(code, "quality_vmaf_") && request.Quality.VMAF != nil && request.Quality.VMAF.GuardrailEnforcement != "reject" {
-						continue
-					}
-					c := benchmarkCheck{Code: code, Reason: benchmarkFailureText(code)}
-					if q.CAMBI != nil && strings.HasPrefix(code, "quality_cambi_") {
-						r.ReviewSourceSeconds = &q.CAMBI.WorstSourceSec
-						if code == "quality_cambi_mean_above_maximum" {
-							c.Actual = &q.CAMBI.Mean
-							if request.Quality != nil && request.Quality.Banding != nil {
-								c.Limit = request.Quality.Banding.MaxMean
-							}
-						}
-						if code == "quality_cambi_peak_above_maximum" {
-							c.Actual = &q.CAMBI.Max
-							if request.Quality != nil && request.Quality.Banding != nil {
-								c.Limit = request.Quality.Banding.MaxPeak
-							}
-						}
-					} else if q.VMAF != nil {
-						r.ReviewSourceSeconds = &q.VMAF.WorstWindowSourceSec
-						if request.Quality != nil && request.Quality.VMAF != nil {
-							if code == "quality_vmaf_p5_below_minimum" {
-								c.Actual, c.Limit = &q.VMAF.P5, request.Quality.VMAF.P5Minimum
-							}
-							if code == "quality_vmaf_worst_window_below_minimum" {
-								c.Actual, c.Limit = &q.VMAF.WorstWindowMean, request.Quality.VMAF.WorstWindowMinimum
-							}
-						}
-					}
-					r.Checks = append(r.Checks, c)
-				}
-			}
-			if len(r.Checks) == 0 {
-				reason := benchmarkFailureText(ev.EvaluationReason)
-				if ev.EvaluationReason == "skipped_quality_dominated" {
-					reason = dominatedText(ev.Uncertainties)
-				}
-				if ev.EvaluationReason == "skipped_savings_dominated" {
-					reason = savingsDominatedText(ev.Uncertainties)
-				}
-				if ev.EvaluationReason == "skipped_larger_than_passing" {
-					reason = largerThanPassingText(ev.Uncertainties)
-				}
-				if ev.EvaluationReason == "not_verified" {
-					reason = notVerifiedText(ev.Uncertainties)
-				}
-				r.Checks = []benchmarkCheck{{Code: ev.EvaluationReason, Reason: reason}}
-			}
-			s.Rejected = append(s.Rejected, r)
-		}
-	}
 	var plan transcode.Plan
 	var source struct {
 		Audio []mediainspect.DetailedStream `json:"audio"`
-	}
-	var original struct {
-		SizeBytes int64 `json:"size_bytes"`
-	}
-	if len(s.Measured) > 0 && benchmarkField(res, "original", &original) {
-		s.SourceBytes = original.SizeBytes
 	}
 	if benchmarkField(res, "plan", &plan) && benchmarkField(res, "original", &source) {
 		for _, a := range source.Audio {
@@ -396,98 +167,7 @@ func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
 			}
 			s.Audio = append(s.Audio, entry)
 		}
-		s.AudioNote = "Planned audio only (first 8 tracks). The benchmark measures video and estimates size; it does not encode or validate final audio. Compact mode copies already compact codecs such as EAC3."
+		s.AudioNote = "Planned audio only (first 8 tracks). Compact mode copies already compact codecs such as EAC3."
 	}
 	return s
-}
-
-func benchmarkFailureText(code string) string {
-	switch code {
-	case "quality_cambi_mean_above_maximum":
-		return "Average additional banding exceeds the configured limit; full-reference CAMBI already accounts for banding in the source."
-	case "quality_cambi_peak_above_maximum":
-		return "Peak additional banding exceeds the configured limit. Inspect the indicated source fragment."
-	case "quality_vmaf_p5_below_minimum":
-		return "The lower-quality portion of the sampled frames is below the configured VMAF limit."
-	case "quality_vmaf_worst_window_below_minimum":
-		return "The worst sampled time window is below the configured VMAF limit."
-	case "sample_below_minimum_quality", "below_minimum_quality":
-		return "Sampled video did not meet the configured minimum quality."
-	case "skipped_quality_dominated":
-		return dominatedText(nil)
-	case "skipped_savings_dominated":
-		return savingsDominatedText(nil)
-	case "skipped_larger_than_passing":
-		return largerThanPassingText(nil)
-	case "quality_cambi_not_measured_vmaf_rejected":
-		return "Banding (CAMBI) was not measured: the candidate already failed a VMAF limit, so its banding could not make it acceptable."
-	case "insufficient_savings":
-		return "The estimated file does not reach the minimum savings compared with the original, so it cannot be selected whatever its quality."
-	case "insufficient_savings_before_metrics":
-		return "Not measured: every encoded sample was already estimated below the minimum savings, so no quality result could produce an acceptable winner."
-	case "verification_not_passed":
-		return "Passed the initial samples but failed the additional verification samples."
-	case "not_verified":
-		return notVerifiedText(nil)
-	case "quality_vmaf_selection_margin_not_met":
-		return "Passed the VMAF limits by too little: a size-mode winner must clear the p5 and worst-window limits by a safety margin, because a thinner result tends to fail the full-file validation."
-	default:
-		return "This check did not pass; inspect its detailed evidence before deciding whether another encode can address it."
-	}
-}
-
-// notVerifiedText explains a candidate that passed the initial samples but
-// whose additional verification samples were never encoded, naming the
-// candidate whose verification failed on quality when the worker recorded it.
-func notVerifiedText(uncertainties []string) string {
-	for _, u := range uncertainties {
-		if u == transcode.NotVerifiedTimeLimit {
-			return "Passed the initial samples, but the search time limit was reached before it could be checked on the verification windows. It was not proven unsuitable; a retry starts a new search."
-		}
-		if failed, ok := strings.CutPrefix(u, "not verified: "); ok {
-			if failed, ok = strings.CutSuffix(failed, " failed verification on quality"); ok && failed != "" {
-				return "Not verified: " + failed + ", a setting of equal or higher quality, already failed verification on quality, so this setting was not tried."
-			}
-		}
-	}
-	return "Passed the initial samples but its additional verification samples were never encoded, so it could not be selected."
-}
-
-// dominatedText explains a candidate that quality pruning never encoded,
-// naming the failed higher-quality leader the worker recorded.
-func dominatedText(uncertainties []string) string {
-	for _, u := range uncertainties {
-		if leader, ok := strings.CutPrefix(u, "not measured: "); ok {
-			if leader, ok = strings.CutSuffix(leader, " failed quality"); ok && leader != "" {
-				return "Not encoded: " + leader + " is a higher-quality setting of the same encoder and already failed quality, so this setting cannot pass."
-			}
-		}
-	}
-	return "Not encoded: a higher-quality setting of the same encoder already failed quality, so this setting cannot pass."
-}
-
-// largerThanPassingText explains a quality rung the walk never measured because
-// a more compressed rung of the same encoder already met quality.
-func largerThanPassingText(uncertainties []string) string {
-	for _, u := range uncertainties {
-		if passing, ok := strings.CutPrefix(u, "not measured: "); ok {
-			if passing, ok = strings.CutSuffix(passing, " already met quality, and a lower CRF only spends more bits"); ok && passing != "" {
-				return "Not encoded: " + passing + " is a more compressed setting of the same encoder and already met quality, so this higher-quality setting could only be larger."
-			}
-		}
-	}
-	return "Not encoded: a more compressed setting of the same encoder already met quality, so this higher-quality setting could only be larger."
-}
-
-// savingsDominatedText explains a candidate the savings precheck never
-// encoded, naming the more-compressed leader that already missed the minimum.
-func savingsDominatedText(uncertainties []string) string {
-	for _, u := range uncertainties {
-		if leader, ok := strings.CutPrefix(u, "not measured: "); ok {
-			if leader, ok = strings.CutSuffix(leader, " is below minimum savings"); ok && leader != "" {
-				return "Not encoded: " + leader + " is a smaller setting of the same encoder and is already estimated below the minimum savings, so this setting cannot save enough."
-			}
-		}
-	}
-	return "Not encoded: a smaller setting of the same encoder is already estimated below the minimum savings, so this setting cannot save enough."
 }

@@ -12,10 +12,10 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
-func TestCompactBatchBudgetStopExplainsProfileRecovery(t *testing.T) {
+func TestCompactBatchStoppedByTheRemovedSearchSaysToStartAgain(t *testing.T) {
 	res := &action.ActionResult{ActionName: "transcode_batch", Status: action.StatusWaitingDecision, State: map[string]any{"reason_code": "search_budget_exhausted"}, Outputs: map[string]any{"counts": map[string]int{"total": 10, "queued": 10}}}
 	batch := compactBatch(res)
-	if batch == nil || !strings.Contains(batch.NextStep, "explicit profile") || strings.Contains(batch.NextStep, "approve") {
+	if batch == nil || !strings.Contains(batch.NextStep, "removed sample search") || !strings.Contains(batch.NextStep, "start a new batch") || strings.Contains(batch.NextStep, "approve") {
 		t.Fatal("budget stop advertised a replacement approval", batch)
 	}
 }
@@ -140,21 +140,23 @@ func TestContextEffectivePolicyDoesNotRepeatSeededDefault(t *testing.T) {
 	}
 }
 
-func TestCompactBatchShowsSelectionWithoutInventingSampleEvidence(t *testing.T) {
+func TestCompactBatchPassesStoredSelectionAndEvidenceThrough(t *testing.T) {
+	// A batch from before the sample search was removed keeps the selection
+	// and evidence it stored; nothing is computed from them now.
 	r := &action.ActionResult{ActionName: "transcode_batch", Status: action.StatusCompleted,
-		State:   map[string]any{"batch_selection": action.BatchSelection{Profile: "anime-x265-calibrated", Priority: "balanced", Reason: "anime series"}},
+		State:   map[string]any{"batch_selection": map[string]any{"profile": "anime-x265", "priority": "balanced", "reason": "anime series"}},
 		Outputs: map[string]any{"dry_run": true, "counts": map[string]int{"total": 3, "queued": 2, "skip": 1}}}
 	s := toCompactSummary(r)
-	if s.Batch.Selection == nil || s.Batch.Selection.Priority != "balanced" || s.Batch.SampleEvidence != nil || s.Batch.Outcome != "preview" {
+	if s.Batch.Selection["priority"] != "balanced" || s.Batch.SampleEvidence != nil || s.Batch.Outcome != "preview" {
 		t.Fatalf("preview must explain selection without fabricated measurements: %+v", s.Batch)
 	}
 	r.Outputs["dry_run"] = false
-	r.State["batch_evidence"] = action.BatchCalibrationEvidence{AcceptedSamples: 2, MinimumSampleVMAF: 92, EstimatedSavingsMin: 22, EstimatedSavingsMax: 35}
+	r.State["batch_evidence"] = map[string]any{"accepted_samples": 2, "minimum_sample_vmaf": 92, "estimated_savings_max": 35}
 	r.State["shared_calibration_profile"] = strings.Repeat("private-recipe-details", 10000)
 	s = toCompactSummary(r)
 	b, err := json.Marshal(s)
-	if err != nil || len(b) > 2048 || strings.Contains(string(b), "private-recipe") || s.Batch.SampleEvidence == nil || s.Batch.SampleEvidence.EstimatedSavingsMax != 35 {
-		t.Fatalf("sample evidence missing or unbounded: %+v %v", s.Batch, err)
+	if err != nil || len(b) > 2048 || strings.Contains(string(b), "private-recipe") || s.Batch.SampleEvidence["estimated_savings_max"] != float64(35) && s.Batch.SampleEvidence["estimated_savings_max"] != 35 {
+		t.Fatalf("stored evidence missing or unbounded: %+v %v", s.Batch, err)
 	}
 }
 

@@ -14,7 +14,6 @@ func TestInvalidSubmissionIsABadRequestAndLeavesTheKeyFree(t *testing.T) {
 		action, inputs, field string
 	}{
 		"podcast without output_path": {"clean_podcast_ads", `{"path":"/media/show/ep01.mp3","podcast_id":"synthetic-show"}`, "output_path"},
-		"benchmark with media_type":   {"benchmark_transcode", `{"path":"/media/show/ep01.mkv","media_type":"movie"}`, "media_type"},
 		"path outside the roots":      {"transcode_media", `{"path":"/elsewhere/ep01.mkv"}`, "path"},
 		"max_height without compact":  {"transcode_media", `{"path":"/media/show/ep01.mkv","max_height":720}`, "max_height"},
 		// The sample search was removed: sample tests and the inputs that

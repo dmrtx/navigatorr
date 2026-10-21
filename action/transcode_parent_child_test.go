@@ -271,43 +271,6 @@ func TestLegacyChildKeyRelationBlocksUncertain404AfterCancelAndRestart(t *testin
 	}
 }
 
-// A new benchmark admission is gated by the parent; an accepted benchmark is
-// still tracked even while paused.
-func TestBenchmarkAdmissionGatedButAcceptedTracked(t *testing.T) {
-	st := setupTestStore(t)
-	seedBatchParent(t, st, "bench-parent", StatusRunning, map[string]any{"paused": true})
-	mock := &mockTranscodeExecutor{}
-	seedActionInstance(t, st, "bench-child", "transcode_media", StatusRunning, 1, "",
-		map[string]any{"path": "/Volumes/media/ep.mkv", "parent_action_id": "bench-parent"},
-		map[string]any{"optimization_enabled": true})
-	e := NewEngine(EngineDeps{Store: st, Transcode: mock})
-
-	ec := childECFor("bench-child", "bench-parent", map[string]any{"optimization_enabled": true})
-	res, err := e.stepBenchmarkSubmit(context.Background(), ec)
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
-	if mock.benchmarkSubmitCalls != 0 {
-		t.Fatalf("paused parent must not submit benchmark, calls=%d", mock.benchmarkSubmitCalls)
-	}
-	if res.Status != StepWaitingExternal || res.WaitingCondition != "parent_paused" {
-		t.Fatalf("got %s/%s want waiting_external/parent_paused", res.Status, res.WaitingCondition)
-	}
-
-	// Already-accepted benchmark: early reuse keeps tracking, no new submit.
-	state := map[string]any{"optimization_enabled": true, "benchmark_submitted": true, "benchmark_job_id": "bench-done"}
-	seedActionInstance(t, st, "bench-done-child", "transcode_media", StatusWaitingExternal, 2, "",
-		map[string]any{"path": "/Volumes/media/ep.mkv", "parent_action_id": "bench-parent"}, state)
-	ec2 := childECFor("bench-done-child", "bench-parent", state)
-	res2, err := e.stepBenchmarkSubmit(context.Background(), ec2)
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
-	if res2.Status != StepCompleted || res2.Outputs["reused"] != true {
-		t.Fatalf("accepted benchmark must be reused, got %s %+v", res2.Status, res2.Outputs)
-	}
-}
-
 // A child with a known but missing/non-batch parent must fail closed.
 func TestMissingKnownParentFailsClosed(t *testing.T) {
 	st := setupTestStore(t)
@@ -352,7 +315,7 @@ func TestWaitingDecisionNotAutoResolved(t *testing.T) {
 	if child.Status != StatusWaitingDecision {
 		t.Fatalf("waiting_decision child changed to %s", child.Status)
 	}
-	if mock.submitCalls != 0 || mock.benchmarkSubmitCalls != 0 {
+	if mock.submitCalls != 0 {
 		t.Fatal("reconciler must not submit for a waiting_decision")
 	}
 }

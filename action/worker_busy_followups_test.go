@@ -8,7 +8,6 @@ import (
 
 	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/httpclient"
-	"github.com/jakenesler/navigatorr/transcode/recipe"
 )
 
 // runSubmitStep runs the encode submit step and merges its outputs the way
@@ -76,24 +75,6 @@ func TestNonBusyOutcomeAfterSlotWaitClearsMarkers(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestBenchmarkNonBusyOutcomeAfterSlotWaitClearsMarkers(t *testing.T) {
-	e := NewEngine(EngineDeps{})
-	ec := testReconcileEC("job-test-inst")
-	ec.Outputs = map[string]any{}
-	res, _ := e.handleBenchmarkTransientFailure(ec, testReconcilePlan(), workerBusyError(30*time.Second), "benchmark_submit")
-	mergeMap(ec.State, res.Outputs)
-	mergeMap(ec.Outputs, res.Outputs)
-	if !getBool(ec.State, "worker_busy") || getString(ec.State, workerBusyNotBeforeKey) == "" {
-		t.Fatalf("busy refusal did not record a slot wait: %v", ec.State)
-	}
-	res, _ = e.handleBenchmarkTransientFailure(ec, testReconcilePlan(), errors.New("ssh: broken pipe"), "benchmark_submit")
-	mergeMap(ec.State, res.Outputs)
-	if res.WaitingCondition != "benchmark_retry" {
-		t.Fatalf("got %s/%s", res.Status, res.WaitingCondition)
-	}
-	assertNoBusyMarkers(t, ec)
 }
 
 // The encode-phase cancel skip: a refused encode has no remote job, while an
@@ -167,56 +148,6 @@ func TestCancelAfterBusyThenCountedRetrySkipsRemote(t *testing.T) {
 	}
 }
 
-func TestBenchmarkCancelAfterBusyThenCountedRetrySkipsRemote(t *testing.T) {
-	calls := 0
-	mock := &mockTranscodeExecutor{
-		benchmarkSubmitFunc: func(ctx context.Context, req transcode.BenchmarkRequest) (transcode.BenchmarkJob, error) {
-			calls++
-			if calls == 1 {
-				return transcode.BenchmarkJob{}, workerBusyError(0)
-			}
-			return transcode.BenchmarkJob{}, errors.New("ssh: broken pipe")
-		},
-		benchmarkCancelFunc: func(ctx context.Context, jobID string) error {
-			return &httpclient.HTTPError{StatusCode: 404, Message: "benchmark not found", Code: transcode.WorkerErrorNotFound}
-		},
-		cancelFunc: func(ctx context.Context, jobID string) error {
-			return &httpclient.HTTPError{StatusCode: 404, Message: "job not found", Code: transcode.WorkerErrorNotFound}
-		},
-	}
-	engine, _, mediaFile, _ := setupBenchmarkTestEnv(t, mock, standard8BitProbeJSON, &recipe.OptimizationPolicy{Enabled: true})
-	res, err := engine.Run(context.Background(), "benchmark_transcode", map[string]any{"path": mediaFile, "profile": "opt-vt"})
-	if err != nil || res.WaitingCondition != "worker_busy" {
-		t.Fatalf("got %v %+v", err, res)
-	}
-	// Give the job a retry budget so the next refusal is a counted retry.
-	inst, err := engine.deps.Store.GetActionInstance(res.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ec := parseExecutionContext(inst, engine)
-	plan := getPlan(ec.State["plan"])
-	plan.Resilience.TransientRetries, plan.Resilience.MaxAttempts, plan.Resilience.RetryOn = 2, 3, []string{"ssh_transient"}
-	ec.State["plan"] = plan
-	inst.StateJSON = toJSON(ec.State)
-	if err := engine.deps.Store.UpdateActionInstance(*inst); err != nil {
-		t.Fatal(err)
-	}
-	got, err := engine.Resume(context.Background(), res.ID, "", nil)
-	if err != nil || got.WaitingCondition != "benchmark_retry" || getBool(got.State, "worker_busy") {
-		t.Fatalf("counted retry: %v %+v", err, got)
-	}
-	if _, err := engine.Cancel(context.Background(), res.ID, "user stopped"); err != nil {
-		t.Fatalf("cancel reported %v", err)
-	}
-	if got, _ = engine.Status(context.Background(), res.ID); got.Status != StatusCancelled {
-		t.Fatalf("status = %s", got.Status)
-	}
-	if mock.benchmarkCancelCalls != 0 || mock.cancelCalls != 0 {
-		t.Fatalf("cancelled a job the worker never created: benchmark=%d transcode=%d", mock.benchmarkCancelCalls, mock.cancelCalls)
-	}
-}
-
 // The check before admission guards the write even when reconciliation of an
 // earlier identity found nothing and falls through to a new submit.
 func TestTranscodeBusyWindowCheckedBeforeAdmission(t *testing.T) {
@@ -248,19 +179,19 @@ func TestSlotWaitWritesOneStepLogRow(t *testing.T) {
 	clock := &testClock{at: time.Now().UTC()}
 	busy := true
 	mock := &mockTranscodeExecutor{
-		benchmarkSubmitFunc: func(ctx context.Context, req transcode.BenchmarkRequest) (transcode.BenchmarkJob, error) {
+		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
 			if busy {
-				return transcode.BenchmarkJob{}, workerBusyError(10 * time.Second)
+				return transcode.Job{}, workerBusyError(10 * time.Second)
 			}
-			return transcode.BenchmarkJob{ID: req.ID}, nil
+			return transcode.Job{ID: req.ID}, nil
 		},
-		benchmarkStatusFunc: func(ctx context.Context, jobID string) (transcode.BenchmarkStatus, error) {
-			return transcode.BenchmarkStatus{ID: jobID, Status: transcode.StatusRunning}, nil
+		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{ID: jobID, Status: transcode.StatusRunning}, nil
 		},
 	}
-	engine, st, mediaFile, _ := setupBenchmarkTestEnv(t, mock, standard8BitProbeJSON, &recipe.OptimizationPolicy{Enabled: true})
+	engine, st, mediaFile, _ := setupProbeTestEnv(t, mock, standard8BitProbeJSON)
 	engine.deps.Now = clock.Now
-	res, err := engine.Run(context.Background(), "benchmark_transcode", map[string]any{"path": mediaFile, "profile": "opt-vt"})
+	res, err := engine.Run(context.Background(), "transcode_media", map[string]any{"path": mediaFile, "profile": "hevc-vt"})
 	if err != nil || res.WaitingCondition != "worker_busy" {
 		t.Fatalf("got %v %+v", err, res)
 	}
@@ -284,7 +215,7 @@ func TestSlotWaitWritesOneStepLogRow(t *testing.T) {
 		}
 		clock.Advance(6 * time.Second)
 	}
-	if n := waitingRows("submit_benchmark"); n != 1 {
+	if n := waitingRows("submit_transcode"); n != 1 {
 		t.Fatalf("slot wait wrote %d waiting rows, want 1", n)
 	}
 	got, _ := engine.Status(context.Background(), res.ID)
@@ -294,10 +225,10 @@ func TestSlotWaitWritesOneStepLogRow(t *testing.T) {
 
 	busy = false
 	clock.Advance(11 * time.Second)
-	if got, err = engine.Resume(context.Background(), res.ID, "", nil); err != nil || got.WaitingCondition != "benchmark_complete" {
+	if got, err = engine.Resume(context.Background(), res.ID, "", nil); err != nil || got.WaitingCondition == "worker_busy" {
 		t.Fatalf("after a free slot: %v %+v", err, got)
 	}
-	if n := waitingRows("wait_benchmark"); n != 1 {
+	if n := waitingRows("wait_transcode"); n != 1 {
 		t.Fatalf("next wait wrote %d rows, want 1", n)
 	}
 	if _, ok := got.State[slotWaitLogKey]; ok {

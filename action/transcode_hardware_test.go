@@ -7,20 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
 )
-
-func hardwareTestCapabilities() transcode.WorkerCapabilities {
-	caps := rulesTestCapabilities()
-	caps.HardwareSearch = true
-	caps.HardwareFallbackSearch = true
-	caps.HardwareSelectionMargin = true
-	caps.SearchContinuation = true
-	caps.Encoders[transcode.VideoCodecHEVCVideoToolbox] = true
-	return caps
-}
 
 // New size operations allow the media engine unless they turn it off, and that
 // is its own frozen snapshot. Without it the size policy is byte-for-byte what
@@ -87,45 +76,20 @@ func TestSizePolicyHardwareDefaultsOnAndFreezes(t *testing.T) {
 	stored := map[string]any{}
 	b, _ := json.Marshal(hw)
 	_ = json.Unmarshal(b, &stored)
-	ec := &ExecutionContext{Engine: legacySearch(&Engine{}), InstanceID: "hw", Inputs: map[string]any{"mode": "size", "allow_hardware": true}, State: map[string]any{"mode_policy": stored}}
+	ec := &ExecutionContext{InstanceID: "hw", Inputs: map[string]any{"mode": "size", "allow_hardware": true}, State: map[string]any{"mode_policy": stored}}
 	frozen, err := freezeModePolicy(ec)
 	if err != nil || frozen.Size.Hardware == nil || frozen.Size.Hardware.GOPSize != 240 {
 		t.Fatalf("stored policy: %+v %v", frozen, err)
-	}
-	// A fresh operation freezes the same snapshot from its inputs, whether it
-	// says nothing, says yes or gives the default margin.
-	for name, inputs := range map[string]map[string]any{
-		"no hardware inputs": {"mode": "size"},
-		"allowed":            {"mode": "size", "allow_hardware": true},
-		"default margin":     {"mode": "size", "allow_hardware": true, "hardware_margin_percent": float64(15)},
-	} {
-		ec = &ExecutionContext{Engine: legacySearch(&Engine{}), InstanceID: "hw2", Inputs: inputs, State: map[string]any{}}
-		fresh, err := freezeModePolicy(ec)
-		if err != nil || fresh.Digest != hw.Digest {
-			t.Fatalf("%s: fresh policy digest %v %v", name, fresh, err)
-		}
-	}
-	// Turning it off is the earlier policy exactly.
-	ec = &ExecutionContext{Engine: legacySearch(&Engine{}), InstanceID: "hw-off", Inputs: map[string]any{"mode": "size", "allow_hardware": false}, State: map[string]any{}}
-	off, err := freezeModePolicy(ec)
-	if err != nil || off.Digest != base.Digest || off.Size.Hardware != nil {
-		t.Fatalf("hardware off changed the policy: %+v %v", off, err)
 	}
 	// A snapshot frozen before the option existed is never re-derived from the
 	// new default: it keeps its digest and stays x265-only.
 	earlier := map[string]any{}
 	b, _ = json.Marshal(base)
 	_ = json.Unmarshal(b, &earlier)
-	ec = &ExecutionContext{Engine: legacySearch(&Engine{}), InstanceID: "hw-earlier", Inputs: map[string]any{"mode": "size"}, State: map[string]any{"mode_policy": earlier}}
+	ec = &ExecutionContext{InstanceID: "hw-earlier", Inputs: map[string]any{"mode": "size"}, State: map[string]any{"mode_policy": earlier}}
 	kept, err := freezeModePolicy(ec)
 	if err != nil || kept.Digest != base.Digest || kept.Size.Hardware != nil {
 		t.Fatalf("an earlier snapshot picked up the default: %+v %v", kept, err)
-	}
-	// The margin is part of the frozen policy.
-	ec = &ExecutionContext{Engine: legacySearch(&Engine{}), InstanceID: "hw3", Inputs: map[string]any{"mode": "size", "allow_hardware": true, "hardware_margin_percent": float64(30)}, State: map[string]any{}}
-	wider, err := freezeModePolicy(ec)
-	if err != nil || wider.Digest == hw.Digest || wider.Size.Hardware.MarginPercent != 30 {
-		t.Fatalf("wider margin %+v %v", wider, err)
 	}
 }
 
@@ -162,155 +126,6 @@ func TestHardwareInputValidation(t *testing.T) {
 	}
 }
 
-func hardwareRequest(t *testing.T, bitDepth int, duration float64, inputs map[string]any, caps transcode.WorkerCapabilities) *transcode.BenchmarkRequest {
-	t.Helper()
-	ec := &ExecutionContext{InstanceID: "hw-request", Inputs: inputs, State: map[string]any{"original_sha256": strings.Repeat("a", 64)}}
-	return hardwareRequestWith(t, ec, bitDepth, duration, caps)
-}
-
-// hardwareRequestFromState builds the request of an 8-bit 45-minute source for
-// an operation whose state may already hold a frozen policy.
-func hardwareRequestFromState(t *testing.T, ec *ExecutionContext, caps transcode.WorkerCapabilities) *transcode.BenchmarkRequest {
-	t.Helper()
-	return hardwareRequestWith(t, ec, 8, 45*60, caps)
-}
-
-func hardwareRequestWith(t *testing.T, ec *ExecutionContext, bitDepth int, duration float64, caps transcode.WorkerCapabilities) *transcode.BenchmarkRequest {
-	t.Helper()
-	policy, err := freezeModePolicy(ec)
-	if err != nil {
-		t.Fatal(err)
-	}
-	plan := &transcode.Plan{VideoCodec: transcode.VideoCodecLibX265, Quality: 23, Preset: "medium", ExpectedBitDepth: bitDepth, AudioMode: policy.Profile.Audio.Mode}
-	if err := preserveSourceBitDepth(plan, bitDepth, true); err != nil {
-		t.Fatal(err)
-	}
-	if bitDepth == 8 {
-		if err := setMain10(plan); err != nil {
-			t.Fatal(err)
-		}
-	}
-	ec.State["plan"] = plan
-	rep := &mediainspect.DetailedReport{DurationSec: duration, Video: []mediainspect.DetailedStream{{BitDepth: bitDepth, FPS: 23.976, BitRate: 10000000}}}
-	req, err := buildBenchmarkRequest(ec, "/media/show/show S01E04.mkv", rep, policy.Profile.Optimization, caps)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return req
-}
-
-func TestSizeHardwareSearchRequest(t *testing.T) {
-	for _, depth := range []int{8, 10} {
-		// Nothing said is the default: allowed, at the default margin.
-		def := hardwareRequest(t, depth, 45*60, map[string]any{"mode": "size"}, hardwareTestCapabilities())
-		if def.HardwareSearch == nil || def.HardwareSearch.MarginPercent != 15 || len(def.Candidates) != 18 {
-			t.Fatalf("depth %d: default request %+v with %d candidates", depth, def.HardwareSearch, len(def.Candidates))
-		}
-		req := hardwareRequest(t, depth, 45*60, map[string]any{"mode": "size", "allow_hardware": true, "hardware_margin_percent": 20}, hardwareTestCapabilities())
-		if req.HardwareSearch == nil || req.HardwareSearch.MarginPercent != 20 || req.AutomaticSearch == nil {
-			t.Fatalf("depth %d: rules %+v", depth, req.HardwareSearch)
-		}
-		if err := transcode.ValidateBenchmarkRequest(req); err != nil {
-			t.Fatalf("depth %d: %v", depth, err)
-		}
-		var hardware, fallback []transcode.BenchmarkCandidate
-		x265 := 0
-		for _, c := range req.Candidates {
-			if strings.HasPrefix(c.ID, hardwareCandidatePrefix) {
-				hardware = append(hardware, c)
-			} else if strings.HasPrefix(c.ID, transcode.HardwareFallbackCandidatePrefix) {
-				fallback = append(fallback, c)
-			} else if transcode.BenchmarkCandidateVideoCodec(c) == transcode.VideoCodecLibX265 {
-				x265++
-			}
-		}
-		// The x265 ladder and its fallback families are untouched (this worker
-		// does not take the quality walk; see TestQualityWalkRequest).
-		if x265 != 11 || len(hardware) != 4 || len(fallback) != 3 {
-			t.Fatalf("depth %d: %d x265, %d hardware and %d hardware fallback candidates", depth, x265, len(hardware), len(fallback))
-		}
-		if len(req.Candidates) > transcode.MaxAutomaticHardwareCandidates {
-			t.Fatalf("depth %d: %d candidates exceed the cap", depth, len(req.Candidates))
-		}
-		for i, c := range append(append([]transcode.BenchmarkCandidate(nil), hardware...), fallback...) {
-			wantQuality := []int{45, 50, 55, 60, 65, 70, 75}[i]
-			wantID := fmt.Sprintf("vt-cand_q%d", wantQuality)
-			if i >= 4 {
-				wantID = fmt.Sprintf("%scand_q%d", transcode.HardwareFallbackCandidatePrefix, wantQuality)
-			}
-			if c.ID != wantID || c.Quality != wantQuality {
-				t.Fatalf("hardware candidate %d: %+v", i, c)
-			}
-			if transcode.BenchmarkCandidateVideoCodec(c) != transcode.VideoCodecHEVCVideoToolbox || c.Preset != "" || c.Tune != "" {
-				t.Fatalf("hardware candidate %+v", c)
-			}
-			// The keyframe interval is what makes the files comparable in size.
-			if c.GOPSize == nil || *c.GOPSize != 240 || c.BFrames == nil || *c.BFrames != 1 {
-				t.Fatalf("hardware candidate %s lacks the frozen GOP and B-frames: %+v", c.ID, c)
-			}
-			// An 8-bit source follows the size policy's Main10 output.
-			if c.VideoProfile != "main10" || c.PixelFormat != "p010le" {
-				t.Fatalf("depth %d: hardware candidate shape %s/%s", depth, c.VideoProfile, c.PixelFormat)
-			}
-		}
-	}
-}
-
-// The option is a permission: a search that cannot use it is the earlier
-// x265-only request, never a failure.
-func TestSizeHardwareSearchFallsBackToSoftware(t *testing.T) {
-	noEncoder := hardwareTestCapabilities()
-	delete(noEncoder.Encoders, transcode.VideoCodecHEVCVideoToolbox)
-	oldWorker := rulesTestCapabilities()
-	oldWorker.Encoders[transcode.VideoCodecHEVCVideoToolbox] = true
-	for name, tc := range map[string]struct {
-		inputs   map[string]any
-		duration float64
-		caps     transcode.WorkerCapabilities
-	}{
-		"option off":                      {map[string]any{"mode": "size", "allow_hardware": false}, 45 * 60, hardwareTestCapabilities()},
-		"worker without hardware_search":  {map[string]any{"mode": "size", "allow_hardware": true}, 45 * 60, oldWorker},
-		"worker without the encoder":      {map[string]any{"mode": "size", "allow_hardware": true}, 45 * 60, noEncoder},
-		"source too short for the search": {map[string]any{"mode": "size", "allow_hardware": true}, 40, hardwareTestCapabilities()},
-	} {
-		req := hardwareRequest(t, 8, tc.duration, tc.inputs, tc.caps)
-		if req.HardwareSearch != nil {
-			t.Fatalf("%s: rules sent: %+v", name, req.HardwareSearch)
-		}
-		for _, c := range req.Candidates {
-			if strings.HasPrefix(c.ID, hardwareCandidatePrefix) {
-				t.Fatalf("%s: hardware candidate %s", name, c.ID)
-			}
-		}
-		if err := transcode.ValidateBenchmarkRequest(req); err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
-	}
-}
-
-// A worker that does not know the fallback rungs gets the ladder alone: the
-// request is what #177 shipped, and validates on an older worker's cap.
-func TestSizeHardwareSearchWithoutFallbackCapability(t *testing.T) {
-	caps := hardwareTestCapabilities()
-	caps.HardwareFallbackSearch = false
-	req := hardwareRequest(t, 8, 45*60, map[string]any{"mode": "size"}, caps)
-	if req.HardwareSearch == nil || len(req.HardwareSearch.FallbackQualityValues) != 0 || len(req.Candidates) != 15 {
-		t.Fatalf("request %+v with %d candidates", req.HardwareSearch, len(req.Candidates))
-	}
-	for _, c := range req.Candidates {
-		if strings.HasPrefix(c.ID, transcode.HardwareFallbackCandidatePrefix) {
-			t.Fatalf("fallback candidate %s sent to a worker without the capability", c.ID)
-		}
-	}
-	if err := transcode.ValidateBenchmarkRequest(req); err != nil {
-		t.Fatal(err)
-	}
-	b, _ := json.Marshal(req.HardwareSearch)
-	if strings.Contains(string(b), "fallback") {
-		t.Fatalf("an older worker would see a field it rejects: %s", b)
-	}
-}
-
 // Rules frozen with the media engine before the fallback rungs existed have no
 // such field: they re-hash to the digest they were frozen under and stay on the
 // ladder alone.
@@ -335,49 +150,6 @@ func TestHardwarePolicyWithoutExtraMarginKeepsItsDigest(t *testing.T) {
 	if err != nil || kept.Digest != p.Digest || kept.Size.Hardware.ExtraSelectionMarginVMAF != 0 {
 		t.Fatalf("an earlier snapshot picked up the extra margin: %+v %v", kept, err)
 	}
-	// It is sent without the field, so any worker accepts it.
-	ec.State["original_sha256"] = strings.Repeat("a", 64)
-	caps := hardwareTestCapabilities()
-	caps.HardwareSelectionMargin = false
-	req := hardwareRequestFromState(t, ec, caps)
-	if req.HardwareSearch == nil || req.HardwareSearch.ExtraSelectionMarginVMAF != 0 {
-		t.Fatalf("an earlier snapshot sent the extra margin: %+v", req.HardwareSearch)
-	}
-}
-
-// A snapshot frozen with the extra margin (#181, before grid verification
-// dropped it) carries it, which a worker that cannot apply it must never be
-// sent: the search is x265 only instead.
-func TestHardwareExtraMarginNeedsWorkerSupport(t *testing.T) {
-	policy := marginEraPolicy(t, withExtraMargin(mustHardwareRules(t)))
-	stored := map[string]any{}
-	b, _ := json.Marshal(policy)
-	_ = json.Unmarshal(b, &stored)
-	ec := &ExecutionContext{InstanceID: "hw-margin-caps", Inputs: map[string]any{"mode": "size"}, State: map[string]any{"mode_policy": stored, "original_sha256": strings.Repeat("a", 64)}}
-	caps := hardwareTestCapabilities()
-	req := hardwareRequestFromState(t, ec, caps)
-	if req.HardwareSearch == nil || req.HardwareSearch.ExtraSelectionMarginVMAF != 2 {
-		t.Fatalf("a new snapshot did not send the extra margin: %+v", req.HardwareSearch)
-	}
-	caps.HardwareSelectionMargin = false
-	req = hardwareRequestFromState(t, ec, caps)
-	if req.HardwareSearch != nil {
-		t.Fatalf("a worker without the margin was sent hardware candidates: %+v", req.HardwareSearch)
-	}
-	for _, c := range req.Candidates {
-		if c.VideoCodec == transcode.VideoCodecHEVCVideoToolbox {
-			t.Fatalf("a worker without the margin was sent %s", c.ID)
-		}
-	}
-}
-
-func mustHardwareRules(t *testing.T) *transcode.HardwareSearchRules {
-	t.Helper()
-	rules, err := modeHardwareInput("size", map[string]any{})
-	if err != nil || rules == nil {
-		t.Fatalf("rules %+v %v", rules, err)
-	}
-	return rules
 }
 
 func TestHardwarePolicyWithoutFallbackRungsKeepsItsDigest(t *testing.T) {
@@ -396,157 +168,6 @@ func TestHardwarePolicyWithoutFallbackRungsKeepsItsDigest(t *testing.T) {
 	kept, err := freezeModePolicy(ec)
 	if err != nil || kept.Digest != p.Digest || len(kept.Size.Hardware.FallbackQualityValues) != 0 {
 		t.Fatalf("an earlier snapshot picked up the fallback rungs: %+v %v", kept, err)
-	}
-	caps := hardwareTestCapabilities()
-	ec.State["original_sha256"] = strings.Repeat("a", 64)
-	req := hardwareRequestFromState(t, ec, caps)
-	if len(req.Candidates) != 18 || len(req.HardwareSearch.FallbackQualityValues) != 0 {
-		t.Fatalf("an earlier snapshot sent fallback rungs: %d candidates, %+v", len(req.Candidates), req.HardwareSearch)
-	}
-}
-
-func TestHardwareFallbackRulesValidation(t *testing.T) {
-	good := func() *transcode.HardwareSearchRules {
-		return &transcode.HardwareSearchRules{MarginPercent: 15, QualityValues: []int{45, 50, 55, 60}, FallbackQualityValues: []int{65, 70, 75}, GOPSize: 240, BFrames: 1}
-	}
-	if err := good().Validate(); err != nil {
-		t.Fatal(err)
-	}
-	for name, fallback := range map[string][]int{
-		"too many rungs":          {61, 65, 70, 75},
-		"not above the ladder":    {60, 65},
-		"unordered":               {70, 65},
-		"duplicate":               {65, 65},
-		"above the encoder's max": {65, 101},
-	} {
-		r := good()
-		r.FallbackQualityValues = fallback
-		if r.Validate() == nil {
-			t.Fatalf("%s accepted: %v", name, fallback)
-		}
-	}
-	// The fallback candidates belong to rules that name them, and to the
-	// VideoToolbox encoder.
-	req := hardwareRequest(t, 8, 45*60, map[string]any{"mode": "size"}, hardwareTestCapabilities())
-	noValues := *req
-	noValues.HardwareSearch = good()
-	noValues.HardwareSearch.FallbackQualityValues = nil
-	if transcode.ValidateBenchmarkRequest(&noValues) == nil {
-		t.Fatal("fallback candidates accepted without fallback rules")
-	}
-	wrongEncoder := *req
-	wrongEncoder.Candidates = append([]transcode.BenchmarkCandidate(nil), req.Candidates...)
-	for i := range wrongEncoder.Candidates {
-		if strings.HasPrefix(wrongEncoder.Candidates[i].ID, transcode.HardwareFallbackCandidatePrefix) {
-			wrongEncoder.Candidates[i].VideoCodec = transcode.VideoCodecLibX265
-		}
-	}
-	if transcode.ValidateBenchmarkRequest(&wrongEncoder) == nil {
-		t.Fatal("fallback candidate on another encoder accepted")
-	}
-	// A fallback candidate is one of the frozen rungs, encoded as the rules say.
-	for name, mutate := range map[string]func(*transcode.BenchmarkCandidate){
-		"a quality outside the rungs": func(c *transcode.BenchmarkCandidate) { c.Quality = 10 },
-		"another keyframe interval":   func(c *transcode.BenchmarkCandidate) { g := 12; c.GOPSize = &g },
-		"no keyframe interval":        func(c *transcode.BenchmarkCandidate) { c.GOPSize = nil },
-		"another B-frame setting":     func(c *transcode.BenchmarkCandidate) { b := 0; c.BFrames = &b },
-		"an x265 preset":              func(c *transcode.BenchmarkCandidate) { c.Preset = "slow" },
-	} {
-		mutated := *req
-		mutated.Candidates = append([]transcode.BenchmarkCandidate(nil), req.Candidates...)
-		for i := range mutated.Candidates {
-			if strings.HasPrefix(mutated.Candidates[i].ID, transcode.HardwareFallbackCandidatePrefix) {
-				mutate(&mutated.Candidates[i])
-				break
-			}
-		}
-		if err := transcode.ValidateBenchmarkRequest(&mutated); err == nil || !strings.Contains(err.Error(), "frozen hardware search rules") {
-			t.Fatalf("%s: %v", name, err)
-		}
-	}
-	// The cap is on distinct candidates: 22 pass, 23 do not, and a fourth
-	// fallback candidate is refused by its own bound.
-	room := *req
-	room.Candidates = append([]transcode.BenchmarkCandidate(nil), req.Candidates...)
-	extra := func(n int) transcode.BenchmarkCandidate {
-		c := room.Candidates[0]
-		c.ID, c.Quality = fmt.Sprintf("extra-%d", n), 40+n
-		return c
-	}
-	for n := 1; len(room.Candidates) < transcode.MaxAutomaticHardwareCandidates; n++ {
-		room.Candidates = append(room.Candidates, extra(n))
-	}
-	if len(room.Candidates) != transcode.MaxAutomaticHardwareCandidates {
-		t.Fatalf("%d candidates, want the cap", len(room.Candidates))
-	}
-	if err := transcode.ValidateBenchmarkRequest(&room); err != nil {
-		t.Fatalf("candidates at the cap refused: %v", err)
-	}
-	room.Candidates = append(room.Candidates, extra(99))
-	if err := transcode.ValidateBenchmarkRequest(&room); err == nil || !strings.Contains(err.Error(), "candidates") {
-		t.Fatalf("%d candidates accepted: %v", len(room.Candidates), err)
-	}
-	fourth := *req
-	fourth.Candidates = append([]transcode.BenchmarkCandidate(nil), req.Candidates...)
-	for _, c := range req.Candidates {
-		if strings.HasPrefix(c.ID, transcode.HardwareFallbackCandidatePrefix) {
-			c.ID += "-again"
-			fourth.Candidates = append(fourth.Candidates, c)
-			break
-		}
-	}
-	if err := transcode.ValidateBenchmarkRequest(&fourth); err == nil || !strings.Contains(err.Error(), "at most 3 hardware fallback") {
-		t.Fatalf("a fourth fallback candidate: %v", err)
-	}
-}
-
-func TestHardwareSearchRulesValidation(t *testing.T) {
-	good := func() *transcode.HardwareSearchRules {
-		return &transcode.HardwareSearchRules{MarginPercent: 15, QualityValues: []int{45, 50, 55, 60}, GOPSize: 240, BFrames: 1}
-	}
-	if err := good().Validate(); err != nil {
-		t.Fatal(err)
-	}
-	var none *transcode.HardwareSearchRules
-	if err := none.Validate(); err != nil {
-		t.Fatal(err)
-	}
-	for name, mutate := range map[string]func(*transcode.HardwareSearchRules){
-		"margin above bound":    func(r *transcode.HardwareSearchRules) { r.MarginPercent = 51 },
-		"negative margin":       func(r *transcode.HardwareSearchRules) { r.MarginPercent = -0.5 },
-		"no qualities":          func(r *transcode.HardwareSearchRules) { r.QualityValues = nil },
-		"too many qualities":    func(r *transcode.HardwareSearchRules) { r.QualityValues = []int{40, 45, 50, 55, 60} },
-		"unordered qualities":   func(r *transcode.HardwareSearchRules) { r.QualityValues = []int{50, 45} },
-		"duplicate qualities":   func(r *transcode.HardwareSearchRules) { r.QualityValues = []int{50, 50} },
-		"quality out of range":  func(r *transcode.HardwareSearchRules) { r.QualityValues = []int{50, 101} },
-		"no keyframe interval":  func(r *transcode.HardwareSearchRules) { r.GOPSize = 0 },
-		"too many B-frames":     func(r *transcode.HardwareSearchRules) { r.BFrames = 2 },
-		"negative B-frames":     func(r *transcode.HardwareSearchRules) { r.BFrames = -1 },
-		"keyframe interval cap": func(r *transcode.HardwareSearchRules) { r.GOPSize = transcode.MaxBenchmarkGOPSize + 1 },
-	} {
-		r := good()
-		mutate(r)
-		if r.Validate() == nil {
-			t.Fatalf("%s accepted: %+v", name, r)
-		}
-	}
-	// Rules ride only with an automatic size v3 search that has its own rules.
-	req := hardwareRequest(t, 8, 45*60, map[string]any{"mode": "size", "allow_hardware": true}, hardwareTestCapabilities())
-	withoutRules := *req
-	withoutRules.AutomaticSearch = nil
-	if transcode.ValidateBenchmarkRequest(&withoutRules) == nil {
-		t.Fatal("hardware search without automatic search rules accepted")
-	}
-	notAutomatic := *req
-	notAutomatic.Automatic = false
-	if transcode.ValidateBenchmarkRequest(&notAutomatic) == nil {
-		t.Fatal("hardware search without automatic search accepted")
-	}
-	bad := *req
-	bad.HardwareSearch = good()
-	bad.HardwareSearch.MarginPercent = 99
-	if transcode.ValidateBenchmarkRequest(&bad) == nil {
-		t.Fatal("out-of-range margin accepted")
 	}
 }
 
@@ -689,47 +310,5 @@ func TestBatchChildInputsCarryTheBatchGoalInputs(t *testing.T) {
 				t.Fatalf("child not bound to the batch policy or stopped early: %v %q", state["mode_policy"], failure)
 			}
 		})
-	}
-}
-
-// The coordinator accepts a winner only if it repeats the measured candidate,
-// including the GOP and B-frame settings the media engine candidates add.
-func TestWinnerMustRepeatTheCandidateGOPAndBFrames(t *testing.T) {
-	inputs := map[string]any{"mode": "size"}
-	req := hardwareRequest(t, 8, 1800, inputs, hardwareTestCapabilities())
-	var candidate transcode.BenchmarkCandidate
-	for _, c := range req.Candidates {
-		if c.ID == "vt-cand_q50" {
-			candidate = c
-		}
-	}
-	if candidate.ID == "" || candidate.GOPSize == nil || candidate.BFrames == nil {
-		t.Fatalf("media engine candidate missing or incomplete: %+v", candidate)
-	}
-	digest, err := transcode.DigestBenchmarkRequest(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	newContext := func() *ExecutionContext {
-		ec := &ExecutionContext{InstanceID: "hw-winner", Inputs: inputs, State: map[string]any{"original_sha256": strings.Repeat("a", 64), "benchmark_request": *req, "benchmark_request_digest": digest, "plan": &transcode.Plan{}}}
-		return ec
-	}
-	winner := func() *transcode.BenchmarkWinner {
-		return &transcode.BenchmarkWinner{CandidateID: candidate.ID, VideoCodec: transcode.VideoCodecHEVCVideoToolbox, Quality: candidate.Quality, VideoProfile: candidate.VideoProfile, PixelFormat: candidate.PixelFormat, GOPSize: candidate.GOPSize, BFrames: candidate.BFrames, MinimumMet: true, MetricType: "vmaf", Score: 99}
-	}
-	if err := verifyModeBenchmarkWinner(newContext(), winner()); err != nil {
-		t.Fatal("a faithful winner was refused:", err)
-	}
-	for name, change := range map[string]func(*transcode.BenchmarkWinner){
-		"different GOP":    func(w *transcode.BenchmarkWinner) { v := 12; w.GOPSize = &v },
-		"GOP dropped":      func(w *transcode.BenchmarkWinner) { w.GOPSize = nil },
-		"B-frames dropped": func(w *transcode.BenchmarkWinner) { w.BFrames = nil },
-		"different B":      func(w *transcode.BenchmarkWinner) { v := 0; w.BFrames = &v },
-	} {
-		w := winner()
-		change(w)
-		if err := verifyModeBenchmarkWinner(newContext(), w); err == nil {
-			t.Fatalf("%s: accepted a winner that differs from the measured candidate", name)
-		}
 	}
 }

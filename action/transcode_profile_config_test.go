@@ -1,90 +1,16 @@
 package action
 
 import (
-	"context"
 	"strings"
 	"testing"
 
 	"github.com/jakenesler/navigatorr/transcode"
 )
 
-func TestBenchmarkExplicitMain10RequiresOptOutAndReachesWorkerUnchanged(t *testing.T) {
-	for _, tc := range []struct {
-		name              string
-		optOut, supported bool
-	}{
-		{"conflicting_default", false, true},
-		{"explicit_conversion", true, true},
-		{"old_worker", true, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var submitted *transcode.BenchmarkRequest
-			mock := &mockTranscodeExecutor{
-				capabilitiesFunc: func(ctx context.Context) (transcode.WorkerCapabilities, error) {
-					caps, err := (&mockTranscodeExecutor{}).Capabilities(ctx)
-					caps.ExplicitMain10Benchmarks = tc.supported
-					caps.Quality = &transcode.QualityCapabilities{Native10Bit: true, CAMBIFullRef: true, Models: map[string]transcode.QualityModelCapability{"v1_1080p_3h": {Available: true}}}
-					return caps, err
-				},
-				benchmarkSubmitFunc: func(_ context.Context, req transcode.BenchmarkRequest) (transcode.BenchmarkJob, error) {
-					submitted = &req
-					return transcode.BenchmarkJob{ID: req.ID}, nil
-				},
-				benchmarkStatusFunc: func(_ context.Context, id string) (transcode.BenchmarkStatus, error) {
-					return transcode.BenchmarkStatus{ProtocolVersion: transcode.WorkerProtocolVersion, ID: id, Status: transcode.StatusRunning}, nil
-				},
-			}
-			e, _, path, _ := setupBenchmarkTestEnv(t, mock, standard8BitProbeJSON, nil)
-			profile := testEphemeralBatchProfileConfig()
-			video := profile["video"].(map[string]any)
-			video["codec"], video["profile"], video["pixel_format"] = "hevc_videotoolbox", "main10", "p010le"
-			delete(video, "preset")
-			delete(video, "tune")
-			video["quality"] = 65
-			profile["optimization"] = map[string]any{"enabled": true, "search": map[string]any{"quality_values": []int{65}, "max_candidates": 1}, "quality": map[string]any{"vmaf": map[string]any{"model": "v1_1080p_3h", "minimum": 88, "target": 92}}}
-			inputs := map[string]any{"path": path, "profile_config": profile}
-			if tc.optOut {
-				inputs["preserve_source_bit_depth"] = false
-			}
-			r, err := e.Run(context.Background(), "benchmark_transcode", inputs)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !tc.optOut {
-				if r.Status != StatusFailed || !strings.Contains(r.Error, "preserve_source_bit_depth=false") || submitted != nil {
-					t.Fatalf("explicit Main10 silently changed: %+v", r)
-				}
-				return
-			}
-			if !tc.supported {
-				if r.Status != StatusFailed || !strings.Contains(r.Error, "upgrade the worker") || submitted != nil {
-					t.Fatalf("unsupported worker received conversion request: %+v", r)
-				}
-				return
-			}
-			if r.Status != StatusWaitingExternal || submitted == nil || len(submitted.Candidates) != 1 {
-				t.Fatalf("Main10 benchmark not submitted: %+v", r)
-			}
-			if !submitted.Allow8BitTo10Bit {
-				t.Fatal("explicit Main10 opt-in was not sent to the worker")
-			}
-			for _, candidate := range submitted.Candidates {
-				if candidate.VideoProfile != "main10" || candidate.PixelFormat != "p010le" {
-					t.Fatalf("worker received changed Main10 settings: %+v", candidate)
-				}
-			}
-			plan := getPlan(r.State["plan"])
-			if plan == nil || plan.ExpectedBitDepth != 10 {
-				t.Fatalf("plan lost actual 10-bit output: %+v", plan)
-			}
-		})
-	}
-}
-
 func TestValidateTranscodeInputsRejectsIgnoredKnobs(t *testing.T) {
 	e := NewEngine(EngineDeps{})
 	ec := &ExecutionContext{
-		ActionName: "benchmark_transcode",
+		ActionName: "transcode_media",
 		Inputs: map[string]any{
 			"path":           "/media/example.mkv",
 			"profile":        "live-action-hevc",
@@ -100,7 +26,7 @@ func TestValidateTranscodeInputsRejectsIgnoredKnobs(t *testing.T) {
 
 func TestValidateTranscodeInputsAcceptsProfileConfig(t *testing.T) {
 	e := NewEngine(EngineDeps{})
-	for _, actionName := range []string{"benchmark_transcode", "transcode_media", "transcode_batch"} {
+	for _, actionName := range []string{"transcode_media", "transcode_batch"} {
 		t.Run(actionName, func(t *testing.T) {
 			inputs := map[string]any{
 				"profile_config": map[string]any{
@@ -157,22 +83,6 @@ func testEphemeralBatchProfileConfig() map[string]any {
 				map[string]any{"when": "container_subtitle_incompatible", "action": "apply_container_conversion"},
 			},
 		},
-	}
-}
-
-func TestMetricAutoSelectsSafeCapabilityForSourceBitDepth(t *testing.T) {
-	caps := transcode.WorkerCapabilities{Filters: map[string]bool{"libvmaf": true, "ssim": true}}
-	if got, err := resolveAutoBenchmarkMetric("auto", caps, 8); err != nil || got != "vmaf" {
-		t.Fatalf("8-bit auto metric = %q, %v; want vmaf", got, err)
-	}
-	if got, err := resolveAutoBenchmarkMetric("auto", caps, 10); err != nil || got != "ssim" {
-		t.Fatalf("10-bit auto metric = %q, %v; want ssim", got, err)
-	}
-	if got, err := resolveAutoBenchmarkMetric("ssim", caps, 8); err != nil || got != "ssim" {
-		t.Fatalf("explicit metric must be preserved, got %q, %v", got, err)
-	}
-	if _, err := resolveAutoBenchmarkMetric("auto", transcode.WorkerCapabilities{Filters: map[string]bool{"libvmaf": true}}, 10); err == nil || !strings.Contains(err.Error(), "no safe metric") {
-		t.Fatalf("10-bit auto without SSIM must fail closed, got %v", err)
 	}
 }
 

@@ -223,9 +223,6 @@ func (e *Engine) shouldReconcile(inst *store.ActionInstance, tmpl ActionTemplate
 	if inst.Status == StatusPending {
 		return getBool(ec.State, "background_admission")
 	}
-	if legacyBudgetStoppedBatch(inst) {
-		return !getBool(ec.State, "paused") && !getBool(ec.State, "cancel_requested")
-	}
 	if inst.Status != StatusWaitingExternal && inst.Status != StatusRunning {
 		return false
 	}
@@ -245,14 +242,6 @@ func (e *Engine) shouldReconcile(inst *store.ActionInstance, tmpl ActionTemplate
 		return false
 	}
 	return true
-}
-
-// legacyBudgetStoppedBatch is a mode batch stopped only by the retired flat
-// operation search cap. Its remaining files are admissible now, so the
-// reconciler resumes scheduling without a decision; nothing is replaced and
-// the stop option stays available while files run.
-func legacyBudgetStoppedBatch(inst *store.ActionInstance) bool {
-	return inst.ActionName == "transcode_batch" && inst.Status == StatusWaitingDecision && inst.WaitingCondition == "search_budget_exhausted"
 }
 
 func (e *Engine) scheduleReconcile(ec *ExecutionContext, condition string) {
@@ -288,7 +277,7 @@ func (e *Engine) scheduleReconcile(ec *ExecutionContext, condition string) {
 		ec.State[workerSlotPolledAtKey] = e.now().Format(time.RFC3339Nano)
 	}
 	next := e.now().Add(delay)
-	for _, key := range []string{"retry_not_before", "benchmark_retry_not_before", workerBusyNotBeforeKey} {
+	for _, key := range []string{"retry_not_before", workerBusyNotBeforeKey} {
 		if at, err := time.Parse(time.RFC3339Nano, getString(ec.State, key)); err == nil && at.After(next) {
 			next = at
 		}

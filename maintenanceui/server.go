@@ -38,6 +38,9 @@ var allowedTools = map[string]bool{
 	"podcast_ad_library": true, "podcast_artifact": true, "podcast_blocks": true, "podcast_block": true, "podcast_classify": true, "podcast_review": true,
 	"inspect_media": true, "fs_list": true, "fs_stat": true, "fs_hash": true, "transcode_backups": true,
 }
+
+// benchmark_transcode stays listed so an old sample test can still be
+// cancelled or opened; a new one is refused by the engine.
 var allowedActions = map[string]bool{"clean_podcast_ads": true, "transcode_media": true, "transcode_batch": true, "benchmark_transcode": true, "promote_transcode_candidate": true}
 
 type Server struct {
@@ -144,7 +147,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/maintenance/worker-slots", s.workerSlots)
 	mux.HandleFunc("POST /api/maintenance/tool", s.tool)
 	mux.HandleFunc("GET /api/maintenance/logs", s.logs)
-	mux.HandleFunc("GET /api/maintenance/benchmark-comparison", s.benchmarkComparison)
 	mux.HandleFunc("GET /sw.js", serveWorker)
 	files, _ := fs.Sub(assets, "assets")
 	static := http.FileServer(http.FS(files))

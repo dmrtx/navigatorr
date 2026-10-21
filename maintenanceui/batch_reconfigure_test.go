@@ -15,7 +15,7 @@ import (
 
 func seedFailedBatch(t *testing.T, s *Server, sonarr bool) map[string]any {
 	t.Helper()
-	inputs := map[string]any{"profile_config": testProfileConfig(), "min_savings_percent": 15, "max_size_increase_percent": 0, "preserve_source_bit_depth": true, "metric": "vmaf"}
+	inputs := map[string]any{"profile_config": testProfileConfig(), "min_savings_percent": 15, "max_size_increase_percent": 0, "preserve_source_bit_depth": true}
 	if sonarr {
 		inputs["service"], inputs["series_id"], inputs["season"], inputs["promote_candidates"] = "sonarr", 10, 1, true
 		inputs["episode_file_ids"] = []int{101, 102, 103, 999}
@@ -55,7 +55,7 @@ func TestReconfigureFreezesFailuresPreservesCustomSettingsAndReceipt(t *testing.
 			}
 			inst, _ := s.engine.Deps().Store.GetActionInstance(receipt["id"])
 			actual := decodeOperationJSON(inst.InputsJSON)
-			if !reflect.DeepEqual(actual["profile_config"], decodeOperationJSON(mustJSON(t, original))["profile_config"]) || actual["min_savings_percent"] != float64(10) || actual["metric"] != nil {
+			if !reflect.DeepEqual(actual["profile_config"], decodeOperationJSON(mustJSON(t, original))["profile_config"]) || actual["min_savings_percent"] != float64(10) {
 				t.Fatal("lost original settings", actual)
 			}
 			if sonarr {

@@ -9,24 +9,26 @@ import (
 // BatchSummary separates workflow completion from the result for the library.
 // Counts are small and independent of the (possibly truncated) item list.
 type BatchSummary struct {
-	PromotionPlanReady bool                             `json:"promotion_plan_ready,omitempty"`
-	Title              string                           `json:"title,omitempty"`
-	Outcome            string                           `json:"outcome"`
-	NextStep           string                           `json:"next_step,omitempty"`
-	DryRun             bool                             `json:"dry_run"`
-	Total              int                              `json:"total"`
-	Completed          int                              `json:"completed"`
-	Failed             int                              `json:"failed"`
-	Cancelled          int                              `json:"cancelled"`
-	Skipped            int                              `json:"skip"`
-	Review             int                              `json:"review"`
-	Queued             int                              `json:"queued"`
-	Running            int                              `json:"running"`
-	WaitingForSlot     int                              `json:"waiting_for_slot"`
-	WaitingDecision    int                              `json:"waiting_decision"`
-	Promotion          *batchPromotionSummary           `json:"promotion,omitempty"`
-	Selection          *action.BatchSelection           `json:"selection,omitempty"`
-	SampleEvidence     *action.BatchCalibrationEvidence `json:"sample_evidence,omitempty"`
+	PromotionPlanReady bool                   `json:"promotion_plan_ready,omitempty"`
+	Title              string                 `json:"title,omitempty"`
+	Outcome            string                 `json:"outcome"`
+	NextStep           string                 `json:"next_step,omitempty"`
+	DryRun             bool                   `json:"dry_run"`
+	Total              int                    `json:"total"`
+	Completed          int                    `json:"completed"`
+	Failed             int                    `json:"failed"`
+	Cancelled          int                    `json:"cancelled"`
+	Skipped            int                    `json:"skip"`
+	Review             int                    `json:"review"`
+	Queued             int                    `json:"queued"`
+	Running            int                    `json:"running"`
+	WaitingForSlot     int                    `json:"waiting_for_slot"`
+	WaitingDecision    int                    `json:"waiting_decision"`
+	Promotion          *batchPromotionSummary `json:"promotion,omitempty"`
+	// Selection and SampleEvidence are what batches run before the sample
+	// search was removed stored; they are passed through for history.
+	Selection      map[string]any `json:"selection,omitempty"`
+	SampleEvidence map[string]any `json:"sample_evidence,omitempty"`
 }
 
 type batchPromotionSummary struct {
@@ -72,13 +74,13 @@ func compactBatch(res *action.ActionResult) *BatchSummary {
 	// Project only known fields, never serialize raw items or ephemeral recipes.
 	fields := compactOperationalFields(res, []string{"series_title", "dry_run", "counts", "batch_promotion_approved", "cancel_requested", "batch_selection", "batch_evidence"})
 	var data struct {
-		Title           string                           `json:"series_title"`
-		DryRun          bool                             `json:"dry_run"`
-		Counts          BatchSummary                     `json:"counts"`
-		Approved        bool                             `json:"batch_promotion_approved"`
-		CancelRequested bool                             `json:"cancel_requested"`
-		Selection       *action.BatchSelection           `json:"batch_selection"`
-		SampleEvidence  *action.BatchCalibrationEvidence `json:"batch_evidence"`
+		Title           string         `json:"series_title"`
+		DryRun          bool           `json:"dry_run"`
+		Counts          BatchSummary   `json:"counts"`
+		Approved        bool           `json:"batch_promotion_approved"`
+		CancelRequested bool           `json:"cancel_requested"`
+		Selection       map[string]any `json:"batch_selection"`
+		SampleEvidence  map[string]any `json:"batch_evidence"`
 	}
 	encoded, err := json.Marshal(fields)
 	if err != nil || json.Unmarshal(encoded, &data) != nil {
@@ -127,14 +129,14 @@ func compactBatch(res *action.ActionResult) *BatchSummary {
 	case "needs_decision":
 		result.NextStep = "Use this action's waiting_options with action_resume. An approve decision authorizes the displayed replacement."
 		if reason := firstString(res.State["reason_code"], res.Outputs["reason_code"]); reason == "search_budget_exhausted" || reason == "search_budget_unavailable" {
-			result.NextStep = "No search budget is available for the remaining files. In the batch settings, choose an explicit profile for remaining files to continue without another mode search. Originals remain unchanged; cancel stops the batch."
+			result.NextStep = "This batch used the removed sample search and cannot continue. Originals remain unchanged; cancel it and start a new batch with a goal (mode)."
 		}
 	case "candidates_ready":
 		result.NextStep = "Candidates are ready; originals are unchanged. Inspect action_detail(section=outputs,key=items) for candidate paths and child action IDs; do not encode again to promote them."
 	case "partial", "needs_review", "failed":
 		result.NextStep = "Inspect the error and action_detail(section=outputs,key=items) for affected files before retrying; completed candidates may already exist."
 	case "no_changes":
-		result.NextStep = "Originals are unchanged. Inspect selection and action_detail(section=outputs,key=items) for skip reasons; no automatic search retry is scheduled."
+		result.NextStep = "Originals are unchanged. Inspect selection and action_detail(section=outputs,key=items) for skip reasons; no automatic retry is scheduled."
 	}
 	return &result
 }

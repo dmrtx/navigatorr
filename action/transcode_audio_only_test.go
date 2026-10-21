@@ -83,7 +83,7 @@ func newAudioOnlyCase(t *testing.T, caps transcode.WorkerCapabilities, capsErr e
 		t.Fatal(err)
 	}
 	base := &transcode.Plan{VideoCodec: transcode.VideoCodecLibX265, Quality: 24, Preset: "medium", VideoProfile: "main10", PixelFormat: "p010le", ExpectedBitDepth: 10, AudioMode: snapshot.Profile.Audio.Mode}
-	base.QualityValidation = &transcode.QualityValidationPlan{Metric: "vmaf", Quality: *ensureBenchmarkQualityMetric(buildBenchmarkQualityConfig(snapshot.Profile.Optimization.Quality), "vmaf"), BenchmarkRequestDigest: "request"}
+	base.QualityValidation = &transcode.QualityValidationPlan{Metric: "vmaf", Quality: *ensureFinalQualityMetric(buildFinalQualityConfig(snapshot.Profile.Optimization.Quality), "vmaf"), BenchmarkRequestDigest: "request"}
 	if err := applyModePlan(base, snapshot); err != nil {
 		t.Fatal(err)
 	}

@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -51,12 +52,6 @@ type Engine struct {
 	// that a test can refuse or slow down. Production leaves them nil.
 	promotionCloneHook     func(dst, src *os.File) error
 	promotionCopyRangeHook func(dst, src *os.File, n int) (int, error)
-	// legacySearch, when set by tests, admits the sample-search inputs new
-	// requests are refused (see rejectSearchInputs) and freezes new goals
-	// under the policy v2/v3 content (see frozenModePolicy), so a test can
-	// drive an action as it was admitted before the search was removed: the
-	// path such actions still take. Production leaves it false.
-	legacySearch bool
 	// promotionReadHook, when set by tests, sees every byte count this process
 	// reads from a promotion file: full hashes and streamed copies.
 	promotionReadHook func(path string, n int64)
@@ -172,6 +167,9 @@ func (e *Engine) Run(ctx context.Context, actionName string, inputs map[string]a
 		return nil, fmt.Errorf("maintenance store is required for action engine")
 	}
 
+	if actionName == removedBenchmarkAction {
+		return nil, inputErr("", removedBenchmarkMessage)
+	}
 	tmpl, ok := e.GetTemplate(actionName)
 	if !ok {
 		return nil, fmt.Errorf("unknown action template: %s", actionName)
@@ -429,6 +427,9 @@ func (e *Engine) retry(ctx context.Context, instanceID string, guard func(*store
 	if inst.Status != StatusFailed {
 		return nil, fmt.Errorf("only failed actions can be retried (current status: %s)", inst.Status)
 	}
+	if removedSearchAction(inst, parseExecutionContext(inst, e)) {
+		return nil, errors.New(removedSearchMessage)
+	}
 
 	tmpl, ok := e.GetTemplate(inst.ActionName)
 	if !ok {
@@ -517,6 +518,11 @@ func (e *Engine) resume(ctx context.Context, instanceID string, decision string,
 		return nil, fmt.Errorf("action instance not found: %s", instanceID)
 	}
 
+	if inst.Status != StatusCompleted && inst.Status != StatusFailed && inst.Status != StatusCancelled {
+		if ec := parseExecutionContext(inst, e); removedSearchAction(inst, ec) {
+			return e.retireRemovedSearch(ctx, inst, ec)
+		}
+	}
 	if e.batchReviewReceiptApplied(ctx, inst) {
 		return e.Status(ctx, inst.ID)
 	}
@@ -531,7 +537,10 @@ func (e *Engine) resume(ctx context.Context, instanceID string, decision string,
 	}
 
 	tmpl, ok := e.GetTemplate(inst.ActionName)
-	if !ok {
+	finished := inst.Status == StatusCompleted || inst.Status == StatusFailed || inst.Status == StatusCancelled
+	// A finished action of a template that no longer exists (the sample test)
+	// is still read back as it ended.
+	if !ok && !finished {
 		return nil, fmt.Errorf("unknown action template: %s", inst.ActionName)
 	}
 
@@ -540,19 +549,14 @@ func (e *Engine) resume(ctx context.Context, instanceID string, decision string,
 	}
 
 	// If already completed or terminal, return current state
-	if inst.Status == StatusCompleted || inst.Status == StatusFailed || inst.Status == StatusCancelled {
+	if finished {
 		ec := parseExecutionContext(inst, e)
 		return buildActionResult(inst, len(tmpl.Steps), ec), nil
 	}
 
 	ec := parseExecutionContext(inst, e)
-	if (automatic && !e.shouldReconcile(inst, tmpl, ec)) || (inst.Status == StatusWaitingDecision && decision == "" && !(automatic && legacyBudgetStoppedBatch(inst))) {
+	if (automatic && !e.shouldReconcile(inst, tmpl, ec)) || (inst.Status == StatusWaitingDecision && decision == "") {
 		return buildActionResult(inst, len(tmpl.Steps), ec), nil
-	}
-	if automatic && legacyBudgetStoppedBatch(inst) && getString(ec.State, "reason_code") == "search_budget_exhausted" {
-		// The retired flat cap's stop is no longer a reason; later decision
-		// points must not repeat its guidance.
-		delete(ec.State, "reason_code")
 	}
 	if decision != "" {
 		ec.Decision = decision
@@ -760,18 +764,6 @@ func (e *Engine) cancelRemoteActionWork(ctx context.Context, ec *ExecutionContex
 	}
 	var errs []string
 
-	benchID := getString(ec.State, "benchmark_job_id")
-	if benchID == "" {
-		benchID = getString(ec.Outputs, "benchmark_job_id")
-	}
-	// A submit refused outright (busy or otherwise) created nothing on the
-	// worker, which would answer a cancel for that identity with 404.
-	if benchID != "" && !getBool(ec.State, "benchmark_done") && !noRemoteJob(ec, "benchmark_submitted", "benchmark_reconcile", benchmarkRejectedKey) {
-		if err := e.cancelBenchmarkJobConfirmed(ctx, benchID); err != nil {
-			errs = append(errs, fmt.Sprintf("benchmark %s: %v", benchID, err))
-		}
-	}
-
 	jobID := getString(ec.State, "job_id")
 	if jobID == "" {
 		jobID = getString(ec.Outputs, "job_id")
@@ -829,32 +821,6 @@ func (e *Engine) cancelTranscodeJobConfirmed(ctx context.Context, jobID string) 
 		return nil
 	default:
 		return fmt.Errorf("cancel result uncertain; worker returned unexpected status %q", st.Status)
-	}
-}
-
-func (e *Engine) cancelBenchmarkJobConfirmed(ctx context.Context, jobID string) error {
-	err := e.deps.Transcode.BenchmarkCancel(ctx, jobID)
-	if err == nil {
-		return nil
-	}
-	if !httpclient.IsTransportUncertain(err) {
-		return err
-	}
-
-	st, serr := e.deps.Transcode.BenchmarkStatus(ctx, jobID)
-	if serr != nil {
-		return fmt.Errorf("benchmark cancel result uncertain (%v); status reconciliation failed: %w", err, serr)
-	}
-	switch st.Status {
-	case transcode.StatusCancelled, transcode.StatusCompleted, transcode.StatusFailed:
-		return nil
-	case transcode.StatusQueued, transcode.StatusRunning:
-		if rerr := e.deps.Transcode.BenchmarkCancel(ctx, jobID); rerr != nil {
-			return fmt.Errorf("benchmark cancel result uncertain; worker still reports %s and confirmed retry failed: %w", st.Status, rerr)
-		}
-		return nil
-	default:
-		return fmt.Errorf("benchmark cancel result uncertain; worker returned unexpected status %q", st.Status)
 	}
 }
 

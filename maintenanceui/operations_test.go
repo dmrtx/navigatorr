@@ -176,12 +176,15 @@ func TestOperationsHistoryIsBoundedButTotalsAreLifetime(t *testing.T) {
 	}
 }
 
-func TestOperationsProjectPlanNoteAndPausedBenchmarkOutcome(t *testing.T) {
+func TestOperationsProjectPlanNoteAndPausedOutcome(t *testing.T) {
 	s, h := testUI(t)
 	st := s.engine.Deps().Store
-	note := "No benchmark candidate was selected; the stored plan is the profile's untested starting configuration."
-	seedOperation(t, st, "untested", "benchmark_transcode", "completed", map[string]any{"path": "/media/a.mkv"}, map[string]any{"plan_source": "profile_base", "plan_note": note}, map[string]any{"optimization_enabled": true, "benchmark_decision": map[string]any{"decision_reason": "all_candidates_invalid", "evaluations": []any{}}})
-	seedOperation(t, st, "paused", "transcode_media", "waiting_decision", map[string]any{"path": "/media/b.mkv", "mode": "compact"}, nil, map[string]any{"optimization_enabled": true, "reason_code": "quality_policy_unavailable", "plan_source": "profile_base"})
+	note := "The profile's fixed settings."
+	seedOperation(t, st, "fixed", "transcode_media", "completed", map[string]any{"path": "/media/a.mkv", "mode": "size"}, map[string]any{"plan_source": "profile_base", "plan_note": note}, map[string]any{"reason_code": "recipe_ready"})
+	seedOperation(t, st, "paused", "transcode_media", "waiting_decision", map[string]any{"path": "/media/b.mkv", "mode": "compact"}, nil, map[string]any{"reason_code": "quality_policy_unavailable", "plan_source": "profile_base"})
+	// A sample test from before the search was removed still lists, with no
+	// encode summary to project.
+	seedOperation(t, st, "old-sample-test", "benchmark_transcode", "completed", map[string]any{"path": "/media/c.mkv"}, map[string]any{"plan_source": "profile_base", "plan_note": note}, map[string]any{"optimization_enabled": true, "benchmark_decision": map[string]any{"decision_reason": "all_candidates_invalid", "evaluations": []any{}}})
 	read := func(id string) map[string]any {
 		t.Helper()
 		var page operationsPage
@@ -190,15 +193,15 @@ func TestOperationsProjectPlanNoteAndPausedBenchmarkOutcome(t *testing.T) {
 			t.Fatal(w.Code, w.Body.String())
 		}
 		benchmark, _ := page.Jobs[0]["benchmark"].(map[string]any)
-		if benchmark == nil {
-			t.Fatal("benchmark summary missing", page.Jobs[0])
-		}
 		return benchmark
 	}
-	if b := read("untested"); b["plan_source"] != "profile_base" || b["plan_note"] != note {
-		t.Fatal("untested plan not projected", b)
+	if b := read("fixed"); b == nil || b["plan_source"] != "profile_base" || b["plan_note"] != note {
+		t.Fatal("plan not projected", b)
 	}
 	if b := read("paused"); b["outcome"] != "quality_policy_unavailable" || b["plan_source"] != nil || b["plan_note"] != nil {
-		t.Fatal("paused job projected as testing or with a provisional plan", b)
+		t.Fatal("paused job projected as encoding or with a provisional plan", b)
+	}
+	if b := read("old-sample-test"); b != nil {
+		t.Fatal("an old sample test was given an encode summary", b)
 	}
 }
