@@ -3689,6 +3689,7 @@ const benchmarkOutcomes = {
   no_suitable_candidate: "No setting passed",
   audio_only: "Audio-only compaction",
   size_budget: "Encoded at your size budget",
+  size_budget_ladder: "Encoding at your size budget",
   size_rejected: "Size limit not met",
   search_review_required: "Your review is needed",
   quality_policy_unavailable: "Quality checks unavailable",
@@ -3727,11 +3728,19 @@ function benchmarkCandidateLabel(c) {
   const rate = c.average_bitrate_kbps ? `${c.average_bitrate_kbps} kbps` : c.video_codec === "libx265" ? `CRF ${c.quality}` : `quality ${c.quality}`;
   return `${c.id} · ${codec} ${rate}${c.preset ? ` · ${c.preset}` : ""}`;
 }
+// The job's one-line outcome when no sample test result card explains it.
+function jobOutcomeText(job) {
+  if (job.status === "completed" && !job.candidate_ready && job.reason_code) return shortJobReason(job.reason_code);
+  // A size budget ladder tests no samples: it says which full encode runs.
+  if (job.benchmark?.outcome === "size_budget_ladder" && job.benchmark.message) return job.benchmark.message;
+  return shortJobReason(job.transcode?.message);
+}
 // Renders the server's benchmark summary (tools/benchmark_summary.go) for people:
 // what happened, why each setting was rejected, and what to do next.
 function benchmarkReport(job) {
   const b = job.benchmark;
-  if (!b || !b.outcome || b.outcome === "testing") return null;
+  // A size budget ladder tests no samples, so there is no sample result.
+  if (!b || !b.outcome || ["testing", "size_budget_ladder"].includes(b.outcome)) return null;
   const box = node("section", "", `benchmark-report outcome-${b.outcome}`);
   box.setAttribute("aria-label", "Sample test result");
   const head = node("div", "", "benchmark-report-head");
@@ -4484,8 +4493,8 @@ async function refreshDetail() {
     if (job.transcode) {
       // A waiting decision repeats its reason below, and a sample test result
       // card explains the outcome itself; show it only once.
-      const hasReport = job.benchmark?.outcome && job.benchmark.outcome !== "testing";
-      if (job.status !== "waiting_decision" && !hasReport) summary.append(node("p", job.status === "completed" && !job.candidate_ready && job.reason_code ? shortJobReason(job.reason_code) : shortJobReason(job.transcode.message), "job-outcome metadata"));
+      const hasReport = job.benchmark?.outcome && !["testing", "size_budget_ladder"].includes(job.benchmark.outcome);
+      if (job.status !== "waiting_decision" && !hasReport) summary.append(node("p", jobOutcomeText(job), "job-outcome metadata"));
       if (job.transcode.tested_candidates) summary.append(node("p", `${job.transcode.tested_candidates} configurations tested${job.transcode.verified_samples ? ` · ${job.transcode.verified_samples} quality samples verified` : ""}`, "metadata"));
     }
  renderPhaseCosts(summary, job);
