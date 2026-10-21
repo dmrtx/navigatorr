@@ -52,8 +52,7 @@ func (s *Store) ListReconcilableActions(afterID string, limit int) ([]ActionInst
 	rows, err := s.db.Query(`SELECT id, action_name, status, current_step, inputs_json,
 		outputs_json, state_json, waiting_reason, waiting_condition, waiting_options_json,
 		error_json, idempotency_key, created_at, updated_at FROM action_instances
-		WHERE (status IN ('pending', 'waiting_external', 'running')
-			OR status = 'waiting_decision' AND action_name = 'transcode_batch' AND waiting_condition = 'search_budget_exhausted')
+		WHERE status IN ('pending', 'waiting_external', 'running')
 		AND id > ? ORDER BY id LIMIT ?`, afterID, limit)
 	if err != nil {
 		return nil, err
@@ -86,7 +85,7 @@ type WorkerSlotWaiterRow struct {
 	Paused           bool
 }
 
-// ListWorkerSlotWaiters returns the live transcode and benchmark actions whose
+// ListWorkerSlotWaiters returns the live transcode actions whose
 // state holds a worker slot ticket (worker_slot_wait_since). The caller
 // decides which of them are still contending; the query only narrows the scan
 // to the few rows that can be and projects the fields it needs.
@@ -100,7 +99,7 @@ func (s *Store) ListWorkerSlotWaiters() ([]WorkerSlotWaiterRow, error) {
 		CASE WHEN json_extract(state_json, '$.paused') IN (1, 'true') THEN 1 ELSE 0 END
 		FROM action_instances
 		WHERE status IN ('pending', 'waiting_external', 'running')
-		AND action_name IN ('transcode_media', 'benchmark_transcode')
+		AND action_name = 'transcode_media'
 		AND json_type(state_json, '$.worker_slot_wait_since') = 'text'
 		ORDER BY id`)
 	if err != nil {
