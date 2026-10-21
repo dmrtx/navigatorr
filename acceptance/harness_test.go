@@ -194,8 +194,9 @@ func startSuite() (_ *suite, err error) {
 		return nil, fmt.Errorf("building the worker: %v\n%s", err, out)
 	}
 	// Job and benchmark runners start in their own sessions, so stopping
-	// serve leaves them running; the binary's unique path finds them all.
-	s.stop = append(s.stop, func() { _ = exec.Command("pkill", "-KILL", "-f", bin).Run() })
+	// serve leaves them and their ffmpeg children running. Every one of them
+	// names a path under this run's own temp dir.
+	s.stop = append(s.stop, func() { _ = exec.Command("pkill", "-KILL", "-f", dir+string(filepath.Separator)).Run() })
 	base, err := startWorker(s, bin, dir)
 	if err != nil {
 		return nil, err
