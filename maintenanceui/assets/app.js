@@ -889,15 +889,17 @@ async function initialize() {
   state.routeReady=false;
   const auth = await api("auth-info");
   state.authMode = auth.auth_mode;
-  $("logout").hidden = state.authMode !== "token";
-  $("local-session").hidden = state.authMode !== "token";
+  // A browser that arrived through Access has no local session to sign out of.
+  state.localSession = state.authMode === "token" && auth.session !== "cloudflare_access";
+  $("logout").hidden = !state.localSession;
+  $("local-session").hidden = !state.localSession;
   const info = await api("bootstrap");
   state.info = info;
   $("login").hidden = true;
   $("workspace").hidden = false;
   $("worker-status").hidden = false;
   void refreshWorkers();
-  $("logout").hidden = state.authMode !== "token";
+  $("logout").hidden = !state.localSession;
   $("access-expired").hidden = true;
   $("service").replaceChildren();
   info.roots.forEach(

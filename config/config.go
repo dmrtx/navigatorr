@@ -75,22 +75,35 @@ func (w WebConfig) CloudflareIssuer() (string, error) {
 	return "https://" + strings.ToLower(u.Host), nil
 }
 
+// CloudflareAccessConfigured reports whether token mode also accepts a verified
+// Access assertion, so a browser signed in through Access needs no local token.
+func (w WebConfig) CloudflareAccessConfigured() bool {
+	return strings.TrimSpace(w.CloudflareAccess.TeamDomain) != "" || strings.TrimSpace(w.CloudflareAccess.Audience) != ""
+}
+
+func (w WebConfig) validateCloudflareAccess() error {
+	if _, err := w.CloudflareIssuer(); err != nil {
+		return err
+	}
+	aud := strings.TrimSpace(w.CloudflareAccess.Audience)
+	if aud == "" || len(aud) > 512 || strings.ContainsAny(aud, " \t\r\n") {
+		return fmt.Errorf("web.cloudflare_access.audience must identify the Access application")
+	}
+	return nil
+}
+
 func (w WebConfig) ValidateAuth() error {
 	switch w.AuthModeValue() {
 	case "token":
-		return nil
+		if !w.CloudflareAccessConfigured() {
+			return nil
+		}
+		return w.validateCloudflareAccess()
 	case "cloudflare_access":
 		if w.Token != "" || w.TokenFile != "" {
 			return fmt.Errorf("web token authentication cannot be configured with cloudflare_access")
 		}
-		if _, err := w.CloudflareIssuer(); err != nil {
-			return err
-		}
-		aud := strings.TrimSpace(w.CloudflareAccess.Audience)
-		if aud == "" || len(aud) > 512 || strings.ContainsAny(aud, " \t\r\n") {
-			return fmt.Errorf("web.cloudflare_access.audience must identify the Access application")
-		}
-		return nil
+		return w.validateCloudflareAccess()
 	default:
 		return fmt.Errorf("web.auth_mode must be token or cloudflare_access")
 	}

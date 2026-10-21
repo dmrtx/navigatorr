@@ -1705,6 +1705,31 @@ test("Cloudflare mode opens the workspace without a local sign-in or sign-out", 
   assert.equal(h.elements.get("logout").hidden, true);
 });
 
+test("token mode reached through Access opens without the token form or a local sign-out", async () => {
+  const h = harness();
+  h.document.querySelector = () => new Element();
+  h.run(
+    'api = async (path) => path === "auth-info" ? {auth_mode:"token",session:"cloudflare_access"} : {roots:[],services:[],tools:[],transcode_enabled:true}; resetLibrary = () => {}; controls = () => {}; loadJobs = async () => {};',
+  );
+  await h.run("initialize()");
+  assert.equal(h.run("state.authMode"), "token");
+  assert.equal(h.elements.get("workspace").hidden, false);
+  assert.equal(h.elements.get("login").hidden, true);
+  assert.equal(h.elements.get("logout").hidden, true);
+  assert.equal(h.elements.get("local-session").hidden, true);
+});
+
+test("token mode with a local session keeps its sign-out", async () => {
+  const h = harness();
+  h.document.querySelector = () => new Element();
+  h.run(
+    'api = async (path) => path === "auth-info" ? {auth_mode:"token"} : {roots:[],services:[],tools:[],transcode_enabled:true}; resetLibrary = () => {}; controls = () => {}; loadJobs = async () => {};',
+  );
+  await h.run("initialize()");
+  assert.equal(h.elements.get("logout").hidden, false);
+  assert.equal(h.elements.get("local-session").hidden, false);
+});
+
 test("folder breadcrumbs preserve selected files while clearing the focused file/search", async () => {
   const h = harness();
   h.context.paths = [];

@@ -20,7 +20,9 @@ web:
 
 Cloudflare Access handles Google sign-in and registration policies. Configure its application to protect the whole origin, including `/api/maintenance/*` and `/mcp`. Navigatorr verifies the Access assertion signature, issuer, application audience and expiry using the team's public keys; it does not present a second login, ask for a token or offer local sign-out in this mode. The team domain and audience are server configuration, not credentials the browser user enters. Use HTTPS and keep the origin private behind the proxy/tunnel. Existing MCP authentication is unchanged.
 
-For standalone use, omit `auth_mode` (defaults to `token`) and configure exactly one of `web.token_file` or `web.token` with a random token of at least 24 characters. This mode retains bounded 12-hour HttpOnly/SameSite sessions. Both modes preserve same-origin mutation checks; worker credentials and \*arr keys stay on the server. `web.enabled` defaults to false and requires `streamable-http`. Enabling the console does not enable destructive actions or audio-only transcoding. The SQLite migration is automatic (schema 8).
+For standalone use, omit `auth_mode` (defaults to `token`) and configure exactly one of `web.token_file` or `web.token` with a random token of at least 24 characters. This mode retains bounded 12-hour HttpOnly/SameSite sessions.
+
+To reach the same token-mode console both privately (LAN, VPN) and through Cloudflare Access, keep `auth_mode: token` and also set `web.cloudflare_access.team_domain` and `audience`. A request carrying a valid Access assertion for that audience is then signed in without the token form and without a local sign-out. Every other request still needs the token. The assertion is verified the same way as in `cloudflare_access` mode, so a forged or foreign header only falls back to the token check. Both modes preserve same-origin mutation checks; worker credentials and \*arr keys stay on the server. `web.enabled` defaults to false and requires `streamable-http`. Enabling the console does not enable destructive actions or audio-only transcoding. The SQLite migration is automatic (schema 8).
 
 ## Mobile and PWA
 

@@ -239,3 +239,69 @@ func TestTokenModeAuthInfoPreservesLocalAuthentication(t *testing.T) {
 		t.Fatal("local logout changed", logout.Body.String())
 	}
 }
+
+func TestTokenModeAlsoAcceptsVerifiedAccessAssertion(t *testing.T) {
+	original, _ := testUI(t)
+	original.cfg.Web.CloudflareAccess = config.CloudflareAccessConfig{TeamDomain: "example.cloudflareaccess.com", Audience: "application-audience"}
+	s, err := New(original.cfg, original.registry, original.engine, original.mcp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.access == nil || s.accessOnly {
+		t.Fatal("token mode did not add the Access verifier")
+	}
+	verifier, key, _ := accessFixture(t)
+	s.access = verifier
+	h := s.Handler()
+	withAssertion := func(method, path, assertion string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, path, nil)
+		r.Header.Set("Cf-Access-Jwt-Assertion", assertion)
+		r.Header.Set("X-Navigatorr-Request", "1")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	valid := accessJWT(t, key, map[string]any{"alg": "RS256", "kid": "key-1"}, accessClaims(verifier))
+	if w := withAssertion("GET", "/api/maintenance/bootstrap", valid); w.Code != 200 {
+		t.Fatalf("verified assertion refused: %d %s", w.Code, w.Body.String())
+	}
+	if w := withAssertion("GET", "/api/maintenance/auth-info", valid); strings.TrimSpace(w.Body.String()) != `{"auth_mode":"token","session":"cloudflare_access"}` {
+		t.Fatal("auth-info did not report the Access session", w.Body.String())
+	}
+	wrongAudience := accessClaims(verifier)
+	wrongAudience["aud"] = []string{"another-application"}
+	for name, assertion := range map[string]string{
+		"forged":         "forged",
+		"wrong audience": accessJWT(t, key, map[string]any{"alg": "RS256", "kid": "key-1"}, wrongAudience),
+	} {
+		if w := withAssertion("GET", "/api/maintenance/bootstrap", assertion); w.Code != 401 {
+			t.Fatalf("%s assertion accepted", name)
+		}
+		if w := withAssertion("GET", "/api/maintenance/auth-info", assertion); strings.TrimSpace(w.Body.String()) != `{"auth_mode":"token"}` {
+			t.Fatalf("%s assertion reported as a session: %s", name, w.Body.String())
+		}
+	}
+	if request(h, "GET", "/api/maintenance/bootstrap", "", false).Code != 401 {
+		t.Fatal("anonymous request accepted")
+	}
+	if request(h, "GET", "/api/maintenance/bootstrap", "", true).Code != 200 {
+		t.Fatal("local token stopped working")
+	}
+	login := request(h, "POST", "/api/maintenance/login", `{"token":"`+testToken+`"}`, false)
+	if login.Code != 200 || len(login.Result().Cookies()) != 1 {
+		t.Fatal("local login stopped working")
+	}
+}
+
+func TestTokenModeRejectsIncompleteAccessConfig(t *testing.T) {
+	for _, access := range []config.CloudflareAccessConfig{
+		{TeamDomain: "example.cloudflareaccess.com"},
+		{Audience: "application-audience"},
+		{TeamDomain: "example.com", Audience: "application-audience"},
+	} {
+		web := config.WebConfig{Enabled: true, Token: testToken, CloudflareAccess: access}
+		if web.ValidateAuth() == nil {
+			t.Fatalf("incomplete Access config accepted: %+v", access)
+		}
+	}
+}

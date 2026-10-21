@@ -41,6 +41,8 @@ web:
 # Configure the Google identity provider and allowed identities in Cloudflare
 # Access. Navigatorr validates Access's signed assertion for this audience;
 # merely forwarding an identity/email header does not grant access.
+# To keep token sign-in for private access and skip it for browsers that come
+# through Access, stay in token mode and add the cloudflare_access block.
 # mcp:
 #   transport: "streamable-http"
 #   listen: "127.0.0.1:8098"
