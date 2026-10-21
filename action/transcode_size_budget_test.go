@@ -223,12 +223,22 @@ func TestSizeBudgetBytesAndBitrate(t *testing.T) {
 	if !known || lossless >= 10_700_000_000-4_000_000_000 {
 		t.Fatalf("lossless audio savings ignored: %d", lossless)
 	}
-	// Without the video's statistics its size is what the sized audio leaves.
+	// Without the video's statistics the output's other streams are sized
+	// directly: converted lossless audio at its compact bitrate (even when the
+	// source track states no size, as FLAC in Matroska often does), copied
+	// audio at its own size.
 	rep.Video[0].Tags = nil
-	if derived, known := sizeBudgetNonVideoBytes(rep, 10_700_000_000); !known || derived <= 0 {
-		t.Fatalf("video size not derived from the sized audio: %d %v", derived, known)
+	_, kbps := transcode.AudioTarget(transcode.AudioModeCompactLossless, transcode.AudioTrack{Codec: "dts", Profile: "DTS-HD MA", Channels: 6, Layout: "5.1(side)"})
+	want := 10_700_000_000*sizeBudgetOverheadPerMille/1000 + 2*int64(kbps)*1000*6000/8 + 192000*6000/8
+	if derived, known := sizeBudgetNonVideoBytes(rep, 10_700_000_000); !known || derived != want {
+		t.Fatalf("other streams %d %v, want %d", derived, known, want)
 	}
 	rep.Audio[1].BitRate = 0
+	if derived, known := sizeBudgetNonVideoBytes(rep, 10_700_000_000); !known || derived != want {
+		t.Fatalf("unsized lossless track: %d %v, want %d", derived, known, want)
+	}
+	// A copied track that states no size leaves the video size unknown.
+	rep.Audio[2].BitRate = 0
 	if _, known := sizeBudgetNonVideoBytes(rep, 10_700_000_000); known {
 		t.Fatal("unknown video size treated as known")
 	}

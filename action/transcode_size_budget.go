@@ -382,8 +382,8 @@ func sizeBudgetActive(state map[string]any) bool {
 // output: the source minus its video stream, minus what compacting the
 // lossless audio saves. A converted track whose source size is unknown saves
 // nothing here, which errs towards a smaller file. It is unknown (false) when
-// the video stream's own size cannot be read and the other streams' sizes
-// cannot stand in for it.
+// the video stream's own size cannot be read and a copied stream states no
+// size either.
 func sizeBudgetNonVideoBytes(rep *mediainspect.DetailedReport, sourceBytes int64) (int64, bool) {
 	if rep == nil || sourceBytes <= 0 || rep.DurationSec <= 0 {
 		return 0, false
@@ -394,16 +394,12 @@ func sizeBudgetNonVideoBytes(rep *mediainspect.DetailedReport, sourceBytes int64
 	}
 	videoBytes := audioStreamBytes(video[0], rep.DurationSec, sourceBytes)
 	if videoBytes <= 0 {
-		// Files muxed without Matroska statistics give no video size, but
-		// their audio states a bitrate: the video is then what the other
-		// streams leave of the file.
-		others, known := sizeBudgetOtherStreamBytes(rep, sourceBytes)
-		if !known {
-			return 0, false
-		}
-		videoBytes = sourceBytes - others
+		// Files muxed without Matroska statistics give no video size. The
+		// output's other streams are sized directly instead: converted audio
+		// is re-encoded at a known bitrate, whatever its source size.
+		return sizeBudgetOtherStreamBytes(rep, sourceBytes)
 	}
-	if videoBytes <= 0 || videoBytes >= sourceBytes {
+	if videoBytes >= sourceBytes {
 		return 0, false
 	}
 	return estimateAudioOnly(rep, sourceBytes).CandidateBytes - videoBytes, true
@@ -419,13 +415,20 @@ const (
 )
 
 // sizeBudgetOtherStreamBytes is what everything but the main video takes in
-// the source, rounded up where a stream states no size: audio and bitmap
-// subtitles must state one (they can be gigabytes), text subtitles and cover
-// art are bounded, attachments carry their size. Overestimating the other
-// streams underestimates the video, which plans a smaller file.
+// the output, rounded up where a stream states no size. Lossless audio is
+// converted at the compact bitrate, so its source size does not matter (FLAC
+// in Matroska often states none). Copied audio and bitmap subtitles must state
+// one (they can be gigabytes); text subtitles and cover art are bounded and
+// attachments carry their size. Overestimating these streams plans a smaller
+// video, never a larger one.
 func sizeBudgetOtherStreamBytes(rep *mediainspect.DetailedReport, sourceBytes int64) (int64, bool) {
 	total := sourceBytes * sizeBudgetOverheadPerMille / 1000
 	for _, a := range rep.Audio {
+		target, kbps := transcode.AudioTarget(transcode.AudioModeCompactLossless, transcode.DetailedAudioTrack(a.Codec, a.Profile, a.Title, a.Tags, a.Channels, a.ChannelLayout))
+		if target != "copy" {
+			total += int64(kbps) * 1000 * int64(math.Ceil(rep.DurationSec)) / 8
+			continue
+		}
 		n := audioStreamBytes(a, rep.DurationSec, sourceBytes)
 		if n <= 0 {
 			return 0, false

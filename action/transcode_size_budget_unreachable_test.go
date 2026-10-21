@@ -158,7 +158,11 @@ func TestPreflightKeepsABudgetTheFileCanMeet(t *testing.T) {
 	// reachable budget (here 85% of the source) is.
 	dir := t.TempDir()
 	file := filepath.Join(dir, "source.mkv")
+	// A sparse 100 MB file: a 40% budget over 100 s is a plannable 3.2 Mb/s.
 	if err := os.WriteFile(file, []byte("source bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(file, 100_000_000); err != nil {
 		t.Fatal(err)
 	}
 	e, st := setupTranscodeEngine(t, &mockTranscodeExecutor{}, writeProbeScript(t, dir, sdrProbeJSON), []string{dir}, []string{dir}, false)

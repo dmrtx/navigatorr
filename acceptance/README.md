@@ -67,15 +67,12 @@ barely changes it: the searches (cases 2, 3, 4) and the final validation dominat
 and they sample fixed windows. The skip cases take seconds. A single case is
 limited to 40 minutes, the whole run needs `-timeout 60m` or more.
 
-## Known failures
+## A failing case
 
-A failing case is a finding about the pipeline, not about the suite.
-
-- 8b_no_size_tags_flac fails while a source with FLAC audio and no
-  per-stream statistics tags cannot get a size budget
-  (`size_budget_estimate_unavailable`): the search and x265 two-pass run instead
-  of the VideoToolbox ladder, several times slower, though the candidate is
-  still produced.
+A failing case is a finding about the pipeline, not about the suite: do not
+deploy that commit to the worker. Case 8b, for example, caught size budgets
+that could not be planned for FLAC sources without per-stream statistics, which
+silently traded the VideoToolbox ladder for a much slower x265 search.
 
 ## Development machines
 
