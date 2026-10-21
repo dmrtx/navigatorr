@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jakenesler/navigatorr/mediainspect"
 )
 
 // A source whose video stream is 100 MB of a 1 GB file leaves about 900 MB for
@@ -52,7 +54,7 @@ func TestUnreachableSizeBudgetEndsBeforeAnyWork(t *testing.T) {
 			if enc := planSizeBudgetEncode(policy, getSourceReport(c.ec.State["source_report"]), budgetSourceBytes, min); enc.Reason != "" {
 				t.Fatalf("the stated minimum %d is unreachable: %s", min, enc.Reason)
 			}
-			if enc := planSizeBudgetEncode(policy, getSourceReport(c.ec.State["source_report"]), budgetSourceBytes, min-1000); enc.Reason != "size_budget_unreachable" {
+			if enc := planSizeBudgetEncode(policy, getSourceReport(c.ec.State["source_report"]), budgetSourceBytes, min-1); enc.Reason != "size_budget_unreachable" {
 				t.Fatalf("a budget below the stated minimum plans: %+v", enc)
 			}
 		})
@@ -135,6 +137,9 @@ func TestPreflightEndsAnUnreachableBudgetBeforeHashingTheSource(t *testing.T) {
 	if rec := sizeBudgetOf(ec.State); rec == nil || rec.Outcome != SizeBudgetExceeded || rec.NonVideoBytes < 800_000_000 {
 		t.Fatalf("record %+v", rec)
 	}
+	if msg := sizeBudgetOf(ec.State).Message; !strings.Contains(msg, "No budget can work") || strings.Contains(msg, "At least") {
+		t.Fatalf("a minimum above the size mode's ceiling must not be offered as a budget: %q", msg)
+	}
 	if getString(ec.State, "resolved_path") == "" || getInt64(ec.State, "original_size") != 1_000_000_000 {
 		t.Fatalf("source identity lost: %+v", ec.State)
 	}
@@ -163,5 +168,41 @@ func TestPreflightKeepsABudgetTheFileCanMeet(t *testing.T) {
 	result, err := e.stepTranscodePreflight(context.Background(), ec)
 	if err != nil || result.Status != StepCompleted || getBool(ec.State, "skip_transcode") || getString(ec.State, "original_sha256") == "" {
 		t.Fatalf("reachable budget ended or skipped the hash: %+v %v state=%+v", result, err, ec.State)
+	}
+}
+
+func TestUnreachableSizeBudgetLeavesAudioOnlyToTheSearch(t *testing.T) {
+	// A still picture with lossless audio: no video bitrate fits, but copying
+	// the video and compacting the audio does.
+	rep := &mediainspect.DetailedReport{DurationSec: 3000,
+		Video: []mediainspect.DetailedStream{{Index: 0, Codec: "h264", BitDepth: 8, Width: 1920, Height: 1080, FPS: 24, Tags: map[string]string{"NUMBER_OF_BYTES": "15000000"}}},
+		Audio: []mediainspect.DetailedStream{{Index: 1, Codec: "flac", Channels: 2, ChannelLayout: "stereo", Language: "eng", BitRate: 1_000_000}},
+	}
+	const source = 395_000_000
+	for name, fallback := range map[string]bool{"fallback allowed": true, "fallback disabled": false} {
+		t.Run(name, func(t *testing.T) {
+			c := newBudgetCase(t, map[string]any{"size_budget_bytes": 98_750_000.0}, budgetCaps())
+			delete(c.ec.State, "benchmark_job_id")
+			c.snapshot.Size.AudioOnlyFallback = fallback
+			policy := c.snapshot.Size.SizeBudget
+			if enc := planSizeBudgetEncode(policy, rep, source, 98_750_000); enc.Reason != "size_budget_unreachable" {
+				t.Fatalf("fixture is not unreachable: %+v", enc)
+			}
+			if est := estimateAudioOnly(rep, source); est.CandidateBytes > 98_750_000 {
+				t.Fatalf("fixture does not fit audio-only: %+v", est)
+			}
+			_, ended := endUnreachableSizeBudget(c.ec, c.snapshot, rep, source, nil)
+			if ended == fallback {
+				t.Fatalf("ended=%v with the audio-only fallback %v", ended, fallback)
+			}
+		})
+	}
+}
+
+func TestSizeBudgetMinimumIsRoundedUp(t *testing.T) {
+	for n, want := range map[int64]string{1_234_567_890: "1.24 GB", 1_000_000_001: "1.01 GB", 1_240_000_000: "1.24 GB", 300_000_001: "301 MB", 300_000_000: "300 MB"} {
+		if got := formatBudgetBytesUp(n); got != want {
+			t.Fatalf("%d shows %q, want %q", n, got, want)
+		}
 	}
 }
