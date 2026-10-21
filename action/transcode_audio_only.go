@@ -77,9 +77,11 @@ func audioStreamBytes(a mediainspect.DetailedStream, duration float64, fileBytes
 	return 0
 }
 
-// sizeAudioOnlyFallback is size v3's answer to a benchmark without a winner:
-// when no video encode meets the quality floor and the savings gate, the
-// lossless audio may still be compacted with the video stream-copied. It
+// sizeAudioOnlyFallback is size v3's answer to a benchmark without a winner,
+// and v4's to a ladder that ends without a candidate or a budget the audio
+// alone fits: when no video encode meets the quality floor and the savings
+// gate, the lossless audio may still be compacted with the video
+// stream-copied. It
 // leaves the result to the caller (no_suitable_candidate) when the frozen
 // policy or the source has nothing for it to do.
 func (e *Engine) sizeAudioOnlyFallback(ctx context.Context, ec *ExecutionContext, outputs map[string]any) (StepResult, bool) {
@@ -87,7 +89,7 @@ func (e *Engine) sizeAudioOnlyFallback(ctx context.Context, ec *ExecutionContext
 		return StepResult{}, false
 	}
 	snapshot, err := freezeModePolicy(ec)
-	if err != nil || snapshot == nil || snapshot.Mode != "size" || snapshot.Version != optimization.ModePolicyV3 || snapshot.Size == nil || !snapshot.Size.AudioOnlyFallback {
+	if err != nil || snapshot == nil || snapshot.Mode != "size" || snapshot.workerVersion() != optimization.ModePolicyV3 || snapshot.Size == nil || !snapshot.Size.AudioOnlyFallback {
 		return StepResult{}, false
 	}
 	rep := getSourceReport(ec.State["source_report"])
@@ -105,7 +107,7 @@ func (e *Engine) sizeAudioOnlyFallback(ctx context.Context, ec *ExecutionContext
 	}
 	outputs["audio_only_estimated_bytes"] = estimate.CandidateBytes
 	ec.State["audio_only_estimated_bytes"] = estimate.CandidateBytes
-	if !optimization.ModeSizeAllowedVersion(snapshot.Mode, original, estimate.CandidateBytes, snapshot.Version) {
+	if !optimization.ModeSizeAllowedVersion(snapshot.Mode, original, estimate.CandidateBytes, snapshot.workerVersion()) {
 		if estimate.Unknown > 0 {
 			return skip("audio_estimate_unavailable")
 		}

@@ -185,7 +185,7 @@ func (e *Engine) ReconfigureBatch(ctx context.Context, id, scope, selectionID, v
 		if err != nil {
 			return nil, err
 		}
-		policy, err := modePolicyWithBudget(mode, getBool(ec.State, "is_anime"), maxHeight, hardware, allowSlow, budget)
+		policy, err := e.frozenModePolicy(mode, getBool(ec.State, "is_anime"), maxHeight, hardware, allowSlow, budget)
 		if err != nil {
 			return nil, err
 		}

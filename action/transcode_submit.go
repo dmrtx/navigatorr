@@ -614,6 +614,11 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 		if getString(ec.Inputs, "mode") != "" {
 			switch st.ReasonCode {
 			case "insufficient_savings", "size_growth", "size_growth_exceeded", "quality_not_met", "preservation_not_met", "already_target_codec", sizeBudgetExceededReason:
+				// A v4 quality ladder encodes the next rung after a quality
+				// miss, and stops on a size refusal.
+				if res, handled := e.advanceQualityLadder(ctx, ec, st); handled {
+					return res, nil
+				}
 				if res, handled, err := e.continueWithoutHardware(ctx, ec, st); err != nil || handled {
 					return res, err
 				}

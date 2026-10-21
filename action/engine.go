@@ -51,6 +51,12 @@ type Engine struct {
 	// that a test can refuse or slow down. Production leaves them nil.
 	promotionCloneHook     func(dst, src *os.File) error
 	promotionCopyRangeHook func(dst, src *os.File, n int) (int, error)
+	// legacySearch, when set by tests, admits the sample-search inputs new
+	// requests are refused (see rejectSearchInputs) and freezes new goals
+	// under the policy v2/v3 content (see frozenModePolicy), so a test can
+	// drive an action as it was admitted before the search was removed: the
+	// path such actions still take. Production leaves it false.
+	legacySearch bool
 	// promotionReadHook, when set by tests, sees every byte count this process
 	// reads from a promotion file: full hashes and streamed copies.
 	promotionReadHook func(path string, n int64)

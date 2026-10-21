@@ -67,8 +67,12 @@ type ModePolicySnapshot struct {
 	Compact *ModeCompactPolicy `json:"compact,omitempty"`
 	// Size is set only for size policy v3, so v2 snapshots and their digests
 	// are unchanged.
-	Size   *ModeSizePolicy `json:"size,omitempty"`
-	Digest string          `json:"digest"`
+	Size *ModeSizePolicy `json:"size,omitempty"`
+	// Recipe is set only for policy v4: the fixed encodes the goal runs
+	// instead of a search (see transcode_recipe.go). Earlier snapshots have
+	// none, so their digests are unchanged.
+	Recipe *ModeRecipe `json:"recipe,omitempty"`
+	Digest string      `json:"digest"`
 }
 
 // ModeSizePolicy freezes what size v3 adds on top of the v2 quality floor:
@@ -341,8 +345,56 @@ func modePolicyWithOptions(mode string, anime bool, maxHeight int, hardware *tra
 	return modePolicyWithBudget(mode, anime, maxHeight, hardware, allowSlow, nil)
 }
 
-// modePolicyWithBudget also freezes the size budget (size mode only).
+// modePolicyWithBudget also freezes the size budget (size mode only). Every
+// new operation is frozen under policy v4: the content v2 and v3 froze for the
+// mode, plus the recipe that replaces their search.
 func modePolicyWithBudget(mode string, anime bool, maxHeight int, hardware *transcode.HardwareSearchRules, allowSlow bool, budget *SizeBudgetPolicy) (ModePolicySnapshot, error) {
+	snapshot, err := modePolicyContent(mode, anime, maxHeight, hardware, allowSlow, budget)
+	if err != nil {
+		return snapshot, err
+	}
+	snapshot.Version = ModePolicyV4
+	// Nothing searches under v4, so nothing is reserved against an operation
+	// budget. SearchBudgetSeconds stays: the request the first encode's final
+	// windows come from is never submitted, but is validated like any other.
+	snapshot.OperationBudgetSeconds = 0
+	snapshot.Recipe = modeRecipeFor(&snapshot, allowSlow)
+	if err := snapshot.Recipe.validate(&snapshot); err != nil {
+		return snapshot, err
+	}
+	return snapshot, digestModePolicy(&snapshot)
+}
+
+// frozenModePolicy is the snapshot a new operation freezes: policy v4. Only a
+// test engine (legacySearch) freezes the v2/v3 content, to drive the path
+// operations frozen before v4 still take.
+func (e *Engine) frozenModePolicy(mode string, anime bool, maxHeight int, hardware *transcode.HardwareSearchRules, allowSlow bool, budget *SizeBudgetPolicy) (ModePolicySnapshot, error) {
+	if e == nil || !e.legacySearch {
+		return modePolicyWithBudget(mode, anime, maxHeight, hardware, allowSlow, budget)
+	}
+	snapshot, err := modePolicyContent(mode, anime, maxHeight, hardware, allowSlow, budget)
+	if err != nil {
+		return snapshot, err
+	}
+	return snapshot, digestModePolicy(&snapshot)
+}
+
+// digestModePolicy sets the snapshot's digest over its content.
+func digestModePolicy(snapshot *ModePolicySnapshot) error {
+	snapshot.Digest = ""
+	b, err := json.Marshal(snapshot)
+	if err != nil {
+		return err
+	}
+	h := sha256.Sum256(b)
+	snapshot.Digest = "sha256:" + hex.EncodeToString(h[:])
+	return nil
+}
+
+// modePolicyContent is what policies v2 (quality, x265_preserve, compact) and
+// v3 (size) freeze for a mode, without a digest. Snapshots already frozen
+// under them keep exactly this content.
+func modePolicyContent(mode string, anime bool, maxHeight int, hardware *transcode.HardwareSearchRules, allowSlow bool, budget *SizeBudgetPolicy) (ModePolicySnapshot, error) {
 	if budget != nil && mode != "size" {
 		return ModePolicySnapshot{}, inputErr(budget.field(), "size_budget_percent and size_budget_bytes are only supported with mode=size")
 	}
@@ -406,12 +458,6 @@ func modePolicyWithBudget(mode string, anime bool, maxHeight int, hardware *tran
 		snapshot.MinSavingsPercent = optimization.CompactMinimumSavingsPercent
 		snapshot.Compact = &ModeCompactPolicy{MaxHeight: maxHeight, ChainVersion: transcode.CompactChainVersion}
 	}
-	b, err := json.Marshal(snapshot)
-	if err != nil {
-		return snapshot, err
-	}
-	h := sha256.Sum256(b)
-	snapshot.Digest = "sha256:" + hex.EncodeToString(h[:])
 	return snapshot, nil
 }
 
@@ -508,6 +554,9 @@ func freezeModePolicy(ec *ExecutionContext) (*ModePolicySnapshot, error) {
 		if "sha256:"+hex.EncodeToString(sum[:]) != digest {
 			return nil, fmt.Errorf("frozen mode policy digest does not match its content")
 		}
+		if (p.Version == ModePolicyV4) != (p.Recipe != nil) || p.Recipe.validate(&p) != nil {
+			return nil, fmt.Errorf("frozen mode policy recipe is missing or invalid")
+		}
 		ec.State["policy_digest"] = p.Digest
 		ec.State["mode"] = p.Mode
 		ec.State["search_budget_seconds"] = p.SearchBudgetSeconds
@@ -530,7 +579,7 @@ func freezeModePolicy(ec *ExecutionContext) (*ModePolicySnapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	p, err := modePolicyWithBudget(mode, getBool(ec.State, "resolved_is_anime") || getBool(ec.Inputs, "is_anime") || getString(ec.Inputs, "media_type") == "anime", maxHeight, hardware, slow, budget)
+	p, err := ec.Engine.frozenModePolicy(mode, getBool(ec.State, "resolved_is_anime") || getBool(ec.Inputs, "is_anime") || getString(ec.Inputs, "media_type") == "anime", maxHeight, hardware, slow, budget)
 	if err != nil {
 		return nil, err
 	}
@@ -650,7 +699,7 @@ func modeAttention(ec *ExecutionContext, reason, message string) StepResult {
 
 func applyModePlan(plan *transcode.Plan, p *ModePolicySnapshot) error {
 	plan.Mode = p.Mode
-	plan.ModePolicyVersion = p.Version
+	plan.ModePolicyVersion = p.workerVersion()
 	plan.PolicyDigest = p.Digest
 	plan.SizePolicy = &transcode.SizePolicy{MinSavingsPercent: p.MinSavingsPercent, MaxSizeIncreasePercent: p.MaxSizeIncreasePercent}
 	plan.PlanDigest = ""
@@ -745,11 +794,23 @@ func reserveModeSearchUpTo(ec *ExecutionContext, key string, ceiling int) bool {
 // batchItemSearchCeiling is reserveModeSearch's ceiling for one batch item,
 // whose revised goal carries its own frozen policy.
 func batchItemSearchCeiling(ec *ExecutionContext, item store.TranscodeBatchItem) int {
-	policy := ec.State["mode_policy"]
+	return searchCeilingSeconds(batchItemPolicy(ec, item), getInt(ec.State, "search_budget_seconds"))
+}
+
+// batchItemPolicy is the frozen goal policy one batch item runs under: its
+// revised goal's, else the batch's.
+func batchItemPolicy(ec *ExecutionContext, item store.TranscodeBatchItem) any {
 	if row, ok := stateObject(ec.State, "batch_item_settings")[item.ItemKey].(map[string]any); ok && getString(row, "mode") != "" {
-		policy = row["mode_policy"]
+		return row["mode_policy"]
 	}
-	return searchCeilingSeconds(policy, getInt(ec.State, "search_budget_seconds"))
+	return ec.State["mode_policy"]
+}
+
+// batchItemSearches reports a batch item whose goal may search: one frozen
+// before policy v4. A v4 item runs a recipe, so it reserves no search budget
+// and is admitted like an item without a goal.
+func batchItemSearches(ec *ExecutionContext, item store.TranscodeBatchItem) bool {
+	return batchItemMode(ec, item) != "" && policyRecipe(batchItemPolicy(ec, item)) == nil
 }
 
 func (e *Engine) settleModeSearches(ec *ExecutionContext, items []store.TranscodeBatchItem) {

@@ -79,6 +79,12 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 				if expectedQuality == nil || !sizeBudgetPlanMatches(snapshot, ec.InstanceID, ec.State, plan, sizeBudgetOf(ec.State)) {
 					return StepResult{Status: StepFailed, Error: "size budget plan does not match the frozen budget; original preserved"}, nil
 				}
+			} else if snapshot.Recipe != nil {
+				// A v4 encode is a rung of the frozen recipe, rebuilt from the
+				// policy and the source, never a searched result.
+				if getString(ec.State, "plan_source") != qualityLadderPlanSource || !qualityLadderPlanMatches(snapshot, ec.State, plan, QualityLadderOf(ec.State)) {
+					return StepResult{Status: StepFailed, Error: "encode does not match the goal's frozen recipe; original preserved"}, nil
+				}
 			}
 			expected, _ := json.Marshal(expectedQuality)
 			actual, _ := json.Marshal(plan.QualityValidation.Quality)
@@ -157,7 +163,11 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 		if !optimization.ModeSizeAllowedVersion(plan.Mode, original, candidateSize, plan.ModePolicyVersion) {
 			ec.State["skip_transcode"] = true
 			ec.State["reason_code"] = "insufficient_savings"
-			return StepResult{Status: StepCompleted, Outputs: map[string]any{"skipped": true, "reason_code": "insufficient_savings", "candidate_size_bytes": candidateSize}}, nil
+			out := map[string]any{"skipped": true, "reason_code": "insufficient_savings", "candidate_size_bytes": candidateSize}
+			if getString(ec.State, "plan_source") == qualityLadderPlanSource {
+				out[qualityLadderKey] = stopQualityLadder(ec, "insufficient_savings", candidateSize)
+			}
+			return StepResult{Status: StepCompleted, Outputs: out}, nil
 		}
 	}
 	if ec.Decision != "" {
@@ -232,6 +242,11 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 	if budget != nil {
 		result["size_budget_outcome"] = budget.Outcome
 		outputs[sizeBudgetKey] = budget
+	}
+	if getString(ec.State, "plan_source") == qualityLadderPlanSource {
+		if rec := passQualityLadder(ec, candidateSize); rec != nil {
+			outputs[qualityLadderKey] = rec
+		}
 	}
 	return StepResult{Status: StepCompleted, Outputs: outputs}, nil
 }
