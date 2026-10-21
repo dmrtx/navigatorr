@@ -727,7 +727,7 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 				return
 			}
 			job["savings"] = r.savings
-			if rerunEligible(r) && !rerunHasResult(r, existingReplacements) {
+			if rerunEligible(r) && !rerunHasResult(r, existingReplacements) && !remedyTaken(r, records) {
 				job["rerun"] = rerunSummary(r, rounds)
 			}
 			if size := operationSizeMode(r); size != nil {

@@ -996,6 +996,17 @@ test("replacement review is read-only and a changed plan blocks approval", async
   assert.equal(h.run('state.fileApproval'), null);
 });
 
+test("approving a replacement closes the review once the server accepts it", async () => {
+  const h = harness(), events = [];
+  h.context.current = {id:"replace",status:"waiting_decision",waiting_options:[{decision:"approve"}],promotion:{original_path:"/media/one.mkv",candidate_path:"/media/.candidates/one.mkv",original_sha256:"original",candidate_sha256:"candidate",original_bytes:1000,candidate_bytes:400,plan_digest:"sha256:plan"}};
+  h.context.record = (...args) => events.push(args);
+  h.run('api = async () => ({jobs:[current]}); openJob = async (id) => record("open", id); jobControl = async (id, name, args, opts) => { record(name, args.decision, $("file-review").open); opts.onAccepted(); record("accepted", $("file-review").open); };');
+  await h.run('reviewFilePromotion("replace")');
+  await h.elements.get("approve-file-review").listeners.get("click")();
+  assert.deepEqual(events, [["action_resume", "approve", true], ["accepted", false]]);
+  assert.equal(h.elements.get("file-review").open, false);
+});
+
 test("search can close, clear its filter and restore the browse view", () => {
   const h = harness(),
     attrs = {};
@@ -3196,8 +3207,8 @@ test("the media engine option belongs to the smaller files goal and starts on", 
   const goal = form.slice(form.indexOf('<fieldset id="processing-goal"'), form.indexOf("</fieldset>", form.indexOf('<fieldset id="processing-goal"')));
   assert.match(goal, /id="allow-hardware" type="checkbox" checked \/>/);
   assert.match(goal, /id="hardware-margin"[^>]*min="0"[^>]*max="50"[^>]*value="15"/);
-  assert.match(goal, /Turn it off to keep software \(x265\) encodes only/);
-  assert.match(goal, /labeled VideoToolbox before you replace anything/);
+  assert.match(goal, /Use the media engine \(faster\)/);
+  assert.match(goal, /Within <input id="hardware-margin"[^>]*> % of x265's size/);
   const h = harness();
   const el = (id) => h.elements.get(id);
   h.run('processingMode=()=>"quality"; controls();');
@@ -3366,20 +3377,14 @@ test("clean podcast opens, lists podcasts and closes after starting", async () =
 
 test("size goal discloses that lossless Atmos and DTS:X become AAC", () => {
   const radio = markup.match(/<label><input type="radio" name="processing-mode" value="size" \/>[\s\S]*?<\/label>/)?.[0] || "";
-  assert.match(radio, /including lossless Atmos and DTS:X, which lose their object and height channels/);
-  assert.match(radio, /Atmos on E-AC-3 included, are copied/);
-  assert.doesNotMatch(radio, /Atmos and DTS:X tracks are copied/);
+  assert.match(radio, /Same look, at least 15% smaller\. Lossless audio becomes AAC\./);
   assert.match(source, /lossless Atmos\/DTS:X lose object and height channels; lossy tracks \(E-AC-3 Atmos included\) copied/);
 });
 
 test("compact goal says in plain language what it drops and still needs approval", () => {
   const radio = markup.match(/<label><input type="radio" name="processing-mode" value="compact" \/>[\s\S]*?<\/label>/)?.[0] || "";
   assert.match(radio, /Make it much smaller · SDR 1080p/);
-  assert.match(radio, /HDR and Dolby Vision are removed/);
-  assert.match(radio, /Atmos on E-AC-3 is kept/);
-  assert.doesNotMatch(radio, /Atmos are dropped/);
-  assert.match(radio, /keeping every language and subtitle/);
-  assert.match(radio, /replacing the original still needs your approval/);
+  assert.match(radio, /4K\/HDR → 1080p SDR, at least 30% smaller\. HDR is removed\./);
   assert.match(markup, /<option value="compact">Make it much smaller · SDR 1080p/);
   assert.match(source, /compact:`Much smaller · SDR \$\{item\.max_height \|\| 1080\}p`/);
 });
@@ -4041,7 +4046,7 @@ test("the smaller files goal offers an optional size budget in both forms", () =
     assert.match(markup, new RegExp(`id="${prefix}-multiplier"[^>]*min="1"[^>]*max="4"[^>]*value="1.5"`));
   }
   assert.match(form, /id="size-budget-option"/);
-  assert.match(markup, /Match sibling episodes/);
+  assert.match(markup, /Match other episodes/);
   const h = harness();
   const el = (id) => h.elements.get(id);
   h.run('processingMode=()=>"quality"; controls();');
@@ -4312,4 +4317,65 @@ test("a size budget ladder run shows the full encode, not a sample test", () => 
   // Other runs keep their wording.
   h.context.other = {status:"waiting_external",transcode:{message:"Automatic testing and verification; originals are preserved."},benchmark:{outcome:"testing"}};
   assert.equal(h.run("jobOutcomeText(other)"), h.run("shortJobReason(other.transcode.message)"));
+});
+
+test("a file skipped for its goal offers one button that starts a new job under the right goal", async () => {
+  const h = harness();
+  h.run('state.workerInfo={ready:true}');
+  const skipped = (reason, mode, remedy) => `{id:"old",action_name:"transcode_media",status:"completed",mode:"${mode}",reason_code:"${reason}",source_path:"/media/movie.mkv",transcode:{message:""},rerun:{source_path:"/media/movie.mkv",mode:"${mode}",replace_original:false,no_winner_rounds:0,remedy_mode:"${remedy}"}}`;
+  const hdr = skipped("hdr_requires_compact", "size", "compact");
+  const sdr = skipped("compact_not_needed", "compact", "size");
+  const labels = (job) => h.run(`jobControls(${job}).children.map(b=>b.textContent)`);
+  assert.ok(labels(hdr).includes("Convert to SDR 1080p"));
+  assert.ok(labels(sdr).includes("Make it smaller"));
+  // The same wrong goal is never offered again, and the other remedy is not mixed in.
+  assert.ok(!labels(hdr).includes("Run again") && !labels(sdr).includes("Run again"));
+  assert.ok(!labels(hdr).includes("Make it smaller") && !labels(sdr).includes("Convert to SDR 1080p"));
+  // Not for batch children, candidates, decisions, replacements, or jobs the server did not mark.
+  for (const patch of ['parent_item_key:"epfile-1"', 'candidate_ready:true', 'status:"waiting_decision"', 'replacement_action_id:"r"', 'rerun:undefined'])
+    assert.ok(!labels(`{...${hdr},${patch}}`).includes("Convert to SDR 1080p"), patch);
+  const control = h.run(`jobControls(${hdr}).children.find(b=>b.textContent==="Convert to SDR 1080p")`);
+  assert.equal(control.className, "primary");
+  assert.equal(control.dataset.requiresWorker, "true");
+  h.run('state.workerInfo={ready:false}');
+  assert.equal(h.run(`jobControls(${hdr}).children.find(b=>b.textContent==="Convert to SDR 1080p")`).disabled, true);
+  h.run('state.workerInfo={ready:true}');
+
+  const calls = [], reviews = [];
+  h.context.calls = calls; h.context.reviews = reviews;
+  h.run('api=async(path,body)=>{calls.push({path,body});return {id:"new"}};loadJobs=async()=>{};openJob=async()=>{};notify=()=>{};let n=0;submissionID=()=>"key-"+(++n);reviewAction=async(r)=>{reviews.push(r);return true};');
+  await h.run(`rerunJob(${hdr}, {mode:"compact"})`);
+  await h.run(`rerunJob(${sdr}, {mode:"size"})`);
+  assert.deepEqual(calls.map(c => [c.path, c.body.id, c.body.mode]), [["rerun", "old", "compact"], ["rerun", "old", "size"]]);
+  assert.notEqual(calls[0].body.key, calls[1].body.key);
+  const text = (r) => r.content.map(n => n.textContent).join(" ");
+  assert.match(text(reviews[0]), /Converts to 1080p SDR and removes HDR\. At least 30% smaller\./);
+  assert.match(text(reviews[0]), /Originals stay in place\./);
+  assert.match(text(reviews[1]), /Keeps the look, at least 15% smaller\./);
+  assert.equal(reviews[0].confirmLabel, "Convert to SDR 1080p");
+  const replacing = hdr.replace("replace_original:false", "replace_original:true");
+  await h.run(`rerunJob(${replacing}, {mode:"compact"})`);
+  assert.match(text(reviews[2]), /The original is replaced only after you approve the result\./);
+  // A plain Run again sends no mode.
+  await h.run(`rerunJob(${hdr})`);
+  assert.equal(calls[calls.length - 1].body.mode, undefined);
+  // Declining sends nothing and frees the key.
+  h.run('reviewAction=async()=>false');
+  const before = calls.length;
+  await h.run(`rerunJob(${hdr}, {mode:"compact"})`);
+  assert.equal(calls.length, before);
+  assert.equal(h.run('state.rerunKeys.has("old:compact")'), false);
+});
+
+test("a skipped file's reason appears once in its job details", async () => {
+  for (const reason of ["hdr_requires_compact", "compact_not_needed"]) {
+    const h = harness();
+    h.context.reason = reason;
+    h.run('api=async()=>({jobs:[{id:"skip",action_name:"transcode_media",status:"completed",mode:"size",reason_code:reason,source_path:"/media/movie.mkv",transcode:{message:""},savings:{source_bytes:63000000000},phase_costs:{worker_probe:{duration_ms:40,attempts:1}}}]});');
+    await h.run('openJob("skip")');
+    const text = h.run('shortJobReason(reason)');
+    const rendered = JSON.stringify(h.elements.get("detail-summary").children);
+    assert.equal(rendered.split(text).length - 1, 1, `${reason} repeated in ${rendered}`);
+    assert.match(rendered, /63\.00 GB source/);
+  }
 });

@@ -2281,13 +2281,18 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
     white-space: nowrap;
   }
 }
-.hardware-option { margin: -.15rem 0 .45rem 1.6rem; }
-.hardware-option > label { margin: .3rem 0; }
-.size-budget-option select { margin-left: .35rem; }
-.size-budget-option input[type="number"] { width: 5rem; margin: 0 .35rem; }
-.size-budget-help { margin: .2rem 0; font-size: .85em; }
-#hardware-margin-label { align-items: center; }
-#hardware-margin { width: 4.5rem; margin: 0 .35rem; }
+/* Size-mode options: a flat group of one-line controls, not a box inside the goal list. */
+.goal-options { display: grid; gap: 2px; margin: .35rem 0 .6rem; min-width: 0; }
+.goal-options > label { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem .5rem; min-height: var(--control-size); margin: 0; min-width: 0; font-size: .9rem; }
+.goal-options > label.check { flex-wrap: nowrap; gap: .6rem; }
+.goal-options > .goal-inline { padding-left: 1.4rem; }
+.goal-options input[type="number"] { width: 5rem; flex: 0 0 auto; margin: 0; }
+.goal-options select { width: auto; flex: 1 1 10rem; max-width: 100%; margin: 0; }
+.goal-options .size-budget-help { margin: 0; padding-left: 1.4rem; font-size: 12px; }
+/* Inside the goal fieldset the option labels must not pick up the goal-card look. */
+.processing-goal .goal-options > label,
+.processing-goal .goal-options > label:has(input:checked) { padding: 0; border: 0; border-radius: 0; background: none; }
+.processing-goal .goal-options > .goal-inline { padding-left: 1.4rem; }
 /* Size budget: the outcome badge, the rate-quality chart and its point lists. */
 .size-budget { margin: 6px 0; display: grid; gap: 6px; }
 .badge.size-budget-badge { color: var(--warning-strong); background: var(--warning-wash); border-color: var(--warning-line); justify-self: start; }
