@@ -154,8 +154,7 @@ func TestPreflightEndsAnUnreachableBudgetBeforeHashingTheSource(t *testing.T) {
 }
 
 func TestPreflightKeepsABudgetTheFileCanMeet(t *testing.T) {
-	// 500 MB leaves room: 900 MB of other streams is not needed, only a
-	// reachable budget (here 85% of the source) is.
+	// A budget the file can meet keeps the job going and hashes the source.
 	dir := t.TempDir()
 	file := filepath.Join(dir, "source.mkv")
 	// A sparse 100 MB file: a 40% budget over 100 s is a plannable 3.2 Mb/s.

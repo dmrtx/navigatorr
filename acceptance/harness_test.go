@@ -3,14 +3,17 @@ package acceptance
 import (
 	"bytes"
 	"context"
+	"flag"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -81,16 +84,41 @@ var (
 	suiteDir string
 )
 
+// teardown stops the worker, its runners and the temp tree once, whichever
+// way the run ends.
+var teardownOnce sync.Once
+
+func teardown() {
+	teardownOnce.Do(func() {
+		if suiteVal != nil {
+			suiteVal.close()
+		}
+		if suiteDir != "" && os.Getenv(envKeep) != "1" {
+			_ = os.RemoveAll(suiteDir)
+		} else if suiteDir != "" {
+			fmt.Fprintf(os.Stderr, "acceptance: kept %s\n", suiteDir)
+		}
+	})
+}
+
 func TestMain(m *testing.M) {
+	flag.Parse()
+	// A go test timeout panics and an operator's Ctrl-C kills the process;
+	// neither returns from m.Run, and the job runners outlive their parent.
+	if timeout := flag.Lookup("test.timeout"); timeout != nil {
+		if d, ok := timeout.Value.(flag.Getter).Get().(time.Duration); ok && d > time.Minute {
+			time.AfterFunc(d-30*time.Second, teardown)
+		}
+	}
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-signals
+		teardown()
+		os.Exit(1)
+	}()
 	code := m.Run()
-	if suiteVal != nil {
-		suiteVal.close()
-	}
-	if suiteDir != "" && os.Getenv(envKeep) != "1" {
-		_ = os.RemoveAll(suiteDir)
-	} else if suiteDir != "" {
-		fmt.Fprintf(os.Stderr, "acceptance: kept %s\n", suiteDir)
-	}
+	teardown()
 	os.Exit(code)
 }
 
@@ -134,7 +162,7 @@ func getSuite(t *testing.T) *suite {
 	return suiteVal
 }
 
-func startSuite() (*suite, error) {
+func startSuite() (_ *suite, err error) {
 	ffmpeg, ffprobe := lookTool(envFFmpeg, "ffmpeg"), lookTool(envFFprobe, "ffprobe")
 	if ffmpeg == "" || ffprobe == "" {
 		return nil, fmt.Errorf("ffmpeg and ffprobe are required (set %s and %s)", envFFmpeg, envFFprobe)
@@ -149,6 +177,12 @@ func startSuite() (*suite, error) {
 		return nil, err
 	}
 	s := &suite{root: filepath.Join(dir, "media"), ffmpeg: ffmpeg, ffprobe: ffprobe, workerLog: &lockedBuffer{}, sources: map[string]string{}}
+	// suiteVal is only set on success, so a failed start stops what it began.
+	defer func() {
+		if err != nil {
+			s.close()
+		}
+	}()
 	for _, d := range []string{s.root, filepath.Join(dir, "worker"), filepath.Join(dir, "engine")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return nil, err
@@ -159,9 +193,11 @@ func startSuite() (*suite, error) {
 	if out, err := exec.Command("go", "build", "-o", bin, "github.com/jakenesler/navigatorr/cmd/navigatorr-transcode").CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("building the worker: %v\n%s", err, out)
 	}
+	// Job and benchmark runners start in their own sessions, so stopping
+	// serve leaves them running; the binary's unique path finds them all.
+	s.stop = append(s.stop, func() { _ = exec.Command("pkill", "-KILL", "-f", bin).Run() })
 	base, err := startWorker(s, bin, dir)
 	if err != nil {
-		s.close()
 		return nil, err
 	}
 
@@ -244,6 +280,7 @@ http_listen: %q
 	})
 
 	base := "http://" + addr
+	client := &http.Client{Timeout: 5 * time.Second}
 	deadline := time.Now().Add(90 * time.Second)
 	for time.Now().Before(deadline) {
 		select {
@@ -251,7 +288,7 @@ http_listen: %q
 			return "", fmt.Errorf("worker exited during startup:\n%s", s.workerLog.String())
 		default:
 		}
-		resp, err := http.Get(base + "/v1/ready")
+		resp, err := client.Get(base + "/v1/ready")
 		if err == nil {
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {

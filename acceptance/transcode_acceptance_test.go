@@ -99,8 +99,8 @@ func caseSizeX265(k *kase) {
 	sha := k.sha(src)
 	k.promisedOK(src, "size")
 	r := k.s.transcode(k.T, src, map[string]any{"mode": "size", "allow_hardware": false, "size_budget_percent": budgetPercent}, caseTimeout)
-	k.expectCandidate(src, sha, r, candidateWant{minSaved: 15, audio: "aac"})
-	k.require(!r.goal.Hardware, "a hardware encoder was used with allow_hardware=false (%s)", r.goal.Encoder)
+	k.expectCandidate(src, sha, r, candidateWant{minSaved: 15, audio: "aac", maxBytes: budgetBytes(fileSize(k.T, src))})
+	k.require(!r.goal.Hardware && r.goal.Encoder == "libx265", "allow_hardware=false encoded with %q, want libx265", r.goal.Encoder)
 }
 
 func caseCompact(k *kase) {
@@ -153,18 +153,17 @@ func (k *kase) expectSkip(spec srcSpec, goal, reason string) {
 	k.require(k.sha(src) == sha, "the original changed during a skipped run")
 }
 
+// A skip is decided from the probe alone, so the skip cases need no encoder or
+// metric.
 func caseSkipHDRSize(k *kase) {
-	k.needCaps("libx265", "vmaf")
 	k.expectSkip(hdrSource, "size", "hdr_requires_compact")
 }
 
 func caseSkipSDRCompact(k *kase) {
-	k.needCaps("libx265", "vmaf")
 	k.expectSkip(sdrSource, "compact", "compact_not_needed")
 }
 
 func caseSkipHEVCPreserve(k *kase) {
-	k.needCaps("libx265", "vmaf")
 	k.expectSkip(hevcSource, "x265_preserve", "already_target_codec")
 }
 

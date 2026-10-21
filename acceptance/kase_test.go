@@ -6,7 +6,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -119,8 +118,9 @@ func (k *kase) expectCandidate(src string, srcSHA string, r *result, want candid
 
 	cand := r.candidate()
 	k.require(cand != "", "completed without a candidate path: %s", r.describe())
-	k.require(within(cand, filepath.Join(k.s.root, k.s.candidatesDirName())) || strings.Contains(cand, k.s.candidatesDirName()),
-		"candidate %s is not under %s", filepath.Base(cand), k.s.candidatesDirName())
+	// Candidates sit in the source folder's own candidate directory.
+	k.require(filepath.Dir(cand) == filepath.Join(filepath.Dir(src), k.s.candidatesDirName()),
+		"candidate %s is not in the source folder's %s", filepath.Base(cand), k.s.candidatesDirName())
 	candSize := fileSize(k.T, cand)
 	srcSize := fileSize(k.T, src)
 	k.row.CandidateB = candSize
