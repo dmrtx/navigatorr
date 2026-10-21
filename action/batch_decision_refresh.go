@@ -15,10 +15,12 @@ import (
 // alone it would keep the child's reason, options and a waiting_decision count
 // for a decision nobody can make any more.
 
-// batchDecisionStale reports a transcode_batch parked on a decision that no
-// child needs any more: it has items marked waiting_decision, and none of their
-// child actions still waits. Anything it cannot judge is not stale, so a
-// decision is never dropped on a read error or a missing child.
+// batchDecisionStale reports a transcode_batch parked on a decision that a
+// child no longer needs: one of its items is marked waiting_decision while that
+// item's child action has moved on. Another child may still wait; re-running
+// the batch recomputes the items and surfaces that child's own decision.
+// Anything it cannot judge is not stale, so a decision is never dropped on a
+// read error or a missing child.
 func (e *Engine) batchDecisionStale(inst *store.ActionInstance, ec *ExecutionContext) bool {
 	if inst.ActionName != "transcode_batch" || inst.Status != StatusWaitingDecision || getBool(ec.State, "paused") {
 		return false
@@ -27,18 +29,16 @@ func (e *Engine) batchDecisionStale(inst *store.ActionInstance, ec *ExecutionCon
 	if err != nil {
 		return false
 	}
-	stale := false
 	for _, item := range items {
 		if item.Status != "waiting_decision" || item.ChildActionID == "" {
 			continue
 		}
 		child, err := e.deps.Store.GetActionInstanceIfExists(item.ChildActionID)
-		if err != nil || child == nil || child.Status == StatusWaitingDecision {
-			return false
+		if err == nil && child != nil && child.Status != StatusWaitingDecision {
+			return true
 		}
-		stale = true
 	}
-	return stale
+	return false
 }
 
 // refreshBatchParent re-evaluates the batch a child belongs to after the child

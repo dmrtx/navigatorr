@@ -559,7 +559,9 @@ func (e *Engine) resume(ctx context.Context, instanceID string, decision string,
 	}
 
 	ec := parseExecutionContext(inst, e)
-	if (automatic && !e.shouldReconcile(inst, tmpl, ec)) || (inst.Status == StatusWaitingDecision && decision == "" && !(automatic && e.batchDecisionStale(inst, ec))) {
+	// A decision wait is only resumed automatically when shouldReconcile found
+	// the batch's decision stale.
+	if (automatic && !e.shouldReconcile(inst, tmpl, ec)) || (inst.Status == StatusWaitingDecision && decision == "" && !automatic) {
 		return buildActionResult(inst, len(tmpl.Steps), ec), nil
 	}
 	if decision != "" {

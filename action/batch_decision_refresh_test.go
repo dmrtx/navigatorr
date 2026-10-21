@@ -156,3 +156,50 @@ func TestCancellingWaitingBatchSettlesCounters(t *testing.T) {
 		t.Fatalf("counts %v, want waiting_decision 0 and cancelled 1", counts)
 	}
 }
+
+// With several children waiting, resolving one must still move the batch: it
+// drops the resolved child's decision and surfaces the next one's.
+func TestRejectingOneOfSeveralWaitingChildrenReevaluatesBatch(t *testing.T) {
+	engine, st, _, srv, _ := setupBatchTestEnv(t, oversizedCandidateExecutor(), 2)
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	res, err := engine.Run(ctx, "transcode_batch", map[string]any{"service": "sonarr", "series_id": 10, "dry_run": false})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	waiting := []store.TranscodeBatchItem{}
+	items, _ := st.ListTranscodeBatchItems(res.ID)
+	for _, item := range items {
+		if item.Status == "waiting_decision" {
+			waiting = append(waiting, item)
+		}
+	}
+	if res.Status != StatusWaitingDecision || len(waiting) < 2 {
+		t.Fatalf("batch %s with %d waiting items, want waiting_decision with at least 2", res.Status, len(waiting))
+	}
+
+	if _, err := engine.Resume(ctx, waiting[0].ChildActionID, "reject", nil); err != nil {
+		t.Fatalf("reject child: %v", err)
+	}
+
+	batch, _ := st.GetActionInstance(res.ID)
+	if batch.Status != StatusWaitingDecision {
+		t.Fatalf("batch status %s, want waiting_decision for the remaining child", batch.Status)
+	}
+	counts := storedBatchCounts(t, st, res.ID)
+	if counts["failed"] != 1 || counts["waiting_decision"] != len(waiting)-1 {
+		t.Fatalf("counts %v, want failed 1 and waiting_decision %d", counts, len(waiting)-1)
+	}
+	remaining, _ := st.GetActionInstance(waiting[1].ChildActionID)
+	if batch.WaitingReason != remaining.WaitingReason || batch.WaitingOptionsJSON != remaining.WaitingOptionsJSON {
+		t.Fatalf("batch reason %q, want the remaining child's %q", batch.WaitingReason, remaining.WaitingReason)
+	}
+	// The next review through the batch targets the child that still waits.
+	if _, err := engine.ResumeReviewedCandidate(ctx, res.ID, waiting[1].ChildActionID, CandidateDecisionVersion(remaining), "reject"); err != nil {
+		t.Fatalf("review the remaining child through the batch: %v", err)
+	}
+	if batch, _ = st.GetActionInstance(res.ID); batch.Status != StatusCompleted {
+		t.Fatalf("batch status %s, want completed once every child is rejected", batch.Status)
+	}
+}
