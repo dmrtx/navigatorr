@@ -130,7 +130,6 @@ func (s *Server) batchReconfigure(w http.ResponseWriter, r *http.Request) {
 		CandidateID     string   `json:"candidate_id"`
 		DecisionVersion string   `json:"decision_version"`
 		Profile         string   `json:"profile"`
-		Priority        string   `json:"priority"`
 		MinSavings      *float64 `json:"min_savings_percent"`
 		MaxGrowth       *float64 `json:"max_size_increase_percent"`
 		Key             string   `json:"key"`
@@ -169,18 +168,19 @@ func (s *Server) batchReconfigure(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		delete(inputs, "profile_config")
-		delete(inputs, "priority")
 		inputs["profile"] = body.Profile
-		if body.Profile == "auto" {
-			if body.Priority != "balanced" && body.Priority != "quality" && body.Priority != "savings" && body.Priority != "preserve_quality" {
-				fail(w, 400, "choose a quality intent")
+		if body.Profile != "auto" {
+			if _, err := s.cfg.Transcode.ResolveProfile(body.Profile); err != nil {
+				fail(w, 400, "profile not found")
 				return
 			}
-			inputs["priority"] = body.Priority
-		} else if _, err := s.cfg.Transcode.ResolveProfile(body.Profile); err != nil {
-			fail(w, 400, "profile not found")
-			return
 		}
+	}
+	// The quality intent and the other inputs that only tuned the sample
+	// search are gone with it; a batch that had them runs its profile as
+	// it is (automatic selection picks a fixed profile per file).
+	for _, key := range action.SearchOnlyInputs() {
+		delete(inputs, key)
 	}
 	for _, field := range []struct {
 		key   string

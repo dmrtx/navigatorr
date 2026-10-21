@@ -31,7 +31,7 @@ func TestPreviewStartFreezesEligibilityAndPreservesSettings(t *testing.T) {
 	for _, sonarr := range []bool{false, true} {
 		t.Run(map[bool]string{true: "sonarr", false: "folder"}[sonarr], func(t *testing.T) {
 			s, h := testUI(t)
-			inputs := map[string]any{"profile_config": testProfileConfig(), "metric": "vmaf", "max_items": 3, "preserve_source_bit_depth": true, "min_savings_percent": 20, "max_size_increase_percent": 0}
+			inputs := map[string]any{"profile_config": testProfileConfig(), "max_items": 3, "preserve_source_bit_depth": true, "min_savings_percent": 20, "max_size_increase_percent": 0}
 			if sonarr {
 				inputs["service"], inputs["series_id"], inputs["season"] = "sonarr", 10, 1
 				inputs["episode_file_ids"] = []int{101, 102, 103, 999}
@@ -71,7 +71,7 @@ func TestPreviewStartFreezesEligibilityAndPreservesSettings(t *testing.T) {
 				t.Fatal("pending detail lost frozen files", w.Body.String())
 			}
 			actual := decodeOperationJSON(job.InputsJSON)
-			if actual["dry_run"] != false || actual["metric"] != "vmaf" || actual["min_savings_percent"] != float64(20) || !reflect.DeepEqual(actual["profile_config"], decodeOperationJSON(mustJSON(t, inputs))["profile_config"]) {
+			if actual["dry_run"] != false || actual["min_savings_percent"] != float64(20) || !reflect.DeepEqual(actual["profile_config"], decodeOperationJSON(mustJSON(t, inputs))["profile_config"]) {
 				t.Fatal("preview settings changed", actual)
 			}
 			if sonarr {

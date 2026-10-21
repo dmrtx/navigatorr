@@ -43,7 +43,7 @@ func TestCandidateReconfigurationRejectsOnlyReviewedFileAndKeepsReceipt(t *testi
 	if w.Code != 200 || plan.Selected != 1 || plan.Kept != 2 || plan.CandidateID != "review-child" {
 		t.Fatal(w.Code, w.Body.String(), plan)
 	}
-	body := map[string]any{"id": plan.ID, "candidate_id": plan.CandidateID, "decision_version": plan.DecisionVersion, "profile": "auto", "priority": "savings", "min_savings_percent": 20, "key": "retry-1"}
+	body := map[string]any{"id": plan.ID, "candidate_id": plan.CandidateID, "decision_version": plan.DecisionVersion, "profile": "auto", "min_savings_percent": 20, "key": "retry-1"}
 	w = request(h, "POST", "/api/maintenance/batch-reconfigure", mustJSON(t, body), true)
 	if w.Code != 202 {
 		t.Fatal(w.Code, w.Body.String())
@@ -57,7 +57,7 @@ func TestCandidateReconfigurationRejectsOnlyReviewedFileAndKeepsReceipt(t *testi
 	}
 	next, _ := st.GetActionInstance(receipt["id"])
 	inputs := decodeOperationJSON(next.InputsJSON)
-	if mustJSON(t, map[string]any{"ids": inputs["episode_file_ids"]}) != `{"ids":[101]}` || inputs["promote_candidates"] != false || inputs["priority"] != "savings" {
+	if mustJSON(t, map[string]any{"ids": inputs["episode_file_ids"]}) != `{"ids":[101]}` || inputs["promote_candidates"] != false || inputs["priority"] != nil {
 		t.Fatal(inputs)
 	}
 	w = request(h, "POST", "/api/maintenance/batch-reconfigure", mustJSON(t, body), true)
@@ -80,7 +80,7 @@ func TestCandidateDecisionStaleReviewAndOfflineRetryDoNotReject(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			s, h := testUI(t)
 			plan := seedWaitingCandidate(t, s)
-			body := map[string]any{"id": plan.ID, "candidate_id": plan.CandidateID, "decision_version": plan.DecisionVersion, "profile": "auto", "priority": "savings", "key": "retry-1"}
+			body := map[string]any{"id": plan.ID, "candidate_id": plan.CandidateID, "decision_version": plan.DecisionVersion, "profile": "auto", "key": "retry-1"}
 			st := s.engine.Deps().Store
 			switch scenario {
 			case "changed":

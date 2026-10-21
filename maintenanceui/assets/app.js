@@ -1959,12 +1959,15 @@ function controls() {
   $("recursive").closest("label").hidden = !folder || explicitSelection;
   $("promote-batch").closest("label").hidden =
     folder || $("service").value !== "sonarr";
-  $("priority-label").hidden =
-    !batch || $("profile").value !== "auto" || $("custom").checked;
+  // Goals encode with fixed recipes; the sample search, its batch priority
+  // and sample tests are no longer accepted by the server.
+  $("priority-label").hidden = true;
   $("profile-mode-note").hidden = $("profile").value !== "auto" || $("custom").checked;
-  $("profile-mode-note").textContent = "Automatic analyzes samples and chooses effective settings for the objective. Test samples is a technical benchmark: it does not convert the full video or replace originals.";
+  $("profile-mode-note").textContent = "Automatic encodes the whole file with fixed settings for the objective and checks the result; originals are preserved until you approve.";
   $("custom-fields").hidden = !technical || !$("custom").checked;
-  $("optimization-fields").hidden = !$("optimize").checked;
+  $("optimize").checked = false;
+  $("optimize").closest("label").hidden = true;
+  $("optimization-fields").hidden = true;
   const vt = $("encoder").value === "hevc_videotoolbox";
   $("vt-fields").hidden = !vt;
   $("x265-fields").hidden = vt;
@@ -1976,7 +1979,7 @@ function controls() {
   $("bitrate").disabled = $("rate-mode").value !== "bitrate";
   $("max-bitrate").disabled = $("rate-mode").value !== "bitrate";
   $("preview").hidden = !technical || !batch;
-  $("benchmark").hidden = !technical || batch;
+  $("benchmark").hidden = true;
   $("audio-note").hidden = !["compact", "he_aac"].includes($("audio").value);
   const hasSource = batch
     ? Boolean(folder ? state.folder : state.media) &&
@@ -1990,14 +1993,7 @@ function controls() {
     state.libraryLoading ||
     !serverReachable ||
     !hasSource;
-  $("benchmark").disabled =
-    !state.info?.transcode_enabled ||
-    !state.workerInfo?.ready ||
-    state.submitting ||
-    state.selectionLoading ||
-    state.libraryLoading ||
-    !serverReachable ||
-    !hasSource;
+  $("benchmark").disabled = true;
   $("preview").disabled =
     !state.info?.transcode_enabled ||
     !state.workerInfo?.ready ||
@@ -2216,12 +2212,8 @@ async function buildAndSubmitJob(mode = "encode") {
   }
   if (!simple && $("custom").checked) {
     inputs.profile_config = profileFromControls();
-    if (inputs.profile_config.optimization?.enabled)
-      inputs.metric = $("metric").value;
   } else if (!simple) {
     inputs.profile = $("profile").value;
-    if (batch && inputs.profile === "auto")
-      inputs.priority = $("priority").value;
   }
   if (!simple && $("custom").checked && name !== "benchmark_transcode") {
     if ($("min-savings").value)
@@ -2573,8 +2565,8 @@ function stageLabel(name) {
     resolve_batch: "Inspect selected files",
     resolve_and_inspect: "Inspect selected files",
     preflight: "Inspect original and prepare conversion",
-    submit_benchmark: "Start quality calibration",
-    wait_benchmark: "Measure quality samples",
+    submit_benchmark: "Plan the encode",
+    wait_benchmark: "Choose encode settings",
     submit_transcode: "Send conversion to worker",
     wait_transcode: "Convert file",
     schedule_batch: "Process selected files",
@@ -3023,7 +3015,7 @@ async function reconfigureBatch(id, candidate = false, savedPlan = null) {
     $("reconfigure-profile").replaceChildren();
     option($("reconfigure-profile"), "", "Choose a profile…");
     option($("reconfigure-profile"), "same", "Keep current settings");
-    for (const profile of state.recipes) if (profile !== "auto") option($("reconfigure-profile"),profile,profileOptionLabel(profile));
+    for (const profile of state.recipes) if (profile !== "auto" && !profileSearches(profile)) option($("reconfigure-profile"),profile,profileOptionLabel(profile));
     $("reconfigure-profile").value = plan.requires_explicit_profile ? "" : "same";
     $("reconfigure-savings").value = plan.settings.min_savings_percent > 0 ? plan.settings.min_savings_percent : "";
     $("reconfigure-growth").value = plan.settings.max_size_increase_percent ?? "";
@@ -3836,6 +3828,7 @@ const benchmarkOutcomes = {
   audio_only: "Audio-only compaction",
   size_budget: "Encoded at your size budget",
   size_budget_ladder: "Encoding at your size budget",
+  recipe: "Encoding with this goal's settings",
   size_rejected: "Size limit not met",
   search_review_required: "Your review is needed",
   quality_policy_unavailable: "Quality checks unavailable",
@@ -3877,16 +3870,18 @@ function benchmarkCandidateLabel(c) {
 // The job's one-line outcome when no sample test result card explains it.
 function jobOutcomeText(job) {
   if (job.status === "completed" && !job.candidate_ready && job.reason_code) return shortJobReason(job.reason_code);
-  // A size budget ladder tests no samples: it says which full encode runs.
-  if (job.benchmark?.outcome === "size_budget_ladder" && job.benchmark.message) return job.benchmark.message;
+  // A size budget ladder or a goal's recipe tests no samples: it says which
+  // full encode runs.
+  if (["size_budget_ladder", "recipe"].includes(job.benchmark?.outcome) && job.benchmark.message) return job.benchmark.message;
   return shortJobReason(job.transcode?.message);
 }
 // Renders the server's benchmark summary (tools/benchmark_summary.go) for people:
 // what happened, why each setting was rejected, and what to do next.
 function benchmarkReport(job) {
   const b = job.benchmark;
-  // A size budget ladder tests no samples, so there is no sample result.
-  if (!b || !b.outcome || ["testing", "size_budget_ladder"].includes(b.outcome)) return null;
+  // A size budget ladder or a goal's recipe tests no samples, so there is no
+  // sample result.
+  if (!b || !b.outcome || ["testing", "size_budget_ladder", "recipe"].includes(b.outcome)) return null;
   const box = node("section", "", `benchmark-report outcome-${b.outcome}`);
   box.setAttribute("aria-label", "Sample test result");
   const head = node("div", "", "benchmark-report-head");
@@ -4647,7 +4642,7 @@ async function refreshDetail() {
     if (job.transcode) {
       // A waiting decision repeats its reason below, and a sample test result
       // card explains the outcome itself; show it only once.
-      const hasReport = job.benchmark?.outcome && !["testing", "size_budget_ladder"].includes(job.benchmark.outcome);
+      const hasReport = job.benchmark?.outcome && !["testing", "size_budget_ladder", "recipe"].includes(job.benchmark.outcome);
       if (job.status !== "waiting_decision" && !hasReport) addOutcome(jobOutcomeText(job));
       if (job.transcode.tested_candidates) summary.append(node("p", `${job.transcode.tested_candidates} configurations tested${job.transcode.verified_samples ? ` · ${job.transcode.verified_samples} quality samples verified` : ""}`, "metadata"));
     }
@@ -5121,6 +5116,10 @@ function profileRate(p) {
   if (v.codec === "hevc_videotoolbox") return `Quality ${v.quality} · Higher means higher quality`;
   return `Quality ${v.quality}`;
 }
+// Profiles that calibrate with samples are rejected by the server.
+function profileSearches(name) {
+  return Boolean(state.recipeDetails[name]?.profile?.optimization?.enabled);
+}
 function profileOptionLabel(name) {
   const data = state.recipeDetails[name];
   if (!data) return name;
@@ -5175,8 +5174,9 @@ async function loadRecipes(initial = false, more = false) {
   const selected = $("profile").value;
   $("profile").replaceChildren();
   option($("profile"), "auto", "Automatic");
-  state.recipes.forEach((n) => option($("profile"), n, profileOptionLabel(n)));
-  $("profile").value = state.recipes.includes(selected) ? selected : "auto";
+  const runnable = state.recipes.filter((n) => !profileSearches(n));
+  runnable.forEach((n) => option($("profile"), n, profileOptionLabel(n)));
+  $("profile").value = runnable.includes(selected) ? selected : "auto";
   renderRecipeList();
   if (initial) return;
 }

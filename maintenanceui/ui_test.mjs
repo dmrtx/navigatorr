@@ -2591,7 +2591,10 @@ test("profile choices describe effective hardware and custom overrides while pre
   const options = h.elements.get('profile').children;
   assert.equal(options[1].value, 'anime-hevc-quality');
   assert.equal(options[1].textContent, 'Anime · CRF 25 · CPU · Custom (anime-hevc-quality)');
-  assert.equal(options[2].textContent, 'Live action · CPU · Test samples');
+  // A profile that calibrates with samples is rejected by the server, so it
+  // is not offered; its label still says what it is.
+  assert.equal(options.length, 2);
+  assert.equal(h.run('profileOptionLabel("live-action-hevc")'), 'Live action · CPU · Test samples');
   h.run('state.recipeDetails["anime-hevc-space"]={source:"active_bundle",profile:{video:{codec:"hevc_videotoolbox",quality:55}}}');
   assert.equal(h.run('profileOptionLabel("anime-hevc-space")'), 'Anime · Smaller files · Hardware');
 });
@@ -3238,6 +3241,25 @@ test("the process button says how many files it starts", () => {
   const h = harness();
   h.run('$("path").value="/media/one.mkv"; controls();');
   assert.equal(h.elements.get("enqueue").textContent, "Process file");
+});
+
+test("sample tests, the sample search and its batch priority are not offered", async () => {
+  const h = harness();
+  h.run('state.info={transcode_enabled:true};state.workerInfo={ready:true};$("path").value="/media/one.mkv"; $("technical").checked=true; $("custom").checked=true; $("optimize").checked=true; controls();');
+  const el = (id) => h.elements.get(id);
+  assert.equal(el("benchmark").hidden, true);
+  assert.equal(el("benchmark").disabled, true);
+  assert.equal(el("priority-label").hidden, true);
+  assert.equal(el("optimize").checked, false);
+  assert.equal(el("optimization-fields").hidden, true);
+  assert.equal(h.run('profileFromControls().optimization.enabled'), false);
+  const {h: batch} = submissionHarness(); let sent;
+  batch.context.capture = (_tool, args) => { sent = JSON.parse(args.inputs); return {id: "submitted"}; };
+  batch.run('$("technical").checked=true;$("custom").checked=false;$("scope").value="batch";$("selected-only").checked=true;state.folderSelected=new Set(["/media/a.mkv","/media/b.mkv"]);$("profile").value="auto";$("priority").value="savings";tool=async(...args)=>capture(...args);');
+  await batch.run('buildAndSubmitJob("encode")');
+  assert.equal(sent.profile, "auto");
+  assert.equal(sent.priority, undefined);
+  assert.equal(sent.metric, undefined);
 });
 
 test("technical profiles live in a labelled Advanced section that keeps the goal visible", () => {

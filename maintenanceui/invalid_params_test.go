@@ -17,6 +17,11 @@ func TestInvalidSubmissionIsABadRequestAndLeavesTheKeyFree(t *testing.T) {
 		"benchmark with media_type":   {"benchmark_transcode", `{"path":"/media/show/ep01.mkv","media_type":"movie"}`, "media_type"},
 		"path outside the roots":      {"transcode_media", `{"path":"/elsewhere/ep01.mkv"}`, "path"},
 		"max_height without compact":  {"transcode_media", `{"path":"/media/show/ep01.mkv","max_height":720}`, "max_height"},
+		// The sample search was removed: sample tests and the inputs that
+		// only tuned it are refused, by name where there is one.
+		"sample test":          {"benchmark_transcode", `{"path":"/media/show/ep01.mkv"}`, ""},
+		"search metric":        {"transcode_media", `{"path":"/media/show/ep01.mkv","metric":"vmaf"}`, "metric"},
+		"batch quality intent": {"transcode_batch", `{"paths":["/media/show/ep01.mkv"],"priority":"savings"}`, "priority"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			arguments, _ := json.Marshal(map[string]any{"name": "action_run", "arguments": map[string]any{"action": tc.action, "inputs": tc.inputs, "idempotency_key": "browser-key"}})
@@ -37,7 +42,7 @@ func TestInvalidSubmissionIsABadRequestAndLeavesTheKeyFree(t *testing.T) {
 			}
 		})
 	}
-	good := `{"name":"action_run","arguments":{"action":"benchmark_transcode","inputs":"{\"path\":\"/media/show/ep01.mkv\"}","idempotency_key":"browser-key"}}`
+	good := `{"name":"action_run","arguments":{"action":"transcode_media","inputs":"{\"path\":\"/media/show/ep01.mkv\"}","idempotency_key":"browser-key"}}`
 	if w := request(h, "POST", "/api/maintenance/tool", good, true); w.Code != 202 {
 		t.Fatalf("corrected submission refused: %d %s", w.Code, w.Body.String())
 	}

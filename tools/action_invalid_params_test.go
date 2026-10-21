@@ -31,6 +31,8 @@ func TestActionRunReportsInvalidParamsWithoutReservingTheKey(t *testing.T) {
 		"benchmark with media_type":   {"benchmark_transcode", `{"path":"/media/show/ep01.mkv","media_type":"movie"}`, "media_type"},
 		"unknown metric":              {"benchmark_transcode", `{"path":"/media/show/ep01.mkv","metric":"psnr"}`, "metric"},
 		"compact with hardware":       {"transcode_media", `{"path":"/media/show/ep01.mkv","mode":"compact","allow_hardware":true}`, "allow_hardware"},
+		"sample test":                 {"benchmark_transcode", `{"path":"/media/show/ep01.mkv"}`, ""},
+		"search metric":               {"transcode_media", `{"path":"/media/show/ep01.mkv","metric":"vmaf"}`, "metric"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			result := callTool(t, s, "action_run", map[string]any{"action": tc.action, "inputs": tc.inputs, "idempotency_key": "one-key"})
@@ -58,7 +60,7 @@ func TestActionRunReportsInvalidParamsWithoutReservingTheKey(t *testing.T) {
 	}
 
 	// The corrected request reuses the key that the bad one tried.
-	admitted := admittedAction(t, callTool(t, s, "action_run", map[string]any{"action": "benchmark_transcode", "inputs": `{"path":"/media/show/ep01.mkv"}`, "idempotency_key": "one-key"}))
+	admitted := admittedAction(t, callTool(t, s, "action_run", map[string]any{"action": "transcode_media", "inputs": `{"path":"/media/show/ep01.mkv"}`, "idempotency_key": "one-key"}))
 	if admitted.ID == "" {
 		t.Fatal("corrected request not admitted")
 	}
