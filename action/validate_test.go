@@ -229,9 +229,8 @@ func TestValidRequestsAreAdmitted(t *testing.T) {
 	}{
 		{"transcode_media", map[string]any{"path": source, "mode": "size", "allow_hardware": false, "size_budget_percent": 50}},
 		{"transcode_media", map[string]any{"path": source, "mode": "compact", "max_height": 720}},
-		{"transcode_media", map[string]any{"path": source, "profile": "general-hevc", "metric": "SSIM"}},
+		{"transcode_media", map[string]any{"path": source, "profile": "general-hevc"}},
 		{"transcode_media", map[string]any{"path": source, "profile_config": twoPassProfileConfig(4000), "preserve_source_bit_depth": false}},
-		{"benchmark_transcode", map[string]any{"path": source, "profile": "general-hevc", "metric": "vmaf+ssim"}},
 		{"transcode_batch", map[string]any{"paths": []string{source}, "mode": "quality", "dry_run": true}},
 	} {
 		if _, err := e.Enqueue(context.Background(), tc.action, tc.inputs, "valid-"+string(rune('a'+i))); err != nil {

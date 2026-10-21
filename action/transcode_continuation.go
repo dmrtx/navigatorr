@@ -285,9 +285,9 @@ func (e *Engine) continueWithoutHardware(ctx context.Context, ec *ExecutionConte
 	if ec.ActionName != "transcode_media" || getString(ec.Inputs, "mode") != "size" || st.ReasonCode != reasonQualityNotMet || st.QualityEvidence == nil || ec.State[hardwareContinuationKey] != nil {
 		return StepResult{}, false, nil
 	}
-	if sizeBudgetLadderOf(ec.State) != nil {
-		// A ladder has no search to continue; its failure offers x265 to the
-		// user instead (failSizeBudget).
+	if sizeBudgetLadderOf(ec.State) != nil || policyRecipe(ec.State["mode_policy"]) != nil {
+		// A ladder or recipe has no search to continue; a ladder's failure
+		// offers x265 to the user instead (failSizeBudget).
 		return StepResult{}, false, nil
 	}
 	var winner transcode.BenchmarkWinner

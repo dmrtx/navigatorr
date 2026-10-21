@@ -359,7 +359,7 @@ func TestMCPWorkerGateDoesNotCreateOfflineJobsAndCancelIsRegistered(t *testing.T
 	e := action.NewEngine(action.EngineDeps{Store: st, Config: &config.Config{}})
 	s := server.NewMCPServer("test", "1")
 	registerActionTools(s, e)
-	for name, inputs := range map[string]string{"transcode_media": `{"path":"/offline.mkv"}`, "transcode_batch": `{"paths":["/offline.mkv"]}`, "benchmark_transcode": `{"path":"/offline.mkv"}`} {
+	for name, inputs := range map[string]string{"transcode_media": `{"path":"/offline.mkv"}`, "transcode_batch": `{"paths":["/offline.mkv"]}`} {
 		result := callTool(t, s, "action_run", map[string]any{"action": name, "inputs": inputs})
 		if !result.IsError || !strings.Contains(resultText(t, result), "no job was submitted") {
 			t.Fatal("offline submission not blocked", result)

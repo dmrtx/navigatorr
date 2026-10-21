@@ -67,7 +67,7 @@ func TestWorkerAvailabilityAndAdmissionRecheck(t *testing.T) {
 	deps := s.engine.Deps()
 	deps.Transcode = unavailableWorker{}
 	s.engine = action.NewEngine(deps)
-	for name, inputs := range map[string]string{"transcode_media": `{\"path\":\"/media/never-submitted.mkv\"}`, "transcode_batch": `{\"paths\":[\"/media/never-submitted.mkv\"]}`, "benchmark_transcode": `{\"path\":\"/media/never-submitted.mkv\"}`} {
+	for name, inputs := range map[string]string{"transcode_media": `{\"path\":\"/media/never-submitted.mkv\"}`, "transcode_batch": `{\"paths\":[\"/media/never-submitted.mkv\"]}`} {
 		body := `{"name":"action_run","arguments":{"action":"` + name + `","inputs":"` + inputs + `","idempotency_key":"offline"}}`
 		w = request(h, "POST", "/api/maintenance/tool", body, true)
 		if w.Code != 409 {

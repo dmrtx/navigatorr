@@ -105,7 +105,9 @@ func setupBenchmarkTestEnv(t *testing.T, mock *mockTranscodeExecutor, ffprobeJSO
 		}
 	}
 
-	return engine, st, mediaFile, dir
+	// This environment drives sample tests and searching profiles, which
+	// only actions admitted before the search was removed still run.
+	return legacySearch(engine), st, mediaFile, dir
 }
 
 const standard8BitProbeJSON = `{
@@ -1064,7 +1066,7 @@ func TestTranscode_PersistedOutputsSurviveActionReload(t *testing.T) {
 		Transcode: mock,
 	})
 
-	res1, err := engine1.Run(context.Background(), "benchmark_transcode", map[string]any{
+	res1, err := legacySearch(engine1).Run(context.Background(), "benchmark_transcode", map[string]any{
 		"path":    mediaFile,
 		"profile": "opt-vt",
 	})

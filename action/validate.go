@@ -2,13 +2,17 @@ package action
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 
+	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/recipe"
+	"github.com/jakenesler/navigatorr/transcode/selector"
 )
 
 // InvalidParamsError reports a request the caller can fix by changing one
@@ -254,13 +258,142 @@ func validateTranscodeCommon(inputs map[string]any) (*transcodeRequest, error) {
 }
 
 func validateTranscodeMedia(_ context.Context, e *Engine, inputs map[string]any) (map[string]any, error) {
-	_, err := e.validateTranscodeRequest("transcode_media", inputs)
-	return inputs, err
+	if _, err := e.validateTranscodeRequest("transcode_media", inputs); err != nil {
+		return inputs, err
+	}
+	return inputs, e.rejectSearchInputs("transcode_media", inputs)
 }
 
 func validateBenchmarkTranscode(_ context.Context, e *Engine, inputs map[string]any) (map[string]any, error) {
-	_, err := e.validateTranscodeRequest("benchmark_transcode", inputs)
-	return inputs, err
+	if _, err := e.validateTranscodeRequest("benchmark_transcode", inputs); err != nil {
+		return inputs, err
+	}
+	return inputs, e.rejectSearchInputs("benchmark_transcode", inputs)
+}
+
+// searchOnlyInputs only ever tuned the CRF sample search.
+var searchOnlyInputs = []string{"metric", "priority", "shared_calibration", "calibration_items", "batch_fixed_quality"}
+
+// SearchOnlyInputs are the inputs new requests may no longer set because
+// they only tuned the removed sample search.
+func SearchOnlyInputs() []string { return slices.Clone(searchOnlyInputs) }
+
+// rejectSearchInputs refuses, for a new request, what only drove the CRF
+// sample search: every goal now encodes the whole file at a fixed recipe and
+// lets the final check decide (see transcode_recipe.go). It is an admission
+// rule only: actions already admitted, and the children and calibration
+// samples a batch admitted before creates from its stored inputs, run as they
+// were admitted.
+func (e *Engine) rejectSearchInputs(name string, inputs map[string]any) error {
+	if e.batchChild(inputs) || e.legacySearch {
+		return nil
+	}
+	if name == "benchmark_transcode" {
+		return inputErr("", "sample tests were removed: the sample search no longer picks encode settings. Run transcode_media with a goal (mode) instead")
+	}
+	for _, key := range searchOnlyInputs {
+		if inputSet(inputs[key]) {
+			return inputErr(key, "%s only tuned the sample search, which was removed; choose a goal (mode) instead", key)
+		}
+	}
+	if raw, present := inputs["profile_config"]; present && raw != nil {
+		var profile recipe.Profile
+		if b, err := json.Marshal(raw); err == nil && json.Unmarshal(b, &profile) == nil && profile.Optimization != nil && profile.Optimization.Enabled {
+			return inputErr("profile_config", "profile_config with optimization enabled ran the sample search, which was removed; turn optimization off for a fixed profile, or choose a goal (mode) instead")
+		}
+	}
+	return e.rejectSearchProfile(name, inputs)
+}
+
+// rejectSearchProfile refuses a request without a goal whose catalog profile
+// would run the sample search: the profile it names, or the one it falls back
+// to when it names none. transcode_media falls back to the configured
+// default_profile (then hevc-vt, as resolving the plan does), a batch to auto;
+// auto stands for every profile the selector can pick. A profile that does not
+// resolve is left to the step that resolves it.
+func (e *Engine) rejectSearchProfile(action string, inputs map[string]any) error {
+	if _, goal := inputs["mode"]; goal || inputs["profile_config"] != nil || e.deps.Config == nil {
+		return nil
+	}
+	name := strings.TrimSpace(getString(inputs, "profile"))
+	configured := false
+	if name == "" {
+		if action == "transcode_batch" {
+			name = "auto"
+		} else if name = strings.TrimSpace(e.deps.Config.Transcode.DefaultProfile); name != "" {
+			configured = true
+		} else {
+			name = "hevc-vt"
+		}
+	}
+	candidates := []string{name}
+	if strings.EqualFold(name, "auto") {
+		candidates = selector.Profiles()
+	}
+	for _, candidate := range candidates {
+		profile, err := e.deps.Config.Transcode.ResolveProfile(candidate)
+		if err != nil || profile.Optimization == nil || !profile.Optimization.Enabled {
+			continue
+		}
+		what := fmt.Sprintf("profile %q runs", name)
+		if candidate != name {
+			what = fmt.Sprintf("profile %s can pick %q, which runs", name, candidate)
+		}
+		if configured {
+			return inputErr("profile", "no goal or profile was given, and the configured default_profile is used: %s the sample search, which was removed; choose a goal (mode) or a profile without optimization, or set transcode.default_profile to one", what)
+		}
+		return inputErr("profile", "%s the sample search, which was removed; choose a goal (mode) or a profile without optimization instead", what)
+	}
+	return nil
+}
+
+// RefusedSearchInputs is why a new request with these inputs would be refused
+// for driving the removed sample search, nil when it would not be: what a
+// rerun of an older action checks before offering to start it again.
+func (e *Engine) RefusedSearchInputs(action string, inputs map[string]any) error {
+	return e.rejectSearchInputs(action, inputs)
+}
+
+// inputSet reports an input given a value: not absent, null, empty or false.
+func inputSet(v any) bool {
+	switch x := v.(type) {
+	case nil:
+		return false
+	case string:
+		return strings.TrimSpace(x) != ""
+	case bool:
+		return x
+	}
+	return true
+}
+
+// batchChild reports a request a batch admitted earlier creates for one of
+// its items: its parent is a transcode_batch that has not ended and lists this
+// file among its items (the item it names, when it names one), as the batch's
+// own children and calibration samples do. Naming a batch is not enough.
+func (e *Engine) batchChild(inputs map[string]any) bool {
+	id := strings.TrimSpace(getString(inputs, "parent_action_id"))
+	path := getString(inputs, "path")
+	if id == "" || path == "" || e.deps.Store == nil {
+		return false
+	}
+	parent, err := e.deps.Store.GetActionInstance(id)
+	if err != nil || parent == nil || parent.ActionName != "transcode_batch" {
+		return false
+	}
+	switch parent.Status {
+	case StatusCompleted, StatusFailed, StatusCancelled:
+		return false
+	}
+	if key := getString(inputs, "batch_item_key"); key != "" {
+		item, err := e.deps.Store.GetTranscodeBatchItem(id, key)
+		return err == nil && item != nil && item.FilePath == path
+	}
+	items, err := e.deps.Store.ListTranscodeBatchItems(id)
+	if err != nil {
+		return false
+	}
+	return slices.ContainsFunc(items, func(item store.TranscodeBatchItem) bool { return item.FilePath == path })
 }
 
 // validateTranscodeBatch checks what a batch passes through to its children
@@ -282,6 +415,9 @@ func validateTranscodeBatch(_ context.Context, e *Engine, inputs map[string]any)
 		return nil, err
 	}
 	if _, err := validateTranscodeCommon(inputs); err != nil {
+		return nil, err
+	}
+	if err := e.rejectSearchInputs("transcode_batch", inputs); err != nil {
 		return nil, err
 	}
 	if paths, present, err := batchPathsInput(inputs); err != nil {

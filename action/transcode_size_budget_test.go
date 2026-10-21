@@ -53,9 +53,17 @@ func newBudgetCase(t *testing.T, inputs map[string]any, caps transcode.WorkerCap
 	// VideoToolbox ladder were: the encoder comparison in place of the ladder.
 	_, legacy := in["legacy_comparison"]
 	delete(in, "legacy_comparison")
+	// policy_v4 freezes the snapshot a new operation gets; without it the
+	// case is an operation frozen under v3, as these cases were written for.
+	_, v4 := in["policy_v4"]
+	delete(in, "policy_v4")
 	sha := strings.Repeat("a", 64)
 	ec := &ExecutionContext{ActionName: "transcode_media", InstanceID: "size-budget", Inputs: in, Outputs: map[string]any{}, State: map[string]any{"original_sha256": sha, "original_size": budgetSourceBytes, "source_report": budgetReport(), "size_main10": true, "optimization_enabled": true, "benchmark_job_id": "bench-1"}}
+	if !v4 {
+		ec.Engine = legacySearch(&Engine{})
+	}
 	snapshot, err := freezeModePolicy(ec)
+	ec.Engine = nil
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,11 +162,11 @@ func TestModeSizeBudgetInput(t *testing.T) {
 }
 
 func TestSizeBudgetPolicyDigest(t *testing.T) {
-	plain, err := modePolicyWithOptions("size", false, 0, nil, false)
+	plain, err := legacyModePolicyWithOptions("size", false, 0, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	none, err := modePolicyWithBudget("size", false, 0, nil, false, nil)
+	none, err := legacyModePolicyWithBudget("size", false, 0, nil, false, nil)
 	if err != nil || none.Digest != plain.Digest {
 		t.Fatalf("no budget changed the digest: %s vs %s (%v)", none.Digest, plain.Digest, err)
 	}
@@ -167,7 +175,7 @@ func TestSizeBudgetPolicyDigest(t *testing.T) {
 		t.Fatal("snapshot without a budget serializes one")
 	}
 	budget, _ := modeSizeBudgetInput("size", map[string]any{"size_budget_percent": 40.0})
-	with, err := modePolicyWithBudget("size", false, 0, nil, false, budget)
+	with, err := legacyModePolicyWithBudget("size", false, 0, nil, false, budget)
 	if err != nil || with.Digest == plain.Digest || with.Size.SizeBudget == nil {
 		t.Fatalf("budget not frozen: %+v %v", with.Size, err)
 	}
@@ -191,7 +199,7 @@ func TestSizeBudgetPolicyDigest(t *testing.T) {
 	if _, err := freezeModePolicy(ec); err == nil {
 		t.Fatal("tampered floor accepted")
 	}
-	if _, err := modePolicyWithBudget("quality", false, 0, nil, false, budget); err == nil {
+	if _, err := legacyModePolicyWithBudget("quality", false, 0, nil, false, budget); err == nil {
 		t.Fatal("quality mode froze a budget")
 	}
 }

@@ -26,11 +26,11 @@ func hardwareTestCapabilities() transcode.WorkerCapabilities {
 // is its own frozen snapshot. Without it the size policy is byte-for-byte what
 // it was, so a snapshot frozen earlier keeps its digest and its behaviour.
 func TestSizePolicyHardwareDefaultsOnAndFreezes(t *testing.T) {
-	base, err := modePolicy("size", false)
+	base, err := legacyModePolicy("size", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	same, err := modePolicyWithHardware("size", false, 0, nil)
+	same, err := legacyModePolicyWithHardware("size", false, 0, nil)
 	if err != nil || same.Digest != base.Digest || same.Size.Hardware != nil {
 		t.Fatalf("size without hardware changed: %+v %v", same.Size, err)
 	}
@@ -54,7 +54,7 @@ func TestSizePolicyHardwareDefaultsOnAndFreezes(t *testing.T) {
 	if got := fmt.Sprint(rules.FallbackQualityValues); got != "[65 70 75]" {
 		t.Fatalf("default fallback rungs %s", got)
 	}
-	hw, err := modePolicyWithHardware("size", false, 0, rules)
+	hw, err := legacyModePolicyWithHardware("size", false, 0, rules)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestSizePolicyHardwareDefaultsOnAndFreezes(t *testing.T) {
 	stored := map[string]any{}
 	b, _ := json.Marshal(hw)
 	_ = json.Unmarshal(b, &stored)
-	ec := &ExecutionContext{InstanceID: "hw", Inputs: map[string]any{"mode": "size", "allow_hardware": true}, State: map[string]any{"mode_policy": stored}}
+	ec := &ExecutionContext{Engine: legacySearch(&Engine{}), InstanceID: "hw", Inputs: map[string]any{"mode": "size", "allow_hardware": true}, State: map[string]any{"mode_policy": stored}}
 	frozen, err := freezeModePolicy(ec)
 	if err != nil || frozen.Size.Hardware == nil || frozen.Size.Hardware.GOPSize != 240 {
 		t.Fatalf("stored policy: %+v %v", frozen, err)
@@ -99,14 +99,14 @@ func TestSizePolicyHardwareDefaultsOnAndFreezes(t *testing.T) {
 		"allowed":            {"mode": "size", "allow_hardware": true},
 		"default margin":     {"mode": "size", "allow_hardware": true, "hardware_margin_percent": float64(15)},
 	} {
-		ec = &ExecutionContext{InstanceID: "hw2", Inputs: inputs, State: map[string]any{}}
+		ec = &ExecutionContext{Engine: legacySearch(&Engine{}), InstanceID: "hw2", Inputs: inputs, State: map[string]any{}}
 		fresh, err := freezeModePolicy(ec)
 		if err != nil || fresh.Digest != hw.Digest {
 			t.Fatalf("%s: fresh policy digest %v %v", name, fresh, err)
 		}
 	}
 	// Turning it off is the earlier policy exactly.
-	ec = &ExecutionContext{InstanceID: "hw-off", Inputs: map[string]any{"mode": "size", "allow_hardware": false}, State: map[string]any{}}
+	ec = &ExecutionContext{Engine: legacySearch(&Engine{}), InstanceID: "hw-off", Inputs: map[string]any{"mode": "size", "allow_hardware": false}, State: map[string]any{}}
 	off, err := freezeModePolicy(ec)
 	if err != nil || off.Digest != base.Digest || off.Size.Hardware != nil {
 		t.Fatalf("hardware off changed the policy: %+v %v", off, err)
@@ -116,13 +116,13 @@ func TestSizePolicyHardwareDefaultsOnAndFreezes(t *testing.T) {
 	earlier := map[string]any{}
 	b, _ = json.Marshal(base)
 	_ = json.Unmarshal(b, &earlier)
-	ec = &ExecutionContext{InstanceID: "hw-earlier", Inputs: map[string]any{"mode": "size"}, State: map[string]any{"mode_policy": earlier}}
+	ec = &ExecutionContext{Engine: legacySearch(&Engine{}), InstanceID: "hw-earlier", Inputs: map[string]any{"mode": "size"}, State: map[string]any{"mode_policy": earlier}}
 	kept, err := freezeModePolicy(ec)
 	if err != nil || kept.Digest != base.Digest || kept.Size.Hardware != nil {
 		t.Fatalf("an earlier snapshot picked up the default: %+v %v", kept, err)
 	}
 	// The margin is part of the frozen policy.
-	ec = &ExecutionContext{InstanceID: "hw3", Inputs: map[string]any{"mode": "size", "allow_hardware": true, "hardware_margin_percent": float64(30)}, State: map[string]any{}}
+	ec = &ExecutionContext{Engine: legacySearch(&Engine{}), InstanceID: "hw3", Inputs: map[string]any{"mode": "size", "allow_hardware": true, "hardware_margin_percent": float64(30)}, State: map[string]any{}}
 	wider, err := freezeModePolicy(ec)
 	if err != nil || wider.Digest == hw.Digest || wider.Size.Hardware.MarginPercent != 30 {
 		t.Fatalf("wider margin %+v %v", wider, err)
@@ -673,7 +673,7 @@ func TestBatchChildInputsCarryTheBatchGoalInputs(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			policy, err := modePolicyWithHardware(getString(tc.inputs, "mode"), false, maxHeight, hardware)
+			policy, err := legacyModePolicyWithHardware(getString(tc.inputs, "mode"), false, maxHeight, hardware)
 			if err != nil {
 				t.Fatal(err)
 			}

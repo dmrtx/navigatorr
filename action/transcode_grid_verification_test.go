@@ -42,7 +42,7 @@ func gridEraPolicy(t *testing.T, hardware *transcode.HardwareSearchRules) ModePo
 // caller that wants the extra hardware margin passes it.
 func marginEraPolicy(t *testing.T, hardware *transcode.HardwareSearchRules) ModePolicySnapshot {
 	t.Helper()
-	p, err := modePolicyWithHardware("size", false, 0, hardware)
+	p, err := legacyModePolicyWithHardware("size", false, 0, hardware)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func withExtraMargin(rules *transcode.HardwareSearchRules) *transcode.HardwareSe
 }
 
 func TestSizePolicyFreezesGridVerification(t *testing.T) {
-	p, err := modePolicy("size", false)
+	p, err := legacyModePolicy("size", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestGridEraSnapshotsKeepTheirDigestAndSearch(t *testing.T) {
 		if legacy.Digest != tc.digest {
 			t.Fatalf("%s: grid-era digest %s, want %s", name, legacy.Digest, tc.digest)
 		}
-		fresh, _ := modePolicyWithHardware("size", false, 0, tc.hardware)
+		fresh, _ := legacyModePolicyWithHardware("size", false, 0, tc.hardware)
 		if fresh.Digest == legacy.Digest {
 			t.Fatalf("%s: new snapshots share the grid-era digest", name)
 		}
@@ -266,9 +266,9 @@ func TestMarginEraSnapshotsKeepTheirDigestAndMargin(t *testing.T) {
 		if legacy.Digest != tc.digest {
 			t.Fatalf("%s: margin-era digest %s, want %s", name, legacy.Digest, tc.digest)
 		}
-		fresh, _ := modePolicyWithHardware("size", false, 0, current)
+		fresh, _ := legacyModePolicyWithHardware("size", false, 0, current)
 		if tc.hardware == nil {
-			fresh, _ = modePolicyWithHardware("size", false, 0, nil)
+			fresh, _ = legacyModePolicyWithHardware("size", false, 0, nil)
 		}
 		if fresh.Digest == legacy.Digest || fresh.Size.AutomaticSearch.SelectionMarginVMAF != 0 {
 			t.Fatalf("%s: new snapshots share the margin-era digest or carry a margin: %+v", name, fresh.Size.AutomaticSearch)

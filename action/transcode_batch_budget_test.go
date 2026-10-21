@@ -32,7 +32,7 @@ func seedModeSeason(t *testing.T, st *store.Store, id, mode string, files int, s
 // such as one frozen before search extensions existed.
 func seedModeSeasonWithPolicy(t *testing.T, st *store.Store, id, mode string, files int, status string, frozen *ModePolicySnapshot) *ExecutionContext {
 	t.Helper()
-	ec := &ExecutionContext{InstanceID: id, Inputs: map[string]any{"mode": mode}, State: map[string]any{}}
+	ec := &ExecutionContext{InstanceID: id, Inputs: map[string]any{"mode": mode}, State: map[string]any{}, Engine: legacySearch(&Engine{})}
 	if frozen != nil {
 		ec.State["mode_policy"] = *frozen
 	}

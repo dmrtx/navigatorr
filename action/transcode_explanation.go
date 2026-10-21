@@ -42,6 +42,10 @@ type TranscodeExplanation struct {
 	// SizeBudgetSiblings is what a sibling budget measured beside the source,
 	// including why it gave no budget.
 	SizeBudgetSiblings *SiblingBudgetEvidence `json:"size_budget_siblings,omitempty"`
+	// QualityLadder is set when the goal's recipe encoded the whole file at a
+	// ladder of fixed settings instead of searching: the rungs, the one
+	// encoding or kept, and what each earlier rung measured.
+	QualityLadder *QualityLadderRecord `json:"quality_ladder,omitempty"`
 }
 
 func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
@@ -56,6 +60,10 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 			return value
 		}
 		return res.State[key]
+	}
+	recipe := policyRecipe(res.State["mode_policy"]) != nil
+	if recipe {
+		e.Message = "Encoding the whole file and checking it against this goal's quality limits; originals are preserved."
 	}
 	var automatic transcode.BenchmarkAutomaticEvidence
 	data, _ := json.Marshal(read("automatic_search"))
@@ -79,6 +87,16 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 		e.Hardware = e.Encoder == transcode.VideoCodecHEVCVideoToolbox
 	}
 	e.SizeBudgetSiblings = siblingEvidenceOf(res.State)
+	if ladder := QualityLadderOf(map[string]any{qualityLadderKey: read(qualityLadderKey)}); ladder != nil {
+		e.QualityLadder = ladder
+		e.Encoder = ladder.VideoCodec
+		e.Hardware = e.Encoder == transcode.VideoCodecHEVCVideoToolbox
+		if ladder.Message != "" {
+			e.Message = ladder.Message
+		}
+	} else if e.SizeBudget != nil && recipe && e.SizeBudget.Message != "" {
+		e.Message = e.SizeBudget.Message
+	}
 	if json.Unmarshal(data, &decision) == nil && decision.Winner != nil && e.SizeBudget == nil {
 		e.Encoder = transcode.BenchmarkCandidateVideoCodec(transcode.BenchmarkCandidate{VideoCodec: decision.Winner.VideoCodec})
 		e.Hardware = e.Encoder == transcode.VideoCodecHEVCVideoToolbox
@@ -127,6 +145,15 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 		if e.Verification != nil && e.Verification.StoppedBy == transcode.VerificationStoppedTimeCap {
 			e.Message = fmt.Sprintf("The search ran out of time before every promising configuration was checked (%d never verified). Nothing was proven unsuitable; retry to continue. Originals preserved.", len(e.Verification.Unverified))
 		}
+	case (reason == "insufficient_savings" || reason == "size_growth" || reason == "size_growth_exceeded" || reason == reasonQualityNotMet) && e.QualityLadder != nil && getString(res.State, "plan_source") == qualityLadderPlanSource && e.QualityLadder.Outcome != QualityLadderEncoding && e.QualityLadder.Outcome != QualityLadderPassed:
+		e.Outcome = "size_rejected"
+		if reason == reasonQualityNotMet {
+			e.Outcome = "quality_rejected"
+			if n := len(e.QualityLadder.Tried); n > 0 {
+				e.FinalQuality = e.QualityLadder.Tried[n-1].Final
+			}
+		}
+		e.Message = e.QualityLadder.Message
 	case reason == "insufficient_savings" || reason == "size_growth" || reason == "size_growth_exceeded":
 		e.Outcome = "size_rejected"
 		e.Message = "The full conversion did not meet this goal's size limit. Original preserved."
@@ -169,6 +196,10 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 	case reason == "already_target_codec":
 		e.Outcome = "no_changes"
 		e.Message = "The source already uses the target codec. Original preserved."
+	case recipe && getString(res.State, sizeBudgetSkipMessageKey) != "" && e.SizeBudget == nil:
+		// A budget the recipe could not encode; finish adds why.
+		e.Outcome = "no_changes"
+		e.Message = "No candidate was made."
 	case getBool(res.State, "skip_transcode") || getBool(res.Outputs, "skip_transcode") || getBool(res.State, "skipped") || getBool(res.Outputs, "skipped"):
 		e.Outcome = "no_changes"
 		e.Message = "No candidate was accepted. Inspect the recorded skip reason."
@@ -178,6 +209,10 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 	case getBool(res.Outputs, "original_intact") && e.SizeBudget != nil && e.SizeBudget.Outcome != "":
 		e.Outcome = "candidate_ready"
 		e.Message = e.SizeBudget.Message
+	case getBool(res.Outputs, "original_intact") && e.QualityLadder != nil && e.QualityLadder.Outcome == QualityLadderPassed:
+		e.Outcome = "candidate_ready"
+		e.FinalQuality = e.QualityLadder.Final
+		e.Message = "Candidate verified; original preserved. " + e.QualityLadder.Message
 	case getBool(res.Outputs, "original_intact"):
 		e.Outcome = "candidate_ready"
 		e.Message = "Candidate verified; original preserved. Quality was measured on samples."

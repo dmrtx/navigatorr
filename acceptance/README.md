@@ -38,14 +38,15 @@ Each case is a subtest, run one after another against one engine and one worker.
 | Case | Source | Goal | Must produce |
 | --- | --- | --- | --- |
 | 1_size_hardware | 1080p SDR H.264 + FLAC | size, hardware allowed | candidate within the size budget, at least 15% smaller, AAC audio, HEVC video, passing quality evidence, a VideoToolbox rung in the budget, original hash unchanged |
-| 2_size_x265 | same | size, hardware off | passing x265 candidate |
-| 3_compact_hdr | 4K HDR10 HEVC 10-bit, tagged BT.2020 / PQ with mastering display and light level | compact | at most 1080p SDR BT.709, at least 30% smaller, passing quality |
-| 4_quality | 1080p SDR | quality | passing candidate against the strict thresholds |
-| 5_x265_preserve | 1080p SDR H.264 | x265_preserve | passing HEVC candidate |
+| 1b_size_hardware_no_budget | same | size, hardware allowed, no budget | passing candidate at least 15% smaller, AAC audio, from a rung of the VideoToolbox quality ladder (`plan_source` `quality_ladder`, encoder `hevc_videotoolbox`, no x265 fallback), no sample test |
+| 2_size_x265 | same | size, hardware off | passing candidate from the one two-pass x265 encode at the budget (`budget_first`, encoder choice `hardware_not_allowed`), no sample test |
+| 3_compact_hdr | 4K HDR10 HEVC 10-bit, tagged BT.2020 / PQ with mastering display and light level | compact | at most 1080p SDR BT.709, at least 30% smaller, passing quality from a rung of the x265 CRF ladder, no sample test |
+| 4_quality | 1080p SDR | quality | passing candidate against the strict thresholds from a rung of the x265 CRF ladder, no sample test |
+| 5_x265_preserve | 1080p SDR H.264 | x265_preserve | passing HEVC candidate from a rung of the x265 CRF ladder, no sample test |
 | 6a/6b/6c | HDR + size, SDR + compact, HEVC + x265_preserve | skips | a completed action with the documented skip reason, and the source profile (`SourceGoals`) predicting the same verdict |
 | 7_timestamp_glitch | variable frame rate with a burst of frames closer than one frame period | size | alignment passes, a candidate with the same number of frames |
 | 8_no_size_tags | remux without per-stream Matroska statistics tags | size | a planned budget (never `size_budget_estimate_unavailable`) and a candidate |
-| 8b_no_size_tags_flac | the same, with FLAC audio that states no bitrate either | size | the same: the VideoToolbox ladder is used, not the search fallback (see Known failures) |
+| 8b_no_size_tags_flac | the same, with FLAC audio that states no bitrate either | size | the same: the VideoToolbox ladder is used, not the x265 fallback |
 | 9_promotion | short SDR file | x265_preserve, then `promote_transcode_candidate` (filesystem) | the reviewed plan digest approved, the library file replaced by the candidate (valid, decodes, hash equal), candidate directory and recovery copy cleaned |
 
 Candidate cases also check: the candidate sits under `.navigatorr-candidates`,
@@ -56,15 +57,15 @@ is present and sane.
 ## Output
 
 A table per case (goal, outcome and reason code, source and candidate size, share
-saved, VMAF mean / p5 / worst window, encoder and ladder rung, wall time) is
+saved, VMAF mean / p5 / worst window, encoder with its VideoToolbox rung or ladder step, wall time) is
 logged at the end of the run, and written as JSON to
 `NAVIGATORR_ACCEPTANCE_REPORT` when set.
 
 ## Runtime
 
 Expect 25 to 35 minutes on an Apple M-series host. Cutting the source length
-barely changes it: the searches (cases 2, 3, 4) and the final validation dominate,
-and they sample fixed windows. The skip cases take seconds. A single case is
+barely changes it: the full-file encodes and their final validation dominate,
+and quality ladders that need a second or third rung repeat both. The skip cases take seconds. A single case is
 limited to 40 minutes, the whole run needs `-timeout 60m` or more.
 
 ## A failing case

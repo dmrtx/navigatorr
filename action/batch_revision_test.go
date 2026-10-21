@@ -102,7 +102,7 @@ func TestModeBatchReservesOnlyAvailableSlots(t *testing.T) {
 	e.RegisterTemplate(ActionTemplate{Name: "transcode_media", ImmutableInputs: true, Steps: []StepDefinition{{Name: "search", Run: func(context.Context, *ExecutionContext) (StepResult, error) {
 		return StepResult{Status: StepWaitingExternal, WaitingCondition: "benchmark_processing"}, nil
 	}}}})
-	ec := &ExecutionContext{InstanceID: "mode-slots", Inputs: map[string]any{"mode": "quality"}, State: map[string]any{}}
+	ec := &ExecutionContext{InstanceID: "mode-slots", Inputs: map[string]any{"mode": "quality"}, State: map[string]any{}, Engine: legacySearch(&Engine{})}
 	_, _ = freezeModePolicy(ec)
 	seedActionInstance(t, st, ec.InstanceID, "transcode_batch", StatusWaitingExternal, 1, "", ec.Inputs, ec.State)
 	for i := 0; i < 10; i++ {

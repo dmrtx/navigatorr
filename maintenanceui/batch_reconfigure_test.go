@@ -55,7 +55,7 @@ func TestReconfigureFreezesFailuresPreservesCustomSettingsAndReceipt(t *testing.
 			}
 			inst, _ := s.engine.Deps().Store.GetActionInstance(receipt["id"])
 			actual := decodeOperationJSON(inst.InputsJSON)
-			if !reflect.DeepEqual(actual["profile_config"], decodeOperationJSON(mustJSON(t, original))["profile_config"]) || actual["min_savings_percent"] != float64(10) || actual["metric"] != "vmaf" {
+			if !reflect.DeepEqual(actual["profile_config"], decodeOperationJSON(mustJSON(t, original))["profile_config"]) || actual["min_savings_percent"] != float64(10) || actual["metric"] != nil {
 				t.Fatal("lost original settings", actual)
 			}
 			if sonarr {
@@ -105,7 +105,7 @@ func TestReconfigureRejectsUnsafeSelectionAndUnavailableWorker(t *testing.T) {
 			s, h := testUI(t)
 			seedFailedBatch(t, s, false)
 			st := s.engine.Deps().Store
-			body := `{"id":"failed-batch","profile":"auto","priority":"savings","min_savings_percent":15,"max_size_increase_percent":0,"key":"attempt-1"}`
+			body := `{"id":"failed-batch","profile":"auto","min_savings_percent":15,"max_size_increase_percent":0,"key":"attempt-1"}`
 			inst, _ := st.GetActionInstance("failed-batch")
 			switch scenario {
 			case "active":
@@ -156,7 +156,7 @@ func TestReconfigureRejectsUnsafeSelectionAndUnavailableWorker(t *testing.T) {
 func TestReconfigureAutoClearsCustomProfile(t *testing.T) {
 	s, h := testUI(t)
 	seedFailedBatch(t, s, false)
-	w := request(h, "POST", "/api/maintenance/batch-reconfigure", `{"id":"failed-batch","profile":"auto","priority":"savings","key":"attempt-1"}`, true)
+	w := request(h, "POST", "/api/maintenance/batch-reconfigure", `{"id":"failed-batch","profile":"auto","key":"attempt-1"}`, true)
 	var receipt map[string]string
 	json.Unmarshal(w.Body.Bytes(), &receipt)
 	if w.Code != 202 {
@@ -164,7 +164,7 @@ func TestReconfigureAutoClearsCustomProfile(t *testing.T) {
 	}
 	inst, _ := s.engine.Deps().Store.GetActionInstance(receipt["id"])
 	inputs := decodeOperationJSON(inst.InputsJSON)
-	if inputs["profile_config"] != nil || inputs["priority"] != "savings" || inputs["profile"] != "auto" || inputs["min_savings_percent"] != nil {
+	if inputs["profile_config"] != nil || inputs["priority"] != nil || inputs["profile"] != "auto" || inputs["min_savings_percent"] != nil {
 		t.Fatal(inputs)
 	}
 }

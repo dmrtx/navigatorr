@@ -174,14 +174,14 @@ func TestQualityWalkDegradesForOlderWorkers(t *testing.T) {
 }
 
 func TestAllowSlowPresetInput(t *testing.T) {
-	def, err := modePolicy("size", false)
+	def, err := legacyModePolicy("size", false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Join(def.Size.AutomaticSearch.QualityFallbackPresets, ","); got != "medium" {
 		t.Fatalf("default presets %q", got)
 	}
-	ec := &ExecutionContext{InstanceID: "slow", Inputs: map[string]any{"mode": "size", "allow_slow_preset": true}, State: map[string]any{"original_sha256": strings.Repeat("a", 64)}}
+	ec := &ExecutionContext{Engine: legacySearch(&Engine{}), InstanceID: "slow", Inputs: map[string]any{"mode": "size", "allow_slow_preset": true}, State: map[string]any{"original_sha256": strings.Repeat("a", 64)}}
 	slow, err := freezeModePolicy(ec)
 	if err != nil {
 		t.Fatal(err)
@@ -232,7 +232,7 @@ func TestAllowSlowPresetInput(t *testing.T) {
 	if _, kept := inputs["allow_slow_preset"]; kept {
 		t.Fatalf("goal inputs kept a stale slow opt-in: %v", inputs)
 	}
-	quality, _ := modePolicy("quality", false)
+	quality, _ := legacyModePolicy("quality", false)
 	inputs = map[string]any{"allow_slow_preset": true}
 	applyGoalPolicyInputs(inputs, quality)
 	if _, kept := inputs["allow_slow_preset"]; kept {
@@ -259,7 +259,7 @@ func TestPreWalkSnapshotsKeepTheirDigestAndSearch(t *testing.T) {
 		"no media engine":         {nil, false, "sha256:5ca0b1d812f8e814a839209ad6cc4ab55169bba5af9e58d4fb15aaff96c30976"},
 		"media engine":            {media, false, "sha256:1f903e4291fdce6d0257446dcc809a87ad819a9d36bd3f16ff6d74c28f881903"},
 	} {
-		p, err := modePolicyWithHardware("size", false, 0, tc.hardware)
+		p, err := legacyModePolicyWithHardware("size", false, 0, tc.hardware)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -305,11 +305,11 @@ func TestPreWalkSnapshotsKeepTheirDigestAndSearch(t *testing.T) {
 		}
 	}
 	// New size snapshots have no operation budget: it never ended a search.
-	def, _ := modePolicy("size", false)
+	def, _ := legacyModePolicy("size", false)
 	if def.OperationBudgetSeconds != 0 {
 		t.Fatalf("new size snapshot carries a %d s operation budget", def.OperationBudgetSeconds)
 	}
-	quality, _ := modePolicy("quality", false)
+	quality, _ := legacyModePolicy("quality", false)
 	if quality.OperationBudgetSeconds != modeOperationBudgetSeconds {
 		t.Fatalf("quality snapshot budget %d", quality.OperationBudgetSeconds)
 	}

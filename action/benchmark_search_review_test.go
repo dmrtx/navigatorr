@@ -18,6 +18,7 @@ func TestBenchmarkSearchStopsAcrossNewActionsAndSupportsExplicitReview(t *testin
 		return transcode.BenchmarkStatus{ID: id, Status: transcode.StatusCompleted, Decision: &transcode.BenchmarkDecision{DecisionReason: "all_candidates_invalid"}}, nil
 	}}
 	e, st, path, _ := setupBenchmarkTestEnv(t, mock, standard8BitProbeJSON, &recipe.OptimizationPolicy{Enabled: true})
+	legacySearch(e)
 	ctx := context.Background()
 	for _, name := range []string{"transcode_media", "benchmark_transcode"} {
 		r, err := e.Run(ctx, name, map[string]any{"path": path, "profile": "opt-vt"})
@@ -27,7 +28,7 @@ func TestBenchmarkSearchStopsAcrossNewActionsAndSupportsExplicitReview(t *testin
 	}
 	// A different recipe name and a fresh Engine cannot reset durable history.
 	e.deps.Config.Transcode.Profiles["another-recipe"] = e.deps.Config.Transcode.Profiles["opt-vt"]
-	e = NewEngine(e.deps)
+	e = legacySearch(NewEngine(e.deps))
 	r, err := e.Run(ctx, "benchmark_transcode", map[string]any{"path": path, "profile": "another-recipe"})
 	if err != nil || r.Status != StatusWaitingDecision || mock.benchmarkSubmitCalls != 2 {
 		t.Fatalf("third round escaped: %v %+v calls=%d", err, r, mock.benchmarkSubmitCalls)

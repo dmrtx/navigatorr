@@ -21,7 +21,7 @@ const preExtensionSizeV3Digest = "sha256:c7a085119dcbdfca077be0f37cb27f7aff8158a
 // the same version string, no extension, and the digest it had then.
 func legacySizeSnapshot(t *testing.T) ModePolicySnapshot {
 	t.Helper()
-	p, err := modePolicy("size", false)
+	p, err := legacyModePolicy("size", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +36,7 @@ func legacySizeSnapshot(t *testing.T) ModePolicySnapshot {
 }
 
 func TestSizeModePolicyV3FreezesSearchExtension(t *testing.T) {
-	p, err := modePolicy("size", false)
+	p, err := legacyModePolicy("size", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestSizeModePolicyV3FreezesSearchExtension(t *testing.T) {
 
 func TestOtherModesKeepAFixedSearchBudget(t *testing.T) {
 	for _, mode := range []string{"quality", "x265_preserve", "compact"} {
-		p, err := modePolicy(mode, false)
+		p, err := legacyModePolicy(mode, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -96,9 +96,9 @@ func TestOtherModesKeepAFixedSearchBudget(t *testing.T) {
 }
 
 func TestSearchCeilingSeconds(t *testing.T) {
-	elastic, _ := modePolicy("size", false)
+	elastic, _ := legacyModePolicy("size", false)
 	legacy := legacySizeSnapshot(t)
-	quality, _ := modePolicy("quality", false)
+	quality, _ := legacyModePolicy("quality", false)
 	narrow := elastic
 	narrow.Size = &ModeSizePolicy{SearchExtension: &transcode.SearchExtension{MaxSeconds: 500, SteadySeconds: 180}}
 	for name, tc := range map[string]struct {
@@ -127,7 +127,7 @@ func TestReserveModeSearchReservesTheLongestSearch(t *testing.T) {
 		}
 		return modeBudgetEntries(ec)["child"].Reserved
 	}
-	elastic, _ := modePolicy("size", false)
+	elastic, _ := legacyModePolicy("size", false)
 	legacy := legacySizeSnapshot(t)
 	if got := reserved(map[string]any{"mode_policy": elastic, "search_budget_seconds": 600}); got != 3000 {
 		t.Errorf("extended search reserved %v, want its hard cap", got)
@@ -147,9 +147,9 @@ func TestReserveModeSearchReservesTheLongestSearch(t *testing.T) {
 }
 
 func TestBatchItemReservationFollowsItsOwnFrozenGoal(t *testing.T) {
-	elastic, _ := modePolicy("size", false)
+	elastic, _ := legacyModePolicy("size", false)
 	legacy := legacySizeSnapshot(t)
-	quality, _ := modePolicy("quality", false)
+	quality, _ := legacyModePolicy("quality", false)
 	ec := &ExecutionContext{State: map[string]any{"search_budget_seconds": 600, "mode_policy": legacy, "batch_item_settings": map[string]any{
 		"revised":   map[string]any{"mode": "size", "mode_policy": elastic},
 		"requality": map[string]any{"mode": "quality", "mode_policy": quality},

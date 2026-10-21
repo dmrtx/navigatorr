@@ -80,6 +80,14 @@ func (e *Engine) stepBenchmarkSubmit(ctx context.Context, ec *ExecutionContext) 
 	if result, handled := e.startSizeBudgetLadder(ctx, ec, cleanPath); handled {
 		return result, nil
 	}
+	// Under policy v4 every goal runs a recipe instead of the search: the
+	// first rung of its ladder is planned here, and nothing is submitted.
+	if result, handled := e.startQualityLadder(ctx, ec, cleanPath); handled {
+		return result, nil
+	}
+	if ec.ActionName == "transcode_media" && policyRecipe(ec.State["mode_policy"]) != nil {
+		return StepResult{Status: StepFailed, Error: "this goal's recipe could not be planned, and it has no search to fall back to (fail closed)"}, nil
+	}
 
 	if wait := getString(ec.State, "benchmark_retry_not_before"); wait != "" {
 		if at, err := time.Parse(time.RFC3339Nano, wait); err == nil && time.Now().Before(at) {
@@ -304,8 +312,8 @@ func (e *Engine) stepBenchmarkWait(ctx context.Context, ec *ExecutionContext) (S
 		return StepResult{Status: StepSkipped}, nil
 	}
 
-	if sizeBudgetLadderOf(ec.State) != nil {
-		// The size budget's ladder replaced the search; its first rung was
+	if sizeBudgetLadderOf(ec.State) != nil || getString(ec.State, "benchmark_job_id") == "" && getBool(ec.State, "benchmark_done") {
+		// A ladder or recipe replaced the search; its first encode was
 		// planned by the submit step and there is no benchmark to wait for.
 		return StepResult{Status: StepCompleted}, nil
 	}
@@ -1308,7 +1316,7 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 		if err != nil {
 			return nil, err
 		}
-		req.ModePolicyVersion = policy.Version
+		req.ModePolicyVersion = policy.workerVersion()
 		req.SearchBudgetSeconds = getInt(ec.State, "search_budget_seconds")
 		// An older worker rejects the field, so it keeps the fixed budget.
 		continued := continuationActive(ec.State)
@@ -1346,10 +1354,10 @@ func buildBenchmarkRequest(ec *ExecutionContext, cleanPath string, rep *mediains
 			}
 			req.Candidates = append(req.Candidates, hardware...)
 		}
-		if policy.Version == SizeModePolicyVersion && !caps.SizeModeV3 {
+		if req.ModePolicyVersion == SizeModePolicyVersion && !caps.SizeModeV3 {
 			return nil, fmt.Errorf("size mode policy v3 requires an updated worker")
 		}
-		if policy.Version == ModePolicyVersion || policy.Version == SizeModePolicyVersion {
+		if req.ModePolicyVersion == ModePolicyVersion || req.ModePolicyVersion == SizeModePolicyVersion {
 			if !caps.AutomaticModesV2 {
 				return nil, fmt.Errorf("automatic quality search requires an updated worker")
 			}

@@ -581,7 +581,7 @@ func endUnreachableSizeBudget(ec *ExecutionContext, snapshot *ModePolicySnapshot
 	if ec.ActionName != "transcode_media" || getString(ec.Inputs, "mode") != "size" || getString(ec.State, "benchmark_job_id") != "" {
 		return StepResult{}, false
 	}
-	if snapshot == nil || snapshot.Version != optimization.ModePolicyV3 || snapshot.Size == nil || snapshot.Size.SizeBudget == nil {
+	if snapshot == nil || snapshot.workerVersion() != optimization.ModePolicyV3 || snapshot.Size == nil || snapshot.Size.SizeBudget == nil {
 		return StepResult{}, false
 	}
 	policy := snapshot.Size.SizeBudget
@@ -924,13 +924,18 @@ func sizeBudgetPlannedMessage(r *SizeBudgetRecord, policy *SizeBudgetPolicy, pla
 	if sizeBudgetIsLadder(r) {
 		return sizeBudgetLadderMessage(r, policy, plan)
 	}
-	why := "No tested setting met this goal's quality limits"
-	if r.Trigger == sizeBudgetTriggerOverBudget {
-		why = fmt.Sprintf("The setting that met this goal's quality limits (%s, about %s) is larger than your size budget", r.OverBudgetCandidateID, formatBudgetBytes(r.OverBudgetEstimatedBytes))
-	}
 	from := ""
 	if r.Siblings != nil {
 		from = " " + r.Siblings.Message
+	}
+	if r.Trigger == sizeBudgetTriggerBudgetFirst {
+		// Policy v4: nothing was searched; the budget's one encode is the
+		// recipe.
+		return fmt.Sprintf("Encoding the whole file once with two-pass x265 at %d kbps of video for about %s of the %s budget. Its quality is checked on the final validation windows against the floor; below this goal's target it is reported as such.%s", r.VideoBitrateKbps, formatBudgetBytes(r.TargetBytes), formatBudgetBytes(r.BudgetBytes), from)
+	}
+	why := "No tested setting met this goal's quality limits"
+	if r.Trigger == sizeBudgetTriggerOverBudget {
+		why = fmt.Sprintf("The setting that met this goal's quality limits (%s, about %s) is larger than your size budget", r.OverBudgetCandidateID, formatBudgetBytes(r.OverBudgetEstimatedBytes))
 	}
 	encoder := "two-pass x265"
 	if sizeBudgetChosenCodec(r) == transcode.VideoCodecHEVCVideoToolbox {

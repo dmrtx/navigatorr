@@ -67,6 +67,13 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 			if snapshot.Size == nil || !snapshot.Size.AudioOnlyFallback || transcode.ValidateSizeAudioOnlyShape(plan) != nil || err != nil || json.Unmarshal(encoded, &evidence) != nil || evidence.Verdict != "pass" || evidence.CandidateSHA256 == "" || evidence.CandidateSHA256 != getString(ec.State, "candidate_sha256") || evidence.PlanDigest != plan.PlanDigest || evidence.VideoCopy.Check() != nil {
 				return StepResult{Status: StepFailed, Error: "video copy evidence is missing or does not match the candidate and plan; original preserved"}, nil
 			}
+			// A v4 budget planned audio-only because it fits carries the
+			// budget as its ceiling; nothing else carries one.
+			if snapshot.Version == ModePolicyV4 {
+				if budget, ok := sizeAudioOnlyBudget(snapshot, ec.State); !ok || plan.SizePolicy.MaxCandidateBytes != budget {
+					return StepResult{Status: StepFailed, Error: "audio-only plan does not carry the frozen size budget; original preserved"}, nil
+				}
+			}
 		} else {
 			expectedQuality := ensureBenchmarkQualityMetric(buildBenchmarkQualityConfig(snapshot.Profile.Optimization.Quality), "vmaf")
 			if getString(ec.State, "plan_source") == sizeBudgetPlanSource {
@@ -78,6 +85,12 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 				expectedQuality = sizeBudgetFloorQuality(snapshot)
 				if expectedQuality == nil || !sizeBudgetPlanMatches(snapshot, ec.InstanceID, ec.State, plan, sizeBudgetOf(ec.State)) {
 					return StepResult{Status: StepFailed, Error: "size budget plan does not match the frozen budget; original preserved"}, nil
+				}
+			} else if snapshot.Recipe != nil {
+				// A v4 encode is a rung of the frozen recipe, rebuilt from the
+				// policy and the source, never a searched result.
+				if getString(ec.State, "plan_source") != qualityLadderPlanSource || !qualityLadderPlanMatches(snapshot, ec.State, plan, QualityLadderOf(ec.State)) {
+					return StepResult{Status: StepFailed, Error: "encode does not match the goal's frozen recipe; original preserved"}, nil
 				}
 			}
 			expected, _ := json.Marshal(expectedQuality)
@@ -122,6 +135,13 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("accepted candidate size is unknown for %q (fail closed)", outputPath)}, nil
 	}
 	var budget *SizeBudgetRecord
+	if plan.Mode != "" && plan.SizePolicy != nil && plan.SizePolicy.MaxCandidateBytes > 0 && candidateSize > plan.SizePolicy.MaxCandidateBytes && !sizeBudgetActive(ec.State) {
+		// The worker holds an encode to its ceiling; a file over it is
+		// never offered, whoever let it through.
+		ec.State["skip_transcode"] = true
+		ec.State["reason_code"] = SizeBudgetExceeded
+		return StepResult{Status: StepCompleted, Outputs: map[string]any{"skipped": true, "reason_code": SizeBudgetExceeded, "candidate_size_bytes": candidateSize}}, nil
+	}
 	if plan.Mode != "" {
 		original := getInt64(ec.State, "original_size")
 		if original <= 0 {
@@ -157,7 +177,11 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 		if !optimization.ModeSizeAllowedVersion(plan.Mode, original, candidateSize, plan.ModePolicyVersion) {
 			ec.State["skip_transcode"] = true
 			ec.State["reason_code"] = "insufficient_savings"
-			return StepResult{Status: StepCompleted, Outputs: map[string]any{"skipped": true, "reason_code": "insufficient_savings", "candidate_size_bytes": candidateSize}}, nil
+			out := map[string]any{"skipped": true, "reason_code": "insufficient_savings", "candidate_size_bytes": candidateSize}
+			if getString(ec.State, "plan_source") == qualityLadderPlanSource {
+				out[qualityLadderKey] = stopQualityLadder(ec, "insufficient_savings", candidateSize)
+			}
+			return StepResult{Status: StepCompleted, Outputs: out}, nil
 		}
 	}
 	if ec.Decision != "" {
@@ -232,6 +256,11 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 	if budget != nil {
 		result["size_budget_outcome"] = budget.Outcome
 		outputs[sizeBudgetKey] = budget
+	}
+	if getString(ec.State, "plan_source") == qualityLadderPlanSource {
+		if rec := passQualityLadder(ec, candidateSize); rec != nil {
+			outputs[qualityLadderKey] = rec
+		}
 	}
 	return StepResult{Status: StepCompleted, Outputs: outputs}, nil
 }

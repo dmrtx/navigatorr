@@ -26,7 +26,7 @@ func TestAutomaticRequestAndLegacyFrozenPolicy(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	legacy, _ := modePolicy("quality", false)
+	legacy, _ := legacyModePolicy("quality", false)
 	legacy.Version = "transcode-modes-v1"
 	legacy.MinSavingsPercent = 15
 	legacy.Digest = ""

@@ -2591,7 +2591,10 @@ test("profile choices describe effective hardware and custom overrides while pre
   const options = h.elements.get('profile').children;
   assert.equal(options[1].value, 'anime-hevc-quality');
   assert.equal(options[1].textContent, 'Anime · CRF 25 · CPU · Custom (anime-hevc-quality)');
-  assert.equal(options[2].textContent, 'Live action · CPU · Test samples');
+  // A profile that calibrates with samples is rejected by the server, so it
+  // is not offered; its label still says what it is.
+  assert.equal(options.length, 2);
+  assert.equal(h.run('profileOptionLabel("live-action-hevc")'), 'Live action · CPU · Test samples');
   h.run('state.recipeDetails["anime-hevc-space"]={source:"active_bundle",profile:{video:{codec:"hevc_videotoolbox",quality:55}}}');
   assert.equal(h.run('profileOptionLabel("anime-hevc-space")'), 'Anime · Smaller files · Hardware');
 });
@@ -3238,6 +3241,25 @@ test("the process button says how many files it starts", () => {
   const h = harness();
   h.run('$("path").value="/media/one.mkv"; controls();');
   assert.equal(h.elements.get("enqueue").textContent, "Process file");
+});
+
+test("sample tests, the sample search and its batch priority are not offered", async () => {
+  const h = harness();
+  h.run('state.info={transcode_enabled:true};state.workerInfo={ready:true};$("path").value="/media/one.mkv"; $("technical").checked=true; $("custom").checked=true; $("optimize").checked=true; controls();');
+  const el = (id) => h.elements.get(id);
+  assert.equal(el("benchmark").hidden, true);
+  assert.equal(el("benchmark").disabled, true);
+  assert.equal(el("priority-label").hidden, true);
+  assert.equal(el("optimize").checked, false);
+  assert.equal(el("optimization-fields").hidden, true);
+  assert.equal(h.run('profileFromControls().optimization.enabled'), false);
+  const {h: batch} = submissionHarness(); let sent;
+  batch.context.capture = (_tool, args) => { sent = JSON.parse(args.inputs); return {id: "submitted"}; };
+  batch.run('$("technical").checked=true;$("custom").checked=false;$("scope").value="batch";$("selected-only").checked=true;state.folderSelected=new Set(["/media/a.mkv","/media/b.mkv"]);$("profile").value="auto";$("priority").value="savings";tool=async(...args)=>capture(...args);');
+  await batch.run('buildAndSubmitJob("encode")');
+  assert.equal(sent.profile, "auto");
+  assert.equal(sent.priority, undefined);
+  assert.equal(sent.metric, undefined);
 });
 
 test("technical profiles live in a labelled Advanced section that keeps the goal visible", () => {
@@ -4072,6 +4094,37 @@ test("a cancelled or no-winner standalone file offers Run again with a confirmat
   await h.run(`rerunJob(${base})`);
   assert.equal(calls.length, 3);
   assert.equal(h.run('state.rerunKeys.has("old")'), false);
+});
+
+test("a VideoToolbox quality ladder whose every step missed offers Try with x265", async () => {
+  const h = harness();
+  h.run('state.workerInfo={ready:true}');
+  const base = '{id:"old",action_name:"transcode_media",status:"completed",mode:"size",reason_code:"quality_not_met",source_path:"/media/Show/S01E01.mkv",rerun:{source_path:"/media/Show/S01E01.mkv",mode:"size",replace_original:false,no_winner_rounds:1,without_hardware:true}}';
+  const labels = (job) => h.run(`jobControls(${job}).children.map(b=>b.textContent)`);
+  assert.ok(labels(base).includes("Try with x265"));
+  assert.ok(labels(base).includes("Run again"));
+  assert.ok(!labels(base.replace(",without_hardware:true", "")).includes("Try with x265"));
+  for (const patch of ['candidate_ready:true', 'status:"waiting_decision"', 'parent_item_key:"epfile-1"', 'replacement_action_id:"r"', 'rerun:undefined'])
+    assert.ok(!labels(`{...${base},${patch}}`).includes("Try with x265"), patch);
+});
+
+test("a job whose settings ran the removed search offers the goal form instead of Run again", async () => {
+  const h = harness();
+  h.run('state.workerInfo={ready:true}');
+  const why = "This job's settings ran the sample search, which was removed, so it cannot run again as it was. Choose a goal for the file instead.";
+  const base = `{id:"old",action_name:"transcode_media",status:"completed",reason_code:"no_suitable_candidate",source_path:"/media/Show/S01E01.mkv",rerun_refused:${JSON.stringify(why)}}`;
+  const labels = (job) => h.run(`jobControls(${job}).children.map(b=>b.textContent)`);
+  assert.ok(labels(base).includes("Choose a goal"));
+  assert.ok(!labels(base).includes("Run again"));
+  const choose = h.run(`jobControls(${base}).children.find(b=>b.textContent==="Choose a goal")`);
+  assert.equal(choose.title, why);
+  assert.equal(choose.dataset.requiresWorker, "false");
+  for (const patch of ['candidate_ready:true', 'status:"waiting_decision"', 'parent_item_key:"epfile-1"', 'replacement_action_id:"r"', 'rerun_refused:undefined'])
+    assert.ok(!labels(`{...${base},${patch}}`).includes("Choose a goal"), patch);
+  h.run('selectTab=()=>{};setFileStep=()=>{};controls=()=>{}');
+  await choose.listeners.get("click")();
+  assert.equal(h.run('$("path").value'), "/media/Show/S01E01.mkv");
+  assert.equal(h.run('$("scope").value'), "file");
 });
 
 test("a media engine budget encode below the quality floor offers Try with x265, which reruns with the engine off", async () => {
