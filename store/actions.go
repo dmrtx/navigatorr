@@ -270,6 +270,37 @@ func (s *Store) FindActiveActionByIdempotencyKey(actionName, idempotencyKey stri
 	return &inst, nil
 }
 
+// FindActionByIdempotencyKeySuffix finds the newest action whose idempotency
+// key ends with suffix, across all statuses. Promotions are keyed
+// promote:<service>:<source>, so this finds one for a source under any
+// configured service name.
+func (s *Store) FindActionByIdempotencyKeySuffix(actionName, suffix string) (*ActionInstance, error) {
+	if suffix == "" {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var inst ActionInstance
+	err := s.db.QueryRow(`SELECT id, action_name, status, current_step, inputs_json,
+		outputs_json, state_json, waiting_reason, waiting_condition, waiting_options_json,
+		error_json, idempotency_key, created_at, updated_at
+		FROM action_instances
+		WHERE action_name=? AND length(idempotency_key) > length(?) AND substr(idempotency_key, -length(?)) = ?
+		ORDER BY created_at DESC LIMIT 1`, actionName, suffix, suffix, suffix).Scan(
+		&inst.ID, &inst.ActionName, &inst.Status, &inst.CurrentStep, &inst.InputsJSON,
+		&inst.OutputsJSON, &inst.StateJSON, &inst.WaitingReason, &inst.WaitingCondition,
+		&inst.WaitingOptionsJSON, &inst.ErrorJSON, &inst.IdempotencyKey, &inst.CreatedAt, &inst.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &inst, nil
+}
+
 // FindActionByIdempotencyKey finds an action by name and idempotency key across all statuses (most recent first).
 func (s *Store) FindActionByIdempotencyKey(actionName, idempotencyKey string) (*ActionInstance, error) {
 	if idempotencyKey == "" {

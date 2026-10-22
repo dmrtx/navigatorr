@@ -2442,6 +2442,19 @@ test("declining a candidate is distinct from an error and cannot blindly resume 
  assert.equal(h.run('queuePresentation({status:"completed",batch:{total:3,failed:3,outcome:"failed"},batch_files:{reasons:[feedback.reasons[0]]}}).status'),'Rejected');
 });
 
+test("rejected, cancelled and superseded jobs say what happened to the candidate file",()=>{
+ const h=harness();
+ h.context.job={id:'file',action_name:'transcode_media',status:'failed',error:'transcode candidate rejected by user decision; original file remains untouched; candidate file removed',candidate_cleanup:{reason:'rejected',outcome:'removed',bytes_freed:2500000000}};
+ assert.equal(h.run('queueOutcome(job)'),'Candidate rejected · Original preserved · Candidate file removed (2.50 GB)');
+ assert.equal(h.run('queuePresentation(job).status'),'Rejected');
+ assert.equal(h.run('shortJobReason(job.error)'),'Candidate rejected by you; original kept; candidate file removed');
+ h.context.kept={id:'file',action_name:'transcode_media',status:'cancelled',waiting_reason:'stopped; candidate file kept: replacement review references this candidate',candidate_cleanup:{reason:'cancelled',outcome:'kept',detail:'replacement review references this candidate'}};
+ assert.equal(h.run('queueOutcome(kept)'),'Stopped by user · Candidate file kept: replacement review references this candidate');
+ h.context.superseded={id:'file',action_name:'transcode_media',status:'completed',candidate_cleanup:{reason:'superseded',outcome:'removed',bytes_freed:0}};
+ assert.equal(h.run('queueOutcome(superseded)'),'Replaced by new batch settings · Original preserved · No candidate file was left');
+ assert.equal(h.run('queueOutcome({status:"cancelled"})'),'Stopped by user');
+});
+
 test("completed batch details retain the server's actual stage outcomes",()=>{
  const h=harness();
  h.run('renderStages({status:"completed",batch:{outcome:"failed"},stages:[{name:"resolve_and_inspect",status:"completed"},{name:"schedule_batch",status:"failed",note:"0 converted · 3 failed"},{name:"promote_batch",status:"skip",note:"No eligible candidates"}]})');

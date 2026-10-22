@@ -278,6 +278,10 @@ func (e *Engine) stepPromotePlan(ctx context.Context, ec *ExecutionContext) (Ste
 	if getBool(source.State, "skip_transcode") {
 		return promoteFailed(fmt.Errorf("the source action did not produce a candidate"))
 	}
+	if getBool(source.State, candidateRemovedKey) {
+		cleanup, _ := source.State[candidateCleanupKey].(map[string]any)
+		return promoteFailed(fmt.Errorf("the candidate was removed after it was %s and can no longer be promoted", getString(cleanup, "reason")))
+	}
 	p := &promotionState{SourceActionID: id, Service: getString(ec.Inputs, "service"), SeriesID: seriesID, OriginalPath: getString(source.State, "resolved_path"), CandidatePath: getString(source.State, "candidate_path"), OriginalSHA: getString(source.State, "original_sha256"), Commands: map[string]*promotionCommand{}}
 	p.MovieID = movieID
 	if getString(source.State, "mode") == "compact" {

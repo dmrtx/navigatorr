@@ -251,3 +251,24 @@ func TestDecisionsAppendOnly(t *testing.T) {
 		t.Error("newest-first order broken")
 	}
 }
+
+func TestFindActionByIdempotencyKeySuffixMatchesOnlyTheWholeSource(t *testing.T) {
+	s := openTest(t)
+	for _, inst := range []ActionInstance{
+		{ID: "promote-a", ActionName: "promote_transcode_candidate", Status: "failed", IdempotencyKey: "promote:sonarr-second:source-1"},
+		{ID: "promote-b", ActionName: "promote_transcode_candidate", Status: "completed", IdempotencyKey: "promote:filesystem:other-source-12"},
+		{ID: "other", ActionName: "transcode_media", Status: "completed", IdempotencyKey: "promote:sonarr:source-12"},
+	} {
+		if err := s.CreateActionInstance(inst); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, err := s.FindActionByIdempotencyKeySuffix("promote_transcode_candidate", ":source-1"); err != nil || got == nil || got.ID != "promote-a" {
+		t.Fatalf("promotion under a named service was not found: %+v %v", got, err)
+	}
+	for _, suffix := range []string{":source-12", ":source", ""} {
+		if got, err := s.FindActionByIdempotencyKeySuffix("promote_transcode_candidate", suffix); err != nil || got != nil {
+			t.Fatalf("suffix %q matched another source or action: %+v %v", suffix, got, err)
+		}
+	}
+}

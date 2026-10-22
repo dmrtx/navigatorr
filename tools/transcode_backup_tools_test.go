@@ -24,11 +24,16 @@ func TestTranscodeBackupsToolModes(t *testing.T) {
 	if text := resultText(t, res); !strings.Contains(text, `"items": []`) || !strings.Contains(text, `"page_bytes": 0`) {
 		t.Fatalf("default inventory: %s", text)
 	}
+	res = callTool(t, s, "transcode_backups", map[string]any{"mode": "candidates"})
+	if text := resultText(t, res); res.IsError || !strings.Contains(text, `"items": []`) || !strings.Contains(text, `"page_bytes": 0`) {
+		t.Fatalf("candidate inventory: %s", text)
+	}
 	for _, args := range []map[string]any{
 		{"mode": "clean"},
 		{"mode": "clean", "action_id": "anything"},
 		{"mode": "delete_all"},
 		{"mode": "list", "offset": -1},
+		{"mode": "candidates", "offset": -1},
 	} {
 		res := callTool(t, s, "transcode_backups", args)
 		if res.IsError != true {

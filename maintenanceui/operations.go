@@ -655,7 +655,7 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 	for _, r := range records {
 		key := operationSourceKey(r)
 		if r.inst.ActionName == "transcode_media" && !replaced[key] && !replacedActions[r.inst.ID] {
-			if r.inst.Status == store.ActionStatusCompleted && r.outputs["original_intact"] == true && r.savings.CandidateSavedBytes != nil && !seenCandidates[key] {
+			if r.inst.Status == store.ActionStatusCompleted && r.outputs["original_intact"] == true && operationValue(r, "candidate_removed") != true && r.savings.CandidateSavedBytes != nil && !seenCandidates[key] {
 				page.Savings.CandidateBytes += *r.savings.CandidateSavedBytes
 				seenCandidates[key] = true
 			}
@@ -807,7 +807,10 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 				}
 				job["workflow_actions"] = related
 			}
-			job["candidate_ready"] = r.inst.ActionName == "transcode_media" && r.inst.Status == store.ActionStatusCompleted && operationValue(r, "skip_transcode") != true && operationValue(r, "original_intact") == true && r.savings.CandidateBytes != nil && !replacedActions[r.inst.ID] && !replaced[operationSourceKey(r)]
+			job["candidate_ready"] = r.inst.ActionName == "transcode_media" && r.inst.Status == store.ActionStatusCompleted && operationValue(r, "skip_transcode") != true && operationValue(r, "original_intact") == true && operationValue(r, "candidate_removed") != true && r.savings.CandidateBytes != nil && !replacedActions[r.inst.ID] && !replaced[operationSourceKey(r)]
+			if cleanup := operationMap(operationValue(r, "candidate_cleanup")); cleanup != nil {
+				job["candidate_cleanup"] = cleanup
+			}
 			if r.inst.ActionName == "transcode_media" {
 				job["replaced"] = replacedActions[r.inst.ID] || replaced[operationSourceKey(r)]
 			}

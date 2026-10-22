@@ -34,7 +34,7 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 	}
 	if ec.Decision != "" {
 		if strings.EqualFold(ec.Decision, "reject") || strings.EqualFold(ec.Decision, "cancel") {
-			return StepResult{Status: StepFailed, Error: "transcode candidate rejected by user decision; original file remains untouched"}, nil
+			return rejectedCandidateResult(), nil
 		}
 	}
 	if getString(ec.Inputs, "mode") != "" && (strings.EqualFold(ec.Decision, "accept_loss") || strings.EqualFold(ec.Decision, "approve")) {

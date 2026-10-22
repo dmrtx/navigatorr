@@ -121,7 +121,7 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 								view.Status = child.Status
 							}
 						}
-						view.CandidateReady = !view.RetryPending && child.Status == store.ActionStatusCompleted && operationValue(r, "skip_transcode") != true && operationValue(r, "skipped") != true && operationValue(r, "original_intact") == true && projectOperationSavings(r, time.Now()).CandidateBytes != nil && !reserved
+						view.CandidateReady = !view.RetryPending && child.Status == store.ActionStatusCompleted && operationValue(r, "skip_transcode") != true && operationValue(r, "skipped") != true && operationValue(r, "original_intact") == true && operationValue(r, "candidate_removed") != true && projectOperationSavings(r, time.Now()).CandidateBytes != nil && !reserved
 						view.SizeBudgetOutcome = operationSizeBudgetOutcome(r)
 						for _, service := range []string{"sonarr", "radarr", "filesystem"} {
 							prior, err := st.FindActionByIdempotencyKey("promote_transcode_candidate", "promote:"+service+":"+child.ID)

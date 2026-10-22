@@ -66,7 +66,7 @@ func recordBatchAttempt(ec *ExecutionContext, item *store.TranscodeBatchItem) {
 	item.Status, item.Decision = "queued", "transcode"
 	item.ChildActionID, item.JobID, item.CandidatePath, item.Error = "", "", "", ""
 	item.Attempts = 0
-	item.Reasons = []string{"New settings requested; previous attempt retained in history"}
+	item.Reasons = []string{"New settings requested"}
 }
 
 // A decision before any candidate exists has no review to reject. Retire its
@@ -85,7 +85,7 @@ func (e *Engine) retireBatchDecision(ctx context.Context, child *store.ActionIns
 		canCancel = canCancel || option.Decision == "cancel"
 	}
 	if canCancel {
-		_, err := e.Cancel(ctx, child.ID, "Encoding settings changed; previous attempt retained and original preserved")
+		_, err := e.Cancel(ctx, child.ID, "Encoding settings changed; original preserved")
 		return err
 	}
 	return fmt.Errorf("resolve the previous attempt's decision before changing encoding settings")
@@ -207,6 +207,7 @@ func (e *Engine) ReconfigureBatch(ctx context.Context, id, scope, selectionID, v
 		return nil, fmt.Errorf("no unreplaced files selected")
 	}
 	var changed []store.TranscodeBatchItem
+	var superseded []string
 	for i := range items {
 		item := &items[i]
 		if !selectedKeys[item.ItemKey] {
@@ -251,6 +252,7 @@ func (e *Engine) ReconfigureBatch(ctx context.Context, id, scope, selectionID, v
 			}
 		}
 		if child != nil {
+			superseded = append(superseded, child.ID)
 			child, _ = e.deps.Store.GetActionInstance(child.ID)
 			if child != nil {
 				item.Status = child.Status
@@ -280,6 +282,8 @@ func (e *Engine) ReconfigureBatch(ctx context.Context, id, scope, selectionID, v
 	if err := e.deps.Store.CommitBatchRevision(*inst, owner, changed); err != nil {
 		return nil, err
 	}
+	// The revision is durable: the replaced attempts can never be promoted.
+	e.retireSupersededCandidates(ctx, superseded)
 	e.WakeReconciler()
 	return e.Status(ctx, id)
 }
@@ -287,6 +291,7 @@ func (e *Engine) ReconfigureBatch(ctx context.Context, id, scope, selectionID, v
 func (e *Engine) applyPendingBatchAttempts(ctx context.Context, ec *ExecutionContext, items []store.TranscodeBatchItem) error {
 	pending := stateObject(ec.State, "batch_retry_pending")
 	var changed []store.TranscodeBatchItem
+	var superseded []string
 	for i := range items {
 		item := &items[i]
 		if pending[item.ItemKey] != true {
@@ -305,6 +310,7 @@ func (e *Engine) applyPendingBatchAttempts(ctx context.Context, ec *ExecutionCon
 			}
 		}
 		if child != nil {
+			superseded = append(superseded, child.ID)
 			child, _ = e.deps.Store.GetActionInstance(child.ID)
 			if child != nil {
 				item.Status = child.Status
@@ -324,7 +330,11 @@ func (e *Engine) applyPendingBatchAttempts(ctx context.Context, ec *ExecutionCon
 	}
 	inst.StateJSON = toJSON(ec.State)
 	owner, _ := ctx.Value(actionLeaseOwnerKey{actionID: ec.InstanceID}).(string)
-	return e.deps.Store.CommitBatchRevision(*inst, owner, changed)
+	if err := e.deps.Store.CommitBatchRevision(*inst, owner, changed); err != nil {
+		return err
+	}
+	e.retireSupersededCandidates(ctx, superseded)
+	return nil
 }
 
 func (e *Engine) BatchItemReplacementReserved(item store.TranscodeBatchItem) (bool, error) {
