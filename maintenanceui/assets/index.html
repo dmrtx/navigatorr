@@ -541,31 +541,8 @@
           </div>
           <section id="worker-activity" class="worker-activity" aria-label="Video worker activity">
             <p id="activity-scheduler" class="metadata" role="status"></p>
-            <div class="activity-heading"><strong id="worker-capacity">Checking worker slots…</strong><span id="activity-checked" class="metadata"></span></div>
+            <div class="activity-heading"><strong id="worker-capacity">Checking worker slots…</strong><span class="activity-heading-end"><span id="activity-checked" class="metadata"></span><button id="worker-open-settings" type="button" class="quiet" hidden>Change in Settings</button></span></div>
             <p id="worker-slot-usage" class="metadata" role="status" hidden></p>
-            <div id="worker-parallel" class="worker-parallel" hidden>
-              <strong id="worker-parallel-summary"></strong>
-              <form id="worker-parallel-form">
-                <label>Parallel jobs on this node<input id="parallel-jobs" type="number" min="1" step="1" inputmode="numeric" required /></label>
-                <button id="worker-parallel-apply" type="submit" class="primary">Apply</button>
-              </form>
-              <p id="worker-parallel-limit" class="metadata"></p>
-              <p class="muted">x265 jobs share the CPUs, so two at once are not faster in total; VideoToolbox encodes and quality checks overlap well.</p>
-              <p id="worker-parallel-note" class="metadata" role="status"></p>
-            </div>
-            <details id="worker-slot-split" class="worker-slot-split" hidden>
-              <summary>Assign slots to video and podcast</summary>
-              <form id="worker-slot-form">
-                <div class="form-grid">
-                  <label>Video slots<input id="slot-video" type="number" min="1" step="1" inputmode="numeric" required /></label>
-                  <label>Podcast slots<input id="slot-podcast" type="number" min="1" step="1" inputmode="numeric" required /></label>
-                </div>
-                <p id="worker-slot-ceiling" class="metadata"></p>
-                <p class="muted">Applies when the next job starts. Running jobs are never interrupted, so a pool lowered below its use admits nothing until it drains. A video job running alone uses all CPUs; encodes that run together share them.</p>
-                <div class="submit-actions"><button id="worker-slot-share" type="button" class="quiet">Share all slots</button><button id="worker-slot-apply" type="submit" class="primary">Apply</button></div>
-                <p id="worker-slot-note" class="metadata" role="status"></p>
-              </form>
-            </details>
             <div id="worker-slots" class="worker-slots"></div>
           </section>
           <div id="jobs-list"></div>
@@ -807,6 +784,34 @@
             </div>
           </div>
           <section id="settings-worker" aria-label="Worker and scheduler health"></section>
+          <section id="settings-node" class="node-settings" aria-label="Transcode node" hidden>
+            <div id="worker-parallel" class="node-settings-node">
+              <strong class="node-settings-title">Transcode node</strong>
+              <div class="settings-row">
+                <span>Parallel jobs<span id="worker-parallel-limit" class="metadata"></span></span>
+                <strong id="worker-parallel-summary" hidden></strong>
+                <form id="worker-parallel-form" class="inline-form">
+                  <input id="parallel-jobs" aria-label="Parallel jobs on this node" type="number" min="1" step="1" inputmode="numeric" required />
+                  <button id="worker-parallel-apply" type="submit" class="primary">Apply</button>
+                </form>
+              </div>
+              <p class="muted">x265 jobs share the CPUs, so two at once are not faster in total; VideoToolbox encodes and quality checks overlap well.</p>
+              <p id="worker-parallel-note" class="metadata" role="status"></p>
+              <details id="worker-slot-split" class="worker-slot-split" hidden>
+                <summary>Assign slots to video and podcast</summary>
+                <form id="worker-slot-form">
+                  <div class="form-grid">
+                    <label>Video slots<input id="slot-video" type="number" min="1" step="1" inputmode="numeric" required /></label>
+                    <label>Podcast slots<input id="slot-podcast" type="number" min="1" step="1" inputmode="numeric" required /></label>
+                  </div>
+                  <p id="worker-slot-ceiling" class="metadata"></p>
+                  <p class="muted">Applies when the next job starts. Running jobs are never interrupted, so a pool lowered below its use admits nothing until it drains. A video job running alone uses all CPUs; encodes that run together share them.</p>
+                  <div class="submit-actions"><button id="worker-slot-share" type="button" class="quiet">Share all slots</button><button id="worker-slot-apply" type="submit" class="primary">Apply</button></div>
+                  <p id="worker-slot-note" class="metadata" role="status"></p>
+                </form>
+              </details>
+            </div>
+          </section>
           <div class="settings-row">
             <span
               >Shared presets<span class="metadata">New jobs only</span></span

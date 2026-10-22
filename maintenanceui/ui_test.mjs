@@ -1687,13 +1687,13 @@ test("parallel jobs on the node are always shown and editable from one, and a lo
   h.context.activity={available:true,activity:{details_available:true,worker_slots_total:1,worker_slots_used:1,jobs:[],
     slots:{ceiling:1,ceiling_limit:10,ceiling_source:"config",host_cpus:10,split:false,video:{total:1,used:1},podcast:{total:1,used:0}}}};
   h.run('renderWorkerActivity(activity)');
-  // One job: the editor is visible, not tucked away; only the split needs two.
-  assert.equal(h.elements.get("worker-parallel").hidden,false);
-  assert.equal(h.elements.get("worker-parallel-summary").textContent,"Parallel jobs on this node: 1");
+  // One job: the editor is visible in Settings, not tucked away; only the split needs two.
+  assert.equal(h.elements.get("settings-node").hidden,false);
+  assert.equal(h.elements.get("worker-parallel-summary").hidden,true);
   assert.equal(h.elements.get("worker-parallel-form").hidden,false);
   assert.equal(h.elements.get("parallel-jobs").value,1);
   assert.equal(h.elements.get("parallel-jobs").max,10);
-  assert.match(h.elements.get("worker-parallel-limit").textContent,/Choose 1 to 10\. From the worker config\./);
+  assert.match(h.elements.get("worker-parallel-limit").textContent,/^1–10 · From the worker config$/);
   assert.equal(h.elements.get("worker-slot-split").hidden,true);
   await h.run('saveParallelJobs(2)');
   assert.deepEqual(JSON.parse(JSON.stringify(h.context.calls[0])),["worker-slots",{video_slots:0,podcast_slots:0,ceiling:2}]);
@@ -1701,7 +1701,7 @@ test("parallel jobs on the node are always shown and editable from one, and a lo
   // Raised and split: the split editor appears and a lower value warns before saving.
   h.run('activity.activity.worker_slots_total=3;activity.activity.slots={ceiling:3,ceiling_limit:10,ceiling_source:"override",host_cpus:10,split:true,video:{total:2,used:1},podcast:{total:1,used:0}};renderWorkerActivity(activity)');
   assert.equal(h.elements.get("worker-slot-split").hidden,false);
-  assert.match(h.elements.get("worker-parallel-limit").textContent,/Set here; overrides the worker config\./);
+  assert.match(h.elements.get("worker-parallel-limit").textContent,/^1–10 · Set here; overrides the worker config$/);
   assert.equal(h.elements.get("parallel-jobs").value,3);
   h.elements.get("parallel-jobs").value=2;
   h.elements.get("parallel-jobs").listeners.get("input")();
@@ -1716,17 +1716,69 @@ test("parallel jobs on the node are always shown and editable from one, and a lo
   assert.deepEqual(JSON.parse(JSON.stringify(h.context.calls[1][1])),{video_slots:2,podcast_slots:1,ceiling:4});
   // A worker that predates the setting shows the value read-only and says why.
   h.run('activity.activity.slots={ceiling:2,split:false,video:{total:2,used:0},podcast:{total:2,used:0}};renderWorkerActivity(activity)');
-  assert.equal(h.elements.get("worker-parallel-summary").textContent,"Parallel jobs on this node: 2");
+  assert.equal(h.elements.get("worker-parallel-summary").textContent,"2");
+  assert.equal(h.elements.get("worker-parallel-summary").hidden,false);
   assert.equal(h.elements.get("worker-parallel-form").hidden,true);
   assert.match(h.elements.get("worker-parallel-limit").textContent,/predates setting this here\. Update it/);
   // One that predates slots altogether still shows its total.
   h.run('activity.activity.slots=undefined;activity.activity.worker_slots_total=1;renderWorkerActivity(activity)');
-  assert.equal(h.elements.get("worker-parallel").hidden,false);
-  assert.equal(h.elements.get("worker-parallel-summary").textContent,"Parallel jobs on this node: 1");
+  assert.equal(h.elements.get("settings-node").hidden,false);
+  assert.equal(h.elements.get("worker-parallel-summary").textContent,"1");
   assert.equal(h.elements.get("worker-parallel-form").hidden,true);
   // Disconnected: nothing to show.
   h.run('renderWorkerActivity({available:false})');
-  assert.equal(h.elements.get("worker-parallel").hidden,true);
+  assert.equal(h.elements.get("settings-node").hidden,true);
+});
+
+test("activity stays read-only and links to the node settings only when something there is editable", () => {
+  const h=harness();
+  h.context.selected=[];
+  h.run('selectTab=tab=>selected.push(tab)');
+  h.context.activity={available:true,activity:{details_available:true,worker_slots_total:2,worker_slots_used:0,jobs:[],
+    slots:{ceiling:2,ceiling_limit:10,ceiling_source:"config",host_cpus:10,split:false,video:{total:1,used:0},podcast:{total:1,used:0}}}};
+  h.run('renderWorkerActivity(activity)');
+  // Activity keeps the status; the editors are in Settings and the link leads there.
+  assert.match(h.elements.get("worker-capacity").textContent,/0\/2 occupied/);
+  assert.equal(h.elements.get("worker-slots").children.length,2);
+  assert.equal(h.elements.get("worker-open-settings").hidden,false);
+  assert.equal(h.elements.get("settings-node").hidden,false);
+  assert.equal(h.elements.get("worker-slot-split").hidden,false);
+  h.elements.get("worker-open-settings").listeners.get("click")();
+  assert.deepEqual(JSON.parse(JSON.stringify(h.context.selected)),["advanced"]);
+  // Below two parallel jobs there is no split to edit, but the ceiling still is.
+  h.run('activity.activity.worker_slots_total=1;activity.activity.slots={ceiling:1,ceiling_limit:10,ceiling_source:"config",split:false,video:{total:1,used:0},podcast:{total:1,used:0}};renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("worker-slot-split").hidden,true);
+  assert.equal(h.elements.get("worker-open-settings").hidden,false);
+  // An old worker reports no ceiling limit and one job: read-only, nothing to link to.
+  h.run('activity.activity.slots={ceiling:1,split:false,video:{total:1,used:0},podcast:{total:1,used:0}};renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("worker-parallel-form").hidden,true);
+  assert.equal(h.elements.get("worker-parallel-summary").hidden,false);
+  assert.match(h.elements.get("worker-parallel-limit").textContent,/predates setting this here/);
+  assert.equal(h.elements.get("worker-slot-split").hidden,true);
+  assert.equal(h.elements.get("worker-open-settings").hidden,true);
+  // Disconnected: no editor and no link.
+  h.run('renderWorkerActivity({available:false})');
+  assert.equal(h.elements.get("worker-open-settings").hidden,true);
+});
+
+test("opening Settings refreshes the worker report that fills the node block", () => {
+  const h=harness();
+  h.context.refreshed=0;
+  h.run('refreshWorkerActivity=async()=>{refreshed++};state.activityCheckedAt=0;selectTab("advanced")');
+  assert.equal(h.context.refreshed,1);
+  h.run('state.activityCheckedAt=Date.now();selectTab("advanced")');
+  assert.equal(h.context.refreshed,1);
+});
+
+test("the parallel jobs editor and the slot split live in Settings, not Activity", () => {
+  const section=(id)=>{const start=markup.indexOf(`<section id="${id}"`);return markup.slice(start,markup.indexOf("</section>",start))};
+  const activity=section("worker-activity"), settings=section("settings-node");
+  for (const id of ["parallel-jobs","worker-parallel-form","worker-slot-form","worker-slot-split"]) {
+    assert.ok(!activity.includes(`id="${id}"`),`${id} still in Activity`);
+    assert.ok(settings.includes(`id="${id}"`),`${id} missing from the node settings`);
+  }
+  assert.ok(activity.includes('id="worker-open-settings"'));
+  assert.ok(markup.indexOf('id="settings-node"') > markup.indexOf('<section id="advanced"'));
 });
 
 test("changing a root blocks old continuation controls until the new first page loads", async () => {
