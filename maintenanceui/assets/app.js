@@ -5445,13 +5445,21 @@ function regrabWarning(notice) {
   if (tracking.length) box.append(node("p", `Library tracking now: ${tracking.join(" · ")}`, "metadata"));
   return box;
 }
-async function readBatchPromotionNotice(id) {
+// Only a notice the server never stored (non-compact batch) means "no
+// warning". Any other failure, or a notice computed for another plan, stops
+// the review rather than letting a replacement be approved unwarned.
+async function readBatchPromotionNotice(id, digest) {
+  let notice;
   try {
-    const notice = (await tool("action_detail", { id, section: "state", key: "batch_promotion_notice", chunk: 0 })).data;
-    return notice && typeof notice === "object" ? notice : null;
-  } catch {
-    return null;
+    notice = (await tool("action_detail", { id, section: "state", key: "batch_promotion_notice", chunk: 0 })).data;
+  } catch (error) {
+    if (/not found in section/.test(error?.message || "")) return null;
+    throw new Error("Cannot verify the re-grab warning. Reopen the replacement review.");
   }
+  if (!notice || typeof notice !== "object") return null;
+  if (notice.plan_digest !== undefined && notice.plan_digest !== digest)
+    throw new Error("The re-grab warning belongs to an earlier plan. Reopen the replacement review.");
+  return notice;
 }
 function replacementReady(job) {
   const p = job?.promotion;
@@ -5601,7 +5609,7 @@ async function readBatchPromotionPlan(id) {
 async function reviewBatchPromotion(id) {
   const authRevision = state.authRevision;
   const plan = await readBatchPromotionPlan(id);
-  const notice = await readBatchPromotionNotice(id);
+  const notice = await readBatchPromotionNotice(id, plan.digest);
   if (authRevision !== state.authRevision || $("workspace").hidden) return;
   state.batchApproval = {id,digest:plan.digest};
   const host=$("batch-review-data");

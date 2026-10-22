@@ -51,6 +51,8 @@ func testBatchLifecycleTwoCandidatesOneApprovalAndRestart(t *testing.T, dropResc
 	}
 	probe := strings.ReplaceAll(fakeMultiProbeJSON, `"bits_per_raw_sample": "10"`, `"bits_per_raw_sample": "8"`)
 	probe = strings.ReplaceAll(probe, `"pix_fmt": "yuv420p"`, `"pix_fmt": "yuv420p", "r_frame_rate": "24/1", "avg_frame_rate": "24/1"`)
+	// Validation measures the candidate's audio packets as well.
+	probe = strings.Replace(probe, "case \"$*\" in\n", "case \"$*\" in\n  *-show_packets*) echo 'stream_index=1|pts_time=0.000000|duration_time=1420.000000|size=1000'; exit 0;;\n", 1)
 	// Renamed final files must continue to probe as the encoded HEVC output.
 	probe = strings.Replace(probe, "*candidate*)", "*candidate*|*final*)", 1)
 	if err := os.WriteFile(h.engine.deps.Ffprobe, []byte(probe), 0700); err != nil {

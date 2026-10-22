@@ -123,6 +123,13 @@ func (e *Engine) PrepareBatchPromotion(ctx context.Context, id, version, receipt
 	delete(ec.State, "batch_promotion")
 	delete(ec.Outputs, "batch_promotion")
 	delete(ec.State, "batch_promotion_commands")
+	// The notice belongs to one plan: replace any left by an earlier plan so
+	// the review never shows another selection's tracking, or none at all.
+	if notice := e.batchPromotionNotice(ctx, plan); notice != nil {
+		ec.State["batch_promotion_notice"] = notice
+	} else {
+		delete(ec.State, "batch_promotion_notice")
+	}
 	ec.State["post_batch_promotion"], ec.State["batch_promotion_plan"], ec.State["batch_promotion_approved"] = true, plan, false
 	stateObject(ec.State, "batch_review_receipts")[receipt] = true
 	inst.Status, inst.CurrentStep = StatusWaitingDecision, 2

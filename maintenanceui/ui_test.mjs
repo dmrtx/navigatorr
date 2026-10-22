@@ -2525,6 +2525,30 @@ test("compact replacement reviews warn about re-grabs and show read-only trackin
   assert.doesNotMatch(text(h.elements.get("batch-review-data")), /download the original again/);
 });
 
+test("the batch review refuses to open without a verified re-grab notice for its own plan", async () => {
+  const h = harness();
+  const text = el => [el, ...el.children.flatMap(function all(e) { return [e, ...e.children.flatMap(all)]; })].map(e => e.textContent).filter(Boolean).join(" ");
+  h.context.plan = {batch_id: "batch-a", digest: "sha256:plan", members: [{item_key: "e1", original_path: "/source.mkv", candidate_path: "/candidate.mkv"}]};
+  const open = async (read) => {
+    h.context.read = read;
+    h.run('tool = async (name, args) => args.key === "batch_promotion_notice" ? read(args) : ({data: plan});');
+    return h.run('reviewBatchPromotion("batch-a")');
+  };
+  // A compact batch: the notice for this plan is shown before approving.
+  await open(async () => ({data: {regrab_warning: "May download the original again.", plan_digest: "sha256:plan"}}));
+  assert.match(text(h.elements.get("batch-review-data")), /download the original again/);
+  assert.equal(h.run("state.batchApproval.digest"), "sha256:plan");
+  // The server never stored one (a batch that is not compact): no warning.
+  h.run("state.batchApproval = null");
+  await open(async () => { throw new Error('key "batch_promotion_notice" not found in section state (available keys: [x])'); });
+  assert.equal(h.run("state.batchApproval.digest"), "sha256:plan");
+  // Any other failure to read it, or a notice from another plan, stops the review.
+  h.run("state.batchApproval = null");
+  await assert.rejects(open(async () => { throw new Error("network down"); }), /Cannot verify the re-grab warning/);
+  await assert.rejects(open(async () => ({data: {regrab_warning: "Old.", plan_digest: "sha256:earlier"}})), /earlier plan/);
+  assert.equal(h.run("state.batchApproval"), null);
+});
+
 test("an all-skipped retry selects the saved files and requires another profile without sending work",async()=>{
   const h=harness(), reads=[], writes=[];
   h.context.reads=reads;h.context.writes=writes;

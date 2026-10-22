@@ -33,7 +33,7 @@ func TestDetailedValidationChecksLayoutOnlyForCompactConversions(t *testing.T) {
 			channels := map[string]string{"stereo": "2", "5.1": "6", "5.1(side)": "6", "7.1": "8"}[tc.srcLayout]
 			probe := `{"streams": [{"index": 0, "codec_type": "video", "codec_name": "hevc", "pix_fmt": "yuv420p", "width": 1920, "height": 1080, "bits_per_raw_sample": "8"},{"index": 1, "codec_type": "audio", "codec_name": "` + tc.outCodec + `", "channels": ` + channels + `, "channel_layout": "` + tc.outLayout + `"}], "format": {"format_name": "matroska,webm", "duration": "1420"}}`
 			ffprobe := filepath.Join(dir, "ffprobe")
-			if err := os.WriteFile(ffprobe, []byte("#!/bin/sh\ncat <<'JSON'\n"+probe+"\nJSON\n"), 0o700); err != nil {
+			if err := os.WriteFile(ffprobe, []byte(probeScriptWithPackets(t, probe)), 0o700); err != nil {
 				t.Fatal(err)
 			}
 			n := map[string]int{"2": 2, "6": 6, "8": 8}[channels]
@@ -96,7 +96,7 @@ func TestDetailedValidationMultiTrackAudio(t *testing.T) {
 			}
 			probe := `{"streams": [` + streams + `], "format": {"format_name": "matroska,webm", "duration": "1420"}}`
 			ffprobe := filepath.Join(dir, "ffprobe")
-			if err := os.WriteFile(ffprobe, []byte("#!/bin/sh\ncat <<'JSON'\n"+probe+"\nJSON\n"), 0o700); err != nil {
+			if err := os.WriteFile(ffprobe, []byte(probeScriptWithPackets(t, probe)), 0o700); err != nil {
 				t.Fatal(err)
 			}
 			var audio []mediainspect.DetailedStream

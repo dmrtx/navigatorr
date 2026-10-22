@@ -123,3 +123,56 @@ func TestBatchPromotionCountsBelowTargetMembers(t *testing.T) {
 		t.Fatalf("counted %d below-target members, want 1", n)
 	}
 }
+
+// The review prepared from the batch dialog stores the notice for exactly its
+// own plan: a compact selection gets the warning and the series' tracking,
+// and a notice left by an earlier plan never survives into a plan that needs
+// none, or into one it does not describe.
+func TestPrepareBatchPromotionStoresTheRegrabNotice(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		compact bool
+	}{{"compact", true}, {"not compact", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newPromotionHarness(t)
+			h.tracking = map[string]any{"monitored": false, "qualityProfileId": 4}
+			if tc.compact {
+				markCompactSource(t, h)
+			}
+			id := seedFinishedReviewBatch(t, h, "sonarr")
+			inst, err := h.st.GetActionInstance(id)
+			if err != nil || inst == nil {
+				t.Fatal(err)
+			}
+			ec := parseExecutionContext(inst, h.engine)
+			ec.State["batch_promotion_notice"] = map[string]any{"regrab_warning": "stale", "plan_digest": "sha256:earlier", "arr_monitored": true}
+			inst.StateJSON = toJSON(ec.State)
+			if err := h.st.UpdateActionInstance(*inst); err != nil {
+				t.Fatal(err)
+			}
+			review, err := h.engine.BatchCandidates(context.Background(), id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := h.engine.PrepareBatchPromotion(context.Background(), id, review.Version, "request-one", []string{"epfile-101"}); err != nil {
+				t.Fatal(err)
+			}
+			after, _ := h.st.GetActionInstance(id)
+			state := parseExecutionContext(after, h.engine).State
+			plan := getBatchPromotionPlan(state["batch_promotion_plan"])
+			notice, _ := state["batch_promotion_notice"].(map[string]any)
+			if !tc.compact {
+				if notice != nil {
+					t.Fatalf("stale notice survived a plan that needs none: %v", notice)
+				}
+				return
+			}
+			if notice["regrab_warning"] != CompactRegrabWarning || notice["plan_digest"] != plan.Digest || notice["arr_monitored"] != false || notice["arr_quality_profile"] != "HD-1080p" {
+				t.Fatalf("notice %v for plan %s", notice, plan.Digest)
+			}
+			if len(h.mutationOrder) != 0 {
+				t.Fatalf("preparing the review changed the library: %v", h.mutationOrder)
+			}
+		})
+	}
+}
