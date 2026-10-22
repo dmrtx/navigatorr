@@ -2572,11 +2572,12 @@ function detailFacts(job) {
 // post-encode checks and worker messages keep telemetry()'s richer text.
 function detailProgress(job) {
   const w = job.worker;
-  // Without a worker the stepper already names the current step.
-  if (!w && job.stages?.[job.current_step]) return null;
-  if (!w || job.activities?.length > 1 || batchProgress(job) || postEncodeWork(job)) return telemetry(job);
   const observation = workerProgressObservation(job);
-  if (observation.message) return telemetry(job);
+  // A wait, an offline worker, the original's check or a batch says more than
+  // the stepper does; otherwise, without a worker, the stepper already names
+  // the current step.
+  if (job.activities?.length > 1 || batchProgress(job) || postEncodeWork(job) || observation.message) return telemetry(job);
+  if (!w) return job.stages?.[job.current_step] ? null : telemetry(job);
   const phase = w.transcode_phase || w.phase;
   const measured = w.progress ?? w.last_known_progress?.progress;
   const known = !["queued", "preparing"].includes(phase) && measured != null && Number.isFinite(Number(measured));
@@ -4592,9 +4593,10 @@ async function refreshDetail() {
     if (progress) summary.append(progress);
     const stepper = renderStepper(job);
     if (stepper) summary.append(stepper);
-    // The chips already carry a running file's size and encode, so its summary
-    // line is left out then; the outcome dedupe below still counts it as shown.
-    if (!(presentation.showTelemetry && facts.length)) summary.append(node("p", presentation.summary, "muted"));
+    // The chips already carry a running conversion's size and encode, so its
+    // summary line is left out then; the outcome dedupe below still counts it
+    // as shown. Other jobs, such as a replacement, keep their line.
+    if (!(presentation.showTelemetry && facts.length && job.action_name === "transcode_media")) summary.append(node("p", presentation.summary, "muted"));
     // The summary line already says why a file was skipped. An outcome line that
     // only repeats text already shown is left out, so the reason appears once.
     const shownOutcomes = [presentation.summary];

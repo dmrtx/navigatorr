@@ -4905,6 +4905,18 @@ test("job details have one progress line with the worker's heartbeat", async () 
   assert.ok(silentDots.length === 0 || silentDots[0].textContent === "Worker silent");
 });
 
+test("job details without a worker still say why the job waits or what it checks", async () => {
+  const text = (n) => [n.textContent || "", ...(n.children || []).map(text)].join(" ");
+  const waiting = await openDetail(detailJob({ status: "waiting_external", worker: undefined, waiting_condition: "worker_busy", work: { phase: "waiting_for_worker", queue_position: 3 } }));
+  assert.match(text(waiting.elements.get("detail-summary")), /running as many jobs as it allows.*2 jobs are ahead of it in line/);
+  const offline = await openDetail(detailJob({ worker: undefined, waiting_condition: "worker_unreachable" }));
+  assert.match(text(offline.elements.get("detail-summary")), /Worker unreachable\. Retrying connection automatically\./);
+  const checking = await openDetail(detailJob({ worker: undefined, work: { phase: "verifying_original", bytes_read: 100, total_bytes: 1000 } }));
+  assert.match(text(checking.elements.get("detail-summary")), /100 B \/ 1(\.0)? KB/);
+  const plain = await openDetail(detailJob({ worker: undefined }));
+  assert.equal(nodesWithClass(plain.elements.get("detail-summary"), "detail-progress").length + nodesWithClass(plain.elements.get("detail-summary"), "workflow-progress").length, 0);
+});
+
 test("job details show the pipeline as a stepper and name the current step", async () => {
   const h = await openDetail(detailJob());
   const [stepper] = nodesWithClass(h.elements.get("detail-summary"), "job-steps");
