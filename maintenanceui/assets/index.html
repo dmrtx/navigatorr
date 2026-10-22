@@ -313,22 +313,52 @@
               <fieldset id="processing-goal" class="processing-goal">
                 <legend>Choose your goal</legend>
                 <p id="source-profile" class="metadata source-profile" role="status" hidden></p>
-                <label><input type="radio" name="processing-mode" value="size" checked /><span><strong>Save space</strong><small>Use it for most files. Same look, at least 15% smaller; lossless audio becomes AAC.</small><em id="goal-note-size" class="goal-note" hidden></em></span></label>
-                <div id="hardware-option" class="goal-options" hidden>
-                  <label class="check"><input id="allow-hardware" type="checkbox" checked /><span>Use the media engine (faster)</span></label>
+                <div class="goal-card">
+                  <label class="goal-head"><input type="radio" name="processing-mode" value="size" checked /><span class="goal-text"><strong class="goal-title">Save space</strong><small class="goal-desc">Use it for most files. Same look, at least 15% smaller; lossless audio becomes AAC.</small><em id="goal-note-size" class="goal-note" hidden></em></span></label>
+                  <div class="goal-body">
+                    <div id="hardware-option" class="goal-option" hidden>
+                      <span id="size-engine-label" class="goal-option-label">Encoder</span>
+                      <div class="segmented" role="radiogroup" aria-labelledby="size-engine-label">
+                        <label><input type="radio" name="size-engine" value="fast" checked /><span>Fast · media engine</span></label>
+                        <label><input type="radio" name="size-engine" value="small" /><span>Smallest · x265</span></label>
+                      </div>
+                      <input id="allow-hardware" type="checkbox" checked hidden />
+                    </div>
+                    <div id="size-budget-option" class="goal-option" hidden>
+                      <span id="size-budget-label" class="goal-option-label">Size limit</span>
+                      <div class="segmented" role="radiogroup" aria-labelledby="size-budget-label">
+                        <label><input type="radio" name="size-budget-limit" value="" checked /><span>None</span></label>
+                        <label><input type="radio" name="size-budget-limit" value="siblings" /><span>Like other episodes</span></label>
+                        <label><input type="radio" name="size-budget-limit" value="fixed" /><span>Fixed</span></label>
+                      </div>
+                      <select id="size-budget-kind" hidden><option value="">None</option><option value="percent">% of original</option><option value="gb">GB</option><option value="siblings">Match other episodes</option></select>
+                      <div id="size-budget-fixed" class="budget-fields" hidden>
+                        <span class="budget-prefix">At most</span>
+                        <label id="size-budget-gb-label" class="budget-input" hidden><span class="sr-only">Limit in GB</span><input id="size-budget-gb" type="number" min="0.05" step="0.05" inputmode="decimal" placeholder="1.5" /></label>
+                        <label id="size-budget-percent-label" class="budget-input" hidden><span class="sr-only">Limit as a percent of the original</span><input id="size-budget-percent" type="number" min="5" max="85" step="1" inputmode="decimal" placeholder="33" /></label>
+                        <select id="size-budget-unit" aria-label="Limit unit"><option value="gb">GB</option><option value="percent">% of the original</option></select>
+                      </div>
+                      <div id="size-budget-multiplier-label" class="budget-fields" hidden>
+                        <span class="budget-prefix">Up to</span>
+                        <span class="stepper"><button id="size-budget-multiplier-down" type="button" aria-label="Lower the multiplier">−</button><input id="size-budget-multiplier" type="number" min="1" max="4" step="0.1" value="1.5" inputmode="decimal" aria-label="Multiplier of the other episodes' bitrate" /><button id="size-budget-multiplier-up" type="button" aria-label="Raise the multiplier">+</button></span>
+                        <span class="budget-prefix">× their bitrate</span>
+                      </div>
+                      <p id="size-budget-readout" class="goal-readout" role="status" hidden></p>
+                      <p class="muted size-budget-help">The whole file is encoded to fit the limit, and the measured quality is shown.</p>
+                    </div>
+                  </div>
                 </div>
-                <div id="size-budget-option" class="goal-options" hidden>
-                  <label class="goal-field">Size limit <select id="size-budget-kind"><option value="">None</option><option value="percent">% of original</option><option value="gb">GB</option><option value="siblings">Match other episodes</option></select></label>
-                  <label id="size-budget-percent-label" class="goal-inline" hidden>At most <input id="size-budget-percent" type="number" min="5" max="85" step="1" inputmode="decimal" placeholder="33" /> % of the original</label>
-                  <label id="size-budget-gb-label" class="goal-inline" hidden>At most <input id="size-budget-gb" type="number" min="0.05" step="0.05" inputmode="decimal" placeholder="1.5" /> GB</label>
-                  <label id="size-budget-multiplier-label" class="goal-inline" hidden>Up to <input id="size-budget-multiplier" type="number" min="1" max="4" step="0.1" value="1.5" inputmode="decimal" /> × other episodes' bitrate</label>
-                  <p class="muted size-budget-help">The whole file is encoded to fit the limit, and the measured quality is shown.</p>
+                <div class="goal-card">
+                  <label class="goal-head"><input type="radio" name="processing-mode" value="compact" /><span class="goal-text"><strong class="goal-title">Shrink to 1080p SDR</strong><small class="goal-desc">Use it for 4K or HDR you don't need in 4K. At least 30% smaller; HDR is removed.</small><em id="goal-note-compact" class="goal-note" hidden></em></span></label>
                 </div>
-                <label><input type="radio" name="processing-mode" value="compact" /><span><strong>Shrink to 1080p SDR</strong><small>Use it for 4K or HDR you don't need in 4K. At least 30% smaller; HDR is removed.</small><em id="goal-note-compact" class="goal-note" hidden></em></span></label>
                 <details id="more-goals" class="more-goals">
                   <summary>More goals</summary>
-                  <label><input type="radio" name="processing-mode" value="quality" /><span><strong>Strict quality</strong><small>Use it when picture quality matters more than space; may save little.</small><em id="goal-note-quality" class="goal-note" hidden></em></span></label>
-                  <label><input type="radio" name="processing-mode" value="x265_preserve" /><span><strong>Convert to HEVC</strong><small>Use it to make a library HEVC-only; HEVC files are left alone.</small><em id="goal-note-x265_preserve" class="goal-note" hidden></em></span></label>
+                  <div class="goal-card">
+                    <label class="goal-head"><input type="radio" name="processing-mode" value="quality" /><span class="goal-text"><strong class="goal-title">Strict quality</strong><small class="goal-desc">Use it when picture quality matters more than space; may save little.</small><em id="goal-note-quality" class="goal-note" hidden></em></span></label>
+                  </div>
+                  <div class="goal-card">
+                    <label class="goal-head"><input type="radio" name="processing-mode" value="x265_preserve" /><span class="goal-text"><strong class="goal-title">Convert to HEVC</strong><small class="goal-desc">Use it to make a library HEVC-only; HEVC files are left alone.</small><em id="goal-note-x265_preserve" class="goal-note" hidden></em></span></label>
+                  </div>
                 </details>
               </fieldset>
               <p id="goal-overridden" class="goal-overridden" role="status" hidden>Goal not used: a technical profile is on in Advanced below. Turn it off to process with this goal.</p>
@@ -924,14 +954,34 @@
       <form id="reconfigure-form" hidden>
         <label id="reconfigure-scope-label">Apply to<select id="reconfigure-scope"></select></label>
         <label id="reconfigure-mode-label" hidden>Goal<select id="reconfigure-mode"><option value="size">Save space · At least 15% smaller</option><option value="compact">Shrink to 1080p SDR · At least 30% smaller, HDR removed</option><optgroup label="More goals"><option value="quality">Strict quality · May save little</option><option value="x265_preserve">Convert to HEVC · HEVC files are left alone</option></optgroup></select></label>
-        <div id="reconfigure-hardware-option" class="goal-options" hidden>
-          <label class="check"><input id="reconfigure-hardware" type="checkbox" checked /><span>Use the media engine (faster)</span></label>
+        <div id="reconfigure-hardware-option" class="goal-option" hidden>
+          <span id="reconfigure-engine-label" class="goal-option-label">Encoder</span>
+          <div class="segmented" role="radiogroup" aria-labelledby="reconfigure-engine-label">
+            <label><input type="radio" name="reconfigure-engine" value="fast" checked /><span>Fast · media engine</span></label>
+            <label><input type="radio" name="reconfigure-engine" value="small" /><span>Smallest · x265</span></label>
+          </div>
+          <input id="reconfigure-hardware" type="checkbox" checked hidden />
         </div>
-        <div id="reconfigure-budget-option" class="goal-options" hidden>
-          <label class="goal-field">Size limit <select id="reconfigure-budget-kind"><option value="">None</option><option value="percent">% of original</option><option value="gb">GB</option><option value="siblings">Match other episodes</option></select></label>
-          <label id="reconfigure-budget-percent-label" class="goal-inline" hidden>At most <input id="reconfigure-budget-percent" type="number" min="5" max="85" step="1" inputmode="decimal" placeholder="33" /> % of the original</label>
-          <label id="reconfigure-budget-gb-label" class="goal-inline" hidden>At most <input id="reconfigure-budget-gb" type="number" min="0.05" step="0.05" inputmode="decimal" placeholder="1.5" /> GB</label>
-          <label id="reconfigure-budget-multiplier-label" class="goal-inline" hidden>Up to <input id="reconfigure-budget-multiplier" type="number" min="1" max="4" step="0.1" value="1.5" inputmode="decimal" /> × other episodes' bitrate</label>
+        <div id="reconfigure-budget-option" class="goal-option" hidden>
+          <span id="reconfigure-budget-label" class="goal-option-label">Size limit</span>
+          <div class="segmented" role="radiogroup" aria-labelledby="reconfigure-budget-label">
+            <label><input type="radio" name="reconfigure-budget-limit" value="" checked /><span>None</span></label>
+            <label><input type="radio" name="reconfigure-budget-limit" value="siblings" /><span>Like other episodes</span></label>
+            <label><input type="radio" name="reconfigure-budget-limit" value="fixed" /><span>Fixed</span></label>
+          </div>
+          <select id="reconfigure-budget-kind" hidden><option value="">None</option><option value="percent">% of original</option><option value="gb">GB</option><option value="siblings">Match other episodes</option></select>
+          <div id="reconfigure-budget-fixed" class="budget-fields" hidden>
+            <span class="budget-prefix">At most</span>
+            <label id="reconfigure-budget-gb-label" class="budget-input" hidden><span class="sr-only">Limit in GB</span><input id="reconfigure-budget-gb" type="number" min="0.05" step="0.05" inputmode="decimal" placeholder="1.5" /></label>
+            <label id="reconfigure-budget-percent-label" class="budget-input" hidden><span class="sr-only">Limit as a percent of the original</span><input id="reconfigure-budget-percent" type="number" min="5" max="85" step="1" inputmode="decimal" placeholder="33" /></label>
+            <select id="reconfigure-budget-unit" aria-label="Limit unit"><option value="gb">GB</option><option value="percent">% of the original</option></select>
+          </div>
+          <div id="reconfigure-budget-multiplier-label" class="budget-fields" hidden>
+            <span class="budget-prefix">Up to</span>
+            <span class="stepper"><button id="reconfigure-budget-multiplier-down" type="button" aria-label="Lower the multiplier">−</button><input id="reconfigure-budget-multiplier" type="number" min="1" max="4" step="0.1" value="1.5" inputmode="decimal" aria-label="Multiplier of the other episodes' bitrate" /><button id="reconfigure-budget-multiplier-up" type="button" aria-label="Raise the multiplier">+</button></span>
+            <span class="budget-prefix">× their bitrate</span>
+          </div>
+          <p id="reconfigure-budget-readout" class="goal-readout" role="status" hidden></p>
           <p class="muted size-budget-help">The whole file is encoded to fit the limit, and the measured quality is shown.</p>
         </div>
         <label>Profile<select id="reconfigure-profile" required aria-describedby="reconfigure-profile-note"></select></label>
@@ -977,8 +1027,14 @@
       </div>
     </dialog>
     <dialog id="job-detail" aria-labelledby="job-detail-title">
-      <div class="dialog-heading">
+      <div class="dialog-heading detail-heading">
         <h2 id="job-detail-title">Job details</h2>
+        <button id="copy-detail-path" class="icon-button" type="button" aria-label="Copy file path" title="Copy file path" hidden>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="9" y="9" width="11" height="11" rx="2" /><path d="M5 15V6a2 2 0 0 1 2-2h9" />
+          </svg>
+        </button>
+        <span id="detail-status" class="detail-status"></span>
         <button id="close-detail" class="icon-button" aria-label="Close">
           ×
         </button>
@@ -988,13 +1044,12 @@
       </p>
       <p id="detail-command-announcer" class="sr-only" role="status" aria-live="polite"></p>
       <div id="detail-summary"></div>
-      <ol id="detail-stages" class="stage-list"></ol>
+      <div id="detail-controls" class="submit-actions"></div>
       <div id="detail-related" class="workflow-history"></div>
       <section id="detail-commands" class="command-history" aria-labelledby="detail-commands-title" hidden>
         <h3 id="detail-commands-title">What you did to this job</h3>
         <ol id="detail-command-list"></ol>
       </section>
-      <div id="detail-controls" class="submit-actions"></div>
       <section id="batch-items-panel" hidden>
         <h3>Batch files</h3>
         <p id="batch-items-note" class="metadata"></p>
@@ -1004,10 +1059,25 @@
           ><button id="batch-items-next">Next →</button>
         </div>
       </section>
-      <div class="detail-extras">
-        <button id="load-detail" class="quiet" hidden>Worker log</button>
+      <div id="detail-rows" class="detail-rows">
+        <details id="detail-row-plan" class="detail-row" hidden>
+          <summary>Plan</summary>
+          <div id="detail-plan"></div>
+        </details>
+        <details id="detail-row-steps" class="detail-row" hidden>
+          <summary>All steps</summary>
+          <ol id="detail-stages" class="stage-list"></ol>
+        </details>
+        <div id="detail-costs"></div>
+        <details id="detail-row-path" class="detail-row" hidden>
+          <summary>Path</summary>
+          <div id="detail-path"></div>
+        </details>
+        <details id="detail-row-log" class="detail-row" hidden>
+          <summary>Worker log</summary>
+          <pre id="detail-content"></pre>
+        </details>
       </div>
-      <pre id="detail-content" hidden></pre>
     </dialog>
     <dialog id="file-review" aria-labelledby="file-review-title">
       <div class="dialog-heading">

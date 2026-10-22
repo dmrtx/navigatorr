@@ -11,6 +11,10 @@ const markup = await readFile(
   new URL("./assets/index.html", import.meta.url),
   "utf8",
 );
+const css = await readFile(
+  new URL("./assets/app.css", import.meta.url),
+  "utf8",
+);
 
 test("automatic recovery keeps processing goals and sends no technical profile", async()=>{
   const h=harness();
@@ -71,9 +75,18 @@ class Element {
   }
   focus() {}
 }
-function harness({ radios: withRadios = false } = {}) {
+// The radio groups behind the segmented controls, by name.
+const segmentGroups = {
+  "size-engine": ["fast", "small"],
+  "size-budget-limit": ["", "siblings", "fixed"],
+  "reconfigure-engine": ["fast", "small"],
+  "reconfigure-budget-limit": ["", "siblings", "fixed"],
+};
+function harness({ radios: withRadios = false, segments: withSegments = false } = {}) {
   const elements = new Map();
   let interval;
+  // Registered before the script loads, because it attaches their listeners then.
+  const segments = new Map(withSegments ? Object.entries(segmentGroups).map(([name, values]) => [name, values.map((value) => Object.assign(new Element(), { value, checked: false }))]) : []);
   // Real goal radios, so the change listener that marks a choice as explicit runs.
   const radios = withRadios
     ? ["size", "compact", "quality", "x265_preserve"].map((value) => Object.assign(new Element(), { value, checked: value === "size" }))
@@ -86,7 +99,7 @@ function harness({ radios: withRadios = false } = {}) {
       return elements.get(id);
     },
     createElement: () => new Element(),
-    querySelectorAll: (selector) => (selector.includes("processing-mode") ? radios : []),
+    querySelectorAll: (selector) => (selector.includes("processing-mode") ? radios : segments.get(/name="([^"]+)"/.exec(selector)?.[1]) || []),
     querySelector: (selector) => (selector.includes("processing-mode") ? radios.find((r) => r.checked) || null : null),
   };
   const context = vm.createContext({
@@ -109,6 +122,7 @@ function harness({ radios: withRadios = false } = {}) {
     document,
     interval,
     radios,
+    segments,
     run: (code) => vm.runInContext(code, context),
   };
 }
@@ -826,8 +840,8 @@ test("mobile checkbox selection waits for Continue and batch summaries show the 
   assert.equal(h.elements.get("scope").value, "file");
 });
 
-function submissionHarness() {
-  const h = harness(),
+function submissionHarness(options) {
+  const h = harness(options),
     receipts = new Map();
   h.context.sessionStorage = {
     getItem: (key) => receipts.get(key),
@@ -1321,7 +1335,7 @@ test("late detail response cannot overwrite the newly opened job", async () => {
   await second;
   a.resolve({ id: "a", status: "failed", action_name: "transcode_media" });
   await first;
-  assert.equal(h.elements.get("detail-summary").children[0].textContent, "b");
+  assert.equal(h.elements.get("job-detail-title").textContent, "b");
   assert.equal(h.run("state.detailJob.id"), "b");
 });
 
@@ -3248,8 +3262,9 @@ test("the goal is sent only while technical profiles are off", async () => {
 test("the media engine option belongs to the smaller files goal and starts on", () => {
   const form = markup.slice(markup.indexOf('<form id="job-form"'), markup.indexOf("</form>", markup.indexOf('<form id="job-form"')));
   const goal = form.slice(form.indexOf('<fieldset id="processing-goal"'), form.indexOf("</fieldset>", form.indexOf('<fieldset id="processing-goal"')));
-  assert.match(goal, /id="allow-hardware" type="checkbox" checked \/>/);
-  assert.match(goal, /Use the media engine \(faster\)/);
+  assert.match(goal, /id="allow-hardware" type="checkbox" checked hidden \/>/);
+  assert.match(goal, /Fast · media engine/);
+  assert.match(goal, /Smallest · x265/);
   assert.doesNotMatch(goal, /hardware-margin|x265's size/);
   const h = harness();
   const el = (id) => h.elements.get(id);
@@ -3293,7 +3308,7 @@ test("the smaller files goal always says whether the media engine is allowed", a
 
 test("changing the goal to smaller files carries the media engine choice", async () => {
   const markupGoal = markup.slice(markup.indexOf('id="reconfigure-hardware-option"'), markup.indexOf('id="reconfigure-profile"'));
-  assert.match(markupGoal, /id="reconfigure-hardware" type="checkbox" checked/);
+  assert.match(markupGoal, /id="reconfigure-hardware" type="checkbox" checked hidden/);
   assert.doesNotMatch(markupGoal, /hardware-margin/);
   const open = async (plan) => {
     const h = harness();
@@ -3384,14 +3399,14 @@ test("clean podcast opens, lists podcasts and closes after starting", async () =
 });
 
 test("size goal discloses that lossless Atmos and DTS:X become AAC", () => {
-  const radio = markup.match(/<label><input type="radio" name="processing-mode" value="size" checked \/>[\s\S]*?<\/label>/)?.[0] || "";
+  const radio = markup.match(/<label class="goal-head"><input type="radio" name="processing-mode" value="size" checked \/>[\s\S]*?<\/label>/)?.[0] || "";
   assert.match(radio, /Same look, at least 15% smaller; lossless audio becomes AAC\./);
   assert.match(source, /lossless Atmos\/DTS:X lose object and height channels; lossy tracks \(E-AC-3 Atmos included\) copied/);
 });
 
 test("compact goal says in plain language what it drops and still needs approval", () => {
-  const radio = markup.match(/<label><input type="radio" name="processing-mode" value="compact" \/>[\s\S]*?<\/label>/)?.[0] || "";
-  assert.match(radio, /<strong>Shrink to 1080p SDR<\/strong>/);
+  const radio = markup.match(/<label class="goal-head"><input type="radio" name="processing-mode" value="compact" \/>[\s\S]*?<\/label>/)?.[0] || "";
+  assert.match(radio, /<strong class="goal-title">Shrink to 1080p SDR<\/strong>/);
   assert.match(radio, /Use it for 4K or HDR you don't need in 4K\. At least 30% smaller; HDR is removed\./);
   assert.match(markup, /<option value="compact">Shrink to 1080p SDR · At least 30% smaller, HDR removed/);
   assert.match(source, /`Shrink to \$\{item\.max_height \|\| 1080\}p SDR`/);
@@ -4651,15 +4666,355 @@ test("goal names are the same in the form, the reconfigure dialog and job rows",
   const form = markup.slice(markup.indexOf('<fieldset id="processing-goal"'), markup.indexOf("</fieldset>", markup.indexOf('<fieldset id="processing-goal"')));
   const visible = form.slice(0, form.indexOf('<details id="more-goals"'));
   const more = form.slice(form.indexOf('<details id="more-goals"'));
-  assert.match(visible, /value="size" checked[\s\S]*<strong>Save space<\/strong>[\s\S]*value="compact"[\s\S]*<strong>Shrink to 1080p SDR<\/strong>/);
+  assert.match(visible, /value="size" checked[\s\S]*<strong class="goal-title">Save space<\/strong>[\s\S]*value="compact"[\s\S]*<strong class="goal-title">Shrink to 1080p SDR<\/strong>/);
   assert.doesNotMatch(visible, /value="quality"|value="x265_preserve"/);
   assert.match(more, /<summary>More goals<\/summary>/);
   assert.doesNotMatch(more, /checked/);
-  assert.match(more, /value="quality"[\s\S]*<strong>Strict quality<\/strong>[\s\S]*Use it when picture quality matters more than space; may save little\./);
-  assert.match(more, /value="x265_preserve"[\s\S]*<strong>Convert to HEVC<\/strong>[\s\S]*Use it to make a library HEVC-only; HEVC files are left alone\./);
+  assert.match(more, /value="quality"[\s\S]*<strong class="goal-title">Strict quality<\/strong>[\s\S]*Use it when picture quality matters more than space; may save little\./);
+  assert.match(more, /value="x265_preserve"[\s\S]*<strong class="goal-title">Convert to HEVC<\/strong>[\s\S]*Use it to make a library HEVC-only; HEVC files are left alone\./);
   const select = markup.match(/<select id="reconfigure-mode">[\s\S]*?<\/select>/)[0];
   for (const name of ["Save space", "Shrink to 1080p SDR", "Strict quality", "Convert to HEVC"]) assert.ok(select.includes(name), name);
   assert.doesNotMatch(markup + source, /Prioritize quality|Make it much smaller|Reduce size|Convert to x265/);
   const h = harness();
   assert.equal(h.run("JSON.stringify(rerunGoals)"), JSON.stringify({ size: "Save space", compact: "Shrink to 1080p SDR", quality: "Strict quality", x265_preserve: "Convert to HEVC" }));
 });
+
+// ---- Segmented controls ----
+
+// Choosing a segment the way a click does: check the radio, fire its change.
+function pickSegment(h, name, value) {
+  const radio = h.segments.get(name).find((r) => r.value === value);
+  assert.ok(radio, `no ${value} segment in ${name}`);
+  radio.checked = true;
+  radio.listeners.get("change")();
+}
+const checkedSegment = (h, name) => h.segments.get(name).find((r) => r.checked)?.value;
+
+test("the segmented controls are named radio groups over the same fields", () => {
+  for (const [name, values] of Object.entries(segmentGroups)) {
+    const group = [...markup.matchAll(new RegExp(`<input type="radio" name="${name}" value="([^"]*)"`, "g"))].map((m) => m[1]);
+    assert.deepEqual(group, values, name);
+    assert.match(markup, new RegExp(`role="radiogroup" aria-labelledby="[\\w-]+">\\s*<label><input type="radio" name="${name}"`));
+  }
+  // The fields the radios drive are still the ones the request builders read.
+  assert.match(markup, /<select id="size-budget-kind"[^>]*hidden/);
+  assert.match(markup, /Fast · media engine/);
+  assert.match(markup, /Smallest · x265/);
+  assert.match(markup, /Like other episodes/);
+  assert.match(css, /\.segmented label:has\(input:focus-visible\) \{[^}]*outline: 2px solid var\(--focus\)/);
+});
+
+test("segmented controls send the same payloads as the fields they drive", async () => {
+  const submit = async (options, setup) => {
+    const { h } = submissionHarness(options);
+    let sent = null;
+    h.context.capture = (_tool, args) => { sent = JSON.parse(args.inputs); return { id: "submitted" }; };
+    h.run('processingMode=()=>"size";tool=async(...args)=>capture(...args);');
+    await setup(h);
+    await h.run('buildAndSubmitJob("encode")');
+    return sent;
+  };
+  const fields = (code) => (h) => h.run(code);
+  const picks = (...steps) => (h) => {
+    for (const [name, value, before] of steps) {
+      if (before) h.run(before);
+      pickSegment(h, name, value);
+    }
+  };
+  const same = async (label, oldWay, newWay) => {
+    assert.deepEqual(await submit({ segments: true }, newWay), await submit({}, oldWay), label);
+  };
+  await same("media engine on", fields('$("allow-hardware").checked=true;'), picks(["size-engine", "fast"]));
+  await same("media engine off", fields('$("allow-hardware").checked=false;'), picks(["size-engine", "small"]));
+  await same("no limit", fields('$("size-budget-kind").value="";'), picks(["size-budget-limit", ""]));
+  await same("fixed GB", fields('$("size-budget-kind").value="gb"; $("size-budget-gb").value="1.5";'), picks(["size-budget-limit", "fixed", '$("size-budget-gb").value="1.5";']));
+  await same("fixed percent", fields('$("size-budget-kind").value="percent"; $("size-budget-percent").value="33";'), (h) => {
+    h.run('$("size-budget-percent").value="33";');
+    pickSegment(h, "size-budget-limit", "fixed");
+    h.run('$("size-budget-unit").value="percent";');
+    h.elements.get("size-budget-unit").listeners.get("change")();
+  });
+  await same("like other episodes", fields('$("size-budget-kind").value="siblings"; $("size-budget-multiplier").value="2";'), picks(["size-budget-limit", "siblings", '$("size-budget-multiplier").value="2";']));
+  await same("like other episodes, default multiplier", fields('$("size-budget-kind").value="siblings"; $("size-budget-multiplier").value="";'), picks(["size-budget-limit", "siblings"]));
+  const inputs = await submit({ segments: true }, picks(["size-engine", "small"], ["size-budget-limit", "fixed", '$("size-budget-gb").value="2";']));
+  assert.equal(inputs.allow_hardware, false);
+  assert.equal(inputs.size_budget_bytes, 2000000000);
+  assert.equal("size_budget_percent" in inputs, false);
+  assert.equal("size_budget_source" in inputs, false);
+  // A fixed limit with nothing typed is still refused before anything is sent.
+  await assert.rejects(submit({ segments: true }, picks(["size-budget-limit", "fixed"])), /0\.05/);
+});
+
+test("the change-goal dialog's segments drive its own fields", async () => {
+  const h = harness({ segments: true });
+  h.context.savedPlan = { id: "b", mode: "quality", scope: "all", selected: 2, kept: 0, active: 0, files: ["one", "two"], selection_version: "v1", settings: {} };
+  h.run("state.info={};state.recipes=[];api=async()=>savedPlan;");
+  await h.run('reconfigureBatch("b")');
+  h.run('$("reconfigure-mode").value="size"; updateReconfigureHardware();');
+  assert.equal(checkedSegment(h, "reconfigure-engine"), "fast");
+  assert.equal(checkedSegment(h, "reconfigure-budget-limit"), "");
+  pickSegment(h, "reconfigure-engine", "small");
+  assert.equal(h.elements.get("reconfigure-hardware").checked, false);
+  assert.equal(checkedSegment(h, "reconfigure-engine"), "small");
+  pickSegment(h, "reconfigure-budget-limit", "siblings");
+  assert.equal(h.elements.get("reconfigure-budget-kind").value, "siblings");
+  assert.equal(h.elements.get("reconfigure-budget-multiplier-label").hidden, false);
+  h.run('$("reconfigure-budget-multiplier").value="2.5";');
+  const calls = [];
+  h.context.record = (path, body) => calls.push([path, body]);
+  h.context.sessionStorage = { getItem: () => null, setItem() {}, removeItem() {} };
+  h.run('submissionID=()=>"seg-1";commandRequest=async(path,body)=>{record(path,body);return {id:"b"}};loadJobs=async()=>{};openJob=async()=>{};notify=()=>{};');
+  await h.run("submitReconfiguredBatch()");
+  assert.equal(calls[0][1].allow_hardware, false);
+  assert.equal(calls[0][1].size_budget_source, "siblings");
+  assert.equal(calls[0][1].size_budget_sibling_multiplier, 2.5);
+});
+
+test("each render shows the field's value in its segments and the matching options", () => {
+  const h = harness({ segments: true });
+  const el = (id) => h.elements.get(id);
+  h.run('processingMode=()=>"size"; $("allow-hardware").checked=false; $("size-budget-kind").value="gb"; controls();');
+  assert.equal(checkedSegment(h, "size-engine"), "small");
+  assert.equal(checkedSegment(h, "size-budget-limit"), "fixed");
+  assert.equal(el("size-budget-fixed").hidden, false);
+  assert.equal(el("size-budget-gb-label").hidden, false);
+  assert.equal(el("size-budget-percent-label").hidden, true);
+  assert.equal(el("size-budget-unit").value, "gb");
+  h.run('$("allow-hardware").checked=true; $("size-budget-kind").value="percent"; controls();');
+  assert.equal(checkedSegment(h, "size-engine"), "fast");
+  assert.equal(checkedSegment(h, "size-budget-limit"), "fixed");
+  assert.equal(el("size-budget-percent-label").hidden, false);
+  assert.equal(el("size-budget-unit").value, "percent");
+  h.run('$("size-budget-kind").value="siblings"; controls();');
+  assert.equal(checkedSegment(h, "size-budget-limit"), "siblings");
+  assert.equal(el("size-budget-fixed").hidden, true);
+  assert.equal(el("size-budget-multiplier-label").hidden, false);
+  h.run('$("size-budget-kind").value=""; controls();');
+  assert.equal(checkedSegment(h, "size-budget-limit"), "");
+  assert.equal(el("size-budget-multiplier-label").hidden, true);
+});
+
+test("the multiplier stepper stays between 1 and 4 and disables at its limits", () => {
+  const h = harness({ segments: true });
+  const el = (id) => h.elements.get(id);
+  const click = (id) => el(id).listeners.get("click")();
+  h.run('processingMode=()=>"size"; $("size-budget-kind").value="siblings"; $("size-budget-multiplier").value="1.5"; controls();');
+  click("size-budget-multiplier-up");
+  assert.equal(el("size-budget-multiplier").value, "1.6");
+  click("size-budget-multiplier-down");
+  click("size-budget-multiplier-down");
+  assert.equal(el("size-budget-multiplier").value, "1.4");
+  h.run('$("size-budget-multiplier").value="1.1";');
+  click("size-budget-multiplier-down");
+  assert.equal(el("size-budget-multiplier").value, "1");
+  assert.equal(el("size-budget-multiplier-down").disabled, true);
+  assert.equal(el("size-budget-multiplier-up").disabled, false);
+  click("size-budget-multiplier-down");
+  assert.equal(el("size-budget-multiplier").value, "1");
+  h.run('$("size-budget-multiplier").value="3.9";');
+  click("size-budget-multiplier-up");
+  click("size-budget-multiplier-up");
+  assert.equal(el("size-budget-multiplier").value, "4");
+  assert.equal(el("size-budget-multiplier-up").disabled, true);
+  // A multiplier typed by hand updates the buttons without a full render.
+  h.run('$("size-budget-multiplier").value="2";');
+  el("size-budget-multiplier").listeners.get("input")();
+  assert.equal(el("size-budget-multiplier-up").disabled, false);
+});
+
+test("a percent limit reads out what it comes to, and other limits say nothing they cannot know", () => {
+  const h = harness();
+  const el = (id) => h.elements.get(id);
+  const readout = (setup) => {
+    h.run(`${setup} updateSizeBudgetFields("size-budget");`);
+    return el("size-budget-readout").hidden ? "" : el("size-budget-readout").textContent;
+  };
+  h.run('state.goalProfile={status:"ready",batch:false,data:{profile:{size_bytes:8400000000}}};');
+  assert.equal(readout('$("size-budget-kind").value="percent"; $("size-budget-percent").value="25";'), "≤ 2.10 GB");
+  h.run("state.goalProfile.batch=true;");
+  assert.equal(readout('$("size-budget-percent").value="50";'), "≤ 4.20 GB for the first file");
+  assert.equal(readout('$("size-budget-percent").value="4";'), "", "out of range");
+  assert.equal(readout('$("size-budget-percent").value="";'), "", "nothing typed");
+  assert.equal(readout('$("size-budget-kind").value="gb"; $("size-budget-gb").value="2";'), "");
+  assert.equal(readout('$("size-budget-kind").value="siblings";'), "", "sibling bitrates are only known to the server");
+  h.run('state.goalProfile={status:"loading"};');
+  assert.equal(readout('$("size-budget-kind").value="percent"; $("size-budget-percent").value="25";'), "");
+});
+
+// ---- Job details ----
+
+const detailStageNames = ["resolve_source", "preflight", "submit_benchmark", "wait_benchmark", "submit_transcode", "wait_transcode", "validate_result"];
+const ladderMessage = "Encoding the whole file with x265 CRF 24 (step 2 of 4) and checking it against this goal's quality limits.";
+const stagesAt = (current, status = "running") => detailStageNames.map((name, i) => ({ name, status: i < current ? "completed" : i === current ? status : "pending" }));
+function detailJob(extra = {}) {
+  return {
+    id: "detail-job", action_name: "transcode_media", status: "running", mode: "size",
+    source_path: "/media/Example Show/Season 1/Example Show S01E01.mkv", current_step: 5,
+    stages: stagesAt(5),
+    savings: { source_bytes: 8400000000, estimated_saved_bytes: 3100000000, eta_seconds: 1500 },
+    worker: { transcode_phase: "encoding", progress: 42.5, speed: 1.35, progress_is_stale: false, worker_heartbeat_at: new Date(Date.now() - 4000).toISOString(), last_progress_at: new Date(Date.now() - 3000).toISOString() },
+    benchmark: { outcome: "size_budget_ladder", message: ladderMessage, plan_source: "size_budget", plan_note: "Encoded at your size budget." },
+    transcode: { message: ladderMessage },
+    size_mode: { expected_bytes: 5200000000, encoder: "libx265", size_budget: { budget_bytes: 5400000000 } },
+    phase_costs: { worker_probe: { duration_ms: 420, attempts: 1, active_compute_ms: 300 } },
+    logs_available: true,
+    ...extra,
+  };
+}
+async function openDetail(job) {
+  const h = harness();
+  h.context.detailData = job;
+  h.run('api=async(path)=>path.startsWith("logs")?{stdout_tail:"frame=1 fps=30",stderr_tail:""}:{jobs:[detailData]}; tool=async()=>({data:{}});');
+  await h.run(`openJob(${JSON.stringify(job.id)})`);
+  return h;
+}
+const nodesWithClass = (n, cls) => [...(String(n.className || "").split(" ").includes(cls) ? [n] : []), ...(n.children || []).flatMap((c) => nodesWithClass(c, cls))];
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+test("job details lead with a one-line title, a status chip and fact chips", async () => {
+  const h = await openDetail(detailJob());
+  const el = (id) => h.elements.get(id);
+  assert.match(el("job-detail-title").textContent, /Example Show S01E01/);
+  assert.equal(el("job-detail-title").title, "/media/Example Show/Season 1/Example Show S01E01.mkv");
+  assert.equal(el("copy-detail-path").hidden, false);
+  assert.ok(el("detail-status").children.length === 1, "one status chip");
+  const chips = nodesWithClass(el("detail-summary"), "detail-fact").map((n) => n.textContent);
+  assert.deepEqual(chips, ["8.40 GB → ~5.20 GB", "x265 CRF 24", "Try 2 of 4", "Limit ≤ 5.40 GB"]);
+  // Nothing says "unknown" for what it does not know.
+  const bare = await openDetail(detailJob({ savings: {}, size_mode: undefined, benchmark: undefined, transcode: { message: "" } }));
+  assert.deepEqual(nodesWithClass(bare.elements.get("detail-summary"), "detail-fact").map((n) => n.textContent), []);
+  assert.doesNotMatch(allTextOf(bare.elements.get("detail-summary")), /unknown/i);
+});
+
+test("job details have one progress line with the worker's heartbeat", async () => {
+  const h = await openDetail(detailJob());
+  const [line] = nodesWithClass(h.elements.get("detail-summary"), "detail-progress");
+  assert.ok(line, "no progress line");
+  assert.match(nodesWithClass(line, "detail-progress-text")[0].textContent, /^42\.5% · 1\.35×/);
+  const [dot] = nodesWithClass(line, "live-dot");
+  assert.equal(dot.textContent, "Worker live");
+  assert.match(dot.title, /^Last heartbeat /);
+  // Without a heartbeat the dot is left out; the rest stays.
+  const quiet = await openDetail(detailJob({ worker: { transcode_phase: "encoding", progress: 10, speed: 1, progress_is_stale: false } }));
+  const quietLine = nodesWithClass(quiet.elements.get("detail-summary"), "detail-progress")[0];
+  assert.equal(nodesWithClass(quietLine, "live-dot").length, 0);
+  assert.doesNotMatch(allTextOf(quietLine), /undefined|NaN/);
+  // A silent worker is named as such rather than live.
+  const silent = await openDetail(detailJob({ worker: { transcode_phase: "encoding", progress: 10, speed: 1, progress_is_stale: false, worker_heartbeat_at: new Date(Date.now() - 600000).toISOString() } }));
+  const silentDots = nodesWithClass(silent.elements.get("detail-summary"), "live-dot");
+  assert.ok(silentDots.length === 0 || silentDots[0].textContent === "Worker silent");
+});
+
+test("job details show the pipeline as a stepper and name the current step", async () => {
+  const h = await openDetail(detailJob());
+  const [stepper] = nodesWithClass(h.elements.get("detail-summary"), "stepper");
+  assert.equal(stepper.children.length, 7);
+  assert.deepEqual(stepper.children.map((n) => n.className.split(" ")[1]), ["done", "done", "done", "done", "done", "current", "pending"]);
+  assert.equal(nodesWithClass(h.elements.get("detail-summary"), "stepper-current")[0].textContent, "Step 6 of 7 · Convert file");
+  const failed = await openDetail(detailJob({ status: "failed", error: "ffmpeg exited with status 1", worker: undefined, stages: stagesAt(5, "failed") }));
+  const [failedStepper] = nodesWithClass(failed.elements.get("detail-summary"), "stepper");
+  assert.equal(failedStepper.children[5].className, "step failed");
+  assert.equal(nodesWithClass(failed.elements.get("detail-summary"), "stepper-current")[0].textContent, "Failed at step 6 of 7 · Convert file");
+  const done = await openDetail(detailJob({ status: "completed", worker: undefined, stages: detailStageNames.map((name) => ({ name, status: "completed" })) }));
+  assert.equal(nodesWithClass(done.elements.get("detail-summary"), "stepper-current")[0].textContent, "All 7 steps done");
+});
+
+test("job details print the plan once, in its own row, and not under the summary", async () => {
+  const h = await openDetail(detailJob());
+  const summary = allTextOf(h.elements.get("detail-summary"));
+  const plan = allTextOf(h.elements.get("detail-plan"));
+  assert.match(plan, /Encoded at your size budget/);
+  assert.doesNotMatch(summary, /Encoded at your size budget/);
+  assert.doesNotMatch(summary, /step 2 of 4/);
+  const everywhere = [summary, plan, allTextOf(h.elements.get("detail-stages")), allTextOf(h.elements.get("detail-path"))].join(" \n ");
+  assert.equal(everywhere.match(/Encoded at your size budget/g).length, 1);
+  assert.equal(h.elements.get("detail-row-plan").hidden, false);
+  // A job with no plan has no Plan row.
+  const bare = await openDetail(detailJob({ benchmark: undefined, transcode: undefined, size_mode: undefined }));
+  assert.equal(bare.elements.get("detail-row-plan").hidden, true);
+});
+
+test("job details keep plan, steps, phase costs, path and worker log in collapsible rows", async () => {
+  assert.match(markup, /<details id="detail-row-plan" class="detail-row" hidden>\s*<summary>Plan<\/summary>/);
+  assert.match(markup, /<details id="detail-row-steps" class="detail-row" hidden>\s*<summary>All steps<\/summary>\s*<ol id="detail-stages"/);
+  assert.match(markup, /<details id="detail-row-path" class="detail-row" hidden>\s*<summary>Path<\/summary>/);
+  assert.match(markup, /<details id="detail-row-log" class="detail-row" hidden>\s*<summary>Worker log<\/summary>\s*<pre id="detail-content">/);
+  assert.doesNotMatch(markup, /<details id="detail-row-[a-z]+"[^>]* open/, "rows start collapsed");
+  const h = await openDetail(detailJob());
+  const el = (id) => h.elements.get(id);
+  for (const key of ["plan", "steps", "path", "log"]) {
+    assert.equal(el(`detail-row-${key}`).hidden, false, key);
+    assert.equal(el(`detail-row-${key}`).open, false, `${key} starts collapsed`);
+  }
+  assert.equal(el("detail-stages").children.length, 7);
+  const costs = nodesWithClass(el("detail-costs"), "phase-costs");
+  assert.equal(costs.length, 1);
+  assert.match(allTextOf(el("detail-path")), /Example Show S01E01\.mkv/);
+  // A row the user opened stays open across a refresh, and the log loads when it opens.
+  el("detail-row-steps").open = true;
+  el("detail-row-log").open = true;
+  el("detail-row-log").listeners.get("toggle")();
+  await settle();
+  assert.match(el("detail-content").textContent, /frame=1 fps=30/);
+  await h.run("refreshDetail()");
+  assert.equal(el("detail-row-steps").open, true);
+  assert.equal(el("detail-row-log").open, true);
+  // A job without logs has no log row.
+  const noLogs = await openDetail(detailJob({ logs_available: false }));
+  assert.equal(noLogs.elements.get("detail-row-log").hidden, true);
+});
+
+test("a failed step opens the steps row once, and closing it sticks", async () => {
+  const failedJob = (id) => detailJob({ id, status: "failed", error: "ffmpeg exited with status 1", worker: undefined, stages: stagesAt(5, "failed") });
+  const h = await openDetail(failedJob("failed-a"));
+  const el = (id) => h.elements.get(id);
+  assert.equal(el("detail-row-steps").open, true);
+  assert.equal(el("detail-row-log").open, false, "the failed step already explains the failure");
+  el("detail-row-steps").open = false;
+  await h.run("refreshDetail()");
+  assert.equal(el("detail-row-steps").open, false, "closing the row sticks across refreshes");
+  // Opening another job starts over.
+  h.context.detailData = failedJob("failed-b");
+  await h.run('openJob("failed-b")');
+  assert.equal(el("detail-row-steps").open, true);
+});
+
+test("a failure no step explains opens the worker log", async () => {
+  const h = await openDetail(detailJob({ status: "failed", error: "worker lost", worker: undefined, stages: stagesAt(5, "pending") }));
+  const el = (id) => h.elements.get(id);
+  assert.equal(el("detail-row-log").open, true);
+  assert.equal(el("detail-row-steps").open, false);
+});
+
+test("cancel keeps its handler and confirmation, right under the progress", async () => {
+  assert.ok(markup.indexOf('id="detail-summary"') < markup.indexOf('id="detail-controls"'));
+  assert.ok(markup.indexOf('id="detail-controls"') < markup.indexOf('id="detail-rows"'));
+  const h = await openDetail(detailJob());
+  const calls = [];
+  h.context.record = (name, id, args) => calls.push([name, id, args]);
+  h.run("jobControl = async (id, name, args) => record(name, id, args); loadJobs = async () => {};");
+  const all = (n) => [n, ...(n.children || []).flatMap(all)];
+  const cancel = all(h.elements.get("detail-controls")).find((n) => n.textContent === "Cancel" && n.listeners.has("click"));
+  assert.ok(cancel, "cancel button");
+  h.run("reviewAction = async () => false;");
+  await cancel.listeners.get("click")();
+  assert.deepEqual(calls, [], "declining the confirmation cancels nothing");
+  h.run("reviewAction = async (options) => { state.asked = options; return true; };");
+  await cancel.listeners.get("click")();
+  assert.equal(h.run("state.asked.title"), "Cancel job?");
+  assert.equal(JSON.stringify(calls), JSON.stringify([["action_cancel", "detail-job", { reason: "Cancelled from maintenance UI" }]]));
+});
+
+test("the copy button copies the full path", async () => {
+  const h = await openDetail(detailJob());
+  const copied = [];
+  h.context.navigator = { clipboard: { writeText: async (text) => { copied.push(text); } } };
+  h.run("notify = () => {};");
+  await h.elements.get("copy-detail-path").listeners.get("click")();
+  await settle();
+  assert.deepEqual(copied, ["/media/Example Show/Season 1/Example Show S01E01.mkv"]);
+});
+
+// The palette and dark-mode contrast checks run with the rest of the UI tests.
+// Imported last, so the harness above is defined before any test starts.
+await import("./theme_test.mjs");
