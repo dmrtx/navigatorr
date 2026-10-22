@@ -2,6 +2,7 @@ package transcodeworker
 
 import (
 	"context"
+	"math"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -385,5 +386,74 @@ func TestCompactAudioMultiTrackPairing(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Matroska stores no per-packet duration for TrueHD, so a UHD remux's lossless
+// tracks are measured from packet timestamps instead of failing closed.
+func TestCompactAudioUndatedTrueHDPackets(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg unavailable")
+	}
+	ffprobe, err := exec.LookPath("ffprobe")
+	if err != nil {
+		t.Skip("ffprobe unavailable")
+	}
+	available, err := ProbeAvailableEncoders(context.Background(), ffmpeg)
+	if err != nil || !available["libx265"] || !available["aac"] || !available["truehd"] {
+		t.Skip("libx265/AAC/TrueHD unavailable")
+	}
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.mkv")
+	candidate := filepath.Join(dir, "candidate.mkv")
+	args := []string{"-nostdin", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24:duration=12", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=12", "-map", "0:v", "-map", "1:a", "-c:v", "ffv1", "-c:a", "truehd", "-strict", "-2", "-ac", "2", "-metadata:s:a:0", "language=eng", source}
+	if out, err := exec.Command(ffmpeg, args...).CombinedOutput(); err != nil {
+		t.Fatalf("fixture: %v %s", err, out)
+	}
+	if out, _ := exec.Command(ffprobe, "-v", "error", "-select_streams", "a", "-show_packets", "-read_intervals", "%+#3", "-show_entries", "packet=duration_time", "-of", "csv=p=0", source).Output(); !strings.Contains(string(out), "N/A") {
+		t.Skip("this ffmpeg writes TrueHD packet durations; the undated case is not reproducible")
+	}
+	spans, err := audioPacketSpans(context.Background(), ffprobe, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := spans[1]; math.Abs(s.end-s.start-12) > 0.01 || s.bytes <= 0 {
+		t.Fatalf("TrueHD span %.4f..%.4f (%d bytes), want 12s", s.start, s.end, s.bytes)
+	}
+	probe, err := ProbeSourceDetails(context.Background(), ffprobe, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := &transcode.Plan{Container: "mkv", VideoCodec: "libx265", Quality: 23, Preset: "ultrafast", VideoProfile: "main10", PixelFormat: "p010le", ExpectedBitDepth: 10, AudioMode: "compact", SubtitleMode: "preserve", PreserveMetadata: true, PreserveChapters: true, PreserveAttachments: true, RecipeVersion: "test", RecipeDigest: "sha256:" + strings.Repeat("0", 64), Resilience: transcode.ResiliencePlan{MaxAttempts: 1}}
+	plan.PlanDigest, _ = transcode.DigestPlan(plan)
+	ep, err := BuildExecutionPlan(plan, probe.Streams, probe.DurationSec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args, err = BuildFFmpegArgs(ep, source, candidate, filepath.Join(dir, "progress"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(ffmpeg, append([]string{"-nostdin", "-v", "error"}, args...)...).CombinedOutput(); err != nil {
+		t.Fatalf("encode: %v %s", err, out)
+	}
+	result, err := ProbeSourceDetails(context.Background(), ffprobe, candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := NewWorker(&WorkerConfig{StateDir: dir, FFmpeg: ffmpeg, FFprobe: ffprobe})
+	if err := w.validateAudioPackets(context.Background(), plan, source, candidate, probe, result); err != nil {
+		t.Fatal(err)
+	}
+	// The candidate check reuses the spans measured before the encode
+	// instead of reading the source again.
+	probe.audioSpans = spans
+	if err := w.validateAudioPackets(context.Background(), plan, filepath.Join(dir, "missing.mkv"), candidate, probe, result); err != nil {
+		t.Fatalf("pre-encode measurement not reused: %v", err)
+	}
+	probe.audioSpans = map[int]audioPacketSpan{1: {start: spans[1].start, end: spans[1].end + 1, bytes: spans[1].bytes}}
+	if err := w.validateAudioPackets(context.Background(), plan, source, candidate, probe, result); err == nil {
+		t.Fatal("a one-second duration change was accepted")
 	}
 }
