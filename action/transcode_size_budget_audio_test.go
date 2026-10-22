@@ -313,6 +313,20 @@ func TestSizeBudgetPlanStepFreezesTheAudioLevel(t *testing.T) {
 			if sizeBudgetPlanMatches(c.snapshot, c.ec.State, plan, &tampered) {
 				t.Fatal("a record with a different track plan matched")
 			}
+			// The encoder is part of the frozen record: a record that names
+			// another encoder for a track is not the plan's.
+			for _, other := range []string{"aac", "", "opus"} {
+				if a.Tracks[0].Encoder == other {
+					continue
+				}
+				b := *rec.Audio
+				b.Tracks = append([]SizeBudgetAudioTrack(nil), b.Tracks...)
+				b.Tracks[1].Encoder = other
+				tampered.Audio = &b
+				if sizeBudgetPlanMatches(c.snapshot, c.ec.State, plan, &tampered) {
+					t.Fatalf("a record naming encoder %q for a track matched", other)
+				}
+			}
 			tampered.Audio = nil
 			if sizeBudgetPlanMatches(c.snapshot, c.ec.State, plan, &tampered) {
 				t.Fatal("a record without the level matched")

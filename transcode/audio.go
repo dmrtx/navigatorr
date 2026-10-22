@@ -22,10 +22,10 @@ const AudioModeCompactLossless = "compact_lossless"
 //	level 1  AudioModeSizeAAC    a track at least 1.25 times its AAC-LC target
 //	                             (stereo 192, mono 128, 5.1 384, 7.1 512 kbps)
 //	                             becomes AAC-LC at it
-//	level 2  AudioModeSizeHEAAC  a track of up to 6 channels at least 1.25 times
-//	                             its HE-AAC target becomes HE-AAC (stereo or
-//	                             mono 64, 3 to 6 channels 160 kbps); the rest as
-//	                             level 1
+//	level 2  AudioModeSizeHEAAC  a stereo, quad or 5.1 track (heAACLayouts) at
+//	                             least 1.25 times its HE-AAC target becomes
+//	                             HE-AAC (stereo 64, quad and 5.1 160 kbps); any
+//	                             other track as level 1
 //
 // At every level any other track is copied: one below 1.25 times its target
 // (lossless included, when it states its bitrate), E-AC-3 JOC (Atmos), layouts
@@ -218,8 +218,14 @@ const sizeLevelMinGainNum, sizeLevelMinGainDen = 5, 4
 // often state none and are nearly always far above any target.
 //
 // AAC-LC is encoded with AudioToolbox (aac_at) where it keeps the track's
-// layout, else with FFmpeg's native encoder; HE-AAC always is, so a layout
-// aac_at cannot keep is left at the level before.
+// layout, else with FFmpeg's native encoder. HE-AAC (level 2) is aac_at too and
+// only for the few layouts it encodes correctly (heAACLayouts); any other track
+// keeps its level 1 output at level 2, with the same minimum gain against the
+// AAC-LC target.
+//
+// This function, its targets and the layout tables below are the contract of
+// plan version transcode-modes-v5 (see TestSizeAudioV5Contract): a change to
+// what it returns needs a new policy and plan version.
 func sizeLevelOutput(mode string, t AudioTrack) AudioOutput {
 	channels := t.Channels
 	if channels < 1 || channels > 8 || !aacKeepsLayout(t.Layout, channels) {
@@ -231,7 +237,7 @@ func sizeLevelOutput(mode string, t AudioTrack) AudioOutput {
 	}
 	toolbox := audioToolboxKeepsLayout(t.Layout, channels)
 	out := AudioOutput{Codec: "aac", Kbps: aacLCKbps(channels), AudioToolbox: toolbox}
-	if mode == AudioModeSizeHEAAC && channels <= 6 && toolbox {
+	if mode == AudioModeSizeHEAAC && heAACKeepsLayout(t.Layout, channels) {
 		out.Kbps, out.HEAAC = heAACKbps(channels), true
 	}
 	if t.BitrateKbps > 0 && t.BitrateKbps*sizeLevelMinGainDen < out.Kbps*sizeLevelMinGainNum {
@@ -241,9 +247,10 @@ func sizeLevelOutput(mode string, t AudioTrack) AudioOutput {
 }
 
 // audioToolboxLayouts are the layouts AudioToolbox's AAC encoder (aac_at)
-// writes back unchanged, keyed to their channel count (checked against the
-// encoder: 2.1, 3.0(back), 3.1, 4.1, hexagonal, 7.1, 7.1(wide) and 5.1.2(back)
-// come out with a different layout or channel count, 7.1 without its LFE).
+// writes back unchanged as AAC-LC, keyed to their channel count (checked with a
+// real encode: 2.1, 3.0(back), 3.1, 4.1, hexagonal, 7.1, 7.1(wide) and
+// 5.1.2(back) come out with a different layout or channel count, 7.1 without
+// its LFE).
 var audioToolboxLayouts = map[string]int{
 	"mono": 1, "stereo": 2, "3.0": 3, "4.0": 4, "quad": 4, "quad(side)": 4, "5.0": 5, "5.0(side)": 5,
 	"5.1": 6, "5.1(side)": 6, "6.1(back)": 7, "7.0": 7, "octagonal": 8,
@@ -255,12 +262,32 @@ func audioToolboxKeepsLayout(layout string, channels int) bool {
 	layout = strings.ToLower(strings.TrimSpace(layout))
 	if layout == "" {
 		switch channels {
-		case 1, 2, 4, 5, 6:
+		case 1, 2, 4, 5, 6, 7:
 			return true
 		}
 		return false
 	}
 	n, ok := audioToolboxLayouts[layout]
+	return ok && n == channels
+}
+
+// heAACLayouts are the layouts aac_at encodes as HE-AAC at the level 2 bitrates
+// and writes back unchanged, keyed to their channel count. Checked with a real
+// encode: mono comes out as stereo (the bitrate is clamped), and 3.0, 4.0, 5.0,
+// 5.0(side) and every layout above 6 channels do not open the encoder.
+var heAACLayouts = map[string]int{
+	"stereo": 2, "quad": 4, "quad(side)": 4, "5.1": 6, "5.1(side)": 6,
+}
+
+// heAACKeepsLayout reports a track aac_at encodes as HE-AAC without changing
+// its layout. An unspecified layout is the channel count's default one, which
+// works for 2 and 6 channels.
+func heAACKeepsLayout(layout string, channels int) bool {
+	layout = strings.ToLower(strings.TrimSpace(layout))
+	if layout == "" {
+		return channels == 2 || channels == 6
+	}
+	n, ok := heAACLayouts[layout]
 	return ok && n == channels
 }
 

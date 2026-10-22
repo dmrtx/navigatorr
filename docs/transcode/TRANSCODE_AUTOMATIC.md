@@ -208,7 +208,7 @@ the planner and the worker:
 | Level | Mode | What it does to a track |
 | --- | --- | --- |
 | 1 | `size_aac` | A track at least 1.25 times its AAC-LC target, lossless or lossy, becomes AAC-LC at that target: stereo 192, mono 128, 5.1 384, 7.1 512 kbps. |
-| 2 | `size_he_aac` | A track of up to 6 channels at least 1.25 times its HE-AAC target becomes HE-AAC: stereo or mono 64, 3 to 6 channels 160 kbps. 7.1 stays AAC-LC at 512 kbps. |
+| 2 | `size_he_aac` | A stereo, quad or 5.1 track (including 5.1(side) and quad(side)) at least 1.25 times its HE-AAC target becomes HE-AAC: stereo 64, quad and 5.1 160 kbps. Every other layout is handled exactly as at level 1. |
 
 The 1.25 factor is a minimum gain: AC-3 5.1 at 448 kbps is copied at level 1
 (it would save 14% for a second lossy generation) while E-AC-3 5.1 at 640 kbps
@@ -223,9 +223,17 @@ never touched. Level 1 is the minimum for a new goal: lossy tracks over the
 factor are always converted (the old behaviour, level 0, converted only
 lossless tracks and survives only in snapshots frozen before the levels).
 AAC-LC is encoded with AudioToolbox's `aac_at` (profile 2) where it keeps the
-track's layout, and with FFmpeg's native encoder for the layouts it changes
-(7.1 loses its LFE, 2.1, 3.1, 4.1 and hexagonal come out different); HE-AAC is
-always `aac_at`, so a layout `aac_at` cannot keep stays AAC-LC at level 2.
+track's layout (mono, stereo, 3.0, 4.0, quad, 5.0, 5.1, their side variants, 6.1(back),
+7.0 and octagonal, and an unlabelled layout of 1, 2 and 4 to 7 channels), and
+with FFmpeg's native encoder for the layouts it changes (7.1 loses its LFE; 2.1,
+3.1, 4.1 and hexagonal come out different). HE-AAC is `aac_at` (profile 4) and
+only for the layouts it writes correctly, which a real encode of each layout
+established: stereo, quad and 5.1. `aac_at` turns mono HE-AAC into stereo and
+refuses 3.0, 4.0, 5.0 and 7.1 as HE-AAC, so those stay AAC-LC at level 2. An
+unlabelled layout (PCM in Matroska) follows its channel count: 2 and 6 channels
+can be HE-AAC, 4 and 5 channels stay AAC-LC. These tables are part of the
+`transcode-modes-v5` contract and are pinned by `TestSizeAudioV5Contract`; a
+change to any of them needs a new plan version.
 
 The level is chosen once per source. The least aggressive level that leaves
 the video at least a good bitrate wins, where good is 0.04 bits per pixel per
@@ -237,8 +245,8 @@ compressed level's. For the 8-track example above, level 1 leaves the picture
 about 0.6 Mbps and level 2 about 2.4 Mbps, so level 2 is used; with a budget of
 2.5 GB level 1 already leaves far more than 2 Mbps and is used.
 
-The frozen record carries the level, every track's planned codec and bitrate,
-the good bitrate and, when level 1 was rejected, what it left. The job and
+The frozen record carries the level, every track's planned codec, bitrate and
+encoder (`aac_at` or `aac`), the good bitrate and, when level 1 was rejected, what it left. The job and
 `action_status` show a sentence such as "Audio level 2 of 2: 8 of 8 tracks are
 re-encoded as HE-AAC". Validation chooses the level again from the frozen policy
 and the source and requires the plan and the record to match it. The worker

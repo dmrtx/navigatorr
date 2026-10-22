@@ -94,6 +94,10 @@ type SizeBudgetAudioTrack struct {
 	Output string `json:"output"`
 	// Kbps is a converted track's bitrate.
 	Kbps int `json:"kbps,omitempty"`
+	// Encoder is what encodes a converted track: aac_at (AudioToolbox) or aac
+	// (FFmpeg's native encoder). It is frozen with the plan so a change of the
+	// encoder rule is caught like a change of the target.
+	Encoder string `json:"encoder,omitempty"`
 }
 
 // SizeBudgetAudioRecord is the audio level a budget planned and what it does
@@ -128,9 +132,12 @@ func sizeBudgetAudioRecord(rep *mediainspect.DetailedReport, mode string, level,
 		out := transcode.AudioOutputFor(mode, track)
 		t := SizeBudgetAudioTrack{Index: i, Codec: a.Codec, SourceKbps: track.BitrateKbps, Output: "copy"}
 		if out.Codec != "copy" {
-			t.Output, t.Kbps = "aac", out.Kbps
+			t.Output, t.Kbps, t.Encoder = "aac", out.Kbps, "aac"
 			if out.HEAAC {
 				t.Output = "he_aac"
+			}
+			if out.AudioToolbox {
+				t.Encoder = "aac_at"
 			}
 		}
 		r.Tracks = append(r.Tracks, t)
@@ -155,6 +162,16 @@ func sizeBudgetAudioSentence(r *SizeBudgetAudioRecord) string {
 	what := "AAC-LC (stereo 192 kbps, 5.1 384 kbps)"
 	if r.Mode == transcode.AudioModeSizeHEAAC {
 		what = "HE-AAC (stereo 64 kbps, 5.1 160 kbps)"
+		he := 0
+		for _, t := range r.Tracks {
+			if t.Output == "he_aac" {
+				he++
+			}
+		}
+		if he < r.converted() {
+			// A layout HE-AAC cannot encode correctly stays AAC-LC.
+			what = fmt.Sprintf("%d HE-AAC (stereo 64 kbps, 5.1 160 kbps) and %d AAC-LC", he, r.converted()-he)
+		}
 	}
 	why := ""
 	if r.PreviousVideoKbps > 0 {
