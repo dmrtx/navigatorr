@@ -3,8 +3,11 @@ package action
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jakenesler/navigatorr/store"
 )
 
 // One member of an approved batch fails promotion validation. Retrying the
@@ -57,5 +60,60 @@ func TestBatchRetryRetriesOnlyTheFailedPromotion(t *testing.T) {
 	}
 	if stored, _ := h.st.GetActionInstance(child.ID); stored.Status != StatusCompleted {
 		t.Fatalf("member %s", stored.Status)
+	}
+}
+
+// The guard refuses only a not-yet-approved member of a failed batch. A
+// single-file replacement, a member whose batch is still going, a member
+// already past approve_promotion and a member whose batch cannot be read all
+// retry as before.
+func TestBatchPromotionRetryGuardAllowsEveryOtherRetry(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	e := NewEngine(EngineDeps{Store: st})
+	tmpl, ok := e.GetTemplate("promote_transcode_candidate")
+	if !ok {
+		t.Fatal("promote_transcode_candidate not registered")
+	}
+	approve := actionStepIndex(tmpl, "approve_promotion")
+	if approve < 0 {
+		t.Fatal("approve_promotion step missing")
+	}
+	for id, status := range map[string]string{"batch-failed": StatusFailed, "batch-waiting": StatusWaitingDecision, "batch-running": StatusRunning} {
+		if err := st.CreateActionInstance(store.ActionInstance{ID: id, ActionName: "transcode_batch", Status: status, InputsJSON: "{}", OutputsJSON: "{}", StateJSON: "{}"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name, action, parent string
+		step                 int
+		refused              bool
+	}{
+		{"member of a failed batch, not yet approved", "promote_transcode_candidate", "batch-failed", 0, true},
+		{"member of a failed batch, at approval", "promote_transcode_candidate", "batch-failed", approve, true},
+		{"single-file replacement", "promote_transcode_candidate", "", 0, false},
+		{"member of a batch waiting for a decision", "promote_transcode_candidate", "batch-waiting", 0, false},
+		{"member of a running batch", "promote_transcode_candidate", "batch-running", 0, false},
+		{"member past approve_promotion", "promote_transcode_candidate", "batch-failed", approve + 1, false},
+		{"member whose batch cannot be read", "promote_transcode_candidate", "batch-missing", 0, false},
+		{"another action", "transcode_media", "batch-failed", 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inst := &store.ActionInstance{ID: "member", ActionName: tc.action, Status: StatusFailed, CurrentStep: tc.step}
+			ec := &ExecutionContext{Inputs: map[string]any{}, State: map[string]any{}}
+			if tc.parent != "" {
+				ec.Inputs["batch_promote_parent_id"] = tc.parent
+			}
+			err := e.batchPromotionRetryOwner(inst, ec, tmpl)
+			if tc.refused != (err != nil) {
+				t.Fatalf("refused=%v, want %v: %v", err != nil, tc.refused, err)
+			}
+			if err != nil && !strings.Contains(err.Error(), "retry the batch instead") {
+				t.Fatalf("error %v", err)
+			}
+		})
 	}
 }

@@ -55,7 +55,7 @@ func TestDetailedValidationHoldsTracksToTheirAudioLevel(t *testing.T) {
 		{"level 2 stereo not converted", transcode.AudioModeSizeHEAAC, change(good(transcode.AudioModeSizeHEAAC), 1, func(o *out) { o.profile = "LC" }), StepWaitingDecision, "Audio profile mismatch at stream 1"},
 		{"level 1 bitrate far above the plan", transcode.AudioModeSizeAAC, change(good(transcode.AudioModeSizeAAC), 0, func(o *out) { o.bitRate = 900_000 }), StepWaitingDecision, "Audio bitrate mismatch at stream 0"},
 		{"level 2 bitrate far above the plan", transcode.AudioModeSizeHEAAC, change(good(transcode.AudioModeSizeHEAAC), 0, func(o *out) { o.bitRate = 384_000 }), StepWaitingDecision, "Audio bitrate mismatch at stream 0"},
-		{"level 2 packets not measurable leave codec profile and channels", transcode.AudioModeSizeHEAAC, change(good(transcode.AudioModeSizeHEAAC), 0, func(o *out) { o.bitRate = 0 }), StepCompleted, ""},
+		{"level 2 packets not measurable are refused", transcode.AudioModeSizeHEAAC, change(good(transcode.AudioModeSizeHEAAC), 0, func(o *out) { o.bitRate = 0 }), StepWaitingDecision, "Audio bitrate not measured at stream 0"},
 		{"level 2 unmeasured packets still need the profile", transcode.AudioModeSizeHEAAC, change(change(good(transcode.AudioModeSizeHEAAC), 0, func(o *out) { o.bitRate = 0 }), 0, func(o *out) { o.profile = "LC" }), StepWaitingDecision, "Audio profile mismatch at stream 0"},
 		{"a track missing", transcode.AudioModeSizeAAC, good(transcode.AudioModeSizeAAC)[:2], StepWaitingDecision, "Audio stream lost"},
 		{"swapped languages", transcode.AudioModeSizeHEAAC, change(change(good(transcode.AudioModeSizeHEAAC), 0, func(o *out) { o.lang = "spa" }), 1, func(o *out) { o.lang = "eng" }), StepWaitingDecision, "Audio language mismatch at stream 0"},

@@ -14,6 +14,8 @@ func TestStatisticsTagKeysIncludeLanguageVariants(t *testing.T) {
 	tags := map[string]string{
 		"language": "spa", "title": "Main", "BPS-eng": "640000", "NUMBER_OF_BYTES-eng": "1", "NUMBER_OF_FRAMES-eng": "1",
 		"DURATION-eng": "00:00:01", "_STATISTICS_WRITING_APP-eng": "mkvmerge", "_STATISTICS_TAGS-eng": "BPS DURATION", "bps": "1", "BPSX": "1", "ENCODER": "x",
+		// "-metadata:s:a:0 BPS-x=y=" would set BPS-x to "y=", not clear it.
+		"BPS-x=y": "1",
 	}
 	want := []string{"BPS-eng", "DURATION-eng", "NUMBER_OF_BYTES-eng", "NUMBER_OF_FRAMES-eng", "_STATISTICS_TAGS-eng", "_STATISTICS_WRITING_APP-eng", "bps"}
 	if got := statisticsTagKeys(tags); !reflect.DeepEqual(got, want) {

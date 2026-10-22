@@ -293,10 +293,14 @@ var statisticsTags = []string{"BPS", "NUMBER_OF_BYTES", "NUMBER_OF_FRAMES", "DUR
 // statistics: an exact name, or one with a language suffix. A Matroska tag
 // with a language other than "und" reaches ffprobe (and ffmpeg's stream
 // metadata) as "NAME-lang", and many mkvmerge versions write the statistics
-// as "BPS-eng"; clearing only "BPS" leaves that one in the output.
+// as "BPS-eng"; clearing only "BPS" leaves that one in the output. A key
+// holding "=" is skipped: as "KEY=" it would set a junk tag, not clear one.
 func statisticsTagKeys(tags map[string]string) []string {
 	var keys []string
 	for key := range tags {
+		if strings.Contains(key, "=") {
+			continue
+		}
 		name, _, _ := strings.Cut(key, "-")
 		for _, tag := range statisticsTags {
 			if strings.EqualFold(name, tag) {

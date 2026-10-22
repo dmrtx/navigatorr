@@ -129,7 +129,9 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 		return waitDecision(fmt.Sprintf("Audio stream lost: original=%d output=%d missing=%s", len(origAudio), len(outRep.Audio), strings.Join(missing, ","))), nil
 	}
 	// A converted track's bitrate is measured from the candidate's packets,
-	// as the worker's pre-publish check measured it, and only once.
+	// as the worker's pre-publish check measured it, and only once. A scan
+	// that fails refuses the candidate; audio_bitrate says "packets" once one
+	// succeeded.
 	audioBitrate := "not_applicable"
 	var packets map[int]mediainspect.AudioPacketSpan
 	measured := false
@@ -169,22 +171,21 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 				if _, probeFailed := mediainspect.AsProbeError(err); err != nil && !probeFailed {
 					return StepResult{}, err
 				}
-				audioBitrate = "packets"
 				if err != nil {
-					// Unmeasurable packets leave the codec, profile, channels
-					// and layout checks, which every track still has to pass.
-					audioBitrate = "not_measured: " + err.Error()
+					// Fail closed: the worker measured these same bytes with
+					// the same parser, so an unreadable scan is a real problem
+					// (or a stalled read, which a retry clears), never a pass.
+					return waitDecision(fmt.Sprintf("Audio bitrate not measured at stream %d: %v", i, err)), nil
 				}
+				audioBitrate = "packets"
 			}
-			if audioBitrate == "packets" {
-				span, ok := packets[b.Index]
-				if !ok {
-					return waitDecision(fmt.Sprintf("Audio stream %d has no measurable packets", i)), nil
-				}
-				// The worker's threshold: a short track's padding is not a rate.
-				if bps := span.BitsPerSecond(); span.Seconds() > minMeasuredAudioSeconds && bps > float64(transcode.AudioBitrateCeilingBps(out.Kbps)) {
-					return waitDecision(fmt.Sprintf("Audio bitrate mismatch at stream %d: planned %d kbps, output is %d kbps", i, out.Kbps, int64(bps)/1000)), nil
-				}
+			span, ok := packets[b.Index]
+			if !ok {
+				return waitDecision(fmt.Sprintf("Audio stream %d has no measurable packets", i)), nil
+			}
+			// The worker's threshold: a short track's padding is not a rate.
+			if bps := span.BitsPerSecond(); span.Seconds() > minMeasuredAudioSeconds && bps > float64(transcode.AudioBitrateCeilingBps(out.Kbps)) {
+				return waitDecision(fmt.Sprintf("Audio bitrate mismatch at stream %d: planned %d kbps, output is %d kbps", i, out.Kbps, int64(bps)/1000)), nil
 			}
 		}
 		if a.Language != "" && normCodec(a.Language) != normCodec(b.Language) {

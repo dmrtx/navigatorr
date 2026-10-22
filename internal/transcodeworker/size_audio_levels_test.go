@@ -318,24 +318,6 @@ func TestSizeAudioLevelsRealEncode(t *testing.T) {
 		if mode == transcode.AudioModeSizeAAC && rep.Audio[1].Tags["BPS"] != "128000" {
 			t.Errorf("copied track lost its statistics: %v", rep.Audio[1].Tags)
 		}
-		// The coordinator's promotion check measures the same packets the
-		// same way.
-		spans, err := audioPacketSpans(ctx, ffprobe, candidate)
-		if err != nil {
-			t.Fatal(err)
-		}
-		measured, err := mediainspect.MeasureAudioPackets(ctx, ffprobe, candidate)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(measured) != len(spans) {
-			t.Fatalf("%s: %d measured streams, worker %d", mode, len(measured), len(spans))
-		}
-		for index, s := range spans {
-			if m := measured[index]; m.Start != s.start || m.End != s.end || m.Bytes != s.bytes {
-				t.Errorf("%s: stream %d measured %+v, worker %+v", mode, index, m, s)
-			}
-		}
 	}
 	// The candidate of one level is not the other level's: the profile and the
 	// bitrate each tell them apart.

@@ -171,3 +171,54 @@ func TestPromotionValidationPassesAlreadyProducedLevelTwoCandidate(t *testing.T)
 		}
 	}
 }
+
+// A converted track whose packets cannot be measured is refused, never
+// passed on codec, profile and layout alone: the worker measured the same
+// bytes with the same scan, so a failure here is either transient (a stalled
+// read, which the batch retry redoes) or a real disagreement.
+func TestPromotionValidationRefusesUnmeasuredAudio(t *testing.T) {
+	restore := mediainspect.SetAudioPacketStallTimeoutForTest(300 * time.Millisecond)
+	defer restore()
+	src := levelTwoEAC3Source()
+	const duration = 1420
+	for _, tc := range []struct {
+		name, packets, reason string
+	}{
+		{"ffprobe exits non-zero", "echo 'read error' >&2; exit 1", "ffprobe tool_exit"},
+		{"packet scan stalls", "exec sleep 30", "no audio packet read for 300ms"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			candidate := filepath.Join(dir, "candidate.mkv")
+			if err := os.WriteFile(candidate, []byte("candidate"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			streams := `{"index": 0, "codec_type": "video", "codec_name": "hevc", "pix_fmt": "yuv420p10le", "width": 1920, "height": 1080, "bits_per_raw_sample": "10"}`
+			for i, a := range src {
+				// A stated bitrate inside the ceiling is no evidence either.
+				streams += fmt.Sprintf(`,{"index": %d, "codec_type": "audio", "codec_name": "aac", "profile": "HE-AAC", "channels": 6, "channel_layout": "5.1", "bit_rate": "160000", "tags": {"language": %q}}`, i+1, a.Language)
+			}
+			probe := fmt.Sprintf(`{"streams": [%s], "format": {"format_name": "matroska,webm", "duration": "%d"}}`, streams, duration)
+			ffprobe := filepath.Join(dir, "ffprobe")
+			script := "#!/bin/sh\ncase \"$*\" in *-show_packets*) " + tc.packets + ";; esac\ncat <<'JSON'\n" + probe + "\nJSON\n"
+			if err := os.WriteFile(ffprobe, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			e := NewEngine(EngineDeps{Ffprobe: ffprobe})
+			ec := &ExecutionContext{Inputs: map[string]any{}, State: map[string]any{
+				"candidate_path": candidate,
+				"plan":           &transcode.Plan{VideoCodec: "libx265", AudioMode: transcode.AudioModeSizeHEAAC, ModePolicyVersion: transcode.ModePolicyV5, ExpectedBitDepth: 10},
+				"original": map[string]any{"size_bytes": int64(8 << 30), "duration_sec": float64(duration),
+					"video": []mediainspect.DetailedStream{{Index: 0, Kind: "video", Codec: "hevc", PixelFormat: "yuv420p10le", Width: 1920, Height: 1080, BitDepth: 10}},
+					"audio": src},
+			}}
+			result, err := e.validateCandidateDetailed(context.Background(), ec)
+			if err != nil || result.Status != StepWaitingDecision {
+				t.Fatalf("status %s (%s%s): %v", result.Status, result.Error, result.WaitingReason, err)
+			}
+			if !strings.HasPrefix(result.WaitingReason, "Audio bitrate not measured at stream 0: ") || !strings.Contains(result.WaitingReason, tc.reason) {
+				t.Fatalf("reason %q, want %q", result.WaitingReason, tc.reason)
+			}
+		})
+	}
+}

@@ -522,6 +522,9 @@ func (e *Engine) batchPromotionRetryOwner(inst *store.ActionInstance, ec *Execut
 	if parentID == "" {
 		return nil
 	}
+	// A parent that cannot be read lets the retry through: this guard only
+	// steers the user to the better path, and approve_promotion still refuses
+	// a replacement whose batch is not running and approved.
 	parent, err := e.deps.Store.GetActionInstance(parentID)
 	if err != nil || parent == nil || parent.Status != StatusFailed {
 		return nil

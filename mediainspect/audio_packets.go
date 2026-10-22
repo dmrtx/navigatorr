@@ -38,6 +38,16 @@ func (s AudioPacketSpan) BitsPerSecond() float64 {
 // It is a variable only so tests can shrink it.
 var audioPacketStallTimeout = 2 * time.Minute
 
+// SetAudioPacketStallTimeoutForTest shrinks the packet scan's stall timeout
+// so another package's tests can exercise a stalled scan, and returns the
+// function that restores it. It is for tests only; it is not safe to call
+// while a scan is running.
+func SetAudioPacketStallTimeoutForTest(d time.Duration) (restore func()) {
+	old := audioPacketStallTimeout
+	audioPacketStallTimeout = d
+	return func() { audioPacketStallTimeout = old }
+}
+
 // MeasureAudioPackets measures every audio stream's packets, keyed by stream
 // index. It reads what the bitstream holds, never the container's statistics
 // tags (BPS, NUMBER_OF_BYTES, DURATION), which a muxer can copy from another
@@ -50,6 +60,7 @@ var audioPacketStallTimeout = 2 * time.Minute
 // cancellation comes back as the context error.
 func MeasureAudioPackets(ctx context.Context, ffprobePath, path string) (map[int]AudioPacketSpan, error) {
 	start := time.Now()
+	stallTimeout := audioPacketStallTimeout
 	if ffprobePath == "" {
 		ffprobePath, _ = exec.LookPath("ffprobe")
 	}
@@ -80,7 +91,7 @@ func MeasureAudioPackets(ctx context.Context, ffprobePath, path string) (map[int
 	watchDone := make(chan struct{})
 	defer close(watchDone)
 	go func() {
-		tick := time.NewTicker(audioPacketStallTimeout / 4)
+		tick := time.NewTicker(stallTimeout / 4)
 		defer tick.Stop()
 		for {
 			select {
@@ -89,7 +100,7 @@ func MeasureAudioPackets(ctx context.Context, ffprobePath, path string) (map[int
 			case <-pctx.Done():
 				return
 			case <-tick.C:
-				if time.Since(time.Unix(0, progress.Load())) > audioPacketStallTimeout {
+				if time.Since(time.Unix(0, progress.Load())) > stallTimeout {
 					stalled.Store(true)
 					cancel()
 					return
@@ -170,7 +181,7 @@ func MeasureAudioPackets(ctx context.Context, ffprobePath, path string) (map[int
 		return nil, fmt.Errorf("audio packet scan interrupted: %w", parent)
 	}
 	if stalled.Load() {
-		return nil, &ProbeError{Kind: ProbeTimeout, Err: fmt.Errorf("no audio packet read for %s", audioPacketStallTimeout), Stderr: stderr.String(), Elapsed: elapsed}
+		return nil, &ProbeError{Kind: ProbeTimeout, Err: fmt.Errorf("no audio packet read for %s", stallTimeout), Stderr: stderr.String(), Elapsed: elapsed}
 	}
 	if parseErr != nil {
 		return nil, &ProbeError{Kind: ProbeBadOutput, Err: parseErr, Stderr: stderr.String(), Elapsed: elapsed}
