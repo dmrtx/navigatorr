@@ -100,6 +100,7 @@ function actionIcon(label) {
     "Review candidates": "M5 4h14v16H5ZM8 8h8M8 12h8",
     "Review candidate": "M5 4h14v16H5ZM8 8h8M8 12h8",
     "Choose a goal": "M8 5h12v15H8ZM4 16V2h12",
+    "Choose tracks": "M4 7h16M4 17h16M9 4v6M15 14v6",
     // Keeping originals is a decision, not filing the job away: a shield, not a box.
     "Keep original": "M12 3l7 3v6c0 4-3 7-7 9-4-2-7-5-7-9V6ZM9 12l2 2 4-4",
     "Keep originals": "M12 3l7 3v6c0 4-3 7-7 9-4-2-7-5-7-9V6ZM9 12l2 2 4-4",
@@ -280,7 +281,7 @@ function authenticationMessage() {
     ? "Cloudflare Access sign-in required. Reload to sign in."
     : "sign in to Navigatorr";
 }
-async function api(path, body, { signal } = {}) {
+async function api(path, body, { signal, method } = {}) {
   if (body !== undefined && !serverReachable)
     throw new Error(
       "Offline. Changes are unavailable until the server responds.",
@@ -288,7 +289,7 @@ async function api(path, body, { signal } = {}) {
   let res;
   try {
     res = await fetch(`/api/maintenance/${path}`, {
-      method: body === undefined ? "GET" : "POST",
+      method: method || (body === undefined ? "GET" : "POST"),
       redirect: "manual",
       headers: {
         "Content-Type": "application/json",
@@ -788,6 +789,7 @@ function selectTab(tab, fromRoute = false) {
   if (["jobs", "stats"].includes(tab) && !fromRoute) safe(loadJobs);
   // The node's job settings come from the worker activity report.
   if (tab === "advanced" && (!state.activityCheckedAt || Date.now() - state.activityCheckedAt > 5000)) void refreshWorkerActivity();
+  if (tab === "advanced") void loadKeepLanguages();
   if (tab === "library" && state.libraryNeedsLoad && !fromRoute) safe(loadLibrary);
   if (tab === "library" && $("service").value.startsWith("folder:") && state.folderSizeTargets?.size) {
     clearTimeout(state.folderSizesTimer);
@@ -910,6 +912,8 @@ async function initialize() {
   $("workspace").hidden = false;
   $("worker-status").hidden = false;
   void refreshWorkers();
+  // The picker in the goal form names the saved languages.
+  void loadKeepLanguages();
   $("logout").hidden = !state.localSession;
   $("access-expired").hidden = true;
   $("service").replaceChildren();
@@ -1716,6 +1720,7 @@ function sourceSummary() {
 function finishSubmission(mode) {
   if (mode === "encode") {
     state.goalExplicit = false;
+    resetKeepTracks();
     state.selected.clear();
     state.folderSelected?.clear();
     $("library-items")
@@ -1798,21 +1803,26 @@ function refreshGoalProfile() {
   clearTimeout(state.goalProfileTimer);
   state.goalProfileTimer = setTimeout(() => { if (state.goalProfile?.key === key) loadGoalProfile(key); }, 150);
 }
+// Reading a file takes one of the server's two source slots. Both can still be
+// held by files just left, so a busy answer is asked once more.
+async function readSource(url, signal, current) {
+  try {
+    return await api(url, undefined, {signal});
+  } catch (err) {
+    if (err?.status !== 429 || !current()) throw err;
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    if (!current()) throw err;
+    return api(url, undefined, {signal});
+  }
+}
 async function loadGoalProfile(key) {
   const seq = state.goalProfileSeq, controller = new AbortController();
   state.goalProfileAbort = controller;
   const current = () => seq === state.goalProfileSeq && state.goalProfile?.key === key;
-  const read = () => api(`source-profile?${new URLSearchParams({path: key})}`, undefined, {signal: controller.signal});
   let data = null;
   try {
-    data = await read();
-  } catch (err) {
-    // Both read slots can still be held by files just left; ask once more.
-    if (err?.status === 429 && current()) {
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      if (current()) try { data = await read(); } catch {}
-    }
-  }
+    data = await readSource(`source-profile?${new URLSearchParams({path: key})}`, controller.signal, current);
+  } catch {}
   if (!current()) return;
   state.goalProfileAbort = null;
   state.goalProfile = data?.profile && data.goals ? {...state.goalProfile, status: "ready", data} : {...state.goalProfile, status: "error"};
@@ -1852,6 +1862,352 @@ function goalSkipWarning() {
   if (verdict?.status !== "skip") return "";
   return `${goalNames[mode]} will skip ${p.batch ? "the first file" : "this file"}: ${goalSkipText(verdict.reason_code)}. The original is kept and nothing is converted.${p.batch ? " The other files are checked one by one." : ""}`;
 }
+// Languages to keep. The Save space and Shrink goals keep the audio and
+// subtitle tracks in these languages (plus the original-language audio and any
+// untagged track, which the server always keeps). A language is its ISO 639-2
+// terminology code, the spelling the server stores and compares by; names,
+// two-letter codes and the bibliographic spellings are accepted when typing.
+const languageTable = [
+  // code, name, ISO 639-1, bibliographic spelling
+  ["ara", "Arabic", "ar"], ["bul", "Bulgarian", "bg"], ["cat", "Catalan", "ca"], ["ces", "Czech", "cs", "cze"],
+  ["cym", "Welsh", "cy", "wel"], ["dan", "Danish", "da"], ["deu", "German", "de", "ger"], ["ell", "Greek", "el", "gre"],
+  ["eng", "English", "en"], ["est", "Estonian", "et"], ["eus", "Basque", "eu", "baq"], ["fas", "Persian", "fa", "per"],
+  ["fin", "Finnish", "fi"], ["fra", "French", "fr", "fre"], ["gle", "Irish", "ga"], ["glg", "Galician", "gl"],
+  ["heb", "Hebrew", "he"], ["hin", "Hindi", "hi"], ["hrv", "Croatian", "hr"], ["hun", "Hungarian", "hu"],
+  ["hye", "Armenian", "hy", "arm"], ["ind", "Indonesian", "id"], ["isl", "Icelandic", "is", "ice"], ["ita", "Italian", "it"],
+  ["jpn", "Japanese", "ja"], ["kat", "Georgian", "ka", "geo"], ["kor", "Korean", "ko"], ["lat", "Latin", "la"],
+  ["lav", "Latvian", "lv"], ["lit", "Lithuanian", "lt"], ["mkd", "Macedonian", "mk", "mac"], ["msa", "Malay", "ms", "may"],
+  ["nld", "Dutch", "nl", "dut"], ["nno", "Norwegian Nynorsk", "nn"], ["nob", "Norwegian Bokmål", "nb"], ["nor", "Norwegian", "no"],
+  ["pol", "Polish", "pl"], ["por", "Portuguese", "pt"], ["ron", "Romanian", "ro", "rum"], ["rus", "Russian", "ru"],
+  ["slk", "Slovak", "sk", "slo"], ["slv", "Slovenian", "sl"], ["spa", "Spanish", "es"], ["sqi", "Albanian", "sq", "alb"],
+  ["srp", "Serbian", "sr"], ["swe", "Swedish", "sv"], ["tam", "Tamil", "ta"], ["tel", "Telugu", "te"],
+  ["tgl", "Tagalog", "tl"], ["tha", "Thai", "th"], ["tur", "Turkish", "tr"], ["ukr", "Ukrainian", "uk"],
+  ["vie", "Vietnamese", "vi"], ["zho", "Chinese", "zh", "chi"],
+];
+const languageNameOf = new Map([...languageTable.map(([code, name]) => [code, name]), ["und", "Untagged"]]);
+const languageAliases = new Map([["untagged", "und"], ["unknown", "und"]]);
+for (const [code, name, twoLetter, bibliographic] of languageTable)
+  for (const alias of [code, name.toLowerCase(), twoLetter, bibliographic]) if (alias) languageAliases.set(alias, code);
+languageAliases.set("und", "und");
+// The one spelling two tags of a language share (es-419, spa and es are "spa").
+function canonicalLanguage(tag) {
+  const text = String(tag ?? "").trim().toLowerCase();
+  if (!text) return "und";
+  const base = text.split(/[-_]/)[0];
+  return languageAliases.get(base) || base;
+}
+function languageName(tag) {
+  const code = canonicalLanguage(tag);
+  return languageNameOf.get(code) || code;
+}
+// What was typed, as a language code: "", or a three-letter code the server
+// will check against ISO 639-2.
+function parseLanguage(text) {
+  const raw = String(text ?? "").trim().toLowerCase();
+  const known = languageAliases.get(raw) || languageAliases.get(raw.replace(/\s*\([a-z]{3}\)$/, ""));
+  return known || (/^[a-z]{3}$/.test(raw) ? raw : "");
+}
+function addLanguageTo(languages, text) {
+  const code = parseLanguage(text);
+  if (!code) return {message: "Enter a language such as English or eng."};
+  if (code === "und") return {message: "Untagged tracks are always kept."};
+  if (languages.includes(code)) return {message: `${languageName(code)} is already in the list.`};
+  return {languages: [...languages, code]};
+}
+const sameLanguages = (a, b) => a.length === b.length && [...a].sort().every((code, i) => code === [...b].sort()[i]);
+const languagesByName = languages => [...languages].sort((a, b) => languageName(a).localeCompare(languageName(b)));
+const languageNames = languages => languagesByName(languages).map(languageName).join(", ");
+// The suggestions offered while typing; choosing one types the name.
+$("language-options").append(...languageTable.map(([code, name]) => Object.assign(document.createElement("option"), {value: name, label: code})));
+function renderLanguageChips(list, languages, remove) {
+  list.hidden = !languages.length;
+  list.replaceChildren(...languagesByName(languages).map(code => {
+    const item = node("li", "", "language-chip");
+    const drop = button("×", () => remove(code), "chip-remove");
+    drop.setAttribute("aria-label", `Remove ${languageName(code)}`);
+    item.append(node("span", languageName(code)), node("span", code, "metadata"), drop);
+    return item;
+  }));
+}
+// Both language editors add the same way: say why an entry was refused, or take
+// it. The goal form's one sits inside the job form, so Enter adds the language
+// instead of submitting the job.
+function wireLanguageInput({input, add, note}, current, set) {
+  const submit = () => {
+    const result = addLanguageTo(current(), $(input).value);
+    $(note).textContent = result.message || "";
+    if (!result.languages) return;
+    $(input).value = "";
+    set(result.languages);
+  };
+  $(add).addEventListener("click", submit);
+  $(input).addEventListener("keydown", event => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    submit();
+  });
+}
+
+// The setting, in Settings: edited as a draft and saved with Apply, like the
+// node's parallel jobs. A load never replaces a draft that has been edited.
+const keepLanguages = {status: "idle", saved: [], draft: [], defaults: [], saving: false, request: 0};
+function applyKeepLanguages(data, adopt) {
+  const k = keepLanguages, clean = adopt || sameLanguages(k.draft, k.saved);
+  const changed = k.status === "ready" && !sameLanguages(k.saved, data.languages);
+  k.saved = [...data.languages];
+  k.defaults = [...(data.default || [])];
+  k.status = "ready";
+  if (clean) k.draft = [...k.saved];
+  // The picker's pre-checked tracks follow the saved list.
+  if (changed) { keepTracks.key = ""; refreshKeepTracks(); }
+}
+async function loadKeepLanguages() {
+  const k = keepLanguages, auth = state.authRevision, request = ++k.request;
+  if (k.status === "idle") { k.status = "loading"; renderKeepLanguages(); }
+  try {
+    const data = await api("keep-languages");
+    if (auth !== state.authRevision || request !== k.request) return;
+    applyKeepLanguages(data, false);
+  } catch {
+    if (auth !== state.authRevision || request !== k.request) return;
+    if (k.status !== "ready") k.status = "error";
+  }
+  renderKeepLanguages();
+  renderKeepTracks();
+}
+function keepLanguagesState(k) {
+  if (k.status === "error") return "Could not load the list";
+  if (k.status !== "ready") return "Loading…";
+  if (!sameLanguages(k.draft, k.saved)) return "Not saved yet";
+  if (!k.saved.length) return "Off: every track is kept";
+  return sameLanguages(k.saved, k.defaults) ? "Default" : "Custom";
+}
+function stageKeepLanguages(languages) {
+  keepLanguages.draft = languages;
+  $("keep-languages-note").textContent = "";
+  renderKeepLanguages();
+}
+function renderKeepLanguages() {
+  const k = keepLanguages, ready = k.status === "ready";
+  $("keep-languages-state").textContent = keepLanguagesState(k);
+  renderLanguageChips($("keep-languages-list"), k.draft, code => {
+    stageKeepLanguages(k.draft.filter(language => language !== code));
+    $("keep-language-input").focus();
+  });
+  $("keep-language-input").disabled = !ready;
+  $("keep-language-add").disabled = !ready;
+  $("keep-languages-apply").disabled = !ready || k.saving || sameLanguages(k.draft, k.saved);
+  $("keep-languages-reset").disabled = !ready || sameLanguages(k.draft, k.defaults);
+  $("keep-languages-off").disabled = !ready || !k.draft.length;
+}
+async function saveKeepLanguages(languages) {
+  const k = keepLanguages, note = $("keep-languages-note"), auth = state.authRevision;
+  if (k.saving) return;
+  k.saving = true;
+  note.textContent = "Saving…";
+  renderKeepLanguages();
+  try {
+    const data = await api("keep-languages", {languages}, {method: "PUT"});
+    if (auth !== state.authRevision) return;
+    k.request++;
+    applyKeepLanguages(data, true);
+    note.textContent = "Saved. It applies to jobs created from now on; jobs already queued keep the list they started with.";
+  } catch (e) {
+    note.textContent = e.message;
+  } finally {
+    k.saving = false;
+    renderKeepLanguages();
+    renderKeepTracks();
+  }
+}
+wireLanguageInput({input: "keep-language-input", add: "keep-language-add", note: "keep-languages-note"}, () => keepLanguages.draft, stageKeepLanguages);
+$("keep-languages-apply").addEventListener("click", () => void saveKeepLanguages(keepLanguages.draft));
+$("keep-languages-reset").addEventListener("click", () => stageKeepLanguages([...keepLanguages.defaults]));
+$("keep-languages-off").addEventListener("click", () => stageKeepLanguages([]));
+
+// The goal form's choice for one job: the saved languages, this job's own list,
+// or every track. For one file the file's tracks are listed too, checked the
+// way the server's rules would keep them (the server answers, so the rules live
+// in one place); changing a box sends explicit stream lists instead.
+const keepGoals = ["size", "compact"];
+const keepTracks = {scope: "saved", languages: [], picks: null, path: "", key: "", status: "idle", data: null, built: null, boxes: [], notice: "", error: "", seq: 0, abort: null, timer: 0};
+// Which file or files the choice is for; null while the goal keeps no tracks.
+function keepTrackTarget() {
+  if ($("technical").checked || !keepGoals.includes(processingMode())) return null;
+  const target = goalProbeTarget();
+  return target ? {path: target.path, single: $("scope").value !== "batch"} : null;
+}
+function keepLanguageInputs() {
+  const kt = keepTracks;
+  return kt.scope === "saved" ? {} : {keep_languages: kt.scope === "all" ? [] : [...kt.languages]};
+}
+// The inputs the choice adds to a job. The saved list sends nothing; boxes that
+// were changed send both lists, so what is frozen is what was on screen.
+function keepTrackInputs(single, path) {
+  const kt = keepTracks, inputs = keepLanguageInputs();
+  if (!single || !kt.picks || kt.path !== path) return inputs;
+  if (!kt.picks.audio.size) throw new Error("Keep at least one audio track.");
+  const order = set => [...set].sort((a, b) => a - b);
+  return {...inputs, keep_audio_streams: order(kt.picks.audio), keep_subtitle_streams: order(kt.picks.subtitles)};
+}
+function resetKeepTracks() {
+  Object.assign(keepTracks, {scope: "saved", languages: [], picks: null, notice: "", key: ""});
+}
+// Opening a file again to pick tracks starts from the languages it was made with.
+function presetKeepLanguages(languages) {
+  Object.assign(keepTracks, {scope: languages.length ? "job" : "all", languages: [...languages], picks: null, notice: "", key: ""});
+}
+function setKeepScope(scope) {
+  const kt = keepTracks;
+  if (scope === kt.scope) return;
+  // Editing starts from the saved list rather than from nothing.
+  if (scope === "job" && !kt.languages.length) kt.languages = [...keepLanguages.saved];
+  kt.scope = scope;
+  $("keep-job-note").textContent = "";
+  controls();
+}
+document.querySelectorAll('input[name="keep-scope"]').forEach(radio => radio.addEventListener("change", () => { if (radio.checked) setKeepScope(radio.value); }));
+wireLanguageInput({input: "keep-job-input", add: "keep-job-add", note: "keep-job-note"}, () => keepTracks.languages, languages => { keepTracks.languages = languages; controls(); });
+function keepTracksQuery(path) {
+  const kt = keepTracks, params = new URLSearchParams({path});
+  if (kt.scope !== "saved") params.set("keep_languages", kt.scope === "all" ? "" : kt.languages.join(","));
+  return params.toString();
+}
+// Called whenever the form changes. A new file or a new language list reads the
+// file again; the same ones do nothing.
+function refreshKeepTracks() {
+  const kt = keepTracks, target = keepTrackTarget(), file = target?.single ? target.path : "";
+  const key = file ? keepTracksQuery(file) : "";
+  if (key === kt.key) return;
+  kt.seq++;
+  kt.abort?.abort();
+  kt.abort = null;
+  clearTimeout(kt.timer);
+  kt.key = key;
+  if (!file) {
+    Object.assign(kt, {status: "idle", data: null, picks: null, path: "", notice: "", error: ""});
+    return;
+  }
+  // A new file starts from the automatic choice. The same file with other
+  // languages does too: the boxes follow the languages again.
+  if (kt.path !== file) Object.assign(kt, {data: null, picks: null, path: file, notice: ""});
+  else if (kt.picks) Object.assign(kt, {picks: null, notice: "The boxes follow the languages again."});
+  kt.status = "loading";
+  kt.error = "";
+  const seq = kt.seq;
+  kt.timer = setTimeout(() => loadKeepTracks(key, seq), 150);
+}
+async function loadKeepTracks(key, seq) {
+  const kt = keepTracks, controller = new AbortController();
+  kt.abort = controller;
+  const current = () => seq === kt.seq;
+  let data = null, error = "";
+  try {
+    data = await readSource(`source-tracks?${key}`, controller.signal, current);
+  } catch (err) {
+    error = err?.status === 400 ? err.message : "Could not read this file's tracks. The job still follows the languages.";
+  }
+  if (!current()) return;
+  kt.abort = null;
+  const ready = Boolean(data?.audio || data?.subtitles);
+  Object.assign(kt, {status: ready ? "ready" : "error", data: ready ? data : null, error: ready ? "" : error || "Could not read this file's tracks. The job still follows the languages."});
+  renderKeepTracks();
+}
+const trackCodecs = {eac3: "E-AC-3", ac3: "AC-3", truehd: "TrueHD", subrip: "SRT", ass: "ASS", ssa: "SSA", hdmv_pgs_subtitle: "PGS", dvd_subtitle: "VobSub", webvtt: "WebVTT", mov_text: "Text"};
+const trackCodec = codec => trackCodecs[codec] || codecLabel(codec);
+function trackChannels(count) {
+  return {1: "Mono", 2: "Stereo", 6: "5.1", 8: "7.1"}[count] || (count > 0 ? `${count} channels` : "");
+}
+const trackKept = (kind, track) => keepTracks.picks ? keepTracks.picks[kind].has(track.index) : track.keep;
+function keepTracksCount(data) {
+  const kept = kind => data[kind].filter(track => trackKept(kind, track)).length;
+  const part = (kind, one, many) => data[kind].length ? `${kept(kind)} of ${data[kind].length} ${data[kind].length === 1 ? one : many}` : "";
+  const parts = [part("audio", "audio track", "audio tracks"), part("subtitles", "subtitle", "subtitles")].filter(Boolean);
+  return parts.length ? `Keeping ${parts.join(" and ")}.` : "";
+}
+function toggleTrack(kind, index, on) {
+  const kt = keepTracks, data = kt.data;
+  if (!data) return;
+  const automatic = name => new Set(data[name].filter(track => track.keep).map(track => track.index));
+  const picks = kt.picks ||= {audio: automatic("audio"), subtitles: automatic("subtitles")};
+  if (on) picks[kind].add(index); else picks[kind].delete(index);
+  // A file keeps its audio, and boxes that match the automatic choice again are
+  // that choice, so nothing explicit is sent.
+  if (kind === "audio" && !picks.audio.size) picks.audio.add(index);
+  const same = name => picks[name].size === automatic(name).size && [...picks[name]].every(i => automatic(name).has(i));
+  if (same("audio") && same("subtitles")) kt.picks = null;
+  kt.notice = "";
+  renderKeepTracks();
+}
+function trackRow(kind, track) {
+  const row = node("li", "", "track-row"), label = node("label", "", "track-label");
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  box.addEventListener("change", () => toggleTrack(kind, track.index, box.checked));
+  const name = node("span", "", "track-text");
+  name.append(node("strong", languageName(track.language), "track-name"));
+  const facts = [trackCodec(track.codec), kind === "audio" ? trackChannels(track.channels) : "", track.title].filter(Boolean);
+  if (facts.length) name.append(node("span", facts.join(" · "), "metadata track-facts"));
+  label.append(box, name);
+  for (const [flag, text] of [["original", "Original"], ["default", "Default"], ["forced", "Forced"]])
+    if (track[flag]) label.append(node("span", text, "badge track-badge"));
+  row.append(label);
+  return {row, box, kind, track};
+}
+// The boxes are built when a file is read and updated in place afterwards, so a
+// keyboard user toggling one never loses their place.
+function syncTrackBoxes() {
+  const loading = keepTracks.status === "loading";
+  const audioKept = keepTracks.boxes.filter(entry => entry.kind === "audio" && trackKept(entry.kind, entry.track)).length;
+  for (const entry of keepTracks.boxes) {
+    entry.box.checked = trackKept(entry.kind, entry.track);
+    // Boxes wait for the file to be read again; the last audio track cannot be unticked.
+    entry.box.disabled = loading || (entry.kind === "audio" && entry.box.checked && audioKept <= 1);
+  }
+}
+function renderKeepTracks() {
+  const kt = keepTracks, target = keepTrackTarget();
+  $("keep-tracks").hidden = !target;
+  if (!target) return;
+  document.querySelectorAll('input[name="keep-scope"]').forEach(radio => { radio.checked = radio.value === kt.scope; });
+  $("keep-job-languages").hidden = kt.scope !== "job";
+  renderLanguageChips($("keep-job-list"), kt.languages, code => {
+    keepTracks.languages = keepTracks.languages.filter(language => language !== code);
+    controls();
+    $("keep-job-input").focus();
+  });
+  const data = target.single ? kt.data : null;
+  const saved = keepLanguages.status === "ready" ? keepLanguages.saved : null;
+  $("keep-tracks-summary").textContent = kt.picks ? "Tracks chosen by hand" : kt.scope === "all" ? "Keep every track"
+    : kt.scope === "job" ? (kt.languages.length ? `This job: ${languageNames(kt.languages)}` : "Keep every track")
+    : saved ? (saved.length ? `Saved list: ${languageNames(saved)}` : "Keep every track") : "Saved list";
+  $("keep-tracks-file").hidden = !target.single;
+  if (!target.single) return;
+  if (data && kt.built !== data) {
+    const audio = data.audio.map(track => trackRow("audio", track)), subtitles = data.subtitles.map(track => trackRow("subtitles", track));
+    kt.built = data;
+    kt.boxes = [...audio, ...subtitles];
+    $("keep-audio-list").replaceChildren(...audio.map(entry => entry.row));
+    $("keep-subtitle-list").replaceChildren(...subtitles.map(entry => entry.row));
+  }
+  if (!data) {
+    kt.built = null;
+    kt.boxes = [];
+    $("keep-audio-list").replaceChildren();
+    $("keep-subtitle-list").replaceChildren();
+  }
+  $("keep-audio").hidden = !data?.audio.length;
+  $("keep-subtitles").hidden = !data?.subtitles.length;
+  syncTrackBoxes();
+  $("keep-tracks-reset").hidden = !kt.picks;
+  $("keep-tracks-status").textContent = kt.status === "error" ? kt.error : kt.status === "loading" ? "Reading the file's tracks…"
+    : [data ? keepTracksCount(data) : "", kt.notice].filter(Boolean).join(" ");
+}
+$("keep-tracks-reset").addEventListener("click", () => {
+  Object.assign(keepTracks, {picks: null, notice: ""});
+  renderKeepTracks();
+});
+
 $("technical").addEventListener("change", controls);
 $("allow-hardware").addEventListener("change", controls);
 $("size-budget-kind").addEventListener("change", controls);
@@ -1906,6 +2262,8 @@ function controls() {
   refreshGoalProfile();
   renderGoalProfile();
   syncMoreGoals();
+  refreshKeepTracks();
+  renderKeepTracks();
   $("goal-overridden").hidden = !technical;
   $("advanced-state").textContent = technical ? "On · goal not used" : "Off";
   $("advanced-state").dataset.on = technical ? "true" : "false";
@@ -2170,6 +2528,7 @@ async function buildAndSubmitJob(mode = "encode") {
     inputs.allow_hardware = $("allow-hardware").checked;
     Object.assign(inputs, sizeBudgetInputs("size-budget"));
   }
+  if (simple && keepGoals.includes(inputs.mode)) Object.assign(inputs, keepTrackInputs(!batch, $("path").value.trim()));
   const folderSource = $("service").value.startsWith("folder:");
   const explicitSelection = (folderSource ? state.folderSelected?.size : state.selected.size) > 0 && (simple || $("selected-only").checked);
   if (batch) {
@@ -3297,15 +3656,23 @@ async function rerunJob(job, {withoutHardware = false, mode = ""} = {}) {
     state.busyJobs.delete(job.id);
   }
 }
-// openGoalForm opens the library's goal form for one file.
-function openGoalForm(path) {
+// openGoalForm opens the library's goal form for one file, closing the job
+// that asked for it. options.mode and options.languages start the form on the
+// goal and languages an earlier job used; options.pickTracks opens the track list.
+function openGoalForm(path, options = {}) {
+  if ($("job-detail").open) $("job-detail").close();
   $("path").value = path || "";
   $("scope").value = "file";
   state.fileMedia = null;
   state.fileService = null;
+  if (options.mode) setProcessingMode(options.mode);
+  if (options.languages) presetKeepLanguages(options.languages);
   selectTab("library");
   setFileStep("configure");
   controls();
+  // Opening a new file clears an explicit goal; this one was asked for.
+  if (options.mode) state.goalExplicit = true;
+  if (options.pickTracks) $("keep-tracks").open = true;
 }
 function jobControls(job, detail = false) {
   const actionRail = node("div", "", "job-actions");
@@ -3467,6 +3834,11 @@ function jobControls(job, detail = false) {
     add("Replace file", () => prepareReplacement(job));
   if (job.replacement_action_id)
     add("View replacement", () => openJob(job.replacement_action_id));
+  // Untagged tracks are kept without being asked; the finished file may have
+  // kept the wrong ones, and the tag is missing, not the track. The lists come
+  // with the one job only, so the queue rows never offer it.
+  if (detail && job.action_name === "transcode_media" && job.status === "completed" && !job.replaced && !job.replacement_action_id && job.source_path && keepGoals.includes(job.mode) && keptUntagged(job.tracks))
+    add("Choose tracks", () => openGoalForm(job.source_path, {mode: job.mode, languages: job.tracks.languages || [], pickTracks: true}));
   if (job.preview_action_id && detail)
     add("View preview", () => openJob(job.preview_action_id));
   if (job.can_archive && ["completed", "failed", "cancelled"].includes(job.status))
@@ -3883,6 +4255,41 @@ function resultReport(job) {
     next.append(node("strong", "Next step: "), node("span", nextStep));
     box.append(next);
   }
+  return box;
+}
+// What a Save space or Shrink job kept of the audio and subtitles: the sentence
+// the server wrote, and the tracks behind it, one line each.
+function keptUntagged(tracks) {
+  return Boolean(tracks) && !tracks.manual && [tracks.audio, tracks.subtitles].some(split => split?.kept?.some(entry => canonicalLanguage(entry.language) === "und"));
+}
+function trackReport(job) {
+  const report = job.tracks, message = report?.message || job.tracks_message;
+  if (!message) return null;
+  const box = node("section", "", "track-report");
+  box.setAttribute("aria-label", "Audio and subtitles");
+  const line = node("p", "", "track-report-line");
+  line.append(node("strong", "Tracks: "), node("span", message));
+  box.append(line);
+  const groups = [["Audio", report?.audio], ["Subtitles", report?.subtitles]].filter(([, split]) => split?.total > 0);
+  if (!groups.length) return box;
+  const details = node("details", "", "track-report-details");
+  // A refresh rebuilds the dialog; the list stays open for the job it was opened on.
+  details.open = state.trackReportOpen === job.id;
+  details.addEventListener("toggle", () => { state.trackReportOpen = details.open ? job.id : null; });
+  details.append(node("summary", "Kept and dropped tracks"));
+  for (const [title, split] of groups) {
+    const entries = [...split.kept.map(entry => ({...entry, kept: true})), ...split.dropped.map(entry => ({...entry, kept: false}))].sort((a, b) => a.index - b.index);
+    const list = node("ul", "", "track-report-list");
+    for (const entry of entries) {
+      const row = node("li", "", `track-report-row ${entry.kept ? "kept" : "dropped"}`);
+      row.append(node("span", entry.kept ? "Kept" : "Dropped", "badge track-badge"), node("strong", languageName(entry.language)));
+      const facts = [trackCodec(entry.codec), entry.title, entry.bytes > 0 ? bytes(entry.bytes) : ""].filter(Boolean);
+      if (facts.length) row.append(node("span", facts.join(" · "), "metadata"));
+      list.append(row);
+    }
+    details.append(node("h4", `${title} · ${split.kept.length} of ${split.total} kept`), list);
+  }
+  box.append(details);
   return box;
 }
 // plan_source/plan_note arrive only once the encode's settings are settled; a
@@ -4659,6 +5066,8 @@ async function refreshDetail() {
     }
     const report = resultReport(job);
     if (report) summary.append(report);
+    const tracks = trackReport(job);
+    if (tracks) summary.append(tracks);
     if (!presentation.showTelemetry && !progress && !job.batch?.dry_run && job.batch?.outcome !== "no_changes") addOutcome(queueOutcome(job));
     if (job.batch?.outcome === "no_changes") summary.append(skippedBatchOutcome(job));
     if (job.batch?.dry_run) summary.append(node("p", queueOutcome(job) + (job.batch.queued > 0 && !job.preview_execution_action_id ? ". Review the eligible files, then choose Start batch to convert them." : "."), "preview-notice"));
@@ -4783,6 +5192,7 @@ async function loadBatchItems(id, revision) {
     if (actions.children.length) row.append(actions);
     const activity = batchFileActivity(item, state.detailJob);
     if (activity) row.append(node("span", activity, "batch-file-activity"));
+    if (item.tracks_message) row.append(node("span", item.tracks_message, "muted batch-file-tracks"));
     if (item.mode) row.append(node("span", `Goal: ${item.mode === "compact" ? `Shrink to ${item.max_height || 1080}p SDR` : goalNames[item.mode] || item.mode}`, "metadata batch-file-profile"));
     else if (item.requested_profile || item.profile) row.append(node("span", `${item.retry_pending ? "Next attempt" : "Profile"}: ${profileOptionLabel(item.requested_profile || item.profile)}`, "metadata batch-file-profile"));
     if (item.previous_attempts?.length) {
