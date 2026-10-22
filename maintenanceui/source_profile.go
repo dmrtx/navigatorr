@@ -30,50 +30,72 @@ type sourceProfile struct {
 	SizeBytes         int64  `json:"size_bytes"`
 }
 
-// sourceProfile reads one video the way a transcode job will, and reports for
-// each goal whether the job's own source gates would skip it. The path is
-// resolved against the same read allow-list the file browser uses; nothing
-// outside it is probed, and nothing is queued or written.
-func (s *Server) sourceProfile(w http.ResponseWriter, r *http.Request) {
+// openSource resolves the requested path against the read allow-list the file
+// browser uses and takes one of the two read slots. Nothing outside the
+// allow-list is touched, and only a regular video file is accepted. The caller
+// releases the slot when it is done.
+func (s *Server) openSource(w http.ResponseWriter, r *http.Request) (path string, release func(), ok bool) {
 	resolver := s.engine.Deps().Fs
 	if resolver == nil {
 		fail(w, 400, "filesystem navigation is unavailable")
-		return
+		return "", nil, false
 	}
 	path, err := resolver.ResolveRead(r.URL.Query().Get("path"))
 	if err != nil {
 		fail(w, 400, err.Error())
-		return
+		return "", nil, false
 	}
 	info, err := os.Stat(path)
 	if err != nil || !info.Mode().IsRegular() || !videoPath(path) {
 		fail(w, 400, "choose a video file")
-		return
+		return "", nil, false
 	}
 	select {
 	case sourceProfileSlots <- struct{}{}:
-		defer func() { <-sourceProfileSlots }()
+		return path, func() { <-sourceProfileSlots }, true
 	default:
 		fail(w, 429, "busy reading another file; try again")
-		return
+		return "", nil, false
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), sourceProfileTimeout)
-	defer cancel()
+}
+
+// probeSource reads the file's streams the way a transcode job will. A file
+// that cannot be read is a handled status, never a gateway error: the console
+// takes 502, 503 and 504 for an unreachable server.
+func (s *Server) probeSource(ctx context.Context, w http.ResponseWriter, path string, valid func(*mediainspect.DetailedReport) bool) (*mediainspect.DetailedReport, bool) {
 	probe := s.probe
 	if probe == nil {
 		probe = mediainspect.InspectDetailed
 	}
 	rep, err := probe(ctx, s.engine.Deps().Ffprobe, path)
-	if err != nil || !rep.Probed || len(rep.MainVideo()) != 1 {
+	if err != nil || !rep.Probed || !valid(&rep) {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			fail(w, 408, "reading this file took too long")
-			return
+			return nil, false
 		}
 		fail(w, 422, "could not read this file")
+		return nil, false
+	}
+	return &rep, true
+}
+
+// sourceProfile reads one video the way a transcode job will, and reports for
+// each goal whether the job's own source gates would skip it. Nothing is
+// queued or written.
+func (s *Server) sourceProfile(w http.ResponseWriter, r *http.Request) {
+	path, release, ok := s.openSource(w, r)
+	if !ok {
 		return
 	}
-	goals := s.engine.SourceGoals(ctx, path, &rep, s.classify)
-	writeJSON(w, 200, map[string]any{"profile": describeSource(&rep, goals.Dynamic), "goals": goals.Goals, "recommended": goals.Recommended})
+	defer release()
+	ctx, cancel := context.WithTimeout(r.Context(), sourceProfileTimeout)
+	defer cancel()
+	rep, ok := s.probeSource(ctx, w, path, func(rep *mediainspect.DetailedReport) bool { return len(rep.MainVideo()) == 1 })
+	if !ok {
+		return
+	}
+	goals := s.engine.SourceGoals(ctx, path, rep, s.classify)
+	writeJSON(w, 200, map[string]any{"profile": describeSource(rep, goals.Dynamic), "goals": goals.Goals, "recommended": goals.Recommended})
 }
 
 func describeSource(rep *mediainspect.DetailedReport, classified *mediainspect.DynamicRange) sourceProfile {

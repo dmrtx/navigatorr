@@ -160,6 +160,21 @@ func operationReplacementContext(r operationRecord, recordsByID map[string]opera
 	return nil
 }
 
+// operationTracks is what a file's job kept of the source's audio and subtitle
+// tracks: the report the final validation gives, else the one the preflight
+// stored when it chose them. It is nil when the goal kept every track.
+func operationTracks(r operationRecord) map[string]any {
+	if r.inst.ActionName != "transcode_media" {
+		return nil
+	}
+	for _, key := range []string{"tracks", "track_report"} {
+		if report := operationMap(operationValue(r, key)); report != nil {
+			return report
+		}
+	}
+	return nil
+}
+
 // operationSizeMode summarises what mode=size decided for one file: the
 // sampled output estimate, the final quality measurement and the audio
 // tracks it compacted. It is nil for every other mode.
@@ -769,6 +784,14 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 			}
 			if outcome := operationSizeBudgetOutcome(r); outcome != "" {
 				job["size_budget_outcome"] = outcome
+			}
+			if tracks := operationTracks(r); tracks != nil {
+				// The queue lists the sentence; the lists of tracks belong to the
+				// one job being opened.
+				job["tracks_message"] = operationString(tracks["message"])
+				if selectedID != "" {
+					job["tracks"] = tracks
+				}
 			}
 			root := roots[r.inst.ID]
 			job["workflow_id"] = root
