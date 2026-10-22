@@ -2557,6 +2557,14 @@ function ladderStep(job) {
 function detailFacts(job) {
   if (job.podcast || job.batch?.total > 1) return [];
   const facts = [];
+  // Nothing was encoded, so there is no result size, encoder or try to report:
+  // only the source and the limit it could not meet.
+  if (notConverted(job)) {
+    const size = Number(job.savings?.source_bytes), cap = Number(job.size_mode?.size_budget?.budget_bytes);
+    if (size > 0) facts.push(bytes(size));
+    if (cap > 0) facts.push(`Limit ≤ ${bytes(cap)}`);
+    return facts;
+  }
   const source = Number(job.savings?.source_bytes), candidate = Number(job.savings?.candidate_bytes), expected = Number(job.size_mode?.expected_bytes);
   if (source > 0) facts.push(candidate > 0 ? `${bytes(source)} → ${bytes(candidate)}` : expected > 0 ? `${bytes(source)} → ~${bytes(expected)}` : bytes(source));
   const ladder = ladderStep(job);
@@ -3494,6 +3502,9 @@ function shortJobReason(reason) {
     compact_frame_evidence_unavailable: "Could not read this video's frames to plan the conversion (it may have timed out); original kept. Use Change goal to try again",
     quality_policy_unavailable: "The worker cannot run the quality checks this goal needs; original kept",
     quality_vmaf_model_unavailable: "The worker cannot measure quality for this video (VMAF model unavailable); original kept",
+    size_budget_exceeded: "The encoded result was over the size budget; original kept",
+    size_budget_unreachable: "The audio, subtitles and other streams leave no room for video within the size budget; original kept",
+    size_budget_estimate_unavailable: "The size budget could not be planned for this file; original kept",
   };
   if (reasons[text]) return reasons[text];
   if (isCandidateRejection(text)) return ["Candidate rejected by you; original kept", candidateNoteInText(text)].filter(Boolean).join("; ");
@@ -3592,6 +3603,35 @@ function rejectedCandidate(job) {
 function savingsPolicyFailure(value) {
   return /benchmark winner predicts only -?\d+(?:\.\d+)?% savings, below required minimum \d+(?:\.\d+)?%|Full conversion not started; original kept/i.test(value || "");
 }
+// A conversion that finished and left nothing to review, replace or undo: no
+// candidate file, no replacement, no retired candidate. This is a fact about
+// the job, not a list of reason codes, so a reason the UI has never seen still
+// reads as "Not converted" instead of a green "Completed".
+function notConverted(job) {
+  return job.action_name === "transcode_media" && job.status === "completed" && !job.candidate_ready &&
+    !job.replaced && !job.replacement_action_id && !job.candidate_cleanup && job.savings?.realized_saved_bytes == null;
+}
+// Why a not-converted job left its original alone: the server's own sentence
+// (the numbers are in it), else the curated line for its code, else the code
+// itself in words. Never empty.
+function notConvertedReason(job) {
+  const message = String(job.benchmark?.message || "").replace(/\s+/g, " ").trim();
+  if (message) {
+    // A sentence ends at ". " before a capital, so "approx. 5 GB" stays whole.
+    let sentence = (message.split(/(?<=[.!?])\s+(?=[A-Z])/)[0] || message).replace(/[.!?]+$/, "");
+    const suffix = "; original kept", limit = 160;
+    if (sentence.length + suffix.length > limit) {
+      // Cut at a clause or word boundary, never inside a number, and keep the
+      // suffix: the user must still learn that the original is untouched.
+      const room = sentence.slice(0, limit - suffix.length - 1);
+      const clause = Math.max(room.lastIndexOf(";"), room.lastIndexOf(","));
+      const cut = clause > room.length / 2 ? clause : room.lastIndexOf(" ");
+      sentence = `${room.slice(0, cut > 0 ? cut : room.length)}…`;
+    }
+    return /original (?:preserved|kept)/i.test(sentence) ? sentence : sentence + suffix;
+  }
+  return shortJobReason(job.reason_code) || "No converted file was made; original kept";
+}
 function visibleBatch(job) {
   if (!job.batch) return null;
   const rejected = Math.min(job.batch.failed || 0, job.batch_files?.rejected_count ?? (job.batch_files?.reasons || []).filter(reason=>isCandidateRejection(reason.reason)).reduce((count,reason)=>count+reason.count,0));
@@ -3640,8 +3680,9 @@ function queuePresentation(job) {
   const observation = workerProgressObservation(job);
   const replacementComplete = job.savings?.realized_saved_bytes != null ||
     (job.replaced && job.status === "completed");
-  const skippedFile = job.action_name === "transcode_media" && job.status === "completed" && !job.candidate_ready && ["quality_not_met","insufficient_savings","size_growth","size_growth_exceeded","preservation_not_met","already_target_codec","no_suitable_candidate","audio_compaction_insufficient","audio_estimate_unavailable","audio_only_worker_unsupported","unsupported_source","hdr_requires_compact","compact_not_needed"].includes(job.reason_code);
-  const status = skippedFile ? "Skipped" : job.status === "waiting_decision" && job.reason_code === "search_budget_exhausted" ? "Needs attention" : job.status === "failed" && !rejectedCandidate(job) && !savingsPolicyFailure(job.error) ? "Failed" : job.replaced_files > 0 && job.remaining_candidates > 0 ? "Candidates ready" : replacementComplete
+  // Nothing was made, so there are no savings to report.
+  const leftNoFile = notConverted(job);
+  const status = leftNoFile ? "Not converted" : job.status === "waiting_decision" && job.reason_code === "search_budget_exhausted" ? "Needs attention" : job.status === "failed" && !rejectedCandidate(job) && !savingsPolicyFailure(job.error) ? "Failed" : job.replaced_files > 0 && job.remaining_candidates > 0 ? "Candidates ready" : replacementComplete
     ? "Replaced"
     : rejectedCandidate(job) ? "Rejected" : savingsPolicyFailure(job.error) ? "Minimum savings not met" : outcomes[batch?.outcome] ||
       (job.candidate_ready && !job.replacement_action_id
@@ -3653,23 +3694,23 @@ function queuePresentation(job) {
     metrics = [];
   if (s.source_bytes != null) {
     metrics.push(
-      s.candidate_bytes != null && !job.replaced
+      s.candidate_bytes != null && !job.replaced && !leftNoFile
         ? `${bytes(s.source_bytes)} → ${bytes(s.candidate_bytes)}`
         : `${bytes(s.source_bytes)} source`,
     );
   }
   if (s.realized_saved_bytes != null)
     metrics.push(`${bytes(s.realized_saved_bytes)} freed`);
-  else if (!job.replaced && !rejectedCandidate(job) && batch?.outcome !== "rejected" && s.candidate_saved_bytes != null)
+  else if (!leftNoFile && !job.replaced && !rejectedCandidate(job) && batch?.outcome !== "rejected" && s.candidate_saved_bytes != null)
     metrics.push(
       s.candidate_saved_bytes < 0
         ? `${bytes(-s.candidate_saved_bytes)} larger`
         : `${bytes(s.candidate_saved_bytes)} potential savings`,
     );
-  else if (!job.replaced && !rejectedCandidate(job) && batch?.outcome !== "rejected" && s.estimated_saved_bytes != null)
+  else if (!leftNoFile && !job.replaced && !rejectedCandidate(job) && batch?.outcome !== "rejected" && s.estimated_saved_bytes != null)
     metrics.push(s.estimated_saved_bytes < 0 ? `about ${bytes(-s.estimated_saved_bytes)} larger (estimate)` : `${bytes(s.estimated_saved_bytes)} estimated savings`);
   let result;
-  if (skippedFile) result = shortJobReason(job.reason_code);
+  if (leftNoFile) result = notConvertedReason(job);
   else if (job.status === "failed")
     result = shortJobReason(job.error) || "Error details unavailable";
   else if (job.replaced && job.status === "completed") result = "Original replaced";
@@ -3814,6 +3855,7 @@ function resultHeadline(job) {
 }
 // The job's one-line outcome when no result card explains it.
 function jobOutcomeText(job) {
+  if (notConverted(job)) return notConvertedReason(job);
   if (job.status === "completed" && !job.candidate_ready && job.reason_code) return shortJobReason(job.reason_code);
   // A size budget ladder or a goal's recipe says which full encode runs.
   if (["size_budget_ladder", "recipe"].includes(job.benchmark?.outcome) && job.benchmark.message) return job.benchmark.message;
@@ -4098,6 +4140,7 @@ function queueOutcome(job) {
   if (batch?.outcome === "failed") return "No candidates created · Change settings to try again";
   if (batch?.completed > 0) return `${batch.completed} ${batch.completed === 1 ? "candidate ready" : "candidates ready"} · Originals unchanged`;
   if (job.candidate_ready) return `Original preserved · Candidate available${belowTargetLabel(job.size_budget_outcome) ? ` · ${belowTargetLabel(job.size_budget_outcome)}` : ""}`;
+  if (notConverted(job)) return notConvertedReason(job);
   if (job.action_name === "transcode_media" && job.reason_code && job.status === "completed") return shortJobReason(job.reason_code);
   if (job.action_name === "benchmark_transcode") return "Sample test complete · Original preserved";
   return "Finished · Open job for details";

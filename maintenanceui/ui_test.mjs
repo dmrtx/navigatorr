@@ -2918,9 +2918,9 @@ test("file details offer goal changes and keep-original decisions without duplic
   const labels=h.run('jobControls({id:"child",action_name:"transcode_media",status:"waiting_decision",reason_code:"search_budget_exhausted",mode:"size",parent_action_id:"batch",parent_item_key:"one",waiting_options:[{decision:"cancel"}]}).children.map(b=>b.textContent)');
   assert.ok(labels.includes("Keep original"));assert.ok(labels.includes("Change goal"));assert.ok(!labels.includes("Cancel"));
   const skipped=h.run('queuePresentation({action_name:"transcode_media",status:"completed",reason_code:"quality_not_met",candidate_ready:false})');
-  assert.equal(skipped.status,"Skipped");assert.match(skipped.summary,/quality target; original kept/);
+  assert.equal(skipped.status,"Not converted");assert.match(skipped.summary,/quality target; original kept/);
   const unsupported=h.run('queuePresentation({action_name:"transcode_media",status:"completed",reason_code:"unsupported_source",candidate_ready:false})');
-  assert.equal(unsupported.status,"Skipped");assert.match(unsupported.summary,/does not support this source format yet/);
+  assert.equal(unsupported.status,"Not converted");assert.match(unsupported.summary,/does not support this source format yet/);
 });
 
 test("replacement from a batch row rechecks the exact candidate and ignores stale or unrelated files",async()=>{
@@ -5025,6 +5025,98 @@ test("the copy button copies the full path", async () => {
   await h.elements.get("copy-detail-path").listeners.get("click")();
   await settle();
   assert.deepEqual(copied, ["/media/Example Show/Season 1/Example Show S01E01.mkv"]);
+});
+
+// ---- A job that left no file says so, and why ----
+
+const sizeRejectedMessage = "The audio, subtitles and other streams alone take 1.14 GB, which leaves no usable video bitrate within the 1.00 GB budget. At least 1.20 GB would be needed for this file; raise the budget, or remove audio or subtitle tracks first. Original preserved.";
+const sizeRejectedNextStep = "Raise the size budget, or remove audio or subtitle tracks, then run it again.";
+function notConvertedJob(extra = {}) {
+  return detailJob({
+    status: "completed", reason_code: "size_budget_exceeded", candidate_ready: false, replaced: false, worker: undefined,
+    stages: stagesAt(7, "completed"), current_step: 7,
+    savings: { source_bytes: 2790000000, estimated_saved_bytes: 1820000000 },
+    benchmark: { outcome: "size_rejected", message: sizeRejectedMessage, user_next_step: sizeRejectedNextStep },
+    transcode: { message: "" },
+    size_mode: { expected_bytes: 970000000, encoder: "libx265", size_budget: { budget_bytes: 1000000000 } },
+    ...extra,
+  });
+}
+
+test("a size-rejected file is Not converted, says why and shows no savings", async () => {
+  const h = harness();
+  h.context.job = notConvertedJob();
+  const row = h.run("queuePresentation(job)");
+  assert.equal(row.status, "Not converted");
+  assert.match(row.summary, /1\.14 GB/);
+  assert.match(row.summary, /1\.00 GB budget/);
+  assert.match(row.summary, /original kept/i);
+  assert.match(row.summary, /2\.79 GB source/);
+  assert.doesNotMatch(row.summary, /estimated savings|potential savings|freed/);
+  assert.equal(h.run("statusClass(queuePresentation(job).status)"), "neutral");
+  // The job's details carry the full message and the next step.
+  const detail = await openDetail(notConvertedJob());
+  const text = allTextOf(detail.elements.get("detail-summary"));
+  assert.match(allTextOf(detail.elements.get("detail-status")), /Not converted/);
+  assert.match(text, /Result/);
+  assert.match(text, /At least 1\.20 GB would be needed/);
+  assert.match(text, /Next step:\s*Raise the size budget/);
+  assert.doesNotMatch(text, /estimated savings/);
+  // The chips name what is known, not an encode that never ran.
+  const chips = (d) => nodesWithClass(d.elements.get("detail-summary"), "detail-fact").map((n) => n.textContent);
+  assert.deepEqual(chips(detail), ["2.79 GB", "Limit ≤ 1.00 GB"]);
+  const measured = await openDetail(notConvertedJob({ savings: { source_bytes: 2790000000, candidate_bytes: 2000000000 } }));
+  assert.deepEqual(chips(measured), ["2.79 GB", "Limit ≤ 1.00 GB"]);
+});
+
+test("a reason code the UI has never heard of still reads as a sentence", () => {
+  const h = harness();
+  h.context.noMessage = notConvertedJob({ reason_code: "future_new_reason", benchmark: undefined });
+  const bare = h.run("queuePresentation(noMessage)");
+  assert.equal(bare.status, "Not converted");
+  assert.match(bare.summary, /Future new reason/);
+  assert.doesNotMatch(bare.summary, /future_new_reason|estimated savings/);
+  h.context.withMessage = notConvertedJob({ reason_code: "future_new_reason", benchmark: { outcome: "future_outcome", message: "The worker could not read this file's frame rate. Original preserved." } });
+  const said = h.run("queuePresentation(withMessage)");
+  assert.equal(said.status, "Not converted");
+  assert.match(said.summary, /The worker could not read this file's frame rate; original kept/);
+  // Neither an empty job reason nor an empty message drops the sentence.
+  h.context.nothing = notConvertedJob({ reason_code: undefined, benchmark: undefined });
+  assert.match(h.run("queuePresentation(nothing)").summary, /No converted file was made/);
+});
+
+test("a long reason is trimmed at a boundary, keeps its numbers and the original-kept suffix", () => {
+  const h = harness();
+  const reason = (message) => { h.context.probe = notConvertedJob({ benchmark: { outcome: "quality_rejected", message } }); return h.run("queuePresentation(probe).summary"); };
+  const long = "The encoded result did not meet the quality requirements on the whole file: VMAF mean 91.2 is below the minimum 93.0; VMAF 5th percentile 71.4 is below the minimum 80.0; the worst 10 second window scored 52.5 against a floor of 60.0. Original preserved.";
+  const text = reason(long);
+  assert.match(text, /…; original kept/);
+  assert.match(text, /minimum 93\.0…; original kept/, "cut at a clause, numbers whole");
+  assert.ok(text.length < 210, text);
+  // A sentence that already says so is not repeated.
+  assert.match(reason("The goal was not met; original preserved. Raise the budget."), /preserved · 2\.79 GB source$/);
+  assert.doesNotMatch(reason("The goal was not met; original preserved. Raise the budget."), /original kept/i);
+  assert.equal((reason("Nothing met the goal; original kept.").match(/original kept/gi) || []).length, 1);
+  // An abbreviation does not end the sentence.
+  assert.match(reason("The file needs approx. 5.00 GB for this goal. Raise the budget."), /approx\. 5\.00 GB for this goal; original kept/);
+});
+
+test("only a job that left no file and replaced nothing is Not converted", () => {
+  const h = harness();
+  const status = (patch) => { h.context.probe = notConvertedJob(patch); return h.run("queuePresentation(probe).status"); };
+  assert.equal(status({}), "Not converted");
+  assert.equal(status({ reason_code: "quality_not_met" }), "Not converted");
+  assert.equal(status({ candidate_ready: true }), "Candidate ready");
+  assert.equal(status({ replaced: true }), "Replaced");
+  assert.equal(status({ replacement_action_id: "replacement" }), "Completed");
+  assert.equal(status({ candidate_cleanup: { reason: "superseded", outcome: "removed", bytes_freed: 0 } }), "Completed");
+  assert.equal(status({ status: "failed", error: "transcode candidate rejected by user decision; candidate file removed" }), "Rejected");
+  assert.equal(status({ status: "failed", error: "ffmpeg exited with status 1" }), "Failed");
+  assert.equal(status({ status: "cancelled" }), "Cancelled");
+  assert.equal(status({ action_name: "promote_transcode_candidate" }), "Completed");
+  // A job with a retired candidate is not Not converted, but keeps its reason in the details.
+  h.context.retired = notConvertedJob({ benchmark: undefined, reason_code: "quality_not_met", candidate_cleanup: { reason: "superseded", outcome: "removed", bytes_freed: 0 } });
+  assert.match(h.run("jobOutcomeText(retired)"), /quality target; original kept/);
 });
 
 // The palette and dark-mode contrast checks run with the rest of the UI tests.
