@@ -2645,7 +2645,7 @@ async function reviewJobDecision(id, decision) {
     if (candidatePlan) {
       await commandRequest("candidate-decision",{id,candidate_id:candidatePlan.candidate_id,decision_version:candidatePlan.decision_version,decision:selected,background:true});
       await Promise.all([loadJobs(),state.detail === id && $("job-detail").open ? refreshDetail() : Promise.resolve()]);
-      notify(selected === "reject" ? "Candidate rejected. Original preserved; other batch files continue." : replaceAfter ? "Candidate accepted. Preparing the replacement review…" : "Candidate accepted. Replacement requires separate approval.");
+      notify(selected === "reject" ? "Candidate rejected. Original preserved; its candidate file is removed when nothing else uses it. Other batch files continue." : replaceAfter ? "Candidate accepted. Preparing the replacement review…" : "Candidate accepted. Replacement requires separate approval.");
       if (replaceAfter) safe(() => continueToReplacement(candidatePlan.candidate_id, id));
     } else {
       await jobControl(id, "action_resume", {decision:selected});
@@ -2919,7 +2919,7 @@ async function reconfigureBatch(id, candidate = false, savedPlan = null) {
     $("reconfigure-limits").hidden = Boolean(plan.mode);
 
     $("reconfigure-profile-info").hidden = true;
-    $("reconfigure-note").textContent = "Same task · Originals kept · Previous attempts saved";
+    $("reconfigure-note").textContent = "Same task · Originals kept · Replaced candidates removed";
     $("reconfigure-title").textContent = plan.mode ? "Change goal" : plan.requires_explicit_profile ? "Try another profile" : "Change settings";
     $("reconfigure-summary").textContent = batchSettingsSummary(plan);
     $("reconfigure-scope").replaceChildren();
@@ -3079,7 +3079,7 @@ async function submitReconfiguredBatch() {
     });
     if (auth !== state.authRevision) return;
     await loadJobs();
-    notify("Settings updated in this batch. Active files finish first; previous attempts remain in file history.");
+    notify("Settings updated in this batch. Active files finish first; replaced candidates are removed and their attempts stay in file history.");
   } finally {
     state.busyJobs.delete(plan.id);
     if (current()) updateBatchSettingsProfile();
@@ -3361,7 +3361,7 @@ function shortJobReason(reason) {
     quality_vmaf_model_unavailable: "The worker cannot measure quality for this video (VMAF model unavailable); original kept",
   };
   if (reasons[text]) return reasons[text];
-  if (isCandidateRejection(text)) return "Candidate rejected by you; original kept";
+  if (isCandidateRejection(text)) return ["Candidate rejected by you; original kept", candidateNoteInText(text)].filter(Boolean).join("; ");
   if (workerBusyFailure(text)) return workerBusyFailureText;
   const growth = text.match(/Candidate file size \(\d+ bytes\) exceeds original \(\d+ bytes\) by ([\d.]+)%, which is greater than max_size_increase_percent \(([\d.]+)%\)/);
   if (growth) return `Candidate is ${growth[1]}% larger; allowed growth is ${growth[2]}%`;
@@ -3436,6 +3436,17 @@ function workerProgressObservation(job) {
   if (w.progress_is_stale && !(discreteProgress && heartbeatAlive(heartbeat)))
     return {...result, warning: true, status: "No updates", message: `No recent ${phase === "encoding" ? "encoding progress" : "progress from the worker"}. ${heartbeatAlive(heartbeat) ? `Worker heartbeat ${activityElapsed(w.worker_heartbeat_at)} ago.` : "Worker heartbeat unavailable."}`};
   return result;
+}
+// The server appends what happened to a retired candidate's own file to the
+// rejection error or the cancellation reason.
+function candidateNoteInText(text) {
+  return String(text || "").match(/; ((?:candidate file (?:removed|kept)|no candidate file was left).*)$/)?.[1] || "";
+}
+function candidateCleanupNote(job) {
+  const cleanup = job.candidate_cleanup;
+  if (!cleanup) return "";
+  if (cleanup.outcome === "removed") return cleanup.bytes_freed > 0 ? `Candidate file removed (${bytes(cleanup.bytes_freed)})` : "No candidate file was left";
+  return `Candidate file kept: ${cleanup.detail || "its cleanup could not be confirmed"}`;
 }
 function isCandidateRejection(reason) {
   return String(reason || "").includes("transcode candidate rejected by user decision");
@@ -3933,7 +3944,9 @@ function queueOutcome(job) {
   const bench = resultHeadline(job);
   if (bench) return bench;
   const batch = visibleBatch(job);
-  if (rejectedCandidate(job) || batch?.outcome === "rejected") return "Candidate rejected · Original preserved";
+  const cleanup = candidateCleanupNote(job);
+  if (rejectedCandidate(job) || batch?.outcome === "rejected") return ["Candidate rejected · Original preserved", cleanup].filter(Boolean).join(" · ");
+  if (job.candidate_cleanup?.reason === "superseded") return ["Replaced by new batch settings · Original preserved", cleanup].filter(Boolean).join(" · ");
   if (job.status === "waiting_decision") {
     if (job.paused || job.waiting_options?.some(option => option.decision === "resume")) return "Paused · Resume to continue the remaining files";
     if (job.batch?.promotion_plan_ready || job.promotion) return "Candidates verified · Waiting for replacement approval · Originals unchanged";
@@ -3941,7 +3954,7 @@ function queueOutcome(job) {
   }
   if (batch?.policy === batch?.total && batch?.policy > 0 || savingsPolicyFailure(job.error)) return "Sample test did not meet the savings requirement · Full conversion not started · Originals kept";
   if (job.status === "failed") return "Open job for error details";
-  if (job.status === "cancelled") return "Stopped by user";
+  if (job.status === "cancelled") return ["Stopped by user", cleanup].filter(Boolean).join(" · ");
   if (job.status === "pending") return "Waiting to start";
   if (job.replaced_files > 0 && job.remaining_candidates > 0) return `${job.replaced_files} replacements verified · ${job.remaining_candidates} candidates still available; their originals remain in place`;
   if (job.savings?.realized_saved_bytes != null || job.replaced) return "Replacement verified";
@@ -4534,7 +4547,7 @@ async function loadBatchItems(id, revision) {
       row.append(history);
     }
     const reasons = item.waiting_reason ? [item.waiting_reason] : item.reason_code ? [item.reason_code] : item.error ? [item.error] : item.reasons || [];
-    const visibleReasons = [...new Set(reasons.filter(reason => reason && !/^(explicit profile requested|eligible for transcode|per-source bounded samples required before full encode|New settings requested; previous attempt retained in history)$/i.test(reason)).map(shortJobReason))];
+    const visibleReasons = [...new Set(reasons.filter(reason => reason && !/^(explicit profile requested|eligible for transcode|per-source bounded samples required before full encode|New settings requested(; previous attempt retained in history)?)$/i.test(reason)).map(shortJobReason))];
     if (!visibleReasons.length && item.status === "skip") visibleReasons.push("This file was omitted by the processing plan; original kept. View the file details or change settings to try again.");
     for (const reason of visibleReasons) row.append(node("span", reason, "muted"));
     if (item.candidate_ready && belowTargetLabel(item.size_budget_outcome)) row.append(node("span", belowTargetLabel(item.size_budget_outcome), "badge size-budget-badge"));
@@ -4620,7 +4633,7 @@ function renderStages(job) {
     } else if (savingsPolicyFailure(job.error) && index === job.current_step) stage = {...stage,status:"skip",note:"Minimum savings not met; full conversion not started."};
     else if (stage.name === "schedule_batch" && ["failed","partial"].includes(stage.status) && batch?.rejected) {
       stage = {...stage,status:batch.failed > 0 || batch.completed > 0 ? "partial" : "rejected",note:[`${batch.completed || 0} candidates`,`${batch.rejected} rejected`,batch.failed > 0 ? `${batch.failed} failed` : ""].filter(Boolean).join(" · ")};
-    } else if (rejectedCandidate(job) && index === job.current_step) stage = {...stage,status:"rejected",note:"Candidate rejected; original preserved."};
+    } else if (rejectedCandidate(job) && index === job.current_step) stage = {...stage,status:"rejected",note:["Candidate rejected; original preserved.", candidateCleanupNote(job)].filter(Boolean).join(" ")};
     const row = node("li", "", `stage ${stage.status}`);
     row.append(node("span", String(index + 1), "stage-number"), node("span", stageLabel(stage.name)), statusBadge(stage.status === "pending" ? "Next" : names[stage.status] || stage.status, stage.status));
     if (stage.note) row.append(node("span", stage.note, "stage-note"));

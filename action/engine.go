@@ -61,6 +61,9 @@ type Engine struct {
 	// promotionMountProbeHook replaces the recovery directory mount probe.
 	promotionMountProbeHook func(dir string) error
 	promotionAlwaysCopy     bool
+	// candidateRemoveHook, when set by tests, runs just before an attempt's
+	// own candidate file is removed.
+	candidateRemoveHook func(path string)
 }
 
 // NewEngine creates a new Action Engine.
@@ -443,6 +446,10 @@ func (e *Engine) retry(ctx context.Context, instanceID string, guard func(*store
 		return nil, fmt.Errorf("invalid retry checkpoint %d", resumeStep)
 	}
 	ec := parseExecutionContext(inst, e)
+	if inst.ActionName == "transcode_media" && getBool(ec.State, candidateRemovedKey) {
+		cleanup, _ := ec.State[candidateCleanupKey].(map[string]any)
+		return nil, fmt.Errorf("this attempt's candidate was removed after it was %s; start a new transcode instead", getString(cleanup, "reason"))
+	}
 	// Retry checks and the execution they lead into are one continuous run.
 	ctx = withPromotionVerifiedFiles(ctx, ec)
 	if inst.ActionName == "clean_podcast_ads" {
@@ -705,8 +712,20 @@ func (e *Engine) cancel(ctx context.Context, instanceID, reason string) (*Action
 	// is confirmed locally, even if the remote cancellation later needs
 	// reconciliation.
 	var cancelErrors []string
-	if err := e.cancelRemoteActionWork(ctx, ec); err != nil {
-		cancelErrors = append(cancelErrors, err.Error())
+	remoteErr := e.cancelRemoteActionWork(ctx, ec)
+	if remoteErr != nil {
+		cancelErrors = append(cancelErrors, remoteErr.Error())
+	}
+	// The cancellation is durable now. A worker that did not confirm it may
+	// still publish into the candidate path, so only a confirmed stop (or no
+	// remote job at all) lets the attempt's own files go.
+	if inst.ActionName == "transcode_media" && getString(ec.State, "candidate_path") != "" && !getBool(ec.State, candidateRemovedKey) {
+		if remoteErr != nil {
+			e.recordCandidateCleanup(ctx, inst, ec, candidateRetiredCancelled, 0, fmt.Errorf("the worker did not confirm the cancellation"))
+		} else {
+			e.retireCandidate(ctx, inst, ec, candidateRetiredCancelled)
+		}
+		result = buildActionResult(inst, len(tmpl.Steps), ec)
 	}
 
 	// A batch used to deliberately leave accepted children running. That makes
@@ -931,6 +950,10 @@ func (e *Engine) execute(ctx context.Context, inst *store.ActionInstance, ec *Ex
 			inst.OutputsJSON = toJSON(ec.State)
 			if saveErr := e.updateInstance(ctx, inst); saveErr != nil {
 				return nil, saveErr
+			}
+			// The rejection is durable now; nothing promotes this candidate.
+			if getBool(res.Outputs, candidateRejectedKey) {
+				e.retireCandidate(ctx, inst, ec, candidateRetiredRejected)
 			}
 			_ = e.deps.Store.LogActionStep(store.ActionStepLog{
 				InstanceID:  inst.ID,

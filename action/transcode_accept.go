@@ -14,7 +14,7 @@ import (
 
 func (e *Engine) stepTranscodeAccept(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
 	if strings.EqualFold(ec.Decision, "reject") {
-		return StepResult{Status: StepFailed, Error: "transcode candidate rejected by user decision; original file remains untouched"}, nil
+		return rejectedCandidateResult(), nil
 	}
 	origPath := getString(ec.State, "resolved_path")
 	candidate := getString(ec.State, "candidate_path")
