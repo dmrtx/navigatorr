@@ -8,14 +8,15 @@ import (
 	"github.com/jakenesler/navigatorr/store"
 )
 
-// The target follows the engine's retry guard: a replacement that stopped at or
-// before approve_promotion is retried through its failed batch (a direct retry
-// is refused), one that stopped later is retried on its own.
+// The target follows the engine's retry guard: the batch re-runs only the
+// replacements that failed in plan_promotion, a failure in approve_promotion
+// has no retry (the approved plan no longer matches), and one that failed later
+// is retried on its own.
 func TestReplacementRetryTargetFollowsTheEnginesRetryGuard(t *testing.T) {
 	s, _ := testUI(t)
-	approve, preserve := s.promotionStep("approve_promotion"), s.promotionStep("preserve_original")
-	if approve != 1 || preserve != 2 {
-		t.Fatalf("the replacement workflow changed: approve %d preserve %d", approve, preserve)
+	plan, approve, preserve := s.promotionStep("plan_promotion"), s.promotionStep("approve_promotion"), s.promotionStep("preserve_original")
+	if plan != 0 || approve != 1 || preserve != 2 {
+		t.Fatalf("the replacement workflow changed: plan %d approve %d preserve %d", plan, approve, preserve)
 	}
 	failed, running := store.ActionStatusFailed, store.ActionStatusRunning
 	for _, tc := range []struct {
@@ -25,14 +26,14 @@ func TestReplacementRetryTargetFollowsTheEnginesRetryGuard(t *testing.T) {
 		step      int
 		want      string
 	}{
-		{"failed before approval", failed, failed, 0, "batch-a"},
-		{"failed at approval", failed, failed, approve, "batch-a"},
+		{"failed planning", failed, failed, plan, "batch-a"},
+		{"failed at approval", failed, failed, approve, ""},
 		{"failed while preserving the original", failed, failed, preserve, "promotion-a"},
 		{"failed importing", failed, failed, s.promotionStep("import_candidate"), "promotion-a"},
 		{"failed rescanning", failed, failed, s.promotionStep("rescan_library"), "promotion-a"},
 		{"batch still running", running, failed, preserve, ""},
 		{"member not failed", failed, store.ActionStatusCompleted, preserve, ""},
-		{"member cancelled", failed, store.ActionStatusCancelled, 0, ""},
+		{"member cancelled", failed, store.ActionStatusCancelled, plan, ""},
 	} {
 		got := s.replacementRetryTarget(store.ActionInstance{ID: "batch-a", Status: tc.batch}, store.ActionInstance{ID: "promotion-a", Status: tc.promotion, CurrentStep: tc.step})
 		if got != tc.want {
@@ -41,39 +42,59 @@ func TestReplacementRetryTargetFollowsTheEnginesRetryGuard(t *testing.T) {
 	}
 }
 
-// "Your original file is intact" is only said while the replacement had not
-// gone past preserve_original and nothing was moved, published or removed.
-func TestOriginalIntactOnlyBeforeAnythingChangesTheOriginal(t *testing.T) {
+// Where the original is comes from what the replacement did. "In place" is said
+// only when nothing was moved, published or removed, "in recovery" only when a
+// recovery copy holds it, and anything else stays unclear.
+func TestOriginalStateIsDecidedFromThePromotionsOwnState(t *testing.T) {
 	s, _ := testUI(t)
-	preserve, importStep := s.promotionStep("preserve_original"), s.promotionStep("import_candidate")
+	preserve, importStep, remove := s.promotionStep("preserve_original"), s.promotionStep("import_candidate"), s.promotionStep("remove_old_file")
 	record := func(step int, promotion, state map[string]any) operationRecord {
 		return operationRecord{inst: store.ActionInstance{ID: "p", Status: store.ActionStatusFailed, CurrentStep: step}, outputs: map[string]any{"promotion": promotion}, state: state}
+	}
+	copyMode := func(extra map[string]any) map[string]any {
+		out := map[string]any{"original_path": "/media/a.mkv", "recovery_mode": "copy"}
+		for k, v := range extra {
+			out[k] = v
+		}
+		return out
+	}
+	moveAside := func(extra map[string]any) map[string]any {
+		out := map[string]any{"original_path": "/media/a.mkv", "recovery_mode": "move_aside"}
+		for k, v := range extra {
+			out[k] = v
+		}
+		return out
 	}
 	for _, tc := range []struct {
 		name string
 		r    operationRecord
-		want bool
+		want string
 	}{
-		{"no promotion record", operationRecord{inst: store.ActionInstance{Status: store.ActionStatusFailed, CurrentStep: importStep}, outputs: map[string]any{}}, true},
-		{"stopped while copying the backup", record(preserve, map[string]any{"original_path": "/media/a.mkv"}, nil), true},
-		{"stopped at the first step", record(0, map[string]any{"original_path": "/media/a.mkv"}, nil), true},
+		{"no promotion record", operationRecord{inst: store.ActionInstance{Status: store.ActionStatusFailed, CurrentStep: importStep}, outputs: map[string]any{}}, originalInPlace},
+		{"stopped at the first step", record(0, map[string]any{"original_path": "/media/a.mkv"}, nil), originalInPlace},
+		{"copy mode, stopped while copying the backup", record(preserve, copyMode(nil), nil), originalInPlace},
 		// A same-name publish renames the candidate over the original and none of
 		// the older flags is set; the step and the publish marker say so.
-		{"same-name publish then a failed check", record(importStep, map[string]any{"original_path": "/media/a.mkv", "new_path": "/media/a.mkv"}, map[string]any{"filesystem_publish_started": true, "filesystem_published": true}), false},
-		{"publish started but not finished", record(preserve, map[string]any{"original_path": "/media/a.mkv"}, map[string]any{"filesystem_publish_started": true}), false},
-		{"past preserve without any marker", record(importStep, map[string]any{"original_path": "/media/a.mkv"}, nil), false},
-		{"move aside started", record(preserve, map[string]any{"move_aside_started_at": "2026-01-01T00:00:00Z"}, nil), false},
-		{"moved aside", record(preserve, map[string]any{"moved_aside": true}, nil), false},
-		{"old file removed", record(preserve, map[string]any{"old_removed": true}, nil), false},
-		{"delete sent", record(preserve, map[string]any{"delete_sent_at": "2026-01-01T00:00:00Z"}, nil), false},
+		{"copy mode, same-name publish then a failed check", record(importStep, copyMode(map[string]any{"new_path": "/media/a.mkv"}), map[string]any{"filesystem_publish_started": true, "filesystem_published": true}), originalInRecovery},
+		{"copy mode, past the backup without a marker", record(importStep, copyMode(nil), nil), originalInRecovery},
+		{"copy mode, old file removed", record(remove, copyMode(map[string]any{"old_removed": true}), nil), originalInRecovery},
+		// Move-aside mode makes no copy: before the move the original is simply
+		// where it was, and a failure there must not point at a recovery copy.
+		{"move-aside mode, failed importing before any move", record(importStep, moveAside(nil), nil), originalInPlace},
+		{"move-aside mode, move started", record(importStep, moveAside(map[string]any{"move_aside_started_at": "2026-01-01T00:00:00Z"}), nil), originalUnclear},
+		{"move-aside mode, moved aside", record(remove, moveAside(map[string]any{"moved_aside": true}), nil), originalInRecovery},
+		{"move-aside mode, past import without a marker", record(remove, moveAside(nil), nil), originalUnclear},
+		{"publish started, mode unknown", record(preserve, map[string]any{"original_path": "/media/a.mkv"}, map[string]any{"filesystem_publish_started": true}), originalUnclear},
+		{"past the backup, mode unknown", record(importStep, map[string]any{"original_path": "/media/a.mkv"}, nil), originalUnclear},
+		{"delete sent, mode unknown", record(preserve, map[string]any{"delete_sent_at": "2026-01-01T00:00:00Z"}, nil), originalUnclear},
 	} {
-		if got := s.originalIntact(tc.r); got != tc.want {
-			t.Errorf("%s: intact %v, want %v", tc.name, got, tc.want)
+		if got := s.originalState(tc.r); got != tc.want {
+			t.Errorf("%s: original %q, want %q", tc.name, got, tc.want)
 		}
 	}
-	failure := s.failureOf(record(importStep, map[string]any{"original_path": "/media/a.mkv"}, map[string]any{"filesystem_published": true}))
-	if failure == nil || failure.OriginalIntact {
-		t.Fatal("a published replacement must not be reported as leaving the original intact")
+	failure := s.failureOf(record(importStep, copyMode(nil), map[string]any{"filesystem_published": true}))
+	if failure == nil || failure.OriginalIntact || failure.OriginalState != originalInRecovery {
+		t.Fatalf("a published replacement must not be reported as leaving the original in place: %+v", failure)
 	}
 }
 
@@ -195,8 +216,7 @@ func TestBatchItemsReportReplacementStateInPlainWords(t *testing.T) {
 	}
 }
 
-// One Retry on the batch re-runs only the files that stopped at or before
-// approval; the count the screen quotes ("Retry 2 failed replacements") must be
+// One Retry on the batch re-runs only the files that failed in plan_promotion; the count the screen quotes ("Retry 2 failed replacements") must be
 // exactly those, not every failed file.
 func TestBatchRetryCountCountsOnlyFilesTheBatchRetryReruns(t *testing.T) {
 	s, h := testUI(t)
@@ -226,8 +246,8 @@ func TestBatchRetryCountCountsOnlyFilesTheBatchRetryReruns(t *testing.T) {
 	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil || len(page.Jobs) != 1 || page.Jobs[0].Replacement == nil {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	if r := page.Jobs[0].Replacement; r.Failed != 3 || r.Done != 1 || r.BatchRetryCount != 2 {
-		t.Fatalf("failed %d done %d batch retry %d, want 3 failed, 1 done, 2 retried by the batch", r.Failed, r.Done, r.BatchRetryCount)
+	if r := page.Jobs[0].Replacement; r.Failed != 3 || r.Done != 1 || r.BatchRetryCount != 1 || r.Retryable != 2 || r.BatchRecordedFailed != 0 {
+		t.Fatalf("failed %d done %d batch retry %d, want 3 failed, 1 done, 1 retried by the batch (only the plan_promotion failure)", r.Failed, r.Done, r.BatchRetryCount)
 	}
 }
 

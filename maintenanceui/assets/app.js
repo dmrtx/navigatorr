@@ -2764,6 +2764,12 @@ function remainingLabel(seconds) {
   const hours = Math.floor(minutes / 60), rest = minutes % 60;
   return `~${hours} h${rest ? ` ${rest} min` : ""} left`;
 }
+// Where a failed replacement left the original: "in_place", "recovery" (a
+// recovery copy holds it) or "unclear". The server decides it from the
+// promotion's own state; only an unlabelled failure falls back to the flag.
+function originalStateOf(failure) {
+  return failure?.original_state || (failure?.original_intact ? "in_place" : "unclear");
+}
 // What an approved batch replacement is doing, in words about the files. The
 // server places each file in a short fixed sequence; none of this is a time
 // estimate.
@@ -2776,7 +2782,7 @@ function replacementStepText(member) {
     case "swap": return "Swapping in the new file";
     case "final_check": return "Checking the new file";
     case "done": return `Done${freed}`;
-    case "failed": return `Stopped${member.failure ? `: ${member.failure.reason}` : ""}${member.failure ? (member.failure.original_intact ? " · original kept" : " · original in Recovery") : ""}`;
+    case "failed": return `Stopped${member.failure ? `: ${member.failure.reason}` : ""}${member.failure ? {in_place: " · original kept", recovery: " · original in Recovery", unclear: " · check Recovery"}[originalStateOf(member.failure)] : ""}`;
     default: return "Waiting";
   }
 }
@@ -2788,9 +2794,10 @@ function replacementHeadline(job) {
   if (r.failed > 0) {
     const failures = (r.members || []).filter((m) => m.failure).map((m) => m.failure);
     const reasons = [...new Set(failures.map((f) => f.reason))];
-    // "Kept" is only said when every failure stopped before anything touched the
-    // original; otherwise the original is safe in its recovery copy.
-    const kept = !failures.length ? "" : failures.every((f) => f.original_intact) ? (failures.length === 1 ? " · original kept" : " · originals kept") : failures.every((f) => !f.original_intact) ? (failures.length === 1 ? " · original in Recovery" : " · originals in Recovery") : " · see Recovery";
+    // "Kept" is only said when every failure left the original in place; "in
+    // Recovery" only when a recovery copy holds it.
+    const states = failures.map(originalStateOf);
+    const kept = !failures.length ? "" : states.every((x) => x === "in_place") ? (failures.length === 1 ? " · original kept" : " · originals kept") : states.every((x) => x === "recovery") ? (failures.length === 1 ? " · original in Recovery" : " · originals in Recovery") : " · check Recovery";
     if (!settled) return `Replacing ${fileCount(r.total)} · ${r.failed} failed`;
     return `${r.done} of ${r.total} replaced · ${r.failed} failed${reasons.length === 1 ? `: ${reasons[0]}` : ""}${kept}`;
   }
@@ -3922,7 +3929,10 @@ function jobControls(job, detail = false) {
       if (job.parent_action_id) add("Change settings", () => reconfigureBatch(job.parent_action_id, true, {candidate_id:job.id}));
     } else if (job.action_name === "benchmark_transcode")
       add("Choose a goal", () => openGoalForm(job.source_path));
-    else if (!(job.replacement?.failed > 0)) add("Retry", () => jobControl(job.id, "action_retry")); // failed replacements are retried per file below
+    // Failed replacements are retried per file below. The batch's own Retry stays
+    // when nothing is retryable per file and only the batch recorded the failure,
+    // so a transient error can still be retried from here.
+    else if (!(job.replacement?.failed > 0) || (!(job.replacement.retryable > 0) && job.replacement.batch_recorded_failed > 0)) add("Retry", () => jobControl(job.id, "action_retry"));
   }
   // The server marks only standalone files that were cancelled or ended with no
   // winner; batch children use Change goal and reviewed candidates are decided.
@@ -5358,7 +5368,7 @@ async function loadBatchItems(id, revision) {
     if (failure) {
       const card = node("div", "", "replacement-failure");
       card.setAttribute("role", "group");
-      card.append(node("strong", `Replacement stopped: ${failure.reason}`), node("p", failure.original_intact ? "Your original file is intact." : "Your original is safe in its recovery copy. Check Recovery before trying again.", "metadata"));
+      card.append(node("strong", `Replacement stopped: ${failure.reason}`), node("p", {in_place: "Your original file is still in place.", recovery: "Your original is safe in its recovery copy. Check Recovery before trying again.", unclear: "Check Recovery to see where your original is before trying again."}[originalStateOf(failure)], "metadata"));
       const options = node("div", "", "batch-file-actions");
       const choose = (label, fn, opts = {}) => {
         const control = button(label, fn, opts.primary ? "primary" : "");

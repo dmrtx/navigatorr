@@ -33,9 +33,9 @@ type batchItemView struct {
 	ReplacementFailure *replacementFailure `json:"replacement_failure,omitempty"`
 	Where              *replacementWhere   `json:"where,omitempty"`
 	// RetryActionID is the action whose Retry can re-run this file's
-	// replacement without encoding again: the batch while the file stopped at
-	// or before approval, the file's own replacement once it stopped later.
-	// Empty when no retry applies.
+	// replacement without encoding again: the batch when the file failed in
+	// plan_promotion, the file's own replacement once it failed after approval.
+	// Empty when no retry applies (including a failure in approve_promotion).
 	RetryActionID  string `json:"retry_action_id,omitempty"`
 	CanReconfigure bool   `json:"can_reconfigure,omitempty"`
 	Mode           string `json:"mode,omitempty"`
@@ -167,7 +167,7 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 				// reported only in the batch's promotion output. Retrying the batch
 				// would reproduce that error, so no retry is offered.
 				if detail := batchPromotionFailure(decodeOperationJSON(inst.OutputsJSON), item.ItemKey); detail != "" {
-					view.ReplacementFailure = &replacementFailure{Reason: plainReplacementReason(detail), Detail: batchReasonText(detail, true), OriginalIntact: true}
+					view.ReplacementFailure = &replacementFailure{Reason: plainReplacementReason(detail), Detail: batchReasonText(detail, true), OriginalState: originalInPlace, OriginalIntact: true}
 				}
 			}
 			if view.ReplacementActionID == "" && view.ReplacementFailure == nil && item.ChildActionID != "" {

@@ -5415,14 +5415,18 @@ test("the batch headline says 'original kept' only when every failure left the o
     h.context.job = { replacement: { approved: true, total: failures.length + 1, done: 1, failed: failures.length, members } };
     return h.run("replacementHeadline(job)");
   };
-  assert.match(headline([{ original_intact: true }]), /original kept$/);
-  assert.match(headline([{ original_intact: true }, { original_intact: true }]), /originals kept$/);
-  const unsafe = headline([{ original_intact: false }]);
-  assert.match(unsafe, /original in Recovery$/);
-  assert.doesNotMatch(unsafe, /kept|intact/);
-  assert.match(headline([{ original_intact: true }, { original_intact: false }]), /see Recovery$/);
-  assert.match(h.run('replacementStepText({phase:"failed", failure:{reason:"x", original_intact:false}})'), /original in Recovery/);
-  assert.match(h.run('replacementStepText({phase:"failed", failure:{reason:"x", original_intact:true}})'), /original kept/);
+  const inPlace = { original_state: "in_place", original_intact: true }, recovery = { original_state: "recovery", original_intact: false }, unclear = { original_state: "unclear", original_intact: false };
+  assert.match(headline([inPlace]), /original kept$/);
+  assert.match(headline([inPlace, inPlace]), /originals kept$/);
+  const safe = headline([recovery]);
+  assert.match(safe, /original in Recovery$/);
+  assert.doesNotMatch(safe, /kept|intact/);
+  assert.match(headline([inPlace, recovery]), /check Recovery$/);
+  assert.match(headline([unclear]), /check Recovery$/);
+  const step = (f) => h.run(`replacementStepText({phase:"failed", failure:${JSON.stringify({ reason: "x", ...f })}})`);
+  assert.match(step(recovery), /original in Recovery/);
+  assert.match(step(inPlace), /original kept/);
+  assert.match(step(unclear), /check Recovery/);
 });
 
 async function batchItemsHarness(items, { detailJob = { status: "completed", batch: {} }, destructive = true } = {}) {
@@ -5491,17 +5495,17 @@ test("the single-file job view offers no Replace file while the batch plan cover
 
 const failedItem = (extra = {}) => ({
   item_key: "k-c", display_label: "Sample Show S01E03", status: "completed", child_action_id: "t-c", replacement_action_id: "p-c", replacement_status: "failed",
-  replacement_failure: { reason: "final check before replacing found an audio mismatch", original_intact: true, detail: "promotion validation failed: audio bitrate mismatch" },
+  replacement_failure: { reason: "final check before replacing found an audio mismatch", original_state: "in_place", original_intact: true, detail: "promotion validation failed: audio bitrate mismatch" },
   retry_action_id: "batch-a", reason_code: "eligible", ...extra,
 });
 
-test("a failed replacement row says why, that the original is intact, and offers retry and details", async () => {
+test("a failed replacement row says why, that the original is still in place, and offers retry and details", async () => {
   const h = await batchItemsHarness([failedItem()], { detailJob: { status: "failed", batch: {} } });
   const row = itemRows(h)[0];
   const text = textOf(row);
   assert.match(text, /Replacement failed/);
   assert.match(text, /Replacement stopped: final check before replacing found an audio mismatch/);
-  assert.match(text, /Your original file is intact\./);
+  assert.match(text, /Your original file is still in place\./);
   assert.deepEqual(buttonLabels(row).filter((l) => ["Retry replacement", "Keep original", "View details"].includes(l)), ["Retry replacement", "View details"]);
   assert.doesNotMatch(text, /recovery copy/);
   // Technical detail is behind a disclosure; the key and the recipe reason are not shown.
@@ -5517,11 +5521,18 @@ test("a failed replacement row says why, that the original is intact, and offers
   assert.equal(retry[3].decision.label, "Retry replacement of Sample Show S01E03");
 });
 
-test("a failure that went past the point of no return never says the original is intact", async () => {
-  const h = await batchItemsHarness([failedItem({ replacement_failure: { reason: "the library did not accept the new file", original_intact: false, detail: "library did not accept the new file" }, retry_action_id: "p-c" })], { detailJob: { status: "failed", batch: {} } });
-  const text = textOf(itemRows(h)[0]);
-  assert.match(text, /Your original is safe in its recovery copy\. Check Recovery before trying again\./);
-  assert.doesNotMatch(text, /intact|original kept/i);
+test("the failure text says where the original is, from the server's state, and never calls it intact when it may have changed", async () => {
+  const row = async (original_state) => {
+    const h = await batchItemsHarness([failedItem({ replacement_failure: { reason: "the library did not accept the new file", original_state, original_intact: original_state === "in_place", detail: "library did not accept the new file" }, retry_action_id: "p-c" })], { detailJob: { status: "failed", batch: {} } });
+    return textOf(itemRows(h)[0]);
+  };
+  const safe = await row("recovery");
+  assert.match(safe, /Your original is safe in its recovery copy\. Check Recovery before trying again\./);
+  assert.doesNotMatch(safe, /intact|in place|original kept/i);
+  const unclear = await row("unclear");
+  assert.match(unclear, /Check Recovery to see where your original is before trying again\./);
+  assert.doesNotMatch(unclear, /intact|in place|safe in its recovery|original kept/i);
+  assert.match(await row("in_place"), /Your original file is still in place\./);
 });
 
 test("Retry goes to the batch for a file that stopped early, to the file itself for one that stopped later, and to nobody when it cannot change", async () => {
@@ -5561,13 +5572,18 @@ test("one batch Retry that re-runs several failed files says how many", async ()
   assert.deepEqual(buttonLabels(itemRows(own)[0]).filter((l) => /^Retry/.test(l)), ["Retry replacement"]);
 });
 
-test("a batch with failed replacements has one Retry, on each file, and no second batch-level button", () => {
+test("a batch with failed replacements has one Retry, on each file, and no second batch-level button unless only the batch recorded the failure", () => {
   const h = harness();
   h.run("state.info={allow_destructive:true};");
   const labels = (job) => plain(h.run(`jobControls(${JSON.stringify(job)}).children.map(b => b.textContent)`));
   const batch = { id: "batch-a", action_name: "transcode_batch", status: "failed", batch: { total: 3, promotion_plan_ready: true } };
   assert.ok(labels(batch).includes("Retry"));
+  // A file with a retry of its own, or a failure no retry can fix (approve_promotion), leaves only the per-file button.
+  assert.ok(!labels({ ...batch, replacement: { approved: true, total: 3, failed: 1, retryable: 1 } }).includes("Retry"));
   assert.ok(!labels({ ...batch, replacement: { approved: true, total: 3, failed: 1 } }).includes("Retry"));
+  // Only the batch recorded the failure: no file can retry, so a transient error is retried from the batch.
+  assert.ok(labels({ ...batch, replacement: { approved: true, total: 3, failed: 1, batch_recorded_failed: 1 } }).includes("Retry"));
+  assert.ok(!labels({ ...batch, replacement: { approved: true, total: 3, failed: 2, retryable: 1, batch_recorded_failed: 1 } }).includes("Retry"));
 });
 
 test("an approved replacement drops the completed and failed chips its headline already states", () => {

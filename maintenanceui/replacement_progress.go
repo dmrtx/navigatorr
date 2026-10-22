@@ -128,10 +128,21 @@ func plainReplacementReason(detail string) string {
 
 // replacementFailure describes a failed or cancelled replacement job.
 type replacementFailure struct {
-	Reason         string `json:"reason"`
-	Detail         string `json:"detail,omitempty"`
+	Reason string `json:"reason"`
+	Detail string `json:"detail,omitempty"`
+	// OriginalState says where the original is, decided from what the
+	// replacement actually did: originalInPlace (not moved, overwritten or
+	// removed), originalInRecovery (a recovery copy holds it) or originalUnclear
+	// (it may have been changed and the state does not say where it is).
+	OriginalState  string `json:"original_state"`
 	OriginalIntact bool   `json:"original_intact"`
 }
+
+const (
+	originalInPlace    = "in_place"
+	originalInRecovery = "recovery"
+	originalUnclear    = "unclear"
+)
 
 // promotionStep is the index of a named step of the replacement workflow, or
 // -1 when the template is not known.
@@ -148,26 +159,37 @@ func (s *Server) promotionStep(name string) int {
 	return -1
 }
 
-// originalIntact says whether a replacement that stopped left the original
-// where it was. It is true only while the replacement had not gone past
-// preserve_original, which only copies, and none of the markers that something
-// was moved, published or removed is set. A same-name publish renames the
-// candidate over the original without setting any of the older flags, so the
-// step and the publish markers are what count. Anything else is treated as
-// changed: the original is then in its recovery copy.
-func (s *Server) originalIntact(r operationRecord) bool {
+// originalState says where the original is after a replacement stopped, from
+// the promotion's own state and never from the failure text.
+//   - In place: nothing moved, published or removed. In copy mode the workflow
+//     had not gone past preserve_original, which only copies. In move-aside mode
+//     preserve_original makes no copy and the original moves only at publish or
+//     removal, so it is still in place until import_candidate has finished
+//     without a move marker.
+//   - In recovery: copy mode past preserve_original (a same-name publish renames
+//     the candidate over the original without setting any older flag, so the
+//     step decides), or the original was moved aside into its recovery entry.
+//   - Unclear: anything else. It is never reported as in place.
+func (s *Server) originalState(r operationRecord) string {
 	p := operationMap(operationValue(r, "promotion"))
 	if p == nil {
-		return true
+		return originalInPlace
 	}
-	preserve := s.promotionStep("preserve_original")
-	if preserve < 0 || r.inst.CurrentStep > preserve {
-		return false
+	preserve, importStep := s.promotionStep("preserve_original"), s.promotionStep("import_candidate")
+	if preserve < 0 {
+		return originalUnclear
 	}
-	if p["old_removed"] == true || p["moved_aside"] == true || operationString(p["delete_sent_at"]) != "" || operationString(p["move_aside_started_at"]) != "" {
-		return false
+	step, mode := r.inst.CurrentStep, operationString(p["recovery_mode"])
+	changed := p["old_removed"] == true || p["moved_aside"] == true || operationString(p["delete_sent_at"]) != "" || operationString(p["move_aside_started_at"]) != "" || r.state["filesystem_publish_started"] == true || r.state["filesystem_published"] == true
+	if !changed {
+		if step <= preserve || (mode == "move_aside" && importStep >= 0 && step <= importStep) {
+			return originalInPlace
+		}
 	}
-	return r.state["filesystem_publish_started"] != true && r.state["filesystem_published"] != true
+	if p["moved_aside"] == true || (mode == "copy" && step > preserve) {
+		return originalInRecovery
+	}
+	return originalUnclear
 }
 
 func (s *Server) failureOf(r operationRecord) *replacementFailure {
@@ -176,28 +198,35 @@ func (s *Server) failureOf(r operationRecord) *replacementFailure {
 	if r.inst.Status == store.ActionStatusCancelled {
 		reason = "replacement was cancelled"
 	}
-	return &replacementFailure{Reason: reason, Detail: detail, OriginalIntact: s.originalIntact(r)}
+	state := s.originalState(r)
+	return &replacementFailure{Reason: reason, Detail: detail, OriginalState: state, OriginalIntact: state == originalInPlace}
 }
 
 // replacementRetryTarget names the action whose Retry can re-run a failed
 // replacement, or "" when none can. It follows the engine's retry guard:
-//   - A replacement that stopped at or before approve_promotion belongs to its
-//     failed batch, which refuses a direct retry. Retrying the batch resumes it
-//     at its replacement step without encoding, reuses the approved plan and
-//     retries every replacement of the batch that is in that state.
-//   - A replacement that stopped later is retried on its own.
+//   - A replacement that failed in plan_promotion belongs to its failed batch,
+//     which refuses a direct retry. Retrying the batch resumes it at its
+//     replacement step without encoding, reuses the approved plan and retries
+//     every replacement of the batch that is in that state.
+//   - A replacement that failed in approve_promotion has no retry: the batch does
+//     not re-run it and the engine refuses a direct retry, because the approved
+//     plan no longer matches.
+//   - A replacement that failed later is retried on its own.
 //
 // A batch that has not failed has nothing to retry yet.
 func (s *Server) replacementRetryTarget(batch, promotion store.ActionInstance) string {
 	if promotion.Status != store.ActionStatusFailed || batch.Status != store.ActionStatusFailed {
 		return ""
 	}
-	approve := s.promotionStep("approve_promotion")
-	if approve < 0 {
+	plan, approve := s.promotionStep("plan_promotion"), s.promotionStep("approve_promotion")
+	if plan < 0 || approve < 0 {
 		return ""
 	}
-	if promotion.CurrentStep <= approve {
+	switch {
+	case promotion.CurrentStep <= plan:
 		return batch.ID
+	case promotion.CurrentStep <= approve:
+		return ""
 	}
 	return promotion.ID
 }
@@ -270,8 +299,14 @@ type replacementProgress struct {
 	FreesBytes int64 `json:"frees_bytes,omitempty"`
 	FreedBytes int64 `json:"freed_bytes,omitempty"`
 	// BatchRetryCount is how many failed files one Retry of the batch re-runs.
-	BatchRetryCount int                     `json:"batch_retry_count,omitempty"`
-	Members         []replacementMemberView `json:"members"`
+	BatchRetryCount int `json:"batch_retry_count,omitempty"`
+	// Retryable counts failed files that have a Retry of their own (through the
+	// batch or on their own promotion); BatchRecordedFailed counts failures that
+	// only the batch recorded. When no file is retryable and only the batch
+	// recorded failures, a transient error can still be retried from the batch.
+	Retryable           int                     `json:"retryable,omitempty"`
+	BatchRecordedFailed int                     `json:"batch_recorded_failed,omitempty"`
+	Members             []replacementMemberView `json:"members"`
 }
 
 // batchReplacementProgress is nil when the batch has no prepared plan.
@@ -306,8 +341,13 @@ func (s *Server) batchReplacementProgress(batch operationRecord, byID map[string
 				case phaseFailed:
 					out.Failed++
 					view.Failure = s.failureOf(pr)
-					if s.replacementRetryTarget(batch.inst, pr.inst) == batch.inst.ID {
+					switch target := s.replacementRetryTarget(batch.inst, pr.inst); target {
+					case "":
+					case batch.inst.ID:
 						out.BatchRetryCount++
+						out.Retryable++
+					default:
+						out.Retryable++
 					}
 				}
 			}
@@ -316,8 +356,9 @@ func (s *Server) batchReplacementProgress(batch operationRecord, byID map[string
 			// The batch recorded this file's failure although its promotion never
 			// produced an action.
 			if detail := batchPromotionFailure(batch.outputs, m.ItemKey); detail != "" {
-				view.Phase, view.Failure = phaseFailed, &replacementFailure{Reason: plainReplacementReason(detail), Detail: detail, OriginalIntact: true}
+				view.Phase, view.Failure = phaseFailed, &replacementFailure{Reason: plainReplacementReason(detail), Detail: detail, OriginalState: originalInPlace, OriginalIntact: true}
 				out.Failed++
+				out.BatchRecordedFailed++
 			}
 		}
 		out.Members = append(out.Members, view)
