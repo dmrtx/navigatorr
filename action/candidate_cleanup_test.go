@@ -492,3 +492,251 @@ func TestLeftoverCandidateListingIsReadOnlyAndOwnershipBased(t *testing.T) {
 		}
 	}
 }
+
+func discardEngine(t *testing.T, st *store.Store, root string) *Engine {
+	t.Helper()
+	resolver, err := fsop.NewResolver([]string{root}, []string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewEngine(EngineDeps{Store: st, Config: &config.Config{AllowDestructive: true}, Fs: resolver})
+}
+
+func markRejected(t *testing.T, st *store.Store, id string) {
+	t.Helper()
+	inst := mustInstance(t, st, id)
+	inst.ErrorJSON = toJSON(map[string]any{"step": "validate", "error": candidateRejectedError})
+	if err := st.UpdateActionInstance(*inst); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDiscardLeftoverCandidateRemovesOnlyThatAttemptsFiles(t *testing.T) {
+	for _, tc := range []struct {
+		name, status string
+		setup        func(t *testing.T, st *store.Store) map[string]any
+	}{
+		{name: "rejected", status: StatusFailed},
+		{name: "cancelled", status: StatusCancelled},
+		{name: "failed", status: StatusFailed},
+		{name: "superseded by a batch revision", status: StatusCompleted, setup: func(t *testing.T, st *store.Store) map[string]any {
+			seedActionInstance(t, st, "batch", "transcode_batch", StatusCompleted, 2, "", map[string]any{}, map[string]any{"batch_attempt_history": map[string]any{"one": []any{map[string]any{"item_key": "one", "child_action_id": "attempt"}}}})
+			return map[string]any{"parent_action_id": "batch"}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := candidateRoot(t)
+			st := setupTestStore(t)
+			e := discardEngine(t, st, root)
+			original := filepath.Join(root, "Sample Show", "Season 1", "sample-episode-01.mkv")
+			writeCandidateFile(t, original, "original")
+			var inputs map[string]any
+			if tc.setup != nil {
+				inputs = tc.setup(t, st)
+			}
+			candidate := seedCandidateAttempt(t, st, "attempt", tc.status, original, "job-attempt", inputs, nil)
+			if tc.name == "rejected" {
+				markRejected(t, st, "attempt")
+			}
+			writeCandidateFile(t, candidate, strings.Repeat("c", 40))
+			writeCandidateFile(t, candidate+".partial.job-attempt", strings.Repeat("p", 25))
+			other := filepath.Join(filepath.Dir(candidate), "sample-episode-02.job-other.mkv")
+			writeCandidateFile(t, other, "another attempt")
+			removals := 0
+			e.candidateRemoveHook = func(string) { removals++ }
+
+			res, err := e.DiscardLeftoverCandidate(context.Background(), "attempt")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Status != tc.status || removals != 2 {
+				t.Fatalf("status %s, removals %d", res.Status, removals)
+			}
+			for _, path := range []string{candidate, candidate + ".partial.job-attempt"} {
+				if _, err := os.Lstat(path); !os.IsNotExist(err) {
+					t.Fatalf("%s kept: %v", filepath.Base(path), err)
+				}
+			}
+			for _, path := range []string{original, other} {
+				if _, err := os.Stat(path); err != nil {
+					t.Fatalf("%s touched: %v", filepath.Base(path), err)
+				}
+			}
+			inst := mustInstance(t, st, "attempt")
+			state := parseExecutionContext(inst, e).State
+			cleanup := candidateCleanupOf(t, e, inst)
+			if !getBool(state, candidateRemovedKey) || getInt(state, "candidate_removed_bytes") != 65 || getString(cleanup, "reason") != candidateRetiredDiscarded || getString(cleanup, "outcome") != "removed" {
+				t.Fatalf("removal not recorded: %v", cleanup)
+			}
+
+			// Approving the same removal again changes nothing.
+			again, err := e.DiscardLeftoverCandidate(context.Background(), "attempt")
+			if err != nil || again.Status != tc.status || removals != 2 {
+				t.Fatalf("second removal: %+v %v %d", again, err, removals)
+			}
+			if after := mustInstance(t, st, "attempt"); after.StateJSON != inst.StateJSON || after.ErrorJSON != inst.ErrorJSON {
+				t.Fatalf("second removal rewrote the record")
+			}
+			if page, err := e.ListLeftoverCandidates(context.Background(), 0); err != nil || len(page.Items) != 0 {
+				t.Fatalf("removed candidate still listed: %+v %v", page, err)
+			}
+		})
+	}
+}
+
+func TestDiscardLeftoverCandidateMissingFilesAndEmptyDirectory(t *testing.T) {
+	root := candidateRoot(t)
+	st := setupTestStore(t)
+	e := discardEngine(t, st, root)
+	original := filepath.Join(root, "Sample Show", "sample-episode-01.mkv")
+	writeCandidateFile(t, original, "original")
+	candidate := seedCandidateAttempt(t, st, "attempt", StatusCancelled, original, "job-attempt", nil, nil)
+	writeCandidateFile(t, candidate, "only file in the directory")
+	if _, err := e.DiscardLeftoverCandidate(context.Background(), "attempt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Dir(candidate)); !os.IsNotExist(err) {
+		t.Fatalf("empty candidate directory kept: %v", err)
+	}
+	if _, err := os.Stat(original); err != nil {
+		t.Fatal(err)
+	}
+
+	// Files someone already removed by hand count as removed.
+	gone := seedCandidateAttempt(t, st, "gone", StatusCancelled, original, "job-gone", nil, nil)
+	res, err := e.DiscardLeftoverCandidate(context.Background(), "gone")
+	if err != nil || res.Status != StatusCancelled {
+		t.Fatalf("missing files: %+v %v", res, err)
+	}
+	state := parseExecutionContext(mustInstance(t, st, "gone"), e).State
+	if !getBool(state, candidateRemovedKey) || getInt(state, "candidate_removed_bytes") != 0 || res.WaitingReason != "no candidate file was left" {
+		t.Fatalf("missing files not recorded as removed: %v %q", state[candidateCleanupKey], res.WaitingReason)
+	}
+	if _, err := os.Lstat(filepath.Dir(gone)); !os.IsNotExist(err) {
+		t.Fatalf("candidate directory appeared: %v", err)
+	}
+}
+
+func TestDiscardLeftoverCandidateRefuses(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status string
+		setup  func(t *testing.T, st *store.Store, original string) (recorded, onDisk string)
+		hold   bool
+		config *config.Config
+		detail string
+	}{
+		{name: "active action", status: StatusWaitingExternal, detail: "not finished"},
+		{name: "ready candidate", status: StatusCompleted, detail: "can still be promoted"},
+		{name: "action holds its lease", status: StatusFailed, hold: true, detail: "already executing"},
+		{name: "destructive changes disabled", status: StatusFailed, config: &config.Config{}, detail: "allow_destructive"},
+		{name: "promotion started", status: StatusFailed, detail: "references this candidate", setup: func(t *testing.T, st *store.Store, original string) (string, string) {
+			path := filepath.Join(filepath.Dir(original), ".navigatorr-candidates", "sample-episode-01.job-guard.mkv")
+			writeCandidateFile(t, path, "being promoted")
+			seedActionInstance(t, st, "replacement", "promote_transcode_candidate", StatusFailed, 3, "promote:filesystem:attempt", map[string]any{"transcode_action_id": "attempt"}, nil)
+			return path, path
+		}},
+		{name: "symlink", status: StatusFailed, detail: "symlink", setup: func(t *testing.T, st *store.Store, original string) (string, string) {
+			target := filepath.Join(filepath.Dir(original), "elsewhere.mkv")
+			writeCandidateFile(t, target, "linked")
+			link := filepath.Join(filepath.Dir(original), ".navigatorr-candidates", "sample-episode-01.job-guard.mkv")
+			if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, link); err != nil {
+				t.Fatal(err)
+			}
+			return link, target
+		}},
+		{name: "outside candidates", status: StatusFailed, detail: ".navigatorr-candidates", setup: func(t *testing.T, st *store.Store, original string) (string, string) {
+			path := filepath.Join(filepath.Dir(original), "sample-episode-01.job-guard.mkv")
+			writeCandidateFile(t, path, "beside the original")
+			return path, path
+		}},
+		{name: "no job id", status: StatusFailed, detail: "job id", setup: func(t *testing.T, st *store.Store, original string) (string, string) {
+			path := filepath.Join(filepath.Dir(original), ".navigatorr-candidates", "sample-episode-01.mkv")
+			writeCandidateFile(t, path, "someone else's file")
+			return path, path
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := candidateRoot(t)
+			st := setupTestStore(t)
+			e := discardEngine(t, st, root)
+			if tc.config != nil {
+				e.deps.Config = tc.config
+			}
+			original := filepath.Join(root, "Sample Show", "Season 1", "sample-episode-01.mkv")
+			writeCandidateFile(t, original, "original")
+			candidate := seedCandidateAttempt(t, st, "attempt", tc.status, original, "job-guard", nil, nil)
+			recorded, onDisk := candidate, candidate
+			if tc.setup != nil {
+				recorded, onDisk = tc.setup(t, st, original)
+				inst := mustInstance(t, st, "attempt")
+				ec := parseExecutionContext(inst, e)
+				ec.State["candidate_path"] = recorded
+				inst.StateJSON = toJSON(ec.State)
+				if err := st.UpdateActionInstance(*inst); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				writeCandidateFile(t, candidate, "candidate")
+			}
+			if tc.status == StatusFailed {
+				markRejected(t, st, "attempt")
+			}
+			if tc.hold {
+				_, release, err := e.claimExecution(context.Background(), "attempt", false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer release()
+			}
+			e.candidateRemoveHook = func(path string) { t.Fatalf("guarded path removed: %s", filepath.Base(path)) }
+			if _, err := e.DiscardLeftoverCandidate(context.Background(), "attempt"); err == nil || !strings.Contains(err.Error(), tc.detail) {
+				t.Fatalf("expected refusal mentioning %q, got %v", tc.detail, err)
+			}
+			for _, path := range []string{onDisk, original} {
+				if _, err := os.Stat(path); err != nil {
+					t.Fatalf("%s touched: %v", filepath.Base(path), err)
+				}
+			}
+			if getBool(parseExecutionContext(mustInstance(t, st, "attempt"), e).State, candidateRemovedKey) {
+				t.Fatal("refused removal recorded as removed")
+			}
+		})
+	}
+}
+
+func TestLinkedPartialIsCountedOnce(t *testing.T) {
+	root := candidateRoot(t)
+	st := setupTestStore(t)
+	e := discardEngine(t, st, root)
+	original := filepath.Join(root, "Sample Show", "sample-episode-01.mkv")
+	writeCandidateFile(t, original, "original")
+	candidate := seedCandidateAttempt(t, st, "attempt", StatusCancelled, original, "job-attempt", nil, nil)
+	writeCandidateFile(t, candidate, strings.Repeat("c", 80))
+	// A link-based publish that never dropped the partial name.
+	if err := os.Link(candidate, candidate+".partial.job-attempt"); err != nil {
+		t.Fatal(err)
+	}
+	page, err := e.ListLeftoverCandidates(context.Background(), 0)
+	if err != nil || len(page.Items) != 1 {
+		t.Fatalf("listing: %+v %v", page, err)
+	}
+	if item := page.Items[0]; item.Bytes != 80 || item.PartialBytes != 0 || page.Bytes != 80 {
+		t.Fatalf("linked partial counted twice: %+v page %d", item, page.Bytes)
+	}
+	if _, err := e.DiscardLeftoverCandidate(context.Background(), "attempt"); err != nil {
+		t.Fatal(err)
+	}
+	state := parseExecutionContext(mustInstance(t, st, "attempt"), e).State
+	if getInt(state, "candidate_removed_bytes") != 80 {
+		t.Fatalf("freed bytes counted twice: %v", state["candidate_removed_bytes"])
+	}
+	for _, path := range []string{candidate, candidate + ".partial.job-attempt"} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("%s kept: %v", filepath.Base(path), err)
+		}
+	}
+}

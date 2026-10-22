@@ -30,6 +30,7 @@ const (
 	candidateRetiredRejected   = "rejected"
 	candidateRetiredCancelled  = "cancelled"
 	candidateRetiredSuperseded = "superseded"
+	candidateRetiredDiscarded  = "discarded"
 )
 
 func rejectedCandidateResult() StepResult {
@@ -105,28 +106,36 @@ func (e *Engine) candidatePromotionStarted(inst *store.ActionInstance, ec *Execu
 }
 
 // removeOwnCandidateFile removes one owned file, through the same root and
-// symlink checks promotion uses. A missing file is already removed.
-func (e *Engine) removeOwnCandidateFile(path string) (int64, error) {
+// symlink checks promotion uses, and returns what it removed. A missing file
+// is already removed.
+func (e *Engine) removeOwnCandidateFile(path string) (os.FileInfo, error) {
 	if _, err := e.promotionPath(path, true); err != nil {
-		return 0, err
+		return nil, err
 	}
 	info, err := e.promotionLstat(path)
 	if os.IsNotExist(err) {
-		return 0, nil
+		return nil, nil
 	}
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	if !info.Mode().IsRegular() {
-		return 0, fmt.Errorf("%s is not a regular file", filepath.Base(path))
+		return nil, fmt.Errorf("%s is not a regular file", filepath.Base(path))
 	}
 	if e.candidateRemoveHook != nil {
 		e.candidateRemoveHook(path)
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return 0, err
+		return nil, err
 	}
-	return info.Size(), nil
+	return info, nil
+}
+
+// sameCandidateBytes reports whether the partial is another name for the
+// candidate's bytes: a link-based publish whose cleanup of the partial name
+// did not finish. Those bytes are counted once.
+func sameCandidateBytes(candidate, partial os.FileInfo) bool {
+	return candidate != nil && partial != nil && os.SameFile(candidate, partial)
 }
 
 func (e *Engine) removeOwnCandidate(ctx context.Context, inst *store.ActionInstance, ec *ExecutionContext) (int64, error) {
@@ -138,12 +147,18 @@ func (e *Engine) removeOwnCandidate(ctx context.Context, inst *store.ActionInsta
 		return 0, err
 	}
 	var freed int64
+	var removed os.FileInfo
 	for _, path := range []string{candidate, partial} {
 		if err := ctx.Err(); err != nil {
 			return freed, err
 		}
-		n, err := e.removeOwnCandidateFile(path)
-		freed += n
+		info, err := e.removeOwnCandidateFile(path)
+		if info != nil && !sameCandidateBytes(removed, info) {
+			freed += info.Size()
+		}
+		if path == candidate {
+			removed = info
+		}
 		if err != nil {
 			return freed, err
 		}
@@ -164,6 +179,47 @@ func (e *Engine) retireCandidate(ctx context.Context, inst *store.ActionInstance
 	}
 	freed, err := e.removeOwnCandidate(ctx, inst, ec)
 	e.recordCandidateCleanup(ctx, inst, ec, why, freed, err)
+}
+
+// DiscardLeftoverCandidate is the owner's approval to remove one listed
+// leftover: the candidate and partial a finished attempt owns, through the
+// same guards and removal as automatic cleanup. It holds the attempt's
+// execution lease and re-checks at call time that nothing can promote the
+// candidate. A file that is already gone counts as removed, so repeating the
+// call changes nothing.
+func (e *Engine) DiscardLeftoverCandidate(ctx context.Context, id string) (*ActionResult, error) {
+	if !e.AllowDestructive() {
+		return nil, fmt.Errorf("allow_destructive must be enabled for candidate removal")
+	}
+	ctx, release, err := e.claimExecution(ctx, id, false)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	inst, err := e.deps.Store.GetActionInstanceIfExists(id)
+	if err != nil {
+		return nil, err
+	}
+	if inst == nil || inst.ActionName != "transcode_media" {
+		return nil, fmt.Errorf("only a transcode attempt's own candidate can be removed")
+	}
+	ec := parseExecutionContext(inst, e)
+	if getBool(ec.State, candidateRemovedKey) {
+		return e.Status(ctx, id)
+	}
+	reason, err := e.leftoverCandidateReason(inst, ec, map[string]map[string]bool{})
+	if err != nil {
+		return nil, err
+	}
+	if reason == "" {
+		return nil, fmt.Errorf("this attempt's candidate can still be promoted or the action is not finished; nothing was removed")
+	}
+	freed, err := e.removeOwnCandidate(ctx, inst, ec)
+	e.recordCandidateCleanup(ctx, inst, ec, candidateRetiredDiscarded, freed, err)
+	if err != nil {
+		return nil, fmt.Errorf("candidate file kept: %v", err)
+	}
+	return e.Status(ctx, id)
 }
 
 // recordCandidateCleanup persists the cleanup outcome and says it in the
@@ -254,7 +310,8 @@ type LeftoverCandidatePage struct {
 // transcodes left in .navigatorr-candidates: rejected, cancelled, failed or
 // superseded attempts nothing promotes. Ready candidates, promotions and
 // recovery files are never listed. Inventory follows action ownership, never
-// a directory sweep.
+// a directory sweep, so a page of actions may list nothing and still have a
+// next page. DiscardLeftoverCandidate removes one listed item.
 func (e *Engine) ListLeftoverCandidates(ctx context.Context, offset int) (*LeftoverCandidatePage, error) {
 	if e.deps.Store == nil {
 		return nil, fmt.Errorf("maintenance store is required")
@@ -288,6 +345,7 @@ func (e *Engine) ListLeftoverCandidates(ctx context.Context, offset int) (*Lefto
 			continue
 		}
 		item := LeftoverCandidate{ActionID: inst.ID, Status: inst.Status, Path: candidate, OriginalPath: getString(ec.State, "resolved_path"), Reason: reason}
+		var candidateInfo os.FileInfo
 		for _, path := range []string{candidate, partial} {
 			if _, err := e.promotionPath(path, false); err != nil {
 				break
@@ -297,8 +355,8 @@ func (e *Engine) ListLeftoverCandidates(ctx context.Context, offset int) (*Lefto
 				continue
 			}
 			if path == candidate {
-				item.Bytes = info.Size()
-			} else {
+				candidateInfo, item.Bytes = info, info.Size()
+			} else if !sameCandidateBytes(candidateInfo, info) {
 				item.PartialBytes = info.Size()
 			}
 		}
