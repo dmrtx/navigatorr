@@ -129,6 +129,12 @@ func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
 		s.UserNextStep = "Nothing to do yet. The file is encoded once at your size budget; if it comes out below the quality target you will be told before you approve any replacement."
 	case planSource == "audio_only":
 		s.Outcome, s.Message = "audio_only", "The video is copied unchanged and only the lossless audio is compacted to AAC."
+		var audioOnly struct {
+			AudioMode string `json:"audio_mode"`
+		}
+		if benchmarkField(res, "plan", &audioOnly) && transcode.IsAudioLevelMode(audioOnly.AudioMode) {
+			s.Message = "The video is copied unchanged and only the audio is re-encoded to AAC."
+		}
 		s.NextStep = "Monitor this action. The candidate must prove its video bit-identical to the source and still meet the same minimum savings; the original is never changed before that."
 		s.UserNextStep = "Nothing to do yet. The new file keeps the video exactly as it is and only makes the audio smaller; the original is not changed before that is checked."
 	case res.Status == action.StatusFailed:
@@ -153,14 +159,15 @@ func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
 	}
 	var plan transcode.Plan
 	var source struct {
-		Audio []mediainspect.DetailedStream `json:"audio"`
+		Audio       []mediainspect.DetailedStream `json:"audio"`
+		DurationSec float64                       `json:"duration_sec"`
 	}
 	if benchmarkField(res, "plan", &plan) && benchmarkField(res, "original", &source) {
 		for _, a := range source.Audio {
 			if len(s.Audio) >= 8 {
 				break
 			}
-			target, kbps := transcode.AudioTarget(plan.AudioMode, transcode.DetailedAudioTrack(a.Codec, a.Profile, a.Title, a.Tags, a.Channels, a.ChannelLayout))
+			target, kbps := transcode.AudioTarget(plan.AudioMode, transcode.DetailedAudioTrackAt(a.Codec, a.Profile, a.Title, a.Tags, a.Channels, a.ChannelLayout, a.BitRate, source.DurationSec))
 			entry := benchmarkAudio{Stream: a.Index, Language: a.Language, Channels: a.Channels, SourceCodec: a.Codec, Operation: "copy", OutputCodec: a.Codec}
 			if target != "copy" {
 				entry.Operation, entry.OutputCodec, entry.TargetKbps = "convert_lossy", target, kbps

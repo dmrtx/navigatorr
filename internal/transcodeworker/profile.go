@@ -25,7 +25,7 @@ func Capabilities() WorkerCapabilities {
 	return WorkerCapabilities{
 		Containers:           []string{"mkv"},
 		VideoCodecs:          []string{"hevc_videotoolbox", "libx265"},
-		AudioOperations:      []string{"copy", "compact", "he_aac", transcode.AudioModeCompactLossless},
+		AudioOperations:      []string{"copy", "compact", "he_aac", transcode.AudioModeCompactLossless, transcode.AudioModeSizeAAC, transcode.AudioModeSizeHEAAC},
 		SubtitleOperations:   []string{"copy", "transcode"},
 		SubtitleEncodeCodecs: []string{"subrip"},
 		SubtitleCopyCodecs:   []string{"subrip", "srt", "ass", "ssa", "hdmv_pgs_subtitle", "pgs", "dvd_subtitle", "vobsub", "dvb_subtitle", "dvb_teletext", "webvtt", "text"},
@@ -83,7 +83,7 @@ func ValidatePlan(p *transcode.Plan) error {
 		// stream proof replaces perceptual validation; every other mode plan
 		// carries its frozen quality policy.
 		audioOnly := transcode.IsSizeAudioOnlyPlan(p)
-		if p.SizePolicy == nil || p.SizePolicy.MinSavingsPercent != min || p.SizePolicy.MaxSizeIncreasePercent != 0 || p.PolicyDigest == "" || (p.QualityValidation == nil) != audioOnly || p.AudioMode != modeAudioMode(p.Mode, p.ModePolicyVersion) {
+		if p.SizePolicy == nil || p.SizePolicy.MinSavingsPercent != min || p.SizePolicy.MaxSizeIncreasePercent != 0 || p.PolicyDigest == "" || (p.QualityValidation == nil) != audioOnly || !modeAudioModeAllowed(p.Mode, p.ModePolicyVersion, p.AudioMode) {
 			return fmt.Errorf("mode plan requires frozen size/quality policy and audio preservation")
 		}
 		if audioOnly {
@@ -114,11 +114,14 @@ func ValidatePlan(p *transcode.Plan) error {
 	if _, err := BuildVideoEncoderArgs(p); err != nil {
 		return err
 	}
-	if norm(p.AudioMode) != "copy" && norm(p.AudioMode) != "compact" && norm(p.AudioMode) != "he_aac" && norm(p.AudioMode) != transcode.AudioModeCompactLossless {
+	if norm(p.AudioMode) != "copy" && norm(p.AudioMode) != "compact" && norm(p.AudioMode) != "he_aac" && norm(p.AudioMode) != transcode.AudioModeCompactLossless && !transcode.IsAudioLevelMode(norm(p.AudioMode)) {
 		return fmt.Errorf("unsupported audio mode %q (fail closed)", p.AudioMode)
 	}
 	if norm(p.AudioMode) == transcode.AudioModeCompactLossless && (p.Mode != "size" || p.ModePolicyVersion != transcode.ModePolicyV3) {
 		return fmt.Errorf("compact_lossless audio requires size mode policy v3 (fail closed)")
+	}
+	if transcode.IsAudioLevelMode(norm(p.AudioMode)) && (p.Mode != "size" || p.ModePolicyVersion != transcode.ModePolicyV5) {
+		return fmt.Errorf("%s audio requires size mode policy v5 (fail closed)", p.AudioMode)
 	}
 	if norm(p.SubtitleMode) != "preserve" {
 		return fmt.Errorf("unsupported subtitle mode %q (fail closed)", p.SubtitleMode)
@@ -276,4 +279,13 @@ func modeAudioMode(mode, version string) string {
 		return transcode.AudioModeCompactLossless
 	}
 	return "copy"
+}
+
+// modeAudioModeAllowed also admits size v5's audio levels: its plan carries
+// the level chosen for the source, either of the two.
+func modeAudioModeAllowed(mode, version, audioMode string) bool {
+	if mode == "size" && version == transcode.ModePolicyV5 {
+		return transcode.IsAudioLevelMode(audioMode)
+	}
+	return audioMode == modeAudioMode(mode, version)
 }

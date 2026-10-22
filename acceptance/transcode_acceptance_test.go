@@ -50,6 +50,7 @@ func TestTranscodeAcceptance(t *testing.T) {
 		{"7_timestamp_glitch", caseTimestampGlitch},
 		{"8_no_size_tags", caseNoSizeTags},
 		{"8b_no_size_tags_flac", caseNoSizeTagsFLAC},
+		{"8c_size_lossy_audio", caseSizeLossyAudio},
 		{"9_promotion", casePromotion},
 	}
 	for _, c := range cases {
@@ -275,6 +276,23 @@ func caseNoSizeTagsFLAC(k *kase) {
 	k.require(r.reason() != "size_budget_estimate_unavailable", "the size budget could not be planned for a source whose streams state no size and whose audio states no bitrate: %s", r.describe())
 	k.expectCandidate(src, sha, r, candidateWant{minSaved: 15, maxBytes: budgetBytes(fileSize(k.T, src)), audio: "aac"})
 	k.expectLadder(r)
+}
+
+// lossyAudioSource carries a tagged AC-3 stereo track at 384 kbps, twice the
+// AAC-LC stereo target: the size goal's audio level 1 converts it.
+var lossyAudioSource = srcSpec{name: "sdr-ac3-1080p", w: 1920, h: 1080, secs: 20, noise: 1, audio: "ac3"}
+
+func caseSizeLossyAudio(k *kase) {
+	k.needCaps("libx264", "ac3", "aac", "libx265", "vmaf")
+	k.row.Goal = "size+x265"
+	src := k.s.source(k.T, lossyAudioSource)
+	sha := k.sha(src)
+	r := k.s.transcode(k.T, src, map[string]any{"mode": "size", "allow_hardware": false, "size_budget_percent": budgetPercent}, caseTimeout)
+	k.expectCandidate(src, sha, r, candidateWant{minSaved: 15, audio: "aac", maxBytes: budgetBytes(fileSize(k.T, src))})
+	k.expectBudgetX265(r)
+	k.require(r.budget.Audio != nil && r.budget.Audio.Level >= 1 && len(r.budget.Audio.Tracks) == 1,
+		"the budget recorded no audio level for a lossy track above the AAC-LC target: %+v", r.budget.Audio)
+	k.require(r.budget.Audio.Tracks[0].Output != "copy", "the lossy track was %q, want it converted", r.budget.Audio.Tracks[0].Output)
 }
 
 // promoSource is a short file of its own: promotion replaces it in the

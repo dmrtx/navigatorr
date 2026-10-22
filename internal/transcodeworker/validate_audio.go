@@ -26,7 +26,7 @@ type audioPacketSpan struct {
 // the candidate's audio timing and bitrate are measured against the source.
 func needsAudioPacketValidation(plan *transcode.Plan, src SourceProbe) bool {
 	switch plan.AudioMode {
-	case "compact", "he_aac", transcode.AudioModeCompactLossless:
+	case "compact", "he_aac", transcode.AudioModeCompactLossless, transcode.AudioModeSizeAAC, transcode.AudioModeSizeHEAAC:
 		return countStreams(src.Streams, "audio") > 0
 	}
 	return false
@@ -149,7 +149,7 @@ func (w *Worker) validateAudioPackets(ctx context.Context, plan *transcode.Plan,
 		if codec, kbps := transcode.AudioTarget(plan.AudioMode, s.AudioTrack()); codec != "copy" && y.end-y.start > 10 {
 			bps := float64(y.bytes) * 8 / (y.end - y.start)
 			// AAC is variable bitrate; reject gross overshoot, not silence or padding.
-			if bps > float64(kbps*2000+16000) {
+			if bps > float64(transcode.AudioBitrateCeilingBps(kbps)) {
 				return fmt.Errorf("compact audio stream %d bitrate %.0f exceeds nominal target tolerance", i, bps)
 			}
 		}

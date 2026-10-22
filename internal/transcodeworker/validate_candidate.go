@@ -308,9 +308,15 @@ func validateAudioPreservation(plan *transcode.Plan, src, cand []SourceStream) e
 	}
 	for i := range srcAudio {
 		a, b := srcAudio[i], candAudio[i]
-		target, _ := transcode.AudioTarget(plan.AudioMode, a.AudioTrack())
-		if plan.AudioMode == "he_aac" && target != "copy" && !strings.EqualFold(b.Profile, "HE-AAC") {
+		out := transcode.AudioOutputFor(plan.AudioMode, a.AudioTrack())
+		target := out.Codec
+		if out.HEAAC && !strings.EqualFold(b.Profile, "HE-AAC") {
 			return fmt.Errorf("HE-AAC audio profile not present in candidate stream %d", i)
+		}
+		// A size level's AAC-LC track is checked too: the profile is half of
+		// what tells a level 1 track from a level 2 one.
+		if transcode.IsAudioLevelMode(plan.AudioMode) && target != "copy" && !out.HEAAC && !strings.EqualFold(b.Profile, "LC") {
+			return candidateInvalid(fmt.Errorf("%w: local candidate audio stream %d is %q, expected AAC-LC (fail closed, never publish)", ErrSourceInvalid, i, b.Profile))
 		}
 		// Only an AAC conversion can remap the layout. A copied track keeps
 		// its bitstream, and Matroska reports no layout for PCM, so a copy

@@ -72,6 +72,9 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 				if budget, ok := sizeAudioOnlyBudget(snapshot, ec.State); !ok || plan.SizePolicy.MaxCandidateBytes != budget {
 					return StepResult{Status: StepFailed, Error: "audio-only plan does not carry the frozen size budget; original preserved"}, nil
 				}
+				if !sizeAudioOnlyLevelMatches(snapshot, ec.State, plan) {
+					return StepResult{Status: StepFailed, Error: "audio-only plan does not carry the frozen audio level; original preserved"}, nil
+				}
 			}
 		} else {
 			expectedQuality := ensureFinalQualityMetric(buildFinalQualityConfig(snapshot.Profile.Optimization.Quality), "vmaf")

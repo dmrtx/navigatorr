@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jakenesler/navigatorr/mediainspect"
+	"github.com/jakenesler/navigatorr/transcode"
 )
 
 // A source whose video stream is 100 MB of a 1 GB file leaves about 900 MB for
@@ -17,8 +18,8 @@ const unreachableProbeJSON = `{"streams":[{"index":0,"codec_type":"video","codec
 
 func TestUnreachableSizeBudgetEndsBeforeAnyWork(t *testing.T) {
 	for name, inputs := range map[string]map[string]any{
-		"hardware allowed":     {"size_budget_bytes": 300_000_000.0},
-		"hardware not allowed": {"size_budget_bytes": 300_000_000.0, "allow_hardware": false},
+		"hardware allowed":     {"size_budget_bytes": 100_000_000.0},
+		"hardware not allowed": {"size_budget_bytes": 100_000_000.0, "allow_hardware": false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := newBudgetCase(t, inputs, budgetCaps())
@@ -40,10 +41,10 @@ func TestUnreachableSizeBudgetEndsBeforeAnyWork(t *testing.T) {
 				t.Fatalf("job or candidate state: %+v", c.ec.State)
 			}
 			rec := sizeBudgetOf(c.ec.State)
-			if rec == nil || rec.Outcome != SizeBudgetExceeded || rec.Trigger != sizeBudgetTriggerUnreachable || rec.BudgetBytes != 300_000_000 {
+			if rec == nil || rec.Outcome != SizeBudgetExceeded || rec.Trigger != sizeBudgetTriggerUnreachable || rec.BudgetBytes != 100_000_000 {
 				t.Fatalf("record %+v", rec)
 			}
-			for _, want := range []string{"alone take", formatBudgetBytes(rec.NonVideoBytes), "300 MB", "At least", "would be needed", "Original preserved"} {
+			for _, want := range []string{"alone take", formatBudgetBytes(rec.NonVideoBytes), "100 MB", "At least", "would be needed", "Original preserved"} {
 				if !strings.Contains(rec.Message, want) {
 					t.Fatalf("message %q lacks %q", rec.Message, want)
 				}
@@ -180,14 +181,14 @@ func TestUnreachableSizeBudgetLeavesAudioOnlyToTheSearch(t *testing.T) {
 	const source = 395_000_000
 	for name, fallback := range map[string]bool{"fallback allowed": true, "fallback disabled": false} {
 		t.Run(name, func(t *testing.T) {
-			c := newBudgetCase(t, map[string]any{"size_budget_bytes": 98_750_000.0}, budgetCaps())
+			c := newBudgetCase(t, map[string]any{"size_budget_bytes": 50_000_000.0}, budgetCaps())
 			delete(c.ec.State, "benchmark_job_id")
 			c.snapshot.Size.AudioOnlyFallback = fallback
 			policy := c.snapshot.Size.SizeBudget
-			if enc := planSizeBudgetEncode(policy, rep, source, 98_750_000); enc.Reason != "size_budget_unreachable" {
+			if enc := planSizeBudgetEncode(policy, rep, source, 50_000_000); enc.Reason != "size_budget_unreachable" {
 				t.Fatalf("fixture is not unreachable: %+v", enc)
 			}
-			if est := estimateAudioOnly(rep, source); est.CandidateBytes > 98_750_000 {
+			if est := estimateAudioOnly(rep, source, transcode.AudioModeSizeHEAAC); est.CandidateBytes > 50_000_000 {
 				t.Fatalf("fixture does not fit audio-only: %+v", est)
 			}
 			_, ended := endUnreachableSizeBudget(c.ec, c.snapshot, rep, source, nil)

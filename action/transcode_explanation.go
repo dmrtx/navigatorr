@@ -152,7 +152,7 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 		}
 	case (reason == SizeBudgetExceeded || reason == "insufficient_savings") && audioOnlyBudget(res, read) > 0:
 		e.Outcome = "size_rejected"
-		e.Message = audioOnlyOvershootMessage(audioOnlyBudget(res, read), getInt64(map[string]any{"size": read("candidate_size_bytes")}, "size"))
+		e.Message = audioOnlyOvershootMessage(audioOnlyBudget(res, read), getInt64(map[string]any{"size": read("candidate_size_bytes")}, "size"), audioOnlyPhrase(getPlan(read("plan"))))
 	case (reason == "insufficient_savings" || reason == "size_growth" || reason == "size_growth_exceeded" || reason == reasonQualityNotMet) && e.QualityLadder != nil && getString(res.State, "plan_source") == qualityLadderPlanSource && e.QualityLadder.Outcome != QualityLadderEncoding && e.QualityLadder.Outcome != QualityLadderPassed:
 		e.Outcome = "size_rejected"
 		if reason == reasonQualityNotMet {
@@ -213,7 +213,7 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 		e.Message = "No candidate was accepted. Inspect the recorded skip reason."
 	case getBool(res.Outputs, "original_intact") && getBool(res.State, "size_audio_only"):
 		e.Outcome = "candidate_ready"
-		e.Message = "Candidate verified; original preserved. The video is copied bit-identically and only the lossless audio was compacted."
+		e.Message = "Candidate verified; original preserved. The video is copied bit-identically and only the audio was " + audioOnlyDone(getPlan(read("plan"))) + "."
 	case getBool(res.Outputs, "original_intact") && e.SizeBudget != nil && e.SizeBudget.Outcome != "":
 		e.Outcome = "candidate_ready"
 		e.Message = e.SizeBudget.Message
@@ -247,13 +247,31 @@ func audioOnlyBudget(res *ActionResult, read func(string) any) int64 {
 	return plan.SizePolicy.MaxCandidateBytes
 }
 
-// audioOnlyOvershootMessage says how far a compacted-audio-only file landed
-// over the budget, as the x265 encode's does: the budget, the size it came
-// out at and the gap.
-func audioOnlyOvershootMessage(budget, candidate int64) string {
+// audioOnlyPhrase is what an audio-only plan does to the audio, for a sentence
+// about its size: the size goal's levels re-encode lossy tracks too, the one
+// audio policy before them only compacted lossless ones.
+func audioOnlyPhrase(plan *transcode.Plan) string {
+	if plan != nil && transcode.IsAudioLevelMode(plan.AudioMode) {
+		return "re-encoding the audio"
+	}
+	return "compacting the lossless audio"
+}
+
+// audioOnlyDone is the past tense of audioOnlyPhrase's action.
+func audioOnlyDone(plan *transcode.Plan) string {
+	if plan != nil && transcode.IsAudioLevelMode(plan.AudioMode) {
+		return "re-encoded"
+	}
+	return "compacted"
+}
+
+// audioOnlyOvershootMessage says how far an audio-only file landed over the
+// budget, as the x265 encode's does: the budget, the size it came out at and
+// the gap.
+func audioOnlyOvershootMessage(budget, candidate int64, phrase string) string {
 	if candidate <= 0 {
-		return fmt.Sprintf("Copying the video and compacting the lossless audio alone came out over the %s budget. Original preserved.", formatBudgetBytes(budget))
+		return fmt.Sprintf("Copying the video and %s alone came out over the %s budget. Original preserved.", phrase, formatBudgetBytes(budget))
 	}
 	gap := candidate - budget
-	return fmt.Sprintf("Copying the video and compacting the lossless audio alone came out at %s, over the %s budget by %s (%.1f%%). The video was copied unchanged, so only a larger budget or fewer tracks can fit. Original preserved.", formatBudgetBytes(candidate), formatBudgetBytes(budget), formatBudgetBytes(gap), float64(gap)/float64(budget)*100)
+	return fmt.Sprintf("Copying the video and %s alone came out at %s, over the %s budget by %s (%.1f%%). The video was copied unchanged, so only a larger budget or fewer tracks can fit. Original preserved.", phrase, formatBudgetBytes(candidate), formatBudgetBytes(budget), formatBudgetBytes(gap), float64(gap)/float64(budget)*100)
 }
