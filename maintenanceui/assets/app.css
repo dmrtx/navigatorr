@@ -2482,8 +2482,9 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
 .keep-tracks > summary::-webkit-details-marker { display: none; }
 .keep-tracks > summary::before { content: "▸"; color: var(--muted); }
 .keep-tracks[open] > summary::before { content: "▾"; }
-.keep-tracks-title { font-weight: 600; }
-.keep-tracks > summary .metadata { flex: 1; min-width: 0; text-align: right; }
+.keep-tracks-title { flex: none; font-weight: 600; }
+.keep-tracks > summary .metadata { flex: 1; min-width: 0; overflow: hidden; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+.keep-tracks .segmented label { white-space: nowrap; }
 .keep-tracks[open] { padding-bottom: .85rem; }
 .keep-tracks-body { display: grid; gap: .85rem; }
 .keep-tracks-body > p { margin: 0; }
@@ -2492,9 +2493,13 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
 .track-group legend { padding: 0; margin-bottom: 2px; font-size: .78rem; font-weight: 600; letter-spacing: .02em; color: var(--muted); }
 .track-list { max-height: 24rem; margin: 0; padding: 0; overflow-y: auto; list-style: none; }
 .track-row + .track-row { border-top: 1px solid var(--line); }
-.track-label { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; min-height: 44px; margin: 0; padding: 4px 0; font-size: 13px; cursor: pointer; }
+.track-label { display: flex; align-items: center; gap: 10px; min-height: 44px; margin: 0; padding: 4px 0; font-size: 13px; cursor: pointer; }
 .track-label:has(input:disabled) { cursor: default; }
-.track-text { display: grid; flex: 1 1 12rem; min-width: 0; gap: 1px; }
+.track-text { display: grid; flex: 1 1 0; min-width: 0; gap: 1px; }
+/* The badges stay on the track's row: side by side, stacked when it is narrow. */
+.track-badges { display: flex; flex: none; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
+.track-badge { white-space: nowrap; }
+@media (max-width: 480px) { .track-badges { flex-direction: column; align-items: flex-end; } }
 .track-name { font-weight: 600; }
 .track-facts { overflow-wrap: anywhere; }
 .track-badge { margin: 0; padding: 2px 7px; border: 1px solid var(--line-strong); border-radius: 999px; font-size: 11px; }

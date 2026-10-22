@@ -268,9 +268,11 @@ func stateModePolicy(state map[string]any) *ModePolicySnapshot {
 	return &p
 }
 
-// trackInfosOf lists a source's audio and subtitle streams for selection, in
-// source order (audio first, then subtitles, each by stream index).
-func trackInfosOf(rep *mediainspect.DetailedReport) []transcode.TrackInfo {
+// TrackInfosOf lists a source's audio and subtitle streams for selection, in
+// source order (audio first, then subtitles, each by stream index). The job and
+// the console's track picker both read a file through it, so the boxes the
+// picker ticks are what the job keeps.
+func TrackInfosOf(rep *mediainspect.DetailedReport) []transcode.TrackInfo {
 	if rep == nil {
 		return nil
 	}
@@ -295,7 +297,7 @@ func resolveTrackSelection(snapshot *ModePolicySnapshot, rep *mediainspect.Detai
 	if snapshot == nil || !snapshot.Tracks.Active() || rep == nil {
 		return nil, nil
 	}
-	return transcode.SelectTracks(snapshot.Tracks, trackInfosOf(rep))
+	return transcode.SelectTracks(snapshot.Tracks, TrackInfosOf(rep))
 }
 
 // trackSelectionOf is the selection preflight stored for this source.

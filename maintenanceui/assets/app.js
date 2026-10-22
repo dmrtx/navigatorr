@@ -1720,6 +1720,7 @@ function sourceSummary() {
 function finishSubmission(mode) {
   if (mode === "encode") {
     state.goalExplicit = false;
+    state.goalCarry = null;
     resetKeepTracks();
     state.selected.clear();
     state.folderSelected?.clear();
@@ -1826,6 +1827,8 @@ async function loadGoalProfile(key) {
   if (!current()) return;
   state.goalProfileAbort = null;
   state.goalProfile = data?.profile && data.goals ? {...state.goalProfile, status: "ready", data} : {...state.goalProfile, status: "error"};
+  // The file's tracks are read after its profile, never beside it.
+  scheduleKeepTracks();
   const recommended = state.goalProfile.data?.recommended;
   // The recommendation fills in an unchosen goal; it never replaces a choice.
   if (recommended && goalNames[recommended] && !state.goalExplicit) setProcessingMode(recommended);
@@ -1958,8 +1961,9 @@ function applyKeepLanguages(data, adopt) {
   k.defaults = [...(data.default || [])];
   k.status = "ready";
   if (clean) k.draft = [...k.saved];
-  // The picker's pre-checked tracks follow the saved list.
-  if (changed) { keepTracks.key = ""; refreshKeepTracks(); }
+  // The pre-checked tracks follow the saved list only while the form uses it;
+  // a job's own languages, or every track, are not affected by it.
+  if (changed && keepTracks.scope === "saved") { keepTracks.key = ""; refreshKeepTracks(); }
 }
 async function loadKeepLanguages() {
   const k = keepLanguages, auth = state.authRevision, request = ++k.request;
@@ -2046,8 +2050,11 @@ function keepLanguageInputs() {
 function keepTrackInputs(single, path) {
   const kt = keepTracks, inputs = keepLanguageInputs();
   if (!single || !kt.picks || kt.path !== path) return inputs;
-  if (!kt.picks.audio.size) throw new Error("Keep at least one audio track.");
   const order = set => [...set].sort((a, b) => a - b);
+  // A file without audio has none to keep: the server takes the subtitles
+  // alone then, and refuses an empty audio list.
+  if (kt.data && !kt.data.audio.length) return {...inputs, keep_subtitle_streams: order(kt.picks.subtitles)};
+  if (!kt.picks.audio.size) throw new Error("Keep at least one audio track.");
   return {...inputs, keep_audio_streams: order(kt.picks.audio), keep_subtitle_streams: order(kt.picks.subtitles)};
 }
 function resetKeepTracks() {
@@ -2094,7 +2101,18 @@ function refreshKeepTracks() {
   else if (kt.picks) Object.assign(kt, {picks: null, notice: "The boxes follow the languages again."});
   kt.status = "loading";
   kt.error = "";
-  const seq = kt.seq;
+  scheduleKeepTracks();
+}
+// One file selection takes one of the server's two source slots at a time: the
+// goal's profile read goes first, and the tracks are read once it is done (or
+// at once when only the languages changed). A second tab keeps the other slot.
+function scheduleKeepTracks() {
+  const kt = keepTracks;
+  clearTimeout(kt.timer);
+  if (!kt.key || kt.status !== "loading" || kt.abort) return;
+  const profile = state.goalProfile;
+  if (profile?.status === "loading" && profile.key === kt.path) return;
+  const key = kt.key, seq = kt.seq;
   kt.timer = setTimeout(() => loadKeepTracks(key, seq), 150);
 }
 async function loadKeepTracks(key, seq) {
@@ -2149,8 +2167,11 @@ function trackRow(kind, track) {
   const facts = [trackCodec(track.codec), kind === "audio" ? trackChannels(track.channels) : "", track.title].filter(Boolean);
   if (facts.length) name.append(node("span", facts.join(" · "), "metadata track-facts"));
   label.append(box, name);
+  // The badges stay on the track's own row, stacked when the row is narrow.
+  const badges = node("span", "", "track-badges");
   for (const [flag, text] of [["original", "Original"], ["default", "Default"], ["forced", "Forced"]])
-    if (track[flag]) label.append(node("span", text, "badge track-badge"));
+    if (track[flag]) badges.append(node("span", text, "badge track-badge"));
+  if (badges.children.length) label.append(badges);
   row.append(label);
   return {row, box, kind, track};
 }
@@ -2529,6 +2550,10 @@ async function buildAndSubmitJob(mode = "encode") {
     Object.assign(inputs, sizeBudgetInputs("size-budget"));
   }
   if (simple && keepGoals.includes(inputs.mode)) Object.assign(inputs, keepTrackInputs(!batch, $("path").value.trim()));
+  // Settings of an earlier job's goal that the form has no control for, while
+  // it is still that file and that goal.
+  const carry = state.goalCarry;
+  if (simple && !batch && carry && carry.path === $("path").value.trim() && carry.mode === inputs.mode) Object.assign(inputs, carry.inputs);
   const folderSource = $("service").value.startsWith("folder:");
   const explicitSelection = (folderSource ? state.folderSelected?.size : state.selected.size) > 0 && (simple || $("selected-only").checked);
   if (batch) {
@@ -3656,16 +3681,39 @@ async function rerunJob(job, {withoutHardware = false, mode = ""} = {}) {
     state.busyJobs.delete(job.id);
   }
 }
+// A job's own goal, repeated for the same file: the encoder and the size limit
+// go into the form's controls, and what the form has no control for (the Shrink
+// height, the slow preset) is carried to the submit for this file and goal.
+function applyGoalSettings(path, goal) {
+  $("allow-hardware").checked = goal.allow_hardware !== false;
+  showSizeBudget("size-budget", goal);
+  const inputs = {};
+  for (const key of ["max_height", "allow_slow_preset"]) if (goal[key] != null) inputs[key] = goal[key];
+  state.goalCarry = {path, mode: goal.mode, inputs};
+}
+// The series or movie the earlier job was made for, so the new job is listed
+// and replaced the same way.
+function applyLibraryContext(context, goal) {
+  const id = context?.[context?.service === "radarr" ? "movie_id" : "series_id"];
+  if (!["sonarr", "radarr"].includes(context?.service) || !Number.isInteger(id) || id <= 0) return;
+  state.fileService = context.service;
+  state.fileMedia = {id, seriesType: goal?.is_anime ? "anime" : "", genres: []};
+}
 // openGoalForm opens the library's goal form for one file, closing the job
-// that asked for it. options.mode and options.languages start the form on the
-// goal and languages an earlier job used; options.pickTracks opens the track list.
+// that asked for it. options.mode, options.goal, options.context and
+// options.languages start the form on what an earlier job used (its goal and
+// size limit, its library and its languages); options.pickTracks opens the
+// track list.
 function openGoalForm(path, options = {}) {
   if ($("job-detail").open) $("job-detail").close();
   $("path").value = path || "";
   $("scope").value = "file";
   state.fileMedia = null;
   state.fileService = null;
+  state.goalCarry = null;
   if (options.mode) setProcessingMode(options.mode);
+  if (options.goal) applyGoalSettings(path, options.goal);
+  applyLibraryContext(options.context, options.goal);
   if (options.languages) presetKeepLanguages(options.languages);
   selectTab("library");
   setFileStep("configure");
@@ -3836,9 +3884,10 @@ function jobControls(job, detail = false) {
     add("View replacement", () => openJob(job.replacement_action_id));
   // Untagged tracks are kept without being asked; the finished file may have
   // kept the wrong ones, and the tag is missing, not the track. The lists come
-  // with the one job only, so the queue rows never offer it.
-  if (detail && job.action_name === "transcode_media" && job.status === "completed" && !job.replaced && !job.replacement_action_id && job.source_path && keepGoals.includes(job.mode) && keptUntagged(job.tracks))
-    add("Choose tracks", () => openGoalForm(job.source_path, {mode: job.mode, languages: job.tracks.languages || [], pickTracks: true}));
+  // with the one job only, so the queue rows never offer it. A job that was
+  // skipped or not converted made no file to choose tracks for.
+  if (detail && job.action_name === "transcode_media" && job.status === "completed" && job.candidate_ready && !job.replaced && !job.replacement_action_id && job.source_path && keepGoals.includes(job.mode) && keptUntagged(job.tracks))
+    add("Choose tracks", () => openGoalForm(job.source_path, {mode: job.mode, goal: job.goal || {mode: job.mode}, context: job.replacement_context, languages: Array.isArray(job.tracks.languages) ? job.tracks.languages : undefined, pickTracks: true}));
   if (job.preview_action_id && detail)
     add("View preview", () => openJob(job.preview_action_id));
   if (job.can_archive && ["completed", "failed", "cancelled"].includes(job.status))

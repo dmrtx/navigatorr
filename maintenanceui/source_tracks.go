@@ -4,15 +4,11 @@ import (
 	"context"
 	"net/http"
 	"strings"
-	"time"
 
+	"github.com/jakenesler/navigatorr/action"
 	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
 )
-
-// sourceTracksTimeout bounds one track read: ffprobe only, with no decoded
-// frames, so it is shorter than a profile read.
-const sourceTracksTimeout = 4 * time.Second
 
 // trackView is one audio or subtitle stream of a file, as the picker lists it.
 // Keep is what the automatic selection does with it for the languages asked
@@ -66,23 +62,18 @@ func (s *Server) sourceTracks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
-	ctx, cancel := context.WithTimeout(r.Context(), sourceTracksTimeout)
+	// The profile's budget: a volume that was asleep for the profile read is
+	// awake now, but a file read on its own may have to wake it.
+	ctx, cancel := context.WithTimeout(r.Context(), sourceProfileTimeout)
 	defer cancel()
 	rep, ok := s.probeSource(ctx, w, path, func(rep *mediainspect.DetailedReport) bool { return len(rep.MainVideo()) > 0 })
 	if !ok {
 		return
 	}
-	infos := make([]transcode.TrackInfo, 0, len(rep.Audio)+len(rep.Subtitles))
-	add := func(kind string, streams []mediainspect.DetailedStream) {
-		for _, st := range streams {
-			infos = append(infos, transcode.TrackInfo{Index: st.Index, Kind: kind, Language: st.Language, Title: st.Title, Codec: st.Codec, Disposition: st.Disposition})
-		}
-	}
-	add("audio", rep.Audio)
-	add("subtitle", rep.Subtitles)
-	// The job's own rule, over the same tracks, so the boxes ticked here are
-	// what an untouched submit keeps. Nothing to remove (or no languages)
-	// is no selection: every track stays.
+	// The job's own rule, over the tracks the job reads the same way, so the
+	// boxes ticked here are what an untouched submit keeps. Nothing to remove
+	// (or no languages) is no selection: every track stays.
+	infos := action.TrackInfosOf(rep)
 	selection, err := transcode.SelectTracks(&transcode.TrackPolicy{Languages: languages}, infos)
 	if err != nil {
 		fail(w, 500, "could not choose the tracks")

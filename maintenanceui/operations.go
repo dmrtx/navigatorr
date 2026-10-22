@@ -175,6 +175,29 @@ func operationTracks(r operationRecord) map[string]any {
 	return nil
 }
 
+// operationGoalKeys are the inputs that make up a file job's goal, the ones a
+// new job for the same file needs to run the same goal: Choose tracks starts one
+// from them. Paths, receipts and profiles are not among them.
+var operationGoalKeys = []string{"mode", "max_height", "allow_hardware", "allow_slow_preset", "size_budget_percent", "size_budget_bytes", "size_budget_source", "size_budget_sibling_multiplier", "media_type", "is_anime"}
+
+// operationGoal is the goal a Save space or Shrink job was submitted with, as
+// the job's inputs hold it. It is nil for any other job.
+func operationGoal(r operationRecord) map[string]any {
+	if r.inst.ActionName != "transcode_media" {
+		return nil
+	}
+	if mode := operationString(r.inputs["mode"]); mode != "size" && mode != "compact" {
+		return nil
+	}
+	goal := map[string]any{}
+	for _, key := range operationGoalKeys {
+		if value, ok := r.inputs[key]; ok && value != nil {
+			goal[key] = value
+		}
+	}
+	return goal
+}
+
 // operationSizeMode summarises what mode=size decided for one file: the
 // sampled output estimate, the final quality measurement and the audio
 // tracks it compacted. It is nil for every other mode.
@@ -791,6 +814,10 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 				job["tracks_message"] = operationString(tracks["message"])
 				if selectedID != "" {
 					job["tracks"] = tracks
+					// What Choose tracks needs to run the same goal again.
+					if goal := operationGoal(r); goal != nil {
+						job["goal"] = goal
+					}
 				}
 			}
 			root := roots[r.inst.ID]

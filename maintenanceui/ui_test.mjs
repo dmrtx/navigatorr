@@ -5313,7 +5313,7 @@ test("the picker lists the file's tracks, checked as the server's rules keep the
   const first = el("keep-audio-list").children[0].children[0];
   assert.equal(first.children[1].children[0].textContent, "English");
   assert.equal(first.children[1].children[1].textContent, "E-AC-3 · 5.1 · Surround");
-  assert.deepEqual(first.children.slice(2).map((badge) => badge.textContent), ["Original", "Default"]);
+  assert.deepEqual(first.children[2].children.map((badge) => badge.textContent), ["Original", "Default"]);
   assert.equal(el("keep-audio-list").children[2].children[0].children[1].children[0].textContent, "Untagged");
   assert.deepEqual(inputs(), {}, "the automatic choice sends no stream lists");
   assert.deepEqual(inputs(false), {});
@@ -5499,6 +5499,7 @@ function trackReportFixture(overrides = {}) {
     status: "completed",
     mode: "size",
     source_path: "/media/Show/Episode 1.mkv",
+    candidate_ready: true,
     tracks_message: "Kept 3 of 4 audio tracks (eng, und, jpn) and 2 of 3 subtitles; dropping the rest saves about 700.0 MB",
     tracks: {
       audio: {
@@ -5603,6 +5604,8 @@ test("Choose tracks is offered in the details of a finished file that kept untag
   assert.ok(!labels(job, false).includes("Choose tracks"), "queue rows carry no track lists");
   for (const change of [
     { replaced: true },
+    { candidate_ready: false },
+    { candidate_ready: undefined },
     { replacement_action_id: "replacement" },
     { status: "running" },
     { mode: "quality" },
@@ -5671,6 +5674,136 @@ test("the markup carries the languages editor and the picker inside the forms th
   assert.doesNotMatch(picker, /<form\b/);
   assert.ok(form.indexOf('<fieldset id="processing-goal"') < form.indexOf('<details id="keep-tracks"'), "the choice follows the goal");
   assert.match(css, /\.track-list\s*\{[^}]*overflow-y:\s*auto/);
+});
+
+test("Choose tracks starts the new job with the earlier job's goal, size limit, encoder and library", async () => {
+  const { h } = submissionHarness({ radios: true });
+  const sent = [];
+  h.context.capture = (_tool, args) => { sent.push(JSON.parse(args.inputs)); return { id: "submitted" }; };
+  h.run('tool = async (...args) => capture(...args); $("technical").checked = false; $("path").value = ""; state.folderSelected = new Set(); state.selected.clear(); keepLanguages.status = "ready"; keepLanguages.saved = ["eng"];');
+  const choose = async (job) => {
+    h.context.job = job;
+    await h.run("jobControls(job, true)").children.find((b) => b.textContent === "Choose tracks").listeners.get("click")();
+  };
+  // Shrink to 720p for a series episode: the height has no control in the form, so it is carried.
+  await choose(trackReportFixture({ mode: "compact", goal: { mode: "compact", max_height: 720, media_type: "tv", is_anime: true }, replacement_context: { service: "sonarr", series_id: 7, source: "job_inputs" } }));
+  assert.equal(h.run("processingMode()"), "compact");
+  assert.equal(h.run("state.fileService"), "sonarr");
+  assert.equal(h.run("state.fileMedia.id"), 7);
+  await h.run('buildAndSubmitJob("encode")');
+  assert.equal(sent[0].mode, "compact");
+  assert.equal(sent[0].max_height, 720);
+  assert.equal(sent[0].path, "/media/Show/Episode 1.mkv");
+  assert.equal(sent[0].media_type, "tv");
+  assert.equal(sent[0].is_anime, true);
+  assert.deepEqual(plain(sent[0].library_context), { service: "sonarr", id: 7 });
+  assert.deepEqual(sent[0].keep_languages, ["eng", "jpn", "spa"], "the languages the earlier job used");
+  assert.equal(h.run("state.goalCarry"), null, "what was carried is used once");
+  // Save space with the media engine off and a limit like the other episodes.
+  await choose(trackReportFixture({ goal: { mode: "size", allow_hardware: false, allow_slow_preset: true, size_budget_source: "siblings", size_budget_sibling_multiplier: 1.8 }, replacement_context: { service: "filesystem", source: "parent_batch" } }));
+  assert.equal(h.run("state.fileMedia"), null, "a folder library has no series to attach");
+  await h.run('buildAndSubmitJob("encode")');
+  assert.equal(sent[1].mode, "size");
+  assert.equal(sent[1].allow_hardware, false);
+  assert.equal(sent[1].allow_slow_preset, true);
+  assert.equal(sent[1].size_budget_source, "siblings");
+  assert.equal(sent[1].size_budget_sibling_multiplier, 1.8);
+  assert.equal("max_height" in sent[1], false);
+  assert.equal("library_context" in sent[1], false);
+  // A budget in bytes and the media engine on.
+  await choose(trackReportFixture({ goal: { mode: "size", size_budget_bytes: 1500000000 } }));
+  await h.run('buildAndSubmitJob("encode")');
+  assert.equal(sent[2].allow_hardware, true);
+  assert.equal(sent[2].size_budget_bytes, 1500000000);
+  // The carried settings belong to that goal: choosing another one sends none of them.
+  await choose(trackReportFixture({ mode: "compact", goal: { mode: "compact", max_height: 720 } }));
+  h.run('processingMode = () => "size"');
+  await h.run('buildAndSubmitJob("encode")');
+  assert.equal(sent[3].mode, "size");
+  assert.equal("max_height" in sent[3], false);
+  // And an ordinary open of the form carries nothing.
+  await choose(trackReportFixture({ mode: "compact", goal: { mode: "compact", max_height: 720 } }));
+  h.run('openGoalForm("/media/plain.mkv")');
+  assert.equal(h.run("state.goalCarry"), null);
+  assert.equal(h.run("state.fileMedia"), null);
+});
+
+test("a file without audio takes subtitle picks alone", async () => {
+  const { h, el, open, boxes, inputs } = keepHarness();
+  h.context.tracks = { ...keepFixture(), audio: [] };
+  await open();
+  assert.equal(el("keep-audio").hidden, true);
+  assert.deepEqual(boxes("audio"), []);
+  assert.equal(el("keep-tracks-status").textContent, "Keeping 2 of 3 subtitles.");
+  h.run('toggleTrack("subtitles", 6, true)');
+  assert.deepEqual(inputs(), { keep_subtitle_streams: [5, 6, 7] }, "an empty audio list would be refused");
+  h.run('toggleTrack("subtitles", 6, false)');
+  assert.deepEqual(inputs(), {});
+});
+
+test("saving the list in Settings resets hand picks only where the form follows the saved list", async () => {
+  const { h, open } = keepHarness();
+  await open();
+  const changed = { languages: ["eng", "fra"], default: ["eng", "jpn", "spa"] };
+  // This job's own languages do not depend on the saved list.
+  h.run('setKeepScope("job")');
+  await h.run("loadKeepTracks(keepTracks.key, keepTracks.seq)");
+  h.run('toggleTrack("audio", 4, false)');
+  const key = h.run("keepTracks.key");
+  h.context.changed = changed;
+  h.run("applyKeepLanguages(changed, true)");
+  assert.deepEqual(plain(h.run("keepLanguages.saved")), ["eng", "fra"]);
+  assert.equal(h.run("keepTracks.key"), key);
+  assert.deepEqual(plain(h.run("[...keepTracks.picks.audio]")), [1, 3]);
+  // Every track neither.
+  h.run('setKeepScope("all")');
+  await h.run("loadKeepTracks(keepTracks.key, keepTracks.seq)");
+  h.run('toggleTrack("audio", 4, false)');
+  h.context.changed = { languages: ["eng"], default: [] };
+  h.run("applyKeepLanguages(changed, true)");
+  assert.notEqual(h.run("keepTracks.picks"), null);
+  // The saved list does: the boxes follow it again.
+  h.run('setKeepScope("saved")');
+  await h.run("loadKeepTracks(keepTracks.key, keepTracks.seq)");
+  h.run('toggleTrack("audio", 4, false)');
+  assert.notEqual(h.run("keepTracks.picks"), null);
+  h.context.changed = { languages: ["eng", "spa"], default: [] };
+  h.run("applyKeepLanguages(changed, true)");
+  assert.equal(h.run("keepTracks.picks"), null);
+  assert.equal(h.run("keepTracks.status"), "loading");
+  assert.equal(h.run("keepTracks.notice"), "The boxes follow the languages again.");
+});
+
+test("one file takes one source slot at a time: its tracks are read after its profile", async () => {
+  const { h, open } = keepHarness();
+  h.context.timers = [];
+  h.context.setTimeout = (fn) => { h.context.timers.push(fn); return h.context.timers.length; };
+  h.context.profile = goalProfileFixture();
+  h.run('var reads = []; api = async (path) => { reads.push(path.split("?")[0]); return path.startsWith("source-tracks") ? tracks : profile; };');
+  // Opening the file starts the profile read; the tracks wait for it.
+  h.run("refreshGoalProfile(); refreshKeepTracks();");
+  assert.equal(h.run("state.goalProfile.status"), "loading");
+  assert.equal(h.run("keepTracks.status"), "loading");
+  const profileTimer = h.context.timers.length;
+  assert.equal(profileTimer, 1, "only the profile read is scheduled");
+  // Changing the languages meanwhile does not start a second read.
+  h.run('setKeepScope("job")');
+  assert.equal(h.context.timers.length, profileTimer);
+  await h.run('loadGoalProfile("/media/movie.mkv")');
+  assert.deepEqual(plain(h.run("reads")), ["source-profile"]);
+  assert.equal(h.context.timers.length, profileTimer + 1, "the profile is in; now the tracks are scheduled");
+  await h.context.timers.at(-1)();
+  assert.deepEqual(plain(h.run("reads")), ["source-profile", "source-tracks"]);
+  assert.equal(h.run("keepTracks.status"), "ready");
+  // With the profile already read, a language change reads the tracks at once.
+  h.run('keepTracks.languages = ["eng"]; refreshKeepTracks();');
+  assert.equal(h.context.timers.length, profileTimer + 2);
+  // A failed profile read does not hold the tracks back either.
+  h.run('$("path").value = "/media/next.mkv"; api = async (path) => { if (!path.startsWith("source-tracks")) throw new Error("no"); return tracks; }; refreshGoalProfile(); refreshKeepTracks();');
+  const before = h.context.timers.length;
+  await h.run('loadGoalProfile("/media/next.mkv")');
+  assert.equal(h.run("state.goalProfile.status"), "error");
+  assert.equal(h.context.timers.length, before + 1);
 });
 
 // The palette and dark-mode contrast checks run with the rest of the UI tests.
