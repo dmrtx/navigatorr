@@ -265,10 +265,12 @@ func (e *Engine) candidateWorkerStopped(ctx context.Context, ec *ExecutionContex
 	}
 	const wait = "the worker job may still be writing; cancel it or wait"
 	jobID := getString(ec.State, "job_id")
-	if e.deps.Transcode == nil {
+	if !e.workersConfigured() {
 		return fmt.Errorf("%s (no transcode worker is configured to confirm job %s stopped)", wait, jobID)
 	}
-	st, err := e.deps.Transcode.Status(ctx, jobID)
+	// Only the job's own worker can say it stopped: another worker answering
+	// not_found says nothing about it.
+	st, err := e.actionWorker(ec).Status(ctx, jobID)
 	if err != nil {
 		if workerJobUnknown(err) {
 			return nil

@@ -46,7 +46,7 @@ func (e *Engine) registerPodcastTemplate() {
 	})
 }
 func (e *Engine) podcastPreflight(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
-	if e.deps.Config == nil || e.deps.Fs == nil || e.deps.Transcode == nil {
+	if e.deps.Config == nil || e.deps.Fs == nil || !e.workersConfigured() {
 		return StepResult{}, fmt.Errorf("podcast requires filesystem, config and worker")
 	}
 	c := e.deps.Config.Podcasts
@@ -71,7 +71,7 @@ func (e *Engine) podcastPreflight(ctx context.Context, ec *ExecutionContext) (St
 	if _, err := os.Lstat(output); !os.IsNotExist(err) {
 		return StepResult{}, fmt.Errorf("output already exists or cannot be inspected")
 	}
-	caps, err := e.deps.Transcode.Capabilities(ctx)
+	caps, err := e.actionWorker(ec).Capabilities(ctx)
 	if err != nil {
 		if isRetryableWorkerPollError(err) {
 			return StepResult{Status: StepWaitingExternal, WaitingCondition: "worker_reconciling", WaitingReason: "Waiting for podcast capabilities"}, nil
@@ -79,7 +79,7 @@ func (e *Engine) podcastPreflight(ctx context.Context, ec *ExecutionContext) (St
 		return StepResult{}, err
 	}
 	if policy.KnownAdsFirstPass {
-		if _, ok := e.deps.Transcode.(transcode.PodcastAdExecutor); !ok || caps.Podcast == nil || caps.Podcast.AdAlgorithm != podcast.AdAlgorithm {
+		if _, ok := e.actionWorker(ec).(transcode.PodcastAdExecutor); !ok || caps.Podcast == nil || caps.Podcast.AdAlgorithm != podcast.AdAlgorithm {
 			return StepResult{}, fmt.Errorf("worker does not support the configured known-ad first pass")
 		}
 	}
@@ -206,7 +206,7 @@ func (e *Engine) podcastWorkerStage(ctx context.Context, ec *ExecutionContext, o
 			return StepResult{}, err
 		}
 	}
-	st, err := e.deps.Transcode.Status(ctx, id)
+	st, err := e.actionWorker(ec).Status(ctx, id)
 	if err != nil {
 		// Only a definitive 404 permits submission. Uncertain transport must
 		// reconcile the persisted identity before any new remote side effect.
@@ -280,7 +280,7 @@ func (e *Engine) podcastWorkerStage(ctx context.Context, ec *ExecutionContext, o
 		if err := e.persistExecutionState(ctx, ec); err != nil {
 			return StepResult{}, err
 		}
-		_, err = e.deps.Transcode.Submit(ctx, req)
+		_, err = e.actionWorker(ec).Submit(ctx, req)
 		if err != nil && !isRetryableWorkerPollError(err) {
 			return StepResult{}, err
 		}

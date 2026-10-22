@@ -433,7 +433,7 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 			}
 
 			if inst, err := engine.Deps().Store.GetActionInstance(id); err == nil && action.RetryRequiresWorker(inst) {
-				if err := engine.CheckWorkerAdmission(ctx); err != nil {
+				if err := engine.CheckInstanceWorkerAdmission(ctx, inst); err != nil {
 					return toolErr("action_retry blocked: %v", err), nil
 				}
 			}
@@ -492,7 +492,7 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 			}
 
 			if inst, err := engine.Deps().Store.GetActionInstance(id); err == nil && action.ResumeRequiresWorker(inst, decision) {
-				if err := engine.CheckWorkerAdmission(ctx); err != nil {
+				if err := engine.CheckInstanceWorkerAdmission(ctx, inst); err != nil {
 					return toolErr("action_resume blocked: %v", err), nil
 				}
 			}

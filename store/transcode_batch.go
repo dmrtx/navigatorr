@@ -20,11 +20,13 @@ type TranscodeBatchItem struct {
 	Status        string   `json:"status"` // queued, skip, review, waiting_for_slot, waiting_decision, running, completed, failed
 	ChildActionID string   `json:"child_action_id"`
 	JobID         string   `json:"job_id"`
-	CandidatePath string   `json:"candidate_path"`
-	Error         string   `json:"error"`
-	Attempts      int      `json:"attempts"`
-	CreatedAt     string   `json:"created_at"`
-	UpdatedAt     string   `json:"updated_at"`
+	// Worker is the worker the child action was assigned, once it has one.
+	Worker        string `json:"worker,omitempty"`
+	CandidatePath string `json:"candidate_path"`
+	Error         string `json:"error"`
+	Attempts      int    `json:"attempts"`
+	CreatedAt     string `json:"created_at"`
+	UpdatedAt     string `json:"updated_at"`
 }
 
 // CreateTranscodeBatchItem inserts a new batch item record into the database.
@@ -47,11 +49,11 @@ func (s *Store) CreateTranscodeBatchItem(item TranscodeBatchItem) error {
 
 	_, err := s.db.Exec(`INSERT INTO transcode_batch_items (
 		batch_id, item_key, file_path, display_label, episode_info,
-		decision, profile, reasons_json, status, child_action_id, job_id,
+		decision, profile, reasons_json, status, child_action_id, job_id, worker,
 		candidate_path, error, attempts, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		item.BatchID, item.ItemKey, item.FilePath, item.DisplayLabel, item.EpisodeInfo,
-		item.Decision, item.Profile, string(reasonsJSON), item.Status, item.ChildActionID, item.JobID,
+		item.Decision, item.Profile, string(reasonsJSON), item.Status, item.ChildActionID, item.JobID, item.Worker,
 		item.CandidatePath, item.Error, item.Attempts, item.CreatedAt, item.UpdatedAt)
 	return err
 }
@@ -73,11 +75,11 @@ func (s *Store) UpdateTranscodeBatchItem(item TranscodeBatchItem) error {
 
 	_, err := s.db.Exec(`UPDATE transcode_batch_items SET
 		file_path = ?, display_label = ?, episode_info = ?, decision = ?,
-		profile = ?, reasons_json = ?, status = ?, child_action_id = ?, job_id = ?,
+		profile = ?, reasons_json = ?, status = ?, child_action_id = ?, job_id = ?, worker = ?,
 		candidate_path = ?, error = ?, attempts = ?, updated_at = ?
 		WHERE batch_id = ? AND item_key = ?`,
 		item.FilePath, item.DisplayLabel, item.EpisodeInfo, item.Decision,
-		item.Profile, string(reasonsJSON), item.Status, item.ChildActionID, item.JobID,
+		item.Profile, string(reasonsJSON), item.Status, item.ChildActionID, item.JobID, item.Worker,
 		item.CandidatePath, item.Error, item.Attempts, item.UpdatedAt,
 		item.BatchID, item.ItemKey)
 	return err
@@ -91,13 +93,13 @@ func (s *Store) GetTranscodeBatchItem(batchID, itemKey string) (*TranscodeBatchI
 	var item TranscodeBatchItem
 	var reasonsJSON string
 	err := s.db.QueryRow(`SELECT id, batch_id, item_key, file_path, display_label,
-		episode_info, decision, profile, reasons_json, status, child_action_id, job_id,
+		episode_info, decision, profile, reasons_json, status, child_action_id, job_id, worker,
 		candidate_path, error, attempts, created_at, updated_at
 		FROM transcode_batch_items WHERE batch_id = ? AND item_key = ?`,
 		batchID, itemKey).Scan(
 		&item.ID, &item.BatchID, &item.ItemKey, &item.FilePath, &item.DisplayLabel,
 		&item.EpisodeInfo, &item.Decision, &item.Profile, &reasonsJSON, &item.Status,
-		&item.ChildActionID, &item.JobID, &item.CandidatePath, &item.Error, &item.Attempts,
+		&item.ChildActionID, &item.JobID, &item.Worker, &item.CandidatePath, &item.Error, &item.Attempts,
 		&item.CreatedAt, &item.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -115,7 +117,7 @@ func (s *Store) ListTranscodeBatchItems(batchID string) ([]TranscodeBatchItem, e
 	defer s.mu.Unlock()
 
 	rows, err := s.db.Query(`SELECT id, batch_id, item_key, file_path, display_label,
-		episode_info, decision, profile, reasons_json, status, child_action_id, job_id,
+		episode_info, decision, profile, reasons_json, status, child_action_id, job_id, worker,
 		candidate_path, error, attempts, created_at, updated_at
 		FROM transcode_batch_items WHERE batch_id = ? ORDER BY id ASC`, batchID)
 	if err != nil {
@@ -136,7 +138,7 @@ func (s *Store) FindTranscodeBatchItemByChildActionID(childActionID string) (*Tr
 	defer s.mu.Unlock()
 	return s.findTranscodeBatchItemLocked(
 		`SELECT id, batch_id, item_key, file_path, display_label,
-			episode_info, decision, profile, reasons_json, status, child_action_id, job_id,
+			episode_info, decision, profile, reasons_json, status, child_action_id, job_id, worker,
 			candidate_path, error, attempts, created_at, updated_at
 			FROM transcode_batch_items WHERE child_action_id = ? LIMIT 2`, childActionID)
 }
@@ -153,7 +155,7 @@ func (s *Store) FindTranscodeBatchItemByChildKey(childKey string) (*TranscodeBat
 	defer s.mu.Unlock()
 	return s.findTranscodeBatchItemLocked(
 		`SELECT id, batch_id, item_key, file_path, display_label,
-			episode_info, decision, profile, reasons_json, status, child_action_id, job_id,
+			episode_info, decision, profile, reasons_json, status, child_action_id, job_id, worker,
 			candidate_path, error, attempts, created_at, updated_at
 			FROM transcode_batch_items
 			WHERE ? = 'batch-' || batch_id || '-' || item_key LIMIT 2`, childKey)
@@ -186,7 +188,7 @@ func scanTranscodeBatchItems(rows *sql.Rows) ([]TranscodeBatchItem, error) {
 		if err := rows.Scan(
 			&item.ID, &item.BatchID, &item.ItemKey, &item.FilePath, &item.DisplayLabel,
 			&item.EpisodeInfo, &item.Decision, &item.Profile, &reasonsJSON, &item.Status,
-			&item.ChildActionID, &item.JobID, &item.CandidatePath, &item.Error, &item.Attempts,
+			&item.ChildActionID, &item.JobID, &item.Worker, &item.CandidatePath, &item.Error, &item.Attempts,
 			&item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}

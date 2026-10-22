@@ -274,7 +274,8 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// HTTPExecutor keeps the worker token server-side and bounds the log tail.
-	httpExec, ok := s.engine.Deps().Transcode.(*httpclient.HTTPExecutor)
+	// The log is on the job's own worker.
+	httpExec, ok := s.engine.ActionWorkerExecutor(state).(*httpclient.HTTPExecutor)
 	if !ok {
 		fail(w, 404, "worker logs require the HTTP executor")
 		return

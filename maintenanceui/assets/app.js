@@ -871,7 +871,7 @@ function renderWorkers() {
   $("worker-submit-status").textContent = !serverReachable ? "Server disconnected. New jobs are blocked."
     : !info ? "Checking video worker before submitting…"
     : info.ready ? "Video worker connected. Connection is checked again before submitting."
-    : info.nodes?.[0]?.message || "Video worker offline or not ready. New jobs are blocked.";
+    : info.message || info.nodes?.[0]?.message || "Video worker offline or not ready. New jobs are blocked.";
   renderWorkerDetails($("worker-nodes"), info);
   renderWorkerDetails($("settings-worker"), info);
   $("activity-scheduler").textContent = schedulerSummary(info);
@@ -4966,11 +4966,51 @@ function renderSlotUsage(activity) {
     $("slot-video").max = $("slot-podcast").max = Math.max(1, slots.ceiling - 1);
   }
 }
+// The slot settings are per node: with several workers, Settings edits the
+// node picked there.
+function workerSlotsPath() {
+  return state.slotNode ? `worker-slots?node=${encodeURIComponent(state.slotNode)}` : "worker-slots";
+}
+// The node Settings edits. With several nodes it is always named, so a save
+// goes to the node shown: the one picked, else the first that reports. A
+// picked node that stops reporting stays picked, its editors hidden, rather
+// than Settings moving to another node under an open edit.
+function settingsNode(nodes, live) {
+  if (nodes.length < 2) return live[0];
+  if (!nodes.some(n => n.name === state.slotNode)) state.slotNode = live[0].name;
+  return nodes.find(n => n.name === state.slotNode);
+}
+function renderNodePicker(nodes, selected) {
+  const pick = $("settings-node-pick");
+  $("settings-node-pick-label").hidden = nodes.length < 2;
+  $("settings-node-title").textContent = nodes.length < 2 ? "Transcode node" : `Transcode node · ${selected.name}`;
+  if (nodes.length < 2) return;
+  const labels = nodes.map(n => n.available && n.activity ? n.name : `${n.name} (unavailable)`);
+  if ([...pick.options].map(o => o.textContent).join() !== labels.join()) pick.replaceChildren(...nodes.map((n, i) => { const option = node("option", labels[i]); option.value = n.name; return option; }));
+  pick.value = selected.name;
+}
+// A picked node that does not report: its settings cannot be read or saved.
+function renderUnavailableNode(selected) {
+  state.workerSlots = null;
+  state.slotFormDirty = state.parallelFormDirty = false;
+  $("settings-node").hidden = false;
+  $("worker-parallel-summary").hidden = true;
+  $("worker-parallel-form").hidden = true;
+  $("worker-slot-split").hidden = true;
+  $("worker-slot-usage").hidden = true;
+  $("worker-parallel-limit").textContent = `${selected.name} is unavailable. Its settings can be changed once it reports again.`;
+}
+$("settings-node-pick").addEventListener("change", () => {
+  state.slotNode = $("settings-node-pick").value;
+  state.slotFormDirty = state.parallelFormDirty = false;
+  $("worker-parallel-note").textContent = $("worker-slot-note").textContent = "";
+  renderWorkerActivity(state.activityData);
+});
 async function saveWorkerSlots(video, podcast) {
   const note = $("worker-slot-note");
   note.textContent = "Saving…";
   try {
-    const result = await api("worker-slots", {video_slots: video, podcast_slots: podcast});
+    const result = await api(workerSlotsPath(), {video_slots: video, podcast_slots: podcast});
     state.slotFormDirty = false;
     const parts = [result.applied ? (video ? "Applied. Takes effect as the next job starts." : "Slots are shared again.") : (result.message || "Saved. The worker has not confirmed yet.")];
     for (const warning of result.warnings || []) parts.push(warning);
@@ -5017,7 +5057,7 @@ async function saveParallelJobs(ceiling) {
   note.textContent = "Saving…";
   try {
     const split = slots?.split ? {video_slots: slots.video.total, podcast_slots: slots.podcast.total} : {video_slots: 0, podcast_slots: 0};
-    const result = await api("worker-slots", {...split, ceiling});
+    const result = await api(workerSlotsPath(), {...split, ceiling});
     state.parallelFormDirty = false;
     const parts = [result.applied ? "Applied. Takes effect as the next job starts; running jobs are never interrupted." : (result.message || "Saved. The worker has not confirmed yet.")];
     for (const warning of result.warnings || []) parts.push(warning);
@@ -5040,9 +5080,16 @@ $("worker-open-settings").addEventListener("click", () => {
   // The page changes under the keyboard: land on the section that was asked for.
   $("settings-node-title").focus({preventScroll: false});
 });
+// Each worker's activity; a server from before workers had names reports one.
+function activityNodes(data) {
+  if (!data) return [];
+  return data.workers || [{name: "", available: data.available, activity: data.activity, message: data.message}];
+}
 function renderWorkerActivity(data) {
+  state.activityData = data;
   $("worker-slots").replaceChildren();
-  if (!serverReachable || !data?.available) {
+  const nodes = activityNodes(data), live = nodes.filter(n => n.available && n.activity);
+  if (!serverReachable || !data?.available || !live.length) {
     $("worker-capacity").textContent = "Worker slots · Unknown";
     $("activity-checked").textContent = "";
     $("worker-slot-usage").hidden = true;
@@ -5052,19 +5099,43 @@ function renderWorkerActivity(data) {
     $("worker-slots").append(node("p",data?.message || "Worker disconnected; slot occupancy is unknown.","metadata"));
     return;
   }
-  const activity = data.activity;
-  $("worker-capacity").textContent = `Worker slots · ${activity.worker_slots_used}/${activity.worker_slots_total} occupied`;
+  const used = live.reduce((sum, n) => sum + n.activity.worker_slots_used, 0);
+  const total = live.reduce((sum, n) => sum + n.activity.worker_slots_total, 0);
+  const missing = nodes.length - live.length;
+  $("worker-capacity").textContent = `Worker slots · ${used}/${total} occupied${missing ? ` · ${missing} of ${nodes.length} nodes unavailable` : ""}`;
   $("activity-checked").textContent = "Updated now · Job reservations";
-  renderParallelJobs(activity);
-  renderSlotUsage(activity);
+  const selected = settingsNode(nodes, live);
+  renderNodePicker(nodes, selected);
+  if (selected.available && selected.activity) {
+    renderParallelJobs(selected.activity);
+    renderSlotUsage(selected.activity);
+  } else {
+    renderUnavailableNode(selected);
+  }
+  // With several nodes each one's split shows under its own heading.
+  if (nodes.length > 1) $("worker-slot-usage").hidden = true;
   // Activity only reports; the editors live in Settings.
   $("worker-open-settings").hidden = $("worker-parallel-form").hidden && $("worker-slot-split").hidden;
+  for (const n of nodes) {
+    if (nodes.length > 1) {
+      const slots = n.activity?.slots;
+      const heading = !n.available || !n.activity ? `${n.name} · ${n.message || "Unavailable"}`
+        : `${n.name} · ${n.activity.worker_slots_used}/${n.activity.worker_slots_total} occupied${slots?.split ? ` · Video ${slots.video.used}/${slots.video.total} · Podcast ${slots.podcast.used}/${slots.podcast.total}` : ""}`;
+      $("worker-slots").append(node("p", heading, "worker-node-heading"));
+    }
+    if (n.available && n.activity) renderSlotGrid(n.activity, n.name);
+  }
+}
+// One node's slots. Each node keeps its own slot positions.
+function renderSlotGrid(activity, name) {
   const jobs = activity.jobs || [];
   const pools = slotPools(activity);
   const shown = Math.min(16, pools.total);
   // Keep a live reservation in the same visual slot as other jobs finish.
   // Slot labels describe this node's reservations, not physical CPU cores.
-  const assigned = state.activitySlotIDs ||= new Map();
+  const byNode = state.activitySlotIDs ||= new Map();
+  if (!byNode.has(name)) byNode.set(name, new Map());
+  const assigned = byNode.get(name);
   const live = new Set(jobs.map(job => job.id));
   for (const [id,slot] of assigned) if (!live.has(id) || slot >= pools.total) assigned.delete(id);
   for (const job of jobs) if (!assigned.has(job.id)) {
@@ -5526,6 +5597,8 @@ function renderDetailRows(job) {
   if (job.source_path) paths.append(node("p", job.source_path, "metadata"));
   const location = job.promotion?.new_path || job.promotion?.original_path;
   if (location) paths.append(node("p", `Library: ${location.slice(0, location.lastIndexOf("/"))}`, "metadata"));
+  // With several workers, say which one runs (or ran) the job.
+  if (job.worker && (state.workerInfo?.nodes?.length || 0) > 1) paths.append(node("p", `Worker: ${job.worker}`, "metadata"));
   showDetailRow("path", paths.children.length > 0);
   // The log opens itself for a failure no step explains; opening loads it.
   const explained = stages.some(stage => ["failed", "rejected"].includes(stage.status));

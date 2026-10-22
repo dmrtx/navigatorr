@@ -353,7 +353,7 @@ func (e *Engine) preparePodcastRetry(ctx context.Context, ec *ExecutionContext) 
 	if id == "" {
 		return nil
 	}
-	st, err := e.deps.Transcode.Status(ctx, id)
+	st, err := e.actionWorker(ec).Status(ctx, id)
 	if err != nil {
 		// A rejected submission can leave a durable coordinator identity with
 		// no worker job. A definitive 404 lets the stage resubmit that SAME

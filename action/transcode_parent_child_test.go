@@ -633,7 +633,7 @@ func TestUncertain404AfterConcurrentCancelNoResubmit(t *testing.T) {
 			return transcode.JobStatus{}, &httpclient.HTTPError{Method: "GET", URL: "/v1/jobs/" + jobID, StatusCode: 404, Message: "not found"}
 		},
 	}
-	eA.deps.Transcode = mock
+	eA.deps.Workers = transcode.SingleWorker(mock)
 
 	ec := childECFor("edge-child", "edge-parent", state)
 	res, err := eA.stepTranscodeSubmit(context.Background(), ec)

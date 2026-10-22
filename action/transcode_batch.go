@@ -568,10 +568,10 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 						continue
 					}
 				}
-			} else if it.JobID != "" && e.deps.Transcode != nil {
+			} else if it.JobID != "" && e.workersConfigured() {
 				// Partial-persistence fallback: stop a known worker job even when
 				// the child action relation was not saved.
-				if cerr := e.cancelTranscodeJobConfirmed(ctx, it.JobID); cerr != nil {
+				if cerr := e.cancelTranscodeJobConfirmed(ctx, e.executorFor(it.Worker), it.JobID); cerr != nil {
 					cancelErrors = append(cancelErrors, fmt.Sprintf("%s job %s: %v", it.ItemKey, it.JobID, cerr))
 					continue
 				}
@@ -685,11 +685,14 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 		if it.ChildActionID != "" {
 			existingChild, err := e.deps.Store.GetActionInstance(it.ChildActionID)
 			if err == nil && existingChild != nil {
-				if it.JobID == "" {
+				if it.JobID == "" || it.Worker == "" {
 					var state map[string]any
 					_ = json.Unmarshal([]byte(existingChild.StateJSON), &state)
-					if j := getString(state, "job_id"); j != "" {
+					if j := getString(state, "job_id"); j != "" && it.JobID == "" {
 						it.JobID = j
+					}
+					if it.Worker == "" {
+						it.Worker = assignedWorker(state)
 					}
 				}
 
@@ -766,13 +769,9 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 			}
 		}
 	}
-	// The worker's video pool, capped by transcode.max_parallel_jobs when set
-	// (see batch_fanout.go).
-	maxParallel := e.batchMaxParallel(ctx)
-
 	// PR3 note: the worker now owns an authoritative durable queue
 	// (transcode submits persist as queued instead of returning "worker busy"),
-	// so this loop's maxParallel gating is LOCAL action fan-out throttling
+	// so this loop's slot gating is LOCAL action fan-out throttling
 	// only (bounding concurrent child-action execution engine-side) and must
 	// not be confused with remote-capacity admission. No remote-capacity probe
 	// is performed here; "worker busy" handling below is retained solely for
@@ -824,7 +823,9 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 			break
 		}
 
-		availableSlots := maxParallel - activeCount
+		// The free video slots across the workers, capped by
+		// transcode.max_parallel_jobs when set (see batch_fanout.go).
+		availableSlots := e.batchAvailableSlots(ctx, items, activeCount)
 		if availableSlots <= 0 {
 			break
 		}
@@ -1208,6 +1209,18 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 	}
 	if jobID != "" {
 		item.JobID = jobID
+	}
+	// The item records its child's worker, so the batch can cancel the job on
+	// it even without the child.
+	if item.Worker == "" && childRes != nil {
+		item.Worker = getString(childRes.Outputs, workerStateKey)
+	}
+	if item.Worker == "" && item.ChildActionID != "" {
+		if inst, _ := e.deps.Store.GetActionInstance(item.ChildActionID); inst != nil {
+			var state map[string]any
+			_ = json.Unmarshal([]byte(inst.StateJSON), &state)
+			item.Worker = assignedWorker(state)
+		}
 	}
 
 	isWorkerBusy := false

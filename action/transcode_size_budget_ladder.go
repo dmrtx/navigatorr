@@ -117,7 +117,7 @@ func (e *Engine) startSizeBudgetLadder(ctx context.Context, ec *ExecutionContext
 	if policy.Validate() != nil {
 		return StepResult{Status: StepFailed, Error: "frozen size budget is invalid (fail closed)"}, true
 	}
-	caps, err := e.deps.Transcode.Capabilities(ctx)
+	caps, err := e.actionWorker(ec).Capabilities(ctx)
 	if err != nil {
 		return workerCapabilityLookupResult(err, "size budget VideoToolbox"), true
 	}
@@ -186,6 +186,7 @@ func (e *Engine) startSizeBudgetLadder(ctx context.Context, ec *ExecutionContext
 	rec := newSizeBudgetRecord(snapshot, rep, original, budget, siblings, enc)
 	rec.Trigger = sizeBudgetTriggerBudgetFirst
 	rec.Rung = 0
+	rec.Worker = assignedWorker(ec.State)
 	switch {
 	case hardware:
 		rec.Choice = &SizeBudgetChoice{VideoCodec: transcode.VideoCodecHEVCVideoToolbox, Reason: SizeBudgetChoiceLadder,

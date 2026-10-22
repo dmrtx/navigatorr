@@ -15,7 +15,7 @@ import (
 // A new identity is allocated only after the worker confirms a terminal failure,
 // otherwise an idempotent Submit would just return the same failed job forever.
 func (e *Engine) prepareRemoteRetry(ctx context.Context, inst *store.ActionInstance, ec *ExecutionContext, tmpl ActionTemplate, resume int) (int, error) {
-	if e.deps.Transcode == nil || inst.ActionName != "transcode_media" {
+	if !e.workersConfigured() || inst.ActionName != "transcode_media" {
 		return resume, nil
 	}
 	if jobID := getString(ec.State, "job_id"); jobID != "" && !getBool(ec.State, "transcode_done") {
@@ -24,7 +24,7 @@ func (e *Engine) prepareRemoteRetry(ctx context.Context, inst *store.ActionInsta
 			return resume, nil
 		}
 		e.recordWorkerPoll(ec)
-		st, err := e.deps.Transcode.Status(ctx, jobID)
+		st, err := e.actionWorker(ec).Status(ctx, jobID)
 		if err != nil {
 			if isRetryableWorkerPollError(err) {
 				ec.State["transcode_reconcile"] = true

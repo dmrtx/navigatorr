@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jakenesler/navigatorr/store"
@@ -75,24 +77,99 @@ func ResumeRequiresWorker(inst *store.ActionInstance, decision string) bool {
 	return true
 }
 
-// CheckWorkerAdmission is shared by external adapters. A lost connection after
-// admission is still handled by durable reconciliation, not by duplicating jobs.
+// CheckWorkerAdmission is shared by external adapters: it passes when any
+// worker could take a new job. A lost connection after admission is still
+// handled by durable reconciliation, not by duplicating jobs.
 func (e *Engine) CheckWorkerAdmission(ctx context.Context) error {
-	if e.deps.Transcode == nil {
+	return e.checkAdmissionAmong(ctx, e.deps.Workers.All())
+}
+
+// CheckWorkerAdmissionFor is the admission of a new action: podcast work
+// needs the podcast worker, anything else any worker.
+func (e *Engine) CheckWorkerAdmissionFor(ctx context.Context, actionName string) error {
+	if actionName == "clean_podcast_ads" {
+		if w, ok := e.deps.Workers.Podcast(); ok {
+			return e.checkAdmissionAmong(ctx, []transcode.NamedWorker{w})
+		}
+	}
+	return e.CheckWorkerAdmission(ctx)
+}
+
+// CheckInstanceWorkerAdmission is the admission of an existing action going
+// on: an action assigned a worker needs that worker, which its jobs never
+// leave; any other the admission of a new action of its kind.
+func (e *Engine) CheckInstanceWorkerAdmission(ctx context.Context, inst *store.ActionInstance) error {
+	if inst == nil {
+		return e.CheckWorkerAdmission(ctx)
+	}
+	var state map[string]any
+	_ = json.Unmarshal([]byte(inst.StateJSON), &state)
+	name := e.instanceWorker(state)
+	if name == "" {
+		return e.CheckWorkerAdmissionFor(ctx, inst.ActionName)
+	}
+	w, ok := e.deps.Workers.Get(name)
+	if !ok {
+		return &WorkerAdmissionError{Message: fmt.Sprintf("this job's worker %q is not configured on this server; nothing was sent", name)}
+	}
+	return e.checkAdmissionAmong(ctx, []transcode.NamedWorker{w})
+}
+
+// checkAdmissionAmong passes when any of the workers passes. They are checked
+// at once, so an offline worker never delays the others. When none passes, the
+// error is a connected worker's when there is one: its checks are what to fix.
+func (e *Engine) checkAdmissionAmong(ctx context.Context, workers []transcode.NamedWorker) error {
+	if len(workers) == 0 {
 		return &WorkerAdmissionError{Message: "video worker is not configured; no job was submitted"}
 	}
+	errs := make([]error, len(workers))
+	var wg sync.WaitGroup
+	for i, w := range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = checkWorkerAdmission(ctx, w.Executor)
+		}()
+	}
+	wg.Wait()
+	var chosen error
+	chosenConnected := false
+	for i, err := range errs {
+		if err == nil {
+			return nil
+		}
+		connected := false
+		var admission *WorkerAdmissionError
+		if errors.As(err, &admission) {
+			connected = admission.Connected
+			// With several workers, say which one refused.
+			if e.deps.Workers.Len() > 1 {
+				named := *admission
+				named.Message = fmt.Sprintf("worker %s: %s", workers[i].Name, admission.Message)
+				err = &named
+			}
+		}
+		if chosen == nil || (connected && !chosenConnected) {
+			chosen, chosenConnected = err, connected
+		}
+	}
+	return chosen
+}
+
+// checkWorkerAdmission checks one worker: ready, then its deep checks.
+func checkWorkerAdmission(ctx context.Context, exec transcode.Executor) error {
 	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
 	defer cancel()
 	var err error
-	if worker, ok := e.deps.Transcode.(transcode.AvailabilityExecutor); ok {
+	if worker, ok := exec.(transcode.AvailabilityExecutor); ok {
 		err = worker.Ready(ctx)
 	} else {
-		_, err = e.deps.Transcode.Capabilities(ctx)
+		_, err = exec.Capabilities(ctx)
 	}
 	if err != nil {
 		return &WorkerAdmissionError{Message: "video worker is offline or not ready; no job was submitted"}
 	}
-	if err := e.deps.Transcode.Doctor(ctx); err != nil {
+	if err := exec.Doctor(ctx); err != nil {
 		message := "video worker is connected but its checks failed; no job was submitted"
 		if text := strings.ToLower(err.Error()); strings.Contains(text, "root") || strings.Contains(text, "smb") || strings.Contains(text, "storage") {
 			message = "video worker is connected but cannot access its media storage; no job was submitted"

@@ -105,7 +105,7 @@ func (e *Engine) podcastReuseTranscript(ctx context.Context, ec *ExecutionContex
 		return StepResult{}, fmt.Errorf("cached transcript source, language or digest differs")
 	}
 	jobID := getString(ec.Inputs, "cached_asr_job_id")
-	st, err := e.deps.Transcode.Status(ctx, jobID)
+	st, err := e.actionWorker(ec).Status(ctx, jobID)
 	if err != nil {
 		if isRetryableWorkerPollError(err) {
 			return StepResult{Status: StepWaitingExternal, WaitingCondition: "worker_reconciling", WaitingReason: "Verifying existing ASR checkpoint; transcription will not be repeated", Outputs: ec.State}, nil

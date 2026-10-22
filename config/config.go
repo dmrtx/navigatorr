@@ -167,8 +167,12 @@ type TranscodeConfig struct {
 	// HTTP configures the dark/non-default persistent-daemon transport.
 	// Canonical key is `http` (consistent with `ssh`); `worker_http` is
 	// accepted as an alias and merged (explicit `http` wins).
-	HTTP          HTTPExecutorConfig                `yaml:"http"`
-	WorkerHTTP    HTTPExecutorConfig                `yaml:"worker_http"`
+	HTTP       HTTPExecutorConfig `yaml:"http"`
+	WorkerHTTP HTTPExecutorConfig `yaml:"worker_http"`
+	// Workers lists the transcode workers by name. The `http` block above is
+	// the one-worker form of it, named video-worker; a config uses one form
+	// or the other. A name is the durable identity of the worker's jobs.
+	Workers       []TranscodeWorkerConfig           `yaml:"workers"`
 	Recipes       TranscodeRecipeConfig             `yaml:"recipes"`
 	Profiles      map[string]TranscodeProfileConfig `yaml:"profiles"`
 	recipeManager *recipe.Manager                   `yaml:"-"`
@@ -602,14 +606,10 @@ func (t *TranscodeConfig) Validate() error {
 	if err := t.validateRecipeSource(); err != nil {
 		return err
 	}
-	if strings.EqualFold(strings.TrimSpace(t.Executor), "http") {
-		if err := t.EffectiveHTTPConfig().ValidateHTTPConfig(); err != nil {
-			return err
-		}
-	} else if hc := t.EffectiveHTTPConfig(); strings.TrimSpace(hc.BaseURL) != "" {
-		// A configured-but-dormant http block must still be well-formed so
-		// enabling it later cannot surprise production.
-		if err := hc.ValidateHTTPConfig(); err != nil {
+	// A configured-but-dormant worker list must still be well-formed so
+	// enabling it later cannot surprise production.
+	if strings.EqualFold(strings.TrimSpace(t.Executor), "http") || len(t.Workers) > 0 || strings.TrimSpace(t.EffectiveHTTPConfig().BaseURL) != "" {
+		if _, err := t.EffectiveWorkers(); err != nil {
 			return err
 		}
 	}
@@ -713,26 +713,103 @@ func (h HTTPExecutorConfig) SubmitTimeoutDuration() time.Duration {
 	return 60 * time.Second
 }
 
-// BuildHTTPExecutorConfig maps the effective http/worker_http block onto
-// the httpclient.HTTPConfig used by NewHTTPExecutor. It is the single
+// TranscodeWorkerConfig is one named worker in `transcode.workers`.
+type TranscodeWorkerConfig struct {
+	Name               string `yaml:"name"`
+	HTTPExecutorConfig `yaml:",inline"`
+	// MaxParallelJobs caps the video jobs the server assigns this worker at
+	// once; 0 follows the worker's own video pool.
+	MaxParallelJobs int `yaml:"max_parallel_jobs"`
+	// Podcast marks the one worker that runs podcast work and keeps the ad
+	// catalog. Without it on any worker, the first one does.
+	Podcast bool `yaml:"podcast"`
+}
+
+// EffectiveWorkers is the configured worker list: `workers`, or the single
+// `http`/`worker_http` block as one worker named video-worker. Setting both
+// forms is an error, as is a malformed worker.
+func (t *TranscodeConfig) EffectiveWorkers() ([]TranscodeWorkerConfig, error) {
+	legacy := t.EffectiveHTTPConfig()
+	var workers []TranscodeWorkerConfig
+	switch {
+	case len(t.Workers) > 0 && strings.TrimSpace(legacy.BaseURL) != "":
+		return nil, fmt.Errorf("transcode: set either transcode.workers or transcode.http, not both")
+	case len(t.Workers) > 0:
+		workers = append(workers, t.Workers...)
+	default:
+		workers = []TranscodeWorkerConfig{{Name: transcode.DefaultWorkerName, HTTPExecutorConfig: legacy, Podcast: true}}
+	}
+	seen := make(map[string]bool, len(workers))
+	urls := make(map[string]string, len(workers))
+	podcast := 0
+	for i := range workers {
+		w := &workers[i]
+		w.Name = strings.TrimSpace(w.Name)
+		if !transcode.ValidWorkerName(w.Name) {
+			return nil, fmt.Errorf("transcode workers: invalid worker name %q (lowercase letters, digits and dashes)", w.Name)
+		}
+		if seen[w.Name] {
+			return nil, fmt.Errorf("transcode workers: worker name %q is used twice", w.Name)
+		}
+		seen[w.Name] = true
+		if err := w.ValidateHTTPConfig(); err != nil {
+			return nil, fmt.Errorf("transcode worker %q: %w", w.Name, err)
+		}
+		base := strings.TrimRight(strings.TrimSpace(w.BaseURL), "/")
+		if other, ok := urls[base]; ok {
+			return nil, fmt.Errorf("transcode workers: %q and %q have the same base_url", other, w.Name)
+		}
+		urls[base] = w.Name
+		if w.MaxParallelJobs < 0 {
+			return nil, fmt.Errorf("transcode worker %q: max_parallel_jobs must not be negative", w.Name)
+		}
+		if w.Podcast {
+			podcast++
+		}
+	}
+	switch podcast {
+	case 0:
+		workers[0].Podcast = true
+	case 1:
+	default:
+		return nil, fmt.Errorf("transcode workers: only one worker may set podcast, %d do", podcast)
+	}
+	return workers, nil
+}
+
+// WorkerExecutorConfig is one worker's executor settings, built by
+// BuildWorkerConfigs.
+type WorkerExecutorConfig struct {
+	Name            string
+	HTTP            httpclient.HTTPConfig
+	Podcast         bool
+	MaxParallelJobs int
+}
+
+// BuildWorkerConfigs maps the effective worker list onto the
+// httpclient.HTTPConfig each worker's executor is built from. It is the single
 // construction site shared by production wiring (main.go) and tests.
-func (t *TranscodeConfig) BuildHTTPExecutorConfig() (httpclient.HTTPConfig, error) {
-	hc := t.EffectiveHTTPConfig()
-	if err := hc.ValidateHTTPConfig(); err != nil {
-		return httpclient.HTTPConfig{}, err
+func (t *TranscodeConfig) BuildWorkerConfigs() ([]WorkerExecutorConfig, error) {
+	workers, err := t.EffectiveWorkers()
+	if err != nil {
+		return nil, err
 	}
-	mappings := make([]transcode.PathMapping, len(hc.PathMappings))
-	for i, m := range hc.PathMappings {
-		mappings[i] = transcode.PathMapping{Local: m.GetLocal(), Remote: m.GetRemote()}
+	out := make([]WorkerExecutorConfig, len(workers))
+	for i, w := range workers {
+		mappings := make([]transcode.PathMapping, len(w.PathMappings))
+		for j, m := range w.PathMappings {
+			mappings[j] = transcode.PathMapping{Local: m.GetLocal(), Remote: m.GetRemote()}
+		}
+		out[i] = WorkerExecutorConfig{Name: w.Name, Podcast: w.Podcast, MaxParallelJobs: w.MaxParallelJobs, HTTP: httpclient.HTTPConfig{
+			BaseURL:        strings.TrimSpace(w.BaseURL),
+			Token:          strings.TrimSpace(w.Token),
+			TokenFile:      strings.TrimSpace(w.TokenFile),
+			RequestTimeout: w.RequestTimeoutDuration(),
+			SubmitTimeout:  w.SubmitTimeoutDuration(),
+			PathMappings:   mappings,
+		}}
 	}
-	return httpclient.HTTPConfig{
-		BaseURL:        strings.TrimSpace(hc.BaseURL),
-		Token:          strings.TrimSpace(hc.Token),
-		TokenFile:      strings.TrimSpace(hc.TokenFile),
-		RequestTimeout: hc.RequestTimeoutDuration(),
-		SubmitTimeout:  hc.SubmitTimeoutDuration(),
-		PathMappings:   mappings,
-	}, nil
+	return out, nil
 }
 
 // ValidateHTTPConfig fail-closes on malformed daemon configuration. It is

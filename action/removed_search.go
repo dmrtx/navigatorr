@@ -89,7 +89,7 @@ func (e *Engine) stepPlanEncode(ctx context.Context, ec *ExecutionContext) (Step
 	if getString(ec.Inputs, "mode") == "" || getBool(ec.State, "skip_transcode") {
 		return StepResult{Status: StepSkipped}, nil
 	}
-	if e.deps.Transcode == nil {
+	if !e.workersConfigured() {
 		return StepResult{Status: StepFailed, Error: "transcode executor is disabled or not configured in navigatorr"}, nil
 	}
 	if getString(ec.State, "original_sha256") == "" {

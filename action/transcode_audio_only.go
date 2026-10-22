@@ -142,10 +142,10 @@ func (e *Engine) sizeAudioOnlyFallback(ctx context.Context, ec *ExecutionContext
 	if len(video) != 1 {
 		return skip("unsupported_source")
 	}
-	if e.deps.Transcode == nil {
+	if !e.workersConfigured() {
 		return StepResult{Status: StepFailed, Error: "transcode executor is disabled or not configured in navigatorr"}, true
 	}
-	caps, err := e.deps.Transcode.Capabilities(ctx)
+	caps, err := e.actionWorker(ec).Capabilities(ctx)
 	if err != nil {
 		return workerCapabilityLookupResult(err, "size audio-only"), true
 	}

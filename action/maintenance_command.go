@@ -34,7 +34,7 @@ func (e *Engine) applyMaintenanceCommand(ctx context.Context, ec *ExecutionConte
 		return StepResult{Status: StepFailed, Error: err.Error()}, nil
 	}
 	if (kind == "retry" && RetryRequiresWorker(inst)) || kind == "resume" && ResumeRequiresWorker(inst, getString(ec.Inputs, "decision")) || kind == "candidate" && getString(ec.Inputs, "decision") == "accept_loss" || kind == "reconfigure" {
-		if err := e.CheckWorkerAdmission(ctx); err != nil {
+		if err := e.CheckInstanceWorkerAdmission(ctx, inst); err != nil {
 			return StepResult{Status: StepFailed, Error: err.Error()}, nil
 		}
 	}

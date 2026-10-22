@@ -3,37 +3,104 @@ package action
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/jakenesler/navigatorr/transcode"
 )
 
-// WorkerObservation is shared by UI and MCP. A short cache collapses concurrent
-// screen/tool reads into one observation; admission remains independently live.
+// WorkerObservation is shared by UI and MCP. Every worker is observed at once,
+// each with its own short cache, so an offline worker never delays the others
+// and concurrent screen/tool reads collapse into one observation per worker;
+// admission remains independently live. The result summarises the workers and
+// lists each one.
 func (e *Engine) WorkerObservation(ctx context.Context) transcode.WorkerObservation {
+	workers := e.deps.Workers.All()
+	if len(workers) == 0 {
+		return transcode.WorkerObservation{SchedulerObservation: transcode.SchedulerObservation{Health: "unknown", Stale: true}, CheckedAt: time.Now().UTC(), Message: "Configure a video worker before submitting jobs."}
+	}
+	list := make([]transcode.WorkerObservation, len(workers))
+	var wg sync.WaitGroup
+	for i, w := range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			list[i] = e.workerObservation(ctx, w)
+		}()
+	}
+	wg.Wait()
+	if len(list) == 1 {
+		out := list[0]
+		out.Workers = list
+		return out
+	}
+	return summariseWorkerObservations(list)
+}
+
+// summariseWorkerObservations is the summary of several workers: reachable and
+// ready when any worker is, healthy when every worker is.
+func summariseWorkerObservations(list []transcode.WorkerObservation) transcode.WorkerObservation {
+	out := transcode.WorkerObservation{Configured: true, CheckedAt: time.Now().UTC(), Workers: list}
+	health := "ok"
+	var ready, notReady []string
+	for _, w := range list {
+		out.Reachable = out.Reachable || w.Reachable
+		if w.Ready {
+			ready = append(ready, w.Name)
+		} else {
+			notReady = append(notReady, w.Name)
+		}
+		switch {
+		case w.Health == "degraded":
+			health = "degraded"
+		case w.Health != "ok" && health == "ok":
+			health = "unknown"
+		}
+	}
+	out.Ready = len(ready) > 0
+	out.Health = health
+	out.Stale = health == "unknown"
+	switch {
+	case len(notReady) == 0:
+		out.Message = fmt.Sprintf("All %d workers are connected and ready.", len(list))
+	case out.Ready:
+		out.Message = fmt.Sprintf("%d of %d workers ready; not ready: %s. Their jobs wait for them.", len(ready), len(list), strings.Join(notReady, ", "))
+	default:
+		out.Message = "No worker is ready. New jobs are blocked."
+		for _, w := range list {
+			if w.AdmissionNote != "" {
+				out.AdmissionNote = w.AdmissionNote
+				break
+			}
+		}
+	}
+	return out
+}
+
+// workerObservation observes one worker, at most every five seconds.
+func (e *Engine) workerObservation(ctx context.Context, w transcode.NamedWorker) transcode.WorkerObservation {
 	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
 	defer cancel()
-	for !e.workerObservationMu.TryLock() {
+	st := e.workerStateFor(w.Name)
+	for !st.obsMu.TryLock() {
 		select {
 		case <-ctx.Done():
-			return transcode.WorkerObservation{SchedulerObservation: transcode.SchedulerObservation{Health: "unknown", Stale: true}, CheckedAt: time.Now().UTC(), Message: "Worker observation unavailable."}
+			return transcode.WorkerObservation{SchedulerObservation: transcode.SchedulerObservation{Health: "unknown", Stale: true}, Name: w.Name, Podcast: w.Podcast, Configured: true, CheckedAt: time.Now().UTC(), Message: "Worker observation unavailable."}
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
-	defer e.workerObservationMu.Unlock()
+	defer st.obsMu.Unlock()
 	now := time.Now().UTC()
-	if !e.workerObservation.CheckedAt.IsZero() && now.Sub(e.workerObservation.CheckedAt) < 5*time.Second {
-		out := e.workerObservation
+	if !st.obs.CheckedAt.IsZero() && now.Sub(st.obs.CheckedAt) < 5*time.Second {
+		out := st.obs
 		out.SchedulerObservation = transcode.NormalizeSchedulerObservation(out.SchedulerObservation, now)
 		return out
 	}
-	out := transcode.WorkerObservation{SchedulerObservation: transcode.SchedulerObservation{Health: "unknown", Stale: true}, Configured: e.deps.Transcode != nil, CheckedAt: now, Message: "Configure a video worker before submitting jobs."}
-	if !out.Configured {
-		e.workerObservation = out
-		return out
-	}
+	out := transcode.WorkerObservation{SchedulerObservation: transcode.SchedulerObservation{Health: "unknown", Stale: true}, Name: w.Name, Podcast: w.Podcast, Configured: true, CheckedAt: now}
 
-	if worker, ok := e.deps.Transcode.(interface {
+	if worker, ok := w.Executor.(interface {
 		Scheduler(context.Context) (transcode.SchedulerObservation, error)
 	}); ok {
 		observation, err := worker.Scheduler(ctx)
@@ -41,10 +108,10 @@ func (e *Engine) WorkerObservation(ctx context.Context) transcode.WorkerObservat
 			out.Reachable = true
 			out.SchedulerObservation = transcode.NormalizeSchedulerObservation(observation, time.Now().UTC())
 		}
-	} else if worker, ok := e.deps.Transcode.(transcode.AvailabilityExecutor); ok {
+	} else if worker, ok := w.Executor.(transcode.AvailabilityExecutor); ok {
 		out.Reachable = worker.Health(ctx) == nil
 	}
-	if err := e.CheckWorkerAdmission(ctx); err == nil {
+	if err := checkWorkerAdmission(ctx, w.Executor); err == nil {
 		out.Ready = true
 		out.Reachable = true
 		out.Message = "Connected. Media storage and encoder checks passed."
@@ -61,8 +128,8 @@ func (e *Engine) WorkerObservation(ctx context.Context) transcode.WorkerObservat
 		}
 	}
 	if !out.Reachable {
-		if !e.workerObservation.ObservedAt.IsZero() {
-			out.SchedulerObservation = e.workerObservation.SchedulerObservation
+		if !st.obs.ObservedAt.IsZero() {
+			out.SchedulerObservation = st.obs.SchedulerObservation
 		}
 		out.Health = "unknown"
 		out.Stale = true
@@ -71,6 +138,6 @@ func (e *Engine) WorkerObservation(ctx context.Context) transcode.WorkerObservat
 		out.Message = "Worker reachable; scheduler is degraded. See sweep diagnostics."
 	}
 	out.CheckedAt = time.Now().UTC()
-	e.workerObservation = out
+	st.obs = out
 	return out
 }

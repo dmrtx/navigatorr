@@ -58,11 +58,16 @@ type Server struct {
 	// probe and classify replace ffprobe in tests; nil uses the real ones.
 	probe    func(ctx context.Context, ffprobe, path string) (mediainspect.DetailedReport, error)
 	classify action.SourceClassifier
+	// slotSync is the last slot push to each worker, by worker name.
 	slotSync struct {
-		mu   sync.Mutex
-		last time.Time
-		err  string
+		mu    sync.Mutex
+		nodes map[string]*slotSyncState
 	}
+}
+
+type slotSyncState struct {
+	last time.Time
+	err  string
 }
 
 func New(cfg *config.Config, registry *arrservice.Registry, engine *action.Engine, mcpServer *server.MCPServer) (*Server, error) {
@@ -392,7 +397,7 @@ func (s *Server) tool(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if action.RequiresWorker(name) && !body.Background {
-			if err := s.engine.CheckWorkerAdmission(r.Context()); err != nil {
+			if err := s.engine.CheckWorkerAdmissionFor(r.Context(), name); err != nil {
 				fail(w, http.StatusConflict, err.Error())
 				return
 			}

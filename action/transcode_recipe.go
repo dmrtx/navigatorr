@@ -224,6 +224,9 @@ type QualityLadderRecord struct {
 	// RetryWithoutHardware is set when every VideoToolbox rung missed the
 	// quality limits: the file may be run again with the media engine off.
 	RetryWithoutHardware bool `json:"retry_without_hardware,omitempty"`
+	// Worker is the worker the ladder was planned for. Empty on records from
+	// before workers had names.
+	Worker string `json:"worker,omitempty"`
 }
 
 // ladderRecipe is the ladder the record runs: the frozen recipe, or its
@@ -347,7 +350,7 @@ func (e *Engine) startQualityLadder(ctx context.Context, ec *ExecutionContext, c
 		return StepResult{}, false
 	}
 	r := snapshot.Recipe
-	caps, err := e.deps.Transcode.Capabilities(ctx)
+	caps, err := e.actionWorker(ec).Capabilities(ctx)
 	if err != nil {
 		return workerCapabilityLookupResult(err, "goal encoder"), true
 	}
@@ -385,7 +388,7 @@ func (e *Engine) startQualityLadder(ctx context.Context, ec *ExecutionContext, c
 	if err != nil {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("building the first encode of the goal: %v", err)}, true
 	}
-	rec := &QualityLadderRecord{VideoCodec: r.VideoCodec, Preset: r.Preset, Values: slices.Clone(r.QualityValues), Outcome: QualityLadderEncoding, Choice: choice}
+	rec := &QualityLadderRecord{VideoCodec: r.VideoCodec, Preset: r.Preset, Values: slices.Clone(r.QualityValues), Outcome: QualityLadderEncoding, Choice: choice, Worker: assignedWorker(ec.State)}
 	rec.Message = qualityLadderStartMessage(rec)
 	if choice != nil {
 		rec.Message = choice.Message + " " + rec.Message

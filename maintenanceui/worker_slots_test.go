@@ -116,7 +116,7 @@ func TestWorkerSlotsSaveStoresAndPushes(t *testing.T) {
 	if worker.split.VideoSlots != 2 || worker.split.PodcastSlots != 1 {
 		t.Fatalf("worker not pushed: %+v", worker.split)
 	}
-	row, err := s.engine.Deps().Store.GetWorkerSlotSettings(videoWorkerNode)
+	row, err := s.engine.Deps().Store.GetWorkerSlotSettings(transcode.DefaultWorkerName)
 	if err != nil || row == nil || row.VideoSlots != 2 || row.Revision != 1 {
 		t.Fatalf("not stored: %+v %v", row, err)
 	}
@@ -147,7 +147,7 @@ func TestWorkerSlotsRejectInvalidSplitsWithoutStoringThem(t *testing.T) {
 	if worker.puts != 0 {
 		t.Fatal("an invalid split reached the worker")
 	}
-	if row, _ := s.engine.Deps().Store.GetWorkerSlotSettings(videoWorkerNode); row != nil {
+	if row, _ := s.engine.Deps().Store.GetWorkerSlotSettings(transcode.DefaultWorkerName); row != nil {
 		t.Fatal("an invalid split was stored", row)
 	}
 	// The worker's own refusal (a stricter or newer worker) is a 400 too.
@@ -155,7 +155,7 @@ func TestWorkerSlotsRejectInvalidSplitsWithoutStoringThem(t *testing.T) {
 	if w := request(h, "POST", "/api/maintenance/worker-slots", `{"video_slots":1,"podcast_slots":1}`, true); w.Code != 400 {
 		t.Fatal("worker refusal", w.Code, w.Body.String())
 	}
-	if row, _ := s.engine.Deps().Store.GetWorkerSlotSettings(videoWorkerNode); row != nil && !row.Shared() {
+	if row, _ := s.engine.Deps().Store.GetWorkerSlotSettings(transcode.DefaultWorkerName); row != nil && !row.Shared() {
 		t.Fatal("a split the worker refused stays stored and would be re-pushed", row)
 	}
 	// A refusal restores the split that was in force, not just clears.
@@ -165,7 +165,7 @@ func TestWorkerSlotsRejectInvalidSplitsWithoutStoringThem(t *testing.T) {
 	}
 	worker.putErr = &httpclient.SlotSplitRejectedError{Message: "refused by worker"}
 	request(h, "POST", "/api/maintenance/worker-slots", `{"video_slots":2,"podcast_slots":1}`, true)
-	if row, _ := s.engine.Deps().Store.GetWorkerSlotSettings(videoWorkerNode); row == nil || row.VideoSlots != 1 || row.PodcastSlots != 1 {
+	if row, _ := s.engine.Deps().Store.GetWorkerSlotSettings(transcode.DefaultWorkerName); row == nil || row.VideoSlots != 1 || row.PodcastSlots != 1 {
 		t.Fatal("the previous split was not restored", row)
 	}
 }
@@ -197,7 +197,7 @@ func TestWorkerSlotsSaveWhenPushFailsIsRetried(t *testing.T) {
 	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &out) != nil || out["applied"] != false {
 		t.Fatal("a saved-but-unpushed split must say so", w.Code, w.Body.String())
 	}
-	if row, _ := s.engine.Deps().Store.GetWorkerSlotSettings(videoWorkerNode); row == nil || row.VideoSlots != 2 {
+	if row, _ := s.engine.Deps().Store.GetWorkerSlotSettings(transcode.DefaultWorkerName); row == nil || row.VideoSlots != 2 {
 		t.Fatal("the split must be stored even when the worker is away", row)
 	}
 	if got := slotsGet(t, h); got["applied"] != false || got["sync_error"] == nil {
@@ -207,10 +207,10 @@ func TestWorkerSlotsSaveWhenPushFailsIsRetried(t *testing.T) {
 	// activity poll re-applies the stored split.
 	worker.putErr = nil
 	s.slotSync.mu.Lock()
-	s.slotSync.last = time.Now().Add(-time.Minute)
+	s.slotSyncStateLocked(transcode.DefaultWorkerName).last = time.Now().Add(-time.Minute)
 	s.slotSync.mu.Unlock()
 	observed := worker.slots()
-	s.syncWorkerSlots(context.Background(), &observed)
+	s.syncWorkerSlots(context.Background(), defaultNode(s), &observed)
 	if worker.split.VideoSlots != 2 || worker.split.PodcastSlots != 1 {
 		t.Fatalf("stored split not re-applied: %+v", worker.split)
 	}
@@ -223,17 +223,17 @@ func TestWorkerSlotsSyncIsRateLimitedAndLeavesUnconfiguredNodesAlone(t *testing.
 	worker := &fakeSlotWorker{ceiling: 3, cpus: 10}
 	s, _ := slotUI(t, worker)
 	observed := worker.slots()
-	s.syncWorkerSlots(context.Background(), &observed)
+	s.syncWorkerSlots(context.Background(), defaultNode(s), &observed)
 	if worker.puts != 0 {
 		t.Fatal("a node nobody configured must not be pushed to")
 	}
-	if _, err := s.engine.Deps().Store.SetWorkerSlotSettings(videoWorkerNode, 2, 1, 0); err != nil {
+	if _, err := s.engine.Deps().Store.SetWorkerSlotSettings(transcode.DefaultWorkerName, 2, 1, 0); err != nil {
 		t.Fatal(err)
 	}
 	worker.putErr = errors.New("down")
-	s.syncWorkerSlots(context.Background(), &observed)
-	s.syncWorkerSlots(context.Background(), &observed)
-	s.syncWorkerSlots(context.Background(), &observed)
+	s.syncWorkerSlots(context.Background(), defaultNode(s), &observed)
+	s.syncWorkerSlots(context.Background(), defaultNode(s), &observed)
+	s.syncWorkerSlots(context.Background(), defaultNode(s), &observed)
 	if worker.puts != 1 {
 		t.Fatalf("polling must not hammer a failing worker: %d pushes", worker.puts)
 	}
@@ -241,10 +241,10 @@ func TestWorkerSlotsSyncIsRateLimitedAndLeavesUnconfiguredNodesAlone(t *testing.
 	worker.split = transcode.SlotSplit{VideoSlots: 2, PodcastSlots: 1}
 	worker.putErr = nil
 	s.slotSync.mu.Lock()
-	s.slotSync.last = time.Time{}
+	s.slotSyncStateLocked(transcode.DefaultWorkerName).last = time.Time{}
 	s.slotSync.mu.Unlock()
 	matching := worker.slots()
-	s.syncWorkerSlots(context.Background(), &matching)
+	s.syncWorkerSlots(context.Background(), defaultNode(s), &matching)
 	if worker.puts != 1 {
 		t.Fatal("an in-sync worker was pushed again")
 	}
@@ -270,16 +270,16 @@ func TestWorkerSlotsRefusalOnUnconfiguredNodeLeavesItUnconfigured(t *testing.T) 
 	if w := request(h, "POST", "/api/maintenance/worker-slots", `{"video_slots":3,"podcast_slots":1}`, true); w.Code != 400 {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	if row, _ := s.engine.Deps().Store.GetWorkerSlotSettings(videoWorkerNode); row != nil {
+	if row, _ := s.engine.Deps().Store.GetWorkerSlotSettings(transcode.DefaultWorkerName); row != nil {
 		t.Fatalf("the refused save left a row behind: %+v", row)
 	}
 	worker.putErr = nil
 	s.slotSync.mu.Lock()
-	s.slotSync.last = time.Time{}
+	s.slotSyncStateLocked(transcode.DefaultWorkerName).last = time.Time{}
 	s.slotSync.mu.Unlock()
 	observed := worker.slots()
 	pushes := worker.puts
-	s.syncWorkerSlots(context.Background(), &observed)
+	s.syncWorkerSlots(context.Background(), defaultNode(s), &observed)
 	if worker.puts != pushes || worker.split.VideoSlots != 2 || worker.split.PodcastSlots != 2 {
 		t.Fatalf("the resync changed a split nobody stored: pushes %d, worker %+v", worker.puts-pushes, worker.split)
 	}
@@ -299,7 +299,7 @@ func TestWorkerSlotsCeilingIsStoredAndPushed(t *testing.T) {
 	if worker.slots().Ceiling != 3 || worker.lastPush.Ceiling != 3 {
 		t.Fatalf("worker not pushed: %+v", worker.lastPush)
 	}
-	row, _ := s.engine.Deps().Store.GetWorkerSlotSettings(videoWorkerNode)
+	row, _ := s.engine.Deps().Store.GetWorkerSlotSettings(transcode.DefaultWorkerName)
 	if row == nil || row.Ceiling != 3 || !row.Shared() {
 		t.Fatalf("not stored: %+v", row)
 	}
@@ -310,7 +310,7 @@ func TestWorkerSlotsCeilingIsStoredAndPushed(t *testing.T) {
 	if w := request(h, "POST", "/api/maintenance/worker-slots", `{"video_slots":2,"podcast_slots":1}`, true); w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	if row, _ := s.engine.Deps().Store.GetWorkerSlotSettings(videoWorkerNode); row.Ceiling != 3 || row.VideoSlots != 2 || worker.lastPush.Ceiling != 3 {
+	if row, _ := s.engine.Deps().Store.GetWorkerSlotSettings(transcode.DefaultWorkerName); row.Ceiling != 3 || row.VideoSlots != 2 || worker.lastPush.Ceiling != 3 {
 		t.Fatalf("split save dropped the ceiling: %+v push %+v", row, worker.lastPush)
 	}
 	// Out of range is refused and nothing changes.
@@ -323,7 +323,7 @@ func TestWorkerSlotsCeilingIsStoredAndPushed(t *testing.T) {
 	if worker.puts != pushes {
 		t.Fatal("a refused ceiling reached the worker")
 	}
-	if row, _ := s.engine.Deps().Store.GetWorkerSlotSettings(videoWorkerNode); row.Ceiling != 3 {
+	if row, _ := s.engine.Deps().Store.GetWorkerSlotSettings(transcode.DefaultWorkerName); row.Ceiling != 3 {
 		t.Fatalf("a refused ceiling was stored: %+v", row)
 	}
 }
@@ -342,7 +342,7 @@ func TestWorkerSlotsLowerCeilingResetsASplitThatNoLongerFits(t *testing.T) {
 	if warnings, _ := out["warnings"].([]any); len(warnings) == 0 || !strings.Contains(warnings[0].(string), "shared again") {
 		t.Fatalf("the reset must be explained: %v", out)
 	}
-	row, _ := s.engine.Deps().Store.GetWorkerSlotSettings(videoWorkerNode)
+	row, _ := s.engine.Deps().Store.GetWorkerSlotSettings(transcode.DefaultWorkerName)
 	if row == nil || !row.Shared() || row.Ceiling != 2 || worker.split.VideoSlots != 0 || worker.slots().Ceiling != 2 {
 		t.Fatalf("row %+v worker %+v", row, worker.slots())
 	}
@@ -364,7 +364,7 @@ func TestWorkerSlotsOldWorkerShowsTheCeilingReadOnly(t *testing.T) {
 			t.Fatalf("%s: %d %s push %+v", body, w.Code, w.Body.String(), worker.lastPush)
 		}
 	}
-	if row, _ := s.engine.Deps().Store.GetWorkerSlotSettings(videoWorkerNode); row == nil || row.VideoSlots != 1 {
+	if row, _ := s.engine.Deps().Store.GetWorkerSlotSettings(transcode.DefaultWorkerName); row == nil || row.VideoSlots != 1 {
 		t.Fatalf("row %+v", row)
 	}
 }
@@ -372,24 +372,30 @@ func TestWorkerSlotsOldWorkerShowsTheCeilingReadOnly(t *testing.T) {
 func TestWorkerSlotsSyncRestoresTheCeilingOnlyOnWorkersThatTakeIt(t *testing.T) {
 	worker := &fakeSlotWorker{ceiling: 1, cpus: 10, limit: 10}
 	s, _ := slotUI(t, worker)
-	if _, err := s.engine.Deps().Store.SetWorkerSlotSettings(videoWorkerNode, 0, 0, 3); err != nil {
+	if _, err := s.engine.Deps().Store.SetWorkerSlotSettings(transcode.DefaultWorkerName, 0, 0, 3); err != nil {
 		t.Fatal(err)
 	}
 	// The worker restarted with its state directory wiped: back to its config.
 	observed := worker.slots()
-	s.syncWorkerSlots(context.Background(), &observed)
+	s.syncWorkerSlots(context.Background(), defaultNode(s), &observed)
 	if worker.puts != 1 || worker.lastPush.Ceiling != 3 || worker.slots().Ceiling != 3 {
 		t.Fatalf("stored ceiling not restored: %+v", worker.lastPush)
 	}
 	// An older worker is compared on the split only and never pushed a ceiling.
 	old := &fakeSlotWorker{ceiling: 1, cpus: 10}
 	s2, _ := slotUI(t, old)
-	if _, err := s2.engine.Deps().Store.SetWorkerSlotSettings(videoWorkerNode, 0, 0, 3); err != nil {
+	if _, err := s2.engine.Deps().Store.SetWorkerSlotSettings(transcode.DefaultWorkerName, 0, 0, 3); err != nil {
 		t.Fatal(err)
 	}
 	observed = old.slots()
-	s2.syncWorkerSlots(context.Background(), &observed)
+	s2.syncWorkerSlots(context.Background(), defaultNode(s2), &observed)
 	if old.puts != 0 {
 		t.Fatalf("an old worker running the stored split was pushed: %+v", old.lastPush)
 	}
+}
+
+// defaultNode is the one worker of the single base_url config.
+func defaultNode(s *Server) transcode.NamedWorker {
+	w, _ := s.engine.Deps().Workers.Get(transcode.DefaultWorkerName)
+	return w
 }

@@ -33,7 +33,7 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 		cand := getString(ec.State, "candidate_path")
 		return StepResult{Status: StepCompleted, Outputs: map[string]any{"job_id": jobID, "external_reference": jobID, "candidate_path": cand, "output_path": cand, "reused": true}}, nil
 	}
-	if e.deps.Transcode == nil {
+	if !e.workersConfigured() {
 		return StepResult{Status: StepFailed, Error: "transcode executor is disabled or not configured in navigatorr"}, nil
 	}
 	if wait := getString(ec.State, "retry_not_before"); wait != "" {
@@ -85,13 +85,13 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 		return StepResult{Status: StepFailed, Error: "original integrity baseline missing (fail closed)"}, nil
 	}
 	if (plan.X265 != nil || plan.AudioMode == "he_aac") && !getBool(ec.State, "transcode_reconcile") {
-		caps, err := e.deps.Transcode.Capabilities(ctx)
+		caps, err := e.actionWorker(ec).Capabilities(ctx)
 		if err != nil || (plan.X265 != nil && !caps.X265TwoPass) || (plan.AudioMode == "he_aac" && !caps.HEAACAudio) {
 			return StepResult{Status: StepFailed, Error: "worker does not support the explicit x265/HE-AAC experiment; upgrade before encoding"}, nil
 		}
 	}
 	if plan.AudioMode == transcode.AudioModeCompactLossless && !getBool(ec.State, "transcode_reconcile") {
-		caps, err := e.deps.Transcode.Capabilities(ctx)
+		caps, err := e.actionWorker(ec).Capabilities(ctx)
 		if err != nil {
 			return StepResult{Status: StepFailed, Error: fmt.Sprintf("checking lossless audio capability: %v", err)}, nil
 		}
@@ -100,7 +100,7 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 		}
 	}
 	if transcode.IsAudioLevelMode(plan.AudioMode) && !getBool(ec.State, "transcode_reconcile") {
-		caps, err := e.deps.Transcode.Capabilities(ctx)
+		caps, err := e.actionWorker(ec).Capabilities(ctx)
 		if err != nil {
 			return StepResult{Status: StepFailed, Error: fmt.Sprintf("checking audio level capability: %v", err)}, nil
 		}
@@ -109,7 +109,7 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 		}
 	}
 	if plan.Tracks != nil && !getBool(ec.State, "transcode_reconcile") {
-		caps, err := e.deps.Transcode.Capabilities(ctx)
+		caps, err := e.actionWorker(ec).Capabilities(ctx)
 		if err != nil {
 			return StepResult{Status: StepFailed, Error: fmt.Sprintf("checking track selection capability: %v", err)}, nil
 		}
@@ -118,7 +118,7 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 		}
 	}
 	if transcode.IsSizeAudioOnlyPlan(plan) && !getBool(ec.State, "transcode_reconcile") {
-		caps, err := e.deps.Transcode.Capabilities(ctx)
+		caps, err := e.actionWorker(ec).Capabilities(ctx)
 		if err != nil {
 			return StepResult{Status: StepFailed, Error: fmt.Sprintf("checking audio-only capability: %v", err)}, nil
 		}
@@ -127,7 +127,7 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 		}
 	}
 	if plan.AudioMode == "compact" && !getBool(ec.State, "transcode_reconcile") {
-		caps, err := e.deps.Transcode.Capabilities(ctx)
+		caps, err := e.actionWorker(ec).Capabilities(ctx)
 		if err != nil {
 			return StepResult{Status: StepFailed, Error: fmt.Sprintf("checking compact audio capability: %v", err)}, nil
 		}
@@ -135,11 +135,11 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 			return StepResult{Status: StepFailed, Error: "worker does not support compact audio; upgrade the worker before encoding"}, nil
 		}
 	}
-	if origMap, _ := ec.State["original"].(map[string]any); len(mediainspect.CoverArtStreams(getStreamsList(origMap, "video"))) > 0 && !getBool(ec.State, "transcode_reconcile") && !e.workerSupportsCoverArt(ctx) {
+	if origMap, _ := ec.State["original"].(map[string]any); len(mediainspect.CoverArtStreams(getStreamsList(origMap, "video"))) > 0 && !getBool(ec.State, "transcode_reconcile") && !workerSupportsCoverArt(ctx, e.actionWorker(ec)) {
 		return StepResult{Status: StepFailed, Error: errCoverArtWorker + " before encoding"}, nil
 	}
 	if plan.Compact != nil && !getBool(ec.State, "transcode_reconcile") {
-		caps, err := e.deps.Transcode.Capabilities(ctx)
+		caps, err := e.actionWorker(ec).Capabilities(ctx)
 		if err != nil {
 			return StepResult{Status: StepFailed, Error: fmt.Sprintf("checking compact capability: %v", err)}, nil
 		}
@@ -153,7 +153,7 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 	// status query and deliberately does not take the parent admission lease.
 	if getBool(ec.State, "transcode_reconcile") {
 		e.recordWorkerPoll(ec)
-		st, serr := e.deps.Transcode.Status(ctx, jobID)
+		st, serr := e.actionWorker(ec).Status(ctx, jobID)
 		if serr != nil {
 			if isRetryableWorkerPollError(serr) {
 				return StepResult{Status: StepWaitingExternal, WaitingCondition: "worker_unreachable", WaitingReason: fmt.Sprintf("Transcode reconcile status uncertain for job %s; awaiting worker", jobID), Outputs: map[string]any{"job_id": jobID, "external_reference": jobID, "attempt": getInt(ec.State, "attempt"), "retry_count": getInt(ec.State, "retry_count")}}, nil
@@ -232,7 +232,7 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 	if !e.parentLeaseHeld(lease) {
 		return StepResult{Status: StepWaitingExternal, WaitingCondition: "parent_busy", WaitingReason: fmt.Sprintf("Parent admission lease lost before submit for job %s; deferring without resubmit", jobID), Outputs: map[string]any{"job_id": jobID, "external_reference": jobID, "candidate_path": candidatePath, "output_path": candidatePath}}, nil
 	}
-	job, err := e.deps.Transcode.Submit(actx, req)
+	job, err := e.actionWorker(ec).Submit(actx, req)
 	if err != nil {
 		if isRetryableWorkerPollError(err) {
 			ec.State["transcode_reconcile"] = true
@@ -303,6 +303,12 @@ func transcodeHTTPError(err error) (*httpclient.HTTPError, bool) {
 // older workers and non-worker responses fall back to the status.
 func isRetryableWorkerPollError(err error) bool {
 	if httpclient.IsTransportUncertain(err) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	// A job's worker missing from the config is waited on like an offline
+	// one: the job stays with it until it is configured again or cancelled.
+	var missing *transcode.WorkerNotConfiguredError
+	if errors.As(err, &missing) {
 		return true
 	}
 	if he, ok := transcodeHTTPError(err); ok {
@@ -580,11 +586,11 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 	if jobID == "" {
 		return StepResult{Status: StepFailed, Error: "no active transcode job ID to monitor"}, nil
 	}
-	if e.deps.Transcode == nil {
+	if !e.workersConfigured() {
 		return StepResult{Status: StepFailed, Error: "transcode executor is not available to monitor job"}, nil
 	}
 	e.recordWorkerPoll(ec)
-	st, err := e.deps.Transcode.Status(ctx, jobID)
+	st, err := e.actionWorker(ec).Status(ctx, jobID)
 	if err != nil {
 		if isRetryableWorkerPollError(err) {
 			ec.State["progress_is_stale"] = true

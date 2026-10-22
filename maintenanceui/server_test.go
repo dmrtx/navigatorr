@@ -14,6 +14,7 @@ import (
 	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/tools"
+	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/httpclient"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -43,16 +44,16 @@ func testUI(t *testing.T) (*Server, http.Handler) {
 	cfg := &config.Config{Web: config.WebConfig{Enabled: true, Token: testToken}, Media: config.MediaConfig{AllowedReadRoots: []string{"/media"}}, Transcode: config.TranscodeConfig{Enabled: true, Executor: "http", HTTP: config.HTTPExecutorConfig{BaseURL: worker.URL, Token: "synthetic-worker-token"}}}
 	m := server.NewMCPServer("test", "1")
 	reg := arrservice.NewRegistry(cfg)
-	workerConfig, err := cfg.Transcode.BuildHTTPExecutorConfig()
+	workerConfigs, err := cfg.Transcode.BuildWorkerConfigs()
 	if err != nil {
 		t.Fatal(err)
 	}
-	workerExecutor, err := httpclient.NewHTTPExecutor(workerConfig)
+	workerExecutor, err := httpclient.NewHTTPExecutor(workerConfigs[0].HTTP)
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := tools.RegisterMaintenance(m, cfg, reg, nil, st, workerExecutor)
-	if _, ok := e.Deps().Transcode.(*httpclient.HTTPExecutor); !ok {
+	e := tools.RegisterMaintenance(m, cfg, reg, nil, st, transcode.SingleWorker(workerExecutor))
+	if w, ok := e.Deps().Workers.Get(transcode.DefaultWorkerName); !ok || w.Executor != workerExecutor {
 		t.Fatal("synthetic worker not configured")
 	}
 	s, err := New(cfg, reg, e, m)

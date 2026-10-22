@@ -40,7 +40,7 @@ func TestSharedWorkerObservationFreshnessAndDependencyRecovery(t *testing.T) {
 		t.Fatal("old scheduler claim inferred progress", out)
 	}
 	worker.observation = transcode.SchedulerObservation{Health: "degraded", ObservedAt: now, FreshUntil: now.Add(time.Minute), LastError: &transcode.WorkerDiagnostic{Class: "storage_missing", Message: "Missing scheduler state."}}
-	engine.workerObservation.CheckedAt = now.Add(-time.Minute)
+	engine.workerStateFor(transcode.DefaultWorkerName).obs.CheckedAt = now.Add(-time.Minute)
 	out = engine.WorkerObservation(context.Background())
 	if out.Health != "degraded" || out.Stale || !out.Reachable {
 		t.Fatal(out)
@@ -51,7 +51,7 @@ func TestSharedWorkerObservationFreshnessAndDependencyRecovery(t *testing.T) {
 		t.Fatal("shared read duplicated a probe", cached)
 	}
 	worker.offline = true
-	engine.workerObservation.CheckedAt = now.Add(-time.Minute)
+	engine.workerStateFor(transcode.DefaultWorkerName).obs.CheckedAt = now.Add(-time.Minute)
 	out = engine.WorkerObservation(context.Background())
 	if out.Reachable || out.Health != "unknown" || !out.Stale || !out.ObservedAt.Equal(now) {
 		t.Fatal("outage discarded evidence or claimed scheduler stopped", out)
@@ -59,7 +59,7 @@ func TestSharedWorkerObservationFreshnessAndDependencyRecovery(t *testing.T) {
 	worker.offline = false
 	worker.observation.LastError = nil
 	worker.observation.Health = "ok"
-	engine.workerObservation.CheckedAt = now.Add(-time.Minute)
+	engine.workerStateFor(transcode.DefaultWorkerName).obs.CheckedAt = now.Add(-time.Minute)
 	out = engine.WorkerObservation(context.Background())
 	if out.Health != "ok" || out.LastError != nil {
 		t.Fatal("recovery preserved false active alert", out)
@@ -67,8 +67,8 @@ func TestSharedWorkerObservationFreshnessAndDependencyRecovery(t *testing.T) {
 }
 func TestWorkerObservationCancelledWaitIsBounded(t *testing.T) {
 	engine := NewEngine(EngineDeps{})
-	engine.workerObservationMu.Lock()
-	defer engine.workerObservationMu.Unlock()
+	engine.workerStateFor(transcode.DefaultWorkerName).obsMu.Lock()
+	defer engine.workerStateFor(transcode.DefaultWorkerName).obsMu.Unlock()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	start := time.Now()

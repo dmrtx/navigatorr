@@ -94,7 +94,7 @@ func TestDiagnosticsSlowProbeDoesNotStarveDoctor(t *testing.T) {
 	}
 
 	s := server.NewMCPServer("test", "0.0.0")
-	RegisterDiagnostics(s, cfg, reg, nil, nil, nil, nil, nil, stub)
+	RegisterDiagnostics(s, cfg, reg, nil, nil, nil, nil, nil, transcode.SingleWorker(stub))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
 	defer cancel()
@@ -130,7 +130,7 @@ func TestDiagnosticsDoctorErrorDoesNotMaskReadiness(t *testing.T) {
 	}
 
 	s := server.NewMCPServer("test", "0.0.0")
-	RegisterDiagnostics(s, &config.Config{}, nil, nil, nil, nil, nil, nil, stub)
+	RegisterDiagnostics(s, &config.Config{}, nil, nil, nil, nil, nil, nil, transcode.SingleWorker(stub))
 
 	txt := callDiagnosticsWithContext(t, s, context.Background(), map[string]any{"check_connectivity": true, "check_deep": true})
 
@@ -203,7 +203,7 @@ func TestDiagnosticsSkipsDoctorWhenConnectivityDisabled(t *testing.T) {
 	stub := &diagDoctorStub{}
 
 	s := server.NewMCPServer("test", "0.0.0")
-	RegisterDiagnostics(s, &config.Config{}, nil, nil, nil, nil, nil, nil, stub)
+	RegisterDiagnostics(s, &config.Config{}, nil, nil, nil, nil, nil, nil, transcode.SingleWorker(stub))
 
 	txt := callDiagnosticsWithContext(t, s, context.Background(), map[string]any{"check_connectivity": false})
 
