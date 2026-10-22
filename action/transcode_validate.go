@@ -249,6 +249,9 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 	ec.State["size_saved_bytes"] = saved
 	ec.State["size_saved_percent"] = pct
 	outputs := map[string]any{"result": result, "validation": validation, "candidate_path": outputPath, "output_path": outputPath, "size_saved_bytes": saved, "size_saved_percent": pct, "profile": getString(ec.State, "profile"), "recipe_version": plan.RecipeVersion, "recipe_digest": plan.RecipeDigest}
+	// Operation readers look for an output by its own key, never inside the
+	// result, so the report is an output of its own as well.
+	addTrackReport(outputs, ec.State)
 	if budget != nil {
 		result["size_budget_outcome"] = budget.Outcome
 		outputs[sizeBudgetKey] = budget

@@ -143,7 +143,8 @@ no accept-loss option. Promotion is unchanged.
 **Reporting.** A job that drops tracks reports `tracks` (kept and dropped audio
 and subtitles with index, language, title, codec and stated bytes,
 `bytes_saved`, `languages`, `manual`) and `tracks_message`, for example "Kept 4
-of 8 audio tracks (spa, spa, eng, jpn) and 6 of 32 subtitles".
+of 8 audio tracks (spa, spa, eng, jpn) and 6 of 32 subtitles". Both are outputs
+of the finished job (the validation step) and are repeated inside its `result`.
 
 ## Earlier policies
 

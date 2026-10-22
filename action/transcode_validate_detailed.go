@@ -258,7 +258,9 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 	ec.State["result"] = result
 	ec.State["size_saved_bytes"] = saved
 	ec.State["size_saved_percent"] = pct
-	return StepResult{Status: StepCompleted, Outputs: map[string]any{"result": result, "validation": validation, "candidate_path": outputPath, "output_path": outputPath, "size_saved_bytes": saved, "size_saved_percent": pct, "profile": getString(ec.State, "profile"), "recipe_version": plan.RecipeVersion, "recipe_digest": plan.RecipeDigest}}, nil
+	outputs := map[string]any{"result": result, "validation": validation, "candidate_path": outputPath, "output_path": outputPath, "size_saved_bytes": saved, "size_saved_percent": pct, "profile": getString(ec.State, "profile"), "recipe_version": plan.RecipeVersion, "recipe_digest": plan.RecipeDigest}
+	addTrackReport(outputs, ec.State)
+	return StepResult{Status: StepCompleted, Outputs: outputs}, nil
 }
 
 func expectedVideoCodec(codec string) string {

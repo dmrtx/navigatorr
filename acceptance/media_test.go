@@ -207,8 +207,18 @@ func (s *suite) tagStatistics(t *testing.T, src, dst string) {
 	info := s.probe(t, src)
 	args := []string{"-hide_banner", "-v", "error", "-y", "-i", src, "-map", "0", "-c", "copy", "-map_metadata", "-1"}
 	for i, st := range info.Streams {
-		bps := int64(float64(bytesBy[i]) * 8 / info.Format.Duration)
 		sel := fmt.Sprintf("-metadata:s:%d", i)
+		// -map_metadata -1 also drops the tags the cases are about, and an
+		// attachment without its filename cannot be written: carry them over.
+		for _, key := range []string{"language", "title", "filename", "mimetype"} {
+			if v := st.Tags[key]; v != "" && v != "und" {
+				args = append(args, sel, key+"="+v)
+			}
+		}
+		if st.CodecType == "attachment" {
+			continue
+		}
+		bps := int64(float64(bytesBy[i]) * 8 / info.Format.Duration)
 		args = append(args,
 			sel, fmt.Sprintf("BPS=%d", bps),
 			sel, fmt.Sprintf("NUMBER_OF_BYTES=%d", bytesBy[i]),

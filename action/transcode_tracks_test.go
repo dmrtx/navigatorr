@@ -3,6 +3,7 @@ package action
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -431,6 +432,74 @@ func TestSizeBudgetPlanStepUsesTheSelection(t *testing.T) {
 	delete(c.ec.State, trackSelectionKey)
 	if sizeBudgetPlanMatches(c.snapshot, c.ec.State, plan, rec) {
 		t.Fatal("the plan matched without the selection it was planned on")
+	}
+}
+
+// The size-budget flow end to end at the action level: the frozen policy
+// selects the tracks as preflight does and stores the report, the plan step
+// plans the encode on them, and the validation step of a finished candidate
+// puts the report among the outputs the operation shows. Readers of an
+// operation look a key up in its outputs and state, never inside the result, so
+// the report must be there under its own keys, and in the result too.
+func TestSizeBudgetFlowReportsTheTrackSelection(t *testing.T) {
+	c := newRecipeCase(t, map[string]any{"size_budget_bytes": 1_000_000_000.0, "allow_hardware": false}, nil)
+	rep := trackFixtureReport()
+	c.ec.State["source_report"], c.ec.State["original_size"] = rep, int64(levelSourceBytes)
+	c.ec.State["original"] = map[string]any{"size_bytes": int64(levelSourceBytes)}
+	sel, err := resolveTrackSelection(c.snapshot, rep)
+	if err != nil || sel == nil {
+		t.Fatal(sel, err)
+	}
+	// What preflight stores for the job.
+	c.ec.State[trackSelectionKey] = sel
+	c.ec.State[trackReportKey] = trackSelectionReport(c.snapshot.Tracks, sel, rep, int64(levelSourceBytes))
+	base := getPlan(c.ec.State["plan"])
+	for i, s := range rep.Subtitles {
+		base.SubtitleActions = append(base.SubtitleActions, transcode.SubtitleAction{TypeIndex: i, SourceStreamIndex: s.Index})
+	}
+	if err := applyTrackSelection(base, sel); err != nil {
+		t.Fatal(err)
+	}
+	planRecipe(t, c)
+	plan := getPlan(c.ec.State["plan"])
+	if plan == nil || getBool(c.ec.State, "skip_transcode") || plan.Tracks == nil {
+		t.Fatalf("not planned on the selection: skip=%v reason=%v", c.ec.State["skip_transcode"], c.ec.State["reason_code"])
+	}
+
+	// The worker finished: a candidate inside the budget with passing evidence.
+	candidate := filepath.Join(t.TempDir(), "candidate.mkv")
+	if err := os.WriteFile(candidate, nil, 0o600); err != nil || os.Truncate(candidate, 900_000_000) != nil {
+		t.Fatal(err)
+	}
+	c.ec.State["candidate_path"], c.ec.State["candidate_sha256"], c.ec.State["candidate_size_bytes"] = candidate, "candidate", int64(900_000_000)
+	c.ec.State["quality_evidence"] = map[string]any{"verdict": "pass", "candidate_sha256": "candidate", "plan_digest": plan.PlanDigest, "benchmark_request_digest": plan.QualityValidation.BenchmarkRequestDigest,
+		"vmaf": map[string]any{"mean": 91.0, "p5": 86.0, "worst_window_mean": 87.0, "min": 50.0}, "cambi": map[string]any{"mean": 2.0, "max": 9.0}}
+	res, err := c.engine.stepTranscodeValidate(context.Background(), c.ec)
+	if err != nil || res.Status != StepCompleted || getBool(c.ec.State, "skip_transcode") {
+		t.Fatalf("validate %+v %v state reason %v", res, err, c.ec.State["reason_code"])
+	}
+	want := trackReportOf(c.ec.State)
+	if want == nil || want.Message == "" {
+		t.Fatalf("the job stored no report: %+v", c.ec.State[trackReportKey])
+	}
+	// The way the engine keeps a step's outputs, then the way an operation is read.
+	mergeMap(c.ec.State, res.Outputs)
+	var got TrackSelectionReport
+	if !reencode(res.Outputs["tracks"], &got) || got.Message != want.Message || len(got.Audio.Kept) != 4 || len(got.Audio.Dropped) != 4 {
+		t.Fatalf("outputs[tracks] = %+v, want the report %+v", res.Outputs["tracks"], want)
+	}
+	if res.Outputs["tracks_message"] != want.Message || c.ec.State["tracks_message"] != want.Message {
+		t.Fatalf("tracks_message %v / %v, want %q", res.Outputs["tracks_message"], c.ec.State["tracks_message"], want.Message)
+	}
+	inResult, _ := res.Outputs["result"].(map[string]any)
+	if inResult["tracks"] == nil || inResult["tracks_message"] != want.Message {
+		t.Fatalf("the result lacks the report: %+v", inResult)
+	}
+	// A goal that keeps every track has no report to show.
+	plain := map[string]any{}
+	addTrackReport(plain, map[string]any{})
+	if len(plain) != 0 {
+		t.Fatalf("a report was made up: %+v", plain)
 	}
 }
 
