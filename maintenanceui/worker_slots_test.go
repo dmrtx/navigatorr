@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,23 +15,36 @@ import (
 )
 
 // fakeSlotWorker stands in for the HTTP worker: it keeps one split and can be
-// made old, unreachable or strict.
+// made old, unreachable or strict. With limit 0 it predates the ceiling
+// override and refuses a push that carries one, as an old worker refuses the
+// unknown field.
 type fakeSlotWorker struct {
 	transcode.Executor
 	ceiling, cpus  int
+	limit          int
+	override       int
 	split          transcode.SlotSplit
 	getErr, putErr error
 	puts           int
+	lastPush       transcode.SlotSplit
 }
 
 func (f *fakeSlotWorker) slots() transcode.WorkerSlots {
-	out := transcode.WorkerSlots{Ceiling: f.ceiling, HostCPUs: f.cpus, Split: !f.split.Shared()}
+	ceiling := f.ceiling
+	out := transcode.WorkerSlots{HostCPUs: f.cpus, Split: !f.split.Shared()}
+	if f.limit > 0 {
+		out.CeilingLimit, out.CeilingSource = f.limit, transcode.SlotCeilingFromConfig
+		if f.override > 0 {
+			ceiling, out.CeilingSource = f.override, transcode.SlotCeilingFromOverride
+		}
+	}
+	out.Ceiling = ceiling
 	if out.Split {
 		out.Video = transcode.SlotPool{Total: f.split.VideoSlots}
 		out.Podcast = transcode.SlotPool{Total: f.split.PodcastSlots}
 	} else {
-		out.Video = transcode.SlotPool{Total: f.ceiling}
-		out.Podcast = transcode.SlotPool{Total: f.ceiling}
+		out.Video = transcode.SlotPool{Total: ceiling}
+		out.Podcast = transcode.SlotPool{Total: ceiling}
 	}
 	return out
 }
@@ -41,10 +55,20 @@ func (f *fakeSlotWorker) Slots(context.Context) (transcode.WorkerSlots, error) {
 
 func (f *fakeSlotWorker) SetSlots(_ context.Context, split transcode.SlotSplit) (transcode.WorkerSlots, []string, error) {
 	f.puts++
+	f.lastPush = split
 	if f.putErr != nil {
 		return transcode.WorkerSlots{}, nil, f.putErr
 	}
-	f.split = split
+	if split.Ceiling > 0 {
+		if f.limit == 0 {
+			return transcode.WorkerSlots{}, nil, &httpclient.SlotSplitRejectedError{Message: `invalid slot split: json: unknown field "ceiling"`}
+		}
+		f.override = split.Ceiling
+		if f.override == f.ceiling {
+			f.override = 0
+		}
+	}
+	f.split = transcode.SlotSplit{VideoSlots: split.VideoSlots, PodcastSlots: split.PodcastSlots}
 	return f.slots(), nil, nil
 }
 
@@ -203,7 +227,7 @@ func TestWorkerSlotsSyncIsRateLimitedAndLeavesUnconfiguredNodesAlone(t *testing.
 	if worker.puts != 0 {
 		t.Fatal("a node nobody configured must not be pushed to")
 	}
-	if _, err := s.engine.Deps().Store.SetWorkerSlotSettings(videoWorkerNode, 2, 1); err != nil {
+	if _, err := s.engine.Deps().Store.SetWorkerSlotSettings(videoWorkerNode, 2, 1, 0); err != nil {
 		t.Fatal(err)
 	}
 	worker.putErr = errors.New("down")
@@ -258,5 +282,114 @@ func TestWorkerSlotsRefusalOnUnconfiguredNodeLeavesItUnconfigured(t *testing.T) 
 	s.syncWorkerSlots(context.Background(), &observed)
 	if worker.puts != pushes || worker.split.VideoSlots != 2 || worker.split.PodcastSlots != 2 {
 		t.Fatalf("the resync changed a split nobody stored: pushes %d, worker %+v", worker.puts-pushes, worker.split)
+	}
+}
+
+func TestWorkerSlotsCeilingIsStoredAndPushed(t *testing.T) {
+	worker := &fakeSlotWorker{ceiling: 1, cpus: 10, limit: 10}
+	s, h := slotUI(t, worker)
+	if got := slotsGet(t, h); got["ceiling_adjustable"] != true || got["worker"].(map[string]any)["ceiling_limit"] != float64(10) {
+		t.Fatalf("a current worker reports its limit: %v", got)
+	}
+	w := request(h, "POST", "/api/maintenance/worker-slots", `{"video_slots":0,"podcast_slots":0,"ceiling":3}`, true)
+	var saved map[string]any
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &saved) != nil || saved["applied"] != true {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if worker.slots().Ceiling != 3 || worker.lastPush.Ceiling != 3 {
+		t.Fatalf("worker not pushed: %+v", worker.lastPush)
+	}
+	row, _ := s.engine.Deps().Store.GetWorkerSlotSettings(videoWorkerNode)
+	if row == nil || row.Ceiling != 3 || !row.Shared() {
+		t.Fatalf("not stored: %+v", row)
+	}
+	if settings := slotsGet(t, h)["settings"].(map[string]any); settings["ceiling"] != float64(3) {
+		t.Fatalf("settings view: %v", settings)
+	}
+	// Saving only the split keeps the stored ceiling and validates against it.
+	if w := request(h, "POST", "/api/maintenance/worker-slots", `{"video_slots":2,"podcast_slots":1}`, true); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if row, _ := s.engine.Deps().Store.GetWorkerSlotSettings(videoWorkerNode); row.Ceiling != 3 || row.VideoSlots != 2 || worker.lastPush.Ceiling != 3 {
+		t.Fatalf("split save dropped the ceiling: %+v push %+v", row, worker.lastPush)
+	}
+	// Out of range is refused and nothing changes.
+	pushes := worker.puts
+	for _, body := range []string{`{"video_slots":2,"podcast_slots":1,"ceiling":11}`, `{"video_slots":2,"podcast_slots":1,"ceiling":-1}`} {
+		if w := request(h, "POST", "/api/maintenance/worker-slots", body, true); w.Code != 400 {
+			t.Errorf("%s: %d", body, w.Code)
+		}
+	}
+	if worker.puts != pushes {
+		t.Fatal("a refused ceiling reached the worker")
+	}
+	if row, _ := s.engine.Deps().Store.GetWorkerSlotSettings(videoWorkerNode); row.Ceiling != 3 {
+		t.Fatalf("a refused ceiling was stored: %+v", row)
+	}
+}
+
+func TestWorkerSlotsLowerCeilingResetsASplitThatNoLongerFits(t *testing.T) {
+	worker := &fakeSlotWorker{ceiling: 1, cpus: 10, limit: 10}
+	s, h := slotUI(t, worker)
+	if w := request(h, "POST", "/api/maintenance/worker-slots", `{"video_slots":2,"podcast_slots":1,"ceiling":3}`, true); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	w := request(h, "POST", "/api/maintenance/worker-slots", `{"video_slots":2,"podcast_slots":1,"ceiling":2}`, true)
+	var out map[string]any
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &out) != nil {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if warnings, _ := out["warnings"].([]any); len(warnings) == 0 || !strings.Contains(warnings[0].(string), "shared again") {
+		t.Fatalf("the reset must be explained: %v", out)
+	}
+	row, _ := s.engine.Deps().Store.GetWorkerSlotSettings(videoWorkerNode)
+	if row == nil || !row.Shared() || row.Ceiling != 2 || worker.split.VideoSlots != 0 || worker.slots().Ceiling != 2 {
+		t.Fatalf("row %+v worker %+v", row, worker.slots())
+	}
+}
+
+func TestWorkerSlotsOldWorkerShowsTheCeilingReadOnly(t *testing.T) {
+	worker := &fakeSlotWorker{ceiling: 2, cpus: 10}
+	s, h := slotUI(t, worker)
+	if got := slotsGet(t, h); got["ceiling_adjustable"] != false || got["ceiling_message"] == nil {
+		t.Fatalf("old worker view: %v", got)
+	}
+	if w := request(h, "POST", "/api/maintenance/worker-slots", `{"video_slots":0,"podcast_slots":0,"ceiling":3}`, true); w.Code != 409 {
+		t.Fatal("an old worker cannot take a new ceiling", w.Code, w.Body.String())
+	}
+	// The value it already runs, or no ceiling at all, is a plain split save
+	// that never carries the field the old worker would refuse.
+	for _, body := range []string{`{"video_slots":1,"podcast_slots":1,"ceiling":2}`, `{"video_slots":1,"podcast_slots":1}`} {
+		if w := request(h, "POST", "/api/maintenance/worker-slots", body, true); w.Code != 200 || worker.lastPush.Ceiling != 0 {
+			t.Fatalf("%s: %d %s push %+v", body, w.Code, w.Body.String(), worker.lastPush)
+		}
+	}
+	if row, _ := s.engine.Deps().Store.GetWorkerSlotSettings(videoWorkerNode); row == nil || row.VideoSlots != 1 {
+		t.Fatalf("row %+v", row)
+	}
+}
+
+func TestWorkerSlotsSyncRestoresTheCeilingOnlyOnWorkersThatTakeIt(t *testing.T) {
+	worker := &fakeSlotWorker{ceiling: 1, cpus: 10, limit: 10}
+	s, _ := slotUI(t, worker)
+	if _, err := s.engine.Deps().Store.SetWorkerSlotSettings(videoWorkerNode, 0, 0, 3); err != nil {
+		t.Fatal(err)
+	}
+	// The worker restarted with its state directory wiped: back to its config.
+	observed := worker.slots()
+	s.syncWorkerSlots(context.Background(), &observed)
+	if worker.puts != 1 || worker.lastPush.Ceiling != 3 || worker.slots().Ceiling != 3 {
+		t.Fatalf("stored ceiling not restored: %+v", worker.lastPush)
+	}
+	// An older worker is compared on the split only and never pushed a ceiling.
+	old := &fakeSlotWorker{ceiling: 1, cpus: 10}
+	s2, _ := slotUI(t, old)
+	if _, err := s2.engine.Deps().Store.SetWorkerSlotSettings(videoWorkerNode, 0, 0, 3); err != nil {
+		t.Fatal(err)
+	}
+	observed = old.slots()
+	s2.syncWorkerSlots(context.Background(), &observed)
+	if old.puts != 0 {
+		t.Fatalf("an old worker running the stored split was pushed: %+v", old.lastPush)
 	}
 }

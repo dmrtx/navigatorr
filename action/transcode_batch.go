@@ -766,10 +766,9 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 			}
 		}
 	}
-	maxParallel := 1
-	if e.deps.Config != nil && e.deps.Config.Transcode.MaxParallelJobs > 0 {
-		maxParallel = e.deps.Config.Transcode.MaxParallelJobs
-	}
+	// The worker's video pool, capped by transcode.max_parallel_jobs when set
+	// (see batch_fanout.go).
+	maxParallel := e.batchMaxParallel(ctx)
 
 	// PR3 note: the worker now owns an authoritative durable queue
 	// (transcode submits persist as queued instead of returning "worker busy"),

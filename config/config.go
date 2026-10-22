@@ -162,8 +162,8 @@ type TranscodeConfig struct {
 	DefaultAction     string            `yaml:"default_action"`
 	DefaultProfile    string            `yaml:"default_profile"`
 	MinSavingsPercent float64           `yaml:"min_savings_percent"`
-	MaxParallelJobs   int               `yaml:"max_parallel_jobs"`
-	SSH               SSHExecutorConfig `yaml:"ssh"` // retired; parsed for compatibility only
+	MaxParallelJobs   int               `yaml:"max_parallel_jobs"` // batch fan-out cap: 0 follows the worker's video pool
+	SSH               SSHExecutorConfig `yaml:"ssh"`               // retired; parsed for compatibility only
 	// HTTP configures the dark/non-default persistent-daemon transport.
 	// Canonical key is `http` (consistent with `ssh`); `worker_http` is
 	// accepted as an alias and merged (explicit `http` wins).

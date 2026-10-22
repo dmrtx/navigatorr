@@ -15,28 +15,71 @@ type SlotPool struct {
 	Used  int `json:"used"`
 }
 
-// WorkerSlots is how a worker divides its max_parallel_jobs ceiling between
-// video work (full conversions and final quality checks) and podcast work (transcription
-// and ad detection). Without a split both kinds draw on one shared pool of
-// Ceiling slots and Video.Total and Podcast.Total both report the ceiling.
+// WorkerSlots is how a worker divides its ceiling (the jobs it runs at once)
+// between video work (full conversions and final quality checks) and podcast
+// work (transcription and ad detection). Without a split both kinds draw on
+// one shared pool of Ceiling slots and Video.Total and Podcast.Total both
+// report the ceiling.
+//
+// Ceiling is the effective value: max_parallel_jobs from the worker config, or
+// the operator's override of it. CeilingLimit and CeilingSource are empty
+// from a worker that cannot take an override.
 type WorkerSlots struct {
-	Ceiling  int      `json:"ceiling"`
-	HostCPUs int      `json:"host_cpus,omitempty"`
-	Split    bool     `json:"split"`
-	Video    SlotPool `json:"video"`
-	Podcast  SlotPool `json:"podcast"`
+	Ceiling       int      `json:"ceiling"`
+	CeilingLimit  int      `json:"ceiling_limit,omitempty"`
+	CeilingSource string   `json:"ceiling_source,omitempty"`
+	HostCPUs      int      `json:"host_cpus,omitempty"`
+	Split         bool     `json:"split"`
+	Video         SlotPool `json:"video"`
+	Podcast       SlotPool `json:"podcast"`
 }
+
+// Ceiling sources a worker reports.
+const (
+	SlotCeilingFromConfig   = "config"
+	SlotCeilingFromOverride = "override"
+)
+
+// CeilingAdjustable reports whether the worker accepts a ceiling override.
+func (s WorkerSlots) CeilingAdjustable() bool { return s.CeilingLimit > 0 }
 
 // SlotSplit is the per-kind slot assignment the server pushes to a worker.
 // Zero values for both clear the split and return the worker to one shared
-// pool.
+// pool. Ceiling, when positive, also sets how many jobs the worker runs at
+// once; zero leaves it as it is. A worker that predates it refuses the field,
+// so it is only sent to one that reports CeilingLimit.
 type SlotSplit struct {
 	VideoSlots   int `json:"video_slots"`
 	PodcastSlots int `json:"podcast_slots"`
+	Ceiling      int `json:"ceiling,omitempty"`
 }
 
 // Shared reports whether the assignment clears the split.
 func (s SlotSplit) Shared() bool { return s.VideoSlots == 0 && s.PodcastSlots == 0 }
+
+// ValidateSlotCeiling checks a ceiling against the worker's hard maximum.
+func ValidateSlotCeiling(ceiling, limit int) error {
+	if ceiling < 1 || ceiling > limit {
+		return fmt.Errorf("parallel jobs must be between 1 and %d on this worker", max(limit, 1))
+	}
+	return nil
+}
+
+// FitSlotSplit applies a new ceiling to a split: a split whose pools add up to
+// more than the ceiling returns to one shared pool rather than being scaled,
+// so the worker only ever runs pools the operator chose. It reports whether
+// the split was reset.
+func FitSlotSplit(split SlotSplit, ceiling int) (SlotSplit, bool) {
+	if split.Shared() || split.VideoSlots+split.PodcastSlots <= ceiling {
+		return split, false
+	}
+	return SlotSplit{Ceiling: split.Ceiling}, true
+}
+
+// SlotSplitResetNote explains a split FitSlotSplit reset.
+func SlotSplitResetNote(ceiling int) string {
+	return fmt.Sprintf("The video and podcast split does not fit %d parallel jobs, so all slots are shared again.", ceiling)
+}
 
 // ValidateSlotSplit checks a split against the worker's ceiling and CPU
 // budget. The error is for a split that cannot work; the warnings describe
@@ -52,9 +95,9 @@ func ValidateSlotSplit(split SlotSplit, ceiling, hostCPUs int) (warnings []strin
 	case split.PodcastSlots < 1:
 		return nil, fmt.Errorf("podcast_slots must be at least 1")
 	case ceiling < 2:
-		return nil, fmt.Errorf("the worker's max_parallel_jobs is %d, so its slots cannot be split between video and podcast", max(ceiling, 1))
+		return nil, fmt.Errorf("the worker runs %d parallel job, so its slots cannot be split between video and podcast", max(ceiling, 1))
 	case split.VideoSlots+split.PodcastSlots > ceiling:
-		return nil, fmt.Errorf("video_slots + podcast_slots is %d but the worker's max_parallel_jobs ceiling is %d", split.VideoSlots+split.PodcastSlots, ceiling)
+		return nil, fmt.Errorf("video_slots + podcast_slots is %d but the worker runs at most %d parallel jobs", split.VideoSlots+split.PodcastSlots, ceiling)
 	}
 	if hostCPUs > 0 {
 		if split.VideoSlots > hostCPUs {

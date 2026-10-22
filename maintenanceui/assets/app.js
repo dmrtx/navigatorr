@@ -4205,7 +4205,7 @@ function renderSlotUsage(activity) {
   if (slots?.split) usage.textContent = `Video ${slots.video.used}/${slots.video.total} · Podcast ${slots.podcast.used}/${slots.podcast.total} · Ceiling ${slots.ceiling}`;
   $("worker-slot-split").hidden = !slots || slots.ceiling < 2;
   if (!slots) return;
-  $("worker-slot-ceiling").textContent = `The worker's ceiling is ${slots.ceiling} slots${slots.host_cpus ? ` on ${slots.host_cpus} CPUs` : ""}. Video and podcast slots together cannot exceed it.`;
+  $("worker-slot-ceiling").textContent = `This node runs ${slots.ceiling} parallel jobs${slots.host_cpus ? ` on ${slots.host_cpus} CPUs` : ""}. Video and podcast slots together cannot exceed them.`;
   // Never overwrite what is being typed or has been edited and not saved.
   if (!state.slotFormDirty && !$("worker-slot-form").contains(document.activeElement)) {
     $("slot-video").value = slots.split ? slots.video.total : Math.max(1, slots.ceiling - 1);
@@ -4233,12 +4233,60 @@ $("worker-slot-form").addEventListener("submit", event => {
 });
 $("worker-slot-share").addEventListener("click", () => void saveWorkerSlots(0, 0));
 for (const id of ["slot-video", "slot-podcast"]) $(id).addEventListener("input", () => { state.slotFormDirty = true; });
+// How many jobs the node runs at once. Shown whenever the worker is connected;
+// editable when the worker reports a limit (older workers only show it).
+function renderParallelJobs(activity) {
+  const slots = activity.slots, ceiling = slots?.ceiling || activity.worker_slots_total;
+  const limit = Number(slots?.ceiling_limit) || 0;
+  state.workerSlots = slots || null;
+  $("worker-parallel").hidden = !ceiling;
+  $("worker-parallel-summary").textContent = `Parallel jobs on this node: ${ceiling}`;
+  $("worker-parallel-form").hidden = !limit;
+  $("worker-parallel-limit").textContent = !limit ? "The video worker predates setting this here. Update it to change parallel jobs from this page."
+    : `Choose 1 to ${limit}. ${slots.ceiling_source === "override" ? "Set here; overrides the worker config." : "From the worker config."}`;
+  // Never overwrite what is being typed or has been edited and not saved.
+  if (limit && !state.parallelFormDirty && !$("worker-parallel-form").contains(document.activeElement)) {
+    $("parallel-jobs").value = slots.ceiling;
+    $("parallel-jobs").max = limit;
+  }
+}
+// The rule a lower ceiling applies to the split (transcode.FitSlotSplit),
+// shown before saving.
+function parallelSplitNote(ceiling) {
+  const slots = state.workerSlots;
+  if (!slots?.split || !(ceiling >= 1) || slots.video.total + slots.podcast.total <= ceiling) return "";
+  return `The video and podcast split (${slots.video.total} + ${slots.podcast.total}) does not fit ${ceiling} parallel jobs, so all slots will be shared again.`;
+}
+async function saveParallelJobs(ceiling) {
+  const note = $("worker-parallel-note"), slots = state.workerSlots;
+  note.textContent = "Saving…";
+  try {
+    const split = slots?.split ? {video_slots: slots.video.total, podcast_slots: slots.podcast.total} : {video_slots: 0, podcast_slots: 0};
+    const result = await api("worker-slots", {...split, ceiling});
+    state.parallelFormDirty = false;
+    const parts = [result.applied ? "Applied. Takes effect as the next job starts; running jobs are never interrupted." : (result.message || "Saved. The worker has not confirmed yet.")];
+    for (const warning of result.warnings || []) parts.push(warning);
+    note.textContent = parts.join(" ");
+    void refreshWorkerActivity(true);
+  } catch (e) {
+    note.textContent = e.message;
+  }
+}
+$("worker-parallel-form").addEventListener("submit", event => {
+  event.preventDefault();
+  void saveParallelJobs(Number($("parallel-jobs").value));
+});
+$("parallel-jobs").addEventListener("input", () => {
+  state.parallelFormDirty = true;
+  $("worker-parallel-note").textContent = parallelSplitNote(Number($("parallel-jobs").value));
+});
 function renderWorkerActivity(data) {
   $("worker-slots").replaceChildren();
   if (!serverReachable || !data?.available) {
     $("worker-capacity").textContent = "Worker slots · Unknown";
     $("activity-checked").textContent = "";
     $("worker-slot-usage").hidden = true;
+    $("worker-parallel").hidden = true;
     $("worker-slot-split").hidden = true;
     $("worker-slots").append(node("p",data?.message || "Worker disconnected; slot occupancy is unknown.","metadata"));
     return;
@@ -4246,6 +4294,7 @@ function renderWorkerActivity(data) {
   const activity = data.activity;
   $("worker-capacity").textContent = `Worker slots · ${activity.worker_slots_used}/${activity.worker_slots_total} occupied`;
   $("activity-checked").textContent = "Updated now · Job reservations";
+  renderParallelJobs(activity);
   renderSlotUsage(activity);
   const jobs = activity.jobs || [];
   const pools = slotPools(activity);
