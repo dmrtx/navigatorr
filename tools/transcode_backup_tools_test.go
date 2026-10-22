@@ -53,7 +53,7 @@ func TestTranscodeBackupsToolModes(t *testing.T) {
 		t.Fatalf("disabled destructive changes not explained: %s", text)
 	}
 	description := s.GetTool("transcode_backups").Tool.Description
-	if strings.Contains(description, "fs_safe_delete") || !strings.Contains(description, "mode=discard_candidate") {
+	if strings.Contains(description, "fs_safe_delete") || !strings.Contains(description, "mode=discard_candidate") || !strings.Contains(description, "worker_check") {
 		t.Fatalf("candidate listing does not name its removal mode: %s", description)
 	}
 }
