@@ -1743,8 +1743,13 @@ test("activity stays read-only and links to the node settings only when somethin
   assert.equal(h.elements.get("worker-open-settings").hidden,false);
   assert.equal(h.elements.get("settings-node").hidden,false);
   assert.equal(h.elements.get("worker-slot-split").hidden,false);
+  let focused=0;
+  h.document.getElementById("settings-node-title").focus=()=>{focused++};
   h.elements.get("worker-open-settings").listeners.get("click")();
   assert.deepEqual(JSON.parse(JSON.stringify(h.context.selected)),["advanced"]);
+  assert.equal(focused,1,"focus moves to the Transcode node heading");
+  assert.match(markup,/id="settings-node-title"[^>]*tabindex="-1"/);
+  assert.match(markup,/id="parallel-jobs"[^>]*aria-describedby="worker-parallel-limit worker-parallel-note"/);
   // Below two parallel jobs there is no split to edit, but the ceiling still is.
   h.run('activity.activity.worker_slots_total=1;activity.activity.slots={ceiling:1,ceiling_limit:10,ceiling_source:"config",split:false,video:{total:1,used:0},podcast:{total:1,used:0}};renderWorkerActivity(activity)');
   assert.equal(h.elements.get("worker-slot-split").hidden,true);

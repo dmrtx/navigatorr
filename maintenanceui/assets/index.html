@@ -786,12 +786,12 @@
           <section id="settings-worker" aria-label="Worker and scheduler health"></section>
           <section id="settings-node" class="node-settings" aria-label="Transcode node" hidden>
             <div id="worker-parallel" class="node-settings-node">
-              <strong class="node-settings-title">Transcode node</strong>
+              <strong id="settings-node-title" class="node-settings-title" tabindex="-1">Transcode node</strong>
               <div class="settings-row">
                 <span>Parallel jobs<span id="worker-parallel-limit" class="metadata"></span></span>
                 <strong id="worker-parallel-summary" hidden></strong>
                 <form id="worker-parallel-form" class="inline-form">
-                  <input id="parallel-jobs" aria-label="Parallel jobs on this node" type="number" min="1" step="1" inputmode="numeric" required />
+                  <input id="parallel-jobs" aria-label="Parallel jobs on this node" aria-describedby="worker-parallel-limit worker-parallel-note" type="number" min="1" step="1" inputmode="numeric" required />
                   <button id="worker-parallel-apply" type="submit" class="primary">Apply</button>
                 </form>
               </div>

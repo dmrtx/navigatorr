@@ -4284,7 +4284,11 @@ $("parallel-jobs").addEventListener("input", () => {
   state.parallelFormDirty = true;
   $("worker-parallel-note").textContent = parallelSplitNote(Number($("parallel-jobs").value));
 });
-$("worker-open-settings").addEventListener("click", () => selectTab("advanced"));
+$("worker-open-settings").addEventListener("click", () => {
+  selectTab("advanced");
+  // The page changes under the keyboard: land on the section that was asked for.
+  $("settings-node-title").focus({preventScroll: false});
+});
 function renderWorkerActivity(data) {
   $("worker-slots").replaceChildren();
   if (!serverReachable || !data?.available) {
