@@ -20,6 +20,8 @@ const state = {
   batchItemsOffset: 0,
   jobsRevision: 0,
   detailRevision: 0,
+  detailAutoOpened: new Set(),
+  detailCostsOpen: false,
   authRevision: 0,
   authMode: "token",
   busyJobs: new Set(),
@@ -1900,6 +1902,7 @@ function controls() {
   $("hardware-option").hidden = processingMode() !== "size";
   $("size-budget-option").hidden = processingMode() !== "size";
   updateSizeBudgetFields("size-budget");
+  renderSegmented(["size-budget"]);
   refreshGoalProfile();
   renderGoalProfile();
   syncMoreGoals();
@@ -2077,11 +2080,75 @@ function sizeBudgetInputs(prefix) {
   if (!Number.isFinite(multiplier) || multiplier < 1 || multiplier > 4) throw new Error("Enter a sibling bitrate multiplier from 1.0 to 4.0.");
   return { size_budget_source: "siblings", size_budget_sibling_multiplier: multiplier };
 }
+const fixedBudgetKinds = ["gb", "percent"];
 function updateSizeBudgetFields(prefix) {
   const kind = $(`${prefix}-kind`).value;
+  $(`${prefix}-fixed`).hidden = !fixedBudgetKinds.includes(kind);
   $(`${prefix}-percent-label`).hidden = kind !== "percent";
   $(`${prefix}-gb-label`).hidden = kind !== "gb";
   $(`${prefix}-multiplier-label`).hidden = kind !== "siblings";
+  if (fixedBudgetKinds.includes(kind)) $(`${prefix}-unit`).value = kind;
+  const multiplier = Number(String($(`${prefix}-multiplier`).value).trim() || 1.5);
+  $(`${prefix}-multiplier-down`).disabled = multiplier <= 1;
+  $(`${prefix}-multiplier-up`).disabled = multiplier >= 4;
+  const readout = sizeBudgetReadout(prefix, kind);
+  $(`${prefix}-readout`).hidden = !readout;
+  $(`${prefix}-readout`).textContent = readout;
+}
+// What a limit comes to, when the form can tell: a percent of the chosen
+// file's size (the batch's first file, as the goal notes say). A gigabyte
+// limit is its own number, and the sibling budget depends on bitrates only the
+// server reads, so those say nothing here.
+function sizeBudgetReadout(prefix, kind) {
+  if (kind !== "percent") return "";
+  const raw = String($(`${prefix}-percent`).value).trim(), percent = raw === "" ? NaN : Number(raw);
+  const profile = prefix === "size-budget" && state.goalProfile?.status === "ready" ? state.goalProfile : null;
+  const size = Number(profile?.data?.profile?.size_bytes);
+  if (!(percent >= 5 && percent <= 85) || !(size > 0)) return "";
+  return `≤ ${bytes(Math.round(size * percent / 100))}${profile.batch ? " for the first file" : ""}`;
+}
+function stepSizeBudgetMultiplier(prefix, delta) {
+  const input = $(`${prefix}-multiplier`), raw = String(input.value).trim();
+  const current = raw === "" || !Number.isFinite(Number(raw)) ? 1.5 : Number(raw);
+  input.value = String(Math.min(4, Math.max(1, Math.round((current + delta) * 10) / 10)));
+  sizeBudgetForms[prefix]();
+}
+// Segmented controls are radio groups over the field that stays the one
+// source of truth: choosing a segment writes the field, and every render shows
+// it back, so a field set in code never disagrees with what is on screen.
+// Arrow keys move through a group natively because its radios share a name.
+const segmentedGroups = [
+  {name: "size-engine", field: "allow-hardware", form: "size-budget", read: f => f.checked ? "fast" : "small", write: (f, v) => { f.checked = v === "fast"; }},
+  {name: "size-budget-limit", field: "size-budget-kind", form: "size-budget", read: f => fixedBudgetKinds.includes(f.value) ? "fixed" : f.value, write: (f, v, form) => { f.value = v === "fixed" ? $(`${form}-unit`).value || "gb" : v; }},
+  {name: "reconfigure-engine", field: "reconfigure-hardware", form: "reconfigure-budget", read: f => f.checked ? "fast" : "small", write: (f, v) => { f.checked = v === "fast"; }},
+  {name: "reconfigure-budget-limit", field: "reconfigure-budget-kind", form: "reconfigure-budget", read: f => fixedBudgetKinds.includes(f.value) ? "fixed" : f.value, write: (f, v, form) => { f.value = v === "fixed" ? $(`${form}-unit`).value || "gb" : v; }},
+];
+// Each form re-renders itself after a change: the goal form in controls(),
+// the reconfigure dialog in updateReconfigureHardware().
+const sizeBudgetForms = {"size-budget": () => controls(), "reconfigure-budget": () => updateReconfigureHardware()};
+const segmentRadios = name => [...document.querySelectorAll(`input[name="${name}"]`)];
+function renderSegmented(forms) {
+  for (const group of segmentedGroups.filter(g => forms.includes(g.form))) {
+    const value = group.read($(group.field));
+    for (const radio of segmentRadios(group.name)) radio.checked = radio.value === value;
+  }
+}
+for (const group of segmentedGroups)
+  for (const radio of segmentRadios(group.name))
+    radio.addEventListener("change", () => {
+      if (!radio.checked) return;
+      group.write($(group.field), radio.value, group.form);
+      sizeBudgetForms[group.form]();
+    });
+for (const form of Object.keys(sizeBudgetForms)) {
+  $(`${form}-unit`).addEventListener("change", () => {
+    if (!fixedBudgetKinds.includes($(`${form}-kind`).value)) return;
+    $(`${form}-kind`).value = $(`${form}-unit`).value;
+    sizeBudgetForms[form]();
+  });
+  for (const field of ["gb", "percent", "multiplier"]) $(`${form}-${field}`).addEventListener("input", () => updateSizeBudgetFields(form));
+  $(`${form}-multiplier-down`).addEventListener("click", () => stepSizeBudgetMultiplier(form, -0.1));
+  $(`${form}-multiplier-up`).addEventListener("click", () => stepSizeBudgetMultiplier(form, 0.1));
 }
 // Shows the budget a saved goal was frozen with; files frozen with different
 // budgets show none (the goal-change note says so).
@@ -2471,6 +2538,71 @@ function telemetry(job) {
       result.append(node("span", "Final quality validation can take several minutes. The percentage reflects the last encoding measurement.", "metadata progress-observation"));
   }
   return result;
+}
+// The encode a ladder run is on, from the "(step N of M)" the server writes
+// into its status messages: "x265 CRF 20 (step 1 of 3)", "quality 65 (step 2 of 5)".
+const encoderNames = {libx265: "x265", hevc_videotoolbox: "VideoToolbox"};
+function ladderStep(job) {
+  for (const text of [job.benchmark?.message, job.transcode?.message]) {
+    const step = /\(step (\d+) of (\d+)\)/.exec(typeof text === "string" ? text : "");
+    if (!step) continue;
+    const rung = /((?:x265 |VideoToolbox )?(?:CRF|quality) \d+) \(step/.exec(text)?.[1] || "";
+    const encoder = encoderNames[job.size_mode?.encoder] || (/VideoToolbox/.test(text) ? "VideoToolbox" : /x265|CRF/.test(text) ? "x265" : "");
+    return {number: Number(step[1]), of: Number(step[2]), rung: rung && !/^(x265|VideoToolbox)/.test(rung) && encoder ? `${encoder} ${rung}` : rung};
+  }
+  return null;
+}
+// Short facts about a file's job: size, encoder, ladder try and size limit.
+// Unknown parts are left out rather than named.
+function detailFacts(job) {
+  if (job.podcast || job.batch?.total > 1) return [];
+  const facts = [];
+  const source = Number(job.savings?.source_bytes), candidate = Number(job.savings?.candidate_bytes), expected = Number(job.size_mode?.expected_bytes);
+  if (source > 0) facts.push(candidate > 0 ? `${bytes(source)} → ${bytes(candidate)}` : expected > 0 ? `${bytes(source)} → ~${bytes(expected)}` : bytes(source));
+  const ladder = ladderStep(job);
+  const encoder = ladder?.rung || encoderNames[job.size_mode?.encoder] || "";
+  if (encoder) facts.push(encoder);
+  if (ladder) facts.push(`Try ${ladder.number} of ${ladder.of}`);
+  const limit = Number(job.size_mode?.size_budget?.budget_bytes);
+  if (limit > 0) facts.push(`Limit ≤ ${bytes(limit)}`);
+  return facts;
+}
+// The one progress line of a running file: "42.5% · 1.35× · ~25 min left",
+// with a small dot for the worker's heartbeat. Batches, several active files,
+// post-encode checks and worker messages keep telemetry()'s richer text.
+function detailProgress(job) {
+  const w = job.worker;
+  const observation = workerProgressObservation(job);
+  // A wait, an offline worker, the original's check or a batch says more than
+  // the stepper does; otherwise, without a worker, the stepper already names
+  // the current step.
+  if (job.activities?.length > 1 || batchProgress(job) || postEncodeWork(job) || observation.message) return telemetry(job);
+  if (!w) return job.stages?.[job.current_step] ? null : telemetry(job);
+  const phase = w.transcode_phase || w.phase;
+  const measured = w.progress ?? w.last_known_progress?.progress;
+  const known = !["queued", "preparing"].includes(phase) && measured != null && Number.isFinite(Number(measured));
+  const percent = known ? Math.max(0, Math.min(100, Number(measured))) : null;
+  const live = phase === "encoding" && !w.progress_is_stale;
+  const parts = percent != null
+    ? [`${w.progress_is_stale ? "Last measured " : ""}${percent.toFixed(1)}%`, phase === "encoding" ? null : workerPhaseLabel(phase)]
+    : [workerPhaseLabel(phase), w.queue_position > 0 ? `Queue #${w.queue_position}` : null];
+  parts.push(live && w.speed > 0 ? `${Number(w.speed).toFixed(2)}×` : null, encodeEta(job.id || "job", w, job.savings?.eta_seconds));
+  const line = node("div", "", "job-progress worker-progress detail-progress");
+  if (percent != null) {
+    const meter = document.createElement("meter");
+    meter.min = 0;
+    meter.max = 100;
+    meter.value = percent;
+    meter.setAttribute("aria-label", `${w.progress_is_stale ? "Last measured" : "Worker"} progress ${percent.toFixed(1)}%`);
+    line.append(meter);
+  }
+  line.append(node("span", parts.filter(Boolean).join(" · "), "detail-progress-text"));
+  if (observation.active && observation.heartbeat !== "unknown") {
+    const dot = node("span", heartbeatAlive(observation.heartbeat) ? "Worker live" : "Worker silent", `live-dot ${observation.heartbeat}`);
+    dot.title = `Last heartbeat ${new Date(w.worker_heartbeat_at).toLocaleTimeString()}`;
+    line.append(dot);
+  }
+  return line;
 }
 function stageLabel(name) {
   const labels = {
@@ -2953,6 +3085,7 @@ function updateReconfigureHardware() {
   $("reconfigure-hardware-option").hidden = !(state.reconfigurePlan?.mode && $("reconfigure-mode").value === "size");
   $("reconfigure-budget-option").hidden = $("reconfigure-hardware-option").hidden;
   updateSizeBudgetFields("reconfigure-budget");
+  renderSegmented(["reconfigure-budget"]);
 }
 $("reconfigure-mode").addEventListener("change", updateReconfigureHardware);
 $("reconfigure-hardware").addEventListener("change", updateReconfigureHardware);
@@ -4284,7 +4417,11 @@ $("parallel-jobs").addEventListener("input", () => {
   state.parallelFormDirty = true;
   $("worker-parallel-note").textContent = parallelSplitNote(Number($("parallel-jobs").value));
 });
-$("worker-open-settings").addEventListener("click", () => selectTab("advanced"));
+$("worker-open-settings").addEventListener("click", () => {
+  selectTab("advanced");
+  // The page changes under the keyboard: land on the section that was asked for.
+  $("settings-node-title").focus({preventScroll: false});
+});
 function renderWorkerActivity(data) {
   $("worker-slots").replaceChildren();
   if (!serverReachable || !data?.available) {
@@ -4379,8 +4516,10 @@ if (typeof IntersectionObserver !== "undefined") {
 function renderPhaseCosts(host, job) {
   const entries = Object.entries(job.phase_costs || {});
   if (!entries.length) return;
-  const detail = node("details", "", "phase-costs");
-  detail.append(node("summary", "Measured phase costs"));
+  const detail = node("details", "", "phase-costs detail-row");
+  detail.open = Boolean(state.detailCostsOpen);
+  detail.addEventListener("toggle", () => { state.detailCostsOpen = detail.open; });
+  detail.append(node("summary", "Phase costs"));
   detail.append(node("p", "Elapsed wall measurements include synchronous I/O. Coordinator measurements count returned invocations and exclude waits between them. CPU time is the user + system time of the worker's ffmpeg/ffprobe processes where the worker measured it; otherwise CPU time is unknown; phases may overlap and are not added into a total.", "metadata"));
   const table = node("table");
   const header = node("tr");
@@ -4404,14 +4543,19 @@ async function openJob(id) {
   state.batchItemsHasMore = false;
   $("batch-items-panel").hidden = true;
   state.detailRevision++;
+  // A new job starts with every row closed; failures open the relevant one.
+  state.detailAutoOpened = new Set();
+  state.detailCostsOpen = false;
   if (!$("job-detail").open) $("job-detail").showModal();
   writeNavigation();
+  $("job-detail-title").textContent = "Job details";
+  $("job-detail-title").title = "";
+  $("copy-detail-path").hidden = true;
+  $("detail-status").replaceChildren();
   $("detail-summary").replaceChildren(node("p", "Loading job…", "muted"));
   $("detail-controls").replaceChildren();
-  $("detail-stages").replaceChildren();
   $("detail-related").replaceChildren();
-  $("detail-content").textContent = "";
-  $("detail-content").hidden = true;
+  resetDetailRows();
   await refreshDetail();
 }
 async function refreshDetail() {
@@ -4427,24 +4571,38 @@ async function refreshDetail() {
       !$("job-detail").open
     )
       return;
-    $("load-detail").hidden = !job.logs_available;
     state.detailJob = job;
     const focus = focusedControl($("detail-controls"));
+    const presentation = queuePresentation(job);
     const summary = $("detail-summary");
-    summary.replaceChildren(
-      node(
-        "p",
-        job.batch || job.source_path || job.promotion ? queuePresentation(job).title : job.id,
-        "metadata",
-      ),
-      statusBadge(queuePresentation(job).status),
-      node("p", queuePresentation(job).summary, "muted"),
-    );
+    const path = detailPath(job);
+    $("job-detail-title").textContent = job.batch || job.source_path || job.promotion ? presentation.title : job.id;
+    $("job-detail-title").title = path;
+    $("copy-detail-path").hidden = !path;
+    $("detail-status").replaceChildren(statusBadge(presentation.status));
+    summary.replaceChildren();
+    const facts = detailFacts(job);
+    if (facts.length) {
+      const chips = node("ul", "", "detail-facts");
+      for (const fact of facts) chips.append(node("li", fact, "detail-fact"));
+      summary.append(chips);
+    }
+    // The progress line and the stepper come first; a step shown there is not
+    // repeated as a sentence below.
+    const progress = presentation.showTelemetry ? detailProgress(job) : batchProgress(job);
+    if (progress) summary.append(progress);
+    const stepper = renderStepper(job);
+    if (stepper) summary.append(stepper);
+    // The chips already carry a running conversion's size and encode, so its
+    // summary line is left out then; the outcome dedupe below still counts it
+    // as shown. Other jobs, such as a replacement, keep their line.
+    if (!(presentation.showTelemetry && facts.length && job.action_name === "transcode_media")) summary.append(node("p", presentation.summary, "muted"));
     // The summary line already says why a file was skipped. An outcome line that
     // only repeats text already shown is left out, so the reason appears once.
-    const shownOutcomes = [queuePresentation(job).summary];
+    const shownOutcomes = [presentation.summary];
     const addOutcome = (text) => {
-      if (!text || shownOutcomes.some(shown => shown.includes(text))) return;
+      // "Open job for details" is the queue row's pointer to this dialog.
+      if (!text || /^(Open job for error details|Finished · Open job for details)$/.test(text) || shownOutcomes.some(shown => shown.includes(text))) return;
       shownOutcomes.push(text);
       summary.append(node("p", text, "job-outcome metadata"));
     };
@@ -4453,19 +4611,12 @@ async function refreshDetail() {
       // A waiting decision repeats its reason below, and a result card
       // explains the outcome itself; show it only once.
       const hasReport = hasResultReport(job.benchmark);
-      if (job.status !== "waiting_decision" && !hasReport) addOutcome(jobOutcomeText(job));
+      if (job.status !== "waiting_decision" && !hasReport && !(presentation.showTelemetry && ladderStep(job))) addOutcome(jobOutcomeText(job));
       if (job.transcode.tested_candidates) summary.append(node("p", `${job.transcode.tested_candidates} configurations tested${job.transcode.verified_samples ? ` · ${job.transcode.verified_samples} quality samples verified` : ""}`, "metadata"));
     }
- renderPhaseCosts(summary, job);
     const report = resultReport(job);
     if (report) summary.append(report);
-    const plan = encodingPlanNote(job);
-    if (plan) summary.append(plan);
-    const size = sizeModeNote(job);
-    if (size) summary.append(size);
-    if (queuePresentation(job).showTelemetry) summary.append(telemetry(job));
-    else if (batchProgress(job)) summary.append(batchProgress(job));
-    else if (!job.batch?.dry_run && job.batch?.outcome !== "no_changes") addOutcome(queueOutcome(job));
+    if (!presentation.showTelemetry && !progress && !job.batch?.dry_run && job.batch?.outcome !== "no_changes") addOutcome(queueOutcome(job));
     if (job.batch?.outcome === "no_changes") summary.append(skippedBatchOutcome(job));
     if (job.batch?.dry_run) summary.append(node("p", queueOutcome(job) + (job.batch.queued > 0 && !job.preview_execution_action_id ? ". Review the eligible files, then choose Start batch to convert them." : "."), "preview-notice"));
     const raw = job.status === "waiting_decision" ? job.waiting_reason : job.status === "failed" ? job.error : "";
@@ -4481,17 +4632,12 @@ async function refreshDetail() {
     }
     summary.dataset.operationId = job.id;
     renderCommandIndicators();
-    renderStages(job);
+    renderDetailRows(job);
     const related = $("detail-related");
     related.replaceChildren();
     for (const action of job.workflow_actions || []) {
       if (action.id === job.id) continue;
       related.append(button(`${workflows[action.action_name] || action.action_name} · ${names[action.status] || action.status}`, () => openJob(action.id), "quiet"));
-    }
-    if (job.source_path) summary.append(node("p", job.source_path, "metadata"));
-    if (job.promotion) {
-      const location = job.promotion.new_path || job.promotion.original_path;
-      if (location) summary.append(node("p", `Library: ${location.slice(0, location.lastIndexOf("/"))}`, "metadata"));
     }
     const controls = $("detail-controls");
     controls.replaceChildren(jobControls(job, true));
@@ -4509,10 +4655,9 @@ async function refreshDetail() {
         button("Retry", refreshDetail, "quiet"),
       );
       $("detail-controls").replaceChildren();
-      $("detail-stages").replaceChildren();
       $("detail-related").replaceChildren();
       $("batch-items-panel").hidden = true;
-      $("load-detail").hidden = true;
+      resetDetailRows();
     }
   }
 }
@@ -4658,6 +4803,54 @@ $("batch-items-prev").addEventListener("click", () =>
 $("batch-items-next").addEventListener("click", () =>
   safe(() => changeBatchPage(25)),
 );
+// The collapsible rows under the job summary are static markup, so a user's
+// open or closed row survives each refresh. A row opens itself once per job
+// when it explains a failure; closing it afterwards sticks.
+const detailRowKeys = ["plan", "steps", "path", "log"];
+function showDetailRow(key, visible, autoOpen = false) {
+  const row = $(`detail-row-${key}`);
+  row.hidden = !visible;
+  if (!visible || !autoOpen || state.detailAutoOpened.has(key)) return false;
+  state.detailAutoOpened.add(key);
+  row.open = true;
+  return true;
+}
+function resetDetailRows() {
+  for (const key of detailRowKeys) {
+    $(`detail-row-${key}`).hidden = true;
+    $(`detail-row-${key}`).open = false;
+  }
+  $("detail-plan").replaceChildren();
+  $("detail-path").replaceChildren();
+  $("detail-stages").replaceChildren();
+  $("detail-costs").replaceChildren();
+  $("detail-content").textContent = "";
+}
+function detailPath(job) {
+  return job.source_path || job.promotion?.original_path || "";
+}
+function renderDetailRows(job) {
+  const plan = $("detail-plan");
+  plan.replaceChildren();
+  const planNote = encodingPlanNote(job), sizeNote = sizeModeNote(job);
+  if (planNote) plan.append(planNote);
+  if (sizeNote) plan.append(sizeNote);
+  showDetailRow("plan", Boolean(planNote || sizeNote));
+  renderStages(job);
+  const stages = effectiveStages(job);
+  showDetailRow("steps", stages.length > 0, stages.some(stage => ["failed", "rejected"].includes(stage.status)));
+  $("detail-costs").replaceChildren();
+  renderPhaseCosts($("detail-costs"), job);
+  const paths = $("detail-path");
+  paths.replaceChildren();
+  if (job.source_path) paths.append(node("p", job.source_path, "metadata"));
+  const location = job.promotion?.new_path || job.promotion?.original_path;
+  if (location) paths.append(node("p", `Library: ${location.slice(0, location.lastIndexOf("/"))}`, "metadata"));
+  showDetailRow("path", paths.children.length > 0);
+  // The log opens itself for a failure no step explains; opening loads it.
+  const explained = stages.some(stage => ["failed", "rejected"].includes(stage.status));
+  showDetailRow("log", Boolean(job.logs_available), job.status === "failed" && !explained);
+}
 async function loadDetail() {
   const id = state.detail;
   const data = await api(`logs?id=${encodeURIComponent(id)}`);
@@ -4678,11 +4871,11 @@ function renderBatchCounts(container, batch) {
   }
   container.append(counts);
 }
-function renderStages(job) {
-  const list = $("detail-stages");
-  list.replaceChildren();
-  if (job.batch?.dry_run) return;
-  for (const [index, storedStage] of (job.stages || []).entries()) {
+// The steps as the job dialog shows them, with batch and rejected-candidate
+// outcomes folded into the stored stage that reports them.
+function effectiveStages(job) {
+  if (job.batch?.dry_run) return [];
+  return (job.stages || []).map((storedStage, index) => {
     let stage = storedStage;
     const batch = visibleBatch(job);
     if (stage.name === "schedule_batch" && ["failed","partial"].includes(stage.status) && batch?.policy && !batch.failed) {
@@ -4691,6 +4884,13 @@ function renderStages(job) {
     else if (stage.name === "schedule_batch" && ["failed","partial"].includes(stage.status) && batch?.rejected) {
       stage = {...stage,status:batch.failed > 0 || batch.completed > 0 ? "partial" : "rejected",note:[`${batch.completed || 0} candidates`,`${batch.rejected} rejected`,batch.failed > 0 ? `${batch.failed} failed` : ""].filter(Boolean).join(" · ")};
     } else if (rejectedCandidate(job) && index === job.current_step) stage = {...stage,status:"rejected",note:["Candidate rejected; original preserved.", candidateCleanupNote(job)].filter(Boolean).join(" ")};
+    return stage;
+  });
+}
+function renderStages(job) {
+  const list = $("detail-stages");
+  list.replaceChildren();
+  for (const [index, stage] of effectiveStages(job).entries()) {
     const row = node("li", "", `stage ${stage.status}`);
     row.append(node("span", String(index + 1), "stage-number"), node("span", stageLabel(stage.name)), statusBadge(stage.status === "pending" ? "Next" : names[stage.status] || stage.status, stage.status));
     if (stage.note) row.append(node("span", stage.note, "stage-note"));
@@ -4699,6 +4899,37 @@ function renderStages(job) {
   }
 }
 
+// The pipeline as small dots joined by a thin line, one dot per step, with
+// the current step named under it. A step is done, current, pending or failed.
+const stepSymbols = {done: "✓", failed: "!", current: "", pending: ""};
+function renderStepper(job) {
+  const stages = effectiveStages(job);
+  if (!stages.length) return null;
+  const active = ["running", "waiting_external", "waiting_decision"].includes(job.status);
+  const stateOf = (stage, index) => ["failed", "rejected"].includes(stage.status) ? "failed"
+    : active && (index === job.current_step || stage.status === "running") ? "current"
+    : ["completed", "skip", "partial"].includes(stage.status) ? "done" : "pending";
+  const states = stages.map(stateOf);
+  const wrap = node("div", "", "job-steps-wrap");
+  const list = node("ol", "", "job-steps");
+  list.setAttribute("aria-label", "Steps");
+  for (const [index, stage] of stages.entries()) {
+    const label = stageLabel(stage.name);
+    const item = node("li", "", `job-step ${states[index]}`);
+    item.title = label;
+    item.setAttribute("aria-label", `Step ${index + 1} of ${stages.length}, ${label}: ${states[index]}`);
+    if (states[index] === "current") item.setAttribute("aria-current", "step");
+    item.append(node("span", stepSymbols[states[index]], "job-step-dot"));
+    list.append(item);
+  }
+  const at = states.includes("failed") ? states.indexOf("failed") : states.indexOf("current");
+  const text = at >= 0
+    ? `${states[at] === "failed" ? "Failed at step" : "Step"} ${at + 1} of ${stages.length} · ${stageLabel(stages[at].name)}`
+    : states.every(value => value === "done") ? `All ${stages.length} steps done`
+    : `Next: ${stageLabel(stages[Math.max(0, states.indexOf("pending"))].name)}`;
+  wrap.append(list, node("p", text, "job-steps-current"));
+  return wrap;
+}
 // Compact replacements can be re-grabbed by Radarr/Sonarr. The tracking
 // shown is read-only; Navigatorr never changes monitoring or profiles.
 function regrabWarning(notice) {
@@ -4912,7 +5143,14 @@ $("approve-batch-review").addEventListener("click",()=>safe(()=>decideBatchRepla
 $("reject-batch-review").addEventListener("click",()=>safe(()=>decideBatchReplacement("reject")));
 $("close-detail").addEventListener("click", () => $("job-detail").close());
 $("job-detail").addEventListener("close", () => { state.detailRevision++; state.detail=null; writeNavigation(); });
-$("load-detail").addEventListener("click", () => safe(loadDetail));
+$("detail-row-log").addEventListener("toggle", () => { if ($("detail-row-log").open) safe(loadDetail); });
+$("copy-detail-path").addEventListener("click", () => safe(async () => {
+  const path = state.detailJob ? detailPath(state.detailJob) : "";
+  if (!path) return;
+  if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) return notify("Copying is not available here.");
+  await navigator.clipboard.writeText(path);
+  notify("Path copied.");
+}));
 
 function profileEncoder(p) {
   return p?.video?.codec === "hevc_videotoolbox" ? "Hardware HEVC" : p?.video?.codec === "libx265" ? "Software HEVC · CPU" : p?.video?.codec || "Encoder unavailable";

@@ -63,14 +63,40 @@ test("both palettes meet WCAG AA for text, badges, controls and focus", () => {
     ["on-forest", "forest"], ["on-forest", "forest-strong"], ["paper", "ink"],
     ["danger", "surface"], ["danger", "danger-wash"], ["warning", "surface"], ["warning-strong", "warning-wash"],
     ["decision", "decision-wash"], ["info", "info-wash"], ["preview", "preview-wash"], ["neutral", "neutral-wash"],
+    // The primary button, its disabled state, the selected segment and the selected goal card.
+    ["on-primary", "primary"], ["on-primary", "primary-hover"], ["on-disabled", "disabled"], ["on-select", "select"],
+    ["ink", "select-wash"], ["muted", "select-wash"], ["forest", "select-wash"], ["ink", "subtle"], ["muted", "subtle"],
+    // Step dots in the job details.
+    ["on-primary", "forest"], ["on-forest", "danger"],
   ];
-  const nonText = [["control-line", "surface"], ["control-line", "field"], ["accent", "paper"], ["accent", "surface"]];
+  const nonText = [
+    ["control-line", "surface"], ["control-line", "field"], ["accent", "paper"], ["accent", "surface"],
+    // Selection, the focus ring and icons against every surface they sit on.
+    ["select", "paper"], ["select", "surface"], ["select", "select-wash"], ["select", "field"],
+    ["focus", "paper"], ["focus", "surface"], ["focus", "field"], ["focus", "select-wash"],
+    ["icon", "paper"], ["icon", "surface"], ["control-line", "select-wash"],
+  ];
   for (const [name, palette] of [["light", light], ["dark", dark]]) {
     for (const [fg, bg] of text)
       assert.ok(contrast(palette, fg, bg) >= 4.5, `${name}: --${fg} on --${bg} is ${contrast(palette, fg, bg).toFixed(2)}:1`);
     for (const [fg, bg] of nonText)
       assert.ok(contrast(palette, fg, bg) >= 3, `${name}: --${fg} on --${bg} is ${contrast(palette, fg, bg).toFixed(2)}:1`);
   }
+});
+
+test("selection and focus have their own tokens, teal in dark, and errors keep --danger", () => {
+  for (const name of ["select", "select-wash", "on-select", "focus", "icon"]) assert.ok(name in light && name in systemDark, `--${name} missing`);
+  for (const name of ["select", "focus"]) {
+    const [r, g, b] = rgba(dark[name]);
+    assert.ok(g > r && b > r, `dark --${name} (${dark[name]}) is not teal`);
+    assert.notEqual(dark[name], dark.danger);
+    assert.notEqual(dark[name], dark.accent);
+  }
+  assert.match(css, /\.segmented label:has\(input:checked\) \{[^}]*var\(--select\)/);
+  assert.match(css, /\.goal-card:has\(\.goal-head input:checked\) \{[^}]*var\(--select\)/);
+  assert.match(css, /input:focus-visible[\s\S]*?outline: 2px solid var\(--focus\)/);
+  assert.doesNotMatch(css, /Georgia/, "headings use one family");
+  assert.match(css, /button\.primary:disabled \{[^}]*var\(--on-disabled\)/);
 });
 
 test("markup loads the theme before styles and offers System, Light and Dark", () => {
