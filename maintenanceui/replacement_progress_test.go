@@ -85,6 +85,7 @@ func TestOriginalStateIsDecidedFromThePromotionsOwnState(t *testing.T) {
 		// in move-aside mode no recovery copy exists yet.
 		{"move-aside mode, arr import sent (snapshot flag), failed importing", record(importStep, moveAside(map[string]any{"service": "sonarr", "import_sent": true}), nil), originalUnclear},
 		{"move-aside mode, arr import sent (full command), failed importing", record(importStep, moveAside(map[string]any{"service": "radarr", "commands": map[string]any{"import": map[string]any{"id": 7, "sent_at": "2026-01-01T00:00:00Z"}}}), nil), originalUnclear},
+		{"move-aside mode, arr import recorded without a body, failed importing", record(importStep, moveAside(map[string]any{"service": "sonarr", "commands": map[string]any{"import": nil}}), nil), originalUnclear},
 		{"move-aside mode, arr import not sent, failed importing", record(importStep, moveAside(map[string]any{"service": "sonarr", "commands": map[string]any{}}), nil), originalInPlace},
 		// A refused move-aside switches to copy; until its fallback copy is
 		// verified the original is still in place and no recovery copy holds it.

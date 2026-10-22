@@ -1726,7 +1726,7 @@ function sourceSummary() {
 function finishSubmission(mode) {
   if (mode === "encode") {
     state.goalExplicit = false;
-    state.goalCarry = null;
+    clearGoalCarry();
     resetKeepTracks();
     state.selected.clear();
     state.folderSelected?.clear();
@@ -1744,7 +1744,7 @@ function finishSubmission(mode) {
 $("configure-selection").addEventListener("click", () =>
   safe(configureSelection),
 );
-$("back-to-files").addEventListener("click", () => { setFileStep("browse"); writeNavigation(); });
+$("back-to-files").addEventListener("click", () => { clearGoalCarry(); setFileStep("browse"); writeNavigation(); });
 $("use-container").addEventListener("click", () => safe(async () => {
   // Freeze discovery into the same explicit selection used by checkboxes.
   await selectAllFiles();
@@ -2288,6 +2288,7 @@ function controls() {
   renderSegmented(["size-budget"]);
   refreshGoalProfile();
   renderGoalProfile();
+  renderShrinkTitle();
   syncMoreGoals();
   refreshKeepTracks();
   renderKeepTracks();
@@ -3787,6 +3788,20 @@ function applyGoalSettings(path, goal) {
   const inputs = {};
   for (const key of ["max_height", "allow_slow_preset"]) if (goal[key] != null) inputs[key] = goal[key];
   state.goalCarry = {path, mode: goal.mode, inputs};
+  renderShrinkTitle();
+}
+// Drops what applyGoalSettings carried, so a later ordinary pick of the same
+// file adds no hidden settings.
+function clearGoalCarry() {
+  state.goalCarry = null;
+  renderShrinkTitle();
+}
+// The Shrink card names the height the form will send: a carried 720 is not
+// "Shrink to 1080p SDR".
+function renderShrinkTitle() {
+  const carry = state.goalCarry;
+  const height = carry?.mode === "compact" && carry.path === $("path").value.trim() ? carry.inputs.max_height : null;
+  $("goal-title-compact").textContent = `Shrink to ${height || 1080}p SDR`;
 }
 // The series or movie the earlier job was made for, so the new job is listed
 // and replaced the same way.
@@ -3807,7 +3822,7 @@ function openGoalForm(path, options = {}) {
   $("scope").value = "file";
   state.fileMedia = null;
   state.fileService = null;
-  state.goalCarry = null;
+  clearGoalCarry();
   if (options.mode) setProcessingMode(options.mode);
   if (options.goal) applyGoalSettings(path, options.goal);
   applyLibraryContext(options.context, options.goal);

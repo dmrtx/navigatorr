@@ -35,17 +35,17 @@ func (s AudioPacketSpan) BitsPerSecond() float64 {
 // audioPacketStallTimeout bounds how long the packet scan may go without
 // reading another packet. A whole-file scan has no fixed deadline (its length
 // follows the file's), but a stalled network read must not hang the caller.
-// It is a variable only so tests can shrink it.
-var audioPacketStallTimeout = 2 * time.Minute
+// It is atomic only so tests can shrink it without racing a running scan.
+var audioPacketStallTimeout atomic.Int64
+
+func init() { audioPacketStallTimeout.Store(int64(2 * time.Minute)) }
 
 // SetAudioPacketStallTimeoutForTest shrinks the packet scan's stall timeout
 // so another package's tests can exercise a stalled scan, and returns the
-// function that restores it. It is for tests only; it is not safe to call
-// while a scan is running.
+// function that restores it. It is for tests only.
 func SetAudioPacketStallTimeoutForTest(d time.Duration) (restore func()) {
-	old := audioPacketStallTimeout
-	audioPacketStallTimeout = d
-	return func() { audioPacketStallTimeout = old }
+	old := audioPacketStallTimeout.Swap(int64(d))
+	return func() { audioPacketStallTimeout.Store(old) }
 }
 
 // MeasureAudioPackets measures every audio stream's packets, keyed by stream
@@ -60,7 +60,7 @@ func SetAudioPacketStallTimeoutForTest(d time.Duration) (restore func()) {
 // cancellation comes back as the context error.
 func MeasureAudioPackets(ctx context.Context, ffprobePath, path string) (map[int]AudioPacketSpan, error) {
 	start := time.Now()
-	stallTimeout := audioPacketStallTimeout
+	stallTimeout := time.Duration(audioPacketStallTimeout.Load())
 	if ffprobePath == "" {
 		ffprobePath, _ = exec.LookPath("ffprobe")
 	}

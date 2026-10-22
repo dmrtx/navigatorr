@@ -187,7 +187,10 @@ func (s *Server) originalState(r operationRecord) string {
 	step, mode := r.inst.CurrentStep, operationString(p["recovery_mode"])
 	changed := p["old_removed"] == true || p["moved_aside"] == true || operationString(p["delete_sent_at"]) != "" || operationString(p["move_aside_started_at"]) != "" || r.state["filesystem_publish_started"] == true || r.state["filesystem_published"] == true
 	if !changed {
-		importSent := p["import_sent"] == true || operationMap(p["commands"])["import"] != nil
+		// A key present with a null body counts as sent, as in the store's
+		// projection: the safer reading.
+		_, commandSent := operationMap(p["commands"])["import"]
+		importSent := p["import_sent"] == true || commandSent
 		switch {
 		case mode != "move_aside" && step <= preserve:
 			return originalInPlace

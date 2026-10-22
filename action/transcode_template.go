@@ -105,6 +105,10 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	var trackReport *TrackSelectionReport
 	delete(ec.State, trackSelectionKey)
 	delete(ec.State, trackReportKey)
+	// A re-run job keeps the previous run's validation outputs; the report a
+	// reader sees must come from this run's selection or from none.
+	delete(ec.State, "tracks")
+	delete(ec.State, "tracks_message")
 	if modeSnapshot != nil {
 		sel, err := resolveTrackSelection(modeSnapshot, &rep)
 		if err != nil {
