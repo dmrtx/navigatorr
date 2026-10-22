@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/jakenesler/navigatorr/store"
+	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/httpclient"
 )
 
 // A transcode attempt's candidate lives at
@@ -30,6 +32,7 @@ const (
 	candidateRetiredRejected   = "rejected"
 	candidateRetiredCancelled  = "cancelled"
 	candidateRetiredSuperseded = "superseded"
+	candidateRetiredDiscarded  = "discarded"
 )
 
 func rejectedCandidateResult() StepResult {
@@ -105,31 +108,44 @@ func (e *Engine) candidatePromotionStarted(inst *store.ActionInstance, ec *Execu
 }
 
 // removeOwnCandidateFile removes one owned file, through the same root and
-// symlink checks promotion uses. A missing file is already removed.
-func (e *Engine) removeOwnCandidateFile(path string) (int64, error) {
+// symlink checks promotion uses, and returns what it removed. A missing file
+// is already removed.
+func (e *Engine) removeOwnCandidateFile(path string) (os.FileInfo, error) {
 	if _, err := e.promotionPath(path, true); err != nil {
-		return 0, err
+		return nil, err
 	}
 	info, err := e.promotionLstat(path)
 	if os.IsNotExist(err) {
-		return 0, nil
+		return nil, nil
 	}
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	if !info.Mode().IsRegular() {
-		return 0, fmt.Errorf("%s is not a regular file", filepath.Base(path))
+		return nil, fmt.Errorf("%s is not a regular file", filepath.Base(path))
 	}
 	if e.candidateRemoveHook != nil {
 		e.candidateRemoveHook(path)
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return 0, err
+		return nil, err
 	}
-	return info.Size(), nil
+	return info, nil
 }
 
-func (e *Engine) removeOwnCandidate(ctx context.Context, inst *store.ActionInstance, ec *ExecutionContext) (int64, error) {
+// sameCandidateBytes reports whether the partial is another name for the
+// candidate's bytes: a link-based publish whose cleanup of the partial name
+// did not finish. The listing counts those bytes once.
+func sameCandidateBytes(candidate, partial os.FileInfo) bool {
+	return candidate != nil && partial != nil && os.SameFile(candidate, partial)
+}
+
+// removeOwnCandidate removes the attempt's candidate and partial and returns
+// the bytes that removal freed. A name whose bytes another link still holds
+// (the partial of a link-based publish, a hard link elsewhere) frees nothing
+// until its last name goes. pruneDir also removes the candidate directory when
+// it is left empty.
+func (e *Engine) removeOwnCandidate(ctx context.Context, inst *store.ActionInstance, ec *ExecutionContext, pruneDir bool) (int64, error) {
 	candidate, partial, err := ownCandidateFiles(ec.State)
 	if err != nil {
 		return 0, err
@@ -142,13 +158,17 @@ func (e *Engine) removeOwnCandidate(ctx context.Context, inst *store.ActionInsta
 		if err := ctx.Err(); err != nil {
 			return freed, err
 		}
-		n, err := e.removeOwnCandidateFile(path)
-		freed += n
+		info, err := e.removeOwnCandidateFile(path)
+		if info != nil && candidateLastLink(info) {
+			freed += info.Size()
+		}
 		if err != nil {
 			return freed, err
 		}
 	}
-	_ = os.Remove(filepath.Dir(candidate)) // Empty-only; other candidates survive.
+	if pruneDir {
+		_ = os.Remove(filepath.Dir(candidate)) // Empty-only; other candidates survive.
+	}
 	return freed, nil
 }
 
@@ -162,8 +182,116 @@ func (e *Engine) retireCandidate(ctx context.Context, inst *store.ActionInstance
 	if inst.ActionName != "transcode_media" || getString(ec.State, "candidate_path") == "" || getBool(ec.State, candidateRemovedKey) {
 		return
 	}
-	freed, err := e.removeOwnCandidate(ctx, inst, ec)
+	freed, err := e.removeOwnCandidate(ctx, inst, ec, true)
 	e.recordCandidateCleanup(ctx, inst, ec, why, freed, err)
+}
+
+// DiscardLeftoverCandidate is the owner's approval to remove one listed
+// leftover: the candidate and partial a finished attempt owns, through the
+// same guards and removal as automatic cleanup. It holds the attempt's
+// execution lease and re-checks at call time that nothing can promote the
+// candidate and that no worker job can still write it. Every call checks the
+// disk, not the recorded outcome, so a file a late publish left after an
+// earlier removal is removed too; a file that is already gone counts as
+// removed, and a call that finds nothing changes nothing. The candidate
+// directory is left in place even when empty: a sibling job may be about to
+// upload into it.
+func (e *Engine) DiscardLeftoverCandidate(ctx context.Context, id string) (*ActionResult, error) {
+	if !e.AllowDestructive() {
+		return nil, fmt.Errorf("allow_destructive must be enabled for candidate removal")
+	}
+	notAttempt := fmt.Errorf("only a transcode attempt's own candidate can be removed")
+	// An unknown id cannot take a lease, so it is refused by name first.
+	if inst, err := e.deps.Store.GetActionInstanceIfExists(id); err != nil {
+		return nil, err
+	} else if inst == nil || inst.ActionName != "transcode_media" {
+		return nil, notAttempt
+	}
+	ctx, release, err := e.claimExecution(ctx, id, false)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	inst, err := e.deps.Store.GetActionInstanceIfExists(id)
+	if err != nil {
+		return nil, err
+	}
+	if inst == nil || inst.ActionName != "transcode_media" {
+		return nil, notAttempt
+	}
+	ec := parseExecutionContext(inst, e)
+	reason, err := e.leftoverCandidateReason(inst, ec, map[string]map[string]bool{})
+	if err != nil {
+		return nil, err
+	}
+	if reason == "" {
+		return nil, fmt.Errorf("this attempt's candidate can still be promoted or the action is not finished; nothing was removed")
+	}
+	if err := e.candidateWorkerStopped(ctx, ec); err != nil {
+		return nil, fmt.Errorf("candidate file kept: %v", err)
+	}
+	recorded := getBool(ec.State, candidateRemovedKey)
+	freed, err := e.removeOwnCandidate(ctx, inst, ec, false)
+	if err == nil && freed == 0 && recorded {
+		return e.Status(ctx, id)
+	}
+	e.recordCandidateCleanup(ctx, inst, ec, candidateRetiredDiscarded, freed, err)
+	if err != nil {
+		return nil, fmt.Errorf("candidate file kept: %v", err)
+	}
+	return e.Status(ctx, id)
+}
+
+// candidateNeedsWorkerCheck reports whether a worker job might still write
+// the attempt's files: the job never reported done, or an earlier cleanup
+// kept them (an unconfirmed cancellation among those reasons).
+func candidateNeedsWorkerCheck(state map[string]any) bool {
+	if getString(state, "job_id") == "" {
+		return false
+	}
+	cleanup, _ := state[candidateCleanupKey].(map[string]any)
+	return !getBool(state, "transcode_done") || getString(cleanup, "outcome") == "kept"
+}
+
+// candidateWorkerStopped asks the worker, when one might still write, whether
+// the attempt's job has stopped. The execution lease stops only this server's
+// executor; a worker job keeps uploading the partial and can publish the
+// candidate after it is removed. Only a terminal status, or the worker saying
+// it does not know the job, lets the files go. Any other status, an
+// unreachable worker or no worker at all keeps them.
+func (e *Engine) candidateWorkerStopped(ctx context.Context, ec *ExecutionContext) error {
+	if !candidateNeedsWorkerCheck(ec.State) {
+		return nil
+	}
+	const wait = "the worker job may still be writing; cancel it or wait"
+	jobID := getString(ec.State, "job_id")
+	if e.deps.Transcode == nil {
+		return fmt.Errorf("%s (no transcode worker is configured to confirm job %s stopped)", wait, jobID)
+	}
+	st, err := e.deps.Transcode.Status(ctx, jobID)
+	if err != nil {
+		if workerJobUnknown(err) {
+			return nil
+		}
+		return fmt.Errorf("%s (status of job %s: %v)", wait, jobID, err)
+	}
+	switch st.Status {
+	case transcode.StatusFailed, transcode.StatusCancelled, transcode.StatusCompleted:
+		return nil
+	}
+	return fmt.Errorf("%s (the worker reports job %s as %q)", wait, jobID, st.Status)
+}
+
+// workerJobUnknown reports a definitive "no such job" from the worker: a 404
+// whose envelope code is not_found. A bare 404 is not enough to delete on:
+// older workers answered 404 for read errors on a live job, and a proxy or a
+// misrouted base URL answers 404 too.
+func workerJobUnknown(err error) bool {
+	if httpclient.IsTransportUncertain(err) {
+		return false
+	}
+	he, ok := transcodeHTTPError(err)
+	return ok && he.StatusCode == 404 && he.Code == transcode.WorkerErrorNotFound
 }
 
 // recordCandidateCleanup persists the cleanup outcome and says it in the
@@ -233,7 +361,10 @@ func (e *Engine) retireSupersededCandidates(ctx context.Context, ids []string) {
 }
 
 // LeftoverCandidate is a candidate file whose owning action is finished and
-// was never promoted. Listing it deletes nothing.
+// was never promoted. Listing it deletes nothing. WorkerCheck marks an
+// attempt whose worker job might still write: the listing does not ask the
+// worker, and removal goes ahead only once the worker reports the job
+// finished or unknown.
 type LeftoverCandidate struct {
 	ActionID     string `json:"action_id"`
 	Status       string `json:"status"`
@@ -242,6 +373,7 @@ type LeftoverCandidate struct {
 	Bytes        int64  `json:"bytes"`
 	PartialBytes int64  `json:"partial_bytes"`
 	Reason       string `json:"reason"`
+	WorkerCheck  bool   `json:"worker_check,omitempty"`
 }
 
 type LeftoverCandidatePage struct {
@@ -254,7 +386,8 @@ type LeftoverCandidatePage struct {
 // transcodes left in .navigatorr-candidates: rejected, cancelled, failed or
 // superseded attempts nothing promotes. Ready candidates, promotions and
 // recovery files are never listed. Inventory follows action ownership, never
-// a directory sweep.
+// a directory sweep, so a page of actions may list nothing and still have a
+// next page. DiscardLeftoverCandidate removes one listed item.
 func (e *Engine) ListLeftoverCandidates(ctx context.Context, offset int) (*LeftoverCandidatePage, error) {
 	if e.deps.Store == nil {
 		return nil, fmt.Errorf("maintenance store is required")
@@ -287,7 +420,8 @@ func (e *Engine) ListLeftoverCandidates(ctx context.Context, offset int) (*Lefto
 		if err != nil || e.candidatePromotionStarted(inst, ec, candidate) != nil {
 			continue
 		}
-		item := LeftoverCandidate{ActionID: inst.ID, Status: inst.Status, Path: candidate, OriginalPath: getString(ec.State, "resolved_path"), Reason: reason}
+		item := LeftoverCandidate{ActionID: inst.ID, Status: inst.Status, Path: candidate, OriginalPath: getString(ec.State, "resolved_path"), Reason: reason, WorkerCheck: candidateNeedsWorkerCheck(ec.State)}
+		var candidateInfo os.FileInfo
 		for _, path := range []string{candidate, partial} {
 			if _, err := e.promotionPath(path, false); err != nil {
 				break
@@ -297,8 +431,8 @@ func (e *Engine) ListLeftoverCandidates(ctx context.Context, offset int) (*Lefto
 				continue
 			}
 			if path == candidate {
-				item.Bytes = info.Size()
-			} else {
+				candidateInfo, item.Bytes = info, info.Size()
+			} else if !sameCandidateBytes(candidateInfo, info) {
 				item.PartialBytes = info.Size()
 			}
 		}

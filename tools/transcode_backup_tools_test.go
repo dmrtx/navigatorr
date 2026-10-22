@@ -34,10 +34,26 @@ func TestTranscodeBackupsToolModes(t *testing.T) {
 		{"mode": "delete_all"},
 		{"mode": "list", "offset": -1},
 		{"mode": "candidates", "offset": -1},
+		{"mode": "discard_candidate"},
+		{"mode": "discard_candidate", "action_id": "anything"},
+		{"mode": "discard_candidate", "action_id": "anything", "confirm": "false"},
+		{"mode": "discard_candidate", "action_id": "anything", "confirm": true},
 	} {
 		res := callTool(t, s, "transcode_backups", args)
 		if res.IsError != true {
 			t.Fatalf("expected tool error for %v", args)
 		}
+	}
+	res = callTool(t, s, "transcode_backups", map[string]any{"mode": "discard_candidate", "action_id": "anything"})
+	if text := resultText(t, res); !strings.Contains(text, "confirm=true") {
+		t.Fatalf("missing confirmation not explained: %s", text)
+	}
+	res = callTool(t, s, "transcode_backups", map[string]any{"mode": "discard_candidate", "action_id": "anything", "confirm": "true"})
+	if text := resultText(t, res); !strings.Contains(text, "allow_destructive") {
+		t.Fatalf("disabled destructive changes not explained: %s", text)
+	}
+	description := s.GetTool("transcode_backups").Tool.Description
+	if strings.Contains(description, "fs_safe_delete") || !strings.Contains(description, "mode=discard_candidate") || !strings.Contains(description, "worker_check") {
+		t.Fatalf("candidate listing does not name its removal mode: %s", description)
 	}
 }

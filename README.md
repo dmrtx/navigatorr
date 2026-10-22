@@ -156,7 +156,7 @@ Persistent, declarative multi-step workflows tracked in SQLite. Workflows surviv
 | `action_status` | Query workflow lifecycle state, current step, and execution log |
 | `action_resume` | Resume a paused workflow from `waiting_external` or `waiting_decision` |
 | `action_retry` | Retry a failed action from its last safe checkpoint |
-| `transcode_backups` | List retained promotion backups and disk usage; clean one failed finalization after verifying the adopted library file; `mode=candidates` lists, read-only, candidate files that rejected, cancelled or superseded transcodes left behind |
+| `transcode_backups` | List retained promotion backups and disk usage; clean one failed finalization after verifying the adopted library file; `mode=candidates` lists, read-only, candidate files that rejected, cancelled, failed or superseded transcodes left behind; `mode=discard_candidate action_id=<id> confirm=true` removes one listed attempt's own candidate and partial (needs `allow_destructive`) |
 | `action_list` | Filter workflows by status (`running`, `waiting_external`, `waiting_decision`, `completed`, `failed`, `cancelled`) |
 
 Operational summaries separate workflow status from the library outcome. For
