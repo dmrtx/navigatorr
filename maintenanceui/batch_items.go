@@ -16,7 +16,10 @@ type batchItemView struct {
 	CandidateReady bool   `json:"candidate_ready,omitempty"`
 	// SizeBudgetOutcome says a candidate came from the operation's size budget
 	// (for example below_quality_target_within_budget).
-	SizeBudgetOutcome   string `json:"size_budget_outcome,omitempty"`
+	SizeBudgetOutcome string `json:"size_budget_outcome,omitempty"`
+	// TracksMessage says which audio and subtitle tracks the file kept, when it
+	// dropped some.
+	TracksMessage       string `json:"tracks_message,omitempty"`
 	ReplacementActionID string `json:"replacement_action_id,omitempty"`
 	ReplacementStatus   string `json:"replacement_status,omitempty"`
 	Replaced            bool   `json:"replaced,omitempty"`
@@ -123,6 +126,7 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 						}
 						view.CandidateReady = !view.RetryPending && child.Status == store.ActionStatusCompleted && operationValue(r, "skip_transcode") != true && operationValue(r, "skipped") != true && operationValue(r, "original_intact") == true && operationValue(r, "candidate_removed") != true && projectOperationSavings(r, time.Now()).CandidateBytes != nil && !reserved
 						view.SizeBudgetOutcome = operationSizeBudgetOutcome(r)
+						view.TracksMessage = operationString(operationTracks(r)["message"])
 						for _, service := range []string{"sonarr", "radarr", "filesystem"} {
 							prior, err := st.FindActionByIdempotencyKey("promote_transcode_candidate", "promote:"+service+":"+child.ID)
 							if err != nil {
