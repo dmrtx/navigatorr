@@ -283,13 +283,15 @@ func (e *Engine) candidateWorkerStopped(ctx context.Context, ec *ExecutionContex
 }
 
 // workerJobUnknown reports a definitive "no such job" from the worker: a 404
-// whose envelope code, when the worker sends one, is not_found.
+// whose envelope code is not_found. A bare 404 is not enough to delete on:
+// older workers answered 404 for read errors on a live job, and a proxy or a
+// misrouted base URL answers 404 too.
 func workerJobUnknown(err error) bool {
 	if httpclient.IsTransportUncertain(err) {
 		return false
 	}
 	he, ok := transcodeHTTPError(err)
-	return ok && he.StatusCode == 404 && (he.Code == "" || he.Code == transcode.WorkerErrorNotFound)
+	return ok && he.StatusCode == 404 && he.Code == transcode.WorkerErrorNotFound
 }
 
 // recordCandidateCleanup persists the cleanup outcome and says it in the

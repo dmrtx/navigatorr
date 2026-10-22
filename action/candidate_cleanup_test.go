@@ -809,7 +809,7 @@ func TestDiscardLeftoverCandidateAsksTheWorker(t *testing.T) {
 		{name: "job completed", status: StatusFailed, worker: statusOf(transcode.StatusCompleted), statusCalls: 1},
 		{name: "unconfirmed cancellation the worker later confirmed", status: StatusCancelled, extra: keptCancel, worker: statusOf(transcode.StatusCancelled), statusCalls: 1},
 		{name: "job unknown to the worker", status: StatusFailed, worker: failWith(&httpclient.HTTPError{StatusCode: 404, Code: transcode.WorkerErrorNotFound}), statusCalls: 1},
-		{name: "job unknown to an older worker", status: StatusCancelled, worker: failWith(&httpclient.HTTPError{StatusCode: 404}), statusCalls: 1},
+		{name: "bare 404 from an older worker or a proxy", status: StatusCancelled, worker: failWith(&httpclient.HTTPError{StatusCode: 404}), statusCalls: 1, detail: "may still be writing"},
 		{name: "job reported done", status: StatusFailed, extra: map[string]any{"transcode_done": true}, worker: statusOf(transcode.StatusRunning)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
