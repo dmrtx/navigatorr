@@ -145,6 +145,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/maintenance/worker-activity", s.workerActivity)
 	mux.HandleFunc("GET /api/maintenance/worker-slots", s.workerSlots)
 	mux.HandleFunc("POST /api/maintenance/worker-slots", s.workerSlots)
+	mux.HandleFunc("GET /api/maintenance/keep-languages", s.keepLanguages)
+	mux.HandleFunc("PUT /api/maintenance/keep-languages", s.keepLanguages)
 	mux.HandleFunc("POST /api/maintenance/tool", s.tool)
 	mux.HandleFunc("GET /api/maintenance/logs", s.logs)
 	mux.HandleFunc("GET /sw.js", serveWorker)

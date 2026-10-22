@@ -80,6 +80,72 @@ If every VideoToolbox rung misses the quality limits the record sets
 file may be run again with `allow_hardware=false` (the job says so and the web UI
 offers **Try with x265**).
 
+## Tracks to keep (size and compact)
+
+The size and compact goals leave out the audio and subtitle tracks in languages
+nobody asked to keep. The selection is a pure function of the file's probe and
+a list of languages, decided once when the job is created and frozen with it.
+
+**Languages.** The global setting is `["spa","eng","jpn"]` until changed
+(`GET` / `PUT /api/maintenance/keep-languages`, body `{"languages":[...]}`,
+the same revisioned shape as the per-node parallel-jobs setting). Codes are
+ISO 639-2, three letters; the bibliographic and terminology spellings are one
+language (ger = deu, fre = fra, chi = zho, dut = nld, rum = ron, gre = ell,
+per = fas, cze = ces, and the rest), stored in the terminology form, sorted.
+`[]` turns the selection off. A job's own `keep_languages` replaces the global
+list; `keep_audio_streams` and `keep_subtitle_streams` (source stream indexes,
+a single `transcode_media` job only) pick tracks by hand, exactly.
+
+| Rule | Behaviour |
+| --- | --- |
+| Original audio | The track with disposition `original`, else the first audio track, is always kept. |
+| Audio match | Audio in a listed language is kept; so is any other audio in the original track's language (a commentary stays with its film), and untagged and `und` audio. |
+| No audio matches | Every audio track is kept. "Matches" looks at the list only, not at the original language. |
+| Subtitles | Kept when in a listed language, in the original track's language, or untagged / `und`. Forced subtitles follow the same rule. No match drops them. |
+| Never dropped | Video, attachments (fonts) and chapters. |
+| Defaults | When the default audio track is dropped, the first kept audio track becomes the default. For subtitles, only if a default subtitle existed: its replacement is the first kept subtitle, or, when the dropped default was a forced subtitle, a kept forced subtitle (none at all if there is none: a full subtitle never replaces a forced default). |
+| No audio in the source | Only subtitles can be dropped; the plan keeps no audio and the worker accepts that for a source that has none (never for one that has audio). |
+| Nothing to drop | The plan is the same as before, with no selection recorded. |
+
+**Frozen, versioned, gated.** The selection is part of the job's frozen policy
+(`tracks` in the snapshot, in its digest only when present, so every older
+digest is unchanged). A plan that drops tracks is policy `v6` and carries the
+kept source stream indexes; a plan that drops nothing keeps its earlier
+version. A snapshot frozen before this feature has no selection and keeps every
+track. The worker advertises `track_selection`; the server refuses to submit,
+to plan a size budget, or to request final validation of a selection to a
+worker that lacks it ("needs a worker that follows the selection"), and an
+older worker rejects the v6 plan on its own.
+
+A goal change of a batch (a new budget, size to compact) keeps the languages
+the batch was created with: its own `keep_languages` (`[]` included), else the
+list it froze at creation. Only a batch frozen before this setting existed has
+no record of its languages and reads the global list as it is at the change;
+likewise, work that was created but not yet frozen when this version is
+deployed takes the list in force when it is frozen (`spa`, `eng`, `jpn` unless
+changed), which is expected and not a regression.
+
+**Size accounting.** The budget counts only the kept tracks: dropped audio
+bytes stay out of the audio levels and the video allowance, and dropped
+streams' stated bytes are credited as savings. For a source of eight E-AC-3
+5.1 640 kbps tracks (eng, spa Castilian, spa Latin, fre, ger, ita, por, jpn),
+1.0 GB, 1080p23.976, 1800 s, keeping spa, eng and jpn leaves four tracks:
+level 1 (AAC-LC 5.1 at 384 kbps) fits and leaves the video 2579 kbps, where
+all eight tracks needed level 2 (HE-AAC 160) for a video of 2373 kbps.
+
+**Worker.** The encode maps `0:v?`, each kept stream by source index and
+`0:t?` (attachments), copies chapters, and sets codec arguments by output
+position. Before publishing, the worker and the server's final validation
+require exactly the planned tracks, in source order, with their languages,
+codecs and the planned default and forced flags; a count mismatch fails with
+no accept-loss option. Promotion is unchanged.
+
+**Reporting.** A job that drops tracks reports `tracks` (kept and dropped audio
+and subtitles with index, language, title, codec and stated bytes,
+`bytes_saved`, `languages`, `manual`) and `tracks_message`, for example "Kept 4
+of 8 audio tracks (spa, spa, eng, jpn) and 6 of 32 subtitles". Both are outputs
+of the finished job (the validation step) and are repeated inside its `result`.
+
 ## Earlier policies
 
 Operations frozen under `transcode-modes-v1`, `-v2` (quality, x265_preserve,

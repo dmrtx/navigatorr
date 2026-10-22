@@ -183,7 +183,8 @@ func sizeBudgetPlanMatches(snapshot *ModePolicySnapshot, state map[string]any, p
 	original := getInt64(state, "original_size")
 	budget := policy.BudgetBytes(original, siblingEvidenceOf(state))
 	rep := getSourceReport(state["source_report"])
-	enc := planSizeBudgetEncode(policy, rep, original, budget)
+	keptRep, keptBytes := keptViewOf(state, rep, original)
+	enc := planSizeBudgetEncode(policy, keptRep, keptBytes, budget)
 	if enc.Reason != "" || rec.BudgetBytes != budget || rec.TargetBytes != enc.TargetBytes || rec.VideoBitrateKbps != enc.X265.BitrateKbps {
 		return false
 	}

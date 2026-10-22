@@ -106,6 +106,9 @@ type candidateWant struct {
 	maxHeight int
 	// verdict is the final quality verdict required; "pass" by default.
 	verdict string
+	// audioTracks is how many audio streams the candidate keeps; zero means
+	// every one of the source's.
+	audioTracks int
 }
 
 // expectCandidate asserts what the user gets from a finished goal: a valid,
@@ -139,7 +142,11 @@ func (k *kase) expectCandidate(src string, srcSHA string, r *result, want candid
 			k.require(st.CodecName == want.audio, "candidate audio is %s, want %s", st.CodecName, want.audio)
 		}
 	}
-	k.require(countKind(info, "audio") == countKind(orig, "audio"), "candidate has %d audio streams, source %d", countKind(info, "audio"), countKind(orig, "audio"))
+	wantAudio := want.audioTracks
+	if wantAudio == 0 {
+		wantAudio = countKind(orig, "audio")
+	}
+	k.require(countKind(info, "audio") == wantAudio, "candidate has %d audio streams, want %d (source %d)", countKind(info, "audio"), wantAudio, countKind(orig, "audio"))
 	k.require(math.Abs(info.Format.Duration-orig.Format.Duration) <= math.Max(1, orig.Format.Duration*0.01),
 		"candidate lasts %.2fs, source %.2fs", info.Format.Duration, orig.Format.Duration)
 	k.s.decodes(k.T, cand)

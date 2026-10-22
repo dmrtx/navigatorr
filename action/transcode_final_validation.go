@@ -281,6 +281,9 @@ func buildFinalValidationRequest(ec *ExecutionContext, cleanPath string, rep *me
 	if plan.Compact != nil && !caps.SupportsCompactTranscode() {
 		return nil, fmt.Errorf("worker does not support compact SDR conversion; upgrade the worker before encoding")
 	}
+	if plan.Tracks != nil && !caps.TrackSelection {
+		return nil, fmt.Errorf("%s before encoding", errTrackSelectionWorker)
+	}
 	return req, nil
 }
 

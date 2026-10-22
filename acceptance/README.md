@@ -47,6 +47,7 @@ Each case is a subtest, run one after another against one engine and one worker.
 | 7_timestamp_glitch | variable frame rate with a burst of frames closer than one frame period | size | alignment passes, a candidate with the same number of frames |
 | 8_no_size_tags | remux without per-stream Matroska statistics tags | size | a planned budget (never `size_budget_estimate_unavailable`) and a candidate |
 | 8b_no_size_tags_flac | the same, with FLAC audio that states no bitrate either | size | the same: the VideoToolbox ladder is used, not the x265 fallback |
+| 8d_keep_languages | 1080p SDR with three AC-3 stereo tracks (eng default, fre, spa) and three SRT subtitles (eng, fre, spa forced) and a font attachment | size, hardware off, `keep_languages` eng + spa | a passing candidate with exactly two audio tracks (eng, spa), two subtitles (eng, spa forced), the font kept, and a track report that lists French audio as dropped with bytes saved |
 | 9_promotion | short SDR file | x265_preserve, then `promote_transcode_candidate` (filesystem) | the reviewed plan digest approved, the library file replaced by the candidate (valid, decodes, hash equal), candidate directory and recovery copy cleaned |
 
 Candidate cases also check: the candidate sits under `.navigatorr-candidates`,

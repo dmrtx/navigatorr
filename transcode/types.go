@@ -64,30 +64,35 @@ type Plan struct {
 	// Bounded typed hevc_videotoolbox rate-control/offline knobs. All must be
 	// unset for libx265; quality-vs-bitrate exclusivity is enforced at every
 	// validation layer. See VideoProfile for field semantics.
-	AverageBitrateKbps           int                    `json:"average_bitrate_kbps,omitempty" yaml:"average_bitrate_kbps,omitempty"`
-	MaxBitrateKbps               int                    `json:"max_bitrate_kbps,omitempty" yaml:"max_bitrate_kbps,omitempty"`
-	ConstantBitrate              *bool                  `json:"constant_bitrate,omitempty" yaml:"constant_bitrate,omitempty"`
-	QMin                         *int                   `json:"qmin,omitempty" yaml:"qmin,omitempty"`
-	QMax                         *int                   `json:"qmax,omitempty" yaml:"qmax,omitempty"`
-	GOPSize                      *int                   `json:"gop_size,omitempty" yaml:"gop_size,omitempty"`
-	BFrames                      *int                   `json:"b_frames,omitempty" yaml:"b_frames,omitempty"`
-	ClosedGOP                    *bool                  `json:"closed_gop,omitempty" yaml:"closed_gop,omitempty"`
-	PowerEfficient               *bool                  `json:"power_efficient,omitempty" yaml:"power_efficient,omitempty"`
-	MaxRefFrames                 *int                   `json:"max_ref_frames,omitempty" yaml:"max_ref_frames,omitempty"`
-	ExpectedBitDepth             int                    `json:"expected_bit_depth,omitempty" yaml:"expected_bit_depth,omitempty"`
-	AudioMode                    string                 `json:"audio_mode" yaml:"audio_mode"`
-	SubtitleMode                 string                 `json:"subtitle_mode" yaml:"subtitle_mode"`
-	ConvertIncompatibleSubtitles bool                   `json:"convert_incompatible_subtitles" yaml:"convert_incompatible_subtitles"`
-	PreserveMetadata             bool                   `json:"preserve_metadata" yaml:"preserve_metadata"`
-	PreserveChapters             bool                   `json:"preserve_chapters" yaml:"preserve_chapters"`
-	PreserveAttachments          bool                   `json:"preserve_attachments" yaml:"preserve_attachments"`
-	SubtitleActions              []SubtitleAction       `json:"subtitle_actions,omitempty" yaml:"subtitle_actions,omitempty"`
-	RecipeVersion                string                 `json:"recipe_version,omitempty" yaml:"recipe_version,omitempty"`
-	RecipeDigest                 string                 `json:"recipe_digest,omitempty" yaml:"recipe_digest,omitempty"`
-	PlanDigest                   string                 `json:"plan_digest,omitempty" yaml:"plan_digest,omitempty"`
-	Resilience                   ResiliencePlan         `json:"resilience,omitempty" yaml:"resilience,omitempty"`
-	AppliedFallbacks             []string               `json:"applied_fallbacks,omitempty" yaml:"applied_fallbacks,omitempty"`
-	QualityValidation            *QualityValidationPlan `json:"quality_validation,omitempty" yaml:"quality_validation,omitempty"`
+	AverageBitrateKbps           int              `json:"average_bitrate_kbps,omitempty" yaml:"average_bitrate_kbps,omitempty"`
+	MaxBitrateKbps               int              `json:"max_bitrate_kbps,omitempty" yaml:"max_bitrate_kbps,omitempty"`
+	ConstantBitrate              *bool            `json:"constant_bitrate,omitempty" yaml:"constant_bitrate,omitempty"`
+	QMin                         *int             `json:"qmin,omitempty" yaml:"qmin,omitempty"`
+	QMax                         *int             `json:"qmax,omitempty" yaml:"qmax,omitempty"`
+	GOPSize                      *int             `json:"gop_size,omitempty" yaml:"gop_size,omitempty"`
+	BFrames                      *int             `json:"b_frames,omitempty" yaml:"b_frames,omitempty"`
+	ClosedGOP                    *bool            `json:"closed_gop,omitempty" yaml:"closed_gop,omitempty"`
+	PowerEfficient               *bool            `json:"power_efficient,omitempty" yaml:"power_efficient,omitempty"`
+	MaxRefFrames                 *int             `json:"max_ref_frames,omitempty" yaml:"max_ref_frames,omitempty"`
+	ExpectedBitDepth             int              `json:"expected_bit_depth,omitempty" yaml:"expected_bit_depth,omitempty"`
+	AudioMode                    string           `json:"audio_mode" yaml:"audio_mode"`
+	SubtitleMode                 string           `json:"subtitle_mode" yaml:"subtitle_mode"`
+	ConvertIncompatibleSubtitles bool             `json:"convert_incompatible_subtitles" yaml:"convert_incompatible_subtitles"`
+	PreserveMetadata             bool             `json:"preserve_metadata" yaml:"preserve_metadata"`
+	PreserveChapters             bool             `json:"preserve_chapters" yaml:"preserve_chapters"`
+	PreserveAttachments          bool             `json:"preserve_attachments" yaml:"preserve_attachments"`
+	SubtitleActions              []SubtitleAction `json:"subtitle_actions,omitempty" yaml:"subtitle_actions,omitempty"`
+	// Tracks is the audio and subtitle streams the output keeps (see
+	// TrackSelection). It is set only by a plan of mode policy v6, which is
+	// what tells an older worker to refuse it; without it the output has every
+	// source track, as every earlier plan does.
+	Tracks            *TrackSelection        `json:"tracks,omitempty" yaml:"tracks,omitempty"`
+	RecipeVersion     string                 `json:"recipe_version,omitempty" yaml:"recipe_version,omitempty"`
+	RecipeDigest      string                 `json:"recipe_digest,omitempty" yaml:"recipe_digest,omitempty"`
+	PlanDigest        string                 `json:"plan_digest,omitempty" yaml:"plan_digest,omitempty"`
+	Resilience        ResiliencePlan         `json:"resilience,omitempty" yaml:"resilience,omitempty"`
+	AppliedFallbacks  []string               `json:"applied_fallbacks,omitempty" yaml:"applied_fallbacks,omitempty"`
+	QualityValidation *QualityValidationPlan `json:"quality_validation,omitempty" yaml:"quality_validation,omitempty"`
 }
 
 // QualityValidationPlan is the immutable bridge from the benchmark's sampled

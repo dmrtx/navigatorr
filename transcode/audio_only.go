@@ -39,13 +39,17 @@ func IsSizeAudioOnlyPlan(p *Plan) bool {
 }
 
 // SizeAudioMode reports the audio mode a size plan of this policy version
-// carries: compact_lossless under v3, one of the audio levels under v5.
+// carries: compact_lossless under v3, one of the audio levels under v5, either
+// under v6 (which version the goal's snapshot extends is the coordinator's to
+// check).
 func SizeAudioMode(version, audioMode string) bool {
 	switch version {
 	case ModePolicyV3:
 		return audioMode == AudioModeCompactLossless
 	case ModePolicyV5:
 		return IsAudioLevelMode(audioMode)
+	case ModePolicyV6:
+		return audioMode == AudioModeCompactLossless || IsAudioLevelMode(audioMode)
 	}
 	return false
 }
@@ -76,6 +80,7 @@ func NewSizeAudioOnlyPlan(base *Plan, sourceBitDepth int) (*Plan, error) {
 		PreserveChapters:             base.PreserveChapters,
 		PreserveAttachments:          base.PreserveAttachments,
 		SubtitleActions:              append([]SubtitleAction(nil), base.SubtitleActions...),
+		Tracks:                       base.Tracks,
 		RecipeVersion:                base.RecipeVersion,
 		RecipeDigest:                 base.RecipeDigest,
 		Resilience:                   base.Resilience,

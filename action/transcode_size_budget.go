@@ -610,14 +610,15 @@ func endUnreachableSizeBudget(ec *ExecutionContext, snapshot *ModePolicySnapshot
 	if rep == nil || budget <= 0 {
 		return StepResult{}, false
 	}
-	enc := planSizeBudgetEncode(policy, rep, original, budget)
+	keptRep, keptBytes := keptViewOf(ec.State, rep, original)
+	enc := planSizeBudgetEncode(policy, keptRep, keptBytes, budget)
 	if enc.Reason != "size_budget_unreachable" {
 		return StepResult{}, false
 	}
 	// No video bitrate fits, but copying the video and compacting the lossless
 	// audio may: that answer is still the search's to give.
 	if snapshot.Size.AudioOnlyFallback {
-		if _, _, fits := sizeBudgetAudioOnlyLevel(policy, rep, original, budget); fits {
+		if _, _, fits := sizeBudgetAudioOnlyLevel(policy, keptRep, keptBytes, budget); fits {
 			return StepResult{}, false
 		}
 	}

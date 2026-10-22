@@ -92,6 +92,13 @@ type WorkerCapabilities struct {
 	// bitrate). Older workers refuse the audio modes, so the coordinator checks
 	// this before it submits a v5 plan.
 	SizeAudioLevels bool `json:"size_audio_levels,omitempty"`
+	// TrackSelection reports a worker that runs plans of mode policy v6: it maps
+	// exactly the audio and subtitle streams the plan keeps and validates that
+	// the output has those tracks and no others. Older workers refuse the plan,
+	// so the coordinator checks this before it submits one. Like the flags
+	// before it, it is not part of the pinned capability fingerprint (the
+	// fingerprint of an unchanged machine must not move).
+	TrackSelection bool `json:"track_selection,omitempty"`
 	// SearchBudgetExtension reports a worker that accepts search_extension on
 	// mode benchmarks: the search budget stretches while work keeps finishing,
 	// up to a hard cap. Older workers reject the field.

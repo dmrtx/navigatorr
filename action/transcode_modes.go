@@ -70,7 +70,12 @@ type ModePolicySnapshot struct {
 	// instead of a search (see transcode_recipe.go). Earlier snapshots have
 	// none, so their digests are unchanged.
 	Recipe *ModeRecipe `json:"recipe,omitempty"`
-	Digest string      `json:"digest"`
+	// Tracks is set only on size and compact snapshots frozen once track
+	// selection existed: the languages whose audio and subtitle tracks the goal
+	// keeps (and any manual stream picks). Earlier snapshots have none, keep
+	// every track, and keep their digests.
+	Tracks *transcode.TrackPolicy `json:"tracks,omitempty"`
+	Digest string                 `json:"digest"`
 }
 
 // ModeSizePolicy freezes what size v3 adds on top of the v2 quality floor:
@@ -319,9 +324,25 @@ func modePolicyWithOptions(mode string, anime bool, maxHeight int, hardware *tra
 // new operation is frozen under policy v4: the content v2 and v3 froze for the
 // mode, plus the recipe that replaces their search.
 func modePolicyWithBudget(mode string, anime bool, maxHeight int, hardware *transcode.HardwareSearchRules, allowSlow bool, budget *SizeBudgetPolicy) (ModePolicySnapshot, error) {
+	return modePolicyWithTracks(mode, anime, maxHeight, hardware, allowSlow, budget, nil)
+}
+
+// modePolicyWithTracks also freezes the track selection (size and compact
+// only). It is frozen with the goal, so a later change of the global list never
+// reaches a job already planned.
+func modePolicyWithTracks(mode string, anime bool, maxHeight int, hardware *transcode.HardwareSearchRules, allowSlow bool, budget *SizeBudgetPolicy, tracks *transcode.TrackPolicy) (ModePolicySnapshot, error) {
 	snapshot, err := modePolicyContent(mode, anime, maxHeight, hardware, allowSlow, budget)
 	if err != nil {
 		return snapshot, err
+	}
+	if tracks != nil {
+		if mode != "size" && mode != "compact" {
+			return snapshot, inputErr(inputKeepLanguages, "track selection is only supported with mode=size or mode=compact")
+		}
+		if err := tracks.Validate(); err != nil {
+			return snapshot, attributeInput(inputKeepLanguages, err)
+		}
+		snapshot.Tracks = tracks.Clone()
 	}
 	snapshot.Version = ModePolicyV4
 	// Nothing searches under v4, so nothing is reserved against an operation
@@ -468,6 +489,9 @@ func validateModeInputs(inputs map[string]any) error {
 		if _, err := modeSizeBudgetInput("", inputs); err != nil {
 			return err
 		}
+		if _, err := modeTrackInput("", inputs); err != nil {
+			return err
+		}
 		return nil
 	}
 	mode, ok := raw.(string)
@@ -490,7 +514,17 @@ func validateModeInputs(inputs map[string]any) error {
 	if err != nil {
 		return err
 	}
-	if _, err := modePolicyWithBudget(mode, getBool(inputs, "is_anime") || getString(inputs, "media_type") == "anime", maxHeight, hardware, slow, budget); err != nil {
+	tracks, err := modeTrackInput(mode, inputs)
+	if err != nil {
+		return err
+	}
+	// Whether the global list or the job's own is in force is decided when the
+	// goal freezes; here the inputs only have to be well formed.
+	trackPolicy, err := trackPolicyFor(mode, tracks, nil)
+	if err != nil {
+		return attributeInput(inputKeepLanguages, err)
+	}
+	if _, err := modePolicyWithTracks(mode, getBool(inputs, "is_anime") || getString(inputs, "media_type") == "anime", maxHeight, hardware, slow, budget, trackPolicy); err != nil {
 		return attributeInput("mode", err)
 	}
 	for _, key := range []string{"profile", "profile_config", "priority", "metric", "min_savings_percent", "max_size_increase_percent", "preserve_source_bit_depth", "expected_video_codec", "shared_calibration", "calibration_items", "batch_fixed_quality", "batch_calibration_digest"} {
@@ -549,6 +583,9 @@ func freezeModePolicy(ec *ExecutionContext) (*ModePolicySnapshot, error) {
 		if (p.Version == ModePolicyV4) != (p.Recipe != nil) || p.Recipe.validate(&p) != nil {
 			return nil, fmt.Errorf("frozen mode policy recipe is missing or invalid")
 		}
+		if p.Tracks != nil && (p.Mode != "size" && p.Mode != "compact" || p.Tracks.Validate() != nil) {
+			return nil, fmt.Errorf("frozen mode policy track selection is invalid")
+		}
 		ec.State["policy_digest"] = p.Digest
 		ec.State["mode"] = p.Mode
 		ec.State["search_budget_seconds"] = p.SearchBudgetSeconds
@@ -571,7 +608,11 @@ func freezeModePolicy(ec *ExecutionContext) (*ModePolicySnapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	p, err := modePolicyWithBudget(mode, getBool(ec.State, "resolved_is_anime") || getBool(ec.Inputs, "is_anime") || getString(ec.Inputs, "media_type") == "anime", maxHeight, hardware, slow, budget)
+	tracks, err := trackPolicyOf(ec, mode)
+	if err != nil {
+		return nil, err
+	}
+	p, err := modePolicyWithTracks(mode, getBool(ec.State, "resolved_is_anime") || getBool(ec.Inputs, "is_anime") || getString(ec.Inputs, "media_type") == "anime", maxHeight, hardware, slow, budget, tracks)
 	if err != nil {
 		return nil, err
 	}

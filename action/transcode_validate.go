@@ -58,6 +58,11 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 		if err != nil || snapshot == nil || plan.Mode != snapshot.Mode || plan.PolicyDigest != snapshot.Digest || (plan.QualityValidation == nil) != audioOnly {
 			return StepResult{Status: StepFailed, Error: "mode final quality policy is missing or mismatched; original preserved"}, nil
 		}
+		// The tracks the plan keeps are the ones the frozen policy keeps of
+		// this source, and no others.
+		if !trackSelectionMatches(snapshot, ec.State, plan) {
+			return StepResult{Status: StepFailed, Error: "the plan's track selection does not match the goal's frozen policy and the source; original preserved"}, nil
+		}
 		if audioOnly {
 			// The video was copied, so the proof is bit-identical video, not
 			// a perceptual score; only a policy that allows it may use it.
@@ -233,6 +238,7 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 	if c := ec.State["conversions"]; c != nil {
 		result["conversions"] = c
 	}
+	addTrackReport(result, ec.State)
 	bitDepthStatus := "not_requested"
 	if plan.ExpectedBitDepth > 0 {
 		bitDepthStatus = "ok"
@@ -243,6 +249,9 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 	ec.State["size_saved_bytes"] = saved
 	ec.State["size_saved_percent"] = pct
 	outputs := map[string]any{"result": result, "validation": validation, "candidate_path": outputPath, "output_path": outputPath, "size_saved_bytes": saved, "size_saved_percent": pct, "profile": getString(ec.State, "profile"), "recipe_version": plan.RecipeVersion, "recipe_digest": plan.RecipeDigest}
+	// Operation readers look for an output by its own key, never inside the
+	// result, so the report is an output of its own as well.
+	addTrackReport(outputs, ec.State)
 	if budget != nil {
 		result["size_budget_outcome"] = budget.Outcome
 		outputs[sizeBudgetKey] = budget

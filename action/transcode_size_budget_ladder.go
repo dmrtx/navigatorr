@@ -137,6 +137,8 @@ func (e *Engine) startSizeBudgetLadder(ctx context.Context, ec *ExecutionContext
 			sizeBudgetSkipReasonKey: reason, sizeBudgetSkipMessageKey: message, "plan_note": message}}, true
 	}
 	original := getInt64(ec.State, "original_size")
+	// The other streams are the ones the output keeps (see keptView).
+	keptRep, keptBytes := keptViewOf(ec.State, rep, original)
 	siblings := siblingEvidenceOf(ec.State)
 	budget := policy.BudgetBytes(original, siblings)
 	if budget <= 0 {
@@ -146,17 +148,20 @@ func (e *Engine) startSizeBudgetLadder(ctx context.Context, ec *ExecutionContext
 		}
 		return decline("size_budget_unavailable", message)
 	}
+	if trackSelectionOf(ec.State) != nil && !caps.TrackSelection {
+		return decline("size_budget_worker_unsupported", "The goal keeps only some audio and subtitle tracks, which needs a worker that follows that selection; upgrade the worker to use it.")
+	}
 	if policy.Audio != nil && !caps.SizeAudioLevels {
 		return decline("size_budget_worker_unsupported", "The size budget needs a worker that converts audio per track to AAC and HE-AAC; upgrade the worker to use it.")
 	}
 	if snapshot.Size.AudioOnlyFallback && caps.SizeAudioOnly {
-		if audioMode, _, fits := sizeBudgetAudioOnlyLevel(policy, rep, original, budget); fits {
+		if audioMode, _, fits := sizeBudgetAudioOnlyLevel(policy, keptRep, keptBytes, budget); fits {
 			// Copying the video loses no picture quality, and also answers a
 			// budget too small for any video bitrate.
 			return e.startSizeBudgetAudioOnly(ctx, ec, budget, audioMode)
 		}
 	}
-	enc := planSizeBudgetEncode(policy, rep, original, budget)
+	enc := planSizeBudgetEncode(policy, keptRep, keptBytes, budget)
 	if enc.Reason != "" {
 		return decline(enc.Reason, enc.Message)
 	}
@@ -269,7 +274,8 @@ func (e *Engine) advanceSizeBudgetRung(ec *ExecutionContext, candidateBytes int6
 	}
 	policy := snapshot.Size.SizeBudget
 	rep := getSourceReport(ec.State["source_report"])
-	enc := planSizeBudgetEncode(policy, rep, getInt64(ec.State, "original_size"), rec.BudgetBytes)
+	keptRep, keptBytes := keptViewOf(ec.State, rep, getInt64(ec.State, "original_size"))
+	enc := planSizeBudgetEncode(policy, keptRep, keptBytes, rec.BudgetBytes)
 	if enc.Reason != "" {
 		return StepResult{Status: StepFailed, Error: "size budget encode can no longer be planned for the next VideoToolbox step (fail closed)"}, true
 	}

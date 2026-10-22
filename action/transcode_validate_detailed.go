@@ -67,6 +67,15 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 	if plan.ExpectedBitDepth > 0 && outVideo[0].BitDepth != plan.ExpectedBitDepth {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("Video bit depth mismatch: plan requires %d-bit output but candidate is %d-bit (fail closed)", plan.ExpectedBitDepth, outVideo[0].BitDepth)}, nil
 	}
+	// The tracks the plan keeps are the output's audio and subtitles, exactly:
+	// no more and no fewer. That is a hard invariant like the video count, not
+	// a discrepancy anyone may accept.
+	origAudio, origSubs := getStreamsList(origMap, "audio"), getStreamsList(origMap, "subtitles")
+	sourceSubtitles := origSubs
+	origAudio, origSubs = keptStreams(origAudio, origSubs, plan.Tracks)
+	if plan.Tracks != nil && (len(outRep.Audio) != len(origAudio) || len(outRep.Subtitles) != len(origSubs)) {
+		return StepResult{Status: StepFailed, Error: fmt.Sprintf("Track selection mismatch: the plan keeps %d audio and %d subtitle tracks, the output has %d and %d (fail closed)", len(origAudio), len(origSubs), len(outRep.Audio), len(outRep.Subtitles))}, nil
+	}
 	if acceptValidationLoss {
 		ec.State["validation_decision_applied"] = ec.Decision
 		return StepResult{Status: StepCompleted, Outputs: map[string]any{"decision_applied": ec.Decision, "note": "validation discrepancy accepted by user decision after hard candidate invariants passed"}}, nil
@@ -99,7 +108,6 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 	if origCovers, outCovers := len(mediainspect.CoverArtStreams(origAllVideo)), len(outRep.CoverArt()); outCovers != origCovers {
 		return waitDecision(fmt.Sprintf("Cover art count mismatch: original=%d output=%d", origCovers, outCovers)), nil
 	}
-	origAudio := getStreamsList(origMap, "audio")
 	if len(outRep.Audio) != len(origAudio) {
 		missing := make([]string, 0)
 		for _, a := range origAudio {
@@ -151,6 +159,12 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 		if a.Language != "" && normCodec(a.Language) != normCodec(b.Language) {
 			return waitDecision(fmt.Sprintf("Audio language mismatch at stream %d: original=%s output=%s", i, a.Language, b.Language)), nil
 		}
+		// Under a selection the default flag is part of the plan: a kept track
+		// the source marked default, or the first kept track when the default
+		// was dropped, must be default in the output.
+		if plan.Tracks != nil && a.Disposition["default"] > 0 && b.Disposition["default"] == 0 {
+			return waitDecision(fmt.Sprintf("Default audio disposition lost at stream %d", i)), nil
+		}
 		if a.Channels > 0 && b.Channels != a.Channels {
 			return waitDecision(fmt.Sprintf("Audio channel mismatch at stream %d: original=%d output=%d", i, a.Channels, b.Channels)), nil
 		}
@@ -158,7 +172,6 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 			return waitDecision(fmt.Sprintf("Audio layout mismatch at stream %d: original=%s output=%s", i, a.ChannelLayout, b.ChannelLayout)), nil
 		}
 	}
-	origSubs := getStreamsList(origMap, "subtitles")
 	if len(outRep.Subtitles) != len(origSubs) {
 		return waitDecision(fmt.Sprintf("Subtitle stream lost: original=%d output=%d", len(origSubs), len(outRep.Subtitles))), nil
 	}
@@ -166,9 +179,19 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 	for _, a := range plan.SubtitleActions {
 		actions[a.TypeIndex] = a
 	}
+	// An action belongs to the subtitle's position among all of the source's
+	// subtitles, which is not its position in the output once some are dropped.
+	position := map[int]int{}
+	for i, s := range sourceSubtitles {
+		position[s.Index] = i
+	}
 	for i, a := range origSubs {
 		b := outRep.Subtitles[i]
-		act, ok := actions[i]
+		at := i
+		if plan.Tracks != nil {
+			at = position[a.Index]
+		}
+		act, ok := actions[at]
 		if !ok {
 			return StepResult{Status: StepFailed, Error: fmt.Sprintf("plan missing subtitle action %d during validation", i)}, nil
 		}
@@ -225,6 +248,7 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 	if c := ec.State["conversions"]; c != nil {
 		result["conversions"] = c
 	}
+	addTrackReport(result, ec.State)
 	bitDepthStatus := "not_requested"
 	if plan.ExpectedBitDepth > 0 {
 		bitDepthStatus = "ok"
@@ -234,7 +258,9 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 	ec.State["result"] = result
 	ec.State["size_saved_bytes"] = saved
 	ec.State["size_saved_percent"] = pct
-	return StepResult{Status: StepCompleted, Outputs: map[string]any{"result": result, "validation": validation, "candidate_path": outputPath, "output_path": outputPath, "size_saved_bytes": saved, "size_saved_percent": pct, "profile": getString(ec.State, "profile"), "recipe_version": plan.RecipeVersion, "recipe_digest": plan.RecipeDigest}}, nil
+	outputs := map[string]any{"result": result, "validation": validation, "candidate_path": outputPath, "output_path": outputPath, "size_saved_bytes": saved, "size_saved_percent": pct, "profile": getString(ec.State, "profile"), "recipe_version": plan.RecipeVersion, "recipe_digest": plan.RecipeDigest}
+	addTrackReport(outputs, ec.State)
+	return StepResult{Status: StepCompleted, Outputs: outputs}, nil
 }
 
 func expectedVideoCodec(codec string) string {

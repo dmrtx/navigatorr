@@ -116,7 +116,10 @@ func (e *Engine) sizeAudioOnlyFallback(ctx context.Context, ec *ExecutionContext
 	}
 	rep := getSourceReport(ec.State["source_report"])
 	original := getInt64(ec.State, "original_size")
-	estimate := estimateAudioOnly(rep, original, audioMode)
+	// The estimate is of the output, so it counts the kept tracks only: dropped
+	// ones are savings, measured against the whole original below.
+	keptRep, keptBytes := keptViewOf(ec.State, rep, original)
+	estimate := estimateAudioOnly(keptRep, keptBytes, audioMode)
 	if estimate.Compacted == 0 {
 		return StepResult{}, false
 	}

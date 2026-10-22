@@ -108,6 +108,15 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 			return StepResult{Status: StepFailed, Error: "worker does not support the size goal's audio levels; upgrade the worker before encoding"}, nil
 		}
 	}
+	if plan.Tracks != nil && !getBool(ec.State, "transcode_reconcile") {
+		caps, err := e.deps.Transcode.Capabilities(ctx)
+		if err != nil {
+			return StepResult{Status: StepFailed, Error: fmt.Sprintf("checking track selection capability: %v", err)}, nil
+		}
+		if !caps.TrackSelection {
+			return StepResult{Status: StepFailed, Error: errTrackSelectionWorker + " before encoding"}, nil
+		}
+	}
 	if transcode.IsSizeAudioOnlyPlan(plan) && !getBool(ec.State, "transcode_reconcile") {
 		caps, err := e.deps.Transcode.Capabilities(ctx)
 		if err != nil {
