@@ -292,10 +292,13 @@ func TestSizeBudgetAudioOnlyCarriesTheBudget(t *testing.T) {
 
 	// validate runs the validate step on an audio-only candidate of n bytes
 	// for a source of original bytes.
-	validate := func(p *transcode.Plan, original int64, n int) StepResult {
+	validate := func(p *transcode.Plan, original int64, n int64) StepResult {
 		t.Helper()
 		candidate := t.TempDir() + "/candidate.mkv"
-		if err := os.WriteFile(candidate, make([]byte, n), 0600); err != nil {
+		if err := os.WriteFile(candidate, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Truncate(candidate, n); err != nil {
 			t.Fatal(err)
 		}
 		state := map[string]any{}
@@ -329,15 +332,8 @@ func TestSizeBudgetAudioOnlyCarriesTheBudget(t *testing.T) {
 	if res := validate(unbounded, 10_700_000_000, 80); res.Status != StepFailed || !strings.Contains(res.Error, "frozen size budget") {
 		t.Fatalf("an audio-only plan without the budget: %+v", res)
 	}
-	// A file over the ceiling is never offered.
-	const small = int64(1000)
-	smallState := map[string]any{"original_size": small}
-	smallBudget, _ := sizeAudioOnlyBudget(c.snapshot, smallState)
-	held, err := sizeAudioOnlyBudgetPlan(plan, smallBudget)
-	if err != nil || smallBudget <= 0 || smallBudget >= small {
-		t.Fatalf("budget %d: %v", smallBudget, err)
-	}
-	if res := validate(held, small, int(smallBudget)+1); res.Status != StepCompleted || res.Outputs["reason_code"] != SizeBudgetExceeded {
+	// A file over the ceiling is never offered (a sparse file stands in for it).
+	if res := validate(plan, 10_700_000_000, budget+1); res.Status != StepCompleted || res.Outputs["reason_code"] != SizeBudgetExceeded {
 		t.Fatalf("a candidate over the budget: %+v", res)
 	}
 }

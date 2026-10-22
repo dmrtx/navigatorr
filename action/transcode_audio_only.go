@@ -11,8 +11,8 @@ import (
 	"github.com/jakenesler/navigatorr/transcode"
 )
 
-// audioOnlyEstimate is the cheap pre-screen for a size v3 audio-only plan:
-// the source size minus what compacting its lossless tracks would save,
+// audioOnlyEstimate is the cheap pre-screen for a size audio-only plan: the
+// source size minus what converting its audio under an audio mode would save,
 // from stream bitrates and Matroska statistics. A track whose size is
 // unknown saves nothing here, so an unknown never passes the gate.
 type audioOnlyEstimate struct {
@@ -21,14 +21,14 @@ type audioOnlyEstimate struct {
 	Unknown        int
 }
 
-func estimateAudioOnly(rep *mediainspect.DetailedReport, sourceBytes int64) audioOnlyEstimate {
+func estimateAudioOnly(rep *mediainspect.DetailedReport, sourceBytes int64, audioMode string) audioOnlyEstimate {
 	var e audioOnlyEstimate
 	if rep == nil || sourceBytes <= 0 || rep.DurationSec <= 0 {
 		return e
 	}
 	var saved int64
 	for _, a := range rep.Audio {
-		target, kbps := transcode.AudioTarget(transcode.AudioModeCompactLossless, transcode.DetailedAudioTrack(a.Codec, a.Profile, a.Title, a.Tags, a.Channels, a.ChannelLayout))
+		target, kbps := transcode.AudioTarget(audioMode, audioTrackOf(a, rep.DurationSec))
 		if target == "copy" {
 			continue
 		}
@@ -81,18 +81,26 @@ func audioStreamBytes(a mediainspect.DetailedStream, duration float64, fileBytes
 // floor and the savings gate, the lossless audio may still be compacted with
 // the video stream-copied. It leaves the result to the caller
 // (no_suitable_candidate) when the frozen policy or the source has nothing for
-// it to do.
-func (e *Engine) sizeAudioOnlyFallback(ctx context.Context, ec *ExecutionContext, outputs map[string]any) (StepResult, bool) {
+// it to do. audioMode is the audio mode the plan converts with; empty takes
+// the starting plan's own (a size budget under policy v5 names its level).
+func (e *Engine) sizeAudioOnlyFallback(ctx context.Context, ec *ExecutionContext, outputs map[string]any, audioMode string) (StepResult, bool) {
 	if ec.ActionName != "transcode_media" || getString(ec.Inputs, "mode") != "size" {
 		return StepResult{}, false
 	}
 	snapshot, err := freezeModePolicy(ec)
-	if err != nil || snapshot == nil || snapshot.Mode != "size" || snapshot.workerVersion() != transcode.ModePolicyV3 || snapshot.Size == nil || !snapshot.Size.AudioOnlyFallback {
+	if err != nil || snapshot == nil || snapshot.Mode != "size" || !transcode.IsSizePolicyVersion(snapshot.workerVersion()) || snapshot.Size == nil || !snapshot.Size.AudioOnlyFallback {
 		return StepResult{}, false
+	}
+	base := getPlan(ec.State["plan"])
+	if base == nil {
+		return StepResult{Status: StepFailed, Error: "the frozen size plan is missing (fail closed)"}, true
+	}
+	if audioMode == "" {
+		audioMode = base.AudioMode
 	}
 	rep := getSourceReport(ec.State["source_report"])
 	original := getInt64(ec.State, "original_size")
-	estimate := estimateAudioOnly(rep, original)
+	estimate := estimateAudioOnly(rep, original, audioMode)
 	if estimate.Compacted == 0 {
 		return StepResult{}, false
 	}
@@ -125,7 +133,11 @@ func (e *Engine) sizeAudioOnlyFallback(ctx context.Context, ec *ExecutionContext
 	if !caps.SizeAudioOnly {
 		return skip("audio_only_worker_unsupported")
 	}
-	plan, err := transcode.NewSizeAudioOnlyPlan(getPlan(ec.State["plan"]), video[0].BitDepth)
+	base, err = planWithAudioMode(base, audioMode)
+	if err != nil {
+		return StepResult{Status: StepFailed, Error: fmt.Sprintf("building audio-only plan: %v", err)}, true
+	}
+	plan, err := transcode.NewSizeAudioOnlyPlan(base, video[0].BitDepth)
 	if err != nil {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("building audio-only plan: %v", err)}, true
 	}
@@ -138,5 +150,8 @@ func (e *Engine) sizeAudioOnlyFallback(ctx context.Context, ec *ExecutionContext
 	outputs["plan_source"] = "audio_only"
 	outputs["plan_digest"] = plan.PlanDigest
 	outputs["plan_note"] = "No video encode met the quality floor and the savings gate; the video is copied unchanged and only lossless audio is compacted."
+	if transcode.IsAudioLevelMode(plan.AudioMode) {
+		outputs["plan_note"] = "No video encode met the quality floor and the savings gate; the video is copied unchanged and only the audio is re-encoded."
+	}
 	return StepResult{Status: StepCompleted, Outputs: outputs}, true
 }

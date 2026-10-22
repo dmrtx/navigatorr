@@ -122,7 +122,8 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 	}
 	for i, a := range origAudio {
 		b := outRep.Audio[i]
-		target, _ := transcode.AudioTarget(plan.AudioMode, transcode.DetailedAudioTrack(a.Codec, a.Profile, a.Title, a.Tags, a.Channels, a.ChannelLayout))
+		out := transcode.AudioOutputFor(plan.AudioMode, audioTrackOf(a, origDur))
+		target := out.Codec
 		// Only an AAC conversion can remap the layout; a copied track (PCM in
 		// Matroska reports none) is checked by codec and channels.
 		checkLayout := target != "copy"
@@ -131,6 +132,21 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 		}
 		if target != normCodec(b.Codec) {
 			return waitDecision(fmt.Sprintf("Audio codec mismatch at stream %d: original=%s output=%s", i, a.Codec, b.Codec)), nil
+		}
+		if transcode.IsAudioLevelMode(plan.AudioMode) && checkLayout {
+			// A converted track must be the profile of its level at about its
+			// planned bitrate. The encoder is variable bitrate, so only gross
+			// overshoot is refused, as the worker's packet check does.
+			wantProfile := "LC"
+			if out.HEAAC {
+				wantProfile = "HE-AAC"
+			}
+			if !strings.EqualFold(b.Profile, wantProfile) {
+				return waitDecision(fmt.Sprintf("Audio profile mismatch at stream %d: expected %s, output is %q", i, wantProfile, b.Profile)), nil
+			}
+			if b.BitRate > 0 && b.BitRate > transcode.AudioBitrateCeilingBps(out.Kbps) {
+				return waitDecision(fmt.Sprintf("Audio bitrate mismatch at stream %d: planned %d kbps, output is %d kbps", i, out.Kbps, b.BitRate/1000)), nil
+			}
 		}
 		if a.Language != "" && normCodec(a.Language) != normCodec(b.Language) {
 			return waitDecision(fmt.Sprintf("Audio language mismatch at stream %d: original=%s output=%s", i, a.Language, b.Language)), nil

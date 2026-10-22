@@ -187,6 +187,11 @@ func sizeBudgetPlanMatches(snapshot *ModePolicySnapshot, state map[string]any, p
 	if enc.Reason != "" || rec.BudgetBytes != budget || rec.TargetBytes != enc.TargetBytes || rec.VideoBitrateKbps != enc.X265.BitrateKbps {
 		return false
 	}
+	// The audio level is chosen again from the source and must be the plan's and
+	// the record's, so a plan cannot carry a level the policy would not choose.
+	if plan.AudioMode != enc.AudioMode || sizeBudgetAudioRecordJSON(rec.Audio) != sizeBudgetAudioRecordJSON(enc.Audio) {
+		return false
+	}
 	if sizeBudgetIsLadder(rec) {
 		return sizeBudgetLadderPlanMatches(snapshot, rep, plan, rec, enc, budget)
 	}

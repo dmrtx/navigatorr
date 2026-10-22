@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
 )
 
@@ -24,6 +25,9 @@ type SourceStream struct {
 	Layout      string         `json:"channel_layout,omitempty"`
 	Disposition map[string]int `json:"disposition,omitempty"`
 	StartTime   *float64       `json:"start_time,omitempty"`
+	// BitrateKbps is an audio track's source bitrate (zero when the probe
+	// states none), which the size goal's audio levels read.
+	BitrateKbps int `json:"bitrate_kbps,omitempty"`
 	// Detailed video fields (zero/empty when the probe could not determine
 	// them). They drive the worker-local pre-publish policy validation so an
 	// invalid candidate is rejected before any NAS publish.
@@ -41,7 +45,7 @@ type SourceStream struct {
 
 // AudioTrack is the stream as the audio policy reads it.
 func (s SourceStream) AudioTrack() transcode.AudioTrack {
-	return transcode.AudioTrack{Codec: s.Codec, Profile: s.Profile, Title: s.Title, Handler: s.Handler, Channels: s.Channels, Layout: s.Layout}
+	return transcode.AudioTrack{Codec: s.Codec, Profile: s.Profile, Title: s.Title, Handler: s.Handler, Channels: s.Channels, Layout: s.Layout, BitrateKbps: s.BitrateKbps}
 }
 
 // IsAttachedPicture reports whether s is embedded cover art (a video stream
@@ -85,6 +89,7 @@ func ProbeSourceDetails(ctx context.Context, ffprobePath, filePath string) (Sour
 	var probe struct {
 		Streams []struct {
 			Index            int               `json:"index"`
+			BitRate          any               `json:"bit_rate"`
 			CodecType        string            `json:"codec_type"`
 			CodecName        string            `json:"codec_name"`
 			Profile          string            `json:"profile"`
@@ -139,12 +144,16 @@ func ProbeSourceDetails(ctx context.Context, ffprobePath, filePath string) (Sour
 		if v, err := strconv.ParseFloat(st.StartTime, 64); err == nil && isFiniteQuality(v) {
 			startTime = &v
 		}
+		bitrateKbps := 0
+		if kind == "audio" {
+			bitrateKbps = transcode.SourceAudioKbps(mediainspect.ParseBitRate(st.BitRate, st.Tags), st.Tags, duration)
+		}
 		out = append(out, SourceStream{
 			Index: st.Index, TypeIndex: typeIdx, Kind: kind, Codec: norm(st.CodecName),
 			Language: lang, Title: title, Handler: transcode.AudioHandler(st.Tags), Channels: st.Channels, Layout: st.ChannelLayout, Disposition: st.Disposition,
 			StartTime: startTime,
 			Width:     st.Width, Height: st.Height, BitDepth: bitDepth, PixelFormat: norm(st.PixFmt), Profile: strings.TrimSpace(st.Profile),
-			Filename: filename, MimeType: mimeType,
+			Filename: filename, MimeType: mimeType, BitrateKbps: bitrateKbps,
 		})
 	}
 	return SourceProbe{Path: filePath, Streams: out, DurationSec: duration, Chapters: len(probe.Chapters)}, nil
@@ -199,6 +208,8 @@ type StreamAction struct {
 	Codec       string         `json:"codec"`
 	TargetCodec string         `json:"target_codec"`
 	BitrateKbps int            `json:"bitrate_kbps,omitempty"`
+	// HEAAC is set on an audio track converted to HE-AAC rather than AAC-LC.
+	HEAAC bool `json:"he_aac,omitempty"`
 	// Audio only: the source title, handler, channels and layout, used to
 	// retitle a converted track whose title or handler names its old format.
 	Title    string `json:"title,omitempty"`
@@ -311,10 +322,14 @@ func BuildExecutionPlan(plan *transcode.Plan, streams []SourceStream, duration f
 		case "video":
 			ep.Streams = append(ep.Streams, StreamAction{Kind: "video", SourceIndex: s.Index, TypeIndex: s.TypeIndex, Codec: s.Codec, TargetCodec: plan.VideoCodec})
 		case "audio":
-			target, bitrate := transcode.AudioTarget(plan.AudioMode, s.AudioTrack())
-			ep.Streams = append(ep.Streams, StreamAction{Kind: "audio", SourceIndex: s.Index, TypeIndex: s.TypeIndex, Codec: s.Codec, TargetCodec: target, BitrateKbps: bitrate, Disposition: s.Disposition, Title: s.Title, Handler: s.Handler, Channels: s.Channels, Layout: s.Layout})
+			out := transcode.AudioOutputFor(plan.AudioMode, s.AudioTrack())
+			target, bitrate := out.Codec, out.Kbps
+			ep.Streams = append(ep.Streams, StreamAction{Kind: "audio", SourceIndex: s.Index, TypeIndex: s.TypeIndex, Codec: s.Codec, TargetCodec: target, BitrateKbps: bitrate, HEAAC: out.HEAAC, Disposition: s.Disposition, Title: s.Title, Handler: s.Handler, Channels: s.Channels, Layout: s.Layout})
 			if target != "copy" {
 				reason := fmt.Sprintf("%s audio requested; AAC at %d kbps, preserving channels and language (lossy)", plan.AudioMode, bitrate)
+				if out.HEAAC {
+					reason = fmt.Sprintf("%s audio requested; HE-AAC at %d kbps, preserving channels and language (lossy)", plan.AudioMode, bitrate)
+				}
 				if transcode.ObjectAudio(s.AudioTrack()) {
 					reason += "; Atmos/DTS:X object and height metadata dropped, channel bed kept"
 				}

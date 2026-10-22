@@ -415,8 +415,13 @@ func modePolicyContent(mode string, anime bool, maxHeight int, hardware *transco
 		// the intended SDR/resolution conversion, measured separately.
 		p.Audio.Mode = "compact"
 	} else if mode == "size" {
-		// Same quality floor as v2; only lossless audio is converted.
+		// Same quality floor as v2; only lossless audio is converted. A size
+		// budget with audio levels starts from the first one, and its plan
+		// takes the level chosen for the source.
 		p.Audio.Mode = transcode.AudioModeCompactLossless
+		if budget != nil && budget.Audio != nil {
+			p.Audio.Mode = budget.Audio.Modes[0]
+		}
 		p.Optimization.Search.QualityValues = []int{22, 24, 26, 28, 30}
 	} else {
 		p.Optimization.Quality.VMAF.Target = 96

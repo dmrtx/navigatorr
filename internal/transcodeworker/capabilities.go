@@ -37,13 +37,13 @@ func ValidateEncoderCapabilities(ctx context.Context, ffmpegPath string, plan *t
 	if plan == nil {
 		return fmt.Errorf("encoder_capability_unsupported: transcode plan is nil")
 	}
-	if norm(plan.AudioMode) == "he_aac" {
+	if norm(plan.AudioMode) == "he_aac" || norm(plan.AudioMode) == transcode.AudioModeSizeHEAAC {
 		available, err := ProbeAvailableEncoders(ctx, ffmpegPath)
 		if err != nil || !available["aac_at"] {
 			return fmt.Errorf("encoder_capability_unsupported: HE-AAC requires AudioToolbox aac_at: %v", err)
 		}
 	}
-	if norm(plan.AudioMode) == "compact" || norm(plan.AudioMode) == transcode.AudioModeCompactLossless {
+	if norm(plan.AudioMode) == "compact" || norm(plan.AudioMode) == transcode.AudioModeCompactLossless || transcode.IsAudioLevelMode(norm(plan.AudioMode)) {
 		available, err := ProbeAvailableEncoders(ctx, ffmpegPath)
 		if err != nil || !available["aac"] {
 			return fmt.Errorf("encoder_capability_unsupported: compact audio requires AAC encoder: %v", err)
@@ -225,6 +225,9 @@ func probeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratch
 	// Audio-only size plans stream-copy the video (keeping leading non-key
 	// packets) and prove it unchanged from ffprobe's per-packet hashes.
 	caps.SizeAudioOnly = caps.SizeModeV3
+	// Size policy v5 converts per track to AAC-LC or HE-AAC, so it needs both
+	// encoders.
+	caps.SizeAudioLevels = caps.CompactAudio && caps.HEAACAudio
 	// Search-only flags, kept for fingerprint stability; they go when the
 	// fingerprint is versioned.
 	// Mode searches may stretch their budget while work keeps finishing.

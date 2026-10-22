@@ -32,9 +32,22 @@ type VideoCopyEvidence struct {
 	ReasonCodes      []string `json:"reason_codes,omitempty"`
 }
 
-// IsSizeAudioOnlyPlan reports a size v3 plan that copies the video stream.
+// IsSizeAudioOnlyPlan reports a size plan (v3 or v5) that copies the video
+// stream.
 func IsSizeAudioOnlyPlan(p *Plan) bool {
-	return p != nil && p.Mode == "size" && p.ModePolicyVersion == ModePolicyV3 && strings.EqualFold(strings.TrimSpace(p.VideoCodec), VideoCodecCopy)
+	return p != nil && p.Mode == "size" && IsSizePolicyVersion(p.ModePolicyVersion) && strings.EqualFold(strings.TrimSpace(p.VideoCodec), VideoCodecCopy)
+}
+
+// SizeAudioMode reports the audio mode a size plan of this policy version
+// carries: compact_lossless under v3, one of the audio levels under v5.
+func SizeAudioMode(version, audioMode string) bool {
+	switch version {
+	case ModePolicyV3:
+		return audioMode == AudioModeCompactLossless
+	case ModePolicyV5:
+		return IsAudioLevelMode(audioMode)
+	}
+	return false
 }
 
 // NewSizeAudioOnlyPlan derives the audio-only plan from a frozen size v3
@@ -42,8 +55,8 @@ func IsSizeAudioOnlyPlan(p *Plan) bool {
 // video encoder setting cleared. No perceptual validation applies because
 // the video is not re-encoded; the final check is VideoCopyEvidence.
 func NewSizeAudioOnlyPlan(base *Plan, sourceBitDepth int) (*Plan, error) {
-	if base == nil || base.Mode != "size" || base.ModePolicyVersion != ModePolicyV3 || base.AudioMode != AudioModeCompactLossless || base.Compact != nil || base.SizePolicy == nil || base.PolicyDigest == "" {
-		return nil, fmt.Errorf("audio-only plan requires a frozen size v3 plan with lossless audio compaction (fail closed)")
+	if base == nil || base.Mode != "size" || !SizeAudioMode(base.ModePolicyVersion, base.AudioMode) || base.Compact != nil || base.SizePolicy == nil || base.PolicyDigest == "" {
+		return nil, fmt.Errorf("audio-only plan requires a frozen size plan with its audio policy (fail closed)")
 	}
 	if sourceBitDepth != 8 && sourceBitDepth != 10 {
 		return nil, fmt.Errorf("audio-only plan requires an 8- or 10-bit source (fail closed)")
@@ -91,8 +104,8 @@ func ValidateSizeAudioOnlyShape(p *Plan) error {
 	if encoderKnobs || p.Compact != nil || p.Podcast != nil || p.QualityValidation != nil || len(p.AppliedFallbacks) > 0 {
 		return fmt.Errorf("audio-only plan carries video encoder or perceptual settings (fail closed)")
 	}
-	if p.AudioMode != AudioModeCompactLossless || p.SizePolicy == nil || p.PolicyDigest == "" || (p.ExpectedBitDepth != 8 && p.ExpectedBitDepth != 10) {
-		return fmt.Errorf("audio-only plan requires lossless audio compaction, a frozen size policy and the source bit depth (fail closed)")
+	if !SizeAudioMode(p.ModePolicyVersion, p.AudioMode) || p.SizePolicy == nil || p.PolicyDigest == "" || (p.ExpectedBitDepth != 8 && p.ExpectedBitDepth != 10) {
+		return fmt.Errorf("audio-only plan requires its size audio policy, a frozen size policy and the source bit depth (fail closed)")
 	}
 	return nil
 }
