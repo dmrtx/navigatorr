@@ -78,7 +78,9 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 	}
 	if acceptValidationLoss {
 		ec.State["validation_decision_applied"] = ec.Decision
-		return StepResult{Status: StepCompleted, Outputs: map[string]any{"decision_applied": ec.Decision, "note": "validation discrepancy accepted by user decision after hard candidate invariants passed"}}, nil
+		outputs := map[string]any{"decision_applied": ec.Decision, "note": "validation discrepancy accepted by user decision after hard candidate invariants passed"}
+		addTrackReport(outputs, ec.State)
+		return StepResult{Status: StepCompleted, Outputs: outputs}, nil
 	}
 	origDur := getFloat(origMap, "duration_sec")
 	if origDur > 0 && outRep.DurationSec > 0 {

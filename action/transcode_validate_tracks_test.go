@@ -107,3 +107,53 @@ func TestDetailedValidationHoldsTheOutputToTheKeptTracks(t *testing.T) {
 		})
 	}
 }
+
+// Accepting a validation discrepancy still publishes a candidate made on the
+// plan's track selection, so its outputs carry the report like the other
+// validation paths do.
+func TestAcceptedValidationLossStillReportsTheTracks(t *testing.T) {
+	dir := t.TempDir()
+	candidate := filepath.Join(dir, "candidate.mkv")
+	if err := os.WriteFile(candidate, []byte("candidate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The kept audio track's language differs from the source's: a discrepancy
+	// a user may accept, unlike a count mismatch.
+	probe := `{"streams": [{"index": 0, "codec_type": "video", "codec_name": "hevc", "pix_fmt": "yuv420p", "width": 1920, "height": 1080, "bits_per_raw_sample": "8"},
+		{"index": 1, "codec_type": "audio", "codec_name": "eac3", "channels": 6, "channel_layout": "5.1", "bit_rate": "640000", "tags": {"language": "spa"}}],
+		"format": {"format_name": "matroska,webm", "duration": "1420"}}`
+	ffprobe := filepath.Join(dir, "ffprobe")
+	if err := os.WriteFile(ffprobe, []byte("#!/bin/sh\ncat <<'JSON'\n"+probe+"\nJSON\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	plan := &transcode.Plan{VideoCodec: "libx265", AudioMode: "copy", ModePolicyVersion: transcode.ModePolicyV6, Tracks: &transcode.TrackSelection{KeepAudio: []int{1}}}
+	report := &TrackSelectionReport{Message: "Kept 1 of 2 audio tracks (eng)"}
+	ec := &ExecutionContext{Inputs: map[string]any{}, Decision: "accept_loss", State: map[string]any{
+		"candidate_path": candidate,
+		"plan":           plan,
+		trackReportKey:   report,
+		"original": map[string]any{"size_bytes": int64(1 << 30), "duration_sec": 1420.0,
+			"video": []mediainspect.DetailedStream{{Index: 0, Kind: "video", Codec: "h264", PixelFormat: "yuv420p", Width: 1920, Height: 1080, BitDepth: 8}},
+			"audio": []mediainspect.DetailedStream{
+				{Index: 1, Kind: "audio", Codec: "eac3", Channels: 6, ChannelLayout: "5.1", Language: "eng", BitRate: 640_000},
+				{Index: 2, Kind: "audio", Codec: "eac3", Channels: 6, ChannelLayout: "5.1", Language: "fre", BitRate: 640_000},
+			}},
+	}}
+	result, err := NewEngine(EngineDeps{Ffprobe: ffprobe}).validateCandidateDetailed(context.Background(), ec)
+	if err != nil || result.Status != StepCompleted || result.Outputs["decision_applied"] != "accept_loss" {
+		t.Fatalf("status %s (%s%s): %v", result.Status, result.Error, result.WaitingReason, err)
+	}
+	if result.Outputs["tracks"] != report || result.Outputs["tracks_message"] != report.Message {
+		t.Fatalf("outputs lack the track report: %+v", result.Outputs)
+	}
+	// A plan that keeps every track has no report to carry.
+	delete(ec.State, trackReportKey)
+	plan.Tracks = nil
+	result, err = NewEngine(EngineDeps{Ffprobe: ffprobe}).validateCandidateDetailed(context.Background(), ec)
+	if err != nil || result.Status != StepCompleted {
+		t.Fatalf("status %s: %v", result.Status, err)
+	}
+	if _, ok := result.Outputs["tracks"]; ok {
+		t.Fatalf("a report appeared from nothing: %+v", result.Outputs)
+	}
+}

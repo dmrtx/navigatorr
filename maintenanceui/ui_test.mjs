@@ -3406,7 +3406,7 @@ test("size goal discloses that lossless Atmos and DTS:X become AAC", () => {
 
 test("compact goal says in plain language what it drops and still needs approval", () => {
   const radio = markup.match(/<label class="goal-head"><input type="radio" name="processing-mode" value="compact" \/>[\s\S]*?<\/label>/)?.[0] || "";
-  assert.match(radio, /<strong class="goal-title">Shrink to 1080p SDR<\/strong>/);
+  assert.match(radio, /<strong id="goal-title-compact" class="goal-title">Shrink to 1080p SDR<\/strong>/);
   assert.match(radio, /Use it for 4K or HDR you don't need in 4K\. At least 30% smaller; HDR is removed\./);
   assert.match(markup, /<option value="compact">Shrink to 1080p SDR · At least 30% smaller, HDR removed/);
   assert.match(source, /`Shrink to \$\{item\.max_height \|\| 1080\}p SDR`/);
@@ -4667,7 +4667,7 @@ test("goal names are the same in the form, the reconfigure dialog and job rows",
   const form = markup.slice(markup.indexOf('<fieldset id="processing-goal"'), markup.indexOf("</fieldset>", markup.indexOf('<fieldset id="processing-goal"')));
   const visible = form.slice(0, form.indexOf('<details id="more-goals"'));
   const more = form.slice(form.indexOf('<details id="more-goals"'));
-  assert.match(visible, /value="size" checked[\s\S]*<strong class="goal-title">Save space<\/strong>[\s\S]*value="compact"[\s\S]*<strong class="goal-title">Shrink to 1080p SDR<\/strong>/);
+  assert.match(visible, /value="size" checked[\s\S]*<strong class="goal-title">Save space<\/strong>[\s\S]*value="compact"[\s\S]*<strong id="goal-title-compact" class="goal-title">Shrink to 1080p SDR<\/strong>/);
   assert.doesNotMatch(visible, /value="quality"|value="x265_preserve"/);
   assert.match(more, /<summary>More goals<\/summary>/);
   assert.doesNotMatch(more, /checked/);
@@ -5726,6 +5726,35 @@ test("Choose tracks starts the new job with the earlier job's goal, size limit, 
   h.run('openGoalForm("/media/plain.mkv")');
   assert.equal(h.run("state.goalCarry"), null);
   assert.equal(h.run("state.fileMedia"), null);
+});
+
+test("cancelling Choose tracks drops the carried goal settings and the Shrink card names the carried height", async () => {
+  const { h } = submissionHarness({ radios: true });
+  const sent = [];
+  h.context.capture = (_tool, args) => { sent.push(JSON.parse(args.inputs)); return { id: "submitted" }; };
+  h.run('tool = async (...args) => capture(...args); $("technical").checked = false; $("path").value = ""; state.folderSelected = new Set(); state.selected.clear(); keepLanguages.status = "ready"; keepLanguages.saved = ["eng"];');
+  const title = () => h.elements.get("goal-title-compact").textContent;
+  h.context.job = trackReportFixture({ mode: "compact", goal: { mode: "compact", max_height: 720, allow_slow_preset: true } });
+  await h.run("jobControls(job, true)").children.find((b) => b.textContent === "Choose tracks").listeners.get("click")();
+  assert.equal(title(), "Shrink to 720p SDR");
+  // Back to the files cancels it: nothing stays carried, and the card is whole again.
+  h.elements.get("back-to-files").listeners.get("click")();
+  assert.equal(h.run("state.goalCarry"), null);
+  assert.equal(title(), "Shrink to 1080p SDR");
+  // A later ordinary pick of the same file sends none of it.
+  h.run('$("path").value = "/media/Show/Episode 1.mkv"; setProcessingMode("compact");');
+  await h.run('buildAndSubmitJob("encode")');
+  assert.equal(sent[0].mode, "compact");
+  assert.equal("max_height" in sent[0], false);
+  assert.equal("allow_slow_preset" in sent[0], false);
+  // A carried height is named only for its file and goal.
+  await h.run("jobControls(job, true)").children.find((b) => b.textContent === "Choose tracks").listeners.get("click")();
+  assert.equal(title(), "Shrink to 720p SDR");
+  h.run('$("path").value = "/media/other.mkv"; renderShrinkTitle()');
+  assert.equal(title(), "Shrink to 1080p SDR");
+  h.context.job = trackReportFixture({ goal: { mode: "size" } });
+  await h.run("jobControls(job, true)").children.find((b) => b.textContent === "Choose tracks").listeners.get("click")();
+  assert.equal(title(), "Shrink to 1080p SDR");
 });
 
 test("a file without audio takes subtitle picks alone", async () => {

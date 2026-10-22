@@ -55,9 +55,7 @@ func TestMeasureAudioPacketsFailures(t *testing.T) {
 
 // A scan that stops reading packets is killed, not waited for.
 func TestMeasureAudioPacketsStall(t *testing.T) {
-	old := audioPacketStallTimeout
-	audioPacketStallTimeout = 200 * time.Millisecond
-	t.Cleanup(func() { audioPacketStallTimeout = old })
+	t.Cleanup(SetAudioPacketStallTimeoutForTest(200 * time.Millisecond))
 	start := time.Now()
 	_, err := MeasureAudioPackets(context.Background(), fakePacketProbe(t, "exec sleep 30\n"), "candidate.mkv")
 	pe, ok := AsProbeError(err)
