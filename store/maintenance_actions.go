@@ -23,7 +23,7 @@ func (m maintenanceMemo) bytes() int {
 }
 
 var maintenanceInputKeys = []string{"path", "parent_action_id", "batch_promote_parent_id", "transcode_action_id", "library_context", "service", "series_id", "movie_id", "media_id", "paths", "episode_file_ids", "dry_run", "promote_candidates", "mode", "replace_original"}
-var maintenanceOutputKeys = []string{"resolved_path", "original_sha256", "original", "result", "candidate_size_bytes", "promotion", "recovery_retained", "original_integrity", "promoted", "original_intact", "benchmark_decision", "expected_savings_percent", "transcode_phase", "progress_is_stale", "progress", "speed", "last_progress_at", "counts", "batch_promotion", "benchmark_comparison_available", "job_id", "transcode_job_id", "paused", "skip_transcode", "batch_item_generations", "batch_settings_revision", "batch_retry_pending", "post_batch_promotion", "mode", "size_main10", "size_audio_only", "audio_only_estimated_bytes", "quality_evidence", "automatic_search", "conversions", "reason_code", "hardware_continuation", "size_budget", "size_budget_siblings", "size_budget_skip_message", "candidate_removed", "candidate_cleanup"}
+var maintenanceOutputKeys = []string{"resolved_path", "original_sha256", "original", "result", "candidate_size_bytes", "promotion", "recovery_retained", "original_integrity", "promoted", "original_intact", "benchmark_decision", "expected_savings_percent", "transcode_phase", "progress_is_stale", "progress", "speed", "last_progress_at", "counts", "batch_promotion", "benchmark_comparison_available", "job_id", "transcode_job_id", "paused", "skip_transcode", "batch_item_generations", "batch_settings_revision", "batch_retry_pending", "post_batch_promotion", "mode", "size_main10", "size_audio_only", "audio_only_estimated_bytes", "quality_evidence", "automatic_search", "conversions", "reason_code", "hardware_continuation", "size_budget", "size_budget_siblings", "size_budget_skip_message", "candidate_removed", "candidate_cleanup", "batch_promotion_plan", "batch_promotion_approved", "work_progress", "tracks_message"}
 
 // maintenanceHardwareNote begins the winner uncertainty that says why a media
 // engine result was chosen. It must equal transcode.HardwareSelectedNote;
@@ -158,6 +158,23 @@ func maintenanceJSON(raw string, keys []string) string {
 					kept["final"] = json.RawMessage(maintenanceJSON(string(final), []string{"verdict", "failures", "measured"}))
 				}
 				value, _ = json.Marshal(kept)
+			case "batch_promotion_plan":
+				// The queue needs which candidates a prepared plan covers and
+				// what to call them, not their paths and hashes.
+				var members []map[string]json.RawMessage
+				_ = json.Unmarshal(nested["members"], &members)
+				kept := make([]map[string]json.RawMessage, 0, len(members))
+				for _, m := range members {
+					row := map[string]json.RawMessage{}
+					for _, k := range []string{"item_key", "episode", "transcode_action_id", "original_path"} {
+						if v, ok := m[k]; ok {
+							row[k] = v
+						}
+					}
+					kept = append(kept, row)
+				}
+				members2, _ := json.Marshal(kept)
+				value, _ = json.Marshal(map[string]json.RawMessage{"members": members2})
 			case "benchmark_decision":
 				if winner, exists := nested["winner"]; exists {
 					nested = map[string]json.RawMessage{"winner": maintenanceWinner(winner)}

@@ -20,8 +20,24 @@ type batchItemView struct {
 	ReplacementActionID string `json:"replacement_action_id,omitempty"`
 	ReplacementStatus   string `json:"replacement_status,omitempty"`
 	Replaced            bool   `json:"replaced,omitempty"`
-	CanReconfigure      bool   `json:"can_reconfigure,omitempty"`
-	Mode                string `json:"mode,omitempty"`
+	// ReplacementPlan says the file is part of the batch's prepared
+	// replacement plan and has no replacement job yet: "review" while the plan
+	// waits for approval, "queued" once approved. Such a file offers no
+	// replacement of its own.
+	ReplacementPlan string `json:"replacement_plan,omitempty"`
+	// ReplacementFailure says why a failed replacement stopped and whether the
+	// original is intact; Where says where the new file and any backup are.
+	ReplacementFailure *replacementFailure `json:"replacement_failure,omitempty"`
+	Where              *replacementWhere   `json:"where,omitempty"`
+	// RetryActionID is the action whose Retry re-runs only this file's
+	// replacement, without encoding again. Empty when no retry applies.
+	RetryActionID string `json:"retry_action_id,omitempty"`
+	// CanKeepOriginal would say the server can discard the candidate of a
+	// failed replacement. It cannot while the approved plan references the
+	// candidate, so it stays false.
+	CanKeepOriginal bool   `json:"can_keep_original,omitempty"`
+	CanReconfigure  bool   `json:"can_reconfigure,omitempty"`
+	Mode            string `json:"mode,omitempty"`
 	// MaxHeight is the frozen compact output height, so the goal label
 	// names the size actually produced.
 	MaxHeight int `json:"max_height,omitempty"`
@@ -131,11 +147,30 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 							}
 							if prior != nil {
 								view.ReplacementActionID, view.ReplacementStatus = prior.ID, prior.Status
+								pr := operationRecord{inst: *prior, inputs: decodeOperationJSON(prior.InputsJSON), outputs: decodeOperationJSON(prior.OutputsJSON), state: decodeOperationJSON(prior.StateJSON)}
+								if prior.Status == store.ActionStatusFailed || prior.Status == store.ActionStatusCancelled {
+									view.ReplacementFailure = failureOf(pr)
+									view.RetryActionID = replacementRetryTarget(*inst, *prior)
+								}
+								view.Where = whereOf(pr)
 								view.Replaced = prior.Status == store.ActionStatusCompleted && decodeOperationJSON(prior.OutputsJSON)["promoted"] == true
 								break
 							}
 						}
 					}
+				}
+			}
+			if view.ReplacementActionID == "" && inst.Status == store.ActionStatusFailed {
+				// A file whose promotion never produced an action of its own is
+				// reported only in the batch's promotion output.
+				if detail := batchPromotionFailure(decodeOperationJSON(inst.OutputsJSON), item.ItemKey); detail != "" {
+					view.ReplacementFailure = &replacementFailure{Reason: plainReplacementReason(detail), Detail: batchReasonText(detail, true), OriginalIntact: true}
+					view.RetryActionID = inst.ID
+				}
+			}
+			if view.ReplacementActionID == "" && view.ReplacementFailure == nil && item.ChildActionID != "" {
+				if view.ReplacementPlan = replacementPlanState(state, item.ChildActionID); view.ReplacementPlan != "" {
+					view.CandidateReady = false
 				}
 			}
 			views = append(views, view)

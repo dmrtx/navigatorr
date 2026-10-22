@@ -2464,3 +2464,45 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
 .detail-row .stage-list { margin: 0 0 10px; }
 .detail-row .stage-list li:last-child { border-bottom: 0; }
 #detail-path p { margin: 4px 0; overflow-wrap: anywhere; }
+
+/* Replacement review: one dialog lists the files with what each saves, then one button. */
+#batch-review { max-width: 560px; }
+#batch-review-data, #file-review-data { margin: 8px 0; }
+.replacement-row { display: grid; gap: 4px; }
+.replacement-row p { margin: 0; }
+.replacement-name { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.replacement-sizes { font-size: 13px; font-variant-numeric: tabular-nums; }
+.replacement-quality, .replacement-tracks { overflow-wrap: anywhere; }
+.replacement-row .size-budget-warning { margin: 2px 0; }
+.replacement-paths { font-size: 12px; }
+.replacement-paths > summary { cursor: pointer; min-height: var(--action-height); display: flex; align-items: center; color: var(--muted); }
+.replacement-paths > summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.review-total { margin: 10px 0 4px; font-size: 15px; font-weight: 600; color: var(--forest); font-variant-numeric: tabular-nums; }
+.review-total:empty { display: none; }
+.review-difference { margin: 8px 0; padding: 8px 10px; border-left: 3px solid var(--warning-line); border-radius: 3px; background: var(--warning-wash); color: var(--warning-strong); }
+.review-difference p { margin: 4px 0 0; }
+.review-difference ul { margin: 4px 0 0; padding-left: 18px; }
+.text-button { min-height: var(--action-height); padding: 2px 8px; border: 0; background: transparent; color: var(--forest); font-size: 12px; text-decoration: underline; }
+.text-button:hover { background: var(--hover); }
+
+/* Replacement progress: a headline, finished files, and one line per file. */
+.job-footer > .replacement-progress, #detail-summary > .replacement-progress { flex: 1 1 100%; max-width: none; max-height: none; overflow: visible; flex-direction: column; align-items: stretch; gap: 6px; }
+.replacement-progress progress { order: 0; width: 100%; max-width: 420px; }
+.replacement-headline { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.replacement-files { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.replacement-file { display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: baseline; font-size: 12px; }
+.replacement-file-name { font-weight: 600; overflow-wrap: anywhere; }
+.replacement-file-step { color: var(--muted); overflow-wrap: anywhere; }
+.replacement-file.done .replacement-file-step { color: var(--forest); }
+.replacement-file.failed .replacement-file-step { color: var(--danger); }
+.terminal-job .replacement-progress progress { display: block; }
+
+/* A file whose replacement stopped: why, that the original is intact, what to do. */
+.replacement-failure { flex-basis: 100%; margin: 4px 0; padding: 8px 10px; border-left: 3px solid var(--danger); border-radius: 3px; background: var(--danger-wash); color: var(--ink); }
+.replacement-failure p { margin: 4px 0; }
+.replacement-failure .batch-file-actions { margin-top: 6px; }
+.batch-where, .replacement-where { flex-basis: 100%; font-size: 12px; }
+.batch-where > summary { cursor: pointer; color: var(--muted); min-height: var(--action-height); display: flex; align-items: center; }
+.replacement-where { margin: 8px 0; }
+.replacement-where p { margin: 2px 0; overflow-wrap: anywhere; }
+.replacement-where-row { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; }
