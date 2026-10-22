@@ -269,13 +269,15 @@ func TestMaintenanceSnapshotSaysWhetherTheLibraryImportWasSentWithoutTheCommand(
 	defer s.Close()
 	sent := `{"promotion":{"service":"sonarr","recovery_mode":"move_aside","commands":{"import":{"id":7,"sent_at":"2026-01-01T00:00:00Z","payload":{"files":[{"path":"/media/.c/secret.mkv"}]}}}}}`
 	notSent := `{"promotion":{"service":"sonarr","recovery_mode":"move_aside","commands":{}}}`
-	for id, state := range map[string]string{"sent": sent, "not-sent": notSent} {
+	// A recorded command with no body still counts as sent: the safer reading.
+	nullBody := `{"promotion":{"service":"sonarr","recovery_mode":"move_aside","commands":{"import":null}}}`
+	for id, state := range map[string]string{"sent": sent, "not-sent": notSent, "null-body": nullBody} {
 		if err := s.CreateActionInstance(ActionInstance{ID: id, ActionName: "promote_transcode_candidate", Status: ActionStatusFailed, InputsJSON: `{}`, OutputsJSON: state, StateJSON: state}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	rows, err := s.ListMaintenanceActionSnapshot()
-	if err != nil || len(rows) != 2 {
+	if err != nil || len(rows) != 3 {
 		t.Fatalf("%v %v", rows, err)
 	}
 	for _, row := range rows {
@@ -283,7 +285,7 @@ func TestMaintenanceSnapshotSaysWhetherTheLibraryImportWasSentWithoutTheCommand(
 			if strings.Contains(got, "commands") || strings.Contains(got, "secret.mkv") {
 				t.Fatalf("%s kept the command: %s", row.ID, got)
 			}
-			if has := strings.Contains(got, `"import_sent":true`); has != (row.ID == "sent") {
+			if has := strings.Contains(got, `"import_sent":true`); has != (row.ID != "not-sent") {
 				t.Fatalf("%s import_sent=%v: %s", row.ID, has, got)
 			}
 		}
